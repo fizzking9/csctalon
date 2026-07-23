@@ -115,10 +115,14 @@ async def confirm_import(
             )
         )
     except Exception as e:
-        record.status = "failed"
-        record.error_detail = {"error": str(e)}
-        record.finished_at = datetime.now(timezone.utc)
-        db.commit()
+        # upsert 失败时事务可能已 aborted,需先 rollback 才能更新上传记录状态
+        db.rollback()
+        record = db.get(UploadRecord, record.id)
+        if record:
+            record.status = "failed"
+            record.error_detail = {"error": str(e)[:2000]}
+            record.finished_at = datetime.now(timezone.utc)
+            db.commit()
         raise HTTPException(status_code=500, detail=f"导入失败: {e}") from e
 
 

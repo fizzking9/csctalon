@@ -29,7 +29,7 @@ def login(
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号已停用")
     token = create_access_token(
-        user.id, extra={"username": user.username, "role": user.role.value, "name": user.display_name}
+        user.id, extra={"username": user.username, "role": user.role, "name": user.display_name}
     )
     return R(data=Token(access_token=token, user=UserOut.model_validate(user)))
 
@@ -42,7 +42,7 @@ def login_json(payload: LoginRequest, db: Session = Depends(get_db)):
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号已停用")
     token = create_access_token(
-        user.id, extra={"username": user.username, "role": user.role.value, "name": user.display_name}
+        user.id, extra={"username": user.username, "role": user.role, "name": user.display_name}
     )
     return R(data=Token(access_token=token, user=UserOut.model_validate(user)))
 

@@ -9,7 +9,32 @@
       </el-radio-group>
     </div>
 
-    <el-card class="mb-16" header="真实现金流出趋势(商户号退款)">
+    <!-- 真实现金流构成卡片 -->
+    <el-row :gutter="16" class="mb-16">
+      <el-col :span="8">
+        <el-card shadow="hover" body-style="padding: 16px 20px">
+          <div class="stat-label">真实现金流总额</div>
+          <div class="stat-value" style="color: #f56c6c">¥ {{ fmt(breakdown.total) }}</div>
+          <div class="stat-sub">直接退款 + 用户提现</div>
+        </el-card>
+      </el-col>
+      <el-col :span="8">
+        <el-card shadow="hover" body-style="padding: 16px 20px">
+          <div class="stat-label">直接退款(线上+人工)</div>
+          <div class="stat-value" style="color: #e6a23c">¥ {{ fmt(breakdown.direct_refund) }}</div>
+          <div class="stat-sub">客服在线操作,钱直接退回用户</div>
+        </el-card>
+      </el-col>
+      <el-col :span="8">
+        <el-card shadow="hover" body-style="padding: 16px 20px">
+          <div class="stat-label">用户提现</div>
+          <div class="stat-value" style="color: #409eff">¥ {{ fmt(breakdown.user_withdraw) }}</div>
+          <div class="stat-sub">退到钱包后用户再提现</div>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-card class="mb-16" header="真实现金流趋势(直接退款 + 用户提现)">
       <BaseChart :option="cashTrendOption" height="320px" />
     </el-card>
 
@@ -57,6 +82,7 @@ const cashTrend = ref([])
 const compare = ref([])
 const merchants = ref([])
 const wallets = ref([])
+const breakdown = ref({ direct_refund: 0, user_withdraw: 0, total: 0 })
 
 function dateRange() {
   const end = dayjs()
@@ -66,14 +92,48 @@ function dateRange() {
 function fmt(v) { return v == null ? '-' : Number(v).toFixed(2) }
 
 const cashTrendOption = computed(() => ({
-  tooltip: { trigger: 'axis' },
-  legend: { data: ['现金流出', '笔数'] },
+  tooltip: {
+    trigger: 'axis',
+    formatter: (params) => {
+      const date = params[0]?.axisValue || ''
+      const lines = [date]
+      params.forEach((p) => {
+        lines.push(`${p.marker} ${p.seriesName}: ¥${Number(p.value).toFixed(2)}`)
+      })
+      return lines.join('<br/>')
+    },
+  },
+  legend: { data: ['直接退款', '用户提现', '真实现金流'] },
   grid: { left: 50, right: 50, bottom: 30, top: 40 },
   xAxis: { type: 'category', data: cashTrend.value.map((d) => d.date) },
-  yAxis: [{ type: 'value', name: '金额(元)' }, { type: 'value', name: '笔数' }],
+  yAxis: { type: 'value', name: '金额(元)' },
   series: [
-    { name: '现金流出', type: 'line', smooth: true, areaStyle: { color: '#f56c6c33' }, itemStyle: { color: '#f56c6c' }, data: cashTrend.value.map((d) => d.value) },
-    { name: '笔数', type: 'bar', yAxisIndex: 1, data: cashTrend.value.map((d) => d.count) },
+    {
+      name: '直接退款',
+      type: 'line',
+      smooth: true,
+      stack: 'cash',
+      areaStyle: { color: '#e6a23c33' },
+      itemStyle: { color: '#e6a23c' },
+      data: cashTrend.value.map((d) => d.direct),
+    },
+    {
+      name: '用户提现',
+      type: 'line',
+      smooth: true,
+      stack: 'cash',
+      areaStyle: { color: '#409eff33' },
+      itemStyle: { color: '#409eff' },
+      data: cashTrend.value.map((d) => d.withdraw),
+    },
+    {
+      name: '真实现金流',
+      type: 'line',
+      smooth: true,
+      itemStyle: { color: '#f56c6c' },
+      lineStyle: { width: 2, type: 'dashed' },
+      data: cashTrend.value.map((d) => d.total),
+    },
   ],
 }))
 
@@ -92,13 +152,15 @@ const compareOption = computed(() => ({
 async function loadAll() {
   const r = dateRange()
   try {
-    const [t, c, m, w] = await Promise.all([
+    const [t, b, c, m, w] = await Promise.all([
       cash.trend(r),
+      cash.breakdown(),
       cash.walletVsWithdraw(r),
       cash.merchant(),
       cash.walletBalance({ limit: 20 }),
     ])
     cashTrend.value = t.data
+    breakdown.value = b.data
     compare.value = c.data
     merchants.value = m.data
     wallets.value = w.data
@@ -107,3 +169,21 @@ async function loadAll() {
 
 onMounted(loadAll)
 </script>
+
+<style scoped>
+.stat-label {
+  font-size: 13px;
+  color: #909399;
+  margin-bottom: 4px;
+}
+.stat-value {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.stat-sub {
+  font-size: 12px;
+  color: #c0c4cc;
+  margin-top: 4px;
+}
+</style>

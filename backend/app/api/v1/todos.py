@@ -17,9 +17,9 @@ def _serialize(t: TodoItem) -> dict:
     return {
         "id": t.id,
         "title": t.title,
-        "source": t.source.value if t.source else None,
-        "priority": t.priority.value if t.priority else None,
-        "status": t.status.value if t.status else None,
+        "source": t.source,
+        "priority": t.priority,
+        "status": t.status,
         "assignee_id": t.assignee_id,
         "deadline": t.deadline.isoformat() if t.deadline else None,
         "related_device_sn": t.related_device_sn,

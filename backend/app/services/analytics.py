@@ -74,26 +74,89 @@ def operation_method_dist(db: Session) -> list[dict]:
 
 
 # ---------- 看板2:现金流分析 ----------
+# 业务定义:
+#   直接退款 = 退款单中 refund_method='线上' 且 operator 为人工(非 sys/system)
+#              → 客服在线操作,钱直接退回用户支付账户,构成真金白银流出
+#   用户提现 = 提现表中 op_type='用户提现'
+#              → 退到会员钱包后用户再提现,同样是真金白银流出
+#   真实现金流 = 直接退款 + 用户提现
+#   ("转入提现账户"不算直接流出,钱进了钱包,等用户提现时才计入)
+
+
+def _direct_refund_filter():
+    """直接退款过滤条件:线上 + 人工操作(排除 sys/system 自动退款)"""
+    return (
+        Refund.refund_method == "线上",
+        Refund.operator.isnot(None),
+        Refund.operator.notin_(["sys", "system", "SYS", "System"]),
+    )
+
+
+def _real_cash_out_total(db: Session) -> tuple[float, float]:
+    """真实现金流总额 = 直接退款 + 用户提现,返回 (直接退款, 用户提现)"""
+    # 直接退款(线上+人工)
+    direct = db.scalar(
+        select(func.coalesce(func.sum(Refund.refund_amount), 0)).where(*_direct_refund_filter())
+    ) or 0
+    # 用户提现
+    withdraw = db.scalar(
+        select(func.coalesce(func.sum(WalletWithdrawal.op_amount), 0)).where(
+            WalletWithdrawal.op_type == "用户提现"
+        )
+    ) or 0
+    return float(direct), float(withdraw)
 
 
 def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | None = None) -> list[dict]:
-    """真实现金流出趋势(商户号退款按日)"""
+    """真实现金流出趋势(按日)= 直接退款 + 用户提现
+
+    两部分按日聚合后合并:direct(直接退款) + withdraw(用户提现) = total(真实现金流)
+    """
     start, end = _date_range(start, end)
-    rows = db.execute(
+    # 直接退款按日
+    direct_rows = db.execute(
         select(
-            func.to_char(MerchantRefund.trade_time, "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(MerchantRefund.refund_amount), 0).label("amount"),
+            func.to_char(Refund.created_at_raw, "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(Refund.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
-        .where(MerchantRefund.trade_time.between(start, end), MerchantRefund.refund_amount > 0)
+        .where(*_direct_refund_filter(), Refund.created_at_raw.between(start, end))
         .group_by("date")
-        .order_by("date")
     ).all()
-    return [{"date": r.date, "value": float(r.amount or 0), "count": r.count} for r in rows]
+    direct_map = {r.date: {"amount": float(r.amount or 0), "count": r.count} for r in direct_rows}
+    # 用户提现按日
+    withdraw_rows = db.execute(
+        select(
+            func.to_char(WalletWithdrawal.op_time, "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(WalletWithdrawal.op_amount), 0).label("amount"),
+            func.count().label("count"),
+        )
+        .where(WalletWithdrawal.op_time.between(start, end), WalletWithdrawal.op_type == "用户提现")
+        .group_by("date")
+    ).all()
+    withdraw_map = {r.date: {"amount": float(r.amount or 0), "count": r.count} for r in withdraw_rows}
+    # 合并
+    dates = sorted(set(direct_map) | set(withdraw_map))
+    return [
+        {
+            "date": d,
+            "direct": direct_map.get(d, {"amount": 0})["amount"],
+            "direct_count": direct_map.get(d, {"count": 0})["count"],
+            "withdraw": withdraw_map.get(d, {"amount": 0})["amount"],
+            "withdraw_count": withdraw_map.get(d, {"count": 0})["count"],
+            "total": direct_map.get(d, {"amount": 0})["amount"] + withdraw_map.get(d, {"amount": 0})["amount"],
+        }
+        for d in dates
+    ]
 
 
 def wallet_vs_withdraw(db: Session, start: datetime | None = None, end: datetime | None = None) -> list[dict]:
-    """退回钱包 vs 实际提现 对比(暴露提现缺口)"""
+    """退回钱包 vs 实际提现 对比(暴露提现缺口)
+
+    - 钱包转入(订单退费转入):钱进了会员钱包,尚未流出
+    - 用户提现:钱从钱包提出,构成真金白银流出
+    两者的差额即为"退到钱包但尚未提现"的沉淀资金
+    """
     start, end = _date_range(start, end)
     # 退回钱包: wallet 中 op_type='订单退费转入'
     wallet_in = db.execute(
@@ -120,6 +183,16 @@ def wallet_vs_withdraw(db: Session, start: datetime | None = None, end: datetime
         {"date": d, "wallet_in": wallet_in_map.get(d, 0), "withdraw": withdraw_map.get(d, 0)}
         for d in dates
     ]
+
+
+def cash_out_breakdown(db: Session) -> dict[str, Any]:
+    """真实现金流构成明细:直接退款 vs 用户提现"""
+    direct, withdraw = _real_cash_out_total(db)
+    return {
+        "direct_refund": direct,  # 直接退款(线上+人工)
+        "user_withdraw": withdraw,  # 用户提现
+        "total": direct + withdraw,  # 真实现金流总额
+    }
 
 
 def merchant_cash_summary(db: Session) -> list[dict]:
@@ -286,10 +359,17 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
     """首页汇总卡片"""
     refund_total = db.scalar(select(func.coalesce(func.sum(Refund.refund_amount), 0))) or 0
     refund_count = db.scalar(select(func.count()).select_from(Refund)) or 0
-    cash_out = db.scalar(select(func.coalesce(func.sum(MerchantRefund.refund_amount), 0)).where(MerchantRefund.refund_amount > 0)) or 0
+    # 真实现金流 = 直接退款(线上+人工) + 用户提现
+    direct, withdraw = _real_cash_out_total(db)
+    # 钱包余额总计(各账户最新余额之和)
+    wallet_balance = db.scalar(
+        select(func.coalesce(func.sum(WalletWithdrawal.wallet_balance), 0))
+    ) or 0
     return {
-        "refund_total": float(refund_total),
+        "refund_total": float(refund_total),  # 退款总金额(含非现金,如退回钱包/无需退款)
         "refund_count": refund_count,
-        "cash_out_total": float(cash_out),
-        "wallet_balance_total": 0.0,
+        "cash_out_total": direct + withdraw,  # 真实现金流
+        "cash_out_direct": direct,  # 直接退款(线上+人工)
+        "cash_out_withdraw": withdraw,  # 用户提现
+        "wallet_balance_total": float(wallet_balance),
     }

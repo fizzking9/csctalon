@@ -52,6 +52,11 @@ def cash_trend(db: DBSession, _: CurrentUser, start: str | None = None, end: str
     return R(data=A.cash_out_trend(db, _parse_dt(start), _parse_dt(end)))
 
 
+@router.get("/cash/breakdown", response_model=R, summary="真实现金流构成(直接退款+用户提现)")
+def cash_breakdown(db: DBSession, _: CurrentUser):
+    return R(data=A.cash_out_breakdown(db))
+
+
 @router.get("/cash/wallet-vs-withdraw", response_model=R, summary="退回钱包vs实际提现")
 def cash_compare(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
     return R(data=A.wallet_vs_withdraw(db, _parse_dt(start), _parse_dt(end)))

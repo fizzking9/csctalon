@@ -16,6 +16,7 @@ export const operation = {
 // 现金流分析
 export const cash = {
   trend: (params) => request.get('/analytics/cash/trend', { params }),
+  breakdown: () => request.get('/analytics/cash/breakdown'),
   walletVsWithdraw: (params) => request.get('/analytics/cash/wallet-vs-withdraw', { params }),
   merchant: () => request.get('/analytics/cash/merchant'),
   walletBalance: (params) => request.get('/analytics/cash/wallet-balance', { params }),

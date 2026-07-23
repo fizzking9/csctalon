@@ -123,25 +123,119 @@ def clean_cell(val: Any) -> Any:
     return val
 
 
+def _split_fields(text: str) -> list[str]:
+    """将单条逻辑记录的原始文本拆分为字段列表(引号感知)。
+
+    与标准 ``csv.reader`` 的关键区别:本函数把换行符 ``\\n`` / ``\\r`` 当作
+    字段内容,而不是记录分隔符。配合外层「按字段数对齐表头」的物理行回拼逻辑,
+    可正确处理导出文件中「自由文本字段含换行却未加引号」导致的记录被截断问题。
+    """
+    fields: list[str] = []
+    buf: list[str] = []
+    in_quote = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_quote:
+            if ch == '"':
+                if i + 1 < n and text[i + 1] == '"':  # 转义的 ""
+                    buf.append('"')
+                    i += 2
+                    continue
+                in_quote = False
+                i += 1
+                continue
+            buf.append(ch)
+            i += 1
+        else:
+            if ch == '"':
+                in_quote = True
+                i += 1
+            elif ch == ",":
+                fields.append("".join(buf))
+                buf = []
+                i += 1
+            else:
+                buf.append(ch)
+                i += 1
+    fields.append("".join(buf))
+    return fields
+
+
 def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tuple[pd.DataFrame, str]:
     """自动识别编码读取 CSV,返回 (df, encoding_used)
 
-    使用 python 引擎 + on_bad_lines='skip' 容错处理字段数不一致的行
-    (真实数据中部分行含逗号/引号会导致字段数错位)
+    表头列数对齐 + 修复「字段内未加引号的换行符」导致的记录断裂:
+
+    真实导出文件中,备注 / 审核备注等自由文本字段常含换行符却未被引号包裹,
+    导致一条逻辑记录被拆成多行物理行——前半段字段数不足、后半段首列为空或
+    自由文本(回填时退费单号为空 → 导入失败;或被当成 bogus 主键写入)。
+
+    处理思路:先按物理行读取,再以「累计字段数 >= 表头列数」判定一条记录是否
+    完整;不完整则把后续物理行回拼进来,换行符作为字段内容保留,从而还原原始
+    记录。同时保留原有「行尾多一个空逗号」时按表头长度截断 / 补齐的对齐逻辑。
     """
-    encodings_to_try = [encoding] if encoding else ["utf-8", "gbk", "gb18030", "utf-8-sig"]
+    encodings_to_try = [encoding] if encoding else ["utf-8-sig", "utf-8", "gbk", "gb18030"]
     last_err: Exception | None = None
     for enc in encodings_to_try:
         if not enc:
             continue
         try:
-            df = pd.read_csv(
-                path,
-                encoding=enc,
-                dtype=str,
-                engine="python",
-                on_bad_lines="warn",
-            )
+            with open(path, encoding=enc, newline="") as f:
+                content = f.read()
+            # 统一换行符:\r\n / 单独 \r -> \n,再按 \n 切物理行
+            content = content.replace("\r\n", "\n").replace("\r", "\n")
+            physical_lines = content.split("\n")
+            # 末尾若因最后一个换行产生空行,丢弃一行
+            if physical_lines and physical_lines[-1] == "":
+                physical_lines.pop()
+            if not physical_lines:
+                return pd.DataFrame(), enc
+
+            # 表头:去 BOM(utf-8-sig 已去)、去 \t、strip
+            header = [str(c).replace("\t", "").strip() for c in _split_fields(physical_lines[0])]
+            header_len = len(header)
+
+            def _emit(fields: list[str]) -> list[str]:
+                """按表头长度截断尾部多余空字段,或补齐不足列"""
+                if len(fields) > header_len:
+                    return fields[:header_len]
+                if len(fields) < header_len:
+                    return fields + [""] * (header_len - len(fields))
+                return fields
+
+            data_rows: list[list[str]] = []
+            buf: str | None = None  # 累计中的(不完整)记录原始文本
+            for line in physical_lines[1:]:
+                line_fields = _split_fields(line)
+                if buf is None:
+                    if len(line_fields) >= header_len:
+                        # 当行即为完整记录
+                        data_rows.append(_emit(line_fields))
+                    else:
+                        # 记录被换行截断,开始累计
+                        buf = line
+                else:
+                    if len(line_fields) >= header_len:
+                        # 当行是新的完整记录 -> 之前累计的 buf 属于「列数本就不足」的
+                        # 合法短行(非换行截断),补齐后单独成一条,再写入当前完整记录
+                        data_rows.append(_emit(_split_fields(buf)))
+                        data_rows.append(_emit(line_fields))
+                        buf = None
+                    else:
+                        # 续行:回拼到 buf,换行符作为字段内容保留
+                        buf = buf + "\n" + line
+                        merged = _split_fields(buf)
+                        if len(merged) >= header_len:
+                            data_rows.append(_emit(merged))
+                            buf = None
+                        # 否则继续累计下一物理行(备注内含多个换行的情况)
+            # 处理尾部残余的不完整记录
+            if buf is not None:
+                data_rows.append(_emit(_split_fields(buf)))
+
+            df = pd.DataFrame(data_rows, columns=header, dtype=str)
             return df, enc
         except (UnicodeDecodeError, UnicodeError) as e:
             last_err = e

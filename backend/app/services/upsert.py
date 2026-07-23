@@ -38,8 +38,30 @@ class ImportResult:
 # ---------- 类型转换工具 ----------
 
 
+def _to_str(val: Any) -> str | None:
+    """强制转字符串,过滤 NaN/None(pandas iterrows 会把混合列推断为 float)"""
+    if val is None:
+        return None
+    try:
+        if pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    if s == "" or s.lower() == "nan":
+        return None
+    return s
+
+
 def _to_float(val: Any) -> float | None:
-    if val is None or val == "":
+    if val is None:
+        return None
+    try:
+        if pd.isna(val):  # 捕获 numpy nan / pandas NaT
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, str) and val.strip() == "":
         return None
     try:
         f = float(val)
@@ -56,22 +78,50 @@ def _to_int(val: Any) -> int | None:
 
 
 def _to_datetime(val: Any) -> datetime | None:
-    if val is None or val == "":
+    if val is None:
         return None
+    try:
+        if pd.isna(val):  # 捕获 pandas NaT / numpy nan
+            return None
+    except (TypeError, ValueError):
+        pass
     if isinstance(val, datetime):
         return val
+    if isinstance(val, str) and val.strip() == "":
+        return None
     try:
-        return pd.to_datetime(val).to_pydatetime()
+        result = pd.to_datetime(val)
+        if pd.isna(result):
+            return None
+        return result.to_pydatetime()
     except Exception:
         return None
 
 
+def _clean_value(val: Any) -> Any:
+    """统一清洗单元格值(pandas object 列里 None 会被内部转成 NaN,
+    且导出数据常含文本 'NaN'/'null' 占位符,需统一归一为 None)"""
+    if val is None:
+        return None
+    try:
+        if pd.isna(val):  # 捕获 numpy nan / pandas NaT
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, str):
+        s = val.strip()
+        if s == "" or s.lower() in ("nan", "null", "none"):
+            return None
+        return s
+    return val
+
+
 def apply_mapping(row: dict, mapping: dict[str, str]) -> dict[str, Any]:
-    """根据列映射从行数据提取目标字段值"""
+    """根据列映射从行数据提取目标字段值(并统一清洗空值)"""
     out: dict[str, Any] = {}
     for target_field, source_col in mapping.items():
         if source_col in row:
-            out[target_field] = row[source_col]
+            out[target_field] = _clean_value(row[source_col])
     return out
 
 
@@ -88,7 +138,18 @@ def _execute_upsert(
     """通用 upsert 执行:先统计已存在,再执行 on_conflict,精确区分 insert/update"""
     if not rows:
         return
-    keys = [r[pk_field] for r in rows if r.get(pk_field)]
+    # 按主键去重(同批次内重复主键会导致 ON CONFLICT affect row a second time;
+    # 保留最后一条,符合"后到覆盖"的增量语义)
+    seen: dict[str, dict] = {}
+    for r in rows:
+        k = r.get(pk_field)
+        if k is not None:
+            seen[str(k)] = r
+    rows = list(seen.values())
+    if not rows:
+        return
+    # 主键统一转字符串,避免 IN 查询时 varchar = double precision 类型冲突
+    keys = [str(r[pk_field]) for r in rows]
     existing_count = 0
     if keys:
         existing_count = db.scalar(
@@ -104,8 +165,13 @@ def _execute_upsert(
 
 
 def _sync_devices(rows: list[dict], sn_field: str, db: Session) -> None:
-    """从导入记录中同步设备主数据(SN 不存在则创建)"""
-    sns = {r.get(sn_field) for r in rows if r.get(sn_field)}
+    """从导入记录中同步设备主数据(SN 不存在则创建)
+
+    SN 统一转字符串并过滤 None/NaN,避免 IN 查询类型冲突
+    (df.iterrows 会把含 NaN 的列推断为 float,导致 varchar = double precision 错误)
+    """
+    sns = {_to_str(r.get(sn_field)) for r in rows}
+    sns.discard(None)
     if not sns:
         return
     existing = set(db.scalars(select(Device.sn).where(Device.sn.in_(sns))))
@@ -120,9 +186,9 @@ def _sync_devices(rows: list[dict], sn_field: str, db: Session) -> None:
 
 def upsert_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
     rows: list[dict] = []
-    for idx, row in df.iterrows():
+    for idx, row in enumerate(df.to_dict("records")):
         try:
-            data = apply_mapping(row.to_dict(), mapping)
+            data = apply_mapping(row, mapping)
             refund_no = (data.get("refund_no") or "").strip() if data.get("refund_no") else None
             if not refund_no:
                 result.add_error(idx, "退费单号为空")
@@ -157,9 +223,9 @@ def upsert_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
 def upsert_wallet(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
     """钱包提现 - 无天然唯一键,简单 insert(on_conflict_do_nothing 兜底)"""
     rows: list[dict] = []
-    for idx, row in df.iterrows():
+    for idx, row in enumerate(df.to_dict("records")):
         try:
-            data = apply_mapping(row.to_dict(), mapping)
+            data = apply_mapping(row, mapping)
             rows.append({
                 "account_id": data.get("account_id"),
                 "wallet_balance": _to_float(data.get("wallet_balance")),
@@ -183,9 +249,9 @@ def upsert_wallet(df: pd.DataFrame, mapping: dict[str, str], db: Session, result
 
 def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
     rows: list[dict] = []
-    for idx, row in df.iterrows():
+    for idx, row in enumerate(df.to_dict("records")):
         try:
-            data = apply_mapping(row.to_dict(), mapping)
+            data = apply_mapping(row, mapping)
             ticket_no = (data.get("ticket_no") or "").strip() if data.get("ticket_no") else None
             if not ticket_no:
                 result.add_error(idx, "工单号为空")
@@ -225,9 +291,9 @@ def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
 
 def upsert_merchant_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
     rows: list[dict] = []
-    for idx, row in df.iterrows():
+    for idx, row in enumerate(df.to_dict("records")):
         try:
-            data = apply_mapping(row.to_dict(), mapping)
+            data = apply_mapping(row, mapping)
             wx_refund_no = (data.get("wx_refund_no") or "").strip() if data.get("wx_refund_no") else None
             if not wx_refund_no:
                 result.add_error(idx, "微信退款单号为空")
@@ -267,9 +333,9 @@ def upsert_merchant_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Sessi
 
 def upsert_merchants(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
     rows: list[dict] = []
-    for idx, row in df.iterrows():
+    for idx, row in enumerate(df.to_dict("records")):
         try:
-            data = apply_mapping(row.to_dict(), mapping)
+            data = apply_mapping(row, mapping)
             sub_name = (data.get("sub_name") or "").strip() if data.get("sub_name") else None
             if not sub_name:
                 continue
@@ -303,6 +369,16 @@ def run_upsert(
 ) -> ImportResult:
     """执行 upsert 主入口"""
     result = ImportResult()
+    # 统一清洗空值:
+    # 1. NaN/NaT → None(iterrows 会把含空值的列推断为 float,产生 NaN/NaT)
+    # 2. 文本 "NaN"/"nan"/"null"/"none"(含前后空白) → None
+    #    (导出数据常用这些占位符表示空,直接插入会触发外键/类型错误)
+    df = df.where(pd.notna(df), None)
+    df = df.map(
+        lambda v: None
+        if (isinstance(v, str) and v.strip().lower() in ("nan", "null", "none", ""))
+        else v
+    )
     fn = UPSERT_DISPATCH.get(data_type)
     if not fn:
         raise ValueError(f"不支持的数据类型: {data_type}")
