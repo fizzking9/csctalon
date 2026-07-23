@@ -1,0 +1,69 @@
+# 客服中心管理系统 - 局域网部署 Docker Compose
+# 使用: docker compose up -d --build
+# 访问: http://<服务器IP>:80 (前端) , http://<服务器IP>:8000 (后端API,可选)
+
+services:
+  db:
+    image: postgres:15
+    container_name: csctalon-db
+    environment:
+      POSTGRES_USER: csctalon
+      POSTGRES_PASSWORD: csctalon123
+      POSTGRES_DB: csctalon
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U csctalon"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: csctalon-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: csctalon-backend
+    environment:
+      ENV: dev
+      DEBUG: "true"
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: csctalon
+      POSTGRES_PASSWORD: csctalon123
+      POSTGRES_DB: csctalon
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      JWT_SECRET_KEY: change-this-to-a-long-random-secret-in-production-2026
+      INIT_ADMIN_USERNAME: admin
+      INIT_ADMIN_PASSWORD: admin123
+      CORS_ORIGINS: http://localhost,http://localhost:5173,http://127.0.0.1
+    volumes:
+      - ./backend/uploads:/app/uploads
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    container_name: csctalon-web
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pgdata:

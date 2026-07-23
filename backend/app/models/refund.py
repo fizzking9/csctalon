@@ -1,0 +1,44 @@
+"""退费单模型 - 经营数据,主键:退费单号"""
+
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+from app.models.base import TimestampMixin
+
+
+class Refund(TimestampMixin, Base):
+    """退费单 - 退费行为记录
+
+    关键业务规则:operator 为 sys/system 表示退到会员钱包(非真实现金流出)
+    """
+
+    __tablename__ = "refunds"
+
+    refund_no: Mapped[str] = mapped_column(String(64), primary_key=True, comment="退费单号 RF...")
+    platform_order_no: Mapped[str | None] = mapped_column(String(64), index=True, comment="平台订单号 SP/WS/WX...")
+    third_order_no: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="三方订单号")
+    device_sn: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("devices.sn"), index=True, nullable=True, comment="设备SN"
+    )
+    refund_reason: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="退费原因")
+    package_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="套餐名称")
+    merchant_name: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True, comment="商户名称")
+    refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退费金额")
+    actual_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="实退金额")
+    remark: Mapped[str | None] = mapped_column(Text, nullable=True, comment="备注")
+    status: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True, comment="状态:申请中/已退款/无需退款")
+    refund_method: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="退款方式:线上/线下")
+    audit_remark: Mapped[str | None] = mapped_column(Text, nullable=True, comment="审核备注")
+    auditor: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="审核人")
+    operator: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="操作人:企微-XXX/sys/system")
+    created_at_raw: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="原始创建时间")
+    updated_at_raw: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="原始更新时间")
+    package_price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="套餐价格")
+    raw_extra: Mapped[dict | None] = mapped_column(JSONB, nullable=True, comment="原始冗余字段")
+
+    # 覆盖 TimestampMixin 的 created_at/updated_at 含义:这里指系统导入时间
+    # created_at/updated_at 来自 TimestampMixin(系统导入时间)

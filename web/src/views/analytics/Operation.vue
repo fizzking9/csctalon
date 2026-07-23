@@ -1,0 +1,114 @@
+<template>
+  <div class="page-container">
+    <div class="flex-between mb-16">
+      <div class="page-title" style="margin: 0">运营分析</div>
+      <el-radio-group v-model="range" size="small" @change="loadAll">
+        <el-radio-button label="7">近7天</el-radio-button>
+        <el-radio-button label="30">近30天</el-radio-button>
+        <el-radio-button label="90">近90天</el-radio-button>
+      </el-radio-group>
+    </div>
+
+    <el-row :gutter="16" class="mb-16">
+      <el-col :span="16">
+        <el-card header="退款趋势(按日)">
+          <BaseChart :option="trendOption" height="320px" />
+        </el-card>
+      </el-col>
+      <el-col :span="8">
+        <el-card header="退费状态分布">
+          <BaseChart :option="statusOption" height="320px" />
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-row :gutter="16">
+      <el-col :span="12">
+        <el-card header="退费原因 TOP10">
+          <BaseChart :option="reasonOption" height="320px" />
+        </el-card>
+      </el-col>
+      <el-col :span="12">
+        <el-card header="退款方式占比">
+          <BaseChart :option="methodOption" height="320px" />
+        </el-card>
+      </el-col>
+    </el-row>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted } from 'vue'
+import BaseChart from '@/components/BaseChart.vue'
+import { operation } from '@/api/analytics'
+import dayjs from 'dayjs'
+
+const range = ref('30')
+const trend = ref([])
+const status = ref([])
+const reason = ref([])
+const method = ref([])
+
+function dateRange() {
+  const end = dayjs()
+  const start = end.subtract(Number(range.value), 'day')
+  return { start: start.format('YYYY-MM-DD'), end: end.format('YYYY-MM-DD') }
+}
+
+const trendOption = computed(() => ({
+  tooltip: { trigger: 'axis' },
+  legend: { data: ['退款金额', '退款笔数'] },
+  grid: { left: 50, right: 50, bottom: 30, top: 40 },
+  xAxis: { type: 'category', data: trend.value.map((d) => d.date) },
+  yAxis: [
+    { type: 'value', name: '金额(元)' },
+    { type: 'value', name: '笔数' },
+  ],
+  series: [
+    { name: '退款金额', type: 'line', smooth: true, areaStyle: {}, data: trend.value.map((d) => d.value) },
+    { name: '退款笔数', type: 'bar', yAxisIndex: 1, data: trend.value.map((d) => d.count) },
+  ],
+}))
+
+const statusOption = computed(() => ({
+  tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+  legend: { bottom: 0 },
+  series: [{
+    type: 'pie', radius: ['40%', '70%'], data: status.value.map((s) => ({ name: s.name, value: s.count })),
+  }],
+}))
+
+const reasonOption = computed(() => ({
+  tooltip: { trigger: 'axis' },
+  grid: { left: 120, right: 30, bottom: 30, top: 20 },
+  xAxis: { type: 'value' },
+  yAxis: { type: 'category', data: reason.value.map((r) => r.name).reverse() },
+  series: [{ type: 'bar', data: reason.value.map((r) => r.value).reverse(), itemStyle: { color: '#ee6666' } }],
+}))
+
+const methodOption = computed(() => ({
+  tooltip: { trigger: 'item', formatter: '{b}: {c}元 ({d}%)' },
+  legend: { bottom: 0 },
+  series: [{
+    type: 'pie', radius: '60%', data: method.value.map((m) => ({ name: m.name, value: m.value })),
+  }],
+}))
+
+async function loadAll() {
+  const r = dateRange()
+  try {
+    const [t, s, re, m] = await Promise.all([
+      operation.trend(r),
+      operation.status(),
+      operation.reason({ limit: 10 }),
+      operation.method(),
+    ])
+    trend.value = t.data
+    status.value = s.data
+    reason.value = re.data
+    method.value = m.data
+  } catch (e) {}
+}
+
+onMounted(loadAll)
+</script>

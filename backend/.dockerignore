@@ -1,0 +1,23 @@
+# 依赖与虚拟环境
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+
+# 环境配置(不打包进镜像)
+.env
+
+# 上传文件(运行时挂载)
+uploads/*
+!uploads/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 数据库
+*.db
+*.sqlite3

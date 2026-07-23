@@ -1,0 +1,108 @@
+import { createRouter, createWebHistory } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
+
+const routes = [
+  {
+    path: '/login',
+    name: 'Login',
+    component: () => import('@/views/Login.vue'),
+    meta: { public: true, title: '登录' },
+  },
+  {
+    path: '/',
+    component: () => import('@/layouts/MainLayout.vue'),
+    redirect: '/dashboard',
+    children: [
+      {
+        path: 'dashboard',
+        name: 'Dashboard',
+        component: () => import('@/views/Dashboard.vue'),
+        meta: { title: '工作台', icon: 'HomeFilled' },
+      },
+      // 数据中心
+      {
+        path: 'data/upload',
+        name: 'DataUpload',
+        component: () => import('@/views/data/Upload.vue'),
+        meta: { title: '数据上传', icon: 'Upload' },
+      },
+      {
+        path: 'data/records',
+        name: 'DataRecords',
+        component: () => import('@/views/data/Records.vue'),
+        meta: { title: '上传记录', icon: 'Document' },
+      },
+      {
+        path: 'data/match',
+        name: 'DataMatch',
+        component: () => import('@/views/data/Match.vue'),
+        meta: { title: '关联匹配', icon: 'Connection' },
+      },
+      // 分析看板
+      {
+        path: 'analytics/operation',
+        name: 'AnalyticsOperation',
+        component: () => import('@/views/analytics/Operation.vue'),
+        meta: { title: '运营分析', icon: 'TrendCharts' },
+      },
+      {
+        path: 'analytics/cash',
+        name: 'AnalyticsCash',
+        component: () => import('@/views/analytics/Cash.vue'),
+        meta: { title: '现金流分析', icon: 'Money' },
+      },
+      {
+        path: 'analytics/category',
+        name: 'AnalyticsCategory',
+        component: () => import('@/views/analytics/Category.vue'),
+        meta: { title: '退款分类', icon: 'PieChart' },
+      },
+      {
+        path: 'analytics/operator',
+        name: 'AnalyticsOperator',
+        component: () => import('@/views/analytics/Operator.vue'),
+        meta: { title: '人员操作', icon: 'User' },
+      },
+      // 待办
+      {
+        path: 'todos',
+        name: 'Todos',
+        component: () => import('@/views/todos/List.vue'),
+        meta: { title: '事项跟进', icon: 'Bell' },
+      },
+      {
+        path: 'todos/:id',
+        name: 'TodoDetail',
+        component: () => import('@/views/todos/Detail.vue'),
+        meta: { title: '事项详情', hidden: true },
+      },
+      // 系统
+      {
+        path: 'system/users',
+        name: 'SystemUsers',
+        component: () => import('@/views/system/Users.vue'),
+        meta: { title: '用户管理', icon: 'UserFilled', admin: true },
+      },
+    ],
+  },
+  { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
+]
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes,
+})
+
+// 路由守卫:登录校验
+router.beforeEach((to) => {
+  const authStore = useAuthStore()
+  document.title = to.meta.title ? `${to.meta.title} - 客服中心管理系统` : '客服中心管理系统'
+  if (!to.meta.public && !authStore.isLoggedIn) {
+    return { name: 'Login', query: { redirect: to.fullPath } }
+  }
+  if (to.meta.admin && !authStore.isAdmin) {
+    return { name: 'Dashboard' }
+  }
+})
+
+export default router

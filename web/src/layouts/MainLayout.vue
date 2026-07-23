@@ -1,0 +1,186 @@
+<template>
+  <el-container class="layout-container">
+    <el-aside :width="isCollapse ? '64px' : '220px'" class="aside">
+      <div class="logo">
+        <el-icon :size="24"><Monitor /></el-icon>
+        <span v-show="!isCollapse" class="logo-text">客服中心管理</span>
+      </div>
+      <el-menu
+        :default-active="activeMenu"
+        :collapse="isCollapse"
+        :collapse-transition="false"
+        router
+        background-color="#001529"
+        text-color="#b7c0cd"
+        active-text-color="#fff"
+      >
+        <el-menu-item index="/dashboard">
+          <el-icon><HomeFilled /></el-icon>
+          <span>工作台</span>
+        </el-menu-item>
+
+        <el-sub-menu index="data">
+          <template #title>
+            <el-icon><FolderOpened /></el-icon>
+            <span>数据中心</span>
+          </template>
+          <el-menu-item index="/data/upload">数据上传</el-menu-item>
+          <el-menu-item index="/data/records">上传记录</el-menu-item>
+          <el-menu-item index="/data/match">关联匹配</el-menu-item>
+        </el-sub-menu>
+
+        <el-sub-menu index="analytics">
+          <template #title>
+            <el-icon><DataAnalysis /></el-icon>
+            <span>分析看板</span>
+          </template>
+          <el-menu-item index="/analytics/operation">运营分析</el-menu-item>
+          <el-menu-item index="/analytics/cash">现金流分析</el-menu-item>
+          <el-menu-item index="/analytics/category">退款分类</el-menu-item>
+          <el-menu-item index="/analytics/operator">人员操作</el-menu-item>
+        </el-sub-menu>
+
+        <el-menu-item index="/todos">
+          <el-icon><Bell /></el-icon>
+          <span>事项跟进</span>
+        </el-menu-item>
+
+        <el-sub-menu v-if="authStore.isAdmin" index="system">
+          <template #title>
+            <el-icon><Setting /></el-icon>
+            <span>系统管理</span>
+          </template>
+          <el-menu-item index="/system/users">用户管理</el-menu-item>
+        </el-sub-menu>
+      </el-menu>
+    </el-aside>
+
+    <el-container>
+      <el-header class="header">
+        <div class="header-left">
+          <el-icon class="collapse-btn" @click="isCollapse = !isCollapse">
+            <Fold v-if="!isCollapse" />
+            <Expand v-else />
+          </el-icon>
+          <el-breadcrumb separator="/">
+            <el-breadcrumb-item :to="{ path: '/dashboard' }">首页</el-breadcrumb-item>
+            <el-breadcrumb-item>{{ currentTitle }}</el-breadcrumb-item>
+          </el-breadcrumb>
+        </div>
+        <div class="header-right">
+          <el-dropdown @command="handleCommand">
+            <span class="user-info">
+              <el-icon><UserFilled /></el-icon>
+              {{ authStore.displayName }}
+              <el-tag size="small" type="info" effect="plain" style="margin-left: 6px">
+                {{ roleLabel }}
+              </el-tag>
+            </span>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
+      </el-header>
+
+      <el-main class="main">
+        <router-view v-slot="{ Component }">
+          <transition name="fade" mode="out-in">
+            <component :is="Component" />
+          </transition>
+        </router-view>
+      </el-main>
+    </el-container>
+  </el-container>
+</template>
+
+<script setup>
+import { ref, computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
+
+const route = useRoute()
+const router = useRouter()
+const authStore = useAuthStore()
+const isCollapse = ref(false)
+
+const activeMenu = computed(() => route.path)
+const currentTitle = computed(() => route.meta.title || '')
+const roleLabel = computed(() => {
+  const map = { admin: '管理员', supervisor: '主管', agent: '客服' }
+  return map[authStore.role] || ''
+})
+
+function handleCommand(cmd) {
+  if (cmd === 'logout') {
+    authStore.logout()
+    router.push('/login')
+  }
+}
+</script>
+
+<style scoped>
+.layout-container {
+  height: 100%;
+}
+.aside {
+  background: #001529;
+  transition: width 0.3s;
+  overflow-x: hidden;
+}
+.logo {
+  height: 60px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.logo-text {
+  overflow: hidden;
+}
+.aside :deep(.el-menu) {
+  border-right: none;
+}
+.header {
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #e6e6e6;
+  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+}
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.collapse-btn {
+  font-size: 20px;
+  cursor: pointer;
+}
+.header-right .user-info {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.main {
+  background: #f0f2f5;
+  padding: 16px;
+  overflow-y: auto;
+}
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+</style>
