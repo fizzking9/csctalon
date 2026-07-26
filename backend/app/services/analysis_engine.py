@@ -15,6 +15,7 @@ from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.analysis_view import AnalysisView, ClassificationRule
+from app.models.cs_record import CsRecord
 from app.models.data_source import DataSource
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
@@ -27,6 +28,7 @@ _MODEL_REGISTRY: dict[str, type] = {
     WalletWithdrawal.__tablename__: WalletWithdrawal,
     ServiceTicket.__tablename__: ServiceTicket,
     MerchantRefund.__tablename__: MerchantRefund,
+    CsRecord.__tablename__: CsRecord,
 }
 
 
@@ -313,7 +315,10 @@ def _get_column(model, field_name: str):
 
 
 def _apply_time_grain(col, grain: str):
-    """时间粒度:day/week/month → to_char"""
+    """时间粒度:hour/day/week/month → to_char"""
+    if grain == "hour":
+        # 00-23,用于客服工作负荷按时段分布分析
+        return func.to_char(col, "HH24")
     if grain == "day":
         return func.to_char(col, "YYYY-MM-DD")
     if grain == "week":

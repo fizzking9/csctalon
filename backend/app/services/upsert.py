@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.models.cs_record import CsRecord
 from app.models.device import Device
 from app.models.merchant import Merchant
 from app.models.merchant_refund import MerchantRefund
@@ -352,12 +353,48 @@ def upsert_merchants(df: pd.DataFrame, mapping: dict[str, str], db: Session, res
     _execute_upsert(db, Merchant, "sub_name", rows, result)
 
 
+def upsert_cs_records(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """智能助手处理记录 - 无天然唯一键,简单 insert(on_conflict_do_nothing 兜底)
+
+    同设备同时间可多次接待,不去重;SN 缺失允许(部分接待无设备号)。
+    """
+    rows: list[dict] = []
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            rows.append({
+                "problem_category": data.get("problem_category"),
+                "problem_type": data.get("problem_type"),
+                "device_sn": data.get("device_sn"),
+                "solution": data.get("solution"),
+                "operation_time": _to_datetime(data.get("operation_time")),
+                "operator": data.get("operator"),
+                "send_content": data.get("send_content"),
+                "description": data.get("description"),
+                "execution_result": data.get("execution_result"),
+                "user_accepted": data.get("user_accepted"),
+                "consult_time": _to_datetime(data.get("consult_time")),
+                "problem_create_time": _to_datetime(data.get("problem_create_time")),
+                "last_consult_time": _to_datetime(data.get("last_consult_time")),
+            })
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
+    _sync_devices(rows, "device_sn", db)
+    db.execute(pg_insert(CsRecord).values(rows).on_conflict_do_nothing())
+    db.flush()
+    result.inserted += len(rows)
+
+
 UPSERT_DISPATCH = {
     "refund": upsert_refunds,
     "wallet": upsert_wallet,
     "ticket": upsert_tickets,
     "merchant_refund": upsert_merchant_refunds,
     "merchant": upsert_merchants,
+    "cs_record": upsert_cs_records,
 }
 
 

@@ -104,6 +104,21 @@ COLUMN_TEMPLATES: dict[str, dict[str, list[str]]] = {
         "legal_person": ["法人"],
         "super_admin": ["超级管理员"],
     },
+    "cs_record": {
+        "problem_category": ["问题大类"],
+        "problem_type": ["问题类型"],
+        "device_sn": ["设备号"],
+        "solution": ["方案"],
+        "operation_time": ["操作时间"],
+        "operator": ["操作人"],
+        "send_content": ["发送内容"],
+        "description": ["说明"],
+        "execution_result": ["执行结果说明"],
+        "user_accepted": ["用户是否接受"],
+        "consult_time": ["咨询时间"],
+        "problem_create_time": ["问题类型创建时间"],
+        "last_consult_time": ["最后咨询时间"],
+    },
 }
 
 

@@ -300,6 +300,98 @@ PRESET_VIEWS: list[dict] = [
         "classification_rule_ids": [],
         "time_range_default": {"days": 30},
     },
+    # ---------- 看板5:客服接待分析(智能助手处理记录) ----------
+    {
+        "code": "preset_cs_reception_trend",
+        "name": "客服接待量趋势(按日)",
+        "description": "客服接待笔数按日趋势(智能助手处理记录)",
+        "chart_type": "line",
+        "segments": [{
+            "source_code": "cs_record",
+            "label": "接待",
+            "dimensions": [
+                {"field": "operation_time", "alias": "日期", "role": "time", "time_grain": "day"}
+            ],
+            "measures": [
+                {"field": "*", "agg": "count", "alias": "接待量"},
+            ],
+            "filters": [],
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_cs_reception_by_operator",
+        "name": "客服接待量排行",
+        "description": "按客服操作人汇总接待笔数(工作量排名)",
+        "chart_type": "bar",
+        "segments": [{
+            "source_code": "cs_record",
+            "label": "客服",
+            "dimensions": [{"field": "operator", "alias": "操作人", "role": "person"}],
+            "measures": [
+                {"field": "*", "agg": "count", "alias": "接待量"},
+                {"field": "device_sn", "agg": "count_distinct", "alias": "设备数"},
+            ],
+            "filters": [
+                {"field": "operator", "op": "is_not_null", "value": None},
+            ],
+            "order_by": {"field": "接待量", "direction": "desc"},
+            "limit": 30,
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_cs_workload_hour",
+        "name": "客服工作负荷分布(按时段)",
+        "description": "按操作小时(00-23)汇总接待量,评估工作负荷时段分布,为排班提供参考",
+        "chart_type": "bar",
+        "segments": [{
+            "source_code": "cs_record",
+            "label": "时段",
+            "dimensions": [
+                {"field": "operation_time", "alias": "时段", "role": "time", "time_grain": "hour"}
+            ],
+            "measures": [
+                {"field": "*", "agg": "count", "alias": "接待量"},
+            ],
+            "filters": [],
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_cs_recover_rate",
+        "name": "退款挽回率(按人)",
+        "description": "按客服汇总总接待量与用户已接受数,前端算挽回率=已接受/总接待",
+        "chart_type": "table",
+        "segments": [
+            {
+                "source_code": "cs_record",
+                "label": "总接待",
+                "dimensions": [{"field": "operator", "alias": "操作人", "role": "person"}],
+                "measures": [{"field": "*", "agg": "count", "alias": "总接待数"}],
+                "filters": [{"field": "operator", "op": "is_not_null", "value": None}],
+            },
+            {
+                "source_code": "cs_record",
+                "label": "已接受",
+                "dimensions": [{"field": "operator", "alias": "操作人", "role": "person"}],
+                "measures": [{"field": "*", "agg": "count", "alias": "已接受数"}],
+                "filters": [
+                    {"field": "operator", "op": "is_not_null", "value": None},
+                    {"field": "user_accepted", "op": "eq", "value": "已接受"},
+                ],
+            },
+        ],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
 ]
 
 

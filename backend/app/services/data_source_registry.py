@@ -9,6 +9,7 @@ from sqlalchemy import Boolean, DateTime, Float, Integer, Numeric, delete, inspe
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from app.models.cs_record import CsRecord
 from app.models.data_source import DataSource, DataSourceField
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
@@ -52,6 +53,15 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "sn_field": "device_no",
         "pk_field": "wx_refund_no",
         "pk_strategy": "primary_key",
+    },
+    {
+        "code": "cs_record",
+        "model": CsRecord,
+        "name_cn": "智能助手处理记录",
+        "time_field": "operation_time",
+        "sn_field": "device_sn",
+        "pk_field": None,
+        "pk_strategy": "none",
     },
 ]
 
@@ -113,6 +123,20 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("merchant_refund", "refund_status"): {"role": "category", "enum": ["SUCCESS"]},
     ("merchant_refund", "merchant_id"): {"role": "category"},
     ("merchant_refund", "trade_time"): {"role": "time"},
+    # cs_record
+    ("cs_record", "device_sn"): {"role": "sn"},
+    ("cs_record", "operator"): {"role": "person"},
+    ("cs_record", "operation_time"): {"role": "time"},
+    ("cs_record", "consult_time"): {"role": "time"},
+    ("cs_record", "problem_create_time"): {"role": "time"},
+    ("cs_record", "last_consult_time"): {"role": "time"},
+    ("cs_record", "problem_category"): {"role": "category"},
+    ("cs_record", "problem_type"): {"role": "category"},
+    ("cs_record", "solution"): {"role": "category"},
+    ("cs_record", "execution_result"): {"role": "category"},
+    ("cs_record", "user_accepted"): {"role": "category", "enum": ["已接受", "未接受", "不涉及"]},
+    ("cs_record", "send_content"): {"role": "dimension", "is_filterable": False},
+    ("cs_record", "description"): {"role": "dimension", "is_filterable": False},
 }
 
 # 反射时排除的系统字段（TimestampMixin 的系统时间 + raw_extra 冗余）

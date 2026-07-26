@@ -23,7 +23,7 @@ from app.services.upsert import run_upsert
 
 router = APIRouter(prefix="/uploads", tags=["数据中心-上传"])
 
-DATA_TYPES = {"refund", "wallet", "ticket", "merchant_refund", "merchant"}
+DATA_TYPES = {"refund", "wallet", "ticket", "merchant_refund", "merchant", "cs_record"}
 
 
 @router.post("/parse", response_model=R, summary="上传并解析文件(返回预览)")
