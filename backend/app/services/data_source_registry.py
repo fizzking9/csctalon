@@ -9,19 +9,35 @@ from sqlalchemy import Boolean, DateTime, Float, Integer, Numeric, delete, inspe
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
 from app.models.data_source import DataSource, DataSourceField
+from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 
 # 表级种子：code → 模型 + 元数据
+# 核心数据表约束:
+# 1. 服务请求(服务工单):包含退款和投诉等服务工单,站在设备视角
+# 2. 退费单:运营视角的费用操作
+# 3. 提现操作记录:会员钱包的操作记录
+# 4. 外部投诉:315和质量监督局的投诉
 DATA_SOURCE_SEEDS: list[dict] = [
+    {
+        "code": "ticket",
+        "model": ServiceTicket,
+        "name_cn": "服务请求管理",
+        "time_field": "register_time",
+        "sn_field": "device_sn",
+        "pk_field": "ticket_no",
+        "pk_strategy": "primary_key",
+    },
     {
         "code": "refund",
         "model": Refund,
-        "name_cn": "退费单",
+        "name_cn": "退费单管理",
         "time_field": "created_at_raw",
         "sn_field": "device_sn",
         "pk_field": "refund_no",
@@ -30,20 +46,29 @@ DATA_SOURCE_SEEDS: list[dict] = [
     {
         "code": "wallet",
         "model": WalletWithdrawal,
-        "name_cn": "钱包提现操作",
+        "name_cn": "提现操作记录",
         "time_field": "op_time",
         "sn_field": "device_sn",
         "pk_field": None,
         "pk_strategy": "none",
     },
     {
-        "code": "ticket",
-        "model": ServiceTicket,
-        "name_cn": "服务退款工单",
-        "time_field": "register_time",
+        "code": "external_complaint",
+        "model": ExternalComplaint,
+        "name_cn": "外部投诉(315/监督局)",
+        "time_field": "complaint_date",
         "sn_field": "device_sn",
-        "pk_field": "ticket_no",
-        "pk_strategy": "primary_key",
+        "pk_field": "complaint_no",
+        "pk_strategy": "upsert",
+    },
+    {
+        "code": "card_complaint",
+        "model": CardComplaint,
+        "name_cn": "卡商群投诉",
+        "time_field": "complaint_date",
+        "sn_field": "device_sn",
+        "pk_field": None,
+        "pk_strategy": "none",
     },
     {
         "code": "merchant_refund",
@@ -137,6 +162,37 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("cs_record", "user_accepted"): {"role": "category", "enum": ["已接受", "未接受", "不涉及"]},
     ("cs_record", "send_content"): {"role": "dimension", "is_filterable": False},
     ("cs_record", "description"): {"role": "dimension", "is_filterable": False},
+    # external_complaint (监督局/315)
+    ("external_complaint", "complaint_no"): {"role": "dimension", "is_pk": True, "is_filterable": False},
+    ("external_complaint", "complaint_date"): {"role": "time"},
+    ("external_complaint", "handle_time"): {"role": "time"},
+    ("external_complaint", "device_sn"): {"role": "sn"},
+    ("external_complaint", "follower"): {"role": "person"},
+    ("external_complaint", "reception_cs"): {"role": "person"},
+    ("external_complaint", "complaint_category"): {"role": "category"},
+    ("external_complaint", "platform"): {"role": "category"},
+    ("external_complaint", "company_entity"): {"role": "category"},
+    ("external_complaint", "result"): {"role": "category"},
+    ("external_complaint", "solution"): {"role": "category"},
+    ("external_complaint", "keyword"): {"role": "category"},
+    ("external_complaint", "package_name"): {"role": "category"},
+    ("external_complaint", "package_price"): {"role": "amount", "agg": "sum"},
+    ("external_complaint", "actual_pay_amount"): {"role": "amount", "agg": "sum"},
+    ("external_complaint", "negotiate_refund_amount"): {"role": "amount", "agg": "sum"},
+    ("external_complaint", "problem"): {"role": "dimension", "is_filterable": False},
+    ("external_complaint", "handle_detail"): {"role": "dimension", "is_filterable": False},
+    ("external_complaint", "internal_analysis"): {"role": "dimension", "is_filterable": False},
+    ("external_complaint", "external_analysis"): {"role": "dimension", "is_filterable": False},
+    # card_complaint (卡商群)
+    ("card_complaint", "complaint_date"): {"role": "time"},
+    ("card_complaint", "device_sn"): {"role": "sn"},
+    ("card_complaint", "handler"): {"role": "person"},
+    ("card_complaint", "complaint_group"): {"role": "category"},
+    ("card_complaint", "problem_category"): {"role": "category"},
+    ("card_complaint", "result"): {"role": "category"},
+    ("card_complaint", "solution"): {"role": "category"},
+    ("card_complaint", "problem"): {"role": "dimension", "is_filterable": False},
+    ("card_complaint", "handle_result"): {"role": "dimension", "is_filterable": False},
 }
 
 # 反射时排除的系统字段（TimestampMixin 的系统时间 + raw_extra 冗余）
@@ -156,6 +212,23 @@ def _infer_data_type(col) -> str:
     return "string"
 
 
+def _clean_comment(comment: str | None) -> str | None:
+    """清理字段注释，提取纯中文名称（去掉冒号后的示例值、括号等）"""
+    if not comment:
+        return None
+    # 去掉冒号及其后面的内容
+    if ':' in comment:
+        comment = comment.split(':', 1)[0].strip()
+    # 去掉括号及其内容
+    import re
+    comment = re.sub(r'\([^)]*\)', '', comment).strip()
+    # 去掉特殊字符后面的内容
+    for char in ['/', '\\', '...']:
+        if char in comment:
+            comment = comment.split(char, 1)[0].strip()
+    return comment if comment else None
+
+
 def ensure_data_sources_registered(db: Session) -> dict:
     """幂等注册：表已存在则更新元数据，字段集按模型反射重建"""
     stats = {"sources": 0, "fields": 0}
@@ -169,7 +242,7 @@ def ensure_data_sources_registered(db: Session) -> dict:
             override = FIELD_OVERRIDES.get((seed["code"], col.name), {})
             reflected.append({
                 "field_name": col.name,
-                "field_name_cn": col.comment or None,
+                "field_name_cn": _clean_comment(col.comment) or None,
                 "data_type": _infer_data_type(col),
                 "semantic_role": override.get("role", "dimension"),
                 "agg_func": override.get("agg"),

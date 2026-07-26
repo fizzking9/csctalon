@@ -8,7 +8,9 @@ sys/system 标记为系统自动操作（is_system=true），不建 person。
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
+from app.models.external_complaint import ExternalComplaint
 from app.models.person import Person, PersonAlias
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
@@ -27,6 +29,9 @@ PERSON_FIELD_SOURCES = [
     (ServiceTicket, ServiceTicket.registrant, "service_tickets", "registrant"),
     (WalletWithdrawal, WalletWithdrawal.operator, "wallet_withdrawals", "operator"),
     (CsRecord, CsRecord.operator, "cs_records", "operator"),
+    (ExternalComplaint, ExternalComplaint.follower, "external_complaints", "follower"),
+    (ExternalComplaint, ExternalComplaint.reception_cs, "external_complaints", "reception_cs"),
+    (CardComplaint, CardComplaint.handler, "card_complaints", "handler"),
 ]
 
 

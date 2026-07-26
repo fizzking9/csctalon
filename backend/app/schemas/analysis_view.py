@@ -52,6 +52,19 @@ class ClassificationRulePreviewRequest(BaseModel):
 # ---------- 分析视图 ----------
 
 
+class RatioItem(BaseModel):
+    """比率度量 - 基于已聚合的分子/分母 measure(合并后)计算
+
+    例如挽回率:numerator=已接受数, denominator=总接待数, as_percent=True → 0-100
+    分母为 0 时返回 None(前端显示 "-")。
+    """
+
+    alias: str
+    numerator: str  # 分子 measure alias
+    denominator: str  # 分母 measure alias
+    as_percent: bool = False
+
+
 class AnalysisViewOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -64,6 +77,7 @@ class AnalysisViewOut(BaseModel):
     merge_strategy: str
     classification_rule_ids: list[int] = []
     time_range_default: dict | None = None
+    ratios: list[dict[str, Any]] = []
     is_preset: bool
     status: str
     owner_id: int | None = None
@@ -81,6 +95,7 @@ class AnalysisViewCreate(BaseModel):
     merge_strategy: str = "add"
     classification_rule_ids: list[int] = []
     time_range_default: dict | None = None
+    ratios: list[dict[str, Any]] = []
     sort_order: int = 0
 
 
@@ -92,6 +107,7 @@ class AnalysisViewUpdate(BaseModel):
     merge_strategy: str | None = None
     classification_rule_ids: list[int] | None = None
     time_range_default: dict | None = None
+    ratios: list[dict[str, Any]] | None = None
     status: str | None = None
     sort_order: int | None = None
 
@@ -104,6 +120,7 @@ class AnalysisViewInlineConfig(BaseModel):
     merge_strategy: str = "add"
     classification_rule_ids: list[int] = []
     time_range_default: dict | None = None
+    ratios: list[dict[str, Any]] = []
 
 
 class AnalysisViewExecuteRequest(BaseModel):
@@ -122,6 +139,7 @@ class AnalysisViewExecuteRequest(BaseModel):
                 "merge_strategy": self.inline_config.merge_strategy,
                 "classification_rule_ids": self.inline_config.classification_rule_ids,
                 "time_range_default": self.inline_config.time_range_default,
+                "ratios": self.inline_config.ratios,
             }
         return {}
 

@@ -367,27 +367,147 @@ PRESET_VIEWS: list[dict] = [
     {
         "code": "preset_cs_recover_rate",
         "name": "退款挽回率(按人)",
-        "description": "按客服汇总总接待量与用户已接受数,前端算挽回率=已接受/总接待",
+        "description": "单 segment + 度量级 filter:总接待数 vs 已接受数,比率度量算挽回率=已接受/总接待×100%",
         "chart_type": "table",
-        "segments": [
-            {
-                "source_code": "cs_record",
-                "label": "总接待",
-                "dimensions": [{"field": "operator", "alias": "操作人", "role": "person"}],
-                "measures": [{"field": "*", "agg": "count", "alias": "总接待数"}],
-                "filters": [{"field": "operator", "op": "is_not_null", "value": None}],
-            },
-            {
-                "source_code": "cs_record",
-                "label": "已接受",
-                "dimensions": [{"field": "operator", "alias": "操作人", "role": "person"}],
-                "measures": [{"field": "*", "agg": "count", "alias": "已接受数"}],
-                "filters": [
-                    {"field": "operator", "op": "is_not_null", "value": None},
-                    {"field": "user_accepted", "op": "eq", "value": "已接受"},
-                ],
-            },
-        ],
+        "segments": [{
+            "source_code": "cs_record",
+            "label": "客服挽回",
+            "dimensions": [{"field": "operator", "alias": "操作人", "role": "person"}],
+            "measures": [
+                {"field": "*", "agg": "count", "alias": "总接待数"},
+                # 度量级 filter:仅统计 user_accepted='已接受' 的记录(PostgreSQL FILTER 子句)
+                {"field": "*", "agg": "count", "alias": "已接受数", "filter": [{"field": "user_accepted", "op": "eq", "value": "已接受"}]},
+            ],
+            "filters": [{"field": "operator", "op": "is_not_null", "value": None}],
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "ratios": [{"alias": "挽回率%", "numerator": "已接受数", "denominator": "总接待数", "as_percent": True}],
+        "time_range_default": {"days": 30},
+    },
+    # ---------- 看板6:投诉专项(外部投诉 315/监督局 + 卡商群) ----------
+    {
+        "code": "preset_external_complaint_trend",
+        "name": "外部投诉趋势(按日)",
+        "description": "外部投诉(315/监督局)笔数按日趋势",
+        "chart_type": "line",
+        "segments": [{
+            "source_code": "external_complaint",
+            "label": "外部投诉",
+            "dimensions": [
+                {"field": "complaint_date", "alias": "日期", "role": "time", "time_grain": "day"}
+            ],
+            "measures": [{"field": "*", "agg": "count", "alias": "投诉量"}],
+            "filters": [],
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_external_complaint_category",
+        "name": "外部投诉分类分布",
+        "description": "按投诉分类(套餐/计费、网络/技术、退款/售后、充值/规则、其他)汇总投诉量",
+        "chart_type": "pie",
+        "segments": [{
+            "source_code": "external_complaint",
+            "label": "分类",
+            "dimensions": [{"field": "complaint_category", "alias": "投诉分类", "role": "category"}],
+            "measures": [{"field": "*", "agg": "count", "alias": "投诉量"}],
+            "filters": [{"field": "complaint_category", "op": "is_not_null", "value": None}],
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": None,
+    },
+    {
+        "code": "preset_external_complaint_by_follower",
+        "name": "外部投诉跟进人统计",
+        "description": "按跟进人汇总投诉量与协商退款金额(工作量与成本)",
+        "chart_type": "bar",
+        "segments": [{
+            "source_code": "external_complaint",
+            "label": "跟进人",
+            "dimensions": [{"field": "follower", "alias": "跟进人", "role": "person"}],
+            "measures": [
+                {"field": "*", "agg": "count", "alias": "投诉量"},
+                {"field": "negotiate_refund_amount", "agg": "sum", "alias": "协商退款金额"},
+            ],
+            "filters": [{"field": "follower", "op": "is_not_null", "value": None}],
+            "limit": 30,
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_external_complaint_valid_rate",
+        "name": "外部投诉结案率(按分类)",
+        "description": "按投诉分类汇总总投诉量与已结案量,比率度量算结案率=结案/总数×100%(结果含'结案'视为已结案)",
+        "chart_type": "table",
+        "segments": [{
+            "source_code": "external_complaint",
+            "label": "结案率",
+            "dimensions": [{"field": "complaint_category", "alias": "投诉分类", "role": "category"}],
+            "measures": [
+                {"field": "*", "agg": "count", "alias": "投诉量"},
+                # 度量级 filter:结果包含"结案"(和解结案/撤销结案/暂行办结/调解结案/调节结案)
+                {"field": "*", "agg": "count", "alias": "已结案", "filter": [{"field": "result", "op": "contains", "value": "结案"}]},
+            ],
+            "filters": [{"field": "complaint_category", "op": "is_not_null", "value": None}],
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "ratios": [{"alias": "结案率%", "numerator": "已结案", "denominator": "投诉量", "as_percent": True}],
+        "time_range_default": None,
+    },
+    {
+        "code": "preset_card_complaint_trend",
+        "name": "卡商群投诉趋势(按日)",
+        "description": "卡商群投诉笔数按日趋势",
+        "chart_type": "line",
+        "segments": [{
+            "source_code": "card_complaint",
+            "label": "卡商群投诉",
+            "dimensions": [
+                {"field": "complaint_date", "alias": "日期", "role": "time", "time_grain": "day"}
+            ],
+            "measures": [{"field": "*", "agg": "count", "alias": "投诉量"}],
+            "filters": [],
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_card_complaint_category",
+        "name": "卡商群投诉分类分布",
+        "description": "按投诉问题分类汇总卡商群投诉量",
+        "chart_type": "pie",
+        "segments": [{
+            "source_code": "card_complaint",
+            "label": "分类",
+            "dimensions": [{"field": "problem_category", "alias": "问题分类", "role": "category"}],
+            "measures": [{"field": "*", "agg": "count", "alias": "投诉量"}],
+            "filters": [{"field": "problem_category", "op": "is_not_null", "value": None}],
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": None,
+    },
+    {
+        "code": "preset_card_complaint_by_handler",
+        "name": "卡商群投诉处理人统计",
+        "description": "按处理人汇总卡商群投诉量",
+        "chart_type": "bar",
+        "segments": [{
+            "source_code": "card_complaint",
+            "label": "处理人",
+            "dimensions": [{"field": "handler", "alias": "处理人", "role": "person"}],
+            "measures": [{"field": "*", "agg": "count", "alias": "投诉量"}],
+            "filters": [{"field": "handler", "op": "is_not_null", "value": None}],
+            "limit": 30,
+        }],
         "merge_strategy": "add",
         "classification_rule_ids": [],
         "time_range_default": {"days": 30},
@@ -409,6 +529,7 @@ def ensure_preset_views_registered(db: Session) -> dict:
             existing.merge_strategy = cfg.get("merge_strategy", "add")
             existing.classification_rule_ids = cfg.get("classification_rule_ids", [])
             existing.time_range_default = cfg.get("time_range_default")
+            existing.ratios = cfg.get("ratios", [])
             existing.sort_order = idx
             stats["updated"] += 1
         else:
@@ -421,6 +542,7 @@ def ensure_preset_views_registered(db: Session) -> dict:
                 merge_strategy=cfg.get("merge_strategy", "add"),
                 classification_rule_ids=cfg.get("classification_rule_ids", []),
                 time_range_default=cfg.get("time_range_default"),
+                ratios=cfg.get("ratios", []),
                 is_preset=True,
                 status="active",
                 sort_order=idx,

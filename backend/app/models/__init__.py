@@ -2,9 +2,11 @@
 
 from app.models.analysis_view import AnalysisView, ClassificationRule  # noqa: F401
 from app.models.base import IDMixin, TimestampMixin  # noqa: F401
+from app.models.card_complaint import CardComplaint  # noqa: F401
 from app.models.cs_record import CsRecord  # noqa: F401
 from app.models.data_source import DataSource, DataSourceField, SemanticRole, SourceType  # noqa: F401
 from app.models.device import Device, DeviceTag, device_tag_rel  # noqa: F401
+from app.models.external_complaint import ExternalComplaint  # noqa: F401
 from app.models.merchant import Merchant  # noqa: F401
 from app.models.merchant_refund import MerchantRefund  # noqa: F401
 from app.models.operation_log import OperationLog  # noqa: F401
@@ -21,9 +23,11 @@ from app.models.wallet import WalletWithdrawal  # noqa: F401
 __all__ = [
     "AnalysisView",
     "ClassificationRule",
+    "CardComplaint",
     "CsRecord",
     "Device",
     "DeviceTag",
+    "ExternalComplaint",
     "Merchant",
     "MerchantRefund",
     "OperationLog",

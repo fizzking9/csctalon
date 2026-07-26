@@ -80,6 +80,7 @@ def create_view(db: DBSession, user: CurrentUser, payload: AnalysisViewCreate):
         merge_strategy=payload.merge_strategy,
         classification_rule_ids=payload.classification_rule_ids,
         time_range_default=payload.time_range_default,
+        ratios=payload.ratios,
         is_preset=False,
         status="active",
         owner_id=user.id,

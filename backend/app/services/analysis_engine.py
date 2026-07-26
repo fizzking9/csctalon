@@ -15,8 +15,10 @@ from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.analysis_view import AnalysisView, ClassificationRule
+from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
 from app.models.data_source import DataSource
+from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
@@ -29,6 +31,8 @@ _MODEL_REGISTRY: dict[str, type] = {
     ServiceTicket.__tablename__: ServiceTicket,
     MerchantRefund.__tablename__: MerchantRefund,
     CsRecord.__tablename__: CsRecord,
+    ExternalComplaint.__tablename__: ExternalComplaint,
+    CardComplaint.__tablename__: CardComplaint,
 }
 
 
@@ -55,6 +59,7 @@ def execute_view(db: Session, view: AnalysisView | dict, params: dict | None = N
             "merge_strategy": view.merge_strategy,
             "classification_rule_ids": view.classification_rule_ids or [],
             "time_range_default": view.time_range_default,
+            "ratios": view.ratios or [],
         }
     else:
         config = view
@@ -72,8 +77,22 @@ def execute_view(db: Session, view: AnalysisView | dict, params: dict | None = N
     # 合并多源(分表聚合后相加)
     merged = _merge_segment_results(segment_results, config.get("merge_strategy", "add"))
 
+    # 比率度量:基于已合并的分子/分母 measure 计算(合并后计算,跨表累加正确)
+    ratios = config.get("ratios") or []
+    if ratios:
+        for row in merged:
+            for r in ratios:
+                num = float(row.get(r["numerator"], 0) or 0)
+                den = float(row.get(r["denominator"], 0) or 0)
+                val = (num / den) if den else None
+                if val is not None and r.get("as_percent"):
+                    val = round(val * 100, 2)
+                elif val is not None:
+                    val = round(val, 4)
+                row[r["alias"]] = val
+
     # 转换为图表数据
-    return _to_chart_data(merged, config["chart_type"], config["segments"])
+    return _to_chart_data(merged, config["chart_type"], config["segments"], ratios)
 
 
 # ---------- 单 segment 执行 ----------
@@ -125,11 +144,19 @@ def _execute_segment(
     for m in seg.get("measures", []):
         field_name = m["field"]
         agg = m.get("agg", "sum")
+        # 构建聚合表达式(先聚合 → 可选 FILTER → coalesce 兜底 0)
         if field_name == "*":
-            col = func.count()
+            agg_expr = func.count()
         else:
-            col = _get_column(model, field_name)
-            col = _apply_agg(col, agg)
+            col0 = _get_column(model, field_name)
+            agg_expr = {"sum": func.sum(col0), "count": func.count(col0), "avg": func.avg(col0)}.get(agg, func.sum(col0))
+        # measure 级 filter(PostgreSQL FILTER 子句):如 count(*) FILTER (WHERE user_accepted='已接受')
+        m_filters = m.get("filter")
+        if m_filters:
+            fconds = _build_filters(model, m_filters)
+            if fconds:
+                agg_expr = agg_expr.filter(*fconds)
+        col = func.coalesce(agg_expr, 0)
         alias = m.get("alias") or (field_name if field_name != "*" else "count")
         select_cols.append(col.label(alias))
         measure_keys.append(alias)
@@ -261,16 +288,24 @@ def _merge_segment_results(segment_results: list[dict], strategy: str) -> list[d
 # ---------- 图表数据转换 ----------
 
 
-def _to_chart_data(merged: list[dict], chart_type: str, segments: list[dict]) -> dict:
-    """根据 chart_type 组装前端可用的图表数据"""
+def _to_chart_data(merged: list[dict], chart_type: str, segments: list[dict], ratios: list[dict] | None = None) -> dict:
+    """根据 chart_type 组装前端可用的图表数据
+
+    ratios 中的 alias 已在 execute_view 阶段写入 merged 行,这里只负责让它们出现在
+    表格列 / 图表 series 中(默认追加在度量之后)。
+    """
     dim_keys = _extract_dim_keys_from_segments(segments)
     measure_keys = _extract_measure_keys(segments)
+    # 比率别名追加为输出列(仅保留 merged 中实际存在的)
+    ratio_keys = [r["alias"] for r in (ratios or []) if r.get("alias")]
+    # 去重(避免与 measure 同名重复)
+    ratio_keys = [k for k in ratio_keys if k not in measure_keys]
 
     if chart_type == "table":
         return {
             "chart_type": "table",
             "data": {
-                "columns": dim_keys + measure_keys,
+                "columns": dim_keys + measure_keys + ratio_keys,
                 "rows": merged,
             },
         }
@@ -290,7 +325,7 @@ def _to_chart_data(merged: list[dict], chart_type: str, segments: list[dict]) ->
     x_axis = [str(_join_dim(r, dim_keys)) if _join_dim(r, dim_keys) is not None else "(空)" for r in merged]
     series = [
         {"name": mk, "data": [float(r.get(mk, 0) or 0) for r in merged]}
-        for mk in measure_keys
+        for mk in measure_keys + ratio_keys
     ]
     return {
         "chart_type": chart_type,
@@ -298,7 +333,7 @@ def _to_chart_data(merged: list[dict], chart_type: str, segments: list[dict]) ->
             "x_axis": x_axis,
             "series": series,
             "dim_keys": dim_keys,
-            "measure_keys": measure_keys,
+            "measure_keys": measure_keys + ratio_keys,
         },
     }
 

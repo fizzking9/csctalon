@@ -3,7 +3,6 @@
 复用现有分析逻辑,从'退费汇总.xlsx'的列结构提取列模板
 """
 
-import io
 import re
 from pathlib import Path
 from typing import Any
@@ -119,6 +118,48 @@ COLUMN_TEMPLATES: dict[str, dict[str, list[str]]] = {
         "problem_create_time": ["问题类型创建时间"],
         "last_consult_time": ["最后咨询时间"],
     },
+    "external_complaint": {
+        "complaint_no": ["投诉编号"],
+        "complaint_date": ["投诉日期"],
+        "platform": ["平台"],
+        "complaint_account": ["投诉账号"],
+        "company_entity": ["公司主体"],
+        "complaint_shop": ["投诉店铺"],
+        "purchase_order_no": ["购买订单编号"],
+        "complainant": ["投诉人"],
+        "complainant_phone": ["投诉手机号"],
+        "device_sn": ["投诉设备号"],
+        "wechat_id": ["微信账户id"],
+        "problem": ["投诉问题"],
+        "keyword": ["投诉关键词"],
+        "complaint_category": ["投诉分类"],
+        "solution": ["解决方案"],
+        "result": ["结果"],
+        "follower": ["跟进人"],
+        "handle_time": ["处理时间"],
+        "handle_detail": ["处理明细"],
+        "internal_analysis": ["内部分析"],
+        "external_analysis": ["外部分析"],
+        "reception_cs": ["接待客服"],
+        "package_order_no": ["套餐订单号"],
+        "package_name": ["套餐名称"],
+        "package_price": ["套餐价格"],
+        "actual_pay_amount": ["实际支付金额"],
+        "negotiate_refund_amount": ["协商退款金额"],
+    },
+    "card_complaint": {
+        "complaint_date": ["投诉日期"],
+        "complaint_group": ["投诉群"],
+        "complainant": ["投诉人"],
+        "complainant_phone": ["投诉手机号"],
+        "device_sn": ["设备号"],
+        "problem": ["投诉问题"],
+        "problem_category": ["投诉问题.1"],
+        "result": ["结果"],
+        "solution": ["解决方案"],
+        "handler": ["处理人"],
+        "handle_result": ["处理结果"],
+    },
 }
 
 
@@ -138,58 +179,15 @@ def clean_cell(val: Any) -> Any:
     return val
 
 
-def _split_fields(text: str) -> list[str]:
-    """将单条逻辑记录的原始文本拆分为字段列表(引号感知)。
-
-    与标准 ``csv.reader`` 的关键区别:本函数把换行符 ``\\n`` / ``\\r`` 当作
-    字段内容,而不是记录分隔符。配合外层「按字段数对齐表头」的物理行回拼逻辑,
-    可正确处理导出文件中「自由文本字段含换行却未加引号」导致的记录被截断问题。
-    """
-    fields: list[str] = []
-    buf: list[str] = []
-    in_quote = False
-    i = 0
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if in_quote:
-            if ch == '"':
-                if i + 1 < n and text[i + 1] == '"':  # 转义的 ""
-                    buf.append('"')
-                    i += 2
-                    continue
-                in_quote = False
-                i += 1
-                continue
-            buf.append(ch)
-            i += 1
-        else:
-            if ch == '"':
-                in_quote = True
-                i += 1
-            elif ch == ",":
-                fields.append("".join(buf))
-                buf = []
-                i += 1
-            else:
-                buf.append(ch)
-                i += 1
-    fields.append("".join(buf))
-    return fields
-
-
 def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tuple[pd.DataFrame, str]:
     """自动识别编码读取 CSV,返回 (df, encoding_used)
 
-    表头列数对齐 + 修复「字段内未加引号的换行符」导致的记录断裂:
-
-    真实导出文件中,备注 / 审核备注等自由文本字段常含换行符却未被引号包裹,
-    导致一条逻辑记录被拆成多行物理行——前半段字段数不足、后半段首列为空或
-    自由文本(回填时退费单号为空 → 导入失败;或被当成 bogus 主键写入)。
-
-    处理思路:先按物理行读取,再以「累计字段数 >= 表头列数」判定一条记录是否
-    完整;不完整则把后续物理行回拼进来,换行符作为字段内容保留,从而还原原始
-    记录。同时保留原有「行尾多一个空逗号」时按表头长度截断 / 补齐的对齐逻辑。
+    处理逻辑:
+    1. 先按物理行读取,分割为lines
+    2. 解析表头,获取预期的字段数量
+    3. 逐行解析数据
+    4. 如果某行的字段数少于表头字段数,说明是行不完整(中间有换行符),需要和下一行合并
+    5. 如果某行的字段数多于表头字段数,说明有字段过长(包含了逗号),需要在过长字段处截断
     """
     encodings_to_try = [encoding] if encoding else ["utf-8-sig", "utf-8", "gbk", "gb18030"]
     last_err: Exception | None = None
@@ -199,57 +197,122 @@ def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tup
         try:
             with open(path, encoding=enc, newline="") as f:
                 content = f.read()
-            # 统一换行符:\r\n / 单独 \r -> \n,再按 \n 切物理行
+            
+            # 统一换行符
             content = content.replace("\r\n", "\n").replace("\r", "\n")
             physical_lines = content.split("\n")
-            # 末尾若因最后一个换行产生空行,丢弃一行
+            
             if physical_lines and physical_lines[-1] == "":
                 physical_lines.pop()
             if not physical_lines:
                 return pd.DataFrame(), enc
-
-            # 表头:去 BOM(utf-8-sig 已去)、去 \t、strip
-            header = [str(c).replace("\t", "").strip() for c in _split_fields(physical_lines[0])]
+            
+            # 解析表头
+            header = [str(c).replace("\t", "").strip() for c in physical_lines[0].split(',')]
             header_len = len(header)
-
-            def _emit(fields: list[str]) -> list[str]:
-                """按表头长度截断尾部多余空字段,或补齐不足列"""
-                if len(fields) > header_len:
-                    return fields[:header_len]
-                if len(fields) < header_len:
-                    return fields + [""] * (header_len - len(fields))
+            
+            def _fix_unclosed_quote(line: str) -> str:
+                """修复未闭合的引号问题
+                
+                场景:备注字段以双引号开头,末尾有转义双引号"",但缺少闭合引号
+                导致后面所有字段都被合并到备注字段中
+                
+                策略:找到转义双引号""的位置,在其后面添加闭合引号
+                """
+                # 查找转义双引号""的位置
+                pos = line.find('""')
+                while pos > 0:
+                    # 检查""后面是否是逗号(字段分隔符)
+                    if pos + 2 < len(line) and line[pos + 2] == ',':
+                        # 检查""前面是否有未闭合的引号
+                        before_double_quote = line[:pos]
+                        quote_count = before_double_quote.count('"')
+                        if quote_count % 2 != 0:
+                            # 有未闭合的引号,在""后面添加闭合引号
+                            line = line[:pos + 2] + '"' + line[pos + 2:]
+                    pos = line.find('""', pos + 2)
+                return line
+            
+            def _split_fields(text: str) -> list[str]:
+                """按逗号分割字段,正确处理双引号和转义双引号"""""
+                fields = []
+                buf = []
+                in_quote = False
+                i = 0
+                n = len(text)
+                while i < n:
+                    ch = text[i]
+                    if in_quote:
+                        if ch == '"':
+                            # 检查是否是转义的双引号("")
+                            if i + 1 < n and text[i + 1] == '"':
+                                buf.append('"')
+                                i += 2
+                                continue
+                            # 闭合引号
+                            in_quote = False
+                        else:
+                            buf.append(ch)
+                        i += 1
+                    else:
+                        if ch == '"':
+                            in_quote = True
+                            i += 1
+                        elif ch == ',':
+                            fields.append(''.join(buf))
+                            buf = []
+                            i += 1
+                        else:
+                            buf.append(ch)
+                            i += 1
+                # 添加最后一个字段
+                if buf:
+                    fields.append(''.join(buf))
                 return fields
-
-            data_rows: list[list[str]] = []
-            buf: str | None = None  # 累计中的(不完整)记录原始文本
-            for line in physical_lines[1:]:
-                line_fields = _split_fields(line)
-                if buf is None:
-                    if len(line_fields) >= header_len:
-                        # 当行即为完整记录
-                        data_rows.append(_emit(line_fields))
-                    else:
-                        # 记录被换行截断,开始累计
-                        buf = line
-                else:
-                    if len(line_fields) >= header_len:
-                        # 当行是新的完整记录 -> 之前累计的 buf 属于「列数本就不足」的
-                        # 合法短行(非换行截断),补齐后单独成一条,再写入当前完整记录
-                        data_rows.append(_emit(_split_fields(buf)))
-                        data_rows.append(_emit(line_fields))
-                        buf = None
-                    else:
-                        # 续行:回拼到 buf,换行符作为字段内容保留
-                        buf = buf + "\n" + line
-                        merged = _split_fields(buf)
-                        if len(merged) >= header_len:
-                            data_rows.append(_emit(merged))
-                            buf = None
-                        # 否则继续累计下一物理行(备注内含多个换行的情况)
-            # 处理尾部残余的不完整记录
-            if buf is not None:
-                data_rows.append(_emit(_split_fields(buf)))
-
+            
+            # 逐行解析数据
+            data_rows = []
+            i = 1
+            while i < len(physical_lines):
+                line = physical_lines[i].strip()
+                if not line:
+                    i += 1
+                    continue
+                
+                # 场景1: 先修复未闭合的引号问题
+                line = _fix_unclosed_quote(line)
+                
+                # 按逗号分割字段(考虑引号)
+                fields = _split_fields(line)
+                
+                # 场景2: 行不完整(字段数少于表头),需要和下一行合并
+                if len(fields) < header_len:
+                    # 检查下一行是否有数据
+                    if i + 1 < len(physical_lines):
+                        next_line = physical_lines[i + 1].strip()
+                        if next_line:
+                            # 合并到当前行(用空格替换换行)
+                            line = line + ' ' + next_line
+                            # 修复合并后的行
+                            line = _fix_unclosed_quote(line)
+                            fields = _split_fields(line)
+                            i += 1  # 跳过已合并的行
+                
+                # 场景3: 字段数多于表头,合并多余的字段到最后一个字段
+                # (通常是提交参数等包含JSON的字段,内部有逗号但未加引号)
+                if len(fields) > header_len:
+                    # 合并多余的字段到最后一个字段
+                    extra_fields = fields[header_len - 1:]
+                    merged_field = ','.join(extra_fields)
+                    fields = fields[:header_len - 1] + [merged_field]
+                
+                # 补齐到表头长度
+                if len(fields) < header_len:
+                    fields = fields + [""] * (header_len - len(fields))
+                
+                data_rows.append(fields)
+                i += 1
+            
             df = pd.DataFrame(data_rows, columns=header, dtype=str)
             return df, enc
         except (UnicodeDecodeError, UnicodeError) as e:
@@ -265,6 +328,10 @@ def read_table(path: Path | str, sheet_name: str | None = None, encoding: str | 
     """读取表格文件,返回 (df, used_encoding, sheet_names)
 
     支持 .csv / .xlsx / .xls
+
+    注意:
+    - CSV 文件:自动修复单元格内换行导致的记录断裂
+    - XLSX 文件:读取后检查是否有空行(首列为空但其他列有值),合并到上一行
     """
     path = Path(path)
     suffix = path.suffix.lower()
@@ -274,27 +341,121 @@ def read_table(path: Path | str, sheet_name: str | None = None, encoding: str | 
         df.columns = [str(c).replace("\t", "").strip() for c in df.columns]
         return df, enc, None
     elif suffix in (".xlsx", ".xls"):
-        xl = pd.ExcelFile(path)
+        # 优先 calamine 引擎(对样式异常的 xlsx 更稳健),失败回退 openpyxl
+        try:
+            xl = pd.ExcelFile(path, engine="calamine")
+        except Exception:
+            xl = pd.ExcelFile(path)
         sheets = xl.sheet_names
         target = sheet_name if sheet_name in sheets else (sheets[0] if sheets else None)
-        df = pd.read_excel(path, sheet_name=target, dtype=str)
+        try:
+            df = pd.read_excel(path, sheet_name=target, dtype=str, engine="calamine")
+        except Exception:
+            df = pd.read_excel(path, sheet_name=target, dtype=str)
         df.columns = [str(c).replace("\t", "").strip() for c in df.columns]
+
+        # 修复xlsx中可能存在的单元格内换行导致的记录断裂
+        # 如果某行首列为空但其他列有值,视为上一行的续行
+        df = _fix_xlsx_line_breaks(df)
+
         return df, None, sheets
     else:
         raise ValueError(f"不支持的文件类型: {suffix}")
 
 
+def _fix_xlsx_line_breaks(df: pd.DataFrame) -> pd.DataFrame:
+    """修复xlsx中单元格内换行导致的记录断裂
+
+    某些导出工具生成的xlsx中,单元格内的换行符会导致pandas将一行拆成多行,
+    表现为:后续行首列为空但其他列有值。
+    """
+    if df.empty or len(df.columns) == 0:
+        return df
+
+    rows = df.to_dict(orient="records")
+    fixed_rows = []
+    i = 0
+    while i < len(rows):
+        row = rows[i]
+        first_col_value = str(row[df.columns[0]]).strip() if df.columns[0] in row else ""
+
+        if not first_col_value and i > 0:
+            # 首列为空且不是第一行 -> 续行,合并到上一行
+            prev_row = fixed_rows[-1]
+            for col in df.columns:
+                curr_val = str(row[col]).strip() if row.get(col) else ""
+                prev_val = str(prev_row[col]).strip() if prev_row.get(col) else ""
+                if curr_val:
+                    if prev_val:
+                        prev_row[col] = prev_val + "\n" + curr_val
+                    else:
+                        prev_row[col] = curr_val
+        else:
+            fixed_rows.append(row.copy())
+        i += 1
+
+    return pd.DataFrame(fixed_rows, columns=df.columns)
+
+
 def suggest_mapping(data_type: str, columns: list[str]) -> dict[str, str]:
-    """根据列模板自动建议列映射(目标字段 -> 实际列名)"""
+    """根据列模板自动建议列映射(目标字段 -> 实际列名)
+
+    增强匹配策略:
+    1. 精确匹配(完全相同)
+    2. 关键词包含匹配(目标字段的候选名出现在源列名中)
+    3. 反向匹配(源列名出现在候选名中)
+    4. 拼音首字母匹配(针对英文/拼音混合列名)
+    """
     template = COLUMN_TEMPLATES.get(data_type, {})
     mapping: dict[str, str] = {}
-    normalized_cols = {c.replace("\t", "").strip(): c for c in columns}
+    used_cols: set[str] = set()
+
+    # 预处理列名:去空格、去特殊字符、转小写
+    def normalize(s: str) -> str:
+        return re.sub(r'[\s\t_/-]', '', s).lower()
+
+    normalized_cols = [(c, normalize(c)) for c in columns]
+
+    # 优先级1: 精确匹配
     for target_field, candidates in template.items():
         for cand in candidates:
-            cand_clean = cand.replace("\t", "").strip()
-            if cand_clean in normalized_cols:
-                mapping[target_field] = normalized_cols[cand_clean]
+            cand_norm = normalize(cand)
+            for col, col_norm in normalized_cols:
+                if col_norm == cand_norm and col not in used_cols:
+                    mapping[target_field] = col
+                    used_cols.add(col)
+                    break
+            if target_field in mapping:
                 break
+
+    # 优先级2: 候选名包含在源列名中
+    for target_field, candidates in template.items():
+        if target_field in mapping:
+            continue
+        for cand in candidates:
+            cand_norm = normalize(cand)
+            for col, col_norm in normalized_cols:
+                if cand_norm in col_norm and col not in used_cols:
+                    mapping[target_field] = col
+                    used_cols.add(col)
+                    break
+            if target_field in mapping:
+                break
+
+    # 优先级3: 源列名包含在候选名中
+    for target_field, candidates in template.items():
+        if target_field in mapping:
+            continue
+        for cand in candidates:
+            cand_norm = normalize(cand)
+            for col, col_norm in normalized_cols:
+                if col_norm in cand_norm and col not in used_cols:
+                    mapping[target_field] = col
+                    used_cols.add(col)
+                    break
+            if target_field in mapping:
+                break
+
     return mapping
 
 

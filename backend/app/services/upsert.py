@@ -12,8 +12,10 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
 from app.models.device import Device
+from app.models.external_complaint import ExternalComplaint
 from app.models.merchant import Merchant
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
@@ -97,6 +99,30 @@ def _to_datetime(val: Any) -> datetime | None:
         return result.to_pydatetime()
     except Exception:
         return None
+
+
+def _sanitize_date(val: datetime | None) -> datetime | None:
+    """对明显录入笔误的年份做纠错(如 2225 → 2025)
+
+    运营平台导出数据偶有年份录入错误(多打一位/输错前两位),
+    规则:年份 > 当前年+1 视为异常,尝试 2xxx→20xx 映射(2000 + year%100);
+    映射后仍异常或无法确定则返回 None。
+    """
+    if val is None:
+        return None
+    year = val.year
+    current_year = datetime.now().year
+    if year <= current_year + 1:
+        return val  # 正常年份,不处理
+    # 尝试 2xxx → 20xx 纠错(如 2225 → 2025, 2204 → 2004)
+    corrected_year = 2000 + (year % 100)
+    if corrected_year <= current_year + 1 and corrected_year >= 2000:
+        try:
+            return val.replace(year=corrected_year)
+        except ValueError:
+            # 2月29日在非闰年不存在,退到2月28日
+            return val.replace(year=corrected_year, day=28)
+    return None
 
 
 def _clean_value(val: Any) -> Any:
@@ -253,7 +279,7 @@ def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
     for idx, row in enumerate(df.to_dict("records")):
         try:
             data = apply_mapping(row, mapping)
-            ticket_no = (data.get("ticket_no") or "").strip() if data.get("ticket_no") else None
+            ticket_no = str(data.get("ticket_no")).strip() if data.get("ticket_no") else None
             if not ticket_no:
                 result.add_error(idx, "工单号为空")
                 continue
@@ -280,6 +306,7 @@ def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
                 "handle_opinion": data.get("handle_opinion"),
                 "is_appeal": data.get("is_appeal"),
                 "order_no": data.get("order_no"),
+                "submit_params": data.get("submit_params"),
                 "refund_amount": _to_float(data.get("refund_amount")),
                 "estimated_amount": _to_float(data.get("estimated_amount")),
             })
@@ -388,6 +415,103 @@ def upsert_cs_records(df: pd.DataFrame, mapping: dict[str, str], db: Session, re
     result.inserted += len(rows)
 
 
+def upsert_external_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """外部投诉(监督局/315) - 投诉编号去重更新,无编号的行简单插入
+
+    投诉编号有 \n 前缀,导入时剥离。无编号的行(~3%)按 on_conflict_do_nothing 插入,
+    重复导入会累计(与 cs_record 一致),有编号的 96% 走 upsert 精确去重更新。
+    """
+    with_pk: list[dict] = []
+    without_pk: list[dict] = []
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            # 投诉编号剥离 \n/空白
+            raw_no = data.get("complaint_no")
+            complaint_no = raw_no.replace("\n", "").strip() if isinstance(raw_no, str) else None
+            rec = {
+                "complaint_no": complaint_no or None,
+                "complaint_date": _sanitize_date(_to_datetime(data.get("complaint_date"))),
+                "platform": data.get("platform"),
+                "complaint_account": data.get("complaint_account"),
+                "company_entity": data.get("company_entity"),
+                "complaint_shop": data.get("complaint_shop"),
+                "purchase_order_no": data.get("purchase_order_no"),
+                "complainant": data.get("complainant"),
+                "complainant_phone": data.get("complainant_phone"),
+                "device_sn": data.get("device_sn"),
+                "wechat_id": data.get("wechat_id"),
+                "problem": data.get("problem"),
+                "keyword": data.get("keyword"),
+                "complaint_category": data.get("complaint_category"),
+                "solution": data.get("solution"),
+                "result": data.get("result"),
+                "follower": data.get("follower"),
+                "handle_time": _sanitize_date(_to_datetime(data.get("handle_time"))),
+                "handle_detail": data.get("handle_detail"),
+                "internal_analysis": data.get("internal_analysis"),
+                "external_analysis": data.get("external_analysis"),
+                "reception_cs": data.get("reception_cs"),
+                "package_order_no": data.get("package_order_no"),
+                "package_name": data.get("package_name"),
+                "package_price": _to_float(data.get("package_price")),
+                "actual_pay_amount": _to_float(data.get("actual_pay_amount")),
+                "negotiate_refund_amount": _to_float(data.get("negotiate_refund_amount")),
+            }
+            (with_pk if complaint_no else without_pk).append(rec)
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    all_rows = with_pk + without_pk
+    if not all_rows:
+        return
+    _sync_devices(all_rows, "device_sn", db)
+    # 有编号:upsert 精确去重更新
+    if with_pk:
+        _execute_upsert(db, ExternalComplaint, "complaint_no", with_pk, result)
+    # 无编号:简单插入(null 不触发 unique 冲突,重复导入会累计)
+    if without_pk:
+        db.execute(pg_insert(ExternalComplaint).values(without_pk).on_conflict_do_nothing())
+        db.flush()
+        result.inserted += len(without_pk)
+
+
+def upsert_card_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """卡商群投诉 - 无天然唯一键,简单 insert(on_conflict_do_nothing 兜底),与 cs_record 一致
+
+    device_sn 单元格可能含多个 SN(换行分隔),取首个以保证 varchar(64) 与外键约束。
+    """
+    rows: list[dict] = []
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            # device_sn 取首个(单元格可能含多个 SN,换行分隔)
+            raw_sn = data.get("device_sn")
+            device_sn = raw_sn.split("\n")[0].strip() if isinstance(raw_sn, str) and raw_sn.strip() else None
+            rows.append({
+                "complaint_date": _sanitize_date(_to_datetime(data.get("complaint_date"))),
+                "complaint_group": data.get("complaint_group"),
+                "complainant": data.get("complainant"),
+                "complainant_phone": data.get("complainant_phone"),
+                "device_sn": device_sn,
+                "problem": data.get("problem"),
+                "problem_category": data.get("problem_category"),
+                "result": data.get("result"),
+                "solution": data.get("solution"),
+                "handler": data.get("handler"),
+                "handle_result": data.get("handle_result"),
+            })
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
+    _sync_devices(rows, "device_sn", db)
+    db.execute(pg_insert(CardComplaint).values(rows).on_conflict_do_nothing())
+    db.flush()
+    result.inserted += len(rows)
+
+
 UPSERT_DISPATCH = {
     "refund": upsert_refunds,
     "wallet": upsert_wallet,
@@ -395,6 +519,8 @@ UPSERT_DISPATCH = {
     "merchant_refund": upsert_merchant_refunds,
     "merchant": upsert_merchants,
     "cs_record": upsert_cs_records,
+    "external_complaint": upsert_external_complaints,
+    "card_complaint": upsert_card_complaints,
 }
 
 

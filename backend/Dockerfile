@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir \
     "sqlalchemy>=2.0.25" "alembic>=1.13.0" "psycopg2-binary>=2.9.9" \
     "pydantic>=2.6.0" "pydantic-settings>=2.1.0" \
     "python-jose[cryptography]>=3.3.0" "bcrypt>=4.0.0" \
-    "python-multipart>=0.0.9" "pandas>=2.2.0" "openpyxl>=3.1.2" \
+    "python-multipart>=0.0.9" "pandas>=2.2.0" "openpyxl>=3.1.2" "python-calamine>=0.2.0" \
     "redis>=5.0.0" "python-dotenv>=1.0.0" "orjson>=3.9.0"
 
 COPY . /app
@@ -35,4 +35,5 @@ EXPOSE 8000
 
 # gunicorn + uvicorn worker
 # --preload: 在主进程加载应用,lifespan(迁移+注册)只执行一次,避免多 worker 并发冲突
-CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "120", "--preload"]
+# 但在某些情况下会导致 worker boot 失败,暂时移除
+CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "120"]

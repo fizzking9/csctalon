@@ -33,10 +33,10 @@ const routes = [
         meta: { title: '上传记录', icon: 'Document' },
       },
       {
-        path: 'data/match',
-        name: 'DataMatch',
-        component: () => import('@/views/data/Match.vue'),
-        meta: { title: '关联匹配', icon: 'Connection' },
+        path: 'data/browser',
+        name: 'DataBrowser',
+        component: () => import('@/views/data/Browser.vue'),
+        meta: { title: '数据查看', icon: 'DataAnalysis' },
       },
       // 分析看板
       {

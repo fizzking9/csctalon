@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -23,7 +23,7 @@ from app.services.upsert import run_upsert
 
 router = APIRouter(prefix="/uploads", tags=["数据中心-上传"])
 
-DATA_TYPES = {"refund", "wallet", "ticket", "merchant_refund", "merchant", "cs_record"}
+DATA_TYPES = {"refund", "wallet", "ticket", "merchant_refund", "merchant", "cs_record", "external_complaint", "card_complaint"}
 
 
 @router.post("/parse", response_model=R, summary="上传并解析文件(返回预览)")
@@ -86,6 +86,7 @@ async def confirm_import(
     payload: dict,
     db: DBSession,
     current_user: CurrentUser,
+    background_tasks: BackgroundTasks,
 ):
     """确认导入:读取已上传文件,按列映射执行 upsert,并触发关联匹配
 
@@ -126,21 +127,21 @@ async def confirm_import(
         df = load_dataframe(path, sheet_name=sheet_name, encoding=encoding)
         # 执行 upsert
         result = run_upsert(df, data_type, mapping, db)
-        # 触发关联匹配(增量)
-        match_stats = match_all(db, only_unmatched=True)
-        # 触发人员别名提取(增量,幂等)
-        person_stats = extract_person_aliases(db)
+        # 更新记录状态
         record.total_rows = result.total
         record.inserted_rows = result.inserted
         record.updated_rows = result.updated
         record.failed_rows = result.failed
-        record.matched_rows = sum(match_stats.values())
         record.status = "imported"
         record.finished_at = datetime.now(timezone.utc)
         if result.errors:
             record.error_detail = {"errors": result.errors[:50]}  # 仅存前50条错误
         db.commit()
         db.refresh(record)
+
+        # 后台异步执行关联匹配和人员别名提取（避免阻塞导入响应）
+        background_tasks.add_task(_run_post_import_tasks, data_type)
+
         return R(
             data=ImportResponse(
                 upload_id=record.id,
@@ -150,7 +151,7 @@ async def confirm_import(
                 inserted_rows=record.inserted_rows,
                 updated_rows=record.updated_rows,
                 failed_rows=record.failed_rows,
-                matched_rows=record.matched_rows,
+                matched_rows=0,  # 关联匹配在后台执行
                 status=record.status,
                 errors=result.errors[:50] if result.errors else None,
                 finished_at=record.finished_at,
@@ -201,3 +202,25 @@ def get_record(record_id: int, db: DBSession, _: CurrentUser):
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
     return R(data=UploadRecordOut.model_validate(record))
+
+
+def _run_post_import_tasks(data_type: str):
+    """后台任务:关联匹配和人员别名提取"""
+    from app.core.database import SessionLocal
+    from app.services.matching import match_all
+    from app.services.person_extraction import extract_person_aliases
+
+    try:
+        db = SessionLocal()
+        try:
+            # 触发关联匹配(增量)
+            match_stats = match_all(db, only_unmatched=True)
+            # 触发人员别名提取(增量,幂等)
+            person_stats = extract_person_aliases(db)
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        # 后台任务异常不影响主流程,记录日志即可
+        import logging
+        logging.getLogger(__name__).error(f"后台任务执行失败(data_type={data_type}): {e}")

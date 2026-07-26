@@ -39,8 +39,8 @@ def list_todos(
     current_user: CurrentUser,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    status: TodoStatus | None = None,
-    priority: TodoPriority | None = None,
+    status: str | None = Query(None, description="状态: pending/processing/confirming/done"),
+    priority: str | None = Query(None, description="优先级: low/medium/high/urgent"),
     assignee_id: int | None = None,
 ):
     stmt = select(TodoItem)
@@ -50,10 +50,17 @@ def list_todos(
     elif current_user.role == RoleEnum.SUPERVISOR.value and current_user.group_name:
         # 主管看本组(简化:同组用户的待办) - 此处先用 assignee_id 或全部,后续完善
         pass
+    # 空字符串/None 均视为不过滤;非空时校验枚举值
     if status:
-        stmt = stmt.where(TodoItem.status == status.value)
+        try:
+            stmt = stmt.where(TodoItem.status == TodoStatus(status).value)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的状态值: {status}")
     if priority:
-        stmt = stmt.where(TodoItem.priority == priority.value)
+        try:
+            stmt = stmt.where(TodoItem.priority == TodoPriority(priority).value)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的优先级值: {priority}")
     if assignee_id:
         stmt = stmt.where(TodoItem.assignee_id == assignee_id)
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))

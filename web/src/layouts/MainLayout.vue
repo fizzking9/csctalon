@@ -26,7 +26,7 @@
           </template>
           <el-menu-item index="/data/upload">数据上传</el-menu-item>
           <el-menu-item index="/data/records">上传记录</el-menu-item>
-          <el-menu-item index="/data/match">关联匹配</el-menu-item>
+          <el-menu-item index="/data/browser">数据查看</el-menu-item>
         </el-sub-menu>
 
         <el-sub-menu index="analytics">

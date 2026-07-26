@@ -52,6 +52,9 @@ class AnalysisView(IDMixin, TimestampMixin, Base):
     time_range_default: Mapped[dict | None] = mapped_column(
         JSONB, nullable=True, comment='默认时间范围 {"days":30}',
     )
+    ratios: Mapped[list] = mapped_column(
+        JSONB, default=list, nullable=False, comment='比率度量数组 [{alias,numerator,denominator,as_percent}]'
+    )
     is_preset: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, comment="预设视图（迁移的4大看板）",
     )

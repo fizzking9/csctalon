@@ -178,6 +178,30 @@
             </el-tab-pane>
           </el-tabs>
 
+          <!-- 比率度量(基于已聚合度量算比率,如挽回率=已接受/总数) -->
+          <div class="drop-zone ratio-zone">
+            <div class="zone-title">
+              <el-tag type="info" size="small">比率度量 (可选)</el-tag>
+              <span class="zone-hint">分子÷分母,合并后计算;分母为0返回空</span>
+              <el-button text type="primary" size="small" :icon="Plus" @click="addRatio">添加</el-button>
+            </div>
+            <div class="zone-items vertical">
+              <div v-for="(r, ri) in viewConfig.ratios" :key="ri" class="ratio-item">
+                <el-input v-model="r.alias" size="small" placeholder="别名(如 挽回率%)" style="width: 130px" @input="triggerPreview" />
+                <el-select v-model="r.numerator" size="small" placeholder="分子" style="width: 130px" @change="triggerPreview">
+                  <el-option v-for="a in allMeasureAliases" :key="a" :label="a" :value="a" />
+                </el-select>
+                <span class="ratio-div">÷</span>
+                <el-select v-model="r.denominator" size="small" placeholder="分母" style="width: 130px" @change="triggerPreview">
+                  <el-option v-for="a in allMeasureAliases" :key="a" :label="a" :value="a" />
+                </el-select>
+                <el-checkbox v-model="r.as_percent" @change="triggerPreview">百分比</el-checkbox>
+                <el-icon class="remove-icon" @click="viewConfig.ratios.splice(ri, 1); triggerPreview()"><Close /></el-icon>
+              </div>
+              <span v-if="!viewConfig.ratios.length" class="empty-hint">无需比率度量(如金额、笔数直接展示即可)</span>
+            </div>
+          </div>
+
           <!-- 时间范围 -->
           <div class="time-range-bar">
             <span class="label">预览时间范围:</span>
@@ -206,7 +230,7 @@
               <BaseChart v-if="previewResult.chart_type !== 'table'" :option="chartOption" height="300px" />
               <el-table v-else :data="previewResult.data.rows" border stripe size="small" max-height="400">
                 <el-table-column v-for="col in previewResult.data.columns" :key="col" :prop="col" :label="col" show-overflow-tooltip>
-                  <template #default="{ row }">{{ fmtVal(row[col]) }}</template>
+                  <template #default="{ row }">{{ fmtVal(row[col], col) }}</template>
                 </el-table-column>
               </el-table>
             </template>
@@ -263,6 +287,7 @@ const viewConfig = reactive({
   chart_type: 'line',
   merge_strategy: 'add',
   segments: [createEmptySegment()],
+  ratios: [],
 })
 
 const activeSegment = ref('0')
@@ -300,6 +325,25 @@ const fieldGroups = computed(() => {
   const order = ['time', 'category', 'person', 'dimension', 'amount', 'measure', 'sn']
   return order.map((k) => groups[k]).filter(Boolean)
 })
+
+// 收集所有 segment 的度量 alias(供比率度量的分子/分母下拉选择)
+const allMeasureAliases = computed(() => {
+  const aliases = []
+  for (const seg of viewConfig.segments) {
+    for (const m of seg.measures) {
+      const a = m.alias || (m.field !== '*' ? m.field : 'count')
+      if (!aliases.includes(a)) aliases.push(a)
+    }
+  }
+  return aliases
+})
+
+// 百分比比率别名集合(用于表格列格式化:追加 % 后缀)
+const percentAliases = computed(() => new Set(viewConfig.ratios.filter((r) => r.as_percent && r.alias).map((r) => r.alias)))
+
+function addRatio() {
+  viewConfig.ratios.push({ alias: '', numerator: '', denominator: '', as_percent: true })
+}
 
 function createEmptySegment() {
   return {
@@ -460,6 +504,7 @@ async function doPreview() {
       })),
       merge_strategy: viewConfig.merge_strategy,
       classification_rule_ids: classificationRuleIdsMultiple.value,
+      ratios: viewConfig.ratios.filter((r) => r.alias && r.numerator && r.denominator),
     }
     const params = {}
     if (previewDays.value > 0) {
@@ -519,9 +564,13 @@ const chartOption = computed(() => {
   }
 })
 
-function fmtVal(v) {
+function fmtVal(v, col) {
   if (v == null) return '-'
-  if (typeof v === 'number') return v.toFixed(2)
+  if (typeof v === 'number') {
+    // 百分比比率列:追加 % 后缀
+    if (col && percentAliases.value.has(col)) return `${v.toFixed(2)}%`
+    return v.toFixed(2)
+  }
   return v
 }
 
@@ -564,6 +613,7 @@ async function handleSave() {
       merge_strategy: viewConfig.merge_strategy,
       classification_rule_ids: classificationRuleIdsMultiple.value,
       time_range_default: previewDays.value > 0 ? { days: previewDays.value } : null,
+      ratios: viewConfig.ratios.filter((r) => r.alias && r.numerator && r.denominator),
     })
     ElMessage.success('视图已保存')
     saveDialogVisible.value = false
@@ -683,11 +733,20 @@ onMounted(() => {
   margin-left: 2px;
 }
 .measure-item,
-.filter-item {
+.filter-item,
+.ratio-item {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 4px 0;
+}
+.ratio-div {
+  color: #909399;
+  font-size: 14px;
+  font-weight: 600;
+}
+.ratio-zone {
+  margin-top: 8px;
 }
 .remove-icon {
   cursor: pointer;

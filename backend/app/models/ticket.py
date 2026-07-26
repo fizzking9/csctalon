@@ -41,5 +41,6 @@ class ServiceTicket(TimestampMixin, Base):
     handle_opinion: Mapped[str | None] = mapped_column(Text, nullable=True, comment="处理意见")
     is_appeal: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="是否申诉")
     order_no: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="订单编号")
+    submit_params: Mapped[str | None] = mapped_column(Text, nullable=True, comment="提交参数(JSON)")
     refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退款金额")
     estimated_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="预估可退金额")

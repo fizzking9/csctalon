@@ -34,7 +34,7 @@
             :label="col"
             show-overflow-tooltip
           >
-            <template #default="{ row }">{{ fmtVal(row[col]) }}</template>
+            <template #default="{ row }">{{ fmtVal(row[col], col) }}</template>
           </el-table-column>
         </el-table>
       </div>
@@ -50,6 +50,12 @@
           <span class="config-hint">共 {{ view.segments.length }} 个数据源片段</span>
         </div>
       </template>
+      <div v-if="view.ratios?.length" class="detail-row" style="margin-bottom: 12px">
+        <span class="detail-label">比率:</span>
+        <el-tag v-for="(r, ri) in view.ratios" :key="ri" type="info" size="small" style="margin-right: 4px">
+          {{ r.alias }} = {{ r.numerator }}÷{{ r.denominator }}{{ r.as_percent ? '%' : '' }}
+        </el-tag>
+      </div>
       <el-collapse>
         <el-collapse-item v-for="(seg, idx) in view.segments" :key="idx" :name="idx">
           <template #title>
@@ -101,6 +107,9 @@ const errorMsg = ref('')
 
 const chartHeight = computed(() => (result.value?.chart_type === 'table' ? 'auto' : '400px'))
 
+// 百分比比率别名集合(从已存视图的 ratios 读取,用于表格列格式化:追加 % 后缀)
+const percentAliases = computed(() => new Set((view.value?.ratios || []).filter((r) => r.as_percent && r.alias).map((r) => r.alias)))
+
 const chartOption = computed(() => {
   if (!result.value) return {}
   const r = result.value
@@ -140,9 +149,13 @@ const chartOption = computed(() => {
   }
 })
 
-function fmtVal(v) {
+function fmtVal(v, col) {
   if (v == null) return '-'
-  if (typeof v === 'number') return v.toFixed(2)
+  if (typeof v === 'number') {
+    // 百分比比率列:追加 % 后缀
+    if (col && percentAliases.value.has(col)) return `${v.toFixed(2)}%`
+    return v.toFixed(2)
+  }
   return v
 }
 

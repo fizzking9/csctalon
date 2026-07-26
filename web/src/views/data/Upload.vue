@@ -15,11 +15,14 @@
         <el-form label-width="120px" style="max-width: 600px; margin: 24px auto">
           <el-form-item label="数据类型" required>
             <el-select v-model="form.data_type" placeholder="请选择数据类型" style="width: 100%">
-              <el-option label="退费单" value="refund" />
-              <el-option label="钱包提现操作" value="wallet" />
-              <el-option label="服务退款工单" value="ticket" />
+              <el-option label="退费单管理" value="refund" />
+              <el-option label="提现操作记录" value="wallet" />
+              <el-option label="服务请求管理" value="ticket" />
               <el-option label="商户号退款" value="merchant_refund" />
               <el-option label="商户主数据" value="merchant" />
+              <el-option label="智能助手处理记录" value="cs_record" />
+              <el-option label="外部投诉(315/监督局)" value="external_complaint" />
+              <el-option label="卡商群投诉" value="card_complaint" />
             </el-select>
           </el-form-item>
           <el-form-item v-if="form.data_type" label="Sheet" >
@@ -74,7 +77,7 @@
             <el-table-column label="目标字段" width="220">
               <template #default="{ row }">
                 <el-select v-model="row.target" clearable placeholder="不导入" style="width: 100%">
-                  <el-option v-for="f in targetFields" :key="f" :label="f" :value="f" />
+                  <el-option v-for="opt in targetFieldOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
                 </el-select>
               </template>
             </el-table-column>
@@ -289,6 +292,21 @@ const targetFields = computed(() => Object.keys(COLUMN_TEMPLATES[form.data_type]
 const mappingRows = computed(() => (preview.value.columns || []).map((c) => ({ source: c, target: suggestedMapping()[c] || '' })))
 const mappingFieldCount = computed(() => mappingRows.value.filter((r) => r.target).length)
 const missingFields = computed(() => targetFields.value.filter((f) => !mappingRows.value.some((r) => r.target === f)))
+
+// 获取字段中文名称
+function getFieldLabel(field) {
+  const template = COLUMN_TEMPLATES[form.data_type] || {}
+  return template[field]?.[0] || field
+}
+
+// 获取字段列表(带中文名称)
+const targetFieldOptions = computed(() => {
+  const template = COLUMN_TEMPLATES[form.data_type] || {}
+  return Object.entries(template).map(([field, labels]) => ({
+    value: field,
+    label: labels[0] || field
+  }))
+})
 
 // new 行预览要展示的字段(取前 6 个映射字段,避免表格过宽)
 const newPreviewFields = computed(() => {
