@@ -47,6 +47,11 @@
           <span>事项跟进</span>
         </el-menu-item>
 
+        <el-menu-item index="/tasks">
+          <el-icon><List /></el-icon>
+          <span>专项任务</span>
+        </el-menu-item>
+
         <el-sub-menu v-if="authStore.isAdmin" index="system">
           <template #title>
             <el-icon><Setting /></el-icon>

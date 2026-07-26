@@ -158,10 +158,11 @@ def delete_todo(todo_id: int, db: DBSession, current_user: CurrentUser):
         raise HTTPException(status_code=404, detail="待办不存在")
     if current_user.role not in (RoleEnum.ADMIN.value, RoleEnum.SUPERVISOR.value) and todo.created_by != current_user.username:
         raise HTTPException(status_code=403, detail="无权删除")
-    # 删除关联的跟进记录
+    # 删除关联的跟进记录(无 relationship 声明,需先 flush 确保子记录先删,避免 FK 约束)
     followups = list(db.scalars(select(TodoFollowup).where(TodoFollowup.todo_id == todo_id)))
     for f in followups:
         db.delete(f)
+    db.flush()
     db.delete(todo)
     db.commit()
     return R()

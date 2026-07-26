@@ -94,6 +94,19 @@ const routes = [
         component: () => import('@/views/todos/Detail.vue'),
         meta: { title: '事项详情', hidden: true },
       },
+      // 专项任务
+      {
+        path: 'tasks',
+        name: 'Tasks',
+        component: () => import('@/views/tasks/List.vue'),
+        meta: { title: '专项任务', icon: 'List' },
+      },
+      {
+        path: 'tasks/:id',
+        name: 'TaskDetail',
+        component: () => import('@/views/tasks/Detail.vue'),
+        meta: { title: '专项详情', hidden: true },
+      },
       // 系统
       {
         path: 'system/users',
