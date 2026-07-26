@@ -120,6 +120,13 @@ const routes = [
         component: () => import('@/views/strategy/Manage.vue'),
         meta: { title: '策略管理', icon: 'EditPen', manager: true },
       },
+      // 报表中心(规划占位,manager 可见)
+      {
+        path: 'report/center',
+        name: 'ReportCenter',
+        component: () => import('@/views/report/Center.vue'),
+        meta: { title: '报表中心', icon: 'Printer', manager: true },
+      },
       // 系统
       {
         path: 'system/users',
@@ -144,6 +151,12 @@ const routes = [
         name: 'SystemClassificationRules',
         component: () => import('@/views/system/ClassificationRules.vue'),
         meta: { title: '分类规则', icon: 'Filter', admin: true },
+      },
+      {
+        path: 'system/operation-logs',
+        name: 'SystemOperationLogs',
+        component: () => import('@/views/system/OperationLogs.vue'),
+        meta: { title: '操作日志', icon: 'Tickets', admin: true },
       },
     ],
   },

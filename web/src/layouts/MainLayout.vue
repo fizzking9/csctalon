@@ -66,6 +66,12 @@
           <span>策略发布</span>
         </el-menu-item>
 
+        <!-- 报表中心(管理层,规划占位) -->
+        <el-menu-item v-if="authStore.isManager" index="/report/center">
+          <el-icon><Printer /></el-icon>
+          <span>报表中心</span>
+        </el-menu-item>
+
         <el-sub-menu v-if="authStore.isAdmin" index="system">
           <template #title>
             <el-icon><Setting /></el-icon>
@@ -75,6 +81,7 @@
           <el-menu-item index="/system/data-sources">数据源管理</el-menu-item>
           <el-menu-item index="/system/persons">人员管理</el-menu-item>
           <el-menu-item index="/system/classification-rules">分类规则</el-menu-item>
+          <el-menu-item index="/system/operation-logs">操作日志</el-menu-item>
         </el-sub-menu>
       </el-menu>
     </el-aside>

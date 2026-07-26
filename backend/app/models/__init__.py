@@ -7,6 +7,7 @@ from app.models.data_source import DataSource, DataSourceField, SemanticRole, So
 from app.models.device import Device, DeviceTag, device_tag_rel  # noqa: F401
 from app.models.merchant import Merchant  # noqa: F401
 from app.models.merchant_refund import MerchantRefund  # noqa: F401
+from app.models.operation_log import OperationLog  # noqa: F401
 from app.models.person import Person, PersonAlias  # noqa: F401
 from app.models.refund import Refund  # noqa: F401
 from app.models.strategy import StrategyDoc, StrategyReadReceipt  # noqa: F401
@@ -25,6 +26,7 @@ __all__ = [
     "DeviceTag",
     "Merchant",
     "MerchantRefund",
+    "OperationLog",
     "Refund",
     "ServiceTicket",
     "WalletWithdrawal",

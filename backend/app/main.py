@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.middleware.operation_log import OperationLogMiddleware
 from app.models import *  # noqa: F401,F403  # 注册所有模型
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -100,6 +101,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(OperationLogMiddleware)
 
     app.include_router(api_router, prefix="/api/v1")
 
