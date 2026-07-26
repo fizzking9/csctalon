@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.models.cs_record import CsRecord
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
@@ -365,6 +366,8 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
     wallet_balance = db.scalar(
         select(func.coalesce(func.sum(WalletWithdrawal.wallet_balance), 0))
     ) or 0
+    # 客服接待量(智能助手处理记录数)
+    cs_reception_count = db.scalar(select(func.count()).select_from(CsRecord)) or 0
     return {
         "refund_total": float(refund_total),  # 退款总金额(含非现金,如退回钱包/无需退款)
         "refund_count": refund_count,
@@ -372,4 +375,5 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
         "cash_out_direct": direct,  # 直接退款(线上+人工)
         "cash_out_withdraw": withdraw,  # 用户提现
         "wallet_balance_total": float(wallet_balance),
+        "cs_reception_count": cs_reception_count,
     }
