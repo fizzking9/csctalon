@@ -51,6 +51,8 @@
             <span>系统管理</span>
           </template>
           <el-menu-item index="/system/users">用户管理</el-menu-item>
+          <el-menu-item index="/system/data-sources">数据源管理</el-menu-item>
+          <el-menu-item index="/system/persons">人员管理</el-menu-item>
         </el-sub-menu>
       </el-menu>
     </el-aside>

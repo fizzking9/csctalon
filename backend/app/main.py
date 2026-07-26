@@ -2,30 +2,42 @@
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import settings
-from app.core.database import Base, SessionLocal, engine
+from app.core.database import SessionLocal
 from app.models import *  # noqa: F401,F403  # 注册所有模型
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# backend/ 目录（alembic.ini 与 alembic/ 所在位置）
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期:启动时初始化数据库与默认管理员"""
-    # 开发环境自动建表(生产用 alembic)
-    if settings.ENV == "dev":
-        Base.metadata.create_all(bind=engine)
-        logger.info("开发环境:已自动创建表结构")
+    """应用生命周期:启动时执行迁移并初始化默认管理员"""
+    _run_migrations_on_startup()
     _init_admin()
     logger.info("应用启动完成")
     yield
     logger.info("应用关闭")
+
+
+def _run_migrations_on_startup() -> None:
+    """启动时执行 alembic upgrade head（统一走迁移，不再用 create_all）"""
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(str(_BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_BACKEND_DIR / "alembic"))
+    command.upgrade(cfg, "head")
+    logger.info("数据库迁移已执行至 head")
 
 
 def _init_admin() -> None:

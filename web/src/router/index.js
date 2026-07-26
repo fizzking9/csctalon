@@ -83,6 +83,18 @@ const routes = [
         component: () => import('@/views/system/Users.vue'),
         meta: { title: '用户管理', icon: 'UserFilled', admin: true },
       },
+      {
+        path: 'system/data-sources',
+        name: 'SystemDataSources',
+        component: () => import('@/views/system/DataSources.vue'),
+        meta: { title: '数据源管理', icon: 'Coin', admin: true },
+      },
+      {
+        path: 'system/persons',
+        name: 'SystemPersons',
+        component: () => import('@/views/system/Persons.vue'),
+        meta: { title: '人员管理', icon: 'UserFilled', admin: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },

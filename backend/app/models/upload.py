@@ -18,6 +18,7 @@ class UploadRecord(IDMixin, TimestampMixin, Base):
     data_type: Mapped[str] = mapped_column(String(32), index=True, nullable=False, comment="数据类型:refund/wallet/ticket/merchant_refund/merchant/device")
     """refund=退费单, wallet=钱包提现, ticket=退款工单, merchant_refund=商户号退款, merchant=商户, device=设备"""
     filename: Mapped[str] = mapped_column(String(255), nullable=False, comment="原文件名")
+    stored_path: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="归档相对路径 yyyy-MM/filename（找文件用）")
     file_size: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="文件大小(字节)")
     sheet_name: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="XLSX的sheet名")
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, comment="pending/parsing/imported/failed")

@@ -335,13 +335,27 @@ def load_dataframe(path: Path | str, sheet_name: str | None = None, encoding: st
     return df
 
 
-def save_upload_file(content: bytes, filename: str) -> Path:
-    """保存上传文件到上传目录,返回路径"""
-    upload_dir = Path(settings.UPLOAD_DIR)
+def save_upload_file(content: bytes, filename: str) -> tuple[Path, str]:
+    """保存上传文件到 uploads/yyyy-MM/原文件名,返回 (绝对路径, 相对路径 stored_path)
+
+    按月归档便于存档追溯；同名文件加时间戳后缀避免覆盖。
+    """
+    from datetime import datetime
+
+    now = datetime.now()
+    month_dir = now.strftime("%Y-%m")
+    upload_dir = Path(settings.UPLOAD_DIR) / month_dir
     upload_dir.mkdir(parents=True, exist_ok=True)
     # 防止路径穿越
     safe_name = Path(filename).name
     dest = upload_dir / safe_name
+    if dest.exists():
+        # 同名加时间戳后缀,保留所有历史版本
+        stem = Path(safe_name).stem
+        suffix = Path(safe_name).suffix
+        ts = now.strftime("%Y%m%d%H%M%S")
+        dest = upload_dir / f"{stem}_{ts}{suffix}"
     with open(dest, "wb") as f:
         f.write(content)
-    return dest
+    stored_path = f"{month_dir}/{dest.name}"  # 相对 UPLOAD_DIR
+    return dest, stored_path

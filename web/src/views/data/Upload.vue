@@ -6,6 +6,7 @@
       <el-steps :active="step" finish-status="success" align-center>
         <el-step title="选择类型与文件" />
         <el-step title="预览与列映射" />
+        <el-step title="Diff 复核" />
         <el-step title="确认导入" />
       </el-steps>
 
@@ -100,12 +101,133 @@
 
         <div class="mt-16 flex gap-8">
           <el-button @click="step = 0">上一步</el-button>
-          <el-button type="primary" @click="goImport">下一步:确认导入</el-button>
+          <el-button type="primary" :loading="diffing" @click="goDiff">下一步:Diff 复核</el-button>
         </div>
       </div>
 
-      <!-- 步骤3: 确认导入 -->
+      <!-- 步骤3: Diff 复核 -->
       <div v-if="step === 2" class="step-content">
+        <!-- loading -->
+        <div v-if="diffing" class="diff-loading">
+          <el-icon class="is-loading" :size="40"><Loading /></el-icon>
+          <p>正在计算 diff,请稍候...</p>
+          <p class="sub">大文件可能需要 1-2 分钟</p>
+        </div>
+
+        <template v-else-if="diffResult">
+          <!-- 截断警告 -->
+          <el-alert v-if="diffResult.truncated" type="warning" :closable="false" class="mb-16">
+            文件超过 {{ diffResult.summary.total.toLocaleString() }} 行已截断,超出部分统一标为 new
+          </el-alert>
+
+          <!-- note 提示 -->
+          <el-alert v-if="diffResult.note" :type="diffResult.strategy === 'unknown' ? 'info' : 'info'" :closable="false" class="mb-16">
+            {{ diffResult.note }}
+          </el-alert>
+
+          <!-- 三卡片汇总 -->
+          <el-row :gutter="16" class="mb-16">
+            <el-col :span="8">
+              <el-card shadow="hover" class="summary-card summary-existing">
+                <div class="summary-num">{{ diffResult.summary.existing.toLocaleString() }}</div>
+                <div class="summary-label">已存在(将覆盖)</div>
+              </el-card>
+            </el-col>
+            <el-col :span="8">
+              <el-card shadow="hover" class="summary-card summary-new">
+                <div class="summary-num">{{ diffResult.summary.new.toLocaleString() }}</div>
+                <div class="summary-label">新增</div>
+              </el-card>
+            </el-col>
+            <el-col :span="8">
+              <el-card shadow="hover" class="summary-card summary-abnormal">
+                <div class="summary-num">{{ diffResult.summary.abnormal.toLocaleString() }}</div>
+                <div class="summary-label">异常(字段差异)</div>
+              </el-card>
+            </el-col>
+          </el-row>
+
+          <!-- abnormal 明细(最高优先级) -->
+          <el-card v-if="diffResult.abnormal_rows.length" class="mb-16" header="异常行明细(主键已存在但字段不同)">
+            <template #header>
+              <div class="flex justify-between items-center">
+                <span>异常行明细(主键已存在但字段不同) · 共 {{ diffResult.summary.abnormal.toLocaleString() }} 行,展示前 {{ diffResult.abnormal_rows.length }} 条</span>
+              </div>
+            </template>
+            <el-table :data="diffResult.abnormal_rows" size="small" max-height="400" row-key="row_idx" border>
+              <el-table-column type="expand">
+                <template #default="{ row }">
+                  <div class="diff-expand">
+                    <el-table :data="row.diffs" size="small" border>
+                      <el-table-column prop="field" label="字段" width="180" />
+                      <el-table-column label="数据库现有值">
+                        <template #default="{ row: d }">
+                          <span class="diff-old">{{ d.old ?? '(空)' }}</span>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="文件新值">
+                        <template #default="{ row: d }">
+                          <span class="diff-new">{{ d.new ?? '(空)' }}</span>
+                        </template>
+                      </el-table-column>
+                    </el-table>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column prop="row_idx" label="行号" width="80" />
+              <el-table-column prop="pk" label="主键" width="240" show-overflow-tooltip />
+              <el-table-column label="差异字段数" width="100">
+                <template #default="{ row }">{{ row.diffs.length }}</template>
+              </el-table-column>
+              <el-table-column label="差异字段">
+                <template #default="{ row }">
+                  <el-tag v-for="d in row.diffs.slice(0, 5)" :key="d.field" size="small" type="danger" class="mr-4">{{ d.field }}</el-tag>
+                  <el-text v-if="row.diffs.length > 5" type="info" size="small">+{{ row.diffs.length - 5 }}</el-text>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+
+          <!-- new 明细 -->
+          <el-card v-if="diffResult.new_rows.length" class="mb-16">
+            <template #header>
+              <span>新增行预览 · 共 {{ diffResult.summary.new.toLocaleString() }} 行,展示前 {{ diffResult.new_rows.length }} 条</span>
+            </template>
+            <el-table :data="diffResult.new_rows" size="small" max-height="300" border>
+              <el-table-column prop="row_idx" label="行号" width="80" />
+              <el-table-column prop="pk" label="主键" width="240" show-overflow-tooltip />
+              <el-table-column
+                v-for="field in newPreviewFields"
+                :key="field"
+                :label="field"
+                :width="150"
+                show-overflow-tooltip
+              >
+                <template #default="{ row }">{{ row.data?.[field] ?? '-' }}</template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+
+          <!-- existing 折叠 -->
+          <el-collapse v-if="diffResult.existing_sample.length" class="mb-16">
+            <el-collapse-item :title="`已存在行(将覆盖) · 共 ${diffResult.summary.existing.toLocaleString()} 行,展示前 ${diffResult.existing_sample.length} 条主键`">
+              <el-table :data="diffResult.existing_sample" size="small" border>
+                <el-table-column prop="row_idx" label="行号" width="80" />
+                <el-table-column prop="pk" label="主键" />
+              </el-table>
+            </el-collapse-item>
+          </el-collapse>
+
+          <div class="mt-16 flex gap-8">
+            <el-button @click="step = 1">上一步</el-button>
+            <el-button @click="runDiff" :loading="diffing">重新计算</el-button>
+            <el-button type="primary" @click="goImport">下一步:确认导入</el-button>
+          </div>
+        </template>
+      </div>
+
+      <!-- 步骤4: 确认导入 -->
+      <div v-if="step === 3" class="step-content">
         <el-result v-if="importResult" :icon="importResult.failed_rows > 0 ? 'warning' : 'success'" :title="importTitle">
           <template #sub-title>
             <p>数据类型:{{ typeLabel }} | 文件:{{ importResult.filename }}</p>
@@ -147,15 +269,17 @@
 import { ref, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Loading } from '@element-plus/icons-vue'
-import { parseUpload, confirmImport } from '@/api/upload'
+import { parseUpload, previewDiff, confirmImport } from '@/api/upload'
 import { COLUMN_TEMPLATES } from './templates'
 
 const step = ref(0)
 const parsing = ref(false)
+const diffing = ref(false)
 const importing = ref(false)
 const currentFile = ref(null)
 const sheetNames = ref([])
 const preview = ref({})
+const diffResult = ref(null)
 const importResult = ref(null)
 
 const form = reactive({ data_type: '', sheet_name: null })
@@ -166,8 +290,13 @@ const mappingRows = computed(() => (preview.value.columns || []).map((c) => ({ s
 const mappingFieldCount = computed(() => mappingRows.value.filter((r) => r.target).length)
 const missingFields = computed(() => targetFields.value.filter((f) => !mappingRows.value.some((r) => r.target === f)))
 
+// new 行预览要展示的字段(取前 6 个映射字段,避免表格过宽)
+const newPreviewFields = computed(() => {
+  const mapped = mappingRows.value.filter((r) => r.target).map((r) => r.target)
+  return mapped.slice(0, 6)
+})
+
 function suggestedMapping() {
-  // 反转 suggested_mapping: 源列名 -> 目标字段
   const map = preview.value.suggested_mapping || {}
   const rev = {}
   for (const [target, source] of Object.entries(map)) {
@@ -184,10 +313,6 @@ function getSample(col) {
 function handleFileChange(file) {
   currentFile.value = file.raw
   sheetNames.value = []
-  // xlsx 文件可先探测 sheet
-  if (file.name.toLowerCase().endsWith('.xlsx') || file.name.toLowerCase().endsWith('.xls')) {
-    // 通过解析预览时返回 sheet_names
-  }
 }
 
 async function handleParse() {
@@ -200,6 +325,7 @@ async function handleParse() {
     const res = await parseUpload(formData)
     preview.value = res.data
     if (res.data.sheet_names) sheetNames.value = res.data.sheet_names
+    diffResult.value = null
     step.value = 1
     ElMessage.success(`解析成功,共 ${res.data.total_rows} 行`)
   } catch (e) {
@@ -209,24 +335,55 @@ async function handleParse() {
   }
 }
 
-function goImport() {
+function buildMapping() {
+  const mapping = {}
+  for (const r of mappingRows.value) {
+    if (r.target) mapping[r.target] = r.source
+  }
+  return mapping
+}
+
+async function goDiff() {
   step.value = 2
+  await runDiff()
+}
+
+async function runDiff() {
+  diffing.value = true
+  try {
+    const res = await previewDiff({
+      data_type: form.data_type,
+      filename: currentFile.value.name,
+      stored_path: preview.value.stored_path,
+      sheet_name: form.sheet_name,
+      encoding: preview.value.detected_encoding,
+      column_mapping: buildMapping(),
+    })
+    diffResult.value = res.data
+    const s = res.data.summary
+    ElMessage.success(`Diff 完成:新增 ${s.new} / 已存在 ${s.existing} / 异常 ${s.abnormal}`)
+  } catch (e) {
+    /* 错误已处理 */
+  } finally {
+    diffing.value = false
+  }
+}
+
+function goImport() {
+  step.value = 3
   doImport()
 }
 
 async function doImport() {
   importing.value = true
   try {
-    const mapping = {}
-    for (const r of mappingRows.value) {
-      if (r.target) mapping[r.target] = r.source
-    }
     const res = await confirmImport({
       data_type: form.data_type,
       filename: currentFile.value.name,
+      stored_path: preview.value.stored_path,
       sheet_name: form.sheet_name,
       encoding: preview.value.detected_encoding,
-      column_mapping: mapping,
+      column_mapping: buildMapping(),
     })
     importResult.value = res.data
     ElMessage.success('导入完成')
@@ -246,6 +403,7 @@ function reset() {
   step.value = 0
   currentFile.value = null
   preview.value = {}
+  diffResult.value = null
   importResult.value = null
   form.data_type = ''
   form.sheet_name = null
@@ -257,16 +415,58 @@ function reset() {
   min-height: 300px;
   padding: 16px 0;
 }
+.diff-loading,
 .import-loading {
   text-align: center;
   padding: 60px 0;
 }
+.diff-loading p,
 .import-loading p {
   margin-top: 16px;
   color: #606266;
 }
+.diff-loading .sub,
 .import-loading .sub {
   font-size: 12px;
   color: #909399;
+}
+
+/* diff 三卡片 */
+.summary-card {
+  text-align: center;
+  padding: 8px 0;
+}
+.summary-num {
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.summary-label {
+  font-size: 13px;
+  color: #909399;
+  margin-top: 4px;
+}
+.summary-existing .summary-num {
+  color: #909399;
+}
+.summary-new .summary-num {
+  color: #67c23a;
+}
+.summary-abnormal .summary-num {
+  color: #f56c6c;
+}
+
+/* diff 展开区 */
+.diff-expand {
+  padding: 8px 16px;
+  background: #fafafa;
+}
+.diff-old {
+  color: #f56c6c;
+  text-decoration: line-through;
+}
+.diff-new {
+  color: #67c23a;
+  font-weight: 600;
 }
 </style>

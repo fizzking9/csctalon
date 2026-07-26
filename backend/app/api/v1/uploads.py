@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -10,11 +11,14 @@ from sqlalchemy.orm import Session
 from app.api.deps import CurrentUser, DBSession
 from app.core.config import settings
 from app.core.database import get_db
+from app.models.data_source import DataSource
 from app.models.upload import UploadRecord
 from app.schemas.common import PageBase, R
-from app.schemas.upload import ImportResponse, UploadRecordOut
-from app.services.data_parser import parse_file, save_upload_file
+from app.schemas.upload import DiffPreviewRequest, ImportResponse, UploadRecordOut
+from app.services.data_parser import load_dataframe, parse_file, save_upload_file
+from app.services.diff_preview import compute_diff
 from app.services.matcher import match_all
+from app.services.person_extractor import extract_person_aliases
 from app.services.upsert import run_upsert
 
 router = APIRouter(prefix="/uploads", tags=["数据中心-上传"])
@@ -35,12 +39,46 @@ async def parse_upload(
     content = await file.read()
     if len(content) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
         raise HTTPException(status_code=413, detail=f"文件超过 {settings.MAX_UPLOAD_SIZE_MB}MB 限制")
-    path = save_upload_file(content, file.filename or "upload")
+    path, stored_path = save_upload_file(content, file.filename or "upload")
     try:
         preview = parse_file(path, data_type, sheet_name=sheet_name)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"文件解析失败: {e}") from e
+    preview["stored_path"] = stored_path
+    preview["filename"] = file.filename
     return R(data=preview)
+
+
+@router.post("/preview-diff", response_model=R, summary="diff 预览(导入前查看 existing/new/abnormal)")
+async def preview_diff(
+    payload: DiffPreviewRequest,
+    db: DBSession,
+    current_user: CurrentUser,
+):
+    """在确认导入前，按主键策略计算 diff：
+    - existing: 主键已存在且字段全一致（将跳过/覆盖）
+    - new: 主键不存在（将新增）
+    - abnormal: 主键已存在但有字段不同（将覆盖，需人工确认）或主键为空
+
+    Body: data_type, filename, stored_path, sheet_name, encoding, column_mapping
+    """
+    if payload.data_type not in DATA_TYPES:
+        raise HTTPException(status_code=400, detail=f"不支持的数据类型,可选: {DATA_TYPES}")
+
+    base = Path(settings.UPLOAD_DIR)
+    path = base / payload.stored_path if payload.stored_path else base / Path(payload.filename).name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="上传文件不存在,请重新上传")
+
+    try:
+        df = load_dataframe(path, sheet_name=payload.sheet_name, encoding=payload.encoding)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"文件解析失败: {e}") from e
+
+    # 查数据源元数据（决定 pk_strategy）
+    ds = db.scalar(select(DataSource).where(DataSource.code == payload.data_type))
+    diff = compute_diff(db, df, payload.data_type, payload.column_mapping, ds)
+    return R(data=diff)
 
 
 @router.post("/import", response_model=R[ImportResponse], summary="确认导入(upsert+关联匹配)")
@@ -56,20 +94,24 @@ async def confirm_import(
     """
     data_type = payload.get("data_type")
     filename = payload.get("filename")
+    stored_path = payload.get("stored_path")
     if data_type not in DATA_TYPES or not filename:
         raise HTTPException(status_code=400, detail="data_type 或 filename 缺失")
     mapping = payload.get("column_mapping") or {}
     sheet_name = payload.get("sheet_name")
     encoding = payload.get("encoding")
 
-    path = Path(settings.UPLOAD_DIR) / Path(filename).name
+    # 优先用 stored_path 找文件（归档后路径），兼容旧 filename
+    base = Path(settings.UPLOAD_DIR)
+    path = base / stored_path if stored_path else base / Path(filename).name
     if not path.exists():
         raise HTTPException(status_code=404, detail="上传文件不存在,请重新上传")
 
     # 创建上传记录
     record = UploadRecord(
         data_type=data_type,
-        filename=str(path.name),
+        filename=filename,
+        stored_path=stored_path,
         file_size=path.stat().st_size,
         sheet_name=sheet_name,
         status="parsing",
@@ -81,13 +123,13 @@ async def confirm_import(
 
     try:
         # 重新加载完整 DataFrame
-        from app.services.data_parser import load_dataframe
-
         df = load_dataframe(path, sheet_name=sheet_name, encoding=encoding)
         # 执行 upsert
         result = run_upsert(df, data_type, mapping, db)
         # 触发关联匹配(增量)
         match_stats = match_all(db, only_unmatched=True)
+        # 触发人员别名提取(增量,幂等)
+        person_stats = extract_person_aliases(db)
         record.total_rows = result.total
         record.inserted_rows = result.inserted
         record.updated_rows = result.updated

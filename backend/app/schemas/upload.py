@@ -33,6 +33,8 @@ class ParsePreviewResponse(BaseModel):
     detected_encoding: str | None = None
     suggested_mapping: dict[str, str]
     sheet_names: list[str] | None = None
+    stored_path: str | None = None
+    filename: str | None = None
 
 
 class ImportRequest(BaseModel):
@@ -40,6 +42,18 @@ class ImportRequest(BaseModel):
 
     data_type: str
     filename: str
+    stored_path: str | None = None
+    sheet_name: str | None = None
+    encoding: str | None = None
+    column_mapping: dict[str, str]
+
+
+class DiffPreviewRequest(BaseModel):
+    """diff 预览请求 - 在确认导入前查看 existing/new/abnormal 分类"""
+
+    data_type: str
+    filename: str
+    stored_path: str | None = None
     sheet_name: str | None = None
     encoding: str | None = None
     column_mapping: dict[str, str]
@@ -69,6 +83,7 @@ class UploadRecordOut(BaseModel):
     id: int
     data_type: str
     filename: str
+    stored_path: str | None = None
     status: str
     total_rows: int
     inserted_rows: int

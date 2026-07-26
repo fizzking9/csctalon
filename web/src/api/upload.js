@@ -8,6 +8,11 @@ export function parseUpload(formData) {
   })
 }
 
+// diff 预览(导入前查看 existing/new/abnormal 分类)
+export function previewDiff(payload) {
+  return request.post('/uploads/preview-diff', payload, { timeout: 300000 })
+}
+
 // 确认导入
 export function confirmImport(payload) {
   return request.post('/uploads/import', payload, { timeout: 300000 })
