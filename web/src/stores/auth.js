@@ -9,6 +9,10 @@ export const useAuthStore = defineStore('auth', () => {
   const isLoggedIn = computed(() => !!token.value)
   const role = computed(() => user.value?.role || '')
   const isAdmin = computed(() => role.value === 'admin')
+  const isSupervisor = computed(() => role.value === 'supervisor')
+  const isAgent = computed(() => role.value === 'agent')
+  // 管理层:admin + supervisor(可编辑/发布策略)
+  const isManager = computed(() => role.value === 'admin' || role.value === 'supervisor')
   const displayName = computed(() => user.value?.display_name || '用户')
 
   async function login(username, password) {
@@ -33,5 +37,5 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.setItem('user', JSON.stringify(user.value))
   }
 
-  return { token, user, isLoggedIn, role, isAdmin, displayName, login, logout, fetchMe }
+  return { token, user, isLoggedIn, role, isAdmin, isSupervisor, isAgent, isManager, displayName, login, logout, fetchMe }
 })

@@ -9,6 +9,7 @@ from app.models.merchant import Merchant  # noqa: F401
 from app.models.merchant_refund import MerchantRefund  # noqa: F401
 from app.models.person import Person, PersonAlias  # noqa: F401
 from app.models.refund import Refund  # noqa: F401
+from app.models.strategy import StrategyDoc, StrategyReadReceipt  # noqa: F401
 from app.models.task import SpecialTask, TaskDevice, TaskFollowup  # noqa: F401
 from app.models.ticket import ServiceTicket  # noqa: F401
 from app.models.todo import TodoFollowup, TodoItem  # noqa: F401
@@ -36,6 +37,8 @@ __all__ = [
     "SpecialTask",
     "TaskDevice",
     "TaskFollowup",
+    "StrategyDoc",
+    "StrategyReadReceipt",
     "DataSource",
     "DataSourceField",
     "SemanticRole",

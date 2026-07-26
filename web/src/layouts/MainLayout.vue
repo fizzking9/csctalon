@@ -52,6 +52,20 @@
           <span>专项任务</span>
         </el-menu-item>
 
+        <!-- 策略发布:管理层看子菜单(管理+查阅),客服只看发布页 -->
+        <el-sub-menu v-if="authStore.isManager" index="strategy">
+          <template #title>
+            <el-icon><Document /></el-icon>
+            <span>策略发布</span>
+          </template>
+          <el-menu-item index="/strategy/manage">策略管理</el-menu-item>
+          <el-menu-item index="/strategy/publish">文档查阅</el-menu-item>
+        </el-sub-menu>
+        <el-menu-item v-else index="/strategy/publish">
+          <el-icon><Document /></el-icon>
+          <span>策略发布</span>
+        </el-menu-item>
+
         <el-sub-menu v-if="authStore.isAdmin" index="system">
           <template #title>
             <el-icon><Setting /></el-icon>

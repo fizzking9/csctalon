@@ -107,6 +107,19 @@ const routes = [
         component: () => import('@/views/tasks/Detail.vue'),
         meta: { title: '专项详情', hidden: true },
       },
+      // 策略发布
+      {
+        path: 'strategy/publish',
+        name: 'StrategyPublish',
+        component: () => import('@/views/strategy/Publish.vue'),
+        meta: { title: '策略发布', icon: 'Document' },
+      },
+      {
+        path: 'strategy/manage',
+        name: 'StrategyManage',
+        component: () => import('@/views/strategy/Manage.vue'),
+        meta: { title: '策略管理', icon: 'EditPen', manager: true },
+      },
       // 系统
       {
         path: 'system/users',
@@ -142,7 +155,7 @@ const router = createRouter({
   routes,
 })
 
-// 路由守卫:登录校验
+// 路由守卫:登录校验 + 角色分流
 router.beforeEach((to) => {
   const authStore = useAuthStore()
   document.title = to.meta.title ? `${to.meta.title} - 客服中心管理系统` : '客服中心管理系统'
@@ -150,6 +163,10 @@ router.beforeEach((to) => {
     return { name: 'Login', query: { redirect: to.fullPath } }
   }
   if (to.meta.admin && !authStore.isAdmin) {
+    return { name: 'Dashboard' }
+  }
+  // manager 仅 admin/supervisor 可访问(如策略管理)
+  if (to.meta.manager && !authStore.isManager) {
     return { name: 'Dashboard' }
   }
 })
