@@ -1,4 +1,16 @@
-"""分析看板路由 - 4 大分析"""
+"""分析看板路由 - 4 大分析
+
+[DEPRECATED] 本模块的硬编码端点已被自助分析引擎取代。
+- 新端点: POST /api/v1/analysis-views/execute (支持 view_id 或 inline_config)
+- 预设视图: 已通过 preset_views_seed.py 注册 13 个预设视图,对应本模块的 4 大看板
+- 引擎服务: app.services.analysis_engine.execute_view
+
+本模块保留作为:
+1. 旧前端页面(Operation.vue/Cash.vue 等)的兼容端点,响应格式不变
+2. 数据对照基准(已验证与引擎结果完全一致)
+
+后续旧前端页面迁移到 ViewRender.vue 后,本模块可删除。
+"""
 
 from datetime import datetime
 from typing import Any
@@ -9,7 +21,7 @@ from app.api.deps import CurrentUser, DBSession
 from app.schemas.common import R
 from app.services import analytics as A
 
-router = APIRouter(prefix="/analytics", tags=["分析看板"])
+router = APIRouter(prefix="/analytics", tags=["分析看板(已废弃-见analysis-views)"])
 
 
 def _parse_dt(s: str | None) -> datetime | None:

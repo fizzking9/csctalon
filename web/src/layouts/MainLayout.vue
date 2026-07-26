@@ -34,6 +34,8 @@
             <el-icon><DataAnalysis /></el-icon>
             <span>分析看板</span>
           </template>
+          <el-menu-item index="/analytics/views">分析视图</el-menu-item>
+          <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
           <el-menu-item index="/analytics/operation">运营分析</el-menu-item>
           <el-menu-item index="/analytics/cash">现金流分析</el-menu-item>
           <el-menu-item index="/analytics/category">退款分类</el-menu-item>
@@ -53,6 +55,7 @@
           <el-menu-item index="/system/users">用户管理</el-menu-item>
           <el-menu-item index="/system/data-sources">数据源管理</el-menu-item>
           <el-menu-item index="/system/persons">人员管理</el-menu-item>
+          <el-menu-item index="/system/classification-rules">分类规则</el-menu-item>
         </el-sub-menu>
       </el-menu>
     </el-aside>

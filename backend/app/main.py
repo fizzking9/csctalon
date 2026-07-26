@@ -24,6 +24,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期:启动时执行迁移并初始化默认管理员"""
     _run_migrations_on_startup()
     _init_admin()
+    _init_data_sources_and_presets()
     logger.info("应用启动完成")
     yield
     logger.info("应用关闭")
@@ -60,6 +61,26 @@ def _init_admin() -> None:
             db.add(admin)
             db.commit()
             logger.info(f"已创建默认管理员: {settings.INIT_ADMIN_USERNAME} / {settings.INIT_ADMIN_PASSWORD}")
+    finally:
+        db.close()
+
+
+def _init_data_sources_and_presets() -> None:
+    """启动时注册数据源元数据 + 预设分析视图(幂等)"""
+    from app.services.data_source_registry import ensure_data_sources_registered
+    from app.services.preset_views_seed import ensure_preset_views_registered
+
+    db = SessionLocal()
+    try:
+        ds_stats = ensure_data_sources_registered(db)
+        logger.info(f"数据源注册完成: sources={ds_stats['sources']}, fields={ds_stats['fields']}")
+        pv_stats = ensure_preset_views_registered(db)
+        logger.info(
+            f"预设视图注册完成: presets={pv_stats['presets']}, "
+            f"created={pv_stats['created']}, updated={pv_stats['updated']}"
+        )
+    except Exception as e:
+        logger.error(f"数据源/预设视图注册失败: {e}", exc_info=True)
     finally:
         db.close()
 

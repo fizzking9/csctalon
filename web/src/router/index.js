@@ -40,6 +40,24 @@ const routes = [
       },
       // 分析看板
       {
+        path: 'analytics/views',
+        name: 'AnalyticsViews',
+        component: () => import('@/views/analytics/ViewList.vue'),
+        meta: { title: '分析视图', icon: 'DataAnalysis' },
+      },
+      {
+        path: 'analytics/builder',
+        name: 'AnalyticsBuilder',
+        component: () => import('@/views/analytics/ViewBuilder.vue'),
+        meta: { title: '视图构建器', icon: 'EditPen' },
+      },
+      {
+        path: 'analytics/views/:id',
+        name: 'AnalyticsViewRender',
+        component: () => import('@/views/analytics/ViewRender.vue'),
+        meta: { title: '视图详情', hidden: true },
+      },
+      {
         path: 'analytics/operation',
         name: 'AnalyticsOperation',
         component: () => import('@/views/analytics/Operation.vue'),
@@ -94,6 +112,12 @@ const routes = [
         name: 'SystemPersons',
         component: () => import('@/views/system/Persons.vue'),
         meta: { title: '人员管理', icon: 'UserFilled', admin: true },
+      },
+      {
+        path: 'system/classification-rules',
+        name: 'SystemClassificationRules',
+        component: () => import('@/views/system/ClassificationRules.vue'),
+        meta: { title: '分类规则', icon: 'Filter', admin: true },
       },
     ],
   },

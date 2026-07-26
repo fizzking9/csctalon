@@ -1,5 +1,6 @@
 """模型汇总 - 导入所有模型,供 Alembic 与应用初始化使用"""
 
+from app.models.analysis_view import AnalysisView, ClassificationRule  # noqa: F401
 from app.models.base import IDMixin, TimestampMixin  # noqa: F401
 from app.models.data_source import DataSource, DataSourceField, SemanticRole, SourceType  # noqa: F401
 from app.models.device import Device, DeviceTag, device_tag_rel  # noqa: F401
@@ -15,6 +16,8 @@ from app.models.user import RoleEnum, User  # noqa: F401
 from app.models.wallet import WalletWithdrawal  # noqa: F401
 
 __all__ = [
+    "AnalysisView",
+    "ClassificationRule",
     "Device",
     "DeviceTag",
     "Merchant",

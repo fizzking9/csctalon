@@ -34,4 +34,5 @@ RUN mkdir -p /app/uploads
 EXPOSE 8000
 
 # gunicorn + uvicorn worker
-CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "120"]
+# --preload: 在主进程加载应用,lifespan(迁移+注册)只执行一次,避免多 worker 并发冲突
+CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "120", "--preload"]
