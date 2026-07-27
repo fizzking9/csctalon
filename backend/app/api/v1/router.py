@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import analysis_views, analytics, auth, data_sources, devices, fetch, match, operation_logs, persons, strategy, tasks, todos, uploads, users
+from app.api.v1 import analysis_views, analytics, auth, data_sources, devices, fetch, match, operation_logs, persons, strategy, system, tasks, todos, uploads, users
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
@@ -20,3 +20,4 @@ api_router.include_router(persons.router)
 api_router.include_router(analysis_views.router)
 api_router.include_router(analysis_views.rules_router)
 api_router.include_router(operation_logs.router)
+api_router.include_router(system.router)

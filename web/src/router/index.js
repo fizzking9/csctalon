@@ -164,6 +164,12 @@ const routes = [
         component: () => import('@/views/system/OperationLogs.vue'),
         meta: { title: '操作日志', icon: 'Tickets', admin: true },
       },
+      {
+        path: 'system/sync-settings',
+        name: 'SystemSyncSettings',
+        component: () => import('@/views/system/SyncSettings.vue'),
+        meta: { title: '同步设置', icon: 'Setting', admin: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },

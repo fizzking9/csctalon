@@ -25,7 +25,7 @@
           <el-tag v-for="h in scheduleStatus.schedule_hours" :key="h" size="small" class="mr-4">{{ h }}:00</el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="下次执行">{{ formatTime(scheduleStatus.next_run) }}</el-descriptions-item>
-        <el-descriptions-item label="BMS凭证">
+        <el-descriptions-item label="默认源凭证">
           <el-tag v-if="scheduleStatus.has_credentials" type="success">已配置</el-tag>
           <el-tag v-else type="danger">未配置</el-tag>
         </el-descriptions-item>
@@ -37,35 +37,38 @@
         show-icon
         class="mt-16"
       >
-        正在同步: {{ scheduleStatus.current_progress.data_type }} - {{ scheduleStatus.current_progress.phase }}
+        正在同步: {{ getDsName(scheduleStatus.current_progress.data_type) }} - {{ scheduleStatus.current_progress.phase }}
       </el-alert>
       <el-alert
-        v-if="!scheduleStatus.has_credentials && scheduleStatus.enabled"
+        v-if="!scheduleStatus.has_credentials"
         type="warning"
         :closable="false"
         show-icon
         class="mt-16"
       >
-        定时同步已启动,但未配置 BMS 凭证。请在后端 .env 中设置 BMS_USERNAME 和 BMS_PASSWORD。
+        默认同步源(退费单/服务请求/提现操作)未全部配置账号密码,定时同步无法启动。
+        请前往 <router-link to="/system/sync-settings" class="link">系统管理 - 同步设置</router-link> 配置各源凭证。
       </el-alert>
     </el-card>
 
     <!-- 手动同步 -->
     <el-card class="mb-16">
       <template #header>
-        <span>手动同步</span>
+        <div class="flex justify-between items-center">
+          <span>手动同步</span>
+          <el-button text type="primary" @click="$router.push('/system/sync-settings')">
+            <el-icon><Setting /></el-icon>
+            同步设置
+          </el-button>
+        </div>
       </template>
       <el-form :model="form" label-width="100px" style="max-width: 600px" :rules="rules" ref="formRef">
-        <el-form-item label="BMS 账号" prop="username">
-          <el-input v-model="form.username" placeholder="请输入 BMS 平台账号" />
-        </el-form-item>
-        <el-form-item label="BMS 密码" prop="password">
-          <el-input v-model="form.password" type="password" placeholder="请输入 BMS 平台密码" show-password />
-        </el-form-item>
         <el-form-item label="同步数据源" prop="dataTypes">
           <el-checkbox-group v-model="form.dataTypes">
             <el-checkbox v-for="ds in dataSources" :key="ds.data_type" :label="ds.data_type">
               {{ ds.name }}
+              <el-tag v-if="!ds.has_credentials" type="danger" size="small" class="ml-4">未配凭证</el-tag>
+              <el-tag v-else type="success" size="small" class="ml-4">已配凭证</el-tag>
             </el-checkbox>
           </el-checkbox-group>
         </el-form-item>
@@ -93,7 +96,7 @@
           <el-alert type="info" :closable="false" show-icon>
             <p class="alert-text">
               选中的数据源将依次同步,每个间隔约 65 秒(BMS 1分钟限制)。
-              默认同步当天 00:00 到当前时间的数据。
+              账号密码从"同步设置"读取,按源独立配置。未配凭证的源会同步失败。
             </p>
           </el-alert>
         </el-form-item>
@@ -152,10 +155,17 @@
       </template>
       <el-table :data="dataSources" border size="small">
         <el-table-column prop="name" label="数据源" width="140" />
-        <el-table-column prop="data_type" label="代码" width="80" />
-        <el-table-column label="来源" width="100">
-          <template #default>
-            <el-tag type="info" size="small">BMS 同步</el-tag>
+        <el-table-column prop="data_type" label="代码" width="100" />
+        <el-table-column label="凭证" width="90">
+          <template #default="{ row }">
+            <el-tag v-if="row.has_credentials" type="success" size="small">已配置</el-tag>
+            <el-tag v-else type="danger" size="small">未配置</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="定时同步" width="90">
+          <template #default="{ row }">
+            <el-tag v-if="row.default_sync" type="primary" size="small">纳入</el-tag>
+            <el-tag v-else type="info" size="small">不纳入</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="最近同步" width="160">
@@ -191,6 +201,7 @@
             <el-option label="退费单" value="refund" />
             <el-option label="服务请求" value="ticket" />
             <el-option label="提现操作" value="wallet" />
+            <el-option label="设备套餐" value="device_combo" />
           </el-select>
         </div>
       </template>
@@ -237,7 +248,7 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, Setting } from '@element-plus/icons-vue'
 import {
   listSyncDataSources,
   syncAll,
@@ -257,18 +268,15 @@ const syncResults = ref([])
 const logFilter = ref('')
 const formRef = ref(null)
 const currentStep = ref(0)
+const dataTypesInited = ref(false)  // dataTypes 是否已按 default_sync 初始化
 
 const form = reactive({
-  username: '',
-  password: '',
-  dataTypes: ['refund', 'ticket', 'wallet'],  // 默认全选
+  dataTypes: [],  // 从 API 的 default_sync 源初始化
   timeRange: 'today',  // 默认今天
   customRange: null,  // 自定义时间范围
 })
 
 const rules = {
-  username: [{ required: true, message: '请输入 BMS 账号', trigger: 'blur' }],
-  password: [{ required: true, message: '请输入 BMS 密码', trigger: 'blur' }],
   dataTypes: [{ required: true, type: 'array', min: 1, message: '请至少选择一个数据源', trigger: 'change' }],
 }
 
@@ -305,6 +313,11 @@ async function loadDataSources() {
   try {
     const res = await listSyncDataSources()
     dataSources.value = res.data
+    // 首次加载:按 default_sync 初始化勾选(device_combo 默认不勾选)
+    if (!dataTypesInited.value) {
+      form.dataTypes = res.data.filter(d => d.default_sync).map(d => d.data_type)
+      dataTypesInited.value = true
+    }
   } catch (e) {
     ElMessage.error(`加载数据源失败: ${e.message}`)
   }
@@ -380,8 +393,6 @@ async function handleSyncAll() {
 
     try {
       const payload = {
-        username: form.username,
-        password: form.password,
         data_types: form.dataTypes,
         time_range: form.timeRange,
       }
@@ -409,7 +420,6 @@ async function handleSyncAll() {
     } catch (e) {
       ElMessage.error(`同步失败: ${e.message}`)
     } finally {
-      form.password = ''
       syncing.value = false
     }
   })
@@ -468,5 +478,12 @@ function formatTime(iso) {
 }
 .mr-4 {
   margin-right: 4px;
+}
+.ml-4 {
+  margin-left: 4px;
+}
+.link {
+  color: var(--el-color-primary);
+  text-decoration: underline;
 }
 </style>

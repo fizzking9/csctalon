@@ -10,7 +10,7 @@ from sqlalchemy import desc, select
 from app.api.deps import CurrentUser, DBSession
 from app.models.bms_sync_log import BmsSyncLog
 from app.schemas.common import R
-from app.services.bms_fetcher import BMS_DATA_SOURCES, BmsFetcher
+from app.services.bms_fetcher import BmsFetcher
 from app.services.bms_scheduler import bms_scheduler
 from app.services.bms_sync import get_sync_status, sync_all
 
@@ -52,9 +52,7 @@ def _compute_time_range(
 class SyncAllRequest(BaseModel):
     """一键同步请求"""
 
-    username: str = Field(..., description="BMS 平台账号")
-    password: str = Field(..., description="BMS 平台密码")
-    data_types: list[str] | None = Field(None, description="要同步的数据源,默认全部。可选: refund/ticket/wallet")
+    data_types: list[str] | None = Field(None, description="要同步的数据源,默认勾选的源。可选: refund/ticket/wallet/device_combo")
     time_range: str = Field("today", description="时间范围预设: today/yesterday/week/custom")
     custom_start: datetime | None = Field(None, description="自定义开始时间(time_range=custom 时生效)")
     custom_end: datetime | None = Field(None, description="自定义结束时间(time_range=custom 时生效)")
@@ -103,7 +101,10 @@ class SyncLogOut(BaseModel):
 class DataSourceStatus(BaseModel):
     data_type: str
     name: str
-    url: str
+    url: str | None = None
+    has_credentials: bool = False
+    default_sync: bool = True
+    enabled: bool = True
     last_sync: str | None = None
     last_status: str | None = None
     last_query_end: str | None = None  # 上次查询截止时间(数据已同步至此时间点)
@@ -123,22 +124,23 @@ class ScheduleStatus(BaseModel):
 
 @router.get("/data-sources", response_model=R[list[DataSourceStatus]], summary="获取可同步的数据源列表")
 def list_sync_data_sources(db: DBSession, _: CurrentUser):
-    """获取所有 BMS 可同步数据源及其最近同步状态"""
+    """获取所有 BMS 可同步数据源及其最近同步状态(凭证/开关来自 sync_source_configs)"""
     statuses = get_sync_status(db)
-    result = []
-    for s in statuses:
-        config = BMS_DATA_SOURCES[s["data_type"]]
-        result.append(
-            DataSourceStatus(
-                data_type=s["data_type"],
-                name=s["name"],
-                url=config["base_url"] + config["page_path"],
-                last_sync=s.get("last_sync"),
-                last_status=s.get("last_status"),
-                last_query_end=s.get("last_end_time"),
-                last_rows=s.get("last_rows"),
-            )
+    result = [
+        DataSourceStatus(
+            data_type=s["data_type"],
+            name=s["name"],
+            url=s.get("url"),
+            has_credentials=s.get("has_credentials", False),
+            default_sync=s.get("default_sync", True),
+            enabled=s.get("enabled", True),
+            last_sync=s.get("last_sync"),
+            last_status=s.get("last_status"),
+            last_query_end=s.get("last_end_time"),
+            last_rows=s.get("last_rows"),
         )
+        for s in statuses
+    ]
     return R(data=result)
 
 
@@ -146,25 +148,24 @@ def list_sync_data_sources(db: DBSession, _: CurrentUser):
 async def sync_all_data(payload: SyncAllRequest, current_user: CurrentUser):
     """同步 BMS 数据
 
-    - 可选择同步哪些数据源(退费单/服务请求/提现操作),默认全部
+    - 可选择同步哪些数据源(退费单/服务请求/提现操作/设备套餐),默认勾选的源
     - 可选择时间范围: 今天(默认)/昨天/过去一周/自定义
     - 每个数据源间隔 65 秒(BMS 1分钟限制)
-    - 账号密码仅内存传递,不落库
+    - 凭证从 sync_source_configs 读取(按源独立),无需调用方传入
     """
     # 校验 data_types
-    valid_types = {"refund", "ticket", "wallet"}
-    data_types = payload.data_types if payload.data_types else list(valid_types)
-    for dt in data_types:
-        if dt not in valid_types:
-            raise HTTPException(status_code=400, detail=f"不支持的数据类型: {dt}, 可选: {valid_types}")
+    valid_types = {"refund", "ticket", "wallet", "device_combo"}
+    data_types = payload.data_types if payload.data_types else None  # None → sync_all 用 DEFAULT_SYNC_TYPES
+    if data_types:
+        for dt in data_types:
+            if dt not in valid_types:
+                raise HTTPException(status_code=400, detail=f"不支持的数据类型: {dt}, 可选: {valid_types}")
 
     # 计算时间范围(所有选中的数据源共用同一时间范围)
     start, end = _compute_time_range(payload.time_range, payload.custom_start, payload.custom_end)
-    time_ranges = {dt: (start, end) for dt in data_types}
+    time_ranges = {dt: (start, end) for dt in (data_types or valid_types)}
 
     results = await sync_all(
-        username=payload.username,
-        password=payload.password,
         trigger_type="manual",
         triggered_by=current_user.username,
         data_types=data_types,
@@ -230,25 +231,25 @@ def get_schedule_status(_: CurrentUser):
 
 
 @router.post("/schedule/start", response_model=R[ScheduleStatus], summary="启动定时同步")
-def start_schedule(current_user: CurrentUser):
+async def start_schedule(current_user: CurrentUser):
     """启动 BMS 定时同步(8/12/16/20/24 点各执行一次)
 
-    前提: 需要在 .env 中配置 BMS_USERNAME 和 BMS_PASSWORD
+    前提: 默认同步的源(refund/ticket/wallet)需在 系统管理-同步设置 中配置账号密码
     """
     if bms_scheduler.is_running:
         return R(data=ScheduleStatus(**bms_scheduler.get_status()))
 
-    # 检查凭证
-    from app.core.config import settings
-
-    if not settings.BMS_USERNAME or not settings.BMS_PASSWORD:
+    # 检查凭证(从 sync_source_configs 判断默认源是否都配了凭证)
+    status = bms_scheduler.get_status()
+    if not status["has_credentials"]:
         raise HTTPException(
             status_code=400,
-            detail="未配置 BMS 凭证,请在 .env 中设置 BMS_USERNAME 和 BMS_PASSWORD",
+            detail="默认同步的源未全部配置凭证,请在 系统管理-同步设置 中配置账号密码",
         )
 
+    # 必须在事件循环中调用,因为 bms_scheduler.start() 内部使用 asyncio.create_task
     bms_scheduler.start()
-    return R(data=ScheduleStatus(**bms_scheduler.get_status()))
+    return R(data=ScheduleStatus(**status))
 
 
 @router.post("/schedule/stop", response_model=R[ScheduleStatus], summary="停止定时同步")

@@ -44,6 +44,25 @@ COLUMN_TEMPLATES: dict[str, dict[str, list[str]]] = {
         "op_time": ["操作时间"],
         "operator": ["操作人员"],
     },
+    "device_combo": {
+        "recharge_order_no": ["充值订单号"],
+        "device_sn": ["设备SN"],
+        "package_name": ["套餐名称"],
+        "package_type": ["套餐类型"],
+        "traffic_type": ["流量类型"],
+        "merchant_name": ["商户名称"],
+        "actual_amount": ["实际支付金额"],
+        "start_date": ["开始日期"],
+        "end_date": ["结束日期"],
+        "updated_at_raw": ["更新时间"],
+        "created_at_raw": ["创建时间"],
+        "valid_days": ["套餐有效天数"],
+        "creator": ["创建人"],
+        "available_traffic": ["可用流量"],
+        "used_traffic": ["已用流量"],
+        "remaining_traffic": ["剩余流量"],
+        "status": ["当前状态"],
+    },
     "ticket": {
         "ticket_no": ["工单号"],
         "device_sn": ["SN"],
@@ -269,6 +288,44 @@ def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tup
                 if buf:
                     fields.append(''.join(buf))
                 return fields
+
+            def _fix_unclosed_quote_in_long_field(line: str) -> str:
+                """修复备注字段引号未闭合导致后续字段被吞的问题
+
+                场景: BMS 导出 CSV 中,备注字段(投诉文本)以 " 开头但未闭合,
+                后续的日期时间等字段被吞进备注,直到提交参数 JSON 里的某个 "
+                被误认为闭合引号(引号总数为偶数,_fix_unclosed_quote 检测不到)。
+
+                策略: 模拟 _split_fields 的引号状态机,在引号内找第一个
+                "逗号+日期时间(yyyy-mm-dd)"模式,在逗号前补闭合引号。
+                备注字段后面紧跟的是登记时间(日期时间格式),补引号后字段恢复对齐。
+                """
+                in_quote = False
+                i = 0
+                n = len(line)
+                while i < n:
+                    ch = line[i]
+                    if in_quote:
+                        if ch == '"':
+                            # 转义引号 ""
+                            if i + 1 < n and line[i + 1] == '"':
+                                i += 2
+                                continue
+                            in_quote = False
+                            i += 1
+                        else:
+                            # 在引号内,检查是否是 "逗号+日期时间" 模式
+                            if ch == ',' and i + 11 <= n:
+                                rest = line[i + 1:i + 11]
+                                if re.match(r'\d{4}-\d{2}-\d{2}', rest):
+                                    # 找到!在逗号前补闭合引号
+                                    return line[:i] + '"' + line[i:]
+                            i += 1
+                    else:
+                        if ch == '"':
+                            in_quote = True
+                        i += 1
+                return line
             
             # 逐行解析数据
             data_rows = []
@@ -281,10 +338,21 @@ def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tup
                 
                 # 场景1: 先修复未闭合的引号问题
                 line = _fix_unclosed_quote(line)
-                
+
                 # 按逗号分割字段(考虑引号)
                 fields = _split_fields(line)
-                
+
+                # 场景1.5: 字段数不足时,尝试修复"备注字段引号未闭合"
+                # 必须在"和下一行合并"之前,否则会把下一行错误吞进来(导致本行错位+下一行丢失)
+                # 触发条件:备注以 " 开头但未闭合,后续日期时间字段被吞,引号总数为偶数
+                if len(fields) < header_len:
+                    fixed_line = _fix_unclosed_quote_in_long_field(line)
+                    if fixed_line != line:
+                        fixed_fields = _split_fields(fixed_line)
+                        if len(fixed_fields) > len(fields):
+                            line = fixed_line
+                            fields = fixed_fields
+
                 # 场景2: 行不完整(字段数少于表头),需要和下一行合并
                 if len(fields) < header_len:
                     # 检查下一行是否有数据

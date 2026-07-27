@@ -74,6 +74,7 @@ def _init_data_sources_and_presets() -> None:
     """启动时注册数据源元数据 + 预设分析视图(幂等)"""
     from app.services.data_source_registry import ensure_data_sources_registered
     from app.services.preset_views_seed import ensure_preset_views_registered
+    from app.services.sync_source_config_service import ensure_sync_sources_registered
 
     db = SessionLocal()
     try:
@@ -84,6 +85,8 @@ def _init_data_sources_and_presets() -> None:
             f"预设视图注册完成: presets={pv_stats['presets']}, "
             f"created={pv_stats['created']}, updated={pv_stats['updated']}"
         )
+        ss_stats = ensure_sync_sources_registered(db)
+        logger.info(f"同步源配置注册完成: created={ss_stats['created']}, total={ss_stats['total']}")
     except Exception as e:
         logger.error(f"数据源/预设视图注册失败: {e}", exc_info=True)
     finally:

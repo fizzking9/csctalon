@@ -80,6 +80,7 @@
           </template>
           <el-menu-item index="/system/users">用户管理</el-menu-item>
           <el-menu-item index="/system/data-sources">数据源管理</el-menu-item>
+          <el-menu-item index="/system/sync-settings">同步设置</el-menu-item>
           <el-menu-item index="/system/persons">人员管理</el-menu-item>
           <el-menu-item index="/system/classification-rules">分类规则</el-menu-item>
           <el-menu-item index="/system/operation-logs">操作日志</el-menu-item>

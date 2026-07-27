@@ -7,6 +7,7 @@ from app.models.card_complaint import CardComplaint  # noqa: F401
 from app.models.cs_record import CsRecord  # noqa: F401
 from app.models.data_source import DataSource, DataSourceField, SemanticRole, SourceType  # noqa: F401
 from app.models.device import Device, DeviceTag, device_tag_rel  # noqa: F401
+from app.models.device_combo import DeviceCombo  # noqa: F401
 from app.models.external_complaint import ExternalComplaint  # noqa: F401
 from app.models.merchant import Merchant  # noqa: F401
 from app.models.merchant_refund import MerchantRefund  # noqa: F401
@@ -14,6 +15,7 @@ from app.models.operation_log import OperationLog  # noqa: F401
 from app.models.person import Person, PersonAlias  # noqa: F401
 from app.models.refund import Refund  # noqa: F401
 from app.models.strategy import StrategyDoc, StrategyReadReceipt  # noqa: F401
+from app.models.sync_source_config import SyncSourceConfig  # noqa: F401
 from app.models.task import SpecialTask, TaskDevice, TaskFollowup  # noqa: F401
 from app.models.ticket import ServiceTicket  # noqa: F401
 from app.models.todo import TodoFollowup, TodoItem  # noqa: F401
@@ -28,6 +30,7 @@ __all__ = [
     "CsRecord",
     "BmsSyncLog",
     "Device",
+    "DeviceCombo",
     "DeviceTag",
     "ExternalComplaint",
     "Merchant",
@@ -35,6 +38,7 @@ __all__ = [
     "OperationLog",
     "Refund",
     "ServiceTicket",
+    "SyncSourceConfig",
     "WalletWithdrawal",
     "UploadRecord",
     "DataMatchRelation",

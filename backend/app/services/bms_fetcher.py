@@ -1,14 +1,16 @@
 """BMS 平台数据抓取服务
 
-支持 3 个数据源的抓取:
+支持 4 个数据源的抓取:
   - refund (退费单): https://wifi.cloud-cat.cn/bms/index.html#/pay/refund-manage
   - ticket (服务请求): https://support.cloud-cat.cn/bms/index.html#/service-request/service-request-manage
   - wallet (提现操作): https://support.cloud-cat.cn/bms/index.html#/settle/customerWalletOperationRecord
+  - device_combo (设备套餐): https://support.cloud-cat.cn/bms/index.html#/device/device-combo
 
 注意:
-  - 账号密码仅在内存中传递,不落库、不写日志
-  - 两个子域名(wifi.cloud-cat.cn / support.cloud-cat.cn)需要分别登录
+  - 账号密码从 sync_source_configs 表读取(加密存储),按源独立配置
+  - 两个子域名(wifi.cloud-cat.cn / support.cloud-cat.cn)需要分别登录,可能用不同账号
   - BMS 系统限制:1分钟内不能连续做查询导出下载动作
+  - BMS_DATA_SOURCES 现仅作为默认种子(首次启动写入 DB),运行时配置以 DB 为准
 """
 
 import asyncio
@@ -21,18 +23,20 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# BMS 数据源配置
+# BMS 数据源默认配置(种子,首次启动写入 sync_source_configs;default_sync 控制是否纳入定时/默认勾选)
 BMS_DATA_SOURCES: dict[str, dict] = {
     "refund": {
         "name": "退费单管理",
         "base_url": "https://wifi.cloud-cat.cn/bms",
         "page_path": "/index.html#/pay/refund-manage",
+        "default_sync": True,
         # 退费单默认按创建时间筛选,无需选时间字段
     },
     "ticket": {
         "name": "服务请求管理",
         "base_url": "https://support.cloud-cat.cn/bms",
         "page_path": "/index.html#/service-request/service-request-manage",
+        "default_sync": True,
         # 服务请求管理有多个时间筛选框,只填"起始完成时间"和"结束完成时间"
         "time_labels": ["起始完成时间", "结束完成时间"],
     },
@@ -40,6 +44,13 @@ BMS_DATA_SOURCES: dict[str, dict] = {
         "name": "提现操作记录",
         "base_url": "https://support.cloud-cat.cn/bms",
         "page_path": "/index.html#/settle/customerWalletOperationRecord",
+        "default_sync": True,
+    },
+    "device_combo": {
+        "name": "设备套餐",
+        "base_url": "https://support.cloud-cat.cn/bms",
+        "page_path": "/index.html#/device/device-combo",
+        "default_sync": False,  # 默认不同步,可在手动同步时勾选
     },
 }
 
@@ -112,36 +123,37 @@ class BmsFetcher:
     async def fetch_one(
         self,
         data_type: str,
-        username: str,
-        password: str,
         start_date: datetime,
         end_date: datetime,
+        config: dict,
         timeout: int = 180,
     ) -> FetchResult:
         """抓取单个数据源
 
         Args:
-            data_type: refund/ticket/wallet
-            username: BMS 账号
-            password: BMS 密码
+            data_type: refund/ticket/wallet/device_combo
             start_date: 开始时间
             end_date: 结束时间
+            config: 该源的运行配置(base_url/page_path/time_labels/username/password/name,来自 sync_source_configs)
             timeout: 超时时间(秒)
         """
         result = FetchResult()
         result.data_type = data_type
 
-        if data_type not in BMS_DATA_SOURCES:
-            result.error = f"不支持的数据类型: {data_type}"
+        if not config or not config.get("base_url"):
+            result.error = f"数据源未配置或缺少 base_url: {data_type}"
+            return result
+        if not config.get("username") or not config.get("password"):
+            result.error = f"数据源未配置账号密码: {data_type}(请在系统管理-同步设置中配置)"
             return result
 
         try:
             await asyncio.wait_for(
-                self._do_fetch_one(data_type, username, password, start_date, end_date, result),
+                self._do_fetch_one(data_type, start_date, end_date, config, result),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            result.error = f"抓取超时({timeout}秒): {BMS_DATA_SOURCES[data_type]['name']}"
+            result.error = f"抓取超时({timeout}秒): {config.get('name', data_type)}"
             logger.error(result.error)
         except Exception as e:
             result.error = f"抓取失败: {e}"
@@ -361,17 +373,17 @@ class BmsFetcher:
     async def _do_fetch_one(
         self,
         data_type: str,
-        username: str,
-        password: str,
         start_date: datetime,
         end_date: datetime,
+        config: dict,
         result: FetchResult,
     ):
-        """执行单个数据源的抓取流程"""
+        """执行单个数据源的抓取流程(配置来自 sync_source_configs)"""
         await self._init_browser()
 
-        config = BMS_DATA_SOURCES[data_type]
         base_url = config["base_url"]
+        username = config["username"]
+        password = config["password"]
         login_url = f"{base_url}/index.html#/login"
         page_url = f"{base_url}{config['page_path']}"
 
@@ -404,7 +416,7 @@ class BmsFetcher:
             logger.info(f"[{data_type}] 登录成功")
 
             # 2. 进入目标页面
-            logger.info(f"[{data_type}] 进入 {config['name']}...")
+            logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")
             await page.goto(page_url, wait_until="networkidle")
             await asyncio.sleep(3)
 
@@ -458,37 +470,35 @@ class BmsFetcher:
 
     async def fetch_all(
         self,
-        username: str,
-        password: str,
-        time_ranges: dict[str, tuple[datetime, datetime]],
+        tasks: list[dict],
         on_progress: callable = None,
     ) -> list[FetchResult]:
         """连续抓取多个数据源,每个之间间隔 65 秒(BMS 1分钟限制)
 
         Args:
-            username: BMS 账号
-            password: BMS 密码
-            time_ranges: {data_type: (start, end)} 每个数据源的时间范围
+            tasks: [{data_type, start, end, config}] 每个数据源的时间范围与运行配置
             on_progress: 回调函数 (data_type, status, result) -> None
         """
         results: list[FetchResult] = []
-        data_types = list(time_ranges.keys())
 
-        for i, data_type in enumerate(data_types):
-            start, end = time_ranges[data_type]
+        for i, task in enumerate(tasks):
+            data_type = task["data_type"]
+            start, end = task["start"], task["end"]
+            config = task["config"]
             if on_progress:
                 await on_progress(data_type, "fetching", None)
 
-            result = await self.fetch_one(data_type, username, password, start, end)
+            result = await self.fetch_one(data_type, start, end, config)
             results.append(result)
 
             if on_progress:
                 await on_progress(data_type, "done", result)
 
             # 如果不是最后一个,等待 65 秒(BMS 1分钟限制)
-            if i < len(data_types) - 1:
-                next_type = data_types[i + 1]
-                logger.info(f"等待 {OPERATION_INTERVAL} 秒后抓取 {BMS_DATA_SOURCES[next_type]['name']}...")
+            if i < len(tasks) - 1:
+                next_type = tasks[i + 1]["data_type"]
+                next_name = tasks[i + 1]["config"].get("name", next_type)
+                logger.info(f"等待 {OPERATION_INTERVAL} 秒后抓取 {next_name}...")
                 if on_progress:
                     await on_progress(next_type, "waiting", None)
                 await asyncio.sleep(OPERATION_INTERVAL)

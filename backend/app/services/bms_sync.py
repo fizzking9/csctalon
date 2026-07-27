@@ -24,12 +24,16 @@ from app.models.bms_sync_log import BmsSyncLog
 from app.models.upload import UploadRecord
 from app.services.bms_fetcher import BMS_DATA_SOURCES, BmsFetcher, FetchResult
 from app.services.data_parser import load_dataframe, parse_file
+from app.services.sync_source_config_service import get_sync_source_config
 from app.services.upsert import run_upsert
 
 logger = logging.getLogger(__name__)
 
-# 支持同步的数据类型
-SYNC_DATA_TYPES = ["refund", "ticket", "wallet"]
+# 全部可同步的数据类型(状态展示/UI 复选框遍历用)
+SYNC_DATA_TYPES = list(BMS_DATA_SOURCES.keys())  # refund/ticket/wallet/device_combo
+
+# 默认同步的数据类型(default_sync=True):定时同步 + 手动同步默认勾选用
+DEFAULT_SYNC_TYPES = [dt for dt, cfg in BMS_DATA_SOURCES.items() if cfg.get("default_sync", True)]
 
 
 def _get_last_sync_time(db: Session, data_type: str) -> datetime | None:
@@ -44,11 +48,15 @@ def _get_last_sync_time(db: Session, data_type: str) -> datetime | None:
 
 
 def calculate_time_range(db: Session, data_type: str) -> tuple[datetime, datetime]:
-    """计算同步时间范围
+    """计算同步时间范围(始终限定为当天数据,防止同步过多历史数据)
 
     逻辑:
       - 如果当天没有成功同步记录,从今日 00:00 开始
-      - 如果当天有同步记录,从上次同步的 end_time 开始
+      - 如果当天有同步记录,从上次同步的 end_time 开始(增量)
+      - 兜底: 任何情况下 start 都不会早于今天 00:00
+
+    注意: 定时同步(bms_scheduler)已显式传入「今天 00:00 ~ now」,
+          本函数仅作为未指定 time_ranges 时的兜底(理论上当前无调用方)。
     """
     now = datetime.now(timezone.utc) + timedelta(hours=8)  # 转东八区
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -69,6 +77,10 @@ def calculate_time_range(db: Session, data_type: str) -> tuple[datetime, datetim
             start = today_start
     else:
         # 从未同步,从今天0点开始
+        start = today_start
+
+    # 兜底保护: start 绝不能早于今天 0 点(防止同步过多历史数据)
+    if start.date() < now.date():
         start = today_start
 
     return start, now
@@ -192,8 +204,6 @@ def _update_sync_log(
 
 
 async def sync_all(
-    username: str,
-    password: str,
     trigger_type: str = "manual",
     triggered_by: str = "admin",
     on_progress: callable = None,
@@ -203,21 +213,21 @@ async def sync_all(
     """同步 BMS 数据源
 
     Args:
-        username: BMS 账号
-        password: BMS 密码
         trigger_type: manual/scheduled
         triggered_by: 触发者用户名
         on_progress: 回调 (data_type, phase, data) -> None
-        data_types: 指定要同步的数据源,默认全部 ["refund","ticket","wallet"]
+        data_types: 指定要同步的数据源,默认 DEFAULT_SYNC_TYPES(default_sync=True 的源)
         time_ranges: 指定各数据源的时间范围 {data_type: (start, end)},默认自动计算
 
     Returns:
         list[dict] 每个数据源的同步结果
+
+    凭证从 sync_source_configs 表读取(按源独立),无需调用方传入。
     """
     results = []
 
-    # 确定要同步的数据源
-    sync_types = data_types if data_types else list(SYNC_DATA_TYPES)
+    # 确定要同步的数据源(默认仅 default_sync=True 的源)
+    sync_types = data_types if data_types else list(DEFAULT_SYNC_TYPES)
 
     # 1. 预计算时间范围(如果未传入则自动计算)
     if not time_ranges:
@@ -234,20 +244,42 @@ async def sync_all(
         # 只同步传入的时间范围中包含的数据源
         sync_types = [dt for dt in sync_types if dt in time_ranges]
 
-    # 2. 抓取所有数据源
-    async with BmsFetcher() as fetcher:
-        fetch_results: list[FetchResult] = await fetcher.fetch_all(
-            username=username,
-            password=password,
-            time_ranges=time_ranges,
-            on_progress=on_progress,
-        )
+    # 2. 加载各源运行配置(含解密凭证)+ 组装抓取任务
+    db = SessionLocal()
+    tasks: list[dict] = []
+    skipped: list[dict] = []  # 未启用/未配置的源,直接生成结果不抓取
+    try:
+        for data_type in sync_types:
+            config = get_sync_source_config(db, data_type)
+            start, end = time_ranges[data_type]
+            if not config:
+                skipped.append({
+                    "data_type": data_type, "name": data_type, "success": False,
+                    "error": f"数据源未注册: {data_type}",
+                    "start_time": start.isoformat(), "end_time": end.isoformat(),
+                })
+                continue
+            if not config.get("enabled", True):
+                skipped.append({
+                    "data_type": data_type, "name": config.get("name", data_type), "success": False,
+                    "error": "数据源已停用(在同步设置中关闭)",
+                    "start_time": start.isoformat(), "end_time": end.isoformat(),
+                })
+                continue
+            tasks.append({"data_type": data_type, "start": start, "end": end, "config": config})
+    finally:
+        db.close()
 
-    # 3. 逐个导入
+    # 3. 抓取所有数据源
+    async with BmsFetcher() as fetcher:
+        fetch_results: list[FetchResult] = await fetcher.fetch_all(tasks=tasks, on_progress=on_progress)
+
+    # 4. 逐个导入
     for fr in fetch_results:
         db = SessionLocal()
         try:
             start, end = time_ranges[fr.data_type]
+            name = next((t["config"].get("name", fr.data_type) for t in tasks if t["data_type"] == fr.data_type), fr.data_type)
 
             if fr.success:
                 # 创建同步日志
@@ -260,7 +292,7 @@ async def sync_all(
 
                     results.append({
                         "data_type": fr.data_type,
-                        "name": BMS_DATA_SOURCES[fr.data_type]["name"],
+                        "name": name,
                         "success": True,
                         "file_path": fr.file_path,
                         "filename": fr.filename,
@@ -276,7 +308,7 @@ async def sync_all(
                     _update_sync_log(db, log.id, "failed", fr.file_path, fr.filename, error=str(e))
                     results.append({
                         "data_type": fr.data_type,
-                        "name": BMS_DATA_SOURCES[fr.data_type]["name"],
+                        "name": name,
                         "success": False,
                         "error": f"导入失败: {e}",
                         "file_path": fr.file_path,
@@ -291,7 +323,7 @@ async def sync_all(
 
                 results.append({
                     "data_type": fr.data_type,
-                    "name": BMS_DATA_SOURCES[fr.data_type]["name"],
+                    "name": name,
                     "success": False,
                     "error": fr.error,
                     "start_time": start.isoformat(),
@@ -300,14 +332,16 @@ async def sync_all(
         finally:
             db.close()
 
+    # 跳过的源(停用/未注册)也计入结果
+    results.extend(skipped)
     return results
 
 
 def get_sync_status(db: Session) -> list[dict]:
-    """获取各数据源的同步状态"""
+    """获取各数据源的同步状态(遍历全部 SYNC_DATA_TYPES)"""
     statuses = []
     for data_type in SYNC_DATA_TYPES:
-        config = BMS_DATA_SOURCES[data_type]
+        config = get_sync_source_config(db, data_type) or {}
         last_log = db.scalar(
             select(BmsSyncLog)
             .where(BmsSyncLog.data_type == data_type)
@@ -316,7 +350,11 @@ def get_sync_status(db: Session) -> list[dict]:
         )
         statuses.append({
             "data_type": data_type,
-            "name": config["name"],
+            "name": config.get("name", data_type),
+            "url": (config.get("base_url", "") + config.get("page_path", "")) or None,
+            "has_credentials": bool(config.get("username") and config.get("password")),
+            "default_sync": config.get("default_sync", True),
+            "enabled": config.get("enabled", True),
             "last_sync": last_log.created_at.isoformat() if last_log else None,
             "last_status": last_log.status if last_log else None,
             "last_end_time": last_log.end_time.isoformat() if last_log else None,

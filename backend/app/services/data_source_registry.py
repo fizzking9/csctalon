@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
 from app.models.data_source import DataSource, DataSourceField
+from app.models.device_combo import DeviceCombo
 from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
@@ -53,6 +54,16 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "sn_field": "device_sn",
         "pk_field": None,
         "pk_strategy": "none",
+        "sync_source": "bms",
+    },
+    {
+        "code": "device_combo",
+        "model": DeviceCombo,
+        "name_cn": "设备套餐",
+        "time_field": "created_at_raw",
+        "sn_field": "device_sn",
+        "pk_field": "recharge_order_no",
+        "pk_strategy": "primary_key",
         "sync_source": "bms",
     },
     {
@@ -119,6 +130,24 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("wallet", "op_type"): {"role": "category", "enum": ["用户提现", "订单退费转入"]},
     ("wallet", "op_time"): {"role": "time"},
     ("wallet", "account_id"): {"role": "category"},
+    # device_combo (设备套餐)
+    ("device_combo", "recharge_order_no"): {"role": "dimension", "is_pk": True, "is_filterable": False},
+    ("device_combo", "device_sn"): {"role": "sn"},
+    ("device_combo", "package_name"): {"role": "category"},
+    ("device_combo", "package_type"): {"role": "category"},
+    ("device_combo", "traffic_type"): {"role": "category"},
+    ("device_combo", "merchant_name"): {"role": "category"},
+    ("device_combo", "actual_amount"): {"role": "amount", "agg": "sum"},
+    ("device_combo", "start_date"): {"role": "time"},
+    ("device_combo", "end_date"): {"role": "time"},
+    ("device_combo", "updated_at_raw"): {"role": "time"},
+    ("device_combo", "created_at_raw"): {"role": "time"},
+    ("device_combo", "valid_days"): {"role": "measure", "agg": "avg"},
+    ("device_combo", "creator"): {"role": "category"},
+    ("device_combo", "available_traffic"): {"role": "dimension", "is_filterable": False},
+    ("device_combo", "used_traffic"): {"role": "dimension", "is_filterable": False},
+    ("device_combo", "remaining_traffic"): {"role": "dimension", "is_filterable": False},
+    ("device_combo", "status"): {"role": "category"},
     # ticket
     ("ticket", "ticket_no"): {"role": "dimension", "is_pk": True, "is_filterable": False},
     ("ticket", "refund_amount"): {"role": "amount", "agg": "sum"},

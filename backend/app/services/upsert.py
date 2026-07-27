@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
 from app.models.device import Device
+from app.models.device_combo import DeviceCombo
 from app.models.external_complaint import ExternalComplaint
 from app.models.merchant import Merchant
 from app.models.merchant_refund import MerchantRefund
@@ -512,10 +513,49 @@ def upsert_card_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
     result.inserted += len(rows)
 
 
+def upsert_device_combos(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """设备套餐 - 主键 recharge_order_no,有则更新无则插入"""
+    rows: list[dict] = []
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            order_no = (data.get("recharge_order_no") or "").strip() if data.get("recharge_order_no") else None
+            if not order_no:
+                result.add_error(idx, "充值订单号为空")
+                continue
+            rows.append({
+                "recharge_order_no": order_no,
+                "device_sn": data.get("device_sn"),
+                "package_name": data.get("package_name"),
+                "package_type": data.get("package_type"),
+                "traffic_type": data.get("traffic_type"),
+                "merchant_name": data.get("merchant_name"),
+                "actual_amount": _to_float(data.get("actual_amount")),
+                "start_date": _to_datetime(data.get("start_date")),
+                "end_date": _to_datetime(data.get("end_date")),
+                "updated_at_raw": _to_datetime(data.get("updated_at_raw")),
+                "created_at_raw": _to_datetime(data.get("created_at_raw")),
+                "valid_days": _to_int(data.get("valid_days")),
+                "creator": data.get("creator"),
+                "available_traffic": _to_int(data.get("available_traffic")),
+                "used_traffic": _to_int(data.get("used_traffic")),
+                "remaining_traffic": _to_int(data.get("remaining_traffic")),
+                "status": data.get("status"),
+            })
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
+    _sync_devices(rows, "device_sn", db)
+    _execute_upsert(db, DeviceCombo, "recharge_order_no", rows, result)
+
+
 UPSERT_DISPATCH = {
     "refund": upsert_refunds,
     "wallet": upsert_wallet,
     "ticket": upsert_tickets,
+    "device_combo": upsert_device_combos,
     "merchant_refund": upsert_merchant_refunds,
     "merchant": upsert_merchants,
     "cs_record": upsert_cs_records,

@@ -18,6 +18,7 @@ from app.models.analysis_view import AnalysisView, ClassificationRule
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
 from app.models.data_source import DataSource
+from app.models.device_combo import DeviceCombo
 from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
@@ -29,6 +30,7 @@ _MODEL_REGISTRY: dict[str, type] = {
     Refund.__tablename__: Refund,
     WalletWithdrawal.__tablename__: WalletWithdrawal,
     ServiceTicket.__tablename__: ServiceTicket,
+    DeviceCombo.__tablename__: DeviceCombo,
     MerchantRefund.__tablename__: MerchantRefund,
     CsRecord.__tablename__: CsRecord,
     ExternalComplaint.__tablename__: ExternalComplaint,
