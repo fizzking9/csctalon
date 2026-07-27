@@ -33,6 +33,7 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "sn_field": "device_sn",
         "pk_field": "ticket_no",
         "pk_strategy": "primary_key",
+        "sync_source": "bms",
     },
     {
         "code": "refund",
@@ -42,6 +43,7 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "sn_field": "device_sn",
         "pk_field": "refund_no",
         "pk_strategy": "primary_key",
+        "sync_source": "bms",
     },
     {
         "code": "wallet",
@@ -51,6 +53,7 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "sn_field": "device_sn",
         "pk_field": None,
         "pk_strategy": "none",
+        "sync_source": "bms",
     },
     {
         "code": "external_complaint",
@@ -261,6 +264,7 @@ def ensure_data_sources_registered(db: Session) -> dict:
             ds.sn_field = seed["sn_field"]
             ds.pk_field = seed["pk_field"]
             ds.pk_strategy = seed["pk_strategy"]
+            ds.sync_source = seed.get("sync_source")
         else:
             ds = DataSource(
                 code=seed["code"],
@@ -270,6 +274,7 @@ def ensure_data_sources_registered(db: Session) -> dict:
                 sn_field=seed["sn_field"],
                 pk_field=seed["pk_field"],
                 pk_strategy=seed["pk_strategy"],
+                sync_source=seed.get("sync_source"),
             )
             db.add(ds)
             db.flush()

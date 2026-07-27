@@ -25,6 +25,7 @@
             <span>数据中心</span>
           </template>
           <el-menu-item index="/data/upload">数据上传</el-menu-item>
+          <el-menu-item index="/data/fetch">BMS同步</el-menu-item>
           <el-menu-item index="/data/records">上传记录</el-menu-item>
           <el-menu-item index="/data/browser">数据查看</el-menu-item>
         </el-sub-menu>

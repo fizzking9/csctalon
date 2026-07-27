@@ -26,8 +26,12 @@ async def lifespan(app: FastAPI):
     _run_migrations_on_startup()
     _init_admin()
     _init_data_sources_and_presets()
+    _start_bms_scheduler()
     logger.info("应用启动完成")
     yield
+    # 关闭时停止调度器
+    from app.services.bms_scheduler import bms_scheduler
+    bms_scheduler.stop()
     logger.info("应用关闭")
 
 
@@ -84,6 +88,16 @@ def _init_data_sources_and_presets() -> None:
         logger.error(f"数据源/预设视图注册失败: {e}", exc_info=True)
     finally:
         db.close()
+
+
+def _start_bms_scheduler() -> None:
+    """启动 BMS 定时同步调度器(如果配置了自动启动)"""
+    if not settings.BMS_SCHEDULE_AUTOSTART:
+        logger.info("BMS 定时同步未开启自动启动(BMS_SCHEDULE_AUTOSTART=False)")
+        return
+    from app.services.bms_scheduler import bms_scheduler
+    bms_scheduler.start()
+    logger.info("BMS 定时同步已自动启动")
 
 
 def create_app() -> FastAPI:

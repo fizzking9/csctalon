@@ -47,6 +47,7 @@ class DataSource(IDMixin, TimestampMixin, Base):
     pk_field: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="主键字段；wallet=null")
     pk_strategy: Mapped[str] = mapped_column(String(32), default="primary_key", nullable=False, comment="primary_key/none（影响 diff 策略）")
     status: Mapped[str] = mapped_column(String(16), default="active", nullable=False, comment="active/inactive")
+    sync_source: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="bms=从BMS系统同步, null=手动上传")
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 

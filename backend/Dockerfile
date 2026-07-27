@@ -11,6 +11,10 @@ RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian.o
 # 系统依赖(libpq 编译所需)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libpq-dev \
+    # Playwright/Chromium 依赖
+    libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+    libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    libgbm1 libasound2 libpangocairo-1.0-0 libpango-1.0-0 libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 
 # pip 使用清华源
@@ -24,7 +28,11 @@ RUN pip install --no-cache-dir \
     "pydantic>=2.6.0" "pydantic-settings>=2.1.0" \
     "python-jose[cryptography]>=3.3.0" "bcrypt>=4.0.0" \
     "python-multipart>=0.0.9" "pandas>=2.2.0" "openpyxl>=3.1.2" "python-calamine>=0.2.0" \
-    "redis>=5.0.0" "python-dotenv>=1.0.0" "orjson>=3.9.0"
+    "redis>=5.0.0" "python-dotenv>=1.0.0" "orjson>=3.9.0" \
+    "playwright>=1.45.0"
+
+# 安装 Chromium 浏览器
+RUN playwright install chromium --with-deps
 
 COPY . /app
 

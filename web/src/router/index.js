@@ -38,6 +38,12 @@ const routes = [
         component: () => import('@/views/data/Browser.vue'),
         meta: { title: '数据查看', icon: 'DataAnalysis' },
       },
+      {
+        path: 'data/fetch',
+        name: 'DataFetch',
+        component: () => import('@/views/data/FetchRefund.vue'),
+        meta: { title: 'BMS同步', icon: 'Download' },
+      },
       // 分析看板
       {
         path: 'analytics/views',

@@ -30,22 +30,43 @@ DATA_TYPES = {"refund", "wallet", "ticket", "merchant_refund", "merchant", "cs_r
 async def parse_upload(
     current_user: CurrentUser,
     data_type: str = Form(...),
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
     sheet_name: str | None = Form(None),
+    stored_path: str | None = Form(None),
+    filename: str | None = Form(None),
 ):
-    """上传文件,解析后返回列名/样例/建议映射,不写入数据库"""
+    """上传文件,解析后返回列名/样例/建议映射,不写入数据库
+
+    支持两种模式:
+    1. 上传文件模式:提供 file 参数
+    2. 已有文件模式:提供 stored_path 参数(用于抓取等场景)
+    """
     if data_type not in DATA_TYPES:
         raise HTTPException(status_code=400, detail=f"不支持的数据类型,可选: {DATA_TYPES}")
-    content = await file.read()
-    if len(content) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-        raise HTTPException(status_code=413, detail=f"文件超过 {settings.MAX_UPLOAD_SIZE_MB}MB 限制")
-    path, stored_path = save_upload_file(content, file.filename or "upload")
+
+    base = Path(settings.UPLOAD_DIR)
+    if stored_path:
+        # 已有文件模式
+        path = base / stored_path
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="文件不存在")
+        actual_stored_path = stored_path
+    elif file:
+        # 上传文件模式
+        content = await file.read()
+        if len(content) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+            raise HTTPException(status_code=413, detail=f"文件超过 {settings.MAX_UPLOAD_SIZE_MB}MB 限制")
+        path, actual_stored_path = save_upload_file(content, file.filename or "upload")
+        filename = file.filename
+    else:
+        raise HTTPException(status_code=400, detail="必须提供 file 或 stored_path 参数")
+
     try:
         preview = parse_file(path, data_type, sheet_name=sheet_name)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"文件解析失败: {e}") from e
-    preview["stored_path"] = stored_path
-    preview["filename"] = file.filename
+    preview["stored_path"] = actual_stored_path
+    preview["filename"] = filename
     return R(data=preview)
 
 

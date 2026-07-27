@@ -2,6 +2,7 @@
 
 from app.models.analysis_view import AnalysisView, ClassificationRule  # noqa: F401
 from app.models.base import IDMixin, TimestampMixin  # noqa: F401
+from app.models.bms_sync_log import BmsSyncLog  # noqa: F401
 from app.models.card_complaint import CardComplaint  # noqa: F401
 from app.models.cs_record import CsRecord  # noqa: F401
 from app.models.data_source import DataSource, DataSourceField, SemanticRole, SourceType  # noqa: F401
@@ -25,6 +26,7 @@ __all__ = [
     "ClassificationRule",
     "CardComplaint",
     "CsRecord",
+    "BmsSyncLog",
     "Device",
     "DeviceTag",
     "ExternalComplaint",

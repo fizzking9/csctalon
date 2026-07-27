@@ -145,6 +145,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import dayjs from 'dayjs'
 import request from '@/api'
 
 const sources = ref([])
@@ -285,10 +286,9 @@ function fmtCell(value, dataType) {
     return value
   }
   if (dataType === 'timestamp') {
-    if (typeof value === 'string' && value.includes('T')) {
-      return value.replace('T', ' ').substring(0, 19)
-    }
-    return value
+    // 用 dayjs 解析,自动处理 UTC(带 Z/+00:00)转本地时区
+    const d = dayjs(value)
+    return d.isValid() ? d.format('YYYY-MM-DD HH:mm:ss') : String(value)
   }
   if (dataType === 'jsonb') {
     return JSON.stringify(value)
@@ -298,15 +298,14 @@ function fmtCell(value, dataType) {
 
 function fmtDate(dateStr) {
   if (!dateStr) return '-'
-  return dateStr.substring(0, 10)
+  const d = dayjs(dateStr)
+  return d.isValid() ? d.format('YYYY-MM-DD') : dateStr.substring(0, 10)
 }
 
 function fmtDateTime(dateStr) {
   if (!dateStr) return '-'
-  if (dateStr.includes('T')) {
-    return dateStr.replace('T', ' ').substring(0, 19)
-  }
-  return dateStr
+  const d = dayjs(dateStr)
+  return d.isValid() ? d.format('YYYY-MM-DD HH:mm:ss') : String(dateStr)
 }
 
 function getTableCount(code) {

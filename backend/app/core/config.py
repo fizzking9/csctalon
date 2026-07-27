@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "./uploads"
     MAX_UPLOAD_SIZE_MB: int = 200
 
+    # BMS 平台(定时同步用,手动同步时前端传入)
+    BMS_USERNAME: str = ""
+    BMS_PASSWORD: str = ""
+    BMS_SCHEDULE_AUTOSTART: bool = False  # 启动时是否自动开启定时同步
+
     # 跨域(局域网部署,允许内网访问)
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 
