@@ -29,17 +29,20 @@
           <el-menu-item index="/data/browser">数据查看</el-menu-item>
           <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
           <el-menu-item index="/analytics/views">分析视图</el-menu-item>
+          <el-menu-item v-if="authStore.isManager" index="/dashboards/designer">看板配置</el-menu-item>
         </el-sub-menu>
 
-        <el-sub-menu index="analytics">
+        <!-- 决策看板:管理层可见,4 常规看板 + 专项跟进 -->
+        <el-sub-menu v-if="authStore.isManager" index="dashboards">
           <template #title>
             <el-icon><DataAnalysis /></el-icon>
             <span>决策看板</span>
           </template>
-          <el-menu-item index="/analytics/operation">运营分析</el-menu-item>
-          <el-menu-item index="/analytics/cash">现金流分析</el-menu-item>
-          <el-menu-item index="/analytics/category">退款分类</el-menu-item>
-          <el-menu-item index="/analytics/operator">人员操作</el-menu-item>
+          <el-menu-item index="/dashboards/refund">退款看板</el-menu-item>
+          <el-menu-item index="/dashboards/complaint">投诉看板</el-menu-item>
+          <el-menu-item index="/dashboards/reception">接待看板</el-menu-item>
+          <el-menu-item index="/dashboards/performance">绩效看板</el-menu-item>
+          <el-menu-item index="/dashboards/special">专项跟进</el-menu-item>
         </el-sub-menu>
 
         <el-menu-item index="/todos">

@@ -60,6 +60,50 @@ const routes = [
         component: () => import('@/views/analytics/ViewRender.vue'),
         meta: { title: '视图详情', hidden: true },
       },
+      // 看板配置(数据中心)
+      {
+        path: 'dashboards/designer',
+        name: 'DashboardDesigner',
+        component: () => import('@/views/dashboards/Designer.vue'),
+        meta: { title: '看板配置', icon: 'Grid', manager: true },
+      },
+      // 决策看板(新,manager 可见)
+      {
+        path: 'dashboards/refund',
+        name: 'DashboardRefund',
+        component: () => import('@/views/dashboards/DashboardView.vue'),
+        meta: { title: '退款看板', icon: 'Wallet', manager: true },
+      },
+      {
+        path: 'dashboards/complaint',
+        name: 'DashboardComplaint',
+        component: () => import('@/views/dashboards/DashboardView.vue'),
+        meta: { title: '投诉看板', icon: 'Warning', manager: true },
+      },
+      {
+        path: 'dashboards/reception',
+        name: 'DashboardReception',
+        component: () => import('@/views/dashboards/DashboardView.vue'),
+        meta: { title: '接待看板', icon: 'Service', manager: true },
+      },
+      {
+        path: 'dashboards/performance',
+        name: 'DashboardPerformance',
+        component: () => import('@/views/dashboards/DashboardView.vue'),
+        meta: { title: '绩效看板', icon: 'UserFilled', manager: true },
+      },
+      {
+        path: 'dashboards/special',
+        name: 'DashboardSpecial',
+        component: () => import('@/views/dashboards/Special.vue'),
+        meta: { title: '专项跟进', icon: 'Aim', manager: true },
+      },
+      {
+        path: 'dashboards/by-code/:code',
+        name: 'DashboardByCode',
+        component: () => import('@/views/dashboards/DashboardView.vue'),
+        meta: { title: '看板', hidden: true, manager: true },
+      },
       {
         path: 'analytics/operation',
         name: 'AnalyticsOperation',

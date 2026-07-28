@@ -151,7 +151,12 @@ def _execute_segment(
             agg_expr = func.count()
         else:
             col0 = _get_column(model, field_name)
-            agg_expr = {"sum": func.sum(col0), "count": func.count(col0), "avg": func.avg(col0)}.get(agg, func.sum(col0))
+            agg_expr = {
+                "sum": func.sum(col0),
+                "count": func.count(col0),
+                "avg": func.avg(col0),
+                "count_distinct": func.count(func.distinct(col0)),
+            }.get(agg, func.sum(col0))
         # measure 级 filter(PostgreSQL FILTER 子句):如 count(*) FILTER (WHERE user_accepted='已接受')
         m_filters = m.get("filter")
         if m_filters:

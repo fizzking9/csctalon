@@ -5,6 +5,7 @@ from app.models.base import IDMixin, TimestampMixin  # noqa: F401
 from app.models.bms_sync_log import BmsSyncLog  # noqa: F401
 from app.models.card_complaint import CardComplaint  # noqa: F401
 from app.models.cs_record import CsRecord  # noqa: F401
+from app.models.dashboard import Dashboard  # noqa: F401
 from app.models.data_source import DataSource, DataSourceField, SemanticRole, SourceType  # noqa: F401
 from app.models.device import Device, DeviceTag, device_tag_rel  # noqa: F401
 from app.models.device_combo import DeviceCombo  # noqa: F401
@@ -26,6 +27,7 @@ from app.models.wallet import WalletWithdrawal  # noqa: F401
 __all__ = [
     "AnalysisView",
     "ClassificationRule",
+    "Dashboard",
     "CardComplaint",
     "CsRecord",
     "BmsSyncLog",
