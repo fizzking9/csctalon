@@ -13,9 +13,17 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import AdminOrSupervisor, CurrentUser, DBSession
+from app.models.analysis_view import AnalysisView
 from app.models.dashboard import Dashboard
 from app.schemas.common import PageBase, R
-from app.schemas.dashboard import DashboardCreate, DashboardOut, DashboardUpdate
+from app.schemas.dashboard import (
+    DashboardCreate,
+    DashboardExecuteRequest,
+    DashboardItemResult,
+    DashboardOut,
+    DashboardUpdate,
+)
+from app.services.analysis_engine import execute_view
 
 router = APIRouter(prefix="/dashboards", tags=["看板"])
 
@@ -72,6 +80,53 @@ def get_dashboard(db: DBSession, user: CurrentUser, dashboard_id: int):
         raise HTTPException(404, "看板不存在")
     _check_visibility(d, user.role)
     return R(data=DashboardOut.model_validate(d))
+
+
+@router.post("/{dashboard_id}/execute", response_model=R, summary="批量执行看板(一次取全部视图结果)")
+def execute_dashboard(db: DBSession, user: CurrentUser, dashboard_id: int, payload: DashboardExecuteRequest):
+    """批量执行看板所有 visible 项,单视图失败隔离。
+
+    前端一次调用取全部结果,避免 N 次并发 /analysis-views/execute。
+    start/end 为空则各视图回退自身 time_range_default(复用 _resolve_time_range 既有逻辑)。
+    """
+    d = db.get(Dashboard, dashboard_id)
+    if not d or d.status != "active":
+        raise HTTPException(404, "看板不存在")
+    _check_visibility(d, user.role)
+
+    params = {"start": payload.start, "end": payload.end}
+    items_out: list[DashboardItemResult] = []
+    for it in d.items or []:
+        if it.get("visible") is False:
+            continue
+        view_id = it.get("view_id")
+        if not view_id:
+            continue
+        v = db.get(AnalysisView, view_id)
+        item = DashboardItemResult(
+            view_id=view_id,
+            view_code=it.get("view_code"),
+            title=it.get("title"),
+        )
+        if not v or v.status != "active":
+            item.error = "视图不存在或已归档"
+        else:
+            # 附带视图元数据,前端卡片无需再单独 GET 视图详情
+            item.view_name = v.name
+            item.ratios = v.ratios
+            item.is_preset = v.is_preset
+            try:
+                item.result = execute_view(db, v, params)
+            except Exception as e:  # noqa: BLE001 单视图失败隔离,不影响其他项
+                item.error = str(e)
+        items_out.append(item)
+
+    return R(data={
+        "dashboard_id": dashboard_id,
+        "start": payload.start,
+        "end": payload.end,
+        "items": items_out,
+    })
 
 
 @router.post("", response_model=R, summary="创建看板(管理层)")

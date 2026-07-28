@@ -24,3 +24,8 @@ export function updateDashboard(id, payload) {
 export function deleteDashboard(id) {
   return request.delete(`/dashboards/${id}`)
 }
+
+// 批量执行看板(一次取全部视图结果,前端分发)
+export function executeDashboard(id, params) {
+  return request.post(`/dashboards/${id}/execute`, params)
+}

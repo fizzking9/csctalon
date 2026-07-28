@@ -7,13 +7,25 @@
         <el-tag v-if="dashboard?.is_preset" type="warning" size="small">预设</el-tag>
       </div>
       <div v-if="dashboard" class="filter-bar">
-        <el-radio-group v-model="rangeDays" size="small" @change="onRangeChange">
-          <el-radio-button :label="7">近7天</el-radio-button>
-          <el-radio-button :label="30">近30天</el-radio-button>
-          <el-radio-button :label="90">近90天</el-radio-button>
-          <el-radio-button :label="0">默认</el-radio-button>
+        <el-radio-group v-model="rangeMode" size="small" @change="onRangeChange">
+          <el-radio-button label="7">近7天</el-radio-button>
+          <el-radio-button label="30">近30天</el-radio-button>
+          <el-radio-button label="90">近90天</el-radio-button>
+          <el-radio-button label="default">默认</el-radio-button>
+          <el-radio-button label="custom">自定义</el-radio-button>
         </el-radio-group>
-        <el-button :icon="Refresh" @click="reloadKey++">刷新</el-button>
+        <el-date-picker
+          v-if="rangeMode === 'custom'"
+          v-model="customRange"
+          type="daterange"
+          size="small"
+          value-format="YYYY-MM-DD"
+          start-placeholder="开始"
+          end-placeholder="结束"
+          style="width: 240px"
+          @change="onRangeChange"
+        />
+        <el-button :icon="Refresh" :loading="batchLoading" @click="loadAllItems">刷新</el-button>
       </div>
     </div>
 
@@ -38,7 +50,10 @@
           :title="item.title || ''"
           :start="effectiveStart"
           :end="effectiveEnd"
-          :reload-key="reloadKey"
+          :prefetched-result="itemResult(item.view_id).result"
+          :prefetched-error="itemResult(item.view_id).error"
+          :prefetched-view="itemView(item.view_id)"
+          :batch-loading="batchLoading"
         />
       </el-col>
     </el-row>
@@ -46,12 +61,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import ViewItemCard from '@/components/ViewItemCard.vue'
-import { getDashboard, listDashboards } from '@/api/dashboard'
+import { getDashboard, listDashboards, executeDashboard } from '@/api/dashboard'
 
 const route = useRoute()
 
@@ -68,25 +83,43 @@ const props = defineProps({
 })
 
 const dashboard = ref(null)
-const rangeDays = ref(30)
-const reloadKey = ref(0)
+const rangeMode = ref('30') // '7'|'30'|'90'|'default'|'custom'
+const customRange = ref([])
+const batchLoading = ref(false)
+const batchResults = ref({}) // { view_id: { result, error, view_name, ratios, is_preset } }
 const errorMsg = ref('')
 
 const visibleItems = computed(() => (dashboard.value?.items || []).filter((i) => i.visible !== false))
 
 const effectiveStart = computed(() => {
-  if (rangeDays.value <= 0) return ''
-  return dayjs().subtract(rangeDays.value, 'day').format('YYYY-MM-DD')
+  if (rangeMode.value === 'custom') return customRange.value?.[0] || ''
+  if (rangeMode.value === 'default' || !rangeMode.value) return ''
+  return dayjs().subtract(Number(rangeMode.value), 'day').format('YYYY-MM-DD')
 })
-const effectiveEnd = computed(() => (rangeDays.value <= 0 ? '' : dayjs().format('YYYY-MM-DD')))
+const effectiveEnd = computed(() => {
+  if (rangeMode.value === 'custom') return customRange.value?.[1] || ''
+  if (rangeMode.value === 'default' || !rangeMode.value) return ''
+  return dayjs().format('YYYY-MM-DD')
+})
+
+// 批量结果取值(null 而非 undefined,确保 ViewItemCard usePrefetched 为 true)
+function itemResult(viewId) {
+  const r = batchResults.value[viewId]
+  return r || { result: null, error: null }
+}
+function itemView(viewId) {
+  const r = batchResults.value[viewId]
+  if (!r || r.view_name === null || r.view_name === undefined) return undefined
+  return { name: r.view_name, ratios: r.ratios, is_preset: r.is_preset }
+}
 
 function onRangeChange() {
-  // rangeDays 变化 → effectiveStart/End 变 → ViewItemCard watch 自动重载
+  // rangeMode/customRange 变化 → effectiveStart/End 变 → watch 触发 loadAllItems
 }
 
 async function resolveDashboardId() {
   if (props.dashboardId) return Number(props.dashboardId)
-  // 从路由推断 code
+  if (route.params.id) return Number(route.params.id) // /dashboards/view/:id
   const code = route.params.code || CODE_BY_NAME[route.name]
   if (!code) return null
   const res = await listDashboards({ page: 1, page_size: 100 })
@@ -96,6 +129,9 @@ async function resolveDashboardId() {
 
 async function loadDashboard() {
   errorMsg.value = ''
+  // 重置状态,避免路由切换时残留旧看板内容(4 个预设看板共用本组件,实例被复用)
+  dashboard.value = null
+  batchResults.value = {}
   try {
     const id = await resolveDashboardId()
     if (!id) {
@@ -106,12 +142,48 @@ async function loadDashboard() {
     dashboard.value = res.data
     // 初始化时间范围为看板默认
     if (dashboard.value.time_range_default?.days) {
-      rangeDays.value = dashboard.value.time_range_default.days
+      rangeMode.value = String(dashboard.value.time_range_default.days)
+    } else {
+      rangeMode.value = 'default'
     }
+    await loadAllItems()
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '加载看板失败'
   }
 }
+
+async function loadAllItems() {
+  if (!dashboard.value) return
+  batchLoading.value = true
+  try {
+    const params = {}
+    if (effectiveStart.value) params.start = effectiveStart.value
+    if (effectiveEnd.value) params.end = effectiveEnd.value
+    const res = await executeDashboard(dashboard.value.id, params)
+    const map = {}
+    for (const it of res.data.items || []) {
+      map[it.view_id] = it
+    }
+    batchResults.value = map
+  } catch (e) {
+    errorMsg.value = e.response?.data?.detail || '批量加载失败'
+  } finally {
+    batchLoading.value = false
+  }
+}
+
+// 时间范围变化 → 重新批量加载
+watch([effectiveStart, effectiveEnd], () => {
+  if (dashboard.value) loadAllItems()
+})
+
+// 路由切换 → 重新加载看板
+// 4 个预设看板(退款/投诉/接待/绩效)共用本组件,Vue Router 复用实例,
+// onMounted 只在首次挂载触发,切换看板时需 watch 路由才能重新加载。
+watch(
+  () => [route.name, route.params.id, route.params.code],
+  () => { loadDashboard() }
+)
 
 onMounted(loadDashboard)
 </script>

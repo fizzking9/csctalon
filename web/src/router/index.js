@@ -105,6 +105,12 @@ const routes = [
         meta: { title: '看板', hidden: true, manager: true },
       },
       {
+        path: 'dashboards/view/:id',
+        name: 'DashboardById',
+        component: () => import('@/views/dashboards/DashboardView.vue'),
+        meta: { title: '看板', hidden: true, manager: true },
+      },
+      {
         path: 'analytics/operation',
         name: 'AnalyticsOperation',
         component: () => import('@/views/analytics/Operation.vue'),

@@ -41,10 +41,11 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
             <el-button text type="primary" size="small" @click="goRender(row)">查看</el-button>
             <el-button text type="primary" size="small" @click="goEdit(row)">编辑</el-button>
+            <el-button text type="success" size="small" @click="openPublish(row)">发布为看板</el-button>
             <el-button v-if="!row.is_preset" text type="danger" size="small" @click="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -60,6 +61,8 @@
         />
       </div>
     </el-card>
+
+    <PublishDashboardDialog v-model="publishDialogVisible" :view="publishView" @success="onPublishSuccess" />
   </div>
 </template>
 
@@ -69,6 +72,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { listAnalysisViews, deleteAnalysisView } from '@/api/analysis-view'
+import PublishDashboardDialog from '@/components/PublishDashboardDialog.vue'
 
 const router = useRouter()
 const list = ref([])
@@ -76,6 +80,8 @@ const total = ref(0)
 const loading = ref(false)
 const page = ref(1)
 const filterPreset = ref(null)
+const publishDialogVisible = ref(false)
+const publishView = ref(null)
 
 const chartLabels = { line: '折线', bar: '柱状', pie: '饼图', table: '表格' }
 const chartLabel = (c) => chartLabels[c] || c
@@ -104,6 +110,15 @@ function goBuilder() {
 
 function goEdit(row) {
   router.push(`/analytics/builder?edit=${row.id}`)
+}
+
+function openPublish(row) {
+  publishView.value = row
+  publishDialogVisible.value = true
+}
+
+function onPublishSuccess(dashboard) {
+  if (dashboard?.id) router.push(`/dashboards/view/${dashboard.id}`)
 }
 
 async function handleDelete(row) {

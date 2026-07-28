@@ -15,6 +15,7 @@
           <el-radio-button :label="90">近90天</el-radio-button>
           <el-radio-button :label="0">全部</el-radio-button>
         </el-radio-group>
+        <el-button :icon="Promotion" @click="publishDialogVisible = true">发布为看板</el-button>
         <el-button :icon="Refresh" @click="loadData">刷新</el-button>
       </div>
     </div>
@@ -85,14 +86,17 @@
         </el-collapse-item>
       </el-collapse>
     </el-card>
+
+    <PublishDashboardDialog v-model="publishDialogVisible" :view="view" @success="onPublishSuccess" />
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, Refresh } from '@element-plus/icons-vue'
+import { ArrowLeft, Refresh, Promotion } from '@element-plus/icons-vue'
 import BaseChart from '@/components/BaseChart.vue'
+import PublishDashboardDialog from '@/components/PublishDashboardDialog.vue'
 import { getAnalysisView, executeAnalysisView } from '@/api/analysis-view'
 import dayjs from 'dayjs'
 
@@ -104,6 +108,7 @@ const result = ref(null)
 const loading = ref(false)
 const rangeDays = ref(30)
 const errorMsg = ref('')
+const publishDialogVisible = ref(false)
 
 const chartHeight = computed(() => (result.value?.chart_type === 'table' ? 'auto' : '400px'))
 
@@ -161,6 +166,10 @@ function fmtVal(v, col) {
 
 function goBack() {
   router.push('/analytics/views')
+}
+
+function onPublishSuccess(dashboard) {
+  if (dashboard?.id) router.push(`/dashboards/view/${dashboard.id}`)
 }
 
 async function loadView() {
