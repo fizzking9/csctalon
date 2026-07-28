@@ -1,7 +1,5 @@
 <template>
-  <div class="page-container">
-    <div class="page-title">BMS 数据同步</div>
-
+  <div>
     <!-- 定时同步控制 -->
     <el-card class="mb-16">
       <template #header>

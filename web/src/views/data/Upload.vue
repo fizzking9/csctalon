@@ -1,9 +1,6 @@
 <template>
-  <div class="page-container">
-    <div class="page-title">数据上传</div>
-
-    <el-card>
-      <el-steps :active="step" finish-status="success" align-center>
+  <el-card>
+    <el-steps :active="step" finish-status="success" align-center>
         <el-step title="选择类型与文件" />
         <el-step title="预览与列映射" />
         <el-step title="Diff 复核" />
@@ -265,7 +262,6 @@
         </div>
       </div>
     </el-card>
-  </div>
 </template>
 
 <script setup>

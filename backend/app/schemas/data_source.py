@@ -35,6 +35,8 @@ class DataSourceOut(BaseModel):
     pk_field: str | None = None
     pk_strategy: str
     status: str
+    sync_source: str | None = None
+    category: str | None = None
     description: str | None = None
     field_count: int = 0
     created_at: datetime

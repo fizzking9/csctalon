@@ -24,19 +24,18 @@
             <el-icon><FolderOpened /></el-icon>
             <span>数据中心</span>
           </template>
-          <el-menu-item index="/data/upload">数据上传</el-menu-item>
-          <el-menu-item index="/data/fetch">BMS同步</el-menu-item>
-          <el-menu-item index="/data/records">上传记录</el-menu-item>
+          <el-menu-item index="/data/ingest">数据采集</el-menu-item>
+          <el-menu-item index="/data/records">导入记录</el-menu-item>
           <el-menu-item index="/data/browser">数据查看</el-menu-item>
+          <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
+          <el-menu-item index="/analytics/views">分析视图</el-menu-item>
         </el-sub-menu>
 
         <el-sub-menu index="analytics">
           <template #title>
             <el-icon><DataAnalysis /></el-icon>
-            <span>分析看板</span>
+            <span>决策看板</span>
           </template>
-          <el-menu-item index="/analytics/views">分析视图</el-menu-item>
-          <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
           <el-menu-item index="/analytics/operation">运营分析</el-menu-item>
           <el-menu-item index="/analytics/cash">现金流分析</el-menu-item>
           <el-menu-item index="/analytics/category">退款分类</el-menu-item>

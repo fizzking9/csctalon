@@ -159,4 +159,5 @@ export const TYPE_LABELS = {
   cs_record: '智能助手处理记录',
   external_complaint: '外部投诉(315/监督局)',
   card_complaint: '卡商群投诉',
+  device_combo: '设备套餐',
 }

@@ -30,8 +30,8 @@ from app.services.upsert import (
     apply_mapping,
 )
 
-# code → 模型类
-_MODEL_BY_CODE: dict[str, type] = {s["code"]: s["model"] for s in DATA_SOURCE_SEEDS}
+# code → 模型类(占位数据源无 model,跳过)
+_MODEL_BY_CODE: dict[str, type] = {s["code"]: s["model"] for s in DATA_SOURCE_SEEDS if "model" in s}
 
 # 比较时排除的系统字段（TimestampMixin 系统时间 + raw_extra 冗余 + 自增 id）
 _EXCLUDED_FIELDS = {"id", "created_at", "updated_at", "raw_extra"}

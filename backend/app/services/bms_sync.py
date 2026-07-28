@@ -114,6 +114,7 @@ def _auto_import(db: Session, data_type: str, file_path: str, filename: str, tri
         file_size=full_path.stat().st_size,
         status="parsing",
         uploaded_by=triggered_by,
+        source="bms",
     )
     db.add(record)
     db.commit()

@@ -138,6 +138,7 @@ async def confirm_import(
         sheet_name=sheet_name,
         status="parsing",
         uploaded_by=current_user.username,
+        source="manual",
     )
     db.add(record)
     db.commit()
@@ -197,12 +198,15 @@ def list_records(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     data_type: str | None = None,
+    source: str | None = None,
 ):
     from sqlalchemy import func
 
     stmt = select(UploadRecord)
     if data_type:
         stmt = stmt.where(UploadRecord.data_type == data_type)
+    if source:
+        stmt = stmt.where(UploadRecord.source == source)
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     items = list(
         db.scalars(stmt.order_by(UploadRecord.id.desc()).offset((page - 1) * page_size).limit(page_size))

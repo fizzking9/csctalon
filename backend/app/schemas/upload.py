@@ -91,5 +91,6 @@ class UploadRecordOut(BaseModel):
     failed_rows: int
     matched_rows: int
     uploaded_by: str | None = None
+    source: str | None = None
     created_at: datetime
     finished_at: datetime | None = None

@@ -5,31 +5,56 @@
       <div class="source-sidebar">
         <div class="sidebar-header">
           <span class="sidebar-title">数据源</span>
-          <span class="sidebar-count">{{ sources.length }} 个</span>
+          <span class="sidebar-count">{{ activeSourceCount }} 个</span>
         </div>
         <el-menu
           :default-active="currentSource?.code"
+          :default-openeds="openedCategories"
           class="source-menu"
           @select="handleSourceSelect"
         >
-          <el-menu-item
-            v-for="src in sources"
-            :key="src.code"
-            :index="src.code"
+          <el-sub-menu
+            v-for="grp in groupedSources"
+            :key="grp.category"
+            :index="grp.category"
           >
-            <el-icon><DataAnalysis /></el-icon>
-            <span>{{ src.name_cn }}</span>
-            <el-badge
-              v-if="src.table_name"
-              :value="getTableCount(src.code)"
-              class="count-badge"
-            />
-          </el-menu-item>
+            <template #title>
+              <span class="group-title">{{ grp.category }}</span>
+              <span class="group-count">{{ grp.items.length }}</span>
+            </template>
+            <el-menu-item
+              v-for="src in grp.items"
+              :key="src.code"
+              :index="src.code"
+            >
+              <span>{{ src.name_cn }}</span>
+              <el-tag
+                v-if="src.status === 'placeholder'"
+                size="small"
+                type="info"
+                effect="plain"
+                class="placeholder-tag"
+              >规划中</el-tag>
+              <el-badge
+                v-else-if="src.table_name"
+                :value="getTableCount(src.code)"
+                class="count-badge"
+              />
+            </el-menu-item>
+          </el-sub-menu>
         </el-menu>
       </div>
 
       <!-- 右侧主区域 -->
       <div class="main-area" v-if="currentSource">
+        <!-- 占位数据源:规划中,暂未实现 -->
+        <div v-if="isPlaceholder" class="placeholder-area">
+          <el-empty :image-size="140" description="该数据源正在规划中，暂未实现">
+            <template #image><el-icon size="80" color="#c0c4cc"><DataAnalysis /></el-icon></template>
+            <p class="placeholder-hint">{{ currentSource.name_cn }}（{{ currentSource.code }}）尚未接入数据</p>
+          </el-empty>
+        </div>
+
         <!-- 数据汇总卡片 -->
         <div class="summary-cards" v-if="summary">
           <div class="summary-item">
@@ -77,7 +102,7 @@
         </div>
 
         <!-- 表格区域 -->
-        <div class="table-area">
+        <div class="table-area" v-if="!isPlaceholder">
           <div class="table-header">
             <div class="header-info">
               <el-icon><Database /></el-icon>
@@ -161,9 +186,39 @@ const tableCounts = ref({})
 const summary = ref(null)
 const uploadRecords = ref([])
 
+// 数据源业务分组顺序(与后端 DATA_SOURCE_SEEDS 的 category 对应)
+const CATEGORY_ORDER = ['现金流', '工单与客服', '投诉登记', '基础数据']
+
+// 按 category 分组,无 category 的归入"其他"
+const groupedSources = computed(() => {
+  const groups = {}
+  const others = []
+  for (const src of sources.value) {
+    if (src.category && CATEGORY_ORDER.includes(src.category)) {
+      ;(groups[src.category] ||= []).push(src)
+    } else {
+      others.push(src)
+    }
+  }
+  const result = CATEGORY_ORDER
+    .map((cat) => ({ category: cat, items: groups[cat] || [] }))
+    .filter((g) => g.items.length)
+  if (others.length) result.push({ category: '其他', items: others })
+  return result
+})
+
+// 默认展开全部分组
+const openedCategories = computed(() => groupedSources.value.map((g) => g.category))
+
+// 当前是否为占位数据源(规划中,无实际表)
+const isPlaceholder = computed(() => currentSource.value?.status === 'placeholder')
+
+// 已实现数据源数量(排除占位项)
+const activeSourceCount = computed(() => sources.value.filter((s) => s.status !== 'placeholder').length)
+
 async function loadSources() {
   try {
-    const res = await request.get('/data-sources')
+    const res = await request.get('/data-sources', { params: { include_placeholder: true } })
     sources.value = res.data || []
     if (sources.value.length) {
       handleSourceSelect(sources.value[0].code)
@@ -245,6 +300,8 @@ function handleSourceSelect(code) {
     searchKeyword.value = ''
     sortField.value = ''
     pagination.value.page = 1
+    // 占位数据源无实际表,不加载字段/汇总/记录/明细
+    if (src.status === 'placeholder') return
     loadFields(code)
     loadSummary(code)
     loadUploadRecords(code)
@@ -379,6 +436,16 @@ onMounted(() => {
 .sidebar-count { font-size: 12px; color: #909399; }
 .source-menu { flex: 1; border-right: none; }
 .count-badge { margin-left: 8px; }
+.group-title { font-size: 13px; font-weight: 600; color: #303133; }
+.group-count {
+  margin-left: 6px;
+  font-size: 12px;
+  color: #909399;
+}
+.source-menu :deep(.el-sub-menu__title) {
+  height: 40px;
+  line-height: 40px;
+}
 
 .main-area {
   flex: 1;
@@ -444,4 +511,17 @@ onMounted(() => {
 }
 .total-info { font-size: 13px; color: #606266; }
 .empty-area { flex: 1; display: flex; align-items: center; justify-content: center; }
+.placeholder-area {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+}
+.placeholder-hint {
+  margin-top: 12px;
+  font-size: 13px;
+  color: #909399;
+}
+.placeholder-tag { margin-left: 6px; }
 </style>

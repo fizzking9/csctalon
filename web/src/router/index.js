@@ -21,28 +21,25 @@ const routes = [
       },
       // 数据中心
       {
-        path: 'data/upload',
-        name: 'DataUpload',
-        component: () => import('@/views/data/Upload.vue'),
-        meta: { title: '数据上传', icon: 'Upload' },
+        path: 'data/ingest',
+        name: 'DataIngest',
+        component: () => import('@/views/data/Ingest.vue'),
+        meta: { title: '数据采集', icon: 'Upload' },
       },
+      // 兼容旧路径
+      { path: 'data/upload', redirect: '/data/ingest' },
+      { path: 'data/fetch', redirect: '/data/ingest?ingest=fetch' },
       {
         path: 'data/records',
         name: 'DataRecords',
         component: () => import('@/views/data/Records.vue'),
-        meta: { title: '上传记录', icon: 'Document' },
+        meta: { title: '导入记录', icon: 'Document' },
       },
       {
         path: 'data/browser',
         name: 'DataBrowser',
         component: () => import('@/views/data/Browser.vue'),
         meta: { title: '数据查看', icon: 'DataAnalysis' },
-      },
-      {
-        path: 'data/fetch',
-        name: 'DataFetch',
-        component: () => import('@/views/data/FetchRefund.vue'),
-        meta: { title: 'BMS同步', icon: 'Download' },
       },
       // 分析看板
       {

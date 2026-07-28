@@ -30,8 +30,12 @@ def _with_field_count(db, ds: DataSource) -> DataSourceOut:
 
 
 @router.get("", response_model=R, summary="数据源列表")
-def list_sources(db: DBSession, _: CurrentUser):
-    items = list(db.scalars(select(DataSource).order_by(DataSource.id)))
+def list_sources(db: DBSession, _: CurrentUser, include_placeholder: bool = Query(False)):
+    stmt = select(DataSource).order_by(DataSource.id)
+    # 默认排除占位数据源(规划中,无实际表);数据查看页传 include_placeholder=true 显示占位项
+    if not include_placeholder:
+        stmt = stmt.where(DataSource.status != "placeholder")
+    items = list(db.scalars(stmt))
     return R(data=[_with_field_count(db, ds) for ds in items])
 
 
@@ -94,10 +98,10 @@ def refresh_sources(db: DBSession, _: AdminUser):
 
 
 def _get_source_model(code: str):
-    """根据数据源 code 获取对应的 SQLAlchemy 模型类"""
+    """根据数据源 code 获取对应的 SQLAlchemy 模型类(占位数据源无 model,返回 None)"""
     for seed in DATA_SOURCE_SEEDS:
         if seed["code"] == code:
-            return seed["model"], seed.get("time_field")
+            return seed.get("model"), seed.get("time_field")
     return None, None
 
 

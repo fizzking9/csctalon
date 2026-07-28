@@ -25,6 +25,7 @@ from app.models.wallet import WalletWithdrawal
 # 2. 退费单:运营视角的费用操作
 # 3. 提现操作记录:会员钱包的操作记录
 # 4. 外部投诉:315和质量监督局的投诉
+# category 业务分组(数据查看左侧分组用):现金流/工单与客服/投诉登记/基础数据
 DATA_SOURCE_SEEDS: list[dict] = [
     {
         "code": "ticket",
@@ -35,6 +36,7 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "pk_field": "ticket_no",
         "pk_strategy": "primary_key",
         "sync_source": "bms",
+        "category": "工单与客服",
     },
     {
         "code": "refund",
@@ -45,6 +47,7 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "pk_field": "refund_no",
         "pk_strategy": "primary_key",
         "sync_source": "bms",
+        "category": "现金流",
     },
     {
         "code": "wallet",
@@ -55,6 +58,60 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "pk_field": None,
         "pk_strategy": "none",
         "sync_source": "bms",
+        "category": "现金流",
+    },
+    {
+        "code": "merchant_refund",
+        "model": MerchantRefund,
+        "name_cn": "商户号退款",
+        "time_field": "trade_time",
+        "sn_field": "device_no",
+        "pk_field": "wx_refund_no",
+        "pk_strategy": "primary_key",
+        "category": "现金流",
+    },
+    # 占位数据源(规划中,暂未建表实现):仅数据查看侧边栏占位,不可导入/同步/查看明细
+    {
+        "code": "shenmao_refund",
+        "name_cn": "闪猫退款",
+        "category": "现金流",
+        "placeholder": True,
+    },
+    {
+        "code": "other_refund",
+        "name_cn": "其他退款",
+        "category": "现金流",
+        "placeholder": True,
+    },
+    {
+        "code": "cs_record",
+        "model": CsRecord,
+        "name_cn": "智能助手处理记录",
+        "time_field": "operation_time",
+        "sn_field": "device_sn",
+        "pk_field": None,
+        "pk_strategy": "none",
+        "category": "工单与客服",
+    },
+    {
+        "code": "external_complaint",
+        "model": ExternalComplaint,
+        "name_cn": "外部投诉(315/监督局)",
+        "time_field": "complaint_date",
+        "sn_field": "device_sn",
+        "pk_field": "complaint_no",
+        "pk_strategy": "upsert",
+        "category": "投诉登记",
+    },
+    {
+        "code": "card_complaint",
+        "model": CardComplaint,
+        "name_cn": "卡商群投诉",
+        "time_field": "complaint_date",
+        "sn_field": "device_sn",
+        "pk_field": None,
+        "pk_strategy": "none",
+        "category": "投诉登记",
     },
     {
         "code": "device_combo",
@@ -65,42 +122,7 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "pk_field": "recharge_order_no",
         "pk_strategy": "primary_key",
         "sync_source": "bms",
-    },
-    {
-        "code": "external_complaint",
-        "model": ExternalComplaint,
-        "name_cn": "外部投诉(315/监督局)",
-        "time_field": "complaint_date",
-        "sn_field": "device_sn",
-        "pk_field": "complaint_no",
-        "pk_strategy": "upsert",
-    },
-    {
-        "code": "card_complaint",
-        "model": CardComplaint,
-        "name_cn": "卡商群投诉",
-        "time_field": "complaint_date",
-        "sn_field": "device_sn",
-        "pk_field": None,
-        "pk_strategy": "none",
-    },
-    {
-        "code": "merchant_refund",
-        "model": MerchantRefund,
-        "name_cn": "商户号退款",
-        "time_field": "trade_time",
-        "sn_field": "device_no",
-        "pk_field": "wx_refund_no",
-        "pk_strategy": "primary_key",
-    },
-    {
-        "code": "cs_record",
-        "model": CsRecord,
-        "name_cn": "智能助手处理记录",
-        "time_field": "operation_time",
-        "sn_field": "device_sn",
-        "pk_field": None,
-        "pk_strategy": "none",
+        "category": "基础数据",
     },
 ]
 
@@ -265,51 +287,66 @@ def ensure_data_sources_registered(db: Session) -> dict:
     """幂等注册：表已存在则更新元数据，字段集按模型反射重建"""
     stats = {"sources": 0, "fields": 0}
     for seed in DATA_SOURCE_SEEDS:
-        # 反射字段集
-        mapper = inspect(seed["model"])
+        is_placeholder = seed.get("placeholder", False)
+
+        # 反射字段集(占位项无 model,跳过反射)
         reflected: list[dict] = []
-        for col in mapper.columns:
-            if col.name in _EXCLUDED_FIELDS:
-                continue
-            override = FIELD_OVERRIDES.get((seed["code"], col.name), {})
-            reflected.append({
-                "field_name": col.name,
-                "field_name_cn": _clean_comment(col.comment) or None,
-                "data_type": _infer_data_type(col),
-                "semantic_role": override.get("role", "dimension"),
-                "agg_func": override.get("agg"),
-                "is_filterable": override.get("is_filterable", True),
-                "is_pk": override.get("is_pk", col.primary_key),
-                "enum_values": override.get("enum"),
-                "sort_order": len(reflected),
-            })
+        if not is_placeholder:
+            mapper = inspect(seed["model"])
+            for col in mapper.columns:
+                if col.name in _EXCLUDED_FIELDS:
+                    continue
+                override = FIELD_OVERRIDES.get((seed["code"], col.name), {})
+                reflected.append({
+                    "field_name": col.name,
+                    "field_name_cn": _clean_comment(col.comment) or None,
+                    "data_type": _infer_data_type(col),
+                    "semantic_role": override.get("role", "dimension"),
+                    "agg_func": override.get("agg"),
+                    "is_filterable": override.get("is_filterable", True),
+                    "is_pk": override.get("is_pk", col.primary_key),
+                    "enum_values": override.get("enum"),
+                    "sort_order": len(reflected),
+                })
+
+        # 表名/状态:占位项用占位表名 + placeholder 状态(无物理表)
+        table_name = f"_placeholder_{seed['code']}" if is_placeholder else seed["model"].__tablename__
+        status = "placeholder" if is_placeholder else "active"
+        time_field = None if is_placeholder else seed["time_field"]
+        sn_field = None if is_placeholder else seed["sn_field"]
+        pk_field = None if is_placeholder else seed["pk_field"]
+        pk_strategy = "none" if is_placeholder else seed["pk_strategy"]
 
         # upsert DataSource
         ds = db.scalar(select(DataSource).where(DataSource.code == seed["code"]))
         if ds:
-            ds.table_name = seed["model"].__tablename__
+            ds.table_name = table_name
             ds.name_cn = seed["name_cn"]
-            ds.time_field = seed["time_field"]
-            ds.sn_field = seed["sn_field"]
-            ds.pk_field = seed["pk_field"]
-            ds.pk_strategy = seed["pk_strategy"]
+            ds.time_field = time_field
+            ds.sn_field = sn_field
+            ds.pk_field = pk_field
+            ds.pk_strategy = pk_strategy
             ds.sync_source = seed.get("sync_source")
+            ds.category = seed.get("category")
+            ds.status = status
         else:
             ds = DataSource(
                 code=seed["code"],
-                table_name=seed["model"].__tablename__,
+                table_name=table_name,
                 name_cn=seed["name_cn"],
-                time_field=seed["time_field"],
-                sn_field=seed["sn_field"],
-                pk_field=seed["pk_field"],
-                pk_strategy=seed["pk_strategy"],
+                time_field=time_field,
+                sn_field=sn_field,
+                pk_field=pk_field,
+                pk_strategy=pk_strategy,
                 sync_source=seed.get("sync_source"),
+                category=seed.get("category"),
+                status=status,
             )
             db.add(ds)
             db.flush()
         stats["sources"] += 1
 
-        # 字段集重建（删旧建新，简单可靠）
+        # 字段集重建（删旧建新，简单可靠；占位项无字段）
         db.execute(delete(DataSourceField).where(DataSourceField.source_id == ds.id))
         for f in reflected:
             db.add(DataSourceField(source_id=ds.id, **f))
