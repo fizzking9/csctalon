@@ -82,9 +82,10 @@
             <span>管理闭环</span>
           </template>
           <el-menu-item index="/management/reports">报告索引</el-menu-item>
-          <el-menu-item index="/management/weekly">周报</el-menu-item>
+          <el-menu-item index="/management/weekly">周报看板</el-menu-item>
           <el-menu-item index="/management/measures">管理措施</el-menu-item>
           <el-menu-item index="/management/incidents">异常事件</el-menu-item>
+          <el-menu-item index="/management/templates">看板模板</el-menu-item>
         </el-sub-menu>
 
         <el-sub-menu v-if="authStore.isAdmin" index="system">

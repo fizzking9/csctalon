@@ -74,6 +74,7 @@ def _init_data_sources_and_presets() -> None:
     """启动时注册数据源元数据 + 预设分析视图(幂等)"""
     from app.services.data_source_registry import ensure_data_sources_registered
     from app.services.preset_dashboards_seed import ensure_preset_dashboards_registered
+    from app.services.preset_templates_seed import ensure_preset_templates_registered
     from app.services.preset_views_seed import ensure_preset_views_registered
     from app.services.sync_source_config_service import ensure_sync_sources_registered
 
@@ -85,6 +86,11 @@ def _init_data_sources_and_presets() -> None:
         logger.info(
             f"预设视图注册完成: presets={pv_stats['presets']}, "
             f"created={pv_stats['created']}, updated={pv_stats['updated']}"
+        )
+        pt_stats = ensure_preset_templates_registered(db)
+        logger.info(
+            f"预设模板注册完成: presets={pt_stats['presets']}, "
+            f"created={pt_stats['created']}, updated={pt_stats['updated']}, skipped={pt_stats['skipped']}"
         )
         pd_stats = ensure_preset_dashboards_registered(db)
         logger.info(

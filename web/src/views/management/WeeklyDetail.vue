@@ -13,6 +13,7 @@
       <div class="flex gap-8">
         <el-button :icon="ArrowLeft" @click="$router.push('/management/weekly')">返回</el-button>
         <template v-if="isDraft">
+          <el-button :icon="Files" @click="openTemplateDialog">套用模板</el-button>
           <el-button type="primary" :icon="DocumentChecked" :loading="saving" @click="handleSave">保存</el-button>
           <el-button type="success" :icon="Check" :loading="confirming" @click="handleConfirm">确认固化</el-button>
         </template>
@@ -27,8 +28,8 @@
     </el-card>
 
     <div class="framework-tip mb-16">
-      10项标准框架 · 视图型自动锁定本周时间范围({{ formatDate(report.week_start) }}~{{ formatDate(report.week_end) }})
-      <span v-if="isDraft">· 可编辑视图/负责人/摘要,确认后固化</span>
+      可编辑看板框架({{ (report.framework || []).length }}项) · 视图型自动锁定本周时间范围({{ formatDate(report.week_start) }}~{{ formatDate(report.week_end) }})
+      <span v-if="isDraft">· 可增删/排序分项/套用模板,确认后固化</span>
       <span v-else>· 已固化,后续跟进请在底部注释</span>
     </div>
 
@@ -37,13 +38,40 @@
       <template #header>
         <div class="section-header">
           <span class="section-index">{{ idx + 1 }}</span>
-          <span class="section-title">{{ section.title }}</span>
-          <el-tag size="small" :type="sectionTypeTag(section.section_type)" effect="plain" style="margin-left: 8px">
+          <el-input
+            v-if="isDraft"
+            v-model="section.title"
+            size="small"
+            style="width: 240px"
+            placeholder="分项标题"
+          />
+          <span v-else class="section-title">{{ section.title }}</span>
+          <el-select
+            v-if="isDraft"
+            v-model="section.section_type"
+            size="small"
+            style="width: 140px; margin-left: 8px"
+            @change="onSectionTypeChange(section)"
+          >
+            <el-option v-for="opt in sectionTypeOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+          </el-select>
+          <el-tag v-else size="small" :type="sectionTypeTag(section.section_type)" effect="plain" style="margin-left: 8px">
             {{ sectionTypeLabel(section.section_type) }}
           </el-tag>
           <span v-if="section.owner_id && !isDraft" class="muted" style="margin-left: auto">
             负责人: {{ userNameMap[section.owner_id] || '-' }}
           </span>
+          <div v-if="isDraft" class="section-actions">
+            <el-tooltip content="上移" placement="top">
+              <el-button :icon="ArrowUp" text size="small" :disabled="idx === 0" @click="moveSection(idx, -1)" />
+            </el-tooltip>
+            <el-tooltip content="下移" placement="top">
+              <el-button :icon="ArrowDown" text size="small" :disabled="idx === (report.framework || []).length - 1" @click="moveSection(idx, 1)" />
+            </el-tooltip>
+            <el-tooltip content="删除分项" placement="top">
+              <el-button :icon="Delete" text size="small" type="danger" @click="removeSection(idx)" />
+            </el-tooltip>
+          </div>
         </div>
       </template>
 
@@ -167,6 +195,12 @@
       </el-form>
     </el-card>
 
+    <!-- 添加分项(草稿态) -->
+    <div v-if="isDraft" class="add-bar mb-16">
+      <el-button :icon="Plus" type="primary" plain @click="addSection">添加分项</el-button>
+      <span class="muted">共 {{ (report.framework || []).length }} 项 · 可上下排序/删除/改类型</span>
+    </div>
+
     <!-- 会议评审 -->
     <el-card class="mb-16" header="会议评审（周会结论）">
       <el-form label-width="100px">
@@ -214,6 +248,29 @@
         <el-button type="primary" :loading="drillSubmitting" @click="handleDrillCreate">创建</el-button>
       </template>
     </el-dialog>
+
+    <!-- 套用模板 dialog -->
+    <el-dialog v-model="templateDialogVisible" title="套用模板(替换当前框架)" width="560px">
+      <el-alert type="warning" :closable="false" class="mb-16" show-icon>
+        套用模板会用模板框架替换当前周报看板分项(当前分项内容将被覆盖,未保存可恢复)。
+      </el-alert>
+      <el-form label-width="100px">
+        <el-form-item label="选择模板">
+          <el-select v-model="templateForm.templateId" placeholder="选择周报模板" filterable style="width: 100%">
+            <el-option v-for="t in templateOptions" :key="t.id" :label="t.name" :value="t.id">
+              <span>{{ t.name }}</span>
+              <el-tag v-if="t.is_default" size="small" type="success" style="margin-left: 6px">默认</el-tag>
+              <el-tag v-if="t.is_preset" size="small" type="warning" style="margin-left: 6px">预设</el-tag>
+            </el-option>
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <div class="page-sub mb-16">模板分项会实例化为带空摘要/数据的周报看板分项,可继续编辑。</div>
+      <template #footer>
+        <el-button @click="templateDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="templateSubmitting" @click="handleApplyTemplate">套用</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -221,8 +278,9 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Check, FolderOpened, DocumentChecked, Plus } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowUp, ArrowDown, Delete, Check, FolderOpened, DocumentChecked, Plus, Files } from '@element-plus/icons-vue'
 import { getWeeklyReport, updateWeeklyReport, confirmWeeklyReport, archiveWeeklyReport, createDrillReport } from '@/api/weekly'
+import { listReportTemplates, instantiateTemplate } from '@/api/report-template'
 import { listAnalysisViews, executeAnalysisView } from '@/api/analysis-view'
 import { listUsers } from '@/api/user'
 import ViewItemCard from '@/components/ViewItemCard.vue'
@@ -250,10 +308,97 @@ const userNameMap = computed(() => Object.fromEntries(userOptions.value.map((u) 
 
 const sectionTypeLabel = (t) => ({ view: '视图', measures: '措施', incidents: '异常', text: '文字' }[t] || t)
 const sectionTypeTag = (t) => ({ view: 'primary', measures: 'warning', incidents: 'danger', text: 'info' }[t] || 'info')
+const sectionTypeOptions = [
+  { value: 'view', label: '视图(数据看板)' },
+  { value: 'text', label: '文本(说明记录)' },
+  { value: 'measures', label: '措施(跟进/计划)' },
+  { value: 'incidents', label: '异常事件' },
+]
 const summaryPlaceholder = (section) => {
   if (section.section_type === 'measures') return '本周措施跟进情况/完成进度'
   if (section.section_type === 'incidents') return '本周异常事故记录/影响/处理'
   return '本周该项情况/结论'
+}
+
+// ---------- 可编辑看板: 增删/排序/套用模板 ----------
+const templateOptions = ref([])
+const templateDialogVisible = ref(false)
+const templateSubmitting = ref(false)
+const templateForm = reactive({ templateId: null })
+
+async function loadTemplateOptions() {
+  try {
+    const res = await listReportTemplates({ report_type: 'weekly', page: 1, page_size: 100 })
+    templateOptions.value = res.data.items || []
+  } catch (e) {
+    templateOptions.value = []
+  }
+}
+
+function openTemplateDialog() {
+  templateForm.templateId = null
+  templateDialogVisible.value = true
+}
+
+async function handleApplyTemplate() {
+  if (!templateForm.templateId) {
+    ElMessage.warning('请选择模板')
+    return
+  }
+  templateSubmitting.value = true
+  try {
+    const res = await instantiateTemplate(templateForm.templateId)
+    // 用实例化框架替换当前 framework
+    report.value.framework = res.data || []
+    templateDialogVisible.value = false
+    ElMessage.success('已套用模板,请检查各分项视图绑定并保存')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '套用失败')
+  } finally {
+    templateSubmitting.value = false
+  }
+}
+
+function addSection() {
+  const newSec = {
+    key: `section_${Date.now()}`,
+    title: '新分项',
+    section_type: 'view',
+    view_ids: [],
+    owner_id: null,
+    summary: '',
+    data: null,
+    related_report_ids: [],
+  }
+  if (!Array.isArray(report.value.framework)) report.value.framework = []
+  report.value.framework.push(newSec)
+}
+
+async function removeSection(idx) {
+  try {
+    await ElMessageBox.confirm(`确认删除分项[${report.value.framework[idx].title}]?`, '删除分项', { type: 'warning' })
+  } catch {
+    return
+  }
+  report.value.framework.splice(idx, 1)
+}
+
+function moveSection(idx, direction) {
+  const arr = report.value.framework
+  const target = idx + direction
+  if (target < 0 || target >= arr.length) return
+  const tmp = arr[idx]
+  arr[idx] = arr[target]
+  arr[target] = tmp
+  // 触发响应式更新
+  report.value.framework = [...arr]
+}
+
+function onSectionTypeChange(section) {
+  // 切换到非 view 类型时清空 view_ids 无需,保留以便切回; data 清空避免误用
+  if (section.section_type !== 'view') {
+    section.data = null
+  }
 }
 
 async function loadReport() {
@@ -403,6 +548,7 @@ onMounted(() => {
   loadReport()
   loadViewOptions()
   loadUsers()
+  loadTemplateOptions()
 })
 </script>
 
@@ -465,5 +611,15 @@ onMounted(() => {
   align-items: center;
   flex-wrap: wrap;
   gap: 4px;
+}
+.section-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+}
+.add-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 </style>

@@ -217,6 +217,12 @@ const routes = [
         component: () => import('@/views/management/Incidents.vue'),
         meta: { title: '异常事件', icon: 'Warning', manager: true },
       },
+      {
+        path: 'management/templates',
+        name: 'ManagementTemplates',
+        component: () => import('@/views/management/ReportTemplates.vue'),
+        meta: { title: '看板模板', icon: 'Files', manager: true },
+      },
       // 系统
       {
         path: 'system/users',

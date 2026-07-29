@@ -30,14 +30,21 @@ request.interceptors.response.use(
   (error) => {
     if (error.response) {
       const status = error.response.status
-      const detail = error.response.data?.detail || error.response.data?.message || '请求错误'
+      // detail 可能是字符串、数组(FastAPI 422验证错误)或对象,统一转为字符串
+      let detail = error.response.data?.detail || error.response.data?.message || '请求错误'
+      if (Array.isArray(detail)) {
+        // FastAPI 422 验证错误: [{type, loc, msg, ...}], 提取可读信息
+        detail = detail.map((e) => e?.msg || String(e)).join('; ') || '请求参数错误'
+      } else if (typeof detail === 'object') {
+        detail = detail?.msg || JSON.stringify(detail)
+      }
       if (status === 401) {
         const authStore = useAuthStore()
         authStore.logout()
         router.push('/login')
         ElMessage.error('登录已过期,请重新登录')
       } else {
-        ElMessage.error(detail)
+        ElMessage.error(String(detail))
       }
     } else {
       ElMessage.error('网络异常,请检查后端服务是否启动')

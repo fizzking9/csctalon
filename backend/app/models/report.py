@@ -48,6 +48,9 @@ class Report(IDMixin, TimestampMixin, Base):
     snapshot: Mapped[dict | None] = mapped_column(
         JSONB, nullable=True, comment="视图配置+执行结果快照(关键数据),confirm时固化"
     )
+    framework: Mapped[list | None] = mapped_column(
+        JSONB, nullable=True, comment="看板框架(可选,同WeeklyReport.framework结构)"
+    )
     pdf_archive: Mapped[str | None] = mapped_column(String(512), nullable=True, comment="归档PDF路径(可选)")
     status: Mapped[str] = mapped_column(
         String(32), default=ReportStatus.DRAFT.value, nullable=False, index=True, comment="状态:草稿/已确认/已归档"

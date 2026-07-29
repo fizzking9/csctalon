@@ -37,6 +37,7 @@ def _serialize_report(r: Report, audit_note_count: int | None = None) -> dict:
         "time_end": r.time_end.isoformat() if r.time_end else None,
         "filters": r.filters,
         "view_ids": r.view_ids,
+        "framework": r.framework,
         "has_snapshot": r.snapshot is not None,
         "pdf_archive": r.pdf_archive,
         "status": r.status,
@@ -117,7 +118,7 @@ def list_reports(
     )
 
 
-@router.get("/{report_id}", response_model=R, summary="报告详情(含快照)")
+@router.get("/{report_id}", response_model=R, summary="报告详情(含快照+看板框架)")
 def get_report(report_id: int, db: DBSession, current_user: CurrentUser):
     r = db.get(Report, report_id)
     if not r:
@@ -139,6 +140,7 @@ def create_report(payload: dict, db: DBSession, current_user: AdminOrSupervisor)
         time_end=datetime.fromisoformat(payload["time_end"]) if payload.get("time_end") else None,
         filters=payload.get("filters"),
         view_ids=payload.get("view_ids"),
+        framework=payload.get("framework"),
         status=ReportStatus.DRAFT.value,
         assignee_id=payload.get("assignee_id"),
         due_date=datetime.fromisoformat(payload["due_date"]) if payload.get("due_date") else None,
@@ -159,7 +161,7 @@ def update_report(report_id: int, payload: dict, db: DBSession, current_user: Ad
         raise HTTPException(status_code=404, detail="报告不存在")
     if r.status != ReportStatus.DRAFT.value:
         raise HTTPException(status_code=400, detail="仅草稿可编辑,已确认/已归档不可改")
-    for k in ("name", "filters", "view_ids", "pdf_archive", "assignee_id", "source_weekly_id", "source_section_key"):
+    for k in ("name", "filters", "view_ids", "framework", "pdf_archive", "assignee_id", "source_weekly_id", "source_section_key"):
         if k in payload:
             setattr(r, k, payload[k])
     for k in ("time_start", "time_end", "due_date"):
@@ -174,17 +176,44 @@ def update_report(report_id: int, payload: dict, db: DBSession, current_user: Ad
 
 @router.post("/{report_id}/confirm", response_model=R, summary="确认报告(固化快照)")
 def confirm_report(report_id: int, payload: dict, db: DBSession, current_user: AdminOrSupervisor):
-    """确认报告: 固化 snapshot(视图配置+关键结果), status→confirmed。
+    """确认报告: 固化快照, status→confirmed。双模式:
+    - 看板模式(有 framework): 固化各 section.data(若前端传入), 自动派生轻量 snapshot
+    - 纯快照模式(无 framework): 必须传 snapshot(向后兼容)
     快照一旦固化不再随源数据变,满足"报告固化数据视图"的审计要求。"""
     r = db.get(Report, report_id)
     if not r:
         raise HTTPException(status_code=404, detail="报告不存在")
     if r.status != ReportStatus.DRAFT.value:
         raise HTTPException(status_code=400, detail=f"仅草稿可确认,当前状态: {r.status}")
-    snapshot = payload.get("snapshot")
-    if snapshot is None:
-        raise HTTPException(status_code=400, detail="确认时必须提供快照数据")
-    r.snapshot = snapshot
+
+    framework = r.framework
+    # 更新 framework(固化各 section.data 快照)
+    if framework is not None and payload.get("framework") is not None:
+        r.framework = payload["framework"]
+        framework = r.framework
+
+    if framework:
+        # 看板模式: 派生轻量 snapshot = 各 section 的 view_ids + data 摘要
+        derived = []
+        for sec in framework:
+            if not isinstance(sec, dict):
+                continue
+            derived.append(
+                {
+                    "key": sec.get("key"),
+                    "title": sec.get("title"),
+                    "view_ids": sec.get("view_ids") or [],
+                    "has_data": sec.get("data") is not None,
+                }
+            )
+        r.snapshot = {"mode": "kanban", "sections": derived}
+    else:
+        # 纯快照模式: 必须传 snapshot
+        snapshot = payload.get("snapshot")
+        if snapshot is None:
+            raise HTTPException(status_code=400, detail="无看板框架时,确认必须提供快照数据")
+        r.snapshot = snapshot
+
     if payload.get("pdf_archive"):
         r.pdf_archive = payload["pdf_archive"]
     r.status = ReportStatus.CONFIRMED.value
@@ -192,7 +221,9 @@ def confirm_report(report_id: int, payload: dict, db: DBSession, current_user: A
     r.confirmed_by = current_user.username
     db.commit()
     db.refresh(r)
-    return R(data=_serialize_report(r))
+    data = _serialize_report(r)
+    data["snapshot"] = r.snapshot  # 确认后返回完整快照(供前端展示)
+    return R(data=data)
 
 
 @router.post("/{report_id}/archive", response_model=R, summary="归档报告")

@@ -13,9 +13,12 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from sqlalchemy import func, select
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.api.deps import AdminOrSupervisor, CurrentUser, DBSession
+from app.api.v1.report_templates import instantiate_framework
 from app.models.report import Report, ReportStatus, ReportType
+from app.models.report_template import ReportTemplate
 from app.models.weekly_report import (
     WEEKLY_FRAMEWORK_SECTIONS,
     WeeklyReport,
@@ -50,30 +53,34 @@ def _serialize(w: WeeklyReport) -> dict:
 
 
 def _normalize_framework(framework: list) -> list:
-    """规范化框架: 按 WEEKLY_FRAMEWORK_SECTIONS 顺序对齐, 补齐缺失项, 保留已填内容。
-    section_type 用模板默认值(不可改), view_ids/owner_id/summary/data/related_report_ids 保留已填。"""
-    by_key = {item.get("key"): item for item in framework if isinstance(item, dict) and item.get("key")}
+    """规范化框架: 保留用户自定义 section 与顺序, 仅做字段补齐与脏数据清洗。
+    不再强制对齐 10 项固定框架(支持可编辑看板)。
+    兼容旧格式 view_id(单值)→view_ids(列表), related_report_id(单值)→列表。"""
     result = []
-    for section in WEEKLY_FRAMEWORK_SECTIONS:
-        existing = by_key.get(section["key"], {})
-        # view_ids: 兼容旧格式 view_id(单值) → view_ids(列表)
-        view_ids = existing.get("view_ids")
-        if view_ids is None and existing.get("view_id") is not None:
-            view_ids = [existing["view_id"]]
-        # related_report_ids: 兼容旧格式 related_report_id(单值) → 列表
-        related_ids = existing.get("related_report_ids")
-        if related_ids is None and existing.get("related_report_id") is not None:
-            related_ids = [existing["related_report_id"]]
+    seen_keys = set()
+    for sec in framework or []:
+        if not isinstance(sec, dict) or not sec.get("key"):
+            continue
+        key = sec["key"]
+        if key in seen_keys:
+            continue  # 去重
+        seen_keys.add(key)
+        view_ids = sec.get("view_ids")
+        if view_ids is None and sec.get("view_id") is not None:
+            view_ids = [sec["view_id"]]
+        related_ids = sec.get("related_report_ids")
+        if related_ids is None and sec.get("related_report_id") is not None:
+            related_ids = [sec["related_report_id"]]
         result.append(
             {
-                "key": section["key"],
-                "title": existing.get("title") or section["title"],
-                "section_type": section["section_type"],
-                "view_ids": view_ids or [],
-                "owner_id": existing.get("owner_id"),
-                "summary": existing.get("summary") or "",
-                "data": existing.get("data"),
-                "related_report_ids": related_ids or [],
+                "key": key,
+                "title": sec.get("title") or key,
+                "section_type": sec.get("section_type") or "view",
+                "view_ids": list(view_ids or []),
+                "owner_id": sec.get("owner_id"),
+                "summary": sec.get("summary") or "",
+                "data": sec.get("data"),
+                "related_report_ids": list(related_ids or []),
             }
         )
     return result
@@ -88,6 +95,25 @@ def _serialize_binding(b: WeeklySectionBinding) -> dict:
         "is_active": b.is_active,
         "created_by": b.created_by,
     }
+
+
+def _get_default_template(db, report_type: str) -> ReportTemplate | None:
+    """取指定类型的默认模板(无默认则取该类型第一个 active 模板)。"""
+    t = db.scalar(
+        select(ReportTemplate).where(
+            ReportTemplate.report_type == report_type,
+            ReportTemplate.is_default.is_(True),
+            ReportTemplate.status == "active",
+        )
+    )
+    if not t:
+        t = db.scalar(
+            select(ReportTemplate).where(
+                ReportTemplate.report_type == report_type,
+                ReportTemplate.status == "active",
+            ).order_by(ReportTemplate.sort_order, ReportTemplate.id)
+        )
+    return t
 
 
 # ---------- 周次计算 ----------
@@ -108,18 +134,52 @@ def _iso_week_range(dt: datetime | None = None) -> tuple[datetime, datetime, str
 # ---------- 框架模板 ----------
 
 
-@router.get("/framework", response_model=R, summary="周报10项框架模板")
-def get_framework(current_user: CurrentUser):
-    """返回 10 项标准框架的 key/title/section_type(供前端表单渲染与校验)"""
+@router.get("/framework", response_model=R, summary="周报框架模板(取默认周报模板)")
+def get_framework(db: DBSession, current_user: CurrentUser):
+    """返回默认周报模板的 section 定义(供前端表单渲染与校验)。
+    无模板时退回硬编码 10 项标准框架。"""
+    t = _get_default_template(db, "weekly")
+    if t and t.framework:
+        # 返回模板侧结构(无 data/summary)
+        sections = []
+        for sec in t.framework:
+            sections.append(
+                {
+                    "key": sec.get("key"),
+                    "title": sec.get("title"),
+                    "section_type": sec.get("section_type") or "view",
+                    "view_ids": sec.get("view_ids") or [],
+                    "owner_id": sec.get("owner_id"),
+                    "summary_placeholder": sec.get("summary_placeholder") or "",
+                }
+            )
+        return R(data=sections)
     return R(data=WEEKLY_FRAMEWORK_SECTIONS)
 
 
-# ---------- 绑定配置(默认视图绑定) ----------
+# ---------- 绑定配置(deprecated 代理: 读写默认周报模板的 section) ----------
 
 
-@router.get("/bindings", response_model=R, summary="周报分项默认绑定配置")
+@router.get("/bindings", response_model=R, summary="周报分项默认绑定配置(代理默认模板)")
 def list_bindings(db: DBSession, current_user: CurrentUser):
-    """返回所有 section_key 的绑定配置(未配置的返回空模板)"""
+    """返回默认周报模板各 section 的绑定配置(view_ids/owner_id)。
+    兼容旧前端 binding 结构: {id, section_key, view_ids, owner_id, is_active}。"""
+    t = _get_default_template(db, "weekly")
+    if t and t.framework:
+        result = []
+        for sec in t.framework:
+            result.append(
+                {
+                    "id": None,
+                    "section_key": sec.get("key"),
+                    "view_ids": sec.get("view_ids") or [],
+                    "owner_id": sec.get("owner_id"),
+                    "is_active": True,
+                    "created_by": None,
+                }
+            )
+        return R(data=result)
+    # 无模板时回退旧表
     existing = {b.section_key: b for b in db.scalars(select(WeeklySectionBinding))}
     result = []
     for s in WEEKLY_FRAMEWORK_SECTIONS:
@@ -140,10 +200,35 @@ def list_bindings(db: DBSession, current_user: CurrentUser):
     return R(data=result)
 
 
-@router.put("/bindings", response_model=R, summary="批量保存绑定配置(管理员配一次)")
+@router.put("/bindings", response_model=R, summary="批量保存绑定配置(代理写入默认模板)")
 def save_bindings(payload: dict, db: DBSession, current_user: AdminOrSupervisor):
-    """批量保存分项默认绑定配置。payload: {bindings: [{section_key, view_ids, owner_id, is_active}]}"""
+    """批量保存分项默认绑定配置, 写入默认周报模板的 framework section(view_ids/owner_id)。
+    payload: {bindings: [{section_key, view_ids, owner_id, is_active}]}"""
     items = payload.get("bindings") or []
+    item_map = {it.get("section_key"): it for it in items if it.get("section_key")}
+    t = _get_default_template(db, "weekly")
+    if t:
+        new_framework = []
+        for sec in (t.framework or []):
+            key = sec.get("key")
+            it = item_map.get(key)
+            if it:
+                new_framework.append(
+                    {
+                        "key": key,
+                        "title": sec.get("title") or key,
+                        "section_type": sec.get("section_type") or "view",
+                        "view_ids": it.get("view_ids") or [],
+                        "owner_id": it.get("owner_id"),
+                        "summary_placeholder": sec.get("summary_placeholder") or "",
+                    }
+                )
+            else:
+                new_framework.append(dict(sec))
+        t.framework = new_framework
+        db.commit()
+        return R(message="绑定配置已写入默认周报模板")
+    # 无模板时回退旧表
     existing = {b.section_key: b for b in db.scalars(select(WeeklySectionBinding))}
     valid_keys = {s["key"] for s in WEEKLY_FRAMEWORK_SECTIONS}
     for item in items:
@@ -171,13 +256,13 @@ def save_bindings(payload: dict, db: DBSession, current_user: AdminOrSupervisor)
 # ---------- 一键生成本周周报看板 ----------
 
 
-@router.post("/generate", response_model=R, summary="一键生成本周周报看板(自动周次+默认绑定)")
+@router.post("/generate", response_model=R, summary="一键生成本周周报看板(自动周次+默认模板)")
 def generate_this_week(db: DBSession, current_user: AdminOrSupervisor, payload: dict = Body(default={})):
     """一键生成本周周报看板:
     - 自动计算本周周一~周日 + ISO 周次名称(如 2026-W30 客服中心周报)
-    - 从 weekly_section_bindings 取默认 view_ids/owner_id 填充各 section
+    - 从默认周报模板实例化 framework(含 view_ids/owner_id 默认绑定)
     - 若本周已存在草稿则返回已有(避免重复创建)
-    payload 可选: {date?: 'YYYY-MM-DD'(指定周), name?: 覆盖名称}
+    payload 可选: {date?: 'YYYY-MM-DD'(指定周), name?: 覆盖名称, template_id?: 指定模板}
     """
     date_str = payload.get("date")
     base_dt = datetime.fromisoformat(date_str) if date_str else datetime.now()
@@ -190,25 +275,36 @@ def generate_this_week(db: DBSession, current_user: AdminOrSupervisor, payload: 
     if existing:
         return R(data=_serialize(existing), message=f"本周({week_label})已存在周报看板")
 
-    # 取绑定配置
-    bindings = {b.section_key: b for b in db.scalars(select(WeeklySectionBinding).where(WeeklySectionBinding.is_active.is_(True)))}
+    # 取模板: 优先指定 template_id, 否则默认周报模板
+    t = None
+    if payload.get("template_id"):
+        t = db.get(ReportTemplate, payload["template_id"])
+    if not t:
+        t = _get_default_template(db, "weekly")
 
-    # 构建 framework: 从绑定配置填充 view_ids/owner_id
-    framework = []
-    for s in WEEKLY_FRAMEWORK_SECTIONS:
-        b = bindings.get(s["key"])
-        framework.append(
-            {
-                "key": s["key"],
-                "title": s["title"],
-                "section_type": s["section_type"],
-                "view_ids": (b.view_ids if b and b.view_ids else []),
-                "owner_id": (b.owner_id if b else None),
-                "summary": "",
-                "data": None,
-                "related_report_ids": [],
-            }
-        )
+    if t and t.framework:
+        framework = instantiate_framework(t.framework)
+    else:
+        # 无模板时回退旧逻辑(10 项 + 旧绑定表)
+        bindings = {
+            b.section_key: b
+            for b in db.scalars(select(WeeklySectionBinding).where(WeeklySectionBinding.is_active.is_(True)))
+        }
+        framework = []
+        for s in WEEKLY_FRAMEWORK_SECTIONS:
+            b = bindings.get(s["key"])
+            framework.append(
+                {
+                    "key": s["key"],
+                    "title": s["title"],
+                    "section_type": s["section_type"],
+                    "view_ids": (b.view_ids if b and b.view_ids else []),
+                    "owner_id": (b.owner_id if b else None),
+                    "summary": "",
+                    "data": None,
+                    "related_report_ids": [],
+                }
+            )
 
     name = payload.get("name") or f"{week_label} 客服中心周报"
     w = WeeklyReport(
@@ -222,7 +318,7 @@ def generate_this_week(db: DBSession, current_user: AdminOrSupervisor, payload: 
     db.add(w)
     db.commit()
     db.refresh(w)
-    return R(data=_serialize(w), message=f"已生成 {week_label} 周报看板(已自动绑定默认视图)")
+    return R(data=_serialize(w), message=f"已生成 {week_label} 周报看板(已从默认模板实例化)")
 
 
 # ---------- 周报 CRUD ----------
@@ -378,12 +474,16 @@ def create_drill_report(
         raise HTTPException(status_code=400, detail=f"无效的分项key: {section_key}")
 
     name = (payload.get("name") or f"{w.name} - {section.get('title', section_key)} 专项审查").strip()
+    # 套用专项审计默认模板实例化 framework(支持可编辑看板)
+    sa_template = _get_default_template(db, "special_audit")
+    report_framework = instantiate_framework(sa_template.framework) if sa_template and sa_template.framework else None
     r = Report(
         name=name,
         report_type=ReportType.SPECIAL_AUDIT.value,
         time_start=w.week_start,
         time_end=w.week_end,
         status=ReportStatus.DRAFT.value,
+        framework=report_framework,
         assignee_id=payload.get("assignee_id"),
         due_date=datetime.fromisoformat(payload["due_date"]) if payload.get("due_date") else None,
         source_weekly_id=weekly_id,
@@ -398,6 +498,7 @@ def create_drill_report(
         related_ids.append(r.id)
     section["related_report_ids"] = related_ids
     w.framework = framework  # 触发 JSONB 更新
+    flag_modified(w, "framework")  # 确保 SQLAlchemy 检测到 JSONB 原地变更
     db.commit()
     db.refresh(r)
     return R(

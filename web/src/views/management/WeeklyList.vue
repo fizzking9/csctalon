@@ -3,10 +3,10 @@
     <div class="flex-between mb-16">
       <div>
         <div class="page-title" style="margin: 0">周报看板</div>
-        <div class="page-sub">10项标准框架 · 视图+摘要组合 · 确认后固化,可持续注释/下钻审计</div>
+        <div class="page-sub">可编辑看板框架 · 视图+摘要组合 · 确认后固化,可持续注释/下钻审计</div>
       </div>
       <div class="flex gap-8">
-        <el-button :icon="Setting" @click="openBindings">默认绑定配置</el-button>
+        <el-button :icon="Files" @click="$router.push('/management/templates')">看板模板</el-button>
         <el-button type="success" :icon="MagicStick" :loading="generating" @click="handleGenerate">一键生成本周</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">手动新建</el-button>
       </div>
@@ -71,41 +71,10 @@
           <el-input v-model="form.summary" type="textarea" :rows="2" placeholder="本周总体情况概述(可选)" />
         </el-form-item>
       </el-form>
-      <div class="page-sub mb-16">创建后自动生成 10 项空白框架,可在详情页逐项填写。推荐使用"一键生成本周"自动填充默认绑定。</div>
+      <div class="page-sub mb-16">创建后从默认周报模板实例化空白框架,可在详情页逐项填写/增删分项。推荐使用"一键生成本周"自动从默认模板生成。</div>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="submitting" @click="handleCreate">创建</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- 默认绑定配置对话框 -->
-    <el-dialog v-model="bindingDialogVisible" title="周报分项默认绑定配置" width="720px" top="5vh">
-      <div class="page-sub mb-16">管理员配置一次,一键生成本周周报看板时自动填充各分项的视图和负责人。草稿态仍可临时调整。</div>
-      <el-table :data="bindings" border size="small" max-height="480">
-        <el-table-column label="分项" width="180">
-          <template #default="{ row }">{{ sectionLabel(row.section_key) }}</template>
-        </el-table-column>
-        <el-table-column label="默认视图(可多选)" min-width="280">
-          <template #default="{ row }">
-            <el-select v-model="row.view_ids" multiple filterable placeholder="选择视图" style="width: 100%">
-              <el-option v-for="v in viewOptions" :key="v.id" :label="v.name" :value="v.id">
-                <span>{{ v.name }}</span>
-                <el-tag v-if="v.is_preset" size="small" type="warning" style="margin-left: 6px">预设</el-tag>
-              </el-option>
-            </el-select>
-          </template>
-        </el-table-column>
-        <el-table-column label="默认负责人" width="200">
-          <template #default="{ row }">
-            <el-select v-model="row.owner_id" clearable filterable placeholder="负责人" style="width: 100%">
-              <el-option v-for="u in userOptions" :key="u.id" :label="u.display_name" :value="u.id" />
-            </el-select>
-          </template>
-        </el-table-column>
-      </el-table>
-      <template #footer>
-        <el-button @click="bindingDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="bindingSaving" @click="handleSaveBindings">保存配置</el-button>
       </template>
     </el-dialog>
   </div>
@@ -115,17 +84,13 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Setting, MagicStick } from '@element-plus/icons-vue'
+import { Plus, Refresh, MagicStick, Files } from '@element-plus/icons-vue'
 import {
   listWeeklyReports,
   createWeeklyReport,
   deleteWeeklyReport,
   generateWeeklyReport,
-  listWeeklyBindings,
-  saveWeeklyBindings,
 } from '@/api/weekly'
-import { listAnalysisViews } from '@/api/analysis-view'
-import { listUsers } from '@/api/user'
 import dayjs from 'dayjs'
 
 const router = useRouter()
@@ -139,31 +104,10 @@ const submitting = ref(false)
 const form = reactive({ name: '', range: null, summary: '' })
 const generating = ref(false)
 
-// 绑定配置
-const bindingDialogVisible = ref(false)
-const bindingSaving = ref(false)
-const bindings = ref([])
-const viewOptions = ref([])
-const userOptions = ref([])
-
 const statusMap = { draft: '草稿', confirmed: '已确认', archived: '已归档' }
 const statusType = (s) => ({ draft: 'info', confirmed: 'success', archived: 'warning' }[s] || 'info')
 const formatDate = (t) => (t ? dayjs(t).format('YYYY-MM-DD') : '-')
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-')
-
-const SECTION_LABELS = {
-  measure_followup: '措施跟进',
-  reception_trend: '总体接待人均趋势',
-  reception_summary: '分项接待汇总',
-  group_reception: '各组接待量',
-  refund_recovery: '退款挽回专项',
-  complaint: '投诉专项(内+外315)',
-  issues: '问题汇总',
-  measure_plan: '措施计划(输出下周)',
-  cross_dept: '跨部门协调(含上游打分)',
-  incidents: '异常事故',
-}
-const sectionLabel = (k) => SECTION_LABELS[k] || k
 
 async function loadData() {
   loading.value = true
@@ -229,36 +173,6 @@ async function handleGenerate() {
     ElMessage.error(e.response?.data?.detail || '生成失败')
   } finally {
     generating.value = false
-  }
-}
-
-async function openBindings() {
-  const [bindRes, viewRes, userRes] = await Promise.all([
-    listWeeklyBindings(),
-    listAnalysisViews({ page: 1, page_size: 100 }),
-    listUsers({ page: 1, page_size: 100 }),
-  ])
-  bindings.value = bindRes.data || []
-  viewOptions.value = viewRes.data.items || []
-  userOptions.value = userRes.data.items || []
-  bindingDialogVisible.value = true
-}
-
-async function handleSaveBindings() {
-  bindingSaving.value = true
-  try {
-    await saveWeeklyBindings({
-      bindings: bindings.value.map((b) => ({
-        section_key: b.section_key,
-        view_ids: b.view_ids || [],
-        owner_id: b.owner_id || null,
-        is_active: b.is_active !== false,
-      })),
-    })
-    ElMessage.success('绑定配置已保存')
-    bindingDialogVisible.value = false
-  } finally {
-    bindingSaving.value = false
   }
 }
 
