@@ -127,6 +127,13 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(OperationLogMiddleware)
 
+    # 静态文件: 挂载 uploads 目录,审计贴图等附件可通过 /uploads/... 访问
+    from fastapi.staticfiles import StaticFiles
+
+    uploads_path = Path(settings.UPLOAD_DIR)
+    uploads_path.mkdir(parents=True, exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory=str(uploads_path)), name="uploads")
+
     app.include_router(api_router, prefix="/api/v1")
 
     @app.get("/health", tags=["系统"])

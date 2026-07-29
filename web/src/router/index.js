@@ -180,6 +180,43 @@ const routes = [
         component: () => import('@/views/report/Center.vue'),
         meta: { title: '报表中心', icon: 'Printer', manager: true },
       },
+      // 管理闭环(报告→审计→措施→跟进→回看)
+      {
+        path: 'management/reports',
+        name: 'ManagementReports',
+        component: () => import('@/views/management/ReportList.vue'),
+        meta: { title: '报告索引', icon: 'Document', manager: true },
+      },
+      {
+        path: 'management/reports/:id',
+        name: 'ManagementReportDetail',
+        component: () => import('@/views/management/ReportDetail.vue'),
+        meta: { title: '报告详情', hidden: true, manager: true },
+      },
+      {
+        path: 'management/weekly',
+        name: 'ManagementWeekly',
+        component: () => import('@/views/management/WeeklyList.vue'),
+        meta: { title: '周报', icon: 'Calendar', manager: true },
+      },
+      {
+        path: 'management/weekly/:id',
+        name: 'ManagementWeeklyDetail',
+        component: () => import('@/views/management/WeeklyDetail.vue'),
+        meta: { title: '周报详情', hidden: true, manager: true },
+      },
+      {
+        path: 'management/measures',
+        name: 'ManagementMeasures',
+        component: () => import('@/views/management/Measures.vue'),
+        meta: { title: '管理措施', icon: 'Flag', manager: true },
+      },
+      {
+        path: 'management/incidents',
+        name: 'ManagementIncidents',
+        component: () => import('@/views/management/Incidents.vue'),
+        meta: { title: '异常事件', icon: 'Warning', manager: true },
+      },
       // 系统
       {
         path: 'system/users',

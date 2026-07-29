@@ -75,6 +75,18 @@
           <span>报表中心</span>
         </el-menu-item>
 
+        <!-- 管理闭环:报告→审计→措施→跟进→回看(管理层可见) -->
+        <el-sub-menu v-if="authStore.isManager" index="management">
+          <template #title>
+            <el-icon><Flag /></el-icon>
+            <span>管理闭环</span>
+          </template>
+          <el-menu-item index="/management/reports">报告索引</el-menu-item>
+          <el-menu-item index="/management/weekly">周报</el-menu-item>
+          <el-menu-item index="/management/measures">管理措施</el-menu-item>
+          <el-menu-item index="/management/incidents">异常事件</el-menu-item>
+        </el-sub-menu>
+
         <el-sub-menu v-if="authStore.isAdmin" index="system">
           <template #title>
             <el-icon><Setting /></el-icon>
