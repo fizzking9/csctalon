@@ -514,24 +514,40 @@ def upsert_card_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
 
 
 def upsert_device_combos(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
-    """设备套餐 - 主键 recharge_order_no,有则更新无则插入"""
+    """设备套餐 - 主键 recharge_order_no,有则更新无则插入
+
+    初始套餐(免费赠送/体验套餐)在 BMS 导出时无充值订单号,此前被主键非空校验跳过,
+    导致这部分记录缺失。现为其生成稳定 fallback 主键 `INIT::{device_sn}::{package_name}::{start_date}`:
+      - `INIT::` 前缀与真实订单号(BR/WX/SP 开头)隔离,绝不冲突
+      - (device_sn, package_name, start_date) 组合唯一,保证多次增量同步幂等(命中 on_conflict_do_update)
+      - device_sn 缺失时无法构造稳定唯一键,才报错跳过(安全网,正常初始套餐数据不触发)
+    """
     rows: list[dict] = []
     for idx, row in enumerate(df.to_dict("records")):
         try:
             data = apply_mapping(row, mapping)
             order_no = (data.get("recharge_order_no") or "").strip() if data.get("recharge_order_no") else None
+            device_sn = data.get("device_sn")
+            package_name = data.get("package_name")
+            start_date = _to_datetime(data.get("start_date"))
+
             if not order_no:
-                result.add_error(idx, "充值订单号为空")
-                continue
+                # 无充值订单号(典型:初始套餐),生成 fallback 主键入库
+                if not device_sn:
+                    result.add_error(idx, "充值订单号为空且设备SN为空,无法生成主键")
+                    continue
+                start_str = start_date.strftime("%Y-%m-%d") if start_date else "unknown"
+                order_no = f"INIT::{device_sn}::{package_name or 'unknown'}::{start_str}"
+
             rows.append({
                 "recharge_order_no": order_no,
-                "device_sn": data.get("device_sn"),
-                "package_name": data.get("package_name"),
+                "device_sn": device_sn,
+                "package_name": package_name,
                 "package_type": data.get("package_type"),
                 "traffic_type": data.get("traffic_type"),
                 "merchant_name": data.get("merchant_name"),
                 "actual_amount": _to_float(data.get("actual_amount")),
-                "start_date": _to_datetime(data.get("start_date")),
+                "start_date": start_date,
                 "end_date": _to_datetime(data.get("end_date")),
                 "updated_at_raw": _to_datetime(data.get("updated_at_raw")),
                 "created_at_raw": _to_datetime(data.get("created_at_raw")),
