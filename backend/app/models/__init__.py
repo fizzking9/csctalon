@@ -19,6 +19,7 @@ from app.models.operation_log import OperationLog  # noqa: F401
 from app.models.person import Person, PersonAlias  # noqa: F401
 from app.models.refund import Refund  # noqa: F401
 from app.models.report import Report, ReportStatus, ReportType  # noqa: F401
+from app.models.staff_assignment import StaffAssignment  # noqa: F401
 from app.models.report_comment import CommentTarget, ReportComment  # noqa: F401
 from app.models.report_template import ReportTemplate  # noqa: F401
 from app.models.strategy import StrategyDoc, StrategyReadReceipt  # noqa: F401
@@ -77,6 +78,7 @@ __all__ = [
     "SourceType",
     "Person",
     "PersonAlias",
+    "StaffAssignment",
     "WeeklyReport",
     "WeeklyReportStatus",
     "WeeklySectionBinding",

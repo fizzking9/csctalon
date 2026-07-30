@@ -20,6 +20,7 @@ dependencies = [
     "redis>=5.0.0",
     "python-dotenv>=1.0.0",
     "orjson>=3.9.0",
+    "pypinyin>=0.50.0",
 ]
 
 [project.optional-dependencies]

@@ -21,6 +21,7 @@ from app.models.data_source import DataSource
 from app.models.device_combo import DeviceCombo
 from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
+from app.models.person import Person, PersonAlias
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
@@ -135,6 +136,9 @@ def _execute_segment(
         time_grain = dim.get("time_grain")
         if role == "time" and time_grain and time_grain != "none":
             col = _apply_time_grain(col, time_grain)
+        elif role == "person":
+            # 人员维度:把业务表 raw 别名字符串解析为归并后 Person.display_name
+            col = _resolve_person_name(col)
         alias = dim.get("alias") or field_name
         labeled = col.label(alias)
         select_cols.append(labeled)
@@ -354,6 +358,27 @@ def _get_column(model, field_name: str):
     if col is None:
         raise ValueError(f"字段不存在: {model.__tablename__}.{field_name}")
     return col
+
+
+def _resolve_person_name(raw_col):
+    """业务表人员字段(别名原值)→ 归并后 Person.display_name 标量子查询。
+
+    role="person" 维度专用:业务表 operator/auditor/handler 等字段存的是别名原值
+    (如 '企微-何琴'/'YKM-XZ'/'店铺-张三'),通过 person_aliases.alias(唯一索引)
+    → persons.display_name 解析为归并后的人员姓名,使视图按真人而非 raw 字符串聚合。
+
+    - 已归并别名 → 对应 Person 显示名
+    - 待归并/person_id IS NULL 别名 → NULL(图表显示"(空)",提示去归并)
+    - 未提取的新别名(不在 person_aliases) → NULL
+    - sys/system 系统别名(person_id=NULL) → NULL(配合视图 raw 层 notin 过滤更佳)
+    """
+    subq = (
+        select(Person.display_name)
+        .join(PersonAlias, PersonAlias.person_id == Person.id)
+        .where(PersonAlias.alias == raw_col)
+        .limit(1)
+    )
+    return subq.scalar_subquery()
 
 
 def _apply_time_grain(col, grain: str):

@@ -23,7 +23,7 @@ from app.services.upsert import run_upsert
 
 router = APIRouter(prefix="/uploads", tags=["数据中心-上传"])
 
-DATA_TYPES = {"refund", "wallet", "ticket", "merchant_refund", "merchant", "cs_record", "external_complaint", "card_complaint"}
+DATA_TYPES = {"refund", "wallet", "ticket", "merchant_refund", "merchant", "cs_record", "external_complaint", "card_complaint", "staff"}
 
 
 @router.post("/parse", response_model=R, summary="上传并解析文件(返回预览)")
@@ -232,8 +232,8 @@ def get_record(record_id: int, db: DBSession, _: CurrentUser):
 def _run_post_import_tasks(data_type: str):
     """后台任务:关联匹配和人员别名提取"""
     from app.core.database import SessionLocal
-    from app.services.matching import match_all
-    from app.services.person_extraction import extract_person_aliases
+    from app.services.matcher import match_all
+    from app.services.person_extractor import extract_person_aliases
 
     try:
         db = SessionLocal()

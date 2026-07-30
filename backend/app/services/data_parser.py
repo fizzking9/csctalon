@@ -179,6 +179,22 @@ COLUMN_TEMPLATES: dict[str, dict[str, list[str]]] = {
         "handler": ["处理人"],
         "handle_result": ["处理结果"],
     },
+    # 人力快照 → SCD2 任职历史(走 /persons/import-snapshot,不走 UPSERT_DISPATCH)
+    "staff": {
+        "display_name": ["姓名"],
+        "alias_kefu": ["客服名"],
+        "alias_name1": ["名称1"],
+        "alias_name2": ["名称2"],
+        "remark": ["备注"],
+        "specialty": ["专项"],
+        "position": ["岗位"],
+        "snapshot_date": ["更新时间"],
+        # 可选生命周期列(Excel 以后补列时自动识别)
+        "hire_date": ["入职日期"],
+        "probation_end_date": ["试用期到期"],
+        "regularization_date": ["转正日期"],
+        "resignation_date": ["离职日期"],
+    },
 }
 
 

@@ -4,9 +4,9 @@
 映射到统一的 Person。sys/system 标记为系统自动操作，不归并到真人。
 """
 
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -22,7 +22,20 @@ class Person(IDMixin, TimestampMixin, Base):
     qw_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True, comment="企微 userid（待对接企微后填）")
     qw_name: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="企微姓名")
     role: Mapped[str] = mapped_column(String(32), default="agent", nullable=False, comment="admin/supervisor/agent")
-    group_name: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="所属组")
+    department: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="部门:企微客服部/店铺客服部(开放文本)")
+    # 以下三项为"当前镜像",由 StaffAssignment service 层在新增/删除任职时同步刷新,
+    # 不开放 PersonUpdate 直接改(避免双写不一致),保留 group_name 兼容老读取路径
+    group_name: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="当前组(镜像自最新任职)")
+    position: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="当前岗位(镜像自最新任职):客服/组长/主管")
+    specialty: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="当前专项(镜像自最新任职):接待/投诉接待/主管")
+    # 生命周期(离散单点事件,每人至多一次)——派生但存储,便于过滤查询
+    hire_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="入职日期")
+    probation_end_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="试用期到期日")
+    regularization_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="转正日期")
+    resignation_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="离职日期")
+    employment_status: Mapped[str] = mapped_column(
+        String(16), default="active", nullable=False, index=True, comment="在职状态:active/probation/regular/resigned"
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, comment="是否已人工确认归并")
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
