@@ -6,7 +6,7 @@
 """
 
 from sqlalchemy import Boolean, DateTime, Float, Integer, Numeric, delete, inspect, select
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.card_complaint import CardComplaint
@@ -346,10 +346,28 @@ def ensure_data_sources_registered(db: Session) -> dict:
             db.flush()
         stats["sources"] += 1
 
-        # 字段集重建（删旧建新，简单可靠；占位项无字段）
+        # 字段集重建：先删旧字段（含已废弃字段），再 upsert 新字段集。
+        # 用 on_conflict_do_update 而非裸 INSERT：多 worker 并发注册时（gunicorn 4 worker
+        # 启动 lifespan/refresh 并发触发）会跨事务撞 uq_source_field 唯一约束，裸 INSERT
+        # 直接报 duplicate key；on_conflict 让后到事务更新先到事务的行，幂等不报错。
         db.execute(delete(DataSourceField).where(DataSourceField.source_id == ds.id))
-        for f in reflected:
-            db.add(DataSourceField(source_id=ds.id, **f))
-            stats["fields"] += 1
+        if reflected:
+            rows = [{"source_id": ds.id, **f} for f in reflected]
+            stmt = pg_insert(DataSourceField).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["source_id", "field_name"],
+                set_={
+                    "field_name_cn": stmt.excluded.field_name_cn,
+                    "data_type": stmt.excluded.data_type,
+                    "semantic_role": stmt.excluded.semantic_role,
+                    "agg_func": stmt.excluded.agg_func,
+                    "is_filterable": stmt.excluded.is_filterable,
+                    "is_pk": stmt.excluded.is_pk,
+                    "enum_values": stmt.excluded.enum_values,
+                    "sort_order": stmt.excluded.sort_order,
+                },
+            )
+            db.execute(stmt)
+        stats["fields"] += len(reflected)
     db.commit()
     return stats

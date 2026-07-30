@@ -85,6 +85,9 @@ backend/uploads/*
 pgdata/
 redis-data/
 backend-data/
+# 部署数据/日志 bind mount 到宿主机（PG、Redis 持久化数据 + 应用日志）
+data/
+
 
 # ---------- 日志 ----------
 *.log

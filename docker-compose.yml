@@ -1,71 +1,84 @@
 # 客服中心管理系统 - 局域网部署 Docker Compose
 # 使用: docker compose up -d --build
-# 访问: http://<服务器IP>:80 (前端) , http://<服务器IP>:8000 (后端API,可选)
+# 访问: http://<服务器IP>:80 (前端), http://<服务器IP>:8000 (后端API,可选)
+#
+# 配置: 所有密钥/环境变量从同目录 .env 读取（已 gitignore），勿提交真实 .env。
+# 数据: PG / Redis 数据 bind mount 到 ./data，宿主机可直接备份。
+# 日志: ① 所有容器 stdout 走 json-file 轮转（单文件 10m，保留 3 份），防止撑爆磁盘；
+#       ② 后端 gunicorn access/error 日志 + nginx 日志额外写文件到 ./logs，便于直接查看。
 
 services:
   db:
     image: postgres:15
     container_name: csctalon-db
     environment:
-      POSTGRES_USER: csctalon
-      POSTGRES_PASSWORD: csctalon123
-      POSTGRES_DB: csctalon
+      POSTGRES_USER: ${POSTGRES_USER:-csctalon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-csctalon}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"   # 仅本机可连，不对局域网暴露
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U csctalon"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-csctalon}"]
       interval: 5s
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   redis:
     image: redis:7-alpine
     container_name: csctalon-redis
+    command: redis-server --appendonly yes   # 开启 AOF 持久化，重启不丢缓存任务状态
+    volumes:
+      - ./data/redis:/data
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"   # 仅本机可连
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   backend:
     build: ./backend
     container_name: csctalon-backend
     env_file:
-      - ./backend/.env
-    environment:
-      ENV: dev
-      DEBUG: "true"
-      POSTGRES_HOST: db
-      POSTGRES_PORT: "5432"
-      POSTGRES_USER: csctalon
-      POSTGRES_PASSWORD: csctalon123
-      POSTGRES_DB: csctalon
-      REDIS_HOST: redis
-      REDIS_PORT: "6379"
-      JWT_SECRET_KEY: change-this-to-a-long-random-secret-in-production-2026
-      INIT_ADMIN_USERNAME: admin
-      INIT_ADMIN_PASSWORD: admin123
-      CORS_ORIGINS: http://localhost,http://localhost:5173,http://127.0.0.1
+      - .env
     volumes:
       - ./backend/uploads:/app/uploads
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"   # 仅本机可连；前端经 nginx 反代访问
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_started
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   web:
     build: ./web
     container_name: csctalon-web
+    volumes:
+      - ./logs/nginx:/var/log/nginx
     ports:
       - "80:80"
     depends_on:
       - backend
     restart: unless-stopped
-
-volumes:
-  pgdata:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

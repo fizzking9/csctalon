@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     APP_VERSION: str = "0.1.0"
     ENV: Literal["dev", "prod", "test"] = "dev"
     DEBUG: bool = True
+    # SQLAlchemy SQL 语句打印(engine echo)。默认关闭——即使 DEBUG=true 也不全量打 SQL,
+    # 避免 SQL 噪音淹没真正错误、撑大日志。需要排障时显式设 SQL_ECHO=true。
+    SQL_ECHO: bool = False
 
     # 数据库
     POSTGRES_USER: str = "csctalon"

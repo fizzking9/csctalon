@@ -36,7 +36,7 @@ RUN playwright install chromium --with-deps
 
 COPY . /app
 
-# 上传目录
+# 上传目录（bind mount 到宿主机 ./backend/uploads）
 RUN mkdir -p /app/uploads
 
 EXPOSE 8000
@@ -44,4 +44,6 @@ EXPOSE 8000
 # gunicorn + uvicorn worker
 # --preload: 在主进程加载应用,lifespan(迁移+注册)只执行一次,避免多 worker 并发冲突
 # 但在某些情况下会导致 worker boot 失败,暂时移除
-CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "120"]
+# 日志: gunicorn/uvicorn/app 日志统一走 stdout/stderr,由 docker json-file 轮转(10m×3)捕获,
+#       用 `docker compose logs backend` 查看;nginx 访问日志另以文件形式落在 ./logs/nginx。
+CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "120", "--log-level", "info"]
