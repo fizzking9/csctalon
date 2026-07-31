@@ -52,7 +52,7 @@ def _compute_time_range(
 class SyncAllRequest(BaseModel):
     """一键同步请求"""
 
-    data_types: list[str] | None = Field(None, description="要同步的数据源,默认勾选的源。可选: refund/ticket/wallet/device_combo")
+    data_types: list[str] | None = Field(None, description="要同步的数据源,默认勾选的源。可选: refund/ticket/wallet/device_combo/cs_record")
     time_range: str = Field("today", description="时间范围预设: today/yesterday/week/custom")
     custom_start: datetime | None = Field(None, description="自定义开始时间(time_range=custom 时生效)")
     custom_end: datetime | None = Field(None, description="自定义结束时间(time_range=custom 时生效)")
@@ -154,7 +154,7 @@ async def sync_all_data(payload: SyncAllRequest, current_user: CurrentUser):
     - 凭证从 sync_source_configs 读取(按源独立),无需调用方传入
     """
     # 校验 data_types
-    valid_types = {"refund", "ticket", "wallet", "device_combo"}
+    valid_types = {"refund", "ticket", "wallet", "device_combo", "cs_record"}
     data_types = payload.data_types if payload.data_types else None  # None → sync_all 用 DEFAULT_SYNC_TYPES
     if data_types:
         for dt in data_types:

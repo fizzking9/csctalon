@@ -29,7 +29,7 @@ RUN pip install --no-cache-dir \
     "python-jose[cryptography]>=3.3.0" "bcrypt>=4.0.0" \
     "python-multipart>=0.0.9" "pandas>=2.2.0" "openpyxl>=3.1.2" "python-calamine>=0.2.0" \
     "redis>=5.0.0" "python-dotenv>=1.0.0" "orjson>=3.9.0" \
-    "pypinyin>=0.50.0" \
+    "pypinyin>=0.50.0" "httpx>=0.27.0" \
     "playwright>=1.45.0"
 
 # 安装 Chromium 浏览器

@@ -272,8 +272,27 @@ async def sync_all(
         db.close()
 
     # 3. 抓取所有数据源
-    async with BmsFetcher() as fetcher:
-        fetch_results: list[FetchResult] = await fetcher.fetch_all(tasks=tasks, on_progress=on_progress)
+    # 分流:fetch_mode="http" 的源走 ai_acc_fetcher(HTTP API),其余走 BmsFetcher(Playwright)
+    http_tasks = [t for t in tasks if t["config"].get("fetch_mode") == "http"]
+    pw_tasks = [t for t in tasks if t["config"].get("fetch_mode") != "http"]
+
+    fetch_results: list[FetchResult] = []
+
+    # HTTP API 抓取(ai-acc 等无需浏览器的源)
+    if http_tasks:
+        from app.services.ai_acc_fetcher import fetch_one as http_fetch_one
+
+        for task in http_tasks:
+            logger.info(f"[{task['data_type']}] HTTP 抓取(非 Playwright)")
+            fr = await http_fetch_one(task)
+            fetch_results.append(fr)
+            if on_progress:
+                await on_progress(fr.data_type, "fetched", {"success": fr.success, "file": fr.filename})
+
+    # Playwright 抓取(BMS 等需浏览器自动化的源)
+    if pw_tasks:
+        async with BmsFetcher() as fetcher:
+            fetch_results.extend(await fetcher.fetch_all(tasks=pw_tasks, on_progress=on_progress))
 
     # 4. 逐个导入
     for fr in fetch_results:

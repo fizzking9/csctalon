@@ -59,6 +59,8 @@ def ensure_sync_sources_registered(db: Session) -> dict:
 
 def _row_to_config(row: SyncSourceConfig) -> dict:
     """DB 行 → 运行配置 dict(解密凭证)"""
+    # fetch_mode 不在 DB 表里,从 BMS_DATA_SOURCES 种子补(标记 http/playwright 分流)
+    seed = BMS_DATA_SOURCES.get(row.data_type, {})
     return {
         "data_type": row.data_type,
         "name": row.name,
@@ -69,6 +71,7 @@ def _row_to_config(row: SyncSourceConfig) -> dict:
         "password": decrypt_secret(row.password),
         "default_sync": row.default_sync,
         "enabled": row.enabled,
+        "fetch_mode": seed.get("fetch_mode", "playwright"),
     }
 
 
@@ -93,6 +96,7 @@ def get_sync_source_config(db: Session, data_type: str) -> dict | None:
         "password": env_pwd or None,
         "default_sync": cfg.get("default_sync", True),
         "enabled": True,
+        "fetch_mode": cfg.get("fetch_mode", "playwright"),
     }
 
 

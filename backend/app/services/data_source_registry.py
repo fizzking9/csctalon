@@ -92,6 +92,7 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "pk_field": None,
         "pk_strategy": "none",
         "category": "工单与客服",
+        "sync_source": "bms",
     },
     {
         "code": "external_complaint",

@@ -52,6 +52,15 @@ BMS_DATA_SOURCES: dict[str, dict] = {
         "page_path": "/index.html#/device/device-combo",
         "default_sync": False,  # 默认不同步,可在手动同步时勾选
     },
+    # ai-acc 平台(智能助手处理记录)— Naive UI,走 HTTP API 非 Playwright
+    # fetch_mode="http" 标记 bms_sync.sync_all 分流到 ai_acc_fetcher
+    "cs_record": {
+        "name": "智能助手处理记录",
+        "base_url": "http://ai-acc.cloud-cat.cn",
+        "page_path": "/ai-acc/cs/v1/assistant/handleRecord/export",  # 导出 API 路径
+        "default_sync": True,
+        "fetch_mode": "http",
+    },
 }
 
 # 每次操作之间的最小间隔(秒),BMS 系统限制1分钟
@@ -61,13 +70,21 @@ OPERATION_INTERVAL = 65
 class FetchResult:
     """单次抓取结果"""
 
-    def __init__(self):
-        self.success: bool = False
-        self.data_type: str = ""
-        self.file_path: Optional[str] = None
-        self.filename: Optional[str] = None
-        self.total_rows: Optional[int] = None
-        self.error: Optional[str] = None
+    def __init__(
+        self,
+        data_type: str = "",
+        success: bool = False,
+        file_path: Optional[str] = None,
+        filename: Optional[str] = None,
+        total_rows: Optional[int] = None,
+        error: Optional[str] = None,
+    ):
+        self.data_type = data_type
+        self.success = success
+        self.file_path = file_path
+        self.filename = filename
+        self.total_rows = total_rows
+        self.error = error
 
 
 class BmsFetcher:

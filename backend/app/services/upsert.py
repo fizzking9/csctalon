@@ -4,13 +4,18 @@
 统计逻辑:upsert 前先查已存在的主键数量,以精确区分 insert/update
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
+
+# 运营平台(BMS / ai-acc)导出的时间为北京时间(naive,无时区)。
+# 存入 timestamptz 列时,DB 时区为 Etc/UTC,naive 值会被当 UTC 存,
+# 导致按北京显示时偏后 8 小时。这里把 naive 视为北京时间,转 UTC 后再存。
+_TZ_CN = timezone(timedelta(hours=8))
 
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
@@ -90,6 +95,9 @@ def _to_datetime(val: Any) -> datetime | None:
     except (TypeError, ValueError):
         pass
     if isinstance(val, datetime):
+        # naive 视为北京时间 → UTC(aware);aware 原样返回
+        if val.tzinfo is None:
+            return val.replace(tzinfo=_TZ_CN).astimezone(timezone.utc)
         return val
     if isinstance(val, str) and val.strip() == "":
         return None
@@ -97,6 +105,10 @@ def _to_datetime(val: Any) -> datetime | None:
         result = pd.to_datetime(val)
         if pd.isna(result):
             return None
+        # 运营平台导出为 naive 北京时间,转 UTC 后存入 timestamptz,
+        # 否则 DB(UTC)会按 UTC 解释导致偏后 8 小时
+        if result.tzinfo is None:
+            result = result.tz_localize(_TZ_CN).tz_convert(timezone.utc)
         return result.to_pydatetime()
     except Exception:
         return None
