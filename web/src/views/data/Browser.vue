@@ -110,6 +110,15 @@
               <el-tag type="info" size="small">{{ currentSource.code }}</el-tag>
             </div>
             <div class="header-actions">
+              <el-button
+                type="primary"
+                size="small"
+                :loading="exporting"
+                :disabled="!tableData.length"
+                @click="handleExport"
+              >
+                <el-icon><Download /></el-icon> 导出 Excel
+              </el-button>
               <el-button text type="primary" size="small" @click="refreshData">
                 <el-icon><Refresh /></el-icon> 刷新
               </el-button>
@@ -171,6 +180,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import dayjs from 'dayjs'
+import { ElMessage } from 'element-plus'
 import request from '@/api'
 
 const sources = ref([])
@@ -185,6 +195,7 @@ const sortDir = ref('desc')
 const tableCounts = ref({})
 const summary = ref(null)
 const uploadRecords = ref([])
+const exporting = ref(false)
 
 // 数据源业务分组顺序(与后端 DATA_SOURCE_SEEDS 的 category 对应)
 const CATEGORY_ORDER = ['现金流', '工单与客服', '投诉登记', '基础数据']
@@ -400,6 +411,74 @@ function refreshData() {
   loadSummary(currentSource.value?.code)
   loadUploadRecords(currentSource.value?.code)
   loadData()
+}
+
+async function handleExport() {
+  if (!currentSource.value || isPlaceholder.value) return
+  exporting.value = true
+  try {
+    // 复用 loadData 的筛选/排序参数(去掉分页,导出全部匹配行)
+    const params = {}
+    if (sortField.value) {
+      params.sort_field = sortField.value
+      params.sort_dir = sortDir.value
+    }
+    const filterObj = {}
+    for (const [key, value] of Object.entries(filters.value)) {
+      if (value) filterObj[key] = value
+    }
+    if (searchKeyword.value) {
+      const searchFields = currentFields.value
+        .filter((f) => f.is_filterable && f.data_type === 'string')
+        .slice(0, 3)
+      searchFields.forEach((f) => {
+        filterObj[`${f.field_name}__contains`] = searchKeyword.value
+      })
+    }
+    if (Object.keys(filterObj).length) {
+      params.filters = JSON.stringify(filterObj)
+    }
+
+    const res = await request.get(`/data-sources/${currentSource.value.code}/export`, {
+      params,
+      responseType: 'blob',
+      timeout: 120000,
+    })
+    // axios 响应拦截器对 blob 成功响应返回 response.data(即 Blob);兼容返回完整 response 的情况
+    const blobData = res instanceof Blob ? res : res?.data
+    const blob = new Blob([blobData], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    const ts = dayjs().format('YYYYMMDD_HHmmss')
+    const fname = `${currentSource.value.name_cn}_导出_${ts}.xlsx`
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fname
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    ElMessage.success('已导出')
+  } catch (e) {
+    // 后端错误以 blob 形式返回时,读取 blob 文本提取 detail(如"超过导出上限")
+    let msg = '导出失败'
+    const errBlob = e?.response?.data
+    if (errBlob instanceof Blob) {
+      try {
+        const text = await errBlob.text()
+        const j = JSON.parse(text)
+        msg = j?.detail || j?.message || msg
+      } catch {
+        // blob 非 JSON,忽略
+      }
+    } else {
+      msg = e?.response?.data?.detail || e?.message || msg
+    }
+    ElMessage.error(msg)
+  } finally {
+    exporting.value = false
+  }
 }
 
 onMounted(() => {

@@ -1,11 +1,17 @@
 """数据源元数据管理路由 + 通用数据浏览"""
 
+import io
 import json
+from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
+import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import Select
 
 from app.api.deps import AdminUser, CurrentUser, DBSession
 from app.models.data_source import DataSource, DataSourceField
@@ -18,6 +24,9 @@ from app.schemas.data_source import (
     DataSourceUpdate,
 )
 from app.services.data_source_registry import DATA_SOURCE_SEEDS, ensure_data_sources_registered
+
+# 导出 Excel 单次最大行数(防止 OOM;超出提示加筛选条件)
+EXPORT_MAX_ROWS = 200_000
 
 router = APIRouter(prefix="/data-sources", tags=["系统-数据源"])
 
@@ -105,23 +114,6 @@ def _get_source_model(code: str):
     return None, None
 
 
-def _serialize_record(row, field_defs: list[dict]) -> dict:
-    """将 SQLAlchemy 模型实例序列化为 dict，按字段定义处理特殊类型"""
-    result = {}
-    for fd in field_defs:
-        fname = fd["field_name"]
-        v = getattr(row, fname, None)
-        # 时间字段格式化
-        if fd.get("data_type") == "timestamp" and v is not None:
-            result[fname] = v.isoformat()
-        # 数值字段确保 float
-        elif fd.get("data_type") == "numeric" and v is not None:
-            result[fname] = float(v)
-        else:
-            result[fname] = v
-    return result
-
-
 @router.get("/{code}/records", response_model=R[PageBase], summary="通用数据浏览")
 def browse_records(
     code: str,
@@ -143,12 +135,51 @@ def browse_records(
     - {"amount__lte": 100} → 小于等于
     - {"name__contains": "关键词"} → 模糊匹配
     """
+    stmt, field_dicts, total = _build_browse_query(code, db, sort_field, sort_dir, filters, with_count=True)
+    rows = list(db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)))
+
+    # 序列化
+    items = []
+    for row in rows:
+        rec = {}
+        for fd in field_dicts:
+            fname = fd["field_name"]
+            v = getattr(row, fname, None)
+            if fd["data_type"] == "timestamp" and v is not None:
+                rec[fname] = v.isoformat()
+            elif fd["data_type"] == "numeric" and v is not None:
+                try:
+                    rec[fname] = float(v)
+                except Exception:
+                    rec[fname] = None
+            else:
+                rec[fname] = v
+        items.append(rec)
+
+    return {"code": 0, "message": "ok", "data": {"items": items, "total": total, "page": page, "page_size": page_size}}
+
+
+def _build_browse_query(
+    code: str,
+    db: Session,
+    sort_field: str | None,
+    sort_dir: str,
+    filters: str | None,
+    with_count: bool = True,
+) -> tuple[Select, list[dict], int]:
+    """构建通用数据浏览查询(筛选+排序),供 browse_records 与 export 共用
+
+    Returns: (stmt, field_dicts, total)
+      - stmt: 已应用筛选/排序的 select(model) 语句,调用方自行加 offset/limit 或全部取出
+      - field_dicts: 字段定义列表(用于序列化/列头)
+      - total: 符合筛选条件的总行数(with_count=False 时为 0,导出用 True 便于超限校验)
+    """
     model, default_sort_field = _get_source_model(code)
     if not model:
         raise HTTPException(status_code=404, detail=f"数据源不存在: {code}")
 
     # 解析 filters JSON
-    filters_dict = {}
+    filters_dict: dict = {}
     if filters:
         try:
             filters_dict = json.loads(filters)
@@ -231,18 +262,47 @@ def browse_records(
         else:
             stmt = stmt.order_by(sort_col.asc())
 
-    # 分页
-    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = list(db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)))
+    total = 0
+    if with_count:
+        total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
 
-    # 序列化
-    items = []
+    return stmt, field_dicts, total
+
+
+@router.get("/{code}/export", summary="导出数据源为 Excel")
+def export_records(
+    code: str,
+    db: DBSession,
+    _: CurrentUser,
+    sort_field: str | None = None,
+    sort_dir: str = Query("desc", pattern="^(asc|desc)$"),
+    filters: str | None = Query(None, description="JSON 格式筛选条件,与 /records 一致"),
+):
+    """导出指定数据源的(经筛选/排序的)全量记录为 xlsx,供线下分析。
+
+    - 不分页,导出全部匹配行(上限 EXPORT_MAX_ROWS,超出报 400 提示加筛选)
+    - 列头用字段中文名(field_name_cn),无中文名回退英文 field_name,与数据查看页表格一致
+    - 时间字段以本地时区字符串写出(与页面 fmtCell 显示口径对齐),数值字段保留原值
+    """
+    stmt, field_dicts, total = _build_browse_query(code, db, sort_field, sort_dir, filters, with_count=True)
+    if total > EXPORT_MAX_ROWS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"匹配 {total} 行超过单次导出上限 {EXPORT_MAX_ROWS} 行,请增加筛选条件缩小范围后再导出",
+        )
+
+    # 取全部匹配行(已校验未超上限)
+    rows = list(db.scalars(stmt))
+
+    # 序列化为 dict 列表 → DataFrame
+    records: list[dict] = []
     for row in rows:
-        rec = {}
+        rec: dict[str, Any] = {}
         for fd in field_dicts:
             fname = fd["field_name"]
             v = getattr(row, fname, None)
             if fd["data_type"] == "timestamp" and v is not None:
+                # 时间字段输出为本地时区字符串(与前端 fmtCell 显示口径一致,便于分析阅读)
                 rec[fname] = v.isoformat()
             elif fd["data_type"] == "numeric" and v is not None:
                 try:
@@ -251,9 +311,32 @@ def browse_records(
                     rec[fname] = None
             else:
                 rec[fname] = v
-        items.append(rec)
+        records.append(rec)
 
-    return {"code": 0, "message": "ok", "data": {"items": items, "total": total, "page": page, "page_size": page_size}}
+    # 列头:中文名优先,无则回退英文 field_name;列顺序与字段 sort_order 一致
+    columns = [fd["field_name"] for fd in field_dicts]
+    headers = [fd["field_name_cn"] or fd["field_name"] for fd in field_dicts]
+    df = pd.DataFrame(records, columns=columns) if columns else pd.DataFrame()
+    if not df.empty:
+        df.columns = headers
+
+    # 写入 xlsx(openpyxl)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="数据")
+    buf.seek(0)
+
+    # 文件名:数据源中文名_导出_yyyymmdd_hhmmss.xlsx(UTF-8 编码,兼容中文)
+    ds = db.scalar(select(DataSource).where(DataSource.code == code))
+    name_cn = ds.name_cn if ds else code
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname = quote(f"{name_cn}_导出_{ts}.xlsx")
+
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{fname}"},
+    )
 
 
 @router.get("/{code}/summary", response_model=R, summary="数据源汇总统计")
