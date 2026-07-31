@@ -55,6 +55,9 @@ class AnalysisView(IDMixin, TimestampMixin, Base):
     ratios: Mapped[list] = mapped_column(
         JSONB, default=list, nullable=False, comment='比率度量数组 [{alias,numerator,denominator,as_percent}]'
     )
+    cumulative: Mapped[list] = mapped_column(
+        JSONB, default=list, nullable=False, comment='累计差额(池子水位)数组 [{alias,inflow,outflow}]'
+    )
     is_preset: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, comment="预设视图（迁移的4大看板）",
     )

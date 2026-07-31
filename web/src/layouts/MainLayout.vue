@@ -29,6 +29,8 @@
           <el-menu-item index="/data/browser">数据查看</el-menu-item>
           <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
           <el-menu-item index="/analytics/views">分析视图</el-menu-item>
+          <el-menu-item index="/audit/device">设备审计</el-menu-item>
+          <el-menu-item index="/audit/person">人员审计</el-menu-item>
           <el-menu-item v-if="authStore.isManager" index="/dashboards/designer">看板配置</el-menu-item>
         </el-sub-menu>
 

@@ -354,6 +354,28 @@ async def sync_all(
 
     # 跳过的源(停用/未注册)也计入结果
     results.extend(skipped)
+
+    # 5. post-sync 钩子:关联匹配 + 退费宽表物化(失败不阻塞同步主流程)
+    #    只在有成功导入时触发,用独立 Session 避免污染主事务
+    any_success = any(r.get("success") for r in results)
+    if any_success:
+        try:
+            from app.core.database import SessionLocal
+            from app.services.matcher import match_all
+            from app.services.wide_table_builder import build_refund_wide
+
+            hook_db = SessionLocal()
+            try:
+                match_stats = match_all(hook_db, only_unmatched=True)
+                wide_stats = build_refund_wide(hook_db)
+                logger.info(
+                    f"post-sync 钩子完成: match={match_stats}, wide={wide_stats}"
+                )
+            finally:
+                hook_db.close()
+        except Exception as e:
+            logger.warning(f"post-sync 钩子(关联匹配/宽表物化)失败,不影响同步结果: {e}")
+
     return results
 
 

@@ -230,10 +230,11 @@ def get_record(record_id: int, db: DBSession, _: CurrentUser):
 
 
 def _run_post_import_tasks(data_type: str):
-    """后台任务:关联匹配和人员别名提取"""
+    """后台任务:关联匹配、人员别名提取、退费宽表物化"""
     from app.core.database import SessionLocal
     from app.services.matcher import match_all
     from app.services.person_extractor import extract_person_aliases
+    from app.services.wide_table_builder import build_refund_wide
 
     try:
         db = SessionLocal()
@@ -243,6 +244,18 @@ def _run_post_import_tasks(data_type: str):
             # 触发人员别名提取(增量,幂等)
             person_stats = extract_person_aliases(db)
             db.commit()
+            # 重建退费宽表(全量,确保源数据更新后宽表同步刷新;失败不阻塞)
+            try:
+                wide_stats = build_refund_wide(db)
+                import logging
+                logging.getLogger(__name__).info(
+                    f"refund_wide 重建完成(data_type={data_type}): {wide_stats}"
+                )
+            except Exception as we:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"refund_wide 重建失败(data_type={data_type},不影响导入): {we}"
+                )
         finally:
             db.close()
     except Exception as e:

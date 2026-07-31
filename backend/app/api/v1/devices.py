@@ -12,6 +12,7 @@ from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 from app.schemas.common import PageBase, R
+from app.services.audit_timeline import build_device_timeline
 
 router = APIRouter(prefix="/devices", tags=["设备管理"])
 
@@ -106,6 +107,37 @@ def get_device(sn: str, db: DBSession, _: CurrentUser):
             ],
         }
     )
+
+
+@router.get("/{sn}/timeline", response_model=R, summary="设备审计时序流(跨表合并)")
+def device_timeline(
+    sn: str,
+    db: DBSession,
+    _: CurrentUser,
+    limit: int = Query(100, ge=1, le=500, description="返回条数上限"),
+    days: int | None = Query(90, ge=0, description="时间窗口天数,0=不限"),
+):
+    """设备维度审计时序:合并 7 张业务表(refund/ticket/wallet/merchant_refund/cs_record/
+    external_complaint/card_complaint)按 device_sn 关联的记录,按时间倒序统一呈现。
+
+    用于设备审计页:时序流 + 明细表双视图。
+    """
+    device = db.get(Device, sn)
+    if not device:
+        raise HTTPException(status_code=404, detail="设备不存在")
+    result = build_device_timeline(db, sn, limit=limit, days=days if days else None)
+    # 补设备基础信息
+    result["subject"] = {
+        "kind": "device",
+        "sn": device.sn,
+        "device_type": device.device_type,
+        "device_type_remark": device.device_type_remark,
+        "merchant_name": device.merchant_name,
+        "status": device.status,
+        "active_time": device.active_time.isoformat() if device.active_time else None,
+        "tags": [{"id": t.id, "name": t.tag_name, "color": t.color} for t in (device.tags or [])],
+    }
+    return R(data=result)
 
 
 @router.put("/{sn}/merchant", response_model=R, summary="更新设备商户")

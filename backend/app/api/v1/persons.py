@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, Query
 from pypinyin import Style, lazy_pinyin
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, AdminOrSupervisor, CurrentUser, DBSession
@@ -21,6 +21,7 @@ from app.schemas.person import (
     PersonUpdate,
     SplitRequest,
 )
+from app.services.audit_timeline import build_person_timeline
 from app.services.person_extractor import count_alias_occurrences, extract_person_aliases, rebuild_unclaimed_aliases
 
 router = APIRouter(prefix="/persons", tags=["系统-人员"])
@@ -175,6 +176,7 @@ def list_persons(
     _: CurrentUser,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    keyword: str | None = Query(None, description="按姓名/部门模糊搜索"),
     status: str | None = Query(None, description="confirmed/unconfirmed/inactive"),
     department: str | None = Query(None, description="按部门过滤"),
     role: str | None = Query(None, description="按角色过滤:agent/supervisor/admin"),
@@ -184,6 +186,9 @@ def list_persons(
     sort_order: str = Query("desc", description="asc/desc"),
 ):
     stmt = select(Person)
+    if keyword:
+        kw = f"%{keyword}%"
+        stmt = stmt.where(or_(Person.display_name.ilike(kw), Person.department.ilike(kw)))
     if status == "confirmed":
         stmt = stmt.where(Person.is_confirmed.is_(True), Person.is_active.is_(True))
     elif status == "unconfirmed":
@@ -275,6 +280,27 @@ def get_person(person_id: int, db: DBSession, _: CurrentUser):
     detail.aliases = [PersonAliasOut.model_validate(a) for a in aliases]
     detail.alias_count = len([a for a in aliases if not a.is_system])
     return R(data=detail)
+
+
+@router.get("/{person_id}/timeline", response_model=R, summary="人员审计时序流(跨表合并)")
+def person_timeline(
+    person_id: int,
+    db: DBSession,
+    _: CurrentUser,
+    limit: int = Query(100, ge=1, le=500, description="返回条数上限"),
+    days: int | None = Query(90, ge=0, description="时间窗口天数,0=不限"),
+):
+    """人员维度审计时序:用 PersonAlias 在 6 张业务表人名字段查询关联记录,
+    按时间倒序统一呈现(refund/ticket/wallet/cs_record/external_complaint/card_complaint,
+    merchant_refund 无人员字段不参与)。
+
+    用于人员审计页:时序流 + 明细表双视图。
+    """
+    p = db.get(Person, person_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="人员不存在")
+    result = build_person_timeline(db, person_id, limit=limit, days=days if days else None)
+    return R(data=result)
 
 
 @router.put("/{person_id}", response_model=R, summary="更新人员信息")

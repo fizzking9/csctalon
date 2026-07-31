@@ -143,6 +143,7 @@ const chartOption = computed(() => {
       type: r.chart_type,
       smooth: r.chart_type === 'line',
       data: s.data,
+      ...(s.stack ? { stack: s.stack } : {}),
     })),
   }
 })
@@ -208,6 +209,7 @@ async function saveAsView() {
       classification_rule_ids: v.classification_rule_ids || [],
       time_range_default: v.time_range_default,
       ratios: v.ratios || [],
+      cumulative: v.cumulative || [],
     })
     ElMessage.success('已复制为自定义视图,可在视图构建器编辑')
   } catch (e) {

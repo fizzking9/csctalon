@@ -16,6 +16,7 @@ from app.models.device_combo import DeviceCombo
 from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
+from app.models.refund_wide import RefundWide
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 
@@ -27,6 +28,18 @@ from app.models.wallet import WalletWithdrawal
 # 4. 外部投诉:315和质量监督局的投诉
 # category 业务分组(数据查看左侧分组用):现金流/工单与客服/投诉登记/基础数据
 DATA_SOURCE_SEEDS: list[dict] = [
+    {
+        "code": "refund_wide",
+        "model": RefundWide,
+        "name_cn": "退费宽表(物化)",
+        "time_field": "created_at_raw",
+        "sn_field": "device_sn",
+        "pk_field": "refund_no",
+        "pk_strategy": "primary_key",
+        "category": "现金流",
+        # internal=True 标记本表由系统物化构建,不来自 BMS/手动上传,UI 上禁止导入/同步
+        "internal": True,
+    },
     {
         "code": "ticket",
         "model": ServiceTicket,
@@ -130,6 +143,39 @@ DATA_SOURCE_SEEDS: list[dict] = [
 # 字段级 override：(source_code, field_name) → {role, agg, enum, is_filterable, is_pk}
 # 未列出的字段默认 role=dimension, is_filterable=True, is_pk=col.primary_key
 FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
+    # refund_wide (物化宽表,跨表关联预计算结果)
+    ("refund_wide", "refund_no"): {"role": "dimension", "is_pk": True, "is_filterable": False},
+    ("refund_wide", "refund_method"): {"role": "category", "enum": ["线上", "线下", "钱包"]},
+    ("refund_wide", "status"): {"role": "category", "enum": ["申请中", "已退款", "无需退款"]},
+    ("refund_wide", "refund_reason"): {"role": "category"},
+    ("refund_wide", "operator"): {"role": "person"},
+    ("refund_wide", "auditor"): {"role": "person"},
+    ("refund_wide", "device_sn"): {"role": "sn"},
+    ("refund_wide", "refund_amount"): {"role": "amount", "agg": "sum"},
+    ("refund_wide", "created_at_raw"): {"role": "time"},
+    # ticket 关联字段
+    ("refund_wide", "ticket_no"): {"role": "dimension", "is_filterable": False},
+    ("refund_wide", "service_item"): {"role": "category"},
+    ("refund_wide", "service_category"): {"role": "category"},
+    ("refund_wide", "ticket_finish_time"): {"role": "time"},
+    ("refund_wide", "ticket_handle_duration"): {"role": "measure", "agg": "avg"},
+    ("refund_wide", "ticket_handler"): {"role": "person"},
+    # merchant_refund 关联字段(mr_ 前缀避免与 refund 主表字段冲突)
+    ("refund_wide", "wx_refund_no"): {"role": "dimension", "is_filterable": False},
+    ("refund_wide", "mr_trade_time"): {"role": "time"},
+    ("refund_wide", "mr_refund_amount"): {"role": "amount", "agg": "sum"},
+    ("refund_wide", "mr_refund_status"): {"role": "category"},
+    ("refund_wide", "mr_fee"): {"role": "amount", "agg": "sum"},
+    ("refund_wide", "merchant_id"): {"role": "category"},
+    # wallet 关联字段
+    ("refund_wide", "wallet_id"): {"role": "dimension", "is_filterable": False},
+    ("refund_wide", "wallet_op_time"): {"role": "time"},
+    ("refund_wide", "wallet_op_amount"): {"role": "amount", "agg": "sum"},
+    # external_complaint 关联字段(分类规则1用)
+    ("refund_wide", "has_external_complaint"): {"role": "category", "enum": [True, False]},
+    ("refund_wide", "external_complaint_count"): {"role": "measure", "agg": "sum"},
+    ("refund_wide", "external_complaint_latest_time"): {"role": "time"},
+    ("refund_wide", "matched_at"): {"role": "dimension", "is_filterable": False},
     # refund
     ("refund", "refund_no"): {"role": "dimension", "is_pk": True, "is_filterable": False},
     ("refund", "refund_amount"): {"role": "amount", "agg": "sum"},

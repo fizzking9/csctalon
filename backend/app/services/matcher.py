@@ -30,6 +30,11 @@ def match_all(db: Session, only_unmatched: bool = True) -> dict[str, int]:
 
     Args:
         only_unmatched: True=只处理之前未匹配的记录(增量),False=全量重跑
+
+    Note:
+        本函数仅负责产出 DataMatchRelation 关联关系。
+        refund_wide 物化宽表的重建由调用方(bms_sync/uploads 钩子)在 match_all 之后显式触发,
+        以便在源数据更新但无新增关联时也能刷新宽表。
     """
     stats = {
         "refund_merchant_refund": _match_refund_merchant_refund(db, only_unmatched),

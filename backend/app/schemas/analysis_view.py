@@ -65,6 +65,20 @@ class RatioItem(BaseModel):
     as_percent: bool = False
 
 
+class CumulativeItem(BaseModel):
+    """累计差额(池子水位)- 基于已合并的 inflow/outflow measure 计算运行总和
+
+    例如资金池水位:inflow=退回钱包, outflow=实际提现, alias=净水位
+    每个时间桶计算 (inflow - outflow),然后按时间维度累计求和。
+    merged 行必须已按时间维排序(execute_view 阶段保证)。
+    outflow 为空时只累加 inflow。注意:累计起算点是 time_range 窗口内第一行,非全期历史。
+    """
+
+    alias: str
+    inflow: str  # 流入 measure alias
+    outflow: str | None = None  # 流出 measure alias(可选)
+
+
 class AnalysisViewOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -78,6 +92,7 @@ class AnalysisViewOut(BaseModel):
     classification_rule_ids: list[int] = []
     time_range_default: dict | None = None
     ratios: list[dict[str, Any]] = []
+    cumulative: list[dict[str, Any]] = []
     is_preset: bool
     status: str
     owner_id: int | None = None
@@ -96,6 +111,7 @@ class AnalysisViewCreate(BaseModel):
     classification_rule_ids: list[int] = []
     time_range_default: dict | None = None
     ratios: list[dict[str, Any]] = []
+    cumulative: list[dict[str, Any]] = []
     sort_order: int = 0
 
 
@@ -108,6 +124,7 @@ class AnalysisViewUpdate(BaseModel):
     classification_rule_ids: list[int] | None = None
     time_range_default: dict | None = None
     ratios: list[dict[str, Any]] | None = None
+    cumulative: list[dict[str, Any]] | None = None
     status: str | None = None
     sort_order: int | None = None
 
@@ -121,6 +138,7 @@ class AnalysisViewInlineConfig(BaseModel):
     classification_rule_ids: list[int] = []
     time_range_default: dict | None = None
     ratios: list[dict[str, Any]] = []
+    cumulative: list[dict[str, Any]] = []
 
 
 class AnalysisViewExecuteRequest(BaseModel):
@@ -140,6 +158,7 @@ class AnalysisViewExecuteRequest(BaseModel):
                 "classification_rule_ids": self.inline_config.classification_rule_ids,
                 "time_range_default": self.inline_config.time_range_default,
                 "ratios": self.inline_config.ratios,
+                "cumulative": self.inline_config.cumulative,
             }
         return {}
 

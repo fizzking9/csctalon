@@ -150,6 +150,7 @@ const chartOption = computed(() => {
       type: r.chart_type,
       smooth: r.chart_type === 'line',
       data: s.data,
+      ...(s.stack ? { stack: s.stack } : {}),
     })),
   }
 })

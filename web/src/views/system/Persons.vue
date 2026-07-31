@@ -148,6 +148,7 @@
               <el-button size="small" type="primary" :icon="Check" :loading="submitting" @click="handleSavePerson">保存</el-button>
               <el-button size="small" type="success" :disabled="currentDetail.is_confirmed" @click="confirmPerson(currentDetail)">确认归并</el-button>
               <el-button size="small" :type="currentDetail.is_active ? 'warning' : 'success'" @click="toggleActive(currentDetail)">{{ currentDetail.is_active ? '停用' : '启用' }}</el-button>
+              <el-button size="small" :icon="Timer" @click="goTimeline(currentDetail)">查看时序</el-button>
             </div>
           </div>
 
@@ -505,8 +506,9 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Connection, Plus, Edit, Upload, Download, Check } from '@element-plus/icons-vue'
+import { Refresh, Connection, Plus, Edit, Upload, Download, Check, Timer } from '@element-plus/icons-vue'
 import {
   listPersons,
   getPerson,
@@ -538,6 +540,7 @@ const list = ref([])
 const total = ref(0)
 const loading = ref(false)
 const page = ref(1)
+const router = useRouter()
 const filter = reactive({ status: 'confirmed', department: '', role: '', employment_status: '' })
 const sort = reactive({ sort_by: 'id', sort_order: 'desc' })
 const deptFilter = ref([])
@@ -744,6 +747,11 @@ async function toggleActive(row) {
     currentDetail.value = res.data
     fillEditForm(res.data)
   }
+}
+
+// 跳转人员审计时序页
+function goTimeline(row) {
+  router.push({ name: 'AuditPerson', query: { person_id: row.id, name: row.display_name } })
 }
 
 // 归并到新建

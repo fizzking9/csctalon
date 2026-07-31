@@ -8,6 +8,7 @@
 5. 所有字段名通过 getattr(model, name) 获取(防注入),值参数化传递
 """
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -23,12 +24,14 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.person import Person, PersonAlias
 from app.models.refund import Refund
+from app.models.refund_wide import RefundWide
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 
 # 模型注册表:table_name → model class(用于根据 DataSource.table_name 反射获取列)
 _MODEL_REGISTRY: dict[str, type] = {
     Refund.__tablename__: Refund,
+    RefundWide.__tablename__: RefundWide,
     WalletWithdrawal.__tablename__: WalletWithdrawal,
     ServiceTicket.__tablename__: ServiceTicket,
     DeviceCombo.__tablename__: DeviceCombo,
@@ -37,6 +40,9 @@ _MODEL_REGISTRY: dict[str, type] = {
     ExternalComplaint.__tablename__: ExternalComplaint,
     CardComplaint.__tablename__: CardComplaint,
 }
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------- 主入口 ----------
@@ -63,6 +69,7 @@ def execute_view(db: Session, view: AnalysisView | dict, params: dict | None = N
             "classification_rule_ids": view.classification_rule_ids or [],
             "time_range_default": view.time_range_default,
             "ratios": view.ratios or [],
+            "cumulative": view.cumulative or [],
         }
     else:
         config = view
@@ -94,8 +101,28 @@ def execute_view(db: Session, view: AnalysisView | dict, params: dict | None = N
                     val = round(val, 4)
                 row[r["alias"]] = val
 
+    # 累计差额(池子水位):基于已合并的 inflow/outflow measure 计算运行总和
+    # merged 需按时间维排序;_merge_segment_results 已按 dim_keys[0] 排序,
+    # 但时间维可能不是 dim_keys[0],这里按 role=time 的维度 alias 重排确保正确
+    cumulative = config.get("cumulative") or []
+    if cumulative:
+        time_alias = None
+        for d in (config["segments"][0].get("dimensions", []) if config["segments"] else []):
+            if d.get("role") == "time":
+                time_alias = d.get("alias") or d.get("field")
+                break
+        if time_alias:
+            merged.sort(key=lambda r: (r.get(time_alias) is None, r.get(time_alias)))
+        for c in cumulative:
+            running = 0.0
+            for row in merged:
+                inflow = float(row.get(c["inflow"], 0) or 0)
+                outflow = float(row.get(c.get("outflow"), 0) or 0) if c.get("outflow") else 0.0
+                running += (inflow - outflow)
+                row[c["alias"]] = round(running, 2)
+
     # 转换为图表数据
-    return _to_chart_data(merged, config["chart_type"], config["segments"], ratios)
+    return _to_chart_data(merged, config["chart_type"], config["segments"], ratios, cumulative)
 
 
 # ---------- 单 segment 执行 ----------
@@ -258,9 +285,18 @@ def _merge_segment_results(segment_results: list[dict], strategy: str) -> list[d
         # 其他策略暂不支持,默认 add
         pass
 
-    # 提取维度 alias(从第一个 segment 推断)
+    # 提取维度 alias(从第一个 segment 推断,含 classification_target 生成的分类列)
     first_seg = segment_results[0]["segment"]
-    dim_keys = [d.get("alias") or d["field"] for d in first_seg.get("dimensions", [])]
+    dim_keys = _extract_dim_keys_from_segments([first_seg])
+
+    # 校验各 segment 维度 alias 一致(不一致会静默丢数据:其他 segment 的行无法对齐到 merged)
+    for sr in segment_results[1:]:
+        other_dim_keys = _extract_dim_keys_from_segments([sr["segment"]])
+        if other_dim_keys != dim_keys:
+            logger.warning(
+                "多 segment 维度 alias 不一致,数据可能无法对齐: %s vs %s (segment: %s)",
+                dim_keys, other_dim_keys, sr["segment"].get("source_code"),
+            )
 
     # 收集所有 measure alias(各 segment 可能不同,合并时统一累加)
     all_measure_keys: list[str] = []
@@ -299,7 +335,7 @@ def _merge_segment_results(segment_results: list[dict], strategy: str) -> list[d
 # ---------- 图表数据转换 ----------
 
 
-def _to_chart_data(merged: list[dict], chart_type: str, segments: list[dict], ratios: list[dict] | None = None) -> dict:
+def _to_chart_data(merged: list[dict], chart_type: str, segments: list[dict], ratios: list[dict] | None = None, cumulative: list[dict] | None = None) -> dict:
     """根据 chart_type 组装前端可用的图表数据
 
     ratios 中的 alias 已在 execute_view 阶段写入 merged 行,这里只负责让它们出现在
@@ -311,12 +347,15 @@ def _to_chart_data(merged: list[dict], chart_type: str, segments: list[dict], ra
     ratio_keys = [r["alias"] for r in (ratios or []) if r.get("alias")]
     # 去重(避免与 measure 同名重复)
     ratio_keys = [k for k in ratio_keys if k not in measure_keys]
+    # 累计差额别名追加为输出列(独立 overlay,不参与堆积)
+    cumulative_keys = [c["alias"] for c in (cumulative or []) if c.get("alias")]
+    cumulative_keys = [k for k in cumulative_keys if k not in measure_keys and k not in ratio_keys]
 
     if chart_type == "table":
         return {
             "chart_type": "table",
             "data": {
-                "columns": dim_keys + measure_keys + ratio_keys,
+                "columns": dim_keys + measure_keys + ratio_keys + cumulative_keys,
                 "rows": merged,
             },
         }
@@ -334,17 +373,24 @@ def _to_chart_data(merged: list[dict], chart_type: str, segments: list[dict], ra
 
     # line / bar
     x_axis = [str(_join_dim(r, dim_keys)) if _join_dim(r, dim_keys) is not None else "(空)" for r in merged]
-    series = [
-        {"name": mk, "data": [float(r.get(mk, 0) or 0) for r in merged]}
-        for mk in measure_keys + ratio_keys
-    ]
+    # stack_group:segment 级配置,measure alias → 堆积组名(同组 series 在 ECharts 堆叠)
+    stack_map = _extract_stack_group_map(segments)
+    series = []
+    for mk in measure_keys + ratio_keys:
+        s = {"name": mk, "data": [float(r.get(mk, 0) or 0) for r in merged]}
+        if stack_map.get(mk):
+            s["stack"] = stack_map[mk]
+        series.append(s)
+    # 累计差额作为独立 overlay series(不参与堆积,如池子水位线)
+    for ck in cumulative_keys:
+        series.append({"name": ck, "data": [float(r.get(ck, 0) or 0) for r in merged]})
     return {
         "chart_type": chart_type,
         "data": {
             "x_axis": x_axis,
             "series": series,
             "dim_keys": dim_keys,
-            "measure_keys": measure_keys + ratio_keys,
+            "measure_keys": measure_keys + ratio_keys + cumulative_keys,
         },
     }
 
@@ -382,7 +428,10 @@ def _resolve_person_name(raw_col):
 
 
 def _apply_time_grain(col, grain: str):
-    """时间粒度:hour/day/week/month → to_char"""
+    """时间粒度:hour/day/week/month/quarter/year → to_char
+
+    所有格式都带年份前缀,字典序天然等于时间序(order_by group_cols[0] 无需特殊处理)。
+    """
     if grain == "hour":
         # 00-23,用于客服工作负荷按时段分布分析
         return func.to_char(col, "HH24")
@@ -392,6 +441,11 @@ def _apply_time_grain(col, grain: str):
         return func.to_char(col, "IYYY-IW")
     if grain == "month":
         return func.to_char(col, "YYYY-MM")
+    if grain == "quarter":
+        # ISO 季度,输出形如 "2026-Q3";"Q" 用双引号包裹转义为字面量,否则被当占位符
+        return func.to_char(col, 'YYYY-"Q"Q')
+    if grain == "year":
+        return func.to_char(col, "YYYY")
     if grain == "none":
         return col
     # 默认按日
@@ -522,11 +576,19 @@ def _load_rules(db: Session, rule_ids: list[int]) -> list[ClassificationRule]:
 
 
 def _extract_dim_keys_from_segments(segments: list[dict]) -> list[str]:
-    """从 segments 配置提取维度 alias(取第一个 segment 的)"""
+    """从 segments 配置提取维度 alias(取第一个 segment 的)
+
+    含 classification_target 生成的分类列(alias = f"{target}_class")
+    """
     if not segments:
         return []
     seg = segments[0]
-    return [d.get("alias") or d["field"] for d in seg.get("dimensions", [])]
+    keys: list[str] = []
+    # 分类列在最前(与 _execute_segment 中 select_cols 顺序一致)
+    if seg.get("classification_target"):
+        keys.append(f"{seg['classification_target']}_class")
+    keys.extend(d.get("alias") or d["field"] for d in seg.get("dimensions", []))
+    return keys
 
 
 def _extract_measure_keys(segments: list[dict]) -> list[str]:
@@ -538,6 +600,26 @@ def _extract_measure_keys(segments: list[dict]) -> list[str]:
             if mk not in keys:
                 keys.append(mk)
     return keys
+
+
+def _extract_stack_group_map(segments: list[dict]) -> dict[str, str]:
+    """从 segments 提取 measure alias → stack_group 映射(堆积图分组)。
+
+    stack_group 是 segment 级配置:同 stack_group 的不同 segment(用不同 measure alias)
+    在前端 ECharts 会堆叠成一根柱/线。未配 stack_group 的 segment 输出独立 series(overlay)。
+
+    注意:同 segment 的多个 measure 都会映射到同一 stack_group,意味着它们也会互相堆叠
+    (通常非预期,因金额/笔数单位不同)。堆积图建议每 segment 只放 1 个 measure。
+    """
+    m: dict[str, str] = {}
+    for seg in segments:
+        sg = seg.get("stack_group")
+        if not sg:
+            continue
+        for measure in seg.get("measures", []):
+            mk = measure.get("alias") or (measure["field"] if measure["field"] != "*" else "count")
+            m[mk] = sg
+    return m
 
 
 def _join_dim(row: dict, dim_keys: list[str]) -> str:

@@ -71,8 +71,11 @@ def _init_admin() -> None:
 
 
 def _init_data_sources_and_presets() -> None:
-    """启动时注册数据源元数据 + 预设分析视图(幂等)"""
+    """启动时注册数据源元数据 + 预设分类规则 + 预设分析视图(幂等)"""
     from app.services.data_source_registry import ensure_data_sources_registered
+    from app.services.preset_classification_rules_seed import (
+        ensure_preset_classification_rules_registered,
+    )
     from app.services.preset_dashboards_seed import ensure_preset_dashboards_registered
     from app.services.preset_templates_seed import ensure_preset_templates_registered
     from app.services.preset_views_seed import ensure_preset_views_registered
@@ -82,10 +85,14 @@ def _init_data_sources_and_presets() -> None:
     try:
         ds_stats = ensure_data_sources_registered(db)
         logger.info(f"数据源注册完成: sources={ds_stats['sources']}, fields={ds_stats['fields']}")
+        # 分类规则先于视图注册(视图通过 classification_rule_names 引用规则)
+        cr_stats = ensure_preset_classification_rules_registered(db)
+        logger.info(f"预设分类规则注册完成: rules={len(cr_stats)}, names={list(cr_stats.keys())}")
         pv_stats = ensure_preset_views_registered(db)
         logger.info(
             f"预设视图注册完成: presets={pv_stats['presets']}, "
-            f"created={pv_stats['created']}, updated={pv_stats['updated']}"
+            f"created={pv_stats['created']}, updated={pv_stats['updated']}, "
+            f"skipped_rules={pv_stats.get('skipped_rules', 0)}"
         )
         pt_stats = ensure_preset_templates_registered(db)
         logger.info(

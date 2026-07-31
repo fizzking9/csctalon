@@ -134,6 +134,19 @@ const routes = [
         component: () => import('@/views/analytics/Operator.vue'),
         meta: { title: '人员操作', icon: 'User' },
       },
+      // 审计时序页(隐藏入口,从设备/人员详情跳转或直接访问)
+      {
+        path: 'audit/device',
+        name: 'AuditDevice',
+        component: () => import('@/views/audit/DeviceAudit.vue'),
+        meta: { title: '设备审计', hidden: true },
+      },
+      {
+        path: 'audit/person',
+        name: 'AuditPerson',
+        component: () => import('@/views/audit/PersonAudit.vue'),
+        meta: { title: '人员审计', hidden: true },
+      },
       // 待办
       {
         path: 'todos',

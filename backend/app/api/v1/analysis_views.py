@@ -81,6 +81,7 @@ def create_view(db: DBSession, user: CurrentUser, payload: AnalysisViewCreate):
         classification_rule_ids=payload.classification_rule_ids,
         time_range_default=payload.time_range_default,
         ratios=payload.ratios,
+        cumulative=payload.cumulative,
         is_preset=False,
         status="active",
         owner_id=user.id,

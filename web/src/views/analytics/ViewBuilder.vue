@@ -58,24 +58,31 @@
 
               <div class="segment-config">
                 <el-row :gutter="12">
-                  <el-col :span="8">
+                  <el-col :span="7">
                     <el-form-item label="数据源" label-width="70px">
                       <el-select v-model="seg.source_code" size="small" @change="onSegSourceChange(seg)">
                         <el-option v-for="ds in dataSources" :key="ds.code" :label="ds.name_cn" :value="ds.code" />
                       </el-select>
                     </el-form-item>
                   </el-col>
-                  <el-col :span="6">
+                  <el-col :span="5">
                     <el-form-item label="标签" label-width="50px">
                       <el-input v-model="seg.label" size="small" placeholder="片段标签" />
                     </el-form-item>
                   </el-col>
-                  <el-col :span="10">
+                  <el-col :span="5">
+                    <el-form-item label="堆积组" label-width="60px">
+                      <el-input v-model="seg.stack_group" size="small" placeholder="留空=独立" @input="triggerPreview" />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="7">
                     <el-form-item label="时间粒度" label-width="70px">
                       <el-select v-model="seg.time_grain" size="small" placeholder="无时间维度" @change="triggerPreview">
                         <el-option label="按日" value="day" />
                         <el-option label="按周" value="week" />
                         <el-option label="按月" value="month" />
+                        <el-option label="按季" value="quarter" />
+                        <el-option label="按年" value="year" />
                         <el-option label="不聚合" value="none" />
                       </el-select>
                     </el-form-item>
@@ -202,6 +209,29 @@
             </div>
           </div>
 
+          <!-- 累计差额(池子水位,基于已聚合度量算运行总和) -->
+          <div class="drop-zone ratio-zone">
+            <div class="zone-title">
+              <el-tag type="info" size="small">累计差额 (可选)</el-tag>
+              <span class="zone-hint">流入-流出按时间累计,如池子水位;窗口内累计</span>
+              <el-button text type="primary" size="small" :icon="Plus" @click="addCumulative">添加</el-button>
+            </div>
+            <div class="zone-items vertical">
+              <div v-for="(c, ci) in viewConfig.cumulative" :key="ci" class="ratio-item">
+                <el-input v-model="c.alias" size="small" placeholder="别名(如 净水位)" style="width: 130px" @input="triggerPreview" />
+                <el-select v-model="c.inflow" size="small" placeholder="流入" style="width: 130px" @change="triggerPreview">
+                  <el-option v-for="a in allMeasureAliases" :key="a" :label="a" :value="a" />
+                </el-select>
+                <span class="ratio-div">-</span>
+                <el-select v-model="c.outflow" size="small" placeholder="流出(可选)" clearable style="width: 130px" @change="triggerPreview">
+                  <el-option v-for="a in allMeasureAliases" :key="a" :label="a" :value="a" />
+                </el-select>
+                <el-icon class="remove-icon" @click="viewConfig.cumulative.splice(ci, 1); triggerPreview()"><Close /></el-icon>
+              </div>
+              <span v-if="!viewConfig.cumulative.length" class="empty-hint">无需累计差额(如纯趋势/占比分析)</span>
+            </div>
+          </div>
+
           <!-- 时间范围 -->
           <div class="time-range-bar">
             <span class="label">预览时间范围:</span>
@@ -288,6 +318,7 @@ const viewConfig = reactive({
   merge_strategy: 'add',
   segments: [createEmptySegment()],
   ratios: [],
+  cumulative: [],
 })
 
 const activeSegment = ref('0')
@@ -345,10 +376,15 @@ function addRatio() {
   viewConfig.ratios.push({ alias: '', numerator: '', denominator: '', as_percent: true })
 }
 
+function addCumulative() {
+  viewConfig.cumulative.push({ alias: '', inflow: '', outflow: null })
+}
+
 function createEmptySegment() {
   return {
     source_code: '',
     label: '',
+    stack_group: null,
     dimensions: [],
     measures: [],
     filters: [],
@@ -500,11 +536,13 @@ async function doPreview() {
           .filter((f) => f.field)
           .map((f) => ({ field: f.field, op: f.op, value: f.value })),
         classification_target: s.classification_target || null,
+        stack_group: s.stack_group || null,
         limit: s.limit,
       })),
       merge_strategy: viewConfig.merge_strategy,
       classification_rule_ids: classificationRuleIdsMultiple.value,
       ratios: viewConfig.ratios.filter((r) => r.alias && r.numerator && r.denominator),
+      cumulative: viewConfig.cumulative.filter((c) => c.alias && c.inflow),
     }
     const params = {}
     if (previewDays.value > 0) {
@@ -560,6 +598,7 @@ const chartOption = computed(() => {
       type: r.chart_type,
       smooth: r.chart_type === 'line',
       data: s.data,
+      ...(s.stack ? { stack: s.stack } : {}),
     })),
   }
 })
@@ -608,12 +647,14 @@ async function handleSave() {
         measures: s.measures.map((m) => ({ field: m.field, agg: m.agg, alias: m.alias })),
         filters: s.filters.filter((f) => f.field).map((f) => ({ field: f.field, op: f.op, value: f.value })),
         classification_target: s.classification_target || null,
+        stack_group: s.stack_group || null,
         limit: s.limit,
       })),
       merge_strategy: viewConfig.merge_strategy,
       classification_rule_ids: classificationRuleIdsMultiple.value,
       time_range_default: previewDays.value > 0 ? { days: previewDays.value } : null,
       ratios: viewConfig.ratios.filter((r) => r.alias && r.numerator && r.denominator),
+      cumulative: viewConfig.cumulative.filter((c) => c.alias && c.inflow),
     })
     ElMessage.success('视图已保存')
     saveDialogVisible.value = false

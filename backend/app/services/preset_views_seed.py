@@ -512,13 +512,183 @@ PRESET_VIEWS: list[dict] = [
         "classification_rule_ids": [],
         "time_range_default": {"days": 30},
     },
+    # ---------- 退款现金流量视图体系(重构) ----------
+    # 视图1:整体趋势(堆积四类金额)
+    {
+        "code": "preset_cash_trend_v2",
+        "name": "退款现金流趋势(堆积)",
+        "description": "直接退款(线上)+ 用户提现 + 商户号退款,按日堆积柱状。闪猫退款暂占位。",
+        "chart_type": "bar",
+        "segments": [
+            {
+                "source_code": "refund",
+                "label": "直接退款",
+                "dimensions": [{"field": "created_at_raw", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "refund_amount", "agg": "sum", "alias": "直接退款"}],
+                "filters": [
+                    {"field": "refund_method", "op": "eq", "value": "线上"},
+                    {"field": "status", "op": "eq", "value": "已退款"},
+                    {"field": "operator", "op": "notin", "value": ["sys", "system"]},
+                ],
+                "stack_group": "现金流",
+            },
+            {
+                "source_code": "wallet",
+                "label": "用户提现",
+                "dimensions": [{"field": "op_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "op_amount", "agg": "sum", "alias": "用户提现"}],
+                "filters": [{"field": "op_type", "op": "eq", "value": "用户提现"}],
+                "stack_group": "现金流",
+            },
+            {
+                "source_code": "merchant_refund",
+                "label": "商户号退款",
+                "dimensions": [{"field": "trade_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "refund_amount", "agg": "sum", "alias": "商户号退款"}],
+                "filters": [],
+                "stack_group": "现金流",
+            },
+        ],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 90},
+    },
+    # 视图2:退费操作人统计
+    {
+        "code": "preset_refund_operator_v2",
+        "name": "退费操作人统计",
+        "description": "线上已退款按操作人(归一化)汇总金额与笔数,支持日/周/月/季/年切换",
+        "chart_type": "bar",
+        "segments": [{
+            "source_code": "refund",
+            "label": "操作人",
+            "dimensions": [{"field": "operator", "alias": "操作人", "role": "person"}],
+            "measures": [
+                {"field": "refund_amount", "agg": "sum", "alias": "退款金额"},
+                {"field": "*", "agg": "count", "alias": "退款笔数"},
+            ],
+            "filters": [
+                {"field": "refund_method", "op": "eq", "value": "线上"},
+                {"field": "status", "op": "eq", "value": "已退款"},
+                {"field": "operator", "op": "notin", "value": ["sys", "system"]},
+            ],
+            "limit": 50,
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    # 视图4:提现 vs 转入(池子水位)
+    {
+        "code": "preset_wallet_pool_v2",
+        "name": "提现池子水位",
+        "description": "订单退费转入(流入) vs 用户提现(流出),含累计净水位。转入<提现=池子在缩小。",
+        "chart_type": "line",
+        "segments": [
+            {
+                "source_code": "wallet",
+                "label": "转入",
+                "dimensions": [{"field": "op_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "op_amount", "agg": "sum", "alias": "转入"}],
+                "filters": [{"field": "op_type", "op": "eq", "value": "订单退费转入"}],
+            },
+            {
+                "source_code": "wallet",
+                "label": "提现",
+                "dimensions": [{"field": "op_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "op_amount", "agg": "sum", "alias": "提现"}],
+                "filters": [{"field": "op_type", "op": "eq", "value": "用户提现"}],
+            },
+        ],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "cumulative": [{"alias": "净水位", "inflow": "转入", "outflow": "提现"}],
+        "time_range_default": {"days": 180},
+    },
+    # 视图3:日记录按人员/原因(退费宽表+分类规则)
+    {
+        "code": "preset_refund_daily_detail_v2",
+        "name": "退款日记录(人员/原因/分类)",
+        "description": "线上已退款明细:操作人/退费原因/服务项/外部投诉标记,按优先级分类(外部>原因>审核人)",
+        "chart_type": "table",
+        "segments": [{
+            "source_code": "refund_wide",
+            "label": "退款明细",
+            "dimensions": [
+                {"field": "refund_no", "alias": "退费单号", "role": "dimension"},
+                {"field": "created_at_raw", "alias": "日期", "role": "time", "time_grain": "day"},
+                {"field": "operator", "alias": "操作人", "role": "person"},
+                {"field": "refund_reason", "alias": "退费原因", "role": "category"},
+                {"field": "service_item", "alias": "服务项", "role": "category"},
+            ],
+            "measures": [{"field": "refund_amount", "agg": "sum", "alias": "退款金额"}],
+            "filters": [
+                {"field": "refund_method", "op": "eq", "value": "线上"},
+                {"field": "status", "op": "eq", "value": "已退款"},
+            ],
+            "classification_target": "refund_no",
+            "limit": 100,
+        }],
+        "merge_strategy": "add",
+        "classification_rule_names": ["客诉-外部投诉", "客诉-原因", "客诉-审核人"],
+        "time_range_default": {"days": 7},
+    },
+    # 视图5:提现SN关联退费单/工单时间分布
+    {
+        "code": "preset_wallet_refund_timing_v2",
+        "name": "提现-退款时序关联",
+        "description": "有提现记录的退款:提现时点 vs 退费单/工单时间,用于审计提现与退款的时序关系",
+        "chart_type": "table",
+        "segments": [{
+            "source_code": "refund_wide",
+            "label": "提现时序",
+            "dimensions": [
+                {"field": "wallet_op_time", "alias": "提现日期", "role": "time", "time_grain": "day"},
+                {"field": "refund_no", "alias": "退费单号", "role": "dimension"},
+                {"field": "ticket_no", "alias": "工单号", "role": "dimension"},
+                {"field": "device_sn", "alias": "设备SN", "role": "sn"},
+            ],
+            "measures": [
+                {"field": "wallet_op_amount", "agg": "sum", "alias": "提现金额"},
+                {"field": "refund_amount", "agg": "sum", "alias": "退款金额"},
+            ],
+            "filters": [{"field": "wallet_id", "op": "is_not_null", "value": None}],
+            "limit": 100,
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
 ]
 
 
 def ensure_preset_views_registered(db: Session) -> dict:
-    """幂等注册预设视图:按 code upsert"""
-    stats = {"presets": 0, "created": 0, "updated": 0}
+    """幂等注册预设视图:按 code upsert
+
+    支持 classification_rule_names:seed 配置中可写规则名称列表(优先级从高到低),
+    本函数查 classification_rules 表解析为 id 列表填入 classification_rule_ids。
+    需在 ensure_preset_classification_rules_registered 之后调用。
+    """
+    from app.models.analysis_view import ClassificationRule
+
+    # 预加载所有分类规则 name→id 映射(供 classification_rule_names 解析)
+    rule_name_to_id: dict[str, int] = {
+        r.name: r.id
+        for r in db.scalars(select(ClassificationRule).where(ClassificationRule.is_active.is_(True)))
+    }
+
+    stats = {"presets": 0, "created": 0, "updated": 0, "skipped_rules": 0}
     for idx, cfg in enumerate(PRESET_VIEWS):
+        # 解析 classification_rule_names → ids(顺序=优先级)
+        rule_names = cfg.get("classification_rule_names")
+        rule_ids = cfg.get("classification_rule_ids", [])
+        if rule_names:
+            resolved = [rule_name_to_id[n] for n in rule_names if n in rule_name_to_id]
+            if len(resolved) != len(rule_names):
+                # 部分规则未注册,记录跳过但继续(用已解析的)
+                stats["skipped_rules"] += len(rule_names) - len(resolved)
+            rule_ids = resolved
+
         existing = db.scalar(select(AnalysisView).where(AnalysisView.code == cfg["code"]))
         if existing:
             # 更新配置(允许调优预设)
@@ -527,9 +697,10 @@ def ensure_preset_views_registered(db: Session) -> dict:
             existing.chart_type = cfg["chart_type"]
             existing.segments = cfg["segments"]
             existing.merge_strategy = cfg.get("merge_strategy", "add")
-            existing.classification_rule_ids = cfg.get("classification_rule_ids", [])
+            existing.classification_rule_ids = rule_ids
             existing.time_range_default = cfg.get("time_range_default")
             existing.ratios = cfg.get("ratios", [])
+            existing.cumulative = cfg.get("cumulative", [])
             existing.sort_order = idx
             stats["updated"] += 1
         else:
@@ -540,9 +711,10 @@ def ensure_preset_views_registered(db: Session) -> dict:
                 chart_type=cfg["chart_type"],
                 segments=cfg["segments"],
                 merge_strategy=cfg.get("merge_strategy", "add"),
-                classification_rule_ids=cfg.get("classification_rule_ids", []),
+                classification_rule_ids=rule_ids,
                 time_range_default=cfg.get("time_range_default"),
                 ratios=cfg.get("ratios", []),
+                cumulative=cfg.get("cumulative", []),
                 is_preset=True,
                 status="active",
                 sort_order=idx,
