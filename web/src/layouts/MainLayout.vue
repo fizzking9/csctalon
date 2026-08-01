@@ -43,6 +43,7 @@
           <el-menu-item index="/dashboards/refund">退款看板</el-menu-item>
           <el-menu-item index="/dashboards/complaint">投诉看板</el-menu-item>
           <el-menu-item index="/dashboards/reception">接待看板</el-menu-item>
+          <el-menu-item index="/dashboards/refund-withdrawal">退款-提现全链路看板</el-menu-item>
           <el-menu-item index="/dashboards/performance">绩效看板</el-menu-item>
           <el-menu-item index="/dashboards/special">专项跟进</el-menu-item>
         </el-sub-menu>

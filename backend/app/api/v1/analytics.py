@@ -118,3 +118,58 @@ def op_audit(db: DBSession, _: CurrentUser, start: str | None = None, end: str |
 @router.get("/operator/refund", response_model=R, summary="人员退费操作统计")
 def op_refund(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
     return R(data=A.operator_refund_stats(db, _parse_dt(start), _parse_dt(end)))
+
+
+# ---------- 看板5: 客服接待看板 (对齐周报4模块) ----------
+
+
+@router.get("/reception/overview", response_model=R, summary="接待看板-总体接待量(按周)")
+def reception_overview(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
+    return R(data=A.reception_overview_trend(db, _parse_dt(start), _parse_dt(end)))
+
+
+@router.get("/reception/category-summary", response_model=R, summary="接待看板-接待分项汇总(按周×分类)")
+def reception_category(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
+    return R(data=A.reception_category_summary(db, _parse_dt(start), _parse_dt(end)))
+
+
+@router.get("/reception/per-capita", response_model=R, summary="接待看板-接待分项人均工作(按周×专项组)")
+def reception_pc(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
+    return R(data=A.reception_per_capita(db, _parse_dt(start), _parse_dt(end)))
+
+
+@router.get("/reception/group-detail", response_model=R, summary="接待看板-各组接待明细(按组×人员×日)")
+def reception_group(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
+    return R(data=A.reception_group_detail(db, _parse_dt(start), _parse_dt(end)))
+
+
+# ---------- 看板6: 退款-提现全链路看板 (合并 SN对账 + 发起退款→实际到账时效分析) ----------
+
+
+@router.get("/refund-withdrawal/overview", response_model=R, summary="提现全链路看板-顶部KPI总览(路径对比+到账率)")
+def rw_overview(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
+    return R(data=A.refund_withdrawal_overview(db, start, end))
+
+
+@router.get("/refund-withdrawal/time-distribution", response_model=R, summary="提现全链路看板-两条路径耗时分桶(用于柱状图)")
+def rw_time_dist(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
+    return R(data=A.refund_withdrawal_time_distribution(db, start, end))
+
+
+@router.get("/refund-withdrawal/dimensions", response_model=R, summary="提现全链路看板-按处理人/原因/方式TopN聚合")
+def rw_dims(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None,
+            topn: int = Query(20, ge=1, le=100)):
+    return R(data=A.refund_withdrawal_dimensions(db, start, end, topn))
+
+
+@router.get("/refund-withdrawal/detail", response_model=R, summary="提现全链路看板-明细列表(支持排序/慢单筛选/分页)")
+def rw_detail(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None,
+              sort: str = Query("days_desc", pattern=r"^(days_(desc|asc)|amount_desc|d1_desc)$"),
+              page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500),
+              slow_only: bool = False, path: str = Query("ALL", pattern=r"^(ALL|AB|A|B|X)$")):
+    return R(data=A.refund_withdrawal_detail(db, start, end, sort, page, page_size, slow_only, path))
+
+
+@router.get("/refund-withdrawal/daily-split", response_model=R, summary="提现全链路看板-按实际出款日拆分两条流(直退vs钱包提现)堆叠图")
+def rw_daily_split(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
+    return R(data=A.refund_withdrawal_daily_split(db, start, end))

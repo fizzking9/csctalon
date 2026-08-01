@@ -83,8 +83,14 @@ const routes = [
       {
         path: 'dashboards/reception',
         name: 'DashboardReception',
-        component: () => import('@/views/dashboards/DashboardView.vue'),
+        component: () => import('@/views/dashboards/Reception.vue'),
         meta: { title: '接待看板', icon: 'Service', manager: true },
+      },
+      {
+        path: 'dashboards/refund-withdrawal',
+        name: 'DashboardRefundWithdrawal',
+        component: () => import('@/views/dashboards/RefundWithdrawal.vue'),
+        meta: { title: '退款-提现全链路看板', icon: 'Money', manager: true },
       },
       {
         path: 'dashboards/performance',

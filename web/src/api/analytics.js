@@ -35,3 +35,21 @@ export const operator = {
   audit: (params) => request.get('/analytics/operator/audit', { params }),
   refund: (params) => request.get('/analytics/operator/refund', { params }),
 }
+
+// 客服接待看板(对齐周报4模块)
+export const reception = {
+  overview: (params) => request.get('/analytics/reception/overview', { params }),
+  categorySummary: (params) => request.get('/analytics/reception/category-summary', { params }),
+  perCapita: (params) => request.get('/analytics/reception/per-capita', { params }),
+  groupDetail: (params) => request.get('/analytics/reception/group-detail', { params }),
+}
+
+// 退款-提现全链路看板 (合并 SN对账 + 发起退款→实际到账时效分析)
+export const refundWithdrawal = {
+  overview: (params) => request.get('/analytics/refund-withdrawal/overview', { params }),
+  timeDistribution: (params) => request.get('/analytics/refund-withdrawal/time-distribution', { params }),
+  dailySplit: (params) => request.get('/analytics/refund-withdrawal/daily-split', { params }),
+  dimensions: (params) => request.get('/analytics/refund-withdrawal/dimensions', { params }),
+  detail: (params) => request.get('/analytics/refund-withdrawal/detail', { params }),
+}
+

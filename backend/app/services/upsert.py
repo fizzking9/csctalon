@@ -4,6 +4,7 @@
 统计逻辑:upsert 前先查已存在的主键数量,以精确区分 insert/update
 """
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -156,6 +157,68 @@ def _clean_value(val: Any) -> Any:
     return val
 
 
+# ---------- 脏数据防御:人名字段 & 单号格式校验 ----------
+
+_NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?$")
+# 典型单号: RF / SP / WS / WX / BR / INIT:: / YKM 等开头,必须是 ASCII 可见字符(不含中文)且长度≤64
+_REFUND_NO_BAD_RE = re.compile(r"[\u4e00-\u9fff]|[\s，。；、（）【】《》\"'`]")
+
+
+def _is_numeric_like(val: Any) -> bool:
+    """判断一个值是否"长得像数字/金额"。
+    用于 operator / auditor / handler 等"应该是人名字符串"的字段,
+    如果 Excel 列映射错把金额列写进来,在这里能识别并拦截。
+    """
+    if val is None:
+        return False
+    if isinstance(val, (int, float)):
+        try:
+            if pd.isna(val):  # NaN/NaT 不算
+                return False
+        except (TypeError, ValueError):
+            pass
+        return True
+    if isinstance(val, str):
+        s = val.strip().replace(",", "")  # 千分位逗号
+        return bool(_NUMERIC_RE.match(s))
+    return False
+
+
+def _looks_like_bad_refund_no(val: str | None) -> bool:
+    """退费单号明显不合法:含中文、中文标点、空白,或长度过于离谱(>64)。
+    合法单号示例: RF2025071200031 / INIT::xxx::套餐::2025-01-01 等。
+    """
+    if not val:
+        return False
+    if len(val) > 64:
+        return True
+    return bool(_REFUND_NO_BAD_RE.search(val))
+
+
+def _sanitize_name_field(
+    val: Any,
+    row_idx: int,
+    result: ImportResult,
+    field_label: str,
+) -> str | None:
+    """清洗应该为人名(或企微-人名 / 英文账号名)的字符串字段。
+    - 含数字/金额格式 → 判定为"Excel 列映射错位",记录为错误行提示,但继续导入(该字段置 None)
+      这样不会丢整行数据,同时在 errors 里提醒用户检查列映射。
+    - 空值 → None
+    """
+    s = _to_str(val)
+    if s is None:
+        return None
+    if _is_numeric_like(s):
+        result.add_error(
+            row_idx,
+            f"{field_label}='{s}' 格式异常(疑似金额/数字,可能是 Excel 列映射错位),已置空请核对列映射",
+            {"field": field_label, "raw_value": s},
+        )
+        return None
+    return s
+
+
 def apply_mapping(row: dict, mapping: dict[str, str]) -> dict[str, Any]:
     """根据列映射从行数据提取目标字段值(并统一清洗空值)"""
     out: dict[str, Any] = {}
@@ -233,6 +296,16 @@ def upsert_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
             if not refund_no:
                 result.add_error(idx, "退费单号为空")
                 continue
+            if _looks_like_bad_refund_no(refund_no):
+                result.add_error(
+                    idx,
+                    f"退费单号 '{refund_no}' 格式异常(含中文/标点/空白或过长,疑似误填为备注文本),请核对",
+                    {"refund_no": refund_no},
+                )
+                continue
+            # operator / auditor 必须像人名(不能是数字,否则是金额列映射错位)
+            operator = _sanitize_name_field(data.get("operator"), idx, result, "退费单-操作人")
+            auditor = _sanitize_name_field(data.get("auditor"), idx, result, "退费单-审核人")
             rows.append({
                 "refund_no": refund_no,
                 "platform_order_no": data.get("platform_order_no"),
@@ -247,8 +320,8 @@ def upsert_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
                 "status": data.get("status"),
                 "refund_method": data.get("refund_method"),
                 "audit_remark": data.get("audit_remark"),
-                "auditor": data.get("auditor"),
-                "operator": data.get("operator"),
+                "auditor": auditor,
+                "operator": operator,
                 "created_at_raw": _to_datetime(data.get("created_at_raw")),
                 "updated_at_raw": _to_datetime(data.get("updated_at_raw")),
                 "package_price": _to_float(data.get("package_price")),
@@ -274,7 +347,7 @@ def upsert_wallet(df: pd.DataFrame, mapping: dict[str, str], db: Session, result
                 "op_amount": _to_float(data.get("op_amount")),
                 "remark": data.get("remark"),
                 "op_time": _to_datetime(data.get("op_time")),
-                "operator": data.get("operator"),
+                "operator": _sanitize_name_field(data.get("operator"), idx, result, "钱包提现-操作人"),
             })
             result.total += 1
         except Exception as e:
@@ -312,10 +385,10 @@ def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
                 "dispatch_time": _to_datetime(data.get("dispatch_time")),
                 "finish_time": _to_datetime(data.get("finish_time")),
                 "handle_duration": _to_int(data.get("handle_duration")),
-                "registrant": data.get("registrant"),
+                "registrant": _sanitize_name_field(data.get("registrant"), idx, result, "工单-登记人"),
                 "channel": data.get("channel"),
                 "handle_node": data.get("handle_node"),
-                "handler": data.get("handler"),
+                "handler": _sanitize_name_field(data.get("handler"), idx, result, "工单-处理人"),
                 "handle_opinion": data.get("handle_opinion"),
                 "is_appeal": data.get("is_appeal"),
                 "order_no": data.get("order_no"),
@@ -444,7 +517,7 @@ def upsert_cs_records(df: pd.DataFrame, mapping: dict[str, str], db: Session, re
                 "device_sn": data.get("device_sn"),
                 "solution": data.get("solution"),
                 "operation_time": _to_datetime(data.get("operation_time")),
-                "operator": data.get("operator"),
+                "operator": _sanitize_name_field(data.get("operator"), idx, result, "客服记录-操作人"),
                 "send_content": data.get("send_content"),
                 "description": data.get("description"),
                 "execution_result": data.get("execution_result"),
@@ -486,7 +559,7 @@ def upsert_external_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Se
                 "company_entity": data.get("company_entity"),
                 "complaint_shop": data.get("complaint_shop"),
                 "purchase_order_no": data.get("purchase_order_no"),
-                "complainant": data.get("complainant"),
+                "complainant": _sanitize_name_field(data.get("complainant"), idx, result, "外部投诉-投诉人"),
                 "complainant_phone": data.get("complainant_phone"),
                 "device_sn": data.get("device_sn"),
                 "wechat_id": data.get("wechat_id"),
@@ -495,12 +568,12 @@ def upsert_external_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Se
                 "complaint_category": data.get("complaint_category"),
                 "solution": data.get("solution"),
                 "result": data.get("result"),
-                "follower": data.get("follower"),
+                "follower": _sanitize_name_field(data.get("follower"), idx, result, "外部投诉-跟进人"),
                 "handle_time": _sanitize_date(_to_datetime(data.get("handle_time"))),
                 "handle_detail": data.get("handle_detail"),
                 "internal_analysis": data.get("internal_analysis"),
                 "external_analysis": data.get("external_analysis"),
-                "reception_cs": data.get("reception_cs"),
+                "reception_cs": _sanitize_name_field(data.get("reception_cs"), idx, result, "外部投诉-接待客服"),
                 "package_order_no": data.get("package_order_no"),
                 "package_name": data.get("package_name"),
                 "package_price": _to_float(data.get("package_price")),
@@ -540,14 +613,14 @@ def upsert_card_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
             rows.append({
                 "complaint_date": _sanitize_date(_to_datetime(data.get("complaint_date"))),
                 "complaint_group": data.get("complaint_group"),
-                "complainant": data.get("complainant"),
+                "complainant": _sanitize_name_field(data.get("complainant"), idx, result, "卡商群投诉-投诉人"),
                 "complainant_phone": data.get("complainant_phone"),
                 "device_sn": device_sn,
                 "problem": data.get("problem"),
                 "problem_category": data.get("problem_category"),
                 "result": data.get("result"),
                 "solution": data.get("solution"),
-                "handler": data.get("handler"),
+                "handler": _sanitize_name_field(data.get("handler"), idx, result, "卡商群投诉-处理人"),
                 "handle_result": data.get("handle_result"),
             })
             result.total += 1
