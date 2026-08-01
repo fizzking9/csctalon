@@ -298,11 +298,11 @@ const confirming = ref(false)
 
 const statusMap = { draft: '草稿', confirmed: '已确认', archived: '已归档' }
 const statusType = (s) => ({ draft: 'info', confirmed: 'success', archived: 'warning' }[s] || 'info')
-const formatDate = (t) => (t ? dayjs(t).format('YYYY-MM-DD') : '-')
+const formatDate = (t) => (t ? dayjs(t).format('YY/MM/DD') : '-')
 const isDraft = computed(() => report.value.status === 'draft')
 
-const weekStartStr = computed(() => (report.value.week_start ? dayjs(report.value.week_start).format('YYYY-MM-DD') : ''))
-const weekEndStr = computed(() => (report.value.week_end ? dayjs(report.value.week_end).format('YYYY-MM-DD') : ''))
+const weekStartStr = computed(() => (report.value.week_start ? dayjs(report.value.week_start).format('YY/MM/DD') : ''))
+const weekEndStr = computed(() => (report.value.week_end ? dayjs(report.value.week_end).format('YY/MM/DD') : ''))
 const viewNameMap = computed(() => Object.fromEntries(viewOptions.value.map((v) => [v.id, v.name])))
 const userNameMap = computed(() => Object.fromEntries(userOptions.value.map((u) => [u.id, u.display_name])))
 

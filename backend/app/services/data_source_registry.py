@@ -157,7 +157,11 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("refund_wide", "ticket_no"): {"role": "dimension", "is_filterable": False},
     ("refund_wide", "service_item"): {"role": "category"},
     ("refund_wide", "service_category"): {"role": "category"},
-    ("refund_wide", "ticket_finish_time"): {"role": "time"},
+    # ticket_finish_time 同 ticket.finish_time,89% 不可靠,隐藏防误用(详见 docs/数据时间字段使用规范.md)
+    ("refund_wide", "ticket_finish_time"): {
+        "role": "time", "is_filterable": False,
+        "name_cn": "⚠️工单完成时间(不可靠,89%被批量覆盖)",
+    },
     ("refund_wide", "ticket_handle_duration"): {"role": "measure", "agg": "avg"},
     ("refund_wide", "ticket_handler"): {"role": "person"},
     # merchant_refund 关联字段(mr_ 前缀避免与 refund 主表字段冲突)
@@ -190,7 +194,11 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("refund", "refund_reason"): {"role": "category"},
     ("refund", "package_name"): {"role": "category"},
     ("refund", "created_at_raw"): {"role": "time"},
-    ("refund", "updated_at_raw"): {"role": "time"},
+    # updated_at_raw 被 SYS 03:15 批量任务覆盖,非真实业务时间,隐藏防误用(详见 docs/数据时间字段使用规范.md)
+    ("refund", "updated_at_raw"): {
+        "role": "time", "is_filterable": False,
+        "name_cn": "⚠️原始更新时间(被SYS批量覆盖,请用创建时间)",
+    },
     # wallet
     ("wallet", "op_amount"): {"role": "amount", "agg": "sum"},
     ("wallet", "wallet_balance"): {"role": "amount", "agg": "sum"},
@@ -229,7 +237,11 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("ticket", "service_item"): {"role": "category"},
     ("ticket", "status"): {"role": "category", "enum": ["待处理", "已完成"]},
     ("ticket", "register_time"): {"role": "time"},
-    ("ticket", "finish_time"): {"role": "time"},
+    # finish_time 89% 非真实完成时间(50%被BMS批量覆盖/23%同步填充/17%同瞬填充),隐藏防误用(详见 docs/数据时间字段使用规范.md)
+    ("ticket", "finish_time"): {
+        "role": "time", "is_filterable": False,
+        "name_cn": "⚠️完成时间(不可靠,89%被批量覆盖,请用登记时间)",
+    },
     ("ticket", "active_time"): {"role": "time"},
     ("ticket", "dispatch_time"): {"role": "time"},
     ("ticket", "priority"): {"role": "measure", "agg": "avg"},
@@ -346,7 +358,8 @@ def ensure_data_sources_registered(db: Session) -> dict:
                 override = FIELD_OVERRIDES.get((seed["code"], col.name), {})
                 reflected.append({
                     "field_name": col.name,
-                    "field_name_cn": _clean_comment(col.comment) or None,
+                    # name_cn 优先用 override(用于给不可靠字段加 ⚠️ 警告前缀),无则反射模型 comment
+                    "field_name_cn": override.get("name_cn") or _clean_comment(col.comment) or None,
                     "data_type": _infer_data_type(col),
                     "semantic_role": override.get("role", "dimension"),
                     "agg_func": override.get("agg"),

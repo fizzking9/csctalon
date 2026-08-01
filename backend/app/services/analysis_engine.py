@@ -437,26 +437,31 @@ def _resolve_person_name(raw_col):
 def _apply_time_grain(col, grain: str):
     """时间粒度:hour/day/week/month/quarter/year → to_char
 
-    所有格式都带年份前缀,字典序天然等于时间序(order_by group_cols[0] 无需特殊处理)。
+    日期采用紧凑格式(YY/MM/DD 等),带前导零 → 字典序天然等于时间序
+    (order_by group_cols[0] 无需特殊处理)。周保留 ISO 年(IYYY)以保证跨年周正确性;
+    年单独显示需 4 位避免歧义。
     """
     if grain == "hour":
         # 00-23,用于客服工作负荷按时段分布分析
         return func.to_char(col, "HH24")
     if grain == "day":
-        return func.to_char(col, "YYYY-MM-DD")
+        # 26/08/01
+        return func.to_char(col, "YY/MM/DD")
     if grain == "week":
+        # 2026-31(ISO 年-周,保留 4 位年避免跨年周错位)
         return func.to_char(col, "IYYY-IW")
     if grain == "month":
-        return func.to_char(col, "YYYY-MM")
+        # 26/08
+        return func.to_char(col, "YY/MM")
     if grain == "quarter":
-        # ISO 季度,输出形如 "2026-Q3";"Q" 用双引号包裹转义为字面量,否则被当占位符
-        return func.to_char(col, 'YYYY-"Q"Q')
+        # 26/Q3;"Q" 用双引号包裹转义为字面量,否则被当占位符
+        return func.to_char(col, 'YY/"Q"Q')
     if grain == "year":
         return func.to_char(col, "YYYY")
     if grain == "none":
         return col
     # 默认按日
-    return func.to_char(col, "YYYY-MM-DD")
+    return func.to_char(col, "YY/MM/DD")
 
 
 def _apply_agg(col, agg: str):

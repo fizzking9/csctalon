@@ -303,11 +303,11 @@ const noteForm = reactive(emptyNoteForm())
 
 const userNameMap = computed(() => Object.fromEntries(userOptions.value.map((u) => [u.id, u.display_name])))
 const viewNameMap = computed(() => Object.fromEntries(viewOptions.value.map((v) => [v.id, v.name])))
-const formatDate = (t) => (t ? dayjs(t).format('YYYY-MM-DD') : '-')
+const formatDate = (t) => (t ? dayjs(t).format('YY/MM/DD') : '-')
 const isDraft = computed(() => report.value.status === 'draft')
 const hasFramework = computed(() => Array.isArray(report.value.framework) && report.value.framework.length > 0)
-const timeStartStr = computed(() => (report.value.time_start ? dayjs(report.value.time_start).format('YYYY-MM-DD') : ''))
-const timeEndStr = computed(() => (report.value.time_end ? dayjs(report.value.time_end).format('YYYY-MM-DD') : ''))
+const timeStartStr = computed(() => (report.value.time_start ? dayjs(report.value.time_start).format('YY/MM/DD') : ''))
+const timeEndStr = computed(() => (report.value.time_end ? dayjs(report.value.time_end).format('YY/MM/DD') : ''))
 
 const typeMap = { weekly: '周报', special_audit: '专项审计', custom: '自定义' }
 const statusMap = { draft: '草稿', confirmed: '已确认', archived: '已归档' }

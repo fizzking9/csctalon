@@ -15,7 +15,7 @@ PRESET_VIEWS: list[dict] = [
     {
         "code": "preset_refund_trend",
         "name": "退款趋势(按日)",
-        "description": "退款金额与笔数按日趋势",
+        "description": "线上真实退款金额与笔数按日趋势(排除 sys/system 系统退款=退到会员钱包非现金流出)",
         "chart_type": "line",
         "segments": [{
             "source_code": "refund",
@@ -27,7 +27,11 @@ PRESET_VIEWS: list[dict] = [
                 {"field": "refund_amount", "agg": "sum", "alias": "退款金额"},
                 {"field": "*", "agg": "count", "alias": "笔数"},
             ],
-            "filters": [],
+            "filters": [
+                {"field": "refund_method", "op": "eq", "value": "线上"},
+                {"field": "operator", "op": "is_not_null", "value": None},
+                {"field": "operator", "op": "notin", "value": ["sys", "system", "SYS", "System"]},
+            ],
         }],
         "merge_strategy": "add",
         "classification_rule_ids": [],
@@ -241,7 +245,7 @@ PRESET_VIEWS: list[dict] = [
     {
         "code": "preset_operator_ticket",
         "name": "人员工单处理统计",
-        "description": "按处理人汇总工单数、退款金额、平均时长",
+        "description": "按处理人汇总工单数、退款金额、平均时长(排除 SYS 系统自动赠送工单与 客户 自处理,仅统计真人客服工作量)",
         "chart_type": "bar",
         "segments": [{
             "source_code": "ticket",
@@ -254,6 +258,7 @@ PRESET_VIEWS: list[dict] = [
             ],
             "filters": [
                 {"field": "handler", "op": "is_not_null", "value": None},
+                {"field": "handler", "op": "notin", "value": ["SYS", "客户"]},
             ],
         }],
         "merge_strategy": "add",
@@ -294,7 +299,7 @@ PRESET_VIEWS: list[dict] = [
             ],
             "filters": [
                 {"field": "operator", "op": "is_not_null", "value": None},
-                {"field": "operator", "op": "notin", "value": ["sys", "system"]},
+                {"field": "operator", "op": "notin", "value": ["sys", "system", "SYS", "System"]},
             ],
         }],
         "merge_strategy": "add",
@@ -529,7 +534,7 @@ PRESET_VIEWS: list[dict] = [
                 "filters": [
                     {"field": "refund_method", "op": "eq", "value": "线上"},
                     {"field": "status", "op": "eq", "value": "已退款"},
-                    {"field": "operator", "op": "notin", "value": ["sys", "system"]},
+                    {"field": "operator", "op": "notin", "value": ["sys", "system", "SYS", "System"]},
                 ],
                 "stack_group": "现金流",
             },
@@ -570,7 +575,7 @@ PRESET_VIEWS: list[dict] = [
             "filters": [
                 {"field": "refund_method", "op": "eq", "value": "线上"},
                 {"field": "status", "op": "eq", "value": "已退款"},
-                {"field": "auditor", "op": "notin", "value": ["sys", "system"]},
+                {"field": "auditor", "op": "notin", "value": ["sys", "system", "SYS", "System"]},
             ],
         }],
         "merge_strategy": "add",
@@ -624,6 +629,7 @@ PRESET_VIEWS: list[dict] = [
             "filters": [
                 {"field": "refund_method", "op": "eq", "value": "线上"},
                 {"field": "status", "op": "eq", "value": "已退款"},
+                {"field": "operator", "op": "notin", "value": ["sys", "system", "SYS", "System"]},
             ],
             "classification_target": "refund_no",
             "limit": 100,

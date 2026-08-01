@@ -106,7 +106,7 @@ const generating = ref(false)
 
 const statusMap = { draft: '草稿', confirmed: '已确认', archived: '已归档' }
 const statusType = (s) => ({ draft: 'info', confirmed: 'success', archived: 'warning' }[s] || 'info')
-const formatDate = (t) => (t ? dayjs(t).format('YYYY-MM-DD') : '-')
+const formatDate = (t) => (t ? dayjs(t).format('YY/MM/DD') : '-')
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-')
 
 async function loadData() {

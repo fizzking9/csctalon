@@ -197,7 +197,7 @@ const statusType = (s) => ({ draft: 'info', executing: 'warning', pending_review
 const sourceMap = { audit: '审计', weekly: '周报', incident: '异常事件', manual: '手工' }
 const typeMap = { internal: '内部管理', external: '外部协调' }
 const reviewResultMap = { effective: '生效', partial: '部分生效', ineffective: '未生效', adjust: '需调整' }
-const formatDate = (t) => (t ? dayjs(t).format('YYYY-MM-DD') : '-')
+const formatDate = (t) => (t ? dayjs(t).format('YY/MM/DD') : '-')
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-')
 const isOverdue = (row) => row.verify_time && row.status !== 'effective' && row.status !== 'archived' && dayjs(row.verify_time).isBefore(dayjs())
 
