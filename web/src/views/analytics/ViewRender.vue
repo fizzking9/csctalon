@@ -157,13 +157,16 @@ const chartOption = computed(() => {
     grid: { left: 60, right: 30, bottom: 40, top: 40 },
     xAxis: { type: 'category', data: data.x_axis || [], axisLabel: { rotate: data.x_axis?.length > 15 ? 30 : 0 } },
     yAxis: { type: 'value' },
-    series: (data.series || []).map((s) => ({
-      name: s.name,
-      type: r.chart_type,
-      smooth: r.chart_type === 'line',
-      data: s.data,
-      ...(s.stack ? { stack: s.stack } : {}),
-    })),
+    series: (data.series || []).map((s) => {
+      const t = s.series_type || r.chart_type
+      return {
+        name: s.name,
+        type: t,
+        smooth: t === 'line',
+        data: s.data,
+        ...(s.stack ? { stack: s.stack } : {}),
+      }
+    }),
   }
 })
 

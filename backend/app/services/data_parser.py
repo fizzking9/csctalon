@@ -105,6 +105,7 @@ COLUMN_TEMPLATES: dict[str, dict[str, list[str]]] = {
         "settle_amount": ["应结订单金额"],
         "voucher_amount": ["代金券金额"],
         "wx_refund_no": ["微信退款单号"],
+        "merchant_refund_no": ["商户退款单号"],
         "refund_amount": ["退款金额"],
         "recharge_voucher_refund": ["充值券退款金额"],
         "refund_type": ["退款类型"],
@@ -204,6 +205,8 @@ def clean_cell(val: Any) -> Any:
         return None
     if isinstance(val, str):
         v = val.replace("\t", "").strip()
+        # 剥离 Excel 文本标记前导反引号(微信商户号导出的 ID 列常带 ` 前缀强制文本格式)
+        v = v.lstrip("`")
         return v if v != "" else None
     # NaN 检测
     try:

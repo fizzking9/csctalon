@@ -185,7 +185,7 @@ def _build_merchant_refund_items(rows: list[MerchantRefund]) -> list[dict]:
             "time": m.trade_time,
             "ref_id": m.wx_refund_no,
             "title": f"商户退款 {m.wx_refund_no}",
-            "summary": " · ".join(parts) or "商户号退款",
+            "summary": " · ".join(parts) or "商户号现金流",
             "amount": amount,
             "fields": {
                 "微信退款单号": m.wx_refund_no,

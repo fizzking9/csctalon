@@ -1,0 +1,17 @@
+# 补丁构建:基于本地已有的 csctalon-backend 镜像(含全部依赖),仅覆盖应用代码。
+# 用途:registry mirror 不可达时,避免重新拉取 python:3.11-slim 基础镜像。
+# 正常网络环境下应使用原 Dockerfile。
+FROM csctalon-backend:latest
+
+WORKDIR /app
+
+# 仅覆盖应用源码与迁移(依赖层不变,无需重装)
+COPY app /app/app
+COPY alembic /app/alembic
+COPY alembic.ini /app/alembic.ini
+
+RUN mkdir -p /app/uploads
+
+EXPOSE 8000
+
+CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "120", "--log-level", "info"]

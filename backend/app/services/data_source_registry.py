@@ -76,11 +76,11 @@ DATA_SOURCE_SEEDS: list[dict] = [
     {
         "code": "merchant_refund",
         "model": MerchantRefund,
-        "name_cn": "商户号退款",
+        "name_cn": "商户号现金流",
         "time_field": "trade_time",
         "sn_field": "device_no",
-        "pk_field": "wx_refund_no",
-        "pk_strategy": "primary_key",
+        "pk_field": None,
+        "pk_strategy": "none",
         "category": "现金流",
     },
     # 占位数据源(规划中,暂未建表实现):仅数据查看侧边栏占位,不可导入/同步/查看明细
@@ -246,7 +246,8 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("ticket", "dispatch_time"): {"role": "time"},
     ("ticket", "priority"): {"role": "measure", "agg": "avg"},
     # merchant_refund
-    ("merchant_refund", "wx_refund_no"): {"role": "dimension", "is_pk": True, "is_filterable": False},
+    ("merchant_refund", "wx_refund_no"): {"role": "dimension", "is_filterable": True},
+    ("merchant_refund", "merchant_refund_no"): {"role": "dimension", "is_filterable": True},
     ("merchant_refund", "refund_amount"): {"role": "amount", "agg": "sum"},
     ("merchant_refund", "settle_amount"): {"role": "amount", "agg": "sum"},
     ("merchant_refund", "voucher_amount"): {"role": "amount", "agg": "sum"},

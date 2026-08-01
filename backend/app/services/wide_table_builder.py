@@ -108,7 +108,10 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None) -> 
 
     merchant_refunds: dict[str, MerchantRefund] = {}
     if mr_ids:
-        merchant_refunds = {m.wx_refund_no: m for m in db.scalars(select(MerchantRefund).where(MerchantRefund.wx_refund_no.in_(mr_ids)))}
+        # mr_ids 是 str(id)(matcher 以 id 作 dst_id),转 int 查询,与 wallet 一致
+        mr_int_ids = [int(mid) for mid in mr_ids if mid.isdigit()]
+        if mr_int_ids:
+            merchant_refunds = {str(m.id): m for m in db.scalars(select(MerchantRefund).where(MerchantRefund.id.in_(mr_int_ids)))}
 
     wallets: dict[str, WalletWithdrawal] = {}
     if wallet_ids:

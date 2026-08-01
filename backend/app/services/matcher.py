@@ -87,12 +87,13 @@ def _add_relation(db: Session, src_table: str, src_id: str, dst_table: str, dst_
 def _match_refund_merchant_refund(db: Session, only_unmatched: bool) -> int:
     """退费单.platform_order_no == 商户退款.merchant_order_no"""
     refunds = db.scalars(select(Refund).where(Refund.platform_order_no.isnot(None))).all()
-    # 建立 merchant_order_no -> wx_refund_no 索引
+    # 建立 merchant_order_no -> merchant_refund.id 索引(用 id 作关联键,与 wallet 一致;
+    # wx_refund_no 在 Excel 导出时被 float 截断且支付行为 0,已非唯一不可作关联键)
     mr_map = {}
     for mr in db.scalars(select(MerchantRefund).where(MerchantRefund.merchant_order_no.isnot(None))).all():
         key = (mr.merchant_order_no or "").strip()
         if key:
-            mr_map[key] = mr.wx_refund_no
+            mr_map[key] = str(mr.id)
     count = 0
     for r in refunds:
         key = (r.platform_order_no or "").strip()

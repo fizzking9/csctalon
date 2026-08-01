@@ -136,8 +136,19 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
         .group_by("date")
     ).all()
     withdraw_map = {r.date: {"amount": float(r.amount or 0), "count": r.count} for r in withdraw_rows}
-    # 合并
-    dates = sorted(set(direct_map) | set(withdraw_map))
+    # 商户号现金流(实际)按日:微信侧真实扣款,trade_status='REFUND' 的退款金额
+    merchant_rows = db.execute(
+        select(
+            func.to_char(MerchantRefund.trade_time, "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(MerchantRefund.refund_amount), 0).label("amount"),
+            func.count().label("count"),
+        )
+        .where(MerchantRefund.trade_status == "REFUND", MerchantRefund.trade_time.between(start, end))
+        .group_by("date")
+    ).all()
+    merchant_map = {r.date: {"amount": float(r.amount or 0), "count": r.count} for r in merchant_rows}
+    # 合并:direct+withdraw 为已登记估算(组成部分),merchant 为实际值,两者差额=闪猫+其他退款
+    dates = sorted(set(direct_map) | set(withdraw_map) | set(merchant_map))
     return [
         {
             "date": d,
@@ -146,6 +157,8 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
             "withdraw": withdraw_map.get(d, {"amount": 0})["amount"],
             "withdraw_count": withdraw_map.get(d, {"count": 0})["count"],
             "total": direct_map.get(d, {"amount": 0})["amount"] + withdraw_map.get(d, {"amount": 0})["amount"],
+            "merchant": merchant_map.get(d, {"amount": 0})["amount"],
+            "merchant_count": merchant_map.get(d, {"count": 0})["count"],
         }
         for d in dates
     ]
@@ -187,17 +200,30 @@ def wallet_vs_withdraw(db: Session, start: datetime | None = None, end: datetime
 
 
 def cash_out_breakdown(db: Session) -> dict[str, Any]:
-    """真实现金流构成明细:直接退款 vs 用户提现"""
+    """真实现金流构成明细:已登记估算(直接退款+用户提现) vs 商户号实际现金流
+
+    业务关系:商户号现金流(微信侧真实扣款)= 包含 直接退款 + 用户提现 + 闪猫退款 + 其他退款
+    因此这里分别给"已登记估算"和"商户号实际",差额=尚未登记的闪猫/其他退款
+    """
     direct, withdraw = _real_cash_out_total(db)
+    # 商户号现金流(实际):trade_status='REFUND' 的退款金额总和(微信侧真实扣款)
+    merchant_cash = db.scalar(
+        select(func.coalesce(func.sum(MerchantRefund.refund_amount), 0))
+        .where(MerchantRefund.trade_status == "REFUND")
+    ) or 0
+    merchant_cash = float(merchant_cash)
+    estimated = direct + withdraw
     return {
         "direct_refund": direct,  # 直接退款(线上+人工)
         "user_withdraw": withdraw,  # 用户提现
-        "total": direct + withdraw,  # 真实现金流总额
+        "total": estimated,  # 已登记估算现金流(组成部分之和)
+        "merchant_cash": merchant_cash,  # 商户号实际现金流(微信侧真实扣款)
+        "diff": round(merchant_cash - estimated, 2),  # 偏差=实际-估算(闪猫+其他未登记退款)
     }
 
 
 def merchant_cash_summary(db: Session) -> list[dict]:
-    """商户号对账(按商户号)"""
+    """商户号现金流对账(按商户号):仅统计 trade_status='REFUND' 的实际退款"""
     rows = db.execute(
         select(
             MerchantRefund.merchant_id,
@@ -205,7 +231,7 @@ def merchant_cash_summary(db: Session) -> list[dict]:
             func.count().label("count"),
             func.coalesce(func.sum(MerchantRefund.fee), 0).label("fee"),
         )
-        .where(MerchantRefund.refund_amount > 0)
+        .where(MerchantRefund.trade_status == "REFUND")
         .group_by(MerchantRefund.merchant_id)
         .order_by(func.sum(MerchantRefund.refund_amount).desc())
         .limit(50)
@@ -360,8 +386,15 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
     """首页汇总卡片"""
     refund_total = db.scalar(select(func.coalesce(func.sum(Refund.refund_amount), 0))) or 0
     refund_count = db.scalar(select(func.count()).select_from(Refund)) or 0
-    # 真实现金流 = 直接退款(线上+人工) + 用户提现
+    # 已登记估算现金流 = 直接退款(线上+人工) + 用户提现(商户号实际现金流的组成部分)
     direct, withdraw = _real_cash_out_total(db)
+    estimated = direct + withdraw
+    # 商户号实际现金流(微信侧真实扣款,包含直接退款/用户提现/闪猫/其他退款)
+    merchant_cash = db.scalar(
+        select(func.coalesce(func.sum(MerchantRefund.refund_amount), 0))
+        .where(MerchantRefund.trade_status == "REFUND")
+    ) or 0
+    merchant_cash = float(merchant_cash)
     # 钱包余额总计(各账户最新余额之和)
     wallet_balance = db.scalar(
         select(func.coalesce(func.sum(WalletWithdrawal.wallet_balance), 0))
@@ -371,9 +404,11 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
     return {
         "refund_total": float(refund_total),  # 退款总金额(含非现金,如退回钱包/无需退款)
         "refund_count": refund_count,
-        "cash_out_total": direct + withdraw,  # 真实现金流
+        "cash_out_total": estimated,  # 已登记估算现金流(直接退款+用户提现)
         "cash_out_direct": direct,  # 直接退款(线上+人工)
         "cash_out_withdraw": withdraw,  # 用户提现
+        "merchant_cash": merchant_cash,  # 商户号实际现金流(微信侧真实扣款)
+        "cash_diff": round(merchant_cash - estimated, 2),  # 偏差=实际-估算(闪猫+其他未登记退款)
         "wallet_balance_total": float(wallet_balance),
         "cs_reception_count": cs_reception_count,
     }

@@ -15,7 +15,7 @@
               <el-option label="退费单管理" value="refund" />
               <el-option label="提现操作记录" value="wallet" />
               <el-option label="服务请求管理" value="ticket" />
-              <el-option label="商户号退款" value="merchant_refund" />
+              <el-option label="商户号现金流" value="merchant_refund" />
               <el-option label="商户主数据" value="merchant" />
               <el-option label="智能助手处理记录" value="cs_record" />
               <el-option label="外部投诉(315/监督局)" value="external_complaint" />
@@ -283,7 +283,7 @@ const importResult = ref(null)
 
 const form = reactive({ data_type: '', sheet_name: null })
 
-const typeLabel = computed(() => ({ refund: '退费单', wallet: '钱包提现操作', ticket: '服务退款工单', merchant_refund: '商户号退款', merchant: '商户主数据' }[form.data_type] || ''))
+const typeLabel = computed(() => ({ refund: '退费单', wallet: '钱包提现操作', ticket: '服务退款工单', merchant_refund: '商户号现金流', merchant: '商户主数据' }[form.data_type] || ''))
 const targetFields = computed(() => Object.keys(COLUMN_TEMPLATES[form.data_type] || {}))
 const mappingRows = computed(() => (preview.value.columns || []).map((c) => ({ source: c, target: suggestedMapping()[c] || '' })))
 const mappingFieldCount = computed(() => mappingRows.value.filter((r) => r.target).length)

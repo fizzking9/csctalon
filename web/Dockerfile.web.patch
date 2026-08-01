@@ -1,0 +1,20 @@
+# 前端补丁构建:基于本地已有镜像,绕过 registry mirror 504
+# 用途:docker.1panel.live 不可达时,用本地 alpine + csctalon-web 避免拉取 node/nginx 基础镜像
+# 正常网络环境下应使用原 Dockerfile
+# 构建命令: cd web && DOCKER_BUILDKIT=0 docker build -f Dockerfile.web.patch -t csctalon-web:latest .
+
+# 阶段1: alpine(本地已有) 装 node 构建 dist
+FROM alpine:latest AS builder
+# 换阿里云 alpine 源加速 apk 下载(dl-cdn 在国内慢)
+RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories \
+    && apk add --no-cache nodejs npm
+WORKDIR /app
+COPY package.json ./
+# npm 源用淘宝(npmmirror)加速依赖安装
+RUN npm config set registry https://registry.npmmirror.com && npm install --silent
+COPY . .
+RUN npm run build
+
+# 阶段2: 复用现有 csctalon-web(含 nginx + nginx.conf) 托管新 dist,无需拉取 nginx:alpine
+FROM csctalon-web:latest
+COPY --from=builder /app/dist /usr/share/nginx/html

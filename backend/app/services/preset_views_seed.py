@@ -100,8 +100,8 @@ PRESET_VIEWS: list[dict] = [
     # ---------- 看板2:现金流分析 ----------
     {
         "code": "preset_cash_trend",
-        "name": "真实现金流趋势(双源相加)",
-        "description": "直接退款(线上+人工) + 用户提现,按日相加",
+        "name": "已登记现金流趋势(估算)",
+        "description": "直接退款(线上+人工) + 用户提现,按日相加=已登记估算现金流(商户号实际现金流的组成部分,不含闪猫/其他退款)",
         "chart_type": "line",
         "segments": [
             {
@@ -162,19 +162,19 @@ PRESET_VIEWS: list[dict] = [
     },
     {
         "code": "preset_merchant_cash",
-        "name": "商户号对账",
-        "description": "按商户号汇总退款金额、笔数、手续费",
+        "name": "商户号现金流对账(按商户号)",
+        "description": "按商户号汇总实际退款金额、笔数、手续费(仅 trade_status='REFUND' 的微信侧真实扣款)",
         "chart_type": "table",
         "segments": [{
             "source_code": "merchant_refund",
-            "label": "商户",
+            "label": "商户号现金流",
             "dimensions": [{"field": "merchant_id", "alias": "商户号", "role": "category"}],
             "measures": [
                 {"field": "refund_amount", "agg": "sum", "alias": "退款金额"},
                 {"field": "*", "agg": "count", "alias": "笔数"},
                 {"field": "fee", "agg": "sum", "alias": "手续费"},
             ],
-            "filters": [{"field": "refund_amount", "op": "gt", "value": 0}],
+            "filters": [{"field": "trade_status", "op": "eq", "value": "REFUND"}],
             "limit": 50,
         }],
         "merge_strategy": "add",
@@ -519,11 +519,14 @@ PRESET_VIEWS: list[dict] = [
         "time_range_default": {"days": 30},
     },
     # ---------- 退款现金流量视图体系(重构) ----------
-    # 视图1:整体趋势(堆积四类金额)
+    # 视图1:整体趋势(估算柱状堆积 vs 实际曲线)
+    # 业务关系:商户号现金流(微信侧实际扣款)= 包含 直接退款+用户提现+闪猫+其他退款
+    # 因此商户号现金流不与直接退款/用户提现堆叠相加(否则重复计算),而是独立曲线对比
+    # 呈现:直接退款+用户提现柱状堆积(估算) + 商户号现金流曲线(实际) overlay,柱顶与曲线高度差=偏差
     {
         "code": "preset_cash_trend_v2",
-        "name": "退款现金流趋势(堆积)",
-        "description": "直接退款(线上)+ 用户提现 + 商户号退款,按日堆积柱状。闪猫退款暂占位。",
+        "name": "现金流趋势(估算柱状 vs 实际曲线)",
+        "description": "已登记估算(直接退款+用户提现,柱状堆积) vs 商户号现金流(实际,曲线 overlay)。商户号现金流包含直接退款/用户提现/闪猫/其他退款,柱顶与曲线高度差=未登记退款(闪猫+其他)",
         "chart_type": "bar",
         "segments": [
             {
@@ -536,7 +539,7 @@ PRESET_VIEWS: list[dict] = [
                     {"field": "status", "op": "eq", "value": "已退款"},
                     {"field": "operator", "op": "notin", "value": ["sys", "system", "SYS", "System"]},
                 ],
-                "stack_group": "现金流",
+                "stack_group": "估算",
             },
             {
                 "source_code": "wallet",
@@ -544,15 +547,15 @@ PRESET_VIEWS: list[dict] = [
                 "dimensions": [{"field": "op_time", "alias": "日期", "role": "time", "time_grain": "day"}],
                 "measures": [{"field": "op_amount", "agg": "sum", "alias": "用户提现"}],
                 "filters": [{"field": "op_type", "op": "eq", "value": "用户提现"}],
-                "stack_group": "现金流",
+                "stack_group": "估算",
             },
             {
                 "source_code": "merchant_refund",
-                "label": "商户号退款",
+                "label": "商户号现金流(实际)",
                 "dimensions": [{"field": "trade_time", "alias": "日期", "role": "time", "time_grain": "day"}],
-                "measures": [{"field": "refund_amount", "agg": "sum", "alias": "商户号退款"}],
-                "filters": [],
-                "stack_group": "现金流",
+                "measures": [{"field": "refund_amount", "agg": "sum", "alias": "商户号现金流(实际)"}],
+                "filters": [{"field": "trade_status", "op": "eq", "value": "REFUND"}],
+                "series_type": "line",
             },
         ],
         "merge_strategy": "add",

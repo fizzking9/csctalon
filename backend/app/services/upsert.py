@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -331,23 +331,38 @@ def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
 
 
 def upsert_merchant_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """商户号现金流 - 按 (trade_time, merchant_order_no) 复合键去重 upsert
+
+    微信退款单号在 Excel 导出时被 float 截断丢失精度,支付行则为 0,不可作主键。
+    改用 (交易时间, 商户订单号) 复合去重键(已验证 86352 行零重复),重复导入按此键
+    更新而非累计,后续拿到准确数据也能按此键覆盖补全。
+    缺少交易时间或商户订单号的行无法定位,跳过。单批超 PG 65535 绑定参数上限,按 2000 行/批。
+    """
     rows: list[dict] = []
     for idx, row in enumerate(df.to_dict("records")):
         try:
             data = apply_mapping(row, mapping)
-            wx_refund_no = (data.get("wx_refund_no") or "").strip() if data.get("wx_refund_no") else None
-            if not wx_refund_no:
-                result.add_error(idx, "微信退款单号为空")
+            trade_time = _to_datetime(data.get("trade_time"))
+            mono = data.get("merchant_order_no")
+            mono = None if (isinstance(mono, str) and mono.strip() in ("", "0", "0.0")) else mono
+            # 缺少去重键(交易时间或商户订单号)的行无法定位,跳过
+            if trade_time is None or mono is None:
+                result.add_error(idx, "缺少交易时间或商户订单号,无法去重定位(跳过)")
                 continue
+            # merchant_refund_no 为 "0"/"0.0" 时归一为 None(支付行无商户退款单号,非真实单号)
+            mrn = data.get("merchant_refund_no")
+            if isinstance(mrn, str) and mrn.strip() in ("0", "0.0"):
+                mrn = None
             rows.append({
-                "wx_refund_no": wx_refund_no,
-                "trade_time": _to_datetime(data.get("trade_time")),
+                "wx_refund_no": data.get("wx_refund_no"),
+                "merchant_refund_no": mrn,
+                "trade_time": trade_time,
                 "app_id": data.get("app_id"),
                 "merchant_id": data.get("merchant_id"),
                 "sub_merchant_id": data.get("sub_merchant_id"),
                 "device_no": data.get("device_no"),
                 "wx_order_no": data.get("wx_order_no"),
-                "merchant_order_no": data.get("merchant_order_no"),
+                "merchant_order_no": mono,
                 "user_id": data.get("user_id"),
                 "trade_type": data.get("trade_type"),
                 "trade_status": data.get("trade_status"),
@@ -368,8 +383,29 @@ def upsert_merchant_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Sessi
             result.total += 1
         except Exception as e:
             result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
     _sync_devices(rows, "device_no", db)
-    _execute_upsert(db, MerchantRefund, "wx_refund_no", rows, result)
+    # 分批 on_conflict_do_update:按 (trade_time, merchant_order_no) 部分唯一索引去重更新。
+    # index_where 须与索引定义一致以供 PG 推断该部分索引。
+    before = db.scalar(select(func.count()).select_from(MerchantRefund)) or 0
+    BATCH = 2000
+    for i in range(0, len(rows), BATCH):
+        batch = rows[i:i + BATCH]
+        stmt = pg_insert(MerchantRefund).values(batch)
+        update_cols = {c: stmt.excluded[c] for c in batch[0].keys()
+                       if c not in ("trade_time", "merchant_order_no")}
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["trade_time", "merchant_order_no"],
+            index_where=text("trade_time IS NOT NULL AND merchant_order_no IS NOT NULL"),
+            set_=update_cols,
+        )
+        db.execute(stmt)
+        db.flush()
+    after = db.scalar(select(func.count()).select_from(MerchantRefund)) or 0
+    inserted = max(after - before, 0)
+    result.inserted += inserted
+    result.updated += max(len(rows) - inserted, 0)
 
 
 def upsert_merchants(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:

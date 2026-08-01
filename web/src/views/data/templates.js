@@ -154,7 +154,7 @@ export const TYPE_LABELS = {
   refund: '退费单',
   wallet: '钱包提现操作',
   ticket: '服务退款工单',
-  merchant_refund: '商户号退款',
+  merchant_refund: '商户号现金流',
   merchant: '商户主数据',
   cs_record: '智能助手处理记录',
   external_complaint: '外部投诉(315/监督局)',

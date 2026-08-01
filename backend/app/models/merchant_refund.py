@@ -1,6 +1,8 @@
-"""商户号退款模型 - 财务数据,微信侧真实完整现金流
+"""商户号现金流模型 - 财务数据,微信侧真实完整现金流
 
-主键:微信退款单号
+微信商户号交易流水(支付+退款混合),无稳定唯一自然键(微信退款单号在 Excel
+导出时被存成 float 丢失精度,支付行则为 0),故用自增 id 作主键、全量保序插入。
+商户退款单号(RF 前缀)为可靠业务键,留作后续准确数据补全的对接键。
 """
 
 from datetime import datetime
@@ -9,15 +11,20 @@ from sqlalchemy import DateTime, ForeignKey, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
-from app.models.base import TimestampMixin
+from app.models.base import IDMixin, TimestampMixin
 
 
-class MerchantRefund(TimestampMixin, Base):
-    """商户号退款 - 微信侧真实现金流"""
+class MerchantRefund(IDMixin, TimestampMixin, Base):
+    """商户号现金流 - 微信侧真实现金流(交易流水,含支付与退款)"""
 
     __tablename__ = "merchant_refunds"
 
-    wx_refund_no: Mapped[str] = mapped_column(String(64), primary_key=True, comment="微信退款单号")
+    wx_refund_no: Mapped[str | None] = mapped_column(
+        String(64), index=True, nullable=True, comment="微信退款单号(Excel存float已损,仅留存)"
+    )
+    merchant_refund_no: Mapped[str | None] = mapped_column(
+        String(64), index=True, nullable=True, comment="商户退款单号(RF前缀,可靠业务键,后续补全对接用)"
+    )
     trade_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True, comment="交易时间")
     app_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="公众账号ID")
     merchant_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="商户号")

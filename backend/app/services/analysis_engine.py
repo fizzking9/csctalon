@@ -385,11 +385,16 @@ def _to_chart_data(merged: list[dict], chart_type: str, segments: list[dict], ra
     x_axis = [str(_join_dim(r, dim_keys)) if _join_dim(r, dim_keys) is not None else "(空)" for r in merged]
     # stack_group:segment 级配置,measure alias → 堆积组名(同组 series 在 ECharts 堆叠)
     stack_map = _extract_stack_group_map(segments)
+    # series_type:segment 级配置,measure alias → series 类型(line/bar)
+    # 用于柱状+曲线混合图:某 segment 配 series_type="line" 时,其 measure 在 bar 图中以曲线 overlay 渲染
+    series_type_map = _extract_series_type_map(segments)
     series = []
     for mk in measure_keys + ratio_keys:
         s = {"name": mk, "data": [float(r.get(mk, 0) or 0) for r in merged]}
         if stack_map.get(mk):
             s["stack"] = stack_map[mk]
+        if series_type_map.get(mk):
+            s["series_type"] = series_type_map[mk]
         series.append(s)
     # 累计差额作为独立 overlay series(不参与堆积,如池子水位线)
     # 标记 series_type=line,使前端在 bar 视图中以曲线 overlay 渲染(柱状+曲线混合图)
@@ -638,6 +643,25 @@ def _extract_stack_group_map(segments: list[dict]) -> dict[str, str]:
         for measure in seg.get("measures", []):
             mk = measure.get("alias") or (measure["field"] if measure["field"] != "*" else "count")
             m[mk] = sg
+    return m
+
+
+def _extract_series_type_map(segments: list[dict]) -> dict[str, str]:
+    """从 segments 提取 measure alias → series_type 映射(柱状+曲线混合图)。
+
+    series_type 是 segment 级配置:覆盖 chart_type 的默认渲染类型。
+    典型场景:chart_type=bar 的视图中,某 segment 配 series_type="line",
+    其 measure 以曲线 overlay 渲染(如商户号实际现金流曲线 vs 估算柱状堆积)。
+    与 stack_group 互不冲突:同 segment 可同时配 stack_group(堆积)和 series_type(类型)。
+    """
+    m: dict[str, str] = {}
+    for seg in segments:
+        st = seg.get("series_type")
+        if not st:
+            continue
+        for measure in seg.get("measures", []):
+            mk = measure.get("alias") or (measure["field"] if measure["field"] != "*" else "count")
+            m[mk] = st
     return m
 
 
