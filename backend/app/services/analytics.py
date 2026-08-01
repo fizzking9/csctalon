@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, or_, select, union
 from sqlalchemy.orm import Session
 
 from app.models.cs_record import CsRecord
@@ -11,6 +11,9 @@ from app.models.merchant_refund import MerchantRefund
 from app.models.person import Person, PersonAlias
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
+from app.models.todo import TodoItem
+from app.models.task import SpecialTask
+from app.models.incident import Incident
 from app.models.wallet import WalletWithdrawal
 
 
@@ -443,7 +446,7 @@ def _category_case():
 
 
 def _operator_to_person_cte():
-    """返回 operator → display_name, group_name, specialty, position 的子查询 CTE
+    """返回 operator → display_name, department, group_name, specialty, position 的子查询 CTE
 
     通过 PersonAlias.alias (归一化匹配) → Person。找不到则 operator 作为 display_name。
     """
@@ -451,6 +454,7 @@ def _operator_to_person_cte():
         select(
             PersonAlias.alias.label("operator"),
             func.coalesce(Person.display_name, PersonAlias.alias).label("display_name"),
+            Person.department.label("department"),
             Person.group_name.label("group_name"),
             Person.specialty.label("specialty"),
             Person.position.label("position"),
@@ -1257,5 +1261,443 @@ def refund_withdrawal_daily_split(db: Session, start: str | None = None, end: st
             "wallet_avg_days_2_4": round(b["a_d24_sum"] / b["a_d24_n"], 3) if b["a_d24_n"] else None,
         })
     return out
+
+
+# ---------- 看板7: 今日看板 (单日切面 + 实时节奏) ----------
+
+import datetime as _dt
+
+# 用于"昨日同时段"对比: 比较 00:00 ~ 当前时间(而不是整天), 避免白天看跌90%的误导.
+# 用法: _today_window(None) -> (今天00:00, 现在), _yesterday_same_window(None) -> (昨天00:00, 昨天此时)
+# 当 date 显式传入(如选了昨天或某历史日期), 窗口就是整天 00:00 ~ 23:59:59.
+
+TZ = __import__("zoneinfo").ZoneInfo("Asia/Shanghai")
+
+
+def _today_windows(date: _dt.date | None) -> tuple[_dt.datetime, _dt.datetime, _dt.datetime, _dt.datetime]:
+    """返回 (today_start, today_end, yoy_start, yoy_end).
+    date=None → 实时窗口 (上海时区今天 00:00 ~ now, 昨天 00:00 ~ 昨天此时)
+    date=具体日期 → 整天窗口 (上海时区 00:00 ~ 23:59:59.999999, 同比前一天)
+    说明:DB 里 TIMESTAMPTZ 存 UTC,PostgreSQL session TIMEZONE=Etc/UTC;
+         因此需把 Asia/Shanghai 窗口先 .astimezone(UTC) 再 replace(tzinfo=None) 传给 DB。
+    """
+    now = _dt.datetime.now(TZ)
+    is_today = date is None or date == now.date()
+    if is_today:
+        t_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        t_end = now
+        y_start = t_start - timedelta(days=1)
+        y_end = t_end - timedelta(days=1)
+    else:
+        t_start = _dt.datetime.combine(date, _dt.time(0, 0, 0), tzinfo=TZ)
+        t_end = t_start + timedelta(days=1) - timedelta(microseconds=1)
+        y_start = t_start - timedelta(days=1)
+        y_end = t_end - timedelta(days=1)
+    # 转 UTC 后再去 tzinfo, 匹配 DB session(UTC) 对 naive datetime 的解释
+    _utc = _dt.timezone.utc
+    return (t_start.astimezone(_utc).replace(tzinfo=None),
+            t_end.astimezone(_utc).replace(tzinfo=None),
+            y_start.astimezone(_utc).replace(tzinfo=None),
+            y_end.astimezone(_utc).replace(tzinfo=None))
+
+
+def _parse_date(s: str | None) -> _dt.date | None:
+    return _dt.date.fromisoformat(s) if s else None
+
+
+def _pct_delta(cur, prev) -> float | None:
+    """环比百分比: (cur-prev)/prev*100, prev为0返回None."""
+    if prev is None or prev == 0:
+        return None
+    return round((cur - prev) / prev * 100.0, 1)
+
+
+def today_kpi(db: Session, date: str | None = None) -> dict[str, Any]:
+    """模块1: 今日6张KPI卡 + 昨日同时段环比.
+
+    date=None 表示今天(实时到当前小时); date='2026-07-31' 表示整天.
+    每张卡 {value, yoy_value, yoy_pct, note?}
+    """
+    d = _parse_date(date)
+    ts, te, ys, ye = _today_windows(d)
+
+    def _between(col, s, e):
+        return and_(col.isnot(None), col >= s, col <= e)
+
+    # 1. 今日接待量 (cs_records.operation_time)
+    cs_today = db.execute(select(func.count()).where(_between(CsRecord.operation_time, ts, te))).scalar() or 0
+    cs_yoy = db.execute(select(func.count()).where(_between(CsRecord.operation_time, ys, ye))).scalar() or 0
+
+    # 2/3. 退款笔数+金额 (refunds.created_at_raw)
+    rf_row = db.execute(select(func.count(), func.coalesce(func.sum(Refund.refund_amount), 0))
+                        .where(_between(Refund.created_at_raw, ts, te))).first()
+    rf_cnt_t, rf_amt_t = int(rf_row[0] or 0), float(rf_row[1] or 0)
+    rf_row_y = db.execute(select(func.count(), func.coalesce(func.sum(Refund.refund_amount), 0))
+                          .where(_between(Refund.created_at_raw, ys, ye))).first()
+    rf_cnt_y, rf_amt_y = int(rf_row_y[0] or 0), float(rf_row_y[1] or 0)
+
+    # 4. 真实现金流 = 直接退款(线上+人工) + 用户提现
+    direct_t = db.scalar(select(func.coalesce(func.sum(Refund.refund_amount), 0))
+                         .where(*_direct_refund_filter(), _between(Refund.created_at_raw, ts, te))) or 0
+    withdraw_t = db.scalar(select(func.coalesce(func.sum(WalletWithdrawal.op_amount), 0))
+                           .where(WalletWithdrawal.op_type == "用户提现",
+                                  _between(WalletWithdrawal.op_time, ts, te))) or 0
+    cash_t = float(direct_t or 0) + float(withdraw_t or 0)
+    direct_y = db.scalar(select(func.coalesce(func.sum(Refund.refund_amount), 0))
+                         .where(*_direct_refund_filter(), _between(Refund.created_at_raw, ys, ye))) or 0
+    withdraw_y = db.scalar(select(func.coalesce(func.sum(WalletWithdrawal.op_amount), 0))
+                           .where(WalletWithdrawal.op_type == "用户提现",
+                                  _between(WalletWithdrawal.op_time, ys, ye))) or 0
+    cash_y = float(direct_y or 0) + float(withdraw_y or 0)
+    # 商户号现金流 T+1 提示: 如果是今天且商户号数据为空,note提示
+    mr_cnt_today = db.scalar(select(func.count()).where(_between(MerchantRefund.trade_time, ts, te),
+                                                         MerchantRefund.trade_status == "REFUND")) or 0
+    merchant_tip = None
+    if (d is None or d == _dt.datetime.now(TZ).date()) and mr_cnt_today == 0:
+        merchant_tip = "商户号流水通常T+1导入，今日数据可能为空"
+
+    # 5. 今日已完工单 (service_tickets.finish_time 且 status='已完成')
+    done_t = db.execute(select(func.count())
+                        .where(_between(ServiceTicket.finish_time, ts, te),
+                               ServiceTicket.status == "已完成")).scalar() or 0
+    done_y = db.execute(select(func.count())
+                        .where(_between(ServiceTicket.finish_time, ys, ye),
+                               ServiceTicket.status == "已完成")).scalar() or 0
+
+    # 6. 今日在岗人数 (cs_records distinct operator)
+    staff_t = db.execute(select(func.count(func.distinct(CsRecord.operator)))
+                         .where(_between(CsRecord.operation_time, ts, te),
+                                CsRecord.operator.isnot(None))).scalar() or 0
+    staff_y = db.execute(select(func.count(func.distinct(CsRecord.operator)))
+                         .where(_between(CsRecord.operation_time, ys, ye),
+                                CsRecord.operator.isnot(None))).scalar() or 0
+
+    def _k(v, yv):
+        return {"value": v, "yoy_value": yv, "yoy_pct": _pct_delta(v, yv)}
+
+    # 返回的window字段用上海时区展示(前端显示友好); ts/te仍用于DB比较
+    _utc = _dt.timezone.utc
+    def _sh_iso(naive_utc: _dt.datetime) -> str:
+        return naive_utc.replace(tzinfo=_utc).astimezone(TZ).isoformat()
+
+    return {
+        "date": (d or _dt.datetime.now(TZ).date()).isoformat(),
+        "is_realtime": d is None,
+        "window": {
+            "today_start": _sh_iso(ts), "today_end": _sh_iso(te),
+            "yoy_start": _sh_iso(ys), "yoy_end": _sh_iso(ye),
+        },
+        "reception":      _k(int(cs_today), int(cs_yoy)),
+        "refund_count":   _k(rf_cnt_t, rf_cnt_y),
+        "refund_amount":  _k(round(rf_amt_t, 2), round(rf_amt_y, 2)),
+        "cash_out":       _k(round(cash_t, 2), round(cash_y, 2)),
+        "ticket_done":    _k(int(done_t), int(done_y)),
+        "staff_on_duty":  _k(int(staff_t), int(staff_y)),
+        "merchant_tip":   merchant_tip,
+    }
+
+
+def today_hourly_trend(db: Session, date: str | None = None) -> dict[str, Any]:
+    """模块2: 今日小时节奏 (上海时区 00:00~23:00, 每小时一行).
+    双Y轴: reception_count 柱左, refund_amount 折线右. 若 date=今天, 当前小时之后的行缺省为0不填充.
+    """
+    d = _parse_date(date)
+    ts, te, _, _ = _today_windows(d)
+    # 小时截断: 先 operation_time AT TIME ZONE 'Asia/Shanghai' → 再 date_trunc('hour')
+    # 保证 h08 对应真实的北京时间 08:00~08:59
+    def _h(col):
+        return func.date_trunc("hour", func.timezone("Asia/Shanghai", col)).label("h")
+    cs_rows = db.execute(
+        select(_h(CsRecord.operation_time), func.count().label("cnt"))
+        .where(CsRecord.operation_time.isnot(None),
+               CsRecord.operation_time >= ts, CsRecord.operation_time <= te)
+        .group_by("h")
+    ).all()
+    cs_map = {r.h.hour: int(r.cnt or 0) for r in cs_rows if r.h}
+
+    rf_rows = db.execute(
+        select(_h(Refund.created_at_raw),
+               func.coalesce(func.sum(Refund.refund_amount), 0).label("amt"))
+        .where(Refund.created_at_raw.isnot(None),
+               Refund.created_at_raw >= ts, Refund.created_at_raw <= te)
+        .group_by("h")
+    ).all()
+    rf_map = {r.h.hour: float(r.amt or 0) for r in rf_rows if r.h}
+
+    # 填充到当前小时(今天,上海时区)或整天24小时(历史日期)
+    now_sh = _dt.datetime.now(TZ)
+    is_today = d is None or d == now_sh.date()
+    max_h = now_sh.hour if is_today else 23
+    hours = list(range(24))
+    return {
+        "date": (d or now_sh.date()).isoformat(),
+        "hours": hours,
+        "hour_labels": [f"{h:02d}:00" for h in hours],
+        "reception": [cs_map.get(h, 0) if h <= max_h else None for h in hours],
+        "refund_amount": [round(rf_map.get(h, 0.0), 2) if h <= max_h else None for h in hours],
+    }
+
+
+def today_reception_breakdown(db: Session, date: str | None = None) -> dict[str, Any]:
+    """模块3: 今日接待分项 = 分类饼图 + Top10客服柱图.
+    分类: 6 类 (投诉/退款/套餐问题/咨询/综合问题/其他问题)
+    """
+    d = _parse_date(date)
+    ts, te, _, _ = _today_windows(d)
+    between = and_(CsRecord.operation_time.isnot(None),
+                   CsRecord.operation_time >= ts, CsRecord.operation_time <= te)
+
+    # 左: 分类饼 (复用 _category_case)
+    bucket = _category_case()
+    cat_rows = db.execute(
+        select(bucket, func.count().label("cnt"))
+        .where(between)
+        .group_by("category_bucket")
+    ).all()
+    categories = []
+    order = ["投诉", "退款", "套餐问题", "咨询", "综合问题", "其他问题"]
+    for r in cat_rows:
+        cat = r.category_bucket if r.category_bucket in order else "其他问题"
+        categories.append({"name": cat, "value": int(r.cnt or 0)})
+    # 补齐0分类
+    present = {c["name"] for c in categories}
+    for nm in order:
+        if nm not in present:
+            categories.append({"name": nm, "value": 0})
+
+    # 右: Top10客服 (按operator分组count, 关联PersonAlias→Person拿group_name/display_name)
+    op_person = _operator_to_person_cte()
+    top_rows = db.execute(
+        select(
+            CsRecord.operator.label("raw_op"),
+            op_person.c.display_name.label("display_name"),
+            op_person.c.department.label("department"),
+            op_person.c.group_name.label("group_name"),
+            func.count().label("cnt"),
+        )
+        .outerjoin(op_person, CsRecord.operator == op_person.c.operator)
+        .where(between, CsRecord.operator.isnot(None))
+        .group_by("raw_op", op_person.c.display_name, op_person.c.department, op_person.c.group_name)
+        .order_by(func.count().desc())
+        .limit(10)
+    ).all()
+    top_staff = [
+        {"name": r.display_name or r.raw_op or "未知",
+         "department": r.department or "未设置",
+         "group": r.group_name or "未分组",
+         "count": int(r.cnt or 0)}
+        for r in top_rows
+    ]
+
+    return {
+        "date": (d or _dt.datetime.now(TZ).date()).isoformat(),
+        "categories": sorted(categories, key=lambda x: -x["value"]),
+        "top_staff": top_staff,
+    }
+
+
+def today_refund_breakdown(db: Session, date: str | None = None) -> dict[str, Any]:
+    """模块4: 今日退款分项 = 退款原因Top10 + 退款方式分布."""
+    d = _parse_date(date)
+    ts, te, _, _ = _today_windows(d)
+    between = and_(Refund.created_at_raw.isnot(None),
+                   Refund.created_at_raw >= ts, Refund.created_at_raw <= te)
+
+    # 左: 原因 Top10 (按金额倒序)
+    reason_rows = db.execute(
+        select(Refund.refund_reason,
+               func.count().label("cnt"),
+               func.coalesce(func.sum(Refund.refund_amount), 0).label("amt"))
+        .where(between, Refund.refund_reason.isnot(None))
+        .group_by(Refund.refund_reason)
+        .order_by(func.sum(Refund.refund_amount).desc())
+        .limit(10)
+    ).all()
+    reasons = [{"name": r[0] or "未填写", "count": int(r.cnt or 0), "amount": round(float(r.amt or 0), 2)}
+               for r in reason_rows]
+
+    # 右: 退款方式饼图
+    def _bucket_method(m: str | None) -> str:
+        if not m:
+            return "未填写"
+        if "转入" in m:
+            return "退回钱包"
+        for kw in ("线上", "微信", "支付宝", "银联", "银行卡", "直退"):
+            if kw in m:
+                return "线上直退"
+        if "线下" in m:
+            return "线下退款"
+        return "其他"
+
+    method_rows = db.execute(
+        select(Refund.refund_method, func.count().label("cnt"))
+        .where(between)
+        .group_by(Refund.refund_method)
+    ).all()
+    method_agg: dict[str, int] = {}
+    for r in method_rows:
+        b = _bucket_method(r[0])
+        method_agg[b] = method_agg.get(b, 0) + int(r.cnt or 0)
+    methods = [{"name": k, "value": v} for k, v in method_agg.items()]
+
+    return {
+        "date": (d or _dt.datetime.now(TZ).date()).isoformat(),
+        "reasons": reasons,
+        "methods": methods,
+    }
+
+
+def today_queue(db: Session, date: str | None = None) -> dict[str, Any]:
+    """模块5: 今日处理队列 = 今日截止待办 + 进行中专项 + 今日异常事件.
+    每项最多10条, 点击可跳转详情页.
+    """
+    d = _parse_date(date)
+    # today_window = 上海时区该日期的整天窗口 (00:00 ~ 23:59:59.999999 → UTC naive)
+    _utc = _dt.timezone.utc
+    target_date = d or _dt.datetime.now(TZ).date()
+    sh_start = _dt.datetime.combine(target_date, _dt.time(0, 0, 0), tzinfo=TZ)
+    sh_end = sh_start + timedelta(days=1) - timedelta(microseconds=1)
+    today_start = sh_start.astimezone(_utc).replace(tzinfo=None)
+    today_end = sh_end.astimezone(_utc).replace(tzinfo=None)
+    # 待办 status: pending/processing/confirming 是未完成, done 已完成
+    not_done = TodoItem.status.notin_(["done"])
+    todo_rows = db.execute(
+        select(TodoItem.id, TodoItem.title, TodoItem.priority, TodoItem.status,
+               TodoItem.deadline, TodoItem.related_refund_no)
+        .where(TodoItem.deadline.isnot(None),
+               TodoItem.deadline >= today_start, TodoItem.deadline <= today_end,
+               not_done)
+        .order_by(case(
+            (TodoItem.priority == "urgent", 0),
+            (TodoItem.priority == "high", 1),
+            (TodoItem.priority == "medium", 2),
+            (TodoItem.priority == "low", 3),
+            else_=4
+        ), TodoItem.deadline.asc())
+        .limit(10)
+    ).all()
+    todos = [{
+        "id": r.id, "title": r.title, "priority": r.priority, "status": r.status,
+        "deadline": r.deadline.isoformat() if r.deadline else None,
+        "related_refund_no": r.related_refund_no,
+    } for r in todo_rows]
+
+    # 2. 进行中专项: status in (pending_start/executing/following) + deadline在7天内或无deadline
+    active_status = ["pending_start", "executing", "following"]
+    week_later = today_end + timedelta(days=7)
+    task_rows = db.execute(
+        select(SpecialTask.id, SpecialTask.title, SpecialTask.status,
+               SpecialTask.task_type, SpecialTask.deadline)
+        .where(SpecialTask.status.in_(active_status))
+        .order_by(case(
+            (SpecialTask.deadline.is_(None), 1),
+            (SpecialTask.deadline <= week_later, 0),
+            else_=2
+        ), SpecialTask.deadline.asc().nullslast())
+        .limit(10)
+    ).all()
+    tasks = [{
+        "id": r.id, "title": r.title, "status": r.status, "type": r.task_type,
+        "deadline": r.deadline.isoformat() if r.deadline else None,
+    } for r in task_rows]
+
+    # 3. 今日异常事件: occurred_at或created_at 落在今天
+    inc_between = or_(
+        and_(Incident.occurred_at.isnot(None), Incident.occurred_at >= today_start, Incident.occurred_at <= today_end),
+        and_(Incident.created_at.isnot(None), Incident.created_at >= today_start, Incident.created_at <= today_end),
+    )
+    inc_rows = db.execute(
+        select(Incident.id, Incident.title, Incident.status, Incident.subject,
+               Incident.occurred_at, Incident.duration_minutes)
+        .where(inc_between)
+        .order_by(Incident.occurred_at.desc().nullslast(), Incident.created_at.desc())
+        .limit(10)
+    ).all()
+    incidents = [{
+        "id": r.id, "title": r.title, "status": r.status, "subject": r.subject,
+        "occurred_at": r.occurred_at.isoformat() if r.occurred_at else None,
+        "duration_minutes": r.duration_minutes,
+    } for r in inc_rows]
+
+    return {
+        "date": (d or _dt.datetime.now(TZ).date()).isoformat(),
+        "todos": todos,
+        "tasks": tasks,
+        "incidents": incidents,
+    }
+
+
+def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30) -> list[dict[str, Any]]:
+    """模块6: 今日人均效率表 (按operator聚合, 关联Person拿display_name/group_name).
+    列: name, group, reception_count, refund_op_count, refund_op_amount, ticket_done_count, work_score.
+    按 work_score(接待量+退款笔数*2+完工单*3) 倒序, 取TopN.
+    """
+    d = _parse_date(date)
+    ts, te, _, _ = _today_windows(d)
+    op_person = _operator_to_person_cte()
+
+    # 1. 接待量 per operator
+    cs_q = (select(CsRecord.operator.label("op"), func.count().label("c"))
+            .where(CsRecord.operation_time.isnot(None),
+                   CsRecord.operation_time >= ts, CsRecord.operation_time <= te,
+                   CsRecord.operator.isnot(None))
+            .group_by(CsRecord.operator)).cte("cs_q")
+    # 2. 退款操作 per operator (排除 sys/system)
+    rf_q = (select(Refund.operator.label("op"),
+                   func.count().label("c"),
+                   func.coalesce(func.sum(Refund.refund_amount), 0).label("a"))
+            .where(Refund.created_at_raw.isnot(None),
+                   Refund.created_at_raw >= ts, Refund.created_at_raw <= te,
+                   Refund.operator.isnot(None),
+                   Refund.operator.notin_(["sys", "system", "SYS", "System"]))
+            .group_by(Refund.operator)).cte("rf_q")
+    # 3. 已完工单 per handler
+    tk_q = (select(ServiceTicket.handler.label("op"), func.count().label("c"))
+            .where(ServiceTicket.finish_time.isnot(None),
+                   ServiceTicket.finish_time >= ts, ServiceTicket.finish_time <= te,
+                   ServiceTicket.handler.isnot(None),
+                   ServiceTicket.status == "已完成")
+            .group_by(ServiceTicket.handler)).cte("tk_q")
+    # 合并三个cte的op并集, 左关联各自的统计值和人员信息
+    # union(UNION DISTINCT) 自动去重, 无需 .distinct()
+    ops_union = union(
+        select(cs_q.c.op), select(rf_q.c.op), select(tk_q.c.op)
+    ).cte("ops_u")
+    rows = db.execute(
+        select(
+            ops_union.c.op,
+            func.coalesce(op_person.c.display_name, ops_union.c.op).label("name"),
+            op_person.c.department.label("dept"),
+            op_person.c.group_name.label("grp"),
+            func.coalesce(cs_q.c.c, 0).label("rc"),
+            func.coalesce(rf_q.c.c, 0).label("fc"),
+            func.coalesce(rf_q.c.a, 0).label("fa"),
+            func.coalesce(tk_q.c.c, 0).label("dc"),
+        )
+        .select_from(ops_union)
+        .outerjoin(cs_q, ops_union.c.op == cs_q.c.op)
+        .outerjoin(rf_q, ops_union.c.op == rf_q.c.op)
+        .outerjoin(tk_q, ops_union.c.op == tk_q.c.op)
+        .outerjoin(op_person, ops_union.c.op == op_person.c.operator)
+    ).all()
+    out = []
+    for r in rows:
+        rc = int(r.rc or 0)
+        fc = int(r.fc or 0)
+        dc = int(r.dc or 0)
+        score = rc + fc * 2 + dc * 3  # 工作量合成分 (可后续调整权重)
+        out.append({
+            "operator": r.op,
+            "name": r.name or r.op or "未知",
+            "department": r.dept or "未设置",
+            "group": r.grp or "未分组",
+            "reception_count": rc,
+            "refund_op_count": fc,
+            "refund_op_amount": round(float(r.fa or 0), 2),
+            "ticket_done_count": dc,
+            "work_score": score,
+        })
+    out.sort(key=lambda x: -x["work_score"])
+    return out[: max(1, min(200, topn or 30))]
 
 

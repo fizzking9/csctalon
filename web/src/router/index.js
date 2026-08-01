@@ -93,6 +93,12 @@ const routes = [
         meta: { title: '退款-提现全链路看板', icon: 'Money', manager: true },
       },
       {
+        path: 'dashboards/today',
+        name: 'DashboardToday',
+        component: () => import('@/views/dashboards/Today.vue'),
+        meta: { title: '今日看板', icon: 'Clock' },
+      },
+      {
         path: 'dashboards/performance',
         name: 'DashboardPerformance',
         component: () => import('@/views/dashboards/DashboardView.vue'),

@@ -53,3 +53,13 @@ export const refundWithdrawal = {
   detail: (params) => request.get('/analytics/refund-withdrawal/detail', { params }),
 }
 
+// 今日看板 (单日切面 + 实时节奏)
+export const today = {
+  kpi: (params) => request.get('/analytics/today/kpi', { params }),
+  hourlyTrend: (params) => request.get('/analytics/today/hourly-trend', { params }),
+  reception: (params) => request.get('/analytics/today/reception', { params }),
+  refund: (params) => request.get('/analytics/today/refund', { params }),
+  queue: (params) => request.get('/analytics/today/queue', { params }),
+  staff: (params) => request.get('/analytics/today/staff', { params }),
+}
+

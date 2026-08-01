@@ -173,3 +173,37 @@ def rw_detail(db: DBSession, _: CurrentUser, start: str | None = None, end: str 
 @router.get("/refund-withdrawal/daily-split", response_model=R, summary="提现全链路看板-按实际出款日拆分两条流(直退vs钱包提现)堆叠图")
 def rw_daily_split(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
     return R(data=A.refund_withdrawal_daily_split(db, start, end))
+
+
+# ---------- 看板7: 今日看板 (单日切面 + 实时节奏) ----------
+
+
+@router.get("/today/kpi", response_model=R, summary="今日看板-KPI汇总卡片(6项+昨日环比)")
+def today_kpi_endpoint(db: DBSession, _: CurrentUser, date: str | None = None):
+    return R(data=A.today_kpi(db, date))
+
+
+@router.get("/today/hourly-trend", response_model=R, summary="今日看板-小时节奏(接待量柱+退款金额线,双Y轴)")
+def today_hourly(db: DBSession, _: CurrentUser, date: str | None = None):
+    return R(data=A.today_hourly_trend(db, date))
+
+
+@router.get("/today/reception", response_model=R, summary="今日看板-接待分项(分类饼+Top客服柱)")
+def today_reception(db: DBSession, _: CurrentUser, date: str | None = None):
+    return R(data=A.today_reception_breakdown(db, date))
+
+
+@router.get("/today/refund", response_model=R, summary="今日看板-退款分项(原因Top10+方式分布)")
+def today_refund(db: DBSession, _: CurrentUser, date: str | None = None):
+    return R(data=A.today_refund_breakdown(db, date))
+
+
+@router.get("/today/queue", response_model=R, summary="今日看板-处理队列(今日到期待办+进行中专项+今日异常)")
+def today_queue_endpoint(db: DBSession, _: CurrentUser, date: str | None = None):
+    return R(data=A.today_queue(db, date))
+
+
+@router.get("/today/staff", response_model=R, summary="今日看板-人均效率表(接待/退款/完工单合成权重)")
+def today_staff(db: DBSession, _: CurrentUser, date: str | None = None,
+                topn: int = Query(30, ge=1, le=200)):
+    return R(data=A.today_staff_efficiency(db, date, topn))
