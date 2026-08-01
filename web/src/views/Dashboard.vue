@@ -49,6 +49,29 @@
             </div>
           </div>
         </el-card>
+        <el-card class="stat-card" shadow="hover" @click="$router.push('/tickets')">
+          <div class="stat">
+            <div class="stat-icon" style="background: #ecf5ff"><el-icon :size="26" color="#409eff"><Tickets /></el-icon></div>
+            <div class="stat-body">
+              <div class="stat-label">工单总数</div>
+              <div class="stat-value">{{ formatNum(summary.ticket_total) }}<span class="stat-unit">单</span></div>
+            </div>
+          </div>
+        </el-card>
+        <el-card class="stat-card" shadow="hover" @click="$router.push('/dashboards/today')">
+          <div class="stat">
+            <div class="stat-icon" style="background: #fef0f0"><el-icon :size="26" color="#f56c6c"><WarningFilled /></el-icon></div>
+            <div class="stat-body">
+              <div class="stat-label">投诉工单</div>
+              <div class="stat-value">
+                {{ formatNum(summary.complaint_total) }}<span class="stat-unit">单</span>
+                <span v-if="summary.complaint_ratio" class="stat-sub">
+                  占 {{ (summary.complaint_ratio * 100).toFixed(1) }}%
+                </span>
+              </div>
+            </div>
+          </div>
+        </el-card>
         <el-card class="stat-card" shadow="hover" @click="$router.push('/todos')">
           <div class="stat">
             <div class="stat-icon" style="background: #f4f4f5"><el-icon :size="26" color="#909399"><Bell /></el-icon></div>
@@ -60,6 +83,89 @@
         </el-card>
       </div>
 
+      <!-- 现金流出四路线拆分 (全域统一核算 v3) -->
+      <el-card class="mb-16" v-loading="loadingStats" shadow="never">
+        <template #header>
+          <div class="flex-between">
+            <span style="font-weight:600">
+              现金流出四路线拆分 & 对账偏差
+              <el-tag size="small" type="info" effect="plain" style="margin-left:8px">全域统一核算规范 v3</el-tag>
+            </span>
+            <el-tooltip effect="dark" placement="top">
+              <template #content>
+                <div style="max-width:420px; line-height:1.85; font-size:12px">
+                  <div style="font-weight:600; margin-bottom:4px">四路经营侧出款 (经营报表导出, data_source=business)</div>
+                  <div>A. 退费单管理 → refund_method='线上' (严格按用户要求: 只线上才算退款路线)</div>
+                  <div>B. 钱包提现记录 → op_type='用户提现'</div>
+                  <div>C. 闪猫退款 → 独立业务表 (data_source=shenmao_refund, 暂未建表=0, 建表后自动并入)</div>
+                  <div>D. 其他退款 → 独立业务表 (data_source=other_refund, 暂未建表=0, 建表后自动并入)</div>
+                  <hr style="margin:8px 0; opacity:.3">
+                  <div style="font-weight:600"><b style="color:#409eff">经营估算</b> = A + B + C + D (四路登记出款合计)</div>
+                  <div style="font-weight:600"><b style="color:#f56c6c">实际现金流 (对账基准)</b> = E.商户号现金流 → merchant_refunds.refund_status='SUCCESS' 合计 (不分ORIGINAL/BALANCE桶)</div>
+                  <div style="font-weight:600"><b>对账偏差</b> = 经营估算 − 实际现金流 (C/D未建表时临时= A+B − E)</div>
+                  <div style="margin-top:4px; color:#909399">【v3 纠正】C/D 不是商户号流水分桶,而是两张独立业务表;商户号流水单独对应第五张表E=实际现金流</div>
+                </div>
+              </template>
+              <el-icon style="color:#909399; cursor:help"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </div>
+        </template>
+        <el-row :gutter="12">
+          <!-- 路线A -->
+          <el-col :xs="12" :sm="6"><div class="route-card">
+            <div class="route-label" style="color:#409eff">A. 退费单-线上直退</div>
+            <div class="route-amount">{{ formatMoney(summary.cash_routes?.route_a?.amount) }}</div>
+            <div class="route-count">{{ formatNum(summary.cash_routes?.route_a?.count) }} 笔</div>
+            <div class="route-tip">refunds refund_method='线上'</div>
+          </div></el-col>
+          <!-- 路线B -->
+          <el-col :xs="12" :sm="6"><div class="route-card">
+            <div class="route-label" style="color:#67c23a">B. 钱包-用户取现</div>
+            <div class="route-amount">{{ formatMoney(summary.cash_routes?.route_b?.amount) }}</div>
+            <div class="route-count">{{ formatNum(summary.cash_routes?.route_b?.count) }} 笔</div>
+            <div class="route-tip">wallet_withdrawals op_type='用户提现'</div>
+          </div></el-col>
+          <!-- 路线C 独立业务表 -->
+          <el-col :xs="12" :sm="6"><div class="route-card" style="opacity:{{ (summary.cash_routes?.route_c?.count ?? 0) === 0 ? .6 : 1 }}">
+            <div class="route-label" style="color:#e6a23c">C. 闪猫退款 (独立业务表)</div>
+            <div class="route-amount">{{ formatMoney(summary.cash_routes?.route_c?.amount) }}</div>
+            <div class="route-count">{{ formatNum(summary.cash_routes?.route_c?.count) }} 笔</div>
+            <div class="route-tip">shenmao_refund (未建表暂0,建表后自动并入)</div>
+          </div></el-col>
+          <!-- 路线D 独立业务表 -->
+          <el-col :xs="12" :sm="6"><div class="route-card" style="opacity:{{ (summary.cash_routes?.route_d?.count ?? 0) === 0 ? .6 : 1 }}">
+            <div class="route-label" style="color:#909399">D. 其他退款 (独立业务表)</div>
+            <div class="route-amount">{{ formatMoney(summary.cash_routes?.route_d?.amount) }}</div>
+            <div class="route-count">{{ formatNum(summary.cash_routes?.route_d?.count) }} 笔</div>
+            <div class="route-tip">other_refund (未建表暂0,建表后自动并入)</div>
+          </div></el-col>
+        </el-row>
+        <!-- 经营估算 + 实际现金流 + 对账偏差 -->
+        <el-row :gutter="12" style="margin-top:12px">
+          <el-col :xs="8"><div class="route-card route-sum" style="background:#ecf5ff">
+            <div class="route-label" style="color:#409eff">经营估算 (A+B+C+D)</div>
+            <div class="route-amount">{{ formatMoney(summary.cash_routes?.operational?.amount) }}</div>
+            <div class="route-count">{{ formatNum(summary.cash_routes?.operational?.count) }} 笔</div>
+          </div></el-col>
+          <el-col :xs="8"><div class="route-card route-sum" style="background:#fdf6ec">
+            <div class="route-label" style="color:#f56c6c">实际现金流 (商户号SUCCESS)</div>
+            <div class="route-amount">{{ formatMoney(summary.cash_routes?.actual_cashflow?.amount ?? summary.cash_routes?.financial?.amount) }}</div>
+            <div class="route-count">{{ formatNum(summary.cash_routes?.actual_cashflow?.count ?? summary.cash_routes?.financial?.count) }} 笔</div>
+          </div></el-col>
+          <el-col :xs="8"><div class="route-card route-sum" :style="(summary.cash_routes?.diff?.amount ?? 0) >= 0 ? 'background:#fef0f0' : 'background:#f0f9eb'">
+            <div class="route-label" :style="(summary.cash_routes?.diff?.amount ?? 0) >= 0 ? 'color:#f56c6c' : 'color:#67c23a'">
+              对账偏差 (经营 − 实际)
+            </div>
+            <div class="route-amount" :style="(summary.cash_routes?.diff?.amount ?? 0) >= 0 ? 'color:#f56c6c' : 'color:#67c23a'">
+              {{ (summary.cash_routes?.diff?.amount ?? 0) >= 0 ? '+' : '' }}{{ formatMoney(summary.cash_routes?.diff?.amount) }}
+            </div>
+            <div class="route-count" :style="(summary.cash_routes?.diff?.count ?? 0) >= 0 ? 'color:#f56c6c' : 'color:#67c23a'">
+              {{ (summary.cash_routes?.diff?.count ?? 0) >= 0 ? '+' : '' }}{{ formatNum(summary.cash_routes?.diff?.count) }} 笔
+            </div>
+          </div></el-col>
+        </el-row>
+      </el-card>
+
       <!-- 空数据提示 -->
       <el-alert
         v-if="!loadingStats && !summary.refund_count"
@@ -67,7 +173,7 @@
         title="暂无业务数据"
         type="info"
         :closable="false"
-        description="请前往 数据中心-数据上传 导入退费单、退款工单、钱包提现、商户号现金流等数据后查看分析。"
+        description="请前往 数据中心-数据上传 导入 退费单、钱包提现、闪猫退款、其他退款、商户号现金流 等5张业务数据源后查看分析。"
       />
 
       <!-- 趋势图 -->
@@ -213,10 +319,15 @@ import { listAnalysisViews } from '@/api/analysis-view'
 import { listOperationLogs } from '@/api/operationLog'
 import { listTasks } from '@/api/task'
 import dayjs from 'dayjs'
+import { WarningFilled, Tickets, QuestionFilled } from '@element-plus/icons-vue'
 
 const authStore = useAuthStore()
 
-const summary = ref({ refund_total: 0, refund_count: 0, cash_out_total: 0, cs_reception_count: 0 })
+const summary = ref({
+  refund_total: 0, refund_count: 0, cash_out_total: 0, cs_reception_count: 0,
+  ticket_total: 0, complaint_total: 0, complaint_ratio: 0,
+  complaint_by_sub: [], complaint_by_status: [],
+})
 const todoCount = ref(0)
 const taskCount = ref(0)
 const trend = ref([])
@@ -411,6 +522,17 @@ onMounted(async () => {
   color: #909399;
   margin-left: 4px;
 }
+.stat-sub {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 400;
+  color: #f56c6c;
+  margin-left: 6px;
+  margin-top: 2px;
+  padding: 1px 6px;
+  background: #fef0f0;
+  border-radius: 10px;
+}
 .preset-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -572,5 +694,39 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+/* 现金流出四路线卡片样式 */
+.route-card {
+  padding: 14px 14px;
+  border-radius: 8px;
+  background: #fafbfc;
+  border: 1px solid #ebeef5;
+  margin-bottom: 4px;
+}
+.route-card.route-sum {
+  padding: 16px 16px;
+  border: none;
+}
+.route-label {
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+.route-amount {
+  font-size: 20px;
+  font-weight: 600;
+  color: #303133;
+  line-height: 1.2;
+}
+.route-count {
+  font-size: 12px;
+  color: #606266;
+  margin-top: 4px;
+}
+.route-tip {
+  font-size: 11px;
+  color: #909399;
+  margin-top: 2px;
+  font-family: 'SF Mono', Menlo, monospace;
 }
 </style>
