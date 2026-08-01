@@ -54,7 +54,7 @@ def execute_view(db: Session, view: AnalysisView | dict, params: dict | None = N
     Args:
         db: 数据库会话
         view: AnalysisView 实例(已存视图)或配置字典(inline 预览)
-        params: {start?: str, end?: str, filters_override?: list[dict]}
+        params: {start?: str, end?: str, filters_override?: list[dict], time_grain?: str}
 
     Returns:
         {chart_type, data: {x_axis?, series?, items?, columns?, rows?}}
@@ -161,6 +161,10 @@ def _execute_segment(
         col = _get_column(model, field_name)
         role = dim.get("role")
         time_grain = dim.get("time_grain")
+        # 运行时覆盖:execute API params 传 time_grain 时,覆盖预设视图的固定粒度
+        # (饼图/表格/明细无 time 维度,此分支不触发,无副作用)
+        if role == "time" and params.get("time_grain"):
+            time_grain = params["time_grain"]
         if role == "time" and time_grain and time_grain != "none":
             col = _apply_time_grain(col, time_grain)
         elif role == "person":

@@ -15,6 +15,11 @@
           <el-radio-button :label="90">近90天</el-radio-button>
           <el-radio-button :label="0">全部</el-radio-button>
         </el-radio-group>
+        <el-radio-group v-if="hasTimeDim" v-model="grainMode" size="small" @change="loadData">
+          <el-radio-button label="day">按日</el-radio-button>
+          <el-radio-button label="week">按周</el-radio-button>
+          <el-radio-button label="month">按月</el-radio-button>
+        </el-radio-group>
         <el-button :icon="Promotion" @click="publishDialogVisible = true">发布为看板</el-button>
         <el-button :icon="Refresh" @click="loadData">刷新</el-button>
       </div>
@@ -107,10 +112,17 @@ const view = ref(null)
 const result = ref(null)
 const loading = ref(false)
 const rangeDays = ref(30)
+const grainMode = ref('day') // 时间粒度:day/week/month,仅趋势类(line/bar)视图可切
 const errorMsg = ref('')
 const publishDialogVisible = ref(false)
 
 const chartHeight = computed(() => (result.value?.chart_type === 'table' ? 'auto' : '400px'))
+
+// 仅含 time 维度的趋势类(line/bar)视图才显示粒度选择器;饼图/表格/明细无 time 维度自动忽略
+const hasTimeDim = computed(() =>
+  ['line', 'bar'].includes(view.value?.chart_type) &&
+  (view.value?.segments || []).some((s) => (s.dimensions || []).some((d) => d.role === 'time'))
+)
 
 // 百分比比率别名集合(从已存视图的 ratios 读取,用于表格列格式化:追加 % 后缀)
 const percentAliases = computed(() => new Set((view.value?.ratios || []).filter((r) => r.as_percent && r.alias).map((r) => r.alias)))
@@ -192,6 +204,7 @@ async function loadData() {
       params.start = start.format('YYYY-MM-DD')
       params.end = end.format('YYYY-MM-DD')
     }
+    if (grainMode.value !== 'day') params.time_grain = grainMode.value
     const res = await executeAnalysisView({ view_id: view.value.id, params })
     result.value = res.data
   } catch (e) {

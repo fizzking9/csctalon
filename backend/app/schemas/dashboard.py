@@ -58,10 +58,15 @@ class DashboardUpdate(BaseModel):
 
 
 class DashboardExecuteRequest(BaseModel):
-    """看板批量执行请求 - start/end 为空则各视图回退自身 time_range_default"""
+    """看板批量执行请求 - start/end 为空则各视图回退自身 time_range_default
+
+    time_grain 为可选的时间粒度覆盖(day/week/month),仅对含 time 维度的趋势项生效;
+    饼图/表格/明细无 time 维度,自动忽略,无副作用。
+    """
 
     start: str | None = None
     end: str | None = None
+    time_grain: str | None = None
 
 
 class DashboardItemResult(BaseModel):

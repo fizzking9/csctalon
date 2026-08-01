@@ -95,6 +95,8 @@ def execute_dashboard(db: DBSession, user: CurrentUser, dashboard_id: int, paylo
     _check_visibility(d, user.role)
 
     params = {"start": payload.start, "end": payload.end}
+    if payload.time_grain:
+        params["time_grain"] = payload.time_grain
     items_out: list[DashboardItemResult] = []
     for it in d.items or []:
         if it.get("visible") is False:

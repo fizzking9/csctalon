@@ -25,6 +25,11 @@
           style="width: 240px"
           @change="onRangeChange"
         />
+        <el-radio-group v-model="grainMode" size="small" @change="onGrainChange">
+          <el-radio-button label="day">按日</el-radio-button>
+          <el-radio-button label="week">按周</el-radio-button>
+          <el-radio-button label="month">按月</el-radio-button>
+        </el-radio-group>
         <el-button :icon="Refresh" :loading="batchLoading" @click="loadAllItems">刷新</el-button>
       </div>
     </div>
@@ -85,6 +90,7 @@ const props = defineProps({
 const dashboard = ref(null)
 const rangeMode = ref('30') // '7'|'30'|'90'|'default'|'custom'
 const customRange = ref([])
+const grainMode = ref('day') // 时间粒度:day/week/month,看板级一次性应用到所有趋势项(饼图/表格自动忽略)
 const batchLoading = ref(false)
 const batchResults = ref({}) // { view_id: { result, error, view_name, ratios, is_preset } }
 const errorMsg = ref('')
@@ -115,6 +121,11 @@ function itemView(viewId) {
 
 function onRangeChange() {
   // rangeMode/customRange 变化 → effectiveStart/End 变 → watch 触发 loadAllItems
+}
+
+function onGrainChange() {
+  // 粒度变化不触发 effectiveStart/End 的 watch,需显式重载
+  loadAllItems()
 }
 
 async function resolveDashboardId() {
@@ -159,6 +170,7 @@ async function loadAllItems() {
     const params = {}
     if (effectiveStart.value) params.start = effectiveStart.value
     if (effectiveEnd.value) params.end = effectiveEnd.value
+    if (grainMode.value !== 'day') params.time_grain = grainMode.value
     const res = await executeDashboard(dashboard.value.id, params)
     const map = {}
     for (const it of res.data.items || []) {
