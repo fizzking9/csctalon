@@ -31,6 +31,7 @@ import pandas as pd
 
 from app.core.config import settings
 from app.services.bms_fetcher import FetchResult
+from app.utils.excel import clean_df_for_excel
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,7 @@ async def fetch_one(task: dict) -> FetchResult:
             full_path = Path(settings.UPLOAD_DIR) / rel_path
             full_path.parent.mkdir(parents=True, exist_ok=True)
             with pd.ExcelWriter(full_path, engine="openpyxl") as writer:
-                merged.to_excel(writer, index=False, sheet_name="Sheet1")
+                clean_df_for_excel(merged).to_excel(writer, index=False, sheet_name="Sheet1")
 
             logger.info(
                 f"[{data_type}] 抓取成功: {filename} ({len(merged)} 行, {len(chunks)} 片合并, "

@@ -24,6 +24,7 @@ from app.schemas.data_source import (
     DataSourceUpdate,
 )
 from app.services.data_source_registry import DATA_SOURCE_SEEDS, ensure_data_sources_registered
+from app.utils.excel import clean_df_for_excel, sanitize_cell_value
 
 # 导出 Excel 单次最大行数(防止 OOM;超出提示加筛选条件)
 EXPORT_MAX_ROWS = 200_000
@@ -320,10 +321,10 @@ def export_records(
     if not df.empty:
         df.columns = headers
 
-    # 写入 xlsx(openpyxl)
+    # 写入 xlsx(openpyxl)。先清洗非法控制字符(openpyxl IllegalCharacterError)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="数据")
+        clean_df_for_excel(df).to_excel(writer, index=False, sheet_name="数据")
     buf.seek(0)
 
     # 文件名:数据源中文名_导出_yyyymmdd_hhmmss.xlsx(UTF-8 编码,兼容中文)
