@@ -360,7 +360,6 @@ async def sync_all(
     any_success = any(r.get("success") for r in results)
     if any_success:
         try:
-            from app.core.database import SessionLocal
             from app.services.matcher import match_all
             from app.services.wide_table_builder import build_refund_wide
 

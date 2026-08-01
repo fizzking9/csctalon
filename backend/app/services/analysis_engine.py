@@ -203,7 +203,7 @@ def _execute_segment(
     conditions = []
     conditions.extend(_build_filters(model, seg.get("filters", [])))
     if time_range:
-        time_filter = _build_time_filter(model, seg, time_range)
+        time_filter = _build_time_filter(model, seg, time_range, fallback_time_field=ds.time_field)
         if time_filter is not None:
             conditions.append(time_filter)
     # params 中的 override filters 叠加
@@ -369,6 +369,12 @@ def _to_chart_data(merged: list[dict], chart_type: str, segments: list[dict], ra
         ]
         # pie 按值降序
         items.sort(key=lambda x: x["value"], reverse=True)
+        # 超过 11 项时取 TOP10,其余归并"其他"(保证占比和=100%,避免饼图碎片化)
+        if len(items) > 11:
+            top = items[:10]
+            other_sum = round(sum(x["value"] for x in items[10:]), 2)
+            top.append({"name": "其他", "value": other_sum})
+            items = top
         return {"chart_type": "pie", "data": {"items": items, "measure_key": mkey}}
 
     # line / bar
@@ -382,8 +388,9 @@ def _to_chart_data(merged: list[dict], chart_type: str, segments: list[dict], ra
             s["stack"] = stack_map[mk]
         series.append(s)
     # 累计差额作为独立 overlay series(不参与堆积,如池子水位线)
+    # 标记 series_type=line,使前端在 bar 视图中以曲线 overlay 渲染(柱状+曲线混合图)
     for ck in cumulative_keys:
-        series.append({"name": ck, "data": [float(r.get(ck, 0) or 0) for r in merged]})
+        series.append({"name": ck, "data": [float(r.get(ck, 0) or 0) for r in merged], "series_type": "line"})
     return {
         "chart_type": chart_type,
         "data": {
@@ -510,16 +517,19 @@ def _build_filters(model, filters: list[dict]) -> list:
     return conditions
 
 
-def _build_time_filter(model, seg: dict, time_range: dict):
+def _build_time_filter(model, seg: dict, time_range: dict, fallback_time_field: str | None = None):
     """构建时间筛选条件
 
-    优先用 segment 中维度 role=time 的字段,否则用 DataSource.time_field
+    优先用 segment 中维度 role=time 的字段;否则回退到 DataSource.time_field
+    (使非时间维度视图如"按审核人/状态/原因"也能受看板时间范围过滤)
     """
     time_field = None
     for dim in seg.get("dimensions", []):
         if dim.get("role") == "time":
             time_field = dim["field"]
             break
+    if not time_field:
+        time_field = fallback_time_field
     if not time_field:
         return None
 

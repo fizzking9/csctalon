@@ -15,23 +15,27 @@ from app.models.dashboard import Dashboard
 
 # 4 个常规预设看板:items 引用 preset_views_seed 中的 view_code
 PRESET_DASHBOARDS: list[dict] = [
-    # ---------- 退款看板(10 视图全整合:运营4+现金流3+退款分类3) ----------
+    # ---------- 退款看板(8 视图:5 个现金流 v2 + 3 个基础分布) ----------
+    # 现金流量重构(2026-07):用 5 个 v2 视图替换旧现金流视图;
+    # 服务项/商户/套餐分类暂移除(数据繁杂,待后续归一化汇聚后再加回)
     {
         "code": "preset_dashboard_refund",
         "name": "退款看板",
-        "description": "退费单趋势/状态/原因/方式 + 真实现金流(退款+提现) + 商户号对账 + 退款分类分布",
+        "description": "退款现金流趋势(堆积) + 退费审核人占比 + 提现池子水位(柱状+曲线) + 退费原因/方式 + 退款日记录 + 提现-退款时序",
         "category": "退款",
         "items": [
-            {"view_code": "preset_refund_trend", "span": 16},
-            {"view_code": "preset_refund_status", "span": 8},
+            # 第一行:整体趋势全宽(堆积四类金额)
+            {"view_code": "preset_cash_trend_v2", "span": 24},
+            # 第二行:退费审核人占比 + 提现池子水位(柱状+曲线)
+            {"view_code": "preset_refund_operator_v2", "span": 12},
+            {"view_code": "preset_wallet_pool_v2", "span": 12},
+            # 第三行:基础分布(原因/方式);退费状态无业务意义已移除
             {"view_code": "preset_refund_reason_top", "span": 12},
             {"view_code": "preset_refund_method", "span": 12},
-            {"view_code": "preset_cash_trend", "span": 24},
-            {"view_code": "preset_wallet_vs_withdraw", "span": 12},
-            {"view_code": "preset_merchant_cash", "span": 12},
-            {"view_code": "preset_category_service_item", "span": 8},
-            {"view_code": "preset_category_merchant", "span": 8},
-            {"view_code": "preset_category_package", "span": 8},
+            # 第四行:退款日记录(人员/原因/分类,table)
+            {"view_code": "preset_refund_daily_detail_v2", "span": 24},
+            # 第五行:提现-退款时序关联(table)
+            {"view_code": "preset_wallet_refund_timing_v2", "span": 24},
         ],
         "time_range_default": {"days": 30},
         "visibility": "manager",

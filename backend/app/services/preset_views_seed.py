@@ -55,23 +55,24 @@ PRESET_VIEWS: list[dict] = [
     {
         "code": "preset_refund_reason_top",
         "name": "退费原因TOP10",
-        "description": "按退费原因汇总金额TOP10",
+        "description": "退款类工单按服务项(真实退款原因)汇总金额与笔数。refund.refund_reason 99%是'用户退款'无意义,真实原因在 service_tickets.service_item",
         "chart_type": "bar",
         "segments": [{
-            "source_code": "refund",
-            "label": "原因",
-            "dimensions": [{"field": "refund_reason", "alias": "原因", "role": "category"}],
+            "source_code": "ticket",
+            "label": "退费原因",
+            "dimensions": [{"field": "service_item", "alias": "退费原因", "role": "category"}],
             "measures": [
                 {"field": "refund_amount", "agg": "sum", "alias": "金额"},
                 {"field": "*", "agg": "count", "alias": "笔数"},
             ],
-            "filters": [{"field": "refund_reason", "op": "is_not_null", "value": None}],
-            "order_by": {"field": "金额", "direction": "desc"},
-            "limit": 10,
+            "filters": [
+                {"field": "service_category", "op": "eq", "value": "退款"},
+                {"field": "service_item", "op": "is_not_null", "value": None},
+            ],
         }],
         "merge_strategy": "add",
         "classification_rule_ids": [],
-        "time_range_default": None,
+        "time_range_default": {"days": 30},
     },
     {
         "code": "preset_refund_method",
@@ -553,37 +554,35 @@ PRESET_VIEWS: list[dict] = [
         "classification_rule_ids": [],
         "time_range_default": {"days": 90},
     },
-    # 视图2:退费操作人统计
+    # 视图2:退费审核人占比(饼图)
     {
         "code": "preset_refund_operator_v2",
-        "name": "退费操作人统计",
-        "description": "线上已退款按操作人(归一化)汇总金额与笔数,支持日/周/月/季/年切换",
-        "chart_type": "bar",
+        "name": "退费审核人占比",
+        "description": "线上已退款按审核人(归一化)金额占比分布,TOP10+其他。看板时间范围(7/30天)生效",
+        "chart_type": "pie",
         "segments": [{
             "source_code": "refund",
-            "label": "操作人",
-            "dimensions": [{"field": "operator", "alias": "操作人", "role": "person"}],
+            "label": "审核人",
+            "dimensions": [{"field": "auditor", "alias": "审核人", "role": "person"}],
             "measures": [
                 {"field": "refund_amount", "agg": "sum", "alias": "退款金额"},
-                {"field": "*", "agg": "count", "alias": "退款笔数"},
             ],
             "filters": [
                 {"field": "refund_method", "op": "eq", "value": "线上"},
                 {"field": "status", "op": "eq", "value": "已退款"},
-                {"field": "operator", "op": "notin", "value": ["sys", "system"]},
+                {"field": "auditor", "op": "notin", "value": ["sys", "system"]},
             ],
-            "limit": 50,
         }],
         "merge_strategy": "add",
         "classification_rule_ids": [],
         "time_range_default": {"days": 30},
     },
-    # 视图4:提现 vs 转入(池子水位)
+    # 视图4:提现 vs 转入(池子水位,柱状+曲线混合)
     {
         "code": "preset_wallet_pool_v2",
         "name": "提现池子水位",
-        "description": "订单退费转入(流入) vs 用户提现(流出),含累计净水位。转入<提现=池子在缩小。",
-        "chart_type": "line",
+        "description": "转入/提现柱状对比 + 净水位累计曲线。转入<提现=池子在缩小。看板时间范围生效",
+        "chart_type": "bar",
         "segments": [
             {
                 "source_code": "wallet",
