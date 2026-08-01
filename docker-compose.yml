@@ -49,6 +49,9 @@ services:
   backend:
     build: ./backend
     container_name: csctalon-backend
+    # 覆盖镜像 CMD: --timeout 对齐 nginx proxy_read_timeout(900s)。
+    # sync-all 多源抓取含 65s 间隔,全程 5-8 分钟,默认 120s 会被 gunicorn 判超时 SIGABRT → 前端 502。
+    command: ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "900", "--log-level", "info"]
     env_file:
       - .env
     volumes:

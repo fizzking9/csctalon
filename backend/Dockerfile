@@ -47,4 +47,4 @@ EXPOSE 8000
 # 但在某些情况下会导致 worker boot 失败,暂时移除
 # 日志: gunicorn/uvicorn/app 日志统一走 stdout/stderr,由 docker json-file 轮转(10m×3)捕获,
 #       用 `docker compose logs backend` 查看;nginx 访问日志另以文件形式落在 ./logs/nginx。
-CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "120", "--log-level", "info"]
+CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "900", "--log-level", "info"]
