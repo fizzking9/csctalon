@@ -702,23 +702,35 @@ def category_by_package(db: Session, limit: int = 20) -> list[dict]:
 # ---------- 看板4:人员操作分析 ----------
 
 
+def _strip_qw_prefix(x: str | None) -> str | None:
+    """终极兜底: Python端去掉"企微-"前缀, 避免维表漏登记导致同一人分两桶。仅作为 display_name 兜底用"""
+    if not x:
+        return x
+    if isinstance(x, str) and x.startswith("企微-"):
+        return x[len("企微-"):]
+    return x
+
+
 def operator_ticket_stats(db: Session, start: datetime | None = None, end: datetime | None = None) -> list[dict]:
-    """人员工单处理统计(处理人)"""
+    """人员工单处理统计(处理人) — 姓名归一: PersonAlias.alias = handler → Person.display_name"""
     start, end = _date_range(start, end)
+    op_prs = _operator_to_person_cte()
     rows = db.execute(
         select(
-            ServiceTicket.handler,
+            func.coalesce(op_prs.c.display_name, ServiceTicket.handler).label("operator"),
             func.count().label("ticket_count"),
             func.coalesce(func.sum(ServiceTicket.refund_amount), 0).label("refund_amount"),
             func.coalesce(func.avg(ServiceTicket.handle_duration), 0).label("avg_duration"),
         )
+        .select_from(ServiceTicket)
+        .outerjoin(op_prs, op_prs.c.operator == ServiceTicket.handler)
         .where(ServiceTicket.handler.isnot(None), ServiceTicket.register_time.between(start, end))
-        .group_by(ServiceTicket.handler)
+        .group_by(text("1"))
         .order_by(func.count().desc())
     ).all()
     return [
         {
-            "operator": r[0],
+            "operator": _strip_qw_prefix(r[0]),
             "ticket_count": r[1],
             "refund_amount": float(r[2] or 0),
             "avg_handle_duration": round(float(r[3] or 0), 2),
@@ -728,46 +740,58 @@ def operator_ticket_stats(db: Session, start: datetime | None = None, end: datet
 
 
 def operator_audit_stats(db: Session, start: datetime | None = None, end: datetime | None = None) -> list[dict]:
-    """人员审核统计(审核人) 【统一口径: 路线A 退费单-线上直退】"""
+    """人员审核统计(审核人) 【统一口径: 路线A 退费单-线上直退】
+    姓名归一: PersonAlias.alias = auditor → Person.display_name
+    """
     start, end = _date_range(start, end)
+    op_prs = _operator_to_person_cte()
     rows = db.execute(
         select(
-            Refund.auditor,
+            func.coalesce(op_prs.c.display_name, Refund.auditor).label("operator"),
             func.count().label("audit_count"),
             func.coalesce(func.sum(Refund.refund_amount), 0).label("audit_amount"),
         )
+        .select_from(Refund)
+        .outerjoin(op_prs, op_prs.c.operator == Refund.auditor)
         .where(Refund.auditor.isnot(None),
                Refund.created_at_raw.between(start, end),
                *_route_a_online_refund_filter())
-        .group_by(Refund.auditor)
+        .group_by(text("1"))
         .order_by(func.sum(Refund.refund_amount).desc())
     ).all()
     return [
-        {"operator": r[0], "audit_count": r[1], "audit_amount": float(r[2] or 0)}
+        {"operator": _strip_qw_prefix(r[0]), "audit_count": r[1], "audit_amount": float(r[2] or 0)}
         for r in rows
     ]
 
 
 def operator_refund_stats(db: Session, start: datetime | None = None, end: datetime | None = None) -> list[dict]:
-    """人员退费操作统计(操作人,排除 sys/system) 【统一口径: 路线A 退费单-线上直退】"""
+    """人员退费操作统计(操作人,排除 sys/system) 【统一口径: 路线A 退费单-线上直退】
+    姓名归一: PersonAlias.alias = operator → Person.display_name;
+    sys/system/SYS 等系统变体由于已在 alias 里链接到"系统自动", 所以额外再过滤掉 display_name='系统自动' 确保一致
+    """
     start, end = _date_range(start, end)
+    op_prs = _operator_to_person_cte()
     rows = db.execute(
         select(
-            Refund.operator,
+            func.coalesce(op_prs.c.display_name, Refund.operator).label("operator"),
             func.count().label("op_count"),
             func.coalesce(func.sum(Refund.refund_amount), 0).label("refund_amount"),
         )
+        .select_from(Refund)
+        .outerjoin(op_prs, op_prs.c.operator == Refund.operator)
         .where(
             Refund.operator.isnot(None),
             Refund.operator.notin_(["sys", "system"]),
             Refund.created_at_raw.between(start, end),
             *_route_a_online_refund_filter(),
         )
-        .group_by(Refund.operator)
+        .group_by(text("1"))
+        .having(func.coalesce(op_prs.c.display_name, Refund.operator) != "系统自动")
         .order_by(func.sum(Refund.refund_amount).desc())
     ).all()
     return [
-        {"operator": r[0], "op_count": r[1], "refund_amount": float(r[2] or 0)}
+        {"operator": _strip_qw_prefix(r[0]), "op_count": r[1], "refund_amount": float(r[2] or 0)}
         for r in rows
     ]
 
@@ -1790,6 +1814,13 @@ def today_kpi(db: Session, date: str | None = None) -> dict[str, Any]:
     # 1. 今日接待量 (cs_records.operation_time)
     cs_today = db.execute(select(func.count()).where(_between(CsRecord.operation_time, ts, te))).scalar() or 0
     cs_yoy = db.execute(select(func.count()).where(_between(CsRecord.operation_time, ys, ye))).scalar() or 0
+    # 1b. 今日服务设备数 (cs_records.device_sn 去重, 排除 NULL/空串) — 补充口径：1台设备多次进线算1次，体现覆盖面
+    cs_device_today = db.execute(select(
+        func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), "")))
+    ).where(_between(CsRecord.operation_time, ts, te))).scalar() or 0
+    cs_device_yoy = db.execute(select(
+        func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), "")))
+    ).where(_between(CsRecord.operation_time, ys, ye))).scalar() or 0
 
     # 2/3. 今日退款笔数+金额 【统一口径=路线A refund_method='线上'】
     rf_row = db.execute(select(func.count(), func.coalesce(func.sum(Refund.refund_amount), 0))
@@ -1856,7 +1887,7 @@ def today_kpi(db: Session, date: str | None = None) -> dict[str, Any]:
             "today_start": _sh_iso(ts), "today_end": _sh_iso(te),
             "yoy_start": _sh_iso(ys), "yoy_end": _sh_iso(ye),
         },
-        "reception":      _k(int(cs_today), int(cs_yoy)),
+        "reception":      {**_k(int(cs_today), int(cs_yoy)), "device_count": int(cs_device_today), "device_count_yoy": int(cs_device_yoy)},
         "refund_count":   _k(rf_cnt_t, rf_cnt_y),
         "refund_amount":  _k(round(rf_amt_t, 2), round(rf_amt_y, 2)),
         "cash_out":       _k(round(cash_t, 2), round(cash_y, 2)),      # 经营估算 A+B+C+D
@@ -1899,12 +1930,15 @@ def today_hourly_trend(db: Session, date: str | None = None) -> dict[str, Any]:
     def _h(col):
         return func.date_trunc("hour", func.timezone("Asia/Shanghai", col)).label("h")
     cs_rows = db.execute(
-        select(_h(CsRecord.operation_time), func.count().label("cnt"))
+        select(_h(CsRecord.operation_time),
+               func.count().label("cnt"),
+               func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("dev_cnt"))
         .where(CsRecord.operation_time.isnot(None),
                CsRecord.operation_time >= ts, CsRecord.operation_time <= te)
         .group_by("h")
     ).all()
     cs_map = {r.h.hour: int(r.cnt or 0) for r in cs_rows if r.h}
+    cs_dev_map = {r.h.hour: int(r.dev_cnt or 0) for r in cs_rows if r.h}
 
     # 退款: 小时级聚合 笔数 + 金额 【统一口径=路线A refund_method='线上'】
     rf_rows = db.execute(
@@ -1938,13 +1972,15 @@ def today_hourly_trend(db: Session, date: str | None = None) -> dict[str, Any]:
         "date": (d or now_sh.date()).isoformat(),
         "hours": hours,
         "hour_labels": [f"{h:02d}:00" for h in hours],
-        "reception":     [cs_map.get(h, 0)     if h <= max_h else None for h in hours],
-        "refund_count":  [rf_cnt_map.get(h, 0) if h <= max_h else None for h in hours],
-        "refund_amount": [round(rf_amt_map.get(h, 0.0), 2) if h <= max_h else None for h in hours],
-        "complaint":     [cp_map.get(h, 0)     if h <= max_h else None for h in hours],
+        "reception":          [cs_map.get(h, 0)         if h <= max_h else None for h in hours],
+        "reception_devices":  [cs_dev_map.get(h, 0)     if h <= max_h else None for h in hours],
+        "refund_count":       [rf_cnt_map.get(h, 0)     if h <= max_h else None for h in hours],
+        "refund_amount":      [round(rf_amt_map.get(h, 0.0), 2) if h <= max_h else None for h in hours],
+        "complaint":          [cp_map.get(h, 0)         if h <= max_h else None for h in hours],
         "_spec": {
             "refund_count":  "路线A: 退费单 refund_method='线上'",
             "refund_amount": "路线A: 退费单 refund_method='线上'",
+            "reception":     "接待人次 = cs_record 计数；reception_devices = 去重设备SN计数(去NULL/空串)",
         },
     }
 
@@ -1979,6 +2015,7 @@ def today_reception_breakdown(db: Session, date: str | None = None) -> dict[str,
             categories.append({"name": nm, "value": 0})
 
     # 右1: Top10客服 (按operator分组count, 关联PersonAlias→Person拿group_name/display_name)
+    #     2026-08-02 加设备SN去重计数: 设备接待台数, 体现覆盖面, 1台设备多次进线算1台
     op_person = _operator_to_person_cte()
     top_rows = db.execute(
         select(
@@ -1987,6 +2024,7 @@ def today_reception_breakdown(db: Session, date: str | None = None) -> dict[str,
             op_person.c.department.label("department"),
             op_person.c.group_name.label("group_name"),
             func.count().label("cnt"),
+            func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("dcnt"),
         )
         .outerjoin(op_person, CsRecord.operator == op_person.c.operator)
         .where(between, CsRecord.operator.isnot(None))
@@ -1994,13 +2032,16 @@ def today_reception_breakdown(db: Session, date: str | None = None) -> dict[str,
         .order_by(func.count().desc())
         .limit(10)
     ).all()
-    top_staff = [
-        {"name": r.display_name or r.raw_op or "未知",
-         "department": r.department or "未设置",
-         "group": r.group_name or "未分组",
-         "count": int(r.cnt or 0)}
-        for r in top_rows
-    ]
+    top_staff = []
+    for r in top_rows:
+        raw_name = r.display_name or r.raw_op or "未知"
+        top_staff.append({
+            "name": _strip_qw_prefix(raw_name) or raw_name or "未知",
+            "department": r.department or "未设置",
+            "group": r.group_name or "未分组",
+            "count": int(r.cnt or 0),
+            "device_count": int(r.dcnt or 0),
+        })
 
     # ---------- 新增: 今日投诉统计 (service_tickets 表, 空类别兜底=投诉) ----------
     # 左2: 投诉子类饼图 (从 service_item 归一化, 仅统计今日投诉工单)
@@ -2113,31 +2154,211 @@ def today_reception_breakdown(db: Session, date: str | None = None) -> dict[str,
     }
 
 
+def _derive_service_item_for_refund(
+    remark: str | None,
+    audit_remark: str | None,
+    package_name: str | None,
+    refund_reason: str | None,
+) -> tuple[str, str | None]:
+    """根据退款单 remark/audit_remark/package 猜 service_category + service_item
+
+    返回: (service_category, service_item). 命中明确关键词优先:
+      「超期」→ 退款 / 退款-超期纠纷
+      「充值」+ 退款 → 退款 / 充值错误
+      网慢/网卡/无网络 → 投诉 / 网络问题
+      不想用 / 要退 → 退款 / 不想用了
+      设备坏 → 投诉 / 设备故障
+    兜底 scat=退款 sitm=退款管理-未分类
+    """
+    blob = " ".join(x or "" for x in [remark, audit_remark, package_name, refund_reason])
+    b = blob.lower()
+    if any(k in b for k in ["超期", "超期订单不允许"]):
+        return "退款", "退款-超期纠纷"
+    if any(k in blob for k in ["充值错误", "充错", "充错了", "冲错"]):
+        return "退款", "充值错误"
+    if any(k in b for k in ["网慢", "网卡", "无网络", "没网", "断网", "信号差", "网速"]):
+        return "投诉", "网络问题"
+    if any(k in b for k in ["不想用", "不要了", "用不上", "不想续费", "不需要了", "不用了", "退订"]):
+        return "退款", "不想用了"
+    if any(k in b for k in ["设备坏", "坏了", "设备故障", "硬件", "无法开机", "坏机"]):
+        return "投诉", "设备故障"
+    # WiFi钱包充值
+    if any(k in (package_name or "") for k in ["WiFi钱包", "钱包"]):
+        return "退款", "充值错误"
+    return "退款", "退款管理-未分类"
+
+
+def _ensure_service_tickets_for_unmatched_refunds(
+    db: Session,
+    range_start: _dt.datetime,
+    range_end: _dt.datetime,
+    match_win_sec: int = 86400 * 45,
+) -> dict[str, int]:
+    """F2: 审计兜底 — 针对 [range_start, range_end) 内所有路线A退款(线上直退),
+    若找不到 ±match_win_sec 内同 SN 的 service_ticket, 自动补建一条 service_ticket,
+    用 refund.operator → registrant, refund.auditor 或 operator → handler,
+    用 remark/audit_remark/package_name 关键字推 service_category/service_item.
+
+    为保证幂等: 新增的工单号 prefix = 'GDREF_'+refund_no (和正常 GDC/GD prefix 完全区分);
+    若已存在同 ticket_no 的工单 → 跳过 (INSERT ON CONFLICT DO NOTHING 语义, 用 merge instead)
+
+    返回: {"inserted": N, "skipped": M} 供调用方参考
+    """
+    # 1. 扫所有日期内路线A退款
+    in_range = and_(
+        Refund.created_at_raw.isnot(None),
+        Refund.created_at_raw >= range_start,
+        Refund.created_at_raw <= range_end,
+        *_route_a_online_refund_filter(),
+    )
+    refunds_rows = db.execute(select(
+        Refund.refund_no, Refund.device_sn, Refund.operator, Refund.auditor,
+        Refund.remark, Refund.audit_remark, Refund.package_name, Refund.refund_reason,
+        Refund.refund_amount, Refund.actual_amount, Refund.created_at_raw, Refund.updated_at_raw,
+        Refund.platform_order_no, Refund.status,
+    ).where(in_range)).all()
+    if not refunds_rows:
+        return {"inserted": 0, "skipped": 0}
+
+    # 1.5 姓名归一查维表: 把 operator/auditor → Person.display_name 一次性先查好 (避免 for 里 N+1)
+    all_names = sorted({
+        x for r in refunds_rows for x in [r.operator or "", r.auditor or ""] if x
+    })
+    name_map: dict[str, str] = {}
+    if all_names:
+        op_prs = _operator_to_person_cte()
+        alias_rows = db.execute(select(op_prs.c.operator, op_prs.c.display_name
+        ).where(op_prs.c.operator.in_(all_names))).all()
+        for a, dn in alias_rows:
+            if dn and a:
+                name_map[a] = dn
+    def _dn(x: str | None) -> str | None:
+        if not x: return None
+        return name_map.get(x, x)  # 没alias登记则保留原值
+
+    # 2. 批量判断每条退款是否有对应工单 (1 次 SQL 直接跑存在性判断)
+    # 对每个 refund 找出: EXISTS(工单 SN 匹配 & 时间差 < match_win_sec)
+    have_ticket: set[str] = set()
+    # 简单策略: 直接按 SN 列表过滤 + 时间窗
+    sns = sorted({r.device_sn for r in refunds_rows if r.device_sn})
+    if sns:
+        sec = match_win_sec
+        pairs = db.execute(select(Refund.refund_no, ServiceTicket.ticket_no
+        ).select_from(Refund).join(ServiceTicket, and_(
+            ServiceTicket.device_sn == Refund.device_sn,
+            ServiceTicket.device_sn.in_(sns),
+            Refund.device_sn.in_(sns),
+            ServiceTicket.register_time.isnot(None),
+            Refund.created_at_raw.isnot(None),
+            func.abs(func.extract("epoch", ServiceTicket.register_time - Refund.created_at_raw)) < sec,
+        )).where(in_range)).all()
+        for rno, _tno in pairs:
+            have_ticket.add(rno)
+
+    # 3. 对没工单的退款 建 service_ticket
+    inserted = 0
+    skipped = 0
+    for r in refunds_rows:
+        if r.refund_no in have_ticket:
+            continue
+        # 幂等: 工单号 = GDREF_{refund_no}  (64 字符限制 OK, refund_no ~ 22 字符)
+        ticket_no = "GDREF_" + r.refund_no
+        # 查重(已有同 ticket_no 已建过)
+        ex = db.execute(select(ServiceTicket.ticket_no).where(ServiceTicket.ticket_no == ticket_no)).first()
+        if ex:
+            skipped += 1
+            have_ticket.add(r.refund_no)
+            continue
+        scat, sitm = _derive_service_item_for_refund(r.remark, r.audit_remark, r.package_name, r.refund_reason)
+        registrant_raw = r.operator or "系统自动补建"
+        handler_raw = (r.auditor or r.operator or None)
+        # 写入前姓名归一 (维表 PersonAlias→Person.display_name), 保持与展示侧 by_staff 口径一致, 避免同一人在不同表里用不同字符串
+        registrant = _dn(registrant_raw) or registrant_raw
+        handler = _dn(handler_raw) if handler_raw else "未指派"
+        # 备注信息: 合并退款 remark/audit_remark/refund_reason + 来源 refund_no
+        rmk_parts = []
+        if r.remark:
+            rmk_parts.append("退款备注:" + r.remark)
+        if r.audit_remark:
+            rmk_parts.append("审核:" + r.audit_remark)
+        if r.refund_reason and r.refund_reason != "用户退款":
+            rmk_parts.append("原退款原因:" + r.refund_reason)
+        rmk_parts.append("来源:退款单" + r.refund_no)
+        if r.package_name:
+            rmk_parts.append("商品:" + r.package_name)
+        # 登记时间用退款的 created_at_raw
+        reg_time = r.created_at_raw or (range_start + (range_end - range_start) / 2)
+        # finish_time 用 updated_at_raw (如 status 非空且已完成)
+        finish_time = None
+        st_status = "处理中"
+        if r.status and ("退款" in r.status or "完成" in r.status or "成功" in r.status):
+            st_status = "已完成"
+            finish_time = r.updated_at_raw or reg_time
+        # 处理人如果是中文非空, 把 st_status 直接置已完成(默认已经操作完了), 避免人工重算
+        if handler and handler != "未指派":
+            st_status = "已完成"
+            finish_time = r.updated_at_raw or reg_time
+        new_t = ServiceTicket(
+            ticket_no=ticket_no,
+            device_sn=r.device_sn,
+            phone=None,
+            service_category=scat,
+            service_item=sitm,
+            priority=2,
+            status=st_status,
+            remark="; ".join(rmk_parts),
+            register_time=reg_time,
+            active_time=reg_time,
+            dispatch_time=reg_time if (handler and handler != "未指派") else None,
+            finish_time=finish_time,
+            handle_duration=None,
+            registrant=registrant,
+            channel="系统自动补建(退款兜底)",
+            handle_node="系统自动补建",
+            handler=handler,
+            handle_opinion=(
+                "经营-实际对账兜底: 该退款发生前/后 " + str(match_win_sec // 86400) +
+                " 天内无对应服务工单; 系统依据退款单字段自动补建以便统计分析。operator=" +
+                (r.operator or "") + ", auditor=" + (r.auditor or "")
+            ),
+            is_appeal="否",
+            order_no=r.platform_order_no,
+            submit_params=None,
+            refund_amount=float(r.actual_amount or r.refund_amount or 0.0),
+            estimated_amount=float(r.refund_amount or 0.0),
+        )
+        db.add(new_t)
+        inserted += 1
+        have_ticket.add(r.refund_no)
+    # Flush 以便 immediately following 的 best_match CTE 能看到; 外部事务统一 commit
+    if inserted:
+        db.flush()
+    return {"inserted": inserted, "skipped": skipped}
+
+
 def today_refund_breakdown(db: Session, date: str | None = None) -> dict[str, Any]:
-    """模块4: 今日退款分项 = 退款细分原因Top10 + 退款方式分布 【统一口径: 路线A refund_method='线上'】
+    """模块4: 今日退款分项 = 退款细分原因Top10 + 退款接待人Top10 【统一口径: 路线A refund_method='线上'】
 
-    v3 升级(2026-08-02): 用户明确 WiFi钱包/Ai套餐等商品名 不是"退款原因",
-    修复 v2 两处缺陷:
-      A. 时间窗过窄导致工单漏匹配: |register_time − created_at_raw| < 48h → < 30天
-         (抽样发现大量10天~28天前的工单因48h窗被漏掉,落入错误桶)
-      B. 兜底语义错误: 未匹配工单 之前 fallback 到 package_name(商品维度)
-         → 现统一归入 [原因未登记] 未关联工单 桶；商品维度改在独立 packages 字段返回,不混入原因
-
-    正确分类策略 (只用工单分类 / 统一未登记桶, 绝不混入商品名):
-      1. 已匹配工单: <service_category or '投诉'>/<service_item>
-         按 device_sn + |register_time - created_at_raw| < 30天 关联，
-         每个 refund 用 PG DISTINCT ON 取时间差最小的 1 条工单（防 1 对多重复计数）
-      2. 未匹配工单: 统一归为『[原因未登记] 未关联到工单』，不再用商品名兜底
+    v3.1 升级(2026-08-02):
+      1. 时间窗过窄修复: |register_time − created_at_raw| < ±30天 → ±45天 (覆盖老套餐月末冷静期退款)
+      2. 未关联工单兜底: 进入分析前调用_ensure_service_tickets_for_unmatched_refunds
+         自动按退款单补建 service_ticket(ticket_no=GDREF_*),
+         handler = auditor或operator, service_item 由 remark/package 关键词推导
+         → 彻底消除 "[未分配]" 桶绩效失真
+      3. 原因榜/接待人榜仍用同一张 best_match CTE
     """
     d = _parse_date(date)
     ts, te, _, _ = _today_windows(d)
     between = and_(Refund.created_at_raw.isnot(None),
                    Refund.created_at_raw >= ts, Refund.created_at_raw <= te,
                    *_route_a_online_refund_filter())
-    _WIN_30D = 86400 * 30  # A缺陷修复: ±30天（从 ±48h 放宽）
+    _WIN_45D = 86400 * 45  # v3.1: ±30d → ±45d,修复 8/1 样本里 31.28d 这种工单登记稍早被错漏的情况
 
-    # ── ① 左: 细分原因 Top10 (按金额倒序) ──
-    # CTE 1: 每个 refund 最佳匹配工单 (DISTINCT ON 取时间差最小的, 无工单时走左连接 NULL)
+    # ── F2. 自动补建工单: 日期内 ±45d 未匹配到工单的退款, 自动建一条 service_ticket, 保证 接待人/原因 绩效不漏 ──
+    _ensure_service_tickets_for_unmatched_refunds(db, ts, te, match_win_sec=_WIN_45D)
+
+    # ── CTE 共享: 每个 refund 最佳匹配工单 (DISTINCT ON 取时间差最小的, 无工单时走左连接 NULL) ──
+    # 一次 DISTINCT ON 同时带出 原因字段(scat/sitm) + 接待人字段(handler), 供后续两次聚合复用
     best_stmt = select(
         Refund.refund_no.label("rid"),
         Refund.refund_amount.label("amt"),
@@ -2146,6 +2367,7 @@ def today_refund_breakdown(db: Session, date: str | None = None) -> dict[str, An
         # 工单字段 (左连接, 可能 NULL)
         ServiceTicket.service_category.label("scat"),
         ServiceTicket.service_item.label("sitm"),
+        ServiceTicket.handler.label("hdl"),
         func.abs(func.extract("epoch",
             ServiceTicket.register_time - Refund.created_at_raw
         )).label("diff_sec"),
@@ -2155,14 +2377,13 @@ def today_refund_breakdown(db: Session, date: str | None = None) -> dict[str, An
         ServiceTicket.register_time.isnot(None),
         func.abs(func.extract("epoch",
             ServiceTicket.register_time - Refund.created_at_raw
-        )) < _WIN_30D,
+        )) < _WIN_45D,
     )).where(between)
-    # PostgreSQL 方言: DISTINCT ON (rid) 每个 refund 只保留 diff_sec 最小那行(含 NULL 工单行)
     best_cte = best_stmt.distinct(text("rid")).order_by(
         text("rid"), text("diff_sec NULLS LAST")
     ).cte("best_match")
 
-    # CTE 2: 分类名推导（B缺陷修复: 不再用 package_name 混进原因维度）
+    # ── ① 左: 细分原因 Top10 (按金额倒序) ──
     def _name_case():
         sc = best_cte.c.scat
         si = best_cte.c.sitm
@@ -2194,7 +2415,26 @@ def today_refund_breakdown(db: Session, date: str | None = None) -> dict[str, An
         for r in reason_agg
     ][:10]  # Top10 按金额
 
-    # ── ② 补充字段: 退款商品分布 Top10 (独立于原因维度, 用于业务分析但不混原因榜) ──
+    # ── ② 右: 退款接待人 Top10 (按工单处理人 handler 统计；先 JOIN PersonAlias→Person.display_name 姓名归一后分组) ──
+    # 姓名归一: PersonAlias.alias = handler(原始带企微-/wechat/SYS 等) → Person.display_name
+    # 没 alias 的原始值直接用原值兜底; 空/NULL → "[未分配]" 桶
+    op_prs = _operator_to_person_cte()
+    staff_agg = db.execute(select(
+        case(
+            (best_cte.c.hdl.is_(None) | (best_cte.c.hdl == ""), "[未分配] 未关联工单或未指派处理人"),
+            else_=func.coalesce(op_prs.c.display_name, best_cte.c.hdl),
+        ).label("name"),
+        func.count().label("cnt"),
+        func.coalesce(func.sum(best_cte.c.amt), 0).label("amt"),
+    ).select_from(best_cte
+     .outerjoin(op_prs, op_prs.c.operator == best_cte.c.hdl)
+    ).group_by(text("name")).order_by(func.sum(best_cte.c.amt).desc()).limit(15)).all()
+    by_staff = [
+        {"name": r[0] or "[未分配]", "count": int(r.cnt or 0), "amount": round(float(r.amt or 0), 2)}
+        for r in staff_agg
+    ]
+
+    # ── ③ 补充字段: 退款商品分布 Top10 (独立于原因维度, 用于业务分析但不混原因榜) ──
     pkg_agg = db.execute(select(
         Refund.package_name.label("pkg"),
         func.count().label("cnt"),
@@ -2206,40 +2446,24 @@ def today_refund_breakdown(db: Session, date: str | None = None) -> dict[str, An
         for r in pkg_agg
     ]
 
-    # ── ③ 右: 退款方式饼图（主 WHERE 已限定路线A refund_method='线上', 这里仅兼容旧结构保留）
-    def _bucket_method(m: str | None) -> str:
-        if not m:
-            return "未填写"
-        if "转入" in m:
-            return "退回钱包"
-        for kw in ("线上", "微信", "支付宝", "银联", "银行卡", "直退"):
-            if kw in m:
-                return "线上直退"
-        if "线下" in m:
-            return "线下退款"
-        return "其他"
-    method_rows = db.execute(
-        select(Refund.refund_method, func.count().label("cnt"))
-        .where(between).group_by(Refund.refund_method)
-    ).all()
-    method_agg: dict[str, int] = {}
-    for r in method_rows:
-        b = _bucket_method(r[0])
-        method_agg[b] = method_agg.get(b, 0) + int(r.cnt or 0)
-    methods = [{"name": k, "value": v} for k, v in method_agg.items()]
-
     return {
         "date": (d or _dt.datetime.now(TZ).date()).isoformat(),
-        "reasons": reasons,                 # 退款原因榜 (仅工单分类 + 未登记统一桶, 无商品名)
-        "packages": packages,               # 新增独立榜: 退款商品分布 Top10 (商品维度)
-        "methods": methods,
+        "reasons": reasons,                 # 左: 退款原因榜 (工单分类 + 未登记统一桶)
+        "packages": packages,               # 独立榜: 退款商品分布 Top10 (与原因榜解耦)
+        "by_staff": by_staff,               # 右: 退款接待人 Top10 (工单处理人 handler)
+        "methods": [],                      # 向后兼容: 原"退款方式分布" 只路线A一桶无意义, 移除以防误导
         "_spec": {
             "scope": "路线A: 退费单 refund_method='线上'",
             "reason_strategy": (
-                "v3: 1)[service_category or '投诉']/service_item (设备SN±30天关联工单,每退款取时间差最小的1条) → "
-                "2)未匹配工单 → '[原因未登记] 未关联到工单' 统一桶 (v3修复: 不再用package_name商品名混入原因维度)"
+                "v3.1: 1)[service_category or '投诉']/service_item (设备SN±45天关联工单,每退款取时间差最小的1条) → "
+                "2)未匹配工单 → 分析函数前置步骤_ensure_service_tickets_for_unmatched_refunds自动补建工单;"
+                "3)补建后仍无工单 → '[原因未登记] 未关联到工单' 统一桶"
             ),
-            "time_window_seconds": _WIN_30D,
+            "staff_strategy": (
+                "v3.1: 同一张best_match CTE取ServiceTicket.handler → 自动补建工单后回填handler;"
+                " 补建后仍无handler → '[未分配] 未关联工单或未指派处理人' 统一桶; Top10按退款金额倒序"
+            ),
+            "time_window_seconds": _WIN_45D,
             "packages_strategy": "独立字段 packages: 按 package_name 商品 Top10 (原因榜与商品榜彻底解耦)",
         },
     }
@@ -2326,75 +2550,134 @@ def today_queue(db: Session, date: str | None = None) -> dict[str, Any]:
 
 
 def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30) -> list[dict[str, Any]]:
-    """模块6: 今日人均效率表 (按operator聚合, 关联Person拿display_name/group_name).
-    列: name, group, reception_count, refund_op_count, refund_op_amount, ticket_done_count, work_score.
-    按 work_score(接待量+退款笔数*2+完工单*3) 倒序, 取TopN.
+    """模块7: 今日人均效率表 (按operator聚合, 关联Person拿display_name/group_name).
+
+    专项任务4分类 (按业务难度从低到高):
+      咨询接待  = 普通咨询 + 其他问题 + 综合问题  (难度1.0)
+      套餐专项  = 套餐相关接待 (套餐疑问/套餐升级等)  (难度1.8)
+      退款挽回  = cs_record 退款类接待 + Refund 线上退款实际操作  (难度2.2)
+      投诉专员  = cs_record 投诉类接待 + 投诉类(service_category空)工单 处理人完工  (难度3.0)
+
+    合成work_score = Σ 每专项计数 × 专项难度系数
+    退款金额(refund_op_amount)不再关注: 退款挽回只算执行笔数,不看金额高低.
+    按 work_score 倒序, 取TopN.
     """
     d = _parse_date(date)
     ts, te, _, _ = _today_windows(d)
     op_person = _operator_to_person_cte()
 
-    # 1. 接待量 per operator
-    cs_q = (select(CsRecord.operator.label("op"), func.count().label("c"))
+    # 1. 会话接待量 + 接待人数(去重SN) 总量 per operator
+    cs_q = (select(CsRecord.operator.label("op"),
+                   func.count().label("c"),
+                   func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("dc"))
             .where(CsRecord.operation_time.isnot(None),
                    CsRecord.operation_time >= ts, CsRecord.operation_time <= te,
                    CsRecord.operator.isnot(None))
             .group_by(CsRecord.operator)).cte("cs_q")
-    # 2. 退款操作 per operator (排除 sys/system) 【统一口径: 路线A refund_method='线上'】
+    # 2. 会话接待 按 6 个 category_bucket 分桶 per operator (用于 4 专项拆分)
+    cs_cat_q = (select(
+        CsRecord.operator.label("op"),
+        _category_case().label("bucket"),
+        func.count().label("cnt"),
+    ).where(
+        CsRecord.operation_time.isnot(None),
+        CsRecord.operation_time >= ts, CsRecord.operation_time <= te,
+        CsRecord.operator.isnot(None),
+    ).group_by(CsRecord.operator, "bucket")).cte("cs_cat_q")
+    # 3. 退款挽回实际执行笔数 per operator (路线A: refund_method='线上', 不看金额)
     rf_q = (select(Refund.operator.label("op"),
-                   func.count().label("c"),
-                   func.coalesce(func.sum(Refund.refund_amount), 0).label("a"))
+                   func.count().label("c"))
             .where(Refund.created_at_raw.isnot(None),
                    Refund.created_at_raw >= ts, Refund.created_at_raw <= te,
                    Refund.operator.isnot(None),
                    Refund.operator.notin_(["sys", "system", "SYS", "System"]),
                    *_route_a_online_refund_filter())
             .group_by(Refund.operator)).cte("rf_q")
-    # 3. 已完工单 per handler
-    tk_q = (select(ServiceTicket.handler.label("op"), func.count().label("c"))
+    # 4. 投诉类工单 处理人完工笔数 per operator (service_category IS NULL 兜底=投诉)
+    cm_q = (select(ServiceTicket.handler.label("op"),
+                   func.count().label("c"))
             .where(ServiceTicket.finish_time.isnot(None),
                    ServiceTicket.finish_time >= ts, ServiceTicket.finish_time <= te,
                    ServiceTicket.handler.isnot(None),
-                   ServiceTicket.status == "已完成")
-            .group_by(ServiceTicket.handler)).cte("tk_q")
-    # 合并三个cte的op并集, 左关联各自的统计值和人员信息
-    # union(UNION DISTINCT) 自动去重, 无需 .distinct()
+                   _ticket_category_case() == "投诉")
+            .group_by(ServiceTicket.handler)).cte("cm_q")
+
+    # 并集: 做过接待 或 退款 或 投诉处理 的人员 (工单完成已移除 不纳入)
     ops_union = union(
-        select(cs_q.c.op), select(rf_q.c.op), select(tk_q.c.op)
+        select(cs_q.c.op), select(rf_q.c.op), select(cm_q.c.op)
     ).cte("ops_u")
+
     rows = db.execute(
         select(
             ops_union.c.op,
             func.coalesce(op_person.c.display_name, ops_union.c.op).label("name"),
             op_person.c.department.label("dept"),
             op_person.c.group_name.label("grp"),
+            op_person.c.position.label("pos"),
+            op_person.c.specialty.label("sp"),
             func.coalesce(cs_q.c.c, 0).label("rc"),
+            func.coalesce(cs_q.c.dc, 0).label("rdc"),
             func.coalesce(rf_q.c.c, 0).label("fc"),
-            func.coalesce(rf_q.c.a, 0).label("fa"),
-            func.coalesce(tk_q.c.c, 0).label("dc"),
         )
         .select_from(ops_union)
         .outerjoin(cs_q, ops_union.c.op == cs_q.c.op)
         .outerjoin(rf_q, ops_union.c.op == rf_q.c.op)
-        .outerjoin(tk_q, ops_union.c.op == tk_q.c.op)
         .outerjoin(op_person, ops_union.c.op == op_person.c.operator)
     ).all()
+
+    # 把 cs_cat_q 的 6 桶 转成 dict 按 op 聚合
+    cs_cat_by_op: dict[str, dict[str, int]] = {}
+    for r in db.execute(select(cs_cat_q)).all():
+        cs_cat_by_op.setdefault(r.op, {})[r.bucket] = int(r.cnt or 0)
+    cm_by_op: dict[str, int] = {r.op: int(r.c or 0) for r in db.execute(select(cm_q)).all()}
+
+    # 4 专项的难度系数 (可后续迁移到独立字典配置表: StaffSpecialtyWeight / specialty_difficulty)
+    WEIGHT = {"咨询接待": 1.0, "套餐专项": 1.8, "退款挽回": 2.2, "投诉专员": 3.0}
+
     out = []
     for r in rows:
+        op = r.op
         rc = int(r.rc or 0)
+        rdc = int(getattr(r, "rdc", 0) or 0)
         fc = int(r.fc or 0)
-        dc = int(r.dc or 0)
-        score = rc + fc * 2 + dc * 3  # 工作量合成分 (可后续调整权重)
+        buckets = cs_cat_by_op.get(op, {})
+        # 专项拆分 (严格遵循 analytics.py 的 6 桶 归并 逻辑 与 接待分项周报一致)
+        c_zixun = buckets.get("咨询", 0) + buckets.get("其他问题", 0) + buckets.get("综合问题", 0)
+        c_taocan = buckets.get("套餐问题", 0)
+        c_tousu_cs = buckets.get("投诉", 0)
+        c_tuikuan_cs = buckets.get("退款", 0)
+        # 退款挽回 = 会话接待中退款类沟通 + 实际退款操作执行
+        c_tuikuan = c_tuikuan_cs + fc
+        # 投诉专员 = 会话接待中投诉类沟通 + 投诉工单处理人完工
+        c_tousu = c_tousu_cs + cm_by_op.get(op, 0)
+
+        # 工作量合成: 4专项 × 各自难度系数
+        score = (c_zixun * WEIGHT["咨询接待"]
+                 + c_taocan * WEIGHT["套餐专项"]
+                 + c_tuikuan * WEIGHT["退款挽回"]
+                 + c_tousu * WEIGHT["投诉专员"])
+
+        raw_name = r.name or op or "未知"
+        norm_name = _strip_qw_prefix(raw_name) or raw_name
         out.append({
-            "operator": r.op,
-            "name": r.name or r.op or "未知",
+            "operator": op,
+            "name": norm_name,
             "department": r.dept or "未设置",
             "group": r.grp or "未分组",
+            "position": r.pos,
+            "current_specialty": r.sp,
             "reception_count": rc,
+            "reception_device_count": rdc,
             "refund_op_count": fc,
-            "refund_op_amount": round(float(r.fa or 0), 2),
-            "ticket_done_count": dc,
-            "work_score": score,
+            # 4 专项明细计数 (便于前端 tooltip 展示 & 后续按专项排名)
+            "sp_zixun": c_zixun,      # 咨询接待
+            "sp_taocan": c_taocan,    # 套餐专项
+            "sp_tuikuan": c_tuikuan,  # 退款挽回
+            "sp_tousu": c_tousu,      # 投诉专员
+            # 难度系数字典 (随每条响应返回, 前端可展示 公式 = Σ 各专项×系数)
+            "weights": dict(WEIGHT),
+            # 合成结果
+            "work_score": round(score, 2),
         })
     out.sort(key=lambda x: -x["work_score"])
     return out[: max(1, min(200, topn or 30))]

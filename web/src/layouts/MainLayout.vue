@@ -34,10 +34,10 @@
           <el-menu-item v-if="authStore.isManager" index="/dashboards/designer">看板配置</el-menu-item>
         </el-sub-menu>
 
-        <!-- 今日看板:全员可见(运营),放决策看板子菜单上方作为独立入口 -->
+        <!-- 客服日度运营看板(原今日看板): 选任意单日切面, 全员可见 -->
         <el-menu-item index="/dashboards/today">
           <el-icon><Clock /></el-icon>
-          <span>今日看板</span>
+          <span>日度运营看板</span>
         </el-menu-item>
 
         <!-- 决策看板:管理层可见,4 常规看板 + 专项跟进 -->

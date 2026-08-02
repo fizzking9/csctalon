@@ -1,9 +1,13 @@
 <template>
   <div class="page-container today-dashboard">
+    <!-- 日期+看板名水印：绝对定位铺满 指针事件穿透不阻塞tooltip；局部截图任何区域都能看到日期 -->
+    <div class="today-watermark" :style="watermarkBg" aria-hidden="true"></div>
     <!-- 顶部标题 + 时间筛选 -->
-    <div class="flex-between mb-16">
-      <div class="page-title" style="margin: 0">
-        今日看板
+    <div class="flex-between mb-16 td-header" style="position: relative; z-index: 2">
+      <div class="page-title" style="margin: 0; white-space: nowrap">
+        客服日度运营看板
+        <span class="title-date-sep">·</span>
+        <span class="title-date">{{ displayDate }}</span>
         <el-tag size="small" type="success" effect="plain" style="margin-left: 8px">单日切面</el-tag>
         <el-tag v-if="kpiData.merchant_tip" size="small" type="warning" effect="plain" style="margin-left: 6px">
           {{ kpiData.merchant_tip }}
@@ -11,8 +15,8 @@
       </div>
       <div class="filter-bar">
         <el-radio-group v-model="quickDate" size="small" @change="onQuickDate">
-          <el-radio-button label="today">今日</el-radio-button>
-          <el-radio-button label="yesterday">昨日</el-radio-button>
+          <el-radio-button label="today">{{ dayjs().format('MM-DD') }} 今日</el-radio-button>
+          <el-radio-button label="yesterday">{{ dayjs().subtract(1, 'day').format('MM-DD') }} 昨日</el-radio-button>
         </el-radio-group>
         <el-date-picker
           v-model="customDate"
@@ -46,6 +50,11 @@
               <template v-if="c.money">{{ formatMoney(c.value) }}</template>
               <template v-else>{{ formatNum(c.value) }}<span class="kpi-unit">{{ c.unit || '' }}</span></template>
             </div>
+            <!-- 接待量卡追加一行: 今日接待人数 (distinct device_sn ≈ 独立客户人数, 一人多设备近似当人数无影响) -->
+            <div v-if="c.key === 'reception' && c.device_count != null" class="kpi-device-sub">
+              <span class="kpi-device-sub-label">接待人数</span>
+              <span class="kpi-device-sub-val">{{ formatNum(c.device_count) }}<span class="kpi-device-sub-unit"> 人</span></span>
+            </div>
             <div class="kpi-yoy">
               <el-tag v-if="c.yoy_pct != null" size="small" effect="plain" :type="yoyTagType(c.key, c.yoy_pct)">
                 {{ c.yoy_pct > 0 ? '↑' : '↓' }} {{ Math.abs(c.yoy_pct) }}%
@@ -61,56 +70,73 @@
         </el-col>
       </el-row>
 
-      <!-- 今日四路线拆分(紧凑版) -->
-      <div class="today-routes" v-if="kpiData.cash_routes_today">
+      <!-- 今日现金流出拆分（紧凑版：3列合计卡 + 横向堆叠比例条，一目了然 经营/实际/偏差 + A/B/C/D占比） -->
+      <div class="today-routes today-routes-v2" v-if="kpiData.cash_routes_today">
         <div class="today-routes-title">
-          今日现金流出拆分 <el-tag size="small" type="info" effect="plain">全域统一核算 A/B/C/D 四路线</el-tag>
+          今日现金流出拆分
+          <el-tag size="small" type="info" effect="plain" style="margin-left:8px">A/B/C/D 四路 → 经营估算 vs 商户号实际现金流</el-tag>
         </div>
-        <el-row :gutter="8">
-          <el-col :span="6"><div class="tr-item tr-a">
-            <div class="tr-name">A.线上直退</div>
-            <div class="tr-val">{{ formatMoney(kpiData.cash_routes_today.route_a.amount) }}</div>
-            <div class="tr-sub">{{ formatNum(kpiData.cash_routes_today.route_a.count) }}笔</div>
+        <!-- 一行 3 个核心合计（经营 / 实际 / 偏差）-->
+        <el-row :gutter="10" class="mt-6">
+          <el-col :span="8"><div class="trv2-sum trv2-sum-op">
+            <div class="trv2-sum-head">经营估算</div>
+            <div class="trv2-sum-body">
+              <span class="trv2-sum-val">{{ formatMoney(kpiData.cash_routes_today.operational.amount) }}</span>
+              <span class="trv2-sum-sub">{{ formatNum(kpiData.cash_routes_today.operational.count) }}笔 · A+B+C+D</span>
+            </div>
           </div></el-col>
-          <el-col :span="6"><div class="tr-item tr-b">
-            <div class="tr-name">B.用户取现</div>
-            <div class="tr-val">{{ formatMoney(kpiData.cash_routes_today.route_b.amount) }}</div>
-            <div class="tr-sub">{{ formatNum(kpiData.cash_routes_today.route_b.count) }}笔</div>
+          <el-col :span="8"><div class="trv2-sum trv2-sum-fc">
+            <div class="trv2-sum-head">实际现金流 <span class="trv2-sum-tip">（对账基准）</span></div>
+            <div class="trv2-sum-body">
+              <span class="trv2-sum-val">{{ formatMoney(kpiData.cash_routes_today.actual_cashflow.amount ?? kpiData.cash_routes_today.financial.amount) }}</span>
+              <span class="trv2-sum-sub">{{ formatNum(kpiData.cash_routes_today.actual_cashflow.count ?? kpiData.cash_routes_today.financial.count) }}笔 · 商户号 SUCCESS</span>
+            </div>
           </div></el-col>
-          <el-col :span="6"><div class="tr-item tr-c">
-            <div class="tr-name">C.闪猫退款</div>
-            <div class="tr-val">{{ formatMoney(kpiData.cash_routes_today.route_c.amount) }}</div>
-            <div class="tr-sub">{{ formatNum(kpiData.cash_routes_today.route_c.count) }}笔</div>
-          </div></el-col>
-          <el-col :span="6"><div class="tr-item tr-d">
-            <div class="tr-name">D.其他退款</div>
-            <div class="tr-val">{{ formatMoney(kpiData.cash_routes_today.route_d.amount) }}</div>
-            <div class="tr-sub">{{ formatNum(kpiData.cash_routes_today.route_d.count) }}笔</div>
-          </div></el-col>
-        </el-row>
-        <el-row :gutter="8" style="margin-top:6px">
-          <el-col :span="8"><div class="tr-item tr-sum-op">
-            <div class="tr-name">经营估算 A+B+C+D</div>
-            <div class="tr-val">{{ formatMoney(kpiData.cash_routes_today.operational.amount) }}</div>
-            <div class="tr-sub">{{ formatNum(kpiData.cash_routes_today.operational.count) }}笔</div>
-          </div></el-col>
-          <el-col :span="8"><div class="tr-item tr-sum-fc">
-            <div class="tr-name">实际现金流 (商户号SUCCESS)</div>
-            <div class="tr-val">{{ formatMoney(kpiData.cash_routes_today.actual_cashflow.amount ?? kpiData.cash_routes_today.financial.amount) }}</div>
-            <div class="tr-sub">{{ formatNum(kpiData.cash_routes_today.actual_cashflow.count ?? kpiData.cash_routes_today.financial.count) }}笔</div>
-          </div></el-col>
-          <el-col :span="8"><div class="tr-item" :class="(kpiData.cash_routes_today.diff.amount ?? 0) >= 0 ? 'tr-diff-pos' : 'tr-diff-neg'">
-            <div class="tr-name">对账偏差 (经营 − 实际)</div>
-            <div class="tr-val">{{ (kpiData.cash_routes_today.diff.amount ?? 0) >= 0 ? '+' : '' }}{{ formatMoney(kpiData.cash_routes_today.diff.amount) }}</div>
-            <div class="tr-sub">{{ (kpiData.cash_routes_today.diff.count ?? 0) >= 0 ? '+' : '' }}{{ formatNum(kpiData.cash_routes_today.diff.count) }}笔</div>
+          <el-col :span="8"><div class="trv2-sum" :class="(kpiData.cash_routes_today.diff.amount ?? 0) >= 0 ? 'trv2-sum-diff-pos' : 'trv2-sum-diff-neg'">
+            <div class="trv2-sum-head">对账偏差 <span class="trv2-sum-tip">（经营 − 实际）</span></div>
+            <div class="trv2-sum-body">
+              <span class="trv2-sum-val">{{ (kpiData.cash_routes_today.diff.amount ?? 0) >= 0 ? '+' : '' }}{{ formatMoney(kpiData.cash_routes_today.diff.amount) }}</span>
+              <span class="trv2-sum-sub">{{ (kpiData.cash_routes_today.diff.count ?? 0) >= 0 ? '+' : '' }}{{ formatNum(kpiData.cash_routes_today.diff.count) }}笔 · 差值</span>
+            </div>
           </div></el-col>
         </el-row>
+        <!-- A/B/C/D 四路横向堆叠条：长度 = 占经营估算的比例，一眼看出每一路贡献 -->
+        <div class="trv2-stack mt-10">
+          <div class="trv2-stack-bar">
+            <template v-for="(seg, k) in stackSegs" :key="k">
+              <div class="trv2-seg"
+                   :class="seg.cls"
+                   :style="{ width: seg.pct + '%', minWidth: seg.amount > 0 ? (seg.pct < 1.2 ? '48px' : 'auto') : '0' }"
+                   :title="seg.title">
+                <span v-if="seg.pct >= 8 || seg.amount > 0 && seg.pct >= 3" class="trv2-seg-in">
+                  <b>{{ seg.label }}</b> {{ formatMoney(seg.amount) }}
+                </span>
+                <span v-else-if="seg.amount > 0" class="trv2-seg-in trv2-seg-mini">
+                  {{ seg.label }}
+                </span>
+              </div>
+            </template>
+            <div v-if="stackSegs.every(s => s.amount === 0 || s.amount == null)"
+                 class="trv2-seg trv2-seg-empty" style="width:100%">
+              <span class="trv2-seg-in">今日暂无数据</span>
+            </div>
+          </div>
+          <!-- 四路图例 & 笔数 -->
+          <div class="trv2-stack-legend mt-8">
+            <div v-for="(seg, k) in stackSegs" :key="'lg-'+k" class="trv2-lg">
+              <i class="trv2-lg-dot" :class="seg.dotCls"></i>
+              <span class="trv2-lg-name">{{ seg.name }}</span>
+              <span class="trv2-lg-val">{{ formatMoney(seg.amount) }}</span>
+              <span class="trv2-lg-sub">{{ formatNum(seg.count) }}笔</span>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
     <!-- 模块2: 小时节奏 -->
     <section class="section-card mb-24">
-      <h2 class="section-title">2. 今日实时节奏 <span class="section-sub">（小时级接待/退款/投诉三柱 + 退款金额线）</span></h2>
+      <h2 class="section-title">2. 今日实时节奏 <span class="section-sub">（小时级双柱：会话接待人次 + 接待人数 + 退款笔数 + 投诉量 + 退款金额线）</span></h2>
       <el-card shadow="never" body-style="padding: 8px 10px">
         <BaseChart :option="hourlyOption" height="320px" />
       </el-card>
@@ -130,7 +156,7 @@
             </el-col>
             <el-col :xs="24" :md="12">
               <el-card shadow="never" body-style="padding: 4px 6px">
-                <div class="chart-title">接待量 Top 10 客服</div>
+                <div class="chart-title">接待量 Top 10 客服 <span style="color:#909399; font-size: 11px; font-weight: 400">（会话人次 + 接待人数）</span></div>
                 <BaseChart :option="receptionStaffOption" height="280px" />
               </el-card>
             </el-col>
@@ -149,8 +175,8 @@
             </el-col>
             <el-col :xs="24" :md="12">
               <el-card shadow="never" body-style="padding: 4px 6px">
-                <div class="chart-title">退款方式分布</div>
-                <BaseChart :option="refundMethodOption" height="280px" />
+                <div class="chart-title">退款接待人 Top 10（退款笔数 + 金额 双柱）<span style="font-weight:400;color:#909399;font-size:11px;margin-left:8px">按 PersonAlias → Person.display_name 姓名归一；来源: 工单handler(关联工单45天) → auditor/operator(自动补建兜底)；[未分配]=未匹配&无人名信息；用户自助=wechat/客户非客服操作；系统自动=sys/system类自动操作</span></div>
+                <BaseChart :option="refundStaffOption" height="280px" />
               </el-card>
             </el-col>
           </el-row>
@@ -288,23 +314,46 @@
               <el-tag size="small" effect="plain" :type="row.group === '未分组' ? 'info' : 'primary'">{{ row.group }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="reception_count" label="接待量" width="100" align="right" sortable>
+          <el-table-column label="岗位" width="92">
+            <template #default="{ row }">
+              <el-tag size="small" effect="plain" :type="posTagType(row.position)">{{ row.position || '—' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="reception_count" label="会话接待人次" width="116" align="right" sortable>
             <template #default="{ row }">{{ formatNum(row.reception_count) }}</template>
           </el-table-column>
-          <el-table-column prop="refund_op_count" label="退款操作笔数" width="120" align="right" sortable>
-            <template #default="{ row }">{{ formatNum(row.refund_op_count) }}</template>
-          </el-table-column>
-          <el-table-column prop="refund_op_amount" label="退款操作金额" width="140" align="right" sortable>
-            <template #default="{ row }">{{ formatMoney(row.refund_op_amount) }}</template>
-          </el-table-column>
-          <el-table-column prop="ticket_done_count" label="已完工单" width="110" align="right" sortable>
-            <template #default="{ row }">{{ formatNum(row.ticket_done_count) }}</template>
-          </el-table-column>
-          <el-table-column prop="work_score" label="工作量合成" width="120" align="right" sortable>
+          <el-table-column prop="reception_device_count" label="接待人数" width="108" align="right" sortable>
             <template #default="{ row }">
-              <el-tag size="small" effect="plain" :type="workScoreTagType(row.work_score)">
-                {{ formatNum(row.work_score) }} 分
-              </el-tag>
+              <span style="color:#409eff">
+                {{ formatNum(row.reception_device_count ?? 0) }}
+                <span style="color:#909399; font-size: 11px">人</span>
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="refund_op_count" label="退款挽回" width="110" align="right" sortable>
+            <template #default="{ row }">
+              <span style="color:#909399;font-size:10px">挽回</span>
+              {{ formatNum(row.sp_tuikuan ?? row.refund_op_count) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="四专项明细" width="298" align="left">
+            <template #default="{ row }">
+              <div class="sp-legend">
+                <span class="sp-chip zx" v-if="row.sp_zixun" title="咨询接待 ×难度1.0">咨询{{ row.sp_zixun }}×1.0</span>
+                <span class="sp-chip tc" v-if="row.sp_taocan" title="套餐专项 ×难度1.8">套餐{{ row.sp_taocan }}×1.8</span>
+                <span class="sp-chip tk" v-if="row.sp_tuikuan" title="退款挽回 ×难度2.2">退款{{ row.sp_tuikuan }}×2.2</span>
+                <span class="sp-chip ts" v-if="row.sp_tousu" title="投诉专员 ×难度3.0">投诉{{ row.sp_tousu }}×3.0</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="work_score" label="工作量合成分" width="140" align="right" sortable>
+            <template #default="{ row }">
+              <el-tooltip effect="dark" placement="top" :width="420" :content="specialtyScoreTooltip(row)">
+                <el-tag size="small" effect="plain" :type="workScoreTagType(row.work_score)">
+                  <span style="font-weight:600">{{ formatNum(row.work_score) }}</span>
+                  <span style="color:#909399;font-size:10px;margin-left:4px">分</span>
+                </el-tag>
+              </el-tooltip>
             </template>
           </el-table-column>
         </el-table>
@@ -335,6 +384,35 @@ const currentDate = computed(() => {
   if (quickDate.value === 'yesterday') return dayjs().subtract(1, 'day').format('YYYY-MM-DD')
   return ''  // 今天不传参数(实时窗口)
 })
+// 大标题显示用日期 (YYYY-MM-DD): 今天不传参数也显示今天的日期, 避免截图时不知道是哪天
+const displayDate = computed(() => {
+  if (customDate.value) return customDate.value
+  if (quickDate.value === 'yesterday') return dayjs().subtract(1, 'day').format('YYYY-MM-DD')
+  return dayjs().format('YYYY-MM-DD')
+})
+
+// ---------- 日期水印 (SVG旋转平铺, 绝对定位穿透 pointer-events, 卡片内容区/卡片间都能看到; 局部截图也清晰) ----------
+const WATERMARK_BOARD_NAME = '客服日度运营看板'
+const WATERMARK_PRIVACY = '内部数据 请勿外传'
+function buildWatermark(dateStr) {
+  const line1 = dateStr
+  const line2 = WATERMARK_BOARD_NAME
+  const line3 = WATERMARK_PRIVACY
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="360" viewBox="0 0 560 360">
+  <g transform="rotate(-17 280 180)">
+    <text x="30" y="140" fill="#1f2937" font-family="PingFang SC,Microsoft YaHei,sans-serif" font-size="30" font-weight="600" opacity="0.062">${line1}</text>
+    <text x="30" y="185" fill="#1f2937" font-family="PingFang SC,Microsoft YaHei,sans-serif" font-size="26" font-weight="500" opacity="0.052">${line2}</text>
+    <text x="30" y="222" fill="#6b7280" font-family="PingFang SC,Microsoft YaHei,sans-serif" font-size="18" font-weight="400" opacity="0.050">${line3}</text>
+  </g>
+</svg>`
+  const encoded = encodeURIComponent(svg)
+    .replace(/'/g, '%27').replace(/"/g, '%22')
+  return `url("data:image/svg+xml;charset=utf-8,${encoded}") 0 0 / 560px 360px repeat`
+}
+const watermarkBg = computed(() => ({
+  background: buildWatermark(displayDate.value),
+}))
 
 // ---------- 模块1 KPI ----------
 const kpiData = ref({})
@@ -342,7 +420,11 @@ const kpiCards = computed(() => {
   const k = kpiData.value || {}
   const def = [
     { key: 'reception',      label: '今日接待量',   icon: 'ChatDotRound', bg: '#ecf5ff', color: '#409eff', unit: '次',
-      money: false, tip: null, ...(k.reception || { value: 0, yoy_value: 0, yoy_pct: null }) },
+      money: false,
+      tip: `会话接待量 = 客服助手 沟通事项次数 (1条接待记录=1次会话, 只记当日已发生)
+今日接待人数 = 去重 device_sn (按活跃设备近似为独立客户人数)
+—— 会话量 > 接待人数 说明老客户多次进线沟通; 会话量 ≈ 接待人数 说明当日服务的基本都是新客户`,
+      ...(k.reception || { value: 0, yoy_value: 0, yoy_pct: null, device_count: 0, device_count_yoy: 0 }) },
     { key: 'refund_count',   label: '今日退款笔数', icon: 'Document',    bg: '#fdf6ec', color: '#e6a23c', unit: '笔',
       money: false,
       tip: '路线A: 退费单管理中 refund_method=\'线上\' 的记录 (统一全域口径: 只退款方式为线上才算一条退款路线)',
@@ -357,15 +439,14 @@ const kpiCards = computed(() => {
       ...(k.cash_out || { value: 0, yoy_value: 0, yoy_pct: null }) },
     { key: 'complaint',      label: '今日投诉量',   icon: 'WarningFilled', bg: '#fef0f0', color: '#f56c6c', unit: '单',
       money: false, tip: null, ...(k.complaint || { value: 0, yoy_value: 0, yoy_pct: null }) },
-    { key: 'ticket_done',    label: '今日已完工单', icon: 'Checked',     bg: '#f0f9eb', color: '#67c23a', unit: '单',
-      money: false, tip: null, ...(k.ticket_done || { value: 0, yoy_value: 0, yoy_pct: null }) },
+    /* ticket_done (今日已完工单): 暂时不关注, 从KPI/排行榜/工作量分中全部移除; 后端接口仍保留字段但不计入权重 */
     { key: 'staff_on_duty',  label: '今日在岗人数', icon: 'UserFilled',  bg: '#f4f4f5', color: '#909399', unit: '人',
       money: false, tip: null, ...(k.staff_on_duty || { value: 0, yoy_value: 0, yoy_pct: null }) },
   ]
   return def
 })
 
-// KPI 环比 tag 颜色: 接待量/完工单/在岗/退款笔数(这些越大越好↑绿↓红); 退款金额/现金流出/投诉量(越小越好↑红↓绿)
+// KPI 环比 tag 颜色: 接待量/在岗/退款笔数(越大越好↑绿↓红); 退款金额/现金流出/投诉量(越小越好↑红↓绿)
 const BAD_UP_KEYS = new Set(['refund_amount', 'cash_out', 'complaint'])
 function yoyTagType(key, pct) {
   if (pct == null) return 'info'
@@ -374,32 +455,77 @@ function yoyTagType(key, pct) {
   return good ? 'success' : 'danger'
 }
 
+// ---------- 模块1 现金流出拆分 堆叠条数据 ----------
+const stackSegs = computed(() => {
+  const r = kpiData.value?.cash_routes_today || {}
+  const defs = [
+    { key: 'route_a', label: 'A', name: 'A. 线上直退',    cls: 'trv2-seg-a', dotCls: 'd-a' },
+    { key: 'route_b', label: 'B', name: 'B. 用户取现',    cls: 'trv2-seg-b', dotCls: 'd-b' },
+    { key: 'route_c', label: 'C', name: 'C. 闪猫退款',    cls: 'trv2-seg-c', dotCls: 'd-c' },
+    { key: 'route_d', label: 'D', name: 'D. 其他退款',    cls: 'trv2-seg-d', dotCls: 'd-d' },
+  ]
+  const totalAmt = Math.max(0, Number(r.operational?.amount ?? 0))
+  return defs.map(d => {
+    const row = r[d.key] || { amount: 0, count: 0 }
+    const amt = Math.max(0, Number(row.amount ?? 0))
+    const cnt = Math.max(0, Number(row.count ?? 0))
+    const pct = totalAmt > 0 ? Math.min(100, amt / totalAmt * 100) : 0
+    return {
+      ...d,
+      amount: amt,
+      count: cnt,
+      pct,
+      title: `${d.name}\n退款金额: ¥${amt.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n退款笔数: ${cnt}笔\n占经营估算: ${pct.toFixed(1)}%`,
+    }
+  })
+})
+
 // ---------- 模块2 小时节奏 ----------
-const hourlyData = ref({ hour_labels: [], reception: [], refund_count: [], refund_amount: [], complaint: [] })
+const hourlyData = ref({ hour_labels: [], reception: [], reception_devices: [], refund_count: [], refund_amount: [], complaint: [] })
 const hourlyOption = computed(() => ({
-  tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-  legend: { data: ['接待量', '退款笔数', '投诉量', '退款金额'], top: 0 },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
+    formatter: (params) => {
+      if (!params || !params.length) return ''
+      const p0 = params[0]
+      const h = hourlyData.value.hour_labels?.[p0.dataIndex] ?? ''
+      const val = (name) => {
+        const m = params.find(x => x.seriesName === name)
+        return m == null ? '-' : m.value == null ? '-' : (name === '退款金额' ? '¥'+Number(m.value).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : Number(m.value).toLocaleString('zh-CN'))
+      }
+      return `<b>${h}</b><br/>` +
+        `会话接待人次: ${val('会话接待人次')}<br/>` +
+        `接待人数: ${val('接待人数')} 人<br/>` +
+        `退款笔数: ${val('退款笔数')}<br/>` +
+        `投诉量: ${val('投诉量')}<br/>` +
+        `退款金额: ${val('退款金额')}`
+    } },
+  legend: { data: ['会话接待人次', '接待人数', '退款笔数', '投诉量', '退款金额'], top: 0 },
   grid: { left: 56, right: 72, bottom: 36, top: 40 },
   xAxis: { type: 'category', data: hourlyData.value.hour_labels || [], axisLabel: { fontSize: 10, interval: 1 } },
   yAxis: [
-    { type: 'value', name: '数量(次/笔/单)', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed' } } },
+    { type: 'value', name: '数量(次/人/笔/单)', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed' } } },
     { type: 'value', name: '退款金额(元)', axisLabel: { formatter: (v) => (v >= 10000 ? (v/10000).toFixed(0)+'万' : v), fontSize: 10 } },
   ],
   series: [
     {
-      name: '接待量', type: 'bar', stack: null, data: hourlyData.value.reception || [],
+      name: '会话接待人次', type: 'bar', stack: null, data: hourlyData.value.reception || [],
       itemStyle: { color: '#409eff', borderRadius: [3, 3, 0, 0] },
-      barMaxWidth: 18,
+      barMaxWidth: 14,
+    },
+    {
+      name: '接待人数', type: 'bar', data: hourlyData.value.reception_devices || [],
+      itemStyle: { color: '#91cc75', borderRadius: [3, 3, 0, 0] },
+      barMaxWidth: 14,
     },
     {
       name: '退款笔数', type: 'bar', data: hourlyData.value.refund_count || [],
       itemStyle: { color: '#e6a23c', borderRadius: [3, 3, 0, 0] },
-      barMaxWidth: 18,
+      barMaxWidth: 14,
     },
     {
       name: '投诉量', type: 'bar', data: hourlyData.value.complaint || [],
       itemStyle: { color: '#f56c6c', borderRadius: [3, 3, 0, 0] },
-      barMaxWidth: 18,
+      barMaxWidth: 14,
     },
     {
       name: '退款金额', type: 'line', yAxisIndex: 1, smooth: true,
@@ -437,24 +563,36 @@ const receptionStaffOption = computed(() => {
       formatter: (p) => {
         const i = list.length - 1 - p[0].dataIndex
         const d = list[i]
+        if (!d) return ''
         const grp = d.group && d.group !== '未分组' ? `组别: ${d.group}` : ''
-        return `${d.name}<br/>部门: ${d.department || '未设置'}${grp ? '<br/>' + grp : ''}<br/>接待量: ${formatNum(d.count)}`
+        const dev = d.device_count != null ? `<br/>接待人数: ${formatNum(d.device_count)} 人 (独立客户≈)` : ''
+        return `<b>${d.name}</b><br/>部门: ${d.department || '未设置'}${grp ? '<br/>' + grp : ''}<br/>会话接待人次: ${formatNum(d.count)}${dev}`
       },
     },
-    grid: { left: 150, right: 60, bottom: 20, top: 10 },
+    grid: { left: 150, right: 140, bottom: 20, top: 10 },
     xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
     yAxis: {
       type: 'category',
       data: list.map(d => `${d.name}${dept(d)}`).reverse(),
       axisLabel: { fontSize: 10, width: 140, overflow: 'truncate' },
     },
-    series: [{
-      type: 'bar',
-      data: list.map(d => d.count).reverse(),
-      itemStyle: { color: '#67c23a', borderRadius: [0, 3, 3, 0] },
-      barMaxWidth: 14,
-      label: { show: true, position: 'right', fontSize: 10, formatter: (p) => formatNum(p.value) },
-    }],
+    legend: { show: false, data: ['会话接待人次', '接待人数'] },
+    series: [
+      {
+        name: '会话接待人次', type: 'bar',
+        data: list.map(d => d.count).reverse(),
+        itemStyle: { color: '#67c23a', borderRadius: [0, 3, 3, 0] },
+        barMaxWidth: 12,
+        label: { show: true, position: 'right', fontSize: 10, formatter: (p) => `${formatNum(p.value)} 次` },
+      },
+      {
+        name: '接待人数', type: 'bar',
+        data: list.map(d => (d.device_count ?? 0)).reverse(),
+        itemStyle: { color: '#409eff', borderRadius: [0, 3, 3, 0] },
+        barMaxWidth: 12,
+        label: { show: true, position: 'right', fontSize: 10, formatter: (p) => `${formatNum(p.value)} 人` },
+      },
+    ],
   }
 })
 
@@ -561,17 +699,37 @@ const refundReasonOption = computed(() => {
     ],
   }
 })
-const refundMethodOption = computed(() => {
-  const data = (refundData.value.methods || []).filter(d => d.value > 0)
+const refundStaffOption = computed(() => {
+  const list = (refundData.value.by_staff || []).slice(0, 10).reverse()
   return {
-    tooltip: { trigger: 'item', formatter: '{b}: {c} 笔 ({d}%)' },
-    legend: { bottom: 0, type: 'scroll' },
-    color: ['#409eff', '#67c23a', '#e6a23c', '#909399', '#f56c6c'],
-    series: [{
-      name: '退款方式', type: 'pie', radius: ['42%', '68%'], center: ['50%', '45%'],
-      label: { show: true, formatter: '{b}\n{c}笔', fontSize: 10 },
-      data: data.length ? data : [{ name: '暂无数据', value: 1, itemStyle: { color: '#f0f0f0' }, label: { formatter: '暂无数据' } }],
-    }],
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      formatter: (params) => {
+        if (!params || !params.length) return ''
+        const idx = params[0].dataIndex
+        if (idx == null || idx < 0 || idx >= list.length) return ''
+        const d = list[idx]
+        if (!d) return ''
+        return `${d.name}<br/>退款笔数: ${formatNum(d.count)} 笔<br/>退款金额: ${formatMoney(d.amount)}`
+      },
+    },
+    legend: { top: 0, right: 10, data: ['退款笔数', '退款金额'], textStyle: { fontSize: 11 } },
+    grid: { left: 140, right: 88, bottom: 20, top: 36 },
+    xAxis: { type: 'value' },
+    yAxis: {
+      type: 'category',
+      data: list.map(d => d.name.length > 16 ? d.name.slice(0,16)+'…' : d.name),
+      axisLabel: { fontSize: 11, color: '#606266' },
+    },
+    series: [
+      { name: '退款笔数', type: 'bar', data: list.map(d => d.count),
+        itemStyle: { color: '#e6a23c' }, barMaxWidth: 14, label: { show: true, position: 'right', fontSize: 10, formatter: '{c}' } },
+      { name: '退款金额', type: 'bar', data: list.map(d => d.amount),
+        itemStyle: { color: '#f56c6c' }, barMaxWidth: 14,
+        label: { show: true, position: 'right', fontSize: 10,
+          formatter: (p) => '¥' + (Number(p.value) || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 }) } },
+    ],
   }
 })
 
@@ -607,11 +765,40 @@ function formatDeadline(d, type='date') {
 // ---------- 模块6 人均效率表 ----------
 const staffRows = ref([])
 function workScoreTagType(score) {
-  if (score >= 100) return 'danger'
-  if (score >= 50)  return 'warning'
-  if (score >= 20)  return 'success'
+  const n = Number(score) || 0
+  if (n >= 500) return 'danger'     // 顶量: 500分+ 王霞/荣海伦级别
+  if (n >= 300) return 'warning'    // 高量: 300~499 分
+  if (n >= 100) return 'success'    // 正常: 100~299 分
   return 'info'
 }
+function posTagType(p) {
+  if (p === '主管') return 'danger'
+  if (p === '组长') return 'warning'
+  if (p === '客服') return 'success'
+  return 'info'
+}
+function specialtyScoreTooltip(r) {
+  const fmt = (v) => formatNum(v)
+  const w = r.weights || { '咨询接待': 1.0, '套餐专项': 1.8, '退款挽回': 2.2, '投诉专员': 3.0 }
+  const zx = (Number(r.sp_zixun) || 0)
+  const tc = (Number(r.sp_taocan) || 0)
+  const tk = (Number(r.sp_tuikuan) || 0)
+  const ts = (Number(r.sp_tousu) || 0)
+  const lines = [
+    `【${r.name || ''}】岗位：${r.position || '—'} ｜ 预设专项：${r.current_specialty || '—'}`,
+    ``,
+    `公式 = 咨询接待×${w['咨询接待']} + 套餐专项×${w['套餐专项']} + 退款挽回×${w['退款挽回']} + 投诉专员×${w['投诉专员']}`,
+    ``,
+    `咨询接待 ${fmt(zx)} × ${w['咨询接待']} = ${(zx*w['咨询接待']).toFixed(1)}`,
+    `套餐专项 ${fmt(tc)} × ${w['套餐专项']} = ${(tc*w['套餐专项']).toFixed(1)}`,
+    `退款挽回 ${fmt(tk)} × ${w['退款挽回']} = ${(tk*w['退款挽回']).toFixed(1)}`,
+    `投诉专员 ${fmt(ts)} × ${w['投诉专员']} = ${(ts*w['投诉专员']).toFixed(1)}`,
+    `———`,
+    `合成分 = ${(zx*1 + tc*1.8 + tk*2.2 + ts*3.0).toFixed(2)} 分 (接口返回 ${r.work_score})`,
+  ]
+  return lines.join('\n')
+}
+
 
 // ---------- 通用格式化 ----------
 function formatNum(v) {
@@ -679,7 +866,19 @@ onMounted(loadAll)
 </script>
 
 <style scoped>
-.today-dashboard { padding-bottom: 24px; }
+.today-dashboard { padding-bottom: 24px; position: relative; overflow: visible; }
+/* 全屏水印层: 绝对定位铺满父容器, z-index=9999 始终位于所有卡片/图表上层, 但 pointer-events:none 永远不挡tooltip/按钮操作
+   局部截图任何一个 chart 子区域, 水印 (日期+看板名+内部数据) 都清晰可见 (旋转-17度, 重复平铺) */
+.today-watermark {
+  position: absolute;
+  inset: 0 0 -40px 0; /* 下方向外40px: 覆盖最底表格尾部 */
+  pointer-events: none !important;
+  user-select: none;
+  z-index: 9999;
+  background-repeat: repeat !important;
+}
+.title-date-sep { color: #c0c4cc; margin: 0 10px; font-weight: 400; }
+.title-date { color: #409eff; font-size: 20px; font-weight: 600; letter-spacing: 0.5px; }
 .filter-bar { display: flex; align-items: center; }
 .section-card { }
 .section-title {
@@ -711,6 +910,11 @@ onMounted(loadAll)
 .kpi-unit { font-size: 13px; font-weight: 400; color: #909399; margin-left: 4px; }
 .kpi-yoy { margin-top: 8px; display: flex; align-items: center; gap: 6px; font-size: 12px; color: #909399; }
 .kpi-yoy-val { color: #c0c4cc; font-size: 12px; }
+/* 接待量KPI卡: 主金额下方追加一行"覆盖设备 XX 台" (蓝色强调, 与设备台数主题呼应) */
+.kpi-device-sub { margin-top: 5px; display: flex; align-items: baseline; gap: 6px; }
+.kpi-device-sub-label { font-size: 11px; color: #909399; }
+.kpi-device-sub-val { font-size: 15px; font-weight: 600; color: #409eff; letter-spacing: -0.3px; }
+.kpi-device-sub-unit { font-size: 11px; font-weight: 400; color: #909399; margin-left: 2px; }
 
 .chart-title { font-size: 13px; color: #606266; font-weight: 500; padding: 4px 8px; }
 
@@ -734,38 +938,108 @@ onMounted(loadAll)
 .queue-status { margin-left: auto; font-size: 11px; }
 .queue-deadline { font-size: 12px; color: #909399; }
 
-/* 今日现金流出四路线(紧凑版) */
-.today-routes {
-  margin-top: 18px;
-  padding: 14px 14px 8px;
-  background: #fafbfc;
+/* 今日现金流出拆分 v2：紧凑一体化（3合计卡 + 1堆叠比例条 + 1图例行） */
+.today-routes-v2 { padding: 10px 12px 10px; background: linear-gradient(180deg,#fbfcfe,#f6f8fb); border: 1px solid #ebeef5; border-radius: 10px; }
+.today-routes-v2 .today-routes-title { margin-bottom: 6px; }
+
+.mt-6 { margin-top: 6px; }
+.mt-8 { margin-top: 8px; }
+.mt-10 { margin-top: 10px; }
+
+/* 3 张合计卡：左色条 + 主金额 + 小计文字，紧凑一行 */
+.trv2-sum {
+  position: relative;
+  padding: 6px 10px 6px 12px;
   border-radius: 8px;
-  border: 1px dashed #ebeef5;
+  background: #fff;
+  border: 1px solid #ebeef5;
 }
-.today-routes-title {
-  font-size: 13px;
-  font-weight: 500;
-  color: #303133;
-  margin-bottom: 10px;
+.trv2-sum::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 6px; bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
 }
-.tr-item {
-  padding: 8px 10px;
+.trv2-sum-head { font-size: 12px; color: #606266; font-weight: 500; line-height: 1.4; }
+.trv2-sum-tip { color: #909399; font-weight: 400; font-size: 11px; }
+.trv2-sum-body { margin-top: 2px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.trv2-sum-val { font-size: 18px; font-weight: 600; color: #303133; line-height: 1.25; letter-spacing: -0.3px; }
+.trv2-sum-sub { font-size: 11px; color: #909399; }
+.trv2-sum-op::before { background: #409eff; }
+.trv2-sum-op { border-color: #d9ecff; }
+.trv2-sum-fc::before { background: #e6a23c; }
+.trv2-sum-fc { border-color: #faecd8; }
+.trv2-sum-diff-pos::before { background: #f56c6c; }
+.trv2-sum-diff-pos { border-color: #fbc4c4; }
+.trv2-sum-diff-pos .trv2-sum-val,
+.trv2-sum-diff-pos .trv2-sum-sub { color: #f56c6c; }
+.trv2-sum-diff-neg::before { background: #67c23a; }
+.trv2-sum-diff-neg { border-color: #c2e7b0; }
+.trv2-sum-diff-neg .trv2-sum-val,
+.trv2-sum-diff-neg .trv2-sum-sub { color: #67c23a; }
+
+/* 四路堆叠条：100% 宽一行分 4 段 = 经营估算总长度（A+B+C+D 加总即 100%） */
+.trv2-stack { }
+.trv2-stack-bar {
+  display: flex;
+  width: 100%;
+  height: 28px;
+  line-height: 28px;
   border-radius: 6px;
-  margin-bottom: 4px;
+  overflow: hidden;
+  background: #f0f2f5;
+  border: 1px solid #e4e7ed;
 }
-.tr-a { background: #ecf5ff; }
-.tr-b { background: #f0f9eb; }
-.tr-c { background: #fdf6ec; }
-.tr-d { background: #f4f4f5; }
-.tr-sum-op { background: #d9ecff; }
-.tr-sum-fc { background: #faecd8; }
-.tr-diff-pos { background: #fef0f0; }
-.tr-diff-neg { background: #f0f9eb; }
-.tr-name { font-size: 12px; color: #606266; margin-bottom: 2px; }
-.tr-val { font-size: 16px; font-weight: 600; color: #303133; line-height: 1.2; }
-.tr-sub { font-size: 11px; color: #909399; margin-top: 2px; }
-.tr-diff-pos .tr-val { color: #f56c6c; }
-.tr-diff-neg .tr-val { color: #67c23a; }
-.tr-diff-pos .tr-sub { color: #f56c6c; }
-.tr-diff-neg .tr-sub { color: #67c23a; }
+.trv2-seg {
+  height: 100%;
+  position: relative;
+  transition: width 0.3s ease;
+  white-space: nowrap;
+}
+.trv2-seg-in {
+  display: block;
+  padding: 0 8px;
+  font-size: 12px;
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0,0,0,0.12);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  line-height: 28px;
+}
+.trv2-seg-mini .trv2-seg-in { padding: 0 4px; font-size: 11px; }
+.trv2-seg-a { background: linear-gradient(90deg,#409eff,#66b1ff); }
+.trv2-seg-b { background: linear-gradient(90deg,#67c23a,#85ce61); }
+.trv2-seg-c { background: linear-gradient(90deg,#e6a23c,#ebb563); }
+.trv2-seg-d { background: linear-gradient(90deg,#909399,#a6a9ad); }
+.trv2-seg-empty { background: #f4f4f5; color: #909399; text-align: center; }
+.trv2-seg-empty .trv2-seg-in { color: #909399; text-shadow: none; text-align: center; }
+
+/* 四路图例：一行 4 列对齐，色点 + 名称 + 金额 + 笔数 */
+.trv2-stack-legend {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px 8px;
+}
+.trv2-lg { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.4; }
+.trv2-lg-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+.d-a { background: #409eff; }
+.d-b { background: #67c23a; }
+.d-c { background: #e6a23c; }
+.d-d { background: #909399; }
+.trv2-lg-name { color: #606266; }
+.trv2-lg-val { color: #303133; font-weight: 500; margin-left: auto; }
+.trv2-lg-sub { color: #909399; font-size: 11px; }
+
+/* 模块7 四专项明细胶囊 (zx咨询/tc套餐/tk退款/ts投诉) */
+.sp-legend { display: flex; flex-wrap: wrap; gap: 4px 6px; line-height: 1.35; }
+.sp-chip {
+  display: inline-flex; align-items: center;
+  padding: 1px 6px; border-radius: 999px;
+  font-size: 10.5px; letter-spacing: -0.2px;
+  border: 1px solid transparent;
+}
+.sp-chip.zx { background: #ecf5ff; color: #409eff; border-color: #d9ecff; }
+.sp-chip.tc { background: #f0f9eb; color: #67c23a; border-color: #e1f3d8; }
+.sp-chip.tk { background: #fdf6ec; color: #e6a23c; border-color: #faecd8; }
+.sp-chip.ts { background: #fef0f0; color: #f56c6c; border-color: #fde2e2; }
 </style>

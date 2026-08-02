@@ -96,7 +96,7 @@ const routes = [
         path: 'dashboards/today',
         name: 'DashboardToday',
         component: () => import('@/views/dashboards/Today.vue'),
-        meta: { title: '今日看板', icon: 'Clock' },
+        meta: { title: '客服日度运营看板', icon: 'Clock' },
       },
       {
         path: 'dashboards/performance',
