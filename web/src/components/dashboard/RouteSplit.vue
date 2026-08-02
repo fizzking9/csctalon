@@ -1,6 +1,6 @@
 <template>
   <div class="route-split">
-    <div class="rs-header">
+    <div v-if="!hideHeader" class="rs-header">
       <span class="rs-title">
         {{ compact ? '四路经营 vs 实际现金流' : '现金流出四路线拆分 & 对账偏差' }}
       </span>
@@ -95,6 +95,8 @@ const props = defineProps({
   //  2) cash_routes_today: 同上 — 今日看板单日切面
   routes: { type: Object, required: true },
   compact: { type: Boolean, default: false },
+  // 隐藏内置头部 (当外层已提供卡头和说明时使用)
+  hideHeader: { type: Boolean, default: false },
 })
 
 const op = computed(() => props.routes?.operational || { amount: 0, count: 0 })

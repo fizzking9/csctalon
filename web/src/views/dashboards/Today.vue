@@ -15,9 +15,7 @@
       </div>
       <FilterBar
         v-model:modelValue="quickDate"
-        v-model:range="customDate ? [customDate] : []"
         :quick-options="todayQuickOptions"
-        :date-picker-type="customDate ? 'date' : 'daterange'"
         :show-custom="false"
         show-grain="false"
         :loading="loading"
@@ -248,10 +246,8 @@ import { today } from '@/api/analytics'
 import BaseChart from '@/components/BaseChart.vue'
 import { formatMoney } from '@/utils/format'
 import dayjs from 'dayjs'
-import {
-  Refresh, ChatDotRound, Document, Money, Wallet, Checked, UserFilled,
-  Bell, List, Warning, WarningFilled, QuestionFilled
-} from '@element-plus/icons-vue'
+// Today.vue 图标通过字符串名传给 KpiCard (KpiCard 内部 component :is 动态解析)
+// 本地脚本不直接使用图标组件
 
 const loading = ref(false)
 const quickDate = ref('today')  // today / yesterday
@@ -325,39 +321,7 @@ const kpiCards = computed(() => {
   return def
 })
 
-// KPI 环比 tag 颜色: 接待量/在岗/退款笔数(越大越好↑绿↓红); 退款金额/现金流出/投诉量(越小越好↑红↓绿)
-const BAD_UP_KEYS = new Set(['refund_amount', 'cash_out', 'complaint'])
-function yoyTagType(key, pct) {
-  if (pct == null) return 'info'
-  const good = BAD_UP_KEYS.has(key) ? pct < 0 : pct > 0
-  if (pct === 0) return 'info'
-  return good ? 'success' : 'danger'
-}
-
-// ---------- 模块1 现金流出拆分 堆叠条数据 ----------
-const stackSegs = computed(() => {
-  const r = kpiData.value?.cash_routes_today || {}
-  const defs = [
-    { key: 'route_a', label: 'A', name: 'A. 线上直退',    cls: 'trv2-seg-a', dotCls: 'd-a' },
-    { key: 'route_b', label: 'B', name: 'B. 用户取现',    cls: 'trv2-seg-b', dotCls: 'd-b' },
-    { key: 'route_c', label: 'C', name: 'C. 闪猫退款',    cls: 'trv2-seg-c', dotCls: 'd-c' },
-    { key: 'route_d', label: 'D', name: 'D. 其他退款',    cls: 'trv2-seg-d', dotCls: 'd-d' },
-  ]
-  const totalAmt = Math.max(0, Number(r.operational?.amount ?? 0))
-  return defs.map(d => {
-    const row = r[d.key] || { amount: 0, count: 0 }
-    const amt = Math.max(0, Number(row.amount ?? 0))
-    const cnt = Math.max(0, Number(row.count ?? 0))
-    const pct = totalAmt > 0 ? Math.min(100, amt / totalAmt * 100) : 0
-    return {
-      ...d,
-      amount: amt,
-      count: cnt,
-      pct,
-      title: `${d.name}\n退款金额: ¥${amt.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n退款笔数: ${cnt}笔\n占经营估算: ${pct.toFixed(1)}%`,
-    }
-  })
-})
+// KPI 环比 tag 颜色逻辑已在 KpiCard 组件内(BAD_UP_KEYS),此处不再重复定义
 
 // ---------- 模块2 小时节奏 ----------
 const hourlyData = ref({ hour_labels: [], reception: [], reception_devices: [], refund_count: [], refund_amount: [], complaint: [] })
@@ -614,32 +578,7 @@ const refundStaffOption = computed(() => {
 
 // ---------- 模块5 处理队列 ----------
 const queueData = ref({ todos: [], tasks: [], incidents: [] })
-function priorityTagType(p) {
-  return { urgent: 'danger', high: 'warning', medium: 'primary', low: 'info' }[p] || 'info'
-}
-function priorityLabel(p) {
-  return { urgent: '紧急', high: '高', medium: '中', low: '低' }[p] || '中'
-}
-function todoStatusLabel(s) {
-  return { pending: '待办', processing: '处理中', confirming: '待确认', done: '已完成' }[s] || s
-}
-function taskStatusTagType(s) {
-  return { pending_start: 'info', executing: 'warning', following: 'primary', done: 'success', archived: 'info' }[s] || 'info'
-}
-function taskStatusLabel(s) {
-  return { pending_start: '待启动', executing: '执行中', following: '跟进中', done: '已完成', archived: '已归档' }[s] || s
-}
-function incidentStatusTagType(s) {
-  return { registered: 'danger', processing: 'warning', calmed: 'primary', reviewed: 'success' }[s] || 'info'
-}
-function incidentStatusLabel(s) {
-  return { registered: '登记', processing: '处理中', calmed: '已平息', reviewed: '已复盘' }[s] || s
-}
-function formatDeadline(d, type='date') {
-  if (!d) return ''
-  if (type === 'time') return dayjs(d).format('MM-DD HH:mm')
-  return dayjs(d).format('MM-DD')
-}
+// 处理队列三栏的优先级/状态/格式化已迁移到 QueuePanel 组件内部,此处无需重复定义
 
 // ---------- 模块6~7 人员效率表: 工作分 / 效率分 双列 + 本职/转接 breakdown ----------
 const staffRows = ref([])
@@ -823,156 +762,14 @@ onMounted(loadAll)
 }
 .title-date-sep { color: #c0c4cc; margin: 0 10px; font-weight: 400; }
 .title-date { color: #409eff; font-size: 20px; font-weight: 600; letter-spacing: 0.5px; }
-.filter-bar { display: flex; align-items: center; }
 .section-card { }
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: #303133;
-  margin: 0 0 14px;
-  padding-left: 10px;
-  border-left: 3px solid #409eff;
-}
-.section-sub { font-size: 12px; color: #909399; font-weight: 400; margin-left: 6px; }
 .mb-16 { margin-bottom: 16px; }
 .mb-24 { margin-bottom: 24px; }
+.mt-12 { margin-top: 12px; }
 .h-full { height: 100%; }
 .flex-between { display: flex; justify-content: space-between; align-items: center; }
 .text-muted { color: #909399; }
 .mr-8 { margin-right: 8px; }
-
-/* KPI卡 */
-.kpi-card { position: relative; transition: transform 0.15s; }
-.kpi-card:hover { transform: translateY(-2px); }
-.kpi-icon {
-  width: 42px; height: 42px; border-radius: 8px;
-  display: flex; align-items: center; justify-content: center;
-  margin-bottom: 10px;
-}
-.kpi-label { color: #909399; font-size: 13px; }
-.kpi-value { font-size: 24px; font-weight: 600; color: #303133; margin-top: 4px; line-height: 1.2; }
-.kpi-unit { font-size: 13px; font-weight: 400; color: #909399; margin-left: 4px; }
-.kpi-yoy { margin-top: 8px; display: flex; align-items: center; gap: 6px; font-size: 12px; color: #909399; }
-.kpi-yoy-val { color: #c0c4cc; font-size: 12px; }
-/* 接待量KPI卡: 主金额下方追加一行"覆盖设备 XX 台" (蓝色强调, 与设备台数主题呼应) */
-.kpi-device-sub { margin-top: 5px; display: flex; align-items: baseline; gap: 6px; }
-.kpi-device-sub-label { font-size: 11px; color: #909399; }
-.kpi-device-sub-val { font-size: 15px; font-weight: 600; color: #409eff; letter-spacing: -0.3px; }
-.kpi-device-sub-unit { font-size: 11px; font-weight: 400; color: #909399; margin-left: 2px; }
-
-.chart-title { font-size: 13px; color: #606266; font-weight: 500; padding: 4px 8px; }
-
-/* 处理队列 */
-.queue-card { height: 100%; }
-.queue-title { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 500; color: #303133; }
-.queue-badge { }
-.queue-list { max-height: 320px; overflow-y: auto; }
-.queue-item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 9px 8px; border-bottom: 1px solid #f5f7fa;
-  cursor: pointer; transition: background 0.15s;
-}
-.queue-item:hover { background: #f5f7fa; }
-.queue-item:last-child { border-bottom: none; }
-.queue-item-title {
-  flex: 1;
-  font-size: 13px; color: #303133;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.queue-status { margin-left: auto; font-size: 11px; }
-.queue-deadline { font-size: 12px; color: #909399; }
-
-/* 今日现金流出拆分 v2：紧凑一体化（3合计卡 + 1堆叠比例条 + 1图例行） */
-.today-routes-v2 { padding: 10px 12px 10px; background: linear-gradient(180deg,#fbfcfe,#f6f8fb); border: 1px solid #ebeef5; border-radius: 10px; }
-.today-routes-v2 .today-routes-title { margin-bottom: 6px; }
-
-.mt-6 { margin-top: 6px; }
-.mt-8 { margin-top: 8px; }
-.mt-10 { margin-top: 10px; }
-
-/* 3 张合计卡：左色条 + 主金额 + 小计文字，紧凑一行 */
-.trv2-sum {
-  position: relative;
-  padding: 6px 10px 6px 12px;
-  border-radius: 8px;
-  background: #fff;
-  border: 1px solid #ebeef5;
-}
-.trv2-sum::before {
-  content: '';
-  position: absolute;
-  left: 0; top: 6px; bottom: 6px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-}
-.trv2-sum-head { font-size: 12px; color: #606266; font-weight: 500; line-height: 1.4; }
-.trv2-sum-tip { color: #909399; font-weight: 400; font-size: 11px; }
-.trv2-sum-body { margin-top: 2px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.trv2-sum-val { font-size: 18px; font-weight: 600; color: #303133; line-height: 1.25; letter-spacing: -0.3px; }
-.trv2-sum-sub { font-size: 11px; color: #909399; }
-.trv2-sum-op::before { background: #409eff; }
-.trv2-sum-op { border-color: #d9ecff; }
-.trv2-sum-fc::before { background: #e6a23c; }
-.trv2-sum-fc { border-color: #faecd8; }
-.trv2-sum-diff-pos::before { background: #f56c6c; }
-.trv2-sum-diff-pos { border-color: #fbc4c4; }
-.trv2-sum-diff-pos .trv2-sum-val,
-.trv2-sum-diff-pos .trv2-sum-sub { color: #f56c6c; }
-.trv2-sum-diff-neg::before { background: #67c23a; }
-.trv2-sum-diff-neg { border-color: #c2e7b0; }
-.trv2-sum-diff-neg .trv2-sum-val,
-.trv2-sum-diff-neg .trv2-sum-sub { color: #67c23a; }
-
-/* 四路堆叠条：100% 宽一行分 4 段 = 经营估算总长度（A+B+C+D 加总即 100%） */
-.trv2-stack { }
-.trv2-stack-bar {
-  display: flex;
-  width: 100%;
-  height: 28px;
-  line-height: 28px;
-  border-radius: 6px;
-  overflow: hidden;
-  background: #f0f2f5;
-  border: 1px solid #e4e7ed;
-}
-.trv2-seg {
-  height: 100%;
-  position: relative;
-  transition: width 0.3s ease;
-  white-space: nowrap;
-}
-.trv2-seg-in {
-  display: block;
-  padding: 0 8px;
-  font-size: 12px;
-  color: #fff;
-  text-shadow: 0 1px 1px rgba(0,0,0,0.12);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  line-height: 28px;
-}
-.trv2-seg-mini .trv2-seg-in { padding: 0 4px; font-size: 11px; }
-.trv2-seg-a { background: linear-gradient(90deg,#409eff,#66b1ff); }
-.trv2-seg-b { background: linear-gradient(90deg,#67c23a,#85ce61); }
-.trv2-seg-c { background: linear-gradient(90deg,#e6a23c,#ebb563); }
-.trv2-seg-d { background: linear-gradient(90deg,#909399,#a6a9ad); }
-.trv2-seg-empty { background: #f4f4f5; color: #909399; text-align: center; }
-.trv2-seg-empty .trv2-seg-in { color: #909399; text-shadow: none; text-align: center; }
-
-/* 四路图例：一行 4 列对齐，色点 + 名称 + 金额 + 笔数 */
-.trv2-stack-legend {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 4px 8px;
-}
-.trv2-lg { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.4; }
-.trv2-lg-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
-.d-a { background: #409eff; }
-.d-b { background: #67c23a; }
-.d-c { background: #e6a23c; }
-.d-d { background: #909399; }
-.trv2-lg-name { color: #606266; }
-.trv2-lg-val { color: #303133; font-weight: 500; margin-left: auto; }
-.trv2-lg-sub { color: #909399; font-size: 11px; }
 
 /* 模块7 四专项明细胶囊 (zx咨询/tc套餐/tk退款/ts投诉) */
 .sp-legend { display: flex; flex-wrap: wrap; gap: 4px 6px; line-height: 1.35; }
@@ -986,4 +783,9 @@ onMounted(loadAll)
 .sp-chip.tc { background: #f0f9eb; color: #67c23a; border-color: #e1f3d8; }
 .sp-chip.tk { background: #fdf6ec; color: #e6a23c; border-color: #faecd8; }
 .sp-chip.ts { background: #fef0f0; color: #f56c6c; border-color: #fde2e2; }
+/* .section-title/.section-sub 已迁移到 SectionHeader.vue
+   .kpi-* 已迁移到 KpiCard.vue
+   .queue-* 已迁移到 QueuePanel.vue
+   .chart-title 已迁移到 ChartCard.vue
+   .trv2-* / .today-routes-v2 已迁移到 RouteSplit.vue */
 </style>

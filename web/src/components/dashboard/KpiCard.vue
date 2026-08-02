@@ -20,7 +20,7 @@
       <span class="kpi-device-sub-label">接待数</span>
       <span class="kpi-device-sub-val">{{ fmtNum(deviceCount) }}<span class="kpi-device-sub-unit"> 个</span></span>
     </div>
-    <div class="kpi-yoy">
+    <div v-if="!hideYoy" class="kpi-yoy">
       <el-tag v-if="yoyPct != null" size="small" effect="plain" :type="yoyTagType(yoyPct)">
         {{ yoyPct > 0 ? '↑' : '↓' }} {{ Math.abs(yoyPct) }}%
       </el-tag>
@@ -55,6 +55,8 @@ const props = defineProps({
   // 接待量追加行: 去重设备近似人数
   deviceCount: { type: Number, default: null },
   tip: { type: String, default: null },
+  // 隐藏同比/环比行 (用于工作台首页, 没有同比数据的简洁卡片)
+  hideYoy: { type: Boolean, default: false },
 })
 
 const BAD_UP_KEYS = new Set(['refund_amount', 'cash_out', 'complaint'])

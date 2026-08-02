@@ -3,79 +3,95 @@
     <!-- 顶部标题 + 时间筛选 -->
     <div class="flex-between mb-16">
       <div class="page-title" style="margin: 0">接待看板 <el-tag size="small" type="warning" effect="plain" style="margin-left: 8px">对齐周报</el-tag></div>
-      <div class="filter-bar">
-        <el-radio-group v-model="rangeMode" size="small" @change="onRangeChange">
-          <el-radio-button label="90">近90天(周视图)</el-radio-button>
-          <el-radio-button label="180">近180天</el-radio-button>
-          <el-radio-button label="365">近一年</el-radio-button>
-          <el-radio-button label="custom">自定义</el-radio-button>
-        </el-radio-group>
-        <el-date-picker
-          v-if="rangeMode === 'custom'"
-          v-model="customRange"
-          type="daterange"
-          size="small"
-          value-format="YYYY-MM-DD"
-          start-placeholder="开始"
-          end-placeholder="结束"
-          style="width: 240px"
-          @change="onRangeChange"
-        />
-        <el-button :icon="Refresh" :loading="loading" @click="loadAll">刷新</el-button>
-      </div>
+      <FilterBar
+        v-model:modelValue="rangeMode"
+        v-model:range="customRange"
+        :quick-options="receptionQuickOptions"
+        date-picker-type="daterange"
+        :show-custom="true"
+        show-grain="false"
+        :loading="loading"
+        @change="onRangeChange"
+        @range-change="onRangeChange"
+        @refresh="loadAll"
+      />
     </div>
 
     <!-- 模块1:总体接待量 -->
     <section class="section-card mb-24">
-      <h2 class="section-title">1. 总体接待量</h2>
+      <SectionHeader title="1. 总体接待量" />
       <!-- 汇总卡片:最新周 -->
       <el-row :gutter="16" class="mb-16">
         <el-col :xs="12" :sm="6" :md="6">
-          <el-card shadow="hover" body-style="padding: 14px 18px">
-            <div class="stat-label">本周接待量</div>
-            <div class="stat-value" style="color: #409eff">{{ fmtNum(latestWeek.reception_total) }}</div>
-            <div class="stat-sub">
-              <span :class="weekDiffColor(latestWeek.reception_total, prevWeek.reception_total)">
-                {{ weekDiffText(latestWeek.reception_total, prevWeek.reception_total) }}
-              </span>
-              <span class="vs-prev"> 较上周</span>
-            </div>
-          </el-card>
+          <KpiCard
+            label="本周接待量"
+            :value="latestWeek.reception_total"
+            unit="次"
+            icon="ChatDotRound"
+            bg="#ecf5ff"
+            color="#409eff"
+            :yoy-pct="weekDiffPct(latestWeek.reception_total, prevWeek.reception_total)"
+            :yoy-value="prevWeek.reception_total"
+            yoy-key="reception_total"
+            tip="客服助手沟通事项次数,1条接待记录=1次会话.环比=本周(最新有数据周)vs上周"
+          >
+            <template #extra>
+              <div class="kpi-sub-local">较上周 <span :class="weekDiffColor(latestWeek.reception_total, prevWeek.reception_total)">{{ weekDiffText(latestWeek.reception_total, prevWeek.reception_total) }}</span></div>
+            </template>
+          </KpiCard>
         </el-col>
         <el-col :xs="12" :sm="6" :md="6">
-          <el-card shadow="hover" body-style="padding: 14px 18px">
-            <div class="stat-label">日均接待量</div>
-            <div class="stat-value" style="color: #67c23a">{{ fmtNum(latestWeek.daily_avg) }}</div>
-            <div class="stat-sub">本周有数据 {{ latestWeek.day_count || 0 }} 天</div>
-          </el-card>
+          <KpiCard
+            label="日均接待量"
+            :value="latestWeek.daily_avg"
+            unit="次/天"
+            icon="DataAnalysis"
+            bg="#f0f9eb"
+            color="#67c23a"
+            tip="本周有数据天数内的日均接待量"
+          >
+            <template #extra>
+              <div class="kpi-sub-local">本周有数据 {{ latestWeek.day_count || 0 }} 天</div>
+            </template>
+          </KpiCard>
         </el-col>
         <el-col :xs="12" :sm="6" :md="6">
-          <el-card shadow="hover" body-style="padding: 14px 18px">
-            <div class="stat-label">客服人数</div>
-            <div class="stat-value" style="color: #e6a23c">{{ latestWeek.staff_count }}</div>
-            <div class="stat-sub">本周实际在岗接待</div>
-          </el-card>
+          <KpiCard
+            label="客服人数"
+            :value="latestWeek.staff_count"
+            unit="人"
+            icon="UserFilled"
+            bg="#fdf6ec"
+            color="#e6a23c"
+            tip="本周实际在岗接待的员工人数"
+          >
+            <template #extra><div class="kpi-sub-local">本周实际在岗接待</div></template>
+          </KpiCard>
         </el-col>
         <el-col :xs="12" :sm="6" :md="6">
-          <el-card shadow="hover" body-style="padding: 14px 18px">
-            <div class="stat-label">人均接待(天)</div>
-            <div class="stat-value" style="color: #909399">{{ fmtNum(latestWeek.per_capita_daily) }}</div>
-            <div class="stat-sub">本周人均(按在岗天)</div>
-          </el-card>
+          <KpiCard
+            label="人均接待(天)"
+            :value="latestWeek.per_capita_daily"
+            unit="次"
+            icon="Histogram"
+            bg="#f4f4f5"
+            color="#909399"
+            tip="按在岗天折算的人均日接待量 (接待总量 / (客服人数 × 有数据天数))"
+          >
+            <template #extra><div class="kpi-sub-local">本周人均(按在岗天)</div></template>
+          </KpiCard>
         </el-col>
       </el-row>
 
       <!-- 总体接待量图:柱接待量 + 双Y人数和人均 -->
-      <el-card class="mb-16" shadow="never" body-style="padding: 8px 10px">
-        <template #header><div class="chart-title">总体接待量</div></template>
+      <ChartCard title="总体接待量趋势" body-style="padding: 8px 10px" class="mb-16">
         <BaseChart :option="overviewTrendOption" height="300px" />
-      </el-card>
+      </ChartCard>
 
       <!-- 第二张:客服人数及人均接待 -->
-      <el-card class="mb-16" shadow="never" body-style="padding: 8px 10px">
-        <template #header><div class="chart-title">客服人数及人均接待</div></template>
+      <ChartCard title="客服人数及人均接待" body-style="padding: 8px 10px" class="mb-16">
         <BaseChart :option="staffPerCapitaOption" height="300px" />
-      </el-card>
+      </ChartCard>
 
       <!-- 总体接待量表 -->
       <el-card shadow="never">
@@ -109,7 +125,7 @@
 
     <!-- 模块2:接待分项汇总 -->
     <section class="section-card mb-24">
-      <h2 class="section-title">2. 接待分项汇总</h2>
+      <SectionHeader title="2. 接待分项汇总" />
       <el-card class="mb-16" shadow="never">
         <el-table :data="categoryRows" border stripe size="small">
           <el-table-column label="周数" width="80" align="center">
@@ -139,27 +155,24 @@
 
       <el-row :gutter="16">
         <el-col :xs="24" :md="12">
-          <el-card class="mb-16" shadow="never" body-style="padding: 8px 10px">
-            <template #header><div class="chart-title">投诉</div></template>
+          <ChartCard title="投诉趋势 + 线性拟合" body-style="padding: 8px 10px" class="mb-16">
             <BaseChart :option="complaintTrendOption" height="300px" />
-          </el-card>
+          </ChartCard>
         </el-col>
         <el-col :xs="24" :md="12">
-          <el-card class="mb-16" shadow="never" body-style="padding: 8px 10px">
-            <template #header><div class="chart-title">退款</div></template>
+          <ChartCard title="退款趋势" body-style="padding: 8px 10px" class="mb-16">
             <BaseChart :option="refundTrendOption" height="300px" />
-          </el-card>
+          </ChartCard>
         </el-col>
       </el-row>
-      <el-card class="mb-16" shadow="never" body-style="padding: 8px 10px">
-        <template #header><div class="chart-title">其他问题汇总</div></template>
+      <ChartCard title="其他问题汇总（套餐/咨询/其他/综合 堆叠面积）" body-style="padding: 8px 10px" class="mb-16">
         <BaseChart :option="othersStackOption" height="300px" />
-      </el-card>
+      </ChartCard>
     </section>
 
     <!-- 模块3:接待分项人均工作 -->
     <section class="section-card mb-24">
-      <h2 class="section-title">3. 接待分项人均工作</h2>
+      <SectionHeader title="3. 接待分项人均工作" />
       <el-card class="mb-16" shadow="never">
         <el-table :data="perCapitaRows" border stripe size="small">
           <el-table-column label="周数" width="80" align="center">
@@ -195,30 +208,27 @@
 
       <el-row :gutter="16">
         <el-col :xs="24" :md="12">
-          <el-card class="mb-16" shadow="never" body-style="padding: 8px 10px">
-            <template #header><div class="chart-title">投诉组人数及人均接待</div></template>
+          <ChartCard title="投诉组人数及人均接待" body-style="padding: 8px 10px" class="mb-16">
             <BaseChart :option="pcComplaintOption" height="300px" />
-          </el-card>
+          </ChartCard>
         </el-col>
         <el-col :xs="24" :md="12">
-          <el-card class="mb-16" shadow="never" body-style="padding: 8px 10px">
-            <template #header><div class="chart-title">退款组人数及人均接待</div></template>
+          <ChartCard title="退款组人数及人均接待" body-style="padding: 8px 10px" class="mb-16">
             <BaseChart :option="pcRefundOption" height="300px" />
-          </el-card>
+          </ChartCard>
         </el-col>
       </el-row>
-      <el-card class="mb-16" shadow="never" body-style="padding: 8px 10px">
-        <template #header><div class="chart-title">其他组人数及人均接待(套餐组 + 咨询组)</div></template>
+      <ChartCard title="其他组人数及人均接待(套餐组 + 咨询组)" body-style="padding: 8px 10px" class="mb-16">
         <BaseChart :option="pcOthersOption" height="320px" />
-      </el-card>
+      </ChartCard>
     </section>
 
     <!-- 模块4:各组接待 -->
     <section class="section-card mb-24">
-      <h2 class="section-title">
-        4. 各组接待
-        <span class="section-subtitle">(所选周期 <b>{{ dateRangeText }}</b> 的人员日接待明细)</span>
-      </h2>
+      <SectionHeader
+        title="4. 各组接待"
+        :sub="`所选周期 ${dateRangeText} 的人员日接待明细`"
+      />
       <div v-if="groupDetail.groups && groupDetail.groups.length">
         <el-card
           v-for="g in groupDetail.groups"
@@ -293,6 +303,10 @@
 import { ref, computed, onMounted } from 'vue'
 import { Refresh, Calendar } from '@element-plus/icons-vue'
 import BaseChart from '@/components/BaseChart.vue'
+import FilterBar from '@/components/dashboard/FilterBar.vue'
+import SectionHeader from '@/components/dashboard/SectionHeader.vue'
+import KpiCard from '@/components/dashboard/KpiCard.vue'
+import ChartCard from '@/components/dashboard/ChartCard.vue'
 import { reception } from '@/api/analytics'
 import dayjs from 'dayjs'
 
@@ -300,6 +314,19 @@ import dayjs from 'dayjs'
 const rangeMode = ref('90')
 const customRange = ref([])
 const loading = ref(false)
+
+// FilterBar 快捷选项 (对齐周报 默认90天周视图)
+const receptionQuickOptions = [
+  { value: '90', label: '近90天(周)' },
+  { value: '180', label: '近180天' },
+  { value: '365', label: '近一年' },
+]
+
+function weekDiffPct(cur, prev) {
+  if (!prev) return null
+  const pct = Math.round((cur - prev) / prev * 1000) / 10
+  return pct === 0 ? 0 : (Number.isFinite(pct) ? pct : null)
+}
 
 const effectiveStart = computed(() => {
   if (rangeMode.value === 'custom') return customRange.value?.[0] || ''
@@ -643,66 +670,23 @@ onMounted(loadAll)
 </script>
 
 <style scoped>
-.reception-dashboard {
-  padding-bottom: 20px;
-}
-.filter-bar {
-  display: flex; align-items: center; gap: 12px;
-}
+.reception-dashboard { padding-bottom: 20px; }
 .section-card {
   background: #fff;
   border-radius: 6px;
   padding: 20px;
   border: 1px solid #ebeef5;
 }
-.section-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: #303133;
-  margin: 0 0 16px;
-  padding-left: 10px;
-  border-left: 4px solid #409eff;
-  line-height: 1.2;
-}
-.section-subtitle {
-  font-size: 13px;
-  font-weight: 400;
-  color: #909399;
-  margin-left: 12px;
-}
-.stat-label {
-  font-size: 13px;
-  color: #909399;
-}
-.stat-value {
-  font-size: 24px;
-  font-weight: 600;
-  margin: 6px 0 4px;
-}
-.stat-sub {
-  font-size: 12px;
-  color: #909399;
-}
-.vs-prev {
-  color: #909399;
-}
-.diff-up {
-  color: #f56c6c;
-  font-weight: 600;
-}
-.diff-down {
-  color: #67c23a;
-  font-weight: 600;
-}
-.chart-title {
-  font-size: 14px;
-  font-weight: 500;
-  color: #303133;
-}
 .mb-16 { margin-bottom: 16px; }
 .mb-24 { margin-bottom: 24px; }
 .flex-between { display: flex; justify-content: space-between; align-items: center; }
 .text-muted { color: #909399; font-size: 13px; }
+
+/* KpiCard #extra 插槽的本地样式 */
+.kpi-sub-local { font-size: 12px; color: #909399; margin-top: 6px; line-height: 1.4; }
+.diff-up { color: #f56c6c; font-weight: 600; }
+.diff-down { color: #67c23a; font-weight: 600; }
+
 .week-cell {
   display: inline-flex; align-items: center; gap: 4px;
   font-weight: 500;
@@ -715,4 +699,8 @@ onMounted(loadAll)
 .group-header {
   display: flex; align-items: center;
 }
+/*
+.filter-bar / .section-title / .section-subtitle / .stat-* 已迁移到 components/dashboard/* 组件
+.chart-title 已迁移到 ChartCard.vue
+*/
 </style>

@@ -11,79 +11,28 @@
 
     <!-- ============ 管理层工作台 ============ -->
     <template v-if="authStore.isManager">
-      <!-- 汇总卡片 -->
+      <!-- 汇总卡片 (复用 KpiCard: hideYoy=true 简洁模式) -->
       <div class="card-row" v-loading="loadingStats">
-        <el-card class="stat-card" shadow="hover" @click="$router.push('/analytics/views')">
-          <div class="stat">
-            <div class="stat-icon" style="background: #ecf5ff"><el-icon :size="26" color="#409eff"><Money /></el-icon></div>
-            <div class="stat-body">
-              <div class="stat-label">退款总额(元)</div>
-              <div class="stat-value">{{ formatMoney(summary.refund_total) }}</div>
-            </div>
-          </div>
-        </el-card>
-        <el-card class="stat-card" shadow="hover" @click="$router.push('/analytics/views')">
-          <div class="stat">
-            <div class="stat-icon" style="background: #fdf6ec"><el-icon :size="26" color="#e6a23c"><Document /></el-icon></div>
-            <div class="stat-body">
-              <div class="stat-label">退费笔数</div>
-              <div class="stat-value">{{ formatNum(summary.refund_count) }}</div>
-            </div>
-          </div>
-        </el-card>
-        <el-card class="stat-card" shadow="hover" @click="$router.push('/analytics/cash')">
-          <div class="stat">
-            <div class="stat-icon" style="background: #fef0f0"><el-icon :size="26" color="#f56c6c"><Wallet /></el-icon></div>
-            <div class="stat-body">
-              <div class="stat-label">真实现金流出(元)</div>
-              <div class="stat-value">{{ formatMoney(summary.cash_out_total) }}</div>
-            </div>
-          </div>
-        </el-card>
-        <el-card class="stat-card" shadow="hover" @click="$router.push('/analytics/operator')">
-          <div class="stat">
-            <div class="stat-icon" style="background: #f0f9eb"><el-icon :size="26" color="#67c23a"><ChatDotRound /></el-icon></div>
-            <div class="stat-body">
-              <div class="stat-label">客服接待量</div>
-              <div class="stat-value">{{ formatNum(summary.cs_reception_count) }}</div>
-            </div>
-          </div>
-        </el-card>
-        <el-card class="stat-card" shadow="hover" @click="$router.push('/tickets')">
-          <div class="stat">
-            <div class="stat-icon" style="background: #ecf5ff"><el-icon :size="26" color="#409eff"><Tickets /></el-icon></div>
-            <div class="stat-body">
-              <div class="stat-label">工单总数</div>
-              <div class="stat-value">{{ formatNum(summary.ticket_total) }}<span class="stat-unit">单</span></div>
-            </div>
-          </div>
-        </el-card>
-        <el-card class="stat-card" shadow="hover" @click="$router.push('/dashboards/today')">
-          <div class="stat">
-            <div class="stat-icon" style="background: #fef0f0"><el-icon :size="26" color="#f56c6c"><WarningFilled /></el-icon></div>
-            <div class="stat-body">
-              <div class="stat-label">投诉工单</div>
-              <div class="stat-value">
-                {{ formatNum(summary.complaint_total) }}<span class="stat-unit">单</span>
-                <span v-if="summary.complaint_ratio" class="stat-sub">
-                  占 {{ (summary.complaint_ratio * 100).toFixed(1) }}%
-                </span>
-              </div>
-            </div>
-          </div>
-        </el-card>
-        <el-card class="stat-card" shadow="hover" @click="$router.push('/todos')">
-          <div class="stat">
-            <div class="stat-icon" style="background: #f4f4f5"><el-icon :size="26" color="#909399"><Bell /></el-icon></div>
-            <div class="stat-body">
-              <div class="stat-label">待办事项</div>
-              <div class="stat-value">{{ todoCount }}<span class="stat-unit">条</span></div>
-            </div>
-          </div>
-        </el-card>
+        <div v-for="c in managerStatCards" :key="c.key" @click="$router.push(c.to)">
+          <KpiCard
+            :label="c.label"
+            :value="c.value"
+            :unit="c.unit"
+            :money="c.money"
+            :icon="c.icon"
+            :bg="c.bg"
+            :color="c.color"
+            hide-yoy
+            body-style="padding: 14px 16px"
+          >
+            <template #extra>
+              <div v-if="c.extraText" :class="c.extraClass || ''">{{ c.extraText }}</div>
+            </template>
+          </KpiCard>
+        </div>
       </div>
 
-      <!-- 现金流出四路线拆分 (全域统一核算 v3) -->
+      <!-- 现金流出四路线拆分 & 对账偏差 (复用 RouteSplit, 外层提供 v3 说明头) -->
       <el-card class="mb-16" v-loading="loadingStats" shadow="never">
         <template #header>
           <div class="flex-between">
@@ -101,7 +50,7 @@
                   <div>D. 其他退款 → 独立业务表 (data_source=other_refund, 暂未建表=0, 建表后自动并入)</div>
                   <hr style="margin:8px 0; opacity:.3">
                   <div style="font-weight:600"><b style="color:#409eff">经营估算</b> = A + B + C + D (四路登记出款合计)</div>
-                  <div style="font-weight:600"><b style="color:#f56c6c">实际现金流 (对账基准)</b> = E.商户号现金流 → merchant_refunds.refund_status='SUCCESS' 合计 (不分ORIGINAL/BALANCE桶)</div>
+                  <div style="font-weight:600"><b style="color:#f56c6c">实际现金流 (对账基准)</b> = E.商户号现金流 → merchant_refunds.refund_status='SUCCESS' 合计</div>
                   <div style="font-weight:600"><b>对账偏差</b> = 经营估算 − 实际现金流 (C/D未建表时临时= A+B − E)</div>
                   <div style="margin-top:4px; color:#909399">【v3 纠正】C/D 不是商户号流水分桶,而是两张独立业务表;商户号流水单独对应第五张表E=实际现金流</div>
                 </div>
@@ -110,60 +59,7 @@
             </el-tooltip>
           </div>
         </template>
-        <el-row :gutter="12">
-          <!-- 路线A -->
-          <el-col :xs="12" :sm="6"><div class="route-card">
-            <div class="route-label" style="color:#409eff">A. 退费单-线上直退</div>
-            <div class="route-amount">{{ formatMoney(summary.cash_routes?.route_a?.amount) }}</div>
-            <div class="route-count">{{ formatNum(summary.cash_routes?.route_a?.count) }} 笔</div>
-            <div class="route-tip">refunds refund_method='线上'</div>
-          </div></el-col>
-          <!-- 路线B -->
-          <el-col :xs="12" :sm="6"><div class="route-card">
-            <div class="route-label" style="color:#67c23a">B. 钱包-用户取现</div>
-            <div class="route-amount">{{ formatMoney(summary.cash_routes?.route_b?.amount) }}</div>
-            <div class="route-count">{{ formatNum(summary.cash_routes?.route_b?.count) }} 笔</div>
-            <div class="route-tip">wallet_withdrawals op_type='用户提现'</div>
-          </div></el-col>
-          <!-- 路线C 独立业务表 -->
-          <el-col :xs="12" :sm="6"><div class="route-card" style="opacity:{{ (summary.cash_routes?.route_c?.count ?? 0) === 0 ? .6 : 1 }}">
-            <div class="route-label" style="color:#e6a23c">C. 闪猫退款 (独立业务表)</div>
-            <div class="route-amount">{{ formatMoney(summary.cash_routes?.route_c?.amount) }}</div>
-            <div class="route-count">{{ formatNum(summary.cash_routes?.route_c?.count) }} 笔</div>
-            <div class="route-tip">shenmao_refund (未建表暂0,建表后自动并入)</div>
-          </div></el-col>
-          <!-- 路线D 独立业务表 -->
-          <el-col :xs="12" :sm="6"><div class="route-card" style="opacity:{{ (summary.cash_routes?.route_d?.count ?? 0) === 0 ? .6 : 1 }}">
-            <div class="route-label" style="color:#909399">D. 其他退款 (独立业务表)</div>
-            <div class="route-amount">{{ formatMoney(summary.cash_routes?.route_d?.amount) }}</div>
-            <div class="route-count">{{ formatNum(summary.cash_routes?.route_d?.count) }} 笔</div>
-            <div class="route-tip">other_refund (未建表暂0,建表后自动并入)</div>
-          </div></el-col>
-        </el-row>
-        <!-- 经营估算 + 实际现金流 + 对账偏差 -->
-        <el-row :gutter="12" style="margin-top:12px">
-          <el-col :xs="8"><div class="route-card route-sum" style="background:#ecf5ff">
-            <div class="route-label" style="color:#409eff">经营估算 (A+B+C+D)</div>
-            <div class="route-amount">{{ formatMoney(summary.cash_routes?.operational?.amount) }}</div>
-            <div class="route-count">{{ formatNum(summary.cash_routes?.operational?.count) }} 笔</div>
-          </div></el-col>
-          <el-col :xs="8"><div class="route-card route-sum" style="background:#fdf6ec">
-            <div class="route-label" style="color:#f56c6c">实际现金流 (商户号SUCCESS)</div>
-            <div class="route-amount">{{ formatMoney(summary.cash_routes?.actual_cashflow?.amount ?? summary.cash_routes?.financial?.amount) }}</div>
-            <div class="route-count">{{ formatNum(summary.cash_routes?.actual_cashflow?.count ?? summary.cash_routes?.financial?.count) }} 笔</div>
-          </div></el-col>
-          <el-col :xs="8"><div class="route-card route-sum" :style="(summary.cash_routes?.diff?.amount ?? 0) >= 0 ? 'background:#fef0f0' : 'background:#f0f9eb'">
-            <div class="route-label" :style="(summary.cash_routes?.diff?.amount ?? 0) >= 0 ? 'color:#f56c6c' : 'color:#67c23a'">
-              对账偏差 (经营 − 实际)
-            </div>
-            <div class="route-amount" :style="(summary.cash_routes?.diff?.amount ?? 0) >= 0 ? 'color:#f56c6c' : 'color:#67c23a'">
-              {{ (summary.cash_routes?.diff?.amount ?? 0) >= 0 ? '+' : '' }}{{ formatMoney(summary.cash_routes?.diff?.amount) }}
-            </div>
-            <div class="route-count" :style="(summary.cash_routes?.diff?.count ?? 0) >= 0 ? 'color:#f56c6c' : 'color:#67c23a'">
-              {{ (summary.cash_routes?.diff?.count ?? 0) >= 0 ? '+' : '' }}{{ formatNum(summary.cash_routes?.diff?.count) }} 笔
-            </div>
-          </div></el-col>
-        </el-row>
+        <RouteSplit :routes="summary.cash_routes || {}" :hide-header="true" />
       </el-card>
 
       <!-- 空数据提示 -->
@@ -311,6 +207,8 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import BaseChart from '@/components/BaseChart.vue'
+import KpiCard from '@/components/dashboard/KpiCard.vue'
+import RouteSplit from '@/components/dashboard/RouteSplit.vue'
 import { useAuthStore } from '@/stores/auth'
 import { getSummary, operation } from '@/api/analytics'
 import { listTodos } from '@/api/todo'
@@ -319,7 +217,10 @@ import { listAnalysisViews } from '@/api/analysis-view'
 import { listOperationLogs } from '@/api/operationLog'
 import { listTasks } from '@/api/task'
 import dayjs from 'dayjs'
-import { WarningFilled, Tickets, QuestionFilled } from '@element-plus/icons-vue'
+import {
+  Money, Document, Wallet, ChatDotRound, Tickets, WarningFilled, Bell,
+  QuestionFilled, ArrowRight, List,
+} from '@element-plus/icons-vue'
 
 const authStore = useAuthStore()
 
@@ -356,6 +257,85 @@ const roleTagType = computed(() => (authStore.role === 'admin' ? 'danger' : auth
 const formatMoney = (v) => (v == null ? '0.00' : Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const formatNum = (v) => (v == null ? '0' : Number(v).toLocaleString('zh-CN'))
 const formatTime = (t) => (t ? dayjs(t).format('MM-DD HH:mm') : '-')
+
+// 管理层汇总卡片 (KpiCard 复用)
+const managerStatCards = computed(() => [
+  {
+    key: 'refund_total',
+    label: '退款总额',
+    value: summary.value.refund_total,
+    unit: '元',
+    money: true,
+    icon: 'Money',
+    bg: '#ecf5ff',
+    color: '#409eff',
+    to: '/analytics/views',
+  },
+  {
+    key: 'refund_count',
+    label: '退费笔数',
+    value: summary.value.refund_count,
+    unit: '笔',
+    icon: 'Document',
+    bg: '#fdf6ec',
+    color: '#e6a23c',
+    to: '/analytics/views',
+  },
+  {
+    key: 'cash_out_total',
+    label: '真实现金流出',
+    value: summary.value.cash_out_total,
+    unit: '元',
+    money: true,
+    icon: 'Wallet',
+    bg: '#fef0f0',
+    color: '#f56c6c',
+    to: '/analytics/cash',
+  },
+  {
+    key: 'cs_reception_count',
+    label: '客服接待量',
+    value: summary.value.cs_reception_count,
+    icon: 'ChatDotRound',
+    bg: '#f0f9eb',
+    color: '#67c23a',
+    to: '/analytics/operator',
+  },
+  {
+    key: 'ticket_total',
+    label: '工单总数',
+    value: summary.value.ticket_total,
+    unit: '单',
+    icon: 'Tickets',
+    bg: '#ecf5ff',
+    color: '#409eff',
+    to: '/tickets',
+  },
+  {
+    key: 'complaint_total',
+    label: '投诉工单',
+    value: summary.value.complaint_total,
+    unit: '单',
+    icon: 'WarningFilled',
+    bg: '#fef0f0',
+    color: '#f56c6c',
+    to: '/dashboards/today',
+    extraText: summary.value.complaint_ratio
+      ? `占 ${(summary.value.complaint_ratio * 100).toFixed(1)}%`
+      : '',
+    extraClass: 'card-complaint-extra',
+  },
+  {
+    key: 'todos',
+    label: '待办事项',
+    value: todoCount.value,
+    unit: '条',
+    icon: 'Bell',
+    bg: '#f4f4f5',
+    color: '#909399',
+    to: '/todos',
+  },
+])
 
 const chartIcon = (t) => ({ line: 'TrendCharts', bar: 'Histogram', pie: 'PieChart', table: 'Grid' }[t] || 'DataAnalysis')
 const chartIconColor = (t) => ({ line: '#409eff', bar: '#67c23a', pie: '#e6a23c', table: '#909399' }[t] || '#409eff')
@@ -465,9 +445,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.dashboard {
-  padding-bottom: 24px;
-}
+.dashboard { padding-bottom: 24px; }
 .greeting {
   display: flex;
   justify-content: space-between;
@@ -485,54 +463,28 @@ onMounted(async () => {
   gap: 12px;
   margin-bottom: 16px;
 }
-.stat-card {
+.card-row > div {
   cursor: pointer;
-  transition: transform 0.15s;
 }
-.stat-card:hover {
-  transform: translateY(-2px);
-}
-.stat {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-.stat-icon {
-  width: 52px;
-  height: 52px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.stat-label {
-  color: #909399;
-  font-size: 13px;
-}
-.stat-value {
-  font-size: 22px;
-  font-weight: 600;
-  color: #303133;
-  margin-top: 2px;
-}
-.stat-unit {
-  font-size: 13px;
-  font-weight: 400;
-  color: #909399;
-  margin-left: 4px;
-}
-.stat-sub {
+
+/* 投诉工单卡片的 extra 占比样式 */
+.card-complaint-extra {
   display: inline-block;
   font-size: 12px;
-  font-weight: 400;
+  font-weight: 500;
   color: #f56c6c;
-  margin-left: 6px;
-  margin-top: 2px;
-  padding: 1px 6px;
+  margin-top: 6px;
+  padding: 1px 8px;
   background: #fef0f0;
   border-radius: 10px;
 }
+
+/*
+以下样式已迁移到 components/dashboard/* 组件:
+  .stat / .stat-icon / .stat-label / .stat-value / .stat-unit / .stat-sub  → KpiCard.vue
+  .route-card / .route-sum / .route-label / .route-amount / .route-count / .route-tip → RouteSplit.vue
+*/
+
 .preset-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -606,9 +558,7 @@ onMounted(async () => {
 .mini-row:last-child {
   border-bottom: none;
 }
-.mini-row:hover .mini-label {
-  color: #409eff;
-}
+.mini-row:hover .mini-label { color: #409eff; }
 .mini-label {
   flex: 1;
   font-size: 14px;
@@ -619,9 +569,7 @@ onMounted(async () => {
   font-weight: 600;
   color: #303133;
 }
-.mini-arrow {
-  color: #c0c4cc;
-}
+.mini-arrow { color: #c0c4cc; }
 .op-list {
   display: flex;
   flex-direction: column;
@@ -631,9 +579,7 @@ onMounted(async () => {
   padding: 6px 0;
   border-bottom: 1px solid #f5f5f5;
 }
-.op-item:last-child {
-  border-bottom: none;
-}
+.op-item:last-child { border-bottom: none; }
 .op-top {
   display: flex;
   justify-content: space-between;
@@ -684,49 +630,7 @@ onMounted(async () => {
   top: 8px;
   right: 8px;
 }
-.text-muted {
-  color: #c0c4cc;
-}
-.mb-16 {
-  margin-bottom: 16px;
-}
-.flex-between {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-/* 现金流出四路线卡片样式 */
-.route-card {
-  padding: 14px 14px;
-  border-radius: 8px;
-  background: #fafbfc;
-  border: 1px solid #ebeef5;
-  margin-bottom: 4px;
-}
-.route-card.route-sum {
-  padding: 16px 16px;
-  border: none;
-}
-.route-label {
-  font-size: 13px;
-  font-weight: 500;
-  margin-bottom: 6px;
-}
-.route-amount {
-  font-size: 20px;
-  font-weight: 600;
-  color: #303133;
-  line-height: 1.2;
-}
-.route-count {
-  font-size: 12px;
-  color: #606266;
-  margin-top: 4px;
-}
-.route-tip {
-  font-size: 11px;
-  color: #909399;
-  margin-top: 2px;
-  font-family: 'SF Mono', Menlo, monospace;
-}
+.text-muted { color: #c0c4cc; }
+.mb-16 { margin-bottom: 16px; }
+.flex-between { display: flex; justify-content: space-between; align-items: center; }
 </style>
