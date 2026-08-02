@@ -143,7 +143,11 @@ class SyncTaskManager:
     # ---------- 对外: 预检 / 锁判断 ----------
 
     def is_busy(self) -> bool:
-        return self._executing or (self._current_task and self._current_task.status == "running")
+        # 注意: Python 的 a or b 在 a=False, b=None 时返回 None, 必须显式转 bool
+        busy = bool(self._executing)
+        if not busy and self._current_task is not None:
+            busy = bool(self._current_task.status == "running")
+        return busy
 
     def get_current_task(self) -> SyncTask | None:
         return self._current_task

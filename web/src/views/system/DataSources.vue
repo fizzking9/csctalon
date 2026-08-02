@@ -1,11 +1,17 @@
 <template>
-  <div class="page-container">
-    <div class="flex-between mb-16">
+  <div :class="embedded ? 'embedded-wrap' : 'page-container'">
+    <div v-if="!embedded" class="flex-between mb-16">
       <div class="page-title" style="margin: 0">数据源管理</div>
       <el-button type="primary" :icon="Refresh" :loading="refreshing" @click="handleRefresh">重建元数据</el-button>
     </div>
 
     <el-card>
+      <template #header v-if="embedded">
+        <div class="flex justify-between items-center">
+          <span>数据源管理</span>
+          <el-button type="primary" :icon="Refresh" :loading="refreshing" @click="handleRefresh">重建元数据</el-button>
+        </div>
+      </template>
       <el-table :data="list" v-loading="loading" border stripe>
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column prop="code" label="代码" width="140" />
@@ -76,6 +82,10 @@ import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Star, Check } from '@element-plus/icons-vue'
 import { listDataSources, listDataSourceFields, refreshDataSources } from '@/api/data-source'
+
+defineProps({
+  embedded: { type: Boolean, default: false },
+})
 
 const list = ref([])
 const loading = ref(false)

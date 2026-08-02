@@ -1,7 +1,7 @@
 <template>
-  <div class="page-container">
-    <div class="page-title">导入记录</div>
-    <el-card>
+  <div :class="embedded ? 'records-embedded' : 'page-container'">
+    <div v-if="!embedded" class="page-title">采集记录</div>
+    <el-card :shadow="embedded ? 'never' : 'always'">
       <div class="flex-between mb-16">
         <div class="flex gap-8">
           <el-select v-model="filter.data_type" placeholder="数据类型" clearable style="width: 180px" @change="loadData">
@@ -64,6 +64,10 @@ import { Refresh } from '@element-plus/icons-vue'
 import { listUploadRecords } from '@/api/upload'
 import { TYPE_LABELS } from './templates'
 import dayjs from 'dayjs'
+
+defineProps({
+  embedded: { type: Boolean, default: false },
+})
 
 const list = ref([])
 const total = ref(0)

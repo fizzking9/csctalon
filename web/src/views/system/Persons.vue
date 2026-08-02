@@ -10,6 +10,7 @@
         <el-button :icon="Refresh" :loading="rebuilding" @click="handleRebuild">重建别名</el-button>
         <el-button :icon="Connection" :loading="importingShop" @click="handleBatchImportShop">纳入店铺客服</el-button>
         <el-button :icon="Connection" :loading="importingQw" @click="handleBatchImportQw">纳入企微客服</el-button>
+        <el-button :icon="Connection" :loading="importingRnd" @click="handleBatchImportRnd">纳入研发</el-button>
         <el-button :icon="Connection" @click="loadSuggestions">归并建议</el-button>
       </div>
     </div>
@@ -87,45 +88,84 @@
           </el-button>
         </div>
         <el-table
-          :data="list"
+          :data="treeList"
           v-loading="loading"
           size="small"
           border
           stripe
           highlight-current-row
-          :row-key="(r) => r.id"
+          row-key="id"
+          :tree-props="{ children: 'children' }"
+          default-expand-all
           height="calc(100vh - 220px)"
-          @row-click="selectPerson"
+          @row-click="onRowClick"
           @selection-change="onPersonSelect"
           @sort-change="onSortChange"
           @filter-change="onFilterChange"
         >
-          <el-table-column type="selection" width="38" />
-          <el-table-column prop="display_name" label="姓名" min-width="90" sortable="custom" show-overflow-tooltip />
-          <el-table-column prop="department" label="部门" width="100" column-key="department" :filtered-value="deptFilter" :filters="[{text:'企微客服部',value:'企微客服部'},{text:'店铺客服部',value:'店铺客服部'}]">
+          <el-table-column type="selection" width="38" :selectable="isPersonRow" :reserve-selection="false" />
+          <el-table-column prop="display_name" label="名称" width="180" show-overflow-tooltip>
             <template #default="{ row }">
-              <el-tag v-if="row.department" :type="row.department === '店铺客服部' ? 'warning' : ''" size="small">{{ row.department }}</el-tag>
+              <template v-if="row._nodeType === 'dept'">
+                <span style="font-weight:600; color:#303133">{{ row.display_name }}</span>
+                <span style="margin-left:6px; color:#909399; font-size:12px">{{ row._personCount }}人</span>
+              </template>
+              <template v-else-if="row._nodeType === 'group'">
+                <span style="color:#606266; font-weight:500">{{ row.display_name || '未分组' }}</span>
+                <span style="margin-left:6px; color:#c0c4cc; font-size:12px">{{ row._personCount }}人</span>
+              </template>
+              <template v-else>
+                <span>{{ row.display_name }}</span>
+              </template>
+            </template>
+          </el-table-column>
+          <el-table-column prop="department" label="部门" width="90" column-key="department" :filtered-value="deptFilter" :filters="[{text:'企微',value:'企微'},{text:'店铺',value:'店铺'},{text:'研发',value:'研发'}]">
+            <template #default="{ row }">
+              <template v-if="row._nodeType === 'dept'">
+                <el-tag :type="row.department === '店铺' ? 'warning' : ''" size="small">{{ row.department }}</el-tag>
+              </template>
+              <template v-else-if="row._nodeType === 'group'">
+                <span style="color:#c0c4cc">—</span>
+              </template>
+              <template v-else>
+                <el-tag v-if="row.department" :type="row.department === '店铺' ? 'warning' : ''" size="small">{{ row.department }}</el-tag>
+                <span v-else style="color:#c0c4cc">-</span>
+              </template>
+            </template>
+          </el-table-column>
+          <el-table-column prop="group_name" label="小组" width="110" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span v-if="row._nodeType === 'group'" style="color:#909399">{{ row.display_name || '未分组' }}</span>
+              <span v-else-if="row._nodeType === 'person' && row.group_name" style="color:#606266">{{ row.group_name }}</span>
               <span v-else style="color:#c0c4cc">-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="role" label="角色" width="70" column-key="role" :filtered-value="roleFilter" :filters="[{text:'客服',value:'agent'},{text:'主管',value:'supervisor'},{text:'管理员',value:'admin'}]">
-            <template #default="{ row }">{{ roleLabels[row.role] || row.role }}</template>
-          </el-table-column>
-          <el-table-column prop="employment_status" label="在职" width="70" column-key="employment_status" :filtered-value="empStatusFilter" :filters="[{text:'在职',value:'active'},{text:'试用期',value:'probation'},{text:'正式',value:'regular'},{text:'离职',value:'resigned'}]">
+          <el-table-column prop="role" label="角色" width="62" column-key="role" :filtered-value="roleFilter" :filters="[{text:'客服',value:'agent'},{text:'主管',value:'supervisor'},{text:'管理员',value:'admin'}]">
             <template #default="{ row }">
-              <el-tag :type="employmentStatusTag(row.employment_status)" size="small">{{ employmentStatusLabels[row.employment_status] || row.employment_status }}</el-tag>
+              <template v-if="row._nodeType === 'person'">{{ roleLabels[row.role] || row.role }}</template>
+              <span v-else style="color:#c0c4cc">-</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="110" fixed="right">
+          <el-table-column prop="employment_status" label="在职" width="62" column-key="employment_status" :filtered-value="empStatusFilter" :filters="[{text:'在职',value:'active'},{text:'试用期',value:'probation'},{text:'正式',value:'regular'},{text:'离职',value:'resigned'}]">
             <template #default="{ row }">
-              <el-button text type="primary" size="small" @click.stop="selectPerson(row)">详情</el-button>
-              <el-button text type="warning" size="small" @click.stop="toggleActive(row)">{{ row.is_active ? '停用' : '启用' }}</el-button>
+              <template v-if="row._nodeType === 'person'">
+                <el-tag :type="employmentStatusTag(row.employment_status)" size="small">{{ employmentStatusLabels[row.employment_status] || row.employment_status }}</el-tag>
+              </template>
+              <span v-else style="color:#c0c4cc">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="100" fixed="right">
+            <template #default="{ row }">
+              <template v-if="row._nodeType === 'person'">
+                <el-button text type="primary" size="small" @click.stop="selectPerson(row)">详情</el-button>
+                <el-button text type="warning" size="small" @click.stop="toggleActive(row)">{{ row.is_active ? '停用' : '启用' }}</el-button>
+              </template>
+              <span v-else style="color:#c0c4cc">-</span>
             </template>
           </el-table-column>
         </el-table>
         <div class="mt-8 flex-between">
-          <span style="color:#909399; font-size:12px">共 {{ total }} 条</span>
-          <el-pagination v-model:current-page="page" :total="total" :page-size="20" size="small" layout="prev, pager, next" @current-change="loadData" />
+          <span style="color:#909399; font-size:12px">部门 {{ deptCount }} 个 · 小组 {{ groupCount }} 个 · 人员 {{ total }} 人</span>
         </div>
       </el-card>
 
@@ -139,7 +179,7 @@
           <div class="detail-header mb-12">
             <div class="flex gap-8" style="align-items:center; flex-wrap:wrap">
               <el-input v-model="editForm.display_name" style="width: 180px" size="default" />
-              <el-tag v-if="currentDetail.department" :type="currentDetail.department === '店铺客服部' ? 'warning' : ''" size="small">{{ currentDetail.department }}</el-tag>
+              <el-tag v-if="currentDetail.department" :type="currentDetail.department === '店铺' ? 'warning' : ''" size="small">{{ currentDetail.department }}</el-tag>
               <el-tag size="small" :type="currentDetail.is_confirmed ? 'success' : 'warning'">{{ currentDetail.is_confirmed ? '已确认' : '待确认' }}</el-tag>
               <el-tag size="small" :type="currentDetail.is_active ? 'success' : 'danger'">{{ currentDetail.is_active ? '启用' : '停用' }}</el-tag>
               <span style="color:#909399; font-size:12px">别名 {{ currentDetail.alias_count }} · ID {{ currentDetail.id }}</span>
@@ -156,8 +196,9 @@
           <el-form :model="editForm" label-position="top" size="small" class="edit-grid">
             <el-form-item label="部门">
               <el-select v-model="editForm.department" filterable allow-create default-first-option placeholder="选择/输入" style="width:100%">
-                <el-option label="企微客服部" value="企微客服部" />
-                <el-option label="店铺客服部" value="店铺客服部" />
+                <el-option label="企微" value="企微" />
+                <el-option label="店铺" value="店铺" />
+                <el-option label="研发" value="研发" />
               </el-select>
             </el-form-item>
             <el-form-item label="角色">
@@ -272,7 +313,7 @@
         </el-form-item>
         <el-form-item label="部门">
           <el-select v-model="mergeNewForm.department" style="width: 100%" filterable allow-create default-first-option placeholder="选择或输入部门">
-            <el-option label="企微客服部" value="企微客服部" /><el-option label="店铺客服部" value="店铺客服部" />
+            <el-option label="企微" value="企微" /><el-option label="店铺" value="店铺" /><el-option label="研发" value="研发" />
           </el-select>
         </el-form-item>
         <el-form-item label="组"><el-input v-model="mergeNewForm.group_name" placeholder="可选(将记为初始任职)" /></el-form-item>
@@ -380,7 +421,7 @@
         <el-form-item label="部门">
           <el-checkbox v-model="batchApply.department" style="width:90px">修改</el-checkbox>
           <el-select v-model="batchForm.department" filterable allow-create default-first-option placeholder="选择/输入" style="width: calc(100% - 100px)">
-            <el-option label="企微客服部" value="企微客服部" /><el-option label="店铺客服部" value="店铺客服部" />
+            <el-option label="企微" value="企微" /><el-option label="店铺" value="店铺" />
           </el-select>
         </el-form-item>
         <el-form-item label="角色">
@@ -537,7 +578,10 @@ import {
 import { parseUpload } from '@/api/upload'
 
 const list = ref([])
+const treeList = ref([])
 const total = ref(0)
+const deptCount = ref(0)
+const groupCount = ref(0)
 const loading = ref(false)
 const page = ref(1)
 const router = useRouter()
@@ -550,6 +594,7 @@ const refreshing = ref(false)
 const rebuilding = ref(false)
 const importingShop = ref(false)
 const importingQw = ref(false)
+const importingRnd = ref(false)
 const submitting = ref(false)
 const mergingAliasId = ref(null)
 const batchMerging = ref(false)
@@ -621,8 +666,8 @@ async function loadData() {
   loading.value = true
   try {
     const res = await listPersons({
-      page: page.value,
-      page_size: 20,
+      page: 1,
+      page_size: 5000,
       status: filter.status,
       sort_by: sort.sort_by,
       sort_order: sort.sort_order,
@@ -630,30 +675,111 @@ async function loadData() {
       ...(filter.role ? { role: filter.role } : {}),
       ...(filter.employment_status ? { employment_status: filter.employment_status } : {}),
     })
-    list.value = res.data.items
+    const flat = res.data.items
+    list.value = flat
     total.value = res.data.total
+    const { tree, nDept, nGroup } = buildPersonTree(flat)
+    treeList.value = tree
+    deptCount.value = nDept
+    groupCount.value = nGroup
   } finally {
     loading.value = false
   }
 }
 
+function buildPersonTree(flatItems) {
+  // 层级: 部门 → 小组 → 人员(三级, 无小组入"未分组"
+  const deptMap = new Map()
+  const _deptOrder = []
+  const _groupOrder = new Map()  // deptKey → [groupKeys 有序
+  for (const p of flatItems) {
+    const deptKey = p.department || '未分配'
+    const groupKey = p.group_name || '未分组'
+    if (!deptMap.has(deptKey)) {
+      const deptNode = {
+        id: `D_${deptKey}`,
+        _nodeType: 'dept',
+        display_name: deptKey,
+        department: deptKey === '未分配' ? '' : deptKey,
+        group_name: '',
+        role: '',
+        employment_status: '',
+        is_active: true,
+        _personCount: 0,
+        children: [],
+      }
+      deptMap.set(deptKey, deptNode)
+      _deptOrder.push(deptKey)
+      _groupOrder.set(deptKey, [])
+    }
+    const deptNode = deptMap.get(deptKey)
+    // 找或建 group 子节点
+    let groupNode = deptNode.children.find(c => c._groupKey === groupKey)
+    if (!groupNode) {
+      groupNode = {
+        id: `G_${deptKey}_${groupKey}`,
+        _nodeType: 'group',
+        _groupKey: groupKey,
+        display_name: groupKey,
+        department: deptKey === '未分配' ? '' : deptKey,
+        group_name: groupKey === '未分组' ? '' : groupKey,
+        role: '',
+        employment_status: '',
+        is_active: true,
+        _personCount: 0,
+        children: [],
+      }
+      deptNode.children.push(groupNode)
+      _groupOrder.get(deptKey).push(groupKey)
+    }
+    // 人员打标后加入 group
+    const personNode = { ...p, _nodeType: 'person' }
+    groupNode.children.push(personNode)
+    groupNode._personCount += 1
+    deptNode._personCount += 1
+  }
+  // 部门排序: 未分配放末尾; 小组内人员按原顺序保留(flat已按sort排序)
+  _deptOrder.sort((a, b) => {
+    if (a === '未分配') return 1
+    if (b === '未分配') return -1
+    return a.localeCompare(b, 'zh-CN')
+  })
+  const tree = _deptOrder.map(k => {
+    const n = deptMap.get(k)
+    // 小组排序: 未分组放末尾
+    n.children.sort((a, b) => {
+      const ak = a._groupKey, bk = b._groupKey
+      if (ak === '未分组') return 1
+      if (bk === '未分组') return -1
+      return ak.localeCompare(bk, 'zh-CN')
+    })
+    return n
+  })
+  const nDept = tree.length
+  const nGroup = tree.reduce((s, d) => s + d.children.length, 0)
+  return { tree, nDept, nGroup }
+}
+
+function isPersonRow(row) { return row && row._nodeType === 'person' }
+function onRowClick(row) { if (isPersonRow(row)) selectPerson(row) }
+
 function onStatusChange() { page.value = 1; loadData() }
 
 function onSortChange({ prop, order }) {
   if (order) {
-    sort.sort_by = prop || 'id'
+    sort.sort_by = prop === 'display_name' ? 'display_name' : (prop || 'id')
     sort.sort_order = order === 'ascending' ? 'asc' : 'desc'
   } else {
     sort.sort_by = 'id'; sort.sort_order = 'desc'
   }
-  page.value = 1; loadData()
+  loadData()
 }
 
 function onFilterChange(filters) {
   if (filters.department !== undefined) filter.department = filters.department[0] || ''
   if (filters.role !== undefined) filter.role = filters.role[0] || ''
   if (filters.employment_status !== undefined) filter.employment_status = filters.employment_status[0] || ''
-  page.value = 1; loadData()
+  loadData()
 }
 
 async function loadUnmerged() {
@@ -662,7 +788,10 @@ async function loadUnmerged() {
 }
 
 function onAliasSelect(rows) { selectedAliasIds.value = rows.map((r) => r.id) }
-function onPersonSelect(rows) { selectedPersonIds.value = rows.map((r) => r.id) }
+function onPersonSelect(rows) {
+  // 只选真实人员(id为数字),排除部门/小组虚拟节点
+  selectedPersonIds.value = rows.filter(r => r && r._nodeType === 'person').map(r => r.id)
+}
 function onDetailAliasSelect(rows) { selectedDetailAliasIds.value = rows.map((r) => r.id) }
 
 // 选中人员 → 右栏显示 + 填充 editForm
@@ -758,7 +887,7 @@ function goTimeline(row) {
 function openMergeToNew() {
   mergeNewForm.display_name = ''
   mergeNewForm.role = 'agent'
-  mergeNewForm.department = '企微客服部'
+  mergeNewForm.department = '企微'
   mergeNewForm.group_name = ''
   mergeNewVisible.value = true
 }
@@ -854,11 +983,11 @@ async function handleRebuild() {
 
 async function handleBatchImportShop() {
   try {
-    await ElMessageBox.confirm('将扫描待归并的「店铺-XXX」别名,按姓名去重建 Person 并归入「店铺客服部」。\n\n确认纳入?', '批量纳入店铺客服', { type: 'warning', confirmButtonText: '确认纳入', cancelButtonText: '取消' })
+    await ElMessageBox.confirm('将扫描待归并的「店铺-XXX」别名,按姓名去重建 Person 并归入「店铺」。\n\n确认纳入?', '批量纳入店铺客服', { type: 'warning', confirmButtonText: '确认纳入', cancelButtonText: '取消' })
   } catch { return }
   importingShop.value = true
   try {
-    const res = await batchImportByPrefix('店铺', '店铺客服部')
+    const res = await batchImportByPrefix('店铺', '店铺')
     const d = res.data
     ElMessage.success(`纳入完成: 新建 ${d.created} 人 / 归并到已有 ${d.merged_to_existing} / 别名归并 ${d.aliases_assigned}`)
     loadData(); loadUnmerged()
@@ -867,15 +996,28 @@ async function handleBatchImportShop() {
 
 async function handleBatchImportQw() {
   try {
-    await ElMessageBox.confirm('将扫描待归并的「企微-XXX」别名,按姓名去重建 Person 并归入「企微客服部」。\n\n确认纳入?', '批量纳入企微客服', { type: 'warning', confirmButtonText: '确认纳入', cancelButtonText: '取消' })
+    await ElMessageBox.confirm('将扫描待归并的「企微-XXX」别名,按姓名去重建 Person 并归入「企微」。\n\n确认纳入?', '批量纳入企微客服', { type: 'warning', confirmButtonText: '确认纳入', cancelButtonText: '取消' })
   } catch { return }
   importingQw.value = true
   try {
-    const res = await batchImportByPrefix('企微', '企微客服部')
+    const res = await batchImportByPrefix('企微', '企微')
     const d = res.data
     ElMessage.success(`纳入完成: 新建 ${d.created} 人 / 归并到已有 ${d.merged_to_existing} / 别名归并 ${d.aliases_assigned}`)
     loadData(); loadUnmerged()
   } finally { importingQw.value = false }
+}
+
+async function handleBatchImportRnd() {
+  try {
+    await ElMessageBox.confirm('将扫描待归并的「研发-XXX」别名,按姓名去重建 Person 并归入「研发」部门。\n\n确认纳入?', '批量纳入研发', { type: 'warning', confirmButtonText: '确认纳入', cancelButtonText: '取消' })
+  } catch { return }
+  importingRnd.value = true
+  try {
+    const res = await batchImportByPrefix('研发', '研发')
+    const d = res.data
+    ElMessage.success(`纳入完成: 新建 ${d.created} 人 / 归并到已有 ${d.merged_to_existing} / 别名归并 ${d.aliases_assigned}`)
+    loadData(); loadUnmerged()
+  } finally { importingRnd.value = false }
 }
 
 async function mergeAliasToSuggested(row) {
@@ -1171,17 +1313,20 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.persons-page :deep(.el-card__body) { padding: 12px; }
-.split-layout { display: flex; gap: 12px; align-items: stretch; }
-.left-panel { width: 38%; min-width: 360px; display: flex; flex-direction: column; }
+.persons-page :deep(.el-card__body) { padding: 10px; }
+.split-layout { display: flex; gap: 10px; align-items: stretch; }
+.left-panel { width: 58%; min-width: 480px; display: flex; flex-direction: column; }
 .right-panel { flex: 1; min-width: 0; overflow: auto; }
-.right-panel :deep(.el-card__body) { max-height: calc(100vh - 120px); overflow: auto; }
+.right-panel :deep(.el-card__body) { padding: 12px; max-height: calc(100vh - 120px); overflow: auto; }
 .empty-tip { display: flex; align-items: center; justify-content: center; height: 60vh; }
-.detail-header { padding-bottom: 8px; border-bottom: 1px solid #ebeef5; }
+.detail-header { padding-bottom: 6px; border-bottom: 1px solid #ebeef5; }
+.detail-header .flex.gap-8 { gap: 6px !important; }
+.detail-content { padding: 0; }
 .section-title { font-weight: 600; font-size: 14px; }
 .mirror-field { color: #606266; }
-.edit-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 12px; }
-.edit-grid :deep(.el-form-item) { margin-bottom: 8px; }
+.edit-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px 8px; }
+.edit-grid :deep(.el-form-item) { margin-bottom: 4px; }
+.edit-grid :deep(.el-form-item__label) { padding-bottom: 2px; line-height: 1.2; }
 .edit-grid .full-row { grid-column: 1 / -1; }
 .alias-collapse :deep(.el-collapse-item__header) { padding: 0 12px; }
 .alias-collapse :deep(.el-collapse-item__content) { padding-bottom: 8px; }

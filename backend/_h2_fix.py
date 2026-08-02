@@ -120,7 +120,7 @@ for grp_name, members in GROUP_PLAN.items():
 
 zhang_lei = db.execute(select(Person).where(Person.display_name == '张蕾', Person.is_active==True)).scalars().first()
 if zhang_lei:
-    zhang_lei.department = '企微客服部'
+    zhang_lei.department = '企微'
     if not zhang_lei.position: zhang_lei.position = '主管'
     if not zhang_lei.specialty: zhang_lei.specialty = '主管'
     zhang_lei.group_name = None
@@ -145,7 +145,7 @@ rows = db.execute(select(
     Person.position,
     func.count()
 ).where(
-    Person.department == '企微客服部',
+    Person.department == '企微',
     Person.is_active == True,
     Person.display_name.notin_(['用户自助','系统自动']),
 ).group_by(func.coalesce(Person.group_name, '(未设置/统管)'), Person.position)

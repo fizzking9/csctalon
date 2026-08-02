@@ -175,7 +175,7 @@ def list_persons(
     db: DBSession,
     _: CurrentUser,
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(20, ge=1, le=5000),
     keyword: str | None = Query(None, description="按姓名/部门模糊搜索"),
     status: str | None = Query(None, description="confirmed/unconfirmed/inactive"),
     department: str | None = Query(None, description="按部门过滤"),

@@ -27,19 +27,21 @@ const routes = [
         meta: { title: '数据采集', icon: 'Upload' },
       },
       // 兼容旧路径
-      { path: 'data/upload', redirect: '/data/ingest' },
-      { path: 'data/fetch', redirect: '/data/ingest?ingest=fetch' },
+      { path: 'data/upload', redirect: '/data/ingest?tab=upload' },
+      { path: 'data/fetch', redirect: '/data/ingest?tab=fetch' },
+      { path: 'data/records', redirect: '/data/ingest?tab=records' },
+      { path: 'data/browser', redirect: '/data/ingest?tab=browser' },
       {
         path: 'data/records',
         name: 'DataRecords',
         component: () => import('@/views/data/Records.vue'),
-        meta: { title: '导入记录', icon: 'Document' },
+        meta: { title: '采集记录', icon: 'Document', hidden: true },
       },
       {
         path: 'data/browser',
         name: 'DataBrowser',
         component: () => import('@/views/data/Browser.vue'),
-        meta: { title: '数据查看', icon: 'DataAnalysis' },
+        meta: { title: '数据查看', icon: 'DataAnalysis', hidden: true },
       },
       // 分析看板
       {
@@ -257,9 +259,13 @@ const routes = [
       },
       {
         path: 'system/data-sources',
+        redirect: '/data/ingest?tab=data-sources',
+      },
+      {
+        path: 'system/data-sources',
         name: 'SystemDataSources',
         component: () => import('@/views/system/DataSources.vue'),
-        meta: { title: '数据源管理', icon: 'Coin', admin: true },
+        meta: { title: '数据源管理', icon: 'Coin', admin: true, hidden: true },
       },
       {
         path: 'system/persons',
@@ -281,9 +287,13 @@ const routes = [
       },
       {
         path: 'system/sync-settings',
+        redirect: '/data/ingest?tab=sync-settings',
+      },
+      {
+        path: 'system/sync-settings',
         name: 'SystemSyncSettings',
         component: () => import('@/views/system/SyncSettings.vue'),
-        meta: { title: '同步设置', icon: 'Setting', admin: true },
+        meta: { title: '同步设置', icon: 'Setting', admin: true, hidden: true },
       },
     ],
   },

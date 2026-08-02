@@ -375,16 +375,27 @@ async def task_submit(payload: SyncAllRequest, current_user: CurrentUser):
 @router.get("/task/status", response_model=R[TaskStatusResponse], summary="[新版]查询同步任务进度")
 def task_status(_: CurrentUser, task_id: str | None = None):
     """
-    - task_id 为空: 返回当前(最近一次)任务
+    - task_id 为空: 返回当前(最近一次)任务,但若为终态且超过5分钟则不返回(避免每次打开页面都显示历史"智能助手处理记录导入"等日志)
     - task_id 不为空: 返回指定任务
     同时返回全局 busy 状态和冷却秒数,方便前端判断 UI
     """
     task = sync_task_manager.get_task(task_id)
+    task_public = None
+    if task:
+        is_terminal = task.status in ("success", "failed", "partial")
+        # 当用户未指定 task_id 时,若是终态且 finished_at 超过 5 分钟,则视为"历史残留"不返回
+        # 避免用户一打开页面就看到上次同步的日志(如智能助手处理记录导入),产生"系统总在后台跑任务"的错觉
+        if task_id is None and is_terminal and task.finished_at is not None:
+            elapsed = (datetime.now(TZ_CN) - task.finished_at.replace(tzinfo=TZ_CN) if task.finished_at.tzinfo is None else datetime.now(TZ_CN) - task.finished_at.astimezone(TZ_CN)).total_seconds()
+            if elapsed > 300:
+                task = None
+        if task is not None:
+            task_public = task.to_public_dict()
     return R(data=TaskStatusResponse(
         task_id=task.task_id if task else None,
         busy=sync_task_manager.is_busy(),
         cooldown_remaining=sync_task_manager.remaining_cooldown_seconds(),
-        task=task.to_public_dict() if task else None,
+        task=task_public,
     ))
 
 

@@ -126,7 +126,7 @@ for grp_name, members in GROUP_PLAN.items():
                 sa_terminated += 1
             new_sa = StaffAssignment(
                 person_id = p.id,
-                department = p.department or '企微客服部',
+                department = p.department or '企微',
                 position = p.position or pos,
                 group_name = grp_name,
                 specialty = sp,
@@ -140,10 +140,10 @@ for grp_name, members in GROUP_PLAN.items():
             db.add(new_sa)
             sa_created += 1
 
-# 主管张蕾: 挂在企微客服部 组名留 空=统管 (不落在任何组里 因为是部门主管)
+# 主管张蕾: 挂在企微 组名留 空=统管 (不落在任何组里 因为是部门主管)
 zhang_lei = db.execute(select(Person).where(Person.display_name == '张蕾', Person.is_active==True)).scalars().first()
 if zhang_lei:
-    zhang_lei.department = '企微客服部'
+    zhang_lei.department = '企微'
     if not zhang_lei.position: zhang_lei.position = '主管'
     if not zhang_lei.specialty: zhang_lei.specialty = '主管'
     zhang_lei.group_name = None  # 部门主管不编入具体小组 全部门统管
@@ -153,7 +153,7 @@ if zhang_lei:
         old_sa.is_current = False; old_sa.effective_to = TODAY-_dt.timedelta(days=1); old_sa.updated_at = NOW
         sa_terminated += 1
     db.add(StaffAssignment(
-        person_id=zhang_lei.id, department='企微客服部', position='主管', group_name=None, specialty='主管',
+        person_id=zhang_lei.id, department='企微', position='主管', group_name=None, specialty='主管',
         effective_from=TODAY, effective_to=_dt.date(9999,12,31), is_current=True,
         source='manual_excel_group_20260802', created_at=NOW, updated_at=NOW,
     ))
@@ -167,13 +167,13 @@ if errors:
     for e in errors: print(f"   - {e}")
 
 # 汇总校验
-print("\n=== 汇总: 按 group_name 聚合 Person (企微客服部在职) ===")
+print("\n=== 汇总: 按 group_name 聚合 Person (企微在职) ===")
 rows = db.execute(select(
     func.coalesce(Person.group_name, '(未设置/统管)'),
     Person.position,
     func.count()
 ).where(
-    Person.department == '企微客服部',
+    Person.department == '企微',
     Person.is_active == True,
     Person.display_name.notin_(['用户自助','系统自动']),
 ).group_by(func.coalesce(Person.group_name, '(未设置/统管)'), Person.position)

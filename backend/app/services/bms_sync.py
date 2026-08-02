@@ -37,11 +37,15 @@ DEFAULT_SYNC_TYPES = [dt for dt, cfg in BMS_DATA_SOURCES.items() if cfg.get("def
 
 
 def _get_last_sync_time(db: Session, data_type: str) -> datetime | None:
-    """查询某数据源最近一次成功同步的 end_time"""
+    """查询某数据源最近一次成功同步的 end_time
+
+    按 created_at 倒序取最近一次成功执行的记录,而不是 end_time 最大的。
+    否则更早的任务(抓跨日区间、end_time 偏大)会覆盖更晚执行、真实数据更近的记录。
+    """
     log = db.scalar(
         select(BmsSyncLog)
         .where(BmsSyncLog.data_type == data_type, BmsSyncLog.status == "success")
-        .order_by(desc(BmsSyncLog.end_time))
+        .order_by(desc(BmsSyncLog.created_at))
         .limit(1)
     )
     return log.end_time if log else None
@@ -465,7 +469,7 @@ def get_sync_status(db: Session) -> list[dict]:
         config = get_sync_source_config(db, data_type) or {}
         last_log = db.scalar(
             select(BmsSyncLog)
-            .where(BmsSyncLog.data_type == data_type)
+            .where(BmsSyncLog.data_type == data_type, BmsSyncLog.status == "success")
             .order_by(desc(BmsSyncLog.created_at))
             .limit(1)
         )

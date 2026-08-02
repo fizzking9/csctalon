@@ -25,8 +25,6 @@
             <span>数据中心</span>
           </template>
           <el-menu-item index="/data/ingest">数据采集</el-menu-item>
-          <el-menu-item index="/data/records">导入记录</el-menu-item>
-          <el-menu-item index="/data/browser">数据查看</el-menu-item>
           <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
           <el-menu-item index="/analytics/views">分析视图</el-menu-item>
           <el-menu-item index="/audit/device">设备审计</el-menu-item>
@@ -103,8 +101,6 @@
             <span>系统管理</span>
           </template>
           <el-menu-item index="/system/users">用户管理</el-menu-item>
-          <el-menu-item index="/system/data-sources">数据源管理</el-menu-item>
-          <el-menu-item index="/system/sync-settings">同步设置</el-menu-item>
           <el-menu-item index="/system/persons">人员管理</el-menu-item>
           <el-menu-item index="/system/classification-rules">分类规则</el-menu-item>
           <el-menu-item index="/system/operation-logs">操作日志</el-menu-item>

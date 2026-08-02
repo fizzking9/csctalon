@@ -34,6 +34,30 @@
         </template>
       </FilterBar>
     </div>
+    <!-- 值班组长(今日有接待的组长)：放在页头最显眼的位置 -->
+    <div v-if="dutyLeaders.length" class="duty-leader-bar mb-16">
+      <div class="duty-label">
+        <el-icon><Timer /></el-icon>
+        <span>今日值班组长</span>
+        <span class="duty-count">{{ dutyLeaders.length }}人</span>
+      </div>
+      <el-space wrap size="small" class="duty-chips">
+        <el-tag
+          v-for="(l,i) in dutyLeaders"
+          :key="i"
+          type="warning"
+          effect="dark"
+          size="small"
+          class="duty-chip"
+        >
+          <span class="chip-name">{{ l.name }}</span>
+          <span class="chip-sep">·</span>
+          <span class="chip-group">{{ l.group || l.department || '部门统管' }}</span>
+          <span class="chip-sep">·</span>
+          <span class="chip-stat">会话 {{ formatNum(l.reception_count) }} / 接待 {{ formatNum(l.reception_device_count ?? 0) }}</span>
+        </el-tag>
+      </el-space>
+    </div>
 
     <!-- 模块1: KPI卡 -->
     <section class="section-card mb-24">
@@ -144,7 +168,22 @@
 
     <!-- 模块7: 人均效率表 -->
     <section class="section-card mb-24">
-      <SectionHeader title="7. 今日人均效率" />
+      <SectionHeader title="7. 今日人均效率">
+        <template #extra v-if="dutyLeaders.length">
+          <el-tag type="warning" effect="plain" size="small" class="mr-4">今日值班组长</el-tag>
+          <el-space wrap size="small">
+            <el-tag
+              v-for="(l,i) in dutyLeaders"
+              :key="i"
+              type="warning"
+              effect="dark"
+              size="small"
+            >
+              {{ l.name }} · {{ l.group || l.department || '部门统管' }}
+            </el-tag>
+          </el-space>
+        </template>
+      </SectionHeader>
       <el-card shadow="never">
         <el-table :data="staffRows" border stripe size="small" max-height="520">
           <el-table-column label="排名" width="64" align="center" fixed>
@@ -155,7 +194,22 @@
               <span v-else class="text-muted">{{ $index + 1 }}</span>
             </template>
           </el-table-column>
-          <el-table-column prop="name" label="人员" width="110" />
+          <el-table-column label="人员" width="170">
+            <template #default="{ row }">
+              <div style="display:flex; flex-direction:column; gap:3px">
+                <div style="display:flex; align-items:center; gap:4px; flex-wrap:wrap">
+                  <span style="font-weight:600">{{ row.name }}</span>
+                  <el-tag
+                    v-if="isDutyLeader(row)"
+                    type="warning"
+                    effect="dark"
+                    size="small"
+                    style="padding: 0 4px; font-size: 10px; height: 18px; line-height: 16px; border-radius: 3px"
+                  >值班组长</el-tag>
+                </div>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="department" label="部门" width="110">
             <template #default="{ row }">
               <el-tag size="small" effect="plain" :type="row.department === '未设置' ? 'info' : 'success'">{{ row.department }}</el-tag>
@@ -190,45 +244,56 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column prop="refund_op_count" label="退款挽回" width="110" align="right" sortable>
+          <!-- 四专项独立列: 每列一行 n次(m个)，简洁不啰嗦 -->
+          <el-table-column label="咨询" width="108" align="center">
             <template #default="{ row }">
-              <span style="color:#909399;font-size:10px">挽回</span>
-              {{ formatNum(row.sp_tuikuan ?? row.refund_op_count) }}
+              <span class="sp-txt zx">{{ formatNum(row.breakdown?.['咨询接待']?.sessions ?? row.sp_zixun ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['咨询接待']?.people ?? row.pp_zixun ?? 0) }}</span>个)</span>
             </template>
           </el-table-column>
-          <el-table-column label="四专项明细" width="298" align="left">
+          <el-table-column label="套餐" width="108" align="center">
             <template #default="{ row }">
-              <div class="sp-legend">
-                <span class="sp-chip zx" v-if="row.sp_zixun" title="咨询接待 ×难度1.0">咨询{{ row.sp_zixun }}×1.0</span>
-                <span class="sp-chip tc" v-if="row.sp_taocan" title="套餐专项 ×难度1.8">套餐{{ row.sp_taocan }}×1.8</span>
-                <span class="sp-chip tk" v-if="row.sp_tuikuan" title="退款挽回 ×难度2.2">退款{{ row.sp_tuikuan }}×2.2</span>
-                <span class="sp-chip ts" v-if="row.sp_tousu" title="投诉专员 ×难度3.0">投诉{{ row.sp_tousu }}×3.0</span>
+              <span class="sp-txt tc">{{ formatNum(row.breakdown?.['套餐专项']?.sessions ?? row.sp_taocan ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['套餐专项']?.people ?? row.pp_taocan ?? 0) }}</span>个)</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="退款" width="108" align="center">
+            <template #default="{ row }">
+              <span class="sp-txt tk">{{ formatNum(row.breakdown?.['退款挽回']?.sessions ?? row.sp_tuikuan ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['退款挽回']?.people ?? row.pp_tuikuan ?? 0) }}</span>个)</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="投诉" width="108" align="center">
+            <template #default="{ row }">
+              <span class="sp-txt ts">{{ formatNum(row.breakdown?.['投诉专员']?.sessions ?? row.sp_tousu ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['投诉专员']?.people ?? row.pp_tousu ?? 0) }}</span>个)</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="工作量" width="104" align="right" sortable :sort-method="(a,b)=>Number(a.work_score||0)-Number(b.work_score||0)">
+            <template #default="{ row }">
+              <div style="position:relative">
+                <el-tooltip effect="light" placement="top" :show-arrow="false" popper-class="score-pop" teleported>
+                  <template #content>
+                    <div class="score-tooltip" v-html="scoreTooltipHtml(row,'work')" />
+                  </template>
+                  <el-tag size="small" effect="plain" :type="scoreTagType(row.work_score,500,300,100)">
+                    <span style="font-weight:600">{{ formatNum(row.work_score) }}</span>
+                  </el-tag>
+                </el-tooltip>
                 <el-tooltip
                   v-if="row.rank === null || row.is_virtual === true"
                   effect="dark" placement="top"
                   content="系统/用户自助/第三方设备账号等 不计入真人员工排名"
                 >
-                  <el-tag size="small" effect="dark" type="info" style="margin-left:4px">非真人</el-tag>
+                  <el-tag size="small" effect="dark" type="info" style="margin-left:4px;margin-top:2px">非真人</el-tag>
                 </el-tooltip>
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="工作量分" width="138" align="right" sortable :sort-method="(a,b)=>Number(a.work_score||0)-Number(b.work_score||0)">
+          <el-table-column label="效率" width="104" align="right" sortable :sort-method="(a,b)=>Number(a.eff_score||0)-Number(b.eff_score||0)">
             <template #default="{ row }">
-              <el-tooltip effect="dark" placement="top" :width="440" :content="scoreTooltip(row,'work')">
-                <el-tag size="small" effect="plain" :type="scoreTagType(row.work_score,500,300,100)">
-                  <span style="font-weight:600">{{ formatNum(row.work_score) }}</span>
-                  <span style="color:#909399;font-size:10px;margin-left:4px">分(次)</span>
-                </el-tag>
-              </el-tooltip>
-            </template>
-          </el-table-column>
-          <el-table-column label="效率分" width="138" align="right" sortable :sort-method="(a,b)=>Number(a.eff_score||0)-Number(b.eff_score||0)">
-            <template #default="{ row }">
-              <el-tooltip effect="dark" placement="top" :width="440" :content="scoreTooltip(row,'eff')">
+              <el-tooltip effect="light" placement="top" :show-arrow="false" popper-class="score-pop" teleported>
+                <template #content>
+                  <div class="score-tooltip" v-html="scoreTooltipHtml(row,'eff')" />
+                </template>
                 <el-tag size="small" effect="plain" :type="scoreTagType(row.eff_score,350,200,80)">
                   <span style="font-weight:600;color:#2563eb">{{ formatNum(row.eff_score) }}</span>
-                  <span style="color:#909399;font-size:10px;margin-left:4px">分(个)</span>
                 </el-tag>
               </el-tooltip>
             </template>
@@ -242,6 +307,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { Timer } from '@element-plus/icons-vue'
 import { today } from '@/api/analytics'
 import BaseChart from '@/components/BaseChart.vue'
 import { formatMoney } from '@/utils/format'
@@ -582,6 +648,40 @@ const queueData = ref({ todos: [], tasks: [], incidents: [] })
 
 // ---------- 模块6~7 人员效率表: 工作分 / 效率分 双列 + 本职/转接 breakdown ----------
 const staffRows = ref([])
+
+// ---------- 值班组长判定:
+//   1. 组长身份满足任一: position含"组长/主管" OR current_specialty==="组长/主管" OR 组名包含本人名(如"叶珍凤组"∋"叶珍凤")
+//   2. 出现在今日 staffRows 即视为今天已上岗(有接待/退款/投诉任一动作) → 值班组长
+//      (不再强制 reception_count>0: 组长当天可能只做管理/值班监督, 不亲自接客, 但仍算值班)
+//   3. 排除虚拟账号
+function isDutyLeader(r) {
+  if (!r || r.is_virtual) return false
+  const name = String(r.name || '').trim()
+  const pos = String(r.position || '')
+  const sp = String(r.current_specialty || '')
+  const grp = String(r.group || '')
+  const byPos = pos.includes('组长') || pos.includes('主管')
+  const bySp = sp === '组长' || sp === '主管'
+  const byGroup = !!(name && grp && (
+    // 精确匹配: 组名 = 姓名+"组"(最常见)
+    grp === `${name}组` ||
+    // 兼容: 组名中包含该姓名(如"林栩烽投诉组" "叶珍凤专项组")
+    grp.includes(name)
+  ))
+  return byPos || bySp || byGroup
+}
+const dutyLeaders = computed(() => {
+  const list = (staffRows.value || []).filter(isDutyLeader)
+  // 接待总量多的排前 → 一眼看到主力值班组长
+  list.sort((a, b) => {
+    const sa = (Number(a.reception_count) || 0) + (Number(a.reception_device_count) || 0)
+    const sb = (Number(b.reception_count) || 0) + (Number(b.reception_device_count) || 0)
+    // 同量按组名排 → 吴晓龙组/林栩烽组顺序稳定
+    if (sb !== sa) return sb - sa
+    return (a.group || '').localeCompare(b.group || '')
+  })
+  return list
+})
 function scoreTagType(score, tHi, tMid, tLo) {
   const n = Number(score) || 0
   if (n >= tHi) return 'danger'
@@ -630,7 +730,7 @@ function inferSpecialty(r) {
   }
   return GRP_DEFAULT_SP[r.group] || (r.group === '未分组' ? '—' : '综合管理')
 }
-// 工作分 / 效率分 通用 tooltip (mode: 'work' 会话次数维度 / 'eff' 接待个数维度)
+// 工作量 / 效率 通用 tooltip (纯文本, 兼容旧逻辑; 新渲染统一走 scoreTooltipHtml 返回结构化HTML)
 function scoreTooltip(r, mode) {
   const fmt = (v) => formatNum(v)
   const w = r.weights || { '咨询接待': 1.0, '套餐专项': 1.8, '退款挽回': 2.2, '投诉专员': 3.0 }
@@ -653,7 +753,7 @@ function scoreTooltip(r, mode) {
   ]
   const head = [
     `【${r.name || ''}】${r.position || '—'} · ${r.group || '部门统管'} · 专项：${sp}${hrMark}${mgmtMark}`,
-    `模式: ${isWork ? '工作量分 (会话次数维度, 反映忙闲强度)' : '效率分 (接待个数维度, SN去重, 反映覆盖面)'}`,
+    `模式: ${isWork ? '工作量 (会话次数维度, 反映忙闲强度)' : '效率 (接待个数维度, SN去重, 反映覆盖面)'}`,
     `系数: 本职=难度系数  非本职(转接)=难度系数×${xfer}`,
     '————————————————————',
   ]
@@ -678,8 +778,99 @@ function scoreTooltip(r, mode) {
   }
   const reported = isWork ? (Number(r.work_score) || 0) : (Number(r.eff_score) || 0)
   lines.push('————————————————————')
-  lines.push(`合成分 = ${total.toFixed(2)} 分${unitChar}   (接口返回: ${reported})`)
+  lines.push(`合成值 = ${total.toFixed(2)}   (接口返回: ${reported})`)
   return head.concat(lines).join('\n')
+}
+
+// 工作量 / 效率 通用 tooltip (返回结构化HTML, 分段显示 不挤成横条)
+function scoreTooltipHtml(r, mode) {
+  const fmt = (v) => formatNum(v)
+  const w = r.weights || { '咨询接待': 1.0, '套餐专项': 1.8, '退款挽回': 2.2, '投诉专员': 3.0 }
+  const xfer = Number(r.transfer_penalty || 0.2)
+  const bd = r.breakdown || {}
+  const useBreakdown = bd && bd['咨询接待'] && (typeof bd['咨询接待'].coef === 'number')
+  const isWork = mode === 'work'
+  const unitChar = isWork ? '次' : '个'
+  const modeColor = isWork ? '#d97706' : '#2563eb'  // 工作量橙 / 效率蓝
+  const modeName = isWork ? '工作量' : '效率'
+  const modeDesc = isWork ? '会话次数维度 · 反映忙闲强度' : '接待个数维度 · SN去重 · 反映覆盖面'
+  const contribKey = isWork ? 'work_contrib' : 'eff_contrib'
+  const countKey = isWork ? 'sessions' : 'people'
+  const sp = (r.current_specialty && r.current_specialty !== '组长') ? r.current_specialty : inferSpecialty(r)
+  const reported = isWork ? (Number(r.work_score) || 0) : (Number(r.eff_score) || 0)
+
+  const CATS = [
+    { k: '咨询接待', short: '咨询', color: '#409eff', fallback_s: r.sp_zixun, fallback_p: r.pp_zixun ?? 0 },
+    { k: '套餐专项', short: '套餐', color: '#67c23a', fallback_s: r.sp_taocan, fallback_p: r.pp_taocan ?? 0 },
+    { k: '退款挽回', short: '退款', color: '#e6a23c', fallback_s: r.sp_tuikuan, fallback_p: r.pp_tuikuan ?? 0 },
+    { k: '投诉专员', short: '投诉', color: '#f56c6c', fallback_s: r.sp_tousu, fallback_p: r.pp_tousu ?? 0 },
+  ]
+  // 头部: 人员+岗位+分组+专项
+  const headerHtml = `
+    <div class="stp-head">
+      <div class="stp-name">
+        <span class="stp-avatar">${(r.name || '?').slice(0,1)}</span>
+        <div>
+          <div class="stp-nameline"><b>${r.name || ''}</b> <span class="stp-meta">${r.position || '—'}</span></div>
+          <div class="stp-subline">${r.group || '部门统管'} · 专项 <b>${sp}</b>${r.is_management ? ' · <span class=\"stp-tag mgmt\">管理层·全系数</span>' : ''}${r.hr_category ? ` · <span class=\"stp-tag hr\">HR=${r.hr_category}</span>` : ''}</div>
+        </div>
+      </div>
+      <div class="stp-mode" style="border-color:${modeColor}33;background:${modeColor}0d;color:${modeColor}">
+        <div class="stp-mode-name">${modeName}</div>
+        <div class="stp-mode-desc">${modeDesc}</div>
+      </div>
+    </div>`
+  // 系数规则小提示
+  const coefHtml = `<div class="stp-coef">难度系数: 咨询×1.0 · 套餐×1.8 · 退款×2.2 · 投诉×3.0 · 转接=系数×${xfer}</div>`
+  // 四专项明细行
+  let total = 0
+  const rowsHtml = CATS.map(c => {
+    let n, coef, contrib, isOwn = true
+    if (useBreakdown) {
+      const b = bd[c.k] || { weight: w[c.k], coef: w[c.k], [countKey]: 0, [contribKey]: 0, is_own: true }
+      n = Number(b[countKey]) || 0
+      coef = Number(b.coef) || 0
+      contrib = Number(b[contribKey]) || 0
+      isOwn = !!b.is_own
+    } else {
+      n = isWork ? (Number(c.fallback_s) || 0) : (Number(c.fallback_p) || 0)
+      coef = w[c.k]
+      contrib = n * coef
+    }
+    total += contrib
+    const ownCls = isOwn ? 'own' : 'xfer'
+    const ownLabel = isOwn ? '本职' : `转接`
+    const isZero = n === 0
+    return `
+      <div class="stp-row ${isZero ? 'is-zero' : ''}" style="--cat-color:${c.color}">
+        <div class="stp-cat"><span class="stp-dot" style="background:${c.color}"></span>${c.short}</div>
+        <div class="stp-formula">
+          <span class="stp-num">${fmt(n)}</span><span class="stp-unit">${unitChar}</span>
+          <span class="stp-op">×</span><span class="stp-coef">${coef}</span>
+          <span class="stp-op">=</span><span class="stp-contrib">${contrib.toFixed(1)}</span>
+        </div>
+        <div class="stp-flag ${ownCls}">${ownLabel}</div>
+      </div>`
+  }).join('')
+  // 合计行
+  const totalHtml = `
+    <div class="stp-total">
+      <div class="stp-total-lbl">合计 ${modeName}</div>
+      <div class="stp-total-val" style="color:${modeColor}">
+        ${total.toFixed(2)}
+        <span class="stp-total-api">· 接口返回 ${reported}</span>
+      </div>
+    </div>`
+
+  return `
+    <div class="score-tooltip-inner">
+      ${headerHtml}
+      ${coefHtml}
+      <div class="stp-divider"></div>
+      <div class="stp-table">${rowsHtml}</div>
+      <div class="stp-divider"></div>
+      ${totalHtml}
+    </div>`
 }
 
 
@@ -783,9 +974,134 @@ onMounted(loadAll)
 .sp-chip.tc { background: #f0f9eb; color: #67c23a; border-color: #e1f3d8; }
 .sp-chip.tk { background: #fdf6ec; color: #e6a23c; border-color: #faecd8; }
 .sp-chip.ts { background: #fef0f0; color: #f56c6c; border-color: #fde2e2; }
+
+/* 模块7 四专项列 极简显示: n次(m个) */
+.sp-txt { font-size: 12.5px; font-weight: 500; letter-spacing: -0.2px; line-height: 1.6; }
+.sp-txt.zx { color: #409eff; }
+.sp-txt.tc { color: #67c23a; }
+.sp-txt.tk { color: #e6a23c; }
+.sp-txt.ts { color: #f56c6c; }
+.sp-txt-p { color: #2563eb; font-weight: 600; }   /* 括号内SN个数 蓝色略粗一点 视觉一眼分清 */
+/* 0次(0个) 弱化: 灰字 看起来不占视线 */
+.sp-txt.sp-zero { color: #c0c4cc; font-weight: 400; }
+.sp-txt.sp-zero .sp-txt-p { color: #909399; font-weight: 500; }
 /* .section-title/.section-sub 已迁移到 SectionHeader.vue
    .kpi-* 已迁移到 KpiCard.vue
    .queue-* 已迁移到 QueuePanel.vue
    .chart-title 已迁移到 ChartCard.vue
    .trv2-* / .today-routes-v2 已迁移到 RouteSplit.vue */
+
+/* ---------- 值班组长醒目栏 ---------- */
+.duty-leader-bar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: linear-gradient(90deg, #fff7e6 0%, #fffbeb 55%, #ffffff 100%);
+  border: 1px solid #ffd591;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px -6px rgba(217, 119, 6, 0.25);
+}
+.duty-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-weight: 600;
+  color: #ad6800;
+  font-size: 13px;
+}
+.duty-label .el-icon { color: #d97706; }
+.duty-count {
+  margin-left: 4px;
+  padding: 1px 6px;
+  font-weight: 500;
+  font-size: 11px;
+  background: #fed7aa;
+  color: #7c2d12;
+  border-radius: 10px;
+}
+.duty-chips { flex: 1; min-width: 0; }
+.duty-chip {
+  padding: 3px 8px 3px 10px !important;
+  border-radius: 5px !important;
+  --el-tag-bg-color: #f59e0b !important;
+  --el-tag-border-color: #f59e0b !important;
+  background: linear-gradient(135deg, #f59e0b, #d97706) !important;
+  border: none !important;
+}
+.chip-name   { font-weight: 700; letter-spacing: 0.2px; }
+.chip-sep    { opacity: 0.75; margin: 0 3px; }
+.chip-group  { font-weight: 500; }
+.chip-stat   { opacity: 0.92; font-size: 11px; font-variant-numeric: tabular-nums; }
+</style>
+
+<!-- tooltip 是 teleported 到 body 下的, 必须写在非 scoped 块里, 否则 scoped 哈希匹配不上 -->
+<style>
+.score-pop.el-popper {
+  background: #ffffff !important;
+  border: 1px solid #eef2f7;
+  box-shadow: 0 10px 30px -12px rgba(15,23,42,0.18), 0 4px 10px -6px rgba(15,23,42,0.1);
+  border-radius: 10px !important;
+  padding: 0 !important;
+  max-width: 420px !important;
+}
+.score-pop .el-popper__arrow::before { background: #ffffff !important; border-color: #eef2f7 !important; }
+/* tooltip 内部结构 */
+.score-tooltip-inner { width: 380px; padding: 12px 14px; font-size: 12.5px; color: #1f2937; }
+.stp-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.stp-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.stp-avatar {
+  width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0;
+  background: linear-gradient(135deg,#60a5fa,#3b82f6);
+  color: #fff; font-weight: 700; font-size: 15px;
+  display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 6px -2px rgba(59,130,246,.4);
+}
+.stp-nameline { line-height: 1.25; }
+.stp-nameline b { font-size: 14px; color: #111827; margin-right: 6px; }
+.stp-meta { color: #6b7280; font-size: 11.5px; font-weight: 500; padding: 1px 6px; background: #f3f4f6; border-radius: 4px; }
+.stp-subline { margin-top: 3px; color: #4b5563; font-size: 11.5px; line-height: 1.35; }
+.stp-subline b { color: #1f2937; font-weight: 600; }
+.stp-tag { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 10.5px; font-weight: 500; }
+.stp-tag.mgmt { background: #fef3c7; color: #92400e; margin-left: 2px; }
+.stp-tag.hr   { background: #dbeafe; color: #1e40af; margin-left: 2px; }
+.stp-mode {
+  border: 1px solid; border-radius: 8px; padding: 5px 9px; text-align: right; flex-shrink: 0;
+}
+.stp-mode-name { font-weight: 700; font-size: 13.5px; line-height: 1.2; }
+.stp-mode-desc { font-size: 10px; margin-top: 2px; opacity: .85; line-height: 1.15; }
+.stp-coef { font-size: 11px; color: #6b7280; background: #f9fafb; padding: 4px 8px; border-radius: 6px; margin-bottom: 8px; line-height: 1.5; }
+.stp-divider { height: 1px; background: #f0f2f5; margin: 8px 0; }
+.stp-table { display: flex; flex-direction: column; gap: 4px; }
+.stp-row {
+  display: grid; grid-template-columns: 52px 1fr 50px; align-items: center; gap: 6px;
+  padding: 5px 8px; border-radius: 6px;
+  background: color-mix(in srgb, var(--cat-color,#999) 6%, transparent);
+  border-left: 3px solid var(--cat-color, #999);
+  transition: opacity .15s ease;
+}
+.stp-row.is-zero { opacity: .38; filter: grayscale(.4); }
+.stp-cat { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: #374151; }
+.stp-dot { width: 7px; height: 7px; border-radius: 50%; }
+.stp-formula { font-variant-numeric: tabular-nums; text-align: center; color: #374151; line-height: 1.45; letter-spacing: -0.2px; }
+.stp-formula .stp-num { font-weight: 700; font-size: 13px; color: #111827; }
+.stp-formula .stp-unit { font-size: 10.5px; color: #6b7280; margin: 0 2px 0 1px; }
+.stp-formula .stp-op { color: #9ca3af; margin: 0 2px; font-weight: 500; }
+.stp-formula .stp-coef { font-weight: 600; color: #4b5563; }
+.stp-formula .stp-contrib { font-weight: 800; color: var(--cat-color, #111); font-size: 13.5px; margin-left: 2px; }
+.stp-flag { justify-self: end; text-align: center; font-size: 10.5px; font-weight: 600; padding: 2px 6px; border-radius: 5px; }
+.stp-flag.own { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+.stp-flag.xfer { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; letter-spacing: -0.3px; }
+.stp-total {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  margin-top: 4px; padding: 8px 10px; border-radius: 8px;
+  background: linear-gradient(90deg, #f9fafb 0%, #f3f4f6 100%);
+  border: 1px solid #e5e7eb;
+}
+.stp-total-lbl { font-weight: 600; color: #374151; font-size: 12.5px; }
+.stp-total-val { font-weight: 800; font-size: 18px; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
+.stp-total-api { font-size: 10.5px; font-weight: 400; color: #9ca3af; margin-left: 4px; letter-spacing: 0; }
 </style>

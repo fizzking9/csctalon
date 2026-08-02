@@ -521,12 +521,27 @@ async function pollProgress() {
     busyRunning.value = !!d.busy
     cooldownRemaining.value = d.cooldown_remaining || 0
     if (d.task) {
-      runningTask.value = d.task
-      if (!currentTaskId.value && d.task.task_id) {
+      const isTerminal = ['success', 'failed', 'partial'].includes(d.task.status)
+      const trackingSpecific = !!currentTaskId.value
+      // runningTask 仅用于"进行中"警示条 + 实时日志流。
+      // 终态任务如果不是本次主动追踪的特定 task_id，不要占着 runningTask（用 syncResults 展示结果即可），
+      // 否则每次打开页面都会显示上次的历史日志，给人"总在跑智能助手导入"的错觉。
+      // 例外: 刚完成 2 分钟内的终态任务, 允许短暂残留显示(方便看到收尾进度)
+      let keepAsRunning = true
+      if (isTerminal && !trackingSpecific && d.task.finished_at) {
+        const finishTs = new Date(d.task.finished_at).getTime()
+        if (Date.now() - finishTs > 2 * 60 * 1000) keepAsRunning = false
+      }
+      if (!isTerminal || trackingSpecific || keepAsRunning) {
+        runningTask.value = d.task
+      } else {
+        runningTask.value = null
+      }
+      if (!currentTaskId.value && d.task.task_id && !isTerminal) {
         currentTaskId.value = d.task.task_id
       }
       // 任务已完成,填充结果,清 task running
-      if (['success', 'failed', 'partial'].includes(d.task.status) && d.task.results) {
+      if (isTerminal && d.task.results) {
         if (!syncResults.value.length || (d.task.finished_at && (!runningTask.value || runningTask.value.status !== d.task.status))) {
           syncResults.value = d.task.results
           currentTaskId.value = null
@@ -534,6 +549,8 @@ async function pollProgress() {
           await Promise.all([loadDataSources(), loadLogs()])
         }
         syncResults.value = d.task.results
+        // 已完成的终态任务(且不是本次追踪的),清掉 runningTask 与 taskId
+        if (!trackingSpecific) currentTaskId.value = null
       }
       // 日志自动滚到底
       await nextTick()

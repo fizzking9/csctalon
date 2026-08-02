@@ -1,12 +1,12 @@
 <template>
-  <div class="page-container">
-    <div class="page-title">同步设置</div>
+  <div :class="embedded ? 'embedded-wrap' : 'page-container'">
+    <div v-if="!embedded" class="page-title">同步设置</div>
 
     <el-card>
       <template #header>
         <div class="flex justify-between items-center">
           <span>BMS 同步源配置</span>
-          <el-button text type="primary" @click="$router.push('/data/fetch')">返回 BMS 同步</el-button>
+          <el-button v-if="!embedded" text type="primary" @click="$router.push('/data/fetch')">返回 BMS 同步</el-button>
         </div>
       </template>
 
@@ -91,6 +91,10 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+
+defineProps({
+  embedded: { type: Boolean, default: false },
+})
 import { listSyncSources, updateSyncSource } from '@/api/system'
 
 const loading = ref(false)
