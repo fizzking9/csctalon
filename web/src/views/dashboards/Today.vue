@@ -304,19 +304,21 @@
             </template>
           </el-table-column>
           <el-table-column prop="name" label="人员" width="110" />
-          <el-table-column prop="department" label="部门" width="130">
+          <el-table-column prop="department" label="部门" width="110">
             <template #default="{ row }">
               <el-tag size="small" effect="plain" :type="row.department === '未设置' ? 'info' : 'success'">{{ row.department }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="group" label="组别" width="100">
+          <el-table-column label="岗位・分组" width="176">
             <template #default="{ row }">
-              <el-tag size="small" effect="plain" :type="row.group === '未分组' ? 'info' : 'primary'">{{ row.group }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="岗位" width="92">
-            <template #default="{ row }">
-              <el-tag size="small" effect="plain" :type="posTagType(row.position)">{{ row.position || '—' }}</el-tag>
+              <div style="display:flex; flex-direction:column; gap:3px">
+                <el-tag size="small" effect="plain" :type="posTagType(row.position)">
+                  {{ row.position || (row.name === '用户自助' ? '系统位' : '—') }}
+                </el-tag>
+                <el-tag size="small" effect="dark" :type="grpTagType(row.group)" style="align-self:flex-start">
+                  {{ row.group === '未分组' ? (row.name === '用户自助' ? '系统位' : '未分组') : (row.group || '部门统管') }}
+                </el-tag>
+              </div>
             </template>
           </el-table-column>
           <el-table-column prop="reception_count" label="会话接待人次" width="116" align="right" sortable>
@@ -776,6 +778,18 @@ function posTagType(p) {
   if (p === '组长') return 'warning'
   if (p === '客服') return 'success'
   return 'info'
+}
+// 5 个组颜色区分一眼就能识别
+const GRP_COLOR_MAP = {
+  '朱海洋组': 'success',
+  '董梦玲组': 'warning',
+  '吴晓龙组': 'primary',
+  '叶珍凤组': 'danger',
+  '投诉专项组': 'info',
+}
+function grpTagType(g) {
+  if (!g || g === '未分组') return 'info'
+  return GRP_COLOR_MAP[g] || 'info'
 }
 function specialtyScoreTooltip(r) {
   const fmt = (v) => formatNum(v)
