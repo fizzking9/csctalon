@@ -13,171 +13,104 @@
           {{ kpiData.merchant_tip }}
         </el-tag>
       </div>
-      <div class="filter-bar">
-        <el-radio-group v-model="quickDate" size="small" @change="onQuickDate">
-          <el-radio-button label="today">{{ dayjs().format('MM-DD') }} 今日</el-radio-button>
-          <el-radio-button label="yesterday">{{ dayjs().subtract(1, 'day').format('MM-DD') }} 昨日</el-radio-button>
-        </el-radio-group>
-        <el-date-picker
-          v-model="customDate"
-          type="date"
-          size="small"
-          value-format="YYYY-MM-DD"
-          placeholder="选择日期"
-          style="width: 160px; margin-left: 8px"
-          @change="onCustomDate"
-        />
-        <el-button :icon="Refresh" :loading="loading" @click="loadAll" style="margin-left: 8px">刷新</el-button>
-      </div>
+      <FilterBar
+        v-model:modelValue="quickDate"
+        v-model:range="customDate ? [customDate] : []"
+        :quick-options="todayQuickOptions"
+        :date-picker-type="customDate ? 'date' : 'daterange'"
+        :show-custom="false"
+        show-grain="false"
+        :loading="loading"
+        @refresh="loadAll"
+      >
+        <template #left>
+          <el-date-picker
+            v-model="customDate"
+            type="date"
+            size="small"
+            value-format="YYYY-MM-DD"
+            placeholder="选择日期"
+            style="width: 160px; margin-right: 8px"
+            @change="onCustomDate"
+          />
+        </template>
+      </FilterBar>
     </div>
 
     <!-- 模块1: KPI卡 -->
     <section class="section-card mb-24">
-      <h2 class="section-title">1. 核心指标 <span class="section-sub">（对比昨日同时段 · 悬停标签查看口径）</span></h2>
+      <SectionHeader title="1. 核心指标" sub="对比昨日同时段 · 悬停标签查看口径" />
       <el-row :gutter="16">
         <el-col :xs="12" :sm="8" :md="4" v-for="c in kpiCards" :key="c.key">
-          <el-card shadow="hover" class="kpi-card" body-style="padding: 14px 18px">
-            <div class="kpi-icon" :style="{ background: c.bg, color: c.color }">
-              <el-icon :size="22"><component :is="c.icon" /></el-icon>
-            </div>
-            <div class="kpi-label" :style="{ cursor: c.tip ? 'help' : 'default' }">
-              {{ c.label }}
-              <el-tooltip v-if="c.tip" effect="dark" placement="top" :content="c.tip">
-                <el-icon style="margin-left:4px; color:#909399; vertical-align: -1px"><QuestionFilled /></el-icon>
-              </el-tooltip>
-            </div>
-            <div class="kpi-value">
-              <template v-if="c.money">{{ formatMoney(c.value) }}</template>
-              <template v-else>{{ formatNum(c.value) }}<span class="kpi-unit">{{ c.unit || '' }}</span></template>
-            </div>
-            <!-- 接待量卡追加一行: 今日接待数 (distinct device_sn ≈ 独立客户人数, 一人多设备近似当人数无影响) -->
-            <div v-if="c.key === 'reception' && c.device_count != null" class="kpi-device-sub">
-              <span class="kpi-device-sub-label">接待数</span>
-              <span class="kpi-device-sub-val">{{ formatNum(c.device_count) }}<span class="kpi-device-sub-unit"> 个</span></span>
-            </div>
-            <div class="kpi-yoy">
-              <el-tag v-if="c.yoy_pct != null" size="small" effect="plain" :type="yoyTagType(c.key, c.yoy_pct)">
-                {{ c.yoy_pct > 0 ? '↑' : '↓' }} {{ Math.abs(c.yoy_pct) }}%
-              </el-tag>
-              <el-tag v-else size="small" type="info" effect="plain">昨日 0</el-tag>
-              <span class="kpi-yoy-val">
-                <template v-if="c.money">{{ formatMoney(c.yoy_value) }}</template>
-                <template v-else>{{ formatNum(c.yoy_value) }}{{ c.unit || '' }}</template>
-                 · 昨日
-              </span>
-            </div>
-          </el-card>
+          <KpiCard
+            :label="c.label"
+            :value="c.value"
+            :unit="c.unit"
+            :money="c.money"
+            :icon="c.icon"
+            :bg="c.bg"
+            :color="c.color"
+            :yoy-key="c.yoy_key || c.key"
+            :yoy-pct="c.yoy_pct"
+            :yoy-value="c.yoy_value"
+            :device-count="c.key === 'reception' ? c.device_count : null"
+            :tip="c.tip"
+          />
         </el-col>
       </el-row>
 
-      <!-- 今日现金流出拆分（紧凑版：3列合计卡 + 横向堆叠比例条，一目了然 经营/实际/偏差 + A/B/C/D占比） -->
-      <div class="today-routes today-routes-v2" v-if="kpiData.cash_routes_today">
-        <div class="today-routes-title">
-          今日现金流出拆分
-          <el-tag size="small" type="info" effect="plain" style="margin-left:8px">A/B/C/D 四路 → 经营估算 vs 商户号实际现金流</el-tag>
-        </div>
-        <!-- 一行 3 个核心合计（经营 / 实际 / 偏差）-->
-        <el-row :gutter="10" class="mt-6">
-          <el-col :span="8"><div class="trv2-sum trv2-sum-op">
-            <div class="trv2-sum-head">经营估算</div>
-            <div class="trv2-sum-body">
-              <span class="trv2-sum-val">{{ formatMoney(kpiData.cash_routes_today.operational.amount) }}</span>
-              <span class="trv2-sum-sub">{{ formatNum(kpiData.cash_routes_today.operational.count) }}笔 · A+B+C+D</span>
-            </div>
-          </div></el-col>
-          <el-col :span="8"><div class="trv2-sum trv2-sum-fc">
-            <div class="trv2-sum-head">实际现金流 <span class="trv2-sum-tip">（对账基准）</span></div>
-            <div class="trv2-sum-body">
-              <span class="trv2-sum-val">{{ formatMoney(kpiData.cash_routes_today.actual_cashflow.amount ?? kpiData.cash_routes_today.financial.amount) }}</span>
-              <span class="trv2-sum-sub">{{ formatNum(kpiData.cash_routes_today.actual_cashflow.count ?? kpiData.cash_routes_today.financial.count) }}笔 · 商户号 SUCCESS</span>
-            </div>
-          </div></el-col>
-          <el-col :span="8"><div class="trv2-sum" :class="(kpiData.cash_routes_today.diff.amount ?? 0) >= 0 ? 'trv2-sum-diff-pos' : 'trv2-sum-diff-neg'">
-            <div class="trv2-sum-head">对账偏差 <span class="trv2-sum-tip">（经营 − 实际）</span></div>
-            <div class="trv2-sum-body">
-              <span class="trv2-sum-val">{{ (kpiData.cash_routes_today.diff.amount ?? 0) >= 0 ? '+' : '' }}{{ formatMoney(kpiData.cash_routes_today.diff.amount) }}</span>
-              <span class="trv2-sum-sub">{{ (kpiData.cash_routes_today.diff.count ?? 0) >= 0 ? '+' : '' }}{{ formatNum(kpiData.cash_routes_today.diff.count) }}笔 · 差值</span>
-            </div>
-          </div></el-col>
-        </el-row>
-        <!-- A/B/C/D 四路横向堆叠条：长度 = 占经营估算的比例，一眼看出每一路贡献 -->
-        <div class="trv2-stack mt-10">
-          <div class="trv2-stack-bar">
-            <template v-for="(seg, k) in stackSegs" :key="k">
-              <div class="trv2-seg"
-                   :class="seg.cls"
-                   :style="{ width: seg.pct + '%', minWidth: seg.amount > 0 ? (seg.pct < 1.2 ? '48px' : 'auto') : '0' }"
-                   :title="seg.title">
-                <span v-if="seg.pct >= 8 || seg.amount > 0 && seg.pct >= 3" class="trv2-seg-in">
-                  <b>{{ seg.label }}</b> {{ formatMoney(seg.amount) }}
-                </span>
-                <span v-else-if="seg.amount > 0" class="trv2-seg-in trv2-seg-mini">
-                  {{ seg.label }}
-                </span>
-              </div>
-            </template>
-            <div v-if="stackSegs.every(s => s.amount === 0 || s.amount == null)"
-                 class="trv2-seg trv2-seg-empty" style="width:100%">
-              <span class="trv2-seg-in">今日暂无数据</span>
-            </div>
-          </div>
-          <!-- 四路图例 & 笔数 -->
-          <div class="trv2-stack-legend mt-8">
-            <div v-for="(seg, k) in stackSegs" :key="'lg-'+k" class="trv2-lg">
-              <i class="trv2-lg-dot" :class="seg.dotCls"></i>
-              <span class="trv2-lg-name">{{ seg.name }}</span>
-              <span class="trv2-lg-val">{{ formatMoney(seg.amount) }}</span>
-              <span class="trv2-lg-sub">{{ formatNum(seg.count) }}笔</span>
-            </div>
-          </div>
-        </div>
+      <!-- 今日现金流出拆分：3合计卡 + 四路堆叠比例条（复用 RouteSplit compact 模式） -->
+      <div class="mt-12" v-if="kpiData.cash_routes_today">
+        <RouteSplit :routes="kpiData.cash_routes_today" compact />
       </div>
     </section>
 
     <!-- 模块2: 小时节奏 -->
     <section class="section-card mb-24">
-      <h2 class="section-title">2. 今日实时节奏 <span class="section-sub">（小时级双柱：会话数(次) + 接待数(个) + 退款笔数 + 投诉量 + 退款金额线）</span></h2>
-      <el-card shadow="never" body-style="padding: 8px 10px">
+      <SectionHeader title="2. 今日实时节奏" sub="小时级双柱：会话数(次) + 接待数(个) + 退款笔数 + 投诉量 + 退款金额线" />
+      <ChartCard body-style="padding: 8px 10px">
         <BaseChart :option="hourlyOption" height="320px" />
-      </el-card>
+      </ChartCard>
     </section>
 
     <!-- 模块3: 接待分项 + 模块4: 退款分项 → 并排两栏 -->
     <el-row :gutter="16" class="mb-24">
       <el-col :xs="24" :lg="12">
         <section class="section-card h-full">
-          <h2 class="section-title">3. 今日接待分项</h2>
+          <SectionHeader title="3. 今日接待分项" />
           <el-row :gutter="12">
             <el-col :xs="24" :md="12">
-              <el-card shadow="never" body-style="padding: 4px 6px">
-                <div class="chart-title">接待分类分布</div>
+              <ChartCard title="接待分类分布">
                 <BaseChart :option="receptionPieOption" height="280px" />
-              </el-card>
+              </ChartCard>
             </el-col>
             <el-col :xs="24" :md="12">
-              <el-card shadow="never" body-style="padding: 4px 6px">
-                <div class="chart-title">接待量 Top 10 客服 <span style="color:#909399; font-size: 11px; font-weight: 400">（会话数(次) + 接待数(个)）</span></div>
+              <ChartCard title="接待量 Top 10 客服 （会话数(次) + 接待数(个)）">
                 <BaseChart :option="receptionStaffOption" height="280px" />
-              </el-card>
+              </ChartCard>
             </el-col>
           </el-row>
         </section>
       </el-col>
       <el-col :xs="24" :lg="12">
         <section class="section-card h-full">
-          <h2 class="section-title">4. 今日退款分项</h2>
+          <SectionHeader title="4. 今日退款分项" />
           <el-row :gutter="12">
             <el-col :xs="24" :md="12">
-              <el-card shadow="never" body-style="padding: 4px 6px">
-                <div class="chart-title">退款细分原因 Top 10（订单数 + 金额 双柱）<span style="font-weight:400;color:#909399;font-size:11px;margin-left:8px">按工单分类 + 商品名兜底（替换原退款单内refund_reason='用户退款'无效字段）</span></div>
+              <ChartCard title="退款细分原因 Top 10（订单数 + 金额 双柱）">
+                <template #extra>
+                  <span style="font-weight:400;color:#909399;font-size:11px">按工单分类 + 商品名兜底（替换原 refund_reason='用户退款'无效字段）</span>
+                </template>
                 <BaseChart :option="refundReasonOption" height="280px" />
-              </el-card>
+              </ChartCard>
             </el-col>
             <el-col :xs="24" :md="12">
-              <el-card shadow="never" body-style="padding: 4px 6px">
-                <div class="chart-title">退款接待人 Top 10（退款笔数 + 金额 双柱）<span style="font-weight:400;color:#909399;font-size:11px;margin-left:8px">按 PersonAlias → Person.display_name 姓名归一；来源: 工单handler(关联工单45天) → auditor/operator(自动补建兜底)；[未分配]=未匹配&无人名信息；用户自助=wechat/客户非客服操作；系统自动=sys/system类自动操作</span></div>
+              <ChartCard title="退款接待人 Top 10（退款笔数 + 金额 双柱）">
+                <template #extra>
+                  <span style="font-weight:400;color:#909399;font-size:11px">按 PersonAlias → Person.display_name 姓名归一；[未分配]=未匹配；用户自助=wechat；系统自动=sys/system</span>
+                </template>
                 <BaseChart :option="refundStaffOption" height="280px" />
-              </el-card>
+              </ChartCard>
             </el-col>
           </el-row>
         </section>
@@ -186,113 +119,34 @@
 
     <!-- 模块5: 今日投诉分项 -->
     <section class="section-card mb-24">
-      <h2 class="section-title">
-        5. 今日投诉分项
-        <span class="section-sub">（共 {{ complaintData.complaint_total || 0 }} 条投诉
-          <template v-if="complaintData.complaint_unmatched > 0">
-            · {{ complaintData.complaint_unmatched }} 条未关联接待记录
-          </template>
-          ）
-        </span>
-      </h2>
+      <SectionHeader title="5. 今日投诉分项" :sub="complaintSub" />
       <el-row :gutter="12">
         <el-col :xs="24" :md="12">
-          <el-card shadow="never" body-style="padding: 4px 6px">
-            <div class="chart-title">投诉子类分布（商品/服务/微信/12315/工信部）</div>
+          <ChartCard title="投诉子类分布（商品/服务/微信/12315/工信部/公共服务平台）">
             <BaseChart :option="complaintSubPieOption" height="300px" />
-          </el-card>
+          </ChartCard>
         </el-col>
         <el-col :xs="24" :md="12">
-          <el-card shadow="never" body-style="padding: 4px 6px">
-            <div class="chart-title">投诉根因分布（关联网速/套餐/退款等接待记录）</div>
+          <ChartCard title="投诉根因分布（关联网速/套餐/退款等接待记录）">
             <BaseChart :option="complaintRootBarOption" height="300px" />
-          </el-card>
+          </ChartCard>
         </el-col>
       </el-row>
     </section>
 
-    <!-- 模块6: 处理队列 三栏 -->
+    <!-- 模块6: 处理队列 三栏（直接复用 QueuePanel） -->
     <section class="section-card mb-24">
-      <h2 class="section-title">6. 今日处理队列</h2>
-      <el-row :gutter="16">
-        <el-col :xs="24" :md="8">
-          <el-card shadow="hover" class="queue-card">
-            <template #header>
-              <div class="flex-between">
-                <span class="queue-title">
-                  <el-icon color="#e6a23c"><Bell /></el-icon>
-                  今日截止待办
-                </span>
-                <el-badge :value="queueData.todos?.length || 0" :max="99" class="queue-badge" />
-              </div>
-            </template>
-            <div class="queue-list">
-              <div v-for="t in queueData.todos || []" :key="t.id" class="queue-item"
-                   @click="$router.push(`/todos/${t.id}`)">
-                <el-tag size="small" :type="priorityTagType(t.priority)" effect="dark" class="mr-8">
-                  {{ priorityLabel(t.priority) }}
-                </el-tag>
-                <span class="queue-item-title">{{ t.title }}</span>
-                <el-tag size="small" effect="plain" class="queue-status">{{ todoStatusLabel(t.status) }}</el-tag>
-              </div>
-              <el-empty v-if="!queueData.todos?.length" description="今日无待办截止" :image-size="60" />
-            </div>
-          </el-card>
-        </el-col>
-        <el-col :xs="24" :md="8">
-          <el-card shadow="hover" class="queue-card">
-            <template #header>
-              <div class="flex-between">
-                <span class="queue-title">
-                  <el-icon color="#409eff"><List /></el-icon>
-                  进行中专项
-                </span>
-                <el-badge :value="queueData.tasks?.length || 0" :max="99" class="queue-badge" />
-              </div>
-            </template>
-            <div class="queue-list">
-              <div v-for="t in queueData.tasks || []" :key="t.id" class="queue-item"
-                   @click="$router.push(`/tasks/${t.id}`)">
-                <el-tag size="small" :type="taskStatusTagType(t.status)" effect="dark" class="mr-8">
-                  {{ taskStatusLabel(t.status) }}
-                </el-tag>
-                <span class="queue-item-title">{{ t.title }}</span>
-                <span v-if="t.deadline" class="queue-deadline">{{ formatDeadline(t.deadline) }}</span>
-              </div>
-              <el-empty v-if="!queueData.tasks?.length" description="暂无进行中专项" :image-size="60" />
-            </div>
-          </el-card>
-        </el-col>
-        <el-col :xs="24" :md="8">
-          <el-card shadow="hover" class="queue-card">
-            <template #header>
-              <div class="flex-between">
-                <span class="queue-title">
-                  <el-icon color="#f56c6c"><Warning /></el-icon>
-                  今日异常事件
-                </span>
-                <el-badge :value="queueData.incidents?.length || 0" :max="99" class="queue-badge" />
-              </div>
-            </template>
-            <div class="queue-list">
-              <div v-for="inc in queueData.incidents || []" :key="inc.id" class="queue-item"
-                   @click="$router.push('/management/incidents')">
-                <el-tag size="small" :type="incidentStatusTagType(inc.status)" effect="dark" class="mr-8">
-                  {{ incidentStatusLabel(inc.status) }}
-                </el-tag>
-                <span class="queue-item-title">{{ inc.title }}</span>
-                <span class="queue-deadline">{{ formatDeadline(inc.occurred_at, 'time') }}</span>
-              </div>
-              <el-empty v-if="!queueData.incidents?.length" description="今日无异常事件 ✅" :image-size="60" />
-            </div>
-          </el-card>
-        </el-col>
-      </el-row>
+      <SectionHeader title="6. 今日处理队列" />
+      <QueuePanel
+        :todos="queueData.todos"
+        :tasks="queueData.tasks"
+        :incidents="queueData.incidents"
+      />
     </section>
 
     <!-- 模块7: 人均效率表 -->
     <section class="section-card mb-24">
-      <h2 class="section-title">7. 今日人均效率</h2>
+      <SectionHeader title="7. 今日人均效率" />
       <el-card shadow="never">
         <el-table :data="staffRows" border stripe size="small" max-height="520">
           <el-table-column label="排名" width="64" align="center" fixed>

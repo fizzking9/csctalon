@@ -271,12 +271,128 @@ async def sync_all(
     finally:
         db.close()
 
-    # 3. 抓取所有数据源
+    # 3. 抓取 + 导入并发:
+    #    旧做法: 所有源全部抓取完成后再串行导入 -> 抓B的等待完全没被利用
+    #    新做法: 每个源抓完就立刻启动后台导入任务,与「下一个抓取+等待」并发执行
+    #    BMS 1 分钟限制仅针对同一个 Web 系统的访问/查询/下载,与本地导入无关
     # 分流:fetch_mode="http" 的源走 ai_acc_fetcher(HTTP API),其余走 BmsFetcher(Playwright)
     http_tasks = [t for t in tasks if t["config"].get("fetch_mode") == "http"]
     pw_tasks = [t for t in tasks if t["config"].get("fetch_mode") != "http"]
 
-    fetch_results: list[FetchResult] = []
+    # 每个源完成抓取后,立刻在此处挂一个 asyncio.Task 做后台导入(用 to_thread 避免阻塞 event_loop)
+    pending_imports: dict[str, asyncio.Task] = {}
+    # 每个源最新的 FetchResult,供回调启动导入时使用
+    last_fr_by_type: dict[str, FetchResult] = {}
+
+    # 用闭包把参数带到 _import_one_in_background 里
+    def _build_task_config(data_type: str):
+        for t in tasks:
+            if t["data_type"] == data_type:
+                return t
+        return None
+
+    async def _import_one_in_background(fr: FetchResult, start: datetime, end: datetime, name: str) -> dict:
+        """在后台线程执行导入(因为 pandas/SQLAlchemy 同步 I/O 会阻塞 event_loop),返回单源结果 dict"""
+        try:
+            def _sync_import_work() -> dict:
+                inner_db = SessionLocal()
+                try:
+                    if fr.success:
+                        log = _create_sync_log(inner_db, fr.data_type, start, end, trigger_type, triggered_by)
+                        try:
+                            import_stats = _auto_import(inner_db, fr.data_type, fr.file_path, fr.filename, triggered_by)
+                            _update_sync_log(inner_db, log.id, "success", fr.file_path, fr.filename, import_stats)
+                            return {
+                                "data_type": fr.data_type,
+                                "name": name,
+                                "success": True,
+                                "file_path": fr.file_path,
+                                "filename": fr.filename,
+                                **import_stats,
+                                "start_time": start.isoformat(),
+                                "end_time": end.isoformat(),
+                            }
+                        except Exception as e:
+                            _update_sync_log(inner_db, log.id, "failed", fr.file_path, fr.filename, error=str(e))
+                            logger.error(f"[{fr.data_type}] 导入失败: {e}", exc_info=True)
+                            return {
+                                "data_type": fr.data_type,
+                                "name": name,
+                                "success": False,
+                                "error": f"导入失败: {e}",
+                                "file_path": fr.file_path,
+                                "start_time": start.isoformat(),
+                                "end_time": end.isoformat(),
+                            }
+                    else:
+                        log = _create_sync_log(inner_db, fr.data_type, start, end, trigger_type, triggered_by)
+                        _update_sync_log(inner_db, log.id, "failed", error=fr.error)
+                        return {
+                            "data_type": fr.data_type,
+                            "name": name,
+                            "success": False,
+                            "error": fr.error,
+                            "start_time": start.isoformat(),
+                            "end_time": end.isoformat(),
+                        }
+                finally:
+                    inner_db.close()
+
+            # 先把 phase 切到 importing(在此处做因为要走 async on_progress 回调)
+            if on_progress:
+                await on_progress(fr.data_type, "importing", None)
+            result_dict = await asyncio.to_thread(_sync_import_work)
+
+            if on_progress:
+                await on_progress(fr.data_type, "imported" if result_dict["success"] else "failed", result_dict)
+            return result_dict
+
+        except Exception as e:
+            # 兜底: 任何导入后台任务本身的异常,都变成一个失败结果,不让 gather 抛异常
+            logger.exception(f"[{fr.data_type}] 导入后台任务崩溃: {e}")
+            tcfg = _build_task_config(fr.data_type)
+            nm = tcfg["config"].get("name", fr.data_type) if tcfg else fr.data_type
+            fallback = {
+                "data_type": fr.data_type,
+                "name": nm,
+                "success": False,
+                "error": f"导入崩溃: {e}",
+                "start_time": time_ranges.get(fr.data_type, (datetime.now(), datetime.now()))[0].isoformat(),
+                "end_time": time_ranges.get(fr.data_type, (datetime.now(), datetime.now()))[1].isoformat(),
+            }
+            if on_progress:
+                await on_progress(fr.data_type, "failed", fallback)
+            return fallback
+
+    def _launch_import_if_needed(fr: FetchResult):
+        """某源抓取完成:立刻起后台导入任务(不阻塞下一次抓取)"""
+        if fr.data_type in pending_imports:
+            return
+        tcfg = _build_task_config(fr.data_type)
+        if not tcfg:
+            return
+        start, end = tcfg["start"], tcfg["end"]
+        name = tcfg["config"].get("name", fr.data_type)
+        last_fr_by_type[fr.data_type] = fr
+        pending_imports[fr.data_type] = asyncio.create_task(
+            _import_one_in_background(fr, start, end, name)
+        )
+
+    # 包装原始 on_progress: 当 phase=fetched / done (抓取完成) 时,立刻启动导入任务
+    original_on_progress = on_progress
+
+    async def _wrapped_on_progress(data_type: str, phase: str, payload):
+        # 先写进度(让前端立刻看到)
+        if original_on_progress:
+            await original_on_progress(data_type, phase, payload)
+        # 抓取阶段结束 -> 立刻起导入
+        if phase in ("fetched", "done") and isinstance(payload, FetchResult):
+            _launch_import_if_needed(payload)
+        elif phase == "fetched" and isinstance(payload, dict):
+            # HTTP 抓取的 payload 是 dict,从 last_fr_by_type 找回 FetchResult
+            fr = last_fr_by_type.get(data_type)
+            if fr:
+                _launch_import_if_needed(fr)
 
     # HTTP API 抓取(ai-acc 等无需浏览器的源)
     if http_tasks:
@@ -285,72 +401,36 @@ async def sync_all(
         for task in http_tasks:
             logger.info(f"[{task['data_type']}] HTTP 抓取(非 Playwright)")
             fr = await http_fetch_one(task)
-            fetch_results.append(fr)
-            if on_progress:
-                await on_progress(fr.data_type, "fetched", {"success": fr.success, "file": fr.filename})
+            last_fr_by_type[fr.data_type] = fr
+            if original_on_progress:
+                await original_on_progress(
+                    fr.data_type, "fetched", {"success": fr.success, "file": fr.filename}
+                )
+            # HTTP 抓取完成: 立刻启动导入(不等待下一个)
+            _launch_import_if_needed(fr)
 
     # Playwright 抓取(BMS 等需浏览器自动化的源)
+    # fetcher.fetch_all 内部按域名分组: 组内等待 65 秒(同一 Web 限制),跨组直接跳过
+    # 同时每个单源抓取完成时通过 _wrapped_on_progress 立刻启动导入,与后续等待/抓取下一个并发
     if pw_tasks:
         async with BmsFetcher() as fetcher:
-            fetch_results.extend(await fetcher.fetch_all(tasks=pw_tasks, on_progress=on_progress))
+            # 即使外部未传 on_progress,也要包一层以便启动导入并发
+            pw_progress_cb = _wrapped_on_progress
+            # fetch_all 返回 FetchResult 列表(可能有重复 or 全部),但导入任务其实已经在回调里都起了
+            await fetcher.fetch_all(tasks=pw_tasks, on_progress=pw_progress_cb)
 
-    # 4. 逐个导入
-    for fr in fetch_results:
-        db = SessionLocal()
-        try:
-            start, end = time_ranges[fr.data_type]
-            name = next((t["config"].get("name", fr.data_type) for t in tasks if t["data_type"] == fr.data_type), fr.data_type)
-
-            if fr.success:
-                # 创建同步日志
-                log = _create_sync_log(db, fr.data_type, start, end, trigger_type, triggered_by)
-
-                try:
-                    # 自动导入
-                    import_stats = _auto_import(db, fr.data_type, fr.file_path, fr.filename, triggered_by)
-                    _update_sync_log(db, log.id, "success", fr.file_path, fr.filename, import_stats)
-
-                    results.append({
-                        "data_type": fr.data_type,
-                        "name": name,
-                        "success": True,
-                        "file_path": fr.file_path,
-                        "filename": fr.filename,
-                        **import_stats,
-                        "start_time": start.isoformat(),
-                        "end_time": end.isoformat(),
-                    })
-
-                    if on_progress:
-                        await on_progress(fr.data_type, "imported", results[-1])
-
-                except Exception as e:
-                    _update_sync_log(db, log.id, "failed", fr.file_path, fr.filename, error=str(e))
-                    results.append({
-                        "data_type": fr.data_type,
-                        "name": name,
-                        "success": False,
-                        "error": f"导入失败: {e}",
-                        "file_path": fr.file_path,
-                        "start_time": start.isoformat(),
-                        "end_time": end.isoformat(),
-                    })
-                    logger.error(f"[{fr.data_type}] 导入失败: {e}", exc_info=True)
-            else:
-                # 抓取失败,记录日志
-                log = _create_sync_log(db, fr.data_type, start, end, trigger_type, triggered_by)
-                _update_sync_log(db, log.id, "failed", error=fr.error)
-
-                results.append({
-                    "data_type": fr.data_type,
-                    "name": name,
-                    "success": False,
-                    "error": fr.error,
-                    "start_time": start.isoformat(),
-                    "end_time": end.isoformat(),
-                })
-        finally:
-            db.close()
+    # 4. 等所有后台导入任务全部完成 -> 聚合成最终结果
+    #    这里不再串行导入了: 大部分导入其实早就在「等待下一次抓取」的间隙里跑完了
+    import_results: list[dict] = []
+    if pending_imports:
+        logger.info(f"已完成抓取,等待 {len(pending_imports)} 个导入后台任务收尾...")
+        done_tasks = await asyncio.gather(*pending_imports.values(), return_exceptions=True)
+        for result_or_exc in done_tasks:
+            if isinstance(result_or_exc, Exception):
+                logger.error(f"导入任务异常(已兜底转失败): {result_or_exc}")
+                continue
+            import_results.append(result_or_exc)
+    results.extend(import_results)
 
     # 跳过的源(停用/未注册)也计入结果
     results.extend(skipped)

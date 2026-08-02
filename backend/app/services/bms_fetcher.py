@@ -490,37 +490,225 @@ class BmsFetcher:
         tasks: list[dict],
         on_progress: callable = None,
     ) -> list[FetchResult]:
-        """连续抓取多个数据源,每个之间间隔 65 秒(BMS 1分钟限制)
+        """批量抓取多个数据源 - 优化:按 base_url 分组复用登录 context
 
-        Args:
-            tasks: [{data_type, start, end, config}] 每个数据源的时间范围与运行配置
-            on_progress: 回调函数 (data_type, status, result) -> None
+        原有行为兼容: 保持 BMS 1 分钟限制(两个源之间间隔 OPERATION_INTERVAL 秒)。
+        优化内容:
+          - 把同 base_url 的任务放在一组(如 ticket/wallet/device_combo 都是
+            support.cloud-cat.cn, 组内共享同一个 browser context),组内第 1 个源登录后
+            其余源直接跳转,省去重复登录耗时。
+          - 不同 base_url 的组仍是独立 context(跨域不共享登录态)。
         """
-        results: list[FetchResult] = []
+        results_map: dict[str, FetchResult] = {}
+        # 保留原始顺序(避免按 base_url 重排导致前端 Steps 错乱)
+        original_order = [t["data_type"] for t in tasks]
 
-        for i, task in enumerate(tasks):
-            data_type = task["data_type"]
-            start, end = task["start"], task["end"]
-            config = task["config"]
-            if on_progress:
-                await on_progress(data_type, "fetching", None)
+        # 1. 按 base_url 分组(并保持每组分内的出现顺序)
+        groups: list[tuple[str, list[dict]]] = []  # [(base_url, [task, ...]), ...]
+        for t in tasks:
+            base = t["config"].get("base_url", "")
+            if not groups or groups[-1][0] != base:
+                # 看是否之前已有同 base 的组
+                found = False
+                for existing_base, existing_list in groups:
+                    if existing_base == base:
+                        existing_list.append(t)
+                        found = True
+                        break
+                if not found:
+                    groups.append((base, [t]))
+            else:
+                groups[-1][1].append(t)
 
-            result = await self.fetch_one(data_type, start, end, config)
-            results.append(result)
+        logger.info(
+            f"fetch_all 分组: 共 {len(tasks)} 个源, 拆为 {len(groups)} 个域名组: "
+            + ", ".join(f"{b.split('//')[-1] if '//' in b else b}({len(ts)}个)" for b, ts in groups)
+        )
 
-            if on_progress:
-                await on_progress(data_type, "done", result)
+        # 2. 依次处理每个组(复用 context)
+        for group_idx, (base_url, group_tasks) in enumerate(groups):
+            if not group_tasks:
+                continue
+            await self._init_browser()
 
-            # 如果不是最后一个,等待 65 秒(BMS 1分钟限制)
-            if i < len(tasks) - 1:
-                next_type = tasks[i + 1]["data_type"]
-                next_name = tasks[i + 1]["config"].get("name", next_type)
-                logger.info(f"等待 {OPERATION_INTERVAL} 秒后抓取 {next_name}...")
-                if on_progress:
-                    await on_progress(next_type, "waiting", None)
-                await asyncio.sleep(OPERATION_INTERVAL)
+            # 同组共享一个 context + 共享页面登录态
+            context = await self._browser.new_context(
+                accept_downloads=True,
+                viewport={"width": 1920, "height": 1080},
+            )
+            page = await context.new_page()
+            logged_in_ok = False  # 组内首个成功登录后为 True,后续跳过
+            try:
+                for i, task in enumerate(group_tasks):
+                    data_type = task["data_type"]
+                    start, end = task["start"], task["end"]
+                    config = task["config"]
+                    if on_progress:
+                        await on_progress(data_type, "fetching", None)
 
-        return results
+                    fr = FetchResult()
+                    fr.data_type = data_type
+                    try:
+                        # 单源抓取 + 复用登录态(组内首个源登录)
+                        await asyncio.wait_for(
+                            self._do_fetch_one_shared(
+                                data_type=data_type,
+                                start_date=start,
+                                end_date=end,
+                                config=config,
+                                result=fr,
+                                context=context,
+                                page=page,
+                                already_logged_in=logged_in_ok,
+                            ),
+                            timeout=180,
+                        )
+                        if fr.success:
+                            logged_in_ok = True
+                    except asyncio.TimeoutError:
+                        fr.error = f"抓取超时(180秒): {config.get('name', data_type)}"
+                        logger.error(fr.error)
+                    except Exception as e:
+                        fr.error = f"抓取失败: {e}"
+                        logger.error(fr.error, exc_info=True)
+
+                    results_map[data_type] = fr
+                    if on_progress:
+                        # 回调 phase=done 表示抓取阶段完成(之后是等待或导入)
+                        await on_progress(data_type, "done", fr)
+
+                    # 是否需要等待:
+                    #  - 组内(同 base_url)两个源之间: 必须等 65 秒(同一个 BMS Web 系统 1 分钟查询限制)
+                    #  - 跨组(不同域名): 两个不同 Web 系统,各自独立限流,无需等待
+                    is_last_in_group = (i == len(group_tasks) - 1)
+                    is_last_group = (group_idx == len(groups) - 1)
+                    if not is_last_in_group:
+                        # 组内后续源: 等待 65s (同域名 BMS 限制)
+                        next_type = group_tasks[i + 1]["data_type"]
+                        next_name = group_tasks[i + 1]["config"].get("name", next_type)
+                        logger.info(
+                            f"[同域名内] 还需等待 {OPERATION_INTERVAL} 秒后抓取 {next_name} "
+                            f"(同一 BMS 系统查询/导出间隔 >= 1 分钟)"
+                        )
+                        if on_progress:
+                            await on_progress(next_type, "waiting", None)
+                        await asyncio.sleep(OPERATION_INTERVAL)
+                    elif not is_last_group:
+                        # 组与组之间是不同域名(如 wifi → support),属于两个不同 Web,无需等 65s
+                        next_group = groups[group_idx + 1]
+                        next_first = next_group[1][0]
+                        next_type = next_first["data_type"]
+                        next_name = next_first["config"].get("name", next_type)
+                        logger.info(
+                            f"[跨域名跳过等待] 下一个源 {next_name} 是不同 BMS 域名,直接切换不等待"
+                        )
+                        # 直接进入下一组,不 sleep
+            finally:
+                await context.close()
+
+        # 3. 按 original_order 组装 results
+        return [results_map[dt] for dt in original_order if dt in results_map]
+
+    async def _do_fetch_one_shared(
+        self,
+        *,
+        data_type: str,
+        start_date: datetime,
+        end_date: datetime,
+        config: dict,
+        result: FetchResult,
+        context,  # 同组共享
+        page,     # 同组共享
+        already_logged_in: bool,
+    ):
+        """复用 context/page 版的单源抓取流程(同域名共享登录态)
+
+        - already_logged_in=True: 跳过登录,直接 goto 目标页
+        - already_logged_in=False: 执行登录并验证成功后才进入页面
+        """
+        if not config or not config.get("base_url"):
+            result.error = f"数据源未配置或缺少 base_url: {data_type}"
+            return
+        if not config.get("username") or not config.get("password"):
+            result.error = f"数据源未配置账号密码: {data_type}(请在系统管理-同步设置中配置)"
+            return
+
+        base_url = config["base_url"]
+        username = config["username"]
+        password = config["password"]
+        login_url = f"{base_url}/index.html#/login"
+        page_url = f"{base_url}{config['page_path']}"
+
+        if not already_logged_in:
+            # 组内首个源: 登录
+            logger.info(f"[{data_type}] (首次,登录) 正在登录 {base_url}...")
+            await page.goto(login_url, wait_until="networkidle")
+            await asyncio.sleep(2)
+            await page.fill('input[type="text"], input[placeholder*="账号"], input[placeholder*="用户名"]', username)
+            await page.fill('input[type="password"], input[placeholder*="密码"]', password)
+            await asyncio.sleep(1)
+            await page.click('button:has-text("登录"), button[type="submit"]')
+            await page.wait_for_load_state("networkidle")
+            await asyncio.sleep(3)
+            if "login" in page.url.lower():
+                error_elem = await page.query_selector(".el-message__content, .el-form-item__error")
+                if error_elem:
+                    error_text = await error_elem.inner_text()
+                    raise RuntimeError(f"登录失败: {error_text}")
+                raise RuntimeError("登录失败: 账号或密码错误")
+            logger.info(f"[{data_type}] 登录成功(后续同组源复用登录态)")
+        else:
+            # 复用登录态: 不重新登录,直接跳页
+            logger.info(f"[{data_type}] 复用登录态,直接跳转目标页")
+
+        # 2. 进入目标页面
+        logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")
+        await page.goto(page_url, wait_until="networkidle")
+        await asyncio.sleep(3)
+
+        # 3. 设置时间范围
+        start_str = start_date.strftime("%Y-%m-%d %H:%M:%S")
+        end_str = end_date.strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(f"[{data_type}] 设置时间范围: {start_str} ~ {end_str}")
+
+        time_labels = config.get("time_labels")
+        if time_labels and len(time_labels) >= 2:
+            await self._set_time_by_labels(page, time_labels[0], time_labels[1], start_str, end_str)
+        else:
+            await self._set_time_range(page, start_str, end_str)
+        await asyncio.sleep(1)
+
+        # 4. 搜索
+        logger.info(f"[{data_type}] 点击搜索...")
+        await page.click('button:has-text("搜索")')
+        await page.wait_for_load_state("networkidle")
+        await asyncio.sleep(2)
+
+        # 5. 导出
+        logger.info(f"[{data_type}] 点击导出...")
+        download_promise = page.wait_for_event("download", timeout=60000)
+        await page.click('button:has-text("导出")')
+        download = await download_promise
+        logger.info(f"[{data_type}] 文件下载成功: {download.suggested_filename}")
+
+        # 6. 保存
+        original_filename = download.suggested_filename or f"{data_type}_export.csv"
+        month_dir = datetime.now().strftime("%Y-%m")
+        upload_dir = Path(settings.UPLOAD_DIR) / month_dir
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        stem = Path(original_filename).stem
+        suffix = Path(original_filename).suffix
+        ts = datetime.now().strftime("%Y%m%d%H%M%S")
+        dest_filename = f"{stem}_{ts}{suffix}"
+        dest_path = upload_dir / dest_filename
+
+        await download.save_as(str(dest_path))
+        logger.info(f"[{data_type}] 文件已保存: {dest_path}")
+
+        result.success = True
+        result.file_path = f"{month_dir}/{dest_filename}"
+        result.filename = dest_filename
 
     async def test_connection(self) -> bool:
         """测试浏览器是否可用"""

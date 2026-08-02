@@ -3,9 +3,9 @@
 使用 asyncio 后台循环实现,无需额外依赖。
 定时: 8:00, 12:00, 16:00, 20:00, 00:00 每天5次。
 
-启动/停止通过 API 控制,状态保持在内存中。
-凭证从 sync_source_configs 表读取(按源独立,定时任务无人值守,必须预设)。
-仅同步 default_sync=True 的源(DEFAULT_SYNC_TYPES)。
+2026-08-02 优化:
+  - 接入 SyncTaskManager 全局互斥锁,防止手动同步时定时任务并发冲突
+  - 定时任务失败也会写入 task 状态,进度可通过 /task/status 统一查询
 """
 
 import asyncio
@@ -13,6 +13,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.services.bms_sync import DEFAULT_SYNC_TYPES, sync_all
+from app.services.sync_task_manager import sync_task_manager
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,6 @@ class BmsScheduler:
         self._task: asyncio.Task | None = None
         self._running = False
         self._last_run_hour: dict[str, int] = {}  # date_str -> last_run_hour, 防止同一小时重复执行
-        self._current_progress: dict = {}  # 当前进度
 
     @property
     def is_running(self) -> bool:
@@ -55,26 +55,39 @@ class BmsScheduler:
             db.close()
 
     def get_status(self) -> dict:
-        """获取调度器状态"""
+        """获取调度器状态(含 SyncTaskManager 的当前任务进度)"""
         now = datetime.now(timezone(timedelta(hours=8)))
-        # 计算下一次运行时间
         today_remaining = [h for h in SCHEDULE_HOURS if h > now.hour]
         if today_remaining:
             next_hour = today_remaining[0]
             next_date = now.date()
         else:
-            # 今天没有了,取明天第一个
             next_hour = SCHEDULE_HOURS[0]
             next_date = now.date() + timedelta(days=1)
 
         next_run = datetime(next_date.year, next_date.month, next_date.day, next_hour, 0, 0)
 
+        # 优先展示 task_manager 维护的当前进度
+        ct = sync_task_manager.get_current_task()
+        current_progress = None
+        if ct and ct.status == "running":
+            current_progress = {
+                "task_id": ct.task_id,
+                "data_type": ct.time_ranges_display,
+                "phase": f"{ct.trigger_type}|{ct.current_phase}" if hasattr(ct, 'current_phase') else f"{ct.trigger_type}运行中",
+                "percent": (ct.to_public_dict().get("percent")),
+                "current_source": (ct.to_public_dict().get("current_source")),
+                "current_phase": (ct.to_public_dict().get("current_phase")),
+            }
+
         return {
             "enabled": self._running,
             "schedule_hours": SCHEDULE_HOURS,
             "next_run": next_run.isoformat(),
-            "current_progress": self._current_progress if self._current_progress else None,
+            "current_progress": current_progress,
             "has_credentials": self._default_sources_have_credentials(),
+            "busy": sync_task_manager.is_busy(),
+            "cooldown_remaining": sync_task_manager.remaining_cooldown_seconds(),
         }
 
     def start(self):
@@ -101,10 +114,9 @@ class BmsScheduler:
                 date_str = now.strftime("%Y-%m-%d")
                 hour = now.hour
 
-                # 检查是否到了定时小时,且本小时还没执行过
                 if (
                     hour in SCHEDULE_HOURS
-                    and now.minute < 5  # 只在前5分钟内触发(防止错过)
+                    and now.minute < 5
                     and self._last_run_hour.get(date_str) != hour
                 ):
                     self._last_run_hour[date_str] = hour
@@ -116,54 +128,68 @@ class BmsScheduler:
             except Exception as e:
                 logger.error(f"调度器异常: {e}", exc_info=True)
 
-            # 等待下一次检查
             await asyncio.sleep(CHECK_INTERVAL)
 
     async def _do_scheduled_sync(self):
-        """执行定时同步(仅 DEFAULT_SYNC_TYPES,仅当天数据,凭证从 DB 读)
+        """执行定时同步 - 通过 SyncTaskManager 提交(全局互斥)
 
-        时间范围硬性限定为「今天 00:00 ~ now」(东八区),不允许同步过多历史数据。
-        每次定时都覆盖当天 0 点至今,upsert 幂等不会产生重复,反而能补回上次失败漏掉的数据。
+        时间范围: 每天 00:00 ~ now(全量重算当日,upsert 幂等不会重复,
+        反而能补回上次失败漏掉的;但 task_manager 的增量时间记录仍会写入,
+        手动同步走增量时可以接续)。
         """
         if not self._default_sources_have_credentials():
-            logger.warning("定时同步跳过: 默认同步的源未全部配置凭证(请在系统管理-同步设置中配置)")
+            logger.warning("定时同步跳过: 默认同步的源未全部配置凭证")
             return
 
-        # 定时同步强制只同步当天数据(今天 00:00 ~ now),防止同步过多历史数据
+        # 如果有手动任务正在跑,跳过本次定时
+        if sync_task_manager.is_busy():
+            ct = sync_task_manager.get_current_task()
+            who = f"{ct.triggered_by} 的手动任务" if ct else "任务"
+            logger.info(f"定时同步跳过: 正在执行 {who},等下一个检查点")
+            return
+
         TZ_CN = timezone(timedelta(hours=8))
         now_cn = datetime.now(TZ_CN)
         today_start = now_cn.replace(hour=0, minute=0, second=0, microsecond=0)
         sync_types = list(DEFAULT_SYNC_TYPES)
-        time_ranges = {dt: (today_start, now_cn) for dt in sync_types}
+        time_ranges_dt = {dt: (today_start, now_cn) for dt in sync_types}
+        time_ranges_display = {
+            dt: (
+                today_start.strftime("%m-%d 00:00(今日定时-全量)"),
+                now_cn.strftime("%m-%d %H:%M:%S"),
+            )
+            for dt in sync_types
+        }
         logger.info(
-            f"定时同步时间范围(仅当天): "
+            f"定时同步时间范围: "
             f"{today_start.strftime('%Y-%m-%d %H:%M:%S')} ~ {now_cn.strftime('%Y-%m-%d %H:%M:%S')} "
             f"数据源={sync_types}"
         )
 
-        async def on_progress(data_type, phase, data):
-            if phase == "fetching":
-                self._current_progress = {"data_type": data_type, "phase": "正在抓取"}
-            elif phase == "waiting":
-                self._current_progress = {"data_type": data_type, "phase": "等待60秒(BMS限制)"}
-            elif phase == "imported":
-                self._current_progress = {"data_type": data_type, "phase": "已导入", "data": data}
-            logger.info(f"同步进度: {data_type} - {phase}")
-
-        try:
-            results = await sync_all(
+        async def runner(task_id: str, on_progress_cb):
+            return await sync_all(
                 trigger_type="scheduled",
                 triggered_by="scheduler",
-                on_progress=on_progress,
+                on_progress=on_progress_cb,
                 data_types=sync_types,
-                time_ranges=time_ranges,
+                time_ranges=time_ranges_dt,
             )
-            success_count = sum(1 for r in results if r["success"])
-            logger.info(f"定时同步完成: {success_count}/{len(results)} 成功")
-        except Exception as e:
-            logger.error(f"定时同步失败: {e}", exc_info=True)
-        finally:
-            self._current_progress = {}
+
+        try:
+            task_id, msg = await sync_task_manager.submit(
+                trigger_type="scheduled",
+                triggered_by="scheduler",
+                data_types=sync_types,
+                time_ranges=time_ranges_dt,
+                time_ranges_display=time_ranges_display,
+                runner_coro=runner,
+                # 定时: 仍受忙锁保护,但忽略冷却(定时即使刚手动完成也允许跑,因为是 0~now 补全更可信)
+                ignore_cooldown=True,
+            )
+            logger.info(f"定时同步已提交: task_id={task_id}, {msg}")
+        except RuntimeError as e:
+            # 被锁挡住,不重试(下一个检查点会再试)
+            logger.warning(f"定时同步未执行: {e}")
 
 
 # 全局单例
