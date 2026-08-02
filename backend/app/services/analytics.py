@@ -2552,15 +2552,19 @@ def today_queue(db: Session, date: str | None = None) -> dict[str, Any]:
 def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30) -> list[dict[str, Any]]:
     """模块7: 今日人均效率表 (按operator聚合, 关联Person拿display_name/group_name).
 
-    专项任务4分类 (按业务难度从低到高):
-      咨询接待  = 普通咨询 + 其他问题 + 综合问题  (难度1.0)
-      套餐专项  = 套餐相关接待 (套餐疑问/套餐升级等)  (难度1.8)
-      退款挽回  = cs_record 退款类接待 + Refund 线上退款实际操作  (难度2.2)
-      投诉专员  = cs_record 投诉类接待 + 投诉类(service_category空)工单 处理人完工  (难度3.0)
+    两个独立合成指标 (用户 2026-08-02 新算法):
+      a. 工作量分 (会话次数维度, 反映忙闲强度):
+         = Σ (专项会话数) × 专项难度系数 × 本职系数(本职=1.0 / 非本职转接×0.2)
+      b. 效率分   (接待个数维度, SN去重, 反映服务覆盖面):
+         = Σ (专项接待个数) × 专项难度系数 × 本职系数(同上)
 
-    合成work_score = Σ 每专项计数 × 专项难度系数
-    退款金额(refund_op_amount)不再关注: 退款挽回只算执行笔数,不看金额高低.
-    按 work_score 倒序, 取TopN.
+    本职判定:
+      - HR 预设专项 与 计算专项 同一大类 → 本职, 全系数
+      - 岗位=主管/组长, 或HR专项属于管理层/投诉 → 全部本职, 豁免转接惩罚
+      - HR未登记的新人 → 默认全部本职 (避免新人刚进来全部被打折)
+
+    非本职 = 跨专项转接, 难度系数再 × 0.2.
+    系统/用户自助 虚拟账户 → 不进真人员工排名, 补在末尾 rank=NULL.
     """
     d = _parse_date(date)
     ts, te, _, _ = _today_windows(d)
@@ -2574,35 +2578,38 @@ def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30)
                    CsRecord.operation_time >= ts, CsRecord.operation_time <= te,
                    CsRecord.operator.isnot(None))
             .group_by(CsRecord.operator)).cte("cs_q")
-    # 2. 会话接待 按 6 个 category_bucket 分桶 per operator (用于 4 专项拆分)
+    # 2. 会话接待 按 6 个 category_bucket 分桶 per operator: 会话数 + 接待数(SN去重) 两套
     cs_cat_q = (select(
         CsRecord.operator.label("op"),
         _category_case().label("bucket"),
-        func.count().label("cnt"),
+        func.count().label("scnt"),
+        func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("pcnt"),
     ).where(
         CsRecord.operation_time.isnot(None),
         CsRecord.operation_time >= ts, CsRecord.operation_time <= te,
         CsRecord.operator.isnot(None),
     ).group_by(CsRecord.operator, "bucket")).cte("cs_cat_q")
-    # 3. 退款挽回实际执行笔数 per operator (路线A: refund_method='线上', 不看金额)
+    # 3. 退款挽回实际执行: 笔数 + 去重设备个数
     rf_q = (select(Refund.operator.label("op"),
-                   func.count().label("c"))
+                   func.count().label("sc"),
+                   func.count(func.distinct(func.nullif(func.trim(Refund.device_sn), ""))).label("pc"))
             .where(Refund.created_at_raw.isnot(None),
                    Refund.created_at_raw >= ts, Refund.created_at_raw <= te,
                    Refund.operator.isnot(None),
                    Refund.operator.notin_(["sys", "system", "SYS", "System"]),
                    *_route_a_online_refund_filter())
             .group_by(Refund.operator)).cte("rf_q")
-    # 4. 投诉类工单 处理人完工笔数 per operator (service_category IS NULL 兜底=投诉)
+    # 4. 投诉类工单 处理人完工: 笔数 + 去重设备个数
     cm_q = (select(ServiceTicket.handler.label("op"),
-                   func.count().label("c"))
+                   func.count().label("sc"),
+                   func.count(func.distinct(func.nullif(func.trim(ServiceTicket.device_sn), ""))).label("pc"))
             .where(ServiceTicket.finish_time.isnot(None),
                    ServiceTicket.finish_time >= ts, ServiceTicket.finish_time <= te,
                    ServiceTicket.handler.isnot(None),
                    _ticket_category_case() == "投诉")
             .group_by(ServiceTicket.handler)).cte("cm_q")
 
-    # 并集: 做过接待 或 退款 或 投诉处理 的人员 (工单完成已移除 不纳入)
+    # 并集: 做过接待 或 退款 或 投诉处理 的人员
     ops_union = union(
         select(cs_q.c.op), select(rf_q.c.op), select(cm_q.c.op)
     ).cte("ops_u")
@@ -2617,69 +2624,131 @@ def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30)
             op_person.c.specialty.label("sp"),
             func.coalesce(cs_q.c.c, 0).label("rc"),
             func.coalesce(cs_q.c.dc, 0).label("rdc"),
-            func.coalesce(rf_q.c.c, 0).label("fc"),
         )
         .select_from(ops_union)
         .outerjoin(cs_q, ops_union.c.op == cs_q.c.op)
-        .outerjoin(rf_q, ops_union.c.op == rf_q.c.op)
         .outerjoin(op_person, ops_union.c.op == op_person.c.operator)
     ).all()
 
-    # 把 cs_cat_q 的 6 桶 转成 dict 按 op 聚合
-    cs_cat_by_op: dict[str, dict[str, int]] = {}
+    # 会话/接待两套 6 桶 按 op 聚合
+    cs_cat_by_op: dict[str, dict[str, tuple[int, int]]] = {}
     for r in db.execute(select(cs_cat_q)).all():
-        cs_cat_by_op.setdefault(r.op, {})[r.bucket] = int(r.cnt or 0)
-    cm_by_op: dict[str, int] = {r.op: int(r.c or 0) for r in db.execute(select(cm_q)).all()}
+        cs_cat_by_op.setdefault(r.op, {})[r.bucket] = (int(r.scnt or 0), int(r.pcnt or 0))
+    rf_by_op: dict[str, tuple[int, int]] = {r.op: (int(r.sc or 0), int(r.pc or 0)) for r in db.execute(select(rf_q)).all()}
+    cm_by_op: dict[str, tuple[int, int]] = {r.op: (int(r.sc or 0), int(r.pc or 0)) for r in db.execute(select(cm_q)).all()}
 
-    # 4 专项的难度系数 (可后续迁移到独立字典配置表: StaffSpecialtyWeight / specialty_difficulty)
     WEIGHT = {"咨询接待": 1.0, "套餐专项": 1.8, "退款挽回": 2.2, "投诉专员": 3.0}
+    TRANSFER_PENALTY = 0.2
+    SYSTEM_VIRTUAL_EXACT = {"用户自助", "系统自动", "客户自助", "企微用户自助", "企微系统自动"}
+    # 未登记到 Person 维表 的 第三方/系统/设备/公司 账号关键字 (关键字匹配 直接判非真人)
+    VIRTUAL_HINT_WORDS = ("wifi","管家","科技","公司","设备","云客猫","闪猫","sys_","sys-","hqq","ykm-","畅享","商米","猫科","科联","运营")
+    def _is_virtual_name(name: str, dept: str | None, grp: str | None, pos: str | None) -> bool:
+        """非真人虚拟账户判定:
+        ① 名字精确匹配 SYSTEM_VIRTUAL_EXACT → True
+        ② 未登记 Person (部门=未设置 AND 组=未分组 AND 岗位空) 且 名字不像人名
+           (≥5字 / 关键字命中 / ≥4字且含数字 / 含横杠下划线 公司/设备名特征 → True
+        """
+        if not name: return True
+        if name in SYSTEM_VIRTUAL_EXACT: return True
+        unregistered = (not dept or dept in ("未设置",)) and (not grp or grp in ("未分组", "用户自助")) and not pos
+        if not unregistered: return False
+        if len(name) >= 5: return True
+        low = name.lower()
+        if any(k.lower() in low for k in VIRTUAL_HINT_WORDS): return True
+        if any(c.isdigit() for c in name) and len(name) >= 4: return True
+        if ("-" in name) or ("_" in name): return True
+        return False
 
-    out = []
+    def _hr_map(hr_sp: str | None, pos: str | None) -> str | None:
+        if not hr_sp and (pos or "") in ("主管", "组长"):
+            return "管理层"
+        # ★ 投诉专员岗: 与主管/组长一样 跨类全系数豁免 (处理的SN全是投诉, 本来就是从别的岗转过来的)
+        if not hr_sp and (pos or "") == "投诉专员":
+            return "投诉专员"
+        if not hr_sp:
+            return None
+        s = hr_sp or ""
+        if "投诉" in s: return "投诉专员"
+        if "退款" in s: return "退款挽回"
+        if "套餐" in s: return "套餐专项"
+        if any(k in s for k in ("咨询", "接待", "综合问题", "其他问题")):
+            return "咨询接待"
+        if any(k in s for k in ("主管", "组长")):
+            return "管理层"
+        return None
+
+    CATS = ["咨询接待", "套餐专项", "退款挽回", "投诉专员"]
+    BUCK_FZ = ("咨询", "其他问题", "综合问题")
+
+    out: list[dict[str, Any]] = []; virtual_rows: list[dict[str, Any]] = []
     for r in rows:
         op = r.op
         rc = int(r.rc or 0)
         rdc = int(getattr(r, "rdc", 0) or 0)
-        fc = int(r.fc or 0)
         buckets = cs_cat_by_op.get(op, {})
-        # 专项拆分 (严格遵循 analytics.py 的 6 桶 归并 逻辑 与 接待分项周报一致)
-        c_zixun = buckets.get("咨询", 0) + buckets.get("其他问题", 0) + buckets.get("综合问题", 0)
-        c_taocan = buckets.get("套餐问题", 0)
-        c_tousu_cs = buckets.get("投诉", 0)
-        c_tuikuan_cs = buckets.get("退款", 0)
-        # 退款挽回 = 会话接待中退款类沟通 + 实际退款操作执行
-        c_tuikuan = c_tuikuan_cs + fc
-        # 投诉专员 = 会话接待中投诉类沟通 + 投诉工单处理人完工
-        c_tousu = c_tousu_cs + cm_by_op.get(op, 0)
+        def _bsum(names: tuple[str, ...], sess: bool) -> int:
+            idx = 0 if sess else 1
+            return sum((buckets.get(n, (0,0))[idx] for n in names), 0)
+        z_sess = _bsum(BUCK_FZ, True);  z_peop = _bsum(BUCK_FZ, False)
+        t_sess = buckets.get("套餐问题", (0,0))[0];  t_peop = buckets.get("套餐问题", (0,0))[1]
+        tu_s = buckets.get("退款", (0,0))[0] + rf_by_op.get(op, (0,0))[0]
+        tu_p = buckets.get("退款", (0,0))[1] + rf_by_op.get(op, (0,0))[1]
+        to_s = buckets.get("投诉", (0,0))[0] + cm_by_op.get(op, (0,0))[0]
+        to_p = buckets.get("投诉", (0,0))[1] + cm_by_op.get(op, (0,0))[1]
+        rf_op_count = rf_by_op.get(op, (0,0))[0]
+        sess = {"咨询接待": z_sess, "套餐专项": t_sess, "退款挽回": tu_s, "投诉专员": to_s}
+        peop = {"咨询接待": z_peop, "套餐专项": t_peop, "退款挽回": tu_p, "投诉专员": to_p}
 
-        # 工作量合成: 4专项 × 各自难度系数
-        score = (c_zixun * WEIGHT["咨询接待"]
-                 + c_taocan * WEIGHT["套餐专项"]
-                 + c_tuikuan * WEIGHT["退款挽回"]
-                 + c_tousu * WEIGHT["投诉专员"])
+        position = r.pos or ""
+        hr_cat = _hr_map(r.sp, position)
+        # ★ 用户要求: 投诉专员岗 = 本来跨类接(处理的SN全是投诉) 同主管/组长 全部豁免转接 全系数
+        mgmt = (position in ("主管", "组长", "投诉专员")) or hr_cat == "管理层" or hr_cat == "投诉专员"
+
+        work_score = 0.0; eff_score = 0.0
+        bd: dict[str, dict[str, Any]] = {}
+        for c in CATS:
+            own = mgmt or hr_cat is None or hr_cat == c
+            coef = WEIGHT[c] if own else WEIGHT[c] * TRANSFER_PENALTY
+            sv = sess[c]; pv = peop[c]
+            wp = sv * coef; ep = pv * coef
+            work_score += wp; eff_score += ep
+            bd[c] = {
+                "sessions": sv, "people": pv,
+                "weight": WEIGHT[c], "coef": round(coef, 3), "is_own": own,
+                "work_contrib": round(wp, 1), "eff_contrib": round(ep, 1),
+            }
 
         raw_name = r.name or op or "未知"
         norm_name = _strip_qw_prefix(raw_name) or raw_name
-        out.append({
-            "operator": op,
-            "name": norm_name,
-            "department": r.dept or "未设置",
-            "group": r.grp or "未分组",
-            "position": r.pos,
-            "current_specialty": r.sp,
-            "reception_count": rc,
-            "reception_device_count": rdc,
-            "refund_op_count": fc,
-            # 4 专项明细计数 (便于前端 tooltip 展示 & 后续按专项排名)
-            "sp_zixun": c_zixun,      # 咨询接待
-            "sp_taocan": c_taocan,    # 套餐专项
-            "sp_tuikuan": c_tuikuan,  # 退款挽回
-            "sp_tousu": c_tousu,      # 投诉专员
-            # 难度系数字典 (随每条响应返回, 前端可展示 公式 = Σ 各专项×系数)
-            "weights": dict(WEIGHT),
-            # 合成结果
-            "work_score": round(score, 2),
-        })
+        record: dict[str, Any] = {
+            "operator": op, "name": norm_name,
+            "department": r.dept or "未设置", "group": r.grp or "未分组",
+            "position": r.pos, "current_specialty": r.sp,
+            "hr_category": hr_cat, "is_management": mgmt,
+            "reception_count": rc, "reception_device_count": rdc,
+            "refund_op_count": rf_op_count,
+            "sp_zixun": z_sess, "sp_taocan": t_sess, "sp_tuikuan": tu_s, "sp_tousu": to_s,
+            "pp_zixun": z_peop, "pp_taocan": t_peop, "pp_tuikuan": tu_p, "pp_tousu": to_p,
+            "weights": dict(WEIGHT), "transfer_penalty": TRANSFER_PENALTY,
+            "breakdown": bd,
+            "work_score": round(work_score, 2), "eff_score": round(eff_score, 2),
+            "rank": None,              # rank 先写默认 None, 排序后真人员工再写 1..N
+            "is_virtual": False,       # 显式 False, 避免 undefined 误判成 null 非真人 Tag 全亮
+        }
+        # 非真人判定 = 精确虚拟匹配 OR 未登记+名字特征匹配
+        if _is_virtual_name(norm_name, r.dept, r.grp, r.pos):
+            record["is_virtual"] = True
+            virtual_rows.append(record)
+        else:
+            out.append(record)
+
     out.sort(key=lambda x: -x["work_score"])
-    return out[: max(1, min(200, topn or 30))]
+    out = out[: max(1, min(200, topn or 30))]
+    for i, rec in enumerate(out, 1):
+        rec["rank"] = i
+    for rec in virtual_rows:
+        rec["rank"] = None
+        out.append(rec)
+    return out
 
 

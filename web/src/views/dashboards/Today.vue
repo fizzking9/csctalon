@@ -50,10 +50,10 @@
               <template v-if="c.money">{{ formatMoney(c.value) }}</template>
               <template v-else>{{ formatNum(c.value) }}<span class="kpi-unit">{{ c.unit || '' }}</span></template>
             </div>
-            <!-- 接待量卡追加一行: 今日接待人数 (distinct device_sn ≈ 独立客户人数, 一人多设备近似当人数无影响) -->
+            <!-- 接待量卡追加一行: 今日接待数 (distinct device_sn ≈ 独立客户人数, 一人多设备近似当人数无影响) -->
             <div v-if="c.key === 'reception' && c.device_count != null" class="kpi-device-sub">
-              <span class="kpi-device-sub-label">接待人数</span>
-              <span class="kpi-device-sub-val">{{ formatNum(c.device_count) }}<span class="kpi-device-sub-unit"> 人</span></span>
+              <span class="kpi-device-sub-label">接待数</span>
+              <span class="kpi-device-sub-val">{{ formatNum(c.device_count) }}<span class="kpi-device-sub-unit"> 个</span></span>
             </div>
             <div class="kpi-yoy">
               <el-tag v-if="c.yoy_pct != null" size="small" effect="plain" :type="yoyTagType(c.key, c.yoy_pct)">
@@ -136,7 +136,7 @@
 
     <!-- 模块2: 小时节奏 -->
     <section class="section-card mb-24">
-      <h2 class="section-title">2. 今日实时节奏 <span class="section-sub">（小时级双柱：会话接待人次 + 接待人数 + 退款笔数 + 投诉量 + 退款金额线）</span></h2>
+      <h2 class="section-title">2. 今日实时节奏 <span class="section-sub">（小时级双柱：会话数(次) + 接待数(个) + 退款笔数 + 投诉量 + 退款金额线）</span></h2>
       <el-card shadow="never" body-style="padding: 8px 10px">
         <BaseChart :option="hourlyOption" height="320px" />
       </el-card>
@@ -156,7 +156,7 @@
             </el-col>
             <el-col :xs="24" :md="12">
               <el-card shadow="never" body-style="padding: 4px 6px">
-                <div class="chart-title">接待量 Top 10 客服 <span style="color:#909399; font-size: 11px; font-weight: 400">（会话人次 + 接待人数）</span></div>
+                <div class="chart-title">接待量 Top 10 客服 <span style="color:#909399; font-size: 11px; font-weight: 400">（会话数(次) + 接待数(个)）</span></div>
                 <BaseChart :option="receptionStaffOption" height="280px" />
               </el-card>
             </el-col>
@@ -309,26 +309,32 @@
               <el-tag size="small" effect="plain" :type="row.department === '未设置' ? 'info' : 'success'">{{ row.department }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="岗位・分组" width="176">
+          <el-table-column label="岗位・分组・专项" width="208">
             <template #default="{ row }">
               <div style="display:flex; flex-direction:column; gap:3px">
-                <el-tag size="small" effect="plain" :type="posTagType(row.position)">
-                  {{ row.position || (row.name === '用户自助' ? '系统位' : '—') }}
-                </el-tag>
-                <el-tag size="small" effect="dark" :type="grpTagType(row.group)" style="align-self:flex-start">
-                  {{ row.group === '未分组' ? (row.name === '用户自助' ? '系统位' : '未分组') : (row.group || '部门统管') }}
+                <div style="display:flex; gap:4px; flex-wrap:wrap">
+                  <el-tag size="small" effect="plain" :type="posTagType(row.position)">
+                    {{ row.position || (row.name === '用户自助' ? '系统位' : '—') }}
+                  </el-tag>
+                  <el-tag size="small" effect="dark" :type="grpTagType(row.group)" style="align-self:flex-start">
+                    {{ row.group === '未分组' ? (row.name === '用户自助' ? '系统位' : '未分组') : (row.group || '部门统管') }}
+                  </el-tag>
+                </div>
+                <el-tag size="small" effect="plain" type="primary" style="align-self:flex-start">
+                  <span style="font-weight:400;color:#909399;font-size:10px; margin-right:4px">专项</span>
+                  {{ (row.current_specialty && row.current_specialty !== '组长') ? row.current_specialty : inferSpecialty(row) }}
                 </el-tag>
               </div>
             </template>
           </el-table-column>
-          <el-table-column prop="reception_count" label="会话接待人次" width="116" align="right" sortable>
+          <el-table-column prop="reception_count" label="会话数(次)" width="116" align="right" sortable>
             <template #default="{ row }">{{ formatNum(row.reception_count) }}</template>
           </el-table-column>
-          <el-table-column prop="reception_device_count" label="接待人数" width="108" align="right" sortable>
+          <el-table-column prop="reception_device_count" label="接待数(个)" width="108" align="right" sortable>
             <template #default="{ row }">
               <span style="color:#409eff">
                 {{ formatNum(row.reception_device_count ?? 0) }}
-                <span style="color:#909399; font-size: 11px">人</span>
+                <span style="color:#909399; font-size: 11px">个</span>
               </span>
             </template>
           </el-table-column>
@@ -345,15 +351,32 @@
                 <span class="sp-chip tc" v-if="row.sp_taocan" title="套餐专项 ×难度1.8">套餐{{ row.sp_taocan }}×1.8</span>
                 <span class="sp-chip tk" v-if="row.sp_tuikuan" title="退款挽回 ×难度2.2">退款{{ row.sp_tuikuan }}×2.2</span>
                 <span class="sp-chip ts" v-if="row.sp_tousu" title="投诉专员 ×难度3.0">投诉{{ row.sp_tousu }}×3.0</span>
+                <el-tooltip
+                  v-if="row.rank === null || row.is_virtual === true"
+                  effect="dark" placement="top"
+                  content="系统/用户自助/第三方设备账号等 不计入真人员工排名"
+                >
+                  <el-tag size="small" effect="dark" type="info" style="margin-left:4px">非真人</el-tag>
+                </el-tooltip>
               </div>
             </template>
           </el-table-column>
-          <el-table-column prop="work_score" label="工作量合成分" width="140" align="right" sortable>
+          <el-table-column label="工作量分" width="138" align="right" sortable :sort-method="(a,b)=>Number(a.work_score||0)-Number(b.work_score||0)">
             <template #default="{ row }">
-              <el-tooltip effect="dark" placement="top" :width="420" :content="specialtyScoreTooltip(row)">
-                <el-tag size="small" effect="plain" :type="workScoreTagType(row.work_score)">
+              <el-tooltip effect="dark" placement="top" :width="440" :content="scoreTooltip(row,'work')">
+                <el-tag size="small" effect="plain" :type="scoreTagType(row.work_score,500,300,100)">
                   <span style="font-weight:600">{{ formatNum(row.work_score) }}</span>
-                  <span style="color:#909399;font-size:10px;margin-left:4px">分</span>
+                  <span style="color:#909399;font-size:10px;margin-left:4px">分(次)</span>
+                </el-tag>
+              </el-tooltip>
+            </template>
+          </el-table-column>
+          <el-table-column label="效率分" width="138" align="right" sortable :sort-method="(a,b)=>Number(a.eff_score||0)-Number(b.eff_score||0)">
+            <template #default="{ row }">
+              <el-tooltip effect="dark" placement="top" :width="440" :content="scoreTooltip(row,'eff')">
+                <el-tag size="small" effect="plain" :type="scoreTagType(row.eff_score,350,200,80)">
+                  <span style="font-weight:600;color:#2563eb">{{ formatNum(row.eff_score) }}</span>
+                  <span style="color:#909399;font-size:10px;margin-left:4px">分(个)</span>
                 </el-tag>
               </el-tooltip>
             </template>
@@ -421,11 +444,11 @@ const kpiData = ref({})
 const kpiCards = computed(() => {
   const k = kpiData.value || {}
   const def = [
-    { key: 'reception',      label: '今日接待量',   icon: 'ChatDotRound', bg: '#ecf5ff', color: '#409eff', unit: '次',
+    { key: 'reception',      label: '今日会话数',   icon: 'ChatDotRound', bg: '#ecf5ff', color: '#409eff', unit: '次',
       money: false,
-      tip: `会话接待量 = 客服助手 沟通事项次数 (1条接待记录=1次会话, 只记当日已发生)
-今日接待人数 = 去重 device_sn (按活跃设备近似为独立客户人数)
-—— 会话量 > 接待人数 说明老客户多次进线沟通; 会话量 ≈ 接待人数 说明当日服务的基本都是新客户`,
+      tip: `今日会话数 = 客服助手 沟通事项次数 (1条接待记录=1次会话, 只记当日已发生)
+今日接待数 = 去重 device_sn (按活跃设备近似为独立客户人数, 单位:个)
+—— 会话数(次) > 接待数(个) 说明老客户多次进线沟通; ≈相等说明当日基本都是新客户`,
       ...(k.reception || { value: 0, yoy_value: 0, yoy_pct: null, device_count: 0, device_count_yoy: 0 }) },
     { key: 'refund_count',   label: '今日退款笔数', icon: 'Document',    bg: '#fdf6ec', color: '#e6a23c', unit: '笔',
       money: false,
@@ -495,27 +518,27 @@ const hourlyOption = computed(() => ({
         return m == null ? '-' : m.value == null ? '-' : (name === '退款金额' ? '¥'+Number(m.value).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : Number(m.value).toLocaleString('zh-CN'))
       }
       return `<b>${h}</b><br/>` +
-        `会话接待人次: ${val('会话接待人次')}<br/>` +
-        `接待人数: ${val('接待人数')} 人<br/>` +
+        `会话数(次): ${val('会话数(次)')}<br/>` +
+        `接待数(个): ${val('接待数(个)')}<br/>` +
         `退款笔数: ${val('退款笔数')}<br/>` +
         `投诉量: ${val('投诉量')}<br/>` +
         `退款金额: ${val('退款金额')}`
     } },
-  legend: { data: ['会话接待人次', '接待人数', '退款笔数', '投诉量', '退款金额'], top: 0 },
+  legend: { data: ['会话数(次)', '接待数(个)', '退款笔数', '投诉量', '退款金额'], top: 0 },
   grid: { left: 56, right: 72, bottom: 36, top: 40 },
   xAxis: { type: 'category', data: hourlyData.value.hour_labels || [], axisLabel: { fontSize: 10, interval: 1 } },
   yAxis: [
-    { type: 'value', name: '数量(次/人/笔/单)', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed' } } },
+    { type: 'value', name: '数量(次/个/笔/单)', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed' } } },
     { type: 'value', name: '退款金额(元)', axisLabel: { formatter: (v) => (v >= 10000 ? (v/10000).toFixed(0)+'万' : v), fontSize: 10 } },
   ],
   series: [
     {
-      name: '会话接待人次', type: 'bar', stack: null, data: hourlyData.value.reception || [],
+      name: '会话数(次)', type: 'bar', stack: null, data: hourlyData.value.reception || [],
       itemStyle: { color: '#409eff', borderRadius: [3, 3, 0, 0] },
       barMaxWidth: 14,
     },
     {
-      name: '接待人数', type: 'bar', data: hourlyData.value.reception_devices || [],
+      name: '接待数(个)', type: 'bar', data: hourlyData.value.reception_devices || [],
       itemStyle: { color: '#91cc75', borderRadius: [3, 3, 0, 0] },
       barMaxWidth: 14,
     },
@@ -567,8 +590,8 @@ const receptionStaffOption = computed(() => {
         const d = list[i]
         if (!d) return ''
         const grp = d.group && d.group !== '未分组' ? `组别: ${d.group}` : ''
-        const dev = d.device_count != null ? `<br/>接待人数: ${formatNum(d.device_count)} 人 (独立客户≈)` : ''
-        return `<b>${d.name}</b><br/>部门: ${d.department || '未设置'}${grp ? '<br/>' + grp : ''}<br/>会话接待人次: ${formatNum(d.count)}${dev}`
+        const dev = d.device_count != null ? `<br/>接待数: ${formatNum(d.device_count)} 个 (独立客户≈)` : ''
+        return `<b>${d.name}</b><br/>部门: ${d.department || '未设置'}${grp ? '<br/>' + grp : ''}<br/>会话数: ${formatNum(d.count)} 次${dev}`
       },
     },
     grid: { left: 150, right: 140, bottom: 20, top: 10 },
@@ -578,21 +601,21 @@ const receptionStaffOption = computed(() => {
       data: list.map(d => `${d.name}${dept(d)}`).reverse(),
       axisLabel: { fontSize: 10, width: 140, overflow: 'truncate' },
     },
-    legend: { show: false, data: ['会话接待人次', '接待人数'] },
+    legend: { show: false, data: ['会话数(次)', '接待数(个)'] },
     series: [
       {
-        name: '会话接待人次', type: 'bar',
+        name: '会话数(次)', type: 'bar',
         data: list.map(d => d.count).reverse(),
         itemStyle: { color: '#67c23a', borderRadius: [0, 3, 3, 0] },
         barMaxWidth: 12,
         label: { show: true, position: 'right', fontSize: 10, formatter: (p) => `${formatNum(p.value)} 次` },
       },
       {
-        name: '接待人数', type: 'bar',
+        name: '接待数(个)', type: 'bar',
         data: list.map(d => (d.device_count ?? 0)).reverse(),
         itemStyle: { color: '#409eff', borderRadius: [0, 3, 3, 0] },
         barMaxWidth: 12,
-        label: { show: true, position: 'right', fontSize: 10, formatter: (p) => `${formatNum(p.value)} 人` },
+        label: { show: true, position: 'right', fontSize: 10, formatter: (p) => `${formatNum(p.value)} 个` },
       },
     ],
   }
@@ -764,13 +787,13 @@ function formatDeadline(d, type='date') {
   return dayjs(d).format('MM-DD')
 }
 
-// ---------- 模块6 人均效率表 ----------
+// ---------- 模块6~7 人员效率表: 工作分 / 效率分 双列 + 本职/转接 breakdown ----------
 const staffRows = ref([])
-function workScoreTagType(score) {
+function scoreTagType(score, tHi, tMid, tLo) {
   const n = Number(score) || 0
-  if (n >= 500) return 'danger'     // 顶量: 500分+ 王霞/荣海伦级别
-  if (n >= 300) return 'warning'    // 高量: 300~499 分
-  if (n >= 100) return 'success'    // 正常: 100~299 分
+  if (n >= tHi) return 'danger'
+  if (n >= tMid) return 'warning'
+  if (n >= tLo) return 'success'
   return 'info'
 }
 function posTagType(p) {
@@ -791,26 +814,79 @@ function grpTagType(g) {
   if (!g || g === '未分组') return 'info'
   return GRP_COLOR_MAP[g] || 'info'
 }
-function specialtyScoreTooltip(r) {
+// 组长 4人 current_specialty 原本=「组长」(非专项名) → 按实际分组属性 反推其默认专项显示
+function inferSpecialty(r) {
+  // 先看实际做了什么(Top 2 专项) 自动生成
+  const items = [
+    { name: '咨询接待', n: Number(r.sp_zixun) || 0 },
+    { name: '套餐专项', n: Number(r.sp_taocan) || 0 },
+    { name: '退款挽回', n: Number(r.sp_tuikuan) || 0 },
+    { name: '投诉专员', n: Number(r.sp_tousu) || 0 },
+  ].filter(x => x.n > 0).sort((a, b) => b.n - a.n)
+  if (items.length) {
+    if (items.length === 1) return items[0].name
+    return items.slice(0, 2).map(i => i.name).join('+')
+  }
+  // 没数据 按组默认属性兜底(已知截图分组)
+  const GRP_DEFAULT_SP = {
+    '董梦玲组': '咨询接待',
+    '吴晓龙组': '投诉接待+咨询',
+    '叶珍凤组': '咨询接待+退款挽回',
+    '朱海洋组': '套餐专项+退款挽回',
+    '投诉专项组': '投诉接待',
+  }
+  return GRP_DEFAULT_SP[r.group] || (r.group === '未分组' ? '—' : '综合管理')
+}
+// 工作分 / 效率分 通用 tooltip (mode: 'work' 会话次数维度 / 'eff' 接待个数维度)
+function scoreTooltip(r, mode) {
   const fmt = (v) => formatNum(v)
   const w = r.weights || { '咨询接待': 1.0, '套餐专项': 1.8, '退款挽回': 2.2, '投诉专员': 3.0 }
-  const zx = (Number(r.sp_zixun) || 0)
-  const tc = (Number(r.sp_taocan) || 0)
-  const tk = (Number(r.sp_tuikuan) || 0)
-  const ts = (Number(r.sp_tousu) || 0)
-  const lines = [
-    `【${r.name || ''}】岗位：${r.position || '—'} ｜ 预设专项：${r.current_specialty || '—'}`,
-    ``,
-    `公式 = 咨询接待×${w['咨询接待']} + 套餐专项×${w['套餐专项']} + 退款挽回×${w['退款挽回']} + 投诉专员×${w['投诉专员']}`,
-    ``,
-    `咨询接待 ${fmt(zx)} × ${w['咨询接待']} = ${(zx*w['咨询接待']).toFixed(1)}`,
-    `套餐专项 ${fmt(tc)} × ${w['套餐专项']} = ${(tc*w['套餐专项']).toFixed(1)}`,
-    `退款挽回 ${fmt(tk)} × ${w['退款挽回']} = ${(tk*w['退款挽回']).toFixed(1)}`,
-    `投诉专员 ${fmt(ts)} × ${w['投诉专员']} = ${(ts*w['投诉专员']).toFixed(1)}`,
-    `———`,
-    `合成分 = ${(zx*1 + tc*1.8 + tk*2.2 + ts*3.0).toFixed(2)} 分 (接口返回 ${r.work_score})`,
+  const xfer = Number(r.transfer_penalty || 0.2)
+  const bd = r.breakdown || {}
+  const useBreakdown = bd && bd['咨询接待'] && (typeof bd['咨询接待'].coef === 'number')
+  const isWork = mode === 'work'
+  const unitChar = isWork ? '次' : '个'
+  const contribKey = isWork ? 'work_contrib' : 'eff_contrib'
+  const countKey = isWork ? 'sessions' : 'people'
+  const sp = (r.current_specialty && r.current_specialty !== '组长') ? r.current_specialty : inferSpecialty(r)
+  const mgmtMark = r.is_management ? '  [管理层:跨类全系数豁免]' : ''
+  const hrMark = r.hr_category ? `  (HR大类=${r.hr_category})` : ''
+
+  const CATS = [
+    { k: '咨询接待', short: '咨询', fallback_s: r.sp_zixun, fallback_p: r.pp_zixun ?? 0 },
+    { k: '套餐专项', short: '套餐', fallback_s: r.sp_taocan, fallback_p: r.pp_taocan ?? 0 },
+    { k: '退款挽回', short: '退款', fallback_s: r.sp_tuikuan, fallback_p: r.pp_tuikuan ?? 0 },
+    { k: '投诉专员', short: '投诉', fallback_s: r.sp_tousu, fallback_p: r.pp_tousu ?? 0 },
   ]
-  return lines.join('\n')
+  const head = [
+    `【${r.name || ''}】${r.position || '—'} · ${r.group || '部门统管'} · 专项：${sp}${hrMark}${mgmtMark}`,
+    `模式: ${isWork ? '工作量分 (会话次数维度, 反映忙闲强度)' : '效率分 (接待个数维度, SN去重, 反映覆盖面)'}`,
+    `系数: 本职=难度系数  非本职(转接)=难度系数×${xfer}`,
+    '————————————————————',
+  ]
+  const lines = []
+  let total = 0
+  for (const c of CATS) {
+    if (useBreakdown) {
+      const b = bd[c.k] || { weight: w[c.k], coef: w[c.k], [countKey]: 0, [contribKey]: 0, is_own: true }
+      const n = Number(b[countKey]) || 0
+      const coef = Number(b.coef) || 0
+      const contrib = Number(b[contribKey]) || 0
+      const mark = b.is_own ? '本职' : `转接×${xfer}`
+      lines.push(`${c.short} ${fmt(n)}${unitChar} × ${coef} [${mark}] = ${contrib.toFixed(1)}`)
+      total += contrib
+    } else {
+      const n = isWork ? (Number(c.fallback_s) || 0) : (Number(c.fallback_p) || 0)
+      const coef = w[c.k]
+      const contrib = n * coef
+      lines.push(`${c.short} ${fmt(n)}${unitChar} × ${coef} = ${contrib.toFixed(1)}`)
+      total += contrib
+    }
+  }
+  const reported = isWork ? (Number(r.work_score) || 0) : (Number(r.eff_score) || 0)
+  lines.push('————————————————————')
+  lines.push(`合成分 = ${total.toFixed(2)} 分${unitChar}   (接口返回: ${reported})`)
+  return head.concat(lines).join('\n')
 }
 
 
