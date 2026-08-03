@@ -59,7 +59,7 @@ def ensure_sync_sources_registered(db: Session) -> dict:
 
 def _row_to_config(row: SyncSourceConfig) -> dict:
     """DB 行 → 运行配置 dict(解密凭证)"""
-    # fetch_mode 不在 DB 表里,从 BMS_DATA_SOURCES 种子补(标记 http/playwright 分流)
+    # fetch_mode / requires_captcha 不在 DB 表里,从 BMS_DATA_SOURCES 种子补(标记 http/playwright 分流/验证码)
     seed = BMS_DATA_SOURCES.get(row.data_type, {})
     return {
         "data_type": row.data_type,
@@ -72,6 +72,7 @@ def _row_to_config(row: SyncSourceConfig) -> dict:
         "default_sync": row.default_sync,
         "enabled": row.enabled,
         "fetch_mode": seed.get("fetch_mode", "playwright"),
+        "requires_captcha": seed.get("requires_captcha", False),
     }
 
 
@@ -97,6 +98,7 @@ def get_sync_source_config(db: Session, data_type: str) -> dict | None:
         "default_sync": cfg.get("default_sync", True),
         "enabled": True,
         "fetch_mode": cfg.get("fetch_mode", "playwright"),
+        "requires_captcha": cfg.get("requires_captcha", False),
     }
 
 
@@ -105,6 +107,7 @@ def list_sync_source_configs(db: Session) -> list[dict]:
     rows = db.scalars(select(SyncSourceConfig).order_by(SyncSourceConfig.sort_order, SyncSourceConfig.id)).all()
     result = []
     for row in rows:
+        seed = BMS_DATA_SOURCES.get(row.data_type, {})
         result.append(
             {
                 "data_type": row.data_type,
@@ -117,6 +120,8 @@ def list_sync_source_configs(db: Session) -> list[dict]:
                 "default_sync": row.default_sync,
                 "enabled": row.enabled,
                 "sort_order": row.sort_order,
+                "fetch_mode": seed.get("fetch_mode", "playwright"),
+                "requires_captcha": seed.get("requires_captcha", False),
             }
         )
     return result

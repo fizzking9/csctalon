@@ -1,16 +1,19 @@
 """BMS 平台数据抓取服务
 
-支持 4 个数据源的抓取:
+支持 6 个数据源的抓取:
   - refund (退费单): https://wifi.cloud-cat.cn/bms/index.html#/pay/refund-manage
   - ticket (服务请求): https://support.cloud-cat.cn/bms/index.html#/service-request/service-request-manage
   - wallet (提现操作): https://support.cloud-cat.cn/bms/index.html#/settle/customerWalletOperationRecord
   - device_combo (设备套餐): https://support.cloud-cat.cn/bms/index.html#/device/device-combo
+  - cs_record (智能助手处理): http://ai-acc.cloud-cat.cn (HTTP API 导出)
+  - shanmao_refund (闪猫退款): https://fast.cloud-cat.cn/sc_brm/#/order-alrrefundapply-alrrefundapply
 
 注意:
   - 账号密码从 sync_source_configs 表读取(加密存储),按源独立配置
   - 两个子域名(wifi.cloud-cat.cn / support.cloud-cat.cn)需要分别登录,可能用不同账号
   - BMS 系统限制:1分钟内不能连续做查询导出下载动作
   - BMS_DATA_SOURCES 现仅作为默认种子(首次启动写入 DB),运行时配置以 DB 为准
+  - shanmao_refund (闪猫) 登录需验证码,采用 storage_state 复用机制,缺失时走前端交互验证码登录
 """
 
 import asyncio
@@ -61,10 +64,30 @@ BMS_DATA_SOURCES: dict[str, dict] = {
         "default_sync": True,
         "fetch_mode": "http",
     },
+    # 闪猫加速平台(已退款申请) - 独立域名 fast.cloud-cat.cn,登录需验证码
+    # requires_captcha=True 标记: 抓取时优先复用 storage_state,缺失时走交互验证码登录流程
+    "shanmao_refund": {
+        "name": "闪猫退款管理",
+        "base_url": "https://fast.cloud-cat.cn/sc_brm",
+        "page_path": "/index.html#/order-alrrefundapply-alrrefundapply",
+        "default_sync": False,  # 首次上线默认不同步,验证通过后管理员手动开启
+        "requires_captcha": True,
+    },
 }
 
 # 每次操作之间的最小间隔(秒),BMS 系统限制1分钟
 OPERATION_INTERVAL = 65
+
+# 浏览器登录态保存目录(复用 storage_state 跳过验证码登录)
+# 目录结构: settings.UPLOAD_DIR/.browser_states/{data_type}.json
+STORAGE_STATE_DIR = ".browser_states"
+
+
+def _storage_state_path(data_type: str) -> Path:
+    """获取某数据源的 storage_state 文件路径(随 UPLOAD_DIR 按月归档不必,登录态单独存)"""
+    base = Path(settings.UPLOAD_DIR) / STORAGE_STATE_DIR
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"{data_type}.json"
 
 
 class FetchResult:
@@ -404,38 +427,85 @@ class BmsFetcher:
         login_url = f"{base_url}/index.html#/login"
         page_url = f"{base_url}{config['page_path']}"
 
+        # ── storage_state 复用(优先加载已保存登录态,跳过验证码) ──
+        state_path = _storage_state_path(data_type)
+        storage_state = None
+        if config.get("requires_captcha") and state_path.exists():
+            try:
+                storage_state = str(state_path)
+                logger.info(f"[{data_type}] 加载已保存登录态: {state_path.name}")
+            except Exception as e:
+                logger.warning(f"[{data_type}] 读取 storage_state 失败,回退到常规登录: {e}")
+                storage_state = None
+
         # 每个数据源使用独立的 context(不同子域名需要分别登录)
-        context = await self._browser.new_context(
-            accept_downloads=True,
-            viewport={"width": 1920, "height": 1080},
-        )
+        context_kwargs = {
+            "accept_downloads": True,
+            "viewport": {"width": 1920, "height": 1080},
+        }
+        if storage_state:
+            context_kwargs["storage_state"] = storage_state
+        context = await self._browser.new_context(**context_kwargs)
         page = await context.new_page()
 
         try:
-            # 1. 登录
-            logger.info(f"[{data_type}] 正在登录 {base_url}...")
-            await page.goto(login_url, wait_until="networkidle")
-            await asyncio.sleep(2)
+            logged_in_via_state = False
+            if storage_state:
+                # 有 storage_state: 直接进目标页,验证是否仍登录
+                logger.info(f"[{data_type}] 验证登录态是否有效...")
+                await page.goto(page_url, wait_until="networkidle")
+                await asyncio.sleep(2)
+                if "login" not in page.url.lower():
+                    logged_in_via_state = True
+                    logger.info(f"[{data_type}] 登录态有效,跳过登录步骤")
 
-            await page.fill('input[type="text"], input[placeholder*="账号"], input[placeholder*="用户名"]', username)
-            await page.fill('input[type="password"], input[placeholder*="密码"]', password)
-            await asyncio.sleep(1)
-            await page.click('button:has-text("登录"), button[type="submit"]')
-            await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(3)
+            if not logged_in_via_state:
+                # storage_state 不存在或已过期,走登录流程
+                # 1. 登录
+                logger.info(f"[{data_type}] 正在登录 {base_url}...")
+                await page.goto(login_url, wait_until="networkidle")
+                await asyncio.sleep(2)
 
-            if "login" in page.url.lower():
-                error_elem = await page.query_selector(".el-message__content, .el-form-item__error")
-                if error_elem:
-                    error_text = await error_elem.inner_text()
-                    raise RuntimeError(f"登录失败: {error_text}")
-                raise RuntimeError("登录失败: 账号或密码错误")
-            logger.info(f"[{data_type}] 登录成功")
+                await page.fill('input[type="text"], input[placeholder*="账号"], input[placeholder*="用户名"]', username)
+                await page.fill('input[type="password"], input[placeholder*="密码"]', password)
 
-            # 2. 进入目标页面
-            logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")
-            await page.goto(page_url, wait_until="networkidle")
-            await asyncio.sleep(3)
+                # ── 闪猫:验证码处理(后续接入前端交互) ──
+                # 目前: 如检测到验证码输入框且无交互验证码值,报错提示需先在同步设置页完成登录
+                if config.get("requires_captcha"):
+                    captcha_input = await page.query_selector(
+                        'input[placeholder*="验证码"], input[aria-label*="验证码"]'
+                    )
+                    if captcha_input and await captcha_input.is_visible():
+                        # 检查是否通过 storage_state / cookie 等已绕过(实际上前面已 goto login 所以必然需要)
+                        raise RuntimeError(
+                            "需要验证码登录:请前往「数据中心-数据采集-同步设置」点击「登录闪猫」按钮完成验证码登录"
+                        )
+
+                await asyncio.sleep(1)
+                await page.click('button:has-text("登录"), button[type="submit"]')
+                await page.wait_for_load_state("networkidle")
+                await asyncio.sleep(3)
+
+                if "login" in page.url.lower():
+                    error_elem = await page.query_selector(".el-message__content, .el-form-item__error")
+                    if error_elem:
+                        error_text = await error_elem.inner_text()
+                        raise RuntimeError(f"登录失败: {error_text}")
+                    raise RuntimeError("登录失败: 账号或密码错误")
+                logger.info(f"[{data_type}] 登录成功")
+
+                # ── 登录成功:保存 storage_state(下次自动复用) ──
+                if config.get("requires_captcha"):
+                    try:
+                        await context.storage_state(path=str(state_path))
+                        logger.info(f"[{data_type}] 登录态已保存至 {state_path.name}")
+                    except Exception as e:
+                        logger.warning(f"[{data_type}] 保存 storage_state 失败(不影响本次抓取): {e}")
+
+                # 2. 进入目标页面
+                logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")
+                await page.goto(page_url, wait_until="networkidle")
+                await asyncio.sleep(3)
 
             # 3. 设置时间范围
             start_str = start_date.strftime("%Y-%m-%d %H:%M:%S")
@@ -531,13 +601,45 @@ class BmsFetcher:
                 continue
             await self._init_browser()
 
+            # ── storage_state 复用:组内首个源 requires_captcha 时优先加载已保存登录态 ──
+            first_cfg = group_tasks[0].get("config", {})
+            first_type = group_tasks[0].get("data_type", "")
+            group_state_path = _storage_state_path(first_type)
+            group_storage_state = None
+            if first_cfg.get("requires_captcha") and group_state_path.exists():
+                try:
+                    group_storage_state = str(group_state_path)
+                    logger.info(f"[组{group_idx+1}] 加载已保存登录态({first_type}): {group_state_path.name}")
+                except Exception as e:
+                    logger.warning(f"[组{group_idx+1}] 读取 storage_state 失败: {e}")
+                    group_storage_state = None
+
             # 同组共享一个 context + 共享页面登录态
-            context = await self._browser.new_context(
-                accept_downloads=True,
-                viewport={"width": 1920, "height": 1080},
-            )
+            context_kwargs = {
+                "accept_downloads": True,
+                "viewport": {"width": 1920, "height": 1080},
+            }
+            if group_storage_state:
+                context_kwargs["storage_state"] = group_storage_state
+            context = await self._browser.new_context(**context_kwargs)
             page = await context.new_page()
-            logged_in_ok = False  # 组内首个成功登录后为 True,后续跳过
+
+            # storage_state 登录态预校验(有 state 时先验证是否仍有效,避免后续每个源都试一次)
+            state_logged_in = False
+            if group_storage_state:
+                try:
+                    first_page_url = f"{first_cfg['base_url']}{first_cfg['page_path']}"
+                    await page.goto(first_page_url, wait_until="networkidle")
+                    await asyncio.sleep(2)
+                    if "login" not in page.url.lower():
+                        state_logged_in = True
+                        logger.info(f"[组{group_idx+1}] 登录态有效(通过 storage_state)")
+                    else:
+                        logger.info(f"[组{group_idx+1}] 登录态已过期,需要重新登录")
+                except Exception as e:
+                    logger.warning(f"[组{group_idx+1}] 校验 storage_state 失败: {e}")
+
+            logged_in_ok = state_logged_in  # 组内首个成功登录后为 True,后续跳过
             try:
                 for i, task in enumerate(group_tasks):
                     data_type = task["data_type"]
@@ -640,23 +742,58 @@ class BmsFetcher:
         page_url = f"{base_url}{config['page_path']}"
 
         if not already_logged_in:
-            # 组内首个源: 登录
-            logger.info(f"[{data_type}] (首次,登录) 正在登录 {base_url}...")
-            await page.goto(login_url, wait_until="networkidle")
-            await asyncio.sleep(2)
-            await page.fill('input[type="text"], input[placeholder*="账号"], input[placeholder*="用户名"]', username)
-            await page.fill('input[type="password"], input[placeholder*="密码"]', password)
-            await asyncio.sleep(1)
-            await page.click('button:has-text("登录"), button[type="submit"]')
-            await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(3)
-            if "login" in page.url.lower():
-                error_elem = await page.query_selector(".el-message__content, .el-form-item__error")
-                if error_elem:
-                    error_text = await error_elem.inner_text()
-                    raise RuntimeError(f"登录失败: {error_text}")
-                raise RuntimeError("登录失败: 账号或密码错误")
-            logger.info(f"[{data_type}] 登录成功(后续同组源复用登录态)")
+            # ── storage_state 预登录验证(在 fetch_all 已做,但作为兜底再检查) ──
+            via_state = False
+            state_path = _storage_state_path(data_type)
+            if config.get("requires_captcha") and state_path.exists():
+                # context 创建时已注入 storage_state,检查是否已处于登录页之外
+                try:
+                    await page.goto(page_url, wait_until="networkidle")
+                    await asyncio.sleep(2)
+                    if "login" not in page.url.lower():
+                        via_state = True
+                        logger.info(f"[{data_type}] 登录态验证通过,跳过登录")
+                except Exception:
+                    pass
+
+            if not via_state:
+                # 组内首个源: 登录
+                logger.info(f"[{data_type}] (首次,登录) 正在登录 {base_url}...")
+                await page.goto(login_url, wait_until="networkidle")
+                await asyncio.sleep(2)
+                await page.fill('input[type="text"], input[placeholder*="账号"], input[placeholder*="用户名"]', username)
+                await page.fill('input[type="password"], input[placeholder*="密码"]', password)
+
+                # ── 闪猫:验证码检测(需要前端交互登录) ──
+                if config.get("requires_captcha"):
+                    captcha_input = await page.query_selector(
+                        'input[placeholder*="验证码"], input[aria-label*="验证码"]'
+                    )
+                    if captcha_input and await captcha_input.is_visible():
+                        raise RuntimeError(
+                            "需要验证码登录:请前往「数据中心-数据采集-同步设置」点击「登录闪猫」按钮完成验证码登录"
+                        )
+
+                await asyncio.sleep(1)
+                await page.click('button:has-text("登录"), button[type="submit"]')
+                await page.wait_for_load_state("networkidle")
+                await asyncio.sleep(3)
+                if "login" in page.url.lower():
+                    error_elem = await page.query_selector(".el-message__content, .el-form-item__error")
+                    if error_elem:
+                        error_text = await error_elem.inner_text()
+                        raise RuntimeError(f"登录失败: {error_text}")
+                    raise RuntimeError("登录失败: 账号或密码错误")
+
+                # ── 登录成功:保存 storage_state(下次自动复用) ──
+                if config.get("requires_captcha"):
+                    try:
+                        await context.storage_state(path=str(state_path))
+                        logger.info(f"[{data_type}] 登录态已保存至 {state_path.name}")
+                    except Exception as e:
+                        logger.warning(f"[{data_type}] 保存 storage_state 失败(不影响本次抓取): {e}")
+
+                logger.info(f"[{data_type}] 登录成功(后续同组源复用登录态)")
         else:
             # 复用登录态: 不重新登录,直接跳页
             logger.info(f"[{data_type}] 复用登录态,直接跳转目标页")

@@ -1,6 +1,8 @@
 """增量 upsert 服务 - 按主键去重,已存在则更新,新增则插入
 
-支持 4 张业务表 + 商户主数据
+支持业务表:refund(退费单) / shanmao_refund(闪猫退款) / ticket(服务工单) / wallet(提现)
+/ device_combo(设备套餐) / merchant_refund(商户号现金流) / cs_record(智能助手)
+/ external_complaint(外部投诉) / card_complaint(卡商群投诉) / merchant(商户主数据)
 统计逻辑:upsert 前先查已存在的主键数量,以精确区分 insert/update
 """
 
@@ -26,6 +28,7 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.merchant import Merchant
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
+from app.models.shanmao_refund import ShanmaoRefund
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 
@@ -697,6 +700,54 @@ def upsert_device_combos(df: pd.DataFrame, mapping: dict[str, str], db: Session,
     _execute_upsert(db, DeviceCombo, "recharge_order_no", rows, result)
 
 
+def upsert_shanmao_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """闪猫退款(已退款申请) - 主键: refund_no
+
+    列结构待实际 CSV 样例确认后再细调,此处提供通用字段模板。
+    """
+    rows: list[dict] = []
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            refund_no = (data.get("refund_no") or "").strip() if data.get("refund_no") else None
+            if not refund_no:
+                result.add_error(idx, "闪猫退款单号为空")
+                continue
+
+            # 姓名类字段清洗:数字/过长纯数字视为脏数据置空
+            applicant = _sanitize_name_field(data.get("applicant"), idx, result, "闪猫退款-申请人")
+            auditor = _sanitize_name_field(data.get("auditor"), idx, result, "闪猫退款-审核人")
+            operator = _sanitize_name_field(data.get("operator"), idx, result, "闪猫退款-操作人")
+
+            rows.append({
+                "refund_no": refund_no,
+                "order_no": data.get("order_no"),
+                "device_sn": data.get("device_sn"),
+                "refund_amount": _to_float(data.get("refund_amount")),
+                "actual_amount": _to_float(data.get("actual_amount")),
+                "package_name": data.get("package_name"),
+                "merchant_name": data.get("merchant_name"),
+                "refund_reason": data.get("refund_reason"),
+                "refund_method": data.get("refund_method"),
+                "status": data.get("status"),
+                "applicant": applicant,
+                "auditor": auditor,
+                "operator": operator,
+                "apply_time": _to_datetime(data.get("apply_time")),
+                "audit_time": _to_datetime(data.get("audit_time")),
+                "refund_time": _to_datetime(data.get("refund_time")),
+                "remark": data.get("remark"),
+                "audit_remark": data.get("audit_remark"),
+            })
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
+    _sync_devices(rows, "device_sn", db)
+    _execute_upsert(db, ShanmaoRefund, "refund_no", rows, result)
+
+
 UPSERT_DISPATCH = {
     "refund": upsert_refunds,
     "wallet": upsert_wallet,
@@ -707,6 +758,7 @@ UPSERT_DISPATCH = {
     "cs_record": upsert_cs_records,
     "external_complaint": upsert_external_complaints,
     "card_complaint": upsert_card_complaints,
+    "shanmao_refund": upsert_shanmao_refunds,
 }
 
 

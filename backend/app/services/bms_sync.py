@@ -481,6 +481,7 @@ def get_sync_status(db: Session) -> list[dict]:
             "has_credentials": bool(config.get("username") and config.get("password")),
             "default_sync": config.get("default_sync", True),
             "enabled": config.get("enabled", True),
+            "requires_captcha": config.get("requires_captcha", False),
             "last_sync": last_log.created_at.isoformat() if last_log else None,
             "last_status": last_log.status if last_log else None,
             "last_end_time": last_log.end_time.isoformat() if last_log else None,

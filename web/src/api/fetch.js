@@ -57,3 +57,25 @@ export function stopSchedule() {
 export function testBrowser() {
   return request.get('/fetch/test')
 }
+
+// ========== 验证码交互登录(闪猫等 requires_captcha 数据源) ==========
+
+// 检查登录态文件是否存在 + 保存时间
+export function captchaLoginCheck(dataType) {
+  return request.get('/fetch/captcha-login/check', { params: { data_type: dataType } })
+}
+
+// 第 1 步: 启动浏览器,截图验证码,返回 session_id + captcha_image(base64 data URI)
+export function captchaLoginStart(dataType) {
+  return request.post('/fetch/captcha-login/start', { data_type: dataType }, { timeout: 90000 })
+}
+
+// 第 2 步: 用户提交验证码 → 填账号密码+验证码提交登录 → 成功保存 storage_state
+export function captchaLoginSubmit(sessionId, captcha) {
+  return request.post('/fetch/captcha-login/submit', { session_id: sessionId, captcha }, { timeout: 60000 })
+}
+
+// 清除登录态(退出登录,强制下次重新登录)
+export function captchaLoginLogout(dataType) {
+  return request.post('/fetch/captcha-login/logout', { data_type: dataType })
+}

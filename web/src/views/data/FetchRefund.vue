@@ -90,6 +90,10 @@
             >
               {{ ds.name }}
               <el-tag v-if="!ds.has_credentials" type="danger" size="small" class="ml-4">未配凭证</el-tag>
+              <el-tag v-else-if="ds.requires_captcha && !captchaStates[ds.data_type]?.has_storage_state"
+                      type="warning" size="small" class="ml-4">需验证码登录</el-tag>
+              <el-tag v-else-if="ds.requires_captcha && captchaStates[ds.data_type]?.has_storage_state"
+                      type="success" size="small" class="ml-4">登录态已保存</el-tag>
               <el-tag v-else type="success" size="small" class="ml-4">已配凭证</el-tag>
             </el-checkbox>
           </el-checkbox-group>
@@ -253,6 +257,20 @@
             <el-tag v-else type="danger" size="small">未配置</el-tag>
           </template>
         </el-table-column>
+        <el-table-column v-if="Object.keys(captchaStates).length" label="验证码登录" width="130">
+          <template #default="{ row }">
+            <template v-if="row.requires_captcha">
+              <el-tag
+                v-if="captchaStates[row.data_type]?.has_storage_state"
+                type="success"
+                size="small"
+                effect="light"
+              >已登录</el-tag>
+              <el-tag v-else type="warning" size="small" effect="light">未登录</el-tag>
+            </template>
+            <span v-else class="dim">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="定时同步" width="90">
           <template #default="{ row }">
             <el-tag v-if="row.default_sync" type="primary" size="small">纳入</el-tag>
@@ -352,6 +370,7 @@ import {
   taskPreflight,
   taskSubmit,
   taskStatus,
+  captchaLoginCheck,
 } from '@/api/fetch'
 
 const testing = ref(false)
@@ -365,6 +384,10 @@ const dataTypesInited = ref(false)
 const submitLoading = ref(false)
 const logPanelOpen = ref([])  // collapse 默认展开
 const logStreamRef = ref(null)
+
+// 验证码登录态(需验证码的数据源: shanmao_refund 等)
+// { data_type: { has_storage_state, state_mtime } }
+const captchaStates = reactive({})
 
 const form = reactive({
   dataTypes: [],
@@ -472,9 +495,31 @@ async function loadDataSources() {
       form.dataTypes = res.data.filter(d => d.default_sync).map(d => d.data_type)
       dataTypesInited.value = true
     }
+    // 为需要验证码的源并行加载登录态
+    await loadCaptchaStates()
   } catch (e) {
     ElMessage.error(`加载数据源失败: ${e.message}`)
   }
+}
+
+async function loadCaptchaStates() {
+  const targets = (dataSources.value || []).filter(d => d.requires_captcha)
+  if (!targets.length) return
+  await Promise.all(
+    targets.map(async d => {
+      try {
+        const r = await captchaLoginCheck(d.data_type)
+        const x = r.data || {}
+        captchaStates[d.data_type] = {
+          has_storage_state: !!x.has_storage_state,
+          state_mtime: x.state_mtime || null,
+        }
+      } catch (e) {
+        // 接口不存在(后端未部署)时不给用户报错,只默认空
+        captchaStates[d.data_type] = { has_storage_state: false, state_mtime: null }
+      }
+    }),
+  )
 }
 
 async function loadLogs() {

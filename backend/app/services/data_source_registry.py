@@ -17,6 +17,7 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
 from app.models.refund_wide import RefundWide
+from app.models.shanmao_refund import ShanmaoRefund
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 
@@ -83,12 +84,16 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "pk_strategy": "none",
         "category": "现金流",
     },
-    # 占位数据源(规划中,暂未建表实现):仅数据查看侧边栏占位,不可导入/同步/查看明细
     {
-        "code": "shenmao_refund",
-        "name_cn": "闪猫退款",
+        "code": "shanmao_refund",
+        "model": ShanmaoRefund,
+        "name_cn": "闪猫退款管理",
+        "time_field": "apply_time",
+        "sn_field": "device_sn",
+        "pk_field": "refund_no",
+        "pk_strategy": "primary_key",
+        "sync_source": "bms",
         "category": "现金流",
-        "placeholder": True,
     },
     {
         "code": "other_refund",
@@ -199,6 +204,22 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
         "role": "time", "is_filterable": False,
         "name_cn": "⚠️原始更新时间(被SYS批量覆盖,请用创建时间)",
     },
+    # shanmao_refund (闪猫退款)
+    ("shanmao_refund", "refund_no"): {"role": "dimension", "is_pk": True, "is_filterable": False},
+    ("shanmao_refund", "refund_amount"): {"role": "amount", "agg": "sum"},
+    ("shanmao_refund", "actual_amount"): {"role": "amount", "agg": "sum"},
+    ("shanmao_refund", "applicant"): {"role": "person"},
+    ("shanmao_refund", "auditor"): {"role": "person"},
+    ("shanmao_refund", "operator"): {"role": "person"},
+    ("shanmao_refund", "device_sn"): {"role": "sn"},
+    ("shanmao_refund", "merchant_name"): {"role": "category"},
+    ("shanmao_refund", "status"): {"role": "category"},
+    ("shanmao_refund", "refund_method"): {"role": "category"},
+    ("shanmao_refund", "refund_reason"): {"role": "category"},
+    ("shanmao_refund", "package_name"): {"role": "category"},
+    ("shanmao_refund", "apply_time"): {"role": "time", "name_cn": "申请时间(主时间)"},
+    ("shanmao_refund", "audit_time"): {"role": "time", "name_cn": "审核时间"},
+    ("shanmao_refund", "refund_time"): {"role": "time", "name_cn": "退款完成时间"},
     # wallet
     ("wallet", "op_amount"): {"role": "amount", "agg": "sum"},
     ("wallet", "wallet_balance"): {"role": "amount", "agg": "sum"},

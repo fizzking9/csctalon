@@ -17,9 +17,11 @@ from sqlalchemy import desc, select
 from app.api.deps import CurrentUser, DBSession
 from app.models.bms_sync_log import BmsSyncLog
 from app.schemas.common import R
-from app.services.bms_fetcher import BmsFetcher
+from app.services.bms_fetcher import BmsFetcher, _storage_state_path, BMS_DATA_SOURCES
 from app.services.bms_scheduler import bms_scheduler
 from app.services.bms_sync import get_sync_status, sync_all
+from app.services.captcha_session import captcha_session_manager, bytes_to_data_uri
+from app.services.sync_source_config_service import get_all_configs
 from app.services.sync_task_manager import sync_task_manager
 
 router = APIRouter(prefix="/fetch", tags=["数据中心-BMS同步"])
@@ -145,6 +147,7 @@ class DataSourceStatus(BaseModel):
     has_credentials: bool = False
     default_sync: bool = True
     enabled: bool = True
+    requires_captcha: bool = False  # True 表示需验证码(如闪猫退款):同步设置页有验证码登录入口
     last_sync: str | None = None
     last_status: str | None = None
     last_query_end: str | None = None  # 上次查询截止时间(数据已同步至此时间点)
@@ -174,6 +177,7 @@ def list_sync_data_sources(db: DBSession, _: CurrentUser):
             has_credentials=s.get("has_credentials", False),
             default_sync=s.get("default_sync", True),
             enabled=s.get("enabled", True),
+            requires_captcha=s.get("requires_captcha", False),
             last_sync=s.get("last_sync"),
             last_status=s.get("last_status"),
             last_query_end=s.get("last_end_time"),
@@ -193,7 +197,7 @@ async def sync_all_data(payload: SyncAllRequest, current_user: CurrentUser):
     若前端未升级,这里为了兼容仍返回 task 执行完成后的 SyncAllResponse,
     通过在后端侧等待最长 8 分钟实现)。
     """
-    valid_types = {"refund", "ticket", "wallet", "device_combo", "cs_record"}
+    valid_types = {"refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record"}
     data_types = payload.data_types if payload.data_types else None
     if data_types:
         for dt in data_types:
@@ -234,7 +238,7 @@ def task_preflight(db: DBSession, _: CurrentUser, data_types: str = ""):
      - 各源凭证状态
     """
     dts = [s for s in data_types.split(",") if s] if data_types else [
-        "refund", "ticket", "wallet", "device_combo", "cs_record",
+        "refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record",
     ]
     statuses = get_sync_status(db)
     has_credentials: dict[str, bool] = {}
@@ -277,7 +281,7 @@ def task_preflight(db: DBSession, _: CurrentUser, data_types: str = ""):
 
 async def _do_submit(payload: SyncAllRequest, current_user) -> SubmitResponse:
     """内部: 提交同步任务到 SyncTaskManager"""
-    valid_types = {"refund", "ticket", "wallet", "device_combo", "cs_record"}
+    valid_types = {"refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record"}
     data_types = payload.data_types if payload.data_types else [
         dt for dt in valid_types
     ]  # None 时默认全量包含,但在 sync_all 内部会再按 default_sync 过滤?不,这里按默认勾选源
@@ -480,3 +484,316 @@ async def test_browser():
     async with BmsFetcher() as fetcher:
         result = await fetcher.test_connection()
     return R(data=result)
+
+
+# ---------- 验证码交互登录接口(用于 requires_captcha=True 的数据源,如闪猫退款) ----------
+
+
+class CaptchaLoginCheckResponse(BaseModel):
+    data_type: str
+    has_storage_state: bool
+    state_mtime: str | None = Field(None, description="登录态保存时间(ISO)")
+    state_path: str | None = None
+
+
+class CaptchaLoginStartRequest(BaseModel):
+    data_type: str = Field(..., description="需验证码登录的数据源,如: shanmao_refund")
+
+
+class CaptchaLoginStartResponse(BaseModel):
+    session_id: str = Field(..., description="会话ID,后续 submit 时使用")
+    captcha_image: str = Field(..., description="验证码图片(data:image/png;base64,...)")
+    login_url: str = Field(..., description="当前登录页URL(便于调试)")
+    hint: str | None = Field(None, description="提示信息")
+
+
+class CaptchaLoginSubmitRequest(BaseModel):
+    session_id: str = Field(..., description="start 接口返回的 session_id")
+    captcha: str = Field(..., description="用户识别出的验证码文本")
+
+
+class CaptchaLoginSubmitResponse(BaseModel):
+    success: bool
+    storage_state_saved: bool = False
+    message: str
+    state_path: str | None = None
+
+
+class CaptchaLoginLogoutRequest(BaseModel):
+    data_type: str = Field(..., description="数据源编码,如 shanmao_refund")
+
+
+@router.get("/captcha-login/check", response_model=R[CaptchaLoginCheckResponse], summary="检查验证码登录态文件是否存在")
+def captcha_login_check(data_type: str, _: CurrentUser):
+    """检查 storage_state 是否存在(首次进入同步设置页时调用)"""
+    seed = BMS_DATA_SOURCES.get(data_type)
+    if not seed or not seed.get("requires_captcha"):
+        raise HTTPException(status_code=400, detail=f"数据源 {data_type} 不需要验证码登录")
+    state_path = _storage_state_path(data_type)
+    has_state = state_path.exists()
+    mtime = None
+    if has_state:
+        ts = state_path.stat().st_mtime
+        mtime = datetime.fromtimestamp(ts, TZ_CN).isoformat()
+    return R(data=CaptchaLoginCheckResponse(
+        data_type=data_type,
+        has_storage_state=has_state,
+        state_mtime=mtime,
+        state_path=str(state_path) if has_state else None,
+    ))
+
+
+@router.post("/captcha-login/start", response_model=R[CaptchaLoginStartResponse], summary="开始验证码登录:启动浏览器并截图验证码")
+async def captcha_login_start(payload: CaptchaLoginStartRequest, _: CurrentUser, db: DBSession):
+    """
+    第 1 步:启动 Playwright,导航到登录页,定位验证码图片并截图返回。
+    前端拿到 captcha_image 后展示给用户,用户肉眼识别后调用 /submit 提交。
+    """
+    data_type = payload.data_type
+    seed = BMS_DATA_SOURCES.get(data_type)
+    if not seed or not seed.get("requires_captcha"):
+        raise HTTPException(status_code=400, detail=f"数据源 {data_type} 不需要验证码登录")
+
+    # 获取账号密码配置
+    all_configs = get_all_configs(db)
+    cfg = None
+    for c in all_configs:
+        if c["data_type"] == data_type:
+            cfg = c
+            break
+    if not cfg:
+        raise HTTPException(status_code=400, detail=f"未配置数据源 {data_type},请在同步设置中填写账号密码")
+    if not cfg.get("username") or not cfg.get("password"):
+        raise HTTPException(status_code=400, detail=f"数据源 {data_type} 未配置账号密码")
+
+    try:
+        from playwright.async_api import async_playwright
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Playwright 不可用: {e}")
+
+    base_url = cfg["base_url"] or seed["base_url"]
+    page_path = seed.get("page_path", "")
+    login_url = f"{base_url}/index.html#/login"
+    state_path = _storage_state_path(data_type)
+
+    sess = await captcha_session_manager.create(
+        data_type=data_type,
+        base_url=base_url,
+        page_path=page_path,
+        username=cfg["username"],
+        password=cfg["password"],
+        state_path=state_path,
+    )
+
+    try:
+        pw = await async_playwright().start()
+        sess.playwright = pw
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+                  "--window-size=1920,1080"],
+        )
+        sess.browser = browser
+        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+        sess.context = context
+        page = await context.new_page()
+        sess.page = page
+
+        # 导航到登录页
+        logger = __import__("logging").getLogger(__name__)
+        logger.info(f"[CaptchaLogin] 导航到登录页: {login_url}")
+        await page.goto(login_url, wait_until="networkidle", timeout=60000)
+        await asyncio.sleep(2)
+
+        # ── 定位验证码图片并截图 ──
+        # 策略: 先找常见验证码元素(img 或 canvas,src 包含 captcha/code;或旁边有"验证码"标签)
+        captcha_elem = None
+        # 1) 找 img[src 包含 captcha|code|vcode]
+        for sel in [
+            'img[src*="captcha" i]',
+            'img[src*="vcode" i]',
+            'img[src*="verify" i]',
+            'img[src*="code" i]',
+            'canvas[class*="captcha" i]',
+            'canvas[id*="captcha" i]',
+        ]:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
+                    captcha_elem = loc
+                    break
+            except Exception:
+                continue
+        # 2) 兜底: 找含"验证码"文字的表单项下的 img/canvas
+        if not captcha_elem:
+            try:
+                form_item = page.locator(".el-form-item:has-text('验证码'), .el-form-item:has-text('校验码')").first
+                if await form_item.count() > 0:
+                    for sel in ["img", "canvas"]:
+                        loc = form_item.locator(sel).first
+                        if await loc.count() > 0 and await loc.is_visible():
+                            captcha_elem = loc
+                            break
+            except Exception:
+                pass
+        # 3) 最后兜底: 取整个登录区域截图(让用户能看到验证码)
+        captcha_png = None
+        if captcha_elem:
+            try:
+                captcha_png = await captcha_elem.screenshot(type="png")
+                logger.info(f"[CaptchaLogin] 已截取验证码图片: {len(captcha_png)} 字节")
+            except Exception as e:
+                logger.warning(f"[CaptchaLogin] 验证码元素截图失败: {e}")
+        if not captcha_png:
+            # 取登录表单所在区域/整个页面可视区截图
+            logger.warning("[CaptchaLogin] 未定位到验证码元素,改为页面截图")
+            try:
+                form = page.locator(".login-container, .login-form, form, .el-form").first
+                if await form.count() > 0 and await form.is_visible():
+                    captcha_png = await form.screenshot(type="png")
+                else:
+                    captcha_png = await page.screenshot(type="png", full_page=False)
+            except Exception as e:
+                captcha_png = await page.screenshot(type="png", full_page=False)
+                logger.warning(f"[CaptchaLogin] 页面截图: {e}")
+
+        return R(data=CaptchaLoginStartResponse(
+            session_id=sess.session_id,
+            captcha_image=bytes_to_data_uri(captcha_png),
+            login_url=login_url,
+            hint="请输入图片中显示的验证码(不区分大小写可先尝试)" if captcha_elem else "未定位到验证码元素,已截整个登录区域,请从中识别验证码",
+        ))
+    except Exception as e:
+        await captcha_session_manager.remove(sess.session_id)
+        raise HTTPException(status_code=500, detail=f"启动验证码登录失败: {e}")
+
+
+@router.post("/captcha-login/submit", response_model=R[CaptchaLoginSubmitResponse], summary="提交验证码:填充并登录,成功后保存 storage_state")
+async def captcha_login_submit(payload: CaptchaLoginSubmitRequest, _: CurrentUser):
+    """
+    第 2 步:用户提交识别的验证码 → 后端填账号密码+验证码 → 提交登录 → 成功后保存 storage_state。
+    后续 BmsFetcher 抓数时会自动加载此 storage_state 跳过登录。
+    """
+    sess = captcha_session_manager.get(payload.session_id)
+    if not sess:
+        raise HTTPException(status_code=400, detail="会话不存在或已过期,请重新开始")
+    if not sess.page:
+        await captcha_session_manager.remove(payload.session_id)
+        raise HTTPException(status_code=400, detail="浏览器会话已失效,请重新开始")
+
+    captcha = (payload.captcha or "").strip()
+    if not captcha:
+        raise HTTPException(status_code=400, detail="验证码不能为空")
+
+    page = sess.page
+    logger = __import__("logging").getLogger(__name__)
+    message = ""
+    success = False
+    state_saved = False
+    state_path_str = None
+
+    try:
+        # 填账号
+        user_sel = 'input[type="text"], input[placeholder*="账号" i], input[placeholder*="用户名" i], input[placeholder*="手机号" i]'
+        try:
+            await page.locator(user_sel).first.fill(sess.username, timeout=10000)
+        except Exception:
+            # 兜底: 找第一个可见文本 input
+            await page.locator("input:visible").first.fill(sess.username, timeout=10000)
+        # 填密码
+        pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
+        await page.locator(pwd_sel).first.fill(sess.password, timeout=10000)
+        # 填验证码
+        captcha_sel = (
+            '.el-form-item:has-text("验证码") input:visible,'
+            '.el-form-item:has-text("校验码") input:visible,'
+            'input[placeholder*="验证码" i], input[placeholder*="校验码" i], input[placeholder*="captcha" i]'
+        )
+        try:
+            await page.locator(captcha_sel).first.fill(captcha, timeout=8000)
+        except Exception as e:
+            logger.warning(f"[CaptchaLogin] 按选择器填验证码失败,尝试找第三个可见 input: {e}")
+            # 兜底: 可见 input 的第三个(账号/密码/验证码顺序)
+            vis = page.locator("input:visible")
+            count = await vis.count()
+            if count >= 3:
+                await vis.nth(2).fill(captcha, timeout=5000)
+            else:
+                raise
+
+        await asyncio.sleep(0.8)
+
+        # 点击登录按钮(优先匹配含"登录"/"sign in"文字的按钮)
+        login_btn_sel = (
+            'button:has-text("登录"), button:has-text("登 录"), button:has-text("Sign in"), button:has-text("LOGIN"),'
+            'button.el-button--primary, button[type="submit"], .login-btn'
+        )
+        btn = page.locator(login_btn_sel).first
+        await btn.click(timeout=8000)
+
+        # 等待跳转: 成功会离开 /login 路由
+        try:
+            await page.wait_for_url(lambda u: "login" not in u.lower().split("#")[-1] if "#" in u else "login" not in u.lower(), timeout=15000)
+        except Exception as e:
+            # 没跳: 大概率验证码错/账号错,尝试抓取页面上的错误提示
+            err_text = ""
+            try:
+                err_loc = page.locator('.el-message, .el-form-item__error, .el-message-box__message, .ant-message-error').first
+                if await err_loc.count() > 0 and await err_loc.is_visible():
+                    err_text = await err_loc.inner_text(timeout=1500)
+            except Exception:
+                pass
+            if not err_text:
+                # 兜底取页面上可见错误
+                try:
+                    whole = await page.inner_text("body", timeout=1500)
+                    for kw in ["验证码", "错误", "失败", "密码", "用户名"]:
+                        if kw in whole:
+                            idx = whole.find(kw)
+                            err_text = whole[max(0, idx-20):idx+40]
+                            break
+                except Exception:
+                    pass
+            raise RuntimeError(f"登录失败: {err_text or '未跳转,可能验证码错误或账号密码错误'}") from e
+
+        success = True
+        logger.info(f"[CaptchaLogin] 登录成功,正在保存 storage_state: {sess.state_path}")
+        # 多等一会儿等资源加载(更完整的 cookie/localStorage)
+        await asyncio.sleep(3)
+        await sess.context.storage_state(path=str(sess.state_path))
+        state_saved = True
+        state_path_str = str(sess.state_path)
+        message = "登录成功,登录态已保存,后续同步将自动复用此登录态"
+
+    except Exception as e:
+        message = str(e)
+        logger.error(f"[CaptchaLogin] submit 失败: {e}", exc_info=True)
+    finally:
+        # 无论成功失败都销毁会话(Playwright 资源)
+        await captcha_session_manager.remove(payload.session_id)
+
+    return R(data=CaptchaLoginSubmitResponse(
+        success=success,
+        storage_state_saved=state_saved,
+        message=message,
+        state_path=state_path_str,
+    ))
+
+
+@router.post("/captcha-login/logout", response_model=R[CaptchaLoginCheckResponse], summary="清除验证码登录态(强制下次重新登录)")
+def captcha_login_logout(payload: CaptchaLoginLogoutRequest, _: CurrentUser):
+    seed = BMS_DATA_SOURCES.get(payload.data_type)
+    if not seed or not seed.get("requires_captcha"):
+        raise HTTPException(status_code=400, detail=f"数据源 {payload.data_type} 不需要验证码登录")
+    state_path = _storage_state_path(payload.data_type)
+    if state_path.exists():
+        try:
+            state_path.unlink()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"删除登录态文件失败: {e}")
+    return R(data=CaptchaLoginCheckResponse(
+        data_type=payload.data_type,
+        has_storage_state=False,
+        state_mtime=None,
+        state_path=None,
+    ))
