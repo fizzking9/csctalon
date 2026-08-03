@@ -24,11 +24,11 @@
       <el-tag v-if="yoyPct != null" size="small" effect="plain" :type="yoyTagType(yoyPct)">
         {{ yoyPct > 0 ? '↑' : '↓' }} {{ Math.abs(yoyPct) }}%
       </el-tag>
-      <el-tag v-else size="small" type="info" effect="plain">昨日 0</el-tag>
+      <el-tag v-else size="small" type="info" effect="plain">{{ yoyLabel }} 0</el-tag>
       <span class="kpi-yoy-val">
         <template v-if="money">{{ fmtMoney(yoyValue) }}</template>
         <template v-else>{{ fmtNum(yoyValue) }}{{ unit || '' }}</template>
-        · 昨日
+        · {{ yoyLabel }}
       </span>
     </div>
     <slot name="extra" />
@@ -48,8 +48,10 @@ const props = defineProps({
   color: { type: String, default: '#409eff' },
   // 环比百分比数值,正数=上升,负数=下降; 配合 yoyKey 判断颜色方向
   yoyPct: { type: Number, default: null },
-  // 昨日绝对值(用于显示)
+  // 对比期绝对值(用于显示)
   yoyValue: { type: [Number, String], default: 0 },
+  // 对比期名称 (日=昨日/周=上周/月=上月/季度=上季度)
+  yoyLabel: { type: String, default: '昨日' },
   // 当 yoyKey 在 BAD_UP_KEYS 时, 数值越大越差(退款金额/投诉/现金流出): 上升显示红
   yoyKey: { type: String, default: '' },
   // 接待量追加行: 去重设备近似人数

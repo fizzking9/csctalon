@@ -179,31 +179,32 @@ def rw_daily_split(db: DBSession, _: CurrentUser, start: str | None = None, end:
 
 
 @router.get("/today/kpi", response_model=R, summary="今日看板-KPI汇总卡片(6项+昨日环比)")
-def today_kpi_endpoint(db: DBSession, _: CurrentUser, date: str | None = None):
-    return R(data=A.today_kpi(db, date))
+def today_kpi_endpoint(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None):
+    return R(data=A.today_kpi(db, date, start, end))
 
 
 @router.get("/today/hourly-trend", response_model=R, summary="今日看板-小时节奏(接待量柱+退款金额线,双Y轴)")
-def today_hourly(db: DBSession, _: CurrentUser, date: str | None = None):
-    return R(data=A.today_hourly_trend(db, date))
+def today_hourly(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None):
+    return R(data=A.today_hourly_trend(db, date, start, end))
 
 
 @router.get("/today/reception", response_model=R, summary="今日看板-接待分项(分类饼+Top客服柱)")
-def today_reception(db: DBSession, _: CurrentUser, date: str | None = None):
-    return R(data=A.today_reception_breakdown(db, date))
+def today_reception(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None):
+    return R(data=A.today_reception_breakdown(db, date, start, end))
 
 
 @router.get("/today/refund", response_model=R, summary="今日看板-退款分项(原因Top10+方式分布)")
-def today_refund(db: DBSession, _: CurrentUser, date: str | None = None):
-    return R(data=A.today_refund_breakdown(db, date))
+def today_refund(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None):
+    return R(data=A.today_refund_breakdown(db, date, start, end))
 
 
 @router.get("/today/queue", response_model=R, summary="今日看板-处理队列(今日到期待办+进行中专项+今日异常)")
-def today_queue_endpoint(db: DBSession, _: CurrentUser, date: str | None = None):
-    return R(data=A.today_queue(db, date))
+def today_queue_endpoint(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None):
+    return R(data=A.today_queue(db, date, start, end))
 
 
 @router.get("/today/staff", response_model=R, summary="今日看板-人均效率表(接待/退款/完工单合成权重)")
 def today_staff(db: DBSession, _: CurrentUser, date: str | None = None,
+                start: str | None = None, end: str | None = None,
                 topn: int = Query(30, ge=1, le=200)):
-    return R(data=A.today_staff_efficiency(db, date, topn))
+    return R(data=A.today_staff_efficiency(db, date, start, end, topn))

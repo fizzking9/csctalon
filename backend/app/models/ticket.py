@@ -44,3 +44,16 @@ class ServiceTicket(TimestampMixin, Base):
     submit_params: Mapped[str | None] = mapped_column(Text, nullable=True, comment="提交参数(JSON)")
     refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退款金额")
     estimated_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="预估可退金额")
+    # ── 催单 & 人员分派新字段(2026-08-03 加, nullable, 不影响历史数据) ──
+    urge_count: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="催单次数")
+    urge_status: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="催单状态")
+    last_dispatch_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="最后派单时间"
+    )
+    assignee: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="分配人员")
+    contact_person: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="联系人员")
+    dispatcher: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="派发人员")
+    last_urge_by: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="最后催单人")
+    last_urge_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="最后催单时间"
+    )

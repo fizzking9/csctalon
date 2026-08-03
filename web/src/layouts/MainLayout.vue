@@ -14,31 +14,19 @@
         text-color="#b7c0cd"
         active-text-color="#fff"
       >
+        <!-- 1. 运营看板(日/周/月/季切换, 全员可见, 第一位) -->
+        <el-menu-item index="/dashboards/today">
+          <el-icon><DataLine /></el-icon>
+          <span>运营看板</span>
+        </el-menu-item>
+
+        <!-- 2. 工作台(次之: 待办/任务/快捷入口导向) -->
         <el-menu-item index="/dashboard">
           <el-icon><HomeFilled /></el-icon>
           <span>工作台</span>
         </el-menu-item>
 
-        <el-sub-menu index="data">
-          <template #title>
-            <el-icon><FolderOpened /></el-icon>
-            <span>数据中心</span>
-          </template>
-          <el-menu-item index="/data/ingest">数据采集</el-menu-item>
-          <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
-          <el-menu-item index="/analytics/views">分析视图</el-menu-item>
-          <el-menu-item index="/audit/device">设备审计</el-menu-item>
-          <el-menu-item index="/audit/person">人员审计</el-menu-item>
-          <el-menu-item v-if="authStore.isManager" index="/dashboards/designer">看板配置</el-menu-item>
-        </el-sub-menu>
-
-        <!-- 客服日度运营看板(原今日看板): 选任意单日切面, 全员可见 -->
-        <el-menu-item index="/dashboards/today">
-          <el-icon><Clock /></el-icon>
-          <span>日度运营看板</span>
-        </el-menu-item>
-
-        <!-- 决策看板:管理层可见,4 常规看板 + 专项跟进 -->
+        <!-- 3. 决策看板:管理层可见, 专项深入分析透视(退款/投诉/接待/提现全链路/绩效/专项跟进) -->
         <el-sub-menu v-if="authStore.isManager" index="dashboards">
           <template #title>
             <el-icon><DataAnalysis /></el-icon>
@@ -50,6 +38,20 @@
           <el-menu-item index="/dashboards/refund-withdrawal">退款-提现全链路看板</el-menu-item>
           <el-menu-item index="/dashboards/performance">绩效看板</el-menu-item>
           <el-menu-item index="/dashboards/special">专项跟进</el-menu-item>
+        </el-sub-menu>
+
+        <!-- 4. 数据中心 -->
+        <el-sub-menu index="data">
+          <template #title>
+            <el-icon><FolderOpened /></el-icon>
+            <span>数据中心</span>
+          </template>
+          <el-menu-item index="/data/ingest">数据采集</el-menu-item>
+          <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
+          <el-menu-item index="/analytics/views">分析视图</el-menu-item>
+          <el-menu-item index="/audit/device">设备审计</el-menu-item>
+          <el-menu-item index="/audit/person">人员审计</el-menu-item>
+          <el-menu-item v-if="authStore.isManager" index="/dashboards/designer">看板配置</el-menu-item>
         </el-sub-menu>
 
         <el-menu-item index="/todos">

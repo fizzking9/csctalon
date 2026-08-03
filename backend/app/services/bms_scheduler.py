@@ -12,25 +12,41 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import desc, select, distinct
+
+from app.core.database import SessionLocal
+from app.models.bms_sync_log import BmsSyncLog
 from app.services.bms_sync import DEFAULT_SYNC_TYPES, sync_all
 from app.services.sync_task_manager import sync_task_manager
 
 logger = logging.getLogger(__name__)
 
-# 定时同步的小时列表(东八区)
-SCHEDULE_HOURS = [0, 8, 12, 16, 20]
+# 定时同步的小时列表(东八区,按从小到大排)
+SCHEDULE_HOURS = sorted([0, 8, 12, 16, 20])
 
 # 检查间隔(秒)
 CHECK_INTERVAL = 60
 
+# 整点触发宽容窗口(分钟): 在该窗口内命中 SCHEDULE_HOURS 都可触发(防止 service 刚在 12:04 重启, 12:30 就永远漏了)
+TRIGGER_WINDOW_MINUTES = 30
+
 
 class BmsScheduler:
-    """BMS 定时同步调度器"""
+    """BMS 定时同步调度器
+
+    关键机制:
+      - 启动时从 bms_sync_logs 回填「今天哪些 scheduled 小时已经成功执行过」,
+        避免服务重启导致重复执行或重复漏掉整点。
+      - 启动后立刻执行一次「启动补跑」: 所有 SCHEDULE_HOURS 中 <= 当前小时
+        且今天没成功执行过的点,立刻补一次(因为窗口已过、不补就永远漏了)。
+      - 触发窗口放宽到 30 分钟,只要当前整点仍在该窗口内就允许执行(重启等极端场景兜底)。
+    """
 
     def __init__(self):
         self._task: asyncio.Task | None = None
         self._running = False
-        self._last_run_hour: dict[str, int] = {}  # date_str -> last_run_hour, 防止同一小时重复执行
+        self._last_run_hour: dict[str, set[int]] = {}  # date_str -> set(hours executed OK today)
+        self._catch_up_done = False  # 启动补跑是否已执行(避免反复补跑)
 
     @property
     def is_running(self) -> bool:
@@ -90,13 +106,68 @@ class BmsScheduler:
             "cooldown_remaining": sync_task_manager.remaining_cooldown_seconds(),
         }
 
+    def _reload_today_completed_hours(self) -> None:
+        """从 bms_sync_logs 回填「今天哪些 scheduled 小时已经成功执行过」
+
+        判断标准: 今天北京时间下, trigger_type='scheduled' 且 status='success'
+        的记录中, finished_at(北京时间)所处的整点小时数。
+        这样即使服务重启,也不会重复执行/也不会漏掉已经过去但没执行的点(补跑会管)。
+        """
+        TZ_CN = timezone(timedelta(hours=8))
+        now_cn = datetime.now(TZ_CN)
+        today_cn = now_cn.date()
+        db = SessionLocal()
+        try:
+            rows = db.execute(
+                select(distinct(BmsSyncLog.finished_at))
+                .where(
+                    BmsSyncLog.trigger_type == "scheduled",
+                    BmsSyncLog.status == "success",
+                    BmsSyncLog.finished_at.isnot(None),
+                )
+                .order_by(desc(BmsSyncLog.finished_at))
+            ).all()
+            hours_done: set[int] = set()
+            for (fin_at,) in rows:
+                if fin_at is None:
+                    continue
+                # 统一转北京时间 naive,比较 date 是否为今天
+                if fin_at.tzinfo is None:
+                    # 数据库可能直接存 naive UTC,强行标 UTC 再转
+                    fin_cn = fin_at.replace(tzinfo=timezone.utc).astimezone(TZ_CN)
+                else:
+                    fin_cn = fin_at.astimezone(TZ_CN)
+                if fin_cn.date() == today_cn:
+                    hours_done.add(fin_cn.hour)
+            today_key = now_cn.strftime("%Y-%m-%d")
+            # 只覆盖今日,其他日期保留为空
+            self._last_run_hour = {today_key: hours_done}
+            logger.info(
+                f"[调度器] 回填今日已完成的定时同步小时: {sorted(hours_done) if hours_done else '（无）'},"
+                f" 下一次计划窗口: {[h for h in SCHEDULE_HOURS if h not in hours_done and h >= now_cn.hour]}"
+            )
+        except Exception as e:
+            logger.warning(f"[调度器] 回填已执行小时失败(忽略,冷启动即可): {e}", exc_info=True)
+        finally:
+            db.close()
+
     def start(self):
-        """启动调度器"""
+        """启动调度器
+
+        步骤:
+          1. 从 bms_sync_logs 回填今天已经成功完成过的 scheduled 小时
+          2. 启动后台循环
+          3. 在后台循环的第一次检查里执行「启动补跑」(SCHEDULE_HOURS 中已过但今日未成功的小时立刻补一次)
+        """
         if self._running:
             return
         self._running = True
+        self._reload_today_completed_hours()
+        self._catch_up_done = False
         self._task = asyncio.create_task(self._run_loop())
-        logger.info(f"BMS 定时同步已启动,定时: {SCHEDULE_HOURS}")
+        logger.info(
+            f"BMS 定时同步已启动, 定时小时={SCHEDULE_HOURS} (宽容窗口{TRIGGER_WINDOW_MINUTES}分钟)"
+        )
 
     def stop(self):
         """停止调度器"""
@@ -107,21 +178,43 @@ class BmsScheduler:
         logger.info("BMS 定时同步已停止")
 
     async def _run_loop(self):
-        """主循环:每分钟检查是否到了定时"""
+        """主循环:每分钟检查是否到了定时;首次检查先做启动补跑"""
+        TZ_CN = timezone(timedelta(hours=8))
+        first_tick = True
         while self._running:
             try:
-                now = datetime.now(timezone(timedelta(hours=8)))
-                date_str = now.strftime("%Y-%m-%d")
-                hour = now.hour
+                now_cn = datetime.now(TZ_CN)
+                date_str = now_cn.strftime("%Y-%m-%d")
+                today_done = self._last_run_hour.setdefault(date_str, set())
 
+                # ── 启动补跑(仅执行一次): 所有 <= 当前小时的 SCHEDULE_HOURS,若今天没成功就立刻补 ──
+                if first_tick and not self._catch_up_done:
+                    self._catch_up_done = True
+                    missed = [h for h in SCHEDULE_HOURS if h <= now_cn.hour and h not in today_done]
+                    if missed:
+                        logger.info(
+                            f"[调度器] 启动补跑: 今日遗漏的整点小时={missed}"
+                            f", 立刻触发一次全量(00:00~now)补同步"
+                        )
+                        await self._do_scheduled_sync(why=f"启动补跑错过窗口{missed}")
+                        first_tick = False
+                        # 补跑完成后, 将 <= now_cn.hour 的所有 SCHEDULE_HOURS 标记为已处理
+                        # (只做一次补跑,覆盖前面所有遗漏点,避免短时间连跑)
+                        for h in missed:
+                            today_done.add(h)
+                        await asyncio.sleep(CHECK_INTERVAL)
+                        continue
+                    first_tick = False
+
+                # ── 常规定时检查: 在 [hour:00, hour:TRIGGER_WINDOW_MINUTES) 窗口内触发 ──
                 if (
-                    hour in SCHEDULE_HOURS
-                    and now.minute < 5
-                    and self._last_run_hour.get(date_str) != hour
+                    now_cn.hour in SCHEDULE_HOURS
+                    and now_cn.minute < TRIGGER_WINDOW_MINUTES
+                    and now_cn.hour not in today_done
                 ):
-                    self._last_run_hour[date_str] = hour
-                    logger.info(f"触发定时同步: {date_str} {hour}:00")
-                    await self._do_scheduled_sync()
+                    today_done.add(now_cn.hour)
+                    logger.info(f"触发定时同步: {date_str} {now_cn.hour}:00 ({now_cn.minute}分,窗口内)")
+                    await self._do_scheduled_sync(why=f"定时触发 {now_cn.hour}:00")
 
             except asyncio.CancelledError:
                 break
@@ -130,22 +223,26 @@ class BmsScheduler:
 
             await asyncio.sleep(CHECK_INTERVAL)
 
-    async def _do_scheduled_sync(self):
+    async def _do_scheduled_sync(self, why: str | None = None):
         """执行定时同步 - 通过 SyncTaskManager 提交(全局互斥)
 
         时间范围: 每天 00:00 ~ now(全量重算当日,upsert 幂等不会重复,
         反而能补回上次失败漏掉的;但 task_manager 的增量时间记录仍会写入,
         手动同步走增量时可以接续)。
+
+        Args:
+            why: 可选,打印到日志里说明触发原因(例如「启动补跑错过窗口[0,8]」)
         """
+        reason = f" [{why}]" if why else ""
         if not self._default_sources_have_credentials():
-            logger.warning("定时同步跳过: 默认同步的源未全部配置凭证")
+            logger.warning(f"定时同步跳过{reason}: 默认同步的源未全部配置凭证")
             return
 
         # 如果有手动任务正在跑,跳过本次定时
         if sync_task_manager.is_busy():
             ct = sync_task_manager.get_current_task()
             who = f"{ct.triggered_by} 的手动任务" if ct else "任务"
-            logger.info(f"定时同步跳过: 正在执行 {who},等下一个检查点")
+            logger.info(f"定时同步跳过{reason}: 正在执行 {who},等下一个检查点")
             return
 
         TZ_CN = timezone(timedelta(hours=8))
@@ -161,7 +258,7 @@ class BmsScheduler:
             for dt in sync_types
         }
         logger.info(
-            f"定时同步时间范围: "
+            f"[定时同步{reason}] 时间范围: "
             f"{today_start.strftime('%Y-%m-%d %H:%M:%S')} ~ {now_cn.strftime('%Y-%m-%d %H:%M:%S')} "
             f"数据源={sync_types}"
         )
@@ -186,10 +283,10 @@ class BmsScheduler:
                 # 定时: 仍受忙锁保护,但忽略冷却(定时即使刚手动完成也允许跑,因为是 0~now 补全更可信)
                 ignore_cooldown=True,
             )
-            logger.info(f"定时同步已提交: task_id={task_id}, {msg}")
+            logger.info(f"[定时同步{reason}] 已提交: task_id={task_id}, {msg}")
         except RuntimeError as e:
             # 被锁挡住,不重试(下一个检查点会再试)
-            logger.warning(f"定时同步未执行: {e}")
+            logger.warning(f"[定时同步{reason}] 未执行: {e}")
 
 
 # 全局单例

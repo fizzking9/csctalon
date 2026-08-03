@@ -72,7 +72,7 @@ async function handleLogin() {
     try {
       await authStore.login(form.username, form.password)
       ElMessage.success('登录成功')
-      const redirect = route.query.redirect || '/dashboard'
+      const redirect = route.query.redirect || '/dashboards/today'
       router.push(redirect)
     } catch (e) {
       // 错误已在拦截器处理

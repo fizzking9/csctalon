@@ -60,6 +60,20 @@ def execute_view(db: Session, view: AnalysisView | dict, params: dict | None = N
         {chart_type, data: {x_axis?, series?, items?, columns?, rows?}}
     """
     params = params or {}
+
+    # ── 手动视图分派 (2026-08-03 加): 若 view.code 在 urge_analysis.HANDLERS 中注册,直接调用专用实现
+    # 用于 engine 无法表达的复杂派生逻辑:如催单分桶/待处理时长/投诉转化率等
+    try:
+        from app.services.urge_analysis import HANDLERS as _URGE_HANDLERS
+        if isinstance(view, AnalysisView):
+            vc = view.code
+        else:
+            vc = view.get("code") if isinstance(view, dict) else None
+        if vc and vc in _URGE_HANDLERS:
+            return _URGE_HANDLERS[vc](db, params)
+    except Exception as _e:
+        logger.warning(f"手动视图分派失败, fallback 到 engine 默认逻辑: {_e}")
+
     # 统一为字典配置
     if isinstance(view, AnalysisView):
         config = {

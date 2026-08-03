@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     # BMS 平台(定时同步用,手动同步时前端传入)
     BMS_USERNAME: str = ""
     BMS_PASSWORD: str = ""
-    BMS_SCHEDULE_AUTOSTART: bool = False  # 启动时是否自动开启定时同步
+    BMS_SCHEDULE_AUTOSTART: bool = True  # 启动时是否自动开启定时同步(默认开启,否则跨日/重启后整小时窗口都漏)
 
     # 跨域(局域网部署,允许内网访问)
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"

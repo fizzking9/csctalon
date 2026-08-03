@@ -2,43 +2,69 @@
   <div class="page-container today-dashboard">
     <!-- 日期+看板名水印：绝对定位铺满 指针事件穿透不阻塞tooltip；局部截图任何区域都能看到日期 -->
     <div class="today-watermark" :style="watermarkBg" aria-hidden="true"></div>
-    <!-- 顶部标题 + 时间筛选 -->
+    <!-- 顶部标题 + 时间粒度切换 + 时间筛选 -->
     <div class="flex-between mb-16 td-header" style="position: relative; z-index: 2">
       <div class="page-title" style="margin: 0; white-space: nowrap">
-        客服日度运营看板
+        运营看板
         <span class="title-date-sep">·</span>
         <span class="title-date">{{ displayDate }}</span>
-        <el-tag size="small" type="success" effect="plain" style="margin-left: 8px">单日切面</el-tag>
+        <el-tag size="small" :type="grainTagType" effect="plain" style="margin-left: 8px">{{ grainLabel }}</el-tag>
         <el-tag v-if="kpiData.merchant_tip" size="small" type="warning" effect="plain" style="margin-left: 6px">
           {{ kpiData.merchant_tip }}
         </el-tag>
       </div>
       <FilterBar
-        v-model:modelValue="quickDate"
-        :quick-options="todayQuickOptions"
+        v-model:modelValue="quickGrainOpt"
+        :quick-options="grainQuickOptions"
         :show-custom="false"
         show-grain="false"
         :loading="loading"
         @refresh="loadAll"
       >
         <template #left>
+          <!-- 1. 粒度单选: 日 / 周 / 月 / 季度 -->
+          <el-radio-group v-model="grain" size="small" style="margin-right: 12px">
+            <el-radio-button value="day">日</el-radio-button>
+            <el-radio-button value="week">周</el-radio-button>
+            <el-radio-button value="month">月</el-radio-button>
+            <el-radio-button value="quarter">季度</el-radio-button>
+          </el-radio-group>
+          <!-- 2. 根据粒度显示对应快捷范围 -->
+          <el-radio-group v-if="grain === 'day'" v-model="quickDate" size="small" style="margin-right: 8px">
+            <el-radio-button value="today">今日</el-radio-button>
+            <el-radio-button value="yesterday">昨日</el-radio-button>
+            <el-radio-button value="custom">自选日</el-radio-button>
+          </el-radio-group>
+          <el-radio-group v-else-if="grain === 'week'" v-model="quickWeek" size="small" style="margin-right: 8px">
+            <el-radio-button value="this_week">本周</el-radio-button>
+            <el-radio-button value="last_week">上周</el-radio-button>
+          </el-radio-group>
+          <el-radio-group v-else-if="grain === 'month'" v-model="quickMonth" size="small" style="margin-right: 8px">
+            <el-radio-button value="this_month">本月</el-radio-button>
+            <el-radio-button value="last_month">上月</el-radio-button>
+          </el-radio-group>
+          <el-radio-group v-else-if="grain === 'quarter'" v-model="quickQuarter" size="small" style="margin-right: 8px">
+            <el-radio-button value="this_quarter">本季度</el-radio-button>
+            <el-radio-button value="last_quarter">上季度</el-radio-button>
+          </el-radio-group>
+          <!-- 3. 自定义日期(日粒度: 单日; 其他粒度: 日期范围) -->
           <el-date-picker
+            v-if="grain === 'day' && quickDate === 'custom'"
             v-model="customDate"
             type="date"
             size="small"
             value-format="YYYY-MM-DD"
             placeholder="选择日期"
             style="width: 160px; margin-right: 8px"
-            @change="onCustomDate"
           />
         </template>
       </FilterBar>
     </div>
-    <!-- 值班组长(今日有接待的组长)：放在页头最显眼的位置 -->
-    <div v-if="dutyLeaders.length" class="duty-leader-bar mb-16">
+    <!-- 值班组长(今日有接待的组长)：只在日粒度展示（值班是日度概念），放在页头最显眼的位置 -->
+    <div v-if="dutyLeaders.length && grain === 'day'" class="duty-leader-bar mb-16">
       <div class="duty-label">
         <el-icon><Timer /></el-icon>
-        <span>今日值班组长</span>
+        <span>值班组长</span>
         <span class="duty-count">{{ dutyLeaders.length }}人</span>
       </div>
       <el-space wrap size="small" class="duty-chips">
@@ -61,7 +87,7 @@
 
     <!-- 模块1: KPI卡 -->
     <section class="section-card mb-24">
-      <SectionHeader title="1. 核心指标" sub="对比昨日同时段 · 悬停标签查看口径" />
+      <SectionHeader :title="'1. 核心指标'" :sub="'对比' + compareName + '同时段 · 悬停标签查看口径'" />
       <el-row :gutter="16">
         <el-col :xs="12" :sm="8" :md="4" v-for="c in kpiCards" :key="c.key">
           <KpiCard
@@ -75,76 +101,90 @@
             :yoy-key="c.yoy_key || c.key"
             :yoy-pct="c.yoy_pct"
             :yoy-value="c.yoy_value"
+            :yoy-label="compareName"
             :device-count="c.key === 'reception' ? c.device_count : null"
             :tip="c.tip"
           />
         </el-col>
       </el-row>
 
-      <!-- 今日现金流出拆分：3合计卡 + 四路堆叠比例条（复用 RouteSplit compact 模式） -->
+      <!-- 现金流出拆分：3合计卡 + 四路堆叠比例条（复用 RouteSplit compact 模式） -->
       <div class="mt-12" v-if="kpiData.cash_routes_today">
         <RouteSplit :routes="kpiData.cash_routes_today" compact />
       </div>
     </section>
 
-    <!-- 模块2: 小时节奏 -->
+    <!-- 模块2: 实时节奏 -->
     <section class="section-card mb-24">
-      <SectionHeader title="2. 今日实时节奏" sub="小时级双柱：会话数(次) + 接待数(个) + 退款笔数 + 投诉量 + 退款金额线" />
+      <SectionHeader title="2. 实时节奏" :sub="rhythmSub" />
       <ChartCard body-style="padding: 8px 10px">
         <BaseChart :option="hourlyOption" height="320px" />
       </ChartCard>
     </section>
 
-    <!-- 模块3: 接待分项 + 模块4: 退款分项 → 并排两栏 -->
-    <el-row :gutter="16" class="mb-24">
-      <el-col :xs="24" :lg="12">
-        <section class="section-card h-full">
-          <SectionHeader title="3. 今日接待分项" />
-          <el-row :gutter="12">
-            <el-col :xs="24" :md="12">
-              <ChartCard title="接待分类分布">
-                <BaseChart :option="receptionPieOption" height="280px" />
-              </ChartCard>
-            </el-col>
-            <el-col :xs="24" :md="12">
-              <ChartCard title="接待量 Top 10 客服 （会话数(次) + 接待数(个)）">
-                <BaseChart :option="receptionStaffOption" height="280px" />
-              </ChartCard>
-            </el-col>
-          </el-row>
-        </section>
-      </el-col>
-      <el-col :xs="24" :lg="12">
-        <section class="section-card h-full">
-          <SectionHeader title="4. 今日退款分项" />
-          <el-row :gutter="12">
-            <el-col :xs="24" :md="12">
-              <ChartCard title="退款细分原因 Top 10（订单数 + 金额 双柱）">
-                <template #extra>
-                  <span style="font-weight:400;color:#909399;font-size:11px">按工单分类 + 商品名兜底（替换原 refund_reason='用户退款'无效字段）</span>
-                </template>
-                <BaseChart :option="refundReasonOption" height="280px" />
-              </ChartCard>
-            </el-col>
-            <el-col :xs="24" :md="12">
-              <ChartCard title="退款接待人 Top 10（退款笔数 + 金额 双柱）">
-                <template #extra>
-                  <span style="font-weight:400;color:#909399;font-size:11px">按 PersonAlias → Person.display_name 姓名归一；[未分配]=未匹配；用户自助=wechat；系统自动=sys/system</span>
-                </template>
-                <BaseChart :option="refundStaffOption" height="280px" />
-              </ChartCard>
-            </el-col>
-          </el-row>
-        </section>
-      </el-col>
-    </el-row>
-
-    <!-- 模块5: 今日投诉分项 -->
+    <!-- 模块3: 接待分项 (独立一行, 为后续扩充预留空间) -->
     <section class="section-card mb-24">
-      <SectionHeader title="5. 今日投诉分项" :sub="complaintSub" />
+      <SectionHeader title="3. 接待分项" />
+      <el-row :gutter="12">
+        <el-col :xs="24" :md="12">
+          <ChartCard title="接待分类分布">
+            <BaseChart :option="receptionPieOption" height="280px" />
+          </ChartCard>
+        </el-col>
+        <el-col :xs="24" :md="12">
+          <ChartCard title="接待量 Top 10 客服 （会话数(次) + 接待数(个)）">
+            <BaseChart :option="receptionStaffOption" height="280px" />
+          </ChartCard>
+        </el-col>
+      </el-row>
+    </section>
+
+    <!-- 模块4: 退款分项 (独立一行, 为后续扩充预留空间) -->
+    <section class="section-card mb-24">
+      <SectionHeader title="4. 退款分项" />
+      <el-row :gutter="12">
+        <el-col :xs="24" :md="12">
+          <ChartCard title="退款细分原因 Top 10（订单数 + 金额 双柱）">
+            <template #extra>
+              <span style="font-weight:400;color:#909399;font-size:11px">按工单分类 + 商品名兜底（替换原 refund_reason='用户退款'无效字段）</span>
+            </template>
+            <BaseChart :option="refundReasonOption" height="280px" />
+          </ChartCard>
+        </el-col>
+        <el-col :xs="24" :md="12">
+          <ChartCard title="退款接待人 Top 10（退款笔数 + 金额 双柱）">
+            <template #extra>
+              <span style="font-weight:400;color:#909399;font-size:11px">按 PersonAlias → Person.display_name 姓名归一；[未分配]=未匹配；用户自助=wechat；系统自动=sys/system</span>
+            </template>
+            <BaseChart :option="refundStaffOption" height="280px" />
+          </ChartCard>
+        </el-col>
+      </el-row>
+    </section>
+
+    <!-- 模块5: 投诉分项 -->
+    <section class="section-card mb-24">
+      <SectionHeader title="5. 投诉分项" :sub="complaintSub" />
+      <!-- 内/外部投诉概览条 -->
+      <div v-if="complaintData.complaint_by_source && complaintData.complaint_by_source.length" class="complaint-source-bar mb-12">
+        <div class="csb-label">
+          <el-icon><WarningFilled /></el-icon>
+          <span>{{ periodName }}共 <b>{{ complaintData.complaint_total || 0 }}</b> 条投诉</span>
+        </div>
+        <el-space wrap size="default" class="csb-cards">
+          <div v-for="(src, i) in complaintData.complaint_by_source" :key="i" class="csb-card" :class="src.name === '外部投诉' ? 'is-external' : 'is-internal'">
+            <div class="csb-card-name">{{ src.name }}</div>
+            <div class="csb-card-value">{{ formatNum(src.value) }}<span class="csb-unit">条</span></div>
+            <div class="csb-card-ratio">{{ complaintData.complaint_total ? ((src.value / complaintData.complaint_total) * 100).toFixed(1) : '0.0' }}%</div>
+          </div>
+        </el-space>
+      </div>
       <el-row :gutter="12">
         <el-col :xs="24" :md="12">
           <ChartCard title="投诉子类分布（商品/服务/微信/12315/工信部/公共服务平台）">
+            <template #extra>
+              <span style="font-weight:400;color:#909399;font-size:11px">外部投诉(工信部/12315/消协/12345等) 与内部投诉 已分别标识着色</span>
+            </template>
             <BaseChart :option="complaintSubPieOption" height="300px" />
           </ChartCard>
         </el-col>
@@ -158,7 +198,7 @@
 
     <!-- 模块6: 处理队列 三栏（直接复用 QueuePanel） -->
     <section class="section-card mb-24">
-      <SectionHeader title="6. 今日处理队列" />
+      <SectionHeader title="6. 处理队列" />
       <QueuePanel
         :todos="queueData.todos"
         :tasks="queueData.tasks"
@@ -168,9 +208,9 @@
 
     <!-- 模块7: 人均效率表 -->
     <section class="section-card mb-24">
-      <SectionHeader title="7. 今日人均效率">
+      <SectionHeader title="7. 人均效率" sub="会话数(次)=cs_record+工单完工条数 · 接待数(个)=智能助手SN ∪ 工单SN 跨表去重 · 排除sys/system/系统自动记录">
         <template #extra v-if="dutyLeaders.length">
-          <el-tag type="warning" effect="plain" size="small" class="mr-4">今日值班组长</el-tag>
+          <el-tag type="warning" effect="plain" size="small" class="mr-4">值班组长</el-tag>
           <el-space wrap size="small">
             <el-tag
               v-for="(l,i) in dutyLeaders"
@@ -299,14 +339,14 @@
             </template>
           </el-table-column>
         </el-table>
-        <el-empty v-if="!staffRows.length" description="今日暂无人员工作数据" />
+        <el-empty v-if="!staffRows.length" :description="periodName + '暂无人员工作数据'" />
       </el-card>
     </section>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { Timer } from '@element-plus/icons-vue'
 import { today } from '@/api/analytics'
 import BaseChart from '@/components/BaseChart.vue'
@@ -316,24 +356,109 @@ import dayjs from 'dayjs'
 // 本地脚本不直接使用图标组件
 
 const loading = ref(false)
-const quickDate = ref('today')  // today / yesterday
-const customDate = ref('')      // YYYY-MM-DD, 空表示用quickDate
 
-// 当前实际传参date: 空=今天, 'YYYY-MM-DD'=指定日期
-const currentDate = computed(() => {
-  if (customDate.value) return customDate.value
-  if (quickDate.value === 'yesterday') return dayjs().subtract(1, 'day').format('YYYY-MM-DD')
-  return ''  // 今天不传参数(实时窗口)
+// ========== 时间粒度: day / week / month / quarter ==========
+const grain = ref('day')
+const quickDate = ref('today')  // day: today / yesterday / custom
+const quickWeek = ref('this_week')   // week: this_week / last_week
+const quickMonth = ref('this_month') // month: this_month / last_month
+const quickQuarter = ref('this_quarter') // quarter: this_quarter / last_quarter
+const customDate = ref('')      // YYYY-MM-DD (日粒度 自定义)
+const quickGrainOpt = ref('all') // 供 FilterBar 占位 (无实际意义, 保持组件兼容)
+const grainQuickOptions = [{ label: '全部', value: 'all' }] // 占位
+const grainLabel = computed(() => ({ day: '日粒度', week: '周粒度', month: '月粒度', quarter: '季度粒度' }[grain.value] || '日粒度'))
+const grainTagType = computed(() => ({ day: 'success', week: 'primary', month: 'warning', quarter: 'danger' }[grain.value] || 'info'))
+// 本期名 & 对比期名 (用于: KpiCard 环比、核心指标副标题、投诉概览条等)
+const periodName = computed(() => {
+  switch (grain.value) {
+    case 'week':    return quickWeek.value  === 'last_week'  ? '上周' : '本周'
+    case 'month':   return quickMonth.value === 'last_month' ? '上月' : '本月'
+    case 'quarter': return quickQuarter.value === 'last_quarter' ? '上季度' : '本季度'
+    case 'day':
+    default:
+      if (quickDate.value === 'yesterday') return '昨日'
+      if (quickDate.value === 'custom' && customDate.value) return '该日'
+      return '今日'
+  }
 })
-// 大标题显示用日期 (YYYY-MM-DD): 今天不传参数也显示今天的日期, 避免截图时不知道是哪天
+const compareName = computed(() => {
+  switch (grain.value) {
+    case 'week':    return quickWeek.value  === 'last_week'  ? '前周' : '上周'
+    case 'month':   return quickMonth.value === 'last_month' ? '前月' : '上月'
+    case 'quarter': return quickQuarter.value === 'last_quarter' ? '前季' : '上季度'
+    case 'day':
+    default:
+      if (quickDate.value === 'yesterday') return '前日'
+      if (quickDate.value === 'custom' && customDate.value) return '前一日'
+      return '昨日'
+  }
+})
+// 节奏粒度说明: 日粒度=小时级, 其他粒度=日历日级
+const rhythmSub = computed(() => grain.value === 'day'
+  ? '会话/接待/投诉独立柱 · 退款笔数双柱堆叠 · 退款金额堆叠双面积+合计虚线 · 按北京时间小时级'
+  : '会话/接待/投诉独立柱 · 退款笔数双柱堆叠 · 退款金额堆叠双面积+合计虚线 · 按北京时间日历日'
+)
+
+// ---- 计算当前实际时间范围 [start, end] YYYY-MM-DD (start=end=单日 时 end 可为空传) ----
+function _startOfWeek(d) { return d.day(1) } // 周一为起始 (国内习惯)
+function _endOfWeek(d) { return d.day(7) }   // 周日为结束
+function _startOfQuarter(d) { return d.startOf('quarter') }
+function _endOfQuarter(d) { return d.endOf('quarter') }
+
+const timeRange = computed(() => {
+  const now = dayjs()
+  switch (grain.value) {
+    case 'week': {
+      const base = quickWeek.value === 'last_week' ? now.subtract(1, 'week') : now
+      const s = _startOfWeek(base.startOf('day'))
+      const e = (quickWeek.value === 'this_week') ? now : _endOfWeek(base.startOf('day'))
+      return [s.format('YYYY-MM-DD'), e.format('YYYY-MM-DD')]
+    }
+    case 'month': {
+      const base = quickMonth.value === 'last_month' ? now.subtract(1, 'month') : now
+      const s = base.startOf('month')
+      const e = (quickMonth.value === 'this_month') ? now : base.endOf('month')
+      return [s.format('YYYY-MM-DD'), e.format('YYYY-MM-DD')]
+    }
+    case 'quarter': {
+      const base = quickQuarter.value === 'last_quarter' ? now.subtract(1, 'quarter') : now
+      const s = _startOfQuarter(base)
+      const e = (quickQuarter.value === 'this_quarter') ? now : _endOfQuarter(base)
+      return [s.format('YYYY-MM-DD'), e.format('YYYY-MM-DD')]
+    }
+    case 'day':
+    default: {
+      let d
+      if (customDate.value) d = dayjs(customDate.value)
+      else if (quickDate.value === 'yesterday') d = now.subtract(1, 'day')
+      else d = now
+      const iso = d.format('YYYY-MM-DD')
+      // 日实时(今日)/昨日整天 → 后端用 date 即可, 传 start=end 也等价
+      return [iso, iso]
+    }
+  }
+})
+// 展示给大标题的日期(含范围)
 const displayDate = computed(() => {
-  if (customDate.value) return customDate.value
-  if (quickDate.value === 'yesterday') return dayjs().subtract(1, 'day').format('YYYY-MM-DD')
-  return dayjs().format('YYYY-MM-DD')
+  const [s, e] = timeRange.value
+  if (!e || s === e) return s
+  return `${s} ~ ${e}`
+})
+// 当前请求参数: 单日 传 date / 范围 传 start + end
+const currentParams = computed(() => {
+  const [s, e] = timeRange.value
+  const rangeDays = dayjs(e).diff(dayjs(s), 'day') + 1
+  if (rangeDays <= 1) {
+    // 单日: 判断是不是今天(实时) 还是昨天(整天)/历史(整天)
+    const todayIso = dayjs().format('YYYY-MM-DD')
+    if (s === todayIso) return {} // 实时今天: 不传任何 (向后兼容最稳)
+    return { date: s }
+  }
+  return { start: s, end: e }
 })
 
 // ---------- 日期水印 (SVG旋转平铺, 绝对定位穿透 pointer-events, 卡片内容区/卡片间都能看到; 局部截图也清晰) ----------
-const WATERMARK_BOARD_NAME = '客服日度运营看板'
+const WATERMARK_BOARD_NAME = '运营看板'
 const WATERMARK_PRIVACY = '内部数据 请勿外传'
 function buildWatermark(dateStr) {
   const line1 = dateStr
@@ -359,18 +484,19 @@ const watermarkBg = computed(() => ({
 const kpiData = ref({})
 const kpiCards = computed(() => {
   const k = kpiData.value || {}
+  const pn = periodName.value
   const def = [
-    { key: 'reception',      label: '今日会话数',   icon: 'ChatDotRound', bg: '#ecf5ff', color: '#409eff', unit: '次',
+    { key: 'reception',      label: '会话数(次)',   icon: 'ChatDotRound', bg: '#ecf5ff', color: '#409eff', unit: '次',
       money: false,
-      tip: `今日会话数 = 客服助手 沟通事项次数 (1条接待记录=1次会话, 只记当日已发生)
-今日接待数 = 去重 device_sn (按活跃设备近似为独立客户人数, 单位:个)
-—— 会话数(次) > 接待数(个) 说明老客户多次进线沟通; ≈相等说明当日基本都是新客户`,
+      tip: `${pn}会话数 = 客服助手 沟通事项次数 (1条接待记录=1次会话, 只记本期已发生)
+${pn}接待数 = 去重 device_sn (按活跃设备近似为独立客户人数, 单位:个)
+—— 会话数(次) > 接待数(个) 说明老客户多次进线沟通; ≈相等说明本期基本都是新客户`,
       ...(k.reception || { value: 0, yoy_value: 0, yoy_pct: null, device_count: 0, device_count_yoy: 0 }) },
-    { key: 'refund_count',   label: '今日退款笔数', icon: 'Document',    bg: '#fdf6ec', color: '#e6a23c', unit: '笔',
+    { key: 'refund_count',   label: '退款笔数', icon: 'Document',    bg: '#fdf6ec', color: '#e6a23c', unit: '笔',
       money: false,
       tip: '路线A: 退费单管理中 refund_method=\'线上\' 的记录 (统一全域口径: 只退款方式为线上才算一条退款路线)',
       ...(k.refund_count || { value: 0, yoy_value: 0, yoy_pct: null }) },
-    { key: 'refund_amount',  label: '今日退款金额', icon: 'Money',       bg: '#fef0f0', color: '#f56c6c', unit: '',
+    { key: 'refund_amount',  label: '退款金额', icon: 'Money',       bg: '#fef0f0', color: '#f56c6c', unit: '',
       money: true,
       tip: '路线A: 退费单 refund_method=\'线上\' 的金额合计 (不包含退回钱包/线下退款等方式)',
       ...(k.refund_amount || { value: 0, yoy_value: 0, yoy_pct: null }) },
@@ -378,10 +504,9 @@ const kpiCards = computed(() => {
       money: true,
       tip: '经营侧登记估算 = A(退费单线上直退) + B(钱包-用户取现) 两路合计',
       ...(k.cash_out || { value: 0, yoy_value: 0, yoy_pct: null }) },
-    { key: 'complaint',      label: '今日投诉量',   icon: 'WarningFilled', bg: '#fef0f0', color: '#f56c6c', unit: '单',
+    { key: 'complaint',      label: '投诉量',   icon: 'WarningFilled', bg: '#fef0f0', color: '#f56c6c', unit: '单',
       money: false, tip: null, ...(k.complaint || { value: 0, yoy_value: 0, yoy_pct: null }) },
-    /* ticket_done (今日已完工单): 暂时不关注, 从KPI/排行榜/工作量分中全部移除; 后端接口仍保留字段但不计入权重 */
-    { key: 'staff_on_duty',  label: '今日在岗人数', icon: 'UserFilled',  bg: '#f4f4f5', color: '#909399', unit: '人',
+    { key: 'staff_on_duty',  label: '在岗人数', icon: 'UserFilled',  bg: '#f4f4f5', color: '#909399', unit: '人',
       money: false, tip: null, ...(k.staff_on_duty || { value: 0, yoy_value: 0, yoy_pct: null }) },
   ]
   return def
@@ -390,59 +515,112 @@ const kpiCards = computed(() => {
 // KPI 环比 tag 颜色逻辑已在 KpiCard 组件内(BAD_UP_KEYS),此处不再重复定义
 
 // ---------- 模块2 小时节奏 ----------
-const hourlyData = ref({ hour_labels: [], reception: [], reception_devices: [], refund_count: [], refund_amount: [], complaint: [] })
+const hourlyData = ref({
+  hour_labels: [],
+  reception: [],
+  reception_devices: [],
+  complaint: [],
+  // 退款笔数: 拆分 + 合计(兼容旧字段 = 合计)
+  refund_count: [],            // 兼容旧 = A+B
+  refund_count_direct: [],     // 路线A 直接退款
+  refund_count_withdraw: [],   // 路线B 钱包提现
+  refund_count_total: [],      // 明确合计
+  // 退款金额: 拆分 + 合计(兼容旧字段 = 合计)
+  refund_amount: [],           // 兼容旧 = A+B
+  refund_amount_direct: [],    // 路线A 直接退款金额
+  refund_amount_withdraw: [],  // 路线B 钱包提现金额
+  refund_amount_total: [],     // 明确合计
+})
 const hourlyOption = computed(() => ({
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
+  tooltip: {
+    trigger: 'axis',
+    axisPointer: { type: 'shadow' },
     formatter: (params) => {
       if (!params || !params.length) return ''
       const p0 = params[0]
       const h = hourlyData.value.hour_labels?.[p0.dataIndex] ?? ''
-      const val = (name) => {
+      const val = (name, opts = {}) => {
         const m = params.find(x => x.seriesName === name)
-        return m == null ? '-' : m.value == null ? '-' : (name === '退款金额' ? '¥'+Number(m.value).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : Number(m.value).toLocaleString('zh-CN'))
+        if (m == null || m.value == null) return '-'
+        const v = Number(m.value)
+        if (opts.currency) return '¥' + v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        return v.toLocaleString('zh-CN')
       }
+      const cntA = val('退款-直接退款')
+      const cntB = val('退款-钱包提现')
+      const amtA = val('退金-直接', { currency: true })
+      const amtB = val('退金-提现', { currency: true })
+      const cntTotal = val('退金-合计') != null ? (Number(hourlyData.value.refund_count_total?.[p0.dataIndex] ?? 0) || 0) : 0
+      const amtTotal = val('退金-合计', { currency: true })
       return `<b>${h}</b><br/>` +
         `会话数(次): ${val('会话数(次)')}<br/>` +
         `接待数(个): ${val('接待数(个)')}<br/>` +
-        `退款笔数: ${val('退款笔数')}<br/>` +
+        `退款笔数: <b>${cntTotal.toLocaleString('zh-CN')}</b> （直退 ${cntA} + 提现 ${cntB}）<br/>` +
         `投诉量: ${val('投诉量')}<br/>` +
-        `退款金额: ${val('退款金额')}`
-    } },
-  legend: { data: ['会话数(次)', '接待数(个)', '退款笔数', '投诉量', '退款金额'], top: 0 },
-  grid: { left: 56, right: 72, bottom: 36, top: 40 },
+        `退款金额: <b>${amtTotal}</b> （直退 ${amtA} + 提现 ${amtB}）`
+    },
+  },
+  legend: {
+    data: ['会话数(次)', '接待数(个)', '退款-直接退款', '退款-钱包提现', '投诉量', '退金-直接', '退金-提现', '退金-合计'],
+    top: 0, type: 'scroll',
+  },
+  grid: { left: 60, right: 80, bottom: 40, top: 52 },
   xAxis: { type: 'category', data: hourlyData.value.hour_labels || [], axisLabel: { fontSize: 10, interval: 1 } },
   yAxis: [
-    { type: 'value', name: '数量(次/个/笔/单)', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed' } } },
+    { type: 'value', name: '数量(次/个/笔)', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed' } } },
     { type: 'value', name: '退款金额(元)', axisLabel: { formatter: (v) => (v >= 10000 ? (v/10000).toFixed(0)+'万' : v), fontSize: 10 } },
   ],
   series: [
+    // 左Y：独立柱
     {
-      name: '会话数(次)', type: 'bar', stack: null, data: hourlyData.value.reception || [],
+      name: '会话数(次)', type: 'bar', data: hourlyData.value.reception || [],
       itemStyle: { color: '#409eff', borderRadius: [3, 3, 0, 0] },
-      barMaxWidth: 14,
+      barMaxWidth: 12,
     },
     {
       name: '接待数(个)', type: 'bar', data: hourlyData.value.reception_devices || [],
       itemStyle: { color: '#91cc75', borderRadius: [3, 3, 0, 0] },
-      barMaxWidth: 14,
+      barMaxWidth: 12,
+    },
+    // 左Y：退款双柱堆叠（stack=refund）
+    {
+      name: '退款-直接退款', type: 'bar', stack: 'refund', data: hourlyData.value.refund_count_direct || [],
+      itemStyle: { color: '#e6a23c' },
+      barMaxWidth: 12,
     },
     {
-      name: '退款笔数', type: 'bar', data: hourlyData.value.refund_count || [],
-      itemStyle: { color: '#e6a23c', borderRadius: [3, 3, 0, 0] },
-      barMaxWidth: 14,
+      name: '退款-钱包提现', type: 'bar', stack: 'refund', data: hourlyData.value.refund_count_withdraw || [],
+      itemStyle: { color: '#f0948e' },
+      barMaxWidth: 12,
     },
+    // 左Y：独立柱-投诉
     {
       name: '投诉量', type: 'bar', data: hourlyData.value.complaint || [],
       itemStyle: { color: '#f56c6c', borderRadius: [3, 3, 0, 0] },
-      barMaxWidth: 14,
+      barMaxWidth: 12,
+    },
+    // 右Y：退款金额 - 堆叠双面积（stack=amt）
+    {
+      name: '退金-直接', type: 'line', yAxisIndex: 1, stack: 'amt', smooth: true,
+      data: hourlyData.value.refund_amount_direct || [],
+      itemStyle: { color: '#9b59b6' },
+      areaStyle: { color: 'rgba(155,89,182,0.14)' },
+      showSymbol: false, lineStyle: { width: 1 },
     },
     {
-      name: '退款金额', type: 'line', yAxisIndex: 1, smooth: true,
-      data: hourlyData.value.refund_amount || [],
-      itemStyle: { color: '#9b59b6' },
-      areaStyle: { color: 'rgba(155,89,182,0.10)' },
+      name: '退金-提现', type: 'line', yAxisIndex: 1, stack: 'amt', smooth: true,
+      data: hourlyData.value.refund_amount_withdraw || [],
+      itemStyle: { color: '#c0392b' },
+      areaStyle: { color: 'rgba(192,57,43,0.14)' },
+      showSymbol: false, lineStyle: { width: 1 },
+    },
+    // 右Y：退款金额 - 合计虚线（不堆叠，指示堆叠总高度）
+    {
+      name: '退金-合计', type: 'line', yAxisIndex: 1, smooth: true,
+      data: hourlyData.value.refund_amount_total || [],
+      itemStyle: { color: '#7d3c98' },
       symbol: 'circle', symbolSize: 5,
-      lineStyle: { width: 2 },
+      lineStyle: { width: 2, type: 'dashed' },
     },
   ],
 }))
@@ -506,20 +684,55 @@ const receptionStaffOption = computed(() => {
 })
 
 // ---------- 模块5 今日投诉分项 (新增) ----------
-// complaintData 字段来自 reception 接口响应 (complaint_total/complaint_subs/complaint_roots/complaint_unmatched)
-const complaintData = ref({ complaint_total: 0, complaint_subs: [], complaint_roots: [], complaint_unmatched: 0 })
+// complaintData 字段来自 reception 接口响应 (complaint_total/complaint_subs/complaint_roots/complaint_unmatched/complaint_by_source)
+const complaintData = ref({ complaint_total: 0, complaint_subs: [], complaint_roots: [], complaint_unmatched: 0, complaint_by_source: [] })
+// 模块5 SectionHeader 副标题: 展示今日投诉总数 & 外部/内部 两个桶
+const complaintSub = computed(() => {
+  const src = complaintData.value.complaint_by_source || []
+  const ext = (src.find(x => x.name === '外部投诉') || {}).value || 0
+  const int = (src.find(x => x.name === '内部投诉') || {}).value || 0
+  const total = complaintData.value.complaint_total || 0
+  if (!total) return '暂无投诉数据'
+  return `${periodName}共 ${total} 条投诉 · 外部 ${ext} 条 · 内部 ${int} 条（按来源类型独立核算分析）`
+})
 // 饼图: 投诉子类分布 (商品投诉/服务投诉/微信投诉/12315/工信部/公共服务平台)
+// 按 source_type(内部/外部) 区分着色: 外部投诉用红/橙暖色系, 内部投诉用蓝/绿冷色系
 const complaintSubPieOption = computed(() => {
-  const data = (complaintData.value.complaint_subs || []).filter(d => d.value > 0)
+  const rows = (complaintData.value.complaint_subs || []).filter(d => d.value > 0)
+  const EXTERNAL_WARM = ['#f56c6c', '#e74c3c', '#e6a23c', '#d35400', '#c0392b', '#e67e22']
+  const INTERNAL_COOL = ['#409eff', '#3498db', '#67c23a', '#2ecc71', '#9b59b6', '#1abc9c', '#909399', '#34495e']
+  let extIdx = 0, intIdx = 0
+  const data = rows.map(r => {
+    const isExt = r.source_type === '外部投诉'
+    let color
+    if (isExt) { color = EXTERNAL_WARM[extIdx % EXTERNAL_WARM.length]; extIdx++ }
+    else { color = INTERNAL_COOL[intIdx % INTERNAL_COOL.length]; intIdx++ }
+    return {
+      name: r.name + (isExt ? ' · 外' : ''),   // 图例里加"·外"/"·内"后缀 一眼区分
+      value: r.value,
+      source_type: r.source_type,
+      itemStyle: { color },
+    }
+  })
   return {
-    tooltip: { trigger: 'item', formatter: '{b}: {c} 条 ({d}%)' },
-    legend: { bottom: 0, type: 'scroll' },
-    color: ['#f56c6c', '#e6a23c', '#909399', '#9b59b6', '#409eff', '#67c23a', '#8e44ad'],
+    tooltip: {
+      trigger: 'item',
+      formatter: (p) => {
+        const d = p.data || {}
+        const tag = d.source_type === '外部投诉' ? '<span style="color:#e74c3c;font-weight:600">[外部]</span>' : '<span style="color:#3498db;font-weight:600">[内部]</span>'
+        return `${tag} ${p.name.replace(/ · [内外]$/, '')}<br/>数量: ${p.value} 条<br/>占比: ${p.percent}%`
+      },
+    },
+    legend: { bottom: 0, type: 'scroll', textStyle: { fontSize: 10 } },
     series: [{
       name: '投诉子类', type: 'pie', radius: ['42%', '68%'], center: ['50%', '45%'],
       avoidLabelOverlap: true,
-      label: { show: true, formatter: '{b}\n{d}%', fontSize: 10 },
-      data: data.length ? data : [{ name: '今日暂无投诉', value: 1, itemStyle: { color: '#f0f0f0' }, label: { formatter: '今日暂无投诉 ✅' } }],
+      label: { show: true, formatter: (p) => {
+        const nm = p.name.replace(/ · [内外]$/, '')
+        const tag = (p.data && p.data.source_type === '外部投诉') ? '★' : '·'
+        return `${tag}${nm}\n${p.percent}%`
+      }, fontSize: 10 },
+      data: data.length ? data : [{ name: '暂无投诉', value: 1, itemStyle: { color: '#f0f0f0' }, label: { formatter: '暂无投诉 ✅' } }],
     }],
   }
 })
@@ -902,7 +1115,7 @@ function onCustomDate(val) {
 // ---------- 数据加载 ----------
 async function loadAll() {
   loading.value = true
-  const params = currentDate.value ? { date: currentDate.value } : {}
+  const params = currentParams.value
   try {
     const [k, h, r, rf, q, s] = await Promise.all([
       today.kpi(params),
@@ -913,7 +1126,22 @@ async function loadAll() {
       today.staff(params),
     ])
     kpiData.value = k.data || {}
-    hourlyData.value = h.data || { hour_labels: [], reception: [], refund_amount: [] }
+    // 向后兼容：后端新接口返回 A/B/TOTAL 全部字段；旧接口只返回 refund_count/amount(=合计)
+    const hd = h.data || {}
+    hourlyData.value = {
+      hour_labels: hd.hour_labels || hd.slot_labels || [],
+      reception: hd.reception || [],
+      reception_devices: hd.reception_devices || [],
+      complaint: hd.complaint || [],
+      refund_count: hd.refund_count ?? [],  // 旧接口 = 合计；新接口 = 合计
+      refund_count_direct:  hd.refund_count_direct  ?? hd.refund_count ?? [],  // 旧接口缺失则退化为合计（堆叠时只有一段）
+      refund_count_withdraw: hd.refund_count_withdraw ?? Array(hd.refund_count?.length || 0).fill(0),
+      refund_count_total:   hd.refund_count_total   ?? hd.refund_count ?? [],
+      refund_amount: hd.refund_amount ?? [],
+      refund_amount_direct:  hd.refund_amount_direct  ?? hd.refund_amount ?? [],
+      refund_amount_withdraw: hd.refund_amount_withdraw ?? Array(hd.refund_amount?.length || 0).fill(0),
+      refund_amount_total:   hd.refund_amount_total   ?? hd.refund_amount ?? [],
+    }
     // reception 响应同时包含 接待分类(top_staff/categories) + 新增投诉统计(complaint_*)
     const rdata = r.data || {}
     receptionData.value = {
@@ -925,16 +1153,30 @@ async function loadAll() {
       complaint_subs: rdata.complaint_subs || [],
       complaint_roots: rdata.complaint_roots || [],
       complaint_unmatched: rdata.complaint_unmatched || 0,
+      complaint_by_source: rdata.complaint_by_source || [],
     }
     refundData.value = rf.data || { reasons: [], methods: [] }
     queueData.value = q.data || { todos: [], tasks: [], incidents: [] }
-    staffRows.value = s.data || []
+    // 人均效率: 后端 range 模式 → {date, date_end, data: [...]}; 单日旧模式 → [...]
+    const sr = s.data
+    if (sr && Array.isArray(sr)) {
+      staffRows.value = sr
+    } else if (sr && Array.isArray((sr).data)) {
+      staffRows.value = (sr).data
+    } else {
+      staffRows.value = []
+    }
   } catch (e) {
     console.error('[Today] load error', e)
   } finally {
     loading.value = false
   }
 }
+
+// 粒度/快捷范围变化时自动 reload
+watch([grain, quickDate, quickWeek, quickMonth, quickQuarter, customDate], () => {
+  loadAll()
+})
 
 onMounted(loadAll)
 </script>
@@ -1036,6 +1278,73 @@ onMounted(loadAll)
 .chip-sep    { opacity: 0.75; margin: 0 3px; }
 .chip-group  { font-weight: 500; }
 .chip-stat   { opacity: 0.92; font-size: 11px; font-variant-numeric: tabular-nums; }
+
+/* ---------- 投诉内/外部概览条 ---------- */
+.complaint-source-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: linear-gradient(90deg, #fff1f0 0%, #fff7ed 50%, #ffffff 100%);
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+}
+.csb-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-weight: 600;
+  color: #991b1b;
+  font-size: 13px;
+}
+.csb-label .el-icon { color: #dc2626; }
+.csb-label b { color: #7f1d1d; font-size: 15px; }
+.csb-cards { flex: 1; min-width: 0; }
+.csb-card {
+  min-width: 140px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.csb-card.is-external {
+  background: linear-gradient(135deg, #fff1f0, #fee2e2);
+  border: 1px solid #fca5a5;
+}
+.csb-card.is-internal {
+  background: linear-gradient(135deg, #eff6ff, #dbeafe);
+  border: 1px solid #93c5fd;
+}
+.csb-card-name {
+  font-size: 11.5px;
+  font-weight: 500;
+  opacity: 0.85;
+}
+.csb-card.is-external .csb-card-name { color: #991b1b; }
+.csb-card.is-internal .csb-card-name { color: #1e40af; }
+.csb-card-value {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.csb-card.is-external .csb-card-value { color: #dc2626; }
+.csb-card.is-internal .csb-card-value { color: #2563eb; }
+.csb-unit {
+  font-size: 12px;
+  font-weight: 400;
+  margin-left: 2px;
+  opacity: 0.75;
+}
+.csb-card-ratio {
+  font-size: 10.5px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+.csb-card.is-external .csb-card-ratio { color: #991b1b; }
+.csb-card.is-internal .csb-card-ratio { color: #1e40af; }
 </style>
 
 <!-- tooltip 是 teleported 到 body 下的, 必须写在非 scoped 块里, 否则 scoped 哈希匹配不上 -->

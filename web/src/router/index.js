@@ -11,8 +11,14 @@ const routes = [
   {
     path: '/',
     component: () => import('@/layouts/MainLayout.vue'),
-    redirect: '/dashboard',
+    redirect: '/dashboards/today',
     children: [
+      {
+        path: 'dashboards/today',
+        name: 'DashboardToday',
+        component: () => import('@/views/dashboards/Today.vue'),
+        meta: { title: '运营看板', icon: 'DataLine' },
+      },
       {
         path: 'dashboard',
         name: 'Dashboard',
@@ -93,12 +99,6 @@ const routes = [
         name: 'DashboardRefundWithdrawal',
         component: () => import('@/views/dashboards/RefundWithdrawal.vue'),
         meta: { title: '退款-提现全链路看板', icon: 'Money', manager: true },
-      },
-      {
-        path: 'dashboards/today',
-        name: 'DashboardToday',
-        component: () => import('@/views/dashboards/Today.vue'),
-        meta: { title: '客服日度运营看板', icon: 'Clock' },
       },
       {
         path: 'dashboards/performance',

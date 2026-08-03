@@ -395,6 +395,15 @@ def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
                 "submit_params": data.get("submit_params"),
                 "refund_amount": _to_float(data.get("refund_amount")),
                 "estimated_amount": _to_float(data.get("estimated_amount")),
+                # ── 催单 & 派单 8 个新列 (2026-08-03) ──
+                "urge_count": _to_int(data.get("urge_count")),
+                "urge_status": data.get("urge_status"),
+                "last_dispatch_time": _to_datetime(data.get("last_dispatch_time")),
+                "assignee": _sanitize_name_field(data.get("assignee"), idx, result, "工单-分配人员"),
+                "contact_person": _sanitize_name_field(data.get("contact_person"), idx, result, "工单-联系人员"),
+                "dispatcher": _sanitize_name_field(data.get("dispatcher"), idx, result, "工单-派发人员"),
+                "last_urge_by": _sanitize_name_field(data.get("last_urge_by"), idx, result, "工单-最后催单人"),
+                "last_urge_time": _to_datetime(data.get("last_urge_time")),
             })
             result.total += 1
         except Exception as e:

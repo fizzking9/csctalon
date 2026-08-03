@@ -672,6 +672,92 @@ PRESET_VIEWS: list[dict] = [
         "classification_rule_ids": [],
         "time_range_default": {"days": 30},
     },
+    # ─────────────────────────────────────────────────────
+    # 催单风险分析 8 个手动视图 (urge_analysis.py HANDLERS 注册, 实际 SQL 在 urge_analysis 模块)
+    # 这里的 segments/filters 仅为占位: execute_view 会先按 view.code 分派到 HANDLERS, 不走 engine
+    # ─────────────────────────────────────────────────────
+    # --- 退款看板 5 张: 催单风险预测(预测性退款参考) ---
+    {
+        "code": "preset_refund_urge_kpi",
+        "name": "退款催单风险 KPI",
+        "description": "当前快照:待处理退款工单数、平均待处理时长(h)、平均催单次数、催单≥3次占比%、催单≥3次工单数",
+        "chart_type": "table",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": None,
+    },
+    {
+        "code": "preset_refund_urge_bucket",
+        "name": "催单次数分桶 → 工单数 & 预估金额",
+        "description": "当前待处理退款工单按催单次数分桶(0/1-2/3-4/≥5)。柱=工单数,线=预估退款金额合计,用于预判长尾高风险金额规模",
+        "chart_type": "bar",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": None,
+    },
+    {
+        "code": "preset_refund_urge_person_top",
+        "name": "最后催单人 / 分配人员 TOP",
+        "description": "当前催单≥3次的待处理退款工单:按最后催单人 & 分配人员 分别排名前15,用于定位需要重点督导的人员/派单分布",
+        "chart_type": "table",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": None,
+    },
+    {
+        "code": "preset_refund_urge_scatter",
+        "name": "催单×时长×金额 风险清单(Top100)",
+        "description": "散点图(以表格呈现):每行1工单,列=工单号/风险等级/催单次数/待处理h/预估金额/退款原因/分配/最后催单人/电话。按 催单次数→待处理时长→预估金额 倒序,一眼找出高风险长尾工单",
+        "chart_type": "table",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": None,
+    },
+    {
+        "code": "preset_refund_urge_top50",
+        "name": "高风险退款工单 Top50 明细",
+        "description": "复合评分=催单次数×10+待处理天数×3+LN(预估金额+1)×2。列含登记时间、最后催单时间、分配/派发人员、最后催单人、联系人员、处理节点、电话,直接用于派单催办",
+        "chart_type": "table",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": None,
+    },
+    # --- 投诉看板 3 张: 催单→投诉关联分析 ---
+    {
+        "code": "preset_complaint_urge_trend",
+        "name": "高催单量日 vs 投诉量 趋势",
+        "description": "按日(受 start/end 过滤):柱=当日催单≥3次的退款工单数;线=外部投诉+卡商群投诉合计。若两者同向波动,说明催单积压是投诉主因",
+        "chart_type": "bar",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_complaint_urge_conversion",
+        "name": "催单次数分桶 → 投诉转化率",
+        "description": "按 start/end 区间登记的退款工单核:每个催单分桶(0/1-2/3-4/≥5)的 退款工单数、最终产生投诉的工单数(按手机号关联)、投诉转化率%",
+        "chart_type": "bar",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_complaint_urge_contribution",
+        "name": "投诉里「有催单退款工单」贡献占比",
+        "description": "按 start/end 区间的全部投诉:分为 3 类饼块 - ①有催单(≥1次)的退款工单用户投诉;②退款工单但无催单的投诉;③与退款工单无关的投诉。用于判断催单积压对投诉总量的贡献度",
+        "chart_type": "pie",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
 ]
 
 

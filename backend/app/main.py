@@ -22,17 +22,83 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期:启动时执行迁移并初始化默认管理员"""
-    _run_migrations_on_startup()
-    _init_admin()
-    _init_data_sources_and_presets()
-    _start_bms_scheduler()
-    logger.info("应用启动完成")
-    yield
-    # 关闭时停止调度器
-    from app.services.bms_scheduler import bms_scheduler
-    bms_scheduler.stop()
-    logger.info("应用关闭")
+    """应用生命周期:启动时执行迁移并初始化默认管理员
+
+    ⚠️ 多 worker (gunicorn -w N) 场景下, 每个 worker 都会调用 lifespan。
+    若不加锁, 多个 worker 同时:
+      ① 执行 alembic upgrade head (冲突少但会重复跑)
+      ② 对 analysis_views / dashboards 表执行相同行的 UPSERT → Postgres 极易死锁 (PG kill 其中一个事务 → worker crash code=3)
+      ③ 启动多个 bms_scheduler → 同一时间重复触发同步任务
+    用 Postgres 应用级咨询锁 (Advisory Lock, key=99887766) 让第一个拿到锁的 worker 真正执行迁移/种子/调度器;
+    其他 worker 等待数秒 (保证第一个 worker 完成 DDL/种子 UPSERT 提交) 后跳过即可。
+    """
+    import asyncio as _aio
+    from sqlalchemy import text as _tx
+
+    STARTUP_LOCK_KEY = 99887766
+    lock_db = SessionLocal()
+    got_lock = False
+    try:
+        # 非阻塞尝试拿锁: 第一个 worker 必拿到; 其他立刻 False
+        r = lock_db.execute(_tx("SELECT pg_try_advisory_lock(:k)"), {"k": STARTUP_LOCK_KEY}).scalar()
+        got_lock = bool(r)
+    except Exception as _e:
+        logger.warning(f"拿咨询锁失败(fallback 降级为无锁,可能重复执行): {_e}")
+    finally:
+        # 咨询锁 session 级持有,这里先不关,等 lifespan 结束统一关 (关了锁就释放了)
+        pass
+
+    try:
+        if got_lock:
+            logger.info(f"[lifespan] worker 持有启动锁(99887766),开始执行迁移/种子/调度器")
+            # 单独包一层 try-except: 迁移/种子/调度器 任一失败都不要让 worker 崩掉 (gunicorn exit code 3 → master kill 全集群)
+            # 只记录错误日志, 之后仍让 HTTP 服务正常启动。
+            try:
+                _run_migrations_on_startup()
+            except Exception as _e:
+                logger.error(f"[lifespan] 启动时迁移失败(非致命,服务继续启动): {_e}", exc_info=True)
+            try:
+                _init_admin()
+            except Exception as _e:
+                logger.error(f"[lifespan] 启动时初始化管理员失败(非致命): {_e}", exc_info=True)
+            try:
+                _init_data_sources_and_presets()
+            except Exception as _e:
+                logger.error(f"[lifespan] 启动时种子注册失败(非致命): {_e}", exc_info=True)
+            try:
+                _start_bms_scheduler()
+            except Exception as _e:
+                logger.error(f"[lifespan] 启动时调度器启动失败(非致命): {_e}", exc_info=True)
+            # 主动 commit, 确保 UPSERT 的行对其他后续跳过的 worker 可见
+            try:
+                lock_db.commit()
+            except Exception:
+                pass
+        else:
+            # 没拿到锁 → 等一下, 确保持有锁的 worker 把迁移+种子做完(事务提交), 然后直接跳过
+            logger.info("[lifespan] worker 未拿到启动锁,等待 6s 后跳过迁移/种子/调度器...")
+            await _aio.sleep(6.0)
+        logger.info("应用启动完成")
+        yield
+    finally:
+        # 关闭时停止调度器 (无论哪个 worker, 都尝试 stop, scheduler.stop() 是幂等的)
+        try:
+            from app.services.bms_scheduler import bms_scheduler
+            bms_scheduler.stop()
+        except Exception:
+            pass
+        # 释放咨询锁 (若持有)
+        try:
+            if got_lock:
+                lock_db.execute(_tx("SELECT pg_advisory_unlock(:k)"), {"k": STARTUP_LOCK_KEY})
+                lock_db.commit()
+        except Exception:
+            pass
+        try:
+            lock_db.close()
+        except Exception:
+            pass
+        logger.info("应用关闭")
 
 
 def _run_migrations_on_startup() -> None:

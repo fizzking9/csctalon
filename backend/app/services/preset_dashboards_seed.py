@@ -15,38 +15,46 @@ from app.models.dashboard import Dashboard
 
 # 4 个常规预设看板:items 引用 preset_views_seed 中的 view_code
 PRESET_DASHBOARDS: list[dict] = [
-    # ---------- 退款看板(8 视图:5 个现金流 v2 + 3 个基础分布) ----------
-    # 现金流量重构(2026-07):用 5 个 v2 视图替换旧现金流视图;
-    # 服务项/商户/套餐分类暂移除(数据繁杂,待后续归一化汇聚后再加回)
+    # ---------- 退款看板(12 视图: 5 催单风险预测 + 7 现金流 v2 基础) ----------
+    # 前 5 个=2026-08-03 新增的"预测性退款参考因素"模块(催单风险分析), 按优先级放顶部;
+    # 后 7 个=原有的现金流/审核人/池子/原因/方式/日记录/时序
     {
         "code": "preset_dashboard_refund",
         "name": "退款看板",
-        "description": "退款现金流趋势(堆积) + 退费审核人占比 + 提现池子水位(柱状+曲线) + 退费原因/方式 + 退款日记录 + 提现-退款时序",
+        "description": "【预测性退款参考】催单风险KPI→分桶→人员TOP→风险清单→Top50明细， + 现金流/审核/池子/原因/方式/日记录/时序",
         "category": "退款",
         "items": [
-            # 第一行:整体趋势全宽(堆积四类金额)
+            # ── 催单风险 (预测性退款参考) ──
+            {"view_code": "preset_refund_urge_kpi", "span": 24, "title": "退款催单风险 KPI(当前快照)"},
+            {"view_code": "preset_refund_urge_bucket", "span": 12, "title": "催单次数分桶 工单数(柱) + 预估金额(线)"},
+            {"view_code": "preset_refund_urge_person_top", "span": 12, "title": "最后催单人 / 分配人员 TOP(≥3次)"},
+            {"view_code": "preset_refund_urge_scatter", "span": 24, "title": "催单×时长×金额 风险清单 Top100"},
+            {"view_code": "preset_refund_urge_top50", "span": 24, "title": "高风险退款工单 Top50 明细"},
+            # ── 原现金流模块 ──
             {"view_code": "preset_cash_trend_v2", "span": 24},
-            # 第二行:退费审核人占比 + 提现池子水位(柱状+曲线)
             {"view_code": "preset_refund_operator_v2", "span": 12},
             {"view_code": "preset_wallet_pool_v2", "span": 12},
-            # 第三行:基础分布(原因/方式);退费状态无业务意义已移除
             {"view_code": "preset_refund_reason_top", "span": 12},
             {"view_code": "preset_refund_method", "span": 12},
-            # 第四行:退款日记录(人员/原因/分类,table)
             {"view_code": "preset_refund_daily_detail_v2", "span": 24},
-            # 第五行:提现-退款时序关联(table)
             {"view_code": "preset_wallet_refund_timing_v2", "span": 24},
         ],
         "time_range_default": {"days": 30},
         "visibility": "manager",
     },
-    # ---------- 投诉看板(7 视图:外部投诉4+卡商群3) ----------
+    # ---------- 投诉看板(10 视图: 3 催单→投诉关联 + 7 原投诉基础) ----------
+    # 前 3 个=2026-08-03 新增"催单对投诉影响"关联分析
     {
         "code": "preset_dashboard_complaint",
         "name": "投诉看板",
-        "description": "外部投诉(315/监督局) + 卡商群投诉 趋势/分类/处理人 + 结案率",
+        "description": "【催单对投诉影响】高催单日vs投诉趋势 + 分桶转化率% + 贡献占比饼， + 外部投诉/卡商群投诉 趋势/分类/处理人/结案率",
         "category": "投诉",
         "items": [
+            # ── 催单→投诉关联 ──
+            {"view_code": "preset_complaint_urge_trend", "span": 24, "title": "高催单日(柱) vs 投诉量(线) 趋势"},
+            {"view_code": "preset_complaint_urge_conversion", "span": 12, "title": "催单次数分桶 → 投诉转化率"},
+            {"view_code": "preset_complaint_urge_contribution", "span": 12, "title": "投诉中「有催单退款工单」贡献占比"},
+            # ── 原投诉基础模块 ──
             {"view_code": "preset_external_complaint_trend", "span": 12},
             {"view_code": "preset_card_complaint_trend", "span": 12},
             {"view_code": "preset_external_complaint_category", "span": 12},

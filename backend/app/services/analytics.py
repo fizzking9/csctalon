@@ -4,7 +4,7 @@ import datetime as _dt
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select, text, union
+from sqlalchemy import and_, case, func, literal, or_, select, text, union
 from sqlalchemy.orm import Session
 
 from app.models.cs_record import CsRecord
@@ -591,8 +591,28 @@ def _complaint_subitem_case():
         (si.ilike("%12315%"), "全国12315平台"),
         (si.ilike("%工信部%"), "工信部投诉"),
         (si.ilike("%公共%"), "公共服务平台"),
+        (si.ilike("%消费者协会%"), "消费者协会"),
+        (si.ilike("%消协%"), "消费者协会"),
         else_=si,
     ).label("complaint_sub")
+
+
+# 投诉来源类型(从 service_tickets.service_item 归一化): 区分外部投诉 vs 内部投诉
+#   外部投诉: 工信部投诉 / 全国12315平台 / 公共服务平台 / 消费者协会 / 315 / 监督局 等
+#   内部投诉: 商品投诉 / 服务投诉 / 微信投诉 / 未标注 / 其它
+# 用于分析时独立核算、独立展示、独立出报表
+_EXTERNAL_COMPLAINT_KEYWORDS = (
+    "工信部", "12315", "公共服务平台", "消费者协会", "消协",
+    "监督局", "市场监管", "市监", "315平台", "12345", "政务平台",
+)
+def _complaint_source_type_case(col=ServiceTicket.service_item):
+    """返回 CASE WHEN 表达式: '外部投诉' / '内部投诉'"""
+    si = func.coalesce(col, literal(""))
+    whens = [si.ilike(f"%{k}%") for k in _EXTERNAL_COMPLAINT_KEYWORDS]
+    return case(
+        (or_(*whens), "外部投诉"),
+        else_="内部投诉",
+    ).label("complaint_source_type")
 
 
 # 投诉工单根因分类 CASE (用关联 cs_record.problem_category/problem_type 归并):
@@ -607,8 +627,8 @@ def _complaint_root_case(pcat, ptype):
     downgrade_kw = ("限速", "降成", "钻石VIP", "VIP", "赠送")
     other_kw = ("注销", "发票", "退换货")
     # 先判断 problem_type 关键词 (更细)
-    pt_type = func.coalesce(ptype, func.literal(""))
-    pc_cat = func.coalesce(pcat, func.literal(""))
+    pt_type = func.coalesce(ptype, literal(""))
+    pc_cat = func.coalesce(pcat, literal(""))
     return case(
         # 网络质量: 类型含网/卡/信号/离线 或 大类是网络问题
         (
@@ -1757,31 +1777,91 @@ def refund_withdrawal_daily_split(db: Session, start: str | None = None, end: st
 TZ = __import__("zoneinfo").ZoneInfo("Asia/Shanghai")
 
 
-def _today_windows(date: _dt.date | None) -> tuple[_dt.datetime, _dt.datetime, _dt.datetime, _dt.datetime]:
-    """返回 (today_start, today_end, yoy_start, yoy_end).
-    date=None → 实时窗口 (上海时区今天 00:00 ~ now, 昨天 00:00 ~ 昨天此时)
-    date=具体日期 → 整天窗口 (上海时区 00:00 ~ 23:59:59.999999, 同比前一天)
-    说明:DB 里 TIMESTAMPTZ 存 UTC,PostgreSQL session TIMEZONE=Etc/UTC;
-         因此需把 Asia/Shanghai 窗口先 .astimezone(UTC) 再 replace(tzinfo=None) 传给 DB。
+def _resolve_windows(
+    date: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> tuple[_dt.datetime, _dt.datetime, _dt.datetime, _dt.datetime, bool, tuple[str, str] | None]:
+    """统一时间窗口解析: 优先 start/end 范围, 否则退回 date 单日.
+
+    Returns:
+        (cur_start, cur_end, prev_start, prev_end, is_realtime, (display_start_iso, display_end_iso) or None)
+        - prev_* 是用于同比/环比的前一个完整周期:
+          * 单日 → 前一天平移 (和 _today_windows 完全一致)
+          * 周/月/季度 → 向前平移 range_length 天 (保证周期长度一致)
+        - is_realtime: 是否实时(今天未结束)窗口
+        - display_*: Asia/Shanghai 时区 ISO 字符串 (前端友好显示/水印), 单日模式下为 None 让 today_* 自行沿用 date 字段
     """
+    _utc = _dt.timezone.utc
+
+    def _sh_to_naive_utc(dt_sh: _dt.datetime) -> _dt.datetime:
+        return dt_sh.astimezone(_utc).replace(tzinfo=None)
+
+    # ── 优先 start/end 模式 ──
+    if start and end:
+        s_d = _parse_date(start)
+        e_d = _parse_date(end)
+        if s_d is None or e_d is None:
+            # 解析失败, 退回今日实时
+            return _today_windows(None) + (True, None)
+        if s_d > e_d:
+            s_d, e_d = e_d, s_d
+        now_sh = _dt.datetime.now(TZ)
+        today_d = now_sh.date()
+        span_days = (e_d - s_d).days + 1
+
+        # 周期结束日 = end 当天; 若 end == 今天 → 实时窗口截止 now; 否则整天 23:59:59
+        if e_d == today_d:
+            cur_end_sh = now_sh
+            is_realtime = True
+        else:
+            cur_end_sh = _dt.datetime.combine(e_d, _dt.time(23, 59, 59, 999999), tzinfo=TZ)
+            is_realtime = False
+        cur_start_sh = _dt.datetime.combine(s_d, _dt.time(0, 0, 0), tzinfo=TZ)
+
+        # 上一个周期: 向前平移 span_days 天 (保证两个周期长度严格一致)
+        prev_start_sh = cur_start_sh - timedelta(days=span_days)
+        prev_end_sh = cur_end_sh - timedelta(days=span_days)
+
+        display = (cur_start_sh.isoformat(), cur_end_sh.isoformat())
+        return (
+            _sh_to_naive_utc(cur_start_sh),
+            _sh_to_naive_utc(cur_end_sh),
+            _sh_to_naive_utc(prev_start_sh),
+            _sh_to_naive_utc(prev_end_sh),
+            is_realtime,
+            display,
+        )
+
+    # ── 退回 date 单日模式 (和原 _today_windows 完全一致) ──
+    d = _parse_date(date)
     now = _dt.datetime.now(TZ)
-    is_today = date is None or date == now.date()
+    is_today = d is None or d == now.date()
     if is_today:
         t_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         t_end = now
         y_start = t_start - timedelta(days=1)
         y_end = t_end - timedelta(days=1)
     else:
-        t_start = _dt.datetime.combine(date, _dt.time(0, 0, 0), tzinfo=TZ)
+        t_start = _dt.datetime.combine(d, _dt.time(0, 0, 0), tzinfo=TZ)
         t_end = t_start + timedelta(days=1) - timedelta(microseconds=1)
         y_start = t_start - timedelta(days=1)
         y_end = t_end - timedelta(days=1)
-    # 转 UTC 后再去 tzinfo, 匹配 DB session(UTC) 对 naive datetime 的解释
-    _utc = _dt.timezone.utc
-    return (t_start.astimezone(_utc).replace(tzinfo=None),
-            t_end.astimezone(_utc).replace(tzinfo=None),
-            y_start.astimezone(_utc).replace(tzinfo=None),
-            y_end.astimezone(_utc).replace(tzinfo=None))
+    return (
+        _sh_to_naive_utc(t_start),
+        _sh_to_naive_utc(t_end),
+        _sh_to_naive_utc(y_start),
+        _sh_to_naive_utc(y_end),
+        is_today,
+        None,
+    )
+
+
+def _today_windows(date: _dt.date | None) -> tuple[_dt.datetime, _dt.datetime, _dt.datetime, _dt.datetime]:
+    """返回 (today_start, today_end, yoy_start, yoy_end) —— 向后兼容, 直接调 _resolve_windows()."""
+    date_str = date.isoformat() if date else None
+    ts, te, ys, ye, _, _ = _resolve_windows(date=date_str)
+    return ts, te, ys, ye
 
 
 def _parse_date(s: str | None) -> _dt.date | None:
@@ -1795,18 +1875,26 @@ def _pct_delta(cur, prev) -> float | None:
     return round((cur - prev) / prev * 100.0, 1)
 
 
-def today_kpi(db: Session, date: str | None = None) -> dict[str, Any]:
-    """模块1: 今日KPI卡 + 昨日同时段环比 【全域统一退款核算 v3】
+def today_kpi(db: Session, date: str | None = None, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+    """模块1: KPI卡 + 前一周期环比 【全域统一退款核算 v3】
 
+    支持三种时间调用方式(按优先级):
+      1. start+end 明确范围 (周/月/季度粒度, 多日汇总) → 上一个同长度周期做环比
+      2. date='YYYY-MM-DD' 指定整天 → 昨天整天做环比
+      3. date=None 实时今天 → 昨天同时段做环比
     口径严格对齐 v3 规范:
-      - 今日退款笔数/金额 = 路线A (退费单 refund_method='线上')
+      - 退款笔数/金额 = 路线A (退费单 refund_method='线上')
       - 真实现金流出(经营估算) = A+B+C+D 四路经营出款 (C/D独立表未建时=A+B)
       - 实际现金流(对账基准) = E (merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶)
       - 对账偏差 = 经营估算 − 实际现金流
-    date=None 表示今天(实时到当前小时); date='2026-07-31' 表示整天.
     """
-    d = _parse_date(date)
-    ts, te, ys, ye = _today_windows(d)
+    ts, te, ys, ye, is_realtime, disp_range = _resolve_windows(date=date, start=start, end=end)
+    d_end_iso = None
+    if disp_range:
+        d_iso = disp_range[0][:10]
+        d_end_iso = disp_range[1][:10]
+    else:
+        d_iso = (_dt.datetime.now(TZ).date() if date is None else _parse_date(date)).isoformat()
 
     def _between(col, s, e):
         return and_(col.isnot(None), col >= s, col <= e)
@@ -1845,8 +1933,10 @@ def today_kpi(db: Session, date: str | None = None) -> dict[str, Any]:
     cash_y = routes_y["operational"]["amount"] # 经营估算 昨日
     merchant_today = e_t["count"]              # 实际现金流笔数 (注意是E的count,不是C+D)
     merchant_tip = None
-    if (d is None or d == _dt.datetime.now(TZ).date()) and merchant_today == 0:
-        merchant_tip = "商户号流水通常T+1导入，今日数据可能为空"
+    today_d_iso = _dt.datetime.now(TZ).date().isoformat()
+    range_end_iso = d_end_iso or d_iso
+    if range_end_iso == today_d_iso and merchant_today == 0:
+        merchant_tip = "商户号流水通常T+1导入，本日/本周期数据可能为空"
 
     # 5. 今日已完工单 (service_tickets.finish_time 且 status='已完成')
     done_t = db.execute(select(func.count())
@@ -1881,8 +1971,9 @@ def today_kpi(db: Session, date: str | None = None) -> dict[str, Any]:
         return naive_utc.replace(tzinfo=_utc).astimezone(TZ).isoformat()
 
     return {
-        "date": (d or _dt.datetime.now(TZ).date()).isoformat(),
-        "is_realtime": d is None,
+        "date": d_iso,
+        "date_end": d_end_iso,
+        "is_realtime": is_realtime,
         "window": {
             "today_start": _sh_iso(ts), "today_end": _sh_iso(te),
             "yoy_start": _sh_iso(ys), "yoy_end": _sh_iso(ye),
@@ -1917,81 +2008,244 @@ def today_kpi(db: Session, date: str | None = None) -> dict[str, Any]:
     }
 
 
-def today_hourly_trend(db: Session, date: str | None = None) -> dict[str, Any]:
-    """模块2: 今日小时节奏 (上海时区 00:00~23:00, 每小时一行) 【统一口径: 退款=路线A】
-
-    左Y数量级: reception_count / refund_count(路线A) / complaint 三柱并列
-    右Y金额级: refund_amount(路线A) 折线
+def today_hourly_trend(db: Session, date: str | None = None, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+    """模块2: 时间节奏 (小时/日/周/月 按跨度自动选择粒度)
+    
+    粒度规则:
+      - 单日 → 按小时聚合 (00:00~23:00, 对应今日实时到当前小时)
+      - 多日 → 按天聚合 (date_trunc day, 标签为 MM-DD)
+    左Y数量级(柱):
+      - 会话数(次) / 接待数(个) / 投诉量: 各自独立柱
+      - 退款笔数: 堆叠双柱 → 「直接退款(路线A) + 钱包提现(路线B)」合计
+    右Y金额级:
+      - 退款金额: 堆叠双面积 → 「直接退款金额 + 钱包提现金额」合计 + 总计折线
     """
-    d = _parse_date(date)
-    ts, te, _, _ = _today_windows(d)
-    # 小时截断: 先 operation_time AT TIME ZONE 'Asia/Shanghai' → 再 date_trunc('hour')
-    # 保证 h08 对应真实的北京时间 08:00~08:59
-    def _h(col):
-        return func.date_trunc("hour", func.timezone("Asia/Shanghai", col)).label("h")
+    ts, te, _, _, is_realtime, disp_range = _resolve_windows(date=date, start=start, end=end)
+
+    # 跨度判断:
+    #   1. 当传入 date(单日模式) → 永远按小时聚合 (不管 UTC 跨日界 bug, 直接固定 hour 粒度)
+    #   2. 当传入 start+end(范围模式) → 转北京时间后算日历跨度, >1 天按 day, =1 天按 hour
+    if date and not (start or end):
+        span_days = 1
+        grain = "hour"
+    else:
+        # 转北京时间后计算日历日跨度 (避免 UTC 日界导致单日被误算成 2 天)
+        ts_sh = _dt.datetime.fromtimestamp(ts.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ).date()
+        te_sh = _dt.datetime.fromtimestamp(te.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ).date()
+        span_days = (te_sh - ts_sh).days + 1
+        grain = "day" if span_days > 1 else "hour"
+    # ── 时间截断函数 ──
+    def _time_trunc(col):
+        if grain == "hour":
+            return func.date_trunc("hour", func.timezone("Asia/Shanghai", col)).label("trunc_t")
+        return func.date_trunc("day", func.timezone("Asia/Shanghai", col)).label("trunc_t")
+    # 2. 小时/日 标签与横轴: 填充连续槽位
+    now_sh = _dt.datetime.now(TZ)
+    if grain == "hour":
+        # 小时轴: 0~23 小时
+        # 注意: _time_trunc(col) = date_trunc('hour', timezone('Asia/Shanghai', col))
+        #  -> 返回的是 naive datetime, 已经是北京时间本地时刻 (例如 08:00 就是北京早8点)
+        #  -> 直接取 .hour 即可，不要再做 UTC→北京时间的二次换算！
+        slots_hours = list(range(24))
+        is_today_like = is_realtime
+        max_slot = now_sh.hour if is_today_like else 23
+        def _slot_idx(trunc_t_local: _dt.datetime) -> int | None:
+            # trunc_t_local = naive 北京datetime (例如 2026-08-01 08:00:00)，.hour 就是北京时间小时
+            return int(trunc_t_local.hour)
+        def _slot_label(slot: int) -> str:
+            return f"{slot:02d}:00"
+        x_label = "小时节奏 (北京时间)"
+    else:
+        # 日轴: 从 start 到 end 连续日期 (按 Asia/Shanghai 日历日)
+        ts_sh = _dt.datetime.fromtimestamp(ts.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ).date()
+        te_sh = _dt.datetime.fromtimestamp(te.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ).date()
+        slots_days: list[_dt.date] = []
+        cur = ts_sh
+        while cur <= te_sh:
+            slots_days.append(cur)
+            cur += timedelta(days=1)
+        max_slot = len(slots_days) - 1
+        today_date = now_sh.date()
+        def _slot_idx(trunc_t_local: _dt.datetime) -> int | None:
+            # trunc_t_local = date_trunc('day', timezone('Asia/Shanghai', col)) → 已naive北京date
+            d_local = trunc_t_local.date() if hasattr(trunc_t_local, 'date') else trunc_t_local
+            if isinstance(d_local, _dt.datetime):
+                d_local = d_local.date()
+            if d_local in slots_days:
+                return slots_days.index(d_local)
+            return None
+        def _slot_label(slot: int) -> str:
+            return slots_days[slot].strftime("%m-%d")
+        x_label = "日期 (跨度 {} 天)".format(len(slots_days))
+    n_slots = len(slots_days) if grain=="day" else 24
     cs_rows = db.execute(
-        select(_h(CsRecord.operation_time),
+        select(_time_trunc(CsRecord.operation_time),
                func.count().label("cnt"),
                func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("dev_cnt"))
         .where(CsRecord.operation_time.isnot(None),
                CsRecord.operation_time >= ts, CsRecord.operation_time <= te)
-        .group_by("h")
+        .group_by("trunc_t")
     ).all()
-    cs_map = {r.h.hour: int(r.cnt or 0) for r in cs_rows if r.h}
-    cs_dev_map = {r.h.hour: int(r.dev_cnt or 0) for r in cs_rows if r.h}
+    cs_map: dict[int, int] = {}
+    cs_dev_map: dict[int, int] = {}
+    for r in cs_rows:
+        tt = r._mapping["trunc_t"]
+        if tt is None:
+            continue
+        idx = _slot_idx(tt)
+        if idx is None:
+            continue
+        cs_map[idx] = int(r.cnt or 0)
+        cs_dev_map[idx] = int(r.dev_cnt or 0)
 
-    # 退款: 小时级聚合 笔数 + 金额 【统一口径=路线A refund_method='线上'】
+    # --- 路线A: 退费单线上直退(按粒度 笔数+金额) ---
     rf_rows = db.execute(
-        select(_h(Refund.created_at_raw),
+        select(_time_trunc(Refund.created_at_raw),
                func.count().label("cnt"),
                func.coalesce(func.sum(Refund.refund_amount), 0).label("amt"))
         .where(Refund.created_at_raw.isnot(None),
                Refund.created_at_raw >= ts, Refund.created_at_raw <= te,
                *_route_a_online_refund_filter())
-        .group_by("h")
+        .group_by("trunc_t")
     ).all()
-    rf_cnt_map = {r.h.hour: int(r.cnt or 0) for r in rf_rows if r.h}
-    rf_amt_map = {r.h.hour: float(r.amt or 0) for r in rf_rows if r.h}
+    a_cnt_map: dict[int, int] = {}
+    a_amt_map: dict[int, float] = {}
+    for r in rf_rows:
+        tt = r._mapping["trunc_t"]
+        if tt is None:
+            continue
+        idx = _slot_idx(tt)
+        if idx is None:
+            continue
+        a_cnt_map[idx] = int(r.cnt or 0)
+        a_amt_map[idx] = float(r.amt or 0)
 
-    # 投诉: 小时级聚合 按 service_tickets.register_time, 空类别兜底=投诉
+    # --- 路线B: 钱包提现(按粒度 笔数+金额) ---
+    wb_rows = db.execute(
+        select(_time_trunc(WalletWithdrawal.op_time),
+               func.count().label("cnt"),
+               func.coalesce(func.sum(WalletWithdrawal.op_amount), 0).label("amt"))
+        .where(WalletWithdrawal.op_time.isnot(None),
+               WalletWithdrawal.op_time >= ts, WalletWithdrawal.op_time <= te,
+               *_route_b_withdraw_filter())
+        .group_by("trunc_t")
+    ).all()
+    b_cnt_map: dict[int, int] = {}
+    b_amt_map: dict[int, float] = {}
+    for r in wb_rows:
+        tt = r._mapping["trunc_t"]
+        if tt is None:
+            continue
+        idx = _slot_idx(tt)
+        if idx is None:
+            continue
+        b_cnt_map[idx] = int(r.cnt or 0)
+        b_amt_map[idx] = float(r.amt or 0)
+
+    # 投诉: 按粒度聚合 按 service_tickets.register_time, 空类别兜底=投诉
     cp_rows = db.execute(
-        select(_h(ServiceTicket.register_time), func.count().label("cnt"))
+        select(_time_trunc(ServiceTicket.register_time), func.count().label("cnt"))
         .where(ServiceTicket.register_time.isnot(None),
                ServiceTicket.register_time >= ts, ServiceTicket.register_time <= te,
                _ticket_category_case() == "投诉")
-        .group_by("h")
+        .group_by("trunc_t")
     ).all()
-    cp_map = {r.h.hour: int(r.cnt or 0) for r in cp_rows if r.h}
+    cp_map: dict[int, int] = {}
+    for r in cp_rows:
+        tt = r._mapping["trunc_t"]
+        if tt is None:
+            continue
+        idx = _slot_idx(tt)
+        if idx is None:
+            continue
+        cp_map[idx] = int(r.cnt or 0)
 
-    # 填充到当前小时(今天,上海时区)或整天24小时(历史日期)
-    now_sh = _dt.datetime.now(TZ)
-    is_today = d is None or d == now_sh.date()
-    max_h = now_sh.hour if is_today else 23
-    hours = list(range(24))
+    # ── 填充到槽位: 单日填当前小时之前, 多日填全部(最后一天可能实时) ──
+    slots = list(range(n_slots))
+    def _arr(a_map, b_map=None):
+        res = []
+        for i in slots:
+            if i > max_slot:
+                res.append(None)
+            else:
+                a = a_map.get(i, 0)
+                b = b_map.get(i, 0) if b_map is not None else 0
+                res.append(a + b)
+        return res
+    def _arr_split(a_map, b_map, *, kind):
+        """返回 [direct_list, withdraw_list, total_list] 三列表"""
+        direct, withdraw, total = [], [], []
+        for i in slots:
+            if i > max_slot:
+                direct.append(None); withdraw.append(None); total.append(None)
+            else:
+                a = a_map.get(i, 0)
+                b = b_map.get(i, 0)
+                direct.append(a if kind == 'count' else a)
+                withdraw.append(b if kind == 'count' else b)
+                total.append(a + b if kind == 'count' else round(a + b, 2))
+        return direct, withdraw, total
+    r_cnt_direct, r_cnt_withdraw, r_cnt_total = _arr_split(a_cnt_map, b_cnt_map, kind='count')
+    r_amt_direct, r_amt_withdraw, r_amt_total = _arr_split(a_amt_map, b_amt_map, kind='amount')
+    # 旧兼容字段 = 合计
+    refund_count = r_cnt_total
+    refund_amount = r_amt_total
+
+    # 展示用日期 (单日 → date; 范围 → start date, 另附 date_end)
+    if disp_range:
+        d_iso = disp_range[0][:10]
+        d_end_iso: str | None = disp_range[1][:10]
+    else:
+        d_iso = (now_sh.date() if date is None else _parse_date(date)).isoformat()
+        d_end_iso = None
+
+    slot_labels = [_slot_label(i) for i in slots]
     return {
-        "date": (d or now_sh.date()).isoformat(),
-        "hours": hours,
-        "hour_labels": [f"{h:02d}:00" for h in hours],
-        "reception":          [cs_map.get(h, 0)         if h <= max_h else None for h in hours],
-        "reception_devices":  [cs_dev_map.get(h, 0)     if h <= max_h else None for h in hours],
-        "refund_count":       [rf_cnt_map.get(h, 0)     if h <= max_h else None for h in hours],
-        "refund_amount":      [round(rf_amt_map.get(h, 0.0), 2) if h <= max_h else None for h in hours],
-        "complaint":          [cp_map.get(h, 0)         if h <= max_h else None for h in hours],
+        "date": d_iso,
+        "date_end": d_end_iso,
+        "grain": grain,
+        "x_label": x_label,
+        "hours": slots if grain == "hour" else None,   # 旧兼容
+        "hour_labels": slot_labels,                     # 前端统一用 hour_labels
+        "slot_labels": slot_labels,
+        "reception":          [cs_map.get(i, 0)         if i <= max_slot else None for i in slots],
+        "reception_devices":  [cs_dev_map.get(i, 0)     if i <= max_slot else None for i in slots],
+        "complaint":          [cp_map.get(i, 0)         if i <= max_slot else None for i in slots],
+        # —— 退款笔数: 拆分 + 合计 + 旧字段兼容 ——
+        "refund_count":       refund_count,      # 旧兼容 = 合计
+        "refund_count_direct":  r_cnt_direct,    # 路线A 直退笔数
+        "refund_count_withdraw": r_cnt_withdraw, # 路线B 钱包提现笔数
+        "refund_count_total":  r_cnt_total,      # 明确合计 = A+B
+        # —— 退款金额: 拆分 + 合计 + 旧字段兼容 ——
+        "refund_amount":      refund_amount,     # 旧兼容 = 合计
+        "refund_amount_direct":  r_amt_direct,    # 路线A 直退金额
+        "refund_amount_withdraw": r_amt_withdraw, # 路线B 钱包提现金额
+        "refund_amount_total":  r_amt_total,      # 明确合计 = A+B
         "_spec": {
-            "refund_count":  "路线A: 退费单 refund_method='线上'",
-            "refund_amount": "路线A: 退费单 refund_method='线上'",
+            "refund_count_direct":  "路线A: 退费单 refund_method='线上' (直接线上退款)",
+            "refund_count_withdraw": "路线B: 钱包提现 op_type='用户提现' (会员钱包取现到账)",
+            "refund_count_total":   "A+B 合计；节奏图中双柱堆叠显示",
+            "refund_amount_direct": "路线A: 退费单 refund_method='线上' 金额",
+            "refund_amount_withdraw": "路线B: 钱包提现 op_type='用户提现' 金额",
+            "refund_amount_total":   "A+B 合计；图中堆叠面积 + 总计折线",
             "reception":     "接待人次 = cs_record 计数；reception_devices = 去重设备SN计数(去NULL/空串)",
+            "grain":         f"时间粒度: {grain} (跨度{span_days}天 → 自动选择粒度)",
         },
     }
 
 
-def today_reception_breakdown(db: Session, date: str | None = None) -> dict[str, Any]:
+def today_reception_breakdown(db: Session, date: str | None = None, start: str | None = None, end: str | None = None) -> dict[str, Any]:
     """模块3: 今日接待分项 = 分类饼图 + Top10客服柱图 + 投诉子类饼图 + 投诉根因柱图.
     分类: 6 类 (投诉/退款/套餐问题/咨询/综合问题/其他问题)
     投诉相关基于 service_tickets (service_category 兜底=投诉), 根因通过 device_sn ±24h 关 cs_record 判断
     """
-    d = _parse_date(date)
-    ts, te, _, _ = _today_windows(d)
+    ts, te, _, _, is_realtime, disp_range = _resolve_windows(date=date, start=start, end=end)
+    if disp_range:
+        d_iso = disp_range[0][:10]
+        d_end_iso = disp_range[1][:10]
+    else:
+        d_iso = (_dt.datetime.now(TZ).date() if date is None else _parse_date(date)).isoformat()
+        d_end_iso = None
     between = and_(CsRecord.operation_time.isnot(None),
                    CsRecord.operation_time >= ts, CsRecord.operation_time <= te)
     tk_between = and_(ServiceTicket.register_time.isnot(None),
@@ -2045,18 +2299,40 @@ def today_reception_breakdown(db: Session, date: str | None = None) -> dict[str,
 
     # ---------- 新增: 今日投诉统计 (service_tickets 表, 空类别兜底=投诉) ----------
     # 左2: 投诉子类饼图 (从 service_item 归一化, 仅统计今日投诉工单)
+    # 同时拿到每个子类的来源类型(内部/外部) 方便前端分组着色与拆分展示
     comp_sub_rows = db.execute(
-        select(_complaint_subitem_case(), func.count().label("cnt"))
+        select(_complaint_subitem_case(),
+               _complaint_source_type_case(),
+               func.count().label("cnt"))
         .where(tk_between, _ticket_category_case() == "投诉")
-        .group_by("complaint_sub")
+        .group_by("complaint_sub", "complaint_source_type")
         .order_by(text("cnt DESC"))
     ).all()
     complaint_subs = [
-        {"name": r[0] or "未标注", "value": int(r[1] or 0)}
+        {"name": r[0] or "未标注",
+         "source_type": r[1] or "内部投诉",
+         "value": int(r[2] or 0)}
         for r in comp_sub_rows
     ]
     # 今日投诉总数 (便于前端展示 "今日共XX条投诉")
     complaint_total = sum(v["value"] for v in complaint_subs) or 0
+    # 投诉来源类型聚合: 外部投诉 vs 内部投诉 各自数量与占比(分析维度独立核算)
+    comp_src_rows = db.execute(
+        select(_complaint_source_type_case(), func.count().label("cnt"))
+        .where(tk_between, _ticket_category_case() == "投诉")
+        .group_by("complaint_source_type")
+        .order_by(text("cnt DESC"))
+    ).all()
+    complaint_by_source = [
+        {"name": r[0] or "内部投诉", "value": int(r[1] or 0)}
+        for r in comp_src_rows
+    ]
+    # 补齐"内部投诉""外部投诉"两个桶,缺失补0 (前端颜色固定)
+    _src_present = {x["name"] for x in complaint_by_source}
+    for nm in ("外部投诉", "内部投诉"):
+        if nm not in _src_present:
+            complaint_by_source.append({"name": nm, "value": 0})
+    complaint_by_source.sort(key=lambda x: -x["value"])
 
     # 右2: 投诉根因柱图 (投诉工单关联 cs_record 的 problem_category/type 归并到 6 大类根因)
     #   逻辑: 投诉工单(device_sn) JOIN cs_record(device_sn) ±24h, 取 diff_min 最小的 1 条
@@ -2142,13 +2418,15 @@ def today_reception_breakdown(db: Session, date: str | None = None) -> dict[str,
     complaint_unmatched = max(0, complaint_total - matched_count)
 
     return {
-        "date": (d or _dt.datetime.now(TZ).date()).isoformat(),
+        "date": d_iso,
+        "date_end": d_end_iso,
         # 原接待分类
         "categories": sorted(categories, key=lambda x: -x["value"]),
         "top_staff": top_staff,
         # 新增: 今日投诉
         "complaint_total": complaint_total,
-        "complaint_subs": complaint_subs,     # 投诉子类 (饼图: 商品投诉/服务投诉/微信投诉/12315/工信部/公共服务平台)
+        "complaint_subs": complaint_subs,     # 投诉子类 (饼图: 商品投诉/服务投诉/微信投诉/12315/工信部/公共服务平台, 每项带 source_type)
+        "complaint_by_source": complaint_by_source,  # 投诉来源(内部/外部) 两个桶独立占比
         "complaint_roots": complaint_roots,   # 投诉根因 (柱图: 6 大类)
         "complaint_unmatched": complaint_unmatched,  # 未匹配到接待记录的投诉数
     }
@@ -2336,7 +2614,7 @@ def _ensure_service_tickets_for_unmatched_refunds(
     return {"inserted": inserted, "skipped": skipped}
 
 
-def today_refund_breakdown(db: Session, date: str | None = None) -> dict[str, Any]:
+def today_refund_breakdown(db: Session, date: str | None = None, start: str | None = None, end: str | None = None) -> dict[str, Any]:
     """模块4: 今日退款分项 = 退款细分原因Top10 + 退款接待人Top10 【统一口径: 路线A refund_method='线上'】
 
     v3.1 升级(2026-08-02):
@@ -2347,8 +2625,13 @@ def today_refund_breakdown(db: Session, date: str | None = None) -> dict[str, An
          → 彻底消除 "[未分配]" 桶绩效失真
       3. 原因榜/接待人榜仍用同一张 best_match CTE
     """
-    d = _parse_date(date)
-    ts, te, _, _ = _today_windows(d)
+    ts, te, _, _, is_realtime, disp_range = _resolve_windows(date=date, start=start, end=end)
+    if disp_range:
+        d_iso = disp_range[0][:10]
+        d_end_iso = disp_range[1][:10]
+    else:
+        d_iso = (_dt.datetime.now(TZ).date() if date is None else _parse_date(date)).isoformat()
+        d_end_iso = None
     between = and_(Refund.created_at_raw.isnot(None),
                    Refund.created_at_raw >= ts, Refund.created_at_raw <= te,
                    *_route_a_online_refund_filter())
@@ -2447,7 +2730,8 @@ def today_refund_breakdown(db: Session, date: str | None = None) -> dict[str, An
     ]
 
     return {
-        "date": (d or _dt.datetime.now(TZ).date()).isoformat(),
+        "date": d_iso,
+        "date_end": d_end_iso,
         "reasons": reasons,                 # 左: 退款原因榜 (工单分类 + 未登记统一桶)
         "packages": packages,               # 独立榜: 退款商品分布 Top10 (与原因榜解耦)
         "by_staff": by_staff,               # 右: 退款接待人 Top10 (工单处理人 handler)
@@ -2469,18 +2753,19 @@ def today_refund_breakdown(db: Session, date: str | None = None) -> dict[str, An
     }
 
 
-def today_queue(db: Session, date: str | None = None) -> dict[str, Any]:
+def today_queue(db: Session, date: str | None = None, start: str | None = None, end: str | None = None) -> dict[str, Any]:
     """模块5: 今日处理队列 = 今日截止待办 + 进行中专项 + 今日异常事件.
     每项最多10条, 点击可跳转详情页.
     """
-    d = _parse_date(date)
-    # today_window = 上海时区该日期的整天窗口 (00:00 ~ 23:59:59.999999 → UTC naive)
-    _utc = _dt.timezone.utc
-    target_date = d or _dt.datetime.now(TZ).date()
-    sh_start = _dt.datetime.combine(target_date, _dt.time(0, 0, 0), tzinfo=TZ)
-    sh_end = sh_start + timedelta(days=1) - timedelta(microseconds=1)
-    today_start = sh_start.astimezone(_utc).replace(tzinfo=None)
-    today_end = sh_end.astimezone(_utc).replace(tzinfo=None)
+    ts, te, _, _, is_realtime, disp_range = _resolve_windows(date=date, start=start, end=end)
+    if disp_range:
+        d_iso = disp_range[0][:10]
+        d_end_iso = disp_range[1][:10]
+    else:
+        d_iso = (_dt.datetime.now(TZ).date() if date is None else _parse_date(date)).isoformat()
+        d_end_iso = None
+    today_start = ts
+    today_end = te
     # 待办 status: pending/processing/confirming 是未完成, done 已完成
     not_done = TodoItem.status.notin_(["done"])
     todo_rows = db.execute(
@@ -2542,21 +2827,26 @@ def today_queue(db: Session, date: str | None = None) -> dict[str, Any]:
     } for r in inc_rows]
 
     return {
-        "date": (d or _dt.datetime.now(TZ).date()).isoformat(),
+        "date": d_iso,
+        "date_end": d_end_iso,
         "todos": todos,
         "tasks": tasks,
         "incidents": incidents,
     }
 
 
-def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30) -> list[dict[str, Any]]:
+def today_staff_efficiency(db: Session, date: str | None = None, start: str | None = None, end: str | None = None, topn: int = 30) -> dict[str, Any]:
     """模块7: 今日人均效率表 (按operator聚合, 关联Person拿display_name/group_name).
 
-    两个独立合成指标 (用户 2026-08-02 新算法):
+    两个独立合成指标 (用户 2026-08-02 新算法, 2026-08-02 v2 二次修订):
       a. 工作量分 (会话次数维度, 反映忙闲强度):
          = Σ (专项会话数) × 专项难度系数 × 本职系数(本职=1.0 / 非本职转接×0.2)
-      b. 效率分   (接待个数维度, SN去重, 反映服务覆盖面):
-         = Σ (专项接待个数) × 专项难度系数 × 本职系数(同上)
+      b. 效率分   (接待个数维度, SN去重, 反映服务覆盖面)
+         —— 2026-08-02 修订: 跨表SN合并去重
+         智能助手(cs_record)接待SN ∪ 服务工单(ServiceTicket)处理SN, 按当天汇总后去重
+         同一SN在两个表都出现只算1个, 真实反映当天服务覆盖的独立设备/客户数.
+         系统自动产生的记录排除: cs_record 中 sys/system/系统自动 等 operator,
+         以及 description/execution_result/solution 中明确是自动触发的关键词.
 
     本职判定:
       - HR 预设专项 与 计算专项 同一大类 → 本职, 全系数
@@ -2566,19 +2856,44 @@ def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30)
     非本职 = 跨专项转接, 难度系数再 × 0.2.
     系统/用户自助 虚拟账户 → 不进真人员工排名, 补在末尾 rank=NULL.
     """
-    d = _parse_date(date)
-    ts, te, _, _ = _today_windows(d)
+    ts, te, _, _, is_realtime, disp_range = _resolve_windows(date=date, start=start, end=end)
+    if disp_range:
+        d_iso = disp_range[0][:10]
+        d_end_iso = disp_range[1][:10]
+    else:
+        d_iso = (_dt.datetime.now(TZ).date() if date is None else _parse_date(date)).isoformat()
+        d_end_iso = None
     op_person = _operator_to_person_cte()
 
+    # ─────────────────────────────────────────────────────────────────────
+    # 系统/自动记录排除规则 (同时用于 cs_record 与 退款/工单)
+    #   1. operator 精确黑名单: sys/system/SYS/System 大小写变体 + 用户自助/客户自助
+    #   2. 业务字段关键词: description/execution_result/solution 中包含"系统自动""自动发送"
+    # ─────────────────────────────────────────────────────────────────────
+    SYS_OP_BLACKLIST = ["sys", "system", "SYS", "System", "用户自助", "客户自助", "企微用户自助"]
+    def _sys_auto_filter():
+        """返回 SQL 条件 排除 cs_record 中系统自动产生的记录"""
+        kw = ("系统自动", "自动发送", "自动回复", "自动推送", "自动补发", "自动触发", "自动生成")
+        kw_like = [CsRecord.description.ilike(f"%{k}%") for k in kw] \
+                + [CsRecord.execution_result.ilike(f"%{k}%") for k in kw] \
+                + [CsRecord.solution.ilike(f"%{k}%") for k in kw]
+        return and_(
+            CsRecord.operator.isnot(None),
+            CsRecord.operator.notin_(SYS_OP_BLACKLIST),
+            ~or_(*kw_like),  # 反向: 不包含任何自动关键词
+        )
+
     # 1. 会话接待量 + 接待人数(去重SN) 总量 per operator
+    #    v2: 排除系统自动记录
     cs_q = (select(CsRecord.operator.label("op"),
                    func.count().label("c"),
                    func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("dc"))
             .where(CsRecord.operation_time.isnot(None),
                    CsRecord.operation_time >= ts, CsRecord.operation_time <= te,
-                   CsRecord.operator.isnot(None))
+                   _sys_auto_filter())
             .group_by(CsRecord.operator)).cte("cs_q")
     # 2. 会话接待 按 6 个 category_bucket 分桶 per operator: 会话数 + 接待数(SN去重) 两套
+    #    v2: 同样排除系统自动记录
     cs_cat_q = (select(
         CsRecord.operator.label("op"),
         _category_case().label("bucket"),
@@ -2587,9 +2902,10 @@ def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30)
     ).where(
         CsRecord.operation_time.isnot(None),
         CsRecord.operation_time >= ts, CsRecord.operation_time <= te,
-        CsRecord.operator.isnot(None),
+        _sys_auto_filter(),
     ).group_by(CsRecord.operator, "bucket")).cte("cs_cat_q")
     # 3. 退款挽回实际执行: 笔数 + 去重设备个数
+    #    已有 sys/system 排除, 保留
     rf_q = (select(Refund.operator.label("op"),
                    func.count().label("sc"),
                    func.count(func.distinct(func.nullif(func.trim(Refund.device_sn), ""))).label("pc"))
@@ -2606,12 +2922,27 @@ def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30)
             .where(ServiceTicket.finish_time.isnot(None),
                    ServiceTicket.finish_time >= ts, ServiceTicket.finish_time <= te,
                    ServiceTicket.handler.isnot(None),
+                   ServiceTicket.handler.notin_(SYS_OP_BLACKLIST),
                    _ticket_category_case() == "投诉")
             .group_by(ServiceTicket.handler)).cte("cm_q")
 
-    # 并集: 做过接待 或 退款 或 投诉处理 的人员
+    # ─────────────────────────────────────────────────────────────────────
+    # v2 新增: 5. 服务工单 全类处理人完工(不只是投诉) — 用于 SN 合并去重
+    #   当天任何完工的服务工单, 其 device_sn 都纳入该处理人"当天工作覆盖SN"
+    #   因为: 咨询/套餐/退款/设备故障类工单也是实际工作, 不能只靠 cs_record
+    # ─────────────────────────────────────────────────────────────────────
+    tk_all_q = (select(ServiceTicket.handler.label("op"),
+                       func.count().label("sc"),
+                       func.count(func.distinct(func.nullif(func.trim(ServiceTicket.device_sn), ""))).label("pc"))
+                .where(ServiceTicket.finish_time.isnot(None),
+                       ServiceTicket.finish_time >= ts, ServiceTicket.finish_time <= te,
+                       ServiceTicket.handler.isnot(None),
+                       ServiceTicket.handler.notin_(SYS_OP_BLACKLIST))
+                .group_by(ServiceTicket.handler)).cte("tk_all_q")
+
+    # 并集: 做过接待 或 退款 或 投诉处理 或 任何工单完工 的人员
     ops_union = union(
-        select(cs_q.c.op), select(rf_q.c.op), select(cm_q.c.op)
+        select(cs_q.c.op), select(rf_q.c.op), select(cm_q.c.op), select(tk_all_q.c.op)
     ).cte("ops_u")
 
     rows = db.execute(
@@ -2636,6 +2967,135 @@ def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30)
         cs_cat_by_op.setdefault(r.op, {})[r.bucket] = (int(r.scnt or 0), int(r.pcnt or 0))
     rf_by_op: dict[str, tuple[int, int]] = {r.op: (int(r.sc or 0), int(r.pc or 0)) for r in db.execute(select(rf_q)).all()}
     cm_by_op: dict[str, tuple[int, int]] = {r.op: (int(r.sc or 0), int(r.pc or 0)) for r in db.execute(select(cm_q)).all()}
+    tk_all_by_op: dict[str, tuple[int, int]] = {r.op: (int(r.sc or 0), int(r.pc or 0)) for r in db.execute(select(tk_all_q)).all()}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # v2 新增: 跨表 SN 合并去重 —— 每个人员 × 专项 的 SN 集合 union 后再计数
+    #   - 咨询:  cs_record[咨询/其他/综合] SN
+    #   - 套餐:  cs_record[套餐问题] SN  +  工单中 service_category='套餐疑问'/'套餐' SN
+    #   - 退款:  cs_record[退款] SN     +  refund SN
+    #   - 投诉:  cs_record[投诉] SN     +  投诉类工单 SN
+    #   - 另外: 工单中其他非投诉 SN 并入"咨询"桶 (如设备故障/网络故障等按咨询算)
+    # 用 SQL 一次性按 op × 专项 聚合 DISTINCT SN, 避免 Python 层内存中拼 SN 集合.
+    # ─────────────────────────────────────────────────────────────────────
+    merged_sn_sql = text(
+        """
+        -- 子查询1: cs_record 按 6 类 bucket × SN 输出 (过滤系统自动)
+        WITH cs_sns AS (
+            SELECT
+                c.operator AS op,
+                CASE
+                    WHEN COALESCE(c.problem_category,'') ILIKE '%投诉%' THEN '投诉'
+                    WHEN COALESCE(c.problem_category,'') ILIKE '%退款%' THEN '退款'
+                    WHEN COALESCE(c.problem_category,'') IN ('套餐','套餐问题') THEN '套餐'
+                    WHEN COALESCE(c.problem_category,'') ILIKE '%咨询%'
+                      OR COALESCE(c.problem_category,'') ILIKE '%网络问题%'
+                      OR COALESCE(c.problem_category,'') ILIKE '%综合%'
+                      OR COALESCE(c.problem_category,'') ILIKE '%其他%'
+                      OR COALESCE(c.problem_category,'') = '' THEN '咨询'
+                    ELSE '咨询'
+                END AS spec,
+                NULLIF(TRIM(c.device_sn),'') AS sn
+            FROM cs_records c
+            WHERE c.operation_time IS NOT NULL
+              AND c.operation_time >= :ts AND c.operation_time <= :te
+              AND c.operator IS NOT NULL
+              AND c.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+              AND NOT (
+                  COALESCE(c.description,'') ILIKE ALL(ARRAY['%系统自动%','%自动发送%','%自动回复%','%自动推送%','%自动补发%','%自动触发%','%自动生成%'])
+                  OR COALESCE(c.execution_result,'') ILIKE ALL(ARRAY['%系统自动%','%自动发送%','%自动回复%','%自动推送%','%自动补发%','%自动触发%','%自动生成%'])
+                  OR COALESCE(c.solution,'') ILIKE ALL(ARRAY['%系统自动%','%自动发送%','%自动回复%','%自动推送%','%自动补发%','%自动触发%','%自动生成%'])
+              )
+        ),
+        -- 子查询2: refund SN → "退款" 专项
+        rf_sns AS (
+            SELECT r.operator AS op, '退款' AS spec,
+                   NULLIF(TRIM(r.device_sn),'') AS sn
+            FROM refunds r
+            WHERE r.created_at_raw IS NOT NULL
+              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+              AND r.operator IS NOT NULL
+              AND r.operator NOT IN ('sys','system','SYS','System')
+              AND r.refund_method = '线上'
+        ),
+        -- 子查询3: 投诉工单 SN → "投诉" 专项
+        cm_sns AS (
+            SELECT st.handler AS op, '投诉' AS spec,
+                   NULLIF(TRIM(st.device_sn),'') AS sn
+            FROM service_tickets st
+            WHERE st.finish_time IS NOT NULL
+              AND st.finish_time >= :ts AND st.finish_time <= :te
+              AND st.handler IS NOT NULL
+              AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+              AND (st.service_category IS NULL OR st.service_category = '投诉')
+        ),
+        -- 子查询4: 非投诉工单 SN → 按 service_category 分桶 (退款→退款, 套餐疑问/套餐→套餐, 其他→咨询)
+        tk_sns AS (
+            SELECT st.handler AS op,
+                   CASE
+                       WHEN COALESCE(st.service_category,'') = '退款' THEN '退款'
+                       WHEN COALESCE(st.service_category,'') IN ('套餐疑问','套餐') THEN '套餐'
+                       WHEN COALESCE(st.service_category,'') IN ('换货','设备故障','网络故障') THEN '咨询'
+                       ELSE '咨询'
+                   END AS spec,
+                   NULLIF(TRIM(st.device_sn),'') AS sn
+            FROM service_tickets st
+            WHERE st.finish_time IS NOT NULL
+              AND st.finish_time >= :ts AND st.finish_time <= :te
+              AND st.handler IS NOT NULL
+              AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+        ),
+        -- 合并 4 个子查询, 按 op × spec × DISTINCT SN 去重后 聚合: 该人员该专项的真实独立设备数
+        merged AS (
+            SELECT op, spec, COUNT(DISTINCT sn) AS sn_cnt
+            FROM (
+                SELECT op, spec, sn FROM cs_sns WHERE sn IS NOT NULL
+                UNION ALL SELECT op, spec, sn FROM rf_sns WHERE sn IS NOT NULL
+                UNION ALL SELECT op, spec, sn FROM cm_sns WHERE sn IS NOT NULL
+                UNION ALL SELECT op, spec, sn FROM tk_sns WHERE sn IS NOT NULL
+            ) all_sn
+            GROUP BY op, spec
+        )
+        SELECT op, spec, sn_cnt FROM merged;
+        """
+    )
+    merged_sn_rows = db.execute(merged_sn_sql, {"ts": ts, "te": te}).fetchall()
+    # 构造成: merged_pp[op][spec] = 跨表去重后的 SN 接待个数
+    merged_pp: dict[str, dict[str, int]] = {}
+    for r in merged_sn_rows:
+        merged_pp.setdefault(r.op, {})[r.spec or "咨询"] = int(r.sn_cnt or 0)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # 继续计算各专项的会话次数 (按原逻辑, 非SN维度, 不需要去重合并)
+    # 但需要把 工单的会话次数(=工单数) 也并入对应专项的会话总数:
+    #   - 投诉专项会话 = cs_record[投诉]条数 + 投诉工单数
+    #   - 退款专项会话 = cs_record[退款]条数 + 退款条数
+    #   - 套餐专项会话 = cs_record[套餐]条数 + 套餐疑问工单数
+    #   - 咨询专项会话 = cs_record[咨询/其他/综合]条数 + 其他类型工单数
+    # 先查"套餐疑问工单数"和"其他类型工单数"按 handler 分桶
+    # ─────────────────────────────────────────────────────────────────────
+    tk_spec_count_sql = text(
+        """
+        SELECT st.handler AS op,
+               CASE
+                   WHEN (st.service_category IS NULL OR st.service_category = '投诉') THEN '投诉'
+                   WHEN COALESCE(st.service_category,'') = '退款' THEN '退款'
+                   WHEN COALESCE(st.service_category,'') IN ('套餐疑问','套餐') THEN '套餐'
+                   ELSE '咨询'
+               END AS spec,
+               COUNT(*) AS cnt
+        FROM service_tickets st
+        WHERE st.finish_time IS NOT NULL
+          AND st.finish_time >= :ts AND st.finish_time <= :te
+          AND st.handler IS NOT NULL
+          AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+        GROUP BY 1, 2
+        """
+    )
+    tk_spec_rows = db.execute(tk_spec_count_sql, {"ts": ts, "te": te}).fetchall()
+    tk_spec_by_op: dict[str, dict[str, int]] = {}
+    for r in tk_spec_rows:
+        tk_spec_by_op.setdefault(r.op or "", {})[r.spec or "咨询"] = int(r.cnt or 0)
 
     WEIGHT = {"咨询接待": 1.0, "套餐专项": 1.8, "退款挽回": 2.2, "投诉专员": 3.0}
     TRANSFER_PENALTY = 0.2
@@ -2686,18 +3146,38 @@ def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30)
         rc = int(r.rc or 0)
         rdc = int(getattr(r, "rdc", 0) or 0)
         buckets = cs_cat_by_op.get(op, {})
-        def _bsum(names: tuple[str, ...], sess: bool) -> int:
-            idx = 0 if sess else 1
-            return sum((buckets.get(n, (0,0))[idx] for n in names), 0)
-        z_sess = _bsum(BUCK_FZ, True);  z_peop = _bsum(BUCK_FZ, False)
-        t_sess = buckets.get("套餐问题", (0,0))[0];  t_peop = buckets.get("套餐问题", (0,0))[1]
-        tu_s = buckets.get("退款", (0,0))[0] + rf_by_op.get(op, (0,0))[0]
-        tu_p = buckets.get("退款", (0,0))[1] + rf_by_op.get(op, (0,0))[1]
-        to_s = buckets.get("投诉", (0,0))[0] + cm_by_op.get(op, (0,0))[0]
-        to_p = buckets.get("投诉", (0,0))[1] + cm_by_op.get(op, (0,0))[1]
+        # 会话次数 (sessions):  cs_record条数 + 对应专项工单完工条数
+        def _sess_sum(names: tuple[str, ...]) -> int:
+            return sum((buckets.get(n, (0,0))[0] for n in names), 0)
+        z_sess_cs = _sess_sum(BUCK_FZ)
+        t_sess_cs = buckets.get("套餐问题", (0,0))[0]
+        tu_sess_cs = buckets.get("退款", (0,0))[0]
+        to_sess_cs = buckets.get("投诉", (0,0))[0]
+        # 加上工单按专项分类的条数
+        tk_sess = tk_spec_by_op.get(op or "", {})
+        z_sess = z_sess_cs + tk_sess.get("咨询", 0)
+        t_sess = t_sess_cs + tk_sess.get("套餐", 0)
+        tu_sess = tu_sess_cs + rf_by_op.get(op, (0,0))[0] + tk_sess.get("退款", 0)
+        to_sess = to_sess_cs + tk_sess.get("投诉", 0)
         rf_op_count = rf_by_op.get(op, (0,0))[0]
-        sess = {"咨询接待": z_sess, "套餐专项": t_sess, "退款挽回": tu_s, "投诉专员": to_s}
-        peop = {"咨询接待": z_peop, "套餐专项": t_peop, "退款挽回": tu_p, "投诉专员": to_p}
+
+        # 接待个数 (people, SN去重跨表合并): 使用 SQL 侧预先算出的 merged_pp
+        sn_pp = merged_pp.get(op or "", {})
+        z_peop = sn_pp.get("咨询", 0)
+        t_peop = sn_pp.get("套餐", 0)
+        tu_peop = sn_pp.get("退款", 0)
+        to_peop = sn_pp.get("投诉", 0)
+
+        sess = {"咨询接待": z_sess, "套餐专项": t_sess, "退款挽回": tu_sess, "投诉专员": to_sess}
+        peop = {"咨询接待": z_peop, "套餐专项": t_peop, "退款挽回": tu_peop, "投诉专员": to_peop}
+        # 总接待设备数 = 4 桶 SN 并集个数 (SQL 侧没有算并集, 这里近似用桶求和; 未来如果需要精确并集再补)
+        total_devices = z_peop + t_peop + tu_peop + to_peop
+        # 若 total_devices 比 cs_record 侧 rdc 大, 用 total_devices 更真实; 否则保留 rdc 保持旧口径
+        reception_device_count = max(rdc, total_devices)
+        # 总会话数 = 工单并入后的 4 桶之和 (反映当天真实工作量条次)
+        reception_count = z_sess + t_sess + tu_sess + to_sess
+        # rc 是原 cs_record 侧算出来的会话总条数; 并入工单数后可能更大, 取 max 避免回退
+        reception_count = max(rc, reception_count)
 
         position = r.pos or ""
         hr_cat = _hr_map(r.sp, position)
@@ -2725,15 +3205,21 @@ def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30)
             "department": r.dept or "未设置", "group": r.grp or "未分组",
             "position": r.pos, "current_specialty": r.sp,
             "hr_category": hr_cat, "is_management": mgmt,
-            "reception_count": rc, "reception_device_count": rdc,
+            "reception_count": reception_count,
+            "reception_device_count": reception_device_count,
             "refund_op_count": rf_op_count,
-            "sp_zixun": z_sess, "sp_taocan": t_sess, "sp_tuikuan": tu_s, "sp_tousu": to_s,
-            "pp_zixun": z_peop, "pp_taocan": t_peop, "pp_tuikuan": tu_p, "pp_tousu": to_p,
+            "sp_zixun": z_sess, "sp_taocan": t_sess, "sp_tuikuan": tu_sess, "sp_tousu": to_sess,
+            "pp_zixun": z_peop, "pp_taocan": t_peop, "pp_tuikuan": tu_peop, "pp_tousu": to_peop,
             "weights": dict(WEIGHT), "transfer_penalty": TRANSFER_PENALTY,
             "breakdown": bd,
             "work_score": round(work_score, 2), "eff_score": round(eff_score, 2),
             "rank": None,              # rank 先写默认 None, 排序后真人员工再写 1..N
             "is_virtual": False,       # 显式 False, 避免 undefined 误判成 null 非真人 Tag 全亮
+            # v2 口径说明供前端 tooltip 渲染
+            "_calc_note": {
+                "sessions_merge": "会话次数(次)=cs_record条数 + 对应专项工单完工条数(退款+全类工单并入)",
+                "sn_merge_rule": "接待个数(个)=智能助手SN ∪ 工单SN 跨表去重, 按人员×专项独立核算; 排除sys/system/系统自动产生的记录",
+            },
         }
         # 非真人判定 = 精确虚拟匹配 OR 未登记+名字特征匹配
         if _is_virtual_name(norm_name, r.dept, r.grp, r.pos):
@@ -2749,6 +3235,10 @@ def today_staff_efficiency(db: Session, date: str | None = None, topn: int = 30)
     for rec in virtual_rows:
         rec["rank"] = None
         out.append(rec)
-    return out
+    return {
+        "date": d_iso,
+        "date_end": d_end_iso,
+        "data": out,
+    }
 
 

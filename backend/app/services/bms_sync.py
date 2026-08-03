@@ -11,6 +11,7 @@
   - 当天有同步记录: 上次同步的 end_time ~ now
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

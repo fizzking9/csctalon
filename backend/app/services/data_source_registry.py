@@ -245,6 +245,15 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("ticket", "active_time"): {"role": "time"},
     ("ticket", "dispatch_time"): {"role": "time"},
     ("ticket", "priority"): {"role": "measure", "agg": "avg"},
+    # ── 催单 & 派单 8 个新字段 (2026-08-03) ──
+    ("ticket", "urge_count"): {"role": "measure", "agg": "sum", "name_cn": "催单次数"},
+    ("ticket", "urge_status"): {"role": "category", "name_cn": "催单状态"},
+    ("ticket", "last_dispatch_time"): {"role": "time", "name_cn": "最后派单时间"},
+    ("ticket", "assignee"): {"role": "person", "name_cn": "分配人员"},
+    ("ticket", "contact_person"): {"role": "person", "name_cn": "联系人员"},
+    ("ticket", "dispatcher"): {"role": "person", "name_cn": "派发人员"},
+    ("ticket", "last_urge_by"): {"role": "person", "name_cn": "最后催单人"},
+    ("ticket", "last_urge_time"): {"role": "time", "name_cn": "最后催单时间"},
     # merchant_refund
     ("merchant_refund", "wx_refund_no"): {"role": "dimension", "is_filterable": True},
     ("merchant_refund", "merchant_refund_no"): {"role": "dimension", "is_filterable": True},

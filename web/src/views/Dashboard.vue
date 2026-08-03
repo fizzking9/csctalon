@@ -9,139 +9,168 @@
       <el-tag :type="roleTagType" effect="plain">{{ roleLabel }}</el-tag>
     </div>
 
-    <!-- ============ 管理层工作台 ============ -->
+    <!-- ============ 管理层工作台 (次之: 待办/任务/快捷入口导向) ============ -->
     <template v-if="authStore.isManager">
-      <!-- 汇总卡片 (复用 KpiCard: hideYoy=true 简洁模式) -->
-      <div class="card-row" v-loading="loadingStats">
-        <div v-for="c in managerStatCards" :key="c.key" @click="$router.push(c.to)">
-          <KpiCard
-            :label="c.label"
-            :value="c.value"
-            :unit="c.unit"
-            :money="c.money"
-            :icon="c.icon"
-            :bg="c.bg"
-            :color="c.color"
-            hide-yoy
-            body-style="padding: 14px 16px"
-          >
-            <template #extra>
-              <div v-if="c.extraText" :class="c.extraClass || ''">{{ c.extraText }}</div>
-            </template>
-          </KpiCard>
-        </div>
-      </div>
-
-      <!-- 现金流出四路线拆分 & 对账偏差 (复用 RouteSplit, 外层提供 v3 说明头) -->
-      <el-card class="mb-16" v-loading="loadingStats" shadow="never">
+      <!-- 一、快捷入口 (最大卡片, 一点直达 运营看板/决策看板/核心管理页) -->
+      <el-card class="mb-16" shadow="never">
         <template #header>
-          <div class="flex-between">
-            <span style="font-weight:600">
-              现金流出四路线拆分 & 对账偏差
-              <el-tag size="small" type="info" effect="plain" style="margin-left:8px">全域统一核算规范 v3</el-tag>
-            </span>
-            <el-tooltip effect="dark" placement="top">
-              <template #content>
-                <div style="max-width:420px; line-height:1.85; font-size:12px">
-                  <div style="font-weight:600; margin-bottom:4px">四路经营侧出款 (经营报表导出, data_source=business)</div>
-                  <div>A. 退费单管理 → refund_method='线上' (严格按用户要求: 只线上才算退款路线)</div>
-                  <div>B. 钱包提现记录 → op_type='用户提现'</div>
-                  <div>C. 闪猫退款 → 独立业务表 (data_source=shenmao_refund, 暂未建表=0, 建表后自动并入)</div>
-                  <div>D. 其他退款 → 独立业务表 (data_source=other_refund, 暂未建表=0, 建表后自动并入)</div>
-                  <hr style="margin:8px 0; opacity:.3">
-                  <div style="font-weight:600"><b style="color:#409eff">经营估算</b> = A + B + C + D (四路登记出款合计)</div>
-                  <div style="font-weight:600"><b style="color:#f56c6c">实际现金流 (对账基准)</b> = E.商户号现金流 → merchant_refunds.refund_status='SUCCESS' 合计</div>
-                  <div style="font-weight:600"><b>对账偏差</b> = 经营估算 − 实际现金流 (C/D未建表时临时= A+B − E)</div>
-                  <div style="margin-top:4px; color:#909399">【v3 纠正】C/D 不是商户号流水分桶,而是两张独立业务表;商户号流水单独对应第五张表E=实际现金流</div>
-                </div>
-              </template>
-              <el-icon style="color:#909399; cursor:help"><QuestionFilled /></el-icon>
-            </el-tooltip>
-          </div>
+          <span style="font-weight:600">快捷入口</span>
         </template>
-        <RouteSplit :routes="summary.cash_routes || {}" :hide-header="true" />
-      </el-card>
-
-      <!-- 空数据提示 -->
-      <el-alert
-        v-if="!loadingStats && !summary.refund_count"
-        class="mb-16"
-        title="暂无业务数据"
-        type="info"
-        :closable="false"
-        description="请前往 数据中心-数据上传 导入 退费单、钱包提现、闪猫退款、其他退款、商户号现金流 等5张业务数据源后查看分析。"
-      />
-
-      <!-- 趋势图 -->
-      <el-card class="mb-16" v-if="summary.refund_count">
-        <template #header>
-          <div class="flex-between" style="margin: -8px 0">
-            <span>退款趋势(近30天)</span>
-            <el-button link type="primary" @click="$router.push('/analytics/operation')">查看更多 ›</el-button>
+        <div class="shortcut-grid">
+          <div class="shortcut-item shortcut-hero is-primary" @click="$router.push('/dashboards/today')">
+            <el-icon :size="40"><DataLine /></el-icon>
+            <div class="si-info">
+              <div class="si-title">运营看板</div>
+              <div class="si-desc">日 / 周 / 月 / 季度 · 全员工作一览</div>
+            </div>
+            <el-icon class="si-arrow"><ArrowRight /></el-icon>
           </div>
-        </template>
-        <BaseChart :option="trendOption" height="280px" />
-      </el-card>
 
-      <!-- 两栏:预设视图 + 右侧动态 -->
-      <el-row :gutter="16">
-        <el-col :xs="24" :md="15">
-          <el-card class="mb-16">
-            <template #header>
-              <div class="flex-between" style="margin: -8px 0">
-                <span>预设分析视图</span>
-                <el-button link type="primary" @click="$router.push('/analytics/views')">全部视图 ›</el-button>
+          <el-divider direction="vertical" style="height: 96px" />
+
+          <div class="shortcut-item-group">
+            <div class="si-subtitle" style="font-size:12px;color:#909399;margin-bottom:8px">决策看板 · 专项深入分析透视 (仅管理层)</div>
+            <div class="shortcut-row">
+              <div class="shortcut-chip" @click="$router.push('/dashboards/refund')">
+                <el-icon color="#e6a23c"><Wallet /></el-icon>
+                <span>退款看板</span>
               </div>
-            </template>
-            <div class="preset-grid" v-loading="loadingViews">
-              <div v-for="v in presetViews" :key="v.id" class="preset-item" @click="$router.push(`/analytics/views/${v.id}`)">
-                <el-icon :size="20" :color="chartIconColor(v.chart_type)"><component :is="chartIcon(v.chart_type)" /></el-icon>
-                <span class="preset-name">{{ v.name }}</span>
-                <el-icon class="preset-arrow"><ArrowRight /></el-icon>
+              <div class="shortcut-chip" @click="$router.push('/dashboards/complaint')">
+                <el-icon color="#f56c6c"><WarningFilled /></el-icon>
+                <span>投诉看板</span>
               </div>
-              <div v-if="!loadingViews && !presetViews.length" class="text-muted" style="grid-column: 1/-1; text-align: center; padding: 20px">
-                暂无预设视图
+              <div class="shortcut-chip" @click="$router.push('/dashboards/reception')">
+                <el-icon color="#409eff"><Service /></el-icon>
+                <span>接待看板</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/dashboards/refund-withdrawal')">
+                <el-icon color="#9b59b6"><Money /></el-icon>
+                <span>提现全链路</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/dashboards/performance')">
+                <el-icon color="#67c23a"><UserFilled /></el-icon>
+                <span>绩效看板</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/dashboards/special')">
+                <el-icon color="#909399"><Aim /></el-icon>
+                <span>专项跟进</span>
               </div>
             </div>
+          </div>
+
+          <el-divider direction="vertical" style="height: 96px" />
+
+          <div class="shortcut-item-group">
+            <div class="si-subtitle" style="font-size:12px;color:#909399;margin-bottom:8px">管理闭环 · 日常流程</div>
+            <div class="shortcut-row">
+              <div class="shortcut-chip" @click="$router.push('/todos')">
+                <el-icon color="#e6a23c"><Bell /></el-icon>
+                <span>待办事项</span>
+                <el-badge v-if="todoCount" :value="todoCount" class="sc-badge" />
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/tasks')">
+                <el-icon color="#409eff"><List /></el-icon>
+                <span>专项任务</span>
+                <el-badge v-if="taskCount" :value="taskCount" class="sc-badge" />
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/reports')">
+                <el-icon color="#34495e"><Document /></el-icon>
+                <span>报告索引</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/weekly')">
+                <el-icon color="#16a085"><Calendar /></el-icon>
+                <span>周报看板</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/measures')">
+                <el-icon color="#d35400"><Flag /></el-icon>
+                <span>管理措施</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/strategy/manage')">
+                <el-icon color="#8e44ad"><EditPen /></el-icon>
+                <span>策略管理</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/report/center')">
+                <el-icon color="#2c3e50"><Printer /></el-icon>
+                <span>报表中心</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-card>
+
+      <!-- 二、两栏: 待办事项 + 专项任务 (左) | 未读策略 + 最近操作 (右) -->
+      <el-row :gutter="16">
+        <el-col :xs="24" :md="14">
+          <!-- 待办事项 (Top 10, 直接点击可跳转详情) -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>
+              <div class="flex-between" style="margin:-8px 0">
+                <span>待办事项 <el-tag size="small" type="warning" round style="margin-left:6px">{{ todoCount }} 条</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/todos')">全部待办 ›</el-button>
+              </div>
+            </template>
+            <ul class="mini-list" v-loading="loadingTodos">
+              <li v-for="t in todoList" :key="t.id" class="mini-list-item" @click="$router.push(`/todos/${t.id}`)">
+                <el-tag size="small" :type="todoPrioTag(t.priority)" effect="plain" class="mr-8">{{ t.priority || '中' }}</el-tag>
+                <span class="mli-title">{{ t.title }}</span>
+                <span class="mli-time">{{ formatDay(t.due_date || t.created_at) }}</span>
+                <el-tag size="small" :type="todoStatusTag(t.status)" effect="plain">{{ t.status || '待处理' }}</el-tag>
+              </li>
+              <li v-if="!loadingTodos && !todoList.length" class="mli-empty">暂无待办，去 <el-link type="primary" @click.stop="$router.push('/todos')">创建一条</el-link> 吧 ✅</li>
+            </ul>
+          </el-card>
+
+          <!-- 专项任务 (Top 10) -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>
+              <div class="flex-between" style="margin:-8px 0">
+                <span>专项任务 <el-tag size="small" type="primary" round style="margin-left:6px">{{ taskCount }} 个进行中</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/tasks')">全部任务 ›</el-button>
+              </div>
+            </template>
+            <ul class="mini-list" v-loading="loadingTasks">
+              <li v-for="tk in taskList" :key="tk.id" class="mini-list-item" @click="$router.push(`/tasks/${tk.id}`)">
+                <el-icon color="#409eff" style="flex-shrink:0"><List /></el-icon>
+                <span class="mli-title">{{ tk.title }}</span>
+                <div class="mli-progress" v-if="tk.progress != null">
+                  <el-progress :percentage="Number(tk.progress) || 0" :stroke-width="6" :show-text="false" style="width: 120px" />
+                  <span class="mli-progress-text">{{ tk.progress }}%</span>
+                </div>
+                <span class="mli-time">{{ formatDay(tk.end_date || tk.start_date || tk.created_at) }}</span>
+                <el-tag size="small" :type="taskStatusTag(tk.status)" effect="dark">{{ tk.status || '进行中' }}</el-tag>
+              </li>
+              <li v-if="!loadingTasks && !taskList.length" class="mli-empty">暂无专项任务，去 <el-link type="primary" @click.stop="$router.push('/tasks')">新建任务</el-link></li>
+            </ul>
           </el-card>
         </el-col>
 
-        <el-col :xs="24" :md="9">
+        <el-col :xs="24" :md="10">
           <!-- 未读策略 -->
-          <el-card class="mb-16" v-if="unreadStrategies.length">
-            <template #header><span>未读策略 <el-tag size="small" type="warning" round>{{ unreadStrategies.length }}</el-tag></span></template>
-            <div class="strategy-list">
+          <el-card class="mb-16" shadow="never" v-if="unreadStrategies.length || loadingStrategies">
+            <template #header>
+              <div class="flex-between" style="margin:-8px 0">
+                <span>未读策略规范 <el-tag v-if="unreadStrategies.length" size="small" type="warning" round>{{ unreadStrategies.length }} 条</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/strategy/publish')">全部策略 ›</el-button>
+              </div>
+            </template>
+            <div class="strategy-list" v-loading="loadingStrategies">
               <div v-for="s in unreadStrategies" :key="s.id" class="strategy-item" @click="$router.push('/strategy/publish')">
                 <span class="unread-dot" />
                 <span class="strategy-title">{{ s.title }}</span>
                 <el-tag size="small" effect="plain">{{ s.category || '通用' }}</el-tag>
               </div>
-            </div>
-          </el-card>
-
-          <!-- 待办与专项 -->
-          <el-card class="mb-16">
-            <template #header><span>待办与专项</span></template>
-            <div class="mini-row" @click="$router.push('/todos')">
-              <el-icon color="#e6a23c"><Bell /></el-icon>
-              <span class="mini-label">待办事项</span>
-              <span class="mini-count">{{ todoCount }}</span>
-              <el-icon class="mini-arrow"><ArrowRight /></el-icon>
-            </div>
-            <div class="mini-row" @click="$router.push('/tasks')">
-              <el-icon color="#409eff"><List /></el-icon>
-              <span class="mini-label">专项任务</span>
-              <span class="mini-count">{{ taskCount }}</span>
-              <el-icon class="mini-arrow"><ArrowRight /></el-icon>
+              <div v-if="!loadingStrategies && !unreadStrategies.length" class="text-muted" style="text-align:center;padding:16px">
+                策略规范已全部阅读 ✅
+              </div>
             </div>
           </el-card>
 
           <!-- 最近操作(仅 admin) -->
-          <el-card v-if="authStore.isAdmin">
+          <el-card v-if="authStore.isAdmin" shadow="never">
             <template #header>
               <div class="flex-between" style="margin: -8px 0">
-                <span>最近操作</span>
-                <el-button link type="primary" @click="$router.push('/system/operation-logs')">全部 ›</el-button>
+                <span>最近系统操作</span>
+                <el-button link type="primary" @click="$router.push('/system/operation-logs')">全部日志 ›</el-button>
               </div>
             </template>
             <div class="op-list" v-loading="loadingOps">
@@ -161,82 +190,106 @@
       </el-row>
     </template>
 
-    <!-- ============ 客服工作台 ============ -->
+    <!-- ============ 客服工作台 (次之: 快捷入口 + 策略 + 个人待办) ============ -->
     <template v-else>
-      <!-- 未读策略(最关键) -->
-      <el-card class="mb-16">
-        <template #header>
-          <div class="flex-between" style="margin: -8px 0">
-            <span>策略规范 <el-tag v-if="unreadStrategies.length" size="small" type="warning" round>{{ unreadStrategies.length }} 未读</el-tag></span>
-            <el-button link type="primary" @click="$router.push('/strategy/publish')">查看全部 ›</el-button>
-          </div>
-        </template>
-        <div v-if="unreadStrategies.length" class="strategy-list">
-          <div v-for="s in unreadStrategies" :key="s.id" class="strategy-item" @click="$router.push('/strategy/publish')">
-            <span class="unread-dot" />
-            <span class="strategy-title">{{ s.title }}</span>
-            <el-tag size="small" effect="plain">{{ s.category || '通用' }}</el-tag>
-          </div>
-        </div>
-        <el-result v-else icon="success" title="策略已全部阅读" sub-title="当前没有未读的策略与规范">
-          <template #extra>
-            <el-button type="primary" @click="$router.push('/strategy/publish')">前往策略发布页</el-button>
-          </template>
-        </el-result>
-      </el-card>
+      <el-row :gutter="16">
+        <el-col :xs="24" :md="15">
+          <!-- 未读策略(最关键) -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>
+              <div class="flex-between" style="margin: -8px 0">
+                <span>策略规范 <el-tag v-if="unreadStrategies.length" size="small" type="warning" round>{{ unreadStrategies.length }} 未读</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/strategy/publish')">查看全部 ›</el-button>
+              </div>
+            </template>
+            <div v-if="unreadStrategies.length || loadingStrategies" class="strategy-list" v-loading="loadingStrategies">
+              <div v-for="s in unreadStrategies" :key="s.id" class="strategy-item" @click="$router.push('/strategy/publish')">
+                <span class="unread-dot" />
+                <span class="strategy-title">{{ s.title }}</span>
+                <el-tag size="small" effect="plain">{{ s.category || '通用' }}</el-tag>
+              </div>
+            </div>
+            <el-result v-else icon="success" title="策略已全部阅读" sub-title="当前没有未读的策略与规范">
+              <template #extra>
+                <el-button type="primary" @click="$router.push('/strategy/publish')">前往策略发布页</el-button>
+              </template>
+            </el-result>
+          </el-card>
 
-      <!-- 快捷入口 -->
-      <el-card>
-        <template #header>快捷入口</template>
-        <div class="agent-shortcuts">
-          <div class="shortcut-tile" @click="$router.push('/strategy/publish')">
-            <el-icon :size="32" color="#409eff"><Document /></el-icon>
-            <span>策略发布</span>
-          </div>
-          <div class="shortcut-tile" @click="$router.push('/todos')">
-            <el-icon :size="32" color="#e6a23c"><Bell /></el-icon>
-            <span>事项跟进</span>
-            <el-badge v-if="todoCount" :value="todoCount" class="shortcut-badge" />
-          </div>
-        </div>
-      </el-card>
+          <!-- 个人待办 -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>
+              <div class="flex-between" style="margin:-8px 0">
+                <span>我的待办 <el-tag size="small" type="warning" round style="margin-left:6px">{{ todoCount }} 条</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/todos')">全部待办 ›</el-button>
+              </div>
+            </template>
+            <ul class="mini-list" v-loading="loadingTodos">
+              <li v-for="t in todoList" :key="t.id" class="mini-list-item" @click="$router.push(`/todos/${t.id}`)">
+                <el-tag size="small" :type="todoPrioTag(t.priority)" effect="plain">{{ t.priority || '中' }}</el-tag>
+                <span class="mli-title">{{ t.title }}</span>
+                <span class="mli-time">{{ formatDay(t.due_date || t.created_at) }}</span>
+              </li>
+              <li v-if="!loadingTodos && !todoList.length" class="mli-empty">暂无待办 👍</li>
+            </ul>
+          </el-card>
+        </el-col>
+
+        <el-col :xs="24" :md="9">
+          <!-- 快捷入口 -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>快捷入口</template>
+            <div class="agent-shortcuts">
+              <div class="shortcut-tile" @click="$router.push('/dashboards/today')">
+                <el-icon :size="32" color="#409eff"><DataLine /></el-icon>
+                <span>运营看板</span>
+              </div>
+              <div class="shortcut-tile" @click="$router.push('/strategy/publish')">
+                <el-icon :size="32" color="#9b59b6"><Document /></el-icon>
+                <span>策略发布</span>
+              </div>
+              <div class="shortcut-tile" @click="$router.push('/todos')">
+                <el-icon :size="32" color="#e6a23c"><Bell /></el-icon>
+                <span>事项跟进</span>
+                <el-badge v-if="todoCount" :value="todoCount" class="shortcut-badge" />
+              </div>
+              <div class="shortcut-tile" @click="$router.push('/tasks')">
+                <el-icon :size="32" color="#16a085"><List /></el-icon>
+                <span>专项任务</span>
+                <el-badge v-if="taskCount" :value="taskCount" class="shortcut-badge" />
+              </div>
+            </div>
+          </el-card>
+        </el-col>
+      </el-row>
     </template>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import BaseChart from '@/components/BaseChart.vue'
-import KpiCard from '@/components/dashboard/KpiCard.vue'
-import RouteSplit from '@/components/dashboard/RouteSplit.vue'
 import { useAuthStore } from '@/stores/auth'
-import { getSummary, operation } from '@/api/analytics'
 import { listTodos } from '@/api/todo'
 import { listStrategy } from '@/api/strategy'
-import { listAnalysisViews } from '@/api/analysis-view'
-import { listOperationLogs } from '@/api/operationLog'
 import { listTasks } from '@/api/task'
+import { listOperationLogs } from '@/api/operationLog'
 import dayjs from 'dayjs'
 import {
-  Money, Document, Wallet, ChatDotRound, Tickets, WarningFilled, Bell,
-  QuestionFilled, ArrowRight, List,
+  ArrowRight, Bell, List, Calendar, Flag, EditPen, Printer,
+  Wallet, WarningFilled, Service, Money, UserFilled, Aim, Document, DataLine,
 } from '@element-plus/icons-vue'
 
 const authStore = useAuthStore()
 
-const summary = ref({
-  refund_total: 0, refund_count: 0, cash_out_total: 0, cs_reception_count: 0,
-  ticket_total: 0, complaint_total: 0, complaint_ratio: 0,
-  complaint_by_sub: [], complaint_by_status: [],
-})
 const todoCount = ref(0)
+const todoList = ref([])
+const loadingTodos = ref(false)
 const taskCount = ref(0)
-const trend = ref([])
-const presetViews = ref([])
+const taskList = ref([])
+const loadingTasks = ref(false)
 const unreadStrategies = ref([])
+const loadingStrategies = ref(false)
 const recentOps = ref([])
-const loadingStats = ref(false)
-const loadingViews = ref(false)
 const loadingOps = ref(false)
 
 const greeting = computed(() => {
@@ -254,193 +307,91 @@ const todayText = computed(() => {
 const roleLabel = computed(() => ({ admin: '管理员', supervisor: '主管', agent: '客服' }[authStore.role] || ''))
 const roleTagType = computed(() => (authStore.role === 'admin' ? 'danger' : authStore.role === 'supervisor' ? 'warning' : 'info'))
 
-const formatMoney = (v) => (v == null ? '0.00' : Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const formatNum = (v) => (v == null ? '0' : Number(v).toLocaleString('zh-CN'))
 const formatTime = (t) => (t ? dayjs(t).format('MM-DD HH:mm') : '-')
+const formatDay = (t) => (t ? dayjs(t).format('YYYY-MM-DD') : '-')
 
-// 管理层汇总卡片 (KpiCard 复用)
-const managerStatCards = computed(() => [
-  {
-    key: 'refund_total',
-    label: '退款总额',
-    value: summary.value.refund_total,
-    unit: '元',
-    money: true,
-    icon: 'Money',
-    bg: '#ecf5ff',
-    color: '#409eff',
-    to: '/analytics/views',
-  },
-  {
-    key: 'refund_count',
-    label: '退费笔数',
-    value: summary.value.refund_count,
-    unit: '笔',
-    icon: 'Document',
-    bg: '#fdf6ec',
-    color: '#e6a23c',
-    to: '/analytics/views',
-  },
-  {
-    key: 'cash_out_total',
-    label: '真实现金流出',
-    value: summary.value.cash_out_total,
-    unit: '元',
-    money: true,
-    icon: 'Wallet',
-    bg: '#fef0f0',
-    color: '#f56c6c',
-    to: '/analytics/cash',
-  },
-  {
-    key: 'cs_reception_count',
-    label: '客服接待量',
-    value: summary.value.cs_reception_count,
-    icon: 'ChatDotRound',
-    bg: '#f0f9eb',
-    color: '#67c23a',
-    to: '/analytics/operator',
-  },
-  {
-    key: 'ticket_total',
-    label: '工单总数',
-    value: summary.value.ticket_total,
-    unit: '单',
-    icon: 'Tickets',
-    bg: '#ecf5ff',
-    color: '#409eff',
-    to: '/tickets',
-  },
-  {
-    key: 'complaint_total',
-    label: '投诉工单',
-    value: summary.value.complaint_total,
-    unit: '单',
-    icon: 'WarningFilled',
-    bg: '#fef0f0',
-    color: '#f56c6c',
-    to: '/dashboards/today',
-    extraText: summary.value.complaint_ratio
-      ? `占 ${(summary.value.complaint_ratio * 100).toFixed(1)}%`
-      : '',
-    extraClass: 'card-complaint-extra',
-  },
-  {
-    key: 'todos',
-    label: '待办事项',
-    value: todoCount.value,
-    unit: '条',
-    icon: 'Bell',
-    bg: '#f4f4f5',
-    color: '#909399',
-    to: '/todos',
-  },
-])
-
-const chartIcon = (t) => ({ line: 'TrendCharts', bar: 'Histogram', pie: 'PieChart', table: 'Grid' }[t] || 'DataAnalysis')
-const chartIconColor = (t) => ({ line: '#409eff', bar: '#67c23a', pie: '#e6a23c', table: '#909399' }[t] || '#409eff')
-
-const opTagType = (a) => {
+function opTagType(a) {
   if (a.includes('失败') || a.includes('拒绝') || a.includes('删除')) return 'danger'
   if (a.includes('发布') || a.includes('创建')) return 'success'
   if (a.includes('更新') || a.includes('跟进')) return 'warning'
   if (a.includes('登录')) return 'info'
   return 'info'
 }
+function todoPrioTag(p) {
+  const k = String(p || '中')
+  if (k.includes('高') || k === 'H') return 'danger'
+  if (k.includes('低') || k === 'L') return 'info'
+  return 'warning'
+}
+function todoStatusTag(s) {
+  const k = String(s || '待处理')
+  if (k.includes('已完成') || k.includes('done')) return 'success'
+  if (k.includes('处理中') || k.includes('进行')) return 'primary'
+  if (k.includes('关闭') || k.includes('取消')) return 'info'
+  return 'warning'
+}
+function taskStatusTag(s) {
+  const k = String(s || '进行中')
+  if (k.includes('已完成') || k.includes('完成')) return 'success'
+  if (k.includes('进行') || k.includes('执行')) return 'primary'
+  if (k.includes('暂停') || k.includes('风险')) return 'warning'
+  if (k.includes('关闭') || k.includes('取消')) return 'info'
+  return 'danger'
+}
 
-const trendOption = computed(() => ({
-  tooltip: { trigger: 'axis' },
-  legend: { data: ['退款金额', '退款笔数'], top: 0 },
-  grid: { left: 56, right: 56, bottom: 30, top: 36 },
-  xAxis: { type: 'category', data: trend.value.map((d) => d.date), axisLabel: { fontSize: 10 } },
-  yAxis: [
-    { type: 'value', name: '金额(元)', axisLabel: { formatter: (v) => (v >= 10000 ? v / 10000 + '万' : v) } },
-    { type: 'value', name: '笔数' },
-  ],
-  series: [
-    { name: '退款金额', type: 'line', smooth: true, areaStyle: { opacity: 0.15 }, data: trend.value.map((d) => d.value) },
-    { name: '退款笔数', type: 'bar', yAxisIndex: 1, data: trend.value.map((d) => d.count) },
-  ],
-}))
-
-async function loadStats() {
-  loadingStats.value = true
+async function loadTodos() {
+  loadingTodos.value = true
   try {
-    const [s, t] = await Promise.all([getSummary(), listTodos({ page: 1, page_size: 1 })])
-    summary.value = s.data
-    todoCount.value = t.data.total
+    const res = await listTodos({ page: 1, page_size: 10, sort: 'priority_desc' })
+    todoCount.value = Number(res.data?.total) || 0
+    todoList.value = (res.data?.items || []).slice(0, 10)
   } catch {
-    /* 忽略 */
+    todoCount.value = 0; todoList.value = []
   } finally {
-    loadingStats.value = false
+    loadingTodos.value = false
   }
 }
-
-async function loadTrend() {
+async function loadTasks() {
+  loadingTasks.value = true
   try {
-    const end = dayjs()
-    const start = end.subtract(30, 'day')
-    const res = await operation.trend({ start: start.format('YYYY-MM-DD'), end: end.format('YYYY-MM-DD') })
-    trend.value = res.data || []
+    const res = await listTasks({ page: 1, page_size: 10 })
+    taskCount.value = Number(res.data?.total) || 0
+    taskList.value = (res.data?.items || []).slice(0, 10)
   } catch {
-    /* 忽略 */
-  }
-}
-
-async function loadPresetViews() {
-  loadingViews.value = true
-  try {
-    const res = await listAnalysisViews({ preset: true, page: 1, page_size: 100 })
-    presetViews.value = (res.data.items || []).filter((v) => v.status === 'active')
-  } catch {
-    /* 忽略 */
+    taskCount.value = 0; taskList.value = []
   } finally {
-    loadingViews.value = false
+    loadingTasks.value = false
   }
 }
-
 async function loadStrategies() {
+  loadingStrategies.value = true
   try {
     const res = await listStrategy({ status: 'published', page: 1, page_size: 50 })
-    unreadStrategies.value = (res.data.items || []).filter((s) => !s.has_read).slice(0, 5)
+    unreadStrategies.value = (res.data?.items || []).filter((s) => !s.has_read).slice(0, 5)
   } catch {
-    /* 忽略 */
+    unreadStrategies.value = []
+  } finally {
+    loadingStrategies.value = false
   }
 }
-
-async function loadTasks() {
-  try {
-    const res = await listTasks({ page: 1, page_size: 1 })
-    taskCount.value = res.data.total
-  } catch {
-    /* 忽略 */
-  }
-}
-
 async function loadRecentOps() {
+  if (!authStore.isAdmin) return
   loadingOps.value = true
   try {
     const res = await listOperationLogs({ page: 1, page_size: 6 })
-    recentOps.value = res.data.items || []
+    recentOps.value = res.data?.items || []
   } catch {
-    /* 忽略 */
+    recentOps.value = []
   } finally {
     loadingOps.value = false
   }
 }
 
 onMounted(async () => {
-  await loadStats()
-  if (authStore.isManager) {
-    loadStrategies()
-    loadTasks()
-    if (summary.value.refund_count) loadTrend()
-    loadPresetViews()
-    if (authStore.isAdmin) loadRecentOps()
-  } else {
-    loadStrategies()
-    loadTasks()
-  }
+  await Promise.all([
+    loadTodos(), loadTasks(), loadStrategies(), authStore.isManager && loadRecentOps(),
+  ].filter(Boolean))
 })
 </script>
 
