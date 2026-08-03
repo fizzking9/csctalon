@@ -208,3 +208,19 @@ def today_staff(db: DBSession, _: CurrentUser, date: str | None = None,
                 start: str | None = None, end: str | None = None,
                 topn: int = Query(30, ge=1, le=200)):
     return R(data=A.today_staff_efficiency(db, date, start, end, topn))
+
+
+@router.get("/today/refund-recovery", response_model=R, summary="今日看板-退款挽回专项分析(独立视图,不冲抵接待效率)")
+def today_refund_recovery_endpoint(
+    db: DBSession, _: CurrentUser, date: str | None = None,
+    start: str | None = None, end: str | None = None,
+):
+    """退款挽回专项分析: 基于退款专项组人员接待SN ∩ 最终退款SN 的交集分析.
+
+    核心口径:
+      · 分母 = 退款专项组(叶珍凤组/朱海洋组 或 HR专项=退款挽回) 人员在周期内 cs_record 接待的 problem_category 含"退款" 的去重 SN
+      · 挽留失败 = 分母SN 中, 同期出现在 refunds 线上退款单 或 service_tickets service_category=退款 工单中的 SN
+      · 挽留成功 = 分母SN - 挽留失败SN
+      · 成功率 = 挽留成功 / 分母
+    """
+    return R(data=A.refund_recovery_analysis(db, date, start, end))

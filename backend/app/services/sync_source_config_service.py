@@ -153,3 +153,9 @@ def update_sync_source_config(db: Session, data_type: str, payload: dict) -> dic
     db.commit()
     db.refresh(row)
     return _row_to_config(row)
+
+
+# ---------- 兼容别名 (旧代码引用) ----------
+def get_all_configs(db: Session) -> list[dict]:
+    """兼容旧导入名: get_all_configs → list_sync_source_configs"""
+    return list_sync_source_configs(db)

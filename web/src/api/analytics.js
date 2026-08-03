@@ -61,5 +61,7 @@ export const today = {
   refund: (params) => request.get('/analytics/today/refund', { params }),
   queue: (params) => request.get('/analytics/today/queue', { params }),
   staff: (params) => request.get('/analytics/today/staff', { params }),
+  // 退款挽回专项分析 (独立视图, 不冲抵接待效率)
+  refundRecovery: (params) => request.get('/analytics/today/refund-recovery', { params }),
 }
 
