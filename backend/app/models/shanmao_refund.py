@@ -20,16 +20,22 @@ class ShanmaoRefund(TimestampMixin, Base):
 
     # ── 主键 & 关联 ──────────────────────────────────────────────
     refund_no: Mapped[str] = mapped_column(
-        String(64), primary_key=True, comment="闪猫退款单号(唯一键,如 ALR/BRM 开头)"
+        String(64), primary_key=True, comment="闪猫退款单号(唯一键,TF开头)"
     )
     order_no: Mapped[str | None] = mapped_column(
-        String(64), index=True, nullable=True, comment="关联订单号"
+        String(64), index=True, nullable=True, comment="关联订单号(WXALR开头)"
     )
     device_sn: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("devices.sn"), index=True, nullable=True, comment="设备SN"
     )
+    phone: Mapped[str | None] = mapped_column(
+        String(32), index=True, nullable=True, comment="手机号码"
+    )
 
     # ── 金额 ────────────────────────────────────────────────────
+    paid_amount: Mapped[float | None] = mapped_column(
+        Numeric(12, 2), nullable=True, comment="实际支付金额(原始订单支付金额)"
+    )
     refund_amount: Mapped[float | None] = mapped_column(
         Numeric(12, 2), nullable=True, comment="申请退款金额"
     )

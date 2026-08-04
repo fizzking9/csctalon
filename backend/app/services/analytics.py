@@ -131,12 +131,16 @@ def _route_b_withdraw_filter():
     return (WalletWithdrawal.op_type == "用户提现",)
 
 # ---------- 路线C 闪猫退款 (独立业务表) ----------
-_C_SHANMAO_TABLE = "_placeholder_shenmao_refund"   # data_sources.code=shenmao_refund 的物理表占位名(未来建表后改真实表名即可)
-# 建表后约定的列名 (若真实列名不同,只需改这里两个常量 无需改聚合逻辑):
-_C_SHANMAO_AMOUNT_COL = "refund_amount"
-_C_SHANMAO_TIME_COL = "refund_time"
-_C_SHANMAO_STATUS_COL = "refund_status"    # None = 不按状态过滤(全表成功)
-_C_SHANMAO_STATUS_OK = "SUCCESS"
+# 真实表名: shanmao_refunds (alembic: b8c9d0e1f2a3_create_shanmao_refunds)
+# 字段映射关系(2026-08-03 实际 Excel 样例):
+#   金额: actual_amount(实际退款金额)  而非 refund_amount(申请退款金额)
+#   时间: audit_time(审核通过时间 ≈ 退款完成时间)  Excel 无独立 refund_time 列
+#   状态列: status  成功值: '已退款'(中文), 其他状态(申请中/已驳回/退款失败等)不计入经营出款
+_C_SHANMAO_TABLE = "shanmao_refunds"
+_C_SHANMAO_AMOUNT_COL = "actual_amount"
+_C_SHANMAO_TIME_COL = "audit_time"
+_C_SHANMAO_STATUS_COL = "status"
+_C_SHANMAO_STATUS_OK = "已退款"
 
 def _route_c_shanmao_agg(db: Session, start, end) -> tuple[int, float]:
     """【路线C】闪猫退款独立表聚合 (表不存在则返回 0,0,不报错).
@@ -1991,7 +1995,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         "cash_routes_today": {
             "route_a": a_t,  # A.退费单线上直退
             "route_b": b_t,  # B.钱包用户取现
-            "route_c": c_t,  # C.闪猫退款 (独立表占位,暂0)
+            "route_c": c_t,  # C.闪猫退款 (独立表 shanmao_refunds, status=已退款 计入)
             "route_d": d_t,  # D.其他退款 (独立表占位,暂0)
             "operational":     routes_t["operational"],     # 经营估算 A+B+C+D
             "actual_cashflow": routes_t["actual_cashflow"], # 实际现金流 E (商户号SUCCESS合计)
@@ -2002,7 +2006,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         "_spec": {
             "refund_count":     "路线A: 退费单 refund_method='线上' (严格按用户要求:退费单管理里只这条算退款路线)",
             "refund_amount":    "路线A: 退费单 refund_method='线上'",
-            "cash_out":         "经营估算 = 四路经营出款 A线上直退 + B用户取现 + C闪猫退款(独立表) + D其他退款(独立表), C/D建表后自动并入",
+            "cash_out":         "经营估算 = 四路经营出款 A线上直退 + B用户取现 + C闪猫退款(shanmao_refunds已建表status=已退款) + D其他退款(独立表占位)",
             "actual_cashflow":  "实际现金流(对账基准) = merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
         },
     }
@@ -3253,8 +3257,10 @@ def today_staff_efficiency(db: Session, date: str | None = None, start: str | No
 #     6. 周/日趋势: 按周/日 拦截订单 + 成功率 走势
 # ==============================================================================
 
-REFUND_RECOVERY_GROUPS = ("叶珍凤组", "朱海洋组")   # 退款专项组配置 (可扩展)
-REFUND_RECOVERY_HR_CATS = ("退款挽回",)             # HR专项=退款挽回
+# 注意: 口径原则 —— 分组(group_name)=行政/管理维度, 专项(specialty/hr_cat)=业务内容维度.
+# 退款挽回专项只按"专项内容"判定, 不看管理分组 (避免同一管理组内不同专项被误圈).
+# 之前的 REFUND_RECOVERY_GROUPS (基于组名) 已废弃, 统一只看 REFUND_RECOVERY_HR_CATS.
+REFUND_RECOVERY_HR_CATS = ("退款挽回",)             # 判定条件: HR专项(=Person.specialty 映射)为"退款挽回"
 SYS_OP_BLACKLIST_RR = ("sys", "system", "SYS", "System", "用户自助", "客户自助", "企微用户自助")
 
 # 退款原因归一化映射 (兼容 refund_reason 文本 和 service_item 文本)
@@ -3283,9 +3289,14 @@ def _normalize_refund_reason(raw: str | None) -> str:
 
 
 def _is_refund_staff(grp: str | None, hr_cat: str | None) -> bool:
-    """判定是否属于退款挽回专项组人员."""
-    if grp and grp in REFUND_RECOVERY_GROUPS:
-        return True
+    """判定是否属于退款挽回专项组人员.
+
+    口径原则: 分组(group_name)=行政/管理维度, 专项(hr_cat/specialty)=业务内容维度.
+    只按"专项内容"判定, 不看管理分组 (避免同一管理组内不同专项被误圈).
+    同时保留"套餐专项"优先排除, 防止其它分支误判.
+    """
+    if hr_cat == "套餐专项":
+        return False
     if hr_cat and hr_cat in REFUND_RECOVERY_HR_CATS:
         return True
     return False
@@ -3442,9 +3453,10 @@ def refund_recovery_analysis(
 
     # ---- 4. 分子: 挽留失败 SN 集合 = 分母SN ∩ (refunds ∪ 退款工单) ----
     #   时间: 退款/工单 发生时间 在 当前周期内 (未来扩展可放宽到 接待后N天)
+    #   注意: PostgreSQL ::text[] 类型转换 会与 SQLAlchemy :param 占位符冲突, 必须用 CAST
     failed_sn_sql = text(
         """
-        WITH host_sns AS (SELECT unnest(:sn_arr::text[]) AS sn),
+        WITH host_sns AS (SELECT unnest(CAST(:sn_arr AS text[])) AS sn),
         refund_sn AS (
             SELECT DISTINCT NULLIF(TRIM(r.device_sn),'') AS sn,
                    'refund' AS src,
@@ -3592,7 +3604,7 @@ def refund_recovery_analysis(
             "success_rule": "分母SN - 失败SN → 挽留成功 (即接待过但最终没走到退款流程)",
             "success_amount_rule": "成功金额暂不核算 (挽留成功的设备未进入退款流程, 无实际退款工单金额可对应)",
             "fee_ratio_rule": "费占比(单量口径) = 成功单数 / (成功单数 + 实际退款单数(失败+退充)) · 参考目标 37%+",
-            "staff_scope": f"退款专项组 (分组∈{REFUND_RECOVERY_GROUPS} 或 HR专项∈{REFUND_RECOVERY_HR_CATS})",
+            "staff_scope": f"退款挽回专项 (仅按专项内容判定, Person.specialty∈{REFUND_RECOVERY_HR_CATS}; 不看管理分组, 已排除套餐专项人员)",
         },
     }
 
@@ -3755,7 +3767,9 @@ def refund_recovery_analysis(
             raw = sn_failed_meta.get(sn, {}).get("reason")
             b = _normalize_refund_reason(raw)
             all_reasons_seen.add(b)
-            day_reason_bucket.setdefault(d, {})[b] = day_reason_bucket[d].get(b, 0) + 1
+            # 注意: 必须先 setdefault 再使用, 不能把它嵌在右侧赋值里 (Python 先算右再算左, setdefault 未先执行会 KeyError)
+            inner = day_reason_bucket.setdefault(d, {})
+            inner[b] = inner.get(b, 0) + 1
 
         ordered_reasons = [r["reason"] for r in reason_dist]
         for extra in sorted(all_reasons_seen - set(ordered_reasons)):

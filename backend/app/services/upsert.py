@@ -703,7 +703,9 @@ def upsert_device_combos(df: pd.DataFrame, mapping: dict[str, str], db: Session,
 def upsert_shanmao_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
     """闪猫退款(已退款申请) - 主键: refund_no
 
-    列结构待实际 CSV 样例确认后再细调,此处提供通用字段模板。
+    实际 Excel 列(2026-08-03 样例,14列):
+      退费单号,订单号,手机号码,套餐名称,实际支付金额,申请退款金额,退款金额,
+      退款原因,退款状态,退款方式,审核人名称,审核时间,审核备注,申请备注
     """
     rows: list[dict] = []
     for idx, row in enumerate(df.to_dict("records")):
@@ -722,7 +724,9 @@ def upsert_shanmao_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
             rows.append({
                 "refund_no": refund_no,
                 "order_no": data.get("order_no"),
+                "phone": data.get("phone"),
                 "device_sn": data.get("device_sn"),
+                "paid_amount": _to_float(data.get("paid_amount")),
                 "refund_amount": _to_float(data.get("refund_amount")),
                 "actual_amount": _to_float(data.get("actual_amount")),
                 "package_name": data.get("package_name"),
@@ -734,7 +738,7 @@ def upsert_shanmao_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
                 "auditor": auditor,
                 "operator": operator,
                 "apply_time": _to_datetime(data.get("apply_time")),
-                "audit_time": _to_datetime(data.get("audit_time")),
+                "audit_time": _sanitize_date(_to_datetime(data.get("audit_time"))),
                 "refund_time": _to_datetime(data.get("refund_time")),
                 "remark": data.get("remark"),
                 "audit_remark": data.get("audit_remark"),
