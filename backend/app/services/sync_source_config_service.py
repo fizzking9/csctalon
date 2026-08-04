@@ -22,8 +22,17 @@ from app.core.config import settings
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.models.sync_source_config import SyncSourceConfig
 from app.services.bms_fetcher import BMS_DATA_SOURCES
+from app.services.scrm_client import SCRM_DATA_SOURCES
 
 logger = logging.getLogger(__name__)
+
+
+def _all_data_sources() -> dict[str, dict]:
+    """合并 BMS + SCRM 所有数据源(BMS 原始顺序在前,SCRM 追加在后,统一注册)"""
+    merged: dict[str, dict] = {}
+    merged.update(BMS_DATA_SOURCES)
+    merged.update(SCRM_DATA_SOURCES)
+    return merged
 
 
 def ensure_sync_sources_registered(db: Session) -> dict:
@@ -32,20 +41,34 @@ def ensure_sync_sources_registered(db: Session) -> dict:
     # .env 凭证作为初始值灌入(仅对新建的源;用户之后可在 UI 改成各子域真实账号)
     env_user = getattr(settings, "BMS_USERNAME", "") or ""
     env_pwd = getattr(settings, "BMS_PASSWORD", "") or ""
+    env_scrm_client = getattr(settings, "SCRM_CLIENT_ID", "") or ""
+    env_scrm_secret = getattr(settings, "SCRM_CLIENT_SECRET", "") or ""
+    env_scrm_base = getattr(settings, "SCRM_BASE_URL", "") or ""
 
-    for idx, (data_type, cfg) in enumerate(BMS_DATA_SOURCES.items()):
+    all_sources = _all_data_sources()
+    for idx, (data_type, cfg) in enumerate(all_sources.items()):
         existing = db.scalar(select(SyncSourceConfig).where(SyncSourceConfig.data_type == data_type))
         if existing:
             continue
+        is_scrm = data_type.startswith("scrm_")
+        if is_scrm:
+            # SCRM: username = Fernet(clientId), password = Fernet(clientSecret)
+            init_user = encrypt_secret(env_scrm_client) if env_scrm_client else None
+            init_pwd = encrypt_secret(env_scrm_secret) if env_scrm_secret else None
+            init_base = cfg.get("base_url") or env_scrm_base
+        else:
+            init_user = encrypt_secret(env_user) if env_user else None
+            init_pwd = encrypt_secret(env_pwd) if env_pwd else None
+            init_base = cfg["base_url"]
         db.add(
             SyncSourceConfig(
                 data_type=data_type,
                 name=cfg["name"],
-                base_url=cfg["base_url"],
-                page_path=cfg["page_path"],
+                base_url=init_base,
+                page_path=cfg.get("page_path", ""),
                 time_labels=cfg.get("time_labels"),
-                username=encrypt_secret(env_user) if env_user else None,
-                password=encrypt_secret(env_pwd) if env_pwd else None,
+                username=init_user,
+                password=init_pwd,
                 default_sync=cfg.get("default_sync", True),
                 enabled=True,
                 sort_order=idx,
@@ -53,14 +76,15 @@ def ensure_sync_sources_registered(db: Session) -> dict:
         )
         created += 1
     db.commit()
-    logger.info(f"同步源配置注册完成: 新建 {created} 个, 共 {len(BMS_DATA_SOURCES)} 个")
-    return {"created": created, "total": len(BMS_DATA_SOURCES)}
+    total = len(all_sources)
+    logger.info(f"同步源配置注册完成: 新建 {created} 个, 共 {total} 个(BMS+SCRM)")
+    return {"created": created, "total": total}
 
 
 def _row_to_config(row: SyncSourceConfig) -> dict:
     """DB 行 → 运行配置 dict(解密凭证)"""
-    # fetch_mode / requires_captcha 不在 DB 表里,从 BMS_DATA_SOURCES 种子补(标记 http/playwright 分流/验证码)
-    seed = BMS_DATA_SOURCES.get(row.data_type, {})
+    # fetch_mode / requires_captcha 不在 DB 表里,从种子补:BMS 走 playwright, SCRM 走 openapi
+    seed = BMS_DATA_SOURCES.get(row.data_type) or SCRM_DATA_SOURCES.get(row.data_type, {})
     return {
         "data_type": row.data_type,
         "name": row.name,
@@ -77,27 +101,32 @@ def _row_to_config(row: SyncSourceConfig) -> dict:
 
 
 def get_sync_source_config(db: Session, data_type: str) -> dict | None:
-    """读取单个源运行配置(解密凭证);DB 缺失时回退到 BMS_DATA_SOURCES + .env 凭证"""
+    """读取单个源运行配置(解密凭证);DB 缺失时回退到 种子 + .env 凭证"""
     row = db.scalar(select(SyncSourceConfig).where(SyncSourceConfig.data_type == data_type))
     if row:
         return _row_to_config(row)
     # 回退(理论上 seed 后不会走到)
-    cfg = BMS_DATA_SOURCES.get(data_type)
+    cfg = BMS_DATA_SOURCES.get(data_type) or SCRM_DATA_SOURCES.get(data_type)
     if not cfg:
         return None
-    env_user = getattr(settings, "BMS_USERNAME", "") or ""
-    env_pwd = getattr(settings, "BMS_PASSWORD", "") or ""
+    is_scrm = data_type.startswith("scrm_")
+    if is_scrm:
+        env_user = getattr(settings, "SCRM_CLIENT_ID", "") or ""
+        env_pwd = getattr(settings, "SCRM_CLIENT_SECRET", "") or ""
+    else:
+        env_user = getattr(settings, "BMS_USERNAME", "") or ""
+        env_pwd = getattr(settings, "BMS_PASSWORD", "") or ""
     return {
         "data_type": data_type,
         "name": cfg["name"],
-        "base_url": cfg["base_url"],
-        "page_path": cfg["page_path"],
+        "base_url": cfg.get("base_url", getattr(settings, "SCRM_BASE_URL", "") if is_scrm else cfg["base_url"]),
+        "page_path": cfg.get("page_path", ""),
         "time_labels": cfg.get("time_labels"),
         "username": env_user or None,
         "password": env_pwd or None,
         "default_sync": cfg.get("default_sync", True),
         "enabled": True,
-        "fetch_mode": cfg.get("fetch_mode", "playwright"),
+        "fetch_mode": cfg.get("fetch_mode", "openapi" if is_scrm else "playwright"),
         "requires_captcha": cfg.get("requires_captcha", False),
     }
 
@@ -107,7 +136,7 @@ def list_sync_source_configs(db: Session) -> list[dict]:
     rows = db.scalars(select(SyncSourceConfig).order_by(SyncSourceConfig.sort_order, SyncSourceConfig.id)).all()
     result = []
     for row in rows:
-        seed = BMS_DATA_SOURCES.get(row.data_type, {})
+        seed = BMS_DATA_SOURCES.get(row.data_type) or SCRM_DATA_SOURCES.get(row.data_type, {})
         result.append(
             {
                 "data_type": row.data_type,

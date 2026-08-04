@@ -6,7 +6,8 @@
 """
 
 from sqlalchemy import Boolean, DateTime, Float, Integer, Numeric, delete, inspect, select
-from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.card_complaint import CardComplaint
@@ -17,6 +18,9 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
 from app.models.refund_wide import RefundWide
+from app.models.scrm_operator import ScrmOperator
+from app.models.scrm_session import ScrmSession
+from app.models.scrm_session_transfer import ScrmSessionTransfer
 from app.models.shanmao_refund import ShanmaoRefund
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
@@ -142,6 +146,40 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "pk_strategy": "primary_key",
         "sync_source": "bms",
         "category": "基础数据",
+    },
+    # ===== SCRM 微信聚合平台(客服接待评估报表) =====
+    {
+        "code": "scrm_operator",
+        "model": ScrmOperator,
+        "name_cn": "SCRM-客服账号列表",
+        "time_field": "last_active_at",
+        "pk_field": "operator_id",
+        "pk_strategy": "upsert",
+        "sync_source": "scrm",
+        "category": "工单与客服",
+        "description": "SCRM平台侧所有客服账号(含部门/状态/最后活跃时间),用于人员别名归一",
+    },
+    {
+        "code": "scrm_session",
+        "model": ScrmSession,
+        "name_cn": "SCRM-客服接待会话",
+        "time_field": "start_time",
+        "pk_field": "session_id",
+        "pk_strategy": "upsert",
+        "sync_source": "scrm",
+        "category": "工单与客服",
+        "description": "私聊/群聊/虚拟会话三合一(含首响/均响/消息数/转接次数,核心绩效数据源)",
+    },
+    {
+        "code": "scrm_session_transfer",
+        "model": ScrmSessionTransfer,
+        "name_cn": "SCRM-会话转接明细",
+        "time_field": "transfer_time",
+        "pk_field": None,
+        "pk_strategy": "none",
+        "sync_source": "scrm",
+        "category": "工单与客服",
+        "description": "会话转接事件流(转出→转入+时间+原因),用于转接率、工作量拆分归属",
     },
 ]
 
@@ -337,6 +375,43 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("card_complaint", "solution"): {"role": "category"},
     ("card_complaint", "problem"): {"role": "dimension", "is_filterable": False},
     ("card_complaint", "handle_result"): {"role": "dimension", "is_filterable": False},
+    # ===== SCRM: scrm_operator (客服账号快照) =====
+    ("scrm_operator", "operator_id"):   {"role": "dimension", "is_pk": True, "is_filterable": True, "name_cn": "客服ID(SCRM)"},
+    ("scrm_operator", "operator_name"): {"role": "person", "name_cn": "客服显示名"},
+    ("scrm_operator", "person_id"):     {"role": "dimension", "is_filterable": True, "name_cn": "关联PersonID(归一后)"},
+    ("scrm_operator", "department"):    {"role": "category", "name_cn": "SCRM部门"},
+    ("scrm_operator", "position"):      {"role": "category", "name_cn": "岗位"},
+    ("scrm_operator", "status"):        {"role": "category", "name_cn": "在线状态"},
+    ("scrm_operator", "last_active_at"): {"role": "time", "name_cn": "最后活跃时间"},
+    ("scrm_operator", "receive_count_today"): {"role": "measure", "agg": "sum", "name_cn": "当日接待量(快照值)"},
+    # ===== SCRM: scrm_session (会话主表,绩效核心数据源) =====
+    ("scrm_session", "session_id"):   {"role": "dimension", "is_pk": True, "is_filterable": True, "name_cn": "会话ID"},
+    ("scrm_session", "session_type"): {"role": "category", "enum": ["private", "group", "virtual"], "name_cn": "会话类型"},
+    ("scrm_session", "operator_id"):  {"role": "dimension", "is_filterable": True, "name_cn": "客服ID(SCRM)"},
+    ("scrm_session", "operator_name"): {"role": "person", "name_cn": "客服名(可归一)"},
+    ("scrm_session", "person_id"):    {"role": "dimension", "is_filterable": True, "name_cn": "PersonID(归一后,建议用此字段分组)"},
+    ("scrm_session", "customer_id"):  {"role": "dimension", "is_filterable": True, "name_cn": "客户ID"},
+    ("scrm_session", "customer_name"): {"role": "dimension", "is_filterable": False, "name_cn": "客户昵称"},
+    ("scrm_session", "group_id"):     {"role": "dimension", "is_filterable": True, "name_cn": "群聊ID"},
+    ("scrm_session", "start_time"):   {"role": "time", "name_cn": "会话开始时间(主时间)"},
+    ("scrm_session", "end_time"):     {"role": "time", "name_cn": "会话结束时间"},
+    ("scrm_session", "duration_sec"): {"role": "measure", "agg": "avg", "name_cn": "会话时长(秒)"},
+    ("scrm_session", "msg_count_customer"): {"role": "measure", "agg": "sum", "name_cn": "客户消息数"},
+    ("scrm_session", "msg_count_staff"):    {"role": "measure", "agg": "sum", "name_cn": "客服消息数"},
+    ("scrm_session", "first_response_sec"): {"role": "measure", "agg": "avg", "name_cn": "首次响应时长(秒),核心质量指标"},
+    ("scrm_session", "avg_response_sec"):   {"role": "measure", "agg": "avg", "name_cn": "平均响应时长(秒),核心质量指标"},
+    ("scrm_session", "transfer_count"):     {"role": "measure", "agg": "sum", "name_cn": "转接次数(>0=发生转接)"},
+    ("scrm_session", "question_type_id"):   {"role": "category", "name_cn": "问题类型ID"},
+    ("scrm_session", "question_type_name"): {"role": "category", "name_cn": "问题类型(映射难度系数:咨询1.0/套餐1.8/退款2.2/投诉3.0)"},
+    ("scrm_session", "sync_status"):   {"role": "category", "enum": ["open", "closed", "reconciled"], "name_cn": "同步状态"},
+    # ===== SCRM: scrm_session_transfer (转接事件流) =====
+    ("scrm_session_transfer", "session_id"): {"role": "dimension", "is_filterable": True, "name_cn": "会话ID"},
+    ("scrm_session_transfer", "from_operator_id"):   {"role": "dimension", "is_filterable": True, "name_cn": "转出客服ID"},
+    ("scrm_session_transfer", "from_operator_name"): {"role": "person", "name_cn": "转出客服名"},
+    ("scrm_session_transfer", "to_operator_id"):     {"role": "dimension", "is_filterable": True, "name_cn": "转入客服ID"},
+    ("scrm_session_transfer", "to_operator_name"):   {"role": "person", "name_cn": "转入客服名"},
+    ("scrm_session_transfer", "transfer_time"): {"role": "time", "name_cn": "转接时间"},
+    ("scrm_session_transfer", "transfer_reason"): {"role": "category", "name_cn": "转接原因"},
 }
 
 # 反射时排除的系统字段（TimestampMixin 的系统时间 + raw_extra 冗余）

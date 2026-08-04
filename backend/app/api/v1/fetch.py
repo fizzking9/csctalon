@@ -1,14 +1,20 @@
-"""BMS 数据同步 API
+"""BMS + SCRM 数据同步 API
 
 2026-08-02 优化: 引入 SyncTaskManager 管理长任务
   - POST /task/submit   异步提交同步任务(立即返回 task_id)
   - GET  /task/status   查询任务进度(轮询用)
   - GET  /task/preflight 预检:是否可执行/增量时间范围/冷却剩余
   - POST /sync-all      (旧接口,兼容旧前端)内部改为走新 submit 模式
+
+2026-Q2 新增 SCRM(微信聚合平台)对接:
+  - GET  /scrm/status    查询 SCRM 4 个数据源最近同步状态
+  - POST /scrm/sync      手动触发 SCRM 同步(可指定 sync_types + 时间范围)
+  - GET  /scrm/logs      查询 SCRM 同步日志
 """
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -16,11 +22,20 @@ from sqlalchemy import desc, select
 
 from app.api.deps import CurrentUser, DBSession
 from app.models.bms_sync_log import BmsSyncLog
+from app.models.scrm_sync_log import ScrmSyncLog
 from app.schemas.common import R
-from app.services.bms_fetcher import BmsFetcher, _storage_state_path, BMS_DATA_SOURCES
+from app.services.bms_fetcher import BMS_DATA_SOURCES, BmsFetcher, _storage_state_path
 from app.services.bms_scheduler import bms_scheduler
 from app.services.bms_sync import get_sync_status, sync_all
-from app.services.captcha_session import captcha_session_manager, bytes_to_data_uri
+from app.services.captcha_session import bytes_to_data_uri, captcha_session_manager
+from app.services.scrm_sync_service import (
+    DATA_TYPE_OPERATOR,
+    DATA_TYPE_SESSION_GROUP,
+    DATA_TYPE_SESSION_PRIVATE,
+    DATA_TYPE_SESSION_VIRTUAL,
+    get_scrm_sync_status,
+    sync_scrm_all,
+)
 from app.services.sync_source_config_service import get_all_configs
 from app.services.sync_task_manager import sync_task_manager
 
@@ -159,7 +174,7 @@ class ScheduleStatus(BaseModel):
     schedule_hours: list[int]
     next_run: str | None = None
     current_progress: dict | None = None
-    has_credentials: bool
+    has_credentials: Any  # bool 或 {"bms":bool, "scrm":bool}(新版)
 
 
 # ---------- API 端点 ----------
@@ -451,19 +466,25 @@ def get_schedule_status(_: CurrentUser):
 
 @router.post("/schedule/start", response_model=R[ScheduleStatus], summary="启动定时同步")
 async def start_schedule(current_user: CurrentUser):
-    """启动 BMS 定时同步(8/12/16/20/24 点各执行一次)
+    """启动 BMS + SCRM 定时同步(8/12/16/20/24 点各执行一次)
 
-    前提: 默认同步的源(refund/ticket/wallet)需在 系统管理-同步设置 中配置账号密码
+    前提: BMS 的退款/工单/钱包 或 SCRM 的 clientId/secret 至少一项已在同步设置中配置
     """
     if bms_scheduler.is_running:
         return R(data=ScheduleStatus(**bms_scheduler.get_status()))
 
-    # 检查凭证(从 sync_source_configs 判断默认源是否都配了凭证)
+    # 检查凭证(新版 has_credentials 是 dict {bms, scrm},至少一个为 True 即可启动)
     status = bms_scheduler.get_status()
-    if not status["has_credentials"]:
+    hc = status.get("has_credentials")
+    ok_to_start = False
+    if isinstance(hc, dict):
+        ok_to_start = bool(hc.get("bms") or hc.get("scrm"))
+    else:
+        ok_to_start = bool(hc)
+    if not ok_to_start:
         raise HTTPException(
             status_code=400,
-            detail="默认同步的源未全部配置凭证,请在 系统管理-同步设置 中配置账号密码",
+            detail="BMS 和 SCRM 均未配置凭证,请在 系统管理-同步设置 中至少配置一种数据源",
         )
 
     # 必须在事件循环中调用,因为 bms_scheduler.start() 内部使用 asyncio.create_task
@@ -473,9 +494,180 @@ async def start_schedule(current_user: CurrentUser):
 
 @router.post("/schedule/stop", response_model=R[ScheduleStatus], summary="停止定时同步")
 def stop_schedule(_: CurrentUser):
-    """停止 BMS 定时同步"""
+    """停止 BMS + SCRM 定时同步"""
     bms_scheduler.stop()
     return R(data=ScheduleStatus(**bms_scheduler.get_status()))
+
+
+# ================================================================
+# SCRM (微信聚合平台) 专用同步接口(独立于 BMS Playwright 同步)
+# ================================================================
+
+SCRM_VALID_TYPES = {
+    DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_PRIVATE, DATA_TYPE_SESSION_GROUP, DATA_TYPE_SESSION_VIRTUAL,
+}
+SCRM_TYPE_NAME = {
+    DATA_TYPE_OPERATOR: "客服操作员(全量快照)",
+    DATA_TYPE_SESSION_PRIVATE: "私聊会话(增量)",
+    DATA_TYPE_SESSION_GROUP: "群聊会话(增量)",
+    DATA_TYPE_SESSION_VIRTUAL: "虚拟会话(增量)",
+}
+
+
+class ScrmSyncRequest(BaseModel):
+    sync_types: list[str] | None = Field(None, description=f"要同步的 SCRM 源,默认全量。可选: {sorted(SCRM_VALID_TYPES)}")
+    time_range: str = Field("incremental", description="时间范围: incremental(增量接续上次)/today/yesterday/week/custom")
+    custom_start: datetime | None = Field(None, description="time_range=custom 时生效")
+    custom_end: datetime | None = Field(None, description="time_range=custom 时生效")
+    force: bool = Field(False, description="强制执行(绕过冷却和忙锁,谨慎使用)")
+    ignore_cooldown: bool = Field(False, description="忽略冷却(仍防并发)")
+
+
+class ScrmLogOut(BaseModel):
+    id: int
+    data_type: str
+    sync_scope: str | None = None
+    start_time: str
+    end_time: str
+    status: str
+    trigger_type: str
+    triggered_by: str | None = None
+    api_call_count: int = 0
+    api_total_reported: int | None = None
+    fetched_rows: int = 0
+    inserted_rows: int = 0
+    updated_rows: int = 0
+    failed_rows: int = 0
+    reconcile_delta: int | None = None
+    error: str | None = None
+    created_at: str
+    finished_at: str | None = None
+
+
+@router.get("/scrm/status", response_model=R[list[dict]], summary="[SCRM]查询4个数据源的最近同步状态")
+def scrm_status(db: DBSession, _: CurrentUser):
+    """返回 4 条 SCRM data_type 最近同步的摘要(类似 BMS get_sync_status)"""
+    rows = get_scrm_sync_status(db)
+    for r in rows:
+        r.setdefault("name", SCRM_TYPE_NAME.get(r["data_type"], r["data_type"]))
+    return R(data=rows)
+
+
+@router.post("/scrm/sync", response_model=R[SubmitResponse], summary="[SCRM]手动提交同步任务")
+async def scrm_sync_submit(payload: ScrmSyncRequest, current_user: CurrentUser):
+    """提交 SCRM 同步到 SyncTaskManager(与 BMS 共享全局互斥锁 + 冷却)。
+
+    立即返回 task_id,前端使用 GET /task/status?task_id=... 轮询进度。
+    """
+    # 1. 校验 sync_types
+    sync_types = list(payload.sync_types) if payload.sync_types else list(SCRM_VALID_TYPES)
+    for t in sync_types:
+        if t not in SCRM_VALID_TYPES:
+            raise HTTPException(status_code=400, detail=f"不支持的 SCRM 类型: {t},可选: {sorted(SCRM_VALID_TYPES)}")
+
+    # 2. 计算 time_ranges(按 data_type 独立窗口): incremental → scrm_sync_service 内部自己按 last_success 算
+    time_ranges_dt: dict[str, tuple[datetime, datetime]] = {}
+    time_ranges_display: dict[str, tuple[str, str]] = {}
+
+    if payload.time_range == "incremental":
+        # 留空: sync_scrm_all 内部根据 _last_success_end_time 自动增量
+        for dt in sync_types:
+            time_ranges_display[dt] = ("按 last_success 增量", datetime.now(TZ_CN).strftime("%m-%d %H:%M:%S"))
+    else:
+        if payload.time_range == "custom":
+            if not payload.custom_start or not payload.custom_end:
+                raise HTTPException(status_code=400, detail="自定义时间范围需提供 custom_start/custom_end")
+            start, end = payload.custom_start, payload.custom_end
+            label_s = start.strftime("%m-%d %H:%M:%S(自定义)")
+            label_e = end.strftime("%m-%d %H:%M:%S")
+        elif payload.time_range == "today":
+            now_cn = datetime.now(TZ_CN)
+            start = now_cn.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = now_cn
+            label_s = start.strftime("%m-%d 00:00(今日)")
+            label_e = end.strftime("%m-%d %H:%M:%S")
+        elif payload.time_range == "yesterday":
+            y = datetime.now(TZ_CN) - timedelta(days=1)
+            start = y.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = y.replace(hour=23, minute=59, second=59, microsecond=0)
+            label_s = start.strftime("%m-%d 00:00(昨日)")
+            label_e = end.strftime("%m-%d 23:59:59")
+        elif payload.time_range == "week":
+            now_cn = datetime.now(TZ_CN)
+            start = (now_cn - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+            end = now_cn
+            label_s = start.strftime("%m-%d 00:00(近一周)")
+            label_e = end.strftime("%m-%d %H:%M:%S")
+        else:
+            raise HTTPException(status_code=400, detail=f"不支持的 time_range: {payload.time_range}")
+        for dt in sync_types:
+            time_ranges_dt[dt] = (start, end)
+            time_ranges_display[dt] = (label_s, label_e)
+
+    # 3. runner 包装(调用 sync_scrm_all)
+    async def runner(task_id: str, on_progress_cb) -> list[dict]:
+        return await sync_scrm_all(
+            trigger_type="manual",
+            triggered_by=current_user.username,
+            time_ranges=time_ranges_dt or None,
+            sync_types=sync_types,
+            on_progress=on_progress_cb,
+        )
+
+    # 4. 提交到 task_manager(与 BMS 共享全局互斥 + 冷却)
+    try:
+        task_id, msg = await sync_task_manager.submit(
+            trigger_type="manual",
+            triggered_by=current_user.username,
+            data_types=sync_types,
+            time_ranges=time_ranges_dt,
+            time_ranges_display=time_ranges_display,
+            runner_coro=runner,
+            force=payload.force,
+            ignore_cooldown=payload.ignore_cooldown or payload.time_range in ("custom", "yesterday", "week"),
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return R(data=SubmitResponse(task_id=task_id, message=msg))
+
+
+@router.get("/scrm/logs", response_model=R[list[ScrmLogOut]], summary="[SCRM]查询同步日志")
+def scrm_sync_logs(
+    db: DBSession,
+    _: CurrentUser,
+    data_type: str | None = None,
+    limit: int = 50,
+):
+    stmt = select(ScrmSyncLog)
+    if data_type:
+        if data_type not in SCRM_VALID_TYPES:
+            raise HTTPException(status_code=400, detail=f"不支持的 data_type: {data_type}")
+        stmt = stmt.where(ScrmSyncLog.data_type == data_type)
+    stmt = stmt.order_by(desc(ScrmSyncLog.created_at)).limit(limit)
+    logs = list(db.scalars(stmt))
+    return R(data=[
+        ScrmLogOut(
+            id=log.id,
+            data_type=log.data_type,
+            sync_scope=log.sync_scope,
+            start_time=log.start_time.isoformat() if log.start_time else "",
+            end_time=log.end_time.isoformat() if log.end_time else "",
+            status=log.status,
+            trigger_type=log.trigger_type,
+            triggered_by=log.triggered_by,
+            api_call_count=log.api_call_count,
+            api_total_reported=log.api_total_reported,
+            fetched_rows=log.fetched_rows,
+            inserted_rows=log.inserted_rows,
+            updated_rows=log.updated_rows,
+            failed_rows=log.failed_rows,
+            reconcile_delta=log.reconcile_delta,
+            error=log.error,
+            created_at=log.created_at.isoformat() if log.created_at else "",
+            finished_at=log.finished_at.isoformat() if log.finished_at else None,
+        )
+        for log in logs
+    ])
 
 
 @router.get("/test", response_model=R[bool], summary="测试浏览器可用性")

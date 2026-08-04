@@ -19,6 +19,9 @@ from app.models.cs_record import CsRecord
 from app.models.external_complaint import ExternalComplaint
 from app.models.person import PersonAlias
 from app.models.refund import Refund
+from app.models.scrm_operator import ScrmOperator
+from app.models.scrm_session import ScrmSession
+from app.models.scrm_session_transfer import ScrmSessionTransfer
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 
@@ -46,7 +49,11 @@ _MULTI_WS_RE = re.compile(r"\s{2,}")
 # 人名前缀（系统标识/部门标识），归一化时剥离使跨表同名归并
 # 注意: 店铺客服也是内部客服(另一部门),剥前缀后可与同名跨表归并,
 # 但 alias 原值保留前缀供人工归并时辨别部门来源。
-_NAME_PREFIXES = ("企微", "客服", "云客猫", "随身wifi", "店铺", "工厂", "研发")
+# 新增:SCRM 聚合平台常见前缀(scrm/微客服/百银/聚合客服等,先填通用,可后续按样本追加)
+_NAME_PREFIXES = (
+    "企微", "客服", "云客猫", "随身wifi", "店铺", "工厂", "研发",
+    "scrm", "SCRM", "微客服", "百银", "聚合", "聚合客服", "baiyin", "baiyinqifu",
+)
 # 前缀后随的分隔符
 _PREFIX_SEPARATORS = "-·—－－_ \t"
 # 角色头衔后缀(管理员/小二/负责人 等=角色非人名),命中即丢弃
@@ -67,6 +74,11 @@ PERSON_FIELD_SOURCES = [
     (ExternalComplaint, ExternalComplaint.follower, "external_complaints", "follower"),
     (ExternalComplaint, ExternalComplaint.reception_cs, "external_complaints", "reception_cs"),
     (CardComplaint, CardComplaint.handler, "card_complaints", "handler"),
+    # ---- SCRM 聚合平台新增数据源(operator_name 用于别名归一 → Person) ----
+    (ScrmOperator, ScrmOperator.operator_name, "scrm_operators", "operator_name"),
+    (ScrmSession, ScrmSession.operator_name, "scrm_sessions", "operator_name"),
+    (ScrmSessionTransfer, ScrmSessionTransfer.from_operator_name, "scrm_session_transfers", "from_operator_name"),
+    (ScrmSessionTransfer, ScrmSessionTransfer.to_operator_name, "scrm_session_transfers", "to_operator_name"),
 ]
 
 # 自由文本字段: 源数据混了名字+投诉叙述,需先取首段人名

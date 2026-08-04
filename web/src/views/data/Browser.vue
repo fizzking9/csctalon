@@ -198,7 +198,7 @@ const uploadRecords = ref([])
 const exporting = ref(false)
 
 // 数据源业务分组顺序(与后端 DATA_SOURCE_SEEDS 的 category 对应)
-const CATEGORY_ORDER = ['现金流', '工单与客服', '投诉登记', '基础数据']
+const CATEGORY_ORDER = ['现金流', '工单与客服', '投诉登记', '微信聚合客服', '基础数据']
 
 // 按 category 分组,无 category 的归入"其他"
 const groupedSources = computed(() => {

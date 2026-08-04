@@ -131,10 +131,10 @@
           </div>
         </el-col>
         <el-col :xs="12" :sm="6" :md="3">
-          <div class="kpi-mini-card" :style="{background: Number(recoveryData.kpi.success_rate||0)>=38?'#f0fdf4':(Number(recoveryData.kpi.success_rate||0)>=30?'#fefce8':'#fef2f2'}">
-            <div class="kpi-mini-label" :style="{color: Number(recoveryData.kpi.success_rate||0)>=38?'#16a34a':(Number(recoveryData.kpi.success_rate||0)>=30?'#ca8a04':'#dc2626'}">成功率</div>
+          <div class="kpi-mini-card" :style="rateBg(recoveryData.kpi.success_rate)">
+            <div class="kpi-mini-label" :style="rateColor(recoveryData.kpi.success_rate)">成功率</div>
             <div class="kpi-mini-sub">成功 / 总接待SN</div>
-            <div class="kpi-mini-value" :style="{color: Number(recoveryData.kpi.success_rate||0)>=38?'#16a34a':(Number(recoveryData.kpi.success_rate||0)>=30?'#ca8a04':'#dc2626'}">
+            <div class="kpi-mini-value" :style="rateColor(recoveryData.kpi.success_rate)">
               {{ Number(recoveryData.kpi.success_rate||0).toFixed(1) }}<span class="kpi-mini-unit">%</span>
             </div>
           </div>
@@ -200,10 +200,10 @@
           </div>
         </el-col>
         <el-col :xs="24" :sm="8" :md="4">
-          <div class="kpi-mini-card" :style="{background: Number(recoveryData.kpi.fee_ratio||0)>=37?'#f0fdf4':'#fef2f2'}">
-            <div class="kpi-mini-label" :style="{color: Number(recoveryData.kpi.fee_ratio||0)>=37?'#16a34a':'#dc2626'}">拦截费占比</div>
+          <div class="kpi-mini-card" :style="feeRatioBg(recoveryData.kpi.fee_ratio)">
+            <div class="kpi-mini-label" :style="feeRatioColor(recoveryData.kpi.fee_ratio)">拦截费占比</div>
             <div class="kpi-mini-sub">成功单数/(成功+实际退款单数) · 单量口径 · 目标37%+</div>
-            <div class="kpi-mini-value" :style="{color: Number(recoveryData.kpi.fee_ratio||0)>=37?'#16a34a':'#dc2626'}">
+            <div class="kpi-mini-value" :style="feeRatioColor(recoveryData.kpi.fee_ratio)">
               {{ Number(recoveryData.kpi.fee_ratio||0).toFixed(1) }}<span class="kpi-mini-unit">%</span>
             </div>
           </div>
@@ -417,6 +417,24 @@ import BaseChart from '@/components/BaseChart.vue'
 import { getDashboard, listDashboards, executeDashboard } from '@/api/dashboard'
 import { today } from '@/api/analytics'
 import { formatMoney } from '@/utils/format'
+
+// ---- 三元样式兜底 helpers (代替模板内嵌套三元,解决 Vue 编译 134:46 parse 报错) ----
+function rateBg(val) {
+  const n = Number(val || 0)
+  return { background: n >= 38 ? '#f0fdf4' : n >= 30 ? '#fefce8' : '#fef2f2' }
+}
+function rateColor(val) {
+  const n = Number(val || 0)
+  return { color: n >= 38 ? '#16a34a' : n >= 30 ? '#ca8a04' : '#dc2626' }
+}
+function feeRatioBg(val) {
+  const n = Number(val || 0)
+  return { background: n >= 37 ? '#f0fdf4' : '#fef2f2' }
+}
+function feeRatioColor(val) {
+  const n = Number(val || 0)
+  return { color: n >= 37 ? '#16a34a' : '#dc2626' }
+}
 
 const route = useRoute()
 

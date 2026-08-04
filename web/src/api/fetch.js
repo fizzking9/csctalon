@@ -79,3 +79,20 @@ export function captchaLoginSubmit(sessionId, captcha) {
 export function captchaLoginLogout(dataType) {
   return request.post('/fetch/captcha-login/logout', { data_type: dataType })
 }
+
+// ========== SCRM 微信聚合平台 ==========
+
+// SCRM: 查询 4 个数据源的最近同步状态
+export function getScrmSyncStatus() {
+  return request.get('/fetch/scrm/status')
+}
+
+// SCRM: 手动提交同步任务(走全局 SyncTaskManager,与 BMS 共享锁/冷却)
+export function submitScrmSync(payload) {
+  return request.post('/fetch/scrm/sync', payload, { timeout: 15000 })
+}
+
+// SCRM: 查询同步日志
+export function listScrmSyncLogs(params = {}) {
+  return request.get('/fetch/scrm/logs', { params })
+}

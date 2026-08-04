@@ -12,11 +12,18 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import desc, select, distinct
+from sqlalchemy import desc, distinct, select
 
 from app.core.database import SessionLocal
 from app.models.bms_sync_log import BmsSyncLog
 from app.services.bms_sync import DEFAULT_SYNC_TYPES, sync_all
+from app.services.scrm_sync_service import (
+    DATA_TYPE_OPERATOR,
+    DATA_TYPE_SESSION_GROUP,
+    DATA_TYPE_SESSION_PRIVATE,
+    DATA_TYPE_SESSION_VIRTUAL,
+    sync_scrm_all,
+)
 from app.services.sync_task_manager import sync_task_manager
 
 logger = logging.getLogger(__name__)
@@ -70,6 +77,18 @@ class BmsScheduler:
         finally:
             db.close()
 
+    @staticmethod
+    def _scrm_sources_have_credentials() -> bool:
+        """SCRM 配置是否已填写(任一 scrm 源配置即视为可用)"""
+        from app.core.database import SessionLocal
+        from app.services.sync_source_config_service import get_sync_source_config
+        db = SessionLocal()
+        try:
+            cfg = get_sync_source_config(db, DATA_TYPE_OPERATOR)
+            return bool(cfg and cfg.get("enabled", True) and cfg.get("username") and cfg.get("password"))
+        finally:
+            db.close()
+
     def get_status(self) -> dict:
         """获取调度器状态(含 SyncTaskManager 的当前任务进度)"""
         now = datetime.now(timezone(timedelta(hours=8)))
@@ -101,7 +120,10 @@ class BmsScheduler:
             "schedule_hours": SCHEDULE_HOURS,
             "next_run": next_run.isoformat(),
             "current_progress": current_progress,
-            "has_credentials": self._default_sources_have_credentials(),
+            "has_credentials": {
+                "bms": self._default_sources_have_credentials(),
+                "scrm": self._scrm_sources_have_credentials(),
+            },
             "busy": sync_task_manager.is_busy(),
             "cooldown_remaining": sync_task_manager.remaining_cooldown_seconds(),
         }
@@ -226,16 +248,17 @@ class BmsScheduler:
     async def _do_scheduled_sync(self, why: str | None = None):
         """执行定时同步 - 通过 SyncTaskManager 提交(全局互斥)
 
-        时间范围: 每天 00:00 ~ now(全量重算当日,upsert 幂等不会重复,
-        反而能补回上次失败漏掉的;但 task_manager 的增量时间记录仍会写入,
-        手动同步走增量时可以接续)。
+        同一时间窗口内同时跑:
+          - BMS sync_all (DEFAULT_SYNC_TYPES, 00:00 ~ now 全量幂等)
+          - SCRM sync_scrm_all (4 个 scrm 数据源, 按各自上次成功时间增量)
 
-        Args:
-            why: 可选,打印到日志里说明触发原因(例如「启动补跑错过窗口[0,8]」)
+        任一未配置则跳过,不影响另一个。
         """
         reason = f" [{why}]" if why else ""
-        if not self._default_sources_have_credentials():
-            logger.warning(f"定时同步跳过{reason}: 默认同步的源未全部配置凭证")
+        has_bms = self._default_sources_have_credentials()
+        has_scrm = self._scrm_sources_have_credentials()
+        if not has_bms and not has_scrm:
+            logger.warning(f"定时同步跳过{reason}: BMS 和 SCRM 均未配置凭证")
             return
 
         # 如果有手动任务正在跑,跳过本次定时
@@ -248,39 +271,70 @@ class BmsScheduler:
         TZ_CN = timezone(timedelta(hours=8))
         now_cn = datetime.now(TZ_CN)
         today_start = now_cn.replace(hour=0, minute=0, second=0, microsecond=0)
-        sync_types = list(DEFAULT_SYNC_TYPES)
-        time_ranges_dt = {dt: (today_start, now_cn) for dt in sync_types}
-        time_ranges_display = {
-            dt: (
+
+        # 构造 BMS 时间范围 & data_types
+        sync_types_bms = list(DEFAULT_SYNC_TYPES) if has_bms else []
+        time_ranges_bms_dt = {dt: (today_start, now_cn) for dt in sync_types_bms} if has_bms else {}
+
+        # SCRM 的 4 个 data_type,时间范围在 sync_scrm_all 内部按 last_success_end_time 计算,这里仅用于 task_manager display
+        sync_types_scrm = [
+            DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_PRIVATE, DATA_TYPE_SESSION_GROUP, DATA_TYPE_SESSION_VIRTUAL,
+        ] if has_scrm else []
+
+        all_types = sync_types_bms + sync_types_scrm
+        time_ranges_display = {}
+        for dt in sync_types_bms:
+            time_ranges_display[dt] = (
                 today_start.strftime("%m-%d 00:00(今日定时-全量)"),
                 now_cn.strftime("%m-%d %H:%M:%S"),
             )
-            for dt in sync_types
-        }
+        for dt in sync_types_scrm:
+            time_ranges_display[dt] = (
+                "按 last_success 增量",
+                now_cn.strftime("%m-%d %H:%M:%S"),
+            )
+
         logger.info(
-            f"[定时同步{reason}] 时间范围: "
-            f"{today_start.strftime('%Y-%m-%d %H:%M:%S')} ~ {now_cn.strftime('%Y-%m-%d %H:%M:%S')} "
-            f"数据源={sync_types}"
+            f"[定时同步{reason}] 数据源={all_types} (BMS={'ON' if has_bms else 'SKIP'}, SCRM={'ON' if has_scrm else 'SKIP'})"
         )
 
         async def runner(task_id: str, on_progress_cb):
-            return await sync_all(
-                trigger_type="scheduled",
-                triggered_by="scheduler",
-                on_progress=on_progress_cb,
-                data_types=sync_types,
-                time_ranges=time_ranges_dt,
-            )
+            combined = []
+            if has_bms:
+                try:
+                    bms_res = await sync_all(
+                        trigger_type="scheduled",
+                        triggered_by="scheduler",
+                        on_progress=on_progress_cb,
+                        data_types=sync_types_bms,
+                        time_ranges=time_ranges_bms_dt,
+                    )
+                    combined.extend(bms_res if isinstance(bms_res, list) else [])
+                except Exception as e:  # noqa: BLE001
+                    logger.exception(f"[定时同步{reason}] BMS 子任务异常: {e}")
+                    combined.extend([{"data_type": dt, "success": False, "error": str(e)} for dt in sync_types_bms])
+            if has_scrm:
+                try:
+                    scrm_res = await sync_scrm_all(
+                        trigger_type="scheduled",
+                        triggered_by="scheduler",
+                        on_progress=on_progress_cb,
+                        sync_types=sync_types_scrm,
+                    )
+                    combined.extend(scrm_res if isinstance(scrm_res, list) else [])
+                except Exception as e:  # noqa: BLE001
+                    logger.exception(f"[定时同步{reason}] SCRM 子任务异常: {e}")
+                    combined.extend([{"data_type": dt, "success": False, "error": str(e)} for dt in sync_types_scrm])
+            return combined
 
         try:
             task_id, msg = await sync_task_manager.submit(
                 trigger_type="scheduled",
                 triggered_by="scheduler",
-                data_types=sync_types,
-                time_ranges=time_ranges_dt,
+                data_types=all_types,
+                time_ranges={**time_ranges_bms_dt},
                 time_ranges_display=time_ranges_display,
                 runner_coro=runner,
-                # 定时: 仍受忙锁保护,但忽略冷却(定时即使刚手动完成也允许跑,因为是 0~now 补全更可信)
                 ignore_cooldown=True,
             )
             logger.info(f"[定时同步{reason}] 已提交: task_id={task_id}, {msg}")

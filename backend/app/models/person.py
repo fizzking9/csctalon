@@ -21,6 +21,8 @@ class Person(IDMixin, TimestampMixin, Base):
     display_name: Mapped[str] = mapped_column(String(64), nullable=False, comment="显示姓名（归并后的最终名）")
     qw_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True, comment="企微 userid（待对接企微后填）")
     qw_name: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="企微姓名")
+    scrm_operator_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True, comment="SCRM平台客服ID(对接后回填,聚合平台内部ID≠企微ID)")
+    scrm_operator_name: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="SCRM平台客服显示名原文")
     role: Mapped[str] = mapped_column(String(32), default="agent", nullable=False, comment="admin/supervisor/agent")
     department: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="部门:企微客服部/店铺客服部(开放文本)")
     # 以下三项为"当前镜像",由 StaffAssignment service 层在新增/删除任职时同步刷新,

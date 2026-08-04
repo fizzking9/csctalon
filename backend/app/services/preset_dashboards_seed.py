@@ -66,31 +66,41 @@ PRESET_DASHBOARDS: list[dict] = [
         "time_range_default": {"days": 30},
         "visibility": "manager",
     },
-    # ---------- 接待看板(4 视图:客服接待) ----------
+    # ---------- 接待看板(原 4 + 新增 4 个 SCRM 视图) ----------
     {
         "code": "preset_dashboard_reception",
         "name": "接待看板",
-        "description": "客服接待量趋势/排行 + 工作负荷时段分布 + 退款挽回率",
+        "description": "客服接待量趋势/排行 + 工作负荷时段分布 + 退款挽回率 (左区cs_record、右区SCRM微信聚合)",
         "category": "接待",
         "items": [
             {"view_code": "preset_cs_reception_trend", "span": 12},
-            {"view_code": "preset_cs_reception_by_operator", "span": 12},
+            {"view_code": "preset_scrm_session_trend", "span": 12},
+            {"view_code": "preset_cs_reception_by_operator", "span": 8},
+            {"view_code": "preset_scrm_session_by_person", "span": 8},
+            {"view_code": "preset_scrm_session_type_pie", "span": 8},
             {"view_code": "preset_cs_workload_hour", "span": 12},
-            {"view_code": "preset_cs_recover_rate", "span": 12},
+            {"view_code": "preset_scrm_workload_hourly", "span": 12},
+            {"view_code": "preset_cs_recover_rate", "span": 24},
         ],
         "time_range_default": {"days": 30},
         "visibility": "manager",
     },
-    # ---------- 绩效看板(3 视图:人员操作量统计,非绩效得分) ----------
+    # ---------- 绩效看板(原 3 + 新增 5 个 SCRM 客服质量视图) ----------
     {
         "code": "preset_dashboard_performance",
         "name": "绩效看板",
-        "description": "仅展示人员操作量统计(工单处理/审核/退费操作),非绩效得分;绩效算法在别处",
+        "description": "人员操作量统计(工单/审核/退费) + SCRM 服务质量(首响/均响/转接/难度/消息效率) — 作为绩效评估的重要维度",
         "category": "绩效",
         "items": [
             {"view_code": "preset_operator_ticket", "span": 8},
             {"view_code": "preset_operator_audit", "span": 8},
             {"view_code": "preset_operator_refund", "span": 8},
+            {"view_code": "preset_scrm_quality_ranking", "span": 24},
+            {"view_code": "preset_scrm_first_response_buckets", "span": 12},
+            {"view_code": "preset_scrm_question_type_dist", "span": 12},
+            {"view_code": "preset_scrm_transfer_rate", "span": 12},
+            {"view_code": "preset_scrm_msg_count_vs_duration", "span": 12},
+            {"view_code": "preset_scrm_transfer_flow", "span": 24},
         ],
         "time_range_default": {"days": 30},
         "visibility": "manager",

@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     BMS_PASSWORD: str = ""
     BMS_SCHEDULE_AUTOSTART: bool = True  # 启动时是否自动开启定时同步(默认开启,否则跨日/重启后整小时窗口都漏)
 
+    # SCRM 微信聚合平台(对接客服接待评估报表)
+    # 说明:默认种子值仅用于首次启动灌入 SyncSourceConfig(加密),实际以 DB 配置为准
+    SCRM_BASE_URL: str = "https://scrm.baiyinqifu.com"  # 平台 OpenAPI 基础地址
+    SCRM_CLIENT_ID: str = ""  # ClientId(对应 SyncSourceConfig.username=Fernet(clientId))
+    SCRM_CLIENT_SECRET: str = ""  # ClientSecret(对应 SyncSourceConfig.password=Fernet(secret))
+
     # 跨域(局域网部署,允许内网访问)
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 

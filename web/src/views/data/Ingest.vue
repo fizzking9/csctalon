@@ -7,6 +7,9 @@
       <el-tab-pane label="BMS同步" name="fetch">
         <FetchRefund />
       </el-tab-pane>
+      <el-tab-pane label="SCRM同步" name="scrm">
+        <FetchScrm />
+      </el-tab-pane>
       <el-tab-pane label="文件上传" name="upload">
         <Upload />
       </el-tab-pane>
@@ -29,6 +32,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import Upload from './Upload.vue'
 import FetchRefund from './FetchRefund.vue'
+import FetchScrm from './FetchScrm.vue'
 import Browser from './Browser.vue'
 import Records from './Records.vue'
 import SyncSettings from '@/views/system/SyncSettings.vue'
@@ -39,9 +43,9 @@ const router = useRouter()
 const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.isAdmin)
 
-// 4 个全员 tab + 2 个管理员 tab(末尾)
-const ALL_TABS = ['browser', 'fetch', 'upload', 'records', 'sync-settings', 'data-sources']
-const PUBLIC_TABS = ['browser', 'fetch', 'upload', 'records']
+// 4 个全员 tab + SCRM(新增) + 2 个管理员 tab(末尾)
+const ALL_TABS = ['browser', 'fetch', 'scrm', 'upload', 'records', 'sync-settings', 'data-sources']
+const PUBLIC_TABS = ['browser', 'fetch', 'scrm', 'upload', 'records']
 
 function resolveInitialTab() {
   const want = route.query.tab

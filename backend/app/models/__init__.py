@@ -7,7 +7,12 @@ from app.models.bms_sync_log import BmsSyncLog  # noqa: F401
 from app.models.card_complaint import CardComplaint  # noqa: F401
 from app.models.cs_record import CsRecord  # noqa: F401
 from app.models.dashboard import Dashboard  # noqa: F401
-from app.models.data_source import DataSource, DataSourceField, SemanticRole, SourceType  # noqa: F401
+from app.models.data_source import (  # noqa: F401
+    DataSource,
+    DataSourceField,
+    SemanticRole,
+    SourceType,
+)
 from app.models.device import Device, DeviceTag, device_tag_rel  # noqa: F401
 from app.models.device_combo import DeviceCombo  # noqa: F401
 from app.models.external_complaint import ExternalComplaint  # noqa: F401
@@ -20,9 +25,13 @@ from app.models.person import Person, PersonAlias  # noqa: F401
 from app.models.refund import Refund  # noqa: F401
 from app.models.refund_wide import RefundWide  # noqa: F401
 from app.models.report import Report, ReportStatus, ReportType  # noqa: F401
-from app.models.staff_assignment import StaffAssignment  # noqa: F401
 from app.models.report_comment import CommentTarget, ReportComment  # noqa: F401
 from app.models.report_template import ReportTemplate  # noqa: F401
+from app.models.scrm_operator import ScrmOperator  # noqa: F401
+from app.models.scrm_session import ScrmSession  # noqa: F401
+from app.models.scrm_session_transfer import ScrmSessionTransfer  # noqa: F401
+from app.models.scrm_sync_log import ScrmSyncLog  # noqa: F401
+from app.models.staff_assignment import StaffAssignment  # noqa: F401
 from app.models.strategy import StrategyDoc, StrategyReadReceipt  # noqa: F401
 from app.models.sync_source_config import SyncSourceConfig  # noqa: F401
 from app.models.task import SpecialTask, TaskDevice, TaskFollowup  # noqa: F401
@@ -60,6 +69,10 @@ __all__ = [
     "ReportComment",
     "CommentTarget",
     "ReportTemplate",
+    "ScrmOperator",
+    "ScrmSession",
+    "ScrmSessionTransfer",
+    "ScrmSyncLog",
     "ServiceTicket",
     "SyncSourceConfig",
     "WalletWithdrawal",
