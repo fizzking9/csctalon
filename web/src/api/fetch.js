@@ -13,10 +13,11 @@ export function syncAll(payload) {
 // ========== 2026-08-02 新版异步 Task 模式 ==========
 
 // 预检: 是否可执行、冷却剩余、增量时间范围、凭证状态
-export function taskPreflight(dataTypes = []) {
+// opts.silentError=true 可在轮询/后台刷新场景下抑制全局 ElMessage 错误弹层
+export function taskPreflight(dataTypes = [], opts = {}) {
   const params = {}
   if (dataTypes && dataTypes.length) params.data_types = dataTypes.join(',')
-  return request.get('/fetch/task/preflight', { params })
+  return request.get('/fetch/task/preflight', { params, ...opts })
 }
 
 // 提交异步同步任务(立即返回 task_id,请轮询 taskStatus)
@@ -24,23 +25,23 @@ export function taskSubmit(payload) {
   return request.post('/fetch/task/submit', payload, { timeout: 15000 })
 }
 
-// 查询任务进度
-export function taskStatus(taskId = null) {
+// 查询任务进度 — 默认 silentError(轮询 2s 一次,避免失败时循环弹错误)
+export function taskStatus(taskId = null, opts = {}) {
   const params = {}
   if (taskId) params.task_id = taskId
-  return request.get('/fetch/task/status', { params })
+  return request.get('/fetch/task/status', { params, silentError: true, ...opts })
 }
 
 // ====================================================
 
 // 获取同步日志
-export function listSyncLogs(params = {}) {
-  return request.get('/fetch/sync-logs', { params })
+export function listSyncLogs(params = {}, opts = {}) {
+  return request.get('/fetch/sync-logs', { params, silentError: true, ...opts })
 }
 
-// 获取定时同步状态
-export function getScheduleStatus() {
-  return request.get('/fetch/schedule/status')
+// 获取定时同步状态 — 默认 silentError(由轮询调用)
+export function getScheduleStatus(opts = {}) {
+  return request.get('/fetch/schedule/status', { silentError: true, ...opts })
 }
 
 // 启动定时同步
@@ -82,9 +83,9 @@ export function captchaLoginLogout(dataType) {
 
 // ========== SCRM 微信聚合平台 ==========
 
-// SCRM: 查询 4 个数据源的最近同步状态
-export function getScrmSyncStatus() {
-  return request.get('/fetch/scrm/status')
+// SCRM: 查询 4 个数据源的最近同步状态 — 默认 silentError(被轮询调用)
+export function getScrmSyncStatus(opts = {}) {
+  return request.get('/fetch/scrm/status', { silentError: true, ...opts })
 }
 
 // SCRM: 手动提交同步任务(走全局 SyncTaskManager,与 BMS 共享锁/冷却)
@@ -92,7 +93,7 @@ export function submitScrmSync(payload) {
   return request.post('/fetch/scrm/sync', payload, { timeout: 15000 })
 }
 
-// SCRM: 查询同步日志
-export function listScrmSyncLogs(params = {}) {
-  return request.get('/fetch/scrm/logs', { params })
+// SCRM: 查询同步日志 — 默认 silentError(被轮询调用)
+export function listScrmSyncLogs(params = {}, opts = {}) {
+  return request.get('/fetch/scrm/logs', { params, silentError: true, ...opts })
 }

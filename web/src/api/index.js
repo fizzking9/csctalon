@@ -22,12 +22,15 @@ request.interceptors.response.use(
   (response) => {
     const data = response.data
     if (data && data.code !== undefined && data.code !== 0) {
-      ElMessage.error(data.message || '请求失败')
+      if (!response.config?.silentError) {
+        ElMessage.error(data.message || '请求失败')
+      }
       return Promise.reject(new Error(data.message || '请求失败'))
     }
     return data
   },
   (error) => {
+    const silent = !!error.config?.silentError
     if (error.response) {
       const status = error.response.status
       // detail 可能是字符串、数组(FastAPI 422验证错误)或对象,统一转为字符串
@@ -43,10 +46,10 @@ request.interceptors.response.use(
         authStore.logout()
         router.push('/login')
         ElMessage.error('登录已过期,请重新登录')
-      } else {
+      } else if (!silent) {
         ElMessage.error(String(detail))
       }
-    } else {
+    } else if (!silent) {
       ElMessage.error('网络异常,请检查后端服务是否启动')
     }
     return Promise.reject(error)
