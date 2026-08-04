@@ -79,7 +79,7 @@ const routes = [
       {
         path: 'dashboards/refund',
         name: 'DashboardRefund',
-        component: () => import('@/views/dashboards/DashboardView.vue'),
+        component: () => import('@/views/dashboards/RefundDashboard.vue'),
         meta: { title: '退款看板', icon: 'Wallet', manager: true },
       },
       {

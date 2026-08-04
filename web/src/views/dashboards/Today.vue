@@ -343,39 +343,23 @@
       </el-card>
     </section>
 
-    <!-- 模块8: 退款挽回专项分析 (独立视图, 不冲抵接待效率) -->
+    <!-- 模块8: 退款挽回专项 (概要, 详情见退款看板) -->
     <section v-if="hasRecovery" class="section-card mb-24">
       <SectionHeader
         title="8. 退款挽回专项"
-        sub="分母=退款组人员本期接待的退款类SN去重 · 挽留失败=分母SN∩最终退款(退款单∪退款类工单) · 成功率=成功/分母 · 独立分析 不冲抵接待效率"
+        sub="概要指标 · 详情请进入「退款看板」查看完整分析"
       >
         <template #extra>
           <el-tag size="small" effect="dark" type="danger" style="margin-right:6px">{{ recoveryData.date }}~{{ recoveryData.date_end || recoveryData.date }}</el-tag>
-          <el-tooltip effect="light" placement="top" :show-arrow="false" popper-class="score-pop" teleported>
-            <template #content>
-              <div style="max-width:440px; line-height:1.9; font-size:12px; color:#4b5563;">
-                <div style="font-weight:600; color:#1f2937; margin-bottom:6px">【退款挽回 核心口径】</div>
-                <div>① 总接待SN(分母): 退款专项组 (叶珍凤组 / 朱海洋组 或 HR专项=退款挽回) 人员在周期内, 智能助手(cs_records)接待的 problem_category 含「退款」的 去重 device_sn 总数</div>
-                <div>② 挽留失败(分子): 分母SN中, 同期出现在 refunds线上退款单 或 service_tickets(service_category=退款)中的 SN → 最终进入了退款流程</div>
-                <div>③ 挽留成功: 分母SN - 失败SN → 接待过但最终没走到退款流程 (即被客服沟通拦截下来)</div>
-                <div>④ 成功率 = 挽留成功 / 总接待SN</div>
-                <div style="margin-top:6px;padding-top:6px;border-top:1px dashed #e5e7eb">
-                  <b>金额口径说明:</b><br/>
-                  · 成功金额暂不核算 (挽留成功的设备未进入退款流程, 无实际退款工单金额可对应)<br/>
-                  · 设备SN数量 / 订单单数 依然保留作为核心参考指标<br/>
-                  · 费占比改为单量口径 = 成功单数 / (成功单数 + 实际退款单数(失败+退充)) · 参考目标 37%+
-                </div>
-              </div>
-            </template>
-            <el-tag size="small" effect="plain" type="primary">查看口径</el-tag>
-          </el-tooltip>
+          <el-button size="small" type="primary" plain @click="$router.push('/dashboards/refund')">
+            查看退款挽回详情 →
+          </el-button>
         </template>
       </SectionHeader>
 
-      <!-- 8.1 顶部 KPI 条 (对齐截图2 4分类+成功率+费占比) -->
-      <el-row :gutter="12" class="mb-12">
-        <!-- SN核心 3卡 + 成功率 -->
-        <el-col :xs="12" :sm="6" :md="3">
+      <!-- 概要: 3 个核心 KPI -->
+      <el-row :gutter="12">
+        <el-col :xs="12" :sm="8">
           <div class="kpi-mini-card" style="background:#eff6ff">
             <div class="kpi-mini-label" style="color:#2563eb">总接待SN(分母)</div>
             <div class="kpi-mini-sub">退款组接待退款类的去重SN</div>
@@ -384,245 +368,26 @@
             </div>
           </div>
         </el-col>
-        <el-col :xs="12" :sm="6" :md="3">
-          <div class="kpi-mini-card" style="background:#f0fdf4">
-            <div class="kpi-mini-label" style="color:#16a34a">挽留成功</div>
-            <div class="kpi-mini-sub">没进入退款流程</div>
-            <div class="kpi-mini-value" style="color:#16a34a">
-              {{ formatNum(recoveryData.kpi.success_sn) }}<span class="kpi-mini-unit">个</span>
-            </div>
-          </div>
-        </el-col>
-        <el-col :xs="12" :sm="6" :md="3">
-          <div class="kpi-mini-card" style="background:#fef2f2">
-            <div class="kpi-mini-label" style="color:#dc2626">挽留失败</div>
-            <div class="kpi-mini-sub">最终退了的SN</div>
-            <div class="kpi-mini-value" style="color:#dc2626">
-              {{ formatNum(recoveryData.kpi.failed_sn) }}<span class="kpi-mini-unit">个</span>
-            </div>
-          </div>
-        </el-col>
-        <el-col :xs="12" :sm="6" :md="3">
+        <el-col :xs="12" :sm="8">
           <div class="kpi-mini-card" :style="{background: Number(recoveryData.kpi.success_rate||0)>=38?'#f0fdf4':(Number(recoveryData.kpi.success_rate||0)>=30?'#fefce8':'#fef2f2')}">
             <div class="kpi-mini-label" :style="{color: Number(recoveryData.kpi.success_rate||0)>=38?'#16a34a':(Number(recoveryData.kpi.success_rate||0)>=30?'#ca8a04':'#dc2626')}">成功率</div>
-            <div class="kpi-mini-sub">成功 / 总接待SN</div>
+            <div class="kpi-mini-sub">挽留成功 / 总接待SN</div>
             <div class="kpi-mini-value" :style="{color: Number(recoveryData.kpi.success_rate||0)>=38?'#16a34a':(Number(recoveryData.kpi.success_rate||0)>=30?'#ca8a04':'#dc2626')}">
               {{ Number(recoveryData.kpi.success_rate||0).toFixed(1) }}<span class="kpi-mini-unit">%</span>
             </div>
           </div>
         </el-col>
-        <!-- 4 分类单数 (对齐截图: 放弃/失败/成功/退充 4行) -->
-        <el-col :xs="12" :sm="6" :md="3">
-          <div class="kpi-mini-card" style="background:#f3f4f6">
-            <div class="kpi-mini-label" style="color:#6b7280">放弃单数</div>
-            <div class="kpi-mini-sub">系统清退·待处理/无需退款</div>
-            <div class="kpi-mini-value" style="color:#6b7280">
-              {{ formatNum(recoveryData.kpi.abandon_cnt) }}<span class="kpi-mini-unit">单</span>
-            </div>
-            <div class="kpi-mini-money">¥{{ formatMoney(Number(recoveryData.kpi.abandon_amount||0)) }}</div>
-          </div>
-        </el-col>
-        <el-col :xs="12" :sm="6" :md="3">
+        <el-col :xs="24" :sm="8">
           <div class="kpi-mini-card" style="background:#fef2f2">
-            <div class="kpi-mini-label" style="color:#dc2626">失败单数</div>
-            <div class="kpi-mini-sub">拦截失败·实际退款成功</div>
+            <div class="kpi-mini-label" style="color:#dc2626">挽留失败</div>
+            <div class="kpi-mini-sub">最终退款的SN</div>
             <div class="kpi-mini-value" style="color:#dc2626">
-              {{ formatNum(recoveryData.kpi.fail_cnt) }}<span class="kpi-mini-unit">单</span>
-            </div>
-            <div class="kpi-mini-money">¥{{ formatMoney(Number(recoveryData.kpi.fail_amount||0)) }}</div>
-          </div>
-        </el-col>
-        <el-col :xs="12" :sm="6" :md="3">
-          <div class="kpi-mini-card" style="background:#f0fdf4">
-            <div class="kpi-mini-label" style="color:#16a34a">成功单数</div>
-            <div class="kpi-mini-sub">拦截成功·沟通后没退款 · 金额暂不核算</div>
-            <div class="kpi-mini-value" style="color:#16a34a">
-              {{ formatNum(recoveryData.kpi.success_cnt) }}<span class="kpi-mini-unit">单</span>
+              {{ formatNum(recoveryData.kpi.failed_sn) }}<span class="kpi-mini-unit">个</span>
+              <span style="font-size:12px; font-weight:500; color:#9ca3af; margin-left:6px">
+                失败单数 {{ formatNum(recoveryData.kpi.fail_cnt) }} · ¥{{ formatMoney(Number(recoveryData.kpi.actual_refund_amount||0)) }}
+              </span>
             </div>
           </div>
-        </el-col>
-        <el-col :xs="12" :sm="6" :md="3">
-          <div class="kpi-mini-card" style="background:#eff6ff">
-            <div class="kpi-mini-label" style="color:#2563eb">退充单</div>
-            <div class="kpi-mini-sub">正常退充·金额互抵</div>
-            <div class="kpi-mini-value" style="color:#2563eb">
-              {{ formatNum(recoveryData.kpi.recharge_cnt) }}<span class="kpi-mini-unit">单</span>
-            </div>
-            <div class="kpi-mini-money">¥{{ formatMoney(Number(recoveryData.kpi.recharge_amount||0)) }}</div>
-          </div>
-        </el-col>
-        <!-- 目标/实际 总览 + 费占比 -->
-        <el-col :xs="12" :sm="8" :md="4">
-          <div class="kpi-mini-card" style="background:#f0fdfa">
-            <div class="kpi-mini-label" style="color:#0f766e">目标总单量</div>
-            <div class="kpi-mini-value" style="color:#0f766e">
-              {{ formatNum(recoveryData.kpi.target_total_cnt) }}<span class="kpi-mini-unit">单</span>
-            </div>
-            <div class="kpi-mini-money">¥{{ formatMoney(Number(recoveryData.kpi.target_total_amount||0)) }}</div>
-          </div>
-        </el-col>
-        <el-col :xs="12" :sm="8" :md="4">
-          <div class="kpi-mini-card" style="background:#fff7ed">
-            <div class="kpi-mini-label" style="color:#7c2d12">实际退款金额</div>
-            <div class="kpi-mini-sub">失败金额 + 退充金额</div>
-            <div class="kpi-mini-value" style="color:#7c2d12">
-              <span class="kpi-mini-unit"></span>
-            </div>
-            <div class="kpi-mini-money">¥{{ formatMoney(Number(recoveryData.kpi.actual_refund_amount||0)) }}</div>
-          </div>
-        </el-col>
-        <el-col :xs="24" :sm="8" :md="4">
-          <div class="kpi-mini-card" :style="{background: Number(recoveryData.kpi.fee_ratio||0)>=37?'#f0fdf4':'#fef2f2'}">
-            <div class="kpi-mini-label" :style="{color: Number(recoveryData.kpi.fee_ratio||0)>=37?'#16a34a':'#dc2626'}">拦截费占比</div>
-            <div class="kpi-mini-sub">成功单数/(成功+实际退款单数) · 单量口径 · 目标 37%+</div>
-            <div class="kpi-mini-value" :style="{color: Number(recoveryData.kpi.fee_ratio||0)>=37?'#16a34a':'#dc2626'}">
-              {{ Number(recoveryData.kpi.fee_ratio||0).toFixed(1) }}<span class="kpi-mini-unit">%</span>
-            </div>
-          </div>
-        </el-col>
-      </el-row>
-
-      <!-- 8.2 第一行: 退款原因分布(柱) + 单分布/金额分布 双饼 -->
-      <el-row :gutter="12" class="mb-16">
-        <el-col :xs="24" :md="12" class="mb-12 md:mb-0">
-          <el-card shadow="never">
-            <template #header>
-              <div style="display:flex; align-items:center; justify-content:space-between">
-                <span style="font-weight:600">退款原因分布 · 挽留失败SN归因</span>
-                <el-tag size="small" effect="plain" type="info">归一化 7 大类 · 悬停看金额</el-tag>
-              </div>
-            </template>
-            <BaseChart v-if="recoveryData.reason_dist?.length" :option="reasonBarOption" height="320px" />
-            <el-empty v-else description="暂无原因分布数据" />
-          </el-card>
-        </el-col>
-        <el-col :xs="24" :md="12">
-          <el-row :gutter="12">
-            <el-col :xs="24" :sm="12" class="mb-12 sm:mb-0">
-              <el-card shadow="never">
-                <template #header><span style="font-weight:600">退款接待单分布</span></template>
-                <BaseChart v-if="recoveryOrderPieOption && recoveryOrderPieOption.series" :option="recoveryOrderPieOption" height="300px" />
-                <el-empty v-else description="暂无分布数据" />
-              </el-card>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-card shadow="never">
-                <template #header><span style="font-weight:600">退款金额分布</span></template>
-                <BaseChart v-if="recoveryAmountPieOption && recoveryAmountPieOption.series" :option="recoveryAmountPieOption" height="300px" />
-                <el-empty v-else description="暂无金额分布" />
-              </el-card>
-            </el-col>
-          </el-row>
-        </el-col>
-      </el-row>
-
-      <!-- 8.3 第二行: 周趋势 双图 (拦截订单汇总 + 实际退款汇总) -->
-      <el-row :gutter="12" class="mb-16">
-        <el-col :xs="24" :md="12" class="mb-12 md:mb-0">
-          <el-card shadow="never">
-            <template #header>
-              <div style="display:flex; align-items:center; justify-content:space-between">
-                <span style="font-weight:600">退款拦截订单汇总(周)趋势</span>
-                <el-tag size="small" effect="plain" type="warning">最近 8 周</el-tag>
-              </div>
-            </template>
-            <BaseChart v-if="recoveryWeeklyOption && recoveryWeeklyOption.series" :option="recoveryWeeklyOption" height="340px" />
-            <el-empty v-else description="暂无周趋势数据" />
-          </el-card>
-        </el-col>
-        <el-col :xs="24" :md="12">
-          <el-card shadow="never">
-            <template #header>
-              <div style="display:flex; align-items:center; justify-content:space-between">
-                <span style="font-weight:600">实际退款汇总(周)趋势</span>
-                <el-tag size="small" effect="plain" type="info">成功金额暂不核算 · 按全局单均粗估</el-tag>
-              </div>
-            </template>
-            <BaseChart v-if="recoveryAmountWeeklyOption && recoveryAmountWeeklyOption.series" :option="recoveryAmountWeeklyOption" height="340px" />
-            <el-empty v-else description="暂无金额趋势" />
-          </el-card>
-        </el-col>
-      </el-row>
-
-      <!-- 8.4 第三行: 按人员明细 (成功率排名) + 日×原因 交叉表 -->
-      <el-row :gutter="12">
-        <el-col :xs="24" :md="10" class="mb-12 md:mb-0">
-          <el-card shadow="never">
-            <template #header>
-              <div style="display:flex; align-items:center; justify-content:space-between">
-                <span style="font-weight:600">退款挽回 · 按人员明细</span>
-                <el-tag size="small" effect="plain" type="primary">按总接待SN倒序</el-tag>
-              </div>
-            </template>
-            <el-table :data="recoveryData.staff_detail || []" border stripe size="small" max-height="420">
-              <el-table-column label="姓名" width="120" fixed>
-                <template #default="{ row }">
-                  <span style="font-weight:600">{{ row.name }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="组" width="110">
-                <template #default="{ row }">
-                  <el-tag size="small" effect="plain" :type="grpTagType(row.group)">{{ row.group || '未分组' }}</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="total_sn" label="总接待SN" width="92" align="right" sortable>
-                <template #default="{ row }">{{ formatNum(row.total_sn) }}个</template>
-              </el-table-column>
-              <el-table-column prop="success_sn" label="成功" width="76" align="right">
-                <template #default="{ row }"><span style="color:#16a34a">{{ formatNum(row.success_sn) }}</span></template>
-              </el-table-column>
-              <el-table-column prop="failed_sn" label="失败" width="76" align="right">
-                <template #default="{ row }"><span style="color:#dc2626">{{ formatNum(row.failed_sn) }}</span></template>
-              </el-table-column>
-              <el-table-column prop="success_rate" label="成功率" width="88" align="right" sortable :sort-method="(a,b)=>Number(a.success_rate||0)-Number(b.success_rate||0)">
-                <template #default="{ row }">
-                  <el-tag size="small" :effect="Number(row.success_rate||0)>=38?'dark':'plain'"
-                    :type="Number(row.success_rate||0)>=38?'success':(Number(row.success_rate||0)>=30?'warning':'danger')">
-                    {{ Number(row.success_rate||0).toFixed(1) }}%
-                  </el-tag>
-                </template>
-              </el-table-column>
-            </el-table>
-            <el-empty v-if="!recoveryData.staff_detail?.length" description="暂无人员明细" />
-          </el-card>
-        </el-col>
-
-        <el-col :xs="24" :md="14">
-          <el-card shadow="never">
-            <template #header>
-              <div style="display:flex; align-items:center; justify-content:space-between">
-                <span style="font-weight:600">退款原因 × 日期 明细</span>
-                <el-tag size="small" effect="plain" type="info">失败SN按首次退款日归因 · 单元格=单数(占比%)</el-tag>
-              </div>
-            </template>
-            <el-table
-              v-if="recoveryData.daily_reason?.length"
-              :data="recoveryData.daily_reason"
-              border stripe size="small" max-height="420"
-              style="width:100%"
-            >
-              <el-table-column prop="date" label="日期" width="108" fixed align="center" />
-              <el-table-column
-                v-for="col in dailyReasonCols" :key="col.k"
-                :label="col.label" :min-width="112" align="right"
-              >
-                <template #default="{ row }">
-                  <div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px">
-                    <span style="font-weight:500">{{ formatNum(row[col.k+'_cnt']) }}</span>
-                    <span :style="{ color: ratioColor(Number(row[col.k+'_ratio']||0)), fontSize: '10px' }">
-                      {{ Number(row[col.k+'_ratio']||0).toFixed(1) }}%
-                    </span>
-                  </div>
-                </template>
-              </el-table-column>
-              <el-table-column label="当日合计" width="88" align="right" fixed="right">
-                <template #default="{ row }">
-                  <span style="font-weight:600; color:#2563eb">{{ formatNum(row._total) }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
-            <el-empty v-else description="暂无日×原因明细 · 切换到周/月粒度可看到更多天" />
-          </el-card>
         </el-col>
       </el-row>
     </section>
@@ -1162,213 +927,8 @@ const recoveryData = ref({
 // 是否有退款组数据 (没数据时整个模块隐藏 避免空版面)
 const hasRecovery = computed(() => {
   const k = recoveryData.value?.kpi || {}
-  return (Number(k.total_sn) || 0) > 0 || (recoveryData.value?.staff_detail || []).length > 0
+  return (Number(k.total_sn) || 0) > 0 || (Number(k.fail_cnt) || 0) > 0
 })
-// 原因分布 柱+成功率 双Y图
-const reasonBarOption = computed(() => {
-  const list = recoveryData.value?.reason_dist || []
-  if (!list.length) return {}
-  const labels = list.map(x => x.reason)
-  const cnts = list.map(x => Number(x.order_cnt) || 0)
-  const ratios = list.map(x => Number(x.ratio) || 0)
-  const maxV = Math.max(1, ...cnts)
-  return {
-    tooltip: {
-      trigger: 'axis', axisPointer: { type: 'shadow' },
-      formatter: (params) => {
-        if (!params || !params.length) return ''
-        const i = params[0].dataIndex
-        const it = list[i] || {}
-        return `<b>${it.reason}</b><br/>工单数: <b>${Number(it.order_cnt)||0}</b> (占比 ${Number(it.ratio)||0}%)<br/>涉及金额: ¥${formatMoney(Number(it.amount)||0)}`
-      }
-    },
-    grid: { left: 60, right: 70, top: 28, bottom: 60 },
-    xAxis: { type: 'category', data: labels, axisLabel: { fontSize: 10, rotate: 18, interval: 0 } },
-    yAxis: [
-      { type: 'value', name: '工单数', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed' } } },
-      { type: 'value', name: '占比(%)', max: 100, axisLabel: { fontSize: 10, formatter: '{value}%' }, splitLine: { show: false } },
-    ],
-    series: [
-      { name: '工单数', type: 'bar', data: cnts, barMaxWidth: 32,
-        itemStyle: {
-          color: (p) => {
-            const pal = ['#e74c3c','#f39c12','#3498db','#9b59b6','#1abc9c','#34495e','#95a5a6','#e67e22']
-            return pal[p.dataIndex % pal.length]
-          },
-          borderRadius: [4,4,0,0],
-        },
-        label: { show: true, position: 'top', fontSize: 10,
-          formatter: (p) => `${p.value} (${ratios[p.dataIndex]}%)` },
-      },
-    ],
-  }
-})
-// 退款接待单分布 饼 (放弃/失败/成功/退充 → 4类)
-const recoveryOrderPieOption = computed(() => {
-  const k = recoveryData.value?.kpi || {}
-  const pie_data = [
-    { name: '放弃',   value: Number(k.abandon_cnt)  || 0, color: '#909399' },
-    { name: '失败',   value: Number(k.fail_cnt)     || 0, color: '#e74c3c' },
-    { name: '成功',   value: Number(k.success_cnt)  || 0, color: '#67c23a' },
-    { name: '退充单', value: Number(k.recharge_cnt) || 0, color: '#409eff' },
-  ].filter(x => x.value > 0)
-  if (!pie_data.length) return {}
-  return {
-    tooltip: { trigger: 'item', formatter: '{b}: {c} 单 ({d}%)' },
-    legend: { bottom: 0, type: 'scroll' },
-    color: pie_data.map(x => x.color),
-    series: [{
-      name: '退款接待单分布', type: 'pie', radius: ['42%','68%'], center: ['50%','45%'],
-      avoidLabelOverlap: true,
-      label: { show: true, formatter: '{b}\n{c}单 ({d}%)', fontSize: 11 },
-      data: pie_data,
-    }],
-  }
-})
-// 退款金额分布 饼 (注意: 成功金额暂不核算, 故只展示有真实数据的 放弃/失败/退充 三类)
-const recoveryAmountPieOption = computed(() => {
-  const k = recoveryData.value?.kpi || {}
-  const items = [
-    { name: '放弃金额',   value: Number(k.abandon_amount)  || 0, color: '#909399' },
-    { name: '失败金额',   value: Number(k.fail_amount)     || 0, color: '#e74c3c' },
-    { name: '退充金额',   value: Number(k.recharge_amount) || 0, color: '#409eff' },
-  ].filter(x => x.value > 0)
-  if (!items.length) return {}
-  return {
-    tooltip: { trigger: 'item', formatter: (p) => `${p.name}: ¥${formatMoney(p.value)} (${p.percent}%)` },
-    legend: { bottom: 0, type: 'scroll' },
-    color: items.map(x => x.color),
-    series: [{
-      name: '退款金额分布', type: 'pie', radius: ['42%','68%'], center: ['50%','45%'],
-      avoidLabelOverlap: true,
-      label: { show: true,
-        formatter: (p) => `${p.name}\n¥${(p.value/10000).toFixed(1)}万 (${p.percent}%)`, fontSize: 11 },
-      data: items,
-    }],
-  }
-})
-// 周趋势: 拦截订单汇总(4类柱堆叠) + 成功率折线 (双Y轴)
-const recoveryWeeklyOption = computed(() => {
-  const wl = recoveryData.value?.weekly_trend || []
-  if (!wl.length) return {}
-  const labels = wl.map(x => (x.date_range && x.date_range[0]) ? `${x.date_range[0]}~${x.date_range[1]}` : (x.week_label || ''))
-  const ab = wl.map(x => Number(x.abandon_cnt) || 0)
-  const fl = wl.map(x => Number(x.fail_cnt)    || 0)
-  const sc = wl.map(x => Number(x.success_cnt) || 0)
-  const rc = wl.map(x => Number(x.recharge_cnt)|| 0)
-  const tt = wl.map(x => Number(x.total_cnt)   || 0)
-  const rt = wl.map(x => Number(x.success_rate)|| 0)
-  return {
-    tooltip: {
-      trigger: 'axis', axisPointer: { type: 'shadow' },
-      formatter: (params) => {
-        if (!params || !params.length) return ''
-        const i = params[0].dataIndex
-        const w = wl[i] || {}
-        return `<b>${labels[i]}</b><br/>` +
-          `放弃: ${w.abandon_cnt||0} · 失败: ${w.fail_cnt||0} · 成功: ${w.success_cnt||0} · 退充: ${w.recharge_cnt||0}<br/>` +
-          `总单量: <b>${w.total_cnt||0}</b><br/>` +
-          `成功率: <b style="color:#16a34a">${Number(w.success_rate||0).toFixed(1)}%</b>`
-      }
-    },
-    legend: {
-      data: ['放弃单数','失败单数','成功单数','退充单','总单量','成功率'],
-      top: 0, type: 'scroll',
-    },
-    grid: { left: 56, right: 68, bottom: 52, top: 44 },
-    xAxis: { type: 'category', data: labels, axisLabel: { fontSize: 10, rotate: 10 } },
-    yAxis: [
-      { type: 'value', name: '单数', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed' } } },
-      { type: 'value', name: '成功率(%)', max: 100, min: 0, axisLabel: { formatter: '{value}%', fontSize: 10 }, splitLine: { show: false } },
-    ],
-    series: [
-      { name: '放弃单数', type: 'bar', stack: 'od', data: ab, itemStyle: { color: '#909399' }, barMaxWidth: 18 },
-      { name: '失败单数', type: 'bar', stack: 'od', data: fl, itemStyle: { color: '#e74c3c' } },
-      { name: '成功单数', type: 'bar', stack: 'od', data: sc, itemStyle: { color: '#67c23a' } },
-      { name: '退充单',   type: 'bar', stack: 'od', data: rc, itemStyle: { color: '#409eff' } },
-      { name: '总单量',   type: 'bar', data: tt, barMaxWidth: 8,
-        itemStyle: { color: 'rgba(37,99,235,0.30)', borderRadius: [4,4,0,0] } },
-      { name: '成功率',   type: 'line', yAxisIndex: 1, data: rt, smooth: true,
-        symbol: 'circle', symbolSize: 7,
-        itemStyle: { color: '#15803d' }, lineStyle: { width: 3, color: '#15803d' } },
-    ],
-  }
-})
-// 实际退款周趋势: 放弃/失败/退充 金额粗估堆叠 + 实际退款总额折线 (注意: 成功金额暂不核算)
-const recoveryAmountWeeklyOption = computed(() => {
-  const wl = recoveryData.value?.weekly_trend || []
-  if (!wl.length) return {}
-  const k = recoveryData.value?.kpi || {}
-  // 用全局 KPI 的分类单均金额粗估每周各分类金额 (仅用于趋势对比, 非精确值)
-  const avg_ab = k.abandon_cnt  ? (Number(k.abandon_amount)  / k.abandon_cnt)  : 0
-  const avg_fl = k.fail_cnt     ? (Number(k.fail_amount)     / k.fail_cnt)     : 0
-  const avg_rc = k.recharge_cnt ? (Number(k.recharge_amount) / k.recharge_cnt) : 0
-  return {
-    tooltip: {
-      trigger: 'axis', axisPointer: { type: 'shadow' },
-      formatter: (params) => {
-        if (!params || !params.length) return ''
-        const i = params[0].dataIndex
-        const x = wl[i] || {}
-        const ab = Math.round((Number(x.abandon_cnt)  || 0) * avg_ab)
-        const fl = Math.round((Number(x.fail_cnt)     || 0) * avg_fl)
-        const rc = Math.round((Number(x.recharge_cnt) || 0) * avg_rc)
-        const total = ab + fl + rc
-        const rate = total ? Number(((fl+rc) / total * 100).toFixed(1)) : 0
-        return `<b>${(x.date_range && x.date_range[0]) ? x.date_range[0]+'~'+x.date_range[1] : (x.week_label||'')}</b><br/>` +
-          `放弃金额估算: ¥${formatMoney(ab)} (${x.abandon_cnt||0}单)<br/>` +
-          `失败金额估算: ¥${formatMoney(fl)} (${x.fail_cnt||0}单)<br/>` +
-          `退充金额估算: ¥${formatMoney(rc)} (${x.recharge_cnt||0}单)<br/>` +
-          `退款金额合计: <b>¥${formatMoney(total)}</b><br/>` +
-          `实际退款占比(失败+退充): <b>${rate}%</b>`
-      }
-    },
-    grid: { left: 56, right: 68, bottom: 52, top: 44 },
-    xAxis: { type: 'category',
-      data: wl.map(x => (x.date_range && x.date_range[0]) ? `${x.date_range[0]}~${x.date_range[1]}` : (x.week_label||'')),
-      axisLabel: { fontSize: 10, rotate: 10 } },
-    yAxis: [
-      { type: 'value', name: '金额(元)',
-        axisLabel: { fontSize: 10, formatter: (v) => (v>=10000 ? (v/10000).toFixed(0)+'万' : v) },
-        splitLine: { lineStyle: { type: 'dashed' } } },
-      { type: 'value', name: '合计(元)',
-        axisLabel: { fontSize: 10, formatter: (v) => (v>=10000 ? (v/10000).toFixed(0)+'万' : v) },
-        splitLine: { show: false } },
-    ],
-    legend: { data: ['放弃金额(粗估)','失败金额(粗估)','退充金额(粗估)','退款金额合计'], top: 0, type: 'scroll' },
-    series: [
-      { name: '放弃金额(粗估)', type: 'bar', stack: 'amt',
-        data: wl.map(x => Math.round((Number(x.abandon_cnt)  || 0) * avg_ab)),
-        barMaxWidth: 22, itemStyle: { color: '#909399' } },
-      { name: '失败金额(粗估)', type: 'bar', stack: 'amt',
-        data: wl.map(x => Math.round((Number(x.fail_cnt)     || 0) * avg_fl)),
-        barMaxWidth: 22, itemStyle: { color: '#e74c3c' } },
-      { name: '退充金额(粗估)', type: 'bar', stack: 'amt',
-        data: wl.map(x => Math.round((Number(x.recharge_cnt) || 0) * avg_rc)),
-        barMaxWidth: 22, itemStyle: { color: '#409eff', borderRadius: [4,4,0,0] } },
-      { name: '退款金额合计', type: 'line', yAxisIndex: 1, smooth: true,
-        data: wl.map(x => {
-          const ab = Math.round((Number(x.abandon_cnt)  || 0) * avg_ab)
-          const fl = Math.round((Number(x.fail_cnt)     || 0) * avg_fl)
-          const rc = Math.round((Number(x.recharge_cnt) || 0) * avg_rc)
-          return ab + fl + rc
-        }),
-        symbol: 'circle', symbolSize: 7,
-        itemStyle: { color: '#7c2d12' }, lineStyle: { width: 3, color: '#7c2d12' } },
-    ],
-  }
-})
-
-// ---------- 模块8 helper: 日×原因 动态列 + 占比色 ----------
-const dailyReasonCols = computed(() => {
-  const reasons = recoveryData.value?.kpi?._calc_note?.reason_order || []
-  return reasons.map(r => ({ k: r, label: r }))
-})
-function ratioColor(pct) {
-  if (pct >= 40) return '#dc2626'
-  if (pct >= 20) return '#ca8a04'
-  return '#6b7280'
-}
 
 // ---------- 值班组长判定:
 //   1. 组长身份满足任一: position含"组长/主管" OR current_specialty==="组长/主管" OR 组名包含本人名(如"叶珍凤组"∋"叶珍凤")
