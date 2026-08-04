@@ -3402,35 +3402,9 @@ def refund_recovery_analysis(
                 continue
             refund_ops.setdefault(op, {"name": op, "group": "未分组", "specialty": None, "position": None, "dept": "未设置"})
 
-    # ---- 2.5 圈定 组长/主管: 他们接待的退款类SN → 默认归入挽回失败 ----
-    #   识别规则:  position 包含 "组长"/"主管" / "主管" / "经理"  OR  group_name 末尾含 "组" 且 position 非空/管理岗
-    #   这些人主要做审核/处理退款工单, 其接待的SN基本都会走到退款流程
-    leader_ops: dict[str, dict] = {}
-    for pr in person_rows:
-        op = pr.operator or ""
-        if not op or op in SYS_OP_BLACKLIST_RR:
-            continue
-        pos = (pr.position or "").strip()
-        group = (pr.group_name or "").strip()
-        is_manager_pos = any(k in pos for k in ("组长", "主管", "经理", "督导", "总监"))
-        is_manager_group = (group.endswith("组") and pos and any(k in pos for k in ("管理", "负责人", "组长", "主管")))
-        if is_manager_pos or is_manager_group:
-            # 同一个 alias 可能同时出现在 refund_ops(挽回成员) 和 leader_ops (管理岗),
-            # 这里优先保留 refund_ops 的成员身份 (挽回成员也可能是组长),
-            # 仅非挽回成员 才 单独归为 leader_ops 用于 "直接计入失败"
-            if op in refund_ops:
-                continue
-            leader_ops.setdefault(op, {
-                "name": pr.display_name or op,
-                "group": group or "未分组",
-                "specialty": pr.specialty,
-                "position": pos,
-                "dept": pr.department or "未设置",
-            })
-
-    # op_list = 退款挽回成员 + 组长/主管 (用于 cs_records 拉取分母 SN)
-    op_list = list(set(refund_ops.keys()) | set(leader_ops.keys()))
-    all_ops_meta: dict[str, dict] = {**leader_ops, **refund_ops}  # 同alias优先 refund_ops 身份
+    # op_list = 退款挽回成员 (按用户最新口径:移除组长/主管强制失败规则,只有 属于退款专项组的人 才算"进入退款专员接待工作量")
+    op_list = list(set(refund_ops.keys()))
+    all_ops_meta: dict[str, dict] = {**refund_ops}
     if not op_list:
         return {
             "date": d_iso, "date_end": d_end_iso,
@@ -3439,12 +3413,16 @@ def refund_recovery_analysis(
             "staff_detail": [],
             "weekly_trend": [],
             "daily_reason": [],
+            "daily_trend": [],
+            "hourly_today": [],
             "_note": "当前时间窗口未识别到退款专项组人员, 请检查 Person 维表的 分组/专项 配置.",
         }
 
-    # ---- 3. 分母: 退款挽回成员 + 组长/主管  在周期内 cs_records 接待的退款类 SN 集合 (按 op 分组) ----
-    #    problem_category 包含 "退款" 即算 (和 merged_sn_sql 中 bucket='退款' 的口径一致)
-    #    注意: 组长/主管接待的SN 后面会 强制 标记为挽回失败, 但依然需要计入分母 用于统计总接待量
+    # ---- 3. 分母: 退款挽回成员 在周期内 cs_records 接待的【真退款类】 SN 集合 (按 op 分组) ----
+    #    新口径(2026-08-04 用户确认):
+    #      - problem_category = '退款' (大类)
+    #      - AND problem_type IN ('不想用了','充值错误','设备故障','服务原因') → 这4类=真的要退款,排除 37% 错标「网络问题」和 7464 条「其他」
+    #      - AND operator 属于 退款专项组人员 (op_list) → 才叫"进入退款专员接待工作量"
     cs_refund_sn_sql = text(
         """
         SELECT c.operator AS op, NULLIF(TRIM(c.device_sn),'') AS sn,
@@ -3454,7 +3432,8 @@ def refund_recovery_analysis(
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND c.operator = ANY(:op_list)
           AND NOT (c.operator = ANY(:sys_bl))
-          AND COALESCE(c.problem_category,'') ILIKE '%退款%'
+          AND c.problem_category = '退款'
+          AND COALESCE(c.problem_type,'') IN ('不想用了','充值错误','设备故障','服务原因')
           AND NOT (
               COALESCE(c.description,'') ILIKE ALL(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
            OR COALESCE(c.execution_result,'') ILIKE ALL(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
@@ -3468,7 +3447,7 @@ def refund_recovery_analysis(
         {"ts": ts, "te": te, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params},
     ).fetchall()
 
-    # op -> set(sn)   (所有操作员, 包括 挽回成员 + 组长/主管)
+    # op -> set(sn)   (退款专项组成员 分母SN)
     op_host_sns: dict[str, set[str]] = {op: set() for op in op_list}
     for r in cs_sn_rows:
         if r.sn:
@@ -3479,14 +3458,12 @@ def refund_recovery_analysis(
     for s in op_host_sns.values():
         global_host_sns.update(s)
 
-    # 记录 "组长/主管接待的SN" 子集 → 这些SN在最终失败集合中 强制加入
-    leader_host_sns: set[str] = set()
-    for op in leader_ops.keys():
-        leader_host_sns.update(op_host_sns.get(op, set()))
-
     # ---- 4. 分子: 挽留失败 SN 集合 = 分母SN ∩ (refunds ∪ 退款工单) ----
-    #   时间: 退款/工单 发生时间 在 当前周期内 (未来扩展可放宽到 接待后N天)
+    #   时间: 退款/工单 发生时间 在 [start, end + 7天] 窗口 (T+7 宽限, 用户2026-08-04确认)
+    #   说明: 允许专员接待后最长7天走到退款审批(到账/工单结案)才判定为失败, 避免"假成功"
     #   注意: PostgreSQL ::text[] 类型转换 会与 SQLAlchemy :param 占位符冲突, 必须用 CAST
+    import datetime as _dt2
+    te7 = te + _dt2.timedelta(days=7)
     failed_sn_sql = text(
         """
         WITH host_sns AS (SELECT unnest(CAST(:sn_arr AS text[])) AS sn),
@@ -3499,7 +3476,7 @@ def refund_recovery_analysis(
                    r.refund_method AS method
             FROM refunds r
             WHERE r.created_at_raw IS NOT NULL
-              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
               AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
               AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
               AND r.refund_method = '线上'
@@ -3513,7 +3490,7 @@ def refund_recovery_analysis(
                    st.service_category AS method
             FROM service_tickets st
             WHERE st.finish_time IS NOT NULL
-              AND st.finish_time >= :ts AND st.finish_time <= :te
+              AND st.finish_time >= :ts AND st.finish_time <= :te7
               AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
               AND st.handler IS NOT NULL AND NOT (st.handler = ANY(:sys_bl))
               AND COALESCE(st.service_category,'') = '退款'
@@ -3530,7 +3507,7 @@ def refund_recovery_analysis(
     )
     fail_rows = db.execute(
         failed_sn_sql,
-        {"sn_arr": list(global_host_sns), "ts": ts, "te": te, "sys_bl": list(SYS_OP_BLACKLIST_RR)},
+        {"sn_arr": list(global_host_sns), "ts": ts, "te7": te7, "sys_bl": list(SYS_OP_BLACKLIST_RR)},
     ).fetchall()
 
     # 全局失败SN集合 + 明细 (按 SN 取金额最大那一条 作为该SN的归因)
@@ -3549,24 +3526,6 @@ def refund_recovery_analysis(
                 "status": r.status, "method": r.method,
             }
 
-    # ---- 4.5 组长/主管接待的SN → 强制归入挽留失败 ----
-    #   规则: 组长/主管(非挽回成员) 接待的退款类SN 直接视为挽回失败
-    #   如果这些SN在 refunds/service_tickets 中找不到明细, 就补一条默认的 meta (标记为"主管接待→直接退款")
-    avg_fail_amt = 0.0
-    _tmp_amts = [float(m.get("amount") or 0) for m in sn_failed_meta.values() if float(m.get("amount") or 0) > 0]
-    if _tmp_amts:
-        avg_fail_amt = sum(_tmp_amts) / len(_tmp_amts)
-    for sn in leader_host_sns:
-        global_fail_sns.add(sn)
-        if sn not in sn_failed_meta:
-            sn_failed_meta[sn] = {
-                "src": "cs_record_leader",
-                "reason": "主管接待→直接退款",
-                "amount": avg_fail_amt,
-                "status": "主管审核退款",
-                "method": "线上",
-            }
-
     # ---- 4.6 退款操作执行人统计 (同SN多人都算工作量, 不算入成功/失败分子) ----
     #   统计每个 operator 作为 refunds.operator / service_tickets.handler 处理的失败SN数
     #   注意: 这只是 "退款操作工作量" 独立字段, 不影响成功率计算的分子分母
@@ -3580,12 +3539,12 @@ def refund_recovery_analysis(
                COALESCE(r.actual_amount, r.refund_amount, 0) AS amt
         FROM refunds r
         WHERE r.created_at_raw IS NOT NULL
-          AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+          AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
           AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
           AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
           AND r.refund_method = '线上'
         """
-    ), {"ts": ts, "te": te, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall():
+    ), {"ts": ts, "te7": te7, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall():
         if not r.sn or not r.op:
             continue
         refund_op_sns.setdefault(r.op, set()).add(r.sn)
@@ -3598,19 +3557,19 @@ def refund_recovery_analysis(
                COALESCE(st.refund_amount, st.estimated_amount, 0) AS amt
         FROM service_tickets st
         WHERE st.finish_time IS NOT NULL
-          AND st.finish_time >= :ts AND st.finish_time <= :te
+          AND st.finish_time >= :ts AND st.finish_time <= :te7
           AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
           AND st.handler IS NOT NULL AND NOT (st.handler = ANY(:sys_bl))
           AND COALESCE(st.service_category,'') = '退款'
         """
-    ), {"ts": ts, "te": te, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall():
+    ), {"ts": ts, "te7": te7, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall():
         if not r.sn or not r.op:
             continue
         refund_op_sns.setdefault(r.op, set()).add(r.sn)
         refund_op_amt[r.op] = refund_op_amt.get(r.op, 0.0) + float(r.amt or 0)
 
     # ---- 5. 按 op 拆分 成功/失败 + 退款操作工作量 (多人同SN各算各的) ----
-    #   范围: refund_ops(挽回成员) + leader_ops(主管组长) + 所有 refund_op_sns 中出现的执行人
+    #   范围: refund_ops(退款专项组成员) + 所有 refund_op_sns 中出现的执行人
     staff_operators: dict[str, dict] = dict(all_ops_meta)  # 先加入 CS 接待侧的人员 meta
     for op in refund_op_sns.keys():
         if op not in staff_operators and op not in SYS_OP_BLACKLIST_RR:
@@ -3630,7 +3589,7 @@ def refund_recovery_analysis(
 
     staff_detail = []
     for op, info in staff_operators.items():
-        # CS 接待工作量: 接待的退款类SN
+        # CS 接待工作量: 接待的真退款类SN
         cs_host = op_host_sns.get(op, set())
         cs_failed = cs_host & global_fail_sns
         cs_success = cs_host - global_fail_sns
@@ -3643,7 +3602,7 @@ def refund_recovery_analysis(
         ro_cnt = len(ro_sns)
         ro_amt = refund_op_amt.get(op, 0.0)
 
-        # 成功率口径: 仅基于 CS 接待侧 (挽回成员+主管组长 的接待成功/接待失败)
+        # 成功率口径: 仅基于 CS 接待侧 (退款专项组人员 的接待成功/接待失败)
         # 如果纯退款执行人(无 CS 接待), 成功率记为 None(空) 避免误导
         total_for_rate = total_cs
         rate = (succ_cs / total_for_rate * 100) if total_for_rate else None
@@ -3654,13 +3613,12 @@ def refund_recovery_analysis(
             "group": info.get("group") or "未分组",
             "department": info.get("dept") or "未设置",
             "position": info.get("position") or "",
-            "total_sn": total_cs,           # CS 接待SN数 (仅来自 cs_records 退款类问题)
+            "total_sn": total_cs,           # CS 接待SN数 (新口径:真退款类问题 + 退款专员接待)
             "success_sn": succ_cs,          # 接待成功SN数
             "failed_sn": fail_cs,           # 接待失败SN数
             "success_rate": round(rate, 2) if rate is not None else None,
             "refund_op_cnt": ro_cnt,        # 退款操作SN数: 作为 refunds.operator 或 service_tickets.handler 处理过的 SN
             "refund_op_amount": round(ro_amt, 2),  # 退款操作金额合计
-            "_is_leader": (op in leader_ops),  # 前端可根据此字段隐藏成功率 (主管一律按失败计, 无意义)
             "_is_refund_staff": (op in refund_ops),
         })
     staff_detail.sort(key=lambda x: (
@@ -3732,14 +3690,14 @@ def refund_recovery_analysis(
         "actual_refund_amount": round(actual_refund, 2),
         "fee_ratio": round(fee_ratio, 2),  # 单量口径拦截比例, 非金额口径
         "_calc_note": {
-            "denominator": "(退款挽回专项成员 ∪ 组长/主管) 在周期内, cs_records 接待的 problem_category 含「退款」的去重 device_sn 总数",
-            "failed_rule": "① 挽回成员接待的SN 出现在同期 refunds(线上退款单) 或 退款工单(service_category=退款) 中 → 挽留失败; ② 组长/主管(非挽回成员)接待的SN 直接视为挽回失败 (主要走审核/退款流程)",
-            "success_rule": "「挽回成员接待的SN」 - 「失败SN」 → 挽留成功 (即接待过但最终没走到退款流程)",
-            "leader_rule": "识别: position 含 组长/主管/经理/督导/总监, 或 group_name 末尾含「组」且 position 含 管理/负责人 → 该人接待的SN默认按退款失败核算",
-            "multi_user_rule": "工作负荷/绩效层面: 同个SN 允许 A(挽回接待人) + B(退款操作人) 各算一次. 接待侧计入 total_sn/success_sn/failed_sn; 退款操作侧(即 refunds.operator/service_tickets.handler) 单独计入 staff_detail.refund_op_cnt / refund_op_amount, 不重复计入成功率",
+            "denominator": "退款专项组成员(Person.specialty=退款挽回/叶珍凤组/朱海洋组) 接待的 problem_category='退款' AND problem_type IN (不想用了/充值错误/设备故障/服务原因) → 真要退款的SN去重总数 (2026-08-04 新口径, 排除 37% 错标的「网络问题」和 「其他」 7464条)",
+            "failed_rule": "分母SN 中, 在 [start, end+7天] T+7 窗口内 出现在 refunds(线上退款单) 或 退款工单(service_category=退款) 中 → 挽留失败. (T+7 宽限避免接待后才走完退款审批的SN被误判为成功)",
+            "success_rule": "「分母SN」 − 「失败SN」 → 挽留成功 (即退款专员接待过但最终没走到退款流程, 被沟通拦截下来)",
+            "leader_rule_removed": "已移除: 原规则「组长/主管接待SN强制失败」(用户2026-08-04确认移除,仅按SN是否真正进入退款工单判定成败)",
+            "multi_user_rule": "工作负荷/绩效层面: 同个SN 允许 A(退款接待专员) + B(退款操作执行人) 各算一次. 接待侧计入 total_sn/success_sn/failed_sn; 退款操作侧(即 refunds.operator/service_tickets.handler) 单独计入 staff_detail.refund_op_cnt / refund_op_amount, 不重复计入成功率",
             "success_amount_rule": "成功金额暂不核算 (挽留成功的设备未进入退款流程, 无实际退款工单金额可对应)",
             "fee_ratio_rule": "费占比(单量口径) = 成功单数 / (成功单数 + 实际退款单数(失败+退充)) · 参考目标 37%+",
-            "staff_scope": f"退款挽回专项 (Person.specialty∈{REFUND_RECOVERY_HR_CATS} OR 组名匹配 叶珍凤组/朱海洋组) + 组长/主管岗位 + 所有退款操作执行人; 同alias多身份时优先按挽回成员计; 已排除系统别名(system/机器人等)",
+            "staff_scope": f"退款专项 (Person.specialty∈{REFUND_RECOVERY_HR_CATS} OR 组名匹配 叶珍凤组/朱海洋组) + 所有退款操作执行人; 同alias多身份时优先按退款专项成员计; 已排除系统别名(system/机器人等)",
             "reason_order": reason_order_placeholder,
         },
     }
@@ -3769,28 +3727,28 @@ def refund_recovery_analysis(
     # 回填 kpi._calc_note.reason_order (按 单量降序 的原因列表, 供 日期×原因 矩阵前端使用)
     kpi["_calc_note"]["reason_order"] = [r["reason"] for r in reason_dist]
 
-    # ---- 8. 周趋势: 最近 8 周 拦截订单汇总 ----
-    #    先拉 8 周的 [start, end) 窗口, 对每周分别算 分母SN / 成功 / 失败 / 分类单数
+    # ---- 8. 周趋势: 最近 8 周 拦截订单汇总 (新口径+T+7) ----
     now_sh = _dt.datetime.now(TZ)
     weekly_trend = []
     for wi in range(7, -1, -1):
-        # 国内习惯: 周一~周日, 取当前周往前推 wi 周
         wk_end = (now_sh - _dt.timedelta(weeks=wi, days=now_sh.weekday())).replace(hour=23, minute=59, second=59, microsecond=0)
         wk_start = wk_end - _dt.timedelta(days=6, hours=23, minutes=59, seconds=59)
         wk_start_utc = wk_start.astimezone(_dt.timezone.utc).replace(tzinfo=None)
         wk_end_utc = wk_end.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+        wk_end7_utc = wk_end_utc + _dt.timedelta(days=7)  # T+7
         week_label = f"{(now_sh.isocalendar()[0])}-W{(now_sh - _dt.timedelta(weeks=wi)).isocalendar()[1]}"
 
-        # 当周 退款组+主管 cs_record 接待退款类 SN (顺带返回 operator 以便识别 leader 接待的SN)
+        # 当周 退款专员 cs_record 接待【真退款类】 SN (新口径)
         wk_cs = db.execute(text(
             """
-            SELECT DISTINCT NULLIF(TRIM(c.device_sn),'') AS sn, c.operator AS op
+            SELECT DISTINCT NULLIF(TRIM(c.device_sn),'') AS sn
             FROM cs_records c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
               AND c.operator = ANY(:op_list)
               AND NOT (c.operator = ANY(:sys_bl))
-              AND COALESCE(c.problem_category,'') ILIKE '%退款%'
+              AND c.problem_category = '退款'
+              AND COALESCE(c.problem_type,'') IN ('不想用了','充值错误','设备故障','服务原因')
               AND NOT (
                   COALESCE(c.description,'') ILIKE ALL(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
                OR COALESCE(c.execution_result,'') ILIKE ALL(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
@@ -3798,16 +3756,9 @@ def refund_recovery_analysis(
               )
             """
         ), {"ts": wk_start_utc, "te": wk_end_utc, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params}).fetchall()
-        wk_host: set[str] = set()
-        wk_leader_host: set[str] = set()  # 当周组长/主管接待的SN
-        leader_op_set = set(leader_ops.keys())
-        for r in wk_cs:
-            if r.sn:
-                wk_host.add(r.sn)
-                if (r.op or "") in leader_op_set:
-                    wk_leader_host.add(r.sn)
+        wk_host: set[str] = set(r.sn for r in wk_cs if r.sn)
 
-        # 当周 失败SN
+        # 当周 失败SN (T+7 窗口)
         wk_fail_rows = db.execute(text(
             """
             SELECT DISTINCT NULLIF(TRIM(r.device_sn),'') AS sn,
@@ -3816,7 +3767,7 @@ def refund_recovery_analysis(
                    r.status AS status, r.refund_method AS method
             FROM refunds r
             WHERE r.created_at_raw IS NOT NULL
-              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
               AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
               AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
               AND r.refund_method = '线上'
@@ -3827,12 +3778,12 @@ def refund_recovery_analysis(
                    st.status AS status, st.service_category AS method
             FROM service_tickets st
             WHERE st.finish_time IS NOT NULL
-              AND st.finish_time >= :ts AND st.finish_time <= :te
+              AND st.finish_time >= :ts AND st.finish_time <= :te7
               AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
               AND st.handler IS NOT NULL AND NOT (st.handler = ANY(:sys_bl))
               AND COALESCE(st.service_category,'') = '退款'
             """
-        ), {"ts": wk_start_utc, "te": wk_end_utc, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall()
+        ), {"ts": wk_start_utc, "te7": wk_end7_utc, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall()
         wk_fail_map: dict[str, dict] = {}
         for r in wk_fail_rows:
             sn = r.sn or ""
@@ -3842,18 +3793,11 @@ def refund_recovery_analysis(
             if prev is None or amt > float(prev.get("amount") or 0):
                 wk_fail_map[sn] = {"reason": r.reason, "amount": amt, "status": r.status, "method": r.method, "src": r.src}
         wk_fail_sns = set(wk_fail_map.keys()) & wk_host
-        # 当周组长/主管接待的SN(在分母中) → 强制加入失败
-        _wk_leader_fail = wk_leader_host & wk_host
-        for sn in _wk_leader_fail:
-            wk_fail_sns.add(sn)
-            if sn not in wk_fail_map:
-                wk_fail_map[sn] = {"reason": "主管接待→直接退款", "amount": 0, "status": "主管审核退款", "method": "线上", "src": "cs_record_leader"}
 
         wk_total = len(wk_host)
         wk_fail_n = len(wk_fail_sns)
         wk_succ_n = wk_total - wk_fail_n
         wk_rate = (wk_succ_n / wk_total * 100) if wk_total else 0.0
-        # 分类: 放弃/失败/成功/退充
         wk_ab = 0; wk_fl = 0; wk_rc = 0
         for sn in wk_fail_sns:
             m = wk_fail_map[sn]
@@ -3875,10 +3819,9 @@ def refund_recovery_analysis(
             "success_rate": round(wk_rate, 2),
         })
 
-    # ---- 9. 日×原因 明细 (当前时间窗口内, 按天 × 原因 交叉) ----
+    # ---- 9. 日×原因 明细 (当前时间窗口内, 按天 × 原因 交叉) (新口径) ----
     daily_reason = []
     if global_fail_sns:
-        # 拿到失败 SN -> 首次失败日期 (用最小的 created_at / finish_time)
         sn_first_day_sql = text(
             """
             SELECT sn, MIN(day) AS first_day
@@ -3887,7 +3830,7 @@ def refund_recovery_analysis(
                        DATE(r.created_at_raw AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS day
                 FROM refunds r
                 WHERE r.created_at_raw IS NOT NULL
-                  AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+                  AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
                   AND NULLIF(TRIM(r.device_sn),'') = ANY(:sn_arr)
                   AND r.refund_method = '线上'
                 UNION ALL
@@ -3895,7 +3838,7 @@ def refund_recovery_analysis(
                        DATE(st.finish_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS day
                 FROM service_tickets st
                 WHERE st.finish_time IS NOT NULL
-                  AND st.finish_time >= :ts AND st.finish_time <= :te
+                  AND st.finish_time >= :ts AND st.finish_time <= :te7
                   AND NULLIF(TRIM(st.device_sn),'') = ANY(:sn_arr)
                   AND COALESCE(st.service_category,'') = '退款'
             ) x
@@ -3905,29 +3848,9 @@ def refund_recovery_analysis(
         )
         day_rows = db.execute(
             sn_first_day_sql,
-            {"ts": ts, "te": te, "sn_arr": list(global_fail_sns)},
+            {"ts": ts, "te7": te7, "sn_arr": list(global_fail_sns)},
         ).fetchall()
         sn_day: dict[str, str] = {r.sn: str(r.first_day) for r in day_rows if r.sn and r.first_day}
-
-        # 补漏: 那些 "主管接待→直接退款" 但没出现在 refunds/service_tickets 的SN
-        # 用 cs_records 里对应的 首次 operation_time 日期 作为其 "失败日期"
-        missing_sns = [sn for sn in global_fail_sns if (sn not in sn_day) and (sn in leader_host_sns or (sn_failed_meta.get(sn, {}).get("src") == "cs_record_leader"))]
-        if missing_sns:
-            cs_day_rows = db.execute(text(
-                """
-                SELECT NULLIF(TRIM(c.device_sn),'') AS sn,
-                       MIN(DATE(c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')) AS first_day
-                FROM cs_records c
-                WHERE c.operation_time IS NOT NULL
-                  AND c.operation_time >= :ts AND c.operation_time <= :te
-                  AND NULLIF(TRIM(c.device_sn),'') = ANY(:sn_arr)
-                  AND COALESCE(c.problem_category,'') ILIKE '%退款%'
-                GROUP BY 1
-                """
-            ), {"ts": ts, "te": te, "sn_arr": missing_sns}).fetchall()
-            for r in cs_day_rows:
-                if r.sn and r.first_day and r.sn not in sn_day:
-                    sn_day[r.sn] = str(r.first_day)
 
         # 日 -> 原因 -> cnt
         day_reason_bucket: dict[str, dict[str, int]] = {}
@@ -3939,7 +3862,6 @@ def refund_recovery_analysis(
             raw = sn_failed_meta.get(sn, {}).get("reason")
             b = _normalize_refund_reason(raw)
             all_reasons_seen.add(b)
-            # 注意: 必须先 setdefault 再使用, 不能把它嵌在右侧赋值里 (Python 先算右再算左, setdefault 未先执行会 KeyError)
             inner = day_reason_bucket.setdefault(d, {})
             inner[b] = inner.get(b, 0) + 1
 
@@ -3959,6 +3881,145 @@ def refund_recovery_analysis(
             daily_reason.append(row)
         kpi["_calc_note"]["reason_order"] = ordered_reasons
 
+    # ---- 10. 按日 挽回趋势 (近30天 或 当前时间窗口 范围内 日粒度) (新口径 新增) ----
+    daily_trend: list[dict] = []
+    try:
+        # 生成每日日期序列
+        start_day = ts.astimezone(TZ).date() if hasattr(ts, 'astimezone') else ts.date()
+        end_day = te.astimezone(TZ).date() if hasattr(te, 'astimezone') else te.date()
+        # 强制至少近30天用于 今日视图观察
+        min_start = _dt.date.today() - _dt.timedelta(days=29)
+        plot_start = min(start_day, min_start)
+        dates_list: list[_dt.date] = []
+        cur_d = plot_start
+        while cur_d <= end_day:
+            dates_list.append(cur_d)
+            cur_d += _dt.timedelta(days=1)
+        if dates_list:
+            ts0 = _dt.datetime.combine(plot_start, _dt.time.min).replace(tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
+            te0 = _dt.datetime.combine(end_day, _dt.time.max).replace(tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
+            te0_7 = te0 + _dt.timedelta(days=7)
+            # 日粒度 分母SN (按天)
+            day_host_rows = db.execute(text(
+                """
+                SELECT DATE(c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS d,
+                       NULLIF(TRIM(c.device_sn),'') AS sn
+                FROM cs_records c
+                WHERE c.operation_time IS NOT NULL
+                  AND c.operation_time >= :ts AND c.operation_time <= :te
+                  AND c.operator = ANY(:op_list)
+                  AND NOT (c.operator = ANY(:sys_bl))
+                  AND c.problem_category = '退款'
+                  AND COALESCE(c.problem_type,'') IN ('不想用了','充值错误','设备故障','服务原因')
+                  AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+                """
+            ), {"ts": ts0, "te": te0, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall()
+            day_to_host: dict[str, set[str]] = {}
+            for r in day_host_rows:
+                if r.d is None or not r.sn: continue
+                key = str(r.d)
+                day_to_host.setdefault(key, set()).add(r.sn)
+            # 日粒度 失败SN (T+7)
+            day_fail_rows = db.execute(text(
+                """
+                SELECT NULLIF(TRIM(r.device_sn),'') AS sn
+                FROM refunds r
+                WHERE r.created_at_raw IS NOT NULL
+                  AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
+                  AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
+                  AND r.refund_method = '线上'
+                  AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
+                UNION
+                SELECT NULLIF(TRIM(st.device_sn),'') AS sn
+                FROM service_tickets st
+                WHERE st.finish_time IS NOT NULL
+                  AND st.finish_time >= :ts AND st.finish_time <= :te7
+                  AND st.handler IS NOT NULL AND NOT (st.handler = ANY(:sys_bl))
+                  AND COALESCE(st.service_category,'') = '退款'
+                  AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+                """
+            ), {"ts": ts0, "te7": te0_7, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall()
+            fail_sn_set = set(r.sn for r in day_fail_rows if r.sn)
+            daily_trend = []
+            for d_obj in dates_list:
+                key = d_obj.isoformat()
+                h = day_to_host.get(key, set())
+                f = h & fail_sn_set
+                total = len(h)
+                fail_n = len(f)
+                succ_n = total - fail_n
+                rate = round((succ_n / total * 100), 2) if total else 0.0
+                daily_trend.append({
+                    "date": key,
+                    "total_sn": total,
+                    "success_sn": succ_n,
+                    "failed_sn": fail_n,
+                    "success_rate": rate,
+                })
+    except Exception as _daily_e:
+        logger.warning(f"退款挽回 按日趋势 计算异常: {_daily_e}")
+        daily_trend = []
+
+    # ---- 11. 今日 按小时 挽回趋势 (00:00~当前) (新口径 新增) ----
+    hourly_today: list[dict] = []
+    try:
+        today_sh = _dt.datetime.now(TZ).date()
+        ts_today = _dt.datetime.combine(today_sh, _dt.time.min).replace(tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
+        te_today = _dt.datetime.now(TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
+        # 今日 分母SN (按小时)
+        hr_rows = db.execute(text(
+            """
+            SELECT EXTRACT(HOUR FROM c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS hh,
+                   NULLIF(TRIM(c.device_sn),'') AS sn
+            FROM cs_records c
+            WHERE c.operation_time IS NOT NULL
+              AND c.operation_time >= :ts AND c.operation_time <= :te
+              AND c.operator = ANY(:op_list)
+              AND NOT (c.operator = ANY(:sys_bl))
+              AND c.problem_category = '退款'
+              AND COALESCE(c.problem_type,'') IN ('不想用了','充值错误','设备故障','服务原因')
+              AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+            """
+        ), {"ts": ts_today, "te": te_today, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall()
+        hr_to_host: dict[int, set[str]] = {}
+        for r in hr_rows:
+            if r.hh is None or not r.sn: continue
+            h = int(float(r.hh))
+            hr_to_host.setdefault(h, set()).add(r.sn)
+        # 今日 失败SN (所有今日接待的分母SN中, 有任何退款记录 = 今日判断失败, T+7宽限会导致今日数据部分还没出来, 但对图表走势无影响)
+        today_all_sns = set()
+        for s in hr_to_host.values():
+            today_all_sns.update(s)
+        today_fail_sns: set[str] = set()
+        if today_all_sns:
+            tfr = db.execute(text(
+                """
+                WITH arr AS (SELECT unnest(CAST(:sn_arr AS text[])) AS sn)
+                SELECT DISTINCT NULLIF(TRIM(r.device_sn),'') AS sn FROM refunds r JOIN arr a ON NULLIF(TRIM(r.device_sn),'') = a.sn
+                 WHERE r.refund_method = '线上' AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
+                UNION
+                SELECT DISTINCT NULLIF(TRIM(st.device_sn),'') AS sn FROM service_tickets st JOIN arr a ON NULLIF(TRIM(st.device_sn),'') = a.sn
+                 WHERE COALESCE(st.service_category,'') = '退款' AND st.handler IS NOT NULL AND NOT (st.handler = ANY(:sys_bl))
+                """
+            ), {"sn_arr": list(today_all_sns), "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall()
+            today_fail_sns = set(r.sn for r in tfr if r.sn)
+        max_hh = _dt.datetime.now(TZ).hour
+        hourly_today = []
+        for h in range(0, max_hh + 1):
+            hh_set = hr_to_host.get(h, set())
+            h_fail = hh_set & today_fail_sns
+            total = len(hh_set)
+            fail_n = len(h_fail)
+            hourly_today.append({
+                "hour": f"{h:02d}",
+                "total_sn": total,
+                "success_sn": total - fail_n,
+                "failed_sn": fail_n,
+            })
+    except Exception as _hourly_e:
+        logger.warning(f"退款挽回 今日按小时趋势 计算异常: {_hourly_e}")
+        hourly_today = []
+
     return {
         "date": d_iso,
         "date_end": d_end_iso,
@@ -3967,6 +4028,8 @@ def refund_recovery_analysis(
         "staff_detail": staff_detail,
         "weekly_trend": weekly_trend,
         "daily_reason": daily_reason,
+        "daily_trend": daily_trend,
+        "hourly_today": hourly_today,
     }
 
 
@@ -3978,5 +4041,218 @@ def _empty_kpi() -> dict:
         "target_total_amount": 0.0, "actual_refund_amount": 0.0, "fee_ratio": 0.0,
         "_calc_note": {},
     }
+
+
+# ==============================================================
+# 退款挽回 5 个 AnalysisView HANDLERS (对应 analysis_engine.py 分派机制)
+# 与 urge_analysis.HANDLERS 完全相同的注册模式:view.code 命中则调用自定义实现
+# ==============================================================
+from typing import Callable as _Callable
+
+_PARAMS_T = dict | None
+_RET_T = dict
+
+
+def _rr_parse_params(params: _PARAMS_T) -> tuple[str | None, str | None]:
+    """从视图执行参数解析 start/end (兼容 AnalysisView 约定)"""
+    if not params:
+        return None, None
+    return params.get("start") or params.get("date_start"), params.get("end") or params.get("date_end")
+
+
+def _view_rr_kpi(db: Session, params: _PARAMS_T) -> _RET_T:
+    """退款挽回 KPI: 核心4指标 + 费占比 (table 格式,供 ViewItemCard 展示)"""
+    s, e = _rr_parse_params(params)
+    data = refund_recovery_analysis(db, start=s, end=e)
+    k = data.get("kpi") or _empty_kpi()
+    # 行=指标, 列=名称/数值/说明
+    rows = [
+        {"指标": "总接待SN (分母)", "数值": int(k.get("total_sn") or 0), "单位": "个",
+         "说明": "退款专员接待 + 真退款类型 (4类) 的去重SN"},
+        {"指标": "挽留成功SN", "数值": int(k.get("success_sn") or 0), "单位": "个",
+         "说明": "分母SN 中 最终未进入退款工单/退款单 (被拦截)"},
+        {"指标": "挽留失败SN", "数值": int(k.get("failed_sn") or 0), "单位": "个",
+         "说明": "分母SN 中 T+7 窗口内 最终进入了退款流程"},
+        {"指标": "挽回成功率", "数值": f"{round(float(k.get('success_rate') or 0), 1)}%", "单位": "%",
+         "说明": "成功SN / 分母SN"},
+        {"指标": "拦截费占比", "数值": f"{round(float(k.get('fee_ratio') or 0), 1)}%", "单位": "%",
+         "说明": "成功单量/(成功单量+实际退款单量) 参考目标 37%+"},
+        {"指标": "实际退款金额", "数值": round(float(k.get("actual_refund_amount") or 0), 2), "单位": "元",
+         "说明": "失败金额 + 退充金额"},
+    ]
+    return {
+        "chart_type": "table",
+        "data": {
+            "columns": [
+                {"field": "指标", "title": "指标"},
+                {"field": "数值", "title": "数值"},
+                {"field": "单位", "title": "单位"},
+                {"field": "说明", "title": "口径说明"},
+            ],
+            "rows": rows,
+            "meta": {"_source": "refund_recovery", "date": data.get("date"), "date_end": data.get("date_end")},
+        },
+    }
+
+
+def _view_rr_daily_trend(db: Session, params: _PARAMS_T) -> _RET_T:
+    """近30天 挽回成功率 (线) + 接待量 (柱) """
+    s, e = _rr_parse_params(params)
+    data = refund_recovery_analysis(db, start=s, end=e)
+    tr = data.get("daily_trend") or []
+    x_axis = [r["date"][5:] for r in tr]  # MM-DD
+    series = [
+        {"name": "总接待SN", "type": "bar", "data": [r.get("total_sn") or 0 for r in tr],
+         "itemStyle": {"color": "#93c5fd"}, "barMaxWidth": 14},
+        {"name": "挽回成功SN", "type": "bar", "stack": None, "data": [r.get("success_sn") or 0 for r in tr],
+         "itemStyle": {"color": "#4ade80"}, "barMaxWidth": 14},
+        {"name": "挽回失败SN", "type": "bar", "stack": None, "data": [r.get("failed_sn") or 0 for r in tr],
+         "itemStyle": {"color": "#f87171"}, "barMaxWidth": 14},
+        {"name": "挽回成功率", "type": "line", "yAxisIndex": 1, "smooth": True, "symbolSize": 6,
+         "data": [r.get("success_rate") or 0 for r in tr],
+         "itemStyle": {"color": "#059669"}, "lineStyle": {"width": 3, "color": "#059669"}},
+    ]
+    return {
+        "chart_type": "line",
+        "data": {
+            "title": "退款挽回 按日趋势 (近30天)",
+            "x_axis": x_axis,
+            "series": series,
+            "legend": {"data": [s["name"] for s in series]},
+            "yAxis": [
+                {"type": "value", "name": "SN个数"},
+                {"type": "value", "name": "成功率%", "min": 0, "max": 100, "axisLabel": {"formatter": "{value}%"}},
+            ],
+        },
+    }
+
+
+def _view_rr_hourly_today(db: Session, params: _PARAMS_T) -> _RET_T:
+    """今日 按小时 接待SN (柱) + 成功率(线)"""
+    s, e = _rr_parse_params(params)
+    data = refund_recovery_analysis(db, start=s, end=e)
+    hl = data.get("hourly_today") or []
+    x_axis = [r["hour"] for r in hl]
+    total = [r.get("total_sn") or 0 for r in hl]
+    succ = [r.get("success_sn") or 0 for r in hl]
+    fail = [r.get("failed_sn") or 0 for r in hl]
+    rates = []
+    for r in hl:
+        t = r.get("total_sn") or 0
+        rates.append(round((r.get("success_sn") or 0) / t * 100, 1) if t else 0)
+    series = [
+        {"name": "总接待SN", "type": "bar", "data": total, "itemStyle": {"color": "#bfdbfe"}, "barMaxWidth": 18},
+        {"name": "挽留成功SN", "type": "bar", "data": succ, "itemStyle": {"color": "#34d399"}, "barMaxWidth": 18},
+        {"name": "挽留失败SN", "type": "bar", "data": fail, "itemStyle": {"color": "#fca5a5"}, "barMaxWidth": 18},
+        {"name": "成功率%", "type": "line", "yAxisIndex": 1, "smooth": True, "symbolSize": 7,
+         "data": rates, "itemStyle": {"color": "#047857"}, "lineStyle": {"width": 3, "color": "#047857"}},
+    ]
+    return {
+        "chart_type": "bar",
+        "data": {
+            "title": "今日 按小时 退款挽回趋势 (00:00 ~ 当前)",
+            "x_axis": x_axis,
+            "series": series,
+            "legend": {"data": [s["name"] for s in series]},
+            "yAxis": [
+                {"type": "value", "name": "SN个数"},
+                {"type": "value", "name": "成功率%", "min": 0, "max": 100, "axisLabel": {"formatter": "{value}%"}},
+            ],
+        },
+    }
+
+
+def _view_rr_operator_rank(db: Session, params: _PARAMS_T) -> _RET_T:
+    """退款挽回 按人员明细排名 (表格)"""
+    s, e = _rr_parse_params(params)
+    data = refund_recovery_analysis(db, start=s, end=e)
+    sd = data.get("staff_detail") or []
+    rows = []
+    for i, r in enumerate(sd):
+        rate = r.get("success_rate")
+        rate_txt = "—" if rate is None else (f"{round(float(rate), 1)}%")
+        rows.append({
+            "排名": i + 1,
+            "姓名": r.get("name") or r.get("operator") or "-",
+            "组别": r.get("group") or "未分组",
+            "岗位": r.get("position") or "-",
+            "接待SN": int(r.get("total_sn") or 0),
+            "成功SN": int(r.get("success_sn") or 0),
+            "失败SN": int(r.get("failed_sn") or 0),
+            "成功率": rate_txt,
+            "退款操作SN": int(r.get("refund_op_cnt") or 0),
+            "退款操作金额": round(float(r.get("refund_op_amount") or 0), 2),
+        })
+    cols = [
+        {"field": "排名", "title": "排名", "width": 60},
+        {"field": "姓名", "title": "姓名", "width": 120},
+        {"field": "组别", "title": "组别", "width": 120},
+        {"field": "岗位", "title": "岗位", "width": 100},
+        {"field": "接待SN", "title": "接待SN(分母)"},
+        {"field": "成功SN", "title": "成功SN"},
+        {"field": "失败SN", "title": "失败SN"},
+        {"field": "成功率", "title": "成功率"},
+        {"field": "退款操作SN", "title": "退款操作SN"},
+        {"field": "退款操作金额", "title": "退款操作金额(元)"},
+    ]
+    return {
+        "chart_type": "table",
+        "data": {"columns": cols, "rows": rows,
+                 "meta": {"_source": "refund_recovery_staff"}},
+    }
+
+
+def _view_rr_reason_dist(db: Session, params: _PARAMS_T) -> _RET_T:
+    """挽回失败SN 原因分布 (柱+占比)"""
+    s, e = _rr_parse_params(params)
+    data = refund_recovery_analysis(db, start=s, end=e)
+    rd = data.get("reason_dist") or []
+    x_axis = [r.get("reason") or "未知" for r in rd]
+    series = [
+        {"name": "失败SN数", "type": "bar", "data": [int(r.get("order_cnt") or 0) for r in rd],
+         "barMaxWidth": 36,
+         "itemStyle": {
+             "color": (lambda idx: ["#ef4444", "#f97316", "#eab308", "#22c55e", "#06b6d4", "#6366f1", "#ec4899"][idx % 7])(0),
+             "borderRadius": [4, 4, 0, 0],
+         },
+         "label": {"show": True, "position": "top",
+                   "formatter": (lambda p: p)}},
+        {"name": "占比%", "type": "line", "yAxisIndex": 1, "smooth": True, "symbolSize": 7,
+         "data": [round(float(r.get("ratio") or 0), 1) for r in rd],
+         "itemStyle": {"color": "#7c3aed"}, "lineStyle": {"width": 3, "color": "#7c3aed"}},
+    ]
+    # Actually series[0].label.formatter must be string for echarts, and color should be a list in data. Fix below:
+    bars_data = []
+    pal = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#06b6d4", "#6366f1", "#ec4899", "#0ea5e9"]
+    for idx in range(len(rd)):
+        bars_data.append({
+            "value": int(rd[idx].get("order_cnt") or 0),
+            "itemStyle": {"color": pal[idx % len(pal)], "borderRadius": [4, 4, 0, 0]},
+        })
+    series[0]["data"] = bars_data
+    series[0].pop("itemStyle", None)
+    return {
+        "chart_type": "bar",
+        "data": {
+            "title": "挽回失败 SN 原因分布 (归一化 7 大类)",
+            "x_axis": x_axis,
+            "series": series,
+            "legend": {"data": ["失败SN数", "占比%"]},
+            "yAxis": [
+                {"type": "value", "name": "SN数"},
+                {"type": "value", "name": "占比%", "min": 0, "max": 100, "axisLabel": {"formatter": "{value}%"}},
+            ],
+        },
+    }
+
+
+# 注册 HANDLERS dict (code → callable). urge_analysis.py 同名模式.
+HANDLERS: dict[str, _Callable[[Session, _PARAMS_T], _RET_T]] = {
+    "preset_refund_recovery_kpi":            _view_rr_kpi,
+    "preset_refund_recovery_daily_trend":    _view_rr_daily_trend,
+    "preset_refund_recovery_hourly_today":   _view_rr_hourly_today,
+    "preset_refund_recovery_operator_rank":  _view_rr_operator_rank,
+    "preset_refund_recovery_reason_dist":    _view_rr_reason_dist,
+}
 
 

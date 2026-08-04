@@ -988,6 +988,62 @@ PRESET_VIEWS: list[dict] = [
         "classification_rule_ids": [],
         "time_range_default": {"days": 30},
     },
+
+    # ============================================================
+    # 退款挽回 5 个预设视图 (2026-08-04 新口径, 对应 analytics.py HANDLERS)
+    # 这些视图使用 手动 HANDLER 分派 (code 命中 analytics.HANDLERS),
+    # segments 字段仅作元数据占位,实际计算由 HANDLER 完成
+    # ============================================================
+    {
+        "code": "preset_refund_recovery_kpi",
+        "name": "退款挽回 KPI 核心",
+        "description": "核心口径:KPI 汇总(分母SN/成功/失败/成功率/费占比/实际退款金额). 分母=退款专项组接待+真退款类型(4类)SN去重; 失败=分母SN中T+7内进入退款工单或退款单; 成功率=(分母-失败)/分母. 2026-08-04 新口径.",
+        "chart_type": "table",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_refund_recovery_daily_trend",
+        "name": "退款挽回 近30天 日趋势",
+        "description": "近30天 退款挽回 日粒度趋势:总接待SN/成功/失败(柱) + 成功率%(双Y轴折线). 新口径:T+7判定失败, 分母=退款专项组+真退款4类问题.",
+        "chart_type": "line",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_refund_recovery_hourly_today",
+        "name": "退款挽回 今日按小时趋势",
+        "description": "今日 00:00 ~ 当前时间, 按小时 接待SN柱 + 成功率%折线. 供运营今日视图实时监控, 今日数据因T+7未完全收敛, 随时间自动更新.",
+        "chart_type": "bar",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 1},
+    },
+    {
+        "code": "preset_refund_recovery_operator_rank",
+        "name": "退款挽回 人员明细排名",
+        "description": "按退款专员/主管维度 接待SN数/成功/失败/成功率排名 + 独立的退款操作SN/操作金额统计. 注:成功率=接待侧口径(非退款操作侧), 纯退款执行人无接待SN 成功率显示为“—”.",
+        "chart_type": "table",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_refund_recovery_reason_dist",
+        "name": "退款挽回 失败原因分布(归一化7大类)",
+        "description": "挽留失败 SN 的退款原因归一化分布(柱+占比%双Y轴). 7大类:设备硬件/充值问题/服务体验/经济因素/合规风控/用户主观/其他未分类. 真实原因从 refunds.refund_reason 与 service_tickets.service_item 交叉汇总归一.",
+        "chart_type": "bar",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
 ]
 
 
