@@ -22,7 +22,7 @@ _TZ_CN = timezone(timedelta(hours=8))
 
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
-from app.models.device import Device
+from app.models.device import Device, DeviceTag, DeviceTagBinding
 from app.models.device_combo import DeviceCombo
 from app.models.external_complaint import ExternalComplaint
 from app.models.merchant import Merchant
@@ -270,21 +270,79 @@ def _execute_upsert(
     result.updated += min(existing_count, len(rows))
 
 
-def _sync_devices(rows: list[dict], sn_field: str, db: Session) -> None:
-    """从导入记录中同步设备主数据(SN 不存在则创建)
+def _sync_devices(rows: list[dict], sn_field: str, db: Session, fill_fields: list[str] | None = None) -> None:
+    """从导入记录中同步设备主数据(SN 不存在则创建,存在则按需填充 merchant_name 等字段)
 
-    SN 统一转字符串并过滤 None/NaN,避免 IN 查询类型冲突
-    (df.iterrows 会把含 NaN 的列推断为 float,导致 varchar = double precision 错误)
+    SN 统一转字符串并过滤 None/NaN,避免 IN 查询类型冲突。
+    fill_fields: 需要从 rows 中同步到 Device 的额外字段名(如 merchant_name),
+                 这些字段会从每一行的同名 key 取值并填充到 Device。
+                 注意:只接受 Device 模型上真实存在的列(填了不存在的列会被跳过并打 warning)。
     """
+    fill_fields = fill_fields or []
+    # 防御: 过滤掉 Device 模型没有的列,避免 new Device(kw) 报 invalid keyword 或 setattr 炸
+    from app.models.device import Device as _DeviceModel
+    _legal_cols = {c.key for c in _DeviceModel.__table__.columns}
+    bad_fields = [f for f in fill_fields if f not in _legal_cols]
+    if bad_fields:
+        import logging
+        _log = logging.getLogger(__name__)
+        _log.warning(
+            "_sync_devices 跳过 Device 不存在的 fill_fields=%s;"
+            " Device 现有列共 %d 个",
+            bad_fields, len(_legal_cols),
+        )
+    fill_fields = [f for f in fill_fields if f in _legal_cols]
+    # 先把 device_sn 里的前后空白统一去掉(BMS CSV 常带尾部空格),同时按规范化后的 SN 建索引
+    normalized_rows: list[dict] = []
+    for r in rows:
+        nr = dict(r)
+        raw_sn = nr.get(sn_field)
+        if isinstance(raw_sn, str):
+            nr[sn_field] = raw_sn.strip()
+        normalized_rows.append(nr)
+    rows = normalized_rows
+
     sns = {_to_str(r.get(sn_field)) for r in rows}
     sns.discard(None)
     if not sns:
         return
-    existing = set(db.scalars(select(Device.sn).where(Device.sn.in_(sns))))
-    to_create = [Device(sn=sn) for sn in sns if sn not in existing]
-    if to_create:
-        db.bulk_save_objects(to_create)
-        db.flush()
+    existing_map: dict[str, Device] = {
+        d.sn: d for d in db.scalars(select(Device).where(Device.sn.in_(sns)))
+    }
+    created: list[Device] = []
+    updated = 0
+    # 用 SN 建原 rows 索引(取第一条非空字段作为填充值)
+    per_sn_fill: dict[str, dict] = {}
+    for r in rows:
+        sn = _to_str(r.get(sn_field))
+        if not sn:
+            continue
+        if sn not in per_sn_fill:
+            per_sn_fill[sn] = {}
+        for f in fill_fields:
+            v = _to_str(r.get(f))
+            if v and f not in per_sn_fill[sn]:
+                per_sn_fill[sn][f] = v
+    for sn in sns:
+        dev = existing_map.get(sn)
+        fill = per_sn_fill.get(sn, {})
+        if dev is None:
+            kw = {"sn": sn}
+            for f in fill_fields:
+                if f in fill:
+                    kw[f] = fill[f]
+            created.append(Device(**kw))
+        else:
+            changed = False
+            for f in fill_fields:
+                if f in fill and not getattr(dev, f, None):
+                    setattr(dev, f, fill[f])
+                    changed = True
+            if changed:
+                updated += 1
+    if created:
+        db.bulk_save_objects(created)
+    db.flush()
 
 
 # ---------- 各数据类型 upsert ----------
@@ -752,6 +810,162 @@ def upsert_shanmao_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
     _execute_upsert(db, ShanmaoRefund, "refund_no", rows, result)
 
 
+def upsert_device_tags(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """设备标签定义 - 主键 id,无 id 时按 tag_name upsert(避免重复名)
+
+    BMS 导出的标签字典通常含:标签ID、标签名称、标签类型、颜色、描述等。
+    若 BMS 未导出 id:优先用 tag_name 唯一键做 upsert。
+    """
+    rows: list[dict] = []
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            tag_id = _to_int(data.get("id"))
+            tag_name = _to_str(data.get("tag_name"))
+            if not tag_name:
+                result.add_error(idx, "标签名称为空")
+                continue
+            tag_name = tag_name.strip()
+            tag_type = _to_str(data.get("tag_type")) or "preset"
+            # tag_type 归一:中文(预设/自定义)→英文 preset/custom
+            if tag_type in ("预设", "默认", "系统", "sys", "default"):
+                tag_type = "preset"
+            elif tag_type in ("自定义", "用户", "自定义标签", "custom", "user"):
+                tag_type = "custom"
+            r: dict = {
+                # ⚠️  仅当 ID 非空时带 id,否则 PostgreSQL 需要走自增序列;
+                # 如果带了 id=None 但 DB 的 sequence 没被触发,会报 NotNullViolation。
+                "tag_name": tag_name,
+                "tag_type": tag_type,
+                "color": _to_str(data.get("color")),
+                "description": _to_str(data.get("description")),
+            }
+            if tag_id is not None:
+                r["id"] = tag_id
+            rows.append(r)
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
+    # id 非空 → 按 id upsert;否则按 tag_name 唯一键 upsert
+    # 为简化:统一使用 pg_insert on_conflict_do_update (tag_name 有唯一索引已覆盖所有冲突)
+    stmt = pg_insert(DeviceTag).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["tag_name"],
+        set_={
+            "tag_type": stmt.excluded.tag_type,
+            "color": stmt.excluded.color,
+            "description": stmt.excluded.description,
+        },
+    )
+    res = db.execute(stmt)
+    # Postgres on_conflict_do_update 不返回插入/更新计数,这里用近似值
+    inserted_or_updated = res.rowcount or 0
+    result.inserted = inserted_or_updated
+    db.flush()
+
+
+def upsert_device_tag_bindings(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """设备-标签绑定明细(打标记录) - 复合主键 (device_sn, tag_id)
+
+    BMS 导出通常包含:设备SN、标签名称/标签ID、打标人、打标时间、设备所属商户、设备当前套餐等。
+    步骤:
+      1. 若导出的是 tag_name,先查 device_tags 表按 tag_name 解析出 tag_id
+      2. 按 (device_sn, tag_id) 复合键 do_nothing upsert(重复绑定不报错)
+      3. 顺带维护 devices 主表(出现新 SN 自动插入空壳 Device;并从导出列补 merchant_name/package_name 到 Device)
+    """
+    from sqlalchemy import select as sa_select
+
+    rows: list[dict] = []
+    tag_name_cache: dict[str, int] = {}
+    # suggest_mapping 会返回 {target_field: source_col_str}, 所以这里取到的是字符串(源列名),需要统一包成 list
+    _merchant_col: str | None = mapping.get("_merchant_name")  # type: ignore[assignment]
+    _package_col: str | None = mapping.get("_package_name")  # type: ignore[assignment]
+    alias_merchant: list[str] = [_merchant_col] if _merchant_col else []
+    alias_package: list[str] = [_package_col] if _package_col else []
+
+    def _resolve_tag_id(tag_name: str | None, tag_id_raw: object) -> int | None:
+        if tag_id_raw is not None:
+            tid = _to_int(tag_id_raw)
+            if tid is not None:
+                return tid
+        if not tag_name:
+            return None
+        if tag_name in tag_name_cache:
+            return tag_name_cache[tag_name]
+        found = db.scalar(sa_select(DeviceTag).where(DeviceTag.tag_name == tag_name))
+        if found:
+            tag_name_cache[tag_name] = found.id
+            return found.id
+        # 标签不存在 → 临时插入一条 preset 标签(后续刷新 device_tags 数据源会覆盖)
+        tmp = DeviceTag(tag_name=tag_name, tag_type="preset")
+        db.add(tmp)
+        db.flush()
+        tag_name_cache[tag_name] = tmp.id
+        return tmp.id
+
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            device_sn = _to_str(data.get("device_sn"))
+            if device_sn:
+                device_sn = device_sn.strip()  # BMS 导出常带前后空白
+            if not device_sn:
+                result.add_error(idx, "设备SN为空")
+                continue
+            tag_name = _to_str(data.get("tag_name"))
+            if tag_name:
+                tag_name = tag_name.strip()
+            tag_id = _resolve_tag_id(tag_name, data.get("tag_id"))
+            if tag_id is None:
+                result.add_error(idx, "标签ID和标签名称均为空,无法定位标签")
+                continue
+            created_by = _sanitize_name_field(data.get("created_by"), idx, result, "打标人")
+            # 从原始 BMS 列名中取 merchant / package 补充给 Device
+            merchant_name = package_name = None
+            for ali in alias_merchant:
+                v = _to_str(row.get(ali)) if isinstance(row, dict) else None
+                if v:
+                    merchant_name = v.strip()
+                    break
+            for ali in alias_package:
+                v = _to_str(row.get(ali)) if isinstance(row, dict) else None
+                if v:
+                    package_name = v.strip()
+                    break
+            rows.append({
+                "device_sn": device_sn,
+                "tag_id": tag_id,
+                "created_by": created_by,
+                "merchant_name": merchant_name,
+                "package_name": package_name,
+            })
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
+    # 维护 devices 主表(新 SN 先插入,避免外键报错;还补 merchant_name)
+    # 注意: Device 表没有 package_name 字段,套餐名存在 device_combos,不往 Device 填
+    _sync_devices(rows, "device_sn", db, fill_fields=["merchant_name"])
+    # ⚠️ 复合主键 do_nothing 需要的 rows 里字段名必须与 DeviceTagBinding ORM 列完全一致
+    # (注意: _sync_devices 会把 device_sn strip 了,但这里 rows 里的 device_sn 已经在上面 strip 过了 — 一致)
+    bind_rows = [
+        {
+            "device_sn": r["device_sn"],
+            "tag_id": r["tag_id"],
+            "created_by": r.get("created_by"),
+        }
+        for r in rows
+    ]
+    stmt = pg_insert(DeviceTagBinding).values(bind_rows)
+    stmt = stmt.on_conflict_do_nothing(index_elements=["device_sn", "tag_id"])
+    res = db.execute(stmt)
+    result.inserted = res.rowcount or 0
+    db.flush()
+
+
 UPSERT_DISPATCH = {
     "refund": upsert_refunds,
     "wallet": upsert_wallet,
@@ -763,6 +977,8 @@ UPSERT_DISPATCH = {
     "external_complaint": upsert_external_complaints,
     "card_complaint": upsert_card_complaints,
     "shanmao_refund": upsert_shanmao_refunds,
+    "device_tag": upsert_device_tags,
+    "device_tag_binding": upsert_device_tag_bindings,
 }
 
 

@@ -30,7 +30,9 @@ RUN pip install --no-cache-dir \
     "python-multipart>=0.0.9" "pandas>=2.2.0" "openpyxl>=3.1.2" "python-calamine>=0.2.0" \
     "redis>=5.0.0" "python-dotenv>=1.0.0" "orjson>=3.9.0" \
     "pypinyin>=0.50.0" "httpx>=0.27.0" \
-    "playwright>=1.45.0"
+    "playwright>=1.45.0" \
+    # 验证码自动识别(ddddocr + ONNX Runtime,纯 Python,无外部系统依赖)
+    "ddddocr>=1.4.11" "onnxruntime>=1.17.0"
 
 # 安装 Chromium 浏览器
 RUN playwright install chromium --with-deps

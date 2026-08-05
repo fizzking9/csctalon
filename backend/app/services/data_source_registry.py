@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
 from app.models.data_source import DataSource, DataSourceField
+from app.models.device import DeviceTag, DeviceTagBinding
 from app.models.device_combo import DeviceCombo
 from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
@@ -146,6 +147,30 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "pk_strategy": "primary_key",
         "sync_source": "bms",
         "category": "基础数据",
+    },
+    {
+        "code": "device_tag",
+        "model": DeviceTag,
+        "name_cn": "设备标签定义",
+        "time_field": "created_at",
+        "sn_field": None,
+        "pk_field": "id",
+        "pk_strategy": "primary_key",
+        "sync_source": "bms",
+        "category": "基础数据",
+        "description": "BMS 平台维护的标签字典(标签名/类型/颜色/描述)",
+    },
+    {
+        "code": "device_tag_binding",
+        "model": DeviceTagBinding,
+        "name_cn": "设备打标明细",
+        "time_field": "created_at",
+        "sn_field": "device_sn",
+        "pk_field": None,
+        "pk_strategy": "none",
+        "sync_source": "bms",
+        "category": "基础数据",
+        "description": "每台设备被打的所有标签(设备SN × 标签ID 多对多,含打标人)",
     },
     # ===== SCRM 微信聚合平台(客服接待评估报表) =====
     {
@@ -284,6 +309,18 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("device_combo", "used_traffic"): {"role": "dimension", "is_filterable": False},
     ("device_combo", "remaining_traffic"): {"role": "dimension", "is_filterable": False},
     ("device_combo", "status"): {"role": "category"},
+    # device_tag (标签定义表)
+    ("device_tag", "id"): {"role": "dimension", "is_pk": True, "is_filterable": True, "name_cn": "标签ID"},
+    ("device_tag", "tag_name"): {"role": "category", "name_cn": "标签名称"},
+    ("device_tag", "tag_type"): {"role": "category", "enum": ["preset", "custom"], "name_cn": "标签类型(preset预设/custom自定义)"},
+    ("device_tag", "color"): {"role": "dimension", "is_filterable": False, "name_cn": "标签颜色"},
+    ("device_tag", "description"): {"role": "dimension", "is_filterable": False, "name_cn": "标签描述"},
+    ("device_tag", "created_at"): {"role": "time", "name_cn": "创建时间"},
+    # device_tag_binding (设备打标明细 / device_tag_rel 同表)
+    ("device_tag_binding", "device_sn"): {"role": "sn", "name_cn": "设备SN"},
+    ("device_tag_binding", "tag_id"): {"role": "dimension", "is_pk": True, "is_filterable": True, "name_cn": "标签ID"},
+    ("device_tag_binding", "created_by"): {"role": "person", "name_cn": "打标人"},
+    ("device_tag_binding", "created_at"): {"role": "time", "name_cn": "打标时间"},
     # ticket
     ("ticket", "ticket_no"): {"role": "dimension", "is_pk": True, "is_filterable": False},
     ("ticket", "refund_amount"): {"role": "amount", "agg": "sum"},
@@ -478,10 +515,10 @@ def ensure_data_sources_registered(db: Session) -> dict:
         # 表名/状态:占位项用占位表名 + placeholder 状态(无物理表)
         table_name = f"_placeholder_{seed['code']}" if is_placeholder else seed["model"].__tablename__
         status = "placeholder" if is_placeholder else "active"
-        time_field = None if is_placeholder else seed["time_field"]
-        sn_field = None if is_placeholder else seed["sn_field"]
-        pk_field = None if is_placeholder else seed["pk_field"]
-        pk_strategy = "none" if is_placeholder else seed["pk_strategy"]
+        time_field = seed.get("time_field") if not is_placeholder else None
+        sn_field = seed.get("sn_field") if not is_placeholder else None
+        pk_field = seed.get("pk_field") if not is_placeholder else None
+        pk_strategy = seed.get("pk_strategy", "none") if not is_placeholder else "none"
 
         # upsert DataSource
         ds = db.scalar(select(DataSource).where(DataSource.code == seed["code"]))
