@@ -13,7 +13,7 @@ from app.models.data_source import (  # noqa: F401
     SemanticRole,
     SourceType,
 )
-from app.models.device import Device, DeviceTag, device_tag_rel  # noqa: F401
+from app.models.device import Device, DeviceTag, DeviceTagBinding, device_tag_rel  # noqa: F401
 from app.models.device_combo import DeviceCombo  # noqa: F401
 from app.models.external_complaint import ExternalComplaint  # noqa: F401
 from app.models.incident import Incident  # noqa: F401
@@ -55,6 +55,7 @@ __all__ = [
     "Device",
     "DeviceCombo",
     "DeviceTag",
+    "DeviceTagBinding",
     "ExternalComplaint",
     "Incident",
     "Measure",

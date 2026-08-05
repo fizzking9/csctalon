@@ -17,12 +17,35 @@
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from app.core.config import settings
+
+# 验证码自动识别(懒加载,首次调用才 import ddddocr)
+# 失败时 fallback 为 None(走人工/报错)
+# 除了 try_ocr_captcha(字符串版),还加载带置信度版 + 常量阈值
+try:
+    from app.services.captcha_session import (  # type: ignore
+        try_ocr_captcha,
+        try_ocr_captcha_with_confidence,
+        _OCR_MIN_CHAR_PROB,
+        _OCR_AVG_PROB,
+        _OCR_PRECHECK_MAX_REFRESH,
+    )
+except Exception as _e_import_ocr:  # pragma: no cover - 导入失败不影响运行,只是 OCR 自动识别不可用
+    try_ocr_captcha = None  # type: ignore
+    try_ocr_captcha_with_confidence = None  # type: ignore
+    _OCR_MIN_CHAR_PROB = 0.72
+    _OCR_AVG_PROB = 0.86
+    _OCR_PRECHECK_MAX_REFRESH = 20
+    logging.getLogger(__name__).warning(
+        f"加载 captcha_session.try_ocr_captcha 失败({_e_import_ocr!r}),"
+        f" 闪猫等需验证码登录的数据源将无法自动识别验证码,需要手动登录。"
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +95,24 @@ BMS_DATA_SOURCES: dict[str, dict] = {
         "page_path": "/index.html#/order-alrrefundapply-alrrefundapply",
         "default_sync": False,  # 首次上线默认不同步,验证通过后管理员手动开启
         "requires_captcha": True,
+        # ⚠️  闪猫平台日期筛选组件 class=el-date-editor--datetimerange
+        #     (Element UI 日期+时间范围选择器,两个 .el-range-input 输入框左右排列),
+        #     必须填完整「YYYY-MM-DD HH:mm:ss」(否则 Vue 组件不接受,清空为 '',导出会拿到历史全量 1976 行)。
+        #     同时要防止 Vue 渲染稍慢导致 query_selector('.el-date-editor--datetimerange') 首轮失败,
+        #     策略1已加最多 6s 轮询;策略4也加了「优先命中 el-range-input 所在行」。
+        "time_format": "%Y-%m-%d %H:%M:%S",
+    },
+    # BMS 设备标签管理页面(https://wifi.cloud-cat.cn/bms/index.html#/device/device-tags)
+    # ⚠️  注意: 该页面点击「导出」导出的并不是「标签定义字典」(device_tag),
+    # 而是每台设备被打标签的明细行(设备SN × 标签名 × 打标人 × 更新时间),
+    # 对应数据源 code=device_tag_binding。标签定义(device_tag)从明细里按 tag_name 自动去重补插
+    # (见 upsert_device_tag_bindings 里 resolve_tag_id 临时插 DeviceTag 行的逻辑),
+    # 且可在本系统侧手动维护,不再做 BMS 自动同步。
+    "device_tag_binding": {
+        "name": "设备标签(打标明细)",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/device/device-tags",
+        "default_sync": False,  # 标签绑定明细变动少,按需手动同步
     },
 }
 
@@ -88,6 +129,666 @@ def _storage_state_path(data_type: str) -> Path:
     base = Path(settings.UPLOAD_DIR) / STORAGE_STATE_DIR
     base.mkdir(parents=True, exist_ok=True)
     return base / f"{data_type}.json"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 验证码自动登录:定位验证码图片 -> ddddocr 识别 -> 填单重试最多 N 次
+# ──────────────────────────────────────────────────────────────────────
+_CAPTCHA_OCR_MAX_RETRY = 8  # 自动识别最多重试次数(每次刷新验证码)
+# 验证码类错误关键词(只有命中这些的错误,才值得刷新验证码再试)
+_CAPTCHA_ERROR_KEYS = ("验证码", "校验码", "驗證碼", "captcha", "vcode", "图形码", "图形验证码")
+# 账号密码类错误关键词(命中则立即终止重试,不要再浪费机会)
+_ACCOUNT_ERROR_KEYS = (
+    "账号", "用户名", "账户", "用户", "密码", "口令",
+    "错误", "不正确", "不对", "无效", "错误的", "不匹配",
+    "锁定", "禁用", "被锁", "封禁",
+    "登录名", "登录密码",
+)
+
+
+async def _locate_captcha_element(page) -> tuple[object | None, bytes | None]:
+    """定位验证码元素并截图(返回:元素 locator, png_bytes)。
+
+    策略与 /captcha-login/start 完全一致,确保两条路径识别效果一致:
+    1) 直接找 src/class/id 带 captcha/vcode/verify/code 的 img/canvas
+    2) 找含「验证码/校验码」文字的表单项下的 img/canvas
+    3) 再兜底:整个登录表单或页面截图
+    """
+    captcha_elem = None
+    for sel in [
+        'img[src*="captcha" i]',
+        'img[src*="vcode" i]',
+        'img[src*="verify" i]',
+        'img[src*="code" i]',
+        'canvas[class*="captcha" i]',
+        'canvas[id*="captcha" i]',
+    ]:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0 and await loc.is_visible():
+                captcha_elem = loc
+                break
+        except Exception:
+            continue
+    if captcha_elem is None:
+        try:
+            form_item = page.locator(
+                ".el-form-item:has-text('验证码'), .el-form-item:has-text('校验码')"
+            ).first
+            if await form_item.count() > 0:
+                for sel in ["img", "canvas"]:
+                    loc = form_item.locator(sel).first
+                    if await loc.count() > 0 and await loc.is_visible():
+                        captcha_elem = loc
+                        break
+        except Exception:
+            pass
+    # 截图
+    png: bytes | None = None
+    if captcha_elem is not None:
+        try:
+            png = await captcha_elem.screenshot(type="png")
+        except Exception:
+            png = None
+    if not png:
+        try:
+            form = page.locator(".login-container, .login-form, form, .el-form").first
+            if await form.count() > 0 and await form.is_visible():
+                png = await form.screenshot(type="png")
+            else:
+                png = await page.screenshot(type="png", full_page=False)
+        except Exception:
+            try:
+                png = await page.screenshot(type="png", full_page=False)
+            except Exception:
+                png = None
+    return captcha_elem, png
+
+
+async def _fill_accounts(page, username: str, password: str) -> None:
+    """统一的账号密码填写逻辑(与 _captcha_do_fill_and_login 保持一致)"""
+    user_sel = (
+        'input[type="text"], input[placeholder*="账号" i],'
+        ' input[placeholder*="用户名" i], input[placeholder*="手机号" i]'
+    )
+    try:
+        await page.locator(user_sel).first.fill(username, timeout=10000)
+    except Exception:
+        await page.locator("input:visible").first.fill(username, timeout=10000)
+    pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
+    await page.locator(pwd_sel).first.fill(password, timeout=10000)
+
+
+async def _fill_captcha_and_click(page, captcha: str) -> None:
+    """填入验证码并点击登录按钮(或按回车提交,后者更稳妥不会点错装饰按钮)"""
+    captcha_sel = (
+        '.el-form-item:has-text("验证码") input:visible,'
+        '.el-form-item:has-text("校验码") input:visible,'
+        'input[placeholder*="验证码" i], input[placeholder*="校验码" i],'
+        ' input[placeholder*="captcha" i]'
+    )
+    cap_inp = None
+    try:
+        loc = page.locator(captcha_sel).first
+        if await loc.count() > 0 and await loc.is_visible(timeout=3000):
+            await loc.fill(captcha, timeout=8000)
+            cap_inp = loc
+    except Exception:
+        # 兜底: 找第三个可见 input(账号/密码/验证码顺序)
+        try:
+            vis = page.locator("input:visible")
+            if await vis.count() >= 3:
+                nth = vis.nth(2)
+                await nth.fill(captcha, timeout=5000)
+                cap_inp = nth
+        except Exception:
+            pass
+    await asyncio.sleep(0.8)
+
+    # ── 登录提交:严格的优先级,避免误点到页面顶部装饰性 el-button--primary(如"欢迎来到闪猫加速") ──
+    # 优先级 1: 页面显式 type=submit 按钮(最可靠)
+    # 优先级 2: 文本明确写着「登录/登 录/Sign in/LOGIN」的可见按钮(必须文本匹配,乱点装饰按钮的坑就在这!)
+    # 优先级 3: form 里最后一个可见按钮(往往是提交)
+    # 优先级 4: 聚焦验证码输入框 → 按 Enter(万能兜底,调试里就是靠这个成功的)
+    submitted = False
+
+    # 1) type=submit
+    if not submitted:
+        try:
+            sels = [
+                'button[type="submit"]:visible',
+                'input[type="submit"]:visible',
+            ]
+            for sel in sels:
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible(timeout=1000):
+                    await loc.click(timeout=8000)
+                    submitted = True
+                    break
+        except Exception:
+            submitted = False
+
+    # 2) 文本精确匹配「登录/登 录/Sign in/LOGIN」的可见按钮(必须满足 has-text + 长度小,排除"欢迎来到闪猫加速"!)
+    if not submitted:
+        texts = ["登录", "登 录", "Sign in", "Sign In", "SIGN IN", "LOGIN", "Login", "立即登录", "登錄"]
+        try:
+            # 先找所有可见 button
+            btns = page.locator("button:visible")
+            cnt = await btns.count()
+            for i in range(cnt):
+                b = btns.nth(i)
+                try:
+                    txt = (await b.inner_text(timeout=400)).strip()
+                    if not txt or len(txt) > 20:
+                        continue
+                    hit = any(t.lower() == txt.lower() for t in texts) or any(
+                        t in txt for t in texts if t in ("登录", "登 录", "登錄")
+                    )
+                    if not hit:
+                        continue
+                    # 再额外校验: 按钮大概率在 input 附近(表单区域,不是页面最顶部装饰区)
+                    box = await b.bounding_box()
+                    if box and box["y"] < 100:
+                        # 页面最顶部的导航栏/欢迎语按钮,直接跳过(就是"欢迎来到闪猫加速"那个坑!)
+                        continue
+                    await b.click(timeout=8000)
+                    submitted = True
+                    break
+                except Exception:
+                    continue
+        except Exception:
+            submitted = False
+
+    # 3) form 里的最后一个按钮
+    if not submitted:
+        try:
+            forms = page.locator("form:visible")
+            if await forms.count() > 0:
+                f = forms.first
+                btns = f.locator("button:visible")
+                cnt = await btns.count()
+                if cnt > 0:
+                    # 取最后一个,通常是"登录"
+                    await btns.nth(cnt - 1).click(timeout=8000)
+                    submitted = True
+        except Exception:
+            submitted = False
+
+    # 4) 兜底:聚焦验证码输入框(或密码框)→ 回车(表单原生 submit,绝对不会点错装饰按钮!)
+    if not submitted:
+        try:
+            # 优先聚焦验证码输入框(验证码是最后一个填的,通常按 Enter 就提交了)
+            if cap_inp is not None and await cap_inp.count() > 0:
+                try:
+                    await cap_inp.focus(timeout=1000)
+                except Exception:
+                    await cap_inp.click(timeout=1000)
+                await asyncio.sleep(0.2)
+                await page.keyboard.press("Enter")
+                submitted = True
+        except Exception:
+            submitted = False
+    if not submitted:
+        try:
+            # 最后兜底:焦点直接给 body,按 Enter
+            await page.keyboard.press("Tab")
+            await asyncio.sleep(0.1)
+            await page.keyboard.press("Enter")
+        except Exception:
+            raise RuntimeError("找不到任何可用的登录提交方式(按钮/Enter 均失败)")
+
+
+async def _poll_login_errors_for(
+    page,
+    seconds: float = 5.0,
+    interval: float = 0.25,
+) -> list[str]:
+    """登录提交后,连续轮询一段时间,收集所有出现过的错误提示(toast/表单/alert/页面关键词)。
+
+    因为 Element UI / Antd 的错误 toast 默认 2-3 秒就会消失,单次抓取很容易漏掉;
+    这个函数在按钮点击后的前 N 秒内持续轮询,返回去重后的所有错误消息列表(按首次出现顺序)。
+    """
+    seen: set[str] = set()
+    order: list[str] = []
+    import math
+    rounds = max(1, int(math.ceil(seconds / interval)))
+    # 全覆盖选择器:Element UI / Antd / Vant / 原生常见错误容器
+    sels = [
+        # Element UI
+        ".el-message",
+        ".el-message__content",
+        ".el-message-box__message",
+        ".el-notification__content",
+        ".el-notification__message",
+        ".el-form-item__error",
+        ".el-form-item__error-text",
+        # Antd
+        ".ant-message-error",
+        ".ant-notification-notice-message",
+        ".ant-notification-notice-description",
+        # Vant
+        ".van-toast",
+        ".van-toast__text",
+        # 通用
+        ".toast",
+        ".toast-message",
+        ".toast-content",
+        ".notice-content",
+        ".alert-content",
+        ".form-error",
+        ".error-text",
+        ".error-message",
+    ]
+    for _ in range(rounds):
+        # 1) 轮询所有 toast/error 容器
+        for sel in sels:
+            try:
+                loc = page.locator(sel)
+                cnt = await loc.count()
+                for i in range(cnt):
+                    n = loc.nth(i)
+                    try:
+                        # is_visible 带超时可能抛,加 short timeout
+                        vis = await n.is_visible(timeout=50)
+                        if not vis:
+                            continue
+                        t = (await n.inner_text(timeout=200)).strip()
+                        if t and len(t) <= 300 and t not in seen:
+                            seen.add(t)
+                            order.append(t)
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        # 2) 页面 body 关键词兜底(每 5 轮一次即可,避免太频繁)
+        if _ % 5 == 0:
+            try:
+                body = await page.inner_text("body", timeout=400)
+                for kw in (
+                    "验证码错误", "验证码失效", "验证码过期", "验证码不对",
+                    "密码错误", "密码不正确", "密码不对", "用户名或密码",
+                    "账号密码", "账号不存在", "账号已锁定", "账号已禁用",
+                    "用户不存在", "用户被锁定",
+                    "登录失败", "登录名或密码",
+                ):
+                    if kw in body:
+                        i = body.find(kw)
+                        frag = body[max(0, i - 20): i + 80].strip()
+                        if frag and frag not in seen:
+                            seen.add(frag)
+                            order.append(frag)
+                        break
+            except Exception:
+                pass
+        await asyncio.sleep(interval)
+    return order
+
+
+async def _read_login_error(page) -> str:
+    """登录失败后读取页面错误提示(单次采样版,兼容旧 API 调用方)。
+
+    新代码建议优先用 _poll_login_errors_for,在按钮点击后的「黄金 3-5 秒」内轮询抓取,
+    避免 toast 消失后漏抓。
+    """
+    errors = await _poll_login_errors_for(page, seconds=1.0, interval=0.3)
+    if errors:
+        return " | ".join(errors)
+    try:
+        whole = await page.inner_text("body", timeout=1500)
+        for kw in ["验证码", "错误", "失败", "密码", "用户名"]:
+            if kw in whole:
+                idx = whole.find(kw)
+                return whole[max(0, idx - 20): idx + 40].strip()
+    except Exception:
+        pass
+    return ""
+
+
+async def _classify_login_errors(errors: list[str]) -> str:
+    """根据本轮轮询到的错误消息列表,返回本轮错误的类别。
+
+    Returns:
+      "captcha"  -> 只有验证码错,刷新验证码继续试
+      "account"  -> 账号/密码/账号状态错,不要再试
+      "unknown"  -> 不知道啥错,默认继续试
+    """
+    if not errors:
+        return "unknown"
+    text = "\n".join(errors)
+    has_account_kw = any(k in text for k in _ACCOUNT_ERROR_KEYS)
+    has_captcha_kw = any(k in text for k in _CAPTCHA_ERROR_KEYS)
+    # 账号密码类关键词优先级更高(除非明确只讲验证码)
+    if has_account_kw and not has_captcha_kw:
+        return "account"
+    if has_captcha_kw:
+        # 注意:「用户名或密码错误,请重新输入(验证码也顺便清了)」这种文案
+        # 可能同时出现,但核心根因其实是账号密码。把「错误/不正确/不对」
+        # 前缀+没有出现「验证码」关键词的句子,单独判断一下。
+        if "验证码错误" in text or "验证码失效" in text or "验证码过期" in text:
+            return "captcha"
+        # 出现了验证码关键词,但不是"验证码错误"(例如「请输入验证码」),还是按验证码类
+        # 除非明确有账号密码类的强特征
+        strong_account_kws = (
+            "用户名或密码", "账号或密码", "账号密码错误", "密码错误",
+            "密码不正确", "用户不存在", "账号不存在",
+            "账号已锁定", "账号已禁用", "用户被锁定",
+        )
+        if any(kw in text for kw in strong_account_kws):
+            return "account"
+        return "captcha"
+    return "unknown"
+
+
+async def _refresh_captcha_image(page, captcha_elem) -> bool:
+    """尝试「点击验证码图片刷新验证码」;失败返回 False。
+
+    大部分 BMS 系列的图形验证码图片,点击本身就会刷新;
+    比整页 goto/reload 快很多,并且不会丢失已填的账号密码。
+    """
+    if captcha_elem is None:
+        return False
+    try:
+        # 点击前截一张图用于对比(部分 canvas 内容不变会导致字节相同)
+        try:
+            before = await captcha_elem.screenshot(type="png")
+        except Exception:
+            before = None
+        try:
+            # 先等待可点击
+            await captcha_elem.wait_for(state="visible", timeout=2000)
+            await captcha_elem.click(timeout=2000)
+        except Exception:
+            # 元素被 overlay 覆盖,试试 force
+            await captcha_elem.click(force=True, timeout=2000)
+        await asyncio.sleep(0.6)
+        try:
+            after = await captcha_elem.screenshot(type="png")
+        except Exception:
+            after = None
+        if before and after and before != after:
+            return True
+        # 图片字节没变但也可能是刷新了(比如随机刷新),按成功算
+        return True
+    except Exception:
+        return False
+
+
+async def _try_auto_login_via_ocr(
+    page,
+    context,
+    data_type: str,
+    login_url: str,
+    username: str,
+    password: str,
+    state_path: Path,
+) -> tuple[bool, str]:
+    """「检测到需要验证码」时,先走 ddddocr 自动识别登录(最多 8 次)。
+
+    内部重试策略(比旧版快 + 更准):
+      - 首次: goto 登录页并填账号密码
+      - 后续(验证码类错误 → 继续): 优先点验证码图片刷新(不丢失已填账号密码,比整页 reload 快 3-5 秒)
+      - 账号/密码类错误 → 立即终止重试(不要再浪费机会)
+      - 点登录后 0.25s 间隔轮询 5 秒 toast(避免 3s 自动消失漏抓)
+      - URL 离开 login 路由 或 出现"工作台/订单/管理"等成功关键词 → 判定登录成功,保存 storage_state
+    """
+    log = logger
+    ocr_avail = callable(try_ocr_captcha)
+    if not ocr_avail:
+        return False, "验证码自动识别未启用(ddddocr 未加载)"
+
+    last_err: str = ""
+    account_password_filled = False  # 第 1 次填过后,后续点击刷新验证码就不用重填账号密码了
+    cap_elem = None
+
+    for attempt in range(1, _CAPTCHA_OCR_MAX_RETRY + 1):
+        # ───────── 1) 刷新验证码 / 页面 ─────────
+        if attempt == 1:
+            # 第一次走完整 goto + 填账号密码
+            try:
+                await page.goto(login_url, wait_until="networkidle", timeout=60000)
+                await asyncio.sleep(2)
+            except Exception as e:
+                last_err = f"第{attempt}次: 刷新登录页失败: {e}"
+                log.warning(f"[{data_type}] {last_err}")
+                continue
+            await _fill_accounts(page, username, password)
+            account_password_filled = True
+        else:
+            # 后续尝试:优先点验证码图片刷新;失败才 reload
+            refreshed = await _refresh_captcha_image(page, cap_elem)
+            if not refreshed:
+                try:
+                    await page.reload(wait_until="networkidle", timeout=60000)
+                    await asyncio.sleep(2)
+                    await _fill_accounts(page, username, password)
+                    account_password_filled = True
+                except Exception as e:
+                    last_err = f"第{attempt}次: reload 登录页失败: {e}"
+                    log.warning(f"[{data_type}] {last_err}")
+                    continue
+            else:
+                # 点刷新验证码通常会清空验证码输入框,账号密码一般还在;
+                # 保险起见,如果账号密码框是空的就再填一次(比如某些系统清整个 form)
+                try:
+                    u_sel = 'input[type="text"], input[placeholder*="账号" i], input[placeholder*="用户名" i]'
+                    p_sel = 'input[type="password"], input[placeholder*="密码" i]'
+                    uval = await page.locator(u_sel).first.input_value(timeout=1500)
+                    pval = await page.locator(p_sel).first.input_value(timeout=1500)
+                    if (not uval) or (not pval):
+                        await _fill_accounts(page, username, password)
+                        account_password_filled = True
+                    # 验证码输入框:清空之前可能填过但提交失败的旧值
+                    try:
+                        captcha_inp = page.locator(
+                            '.el-form-item:has-text("验证码") input:visible,'
+                            '.el-form-item:has-text("校验码") input:visible,'
+                            'input[placeholder*="验证码" i], input[placeholder*="校验码" i]'
+                        ).first
+                        if await captcha_inp.count() > 0:
+                            await captcha_inp.fill("", timeout=1500)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+        # ───────── 2) 定位验证码 → OCR 置信度预检(不登录,低置信度就刷新验证码重认) ─────────
+        # 核心策略(用户提出的优化):避免「低把握的识别结果强行去登录 → 触发验证码错误toast + 验证码失效」
+        # 先在本地反复刷新验证码,直到 OCR 给出一个"有把握"的结果再去提交,最大限度减少服务端报错。
+        cap_elem, cap_png = await _locate_captcha_element(page)
+        if not cap_png:
+            last_err = "定位不到验证码图片元素,无法自动识别"
+            break
+
+        use_confidence_mode = callable(try_ocr_captcha_with_confidence)
+        best_result: dict | None = None
+        best_score = -1.0
+        pre_tried = 0
+        ocr_text: str | None = None
+
+        while pre_tried < _OCR_PRECHECK_MAX_REFRESH:  # type: ignore[operator]
+            pre_tried += 1
+            cur_result: dict | None = None
+            if use_confidence_mode:
+                try:
+                    cur_result = try_ocr_captcha_with_confidence(cap_png)  # type: ignore[misc]
+                except Exception as _e_ocr:
+                    log.warning(f"[{data_type}] 带置信度 OCR 抛错,回退到纯字符串模式: {_e_ocr}")
+                    cur_result = None
+            if cur_result is None:
+                # 回退: try_ocr_captcha 纯字符串模式,按退化中等置信度打分
+                tmp = try_ocr_captcha(cap_png)
+                if tmp is None:
+                    break
+                cur_result = {
+                    "code": tmp,
+                    "used_beta": None,
+                    "min_prob": 0.70,
+                    "avg_prob": 0.80,
+                    "probs": [0.70] * len(tmp),
+                    "chars": list(tmp),
+                    "confident": False,
+                }
+            # 综合评分:单字符最低概率权重加倍(因为只要有一个字符认错,整条验证码就错了)
+            try:
+                min_p = float(cur_result.get("min_prob", 0.0))
+                avg_p = float(cur_result.get("avg_prob", 0.0))
+            except Exception:
+                min_p = 0.0
+                avg_p = 0.0
+            cur_score = (min_p * 2.0 + avg_p) / 3.0
+            if cur_score > best_score:
+                best_score = cur_score
+                best_result = cur_result
+            # 达标了 → 立即停止预检,拿去登录
+            if bool(cur_result.get("confident")):
+                log.info(
+                    "[%s] OCR 预检第%d/%d次:识别=%s, min=%.3f avg=%.3f,达到阈值(min>=%s avg>=%s) → 直接拿去登录",
+                    data_type, pre_tried, _OCR_PRECHECK_MAX_REFRESH, cur_result.get("code"),
+                    min_p, avg_p, _OCR_MIN_CHAR_PROB, _OCR_AVG_PROB,
+                )
+                ocr_text = cur_result["code"]
+                break
+            # 未达标 → 刷一下验证码图片,下次循环重新识别
+            log.info(
+                "[%s] OCR 预检第%d/%d次:识别=%s, min=%.3f avg=%.3f,不达标 → 刷新验证码再认",
+                data_type, pre_tried, _OCR_PRECHECK_MAX_REFRESH, cur_result.get("code"),
+                min_p, avg_p,
+            )
+            if pre_tried >= _OCR_PRECHECK_MAX_REFRESH:  # type: ignore[operator]
+                break
+            refreshed = await _refresh_captcha_image(page, cap_elem)
+            if not refreshed:
+                # 验证码点不动,没必要再预检了
+                break
+            # 刷新后重新截图(元素对象可能没变但内容变了)
+            new_png = None
+            try:
+                if cap_elem is not None:
+                    new_png = await cap_elem.screenshot(type="png")
+            except Exception:
+                new_png = None
+            if not new_png:
+                _, new_png = await _locate_captcha_element(page)
+            if not new_png:
+                break
+            cap_png = new_png
+
+        # 预检循环结束: 要么找到了 confident 结果(ocr_text 已赋值),要么超次数,用最高分兜底
+        if ocr_text is None and best_result is not None:
+            ocr_text = best_result.get("code")  # type: ignore[assignment]
+            if isinstance(ocr_text, str) and ocr_text:
+                log.warning(
+                    "[%s] OCR 预检 %d 次均未达到置信度阈值,取最高分=%.3f 的识别结果=%s 登录兜底",
+                    data_type, pre_tried, best_score, ocr_text,
+                )
+        if not ocr_text:
+            # 最后兜底:一次普通字符串 OCR
+            ocr_text = try_ocr_captcha(cap_png)  # type: ignore[misc]
+        if not ocr_text:
+            last_err = f"第{attempt}次: ddddocr 未识别出合法验证码(返回 None)"
+            log.warning(f"[{data_type}] 验证码 OCR: {last_err}")
+            break
+        log.info(
+            f"[{data_type}] 验证码自动识别第{attempt}/{_CAPTCHA_OCR_MAX_RETRY}次:"
+            f" 截图{len(cap_png)}字节,识别结果={ocr_text!r},填入登录..."
+        )
+        # ───────── 3) 填验证码 + 点登录(并发启动:URL跳转监听 + 错误轮询) ─────────
+        try:
+            await _fill_captcha_and_click(page, ocr_text)
+        except Exception as e:
+            last_err = f"填入验证码或点击登录失败: {e}"
+            log.warning(f"[{data_type}] {last_err}")
+            continue
+
+        url_skipped = asyncio.create_task(asyncio.sleep(0))  # placeholder,实际下面覆盖
+
+        async def _wait_url_jump() -> bool:
+            try:
+                await page.wait_for_url(
+                    lambda u: (
+                        "login" not in u.lower().split("#")[-1]
+                        if "#" in u
+                        else "login" not in u.lower()
+                    ),
+                    timeout=15000,
+                )
+                return True
+            except Exception:
+                return False
+
+        async def _poll_errors_task() -> tuple[str, list[str]]:
+            errs = await _poll_login_errors_for(page, seconds=5.0, interval=0.25)
+            if errs:
+                combined = " | ".join(errs)
+                log.info(f"[{data_type}] 第{attempt}次登录后捕获到错误: {combined}")
+            return (await _classify_login_errors(errs)), errs
+
+        # 并发:等待 URL 跳转 + 前 5 秒持续轮询错误
+        url_task = asyncio.create_task(_wait_url_jump())
+        err_task = asyncio.create_task(_poll_errors_task())
+        done, _ = await asyncio.wait(
+            [url_task, err_task],
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=16.0,
+        )
+        # URL 先跳了 → 登录成功
+        if url_task in done and url_task.result():
+            log.info(
+                f"[{data_type}] 验证码自动识别登录成功(第{attempt}次尝试,OCR={ocr_text},URL已跳转)"
+            )
+            err_task.cancel()
+            try:
+                await asyncio.sleep(3)
+                await context.storage_state(path=str(state_path))
+                log.info(f"[{data_type}] 登录态已保存: {state_path.name}")
+            except Exception as e:
+                log.warning(f"[{data_type}] 保存登录态失败(不影响本次抓取): {e}")
+            return True, "验证码自动识别登录成功"
+        # URL 没跳,但错误收集任务可能已经返回 → 等它
+        err_kind = "unknown"
+        err_list: list[str] = []
+        try:
+            if not err_task.done():
+                err_kind, err_list = await asyncio.wait_for(err_task, timeout=1.0)
+            else:
+                err_kind, err_list = err_task.result()
+        except Exception:
+            pass
+        # URL 等 16s 都没跳,最后再判定一次(避免极端情况刚好 15.9s 才跳)
+        still_on_login = False
+        try:
+            u = page.url.lower()
+            still_on_login = ("login" in u.split("#")[-1]) if "#" in u else ("login" in u)
+        except Exception:
+            still_on_login = True
+        if not still_on_login:
+            log.info(
+                f"[{data_type}] 第{attempt}次URL判定已离开登录,视为登录成功(OCR={ocr_text})"
+            )
+            try:
+                await asyncio.sleep(3)
+                await context.storage_state(path=str(state_path))
+            except Exception as e:
+                log.warning(f"[{data_type}] 保存登录态失败(不影响): {e}")
+            return True, "验证码自动识别登录成功"
+        # 判定失败原因
+        err_text = (
+            (" | ".join(err_list))
+            if err_list
+            else (await _read_login_error(page) or "未跳转,可能验证码错误或账号密码错误")
+        )
+        last_err = f"第{attempt}次识别({ocr_text})登录失败: {err_text}"
+        log.warning(f"[{data_type}] {last_err}")
+        # 账号密码类错误 → 立即中止重试(再试只是浪费机会)
+        if err_kind == "account":
+            log.warning(
+                f"[{data_type}] 判定为账号/密码/账号状态类错误,终止重试;错误=%r",
+                err_list,
+            )
+            break
+        # captcha / unknown → 进入下次重试
+        url_task.cancel()
+    return False, last_err or f"自动识别{_CAPTCHA_OCR_MAX_RETRY}次均失败"
 
 
 class FetchResult:
@@ -300,16 +1001,155 @@ class BmsFetcher:
     async def _set_time_range(self, page, start_str: str, end_str: str):
         """设置时间范围 - 适配 Element UI 日期选择器
 
-        策略:
-          1. 优先找 datetimerange 范围选择器(单个组件两个 input)
-          2. 其次找可见的日期 input(过滤隐藏的)
-          3. 兜底用 placeholder 匹配
+        策略(优先级从高到低,高优先级命中即 return):
+          0) [快速轮询] 最多等 6s 找 Element UI datetimerange/daterange 容器
+               class=el-date-editor--datetimerange 或 el-date-editor--daterange
+               → 内部两个 .el-range-input 填 start/end(填完再读 value 确认,避免 Vue 清空)
+          1) 可见 input 里找 className 含 el-range-input / 父节点含 el-date-editor 的前 2 个
+          2) 可见 placeholder 含「日期/时间/开始/结束」的 input
+          3) [策略4兜底] y 行分组:优先命中含 el-range-input 的 y 行;否则取最上一行 ≥2 个非 readonly text input
 
         Element UI datetimerange 结构:
-          .el-date-editor--datetimerange
+          .el-date-editor.el-date-editor--datetimerange
             input.el-range-input (开始)
             input.el-range-input (结束)
         """
+        # ── 策略0(推荐):快速轮询 datetimerange/daterange 容器(最多 6s,每 0.75s 一次) ──
+        #   解决:闪猫/Vue 渲染稍慢时,首轮 query_selector 找不到即退到策略4选错 input。
+        logger.info(
+            "[策略0] 轮询找 datetimerange 容器(最多 6s):期望找到 .el-date-editor--datetimerange > 2x .el-range-input"
+        )
+        range_pat_selectors = [
+            ".el-date-editor--datetimerange",
+            ".el-date-editor--daterange",
+            ".el-range-editor",
+        ]
+        range_container = None
+        range_inputs = None
+        for try_i in range(8):
+            for sel in range_pat_selectors:
+                try:
+                    rc = await page.query_selector(f"{sel}:visible")
+                    if rc:
+                        inps = await rc.query_selector_all("input.el-range-input:visible, input:visible")
+                        # 只取非 readonly/非 disabled 的前 2 个
+                        good = []
+                        for ip in inps:
+                            try:
+                                if not await ip.is_visible(): continue
+                                if await ip.get_attribute("readonly") or await ip.get_attribute("disabled"):
+                                    continue
+                                good.append(ip)
+                            except Exception:
+                                continue
+                        if len(good) >= 2:
+                            range_container = rc
+                            range_inputs = [good[0], good[1]]
+                            break
+                except Exception:
+                    pass
+            if range_inputs is not None:
+                break
+            await asyncio.sleep(0.75)
+        if range_container and range_inputs:
+            logger.info(
+                f"  [策略0] 命中(轮询第 {try_i+1}/8):尝试填 start={start_str!r} end={end_str!r}"
+            )
+            # ── 填值:模拟真实用户 click→ctrl+a→backspace→type 键盘输入,确保 Vue v-model 内部 state 更新 ──
+            #   原因:Element UI DatePicker/DateTimeRange 组件内部维护 v-model,
+            #   直接 fill / eval 修改 DOM input.value 不会同步到 Vue 实例的 this.value,
+            #   导致查询/导出时 Vue 仍按空值处理,筛选无效。
+            for i_el, val in [(range_inputs[0], start_str), (range_inputs[1], end_str)]:
+                try:
+                    await i_el.scroll_into_view_if_needed()
+                    await asyncio.sleep(0.18)
+                    await i_el.click()
+                    await asyncio.sleep(0.28)
+                    await page.keyboard.press("Control+A")
+                    await asyncio.sleep(0.10)
+                    await page.keyboard.press("Backspace")
+                    await asyncio.sleep(0.15)
+                    await i_el.type(val, delay=35)
+                    await asyncio.sleep(0.30)
+                except Exception as e:
+                    logger.warning(f"  [策略0] 模拟键盘 type 失败,回退到 _fill_el_input: {e}")
+                    await self._fill_el_input(page, i_el, val)
+            # 触发两个 input blur → 点击页面右上角空白区域,让 DateTimeRange picker 失焦并同步内部值
+            try:
+                viewport = page.viewport_size or {"width":1920,"height":1080}
+                await page.mouse.click(max(int(viewport.get("width",1920)) - 40, 1850), 20)
+            except Exception:
+                pass
+            await asyncio.sleep(0.9)
+
+            # 回填 value 确认(DOM value + Vue2 实例 value 都要检查)
+            verify = await page.evaluate(
+                """([sEl, eEl]) => {
+                    const sDom = sEl.value || '';
+                    const eDom = eEl.value || '';
+                    // 向上找最近父节点带 __vue__ 的(DateRange 组件本身)
+                    function upVue(el) {
+                        let n = el;
+                        for (let i=0; i<8 && n; i++) {
+                            if (n.__vue__) return n.__vue__;
+                            n = n.parentElement;
+                        }
+                        return null;
+                    }
+                    const v = upVue(sEl) || upVue(eEl);
+                    let vueVal = null;
+                    try { if (v && v.value !== undefined) vueVal = JSON.parse(JSON.stringify(v.value)); }
+                    catch(_) { vueVal = String(v && v.value).slice(0,200); }
+                    return {
+                        s: sDom, e: eDom,
+                        sCls: (sEl.className || '').slice(0,80),
+                        eCls: (eEl.className || '').slice(0,80),
+                        vueValue: vueVal,
+                        vueFound: !!v,
+                        vueName: v ? (v.$options && v.$options.name) : null,
+                    };
+                }""",
+                [range_inputs[0], range_inputs[1]],
+            )
+            s_ok = start_str in (verify.get('s') or '')
+            e_ok = end_str in (verify.get('e') or '')
+            vv = verify.get("vueValue")
+            # vue value 正确格式:长度=2 的数组, 2 个元素分别等于 start_str/end_str (或者 start_str 在其字符串里)
+            vue_ok = False
+            if isinstance(vv, (list, tuple)) and len(vv) >= 2:
+                vs0 = str(vv[0] or '')
+                vs1 = str(vv[1] or '')
+                vue_ok = (start_str in vs0) and (end_str in vs1)
+            if (not s_ok or not e_ok) and not vue_ok:
+                logger.warning(
+                    "  [策略0] 回填验证失败 s=%r(%s) e=%r(%s)  vue=%r(%s) → fallback _fill_el_input+setter",
+                    verify.get('s'), "OK" if s_ok else "MISS",
+                    verify.get('e'), "OK" if e_ok else "MISS",
+                    vv, "OK" if vue_ok else "MISS",
+                )
+                # fallback: 再次调用 _fill_el_input + setter dispatchEvent (双保险)
+                await self._fill_el_input(page, range_inputs[0], start_str)
+                await self._fill_el_input(page, range_inputs[1], end_str)
+                await page.evaluate(
+                    """([sEl, sVal, eEl, eVal]) => {
+                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        for (const [el, val] of [[sEl,sVal],[eEl,eVal]]) {
+                            if (setter) setter.call(el, val); else el.value = val;
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                            el.blur && el.blur();
+                        }
+                    }""",
+                    [range_inputs[0], start_str, range_inputs[1], end_str],
+                )
+                await asyncio.sleep(0.5)
+            else:
+                logger.info(
+                    "  [策略0] 回填验证通过 s=%r/%r  e=%r/%r  vueValue=%r ✅",
+                    verify.get('s'), start_str, verify.get('e'), end_str, vv,
+                )
+            return
+
         # 策略1: Element UI datetimerange 范围选择器(只取第一个,避免多时间字段干扰)
         range_editor = await page.query_selector(".el-date-editor--datetimerange")
         if range_editor:
@@ -318,6 +1158,21 @@ class BmsFetcher:
                 logger.info(f"使用 datetimerange 选择器,找到 {len(inputs)} 个 input")
                 await self._fill_el_input(page, inputs[0], start_str)
                 await self._fill_el_input(page, inputs[1], end_str)
+                return
+            # 兜底:任意后代 input(前两个非 readonly)
+            any_ins = await range_editor.query_selector_all("input")
+            good = []
+            for i in any_ins:
+                try:
+                    ro = (await i.get_attribute("readonly")) is not None
+                    dis = (await i.get_attribute("disabled")) is not None
+                    if not ro and not dis: good.append(i)
+                except Exception:
+                    pass
+            if len(good) >= 2:
+                logger.info(f"使用 datetimerange 容器(兜底后代 input),找到 {len(good)} 个可用 input")
+                await self._fill_el_input(page, good[0], start_str)
+                await self._fill_el_input(page, good[1], end_str)
                 return
 
         # 策略2: 找所有可见的日期相关 input,取前两个
@@ -372,43 +1227,219 @@ class BmsFetcher:
         try:
             await page.fill('input[placeholder*="开始"]', start_str, timeout=5000)
             await page.fill('input[placeholder*="结束"]', end_str, timeout=5000)
+            return
         except Exception:
-            # 最后兜底: 用 evaluate 直接设值并触发事件
-            await page.evaluate(f"""
-                () => {{
-                    const inputs = document.querySelectorAll('input.el-range-input:visible, .el-date-editor input:visible');
-                    if (inputs.length >= 2) {{
-                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                        setter.call(inputs[0], '{start_str}');
-                        inputs[0].dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        setter.call(inputs[1], '{end_str}');
-                        inputs[1].dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    }}
+            pass
+
+        # 策略4(终极兜底,专门适配「无 label/placeholder 全空」的页面):
+        #   把所有可见 input 按 y 坐标分组(差 ≤30px 视为同一行),
+        #   优先选择「含 el-range-input / 父节点含 el-date-editor」的组;
+        #   否则取最上面一组(筛选条所在行)里「非 readonly、类型是 text」的前两个,
+        #   依次填 开始/结束时间。
+        logger.info(
+            "[兜底策略4] 未匹配到日期类选择器,尝试按可见 input 的 y 行分组(优先命中 el-range-input 组)"
+        )
+        info = await page.evaluate("""
+            () => {
+                const all = document.querySelectorAll('input');
+                const rows = new Map();  // key=roundedY(10)  value=[{x,y,readonly,type,el}]
+                for (const el of all) {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    if (rect.width <= 0 || rect.height <= 0) continue;
+                    if (style.visibility === 'hidden' || style.display === 'none') continue;
+                    const y = rect.top + rect.height / 2;
+                    const key = Math.round(y / 10) * 10;
+                    // 命中 el-range-input:说明它属于 Element UI 日期范围选择器
+                    const cls = (el.className || '').toString();
+                    const pcls = (el.parentElement && el.parentElement.className || '').toString();
+                    const is_datey = /el-range-input|el-date-editor|date-picker|daterange|datetimerange/i.test(cls + ' ' + pcls);
+                    const info = {
+                        x: rect.left + rect.width / 2,
+                        y,
+                        readonly: !!el.readOnly || el.hasAttribute('readonly'),
+                        disabled: !!el.disabled || el.hasAttribute('disabled'),
+                        type: (el.getAttribute('type') || 'text').toLowerCase(),
+                        placeholder: el.placeholder || '',
+                        is_datey,
+                    };
+                    if (!rows.has(key)) rows.set(key, []);
+                    rows.get(key).push({ info, el });
+                }
+                const sortedKeys = Array.from(rows.keys()).sort((a,b)=>a-b);
+                // 第一优先级:y 行里存在 is_datey=true,且 ≥2 个非 readonly 非 disabled input
+                for (const k of sortedKeys) {
+                    const row = rows.get(k);
+                    const has_datey = row.some(r => r.info.is_datey);
+                    if (!has_datey) continue;
+                    const candidates = row
+                        .filter(r => !r.info.readonly && !r.info.disabled && (r.info.type === 'text' || r.info.type === ''))
+                        .sort((a,b) => a.info.x - b.info.x);
+                    if (candidates.length >= 2) {
+                        window.__START_INP__ = candidates[0].el;
+                        window.__END_INP__   = candidates[1].el;
+                        return {
+                            ok: true,
+                            why: 'datey-row',
+                            row_y: k,
+                            start_x: candidates[0].info.x,
+                            end_x:   candidates[1].info.x,
+                            start_ph: candidates[0].info.placeholder,
+                            end_ph:   candidates[1].info.placeholder,
+                        };
+                    }
+                }
+                // 第二优先级:取最上一行(最小 y)里有 ≥2 个非 readonly 非 disabled text input
+                for (const k of sortedKeys) {
+                    const row = rows.get(k);
+                    const candidates = row
+                        .filter(r => !r.info.readonly && !r.info.disabled && (r.info.type === 'text' || r.info.type === ''))
+                        .sort((a,b) => a.info.x - b.info.x);
+                    if (candidates.length >= 2) {
+                        window.__START_INP__ = candidates[0].el;
+                        window.__END_INP__   = candidates[1].el;
+                        return {
+                            ok: true,
+                            why: 'top-row-fallback',
+                            row_y: k,
+                            start_x: candidates[0].info.x,
+                            end_x:   candidates[1].info.x,
+                            start_ph: candidates[0].info.placeholder,
+                            end_ph:   candidates[1].info.placeholder,
+                        };
+                    }
+                }
+                return { ok: false };
+            }
+        """)
+        if info and info.get("ok"):
+            logger.info(
+                "  命中: why=%s 第 y=%s 行,起止 x=(%s,%s) placeholder=(%r,%r) → 开始填值并触发事件",
+                info.get("why"), info.get("row_y"), info.get("start_x"), info.get("end_x"),
+                info.get("start_ph"), info.get("end_ph"),
+            )
+            filled = await page.evaluate(
+                """([sVal, eVal]) => {
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                    const s = window.__START_INP__; const e = window.__END_INP__;
+                    if (!s || !e) return false;
+                    for (const [el, val] of [[s, sVal], [e, eVal]]) {
+                        if (setter) setter.call(el, val); else el.value = val;
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    try { delete window.__START_INP__; delete window.__END_INP__; } catch (_) {}
+                    return true;
+                }""",
+                [start_str, end_str],
+            )
+            if filled:
+                return
+        # 最后兜底: evaluate 直接找 range
+        await page.evaluate(f"""
+            () => {{
+                const inputs = document.querySelectorAll('input.el-range-input:visible, .el-date-editor input:visible');
+                if (inputs.length >= 2) {{
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                    setter.call(inputs[0], '{start_str}');
+                    inputs[0].dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    setter.call(inputs[1], '{end_str}');
+                    inputs[1].dispatchEvent(new Event('input', {{ bubbles: true }}));
                 }}
-            """)
+            }}
+        """)
 
     async def _fill_el_input(self, page, element, value: str):
-        """填充 Element UI 日期输入框
+        """填充 Element UI 日期输入框(通用 input 也能用)。
 
-        Element UI 的 input 可能需要: 点击 → 清空 → 输入 → 回车确认
+        注意: Playwright 的 ElementHandle/Locator 是 Python 代理对象,
+        不要调用 Python 对象上的 element.dispatchEvent(不存在!),所有 DOM 事件必须
+        在浏览器上下文里(evaluate/JS 回调)触发。
         """
+        ok = False
         try:
-            # 方式1: 直接 fill(适用于可见的 range-input)
-            await element.fill(value, timeout=10000)
-            # 触发 input 和 change 事件确保 Vue 响应
-            await element.dispatchEvent("input")
-            await element.dispatchEvent("change")
+            await element.fill(value, timeout=8000)
+            ok = True
         except Exception as e:
-            logger.warning(f"fill 失败,尝试 evaluate 设值: {e}")
-            # 方式2: 用 JS 直接设值并触发事件
-            await element.evaluate(f"""
-                (el) => {{
-                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                    setter.call(el, '{value}');
-                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                }}
-            """)
+            logger.warning(f"fill 失败,退化为 evaluate 直接设值: {e}")
+        try:
+            await element.evaluate(
+                """(el, val) => {
+                    if (el.value !== val) {
+                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        if (setter) setter.call(el, val); else el.value = val;
+                    }
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }""",
+                value,
+            )
+            ok = True
+        except Exception as e2:
+            logger.warning(f"evaluate 触发 input/change 失败({e2}),但 fill 可能已经成功;不抛")
+        if not ok:
+            raise RuntimeError(f"_fill_el_input: fill + evaluate 都失败 value={value!r}")
+
+    async def _click_query_button(self, page) -> None:
+        """点击「查询/搜索/筛选」按钮(兼容各站点的按钮文案,避免写死 has-text("搜索"))。
+
+        优先级:
+          1) 文本精确匹配「查询/查 询/搜索/搜 索/筛选/开始查询」
+          2) 找不到 → 找页面上 y 坐标最靠上的筛选条区域里第一个非「重置/导出」按钮
+          3) 再找不到 → 聚焦最后一个筛选框后按 Enter(原生触发查询)
+        """
+        # 1) 文本匹配
+        keywords = ["查询", "查 询", "搜索", "搜 索", "筛选", "开始查询", "查询统计", "确认查询"]
+        exclude_keywords = ["重置", "导出", "下载", "清空", "取消", "关闭"]
+        try:
+            btns = await page.query_selector_all("button:visible")
+            for b in btns:
+                try:
+                    txt = (await b.inner_text()).strip()
+                except Exception:
+                    txt = ""
+                if not txt:
+                    continue
+                matched_kw = any(kw in txt for kw in keywords)
+                excluded = any(kw in txt for kw in exclude_keywords)
+                if matched_kw and not excluded:
+                    logger.info(f"  点击查询按钮: text={txt!r}")
+                    await b.click(timeout=8000)
+                    return
+            # 2) 找筛选条(y 小)里第一个非「重置/导出」按钮
+            y_sorted = []
+            for b in btns:
+                try:
+                    box = await b.bounding_box()
+                    if not box or box["y"] < 60 or box["y"] > 600:
+                        continue
+                    txt = (await b.inner_text()).strip()
+                    if any(kw in txt for kw in exclude_keywords):
+                        continue
+                    y_sorted.append((box["y"], box["x"], b, txt))
+                except Exception:
+                    continue
+            y_sorted.sort(key=lambda r: (r[0], r[1]))
+            if y_sorted:
+                _, _, b, txt = y_sorted[0]
+                logger.info(f"  文本未匹配,按坐标取筛选条第一个按钮 text={txt!r} 点击")
+                await b.click(timeout=8000)
+                return
+        except Exception as e:
+            logger.warning(f"  查询按钮点击策略异常: {e},退化为 Enter 触发")
+        # 3) Enter 兜底
+        try:
+            # 先尝试聚焦最后一个可见 input(通常是筛选框最后一个),再按 Enter
+            last_inp = page.locator('input:visible').last
+            if await last_inp.count() > 0:
+                await last_inp.focus(timeout=1000)
+                await asyncio.sleep(0.1)
+                await page.keyboard.press("Enter")
+                logger.info("  Enter 兜底触发查询")
+                return
+        except Exception:
+            pass
+        raise RuntimeError("找不到任何查询/搜索按钮,Enter 兜底也失败")
 
     async def _do_fetch_one(
         self,
@@ -469,38 +1500,46 @@ class BmsFetcher:
                 await page.fill('input[type="text"], input[placeholder*="账号"], input[placeholder*="用户名"]', username)
                 await page.fill('input[type="password"], input[placeholder*="密码"]', password)
 
-                # ── 闪猫:验证码处理(后续接入前端交互) ──
-                # 目前: 如检测到验证码输入框且无交互验证码值,报错提示需先在同步设置页完成登录
+                # ── 闪猫:验证码处理(自动识别优先,最多 3 次重试,失败再提示手动登录) ──
+                ocr_logged_in = False
                 if config.get("requires_captcha"):
                     captcha_input = await page.query_selector(
                         'input[placeholder*="验证码"], input[aria-label*="验证码"]'
                     )
                     if captcha_input and await captcha_input.is_visible():
-                        # 检查是否通过 storage_state / cookie 等已绕过(实际上前面已 goto login 所以必然需要)
-                        raise RuntimeError(
-                            "需要验证码登录:请前往「数据中心-数据采集-同步设置」点击「登录闪猫」按钮完成验证码登录"
+                        ok, msg = await _try_auto_login_via_ocr(
+                            page, context, data_type, login_url, username, password, state_path
                         )
+                        if not ok:
+                            raise RuntimeError(
+                                "验证码自动识别登录失败(" + msg + ");"
+                                "请前往「数据中心-数据采集-同步设置」点击「登录闪猫」按钮完成手动登录"
+                            )
+                        # OCR 登录成功:内部已经做完填单/点登录/保存 storage_state,跳过下面的 click 登录
+                        ocr_logged_in = True
+                        logger.info(f"[{data_type}] OCR 自动登录完成,跳过后续点击登录步骤")
 
-                await asyncio.sleep(1)
-                await page.click('button:has-text("登录"), button[type="submit"]')
-                await page.wait_for_load_state("networkidle")
-                await asyncio.sleep(3)
+                if not ocr_logged_in:
+                    await asyncio.sleep(1)
+                    await page.click('button:has-text("登录"), button[type="submit"]')
+                    await page.wait_for_load_state("networkidle")
+                    await asyncio.sleep(3)
 
-                if "login" in page.url.lower():
-                    error_elem = await page.query_selector(".el-message__content, .el-form-item__error")
-                    if error_elem:
-                        error_text = await error_elem.inner_text()
-                        raise RuntimeError(f"登录失败: {error_text}")
-                    raise RuntimeError("登录失败: 账号或密码错误")
-                logger.info(f"[{data_type}] 登录成功")
+                    if "login" in page.url.lower():
+                        error_elem = await page.query_selector(".el-message__content, .el-form-item__error")
+                        if error_elem:
+                            error_text = await error_elem.inner_text()
+                            raise RuntimeError(f"登录失败: {error_text}")
+                        raise RuntimeError("登录失败: 账号或密码错误")
+                    logger.info(f"[{data_type}] 登录成功")
 
-                # ── 登录成功:保存 storage_state(下次自动复用) ──
-                if config.get("requires_captcha"):
-                    try:
-                        await context.storage_state(path=str(state_path))
-                        logger.info(f"[{data_type}] 登录态已保存至 {state_path.name}")
-                    except Exception as e:
-                        logger.warning(f"[{data_type}] 保存 storage_state 失败(不影响本次抓取): {e}")
+                    # ── 登录成功:保存 storage_state(下次自动复用) ──
+                    if config.get("requires_captcha"):
+                        try:
+                            await context.storage_state(path=str(state_path))
+                            logger.info(f"[{data_type}] 登录态已保存至 {state_path.name}")
+                        except Exception as e:
+                            logger.warning(f"[{data_type}] 保存 storage_state 失败(不影响本次抓取): {e}")
 
                 # 2. 进入目标页面
                 logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")
@@ -508,9 +1547,10 @@ class BmsFetcher:
                 await asyncio.sleep(3)
 
             # 3. 设置时间范围
-            start_str = start_date.strftime("%Y-%m-%d %H:%M:%S")
-            end_str = end_date.strftime("%Y-%m-%d %H:%M:%S")
-            logger.info(f"[{data_type}] 设置时间范围: {start_str} ~ {end_str}")
+            time_format = config.get("time_format", "%Y-%m-%d %H:%M:%S")
+            start_str = start_date.strftime(time_format)
+            end_str = end_date.strftime(time_format)
+            logger.info(f"[{data_type}] 设置时间范围: {start_str} ~ {end_str} (format={time_format})")
 
             # 3.1 如果配置了 time_labels(页面有多个时间筛选框),按标签精确查找
             time_labels = config.get("time_labels")
@@ -522,15 +1562,77 @@ class BmsFetcher:
             await asyncio.sleep(1)
 
             # 4. 搜索
-            logger.info(f"[{data_type}] 点击搜索...")
-            await page.click('button:has-text("搜索")')
-            await page.wait_for_load_state("networkidle")
+            logger.info(f"[{data_type}] 点击查询/搜索...")
+            await self._click_query_button(page)
+
+            # 4.1 【shanmao_refund/需要日期筛选的数据源】轮询分页器「共 x 条」,确认筛选真的生效
+            #     原问题:闪猫退款前端组件 v-model 可能更新不及时,或用户筛选条件未同步到查询接口,
+            #           导致查询结果仍为全量(1976 条),后续导出也必为全量。
+            initial_total = None
+            after_total = None
+            try:
+                for poll_i in range(20):
+                    await asyncio.sleep(1.0 if poll_i < 8 else 0.75)
+                    try:
+                        total_text = await page.evaluate("""() => {
+                            const p = document.querySelector('.el-pagination__total');
+                            if (!p) {
+                                // fallback:整个 body 里搜 "共 xxx 条"
+                                const m = (document.body.innerText || '').match(/共\\s*(\\d+(?:,\\d+)?)\\s*条/);
+                                return m ? m[1].replace(/,/g,'') : null;
+                            }
+                            const m = (p.innerText || '').match(/共\\s*(\\d+(?:,\\d+)?)\\s*条/);
+                            return m ? m[1].replace(/,/g,'') : null;
+                        }""")
+                        if total_text:
+                            try:
+                                tn = int(total_text)
+                                if initial_total is None:
+                                    initial_total = tn
+                                else:
+                                    after_total = tn
+                                    # 若明显减少 (>100 条差距) 或 <100,认为筛选生效
+                                    if (initial_total - tn > 100) or (tn < 100):
+                                        logger.info(
+                                            f"[{data_type}] 筛选生效(轮询 {poll_i+1}s): 初始 {initial_total} 条 → 现在 {tn} 条"
+                                        )
+                                        break
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"[{data_type}] 轮询筛选结果总数异常(不影响流程): {e}")
+
+            try:
+                await page.wait_for_load_state("networkidle")
+            except Exception:
+                pass
             await asyncio.sleep(2)
 
             # 5. 导出
+            #    ⚠️  闪猫退款平台 exportRefundApply 接口不接受任何请求参数!
+            #       传任何非空 body(包括 JSON 字符串数组/毫秒时间戳数组)都会返回 HTTP 500 错误,
+            #       只有空 body 才能 200 返回全量历史 xlsx(约 1976 行 172KB),
+            #       因此这里不做任何 monkey patch / route 拦截,避免 500。
+            #       筛选逻辑改到第 6.1 步:用 pandas 按「退费单号前缀 TFYYYYMMDD 或时间列」
+            #       精确裁剪,只保留目标日期范围内的行再覆盖写回同一个 dest_path。
             logger.info(f"[{data_type}] 点击导出...")
-            download_promise = page.wait_for_event("download", timeout=60000)
-            await page.click('button:has-text("导出")')
+            download_promise = page.wait_for_event("download", timeout=90000)
+            try:
+                await page.click('button:has-text("导出")')
+            except Exception:
+                # fallback:找所有含「导出」的 visible button,点第一个
+                btns = await page.query_selector_all('button:visible')
+                clicked = False
+                for b in btns:
+                    t = (await b.inner_text()).strip()
+                    if "导出" in t and "重置" not in t:
+                        await b.click(timeout=15000)
+                        clicked = True
+                        break
+                if not clicked:
+                    raise RuntimeError("未找到导出按钮")
             download = await download_promise
             logger.info(f"[{data_type}] 文件下载成功: {download.suggested_filename}")
 
@@ -548,6 +1650,136 @@ class BmsFetcher:
 
             await download.save_as(str(dest_path))
             logger.info(f"[{data_type}] 文件已保存: {dest_path}")
+
+            # 5.2 【极速校验】若文件 <16KB 且开头是 { → 极可能是接口 500/401 返回 JSON 伪 Excel!直接抛异常(否则 success=True 但文件根本打不开)!
+            try:
+                if dest_path.exists():
+                    _sz = dest_path.stat().st_size
+                    if _sz < 16384 and _sz > 0:
+                        _head = dest_path.read_bytes()[:256]
+                        _body = _head[3:] if _head[:3] == b'\xef\xbb\xbf' else _head
+                        if _body[:1] == b'{':
+                            _txt = _body.decode("utf-8", errors="replace")
+                            _emsg = ""
+                            try:
+                                _info = json.loads(_txt)
+                                _emsg = str(_info.get("msg") or _info.get("message") or _info)[:400]
+                            except Exception:
+                                _emsg = _txt[:400]
+                            raise RuntimeError(
+                                f"[{data_type}] 导出接口返回 JSON 错误(不是 Excel! size={_sz}B): {_emsg}"
+                            )
+            except RuntimeError:
+                raise
+            except Exception as _ck:
+                logger.warning(f"[{data_type}] 文件头检查跳过: {_ck}")
+
+            # 6.1 【shanmao_refund 核心:全量导出后按日期范围裁剪写回】
+            #    闪猫导出接口不支持筛选参数(传参=500),只能拿到全量 1976 行,
+            #    因此这里用 pandas 精确保留 start_date~end_date 范围内的行再覆盖写回:
+            #    优先用【退费单号前缀 TFYYYYMMDD】(100% 精确,因为单号里包含真实申请日期);
+            #    若没有该列则回退用【审核时间 / 申请时间 / 退款时间】等列 between 判断。
+            #    裁剪后仍为空也不抛错(可能该日期确实无退款申请),只是写 0 行 xlsx 出去。
+            if data_type == "shanmao_refund":
+                try:
+                    import pandas as pd
+                    suffix_l = str(dest_path).lower()
+                    if suffix_l.endswith(".xlsx"):
+                        df = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
+                    elif suffix_l.endswith(".xls"):
+                        try:
+                            df = pd.read_excel(dest_path, dtype=str)
+                        except Exception as exc:
+                            raise RuntimeError(
+                                f"[{data_type}] .xls 老格式缺少解析引擎(需 xlrd==1.2.0/pyxlsb): {exc}"
+                            )
+                    else:
+                        df = pd.read_csv(dest_path, dtype=str)
+
+                    orig_rows = len(df)
+                    mask = None
+                    chosen_col = None
+                    # 策略1: 退费单号前缀 TFYYYYMMDD → 100% 精准(闪猫单号里嵌入了申请日期)
+                    if "退费单号" in df.columns:
+                        _pref = df["退费单号"].astype(str).str[:10]
+                        expected_prefix = start_date.strftime("TF%Y%m%d")
+                        mask = _pref == expected_prefix
+                        chosen_col = "退费单号 prefix=" + expected_prefix
+                        # 防御: 若 start_date != end_date(跨天范围),改用逐行 datetime 解析 退单号里的日期
+                        if (end_date - start_date).days != 0:
+                            try:
+                                _ymd = _pref.str[2:10]  # "TF" 后面的 YYYYMMDD
+                                _dates = pd.to_datetime(_ymd, format="%Y%m%d", errors="coerce")
+                                sd = pd.to_datetime(start_date.date())
+                                ed = pd.to_datetime(end_date.date())
+                                mask = (_dates >= sd) & (_dates <= ed)
+                                chosen_col = "退费单号 YYYYMMDD in range"
+                            except Exception:
+                                pass
+                    # 策略2: 审核时间 / 申请时间 / 打款时间 等 between
+                    if mask is None:
+                        for col in ("审核时间", "申请时间", "退款时间", "创建时间", "打款时间"):
+                            if col in df.columns:
+                                try:
+                                    vs = pd.to_datetime(df[col].dropna(), errors="coerce")
+                                    sd = pd.to_datetime(start_date)
+                                    ed = pd.to_datetime(end_date)
+                                    mask = (vs >= sd) & (vs <= ed)
+                                    chosen_col = f"{col} between [{start_date},{end_date}]"
+                                    # 把空行(NaT)视为 False
+                                    mask = mask.fillna(False)
+                                    if len(mask) != len(df):
+                                        # 索引对齐, 缺失行 False
+                                        _tmp = pd.Series(False, index=df.index)
+                                        _tmp.loc[mask.index[mask.values]] = True
+                                        mask = _tmp
+                                    break
+                                except Exception:
+                                    continue
+                    if mask is None:
+                        logger.warning(
+                            f"[{data_type}] ⚠️  找不到任何可用于日期范围裁剪的列(退费单号/审核时间/申请时间...)"
+                            f", 保留原 xlsx 的 {orig_rows} 行(未裁剪)。请检查导出列命名是否变更?"
+                        )
+                    else:
+                        df_filtered = df.loc[mask].copy()
+                        kept = len(df_filtered)
+                        logger.info(
+                            f"[{data_type}] 日期范围裁剪完成: 依据列={chosen_col}, 原 {orig_rows} 行 → 保留 {kept} 行"
+                            f" (范围 {start_date.strftime('%Y-%m-%d %H:%M:%S')} ~ {end_date.strftime('%Y-%m-%d %H:%M:%S')})"
+                        )
+                        # ★ 覆盖写回同一个 dest_path → 下游任务看到的就是裁剪后仅 1 行的 xlsx
+                        if suffix_l.endswith(".xlsx"):
+                            with pd.ExcelWriter(dest_path, engine="openpyxl") as w:
+                                df_filtered.to_excel(w, index=False)
+                        elif suffix_l.endswith(".xls"):
+                            # 老格式尽量写 xlsx(覆盖扩展),避免缺少 xlwt 写失败
+                            new_p = dest_path.with_suffix(".xlsx")
+                            if new_p != dest_path:
+                                try: dest_path.unlink()
+                                except: pass
+                                dest_path = new_p
+                                dest_filename = dest_path.name
+                            with pd.ExcelWriter(str(dest_path), engine="openpyxl") as w:
+                                df_filtered.to_excel(w, index=False)
+                        else:
+                            df_filtered.to_csv(dest_path, index=False)
+                        logger.info(
+                            f"[{data_type}] ✅ 裁剪后文件已覆盖写回 {dest_path} (最终 {kept} 行)"
+                        )
+                        # 读回来再做一次校验(避免写回失败)
+                        try:
+                            if str(dest_path).lower().endswith(".xlsx"):
+                                df_check = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
+                            else:
+                                df_check = pd.read_csv(dest_path, dtype=str)
+                            logger.info(
+                                f"[{data_type}] 二次校验 OK:写回后实际 rows={len(df_check)}"
+                            )
+                        except Exception as wb:
+                            logger.warning(f"[{data_type}] ⚠️  裁剪后二次读取失败(不影响主流程): {wb}")
+                except Exception as e:
+                    logger.warning(f"[{data_type}] 日期范围裁剪/写回失败(保留原文件,不影响主流程): {type(e).__name__}: {e}")
 
             result.success = True
             result.file_path = f"{month_dir}/{dest_filename}"
@@ -764,36 +1996,45 @@ class BmsFetcher:
                 await page.fill('input[type="text"], input[placeholder*="账号"], input[placeholder*="用户名"]', username)
                 await page.fill('input[type="password"], input[placeholder*="密码"]', password)
 
-                # ── 闪猫:验证码检测(需要前端交互登录) ──
+                # ── 闪猫:验证码自动识别登录(失败才提示需手动) ──
+                ocr_logged_in = False
                 if config.get("requires_captcha"):
                     captcha_input = await page.query_selector(
                         'input[placeholder*="验证码"], input[aria-label*="验证码"]'
                     )
                     if captcha_input and await captcha_input.is_visible():
-                        raise RuntimeError(
-                            "需要验证码登录:请前往「数据中心-数据采集-同步设置」点击「登录闪猫」按钮完成验证码登录"
+                        ok, msg = await _try_auto_login_via_ocr(
+                            page, context, data_type, login_url, username, password, state_path
                         )
+                        if not ok:
+                            raise RuntimeError(
+                                "验证码自动识别登录失败(" + msg + ");"
+                                "请前往「数据中心-数据采集-同步设置」点击「登录闪猫」按钮完成手动登录"
+                            )
+                        ocr_logged_in = True
+                        logger.info(f"[{data_type}] OCR 自动登录完成(组内首个源),跳过后续点击登录步骤")
 
-                await asyncio.sleep(1)
-                await page.click('button:has-text("登录"), button[type="submit"]')
-                await page.wait_for_load_state("networkidle")
-                await asyncio.sleep(3)
-                if "login" in page.url.lower():
-                    error_elem = await page.query_selector(".el-message__content, .el-form-item__error")
-                    if error_elem:
-                        error_text = await error_elem.inner_text()
-                        raise RuntimeError(f"登录失败: {error_text}")
-                    raise RuntimeError("登录失败: 账号或密码错误")
+                if not ocr_logged_in:
+                    await asyncio.sleep(1)
+                    await page.click('button:has-text("登录"), button[type="submit"]')
+                    await page.wait_for_load_state("networkidle")
+                    await asyncio.sleep(3)
+                    if "login" in page.url.lower():
+                        error_elem = await page.query_selector(".el-message__content, .el-form-item__error")
+                        if error_elem:
+                            error_text = await error_elem.inner_text()
+                            raise RuntimeError(f"登录失败: {error_text}")
+                        raise RuntimeError("登录失败: 账号或密码错误")
 
-                # ── 登录成功:保存 storage_state(下次自动复用) ──
-                if config.get("requires_captcha"):
-                    try:
-                        await context.storage_state(path=str(state_path))
-                        logger.info(f"[{data_type}] 登录态已保存至 {state_path.name}")
-                    except Exception as e:
-                        logger.warning(f"[{data_type}] 保存 storage_state 失败(不影响本次抓取): {e}")
+                    # ── 登录成功:保存 storage_state(下次自动复用) ──
+                    if config.get("requires_captcha"):
+                        try:
+                            await context.storage_state(path=str(state_path))
+                            logger.info(f"[{data_type}] 登录态已保存至 {state_path.name}")
+                        except Exception as e:
+                            logger.warning(f"[{data_type}] 保存 storage_state 失败(不影响本次抓取): {e}")
 
-                logger.info(f"[{data_type}] 登录成功(后续同组源复用登录态)")
+                    logger.info(f"[{data_type}] 登录成功(后续同组源复用登录态)")
         else:
             # 复用登录态: 不重新登录,直接跳页
             logger.info(f"[{data_type}] 复用登录态,直接跳转目标页")
@@ -816,14 +2057,17 @@ class BmsFetcher:
         await asyncio.sleep(1)
 
         # 4. 搜索
-        logger.info(f"[{data_type}] 点击搜索...")
-        await page.click('button:has-text("搜索")')
-        await page.wait_for_load_state("networkidle")
+        logger.info(f"[{data_type}] 点击查询/搜索...")
+        await self._click_query_button(page)
+        try:
+            await page.wait_for_load_state("networkidle")
+        except Exception:
+            pass
         await asyncio.sleep(2)
 
         # 5. 导出
         logger.info(f"[{data_type}] 点击导出...")
-        download_promise = page.wait_for_event("download", timeout=60000)
+        download_promise = page.wait_for_event("download", timeout=90000)
         await page.click('button:has-text("导出")')
         download = await download_promise
         logger.info(f"[{data_type}] 文件下载成功: {download.suggested_filename}")

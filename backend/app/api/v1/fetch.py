@@ -24,10 +24,20 @@ from app.api.deps import CurrentUser, DBSession
 from app.models.bms_sync_log import BmsSyncLog
 from app.models.scrm_sync_log import ScrmSyncLog
 from app.schemas.common import R
-from app.services.bms_fetcher import BMS_DATA_SOURCES, BmsFetcher, _storage_state_path
+from app.services.bms_fetcher import (
+    BMS_DATA_SOURCES,
+    BmsFetcher,
+    _storage_state_path,
+    _try_auto_login_via_ocr,
+)
 from app.services.bms_scheduler import bms_scheduler
 from app.services.bms_sync import get_sync_status, sync_all
-from app.services.captcha_session import bytes_to_data_uri, captcha_session_manager
+from app.services.captcha_session import (
+    CaptchaSession,
+    bytes_to_data_uri,
+    captcha_session_manager,
+    try_ocr_captcha,
+)
 from app.services.scrm_sync_service import (
     DATA_TYPE_OPERATOR,
     DATA_TYPE_SESSION_GROUP,
@@ -36,7 +46,7 @@ from app.services.scrm_sync_service import (
     get_scrm_sync_status,
     sync_scrm_all,
 )
-from app.services.sync_source_config_service import get_all_configs
+from app.services.sync_source_config_service import get_all_configs, get_sync_source_config
 from app.services.sync_task_manager import sync_task_manager
 
 router = APIRouter(prefix="/fetch", tags=["数据中心-BMS同步"])
@@ -212,7 +222,7 @@ async def sync_all_data(payload: SyncAllRequest, current_user: CurrentUser):
     若前端未升级,这里为了兼容仍返回 task 执行完成后的 SyncAllResponse,
     通过在后端侧等待最长 8 分钟实现)。
     """
-    valid_types = {"refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record"}
+    valid_types = {"refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record", "device_tag", "device_tag_binding"}
     data_types = payload.data_types if payload.data_types else None
     if data_types:
         for dt in data_types:
@@ -296,7 +306,7 @@ def task_preflight(db: DBSession, _: CurrentUser, data_types: str = ""):
 
 async def _do_submit(payload: SyncAllRequest, current_user) -> SubmitResponse:
     """内部: 提交同步任务到 SyncTaskManager"""
-    valid_types = {"refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record"}
+    valid_types = {"refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record", "device_tag", "device_tag_binding"}
     data_types = payload.data_types if payload.data_types else [
         dt for dt in valid_types
     ]  # None 时默认全量包含,但在 sync_all 内部会再按 default_sync 过滤?不,这里按默认勾选源
@@ -690,6 +700,10 @@ class CaptchaLoginCheckResponse(BaseModel):
 
 class CaptchaLoginStartRequest(BaseModel):
     data_type: str = Field(..., description="需验证码登录的数据源,如: shanmao_refund")
+    auto_ocr: bool = Field(
+        True,
+        description="是否启用自动 OCR 识别+重试登录(默认 true).关闭后仅截图返回给用户手动输入",
+    )
 
 
 class CaptchaLoginStartResponse(BaseModel):
@@ -697,6 +711,13 @@ class CaptchaLoginStartResponse(BaseModel):
     captcha_image: str = Field(..., description="验证码图片(data:image/png;base64,...)")
     login_url: str = Field(..., description="当前登录页URL(便于调试)")
     hint: str | None = Field(None, description="提示信息")
+    # 自动 OCR 识别字段(新):若 OCR 成功且自动登录通过,前端无需再弹窗让用户输入
+    auto_login_attempted: bool = Field(False, description="后端是否尝试了自动 OCR 识别登录")
+    auto_login_success: bool = Field(False, description="自动 OCR 识别+登录是否成功")
+    ocr_recognized_text: str | None = Field(None, description="OCR 识别出的验证码文本(用于调试展示,可能错误)")
+    auto_login_message: str | None = Field(None, description="自动登录成功/失败的说明")
+    storage_state_saved: bool = Field(False, description="若自动登录成功,storage_state 是否已写入磁盘")
+    state_path: str | None = Field(None, description="若自动登录成功,对应 storage_state 路径")
 
 
 class CaptchaLoginSubmitRequest(BaseModel):
@@ -713,6 +734,113 @@ class CaptchaLoginSubmitResponse(BaseModel):
 
 class CaptchaLoginLogoutRequest(BaseModel):
     data_type: str = Field(..., description="数据源编码,如 shanmao_refund")
+
+
+# ---- 验证码登录共享逻辑:填账号密码+验证码+点登录+保存 storage_state ----
+async def _captcha_do_fill_and_login(
+    sess: CaptchaSession,
+    captcha: str,
+) -> tuple[bool, bool, str, str | None]:
+    """执行验证码登录的核心步骤(被自动 OCR 路径与人工 submit 路径复用)。
+
+    Returns:
+      (success: bool, storage_state_saved: bool, message: str, state_path: str|None)
+    """
+    page = sess.page
+    log = __import__("logging").getLogger(__name__)
+    success = False
+    state_saved = False
+    state_path_str: str | None = None
+    message = ""
+
+    try:
+        captcha = (captcha or "").strip()
+        if not captcha:
+            raise ValueError("验证码不能为空")
+        # 填账号
+        user_sel = 'input[type="text"], input[placeholder*="账号" i], input[placeholder*="用户名" i], input[placeholder*="手机号" i]'
+        try:
+            await page.locator(user_sel).first.fill(sess.username, timeout=10000)
+        except Exception:
+            # 兜底: 找第一个可见文本 input
+            await page.locator("input:visible").first.fill(sess.username, timeout=10000)
+        # 填密码
+        pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
+        await page.locator(pwd_sel).first.fill(sess.password, timeout=10000)
+        # 填验证码
+        captcha_sel = (
+            '.el-form-item:has-text("验证码") input:visible,'
+            '.el-form-item:has-text("校验码") input:visible,'
+            'input[placeholder*="验证码" i], input[placeholder*="校验码" i], input[placeholder*="captcha" i]'
+        )
+        try:
+            await page.locator(captcha_sel).first.fill(captcha, timeout=8000)
+        except Exception as e:
+            log.warning(f"[CaptchaLogin] 按选择器填验证码失败,尝试找第三个可见 input: {e}")
+            # 兜底: 可见 input 的第三个(账号/密码/验证码顺序)
+            vis = page.locator("input:visible")
+            count = await vis.count()
+            if count >= 3:
+                await vis.nth(2).fill(captcha, timeout=5000)
+            else:
+                raise
+
+        await asyncio.sleep(0.8)
+
+        # 点击登录按钮(优先匹配含"登录"/"sign in"文字的按钮)
+        login_btn_sel = (
+            'button:has-text("登录"), button:has-text("登 录"), button:has-text("Sign in"), button:has-text("LOGIN"),'
+            'button.el-button--primary, button[type="submit"], .login-btn'
+        )
+        btn = page.locator(login_btn_sel).first
+        await btn.click(timeout=8000)
+
+        # 等待跳转: 成功会离开 /login 路由
+        try:
+            await page.wait_for_url(
+                lambda u: "login" not in u.lower().split("#")[-1] if "#" in u else "login" not in u.lower(),
+                timeout=15000,
+            )
+        except Exception as e:
+            # 没跳: 大概率验证码错/账号错,尝试抓取页面上的错误提示
+            err_text = ""
+            try:
+                err_loc = page.locator(
+                    '.el-message, .el-form-item__error, .el-message-box__message, .ant-message-error'
+                ).first
+                if await err_loc.count() > 0 and await err_loc.is_visible():
+                    err_text = await err_loc.inner_text(timeout=1500)
+            except Exception:
+                pass
+            if not err_text:
+                # 兜底取页面上可见错误
+                try:
+                    whole = await page.inner_text("body", timeout=1500)
+                    for kw in ["验证码", "错误", "失败", "密码", "用户名"]:
+                        if kw in whole:
+                            idx = whole.find(kw)
+                            err_text = whole[max(0, idx - 20): idx + 40]
+                            break
+                except Exception:
+                    pass
+            raise RuntimeError(
+                f"登录失败: {err_text or '未跳转,可能验证码错误或账号密码错误'}"
+            ) from e
+
+        success = True
+        log.info(f"[CaptchaLogin] 登录成功,正在保存 storage_state: {sess.state_path}")
+        # 多等一会儿等资源加载(更完整的 cookie/localStorage)
+        await asyncio.sleep(3)
+        await sess.context.storage_state(path=str(sess.state_path))
+        state_saved = True
+        state_path_str = str(sess.state_path)
+        message = "登录成功,登录态已保存,后续同步将自动复用此登录态"
+
+    except Exception as e:
+        message = str(e)
+        log.error(f"[CaptchaLogin] 执行填单登录失败: {e}", exc_info=True)
+
+    return success, state_saved, message, state_path_str
 
 
 @router.get("/captcha-login/check", response_model=R[CaptchaLoginCheckResponse], summary="检查验证码登录态文件是否存在")
@@ -746,13 +874,8 @@ async def captcha_login_start(payload: CaptchaLoginStartRequest, _: CurrentUser,
     if not seed or not seed.get("requires_captcha"):
         raise HTTPException(status_code=400, detail=f"数据源 {data_type} 不需要验证码登录")
 
-    # 获取账号密码配置
-    all_configs = get_all_configs(db)
-    cfg = None
-    for c in all_configs:
-        if c["data_type"] == data_type:
-            cfg = c
-            break
+    # 获取账号密码配置(必须走解密版本,不能用 get_all_configs 的 API 掩码版——没有 password 字段,username 也是加密串)
+    cfg = get_sync_source_config(db, data_type)
     if not cfg:
         raise HTTPException(status_code=400, detail=f"未配置数据源 {data_type},请在同步设置中填写账号密码")
     if not cfg.get("username") or not cfg.get("password"):
@@ -849,11 +972,94 @@ async def captcha_login_start(payload: CaptchaLoginStartRequest, _: CurrentUser,
                 captcha_png = await page.screenshot(type="png", full_page=False)
                 logger.warning(f"[CaptchaLogin] 页面截图: {e}")
 
+        # ── 自动 OCR 识别尝试(优先):最多 N 次重试(使用 bms_fetcher 升级后的 _try_auto_login_via_ocr) ──
+        auto_attempted = False
+        auto_success = False
+        ocr_text: str | None = None
+        auto_msg: str | None = None
+        autostate_saved = False
+        autostate_path: str | None = None
+        base_hint = (
+            "请输入图片中显示的验证码(不区分大小写可先尝试)"
+            if captcha_elem
+            else "未定位到验证码元素,已截整个登录区域,请从中识别验证码"
+        )
+
+        # 只在用户勾选「自动识别」(payload.auto_ocr=True) 且有验证码图片时,走自动重试
+        if payload.auto_ocr and captcha_png:
+            auto_attempted = True
+            ocr_result = try_ocr_captcha(captcha_png)
+            ocr_text = ocr_result  # 先把第一次识别结果返回给前端(便于排查)
+            logger.info(
+                f"[CaptchaLogin] 触发自动 OCR 登录模式(调用 _try_auto_login_via_ocr,最多 8 次重试);"
+                f" 首次粗略识别={ocr_result!r}"
+            )
+            # 注意: _try_auto_login_via_ocr 内部会:
+            #   1) 第 1 次尝试会 goto(login_url) + 填账号密码(我们已经做过了,但它重做一次也没关系,幂等)
+            #   2) 定位验证码 → OCR → 填入 → 点登录 → 并发 (poll_error 5s + wait_url 15s)
+            #   3) 验证码类错误:点验证码图片刷新重试
+            #   4) 账号密码类错误:立即终止
+            ok, msg = await _try_auto_login_via_ocr(
+                page=page,
+                context=context,
+                data_type=data_type,
+                login_url=login_url,
+                username=sess.username,
+                password=sess.password,
+                state_path=sess.state_path,
+            )
+            auto_success = ok
+            auto_msg = msg
+            autostate_saved = bool(sess.state_path.exists()) if ok else False
+            autostate_path = str(sess.state_path) if autostate_saved else None
+            if ok:
+                # OCR 登录成功:直接销毁会话,返回成功响应给前端(无需用户再操作)
+                logger.info(f"[CaptchaLogin] 自动 OCR 登录成功:{msg}")
+                await captcha_session_manager.remove(sess.session_id)
+                return R(data=CaptchaLoginStartResponse(
+                    session_id=sess.session_id,
+                    captcha_image=bytes_to_data_uri(captcha_png),
+                    login_url=login_url,
+                    hint=base_hint + " (后端已自动识别并登录成功,无需输入)",
+                    auto_login_attempted=True,
+                    auto_login_success=True,
+                    ocr_recognized_text=ocr_text,
+                    auto_login_message=auto_msg,
+                    storage_state_saved=autostate_saved,
+                    state_path=autostate_path,
+                ))
+            else:
+                # OCR 登录失败(大概率验证码识别错了/账号密码错)
+                logger.warning(f"[CaptchaLogin] 自动 OCR 登录 {_try_auto_login_via_ocr.__name__} 失败,转人工兜底: {msg}")
+                # 保留会话,但刷新一次登录页+重新截验证码图片(保证用户手动输入时用的是新验证码)
+                try:
+                    await page.goto(login_url, wait_until="networkidle", timeout=60000)
+                    await asyncio.sleep(2)
+                    if captcha_elem:
+                        try:
+                            cap2 = await captcha_elem.screenshot(type="png")
+                            if cap2 and len(cap2) > 100:
+                                captcha_png = cap2
+                        except Exception:
+                            pass
+                except Exception as re:
+                    logger.warning(f"[CaptchaLogin] 刷新登录页失败: {re}")
+
+        # 无 OCR 或 OCR 登录失败 → 进入人工输入兜底流程(标准原流程)
+        final_hint = base_hint
+        if auto_attempted and not auto_success:
+            final_hint = f"自动识别失败({auto_msg}),请手动输入验证码"
         return R(data=CaptchaLoginStartResponse(
             session_id=sess.session_id,
             captcha_image=bytes_to_data_uri(captcha_png),
             login_url=login_url,
-            hint="请输入图片中显示的验证码(不区分大小写可先尝试)" if captcha_elem else "未定位到验证码元素,已截整个登录区域,请从中识别验证码",
+            hint=final_hint,
+            auto_login_attempted=auto_attempted,
+            auto_login_success=False,
+            ocr_recognized_text=ocr_text,
+            auto_login_message=auto_msg,
+            storage_state_saved=False,
+            state_path=None,
         ))
     except Exception as e:
         await captcha_session_manager.remove(sess.session_id)
@@ -877,89 +1083,12 @@ async def captcha_login_submit(payload: CaptchaLoginSubmitRequest, _: CurrentUse
     if not captcha:
         raise HTTPException(status_code=400, detail="验证码不能为空")
 
-    page = sess.page
-    logger = __import__("logging").getLogger(__name__)
-    message = ""
-    success = False
-    state_saved = False
-    state_path_str = None
-
+    log = __import__("logging").getLogger(__name__)
     try:
-        # 填账号
-        user_sel = 'input[type="text"], input[placeholder*="账号" i], input[placeholder*="用户名" i], input[placeholder*="手机号" i]'
-        try:
-            await page.locator(user_sel).first.fill(sess.username, timeout=10000)
-        except Exception:
-            # 兜底: 找第一个可见文本 input
-            await page.locator("input:visible").first.fill(sess.username, timeout=10000)
-        # 填密码
-        pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
-        await page.locator(pwd_sel).first.fill(sess.password, timeout=10000)
-        # 填验证码
-        captcha_sel = (
-            '.el-form-item:has-text("验证码") input:visible,'
-            '.el-form-item:has-text("校验码") input:visible,'
-            'input[placeholder*="验证码" i], input[placeholder*="校验码" i], input[placeholder*="captcha" i]'
-        )
-        try:
-            await page.locator(captcha_sel).first.fill(captcha, timeout=8000)
-        except Exception as e:
-            logger.warning(f"[CaptchaLogin] 按选择器填验证码失败,尝试找第三个可见 input: {e}")
-            # 兜底: 可见 input 的第三个(账号/密码/验证码顺序)
-            vis = page.locator("input:visible")
-            count = await vis.count()
-            if count >= 3:
-                await vis.nth(2).fill(captcha, timeout=5000)
-            else:
-                raise
-
-        await asyncio.sleep(0.8)
-
-        # 点击登录按钮(优先匹配含"登录"/"sign in"文字的按钮)
-        login_btn_sel = (
-            'button:has-text("登录"), button:has-text("登 录"), button:has-text("Sign in"), button:has-text("LOGIN"),'
-            'button.el-button--primary, button[type="submit"], .login-btn'
-        )
-        btn = page.locator(login_btn_sel).first
-        await btn.click(timeout=8000)
-
-        # 等待跳转: 成功会离开 /login 路由
-        try:
-            await page.wait_for_url(lambda u: "login" not in u.lower().split("#")[-1] if "#" in u else "login" not in u.lower(), timeout=15000)
-        except Exception as e:
-            # 没跳: 大概率验证码错/账号错,尝试抓取页面上的错误提示
-            err_text = ""
-            try:
-                err_loc = page.locator('.el-message, .el-form-item__error, .el-message-box__message, .ant-message-error').first
-                if await err_loc.count() > 0 and await err_loc.is_visible():
-                    err_text = await err_loc.inner_text(timeout=1500)
-            except Exception:
-                pass
-            if not err_text:
-                # 兜底取页面上可见错误
-                try:
-                    whole = await page.inner_text("body", timeout=1500)
-                    for kw in ["验证码", "错误", "失败", "密码", "用户名"]:
-                        if kw in whole:
-                            idx = whole.find(kw)
-                            err_text = whole[max(0, idx-20):idx+40]
-                            break
-                except Exception:
-                    pass
-            raise RuntimeError(f"登录失败: {err_text or '未跳转,可能验证码错误或账号密码错误'}") from e
-
-        success = True
-        logger.info(f"[CaptchaLogin] 登录成功,正在保存 storage_state: {sess.state_path}")
-        # 多等一会儿等资源加载(更完整的 cookie/localStorage)
-        await asyncio.sleep(3)
-        await sess.context.storage_state(path=str(sess.state_path))
-        state_saved = True
-        state_path_str = str(sess.state_path)
-        message = "登录成功,登录态已保存,后续同步将自动复用此登录态"
-
+        success, state_saved, message, state_path_str = await _captcha_do_fill_and_login(sess, captcha)
     except Exception as e:
-        message = str(e)
-        logger.error(f"[CaptchaLogin] submit 失败: {e}", exc_info=True)
+        log.error(f"[CaptchaLogin] submit 异常: {e}", exc_info=True)
+        success, state_saved, message, state_path_str = False, False, str(e), None
     finally:
         # 无论成功失败都销毁会话(Playwright 资源)
         await captcha_session_manager.remove(payload.session_id)

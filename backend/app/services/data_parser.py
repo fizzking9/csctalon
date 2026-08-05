@@ -214,6 +214,33 @@ COLUMN_TEMPLATES: dict[str, dict[str, list[str]]] = {
         "handler": ["处理人"],
         "handle_result": ["处理结果"],
     },
+    # 设备标签(标签字典 + 打标明细,同一次导出可能含两张 sheet 或一张合并表)
+    # 常见 BMS 标签字典列名候选
+    # 设备标签定义: BMS 后台实际不单独导出标签字典(通常只导出打标明细 + 部分元数据)。
+    # 这里留作手动维护 / 从打标明细里抽取 tag_name 反推的导入模板支持,同时兼容未来可能导出的
+    # "ID / 标签 / 类型 / 颜色 / 描述 / 创建时间" 字段顺序。
+    "device_tag": {
+        "id": ["标签ID", "id", "ID"],
+        "tag_name": ["标签名称", "标签名", "标签", "名称", "tag_name"],
+        "tag_type": ["标签类型", "类型", "分类", "tag_type"],
+        "color": ["颜色", "标签颜色", "显示颜色"],
+        "description": ["描述", "备注", "说明", "标签描述"],
+        "created_at": ["创建时间", "生成时间", "添加时间"],
+    },
+    # 设备标签打标明细(BMS 「device/device-tags」页点导出实际输出的表结构,
+    # 实测 2026-08-05 导出列: 设备sn,标签名,设备所属商户,设备当前套餐,创建人,更新时间)
+    "device_tag_binding": {
+        "device_sn": ["设备SN", "SN", "SN码", "设备编号", "设备号", "设备sn", "sn"],
+        "tag_id": ["标签ID", "标签id", "tag_id"],
+        "tag_name": ["标签名称", "标签名", "标签", "tag_name"],
+        "created_by": ["打标人", "创建人", "操作人", "添加人", "创建员", "最后修改人", "修改人"],
+        "created_at": ["打标时间", "创建时间", "添加时间", "绑定时间", "更新时间"],
+        # BMS 顺带导出的设备维度信息,非打标明细主键字段:
+        # 设备所属商户/设备当前套餐 — 作为导入时的 _sync_devices 辅助信息填进 devices 表
+        # (data_parser apply_mapping 遇到非模型字段会忽略,因此列名不冲突;需注意保持列名可读性)
+        "_merchant_name": ["设备所属商户", "所属商户", "商户"],
+        "_package_name": ["设备当前套餐", "当前套餐", "套餐"],
+    },
     # 人力快照 → SCD2 任职历史(走 /persons/import-snapshot,不走 UPSERT_DISPATCH)
     "staff": {
         "display_name": ["姓名"],
