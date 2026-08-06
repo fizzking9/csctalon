@@ -8,6 +8,8 @@ from sqlalchemy import and_, case, func, literal, or_, select, text, union
 from sqlalchemy.orm import Session
 
 from app.models.cs_record import CsRecord
+from app.models.external_complaint import ExternalComplaint
+from app.models.card_complaint import CardComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.person import Person, PersonAlias
 from app.models.refund import Refund
@@ -573,11 +575,28 @@ def wallet_balance_top(db: Session, limit: int = 20) -> list[dict]:
 
 # 工单类别兜底 CASE:
 #   service_category 为空 → 100%是投诉(已验证7.30-8.1共883条空类别,投诉占比100%)
+#   service_category 含"投诉"字样 → 识别为投诉(如 SCRM/平台同步过来的 "业务投诉""用户投诉"等)
+#   service_item 含外部投诉关键词(12315/工信部/消协/公共服务平台等) → 识别为投诉
 #   其它保持原值(退款/套餐疑问/其他/换货/设备故障/网络故障)
-# 用于所有按 service_category 聚合的场景,避免"空"类别在报表里散成孤立点
-def _ticket_category_case(col=ServiceTicket.service_category):
+# 用于所有按 service_category 聚合的场景,避免"空"类别在报表里散成孤立点,
+# 同时兼容 SCRM 平台把"业务投诉"写进 service_category 的新同步口径。
+_EXTERNAL_ITEM_COMPLAINT_KW = (
+    "12315", "工信部", "消协", "公共服务平台", "消费者协会",
+    "监督局", "市场监管", "市监", "315平台", "12345", "政务平台",
+)
+def _ticket_category_case(
+    col=ServiceTicket.service_category,
+    item_col=ServiceTicket.service_item,
+):
+    # item 命中外部投诉关键词 → 强制归为"投诉"
+    item_whens = [func.coalesce(item_col, literal("")).ilike(f"%{k}%") for k in _EXTERNAL_ITEM_COMPLAINT_KW]
+    # item 命中内部投诉关键词 → 归为"投诉"
+    internal_kws = ("商品投诉", "服务投诉", "微信投诉")
+    internal_whens = [func.coalesce(item_col, literal("")).ilike(f"%{k}%") for k in internal_kws]
     return case(
         (col.is_(None), "投诉"),
+        (col.ilike("%投诉%"), "投诉"),
+        (or_(*(item_whens + internal_whens)), "投诉"),
         else_=col,
     ).label("ticket_category")
 
@@ -849,14 +868,17 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
     # 客服接待量(智能助手处理记录数)
     cs_reception_count = db.scalar(select(func.count()).select_from(CsRecord)) or 0
 
-    # ---- 投诉统计 (service_category 兜底=投诉) ----
-    # 1. 投诉工单总数 (service_category IS NULL → 投诉)
-    complaint_total = db.scalar(
+    # ---- 投诉统计 (口径 = service_tickets 投诉 + external_complaints + card_complaints 三表 UNION) ----
+    # 1. 投诉工单总数 (service_tickets: _ticket_category_case()==投诉; 另叠加两张独立投诉表)
+    complaint_st = db.scalar(
         select(func.count())
         .select_from(ServiceTicket)
         .where(_ticket_category_case() == "投诉")
     ) or 0
-    # 2. 投诉子类分布
+    complaint_ec = db.scalar(select(func.count()).select_from(ExternalComplaint)) or 0
+    complaint_cc = db.scalar(select(func.count()).select_from(CardComplaint)) or 0
+    complaint_total = complaint_st + complaint_ec + complaint_cc
+    # 2. 投诉子类分布 (service_tickets 内部投诉分类 + 外部投诉合并)
     complaint_sub_rows = db.execute(
         select(_complaint_subitem_case(), func.count().label("cnt"))
         .select_from(ServiceTicket)
@@ -867,7 +889,17 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
     complaint_by_sub = [
         {"name": r[0], "value": int(r[1] or 0)} for r in complaint_sub_rows
     ]
-    # 3. 投诉状态分布 (待处理/已完成/终止)
+    # 把 external_complaints 的 complaint_category 归并为 "外部投诉平台" 子类 (避免与内部投诉子类混淆,同时累加独立投诉表)
+    if complaint_ec or complaint_cc:
+        _name_ec = "外部投诉(监督局/315等)"
+        _name_cc = "卡商群投诉"
+        _existing_subs = {x["name"] for x in complaint_by_sub}
+        if complaint_ec:
+            complaint_by_sub.append({"name": _name_ec, "value": int(complaint_ec)})
+        if complaint_cc:
+            complaint_by_sub.append({"name": _name_cc, "value": int(complaint_cc)})
+        complaint_by_sub.sort(key=lambda x: -x["value"])
+    # 3. 投诉状态分布 (待处理/已完成/终止) — 仅 service_tickets (两张独立投诉表状态口径不同暂不合并展示,避免饼图失真)
     complaint_status_rows = db.execute(
         select(
             func.coalesce(ServiceTicket.status, "未标注").label("st"),
@@ -881,7 +913,24 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
     complaint_by_status = [
         {"name": r[0], "value": int(r[1] or 0)} for r in complaint_status_rows
     ]
-    # 4. 工单总数(非投诉类)
+    # 补齐外部投诉/卡商投诉的状态缺失时,按 result 字段粗略估算 已完成(有效值)/待处理(未标注)
+    if complaint_ec:
+        ec_done = db.scalar(
+            select(func.count()).select_from(ExternalComplaint)
+            .where(func.coalesce(ExternalComplaint.result, "").ilike("%有效%"))
+        ) or 0
+        complaint_by_status.append({"name": "外部投诉-已处理", "value": int(ec_done)})
+        if complaint_ec - ec_done > 0:
+            complaint_by_status.append({"name": "外部投诉-待跟进", "value": int(complaint_ec - ec_done)})
+    if complaint_cc:
+        cc_done = db.scalar(
+            select(func.count()).select_from(CardComplaint)
+            .where(func.coalesce(CardComplaint.result, "").ilike("%完成%"))
+        ) or 0
+        complaint_by_status.append({"name": "卡商投诉-已处理", "value": int(cc_done)})
+        if complaint_cc - cc_done > 0:
+            complaint_by_status.append({"name": "卡商投诉-待跟进", "value": int(complaint_cc - cc_done)})
+    # 4. 工单总数(非投诉类) — 保持原 service_tickets 全量,仅用于投诉占比分母
     ticket_total = db.scalar(select(func.count()).select_from(ServiceTicket)) or 0
 
     return {
@@ -1958,13 +2007,27 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
                          .where(_between(CsRecord.operation_time, ys, ye),
                                 CsRecord.operator.isnot(None))).scalar() or 0
 
-    # 7. 今日投诉单 (service_category 兜底=投诉, register_time 落当天)
-    comp_t = db.execute(select(func.count())
+    # 7. 今日投诉单 (统计口径 = service_tickets 投诉 + external_complaints + card_complaints 三表 UNION)
+    #    - service_tickets: _ticket_category_case() == "投诉" (含 IS NULL / category含投诉 / item含关键词)
+    #    - external_complaints: 315/监督局/消协等外部平台投诉 (complaint_date 落当天)
+    #    - card_complaints: 卡商群投诉 (complaint_date 落当天)
+    comp_t_st = db.execute(select(func.count())
                         .where(_between(ServiceTicket.register_time, ts, te),
                                _ticket_category_case() == "投诉")).scalar() or 0
-    comp_y = db.execute(select(func.count())
+    comp_t_ec = db.execute(select(func.count())
+                        .where(_between(ExternalComplaint.complaint_date, ts, te))).scalar() or 0
+    comp_t_cc = db.execute(select(func.count())
+                        .where(_between(CardComplaint.complaint_date, ts, te))).scalar() or 0
+    comp_t = comp_t_st + comp_t_ec + comp_t_cc
+
+    comp_y_st = db.execute(select(func.count())
                         .where(_between(ServiceTicket.register_time, ys, ye),
                                _ticket_category_case() == "投诉")).scalar() or 0
+    comp_y_ec = db.execute(select(func.count())
+                        .where(_between(ExternalComplaint.complaint_date, ys, ye))).scalar() or 0
+    comp_y_cc = db.execute(select(func.count())
+                        .where(_between(CardComplaint.complaint_date, ys, ye))).scalar() or 0
+    comp_y = comp_y_st + comp_y_ec + comp_y_cc
 
     def _k(v, yv):
         return {"value": v, "yoy_value": yv, "yoy_pct": _pct_delta(v, yv)}
@@ -2146,7 +2209,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         b_cnt_map[idx] = int(r.cnt or 0)
         b_amt_map[idx] = float(r.amt or 0)
 
-    # 投诉: 按粒度聚合 按 service_tickets.register_time, 空类别兜底=投诉
+    # 投诉: 按粒度聚合 按 service_tickets.register_time, 三表 UNION 计数
     cp_rows = db.execute(
         select(_time_trunc(ServiceTicket.register_time), func.count().label("cnt"))
         .where(ServiceTicket.register_time.isnot(None),
@@ -2163,6 +2226,32 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         if idx is None:
             continue
         cp_map[idx] = int(r.cnt or 0)
+    # 叠加 ExternalComplaint 小时/日节奏
+    ec_rows = db.execute(
+        select(_time_trunc(ExternalComplaint.complaint_date), func.count().label("cnt"))
+        .where(ExternalComplaint.complaint_date.isnot(None),
+               ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te)
+        .group_by("trunc_t")
+    ).all()
+    for r in ec_rows:
+        tt = r._mapping["trunc_t"]
+        if tt is None: continue
+        idx = _slot_idx(tt)
+        if idx is not None:
+            cp_map[idx] = cp_map.get(idx, 0) + int(r.cnt or 0)
+    # 叠加 CardComplaint 小时/日节奏
+    cc_rows = db.execute(
+        select(_time_trunc(CardComplaint.complaint_date), func.count().label("cnt"))
+        .where(CardComplaint.complaint_date.isnot(None),
+               CardComplaint.complaint_date >= ts, CardComplaint.complaint_date <= te)
+        .group_by("trunc_t")
+    ).all()
+    for r in cc_rows:
+        tt = r._mapping["trunc_t"]
+        if tt is None: continue
+        idx = _slot_idx(tt)
+        if idx is not None:
+            cp_map[idx] = cp_map.get(idx, 0) + int(r.cnt or 0)
 
     # ── 填充到槽位: 单日填当前小时之前, 多日填全部(最后一天可能实时) ──
     slots = list(range(n_slots))
@@ -2301,7 +2390,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
             "device_count": int(r.dcnt or 0),
         })
 
-    # ---------- 新增: 今日投诉统计 (service_tickets 表, 空类别兜底=投诉) ----------
+    # ---------- 新增: 今日投诉统计 (口径=三表 UNION: service_tickets + external_complaints + card_complaints) ----------
     # 左2: 投诉子类饼图 (从 service_item 归一化, 仅统计今日投诉工单)
     # 同时拿到每个子类的来源类型(内部/外部) 方便前端分组着色与拆分展示
     comp_sub_rows = db.execute(
@@ -2318,8 +2407,47 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
          "value": int(r[2] or 0)}
         for r in comp_sub_rows
     ]
-    # 今日投诉总数 (便于前端展示 "今日共XX条投诉")
-    complaint_total = sum(v["value"] for v in complaint_subs) or 0
+    # 叠加 external_complaints 今日 (按 complaint_category 聚合,未分类则归入 "外部投诉(监督局/315等)")
+    ec_between = and_(ExternalComplaint.complaint_date.isnot(None),
+                      ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te)
+    ec_rows = db.execute(
+        select(func.coalesce(ExternalComplaint.complaint_category, "外部投诉(监督局/315等)"),
+               func.count().label("cnt"))
+        .where(ec_between)
+        .group_by(func.coalesce(ExternalComplaint.complaint_category, "外部投诉(监督局/315等)"))
+        .order_by(text("cnt DESC"))
+    ).all()
+    for r in ec_rows:
+        complaint_subs.append({
+            "name": str(r[0] or "外部投诉(监督局/315等)"),
+            "source_type": "外部投诉",
+            "value": int(r[1] or 0),
+        })
+    # 叠加 card_complaints 今日 (按 problem_category 聚合, 未分类归入 "卡商群投诉")
+    cc_between = and_(CardComplaint.complaint_date.isnot(None),
+                      CardComplaint.complaint_date >= ts, CardComplaint.complaint_date <= te)
+    cc_rows = db.execute(
+        select(func.coalesce(CardComplaint.problem_category, "卡商群投诉"),
+               func.count().label("cnt"))
+        .where(cc_between)
+        .group_by(func.coalesce(CardComplaint.problem_category, "卡商群投诉"))
+        .order_by(text("cnt DESC"))
+    ).all()
+    for r in cc_rows:
+        complaint_subs.append({
+            "name": str(r[0] or "卡商群投诉"),
+            "source_type": "内部投诉",
+            "value": int(r[1] or 0),
+        })
+    if complaint_subs:
+        complaint_subs.sort(key=lambda x: -x["value"])
+    # 今日投诉总数 (便于前端展示 "今日共XX条投诉") = 三张独立投诉表今日之和
+    st_cnt = int(sum((x["value"] for x in complaint_subs if x["name"] not in ("外部投诉(监督局/315等)", "卡商群投诉") or (x["source_type"] == "外部投诉" and x["name"].startswith("外部投诉"))), 0))
+    # 为避免重复计算,直接重算 total = 三表独立相加
+    _cnt_st = db.execute(select(func.count()).where(tk_between, _ticket_category_case() == "投诉")).scalar() or 0
+    _cnt_ec = db.execute(select(func.count()).where(ec_between)).scalar() or 0
+    _cnt_cc = db.execute(select(func.count()).where(cc_between)).scalar() or 0
+    complaint_total = int(_cnt_st) + int(_cnt_ec) + int(_cnt_cc)
     # 投诉来源类型聚合: 外部投诉 vs 内部投诉 各自数量与占比(分析维度独立核算)
     comp_src_rows = db.execute(
         select(_complaint_source_type_case(), func.count().label("cnt"))
@@ -2331,6 +2459,23 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         {"name": r[0] or "内部投诉", "value": int(r[1] or 0)}
         for r in comp_src_rows
     ]
+    # 外部投诉平台(ExternalComplaint + CardComplaint) 归入外部/内部 来源桶
+    if _cnt_ec > 0:
+        # 所有 external_complaints 统一算 "外部投诉"
+        found_outer = False
+        for x in complaint_by_source:
+            if x["name"] == "外部投诉":
+                x["value"] += int(_cnt_ec); found_outer = True; break
+        if not found_outer:
+            complaint_by_source.append({"name": "外部投诉", "value": int(_cnt_ec)})
+    if _cnt_cc > 0:
+        # 卡商群投诉 = 内部投诉
+        found_inner = False
+        for x in complaint_by_source:
+            if x["name"] == "内部投诉":
+                x["value"] += int(_cnt_cc); found_inner = True; break
+        if not found_inner:
+            complaint_by_source.append({"name": "内部投诉", "value": int(_cnt_cc)})
     # 补齐"内部投诉""外部投诉"两个桶,缺失补0 (前端颜色固定)
     _src_present = {x["name"] for x in complaint_by_source}
     for nm in ("外部投诉", "内部投诉"):
@@ -2355,7 +2500,16 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
             WHERE st.register_time IS NOT NULL
               AND st.register_time >= :ts
               AND st.register_time <= :te
-              AND (st.service_category IS NULL)  -- 投诉工单 (兜底规则)
+              -- 投诉工单: 与 _ticket_category_case 口径严格一致
+              AND (
+                st.service_category IS NULL
+                OR st.service_category ILIKE '%投诉%'
+                OR st.service_item ILIKE ANY (ARRAY[
+                    '%12315%', '%工信部%', '%消协%', '%公共服务平台%', '%消费者协会%',
+                    '%监督局%', '%市场监管%', '%市监%', '%315平台%', '%12345%', '%政务平台%',
+                    '%商品投诉%', '%服务投诉%', '%微信投诉%'
+                ])
+              )
         ),
         nearest_cs AS (
             SELECT DISTINCT ON (ct.ticket_no)

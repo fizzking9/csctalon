@@ -37,6 +37,7 @@ from app.services.captcha_session import (
     bytes_to_data_uri,
     captcha_session_manager,
     try_ocr_captcha,
+    try_ocr_math_captcha,
 )
 from app.services.scrm_sync_service import (
     DATA_TYPE_OPERATOR,
@@ -711,10 +712,14 @@ class CaptchaLoginStartResponse(BaseModel):
     captcha_image: str = Field(..., description="验证码图片(data:image/png;base64,...)")
     login_url: str = Field(..., description="当前登录页URL(便于调试)")
     hint: str | None = Field(None, description="提示信息")
+    captcha_type: str = Field(
+        "text",
+        description="验证码类型: text=普通字母数字(闪猫), math=数学计算式(SCRM,需提交计算结果)",
+    )
     # 自动 OCR 识别字段(新):若 OCR 成功且自动登录通过,前端无需再弹窗让用户输入
     auto_login_attempted: bool = Field(False, description="后端是否尝试了自动 OCR 识别登录")
     auto_login_success: bool = Field(False, description="自动 OCR 识别+登录是否成功")
-    ocr_recognized_text: str | None = Field(None, description="OCR 识别出的验证码文本(用于调试展示,可能错误)")
+    ocr_recognized_text: str | None = Field(None, description="OCR 识别出的文本(math 类型=计算后的答案数字,例如 '0')")
     auto_login_message: str | None = Field(None, description="自动登录成功/失败的说明")
     storage_state_saved: bool = Field(False, description="若自动登录成功,storage_state 是否已写入磁盘")
     state_path: str | None = Field(None, description="若自动登录成功,对应 storage_state 路径")
@@ -844,11 +849,11 @@ async def _captcha_do_fill_and_login(
 
 
 @router.get("/captcha-login/check", response_model=R[CaptchaLoginCheckResponse], summary="检查验证码登录态文件是否存在")
-def captcha_login_check(data_type: str, _: CurrentUser):
-    """检查 storage_state 是否存在(首次进入同步设置页时调用)"""
-    seed = BMS_DATA_SOURCES.get(data_type)
-    if not seed or not seed.get("requires_captcha"):
-        raise HTTPException(status_code=400, detail=f"数据源 {data_type} 不需要验证码登录")
+def captcha_login_check(data_type: str, _: CurrentUser, db: DBSession):
+    """检查 storage_state 是否存在(首次进入同步设置页时调用)。兼容 BMS + SCRM。"""
+    cfg = get_sync_source_config(db, data_type)
+    if not cfg or not cfg.get("requires_captcha"):
+        raise HTTPException(status_code=400, detail=f"数据源 {data_type} 当前配置不需要验证码登录")
     state_path = _storage_state_path(data_type)
     has_state = state_path.exists()
     mtime = None
@@ -868,16 +873,18 @@ async def captcha_login_start(payload: CaptchaLoginStartRequest, _: CurrentUser,
     """
     第 1 步:启动 Playwright,导航到登录页,定位验证码图片并截图返回。
     前端拿到 captcha_image 后展示给用户,用户肉眼识别后调用 /submit 提交。
+
+    兼容 BMS(text 验证码+闪猫自动重试) 与 SCRM(math 数学计算式验证码,OCR 后返回计算答案供用户确认)。
     """
     data_type = payload.data_type
-    seed = BMS_DATA_SOURCES.get(data_type)
-    if not seed or not seed.get("requires_captcha"):
-        raise HTTPException(status_code=400, detail=f"数据源 {data_type} 不需要验证码登录")
-
-    # 获取账号密码配置(必须走解密版本,不能用 get_all_configs 的 API 掩码版——没有 password 字段,username 也是加密串)
     cfg = get_sync_source_config(db, data_type)
     if not cfg:
         raise HTTPException(status_code=400, detail=f"未配置数据源 {data_type},请在同步设置中填写账号密码")
+    if not cfg.get("requires_captcha"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"数据源 {data_type} 当前模式({cfg.get('fetch_mode')})不需要验证码登录。请先在同步设置中切换为 Playwright 模式。"
+        )
     if not cfg.get("username") or not cfg.get("password"):
         raise HTTPException(status_code=400, detail=f"数据源 {data_type} 未配置账号密码")
 
@@ -886,9 +893,19 @@ async def captcha_login_start(payload: CaptchaLoginStartRequest, _: CurrentUser,
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Playwright 不可用: {e}")
 
-    base_url = cfg["base_url"] or seed["base_url"]
-    page_path = seed.get("page_path", "")
-    login_url = f"{base_url}/index.html#/login"
+    captcha_type: str = cfg.get("captcha_type") or "text"
+    options: dict = cfg.get("options") or {}
+    base_url = cfg["base_url"] or (BMS_DATA_SOURCES.get(data_type) or {}).get("base_url", "")
+    seed = BMS_DATA_SOURCES.get(data_type) or SCRM_DATA_SOURCES.get(data_type) or {}
+
+    # 登录地址推导: BMS = base/index.html#/login, SCRM = base + options.login_url_path(/login)
+    if cfg.get("fetch_mode") == "openapi":
+        raise HTTPException(status_code=400, detail="OpenAPI 模式不需要网页登录;请切换到 Playwright 模式")
+    if data_type.startswith("scrm_"):
+        login_url_path = options.get("login_url_path") or "/login"
+        login_url = base_url.rstrip("/") + login_url_path
+    else:
+        login_url = f"{base_url}/index.html#/login"
     state_path = _storage_state_path(data_type)
 
     sess = await captcha_session_manager.create(
@@ -972,94 +989,115 @@ async def captcha_login_start(payload: CaptchaLoginStartRequest, _: CurrentUser,
                 captcha_png = await page.screenshot(type="png", full_page=False)
                 logger.warning(f"[CaptchaLogin] 页面截图: {e}")
 
-        # ── 自动 OCR 识别尝试(优先):最多 N 次重试(使用 bms_fetcher 升级后的 _try_auto_login_via_ocr) ──
+        # ── 自动 OCR 识别尝试(优先):最多 N 次重试 ──
         auto_attempted = False
         auto_success = False
         ocr_text: str | None = None
         auto_msg: str | None = None
         autostate_saved = False
         autostate_path: str | None = None
-        base_hint = (
-            "请输入图片中显示的验证码(不区分大小写可先尝试)"
-            if captcha_elem
-            else "未定位到验证码元素,已截整个登录区域,请从中识别验证码"
-        )
+        if captcha_type == "math":
+            base_hint = (
+                "请输入图片中数学计算式的计算结果(例如 7*0=? 的答案是 0, 9-9=? 的答案是 0)。"
+                "OCR 已自动算出答案,请核对图片后直接点提交即可。"
+                if captcha_elem
+                else "未定位到验证码图片,请从截图中自行计算数学题的答案并输入"
+            )
+        else:
+            base_hint = (
+                "请输入图片中显示的验证码(不区分大小写可先尝试)"
+                if captcha_elem
+                else "未定位到验证码元素,已截整个登录区域,请从中识别验证码"
+            )
 
         # 只在用户勾选「自动识别」(payload.auto_ocr=True) 且有验证码图片时,走自动重试
         if payload.auto_ocr and captcha_png:
             auto_attempted = True
-            ocr_result = try_ocr_captcha(captcha_png)
-            ocr_text = ocr_result  # 先把第一次识别结果返回给前端(便于排查)
-            logger.info(
-                f"[CaptchaLogin] 触发自动 OCR 登录模式(调用 _try_auto_login_via_ocr,最多 8 次重试);"
-                f" 首次粗略识别={ocr_result!r}"
-            )
-            # 注意: _try_auto_login_via_ocr 内部会:
-            #   1) 第 1 次尝试会 goto(login_url) + 填账号密码(我们已经做过了,但它重做一次也没关系,幂等)
-            #   2) 定位验证码 → OCR → 填入 → 点登录 → 并发 (poll_error 5s + wait_url 15s)
-            #   3) 验证码类错误:点验证码图片刷新重试
-            #   4) 账号密码类错误:立即终止
-            ok, msg = await _try_auto_login_via_ocr(
-                page=page,
-                context=context,
-                data_type=data_type,
-                login_url=login_url,
-                username=sess.username,
-                password=sess.password,
-                state_path=sess.state_path,
-            )
-            auto_success = ok
-            auto_msg = msg
-            autostate_saved = bool(sess.state_path.exists()) if ok else False
-            autostate_path = str(sess.state_path) if autostate_saved else None
-            if ok:
-                # OCR 登录成功:直接销毁会话,返回成功响应给前端(无需用户再操作)
-                logger.info(f"[CaptchaLogin] 自动 OCR 登录成功:{msg}")
-                await captcha_session_manager.remove(sess.session_id)
-                return R(data=CaptchaLoginStartResponse(
-                    session_id=sess.session_id,
-                    captcha_image=bytes_to_data_uri(captcha_png),
-                    login_url=login_url,
-                    hint=base_hint + " (后端已自动识别并登录成功,无需输入)",
-                    auto_login_attempted=True,
-                    auto_login_success=True,
-                    ocr_recognized_text=ocr_text,
-                    auto_login_message=auto_msg,
-                    storage_state_saved=autostate_saved,
-                    state_path=autostate_path,
-                ))
+            if captcha_type == "math":
+                # SCRM 数学验证码: OCR 直接返回计算好的答案数字字符串
+                ocr_result = try_ocr_math_captcha(captcha_png)
+                ocr_text = ocr_result
+                logger.info(
+                    f"[CaptchaLogin-Math] 数学验证码 OCR 完成: 答案={ocr_result!r};"
+                    f" 进入人工确认/提交流程(不尝试自动 fill,保持与 text 一致的交互路径)"
+                )
+                auto_msg = (
+                    f"OCR 计算答案是 '{ocr_result}',请核对图片后直接点提交(若识别错可手动修改)"
+                    if ocr_result
+                    else "OCR 未能识别此算式,请肉眼计算后手动输入答案"
+                )
+                # math 类型不调用 _try_auto_login_via_ocr(那是 BMS 专用的):
+                #   - 让用户看到答案 → 点 submit → 走通用 _captcha_do_fill_and_login 路径(也支持 math)
+                #   - 这样保证与 text 类型交互一致,也方便人工修正
             else:
-                # OCR 登录失败(大概率验证码识别错了/账号密码错)
-                logger.warning(f"[CaptchaLogin] 自动 OCR 登录 {_try_auto_login_via_ocr.__name__} 失败,转人工兜底: {msg}")
-                # 保留会话,但刷新一次登录页+重新截验证码图片(保证用户手动输入时用的是新验证码)
-                try:
-                    await page.goto(login_url, wait_until="networkidle", timeout=60000)
-                    await asyncio.sleep(2)
-                    if captcha_elem:
-                        try:
-                            cap2 = await captcha_elem.screenshot(type="png")
-                            if cap2 and len(cap2) > 100:
-                                captcha_png = cap2
-                        except Exception:
-                            pass
-                except Exception as re:
-                    logger.warning(f"[CaptchaLogin] 刷新登录页失败: {re}")
+                # BMS text 类型: 原闪猫自动重试逻辑
+                ocr_result = try_ocr_captcha(captcha_png)
+                ocr_text = ocr_result  # 先把第一次识别结果返回给前端(便于排查)
+                logger.info(
+                    f"[CaptchaLogin-Text] 触发自动 OCR 登录模式(调用 _try_auto_login_via_ocr,最多 8 次重试);"
+                    f" 首次粗略识别={ocr_result!r}"
+                )
+                ok, msg = await _try_auto_login_via_ocr(
+                    page=page,
+                    context=context,
+                    data_type=data_type,
+                    login_url=login_url,
+                    username=sess.username,
+                    password=sess.password,
+                    state_path=sess.state_path,
+                )
+                auto_success = ok
+                auto_msg = msg
+                autostate_saved = bool(sess.state_path.exists()) if ok else False
+                autostate_path = str(sess.state_path) if autostate_saved else None
+                if ok:
+                    logger.info(f"[CaptchaLogin-Text] 自动 OCR 登录成功:{msg}")
+                    await captcha_session_manager.remove(sess.session_id)
+                    return R(data=CaptchaLoginStartResponse(
+                        session_id=sess.session_id,
+                        captcha_image=bytes_to_data_uri(captcha_png),
+                        login_url=login_url,
+                        hint=base_hint + " (后端已自动识别并登录成功,无需输入)",
+                        captcha_type=captcha_type,
+                        auto_login_attempted=True,
+                        auto_login_success=True,
+                        ocr_recognized_text=ocr_text,
+                        auto_login_message=auto_msg,
+                        storage_state_saved=autostate_saved,
+                        state_path=autostate_path,
+                    ))
+                else:
+                    logger.warning(f"[CaptchaLogin-Text] 自动 OCR 登录 {_try_auto_login_via_ocr.__name__} 失败,转人工兜底: {msg}")
+                    # 保留会话,但刷新一次登录页+重新截验证码图片(保证用户手动输入时用的是新验证码)
+                    try:
+                        await page.goto(login_url, wait_until="networkidle", timeout=60000)
+                        await asyncio.sleep(2)
+                        if captcha_elem:
+                            try:
+                                cap2 = await captcha_elem.screenshot(type="png")
+                                if cap2 and len(cap2) > 100:
+                                    captcha_png = cap2
+                            except Exception:
+                                pass
+                    except Exception as re:
+                        logger.warning(f"[CaptchaLogin-Text] 刷新登录页失败: {re}")
 
-        # 无 OCR 或 OCR 登录失败 → 进入人工输入兜底流程(标准原流程)
+        # 无 OCR / math 类型 / OCR 登录失败 → 进入人工输入兜底流程(标准原流程)
         final_hint = base_hint
-        if auto_attempted and not auto_success:
-            final_hint = f"自动识别失败({auto_msg}),请手动输入验证码"
+        if auto_attempted and not auto_success and auto_msg:
+            final_hint = f"自动识别提示: {auto_msg} —— 请手动确认/输入答案后提交"
         return R(data=CaptchaLoginStartResponse(
             session_id=sess.session_id,
             captcha_image=bytes_to_data_uri(captcha_png),
             login_url=login_url,
             hint=final_hint,
+            captcha_type=captcha_type,
             auto_login_attempted=auto_attempted,
-            auto_login_success=False,
+            auto_login_success=auto_success,
             ocr_recognized_text=ocr_text,
             auto_login_message=auto_msg,
-            storage_state_saved=False,
-            state_path=None,
+            storage_state_saved=autostate_saved,
+            state_path=autostate_path,
         ))
     except Exception as e:
         await captcha_session_manager.remove(sess.session_id)
@@ -1102,10 +1140,13 @@ async def captcha_login_submit(payload: CaptchaLoginSubmitRequest, _: CurrentUse
 
 
 @router.post("/captcha-login/logout", response_model=R[CaptchaLoginCheckResponse], summary="清除验证码登录态(强制下次重新登录)")
-def captcha_login_logout(payload: CaptchaLoginLogoutRequest, _: CurrentUser):
-    seed = BMS_DATA_SOURCES.get(payload.data_type)
-    if not seed or not seed.get("requires_captcha"):
-        raise HTTPException(status_code=400, detail=f"数据源 {payload.data_type} 不需要验证码登录")
+def captcha_login_logout(payload: CaptchaLoginLogoutRequest, _: CurrentUser, db: DBSession):
+    cfg = get_sync_source_config(db, payload.data_type)
+    if not cfg or not cfg.get("requires_captcha"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"数据源 {payload.data_type} 当前模式({cfg.get('fetch_mode') if cfg else ''})不需要验证码登录",
+        )
     state_path = _storage_state_path(payload.data_type)
     if state_path.exists():
         try:
