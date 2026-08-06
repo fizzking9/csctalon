@@ -57,3 +57,18 @@ class ServiceTicket(TimestampMixin, Base):
     last_urge_time: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="最后催单时间"
     )
+    # ── 同步溯源 & 更新人拆分 (2026-08-06 新口径 P1-T4) ──
+    # synced_at: 本条记录最后一次被「导入/同步任务」写回 DB 的时间 (每次 upsert 强制 now()),
+    #   用于区分「上游 BMS/SCRM 真的改了这张单」还是「我们的同步任务每天扫表覆盖」,
+    #   区别于 TimestampMixin.updated_at (所有 ORM save 都会改) 和 finish_time (89% 被批量覆盖不可靠)。
+    synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True,
+        comment="最后一次被导入/同步任务写入时间(每次 upsert 强制 now())",
+    )
+    # updated_by_raw: 上游 BMS/SCRM 导出的「更新人/最后操作人」原样保留,
+    #   不和 handler / operator / auditor 这些业务意义的人员字段混合,
+    #   用于在「更新时间不可靠」的情况下, 反向追溯「最后是谁在上游改了这张单」。
+    updated_by_raw: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True,
+        comment="上游(BMS/SCRM)原始更新人/最后操作人,原样导入不参与业务逻辑",
+    )

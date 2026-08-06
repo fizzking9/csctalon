@@ -1044,6 +1044,71 @@ PRESET_VIEWS: list[dict] = [
         "classification_rule_ids": [],
         "time_range_default": {"days": 30},
     },
+
+    # ============================================================
+    # 服务请求管理专项 6 个预设视图 (本次 2026-08-06 新口径)
+    # 全部使用 analytics.py HANDLERS 自定义实现 (segments 仅占位元数据)
+    # ============================================================
+    {
+        "code": "preset_ticket_work_content_top20",
+        "name": "工单工作内容 Top20 (类别×服务项)",
+        "description": "近7天 服务类别×服务项 组合 Top20 排名: 工单量/同比/在途积压/平均处理时长/覆盖SN/覆盖手机号. 用于一眼看清「现在客服大部分时间在处理什么」.",
+        "chart_type": "table",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": None,
+    },
+    {
+        "code": "preset_complaint_subtype_rootcause_heatmap",
+        "name": "投诉子类×六大类根因 热力矩阵",
+        "description": "投诉子类 Top10 × 网络质量/套餐争议/退款协商失败/降成争议/其它/未关联SN 六大类根因 热力占比表. 根因按 SN±24h 窗口 JOIN cs_record.problem_category/problem_type 归并, 与投诉根因柱图同口径.",
+        "chart_type": "table",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 7},
+    },
+    {
+        "code": "preset_today_sn_top_coverage",
+        "name": "今日 SN TOP 覆盖",
+        "description": "今日接待工单量 Top20 SN 设备清单: 今日工单数/其中投诉/覆盖手机号/首次最近进线/服务项摘要. 用于排查高重复设备及对应的问题集中爆发点.",
+        "chart_type": "table",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": None,
+    },
+    {
+        "code": "preset_today_phone_dup_complaint",
+        "name": "今日手机号 TOP 重复投诉",
+        "description": "当日同一手机号 ≥ 2 次投诉 (三表 UNION: 工单投诉 + 外部投诉 + 卡商投诉) 的 Top20 用户清单: 脱敏手机号/今日投诉次数/今日总进线次数/投诉子类摘要/关联SN. 用于定位重点客户/纠纷用户, 优先派发主管跟进.",
+        "chart_type": "table",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": None,
+    },
+    {
+        "code": "preset_today_handler_sn_rank",
+        "name": "今日处理人 覆盖 SN 排行",
+        "description": "按「今日真实覆盖去重 SN 数」排名 (而不是纯结单数量, 后者会被批量覆盖污染). 更准确反映每位客服今天真正帮了多少台设备/用户解决问题. 口径与 today_kpi.ticket_done 有效完工推算一致.",
+        "chart_type": "table",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": None,
+    },
+    {
+        "code": "preset_today_cold_tickets",
+        "name": "在途冷工单 Top50 (压单最久)",
+        "description": "冷工单=当前仍未结 (status ∉ 已完成/无需处理/已取消) 且距登记 >24 小时. 按压单时长倒序输出 Top50: 工单号/距登记h/状态/服务项/处理人/派发人/最后活动时间/催单次数/SN/手机号. 主管每天优先督办这张表.",
+        "chart_type": "table",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": None,
+    },
 ]
 
 

@@ -61,7 +61,9 @@ def _resolve_effective_options(db_options: dict | None, seed_cfg: dict) -> dict:
     # ── 顶层 seed 的 fetch_mode / requires_captcha 也同步到 effective(兼容老种子写法) ──
     if "fetch_mode" not in effective:
         effective["fetch_mode"] = seed_cfg.get(
-            "fetch_mode", "openapi" if _is_scrm_type(seed_cfg.get("data_type", "")) else "playwright"
+            # 2026-08-06 修复: SCRM 默认从 openapi → playwright (OpenAPI 会被平台风控/限流,
+            # 且用户反馈 OpenAPI 抓不到今日增量, Playwright 直接模拟浏览器导出与后台页面一致)
+            "fetch_mode", "playwright" if _is_scrm_type(seed_cfg.get("data_type", "")) else "playwright"
         )
     if "captcha_type" not in effective:
         # 推导: BMS requires_captcha=True → "text"(闪猫); SCRM playwright 模式 → "math"; 否则 "none"
@@ -182,6 +184,34 @@ def ensure_sync_sources_registered(db: Session) -> dict:
                 except Exception:
                     # 某些旧版本 SQLAlchemy 对属性 setattr 有限制,忽略
                     pass
+
+            # ── SCRM 模式补丁 (2026-08-06): 旧默认 openapi → 强制改成 playwright ──
+            #   用户需求: SCRM 同步默认 Playwright。之前 scrm_client.SCRM_DATA_SOURCES
+            #   4 个源的默认 fetch_mode = "openapi",DB 中已存在的老行 options.fetch_mode
+            #   会停在旧默认 openapi。我们这里做补丁:如果当前 fetch_mode 是 None 或
+            #   "openapi" (= 老默认值,不是用户主动选的其他模式),强制升级到 playwright。
+            #   如果用户之前明确选了 dual/http 等非 openapi 的其他值,则保留用户选择不动。
+            if _is_scrm_type(data_type):
+                cur_opts = copy.deepcopy(existing.options or {})
+                cur_fm = cur_opts.get("fetch_mode")
+                if cur_fm in (None, "openapi", "OpenAPI", "openapi_v1"):
+                    new_fetch_mode = (
+                        cfg.get("fetch_mode")
+                        or (cfg.get("options") or {}).get("fetch_mode")
+                        or "playwright"
+                    )
+                    cur_opts["fetch_mode"] = new_fetch_mode
+                    try:
+                        existing.options = cur_opts or None
+                        patched_fields += 1
+                        logger.info(
+                            f"[sync_source_configs] SCRM 模式自动升级: {data_type}.fetch_mode "
+                            f"{cur_fm!r} → {new_fetch_mode!r} (旧默认 openapi 补丁)"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"SCRM fetch_mode 补丁更新 {data_type} 失败: {e}"
+                        )
     if created or updated_options or patched_fields:
         db.commit()
     total = len(all_sources)
@@ -200,7 +230,8 @@ def _row_to_config(row: SyncSourceConfig) -> dict:
     seed_with_dt = {**seed, "data_type": row.data_type}
     effective_options = _resolve_effective_options(row.options, seed_with_dt)
     fetch_mode = effective_options.get(
-        "fetch_mode", "openapi" if _is_scrm_type(row.data_type) else "playwright"
+        # 2026-08-06: SCRM fallback 默认从 openapi → playwright
+        "fetch_mode", "playwright" if _is_scrm_type(row.data_type) else "playwright"
     )
     captcha_type = effective_options.get("captcha_type", "none")
     requires_captcha = _requires_captcha_from_options(effective_options)
@@ -249,7 +280,7 @@ def get_sync_source_config(db: Session, data_type: str) -> dict | None:
         "username": env_user or None,
         "password": env_pwd or None,
         "options": effective_options,
-        "fetch_mode": effective_options.get("fetch_mode", "openapi" if is_scrm else "playwright"),
+        "fetch_mode": effective_options.get("fetch_mode", "playwright" if is_scrm else "playwright"),
         "captcha_type": effective_options.get("captcha_type", "none"),
         "requires_captcha": _requires_captcha_from_options(effective_options),
         "default_sync": cfg.get("default_sync", True),
@@ -265,7 +296,8 @@ def list_sync_source_configs(db: Session) -> list[dict]:
         seed = _seed_of(row.data_type)
         effective_options = _resolve_effective_options(row.options, {**seed, "data_type": row.data_type})
         fetch_mode = effective_options.get(
-            "fetch_mode", "openapi" if _is_scrm_type(row.data_type) else "playwright"
+            # 2026-08-06: SCRM fallback 默认从 openapi → playwright (与 seed 一致)
+            "fetch_mode", "playwright" if _is_scrm_type(row.data_type) else "playwright"
         )
         captcha_type = effective_options.get("captcha_type", "none")
         requires_captcha = _requires_captcha_from_options(effective_options)
@@ -340,16 +372,64 @@ def update_sync_source_config(db: Session, data_type: str, payload: dict) -> dic
         row.password = encrypt_secret(payload["password"])
 
     # ── options 合并:顶层特殊 key (fetch_mode/captcha_type) + options.patch + 其他未知顶层 key ──
+    _VALID_FETCH_MODES = {"openapi", "playwright", "dual", "http"}
+    _VALID_CAPTCHA_TYPES = {"none", "text", "math"}
+
     options_patch: dict = {}
-    # 1) 直接传的 fetch_mode / captcha_type 优先
-    if payload.get("fetch_mode") in ("openapi", "playwright", "dual", "http"):
-        options_patch["fetch_mode"] = payload["fetch_mode"]
-    if payload.get("captcha_type") in ("none", "text", "math"):
-        options_patch["captcha_type"] = payload["captcha_type"]
-    # 2) options 整体 patch (前端表单直接 options 展开提交)
+
+    # ---------- 1) 直接传的 fetch_mode / captcha_type 优先 ----------
+    #   修复 2026-08-06: 之前只允许精确小写匹配,不在枚举中就静默忽略,导致用户传
+    #   "Playwright" / " playwright " / 拼写有误时,保存看起来成功但实际没写 DB,
+    #   下次进来又回到旧值(默认 openapi)。
+    #   现在: 对字符串先 strip().lower() 规范化, 仍不合法就显式抛 ValueError,
+    #   前端拿到 400/422 给用户看明确错误提示, 不再默默吃掉。
+    if "fetch_mode" in payload and payload["fetch_mode"] is not None:
+        raw_fm = str(payload["fetch_mode"]).strip().lower() if isinstance(payload["fetch_mode"], str) else None
+        if raw_fm and raw_fm not in _VALID_FETCH_MODES:
+            raise ValueError(
+                f"[update_sync_source_config] data_type={data_type} fetch_mode={raw_fm!r} 非法;"
+                f" 允许值: {sorted(_VALID_FETCH_MODES)}"
+            )
+        if raw_fm:
+            options_patch["fetch_mode"] = raw_fm
+
+    if "captcha_type" in payload and payload["captcha_type"] is not None:
+        raw_ct = str(payload["captcha_type"]).strip().lower() if isinstance(payload["captcha_type"], str) else None
+        if raw_ct and raw_ct not in _VALID_CAPTCHA_TYPES:
+            raise ValueError(
+                f"[update_sync_source_config] data_type={data_type} captcha_type={raw_ct!r} 非法;"
+                f" 允许值: {sorted(_VALID_CAPTCHA_TYPES)}"
+            )
+        if raw_ct:
+            options_patch["captcha_type"] = raw_ct
+
+    # ---------- 2) options 整体 patch (前端表单直接 options 展开提交) ----------
+    #   如果 options 里也有 fetch_mode/captcha_type, 同样做规范化 + 合法性校验(与顶层一致)。
     if isinstance(payload.get("options"), dict):
-        options_patch.update({k: v for k, v in payload["options"].items() if v is not None})
-    # 3) 其他任何 options 已知子 key (顶层传了就合并,避免前端必须包 options.)
+        for k, raw_v in payload["options"].items():
+            v = raw_v
+            if raw_v is None:
+                options_patch[k] = None
+                continue
+            if k == "fetch_mode" and isinstance(raw_v, str):
+                fm = raw_v.strip().lower()
+                if fm not in _VALID_FETCH_MODES:
+                    raise ValueError(
+                        f"[update_sync_source_config] data_type={data_type} options.fetch_mode={raw_v!r} 非法;"
+                        f" 允许值: {sorted(_VALID_FETCH_MODES)}"
+                    )
+                v = fm
+            if k == "captcha_type" and isinstance(raw_v, str):
+                ct = raw_v.strip().lower()
+                if ct not in _VALID_CAPTCHA_TYPES:
+                    raise ValueError(
+                        f"[update_sync_source_config] data_type={data_type} options.captcha_type={raw_v!r} 非法;"
+                        f" 允许值: {sorted(_VALID_CAPTCHA_TYPES)}"
+                    )
+                v = ct
+            options_patch[k] = v
+
+    # ---------- 3) 其他任何 options 已知子 key (顶层传了就合并,避免前端必须包 options.) ----------
     known_option_keys = {
         "login_url_path", "captcha_img_selector", "username_placeholder", "password_placeholder",
         "captcha_input_placeholder", "submit_button_text", "web_operator_entry_path",
@@ -360,6 +440,10 @@ def update_sync_source_config(db: Session, data_type: str, payload: dict) -> dic
             options_patch[k] = payload[k]
     if options_patch:
         row.options = _merge_options_update(row.options, options_patch)
+        logger.info(
+            f"[update_sync_source_config] data_type={data_type} options 已更新:"
+            f" options_patch={options_patch}; 合并后 row.options={row.options}"
+        )
 
     db.commit()
     db.refresh(row)

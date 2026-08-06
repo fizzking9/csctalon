@@ -65,7 +65,13 @@ def downgrade() -> None:
     # 回滚 2
     op.alter_column(
         "sync_source_configs",
-        "password",
+        "password",cd backend && source .venv/bin/activate
+alembic upgrade b2d3e4f5a6b7   # ServiceTicket/Refund 加 synced_at/updated_by_raw
+alembic upgrade c3e4f5a6b7c8   # 建 ticket_action_logscd backend && source .venv/bin/activate
+alembic upgrade b2d3e4f5a6b7   # ServiceTicket/Refund 加 synced_at/updated_by_raw
+alembic upgrade c3e4f5a6b7c8   # 建 ticket_action_logscd backend && source .venv/bin/activate
+alembic upgrade b2d3e4f5a6b7   # ServiceTicket/Refund 加 synced_at/updated_by_raw
+alembic upgrade c3e4f5a6b7c8   # 建 ticket_action_logs
         existing_type=sa.Text(),
         existing_nullable=True,
         comment="BMS 密码(Fernet 加密)",

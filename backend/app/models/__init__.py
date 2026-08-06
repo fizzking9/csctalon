@@ -36,6 +36,7 @@ from app.models.strategy import StrategyDoc, StrategyReadReceipt  # noqa: F401
 from app.models.sync_source_config import SyncSourceConfig  # noqa: F401
 from app.models.task import SpecialTask, TaskDevice, TaskFollowup  # noqa: F401
 from app.models.ticket import ServiceTicket  # noqa: F401
+from app.models.ticket_action_log import TicketActionLog  # noqa: F401
 from app.models.todo import TodoFollowup, TodoItem  # noqa: F401
 from app.models.upload import DataMatchRelation, UploadRecord  # noqa: F401
 from app.models.user import RoleEnum, User  # noqa: F401
@@ -75,6 +76,7 @@ __all__ = [
     "ScrmSessionTransfer",
     "ScrmSyncLog",
     "ServiceTicket",
+    "TicketActionLog",
     "SyncSourceConfig",
     "WalletWithdrawal",
     "UploadRecord",
