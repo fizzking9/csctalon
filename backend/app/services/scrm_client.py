@@ -26,34 +26,82 @@ logger = logging.getLogger(__name__)
 #  data_type 命名: scrm_operator / scrm_session_private / scrm_session_group / scrm_session_virtual
 #  说明: 三种会话列表都是"会话",但接口不同、参数不同。同步服务内合并为 scrm_sessions 表,
 #        这里分开 seed 便于在同步配置中独立开关 / 独立时间范围。
+#
+# options 扩展参数说明:
+#   fetch_mode:
+#     - "openapi"     → 走 ClientId/ClientSecret 的 OpenAPI(原默认方式,稳定)
+#     - "playwright"  → 走网页 Playwright 登录抓取 (验证码类型由 captcha_type 决定)
+#     - "dual"        → 先尝试 OpenAPI,失败或无凭证时自动回退 Playwright(双保险推荐)
+#   captcha_type:
+#     - "none" → 无验证码
+#     - "text" → 普通字符验证码 (闪猫同款,ddddocr 直接识别)
+#     - "math" → 数学计算式 (SCRM 网页登录,识别后计算结果再填入)
+#   其他选择器/路径:可留空走自动探测。
 SCRM_DATA_SOURCES: dict[str, dict] = {
     "scrm_operator": {
         "name": "SCRM-客服账号列表",
-        "base_url": "https://scrm.baiyinqifu.com",
+        "base_url": "https://gateway.bilinl.com",
         "page_path": "/thirdparty/partner/merChat/getMerChatOperator",  # 仅文档参考
         "default_sync": True,
         "fetch_mode": "openapi",
+        "requires_captcha": False,  # OpenAPI 不需要,网页模式在 options 里控制
+        "options": {
+            "fetch_mode": "openapi",
+            "captcha_type": "math",
+            "login_url_path": "/login",
+            "web_operator_entry_path": "/index#/system/user-manage",
+            "captcha_img_selector": "img.show-code-img",
+            "username_placeholder": "请输入登录账号/手机号",
+            "password_placeholder": "请输入密码",
+            "captcha_input_placeholder": "请输入验证码",
+            "submit_button_text": "登录",
+        },
     },
     "scrm_session_private": {
         "name": "SCRM-私聊会话列表",
-        "base_url": "https://scrm.baiyinqifu.com",
+        "base_url": "https://gateway.bilinl.com",
         "page_path": "/thirdparty/customer/chatSession/privateChat/getUserChatListByPage",
         "default_sync": True,
         "fetch_mode": "openapi",
+        "requires_captcha": False,
+        "options": {
+            "fetch_mode": "openapi",
+            "captcha_type": "math",
+            "login_url_path": "/login",
+            "web_session_entry_path": "/index#/chat/session-list",
+            "captcha_img_selector": "img.show-code-img",
+            "submit_button_text": "登录",
+        },
     },
     "scrm_session_group": {
         "name": "SCRM-群聊会话列表",
-        "base_url": "https://scrm.baiyinqifu.com",
+        "base_url": "https://gateway.bilinl.com",
         "page_path": "/thirdparty/customer/chatSession/groupChat/getUserChatListByGroup",
         "default_sync": False,  # 群聊先关闭,后续业务确认口径后开启
         "fetch_mode": "openapi",
+        "requires_captcha": False,
+        "options": {
+            "fetch_mode": "openapi",
+            "captcha_type": "math",
+            "login_url_path": "/login",
+            "captcha_img_selector": "img.show-code-img",
+            "submit_button_text": "登录",
+        },
     },
     "scrm_session_virtual": {
         "name": "SCRM-虚拟会话列表",
-        "base_url": "https://scrm.baiyinqifu.com",
+        "base_url": "https://gateway.bilinl.com",
         "page_path": "/thirdparty/customer/chatSession/virtualSession/getVirtualChatSessionPage",
         "default_sync": False,  # 虚拟会话先关闭,待确认是否算客服工作量
         "fetch_mode": "openapi",
+        "requires_captcha": False,
+        "options": {
+            "fetch_mode": "openapi",
+            "captcha_type": "math",
+            "login_url_path": "/login",
+            "captcha_img_selector": "img.show-code-img",
+            "submit_button_text": "登录",
+        },
     },
 }
 
@@ -67,6 +115,7 @@ class ScrmApiError(RuntimeError):
 
     def __init__(self, message: str, code: int | None = None, raw: Any = None):
         super().__init__(message)
+        self.message = message
         self.code = code
         self.raw = raw
 
@@ -127,9 +176,13 @@ class ScrmClient:
     async def get_token(self, force_refresh: bool = False) -> str:
         """获取 access_token,自动缓存与过期前刷新(线程安全: asyncio.Lock)
 
-        /thirdparty/partner/getOauthToken 文档:
-          请求: POST, Body: clientId, clientSecret, userName?, passWord?
-          响应: code=0, data.accessToken + data.expiredTime(秒,通常 7200)
+        真实 SCRM 平台 (百引AI / gateway.bilinl.com):
+          接口: POST /thirdparty/user/login/client
+          请求 Body: {clientId, clientSecret}
+          响应: code=0, data.value (token字符串),
+                data.expiredTime (毫秒级timestamp,如 1785989965000)
+                data.expired (可读字符串,如 "2026-08-06 12:19:25")
+          业务接口鉴权: Authorization: Bearer <data.value> (Header)
         """
         if not force_refresh and self._token_cache:
             tok, expire_mono, _ = self._token_cache
@@ -143,7 +196,7 @@ class ScrmClient:
                     return tok
             try:
                 resp = await self._client.post(
-                    f"{self.base_url}/thirdparty/partner/getOauthToken",
+                    f"{self.base_url}/thirdparty/user/login/client",
                     json={
                         "clientId": self.client_id,
                         "clientSecret": self.client_secret,
@@ -152,15 +205,29 @@ class ScrmClient:
                 resp.raise_for_status()
             except httpx.HTTPError as e:
                 raise ScrmApiError(f"获取 token 网络失败: {e}") from e
-            payload = self._parse_payload(resp, action="getOauthToken")
-            access_token = payload.get("accessToken")
-            expired_sec = int(payload.get("expiredTime") or 7200)
+            payload = self._parse_payload(resp, action="login/client")
+            # 兼容字段: value 是真实平台名,同时保留 accessToken / token 作为 fallback
+            access_token = (
+                payload.get("value")
+                or payload.get("token")
+                or payload.get("accessToken")
+            )
+            # 过期时间: expiredTime 可能是毫秒 timestamp,也可能是秒;做归一化
+            expired_raw = payload.get("expiredTime")
+            expired_sec: int
+            if isinstance(expired_raw, (int, float)):
+                # > 10^12 视为毫秒
+                expired_sec = int(expired_raw / 1000) if expired_raw > 10_000_000_000 else int(expired_raw)
+            else:
+                expired_sec = 7200  # 默认 2 小时
             if not access_token:
-                raise ScrmApiError(f"获取 token 响应缺少 accessToken: {payload!r}")
+                raise ScrmApiError(f"获取 token 响应缺少 value/token: {payload!r}")
             # 缓存并提前 5 分钟过期
-            expire_mono = time.monotonic() + max(1, expired_sec - SCRM_TOKEN_REFRESH_BEFORE)
+            ttl = max(1, expired_sec - int(time.time()))
+            cache_ttl = max(1, ttl - SCRM_TOKEN_REFRESH_BEFORE)
+            expire_mono = time.monotonic() + cache_ttl
             self._token_cache = (access_token, expire_mono, expired_sec)
-            logger.info(f"[scrm] token 获取成功,缓存 {expired_sec}s (提前 5min 刷新)")
+            logger.info(f"[scrm] token 获取成功,ttl≈{ttl}s,缓存 {cache_ttl}s (提前 5min 刷新)")
             return access_token
 
     @staticmethod
@@ -183,18 +250,22 @@ class ScrmClient:
         return data if isinstance(data, dict) else {"records": data}
 
     async def _post(self, path: str, body: dict, action: str, *, _retry: int = 1) -> dict:
-        """通用 POST(自动注入 accessToken;401 时 force 刷新 token 重试一次)"""
+        """通用 POST(自动注入 Authorization: Bearer <token>;
+        401/403/2012(鉴权失效) 时强制刷新 token 后重试一次)"""
         if not self._client:
             raise RuntimeError("ScrmClient 未初始化,请使用 async with")
         token = await self.get_token()
         body = dict(body)
-        body.setdefault("accessToken", token)
+        # 真实 SCRM: Header 注入 Bearer token (不再放在 body.accessToken 中)
+        headers = {"Authorization": f"Bearer {token}"}
         try:
-            resp = await self._client.post(f"{self.base_url}{path}", json=body)
+            resp = await self._client.post(
+                f"{self.base_url}{path}", json=body, headers=headers,
+            )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (401, 403) and _retry > 0:
-                logger.warning(f"[scrm] {action} 401/403,强制刷新 token 后重试")
+                logger.warning(f"[scrm] {action} HTTP {e.response.status_code},强制刷新 token 后重试")
                 await self.get_token(force_refresh=True)
                 return await self._post(path, body, action, _retry=_retry - 1)
             raise ScrmApiError(f"[{action}] HTTP {e.response.status_code}: {e}") from e
@@ -203,12 +274,18 @@ class ScrmClient:
         try:
             return self._parse_payload(resp, action=action)
         except ScrmApiError as api_err:
-            # token 过期但 code != 0(某些网关会用业务码表达)—— 重刷一次
-            if _retry > 0 and (
-                (api_err.code == 401)
-                or (isinstance(api_err.message, str) and "token" in api_err.message.lower())
-            ):
-                logger.warning(f"[scrm] {action} token 业务失效(码={api_err.code}),刷新后重试")
+            # token 失效触发重刷: HTTP 层 401/403,或业务码 = 401/2012(鉴权失败)
+            msg_lower = (api_err.message or "").lower()
+            token_invalid = (
+                api_err.code in (401, 2012)
+                or "token" in msg_lower
+                or "认证" in (api_err.message or "")
+                or "登录" in (api_err.message or "")
+            )
+            if _retry > 0 and token_invalid:
+                logger.warning(
+                    f"[scrm] {action} token 业务失效(码={api_err.code},msg={api_err.message}),刷新后重试"
+                )
                 await self.get_token(force_refresh=True)
                 return await self._post(path, body, action, _retry=_retry - 1)
             raise

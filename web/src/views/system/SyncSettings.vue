@@ -5,14 +5,19 @@
     <el-card>
       <template #header>
         <div class="flex justify-between items-center">
-          <span>BMS 同步源配置</span>
+          <span>BMS / SCRM 同步源配置</span>
           <el-button v-if="!embedded" text type="primary" @click="$router.push('/data/fetch')">返回 BMS 同步</el-button>
         </div>
       </template>
 
       <el-alert type="info" :closable="false" show-icon class="mb-16">
         <p class="alert-text">
-          每个数据源独立配置 BMS 地址与账号密码(加密存储)。不同子域名(wifi/support.cloud-cat.cn)可能用不同账号。
+          每个数据源独立配置地址与账号密码(加密存储)。<br/>
+          • <strong>BMS</strong>: 不同子域名(wifi/support.cloud-cat.cn)可能用不同账号。Playwright 页面抓取模式。<br/>
+          • <strong>SCRM</strong>: 支持三种抓取模式:
+          <span style="color:#2f6feb">OpenAPI (默认,稳定)</span> /
+          <span style="color:#e6a23c">Playwright 网页(数学验证码兜底)</span> /
+          <span style="color:#67c23a">双模式(OpenAPI优先,失败自动回退网页)</span>。<br/>
           「默认同步」控制是否纳入定时同步与手动同步的默认勾选。账号/密码留空表示不修改原值。
         </p>
       </el-alert>
@@ -20,6 +25,31 @@
       <el-table :data="sources" border size="small" v-loading="loading">
         <el-table-column prop="name" label="数据源" width="130" />
         <el-table-column prop="data_type" label="代码" width="110" />
+        <el-table-column label="抓取模式" width="150">
+          <template #default="{ row }">
+            <template v-if="isScrmSource(row)">
+              <el-tag
+                v-if="row.fetch_mode === 'openapi'"
+                size="small"
+                effect="light"
+              >OpenAPI</el-tag>
+              <el-tag
+                v-else-if="row.fetch_mode === 'playwright'"
+                type="warning"
+                size="small"
+                effect="light"
+              >网页(数学验证码)</el-tag>
+              <el-tag
+                v-else-if="row.fetch_mode === 'dual'"
+                type="success"
+                size="small"
+                effect="light"
+              >双模式兜底</el-tag>
+              <el-tag v-else size="small" effect="light">—</el-tag>
+            </template>
+            <el-tag v-else size="small" effect="light">Playwright</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="凭证" width="90">
           <template #default="{ row }">
             <el-tag v-if="row.has_credentials" type="success" size="small">已配置</el-tag>
@@ -86,12 +116,15 @@
 
     <!-- 编辑对话框 -->
     <el-dialog v-model="dialogVisible" :title="`编辑同步源 - ${editForm.name || editForm.data_type}`" width="560px">
-      <el-form :model="editForm" label-width="100px">
+      <el-form :model="editForm" label-width="110px">
         <el-form-item label="显示名">
           <el-input v-model="editForm.name" />
         </el-form-item>
         <el-form-item label="基础地址">
-          <el-input v-model="editForm.base_url" placeholder="如 https://support.cloud-cat.cn/bms" />
+          <el-input
+            v-model="editForm.base_url"
+            :placeholder="isScrmSource(editForm) ? '如 https://your-scrm.example.com' : '如 https://support.cloud-cat.cn/bms'"
+          />
         </el-form-item>
         <el-form-item label="页面路径">
           <el-input v-model="editForm.page_path" placeholder="如 /index.html#/device/device-combo" />
@@ -102,17 +135,28 @@
             placeholder="多个时间筛选框时按标签精确填,逗号分隔(如: 起始完成时间,结束完成时间);单个日期范围留空"
           />
         </el-form-item>
+        <el-form-item v-if="isScrmSource(editForm)" label="抓取模式">
+          <el-select v-model="editForm.fetch_mode" style="width: 100%" @change="onFetchModeChange">
+            <el-option label="OpenAPI (默认,稳定)" value="openapi" />
+            <el-option label="Playwright 网页(数学验证码兜底)" value="playwright" />
+            <el-option label="双模式(OpenAPI优先,失败自动回退网页)" value="dual" />
+          </el-select>
+          <div class="form-hint mt-8">
+            切换到 Playwright/双模式 后,需保存配置并点击「登录」完成网页验证码一次性登录,
+            账号密码也会被解释为网页登录凭证。
+          </div>
+        </el-form-item>
         <el-form-item label="默认同步">
           <el-switch v-model="editForm.default_sync" active-text="纳入定时/默认勾选" inactive-text="不纳入" />
         </el-form-item>
         <el-form-item label="启用">
           <el-switch v-model="editForm.enabled" active-text="启用" inactive-text="停用" />
         </el-form-item>
-        <el-form-item label="BMS 账号">
-          <el-input v-model="editForm.username" placeholder="留空表示不修改原值" />
+        <el-form-item :label="scrmLabel[0]">
+          <el-input v-model="editForm.username" :placeholder="scrmUsernamePlaceholder" />
         </el-form-item>
-        <el-form-item label="BMS 密码">
-          <el-input v-model="editForm.password" type="password" show-password placeholder="留空表示不修改原值" />
+        <el-form-item :label="scrmLabel[1]">
+          <el-input v-model="editForm.password" type="password" show-password :placeholder="scrmPasswordPlaceholder" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -124,14 +168,21 @@
     <!-- 验证码登录对话框(不切换页面,直接在此输入验证码) -->
     <el-dialog
       v-model="captchaDialogVisible"
-      :title="`${captchaRow?.name || captchaRow?.data_type} - 验证码登录`"
+      :title="`${captchaRow?.name || captchaRow?.data_type} - ${isMathCaptcha ? '数学验证码' : '验证码'}登录`"
       width="480px"
       :close-on-click-modal="false"
       @closed="resetCaptchaForm"
     >
-      <el-alert type="info" :closable="false" show-icon class="mb-16" size="small">
-        请读取图片中的验证码后填入下方输入框,点击提交后会自动填账号密码并登录。
-        登录成功后会自动保存登录态,后续同步无需再次输入验证码。
+      <el-alert :type="isMathCaptcha ? 'warning' : 'info'" :closable="false" show-icon class="mb-16" size="small">
+        <template v-if="isMathCaptcha">
+          SCRM 登录使用<strong>数学计算式</strong>验证码。下方图片显示的是如「7*0=?」的算式,
+          请在输入框中填入<strong>计算结果数字</strong>(如 0、63)。<br/>
+          若 OCR 自动识别出了答案,已经帮你填好了,请核对后直接点「提交并登录」。
+        </template>
+        <template v-else>
+          请读取图片中的验证码后填入下方输入框,点击提交后会自动填账号密码并登录。
+          登录成功后会自动保存登录态,后续同步无需再次输入验证码。
+        </template>
       </el-alert>
       <div v-if="captchaLoading" class="captcha-loading">
         <el-icon class="is-loading"><Loading /></el-icon>
@@ -154,17 +205,17 @@
         </el-button>
       </div>
       <el-form :model="captchaForm" label-width="80px" class="mt-16">
-        <el-form-item label="验证码">
+        <el-form-item :label="isMathCaptcha ? '算式答案' : '验证码'">
           <el-input
             v-model="captchaForm.captcha"
-            placeholder="请输入图片中的验证码"
-            maxlength="8"
+            :placeholder="isMathCaptcha ? '请输入计算结果(整数),OCR已自动填充' : '请输入图片中的验证码'"
+            :maxlength="isMathCaptcha ? 16 : 8"
             clearable
             @keyup.enter="submitCaptcha"
           />
         </el-form-item>
         <el-form-item v-if="captchaHint" label="提示">
-          <span class="hint-text">{{ captchaHint }}</span>
+          <span class="hint-text" v-html="captchaHintHtml"></span>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -211,8 +262,56 @@ const editForm = reactive({
   time_labels_text: '',
   default_sync: true,
   enabled: true,
+  fetch_mode: 'openapi', // SCRM 模式: openapi / playwright / dual
   username: '',
   password: '',
+})
+
+// ============== 工具: SCRM / math 验证码 ==============
+function isScrmSource(row) {
+  return !!(row && typeof row.data_type === 'string' && row.data_type.startsWith('scrm_'))
+}
+// SCRM 编辑表单: 账号/密码 标签随抓取模式切换
+const scrmLabel = computed(() => {
+  if (!isScrmSource(editForm)) return ['BMS 账号', 'BMS 密码']
+  const mode = editForm.fetch_mode || 'openapi'
+  if (mode === 'openapi') return ['Client ID', 'Client Secret']
+  if (mode === 'playwright') return ['SCRM 登录账号', 'SCRM 登录密码']
+  // dual: 两个地方都要,以 OpenAPI 为主,网页为兜底
+  return ['账号(Client ID / 登录账号)', '密码(Client Secret / 登录密码)']
+})
+const scrmUsernamePlaceholder = computed(() => {
+  if (!isScrmSource(editForm)) return '留空表示不修改原值'
+  const mode = editForm.fetch_mode || 'openapi'
+  if (mode === 'openapi') return 'SCRM OpenAPI Client ID'
+  if (mode === 'playwright') return 'SCRM 网页登录账号(用户名/手机号)'
+  return 'OpenAPI Client ID 或 网页登录账号(留空表示不修改)'
+})
+const scrmPasswordPlaceholder = computed(() => {
+  if (!isScrmSource(editForm)) return '留空表示不修改原值'
+  const mode = editForm.fetch_mode || 'openapi'
+  if (mode === 'openapi') return 'SCRM OpenAPI Client Secret'
+  if (mode === 'playwright') return 'SCRM 网页登录密码'
+  return 'OpenAPI Client Secret 或 网页登录密码(留空表示不修改)'
+})
+function onFetchModeChange() {
+  // 切换模式时,提示用户需要重新配置账号密码
+  if (dialogVisible.value && isScrmSource(editForm)) {
+    // 不做打断式提示,只在 form-hint 里说明
+  }
+}
+
+// 当前验证码登录框是否为数学验证码
+const isMathCaptcha = computed(
+  () => !!(captchaRow.value && isScrmSource(captchaRow.value) && captchaRow.value?.captcha_type === 'math'),
+)
+// 提示文本的 HTML 版本(把后端 auto_msg 里的答案用 <strong> 包起来)
+const captchaHintHtml = computed(() => {
+  const t = captchaHint.value || ''
+  if (!t) return ''
+  // 简单转义 < & >,再把识别出的数字答案用蓝色加粗样式标出来
+  const escaped = t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return escaped.replace(/'(\d+)'/g, ' <b style="color:#409eff;font-weight:600">\'$1\'</b> ')
 })
 
 // 是否包含需要验证码登录的源(控制"验证码登录"列显示)
@@ -282,6 +381,7 @@ function openEdit(row) {
   editForm.time_labels_text = (row.time_labels || []).join(',')
   editForm.default_sync = row.default_sync
   editForm.enabled = row.enabled
+  editForm.fetch_mode = isScrmSource(row) ? (row.fetch_mode || 'openapi') : 'playwright'
   editForm.username = ''
   editForm.password = ''
   dialogVisible.value = true
@@ -299,6 +399,10 @@ async function handleSave() {
         : [],
       default_sync: editForm.default_sync,
       enabled: editForm.enabled,
+    }
+    // SCRM 才提交 fetch_mode
+    if (isScrmSource(editForm) && editForm.fetch_mode) {
+      payload.fetch_mode = editForm.fetch_mode
     }
     // 账号密码仅当非空时传(后端:空表示不改)
     if (editForm.username) payload.username = editForm.username
@@ -350,6 +454,25 @@ async function startCaptchaLogin() {
     captchaForm.sessionId = d?.session_id || ''
     captchaImage.value = d?.captcha_image || ''
     captchaHint.value = d?.hint || ''
+
+    // 后端 OCR 自动登录成功 → 直接提示并关对话
+    if (d?.auto_login_success) {
+      ElMessage.success(d?.auto_login_message || d?.message || '后端已自动识别并登录成功')
+      captchaDialogVisible.value = false
+      if (captchaRow.value) await loadLoginState(captchaRow.value.data_type)
+      return
+    }
+    // 如果是数学验证码且 OCR 识别出了答案 → 自动填充到输入框,用户只需点提交
+    const captchaType = d?.captcha_type || (isScrmSource(captchaRow.value) ? 'math' : 'text')
+    const recognized = d?.ocr_recognized_text
+    if (captchaType === 'math' && recognized && !captchaForm.captcha) {
+      captchaForm.captcha = recognized
+      // 追加一个本地提示
+      const extra = `识别出的答案已自动填入: '${recognized}' —— 请核对图片是否一致再提交。`
+      captchaHint.value = captchaHint.value
+        ? captchaHint.value + ' | ' + extra
+        : extra
+    }
   } catch (e) {
     ElMessage.error(`获取验证码失败: ${e.message}`)
   } finally {
@@ -368,7 +491,7 @@ async function submitCaptcha() {
     return
   }
   if (!captchaForm.captcha.trim()) {
-    ElMessage.warning('请输入验证码')
+    ElMessage.warning(isMathCaptcha.value ? '请输入数学计算的答案' : '请输入验证码')
     return
   }
   captchaSubmitting.value = true
@@ -423,10 +546,18 @@ async function handleLogout(row) {
 .alert-text {
   margin: 0;
   font-size: 13px;
+  line-height: 1.6;
+}
+.form-hint {
+  color: #909399;
+  font-size: 12px;
   line-height: 1.5;
 }
 .mb-16 {
   margin-bottom: 16px;
+}
+.mt-8 {
+  margin-top: 8px;
 }
 .mt-16 {
   margin-top: 16px;

@@ -63,8 +63,16 @@ BMS_DATA_SOURCES: dict[str, dict] = {
         "base_url": "https://support.cloud-cat.cn/bms",
         "page_path": "/index.html#/service-request/service-request-manage",
         "default_sync": True,
-        # 服务请求管理有多个时间筛选框,只填"起始完成时间"和"结束完成时间"
-        "time_labels": ["起始完成时间", "结束完成时间"],
+        # ⚠️  2026-08-06 修复: 原默认 time_labels=["起始完成时间","结束完成时间"] 会导致两类严重错误:
+        #     (1) 今天登记但尚未完成 / status != 已完成 / finish_time IS NULL 的工单 100% 漏同步(含当日新增投诉工单)
+        #     (2) 老工单(上周/上月登记) 因 BMS 凌晨 03:15 批量覆盖 finish_time 被算进今日, 导致同步数据"看起来完成很多但其实是旧记录被重算"
+        #  改按 "起始登记时间 / 结束登记时间" 拉取:
+        #     - 好处 1: 登记时间 只要工单进入系统就一定会写, 不会漏掉"今天新登记的任何工单"
+        #     - 好处 2: 对已经导入的历史老工单, 后续的状态/备注更新 依靠 upsert(ticket_no 唯一) 自动覆盖, 不会因时间窗口而丢字段
+        #  兼容说明: BMS 服务请求管理页面"登记时间"筛选框的中文标签在不同版本存在两种写法("起始登记时间"或直接"登记时间"),
+        #  _set_time_by_labels 内部用 has_text() 包含匹配(不是完全相等), 所以 ["起始登记时间","结束登记时间"] 两种写法都能命中.
+        #  若以后 BMS 升级改标签名, 只需更新 sync_source_configs 对应行 time_labels 字段 (无需再改代码默认种子).
+        "time_labels": ["起始登记时间", "结束登记时间"],
     },
     "wallet": {
         "name": "提现操作记录",

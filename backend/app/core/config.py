@@ -54,7 +54,7 @@ class Settings(BaseSettings):
 
     # SCRM 微信聚合平台(对接客服接待评估报表)
     # 说明:默认种子值仅用于首次启动灌入 SyncSourceConfig(加密),实际以 DB 配置为准
-    SCRM_BASE_URL: str = "https://scrm.baiyinqifu.com"  # 平台 OpenAPI 基础地址
+    SCRM_BASE_URL: str = "https://gateway.bilinl.com"  # 平台 OpenAPI 基础地址
     SCRM_CLIENT_ID: str = ""  # ClientId(对应 SyncSourceConfig.username=Fernet(clientId))
     SCRM_CLIENT_SECRET: str = ""  # ClientSecret(对应 SyncSourceConfig.password=Fernet(secret))
 

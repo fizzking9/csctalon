@@ -443,3 +443,268 @@ def bytes_to_data_uri(png_bytes: bytes) -> str:
     """把 PNG 字节转成 data: URI(前端 <img src=...> 直接可用)"""
     b64 = base64.b64encode(png_bytes).decode("ascii")
     return f"data:image/png;base64,{b64}"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 数学计算式验证码识别 & 安全计算 (SCRM 新版企微 专用)
+#
+# 验证码形式: "7*0=?" / "9-9=?" / "5+3≈?" / "12÷4=?" / "(1+2)*3=?"
+# 处理流程:
+#   1. OCR 识别出算式字符串 (复用 try_ocr_captcha_with_confidence)
+#   2. 符号归一化 (≈→=, ×/x/X/*→*, ÷→/, −/—→-)
+#   3. 正则剥离尾部 =? 或 ≈? 拿到纯表达式
+#   4. ast.parse 白名单方式安全计算 (仅允许 数字/加减乘除/括号)
+#   5. 返回计算结果字符串 (整数取整去尾,浮点数保留最多2位小数)
+# ──────────────────────────────────────────────────────────────────────
+
+import ast as _ast
+import re as _re
+
+# 符号归一化映射表 (OCR 可能把 × 识别成 x/X, 把 ÷ 识别成 其他,把 ≈ 和 = 混用)
+_MATH_SYMBOL_NORMALIZE_MAP = {
+    "×": "*", "x": "*", "X": "*", "✕": "*", "✖": "*", "❌": "*",
+    "÷": "/", "／": "/", "∕": "/",
+    "−": "-", "—": "-", "–": "-", "―": "-", "‑": "-",
+    "＋": "+", "➕": "+",
+    "（": "(", "）": ")", "〔": "(", "〕": ")",
+    "≈": "=", "≡": "=", "＝": "=", "﹦": "=",
+    "？": "?", "❓": "?",
+    ",": "", "，": "",  # 千分位分隔符直接去掉
+    " ": "", "\t": "", "\u3000": "",  # 所有空白去掉
+}
+
+# 合法数学表达式字符集 (归一化后): 数字 点 加减乘除 括号
+_MATH_EXPR_VALID_RE = _re.compile(r"^[0-9.+\-*/()]+$")
+# 尾部 =? 剥离 (支持 "expr=?" / "expr ≈ ?" / "expr＝？" 等多种写法,归一化后都是 expr=?)
+_MATH_TAIL_STRIP_RE = _re.compile(r"=\??$")
+# 头部非表达式字符清理 (OCR 可能识别出前缀如 "验证码:7*0=?")
+_MATH_HEAD_CLEAN_RE = _re.compile(r"^[^0-9(]+")
+
+
+def _normalize_math_captcha_text(raw_text: str) -> str:
+    """归一化 OCR 出来的算式文本:符号映射 + 空白去除"""
+    if not raw_text:
+        return ""
+    tmp = raw_text
+    for k, v in _MATH_SYMBOL_NORMALIZE_MAP.items():
+        tmp = tmp.replace(k, v)
+    # 再走一次空白字符彻底清除(上面 map 里已经清过,保险起见)
+    tmp = "".join(tmp.split())
+    return tmp
+
+
+def _safe_eval_math_expr(expr: str) -> float | int | None:
+    """使用 ast.NodeTransformer 白名单方式安全计算数学表达式(永不调用 eval)。
+
+    仅允许:
+      - Constant(int/float) 数字
+      - BinOp: Add/Sub/Mult/Div
+      - UnaryOp: UAdd/USub (正负数,如 -3, +5)
+    不允许: 任何变量/函数/比较/布尔/位运算/幂运算 等.
+    """
+    if not expr or not _MATH_EXPR_VALID_RE.match(expr):
+        return None
+    try:
+        tree = _ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return None
+
+    # 用 ast.NodeVisitor 白名单检查 + 计算
+    def _calc(node):
+        if isinstance(node, _ast.Expression):
+            return _calc(node.body)
+        if isinstance(node, _ast.Constant):
+            v = node.value
+            if isinstance(v, bool):  # bool 是 int 子类,但不允许
+                return None
+            if isinstance(v, (int, float)):
+                return v
+            return None
+        # Python 3.7-3.8 兼容: ast.Num (3.8 之前的旧写法)
+        if hasattr(_ast, "Num") and isinstance(node, getattr(_ast, "Num")):
+            v = node.n  # type: ignore[attr-defined]
+            if isinstance(v, (int, float)):
+                return v
+            return None
+        if isinstance(node, _ast.UnaryOp):
+            operand = _calc(node.operand)
+            if operand is None:
+                return None
+            if isinstance(node.op, _ast.UAdd):
+                return +operand
+            if isinstance(node.op, _ast.USub):
+                return -operand
+            return None
+        if isinstance(node, _ast.BinOp):
+            left = _calc(node.left)
+            right = _calc(node.right)
+            if left is None or right is None:
+                return None
+            if isinstance(node.op, _ast.Add):
+                return left + right
+            if isinstance(node.op, _ast.Sub):
+                return left - right
+            if isinstance(node.op, _ast.Mult):
+                return left * right
+            if isinstance(node.op, _ast.Div):
+                if right == 0:  # 除零保护 (OCR 识别错可能导致)
+                    return None
+                return left / right
+            return None
+        return None  # 其他任何节点类型都不允许
+
+    result = _calc(tree)
+    if result is None:
+        return None
+    if isinstance(result, float) and not (float("-inf") < result < float("inf")):
+        return None  # 排除 NaN / inf
+    # 整数判定:浮点数尾部为 0 → 转回 int (避免显示 7.0)
+    if isinstance(result, float) and result.is_integer():
+        return int(result)
+    return result
+
+
+def _extract_math_expr_from_normalized(normalized: str) -> str | None:
+    """从归一化后的文本中剥离 =? 尾部,拿到纯表达式部分"""
+    if not normalized:
+        return None
+    # 1. 清头部非表达式垃圾字符 (OCR 可能把图形也识别出前缀字符)
+    cleaned = _MATH_HEAD_CLEAN_RE.sub("", normalized)
+    # 2. 剥离尾部 =? = ?? ? =? 等
+    cleaned = _MATH_TAIL_STRIP_RE.sub("", cleaned)
+    # 3. 再走一次:如果尾部还有单独的 = 或 ? 残留,继续剥
+    while cleaned and cleaned[-1] in ("=", "?"):
+        cleaned = cleaned[:-1]
+    if not cleaned:
+        return None
+    # 4. 合法性再检查一遍
+    if not _MATH_EXPR_VALID_RE.match(cleaned):
+        return None
+    # 5. 括号必须配对 (快速检查)
+    depth = 0
+    for ch in cleaned:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+    if depth != 0:
+        return None
+    return cleaned
+
+
+def _format_math_answer(val: float | int) -> str:
+    """格式化计算结果为字符串:整数取整,浮点数最多2位小数(去尾零)"""
+    if isinstance(val, int):
+        return str(val)
+    # float 情况
+    rounded = round(val, 2)
+    if rounded == int(rounded):
+        return str(int(rounded))
+    # 去尾零:例如 2.50 → "2.5", 2.05 → "2.05"
+    s = f"{rounded:.2f}"
+    s = s.rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def try_ocr_math_captcha_with_confidence(png_bytes: bytes) -> Optional[dict]:
+    """SCRM 数学计算式验证码识别 + 置信度预检 + 安全计算结果。
+
+    Returns:
+      None 表示识别/计算任一环节失败(外层应刷新验证码重试)
+      dict 结构:
+        {
+          "ocr_code": str,          # OCR 原始识别结果(归一化前)
+          "normalized_expr": str,   # 归一化+去尾部后的纯表达式, 如 "7*0"
+          "answer": str,            # 最终计算结果(字符串,直接填输入框), 如 "0"
+          "computed_value": int|float,  # 原始计算值
+          "used_beta": bool,        # 用的是哪个 OCR 模型
+          "min_prob": float,
+          "avg_prob": float,
+          "probs": list[float],
+          "chars": list[str],       # OCR 每个字符(算式)
+          "confident": bool,        # 置信度是否通过阈值 AND 计算成功
+        }
+    """
+    # 第一步:复用现有的文本验证码 OCR + 置信度预检 (文本验证码的合法字符集已覆盖 0-9 +-*/() ≈ = ?)
+    base = try_ocr_captcha_with_confidence(png_bytes)
+    if base is None:
+        # 文本验证码识别失败 → 再退化尝试一次:放宽 _CAPTCHA_RE 限制(因为数学验证码可能含 =?() 等)
+        # 直接裸调用 OCR,跳过 _CAPTCHA_RE 正则过滤
+        for beta in (True, False):
+            ocr = get_ocr(beta=beta)
+            if ocr is None:
+                continue
+            try:
+                raw_text = ocr.classification(png_bytes)
+            except Exception:
+                continue
+            if not isinstance(raw_text, str) or not raw_text.strip():
+                continue
+            # 用退化置信度(每个字符 _OCR_FALLBACK_CONFIDENCE)
+            chars = list(raw_text.strip())
+            probs = [_OCR_FALLBACK_CONFIDENCE] * len(chars)
+            min_p = min(probs)
+            avg_p = sum(probs) / len(probs)
+            base = {
+                "code": raw_text.strip(),
+                "used_beta": beta,
+                "min_prob": round(min_p, 4),
+                "avg_prob": round(avg_p, 4),
+                "probs": probs,
+                "chars": chars,
+                # 退化情况降低置信度阈值:至少 OCR 给个结果就算
+                "confident": (min_p >= 0.5) and (avg_p >= 0.6),
+            }
+            break
+        if base is None:
+            return None
+
+    ocr_code = base.get("code", "")
+    # 第二步:归一化符号 + 提取纯表达式
+    normalized = _normalize_math_captcha_text(ocr_code)
+    expr = _extract_math_expr_from_normalized(normalized)
+    if expr is None or len(expr) < 3:
+        # 提取不出合法表达式 → 失败 (外层应刷新)
+        return None
+    # 第三步:安全计算
+    computed = _safe_eval_math_expr(expr)
+    if computed is None:
+        return None
+    answer = _format_math_answer(computed)
+    # 长度保护:答案字符串最多 6 位(123456, 或 -1234)——正常数学题不会更长
+    if len(answer) > 8:
+        return None
+    # 最终 confident:必须原置信度达标 AND 计算成功且结果在合理范围 [-9999, 9999]
+    ok_range = isinstance(computed, (int, float)) and -99999 <= computed <= 99999
+    final_confident = base.get("confident", False) and ok_range
+
+    return {
+        "ocr_code": ocr_code,
+        "normalized_expr": expr,
+        "answer": answer,
+        "computed_value": computed,
+        "used_beta": base.get("used_beta", False),
+        "min_prob": base.get("min_prob", 0.0),
+        "avg_prob": base.get("avg_prob", 0.0),
+        "probs": base.get("probs", []),
+        "chars": base.get("chars", []),
+        "confident": final_confident,
+    }
+
+
+def try_ocr_math_captcha(png_bytes: bytes) -> Optional[str]:
+    """简化版:直接返回计算好的验证码答案字符串(填输入框用);失败返回 None"""
+    r = try_ocr_math_captcha_with_confidence(png_bytes)
+    if r is None:
+        if png_bytes:
+            try:
+                fn = Path(__import__("tempfile").gettempdir()) / f"math_captcha_failed_{uuid.uuid4().hex[:8]}.png"
+                fn.write_bytes(png_bytes)
+                logger.info(f"[MathCaptchaOCR] 数学验证码识别失败,图片已存: {fn}")
+            except Exception:
+                pass
+        return None
+    return r["answer"]
+
