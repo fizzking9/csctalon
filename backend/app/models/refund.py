@@ -40,5 +40,16 @@ class Refund(TimestampMixin, Base):
     package_price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="套餐价格")
     raw_extra: Mapped[dict | None] = mapped_column(JSONB, nullable=True, comment="原始冗余字段")
 
+    # ── 同步溯源 & 更新人拆分 (2026-08-06 P1-T4) ──
+    # 注释同 ServiceTicket.synced_at / updated_by_raw
+    synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True,
+        comment="最后一次被导入/同步任务写入时间(每次 upsert 强制 now())",
+    )
+    updated_by_raw: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True,
+        comment="上游(BMS/SCRM)原始更新人/最后操作人,原样导入不参与业务逻辑",
+    )
+
     # 覆盖 TimestampMixin 的 created_at/updated_at 含义:这里指系统导入时间
     # created_at/updated_at 来自 TimestampMixin(系统导入时间)

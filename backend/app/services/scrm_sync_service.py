@@ -198,8 +198,14 @@ def _finish_log(
     updated: int = 0,
     failed: int = 0,
     error: str | None = None,
+    remark: str | None = None,
 ) -> None:
-    log = db.get(ScrmSyncLog, log_id)
+    """收尾日志(带事务回滚兜底,避免前面入库异常导致 session aborted 无法 commit)"""
+    try:
+        log = db.get(ScrmSyncLog, log_id)
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        log = db.get(ScrmSyncLog, log_id)
     if not log:
         return
     log.status = status
@@ -217,7 +223,13 @@ def _finish_log(
     log.reconcile_delta = delta
     if error:
         log.error = (error or "")[:8000]
-    db.commit()
+    if remark:
+        log.remark = (remark or "")[:1000]
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        db.commit()
 
 
 # ==========================================================
@@ -277,6 +289,8 @@ async def sync_operators(
     """
     start, end = _calculate_sync_range(db, DATA_TYPE_OPERATOR, time_range_override)
     log = _create_log(db, DATA_TYPE_OPERATOR, start, end, trigger_type, triggered_by)
+    log_id = log.id
+    log_closed = False
     cfg: dict = getattr(client, "_attached_cfg", None) or get_sync_source_config(db, DATA_TYPE_OPERATOR) or {}
     fetch_mode = cfg.get("fetch_mode") or "openapi"
 
@@ -285,104 +299,121 @@ async def sync_operators(
     api_total_reported: int | None = None
     fetched_rows = 0
     error_msg: str | None = None
-
-    # ── 第 1 轮: OpenAPI (仅 openapi / dual 模式) ──
-    try_openapi = fetch_mode in ("openapi", "dual")
-    records: list[dict] | None = None
-    if try_openapi:
-        try:
-            async with client:
-                raw = await client.list_operators()
-                api_call_count += 1
-                if isinstance(raw, dict):
-                    api_total_reported = int(raw.get("total") or 0) or None
-                    raw = raw.get("records") or []
-                records = list(raw) if raw else []
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[scrm][operator] OpenAPI 同步失败(模式={fetch_mode}): {e}")
-            error_msg = f"OpenAPI: {e}"
-            records = None  # 触发回退
-    # ── 第 2 轮: Playwright 网页抓取 (playwright 直接; dual 在 API 失败时) ──
-    fetch_source = "openapi"
-    if records is None and fetch_mode in ("playwright", "dual"):
-        logger.info(f"[scrm][operator] 回退到 Playwright 网页抓取(触发原因:{'API失败' if try_openapi else '指定playwright模式'})")
-        fetch_source = "playwright"
-        try:
-            from app.services.scrm_web_fetcher import run_web_fetch
-            # SCRM 时间格式: start/end datetime → date(网页一般按日期查)
-            start_date = start.astimezone(timezone.utc).date() if start.tzinfo else start.date()
-            end_date = end.astimezone(timezone.utc).date() if end.tzinfo else end.date()
-            web_res = run_web_fetch(
-                base_url=cfg.get("base_url") or "",
-                username=cfg.get("username") or "",
-                password=cfg.get("password") or "",
-                options=cfg.get("options") or {},
-                data_types=[DATA_TYPE_OPERATOR],
-                date_range=(start_date, end_date),
-                logger=logger,
-            )
-            records = list(web_res.get(DATA_TYPE_OPERATOR) or [])
-            api_total_reported = None  # web 抓取没有官方 total 字段
-        except Exception as e:  # noqa: BLE001
-            logger.exception(f"[scrm][operator] Playwright 抓取也失败: {e}")
-            error_msg = (error_msg + " | " if error_msg else "") + f"Playwright: {e}"
-            records = None
-
-    # ── 共用入库逻辑 ──
     success = False
-    if records is not None:
-        try:
-            fetched_rows = len(records)
-            BATCH = 100
-            for i in range(0, fetched_rows, BATCH):
-                batch = records[i:i + BATCH]
-                for rec in batch:
-                    try:
-                        result = _upsert_operator(db, rec)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"[scrm][operator] 单条 upsert 失败: {e}")
-                        result = "failed"
-                    if result == "inserted":
-                        inserted += 1
-                    elif result == "updated":
-                        updated += 1
-                    else:
-                        failed += 1
-                db.commit()
-            success = True
-        except Exception as e:  # noqa: BLE001
-            logger.exception(f"[scrm][operator] 入库失败: {e}")
-            error_msg = (error_msg + " | " if error_msg else "") + f"Upsert: {e}"
+    fetch_source = "openapi"
 
-    if success:
-        _finish_log(
-            db, log.id, "success",
-            api_call_count=api_call_count, api_total_reported=api_total_reported,
-            fetched_rows=fetched_rows, inserted=inserted, updated=updated, failed=failed,
-            remark=f"fetch_source={fetch_source}",
-        )
-        logger.info(f"[scrm][operator] 成功(source={fetch_source}): inserted={inserted} updated={updated} failed={failed}")
-        return {
-            "data_type": DATA_TYPE_OPERATOR, "success": True,
-            "start_time": start.isoformat(), "end_time": end.isoformat(),
-            "api_call_count": api_call_count, "fetched_rows": fetched_rows,
-            "inserted": inserted, "updated": updated, "failed": failed,
-            "fetch_source": fetch_source,
-        }
-    else:
-        _finish_log(
-            db, log.id, "failed",
-            api_call_count=api_call_count, api_total_reported=api_total_reported,
-            fetched_rows=fetched_rows, inserted=inserted, updated=updated, failed=failed,
-            error=str(error_msg or "两种抓取模式均失败"),
-            remark=f"fetch_source={fetch_source}, 双模式均失败",
-        )
-        logger.error(f"[scrm][operator] 同步失败: {error_msg}")
-        return {
-            "data_type": DATA_TYPE_OPERATOR, "success": False, "error": str(error_msg or "两种抓取模式均失败"),
-            "start_time": start.isoformat(), "end_time": end.isoformat(),
-            "fetch_source": fetch_source,
-        }
+    try:
+        # ── 第 1 轮: OpenAPI (仅 openapi / dual 模式) ──
+        try_openapi = fetch_mode in ("openapi", "dual")
+        records: list[dict] | None = None
+        if try_openapi:
+            try:
+                async with client:
+                    raw = await client.list_operators()
+                    api_call_count += 1
+                    if isinstance(raw, dict):
+                        api_total_reported = int(raw.get("total") or 0) or None
+                        raw = raw.get("records") or []
+                    records = list(raw) if raw else []
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[scrm][operator] OpenAPI 同步失败(模式={fetch_mode}): {e}")
+                error_msg = f"OpenAPI: {e}"
+                records = None  # 触发回退
+        # ── 第 2 轮: Playwright 网页抓取 (playwright 直接; dual 在 API 失败时) ──
+        fetch_source = "openapi"
+        if records is None and fetch_mode in ("playwright", "dual"):
+            logger.info(f"[scrm][operator] 回退到 Playwright 网页抓取(触发原因:{'API失败' if try_openapi else '指定playwright模式'})")
+            fetch_source = "playwright"
+            try:
+                from app.services.scrm_web_fetcher import run_web_fetch
+                # SCRM 时间格式: start/end datetime → date(网页一般按日期查)
+                start_date = start.astimezone(timezone.utc).date() if start.tzinfo else start.date()
+                end_date = end.astimezone(timezone.utc).date() if end.tzinfo else end.date()
+                web_res = run_web_fetch(
+                    base_url=cfg.get("base_url") or "",
+                    username=cfg.get("username") or "",
+                    password=cfg.get("password") or "",
+                    options=cfg.get("options") or {},
+                    data_types=[DATA_TYPE_OPERATOR],
+                    date_range=(start_date, end_date),
+                    logger=logger,
+                )
+                records = list(web_res.get(DATA_TYPE_OPERATOR) or [])
+                api_total_reported = None  # web 抓取没有官方 total 字段
+            except Exception as e:  # noqa: BLE001
+                logger.exception(f"[scrm][operator] Playwright 抓取也失败: {e}")
+                error_msg = (error_msg + " | " if error_msg else "") + f"Playwright: {e}"
+                records = None
+
+        # ── 共用入库逻辑 ──
+        success = False
+        if records is not None:
+            try:
+                fetched_rows = len(records)
+                BATCH = 100
+                for i in range(0, fetched_rows, BATCH):
+                    batch = records[i:i + BATCH]
+                    for rec in batch:
+                        try:
+                            result = _upsert_operator(db, rec)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning(f"[scrm][operator] 单条 upsert 失败: {e}")
+                            result = "failed"
+                        if result == "inserted":
+                            inserted += 1
+                        elif result == "updated":
+                            updated += 1
+                        else:
+                            failed += 1
+                    db.commit()
+                success = True
+            except Exception as e:  # noqa: BLE001
+                logger.exception(f"[scrm][operator] 入库失败: {e}")
+                error_msg = (error_msg + " | " if error_msg else "") + f"Upsert: {e}"
+
+        if success:
+            _finish_log(
+                db, log_id, "success",
+                api_call_count=api_call_count, api_total_reported=api_total_reported,
+                fetched_rows=fetched_rows, inserted=inserted, updated=updated, failed=failed,
+                remark=f"fetch_source={fetch_source}",
+            )
+            log_closed = True
+            logger.info(f"[scrm][operator] 成功(source={fetch_source}): inserted={inserted} updated={updated} failed={failed}")
+            return {
+                "data_type": DATA_TYPE_OPERATOR, "success": True,
+                "start_time": start.isoformat(), "end_time": end.isoformat(),
+                "api_call_count": api_call_count, "fetched_rows": fetched_rows,
+                "inserted": inserted, "updated": updated, "failed": failed,
+                "fetch_source": fetch_source,
+            }
+        else:
+            _finish_log(
+                db, log_id, "failed",
+                api_call_count=api_call_count, api_total_reported=api_total_reported,
+                fetched_rows=fetched_rows, inserted=inserted, updated=updated, failed=failed,
+                error=str(error_msg or "两种抓取模式均失败"),
+                remark=f"fetch_source={fetch_source}, 双模式均失败",
+            )
+            log_closed = True
+            logger.error(f"[scrm][operator] 同步失败: {error_msg}")
+            return {
+                "data_type": DATA_TYPE_OPERATOR, "success": False, "error": str(error_msg or "两种抓取模式均失败"),
+                "start_time": start.isoformat(), "end_time": end.isoformat(),
+                "fetch_source": fetch_source,
+            }
+    finally:
+        if not log_closed:
+            try:
+                _finish_log(
+                    db, log_id, "failed",
+                    api_call_count=api_call_count, api_total_reported=api_total_reported,
+                    fetched_rows=fetched_rows, inserted=inserted, updated=updated, failed=failed,
+                    error=str(error_msg or "同步过程异常中断(兜底)"),
+                    remark=f"[finally 兜底] fetch_source={fetch_source}",
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ==========================================================
@@ -564,6 +595,8 @@ async def _sync_one_session_type(
     type_label, data_type, fetcher = _SESSION_TYPE_TO_METHOD[session_type]
     start, end = _calculate_sync_range(db, data_type, time_range_override)
     log = _create_log(db, data_type, start, end, trigger_type, triggered_by)
+    log_id = log.id
+    log_closed = False
     cfg: dict = getattr(client, "_attached_cfg", None) or get_sync_source_config(db, DATA_TYPE_OPERATOR) or {}
     fetch_mode = cfg.get("fetch_mode") or "openapi"
 
@@ -574,130 +607,147 @@ async def _sync_one_session_type(
     start_s = _fmt_scrm_ts(start)
     end_s = _fmt_scrm_ts(end)
     error_msg: str | None = None
-
-    # ── 第 1 轮: OpenAPI ──
-    try_openapi = fetch_mode in ("openapi", "dual")
-    records: list[dict] | None = None
-    transfers_records: list[dict] | None = None  # 仅 web 模式下 scrm_session_transfers 会用到
-    if try_openapi:
-        try:
-            async with client:
-                raw = await fetcher(client, start_s, end_s, None)
-                api_call_count += 1
-                records = list(raw) if raw else []
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[scrm][session-{type_label}] OpenAPI 失败(模式={fetch_mode}): {e}")
-            error_msg = f"OpenAPI: {e}"
-            records = None
-    # ── 第 2 轮: Playwright 网页抓取 ──
     fetch_source = "openapi"
-    if records is None and fetch_mode in ("playwright", "dual"):
-        logger.info(
-            f"[scrm][session-{type_label}] 回退到 Playwright 网页抓取"
-            f"(触发原因:{'API失败' if try_openapi else '指定playwright模式'})"
-        )
-        fetch_source = "playwright"
-        try:
-            from app.services.scrm_web_fetcher import run_web_fetch
-            start_date = start.astimezone(timezone.utc).date() if start.tzinfo else start.date()
-            end_date = end.astimezone(timezone.utc).date() if end.tzinfo else end.date()
-            # web_sessions / web_transfers 两个都抓(因为同步 scrm_sessions 时若 transfers_list 内嵌可能不全)
-            web_to_fetch = ["scrm_sessions"]
-            # SCRM 会话 3 类型(private/group/virtual) 在网页版可能是同一个 Tab,用通用抓取名 scrm_sessions
-            web_res = run_web_fetch(
-                base_url=cfg.get("base_url") or "",
-                username=cfg.get("username") or "",
-                password=cfg.get("password") or "",
-                options=cfg.get("options") or {},
-                data_types=web_to_fetch,
-                date_range=(start_date, end_date),
-                logger=logger,
-            )
-            raw_sessions = list(web_res.get("scrm_sessions") or [])
-            # 网页版抓取可能不区分 private/group/virtual;
-            # 按 record 里的 sessionType/会话类型 字段筛选,没找到就默认全量给当前类型兜底(后续同步类型时会覆盖更新,不重复创建)
-            filtered: list[dict] = []
-            for rec in raw_sessions:
-                rtype = (
-                    str(rec.get("sessionType") or rec.get("会话类型") or rec.get("type") or "").strip().lower()
-                )
-                if not rtype:
-                    # 无类型字段:交给当前同步类型(3 个类型都同步一次总数据的话,会覆盖更新同一条 session)
-                    filtered.append(rec)
-                elif type_label in rtype or rtype in type_label:
-                    # 类型匹配
-                    filtered.append(rec)
-                elif (type_label == "private" and ("私" in rtype or "1v1" in rtype or "p2p" in rtype)) or (
-                    type_label == "group" and ("群" in rtype or "group" in rtype)
-                ) or (type_label == "virtual" and ("虚拟" in rtype or "virtual" in rtype)):
-                    filtered.append(rec)
-                else:
-                    # 兜底:3 种类型都要走一遍时,全量给,让主键重复时 upsert 成一样
-                    filtered.append(rec)
-            records = filtered
-        except Exception as e:  # noqa: BLE001
-            logger.exception(f"[scrm][session-{type_label}] Playwright 抓取也失败: {e}")
-            error_msg = (error_msg + " | " if error_msg else "") + f"Playwright: {e}"
-            records = None
-
-    # ── 共用入库逻辑 ──
     success = False
-    if records is not None:
-        try:
-            fetched_rows = len(records)
-            BATCH = 50
-            for i in range(0, fetched_rows, BATCH):
-                batch = records[i:i + BATCH]
-                for rec in batch:
-                    try:
-                        _sess, status = _upsert_session(db, rec, type_label)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"[scrm][session-{type_label}] 单条 upsert 失败: {e}")
-                        status = "failed"
-                    if status == "inserted":
-                        inserted += 1
-                    elif status == "updated":
-                        updated += 1
-                    else:
-                        failed += 1
-                db.commit()
-            success = True
-        except Exception as e:  # noqa: BLE001
-            logger.exception(f"[scrm][session-{type_label}] 入库失败: {e}")
-            error_msg = (error_msg + " | " if error_msg else "") + f"Upsert: {e}"
 
-    if success:
-        _finish_log(
-            db, log.id, "success",
-            api_call_count=api_call_count, api_total_reported=api_total_reported,
-            fetched_rows=fetched_rows, inserted=inserted, updated=updated, failed=failed,
-            remark=f"fetch_source={fetch_source},type={type_label}",
-        )
-        logger.info(
-            f"[scrm][session-{type_label}] 成功(source={fetch_source}): "
-            f"inserted={inserted} updated={updated} failed={failed} (fetched={fetched_rows})"
-        )
-        return {
-            "data_type": data_type, "success": True,
-            "start_time": start.isoformat(), "end_time": end.isoformat(),
-            "api_call_count": api_call_count, "fetched_rows": fetched_rows,
-            "inserted": inserted, "updated": updated, "failed": failed,
-            "fetch_source": fetch_source,
-        }
-    else:
-        _finish_log(
-            db, log.id, "failed",
-            api_call_count=api_call_count, api_total_reported=api_total_reported,
-            fetched_rows=fetched_rows, inserted=inserted, updated=updated, failed=failed,
-            error=str(error_msg or "两种抓取模式均失败"),
-            remark=f"fetch_source={fetch_source},type={type_label},双模式均失败",
-        )
-        logger.error(f"[scrm][session-{type_label}] 同步失败: {error_msg}")
-        return {
-            "data_type": data_type, "success": False, "error": str(error_msg or "两种抓取模式均失败"),
-            "start_time": start.isoformat(), "end_time": end.isoformat(),
-            "fetch_source": fetch_source,
-        }
+    try:
+        # ── 第 1 轮: OpenAPI ──
+        try_openapi = fetch_mode in ("openapi", "dual")
+        records: list[dict] | None = None
+        transfers_records: list[dict] | None = None  # 仅 web 模式下 scrm_session_transfers 会用到
+        if try_openapi:
+            try:
+                async with client:
+                    raw = await fetcher(client, start_s, end_s, None)
+                    api_call_count += 1
+                    records = list(raw) if raw else []
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[scrm][session-{type_label}] OpenAPI 失败(模式={fetch_mode}): {e}")
+                error_msg = f"OpenAPI: {e}"
+                records = None
+        # ── 第 2 轮: Playwright 网页抓取 ──
+        fetch_source = "openapi"
+        if records is None and fetch_mode in ("playwright", "dual"):
+            logger.info(
+                f"[scrm][session-{type_label}] 回退到 Playwright 网页抓取"
+                f"(触发原因:{'API失败' if try_openapi else '指定playwright模式'})"
+            )
+            fetch_source = "playwright"
+            try:
+                from app.services.scrm_web_fetcher import run_web_fetch
+                start_date = start.astimezone(timezone.utc).date() if start.tzinfo else start.date()
+                end_date = end.astimezone(timezone.utc).date() if end.tzinfo else end.date()
+                # web_sessions / web_transfers 两个都抓(因为同步 scrm_sessions 时若 transfers_list 内嵌可能不全)
+                web_to_fetch = ["scrm_sessions"]
+                # SCRM 会话 3 类型(private/group/virtual) 在网页版可能是同一个 Tab,用通用抓取名 scrm_sessions
+                web_res = run_web_fetch(
+                    base_url=cfg.get("base_url") or "",
+                    username=cfg.get("username") or "",
+                    password=cfg.get("password") or "",
+                    options=cfg.get("options") or {},
+                    data_types=web_to_fetch,
+                    date_range=(start_date, end_date),
+                    logger=logger,
+                )
+                raw_sessions = list(web_res.get("scrm_sessions") or [])
+                # 网页版抓取可能不区分 private/group/virtual;
+                # 按 record 里的 sessionType/会话类型 字段筛选,没找到就默认全量给当前类型兜底(后续同步类型时会覆盖更新,不重复创建)
+                filtered: list[dict] = []
+                for rec in raw_sessions:
+                    rtype = (
+                        str(rec.get("sessionType") or rec.get("会话类型") or rec.get("type") or "").strip().lower()
+                    )
+                    if not rtype:
+                        # 无类型字段:交给当前同步类型(3 个类型都同步一次总数据的话,会覆盖更新同一条 session)
+                        filtered.append(rec)
+                    elif type_label in rtype or rtype in type_label:
+                        # 类型匹配
+                        filtered.append(rec)
+                    elif (type_label == "private" and ("私" in rtype or "1v1" in rtype or "p2p" in rtype)) or (
+                        type_label == "group" and ("群" in rtype or "group" in rtype)
+                    ) or (type_label == "virtual" and ("虚拟" in rtype or "virtual" in rtype)):
+                        filtered.append(rec)
+                    else:
+                        # 兜底:3 种类型都要走一遍时,全量给,让主键重复时 upsert 成一样
+                        filtered.append(rec)
+                records = filtered
+            except Exception as e:  # noqa: BLE001
+                logger.exception(f"[scrm][session-{type_label}] Playwright 抓取也失败: {e}")
+                error_msg = (error_msg + " | " if error_msg else "") + f"Playwright: {e}"
+                records = None
+
+        # ── 共用入库逻辑 ──
+        success = False
+        if records is not None:
+            try:
+                fetched_rows = len(records)
+                BATCH = 50
+                for i in range(0, fetched_rows, BATCH):
+                    batch = records[i:i + BATCH]
+                    for rec in batch:
+                        try:
+                            _sess, status = _upsert_session(db, rec, type_label)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning(f"[scrm][session-{type_label}] 单条 upsert 失败: {e}")
+                            status = "failed"
+                        if status == "inserted":
+                            inserted += 1
+                        elif status == "updated":
+                            updated += 1
+                        else:
+                            failed += 1
+                    db.commit()
+                success = True
+            except Exception as e:  # noqa: BLE001
+                logger.exception(f"[scrm][session-{type_label}] 入库失败: {e}")
+                error_msg = (error_msg + " | " if error_msg else "") + f"Upsert: {e}"
+
+        if success:
+            _finish_log(
+                db, log_id, "success",
+                api_call_count=api_call_count, api_total_reported=api_total_reported,
+                fetched_rows=fetched_rows, inserted=inserted, updated=updated, failed=failed,
+                remark=f"fetch_source={fetch_source},type={type_label}",
+            )
+            log_closed = True
+            logger.info(
+                f"[scrm][session-{type_label}] 成功(source={fetch_source}): "
+                f"inserted={inserted} updated={updated} failed={failed} (fetched={fetched_rows})"
+            )
+            return {
+                "data_type": data_type, "success": True,
+                "start_time": start.isoformat(), "end_time": end.isoformat(),
+                "api_call_count": api_call_count, "fetched_rows": fetched_rows,
+                "inserted": inserted, "updated": updated, "failed": failed,
+                "fetch_source": fetch_source,
+            }
+        else:
+            _finish_log(
+                db, log_id, "failed",
+                api_call_count=api_call_count, api_total_reported=api_total_reported,
+                fetched_rows=fetched_rows, inserted=inserted, updated=updated, failed=failed,
+                error=str(error_msg or "两种抓取模式均失败"),
+                remark=f"fetch_source={fetch_source},type={type_label},双模式均失败",
+            )
+            log_closed = True
+            logger.error(f"[scrm][session-{type_label}] 同步失败: {error_msg}")
+            return {
+                "data_type": data_type, "success": False, "error": str(error_msg or "两种抓取模式均失败"),
+                "start_time": start.isoformat(), "end_time": end.isoformat(),
+                "fetch_source": fetch_source,
+            }
+    finally:
+        if not log_closed:
+            try:
+                _finish_log(
+                    db, log_id, "failed",
+                    api_call_count=api_call_count, api_total_reported=api_total_reported,
+                    fetched_rows=fetched_rows, inserted=inserted, updated=updated, failed=failed,
+                    error=str(error_msg or "同步过程异常中断(兜底)"),
+                    remark=f"[finally 兜底] fetch_source={fetch_source},type={type_label}",
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ==========================================================

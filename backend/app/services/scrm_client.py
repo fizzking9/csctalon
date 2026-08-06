@@ -43,10 +43,13 @@ SCRM_DATA_SOURCES: dict[str, dict] = {
         "base_url": "https://gateway.bilinl.com",
         "page_path": "/thirdparty/partner/merChat/getMerChatOperator",  # 仅文档参考
         "default_sync": True,
-        "fetch_mode": "openapi",
-        "requires_captcha": False,  # OpenAPI 不需要,网页模式在 options 里控制
+        # 2026-08-06 修复: 默认抓取模式从 openapi → playwright (OpenAPI 在部分环境会
+        # 被平台风控拦截/限流,同时客户反馈 OpenAPI 抓取频率过低缺今日增量, Playwright
+        # 直接模拟浏览器导出,更稳定拿到与后台页面一致的今日数据, 默认使用 Playwright)
+        "fetch_mode": "playwright",
+        "requires_captcha": True,  # Playwright 登录需要数学公式验证码
         "options": {
-            "fetch_mode": "openapi",
+            "fetch_mode": "playwright",
             "captcha_type": "math",
             "login_url_path": "/login",
             "web_operator_entry_path": "/index#/system/user-manage",
@@ -62,10 +65,10 @@ SCRM_DATA_SOURCES: dict[str, dict] = {
         "base_url": "https://gateway.bilinl.com",
         "page_path": "/thirdparty/customer/chatSession/privateChat/getUserChatListByPage",
         "default_sync": True,
-        "fetch_mode": "openapi",
-        "requires_captcha": False,
+        "fetch_mode": "playwright",
+        "requires_captcha": True,
         "options": {
-            "fetch_mode": "openapi",
+            "fetch_mode": "playwright",
             "captcha_type": "math",
             "login_url_path": "/login",
             "web_session_entry_path": "/index#/chat/session-list",
@@ -78,10 +81,10 @@ SCRM_DATA_SOURCES: dict[str, dict] = {
         "base_url": "https://gateway.bilinl.com",
         "page_path": "/thirdparty/customer/chatSession/groupChat/getUserChatListByGroup",
         "default_sync": False,  # 群聊先关闭,后续业务确认口径后开启
-        "fetch_mode": "openapi",
-        "requires_captcha": False,
+        "fetch_mode": "playwright",
+        "requires_captcha": True,
         "options": {
-            "fetch_mode": "openapi",
+            "fetch_mode": "playwright",
             "captcha_type": "math",
             "login_url_path": "/login",
             "captcha_img_selector": "img.show-code-img",
@@ -93,10 +96,10 @@ SCRM_DATA_SOURCES: dict[str, dict] = {
         "base_url": "https://gateway.bilinl.com",
         "page_path": "/thirdparty/customer/chatSession/virtualSession/getVirtualChatSessionPage",
         "default_sync": False,  # 虚拟会话先关闭,待确认是否算客服工作量
-        "fetch_mode": "openapi",
-        "requires_captcha": False,
+        "fetch_mode": "playwright",
+        "requires_captcha": True,
         "options": {
-            "fetch_mode": "openapi",
+            "fetch_mode": "playwright",
             "captcha_type": "math",
             "login_url_path": "/login",
             "captcha_img_selector": "img.show-code-img",

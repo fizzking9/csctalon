@@ -20,6 +20,67 @@ from app.models.incident import Incident
 from app.models.wallet import WalletWithdrawal
 
 
+# ============================================================
+# 通用工具: 手机号清洗归一化 (_clean_phone)
+# ============================================================
+def _clean_phone(raw: str | None) -> str | None:
+    """清洗并归一化手机号,用于 COUNT(DISTINCT) / TOP 去重 / JOIN
+
+    规则 (严格保持与规范一致):
+      1. 空/纯空白 → None
+      2. 去掉前缀 +86 / 86 / 0086 / 0 (仅首字符为0时) 及 ( ) - 空格 等分隔符
+      3. 含掩码字符(**** / **** / XXXX) → None (不进去重计数,避免归并)
+      4. 清洗后长度 != 11 或不是 1 开头纯数字 → None
+      5. 其余 → 11 位纯数字字符串
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    # 掩码: 任意含 4 位连续 * 或 X 的直接丢
+    if "****" in s or "XXXX" in s or "****" in s:
+        return None
+    # 去所有非数字字符
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if not digits:
+        return None
+    # 掉 0086 / +86 → 等价于去数字前导 86 (仅当总长 13 时)
+    if digits.startswith("0086") and len(digits) == 15:
+        digits = digits[4:]
+    elif digits.startswith("86") and len(digits) == 13:
+        digits = digits[2:]
+    elif digits.startswith("0") and len(digits) == 12:
+        digits = digits[1:]
+    if len(digits) != 11 or not digits.startswith("1"):
+        return None
+    return digits
+
+
+def _clean_col_expr(col):
+    """SQLAlchemy 表达式版本的 _clean_phone (生成 CASE WHEN 表达式返回归一化后的手机号或 NULL)
+
+    用于 COUNT(DISTINCT) 聚合,避免先拉回 Python 再去重。
+    """
+    # 简化版本: 先 trim, 如果含 ****/XXXX 直接 NULL; 长度 11 且 1 开头的才保留; 其它 NULL。
+    # 去前缀 86/+86 的部分: 去掉所有非数字字符后再判断
+    raw = func.coalesce(col, literal(""))
+    # 去掉非数字字符 (regexp_replace only available in PG, which we're on)
+    digits_ = func.regexp_replace(raw, r"\D", "", "g")
+    digits = case(
+        (func.substring(digits_, 1, 4) == "0086", func.substring(digits_, 5)),
+        (func.substring(digits_, 1, 2) == "86", func.substring(digits_, 3)),
+        else_=digits_,
+    )
+    mask_hit = or_(raw.ilike("%****%"), raw.ilike("%XXXX%"))
+    ok = and_(func.length(digits) == 11, func.substring(digits, 1, 1) == "1")
+    return case(
+        (mask_hit, None),
+        (ok, digits),
+        else_=None,
+    ).label("phone_clean")
+
+
 def _date_range(start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:
     if not end:
         end = datetime.now()
@@ -636,6 +697,144 @@ def _complaint_source_type_case(col=ServiceTicket.service_item):
         (or_(*whens), "外部投诉"),
         else_="内部投诉",
     ).label("complaint_source_type")
+
+
+# ============================================================
+# 模块: 工单有效完工时间推算 (effective_finish_time)
+# ============================================================
+# 背景: ticket.finish_time 89% 被批量覆盖/同步填充(详见 docs/数据时间审核报告.md L67-L70)
+#   - 50% finish > register+12h (BMS 03:15 批量覆盖)
+#   - 23% finish == register (导入时同步填充)
+#   - 17% 更早于 register (同瞬填充)
+#   - 仅 10.7% 是真实完成时间 (status=已完成, handler 非空, finish 落在 register..register+12h)
+#
+# 因此在统计"今日完工单量 / 人员绩效结单量"时,必须走以下推断链:
+#   1) 先过白名单,真实完成 → 直接用 finish_time
+#   2) 否则若 handle_duration 存在 → effective_finish = register_time + handle_duration 秒
+#   3) 否则若该 handler 在近 30 天有真实平均耗时 → effective_finish = register_time + avg(handler)
+#   4) 否则 → effective_finish = register_time + 全局平均(近 30 天真实完成样本)
+#
+# 最终只算 status == '已完成' 的工单 (status != 已完成意味着仍在途,不能视为"完工")。
+# ============================================================
+
+def _ticket_effective_finish_time_where(db: Session, start_time: datetime, end_time: datetime,
+                                        lookback_days: int = 30) -> tuple[int, int]:
+    """返回 (status=已完成 且 推算后 effective_finish 落在 [start_time,end_time] 里的工单数,
+               其中「真实完工样本」数量(用于前端口径说明))
+
+    用两层查询:
+      第一层 SQL: 取近 lookback_days 每个 handler(+全局) 的平均 handle_duration(仅 真实完成样本参与, 避免平均被批量覆盖污染)
+      第二层: 取 status='已完成' 且 register_time < end_time + 12h 的工单, Python 侧算 effective_finish 再计数。
+      这比单条巨型 SQL 可读性高得多,性能也足够(量级 <= 30 天 ≈ 9k 行)。
+    """
+    SYS_USERS = {"sys", "system", "SYS", "System", "客户", None}
+
+    # 统一为带 UTC tzinfo 的 aware datetime, 避免 naive <-> aware 比较 TypeError
+    import datetime as __dt
+    def _as_utc_aware(dt: datetime) -> datetime:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=__dt.timezone.utc)
+        return dt.astimezone(__dt.timezone.utc)
+    _s = _as_utc_aware(start_time)
+    _e = _as_utc_aware(end_time)
+
+    # ── Step 1: 近 30 天 真实完成样本, 按 handler 聚合平均处理时长 ──
+    hist_since = _s - timedelta(days=lookback_days)
+    # 真实完成样本 = status=已完成 AND handler 非空非系统 AND handler 字面像人名 AND finish 在 register..register+12h
+    real_done_cond = and_(
+        ServiceTicket.status == "已完成",
+        ServiceTicket.handler.isnot(None),
+        ~ServiceTicket.handler.in_(list(SYS_USERS) + ["客户"]),
+        ServiceTicket.finish_time.isnot(None),
+        ServiceTicket.register_time.isnot(None),
+        ServiceTicket.finish_time >= ServiceTicket.register_time,
+        ServiceTicket.finish_time <= func.timeadd('hour', 12, ServiceTicket.register_time) if False
+        else ServiceTicket.finish_time <= ServiceTicket.register_time + text("INTERVAL '12 hours'"),
+    )
+    # a) 按 handler 平均 (只对有真实完成样本的 handler 建索引)
+    handler_avg_rows = db.execute(
+        select(
+            ServiceTicket.handler,
+            func.avg(
+                case(
+                    (ServiceTicket.handle_duration > 0, ServiceTicket.handle_duration),
+                    else_=func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time),
+                )
+            ).label("avg_dur_s"),
+            func.count().label("n"),
+        )
+        .where(real_done_cond, ServiceTicket.register_time >= hist_since)
+        .group_by(ServiceTicket.handler)
+    ).all()
+    handler_avg: dict[str, float] = {}
+    weighted_total, weighted_count = 0.0, 0
+    for r in handler_avg_rows:
+        dur = float(r._mapping["avg_dur_s"] or 0.0)
+        n = int(r._mapping["n"] or 0)
+        if n <= 0 or dur <= 0:
+            continue
+        handler_avg[str(r.handler).strip()] = dur
+        weighted_total += dur * n
+        weighted_count += n
+    global_avg = (weighted_total / weighted_count) if weighted_count > 0 else (60.0 * 28)  # fallback = 28 分钟
+
+    # ── Step 2: 拉 status='已完成' 且 register_time 落在 [hist_since, end_time+12h] 范围内的工单
+    #            ( register > end_time 绝对不可能今日完工, 提前过滤) ──
+    rows = db.execute(
+        select(
+            ServiceTicket.register_time,
+            ServiceTicket.finish_time,
+            ServiceTicket.handle_duration,
+            ServiceTicket.handler,
+            ServiceTicket.status,
+        )
+        .where(
+            ServiceTicket.status == "已完成",
+            ServiceTicket.register_time.isnot(None),
+            ServiceTicket.register_time >= hist_since,
+            ServiceTicket.register_time <= _e + timedelta(hours=13),
+        )
+    ).all()
+
+    done_cnt = 0
+    real_done_cnt = 0
+    for r in rows:
+        reg, fin, hd, hdlr, st = (r.register_time, r.finish_time, r.handle_duration, r.handler, r.status)
+        if not reg:
+            continue
+        # 把 reg/fin 都转成 UTC aware, 保证加 timedelta 后仍能和 _s/_e 比较
+        reg_a = _as_utc_aware(reg)
+        fin_a = _as_utc_aware(fin) if fin else None
+        # 判定是否真实完成样本 (和上面 real_done_cond 保持一致)
+        is_real = bool(
+            fin_a is not None
+            and hdlr is not None
+            and hdlr not in SYS_USERS
+            and fin_a >= reg_a
+            and fin_a <= reg_a + timedelta(hours=12)
+        )
+        if is_real:
+            eff = fin_a
+        else:
+            # 2) handle_duration > 0 直接用
+            if isinstance(hd, (int, float)) and hd > 0:
+                eff = reg_a + timedelta(seconds=float(hd))
+            else:
+                # 3) handler 近 30 天真实平均
+                avg = handler_avg.get(str(hdlr).strip()) if hdlr else None
+                if avg and avg > 0:
+                    eff = reg_a + timedelta(seconds=avg)
+                else:
+                    # 4) 全局 fallback
+                    eff = reg_a + timedelta(seconds=global_avg)
+        if _s <= eff <= _e:
+            done_cnt += 1
+            if is_real:
+                real_done_cnt += 1
+
+    return done_cnt, real_done_cnt
 
 
 # 投诉工单根因分类 CASE (用关联 cs_record.problem_category/problem_type 归并):
@@ -1991,13 +2190,12 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
     if range_end_iso == today_d_iso and merchant_today == 0:
         merchant_tip = "商户号流水通常T+1导入，本日/本周期数据可能为空"
 
-    # 5. 今日已完工单 (service_tickets.finish_time 且 status='已完成')
-    done_t = db.execute(select(func.count())
-                        .where(_between(ServiceTicket.finish_time, ts, te),
-                               ServiceTicket.status == "已完成")).scalar() or 0
-    done_y = db.execute(select(func.count())
-                        .where(_between(ServiceTicket.finish_time, ys, ye),
-                               ServiceTicket.status == "已完成")).scalar() or 0
+    # 5. 今日已完工单 (新口径:有效完工时间推算)
+    #    - 背景: finish_time 89% 被批量覆盖/同步填充(详见 docs/数据时间审核报告.md L67-L70)
+    #    - 推算链: 真实完成样本(白名单) → handle_duration 秒 → handler 近 30 天真实平均 → 全局真实平均
+    #    - 仅统计 status='已完成' 的工单 (在途不视为完工)
+    done_t, real_done_t = _ticket_effective_finish_time_where(db, ts, te)
+    done_y, real_done_y = _ticket_effective_finish_time_where(db, ys, ye)
 
     # 6. 今日在岗人数 (cs_records distinct operator)
     staff_t = db.execute(select(func.count(func.distinct(CsRecord.operator)))
@@ -2050,7 +2248,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         "refund_amount":  _k(round(rf_amt_t, 2), round(rf_amt_y, 2)),
         "cash_out":       _k(round(cash_t, 2), round(cash_y, 2)),      # 经营估算 A+B+C+D
         "actual_cashflow":_k(round(e_t["amount"], 2), round(e_y["amount"], 2)), # (新) 实际现金流E
-        "ticket_done":    _k(int(done_t), int(done_y)),
+        "ticket_done":    {**_k(int(done_t), int(done_y)), "real_done_today": int(real_done_t), "real_done_yoy": int(real_done_y)},
         "staff_on_duty":  _k(int(staff_t), int(staff_y)),
         "complaint":      _k(int(comp_t), int(comp_y)),
         "merchant_tip":   merchant_tip,
@@ -2071,6 +2269,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
             "refund_amount":    "路线A: 退费单 refund_method='线上'",
             "cash_out":         "经营估算 = 四路经营出款 A线上直退 + B用户取现 + C闪猫退款(shanmao_refunds已建表status=已退款) + D其他退款(独立表占位)",
             "actual_cashflow":  "实际现金流(对账基准) = merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
+            "ticket_done":      "有效完工时间推算: 10.7% 真实完成(白名单:status=已完成且finish在register+12h内且handler非空非SYS) → handle_duration秒 → 该handler近30天真实平均耗时 → 全局真实平均。仅status=已完成视为完工, 避免finish_time被BMS 03:15批量覆盖导致的虚高。",
         },
     }
 
@@ -4400,13 +4599,617 @@ def _view_rr_reason_dist(db: Session, params: _PARAMS_T) -> _RET_T:
     }
 
 
-# 注册 HANDLERS dict (code → callable). urge_analysis.py 同名模式.
+# ==============================================================
+# 服务请求管理 / 今日看板专项 6 个 AnalysisView HANDLERS
+# (对应 P1-T3.1, P1-T3.2, P2-T6.1~T6.4 6 个待实现视图)
+# 所有函数签名: (Session, params:{start/end/date}) -> dict[chart_type, data]
+# ==============================================================
+
+def _sh_parse_params(params: _PARAMS_T) -> tuple[_dt.datetime, _dt.datetime]:
+    """解析视图参数 → 返回北京时间当日窗口 (ts naive-UTC-start, te naive-UTC-end inclusive)
+
+    优先级:
+      - params.date (单日模式): 该自然日 00:00~23:59:59.999999 北京时间
+      - params.start / params.end: 直接用 (字符串 YYYY-MM-DD 或 datetime)
+      - 缺省: 今天自然日 北京时间
+    """
+    import datetime as __dt
+    from zoneinfo import ZoneInfo as _ZI
+    _TZ = _ZI("Asia/Shanghai")
+
+    def _from_iso(s: str) -> __dt.date | None:
+        try:
+            # 先尝试 YYYY-MM-DD
+            return __dt.date.fromisoformat(s[:10])
+        except Exception:
+            return None
+    # 1) date 单日模式
+    if params and params.get("date"):
+        d = _from_iso(str(params["date"])) or __dt.datetime.now(_TZ).date()
+    elif params and (params.get("start") or params.get("end")):
+        d = _from_iso(str(params.get("start"))) if params.get("start") else __dt.datetime.now(_TZ).date()
+    else:
+        d = __dt.datetime.now(_TZ).date()
+    s_local = __dt.datetime.combine(d, __dt.time(0, 0, 0), tzinfo=_TZ)
+    e_local = __dt.datetime.combine(d, __dt.time(23, 59, 59, 999999), tzinfo=_TZ)
+    return (
+        s_local.astimezone(__dt.timezone.utc).replace(tzinfo=None),
+        e_local.astimezone(__dt.timezone.utc).replace(tzinfo=None),
+    )
+
+
+def _view_ticket_work_top20(db: Session, params: _PARAMS_T) -> _RET_T:
+    """P1-T3.1: 工单工作内容 Top20 (服务类别 × 服务项)
+
+    列: 服务类别 / 服务项 / 近7天工单量 / 同比±% / 在途积压 / 平均处理时长min / 涉及SN去重 / 涉及手机号去重
+    """
+    ts, te = _sh_parse_params(params)
+    # 近7天窗口
+    ts_7 = te - timedelta(days=7) + timedelta(microseconds=1)
+    # 同比7天 (前7-14天)
+    ys_7 = ts_7 - timedelta(days=7)
+    ye_7 = ts_7 - timedelta(microseconds=1)
+
+    # Base CTE: 服务类别归一化 + 手机号清洗
+    cat = _ticket_category_case()  # 归一化后的 service_category
+    phone_clean = _clean_col_expr(ServiceTicket.phone)
+
+    # 近7天聚合
+    base_sel = (
+        select(
+            cat.label("cat_norm"),
+            func.coalesce(ServiceTicket.service_item, literal("未标注")).label("item_norm"),
+            func.count().label("cnt_cur"),
+            func.count(func.distinct(func.nullif(func.trim(ServiceTicket.device_sn), ""))).label("sn_cnt"),
+            func.count(func.distinct(phone_clean)).label("phone_cnt"),
+            func.coalesce(func.avg(case(
+                (and_(ServiceTicket.handle_duration != None, ServiceTicket.handle_duration > 0),
+                 ServiceTicket.handle_duration / 60.0),
+                else_=func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) / 60.0
+            )), 0.0).label("avg_dur_min"),
+            func.sum(case(
+                (ServiceTicket.status.notin_(["已完成", "无需处理", "已取消"]), 1),
+                else_=0
+            )).label("open_cnt"),
+        )
+        .select_from(ServiceTicket)
+        .where(ServiceTicket.register_time.isnot(None),
+               ServiceTicket.register_time >= ts_7, ServiceTicket.register_time <= te)
+        .group_by("cat_norm", "item_norm")
+        .cte("cur_agg")
+    )
+    # 同比7天聚合 (键相同的才会JOIN)
+    yoy_sel = (
+        select(
+            cat.label("y_cat"),
+            func.coalesce(ServiceTicket.service_item, literal("未标注")).label("y_item"),
+            func.count().label("cnt_yoy")
+        )
+        .select_from(ServiceTicket)
+        .where(ServiceTicket.register_time.isnot(None),
+               ServiceTicket.register_time >= ys_7, ServiceTicket.register_time <= ye_7)
+        .group_by("y_cat", "y_item")
+        .cte("yoy_agg")
+    )
+    stmt = (
+        select(
+            base_sel.c.cat_norm, base_sel.c.item_norm,
+            base_sel.c.cnt_cur, yoy_sel.c.cnt_yoy,
+            base_sel.c.open_cnt, base_sel.c.avg_dur_min, base_sel.c.sn_cnt, base_sel.c.phone_cnt,
+        )
+        .select_from(base_sel)
+        .outerjoin(yoy_sel, and_(yoy_sel.c.y_cat == base_sel.c.cat_norm, yoy_sel.c.y_item == base_sel.c.item_norm))
+        .order_by(base_sel.c.cnt_cur.desc())
+        .limit(20)
+    )
+    rows_q = db.execute(stmt).all()
+    rows = []
+    for r in rows_q:
+        cur = int(r.cnt_cur or 0)
+        yoy = int(r.cnt_yoy or 0)
+        diff = cur - yoy
+        ratio = round(diff / yoy * 100, 1) if yoy else None
+        rows.append({
+            "服务类别": (r.cat_norm or "未分类") if r.cat_norm != "投诉" else "投诉",
+            "服务项": (r.item_norm or "未标注")[:30],
+            "近7天工单量": cur,
+            "同比工单量": yoy,
+            "同比Δ": (f"+{diff}" if diff >= 0 else f"{diff}"),
+            "同比%": (f"{ratio:+.1f}%" if ratio is not None else "新"),
+            "在途积压": int(r.open_cnt or 0),
+            "平均处理时长(min)": round(float(r.avg_dur_min or 0), 1),
+            "涉及SN(去重)": int(r.sn_cnt or 0),
+            "涉及手机号(去重)": int(r.phone_cnt or 0),
+        })
+    cols = [
+        "服务类别", "服务项", "近7天工单量", "同比工单量", "同比Δ", "同比%",
+        "在途积压", "平均处理时长(min)", "涉及SN(去重)", "涉及手机号(去重)",
+    ]
+    return {
+        "chart_type": "table",
+        "data": {
+            "title": "工单工作内容 Top20 (按 服务类别×服务项, 近7天工单量排序)",
+            "columns": cols,
+            "rows": rows,
+        },
+    }
+
+
+def _view_complaint_root_heatmap(db: Session, params: _PARAMS_T) -> _RET_T:
+    """P1-T3.2: 投诉子类 Top10 × 六大类根因 热力矩阵
+
+    口径与投诉根因柱图 (today_complaint_root_cause) 保持一致:
+      - 投诉工单 (三表 UNION) JOIN cs_record (SN ± 24h 窗口关联)
+      - 根因: 网络质量类 / 套餐争议类 / 退款协商失败类 / 降成争议类 / 其它注销发票退换 / 未关联SN
+    """
+    ts, te = _sh_parse_params(params)
+    # 三表 UNION ALL: sn, phone, complaint_sub, register_time
+    union_subq = union(
+        select(
+            ServiceTicket.device_sn.label("sn"),
+            ServiceTicket.phone.label("phone"),
+            _complaint_subitem_case().label("sub"),
+            ServiceTicket.register_time.label("rt"),
+        ).where(
+            ServiceTicket.register_time >= ts - timedelta(days=1),
+            ServiceTicket.register_time <= te + timedelta(days=1),
+            _ticket_category_case() == "投诉",
+        ).cte("_tp", recursive=False),
+        select(
+            ExternalComplaint.device_sn.label("sn"),
+            ExternalComplaint.complainant_phone.label("phone"),
+            func.coalesce(ExternalComplaint.complaint_category, literal("外部投诉")).label("sub"),
+            ExternalComplaint.complaint_date.label("rt"),
+        ).where(
+            ExternalComplaint.complaint_date >= ts - timedelta(days=1),
+            ExternalComplaint.complaint_date <= te + timedelta(days=1),
+        ).cte("_ep", recursive=False),
+        select(
+            CardComplaint.device_sn.label("sn"),
+            CardComplaint.complainant_phone.label("phone"),
+            func.coalesce(CardComplaint.problem_category, literal("卡商投诉")).label("sub"),
+            CardComplaint.complaint_date.label("rt"),
+        ).where(
+            CardComplaint.complaint_date >= ts - timedelta(days=1),
+            CardComplaint.complaint_date <= te + timedelta(days=1),
+        ).cte("_cp", recursive=False),
+    )
+    # 再建一级 CTE 便于 JOIN
+    u = select(union_subq.c.sn, union_subq.c.phone, union_subq.c.sub, union_subq.c.rt).cte("u")
+
+    # ±24h 窗口 JOIN cs_record, 拿根因分类
+    from app.models.cs_record import CsRecord as _CsR
+    stmt = (
+        select(
+            u.c.sub.label("投诉子类"),
+            _complaint_root_case(_CsR.problem_category, _CsR.problem_type).label("根因"),
+            func.count().label("c"),
+        )
+        .select_from(u)
+        .outerjoin(
+            _CsR,
+            and_(
+                func.nullif(func.trim(_CsR.device_sn), "").isnot(None),
+                u.c.sn == func.nullif(func.trim(_CsR.device_sn), ""),
+                _CsR.operation_time >= u.c.rt - text("INTERVAL '24 hours'"),
+                _CsR.operation_time <= u.c.rt + text("INTERVAL '24 hours'"),
+            ),
+        )
+        # 过滤窗口内登记的 (避免多 JOIN 后多算, 我们按 rt 再过滤)
+        .where(u.c.rt >= ts, u.c.rt <= te)
+        .group_by("投诉子类", "根因")
+        .order_by(func.count().desc())
+    )
+    rows_q = db.execute(stmt).all()
+    # 先拿到 Top10 投诉子类 + 6 根因桶
+    sub_totals: dict[str, int] = {}
+    matrix: dict[tuple[str, str], int] = {}
+    ROOT_BUCKETS = [
+        "网络质量类", "套餐争议类", "退款协商失败类", "降成争议类",
+        "其它(注销/发票/退换)", "未关联SN",
+    ]
+    for r in rows_q:
+        sub = (r["投诉子类"] or "未标注")[:14]
+        rc = r["根因"] or "未关联SN"
+        # 没关联上的 → 未关联SN 桶
+        if rc not in ROOT_BUCKETS:
+            # _complaint_root_case 已经归一化, 没命中的 else 值按规范归入最后兜底桶
+            rc = "其它(注销/发票/退换)" if rc and "未关联" not in rc else "未关联SN"
+        c = int(r.c or 0)
+        sub_totals[sub] = sub_totals.get(sub, 0) + c
+        matrix[(sub, rc)] = matrix.get((sub, rc), 0) + c
+    # Top10 投诉子类
+    top10_subs = [s for s, _ in sorted(sub_totals.items(), key=lambda kv: -kv[1])[:10]]
+    if not top10_subs:
+        return {"chart_type": "table", "data": {"columns": ["投诉子类"] + ROOT_BUCKETS + ["合计"], "rows": []}}
+    # 行: 投诉子类 Top10; 列: 6 根因桶 + 合计; 值=该 cell 投诉量; 额外加一列占比% (cell / 该子类总量)
+    rows = []
+    for sub in top10_subs:
+        total = sub_totals[sub]
+        row = {"投诉子类": f"{sub}  (n={total})", "合计": total}
+        for rc in ROOT_BUCKETS:
+            cell = matrix.get((sub, rc), 0)
+            pct = round(cell / total * 100, 1) if total else 0.0
+            row[rc] = cell
+            row[f"{rc}%"] = pct
+        rows.append(row)
+    cols = ["投诉子类"] + [x for pair in zip(ROOT_BUCKETS, [f"{b}%" for b in ROOT_BUCKETS]) for x in pair] + ["合计"]
+    return {
+        "chart_type": "table",
+        "data": {
+            "title": "投诉子类 Top10 × 六大类根因 热力矩阵 (SN±24h JOIN cs_record 归并根因)",
+            "columns": cols,
+            "rows": rows,
+            "_matrix_cfg": {
+                "top10_subs": top10_subs,
+                "root_buckets": ROOT_BUCKETS,
+                "matrix": {f"{k[0]}||{k[1]}": v for k, v in matrix.items()},
+            },
+        },
+    }
+
+
+def _view_today_sn_top(db: Session, params: _PARAMS_T) -> _RET_T:
+    """P2-T6.1: 今日 SN TOP 覆盖 (按 接待工单量 排序, Top20)
+
+    列: SN / 今日工单数 / 其中投诉 / 去重手机号 / 首次进线 / 最近进线 / 关联服务项摘要
+    """
+    ts, te = _sh_parse_params(params)
+    stmt = (
+        select(
+            func.nullif(func.trim(ServiceTicket.device_sn), "").label("sn"),
+            func.count().label("ticket_cnt"),
+            func.sum(case((_ticket_category_case() == "投诉", 1), else_=0)).label("complaint_cnt"),
+            func.count(func.distinct(_clean_col_expr(ServiceTicket.phone))).label("phone_cnt"),
+            func.min(ServiceTicket.register_time).label("first_rt"),
+            func.max(ServiceTicket.register_time).label("last_rt"),
+            func.array_agg(func.distinct(func.coalesce(ServiceTicket.service_item, literal("未标注")))).label("items"),
+        )
+        .select_from(ServiceTicket)
+        .where(
+            ServiceTicket.register_time.isnot(None),
+            ServiceTicket.register_time >= ts, ServiceTicket.register_time <= te,
+            func.nullif(func.trim(ServiceTicket.device_sn), "").isnot(None),
+        )
+        .group_by(text("sn"))
+        .order_by(func.count().desc())
+        .limit(20)
+    )
+    rows_q = db.execute(stmt).all()
+    rows = []
+    from zoneinfo import ZoneInfo
+    TZ = ZoneInfo("Asia/Shanghai")
+    for r in rows_q:
+        def _fmt(t):
+            if not t: return ""
+            try:
+                return (t.replace(tzinfo=_dt.timezone.utc) if t.tzinfo is None else t).astimezone(TZ).strftime("%H:%M")
+            except Exception:
+                return ""
+        items_list = list(r.items or [])[:3]
+        rows.append({
+            "SN": str(r.sn),
+            "今日工单数": int(r.ticket_cnt or 0),
+            "其中投诉": int(r.complaint_cnt or 0),
+            "去重手机号": int(r.phone_cnt or 0),
+            "首次进线": _fmt(r.first_rt),
+            "最近进线": _fmt(r.last_rt),
+            "服务项摘要": " / ".join([str(x)[:12] for x in items_list]),
+        })
+    cols = ["SN", "今日工单数", "其中投诉", "去重手机号", "首次进线", "最近进线", "服务项摘要"]
+    return {
+        "chart_type": "table",
+        "data": {"title": "今日 SN TOP 覆盖 Top20 (按 今日工单数 排序)", "columns": cols, "rows": rows},
+    }
+
+
+def _view_today_phone_dup(db: Session, params: _PARAMS_T) -> _RET_T:
+    """P2-T6.2: 今日手机号 TOP 重复投诉 (当日同一手机号 ≥ 2 次投诉, 三表 UNION)
+
+    列: 脱敏手机号 / 今日投诉次数 (投诉三表内重复) / 今日总进线次数 (全部工单) / 关联SN列表 / 投诉子类摘要
+    """
+    ts, te = _sh_parse_params(params)
+    # 投诉三表 UNION: 手机号, 投诉子类, SN
+    comp_st = select(
+        _clean_col_expr(ServiceTicket.phone).label("phone_c"),
+        _complaint_subitem_case().label("sub"),
+        ServiceTicket.device_sn.label("sn_c"),
+        literal("ST").label("src"),
+    ).where(
+        ServiceTicket.register_time >= ts, ServiceTicket.register_time <= te,
+        _ticket_category_case() == "投诉",
+    )
+    comp_ec = select(
+        _clean_col_expr(ExternalComplaint.complainant_phone).label("phone_c"),
+        func.coalesce(ExternalComplaint.complaint_category, literal("外部投诉")).label("sub"),
+        ExternalComplaint.device_sn.label("sn_c"),
+        literal("EC").label("src"),
+    ).where(
+        ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te,
+    )
+    comp_cc = select(
+        _clean_col_expr(CardComplaint.complainant_phone).label("phone_c"),
+        func.coalesce(CardComplaint.problem_category, literal("卡商投诉")).label("sub"),
+        CardComplaint.device_sn.label("sn_c"),
+        literal("CC").label("src"),
+    ).where(
+        CardComplaint.complaint_date >= ts, CardComplaint.complaint_date <= te,
+    )
+    comp_u = union(comp_st, comp_ec, comp_cc).cte("u")
+    # 全部工单 (非投诉也统计) 用于总进线次数
+    total_st = (
+        select(
+            _clean_col_expr(ServiceTicket.phone).label("phone_t"),
+            func.count().label("total_cnt"),
+            func.array_agg(func.distinct(func.nullif(func.trim(ServiceTicket.device_sn), ""))).label("sn_list"),
+        )
+        .where(ServiceTicket.register_time >= ts, ServiceTicket.register_time <= te)
+        .group_by("phone_t")
+        .cte("ts_agg")
+    )
+    # 投诉聚合
+    comp_agg = (
+        select(
+            comp_u.c.phone_c.label("phone"),
+            func.count().label("comp_cnt"),
+            func.array_agg(func.distinct(comp_u.c.sub)).label("sub_list"),
+            func.array_agg(func.distinct(func.nullif(func.trim(comp_u.c.sn_c), ""))).label("sn_list"),
+        )
+        .where(comp_u.c.phone_c.isnot(None))
+        .group_by("phone")
+        .having(func.count() >= 2)
+        .order_by(func.count().desc())
+        .limit(20)
+        .cte("cagg")
+    )
+    stmt = (
+        select(
+            comp_agg.c.phone, comp_agg.c.comp_cnt, comp_agg.c.sub_list,
+            func.coalesce(total_st.c.total_cnt, comp_agg.c.comp_cnt).label("total_cnt"),
+            func.coalesce(total_st.c.sn_list, comp_agg.c.sn_list).label("sn_list"),
+        )
+        .select_from(comp_agg)
+        .outerjoin(total_st, total_st.c.phone_t == comp_agg.c.phone)
+        .order_by(comp_agg.c.comp_cnt.desc())
+    )
+    rows_q = db.execute(stmt).all()
+    rows = []
+    for r in rows_q:
+        # 脱敏手机号: 138****1234
+        p = str(r.phone or "")
+        masked = p[:3] + "****" + p[7:] if len(p) == 11 else p
+        subs = list(r.sub_list or [])[:3]
+        sns = list({x for x in (r.sn_list or []) if x})[:5]
+        rows.append({
+            "手机号(脱敏)": masked,
+            "今日投诉次数": int(r.comp_cnt or 0),
+            "今日总进线次数": int(r.total_cnt or 0),
+            "投诉子类摘要": " / ".join([str(s)[:12] for s in subs]),
+            "关联SN(去重)": " / ".join(sns),
+        })
+    cols = ["手机号(脱敏)", "今日投诉次数", "今日总进线次数", "投诉子类摘要", "关联SN(去重)"]
+    return {
+        "chart_type": "table",
+        "data": {"title": "今日手机号 TOP 重复投诉 (当日 ≥ 2 次投诉, Top20)", "columns": cols, "rows": rows},
+    }
+
+
+def _view_today_handler_sn_rank(db: Session, params: _PARAMS_T) -> _RET_T:
+    """P2-T6.3: 今日处理人 覆盖 SN 排行 (按 白名单真实完工 + 推算完工时间 落今日 → 去重 SN 数 排序)
+
+    更准确地反映"谁今天真正帮了最多设备的用户解决问题", 而不是纯结单数量。
+    """
+    ts, te = _sh_parse_params(params)
+    SYS_USERS = {"sys", "system", "SYS", "System", "客户", None}
+
+    # Step 1: 近 30 天真实完成样本, handler 平均耗时 (复用 _ticket_effective_finish_time_where 的 Step 1 逻辑)
+    hist_since = ts - timedelta(days=30)
+    real_done_cond = and_(
+        ServiceTicket.status == "已完成",
+        ServiceTicket.handler.isnot(None),
+        ~ServiceTicket.handler.in_(list(SYS_USERS) + ["客户"]),
+        ServiceTicket.finish_time.isnot(None),
+        ServiceTicket.register_time.isnot(None),
+        ServiceTicket.finish_time >= ServiceTicket.register_time,
+        ServiceTicket.finish_time <= ServiceTicket.register_time + text("INTERVAL '12 hours'"),
+    )
+    h_avg_rows = db.execute(
+        select(
+            ServiceTicket.handler,
+            func.avg(case(
+                (and_(ServiceTicket.handle_duration != None, ServiceTicket.handle_duration > 0),
+                 ServiceTicket.handle_duration),
+                else_=func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time)
+            )).label("avg_dur"),
+            func.count().label("n"),
+        )
+        .where(real_done_cond, ServiceTicket.register_time >= hist_since)
+        .group_by(ServiceTicket.handler)
+    ).all()
+    handler_avg: dict[str, float] = {}
+    w_t, w_c = 0.0, 0
+    for r in h_avg_rows:
+        d = float(r._mapping["avg_dur"] or 0.0)
+        n = int(r._mapping["n"] or 0)
+        if n > 0 and d > 0:
+            handler_avg[str(r.handler).strip()] = d
+            w_t += d * n
+            w_c += n
+    global_avg = w_t / w_c if w_c else (28.0 * 60)
+
+    # Step 2: 拉 status='已完成' + register 合理范围的工单, 算 effective_finish_time
+    rows = db.execute(
+        select(
+            ServiceTicket.register_time, ServiceTicket.finish_time,
+            ServiceTicket.handle_duration, ServiceTicket.handler,
+            ServiceTicket.device_sn, ServiceTicket.service_category, ServiceTicket.service_item,
+        )
+        .where(
+            ServiceTicket.status == "已完成",
+            ServiceTicket.register_time.isnot(None),
+            ServiceTicket.register_time >= hist_since,
+            ServiceTicket.register_time <= te + timedelta(hours=13),
+        )
+    ).all()
+
+    import datetime as __dt
+    def _u(t):
+        if t is None: return None
+        return t.replace(tzinfo=__dt.timezone.utc) if t.tzinfo is None else t.astimezone(__dt.timezone.utc)
+    _s, _e = _u(ts), _u(te)
+
+    # {handler: set(sns)} 今日有效完工
+    out: dict[str, set[str]] = {}
+    ticket_cnt: dict[str, int] = {}
+    for r in rows:
+        reg_a = _u(r.register_time)
+        if not reg_a: continue
+        fin_a = _u(r.finish_time)
+        is_real = bool(
+            fin_a and r.handler and r.handler not in SYS_USERS
+            and fin_a >= reg_a and fin_a <= reg_a + timedelta(hours=12)
+        )
+        if is_real:
+            eff = fin_a
+        else:
+            if isinstance(r.handle_duration, (int, float)) and r.handle_duration > 0:
+                eff = reg_a + timedelta(seconds=float(r.handle_duration))
+            else:
+                avg = handler_avg.get(str(r.handler).strip()) if r.handler else None
+                eff = reg_a + timedelta(seconds=avg) if avg else reg_a + timedelta(seconds=global_avg)
+        if not (_s <= eff <= _e): continue
+        # 计数
+        h = str(r.handler or "未分派").strip() or "未分派"
+        if h not in out:
+            out[h] = set()
+            ticket_cnt[h] = 0
+        ticket_cnt[h] += 1
+        sn = (r.device_sn or "").strip()
+        if sn:
+            out[h].add(sn)
+
+    # 排序
+    rows_out = []
+    for h, sns in sorted(out.items(), key=lambda kv: (-len(kv[1]), -ticket_cnt.get(kv[0], 0))):
+        rows_out.append({
+            "处理人": h,
+            "今日覆盖SN数": len(sns),
+            "今日真实结单量": ticket_cnt.get(h, 0),
+        })
+    cols = ["处理人", "今日覆盖SN数", "今日真实结单量"]
+    return {
+        "chart_type": "table",
+        "data": {
+            "title": "今日处理人 覆盖 SN 排行 (按 今日真实覆盖去重SN数 排序, 更能体现客服工作覆盖)",
+            "columns": cols,
+            "rows": rows_out,
+        },
+    }
+
+
+def _view_today_cold_tickets(db: Session, params: _PARAMS_T) -> _RET_T:
+    """P2-T6.4: 今日在途冷工单清单 (当前仍未结单 + 距登记 >24h + 最后更新人/最后更新时间)
+
+    冷工单定义 (规范一致):
+      - status 不属于 ['已完成','无需处理','已取消'] 三桶 (仍在途)
+      - 当前时间 - register_time > 24 小时 (属于「压单」)
+    按 "距登记时长(小时)" 倒序, 主管一眼看到压单最久的 50 条先处理。
+    """
+    # 冷工单不依赖"今日窗口",而是"当前所有在途"。
+    # 不过 params.date 如果指定了日期, 就按「当日登记的在途工单 >24h」展示 (用于历史回溯)
+    ts_utc, te_utc = _sh_parse_params(params)
+    now_utc = datetime.now() if True else _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
+    # now 转 naive UTC (因为 ServiceTicket.register_time 取出时若 tz-aware, 会兼容比较)
+    import datetime as __dt
+    now = __dt.datetime.now(__dt.timezone.utc).replace(tzinfo=None)
+
+    cond_in_progress = ServiceTicket.status.notin_(["已完成", "无需处理", "已取消"])
+    # 距登记 > 24h
+    cold_cond = now - ServiceTicket.register_time >= text("INTERVAL '24 hours'")
+    # 如果是"非今日日期"模式 (params.date 不等于今天) → 就限定 register_time 落在 [ts_utc,te_utc] (当日视角)
+    d_today = __dt.date.today()  # system date (we'll compare to sh today to decide)
+    from zoneinfo import ZoneInfo as _ZI
+    _TODAY_SH = __dt.datetime.now(_ZI("Asia/Shanghai")).date()
+    # 用 te_utc 反推 display 日期
+    def _to_sh_date(naive_utc):
+        return naive_utc.replace(tzinfo=__dt.timezone.utc).astimezone(_ZI("Asia/Shanghai")).date()
+    display_date = _to_sh_date(te_utc)
+    scope = and_(ServiceTicket.register_time >= (ts_utc - timedelta(days=14)),
+                 ServiceTicket.register_time <= te_utc) if display_date != _TODAY_SH else and_(
+                     ServiceTicket.register_time <= te_utc,
+                     now - ServiceTicket.register_time <= text("INTERVAL '60 days'"),
+                 )
+
+    stmt = (
+        select(
+            ServiceTicket.ticket_no, ServiceTicket.register_time, ServiceTicket.status,
+            ServiceTicket.service_category, ServiceTicket.service_item,
+            ServiceTicket.handler, ServiceTicket.dispatcher,
+            ServiceTicket.last_dispatch_time, ServiceTicket.last_urge_time,
+            ServiceTicket.device_sn, _clean_col_expr(ServiceTicket.phone).label("phone"),
+            ServiceTicket.urge_count,
+        )
+        .where(cond_in_progress, cold_cond, ServiceTicket.register_time.isnot(None), scope)
+        .order_by((now - ServiceTicket.register_time).desc())
+        .limit(50)
+    )
+    rows_q = db.execute(stmt).all()
+    TZ = _ZI("Asia/Shanghai")
+    rows = []
+    for r in rows_q:
+        rt = r.register_time
+        if not rt: continue
+        rt_aware = rt.replace(tzinfo=__dt.timezone.utc) if rt.tzinfo is None else rt
+        hrs = (now.replace(tzinfo=__dt.timezone.utc) - rt_aware).total_seconds() / 3600.0
+        # 最后活动时间: 最后派单时间 / 最后催单时间 / 登记时间 取最大
+        times = [rt_aware]
+        for t in (r.last_dispatch_time, r.last_urge_time):
+            if t is None: continue
+            t_aware = t.replace(tzinfo=__dt.timezone.utc) if t.tzinfo is None else t
+            times.append(t_aware)
+        last_activity = max(times)
+        rows.append({
+            "工单号": r.ticket_no,
+            "距登记(h)": round(hrs, 1),
+            "状态": (r.status or "未标注")[:8],
+            "服务类别": (r.service_category or "未分类")[:8],
+            "服务项": (r.service_item or "未标注")[:18],
+            "处理人": r.handler or "—",
+            "派发人": r.dispatcher or "—",
+            "最后活动": last_activity.astimezone(TZ).strftime("%m-%d %H:%M"),
+            "催单次数": int(r.urge_count or 0),
+            "SN": (r.device_sn or "")[:16],
+            "手机号(脱敏)": (lambda p: p[:3] + "****" + p[7:] if p and len(p) == 11 else (p or ""))(r.phone),
+            "登记时间": rt_aware.astimezone(TZ).strftime("%m-%d %H:%M"),
+        })
+    cols = [
+        "工单号", "距登记(h)", "状态", "服务类别", "服务项", "处理人", "派发人",
+        "最后活动", "催单次数", "SN", "手机号(脱敏)", "登记时间",
+    ]
+    return {
+        "chart_type": "table",
+        "data": {
+            "title": f"在途冷工单 Top50 (仍未结 + 距登记 > 24h, 按压单时长倒序, 主管优先处理)",
+            "columns": cols,
+            "rows": rows,
+            "_scope": {"display_date": display_date.isoformat(), "now": __dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")},
+        },
+    }
+
+
 HANDLERS: dict[str, _Callable[[Session, _PARAMS_T], _RET_T]] = {
     "preset_refund_recovery_kpi":            _view_rr_kpi,
     "preset_refund_recovery_daily_trend":    _view_rr_daily_trend,
     "preset_refund_recovery_hourly_today":   _view_rr_hourly_today,
     "preset_refund_recovery_operator_rank":  _view_rr_operator_rank,
     "preset_refund_recovery_reason_dist":    _view_rr_reason_dist,
+    # ---- 今日看板 / 服务请求专项 (本次新增 6 个 handlers) ----
+    "preset_ticket_work_content_top20":      _view_ticket_work_top20,
+    "preset_complaint_subtype_rootcause_heatmap": _view_complaint_root_heatmap,
+    "preset_today_sn_top_coverage":          _view_today_sn_top,
+    "preset_today_phone_dup_complaint":      _view_today_phone_dup,
+    "preset_today_handler_sn_rank":          _view_today_handler_sn_rank,
+    "preset_today_cold_tickets":             _view_today_cold_tickets,
 }
 
 

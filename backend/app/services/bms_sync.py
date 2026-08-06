@@ -191,8 +191,12 @@ def _update_sync_log(
     import_stats: dict | None = None,
     error: str | None = None,
 ):
-    """更新同步日志记录"""
-    log = db.get(BmsSyncLog, log_id)
+    """更新同步日志记录(带事务回滚兜底,避免前序失败导致 session 处于 aborted 状态而无法 commit)"""
+    try:
+        log = db.get(BmsSyncLog, log_id)
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        log = db.get(BmsSyncLog, log_id)
     if not log:
         return
     log.status = status
@@ -206,7 +210,11 @@ def _update_sync_log(
         log.failed_rows = import_stats.get("failed_rows")
     if error:
         log.error = error[:2000]
-    db.commit()
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        db.commit()
 
 
 async def sync_all(

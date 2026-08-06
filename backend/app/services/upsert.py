@@ -241,7 +241,14 @@ def _execute_upsert(
     rows: list[dict],
     result: ImportResult,
 ) -> None:
-    """通用 upsert 执行:先统计已存在,再执行 on_conflict,精确区分 insert/update"""
+    """通用 upsert 执行:先统计已存在,再执行 on_conflict,精确区分 insert/update
+
+    自动处理 2026-08-06 P1-T4 新增的两列(如模型存在对应字段):
+      - synced_at     : 每行 INSERT 时填 python now(UTC), 冲突 UPDATE 时强制 = DB now()
+                        (保证"最后一次被同步任务写入"的精确时间戳,不被上游旧值覆盖)
+      - updated_by_raw: 从传入 rows 的若干常见别名中嗅探填充(更新人/最后操作人/updated_by 等),
+                        冲突 UPDATE 时用 excluded.updated_by_raw (新导入覆盖旧)
+    """
     if not rows:
         return
     # 按主键去重(同批次内重复主键会导致 ON CONFLICT affect row a second time;
@@ -254,6 +261,33 @@ def _execute_upsert(
     rows = list(seen.values())
     if not rows:
         return
+
+    # ── 嗅探模型是否存在 synced_at / updated_by_raw 列 (P1-T4 新字段) ──
+    _m_cols = {c.key for c in model.__table__.columns}
+    _has_synced_at = "synced_at" in _m_cols
+    _has_updated_by_raw = "updated_by_raw" in _m_cols
+    # updated_by_raw 的常见别名(按优先级)
+    _UPDATED_BY_ALIASES = (
+        "updated_by_raw",
+        "更新人", "最后操作人", "修改人", "最近操作人",
+        "updated_by", "last_operator", "修改者", "更新者",
+        "处理人", "handler",  # 注意:handler 是业务处理人,只在没有上面明确字段时兜底
+    )
+    if _has_synced_at or _has_updated_by_raw:
+        _now = datetime.now(timezone.utc)
+        for r in rows:
+            if _has_synced_at:
+                r["synced_at"] = _now
+            if _has_updated_by_raw:
+                # 已经显式传入则不再覆盖
+                if r.get("updated_by_raw"):
+                    continue
+                for alias in _UPDATED_BY_ALIASES:
+                    v = r.get(alias)
+                    if v:
+                        r["updated_by_raw"] = _to_str(v)
+                        break
+
     # 主键统一转字符串,避免 IN 查询时 varchar = double precision 类型冲突
     keys = [str(r[pk_field]) for r in rows]
     existing_count = 0
@@ -263,6 +297,9 @@ def _execute_upsert(
         ) or 0
     stmt = pg_insert(model).values(rows)
     update_cols = {c: stmt.excluded[c] for c in rows[0] if c != pk_field}
+    # P1-T4: 冲突更新时 synced_at 强制 = DB now() (覆盖 excluded 值,避免 Python 机时钟差 / 扫表时间漂移)
+    if _has_synced_at:
+        update_cols["synced_at"] = func.now()
     stmt = stmt.on_conflict_do_update(index_elements=[pk_field], set_=update_cols)
     db.execute(stmt)
     db.flush()
@@ -471,6 +508,170 @@ def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
             result.add_error(idx, f"行解析失败: {e}")
     _sync_devices(rows, "device_sn", db)
     _execute_upsert(db, ServiceTicket, "ticket_no", rows, result)
+    # P2-T5: 工单动作流水写回 hook (幂等 INSERT ... WHERE NOT EXISTS,不重复记)
+    _touch_ticket_action_logs_after_upsert(db, rows)
+
+
+def _touch_ticket_action_logs_after_upsert(
+    db: Session,
+    ticket_rows: list[dict],
+) -> None:
+    """工单动作流水写回 hook (P2-T5)。
+
+    只对本次 batch 内「有独立业务时间戳」的 4 类动作做幂等落库:
+      1. 催单    : last_urge_time/last_urge_by 非空  → action_type=催单
+      2. 派发    : dispatch_time/dispatcher 非空     → action_type=派发
+      3. 结单    : finish_time 非空 & status ∈ 已完成/... → action_type=结单
+      4. 登记    : register_time 非空                → action_type=登记
+
+    每类动作都用 (ticket_no, action_type, action_at) 做天然幂等键,
+    用 INSERT INTO ... SELECT ... WHERE NOT EXISTS 避免重复记流水。
+    其他「改状态/改处理人/改服务项」等无明确时间点的变更, 留到 diff 级的 ORM save hook
+    再补(本 helper 只处理从 CSV / BMS 同步过来带时间戳字段的动作)。
+    """
+    if not ticket_rows:
+        return
+
+    # 终态集合(判定结单用),和 ticket.py _ticket_category_case 里的终态白名单对齐
+    _DONE_STATUS = {"已完成", "已解决", "已关闭", "无需处理", "已取消", "已撤销"}
+
+    from app.models.ticket_action_log import TicketActionLog
+    from sqlalchemy import literal_column, bindparam
+
+    tlog_tbl = TicketActionLog.__table__
+
+    # ---------- 每类动作:构造 (ticket_no, action_type, action_at, operator, detail, remark) 的待插集 ----------
+    pending: list[dict] = []
+
+    for r in ticket_rows:
+        tno = r.get("ticket_no")
+        if not tno:
+            continue
+        ub = _to_str(r.get("updated_by_raw")) or _to_str(r.get("handler")) or None
+        remark = _to_str(r.get("remark")) or None
+        handle_opinion = _to_str(r.get("handle_opinion")) or None
+
+        # (1) 催单:必须有 last_urge_time
+        lut = r.get("last_urge_time")
+        lub = _to_str(r.get("last_urge_by")) or ub
+        if lut is not None:
+            pending.append({
+                "ticket_no": tno, "action_type": "催单",
+                "action_at": lut, "operator": lub,
+                "detail": {"urge_count": r.get("urge_count"), "urge_status": r.get("urge_status")},
+                "remark": remark,
+            })
+        # (2) 派发:必须有 dispatch_time 或 last_dispatch_time
+        dtime = r.get("dispatch_time") or r.get("last_dispatch_time")
+        disp = _to_str(r.get("dispatcher")) or _to_str(r.get("assignee")) or ub
+        if dtime is not None:
+            pending.append({
+                "ticket_no": tno, "action_type": "派发",
+                "action_at": dtime, "operator": disp,
+                "detail": {"handler": _to_str(r.get("handler")), "assignee": _to_str(r.get("assignee"))},
+                "remark": None,
+            })
+        # (3) 结单:必须有 finish_time & status 看起来像终态
+        ft = r.get("finish_time")
+        st = _to_str(r.get("status"))
+        if ft is not None and st is not None:
+            if any(k in st for k in _DONE_STATUS):
+                pending.append({
+                    "ticket_no": tno, "action_type": "结单",
+                    "action_at": ft, "operator": ub,
+                    "detail": {
+                        "status": st,
+                        "handle_duration": r.get("handle_duration"),
+                        "refund_amount": r.get("refund_amount"),
+                    },
+                    "remark": handle_opinion or remark,
+                })
+        # (4) 登记:必须有 register_time
+        rt = r.get("register_time")
+        if rt is not None:
+            pending.append({
+                "ticket_no": tno, "action_type": "登记",
+                "action_at": rt,
+                "operator": _to_str(r.get("registrant")) or ub,
+                "detail": {
+                    "channel": _to_str(r.get("channel")),
+                    "service_category": _to_str(r.get("service_category")),
+                    "service_item": _to_str(r.get("service_item")),
+                },
+                "remark": None,
+            })
+
+    if not pending:
+        return
+
+    # ---------- 幂等 INSERT:对每条 (ticket_no,action_type,action_at) 先 SELECT, 不存在才插 ----------
+    # 用 raw SQL + VALUES 做一整批, 避免 N 次往返
+    sql = text(
+        """
+        INSERT INTO ticket_action_logs
+            (ticket_no, action_type, operator, action_at, detail, remark, created_at, updated_at)
+        SELECT
+            v.ticket_no, v.action_type, v.operator::varchar, v.action_at::timestamptz,
+            v.detail::jsonb, v.remark::text, now(), now()
+        FROM (
+          SELECT
+            :ticket_no    AS ticket_no,
+            :action_type  AS action_type,
+            :operator     AS operator,
+            :action_at    AS action_at,
+            :detail       AS detail,
+            :remark       AS remark
+        ) AS v
+        WHERE NOT EXISTS (
+          SELECT 1 FROM ticket_action_logs
+           WHERE ticket_no    = v.ticket_no
+             AND action_type  = v.action_type
+             AND action_at    = v.action_at
+        )
+        """
+    )
+    # batch 执行:每批 <=200 行,避免绑定参数过多
+    import math
+    batch_size = 200
+    total_batches = int(math.ceil(len(pending) / batch_size))
+    for bi in range(total_batches):
+        batch = pending[bi * batch_size: (bi + 1) * batch_size]
+        # 把 batch 展开成多参数 SQL: 类型转换统一放到外层 SELECT (避免 VALUES 里 :name::type 与 text() 参数占位符冲突)
+        cases_sql = []
+        params = {}
+        for i, p in enumerate(batch):
+            cases_sql.append(
+                f"(:tn{i}, :at{i}, :op{i}, :aa{i}, :dt{i}, :rk{i})"
+            )
+            params[f"tn{i}"] = p["ticket_no"]
+            params[f"at{i}"] = p["action_type"]
+            params[f"op{i}"] = p["operator"]
+            params[f"aa{i}"] = p["action_at"]
+            params[f"dt{i}"] = p["detail"]
+            params[f"rk{i}"] = p["remark"]
+        insert_sql = text(
+            f"""
+            INSERT INTO ticket_action_logs
+                (ticket_no, action_type, operator, action_at, detail, remark, created_at, updated_at)
+            SELECT
+                v.tn::varchar        AS ticket_no,
+                v.at::varchar        AS action_type,
+                v.op::varchar        AS operator,
+                v.aa::timestamptz    AS action_at,
+                v.dt::jsonb          AS detail,
+                v.rk::text           AS remark,
+                now(), now()
+            FROM (VALUES {', '.join(cases_sql)}) AS v(tn, at, op, aa, dt, rk)
+            WHERE NOT EXISTS (
+              SELECT 1 FROM ticket_action_logs
+               WHERE ticket_no    = v.tn::varchar
+                 AND action_type  = v.at::varchar
+                 AND action_at    = v.aa::timestamptz
+            )
+            """
+        )
+        db.execute(insert_sql, params)
+    db.flush()
 
 
 def upsert_merchant_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
