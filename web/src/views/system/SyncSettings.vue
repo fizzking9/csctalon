@@ -152,12 +152,38 @@
         <el-form-item label="启用">
           <el-switch v-model="editForm.enabled" active-text="启用" inactive-text="停用" />
         </el-form-item>
+        <!-- 主账号密码: SCRM=ClientID/ClientSecret 或 OpenAPI; BMS=BMS 网页登录账号 -->
         <el-form-item :label="scrmLabel[0]">
           <el-input v-model="editForm.username" :placeholder="scrmUsernamePlaceholder" />
         </el-form-item>
         <el-form-item :label="scrmLabel[1]">
           <el-input v-model="editForm.password" type="password" show-password :placeholder="scrmPasswordPlaceholder" />
         </el-form-item>
+        <!-- Playwright / Dual 模式下需要独立再配置一对「网页登录账号密码」(SCRM 专属,和 OpenAPI 凭证分离) -->
+        <!-- ⚠️ 2026-08-06: 对齐用户心智模型(和 SyncDashboard.vue 完全一致):
+             - Playwright 模式: 主字段 username/password 直接就是「SCRM 网页账号/SCRM 网页密码」,不再额外加一对 web_ 字段
+             - Dual 模式(OpenAPI+Playwright 双模式): 主字段是 OpenAPI ClientID/ClientSecret, 下方 web_username/web_password 才是独立的网页登录凭证 -->
+        <template v-if="isScrmSource(editForm) && editForm.fetch_mode === 'dual'">
+          <el-divider content-position="left">Playwright 网页登录凭证(双模式下独立配置)</el-divider>
+          <el-alert type="warning" :closable="false" show-icon class="mb-8" size="small">
+            下方是 SCRM 后台管理页面实际的「登录账号/密码」(手机号/邮箱 + 登录密码),<strong>不要填 ClientID/ClientSecret</strong>。
+            留空表示不修改之前保存过的值。
+          </el-alert>
+          <el-form-item label="SCRM 网页账号">
+            <el-input
+              v-model="editForm.web_username"
+              :placeholder="webUsernamePlaceholder"
+            />
+          </el-form-item>
+          <el-form-item label="SCRM 网页密码">
+            <el-input
+              v-model="editForm.web_password"
+              type="password"
+              show-password
+              :placeholder="webPasswordPlaceholder"
+            />
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -263,8 +289,10 @@ const editForm = reactive({
   default_sync: true,
   enabled: true,
   fetch_mode: 'openapi', // SCRM 模式: openapi / playwright / dual
-  username: '',
-  password: '',
+  username: '',         // SCRM: ClientID 或 OpenAPI 主账号; BMS: BMS 网页登录账号
+  password: '',         // SCRM: ClientSecret 或 OpenAPI 主密码; BMS: BMS 网页登录密码
+  web_username: '',     // SCRM Playwright/Dual 模式: 网页登录账号(真实手机号/邮箱)
+  web_password: '',     // SCRM Playwright/Dual 模式: 网页登录密码
 })
 
 // ============== 工具: SCRM / math 验证码 ==============
@@ -275,25 +303,38 @@ function isScrmSource(row) {
 const scrmLabel = computed(() => {
   if (!isScrmSource(editForm)) return ['BMS 账号', 'BMS 密码']
   const mode = editForm.fetch_mode || 'openapi'
+  // Playwright 模式: 主字段直接就是网页登录凭证（用户最直观）
   if (mode === 'openapi') return ['Client ID', 'Client Secret']
-  if (mode === 'playwright') return ['SCRM 登录账号', 'SCRM 登录密码']
-  // dual: 两个地方都要,以 OpenAPI 为主,网页为兜底
-  return ['账号(Client ID / 登录账号)', '密码(Client Secret / 登录密码)']
+  if (mode === 'playwright') return ['SCRM 网页账号', 'SCRM 网页密码']
+  // Dual 模式: 主字段是 OpenAPI,下方再额外补一对 web_ 网页凭证
+  return ['OpenAPI Client ID', 'OpenAPI Client Secret']
 })
+// 动态 placeholder, 已配置/未配置时提示不同
+const _credPlaceholder = (label, configured, emptyHint) => {
+  if (configured) return `${label}(已配置,留空=不修改,输入新值覆盖)`
+  return emptyHint || `请输入${label},留空表示不修改`
+}
 const scrmUsernamePlaceholder = computed(() => {
-  if (!isScrmSource(editForm)) return '留空表示不修改原值'
+  if (!isScrmSource(editForm)) return _credPlaceholder('BMS 登录账号', credentialsState.username_configured, '留空表示不修改原值')
   const mode = editForm.fetch_mode || 'openapi'
-  if (mode === 'openapi') return 'SCRM OpenAPI Client ID'
-  if (mode === 'playwright') return 'SCRM 网页登录账号(用户名/手机号)'
-  return 'OpenAPI Client ID 或 网页登录账号(留空表示不修改)'
+  if (mode === 'openapi') return _credPlaceholder('SCRM OpenAPI Client ID', credentialsState.username_configured, 'SCRM OpenAPI Client ID,留空表示不修改')
+  if (mode === 'playwright') return _credPlaceholder('SCRM 网页登录账号', credentialsState.username_configured, 'SCRM 后台真实登录账号(手机号/邮箱),不要填 ClientID')
+  // Dual
+  return _credPlaceholder('OpenAPI Client ID', credentialsState.username_configured, '双模式主字段填 OpenAPI Client ID,SCRM 网页账号请填下面独立的 web_ 字段')
 })
 const scrmPasswordPlaceholder = computed(() => {
-  if (!isScrmSource(editForm)) return '留空表示不修改原值'
+  if (!isScrmSource(editForm)) return _credPlaceholder('BMS 登录密码', credentialsState.password_configured, '留空表示不修改原值')
   const mode = editForm.fetch_mode || 'openapi'
-  if (mode === 'openapi') return 'SCRM OpenAPI Client Secret'
-  if (mode === 'playwright') return 'SCRM 网页登录密码'
-  return 'OpenAPI Client Secret 或 网页登录密码(留空表示不修改)'
+  if (mode === 'openapi') return _credPlaceholder('SCRM OpenAPI Client Secret', credentialsState.password_configured, 'SCRM OpenAPI Client Secret,留空表示不修改')
+  if (mode === 'playwright') return _credPlaceholder('SCRM 网页登录密码', credentialsState.password_configured, 'SCRM 后台登录密码,不要填 ClientSecret')
+  // Dual
+  return _credPlaceholder('OpenAPI Client Secret', credentialsState.password_configured, '双模式主字段填 OpenAPI Client Secret,SCRM 网页密码请填下面独立的 web_ 字段')
 })
+// SCRM 网页凭证的 placeholder(动态) —— 仅 Dual 模式显示
+const webUsernamePlaceholder = computed(() =>
+  _credPlaceholder('SCRM 网页登录账号(手机号/邮箱)', credentialsState.web_username_configured, 'SCRM 后台管理页面实际登录用的账号,不要填 ClientID;留空=不改'))
+const webPasswordPlaceholder = computed(() =>
+  _credPlaceholder('SCRM 网页登录密码', credentialsState.web_password_configured, 'SCRM 后台管理页面实际登录用的密码;留空=不改'))
 function onFetchModeChange() {
   // 切换模式时,提示用户需要重新配置账号密码
   if (dialogVisible.value && isScrmSource(editForm)) {
@@ -373,6 +414,14 @@ async function loadLoginState(dataType) {
   }
 }
 
+// 打开编辑框时, row 里已经拿到"是否配置过凭证"的状态
+const credentialsState = reactive({
+  username_configured: false,
+  password_configured: false,
+  web_username_configured: false,
+  web_password_configured: false,
+})
+
 function openEdit(row) {
   editForm.data_type = row.data_type
   editForm.name = row.name
@@ -382,10 +431,49 @@ function openEdit(row) {
   editForm.default_sync = row.default_sync
   editForm.enabled = row.enabled
   editForm.fetch_mode = isScrmSource(row) ? (row.fetch_mode || 'openapi') : 'playwright'
+
+  // ---- 凭证回填: 前端拿到的是加密密文(security 考虑), 所以不直接填到表单里 ----
+  //   避免: 加密串直接被用户看到或误编辑再次提交 → 重复加密成垃圾值。
+  //   正确语义: 留空 = 不修改原值, 有值输入 = 用新明文覆盖加密保存。
+  //   但 UI 必须明确告诉用户"已保存过,只是为了安全没回显明文", 否则用户会以为"保存了重新打开又没了"。
+  credentialsState.username_configured = !!(row.username || row.has_credentials)
+  credentialsState.password_configured = !!(row.password || row.has_credentials)
+  // web_username / web_password: 从 row.options(解密后) 拿(后端会把 options 里的 web_* 解密返回给前端编辑态用, 或只返回 boolean 标志位)
+  const opts = (typeof row.options === 'object' && row.options) ? row.options : {}
+  credentialsState.web_username_configured = !!(opts.web_username_configured || opts.web_username)
+  credentialsState.web_password_configured = !!(opts.web_password_configured || opts.web_password)
+  // 表单输入框统一清空(留空=不修改)
   editForm.username = ''
   editForm.password = ''
+  editForm.web_username = ''
+  editForm.web_password = ''
   dialogVisible.value = true
 }
+
+// 动态 placeholder, 已配置/未配置时提示不同
+const _credPlaceholder = (label, configured, emptyHint) => {
+  if (configured) return `${label}(已配置,留空=不修改,输入新值覆盖)`
+  return emptyHint || `请输入${label},留空表示不修改`
+}
+const scrmUsernamePlaceholder = computed(() => {
+  if (!isScrmSource(editForm)) return _credPlaceholder('BMS 登录账号', credentialsState.username_configured, '留空表示不修改原值')
+  const mode = editForm.fetch_mode || 'openapi'
+  if (mode === 'openapi') return _credPlaceholder('SCRM OpenAPI Client ID', credentialsState.username_configured, 'SCRM OpenAPI Client ID,留空表示不修改')
+  if (mode === 'playwright') return _credPlaceholder('SCRM OpenAPI Client ID(可选,留空不修改)', credentialsState.username_configured, '仅 OpenAPI/双模式需要; Playwright 模式请在下方填网页登录凭证,留空=不改')
+  return _credPlaceholder('Client ID(OpenAPI模式用)', credentialsState.username_configured, 'OpenAPI 模式使用 ClientID; 网页模式请在下方填网页登录凭证,留空=不改')
+})
+const scrmPasswordPlaceholder = computed(() => {
+  if (!isScrmSource(editForm)) return _credPlaceholder('BMS 登录密码', credentialsState.password_configured, '留空表示不修改原值')
+  const mode = editForm.fetch_mode || 'openapi'
+  if (mode === 'openapi') return _credPlaceholder('SCRM OpenAPI Client Secret', credentialsState.password_configured, 'SCRM OpenAPI Client Secret,留空表示不修改')
+  if (mode === 'playwright') return _credPlaceholder('SCRM OpenAPI Client Secret(可选,留空不修改)', credentialsState.password_configured, '仅 OpenAPI/双模式需要; Playwright 模式请在下方填网页登录凭证,留空=不改')
+  return _credPlaceholder('Client Secret(OpenAPI模式用)', credentialsState.password_configured, 'OpenAPI 模式使用 ClientSecret; 网页模式请在下方填网页登录凭证,留空=不改')
+})
+// SCRM 网页凭证的 placeholder(动态)
+const webUsernamePlaceholder = computed(() =>
+  _credPlaceholder('SCRM 网页登录账号(手机号/邮箱)', credentialsState.web_username_configured, 'SCRM 后台管理页面实际登录用的账号,不要填 ClientID;留空=不改'))
+const webPasswordPlaceholder = computed(() =>
+  _credPlaceholder('SCRM 网页登录密码', credentialsState.web_password_configured, 'SCRM 后台管理页面实际登录用的密码;留空=不改'))
 
 async function handleSave() {
   saving.value = true
@@ -404,9 +492,18 @@ async function handleSave() {
     if (isScrmSource(editForm) && editForm.fetch_mode) {
       payload.fetch_mode = editForm.fetch_mode
     }
-    // 账号密码仅当非空时传(后端:空表示不改)
+    // 主账号密码: 仅当非空时传(后端:空表示不改)
     if (editForm.username) payload.username = editForm.username
     if (editForm.password) payload.password = editForm.password
+    // SCRM Dual 模式下: web_username / web_password → 合并进 options patch
+    //   (后端会自动把 options.patch 的 key 合并进 DB options 列,加密后保存)
+    //   Playwright 模式: 主字段 username/password 直接就是网页登录凭证,不需要 web_*
+    if (isScrmSource(editForm) && editForm.fetch_mode === 'dual') {
+      const optsPatch = {}
+      if (editForm.web_username) optsPatch.web_username = editForm.web_username
+      if (editForm.web_password) optsPatch.web_password = editForm.web_password
+      if (Object.keys(optsPatch).length > 0) payload.options = optsPatch
+    }
 
     await updateSyncSource(editForm.data_type, payload)
     ElMessage.success('保存成功')

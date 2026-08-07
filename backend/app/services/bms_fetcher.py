@@ -787,14 +787,29 @@ async def _try_auto_login_via_ocr(
         )
         last_err = f"第{attempt}次识别({ocr_text})登录失败: {err_text}"
         log.warning(f"[{data_type}] {last_err}")
-        # 账号密码类错误 → 立即中止重试(再试只是浪费机会)
-        if err_kind == "account":
+        # ⚠️ 关键修复: 验证码登录前几次不要轻易判定为"账号密码错误"而终止重试!
+        #    很多 BMS/闪猫这类站点,为了防撞库,故意把「验证码错误」「账号被锁定」「验证码过期」
+        #    等多种失败原因的提示语都写成"用户名或密码错误!",错误分类器一旦命中就会直接 break.
+        #    结果是: 实际上只是 OCR 把 WXEAH 认成了别的,却再也没有机会刷新重试下一张了。
+        #
+        #    策略: 前 CAPTCHA_ACCOUNT_GUARD_ATTEMPTS 次(默认3次)内,即使分类器返回 account,
+        #    也当作验证码错误继续刷新重试,避免被模糊的提示语误伤。超过这个阈值仍失败,才认定为
+        #    真·账号密码问题并终止。
+        CAPTCHA_ACCOUNT_GUARD_ATTEMPTS = 3
+        if err_kind == "account" and attempt > CAPTCHA_ACCOUNT_GUARD_ATTEMPTS:
             log.warning(
-                f"[{data_type}] 判定为账号/密码/账号状态类错误,终止重试;错误=%r",
+                f"[{data_type}] 已重试{attempt}次({CAPTCHA_ACCOUNT_GUARD_ATTEMPTS}次验证码豁免窗口已用完),"
+                f" 判定为账号/密码/账号状态类错误,终止重试;错误=%r",
                 err_list,
             )
             break
-        # captcha / unknown → 进入下次重试
+        if err_kind == "account" and attempt <= CAPTCHA_ACCOUNT_GUARD_ATTEMPTS:
+            log.warning(
+                "[%s] 错误文本看似为账号密码类(%r),但仍在验证码豁免窗口(%d/%d)内,"
+                " 当作验证码错误继续刷新下一张重试(防止被站点『统一提示为用户名或密码错误』误伤)",
+                data_type, err_list, attempt, CAPTCHA_ACCOUNT_GUARD_ATTEMPTS,
+            )
+        # captcha / unknown / 被豁免的 account → 进入下次重试
         url_task.cancel()
     return False, last_err or f"自动识别{_CAPTCHA_OCR_MAX_RETRY}次均失败"
 
@@ -1505,8 +1520,17 @@ class BmsFetcher:
                 await page.goto(login_url, wait_until="networkidle")
                 await asyncio.sleep(2)
 
-                await page.fill('input[type="text"], input[placeholder*="账号"], input[placeholder*="用户名"]', username)
-                await page.fill('input[type="password"], input[placeholder*="密码"]', password)
+                # ⚠️ 必须用 locator(...).first.fill(), 不能直接 page.fill(选择器字符串列表).
+                #    当页面有多个匹配元素时(比如顶部导航搜索框 + 登录表单账号框),page.fill() 会在
+                #    "ambiguous match" 分支下一直等到 30 秒超时,表现为 Page.fill Timeout 而没有
+                #    报错根因,用户侧只看到"登录死/抓取死".用 .first 可以稳扎稳打取第一个表单里的元素.
+                user_sel = 'input[type="text"], input[placeholder*="账号" i], input[placeholder*="用户名" i]'
+                try:
+                    await page.locator(user_sel).first.fill(username, timeout=15000)
+                except Exception:
+                    await page.locator("input:visible").first.fill(username, timeout=15000)
+                pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
+                await page.locator(pwd_sel).first.fill(password, timeout=15000)
 
                 # ── 闪猫:验证码处理(自动识别优先,最多 3 次重试,失败再提示手动登录) ──
                 ocr_logged_in = False
@@ -1880,6 +1904,12 @@ class BmsFetcher:
                     logger.warning(f"[组{group_idx+1}] 校验 storage_state 失败: {e}")
 
             logged_in_ok = state_logged_in  # 组内首个成功登录后为 True,后续跳过
+            # ── 组级登录失败熔断记忆 ──
+            # 同组 (base_url相同) 下的多个源共用一套账号密码;
+            # 组内第一个源如果因"登录类错误"失败(账号/密码/验证码/页面跳转仍在/login),
+            # 后续同组源直接跳过登录和抓取,复用同一个登录失败错误,避免 2/3 次相同登录错误反复弹日志。
+            group_login_failed_err: str | None = None
+
             try:
                 for i, task in enumerate(group_tasks):
                     data_type = task["data_type"]
@@ -1891,6 +1921,30 @@ class BmsFetcher:
                     fr = FetchResult()
                     fr.data_type = data_type
                     try:
+                        # ⚠️ 同组已记过登录类失败 → 直接跳过,不再反复启登录表单 / OCR / 验证码重试
+                        if group_login_failed_err is not None:
+                            logger.warning(
+                                "[组%s] %s 同组已记录登录类失败:%r, 直接跳过本次抓取(避免反复弹相同登录错误)",
+                                group_idx + 1, data_type, group_login_failed_err,
+                            )
+                            fr.error = f"[同域登录熔断复用] {group_login_failed_err}"
+                            results_map[data_type] = fr
+                            if on_progress:
+                                await on_progress(data_type, "done", fr)
+                            # 即使跳过也要假装走了等待逻辑:组内非末位仍要等 65s,否则后续源在错误的时刻启动
+                            is_last_in_group = (i == len(group_tasks) - 1)
+                            is_last_group = (group_idx == len(groups) - 1)
+                            if not is_last_in_group:
+                                next_type = group_tasks[i + 1]["data_type"]
+                                next_name = group_tasks[i + 1]["config"].get("name", next_type)
+                                logger.info(
+                                    f"[同域名内·熔断跳过后] 仍需等待 {OPERATION_INTERVAL} 秒, 准备下一个源 {next_name}"
+                                )
+                                if on_progress:
+                                    await on_progress(next_type, "waiting", None)
+                                await asyncio.sleep(OPERATION_INTERVAL)
+                            continue
+
                         # 单源抓取 + 复用登录态(组内首个源登录)
                         await asyncio.wait_for(
                             self._do_fetch_one_shared(
@@ -1913,6 +1967,20 @@ class BmsFetcher:
                     except Exception as e:
                         fr.error = f"抓取失败: {e}"
                         logger.error(fr.error, exc_info=True)
+                        # ⚠️ 记忆化: 如果是"登录类错误",写入 group_login_failed_err
+                        err_txt = str(e).lower()
+                        if any(k in err_txt for k in (
+                            "登录失败", "账号或密码", "账号或密码错误", "用户名或密码", "验证码自动识别登录失败",
+                            "登录", "密码", "验证码", "captcha", "vcode",
+                        )):
+                            group_login_failed_err = str(e)
+                            logger.warning(
+                                "[组%s] 源 %s 登录类失败:%r; 组内剩余 %d 个同源将直接跳过登录抓取",
+                                group_idx + 1, data_type, group_login_failed_err,
+                                max(0, len(group_tasks) - i - 1),
+                            )
+                        # 虽然 logged_in_ok 仍是 False,但若 group_login_failed_err 有值,
+                        # 下一轮循环开头就会直接跳过,不会再进入 _do_fetch_one_shared 再登录一遍。
 
                     results_map[data_type] = fr
                     if on_progress:
@@ -2001,8 +2069,15 @@ class BmsFetcher:
                 logger.info(f"[{data_type}] (首次,登录) 正在登录 {base_url}...")
                 await page.goto(login_url, wait_until="networkidle")
                 await asyncio.sleep(2)
-                await page.fill('input[type="text"], input[placeholder*="账号"], input[placeholder*="用户名"]', username)
-                await page.fill('input[type="password"], input[placeholder*="密码"]', password)
+
+                # ⚠️ 同上, locator(...).first.fill(), 避免多元素匹配导致 30 秒死等
+                user_sel = 'input[type="text"], input[placeholder*="账号" i], input[placeholder*="用户名" i]'
+                try:
+                    await page.locator(user_sel).first.fill(username, timeout=15000)
+                except Exception:
+                    await page.locator("input:visible").first.fill(username, timeout=15000)
+                pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
+                await page.locator(pwd_sel).first.fill(password, timeout=15000)
 
                 # ── 闪猫:验证码自动识别登录(失败才提示需手动) ──
                 ocr_logged_in = False

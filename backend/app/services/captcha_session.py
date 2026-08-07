@@ -81,13 +81,14 @@ def get_ocr(beta: bool = False) -> Optional[object]:
         _ocr_init_lock = False
 
 
-# 合法验证码校验: 闪猫/BMS 验证码常见组合为「中文汉字 + 大写/小写字母 + 数字」混合,
+# 合法验证码校验: 常见组合为「中文汉字 + 大写/小写字母 + 数字」混合,
+# 某些系统(SCRM 白音)是「英数 + 数学运算符号」但本质不是数学计算而是直接输入原文。
 # 不区分字符集(ddddocr 可能识别出中文数字/中文),长度通常 3-8 位,放宽到 3-12 位兜底。
 # 常见字符集:
 #   - 英数: [A-Za-z0-9]
 #   - 中文: 常用汉字区 \u4e00-\u9fff(含中文数字零一二三四五六七八九十百千等)
-#   - 允许中划线 / 下划线? 少见,暂不引入;识别出再扩展。
-_CAPTCHA_RE = re.compile(r"^[\u4e00-\u9fffA-Za-z0-9]{3,12}$")
+#   - 允许常见符号: +-*/=. 以及大小写 x/X(常被写成乘号)
+_CAPTCHA_RE = re.compile(r"^[\u4e00-\u9fffA-Za-z0-9+\-*/=.xX]{3,12}$")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -461,11 +462,21 @@ import ast as _ast
 import re as _re
 
 # 符号归一化映射表 (OCR 可能把 × 识别成 x/X, 把 ÷ 识别成 其他,把 ≈ 和 = 混用)
+# 新增: OCR 常见把 + 号识别为 V/T/Y/U (形状相近), 故也做映射.
+#       注意: X/x 还是保留为乘号 (*), 不要覆盖成加号.
 _MATH_SYMBOL_NORMALIZE_MAP = {
     "×": "*", "x": "*", "X": "*", "✕": "*", "✖": "*", "❌": "*",
     "÷": "/", "／": "/", "∕": "/",
     "−": "-", "—": "-", "–": "-", "―": "-", "‑": "-",
     "＋": "+", "➕": "+",
+    # --- OCR 常见误识别: 加号 (+) 被识别成 V/Y/U (形状相近) ---
+    "V": "+", "v": "+",
+    "Y": "+", "y": "+",
+    "U": "+", "u": "+",
+    # --- OCR 常见误识别: 乘号 (×) 被识别成 T/t (更像 T 的形状: 上面一横下面一竖) ---
+    "T": "*", "t": "*",
+    # --- OCR 常见误识别: 等号(=) 被识别成 E/e/≈ 等 ---
+    "E": "=", "e": "=",
     "（": "(", "）": ")", "〔": "(", "〕": ")",
     "≈": "=", "≡": "=", "＝": "=", "﹦": "=",
     "？": "?", "❓": "?",
@@ -594,6 +605,158 @@ def _extract_math_expr_from_normalized(normalized: str) -> str | None:
     return cleaned
 
 
+# ── 强力 fallback: OCR 经常把符号识别成字母/数字,尝试多种假设组合算出合法答案 ──
+# 不同假设的符号映射变体(用于 OCR 把不同符号识别成同一个字母时的多候选尝试)
+_MATH_SYMBOL_FALLBACK_VARIANTS: list[dict[str, str]] = [
+    # H0: 默认假设(T→* ; V/Y/U→+ ; X→* ; E→=  ) — 已在 _MATH_SYMBOL_NORMALIZE_MAP 中实现
+    {},
+    # H1: T 是加号 + (有些字体 T 和 + 相似)
+    {"T": "+", "t": "+"},
+    # H2: V 是除号 ÷ (少见但尝试)
+    {"V": "/", "v": "/"},
+    # H3: Y/U/V 可能都是乘号 ×
+    {"Y": "*", "y": "*", "U": "*", "u": "*", "V": "*", "v": "*"},
+    # H4: 常见「数字被识别为字母」修正(S→5, G→6, B→8, l/I→1, O/o/Q→0, Z→2, q→9)
+    {"S": "5", "s": "5", "G": "6", "g": "6", "B": "8",
+     "I": "1", "l": "1", "O": "0", "o": "0", "Q": "0",
+     "Z": "2", "z": "2"},
+]
+
+
+def _apply_symbol_map(raw_text: str, extra_overrides: dict[str, str]) -> str:
+    """应用符号映射 + 额外覆盖表,返回归一化后字符串。
+
+    顺序:先应用 override(针对 T→* 这类特殊假设,保证 override 不会被默认映射覆盖),
+    再应用默认 _MATH_SYMBOL_NORMALIZE_MAP(除 override 已处理的 key)。
+    """
+    tmp = raw_text
+    used_keys: set[str] = set()
+    # Step 1: 先应用 override (保证特殊假设生效, T→* 就真的变成 *,不会先被默认映射成 +)
+    for k, v in extra_overrides.items():
+        if k in tmp:
+            tmp = tmp.replace(k, v)
+            used_keys.add(k)
+    # Step 2: 默认映射,但跳过 override 用过的 key(避免覆盖用户假设)
+    for k, v in _MATH_SYMBOL_NORMALIZE_MAP.items():
+        if k in used_keys:
+            continue
+        if k in tmp:
+            tmp = tmp.replace(k, v)
+    return "".join(tmp.split())
+
+
+def _score_math_candidate(expr: str, val: float | int,
+                          tail_strip: int = 0,
+                          variant_idx: int = 0) -> int:
+    """给数学验证码候选项打分,分数越高越合理(越大越优先)。
+
+    规则:
+      - 整数 > 近似整数 > 非整数浮点数 (+5000 / +2500 / -500)
+      - 答案在 0~99 合理范围 +500,100~199 +200,超过 1000 或负数 -800
+      - 操作数位差(两个数字位数)大的扣分(避免 4+57 / 9+39 这种垃圾题)
+      - 尾部剥越少越优先(-tail_strip*10); variant_idx 越小越优先
+    """
+    score = 1000 - tail_strip * 10 - variant_idx * 5
+    if isinstance(val, int):
+        score += 5000
+    elif float(val).is_integer():
+        score += 2500
+    else:
+        score -= 500
+    if isinstance(val, int):
+        if 0 <= val <= 99:
+            score += 500
+        elif 100 <= val <= 199:
+            score += 200
+        elif val > 1000 or val < 0:
+            score -= 800
+    # 操作数位差惩罚
+    try:
+        parts = _re.split(r"[+\-*/]", expr)
+        if len(parts) >= 2:
+            lens = []
+            for p in parts:
+                dig = "".join(ch for ch in p if ch.isdigit())
+                if dig:
+                    lens.append(len(dig))
+            if len(lens) >= 2:
+                diff = abs(lens[0] - lens[1])
+                if diff >= 1:
+                    score -= (200 + 300 * diff)  # 差 1 位扣 500,差 2 位扣 800
+    except Exception:
+        pass
+    return score
+
+
+def _aggressive_try_math_compute(raw_text: str) -> Optional[dict]:
+    """对 OCR 原始字符串穷举多种「符号映射假设 × 尾部截断长度」,返回第一个算出合法整数的结果。
+
+    Returns:
+        dict = {"expr": str, "answer": int|float, "tail_strip": int, "variant_idx": int}
+        任何组合都算不出 → 返回 None
+    """
+    if not raw_text:
+        return None
+    base_text = raw_text.strip()
+    if not base_text:
+        return None
+
+    best: Optional[dict] = None
+    best_score = -1_000_000
+
+    for vi, overrides in enumerate(_MATH_SYMBOL_FALLBACK_VARIANTS):
+        mapped = _apply_symbol_map(base_text, overrides)
+        if not mapped:
+            continue
+        max_strip = min(5, max(0, len(mapped) - 3))
+        for tail_strip in range(0, max_strip + 1):
+            cur = mapped[:-tail_strip] if tail_strip > 0 else mapped
+            if len(cur) < 3:
+                continue
+            cleaned = _MATH_HEAD_CLEAN_RE.sub("", cur)
+            cleaned = _MATH_TAIL_STRIP_RE.sub("", cleaned)
+            while cleaned and cleaned[-1] in ("=", "?"):
+                cleaned = cleaned[:-1]
+            # 表达式必须数字/右括号结尾 (否则一直剥到是为止)
+            while cleaned and cleaned[-1] not in "0123456789)":
+                cleaned = cleaned[:-1]
+            if len(cleaned) < 3:
+                continue
+            if not _MATH_EXPR_VALID_RE.match(cleaned):
+                continue
+            # 至少要有一个运算符 (纯数字就不算计算式了)
+            if not any(op in cleaned for op in ("+", "-", "*", "/")):
+                continue
+            # 括号配对
+            depth = 0
+            bad_paren = False
+            for ch in cleaned:
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth < 0:
+                        bad_paren = True
+                        break
+            if bad_paren or depth != 0:
+                continue
+            val = _safe_eval_math_expr(cleaned)
+            if val is None:
+                continue
+            if not (-99999 <= val <= 99999):
+                continue
+            score = _score_math_candidate(cleaned, val, tail_strip=tail_strip, variant_idx=vi)
+            if score > best_score:
+                best_score = score
+                best = {
+                    "expr": cleaned,
+                    "answer": val,
+                    "tail_strip": tail_strip,
+                    "variant_idx": vi,
+                }
+    return best
+
+
 def _format_math_answer(val: float | int) -> str:
     """格式化计算结果为字符串:整数取整,浮点数最多2位小数(去尾零)"""
     if isinstance(val, int):
@@ -611,6 +774,12 @@ def _format_math_answer(val: float | int) -> str:
 def try_ocr_math_captcha_with_confidence(png_bytes: bytes) -> Optional[dict]:
     """SCRM 数学计算式验证码识别 + 置信度预检 + 安全计算结果。
 
+    关键优化:不再依赖「文本验证码 OCR」(那个函数会用英数正则过滤掉带符号的字符串)。
+    直接对 beta=True/False 两个 ddddocr 模型裸识别,每个结果都:
+      1) 先走「原流程」: 符号归一化 → 尾部 =? 剥离 → 正则校验 → 计算
+      2) 原流程失败 → 再走「强力 fallback」: 穷举多种符号映射假设 × 尾部截断长度,
+         计算出任何合理整数结果就算通过。
+
     Returns:
       None 表示识别/计算任一环节失败(外层应刷新验证码重试)
       dict 结构:
@@ -627,71 +796,111 @@ def try_ocr_math_captcha_with_confidence(png_bytes: bytes) -> Optional[dict]:
           "confident": bool,        # 置信度是否通过阈值 AND 计算成功
         }
     """
-    # 第一步:复用现有的文本验证码 OCR + 置信度预检 (文本验证码的合法字符集已覆盖 0-9 +-*/() ≈ = ?)
-    base = try_ocr_captcha_with_confidence(png_bytes)
-    if base is None:
-        # 文本验证码识别失败 → 再退化尝试一次:放宽 _CAPTCHA_RE 限制(因为数学验证码可能含 =?() 等)
-        # 直接裸调用 OCR,跳过 _CAPTCHA_RE 正则过滤
-        for beta in (True, False):
-            ocr = get_ocr(beta=beta)
-            if ocr is None:
-                continue
+    best_result: Optional[dict] = None
+    # 分高优先:整数 > 近似整数 > 浮点; 置信度高 > 置信度低; beta=True(更准)优先于 beta=False
+    best_score = -10_000_000
+
+    for beta in (True, False):
+        ocr = get_ocr(beta=beta)
+        if ocr is None:
+            continue
+        # 先尝试 probability=True 模式(拿每个字符概率)
+        code_raw: str | None = None
+        probs: list[float] = []
+        try:
+            raw_prob = ocr.classification(png_bytes, probability=True)
+            coerced_code, coerced_probs = _coerce_prob_list(raw_prob)
+            if isinstance(coerced_code, str) and coerced_code.strip():
+                code_raw = coerced_code.strip()
+                probs = coerced_probs or []
+        except (TypeError, ValueError, Exception):
+            pass
+        if not code_raw:
             try:
-                raw_text = ocr.classification(png_bytes)
+                plain = ocr.classification(png_bytes)
             except Exception:
                 continue
-            if not isinstance(raw_text, str) or not raw_text.strip():
+            if not isinstance(plain, str) or not plain.strip():
                 continue
-            # 用退化置信度(每个字符 _OCR_FALLBACK_CONFIDENCE)
-            chars = list(raw_text.strip())
-            probs = [_OCR_FALLBACK_CONFIDENCE] * len(chars)
-            min_p = min(probs)
-            avg_p = sum(probs) / len(probs)
-            base = {
-                "code": raw_text.strip(),
+            code_raw = plain.strip()
+            probs = [_OCR_FALLBACK_CONFIDENCE] * len(code_raw)
+        # 归一化一下概率长度
+        if len(probs) != len(code_raw):
+            if len(probs) == 0:
+                probs = [_OCR_FALLBACK_CONFIDENCE] * len(code_raw)
+            else:
+                m = min(len(probs), len(code_raw))
+                code_raw = code_raw[:m]
+                probs = probs[:m]
+        if len(code_raw) < 3:
+            continue
+
+        min_p = min(probs) if probs else 0.0
+        avg_p = (sum(probs) / len(probs)) if probs else 0.0
+
+        # 收集这个模型下的所有候选项(原流程 + aggressive fallback),选分数最高的
+        local_candidates: list[tuple[int, str, float | int, bool]] = []  # (score, expr, computed, is_from_original)
+
+        # === 策略 1: 原「标准流程」(最快,也最准确) ===
+        normalized = _normalize_math_captcha_text(code_raw)
+        extracted_expr = _extract_math_expr_from_normalized(normalized)
+        if extracted_expr:
+            computed = _safe_eval_math_expr(extracted_expr)
+            if computed is not None and -99999 <= computed <= 99999:
+                # 对策略1 候选项也打分(和 fallback 保持一致的评分规则)
+                s = _score_math_candidate(extracted_expr, computed, tail_strip=0)
+                local_candidates.append((s, extracted_expr, computed, True))
+
+        # === 策略 2: 强力 fallback 穷举 (针对 OCR 把 +/-/=/? 识别成字母/数字) ===
+        # 无论策略1 是否成功,都跑一遍,避免策略1给出垃圾答案(如 4+57=61)
+        fb = _aggressive_try_math_compute(code_raw)
+        if fb is not None:
+            s = _score_math_candidate(fb["expr"], fb["answer"], tail_strip=fb.get("tail_strip", 0),
+                                      variant_idx=fb.get("variant_idx", 99))
+            local_candidates.append((s, fb["expr"], fb["answer"], False))
+
+        if not local_candidates:
+            continue  # 这个模型识别不出合法算式,下一个模型
+
+        # 选这个模型下分数最高的候选项
+        local_candidates.sort(key=lambda x: x[0], reverse=True)
+        top_score, expr_used, computed, _ = local_candidates[0]
+
+        answer_str = _format_math_answer(computed)
+        if len(answer_str) > 8:
+            continue
+
+        # 评分
+        score = 0
+        if isinstance(computed, int):
+            score += 100_000
+        elif float(computed).is_integer():
+            score += 50_000
+        score += int(avg_p * 10_000)
+        score += int(min_p * 1_000)
+        # beta=True 是中文混合模型,对中文符号识别更准,略优先
+        if beta:
+            score += 500
+
+        if score > best_score:
+            best_score = score
+            ok_range = isinstance(computed, (int, float)) and -99999 <= computed <= 99999
+            base_confident = (min_p >= _OCR_MIN_CHAR_PROB) and (avg_p >= _OCR_AVG_PROB)
+            final_confident = base_confident and ok_range and isinstance(computed, int)
+            best_result = {
+                "ocr_code": code_raw,
+                "normalized_expr": expr_used,
+                "answer": answer_str,
+                "computed_value": computed,
                 "used_beta": beta,
                 "min_prob": round(min_p, 4),
                 "avg_prob": round(avg_p, 4),
-                "probs": probs,
-                "chars": chars,
-                # 退化情况降低置信度阈值:至少 OCR 给个结果就算
-                "confident": (min_p >= 0.5) and (avg_p >= 0.6),
+                "probs": [round(x, 4) for x in probs],
+                "chars": list(code_raw),
+                "confident": final_confident,
             }
-            break
-        if base is None:
-            return None
 
-    ocr_code = base.get("code", "")
-    # 第二步:归一化符号 + 提取纯表达式
-    normalized = _normalize_math_captcha_text(ocr_code)
-    expr = _extract_math_expr_from_normalized(normalized)
-    if expr is None or len(expr) < 3:
-        # 提取不出合法表达式 → 失败 (外层应刷新)
-        return None
-    # 第三步:安全计算
-    computed = _safe_eval_math_expr(expr)
-    if computed is None:
-        return None
-    answer = _format_math_answer(computed)
-    # 长度保护:答案字符串最多 6 位(123456, 或 -1234)——正常数学题不会更长
-    if len(answer) > 8:
-        return None
-    # 最终 confident:必须原置信度达标 AND 计算成功且结果在合理范围 [-9999, 9999]
-    ok_range = isinstance(computed, (int, float)) and -99999 <= computed <= 99999
-    final_confident = base.get("confident", False) and ok_range
-
-    return {
-        "ocr_code": ocr_code,
-        "normalized_expr": expr,
-        "answer": answer,
-        "computed_value": computed,
-        "used_beta": base.get("used_beta", False),
-        "min_prob": base.get("min_prob", 0.0),
-        "avg_prob": base.get("avg_prob", 0.0),
-        "probs": base.get("probs", []),
-        "chars": base.get("chars", []),
-        "confident": final_confident,
-    }
+    return best_result
 
 
 def try_ocr_math_captcha(png_bytes: bytes) -> Optional[str]:
