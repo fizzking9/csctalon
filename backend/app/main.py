@@ -206,6 +206,44 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(OperationLogMiddleware)
 
+    # P2-4: 全局 500 异常 traceback 记录器 (FastAPI 异常处理器)
+    #       生产环境用户侧只能看到「服务器内部错误」，但服务端必须把完整 traceback 打到日志里，
+    #       避免出现「前端 500 后端日志里啥都没有」的排查惨案。
+    from fastapi import Request as _Request
+    from fastapi.responses import JSONResponse as _JSONResponse
+    import traceback as _tb
+
+    @app.exception_handler(Exception)
+    async def _global_unhandled_exception_handler(request: _Request, exc: Exception):
+        # 拿请求摘要 (method + url + query + 客户端IP)
+        try:
+            method = request.method
+            url = request.url.path
+            qs = request.url.query
+            client = request.client.host if request.client else "-"
+            user_agent = request.headers.get("user-agent", "-")[:200]
+            req_summary = f"{method} {url}{('?' + qs) if qs else ''} (from {client}) UA={user_agent}"
+        except Exception:
+            req_summary = f"<unable to extract request info>"
+        # 打完整 traceback 到 error 日志
+        logger.error(
+            f"[HTTP 500] 未处理异常: {type(exc).__name__}: {exc!r}\n"
+            f"  请求: {req_summary}\n"
+            f"  Traceback (most recent call last):\n{_tb.format_exc()}"
+        )
+        # 返回给用户侧的消息:保持跟默认 HTTPException 一致格式,不暴露内部堆栈
+        return _JSONResponse(
+            status_code=500,
+            content={
+                "code": 500,
+                "message": (
+                    f"服务器内部错误 ({type(exc).__name__})"
+                    if settings.ENV != "prod" else
+                    "服务器内部错误,请联系管理员查看日志"
+                ),
+            },
+        )
+
     # 静态文件: 挂载 uploads 目录,审计贴图等附件可通过 /uploads/... 访问
     from fastapi.staticfiles import StaticFiles
 

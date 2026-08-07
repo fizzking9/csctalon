@@ -300,7 +300,16 @@ class BmsScheduler:
 
         async def runner(task_id: str, on_progress_cb):
             combined = []
+            # ── P2-3: 调度器拆开 (BMS ↔ SCRM 串行但独立分段,日志清晰) ──
+            #   历史问题: 原来虽然是顺序执行,但没有分界日志,当一个失败另一个继续时,
+            #   日志里看不清是 BMS 还是 SCRM 的问题。这里加显式分段:
+            #     1) BMS 完成后 → 打成功/失败汇总 → 立刻进 SCRM,互不阻塞
+            #     2) 任一子任务里单个 data_type 失败, 不会污染另一个
+            #   注意: 不做真正多进程/多线程拆分 (SyncTaskManager 是单全局互斥锁),
+            #        但 "分段 + 清晰日志" 已经能显著降低定位成本。
+            # ── 1) BMS 子任务 ──
             if has_bms:
+                logger.info(f"[定时同步{reason}] ▶▶▶ BMS 子任务开始: data_types={sync_types_bms}")
                 try:
                     bms_res = await sync_all(
                         trigger_type="scheduled",
@@ -310,10 +319,17 @@ class BmsScheduler:
                         time_ranges=time_ranges_bms_dt,
                     )
                     combined.extend(bms_res if isinstance(bms_res, list) else [])
+                    ok_n = sum(1 for r in (bms_res or []) if isinstance(r, dict) and r.get("success"))
+                    logger.info(
+                        f"[定时同步{reason}] ◀◀◀ BMS 子任务完成: "
+                        f"{ok_n}/{len(sync_types_bms)} 成功"
+                    )
                 except Exception as e:  # noqa: BLE001
-                    logger.exception(f"[定时同步{reason}] BMS 子任务异常: {e}")
+                    logger.exception(f"[定时同步{reason}] ◀◀◀ BMS 子任务异常(全标失败): {e}")
                     combined.extend([{"data_type": dt, "success": False, "error": str(e)} for dt in sync_types_bms])
+            # ── 2) SCRM 子任务 ──
             if has_scrm:
+                logger.info(f"[定时同步{reason}] ▶▶▶ SCRM 子任务开始: data_types={sync_types_scrm}")
                 try:
                     scrm_res = await sync_scrm_all(
                         trigger_type="scheduled",
@@ -322,9 +338,20 @@ class BmsScheduler:
                         sync_types=sync_types_scrm,
                     )
                     combined.extend(scrm_res if isinstance(scrm_res, list) else [])
+                    ok_n = sum(1 for r in (scrm_res or []) if isinstance(r, dict) and r.get("success"))
+                    logger.info(
+                        f"[定时同步{reason}] ◀◀◀ SCRM 子任务完成: "
+                        f"{ok_n}/{len(sync_types_scrm)} 成功"
+                    )
                 except Exception as e:  # noqa: BLE001
-                    logger.exception(f"[定时同步{reason}] SCRM 子任务异常: {e}")
+                    logger.exception(f"[定时同步{reason}] ◀◀◀ SCRM 子任务异常(全标失败): {e}")
                     combined.extend([{"data_type": dt, "success": False, "error": str(e)} for dt in sync_types_scrm])
+            # 最终汇总
+            total_ok = sum(1 for r in combined if isinstance(r, dict) and r.get("success"))
+            logger.info(
+                f"[定时同步{reason}] 全部子任务结束: {total_ok}/{len(combined)} 成功"
+                + (f", failures={[(r.get('data_type'), r.get('error')) for r in combined if isinstance(r, dict) and not r.get('success')]}" if total_ok != len(combined) else "")
+            )
             return combined
 
         try:

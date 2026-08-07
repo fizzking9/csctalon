@@ -450,31 +450,6 @@ function openEdit(row) {
   dialogVisible.value = true
 }
 
-// 动态 placeholder, 已配置/未配置时提示不同
-const _credPlaceholder = (label, configured, emptyHint) => {
-  if (configured) return `${label}(已配置,留空=不修改,输入新值覆盖)`
-  return emptyHint || `请输入${label},留空表示不修改`
-}
-const scrmUsernamePlaceholder = computed(() => {
-  if (!isScrmSource(editForm)) return _credPlaceholder('BMS 登录账号', credentialsState.username_configured, '留空表示不修改原值')
-  const mode = editForm.fetch_mode || 'openapi'
-  if (mode === 'openapi') return _credPlaceholder('SCRM OpenAPI Client ID', credentialsState.username_configured, 'SCRM OpenAPI Client ID,留空表示不修改')
-  if (mode === 'playwright') return _credPlaceholder('SCRM OpenAPI Client ID(可选,留空不修改)', credentialsState.username_configured, '仅 OpenAPI/双模式需要; Playwright 模式请在下方填网页登录凭证,留空=不改')
-  return _credPlaceholder('Client ID(OpenAPI模式用)', credentialsState.username_configured, 'OpenAPI 模式使用 ClientID; 网页模式请在下方填网页登录凭证,留空=不改')
-})
-const scrmPasswordPlaceholder = computed(() => {
-  if (!isScrmSource(editForm)) return _credPlaceholder('BMS 登录密码', credentialsState.password_configured, '留空表示不修改原值')
-  const mode = editForm.fetch_mode || 'openapi'
-  if (mode === 'openapi') return _credPlaceholder('SCRM OpenAPI Client Secret', credentialsState.password_configured, 'SCRM OpenAPI Client Secret,留空表示不修改')
-  if (mode === 'playwright') return _credPlaceholder('SCRM OpenAPI Client Secret(可选,留空不修改)', credentialsState.password_configured, '仅 OpenAPI/双模式需要; Playwright 模式请在下方填网页登录凭证,留空=不改')
-  return _credPlaceholder('Client Secret(OpenAPI模式用)', credentialsState.password_configured, 'OpenAPI 模式使用 ClientSecret; 网页模式请在下方填网页登录凭证,留空=不改')
-})
-// SCRM 网页凭证的 placeholder(动态)
-const webUsernamePlaceholder = computed(() =>
-  _credPlaceholder('SCRM 网页登录账号(手机号/邮箱)', credentialsState.web_username_configured, 'SCRM 后台管理页面实际登录用的账号,不要填 ClientID;留空=不改'))
-const webPasswordPlaceholder = computed(() =>
-  _credPlaceholder('SCRM 网页登录密码', credentialsState.web_password_configured, 'SCRM 后台管理页面实际登录用的密码;留空=不改'))
-
 async function handleSave() {
   saving.value = true
   try {

@@ -28,10 +28,13 @@ from app.core.config import settings
 # 验证码自动识别(懒加载,首次调用才 import ddddocr)
 # 失败时 fallback 为 None(走人工/报错)
 # 除了 try_ocr_captcha(字符串版),还加载带置信度版 + 常量阈值
+# P1-2: 新增数学计算式验证码识别(闪猫/SCRM 等平台使用 7*0=? / 9-5=? 形式)
 try:
     from app.services.captcha_session import (  # type: ignore
         try_ocr_captcha,
         try_ocr_captcha_with_confidence,
+        try_ocr_math_captcha,
+        try_ocr_math_captcha_with_confidence,
         _OCR_MIN_CHAR_PROB,
         _OCR_AVG_PROB,
         _OCR_PRECHECK_MAX_REFRESH,
@@ -39,6 +42,8 @@ try:
 except Exception as _e_import_ocr:  # pragma: no cover - 导入失败不影响运行,只是 OCR 自动识别不可用
     try_ocr_captcha = None  # type: ignore
     try_ocr_captcha_with_confidence = None  # type: ignore
+    try_ocr_math_captcha = None  # type: ignore
+    try_ocr_math_captcha_with_confidence = None  # type: ignore
     _OCR_MIN_CHAR_PROB = 0.72
     _OCR_AVG_PROB = 0.86
     _OCR_PRECHECK_MAX_REFRESH = 20
@@ -137,6 +142,106 @@ def _storage_state_path(data_type: str) -> Path:
     base = Path(settings.UPLOAD_DIR) / STORAGE_STATE_DIR
     base.mkdir(parents=True, exist_ok=True)
     return base / f"{data_type}.json"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# P1-1: 导出下载超时控制 + 自动重试
+#       - wallet(提现操作记录):数据量大,导出通常需要 3-10 分钟,给 600s 超时 + 最多 2 次重试
+#       - shanmao_refund(闪猫退款):文件不大(~172KB),默认 90s 即可,但给 1 次重试对付偶发 500
+#       - 其他(refund/ticket/device_combo):通常 90s 够用,给 1 次重试
+# ──────────────────────────────────────────────────────────────────────
+_DOWNLOAD_TIMEOUT_MS: dict[str, int] = {
+    "wallet": 600_000,       # 10 分钟
+    "shanmao_refund": 90_000,
+    "refund": 180_000,       # 退费单也经常较大,放宽到 3 分钟
+    "ticket": 180_000,
+    "device_combo": 90_000,
+    "device_tag": 90_000,
+    "device_tag_binding": 90_000,
+}
+_DOWNLOAD_DEFAULT_TIMEOUT_MS = 120_000  # 未知类型默认 2 分钟
+_DOWNLOAD_MAX_RETRIES: dict[str, int] = {
+    "wallet": 2,
+    "shanmao_refund": 1,
+    "refund": 1,
+    "ticket": 1,
+}
+_DOWNLOAD_DEFAULT_RETRIES = 1
+
+
+async def _click_export_button(page) -> None:
+    """点击「导出」按钮,找不到标准按钮时 fallback 遍历所有可见按钮"""
+    try:
+        await page.click('button:has-text("导出")', timeout=15000)
+        return
+    except Exception:
+        pass
+    btns = await page.query_selector_all('button:visible')
+    clicked = False
+    for b in btns:
+        try:
+            t = (await b.inner_text()).strip()
+        except Exception:
+            t = ""
+        if "导出" in t and "重置" not in t:
+            try:
+                await b.click(timeout=15000)
+                clicked = True
+                break
+            except Exception:
+                continue
+    if not clicked:
+        raise RuntimeError("未找到导出按钮")
+
+
+async def _download_with_retry(
+    page,
+    data_type: str,
+    logger_obj,
+):
+    """封装 Playwright 导出下载:按 data_type 配置超时 + 最多 N 次重试。
+
+    每次重试都会:
+      1. 重新等待 download 事件(新的超时窗口)
+      2. 重新点「导出」按钮(避免上次失败事件未触发后,按钮点了没反应)
+    重试间隔 2 秒,避免给服务器太大压力。
+    """
+    timeout_ms = _DOWNLOAD_TIMEOUT_MS.get(data_type, _DOWNLOAD_DEFAULT_TIMEOUT_MS)
+    max_retries = _DOWNLOAD_MAX_RETRIES.get(data_type, _DOWNLOAD_DEFAULT_RETRIES)
+    last_exc: Exception | None = None
+
+    for attempt in range(0, max_retries + 1):
+        try:
+            if attempt > 0:
+                logger_obj.info(
+                    "[%s] 下载重试第 %d/%d 次(上次失败:%s),等待 %ds 后重新点导出...",
+                    data_type, attempt, max_retries,
+                    last_exc, timeout_ms // 1000,
+                )
+                await asyncio.sleep(2)
+            download_promise = page.wait_for_event("download", timeout=timeout_ms)
+            # 每次尝试都重新点导出(上次可能只是注册了事件但按钮没真的点到/服务器没反应)
+            await _click_export_button(page)
+            download = await download_promise
+            logger_obj.info(
+                "[%s] 文件下载成功(尝试 %d/%d):%s",
+                data_type, attempt + 1, max_retries + 1, download.suggested_filename,
+            )
+            return download
+        except Exception as e:
+            last_exc = e
+            # download 事件超时/失败,下一轮循环会重试(如果还有次数)
+            logger_obj.warning(
+                "[%s] 下载失败(尝试 %d/%d):%s",
+                data_type, attempt + 1, max_retries + 1, e,
+            )
+            continue
+
+    # 所有重试都用完了 → 把最后一次异常抛出去
+    raise RuntimeError(
+        f"[{data_type}] 导出下载 {max_retries + 1} 次均失败: "
+        f"{last_exc!r}. 请检查 BMS 后台导出是否正常、数据量是否过大、网络是否拥塞。"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -548,6 +653,14 @@ async def _try_auto_login_via_ocr(
     account_password_filled = False  # 第 1 次填过后,后续点击刷新验证码就不用重填账号密码了
     cap_elem = None
 
+    # P1-2: 根据 data_type 自动切换验证码识别模式
+    #       shanmao_refund(闪猫退款平台) 使用数学计算式验证码(7*0=? / 9-5=?),
+    #       其他平台(如未来接入更多)默认走纯文本验证码.
+    #       若后续需要按配置切换,可把这个判断改成读 config.get("captcha_type")
+    use_math_captcha = (data_type == "shanmao_refund")
+    if use_math_captcha:
+        log.info(f"[{data_type}] 检测到数学计算式验证码,启用 try_ocr_math_captcha 流程")
+
     for attempt in range(1, _CAPTCHA_OCR_MAX_RETRY + 1):
         # ───────── 1) 刷新验证码 / 页面 ─────────
         if attempt == 1:
@@ -607,7 +720,21 @@ async def _try_auto_login_via_ocr(
             last_err = "定位不到验证码图片元素,无法自动识别"
             break
 
-        use_confidence_mode = callable(try_ocr_captcha_with_confidence)
+        # P1-2: 根据模式选择不同的 OCR 函数 + 结果字段:
+        #   数学验证码 → try_ocr_math_captcha_with_confidence, 结果填值用 answer (计算出来的数字答案)
+        #   文本验证码 → try_ocr_captcha_with_confidence, 结果填值用 code  (直接识别出的字符串)
+        if use_math_captcha:
+            fn_confidence = try_ocr_math_captcha_with_confidence
+            fn_plain = try_ocr_math_captcha
+            ans_field = "answer"
+            ocr_disp_field = "normalized_expr"  # 展示用:显示识别出的算式
+        else:
+            fn_confidence = try_ocr_captcha_with_confidence
+            fn_plain = try_ocr_captcha
+            ans_field = "code"
+            ocr_disp_field = "code"
+
+        use_confidence_mode = callable(fn_confidence)
         best_result: dict | None = None
         best_score = -1.0
         pre_tried = 0
@@ -618,17 +745,17 @@ async def _try_auto_login_via_ocr(
             cur_result: dict | None = None
             if use_confidence_mode:
                 try:
-                    cur_result = try_ocr_captcha_with_confidence(cap_png)  # type: ignore[misc]
+                    cur_result = fn_confidence(cap_png)  # type: ignore[misc]
                 except Exception as _e_ocr:
                     log.warning(f"[{data_type}] 带置信度 OCR 抛错,回退到纯字符串模式: {_e_ocr}")
                     cur_result = None
             if cur_result is None:
-                # 回退: try_ocr_captcha 纯字符串模式,按退化中等置信度打分
-                tmp = try_ocr_captcha(cap_png)
+                # 回退: 纯字符串模式(验证码→计算答案),按退化中等置信度打分
+                tmp = fn_plain(cap_png) if callable(fn_plain) else None
                 if tmp is None:
                     break
                 cur_result = {
-                    "code": tmp,
+                    ans_field: tmp,
                     "used_beta": None,
                     "min_prob": 0.70,
                     "avg_prob": 0.80,
@@ -636,6 +763,8 @@ async def _try_auto_login_via_ocr(
                     "chars": list(tmp),
                     "confident": False,
                 }
+                if use_math_captcha:
+                    cur_result["normalized_expr"] = tmp
             # 综合评分:单字符最低概率权重加倍(因为只要有一个字符认错,整条验证码就错了)
             try:
                 min_p = float(cur_result.get("min_prob", 0.0))
@@ -649,17 +778,19 @@ async def _try_auto_login_via_ocr(
                 best_result = cur_result
             # 达标了 → 立即停止预检,拿去登录
             if bool(cur_result.get("confident")):
+                disp_val = cur_result.get(ocr_disp_field) or cur_result.get(ans_field)
                 log.info(
                     "[%s] OCR 预检第%d/%d次:识别=%s, min=%.3f avg=%.3f,达到阈值(min>=%s avg>=%s) → 直接拿去登录",
-                    data_type, pre_tried, _OCR_PRECHECK_MAX_REFRESH, cur_result.get("code"),
+                    data_type, pre_tried, _OCR_PRECHECK_MAX_REFRESH, disp_val,
                     min_p, avg_p, _OCR_MIN_CHAR_PROB, _OCR_AVG_PROB,
                 )
-                ocr_text = cur_result["code"]
+                ocr_text = cur_result[ans_field]
                 break
             # 未达标 → 刷一下验证码图片,下次循环重新识别
+            disp_val = cur_result.get(ocr_disp_field) or cur_result.get(ans_field)
             log.info(
                 "[%s] OCR 预检第%d/%d次:识别=%s, min=%.3f avg=%.3f,不达标 → 刷新验证码再认",
-                data_type, pre_tried, _OCR_PRECHECK_MAX_REFRESH, cur_result.get("code"),
+                data_type, pre_tried, _OCR_PRECHECK_MAX_REFRESH, disp_val,
                 min_p, avg_p,
             )
             if pre_tried >= _OCR_PRECHECK_MAX_REFRESH:  # type: ignore[operator]
@@ -683,15 +814,16 @@ async def _try_auto_login_via_ocr(
 
         # 预检循环结束: 要么找到了 confident 结果(ocr_text 已赋值),要么超次数,用最高分兜底
         if ocr_text is None and best_result is not None:
-            ocr_text = best_result.get("code")  # type: ignore[assignment]
+            ocr_text = best_result.get(ans_field)  # type: ignore[assignment]
             if isinstance(ocr_text, str) and ocr_text:
+                disp_val = best_result.get(ocr_disp_field) or ocr_text
                 log.warning(
                     "[%s] OCR 预检 %d 次均未达到置信度阈值,取最高分=%.3f 的识别结果=%s 登录兜底",
-                    data_type, pre_tried, best_score, ocr_text,
+                    data_type, pre_tried, best_score, disp_val,
                 )
         if not ocr_text:
             # 最后兜底:一次普通字符串 OCR
-            ocr_text = try_ocr_captcha(cap_png)  # type: ignore[misc]
+            ocr_text = fn_plain(cap_png) if callable(fn_plain) else None
         if not ocr_text:
             last_err = f"第{attempt}次: ddddocr 未识别出合法验证码(返回 None)"
             log.warning(f"[{data_type}] 验证码 OCR: {last_err}")
@@ -1649,24 +1781,8 @@ class BmsFetcher:
             #       因此这里不做任何 monkey patch / route 拦截,避免 500。
             #       筛选逻辑改到第 6.1 步:用 pandas 按「退费单号前缀 TFYYYYMMDD 或时间列」
             #       精确裁剪,只保留目标日期范围内的行再覆盖写回同一个 dest_path。
-            logger.info(f"[{data_type}] 点击导出...")
-            download_promise = page.wait_for_event("download", timeout=90000)
-            try:
-                await page.click('button:has-text("导出")')
-            except Exception:
-                # fallback:找所有含「导出」的 visible button,点第一个
-                btns = await page.query_selector_all('button:visible')
-                clicked = False
-                for b in btns:
-                    t = (await b.inner_text()).strip()
-                    if "导出" in t and "重置" not in t:
-                        await b.click(timeout=15000)
-                        clicked = True
-                        break
-                if not clicked:
-                    raise RuntimeError("未找到导出按钮")
-            download = await download_promise
-            logger.info(f"[{data_type}] 文件下载成功: {download.suggested_filename}")
+            # P1-1: 调用统一的 _download_with_retry (自动按 data_type 配置超时 + 重试)
+            download = await _download_with_retry(page, data_type, logger)
 
             # 6. 保存
             original_filename = download.suggested_filename or f"{data_type}_export.csv"
@@ -2149,11 +2265,10 @@ class BmsFetcher:
         await asyncio.sleep(2)
 
         # 5. 导出
-        logger.info(f"[{data_type}] 点击导出...")
-        download_promise = page.wait_for_event("download", timeout=90000)
-        await page.click('button:has-text("导出")')
-        download = await download_promise
-        logger.info(f"[{data_type}] 文件下载成功: {download.suggested_filename}")
+        # P1-1: 调用统一的 _download_with_retry (自动按 data_type 配置超时 + 重试)
+        #       - wallet: 600s + 2次重试 (数据量大,经常超时)
+        #       - refund/ticket: 180s + 1次重试
+        download = await _download_with_retry(page, data_type, logger)
 
         # 6. 保存
         original_filename = download.suggested_filename or f"{data_type}_export.csv"

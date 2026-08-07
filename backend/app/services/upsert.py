@@ -51,6 +51,74 @@ class ImportResult:
 
 # ---------- 类型转换工具 ----------
 
+# P1-3: 数值列归一化 - 清洗 BMS CSV 导出常见的「带单位/货币/千分位/百分比」字符串
+# 清洗顺序:
+#   1. 全角/半角空白去除
+#   2. 货币符号 (¥ / ￥ / $ / RMB / 元) 去除
+#   3. 千分位逗号去除 (1,234.56 → 1234.56)
+#   4. 百分比 % → 除以 100 (50% → 0.5)
+#   5. 中文数量级后缀:万(×10_000) / 亿(×100_000_000)
+#   6. 尾部常见单位(小时/分钟/秒/次/个/人/笔/件/单/条) 剥掉
+#   7. 括号里的备注(如 "123.45(已审核)") 剥掉
+_NUM_CURRENCY_RE = re.compile(r"[¥￥$€£]|RMB|rmb|元")
+_NUM_PAREN_RE = re.compile(r"[（(].*?[)）]")
+_NUM_UNIT_TAIL_RE = re.compile(
+    r"(小时|时|分钟|分|秒|ms|次|个|人|笔|件|单|条|台|部|张|份|元|天|日|周|月|年|%|个点)$"
+)
+
+
+def _normalize_numeric_string(s: str) -> str:
+    """把「带杂项的数值字符串」清洗成 float('') 能吃的纯数字串"""
+    if not s:
+        return ""
+    tmp = s.strip().replace("\u3000", "").replace(" ", "").replace("\t", "")
+    if not tmp:
+        return ""
+    # 去括号备注: 12.3(元) / 456（已审核）
+    tmp = _NUM_PAREN_RE.sub("", tmp)
+    # 去货币符号: ¥1,234.56 → 1,234.56
+    tmp = _NUM_CURRENCY_RE.sub("", tmp)
+    # 检测尾部百分比
+    is_percent = tmp.endswith("%") or tmp.endswith("％")
+    # 检测尾部中文数量级 (必须在剥通用单位之前做,避免被 亿/万 误当成通用字符)
+    scale = 1.0
+    if tmp.endswith("亿"):
+        scale = 100_000_000.0
+        tmp = tmp[:-1]
+    elif tmp.endswith("万"):
+        scale = 10_000.0
+        tmp = tmp[:-1]
+    # 反复剥尾部通用单位 (最多 5 层,对付 "0.5小时/人次" 这种叠加)
+    for _ in range(5):
+        new_tmp = _NUM_UNIT_TAIL_RE.sub("", tmp)
+        if new_tmp == tmp:
+            break
+        tmp = new_tmp
+    # 千分位逗号: 1,234,567.89 → 1234567.89 (注意:欧洲写法 1.234.567,89 不处理,国内没见过)
+    tmp = tmp.replace(",", "").replace("，", "")
+    if not tmp:
+        return ""
+    # 百分比后处理: 必须放在最后再把 is_percent 信息写回一个可识别的格式
+    if is_percent:
+        # 在最末尾塞一个不会被 float 识别的记号 → 外层解析后 *0.01
+        tmp = f"{tmp}||PERCENT"
+    if scale != 1.0:
+        tmp = f"{tmp}||SCALE={scale}"
+    return tmp
+
+
+def _apply_modifiers(raw: float, cleaned: str) -> float:
+    """应用 _normalize_numeric_string 写在尾部的 % / 万 / 亿 修饰符"""
+    if "||PERCENT" in cleaned:
+        raw = raw * 0.01
+    m = re.search(r"\|\|SCALE=([0-9.]+)", cleaned)
+    if m:
+        try:
+            raw = raw * float(m.group(1))
+        except (TypeError, ValueError):
+            pass
+    return raw
+
 
 def _to_str(val: Any) -> str | None:
     """强制转字符串,过滤 NaN/None(pandas iterrows 会把混合列推断为 float)"""
@@ -75,20 +143,60 @@ def _to_float(val: Any) -> float | None:
             return None
     except (TypeError, ValueError):
         pass
-    if isinstance(val, str) and val.strip() == "":
+    if isinstance(val, (int, float)):
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            return None
+        if pd.isna(f):
+            return None
+        return f
+    # 字符串路径
+    s = str(val).strip()
+    if s == "" or s.lower() == "nan":
         return None
+    # 先试直接转(最快,且不含单位的字符串 99% 会走这条)
     try:
-        f = float(val)
+        f = float(s)
         if pd.isna(f):
             return None
         return f
     except (TypeError, ValueError):
+        pass
+    # P1-3: 走归一化流程 (¥1,234.56 / 50% / 1.2万 / 0.5小时 / 12(备注) 等)
+    cleaned = _normalize_numeric_string(s)
+    if not cleaned:
         return None
+    # 剥掉修饰符后缀后,再拿纯数字部分去 float
+    num_part = cleaned.split("||", 1)[0]
+    if not num_part:
+        return None
+    try:
+        f = float(num_part)
+    except (TypeError, ValueError):
+        # 最后一招: 所有非数字/小数点/- 的字符全删掉,再试一次
+        last_resort = re.sub(r"[^0-9.\-]", "", num_part)
+        if not last_resort or last_resort in (".", "-", "-."):
+            return None
+        try:
+            f = float(last_resort)
+        except (TypeError, ValueError):
+            return None
+    if pd.isna(f):
+        return None
+    return _apply_modifiers(f, cleaned)
 
 
 def _to_int(val: Any) -> int | None:
     f = _to_float(val)
-    return int(f) if f is not None else None
+    if f is None:
+        return None
+    # P1-3: 直接 int(f) 会截断 1.9 → 1; 如果实际金额类字段用户给的是近似值,保留 round 更合理
+    # 但对 BMS 工单里的「处理时长/催单次数」这些计数列,用户导出经常是整数小数字符串 (1.00),
+    # 所以先 is_integer() 判断是不是纯整数浮点数,是就直接转,否则 round.
+    if isinstance(f, float) and f.is_integer():
+        return int(f)
+    return int(round(f))
 
 
 def _to_datetime(val: Any) -> datetime | None:
@@ -1018,7 +1126,13 @@ def upsert_device_tags(df: pd.DataFrame, mapping: dict[str, str], db: Session, r
 
     BMS 导出的标签字典通常含:标签ID、标签名称、标签类型、颜色、描述等。
     若 BMS 未导出 id:优先用 tag_name 唯一键做 upsert。
+
+    ⚠️ P0-2 修复: 早期迁移脚本可能导致 device_tags.id 列的 nextval(序列) 默认值
+    未被正确设置, bulk insert 时若不带 id 字段会抛 NotNullViolation: "null value in
+    column \"id\" of relation \"device_tags\" violates not-null constraint"。
+    修复策略: 对缺 id 的批次,统一手动从 device_tags_id_seq 取 nextval 补齐,避免依赖 DB 默认值。
     """
+    from sqlalchemy import text as sa_text
     rows: list[dict] = []
     for idx, row in enumerate(df.to_dict("records")):
         try:
@@ -1036,8 +1150,6 @@ def upsert_device_tags(df: pd.DataFrame, mapping: dict[str, str], db: Session, r
             elif tag_type in ("自定义", "用户", "自定义标签", "custom", "user"):
                 tag_type = "custom"
             r: dict = {
-                # ⚠️  仅当 ID 非空时带 id,否则 PostgreSQL 需要走自增序列;
-                # 如果带了 id=None 但 DB 的 sequence 没被触发,会报 NotNullViolation。
                 "tag_name": tag_name,
                 "tag_type": tag_type,
                 "color": _to_str(data.get("color")),
@@ -1051,8 +1163,35 @@ def upsert_device_tags(df: pd.DataFrame, mapping: dict[str, str], db: Session, r
             result.add_error(idx, f"行解析失败: {e}")
     if not rows:
         return
-    # id 非空 → 按 id upsert;否则按 tag_name 唯一键 upsert
-    # 为简化:统一使用 pg_insert on_conflict_do_update (tag_name 有唯一索引已覆盖所有冲突)
+
+    # ── P0-2: 对缺 id 的行手动补 nextval(device_tags_id_seq),避免 DB 默认值缺失
+    has_seq = True
+    try:
+        nextval_sql = sa_text("SELECT nextval(pg_get_serial_sequence('device_tags','id'))")
+    except Exception:
+        has_seq = False
+    for r in rows:
+        if "id" in r and r["id"] is not None:
+            continue
+        if has_seq:
+            try:
+                seq_val = db.scalar(nextval_sql)
+                if seq_val is not None:
+                    r["id"] = int(seq_val)
+                    continue
+            except Exception:
+                # nextval 失败(例如序列名不对) → fallback 按 tag_name 查询避免重复 id
+                pass
+        # Fallback: query max(id) + 1(纯内存自增,有并发风险但 device_tags 导入很少,且 tag_name 有唯一索引兜底)
+        try:
+            from sqlalchemy import select as sa_sel, func as sa_fn
+            max_id = db.scalar(sa_sel(sa_fn.max(DeviceTag.id))) or 0
+            # 临时用 max_id+offset:tag_name 唯一索引会冲突时在 on_conflict 里 merge, 不影响正确性
+            r["id"] = int(max_id) + len(rows) + rows.index(r) + 1  # 确保本批次内不重复
+        except Exception:
+            r["id"] = 10_000 + rows.index(r)
+
+    # 统一使用 pg_insert on_conflict_do_update (tag_name 有唯一索引已覆盖所有冲突)
     stmt = pg_insert(DeviceTag).values(rows)
     stmt = stmt.on_conflict_do_update(
         index_elements=["tag_name"],
