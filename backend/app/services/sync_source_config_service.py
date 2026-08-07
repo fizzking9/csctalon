@@ -224,11 +224,31 @@ def ensure_sync_sources_registered(db: Session) -> dict:
 
 
 # ── 读取 (运行时 + API) ──────────────────────────────────────────────
+def _decrypt_options_secrets(raw_opts: dict | None) -> dict:
+    """把 options 里需要加密保存的敏感子 key(web_username/web_password)解密成明文。
+    非敏感 key 原样返回;输入 None 返回空 dict。"""
+    if not raw_opts:
+        return {}
+    opts = {**raw_opts}
+    for k in ("web_username", "web_password"):
+        if isinstance(opts.get(k), str) and opts[k]:
+            try:
+                opts[k] = decrypt_secret(opts[k])
+            except Exception:
+                # 旧值可能是明文(第一次升级前),解密失败就当原值使用(兼容)
+                pass
+    return opts
+
+
 def _row_to_config(row: SyncSourceConfig) -> dict:
     """DB 行 → 运行配置 dict(解密凭证 + 合并 options,并抛出顶层关键字段)"""
     seed = _seed_of(row.data_type)
     seed_with_dt = {**seed, "data_type": row.data_type}
+    # ⚠️ 注意: _resolve_effective_options 的入参 row.options 仍是"加密状态的原始 options",
+    #   解密 options 内敏感 key 需要放在 effective_options 解析后再做,
+    #   否则 seed 默认值填充逻辑与加密判断会互相覆盖。
     effective_options = _resolve_effective_options(row.options, seed_with_dt)
+    effective_options = _decrypt_options_secrets(effective_options)
     fetch_mode = effective_options.get(
         # 2026-08-06: SCRM fallback 默认从 openapi → playwright
         "fetch_mode", "playwright" if _is_scrm_type(row.data_type) else "playwright"
@@ -294,13 +314,31 @@ def list_sync_source_configs(db: Session) -> list[dict]:
     result = []
     for row in rows:
         seed = _seed_of(row.data_type)
-        effective_options = _resolve_effective_options(row.options, {**seed, "data_type": row.data_type})
-        fetch_mode = effective_options.get(
+        seed_with_dt = {**seed, "data_type": row.data_type}
+        # 1) 先解析 effective_options(合并种子默认值)
+        effective_options = _resolve_effective_options(row.options, seed_with_dt)
+        # 2) 这里是「列表/编辑态」接口,不应该把明文密码抛给前端浏览器;
+        #    web_username/web_password:   - 先解密再丢弃明文,只保留 xxx_configured 布尔标志位给 UI 动态占位
+        #                                 - 保证 openEdit 里 credentialsState.xxx_configured 判断正确
+        configured_web_username = False
+        configured_web_password = False
+        opts_sanitized = _decrypt_options_secrets(effective_options)
+        if isinstance(opts_sanitized.get("web_username"), str) and opts_sanitized["web_username"]:
+            configured_web_username = True
+        if isinstance(opts_sanitized.get("web_password"), str) and opts_sanitized["web_password"]:
+            configured_web_password = True
+        # 敏感 key 移除(不再返回给前端列表/编辑态)
+        opts_sanitized.pop("web_username", None)
+        opts_sanitized.pop("web_password", None)
+        # 补上布尔标志位,让前端 openEdit 能给 placeholder 提示
+        opts_sanitized["web_username_configured"] = bool(configured_web_username)
+        opts_sanitized["web_password_configured"] = bool(configured_web_password)
+        fetch_mode = opts_sanitized.get(
             # 2026-08-06: SCRM fallback 默认从 openapi → playwright (与 seed 一致)
             "fetch_mode", "playwright" if _is_scrm_type(row.data_type) else "playwright"
         )
-        captcha_type = effective_options.get("captcha_type", "none")
-        requires_captcha = _requires_captcha_from_options(effective_options)
+        captcha_type = opts_sanitized.get("captcha_type", "none")
+        requires_captcha = _requires_captcha_from_options(opts_sanitized)
         result.append(
             {
                 "data_type": row.data_type,
@@ -315,7 +353,7 @@ def list_sync_source_configs(db: Session) -> list[dict]:
                 "enabled": row.enabled,
                 "sort_order": row.sort_order,
                 # ── 新增: 抓取模式 & 验证码类型 & options(给前端编辑表单) ──
-                "options": effective_options,
+                "options": opts_sanitized,
                 "fetch_mode": fetch_mode,
                 "captcha_type": captcha_type,
                 "requires_captcha": requires_captcha,
@@ -408,6 +446,11 @@ def update_sync_source_config(db: Session, data_type: str, payload: dict) -> dic
     if isinstance(payload.get("options"), dict):
         for k, raw_v in payload["options"].items():
             v = raw_v
+            # 先处理加密: web_username / web_password 等敏感 key 明文进 options 前必须加密
+            if k in ("web_username", "web_password") and isinstance(raw_v, str) and raw_v:
+                v = encrypt_secret(raw_v)
+            elif k in ("web_username", "web_password") and (raw_v is None or raw_v == ""):
+                v = None  # None 会被 merge 时从 options 中删除(等于"清空该字段")
             if raw_v is None:
                 options_patch[k] = None
                 continue
@@ -434,10 +477,17 @@ def update_sync_source_config(db: Session, data_type: str, payload: dict) -> dic
         "login_url_path", "captcha_img_selector", "username_placeholder", "password_placeholder",
         "captcha_input_placeholder", "submit_button_text", "web_operator_entry_path",
         "web_session_entry_path",
+        # SCRM Playwright 模式:独立一对网页登录账号密码(明文传进来时会在 options.patch 分支加密,
+        # 这里保留顶层也支持,但顶层传了也要加密后才合入 options)
+        "web_username", "web_password",
     }
     for k in known_option_keys:
         if k in payload and payload[k] is not None:
-            options_patch[k] = payload[k]
+            # 顶层传的敏感 key 先加密(如果传的是明文)再合并
+            if k in ("web_username", "web_password") and isinstance(payload[k], str) and payload[k]:
+                options_patch[k] = encrypt_secret(payload[k])
+            else:
+                options_patch[k] = payload[k]
     if options_patch:
         row.options = _merge_options_update(row.options, options_patch)
         logger.info(

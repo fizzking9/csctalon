@@ -40,8 +40,11 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
-# 跨服务: 复用数学验证码 OCR 逻辑
-from app.services.captcha_session import try_ocr_math_captcha
+# 跨服务: 复用数学验证码 OCR 逻辑 + 纯文本验证码 OCR 逻辑
+from app.services.captcha_session import (
+    try_ocr_math_captcha,
+    try_ocr_captcha,
+)
 # 种子配置: 各 SCRM 源的 base_url / page_path / 默认 options 等
 from app.services.scrm_client import SCRM_DATA_SOURCES
 
@@ -164,6 +167,13 @@ class ScrmWebFetcher:
         target = start_url or self._full_url(self._selector("login_url_path"))
         self.logger.info(f"[ScrmWeb] 打开登录页: {target}")
         self._page.goto(target, wait_until="domcontentloaded")
+        # 等 Vue 把 input/按钮渲染出来(有些 SPA 是 domcontentloaded 后才 mount 组件,input 此时还没出现)
+        self._page.wait_for_timeout(1500)
+        try:
+            # 至少等到账号密码 input 任一可见才继续(否则后续 locator.count() 可能为 0)
+            self._page.wait_for_load_state("networkidle", timeout=4000)
+        except PWTimeoutError:
+            self._page.wait_for_timeout(1000)
 
         # 极端情况: 已经登录过(复用 context 的 cookie 时) → 直接返回
         if self._am_i_logged_in():
@@ -204,40 +214,95 @@ class ScrmWebFetcher:
             f"最后错误: {last_error}"
         )
 
+    # ── 辅助: 获取是否需要验证码 ───────────────────────────────────────
+    def _needs_captcha(self) -> bool:
+        """是否需要处理验证码(captcha_type != 'none' 且配置了验证码选择器)"""
+        ct = (self.options or {}).get("captcha_type")
+        if ct and str(ct).lower() == "none":
+            return False
+        cis = self._selector("captcha_img_selector")
+        cap_ph = self._selector("captcha_input_placeholder")
+        return bool(cis and cis.strip() and cap_ph and cap_ph.strip())
+
+    # ── 辅助: 更稳健的 input 定位 ───────────────────────────────────────
+    def _locate_input(self, field: str, placeholder_sel: str, preferred_name: str = ""):
+        """定位 input: 优先按 name 属性(最稳定, 后端约定), 找不到再回退 placeholder 模糊匹配。
+
+        注:SPA(Vue/Element UI) 可能在 domcontentloaded 之后异步挂载组件,
+        所以对首选选择器会短时间轮询等待(最多 2.5s),找不到才 fallback。
+        """
+        page = self._page
+        assert page is not None
+        candidates = []
+        if preferred_name:
+            candidates.append((f"input[name='{preferred_name}']", f"name={preferred_name}", 2500))
+        if placeholder_sel:
+            candidates.append((f"input[placeholder*='{placeholder_sel}']",
+                               f"placeholder~{placeholder_sel[:10]}", 800))
+        all_inputs_sel = "input"
+        for sel, _desc, wait_ms in candidates:
+            try:
+                loc = page.locator(sel).first
+                # 先快速 count 检查,有就直接用
+                if loc.count() > 0:
+                    return loc
+                # 没看到可能是异步渲染,短暂等待一下(不抛异常,失败就下一个候选)
+                try:
+                    loc.wait_for(state="visible", timeout=wait_ms)
+                    if loc.count() > 0:
+                        return loc
+                except PWTimeoutError:
+                    pass
+            except Exception:
+                continue
+        # 兜底: 根据 field 序号取
+        idx = {"user": 0, "pwd": 1, "cap": 2}.get(field, 0)
+        self.logger.warning(f"[ScrmWeb] 未能按 name/placeholder 定位 {field} input, 兜底取全部 input 中第 #{idx} 个可见的")
+        return page.locator(all_inputs_sel).nth(idx)
+
     # ── 单轮登录步骤 ───────────────────────────────────────────────────
     def _single_login_attempt(self, attempt_no: int) -> None:
-        """填充账号 + 密码 + 验证码答案 → 点击 登 录"""
+        """填充账号 + 密码 (+ 可选验证码) → 点击登录。"""
         page = self._page
         assert page is not None
 
-        # 1. 账号 / 密码
+        needs_cap = self._needs_captcha()
         user_ph = self._selector("username_placeholder")
         pwd_ph = self._selector("password_placeholder")
         cap_ph = self._selector("captcha_input_placeholder")
-        self.logger.debug(f"[ScrmWeb] #{attempt_no}: 填充 username={self.username}")
+        self.logger.info(
+            f"[ScrmWeb] #{attempt_no}: 填充账号={self.username}, 需要验证码={needs_cap}"
+        )
 
-        user_input = page.locator(f"input[placeholder*='{user_ph}']").first
-        pwd_input = page.locator(f"input[placeholder*='{pwd_ph}']").first
-        cap_input = page.locator(f"input[placeholder*='{cap_ph}']").first
-
-        for loc in (user_input, pwd_input, cap_input):
-            loc.wait_for(state="visible")
+        user_input = self._locate_input("user", user_ph, "username")
+        pwd_input = self._locate_input("pwd", pwd_ph, "password")
+        user_input.wait_for(state="visible")
+        pwd_input.wait_for(state="visible")
 
         # 清空旧值再填(避免 retry 时残留)
         user_input.fill("")
         user_input.fill(self.username)
         pwd_input.fill("")
         pwd_input.fill(self.password)
-        cap_input.fill("")
 
-        # 2. 抓验证码图片 → OCR 计算答案
-        answer = self._crack_math_captcha(attempt_no)
-        self.logger.debug(f"[ScrmWeb] #{attempt_no}: 验证码答案 = '{answer}'")
-        cap_input.fill(answer)
-        # 等 300ms: 让前端 JS 监听到 input 事件(有些框架会校验输入事件)
-        page.wait_for_timeout(300)
+        if needs_cap:
+            cap_input = self._locate_input("cap", cap_ph, "captcha")
+            try:
+                cap_input.wait_for(state="visible", timeout=5000)
+                cap_input.fill("")
+            except PWTimeoutError:
+                self.logger.warning(f"[ScrmWeb] #{attempt_no}: 等待验证码输入框超时(可能页面没有), 跳过")
+                needs_cap = False
 
-        # 3. 点登录按钮 (按文本匹配最通用,也可 fallback 到 placeholder 附近的 button)
+        if needs_cap:
+            # 抓验证码图片 → OCR 计算答案
+            answer = self._crack_math_captcha(attempt_no)
+            self.logger.debug(f"[ScrmWeb] #{attempt_no}: 验证码答案 = '{answer}'")
+            cap_input.fill(answer)
+            # 等 300ms: 让前端 JS 监听到 input 事件(有些框架会校验输入事件)
+            page.wait_for_timeout(300)
+
+        # 点登录按钮 (按文本匹配最通用,也可 fallback 到 placeholder 附近的 button)
         submit_text = self._selector("submit_button_text")
         submit_btn = page.get_by_role("button", name=submit_text).first
         try:
@@ -249,8 +314,26 @@ class ScrmWebFetcher:
         # 等跳转(登录成功一般 1-3s 跳首页)
         page.wait_for_timeout(2_500)
 
+    def _captcha_type(self) -> str:
+        """返回当前配置的验证码类型: 'text' | 'math' | 'none'
+
+        历史遗留: 早期配置未写 captcha_type 时默认 math,保持向后兼容。
+        """
+        ct = (self.options or {}).get("captcha_type")
+        if ct is None:
+            return "math"
+        s = str(ct).strip().lower()
+        if s in ("text", "plain", "alnum", "string"):
+            return "text"
+        if s in ("none", "off", "disable", "no"):
+            return "none"
+        return "math"
+
     def _crack_math_captcha(self, attempt_no: int) -> str:
-        """抓 <img> → base64/png_bytes → try_ocr_math_captcha 计算答案
+        """抓 <img> → base64/png_bytes → 根据 captcha_type 选择对应 OCR 函数
+
+        captcha_type='math': OCR 识别表达式 → AST 安全计算 → 返回答案 (7*0 → 0)
+        captcha_type='text': 直接 ddddocr 识别 → 返回原文 (3t9a → 3T9A, 7+97 → 7+97)
 
         Returns: 验证码答案字符串
         Raises: ScrmWebCaptchaFailError: OCR 识别不出来
@@ -259,6 +342,8 @@ class ScrmWebFetcher:
         assert page is not None
 
         img_sel = self._selector("captcha_img_selector")
+        if not img_sel or not img_sel.strip():
+            raise ScrmWebCaptchaFailError("未配置 captcha_img_selector, 无法识别验证码")
         img = page.locator(img_sel).first
         img.wait_for(state="visible")
         # wait_for: 让图片加载完成(有些页面是懒加载)
@@ -269,7 +354,12 @@ class ScrmWebFetcher:
         if not png_bytes:
             raise ScrmWebCaptchaFailError("验证码截图为空")
 
-        answer: Optional[str] = try_ocr_math_captcha(png_bytes)
+        ct = self._captcha_type()
+        answer: Optional[str]
+        if ct == "text":
+            answer = try_ocr_captcha(png_bytes)
+        else:
+            answer = try_ocr_math_captcha(png_bytes)
         if not answer:
             # debug: 保存失败图片(存临时文件,方便后续人工查看提升 OCR)
             try:
@@ -278,20 +368,31 @@ class ScrmWebFetcher:
                     prefix="scrm_captcha_fail_", suffix=".png", delete=False
                 ) as f:
                     f.write(png_bytes)
-                    self.logger.warning(f"[ScrmWeb] #{attempt_no}: 验证码识别失败,图片保存到 {f.name}")
+                    self.logger.warning(f"[ScrmWeb] #{attempt_no}: captcha_type={ct} 验证码识别失败,图片保存到 {f.name}")
             except Exception:
                 pass
-            raise ScrmWebCaptchaFailError("数学验证码 OCR/计算失败")
+            raise ScrmWebCaptchaFailError(
+                f"验证码 OCR 失败(captcha_type={ct})"
+            )
         return answer
 
     def _refresh_captcha_image(self) -> None:
-        """点击验证码图片刷新(大多数 img 点击会换一张)"""
+        """点击验证码图片刷新(大多数 img 点击会换一张);无验证码时改为 reload 整页"""
         page = self._page
         assert page is not None
+        if not self._needs_captcha():
+            # 无验证码场景: 刷新失败直接 reload 整页即可
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_timeout(800)
+            return
         img_sel = self._selector("captcha_img_selector")
-        img = page.locator(img_sel).first
-        img.click()
-        page.wait_for_timeout(400)
+        try:
+            img = page.locator(img_sel).first
+            img.click()
+            page.wait_for_timeout(400)
+        except Exception:
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_timeout(800)
 
     def _am_i_logged_in(self) -> bool:
         """简单判登录态:

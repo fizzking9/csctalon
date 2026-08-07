@@ -30,6 +30,7 @@ from app.models.report_template import ReportTemplate  # noqa: F401
 from app.models.scrm_operator import ScrmOperator  # noqa: F401
 from app.models.scrm_session import ScrmSession  # noqa: F401
 from app.models.scrm_session_transfer import ScrmSessionTransfer  # noqa: F401
+from app.models.scrm_staff_profile import ScrmStaffProfile  # noqa: F401
 from app.models.scrm_sync_log import ScrmSyncLog  # noqa: F401
 from app.models.staff_assignment import StaffAssignment  # noqa: F401
 from app.models.strategy import StrategyDoc, StrategyReadReceipt  # noqa: F401
@@ -74,6 +75,7 @@ __all__ = [
     "ScrmOperator",
     "ScrmSession",
     "ScrmSessionTransfer",
+    "ScrmStaffProfile",
     "ScrmSyncLog",
     "ServiceTicket",
     "TicketActionLog",

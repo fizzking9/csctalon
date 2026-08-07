@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import analysis_views, analytics, auth, dashboards, data_sources, devices, fetch, incidents, match, measures, operation_logs, persons, report_comments, report_templates, reports, staff_assignments, strategy, system, tasks, todos, uploads, users, weekly_reports, wide_tables
+from app.api.v1 import analysis_views, analytics, auth, dashboards, data_sources, devices, fetch, incidents, match, measures, operation_logs, persons, report_comments, report_templates, reports, scrm_chat, scrm_staff, staff_assignments, strategy, system, tasks, todos, uploads, users, weekly_reports, wide_tables
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
@@ -30,3 +30,5 @@ api_router.include_router(dashboards.router)
 api_router.include_router(operation_logs.router)
 api_router.include_router(system.router)
 api_router.include_router(wide_tables.router)
+api_router.include_router(scrm_staff.router)
+api_router.include_router(scrm_chat.router)

@@ -6,6 +6,7 @@
 统计逻辑:upsert 前先查已存在的主键数量,以精确区分 insert/update
 """
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -647,7 +648,8 @@ def _touch_ticket_action_logs_after_upsert(
             params[f"at{i}"] = p["action_type"]
             params[f"op{i}"] = p["operator"]
             params[f"aa{i}"] = p["action_at"]
-            params[f"dt{i}"] = p["detail"]
+            # ⚠️ detail 是 dict 类型,必须序列化为 JSON 字符串再绑定,否则 PG 驱动报 "can't adapt type 'dict'"
+            params[f"dt{i}"] = json.dumps(p["detail"], ensure_ascii=False) if p["detail"] is not None else None
             params[f"rk{i}"] = p["remark"]
         insert_sql = text(
             f"""
