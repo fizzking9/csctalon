@@ -152,8 +152,9 @@ class ScrmClient:
     ):
         if not base_url:
             raise ValueError("ScrmClient: base_url 不能为空")
-        if not client_id or not client_secret:
-            raise ValueError("ScrmClient: clientId/clientSecret 未配置(请在同步设置页填写)")
+        # ⚠️ 2026-08-07: client_id/client_secret 允许为空 —— 当 fetch_mode=playwright (仅网页抓取,不调 OpenAPI) 时,
+        #    ScrmClient 对象只被用来作为「cfg 载体」(_attached_cfg 属性),根本不走到 get_token / list_operators 等 OpenAPI 方法。
+        #    强制校验放在 _ensure_openapi_ready() 里,在首次调用 OpenAPI 方法时再抛错,避免 playwrite-only 配置被入口误杀。
         self.base_url = base_url.rstrip("/")
         self.client_id = client_id
         self.client_secret = client_secret
@@ -164,7 +165,21 @@ class ScrmClient:
         self._token_cache: tuple[str, float, int] | None = None
         self._token_lock = asyncio.Lock()
 
+    def _ensure_openapi_ready(self) -> None:
+        """首次调用 OpenAPI 方法时校验 client_id/client_secret。
+
+        playwright-only 模式下全程不会调 OpenAPI 方法,故不会走到这里。
+        """
+        if not self.client_id or not self.client_secret:
+            raise ValueError(
+                "ScrmClient: 当前未配置 OpenAPI ClientID/ClientSecret,"
+                " 无法调用 OpenAPI 接口。请在同步设置中填写 ClientID/ClientSecret,"
+                " 或把抓取模式切换为「Playwright 网页」/「双模式(API 失败自动回退网页)」。"
+            )
+
     async def __aenter__(self) -> "ScrmClient":
+        # 进入 OpenAPI 上下文前校验凭证 (playwright-only 模式不会走到 async with client 这里)
+        self._ensure_openapi_ready()
         self._client = httpx.AsyncClient(timeout=self.timeout)
         return self
 

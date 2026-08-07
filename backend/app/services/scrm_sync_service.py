@@ -46,6 +46,39 @@ SCRM_INITIAL_LOOKBACK_DAYS = 30
 # 增量同步时的重叠窗口(防止跨两次同步边界的会话漏,回退 N 小时)
 SCRM_INCREMENTAL_OVERLAP_HOURS = 2
 
+# ── P0-1: 单个 data_type 同步超时(单 operator / 单会话类型) 超过直接取消,防止僵死 ──
+SCRM_SYNC_PER_SOURCE_TIMEOUT_SEC = 300  # 5 分钟
+
+# ── P2-2: 进程级 SCRM Playwright 登录失败全局缓存(带 TTL) ──
+# 解决: 两个任务并发(例如 scheduler + manual 快速点两次) 各自一份缓存,
+#   会分别启浏览器 + OCR + 登录尝试 2 次。升级为进程级全局缓存,带 10 分钟 TTL。
+# key: (base_url, username) → (expire_monotonic_sec, error_message)
+_PW_LOGIN_FAIL_CACHE_GLOBAL: dict[tuple[str, str], tuple[float, str]] = {}
+_PW_LOGIN_FAIL_CACHE_TTL_SEC = 600  # 10 分钟
+import asyncio as _asyncio_global
+_PW_LOGIN_FAIL_CACHE_LOCK = _asyncio_global.Lock()
+
+
+async def _pw_global_cache_get(key: tuple[str, str]) -> str | None:
+    """读取进程级全局缓存,过期自动清理;None=未命中"""
+    import time as _time
+    async with _PW_LOGIN_FAIL_CACHE_LOCK:
+        item = _PW_LOGIN_FAIL_CACHE_GLOBAL.get(key)
+        if item is None:
+            return None
+        expire_at, err = item
+        if _time.monotonic() > expire_at:
+            _PW_LOGIN_FAIL_CACHE_GLOBAL.pop(key, None)
+            return None
+        return err
+
+
+async def _pw_global_cache_put(key: tuple[str, str], err: str) -> None:
+    """写入进程级全局缓存(带 TTL)"""
+    import time as _time
+    async with _PW_LOGIN_FAIL_CACHE_LOCK:
+        _PW_LOGIN_FAIL_CACHE_GLOBAL[key] = (_time.monotonic() + _PW_LOGIN_FAIL_CACHE_TTL_SEC, err)
+
 # 每个 scrm_sync_logs.data_type 枚举
 DATA_TYPE_OPERATOR = "scrm_operator"
 DATA_TYPE_SESSION_PRIVATE = "scrm_session_private"
@@ -60,8 +93,15 @@ DATA_TYPE_SESSION_VIRTUAL = "scrm_session_virtual"
 def _build_scrm_client(db: Session) -> tuple[ScrmClient, dict]:
     """从 SyncSourceConfig 读取配置构造 ScrmClient
 
+    注意:
+      - fetch_mode=playwright 时, username/password 是**网页登录账号密码**,不是 OpenAPI ClientID/ClientSecret,
+        所以 client_id/client_secret 会传空字符串。ScrmClient 允许空值(仅作为 cfg 载体),
+        真正调用 OpenAPI 方法时才会在 _ensure_openapi_ready() 里报错。
+      - fetch_mode=openapi 且缺 ClientID/Secret → 直接抛明确错误(提示用户切换模式或填写凭证)。
+      - fetch_mode=dual 且缺 ClientID/Secret → 警告日志但不报错(后续同步会自动回退到 playwright)。
+
     Returns: (client, config_dict)
-    Raises: ValueError 未配置/已停用
+    Raises: ValueError 未配置/已停用 / openapi 模式缺凭证且未启用网页回退
     """
     # 任一 scrm 源都能拿到同一份 clientId/secret,取 scrm_operator 作为代表
     cfg = get_sync_source_config(db, DATA_TYPE_OPERATOR)
@@ -76,16 +116,35 @@ def _build_scrm_client(db: Session) -> tuple[ScrmClient, dict]:
     #   - dual 模式:
     #        * username/password = OpenAPI ClientID / ClientSecret (主字段, 供 _build_scrm_client 用)
     #        * options.web_username / options.web_password = 独立的网页登录凭证
-    # 所以这里只有 openapi / dual 模式才应该从 username/password 读取 client_id / client_secret;
-    # playwright 模式下 username/password 根本不是 OpenAPI 凭证, 传空避免 ScrmClient 把手机号当 client_id 报错。
     fetch_mode = str(cfg.get("fetch_mode") or "openapi")
     if fetch_mode in ("openapi", "dual"):
         client_id = (cfg.get("username") or "").strip()
         client_secret = (cfg.get("password") or "").strip()
     else:
-        # playwright 模式: username/password 是网页登录账号, 不是 OpenAPI 凭证
+        # playwright 模式: username/password 是网页登录账号, 不是 OpenAPI 凭证 → 传空
         client_id = ""
         client_secret = ""
+
+    # ---------- 前置:按模式给更精准的提示(让用户一眼看出缺啥) ----------
+    has_web_cred = _has_playwright_credentials(cfg)
+    if fetch_mode == "openapi" and (not client_id or not client_secret):
+        raise ValueError(
+            "当前抓取模式=OpenAPI(默认稳定模式),但未配置 ClientID/ClientSecret。"
+            "请在「同步设置」中填写 OpenAPI 凭证;"
+            "或把抓取模式切换为「Playwright 网页」(仅需网页登录账号密码,数学验证码一次性登录)。"
+        )
+    if fetch_mode == "dual" and (not client_id or not client_secret):
+        logger.warning(
+            "[scrm][build_client] 抓取模式=双模式,但 OpenAPI ClientID/ClientSecret 未配置,"
+            " 后续同步将直接跳过 OpenAPI 第一轮,只用 Playwright 网页抓取兜底。"
+            " 如需稳定优先请补填 ClientID/ClientSecret。"
+        )
+    if fetch_mode == "playwright" and not has_web_cred:
+        raise ValueError(
+            "当前抓取模式=Playwright 网页,但未配置网页登录账号密码。"
+            "请在「同步设置」中填写 SCRM 管理后台的登录账号/密码(手机号/邮箱 + 登录密码)。"
+        )
+
     client = ScrmClient(base_url=base_url, client_id=client_id, client_secret=client_secret)
     # 把 cfg 附到 client 上, 后续 sync_operators 等函数读取 fetch_mode/options.web_* 用,
     # 避免每个子函数再各自 get_sync_source_config 重新查一次(浪费 SQL 且结果不一致风险)
@@ -94,6 +153,27 @@ def _build_scrm_client(db: Session) -> tuple[ScrmClient, dict]:
     except Exception:
         pass
     return client, cfg
+
+
+def _has_playwright_credentials(cfg: dict) -> bool:
+    """判断当前配置是否已具备 Playwright 网页登录所需的账号密码。
+
+    读取优先级:
+      1) options.web_username / options.web_password (dual 模式下独立配置的网页凭证)
+      2) username / password (playwright 模式下直接用作网页凭证)
+    """
+    opts = cfg.get("options")
+    opts = opts if isinstance(opts, dict) else {}
+    web_user = (opts.get("web_username") or "").strip()
+    web_pwd = (opts.get("web_password") or "").strip()
+    if web_user and web_pwd:
+        return True
+    if str(cfg.get("fetch_mode") or "openapi") == "playwright":
+        user = (cfg.get("username") or "").strip()
+        pwd = (cfg.get("password") or "").strip()
+        if user and pwd:
+            return True
+    return False
 
 
 def _to_utc_aware(ts: Any) -> datetime | None:
@@ -464,41 +544,59 @@ async def sync_operators(
                 error_msg = (error_msg + " | " if error_msg else "") + f"Playwright: [同域登录熔断复用] {err_cached}"
                 records = None
             else:
-                try:
-                    from app.services.scrm_web_fetcher import run_web_fetch
-                    # ⚠️ 先解析网页登录凭证:避免拿 ClientID/ClientSecret 填网页登录框 → 100% 失败反复弹日志
-                    pw_user, pw_pwd, pw_cred_err = _resolve_pw_credentials(cfg)
-                    if pw_cred_err is not None:
-                        raise RuntimeError(f"Playwright 凭证校验失败: {pw_cred_err}")
-                    # SCRM 时间格式: start/end datetime → date(网页一般按日期查)
-                    start_date = start.astimezone(timezone.utc).date() if start.tzinfo else start.date()
-                    end_date = end.astimezone(timezone.utc).date() if end.tzinfo else end.date()
-                    web_res = run_web_fetch(
-                        base_url=cfg.get("base_url") or "",
-                        username=pw_user,
-                        password=pw_pwd,
-                        options=cfg.get("options") or {},
-                        data_types=[DATA_TYPE_OPERATOR],
-                        date_range=(start_date, end_date),
-                        logger=logger,
-                    )
-                    records = list(web_res.get(DATA_TYPE_OPERATOR) or [])
-                    api_total_reported = None  # web 抓取没有官方 total 字段
-                except Exception as e:  # noqa: BLE001
-                    logger.exception(f"[scrm][operator] Playwright 抓取也失败: {e}")
-                    err_txt = f"Playwright: {e}"
-                    error_msg = (error_msg + " | " if error_msg else "") + err_txt
+                # ── P2-2: 先查进程级全局缓存(跨任务复用,避免快速点两次同步两次启浏览器) ──
+                global_cached_err: str | None = None
+                if cache_key is not None:
+                    global_cached_err = await _pw_global_cache_get(cache_key)
+                    if global_cached_err:
+                        logger.warning(
+                            "[scrm][operator] Playwright (base_url=%r,user=%r) 命中进程级全局登录失败缓存(10min TTL): %r",
+                            cache_key[0], cache_key[1], global_cached_err,
+                        )
+                if global_cached_err:
+                    error_msg = (error_msg + " | " if error_msg else "") + f"Playwright: [全局登录熔断复用] {global_cached_err}"
+                    pw_login_fail_cache[cache_key] = global_cached_err  # 同步写回任务级,减少下一个源的查锁开销
                     records = None
-                    # ⚠️ 记忆化: 登录/凭证/验证码/启动浏览器类错误,都写入缓存(下一个源直接跳过)
-                    _low_err = str(e).lower()
-                    _cred_match = "凭证校验失败" in str(e) or "凭据校验失败" in str(e)
-                    if pw_login_fail_cache is not None and (
-                        _cred_match
-                        or any(k in _low_err for k in ("登录", "账号", "密码", "验证码", "启动 playwright", "playwright: 启动"))
-                        or (isinstance(e, RuntimeError) and any(k in str(e) for k in ("登录", "用户名或密码", "验证码", "凭证")))
-                    ):
-                        if cache_key is not None:
-                            pw_login_fail_cache[cache_key] = str(e)
+                else:
+                    try:
+                        from app.services.scrm_web_fetcher import run_web_fetch
+                        # ⚠️ 先解析网页登录凭证:避免拿 ClientID/ClientSecret 填网页登录框 → 100% 失败反复弹日志
+                        pw_user, pw_pwd, pw_cred_err = _resolve_pw_credentials(cfg)
+                        if pw_cred_err is not None:
+                            raise RuntimeError(f"Playwright 凭证校验失败: {pw_cred_err}")
+                        # SCRM 时间格式: start/end datetime → date(网页一般按日期查)
+                        start_date = start.astimezone(timezone.utc).date() if start.tzinfo else start.date()
+                        end_date = end.astimezone(timezone.utc).date() if end.tzinfo else end.date()
+                        # ⚠️ P0-3: run_web_fetch 已经是 async def,直接 await,不再嵌套 asyncio.run
+                        web_res = await run_web_fetch(
+                            base_url=cfg.get("base_url") or "",
+                            username=pw_user,
+                            password=pw_pwd,
+                            options=cfg.get("options") or {},
+                            data_types=[DATA_TYPE_OPERATOR],
+                            date_range=(start_date, end_date),
+                            logger=logger,
+                        )
+                        records = list(web_res.get(DATA_TYPE_OPERATOR) or [])
+                        api_total_reported = None  # web 抓取没有官方 total 字段
+                    except Exception as e:  # noqa: BLE001
+                        logger.exception(f"[scrm][operator] Playwright 抓取也失败: {e}")
+                        err_txt = f"Playwright: {e}"
+                        error_msg = (error_msg + " | " if error_msg else "") + err_txt
+                        records = None
+                        # ⚠️ 记忆化: 登录/凭证/验证码/启动浏览器类错误,都写入缓存(下一个源直接跳过)
+                        _low_err = str(e).lower()
+                        _cred_match = "凭证校验失败" in str(e) or "凭据校验失败" in str(e)
+                        should_cache_login_fail = (
+                            _cred_match
+                            or any(k in _low_err for k in ("登录", "账号", "密码", "验证码", "启动 playwright", "playwright: 启动"))
+                            or (isinstance(e, RuntimeError) and any(k in str(e) for k in ("登录", "用户名或密码", "验证码", "凭证")))
+                        )
+                        if pw_login_fail_cache is not None and should_cache_login_fail:
+                            if cache_key is not None:
+                                pw_login_fail_cache[cache_key] = str(e)
+                                # ── P2-2: 同步写进程级全局缓存(带 10min TTL) ──
+                                await _pw_global_cache_put(cache_key, str(e))
 
         # ── 共用入库逻辑 ──
         success = False
@@ -805,63 +903,82 @@ async def _sync_one_session_type(
                 error_msg = (error_msg + " | " if error_msg else "") + f"Playwright: [同域登录熔断复用] {err_cached}"
                 records = None
             else:
-                try:
-                    from app.services.scrm_web_fetcher import run_web_fetch
-                    # ⚠️ 先解析网页登录凭证:避免拿 ClientID/ClientSecret 填网页登录框 → 100% 失败反复弹
-                    pw_user, pw_pwd, pw_cred_err = _resolve_pw_credentials(cfg)
-                    if pw_cred_err is not None:
-                        raise RuntimeError(f"Playwright 凭证校验失败: {pw_cred_err}")
-                    start_date = start.astimezone(timezone.utc).date() if start.tzinfo else start.date()
-                    end_date = end.astimezone(timezone.utc).date() if end.tzinfo else end.date()
-                    # web_sessions / web_transfers 两个都抓(因为同步 scrm_sessions 时若 transfers_list 内嵌可能不全)
-                    web_to_fetch = ["scrm_sessions"]
-                    # SCRM 会话 3 类型(private/group/virtual) 在网页版可能是同一个 Tab,用通用抓取名 scrm_sessions
-                    web_res = run_web_fetch(
-                        base_url=cfg.get("base_url") or "",
-                        username=pw_user,
-                        password=pw_pwd,
-                        options=cfg.get("options") or {},
-                        data_types=web_to_fetch,
-                        date_range=(start_date, end_date),
-                        logger=logger,
-                    )
-                    raw_sessions = list(web_res.get("scrm_sessions") or [])
-                    # 网页版抓取可能不区分 private/group/virtual;
-                    # 按 record 里的 sessionType/会话类型 字段筛选,没找到就默认全量给当前类型兜底(后续同步类型时会覆盖更新,不重复创建)
-                    filtered: list[dict] = []
-                    for rec in raw_sessions:
-                        rtype = (
-                            str(rec.get("sessionType") or rec.get("会话类型") or rec.get("type") or "").strip().lower()
+                # ── P2-2: 先查进程级全局缓存(跨任务复用) ──
+                global_cached_err: str | None = None
+                if cache_key is not None:
+                    global_cached_err = await _pw_global_cache_get(cache_key)
+                    if global_cached_err:
+                        logger.warning(
+                            "[scrm][session-%s] Playwright (base_url=%r,user=%r) 命中进程级全局登录失败缓存(10min TTL): %r",
+                            type_label, cache_key[0], cache_key[1], global_cached_err,
                         )
-                        if not rtype:
-                            # 无类型字段:交给当前同步类型(3 个类型都同步一次总数据的话,会覆盖更新同一条 session)
-                            filtered.append(rec)
-                        elif type_label in rtype or rtype in type_label:
-                            # 类型匹配
-                            filtered.append(rec)
-                        elif (type_label == "private" and ("私" in rtype or "1v1" in rtype or "p2p" in rtype)) or (
-                            type_label == "group" and ("群" in rtype or "group" in rtype)
-                        ) or (type_label == "virtual" and ("虚拟" in rtype or "virtual" in rtype)):
-                            filtered.append(rec)
-                        else:
-                            # 兜底:3 种类型都要走一遍时,全量给,让主键重复时 upsert 成一样
-                            filtered.append(rec)
-                    records = filtered
-                except Exception as e:  # noqa: BLE001
-                    logger.exception(f"[scrm][session-{type_label}] Playwright 抓取也失败: {e}")
-                    err_txt = f"Playwright: {e}"
-                    error_msg = (error_msg + " | " if error_msg else "") + err_txt
+                if global_cached_err:
+                    error_msg = (error_msg + " | " if error_msg else "") + f"Playwright: [全局登录熔断复用] {global_cached_err}"
+                    if cache_key is not None:
+                        pw_login_fail_cache[cache_key] = global_cached_err
                     records = None
-                    # ⚠️ 记忆化: 登录/凭证/验证码/启动浏览器类错误都记到缓存
-                    _low_err = str(e).lower()
-                    _cred_match = "凭证校验失败" in str(e) or "凭据校验失败" in str(e)
-                    if pw_login_fail_cache is not None and (
-                        _cred_match
-                        or any(k in _low_err for k in ("登录", "账号", "密码", "验证码", "启动 playwright", "playwright: 启动"))
-                        or (isinstance(e, RuntimeError) and any(k in str(e) for k in ("登录", "用户名或密码", "验证码", "凭证")))
-                    ):
-                        if cache_key is not None:
-                            pw_login_fail_cache[cache_key] = str(e)
+                else:
+                    try:
+                        from app.services.scrm_web_fetcher import run_web_fetch
+                        # ⚠️ 先解析网页登录凭证:避免拿 ClientID/ClientSecret 填网页登录框 → 100% 失败反复弹
+                        pw_user, pw_pwd, pw_cred_err = _resolve_pw_credentials(cfg)
+                        if pw_cred_err is not None:
+                            raise RuntimeError(f"Playwright 凭证校验失败: {pw_cred_err}")
+                        start_date = start.astimezone(timezone.utc).date() if start.tzinfo else start.date()
+                        end_date = end.astimezone(timezone.utc).date() if end.tzinfo else end.date()
+                        # web_sessions / web_transfers 两个都抓(因为同步 scrm_sessions 时若 transfers_list 内嵌可能不全)
+                        web_to_fetch = ["scrm_sessions"]
+                        # SCRM 会话 3 类型(private/group/virtual) 在网页版可能是同一个 Tab,用通用抓取名 scrm_sessions
+                        # ⚠️ P0-3: run_web_fetch 现在是 async def,直接 await
+                        web_res = await run_web_fetch(
+                            base_url=cfg.get("base_url") or "",
+                            username=pw_user,
+                            password=pw_pwd,
+                            options=cfg.get("options") or {},
+                            data_types=web_to_fetch,
+                            date_range=(start_date, end_date),
+                            logger=logger,
+                        )
+                        raw_sessions = list(web_res.get("scrm_sessions") or [])
+                        # 网页版抓取可能不区分 private/group/virtual;
+                        # 按 record 里的 sessionType/会话类型 字段筛选,没找到就默认全量给当前类型兜底(后续同步类型时会覆盖更新,不重复创建)
+                        filtered: list[dict] = []
+                        for rec in raw_sessions:
+                            rtype = (
+                                str(rec.get("sessionType") or rec.get("会话类型") or rec.get("type") or "").strip().lower()
+                            )
+                            if not rtype:
+                                # 无类型字段:交给当前同步类型(3 个类型都同步一次总数据的话,会覆盖更新同一条 session)
+                                filtered.append(rec)
+                            elif type_label in rtype or rtype in type_label:
+                                # 类型匹配
+                                filtered.append(rec)
+                            elif (type_label == "private" and ("私" in rtype or "1v1" in rtype or "p2p" in rtype)) or (
+                                type_label == "group" and ("群" in rtype or "group" in rtype)
+                            ) or (type_label == "virtual" and ("虚拟" in rtype or "virtual" in rtype)):
+                                filtered.append(rec)
+                            else:
+                                # 兜底:3 种类型都要走一遍时,全量给,让主键重复时 upsert 成一样
+                                filtered.append(rec)
+                        records = filtered
+                    except Exception as e:  # noqa: BLE001
+                        logger.exception(f"[scrm][session-{type_label}] Playwright 抓取也失败: {e}")
+                        err_txt = f"Playwright: {e}"
+                        error_msg = (error_msg + " | " if error_msg else "") + err_txt
+                        records = None
+                        # ⚠️ 记忆化: 登录/凭证/验证码/启动浏览器类错误都记到缓存
+                        _low_err = str(e).lower()
+                        _cred_match = "凭证校验失败" in str(e) or "凭据校验失败" in str(e)
+                        should_cache_login_fail = (
+                            _cred_match
+                            or any(k in _low_err for k in ("登录", "账号", "密码", "验证码", "启动 playwright", "playwright: 启动"))
+                            or (isinstance(e, RuntimeError) and any(k in str(e) for k in ("登录", "用户名或密码", "验证码", "凭证")))
+                        )
+                        if pw_login_fail_cache is not None and should_cache_login_fail:
+                            if cache_key is not None:
+                                pw_login_fail_cache[cache_key] = str(e)
+                                # ── P2-2: 同步写进程级全局缓存(带 10min TTL) ──
+                                await _pw_global_cache_put(cache_key, str(e))
 
         # ── 共用入库逻辑 ──
         success = False
@@ -1003,15 +1120,25 @@ async def sync_scrm_all(
                 pass
         thread_db = SessionLocal()
         try:
-            def _op_work(cache_ref=pw_login_fail_cache):
-                return asyncio.run(sync_operators(
-                    client, thread_db, trigger_type, triggered_by,
-                    time_range_override=(time_ranges or {}).get(DATA_TYPE_OPERATOR),
-                    pw_login_fail_cache=cache_ref,
-                ))
-            res = await asyncio.to_thread(_op_work)
+            # P0-3: sync_operators 已经是 async def,直接 await,不再 to_thread + asyncio.run 嵌套
+            # P0-1: 包一层 asyncio.wait_for 单源 300s(5 分钟)超时,防止 Playwright 僵死 running 不结束
+            res: dict
+            try:
+                res = await asyncio.wait_for(
+                    sync_operators(
+                        client, thread_db, trigger_type, triggered_by,
+                        time_range_override=(time_ranges or {}).get(DATA_TYPE_OPERATOR),
+                        pw_login_fail_cache=pw_login_fail_cache,
+                    ),
+                    timeout=SCRM_SYNC_PER_SOURCE_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                err = (f"[P0-1 超时熔断] SCRM 操作员同步单源超过 "
+                       f"{SCRM_SYNC_PER_SOURCE_TIMEOUT_SEC}s,已强制取消,防止僵死。")
+                logger.error(f"[scrm][operator] {err}")
+                res = {"data_type": DATA_TYPE_OPERATOR, "success": False, "error": err}
         except Exception as e:  # noqa: BLE001
-            logger.exception("[scrm] operator to_thread 崩溃")
+            logger.exception("[scrm][operator] 顶层崩溃(should be rare,超时已被 wait_for 兜底)")
             res = {"data_type": DATA_TYPE_OPERATOR, "success": False, "error": str(e)}
         finally:
             try:
@@ -1040,25 +1167,35 @@ async def sync_scrm_all(
                 pass
         thread_db = SessionLocal()
         try:
-            def _sess_work(s=st, d=dt, cache_ref=pw_login_fail_cache):
-                return asyncio.run(_sync_one_session_type(
-                    client, thread_db, s, trigger_type, triggered_by,
-                    time_range_override=(time_ranges or {}).get(d),
-                    pw_login_fail_cache=cache_ref,
-                ))
-            res = await asyncio.to_thread(_sess_work)
+            # P0-3: 不再 to_thread + asyncio.run 嵌套,直接 await
+            # P0-1: 每个会话类型都单独 5 分钟超时
+            sess_res: dict
+            try:
+                sess_res = await asyncio.wait_for(
+                    _sync_one_session_type(
+                        client, thread_db, st, trigger_type, triggered_by,
+                        time_range_override=(time_ranges or {}).get(dt),
+                        pw_login_fail_cache=pw_login_fail_cache,
+                    ),
+                    timeout=SCRM_SYNC_PER_SOURCE_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                err = (f"[P0-1 超时熔断] SCRM 会话-{st} 同步单源超过 "
+                       f"{SCRM_SYNC_PER_SOURCE_TIMEOUT_SEC}s,已强制取消,防止僵死。")
+                logger.error(f"[scrm][session-{st}] {err}")
+                sess_res = {"data_type": dt, "success": False, "error": err}
         except Exception as e:  # noqa: BLE001
-            logger.exception(f"[scrm] session-{st} to_thread 崩溃")
-            res = {"data_type": dt, "success": False, "error": str(e)}
+            logger.exception(f"[scrm] session-{st} 顶层崩溃(should be rare)")
+            sess_res = {"data_type": dt, "success": False, "error": str(e)}
         finally:
             try:
                 thread_db.close()
             except Exception:  # noqa: BLE001
                 pass
-        results.append(res)
+        results.append(sess_res)
         if on_progress:
             try:
-                await on_progress(dt, "done", res)
+                await on_progress(dt, "done", sess_res)
             except Exception:  # noqa: BLE001
                 pass
 
