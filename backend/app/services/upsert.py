@@ -120,6 +120,17 @@ def _apply_modifiers(raw: float, cleaned: str) -> float:
     return raw
 
 
+def _truncate_str(val: Any, max_len: int) -> str | None:
+    """强制转字符串并按 max_len 截断,用于防御 DB VARCHAR(n) 长度超限报错。
+    返回 None 当原值为空/NaN。"""
+    s = _to_str(val)
+    if s is None:
+        return None
+    if len(s) <= max_len:
+        return s
+    return s[:max_len]
+
+
 def _to_str(val: Any) -> str | None:
     """强制转字符串,过滤 NaN/None(pandas iterrows 会把混合列推断为 float)"""
     if val is None:
@@ -388,14 +399,21 @@ def _execute_upsert(
             if _has_synced_at:
                 r["synced_at"] = _now
             if _has_updated_by_raw:
-                # 已经显式传入则不再覆盖
-                if r.get("updated_by_raw"):
+                # ⚠️ 无论是否找到值,都必须显式设置键,保证同批次 rows 字典键一致。
+                # 否则 rows[0] 有 updated_by_raw 而 rows[1] 没有,会导致
+                # pg_insert().values(rows) 编译时抛 "explicitly rendered as a
+                # boundparameter in the VALUES clause" 错误。
+                _existing = r.get("updated_by_raw")
+                if _existing:
+                    r["updated_by_raw"] = _truncate_str(_existing, 64)
                     continue
+                _sniffed: str | None = None
                 for alias in _UPDATED_BY_ALIASES:
                     v = r.get(alias)
                     if v:
-                        r["updated_by_raw"] = _to_str(v)
+                        _sniffed = _truncate_str(v, 64)
                         break
+                r["updated_by_raw"] = _sniffed  # 显式赋 None 也必须设键
 
     # 主键统一转字符串,避免 IN 查询时 varchar = double precision 类型冲突
     keys = [str(r[pk_field]) for r in rows]
@@ -572,44 +590,57 @@ def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
     for idx, row in enumerate(df.to_dict("records")):
         try:
             data = apply_mapping(row, mapping)
-            ticket_no = str(data.get("ticket_no")).strip() if data.get("ticket_no") else None
+            ticket_no = _truncate_str(data.get("ticket_no"), 64)
             if not ticket_no:
                 result.add_error(idx, "工单号为空")
                 continue
             rows.append({
                 "ticket_no": ticket_no,
-                "device_sn": data.get("device_sn"),
-                "device_type": data.get("device_type"),
-                "device_type_remark": data.get("device_type_remark"),
-                "phone": data.get("phone"),
-                "service_category": data.get("service_category"),
-                "service_item": data.get("service_item"),
+                "device_sn": _truncate_str(data.get("device_sn"), 64),
+                "device_type": _truncate_str(data.get("device_type"), 64),
+                "device_type_remark": _truncate_str(data.get("device_type_remark"), 128),
+                "phone": _truncate_str(data.get("phone"), 32),
+                "service_category": _truncate_str(data.get("service_category"), 64),
+                "service_item": _truncate_str(data.get("service_item"), 64),
                 "priority": _to_int(data.get("priority")),
-                "status": data.get("status"),
+                # 迁移 aa11bb22cc33 后 status/is_appeal 等均扩为 VARCHAR(64),此处与 DB 列宽对齐
+                "status": _truncate_str(data.get("status"), 64),
                 "remark": data.get("remark"),
                 "register_time": _to_datetime(data.get("register_time")),
                 "active_time": _to_datetime(data.get("active_time")),
                 "dispatch_time": _to_datetime(data.get("dispatch_time")),
                 "finish_time": _to_datetime(data.get("finish_time")),
                 "handle_duration": _to_int(data.get("handle_duration")),
-                "registrant": _sanitize_name_field(data.get("registrant"), idx, result, "工单-登记人"),
-                "channel": data.get("channel"),
-                "handle_node": data.get("handle_node"),
-                "handler": _sanitize_name_field(data.get("handler"), idx, result, "工单-处理人"),
+                "registrant": _truncate_str(
+                    _sanitize_name_field(data.get("registrant"), idx, result, "工单-登记人"), 64
+                ),
+                "channel": _truncate_str(data.get("channel"), 64),
+                "handle_node": _truncate_str(data.get("handle_node"), 64),
+                "handler": _truncate_str(
+                    _sanitize_name_field(data.get("handler"), idx, result, "工单-处理人"), 64
+                ),
                 "handle_opinion": data.get("handle_opinion"),
-                "is_appeal": data.get("is_appeal"),
-                "order_no": data.get("order_no"),
+                "is_appeal": _truncate_str(data.get("is_appeal"), 64),  # 迁移后列宽 64,与 DB 对齐
+                "order_no": _truncate_str(data.get("order_no"), 64),
                 "submit_params": data.get("submit_params"),
                 "refund_amount": _to_float(data.get("refund_amount")),
                 "estimated_amount": _to_float(data.get("estimated_amount")),
                 # ── 催单 & 派单 8 个新列 (2026-08-03) ──
                 "urge_count": _to_int(data.get("urge_count")),
-                "urge_status": data.get("urge_status"),
+                "urge_status": _truncate_str(data.get("urge_status"), 64),
                 "last_dispatch_time": _to_datetime(data.get("last_dispatch_time")),
-                "assignee": _sanitize_name_field(data.get("assignee"), idx, result, "工单-分配人员"),
-                "contact_person": _sanitize_name_field(data.get("contact_person"), idx, result, "工单-联系人员"),
-                "dispatcher": _sanitize_name_field(data.get("dispatcher"), idx, result, "工单-派发人员"),
-                "last_urge_by": _sanitize_name_field(data.get("last_urge_by"), idx, result, "工单-最后催单人"),
+                "assignee": _truncate_str(
+                    _sanitize_name_field(data.get("assignee"), idx, result, "工单-分配人员"), 64
+                ),
+                "contact_person": _truncate_str(
+                    _sanitize_name_field(data.get("contact_person"), idx, result, "工单-联系人员"), 64
+                ),
+                "dispatcher": _truncate_str(
+                    _sanitize_name_field(data.get("dispatcher"), idx, result, "工单-派发人员"), 64
+                ),
+                "last_urge_by": _truncate_str(
+                    _sanitize_name_field(data.get("last_urge_by"), idx, result, "工单-最后催单人"), 64
+                ),
                 "last_urge_time": _to_datetime(data.get("last_urge_time")),
             })
             result.total += 1
