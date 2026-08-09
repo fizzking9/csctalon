@@ -49,6 +49,12 @@ const routes = [
         component: () => import('@/views/data/Browser.vue'),
         meta: { title: '数据查看', icon: 'DataAnalysis', hidden: true },
       },
+      {
+        path: 'data/recharge-traffic',
+        name: 'DataRechargeTraffic',
+        component: () => import('@/views/data/RechargeTraffic.vue'),
+        meta: { title: '流量与充值查询', icon: 'Coin' },
+      },
       // 分析看板
       {
         path: 'analytics/views',
@@ -243,6 +249,12 @@ const routes = [
         name: 'ManagementIncidents',
         component: () => import('@/views/management/Incidents.vue'),
         meta: { title: '异常事件', icon: 'Warning', manager: true },
+      },
+      {
+        path: 'management/registry',
+        name: 'ManagementRegistry',
+        component: () => import('@/views/management/RegistryCenter.vue'),
+        meta: { title: '登记中心', icon: 'Form', manager: true },
       },
       {
         path: 'management/templates',

@@ -289,6 +289,8 @@ def person_timeline(
     _: CurrentUser,
     limit: int = Query(100, ge=1, le=500, description="返回条数上限"),
     days: int | None = Query(90, ge=0, description="时间窗口天数,0=不限"),
+    include_device_sn: bool = Query(True, description="每条事件包含设备SN(如有)"),
+    include_person_name: bool = Query(False, description="每条事件包含操作人姓名(如已有subject通常不需)"),
 ):
     """人员维度审计时序:用 PersonAlias 在 6 张业务表人名字段查询关联记录,
     按时间倒序统一呈现(refund/ticket/wallet/cs_record/external_complaint/card_complaint,
@@ -299,7 +301,13 @@ def person_timeline(
     p = db.get(Person, person_id)
     if not p:
         raise HTTPException(status_code=404, detail="人员不存在")
-    result = build_person_timeline(db, person_id, limit=limit, days=days if days else None)
+    result = build_person_timeline(
+        db, person_id,
+        limit=limit,
+        days=days if days else None,
+        include_device_sn=include_device_sn,
+        include_person_name=include_person_name,
+    )
     return R(data=result)
 
 

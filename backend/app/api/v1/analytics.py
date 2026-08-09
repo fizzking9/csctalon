@@ -206,8 +206,11 @@ def today_queue_endpoint(db: DBSession, _: CurrentUser, date: str | None = None,
 @router.get("/today/staff", response_model=R, summary="今日看板-人均效率表(接待/退款/完工单合成权重)")
 def today_staff(db: DBSession, _: CurrentUser, date: str | None = None,
                 start: str | None = None, end: str | None = None,
-                topn: int = Query(30, ge=1, le=200)):
-    return R(data=A.today_staff_efficiency(db, date, start, end, topn))
+                topn: int = Query(30, ge=1, le=200),
+                qw_only: bool = Query(False, description="仅显示已绑定企微(Person.qw_user_id非空)的人员"),
+                aggregate_by: str = Query("person", pattern="^(person|specialty|group|all)$",
+                                          description="聚合方式: person=按人明细/specialty=按专项/group=按行政组/all=全员合计一行")):
+    return R(data=A.today_staff_efficiency(db, date, start, end, topn, qw_only, aggregate_by))
 
 
 @router.get("/today/refund-recovery", response_model=R, summary="今日看板-退款挽回专项分析(独立视图,不冲抵接待效率)")

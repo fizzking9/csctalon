@@ -209,18 +209,35 @@
     <!-- 模块7: 人均效率表 -->
     <section class="section-card mb-24">
       <SectionHeader title="7. 人均效率" sub="会话数(次)=cs_record+工单完工条数 · 接待数(个)=智能助手SN ∪ 工单SN 跨表去重 · 排除sys/system/系统自动记录">
-        <template #extra v-if="dutyLeaders.length">
-          <el-tag type="warning" effect="plain" size="small" class="mr-4">值班组长</el-tag>
+        <template #extra>
           <el-space wrap size="small">
-            <el-tag
-              v-for="(l,i) in dutyLeaders"
-              :key="i"
+            <el-alert
+              v-if="dutyLeaders.length"
+              :title="'今日值班组长: ' + dutyLeaders.map(l => l.name).join('、')"
               type="warning"
-              effect="dark"
+              effect="light"
+              :closable="false"
               size="small"
-            >
-              {{ l.name }} · {{ l.group || l.department || '部门统管' }}
-            </el-tag>
+              style="max-width: 360px"
+            />
+            <!-- 企微筛选 -->
+            <el-tooltip effect="light" placement="top" content="仅显示 Person 维表中已绑定企微账号(qw_user_id)的员工；自动过滤 客户自助/系统位/非企微临时名">
+              <el-switch
+                v-model="staffFilter.qwOnly"
+                @change="loadAll"
+                size="small"
+                active-text="仅企微"
+                inactive-text="全部人员"
+                inline-prompt
+              />
+            </el-tooltip>
+            <!-- 聚合方式 Tab -->
+            <el-radio-group v-model="staffFilter.aggregateBy" size="small" @change="loadAll">
+              <el-radio-button label="person">按人</el-radio-button>
+              <el-radio-button label="specialty">按专项</el-radio-button>
+              <el-radio-button label="group">按分组</el-radio-button>
+              <el-radio-button label="all">全员</el-radio-button>
+            </el-radio-group>
           </el-space>
         </template>
       </SectionHeader>
@@ -395,7 +412,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, reactive, onMounted, watch } from 'vue'
 import { Timer } from '@element-plus/icons-vue'
 import { today } from '@/api/analytics'
 import BaseChart from '@/components/BaseChart.vue'
@@ -910,6 +927,10 @@ const queueData = ref({ todos: [], tasks: [], incidents: [] })
 
 // ---------- 模块6~7 人员效率表: 工作分 / 效率分 双列 + 本职/转接 breakdown ----------
 const staffRows = ref([])
+const staffFilter = reactive({
+  qwOnly: false,
+  aggregateBy: 'person', // person/specialty/group/all
+})
 
 // ---------- 模块8: 退款挽回专项分析 (独立视图, 不冲抵接待效率) ----------
 function emptyKpi() {
@@ -1185,13 +1206,18 @@ async function loadAll() {
   loading.value = true
   const params = currentParams.value
   try {
+    const staffParams = {
+      ...params,
+      qw_only: staffFilter.qwOnly ? 1 : 0,
+      aggregate_by: staffFilter.aggregateBy || 'person',
+    }
     const [k, h, r, rf, q, s, rr] = await Promise.all([
       today.kpi(params),
       today.hourlyTrend(params),
       today.reception(params),
       today.refund(params),
       today.queue(params),
-      today.staff(params),
+      today.staff(staffParams),
       today.refundRecovery(params),
     ])
     kpiData.value = k.data || {}

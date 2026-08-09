@@ -116,6 +116,8 @@ def device_timeline(
     _: CurrentUser,
     limit: int = Query(100, ge=1, le=500, description="返回条数上限"),
     days: int | None = Query(90, ge=0, description="时间窗口天数,0=不限"),
+    include_person_name: bool = Query(True, description="每条事件包含操作人姓名(如有)"),
+    include_device_sn: bool = Query(False, description="每条事件包含设备SN(如已有subject通常不需)"),
 ):
     """设备维度审计时序:合并 7 张业务表(refund/ticket/wallet/merchant_refund/cs_record/
     external_complaint/card_complaint)按 device_sn 关联的记录,按时间倒序统一呈现。
@@ -125,7 +127,13 @@ def device_timeline(
     device = db.get(Device, sn)
     if not device:
         raise HTTPException(status_code=404, detail="设备不存在")
-    result = build_device_timeline(db, sn, limit=limit, days=days if days else None)
+    result = build_device_timeline(
+        db, sn,
+        limit=limit,
+        days=days if days else None,
+        include_person_name=include_person_name,
+        include_device_sn=include_device_sn,
+    )
     # 补设备基础信息
     result["subject"] = {
         "kind": "device",

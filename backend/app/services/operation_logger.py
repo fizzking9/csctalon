@@ -27,6 +27,10 @@ RESOURCE_LABELS: dict[str, str] = {
     "analysis-views": "视图",
     "classification-rules": "分类规则",
     "match": "关联",
+    "incidents": "异常事件",
+    "measures": "管理措施",
+    "policies": "管理制度",
+    "dept-info-syncs": "部门同步",
 }
 
 # 资源 → 操作对象类型(用于 target_type 字段)
@@ -43,6 +47,10 @@ RESOURCE_TARGET_TYPE: dict[str, str] = {
     "analysis-views": "analysis_view",
     "classification-rules": "classification_rule",
     "match": "match",
+    "incidents": "incident",
+    "measures": "measure",
+    "policies": "policy",
+    "dept-info-syncs": "dept_info_sync",
 }
 
 # 子动作后缀 → 中文
@@ -60,6 +68,16 @@ SUB_ACTIONS: dict[str, str] = {
     "me": "查看自己",
     "reset-password": "重置密码",
     "fields": "字段",
+    "convert": "转预期事项",
+    "review": "审核",
+    "approve": "批准",
+    "reject": "驳回",
+    "archive": "归档",
+    "adjust": "调整",
+    "register": "登记",
+    "classify": "分类",
+    "timeline": "审计时序",
+    "review-note": "复盘批注",
 }
 
 # 方法 → 默认动作(资源级 CRUD)

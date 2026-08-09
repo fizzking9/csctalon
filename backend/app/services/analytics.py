@@ -1200,9 +1200,10 @@ def _category_case():
 
 
 def _operator_to_person_cte():
-    """返回 operator → display_name, department, group_name, specialty, position 的子查询 CTE
+    """返回 operator → display_name, department, group_name, specialty, position, qw_user_id 的子查询 CTE
 
     通过 PersonAlias.alias (归一化匹配) → Person。找不到则 operator 作为 display_name。
+    qw_user_id: 非空表示该别名所对应的 Person 已绑定企微 (有企微账号)
     """
     return (
         select(
@@ -1212,6 +1213,7 @@ def _operator_to_person_cte():
             Person.group_name.label("group_name"),
             Person.specialty.label("specialty"),
             Person.position.label("position"),
+            Person.qw_user_id.label("qw_user_id"),
         )
         .select_from(PersonAlias)
         .outerjoin(Person, PersonAlias.person_id == Person.id)
@@ -2871,8 +2873,11 @@ def _ensure_service_tickets_for_unmatched_refunds(
         if not x: return None
         return name_map.get(x, x)  # 没alias登记则保留原值
 
-    # 2. 批量判断每条退款是否有对应工单 (1 次 SQL 直接跑存在性判断)
-    # 对每个 refund 找出: EXISTS(工单 SN 匹配 & 时间差 < match_win_sec)
+    # 2. 批量判断每条退款是否有"有效"工单 (1 次 SQL 直接跑存在性判断)
+    # v3.2 P0修复: 只有匹配到 handler 非空(已指派/已处理) 的工单才算"有工单";
+    #   如果匹配到的是 handler=NULL 的用户自助工单(H5/微信投诉), 视为"仍然无有效接待人",
+    #   需要继续补建 GDREF_ 兜底工单, 避免 handler 空值落入 [未分配] 桶.
+    #   同时增加 service_category IS NOT NULL 条件以改善原因榜的覆盖率(与P0-1排序规则对齐)
     have_ticket: set[str] = set()
     # 简单策略: 直接按 SN 列表过滤 + 时间窗
     sns = sorted({r.device_sn for r in refunds_rows if r.device_sn})
@@ -2886,6 +2891,12 @@ def _ensure_service_tickets_for_unmatched_refunds(
             ServiceTicket.register_time.isnot(None),
             Refund.created_at_raw.isnot(None),
             func.abs(func.extract("epoch", ServiceTicket.register_time - Refund.created_at_raw)) < sec,
+            # v3.2 P0新增: 必须handler非空, 才算"已被服务工单覆盖"
+            ServiceTicket.handler.isnot(None),
+            ServiceTicket.handler != "",
+            # 同时工单必须有明确分类信息(避免"空分类工单"阻止补建, 导致原因榜也失真)
+            ServiceTicket.service_category.isnot(None),
+            ServiceTicket.service_category != "",
         )).where(in_range)).all()
         for rno, _tno in pairs:
             have_ticket.add(rno)
@@ -2997,13 +3008,33 @@ def today_refund_breakdown(db: Session, date: str | None = None, start: str | No
     # ── F2. 自动补建工单: 日期内 ±45d 未匹配到工单的退款, 自动建一条 service_ticket, 保证 接待人/原因 绩效不漏 ──
     _ensure_service_tickets_for_unmatched_refunds(db, ts, te, match_win_sec=_WIN_45D)
 
-    # ── CTE 共享: 每个 refund 最佳匹配工单 (DISTINCT ON 取时间差最小的, 无工单时走左连接 NULL) ──
-    # 一次 DISTINCT ON 同时带出 原因字段(scat/sitm) + 接待人字段(handler), 供后续两次聚合复用
+    # ── CTE 共享: 每个 refund 最佳匹配工单 ──
+    # v3.2 排序升级 (P0修复):
+    #   1) handler 非空优先 (避免"时差最小但handler=NULL的用户自助工单"覆盖掉"时差稍大但有真实处理人"的工单)
+    #   2) scat/sitm 非空优先 (同理, 原因榜不要选上空分类的工单)
+    #   3) 时间差最小 (原有逻辑, 作为次级排序)
+    # 同时带出 Refund.auditor/operator 作为最终兜底: 工单hdl仍空时直接回退到退款单审核人/操作人
+    _hdl_ok = case(
+        (and_(ServiceTicket.handler.isnot(None), ServiceTicket.handler != ""), 1),
+        else_=0,
+    )
+    _cat_ok = case(
+        (and_(
+            ServiceTicket.service_category.isnot(None), ServiceTicket.service_category != "",
+            ServiceTicket.service_item.isnot(None), ServiceTicket.service_item != "",
+        ), 2),
+        (and_(
+            (ServiceTicket.service_category.isnot(None)) & (ServiceTicket.service_category != ""),
+        ), 1),
+        else_=0,
+    )
     best_stmt = select(
         Refund.refund_no.label("rid"),
         Refund.refund_amount.label("amt"),
         Refund.package_name.label("pkg"),
         Refund.refund_reason.label("rrsn"),
+        Refund.auditor.label("raud"),   # 新增: 退款单审核人 (P2回退)
+        Refund.operator.label("rop"),   # 新增: 退款单操作人 (P2回退)
         # 工单字段 (左连接, 可能 NULL)
         ServiceTicket.service_category.label("scat"),
         ServiceTicket.service_item.label("sitm"),
@@ -3020,7 +3051,10 @@ def today_refund_breakdown(db: Session, date: str | None = None, start: str | No
         )) < _WIN_45D,
     )).where(between)
     best_cte = best_stmt.distinct(text("rid")).order_by(
-        text("rid"), text("diff_sec NULLS LAST")
+        text("rid"),
+        _hdl_ok.desc(),          # P0: handler 非空优先 (1 > 0)
+        _cat_ok.desc(),          # 同步: 分类非空优先
+        text("diff_sec NULLS LAST"),
     ).cte("best_match")
 
     # ── ① 左: 细分原因 Top10 (按金额倒序) ──
@@ -3055,24 +3089,68 @@ def today_refund_breakdown(db: Session, date: str | None = None, start: str | No
         for r in reason_agg
     ][:10]  # Top10 按金额
 
-    # ── ② 右: 退款接待人 Top10 (按工单处理人 handler 统计；先 JOIN PersonAlias→Person.display_name 姓名归一后分组) ──
-    # 姓名归一: PersonAlias.alias = handler(原始带企微-/wechat/SYS 等) → Person.display_name
-    # 没 alias 的原始值直接用原值兜底; 空/NULL → "[未分配]" 桶
-    op_prs = _operator_to_person_cte()
-    staff_agg = db.execute(select(
-        case(
-            (best_cte.c.hdl.is_(None) | (best_cte.c.hdl == ""), "[未分配] 未关联工单或未指派处理人"),
-            else_=func.coalesce(op_prs.c.display_name, best_cte.c.hdl),
-        ).label("name"),
+    # ── ② 右: 退款接待人 Top10 ──
+    # v3.2 两级兜底策略 (P2修复):
+    #   Tier1: 工单handler → 经 PersonAlias 归一化后取 display_name
+    #   Tier2: 工单handler仍空时 → 用退款单自身的 auditor (优先) / operator (次选) 回退计名
+    #          与 _ensure_service_tickets_for_unmatched_refunds 补建工单时取handler逻辑完全一致
+    #   Tier3: auditor/operator 都空 → 才进 "[未分配]" 桶
+    #
+    # 姓名归一化: 一次性从 best_cte 取出 hdl/raud/rop 三列的去重 raw 值集合,
+    # 用 1 次 _operator_to_person_cte 反查构建 name_map (避免 SQL 里多CTE同名冲突 & N+1),
+    # 然后在 SQL 里按优先级算出 raw_handler, 最后 Python 端统一做 display_name 替换 + 聚合.
+    # Step B1: 查所有候选name的归一结果 (1次SQL取三列, Python端合并去重构建name_map, 避免Union/CTE复杂)
+    name_rows = db.execute(select(
+        best_cte.c.hdl, best_cte.c.raud, best_cte.c.rop,
+    ).select_from(best_cte)).all()
+    all_raw: set[str] = set()
+    for r in name_rows:
+        if r.hdl: all_raw.add(r.hdl)
+        if r.raud: all_raw.add(r.raud)
+        if r.rop: all_raw.add(r.rop)
+    name_map: dict[str, str] = {}
+    if all_raw:
+        op_prs = _operator_to_person_cte()
+        nm_rows = db.execute(select(
+            op_prs.c.operator, op_prs.c.display_name,
+        ).where(op_prs.c.operator.in_(sorted(all_raw)))).all()
+        for _op, dn in nm_rows:
+            if dn and _op:
+                name_map[_op] = dn
+
+    def _dn(x: str | None) -> str | None:
+        if not x: return None
+        return name_map.get(x, x)
+
+    # Step B2: SQL 聚合只按 raw_handler (三级回退优先级) 聚合, 不做维表JOIN
+    _raw_hdl = case(
+        (best_cte.c.hdl.isnot(None) & (best_cte.c.hdl != ""), best_cte.c.hdl),
+        (best_cte.c.raud.isnot(None) & (best_cte.c.raud != ""), best_cte.c.raud),
+        (best_cte.c.rop.isnot(None) & (best_cte.c.rop != ""), best_cte.c.rop),
+        else_=None,
+    )
+    staff_raw = db.execute(select(
+        _raw_hdl.label("raw"),
         func.count().label("cnt"),
         func.coalesce(func.sum(best_cte.c.amt), 0).label("amt"),
     ).select_from(best_cte
-     .outerjoin(op_prs, op_prs.c.operator == best_cte.c.hdl)
-    ).group_by(text("name")).order_by(func.sum(best_cte.c.amt).desc()).limit(15)).all()
-    by_staff = [
-        {"name": r[0] or "[未分配]", "count": int(r.cnt or 0), "amount": round(float(r.amt or 0), 2)}
-        for r in staff_agg
-    ]
+    ).group_by(text("raw"))).all()
+
+    # Step B3: Python 端 display_name 归一 → 合并 → 排序取 Top
+    merged: dict[str, dict] = {}
+    for r in staff_raw:
+        raw = r.raw
+        if not raw:
+            nm = "[未分配] 未关联工单或未指派处理人"
+        else:
+            nm = _dn(raw) or raw or "[未分配] 未关联工单或未指派处理人"
+        if nm not in merged:
+            merged[nm] = {"name": nm, "count": 0, "amount": 0.0}
+        merged[nm]["count"] += int(r.cnt or 0)
+        merged[nm]["amount"] += float(r.amt or 0)
+    by_staff = sorted(merged.values(), key=lambda x: -x["amount"])[:15]
+    for s in by_staff:
+        s["amount"] = round(s["amount"], 2)
 
     # ── ③ 补充字段: 退款商品分布 Top10 (独立于原因维度, 用于业务分析但不混原因榜) ──
     pkg_agg = db.execute(select(
@@ -3096,13 +3174,15 @@ def today_refund_breakdown(db: Session, date: str | None = None, start: str | No
         "_spec": {
             "scope": "路线A: 退费单 refund_method='线上'",
             "reason_strategy": (
-                "v3.1: 1)[service_category or '投诉']/service_item (设备SN±45天关联工单,每退款取时间差最小的1条) → "
-                "2)未匹配工单 → 分析函数前置步骤_ensure_service_tickets_for_unmatched_refunds自动补建工单;"
-                "3)补建后仍无工单 → '[原因未登记] 未关联到工单' 统一桶"
+                "v3.2: 1)best_match DISTINCT ON排序: 先分类完整性(scat&sitm > scat > 空) → 再时差最小; "
+                "2)自动补建GDREF_工单的判定条件升级为: 只有[handler非空 & 分类非空]的工单才算'已覆盖' → "
+                "否则继续补建GDREF_以纠正原因榜; 3)补建后仍无分类 → '[原因未登记] 未关联到工单' 统一桶"
             ),
             "staff_strategy": (
-                "v3.1: 同一张best_match CTE取ServiceTicket.handler → 自动补建工单后回填handler;"
-                " 补建后仍无handler → '[未分配] 未关联工单或未指派处理人' 统一桶; Top10按退款金额倒序"
+                "v3.2 P0+P2三级兜底: 1)best_match DISTINCT ON 先选handler非空的工单(>handler空时差最小); "
+                "2)工单handler仍空 → 回退用退款单auditor → operator (与补建工单取handler口径一致, 自动PersonAlias归一); "
+                "3)auditor/operator全空 → 才进'[未分配] 未关联工单或未指派处理人'桶; "
+                "4)补建工单判定升级为: 仅handler非空工单算已覆盖, 否则仍补建GDREF_填handler"
             ),
             "time_window_seconds": _WIN_45D,
             "packages_strategy": "独立字段 packages: 按 package_name 商品 Top10 (原因榜与商品榜彻底解耦)",
@@ -3192,12 +3272,20 @@ def today_queue(db: Session, date: str | None = None, start: str | None = None, 
     }
 
 
-def today_staff_efficiency(db: Session, date: str | None = None, start: str | None = None, end: str | None = None, topn: int = 30) -> dict[str, Any]:
+def today_staff_efficiency(
+    db: Session,
+    date: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    topn: int = 30,
+    qw_only: bool = False,
+    aggregate_by: str = "person",   # "person" 按人明细 / "specialty" 按专项 / "group" 按分组 / "all" 全员汇总
+) -> dict[str, Any]:
     """模块7: 今日人均效率表 (按operator聚合, 关联Person拿display_name/group_name).
 
-    两个独立合成指标 (用户 2026-08-02 新算法, 2026-08-02 v2 二次修订):
+    两个独立合成指标 (用户 2026-08-02 新算法, 2026-08-02 v2 二次修订, 2026-08-09 v3 转接系数调整):
       a. 工作量分 (会话次数维度, 反映忙闲强度):
-         = Σ (专项会话数) × 专项难度系数 × 本职系数(本职=1.0 / 非本职转接×0.2)
+         = Σ (专项会话数) × 专项难度系数 × 本职系数(本职=1.0 / 非本职转接=固定0.2, 不再叠加专项难度)
       b. 效率分   (接待个数维度, SN去重, 反映服务覆盖面)
          —— 2026-08-02 修订: 跨表SN合并去重
          智能助手(cs_record)接待SN ∪ 服务工单(ServiceTicket)处理SN, 按当天汇总后去重
@@ -3210,8 +3298,16 @@ def today_staff_efficiency(db: Session, date: str | None = None, start: str | No
       - 岗位=主管/组长, 或HR专项属于管理层/投诉 → 全部本职, 豁免转接惩罚
       - HR未登记的新人 → 默认全部本职 (避免新人刚进来全部被打折)
 
-    非本职 = 跨专项转接, 难度系数再 × 0.2.
+    非本职 = 跨专项转接, 固定折算 TRANSFER_PENALTY (0.2), 不再 × 专项难度系数.
     系统/用户自助 虚拟账户 → 不进真人员工排名, 补在末尾 rank=NULL.
+
+    新增 2026-08-09 筛选 & 聚合:
+      qw_only = True  → 仅显示 Person 维表中 qw_user_id 非空 (已绑定企微账号) 的人员
+      aggregate_by:
+        "person"      → 原口径: 每人一行 (默认)
+        "specialty"   → 按 hr_category (咨询接待/套餐专项/退款挽回/投诉专员) 聚合
+        "group"       → 按 group_name (行政小组) 聚合
+        "all"         → 所有真人一行总汇总 (显示"全员合计")
     """
     ts, te, _, _, is_realtime, disp_range = _resolve_windows(date=date, start=start, end=end)
     if disp_range:
@@ -3310,6 +3406,7 @@ def today_staff_efficiency(db: Session, date: str | None = None, start: str | No
             op_person.c.group_name.label("grp"),
             op_person.c.position.label("pos"),
             op_person.c.specialty.label("sp"),
+            op_person.c.qw_user_id.label("qw_user_id"),
             func.coalesce(cs_q.c.c, 0).label("rc"),
             func.coalesce(cs_q.c.dc, 0).label("rdc"),
         )
@@ -3359,9 +3456,9 @@ def today_staff_efficiency(db: Session, date: str | None = None, start: str | No
               AND c.operator IS NOT NULL
               AND c.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
               AND NOT (
-                  COALESCE(c.description,'') ILIKE ALL(ARRAY['%系统自动%','%自动发送%','%自动回复%','%自动推送%','%自动补发%','%自动触发%','%自动生成%'])
-                  OR COALESCE(c.execution_result,'') ILIKE ALL(ARRAY['%系统自动%','%自动发送%','%自动回复%','%自动推送%','%自动补发%','%自动触发%','%自动生成%'])
-                  OR COALESCE(c.solution,'') ILIKE ALL(ARRAY['%系统自动%','%自动发送%','%自动回复%','%自动推送%','%自动补发%','%自动触发%','%自动生成%'])
+                  COALESCE(c.description,'') ILIKE ANY(ARRAY['%系统自动%','%自动发送%','%自动回复%','%自动推送%','%自动补发%','%自动触发%','%自动生成%'])
+                  OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY['%系统自动%','%自动发送%','%自动回复%','%自动推送%','%自动补发%','%自动触发%','%自动生成%'])
+                  OR COALESCE(c.solution,'') ILIKE ANY(ARRAY['%系统自动%','%自动发送%','%自动回复%','%自动推送%','%自动补发%','%自动触发%','%自动生成%'])
               )
         ),
         -- 子查询2: refund SN → "退款" 专项
@@ -3456,6 +3553,13 @@ def today_staff_efficiency(db: Session, date: str | None = None, start: str | No
 
     WEIGHT = {"咨询接待": 1.0, "套餐专项": 1.8, "退款挽回": 2.2, "投诉专员": 3.0}
     TRANSFER_PENALTY = 0.2
+    # 2026-08-09 用户新要求: 转接接待工作量/效率折算 = 固定 TRANSFER_PENALTY (0.2)
+    #   不再叠加 专项难度系数 WEIGHT[c], 即:
+    #   原 咨询 1.0×0.2=0.2 / 套餐 1.8×0.2=0.36 / 退款 2.2×0.2=0.44 / 投诉 3.0×0.2=0.6
+    #   新 全部 → 0.2 (理由: 转接接待本身负荷相似且不高, 不按原专项难度打折上折)
+    # 计算口径:
+    #   本职 → coef = WEIGHT[c]
+    #   转接 → coef = TRANSFER_PENALTY (固定, 不再乘以 WEIGHT[c])
     SYSTEM_VIRTUAL_EXACT = {"用户自助", "系统自动", "客户自助", "企微用户自助", "企微系统自动"}
     # 未登记到 Person 维表 的 第三方/系统/设备/公司 账号关键字 (关键字匹配 直接判非真人)
     VIRTUAL_HINT_WORDS = ("wifi","管家","科技","公司","设备","云客猫","闪猫","sys_","sys-","hqq","ykm-","畅享","商米","猫科","科联","运营")
@@ -3545,7 +3649,7 @@ def today_staff_efficiency(db: Session, date: str | None = None, start: str | No
         bd: dict[str, dict[str, Any]] = {}
         for c in CATS:
             own = mgmt or hr_cat is None or hr_cat == c
-            coef = WEIGHT[c] if own else WEIGHT[c] * TRANSFER_PENALTY
+            coef = WEIGHT[c] if own else TRANSFER_PENALTY
             sv = sess[c]; pv = peop[c]
             wp = sv * coef; ep = pv * coef
             work_score += wp; eff_score += ep
@@ -3557,11 +3661,13 @@ def today_staff_efficiency(db: Session, date: str | None = None, start: str | No
 
         raw_name = r.name or op or "未知"
         norm_name = _strip_qw_prefix(raw_name) or raw_name
+        _qw = getattr(r, "qw_user_id", None)
         record: dict[str, Any] = {
             "operator": op, "name": norm_name,
             "department": r.dept or "未设置", "group": r.grp or "未分组",
             "position": r.pos, "current_specialty": r.sp,
             "hr_category": hr_cat, "is_management": mgmt,
+            "qw_user_id": _qw,
             "reception_count": reception_count,
             "reception_device_count": reception_device_count,
             "refund_op_count": rf_op_count,
@@ -3585,6 +3691,104 @@ def today_staff_efficiency(db: Session, date: str | None = None, start: str | No
         else:
             out.append(record)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 2026-08-09 新增: 企微筛选 + 聚合视图
+    # ═══════════════════════════════════════════════════════════════════
+    def _filter_qw_only(recs: list[dict]) -> list[dict]:
+        """qw_only: 仅保留 Person 维表已绑定企微 qw_user_id 的人员"""
+        return [r for r in recs if (r.get("qw_user_id") or "").strip() != ""]
+
+    def _aggregate_records(recs: list[dict], mode: str) -> list[dict]:
+        """按 mode 聚合真人员工记录.
+        mode: person (不聚合) / specialty (按hr_category) / group (按组) / all (全员一行)
+        """
+        if mode == "person":
+            return recs
+        if not recs:
+            return recs
+        SUM_KEYS = [
+            "reception_count", "reception_device_count", "refund_op_count",
+            "sp_zixun", "sp_taocan", "sp_tuikuan", "sp_tousu",
+            "pp_zixun", "pp_taocan", "pp_tuikuan", "pp_tousu",
+            "work_score", "eff_score",
+        ]
+        buckets: dict[str, dict] = {}
+        for r in recs:
+            if mode == "specialty":
+                key = r.get("hr_category") or "未登记专项"
+                disp_name = key
+            elif mode == "group":
+                key = r.get("group") or "未分组"
+                disp_name = key
+            elif mode == "all":
+                key = "__ALL__"
+                disp_name = "全员合计"
+            else:  # fallback
+                key = r.get("name") or ""
+                disp_name = key
+            if key not in buckets:
+                buckets[key] = {
+                    "aggregate_key": key,
+                    "operator": None,
+                    "name": disp_name,
+                    "department": _merge_mode_label(r.get("department"), mode),
+                    "group": disp_name if mode == "group" else "—",
+                    "position": _merge_mode_label(r.get("position"), mode),
+                    "current_specialty": disp_name if mode == "specialty" else "—",
+                    "hr_category": disp_name if mode == "specialty" else "—",
+                    "is_management": False,
+                    "qw_user_id": None,
+                    "weights": dict(WEIGHT),
+                    "transfer_penalty": TRANSFER_PENALTY,
+                    "breakdown": {c: {
+                        "sessions": 0, "people": 0,
+                        "weight": WEIGHT.get(c, 1.0),
+                        "coef": WEIGHT.get(c, 1.0),
+                        "is_own": True,
+                        "work_contrib": 0.0, "eff_contrib": 0.0,
+                    } for c in CATS},
+                    "is_virtual": False,
+                    "_calc_note": {
+                        "aggregate_mode": mode,
+                        "sessions_merge": "聚合视图: 各人员 Σ 工作量分 / Σ 效率分",
+                    },
+                    **{k: 0 for k in SUM_KEYS},
+                }
+            b = buckets[key]
+            for k in SUM_KEYS:
+                b[k] = b[k] + (r.get(k) or 0)
+            for c in CATS:
+                rb = (r.get("breakdown") or {}).get(c) or {}
+                bb = b["breakdown"][c]
+                for k in ("sessions", "people", "work_contrib", "eff_contrib"):
+                    bb[k] = bb[k] + (rb.get(k) or 0)
+        # 后处理: round, rank 后续再打
+        out_list = list(buckets.values())
+        for b in out_list:
+            b["work_score"] = round(float(b["work_score"] or 0), 2)
+            b["eff_score"] = round(float(b["eff_score"] or 0), 2)
+            for c in CATS:
+                bb = b["breakdown"][c]
+                bb["work_contrib"] = round(float(bb["work_contrib"]), 1)
+                bb["eff_contrib"] = round(float(bb["eff_contrib"]), 1)
+        return out_list
+
+    def _merge_mode_label(val: str | None, mode: str) -> str:
+        if mode == "all":
+            return "—"
+        return val or "—"
+
+    # 先做企微筛选 (真人员工 + 虚拟 都筛一遍; 虚拟账号一般 qw_user_id 为空就被筛掉)
+    if qw_only:
+        out = _filter_qw_only(out)
+        virtual_rows = _filter_qw_only(virtual_rows)
+
+    # 真人员工 按 mode 聚合 (virtual_rows 不聚合, 原样保留在末尾)
+    aggregate_mode = (aggregate_by or "person").lower()
+    if aggregate_mode not in ("person", "specialty", "group", "all"):
+        aggregate_mode = "person"
+    out = _aggregate_records(out, aggregate_mode)
+
     out.sort(key=lambda x: -x["work_score"])
     out = out[: max(1, min(200, topn or 30))]
     for i, rec in enumerate(out, 1):
@@ -3595,6 +3799,8 @@ def today_staff_efficiency(db: Session, date: str | None = None, start: str | No
     return {
         "date": d_iso,
         "date_end": d_end_iso,
+        "qw_only": qw_only,
+        "aggregate_by": aggregate_mode,
         "data": out,
     }
 
@@ -3788,9 +3994,9 @@ def refund_recovery_analysis(
           AND c.problem_category = '退款'
           AND COALESCE(c.problem_type,'') IN ('不想用了','充值错误','设备故障','服务原因')
           AND NOT (
-              COALESCE(c.description,'') ILIKE ALL(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
-           OR COALESCE(c.execution_result,'') ILIKE ALL(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
-           OR COALESCE(c.solution,'') ILIKE ALL(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
+              COALESCE(c.description,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
+           OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
+           OR COALESCE(c.solution,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
           )
         """
     )
@@ -4103,9 +4309,9 @@ def refund_recovery_analysis(
               AND c.problem_category = '退款'
               AND COALESCE(c.problem_type,'') IN ('不想用了','充值错误','设备故障','服务原因')
               AND NOT (
-                  COALESCE(c.description,'') ILIKE ALL(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
-               OR COALESCE(c.execution_result,'') ILIKE ALL(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
-               OR COALESCE(c.solution,'') ILIKE ALL(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
+                  COALESCE(c.description,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
+               OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
+               OR COALESCE(c.solution,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
               )
             """
         ), {"ts": wk_start_utc, "te": wk_end_utc, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params}).fetchall()
@@ -4265,8 +4471,13 @@ def refund_recovery_analysis(
                   AND c.problem_category = '退款'
                   AND COALESCE(c.problem_type,'') IN ('不想用了','充值错误','设备故障','服务原因')
                   AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+                  AND NOT (
+                      COALESCE(c.description,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
+                   OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
+                   OR COALESCE(c.solution,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
+                  )
                 """
-            ), {"ts": ts0, "te": te0, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall()
+            ), {"ts": ts0, "te": te0, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params}).fetchall()
             day_to_host: dict[str, set[str]] = {}
             for r in day_host_rows:
                 if r.d is None or not r.sn: continue
@@ -4332,8 +4543,13 @@ def refund_recovery_analysis(
               AND c.problem_category = '退款'
               AND COALESCE(c.problem_type,'') IN ('不想用了','充值错误','设备故障','服务原因')
               AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+              AND NOT (
+                  COALESCE(c.description,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
+               OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
+               OR COALESCE(c.solution,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
+              )
             """
-        ), {"ts": ts_today, "te": te_today, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall()
+        ), {"ts": ts_today, "te": te_today, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params}).fetchall()
         hr_to_host: dict[int, set[str]] = {}
         for r in hr_rows:
             if r.hh is None or not r.sn: continue
@@ -4383,6 +4599,19 @@ def refund_recovery_analysis(
         "daily_reason": daily_reason,
         "daily_trend": daily_trend,
         "hourly_today": hourly_today,
+        # 2026-08-09 追加: 数据核查调试信息 (前端不展示, 便于有疑问时在接口响应中直接核对)
+        "_debug": {
+            "refund_op_count": len(refund_ops),
+            "refund_op_list_sample": list(refund_ops.keys())[:20],
+            "cs_sn_row_count": len(cs_sn_rows),
+            "global_host_sn_count": len(global_host_sns),
+            "global_fail_sn_count": len(global_fail_sns),
+            "fail_refund_sn_cnt": sum(1 for v in sn_failed_meta.values() if v.get("src") == "refund"),
+            "fail_ticket_sn_cnt": sum(1 for v in sn_failed_meta.values() if v.get("src") == "ticket"),
+            "sys_keywords_used": SYS_KW,
+            "sys_blacklist_ops": list(SYS_OP_BLACKLIST_RR),
+            "problem_type_filter": ['不想用了', '充值错误', '设备故障', '服务原因'],
+        },
     }
 
 

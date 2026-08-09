@@ -70,7 +70,7 @@ def _amount(v: Any) -> float | None:
         return None
 
 
-def _build_refund_items(rows: list[Refund]) -> list[dict]:
+def _build_refund_items(rows: list[Refund], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
     items: list[dict] = []
     for r in rows:
         amount = _amount(r.refund_amount)
@@ -79,10 +79,23 @@ def _build_refund_items(rows: list[Refund]) -> list[dict]:
             parts.append(r.refund_method)
         if r.status:
             parts.append(r.status)
-        if r.operator:
+        if include_person_name and r.operator:
             parts.append(f"操作:{r.operator}")
         if r.refund_reason:
             parts.append(r.refund_reason)
+        fields = {
+            "退费单号": r.refund_no,
+            "退款方式": r.refund_method,
+            "状态": r.status,
+            "退费金额": amount,
+            "操作人": r.operator,
+            "审核人": r.auditor,
+            "退费原因": r.refund_reason,
+            "套餐": r.package_name,
+            "创建时间": _dt_iso(r.created_at_raw),
+        }
+        if include_device_sn:
+            fields["设备SN"] = r.device_sn
         items.append({
             "type": "refund",
             "time": r.created_at_raw,
@@ -90,22 +103,14 @@ def _build_refund_items(rows: list[Refund]) -> list[dict]:
             "title": f"退费单 {r.refund_no}",
             "summary": " · ".join(parts) or "退费单",
             "amount": amount,
-            "fields": {
-                "退费单号": r.refund_no,
-                "退款方式": r.refund_method,
-                "状态": r.status,
-                "退费金额": amount,
-                "操作人": r.operator,
-                "审核人": r.auditor,
-                "退费原因": r.refund_reason,
-                "套餐": r.package_name,
-                "创建时间": _dt_iso(r.created_at_raw),
-            },
+            "device_sn": r.device_sn if include_device_sn else None,
+            "person_names": [n for n in (r.operator, r.auditor) if n] if include_person_name else None,
+            "fields": fields,
         })
     return items
 
 
-def _build_ticket_items(rows: list[ServiceTicket]) -> list[dict]:
+def _build_ticket_items(rows: list[ServiceTicket], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
     items: list[dict] = []
     for t in rows:
         amount = _amount(t.refund_amount)
@@ -114,10 +119,24 @@ def _build_ticket_items(rows: list[ServiceTicket]) -> list[dict]:
             parts.append(t.service_category)
         if t.service_item:
             parts.append(t.service_item)
-        if t.handler:
+        if include_person_name and t.handler:
             parts.append(f"处理:{t.handler}")
         if t.status:
             parts.append(t.status)
+        fields = {
+            "工单号": t.ticket_no,
+            "服务类别": t.service_category,
+            "服务项": t.service_item,
+            "状态": t.status,
+            "处理人": t.handler,
+            "登记人": t.registrant,
+            "退款金额": amount,
+            "处理时长(分)": t.handle_duration,
+            "登记时间": _dt_iso(t.register_time),
+            "完成时间": _dt_iso(t.finish_time),
+        }
+        if include_device_sn:
+            fields["设备SN"] = t.device_sn
         items.append({
             "type": "ticket",
             "time": t.finish_time or t.register_time,
@@ -125,31 +144,34 @@ def _build_ticket_items(rows: list[ServiceTicket]) -> list[dict]:
             "title": f"工单 {t.ticket_no}",
             "summary": " · ".join(parts) or "服务工单",
             "amount": amount,
-            "fields": {
-                "工单号": t.ticket_no,
-                "服务类别": t.service_category,
-                "服务项": t.service_item,
-                "状态": t.status,
-                "处理人": t.handler,
-                "登记人": t.registrant,
-                "退款金额": amount,
-                "处理时长(分)": t.handle_duration,
-                "登记时间": _dt_iso(t.register_time),
-                "完成时间": _dt_iso(t.finish_time),
-            },
+            "device_sn": t.device_sn if include_device_sn else None,
+            "person_names": [n for n in (t.handler, t.registrant) if n] if include_person_name else None,
+            "fields": fields,
         })
     return items
 
 
-def _build_wallet_items(rows: list[WalletWithdrawal]) -> list[dict]:
+def _build_wallet_items(rows: list[WalletWithdrawal], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
     items: list[dict] = []
     for w in rows:
         amount = _amount(w.op_amount)
         parts = []
         if w.op_type:
             parts.append(w.op_type)
-        if w.operator:
+        if include_person_name and w.operator:
             parts.append(f"操作:{w.operator}")
+        fields = {
+            "流水ID": w.id,
+            "操作类型": w.op_type,
+            "操作金额": amount,
+            "钱包余额": _amount(w.wallet_balance),
+            "操作人": w.operator,
+            "账户ID": w.account_id,
+            "操作时间": _dt_iso(w.op_time),
+            "备注": w.remark,
+        }
+        if include_device_sn:
+            fields["设备SN"] = w.device_sn
         items.append({
             "type": "wallet",
             "time": w.op_time,
@@ -157,21 +179,14 @@ def _build_wallet_items(rows: list[WalletWithdrawal]) -> list[dict]:
             "title": f"钱包流水 #{w.id}",
             "summary": " · ".join(parts) or "钱包流水",
             "amount": amount,
-            "fields": {
-                "流水ID": w.id,
-                "操作类型": w.op_type,
-                "操作金额": amount,
-                "钱包余额": _amount(w.wallet_balance),
-                "操作人": w.operator,
-                "账户ID": w.account_id,
-                "操作时间": _dt_iso(w.op_time),
-                "备注": w.remark,
-            },
+            "device_sn": w.device_sn if include_device_sn else None,
+            "person_names": [w.operator] if include_person_name and w.operator else None,
+            "fields": fields,
         })
     return items
 
 
-def _build_merchant_refund_items(rows: list[MerchantRefund]) -> list[dict]:
+def _build_merchant_refund_items(rows: list[MerchantRefund], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
     items: list[dict] = []
     for m in rows:
         amount = _amount(m.refund_amount)
@@ -180,6 +195,20 @@ def _build_merchant_refund_items(rows: list[MerchantRefund]) -> list[dict]:
             parts.append(m.refund_status)
         if m.merchant_id:
             parts.append(f"商户:{m.merchant_id}")
+        fields = {
+            "微信退款单号": m.wx_refund_no,
+            "商户号": m.merchant_id,
+            "退款金额": amount,
+            "手续费": _amount(m.fee),
+            "退款状态": m.refund_status,
+            "交易时间": _dt_iso(m.trade_time),
+            "商户订单号": m.merchant_order_no,
+            "商品名称": m.product_name,
+        }
+        # merchant_refund 表字段名叫 device_no (如果模型里是 device_sn 就用 device_sn, 否则看 device_no)
+        device_sn_val = getattr(m, "device_sn", None) or getattr(m, "device_no", None)
+        if include_device_sn and device_sn_val:
+            fields["设备SN"] = device_sn_val
         items.append({
             "type": "merchant_refund",
             "time": m.trade_time,
@@ -187,21 +216,14 @@ def _build_merchant_refund_items(rows: list[MerchantRefund]) -> list[dict]:
             "title": f"商户退款 {m.wx_refund_no}",
             "summary": " · ".join(parts) or "商户号现金流",
             "amount": amount,
-            "fields": {
-                "微信退款单号": m.wx_refund_no,
-                "商户号": m.merchant_id,
-                "退款金额": amount,
-                "手续费": _amount(m.fee),
-                "退款状态": m.refund_status,
-                "交易时间": _dt_iso(m.trade_time),
-                "商户订单号": m.merchant_order_no,
-                "商品名称": m.product_name,
-            },
+            "device_sn": device_sn_val if include_device_sn else None,
+            "person_names": None,  # merchant_refund 无操作人字段
+            "fields": fields,
         })
     return items
 
 
-def _build_cs_record_items(rows: list[CsRecord]) -> list[dict]:
+def _build_cs_record_items(rows: list[CsRecord], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
     items: list[dict] = []
     for c in rows:
         parts = []
@@ -209,10 +231,23 @@ def _build_cs_record_items(rows: list[CsRecord]) -> list[dict]:
             parts.append(c.problem_category)
         if c.problem_type:
             parts.append(c.problem_type)
-        if c.operator:
+        if include_person_name and c.operator:
             parts.append(f"客服:{c.operator}")
         if c.user_accepted:
             parts.append(f"用户{c.user_accepted}")
+        fields = {
+            "记录ID": c.id,
+            "问题大类": c.problem_category,
+            "问题类型": c.problem_type,
+            "方案": c.solution,
+            "操作人": c.operator,
+            "执行结果": c.execution_result,
+            "用户是否接受": c.user_accepted,
+            "操作时间": _dt_iso(c.operation_time),
+            "说明": c.description,
+        }
+        if include_device_sn:
+            fields["设备SN"] = c.device_sn
         items.append({
             "type": "cs_record",
             "time": c.operation_time,
@@ -220,22 +255,14 @@ def _build_cs_record_items(rows: list[CsRecord]) -> list[dict]:
             "title": f"客服接待 #{c.id}",
             "summary": " · ".join(parts) or "客服接待",
             "amount": None,
-            "fields": {
-                "记录ID": c.id,
-                "问题大类": c.problem_category,
-                "问题类型": c.problem_type,
-                "方案": c.solution,
-                "操作人": c.operator,
-                "执行结果": c.execution_result,
-                "用户是否接受": c.user_accepted,
-                "操作时间": _dt_iso(c.operation_time),
-                "说明": c.description,
-            },
+            "device_sn": c.device_sn if include_device_sn else None,
+            "person_names": [c.operator] if include_person_name and c.operator else None,
+            "fields": fields,
         })
     return items
 
 
-def _build_external_complaint_items(rows: list[ExternalComplaint]) -> list[dict]:
+def _build_external_complaint_items(rows: list[ExternalComplaint], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
     items: list[dict] = []
     for e in rows:
         amount = _amount(e.negotiate_refund_amount)
@@ -244,8 +271,24 @@ def _build_external_complaint_items(rows: list[ExternalComplaint]) -> list[dict]
             parts.append(e.complaint_category)
         if e.result:
             parts.append(e.result)
-        if e.follower:
+        if include_person_name and e.follower:
             parts.append(f"跟进:{e.follower}")
+        fields = {
+            "投诉编号": e.complaint_no,
+            "投诉日期": _dt_iso(e.complaint_date),
+            "平台": e.platform,
+            "投诉分类": e.complaint_category,
+            "投诉问题": e.problem,
+            "关键词": e.keyword,
+            "结果": e.result,
+            "跟进人": e.follower,
+            "接待客服": e.reception_cs,
+            "协商退款金额": amount,
+            "套餐名称": e.package_name,
+        }
+        if include_device_sn:
+            fields["设备SN"] = e.device_sn
+        persons = [n for n in (e.follower, e.reception_cs) if n] if include_person_name else None
         items.append({
             "type": "external_complaint",
             "time": e.complaint_date,
@@ -253,24 +296,14 @@ def _build_external_complaint_items(rows: list[ExternalComplaint]) -> list[dict]
             "title": f"外部投诉 {e.complaint_no or e.id}",
             "summary": " · ".join(parts) or "外部投诉",
             "amount": amount,
-            "fields": {
-                "投诉编号": e.complaint_no,
-                "投诉日期": _dt_iso(e.complaint_date),
-                "平台": e.platform,
-                "投诉分类": e.complaint_category,
-                "投诉问题": e.problem,
-                "关键词": e.keyword,
-                "结果": e.result,
-                "跟进人": e.follower,
-                "接待客服": e.reception_cs,
-                "协商退款金额": amount,
-                "套餐名称": e.package_name,
-            },
+            "device_sn": e.device_sn if include_device_sn else None,
+            "person_names": persons or None,
+            "fields": fields,
         })
     return items
 
 
-def _build_card_complaint_items(rows: list[CardComplaint]) -> list[dict]:
+def _build_card_complaint_items(rows: list[CardComplaint], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
     items: list[dict] = []
     for c in rows:
         parts = []
@@ -278,10 +311,23 @@ def _build_card_complaint_items(rows: list[CardComplaint]) -> list[dict]:
             parts.append(c.complaint_group)
         if c.problem_category:
             parts.append(c.problem_category)
-        if c.handler:
+        if include_person_name and c.handler:
             parts.append(f"处理:{c.handler}")
         if c.result:
             parts.append(c.result)
+        fields = {
+            "记录ID": c.id,
+            "投诉群": c.complaint_group,
+            "投诉日期": _dt_iso(c.complaint_date),
+            "投诉人": c.complainant,
+            "问题分类": c.problem_category,
+            "投诉问题": c.problem,
+            "结果": c.result,
+            "解决方案": c.solution,
+            "处理人": c.handler,
+        }
+        if include_device_sn:
+            fields["设备SN"] = c.device_sn
         items.append({
             "type": "card_complaint",
             "time": c.complaint_date,
@@ -289,17 +335,9 @@ def _build_card_complaint_items(rows: list[CardComplaint]) -> list[dict]:
             "title": f"卡商投诉 #{c.id}",
             "summary": " · ".join(parts) or "卡商投诉",
             "amount": None,
-            "fields": {
-                "记录ID": c.id,
-                "投诉群": c.complaint_group,
-                "投诉日期": _dt_iso(c.complaint_date),
-                "投诉人": c.complainant,
-                "问题分类": c.problem_category,
-                "投诉问题": c.problem,
-                "结果": c.result,
-                "解决方案": c.solution,
-                "处理人": c.handler,
-            },
+            "device_sn": c.device_sn if include_device_sn else None,
+            "person_names": [c.handler] if include_person_name and c.handler else None,
+            "fields": fields,
         })
     return items
 
@@ -325,11 +363,17 @@ def build_device_timeline(
     sn: str,
     limit: int = 100,
     days: int | None = 90,
+    include_person_name: bool = True,
+    include_device_sn: bool = False,
 ) -> dict:
     """构建设备维度的审计时序流
 
     查 7 张表(device_sn 外键关联;merchant_refund 字段名是 device_no):
         refund / ticket / wallet / merchant_refund / cs_record / external_complaint / card_complaint
+
+    Args:
+        include_person_name: 每条事件补充「操作人姓名」汇总到 person_names 字段及 fields 中(默认 True,满足设备审计要含人员姓名)
+        include_device_sn: 补设备 SN 字段到每条事件(设备视角默认 False,因为 subject 已带 SN)
     """
     since = _resolve_time_window(days)
     per_table_limit = max(limit, 200)  # 每表多取一些,合并后再截断 limit
@@ -387,13 +431,13 @@ def build_device_timeline(
 
     items = _merge_and_sort(
         [
-            _build_refund_items(refunds),
-            _build_ticket_items(tickets),
-            _build_wallet_items(wallets),
-            _build_merchant_refund_items(merchant_refunds),
-            _build_cs_record_items(cs_records),
-            _build_external_complaint_items(external_complaints),
-            _build_card_complaint_items(card_complaints),
+            _build_refund_items(refunds, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_ticket_items(tickets, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_wallet_items(wallets, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_merchant_refund_items(merchant_refunds, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_cs_record_items(cs_records, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_external_complaint_items(external_complaints, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_card_complaint_items(card_complaints, include_device_sn=include_device_sn, include_person_name=include_person_name),
         ],
         limit,
     )
@@ -417,6 +461,8 @@ def build_person_timeline(
     person_id: int,
     limit: int = 100,
     days: int | None = 90,
+    include_device_sn: bool = True,
+    include_person_name: bool = False,
 ) -> dict:
     """构建人员维度的审计时序流
 
@@ -425,6 +471,10 @@ def build_person_timeline(
         2. 各业务表人名字段 IN(aliases) 查询
         3. 自由文本字段(external_complaints.reception_cs)用 LIKE 匹配
     注:merchant_refund 无人员字段,不参与人员视角时序
+
+    Args:
+        include_device_sn: 每条事件补充「设备 SN」字段到 fields 中(默认 True,满足人员审计要含设备 SN)
+        include_person_name: 补操作人姓名字段(人员视角默认 False,因为 subject 已带姓名)
     """
     from app.models.person import Person, PersonAlias
 
@@ -498,12 +548,12 @@ def build_person_timeline(
 
     items = _merge_and_sort(
         [
-            _build_refund_items(refunds),
-            _build_ticket_items(tickets),
-            _build_wallet_items(wallets),
-            _build_cs_record_items(cs_records),
-            _build_external_complaint_items(external_complaints),
-            _build_card_complaint_items(card_complaints),
+            _build_refund_items(refunds, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_ticket_items(tickets, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_wallet_items(wallets, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_cs_record_items(cs_records, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_external_complaint_items(external_complaints, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_card_complaint_items(card_complaints, include_device_sn=include_device_sn, include_person_name=include_person_name),
         ],
         limit,
     )
