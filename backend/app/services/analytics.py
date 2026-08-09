@@ -4561,29 +4561,21 @@ def _view_rr_reason_dist(db: Session, params: _PARAMS_T) -> _RET_T:
     data = refund_recovery_analysis(db, start=s, end=e)
     rd = data.get("reason_dist") or []
     x_axis = [r.get("reason") or "未知" for r in rd]
-    series = [
-        {"name": "失败SN数", "type": "bar", "data": [int(r.get("order_cnt") or 0) for r in rd],
-         "barMaxWidth": 36,
-         "itemStyle": {
-             "color": (lambda idx: ["#ef4444", "#f97316", "#eab308", "#22c55e", "#06b6d4", "#6366f1", "#ec4899"][idx % 7])(0),
-             "borderRadius": [4, 4, 0, 0],
-         },
-         "label": {"show": True, "position": "top",
-                   "formatter": (lambda p: p)}},
-        {"name": "占比%", "type": "line", "yAxisIndex": 1, "smooth": True, "symbolSize": 7,
-         "data": [round(float(r.get("ratio") or 0), 1) for r in rd],
-         "itemStyle": {"color": "#7c3aed"}, "lineStyle": {"width": 3, "color": "#7c3aed"}},
-    ]
-    # Actually series[0].label.formatter must be string for echarts, and color should be a list in data. Fix below:
-    bars_data = []
     pal = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#06b6d4", "#6366f1", "#ec4899", "#0ea5e9"]
+    bars_data = []
     for idx in range(len(rd)):
         bars_data.append({
             "value": int(rd[idx].get("order_cnt") or 0),
             "itemStyle": {"color": pal[idx % len(pal)], "borderRadius": [4, 4, 0, 0]},
         })
-    series[0]["data"] = bars_data
-    series[0].pop("itemStyle", None)
+    series = [
+        {"name": "失败SN数", "type": "bar", "data": bars_data,
+         "barMaxWidth": 36,
+         "label": {"show": True, "position": "top"}},
+        {"name": "占比%", "type": "line", "yAxisIndex": 1, "smooth": True, "symbolSize": 7,
+         "data": [round(float(r.get("ratio") or 0), 1) for r in rd],
+         "itemStyle": {"color": "#7c3aed"}, "lineStyle": {"width": 3, "color": "#7c3aed"}},
+    ]
     return {
         "chart_type": "bar",
         "data": {
