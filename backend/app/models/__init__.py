@@ -13,6 +13,7 @@ from app.models.data_source import (  # noqa: F401
     SemanticRole,
     SourceType,
 )
+from app.models.dept_info_sync import DeptInfoSync  # noqa: F401
 from app.models.device import Device, DeviceTag, DeviceTagBinding, device_tag_rel  # noqa: F401
 from app.models.device_combo import DeviceCombo  # noqa: F401
 from app.models.external_complaint import ExternalComplaint  # noqa: F401
@@ -22,6 +23,7 @@ from app.models.merchant import Merchant  # noqa: F401
 from app.models.merchant_refund import MerchantRefund  # noqa: F401
 from app.models.operation_log import OperationLog  # noqa: F401
 from app.models.person import Person, PersonAlias  # noqa: F401
+from app.models.policy import Policy  # noqa: F401
 from app.models.refund import Refund  # noqa: F401
 from app.models.refund_wide import RefundWide  # noqa: F401
 from app.models.report import Report, ReportStatus, ReportType  # noqa: F401
@@ -54,6 +56,7 @@ __all__ = [
     "CardComplaint",
     "CsRecord",
     "BmsSyncLog",
+    "DeptInfoSync",
     "Device",
     "DeviceCombo",
     "DeviceTag",
@@ -64,6 +67,7 @@ __all__ = [
     "Merchant",
     "MerchantRefund",
     "OperationLog",
+    "Policy",
     "Refund",
     "RefundWide",
     "Report",
