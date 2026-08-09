@@ -2,15 +2,25 @@
 
 各业务表中的 operator/auditor/handler/registrant 等人名字段视为别名，
 映射到统一的 Person。sys/system 标记为系统自动操作，不归并到真人。
+
+架构说明 (Group/Specialty 双体系):
+- 行政分组 (Group): 行政管理单位,组长相对固定,调整频率低
+- 业务专项 (Specialty): 任务属性,负责人可能轮岗,支持临时专项,一人可多专项
+- group_name/position/specialty 为兼容镜像字段,由服务层从新表同步,保持向后兼容
 """
 
 from datetime import date, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.models.base import IDMixin, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.group import Group, PersonGroupMembership, GroupLeadershipHistory
+    from app.models.specialty import Specialty, PersonSpecialtyAssignment, SpecialtyLeadershipHistory
 
 
 class Person(IDMixin, TimestampMixin, Base):
@@ -24,24 +34,50 @@ class Person(IDMixin, TimestampMixin, Base):
     scrm_operator_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True, comment="SCRM平台客服ID(对接后回填,聚合平台内部ID≠企微ID)")
     scrm_operator_name: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="SCRM平台客服显示名原文")
     role: Mapped[str] = mapped_column(String(32), default="agent", nullable=False, comment="admin/supervisor/agent")
-    department: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="部门:企微客服部/店铺客服部(开放文本)")
-    # 以下三项为"当前镜像",由 StaffAssignment service 层在新增/删除任职时同步刷新,
-    # 不开放 PersonUpdate 直接改(避免双写不一致),保留 group_name 兼容老读取路径
-    group_name: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="当前组(镜像自最新任职)")
-    position: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="当前岗位(镜像自最新任职):客服/组长/主管")
-    specialty: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="当前专项(镜像自最新任职):接待/投诉接待/主管")
+    department: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="部门:企微/店铺/研发")
+    
+    # ========== 新架构: Group/Specialty 独立体系 ==========
+    # 当前行政分组ID (外键,指向 groups 表)
+    current_group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id"), nullable=True, index=True, comment="当前行政分组ID")
+    
+    # 兼容镜像字段(由服务层同步,保持现有代码读取路径不变):
+    group_name: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="当前组名(镜像,从groups表同步)")
+    position: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="当前岗位(客服/组长/副主管/主管)")
+    primary_specialty: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="当前主专项(镜像,从person_specialty_assignments同步)")
+    # specialty 字段保留兼容,指向 primary_specialty
+    specialty: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="当前专项(兼容字段,同primary_specialty)")
+    
     # 生命周期(离散单点事件,每人至多一次)——派生但存储,便于过滤查询
     hire_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="入职日期")
     probation_end_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="试用期到期日")
     regularization_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="转正日期")
     resignation_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="离职日期")
     employment_status: Mapped[str] = mapped_column(
-        String(16), default="active", nullable=False, index=True, comment="在职状态:active/probation/regular/resigned"
+        String(16), default="active", nullable=False, index=True, 
+        comment="在职状态:active(待入职)/probation(试用)/regular(正式)/transferred(调岗)/resigned(离职)/inactive(非活跃/占位)"
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, comment="是否已人工确认归并")
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, comment="绑定登录账号（可选）")
+
+    # ========== 关系 ==========
+    # 行政分组关系
+    current_group: Mapped["Group | None"] = relationship("Group", foreign_keys=[current_group_id], lazy="joined", post_update=True)
+    group_memberships: Mapped[list["PersonGroupMembership"]] = relationship(back_populates="person", order_by="PersonGroupMembership.effective_from.desc()")
+    group_leadership: Mapped[list["GroupLeadershipHistory"]] = relationship(
+        "GroupLeadershipHistory", 
+        foreign_keys="GroupLeadershipHistory.person_id",
+        order_by="GroupLeadershipHistory.effective_from.desc()"
+    )
+    
+    # 业务专项关系
+    specialty_assignments: Mapped[list["PersonSpecialtyAssignment"]] = relationship(back_populates="person", order_by="PersonSpecialtyAssignment.effective_from.desc()")
+    specialty_leadership: Mapped[list["SpecialtyLeadershipHistory"]] = relationship(
+        "SpecialtyLeadershipHistory",
+        foreign_keys="SpecialtyLeadershipHistory.person_id", 
+        order_by="SpecialtyLeadershipHistory.effective_from.desc()"
+    )
 
 
 class PersonAlias(IDMixin, TimestampMixin, Base):

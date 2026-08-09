@@ -43,7 +43,7 @@
 <script setup>
 import { ref, watch } from 'vue'
 import dayjs from 'dayjs'
-import { listIncidents } from '@/api'
+import { listIncidents } from '@/api/incident'
 
 const props = defineProps({ filter: { type: Object, required: true } })
 defineEmits(['view'])

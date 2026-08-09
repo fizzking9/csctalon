@@ -180,7 +180,7 @@ def list_persons(
     status: str | None = Query(None, description="confirmed/unconfirmed/inactive"),
     department: str | None = Query(None, description="按部门过滤"),
     role: str | None = Query(None, description="按角色过滤:agent/supervisor/admin"),
-    employment_status: str | None = Query(None, description="按在职状态过滤:active/probation/regular/resigned"),
+    employment_status: str | None = Query(None, description="按在职状态过滤:active(待入职)/probation(试用期)/regular(正式)/transferred(调岗)/resigned(离职)/inactive(非活跃)"),
     is_confirmed: bool | None = Query(None, description="是否已确认归并"),
     sort_by: str | None = Query(None, description="排序字段:id/display_name/department/role/employment_status/created_at/hire_date"),
     sort_order: str = Query("desc", description="asc/desc"),

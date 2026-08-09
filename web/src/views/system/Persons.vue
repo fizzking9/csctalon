@@ -115,7 +115,12 @@
                 <span style="margin-left:6px; color:#c0c4cc; font-size:12px">{{ row._personCount }}人</span>
               </template>
               <template v-else>
-                <span>{{ row.display_name }}</span>
+                <span :style="{ color: ['resigned','transferred','inactive'].includes(row.employment_status) ? '#c0c4cc' : '' }">
+                  {{ row.display_name }}
+                  <el-tag v-if="row.employment_status === 'transferred'" size="small" type="warning" effect="plain" style="margin-left:4px">调岗</el-tag>
+                  <el-tag v-else-if="row.employment_status === 'resigned'" size="small" type="danger" effect="plain" style="margin-left:4px">离职</el-tag>
+                  <el-tag v-else-if="row.employment_status === 'inactive'" size="small" type="info" effect="plain" style="margin-left:4px">非活跃</el-tag>
+                </span>
               </template>
             </template>
           </el-table-column>
@@ -146,7 +151,7 @@
               <span v-else style="color:#c0c4cc">-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="employment_status" label="在职" width="62" column-key="employment_status" :filtered-value="empStatusFilter" :filters="[{text:'在职',value:'active'},{text:'试用期',value:'probation'},{text:'正式',value:'regular'},{text:'离职',value:'resigned'}]">
+          <el-table-column prop="employment_status" label="在职" width="75" column-key="employment_status" :filtered-value="empStatusFilter" :filters="[{text:'正式',value:'regular'},{text:'试用期',value:'probation'},{text:'待入职',value:'active'},{text:'调岗',value:'transferred'},{text:'离职',value:'resigned'},{text:'非活跃',value:'inactive'}]">
             <template #default="{ row }">
               <template v-if="row._nodeType === 'person'">
                 <el-tag :type="employmentStatusTag(row.employment_status)" size="small">{{ employmentStatusLabels[row.employment_status] || row.employment_status }}</el-tag>
@@ -210,10 +215,12 @@
             </el-form-item>
             <el-form-item label="在职状态">
               <el-select v-model="editForm.employment_status" style="width:100%">
-                <el-option label="在职" value="active" />
-                <el-option label="试用期" value="probation" />
                 <el-option label="正式" value="regular" />
+                <el-option label="试用期" value="probation" />
+                <el-option label="待入职" value="active" />
+                <el-option label="调岗" value="transferred" />
                 <el-option label="离职" value="resigned" />
+                <el-option label="非活跃" value="inactive" />
               </el-select>
             </el-form-item>
             <el-form-item label="入职日期">
@@ -433,7 +440,12 @@
         <el-form-item label="在职状态">
           <el-checkbox v-model="batchApply.employment_status" style="width:90px">修改</el-checkbox>
           <el-select v-model="batchForm.employment_status" style="width: calc(100% - 100px)">
-            <el-option label="在职" value="active" /><el-option label="试用期" value="probation" /><el-option label="正式" value="regular" /><el-option label="离职" value="resigned" />
+            <el-option label="正式" value="regular" />
+            <el-option label="试用期" value="probation" />
+            <el-option label="待入职" value="active" />
+            <el-option label="调岗" value="transferred" />
+            <el-option label="离职" value="resigned" />
+            <el-option label="非活跃" value="inactive" />
           </el-select>
         </el-form-item>
         <el-form-item label="启用/停用">
@@ -657,9 +669,15 @@ const importResult = ref({ success: false, total_rows: 0, inserted_rows: 0, upda
 
 const roleLabels = { admin: '管理员', supervisor: '主管', agent: '客服' }
 const sourceLabels = { manual: '手工', xlsx_import: '快照导入' }
-const employmentStatusLabels = { active: '在职', probation: '试用期', regular: '正式', resigned: '离职' }
+const employmentStatusLabels = { 
+  active: '待入职', probation: '试用期', regular: '正式', 
+  transferred: '调岗', resigned: '离职', inactive: '非活跃' 
+}
 function employmentStatusTag(s) {
-  return { active: 'success', probation: 'warning', regular: 'success', resigned: 'danger' }[s] || 'info'
+  return { 
+    active: 'info', probation: 'warning', regular: 'success', 
+    transferred: 'warning', resigned: 'danger', inactive: 'info' 
+  }[s] || 'info'
 }
 
 async function loadData() {
