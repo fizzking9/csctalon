@@ -3736,6 +3736,7 @@ def today_staff_efficiency(
                     "position": _merge_mode_label(r.get("position"), mode),
                     "current_specialty": disp_name if mode == "specialty" else "—",
                     "hr_category": disp_name if mode == "specialty" else "—",
+                    "person_count": 0,
                     "is_management": False,
                     "qw_user_id": None,
                     "weights": dict(WEIGHT),
@@ -3755,6 +3756,7 @@ def today_staff_efficiency(
                     **{k: 0 for k in SUM_KEYS},
                 }
             b = buckets[key]
+            b["person_count"] += 1
             for k in SUM_KEYS:
                 b[k] = b[k] + (r.get(k) or 0)
             for c in CATS:
@@ -3793,9 +3795,11 @@ def today_staff_efficiency(
     out = out[: max(1, min(200, topn or 30))]
     for i, rec in enumerate(out, 1):
         rec["rank"] = i
-    for rec in virtual_rows:
-        rec["rank"] = None
-        out.append(rec)
+    # 聚合模式（按专项/分组/全员）不追加虚拟账号行，只显示聚合后的真实数据汇总
+    if aggregate_mode == "person":
+        for rec in virtual_rows:
+            rec["rank"] = None
+            out.append(rec)
     return {
         "date": d_iso,
         "date_end": d_end_iso,

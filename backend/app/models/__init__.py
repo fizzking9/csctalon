@@ -22,8 +22,10 @@ from app.models.measure import Measure  # noqa: F401
 from app.models.merchant import Merchant  # noqa: F401
 from app.models.merchant_refund import MerchantRefund  # noqa: F401
 from app.models.operation_log import OperationLog  # noqa: F401
+from app.models.group import Group, GroupLeadershipHistory, PersonGroupMembership  # noqa: F401
 from app.models.person import Person, PersonAlias  # noqa: F401
 from app.models.policy import Policy  # noqa: F401
+from app.models.specialty import Specialty, SpecialtyLeadershipHistory, PersonSpecialtyAssignment, STANDARD_SPECIALTIES  # noqa: F401
 from app.models.refund import Refund  # noqa: F401
 from app.models.refund_wide import RefundWide  # noqa: F401
 from app.models.report import Report, ReportStatus, ReportType  # noqa: F401
@@ -62,12 +64,17 @@ __all__ = [
     "DeviceTag",
     "DeviceTagBinding",
     "ExternalComplaint",
+    "Group",
+    "GroupLeadershipHistory",
+    "PersonGroupMembership",
     "Incident",
     "Measure",
     "Merchant",
     "MerchantRefund",
     "OperationLog",
     "Policy",
+    "Person",
+    "PersonAlias",
     "Refund",
     "RefundWide",
     "Report",
@@ -76,12 +83,17 @@ __all__ = [
     "ReportComment",
     "CommentTarget",
     "ReportTemplate",
+    "Specialty",
+    "SpecialtyLeadershipHistory",
+    "PersonSpecialtyAssignment",
+    "STANDARD_SPECIALTIES",
     "ScrmOperator",
     "ScrmSession",
     "ScrmSessionTransfer",
     "ScrmStaffProfile",
     "ScrmSyncLog",
     "ServiceTicket",
+    "StaffAssignment",
     "TicketActionLog",
     "SyncSourceConfig",
     "WalletWithdrawal",
@@ -100,9 +112,6 @@ __all__ = [
     "DataSourceField",
     "SemanticRole",
     "SourceType",
-    "Person",
-    "PersonAlias",
-    "StaffAssignment",
     "WeeklyReport",
     "WeeklyReportStatus",
     "WeeklySectionBinding",

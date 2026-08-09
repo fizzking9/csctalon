@@ -243,15 +243,19 @@
       </SectionHeader>
       <el-card shadow="never">
         <el-table :data="staffRows" border stripe size="small" max-height="520">
+          <!-- 排名列：所有模式都显示 -->
           <el-table-column label="排名" width="64" align="center" fixed>
             <template #default="{ $index }">
-              <el-tag v-if="$index < 3" size="small" :type="['danger','warning','success'][$index]" effect="dark">
+              <el-tag v-if="$index < 3 && staffFilter.aggregateBy !== 'all'" size="small" :type="['danger','warning','success'][$index]" effect="dark">
                 Top{{ $index + 1 }}
               </el-tag>
-              <span v-else class="text-muted">{{ $index + 1 }}</span>
+              <span v-else-if="staffFilter.aggregateBy !== 'all'" class="text-muted">{{ $index + 1 }}</span>
+              <span v-else class="text-muted">合计</span>
             </template>
           </el-table-column>
-          <el-table-column label="人员" width="170">
+
+          <!-- 按人模式：人员列 -->
+          <el-table-column v-if="staffFilter.aggregateBy === 'person'" label="人员" width="170">
             <template #default="{ row }">
               <div style="display:flex; flex-direction:column; gap:3px">
                 <div style="display:flex; align-items:center; gap:4px; flex-wrap:wrap">
@@ -267,12 +271,53 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column prop="department" label="部门" width="110">
+
+          <!-- 按专项模式：专项名称列 -->
+          <el-table-column v-else-if="staffFilter.aggregateBy === 'specialty'" label="专项" width="170">
             <template #default="{ row }">
-              <el-tag size="small" effect="plain" :type="row.department === '未设置' ? 'info' : 'success'">{{ row.department }}</el-tag>
+              <el-tag size="default" effect="dark" :type="specialtyTagType(row.name)" style="font-weight:600">
+                {{ row.name || '未知专项' }}
+              </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="岗位・分组・专项" width="208">
+
+          <!-- 按分组模式：分组名称列 -->
+          <el-table-column v-else-if="staffFilter.aggregateBy === 'group'" label="分组" width="170">
+            <template #default="{ row }">
+              <el-tag size="default" effect="dark" :type="grpTagType(row.name)" style="font-weight:600">
+                {{ row.name || '未分组' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+
+          <!-- 全员模式：名称列 -->
+          <el-table-column v-else-if="staffFilter.aggregateBy === 'all'" label="统计范围" width="170">
+            <template #default>
+              <el-tag size="default" type="primary" effect="dark" style="font-weight:600">
+                {{ staffFilter.qwOnly ? '企微全员合计' : '全员合计' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+
+          <!-- 部门列：按人/按分组模式显示 -->
+          <el-table-column v-if="staffFilter.aggregateBy === 'person' || staffFilter.aggregateBy === 'group'" prop="department" label="部门" width="110">
+            <template #default="{ row }">
+              <el-tag size="small" effect="plain" :type="row.department === '未设置' || !row.department ? 'info' : 'success'">
+                {{ row.department || '—' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+
+          <!-- 人员数：按专项/按分组/全员模式显示 -->
+          <el-table-column v-if="staffFilter.aggregateBy !== 'person'" label="人数" width="80" align="center">
+            <template #default="{ row }">
+              <span style="font-weight:600;color:#606266">{{ formatNum(row.person_count || row.staff_count || 0) }}</span>
+              <span style="color:#909399;font-size:11px">人</span>
+            </template>
+          </el-table-column>
+
+          <!-- 岗位・分组・专项列：仅按人模式显示 -->
+          <el-table-column v-if="staffFilter.aggregateBy === 'person'" label="岗位・分组・专项" width="208">
             <template #default="{ row }">
               <div style="display:flex; flex-direction:column; gap:3px">
                 <div style="display:flex; gap:4px; flex-wrap:wrap">
@@ -290,6 +335,7 @@
               </div>
             </template>
           </el-table-column>
+
           <el-table-column prop="reception_count" label="会话数(次)" width="116" align="right" sortable>
             <template #default="{ row }">{{ formatNum(row.reception_count) }}</template>
           </el-table-column>
@@ -334,7 +380,7 @@
                   </el-tag>
                 </el-tooltip>
                 <el-tooltip
-                  v-if="row.rank === null || row.is_virtual === true"
+                  v-if="staffFilter.aggregateBy === 'person' && (row.rank === null || row.is_virtual === true)"
                   effect="dark" placement="top"
                   content="系统/用户自助/第三方设备账号等 不计入真人员工排名"
                 >
@@ -1008,6 +1054,16 @@ const GRP_COLOR_MAP = {
 function grpTagType(g) {
   if (!g || g === '未分组') return 'info'
   return GRP_COLOR_MAP[g] || 'info'
+}
+// 专项标签颜色
+const SPECIALTY_COLOR_MAP = {
+  '咨询接待': 'primary',
+  '套餐专项': 'success',
+  '退款挽回': 'warning',
+  '投诉专员': 'danger',
+}
+function specialtyTagType(s) {
+  return SPECIALTY_COLOR_MAP[s] || 'info'
 }
 // 组长 4人 current_specialty 原本=「组长」(非专项名) → 按实际分组属性 反推其默认专项显示
 function inferSpecialty(r) {
