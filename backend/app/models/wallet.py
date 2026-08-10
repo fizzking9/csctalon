@@ -5,7 +5,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text
+from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -16,6 +16,12 @@ class WalletWithdrawal(IDMixin, TimestampMixin, Base):
     """钱包提现操作 - 会员钱包流水"""
 
     __tablename__ = "wallet_withdrawals"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id", "op_type", "op_time", "operator", "op_amount", "device_sn",
+            name="uq_wallet_withdrawals_business"
+        ),
+    )
 
     account_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True, comment="账户ID")
     wallet_balance: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="钱包余额")
