@@ -7,14 +7,17 @@
 """
 
 import json
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 # 运营平台(BMS / ai-acc)导出的时间为北京时间(naive,无时区)。
 # 存入 timestamptz 列时,DB 时区为 Etc/UTC,naive 值会被当 UTC 存,
@@ -559,7 +562,10 @@ def upsert_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
 
 
 def upsert_wallet(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
-    """钱包提现 - 无天然唯一键,简单 insert(on_conflict_do_nothing 兜底)"""
+    """钱包提现 - 按业务复合唯一键去重(account_id, op_type, op_time, operator, op_amount, device_sn)
+
+    防止重复同步导致数据膨胀;冲突时 DO NOTHING。
+    """
     rows: list[dict] = []
     for idx, row in enumerate(df.to_dict("records")):
         try:
@@ -579,10 +585,53 @@ def upsert_wallet(df: pd.DataFrame, mapping: dict[str, str], db: Session, result
             result.add_error(idx, f"行解析失败: {e}")
     if not rows:
         return
-    _sync_devices(rows, "device_sn", db)
-    db.execute(pg_insert(WalletWithdrawal).values(rows).on_conflict_do_nothing())
+
+    # 1. 同批次内按业务键去重
+    seen: dict[tuple, dict] = {}
+    for r in rows:
+        key = (
+            r.get("account_id"),
+            r.get("op_type"),
+            r.get("op_time"),
+            r.get("operator"),
+            r.get("op_amount"),
+            r.get("device_sn"),
+        )
+        seen[key] = r
+    unique_rows = list(seen.values())
+    dup_in_batch = len(rows) - len(unique_rows)
+    if dup_in_batch > 0:
+        logger.info(f"[wallet] 同批次内去重: {len(rows)} → {len(unique_rows)} 行 (移除 {dup_in_batch} 条重复)")
+
+    _sync_devices(unique_rows, "device_sn", db)
+
+    # 2. 查询已存在记录数(精确统计)
+    existing_count = 0
+    if unique_rows:
+        conditions = []
+        for r in unique_rows:
+            cond = and_(
+                WalletWithdrawal.account_id == r.get("account_id"),
+                WalletWithdrawal.op_type == r.get("op_type"),
+                WalletWithdrawal.op_time == r.get("op_time"),
+                WalletWithdrawal.operator == r.get("operator"),
+                WalletWithdrawal.op_amount == r.get("op_amount"),
+            )
+            if r.get("device_sn") is not None:
+                cond = and_(cond, WalletWithdrawal.device_sn == r.get("device_sn"))
+            else:
+                cond = and_(cond, WalletWithdrawal.device_sn.is_(None))
+            conditions.append(cond)
+        existing_count = db.scalar(select(func.count()).select_from(WalletWithdrawal).where(or_(*conditions))) or 0
+
+    # 3. 插入,冲突时跳过
+    db.execute(
+        pg_insert(WalletWithdrawal)
+        .values(unique_rows)
+        .on_conflict_do_nothing(constraint="uq_wallet_withdrawals_business")
+    )
     db.flush()
-    result.inserted += len(rows)
+    result.inserted += len(unique_rows) - existing_count
 
 
 def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
@@ -915,9 +964,10 @@ def upsert_merchants(df: pd.DataFrame, mapping: dict[str, str], db: Session, res
 
 
 def upsert_cs_records(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
-    """智能助手处理记录 - 无天然唯一键,简单 insert(on_conflict_do_nothing 兜底)
+    """智能助手处理记录 - 业务复合唯一键去重
 
-    同设备同时间可多次接待,不去重;SN 缺失允许(部分接待无设备号)。
+    唯一键: (device_sn, operation_time, operator, problem_category, problem_type, solution, consult_time, problem_create_time)
+    防止重复同步导致数据膨胀;冲突时 DO NOTHING(接待记录是事件流水,不需要更新)。
     """
     rows: list[dict] = []
     for idx, row in enumerate(df.to_dict("records")):
@@ -943,10 +993,54 @@ def upsert_cs_records(df: pd.DataFrame, mapping: dict[str, str], db: Session, re
             result.add_error(idx, f"行解析失败: {e}")
     if not rows:
         return
-    _sync_devices(rows, "device_sn", db)
-    db.execute(pg_insert(CsRecord).values(rows).on_conflict_do_nothing())
+
+    # 1. 同批次内按业务键去重(保留最后一条)
+    seen: dict[tuple, dict] = {}
+    for r in rows:
+        key = (
+            r.get("device_sn"),
+            r.get("operation_time"),
+            r.get("operator"),
+            r.get("problem_category"),
+            r.get("problem_type"),
+            r.get("solution"),
+            r.get("consult_time"),
+            r.get("problem_create_time"),
+        )
+        seen[key] = r
+    unique_rows = list(seen.values())
+    dup_in_batch = len(rows) - len(unique_rows)
+    if dup_in_batch > 0:
+        logger.info(f"[cs_record] 同批次内去重: {len(rows)} → {len(unique_rows)} 行 (移除 {dup_in_batch} 条重复)")
+
+    _sync_devices(unique_rows, "device_sn", db)
+
+    # 2. 查询已存在的记录数(用于精确统计 inserted)
+    #    由于唯一键包含 timestamptz 字段,用 OR 查询简化
+    existing_count = 0
+    if unique_rows:
+        conditions = []
+        for r in unique_rows:
+            conditions.append(and_(
+                CsRecord.device_sn == r.get("device_sn"),
+                CsRecord.operation_time == r.get("operation_time"),
+                CsRecord.operator == r.get("operator"),
+                CsRecord.problem_category == r.get("problem_category"),
+                CsRecord.problem_type == r.get("problem_type"),
+                CsRecord.solution == r.get("solution"),
+                CsRecord.consult_time == r.get("consult_time"),
+                CsRecord.problem_create_time == r.get("problem_create_time"),
+            ))
+        existing_count = db.scalar(select(func.count()).select_from(CsRecord).where(or_(*conditions))) or 0
+
+    # 3. 插入,冲突时跳过(按唯一约束)
+    db.execute(
+        pg_insert(CsRecord)
+        .values(unique_rows)
+        .on_conflict_do_nothing(constraint="uq_cs_record_business")
+    )
     db.flush()
-    result.inserted += len(rows)
+    result.inserted += len(unique_rows) - existing_count
 
 
 def upsert_external_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:

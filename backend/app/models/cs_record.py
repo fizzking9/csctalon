@@ -1,13 +1,13 @@
 """智能助手处理记录模型 - 客服接待与操作流水
 
 记录客服接待执行明细:接待量、工作负荷、退款挽回成功率等分析的源头数据。
-无天然唯一键(同设备同时间可多次接待),采用 IDMixin 自增主键 + pk_strategy=none,
-导入时简单 insert(on_conflict_do_nothing 兜底),与 wallet 表一致。
+采用业务复合唯一键(device_sn, operation_time, operator, problem_category, problem_type, solution, consult_time, problem_create_time)
+防止重复同步导致数据膨胀,冲突时 ON CONFLICT DO NOTHING。
 """
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -18,6 +18,14 @@ class CsRecord(IDMixin, TimestampMixin, Base):
     """智能助手处理记录 - 客服接待/操作流水"""
 
     __tablename__ = "cs_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "device_sn", "operation_time", "operator",
+            "problem_category", "problem_type", "solution",
+            "consult_time", "problem_create_time",
+            name="uq_cs_record_business"
+        ),
+    )
 
     problem_category: Mapped[str | None] = mapped_column(
         String(64), index=True, nullable=True, comment="问题大类:退款/网络问题..."

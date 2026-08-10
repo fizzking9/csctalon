@@ -7,7 +7,8 @@
   4. 异步提交: 支持后台 asyncio task 执行,API 立即返回 task_id
 
 说明:
-  - 状态保存在**内存**中(单进程模型),重启会丢失。如需跨进程持久化,可迁移到 Redis。
+  - 状态保存在**内存**中(单进程模型),重启会丢失。
+  - 部署: 使用单worker(-w 1)保证互斥锁有效; 数据库层唯一约束是重复数据的最后防线。
   - 每个 task_id = sync_{timestamp}_{rand6}
   - 历史保留最近 20 条进度,轮询足够用
 """
@@ -128,7 +129,7 @@ class SyncTask:
 
 
 class SyncTaskManager:
-    """全局同步任务管理器(单例)"""
+    """全局同步任务管理器(单例) - 单worker部署使用内存锁"""
 
     def __init__(self):
         self._lock = asyncio.Lock()  # 内部操作锁(保护状态读写)
