@@ -1211,6 +1211,8 @@ def get_scrm_sync_status(db: Session) -> list[dict]:
     types = [DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_PRIVATE, DATA_TYPE_SESSION_GROUP, DATA_TYPE_SESSION_VIRTUAL]
     out = []
     for dt in types:
+        # 从 SyncSourceConfig 读取配置(与 BMS get_sync_status 保持一致)
+        config = get_sync_source_config(db, dt) or {}
         row = db.scalar(
             select(ScrmSyncLog)
             .where(ScrmSyncLog.data_type == dt)
@@ -1220,6 +1222,10 @@ def get_scrm_sync_status(db: Session) -> list[dict]:
         if row is None:
             out.append({
                 "data_type": dt,
+                "name": config.get("name", dt),
+                "default_sync": config.get("default_sync", True),
+                "has_credentials": bool(config.get("username") and config.get("password")),
+                "enabled": config.get("enabled", True),
                 "status": "never",
                 "last_start": None,
                 "last_end": None,
@@ -1228,6 +1234,10 @@ def get_scrm_sync_status(db: Session) -> list[dict]:
         else:
             out.append({
                 "data_type": dt,
+                "name": config.get("name", dt),
+                "default_sync": config.get("default_sync", True),
+                "has_credentials": bool(config.get("username") and config.get("password")),
+                "enabled": config.get("enabled", True),
                 "status": row.status,
                 "last_start": row.start_time.isoformat() if row.start_time else None,
                 "last_end": row.end_time.isoformat() if row.end_time else None,

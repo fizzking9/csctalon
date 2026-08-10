@@ -21,12 +21,14 @@ if TYPE_CHECKING:
     from app.models.person import Person
 
 
-# 预定义的标准专项
+# 预定义的标准专项 (2026-08-10 按业务细分调整)
 STANDARD_SPECIALTIES = {
     "consulting": {"name": "咨询接待", "difficulty_weight": 1.0, "is_temporary": False, "description": "常规咨询接待工作"},
-    "complaint": {"name": "投诉接待", "difficulty_weight": 3.0, "is_temporary": False, "description": "客户投诉处理"},
     "package": {"name": "套餐专项", "difficulty_weight": 1.8, "is_temporary": False, "description": "套餐相关问题处理"},
-    "refund_recovery": {"name": "退款挽回", "difficulty_weight": 2.2, "is_temporary": False, "description": "退款客户挽回工作"},
+    "refund_processing": {"name": "退款处理", "difficulty_weight": 2.0, "is_temporary": False, "description": "日常退款操作处理(唐彩慧等)"},
+    "refund_recovery": {"name": "退款挽回", "difficulty_weight": 2.2, "is_temporary": False, "description": "退款客户挽回工作(朱海洋组)"},
+    "internal_complaint": {"name": "内部投诉", "difficulty_weight": 3.0, "is_temporary": False, "description": "私域/企微内部客户投诉处理(刘景山/苏紫依等)"},
+    "external_complaint": {"name": "外部投诉", "difficulty_weight": 5.0, "is_temporary": False, "description": "平台/12315等外部投诉处理(洪佳/陈玉红等)"},
 }
 
 

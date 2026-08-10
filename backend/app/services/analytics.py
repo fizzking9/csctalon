@@ -1337,26 +1337,11 @@ def _operator_to_person_cte(department: str | None = None,
     通过 PersonAlias.alias (归一化匹配) → Person。找不到则 operator 作为 display_name。
     qw_user_id: 非空表示该别名所对应的 Person 已绑定企微 (有企微账号)
     department/group_id/specialty_id: 可选筛选条件
+    group_name: 通过 PersonGroupMembership → Group 关联获取当前有效分组名称 (不依赖镜像字段)
     """
     person_conds = []
     if department:
         person_conds.append(Person.department == department)
-    if group_id is not None:
-        # 通过EXISTS检查是否在指定分组
-        exists_g = select(1).where(
-            PersonGroupMembership.person_id == Person.id,
-            PersonGroupMembership.group_id == group_id,
-            PersonGroupMembership.is_current == True,
-        )
-        person_conds.append(exists_g.exists())
-    if specialty_id is not None:
-        # 通过EXISTS检查是否分配指定专项
-        exists_s = select(1).where(
-            PersonSpecialtyAssignment.person_id == Person.id,
-            PersonSpecialtyAssignment.specialty_id == specialty_id,
-            PersonSpecialtyAssignment.is_current == True,
-        )
-        person_conds.append(exists_s.exists())
 
     return (
         select(
@@ -1364,13 +1349,21 @@ def _operator_to_person_cte(department: str | None = None,
             Person.id.label("person_id"),
             func.coalesce(Person.display_name, PersonAlias.alias).label("display_name"),
             Person.department.label("department"),
-            Person.group_name.label("group_name"),
+            func.coalesce(Group.name, Person.group_name).label("group_name"),
             Person.specialty.label("specialty"),
             Person.position.label("position"),
             Person.qw_user_id.label("qw_user_id"),
         )
         .select_from(PersonAlias)
         .outerjoin(Person, PersonAlias.person_id == Person.id)
+        .outerjoin(
+            PersonGroupMembership,
+            and_(
+                PersonGroupMembership.person_id == Person.id,
+                PersonGroupMembership.is_current == True,
+            ),
+        )
+        .outerjoin(Group, PersonGroupMembership.group_id == Group.id)
         .where(and_(*person_conds) if person_conds else True)
         .cte(name="op_person")
     )
@@ -3757,15 +3750,43 @@ def today_staff_efficiency(
     for r in tk_spec_rows:
         tk_spec_by_op.setdefault(r.op or "", {})[r.spec or "咨询"] = int(r.cnt or 0)
 
-    WEIGHT = {"咨询接待": 1.0, "套餐专项": 1.8, "退款挽回": 2.2, "投诉专员": 3.0}
+    # 2026-08-10 专项细分调整: 6个专项, 难度系数
+    #   咨询接待×1.0 | 套餐专项×1.8 | 退款处理×2.0 | 退款挽回×2.2 | 内部投诉×3.0 | 外部投诉×5.0
+    # 工单大类(4桶): 咨询/套餐/退款/投诉
+    #   退款大类 包含: 退款处理、退款挽回 两个专项
+    #   投诉大类 包含: 内部投诉、外部投诉 两个专项
+    WEIGHT = {
+        "咨询接待": 1.0,
+        "套餐专项": 1.8,
+        "退款处理": 2.0,
+        "退款挽回": 2.2,
+        "内部投诉": 3.0,
+        "外部投诉": 5.0,
+    }
+    # 工单大类 → 管理岗/无主项人员使用的默认系数
+    CAT_DEFAULT_WEIGHT = {
+        "咨询接待": 1.0,    # 咨询
+        "套餐专项": 1.8,    # 套餐
+        "退款处理": 2.0,    # 退款(默认退款处理系数)
+        "投诉接待": 3.0,    # 投诉(默认内部投诉系数)
+    }
+    # 工单大类key → (桶key, 大类名称, 包含的专项集合)
+    CAT_BUCKETS = [
+        ("zixun", "咨询接待", {"咨询接待"}),
+        ("taocan", "套餐专项", {"套餐专项"}),
+        ("tuikuan", "退款处理", {"退款处理", "退款挽回"}),
+        ("tousu", "投诉接待", {"内部投诉", "外部投诉"}),
+    ]
+    CATS = [c[1] for c in CAT_BUCKETS]  # ["咨询接待", "套餐专项", "退款处理", "投诉接待"]
     TRANSFER_PENALTY = 0.2
     # 2026-08-09 用户新要求: 转接接待工作量/效率折算 = 固定 TRANSFER_PENALTY (0.2)
     #   不再叠加 专项难度系数 WEIGHT[c], 即:
     #   原 咨询 1.0×0.2=0.2 / 套餐 1.8×0.2=0.36 / 退款 2.2×0.2=0.44 / 投诉 3.0×0.2=0.6
     #   新 全部 → 0.2 (理由: 转接接待本身负荷相似且不高, 不按原专项难度打折上折)
     # 计算口径:
-    #   本职 → coef = WEIGHT[c]
+    #   本职 → coef = WEIGHT[hr_cat] (本人主专项系数)
     #   转接 → coef = TRANSFER_PENALTY (固定, 不再乘以 WEIGHT[c])
+    #   管理岗 → coef = CAT_DEFAULT_WEIGHT[cat] (大类默认系数, 跨类豁免全系数)
     SYSTEM_VIRTUAL_EXACT = {"用户自助", "系统自动", "客户自助", "企微用户自助", "企微系统自动"}
     # 未登记到 Person 维表 的 第三方/系统/设备/公司 账号关键字 (关键字匹配 直接判非真人)
     VIRTUAL_HINT_WORDS = ("wifi","管家","科技","公司","设备","云客猫","闪猫","sys_","sys-","hqq","ykm-","畅享","商米","猫科","科联","运营")
@@ -3787,24 +3808,28 @@ def today_staff_efficiency(
         return False
 
     def _hr_map(hr_sp: str | None, pos: str | None) -> str | None:
-        if not hr_sp and (pos or "") in ("主管", "组长"):
+        """人员主专项归一化映射 (2026-08-10 细分后)
+        返回: 专项名称 | "管理层" | None
+        """
+        # 管理岗（主管/组长）→ 跨类全豁免
+        if (pos or "") in ("主管", "组长", "副主管"):
             return "管理层"
-        # ★ 投诉专员岗: 与主管/组长一样 跨类全系数豁免 (处理的SN全是投诉, 本来就是从别的岗转过来的)
-        if not hr_sp and (pos or "") == "投诉专员":
-            return "投诉专员"
         if not hr_sp:
             return None
-        s = hr_sp or ""
-        if "投诉" in s: return "投诉专员"
-        if "退款" in s: return "退款挽回"
+        # 精确匹配6个标准专项名称
+        s = (hr_sp or "").strip()
+        if s in WEIGHT:
+            return s
+        # 兼容旧数据的模糊匹配
+        if "外部投诉" in s: return "外部投诉"
+        if "内部投诉" in s or "投诉" in s: return "内部投诉"
+        if "退款挽回" in s: return "退款挽回"
+        if "退款处理" in s or "退款" in s: return "退款处理"
         if "套餐" in s: return "套餐专项"
         if any(k in s for k in ("咨询", "接待", "综合问题", "其他问题")):
             return "咨询接待"
-        if any(k in s for k in ("主管", "组长")):
-            return "管理层"
         return None
 
-    CATS = ["咨询接待", "套餐专项", "退款挽回", "投诉专员"]
     BUCK_FZ = ("咨询", "其他问题", "综合问题")
 
     out: list[dict[str, Any]] = []; virtual_rows: list[dict[str, Any]] = []
@@ -3835,8 +3860,13 @@ def today_staff_efficiency(
         tu_peop = sn_pp.get("退款", 0)
         to_peop = sn_pp.get("投诉", 0)
 
-        sess = {"咨询接待": z_sess, "套餐专项": t_sess, "退款挽回": tu_sess, "投诉专员": to_sess}
-        peop = {"咨询接待": z_peop, "套餐专项": t_peop, "退款挽回": tu_peop, "投诉专员": to_peop}
+        # 4 个工单大类桶 (key → sessions, people)
+        cat_data = {
+            "zixun": (z_sess, z_peop),
+            "taocan": (t_sess, t_peop),
+            "tuikuan": (tu_sess, tu_peop),
+            "tousu": (to_sess, to_peop),
+        }
         # 总接待设备数 = 4 桶 SN 并集个数 (SQL 侧没有算并集, 这里近似用桶求和; 未来如果需要精确并集再补)
         total_devices = z_peop + t_peop + tu_peop + to_peop
         # 若 total_devices 比 cs_record 侧 rdc 大, 用 total_devices 更真实; 否则保留 rdc 保持旧口径
@@ -3848,20 +3878,34 @@ def today_staff_efficiency(
 
         position = r.pos or ""
         hr_cat = _hr_map(r.sp, position)
-        # ★ 用户要求: 投诉专员岗 = 本来跨类接(处理的SN全是投诉) 同主管/组长 全部豁免转接 全系数
-        mgmt = (position in ("主管", "组长", "投诉专员")) or hr_cat == "管理层" or hr_cat == "投诉专员"
+        # 管理岗判定: 主管/组长/副主管 → 跨类全系数豁免
+        mgmt = (position in ("主管", "组长", "副主管")) or hr_cat == "管理层"
 
         work_score = 0.0; eff_score = 0.0
         bd: dict[str, dict[str, Any]] = {}
-        for c in CATS:
-            own = mgmt or hr_cat is None or hr_cat == c
-            coef = WEIGHT[c] if own else TRANSFER_PENALTY
-            sv = sess[c]; pv = peop[c]
+        for (bucket_key, cat_name, sp_set) in CAT_BUCKETS:
+            sv, pv = cat_data[bucket_key]
+            if sv == 0 and pv == 0:
+                bd[cat_name] = {"sessions": 0, "people": 0, "weight": 0, "coef": 0, "is_own": False, "work_contrib": 0, "eff_contrib": 0}
+                continue
+            # 判断本职/转接
+            if mgmt:
+                # 管理岗: 跨类豁免, 使用大类默认系数
+                own = True
+                coef = CAT_DEFAULT_WEIGHT[cat_name]
+            elif hr_cat is not None and hr_cat in sp_set:
+                # 本人主专项属于该大类 → 本职, 使用本人专项系数
+                own = True
+                coef = WEIGHT[hr_cat]
+            else:
+                # 转接 → 固定 0.2
+                own = False
+                coef = TRANSFER_PENALTY
             wp = sv * coef; ep = pv * coef
             work_score += wp; eff_score += ep
-            bd[c] = {
+            bd[cat_name] = {
                 "sessions": sv, "people": pv,
-                "weight": WEIGHT[c], "coef": round(coef, 3), "is_own": own,
+                "weight": coef, "coef": round(coef, 3), "is_own": own,
                 "work_contrib": round(wp, 1), "eff_contrib": round(ep, 1),
             }
 
@@ -3888,6 +3932,7 @@ def today_staff_efficiency(
             "_calc_note": {
                 "sessions_merge": "会话次数(次)=cs_record条数 + 对应专项工单完工条数(退款+全类工单并入)",
                 "sn_merge_rule": "接待个数(个)=智能助手SN ∪ 工单SN 跨表去重, 按人员×专项独立核算; 排除sys/system/系统自动产生的记录",
+                "weight_rule": "本职: 主专项系数(外诉×5.0/内诉×3.0/退款挽回×2.2/退款处理×2.0/套餐×1.8/咨询×1.0); 转接: 固定×0.2; 管理岗: 大类默认系数",
             },
         }
         # 非真人判定 = 精确虚拟匹配 OR 未登记+名字特征匹配
@@ -4103,22 +4148,27 @@ def refund_recovery_analysis(
     def _desc_auto_filter(col):
         return ~and_(*[func.coalesce(col, "").ilike(f"%{k}%") for k in SYS_KW])
 
-    # ---- HR 专项 映射 (复制自 today_staff_efficiency 内部函数, 保持口径一致) ----
+    # ---- HR 专项 映射 (2026-08-10 细分后版本, 与 today_staff_efficiency 保持一致) ----
     def _hr_map(hr_sp: str | None, pos: str | None) -> str | None:
-        if not hr_sp and (pos or "") in ("主管", "组长"):
+        """人员主专项归一化映射
+        返回: 专项名称 | "管理层" | None
+        """
+        if (pos or "") in ("主管", "组长", "副主管"):
             return "管理层"
-        if not hr_sp and (pos or "") == "投诉专员":
-            return "投诉专员"
         if not hr_sp:
             return None
-        s = hr_sp or ""
-        if "投诉" in s: return "投诉专员"
-        if "退款" in s: return "退款挽回"
+        s = (hr_sp or "").strip()
+        # 6个标准专项
+        if s in ("咨询接待", "套餐专项", "退款处理", "退款挽回", "内部投诉", "外部投诉"):
+            return s
+        # 兼容旧数据模糊匹配
+        if "外部投诉" in s: return "外部投诉"
+        if "内部投诉" in s or "投诉" in s: return "内部投诉"
+        if "退款挽回" in s: return "退款挽回"
+        if "退款处理" in s or "退款" in s: return "退款处理"
         if "套餐" in s: return "套餐专项"
         if any(k in s for k in ("咨询", "接待", "综合问题", "其他问题")):
             return "咨询接待"
-        if any(k in s for k in ("主管", "组长")):
-            return "管理层"
         return None
 
     # ---- 2. 先找 Person 维表: 哪些人 属于 退款专项组 ----
