@@ -2419,12 +2419,15 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
     }
 
 
-def today_hourly_trend(db: Session, date: str | None = None, start: str | None = None, end: str | None = None) -> dict[str, Any]:
-    """模块2: 时间节奏 (小时/日/周/月 按跨度自动选择粒度) v4
+def today_hourly_trend(db: Session, date: str | None = None, start: str | None = None, end: str | None = None, trend_grain: str | None = None) -> dict[str, Any]:
+    """模块2: 时间节奏 (小时/日/周/月 支持手动指定聚合粒度) v5
 
     粒度规则:
-      - 单日 → 按小时聚合 (00:00~23:00, 对应今日实时到当前小时)
-      - 多日 → 按天聚合 (date_trunc day, 标签为 MM-DD)
+      - trend_grain 手动指定优先级最高: hour/day/week/month
+      - 单日自动 → 按小时聚合 (00:00~23:00, 对应今日实时到当前小时)
+      - 多日自动 → 按天聚合 (date_trunc day, 标签为 MM-DD)
+      - 周聚合: 周一为起始, 标签如 "W32(08-04~08-10)"
+      - 月聚合: 标签如 "08月"
     按三组分类展示:
       【工作量组】左Y柱:
         - 会话数(次) / 接待数(个): 独立柱
@@ -2436,43 +2439,109 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
     """
     ts, te, _, _, is_realtime, disp_range = _resolve_windows(date=date, start=start, end=end)
 
-    # 跨度判断:
-    #   1. 当传入 date(单日模式) → 永远按小时聚合 (不管 UTC 跨日界 bug, 直接固定 hour 粒度)
-    #   2. 当传入 start+end(范围模式) → 转北京时间后算日历跨度, >1 天按 day, =1 天按 hour
-    if date and not (start or end):
-        span_days = 1
+    # 先计算跨度天数(北京时间日历日)
+    ts_sh = _dt.datetime.fromtimestamp(ts.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ).date()
+    te_sh = _dt.datetime.fromtimestamp(te.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ).date()
+    span_days = (te_sh - ts_sh).days + 1
+
+    # 确定聚合粒度
+    valid_grains = {"hour", "day", "week", "month"}
+    if trend_grain in valid_grains:
+        grain = trend_grain
+    elif span_days <= 1:
         grain = "hour"
     else:
-        # 转北京时间后计算日历日跨度 (避免 UTC 日界导致单日被误算成 2 天)
-        ts_sh = _dt.datetime.fromtimestamp(ts.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ).date()
-        te_sh = _dt.datetime.fromtimestamp(te.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ).date()
-        span_days = (te_sh - ts_sh).days + 1
-        grain = "day" if span_days > 1 else "hour"
+        grain = "day"
     # ── 时间截断函数 ──
     def _time_trunc(col):
         if grain == "hour":
             return func.date_trunc("hour", func.timezone("Asia/Shanghai", col)).label("trunc_t")
+        elif grain == "week":
+            # date_trunc('week', ...) 返回周一为起始的日期
+            return func.date_trunc("week", func.timezone("Asia/Shanghai", col)).label("trunc_t")
+        elif grain == "month":
+            return func.date_trunc("month", func.timezone("Asia/Shanghai", col)).label("trunc_t")
         return func.date_trunc("day", func.timezone("Asia/Shanghai", col)).label("trunc_t")
-    # 2. 小时/日 标签与横轴: 填充连续槽位
+    # 2. 小时/日/周/月 标签与横轴: 填充连续槽位
     now_sh = _dt.datetime.now(TZ)
+    # 预定义辅助函数: datetime转date
+    def _to_date(d):
+        if isinstance(d, _dt.datetime):
+            return d.date()
+        return d
     if grain == "hour":
         # 小时轴: 0~23 小时
-        # 注意: _time_trunc(col) = date_trunc('hour', timezone('Asia/Shanghai', col))
-        #  -> 返回的是 naive datetime, 已经是北京时间本地时刻 (例如 08:00 就是北京早8点)
-        #  -> 直接取 .hour 即可，不要再做 UTC→北京时间的二次换算！
         slots_hours = list(range(24))
         is_today_like = is_realtime
         max_slot = now_sh.hour if is_today_like else 23
         def _slot_idx(trunc_t_local: _dt.datetime) -> int | None:
-            # trunc_t_local = naive 北京datetime (例如 2026-08-01 08:00:00)，.hour 就是北京时间小时
             return int(trunc_t_local.hour)
         def _slot_label(slot: int) -> str:
             return f"{slot:02d}:00"
         x_label = "小时节奏 (北京时间)"
+        n_slots = 24
+    elif grain == "week":
+        # 周轴: 从start所在周到end所在周 (周一为起始)
+        # 用datetime对象计算周起始
+        ts_sh_dt = _dt.datetime.fromtimestamp(ts.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ)
+        te_sh_dt = _dt.datetime.fromtimestamp(te.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ)
+        def _start_of_week(d):
+            d = _to_date(d)
+            return d - timedelta(days=d.weekday())
+        cur_week_start = _start_of_week(ts_sh_dt)
+        end_week_start = _start_of_week(te_sh_dt)
+        slots_weeks = []
+        while cur_week_start <= end_week_start:
+            slots_weeks.append(cur_week_start)
+            cur_week_start += timedelta(days=7)
+        # 判断最后一周是否是当前周(实时)
+        current_week_start = _start_of_week(now_sh)
+        def _slot_idx(trunc_t_local) -> int | None:
+            # date_trunc 返回 datetime，先转 date
+            ws = _start_of_week(trunc_t_local)
+            if ws in slots_weeks:
+                return slots_weeks.index(ws)
+            return None
+        def _slot_label(slot: int) -> str:
+            ws = slots_weeks[slot]
+            we = ws + timedelta(days=6)
+            return f"W{ws.isocalendar()[1]}({ws.strftime('%m-%d')}~{we.strftime('%m-%d')})"
+        max_slot = slots_weeks.index(current_week_start) if current_week_start in slots_weeks and is_realtime else len(slots_weeks) - 1
+        x_label = "周节奏 (周一~周日)"
+        n_slots = len(slots_weeks)
+    elif grain == "month":
+        # 月轴: 从start所在月到end所在月
+        ts_sh_dt = _dt.datetime.fromtimestamp(ts.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ)
+        te_sh_dt = _dt.datetime.fromtimestamp(te.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ)
+        def _start_of_month(d):
+            d = _to_date(d)
+            return d.replace(day=1)
+        cur_month_start = _start_of_month(ts_sh_dt)
+        end_month_start = _start_of_month(te_sh_dt)
+        slots_months = []
+        while cur_month_start <= end_month_start:
+            slots_months.append(cur_month_start)
+            # 下月1号
+            if cur_month_start.month == 12:
+                cur_month_start = cur_month_start.replace(year=cur_month_start.year + 1, month=1)
+            else:
+                cur_month_start = cur_month_start.replace(month=cur_month_start.month + 1)
+        # 判断最后一月是否是当前月(实时)
+        current_month_start = _start_of_month(now_sh)
+        def _slot_idx(trunc_t_local) -> int | None:
+            ms = _start_of_month(trunc_t_local)
+            if ms in slots_months:
+                return slots_months.index(ms)
+            return None
+        def _slot_label(slot: int) -> str:
+            ms = slots_months[slot]
+            return f"{ms.strftime('%Y-%m')}"
+        max_slot = slots_months.index(current_month_start) if current_month_start in slots_months and is_realtime else len(slots_months) - 1
+        x_label = "月节奏"
+        n_slots = len(slots_months)
     else:
         # 日轴: 从 start 到 end 连续日期 (按 Asia/Shanghai 日历日)
-        ts_sh = _dt.datetime.fromtimestamp(ts.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ).date()
-        te_sh = _dt.datetime.fromtimestamp(te.replace(tzinfo=_dt.timezone.utc).timestamp(), tz=TZ).date()
+        # ts_sh/te_sh已经在开头计算为date类型
         slots_days: list[_dt.date] = []
         cur = ts_sh
         while cur <= te_sh:
@@ -2481,17 +2550,14 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         max_slot = len(slots_days) - 1
         today_date = now_sh.date()
         def _slot_idx(trunc_t_local: _dt.datetime) -> int | None:
-            # trunc_t_local = date_trunc('day', timezone('Asia/Shanghai', col)) → 已naive北京date
-            d_local = trunc_t_local.date() if hasattr(trunc_t_local, 'date') else trunc_t_local
-            if isinstance(d_local, _dt.datetime):
-                d_local = d_local.date()
+            d_local = _to_date(trunc_t_local)
             if d_local in slots_days:
                 return slots_days.index(d_local)
             return None
         def _slot_label(slot: int) -> str:
             return slots_days[slot].strftime("%m-%d")
         x_label = "日期 (跨度 {} 天)".format(len(slots_days))
-    n_slots = len(slots_days) if grain=="day" else 24
+        n_slots = len(slots_days)
     cs_rows = db.execute(
         select(_time_trunc(CsRecord.operation_time),
                func.count().label("cnt"),

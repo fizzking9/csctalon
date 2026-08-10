@@ -22,32 +22,21 @@
         @refresh="loadAll"
       >
         <template #left>
-          <!-- 1. 粒度单选: 日 / 周 / 月 / 季度 -->
+          <!-- 1. 视图粒度单选: 日 / 周 / 月 / 季度 / 年 -->
           <el-radio-group v-model="grain" size="small" style="margin-right: 12px">
             <el-radio-button value="day">日</el-radio-button>
             <el-radio-button value="week">周</el-radio-button>
             <el-radio-button value="month">月</el-radio-button>
             <el-radio-button value="quarter">季度</el-radio-button>
+            <el-radio-button value="year">年</el-radio-button>
           </el-radio-group>
-          <!-- 2. 根据粒度显示对应快捷范围 -->
+          <!-- 2. 根据视图粒度显示对应快捷选择 -->
           <el-radio-group v-if="grain === 'day'" v-model="quickDate" size="small" style="margin-right: 8px">
             <el-radio-button value="today">今日</el-radio-button>
             <el-radio-button value="yesterday">昨日</el-radio-button>
             <el-radio-button value="custom">自选日</el-radio-button>
           </el-radio-group>
-          <el-radio-group v-else-if="grain === 'week'" v-model="quickWeek" size="small" style="margin-right: 8px">
-            <el-radio-button value="this_week">本周</el-radio-button>
-            <el-radio-button value="last_week">上周</el-radio-button>
-          </el-radio-group>
-          <el-radio-group v-else-if="grain === 'month'" v-model="quickMonth" size="small" style="margin-right: 8px">
-            <el-radio-button value="this_month">本月</el-radio-button>
-            <el-radio-button value="last_month">上月</el-radio-button>
-          </el-radio-group>
-          <el-radio-group v-else-if="grain === 'quarter'" v-model="quickQuarter" size="small" style="margin-right: 8px">
-            <el-radio-button value="this_quarter">本季度</el-radio-button>
-            <el-radio-button value="last_quarter">上季度</el-radio-button>
-          </el-radio-group>
-          <!-- 3. 自定义日期(日粒度: 单日; 其他粒度: 日期范围) -->
+          <!-- 日粒度自定义单日选择 -->
           <el-date-picker
             v-if="grain === 'day' && quickDate === 'custom'"
             v-model="customDate"
@@ -56,7 +45,42 @@
             value-format="YYYY-MM-DD"
             placeholder="选择日期"
             style="width: 160px; margin-right: 8px"
+            @change="onCustomDate"
           />
+          <el-select v-else-if="grain === 'week'" v-model="weekOffset" size="small" style="width: 140px; margin-right: 8px">
+            <el-option v-for="w in weekOptions" :key="w.value" :label="w.label" :value="w.value" />
+          </el-select>
+          <el-select v-else-if="grain === 'month'" v-model="monthOffset" size="small" style="width: 140px; margin-right: 8px">
+            <el-option v-for="m in monthOptions" :key="m.value" :label="m.label" :value="m.value" />
+          </el-select>
+          <el-select v-else-if="grain === 'quarter'" v-model="quarterOffset" size="small" style="width: 140px; margin-right: 8px">
+            <el-option v-for="q in quarterOptions" :key="q.value" :label="q.label" :value="q.value" />
+          </el-select>
+          <el-select v-else-if="grain === 'year'" v-model="yearOffset" size="small" style="width: 140px; margin-right: 8px">
+            <el-option v-for="y in yearOptions" :key="y.value" :label="y.label" :value="y.value" />
+          </el-select>
+          <!-- 3. 聚合粒度选择: 日固定小时, 周固定日, 月/季/年可选 -->
+          <el-select v-if="grain === 'month' || grain === 'quarter' || grain === 'year'" v-model="trendGrain" size="small" style="width: 120px; margin-right: 8px">
+            <el-option label="按日聚合" value="day" />
+            <el-option label="按周聚合" value="week" />
+            <el-option label="按月聚合" value="month" />
+          </el-select>
+          <!-- 4. 自定义日期范围 -->
+          <el-date-picker
+            v-if="customRangeVisible"
+            v-model="customDateRange"
+            type="daterange"
+            size="small"
+            value-format="YYYY-MM-DD"
+            range-separator="至"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            style="width: 260px; margin-right: 8px"
+            @change="onCustomRangeChange"
+          />
+          <el-button v-if="grain !== 'day'" size="small" :type="customDateRange ? 'primary' : 'default'" @click="toggleCustomRange">
+            {{ customDateRange ? '自定义范围' : '自定义范围' }}
+          </el-button>
         </template>
       </FilterBar>
     </div>
@@ -510,6 +534,13 @@ import { listSpecialties } from '@/api/specialty'
 import BaseChart from '@/components/BaseChart.vue'
 import { formatMoney } from '@/utils/format'
 import dayjs from 'dayjs'
+import isoWeek from 'dayjs/plugin/isoWeek'
+import quarterOfYear from 'dayjs/plugin/quarterOfYear'
+import weekOfYear from 'dayjs/plugin/weekOfYear'
+// 扩展dayjs插件
+dayjs.extend(isoWeek)
+dayjs.extend(quarterOfYear)
+dayjs.extend(weekOfYear)
 // Today.vue 图标通过字符串名传给 KpiCard (KpiCard 内部 component :is 动态解析)
 // 本地脚本不直接使用图标组件
 
@@ -531,23 +562,92 @@ const departmentOptions = computed(() => {
   return Array.from(depts).sort()
 })
 
-// ========== 时间粒度: day / week / month / quarter ==========
-const grain = ref('day')
-const quickDate = ref('today')  // day: today / yesterday / custom
-const quickWeek = ref('this_week')   // week: this_week / last_week
-const quickMonth = ref('this_month') // month: this_month / last_month
-const quickQuarter = ref('this_quarter') // quarter: this_quarter / last_quarter
-const customDate = ref('')      // YYYY-MM-DD (日粒度 自定义)
-const quickGrainOpt = ref('all') // 供 FilterBar 占位 (无实际意义, 保持组件兼容)
-const grainQuickOptions = [{ label: '全部', value: 'all' }] // 占位
-const grainLabel = computed(() => ({ day: '日粒度', week: '周粒度', month: '月粒度', quarter: '季度粒度' }[grain.value] || '日粒度'))
-const grainTagType = computed(() => ({ day: 'success', week: 'primary', month: 'warning', quarter: 'danger' }[grain.value] || 'info'))
-// 本期名 & 对比期名 (用于: KpiCard 环比、核心指标副标题、投诉概览条等)
+// ========== 时间选择与聚合逻辑 ==========
+const grain = ref('day')                    // 视图粒度: day/week/month/quarter/year
+const quickDate = ref('today')              // day: today/yesterday/custom
+const weekOffset = ref(0)                   // week: 0=本周, 1=上周, 2=上上周... (近12周)
+const monthOffset = ref(0)                  // month: 0=本月, 1=上月... (近12月)
+const quarterOffset = ref(0)                // quarter: 0=本季度... (近8季度)
+const yearOffset = ref(0)                   // year: 0=今年... (近3年)
+const customDate = ref('')                  // 日粒度自定义单日
+const customDateRange = ref(null)           // 自定义日期范围 [start, end]
+const customRangeVisible = ref(false)       // 是否显示自定义日期范围选择器
+const trendGrain = ref('hour')              // 聚合粒度: hour/day/week/month
+const quickGrainOpt = ref('all')
+const grainQuickOptions = [{ label: '全部', value: 'all' }]
+
+// 周选项: 近12周
+const weekOptions = computed(() => {
+  const opts = []
+  for (let i = 0; i < 12; i++) {
+    const d = dayjs().subtract(i, 'week')
+    const ws = d.startOf('week').add(1, 'day') // 周一
+    const we = ws.add(6, 'day')               // 周日
+    const label = i === 0 ? '本周' : i === 1 ? '上周' : `${ws.format('MM-DD')}~${we.format('MM-DD')}`
+    opts.push({ label, value: i })
+  }
+  return opts
+})
+// 月选项: 近12月
+const monthOptions = computed(() => {
+  const opts = []
+  for (let i = 0; i < 12; i++) {
+    const d = dayjs().subtract(i, 'month')
+    const label = i === 0 ? '本月' : i === 1 ? '上月' : d.format('YYYY年MM月')
+    opts.push({ label, value: i })
+  }
+  return opts
+})
+// 季度选项: 近8季度
+const quarterOptions = computed(() => {
+  const opts = []
+  for (let i = 0; i < 8; i++) {
+    const d = dayjs().subtract(i, 'quarter')
+    const q = d.quarter()
+    const label = i === 0 ? '本季度' : i === 1 ? '上季度' : `${d.year()}年Q${q}`
+    opts.push({ label, value: i })
+  }
+  return opts
+})
+// 年选项: 近3年
+const yearOptions = computed(() => {
+  const opts = []
+  for (let i = 0; i < 3; i++) {
+    const d = dayjs().subtract(i, 'year')
+    const label = i === 0 ? '今年' : i === 1 ? '去年' : `${d.year()}年`
+    opts.push({ label, value: i })
+  }
+  return opts
+})
+
+// 标签显示
+const grainLabel = computed(() => {
+  const gMap = { day: '日视图', week: '周视图', month: '月视图', quarter: '季度视图', year: '年视图' }
+  const tMap = { hour: '·按小时', day: '·按日', week: '·按周', month: '·按月' }
+  return (gMap[grain.value] || '日视图') + (tMap[trendGrain.value] || '')
+})
+const grainTagType = computed(() => ({ day: 'success', week: 'primary', month: 'warning', quarter: 'danger', year: 'info' }[grain.value] || 'info'))
+
+// 本期名 & 对比期名
 const periodName = computed(() => {
+  if (customDateRange.value) return '自定义范围'
   switch (grain.value) {
-    case 'week':    return quickWeek.value  === 'last_week'  ? '上周' : '本周'
-    case 'month':   return quickMonth.value === 'last_month' ? '上月' : '本月'
-    case 'quarter': return quickQuarter.value === 'last_quarter' ? '上季度' : '本季度'
+    case 'week': {
+      const i = weekOffset.value
+      return i === 0 ? '本周' : i === 1 ? '上周' : `第${dayjs().subtract(i, 'week').isoWeek()}周`
+    }
+    case 'month': {
+      const i = monthOffset.value
+      return i === 0 ? '本月' : i === 1 ? '上月' : dayjs().subtract(i, 'month').format('YYYY年MM月')
+    }
+    case 'quarter': {
+      const i = quarterOffset.value
+      return i === 0 ? '本季度' : i === 1 ? '上季度' : `${dayjs().subtract(i, 'quarter').year()}年Q${dayjs().subtract(i, 'quarter').quarter()}`
+    }
+    case 'year': {
+      const i = yearOffset.value
+      return i === 0 ? '今年' : i === 1 ? '去年' : `${dayjs().subtract(i, 'year').year()}年`
+    }
     case 'day':
     default:
       if (quickDate.value === 'yesterday') return '昨日'
@@ -556,10 +656,24 @@ const periodName = computed(() => {
   }
 })
 const compareName = computed(() => {
+  if (customDateRange.value) return '对比期'
   switch (grain.value) {
-    case 'week':    return quickWeek.value  === 'last_week'  ? '前周' : '上周'
-    case 'month':   return quickMonth.value === 'last_month' ? '前月' : '上月'
-    case 'quarter': return quickQuarter.value === 'last_quarter' ? '前季' : '上季度'
+    case 'week': {
+      const i = weekOffset.value + 1
+      return i === 1 ? '上周' : `前${i}周`
+    }
+    case 'month': {
+      const i = monthOffset.value + 1
+      return i === 1 ? '上月' : `前${i}月`
+    }
+    case 'quarter': {
+      const i = quarterOffset.value + 1
+      return i === 1 ? '上季度' : `前${i}季`
+    }
+    case 'year': {
+      const i = yearOffset.value + 1
+      return i === 1 ? '去年' : `前${i}年`
+    }
     case 'day':
     default:
       if (quickDate.value === 'yesterday') return '前日'
@@ -567,37 +681,54 @@ const compareName = computed(() => {
       return '昨日'
   }
 })
-// 节奏粒度说明: 日粒度=小时级, 其他粒度=日历日级
-const rhythmSub = computed(() => grain.value === 'day'
-  ? '【工作量】会话/接待 · 【款项】退款笔数四路堆叠+金额四路堆叠面积+真实现金流E虚线 · 【投诉】投诉量 · 按北京时间小时级'
-  : '【工作量】会话/接待 · 【款项】退款笔数四路堆叠+金额四路堆叠面积+真实现金流E虚线 · 【投诉】投诉量 · 按北京时间日历日'
-)
 
-// ---- 计算当前实际时间范围 [start, end] YYYY-MM-DD (start=end=单日 时 end 可为空传) ----
-function _startOfWeek(d) { return d.day(1) } // 周一为起始 (国内习惯)
-function _endOfWeek(d) { return d.day(7) }   // 周日为结束
-function _startOfQuarter(d) { return d.startOf('quarter') }
-function _endOfQuarter(d) { return d.endOf('quarter') }
+// 时间粒度自动映射规则
+function getAutoTrendGrain() {
+  if (grain.value === 'day') return 'hour'
+  if (grain.value === 'week') return 'day'
+  return trendGrain.value || 'day'
+}
+
+// 节奏副标题
+const rhythmSub = computed(() => {
+  const tg = trendGrain.value
+  const grainDesc = { hour: '按北京时间小时级', day: '按日历日', week: '按周(周一~周日)', month: '按月' }
+  return `【工作量】会话/接待 · 【款项】退款笔数四路堆叠+金额四路堆叠面积+真实现金流E虚线 · 【投诉】投诉量 · ${grainDesc[tg] || '自动'}`
+})
+
+// ---- 计算当前实际时间范围 [start, end] YYYY-MM-DD ----
+function _startOfWeek(d) { return d.day(1) }
+function _endOfWeek(d) { return d.day(7) }
 
 const timeRange = computed(() => {
+  // 优先使用自定义日期范围
+  if (customDateRange.value && customDateRange.value.length === 2) {
+    return [customDateRange.value[0], customDateRange.value[1]]
+  }
   const now = dayjs()
   switch (grain.value) {
     case 'week': {
-      const base = quickWeek.value === 'last_week' ? now.subtract(1, 'week') : now
+      const base = now.subtract(weekOffset.value, 'week')
       const s = _startOfWeek(base.startOf('day'))
-      const e = (quickWeek.value === 'this_week') ? now : _endOfWeek(base.startOf('day'))
+      const e = (weekOffset.value === 0) ? now : _endOfWeek(base.startOf('day'))
       return [s.format('YYYY-MM-DD'), e.format('YYYY-MM-DD')]
     }
     case 'month': {
-      const base = quickMonth.value === 'last_month' ? now.subtract(1, 'month') : now
+      const base = now.subtract(monthOffset.value, 'month')
       const s = base.startOf('month')
-      const e = (quickMonth.value === 'this_month') ? now : base.endOf('month')
+      const e = (monthOffset.value === 0) ? now : base.endOf('month')
       return [s.format('YYYY-MM-DD'), e.format('YYYY-MM-DD')]
     }
     case 'quarter': {
-      const base = quickQuarter.value === 'last_quarter' ? now.subtract(1, 'quarter') : now
-      const s = _startOfQuarter(base)
-      const e = (quickQuarter.value === 'this_quarter') ? now : _endOfQuarter(base)
+      const base = now.subtract(quarterOffset.value, 'quarter')
+      const s = base.startOf('quarter')
+      const e = (quarterOffset.value === 0) ? now : base.endOf('quarter')
+      return [s.format('YYYY-MM-DD'), e.format('YYYY-MM-DD')]
+    }
+    case 'year': {
+      const base = now.subtract(yearOffset.value, 'year')
+      const s = base.startOf('year')
+      const e = (yearOffset.value === 0) ? now : base.endOf('year')
       return [s.format('YYYY-MM-DD'), e.format('YYYY-MM-DD')]
     }
     case 'day':
@@ -607,36 +738,64 @@ const timeRange = computed(() => {
       else if (quickDate.value === 'yesterday') d = now.subtract(1, 'day')
       else d = now
       const iso = d.format('YYYY-MM-DD')
-      // 日实时(今日)/昨日整天 → 后端用 date 即可, 传 start=end 也等价
       return [iso, iso]
     }
   }
 })
-// 展示给大标题的日期(含范围)
+
+// 展示给大标题的日期
 const displayDate = computed(() => {
   const [s, e] = timeRange.value
   if (!e || s === e) return s
   return `${s} ~ ${e}`
 })
-// 当前请求参数: 单日 传 date / 范围 传 start + end
-// 注意：人员筛选(部门/分组/专项)仅作用于「7. 人均效率」表格，不影响其他全量看板数据
+
+// 当前请求参数
 const currentParams = computed(() => {
   const [s, e] = timeRange.value
   const rangeDays = dayjs(e).diff(dayjs(s), 'day') + 1
   let params
   if (rangeDays <= 1) {
-    // 单日: 判断是不是今天(实时) 还是昨天(整天)/历史(整天)
     const todayIso = dayjs().format('YYYY-MM-DD')
-    if (s === todayIso) {
-      params = {} // 实时今天: 不传任何 (向后兼容最稳)
+    if (s === todayIso && !customDateRange.value) {
+      params = {}
     } else {
       params = { date: s }
     }
   } else {
     params = { start: s, end: e }
   }
+  // 添加聚合粒度参数
+  params.trend_grain = getAutoTrendGrain()
   return params
 })
+
+// 切换视图粒度时重置默认值
+watch(grain, (newGrain) => {
+  customDateRange.value = null
+  customRangeVisible.value = false
+  if (newGrain === 'month' || newGrain === 'quarter' || newGrain === 'year') {
+    trendGrain.value = 'day'
+  } else if (newGrain === 'week') {
+    trendGrain.value = 'day'
+  } else {
+    trendGrain.value = 'hour'
+  }
+})
+
+// 自定义日期范围
+function toggleCustomRange() {
+  customRangeVisible.value = !customRangeVisible.value
+  if (!customRangeVisible.value) {
+    customDateRange.value = null
+    loadAll()
+  }
+}
+function onCustomRangeChange(val) {
+  if (val && val.length === 2) {
+    loadAll()
+  }
+}
 
 // ---------- 日期水印 (SVG旋转平铺, 绝对定位穿透 pointer-events, 卡片内容区/卡片间都能看到; 局部截图也清晰) ----------
 const WATERMARK_BOARD_NAME = '运营看板'
@@ -1595,9 +1754,8 @@ async function loadAll() {
   }
 }
 
-// 时间粒度/快捷范围变化才需要重新请求后端
-// 人员筛选(部门/分组/专项)是纯前端过滤，不需要重新请求，computed自动更新
-watch([grain, quickDate, quickWeek, quickMonth, quickQuarter, customDate], () => {
+// 时间粒度/快捷范围/聚合粒度变化都需要重新请求后端
+watch([grain, quickDate, weekOffset, monthOffset, quarterOffset, yearOffset, customDate, trendGrain, customDateRange], () => {
   loadAll()
 })
 

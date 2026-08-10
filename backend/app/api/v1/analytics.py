@@ -191,10 +191,11 @@ def today_kpi_endpoint(db: DBSession, _: CurrentUser, date: str | None = None, s
     return R(data=A.today_kpi(db, date, start, end))
 
 
-@router.get("/today/hourly-trend", response_model=R, summary="今日看板-小时节奏(接待量柱+退款金额线,双Y轴)")
+@router.get("/today/hourly-trend", response_model=R, summary="今日看板-时间节奏(接待量柱+退款金额线,双Y轴,支持hour/day/week/month粒度)")
 def today_hourly(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
+                 trend_grain: str | None = Query(None, pattern="^(hour|day|week|month)$", description="聚合粒度: hour=按小时, day=按日, week=按周, month=按月; 不传则根据时间跨度自动选择"),
                  department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
-    return R(data=A.today_hourly_trend(db, date, start, end))
+    return R(data=A.today_hourly_trend(db, date, start, end, trend_grain=trend_grain))
 
 
 @router.get("/today/reception", response_model=R, summary="今日看板-接待分项(分类饼+Top客服柱)")
