@@ -178,28 +178,40 @@ def rw_daily_split(db: DBSession, _: CurrentUser, start: str | None = None, end:
 # ---------- 看板7: 今日看板 (单日切面 + 实时节奏) ----------
 
 
+def _add_filter_params(q):
+    """给查询函数添加人员筛选参数装饰器"""
+    return q
+
+
 @router.get("/today/kpi", response_model=R, summary="今日看板-KPI汇总卡片(6项+昨日环比)")
-def today_kpi_endpoint(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None):
+def today_kpi_endpoint(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
+                      department: str | None = Query(None, description="按部门筛选"),
+                      group_id: int | None = Query(None, description="按分组ID筛选"),
+                      specialty_id: int | None = Query(None, description="按专项ID筛选")):
     return R(data=A.today_kpi(db, date, start, end))
 
 
 @router.get("/today/hourly-trend", response_model=R, summary="今日看板-小时节奏(接待量柱+退款金额线,双Y轴)")
-def today_hourly(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None):
+def today_hourly(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
+                 department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
     return R(data=A.today_hourly_trend(db, date, start, end))
 
 
 @router.get("/today/reception", response_model=R, summary="今日看板-接待分项(分类饼+Top客服柱)")
-def today_reception(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None):
+def today_reception(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
+                    department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
     return R(data=A.today_reception_breakdown(db, date, start, end))
 
 
 @router.get("/today/refund", response_model=R, summary="今日看板-退款分项(原因Top10+方式分布)")
-def today_refund(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None):
+def today_refund(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
+                 department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
     return R(data=A.today_refund_breakdown(db, date, start, end))
 
 
 @router.get("/today/queue", response_model=R, summary="今日看板-处理队列(今日到期待办+进行中专项+今日异常)")
-def today_queue_endpoint(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None):
+def today_queue_endpoint(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
+                         department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
     return R(data=A.today_queue(db, date, start, end))
 
 
@@ -209,14 +221,19 @@ def today_staff(db: DBSession, _: CurrentUser, date: str | None = None,
                 topn: int = Query(30, ge=1, le=200),
                 qw_only: bool = Query(False, description="仅显示已绑定企微(Person.qw_user_id非空)的人员"),
                 aggregate_by: str = Query("person", pattern="^(person|specialty|group|all)$",
-                                          description="聚合方式: person=按人明细/specialty=按专项/group=按行政组/all=全员合计一行")):
-    return R(data=A.today_staff_efficiency(db, date, start, end, topn, qw_only, aggregate_by))
+                                          description="聚合方式: person=按人明细/specialty=按专项/group=按行政组/all=全员合计一行"),
+                department: str | None = Query(None, description="按部门筛选"),
+                group_id: int | None = Query(None, description="按分组ID筛选"),
+                specialty_id: int | None = Query(None, description="按专项ID筛选")):
+    return R(data=A.today_staff_efficiency(db, date, start, end, topn, qw_only, aggregate_by,
+                                           department=department, group_id=group_id, specialty_id=specialty_id))
 
 
 @router.get("/today/refund-recovery", response_model=R, summary="今日看板-退款挽回专项分析(独立视图,不冲抵接待效率)")
 def today_refund_recovery_endpoint(
     db: DBSession, _: CurrentUser, date: str | None = None,
     start: str | None = None, end: str | None = None,
+    department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)
 ):
     """退款挽回专项分析: 基于退款专项组人员接待SN ∩ 最终退款SN 的交集分析.
 

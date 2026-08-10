@@ -78,11 +78,32 @@
       <!-- 左栏:人员列表 -->
       <el-card class="left-panel" shadow="never">
         <div class="flex-between mb-8" style="flex-wrap: wrap; gap: 6px">
-          <el-radio-group v-model="filter.status" size="small" @change="onStatusChange">
-            <el-radio-button value="confirmed">已确认</el-radio-button>
-            <el-radio-button value="unconfirmed">待确认</el-radio-button>
-            <el-radio-button value="inactive">已停用</el-radio-button>
-          </el-radio-group>
+          <div class="flex gap-8" style="flex-wrap: wrap; align-items: center">
+            <el-radio-group v-model="filter.status" size="small" @change="onStatusChange">
+              <el-radio-button value="confirmed">已确认</el-radio-button>
+              <el-radio-button value="unconfirmed">待确认</el-radio-button>
+              <el-radio-button value="inactive">已停用</el-radio-button>
+            </el-radio-group>
+            <el-select v-model="filter.department" placeholder="部门" size="small" clearable style="width: 100px" @change="loadData">
+              <el-option label="企微" value="企微" />
+              <el-option label="店铺" value="店铺" />
+              <el-option label="研发" value="研发" />
+            </el-select>
+            <el-select v-model="filter.group_id" placeholder="分组" size="small" clearable filterable style="width: 130px" @change="loadData">
+              <el-option v-for="g in groupsList" :key="g.id" :label="g.name" :value="g.id" />
+            </el-select>
+            <el-select v-model="filter.specialty_id" placeholder="专项" size="small" clearable filterable style="width: 130px" @change="loadData">
+              <el-option v-for="s in specialtiesList" :key="s.id" :label="s.name" :value="s.id" />
+            </el-select>
+            <el-select v-model="filter.employment_status" placeholder="在职状态" size="small" clearable style="width: 110px" @change="loadData">
+              <el-option label="正式" value="regular" />
+              <el-option label="试用期" value="probation" />
+              <el-option label="待入职" value="active" />
+              <el-option label="调岗" value="transferred" />
+              <el-option label="离职" value="resigned" />
+              <el-option label="非活跃" value="inactive" />
+            </el-select>
+          </div>
           <el-button size="small" type="warning" :icon="Edit" :disabled="!selectedPersonIds.length" @click="openBatchEdit">
             批量编辑<span v-if="selectedPersonIds.length">({{ selectedPersonIds.length }})</span>
           </el-button>
@@ -142,6 +163,27 @@
             <template #default="{ row }">
               <span v-if="row._nodeType === 'group'" style="color:#909399">{{ row.display_name || '未分组' }}</span>
               <span v-else-if="row._nodeType === 'person' && row.group_name" style="color:#606266">{{ row.group_name }}</span>
+              <span v-else style="color:#c0c4cc">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="专项" min-width="160" show-overflow-tooltip>
+            <template #default="{ row }">
+              <template v-if="row._nodeType === 'person'">
+                <template v-if="row.current_specialties && row.current_specialties.length">
+                  <el-tag 
+                    v-for="(spec, idx) in row.current_specialties" 
+                    :key="idx"
+                    size="small" 
+                    :type="spec.is_primary ? '' : 'info'"
+                    :effect="spec.is_primary ? 'light' : 'plain'"
+                    style="margin-right:4px; margin-bottom:2px"
+                  >
+                    {{ spec.name }}
+                  </el-tag>
+                </template>
+                <span v-else-if="row.specialty" style="color:#606266">{{ row.specialty }}</span>
+                <span v-else style="color:#c0c4cc">-</span>
+              </template>
               <span v-else style="color:#c0c4cc">-</span>
             </template>
           </el-table-column>
@@ -238,11 +280,28 @@
             <el-form-item label="当前岗位">
               <span class="mirror-field">{{ currentDetail.position || '-' }}</span>
             </el-form-item>
-            <el-form-item label="当前专项">
-              <span class="mirror-field">{{ currentDetail.specialty || '-' }}</span>
-            </el-form-item>
             <el-form-item label="当前分组">
-              <span class="mirror-field">{{ currentDetail.group_name || '-' }}</span>
+              <template v-if="currentDetail.current_group">
+                <el-tag size="small" type="primary">{{ currentDetail.current_group.name }}</el-tag>
+              </template>
+              <span v-else class="mirror-field">{{ currentDetail.group_name || '-' }}</span>
+            </el-form-item>
+            <el-form-item label="当前专项" class="full-row">
+              <template v-if="currentDetail.current_specialties && currentDetail.current_specialties.length">
+                <div class="flex gap-4" style="flex-wrap: wrap">
+                  <el-tag 
+                    v-for="(spec, idx) in currentDetail.current_specialties" 
+                    :key="idx"
+                    size="small" 
+                    :type="spec.is_primary ? '' : 'info'"
+                    :effect="spec.is_primary ? 'light' : 'plain'"
+                  >
+                    {{ spec.name }}
+                    <span v-if="spec.difficulty_weight && spec.difficulty_weight !== 1" style="opacity:0.7; margin-left:2px">×{{ spec.difficulty_weight }}</span>
+                  </el-tag>
+                </div>
+              </template>
+              <span v-else class="mirror-field">{{ currentDetail.specialty || '-' }}</span>
             </el-form-item>
             <el-form-item label="备注" class="full-row">
               <el-input v-model="editForm.remark" type="textarea" :rows="2" placeholder="可选" />
@@ -579,6 +638,8 @@ import {
   batchUpdatePersons,
   exportPersons,
 } from '@/api/person'
+import { listGroups } from '@/api/group'
+import { listSpecialties } from '@/api/specialty'
 import {
   listAssignments,
   createAssignment,
@@ -597,8 +658,10 @@ const groupCount = ref(0)
 const loading = ref(false)
 const page = ref(1)
 const router = useRouter()
-const filter = reactive({ status: 'confirmed', department: '', role: '', employment_status: '' })
+const filter = reactive({ status: 'confirmed', department: '', group_id: null, specialty_id: null, role: '', employment_status: '' })
 const sort = reactive({ sort_by: 'id', sort_order: 'desc' })
+const groupsList = ref([])
+const specialtiesList = ref([])
 const deptFilter = ref([])
 const roleFilter = ref([])
 const empStatusFilter = ref([])
@@ -690,6 +753,8 @@ async function loadData() {
       sort_by: sort.sort_by,
       sort_order: sort.sort_order,
       ...(filter.department ? { department: filter.department } : {}),
+      ...(filter.group_id ? { group_id: filter.group_id } : {}),
+      ...(filter.specialty_id ? { specialty_id: filter.specialty_id } : {}),
       ...(filter.role ? { role: filter.role } : {}),
       ...(filter.employment_status ? { employment_status: filter.employment_status } : {}),
     })
@@ -702,6 +767,24 @@ async function loadData() {
     groupCount.value = nGroup
   } finally {
     loading.value = false
+  }
+}
+
+async function loadGroups() {
+  try {
+    const res = await listGroups({ is_active: true })
+    groupsList.value = res.data
+  } catch (e) {
+    console.error('加载分组列表失败', e)
+  }
+}
+
+async function loadSpecialties() {
+  try {
+    const res = await listSpecialties({ is_active: true, include_temporary: true })
+    specialtiesList.value = res.data
+  } catch (e) {
+    console.error('加载专项列表失败', e)
   }
 }
 
@@ -1325,6 +1408,8 @@ async function handleExport() {
 }
 
 onMounted(() => {
+  loadGroups()
+  loadSpecialties()
   loadData()
   loadUnmerged()
 })

@@ -12,12 +12,61 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.card_complaint import CardComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.person import Person, PersonAlias
+from app.models.group import Group, PersonGroupMembership
+from app.models.specialty import Specialty, PersonSpecialtyAssignment
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.models.todo import TodoItem
 from app.models.task import SpecialTask
 from app.models.incident import Incident
 from app.models.wallet import WalletWithdrawal
+
+
+# ============================================================
+# 通用人员筛选 (按部门/分组/专项)
+# ============================================================
+def _person_filter_conds(department: str | None = None,
+                         group_id: int | None = None,
+                         specialty_id: int | None = None):
+    """返回对Person表的筛选条件列表,用于JOIN后WHERE"""
+    conds = []
+    if department:
+        conds.append(Person.department == department)
+    if group_id is not None:
+        # 通过PersonGroupMembership关联 (使用EXISTS子查询)
+        pass  # group_id/specialty_id通过JOIN处理,这里返回None表示需要额外JOIN
+    if specialty_id is not None:
+        pass
+    return conds
+
+
+def _apply_person_filters(stmt, person_alias,
+                          department: str | None = None,
+                          group_id: int | None = None,
+                          specialty_id: int | None = None):
+    """在已有查询语句上应用人员筛选条件 (person_alias是Person表或其别名)
+
+    通过JOIN/EXISTS方式添加分组和专项筛选,返回修改后的stmt
+    """
+    if department:
+        stmt = stmt.where(person_alias.department == department)
+    if group_id is not None:
+        # EXISTS子查询检查是否在指定分组
+        exists_g = select(1).where(
+            PersonGroupMembership.person_id == person_alias.id,
+            PersonGroupMembership.group_id == group_id,
+            PersonGroupMembership.is_current == True,
+        )
+        stmt = stmt.where(exists_g.exists())
+    if specialty_id is not None:
+        # EXISTS子查询检查是否分配了指定专项
+        exists_s = select(1).where(
+            PersonSpecialtyAssignment.person_id == person_alias.id,
+            PersonSpecialtyAssignment.specialty_id == specialty_id,
+            PersonSpecialtyAssignment.is_current == True,
+        )
+        stmt = stmt.where(exists_s.exists())
+    return stmt
 
 
 # ============================================================
@@ -1199,15 +1248,39 @@ def _category_case():
     return case(*whens, else_=fallback).label("category_bucket")
 
 
-def _operator_to_person_cte():
-    """返回 operator → display_name, department, group_name, specialty, position, qw_user_id 的子查询 CTE
+def _operator_to_person_cte(department: str | None = None,
+                            group_id: int | None = None,
+                            specialty_id: int | None = None):
+    """返回 operator → person_id, display_name, department, group_name, specialty, position, qw_user_id 的子查询 CTE
 
     通过 PersonAlias.alias (归一化匹配) → Person。找不到则 operator 作为 display_name。
     qw_user_id: 非空表示该别名所对应的 Person 已绑定企微 (有企微账号)
+    department/group_id/specialty_id: 可选筛选条件
     """
+    person_conds = []
+    if department:
+        person_conds.append(Person.department == department)
+    if group_id is not None:
+        # 通过EXISTS检查是否在指定分组
+        exists_g = select(1).where(
+            PersonGroupMembership.person_id == Person.id,
+            PersonGroupMembership.group_id == group_id,
+            PersonGroupMembership.is_current == True,
+        )
+        person_conds.append(exists_g.exists())
+    if specialty_id is not None:
+        # 通过EXISTS检查是否分配指定专项
+        exists_s = select(1).where(
+            PersonSpecialtyAssignment.person_id == Person.id,
+            PersonSpecialtyAssignment.specialty_id == specialty_id,
+            PersonSpecialtyAssignment.is_current == True,
+        )
+        person_conds.append(exists_s.exists())
+
     return (
         select(
             PersonAlias.alias.label("operator"),
+            Person.id.label("person_id"),
             func.coalesce(Person.display_name, PersonAlias.alias).label("display_name"),
             Person.department.label("department"),
             Person.group_name.label("group_name"),
@@ -1217,6 +1290,7 @@ def _operator_to_person_cte():
         )
         .select_from(PersonAlias)
         .outerjoin(Person, PersonAlias.person_id == Person.id)
+        .where(and_(*person_conds) if person_conds else True)
         .cte(name="op_person")
     )
 
@@ -3280,6 +3354,9 @@ def today_staff_efficiency(
     topn: int = 30,
     qw_only: bool = False,
     aggregate_by: str = "person",   # "person" 按人明细 / "specialty" 按专项 / "group" 按分组 / "all" 全员汇总
+    department: str | None = None,  # 按部门筛选
+    group_id: int | None = None,    # 按分组ID筛选
+    specialty_id: int | None = None, # 按专项ID筛选
 ) -> dict[str, Any]:
     """模块7: 今日人均效率表 (按operator聚合, 关联Person拿display_name/group_name).
 
@@ -3316,7 +3393,7 @@ def today_staff_efficiency(
     else:
         d_iso = (_dt.datetime.now(TZ).date() if date is None else _parse_date(date)).isoformat()
         d_end_iso = None
-    op_person = _operator_to_person_cte()
+    op_person = _operator_to_person_cte(department=department, group_id=group_id, specialty_id=specialty_id)
 
     # ─────────────────────────────────────────────────────────────────────
     # 系统/自动记录排除规则 (同时用于 cs_record 与 退款/工单)

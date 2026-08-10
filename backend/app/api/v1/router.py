@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import analysis_views, analytics, auth, dashboards, data_sources, dept_info_syncs, devices, fetch, incidents, match, measures, operation_logs, persons, policies, recharges, report_comments, report_templates, reports, scrm_chat, scrm_staff, staff_assignments, strategy, system, tasks, todos, uploads, users, weekly_reports, wide_tables
+from app.api.v1 import analysis_views, analytics, auth, dashboards, data_sources, dept_info_syncs, devices, fetch, groups, incidents, match, measures, operation_logs, persons, policies, recharges, report_comments, report_templates, reports, scrm_chat, scrm_staff, specialties, staff_assignments, strategy, system, tasks, todos, uploads, users, weekly_reports, wide_tables
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
@@ -27,6 +27,8 @@ api_router.include_router(strategy.router)
 api_router.include_router(data_sources.router)
 api_router.include_router(staff_assignments.router)
 api_router.include_router(persons.router)
+api_router.include_router(groups.router)
+api_router.include_router(specialties.router)
 api_router.include_router(analysis_views.router)
 api_router.include_router(analysis_views.rules_router)
 api_router.include_router(dashboards.router)

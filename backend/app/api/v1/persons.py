@@ -7,7 +7,9 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, AdminOrSupervisor, CurrentUser, DBSession
 from app.models.data_source import DataSource
+from app.models.group import Group, PersonGroupMembership
 from app.models.person import Person, PersonAlias
+from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.schemas.common import PageBase, R
 from app.schemas.person import (
     BatchImportByPrefixRequest,
@@ -161,12 +163,67 @@ def _attach_alias_labels(db: Session, aliases: list[PersonAlias]) -> list[Person
     return aliases
 
 
-def _with_alias_count(db: Session, p: Person) -> PersonOut:
+def _with_alias_count(db: Session, p: Person) -> dict:
     cnt = db.scalar(
         select(func.count()).select_from(PersonAlias).where(PersonAlias.person_id == p.id, PersonAlias.is_system.is_(False))
     ) or 0
-    out = PersonOut.model_validate(p)
-    out.alias_count = cnt
+    
+    # 获取当前分组信息
+    current_group = None
+    if p.current_group_id:
+        g = db.get(Group, p.current_group_id)
+        if g:
+            current_group = {"id": g.id, "name": g.name}
+    
+    # 获取当前所有专项(主+辅)
+    current_specialties = []
+    assigns = list(db.scalars(
+        select(PersonSpecialtyAssignment)
+        .where(
+            PersonSpecialtyAssignment.person_id == p.id,
+            PersonSpecialtyAssignment.is_current == True,
+        )
+        .order_by(PersonSpecialtyAssignment.is_primary.desc(), PersonSpecialtyAssignment.effective_from.desc())
+    ))
+    spec_ids = [a.specialty_id for a in assigns]
+    if spec_ids:
+        specs = {s.id: s for s in db.scalars(select(Specialty).where(Specialty.id.in_(spec_ids))).all()}
+        for a in assigns:
+            if a.specialty_id in specs:
+                current_specialties.append({
+                    "id": a.specialty_id,
+                    "name": specs[a.specialty_id].name,
+                    "code": specs[a.specialty_id].code,
+                    "is_primary": a.is_primary,
+                    "difficulty_weight": specs[a.specialty_id].difficulty_weight,
+                    "workload_ratio": a.workload_ratio,
+                })
+    
+    out = {
+        "id": p.id,
+        "display_name": p.display_name,
+        "qw_user_id": p.qw_user_id,
+        "qw_name": p.qw_name,
+        "role": p.role,
+        "department": p.department,
+        "group_name": p.group_name,
+        "position": p.position,
+        "specialty": p.specialty,
+        "hire_date": p.hire_date,
+        "probation_end_date": p.probation_end_date,
+        "regularization_date": p.regularization_date,
+        "resignation_date": p.resignation_date,
+        "employment_status": p.employment_status,
+        "is_active": p.is_active,
+        "is_confirmed": p.is_confirmed,
+        "remark": p.remark,
+        "user_id": p.user_id,
+        "alias_count": cnt,
+        "created_at": p.created_at,
+        "updated_at": p.updated_at,
+        "current_group": current_group,
+        "current_specialties": current_specialties,
+    }
     return out
 
 
@@ -179,6 +236,8 @@ def list_persons(
     keyword: str | None = Query(None, description="按姓名/部门模糊搜索"),
     status: str | None = Query(None, description="confirmed/unconfirmed/inactive"),
     department: str | None = Query(None, description="按部门过滤"),
+    group_id: int | None = Query(None, description="按分组ID过滤"),
+    specialty_id: int | None = Query(None, description="按专项ID过滤(包含主/辅专项)"),
     role: str | None = Query(None, description="按角色过滤:agent/supervisor/admin"),
     employment_status: str | None = Query(None, description="按在职状态过滤:active(待入职)/probation(试用期)/regular(正式)/transferred(调岗)/resigned(离职)/inactive(非活跃)"),
     is_confirmed: bool | None = Query(None, description="是否已确认归并"),
@@ -197,6 +256,22 @@ def list_persons(
         stmt = stmt.where(Person.is_active.is_(False))
     if department:
         stmt = stmt.where(Person.department == department)
+    if group_id:
+        # 通过 PersonGroupMembership 关联筛选
+        stmt = stmt.join(
+            PersonGroupMembership,
+            (PersonGroupMembership.person_id == Person.id) & 
+            (PersonGroupMembership.group_id == group_id) &
+            (PersonGroupMembership.is_current == True)
+        )
+    if specialty_id:
+        # 通过 PersonSpecialtyAssignment 关联筛选
+        stmt = stmt.join(
+            PersonSpecialtyAssignment,
+            (PersonSpecialtyAssignment.person_id == Person.id) &
+            (PersonSpecialtyAssignment.specialty_id == specialty_id) &
+            (PersonSpecialtyAssignment.is_current == True)
+        )
     if role:
         stmt = stmt.where(Person.role == role)
     if employment_status:
@@ -260,7 +335,65 @@ def get_person(person_id: int, db: DBSession, _: CurrentUser):
     p = db.get(Person, person_id)
     if not p:
         raise HTTPException(status_code=404, detail="人员不存在")
-    detail = PersonDetail.model_validate(p)
+    
+    # 获取当前分组信息
+    current_group = None
+    if p.current_group_id:
+        g = db.get(Group, p.current_group_id)
+        if g:
+            current_group = {"id": g.id, "name": g.name}
+    
+    # 获取当前所有专项
+    current_specialties = []
+    assigns = list(db.scalars(
+        select(PersonSpecialtyAssignment)
+        .where(
+            PersonSpecialtyAssignment.person_id == p.id,
+            PersonSpecialtyAssignment.is_current == True,
+        )
+        .order_by(PersonSpecialtyAssignment.is_primary.desc())
+    ))
+    spec_ids = [a.specialty_id for a in assigns]
+    if spec_ids:
+        specs = {s.id: s for s in db.scalars(select(Specialty).where(Specialty.id.in_(spec_ids))).all()}
+        for a in assigns:
+            if a.specialty_id in specs:
+                current_specialties.append({
+                    "id": a.specialty_id,
+                    "name": specs[a.specialty_id].name,
+                    "code": specs[a.specialty_id].code,
+                    "is_primary": a.is_primary,
+                    "difficulty_weight": specs[a.specialty_id].difficulty_weight,
+                    "workload_ratio": a.workload_ratio,
+                    "effective_from": a.effective_from,
+                })
+    
+    # 基础信息
+    detail = {
+        "id": p.id,
+        "display_name": p.display_name,
+        "qw_user_id": p.qw_user_id,
+        "qw_name": p.qw_name,
+        "role": p.role,
+        "department": p.department,
+        "group_name": p.group_name,
+        "position": p.position,
+        "specialty": p.specialty,
+        "hire_date": p.hire_date,
+        "probation_end_date": p.probation_end_date,
+        "regularization_date": p.regularization_date,
+        "resignation_date": p.resignation_date,
+        "employment_status": p.employment_status,
+        "is_active": p.is_active,
+        "is_confirmed": p.is_confirmed,
+        "remark": p.remark,
+        "user_id": p.user_id,
+        "created_at": p.created_at,
+        "updated_at": p.updated_at,
+        "current_group": current_group,
+        "current_specialties": current_specialties,
+    }
+    
     aliases = list(db.scalars(select(PersonAlias).where(PersonAlias.person_id == person_id).order_by(PersonAlias.id)))
     _attach_alias_labels(db, aliases)
     # 注入每个别名在各业务表的出现位置(回答"别名在哪些地方出现")
@@ -277,8 +410,8 @@ def get_person(person_id: int, db: DBSession, _: CurrentUser):
             }
             for o in occ_map.get(a.alias, [])
         ]
-    detail.aliases = [PersonAliasOut.model_validate(a) for a in aliases]
-    detail.alias_count = len([a for a in aliases if not a.is_system])
+    detail["aliases"] = [PersonAliasOut.model_validate(a).model_dump() for a in aliases]
+    detail["alias_count"] = len([a for a in aliases if not a.is_system])
     return R(data=detail)
 
 
