@@ -111,9 +111,9 @@
     </div>
 
     <!-- 模块1: KPI卡 -->
-    <section class="section-card mb-24">
+    <section class="section-card mb-20">
       <SectionHeader :title="'1. 核心指标'" :sub="'对比' + compareName + '同时段 · 悬停标签查看口径'" />
-      <el-row :gutter="16">
+      <el-row :gutter="10">
         <el-col :xs="12" :sm="8" :md="4" v-for="c in kpiCards" :key="c.key">
           <KpiCard
             :label="c.label"
@@ -129,12 +129,13 @@
             :yoy-label="compareName"
             :device-count="c.key === 'reception' ? c.device_count : null"
             :tip="c.tip"
+            compact
           />
         </el-col>
       </el-row>
 
       <!-- 现金流出拆分：3合计卡 + 四路堆叠比例条（复用 RouteSplit compact 模式） -->
-      <div class="mt-12" v-if="kpiData.cash_routes_today">
+      <div class="mt-10" v-if="kpiData.cash_routes_today">
         <RouteSplit :routes="kpiData.cash_routes_today" compact />
       </div>
     </section>
@@ -142,8 +143,28 @@
     <!-- 模块2: 实时节奏 -->
     <section class="section-card mb-24">
       <SectionHeader title="2. 实时节奏" :sub="rhythmSub" />
+      <!-- 分组标签条：工作量 / 款项 / 投诉 三组视觉分隔 -->
+      <div class="rhythm-group-bar">
+        <div class="rhythm-group-tag workload">
+          <span class="dot workload-dot"></span>
+          <span>工作量</span>
+          <span class="group-desc">会话·接待</span>
+        </div>
+        <div class="rhythm-divider"></div>
+        <div class="rhythm-group-tag payment">
+          <span class="dot payment-dot"></span>
+          <span>款项</span>
+          <span class="group-desc">退款笔数·金额·真实现金流</span>
+        </div>
+        <div class="rhythm-divider"></div>
+        <div class="rhythm-group-tag complaint">
+          <span class="dot complaint-dot"></span>
+          <span>投诉</span>
+          <span class="group-desc">投诉量</span>
+        </div>
+      </div>
       <ChartCard body-style="padding: 8px 10px">
-        <BaseChart :option="hourlyOption" height="320px" />
+        <BaseChart :option="hourlyOption" height="360px" />
       </ChartCard>
     </section>
 
@@ -542,8 +563,8 @@ const compareName = computed(() => {
 })
 // 节奏粒度说明: 日粒度=小时级, 其他粒度=日历日级
 const rhythmSub = computed(() => grain.value === 'day'
-  ? '会话/接待/投诉独立柱 · 退款笔数双柱堆叠 · 退款金额堆叠双面积+合计虚线 · 按北京时间小时级'
-  : '会话/接待/投诉独立柱 · 退款笔数双柱堆叠 · 退款金额堆叠双面积+合计虚线 · 按北京时间日历日'
+  ? '【工作量】会话/接待 · 【款项】退款笔数四路堆叠+金额四路堆叠面积+真实现金流E虚线 · 【投诉】投诉量 · 按北京时间小时级'
+  : '【工作量】会话/接待 · 【款项】退款笔数四路堆叠+金额四路堆叠面积+真实现金流E虚线 · 【投诉】投诉量 · 按北京时间日历日'
 )
 
 // ---- 计算当前实际时间范围 [start, end] YYYY-MM-DD (start=end=单日 时 end 可为空传) ----
@@ -651,15 +672,15 @@ ${pn}接待数 = 去重 device_sn (按活跃设备近似为独立客户人数, �
       ...(k.reception || { value: 0, yoy_value: 0, yoy_pct: null, device_count: 0, device_count_yoy: 0 }) },
     { key: 'refund_count',   label: '退款笔数', icon: 'Document',    bg: '#fdf6ec', color: '#e6a23c', unit: '笔',
       money: false,
-      tip: '路线A: 退费单管理中 refund_method=\'线上\' 的记录 (统一全域口径: 只退款方式为线上才算一条退款路线)',
+      tip: '退款笔数 = 四路经营合计: A线上直退 + B钱包取现 + C闪猫退款 + D其他退款 (C/D独立表建表后自动并入)',
       ...(k.refund_count || { value: 0, yoy_value: 0, yoy_pct: null }) },
     { key: 'refund_amount',  label: '退款金额', icon: 'Money',       bg: '#fef0f0', color: '#f56c6c', unit: '',
       money: true,
-      tip: '路线A: 退费单 refund_method=\'线上\' 的金额合计 (不包含退回钱包/线下退款等方式)',
+      tip: '退款金额 = 四路经营合计: A线上直退 + B钱包取现 + C闪猫退款 + D其他退款 (经营侧登记的所有退款出款)',
       ...(k.refund_amount || { value: 0, yoy_value: 0, yoy_pct: null }) },
-    { key: 'cash_out',       label: '真实现金流出', icon: 'Wallet',      bg: '#fdf6ec', color: '#e6a23c', unit: '',
+    { key: 'cash_out',       label: '真实现金流', icon: 'Wallet',      bg: '#f0f9eb', color: '#67c23a', unit: '',
       money: true,
-      tip: '经营侧登记估算 = A(退费单线上直退) + B(钱包-用户取现) 两路合计',
+      tip: '真实现金流(对账基准) = 商户号流水 merchant_refunds WHERE refund_status=\'SUCCESS\' 合计, 即微信侧真实扣款金额',
       ...(k.cash_out || { value: 0, yoy_value: 0, yoy_pct: null }) },
     { key: 'complaint',      label: '投诉量',   icon: 'WarningFilled', bg: '#fef0f0', color: '#f56c6c', unit: '单',
       money: false, tip: null, ...(k.complaint || { value: 0, yoy_value: 0, yoy_pct: null }) },
@@ -674,113 +695,245 @@ ${pn}接待数 = 去重 device_sn (按活跃设备近似为独立客户人数, �
 // ---------- 模块2 小时节奏 ----------
 const hourlyData = ref({
   hour_labels: [],
+  // === 工作量组 ===
   reception: [],
   reception_devices: [],
+  // === 款项组 - 退款笔数(四路堆叠) ===
+  refund_count: [],            // 兼容旧 = 四路合计
+  refund_count_a: [],          // A 线上直退
+  refund_count_b: [],          // B 钱包提现
+  refund_count_c: [],          // C 闪猫退款
+  refund_count_d: [],          // D 其他退款
+  refund_count_total: [],      // 四路合计 A+B+C+D
+  // === 款项组 - 退款金额(四路堆叠面积 + 实际现金流E折线) ===
+  refund_amount: [],           // 兼容旧 = 四路合计
+  refund_amount_a: [],         // A 金额
+  refund_amount_b: [],         // B 金额
+  refund_amount_c: [],         // C 金额
+  refund_amount_d: [],         // D 金额
+  refund_amount_e: [],         // E 实际现金流金额(商户号SUCCESS)
+  refund_amount_total: [],     // 四路经营合计 A+B+C+D
+  cashflow_e_count: [],        // 实际现金流E 笔数
+  cashflow_e_amount: [],       // 实际现金流E 金额
+  // === 投诉组 ===
   complaint: [],
-  // 退款笔数: 拆分 + 合计(兼容旧字段 = 合计)
-  refund_count: [],            // 兼容旧 = A+B
-  refund_count_direct: [],     // 路线A 直接退款
-  refund_count_withdraw: [],   // 路线B 钱包提现
-  refund_count_total: [],      // 明确合计
-  // 退款金额: 拆分 + 合计(兼容旧字段 = 合计)
-  refund_amount: [],           // 兼容旧 = A+B
-  refund_amount_direct: [],    // 路线A 直接退款金额
-  refund_amount_withdraw: [],  // 路线B 钱包提现金额
-  refund_amount_total: [],     // 明确合计
 })
-const hourlyOption = computed(() => ({
-  tooltip: {
-    trigger: 'axis',
-    axisPointer: { type: 'shadow' },
-    formatter: (params) => {
-      if (!params || !params.length) return ''
-      const p0 = params[0]
-      const h = hourlyData.value.hour_labels?.[p0.dataIndex] ?? ''
-      const val = (name, opts = {}) => {
-        const m = params.find(x => x.seriesName === name)
-        if (m == null || m.value == null) return '-'
-        const v = Number(m.value)
-        if (opts.currency) return '¥' + v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-        return v.toLocaleString('zh-CN')
-      }
-      const cntA = val('退款-直接退款')
-      const cntB = val('退款-钱包提现')
-      const amtA = val('退金-直接', { currency: true })
-      const amtB = val('退金-提现', { currency: true })
-      const cntTotal = val('退金-合计') != null ? (Number(hourlyData.value.refund_count_total?.[p0.dataIndex] ?? 0) || 0) : 0
-      const amtTotal = val('退金-合计', { currency: true })
-      return `<b>${h}</b><br/>` +
-        `会话数(次): ${val('会话数(次)')}<br/>` +
-        `接待数(个): ${val('接待数(个)')}<br/>` +
-        `退款笔数: <b>${cntTotal.toLocaleString('zh-CN')}</b> （直退 ${cntA} + 提现 ${cntB}）<br/>` +
-        `投诉量: ${val('投诉量')}<br/>` +
-        `退款金额: <b>${amtTotal}</b> （直退 ${amtA} + 提现 ${amtB}）`
+
+// 四路颜色映射
+const ROUTE_COLORS = {
+  a: { bar: '#e6a23c', area: 'rgba(230,162,60,0.20)', line: '#d4881a' },   // A 橙
+  b: { bar: '#f0948e', area: 'rgba(240,148,142,0.18)', line: '#e0726a' },  // B 浅红
+  c: { bar: '#9b59b6', area: 'rgba(155,89,182,0.16)', line: '#804399' },  // C 紫
+  d: { bar: '#95a5a6', area: 'rgba(149,165,166,0.14)', line: '#7b8a8b' }, // D 灰
+  e: { line: '#27ae60', area: 'rgba(39,174,96,0.10)' },                    // E 绿(真实现金流)
+}
+// 工作量组颜色
+const WORK_COLORS = {
+  session: '#409eff',     // 会话 蓝
+  reception: '#91cc75',   // 接待 绿
+}
+// 投诉颜色
+const COMPLAINT_COLOR = '#f56c6c'  // 投诉 红
+
+const hourlyOption = computed(() => {
+  const hd = hourlyData.value
+  const labels = hd.hour_labels || []
+
+  // 三路分组的legend数据（用legend.data里带分隔符标题的方式实现视觉分组）
+  const legendData = [
+    '会话数(次)', '接待数(个)',
+    '',  // 占位分隔
+    '退款-A(直退)', '退款-B(提现)', '退款-C(闪猫)', '退款-D(其他)',
+    '',
+    '退金-A', '退金-B', '退金-C', '退金-D', '退款合计', '真实现金流E',
+    '',
+    '投诉量',
+  ]
+
+  return {
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      formatter: (params) => {
+        if (!params || !params.length) return ''
+        const p0 = params[0]
+        const h = labels[p0.dataIndex] ?? ''
+        const getVal = (name, opts = {}) => {
+          const m = params.find(x => x.seriesName === name)
+          if (m == null || m.value == null) return '-'
+          const v = Number(m.value)
+          if (opts.currency) return '¥' + v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+          return v.toLocaleString('zh-CN')
+        }
+        const cntA = getVal('退款-A(直退)')
+        const cntB = getVal('退款-B(提现)')
+        const cntC = getVal('退款-C(闪猫)')
+        const cntD = getVal('退款-D(其他)')
+        const cntTotal = Number(hd.refund_count_total?.[p0.dataIndex] ?? 0)
+        const amtA = getVal('退金-A', { currency: true })
+        const amtB = getVal('退金-B', { currency: true })
+        const amtC = getVal('退金-C', { currency: true })
+        const amtD = getVal('退金-D', { currency: true })
+        const amtTotal = getVal('退款合计', { currency: true })
+        const amtE = getVal('真实现金流E', { currency: true })
+
+        return `<div style="font-weight:600;margin-bottom:4px">${h}</div>` +
+          // 工作量组
+          `<div style="border-top:1px dashed #e4e7ed;padding-top:4px;margin-top:2px;color:#909399;font-size:11px">【工作量】</div>` +
+          `<div>会话数(次): <b>${getVal('会话数(次)')}</b></div>` +
+          `<div>接待数(个): <b>${getVal('接待数(个)')}</b></div>` +
+          // 款项组
+          `<div style="border-top:1px dashed #e4e7ed;padding-top:4px;margin-top:2px;color:#909399;font-size:11px">【款项·笔数】</div>` +
+          `<div>退款笔数合计: <b>${cntTotal.toLocaleString('zh-CN')}</b> (直退${cntA} + 提现${cntB} + 闪猫${cntC} + 其他${cntD})</div>` +
+          `<div style="color:#909399;font-size:11px">【款项·金额】</div>` +
+          `<div>退款金额合计: <b>${amtTotal}</b> (A${amtA} + B${amtB} + C${amtC} + D${amtD})</div>` +
+          `<div>真实现金流E: <b style="color:#27ae60">${amtE}</b></div>` +
+          // 投诉组
+          `<div style="border-top:1px dashed #e4e7ed;padding-top:4px;margin-top:2px;color:#909399;font-size:11px">【投诉】</div>` +
+          `<div>投诉量: <b style="color:${COMPLAINT_COLOR}">${getVal('投诉量')}</b></div>`
+      },
     },
-  },
-  legend: {
-    data: ['会话数(次)', '接待数(个)', '退款-直接退款', '退款-钱包提现', '投诉量', '退金-直接', '退金-提现', '退金-合计'],
-    top: 0, type: 'scroll',
-  },
-  grid: { left: 60, right: 80, bottom: 40, top: 52 },
-  xAxis: { type: 'category', data: hourlyData.value.hour_labels || [], axisLabel: { fontSize: 10, interval: 1 } },
-  yAxis: [
-    { type: 'value', name: '数量(次/个/笔)', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed' } } },
-    { type: 'value', name: '退款金额(元)', axisLabel: { formatter: (v) => (v >= 10000 ? (v/10000).toFixed(0)+'万' : v), fontSize: 10 } },
-  ],
-  series: [
-    // 左Y：独立柱
-    {
-      name: '会话数(次)', type: 'bar', data: hourlyData.value.reception || [],
-      itemStyle: { color: '#409eff', borderRadius: [3, 3, 0, 0] },
-      barMaxWidth: 12,
+    legend: {
+      data: legendData,
+      top: 0,
+      type: 'scroll',
+      formatter: (name) => {
+        if (name === '') return ''
+        return name
+      },
+      // 用不同颜色文字区分三组
+      textStyle: { fontSize: 11 },
+      selected: {
+        '退款-C(闪猫)': false,  // C/D默认隐藏，因为当前没有数据
+        '退款-D(其他)': false,
+        '退金-C': false,
+        '退金-D': false,
+      },
     },
-    {
-      name: '接待数(个)', type: 'bar', data: hourlyData.value.reception_devices || [],
-      itemStyle: { color: '#91cc75', borderRadius: [3, 3, 0, 0] },
-      barMaxWidth: 12,
+    grid: [
+      // 主网格（左Y：笔数/工作量/投诉；右Y：金额）
+      { left: 56, right: 72, bottom: 36, top: 58, containLabel: false },
+    ],
+    xAxis: {
+      type: 'category',
+      data: labels,
+      axisLabel: { fontSize: 10, interval: 0 },
+      axisPointer: { type: 'shadow' },
     },
-    // 左Y：退款双柱堆叠（stack=refund）
-    {
-      name: '退款-直接退款', type: 'bar', stack: 'refund', data: hourlyData.value.refund_count_direct || [],
-      itemStyle: { color: '#e6a23c' },
-      barMaxWidth: 12,
-    },
-    {
-      name: '退款-钱包提现', type: 'bar', stack: 'refund', data: hourlyData.value.refund_count_withdraw || [],
-      itemStyle: { color: '#f0948e' },
-      barMaxWidth: 12,
-    },
-    // 左Y：独立柱-投诉
-    {
-      name: '投诉量', type: 'bar', data: hourlyData.value.complaint || [],
-      itemStyle: { color: '#f56c6c', borderRadius: [3, 3, 0, 0] },
-      barMaxWidth: 12,
-    },
-    // 右Y：退款金额 - 堆叠双面积（stack=amt）
-    {
-      name: '退金-直接', type: 'line', yAxisIndex: 1, stack: 'amt', smooth: true,
-      data: hourlyData.value.refund_amount_direct || [],
-      itemStyle: { color: '#9b59b6' },
-      areaStyle: { color: 'rgba(155,89,182,0.14)' },
-      showSymbol: false, lineStyle: { width: 1 },
-    },
-    {
-      name: '退金-提现', type: 'line', yAxisIndex: 1, stack: 'amt', smooth: true,
-      data: hourlyData.value.refund_amount_withdraw || [],
-      itemStyle: { color: '#c0392b' },
-      areaStyle: { color: 'rgba(192,57,43,0.14)' },
-      showSymbol: false, lineStyle: { width: 1 },
-    },
-    // 右Y：退款金额 - 合计虚线（不堆叠，指示堆叠总高度）
-    {
-      name: '退金-合计', type: 'line', yAxisIndex: 1, smooth: true,
-      data: hourlyData.value.refund_amount_total || [],
-      itemStyle: { color: '#7d3c98' },
-      symbol: 'circle', symbolSize: 5,
-      lineStyle: { width: 2, type: 'dashed' },
-    },
-  ],
-}))
+    yAxis: [
+      {
+        type: 'value',
+        name: '数量(次/个/笔)',
+        nameTextStyle: { fontSize: 10, color: '#909399' },
+        axisLabel: { fontSize: 10 },
+        splitLine: { lineStyle: { type: 'dashed', color: '#f0f0f0' } },
+      },
+      {
+        type: 'value',
+        name: '金额(元)',
+        nameTextStyle: { fontSize: 10, color: '#909399' },
+        axisLabel: {
+          fontSize: 10,
+          formatter: (v) => (v >= 10000 ? (v / 10000).toFixed(0) + '万' : v),
+        },
+        splitLine: { show: false },
+      },
+    ],
+    series: [
+      // ========== 【工作量组】独立柱 ==========
+      {
+        name: '会话数(次)', type: 'bar', data: hd.reception || [],
+        itemStyle: { color: WORK_COLORS.session, borderRadius: [3, 3, 0, 0] },
+        barMaxWidth: 10,
+        barGap: '10%',
+      },
+      {
+        name: '接待数(个)', type: 'bar', data: hd.reception_devices || [],
+        itemStyle: { color: WORK_COLORS.reception, borderRadius: [3, 3, 0, 0] },
+        barMaxWidth: 10,
+      },
+
+      // ========== 【款项组·笔数】四路堆叠柱 stack=refund_cnt ==========
+      {
+        name: '退款-A(直退)', type: 'bar', stack: 'refund_cnt', data: hd.refund_count_a || [],
+        itemStyle: { color: ROUTE_COLORS.a.bar },
+        barMaxWidth: 16,
+        barGap: '20%',
+      },
+      {
+        name: '退款-B(提现)', type: 'bar', stack: 'refund_cnt', data: hd.refund_count_b || [],
+        itemStyle: { color: ROUTE_COLORS.b.bar },
+        barMaxWidth: 16,
+      },
+      {
+        name: '退款-C(闪猫)', type: 'bar', stack: 'refund_cnt', data: hd.refund_count_c || [],
+        itemStyle: { color: ROUTE_COLORS.c.bar },
+        barMaxWidth: 16,
+      },
+      {
+        name: '退款-D(其他)', type: 'bar', stack: 'refund_cnt', data: hd.refund_count_d || [],
+        itemStyle: { color: ROUTE_COLORS.d.bar },
+        barMaxWidth: 16,
+      },
+
+      // ========== 【投诉组】独立柱 ==========
+      {
+        name: '投诉量', type: 'bar', data: hd.complaint || [],
+        itemStyle: { color: COMPLAINT_COLOR, borderRadius: [3, 3, 0, 0] },
+        barMaxWidth: 10,
+      },
+
+      // ========== 【款项组·金额】四路堆叠面积 stack=refund_amt (右Y) ==========
+      {
+        name: '退金-A', type: 'line', yAxisIndex: 1, stack: 'refund_amt', smooth: true,
+        data: hd.refund_amount_a || [],
+        itemStyle: { color: ROUTE_COLORS.a.line },
+        areaStyle: { color: ROUTE_COLORS.a.area },
+        showSymbol: false, lineStyle: { width: 1 },
+      },
+      {
+        name: '退金-B', type: 'line', yAxisIndex: 1, stack: 'refund_amt', smooth: true,
+        data: hd.refund_amount_b || [],
+        itemStyle: { color: ROUTE_COLORS.b.line },
+        areaStyle: { color: ROUTE_COLORS.b.area },
+        showSymbol: false, lineStyle: { width: 1 },
+      },
+      {
+        name: '退金-C', type: 'line', yAxisIndex: 1, stack: 'refund_amt', smooth: true,
+        data: hd.refund_amount_c || [],
+        itemStyle: { color: ROUTE_COLORS.c.line },
+        areaStyle: { color: ROUTE_COLORS.c.area },
+        showSymbol: false, lineStyle: { width: 1 },
+      },
+      {
+        name: '退金-D', type: 'line', yAxisIndex: 1, stack: 'refund_amt', smooth: true,
+        data: hd.refund_amount_d || [],
+        itemStyle: { color: ROUTE_COLORS.d.line },
+        areaStyle: { color: ROUTE_COLORS.d.area },
+        showSymbol: false, lineStyle: { width: 1 },
+      },
+      // 退款金额合计虚线
+      {
+        name: '退款合计', type: 'line', yAxisIndex: 1, smooth: true,
+        data: hd.refund_amount_total || [],
+        itemStyle: { color: '#7d3c98' },
+        symbol: 'circle', symbolSize: 4,
+        lineStyle: { width: 2, type: 'dashed' },
+        z: 5,
+      },
+      // 真实现金流E (独立线,不堆叠)
+      {
+        name: '真实现金流E', type: 'line', yAxisIndex: 1, smooth: true,
+        data: hd.refund_amount_e || hd.cashflow_e_amount || [],
+        itemStyle: { color: ROUTE_COLORS.e.line },
+        symbol: 'diamond', symbolSize: 5,
+        lineStyle: { width: 2.5, type: 'solid' },
+        areaStyle: { color: ROUTE_COLORS.e.area },
+        z: 6,
+      },
+    ],
+  }
+})
 
 // ---------- 模块3 接待分项 ----------
 const receptionData = ref({ categories: [], top_staff: [] })
@@ -1322,21 +1475,36 @@ async function loadAll() {
       today.refundRecovery(params),
     ])
     kpiData.value = k.data || {}
-    // 向后兼容：后端新接口返回 A/B/TOTAL 全部字段；旧接口只返回 refund_count/amount(=合计)
+    // 向后兼容：后端v4接口返回 A/B/C/D/E 全部字段；旧接口只返回 refund_count/amount(=合计) 或 direct/withdraw(A/B)
     const hd = h.data || {}
+    const emptyArr = (len) => Array(len || 0).fill(0)
+    const dataLen = (hd.hour_labels || hd.slot_labels || []).length
+    // 新接口字段: refund_count_a/b/c/d, refund_amount_a/b/c/d/e, cashflow_e_count/amount
+    // 旧接口兼容: refund_count_direct→a, refund_count_withdraw→b, refund_count_total→total
     hourlyData.value = {
       hour_labels: hd.hour_labels || hd.slot_labels || [],
+      // === 工作量组 ===
       reception: hd.reception || [],
       reception_devices: hd.reception_devices || [],
+      // === 款项组·笔数: 四路 A/B/C/D ===
+      refund_count: hd.refund_count ?? hd.refund_count_total ?? [],  // 合计(旧兼容)
+      refund_count_a: hd.refund_count_a ?? hd.refund_count_direct  ?? emptyArr(dataLen),
+      refund_count_b: hd.refund_count_b ?? hd.refund_count_withdraw ?? emptyArr(dataLen),
+      refund_count_c: hd.refund_count_c ?? emptyArr(dataLen),
+      refund_count_d: hd.refund_count_d ?? emptyArr(dataLen),
+      refund_count_total: hd.refund_count_total ?? hd.refund_count ?? emptyArr(dataLen),
+      // === 款项组·金额: 四路 A/B/C/D + E(实际现金流) ===
+      refund_amount: hd.refund_amount ?? hd.refund_amount_total ?? [],  // 合计(旧兼容)
+      refund_amount_a: hd.refund_amount_a ?? hd.refund_amount_direct  ?? emptyArr(dataLen),
+      refund_amount_b: hd.refund_amount_b ?? hd.refund_amount_withdraw ?? emptyArr(dataLen),
+      refund_amount_c: hd.refund_amount_c ?? emptyArr(dataLen),
+      refund_amount_d: hd.refund_amount_d ?? emptyArr(dataLen),
+      refund_amount_e: hd.refund_amount_e ?? hd.cashflow_e_amount ?? emptyArr(dataLen),
+      refund_amount_total: hd.refund_amount_total ?? hd.refund_amount ?? emptyArr(dataLen),
+      cashflow_e_count: hd.cashflow_e_count ?? emptyArr(dataLen),
+      cashflow_e_amount: hd.cashflow_e_amount ?? hd.refund_amount_e ?? emptyArr(dataLen),
+      // === 投诉组 ===
       complaint: hd.complaint || [],
-      refund_count: hd.refund_count ?? [],  // 旧接口 = 合计；新接口 = 合计
-      refund_count_direct:  hd.refund_count_direct  ?? hd.refund_count ?? [],  // 旧接口缺失则退化为合计（堆叠时只有一段）
-      refund_count_withdraw: hd.refund_count_withdraw ?? Array(hd.refund_count?.length || 0).fill(0),
-      refund_count_total:   hd.refund_count_total   ?? hd.refund_count ?? [],
-      refund_amount: hd.refund_amount ?? [],
-      refund_amount_direct:  hd.refund_amount_direct  ?? hd.refund_amount ?? [],
-      refund_amount_withdraw: hd.refund_amount_withdraw ?? Array(hd.refund_amount?.length || 0).fill(0),
-      refund_amount_total:   hd.refund_amount_total   ?? hd.refund_amount ?? [],
     }
     // reception 响应同时包含 接待分类(top_staff/categories) + 新增投诉统计(complaint_*)
     const rdata = r.data || {}
@@ -1417,6 +1585,55 @@ onMounted(() => {
 .flex-between { display: flex; justify-content: space-between; align-items: center; }
 .text-muted { color: #909399; }
 .mr-8 { margin-right: 8px; }
+
+/* ---------- 模块2 实时节奏 分组标签条 ---------- */
+.rhythm-group-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px 10px;
+  flex-wrap: wrap;
+}
+.rhythm-group-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 20px;
+}
+.rhythm-group-tag.workload {
+  background: linear-gradient(135deg, rgba(102,126,234,0.1), rgba(118,75,162,0.08));
+  color: #667eea;
+}
+.rhythm-group-tag.payment {
+  background: linear-gradient(135deg, rgba(245,108,108,0.08), rgba(230,162,60,0.06));
+  color: #f56c6c;
+}
+.rhythm-group-tag.complaint {
+  background: linear-gradient(135deg, rgba(230,126,34,0.1), rgba(231,76,60,0.08));
+  color: #e67e22;
+}
+.rhythm-group-tag .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.workload-dot { background: linear-gradient(135deg, #667eea, #764ba2); }
+.payment-dot { background: linear-gradient(135deg, #f56c6c, #e6a23c); }
+.complaint-dot { background: #e67e22; }
+.group-desc {
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.75;
+  margin-left: 4px;
+}
+.rhythm-divider {
+  width: 1px;
+  height: 16px;
+  background: #e5e7eb;
+}
 
 /* ---------- 模块8 退款挽回 KpiCardMini 内联样式 ---------- */
 .kpi-mini-card {

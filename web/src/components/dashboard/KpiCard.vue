@@ -1,8 +1,8 @@
 <template>
-  <el-card shadow="hover" class="kpi-card" body-style="padding: 14px 18px">
+  <el-card shadow="hover" class="kpi-card" :class="{ 'is-compact': compact }" :body-style="compact ? 'padding: 10px 14px' : 'padding: 14px 18px'">
     <div class="kpi-head">
       <div v-if="icon" class="kpi-icon" :style="{ background: bg || '#ecf5ff', color: color || '#409eff' }">
-        <el-icon :size="22"><component :is="icon" /></el-icon>
+        <el-icon :size="compact ? 18 : 22"><component :is="icon" /></el-icon>
       </div>
       <div class="kpi-label" :style="{ cursor: tip ? 'help' : 'default' }">
         {{ label }}
@@ -59,9 +59,11 @@ const props = defineProps({
   tip: { type: String, default: null },
   // 隐藏同比/环比行 (用于工作台首页, 没有同比数据的简洁卡片)
   hideYoy: { type: Boolean, default: false },
+  // 紧凑模式: 缩小padding/字体/间距,适合核心指标条
+  compact: { type: Boolean, default: false },
 })
 
-const BAD_UP_KEYS = new Set(['refund_amount', 'cash_out', 'complaint'])
+const BAD_UP_KEYS = new Set(['refund_amount', 'cash_out', 'complaint', 'refund_count'])
 
 function yoyTagType(pct) {
   if (pct == null) return 'info'
@@ -89,10 +91,10 @@ function fmtMoney(v) {
 .kpi-icon {
   width: 42px; height: 42px; border-radius: 8px;
   display: flex; align-items: center; justify-content: center;
-  margin-bottom: 10px;
+  margin-bottom: 10px; flex-shrink: 0;
 }
-.kpi-label { color: #909399; font-size: 13px; flex: 1; }
-.kpi-value { font-size: 24px; font-weight: 600; color: #303133; margin-top: 4px; line-height: 1.2; }
+.kpi-label { color: #909399; font-size: 13px; flex: 1; line-height: 1.4; }
+.kpi-value { font-size: 24px; font-weight: 600; color: #303133; margin-top: 4px; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .kpi-unit { font-size: 13px; font-weight: 400; color: #909399; margin-left: 4px; }
 .kpi-yoy { margin-top: 8px; display: flex; align-items: center; gap: 6px; font-size: 12px; color: #909399; }
 .kpi-yoy-val { color: #c0c4cc; font-size: 12px; }
@@ -100,4 +102,17 @@ function fmtMoney(v) {
 .kpi-device-sub-label { font-size: 11px; color: #909399; }
 .kpi-device-sub-val { font-size: 15px; font-weight: 600; color: #409eff; letter-spacing: -0.3px; }
 .kpi-device-sub-unit { font-size: 11px; font-weight: 400; color: #909399; margin-left: 2px; }
+
+/* 紧凑模式 */
+.kpi-card.is-compact .kpi-icon {
+  width: 32px; height: 32px; border-radius: 6px;
+  margin-bottom: 6px;
+}
+.kpi-card.is-compact .kpi-label { font-size: 12px; }
+.kpi-card.is-compact .kpi-value { font-size: 20px; margin-top: 2px; }
+.kpi-card.is-compact .kpi-unit { font-size: 12px; }
+.kpi-card.is-compact .kpi-yoy { margin-top: 5px; font-size: 11px; }
+.kpi-card.is-compact .kpi-yoy-val { font-size: 11px; }
+.kpi-card.is-compact .kpi-device-sub { margin-top: 3px; }
+.kpi-card.is-compact .kpi-device-sub-val { font-size: 13px; }
 </style>
