@@ -4238,10 +4238,12 @@ def refund_recovery_analysis(
         }
 
     # ---- 3. 分母: 退款挽回成员 在周期内 cs_records 接待的【真退款类】 SN 集合 (按 op 分组) ----
-    #    新口径(2026-08-04 用户确认):
-    #      - problem_category = '退款' (大类)
-    #      - AND problem_type IN ('不想用了','充值错误','设备故障','服务原因') → 这4类=真的要退款,排除 37% 错标「网络问题」和 7464 条「其他」
-    #      - AND operator 属于 退款专项组人员 (op_list) → 才叫"进入退款专员接待工作量"
+    #    口径修正(2026-08-10 验证数据后修正):
+    #      - problem_category = '退款' (大类是退款诉求)
+    #      - AND operator 属于 退款挽回专项组人员 (op_list) → 才叫"进入退款专员接待工作量"
+    #      - 移除 problem_type 过度过滤: 之前错误排除了"网络问题"和"其他",这两类是占比最大的退款理由
+    #        (卢宁接待量中网络问题1880SN+其他1517SN=3397SN,占66%;黄亚康网络问题703SN+其他646SN=1349SN,占48%)
+    #        客户以"网络不好/不想用了/设备故障"等任何理由要求退款,都属于退款挽回工作范围
     cs_refund_sn_sql = text(
         """
         SELECT c.operator AS op, NULLIF(TRIM(c.device_sn),'') AS sn,
@@ -4252,7 +4254,6 @@ def refund_recovery_analysis(
           AND c.operator = ANY(:op_list)
           AND NOT (c.operator = ANY(:sys_bl))
           AND c.problem_category = '退款'
-          AND COALESCE(c.problem_type,'') IN ('不想用了','充值错误','设备故障','服务原因')
           AND NOT (
               COALESCE(c.description,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
            OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
@@ -4272,15 +4273,22 @@ def refund_recovery_analysis(
         if r.sn:
             op_host_sns.setdefault(r.op or "", set()).add(r.sn)
 
-    # 全局分母SN (全部合并)
+    # 全局分母SN (全部合并) + 每个SN最早接待时间
     global_host_sns: set[str] = set()
+    sn_first_op_time: dict[str, datetime] = {}  # sn -> 最早接待时间
+    for r in cs_sn_rows:
+        if r.sn:
+            global_host_sns.add(r.sn)
+            # 记录最早接待时间
+            if r.op_time and (r.sn not in sn_first_op_time or r.op_time < sn_first_op_time[r.sn]):
+                sn_first_op_time[r.sn] = r.op_time
     for s in op_host_sns.values():
-        global_host_sns.update(s)
+        pass  # 已经在上面填充global_host_sns了
 
     # ---- 4. 分子: 挽留失败 SN 集合 = 分母SN ∩ (refunds ∪ 退款工单) ----
-    #   时间: 退款/工单 发生时间 在 [start, end + 7天] 窗口 (T+7 宽限, 用户2026-08-04确认)
+    #   时间: 退款/工单 发生时间 在 [该SN最早接待时间, 最早接待时间+7天] 窗口 (T+7 宽限, 2026-08-10修正)
+    #   修正说明: 之前只判断了全局时间窗口,没有校验"退款时间必须在接待时间之后",导致接待前已退款的SN被误判为失败
     #   说明: 允许专员接待后最长7天走到退款审批(到账/工单结案)才判定为失败, 避免"假成功"
-    #   注意: PostgreSQL ::text[] 类型转换 会与 SQLAlchemy :param 占位符冲突, 必须用 CAST
     import datetime as _dt2
     te7 = te + _dt2.timedelta(days=7)
     failed_sn_sql = text(
@@ -4292,13 +4300,15 @@ def refund_recovery_analysis(
                    r.refund_reason AS reason,
                    COALESCE(r.actual_amount, r.refund_amount, 0) AS amount,
                    r.status AS status,
-                   r.refund_method AS method
+                   r.refund_method AS method,
+                   r.created_at_raw AS event_time
             FROM refunds r
+            JOIN host_sns hs ON NULLIF(TRIM(r.device_sn),'') = hs.sn
             WHERE r.created_at_raw IS NOT NULL
-              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
               AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
-              AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
-              AND r.refund_method = '线上'
+              AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')  -- 无需退款/驳回不算失败
+              -- 不限制operator和refund_method：任何方式的退款、任何人操作都算失败
+              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
         ),
         ticket_sn AS (
             SELECT DISTINCT NULLIF(TRIM(st.device_sn),'') AS sn,
@@ -4306,36 +4316,51 @@ def refund_recovery_analysis(
                    st.service_item AS reason,
                    COALESCE(st.refund_amount, st.estimated_amount, 0) AS amount,
                    st.status AS status,
-                   st.service_category AS method
+                   st.service_category AS method,
+                   st.register_time AS event_time  -- 用工单提交时间而非结案时间，客户提交即表示坚持退款
             FROM service_tickets st
-            WHERE st.finish_time IS NOT NULL
-              AND st.finish_time >= :ts AND st.finish_time <= :te7
+            JOIN host_sns hs ON NULLIF(TRIM(st.device_sn),'') = hs.sn
+            WHERE st.register_time IS NOT NULL
               AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
-              AND st.handler IS NOT NULL AND NOT (st.handler = ANY(:sys_bl))
               AND COALESCE(st.service_category,'') = '退款'
+              AND COALESCE(st.status, '') != '终止'  -- 终止=客户撤单，不算失败
+              -- 不限制handler：任何人处理的退款工单都算失败
+              AND st.register_time >= :ts AND st.register_time <= :te7
         ),
         all_fail AS (
-            SELECT sn, src, reason, amount, status, method FROM refund_sn
+            SELECT sn, src, reason, amount, status, method, event_time FROM refund_sn
             UNION ALL
-            SELECT sn, src, reason, amount, status, method FROM ticket_sn
+            SELECT sn, src, reason, amount, status, method, event_time FROM ticket_sn
         )
-        SELECT af.sn, af.src, af.reason, af.amount, af.status, af.method
+        SELECT af.sn, af.src, af.reason, af.amount, af.status, af.method, af.event_time
         FROM all_fail af
         JOIN host_sns hs ON af.sn = hs.sn
         """
     )
     fail_rows = db.execute(
         failed_sn_sql,
-        {"sn_arr": list(global_host_sns), "ts": ts, "te7": te7, "sys_bl": list(SYS_OP_BLACKLIST_RR)},
+        {"sn_arr": list(global_host_sns), "ts": ts, "te7": te7},
     ).fetchall()
 
     # 全局失败SN集合 + 明细 (按 SN 取金额最大那一条 作为该SN的归因)
+    # 校验事件时间必须在 [该SN最早接待时间, 最早接待时间+7天] 窗口内
     global_fail_sns: set[str] = set()
     sn_failed_meta: dict[str, dict] = {}
     for r in fail_rows:
         sn = r.sn or ""
         if not sn:
             continue
+        # 获取该SN最早接待时间
+        first_op = sn_first_op_time.get(sn)
+        if not first_op:
+            continue
+        event_time = r.event_time
+        if not event_time:
+            continue
+        # 判断事件时间是否在 [接待时间, 接待时间+7天] 窗口内
+        window_end = first_op + _dt2.timedelta(days=7)
+        if not (first_op <= event_time <= window_end):
+            continue  # 接待前已发生 或 超过T+7才发生, 不算失败
         global_fail_sns.add(sn)
         amt = float(r.amount or 0)
         prev = sn_failed_meta.get(sn)
@@ -4350,7 +4375,7 @@ def refund_recovery_analysis(
     #   注意: 这只是 "退款操作工作量" 独立字段, 不影响成功率计算的分子分母
     refund_op_sns: dict[str, set[str]] = {}   # operator alias -> set of 退款操作 SN
     refund_op_amt: dict[str, float] = {}     # operator alias -> 操作金额合计
-    # 从 refunds 拉 operator
+    # 从 refunds 拉 operator (统计真人操作的所有退款方式:线上/线下/转入提现账户)
     for r in db.execute(text(
         """
         SELECT NULLIF(TRIM(r.device_sn),'') AS sn,
@@ -4361,14 +4386,14 @@ def refund_recovery_analysis(
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
           AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
           AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
-          AND r.refund_method = '线上'
+          AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
         """
     ), {"ts": ts, "te7": te7, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall():
         if not r.sn or not r.op:
             continue
         refund_op_sns.setdefault(r.op, set()).add(r.sn)
         refund_op_amt[r.op] = refund_op_amt.get(r.op, 0.0) + float(r.amt or 0)
-    # 从 service_tickets 拉 handler
+    # 从 service_tickets 拉 handler (统计真人处理的已完成退款工单)
     for r in db.execute(text(
         """
         SELECT NULLIF(TRIM(st.device_sn),'') AS sn,
@@ -4380,6 +4405,7 @@ def refund_recovery_analysis(
           AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
           AND st.handler IS NOT NULL AND NOT (st.handler = ANY(:sys_bl))
           AND COALESCE(st.service_category,'') = '退款'
+          AND COALESCE(st.status, '') = '已完成'
         """
     ), {"ts": ts, "te7": te7, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall():
         if not r.sn or not r.op:
@@ -4509,14 +4535,15 @@ def refund_recovery_analysis(
         "actual_refund_amount": round(actual_refund, 2),
         "fee_ratio": round(fee_ratio, 2),  # 单量口径拦截比例, 非金额口径
         "_calc_note": {
-            "denominator": "退款专项组成员(Person.specialty=退款挽回/叶珍凤组/朱海洋组) 接待的 problem_category='退款' AND problem_type IN (不想用了/充值错误/设备故障/服务原因) → 真要退款的SN去重总数 (2026-08-04 新口径, 排除 37% 错标的「网络问题」和 「其他」 7464条)",
-            "failed_rule": "分母SN 中, 在 [start, end+7天] T+7 窗口内 出现在 refunds(线上退款单) 或 退款工单(service_category=退款) 中 → 挽留失败. (T+7 宽限避免接待后才走完退款审批的SN被误判为成功)",
+            "denominator": "退款挽回专项组成员(Person.specialty=退款挽回) 接待的 problem_category='退款' 的SN去重总数 (不限制problem_type: 网络问题/不想用了/设备故障/其他等所有退款理由均计入)",
+            "failed_rule": "分母SN 中, 在 [该SN最早接待时间, 最早接待时间+7天] T+7窗口内: 1)出现在refunds表且status≠无需退款/驳回(不限制退款方式和操作人:线上/线下/转入提现账户/任何人均算); 2)出现在service_tickets退款类工单且status≠终止(以register_time提交时间为准). 满足任一即判定挽留失败",
             "success_rule": "「分母SN」 − 「失败SN」 → 挽留成功 (即退款专员接待过但最终没走到退款流程, 被沟通拦截下来)",
-            "leader_rule_removed": "已移除: 原规则「组长/主管接待SN强制失败」(用户2026-08-04确认移除,仅按SN是否真正进入退款工单判定成败)",
+            "t_window_note": "T+7窗口已关闭的历史数据(≥7天前接待)成功率才准确; 最近7天接待的数据因部分退款还在流程中,成功率会偏高属于正常",
+            "leader_rule_removed": "已移除: 原规则「组长/主管接待SN强制失败」(用户2026-08-04确认移除,仅按SN是否真正进入退款流程判定成败)",
             "multi_user_rule": "工作负荷/绩效层面: 同个SN 允许 A(退款接待专员) + B(退款操作执行人) 各算一次. 接待侧计入 total_sn/success_sn/failed_sn; 退款操作侧(即 refunds.operator/service_tickets.handler) 单独计入 staff_detail.refund_op_cnt / refund_op_amount, 不重复计入成功率",
             "success_amount_rule": "成功金额暂不核算 (挽留成功的设备未进入退款流程, 无实际退款工单金额可对应)",
             "fee_ratio_rule": "费占比(单量口径) = 成功单数 / (成功单数 + 实际退款单数(失败+退充)) · 参考目标 37%+",
-            "staff_scope": f"退款专项 (Person.specialty∈{REFUND_RECOVERY_HR_CATS} OR 组名匹配 叶珍凤组/朱海洋组) + 所有退款操作执行人; 同alias多身份时优先按退款专项成员计; 已排除系统别名(system/机器人等)",
+            "staff_scope": f"退款挽回专项 (Person.specialty∈{REFUND_RECOVERY_HR_CATS}) + 所有退款操作执行人; 已排除系统别名(system/机器人/用户自助等)",
             "reason_order": reason_order_placeholder,
         },
     }
@@ -4557,61 +4584,71 @@ def refund_recovery_analysis(
         wk_end7_utc = wk_end_utc + _dt.timedelta(days=7)  # T+7
         week_label = f"{(now_sh.isocalendar()[0])}-W{(now_sh - _dt.timedelta(weeks=wi)).isocalendar()[1]}"
 
-        # 当周 退款专员 cs_record 接待【真退款类】 SN (新口径)
+        # 当周 退款专员 cs_record 接待【真退款类】 SN (修正口径: 移除problem_type过度过滤)
         wk_cs = db.execute(text(
             """
-            SELECT DISTINCT NULLIF(TRIM(c.device_sn),'') AS sn
+            SELECT DISTINCT NULLIF(TRIM(c.device_sn),'') AS sn,
+                   MIN(c.operation_time) AS first_op_time
             FROM cs_records c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
               AND c.operator = ANY(:op_list)
               AND NOT (c.operator = ANY(:sys_bl))
               AND c.problem_category = '退款'
-              AND COALESCE(c.problem_type,'') IN ('不想用了','充值错误','设备故障','服务原因')
               AND NOT (
                   COALESCE(c.description,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
                OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
                OR COALESCE(c.solution,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
               )
+            GROUP BY sn
             """
         ), {"ts": wk_start_utc, "te": wk_end_utc, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params}).fetchall()
         wk_host: set[str] = set(r.sn for r in wk_cs if r.sn)
+        wk_first_op = {r.sn: r.first_op_time for r in wk_cs if r.sn}
 
-        # 当周 失败SN (T+7 窗口)
+        # 当周 失败SN (T+7 窗口: 不限制operator/refund_method, 工单用register_time)
         wk_fail_rows = db.execute(text(
             """
-            SELECT DISTINCT NULLIF(TRIM(r.device_sn),'') AS sn,
+            SELECT NULLIF(TRIM(r.device_sn),'') AS sn,
                    'refund' AS src, r.refund_reason AS reason,
                    COALESCE(r.actual_amount, r.refund_amount, 0) AS amount,
-                   r.status AS status, r.refund_method AS method
+                   r.status AS status, r.refund_method AS method,
+                   r.created_at_raw AS event_time
             FROM refunds r
             WHERE r.created_at_raw IS NOT NULL
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
               AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
-              AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
-              AND r.refund_method = '线上'
+              AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
             UNION ALL
-            SELECT DISTINCT NULLIF(TRIM(st.device_sn),'') AS sn,
+            SELECT NULLIF(TRIM(st.device_sn),'') AS sn,
                    'ticket' AS src, st.service_item AS reason,
                    COALESCE(st.refund_amount, st.estimated_amount, 0) AS amount,
-                   st.status AS status, st.service_category AS method
+                   st.status AS status, st.service_category AS method,
+                   st.register_time AS event_time
             FROM service_tickets st
-            WHERE st.finish_time IS NOT NULL
-              AND st.finish_time >= :ts AND st.finish_time <= :te7
+            WHERE st.register_time IS NOT NULL
+              AND st.register_time >= :ts AND st.register_time <= :te7
               AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
-              AND st.handler IS NOT NULL AND NOT (st.handler = ANY(:sys_bl))
               AND COALESCE(st.service_category,'') = '退款'
+              AND COALESCE(st.status, '') != '终止'
             """
-        ), {"ts": wk_start_utc, "te7": wk_end7_utc, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall()
+        ), {"ts": wk_start_utc, "te7": wk_end7_utc}).fetchall()
         wk_fail_map: dict[str, dict] = {}
         for r in wk_fail_rows:
             sn = r.sn or ""
-            if not sn: continue
+            if not sn or sn not in wk_host:
+                continue
+            # 校验事件时间必须在 [接待时间, 接待时间+7天] 内
+            first_op = wk_first_op.get(sn)
+            if not first_op or not r.event_time:
+                continue
+            if not (first_op <= r.event_time <= first_op + _dt.timedelta(days=7)):
+                continue
             amt = float(r.amount or 0)
             prev = wk_fail_map.get(sn)
             if prev is None or amt > float(prev.get("amount") or 0):
                 wk_fail_map[sn] = {"reason": r.reason, "amount": amt, "status": r.status, "method": r.method, "src": r.src}
-        wk_fail_sns = set(wk_fail_map.keys()) & wk_host
+        wk_fail_sns = set(wk_fail_map.keys())
 
         wk_total = len(wk_host)
         wk_fail_n = len(wk_fail_sns)
@@ -4651,15 +4688,16 @@ def refund_recovery_analysis(
                 WHERE r.created_at_raw IS NOT NULL
                   AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
                   AND NULLIF(TRIM(r.device_sn),'') = ANY(:sn_arr)
-                  AND r.refund_method = '线上'
+                  AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
                 UNION ALL
                 SELECT NULLIF(TRIM(st.device_sn),'') AS sn,
-                       DATE(st.finish_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS day
+                       DATE(st.register_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS day
                 FROM service_tickets st
-                WHERE st.finish_time IS NOT NULL
-                  AND st.finish_time >= :ts AND st.finish_time <= :te7
+                WHERE st.register_time IS NOT NULL
+                  AND st.register_time >= :ts AND st.register_time <= :te7
                   AND NULLIF(TRIM(st.device_sn),'') = ANY(:sn_arr)
                   AND COALESCE(st.service_category,'') = '退款'
+                  AND COALESCE(st.status, '') != '终止'
             ) x
             WHERE sn IS NOT NULL
             GROUP BY sn
@@ -4718,7 +4756,7 @@ def refund_recovery_analysis(
             ts0 = _dt.datetime.combine(plot_start, _dt.time.min).replace(tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
             te0 = _dt.datetime.combine(end_day, _dt.time.max).replace(tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
             te0_7 = te0 + _dt.timedelta(days=7)
-            # 日粒度 分母SN (按天)
+            # 日粒度 分母SN (按天, 修正口径: 移除problem_type过度过滤)
             day_host_rows = db.execute(text(
                 """
                 SELECT DATE(c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS d,
@@ -4729,7 +4767,6 @@ def refund_recovery_analysis(
                   AND c.operator = ANY(:op_list)
                   AND NOT (c.operator = ANY(:sys_bl))
                   AND c.problem_category = '退款'
-                  AND COALESCE(c.problem_type,'') IN ('不想用了','充值错误','设备故障','服务原因')
                   AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
                   AND NOT (
                       COALESCE(c.description,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
@@ -4743,26 +4780,25 @@ def refund_recovery_analysis(
                 if r.d is None or not r.sn: continue
                 key = str(r.d)
                 day_to_host.setdefault(key, set()).add(r.sn)
-            # 日粒度 失败SN (T+7)
+            # 日粒度 失败SN (T+7, 修正口径: 不限制operator/refund_method, 工单用register_time)
             day_fail_rows = db.execute(text(
                 """
                 SELECT NULLIF(TRIM(r.device_sn),'') AS sn
                 FROM refunds r
                 WHERE r.created_at_raw IS NOT NULL
                   AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
-                  AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
-                  AND r.refund_method = '线上'
+                  AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
                   AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
                 UNION
                 SELECT NULLIF(TRIM(st.device_sn),'') AS sn
                 FROM service_tickets st
-                WHERE st.finish_time IS NOT NULL
-                  AND st.finish_time >= :ts AND st.finish_time <= :te7
-                  AND st.handler IS NOT NULL AND NOT (st.handler = ANY(:sys_bl))
+                WHERE st.register_time IS NOT NULL
+                  AND st.register_time >= :ts AND st.register_time <= :te7
                   AND COALESCE(st.service_category,'') = '退款'
+                  AND COALESCE(st.status, '') != '终止'
                   AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
                 """
-            ), {"ts": ts0, "te7": te0_7, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall()
+            ), {"ts": ts0, "te7": te0_7}).fetchall()
             fail_sn_set = set(r.sn for r in day_fail_rows if r.sn)
             daily_trend = []
             for d_obj in dates_list:
@@ -4790,7 +4826,7 @@ def refund_recovery_analysis(
         today_sh = _dt.datetime.now(TZ).date()
         ts_today = _dt.datetime.combine(today_sh, _dt.time.min).replace(tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
         te_today = _dt.datetime.now(TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
-        # 今日 分母SN (按小时)
+        # 今日 分母SN (按小时, 修正口径: 移除problem_type过度过滤)
         hr_rows = db.execute(text(
             """
             SELECT EXTRACT(HOUR FROM c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS hh,
@@ -4801,7 +4837,6 @@ def refund_recovery_analysis(
               AND c.operator = ANY(:op_list)
               AND NOT (c.operator = ANY(:sys_bl))
               AND c.problem_category = '退款'
-              AND COALESCE(c.problem_type,'') IN ('不想用了','充值错误','设备故障','服务原因')
               AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
               AND NOT (
                   COALESCE(c.description,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
@@ -4825,12 +4860,12 @@ def refund_recovery_analysis(
                 """
                 WITH arr AS (SELECT unnest(CAST(:sn_arr AS text[])) AS sn)
                 SELECT DISTINCT NULLIF(TRIM(r.device_sn),'') AS sn FROM refunds r JOIN arr a ON NULLIF(TRIM(r.device_sn),'') = a.sn
-                 WHERE r.refund_method = '线上' AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
+                 WHERE COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
                 UNION
                 SELECT DISTINCT NULLIF(TRIM(st.device_sn),'') AS sn FROM service_tickets st JOIN arr a ON NULLIF(TRIM(st.device_sn),'') = a.sn
-                 WHERE COALESCE(st.service_category,'') = '退款' AND st.handler IS NOT NULL AND NOT (st.handler = ANY(:sys_bl))
+                 WHERE COALESCE(st.service_category,'') = '退款' AND COALESCE(st.status, '') != '终止'
                 """
-            ), {"sn_arr": list(today_all_sns), "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall()
+            ), {"sn_arr": list(today_all_sns)}).fetchall()
             today_fail_sns = set(r.sn for r in tfr if r.sn)
         max_hh = _dt.datetime.now(TZ).hour
         hourly_today = []
