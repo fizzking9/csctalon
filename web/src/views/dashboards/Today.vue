@@ -60,31 +60,6 @@
         </template>
       </FilterBar>
     </div>
-    <!-- 人员筛选: 部门/分组/专项 -->
-    <div class="filter-bar mb-16" style="position: relative; z-index: 2">
-      <el-form :inline="true" size="small" @submit.prevent>
-        <el-form-item label="部门">
-          <el-select v-model="filterDepartment" placeholder="全部部门" clearable style="width: 140px">
-            <el-option v-for="d in DEPARTMENT_OPTIONS" :key="d" :label="d" :value="d" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="分组">
-          <el-select v-model="filterGroupId" placeholder="全部分组" clearable style="width: 180px">
-            <el-option v-for="g in groupsList" :key="g.id" :label="g.group_name" :value="g.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="专项">
-          <el-select v-model="filterSpecialtyId" placeholder="全部专项" clearable style="width: 180px">
-            <el-option v-for="s in specialtiesList" :key="s.id" :label="s.name" :value="s.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item v-if="filterDepartment || filterGroupId || filterSpecialtyId">
-          <el-button size="small" @click="filterDepartment=''; filterGroupId=null; filterSpecialtyId=null">
-            重置筛选
-          </el-button>
-        </el-form-item>
-      </el-form>
-    </div>
     <!-- 值班组长(今日有接待的组长)：只在日粒度展示（值班是日度概念），放在页头最显眼的位置 -->
     <div v-if="dutyLeaders.length && grain === 'day'" class="duty-leader-bar mb-16">
       <div class="duty-label">
@@ -278,7 +253,7 @@
               />
             </el-tooltip>
             <!-- 聚合方式 Tab -->
-            <el-radio-group v-model="staffFilter.aggregateBy" size="small" @change="loadAll">
+            <el-radio-group v-model="staffFilter.aggregateBy" size="small" @change="onAggregateChange">
               <el-radio-button label="person">按人</el-radio-button>
               <el-radio-button label="specialty">按专项</el-radio-button>
               <el-radio-button label="group">按分组</el-radio-button>
@@ -288,6 +263,29 @@
         </template>
       </SectionHeader>
       <el-card shadow="never">
+        <!-- 人员筛选工具栏：仅在按人模式显示 -->
+        <div v-if="staffFilter.aggregateBy === 'person'" class="mb-12" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap">
+          <span style="font-size:13px; color:#909399">筛选：</span>
+          <el-select v-model="filterDepartment" placeholder="全部部门" clearable size="small" style="width: 120px">
+            <el-option v-for="d in departmentOptions" :key="d" :label="d" :value="d" />
+          </el-select>
+          <el-select v-model="filterGroupId" placeholder="全部分组" clearable size="small" style="width: 140px">
+            <el-option v-for="g in groupsList" :key="g.id" :label="g.name" :value="g.id" />
+          </el-select>
+          <el-select v-model="filterSpecialtyId" placeholder="全部专项" clearable size="small" style="width: 140px">
+            <el-option v-for="s in specialtiesList" :key="s.id" :label="s.name" :value="s.id" />
+          </el-select>
+          <el-button
+            v-if="filterDepartment || filterGroupId || filterSpecialtyId"
+            size="small"
+            text
+            type="primary"
+            @click="filterDepartment=''; filterGroupId=null; filterSpecialtyId=null"
+          >重置筛选</el-button>
+          <span v-if="staffRows.length !== rawStaffRows.length" class="text-muted" style="font-size:12px; margin-left:8px">
+            共 {{ staffRows.length }} / {{ rawStaffRows.length }} 人
+          </span>
+        </div>
         <el-table :data="staffRows" border stripe size="small" max-height="520">
           <!-- 排名列：所有模式都显示 -->
           <el-table-column label="排名" width="64" align="center" fixed>
@@ -406,12 +404,12 @@
           </el-table-column>
           <el-table-column label="退款" width="108" align="center">
             <template #default="{ row }">
-              <span class="sp-txt tk">{{ formatNum(row.breakdown?.['退款挽回']?.sessions ?? row.sp_tuikuan ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['退款挽回']?.people ?? row.pp_tuikuan ?? 0) }}</span>个)</span>
+              <span class="sp-txt tk">{{ formatNum(row.breakdown?.['退款处理']?.sessions ?? row.sp_tuikuan ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['退款处理']?.people ?? row.pp_tuikuan ?? 0) }}</span>个)</span>
             </template>
           </el-table-column>
           <el-table-column label="投诉" width="108" align="center">
             <template #default="{ row }">
-              <span class="sp-txt ts">{{ formatNum(row.breakdown?.['投诉专员']?.sessions ?? row.sp_tousu ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['投诉专员']?.people ?? row.pp_tousu ?? 0) }}</span>个)</span>
+              <span class="sp-txt ts">{{ formatNum(row.breakdown?.['投诉接待']?.sessions ?? row.sp_tousu ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['投诉接待']?.people ?? row.pp_tousu ?? 0) }}</span>个)</span>
             </template>
           </el-table-column>
           <el-table-column label="工作量" width="104" align="right" sortable :sort-method="(a,b)=>Number(a.work_score||0)-Number(b.work_score||0)">
@@ -523,7 +521,15 @@ const filterGroupId = ref(null)
 const filterSpecialtyId = ref(null)
 const groupsList = ref([])
 const specialtiesList = ref([])
-const DEPARTMENT_OPTIONS = ['客服部', '技术部', '运营部', '产品部', '市场部', '人事部', '财务部', '行政部']
+
+// 动态部门列表：从实际人员数据提取（不硬编码）
+const departmentOptions = computed(() => {
+  const depts = new Set()
+  ;(rawStaffRows.value || []).forEach(r => {
+    if (r.department && r.department !== '未分配') depts.add(r.department)
+  })
+  return Array.from(depts).sort()
+})
 
 // ========== 时间粒度: day / week / month / quarter ==========
 const grain = ref('day')
@@ -613,6 +619,7 @@ const displayDate = computed(() => {
   return `${s} ~ ${e}`
 })
 // 当前请求参数: 单日 传 date / 范围 传 start + end
+// 注意：人员筛选(部门/分组/专项)仅作用于「7. 人均效率」表格，不影响其他全量看板数据
 const currentParams = computed(() => {
   const [s, e] = timeRange.value
   const rangeDays = dayjs(e).diff(dayjs(s), 'day') + 1
@@ -628,10 +635,6 @@ const currentParams = computed(() => {
   } else {
     params = { start: s, end: e }
   }
-  // 添加人员筛选参数
-  if (filterDepartment.value) params.department = filterDepartment.value
-  if (filterGroupId.value) params.group_id = filterGroupId.value
-  if (filterSpecialtyId.value) params.specialty_id = filterSpecialtyId.value
   return params
 })
 
@@ -1170,10 +1173,55 @@ const queueData = ref({ todos: [], tasks: [], incidents: [] })
 // 处理队列三栏的优先级/状态/格式化已迁移到 QueuePanel 组件内部,此处无需重复定义
 
 // ---------- 模块6~7 人员效率表: 工作分 / 效率分 双列 + 本职/转接 breakdown ----------
-const staffRows = ref([])
+const rawStaffRows = ref([])  // 全量原始数据（用于前端筛选）
 const staffFilter = reactive({
   qwOnly: false,
   aggregateBy: 'person', // person/specialty/group/all
+})
+
+// 前端筛选后的人均效率数据（仅作用于表格，不影响值班组长等其他模块）
+// 注意：只有在"按人"明细模式下筛选才生效，聚合模式（按专项/分组/全员）显示全量汇总
+const staffRows = computed(() => {
+  let rows = [...(rawStaffRows.value || [])]
+  
+  // 聚合模式下不筛选，返回全量汇总数据
+  if (staffFilter.aggregateBy !== 'person') {
+    return rows
+  }
+  
+  // 部门筛选（精确匹配）
+  if (filterDepartment.value) {
+    rows = rows.filter(r => r.department === filterDepartment.value)
+  }
+  
+  // 分组筛选（支持包含匹配，兼容组名前缀/后缀差异）
+  if (filterGroupId.value) {
+    const group = groupsList.value.find(g => g.id === filterGroupId.value)
+    if (group) {
+      const targetName = group.name
+      rows = rows.filter(r => {
+        const g = r.group || ''
+        return g === targetName || g.includes(targetName) || targetName.includes(g)
+      })
+    }
+  }
+  
+  // 专项筛选（支持current_specialty原始值和hr_category归一化值，包含匹配）
+  if (filterSpecialtyId.value) {
+    const specialty = specialtiesList.value.find(s => s.id === filterSpecialtyId.value)
+    if (specialty) {
+      const targetName = specialty.name
+      rows = rows.filter(r => {
+        const cs = r.current_specialty || ''
+        const hc = r.hr_category || ''
+        return cs === targetName || hc === targetName ||
+               cs.includes(targetName) || hc.includes(targetName) ||
+               targetName.includes(cs) || targetName.includes(hc)
+      })
+    }
+  }
+  
+  return rows
 })
 
 // ---------- 模块8: 退款挽回专项分析 (独立视图, 不冲抵接待效率) ----------
@@ -1217,7 +1265,8 @@ function isDutyLeader(r) {
   return byPos || bySp || byGroup
 }
 const dutyLeaders = computed(() => {
-  const list = (staffRows.value || []).filter(isDutyLeader)
+  // 值班组长始终使用全量数据，不受人员筛选影响
+  const list = (rawStaffRows.value || []).filter(isDutyLeader)
   // 接待总量多的排前 → 一眼看到主力值班组长
   list.sort((a, b) => {
     const sa = (Number(a.reception_count) || 0) + (Number(a.reception_device_count) || 0)
@@ -1257,8 +1306,12 @@ function grpTagType(g) {
 const SPECIALTY_COLOR_MAP = {
   '咨询接待': 'primary',
   '套餐专项': 'success',
+  '退款处理': 'warning',
   '退款挽回': 'warning',
-  '投诉专员': 'danger',
+  '内部投诉': 'danger',
+  '外部投诉': 'danger',
+  '投诉接待': 'danger',
+  '管理层': 'info',
 }
 function specialtyTagType(s) {
   return SPECIALTY_COLOR_MAP[s] || 'info'
@@ -1269,8 +1322,8 @@ function inferSpecialty(r) {
   const items = [
     { name: '咨询接待', n: Number(r.sp_zixun) || 0 },
     { name: '套餐专项', n: Number(r.sp_taocan) || 0 },
-    { name: '退款挽回', n: Number(r.sp_tuikuan) || 0 },
-    { name: '投诉专员', n: Number(r.sp_tousu) || 0 },
+    { name: '退款处理', n: Number(r.sp_tuikuan) || 0 },
+    { name: '投诉接待', n: Number(r.sp_tousu) || 0 },
   ].filter(x => x.n > 0).sort((a, b) => b.n - a.n)
   if (items.length) {
     if (items.length === 1) return items[0].name
@@ -1279,17 +1332,18 @@ function inferSpecialty(r) {
   // 没数据 按组默认属性兜底(已知截图分组)
   const GRP_DEFAULT_SP = {
     '董梦玲组': '咨询接待',
-    '吴晓龙组': '投诉接待+咨询',
-    '叶珍凤组': '咨询接待+退款挽回',
-    '朱海洋组': '套餐专项+退款挽回',
+    '吴晓龙组': '投诉接待',
+    '叶珍凤组': '咨询接待',
+    '朱海洋组': '退款挽回',
     '投诉专项组': '投诉接待',
+    '张蕾组': '投诉接待+退款处理',
   }
   return GRP_DEFAULT_SP[r.group] || (r.group === '未分组' ? '—' : '综合管理')
 }
 // 工作量 / 效率 通用 tooltip (纯文本, 兼容旧逻辑; 新渲染统一走 scoreTooltipHtml 返回结构化HTML)
 function scoreTooltip(r, mode) {
   const fmt = (v) => formatNum(v)
-  const w = r.weights || { '咨询接待': 1.0, '套餐专项': 1.8, '退款挽回': 2.2, '投诉专员': 3.0 }
+  const w = r.weights || { '咨询接待': 1.0, '套餐专项': 1.8, '退款处理': 2.0, '退款挽回': 2.2, '内部投诉': 3.0, '外部投诉': 5.0 }
   const xfer = Number(r.transfer_penalty || 0.2)
   const bd = r.breakdown || {}
   const useBreakdown = bd && bd['咨询接待'] && (typeof bd['咨询接待'].coef === 'number')
@@ -1304,8 +1358,8 @@ function scoreTooltip(r, mode) {
   const CATS = [
     { k: '咨询接待', short: '咨询', fallback_s: r.sp_zixun, fallback_p: r.pp_zixun ?? 0 },
     { k: '套餐专项', short: '套餐', fallback_s: r.sp_taocan, fallback_p: r.pp_taocan ?? 0 },
-    { k: '退款挽回', short: '退款', fallback_s: r.sp_tuikuan, fallback_p: r.pp_tuikuan ?? 0 },
-    { k: '投诉专员', short: '投诉', fallback_s: r.sp_tousu, fallback_p: r.pp_tousu ?? 0 },
+    { k: '退款处理', short: '退款', fallback_s: r.sp_tuikuan, fallback_p: r.pp_tuikuan ?? 0 },
+    { k: '投诉接待', short: '投诉', fallback_s: r.sp_tousu, fallback_p: r.pp_tousu ?? 0 },
   ]
   const head = [
     `【${r.name || ''}】${r.position || '—'} · ${r.group || '部门统管'} · 专项：${sp}${hrMark}${mgmtMark}`,
@@ -1341,7 +1395,7 @@ function scoreTooltip(r, mode) {
 // 工作量 / 效率 通用 tooltip (返回结构化HTML, 分段显示 不挤成横条)
 function scoreTooltipHtml(r, mode) {
   const fmt = (v) => formatNum(v)
-  const w = r.weights || { '咨询接待': 1.0, '套餐专项': 1.8, '退款挽回': 2.2, '投诉专员': 3.0 }
+  const w = r.weights || { '咨询接待': 1.0, '套餐专项': 1.8, '退款处理': 2.0, '退款挽回': 2.2, '内部投诉': 3.0, '外部投诉': 5.0 }
   const xfer = Number(r.transfer_penalty || 0.2)
   const bd = r.breakdown || {}
   const useBreakdown = bd && bd['咨询接待'] && (typeof bd['咨询接待'].coef === 'number')
@@ -1358,8 +1412,8 @@ function scoreTooltipHtml(r, mode) {
   const CATS = [
     { k: '咨询接待', short: '咨询', color: '#409eff', fallback_s: r.sp_zixun, fallback_p: r.pp_zixun ?? 0 },
     { k: '套餐专项', short: '套餐', color: '#67c23a', fallback_s: r.sp_taocan, fallback_p: r.pp_taocan ?? 0 },
-    { k: '退款挽回', short: '退款', color: '#e6a23c', fallback_s: r.sp_tuikuan, fallback_p: r.pp_tuikuan ?? 0 },
-    { k: '投诉专员', short: '投诉', color: '#f56c6c', fallback_s: r.sp_tousu, fallback_p: r.pp_tousu ?? 0 },
+    { k: '退款处理', short: '退款', color: '#e6a23c', fallback_s: r.sp_tuikuan, fallback_p: r.pp_tuikuan ?? 0 },
+    { k: '投诉接待', short: '投诉', color: '#f56c6c', fallback_s: r.sp_tousu, fallback_p: r.pp_tousu ?? 0 },
   ]
   // 头部: 人员+岗位+分组+专项
   const headerHtml = `
@@ -1377,7 +1431,7 @@ function scoreTooltipHtml(r, mode) {
       </div>
     </div>`
   // 系数规则小提示
-  const coefHtml = `<div class="stp-coef">难度系数: 咨询×1.0 · 套餐×1.8 · 退款×2.2 · 投诉×3.0 · 转接=系数×${xfer}</div>`
+  const coefHtml = `<div class="stp-coef">难度系数: 咨询×1.0 · 套餐×1.8 · 退款×2.0 · 退款挽回×2.2 · 内部投诉×3.0 · 外部投诉×5.0 · 转接=固定×${xfer}</div>`
   // 四专项明细行
   let total = 0
   const rowsHtml = CATS.map(c => {
@@ -1460,6 +1514,7 @@ async function loadAll() {
   loading.value = true
   const params = currentParams.value
   try {
+    // 人员筛选参数仅在前端对人均效率表格进行过滤，后端不传筛选参数获取全量数据
     const staffParams = {
       ...params,
       qw_only: staffFilter.qwOnly ? 1 : 0,
@@ -1522,13 +1577,14 @@ async function loadAll() {
     refundData.value = rf.data || { reasons: [], methods: [] }
     queueData.value = q.data || { todos: [], tasks: [], incidents: [] }
     // 人均效率: 后端 range 模式 → {date, date_end, data: [...]}; 单日旧模式 → [...]
+    // 保存全量原始数据到 rawStaffRows，前端通过 computed staffRows 进行筛选
     const sr = s.data
     if (sr && Array.isArray(sr)) {
-      staffRows.value = sr
+      rawStaffRows.value = sr
     } else if (sr && Array.isArray((sr).data)) {
-      staffRows.value = (sr).data
+      rawStaffRows.value = (sr).data
     } else {
-      staffRows.value = []
+      rawStaffRows.value = []
     }
     // 退款挽回专项分析
     recoveryData.value = rr.data || { kpi: emptyKpi(), reason_dist: [], staff_detail: [], weekly_trend: [], daily_reason: [] }
@@ -1539,10 +1595,29 @@ async function loadAll() {
   }
 }
 
-// 粒度/快捷范围变化时自动 reload
-watch([grain, quickDate, quickWeek, quickMonth, quickQuarter, customDate,
-       filterDepartment, filterGroupId, filterSpecialtyId], () => {
+// 时间粒度/快捷范围变化才需要重新请求后端
+// 人员筛选(部门/分组/专项)是纯前端过滤，不需要重新请求，computed自动更新
+watch([grain, quickDate, quickWeek, quickMonth, quickQuarter, customDate], () => {
   loadAll()
+})
+
+// 切换聚合方式：切到非"按人"模式时清空人员筛选
+function onAggregateChange() {
+  if (staffFilter.aggregateBy !== 'person') {
+    filterDepartment.value = ''
+    filterGroupId.value = null
+    filterSpecialtyId.value = null
+  }
+  loadAll()
+}
+
+// 部门/分组/专项筛选：自动切换到"按人"明细视图（只有按人模式支持筛选）
+watch([filterDepartment, filterGroupId, filterSpecialtyId], () => {
+  const hasFilter = filterDepartment.value || filterGroupId.value || filterSpecialtyId.value
+  if (hasFilter && staffFilter.aggregateBy !== 'person') {
+    staffFilter.aggregateBy = 'person'
+    loadAll() // 切换聚合模式需要后端重新返回对应数据
+  }
 })
 
 // 加载分组和专项列表
