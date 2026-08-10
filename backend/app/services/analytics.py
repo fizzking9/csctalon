@@ -320,6 +320,87 @@ def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
     except Exception:
         return 0, 0.0
 
+# ---------- 路线C/D 按时间粒度分组聚合 (小时/日) ----------
+def _route_c_shanmao_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tuple[dict[int, int], dict[int, float]]:
+    """【路线C】闪猫退款按时间分组聚合 (表不存在则返回空map)."""
+    trunc_expr = "date_trunc(:grain, timezone('Asia/Shanghai', " + _C_SHANMAO_TIME_COL + "))" if grain == "hour" else "date_trunc(:grain, timezone('Asia/Shanghai', " + _C_SHANMAO_TIME_COL + "))"
+    sql_tpl = f"""
+    SELECT {trunc_expr} AS trunc_t,
+           COUNT(*) AS cnt,
+           COALESCE(SUM({_C_SHANMAO_AMOUNT_COL})::numeric,0) AS amt
+    FROM {_C_SHANMAO_TABLE}
+    WHERE {_C_SHANMAO_TIME_COL} IS NOT NULL
+      {"AND " + _C_SHANMAO_STATUS_COL + " = :st" if _C_SHANMAO_STATUS_COL else ""}
+      {"AND " + _C_SHANMAO_TIME_COL + " >= :s" if start else ""}
+      {"AND " + _C_SHANMAO_TIME_COL + " <= :e" if end else ""}
+    GROUP BY trunc_t
+    """
+    params: dict[str, Any] = {"grain": grain}
+    if _C_SHANMAO_STATUS_COL:
+        params["st"] = _C_SHANMAO_STATUS_OK
+    if start is not None:
+        params["s"] = start
+    if end is not None:
+        params["e"] = end
+    cnt_map: dict[int, int] = {}
+    amt_map: dict[int, float] = {}
+    try:
+        with db.begin_nested():
+            rows = db.execute(text(sql_tpl), params).all()
+        for r in rows:
+            tt = r[0]
+            if tt is None:
+                continue
+            idx = slot_idx_fn(tt)
+            if idx is None:
+                continue
+            cnt_map[idx] = int(r[1] or 0)
+            amt_map[idx] = float(r[2] or 0)
+    except Exception:
+        pass
+    return cnt_map, amt_map
+
+
+def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tuple[dict[int, int], dict[int, float]]:
+    """【路线D】其他退款按时间分组聚合 (表不存在则返回空map)."""
+    trunc_expr = "date_trunc(:grain, timezone('Asia/Shanghai', " + _D_OTHER_TIME_COL + "))"
+    sql_tpl = f"""
+    SELECT {trunc_expr} AS trunc_t,
+           COUNT(*) AS cnt,
+           COALESCE(SUM({_D_OTHER_AMOUNT_COL})::numeric,0) AS amt
+    FROM {_D_OTHER_TABLE}
+    WHERE {_D_OTHER_TIME_COL} IS NOT NULL
+      {"AND " + _D_OTHER_STATUS_COL + " = :st" if _D_OTHER_STATUS_COL else ""}
+      {"AND " + _D_OTHER_TIME_COL + " >= :s" if start else ""}
+      {"AND " + _D_OTHER_TIME_COL + " <= :e" if end else ""}
+    GROUP BY trunc_t
+    """
+    params: dict[str, Any] = {"grain": grain}
+    if _D_OTHER_STATUS_COL:
+        params["st"] = _D_OTHER_STATUS_OK
+    if start is not None:
+        params["s"] = start
+    if end is not None:
+        params["e"] = end
+    cnt_map: dict[int, int] = {}
+    amt_map: dict[int, float] = {}
+    try:
+        with db.begin_nested():
+            rows = db.execute(text(sql_tpl), params).all()
+        for r in rows:
+            tt = r[0]
+            if tt is None:
+                continue
+            idx = slot_idx_fn(tt)
+            if idx is None:
+                continue
+            cnt_map[idx] = int(r[1] or 0)
+            amt_map[idx] = float(r[2] or 0)
+    except Exception:
+        pass
+    return cnt_map, amt_map
+
+
 # ---------- 实际现金流 E: 商户号现金流表 (独立对账基准) ----------
 def _route_e_merchant_cashflow_filter():
     """【实际现金流 E】merchant_refunds: refund_status='SUCCESS' 全部 (不区分 refund_type 不分C/D桶)"""
@@ -2204,16 +2285,15 @@ def _pct_delta(cur, prev) -> float | None:
 
 
 def today_kpi(db: Session, date: str | None = None, start: str | None = None, end: str | None = None) -> dict[str, Any]:
-    """模块1: KPI卡 + 前一周期环比 【全域统一退款核算 v3】
+    """模块1: KPI卡 + 前一周期环比 【全域统一退款核算 v4】
 
     支持三种时间调用方式(按优先级):
       1. start+end 明确范围 (周/月/季度粒度, 多日汇总) → 上一个同长度周期做环比
       2. date='YYYY-MM-DD' 指定整天 → 昨天整天做环比
       3. date=None 实时今天 → 昨天同时段做环比
-    口径严格对齐 v3 规范:
-      - 退款笔数/金额 = 路线A (退费单 refund_method='线上')
-      - 真实现金流出(经营估算) = A+B+C+D 四路经营出款 (C/D独立表未建时=A+B)
-      - 实际现金流(对账基准) = E (merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶)
+    口径严格对齐 v4 规范 (2026-08-10 用户调整):
+      - 退款笔数/金额 = 四路经营合计 A+B+C+D (经营侧登记的所有退款出款)
+      - 真实现金流 = E (merchant_refunds WHERE refund_status='SUCCESS' 合计, 对账基准)
       - 对账偏差 = 经营估算 − 实际现金流
     """
     ts, te, ys, ye, is_realtime, disp_range = _resolve_windows(date=date, start=start, end=end)
@@ -2238,28 +2318,24 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), "")))
     ).where(_between(CsRecord.operation_time, ys, ye))).scalar() or 0
 
-    # 2/3. 今日退款笔数+金额 【统一口径=路线A refund_method='线上'】
-    rf_row = db.execute(select(func.count(), func.coalesce(func.sum(Refund.refund_amount), 0))
-                        .where(_between(Refund.created_at_raw, ts, te),
-                               *_route_a_online_refund_filter())).first()
-    rf_cnt_t, rf_amt_t = int(rf_row[0] or 0), float(rf_row[1] or 0)
-    rf_row_y = db.execute(select(func.count(), func.coalesce(func.sum(Refund.refund_amount), 0))
-                          .where(_between(Refund.created_at_raw, ys, ye),
-                                 *_route_a_online_refund_filter())).first()
-    rf_cnt_y, rf_amt_y = int(rf_row_y[0] or 0), float(rf_row_y[1] or 0)
-
-    # 4. 真实现金流(经营估算) = A+B+C+D 四路经营出款 (通过统一聚合器计算)
-    #    实际现金流 E = merchant_refunds SUCCESS合计
+    # 2/3/4. 四路经营退款+实际现金流 (通过统一聚合器一次性计算)
     routes_t = _cash_routes_total(db, start=ts, end=te)
     routes_y = _cash_routes_total(db, start=ys, end=ye)
     a_t, b_t = routes_t["route_a"], routes_t["route_b"]
     a_y, b_y = routes_y["route_a"], routes_y["route_b"]
     c_t, d_t = routes_t["route_c"], routes_t["route_d"]
+    c_y, d_y = routes_y["route_c"], routes_y["route_d"]
     e_t = routes_t["actual_cashflow"]          # 实际现金流 E (今日)
     e_y = routes_y["actual_cashflow"]          # 实际现金流 E (昨日)
-    cash_t = routes_t["operational"]["amount"] # 经营估算 A+B+C+D
-    cash_y = routes_y["operational"]["amount"] # 经营估算 昨日
-    merchant_today = e_t["count"]              # 实际现金流笔数 (注意是E的count,不是C+D)
+    op_t = routes_t["operational"]             # 经营估算 A+B+C+D (今日)
+    op_y = routes_y["operational"]             # 经营估算 A+B+C+D (昨日)
+    # 退款笔数/金额 = 四路经营合计
+    rf_cnt_t, rf_amt_t = op_t["count"], op_t["amount"]
+    rf_cnt_y, rf_amt_y = op_y["count"], op_y["amount"]
+    # 真实现金流 = 实际现金流 E (merchant_refunds SUCCESS合计)
+    cash_t = e_t["amount"]
+    cash_y = e_y["amount"]
+    merchant_today = e_t["count"]              # 实际现金流笔数
     merchant_tip = None
     today_d_iso = _dt.datetime.now(TZ).date().isoformat()
     range_end_iso = d_end_iso or d_iso
@@ -2341,9 +2417,9 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         },
         # ── 口径注释 (前端标题tooltip) ──
         "_spec": {
-            "refund_count":     "路线A: 退费单 refund_method='线上' (严格按用户要求:退费单管理里只这条算退款路线)",
-            "refund_amount":    "路线A: 退费单 refund_method='线上'",
-            "cash_out":         "经营估算 = 四路经营出款 A线上直退 + B用户取现 + C闪猫退款(shanmao_refunds已建表status=已退款) + D其他退款(独立表占位)",
+            "refund_count":     "退款笔数 = 四路经营合计 A线上直退 + B用户取现 + C闪猫退款 + D其他退款",
+            "refund_amount":    "退款金额 = 四路经营合计 A+B+C+D (经营侧登记的所有退款出款)",
+            "cash_out":         "真实现金流(对账基准) = merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
             "actual_cashflow":  "实际现金流(对账基准) = merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
             "ticket_done":      "有效完工时间推算: 10.7% 真实完成(白名单:status=已完成且finish在register+12h内且handler非空非SYS) → handle_duration秒 → 该handler近30天真实平均耗时 → 全局真实平均。仅status=已完成视为完工, 避免finish_time被BMS 03:15批量覆盖导致的虚高。",
         },
@@ -2351,16 +2427,19 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
 
 
 def today_hourly_trend(db: Session, date: str | None = None, start: str | None = None, end: str | None = None) -> dict[str, Any]:
-    """模块2: 时间节奏 (小时/日/周/月 按跨度自动选择粒度)
-    
+    """模块2: 时间节奏 (小时/日/周/月 按跨度自动选择粒度) v4
+
     粒度规则:
       - 单日 → 按小时聚合 (00:00~23:00, 对应今日实时到当前小时)
       - 多日 → 按天聚合 (date_trunc day, 标签为 MM-DD)
-    左Y数量级(柱):
-      - 会话数(次) / 接待数(个) / 投诉量: 各自独立柱
-      - 退款笔数: 堆叠双柱 → 「直接退款(路线A) + 钱包提现(路线B)」合计
-    右Y金额级:
-      - 退款金额: 堆叠双面积 → 「直接退款金额 + 钱包提现金额」合计 + 总计折线
+    按三组分类展示:
+      【工作量组】左Y柱:
+        - 会话数(次) / 接待数(个): 独立柱
+      【款项组】左Y柱(笔数堆叠) + 右Y面积(金额堆叠):
+        - 退款笔数: 四路堆叠柱 → A(线上直退) + B(钱包提现) + C(闪猫退款) + D(其他退款) = 经营合计
+        - 退款金额: 四路堆叠面积 → A+B+C+D = 经营合计; 独立虚线 = E(商户号实际现金流)
+      【投诉组】左Y柱:
+        - 投诉量: 独立柱
     """
     ts, te, _, _, is_realtime, disp_range = _resolve_windows(date=date, start=start, end=end)
 
@@ -2484,6 +2563,34 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         b_cnt_map[idx] = int(r.cnt or 0)
         b_amt_map[idx] = float(r.amt or 0)
 
+    # --- 路线C: 闪猫退款(按粒度 笔数+金额) ---
+    c_cnt_map, c_amt_map = _route_c_shanmao_trend(db, ts, te, grain, _slot_idx)
+
+    # --- 路线D: 其他退款(按粒度 笔数+金额) ---
+    d_cnt_map, d_amt_map = _route_d_other_trend(db, ts, te, grain, _slot_idx)
+
+    # --- 路线E: 商户号实际现金流(按粒度 笔数+金额) ---
+    e_rows = db.execute(
+        select(_time_trunc(MerchantRefund.trade_time),
+               func.count().label("cnt"),
+               func.coalesce(func.sum(MerchantRefund.refund_amount), 0).label("amt"))
+        .where(MerchantRefund.trade_time.isnot(None),
+               MerchantRefund.trade_time >= ts, MerchantRefund.trade_time <= te,
+               *_route_e_merchant_cashflow_filter())
+        .group_by("trunc_t")
+    ).all()
+    e_cnt_map: dict[int, int] = {}
+    e_amt_map: dict[int, float] = {}
+    for r in e_rows:
+        tt = r._mapping["trunc_t"]
+        if tt is None:
+            continue
+        idx = _slot_idx(tt)
+        if idx is None:
+            continue
+        e_cnt_map[idx] = int(r.cnt or 0)
+        e_amt_map[idx] = float(r.amt or 0)
+
     # 投诉: 按粒度聚合 按 service_tickets.register_time, 三表 UNION 计数
     cp_rows = db.execute(
         select(_time_trunc(ServiceTicket.register_time), func.count().label("cnt"))
@@ -2530,32 +2637,35 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
 
     # ── 填充到槽位: 单日填当前小时之前, 多日填全部(最后一天可能实时) ──
     slots = list(range(n_slots))
-    def _arr(a_map, b_map=None):
-        res = []
+    def _fill_list(*maps, kind='count'):
+        """将多个map按slot合并成list, 返回各路线list + 合计list"""
+        n_maps = len(maps)
+        lists = [[] for _ in range(n_maps)]
+        total_list = []
         for i in slots:
             if i > max_slot:
-                res.append(None)
+                for L in lists: L.append(None)
+                total_list.append(None)
             else:
-                a = a_map.get(i, 0)
-                b = b_map.get(i, 0) if b_map is not None else 0
-                res.append(a + b)
-        return res
-    def _arr_split(a_map, b_map, *, kind):
-        """返回 [direct_list, withdraw_list, total_list] 三列表"""
-        direct, withdraw, total = [], [], []
-        for i in slots:
-            if i > max_slot:
-                direct.append(None); withdraw.append(None); total.append(None)
-            else:
-                a = a_map.get(i, 0)
-                b = b_map.get(i, 0)
-                direct.append(a if kind == 'count' else a)
-                withdraw.append(b if kind == 'count' else b)
-                total.append(a + b if kind == 'count' else round(a + b, 2))
-        return direct, withdraw, total
-    r_cnt_direct, r_cnt_withdraw, r_cnt_total = _arr_split(a_cnt_map, b_cnt_map, kind='count')
-    r_amt_direct, r_amt_withdraw, r_amt_total = _arr_split(a_amt_map, b_amt_map, kind='amount')
-    # 旧兼容字段 = 合计
+                total = 0
+                for j, m in enumerate(maps):
+                    v = m.get(i, 0)
+                    lists[j].append(v if kind == 'count' else v)
+                    total += v
+                total_list.append(total if kind == 'count' else round(total, 2))
+        return lists + [total_list]
+
+    # 退款笔数: A/B/C/D 四路 + 合计
+    cnt_lists = _fill_list(a_cnt_map, b_cnt_map, c_cnt_map, d_cnt_map, kind='count')
+    r_cnt_a, r_cnt_b, r_cnt_c, r_cnt_d, r_cnt_total = cnt_lists
+    # 退款金额: A/B/C/D 四路 + 合计(经营估算)
+    amt_lists = _fill_list(a_amt_map, b_amt_map, c_amt_map, d_amt_map, kind='amount')
+    r_amt_a, r_amt_b, r_amt_c, r_amt_d, r_amt_total = amt_lists
+    # 实际现金流E (笔数+金额)
+    e_cnt_list = [e_cnt_map.get(i, 0) if i <= max_slot else None for i in slots]
+    e_amt_list = [round(e_amt_map.get(i, 0), 2) if i <= max_slot else None for i in slots]
+
+    # 旧兼容字段 = 四路合计
     refund_count = r_cnt_total
     refund_amount = r_amt_total
 
@@ -2576,27 +2686,46 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         "hours": slots if grain == "hour" else None,   # 旧兼容
         "hour_labels": slot_labels,                     # 前端统一用 hour_labels
         "slot_labels": slot_labels,
+        # === 工作量组 ===
         "reception":          [cs_map.get(i, 0)         if i <= max_slot else None for i in slots],
         "reception_devices":  [cs_dev_map.get(i, 0)     if i <= max_slot else None for i in slots],
+        # === 款项组 - 退款笔数: 四路拆分 + 合计 ===
+        "refund_count":       refund_count,      # 旧兼容 = 四路合计
+        "refund_count_a":     r_cnt_a,           # 路线A 退费单线上直退
+        "refund_count_b":     r_cnt_b,           # 路线B 钱包用户取现
+        "refund_count_c":     r_cnt_c,           # 路线C 闪猫退款
+        "refund_count_d":     r_cnt_d,           # 路线D 其他退款
+        "refund_count_direct":  r_cnt_a,         # 向后兼容: direct = A
+        "refund_count_withdraw": r_cnt_b,        # 向后兼容: withdraw = B
+        "refund_count_total":  r_cnt_total,      # 四路合计 A+B+C+D
+        # === 款项组 - 退款金额: 四路拆分 + 合计 + 实际现金流E ===
+        "refund_amount":      refund_amount,     # 旧兼容 = 四路合计
+        "refund_amount_a":    r_amt_a,           # 路线A 金额
+        "refund_amount_b":    r_amt_b,           # 路线B 金额
+        "refund_amount_c":    r_amt_c,           # 路线C 金额
+        "refund_amount_d":    r_amt_d,           # 路线D 金额
+        "refund_amount_e":    e_amt_list,        # 路线E 实际现金流金额
+        "refund_amount_direct":  r_amt_a,        # 向后兼容
+        "refund_amount_withdraw": r_amt_b,       # 向后兼容
+        "refund_amount_total":  r_amt_total,     # 四路经营合计 A+B+C+D
+        "cashflow_e_count":   e_cnt_list,        # 实际现金流E 笔数
+        "cashflow_e_amount":  e_amt_list,        # 实际现金流E 金额
+        # === 投诉组 ===
         "complaint":          [cp_map.get(i, 0)         if i <= max_slot else None for i in slots],
-        # —— 退款笔数: 拆分 + 合计 + 旧字段兼容 ——
-        "refund_count":       refund_count,      # 旧兼容 = 合计
-        "refund_count_direct":  r_cnt_direct,    # 路线A 直退笔数
-        "refund_count_withdraw": r_cnt_withdraw, # 路线B 钱包提现笔数
-        "refund_count_total":  r_cnt_total,      # 明确合计 = A+B
-        # —— 退款金额: 拆分 + 合计 + 旧字段兼容 ——
-        "refund_amount":      refund_amount,     # 旧兼容 = 合计
-        "refund_amount_direct":  r_amt_direct,    # 路线A 直退金额
-        "refund_amount_withdraw": r_amt_withdraw, # 路线B 钱包提现金额
-        "refund_amount_total":  r_amt_total,      # 明确合计 = A+B
         "_spec": {
-            "refund_count_direct":  "路线A: 退费单 refund_method='线上' (直接线上退款)",
-            "refund_count_withdraw": "路线B: 钱包提现 op_type='用户提现' (会员钱包取现到账)",
-            "refund_count_total":   "A+B 合计；节奏图中双柱堆叠显示",
-            "refund_amount_direct": "路线A: 退费单 refund_method='线上' 金额",
-            "refund_amount_withdraw": "路线B: 钱包提现 op_type='用户提现' 金额",
-            "refund_amount_total":   "A+B 合计；图中堆叠面积 + 总计折线",
-            "reception":     "接待人次 = cs_record 计数；reception_devices = 去重设备SN计数(去NULL/空串)",
+            "refund_count_a":  "路线A: 退费单 refund_method='线上' (线上直退)",
+            "refund_count_b":  "路线B: 钱包提现 op_type='用户提现'",
+            "refund_count_c":  "路线C: 闪猫退款 (shanmao_refunds status=已退款)",
+            "refund_count_d":  "路线D: 其他退款 (独立表占位)",
+            "refund_count_total": "四路经营合计 A+B+C+D",
+            "refund_amount_a": "路线A: 退费单线上直退金额",
+            "refund_amount_b": "路线B: 钱包用户取现金额",
+            "refund_amount_c": "路线C: 闪猫退款金额",
+            "refund_amount_d": "路线D: 其他退款金额",
+            "refund_amount_e": "路线E: 商户号实际现金流 (merchant_refunds SUCCESS)",
+            "refund_amount_total": "四路经营合计金额 A+B+C+D",
+            "reception":     "会话数(次) = cs_record 计数；接待数(个) = 去重设备SN计数(去NULL/空串)",
+            "groups":        "工作量: 会话/接待 · 款项: 退款笔数(四路堆叠)/退款金额(四路堆叠面积+实际现金流E线) · 投诉: 投诉量",
             "grain":         f"时间粒度: {grain} (跨度{span_days}天 → 自动选择粒度)",
         },
     }
