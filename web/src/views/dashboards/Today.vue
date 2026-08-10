@@ -60,6 +60,31 @@
         </template>
       </FilterBar>
     </div>
+    <!-- 人员筛选: 部门/分组/专项 -->
+    <div class="filter-bar mb-16" style="position: relative; z-index: 2">
+      <el-form :inline="true" size="small" @submit.prevent>
+        <el-form-item label="部门">
+          <el-select v-model="filterDepartment" placeholder="全部部门" clearable style="width: 140px">
+            <el-option v-for="d in DEPARTMENT_OPTIONS" :key="d" :label="d" :value="d" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="分组">
+          <el-select v-model="filterGroupId" placeholder="全部分组" clearable style="width: 180px">
+            <el-option v-for="g in groupsList" :key="g.id" :label="g.group_name" :value="g.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="专项">
+          <el-select v-model="filterSpecialtyId" placeholder="全部专项" clearable style="width: 180px">
+            <el-option v-for="s in specialtiesList" :key="s.id" :label="s.name" :value="s.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="filterDepartment || filterGroupId || filterSpecialtyId">
+          <el-button size="small" @click="filterDepartment=''; filterGroupId=null; filterSpecialtyId=null">
+            重置筛选
+          </el-button>
+        </el-form-item>
+      </el-form>
+    </div>
     <!-- 值班组长(今日有接待的组长)：只在日粒度展示（值班是日度概念），放在页头最显眼的位置 -->
     <div v-if="dutyLeaders.length && grain === 'day'" class="duty-leader-bar mb-16">
       <div class="duty-label">
@@ -461,6 +486,8 @@
 import { ref, computed, reactive, onMounted, watch } from 'vue'
 import { Timer } from '@element-plus/icons-vue'
 import { today } from '@/api/analytics'
+import { listGroups } from '@/api/group'
+import { listSpecialties } from '@/api/specialty'
 import BaseChart from '@/components/BaseChart.vue'
 import { formatMoney } from '@/utils/format'
 import dayjs from 'dayjs'
@@ -468,6 +495,14 @@ import dayjs from 'dayjs'
 // 本地脚本不直接使用图标组件
 
 const loading = ref(false)
+
+// ========== 人员筛选: 部门/分组/专项 ==========
+const filterDepartment = ref('')
+const filterGroupId = ref(null)
+const filterSpecialtyId = ref(null)
+const groupsList = ref([])
+const specialtiesList = ref([])
+const DEPARTMENT_OPTIONS = ['客服部', '技术部', '运营部', '产品部', '市场部', '人事部', '财务部', '行政部']
 
 // ========== 时间粒度: day / week / month / quarter ==========
 const grain = ref('day')
@@ -560,13 +595,23 @@ const displayDate = computed(() => {
 const currentParams = computed(() => {
   const [s, e] = timeRange.value
   const rangeDays = dayjs(e).diff(dayjs(s), 'day') + 1
+  let params
   if (rangeDays <= 1) {
     // 单日: 判断是不是今天(实时) 还是昨天(整天)/历史(整天)
     const todayIso = dayjs().format('YYYY-MM-DD')
-    if (s === todayIso) return {} // 实时今天: 不传任何 (向后兼容最稳)
-    return { date: s }
+    if (s === todayIso) {
+      params = {} // 实时今天: 不传任何 (向后兼容最稳)
+    } else {
+      params = { date: s }
+    }
+  } else {
+    params = { start: s, end: e }
   }
-  return { start: s, end: e }
+  // 添加人员筛选参数
+  if (filterDepartment.value) params.department = filterDepartment.value
+  if (filterGroupId.value) params.group_id = filterGroupId.value
+  if (filterSpecialtyId.value) params.specialty_id = filterSpecialtyId.value
+  return params
 })
 
 // ---------- 日期水印 (SVG旋转平铺, 绝对定位穿透 pointer-events, 卡片内容区/卡片间都能看到; 局部截图也清晰) ----------
@@ -1327,11 +1372,26 @@ async function loadAll() {
 }
 
 // 粒度/快捷范围变化时自动 reload
-watch([grain, quickDate, quickWeek, quickMonth, quickQuarter, customDate], () => {
+watch([grain, quickDate, quickWeek, quickMonth, quickQuarter, customDate,
+       filterDepartment, filterGroupId, filterSpecialtyId], () => {
   loadAll()
 })
 
-onMounted(loadAll)
+// 加载分组和专项列表
+async function loadFilterOptions() {
+  try {
+    const [gRes, sRes] = await Promise.all([listGroups(), listSpecialties()])
+    groupsList.value = gRes.data || []
+    specialtiesList.value = sRes.data || []
+  } catch (e) {
+    console.error('[Today] load filter options error', e)
+  }
+}
+
+onMounted(() => {
+  loadFilterOptions()
+  loadAll()
+})
 </script>
 
 <style scoped>
