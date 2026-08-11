@@ -1,7 +1,7 @@
 """BMS 平台数据抓取服务
 
 支持 6 个数据源的抓取:
-  - refund (退费单): https://wifi.cloud-cat.cn/bms/index.html#/pay/refund-manage
+#   - refund (退费单): https://support.cloud-cat.cn/bms/index.html#/pay/refund-manage
   - ticket (服务请求): https://support.cloud-cat.cn/bms/index.html#/service-request/service-request-manage
   - wallet (提现操作): https://support.cloud-cat.cn/bms/index.html#/settle/customerWalletOperationRecord
   - device_combo (设备套餐): https://support.cloud-cat.cn/bms/index.html#/device/device-combo
@@ -10,10 +10,11 @@
 
 注意:
   - 账号密码从 sync_source_configs 表读取(加密存储),按源独立配置
-  - 两个子域名(wifi.cloud-cat.cn / support.cloud-cat.cn)需要分别登录,可能用不同账号
+  - BMS 主平台(support.cloud-cat.cn) 的 refund/ticket/wallet/device_combo/device_tag_binding 共用同一登录态
+  - 闪猫(fast.cloud-cat.cn) 是独立平台,登录需验证码,采用 storage_state 复用机制
   - BMS 系统限制:1分钟内不能连续做查询导出下载动作
   - BMS_DATA_SOURCES 现仅作为默认种子(首次启动写入 DB),运行时配置以 DB 为准
-  - shanmao_refund (闪猫) 登录需验证码,采用 storage_state 复用机制,缺失时走前端交互验证码登录
+  - shanmao_refund (闪猫) 登录需验证码,缺失时走前端交互验证码登录
 """
 
 import asyncio
@@ -58,7 +59,7 @@ logger = logging.getLogger(__name__)
 BMS_DATA_SOURCES: dict[str, dict] = {
     "refund": {
         "name": "退费单管理",
-        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "base_url": "https://support.cloud-cat.cn/bms",
         "page_path": "/index.html#/pay/refund-manage",
         "default_sync": True,
         # 退费单默认按创建时间筛选,无需选时间字段
@@ -115,15 +116,17 @@ BMS_DATA_SOURCES: dict[str, dict] = {
         #     策略1已加最多 6s 轮询;策略4也加了「优先命中 el-range-input 所在行」。
         "time_format": "%Y-%m-%d %H:%M:%S",
     },
-    # BMS 设备标签管理页面(https://wifi.cloud-cat.cn/bms/index.html#/device/device-tags)
+    # BMS 设备标签管理页面(https://support.cloud-cat.cn/bms/index.html#/device/device-tags)
     # ⚠️  注意: 该页面点击「导出」导出的并不是「标签定义字典」(device_tag),
     # 而是每台设备被打标签的明细行(设备SN × 标签名 × 打标人 × 更新时间),
     # 对应数据源 code=device_tag_binding。标签定义(device_tag)从明细里按 tag_name 自动去重补插
     # (见 upsert_device_tag_bindings 里 resolve_tag_id 临时插 DeviceTag 行的逻辑),
     # 且可在本系统侧手动维护,不再做 BMS 自动同步。
+    # ⚠️  2026-08-11 修复: base_url 从 wifi.cloud-cat.cn 统一到 support.cloud-cat.cn
+    #   (两域名指向同一套 BMS 系统,统一后可与 refund/ticket/wallet 共享登录态,避免单独登录)
     "device_tag_binding": {
         "name": "设备标签(打标明细)",
-        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "base_url": "https://support.cloud-cat.cn/bms",
         "page_path": "/index.html#/device/device-tags",
         "default_sync": False,  # 标签绑定明细变动少,按需手动同步
     },
@@ -654,12 +657,16 @@ async def _try_auto_login_via_ocr(
     cap_elem = None
 
     # P1-2: 根据 data_type 自动切换验证码识别模式
-    #       shanmao_refund(闪猫退款平台) 使用数学计算式验证码(7*0=? / 9-5=?),
-    #       其他平台(如未来接入更多)默认走纯文本验证码.
+    #       - shanmao_refund(闪猫加速 https://fast.cloud-cat.cn/sc_brm) 是 5 字符纯文本验证码,
+    #         实测 ddddocr 普通模式可识别(如 '4vrqg'),走 try_ocr_captcha_with_confidence
+    #       - BMS 其他数据源(refund/ticket/wallet/cs_record 等)大多无验证码或纯文本验证码
+    #       - SCRM 的数学计算式验证码(7*0=? / 9-5=?)在 scrm_web_fetcher.py 独立处理,不经过这里
     #       若后续需要按配置切换,可把这个判断改成读 config.get("captcha_type")
-    use_math_captcha = (data_type == "shanmao_refund")
+    use_math_captcha = False  # BMS 系列数据源默认走纯文本验证码
     if use_math_captcha:
         log.info(f"[{data_type}] 检测到数学计算式验证码,启用 try_ocr_math_captcha 流程")
+    else:
+        log.info(f"[{data_type}] 使用纯文本验证码识别(try_ocr_captcha_with_confidence)")
 
     for attempt in range(1, _CAPTCHA_OCR_MAX_RETRY + 1):
         # ───────── 1) 刷新验证码 / 页面 ─────────
@@ -1298,11 +1305,71 @@ class BmsFetcher:
                     [range_inputs[0], start_str, range_inputs[1], end_str],
                 )
                 await asyncio.sleep(0.5)
+                # ── 二次校验:fallback 后必须再读一次 DOM/Vue 值,确认填入成功 ──
+                #   原因:之前 fallback 后直接 return,调用方会继续点搜索,
+                #   导致带着错误时间范围(默认近30天)查询,下回错月份数据。
+                verify2 = await page.evaluate(
+                    """([sEl, eEl]) => {
+                        function upVue(el) {
+                            let n = el;
+                            for (let i=0; i<8 && n; i++) {
+                                if (n.__vue__) return n.__vue__;
+                                n = n.parentElement;
+                            }
+                            return null;
+                        }
+                        const v = upVue(sEl) || upVue(eEl);
+                        let vueVal = null;
+                        try { if (v && v.value !== undefined) vueVal = JSON.parse(JSON.stringify(v.value)); }
+                        catch(_) { vueVal = String(v && v.value).slice(0,200); }
+                        return { s: sEl.value || '', e: eEl.value || '', vueValue: vueVal };
+                    }""",
+                    [range_inputs[0], range_inputs[1]],
+                )
+                s_ok2 = start_str in (verify2.get('s') or '')
+                e_ok2 = end_str in (verify2.get('e') or '')
+                vv2 = verify2.get("vueValue")
+                vue_ok2 = False
+                if isinstance(vv2, (list, tuple)) and len(vv2) >= 2:
+                    vue_ok2 = (start_str in str(vv2[0] or '')) and (end_str in str(vv2[1] or ''))
+                if (not s_ok2 or not e_ok2) and not vue_ok2:
+                    # fallback 仍失败 → 必须中止,避免用错误时间范围查询导出脏数据
+                    logger.error(
+                        "  [策略0] fallback 后二次校验仍失败 s=%r(%s) e=%r(%s) vue=%r(%s) → 抛错中止,避免按错误时间范围查询",
+                        verify2.get('s'), "OK" if s_ok2 else "MISS",
+                        verify2.get('e'), "OK" if e_ok2 else "MISS",
+                        vv2, "OK" if vue_ok2 else "MISS",
+                    )
+                    raise RuntimeError(
+                        f"时间范围填入失败: 目标 start={start_str!r} end={end_str!r}, "
+                        f"实际 DOM s={verify2.get('s')!r} e={verify2.get('e')!r}, "
+                        f"vue={vv2!r}; 已中止查询以避免按错误时间范围导出脏数据"
+                    )
+                logger.info(
+                    "  [策略0] fallback 后二次校验通过 s=%r/%r  e=%r/%r  vueValue=%r ✅",
+                    verify2.get('s'), start_str, verify2.get('e'), end_str, vv2,
+                )
             else:
                 logger.info(
                     "  [策略0] 回填验证通过 s=%r/%r  e=%r/%r  vueValue=%r ✅",
                     verify.get('s'), start_str, verify.get('e'), end_str, vv,
                 )
+            # 关闭可能遮挡搜索按钮的日期选择器弹窗 (el-picker-panel / el-date-picker__time-header)
+            try:
+                await page.evaluate(
+                    """() => {
+                        // 点击页面空白处关闭 Element UI 日期弹窗
+                        const popups = document.querySelectorAll('.el-picker-panel, .el-picker-panel__body, .el-date-picker__time-header');
+                        if (popups.length) {
+                            // 触发 ESC 关闭
+                            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                        }
+                        return true;
+                    }"""
+                )
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
             return
 
         # 策略1: Element UI datetimerange 范围选择器(只取第一个,避免多时间字段干扰)
@@ -1541,9 +1608,9 @@ class BmsFetcher:
         优先级:
           1) 文本精确匹配「查询/查 询/搜索/搜 索/筛选/开始查询」
           2) 找不到 → 找页面上 y 坐标最靠上的筛选条区域里第一个非「重置/导出」按钮
-          3) 再找不到 → 聚焦最后一个筛选框后按 Enter(原生触发查询)
+          3) 再找不到 → 用 JS 点击第一个匹配按钮
+          4) 仍失败 → 按 Enter 兜底触发
         """
-        # 1) 文本匹配
         keywords = ["查询", "查 询", "搜索", "搜 索", "筛选", "开始查询", "查询统计", "确认查询"]
         exclude_keywords = ["重置", "导出", "下载", "清空", "取消", "关闭"]
         try:
@@ -1559,8 +1626,13 @@ class BmsFetcher:
                 excluded = any(kw in txt for kw in exclude_keywords)
                 if matched_kw and not excluded:
                     logger.info(f"  点击查询按钮: text={txt!r}")
-                    await b.click(timeout=8000)
-                    return
+                    try:
+                        await b.click(timeout=5000)
+                        return
+                    except Exception as click_err:
+                        logger.warning(f"  Playwright click 超时: {click_err}, 改用 JS 点击")
+                        await b.evaluate("(el) => el.click()")
+                        return
             # 2) 找筛选条(y 小)里第一个非「重置/导出」按钮
             y_sorted = []
             for b in btns:
@@ -1578,23 +1650,57 @@ class BmsFetcher:
             if y_sorted:
                 _, _, b, txt = y_sorted[0]
                 logger.info(f"  文本未匹配,按坐标取筛选条第一个按钮 text={txt!r} 点击")
-                await b.click(timeout=8000)
-                return
+                try:
+                    await b.click(timeout=5000)
+                    return
+                except Exception:
+                    await b.evaluate("(el) => el.click()")
+                    return
         except Exception as e:
-            logger.warning(f"  查询按钮点击策略异常: {e},退化为 Enter 触发")
-        # 3) Enter 兜底
+            logger.warning(f"  查询按钮点击策略异常: {e}")
+        # 3) JS 全局查找按钮并点击(兜底)
         try:
-            # 先尝试聚焦最后一个可见 input(通常是筛选框最后一个),再按 Enter
+            clicked = await page.evaluate(
+                """(kw_list, excl_list) => {
+                    const btns = document.querySelectorAll('button');
+                    for (const b of btns) {
+                        const txt = (b.innerText || '').trim();
+                        if (!txt) continue;
+                        const matched = kw_list.some(k => txt.includes(k));
+                        const excluded = excl_list.some(k => txt.includes(k));
+                        if (matched && !excluded) {
+                            b.click();
+                            return txt;
+                        }
+                    }
+                    return null;
+                }""",
+                keywords, exclude_keywords,
+            )
+            if clicked:
+                logger.info(f"  JS 全局点击查询按钮成功: text={clicked!r}")
+                return
+        except Exception:
+            pass
+        # 4) Enter 兜底 - 聚焦第一个筛选框后按 Enter
+        try:
+            date_inp = await page.query_selector('input.el-range-input:visible')
+            if date_inp:
+                await date_inp.focus()
+                await asyncio.sleep(0.1)
+                await page.keyboard.press("Enter")
+                logger.info("  Enter 兜底触发查询(日期框)")
+                return
             last_inp = page.locator('input:visible').last
             if await last_inp.count() > 0:
                 await last_inp.focus(timeout=1000)
                 await asyncio.sleep(0.1)
                 await page.keyboard.press("Enter")
-                logger.info("  Enter 兜底触发查询")
+                logger.info("  Enter 兜底触发查询(最后一个输入框)")
                 return
         except Exception:
             pass
-        raise RuntimeError("找不到任何查询/搜索按钮,Enter 兜底也失败")
+        raise RuntimeError("找不到任何查询/搜索按钮,所有兜底均失败")
 
     async def _do_fetch_one(
         self,
@@ -1823,117 +1929,326 @@ class BmsFetcher:
                 logger.warning(f"[{data_type}] 文件头检查跳过: {_ck}")
 
             # 6.1 【shanmao_refund 核心:全量导出后按日期范围裁剪写回】
-            #    闪猫导出接口不支持筛选参数(传参=500),只能拿到全量 1976 行,
-            #    因此这里用 pandas 精确保留 start_date~end_date 范围内的行再覆盖写回:
-            #    优先用【退费单号前缀 TFYYYYMMDD】(100% 精确,因为单号里包含真实申请日期);
-            #    若没有该列则回退用【审核时间 / 申请时间 / 退款时间】等列 between 判断。
-            #    裁剪后仍为空也不抛错(可能该日期确实无退款申请),只是写 0 行 xlsx 出去。
+            #    闪猫导出接口不支持筛选参数(传参=500),只能拿到全量,
+            #    因此用 pandas 精确保留 start_date~end_date 范围内的行再覆盖写回。
+            #    裁剪逻辑提取为独立方法,_do_fetch_one 和 _do_fetch_one_shared 共用。
             if data_type == "shanmao_refund":
-                try:
-                    import pandas as pd
-                    suffix_l = str(dest_path).lower()
-                    if suffix_l.endswith(".xlsx"):
-                        df = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
-                    elif suffix_l.endswith(".xls"):
-                        try:
-                            df = pd.read_excel(dest_path, dtype=str)
-                        except Exception as exc:
-                            raise RuntimeError(
-                                f"[{data_type}] .xls 老格式缺少解析引擎(需 xlrd==1.2.0/pyxlsb): {exc}"
-                            )
-                    else:
-                        df = pd.read_csv(dest_path, dtype=str)
+                dest_path, dest_filename = await self._crop_shanmao_refund_by_date_range(
+                    dest_path, dest_filename, start_date, end_date, data_type
+                )
 
-                    orig_rows = len(df)
-                    mask = None
-                    chosen_col = None
-                    # 策略1: 退费单号前缀 TFYYYYMMDD → 100% 精准(闪猫单号里嵌入了申请日期)
-                    if "退费单号" in df.columns:
-                        _pref = df["退费单号"].astype(str).str[:10]
-                        expected_prefix = start_date.strftime("TF%Y%m%d")
-                        mask = _pref == expected_prefix
-                        chosen_col = "退费单号 prefix=" + expected_prefix
-                        # 防御: 若 start_date != end_date(跨天范围),改用逐行 datetime 解析 退单号里的日期
-                        if (end_date - start_date).days != 0:
-                            try:
-                                _ymd = _pref.str[2:10]  # "TF" 后面的 YYYYMMDD
-                                _dates = pd.to_datetime(_ymd, format="%Y%m%d", errors="coerce")
-                                sd = pd.to_datetime(start_date.date())
-                                ed = pd.to_datetime(end_date.date())
-                                mask = (_dates >= sd) & (_dates <= ed)
-                                chosen_col = "退费单号 YYYYMMDD in range"
-                            except Exception:
-                                pass
-                    # 策略2: 审核时间 / 申请时间 / 打款时间 等 between
-                    if mask is None:
-                        for col in ("审核时间", "申请时间", "退款时间", "创建时间", "打款时间"):
-                            if col in df.columns:
-                                try:
-                                    vs = pd.to_datetime(df[col].dropna(), errors="coerce")
-                                    sd = pd.to_datetime(start_date)
-                                    ed = pd.to_datetime(end_date)
-                                    mask = (vs >= sd) & (vs <= ed)
-                                    chosen_col = f"{col} between [{start_date},{end_date}]"
-                                    # 把空行(NaT)视为 False
-                                    mask = mask.fillna(False)
-                                    if len(mask) != len(df):
-                                        # 索引对齐, 缺失行 False
-                                        _tmp = pd.Series(False, index=df.index)
-                                        _tmp.loc[mask.index[mask.values]] = True
-                                        mask = _tmp
-                                    break
-                                except Exception:
-                                    continue
-                    if mask is None:
-                        logger.warning(
-                            f"[{data_type}] ⚠️  找不到任何可用于日期范围裁剪的列(退费单号/审核时间/申请时间...)"
-                            f", 保留原 xlsx 的 {orig_rows} 行(未裁剪)。请检查导出列命名是否变更?"
-                        )
-                    else:
-                        df_filtered = df.loc[mask].copy()
-                        kept = len(df_filtered)
-                        logger.info(
-                            f"[{data_type}] 日期范围裁剪完成: 依据列={chosen_col}, 原 {orig_rows} 行 → 保留 {kept} 行"
-                            f" (范围 {start_date.strftime('%Y-%m-%d %H:%M:%S')} ~ {end_date.strftime('%Y-%m-%d %H:%M:%S')})"
-                        )
-                        # ★ 覆盖写回同一个 dest_path → 下游任务看到的就是裁剪后仅 1 行的 xlsx
-                        if suffix_l.endswith(".xlsx"):
-                            with pd.ExcelWriter(dest_path, engine="openpyxl") as w:
-                                df_filtered.to_excel(w, index=False)
-                        elif suffix_l.endswith(".xls"):
-                            # 老格式尽量写 xlsx(覆盖扩展),避免缺少 xlwt 写失败
-                            new_p = dest_path.with_suffix(".xlsx")
-                            if new_p != dest_path:
-                                try: dest_path.unlink()
-                                except: pass
-                                dest_path = new_p
-                                dest_filename = dest_path.name
-                            with pd.ExcelWriter(str(dest_path), engine="openpyxl") as w:
-                                df_filtered.to_excel(w, index=False)
-                        else:
-                            df_filtered.to_csv(dest_path, index=False)
-                        logger.info(
-                            f"[{data_type}] ✅ 裁剪后文件已覆盖写回 {dest_path} (最终 {kept} 行)"
-                        )
-                        # 读回来再做一次校验(避免写回失败)
-                        try:
-                            if str(dest_path).lower().endswith(".xlsx"):
-                                df_check = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
-                            else:
-                                df_check = pd.read_csv(dest_path, dtype=str)
-                            logger.info(
-                                f"[{data_type}] 二次校验 OK:写回后实际 rows={len(df_check)}"
-                            )
-                        except Exception as wb:
-                            logger.warning(f"[{data_type}] ⚠️  裁剪后二次读取失败(不影响主流程): {wb}")
-                except Exception as e:
-                    logger.warning(f"[{data_type}] 日期范围裁剪/写回失败(保留原文件,不影响主流程): {type(e).__name__}: {e}")
+            # 6.2 【refund:BMS 退费单全量导出后按日期范围裁剪写回】
+            if data_type == "refund":
+                dest_path, dest_filename = await self._crop_refund_by_date_range(
+                    dest_path, dest_filename, start_date, end_date, data_type
+                )
 
             result.success = True
             result.file_path = f"{month_dir}/{dest_filename}"
             result.filename = dest_filename
         finally:
             await context.close()
+
+    async def _crop_shanmao_refund_by_date_range(
+        self, dest_path, dest_filename, start_date, end_date, data_type
+    ):
+        """闪猫退款单导出后按日期范围裁剪写回(全量导出 → 仅保留目标日期范围行)
+
+        闪猫导出接口不支持时间筛选参数(传参=500),只能拿到全量,
+        因此用 pandas 精确保留 start_date~end_date 范围内的行再覆盖写回:
+        - 策略1: 退费单号前缀 TFYYYYMMDD(100% 精确,因为单号里包含真实申请日期)
+        - 策略2: 审核时间 / 申请时间 / 退款时间 / 创建时间 / 打款时间 等 between 判断
+
+        裁剪后仍为空也不抛错(可能该日期确实无退款申请),只是写 0 行出去。
+        .xls 老格式会转换为 .xlsx 写回,此时 dest_path/dest_filename 会变,需要返回更新后的值。
+        """
+        try:
+            import pandas as pd
+            suffix_l = str(dest_path).lower()
+            if suffix_l.endswith(".xlsx"):
+                df = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
+            elif suffix_l.endswith(".xls"):
+                try:
+                    df = pd.read_excel(dest_path, dtype=str)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"[{data_type}] .xls 老格式缺少解析引擎(需 xlrd==1.2.0/pyxlsb): {exc}"
+                    )
+            else:
+                df = pd.read_csv(dest_path, dtype=str)
+
+            orig_rows = len(df)
+            mask = None
+            chosen_col = None
+            # 策略1: 退费单号前缀 TFYYYYMMDD → 100% 精准(闪猫单号里嵌入了申请日期)
+            if "退费单号" in df.columns:
+                _pref = df["退费单号"].astype(str).str[:10]
+                expected_prefix = start_date.strftime("TF%Y%m%d")
+                mask = _pref == expected_prefix
+                chosen_col = "退费单号 prefix=" + expected_prefix
+                # 防御: 若 start_date != end_date(跨天范围),改用逐行 datetime 解析 退单号里的日期
+                if (end_date - start_date).days != 0:
+                    try:
+                        _ymd = _pref.str[2:10]  # "TF" 后面的 YYYYMMDD
+                        _dates = pd.to_datetime(_ymd, format="%Y%m%d", errors="coerce")
+                        sd = pd.to_datetime(start_date.date())
+                        ed = pd.to_datetime(end_date.date())
+                        mask = (_dates >= sd) & (_dates <= ed)
+                        chosen_col = "退费单号 YYYYMMDD in range"
+                    except Exception:
+                        pass
+            # 策略2: 审核时间 / 申请时间 / 打款时间 等 between
+            if mask is None:
+                for col in ("审核时间", "申请时间", "退款时间", "创建时间", "打款时间"):
+                    if col in df.columns:
+                        try:
+                            vs = pd.to_datetime(df[col].dropna(), errors="coerce")
+                            sd = pd.to_datetime(start_date)
+                            ed = pd.to_datetime(end_date)
+                            mask = (vs >= sd) & (vs <= ed)
+                            chosen_col = f"{col} between [{start_date},{end_date}]"
+                            # 把空行(NaT)视为 False
+                            mask = mask.fillna(False)
+                            if len(mask) != len(df):
+                                # 索引对齐, 缺失行 False
+                                _tmp = pd.Series(False, index=df.index)
+                                _tmp.loc[mask.index[mask.values]] = True
+                                mask = _tmp
+                            break
+                        except Exception:
+                            continue
+            if mask is None:
+                logger.warning(
+                    f"[{data_type}] ⚠️  找不到任何可用于日期范围裁剪的列(退费单号/审核时间/申请时间...)"
+                    f", 保留原 xlsx 的 {orig_rows} 行(未裁剪)。请检查导出列命名是否变更?"
+                )
+            else:
+                df_filtered = df.loc[mask].copy()
+                kept = len(df_filtered)
+                logger.info(
+                    f"[{data_type}] 日期范围裁剪完成: 依据列={chosen_col}, 原 {orig_rows} 行 → 保留 {kept} 行"
+                    f" (范围 {start_date.strftime('%Y-%m-%d %H:%M:%S')} ~ {end_date.strftime('%Y-%m-%d %H:%M:%S')})"
+                )
+                # ★ 覆盖写回同一个 dest_path → 下游任务看到的就是裁剪后的 xlsx
+                if suffix_l.endswith(".xlsx"):
+                    with pd.ExcelWriter(dest_path, engine="openpyxl") as w:
+                        df_filtered.to_excel(w, index=False)
+                elif suffix_l.endswith(".xls"):
+                    # 老格式尽量写 xlsx(覆盖扩展),避免缺少 xlwt 写失败
+                    new_p = dest_path.with_suffix(".xlsx")
+                    if new_p != dest_path:
+                        try: dest_path.unlink()
+                        except: pass
+                        dest_path = new_p
+                        dest_filename = dest_path.name
+                    with pd.ExcelWriter(str(dest_path), engine="openpyxl") as w:
+                        df_filtered.to_excel(w, index=False)
+                else:
+                    df_filtered.to_csv(dest_path, index=False)
+                logger.info(
+                    f"[{data_type}] ✅ 裁剪后文件已覆盖写回 {dest_path} (最终 {kept} 行)"
+                )
+                # 读回来再做一次校验(避免写回失败)
+                try:
+                    if str(dest_path).lower().endswith(".xlsx"):
+                        df_check = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
+                    else:
+                        df_check = pd.read_csv(dest_path, dtype=str)
+                    logger.info(
+                        f"[{data_type}] 二次校验 OK:写回后实际 rows={len(df_check)}"
+                    )
+                except Exception as wb:
+                    logger.warning(f"[{data_type}] ⚠️  裁剪后二次读取失败(不影响主流程): {wb}")
+        except Exception as e:
+            logger.warning(f"[{data_type}] 日期范围裁剪/写回失败(保留原文件,不影响主流程): {type(e).__name__}: {e}")
+        return dest_path, dest_filename
+
+    async def _crop_refund_by_date_range(
+        self, dest_path, dest_filename, start_date, end_date, data_type
+    ):
+        """BMS 退费单导出后按日期范围裁剪写回(全量导出 → 仅保留目标日期范围行)
+
+        BMS exportRefundApply 导出接口不接受筛选参数,只能拿到全量,
+        因此用 pandas 精确保留 start_date~end_date 范围内的行再覆盖写回:
+        - 主策略: 创建时间 between start_date ~ end_date
+        - 辅策略: 退费单号中嵌入的 YYYYMMDD 日期(BMS 单号如 BR2026022502165999775)
+
+        裁剪后仍为空也不抛错(可能该日期确实无退款申请),只是写 0 行出去。
+        """
+        try:
+            import pandas as pd
+            suffix_l = str(dest_path).lower()
+            if suffix_l.endswith(".xlsx"):
+                df = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
+            elif suffix_l.endswith(".xls"):
+                try:
+                    df = pd.read_excel(dest_path, dtype=str)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"[{data_type}] .xls 老格式缺少解析引擎(需 xlrd==1.2.0/pyxlsb): {exc}"
+                    )
+            else:
+                # BMS 导出 CSV 问题: (1) 每行末尾多一个 \t 导致字段数+1(末尾空字段)
+                #   (2) 部分行内部含换行/\t 导致字段严重错位(如 18→10 字段)
+                #   (3) pandas on_bad_lines="skip" 在"字段数+1"场景下会硬塞,
+                #       导致"实退金额"列被塞入【退微信】等文本→数值溢出
+                # 修复: 逐行用 csv.reader 解析,
+                #   ① 去除每个字段尾部 \t
+                #   ② 去除末尾多出的空字段(BMS 末尾多一个 \t 的特性)
+                #   ③ 严格校验字段数==表头字段数,不匹配的直接跳过(100% 是截断/错位)
+                import csv as _csv
+                import io as _io
+                raw_text = Path(dest_path).read_text(encoding="utf-8-sig", errors="replace")
+                raw_lines = raw_text.splitlines()
+                if not raw_lines:
+                    raise RuntimeError(f"[{data_type}] CSV 文件为空")
+
+                # 解析表头
+                header_fields = next(_csv.reader(_io.StringIO(raw_lines[0])))
+                header_fields = [h.rstrip("\t") for h in header_fields]
+                expected_n = len(header_fields)
+
+                clean_rows = [header_fields]
+                skipped = 0
+                for line in raw_lines[1:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        fields = next(_csv.reader(_io.StringIO(line)))
+                    except (StopIteration, _csv.Error):
+                        skipped += 1
+                        continue
+                    # 去除每个字段尾部 \t
+                    fields = [f.rstrip("\t") for f in fields]
+                    # 去除末尾多出的空字段(BMS 每行末尾多一个 \t → 多一个空字段)
+                    while len(fields) > expected_n and fields[-1] == "":
+                        fields.pop()
+                    # ★ 严格校验: 字段数必须完全匹配表头,否则跳过(100% 是截断/错位)
+                    if len(fields) != expected_n:
+                        skipped += 1
+                        continue
+                    clean_rows.append(fields)
+
+                # 重新拼成 CSV 文本交给 pandas
+                buf = _io.StringIO()
+                w = _csv.writer(buf)
+                for r in clean_rows:
+                    w.writerow(r)
+                df = pd.read_csv(_io.StringIO(buf.getvalue()), dtype=str)
+                if skipped > 0:
+                    logger.info(
+                        f"[{data_type}] CSV 严格校验: 跳过 {skipped} 行字段数不匹配的截断行"
+                        f"(期望 {expected_n} 字段), 保留 {len(df)} 行"
+                    )
+
+            if df.empty:
+                logger.warning(f"[{data_type}] CSV 解析为空,跳过裁剪")
+                return dest_path, dest_filename
+
+            orig_rows = len(df)
+            mask = None
+            chosen_col = None
+
+            # 策略1(主): 创建时间 between —— 最可靠,因为 BMS 日期筛选器就是按"实际退款时间"筛选的
+            if "创建时间" in df.columns:
+                try:
+                    vs = pd.to_datetime(df["创建时间"], errors="coerce")
+                    sd = pd.to_datetime(start_date)
+                    ed = pd.to_datetime(end_date)
+                    mask = (vs >= sd) & (vs <= ed)
+                    mask = mask.fillna(False)
+                    chosen_col = f"创建时间 between [{start_date},{end_date}]"
+                    logger.info(
+                        f"[{data_type}] 策略1(创建时间): 命中 {mask.sum()}/{orig_rows} 行"
+                    )
+                except Exception:
+                    mask = None
+
+            # 策略2(辅): 退费单号中嵌入日期 —— BMS 单号如 BR2026022502165999775
+            #   前缀(2-3字母) + YYYYMMDD + 序号
+            if mask is None or (isinstance(mask, pd.Series) and mask.sum() == 0):
+                if "退费单号" in df.columns:
+                    try:
+                        _nos = df["退费单号"].astype(str).str.strip()
+                        # 尝试提取 YYYYMMDD: 跳过前缀字母(2-3位),取后续 8 位数字
+                        _ymd = _nos.str.extract(r'^[A-Z]{2,3}(\d{4})(\d{2})(\d{2})', expand=False)
+                        if _ymd is not None and len(_ymd) > 0:
+                            _dates = pd.to_datetime(
+                                _ymd[0].fillna('') + _ymd[1].fillna('') + _ymd[2].fillna(''),
+                                format="%Y%m%d", errors="coerce"
+                            )
+                            sd = pd.to_datetime(start_date.date())
+                            ed = pd.to_datetime(end_date.date())
+                            mask = (_dates >= sd) & (_dates <= ed)
+                            mask = mask.fillna(False)
+                            chosen_col = f"退费单号嵌入日期 in range"
+                            logger.info(
+                                f"[{data_type}] 策略2(退费单号): 命中 {mask.sum()}/{orig_rows} 行"
+                            )
+                    except Exception:
+                        mask = None
+
+            # 策略3(兜底): 更新时间 between
+            if mask is None or (isinstance(mask, pd.Series) and mask.sum() == 0):
+                if "更新时间" in df.columns:
+                    try:
+                        vs = pd.to_datetime(df["更新时间"], errors="coerce")
+                        sd = pd.to_datetime(start_date)
+                        ed = pd.to_datetime(end_date)
+                        mask = (vs >= sd) & (vs <= ed)
+                        mask = mask.fillna(False)
+                        chosen_col = f"更新时间 between [{start_date},{end_date}]"
+                        logger.info(
+                            f"[{data_type}] 策略3(更新时间): 命中 {mask.sum()}/{orig_rows} 行"
+                        )
+                    except Exception:
+                        mask = None
+
+            if mask is None:
+                logger.warning(
+                    f"[{data_type}] ⚠️  找不到任何可用于日期范围裁剪的列(创建时间/退费单号/更新时间)"
+                    f", 保留原文件的 {orig_rows} 行(未裁剪)。请检查导出列命名是否变更?"
+                )
+            else:
+                df_filtered = df.loc[mask].copy()
+                kept = len(df_filtered)
+                logger.info(
+                    f"[{data_type}] 日期范围裁剪完成: 依据列={chosen_col}, 原 {orig_rows} 行 → 保留 {kept} 行"
+                    f" (范围 {start_date.strftime('%Y-%m-%d %H:%M:%S')} ~ {end_date.strftime('%Y-%m-%d %H:%M:%S')})"
+                )
+                # ★ 覆盖写回同一个 dest_path → 下游任务看到的就是裁剪后的文件
+                if suffix_l.endswith(".xlsx"):
+                    with pd.ExcelWriter(dest_path, engine="openpyxl") as w:
+                        df_filtered.to_excel(w, index=False)
+                elif suffix_l.endswith(".xls"):
+                    new_p = dest_path.with_suffix(".xlsx")
+                    if new_p != dest_path:
+                        try: dest_path.unlink()
+                        except: pass
+                        dest_path = new_p
+                        dest_filename = dest_path.name
+                    with pd.ExcelWriter(str(dest_path), engine="openpyxl") as w:
+                        df_filtered.to_excel(w, index=False)
+                else:
+                    df_filtered.to_csv(dest_path, index=False)
+                logger.info(
+                    f"[{data_type}] ✅ 裁剪后文件已覆盖写回 {dest_path} (最终 {kept} 行)"
+                )
+                # 读回来再做一次校验(避免写回失败)
+                try:
+                    if str(dest_path).lower().endswith(".xlsx"):
+                        df_check = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
+                    else:
+                        df_check = pd.read_csv(dest_path, dtype=str)
+                    logger.info(
+                        f"[{data_type}] 二次校验 OK:写回后实际 rows={len(df_check)}"
+                    )
+                except Exception as wb:
+                    logger.warning(f"[{data_type}] ⚠️  裁剪后二次读取失败(不影响主流程): {wb}")
+        except Exception as e:
+            logger.warning(f"[{data_type}] 日期范围裁剪/写回失败(保留原文件,不影响主流程): {type(e).__name__}: {e}")
+        return dest_path, dest_filename
 
     async def fetch_all(
         self,
@@ -2284,6 +2599,21 @@ class BmsFetcher:
 
         await download.save_as(str(dest_path))
         logger.info(f"[{data_type}] 文件已保存: {dest_path}")
+
+        # 【shanmao_refund 核心:全量导出后按日期范围裁剪写回】
+        # 闪猫导出接口不支持时间筛选参数(传参=500),只能拿到全量,
+        # 因此用 pandas 精确保留 start_date~end_date 范围内的行再覆盖写回。
+        # (与 _do_fetch_one 共用 _crop_shanmao_refund_by_date_range 方法)
+        if data_type == "shanmao_refund":
+            dest_path, dest_filename = await self._crop_shanmao_refund_by_date_range(
+                dest_path, dest_filename, start_date, end_date, data_type
+            )
+
+        # 【refund:BMS 退费单全量导出后按日期范围裁剪写回】
+        if data_type == "refund":
+            dest_path, dest_filename = await self._crop_refund_by_date_range(
+                dest_path, dest_filename, start_date, end_date, data_type
+            )
 
         result.success = True
         result.file_path = f"{month_dir}/{dest_filename}"
