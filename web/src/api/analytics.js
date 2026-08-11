@@ -54,14 +54,15 @@ export const refundWithdrawal = {
 }
 
 // 今日看板 (单日切面 + 实时节奏)
+// 第二个参数 config 可传 { signal } 用于 AbortController 取消请求
 export const today = {
-  kpi: (params) => request.get('/analytics/today/kpi', { params }),
-  hourlyTrend: (params) => request.get('/analytics/today/hourly-trend', { params }),
-  reception: (params) => request.get('/analytics/today/reception', { params }),
-  refund: (params) => request.get('/analytics/today/refund', { params }),
-  queue: (params) => request.get('/analytics/today/queue', { params }),
-  staff: (params) => request.get('/analytics/today/staff', { params }),
+  kpi: (params, config) => request.get('/analytics/today/kpi', { params, ...config }),
+  hourlyTrend: (params, config) => request.get('/analytics/today/hourly-trend', { params, ...config }),
+  reception: (params, config) => request.get('/analytics/today/reception', { params, ...config }),
+  refund: (params, config) => request.get('/analytics/today/refund', { params, ...config }),
+  queue: (params, config) => request.get('/analytics/today/queue', { params, ...config }),
+  staff: (params, config) => request.get('/analytics/today/staff', { params, ...config }),
   // 退款挽回专项分析 (独立视图, 不冲抵接待效率)
-  refundRecovery: (params) => request.get('/analytics/today/refund-recovery', { params }),
+  refundRecovery: (params, config) => request.get('/analytics/today/refund-recovery', { params, ...config }),
 }
 

@@ -468,7 +468,7 @@ async def sync_all(
     # 跳过的源(停用/未注册)也计入结果
     results.extend(skipped)
 
-    # 5. post-sync 钩子:关联匹配 + 退费宽表物化(失败不阻塞同步主流程)
+    # 5. post-sync 钩子:关联匹配 + 退费宽表物化 + 统计刷新 + 缓存失效(失败不阻塞同步主流程)
     #    只在有成功导入时触发,用独立 Session 避免污染主事务
     any_success = any(r.get("success") for r in results)
     if any_success:
@@ -480,15 +480,54 @@ async def sync_all(
             try:
                 match_stats = match_all(hook_db, only_unmatched=True)
                 wide_stats = build_refund_wide(hook_db)
+                # 2026-08-11: 同步后主动 ANALYZE 关键表, 修复 BMS 全量覆盖导入导致统计信息滞后
+                # (此前 cs_records 统计 n_live_tup=646 实际 144660, 差 224 倍, 严重影响查询计划)
+                _analyze_key_tables(hook_db)
                 logger.info(
                     f"post-sync 钩子完成: match={match_stats}, wide={wide_stats}"
                 )
             finally:
                 hook_db.close()
+            # 失效 Redis 缓存 (today:* 等), 避免同步后仍读到旧聚合结果
+            try:
+                from app.core.redis_client import cache_invalidate_pattern
+                n = cache_invalidate_pattern("today:*")
+                if n:
+                    logger.info(f"已失效 {n} 条 today:* 缓存")
+            except Exception as ce:
+                logger.debug(f"缓存失效失败(不影响同步): {ce}")
         except Exception as e:
             logger.warning(f"post-sync 钩子(关联匹配/宽表物化)失败,不影响同步结果: {e}")
 
     return results
+
+
+def _analyze_key_tables(db) -> None:
+    """对同步频繁的表执行 ANALYZE, 刷新 PostgreSQL 统计信息
+
+    BMS 同步用 ON CONFLICT DO NOTHING 全量覆盖, 产生大量 dead tuples + 统计滞后,
+    导致查询计划器基于过时的 n_live_tup 选择低效计划(如把 144660 行的表当成 646 行).
+    autovacuum 默认阈值 20% 才触发, 对日增量小的表可能几天才分析一次, 期间性能持续恶化.
+    """
+    # ANALYZE 不能在事务里执行, 用 raw connection autocommit
+    from sqlalchemy import text as _sa_text
+    conn = db.connection()
+    try:
+        # 退出当前事务上下文(若有), 切到 autocommit
+        conn.execute(_sa_text("COMMIT"))
+    except Exception:
+        pass
+    old_autocommit = getattr(conn, "autocommit", False)
+    try:
+        conn.autocommit = True
+        for tbl in ("cs_records", "service_tickets", "refunds",
+                    "wallet_withdrawals", "merchant_refunds", "refund_wide"):
+            try:
+                conn.execute(_sa_text(f"ANALYZE {tbl}"))
+            except Exception:
+                pass  # 表不存在(如 refund_wide 未建)静默跳过
+    finally:
+        conn.autocommit = old_autocommit
 
 
 def get_sync_status(db: Session) -> list[dict]:

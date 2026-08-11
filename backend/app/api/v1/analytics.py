@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from app.api.deps import CurrentUser, DBSession
+from app.core.redis_client import cached_call
 from app.schemas.common import R
 from app.services import analytics as A
 
@@ -188,32 +189,38 @@ def today_kpi_endpoint(db: DBSession, _: CurrentUser, date: str | None = None, s
                       department: str | None = Query(None, description="按部门筛选"),
                       group_id: int | None = Query(None, description="按分组ID筛选"),
                       specialty_id: int | None = Query(None, description="按专项ID筛选")):
-    return R(data=A.today_kpi(db, date, start, end))
+    # 60s 缓存: 切换聚合粒度时同参数重复请求命中缓存, 避免重复 DB 聚合
+    key = f"today:kpi:{date}:{start}:{end}"
+    return R(data=cached_call(key, 60, A.today_kpi, db, date, start, end))
 
 
 @router.get("/today/hourly-trend", response_model=R, summary="今日看板-时间节奏(接待量柱+退款金额线,双Y轴,支持hour/day/week/month粒度)")
 def today_hourly(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
                  trend_grain: str | None = Query(None, pattern="^(hour|day|week|month)$", description="聚合粒度: hour=按小时, day=按日, week=按周, month=按月; 不传则根据时间跨度自动选择"),
                  department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
-    return R(data=A.today_hourly_trend(db, date, start, end, trend_grain=trend_grain))
+    key = f"today:hourly:{date}:{start}:{end}:{trend_grain}"
+    return R(data=cached_call(key, 60, A.today_hourly_trend, db, date, start, end, trend_grain=trend_grain))
 
 
 @router.get("/today/reception", response_model=R, summary="今日看板-接待分项(分类饼+Top客服柱)")
 def today_reception(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
                     department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
-    return R(data=A.today_reception_breakdown(db, date, start, end))
+    key = f"today:reception:{date}:{start}:{end}"
+    return R(data=cached_call(key, 60, A.today_reception_breakdown, db, date, start, end))
 
 
 @router.get("/today/refund", response_model=R, summary="今日看板-退款分项(原因Top10+方式分布)")
 def today_refund(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
                  department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
-    return R(data=A.today_refund_breakdown(db, date, start, end))
+    key = f"today:refund:{date}:{start}:{end}"
+    return R(data=cached_call(key, 60, A.today_refund_breakdown, db, date, start, end))
 
 
 @router.get("/today/queue", response_model=R, summary="今日看板-处理队列(今日到期待办+进行中专项+今日异常)")
 def today_queue_endpoint(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
                          department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
-    return R(data=A.today_queue(db, date, start, end))
+    key = f"today:queue:{date}:{start}:{end}"
+    return R(data=cached_call(key, 60, A.today_queue, db, date, start, end))
 
 
 @router.get("/today/staff", response_model=R, summary="今日看板-人均效率表(接待/退款/完工单合成权重)")
@@ -226,7 +233,9 @@ def today_staff(db: DBSession, _: CurrentUser, date: str | None = None,
                 department: str | None = Query(None, description="按部门筛选"),
                 group_id: int | None = Query(None, description="按分组ID筛选"),
                 specialty_id: int | None = Query(None, description="按专项ID筛选")):
-    return R(data=A.today_staff_efficiency(db, date, start, end, topn, qw_only, aggregate_by,
+    # staff 接口是最重的(含 DISTINCT ON 关联), 缓存 90s 进一步降低切换开销
+    key = f"today:staff:{date}:{start}:{end}:{topn}:{int(qw_only)}:{aggregate_by}:{department}:{group_id}:{specialty_id}"
+    return R(data=cached_call(key, 90, A.today_staff_efficiency, db, date, start, end, topn, qw_only, aggregate_by,
                                            department=department, group_id=group_id, specialty_id=specialty_id))
 
 
@@ -246,4 +255,5 @@ def today_refund_recovery_endpoint(
       · 挽留成功 = 分母SN - 挽留失败SN
       · 成功率 = 挽留成功 / 分母
     """
-    return R(data=A.refund_recovery_analysis(db, date, start, end))
+    key = f"today:rr:{date}:{start}:{end}"
+    return R(data=cached_call(key, 60, A.refund_recovery_analysis, db, date, start, end))

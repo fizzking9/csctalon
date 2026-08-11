@@ -31,6 +31,10 @@ request.interceptors.response.use(
   },
   (error) => {
     const silent = !!error.config?.silentError
+    // 1. 主动取消 (AbortController) — 静默, 不弹任何提示
+    if (error.code === 'ERR_CANCELED' || error.name === 'CanceledError') {
+      return Promise.reject(error)
+    }
     if (error.response) {
       const status = error.response.status
       // detail 可能是字符串、数组(FastAPI 422验证错误)或对象,统一转为字符串
@@ -50,7 +54,12 @@ request.interceptors.response.use(
         ElMessage.error(String(detail))
       }
     } else if (!silent) {
-      ElMessage.error('网络异常,请检查后端服务是否启动')
+      // 区分超时 / 网络错误, 给用户更准确的提示
+      if (error.code === 'ECONNABORTED') {
+        ElMessage.error('请求超时,后端处理时间过长,请稍后重试或缩小查询范围')
+      } else {
+        ElMessage.error('网络异常,请检查后端服务是否启动')
+      }
     }
     return Promise.reject(error)
   }

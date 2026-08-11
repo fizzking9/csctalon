@@ -536,7 +536,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted, watch } from 'vue'
+import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { Timer } from '@element-plus/icons-vue'
 import { today } from '@/api/analytics'
 import { listGroups } from '@/api/group'
@@ -798,12 +798,12 @@ function toggleCustomRange() {
   customRangeVisible.value = !customRangeVisible.value
   if (!customRangeVisible.value) {
     customDateRange.value = null
-    loadAll()
+    scheduleLoadAll()
   }
 }
 function onCustomRangeChange(val) {
   if (val && val.length === 2) {
-    loadAll()
+    scheduleLoadAll()
   }
 }
 
@@ -1694,7 +1694,7 @@ function formatNum(v) {
 // ---------- 日期切换 ----------
 function onQuickDate() {
   customDate.value = ''
-  loadAll()
+  scheduleLoadAll()
 }
 function onCustomDate(val) {
   if (!val) {
@@ -1705,11 +1705,35 @@ function onCustomDate(val) {
     if (val === y) quickDate.value = 'today'
     else if (val === yst) quickDate.value = 'yesterday'
   }
-  loadAll()
+  scheduleLoadAll()
 }
 
 // ---------- 数据加载 ----------
+// 性能优化(2026-08-11):
+//   1. 防抖 300ms: 切换聚合粒度时 watch(grain) 会重置 trendGrain, 进而触发 watch([...]) 两次,
+//      防抖可合并同 tick 内的多次触发, 避免 loadAll 被连续调用 (原: 1次切换=14个请求)
+//   2. AbortController: 连续切换时取消未完成的旧请求, 避免后端 LATERAL JOIN 堆积打满连接池
+let _loadAllAbort = null    // AbortController, 取消上一批未完成请求
+let _loadAllTimer = null    // 防抖定时器
+function scheduleLoadAll(delay = 300) {
+  // 取消上一批未完成请求 (含 100s 的 staff 接口)
+  if (_loadAllAbort) {
+    _loadAllAbort.abort()
+    _loadAllAbort = null
+  }
+  // 合并同 tick 内的多次触发 (grain 变化 + trendGrain 重置 = 2 次触发)
+  if (_loadAllTimer) clearTimeout(_loadAllTimer)
+  _loadAllTimer = setTimeout(() => {
+    _loadAllTimer = null
+    loadAll()
+  }, delay)
+}
+
 async function loadAll() {
+  // 创建本批请求的 AbortController, 保存到外层以便 scheduleLoadAll 能取消
+  const ac = new AbortController()
+  _loadAllAbort = ac
+  const signal = ac.signal
   loading.value = true
   const params = currentParams.value
   try {
@@ -1719,15 +1743,18 @@ async function loadAll() {
       qw_only: staffFilter.qwOnly ? 1 : 0,
       aggregate_by: staffFilter.aggregateBy || 'person',
     }
+    const cfg = { signal }
     const [k, h, r, rf, q, s, rr] = await Promise.all([
-      today.kpi(params),
-      today.hourlyTrend(params),
-      today.reception(params),
-      today.refund(params),
-      today.queue(params),
-      today.staff(staffParams),
-      today.refundRecovery(params),
+      today.kpi(params, cfg),
+      today.hourlyTrend(params, cfg),
+      today.reception(params, cfg),
+      today.refund(params, cfg),
+      today.queue(params, cfg),
+      today.staff(staffParams, cfg),
+      today.refundRecovery(params, cfg),
     ])
+    // 如果已经被下一批请求取消, 丢弃本批结果
+    if (signal.aborted) return
     kpiData.value = k.data || {}
     // 向后兼容：后端v4接口返回 A/B/C/D/E 全部字段；旧接口只返回 refund_count/amount(=合计) 或 direct/withdraw(A/B)
     const hd = h.data || {}
@@ -1788,15 +1815,22 @@ async function loadAll() {
     // 退款挽回专项分析
     recoveryData.value = rr.data || { kpi: emptyKpi(), reason_dist: [], staff_detail: [], weekly_trend: [], daily_reason: [] }
   } catch (e) {
+    // 被取消的请求不算错误, 不打日志不弹提示
+    if (signal.aborted || e?.code === 'ERR_CANCELED' || e?.name === 'CanceledError') return
     console.error('[Today] load error', e)
   } finally {
-    loading.value = false
+    // 只有当前批是最新的 (未被后续取消) 才清 loading
+    if (_loadAllAbort === ac) {
+      loading.value = false
+      _loadAllAbort = null
+    }
   }
 }
 
 // 时间粒度/快捷范围/聚合粒度变化都需要重新请求后端
+// 通过 scheduleLoadAll 防抖合并 + 取消旧请求, 避免 watch(grain) 重置 trendGrain 导致的重复触发
 watch([grain, quickDate, weekOffset, monthOffset, quarterOffset, yearOffset, customDate, trendGrain, customDateRange], () => {
-  loadAll()
+  scheduleLoadAll()
 })
 
 // 切换聚合方式：切到非"按人"模式时清空人员筛选
@@ -1806,7 +1840,7 @@ function onAggregateChange() {
     filterGroupId.value = null
     filterSpecialtyId.value = null
   }
-  loadAll()
+  scheduleLoadAll()
 }
 
 // 部门/分组/专项筛选：自动切换到"按人"明细视图（只有按人模式支持筛选）
@@ -1814,8 +1848,14 @@ watch([filterDepartment, filterGroupId, filterSpecialtyId], () => {
   const hasFilter = filterDepartment.value || filterGroupId.value || filterSpecialtyId.value
   if (hasFilter && staffFilter.aggregateBy !== 'person') {
     staffFilter.aggregateBy = 'person'
-    loadAll() // 切换聚合模式需要后端重新返回对应数据
+    scheduleLoadAll() // 切换聚合模式需要后端重新返回对应数据
   }
+})
+
+// 组件卸载时清理: 取消未完成请求 + 清防抖定时器, 避免泄漏和卸载后状态写入
+onBeforeUnmount(() => {
+  if (_loadAllAbort) { _loadAllAbort.abort(); _loadAllAbort = null }
+  if (_loadAllTimer) { clearTimeout(_loadAllTimer); _loadAllTimer = null }
 })
 
 // 加载分组和专项列表

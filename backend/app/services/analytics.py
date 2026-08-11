@@ -3783,8 +3783,12 @@ def today_staff_efficiency(
         ),
         -- 子查询6: handler为空/SYS的工单 → SN关联cs_record找处理人(取最近一次操作人)
         -- 解决BMS系统工单处理人字段大量为空的问题(覆盖率从12%提升到75%)
+        -- 性能优化(2026-08-11): 原 CROSS JOIN LATERAL ... LIMIT 1 会被执行 N 次(N=空handler工单数, 实测8120次),
+        --   每次扫 cs_records 时间窗口内全部行, 累计 1 亿次行扫描, 单段耗时 39.4s
+        --   改用 DISTINCT ON + 普通 JOIN, PostgreSQL 选用 Merge Join 一次性完成, 实测降至 0.34s (115倍提升)
         tk_sns_linked AS (
-            SELECT c.operator AS op,
+            SELECT DISTINCT ON (st.ticket_no)
+                   c2.operator AS op,
                    CASE
                        WHEN COALESCE(st.service_item,'') ILIKE ANY(ARRAY['%12315%','%工信部%','%消协%','%公共服务平台%','%消费者协会%','%监督局%','%市场监管%','%市监%','%315平台%','%12345%','%政务平台%']) THEN '外部投诉'
                        WHEN (st.service_category IS NULL OR st.service_category = '投诉') THEN '内部投诉'
@@ -3795,22 +3799,20 @@ def today_staff_efficiency(
                    END AS spec,
                    NULLIF(TRIM(st.device_sn),'') AS sn
             FROM service_tickets st
-            CROSS JOIN LATERAL (
-                SELECT c2.operator
-                FROM cs_records c2
-                WHERE NULLIF(TRIM(c2.device_sn),'') = NULLIF(TRIM(st.device_sn),'')
-                  AND c2.operator IS NOT NULL
-                  AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
-                  AND c2.operation_time IS NOT NULL
-                  AND c2.operation_time >= st.register_time - INTERVAL '2 days'
-                  AND c2.operation_time <= st.finish_time + INTERVAL '1 day'
-                ORDER BY c2.operation_time DESC
-                LIMIT 1
-            ) c
+            JOIN cs_records c2
+              ON NULLIF(TRIM(c2.device_sn),'') = NULLIF(TRIM(st.device_sn),'')
+             AND c2.operator IS NOT NULL
+             AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+             AND c2.operation_time IS NOT NULL
+             AND c2.operation_time >= st.register_time - INTERVAL '2 days'
+             AND c2.operation_time <= st.finish_time + INTERVAL '1 day'
             WHERE st.finish_time IS NOT NULL
               AND st.finish_time >= :ts AND st.finish_time <= :te
               AND (st.handler IS NULL OR st.handler = '' OR st.handler = 'SYS')
               AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+            -- DISTINCT ON (ticket_no) + ORDER BY ticket_no, operation_time DESC
+            -- = 每个工单取最近一次 cs_record 操作人, 等价于 LATERAL ... LIMIT 1
+            ORDER BY st.ticket_no, c2.operation_time DESC
         ),
         -- 合并 6 个子查询, 按 op × spec × DISTINCT SN 去重后 聚合: 该人员该专项的真实独立设备数
         merged AS (
@@ -3870,32 +3872,37 @@ def today_staff_efficiency(
         UNION ALL
 
         -- 2. handler为空/SYS的工单 → SN关联cs_record找处理人(取最近一次操作人)
-        SELECT c.operator AS op,
+        -- 性能优化(2026-08-11): 同 merged_sn_sql.tk_sns_linked, 改用 DISTINCT ON 替代 LATERAL JOIN
+        --   原 LATERAL 单段耗时 39.4s, 改后降至 0.34s
+        SELECT linked.op AS op,
                CASE
-                   WHEN COALESCE(st.service_item,'') ILIKE ANY(ARRAY['%12315%','%工信部%','%消协%','%公共服务平台%','%消费者协会%','%监督局%','%市场监管%','%市监%','%315平台%','%12345%','%政务平台%']) THEN '外部投诉'
-                   WHEN (st.service_category IS NULL OR st.service_category = '投诉') THEN '内部投诉'
-                   WHEN COALESCE(st.service_category,'') = '退款' THEN '退款处理'
-                   WHEN COALESCE(st.service_category,'') IN ('套餐疑问','套餐') THEN '套餐专项'
+                   WHEN COALESCE(linked.service_item,'') ILIKE ANY(ARRAY['%12315%','%工信部%','%消协%','%公共服务平台%','%消费者协会%','%监督局%','%市场监管%','%市监%','%315平台%','%12345%','%政务平台%']) THEN '外部投诉'
+                   WHEN (linked.service_category IS NULL OR linked.service_category = '投诉') THEN '内部投诉'
+                   WHEN COALESCE(linked.service_category,'') = '退款' THEN '退款处理'
+                   WHEN COALESCE(linked.service_category,'') IN ('套餐疑问','套餐') THEN '套餐专项'
                    ELSE '咨询接待'
                END AS spec,
                COUNT(*) AS cnt
-        FROM service_tickets st
-        CROSS JOIN LATERAL (
-            SELECT c2.operator
-            FROM cs_records c2
-            WHERE NULLIF(TRIM(c2.device_sn),'') = NULLIF(TRIM(st.device_sn),'')
-              AND c2.operator IS NOT NULL
-              AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
-              AND c2.operation_time IS NOT NULL
-              AND c2.operation_time >= st.register_time - INTERVAL '2 days'
-              AND c2.operation_time <= st.finish_time + INTERVAL '1 day'
-            ORDER BY c2.operation_time DESC
-            LIMIT 1
-        ) c
-        WHERE st.finish_time IS NOT NULL
-          AND st.finish_time >= :ts AND st.finish_time <= :te
-          AND (st.handler IS NULL OR st.handler = '' OR st.handler = 'SYS')
-          AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+        FROM (
+            -- 子查询: 每个空-handler 工单取最近一次 cs_record operator (等价 LATERAL LIMIT 1)
+            SELECT DISTINCT ON (st.ticket_no)
+                   c2.operator AS op,
+                   st.service_item AS service_item,
+                   st.service_category AS service_category
+            FROM service_tickets st
+            JOIN cs_records c2
+              ON NULLIF(TRIM(c2.device_sn),'') = NULLIF(TRIM(st.device_sn),'')
+             AND c2.operator IS NOT NULL
+             AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+             AND c2.operation_time IS NOT NULL
+             AND c2.operation_time >= st.register_time - INTERVAL '2 days'
+             AND c2.operation_time <= st.finish_time + INTERVAL '1 day'
+            WHERE st.finish_time IS NOT NULL
+              AND st.finish_time >= :ts AND st.finish_time <= :te
+              AND (st.handler IS NULL OR st.handler = '' OR st.handler = 'SYS')
+              AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+            ORDER BY st.ticket_no, c2.operation_time DESC
+        ) linked
         GROUP BY 1, 2
         """
     )
