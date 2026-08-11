@@ -35,7 +35,7 @@ class Refund(TimestampMixin, Base):
     audit_remark: Mapped[str | None] = mapped_column(Text, nullable=True, comment="审核备注")
     auditor: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="审核人")
     operator: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="操作人:企微-XXX/sys/system")
-    created_at_raw: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="原始创建时间")
+    created_at_raw: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True, comment="原始创建时间")
     updated_at_raw: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="原始更新时间")
     package_price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="套餐价格")
     raw_extra: Mapped[dict | None] = mapped_column(JSONB, nullable=True, comment="原始冗余字段")

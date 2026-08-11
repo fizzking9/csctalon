@@ -29,7 +29,7 @@ class ServiceTicket(TimestampMixin, Base):
     priority: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="优先级")
     status: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True, comment="状态:待处理/已完成")
     remark: Mapped[str | None] = mapped_column(Text, nullable=True, comment="备注")
-    register_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="登记时间")
+    register_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True, comment="登记时间")
     active_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="激活时间")
     dispatch_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="分发时间")
     finish_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True, comment="完成时间")
