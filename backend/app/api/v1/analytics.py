@@ -236,11 +236,13 @@ def today_refund_recovery_endpoint(
     start: str | None = None, end: str | None = None,
     department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)
 ):
-    """退款挽回专项分析: 基于退款专项组人员接待SN ∩ 最终退款SN 的交集分析.
+    """退款挽回专项分析: 基于退款挽回人员接待SN ∩ 最终退款SN 的交集分析.
 
-    核心口径:
-      · 分母 = 退款专项组(叶珍凤组/朱海洋组 或 HR专项=退款挽回) 人员在周期内 cs_record 接待的 problem_category 含"退款" 的去重 SN
-      · 挽留失败 = 分母SN 中, 同期出现在 refunds 线上退款单 或 service_tickets service_category=退款 工单中的 SN
+    核心口径(2026-08-11修正: 分组≠专项, 不按组名判定):
+      · 分母 = 所有人员(专职退款挽回专员+组长/主管+其他岗位)在周期内 cs_record 接待的 problem_category='退款' 的去重 SN
+      · 专职退款挽回人员判定: Person.specialty='退款挽回' (与分组无关, 同一组内可有多专项分工)
+      · 非专职人员挽回: 任何人员(含组长/主管)接待退款类SN但最终未产生退款行为 → 也算挽回成功
+      · 挽留失败 = 分母SN 中, 同期出现在 refunds 线上退款单(非驳回/无需退款) 或 service_tickets service_category=退款 工单(非终止)中的 SN
       · 挽留成功 = 分母SN - 挽留失败SN
       · 成功率 = 挽留成功 / 分母
     """

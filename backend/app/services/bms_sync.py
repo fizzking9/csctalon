@@ -97,6 +97,10 @@ def _auto_import(db: Session, data_type: str, file_path: str, filename: str, tri
     Returns:
         dict with total_rows, inserted_rows, updated_rows, failed_rows
     """
+    # 2026-08-11 双维度同步: ticket_finish 是 ticket 的按完成时间补充抓取,按 ticket 导入
+    if data_type == "ticket_finish":
+        logger.info(f"[ticket_finish] 映射为 ticket 进行导入(按完成时间补充抓取)")
+        data_type = "ticket"
     base = Path(settings.UPLOAD_DIR)
     full_path = base / file_path
 
@@ -281,6 +285,22 @@ async def sync_all(
                 })
                 continue
             tasks.append({"data_type": data_type, "start": start, "end": end, "config": config})
+
+            # 2026-08-11 双维度同步: ticket 附加按"完成时间"抓取一次
+            # 原因: 工单登记时handler为空,完工时才回填handler。
+            #       只按登记时间同步会遗漏老工单完工后的handler更新(34.8%的工单非当天完工)。
+            # 方案: 额外按"完成时间"抓取同时间范围的工单, upsert 按 ticket_no 自动去重合并。
+            if data_type == "ticket":
+                finish_config = dict(config)  # 浅拷贝,避免污染原始config
+                finish_config["time_labels"] = ["起始完成时间", "结束完成时间"]
+                finish_config["name"] = config.get("name", "服务请求管理") + "(按完成时间)"
+                tasks.append({
+                    "data_type": "ticket_finish",
+                    "start": start,
+                    "end": end,
+                    "config": finish_config,
+                })
+                logger.info(f"[ticket] 双维度同步: 已添加按完成时间抓取任务(覆盖老工单完工handler回填)")
     finally:
         db.close()
 
