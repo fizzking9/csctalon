@@ -1075,12 +1075,25 @@ def category_by_package(db: Session, limit: int = 20) -> list[dict]:
 
 
 def _strip_qw_prefix(x: str | None) -> str | None:
-    """终极兜底: Python端去掉"企微-"前缀, 避免维表漏登记导致同一人分两桶。仅作为 display_name 兜底用"""
-    if not x:
+    """终极兜底: Python端去掉人名前的部门/系统前缀(企微-/店铺-/生产-/财务-/云客猫-/全球wifi- 等),
+    避免维表漏登记或 display_name 带前缀导致同一人分两桶。仅作为 display_name 兜底用。
+    2026-08-11 扩展: 复用 person_extractor._NAME_PREFIXES 全量前缀, 覆盖生产/财务/测试等独立部门。"""
+    if not x or not isinstance(x, str):
         return x
-    if isinstance(x, str) and x.startswith("企微-"):
-        return x[len("企微-"):]
-    return x
+    from app.services.person_extractor import _NAME_PREFIXES, _PREFIX_SEPARATORS
+    s = x
+    changed = True
+    while changed:
+        changed = False
+        low = s.lower()
+        for pfx in _NAME_PREFIXES:
+            if low.startswith(pfx.lower()):
+                s = s[len(pfx):]
+                while s and s[0] in _PREFIX_SEPARATORS:
+                    s = s[1:]
+                changed = True
+                break
+    return s if s else x  # 剥光(纯前缀词)则返回原值
 
 
 def operator_ticket_stats(db: Session, start: datetime | None = None, end: datetime | None = None) -> list[dict]:
@@ -3667,6 +3680,7 @@ def today_staff_efficiency(
         select(
             ops_union.c.op,
             func.coalesce(op_person.c.display_name, ops_union.c.op).label("name"),
+            op_person.c.person_id.label("person_id"),
             op_person.c.department.label("dept"),
             op_person.c.group_name.label("grp"),
             op_person.c.position.label("pos"),
@@ -3679,6 +3693,97 @@ def today_staff_efficiency(
         .outerjoin(cs_q, ops_union.c.op == cs_q.c.op)
         .outerjoin(op_person, ops_union.c.op == op_person.c.operator)
     ).all()
+    # 转成可变对象 (SQLAlchemy Row 不可变, 后续兜底匹配需要改字段)
+    from types import SimpleNamespace as _SN
+    rows = [_SN(**dict(r._mapping)) for r in rows]
+
+    # 2026-08-11 兜底匹配: PersonAlias 精确匹配失败的 operator, 尝试去前缀变体匹配
+    # 场景: refunds.operator='刘思敏', 但 PersonAlias 登记 '生产-刘思敏'/'全球WiFi-刘思敏' (带部门前缀)
+    # 方案: 把所有 PersonAlias.alias 取出, 对未匹配 operator 做 "alias 去前缀后 == operator" 的 Python 匹配
+    # 注意: 触发条件用 person_id is None (而非 dept is None), 否则会把"精确匹配成功但 Person.department 为空"
+    #       的 operator (如 '徐依婷'→pid 365) 误当作未匹配, 被兜底覆盖成另一个带前缀的 Person ('财务-徐依婷')
+    unmatched_ops = [r.op for r in rows if r.person_id is None and r.op]
+    if unmatched_ops:
+        # 一次性查全部 PersonAlias + Person 信息, 避免 N+1
+        _fb_rows = db.execute(
+            select(
+                PersonAlias.alias, PersonAlias.person_id,
+                Person.id.label("pid"), Person.display_name, Person.department,
+                Person.specialty, Person.position, Person.qw_user_id,
+                func.coalesce(Group.name, Person.group_name).label("group_name"),
+            )
+            .select_from(PersonAlias)
+            .outerjoin(Person, PersonAlias.person_id == Person.id)
+            .outerjoin(PersonGroupMembership, and_(PersonGroupMembership.person_id == Person.id, PersonGroupMembership.is_current == True))
+            .outerjoin(Group, PersonGroupMembership.group_id == Group.id)
+        ).all()
+        # 建 "去前缀后缀 → person 信息" 索引 (取第一个匹配, 多个匹配时优先企微部门)
+        suffix_map: dict[str, dict] = {}
+        for a in _fb_rows:
+            for sep in ('-', '_'):
+                if sep in (a.alias or ''):
+                    suffix = (a.alias or '').rsplit(sep, 1)[-1]
+                    # 优先保留有部门信息的记录
+                    if suffix not in suffix_map or (a.department and not suffix_map[suffix].get('dept')):
+                        suffix_map[suffix] = {
+                            'pid': a.pid, 'name': a.display_name or a.alias,
+                            'dept': a.department, 'grp': a.group_name,
+                            'pos': a.position, 'sp': a.specialty,
+                            'qw_user_id': a.qw_user_id,
+                        }
+        # 对未匹配 operator 应用兜底
+        _fb_applied = 0
+        for r in rows:
+            if r.person_id is None and r.op in suffix_map:
+                info = suffix_map[r.op]
+                _fb_applied += 1
+                r.person_id = info['pid']
+                r.name = info['name']
+                r.dept = info['dept']
+                r.grp = info['grp']
+                r.pos = info['pos']
+                r.sp = info['sp']
+                r.qw_user_id = info['qw_user_id']
+        if _fb_applied:
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                f"today_staff_efficiency: 前缀兜底匹配成功 {_fb_applied}/{len(unmatched_ops)} 个未登记 operator"
+            )
+
+    # 2026-08-11 部门前缀推断: Person.department 为空时, 从 PersonAlias.alias / operator 前缀推断部门
+    # 场景: '生产-刘思敏'/'财务-徐依婷'/'测试-谢莹' 等 Person 维表 department 暂空, 但 alias 前缀已携带部门信息
+    # 生产/财务/测试 是独立部门 (非企微/店铺/研发), 通过 alias 前缀识别并补全
+    _DEPT_PREFIX_MAP = {"企微": "企微", "店铺": "店铺", "研发": "研发",
+                        "生产": "生产", "财务": "财务", "测试": "测试"}
+    def _infer_dept(name: str | None) -> str | None:
+        if not name: return None
+        for pfx, dept in _DEPT_PREFIX_MAP.items():
+            if name.startswith(pfx):
+                rest = name[len(pfx):]
+                if rest and (rest[0] in "-·—_ \t" or '\u4e00' <= rest[0] <= '\u9fa5'):
+                    return dept
+        return None
+    # 建 person_id → 部门 映射 (从带部门前缀的 PersonAlias 推断, 一次性查全表避免 N+1)
+    _pid_dept: dict[int, str] = {}
+    for dr in db.execute(
+        select(PersonAlias.person_id, PersonAlias.alias).where(PersonAlias.person_id.isnot(None))
+    ).all():
+        d = _infer_dept(dr.alias)
+        if d:
+            _pid_dept[dr.person_id] = d
+    # 对 department 为空的人员, 优先用 person_id 映射, 其次用 operator 自身前缀推断
+    _dept_filled = 0
+    for r in rows:
+        if (not r.dept or r.dept == "未设置") and r.person_id:
+            inferred = _pid_dept.get(r.person_id) or _infer_dept(r.op)
+            if inferred:
+                r.dept = inferred
+                _dept_filled += 1
+    if _dept_filled:
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            f"today_staff_efficiency: 部门前缀推断填充 {_dept_filled} 人 (生产/财务/测试 等独立部门)"
+        )
 
     # 会话/接待两套 6 桶 按 op 聚合
     cs_cat_by_op: dict[str, dict[str, tuple[int, int]]] = {}
@@ -3949,24 +4054,54 @@ def today_staff_efficiency(
     #   本职 → coef = WEIGHT[hr_cat] (本人主专项系数)
     #   转接 → coef = TRANSFER_PENALTY (固定, 不再乘以 WEIGHT[c])
     #   管理岗 → coef = CAT_DEFAULT_WEIGHT[cat] (大类默认系数, 跨类豁免全系数)
-    SYSTEM_VIRTUAL_EXACT = {"用户自助", "系统自动", "客户自助", "企微用户自助", "企微系统自动"}
+    SYSTEM_VIRTUAL_EXACT = {
+        "用户自助", "系统自动", "客户自助", "企微用户自助", "企微系统自动",
+        # 2026-08-11 补充: 实测今年范围内出现的系统/第三方账户
+        "系统",            # 单字"系统"(BMS 系统账户, 非操作人)
+        "AI客服",          # AI 自动客服
+        "班牛",            # 工单系统自动账户
+        "深圳市云客猫科技有限公司",  # 设备供应商公司名
+        "大秦WiFi管家", "大秦随身管理员", "全球WiFi管理员",  # WiFi 设备管理账户
+        # 2026-08-11 v2 补充: 工单系统分类账户 (service_tickets.handler 出现, 非真人)
+        "微信投诉",        # 微信投诉工单的系统归类账户, 非操作人
+    }
     # 未登记到 Person 维表 的 第三方/系统/设备/公司 账号关键字 (关键字匹配 直接判非真人)
-    VIRTUAL_HINT_WORDS = ("wifi","管家","科技","公司","设备","云客猫","闪猫","sys_","sys-","hqq","ykm-","畅享","商米","猫科","科联","运营")
-    def _is_virtual_name(name: str, dept: str | None, grp: str | None, pos: str | None) -> bool:
-        """非真人虚拟账户判定:
-        ① 名字精确匹配 SYSTEM_VIRTUAL_EXACT → True
-        ② 未登记 Person (部门=未设置 AND 组=未分组 AND 岗位空) 且 名字不像人名
-           (≥5字 / 关键字命中 / ≥4字且含数字 / 含横杠下划线 公司/设备名特征 → True
+    # 2026-08-11 修正: 移除 "hqq" 和 "ykm-" — 这两个是真人员工缩写/工号前缀, 误判为虚拟
+    #   (hqq 是真人员工拼音缩写, description 里 "hqq发送退款说明"; YKM-XXX 是企微部门工号, 已登记的 YKM-LN=卢宁等都是真人)
+    VIRTUAL_HINT_WORDS = ("wifi", "管家", "科技", "公司", "设备", "云客猫", "闪猫",
+                          "sys_", "sys-", "畅享", "商米", "猫科", "科联", "运营",
+                          "管理员", "客服中心", "网络")  # "网络": 烁盟网络等公司名
+    # 工号/缩写格式正则: 纯字母数字+横杠下划线, 2-12字 (如 YKM-XXX, hqq, DML, LJY)
+    # 这类格式是真人员工工号, 不应因含横杠/下划线就判虚拟
+    import re as _re_mod
+    _EMPLOYEE_ID_PATTERN = _re_mod.compile(r'^[A-Za-z][A-Za-z0-9_-]{1,11}$')
+    _PERSON_NAME_PATTERN = _re_mod.compile(r'^[\u4e00-\u9fa5]{2,4}$')  # 中文人名 2-4 字
+    def _is_virtual_name(name: str, dept: str | None, grp: str | None, pos: str | None,
+                        person_id: int | None = None) -> bool:
+        """非真人虚拟账户判定 (2026-08-11 修订 v2):
+        ① 名字精确匹配 SYSTEM_VIRTUAL_EXACT → True (覆盖 wechat/客户→"用户自助"、系统、AI客服 等)
+        ② 已通过 PersonAlias 匹配到 Person (person_id 非空) 且 name 不在虚拟黑名单 → 一定真人, False
+           (覆盖 '财务-徐依婷'/'生产-刘思敏'/'畅享贝贝' 等 display_name 带前缀但确属真人的情况;
+            旧逻辑用 dept/pos 为空判定 unregistered 会误伤这些 Person.department 暂空的真人)
+        ③ 未匹配 Person 时, 按名字特征判定:
+           - 关键字命中 (wifi/管家/科技/公司/管理员/畅享 等) → True
+           - 工号格式 (YKM-XXX/hqq/DML 等纯字母数字+横杠下划线) → False (真人)
+           - 中文人名 (2-4 字) → False (真人, 只是 Person 维表漏登记)
+           - 长公司名 (≥5 字 且非工号 非人名) → True
         """
         if not name: return True
         if name in SYSTEM_VIRTUAL_EXACT: return True
-        unregistered = (not dept or dept in ("未设置",)) and (not grp or grp in ("未分组", "用户自助")) and not pos
-        if not unregistered: return False
-        if len(name) >= 5: return True
+        # 已通过 PersonAlias 匹配到 Person → 一定不是虚拟 (虚拟账户的 name 已在上面黑名单拦截)
+        if person_id is not None: return False
+        # 未匹配 Person 的, 按名字特征判定
         low = name.lower()
         if any(k.lower() in low for k in VIRTUAL_HINT_WORDS): return True
-        if any(c.isdigit() for c in name) and len(name) >= 4: return True
-        if ("-" in name) or ("_" in name): return True
+        # 工号/缩写格式 → 真人 (YKM-XXX, hqq, DML, LJY 等)
+        if _EMPLOYEE_ID_PATTERN.match(name): return False
+        # 中文人名 2-4 字 → 真人 (黄展强, 刘思敏 等漏登记的)
+        if _PERSON_NAME_PATTERN.match(name): return False
+        # 其他未登记且名字不像人名/工号 → 长名(≥5字)判虚拟, 短名保守判真人
+        if len(name) >= 5: return True
         return False
 
     def _hr_map(hr_sp: str | None, pos: str | None) -> str | None:
@@ -4130,7 +4265,7 @@ def today_staff_efficiency(
             },
         }
         # 非真人判定 = 精确虚拟匹配 OR 未登记+名字特征匹配
-        if _is_virtual_name(norm_name, r.dept, r.grp, r.pos):
+        if _is_virtual_name(norm_name, r.dept, r.grp, r.pos, r.person_id):
             record["is_virtual"] = True
             virtual_rows.append(record)
         else:

@@ -50,10 +50,35 @@ _MULTI_WS_RE = re.compile(r"\s{2,}")
 # 注意: 店铺客服也是内部客服(另一部门),剥前缀后可与同名跨表归并,
 # 但 alias 原值保留前缀供人工归并时辨别部门来源。
 # 新增:SCRM 聚合平台常见前缀(scrm/微客服/百银/聚合客服等,先填通用,可后续按样本追加)
+# 2026-08-11 新增独立部门前缀: 生产/财务/测试 (与企微/店铺/研发 并列的独立部门)
 _NAME_PREFIXES = (
-    "企微", "客服", "云客猫", "随身wifi", "店铺", "工厂", "研发",
+    "企微", "客服", "云客猫", "随身wifi", "全球wifi", "店铺", "工厂", "研发",
+    "生产", "财务", "测试",
     "scrm", "SCRM", "微客服", "百银", "聚合", "聚合客服", "baiyin", "baiyinqifu",
 )
+
+# 部门前缀 → 部门名 映射 (用于从 alias 前缀推断 Person.department)
+# 企微/店铺/研发 为既有3部门; 生产/财务/测试 为独立部门 (2026-08-11 新增)
+DEPT_PREFIX_MAP = {
+    "企微": "企微", "店铺": "店铺", "研发": "研发",
+    "生产": "生产", "财务": "财务", "测试": "测试",
+}
+
+
+def infer_department(alias: str | None) -> str | None:
+    """从 alias/display_name 前缀推断部门 (生产/财务/测试 等独立部门).
+
+    匹配规则: alias 以部门前缀开头, 且前缀后跟分隔符(- · — _ 空格)或中文字符.
+    样本: '生产-刘思敏' → '生产', '财务-徐依婷' → '财务', '企微-洪佳' → '企微'
+    """
+    if not alias:
+        return None
+    for pfx, dept in DEPT_PREFIX_MAP.items():
+        if alias.startswith(pfx):
+            rest = alias[len(pfx):]
+            if rest and (rest[0] in "-·—_ \t" or '\u4e00' <= rest[0] <= '\u9fa5'):
+                return dept
+    return None
 # 前缀后随的分隔符
 _PREFIX_SEPARATORS = "-·—－－_ \t"
 # 角色头衔后缀(管理员/小二/负责人 等=角色非人名),命中即丢弃
