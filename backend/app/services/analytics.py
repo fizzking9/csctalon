@@ -1309,7 +1309,7 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
 _CATEGORY_BUCKETS = [
     ("投诉", ["投诉"]),
     ("退款", ["退款"]),
-    ("套餐问题", ["套餐", "套餐问题"]),
+    ("套餐问题", ["套餐", "套餐问题", "降成"]),  # 降成=套餐降级/限速/VIP/赠送, 属套餐专项工作
     ("咨询", ["咨询", "网络问题"]),
     ("综合问题", ["综合", "综合问题", "其他"]),
     ("其他问题", []),  # 兜底:非上述任一的非空值 OR 空值
@@ -3689,30 +3689,29 @@ def today_staff_efficiency(
     tk_all_by_op: dict[str, tuple[int, int]] = {r.op: (int(r.sc or 0), int(r.pc or 0)) for r in db.execute(select(tk_all_q)).all()}
 
     # ─────────────────────────────────────────────────────────────────────
-    # v2 新增: 跨表 SN 合并去重 —— 每个人员 × 专项 的 SN 集合 union 后再计数
-    #   - 咨询:  cs_record[咨询/其他/综合] SN
-    #   - 套餐:  cs_record[套餐问题] SN  +  工单中 service_category='套餐疑问'/'套餐' SN
-    #   - 退款:  cs_record[退款] SN     +  refund SN
-    #   - 投诉:  cs_record[投诉] SN     +  投诉类工单 SN
-    #   - 另外: 工单中其他非投诉 SN 并入"咨询"桶 (如设备故障/网络故障等按咨询算)
-    # 用 SQL 一次性按 op × 专项 聚合 DISTINCT SN, 避免 Python 层内存中拼 SN 集合.
+    # v3 2026-08-11: 6个专项明确区分 - 退款挽回/退款处理/内部投诉/外部投诉
+    #   退款挽回(recovery): cs_record 中 problem_category='退款' 的接待工作
+    #   退款处理(processing): refunds 表的实际退款操作 + service_tickets 退款类工单完工
+    #   内部投诉(internal): service_tickets 中内部投诉类
+    #   外部投诉(external): service_tickets + external_complaints + card_complaints 外部投诉类
     # ─────────────────────────────────────────────────────────────────────
     merged_sn_sql = text(
         """
-        -- 子查询1: cs_record 按 6 类 bucket × SN 输出 (过滤系统自动)
+        -- 子查询1: cs_record 按 6 类专项 × SN 输出 (过滤系统自动)
         WITH cs_sns AS (
             SELECT
                 c.operator AS op,
                 CASE
-                    WHEN COALESCE(c.problem_category,'') ILIKE '%投诉%' THEN '投诉'
-                    WHEN COALESCE(c.problem_category,'') ILIKE '%退款%' THEN '退款'
-                    WHEN COALESCE(c.problem_category,'') IN ('套餐','套餐问题') THEN '套餐'
+                    WHEN COALESCE(c.problem_category,'') ILIKE '%投诉%' THEN '内部投诉'
+                    WHEN COALESCE(c.problem_category,'') ILIKE '%退款%' THEN '退款挽回'
+                    WHEN COALESCE(c.problem_category,'') ILIKE '%套餐%'
+                      OR COALESCE(c.problem_category,'') ILIKE '%降成%' THEN '套餐专项'
                     WHEN COALESCE(c.problem_category,'') ILIKE '%咨询%'
                       OR COALESCE(c.problem_category,'') ILIKE '%网络问题%'
                       OR COALESCE(c.problem_category,'') ILIKE '%综合%'
                       OR COALESCE(c.problem_category,'') ILIKE '%其他%'
-                      OR COALESCE(c.problem_category,'') = '' THEN '咨询'
-                    ELSE '咨询'
+                      OR COALESCE(c.problem_category,'') = '' THEN '咨询接待'
+                    ELSE '咨询接待'
                 END AS spec,
                 NULLIF(TRIM(c.device_sn),'') AS sn
             FROM cs_records c
@@ -3726,9 +3725,9 @@ def today_staff_efficiency(
                   OR COALESCE(c.solution,'') ILIKE ANY(ARRAY['%系统自动%','%自动发送%','%自动回复%','%自动推送%','%自动补发%','%自动触发%','%自动生成%'])
               )
         ),
-        -- 子查询2: refund SN → "退款" 专项
+        -- 子查询2: refund SN → "退款处理" 专项 (实际退款操作)
         rf_sns AS (
-            SELECT r.operator AS op, '退款' AS spec,
+            SELECT r.operator AS op, '退款处理' AS spec,
                    NULLIF(TRIM(r.device_sn),'') AS sn
             FROM refunds r
             WHERE r.created_at_raw IS NOT NULL
@@ -3737,9 +3736,23 @@ def today_staff_efficiency(
               AND r.operator NOT IN ('sys','system','SYS','System')
               AND r.refund_method = '线上'
         ),
-        -- 子查询3: 投诉工单 SN → "投诉" 专项
-        cm_sns AS (
-            SELECT st.handler AS op, '投诉' AS spec,
+        -- 子查询3: 外部投诉工单 SN → "外部投诉" 专项
+        cm_ext_sns AS (
+            SELECT st.handler AS op, '外部投诉' AS spec,
+                   NULLIF(TRIM(st.device_sn),'') AS sn
+            FROM service_tickets st
+            WHERE st.finish_time IS NOT NULL
+              AND st.finish_time >= :ts AND st.finish_time <= :te
+              AND st.handler IS NOT NULL
+              AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+              AND (
+                  -- 外部投诉判定: service_item 含外部投诉关键词
+                  COALESCE(st.service_item,'') ILIKE ANY(ARRAY['%12315%','%工信部%','%消协%','%公共服务平台%','%消费者协会%','%监督局%','%市场监管%','%市监%','%315平台%','%12345%','%政务平台%'])
+              )
+        ),
+        -- 子查询4: 内部投诉工单 SN → "内部投诉" 专项 (非外部的投诉)
+        cm_int_sns AS (
+            SELECT st.handler AS op, '内部投诉' AS spec,
                    NULLIF(TRIM(st.device_sn),'') AS sn
             FROM service_tickets st
             WHERE st.finish_time IS NOT NULL
@@ -3747,15 +3760,18 @@ def today_staff_efficiency(
               AND st.handler IS NOT NULL
               AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
               AND (st.service_category IS NULL OR st.service_category = '投诉')
+              AND NOT (
+                  COALESCE(st.service_item,'') ILIKE ANY(ARRAY['%12315%','%工信部%','%消协%','%公共服务平台%','%消费者协会%','%监督局%','%市场监管%','%市监%','%315平台%','%12345%','%政务平台%'])
+              )
         ),
-        -- 子查询4: 非投诉工单 SN → 按 service_category 分桶 (退款→退款, 套餐疑问/套餐→套餐, 其他→咨询)
+        -- 子查询5: 非投诉工单 SN → 按 service_category 分桶 (退款→退款处理, 套餐疑问/套餐→套餐, 其他→咨询)
         tk_sns AS (
             SELECT st.handler AS op,
                    CASE
-                       WHEN COALESCE(st.service_category,'') = '退款' THEN '退款'
-                       WHEN COALESCE(st.service_category,'') IN ('套餐疑问','套餐') THEN '套餐'
-                       WHEN COALESCE(st.service_category,'') IN ('换货','设备故障','网络故障') THEN '咨询'
-                       ELSE '咨询'
+                       WHEN COALESCE(st.service_category,'') = '退款' THEN '退款处理'
+                       WHEN COALESCE(st.service_category,'') IN ('套餐疑问','套餐') THEN '套餐专项'
+                       WHEN COALESCE(st.service_category,'') IN ('换货','设备故障','网络故障') THEN '咨询接待'
+                       ELSE '咨询接待'
                    END AS spec,
                    NULLIF(TRIM(st.device_sn),'') AS sn
             FROM service_tickets st
@@ -3763,15 +3779,49 @@ def today_staff_efficiency(
               AND st.finish_time >= :ts AND st.finish_time <= :te
               AND st.handler IS NOT NULL
               AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+              AND NOT (st.service_category IS NULL OR st.service_category = '投诉')
         ),
-        -- 合并 4 个子查询, 按 op × spec × DISTINCT SN 去重后 聚合: 该人员该专项的真实独立设备数
+        -- 子查询6: handler为空/SYS的工单 → SN关联cs_record找处理人(取最近一次操作人)
+        -- 解决BMS系统工单处理人字段大量为空的问题(覆盖率从12%提升到75%)
+        tk_sns_linked AS (
+            SELECT c.operator AS op,
+                   CASE
+                       WHEN COALESCE(st.service_item,'') ILIKE ANY(ARRAY['%12315%','%工信部%','%消协%','%公共服务平台%','%消费者协会%','%监督局%','%市场监管%','%市监%','%315平台%','%12345%','%政务平台%']) THEN '外部投诉'
+                       WHEN (st.service_category IS NULL OR st.service_category = '投诉') THEN '内部投诉'
+                       WHEN COALESCE(st.service_category,'') = '退款' THEN '退款处理'
+                       WHEN COALESCE(st.service_category,'') IN ('套餐疑问','套餐') THEN '套餐专项'
+                       WHEN COALESCE(st.service_category,'') IN ('换货','设备故障','网络故障') THEN '咨询接待'
+                       ELSE '咨询接待'
+                   END AS spec,
+                   NULLIF(TRIM(st.device_sn),'') AS sn
+            FROM service_tickets st
+            CROSS JOIN LATERAL (
+                SELECT c2.operator
+                FROM cs_records c2
+                WHERE NULLIF(TRIM(c2.device_sn),'') = NULLIF(TRIM(st.device_sn),'')
+                  AND c2.operator IS NOT NULL
+                  AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+                  AND c2.operation_time IS NOT NULL
+                  AND c2.operation_time >= st.register_time - INTERVAL '2 days'
+                  AND c2.operation_time <= st.finish_time + INTERVAL '1 day'
+                ORDER BY c2.operation_time DESC
+                LIMIT 1
+            ) c
+            WHERE st.finish_time IS NOT NULL
+              AND st.finish_time >= :ts AND st.finish_time <= :te
+              AND (st.handler IS NULL OR st.handler = '' OR st.handler = 'SYS')
+              AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+        ),
+        -- 合并 6 个子查询, 按 op × spec × DISTINCT SN 去重后 聚合: 该人员该专项的真实独立设备数
         merged AS (
             SELECT op, spec, COUNT(DISTINCT sn) AS sn_cnt
             FROM (
                 SELECT op, spec, sn FROM cs_sns WHERE sn IS NOT NULL
                 UNION ALL SELECT op, spec, sn FROM rf_sns WHERE sn IS NOT NULL
-                UNION ALL SELECT op, spec, sn FROM cm_sns WHERE sn IS NOT NULL
+                UNION ALL SELECT op, spec, sn FROM cm_ext_sns WHERE sn IS NOT NULL
+                UNION ALL SELECT op, spec, sn FROM cm_int_sns WHERE sn IS NOT NULL
                 UNION ALL SELECT op, spec, sn FROM tk_sns WHERE sn IS NOT NULL
+                UNION ALL SELECT op, spec, sn FROM tk_sns_linked WHERE sn IS NOT NULL
             ) all_sn
             GROUP BY op, spec
         )
@@ -3795,12 +3845,19 @@ def today_staff_efficiency(
     # ─────────────────────────────────────────────────────────────────────
     tk_spec_count_sql = text(
         """
+        -- 1. handler有值的工单 → 直接用handler归人
         SELECT st.handler AS op,
                CASE
-                   WHEN (st.service_category IS NULL OR st.service_category = '投诉') THEN '投诉'
-                   WHEN COALESCE(st.service_category,'') = '退款' THEN '退款'
-                   WHEN COALESCE(st.service_category,'') IN ('套餐疑问','套餐') THEN '套餐'
-                   ELSE '咨询'
+                   -- 外部投诉
+                   WHEN COALESCE(st.service_item,'') ILIKE ANY(ARRAY['%12315%','%工信部%','%消协%','%公共服务平台%','%消费者协会%','%监督局%','%市场监管%','%市监%','%315平台%','%12345%','%政务平台%']) THEN '外部投诉'
+                   -- 内部投诉 (service_category为空或投诉，且不是外部投诉)
+                   WHEN (st.service_category IS NULL OR st.service_category = '投诉') THEN '内部投诉'
+                   -- 退款类工单 → 退款处理
+                   WHEN COALESCE(st.service_category,'') = '退款' THEN '退款处理'
+                   -- 套餐类
+                   WHEN COALESCE(st.service_category,'') IN ('套餐疑问','套餐') THEN '套餐专项'
+                   -- 其他 → 咨询接待
+                   ELSE '咨询接待'
                END AS spec,
                COUNT(*) AS cnt
         FROM service_tickets st
@@ -3809,6 +3866,37 @@ def today_staff_efficiency(
           AND st.handler IS NOT NULL
           AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
         GROUP BY 1, 2
+
+        UNION ALL
+
+        -- 2. handler为空/SYS的工单 → SN关联cs_record找处理人(取最近一次操作人)
+        SELECT c.operator AS op,
+               CASE
+                   WHEN COALESCE(st.service_item,'') ILIKE ANY(ARRAY['%12315%','%工信部%','%消协%','%公共服务平台%','%消费者协会%','%监督局%','%市场监管%','%市监%','%315平台%','%12345%','%政务平台%']) THEN '外部投诉'
+                   WHEN (st.service_category IS NULL OR st.service_category = '投诉') THEN '内部投诉'
+                   WHEN COALESCE(st.service_category,'') = '退款' THEN '退款处理'
+                   WHEN COALESCE(st.service_category,'') IN ('套餐疑问','套餐') THEN '套餐专项'
+                   ELSE '咨询接待'
+               END AS spec,
+               COUNT(*) AS cnt
+        FROM service_tickets st
+        CROSS JOIN LATERAL (
+            SELECT c2.operator
+            FROM cs_records c2
+            WHERE NULLIF(TRIM(c2.device_sn),'') = NULLIF(TRIM(st.device_sn),'')
+              AND c2.operator IS NOT NULL
+              AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+              AND c2.operation_time IS NOT NULL
+              AND c2.operation_time >= st.register_time - INTERVAL '2 days'
+              AND c2.operation_time <= st.finish_time + INTERVAL '1 day'
+            ORDER BY c2.operation_time DESC
+            LIMIT 1
+        ) c
+        WHERE st.finish_time IS NOT NULL
+          AND st.finish_time >= :ts AND st.finish_time <= :te
+          AND (st.handler IS NULL OR st.handler = '' OR st.handler = 'SYS')
+          AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+        GROUP BY 1, 2
         """
     )
     tk_spec_rows = db.execute(tk_spec_count_sql, {"ts": ts, "te": te}).fetchall()
@@ -3816,11 +3904,8 @@ def today_staff_efficiency(
     for r in tk_spec_rows:
         tk_spec_by_op.setdefault(r.op or "", {})[r.spec or "咨询"] = int(r.cnt or 0)
 
-    # 2026-08-10 专项细分调整: 6个专项, 难度系数
+    # 2026-08-11 明确区分: 6个独立专项, 每个专项独立展示列
     #   咨询接待×1.0 | 套餐专项×1.8 | 退款处理×2.0 | 退款挽回×2.2 | 内部投诉×3.0 | 外部投诉×5.0
-    # 工单大类(4桶): 咨询/套餐/退款/投诉
-    #   退款大类 包含: 退款处理、退款挽回 两个专项
-    #   投诉大类 包含: 内部投诉、外部投诉 两个专项
     WEIGHT = {
         "咨询接待": 1.0,
         "套餐专项": 1.8,
@@ -3829,21 +3914,25 @@ def today_staff_efficiency(
         "内部投诉": 3.0,
         "外部投诉": 5.0,
     }
-    # 工单大类 → 管理岗/无主项人员使用的默认系数
+    # 管理岗/无主项人员使用的默认系数 (每个专项独立默认系数)
     CAT_DEFAULT_WEIGHT = {
-        "咨询接待": 1.0,    # 咨询
-        "套餐专项": 1.8,    # 套餐
-        "退款处理": 2.0,    # 退款(默认退款处理系数)
-        "投诉接待": 3.0,    # 投诉(默认内部投诉系数)
+        "咨询接待": 1.0,
+        "套餐专项": 1.8,
+        "退款处理": 2.0,
+        "退款挽回": 2.2,
+        "内部投诉": 3.0,
+        "外部投诉": 5.0,
     }
-    # 工单大类key → (桶key, 大类名称, 包含的专项集合)
+    # 6个独立专项桶 (不再合并大类, 每个专项独立一列展示)
     CAT_BUCKETS = [
         ("zixun", "咨询接待", {"咨询接待"}),
         ("taocan", "套餐专项", {"套餐专项"}),
-        ("tuikuan", "退款处理", {"退款处理", "退款挽回"}),
-        ("tousu", "投诉接待", {"内部投诉", "外部投诉"}),
+        ("recovery", "退款挽回", {"退款挽回"}),
+        ("processing", "退款处理", {"退款处理"}),
+        ("internal", "内部投诉", {"内部投诉"}),
+        ("external", "外部投诉", {"外部投诉"}),
     ]
-    CATS = [c[1] for c in CAT_BUCKETS]  # ["咨询接待", "套餐专项", "退款处理", "投诉接待"]
+    CATS = [c[1] for c in CAT_BUCKETS]  # ["咨询接待", "套餐专项", "退款挽回", "退款处理", "内部投诉", "外部投诉"]
     TRANSFER_PENALTY = 0.2
     # 2026-08-09 用户新要求: 转接接待工作量/效率折算 = 固定 TRANSFER_PENALTY (0.2)
     #   不再叠加 专项难度系数 WEIGHT[c], 即:
@@ -3907,38 +3996,56 @@ def today_staff_efficiency(
         # 会话次数 (sessions):  cs_record条数 + 对应专项工单完工条数
         def _sess_sum(names: tuple[str, ...]) -> int:
             return sum((buckets.get(n, (0,0))[0] for n in names), 0)
+        # cs_record 侧的会话数
         z_sess_cs = _sess_sum(BUCK_FZ)
         t_sess_cs = buckets.get("套餐问题", (0,0))[0]
-        tu_sess_cs = buckets.get("退款", (0,0))[0]
-        to_sess_cs = buckets.get("投诉", (0,0))[0]
+        # cs_record 中 problem_category='退款' → 退款挽回接待会话
+        recovery_sess_cs = buckets.get("退款", (0,0))[0]
+        # cs_record 中投诉 → 内部投诉会话 (外部投诉主要在工单侧区分)
+        internal_sess_cs = buckets.get("投诉", (0,0))[0]
+        external_sess_cs = 0  # cs_record中暂不区分外部投诉
+        
         # 加上工单按专项分类的条数
         tk_sess = tk_spec_by_op.get(op or "", {})
-        z_sess = z_sess_cs + tk_sess.get("咨询", 0)
-        t_sess = t_sess_cs + tk_sess.get("套餐", 0)
-        tu_sess = tu_sess_cs + rf_by_op.get(op, (0,0))[0] + tk_sess.get("退款", 0)
-        to_sess = to_sess_cs + tk_sess.get("投诉", 0)
+        # 咨询接待: cs_record 咨询/其他/综合 + 工单 咨询接待
+        z_sess = z_sess_cs + tk_sess.get("咨询接待", 0)
+        # 套餐专项: cs_record 套餐问题 + 工单 套餐专项
+        t_sess = t_sess_cs + tk_sess.get("套餐专项", 0)
+        # 退款挽回: cs_record 退款接待 (工单侧的退款都是退款处理)
+        recovery_sess = recovery_sess_cs
+        # 退款处理: refunds表操作数 + 工单 退款处理
+        processing_sess = rf_by_op.get(op, (0,0))[0] + tk_sess.get("退款处理", 0)
+        # 内部投诉: cs_record 投诉 + 工单 内部投诉
+        internal_sess = internal_sess_cs + tk_sess.get("内部投诉", 0)
+        # 外部投诉: 工单 外部投诉
+        external_sess = external_sess_cs + tk_sess.get("外部投诉", 0)
+        
         rf_op_count = rf_by_op.get(op, (0,0))[0]
 
         # 接待个数 (people, SN去重跨表合并): 使用 SQL 侧预先算出的 merged_pp
         sn_pp = merged_pp.get(op or "", {})
-        z_peop = sn_pp.get("咨询", 0)
-        t_peop = sn_pp.get("套餐", 0)
-        tu_peop = sn_pp.get("退款", 0)
-        to_peop = sn_pp.get("投诉", 0)
+        z_peop = sn_pp.get("咨询接待", 0)
+        t_peop = sn_pp.get("套餐专项", 0)
+        recovery_peop = sn_pp.get("退款挽回", 0)
+        processing_peop = sn_pp.get("退款处理", 0)
+        internal_peop = sn_pp.get("内部投诉", 0)
+        external_peop = sn_pp.get("外部投诉", 0)
 
-        # 4 个工单大类桶 (key → sessions, people)
+        # 6 个专项桶 (key → sessions, people)
         cat_data = {
             "zixun": (z_sess, z_peop),
             "taocan": (t_sess, t_peop),
-            "tuikuan": (tu_sess, tu_peop),
-            "tousu": (to_sess, to_peop),
+            "recovery": (recovery_sess, recovery_peop),
+            "processing": (processing_sess, processing_peop),
+            "internal": (internal_sess, internal_peop),
+            "external": (external_sess, external_peop),
         }
-        # 总接待设备数 = 4 桶 SN 并集个数 (SQL 侧没有算并集, 这里近似用桶求和; 未来如果需要精确并集再补)
-        total_devices = z_peop + t_peop + tu_peop + to_peop
+        # 总接待设备数 = 6 桶 SN 并集个数 (近似用桶求和)
+        total_devices = z_peop + t_peop + recovery_peop + processing_peop + internal_peop + external_peop
         # 若 total_devices 比 cs_record 侧 rdc 大, 用 total_devices 更真实; 否则保留 rdc 保持旧口径
         reception_device_count = max(rdc, total_devices)
-        # 总会话数 = 工单并入后的 4 桶之和 (反映当天真实工作量条次)
-        reception_count = z_sess + t_sess + tu_sess + to_sess
+        # 总会话数 = 工单并入后的 6 桶之和 (反映当天真实工作量条次)
+        reception_count = z_sess + t_sess + recovery_sess + processing_sess + internal_sess + external_sess
         # rc 是原 cs_record 侧算出来的会话总条数; 并入工单数后可能更大, 取 max 避免回退
         reception_count = max(rc, reception_count)
 
@@ -3987,18 +4094,32 @@ def today_staff_efficiency(
             "reception_count": reception_count,
             "reception_device_count": reception_device_count,
             "refund_op_count": rf_op_count,
-            "sp_zixun": z_sess, "sp_taocan": t_sess, "sp_tuikuan": tu_sess, "sp_tousu": to_sess,
-            "pp_zixun": z_peop, "pp_taocan": t_peop, "pp_tuikuan": tu_peop, "pp_tousu": to_peop,
+            # 6个专项: 会话次数(次)
+            "sp_zixun": z_sess, "sp_taocan": t_sess, 
+            "sp_recovery": recovery_sess, "sp_processing": processing_sess,
+            "sp_internal": internal_sess, "sp_external": external_sess,
+            # 兼容字段别名 (前端使用)
+            "sp_wanhui": recovery_sess, "sp_tuikuan": processing_sess,
+            "sp_neibu": internal_sess, "sp_waibu": external_sess,
+            # 6个专项: 接待个数(个, SN去重)
+            "pp_zixun": z_peop, "pp_taocan": t_peop,
+            "pp_recovery": recovery_peop, "pp_processing": processing_peop,
+            "pp_internal": internal_peop, "pp_external": external_peop,
+            # 兼容字段别名 (前端使用)
+            "pp_wanhui": recovery_peop, "pp_tuikuan": processing_peop,
+            "pp_neibu": internal_peop, "pp_waibu": external_peop,
             "weights": dict(WEIGHT), "transfer_penalty": TRANSFER_PENALTY,
             "breakdown": bd,
             "work_score": round(work_score, 2), "eff_score": round(eff_score, 2),
             "rank": None,              # rank 先写默认 None, 排序后真人员工再写 1..N
             "is_virtual": False,       # 显式 False, 避免 undefined 误判成 null 非真人 Tag 全亮
-            # v2 口径说明供前端 tooltip 渲染
+            # v3 口径说明供前端 tooltip 渲染
             "_calc_note": {
-                "sessions_merge": "会话次数(次)=cs_record条数 + 对应专项工单完工条数(退款+全类工单并入)",
+                "sessions_merge": "会话次数(次)=cs_record条数 + 对应专项工单完工条数; 退款挽回=退款类接待; 退款处理=实际退款操作+退款工单",
                 "sn_merge_rule": "接待个数(个)=智能助手SN ∪ 工单SN 跨表去重, 按人员×专项独立核算; 排除sys/system/系统自动产生的记录",
-                "weight_rule": "本职: 主专项系数(外诉×5.0/内诉×3.0/退款挽回×2.2/退款处理×2.0/套餐×1.8/咨询×1.0); 转接: 固定×0.2; 管理岗: 大类默认系数",
+                "weight_rule": "本职: 主专项系数(外诉×5.0/内诉×3.0/退款挽回×2.2/退款处理×2.0/套餐×1.8/咨询×1.0); 转接: 固定×0.2; 管理岗: 各专项默认系数",
+                "recovery_def": "退款挽回: cs_record接待problem_category='退款'的客户(沟通挽留工作)",
+                "processing_def": "退款处理: refunds表实际退款操作 + service_tickets退款类工单完工(执行退款)",
             },
         }
         # 非真人判定 = 精确虚拟匹配 OR 未登记+名字特征匹配
@@ -4025,8 +4146,10 @@ def today_staff_efficiency(
             return recs
         SUM_KEYS = [
             "reception_count", "reception_device_count", "refund_op_count",
-            "sp_zixun", "sp_taocan", "sp_tuikuan", "sp_tousu",
-            "pp_zixun", "pp_taocan", "pp_tuikuan", "pp_tousu",
+            "sp_zixun", "sp_taocan", "sp_recovery", "sp_processing", "sp_internal", "sp_external",
+            "sp_wanhui", "sp_tuikuan", "sp_neibu", "sp_waibu",  # 兼容别名
+            "pp_zixun", "pp_taocan", "pp_recovery", "pp_processing", "pp_internal", "pp_external",
+            "pp_wanhui", "pp_tuikuan", "pp_neibu", "pp_waibu",  # 兼容别名
             "work_score", "eff_score",
         ]
         buckets: dict[str, dict] = {}
@@ -4237,7 +4360,7 @@ def refund_recovery_analysis(
             return "咨询接待"
         return None
 
-    # ---- 2. 先找 Person 维表: 哪些人 属于 退款专项组 ----
+    # ---- 2. 先找 Person 维表: 建立所有人员的meta信息 ----
     #   注意: PersonAlias.alias = 业务表的 operator (如 "企微-叶珍凤"), 通过 person_id 关联到 Person (统一实体)
     from app.models.person import Person as P, PersonAlias as PA
     person_rows = db.execute(
@@ -4250,47 +4373,31 @@ def refund_recovery_analysis(
         .outerjoin(P, PA.person_id == P.id)
         .where(PA.is_system == False)  # 排除 sys/system 等系统自动别名
     ).all()
-    refund_ops: dict[str, dict] = {}  # operator (alias) -> {name, group, specialty, position, dept}
+    
+    # 专职退款挽回人员 (hr_cat=退款挽回)
+    recovery_ops: dict[str, dict] = {}
+    # 所有人员的meta信息 (用于非专职人员接待退款时的挽回统计)
+    all_ops_meta: dict[str, dict] = {}
+    
     for pr in person_rows:
         op = pr.operator or ""
         if not op:
             continue
         hr_cat = _hr_map(pr.specialty, pr.position)
-        if _is_refund_staff(pr.group_name, hr_cat):
-            # 同一人员(同 person) 可能有多个 alias (企微-xxx, 店铺-xxx), 均加入 refund_ops 以便 cs_records 匹配
-            refund_ops.setdefault(op, {
-                "name": pr.display_name or op,
-                "group": pr.group_name or "未分组",
-                "specialty": pr.specialty,
-                "position": pr.position,
-                "dept": pr.department or "未设置",
-            })
+        info = {
+            "name": pr.display_name or op,
+            "group": pr.group_name or "未分组",
+            "specialty": pr.specialty,
+            "position": pr.position,
+            "dept": pr.department or "未设置",
+            "hr_cat": hr_cat,
+            "is_recovery_staff": _is_refund_staff(pr.group_name, hr_cat),
+        }
+        all_ops_meta[op] = info
+        if info["is_recovery_staff"]:
+            recovery_ops[op] = info
 
-    if not refund_ops:
-        # 兜底: 如果维表没配, 从实际数据里推 (做过退款类工单/退款单的人)
-        guess_ops = set()
-        for r in db.execute(select(Refund.operator).where(
-            Refund.created_at_raw.isnot(None),
-            Refund.created_at_raw >= ts, Refund.created_at_raw <= te,
-            Refund.operator.isnot(None), Refund.operator.notin_(SYS_OP_BLACKLIST_RR),
-        )).all():
-            guess_ops.add(r.operator or "")
-        for r in db.execute(select(ServiceTicket.handler).where(
-            ServiceTicket.finish_time.isnot(None),
-            ServiceTicket.finish_time >= ts, ServiceTicket.finish_time <= te,
-            ServiceTicket.handler.isnot(None), ServiceTicket.handler.notin_(SYS_OP_BLACKLIST_RR),
-            func.coalesce(ServiceTicket.service_category, "") == "退款",
-        )).all():
-            guess_ops.add(r.handler or "")
-        for op in guess_ops:
-            if not op or op in SYS_OP_BLACKLIST_RR:
-                continue
-            refund_ops.setdefault(op, {"name": op, "group": "未分组", "specialty": None, "position": None, "dept": "未设置"})
-
-    # op_list = 退款挽回成员 (按用户最新口径:移除组长/主管强制失败规则,只有 属于退款专项组的人 才算"进入退款专员接待工作量")
-    op_list = list(set(refund_ops.keys()))
-    all_ops_meta: dict[str, dict] = {**refund_ops}
-    if not op_list:
+    if not all_ops_meta:
         return {
             "date": d_iso, "date_end": d_end_iso,
             "kpi": _empty_kpi(),
@@ -4300,16 +4407,15 @@ def refund_recovery_analysis(
             "daily_reason": [],
             "daily_trend": [],
             "hourly_today": [],
-            "_note": "当前时间窗口未识别到退款专项组人员, 请检查 Person 维表的 分组/专项 配置.",
+            "_note": "当前时间窗口未识别到人员数据, 请检查 Person 维表配置.",
         }
 
-    # ---- 3. 分母: 退款挽回成员 在周期内 cs_records 接待的【真退款类】 SN 集合 (按 op 分组) ----
-    #    口径修正(2026-08-10 验证数据后修正):
+    # ---- 3. 分母: 所有人员 在周期内 cs_records 接待的【真退款类】 SN 集合 (按 op 分组) ----
+    #    口径修正(2026-08-11):
     #      - problem_category = '退款' (大类是退款诉求)
-    #      - AND operator 属于 退款挽回专项组人员 (op_list) → 才叫"进入退款专员接待工作量"
-    #      - 移除 problem_type 过度过滤: 之前错误排除了"网络问题"和"其他",这两类是占比最大的退款理由
-    #        (卢宁接待量中网络问题1880SN+其他1517SN=3397SN,占66%;黄亚康网络问题703SN+其他646SN=1349SN,占48%)
-    #        客户以"网络不好/不想用了/设备故障"等任何理由要求退款,都属于退款挽回工作范围
+    #      - 不再限制operator必须是退款挽回专员: 任何人员(含组长/主管/退款处理员)接待的退款类SN都算入分母
+    #      - 如果非专职挽回人员接待的退款SN最终没有产生退款行为 → 也算挽回成功
+    #      - 移除 problem_type 过度过滤: 网络问题/其他问题等所有退款理由均计入
     cs_refund_sn_sql = text(
         """
         SELECT c.operator AS op, NULLIF(TRIM(c.device_sn),'') AS sn,
@@ -4317,7 +4423,6 @@ def refund_recovery_analysis(
         FROM cs_records c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
-          AND c.operator = ANY(:op_list)
           AND NOT (c.operator = ANY(:sys_bl))
           AND c.problem_category = '退款'
           AND NOT (
@@ -4330,33 +4435,79 @@ def refund_recovery_analysis(
     kw_params = {f"k{i+1}": f"%{k}%" for i, k in enumerate(SYS_KW)}
     cs_sn_rows = db.execute(
         cs_refund_sn_sql,
-        {"ts": ts, "te": te, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params},
+        {"ts": ts, "te": te, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params},
     ).fetchall()
 
-    # op -> set(sn)   (退款专项组成员 分母SN)
-    op_host_sns: dict[str, set[str]] = {op: set() for op in op_list}
+    # 收集所有在cs_records中出现的operator，然后补全他们的meta信息
+    all_cs_ops: set[str] = set()
     for r in cs_sn_rows:
-        if r.sn:
-            op_host_sns.setdefault(r.op or "", set()).add(r.sn)
+        if r.op:
+            all_cs_ops.add(r.op)
+    
+    # 将cs_records中出现但不在person_rows中的operator也加入all_ops_meta
+    person_op_map = {p.operator: p for p in person_rows}
+    for op in all_cs_ops:
+        if op not in all_ops_meta:
+            p = person_op_map.get(op)
+            if p:
+                all_ops_meta[op] = {
+                    "name": p.display_name or op,
+                    "group": p.group_name or "未分组",
+                    "specialty": p.specialty or None,
+                    "position": p.position or "",
+                    "dept": p.department or "未设置",
+                    "is_recovery_staff": (p.specialty in REFUND_RECOVERY_HR_CATS),
+                }
+            else:
+                all_ops_meta[op] = {
+                    "name": op,
+                    "group": "未知分组",
+                    "specialty": None,
+                    "position": "",
+                    "dept": "未设置",
+                    "is_recovery_staff": False,
+                }
 
-    # 全局分母SN (全部合并) + 每个SN最早接待时间
+    # op -> set(sn)   (每个接待人员的分母SN)
+    op_host_sns: dict[str, set[str]] = {}
+    for r in cs_sn_rows:
+        if r.sn and r.op:
+            op_host_sns.setdefault(r.op, set()).add(r.sn)
+
+    # 全局分母SN (全部合并,去重) + 每个SN最早接待时间 + 接待人员列表
     global_host_sns: set[str] = set()
     sn_first_op_time: dict[str, datetime] = {}  # sn -> 最早接待时间
+    sn_host_ops: dict[str, list[str]] = {}      # sn -> [接待过的operators] (区分专职/非专职)
     for r in cs_sn_rows:
         if r.sn:
-            global_host_sns.add(r.sn)
+            sn = r.sn
+            global_host_sns.add(sn)
             # 记录最早接待时间
-            if r.op_time and (r.sn not in sn_first_op_time or r.op_time < sn_first_op_time[r.sn]):
-                sn_first_op_time[r.sn] = r.op_time
-    for s in op_host_sns.values():
-        pass  # 已经在上面填充global_host_sns了
+            if r.op_time and (sn not in sn_first_op_time or r.op_time < sn_first_op_time[sn]):
+                sn_first_op_time[sn] = r.op_time
+            # 记录接待人员
+            if r.op:
+                sn_host_ops.setdefault(sn, [])
+                if r.op not in sn_host_ops[sn]:
+                    sn_host_ops[sn].append(r.op)
 
     # ---- 4. 分子: 挽留失败 SN 集合 = 分母SN ∩ (refunds ∪ 退款工单) ----
     #   时间: 退款/工单 发生时间 在 [该SN最早接待时间, 最早接待时间+7天] 窗口 (T+7 宽限, 2026-08-10修正)
     #   修正说明: 之前只判断了全局时间窗口,没有校验"退款时间必须在接待时间之后",导致接待前已退款的SN被误判为失败
     #   说明: 允许专员接待后最长7天走到退款审批(到账/工单结案)才判定为失败, 避免"假成功"
+    #   2026-08-11 修正: 增加第3个失败来源——cs_record描述关键词匹配
+    #     大量退款操作通过企微等渠道执行,记录在cs_records.description中(如"退款说明"/"退款后重新充值说明"等)
+    #     但没有同步到refunds表或service_tickets表,导致这些已进入退款流程的SN被误判为"挽回成功"
+    #     新增cs_kw_sn分支: cs_record描述含退款流程关键词的SN直接判定为失败
     import datetime as _dt2
     te7 = te + _dt2.timedelta(days=7)
+    # cs_record描述中的"已进入退款流程"关键词 (匹配即判失败)
+    #   退款说明 = 已发送退款说明,进入退款流程
+    #   退款后重新充值 = 已退款但重新充值
+    #   要求退回微信 = 已进入退款流程
+    #   非挽回用户 = 放弃挽回
+    CS_FAIL_KW = ["退款说明", "退款后重新充值", "要求退回微信", "非挽回用户"]
+    cs_kw_params = {f"ck{i+1}": f"%{k}%" for i, k in enumerate(CS_FAIL_KW)}
     failed_sn_sql = text(
         """
         WITH host_sns AS (SELECT unnest(CAST(:sn_arr AS text[])) AS sn),
@@ -4393,10 +4544,34 @@ def refund_recovery_analysis(
               -- 不限制handler：任何人处理的退款工单都算失败
               AND st.register_time >= :ts AND st.register_time <= :te7
         ),
+        cs_kw_sn AS (
+            -- 2026-08-11新增: cs_record描述含"退款说明"等关键词 = 已进入退款流程 = 挽回失败
+            SELECT DISTINCT NULLIF(TRIM(c.device_sn),'') AS sn,
+                   'cs_kw' AS src,
+                   LEFT(COALESCE(c.description,''),100) AS reason,
+                   0 AS amount,
+                   '退款流程' AS status,
+                   'cs_record关键词' AS method,
+                   c.operation_time AS event_time
+            FROM cs_records c
+            JOIN host_sns hs ON NULLIF(TRIM(c.device_sn),'') = hs.sn
+            WHERE c.operation_time IS NOT NULL
+              AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+              AND c.problem_category = '退款'
+              AND NOT (c.operator = ANY(:sys_bl))
+              AND (
+                  COALESCE(c.description,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4])
+               OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4])
+               OR COALESCE(c.solution,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4])
+              )
+              AND c.operation_time >= :ts AND c.operation_time <= :te7
+        ),
         all_fail AS (
             SELECT sn, src, reason, amount, status, method, event_time FROM refund_sn
             UNION ALL
             SELECT sn, src, reason, amount, status, method, event_time FROM ticket_sn
+            UNION ALL
+            SELECT sn, src, reason, amount, status, method, event_time FROM cs_kw_sn
         )
         SELECT af.sn, af.src, af.reason, af.amount, af.status, af.method, af.event_time
         FROM all_fail af
@@ -4405,7 +4580,8 @@ def refund_recovery_analysis(
     )
     fail_rows = db.execute(
         failed_sn_sql,
-        {"sn_arr": list(global_host_sns), "ts": ts, "te7": te7},
+        {"sn_arr": list(global_host_sns), "ts": ts, "te7": te7,
+         "sys_bl": list(SYS_OP_BLACKLIST_RR), **cs_kw_params},
     ).fetchall()
 
     # 全局失败SN集合 + 明细 (按 SN 取金额最大那一条 作为该SN的归因)
@@ -4513,8 +4689,13 @@ def refund_recovery_analysis(
         ro_cnt = len(ro_sns)
         ro_amt = refund_op_amt.get(op, 0.0)
 
-        # 成功率口径: 仅基于 CS 接待侧 (退款专项组人员 的接待成功/接待失败)
-        # 如果纯退款执行人(无 CS 接待), 成功率记为 None(空) 避免误导
+        # 跳过既没有接待也没有退款操作的人员 (避免无关人员出现在列表中)
+        if total_cs == 0 and ro_cnt == 0:
+            continue
+            
+        # 成功率口径: 基于 CS 接待侧
+        # - 有接待的人员: 计算成功率
+        # - 纯退款执行人(无CS接待): 成功率记为 None(空)
         total_for_rate = total_cs
         rate = (succ_cs / total_for_rate * 100) if total_for_rate else None
 
@@ -4524,13 +4705,14 @@ def refund_recovery_analysis(
             "group": info.get("group") or "未分组",
             "department": info.get("dept") or "未设置",
             "position": info.get("position") or "",
-            "total_sn": total_cs,           # CS 接待SN数 (新口径:真退款类问题 + 退款专员接待)
+            "total_sn": total_cs,           # CS 接待SN数 (退款类诉求接待)
             "success_sn": succ_cs,          # 接待成功SN数
             "failed_sn": fail_cs,           # 接待失败SN数
             "success_rate": round(rate, 2) if rate is not None else None,
             "refund_op_cnt": ro_cnt,        # 退款操作SN数: 作为 refunds.operator 或 service_tickets.handler 处理过的 SN
             "refund_op_amount": round(ro_amt, 2),  # 退款操作金额合计
-            "_is_refund_staff": (op in refund_ops),
+            "_is_recovery_staff": info.get("is_recovery_staff", False),  # 是否是专职退款挽回人员
+            "staff_type": "专职挽回" if info.get("is_recovery_staff", False) else ("退款操作" if total_cs == 0 else "其他人员挽回"),
         })
     staff_detail.sort(key=lambda x: (
         -(x.get("total_sn") or 0),            # 主排序: CS 接待SN数降序
@@ -4601,15 +4783,15 @@ def refund_recovery_analysis(
         "actual_refund_amount": round(actual_refund, 2),
         "fee_ratio": round(fee_ratio, 2),  # 单量口径拦截比例, 非金额口径
         "_calc_note": {
-            "denominator": "退款挽回专项组成员(Person.specialty=退款挽回) 接待的 problem_category='退款' 的SN去重总数 (不限制problem_type: 网络问题/不想用了/设备故障/其他等所有退款理由均计入)",
-            "failed_rule": "分母SN 中, 在 [该SN最早接待时间, 最早接待时间+7天] T+7窗口内: 1)出现在refunds表且status≠无需退款/驳回(不限制退款方式和操作人:线上/线下/转入提现账户/任何人均算); 2)出现在service_tickets退款类工单且status≠终止(以register_time提交时间为准). 满足任一即判定挽留失败",
-            "success_rule": "「分母SN」 − 「失败SN」 → 挽留成功 (即退款专员接待过但最终没走到退款流程, 被沟通拦截下来)",
+            "denominator": "所有人员(含专职退款挽回专员、组长/主管、其他人员)接待的 problem_category='退款' 的SN去重总数 (不限制problem_type: 网络问题/不想用了/设备故障/其他等所有退款理由均计入)",
+            "failed_rule": "分母SN 中, 在 [该SN最早接待时间, 最早接待时间+7天] T+7窗口内满足任一即判失败: 1)refunds表且status≠无需退款/驳回; 2)service_tickets退款类工单且status≠终止; 3)cs_record描述含退款流程关键词(退款说明/退款后重新充值/要求退回微信/非挽回用户)——大量企微退款操作未同步到refunds表,通过cs_record描述关键词补充判定",
+            "success_rule": "「分母SN」 − 「失败SN」 → 挽留成功 (即接待过但最终没走到退款流程, 被沟通拦截下来; 专职挽回和组长/主管/其他人员的挽回均计入)",
             "t_window_note": "T+7窗口已关闭的历史数据(≥7天前接待)成功率才准确; 最近7天接待的数据因部分退款还在流程中,成功率会偏高属于正常",
-            "leader_rule_removed": "已移除: 原规则「组长/主管接待SN强制失败」(用户2026-08-04确认移除,仅按SN是否真正进入退款流程判定成败)",
-            "multi_user_rule": "工作负荷/绩效层面: 同个SN 允许 A(退款接待专员) + B(退款操作执行人) 各算一次. 接待侧计入 total_sn/success_sn/failed_sn; 退款操作侧(即 refunds.operator/service_tickets.handler) 单独计入 staff_detail.refund_op_cnt / refund_op_amount, 不重复计入成功率",
+            "staff_type_def": "专职挽回: Person.specialty=退款挽回的人员; 其他人员挽回: 非专职人员(组长/主管/咨询/套餐/投诉等)接待退款类SN且未产生退款; 退款操作: 仅执行退款操作(refunds.operator)无接待的人员",
+            "multi_user_rule": "工作负荷/绩效层面: 同个SN 允许多人各算各的. 接待侧每人算各自的 total_sn/success_sn/failed_sn; 退款操作侧(refunds.operator/service_tickets.handler)单独计入 staff_detail.refund_op_cnt / refund_op_amount, 不重复计入成功率",
             "success_amount_rule": "成功金额暂不核算 (挽留成功的设备未进入退款流程, 无实际退款工单金额可对应)",
             "fee_ratio_rule": "费占比(单量口径) = 成功单数 / (成功单数 + 实际退款单数(失败+退充)) · 参考目标 37%+",
-            "staff_scope": f"退款挽回专项 (Person.specialty∈{REFUND_RECOVERY_HR_CATS}) + 所有退款操作执行人; 已排除系统别名(system/机器人/用户自助等)",
+            "staff_scope": "所有人员(含专职退款挽回专员、组长/主管等管理人员、其他岗位人员)的退款类接待 + 退款操作执行人; 已排除系统别名(system/机器人/用户自助等)",
             "reason_order": reason_order_placeholder,
         },
     }
@@ -4650,7 +4832,7 @@ def refund_recovery_analysis(
         wk_end7_utc = wk_end_utc + _dt.timedelta(days=7)  # T+7
         week_label = f"{(now_sh.isocalendar()[0])}-W{(now_sh - _dt.timedelta(weeks=wi)).isocalendar()[1]}"
 
-        # 当周 退款专员 cs_record 接待【真退款类】 SN (修正口径: 移除problem_type过度过滤)
+        # 当周 所有人员 cs_record 接待【真退款类】 SN (2026-08-11: 包含所有人员,不只专职挽回)
         wk_cs = db.execute(text(
             """
             SELECT DISTINCT NULLIF(TRIM(c.device_sn),'') AS sn,
@@ -4658,7 +4840,6 @@ def refund_recovery_analysis(
             FROM cs_records c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
-              AND c.operator = ANY(:op_list)
               AND NOT (c.operator = ANY(:sys_bl))
               AND c.problem_category = '退款'
               AND NOT (
@@ -4668,7 +4849,7 @@ def refund_recovery_analysis(
               )
             GROUP BY sn
             """
-        ), {"ts": wk_start_utc, "te": wk_end_utc, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params}).fetchall()
+        ), {"ts": wk_start_utc, "te": wk_end_utc, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params}).fetchall()
         wk_host: set[str] = set(r.sn for r in wk_cs if r.sn)
         wk_first_op = {r.sn: r.first_op_time for r in wk_cs if r.sn}
 
@@ -4822,7 +5003,7 @@ def refund_recovery_analysis(
             ts0 = _dt.datetime.combine(plot_start, _dt.time.min).replace(tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
             te0 = _dt.datetime.combine(end_day, _dt.time.max).replace(tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
             te0_7 = te0 + _dt.timedelta(days=7)
-            # 日粒度 分母SN (按天, 修正口径: 移除problem_type过度过滤)
+            # 日粒度 分母SN (按天, 2026-08-11: 包含所有人员,不只专职挽回)
             day_host_rows = db.execute(text(
                 """
                 SELECT DATE(c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS d,
@@ -4830,7 +5011,6 @@ def refund_recovery_analysis(
                 FROM cs_records c
                 WHERE c.operation_time IS NOT NULL
                   AND c.operation_time >= :ts AND c.operation_time <= :te
-                  AND c.operator = ANY(:op_list)
                   AND NOT (c.operator = ANY(:sys_bl))
                   AND c.problem_category = '退款'
                   AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
@@ -4840,7 +5020,7 @@ def refund_recovery_analysis(
                    OR COALESCE(c.solution,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
                   )
                 """
-            ), {"ts": ts0, "te": te0, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params}).fetchall()
+            ), {"ts": ts0, "te": te0, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params}).fetchall()
             day_to_host: dict[str, set[str]] = {}
             for r in day_host_rows:
                 if r.d is None or not r.sn: continue
@@ -4892,7 +5072,7 @@ def refund_recovery_analysis(
         today_sh = _dt.datetime.now(TZ).date()
         ts_today = _dt.datetime.combine(today_sh, _dt.time.min).replace(tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
         te_today = _dt.datetime.now(TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
-        # 今日 分母SN (按小时, 修正口径: 移除problem_type过度过滤)
+        # 今日 分母SN (按小时, 2026-08-11: 包含所有人员,不只专职挽回)
         hr_rows = db.execute(text(
             """
             SELECT EXTRACT(HOUR FROM c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS hh,
@@ -4900,7 +5080,6 @@ def refund_recovery_analysis(
             FROM cs_records c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
-              AND c.operator = ANY(:op_list)
               AND NOT (c.operator = ANY(:sys_bl))
               AND c.problem_category = '退款'
               AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
@@ -4910,7 +5089,7 @@ def refund_recovery_analysis(
                OR COALESCE(c.solution,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
               )
             """
-        ), {"ts": ts_today, "te": te_today, "op_list": op_list, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params}).fetchall()
+        ), {"ts": ts_today, "te": te_today, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params}).fetchall()
         hr_to_host: dict[int, set[str]] = {}
         for r in hr_rows:
             if r.hh is None or not r.sn: continue
@@ -4962,13 +5141,17 @@ def refund_recovery_analysis(
         "hourly_today": hourly_today,
         # 2026-08-09 追加: 数据核查调试信息 (前端不展示, 便于有疑问时在接口响应中直接核对)
         "_debug": {
-            "refund_op_count": len(refund_ops),
-            "refund_op_list_sample": list(refund_ops.keys())[:20],
+            "refund_op_count": len(refund_op_sns),
+            "refund_op_list_sample": list(refund_op_sns.keys())[:20],
+            "recovery_staff_count": len(recovery_ops),
+            "recovery_staff_list": list(recovery_ops.keys())[:20],
             "cs_sn_row_count": len(cs_sn_rows),
             "global_host_sn_count": len(global_host_sns),
             "global_fail_sn_count": len(global_fail_sns),
             "fail_refund_sn_cnt": sum(1 for v in sn_failed_meta.values() if v.get("src") == "refund"),
             "fail_ticket_sn_cnt": sum(1 for v in sn_failed_meta.values() if v.get("src") == "ticket"),
+            "fail_cs_kw_sn_cnt": sum(1 for v in sn_failed_meta.values() if v.get("src") == "cs_kw"),
+            "cs_fail_keywords": CS_FAIL_KW,
             "sys_keywords_used": SYS_KW,
             "sys_blacklist_ops": list(SYS_OP_BLACKLIST_RR),
             "problem_type_filter": ['不想用了', '充值错误', '设备故障', '服务原因'],

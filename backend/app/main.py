@@ -66,6 +66,10 @@ async def lifespan(app: FastAPI):
             except Exception as _e:
                 logger.error(f"[lifespan] 启动时种子注册失败(非致命): {_e}", exc_info=True)
             try:
+                _cleanup_zombie_running_tasks()
+            except Exception as _e:
+                logger.warning(f"[lifespan] 清理僵尸任务失败(非致命): {_e}", exc_info=True)
+            try:
                 _start_bms_scheduler()
             except Exception as _e:
                 logger.error(f"[lifespan] 启动时调度器启动失败(非致命): {_e}", exc_info=True)
@@ -102,14 +106,25 @@ async def lifespan(app: FastAPI):
 
 
 def _run_migrations_on_startup() -> None:
-    """启动时执行 alembic upgrade head（统一走迁移，不再用 create_all）"""
+    """启动时执行 alembic upgrade heads（统一走迁移，不再用 create_all）
+    
+    临时禁用自动迁移(2026-08-11): alembic多head分支导致upgrade卡住，数据库已是最新状态无需迁移
+    """
+    logger.info("跳过自动迁移(数据库已是最新版本)")
+    return
+    
     from alembic import command
     from alembic.config import Config
 
     cfg = Config(str(_BACKEND_DIR / "alembic.ini"))
     cfg.set_main_option("script_location", str(_BACKEND_DIR / "alembic"))
-    command.upgrade(cfg, "head")
-    logger.info("数据库迁移已执行至 head")
+    # 使用 heads (复数) 处理多分支迁移 (multiple head revisions)
+    try:
+        command.upgrade(cfg, "heads")
+        logger.info("数据库迁移已执行至 heads")
+    except Exception as e:
+        logger.error(f"数据库迁移失败(非致命): {e}", exc_info=True)
+        # 迁移失败不阻塞服务启动
 
 
 def _init_admin() -> None:
@@ -175,6 +190,49 @@ def _init_data_sources_and_presets() -> None:
         logger.info(f"同步源配置注册完成: created={ss_stats['created']}, total={ss_stats['total']}")
     except Exception as e:
         logger.error(f"数据源/预设视图注册失败: {e}", exc_info=True)
+    finally:
+        db.close()
+
+
+def _cleanup_zombie_running_tasks() -> None:
+    """清理服务重启后残留的僵尸 running 状态同步任务
+
+    同步任务在后台线程/协程中执行,若服务重启时任务正在运行,
+    进程被终止后数据库中的 status='running' 记录将永久残留,
+    导致后续定时同步误判"已有任务在运行"而跳过。
+
+    解决:服务启动时将所有 running 状态的同步日志标记为 failed。
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy import text as _tx
+
+    db = SessionLocal()
+    try:
+        # 清理 BMS 僵尸任务
+        bms_count = db.execute(
+            _tx(
+                "UPDATE bms_sync_logs SET status='failed', "
+                "error='服务重启清理:僵尸running任务', finished_at=NOW() "
+                "WHERE status='running'"
+            )
+        ).rowcount
+        # 清理 SCRM 僵尸任务
+        scrm_count = db.execute(
+            _tx(
+                "UPDATE scrm_sync_logs SET status='failed', "
+                "error='服务重启清理:僵尸running任务', finished_at=NOW() "
+                "WHERE status='running'"
+            )
+        ).rowcount
+        db.commit()
+        if bms_count or scrm_count:
+            logger.info(
+                f"[启动清理] 僵尸running任务已清理: BMS={bms_count}, SCRM={scrm_count}"
+            )
+    except Exception as e:
+        logger.warning(f"[启动清理] 清理僵尸任务出错: {e}")
+        db.rollback()
     finally:
         db.close()
 

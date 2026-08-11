@@ -253,7 +253,7 @@
 
     <!-- 模块7: 人均效率表 -->
     <section class="section-card mb-24">
-      <SectionHeader title="7. 人均效率" sub="会话数(次)=cs_record+工单完工条数 · 接待数(个)=智能助手SN ∪ 工单SN 跨表去重 · 排除sys/system/系统自动记录">
+      <SectionHeader title="7. 人均效率" sub="会话数(次)=cs_record+工单完工条数 · 接待数(个)=智能助手SN ∪ 工单SN 跨表去重 · 六专项独立列:咨询接待×1.0|套餐专项×1.8|退款挽回×2.2|退款处理×2.0|内部投诉×3.0|外部投诉×5.0 · 排除sys/system/系统自动记录">
         <template #extra>
           <el-space wrap size="small">
             <el-alert
@@ -415,25 +415,35 @@
               </span>
             </template>
           </el-table-column>
-          <!-- 四专项独立列: 每列一行 n次(m个)，简洁不啰嗦 -->
-          <el-table-column label="咨询" width="108" align="center">
+          <!-- 六专项独立列: 每列一行 n次(m个)，简洁不啰嗦 (2026-08-11 拆分退款为退款处理+退款挽回，拆分投诉为内部+外部) -->
+          <el-table-column label="咨询接待" width="108" align="center">
             <template #default="{ row }">
               <span class="sp-txt zx">{{ formatNum(row.breakdown?.['咨询接待']?.sessions ?? row.sp_zixun ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['咨询接待']?.people ?? row.pp_zixun ?? 0) }}</span>个)</span>
             </template>
           </el-table-column>
-          <el-table-column label="套餐" width="108" align="center">
+          <el-table-column label="套餐专项" width="108" align="center">
             <template #default="{ row }">
               <span class="sp-txt tc">{{ formatNum(row.breakdown?.['套餐专项']?.sessions ?? row.sp_taocan ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['套餐专项']?.people ?? row.pp_taocan ?? 0) }}</span>个)</span>
             </template>
           </el-table-column>
-          <el-table-column label="退款" width="108" align="center">
+          <el-table-column label="退款挽回" width="108" align="center">
+            <template #default="{ row }">
+              <span class="sp-txt wh">{{ formatNum(row.breakdown?.['退款挽回']?.sessions ?? row.sp_wanhui ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['退款挽回']?.people ?? row.pp_wanhui ?? 0) }}</span>个)</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="退款处理" width="108" align="center">
             <template #default="{ row }">
               <span class="sp-txt tk">{{ formatNum(row.breakdown?.['退款处理']?.sessions ?? row.sp_tuikuan ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['退款处理']?.people ?? row.pp_tuikuan ?? 0) }}</span>个)</span>
             </template>
           </el-table-column>
-          <el-table-column label="投诉" width="108" align="center">
+          <el-table-column label="内部投诉" width="108" align="center">
             <template #default="{ row }">
-              <span class="sp-txt ts">{{ formatNum(row.breakdown?.['投诉接待']?.sessions ?? row.sp_tousu ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['投诉接待']?.people ?? row.pp_tousu ?? 0) }}</span>个)</span>
+              <span class="sp-txt ni">{{ formatNum(row.breakdown?.['内部投诉']?.sessions ?? row.sp_neibu ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['内部投诉']?.people ?? row.pp_neibu ?? 0) }}</span>个)</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="外部投诉" width="108" align="center">
+            <template #default="{ row }">
+              <span class="sp-txt wa">{{ formatNum(row.breakdown?.['外部投诉']?.sessions ?? row.sp_waibu ?? 0) }}次(<span class="sp-txt-p">{{ formatNum(row.breakdown?.['外部投诉']?.people ?? row.pp_waibu ?? 0) }}</span>个)</span>
             </template>
           </el-table-column>
           <el-table-column label="工作量" width="104" align="right" sortable :sort-method="(a,b)=>Number(a.work_score||0)-Number(b.work_score||0)">
@@ -1365,17 +1375,33 @@ const staffRows = computed(() => {
     }
   }
   
-  // 专项筛选（支持current_specialty原始值和hr_category归一化值，包含匹配）
+  // 专项筛选：本职专项匹配 OR 有对应专项工作量的人员也显示
+  // (2026-08-11修正: 本职专项匹配 + 有该专项工作量的人员都显示)
+  // 原则: 专项筛选 = "谁做了这个专项的工作"; 本职人员 + 跨专项处理人员都应显示;
+  //        譬如投诉专员处理了套餐问题,也应出现在套餐专项筛选中,通过工作量列区分主次
   if (filterSpecialtyId.value) {
     const specialty = specialtiesList.value.find(s => s.id === filterSpecialtyId.value)
     if (specialty) {
       const targetName = specialty.name
+      // 专项名称 → 对应的sp工作量字段映射
+      const SP_FIELD_MAP = {
+        '咨询接待': 'sp_zixun',
+        '套餐专项': 'sp_taocan',
+        '退款挽回': 'sp_wanhui',
+        '退款处理': 'sp_tuikuan',
+        '内部投诉': 'sp_neibu',
+        '外部投诉': 'sp_waibu',
+      }
+      const spField = SP_FIELD_MAP[targetName]
       rows = rows.filter(r => {
-        const cs = r.current_specialty || ''
-        const hc = r.hr_category || ''
-        return cs === targetName || hc === targetName ||
-               cs.includes(targetName) || hc.includes(targetName) ||
-               targetName.includes(cs) || targetName.includes(hc)
+        const cs = (r.current_specialty || '').trim()
+        const hc = (r.hr_category || '').trim()
+        // 条件1: 本职专项匹配 (Person.specialty 或 hr_category 匹配目标专项; 空值不匹配)
+        if (cs && (cs === targetName || cs.includes(targetName) || targetName.includes(cs))) return true
+        if (hc && hc !== '管理层' && (hc === targetName || hc.includes(targetName) || targetName.includes(hc))) return true
+        // 条件2: 有对应专项的实际工作量 → 跨专项处理也计入 (做了就显示)
+        if (spField && Number(r[spField]) > 0) return true
+        return false
       })
     }
   }
@@ -1475,29 +1501,39 @@ const SPECIALTY_COLOR_MAP = {
 function specialtyTagType(s) {
   return SPECIALTY_COLOR_MAP[s] || 'info'
 }
-// 组长 4人 current_specialty 原本=「组长」(非专项名) → 按实际分组属性 反推其默认专项显示
+// 推断人员主专项显示 (2026-08-11修正: 优先用current_specialty, 不按组名硬编码, 分组≠专项)
+// 原则: 分组(group_name)是行政/管理维度, 专项(specialty)是业务内容维度, 同一组内可有多专项(如朱海洋组既有套餐又有退款挽回)
 function inferSpecialty(r) {
-  // 先看实际做了什么(Top 2 专项) 自动生成
+  // 1. 优先使用后端返回的current_specialty (已在维表正确登记的专项)
+  const STANDARD_SPECIALTIES = ['咨询接待', '套餐专项', '退款挽回', '退款处理', '内部投诉', '外部投诉']
+  if (r.current_specialty && STANDARD_SPECIALTIES.includes(r.current_specialty)) {
+    return r.current_specialty
+  }
+  
+  // 2. 看实际做了什么(Top 2 专项), 从会话数自动推断
+  // 先看实际做了什么(Top 2 专项) 自动生成 (2026-08-11: 更新为6个独立专项)
   const items = [
     { name: '咨询接待', n: Number(r.sp_zixun) || 0 },
     { name: '套餐专项', n: Number(r.sp_taocan) || 0 },
+    { name: '退款挽回', n: Number(r.sp_wanhui) || 0 },
     { name: '退款处理', n: Number(r.sp_tuikuan) || 0 },
-    { name: '投诉接待', n: Number(r.sp_tousu) || 0 },
+    { name: '内部投诉', n: Number(r.sp_neibu) || 0 },
+    { name: '外部投诉', n: Number(r.sp_waibu) || 0 },
   ].filter(x => x.n > 0).sort((a, b) => b.n - a.n)
   if (items.length) {
     if (items.length === 1) return items[0].name
     return items.slice(0, 2).map(i => i.name).join('+')
   }
-  // 没数据 按组默认属性兜底(已知截图分组)
-  const GRP_DEFAULT_SP = {
-    '董梦玲组': '咨询接待',
-    '吴晓龙组': '投诉接待',
-    '叶珍凤组': '咨询接待',
-    '朱海洋组': '退款挽回',
-    '投诉专项组': '投诉接待',
-    '张蕾组': '投诉接待+退款处理',
+  // 3. 管理岗(组长/主管/副主管)且无工作数据, 显示"管理岗"
+  if (r.position && ['组长', '主管', '副主管'].includes(r.position)) {
+    return '管理岗'
   }
-  return GRP_DEFAULT_SP[r.group] || (r.group === '未分组' ? '—' : '综合管理')
+  if (r.current_specialty === '组长') {
+    return '管理岗'
+  }
+  
+  // 4. 兜底: 未分组显示"—", 其他显示"综合"
+  return (r.group === '未分组') ? '—' : '综合'
 }
 // 工作量 / 效率 通用 tooltip (纯文本, 兼容旧逻辑; 新渲染统一走 scoreTooltipHtml 返回结构化HTML)
 function scoreTooltip(r, mode) {
@@ -1517,8 +1553,10 @@ function scoreTooltip(r, mode) {
   const CATS = [
     { k: '咨询接待', short: '咨询', fallback_s: r.sp_zixun, fallback_p: r.pp_zixun ?? 0 },
     { k: '套餐专项', short: '套餐', fallback_s: r.sp_taocan, fallback_p: r.pp_taocan ?? 0 },
+    { k: '退款挽回', short: '挽回', fallback_s: r.sp_wanhui, fallback_p: r.pp_wanhui ?? 0 },
     { k: '退款处理', short: '退款', fallback_s: r.sp_tuikuan, fallback_p: r.pp_tuikuan ?? 0 },
-    { k: '投诉接待', short: '投诉', fallback_s: r.sp_tousu, fallback_p: r.pp_tousu ?? 0 },
+    { k: '内部投诉', short: '内诉', fallback_s: r.sp_neibu, fallback_p: r.pp_neibu ?? 0 },
+    { k: '外部投诉', short: '外诉', fallback_s: r.sp_waibu, fallback_p: r.pp_waibu ?? 0 },
   ]
   const head = [
     `【${r.name || ''}】${r.position || '—'} · ${r.group || '部门统管'} · 专项：${sp}${hrMark}${mgmtMark}`,
@@ -1571,8 +1609,10 @@ function scoreTooltipHtml(r, mode) {
   const CATS = [
     { k: '咨询接待', short: '咨询', color: '#409eff', fallback_s: r.sp_zixun, fallback_p: r.pp_zixun ?? 0 },
     { k: '套餐专项', short: '套餐', color: '#67c23a', fallback_s: r.sp_taocan, fallback_p: r.pp_taocan ?? 0 },
+    { k: '退款挽回', short: '挽回', color: '#e67e22', fallback_s: r.sp_wanhui, fallback_p: r.pp_wanhui ?? 0 },
     { k: '退款处理', short: '退款', color: '#e6a23c', fallback_s: r.sp_tuikuan, fallback_p: r.pp_tuikuan ?? 0 },
-    { k: '投诉接待', short: '投诉', color: '#f56c6c', fallback_s: r.sp_tousu, fallback_p: r.pp_tousu ?? 0 },
+    { k: '内部投诉', short: '内诉', color: '#e74c3c', fallback_s: r.sp_neibu, fallback_p: r.pp_neibu ?? 0 },
+    { k: '外部投诉', short: '外诉', color: '#c0392b', fallback_s: r.sp_waibu, fallback_p: r.pp_waibu ?? 0 },
   ]
   // 头部: 人员+岗位+分组+专项
   const headerHtml = `
@@ -1590,8 +1630,8 @@ function scoreTooltipHtml(r, mode) {
       </div>
     </div>`
   // 系数规则小提示
-  const coefHtml = `<div class="stp-coef">难度系数: 咨询×1.0 · 套餐×1.8 · 退款×2.0 · 退款挽回×2.2 · 内部投诉×3.0 · 外部投诉×5.0 · 转接=固定×${xfer}</div>`
-  // 四专项明细行
+  const coefHtml = `<div class="stp-coef">难度系数: 咨询×1.0 · 套餐×1.8 · 挽回×2.2 · 退款×2.0 · 内诉×3.0 · 外诉×5.0 · 转接=固定×${xfer}</div>`
+  // 六专项明细行
   let total = 0
   const rowsHtml = CATS.map(c => {
     let n, coef, contrib, isOwn = true
@@ -1918,7 +1958,7 @@ onMounted(() => {
   opacity: 0.92;
 }
 
-/* 模块7 四专项明细胶囊 (zx咨询/tc套餐/tk退款/ts投诉) */
+/* 模块7 六专项明细胶囊 (zx咨询/tc套餐/wh挽回/tk退款/ni内诉/wa外诉) */
 .sp-legend { display: flex; flex-wrap: wrap; gap: 4px 6px; line-height: 1.35; }
 .sp-chip {
   display: inline-flex; align-items: center;
@@ -1928,15 +1968,19 @@ onMounted(() => {
 }
 .sp-chip.zx { background: #ecf5ff; color: #409eff; border-color: #d9ecff; }
 .sp-chip.tc { background: #f0f9eb; color: #67c23a; border-color: #e1f3d8; }
+.sp-chip.wh { background: #fef3e2; color: #e67e22; border-color: #fde2c0; }
 .sp-chip.tk { background: #fdf6ec; color: #e6a23c; border-color: #faecd8; }
-.sp-chip.ts { background: #fef0f0; color: #f56c6c; border-color: #fde2e2; }
+.sp-chip.ni { background: #fef0f0; color: #e74c3c; border-color: #fde2e2; }
+.sp-chip.wa { background: #fdecea; color: #c0392b; border-color: #f9cdc7; }
 
-/* 模块7 四专项列 极简显示: n次(m个) */
+/* 模块7 六专项列 极简显示: n次(m个) */
 .sp-txt { font-size: 12.5px; font-weight: 500; letter-spacing: -0.2px; line-height: 1.6; }
 .sp-txt.zx { color: #409eff; }
 .sp-txt.tc { color: #67c23a; }
-.sp-txt.tk { color: #e6a23c; }
-.sp-txt.ts { color: #f56c6c; }
+.sp-txt.wh { color: #e67e22; }   /* 退款挽回 橙色 */
+.sp-txt.tk { color: #e6a23c; }   /* 退款处理 浅橙 */
+.sp-txt.ni { color: #e74c3c; }   /* 内部投诉 红色 */
+.sp-txt.wa { color: #c0392b; }   /* 外部投诉 深红 */
 .sp-txt-p { color: #2563eb; font-weight: 600; }   /* 括号内SN个数 蓝色略粗一点 视觉一眼分清 */
 /* 0次(0个) 弱化: 灰字 看起来不占视线 */
 .sp-txt.sp-zero { color: #c0c4cc; font-weight: 400; }

@@ -286,13 +286,16 @@
           <el-tooltip effect="light" placement="top" :show-arrow="false" popper-class="score-pop" teleported>
             <template #content>
               <div style="max-width:480px; line-height:1.9; font-size:12px; color:#4b5563;">
-                <div style="font-weight:600; color:#1f2937; margin-bottom:6px">【退款挽回 新口径 2026-08-04】</div>
-                <div>① 总接待SN(分母): 退款专项组 (叶珍凤组 / 朱海洋组 或 HR专项=退款挽回) 人员在周期内, 接待 problem_category='退款' AND problem_type IN(不想用了/充值错误/设备故障/服务原因) 4类真退款问题的去重 device_sn → 排除原「网络问题」「其他」7464条错标</div>
-                <div>② 挽留失败(分子): 分母SN中, 在 [start, end+7天] T+7 宽限窗口内 出现在 refunds线上退款单 或 service_tickets(service_category=退款)中的 SN → 防止接待后才走完退款审批的SN被误判为成功</div>
-                <div>③ 挽留成功: 分母SN - 失败SN → 被客服沟通拦截下来, 最终没走到退款流程</div>
-                <div>④ 成功率 = 挽留成功 / 总接待SN</div>
+                <div style="font-weight:600; color:#1f2937; margin-bottom:6px">【退款挽回 新口径 2026-08-11】</div>
+                <div>① 总接待SN(分母): 所有人员(专职退款挽回专员+组长/主管+其他岗位)在周期内, 接待 problem_category='退款' 的去重 device_sn (所有退款理由均计入, 包含网络问题/其他等; 不限制problem_type)</div>
+                <div>② <b>专职判定:</b> 退款挽回专员 = Person.specialty='退款挽回' (与分组无关, 同一组如朱海洋组内既有套餐专项也有退款挽回专项, 按人员维表specialty判定)</div>
+                <div>③ <b>非专职挽回:</b> 任何人员(含组长/主管)接待退款类SN但最终未产生退款行为(refunds表退款/退款类工单) → 也算挽回成功</div>
+                <div>④ 挽留失败(分子): 分母SN中, 在 [最早接待时间, 最早接待时间+7天] T+7 宽限窗口内 出现在 refunds线上退款单(非驳回/无需退款) 或 service_tickets(service_category=退款,非终止)中的 SN → 防止接待后才走完退款审批的SN被误判为成功</div>
+                <div>⑤ 挽留成功: 分母SN - 失败SN → 被客服沟通拦截下来, 最终没走到退款流程</div>
+                <div>⑥ 成功率 = 挽留成功 / 总接待SN</div>
                 <div style="margin-top:6px;padding-top:6px;border-top:1px dashed #e5e7eb">
                   <b>移除项:</b> 原规则「组长/主管接待SN强制失败」用户已确认移除(2026-08-04).<br/>
+                  <b>分组≠专项:</b> 分组(group_name)是行政/管理维度, 专项(specialty)是业务内容维度, 两者无必然关联, 一律按Person.specialty判定本职/转接.<br/>
                   <b>费占比:</b> 单量口径=成功单数/(成功单数+实际退款单数(失败+退充)) · 参考目标 37%+<br/>
                   <b>今日视图:</b> 顶部Tab切到「今日视图」查看 KPI + 小时趋势 + 近7日日趋势
                 </div>
