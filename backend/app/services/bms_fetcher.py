@@ -245,7 +245,14 @@ async def _download_with_retry(
                 await asyncio.sleep(2)
             logger_obj.info("[%s] [%d/%d] 注册 download 事件监听(timeout=%ds)...",
                             data_type, attempt + 1, max_retries + 1, timeout_ms // 1000)
-            download_promise = page.wait_for_event("download", timeout=timeout_ms)
+            # ⚠️ 2026-08-12 修复: 将协程转为 Task 一次,后续 asyncio.shield(Task) 只是对
+            #   Future 包壳,不会重复 ensure_future(coro) → 避免 "cannot reuse already
+            #   awaited coroutine" 错误(此前 download_promise 是裸协程,每轮 poll 的
+            #   shield(download_promise) 都试图为新协程建 Task,已运行的协程报错,
+            #   产生 146 条 "Task exception was never retrieved" 噪音并导致 download 等待异常)
+            download_task = asyncio.ensure_future(
+                page.wait_for_event("download", timeout=timeout_ms)
+            )
 
             # ★ 监听 export 响应:如果返回 JSON(限流),提前抛错触发重试
             export_rate_limited = {"hit": False, "msg": ""}
@@ -276,23 +283,27 @@ async def _download_with_retry(
                             data_type, attempt + 1, max_retries + 1)
 
             # 轮询等待 download 事件,同时检测限流响应
+            # ⚠️ shield(download_task) 传入的是 Task(Future),ensure_future 直接返回它,
+            #   不会尝试再次创建 Task → 可安全反复调用
             download = None
             poll_start = asyncio.get_event_loop().time()
             while True:
                 # 检查限流
                 if export_rate_limited["hit"]:
                     page.remove_listener("response", _on_response)
+                    download_task.cancel()
                     raise RuntimeError(
                         f"BMS 导出返回 JSON(疑似限流或异常): {export_rate_limited['msg']}"
                     )
                 # 检查 download 事件是否已触发(非阻塞)
                 try:
-                    download = await asyncio.wait_for(asyncio.shield(download_promise), timeout=2.0)
+                    download = await asyncio.wait_for(asyncio.shield(download_task), timeout=2.0)
                     break
                 except asyncio.TimeoutError:
                     # 2 秒内没触发,继续轮询(只要总时间没超 timeout_ms)
                     elapsed = asyncio.get_event_loop().time() - poll_start
                     if elapsed * 1000 > timeout_ms:
+                        download_task.cancel()
                         raise RuntimeError(f"等待 download 事件超时({int(elapsed)}s)")
                     continue
 
@@ -303,6 +314,16 @@ async def _download_with_retry(
             )
             return download
         except Exception as e:
+            # ⚠️ 清理:移除 response listener + 取消残留 download_task,避免泄漏
+            try:
+                page.remove_listener("response", _on_response)
+            except Exception:
+                pass
+            try:
+                if not download_task.done():
+                    download_task.cancel()
+            except Exception:
+                pass
             last_exc = e
             err_msg = str(e)
             # 如果是被限流,等待 60 秒再重试(BMS 限流窗口是 1 分钟)
@@ -403,14 +424,18 @@ async def _locate_captcha_element(page) -> tuple[object | None, bytes | None]:
 
 async def _fill_accounts(page, username: str, password: str) -> None:
     """统一的账号密码填写逻辑(与 _captcha_do_fill_and_login 保持一致)"""
+    # ⚠️ 2026-08-12: 排除 readonly el-select 内部 input,避免命中"请选择"下拉框
     user_sel = (
-        'input[type="text"], input[placeholder*="账号" i],'
-        ' input[placeholder*="用户名" i], input[placeholder*="手机号" i]'
+        'input[name="username"]:not([readonly]):not([disabled]),'
+        'input[placeholder*="账号" i]:not([readonly]):not([disabled]),'
+        ' input[placeholder*="用户名" i]:not([readonly]):not([disabled]),'
+        ' input[placeholder*="手机号" i]:not([readonly]):not([disabled]),'
+        ' input[type="text"]:not([readonly]):not([disabled])'
     )
     try:
         await page.locator(user_sel).first.fill(username, timeout=10000)
     except Exception:
-        await page.locator("input:visible").first.fill(username, timeout=10000)
+        await page.locator("input:visible:not([readonly]):not([disabled])").first.fill(username, timeout=10000)
     pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
     await page.locator(pwd_sel).first.fill(password, timeout=10000)
 
@@ -431,8 +456,9 @@ async def _fill_captcha_and_click(page, captcha: str) -> None:
             cap_inp = loc
     except Exception:
         # 兜底: 找第三个可见 input(账号/密码/验证码顺序)
+        # ⚠️ 2026-08-12: 排除 readonly,避免把 el-select 下拉框算进去导致索引错位
         try:
-            vis = page.locator("input:visible")
+            vis = page.locator("input:visible:not([readonly]):not([disabled])")
             if await vis.count() >= 3:
                 nth = vis.nth(2)
                 await nth.fill(captcha, timeout=5000)
@@ -778,7 +804,12 @@ async def _try_auto_login_via_ocr(
                 # 点刷新验证码通常会清空验证码输入框,账号密码一般还在;
                 # 保险起见,如果账号密码框是空的就再填一次(比如某些系统清整个 form)
                 try:
-                    u_sel = 'input[type="text"], input[placeholder*="账号" i], input[placeholder*="用户名" i]'
+                    u_sel = (
+                        'input[name="username"]:not([readonly]):not([disabled]),'
+                        'input[placeholder*="账号" i]:not([readonly]):not([disabled]),'
+                        'input[placeholder*="用户名" i]:not([readonly]):not([disabled]),'
+                        'input[type="text"]:not([readonly]):not([disabled])'
+                    )
                     p_sel = 'input[type="password"], input[placeholder*="密码" i]'
                     uval = await page.locator(u_sel).first.input_value(timeout=1500)
                     pval = await page.locator(p_sel).first.input_value(timeout=1500)
@@ -1051,6 +1082,10 @@ class FetchResult:
         self.filename = filename
         self.total_rows = total_rows
         self.error = error
+        # ⚠️ 2026-08-12: 标记本源是否已完成登录(即使后续下载超时/失败,登录态仍可复用)
+        #   解决: refund 登录成功但下载超时 → logged_in_ok 未传递 → ticket 在残留的
+        #   refund 页面上"重新登录" → 命中 readonly el-select → 全组连锁失败
+        self.logged_in: bool = False
 
 
 class BmsFetcher:
@@ -1837,18 +1872,32 @@ class BmsFetcher:
                 # storage_state 不存在或已过期,走登录流程
                 # 1. 登录
                 logger.info(f"[{data_type}] 正在登录 {base_url}...")
-                await page.goto(login_url, wait_until="networkidle")
-                await asyncio.sleep(2)
+                # ⚠️ 2026-08-12: SPA hash 路由跳转时 networkidle 立即 resolve,改用
+                #   domcontentloaded + 显式等待登录表单渲染(同 _do_fetch_one_shared 修复)
+                await page.goto(login_url, wait_until="domcontentloaded")
+                try:
+                    await page.wait_for_selector(
+                        'input[name="username"], input[placeholder*="账号" i], input[placeholder*="用户名" i]',
+                        state="visible", timeout=10000,
+                    )
+                except Exception:
+                    await asyncio.sleep(2)
 
                 # ⚠️ 必须用 locator(...).first.fill(), 不能直接 page.fill(选择器字符串列表).
                 #    当页面有多个匹配元素时(比如顶部导航搜索框 + 登录表单账号框),page.fill() 会在
                 #    "ambiguous match" 分支下一直等到 30 秒超时,表现为 Page.fill Timeout 而没有
                 #    报错根因,用户侧只看到"登录死/抓取死".用 .first 可以稳扎稳打取第一个表单里的元素.
-                user_sel = 'input[type="text"], input[placeholder*="账号" i], input[placeholder*="用户名" i]'
+                # ⚠️ 2026-08-12: 排除 readonly el-select 内部 input,避免命中"请选择"下拉框
+                user_sel = (
+                    'input[name="username"]:not([readonly]):not([disabled]),'
+                    'input[placeholder*="账号" i]:not([readonly]):not([disabled]),'
+                    'input[placeholder*="用户名" i]:not([readonly]):not([disabled]),'
+                    'input[type="text"]:not([readonly]):not([disabled])'
+                )
                 try:
                     await page.locator(user_sel).first.fill(username, timeout=15000)
                 except Exception:
-                    await page.locator("input:visible").first.fill(username, timeout=15000)
+                    await page.locator("input:visible:not([readonly]):not([disabled])").first.fill(username, timeout=15000)
                 pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
                 await page.locator(pwd_sel).first.fill(password, timeout=15000)
 
@@ -1897,6 +1946,9 @@ class BmsFetcher:
                 logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")
                 await page.goto(page_url, wait_until="networkidle")
                 await asyncio.sleep(3)
+
+            # ⚠️ 2026-08-12: 标记登录已完成(无论 storage_state 有效还是刚登录成功)
+            result.logged_in = True
 
             # 3. 设置时间范围
             time_format = config.get("time_format", "%Y-%m-%d %H:%M:%S")
@@ -2481,6 +2533,12 @@ class BmsFetcher:
                     except asyncio.TimeoutError:
                         fr.error = f"抓取超时({_fetch_timeout}秒): {config.get('name', data_type)}"
                         logger.error(fr.error)
+                        # ⚠️ 2026-08-12: 即使下载超时,登录可能已成功 → 标记登录态供后续源复用
+                        #   此前: refund 登录成功但下载超时 → logged_in_ok 未传递 → ticket
+                        #   在 refund 残留页面上"重新登录" → 命中 readonly 下拉框 → 全组连锁失败
+                        if fr.logged_in:
+                            logged_in_ok = True
+                            logger.info(f"[组{group_idx+1}] {data_type} 虽超时但登录已完成,后续源复用登录态")
                     except Exception as e:
                         fr.error = f"抓取失败: {e}"
                         logger.error(fr.error, exc_info=True)
@@ -2496,8 +2554,10 @@ class BmsFetcher:
                                 group_idx + 1, data_type, group_login_failed_err,
                                 max(0, len(group_tasks) - i - 1),
                             )
-                        # 虽然 logged_in_ok 仍是 False,但若 group_login_failed_err 有值,
-                        # 下一轮循环开头就会直接跳过,不会再进入 _do_fetch_one_shared 再登录一遍。
+                        # ⚠️ 2026-08-12: 非登录类错误(如下载/设置时间失败)发生在登录之后,
+                        #   登录态仍可复用,避免后续源在残留页面上"重新登录"
+                        if fr.logged_in and not group_login_failed_err:
+                            logged_in_ok = True
 
                     results_map[data_type] = fr
                     if on_progress:
@@ -2584,15 +2644,34 @@ class BmsFetcher:
             if not via_state:
                 # 组内首个源: 登录
                 logger.info(f"[{data_type}] (首次,登录) 正在登录 {base_url}...")
-                await page.goto(login_url, wait_until="networkidle")
-                await asyncio.sleep(2)
+                # ⚠️ 2026-08-12: SPA hash 路由(如 #/pay/refund-manage → #/login)变化时,
+                #   wait_until="networkidle" 会立即 resolve(无新网络请求),但 SPA 视图
+                #   可能尚未切换 → 登录表单未渲染 → input:visible.first 命中上一页的
+                #   readonly el-select 筛选下拉框(placeholder="请选择") → fill 超时。
+                #   修复: 用 domcontentloaded + 显式等待登录表单的 username 输入框出现。
+                await page.goto(login_url, wait_until="domcontentloaded")
+                # 显式等待登录表单的账号输入框出现(确认 SPA 已切换到 login 视图)
+                try:
+                    await page.wait_for_selector(
+                        'input[name="username"], input[placeholder*="账号" i], input[placeholder*="用户名" i]',
+                        state="visible", timeout=10000,
+                    )
+                except Exception:
+                    # 兜底: 如果选择器没命中,等 2s 让 SPA 完成渲染
+                    await asyncio.sleep(2)
 
-                # ⚠️ 同上, locator(...).first.fill(), 避免多元素匹配导致 30 秒死等
-                user_sel = 'input[type="text"], input[placeholder*="账号" i], input[placeholder*="用户名" i]'
+                # ⚠️ 选择器排除 readonly: el-select 下拉框内部 input 是 type="text" + readonly,
+                #   此前 input[type="text"] 会优先命中它 → fill "element is not editable" 超时
+                user_sel = (
+                    'input[name="username"]:not([readonly]):not([disabled]),'
+                    'input[placeholder*="账号" i]:not([readonly]):not([disabled]),'
+                    'input[placeholder*="用户名" i]:not([readonly]):not([disabled]),'
+                    'input[type="text"]:not([readonly]):not([disabled])'
+                )
                 try:
                     await page.locator(user_sel).first.fill(username, timeout=15000)
                 except Exception:
-                    await page.locator("input:visible").first.fill(username, timeout=15000)
+                    await page.locator("input:visible:not([readonly]):not([disabled])").first.fill(username, timeout=15000)
                 pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
                 await page.locator(pwd_sel).first.fill(password, timeout=15000)
 
@@ -2638,6 +2717,10 @@ class BmsFetcher:
         else:
             # 复用登录态: 不重新登录,直接跳页
             logger.info(f"[{data_type}] 复用登录态,直接跳转目标页")
+
+        # ⚠️ 2026-08-12: 标记登录已完成 — 即使后续下载超时被 asyncio.wait_for 取消,
+        #   此标记已写入 result,调用方可据此让同组后续源复用登录态,避免在残留页面上"重新登录"
+        result.logged_in = True
 
         # 2. 进入目标页面
         logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")

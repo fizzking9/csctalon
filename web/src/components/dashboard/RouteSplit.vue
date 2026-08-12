@@ -12,7 +12,7 @@
             <div>A. 退费单管理 → refund_method='线上'</div>
             <div>B. 钱包提现记录 → op_type='用户提现'</div>
             <div>C. 闪猫退款 → 独立业务表 (shanmao_refunds, status=已退款 计入)</div>
-            <div>D. 其他退款 → 独立业务表 (other_refund, 未建表=0, 建表自动并入)</div>
+            <div>D. 其他退款 → 暂无数据 (=0)</div>
             <hr style="margin:8px 0; opacity:.3">
             <div style="font-weight:600; color:#409eff">经营估算 = A + B + C + D</div>
             <div style="font-weight:600; color:#f56c6c">实际现金流 (对账基准) = merchant_refunds SUCCESS 合计</div>

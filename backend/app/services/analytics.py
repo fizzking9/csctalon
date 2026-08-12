@@ -203,18 +203,16 @@ def operation_method_dist(db: Session) -> list[dict]:
 # │   sys/system 操作(钱包内部转)仍按 refund_method 字段保留,不做人工剔除           │
 # │ B. 钱包-用户取现    wallet_withdrawals 表 WHERE op_type = '用户提现'           │
 # │   (钱从钱包真实提出到用户银行卡,构成现金流)                                    │
-# │ C. 闪猫退款         shenmao_refund 独立业务表 (data_sources.code=shenmao_refund)│
-# │   物理表占位名 _placeholder_shenmao_refund(建表后代码零改动, 自动读新表)       │
-# │   当前表未建 → 读 0; 建表成功后按约定状态(如 refund_status='SUCCESS')聚合      │
-# │ D. 其他退款         other_refund 独立业务表 (data_sources.code=other_refund)   │
-# │   物理表占位名 _placeholder_other_refund (同C,建表后自动生效)                  │
-# │   当前表未建 → 读 0                                                           │
+# │ C. 闪猫退款         shanmao_refunds 独立业务表 (data_sources.code=shanmao_refund)│
+# │   已建表有数据,按 status='已退款' + audit_time 聚合                            │
+# │ D. 其他退款         other_refund (规划中,物理表未建)                           │
+# │   占位表名 _placeholder_other_refund,表不存在时 _table_exists 检查跳过返回 0   │
 # ├─────────────────── 实际现金流 (财务侧,微信商户号真实扣款,独立第五张表) ──────────┤
 # │ E. 商户号现金流     merchant_refunds 表 WHERE refund_status = 'SUCCESS'       │
 # │   不区分 refund_type 字段 (ORIGINAL+BALANCE 全部合计,不分桶C/D)               │
 # │   (data_sources.code=merchant_refund, name_cn="商户号现金流" = 对账基准)      │
 # ├─────────────────── 合计口径 ───────────────────────────────────────────────────┤
-# │ 经营估算 (经营侧四路总登记出款) = A + B + C + D  (C/D建表后自动并入)           │
+# │ 经营估算 (经营侧四路总登记出款) = A + B + C + D  (D未建表时 = 0)              │
 # │ 实际现金流 (财务侧商户号真扣) = E  (merchant_refunds SUCCESS 合计)            │
 # │ 对账偏差 = 经营估算 − 实际现金流 = (A+B+C+D) − E                               │
 # │                                                                                │
@@ -222,7 +220,7 @@ def operation_method_dist(db: Session) -> list[dict]:
 # │   "今日退款笔数/金额" = 路线 A  (退费单线上直退, 业务退款口径)                 │
 # │   "真实现金流出 / 现金流出" = A+B+C+D (经营侧四路出款估算)                     │
 # │   "商户号实际现金流" = E (merchant_refunds SUCCESS,对账基准)                  │
-# │   "对账偏差" = 经营估算 − 实际现金流 (C/D未建表时临时 = A+B − E)              │
+# │   "对账偏差" = 经营估算 − 实际现金流 (D未建表时 = A+B+C − E)                  │
 # └────────────────────────────────────────────────────────────────────────────────┘
 #
 # 【v2 → v3 改动】(2026-08-02,用户明确纠正):
@@ -254,6 +252,31 @@ _C_SHANMAO_TIME_COL = "audit_time"
 _C_SHANMAO_STATUS_COL = "status"
 _C_SHANMAO_STATUS_OK = "已退款"
 
+# 表存在性缓存: {table_name: (exists, checked_at_monotonic)}
+# 避免反复查询不存在的占位表(如 _placeholder_other_refund)导致 PG 日志刷屏 ERROR。
+# to_regclass() 查不到返回 NULL,不会产生 ERROR 日志;缓存 10 分钟,建表后自动生效。
+_table_exists_cache: dict[str, tuple[bool, float]] = {}
+_TABLE_EXISTS_RECHECK_SEC = 600.0
+
+def _table_exists(db: Session, table_name: str) -> bool:
+    """检查物理表是否存在(带缓存,用 to_regclass 避免 PG ERROR 日志刷屏)"""
+    import time as _t
+    now = _t.monotonic()
+    cached = _table_exists_cache.get(table_name)
+    if cached:
+        exists, checked_at = cached
+        # 已确认存在 → 永久缓存; 不存在 → 10 分钟内跳过重查
+        if exists or (now - checked_at) < _TABLE_EXISTS_RECHECK_SEC:
+            return exists
+    try:
+        with db.begin_nested():
+            oid = db.execute(text("SELECT to_regclass(:t)"), {"t": table_name}).scalar()
+        exists = oid is not None
+    except Exception:
+        exists = False
+    _table_exists_cache[table_name] = (exists, now)
+    return exists
+
 def _route_c_shanmao_agg(db: Session, start, end) -> tuple[int, float]:
     """【路线C】闪猫退款独立表聚合 (表不存在则返回 0,0,不报错).
 
@@ -261,6 +284,8 @@ def _route_c_shanmao_agg(db: Session, start, end) -> tuple[int, float]:
     即使 Python 层 except 吞异常，后续 SQL 也会被 PG 拒绝。
     必须用 savepoint (begin_nested) 隔离，失败只回滚子事务。
     """
+    if not _table_exists(db, _C_SHANMAO_TABLE):
+        return 0, 0.0
     sql_tpl = f"""
     SELECT COUNT(*) AS cnt,
            COALESCE(SUM({_C_SHANMAO_AMOUNT_COL})::numeric,0) AS amt
@@ -297,6 +322,8 @@ def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
 
     同 _route_c_shanmao_agg: 必须用 savepoint 隔离 PG 事务失败状态。
     """
+    if not _table_exists(db, _D_OTHER_TABLE):
+        return 0, 0.0
     sql_tpl = f"""
     SELECT COUNT(*) AS cnt,
            COALESCE(SUM({_D_OTHER_AMOUNT_COL})::numeric,0) AS amt
@@ -323,6 +350,8 @@ def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
 # ---------- 路线C/D 按时间粒度分组聚合 (小时/日) ----------
 def _route_c_shanmao_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tuple[dict[int, int], dict[int, float]]:
     """【路线C】闪猫退款按时间分组聚合 (表不存在则返回空map)."""
+    if not _table_exists(db, _C_SHANMAO_TABLE):
+        return {}, {}
     trunc_expr = "date_trunc(:grain, timezone('Asia/Shanghai', " + _C_SHANMAO_TIME_COL + "))" if grain == "hour" else "date_trunc(:grain, timezone('Asia/Shanghai', " + _C_SHANMAO_TIME_COL + "))"
     sql_tpl = f"""
     SELECT {trunc_expr} AS trunc_t,
@@ -363,6 +392,8 @@ def _route_c_shanmao_trend(db: Session, start, end, grain: str, slot_idx_fn) -> 
 
 def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tuple[dict[int, int], dict[int, float]]:
     """【路线D】其他退款按时间分组聚合 (表不存在则返回空map)."""
+    if not _table_exists(db, _D_OTHER_TABLE):
+        return {}, {}
     trunc_expr = "date_trunc(:grain, timezone('Asia/Shanghai', " + _D_OTHER_TIME_COL + "))"
     sql_tpl = f"""
     SELECT {trunc_expr} AS trunc_t,
@@ -543,44 +574,46 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
     withdraw_map = {r.date: {"amount": float(r.amount or 0), "count": r.count} for r in withdraw_rows}
     # ── C 闪猫退款按日 (独立表 shenmao_refund 占位, 表不存在→空map) ──
     shanmao_map: dict[str, dict] = {}
-    try:
-        with db.begin_nested():
-            sm_rows = db.execute(text(f"""
-            SELECT to_char({_C_SHANMAO_TIME_COL}, 'YYYY-MM-DD') AS date,
-                   COUNT(*) AS cnt,
-                   COALESCE(SUM({_C_SHANMAO_AMOUNT_COL})::numeric,0) AS amt
-            FROM {_C_SHANMAO_TABLE}
-            WHERE {_C_SHANMAO_TIME_COL} IS NOT NULL
-              {'AND ' + _C_SHANMAO_STATUS_COL + ' = :st' if _C_SHANMAO_STATUS_COL else ''}
-              AND {_C_SHANMAO_TIME_COL} >= :s AND {_C_SHANMAO_TIME_COL} <= :e
-            GROUP BY 1
-            """), {
-                **({"st": _C_SHANMAO_STATUS_OK} if _C_SHANMAO_STATUS_COL else {}),
-                "s": s, "e": e,
-            }).all()
-        shanmao_map = {r[0]: {"amount": float(r[2] or 0), "count": int(r[1] or 0)} for r in sm_rows}
-    except Exception:
-        pass   # 表未建 → 空 (savepoint 已隔离 PG 事务失败状态)
+    if _table_exists(db, _C_SHANMAO_TABLE):
+        try:
+            with db.begin_nested():
+                sm_rows = db.execute(text(f"""
+                SELECT to_char({_C_SHANMAO_TIME_COL}, 'YYYY-MM-DD') AS date,
+                       COUNT(*) AS cnt,
+                       COALESCE(SUM({_C_SHANMAO_AMOUNT_COL})::numeric,0) AS amt
+                FROM {_C_SHANMAO_TABLE}
+                WHERE {_C_SHANMAO_TIME_COL} IS NOT NULL
+                  {'AND ' + _C_SHANMAO_STATUS_COL + ' = :st' if _C_SHANMAO_STATUS_COL else ''}
+                  AND {_C_SHANMAO_TIME_COL} >= :s AND {_C_SHANMAO_TIME_COL} <= :e
+                GROUP BY 1
+                """), {
+                    **({"st": _C_SHANMAO_STATUS_OK} if _C_SHANMAO_STATUS_COL else {}),
+                    "s": s, "e": e,
+                }).all()
+            shanmao_map = {r[0]: {"amount": float(r[2] or 0), "count": int(r[1] or 0)} for r in sm_rows}
+        except Exception:
+            pass   # 表未建 → 空 (savepoint 已隔离 PG 事务失败状态)
     # ── D 其他退款按日 (独立表 other_refund 占位) ──
     other_map: dict[str, dict] = {}
-    try:
-        with db.begin_nested():
-            ot_rows = db.execute(text(f"""
-            SELECT to_char({_D_OTHER_TIME_COL}, 'YYYY-MM-DD') AS date,
-                   COUNT(*) AS cnt,
-                   COALESCE(SUM({_D_OTHER_AMOUNT_COL})::numeric,0) AS amt
-            FROM {_D_OTHER_TABLE}
-            WHERE {_D_OTHER_TIME_COL} IS NOT NULL
-              {'AND ' + _D_OTHER_STATUS_COL + ' = :st' if _D_OTHER_STATUS_COL else ''}
-              AND {_D_OTHER_TIME_COL} >= :s AND {_D_OTHER_TIME_COL} <= :e
-            GROUP BY 1
-            """), {
-                **({"st": _D_OTHER_STATUS_OK} if _D_OTHER_STATUS_COL else {}),
-                "s": s, "e": e,
-            }).all()
-        other_map = {r[0]: {"amount": float(r[2] or 0), "count": int(r[1] or 0)} for r in ot_rows}
-    except Exception:
-        pass
+    if _table_exists(db, _D_OTHER_TABLE):
+        try:
+            with db.begin_nested():
+                ot_rows = db.execute(text(f"""
+                SELECT to_char({_D_OTHER_TIME_COL}, 'YYYY-MM-DD') AS date,
+                       COUNT(*) AS cnt,
+                       COALESCE(SUM({_D_OTHER_AMOUNT_COL})::numeric,0) AS amt
+                FROM {_D_OTHER_TABLE}
+                WHERE {_D_OTHER_TIME_COL} IS NOT NULL
+                  {'AND ' + _D_OTHER_STATUS_COL + ' = :st' if _D_OTHER_STATUS_COL else ''}
+                  AND {_D_OTHER_TIME_COL} >= :s AND {_D_OTHER_TIME_COL} <= :e
+                GROUP BY 1
+                """), {
+                    **({"st": _D_OTHER_STATUS_OK} if _D_OTHER_STATUS_COL else {}),
+                    "s": s, "e": e,
+                }).all()
+            other_map = {r[0]: {"amount": float(r[2] or 0), "count": int(r[1] or 0)} for r in ot_rows}
+        except Exception:
+            pass
     # ── E 实际现金流按日 (merchant_refunds.SUCCESS 合计, 不分 refund_type 桶) ──
     actual_rows = db.execute(
         select(
