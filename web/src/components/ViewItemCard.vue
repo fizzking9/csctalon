@@ -35,12 +35,13 @@
       >
         <el-table-column
           v-for="col in displayResult.data.columns"
-          :key="col"
-          :prop="col"
-          :label="col"
+          :key="col.field || col"
+          :prop="col.field || col"
+          :label="col.title || col"
+          :width="col.width"
           show-overflow-tooltip
         >
-          <template #default="{ row }">{{ fmtVal(row[col], col) }}</template>
+          <template #default="{ row }">{{ fmtVal(row[col.field || col], col.field || col) }}</template>
         </el-table-column>
       </el-table>
     </div>
@@ -123,31 +124,61 @@ const chartOption = computed(() => {
       }],
     }
   }
+  // 通用柱/线:支持 handler 自定义 yAxis(数组=双Y轴)、orientation=horizontal 横向柱
+  const isHorizontal = data.orientation === 'horizontal'
+  const customYAxis = data.yAxis
+  const categoryAxis = {
+    type: 'category',
+    data: data.x_axis || [],
+    axisLabel: { rotate: (data.x_axis?.length > 15 && !isHorizontal) ? 30 : 0 },
+  }
+  const defaultValueAxis = { type: 'value' }
+  let xAxis, yAxis
+  if (isHorizontal) {
+    // 横向柱:类目轴在Y,数值轴在X(支持数组=双数值轴)
+    yAxis = categoryAxis
+    xAxis = Array.isArray(customYAxis) ? customYAxis : (customYAxis || defaultValueAxis)
+  } else {
+    xAxis = categoryAxis
+    yAxis = Array.isArray(customYAxis) ? customYAxis : (customYAxis || defaultValueAxis)
+  }
+  const series = (data.series || []).map((s) => {
+    const t = s.type || s.series_type || r.chart_type
+    // 横向模式: yAxisIndex 语义映射为 xAxisIndex (数值轴在X)
+    const axisIdxKey = isHorizontal ? 'xAxisIndex' : 'yAxisIndex'
+    const opt = {
+      name: s.name,
+      type: t,
+      data: s.data,
+      ...(t === 'line' && s.smooth !== false ? { smooth: true } : {}),
+      ...(s.yAxisIndex != null ? { [axisIdxKey]: s.yAxisIndex } : {}),
+      ...(s.stack ? { stack: s.stack } : {}),
+      ...(s.itemStyle ? { itemStyle: s.itemStyle } : {}),
+      ...(s.lineStyle ? { lineStyle: s.lineStyle } : {}),
+      ...(s.barMaxWidth ? { barMaxWidth: s.barMaxWidth } : {}),
+      ...(s.label ? { label: s.label } : {}),
+      ...(s.symbolSize ? { symbolSize: s.symbolSize } : {}),
+    }
+    return opt
+  })
   return {
     tooltip: {
       trigger: 'axis',
+      axisPointer: { type: isHorizontal ? 'shadow' : 'cross' },
       formatter: (params) => {
         const lines = [params[0]?.axisValue || '']
         params.forEach((p) => {
-          lines.push(`${p.marker} ${p.seriesName}: ${Number(p.value).toFixed(2)}`)
+          const v = Number(p.value)
+          lines.push(`${p.marker} ${p.seriesName}: ${Number.isNaN(v) ? p.value : v.toFixed(2)}`)
         })
         return lines.join('<br/>')
       },
     },
-    legend: { data: data.series?.map((s) => s.name) || [] },
-    grid: { left: 60, right: 30, bottom: 40, top: 40 },
-    xAxis: { type: 'category', data: data.x_axis || [], axisLabel: { rotate: data.x_axis?.length > 15 ? 30 : 0 } },
-    yAxis: { type: 'value' },
-    series: (data.series || []).map((s) => {
-      const t = s.series_type || r.chart_type
-      return {
-        name: s.name,
-        type: t,
-        smooth: t === 'line',
-        data: s.data,
-        ...(s.stack ? { stack: s.stack } : {}),
-      }
-    }),
+    legend: { data: data.series?.map((s) => s.name) || data.legend?.data || [], top: 0, type: 'scroll' },
+    grid: { left: isHorizontal ? 120 : 60, right: 60, bottom: 40, top: 36 },
+    xAxis,
+    yAxis,
+    series,
   }
 })
 
@@ -155,6 +186,7 @@ function fmtVal(v, col) {
   if (v == null) return '-'
   if (typeof v === 'number') {
     if (col && percentAliases.value.has(col)) return `${v.toFixed(2)}%`
+    if (Number.isInteger(v)) return v.toLocaleString('zh-CN')
     return v.toFixed(2)
   }
   return v

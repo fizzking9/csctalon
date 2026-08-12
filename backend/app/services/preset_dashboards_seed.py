@@ -15,38 +15,31 @@ from app.models.dashboard import Dashboard
 
 # 4 个常规预设看板:items 引用 preset_views_seed 中的 view_code
 PRESET_DASHBOARDS: list[dict] = [
-    # ---------- 退款看板(17 视图: 5 催单风险预测 + 5 退款挽回分析 + 7 现金流 v2 基础) ----------
-    # 前 5 个=2026-08-03 新增的"预测性退款参考因素"模块(催单风险分析);
-    # 中 5 个=2026-08-04 新增"退款挽回分析"模块(成功率/日趋势/今日小时/人员排名/失败原因);
-    # 后 7 个=原有的现金流/审核人/池子/原因/方式/日记录/时序
+    # ---------- 退款看板(13 视图: 7 退款挽回分析 + 6 现金流/基础) ----------
+    # 2026-08-12 重构: 移除催单风险5视图(无参考意义)+退费状态饼+退款方式占比;
+    # 新增原因三分布(退款意愿/挽留失败/挽回成功);审核人/原因TOP改横向双柱(金额+单数)
     {
         "code": "preset_dashboard_refund",
         "name": "退款看板",
-        "description": "【催单风险】KPI/分桶/人员/TOP50;【退款挽回】成功率新口径(KPI/日趋势/今日小时/人员排名/失败原因);【现金流】趋势/审核/池子/原因/方式/日记录/时序",
+        "description": "【退款挽回】KPI/日趋势/今日小时/人员排名/原因三分布(意愿·失败·成功);【现金流】趋势/审核人(金额+单数)/池子水位/原因TOP10/日记录/提现时序",
         "category": "退款",
         "items": [
-            # ── 催单风险 (预测性退款参考) ──
-            {"view_code": "preset_refund_urge_kpi", "span": 24, "title": "退款催单风险 KPI(当前快照)"},
-            {"view_code": "preset_refund_urge_bucket", "span": 12, "title": "催单次数分桶 工单数(柱) + 预估金额(线)"},
-            {"view_code": "preset_refund_urge_person_top", "span": 12, "title": "最后催单人 / 分配人员 TOP(≥3次)"},
-            {"view_code": "preset_refund_urge_scatter", "span": 24, "title": "催单×时长×金额 风险清单 Top100"},
-            {"view_code": "preset_refund_urge_top50", "span": 24, "title": "高风险退款工单 Top50 明细"},
-            # ── 退款挽回分析 (成功率 2026-08-04 新口径) ──
+            # ── 退款挽回分析 (2026-08-04 新口径 + 08-12 原因三分布) ──
             {"view_code": "preset_refund_recovery_kpi", "span": 24, "title": "退款挽回 KPI 核心 (分母=退款专员+真退款4类 · T+7判定)"},
             {"view_code": "preset_refund_recovery_daily_trend", "span": 12, "title": "近30天 挽回成功率(线) + 接待SN(柱)"},
             {"view_code": "preset_refund_recovery_hourly_today", "span": 12, "title": "今日按小时 挽回趋势(00:00~当前)"},
             {"view_code": "preset_refund_recovery_operator_rank", "span": 24, "title": "退款专员 接待/挽回/退款操作 明细排名"},
-            {"view_code": "preset_refund_recovery_reason_dist", "span": 12, "title": "挽留失败SN 原因分布(归一化7大类)"},
-            # 退款挽回专用 reason_dist 12 span; 右侧原 preset_refund_status 可搭配看状态分布. 为保持 24 对齐,右侧用 status/preset_refund_reason_top
-            {"view_code": "preset_refund_status", "span": 12, "title": "退费状态分布饼图"},
-            # ── 原现金流模块 ──
-            {"view_code": "preset_cash_trend_v2", "span": 24},
-            {"view_code": "preset_refund_operator_v2", "span": 12},
-            {"view_code": "preset_wallet_pool_v2", "span": 12},
-            {"view_code": "preset_refund_reason_top", "span": 12},
-            {"view_code": "preset_refund_method", "span": 12},
-            {"view_code": "preset_refund_daily_detail_v2", "span": 24},
-            {"view_code": "preset_wallet_refund_timing_v2", "span": 24},
+            # 原因三分布: 退款意愿(全分母) / 挽留失败 / 挽回成功
+            {"view_code": "preset_refund_recovery_reason_wish", "span": 8, "title": "退款意愿 原因分布(全接待SN)"},
+            {"view_code": "preset_refund_recovery_reason_dist", "span": 8, "title": "挽留失败SN 原因分布"},
+            {"view_code": "preset_refund_recovery_reason_saved", "span": 8, "title": "挽回成功SN 原因分布"},
+            # ── 现金流与退款基础 ──
+            {"view_code": "preset_cash_trend_v2", "span": 24, "title": "现金流趋势(四路经营 vs 实际对账)"},
+            {"view_code": "preset_refund_operator_v2", "span": 12, "title": "退费审核人 金额+单数(横向双柱)"},
+            {"view_code": "preset_wallet_pool_v2", "span": 12, "title": "提现池子水位"},
+            {"view_code": "preset_refund_reason_top", "span": 24, "title": "退费原因TOP10 金额+单数(横向双柱)"},
+            {"view_code": "preset_refund_daily_detail_v2", "span": 24, "title": "退款日记录(人员/原因/分类)"},
+            {"view_code": "preset_wallet_refund_timing_v2", "span": 24, "title": "提现-退款时序关联"},
         ],
         "time_range_default": {"days": 30},
         "visibility": "manager",

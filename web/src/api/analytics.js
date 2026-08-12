@@ -66,3 +66,16 @@ export const today = {
   refundRecovery: (params, config) => request.get('/analytics/today/refund-recovery', { params, ...config }),
 }
 
+// 退款看板深度分析 (2026-08-12 新增)
+export const refundDeep = {
+  personnelAnalysis: (params) => request.get('/analytics/refund/personnel-analysis', { params }),
+  personDevices: (params) => request.get('/analytics/refund/person-devices', { params }),
+  personnelTrend: (params) => request.get('/analytics/refund/personnel-trend', { params }),
+  personReasonMatrix: (params) => request.get('/analytics/refund/person-reason-matrix', { params }),
+  deviceAnalysis: (params) => request.get('/analytics/refund/device-analysis', { params }),
+  deviceDetail: (params) => request.get('/analytics/refund/device-detail', { params }),
+  typeTrend: (params) => request.get('/analytics/refund/type-trend', { params }),
+  problemTypeDetail: (params) => request.get('/analytics/refund/problem-type-detail', { params }),
+  groupComparison: (params) => request.get('/analytics/refund/group-comparison', { params }),
+}
+

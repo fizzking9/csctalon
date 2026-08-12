@@ -8,8 +8,11 @@
       </div>
       <div v-if="dashboard" class="filter-bar">
         <el-radio-group v-model="tabMode" size="small" @change="onTabChange">
+          <el-radio-button label="today">概览</el-radio-button>
+          <el-radio-button label="personnel">人员分析</el-radio-button>
+          <el-radio-button label="device">设备分析</el-radio-button>
+          <el-radio-button label="type">类型趋势</el-radio-button>
           <el-radio-button label="overview">综合看板</el-radio-button>
-          <el-radio-button label="today">今日视图</el-radio-button>
         </el-radio-group>
         <el-radio-group v-model="rangeMode" size="small" @change="onRangeChange">
           <el-radio-button label="7">近7天</el-radio-button>
@@ -194,6 +197,61 @@
         </el-row>
       </section>
 
+      <!-- Tab1 强化: Top5 高风险设备 + 金额分桶 -->
+      <section class="section-card mb-24">
+        <div class="block-title mb-12">高风险设备 · 金额分布</div>
+        <el-row :gutter="16">
+          <el-col :xs="24" :md="14" class="mb-16">
+            <el-card shadow="never">
+              <template #header>
+                <div style="display:flex; align-items:center; justify-content:space-between">
+                  <span style="font-weight:600">Top5 高风险设备 (按退款金额倒序)</span>
+                  <el-tag size="small" effect="plain" type="danger">T+7 失败</el-tag>
+                </div>
+              </template>
+              <el-table :data="recoveryData.top_risk_devices || []" border stripe size="small" max-height="320">
+                <el-table-column prop="device_sn" label="设备SN" min-width="140" fixed>
+                  <template #default="{row}"><span style="font-weight:600">{{ row.device_sn }}</span></template>
+                </el-table-column>
+                <el-table-column prop="reason" label="失败原因" width="120">
+                  <template #default="{row}">
+                    <el-tag v-if="row.reason" size="small" :type="reasonTagType(row.reason)" effect="light">{{ row.reason }}</el-tag>
+                    <span v-else style="color:#9ca3af">—</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="amount" label="退款金额" width="120" align="right" sortable>
+                  <template #default="{row}">
+                    <span :style="{color: Number(row.amount)>1000?'#dc2626':'#374151', fontWeight:600}">¥{{ formatMoney(row.amount) }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="operator_name" label="接待人" min-width="100">
+                  <template #default="{row}">{{ row.operator_name || row.operator || '—' }}</template>
+                </el-table-column>
+                <el-table-column prop="status" label="状态" width="100">
+                  <template #default="{row}">
+                    <el-tag v-if="row.status" size="small" :type="statusTagType(row.status)" effect="plain">{{ row.status }}</el-tag>
+                    <span v-else style="color:#9ca3af">—</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <el-empty v-if="!(recoveryData.top_risk_devices && recoveryData.top_risk_devices.length)" description="暂无高风险设备" />
+            </el-card>
+          </el-col>
+          <el-col :xs="24" :md="10" class="mb-16">
+            <el-card shadow="never">
+              <template #header>
+                <div style="display:flex; align-items:center; justify-content:space-between">
+                  <span style="font-weight:600">失败设备 · 金额分桶</span>
+                  <el-tag size="small" effect="plain" type="info">按退款金额区间</el-tag>
+                </div>
+              </template>
+              <BaseChart v-if="amountBucketOption && amountBucketOption.series && amountBucketOption.series.length" :option="amountBucketOption" height="320px" />
+              <el-empty v-else description="暂无金额分桶数据" />
+            </el-card>
+          </el-col>
+        </el-row>
+      </section>
+
       <!-- 今日视图下半屏: 失败原因TOP(7类柱图) + 退款专员接待排名 (各12+12) -->
       <section class="section-card">
         <div class="block-title mb-12">归因 · 绩效 (今日视角)</div>
@@ -245,39 +303,35 @@
     </template>
 
     <!-- ============================================================== -->
-    <!-- TAB 2: 综合看板 - 完全视图驱动 + 原催单/挽回/现金流三段结构      -->
-    <!-- 5 催单视图 | 6 挽回视图(5个HANDLER+1状态饼) | 7 现金流视图 = 18 -->
+    <!-- TAB: 人员分析 - 人员对比表+趋势+热力图+设备清单下钻             -->
+    <!-- ============================================================== -->
+    <template v-else-if="tabMode==='personnel'">
+      <PersonnelAnalysis :start="effectiveStart" :end="effectiveEnd" />
+    </template>
+
+    <!-- ============================================================== -->
+    <!-- TAB: 设备分析 - Top风险设备+时差分布+设备详情下钻               -->
+    <!-- ============================================================== -->
+    <template v-else-if="tabMode==='device'">
+      <DeviceAnalysis :start="effectiveStart" :end="effectiveEnd" />
+    </template>
+
+    <!-- ============================================================== -->
+    <!-- TAB: 类型×趋势 - 原因/人员类型趋势+热力图+组间对比             -->
+    <!-- ============================================================== -->
+    <template v-else-if="tabMode==='type'">
+      <TypeTrend :start="effectiveStart" :end="effectiveEnd" />
+    </template>
+
+    <!-- ============================================================== -->
+    <!-- TAB 5: 综合看板 - 视图驱动 (挽回7视图 + 现金流6视图 = 13)        -->
     <!-- ============================================================== -->
     <template v-else>
-      <!-- ============ 区块1: 催单风险 (预测性退款参考) ============ -->
-      <section v-if="urgeItems.length" class="section-card mb-24">
-        <div class="block-title">一、退款催单风险分析（预测性退款参考因素）</div>
-        <el-row :gutter="16">
-          <el-col
-            v-for="item in urgeItems"
-            :key="item.view_id"
-            :span="item.span"
-            class="mb-16"
-          >
-            <ViewItemCard
-              :view-id="item.view_id"
-              :title="item.title || ''"
-              :start="effectiveStart"
-              :end="effectiveEnd"
-              :prefetched-result="itemResult(item.view_id).result"
-              :prefetched-error="itemResult(item.view_id).error"
-              :prefetched-view="itemView(item.view_id)"
-              :batch-loading="batchLoading"
-            />
-          </el-col>
-        </el-row>
-      </section>
-
-      <!-- ============ 区块2: 退款挽回专项 (视图驱动,6个视图:索引5~10) ============ -->
+      <!-- ============ 区块1: 退款挽回专项 (视图驱动,7个视图) ============ -->
       <section v-if="recoveryItems.length" class="section-card mb-24">
         <div class="flex-between mb-12">
           <div>
-            <div class="block-title">二、退款挽回专项 (2026-08-04 新口径 · 视图驱动)</div>
+            <div class="block-title">一、退款挽回专项 (2026-08-04 新口径 · 视图驱动)</div>
             <div class="block-sub">
               分母=退款专项组成员接待 problem_category=退款 AND problem_type∈(不想用了/充值错误/设备故障/服务原因) 去重SN ·
               失败=分母SN∩T+7窗口内最终退款(退款单∪退款工单) · 成功率=成功/分母 · 已移除原「组长/主管接待强制失败」规则
@@ -325,9 +379,9 @@
         </el-row>
       </section>
 
-      <!-- ============ 区块3: 现金流 / 退款基础 ============ -->
+      <!-- ============ 区块2: 现金流 / 退款基础 ============ -->
       <section v-if="cashflowItems.length" class="section-card">
-        <div class="block-title">三、现金流与退款基础分析</div>
+        <div class="block-title">二、现金流与退款基础分析</div>
         <el-row :gutter="16">
           <el-col
             v-for="item in cashflowItems"
@@ -359,6 +413,9 @@ import { Refresh } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import ViewItemCard from '@/components/ViewItemCard.vue'
 import BaseChart from '@/components/BaseChart.vue'
+import PersonnelAnalysis from './refund/PersonnelAnalysis.vue'
+import DeviceAnalysis from './refund/DeviceAnalysis.vue'
+import TypeTrend from './refund/TypeTrend.vue'
 import { getDashboard, listDashboards, executeDashboard } from '@/api/dashboard'
 import { today } from '@/api/analytics'
 import { formatMoney } from '@/utils/format'
@@ -407,6 +464,7 @@ function emptyKpi() {
 }
 const recoveryData = ref({
   kpi: emptyKpi(), reason_dist: [], staff_detail: [], weekly_trend: [], daily_reason: [], daily_trend: [], hourly_today: [],
+  top_risk_devices: [], amount_buckets: [],
 })
 function formatNum(v) {
   if (v == null || v === '') return '0'
@@ -415,12 +473,11 @@ function formatNum(v) {
   return n.toLocaleString('zh-CN')
 }
 
-// --- 看板视图分段: 5(催单) | 6(挽回5个HANDLER+status饼) | 7(现金流) ---
-const urgeItems = computed(() => (dashboard.value?.items || []).filter((it, idx) => idx < 5 && (it.visible !== false)))
-// 退款挽回视图块 = 预设 items 索引 5..10 (6个视图)
-const recoveryItems = computed(() => (dashboard.value?.items || []).filter((it, idx) => idx >= 5 && idx <= 10 && (it.visible !== false)))
-// 现金流模块 = 索引 11 往后 (7 个视图)
-const cashflowItems = computed(() => (dashboard.value?.items || []).filter((it, idx) => idx >= 11 && it.visible !== false))
+// --- 看板视图分段 (2026-08-12: 移除催单块, 按 view_code 前缀划分) ---
+// 退款挽回视图块 = view_code 以 preset_refund_recovery 开头
+const recoveryItems = computed(() => (dashboard.value?.items || []).filter((it) => it.view_code?.startsWith('preset_refund_recovery') && (it.visible !== false)))
+// 现金流模块 = 其余非 recovery 视图
+const cashflowItems = computed(() => (dashboard.value?.items || []).filter((it) => !it.view_code?.startsWith('preset_refund_recovery') && (it.visible !== false)))
 
 // --- 时间范围 ---
 // 今日视图: start=今天, end=今天 (固定 不随 rangeMode); 综合视图: 按 rangeMode
@@ -447,7 +504,12 @@ function itemView(viewId) {
   return { name: r.view_name, ratios: r.ratios, is_preset: r.is_preset }
 }
 
-function onTabChange() { loadAll() }
+function onTabChange() {
+  // 新 Tab (personnel/device/type) 由子组件自行加载数据, 仅 today/overview 需要父组件加载
+  if (tabMode.value === 'today' || tabMode.value === 'overview') {
+    loadAll()
+  }
+}
 function onRangeChange() {}
 function onGrainChange() { loadAll() }
 
@@ -593,6 +655,69 @@ function grpTagType(g) {
   return GRP_COLOR_MAP[g] || 'info'
 }
 
+// ---- Tab1 强化: Top5 高风险设备 + 金额分桶 ----
+const REASON_TAG_MAP = {
+  '不想用了': 'info', '充值错误': 'warning', '设备故障': 'danger',
+  '服务原因': 'primary', '其他': 'info',
+}
+function reasonTagType(r) {
+  if (!r) return 'info'
+  return REASON_TAG_MAP[r] || 'info'
+}
+function statusTagType(s) {
+  if (!s) return 'info'
+  const t = String(s)
+  if (t.includes('成功') || t.includes('完成')) return 'success'
+  if (t.includes('失败') || t.includes('驳回')) return 'danger'
+  if (t.includes('处理') || t.includes('审核')) return 'warning'
+  return 'info'
+}
+
+const amountBucketOption = computed(() => {
+  const list = recoveryData.value?.amount_buckets || []
+  if (!list.length) return {}
+  const palette = ['#93c5fd', '#fbbf24', '#fb923c', '#dc2626']
+  const data = list.map((b, i) => ({
+    name: b.bucket,
+    value: b.sn_cnt,
+    amount: b.amount,
+    ratio: b.ratio,
+    itemStyle: { color: palette[i % palette.length] },
+  }))
+  const totalCnt = list.reduce((s, x) => s + Number(x.sn_cnt || 0), 0)
+  return {
+    tooltip: {
+      trigger: 'item',
+      formatter: (p) => {
+        const d = p.data || {}
+        const amt = Number(d.amount || 0)
+        return `<b>${p.name}</b><br/>设备数: <b>${p.value}</b> 个 (${Number(d.ratio||0).toFixed(1)}%)<br/>金额合计: ¥${formatMoney(amt)}`
+      },
+    },
+    legend: { bottom: 0, type: 'scroll', textStyle: { fontSize: 11 } },
+    series: [{
+      type: 'pie',
+      radius: ['42%', '68%'],
+      center: ['50%', '46%'],
+      avoidLabelOverlap: true,
+      label: {
+        show: true,
+        formatter: (p) => `${p.name}\n${p.value}个`,
+        fontSize: 11,
+      },
+      emphasis: {
+        label: { show: true, fontSize: 13, fontWeight: 600 },
+        itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.15)' },
+      },
+      data,
+    }],
+    graphic: totalCnt ? {
+      type: 'text', left: 'center', top: '42%',
+      style: { text: `共${totalCnt}\n失败设备`, fontSize: 13, fontWeight: 600, fill: '#374151', textAlign: 'center' },
+    } : undefined,
+  }
+})
+
 async function resolveDashboardId() {
   const code = 'preset_dashboard_refund'
   const res = await listDashboards({ page: 1, page_size: 100 })
@@ -645,7 +770,8 @@ async function loadAll() {
     }
     batchResults.value = map
     recoveryData.value = Object.assign(
-      { kpi: emptyKpi(), reason_dist: [], staff_detail: [], weekly_trend: [], daily_reason: [], daily_trend: [], hourly_today: [] },
+      { kpi: emptyKpi(), reason_dist: [], staff_detail: [], weekly_trend: [], daily_reason: [], daily_trend: [], hourly_today: [],
+        top_risk_devices: [], amount_buckets: [] },
       recoverRes.data || {}
     )
   } catch (e) {
