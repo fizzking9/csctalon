@@ -95,6 +95,12 @@ class SyncTask:
                 break
             if p.phase in ("imported", "failed", "skipped"):
                 continue
+        # 所有数据源完成后,检查 post-sync 钩子是否仍在运行(__post_sync__ 不在 data_types 里)
+        if current_source is None:
+            post_sync = self.per_source.get("__post_sync__")
+            if post_sync and post_sync.phase == "importing":
+                current_source = "__post_sync__"
+                current_phase = "后处理中"
         # 如果全部处理完
         if self.status in ("success", "failed", "partial") and current_source is None:
             current_phase = "全部完成" if self.status == "success" else "完成(部分失败)" if self.status == "partial" else "失败"

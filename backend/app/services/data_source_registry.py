@@ -5,10 +5,14 @@
 新表加入：建表迁移 + 在 DATA_SOURCE_SEEDS 加一行 + 调 refresh。
 """
 
+import logging
+
 from sqlalchemy import Boolean, DateTime, Float, Integer, Numeric, delete, inspect, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
@@ -99,12 +103,6 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "pk_strategy": "primary_key",
         "sync_source": "bms",
         "category": "现金流",
-    },
-    {
-        "code": "other_refund",
-        "name_cn": "其他退款",
-        "category": "现金流",
-        "placeholder": True,
     },
     {
         "code": "cs_record",
@@ -572,5 +570,15 @@ def ensure_data_sources_registered(db: Session) -> dict:
             )
             db.execute(stmt)
         stats["fields"] += len(reflected)
+
+    # 清理已从 seed 移除的旧数据源(如 other_refund 占位项),避免数据查看页继续显示"规划中"
+    valid_codes = {s["code"] for s in DATA_SOURCE_SEEDS}
+    obsolete = db.execute(
+        select(DataSource).where(~DataSource.code.in_(valid_codes))
+    ).scalars().all()
+    for old_ds in obsolete:
+        logger.info(f"清理已移除的数据源: {old_ds.code} ({old_ds.name_cn})")
+        db.delete(old_ds)
+
     db.commit()
     return stats

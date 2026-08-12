@@ -50,17 +50,22 @@ _WIDE_UPDATE_FIELDS = [
 ]
 
 
-def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None) -> dict:
-    """构建 refund_wide 物化宽表
+# 分批大小:每批处理的退费单数量(避免全量加载 15万+ ORM 对象导致 OOM)
+_BATCH_SIZE = 5000
+
+
+def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None, progress_callback=None) -> dict:
+    """构建 refund_wide 物化宽表(分批处理,避免 OOM)
 
     Args:
-        db: 数据库会话(函数内不 commit,由调用方决定;但 upsert 后会 commit)
+        db: 数据库会话(函数内不 commit,由调用方决定;但每批 upsert 后会 commit)
         only_refund_nos: 指定退费单号列表(增量构建);None=全量构建所有退费单
+        progress_callback: 可选回调 (built: int, total: int) -> None, 每批完成时调用
 
     Returns:
         {"built": int, "updated": int, "skipped": int}
     """
-    # 1. 确定要处理的退费单号集合
+    # 1. 确定要处理的退费单号集合(仅加载字符串,内存占用极小)
     if only_refund_nos:
         target_refund_nos = list(dict.fromkeys(only_refund_nos))  # 去重保序
     else:
@@ -69,7 +74,37 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None) -> 
     if not target_refund_nos:
         return {"built": 0, "updated": 0, "skipped": 0}
 
-    # 2. 批量拉取退费单主表记录
+    total_built = 0
+    total_skipped = 0
+
+    # 2. 分批处理,每批 _BATCH_SIZE 个退费单
+    for start in range(0, len(target_refund_nos), _BATCH_SIZE):
+        batch = target_refund_nos[start:start + _BATCH_SIZE]
+        batch_stats = _build_wide_batch(db, batch)
+        total_built += batch_stats["built"]
+        total_skipped += batch_stats["skipped"]
+        # 释放本批 ORM 对象,防止内存累积
+        db.expunge_all()
+        logger.info(
+            f"refund_wide 批次完成: start={start}, batch_size={len(batch)}, "
+            f"batch_built={batch_stats['built']}, 累计={total_built}/{len(target_refund_nos)}"
+        )
+        if progress_callback:
+            try:
+                progress_callback(total_built, len(target_refund_nos))
+            except Exception:
+                pass
+
+    logger.info(
+        f"refund_wide 构建完成: built={total_built}, skipped={total_skipped}, "
+        f"target={len(target_refund_nos)}"
+    )
+    return {"built": total_built, "updated": total_built, "skipped": total_skipped}
+
+
+def _build_wide_batch(db: Session, target_refund_nos: list[str]) -> dict:
+    """为一批退费单构建宽表行并 upsert"""
+    # 1. 拉取本批退费单主表记录
     refunds: dict[str, Refund] = {
         r.refund_no: r
         for r in db.scalars(
@@ -77,7 +112,7 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None) -> 
         )
     }
 
-    # 3. 拉取关联关系(src_table='refund' AND status='matched'),按 refund_no 分组
+    # 2. 拉取本批关联关系(src_table='refund' AND status='matched')
     rel_rows = db.execute(
         select(DataMatchRelation.src_id, DataMatchRelation.dst_table, DataMatchRelation.dst_id, DataMatchRelation.match_type).where(
             DataMatchRelation.src_table == "refund",
@@ -90,7 +125,7 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None) -> 
     for src_id, dst_table, dst_id, match_type in rel_rows:
         refund_rel_map[src_id][dst_table].append((dst_id, match_type))
 
-    # 4. 收集所有 dst_id,批量拉取关联表记录
+    # 3. 收集本批所有 dst_id,批量拉取关联表记录
     ticket_ids: set[str] = set()
     mr_ids: set[str] = set()
     wallet_ids: set[str] = set()
@@ -108,19 +143,17 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None) -> 
 
     merchant_refunds: dict[str, MerchantRefund] = {}
     if mr_ids:
-        # mr_ids 是 str(id)(matcher 以 id 作 dst_id),转 int 查询,与 wallet 一致
         mr_int_ids = [int(mid) for mid in mr_ids if mid.isdigit()]
         if mr_int_ids:
             merchant_refunds = {str(m.id): m for m in db.scalars(select(MerchantRefund).where(MerchantRefund.id.in_(mr_int_ids)))}
 
     wallets: dict[str, WalletWithdrawal] = {}
     if wallet_ids:
-        # wallet_id 在关系表中是 str(w.id),需转 int 查询
         wallet_int_ids = [int(wid) for wid in wallet_ids if wid.isdigit()]
         if wallet_int_ids:
             wallets = {str(w.id): w for w in db.scalars(select(WalletWithdrawal).where(WalletWithdrawal.id.in_(wallet_int_ids)))}
 
-    # 5. 外部投诉按 device_sn 聚合(与 matcher 关系无关,直接查表)
+    # 4. 外部投诉按 device_sn 聚合(与 matcher 关系无关,直接查表)
     device_sns: set[str] = {r.device_sn for r in refunds.values() if r.device_sn}
     ec_stats: dict[str, tuple[int, datetime | None]] = {}
     if device_sns:
@@ -135,7 +168,7 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None) -> 
         ).all()
         ec_stats = {row[0]: (row[1], row[2]) for row in ec_rows}
 
-    # 6. 组装 RefundWide 行
+    # 5. 组装 RefundWide 行
     now = datetime.now(timezone.utc)
     wide_rows: list[dict] = []
     skipped = 0
@@ -190,7 +223,7 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None) -> 
             "matched_at": now,
         })
 
-    # 7. 批量 upsert(ON CONFLICT refund_no DO UPDATE)
+    # 6. 批量 upsert(ON CONFLICT refund_no DO UPDATE)
     if wide_rows:
         stmt = pg_insert(RefundWide).values(wide_rows)
         update_set = {f: getattr(stmt.excluded, f) for f in _WIDE_UPDATE_FIELDS}
@@ -198,11 +231,7 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None) -> 
         db.execute(stmt)
         db.commit()
 
-    logger.info(
-        f"refund_wide 构建完成: built={len(wide_rows)}, skipped={skipped}, "
-        f"target={len(target_refund_nos)}"
-    )
-    return {"built": len(wide_rows), "updated": len(wide_rows), "skipped": skipped}
+    return {"built": len(wide_rows), "skipped": skipped}
 
 
 def _select_ticket(

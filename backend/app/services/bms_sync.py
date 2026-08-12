@@ -476,18 +476,55 @@ async def sync_all(
             from app.services.matcher import match_all
             from app.services.wide_table_builder import build_refund_wide
 
-            hook_db = SessionLocal()
-            try:
-                match_stats = match_all(hook_db, only_unmatched=True)
-                wide_stats = build_refund_wide(hook_db)
-                # 2026-08-11: 同步后主动 ANALYZE 关键表, 修复 BMS 全量覆盖导入导致统计信息滞后
-                # (此前 cs_records 统计 n_live_tup=646 实际 144660, 差 224 倍, 严重影响查询计划)
-                _analyze_key_tables(hook_db)
-                logger.info(
-                    f"post-sync 钩子完成: match={match_stats}, wide={wide_stats}"
-                )
-            finally:
-                hook_db.close()
+            # ⚠️ 2026-08-12 关键修复:
+            # match_all / build_refund_wide / _analyze_key_tables 都是同步阻塞函数,
+            # 直接在 async 函数里调用会阻塞 event loop 数分钟(15万+行宽表构建 ~8分钟),
+            # 期间 FastAPI 无法响应 /task/status 轮询 → 前端连续超时后停止轮询,
+            # 表现为"界面卡死 也不恢复"。且原 asyncio.ensure_future 回调因 event loop
+            # 被阻塞也无法执行,进度日志无法到达前端。
+            # 修复: 整个 post-sync 钩子放到 worker 线程(asyncio.to_thread),
+            # 进度回调用 run_coroutine_threadsafe 跨线程调度到主 event loop。
+            loop = asyncio.get_running_loop()
+
+            def _sync_post_sync_hook() -> tuple[dict, dict]:
+                hook_db = SessionLocal()
+                try:
+                    def _report(name: str, phase: str = "importing"):
+                        """跨线程向主 event loop 投递进度事件(fire-and-forget)"""
+                        if on_progress:
+                            try:
+                                asyncio.run_coroutine_threadsafe(
+                                    on_progress("__post_sync__", phase, {"name": name}),
+                                    loop,
+                                )
+                            except Exception:
+                                pass
+
+                    _report("关联匹配中...")
+                    match_stats = match_all(hook_db, only_unmatched=True)
+
+                    # build_refund_wide 可能耗时数分钟(15万+行分批构建),
+                    # 通过 progress_callback 实时报告批次进度到前端日志面板
+                    def _wide_progress_cb(built: int, total: int):
+                        _report(f"构建退费宽表 {built}/{total}")
+
+                    _report("构建退费宽表...")
+                    wide_stats = build_refund_wide(hook_db, progress_callback=_wide_progress_cb)
+
+                    _report("刷新数据库统计...")
+                    # 2026-08-11: 同步后主动 ANALYZE 关键表, 修复 BMS 全量覆盖导入导致统计信息滞后
+                    # (此前 cs_records 统计 n_live_tup=646 实际 144660, 差 224 倍, 严重影响查询计划)
+                    _analyze_key_tables(hook_db)
+                    logger.info(
+                        f"post-sync 钩子完成: match={match_stats}, wide={wide_stats}"
+                    )
+                    _report("post-sync 完成", phase="imported")
+                    return match_stats, wide_stats
+                finally:
+                    hook_db.close()
+
+            await asyncio.to_thread(_sync_post_sync_hook)
+
             # 失效 Redis 缓存 (today:* 等), 避免同步后仍读到旧聚合结果
             try:
                 from app.core.redis_client import cache_invalidate_pattern
