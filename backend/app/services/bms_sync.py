@@ -501,7 +501,10 @@ async def sync_all(
                                 pass
 
                     _report("关联匹配中...")
-                    match_stats = match_all(hook_db, only_unmatched=True)
+                    def _match_progress_cb(step_name: str, current: int, total: int):
+                        _report(f"关联匹配 {current+1}/{total}: {step_name}")
+
+                    match_stats = match_all(hook_db, only_unmatched=True, progress_callback=_match_progress_cb)
 
                     # build_refund_wide 可能耗时数分钟(15万+行分批构建),
                     # 通过 progress_callback 实时报告批次进度到前端日志面板

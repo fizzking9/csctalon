@@ -9,9 +9,16 @@
 6. 退费单.merchant_name == 商户.sub_name  (精确)
 
 每次新数据导入后,对新数据 + 之前未关联数据重跑匹配(持续对齐)
+
+性能优化(2026-08-12):
+  旧版对每条记录单独查 _exists_relation (N+1 问题), 15万条 × 6 函数 = 上百万次 SQL,
+  导致 post-sync "关联匹配中" 阶段耗时数十分钟。
+  新版预加载已有关系到内存 set (1 次批量查询替代 N 次), 批量 add_all 插入新关系。
 """
 
+import logging
 import re
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -22,135 +29,159 @@ from app.models.ticket import ServiceTicket
 from app.models.upload import DataMatchRelation
 from app.models.wallet import WalletWithdrawal
 
+logger = logging.getLogger(__name__)
+
 REFUND_NO_PATTERN = re.compile(r"RF\d{10,}")
 
 
-def match_all(db: Session, only_unmatched: bool = True) -> dict[str, int]:
+def match_all(db: Session, only_unmatched: bool = True, progress_callback=None) -> dict[str, int]:
     """执行全量匹配,返回各类型新增匹配数
 
     Args:
+        db: 数据库会话
         only_unmatched: True=只处理之前未匹配的记录(增量),False=全量重跑
+        progress_callback: 可选回调 (step_name: str, current: int, total: int) -> None
 
     Note:
         本函数仅负责产出 DataMatchRelation 关联关系。
         refund_wide 物化宽表的重建由调用方(bms_sync/uploads 钩子)在 match_all 之后显式触发,
         以便在源数据更新但无新增关联时也能刷新宽表。
     """
-    stats = {
-        "refund_merchant_refund": _match_refund_merchant_refund(db, only_unmatched),
-        "refund_ticket_order": _match_refund_ticket_by_order(db, only_unmatched),
-        "refund_ticket_sn": _match_refund_ticket_by_sn(db, only_unmatched),
-        "refund_wallet_remark": _match_refund_wallet_by_remark(db, only_unmatched),
-        "refund_wallet_sn": _match_refund_wallet_by_sn(db, only_unmatched),
-        "refund_merchant": _match_refund_merchant(db, only_unmatched),
-    }
+    steps = [
+        ("退费单↔商户退款(订单号)", _match_refund_merchant_refund),
+        ("退费单↔工单(订单号)", _match_refund_ticket_by_order),
+        ("退费单↔工单(设备SN)", _match_refund_ticket_by_sn),
+        ("退费单↔钱包(备注提取)", _match_refund_wallet_by_remark),
+        ("退费单↔钱包(设备SN)", _match_refund_wallet_by_sn),
+        ("退费单↔商户(商户名)", _match_refund_merchant),
+    ]
+    stats = {}
+    total_steps = len(steps)
+    for i, (label, fn) in enumerate(steps):
+        if progress_callback:
+            try:
+                progress_callback(label, i, total_steps)
+            except Exception:
+                pass
+        logger.info(f"[matcher] {i+1}/{total_steps} {label} ...")
+        stats[label] = fn(db, only_unmatched)
+        logger.info(f"[matcher] {label} 完成, 新增 {stats[label]} 条")
     db.commit()
+    if progress_callback:
+        try:
+            progress_callback("匹配完成", total_steps, total_steps)
+        except Exception:
+            pass
     return stats
 
 
-def _exists_relation(db: Session, src_table: str, src_id: str, dst_table: str, match_type: str) -> bool:
-    """检查是否已存在某类关联"""
-    return bool(
-        db.scalar(
-            select(func.count())
-            .select_from(DataMatchRelation)
-            .where(
-                DataMatchRelation.src_table == src_table,
-                DataMatchRelation.src_id == src_id,
-                DataMatchRelation.dst_table == dst_table,
-                DataMatchRelation.match_type == match_type,
-                DataMatchRelation.status == "matched",
-            )
+def _preload_existing_relations(db: Session, src_table: str, dst_table: str, match_type: str) -> set[str]:
+    """批量预加载已有关系到内存 set (1 次查询替代 N 次 _exists_relation)"""
+    return set(db.scalars(
+        select(DataMatchRelation.src_id).where(
+            DataMatchRelation.src_table == src_table,
+            DataMatchRelation.dst_table == dst_table,
+            DataMatchRelation.match_type == match_type,
+            DataMatchRelation.status == "matched",
         )
-    )
-
-
-def _add_relation(db: Session, src_table: str, src_id: str, dst_table: str, dst_id: str, match_type: str, confidence: int = 100) -> bool:
-    """新增关联(已存在则跳过),返回是否新增"""
-    if _exists_relation(db, src_table, src_id, dst_table, match_type):
-        return False
-    db.add(
-        DataMatchRelation(
-            src_table=src_table,
-            src_id=src_id,
-            dst_table=dst_table,
-            dst_id=dst_id,
-            match_type=match_type,
-            confidence=confidence,
-            matched_by="auto",
-            status="matched",
-        )
-    )
-    return True
+    ))
 
 
 def _match_refund_merchant_refund(db: Session, only_unmatched: bool) -> int:
     """退费单.platform_order_no == 商户退款.merchant_order_no"""
     refunds = db.scalars(select(Refund).where(Refund.platform_order_no.isnot(None))).all()
-    # 建立 merchant_order_no -> merchant_refund.id 索引(用 id 作关联键,与 wallet 一致;
-    # wx_refund_no 在 Excel 导出时被 float 截断且支付行为 0,已非唯一不可作关联键)
     mr_map = {}
     for mr in db.scalars(select(MerchantRefund).where(MerchantRefund.merchant_order_no.isnot(None))).all():
         key = (mr.merchant_order_no or "").strip()
         if key:
             mr_map[key] = str(mr.id)
-    count = 0
+
+    existing = _preload_existing_relations(db, "refund", "merchant_refund", "order_no") if only_unmatched else set()
+
+    new_rels = []
     for r in refunds:
         key = (r.platform_order_no or "").strip()
-        if not key:
+        if not key or key not in mr_map:
             continue
-        if only_unmatched and _exists_relation(db, "refund", r.refund_no, "merchant_refund", "order_no"):
+        if r.refund_no in existing:
             continue
-        if key in mr_map:
-            if _add_relation(db, "refund", r.refund_no, "merchant_refund", mr_map[key], "order_no"):
-                count += 1
-    return count
+        new_rels.append(DataMatchRelation(
+            src_table="refund", src_id=r.refund_no,
+            dst_table="merchant_refund", dst_id=mr_map[key],
+            match_type="order_no", confidence=100,
+            matched_by="auto", status="matched",
+        ))
+        existing.add(r.refund_no)
+    if new_rels:
+        db.add_all(new_rels)
+    return len(new_rels)
 
 
 def _match_refund_ticket_by_order(db: Session, only_unmatched: bool) -> int:
-    """退费单.Platform_order_no == 工单.order_no"""
+    """退费单.platform_order_no == 工单.order_no"""
     refunds = db.scalars(select(Refund).where(Refund.platform_order_no.isnot(None))).all()
     ticket_map = {}
     for t in db.scalars(select(ServiceTicket).where(ServiceTicket.order_no.isnot(None))).all():
         key = (t.order_no or "").strip()
         if key:
             ticket_map[key] = t.ticket_no
-    count = 0
+
+    existing = _preload_existing_relations(db, "refund", "ticket", "order_no") if only_unmatched else set()
+
+    new_rels = []
     for r in refunds:
         key = (r.platform_order_no or "").strip()
-        if not key:
+        if not key or key not in ticket_map:
             continue
-        if only_unmatched and _exists_relation(db, "refund", r.refund_no, "ticket", "order_no"):
+        if r.refund_no in existing:
             continue
-        if key in ticket_map:
-            if _add_relation(db, "refund", r.refund_no, "ticket", ticket_map[key], "order_no"):
-                count += 1
-    return count
+        new_rels.append(DataMatchRelation(
+            src_table="refund", src_id=r.refund_no,
+            dst_table="ticket", dst_id=ticket_map[key],
+            match_type="order_no", confidence=100,
+            matched_by="auto", status="matched",
+        ))
+        existing.add(r.refund_no)
+    if new_rels:
+        db.add_all(new_rels)
+    return len(new_rels)
 
 
 def _match_refund_ticket_by_sn(db: Session, only_unmatched: bool) -> int:
     """退费单.device_sn == 工单.device_sn"""
     refunds = db.scalars(select(Refund).where(Refund.device_sn.isnot(None))).all()
-    # SN -> [ticket_no] (一个SN可能多个工单)
     ticket_sn_map = {}
     for t in db.scalars(select(ServiceTicket).where(ServiceTicket.device_sn.isnot(None))).all():
         ticket_sn_map.setdefault(t.device_sn, []).append(t.ticket_no)
-    count = 0
+
+    existing = _preload_existing_relations(db, "refund", "ticket", "device_sn") if only_unmatched else set()
+
+    new_rels = []
     for r in refunds:
         if not r.device_sn:
             continue
-        if only_unmatched and _exists_relation(db, "refund", r.refund_no, "ticket", "device_sn"):
+        if r.refund_no in existing:
             continue
         for tn in ticket_sn_map.get(r.device_sn, []):
-            if _add_relation(db, "refund", r.refund_no, "ticket", tn, "device_sn", confidence=80):
-                count += 1
-    return count
+            new_rels.append(DataMatchRelation(
+                src_table="refund", src_id=r.refund_no,
+                dst_table="ticket", dst_id=tn,
+                match_type="device_sn", confidence=80,
+                matched_by="auto", status="matched",
+            ))
+        existing.add(r.refund_no)
+    if new_rels:
+        db.add_all(new_rels)
+    return len(new_rels)
 
 
 def _match_refund_wallet_by_remark(db: Session, only_unmatched: bool) -> int:
     """钱包提现.remark 含退费单号 RF..."""
     wallets = db.scalars(select(WalletWithdrawal).where(WalletWithdrawal.remark.isnot(None))).all()
-    count = 0
+
+    existing = _preload_existing_relations(db, "refund", "wallet", "refund_no_in_remark") if only_unmatched else set()
+
+    new_rels = []
     for w in wallets:
         if not w.remark:
             continue
@@ -158,11 +189,18 @@ def _match_refund_wallet_by_remark(db: Session, only_unmatched: bool) -> int:
         if not m:
             continue
         refund_no = m.group(0)
-        if only_unmatched and _exists_relation(db, "refund", refund_no, "wallet", "refund_no_in_remark"):
+        if refund_no in existing:
             continue
-        if _add_relation(db, "refund", refund_no, "wallet", str(w.id), "refund_no_in_remark"):
-            count += 1
-    return count
+        new_rels.append(DataMatchRelation(
+            src_table="refund", src_id=refund_no,
+            dst_table="wallet", dst_id=str(w.id),
+            match_type="refund_no_in_remark", confidence=100,
+            matched_by="auto", status="matched",
+        ))
+        existing.add(refund_no)
+    if new_rels:
+        db.add_all(new_rels)
+    return len(new_rels)
 
 
 def _match_refund_wallet_by_sn(db: Session, only_unmatched: bool) -> int:
@@ -171,37 +209,57 @@ def _match_refund_wallet_by_sn(db: Session, only_unmatched: bool) -> int:
     wallet_sn_map = {}
     for w in db.scalars(select(WalletWithdrawal).where(WalletWithdrawal.device_sn.isnot(None))).all():
         wallet_sn_map.setdefault(w.device_sn, []).append(w.id)
-    count = 0
+
+    existing = _preload_existing_relations(db, "refund", "wallet", "device_sn") if only_unmatched else set()
+
+    new_rels = []
     for r in refunds:
         if not r.device_sn:
             continue
-        if only_unmatched and _exists_relation(db, "refund", r.refund_no, "wallet", "device_sn"):
+        if r.refund_no in existing:
             continue
         for wid in wallet_sn_map.get(r.device_sn, []):
-            if _add_relation(db, "refund", r.refund_no, "wallet", str(wid), "device_sn", confidence=70):
-                count += 1
-    return count
+            new_rels.append(DataMatchRelation(
+                src_table="refund", src_id=r.refund_no,
+                dst_table="wallet", dst_id=str(wid),
+                match_type="device_sn", confidence=70,
+                matched_by="auto", status="matched",
+            ))
+        existing.add(r.refund_no)
+    if new_rels:
+        db.add_all(new_rels)
+    return len(new_rels)
 
 
 def _match_refund_merchant(db: Session, only_unmatched: bool) -> int:
     """退费单.merchant_name == 商户.sub_name"""
     refunds = db.scalars(select(Refund).where(Refund.merchant_name.isnot(None))).all()
     merchant_map = {m.sub_name: m.id for m in db.scalars(select(Merchant)).all()}
-    count = 0
+
+    existing = _preload_existing_relations(db, "refund", "merchant", "merchant_name") if only_unmatched else set()
+
+    new_rels = []
     for r in refunds:
         if not r.merchant_name:
             continue
-        if only_unmatched and _exists_relation(db, "refund", r.refund_no, "merchant", "merchant_name"):
+        if r.refund_no in existing:
             continue
         mid = merchant_map.get(r.merchant_name.strip())
-        if mid and _add_relation(db, "refund", r.refund_no, "merchant", str(mid), "merchant_name"):
-            count += 1
-    return count
+        if mid:
+            new_rels.append(DataMatchRelation(
+                src_table="refund", src_id=r.refund_no,
+                dst_table="merchant", dst_id=str(mid),
+                match_type="merchant_name", confidence=100,
+                matched_by="auto", status="matched",
+            ))
+            existing.add(r.refund_no)
+    if new_rels:
+        db.add_all(new_rels)
+    return len(new_rels)
 
 
 def get_unmatched_summary(db: Session) -> dict[str, int]:
     """获取各表待关联数据统计"""
-    # 退费单未关联商户退款(无现金流)
     refund_count = db.scalar(select(func.count()).select_from(Refund)) or 0
     refund_with_mr = db.scalar(
         select(func.count(func.distinct(DataMatchRelation.src_id)))
