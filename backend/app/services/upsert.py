@@ -565,11 +565,29 @@ def upsert_wallet(df: pd.DataFrame, mapping: dict[str, str], db: Session, result
     """钱包提现 - 按业务复合唯一键去重(account_id, op_type, op_time, operator, op_amount, device_sn)
 
     防止重复同步导致数据膨胀;冲突时 DO NOTHING。
+
+    ⚠️  2026-08-11 修复: 增加 op_time 必填校验
+        历史问题: 2026-08-06 一次错误导入(工单文件被误当 wallet 导入),
+        导致 8068 行只有 device_sn 和 remark(投诉文本) 但 op_time/account_id/op_amount 全 NULL 的
+        垃圾数据进入 wallet_withdrawals 表。已清理。
+        修复: op_time 为空时直接跳过,记录到错误,防止再次产生垃圾数据。
     """
     rows: list[dict] = []
+    skipped_no_op_time = 0
     for idx, row in enumerate(df.to_dict("records")):
         try:
             data = apply_mapping(row, mapping)
+            op_time = _to_datetime(data.get("op_time"))
+            # ★ op_time 是钱包流水的核心字段,为空说明数据不完整或映射错误(如工单文件被误导入)
+            #   直接跳过,避免产生只有 device_sn 没有 op_time 的垃圾数据
+            if op_time is None:
+                skipped_no_op_time += 1
+                result.add_error(
+                    idx,
+                    "op_time 为空,跳过(钱包流水必须有操作时间,可能是错误映射或数据不完整)",
+                    {"device_sn": data.get("device_sn"), "remark": (data.get("remark") or "")[:80]},
+                )
+                continue
             rows.append({
                 "account_id": data.get("account_id"),
                 "wallet_balance": _to_float(data.get("wallet_balance")),
@@ -577,12 +595,16 @@ def upsert_wallet(df: pd.DataFrame, mapping: dict[str, str], db: Session, result
                 "op_type": data.get("op_type"),
                 "op_amount": _to_float(data.get("op_amount")),
                 "remark": data.get("remark"),
-                "op_time": _to_datetime(data.get("op_time")),
+                "op_time": op_time,
                 "operator": _sanitize_name_field(data.get("operator"), idx, result, "钱包提现-操作人"),
             })
             result.total += 1
         except Exception as e:
             result.add_error(idx, f"行解析失败: {e}")
+    if skipped_no_op_time > 0:
+        logger.warning(
+            f"[wallet] 跳过 {skipped_no_op_time} 行 op_time 为空的数据(防止垃圾数据入库)"
+        )
     if not rows:
         return
 

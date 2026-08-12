@@ -2,6 +2,7 @@
 
 import logging
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -15,6 +16,17 @@ from app.models import *  # noqa: F401,F403  # 注册所有模型
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+# 持久化日志到文件(挂载 ./logs/backend → /app/logs),避免容器重建丢失 500 堆栈
+try:
+    Path("/app/logs").mkdir(parents=True, exist_ok=True)
+    _file_handler = RotatingFileHandler(
+        "/app/logs/app.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    logging.getLogger().addHandler(_file_handler)
+except Exception:
+    pass  # 目录不可写时不影响启动
 
 # backend/ 目录（alembic.ini 与 alembic/ 所在位置）
 _BACKEND_DIR = Path(__file__).resolve().parent.parent

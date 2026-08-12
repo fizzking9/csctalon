@@ -174,26 +174,42 @@ _DOWNLOAD_DEFAULT_RETRIES = 1
 
 async def _click_export_button(page) -> None:
     """点击「导出」按钮,找不到标准按钮时 fallback 遍历所有可见按钮"""
+    import logging as _lg
+    _log = _lg.getLogger(__name__)
+    _log.info("  [导出按钮] 开始定位导出按钮...")
     try:
         await page.click('button:has-text("导出")', timeout=15000)
+        _log.info("  [导出按钮] 标准 selector 命中并点击成功")
         return
-    except Exception:
-        pass
+    except Exception as e:
+        _log.info(f"  [导出按钮] 标准 selector 未命中: {type(e).__name__}, 改为遍历所有按钮")
     btns = await page.query_selector_all('button:visible')
+    _log.info(f"  [导出按钮] 页面可见按钮数: {len(btns)}")
     clicked = False
-    for b in btns:
+    for idx, b in enumerate(btns):
         try:
             t = (await b.inner_text()).strip()
         except Exception:
             t = ""
         if "导出" in t and "重置" not in t:
+            _log.info(f"  [导出按钮] 遍历命中第 {idx} 个: text={t!r}, 准备点击")
             try:
                 await b.click(timeout=15000)
                 clicked = True
+                _log.info(f"  [导出按钮] 遍历点击成功")
                 break
-            except Exception:
+            except Exception as ce:
+                _log.warning(f"  [导出按钮] 遍历点击失败: {ce}")
                 continue
     if not clicked:
+        # 列出所有按钮文本,方便诊断
+        all_texts = []
+        for b in btns:
+            try:
+                all_texts.append((await b.inner_text()).strip())
+            except Exception:
+                pass
+        _log.warning(f"  [导出按钮] 未找到导出按钮! 所有按钮文本: {all_texts[:20]}")
         raise RuntimeError("未找到导出按钮")
 
 
@@ -208,6 +224,11 @@ async def _download_with_retry(
       1. 重新等待 download 事件(新的超时窗口)
       2. 重新点「导出」按钮(避免上次失败事件未触发后,按钮点了没反应)
     重试间隔 2 秒,避免给服务器太大压力。
+
+    ⚠️ 2026-08-11 修复: BMS 导出有"1分钟内请勿重复操作"限流
+      - 监听 export 响应,如果返回 JSON({"success":false,...})说明被限流
+      - 被限流时不会触发 download 事件,需等待 60s+ 后重试
+      - wallet 的 max_retries=2,每次 600s 超时,足够等待限流解除
     """
     timeout_ms = _DOWNLOAD_TIMEOUT_MS.get(data_type, _DOWNLOAD_DEFAULT_TIMEOUT_MS)
     max_retries = _DOWNLOAD_MAX_RETRIES.get(data_type, _DOWNLOAD_DEFAULT_RETRIES)
@@ -222,10 +243,60 @@ async def _download_with_retry(
                     last_exc, timeout_ms // 1000,
                 )
                 await asyncio.sleep(2)
+            logger_obj.info("[%s] [%d/%d] 注册 download 事件监听(timeout=%ds)...",
+                            data_type, attempt + 1, max_retries + 1, timeout_ms // 1000)
             download_promise = page.wait_for_event("download", timeout=timeout_ms)
+
+            # ★ 监听 export 响应:如果返回 JSON(限流),提前抛错触发重试
+            export_rate_limited = {"hit": False, "msg": ""}
+
+            def _on_response(resp):
+                try:
+                    if "/export" in resp.url.lower() and resp.request.method == "GET":
+                        ctype = (resp.headers.get("content-type") or "").lower()
+                        if "json" in ctype:
+                            # JSON 响应 = 被限流(或异常),不会触发 download 事件
+                            export_rate_limited["hit"] = True
+                            async def _read_body():
+                                try:
+                                    body = await resp.text()
+                                    export_rate_limited["msg"] = body[:200]
+                                except Exception:
+                                    export_rate_limited["msg"] = "(body 读取失败)"
+                            asyncio.ensure_future(_read_body())
+                except Exception:
+                    pass
+            page.on("response", _on_response)
+
             # 每次尝试都重新点导出(上次可能只是注册了事件但按钮没真的点到/服务器没反应)
+            logger_obj.info("[%s] [%d/%d] 开始点击导出按钮...",
+                            data_type, attempt + 1, max_retries + 1)
             await _click_export_button(page)
-            download = await download_promise
+            logger_obj.info("[%s] [%d/%d] 导出按钮已点击,等待 download 事件触发...",
+                            data_type, attempt + 1, max_retries + 1)
+
+            # 轮询等待 download 事件,同时检测限流响应
+            download = None
+            poll_start = asyncio.get_event_loop().time()
+            while True:
+                # 检查限流
+                if export_rate_limited["hit"]:
+                    page.remove_listener("response", _on_response)
+                    raise RuntimeError(
+                        f"BMS 导出返回 JSON(疑似限流或异常): {export_rate_limited['msg']}"
+                    )
+                # 检查 download 事件是否已触发(非阻塞)
+                try:
+                    download = await asyncio.wait_for(asyncio.shield(download_promise), timeout=2.0)
+                    break
+                except asyncio.TimeoutError:
+                    # 2 秒内没触发,继续轮询(只要总时间没超 timeout_ms)
+                    elapsed = asyncio.get_event_loop().time() - poll_start
+                    if elapsed * 1000 > timeout_ms:
+                        raise RuntimeError(f"等待 download 事件超时({int(elapsed)}s)")
+                    continue
+
+            page.remove_listener("response", _on_response)
             logger_obj.info(
                 "[%s] 文件下载成功(尝试 %d/%d):%s",
                 data_type, attempt + 1, max_retries + 1, download.suggested_filename,
@@ -233,11 +304,20 @@ async def _download_with_retry(
             return download
         except Exception as e:
             last_exc = e
-            # download 事件超时/失败,下一轮循环会重试(如果还有次数)
-            logger_obj.warning(
-                "[%s] 下载失败(尝试 %d/%d):%s",
-                data_type, attempt + 1, max_retries + 1, e,
-            )
+            err_msg = str(e)
+            # 如果是被限流,等待 60 秒再重试(BMS 限流窗口是 1 分钟)
+            if "限流" in err_msg or "1分钟" in err_msg or "请勿重复" in err_msg:
+                logger_obj.warning(
+                    "[%s] 下载被限流(尝试 %d/%d):%s,等待 60s 后重试...",
+                    data_type, attempt + 1, max_retries + 1, err_msg,
+                )
+                await asyncio.sleep(60)
+            else:
+                logger_obj.warning(
+                    "[%s] 下载失败(尝试 %d/%d):%s: %s",
+                    data_type, attempt + 1, max_retries + 1, type(e).__name__, e,
+                )
+                await asyncio.sleep(2)
             continue
 
     # 所有重试都用完了 → 把最后一次异常抛出去
@@ -1628,10 +1708,12 @@ class BmsFetcher:
                     logger.info(f"  点击查询按钮: text={txt!r}")
                     try:
                         await b.click(timeout=5000)
+                        logger.info(f"  查询按钮 click() 已返回")
                         return
                     except Exception as click_err:
                         logger.warning(f"  Playwright click 超时: {click_err}, 改用 JS 点击")
                         await b.evaluate("(el) => el.click()")
+                        logger.info(f"  JS click() 已返回")
                         return
             # 2) 找筛选条(y 小)里第一个非「重置/导出」按钮
             y_sorted = []
@@ -1792,7 +1874,7 @@ class BmsFetcher:
                 if not ocr_logged_in:
                     await asyncio.sleep(1)
                     await page.click('button:has-text("登录"), button[type="submit"]')
-                    await page.wait_for_load_state("networkidle")
+                    await page.wait_for_load_state("networkidle", timeout=15_000)
                     await asyncio.sleep(3)
 
                     if "login" in page.url.lower():
@@ -1875,7 +1957,7 @@ class BmsFetcher:
                 logger.warning(f"[{data_type}] 轮询筛选结果总数异常(不影响流程): {e}")
 
             try:
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("networkidle", timeout=15_000)
             except Exception:
                 pass
             await asyncio.sleep(2)
@@ -2377,6 +2459,10 @@ class BmsFetcher:
                             continue
 
                         # 单源抓取 + 复用登录态(组内首个源登录)
+                        # ⚠️ 超时按 data_type 取(与 _download_with_retry 的超时配置一致):
+                        #   wallet 600s / refund 180s / ticket 180s / 其他 120s
+                        #   历史问题: 之前硬编码 timeout=180 导致 wallet 抓取 1-2 月大数据量时超时失败
+                        _fetch_timeout = _DOWNLOAD_TIMEOUT_MS.get(data_type, _DOWNLOAD_DEFAULT_TIMEOUT_MS) // 1000
                         await asyncio.wait_for(
                             self._do_fetch_one_shared(
                                 data_type=data_type,
@@ -2388,12 +2474,12 @@ class BmsFetcher:
                                 page=page,
                                 already_logged_in=logged_in_ok,
                             ),
-                            timeout=180,
+                            timeout=_fetch_timeout,
                         )
                         if fr.success:
                             logged_in_ok = True
                     except asyncio.TimeoutError:
-                        fr.error = f"抓取超时(180秒): {config.get('name', data_type)}"
+                        fr.error = f"抓取超时({_fetch_timeout}秒): {config.get('name', data_type)}"
                         logger.error(fr.error)
                     except Exception as e:
                         fr.error = f"抓取失败: {e}"
@@ -2531,7 +2617,7 @@ class BmsFetcher:
                 if not ocr_logged_in:
                     await asyncio.sleep(1)
                     await page.click('button:has-text("登录"), button[type="submit"]')
-                    await page.wait_for_load_state("networkidle")
+                    await page.wait_for_load_state("networkidle", timeout=15_000)
                     await asyncio.sleep(3)
                     if "login" in page.url.lower():
                         error_elem = await page.query_selector(".el-message__content, .el-form-item__error")
@@ -2570,14 +2656,23 @@ class BmsFetcher:
             await self._set_time_range(page, start_str, end_str)
         await asyncio.sleep(1)
 
-        # 4. 搜索
+        # 4. 搜索 — 带页面卡死检测 + 刷新重试
+        # ⚠️ 2026-08-11 修复: BMS 导出有"1分钟内请勿重复操作"限流
+        #   历史问题: 之前 _download_with_retry 重试时连续点导出按钮,触发限流,
+        #   返回 JSON {"success":false,"message":"1分钟内请勿重复操作"},
+        #   不会触发 download 事件,导致 wait_for_event("download") 等到 600s 超时
+        #   修复: 在导出响应返回 JSON(限流)时,等待 60s 后重试,而不是立即重试点按钮
+        #   (注意: networkidle < 1s 是正常的,因为页面早就加载完了,点搜索只是局部 ajax)
         logger.info(f"[{data_type}] 点击查询/搜索...")
         await self._click_query_button(page)
+        logger.info(f"[{data_type}] 查询按钮已点击,开始等待页面加载(最多15s)...")
         try:
-            await page.wait_for_load_state("networkidle")
-        except Exception:
-            pass
+            await page.wait_for_load_state("networkidle", timeout=15_000)
+            logger.info(f"[{data_type}] 页面已达到 networkidle 状态")
+        except Exception as e:
+            logger.info(f"[{data_type}] networkidle 等待结束(超时或异常,忽略): {type(e).__name__}: {e}")
         await asyncio.sleep(2)
+        logger.info(f"[{data_type}] 准备点击导出按钮并等待下载...")
 
         # 5. 导出
         # P1-1: 调用统一的 _download_with_retry (自动按 data_type 配置超时 + 重试)
