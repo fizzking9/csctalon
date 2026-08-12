@@ -257,3 +257,104 @@ def today_refund_recovery_endpoint(
     """
     key = f"today:rr:{date}:{start}:{end}"
     return R(data=cached_call(key, 60, A.refund_recovery_analysis, db, date, start, end))
+
+
+# ==============================================================
+# 退款看板深度分析 - 9 个新接口 (2026-08-12)
+# ==============================================================
+@router.get("/refund/personnel-analysis", response_model=R, summary="退款看板-人员分析汇总")
+def refund_personnel_analysis_endpoint(
+    db: DBSession, _: CurrentUser,
+    start: str | None = Query(None), end: str | None = Query(None),
+    department: str | None = Query(None), group: str | None = Query(None),
+    specialty: str | None = Query(None), staff_type: str | None = Query(None),
+):
+    key = f"refund:pa:{start}:{end}:{department}:{group}:{specialty}:{staff_type}"
+    return R(data=cached_call(key, 60, A.refund_personnel_analysis, db, start, end,
+                               department=department, group=group, specialty=specialty, staff_type=staff_type))
+
+
+@router.get("/refund/person-devices", response_model=R, summary="退款看板-人员接待设备清单")
+def refund_person_devices_endpoint(
+    db: DBSession, _: CurrentUser,
+    operator: str = Query(..., description="人员别名(如 企微-叶珍凤)"),
+    start: str | None = Query(None), end: str | None = Query(None),
+    result: str = Query("all", pattern="^(all|success|failed)$"),
+):
+    key = f"refund:pd:{operator}:{start}:{end}:{result}"
+    return R(data=cached_call(key, 60, A.refund_person_devices, db, operator, start, end, result=result))
+
+
+@router.get("/refund/personnel-trend", response_model=R, summary="退款看板-人员趋势")
+def refund_personnel_trend_endpoint(
+    db: DBSession, _: CurrentUser,
+    start: str | None = Query(None), end: str | None = Query(None),
+    operators: str | None = Query(None, description="逗号分隔的人员别名列表"),
+    grain: str = Query("day", pattern="^(day|week)$"),
+):
+    key = f"refund:pt:{start}:{end}:{operators}:{grain}"
+    return R(data=cached_call(key, 120, A.refund_personnel_trend, db, start, end, operators=operators, grain=grain))
+
+
+@router.get("/refund/person-reason-matrix", response_model=R, summary="退款看板-人员×原因矩阵")
+def refund_person_reason_matrix_endpoint(
+    db: DBSession, _: CurrentUser,
+    start: str | None = Query(None), end: str | None = Query(None),
+    top: int = Query(15, ge=1, le=50),
+):
+    key = f"refund:prm:{start}:{end}:{top}"
+    return R(data=cached_call(key, 120, A.refund_person_reason_matrix, db, start, end, top=top))
+
+
+@router.get("/refund/device-analysis", response_model=R, summary="退款看板-设备分析")
+def refund_device_analysis_endpoint(
+    db: DBSession, _: CurrentUser,
+    start: str | None = Query(None), end: str | None = Query(None),
+    reason: str | None = Query(None), amount_min: float | None = Query(None),
+    amount_max: float | None = Query(None), reception_count_min: int | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    key = f"refund:da:{start}:{end}:{reason}:{amount_min}:{amount_max}:{reception_count_min}:{limit}"
+    return R(data=cached_call(key, 120, A.refund_device_analysis, db, start, end,
+                               reason=reason, amount_min=amount_min, amount_max=amount_max,
+                               reception_count_min=reception_count_min, limit=limit))
+
+
+@router.get("/refund/device-detail", response_model=R, summary="退款看板-设备详情")
+def refund_device_detail_endpoint(
+    db: DBSession, _: CurrentUser,
+    device_sn: str = Query(..., description="设备SN"),
+    start: str | None = Query(None), end: str | None = Query(None),
+):
+    key = f"refund:dd:{device_sn}:{start}:{end}"
+    return R(data=cached_call(key, 60, A.refund_device_detail, db, device_sn, start, end))
+
+
+@router.get("/refund/type-trend", response_model=R, summary="退款看板-类型趋势")
+def refund_type_trend_endpoint(
+    db: DBSession, _: CurrentUser,
+    start: str | None = Query(None), end: str | None = Query(None),
+    grain: str = Query("day", pattern="^(day|week|month)$"),
+    dimension: str = Query("reason", pattern="^(reason|staff_type)$"),
+):
+    key = f"refund:tt:{start}:{end}:{grain}:{dimension}"
+    return R(data=cached_call(key, 120, A.refund_type_trend, db, start, end, grain=grain, dimension=dimension))
+
+
+@router.get("/refund/problem-type-detail", response_model=R, summary="退款看板-problem_type细分Top10")
+def refund_problem_type_detail_endpoint(
+    db: DBSession, _: CurrentUser,
+    start: str | None = Query(None), end: str | None = Query(None),
+    top: int = Query(10, ge=1, le=30),
+):
+    key = f"refund:ptd:{start}:{end}:{top}"
+    return R(data=cached_call(key, 120, A.refund_problem_type_detail, db, start, end, top=top))
+
+
+@router.get("/refund/group-comparison", response_model=R, summary="退款看板-组间对比")
+def refund_group_comparison_endpoint(
+    db: DBSession, _: CurrentUser,
+    start: str | None = Query(None), end: str | None = Query(None),
+):
+    key = f"refund:gc:{start}:{end}"
+    return R(data=cached_call(key, 120, A.refund_group_comparison, db, start, end))

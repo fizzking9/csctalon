@@ -58,8 +58,8 @@ PRESET_VIEWS: list[dict] = [
     },
     {
         "code": "preset_refund_reason_top",
-        "name": "退费原因TOP10",
-        "description": "退款类工单按服务项(真实退款原因)汇总金额与笔数。refund.refund_reason 99%是'用户退款'无意义,真实原因在 service_tickets.service_item",
+        "name": "退费原因TOP10 金额+单数",
+        "description": "退款类工单按服务项(真实退款原因)汇总 退款金额+单数 横向双柱 TOP10。双数值轴:金额(元)+单数。refund.refund_reason 99%是'用户退款'无意义,真实原因在 service_tickets.service_item",
         "chart_type": "bar",
         "segments": [{
             "source_code": "ticket",
@@ -567,12 +567,12 @@ PRESET_VIEWS: list[dict] = [
         "classification_rule_ids": [],
         "time_range_default": {"days": 90},
     },
-    # 视图2:退费审核人占比(饼图)
+    # 视图2:退费审核人 金额+单数(横向双柱, 2026-08-12 改 HANDLER)
     {
         "code": "preset_refund_operator_v2",
-        "name": "退费审核人占比",
-        "description": "线上已退款按审核人(归一化)金额占比分布,TOP10+其他。看板时间范围(7/30天)生效",
-        "chart_type": "pie",
+        "name": "退费审核人 金额+单数",
+        "description": "线上已退款按审核人(归一化) 退款金额+单数 横向双柱 TOP10。双数值轴:金额(元)+单数。看板时间范围生效",
+        "chart_type": "bar",
         "segments": [{
             "source_code": "refund",
             "label": "审核人",
@@ -1038,6 +1038,26 @@ PRESET_VIEWS: list[dict] = [
         "code": "preset_refund_recovery_reason_dist",
         "name": "退款挽回 失败原因分布(归一化7大类)",
         "description": "挽留失败 SN 的退款原因归一化分布(柱+占比%双Y轴). 7大类:设备硬件/充值问题/服务体验/经济因素/合规风控/用户主观/其他未分类. 真实原因从 refunds.refund_reason 与 service_tickets.service_item 交叉汇总归一.",
+        "chart_type": "bar",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_refund_recovery_reason_wish",
+        "name": "退款意愿 原因分布(全接待SN)",
+        "description": "所有接待过退款类问题的SN(分母), 按cs_record.problem_type归一化原因分布(柱+占比%双Y轴). 反映客户退款意愿的原始原因构成.",
+        "chart_type": "bar",
+        "segments": [],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_refund_recovery_reason_saved",
+        "name": "挽回成功SN 原因分布",
+        "description": "挽回成功SN(分母-失败) 按cs_record.problem_type归一化原因分布(柱+占比%双Y轴). 反映哪些原因的退款意愿被成功拦截.",
         "chart_type": "bar",
         "segments": [],
         "merge_strategy": "add",
