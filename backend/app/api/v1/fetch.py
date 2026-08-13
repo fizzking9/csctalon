@@ -106,6 +106,13 @@ class TaskStatusResponse(BaseModel):
     busy: bool
     cooldown_remaining: int
     task: dict | None
+    # 全局读写并发辅助字段(前端可据此显示黄条/屏蔽刷新等)
+    is_syncing: bool
+    is_writing_heavy: bool
+    last_success_at: str | None
+    current_phase: str | None
+    current_source: str | None
+    percent: int | None
 
 
 class PreflightSource(BaseModel):
@@ -421,11 +428,18 @@ def task_status(_: CurrentUser, task_id: str | None = None):
                 task = None
         if task is not None:
             task_public = task.to_public_dict()
+    gs = sync_task_manager.get_global_status()
     return R(data=TaskStatusResponse(
         task_id=task.task_id if task else None,
         busy=sync_task_manager.is_busy(),
         cooldown_remaining=sync_task_manager.remaining_cooldown_seconds(),
         task=task_public,
+        is_syncing=gs["is_syncing"],
+        is_writing_heavy=gs["is_writing_heavy"],
+        last_success_at=gs["last_success_at"],
+        current_phase=gs["current_phase"],
+        current_source=gs["current_source"],
+        percent=gs["percent"],
     ))
 
 

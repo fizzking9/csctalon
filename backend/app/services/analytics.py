@@ -844,22 +844,42 @@ def _complaint_subitem_case():
     ).label("complaint_sub")
 
 
-# 投诉来源类型(从 service_tickets.service_item 归一化): 区分外部投诉 vs 内部投诉
-#   外部投诉: 工信部投诉 / 全国12315平台 / 公共服务平台 / 消费者协会 / 315 / 监督局 等
-#   内部投诉: 商品投诉 / 服务投诉 / 微信投诉 / 未标注 / 其它
+# 投诉来源类型(从 service_tickets.service_item 归一化): 区分三大类
+#   外部投诉(平台): 工信部投诉 / 全国12315平台 / 公共服务平台 / 消费者协会 / 315 / 监督局 等
+#   商户号投诉: 微信投诉 (也是外部投诉的一种, 但为了展示清晰独立分组)
+#   内部投诉: 商品投诉 / 服务投诉 / 未标注 / 其它
+# 全域适用规则:
+#   外部投诉 = {公共服务平台, 全国12315平台, 消费者协会, 工信部投诉, 微信投诉(商户号)}
+#   内部投诉 = {服务投诉, 商品投诉}
 # 用于分析时独立核算、独立展示、独立出报表
-_EXTERNAL_COMPLAINT_KEYWORDS = (
+_EXTERNAL_PLATFORM_KEYWORDS = (
     "工信部", "12315", "公共服务平台", "消费者协会", "消协",
     "监督局", "市场监管", "市监", "315平台", "12345", "政务平台",
 )
+_MERCHANT_COMPLAINT_KEYWORDS = ("微信",)
 def _complaint_source_type_case(col=ServiceTicket.service_item):
-    """返回 CASE WHEN 表达式: '外部投诉' / '内部投诉'"""
+    """返回 CASE WHEN 表达式: '外部投诉' / '商户号投诉' / '内部投诉'
+    注: 商户号投诉(微信) 本质也是外部投诉, 为展示细分独立出分组"""
     si = func.coalesce(col, literal(""))
-    whens = [si.ilike(f"%{k}%") for k in _EXTERNAL_COMPLAINT_KEYWORDS]
+    platform_whens = [si.ilike(f"%{k}%") for k in _EXTERNAL_PLATFORM_KEYWORDS]
+    merchant_whens = [si.ilike(f"%{k}%") for k in _MERCHANT_COMPLAINT_KEYWORDS]
+    return case(
+        (or_(*platform_whens), "外部投诉"),
+        (or_(*merchant_whens), "商户号投诉"),
+        else_="内部投诉",
+    ).label("complaint_source_type")
+
+# 简化版: 仅区分 外部投诉 vs 内部投诉 (用于需要两桶口径的统计, 如 complaint_by_source 中微信归入外部)
+def _complaint_source_type_simple_case(col=ServiceTicket.service_item):
+    """返回 CASE WHEN 表达式: '外部投诉' / '内部投诉'
+    商户号投诉(微信) 在此处归入外部投诉桶"""
+    si = func.coalesce(col, literal(""))
+    all_external_kws = _EXTERNAL_PLATFORM_KEYWORDS + _MERCHANT_COMPLAINT_KEYWORDS
+    whens = [si.ilike(f"%{k}%") for k in all_external_kws]
     return case(
         (or_(*whens), "外部投诉"),
         else_="内部投诉",
-    ).label("complaint_source_type")
+    ).label("complaint_source_type_simple")
 
 
 # ============================================================
@@ -2957,20 +2977,19 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     _cnt_ec = db.execute(select(func.count()).where(ec_between)).scalar() or 0
     _cnt_cc = db.execute(select(func.count()).where(cc_between)).scalar() or 0
     complaint_total = int(_cnt_st) + int(_cnt_ec) + int(_cnt_cc)
-    # 投诉来源类型聚合: 外部投诉 vs 内部投诉 各自数量与占比(分析维度独立核算)
+    # 投诉来源类型聚合: 外部投诉 vs 内部投诉 各自数量与占比(两桶口径, 商户号投诉=微信归入外部)
     comp_src_rows = db.execute(
-        select(_complaint_source_type_case(), func.count().label("cnt"))
+        select(_complaint_source_type_simple_case(), func.count().label("cnt"))
         .where(tk_between, _ticket_category_case() == "投诉")
-        .group_by("complaint_source_type")
+        .group_by("complaint_source_type_simple")
         .order_by(text("cnt DESC"))
     ).all()
     complaint_by_source = [
         {"name": r[0] or "内部投诉", "value": int(r[1] or 0)}
         for r in comp_src_rows
     ]
-    # 外部投诉平台(ExternalComplaint + CardComplaint) 归入外部/内部 来源桶
+    # 外部投诉平台(ExternalComplaint) 归入外部桶; CardComplaint=卡商群投诉 归入内部桶
     if _cnt_ec > 0:
-        # 所有 external_complaints 统一算 "外部投诉"
         found_outer = False
         for x in complaint_by_source:
             if x["name"] == "外部投诉":
@@ -2992,24 +3011,33 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
             complaint_by_source.append({"name": nm, "value": 0})
     complaint_by_source.sort(key=lambda x: -x["value"])
 
-    # 右2: 投诉根因柱图 (投诉工单关联 cs_record 的 problem_category/type 归并到 6 大类根因)
-    #   逻辑: 投诉工单(device_sn) JOIN cs_record(device_sn) ±24h, 取 diff_min 最小的 1 条
-    #   再用 _complaint_root_case 归并根因
-    comp_root_sql = text(
+    # 右2: 投诉根因柱图 (口径严格 = complaint_total: service_tickets投诉 + external_complaints + card_complaints 全部覆盖)
+    #
+    # 分层统计策略:
+    #   A. service_tickets投诉工单:
+    #        A1. 能匹配到 cs_record ±24h → 用 cs_record 的 problem_category/type 精确归类 (原有6类)
+    #        A2. 未匹配 cs_record → 基于 service_item/service_category 文本关键词粗略归类, 否则"待标注"
+    #   B. external_complaints (外部投诉: 315/监督局等): 基于 complaint_category/platform/keyword 归类,
+    #        否则归入"外部投诉平台受理类"(不虚构根因, 仅标识来自外部平台)
+    #   C. card_complaints (卡商群投诉): 基于 problem_category/problem 文本关键词归类,
+    #        否则归入"卡商群待标注"
+    #
+    # 最终保证: SUM(complaint_roots[*].count) == complaint_total, complaint_unmatched 仅作为覆盖率提示
+
+    # ---------- A层: service_tickets 投诉工单根因 ----------
+    st_root_sql = text(
         """
         WITH comp_tickets AS (
             SELECT
                 st.ticket_no,
                 st.service_item,
+                st.service_category,
                 st.device_sn,
-                st.register_time,
-                st.remark,
-                st.handle_opinion
+                st.register_time
             FROM service_tickets st
             WHERE st.register_time IS NOT NULL
               AND st.register_time >= :ts
               AND st.register_time <= :te
-              -- 投诉工单: 与 _ticket_category_case 口径严格一致
               AND (
                 st.service_category IS NULL
                 OR st.service_category ILIKE '%投诉%'
@@ -3024,56 +3052,135 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
             SELECT DISTINCT ON (ct.ticket_no)
                 ct.ticket_no,
                 ct.service_item,
+                ct.service_category,
                 c.problem_category,
-                c.problem_type
+                c.problem_type,
+                -- 是否匹配到 cs_record: 1=匹配, 0=未匹配
+                CASE WHEN c.problem_category IS NOT NULL THEN 1 ELSE 0 END AS has_match
             FROM comp_tickets ct
-            JOIN cs_records c
+            LEFT JOIN cs_records c
               ON ct.device_sn = c.device_sn
+              AND c.operation_time IS NOT NULL
               AND c.operation_time BETWEEN (ct.register_time - INTERVAL '24 hours')
                                        AND (ct.register_time + INTERVAL '24 hours')
-            WHERE c.operation_time IS NOT NULL
             ORDER BY ct.ticket_no,
+                     CASE WHEN c.problem_category IS NULL THEN 1 ELSE 0 END,
                      ABS(EXTRACT(EPOCH FROM (c.operation_time - ct.register_time))) ASC
         )
         SELECT
             CASE
-                -- 网络质量
-                WHEN COALESCE(problem_category, '') = '网络问题'
-                     OR COALESCE(problem_type, '') ~* '(网|卡|信号|离线|WiFi|激活网卡)'
-                THEN '网络质量类'
-                -- 套餐争议
-                WHEN COALESCE(problem_category, '') = '套餐问题'
-                     OR COALESCE(problem_type, '') ~* '(套餐|涨价|流量统计|360天|包月|加油包|返现|预存|切网)'
-                THEN '套餐争议类'
-                -- 退款协商失败
-                WHEN COALESCE(problem_category, '') = '退款'
+                -- ====== A1: 已匹配 cs_record → 用 cs_record 的精确归类 ======
+                WHEN has_match = 1 AND (
+                    COALESCE(problem_category, '') = '网络问题'
+                    OR COALESCE(problem_type, '') ~* '(网|卡|信号|离线|WiFi|激活网卡)'
+                ) THEN '网络质量类'
+                WHEN has_match = 1 AND (
+                    COALESCE(problem_category, '') = '套餐问题'
+                    OR COALESCE(problem_type, '') ~* '(套餐|涨价|流量统计|360天|包月|加油包|返现|预存|切网)'
+                ) THEN '套餐争议类'
+                WHEN has_match = 1 AND COALESCE(problem_category, '') = '退款'
                 THEN '退款协商失败类'
-                -- 降成争议
-                WHEN COALESCE(problem_category, '') = '降成问题'
-                     OR COALESCE(problem_type, '') ~* '(限速|降成|钻石VIP|VIP|赠送)'
+                WHEN has_match = 1 AND (
+                    COALESCE(problem_category, '') = '降成问题'
+                    OR COALESCE(problem_type, '') ~* '(限速|降成|钻石VIP|VIP|赠送)'
+                ) THEN '降成争议类'
+                WHEN has_match = 1 AND (
+                    COALESCE(problem_category, '') IN ('其他问题', '激活实名')
+                    OR COALESCE(problem_type, '') ~* '(注销|发票|退换货)'
+                ) THEN '其它(注销/发票/退换)'
+
+                -- ====== A2: 未匹配 cs_record 或 用cs_record仍落入待标注 → 用 service_item 文本关键词粗略归类 ======
+                WHEN COALESCE(service_item, '') ~* '(网|卡|信号|离线|WiFi|无网络|网速|断网|网卡)'
+                THEN '网络质量类'
+                WHEN COALESCE(service_item, '') ~* '(套餐|涨价|流量统计|360天|包月|加油包|返现|预存|切网)'
+                THEN '套餐争议类'
+                WHEN COALESCE(service_item, '') ~* '(退款|退费|退钱|不予退款|拒绝退款)'
+                THEN '退款协商失败类'
+                WHEN COALESCE(service_item, '') ~* '(限速|降成|钻石VIP|VIP|赠送)'
                 THEN '降成争议类'
-                -- 其它 (注销/发票/退换货)
-                WHEN COALESCE(problem_category, '') IN ('其他问题', '激活实名')
-                     OR COALESCE(problem_type, '') ~* '(注销|发票|退换货)'
+                WHEN COALESCE(service_item, '') ~* '(注销|发票|退换货|退货|换货)'
                 THEN '其它(注销/发票/退换)'
+                -- 服务投诉/商品投诉但无更细文本 → 待标注
                 ELSE '待标注'
             END AS root_cause,
-            COUNT(*) AS cnt
+            COUNT(*) AS cnt,
+            SUM(has_match) AS matched_cnt  -- 有多少条是通过 cs_record 精确匹配的 (用于计算覆盖率)
         FROM nearest_cs
         GROUP BY 1
         ORDER BY cnt DESC;
         """
     )
-    comp_root_rows = db.execute(comp_root_sql, {"ts": ts, "te": te}).fetchall()
-    complaint_roots = [
-        {"name": r[0], "count": int(r[1] or 0)} for r in comp_root_rows
-    ]
-    # 已关联到接待记录的投诉数 (从子查询 GROUP BY 汇总, 再减去补齐的 0 项前计算)
-    matched_count = sum(r["count"] for r in complaint_roots)
-    # 补齐根因到常见的 6 类, 缺失补 0 (便于前端颜色固定)
+    st_root_rows = db.execute(st_root_sql, {"ts": ts, "te": te}).fetchall()
+    complaint_roots_map: dict[str, int] = {}
+    st_matched_count = 0
+    for r in st_root_rows:
+        nm = str(r[0]); cnt = int(r[1] or 0); mcnt = int(r[2] or 0)
+        complaint_roots_map[nm] = complaint_roots_map.get(nm, 0) + cnt
+        st_matched_count += mcnt
+
+    # ---------- B层: external_complaints 外部投诉(平台受理) ----------
+    def _ec_root_cause(complaint_category: str | None, platform: str | None, keyword: str | None) -> str:
+        """external_complaint 根因归类 (基于文本关键词, 不虚构根因)"""
+        blob = " ".join(x or "" for x in [complaint_category or "", platform or "", keyword or ""])
+        b = blob.lower()
+        net_kw = ("网", "卡", "信号", "离线", "wifi", "无网络", "网速", "断网", "网卡")
+        pkg_kw = ("套餐", "涨价", "流量统计", "360天", "包月", "加油包", "返现", "预存", "切网")
+        ref_kw = ("退款", "退费", "退钱", "不予退款", "拒绝退款")
+        down_kw = ("限速", "降成", "钻石vip", "vip", "赠送")
+        oth_kw = ("注销", "发票", "退换货", "退货", "换货")
+        if any(k in b for k in net_kw): return "网络质量类"
+        if any(k in b for k in pkg_kw): return "套餐争议类"
+        if any(k in b for k in ref_kw): return "退款协商失败类"
+        if any(k in b for k in down_kw): return "降成争议类"
+        if any(k in b for k in oth_kw): return "其它(注销/发票/退换)"
+        # 无可用关键词 → 归入"外部平台投诉受理类"(独立桶, 保持6+1类)
+        return "外部平台投诉受理类"
+
+    ec_list_rows = db.execute(
+        select(ExternalComplaint.complaint_category,
+               ExternalComplaint.platform,
+               ExternalComplaint.keyword)
+        .where(ec_between)
+    ).all()
+    for r in ec_list_rows:
+        rc = _ec_root_cause(r[0], r[1], r[2])
+        complaint_roots_map[rc] = complaint_roots_map.get(rc, 0) + 1
+
+    # ---------- C层: card_complaints 卡商群投诉 ----------
+    def _cc_root_cause(problem_category: str | None, problem: str | None) -> str:
+        """card_complaint 根因归类 (基于文本关键词)"""
+        blob = " ".join(x or "" for x in [problem_category or "", problem or ""])
+        b = blob.lower()
+        net_kw = ("网", "卡", "信号", "离线", "wifi", "无网络", "网速", "断网", "网卡")
+        pkg_kw = ("套餐", "涨价", "流量统计", "360天", "包月", "加油包", "返现", "预存", "切网")
+        ref_kw = ("退款", "退费", "退钱", "不予退款", "拒绝退款")
+        down_kw = ("限速", "降成", "钻石vip", "vip", "赠送")
+        oth_kw = ("注销", "发票", "退换货", "退货", "换货")
+        if any(k in b for k in net_kw): return "网络质量类"
+        if any(k in b for k in pkg_kw): return "套餐争议类"
+        if any(k in b for k in ref_kw): return "退款协商失败类"
+        if any(k in b for k in down_kw): return "降成争议类"
+        if any(k in b for k in oth_kw): return "其它(注销/发票/退换)"
+        return "卡商群待标注类"
+
+    cc_list_rows = db.execute(
+        select(CardComplaint.problem_category,
+               CardComplaint.problem)
+        .where(cc_between)
+    ).all()
+    for r in cc_list_rows:
+        rc = _cc_root_cause(r[0], r[1])
+        complaint_roots_map[rc] = complaint_roots_map.get(rc, 0) + 1
+
+    # ---------- 汇总根因 ----------
+    complaint_roots = [{"name": k, "count": v} for k, v in complaint_roots_map.items()]
+    # 所有根因的总数 = complaint_total (保证柱图总数与投诉总数匹配)
+    root_total = sum(r["count"] for r in complaint_roots)
+    # 补齐标准根因桶 (6 标准 + 2 扩展: 外部平台/卡商群) 缺失补 0
     root_order = [
         "网络质量类", "套餐争议类", "退款协商失败类",
-        "降成争议类", "其它(注销/发票/退换)", "待标注",
+        "降成争议类", "其它(注销/发票/退换)",
+        "外部平台投诉受理类", "卡商群待标注类", "待标注",
     ]
     present_root = {r["name"] for r in complaint_roots}
     for nm in root_order:
@@ -3081,8 +3188,10 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
             complaint_roots.append({"name": nm, "count": 0})
     complaint_roots.sort(key=lambda x: -x["count"])
 
-    # 今日未关联 cs_record 的投诉数 (关联覆盖率提示)
-    complaint_unmatched = max(0, complaint_total - matched_count)
+    # 覆盖率统计: service_tickets 中有多少条精确匹配到了 cs_record
+    # complaint_unmatched 含义调整为: 未精确匹配 cs_record 的数量 (其余用文本归类或扩展桶)
+    # 这样 SUM(roots.count) == complaint_total 严格成立, unmatched 仅作质量提示
+    complaint_unmatched = max(0, _cnt_st - st_matched_count)
 
     return {
         "date": d_iso,

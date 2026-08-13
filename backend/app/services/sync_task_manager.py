@@ -156,6 +156,38 @@ class SyncTaskManager:
             busy = bool(self._current_task.status == "running")
         return busy
 
+    def is_writing_heavy(self) -> bool:
+        """当前是否处于「写入高峰期」(导入/匹配/宽表构建阶段),
+        用于缓存策略:高峰期自动延长TTL防DB击穿,以及UI提示黄条"""
+        if not self.is_busy() or self._current_task is None:
+            return False
+        task = self._current_task
+        # __post_sync__ 进行中 = 匹配/宽表/ANALYZE = 写入高峰
+        post_sync = task.per_source.get("__post_sync__")
+        if post_sync and post_sync.phase == "importing":
+            return True
+        # 任一数据源在 importing 阶段 = 正在 upsert,写入高峰
+        for dt in task.data_types:
+            p = task.per_source.get(dt)
+            if p and p.phase == "importing":
+                return True
+        return False
+
+    def get_global_status(self) -> dict:
+        """返回给全局 API/前端的状态(跨任务)"""
+        cur = self._current_task
+        return {
+            "is_syncing": self.is_busy(),
+            "is_writing_heavy": self.is_writing_heavy(),
+            "cooldown_remaining": self.remaining_cooldown_seconds(),
+            "last_success_at": self._last_success_at.isoformat() if self._last_success_at else None,
+            "current_task_id": cur.task_id if cur else None,
+            "current_status": cur.status if cur else None,
+            "current_phase": cur.to_public_dict().get("current_phase") if cur else None,
+            "current_source": cur.to_public_dict().get("current_source") if cur else None,
+            "percent": cur.to_public_dict().get("percent") if cur else 0,
+        }
+
     def get_current_task(self) -> SyncTask | None:
         return self._current_task
 

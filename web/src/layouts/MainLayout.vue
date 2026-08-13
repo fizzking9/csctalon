@@ -140,6 +140,27 @@
         </div>
       </el-header>
 
+      <!-- 同步中提示条: 不阻塞任何功能, 只是告诉用户此刻数据可能稍旧,
+           用户正常读写不受影响, PostgreSQL MVCC 天然支持并发。 -->
+      <el-alert
+        v-if="syncBanner.visible"
+        :title="syncBanner.title"
+        :type="syncBanner.type"
+        :description="syncBanner.description"
+        show-icon
+        :closable="false"
+        class="sync-banner"
+      >
+        <template v-if="syncBanner.percent != null" #default>
+          <el-progress
+            :percentage="syncBanner.percent"
+            :stroke-width="8"
+            :text-inside="false"
+            :status="syncBanner.progressStatus"
+          />
+        </template>
+      </el-alert>
+
       <el-main class="main">
         <router-view v-slot="{ Component }">
           <transition name="fade" mode="out-in">
@@ -152,9 +173,10 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { taskStatus } from '@/api/fetch'
 
 const route = useRoute()
 const router = useRouter()
@@ -166,6 +188,84 @@ const currentTitle = computed(() => route.meta.title || '')
 const roleLabel = computed(() => {
   const map = { admin: '管理员', supervisor: '主管', agent: '客服' }
   return map[authStore.role] || ''
+})
+
+// ---------- 全局同步状态轮询 & 黄条提示 ----------
+// 全局轻量轮询:15秒一次,仅用于UI提示,不阻塞任何操作
+const SYNC_POLL_MS = 15 * 1000
+const rawSync = reactive({
+  is_syncing: false,
+  is_writing_heavy: false,
+  percent: 0,
+  current_phase: null,
+  current_source: null,
+  task_id: null,
+  last_success_at: null,
+})
+
+let _pollTimer = null
+
+async function _pollSyncOnce() {
+  try {
+    const resp = await taskStatus(null, { silentError: true })
+    const data = (resp && resp.data) || resp || {}
+    rawSync.is_syncing = !!data.is_syncing
+    rawSync.is_writing_heavy = !!data.is_writing_heavy
+    rawSync.percent = typeof data.percent === 'number' ? data.percent : 0
+    rawSync.current_phase = data.current_phase || null
+    rawSync.current_source = data.current_source || null
+    rawSync.task_id = data.task_id || null
+    rawSync.last_success_at = data.last_success_at || null
+  } catch (e) {
+    // 网络/后端 502 等错误不影响 UI,静默忽略
+  }
+}
+
+const syncBanner = computed(() => {
+  if (!rawSync.is_syncing && !rawSync.is_writing_heavy) {
+    return { visible: false }
+  }
+  const sourceLabel = rawSync.current_source === '__post_sync__'
+    ? '后处理(关联匹配/宽表物化/统计刷新)'
+    : rawSync.current_source
+    ? `数据源「${rawSync.current_source}」`
+    : ''
+  const phaseLabel = rawSync.current_phase ? ` · 当前:${rawSync.current_phase}` : ''
+  if (rawSync.is_writing_heavy) {
+    // 写入高峰(红色 warning→danger 级): 正在导入/构建宽表,缓存策略已切换
+    const descParts = []
+    descParts.push(`正在批量写入数据库${sourceLabel ? ' — ' + sourceLabel : ''}${phaseLabel}`)
+    descParts.push('所有页面照常可用(PostgreSQL MVCC 读写不互锁)，展示的可能是几分钟前的缓存数据,同步完成后会自动刷新。')
+    return {
+      visible: true,
+      type: 'warning',
+      title: `🔥 写入高峰期 · 同步中 ${rawSync.percent ?? 0}%`,
+      description: descParts.join('  \n'),
+      percent: rawSync.percent ?? null,
+      progressStatus: rawSync.percent >= 100 ? 'success' : '',
+    }
+  }
+  // 仅抓取/等待阶段(黄色 info): 主要是 Playwright 等待 BMS, 对 DB 没压力
+  return {
+    visible: true,
+    type: 'info',
+    title: `后台同步最新数据中 · 进度 ${rawSync.percent ?? 0}%`,
+    description: `正在自动抓取/整理最新记录${phaseLabel}。所有功能正常使用，同步完成后自动更新缓存。`,
+    percent: rawSync.percent ?? null,
+    progressStatus: '',
+  }
+})
+
+onMounted(() => {
+  _pollSyncOnce()
+  _pollTimer = setInterval(_pollSyncOnce, SYNC_POLL_MS)
+})
+
+onBeforeUnmount(() => {
+  if (_pollTimer) {
+    clearInterval(_pollTimer)
+    _pollTimer = null
+  }
 })
 
 function handleCommand(cmd) {
@@ -229,6 +329,17 @@ function handleCommand(cmd) {
   background: #f0f2f5;
   padding: 16px;
   overflow-y: auto;
+}
+.sync-banner {
+  margin: 0 16px;
+  border-radius: 6px;
+}
+.sync-banner :deep(.el-alert__description) {
+  white-space: pre-line;
+}
+.sync-banner :deep(.el-progress) {
+  margin-top: 6px;
+  max-width: 480px;
 }
 .fade-enter-active,
 .fade-leave-active {

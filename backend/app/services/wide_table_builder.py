@@ -16,6 +16,7 @@
 """
 
 import logging
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -94,6 +95,10 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None, pro
                 progress_callback(total_built, len(target_refund_nos))
             except Exception:
                 pass
+        # ⚠️ 读写并发友好: 每批 upsert 后小憩 200ms,把 CPU/IO/连接槽位让给前端查询
+        #   宽表构建宁可多花 5-10% 时间,也不把 PostgreSQL 打满导致看板卡顿
+        if start + _BATCH_SIZE < len(target_refund_nos):
+            time.sleep(0.2)
 
     logger.info(
         f"refund_wide 构建完成: built={total_built}, skipped={total_skipped}, "

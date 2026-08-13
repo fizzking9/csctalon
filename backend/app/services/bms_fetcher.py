@@ -235,6 +235,35 @@ async def _download_with_retry(
     last_exc: Exception | None = None
 
     for attempt in range(0, max_retries + 1):
+        download_task: asyncio.Task | None = None
+        on_response_removed = False
+
+        def _remove_response_listener(p):
+            nonlocal on_response_removed
+            if on_response_removed:
+                return
+            try:
+                p.remove_listener("response", _on_response)
+            except Exception:
+                pass
+            on_response_removed = True
+
+        def _drain_task(t: asyncio.Task | None):
+            """取消 task 并消费其结果/异常,避免「Task exception was never retrieved」噪音"""
+            if t is None or t.done():
+                return
+            try:
+                t.cancel()
+            except Exception:
+                pass
+            # 不 await(避免阻塞重试),只挂回调消费结果
+            def _cb(fut):
+                try:
+                    fut.result()
+                except (asyncio.CancelledError, Exception):
+                    pass
+            t.add_done_callback(_cb)
+
         try:
             if attempt > 0:
                 logger_obj.info(
@@ -245,12 +274,9 @@ async def _download_with_retry(
                 await asyncio.sleep(2)
             logger_obj.info("[%s] [%d/%d] 注册 download 事件监听(timeout=%ds)...",
                             data_type, attempt + 1, max_retries + 1, timeout_ms // 1000)
-            # ⚠️ 2026-08-12 修复: 将协程转为 Task 一次,后续 asyncio.shield(Task) 只是对
-            #   Future 包壳,不会重复 ensure_future(coro) → 避免 "cannot reuse already
-            #   awaited coroutine" 错误(此前 download_promise 是裸协程,每轮 poll 的
-            #   shield(download_promise) 都试图为新协程建 Task,已运行的协程报错,
-            #   产生 146 条 "Task exception was never retrieved" 噪音并导致 download 等待异常)
-            download_task = asyncio.ensure_future(
+            # ⚠️ 每次重试都为 wait_for_event 创建独立 Task(= ensure_future),
+            #   避免历史上裸协程复用 → "cannot reuse already awaited coroutine" 报错
+            download_task = asyncio.create_task(
                 page.wait_for_event("download", timeout=timeout_ms)
             )
 
@@ -270,7 +296,8 @@ async def _download_with_retry(
                                     export_rate_limited["msg"] = body[:200]
                                 except Exception:
                                     export_rate_limited["msg"] = "(body 读取失败)"
-                            asyncio.ensure_future(_read_body())
+                            # 用 create_task 挂后台,避免同步回调里直接 await 协程
+                            asyncio.create_task(_read_body())
                 except Exception:
                     pass
             page.on("response", _on_response)
@@ -283,19 +310,17 @@ async def _download_with_retry(
                             data_type, attempt + 1, max_retries + 1)
 
             # 轮询等待 download 事件,同时检测限流响应
-            # ⚠️ shield(download_task) 传入的是 Task(Future),ensure_future 直接返回它,
-            #   不会尝试再次创建 Task → 可安全反复调用
             download = None
             poll_start = asyncio.get_event_loop().time()
             while True:
                 # 检查限流
                 if export_rate_limited["hit"]:
-                    page.remove_listener("response", _on_response)
-                    download_task.cancel()
+                    _remove_response_listener(page)
+                    _drain_task(download_task)
                     raise RuntimeError(
                         f"BMS 导出返回 JSON(疑似限流或异常): {export_rate_limited['msg']}"
                     )
-                # 检查 download 事件是否已触发(非阻塞)
+                # 检查 download 事件是否已触发(用 shield+短 timeout 轮询)
                 try:
                     download = await asyncio.wait_for(asyncio.shield(download_task), timeout=2.0)
                     break
@@ -303,11 +328,11 @@ async def _download_with_retry(
                     # 2 秒内没触发,继续轮询(只要总时间没超 timeout_ms)
                     elapsed = asyncio.get_event_loop().time() - poll_start
                     if elapsed * 1000 > timeout_ms:
-                        download_task.cancel()
+                        _drain_task(download_task)
                         raise RuntimeError(f"等待 download 事件超时({int(elapsed)}s)")
                     continue
 
-            page.remove_listener("response", _on_response)
+            _remove_response_listener(page)
             logger_obj.info(
                 "[%s] 文件下载成功(尝试 %d/%d):%s",
                 data_type, attempt + 1, max_retries + 1, download.suggested_filename,
@@ -315,15 +340,8 @@ async def _download_with_retry(
             return download
         except Exception as e:
             # ⚠️ 清理:移除 response listener + 取消残留 download_task,避免泄漏
-            try:
-                page.remove_listener("response", _on_response)
-            except Exception:
-                pass
-            try:
-                if not download_task.done():
-                    download_task.cancel()
-            except Exception:
-                pass
+            _remove_response_listener(page)
+            _drain_task(download_task)
             last_exc = e
             err_msg = str(e)
             # 如果是被限流,等待 60 秒再重试(BMS 限流窗口是 1 分钟)
