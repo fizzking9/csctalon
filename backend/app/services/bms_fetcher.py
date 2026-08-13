@@ -2495,6 +2495,47 @@ class BmsFetcher:
 
             try:
                 for i, task in enumerate(group_tasks):
+                    # ═══════════════════════════════════════════════════════════
+                    # 2026-08-13 关键修复: 同组(同 base_url) 的每个源用全新 page,
+                    #   而不是共用同一个 page! 登录态保存在 context(cookies/
+                    #   localStorage),page 只是渲染容器,重建 page 不会丢失登录。
+                    #   此前:ticket 导出 8500+ 行后,页面 JS heap / Blob 内存膨胀,
+                    #       ticket_finish/wallet 复用同一个 page,page.goto 直接
+                    #       "Page crashed",整组 3 个源连锁失败。
+                    #   现在:每处理一个源前 close 旧 page + new_page,
+                    #       彻底隔离每轮 DOM/内存开销,同时登录态 context 共享省 3 次登录。
+                    # ═══════════════════════════════════════════════════════════
+                    try:
+                        # 先尝试关闭当前 page(非首个,第 1 个源之前已 new_page 过)
+                        if i > 0 and page is not None:
+                            try:
+                                await page.close()
+                            except Exception:
+                                pass
+                        # 无论关闭是否成功,都从 context 新建干净的 page
+                        page = await context.new_page()
+                    except Exception as _e:
+                        # 如果连 new_page 都失败,通常是 context 本身崩了,
+                        # 这时只能标记组内后续源失败并 break 出组
+                        logger.error(
+                            f"[组{group_idx+1}] 创建新页面失败(context 可能已崩溃), "
+                            f"源 {task.get('data_type')} 及后续同组源将失败: {_e}"
+                        )
+                        # 把当前 task 记失败 + 剩余 group_tasks 也标记失败
+                        _cur_type = task.get("data_type")
+                        _cur_cfg = task.get("config") or {}
+                        _fr_cur = FetchResult(data_type=_cur_type or "", error=f"创建新页面失败: {_e}")
+                        results_map[_cur_type] = _fr_cur
+                        if on_progress:
+                            await on_progress(_cur_type, "failed", _fr_cur)
+                        for _j in range(i + 1, len(group_tasks)):
+                            _t = group_tasks[_j]
+                            _dt = _t["data_type"]
+                            _fr2 = FetchResult(data_type=_dt, error=f"[同组页面创建失败连锁] {_e}")
+                            results_map[_dt] = _fr2
+                            if on_progress:
+                                await on_progress(_dt, "failed", _fr2)
+                        break  # 直接跳出组循环
                     data_type = task["data_type"]
                     start, end = task["start"], task["end"]
                     config = task["config"]
@@ -2521,7 +2562,7 @@ class BmsFetcher:
                                 next_type = group_tasks[i + 1]["data_type"]
                                 next_name = group_tasks[i + 1]["config"].get("name", next_type)
                                 logger.info(
-                                    f"[同域名内·熔断跳过后] 仍需等待 {OPERATION_INTERVAL} 秒, 准备下一个源 {next_name}"
+                                    f"[同域名内·熔断跳过后] 还需等待 {OPERATION_INTERVAL} 秒, 准备下一个源 {next_name}"
                                 )
                                 if on_progress:
                                     await on_progress(next_type, "waiting", None)
@@ -2558,15 +2599,26 @@ class BmsFetcher:
                             logged_in_ok = True
                             logger.info(f"[组{group_idx+1}] {data_type} 虽超时但登录已完成,后续源复用登录态")
                     except Exception as e:
-                        fr.error = f"抓取失败: {e}"
+                        # ── 2026-08-13 新增: Page crashed 自动重建干净 page ──
+                        err_txt_full = str(e)
+                        err_txt_lower = err_txt_full.lower()
+                        page_crashed = any(k in err_txt_lower for k in (
+                            "page crashed", "target page", "has been closed", "target closed",
+                        ))
+                        if page_crashed and fr.logged_in:
+                            logger.warning(
+                                f"[组{group_idx+1}] {data_type} 因 Page crashed 失败,但登录已成功;"
+                                " 已在下次循环新建 page,登录态不丢失"
+                            )
+                            logged_in_ok = True
+                        fr.error = f"抓取失败: {err_txt_full}"
                         logger.error(fr.error, exc_info=True)
                         # ⚠️ 记忆化: 如果是"登录类错误",写入 group_login_failed_err
-                        err_txt = str(e).lower()
-                        if any(k in err_txt for k in (
+                        if any(k in err_txt_lower for k in (
                             "登录失败", "账号或密码", "账号或密码错误", "用户名或密码", "验证码自动识别登录失败",
                             "登录", "密码", "验证码", "captcha", "vcode",
-                        )):
-                            group_login_failed_err = str(e)
+                        )) and not page_crashed:
+                            group_login_failed_err = err_txt_full
                             logger.warning(
                                 "[组%s] 源 %s 登录类失败:%r; 组内剩余 %d 个同源将直接跳过登录抓取",
                                 group_idx + 1, data_type, group_login_failed_err,
@@ -2609,6 +2661,12 @@ class BmsFetcher:
                         )
                         # 直接进入下一组,不 sleep
             finally:
+                # 关闭当前 page,再关闭 context(Playwright 官方推荐顺序,避免上下文泄露)
+                try:
+                    if page is not None:
+                        await page.close()
+                except Exception:
+                    pass
                 await context.close()
 
         # 3. 按 original_order 组装 results

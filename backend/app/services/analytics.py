@@ -3100,7 +3100,28 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                 THEN '降成争议类'
                 WHEN COALESCE(service_item, '') ~* '(注销|发票|退换货|退货|换货)'
                 THEN '其它(注销/发票/退换)'
-                -- 服务投诉/商品投诉但无更细文本 → 待标注
+
+                -- ═══════════════════════════════════════════════════════════
+                -- 2026-08-13 新增: A3 基于 service_item "投诉大类名" 直接归位
+                --   现实数据 80%+ service_item 就是投诉子类(不带具体问题),
+                --   之前全部落入 待标注 导致饼图"今日投诉 6条 待标注100%"
+                -- ═══════════════════════════════════════════════════════════
+                -- A3-1: 商品投诉 → 商品质量/售后类 (实物投诉)
+                WHEN COALESCE(service_item, '') ~* '商品投诉'
+                THEN '商品质量/售后类'
+                -- A3-2: 服务投诉 → 服务态度/时效类 (非商品性投诉, 客服/流程/时效问题)
+                WHEN COALESCE(service_item, '') ~* '服务投诉'
+                THEN '服务态度/时效类'
+                -- A3-3: 微信投诉(商户号投诉,独立展示单独桶)
+                WHEN COALESCE(service_item, '') ~* '微信投诉'
+                THEN '微信商户号投诉类'
+                -- A3-4: 外部平台名(12315/工信部/消协/公共服务/市监/政务) → 外部平台投诉受理类
+                --       注意: 这里不重复 外部投诉(ExternalComplaint)表, 这些工单是 service_tickets
+                --       中通过 "投诉子类" 字段直接录入"全国12315平台"等名称的记录
+                WHEN COALESCE(service_item, '') ~* '(12315|工信部|消协|消费者协会|公共服务|监督局|市场监管|市监|12345|政务平台)'
+                THEN '外部平台投诉受理类'
+
+                -- 真的啥都匹配不到 → 待标注(剩下 <5% 预留人工标注接口)
                 ELSE '待标注'
             END AS root_cause,
             COUNT(*) AS cnt,
@@ -3176,10 +3197,12 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     complaint_roots = [{"name": k, "count": v} for k, v in complaint_roots_map.items()]
     # 所有根因的总数 = complaint_total (保证柱图总数与投诉总数匹配)
     root_total = sum(r["count"] for r in complaint_roots)
-    # 补齐标准根因桶 (6 标准 + 2 扩展: 外部平台/卡商群) 缺失补 0
+    # 补齐标准根因桶 (6 标准 + 2 扩展 + A3新增3桶 + 待标注) 缺失补 0
+    #   新增: 商品质量/售后类 / 服务态度/时效类 / 微信商户号投诉类 — 来自 service_tickets.service_item 大类名
     root_order = [
         "网络质量类", "套餐争议类", "退款协商失败类",
         "降成争议类", "其它(注销/发票/退换)",
+        "商品质量/售后类", "服务态度/时效类", "微信商户号投诉类",
         "外部平台投诉受理类", "卡商群待标注类", "待标注",
     ]
     present_root = {r["name"] for r in complaint_roots}
@@ -3193,6 +3216,138 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     # 这样 SUM(roots.count) == complaint_total 严格成立, unmatched 仅作质量提示
     complaint_unmatched = max(0, _cnt_st - st_matched_count)
 
+    # ═══════════════════════════════════════════════════════════
+    # 2026-08-13 新增: 投诉处理人 × 处理状态 统计 (三张投诉表合并)
+    #   - 处理人来源: service_tickets.handler / ExternalComplaint.handler / CardComplaint.handler
+    #   - 统一归一化: "企微-洪佳" → "洪佳"，空值 → "未分配"
+    #   - 状态口径: 3表统一映射为 [待处理/处理中/已完成/已终止/未标注] 5 桶
+    # ═══════════════════════════════════════════════════════════
+    _handler_sql = text("""
+        WITH st_h AS (
+            SELECT
+                COALESCE(NULLIF(TRIM(st.handler), ''), '未分配') AS raw_handler,
+                st.status AS raw_status,
+                '内部投诉'::text AS source_type,
+                COUNT(*)::int AS cnt
+            FROM service_tickets st
+            WHERE st.register_time IS NOT NULL
+              AND st.register_time >= :ts AND st.register_time <= :te
+              AND (
+                st.service_category IS NULL
+                OR st.service_category ILIKE '%投诉%'
+                OR st.service_item ILIKE ANY (ARRAY[
+                    '%12315%', '%工信部%', '%消协%', '%公共服务平台%', '%消费者协会%',
+                    '%监督局%', '%市场监管%', '%市监%', '%315平台%', '%12345%', '%政务平台%',
+                    '%商品投诉%', '%服务投诉%', '%微信投诉%'
+                ])
+              )
+            GROUP BY 1, 2, 3
+        ),
+        ec_h AS (
+            SELECT
+                -- external_complaints 没有 handler 列: 优先用 follower(跟进人), 兜底 reception_cs(接待客服) → 都是人员别名
+                COALESCE(NULLIF(TRIM(ec.follower), ''), NULLIF(TRIM(ec.reception_cs), ''), '未分配') AS raw_handler,
+                -- 没有 status 列, 直接基于 result + handle_time 判断状态
+                CASE
+                    WHEN COALESCE(ec.result, '') ILIKE '%有效%' THEN '已完成'
+                    WHEN COALESCE(ec.result, '') ILIKE '%无效%' THEN '已终止'
+                    WHEN COALESCE(ec.result, '') ILIKE '%处理%' THEN '处理中'
+                    WHEN ec.handle_time IS NOT NULL THEN '已完成'
+                    WHEN COALESCE(ec.handle_detail, '') <> '' THEN '处理中'
+                    ELSE '未标注'
+                END AS raw_status,
+                '外部投诉'::text AS source_type,
+                COUNT(*)::int AS cnt
+            FROM external_complaints ec
+            WHERE ec.complaint_date IS NOT NULL
+              AND ec.complaint_date >= :ts AND ec.complaint_date <= :te
+            GROUP BY 1, 2, 3
+        ),
+        cc_h AS (
+            SELECT
+                COALESCE(NULLIF(TRIM(cc.handler), ''), '未分配') AS raw_handler,
+                -- card_complaints 没有 status 列, 直接基于 result + handle_result 判断
+                CASE
+                    WHEN COALESCE(cc.result, '') ILIKE '%已处理%' THEN '已完成'
+                    WHEN COALESCE(cc.result, '') ILIKE '%未处理%' THEN '待处理'
+                    WHEN COALESCE(cc.result, '') ILIKE '%处理%' THEN '处理中'
+                    WHEN COALESCE(cc.handle_result, '') <> '' THEN '已完成'
+                    WHEN COALESCE(cc.solution, '') <> '' THEN '处理中'
+                    ELSE '未标注'
+                END AS raw_status,
+                '卡商群投诉'::text AS source_type,
+                COUNT(*)::int AS cnt
+            FROM card_complaints cc
+            WHERE cc.complaint_date IS NOT NULL
+              AND cc.complaint_date >= :ts AND cc.complaint_date <= :te
+            GROUP BY 1, 2, 3
+        ),
+        all_h AS (
+            SELECT raw_handler, raw_status, source_type, cnt FROM st_h
+            UNION ALL
+            SELECT raw_handler, raw_status, source_type, cnt FROM ec_h
+            UNION ALL
+            SELECT raw_handler, raw_status, source_type, cnt FROM cc_h
+        )
+        SELECT raw_handler, raw_status, source_type, SUM(cnt)::int AS cnt
+        FROM all_h
+        GROUP BY 1, 2, 3
+        ORDER BY SUM(cnt) DESC;
+    """)
+    handler_rows = db.execute(_handler_sql, {"ts": ts, "te": te}).mappings().all()
+
+    # 聚合: {handler: {total: N, by_status: {st: N}, by_source: {src: N}}}
+    handlers_acc: dict[str, dict] = {}
+    for hr in handler_rows:
+        raw = str(hr["raw_handler"] or "")
+        # 去除 "企微-" 前缀 (企微-洪佳 → 洪佳), 再首尾 strip
+        cleaned = raw.removeprefix("企微-").removeprefix("企微").strip() if raw else ""
+        handler = cleaned or raw or "未分配"
+        if not handler:
+            handler = "未分配"
+        raw_st = str(hr["raw_status"] or "未标注")
+        # 状态口径统一映射: 待处理/处理中/已完成/已终止/未标注
+        rs = raw_st
+        if any(k in rs for k in ["待处理", "待接单", "待派", "未处理", "new", "open"]):
+            status_bucket = "待处理"
+        elif any(k in rs for k in ["处理中", "进行中", "处理", "running", "dispatch", "已派"]):
+            status_bucket = "处理中"
+        elif any(k in rs for k in ["已完成", "完成", "办结", "关闭", "closed", "done", "finish", "有效", "已处理"]):
+            status_bucket = "已完成"
+        elif any(k in rs for k in ["终止", "取消", "取消处理", "无效", "拒绝", "reject"]):
+            status_bucket = "已终止"
+        else:
+            status_bucket = "未标注"
+        src_bucket = str(hr["source_type"] or "未标注")
+        cnt = int(hr["cnt"] or 0)
+        acc = handlers_acc.setdefault(handler, {
+            "total": 0,
+            "by_status": {"待处理": 0, "处理中": 0, "已完成": 0, "已终止": 0, "未标注": 0},
+            "by_source": {"内部投诉": 0, "外部投诉": 0, "卡商群投诉": 0},
+        })
+        acc["total"] += cnt
+        acc["by_status"][status_bucket] = acc["by_status"].get(status_bucket, 0) + cnt
+        if src_bucket in ("内部投诉", "外部投诉", "卡商群投诉"):
+            acc["by_source"][src_bucket] = acc["by_source"].get(src_bucket, 0) + cnt
+        else:
+            acc["by_source"]["未标注"] = acc["by_source"].get("未标注", 0) + cnt
+
+    # 取 Top 15 处理人 (按 total 倒序), "未分配" 固定排首位 if 存在
+    complaint_handlers = []
+    if handlers_acc.get("未分配"):
+        unallocated = handlers_acc.pop("未分配")
+        complaint_handlers.append({"handler": "未分配", **unallocated})
+    sorted_names = sorted(handlers_acc.keys(), key=lambda n: -handlers_acc[n]["total"])[:15]
+    for nm in sorted_names:
+        complaint_handlers.append({"handler": nm, **handlers_acc[nm]})
+
+    # 同时汇总: 3 表合并后的投诉处理状态分布(与饼图对齐)
+    status_agg: dict[str, int] = {"待处理": 0, "处理中": 0, "已完成": 0, "已终止": 0, "未标注": 0}
+    for ch in complaint_handlers:
+        for st, c in ch["by_status"].items():
+            status_agg[st] = status_agg.get(st, 0) + int(c or 0)
+    complaint_status_all = [{"name": k, "value": v} for k, v in status_agg.items() if v]
+
     return {
         "date": d_iso,
         "date_end": d_end_iso,
@@ -3203,8 +3358,11 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         "complaint_total": complaint_total,
         "complaint_subs": complaint_subs,     # 投诉子类 (饼图: 商品投诉/服务投诉/微信投诉/12315/工信部/公共服务平台, 每项带 source_type)
         "complaint_by_source": complaint_by_source,  # 投诉来源(内部/外部) 两个桶独立占比
-        "complaint_roots": complaint_roots,   # 投诉根因 (柱图: 6 大类)
+        "complaint_roots": complaint_roots,   # 投诉根因 (柱图: 6+3+扩展桶)
         "complaint_unmatched": complaint_unmatched,  # 未匹配到接待记录的投诉数
+        # ↓↓↓ 2026-08-13 新增: 投诉处理人 + 处理状态全景 ↓↓↓
+        "complaint_handlers": complaint_handlers,  # Top 15 处理人: {handler, total, by_status, by_source}
+        "complaint_status_all": complaint_status_all,  # 三表合并处理状态 5 桶(对齐处理人status)
     }
 
 
