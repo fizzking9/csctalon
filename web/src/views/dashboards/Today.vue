@@ -226,15 +226,26 @@
       </div>
       <el-row :gutter="12">
         <el-col :xs="24" :md="12">
-          <ChartCard title="投诉子类分布（商品/服务/微信/12315/工信部/公共服务平台）">
+          <ChartCard title="投诉子类分布（按三大类分组着色）">
             <template #extra>
-              <span style="font-weight:400;color:#909399;font-size:11px">外部投诉(工信部/12315/消协/12345等) 与内部投诉 已分别标识着色</span>
+              <span style="font-weight:400;color:#909399;font-size:11px">
+                <span style="color:#e74c3c">■</span>外部投诉(12315/工信部/消协/12345等)　
+                <span style="color:#9b59b6">■</span>商户号投诉(微信, 属外部)　
+                <span style="color:#409eff">■</span>内部投诉(商品/服务)
+              </span>
             </template>
             <BaseChart :option="complaintSubPieOption" height="300px" />
           </ChartCard>
         </el-col>
         <el-col :xs="24" :md="12">
-          <ChartCard title="投诉根因分布（关联网速/套餐/退款等接待记录）">
+          <ChartCard title="投诉根因分布（所有投诉工单均纳入统计）">
+            <template #extra>
+              <span v-if="complaintData.complaint_unmatched != null"
+                    style="font-weight:400;color:#909399;font-size:11px">
+                精确关联网速/套餐/退款接待记录 {{ formatNum(complaintData.complaint_total - complaintData.complaint_unmatched) }} 条
+                （其余用投诉标题关键词归类）
+              </span>
+            </template>
             <BaseChart :option="complaintRootBarOption" height="300px" />
           </ChartCard>
         </el-col>
@@ -1178,22 +1189,36 @@ const complaintSub = computed(() => {
   return `${periodName}共 ${total} 条投诉 · 外部 ${ext} 条 · 内部 ${int} 条（按来源类型独立核算分析）`
 })
 // 饼图: 投诉子类分布 (商品投诉/服务投诉/微信投诉/12315/工信部/公共服务平台)
-// 按 source_type(内部/外部) 区分着色: 外部投诉用红/橙暖色系, 内部投诉用蓝/绿冷色系
+// 按 source_type 三大类分组着色:
+//   外部投诉 → 红色暖色系 (红/橙/深红/砖红)
+//   商户号投诉(微信, 属外部) → 紫色独立色组 (紫/深紫/洋红)
+//   内部投诉 → 蓝绿冷色系 (蓝/青绿/湖蓝)
 const complaintSubPieOption = computed(() => {
   const rows = (complaintData.value.complaint_subs || []).filter(d => d.value > 0)
   const EXTERNAL_WARM = ['#f56c6c', '#e74c3c', '#e6a23c', '#d35400', '#c0392b', '#e67e22']
-  const INTERNAL_COOL = ['#409eff', '#3498db', '#67c23a', '#2ecc71', '#9b59b6', '#1abc9c', '#909399', '#34495e']
-  let extIdx = 0, intIdx = 0
+  const MERCHANT_PURPLE = ['#9b59b6', '#8e44ad', '#e91e63', '#b83280']  // 商户号投诉=微信: 紫色系(一眼区分)
+  const INTERNAL_COOL = ['#409eff', '#3498db', '#67c23a', '#2ecc71', '#1abc9c', '#909399', '#34495e']
+  let extIdx = 0, merIdx = 0, intIdx = 0
   const data = rows.map(r => {
-    const isExt = r.source_type === '外部投诉'
-    let color
-    if (isExt) { color = EXTERNAL_WARM[extIdx % EXTERNAL_WARM.length]; extIdx++ }
-    else { color = INTERNAL_COOL[intIdx % INTERNAL_COOL.length]; intIdx++ }
+    const st = r.source_type || '内部投诉'
+    let color, tagCh, tagHtml, suffix
+    if (st === '外部投诉') {
+      color = EXTERNAL_WARM[extIdx % EXTERNAL_WARM.length]; extIdx++
+      tagCh = '★'; tagHtml = '<span style="color:#e74c3c;font-weight:600">[外部]</span>'; suffix = ' · 外'
+    } else if (st === '商户号投诉') {
+      color = MERCHANT_PURPLE[merIdx % MERCHANT_PURPLE.length]; merIdx++
+      tagCh = '◆'; tagHtml = '<span style="color:#9b59b6;font-weight:600">[商户号·外]</span>'; suffix = ' · 商户'
+    } else {
+      color = INTERNAL_COOL[intIdx % INTERNAL_COOL.length]; intIdx++
+      tagCh = '·'; tagHtml = '<span style="color:#3498db;font-weight:600">[内部]</span>'; suffix = ' · 内'
+    }
     return {
-      name: r.name + (isExt ? ' · 外' : ''),   // 图例里加"·外"/"·内"后缀 一眼区分
+      name: r.name + suffix,
       value: r.value,
       source_type: r.source_type,
       itemStyle: { color },
+      _tagCh: tagCh,
+      _tagHtml: tagHtml,
     }
   })
   return {
@@ -1201,8 +1226,8 @@ const complaintSubPieOption = computed(() => {
       trigger: 'item',
       formatter: (p) => {
         const d = p.data || {}
-        const tag = d.source_type === '外部投诉' ? '<span style="color:#e74c3c;font-weight:600">[外部]</span>' : '<span style="color:#3498db;font-weight:600">[内部]</span>'
-        return `${tag} ${p.name.replace(/ · [内外]$/, '')}<br/>数量: ${p.value} 条<br/>占比: ${p.percent}%`
+        const nm = (p.name || '').replace(/ · (外|内|商户)$/, '')
+        return `${d._tagHtml || ''} ${nm}<br/>数量: ${p.value} 条<br/>占比: ${p.percent}%`
       },
     },
     legend: { bottom: 0, type: 'scroll', textStyle: { fontSize: 10 } },
@@ -1210,23 +1235,26 @@ const complaintSubPieOption = computed(() => {
       name: '投诉子类', type: 'pie', radius: ['42%', '68%'], center: ['50%', '45%'],
       avoidLabelOverlap: true,
       label: { show: true, formatter: (p) => {
-        const nm = p.name.replace(/ · [内外]$/, '')
-        const tag = (p.data && p.data.source_type === '外部投诉') ? '★' : '·'
+        const nm = (p.name || '').replace(/ · (外|内|商户)$/, '')
+        const tag = (p.data && p.data._tagCh) || '·'
         return `${tag}${nm}\n${p.percent}%`
       }, fontSize: 10 },
       data: data.length ? data : [{ name: '暂无投诉', value: 1, itemStyle: { color: '#f0f0f0' }, label: { formatter: '暂无投诉 ✅' } }],
     }],
   }
 })
-// 柱图: 投诉根因分布 (网络质量类/套餐争议类/退款协商失败类/降成争议类/其它/待标注)
+// 柱图: 投诉根因分布 (6标准 + 2扩展: 外部平台/卡商群)
+// SUM(count) 必须严格等于 complaint_total, 颜色映射覆盖所有扩展桶
 const complaintRootBarOption = computed(() => {
-  const list = (complaintData.value.complaint_roots || []).filter(d => d.count > 0).slice(0, 10)
+  const list = (complaintData.value.complaint_roots || []).filter(d => d.count > 0).slice(0, 12)
   const rootColorMap = {
     '网络质量类': '#f56c6c',
     '套餐争议类': '#e6a23c',
     '退款协商失败类': '#909399',
     '降成争议类': '#9b59b6',
     '其它(注销/发票/退换)': '#409eff',
+    '外部平台投诉受理类': '#c0392b',   // 扩展桶1: 外部投诉但无法识别具体根因
+    '卡商群待标注类': '#27ae60',       // 扩展桶2: 卡商群投诉无法识别具体根因
     '待标注': '#c0c4cc',
   }
   return {
@@ -1234,7 +1262,9 @@ const complaintRootBarOption = computed(() => {
       trigger: 'axis', axisPointer: { type: 'shadow' },
       formatter: (p) => {
         const item = p[0]
-        return `${item.name}<br/>投诉数: ${formatNum(item.data)} 条`
+        const total = (complaintData.value.complaint_total || 0)
+        const pct = total ? ((item.data / total) * 100).toFixed(1) : '0.0'
+        return `${item.name}<br/>投诉数: ${formatNum(item.data)} 条 · 占比 ${pct}%`
       },
     },
     grid: { left: 150, right: 48, bottom: 24, top: 10 },
@@ -1251,7 +1281,14 @@ const complaintRootBarOption = computed(() => {
         itemStyle: { color: rootColorMap[d.name] || '#409eff', borderRadius: [0, 3, 3, 0] },
       })).reverse(),
       barMaxWidth: 18,
-      label: { show: true, position: 'right', fontSize: 10, formatter: (p) => formatNum(p.value) + '条' },
+      label: {
+        show: true, position: 'right', fontSize: 10,
+        formatter: (p) => {
+          const total = (complaintData.value.complaint_total || 0)
+          const pct = total ? `(${((p.value / total) * 100).toFixed(0)}%)` : ''
+          return formatNum(p.value) + '条' + pct
+        }
+      },
     }],
   }
 })

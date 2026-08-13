@@ -20,7 +20,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.database import SessionLocal
+from app.core.database import SessionLocal, engine as _db_engine
 from app.models.bms_sync_log import BmsSyncLog
 from app.models.upload import UploadRecord
 from app.services.bms_fetcher import BMS_DATA_SOURCES, BmsFetcher, FetchResult
@@ -427,117 +427,323 @@ async def sync_all(
             if fr:
                 _launch_import_if_needed(fr)
 
-    # HTTP API 抓取(ai-acc 等无需浏览器的源)
-    if http_tasks:
-        from app.services.ai_acc_fetcher import fetch_one as http_fetch_one
-
-        for task in http_tasks:
-            logger.info(f"[{task['data_type']}] HTTP 抓取(非 Playwright)")
-            fr = await http_fetch_one(task)
-            last_fr_by_type[fr.data_type] = fr
-            if original_on_progress:
-                await original_on_progress(
-                    fr.data_type, "fetched", {"success": fr.success, "file": fr.filename}
-                )
-            # HTTP 抓取完成: 立刻启动导入(不等待下一个)
-            _launch_import_if_needed(fr)
-
-    # Playwright 抓取(BMS 等需浏览器自动化的源)
-    # fetcher.fetch_all 内部按域名分组: 组内等待 65 秒(同一 Web 限制),跨组直接跳过
-    # 同时每个单源抓取完成时通过 _wrapped_on_progress 立刻启动导入,与后续等待/抓取下一个并发
-    if pw_tasks:
-        async with BmsFetcher() as fetcher:
-            # 即使外部未传 on_progress,也要包一层以便启动导入并发
-            pw_progress_cb = _wrapped_on_progress
-            # fetch_all 返回 FetchResult 列表(可能有重复 or 全部),但导入任务其实已经在回调里都起了
-            await fetcher.fetch_all(tasks=pw_tasks, on_progress=pw_progress_cb)
-
-    # 4. 等所有后台导入任务全部完成 -> 聚合成最终结果
-    #    这里不再串行导入了: 大部分导入其实早就在「等待下一次抓取」的间隙里跑完了
-    import_results: list[dict] = []
-    if pending_imports:
-        logger.info(f"已完成抓取,等待 {len(pending_imports)} 个导入后台任务收尾...")
-        done_tasks = await asyncio.gather(*pending_imports.values(), return_exceptions=True)
-        for result_or_exc in done_tasks:
-            if isinstance(result_or_exc, Exception):
-                logger.error(f"导入任务异常(已兜底转失败): {result_or_exc}")
-                continue
-            import_results.append(result_or_exc)
-    results.extend(import_results)
-
-    # 跳过的源(停用/未注册)也计入结果
-    results.extend(skipped)
-
-    # 5. post-sync 钩子:关联匹配 + 退费宽表物化 + 统计刷新 + 缓存失效(失败不阻塞同步主流程)
-    #    只在有成功导入时触发,用独立 Session 避免污染主事务
-    any_success = any(r.get("success") for r in results)
-    if any_success:
+    # 读写并发优化(抓取→导入→匹配→宽表):标记「写入高峰期」
+    # - Redis 缓存 TTL 自动延长(60s → 300s),避免写入高峰时缓存雪崩击穿 DB
+    # - 30 分钟兜底 TTL, 即使进程崩了未清除标记, Redis 也会自动解除
+    # - 任何异常都会 finally 清除标记
+    _writing_marked = False
+    try:
         try:
-            from app.services.matcher import match_all
-            from app.services.wide_table_builder import build_refund_wide
+            from app.core.redis_client import mark_sync_writing
+            mark_sync_writing(True, ttl=1800)
+            _writing_marked = True
+        except Exception:
+            pass
 
-            # ⚠️ 2026-08-12 关键修复:
-            # match_all / build_refund_wide / _analyze_key_tables 都是同步阻塞函数,
-            # 直接在 async 函数里调用会阻塞 event loop 数分钟(15万+行宽表构建 ~8分钟),
-            # 期间 FastAPI 无法响应 /task/status 轮询 → 前端连续超时后停止轮询,
-            # 表现为"界面卡死 也不恢复"。且原 asyncio.ensure_future 回调因 event loop
-            # 被阻塞也无法执行,进度日志无法到达前端。
-            # 修复: 整个 post-sync 钩子放到 worker 线程(asyncio.to_thread),
-            # 进度回调用 run_coroutine_threadsafe 跨线程调度到主 event loop。
-            loop = asyncio.get_running_loop()
+        # HTTP API 抓取(ai-acc 等无需浏览器的源)
+        if http_tasks:
+            from app.services.ai_acc_fetcher import fetch_one as http_fetch_one
 
-            def _sync_post_sync_hook() -> tuple[dict, dict]:
-                hook_db = SessionLocal()
-                try:
-                    def _report(name: str, phase: str = "importing"):
-                        """跨线程向主 event loop 投递进度事件(fire-and-forget)"""
-                        if on_progress:
-                            try:
-                                asyncio.run_coroutine_threadsafe(
-                                    on_progress("__post_sync__", phase, {"name": name}),
-                                    loop,
+            for task in http_tasks:
+                logger.info(f"[{task['data_type']}] HTTP 抓取(非 Playwright)")
+                fr = await http_fetch_one(task)
+                last_fr_by_type[fr.data_type] = fr
+                if original_on_progress:
+                    await original_on_progress(
+                        fr.data_type, "fetched", {"success": fr.success, "file": fr.filename}
+                    )
+                # HTTP 抓取完成: 立刻启动导入(不等待下一个)
+                _launch_import_if_needed(fr)
+
+        # Playwright 抓取(BMS 等需浏览器自动化的源)
+        # fetcher.fetch_all 内部按域名分组: 组内等待 65 秒(同一 Web 限制),跨组直接跳过
+        # 同时每个单源抓取完成时通过 _wrapped_on_progress 立刻启动导入,与后续等待/抓取下一个并发
+        if pw_tasks:
+            async with BmsFetcher() as fetcher:
+                # 即使外部未传 on_progress,也要包一层以便启动导入并发
+                pw_progress_cb = _wrapped_on_progress
+                # fetch_all 返回 FetchResult 列表(可能有重复 or 全部),但导入任务其实已经在回调里都起了
+                await fetcher.fetch_all(tasks=pw_tasks, on_progress=pw_progress_cb)
+
+        # 4. 等所有后台导入任务全部完成 -> 聚合成最终结果
+        #    这里不再串行导入了: 大部分导入其实早就在「等待下一次抓取」的间隙里跑完了
+        import_results: list[dict] = []
+        if pending_imports:
+            logger.info(f"已完成抓取,等待 {len(pending_imports)} 个导入后台任务收尾...")
+            done_tasks = await asyncio.gather(*pending_imports.values(), return_exceptions=True)
+            for result_or_exc in done_tasks:
+                if isinstance(result_or_exc, Exception):
+                    logger.error(f"导入任务异常(已兜底转失败): {result_or_exc}")
+                    continue
+                import_results.append(result_or_exc)
+        results.extend(import_results)
+
+        # 跳过的源(停用/未注册)也计入结果
+        results.extend(skipped)
+
+        # 5. post-sync 钩子:关联匹配 + 退费宽表物化 + 统计刷新 + 缓存失效(失败不阻塞同步主流程)
+        #    只在有成功导入时触发,用独立 Session 避免污染主事务
+        any_success = any(r.get("success") for r in results)
+        if any_success:
+            try:
+                from app.services.matcher import match_all
+                from app.services.wide_table_builder import build_refund_wide
+
+                # ⚠️ 2026-08-12 关键修复:
+                # match_all / build_refund_wide / _analyze_key_tables 都是同步阻塞函数,
+                # 直接在 async 函数里调用会阻塞 event loop 数分钟(15万+行宽表构建 ~8分钟),
+                # 期间 FastAPI 无法响应 /task/status 轮询 → 前端连续超时后停止轮询,
+                # 表现为"界面卡死 也不恢复"。且原 asyncio.ensure_future 回调因 event loop
+                # 被阻塞也无法执行,进度日志无法到达前端。
+                # 修复: 整个 post-sync 钩子放到 worker 线程(asyncio.to_thread),
+                # 进度回调用 run_coroutine_threadsafe 跨线程调度到主 event loop。
+                #
+                # ⚠️ 2026-08-13 宽表增量优化:
+                #   此前每次同步都全量 rebuild 15 万+行宽表(~8 分钟),绝大多数行其实
+                #   没有任何数据变化。改为增量:从「本次同步导入成功 + 本次新增匹配关系」
+                #   汇总 affected_refund_nos,仅 rebuild 受影响的行。当影响面超过 25%
+                #   或总量较小(<2000行)时自动降级全量,兼顾正确性和效率。
+                loop = asyncio.get_running_loop()
+
+                def _sync_post_sync_hook() -> tuple[dict, dict]:
+                    from sqlalchemy.exc import OperationalError as _OpErr
+                    import time as _time
+
+                    def _run_hook_once(first_try: bool) -> tuple[dict, dict]:
+                        hook_db = SessionLocal()
+                        try:
+                            from sqlalchemy import func as _func
+
+                            def _report(name: str, phase: str = "importing"):
+                                """跨线程向主 event loop 投递进度事件(fire-and-forget)"""
+                                if on_progress:
+                                    try:
+                                        asyncio.run_coroutine_threadsafe(
+                                            on_progress("__post_sync__", phase, {"name": name}),
+                                            loop,
+                                        )
+                                    except Exception:
+                                        pass
+
+                            _report("关联匹配中..." if first_try else "关联匹配中(重试)...")
+                            def _match_progress_cb(step_name: str, current: int, total: int):
+                                _report(f"关联匹配 {current+1}/{total}: {step_name}")
+
+                            match_stats = match_all(hook_db, only_unmatched=True, progress_callback=_match_progress_cb)
+                            match_affected: set[str] = match_stats.pop("_affected_refund_nos", set()) or set()
+
+                            # ---------- 增量收集 affected_refund_nos ----------
+                            def _collect_affected_from_imports(imp_results: list[dict], db: Session) -> set[str]:
+                                """从成功导入记录中,收集需要刷新宽表的 refund_no 集合"""
+                                from datetime import datetime as _dt
+                                from app.models.refund import Refund
+                                from app.models.ticket import ServiceTicket
+                                from app.models.wallet import WalletWithdrawal
+                                from app.models.merchant_refund import MerchantRefund
+                                from app.models.external_complaint import ExternalComplaint
+                                from app.models.upload import DataMatchRelation
+
+                                affected: set[str] = set()
+                                for r in imp_results:
+                                    if not r.get("success"):
+                                        continue
+                                    if (r.get("inserted_rows", 0) or 0) + (r.get("updated_rows", 0) or 0) == 0:
+                                        continue
+                                    dt = r.get("data_type")
+                                    start_s = r.get("start_time")
+                                    start_dt = None
+                                    if start_s:
+                                        try:
+                                            start_dt = _dt.fromisoformat(start_s) if isinstance(start_s, str) else start_s
+                                        except Exception:
+                                            start_dt = None
+
+                                    if dt == "refund":
+                                        q = select(Refund.refund_no)
+                                        if start_dt:
+                                            q = q.where(
+                                                (Refund.created_at_raw >= start_dt) | (Refund.created_at >= start_dt)
+                                            )
+                                        else:
+                                            from datetime import timedelta as _td
+                                            recent = _dt.now() - _td(hours=2)
+                                            q = q.where(Refund.created_at >= recent)
+                                        affected.update(db.scalars(q).all())
+
+                                    elif dt == "ticket":
+                                        tq = select(ServiceTicket.ticket_no)
+                                        if start_dt:
+                                            tq = tq.where(
+                                                (ServiceTicket.register_time >= start_dt)
+                                                | (ServiceTicket.created_at >= start_dt)
+                                            )
+                                        else:
+                                            from datetime import timedelta as _td
+                                            recent = _dt.now() - _td(hours=2)
+                                            tq = tq.where(ServiceTicket.created_at >= recent)
+                                        ticket_nos = set(db.scalars(tq).all())
+                                        if ticket_nos:
+                                            rq = (
+                                                select(DataMatchRelation.src_id)
+                                                .where(
+                                                    DataMatchRelation.src_table == "refund",
+                                                    DataMatchRelation.dst_table == "ticket",
+                                                    DataMatchRelation.status == "matched",
+                                                    DataMatchRelation.dst_id.in_(list(ticket_nos)),
+                                                )
+                                            )
+                                            affected.update(db.scalars(rq).all())
+
+                                    elif dt == "wallet":
+                                        wq = select(WalletWithdrawal.id)
+                                        if start_dt:
+                                            wq = wq.where(WalletWithdrawal.created_at >= start_dt)
+                                        else:
+                                            from datetime import timedelta as _td
+                                            recent = _dt.now() - _td(hours=2)
+                                            wq = wq.where(WalletWithdrawal.created_at >= recent)
+                                        wids = [str(i) for i in db.scalars(wq).all()]
+                                        if wids:
+                                            rq = (
+                                                select(DataMatchRelation.src_id)
+                                                .where(
+                                                    DataMatchRelation.src_table == "refund",
+                                                    DataMatchRelation.dst_table == "wallet",
+                                                    DataMatchRelation.status == "matched",
+                                                    DataMatchRelation.dst_id.in_(wids),
+                                                )
+                                            )
+                                            affected.update(db.scalars(rq).all())
+
+                                    elif dt == "merchant_refund":
+                                        mq = select(MerchantRefund.id)
+                                        if start_dt:
+                                            mq = mq.where(MerchantRefund.created_at >= start_dt)
+                                        else:
+                                            from datetime import timedelta as _td
+                                            recent = _dt.now() - _td(hours=2)
+                                            mq = mq.where(MerchantRefund.created_at >= recent)
+                                        mids = [str(i) for i in db.scalars(mq).all()]
+                                        if mids:
+                                            rq = (
+                                                select(DataMatchRelation.src_id)
+                                                .where(
+                                                    DataMatchRelation.src_table == "refund",
+                                                    DataMatchRelation.dst_table == "merchant_refund",
+                                                    DataMatchRelation.status == "matched",
+                                                    DataMatchRelation.dst_id.in_(mids),
+                                                )
+                                            )
+                                            affected.update(db.scalars(rq).all())
+
+                                    elif dt == "external_complaint":
+                                        eq = select(ExternalComplaint.device_sn).where(
+                                            ExternalComplaint.device_sn.isnot(None)
+                                        )
+                                        if start_dt:
+                                            eq = eq.where(ExternalComplaint.created_at >= start_dt)
+                                        else:
+                                            from datetime import timedelta as _td
+                                            recent = _dt.now() - _td(hours=2)
+                                            eq = eq.where(ExternalComplaint.created_at >= recent)
+                                        sns = set(s for s in db.scalars(eq).all() if s)
+                                        if sns:
+                                            rq = select(Refund.refund_no).where(Refund.device_sn.in_(list(sns)))
+                                            affected.update(db.scalars(rq).all())
+
+                                return affected
+
+                            imported_affected = _collect_affected_from_imports(results, hook_db)
+                            all_affected = imported_affected | match_affected
+
+                            total_refunds = hook_db.scalar(select(_func.count()).select_from(Refund)) or 0
+                            # 阈值策略:总量小(<2000)或影响面大(>25%)→全量更高效;否则增量
+                            INCREMENTAL_RATIO_THRESHOLD = 0.25
+                            INCREMENTAL_MIN_TOTAL = 2000
+                            use_incremental = (
+                                len(all_affected) > 0
+                                and total_refunds >= INCREMENTAL_MIN_TOTAL
+                                and len(all_affected) / total_refunds <= INCREMENTAL_RATIO_THRESHOLD
+                            )
+
+                            def _wide_progress_cb(built: int, total: int):
+                                _report(f"构建退费宽表 {built}/{total}")
+
+                            _report(
+                                ("构建退费宽表" if first_try else "构建退费宽表(重试)")
+                                + ("(增量)" if use_incremental else "(全量)")
+                                + f" affected={len(all_affected)} total={total_refunds}"
+                            )
+
+                            if use_incremental:
+                                wide_stats = build_refund_wide(
+                                    hook_db,
+                                    only_refund_nos=list(all_affected),
+                                    progress_callback=_wide_progress_cb,
                                 )
+                                wide_stats["mode"] = "incremental"
+                                wide_stats["affected_count"] = len(all_affected)
+                                wide_stats["total_refunds"] = total_refunds
+                            else:
+                                wide_stats = build_refund_wide(hook_db, progress_callback=_wide_progress_cb)
+                                wide_stats["mode"] = "full"
+                                wide_stats["total_refunds"] = total_refunds
+
+                            _report("刷新数据库统计...")
+                            _analyze_key_tables(hook_db)
+                            logger.info(
+                                f"post-sync 钩子完成: match={match_stats}, wide={wide_stats}"
+                            )
+                            _report("post-sync 完成", phase="imported")
+                            return match_stats, wide_stats
+                        finally:
+                            try:
+                                hook_db.close()
                             except Exception:
                                 pass
 
-                    _report("关联匹配中...")
-                    def _match_progress_cb(step_name: str, current: int, total: int):
-                        _report(f"关联匹配 {current+1}/{total}: {step_name}")
+                    # 首次执行
+                    try:
+                        return _run_hook_once(first_try=True)
+                    except _OpErr as e:
+                        # ⚠️ 数据库连接在长耗时期间被静默断开(OperationalError: server closed
+                        # the connection unexpectedly)。此时连接池中的连接可能都已坏掉,
+                        # dispose 清空池+等待 2s 再用新 Session 重试一次(最多一次)。
+                        logger.warning(
+                            "post-sync 钩子遇到 DB 连接断开:%s。清空连接池后重试一次...", e
+                        )
+                        try:
+                            _db_engine.dispose()
+                        except Exception:
+                            pass
+                        _time.sleep(2)
+                        try:
+                            return _run_hook_once(first_try=False)
+                        except _OpErr as e2:
+                            logger.warning("post-sync 重试仍然 DB 连接断开:%s,降级跳过", e2)
+                            raise
 
-                    match_stats = match_all(hook_db, only_unmatched=True, progress_callback=_match_progress_cb)
+                await asyncio.to_thread(_sync_post_sync_hook)
 
-                    # build_refund_wide 可能耗时数分钟(15万+行分批构建),
-                    # 通过 progress_callback 实时报告批次进度到前端日志面板
-                    def _wide_progress_cb(built: int, total: int):
-                        _report(f"构建退费宽表 {built}/{total}")
+                # 失效 Redis 缓存 (today:* 等), 避免同步后仍读到旧聚合结果
+                try:
+                    from app.core.redis_client import cache_invalidate_pattern
+                    n = cache_invalidate_pattern("today:*")
+                    if n:
+                        logger.info(f"已失效 {n} 条 today:* 缓存")
+                except Exception as ce:
+                    logger.debug(f"缓存失效失败(不影响同步): {ce}")
+            except Exception as e:
+                logger.warning(f"post-sync 钩子(关联匹配/宽表物化)失败,不影响同步结果: {e}")
 
-                    _report("构建退费宽表...")
-                    wide_stats = build_refund_wide(hook_db, progress_callback=_wide_progress_cb)
-
-                    _report("刷新数据库统计...")
-                    # 2026-08-11: 同步后主动 ANALYZE 关键表, 修复 BMS 全量覆盖导入导致统计信息滞后
-                    # (此前 cs_records 统计 n_live_tup=646 实际 144660, 差 224 倍, 严重影响查询计划)
-                    _analyze_key_tables(hook_db)
-                    logger.info(
-                        f"post-sync 钩子完成: match={match_stats}, wide={wide_stats}"
-                    )
-                    _report("post-sync 完成", phase="imported")
-                    return match_stats, wide_stats
-                finally:
-                    hook_db.close()
-
-            await asyncio.to_thread(_sync_post_sync_hook)
-
-            # 失效 Redis 缓存 (today:* 等), 避免同步后仍读到旧聚合结果
+    finally:
+        # 写入高峰期结束:清除 Redis 标记(即使前面抛异常也保证清掉)
+        if _writing_marked:
             try:
-                from app.core.redis_client import cache_invalidate_pattern
-                n = cache_invalidate_pattern("today:*")
-                if n:
-                    logger.info(f"已失效 {n} 条 today:* 缓存")
-            except Exception as ce:
-                logger.debug(f"缓存失效失败(不影响同步): {ce}")
-        except Exception as e:
-            logger.warning(f"post-sync 钩子(关联匹配/宽表物化)失败,不影响同步结果: {e}")
+                from app.core.redis_client import mark_sync_writing
+                mark_sync_writing(False)
+            except Exception:
+                pass
 
     return results
 

@@ -18,6 +18,7 @@
 
 import logging
 import re
+import time
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -34,18 +35,19 @@ logger = logging.getLogger(__name__)
 REFUND_NO_PATTERN = re.compile(r"RF\d{10,}")
 
 
-def match_all(db: Session, only_unmatched: bool = True, progress_callback=None) -> dict[str, int]:
-    """执行全量匹配,返回各类型新增匹配数
+def match_all(db: Session, only_unmatched: bool = True, progress_callback=None) -> dict:
+    """执行全量匹配,返回各类型新增匹配数及受影响的退费单号集合
 
     Args:
         db: 数据库会话
         only_unmatched: True=只处理之前未匹配的记录(增量),False=全量重跑
         progress_callback: 可选回调 (step_name: str, current: int, total: int) -> None
 
-    Note:
-        本函数仅负责产出 DataMatchRelation 关联关系。
-        refund_wide 物化宽表的重建由调用方(bms_sync/uploads 钩子)在 match_all 之后显式触发,
-        以便在源数据更新但无新增关联时也能刷新宽表。
+    Returns:
+        dict:
+            - 各标签 key: 新增匹配条数(UI展示用)
+            - "_affected_refund_nos": 受影响的退费单号集合(set[str]),用于宽表增量重建
+            - "_total_new_relations": 总新增关联条数
     """
     steps = [
         ("退费单↔商户退款(订单号)", _match_refund_merchant_refund),
@@ -55,7 +57,9 @@ def match_all(db: Session, only_unmatched: bool = True, progress_callback=None) 
         ("退费单↔钱包(设备SN)", _match_refund_wallet_by_sn),
         ("退费单↔商户(商户名)", _match_refund_merchant),
     ]
-    stats = {}
+    stats: dict = {}
+    affected_refund_nos: set[str] = set()
+    total_relations = 0
     total_steps = len(steps)
     for i, (label, fn) in enumerate(steps):
         if progress_callback:
@@ -64,9 +68,17 @@ def match_all(db: Session, only_unmatched: bool = True, progress_callback=None) 
             except Exception:
                 pass
         logger.info(f"[matcher] {i+1}/{total_steps} {label} ...")
-        stats[label] = fn(db, only_unmatched)
-        logger.info(f"[matcher] {label} 完成, 新增 {stats[label]} 条")
+        count, affected = fn(db, only_unmatched)
+        stats[label] = count
+        total_relations += count
+        affected_refund_nos.update(affected)
+        logger.info(f"[matcher] {label} 完成, 新增 {count} 条, 影响 {len(affected)} 个退费单")
+        # 读写并发友好:匹配步骤之间小睡 100ms,让出 DB 连接资源给前端查询
+        if i < total_steps - 1:
+            time.sleep(0.1)
     db.commit()
+    stats["_affected_refund_nos"] = affected_refund_nos
+    stats["_total_new_relations"] = total_relations
     if progress_callback:
         try:
             progress_callback("匹配完成", total_steps, total_steps)
@@ -87,7 +99,7 @@ def _preload_existing_relations(db: Session, src_table: str, dst_table: str, mat
     ))
 
 
-def _match_refund_merchant_refund(db: Session, only_unmatched: bool) -> int:
+def _match_refund_merchant_refund(db: Session, only_unmatched: bool) -> tuple[int, set[str]]:
     """退费单.platform_order_no == 商户退款.merchant_order_no"""
     refunds = db.scalars(select(Refund).where(Refund.platform_order_no.isnot(None))).all()
     mr_map = {}
@@ -99,6 +111,7 @@ def _match_refund_merchant_refund(db: Session, only_unmatched: bool) -> int:
     existing = _preload_existing_relations(db, "refund", "merchant_refund", "order_no") if only_unmatched else set()
 
     new_rels = []
+    affected: set[str] = set()
     for r in refunds:
         key = (r.platform_order_no or "").strip()
         if not key or key not in mr_map:
@@ -112,12 +125,13 @@ def _match_refund_merchant_refund(db: Session, only_unmatched: bool) -> int:
             matched_by="auto", status="matched",
         ))
         existing.add(r.refund_no)
+        affected.add(r.refund_no)
     if new_rels:
         db.add_all(new_rels)
-    return len(new_rels)
+    return len(new_rels), affected
 
 
-def _match_refund_ticket_by_order(db: Session, only_unmatched: bool) -> int:
+def _match_refund_ticket_by_order(db: Session, only_unmatched: bool) -> tuple[int, set[str]]:
     """退费单.platform_order_no == 工单.order_no"""
     refunds = db.scalars(select(Refund).where(Refund.platform_order_no.isnot(None))).all()
     ticket_map = {}
@@ -129,6 +143,7 @@ def _match_refund_ticket_by_order(db: Session, only_unmatched: bool) -> int:
     existing = _preload_existing_relations(db, "refund", "ticket", "order_no") if only_unmatched else set()
 
     new_rels = []
+    affected: set[str] = set()
     for r in refunds:
         key = (r.platform_order_no or "").strip()
         if not key or key not in ticket_map:
@@ -142,12 +157,13 @@ def _match_refund_ticket_by_order(db: Session, only_unmatched: bool) -> int:
             matched_by="auto", status="matched",
         ))
         existing.add(r.refund_no)
+        affected.add(r.refund_no)
     if new_rels:
         db.add_all(new_rels)
-    return len(new_rels)
+    return len(new_rels), affected
 
 
-def _match_refund_ticket_by_sn(db: Session, only_unmatched: bool) -> int:
+def _match_refund_ticket_by_sn(db: Session, only_unmatched: bool) -> tuple[int, set[str]]:
     """退费单.device_sn == 工单.device_sn"""
     refunds = db.scalars(select(Refund).where(Refund.device_sn.isnot(None))).all()
     ticket_sn_map = {}
@@ -157,6 +173,7 @@ def _match_refund_ticket_by_sn(db: Session, only_unmatched: bool) -> int:
     existing = _preload_existing_relations(db, "refund", "ticket", "device_sn") if only_unmatched else set()
 
     new_rels = []
+    affected: set[str] = set()
     for r in refunds:
         if not r.device_sn:
             continue
@@ -170,18 +187,20 @@ def _match_refund_ticket_by_sn(db: Session, only_unmatched: bool) -> int:
                 matched_by="auto", status="matched",
             ))
         existing.add(r.refund_no)
+        affected.add(r.refund_no)
     if new_rels:
         db.add_all(new_rels)
-    return len(new_rels)
+    return len(new_rels), affected
 
 
-def _match_refund_wallet_by_remark(db: Session, only_unmatched: bool) -> int:
+def _match_refund_wallet_by_remark(db: Session, only_unmatched: bool) -> tuple[int, set[str]]:
     """钱包提现.remark 含退费单号 RF..."""
     wallets = db.scalars(select(WalletWithdrawal).where(WalletWithdrawal.remark.isnot(None))).all()
 
     existing = _preload_existing_relations(db, "refund", "wallet", "refund_no_in_remark") if only_unmatched else set()
 
     new_rels = []
+    affected: set[str] = set()
     for w in wallets:
         if not w.remark:
             continue
@@ -198,12 +217,13 @@ def _match_refund_wallet_by_remark(db: Session, only_unmatched: bool) -> int:
             matched_by="auto", status="matched",
         ))
         existing.add(refund_no)
+        affected.add(refund_no)
     if new_rels:
         db.add_all(new_rels)
-    return len(new_rels)
+    return len(new_rels), affected
 
 
-def _match_refund_wallet_by_sn(db: Session, only_unmatched: bool) -> int:
+def _match_refund_wallet_by_sn(db: Session, only_unmatched: bool) -> tuple[int, set[str]]:
     """退费单.device_sn == 钱包提现.device_sn"""
     refunds = db.scalars(select(Refund).where(Refund.device_sn.isnot(None))).all()
     wallet_sn_map = {}
@@ -213,6 +233,7 @@ def _match_refund_wallet_by_sn(db: Session, only_unmatched: bool) -> int:
     existing = _preload_existing_relations(db, "refund", "wallet", "device_sn") if only_unmatched else set()
 
     new_rels = []
+    affected: set[str] = set()
     for r in refunds:
         if not r.device_sn:
             continue
@@ -226,12 +247,13 @@ def _match_refund_wallet_by_sn(db: Session, only_unmatched: bool) -> int:
                 matched_by="auto", status="matched",
             ))
         existing.add(r.refund_no)
+        affected.add(r.refund_no)
     if new_rels:
         db.add_all(new_rels)
-    return len(new_rels)
+    return len(new_rels), affected
 
 
-def _match_refund_merchant(db: Session, only_unmatched: bool) -> int:
+def _match_refund_merchant(db: Session, only_unmatched: bool) -> tuple[int, set[str]]:
     """退费单.merchant_name == 商户.sub_name"""
     refunds = db.scalars(select(Refund).where(Refund.merchant_name.isnot(None))).all()
     merchant_map = {m.sub_name: m.id for m in db.scalars(select(Merchant)).all()}
@@ -239,6 +261,7 @@ def _match_refund_merchant(db: Session, only_unmatched: bool) -> int:
     existing = _preload_existing_relations(db, "refund", "merchant", "merchant_name") if only_unmatched else set()
 
     new_rels = []
+    affected: set[str] = set()
     for r in refunds:
         if not r.merchant_name:
             continue
@@ -253,9 +276,10 @@ def _match_refund_merchant(db: Session, only_unmatched: bool) -> int:
                 matched_by="auto", status="matched",
             ))
             existing.add(r.refund_no)
+            affected.add(r.refund_no)
     if new_rels:
         db.add_all(new_rels)
-    return len(new_rels)
+    return len(new_rels), affected
 
 
 def get_unmatched_summary(db: Session) -> dict[str, int]:
