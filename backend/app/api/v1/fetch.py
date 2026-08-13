@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -49,6 +50,8 @@ from app.services.scrm_sync_service import (
 )
 from app.services.sync_source_config_service import get_all_configs, get_sync_source_config
 from app.services.sync_task_manager import sync_task_manager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/fetch", tags=["数据中心-BMS同步"])
 
@@ -190,9 +193,15 @@ class DataSourceStatus(BaseModel):
 class ScheduleStatus(BaseModel):
     enabled: bool
     schedule_hours: list[int]
+    daytime_hours: list[int] | None = None
+    catchup_hour: int | None = None
     next_run: str | None = None
     current_progress: dict | None = None
     has_credentials: Any  # bool 或 {"bms":bool, "scrm":bool}(新版)
+    busy: bool | None = None
+    cooldown_remaining: int | None = None
+    is_halted: bool | None = None
+    halted_biz_date: str | None = None
 
 
 # ---------- API 端点 ----------
@@ -385,7 +394,13 @@ async def _do_submit(payload: SyncAllRequest, current_user) -> SubmitResponse:
             time_ranges=time_ranges_dt,
         )
 
-    # 3. 提交到 manager
+    # 3. 用户手动发起同步 → 视为用户确认恢复,清除当天熔断
+    try:
+        bms_scheduler.reset_halt()
+    except Exception as _rh_e:
+        logger.warning(f"清除熔断标记失败(不影响手动提交): {_rh_e}")
+
+    # 4. 提交到 manager
     try:
         task_id, msg = await sync_task_manager.submit(
             trigger_type="manual",
@@ -639,7 +654,13 @@ async def scrm_sync_submit(payload: ScrmSyncRequest, current_user: CurrentUser):
             on_progress=on_progress_cb,
         )
 
-    # 4. 提交到 task_manager(与 BMS 共享全局互斥 + 冷却)
+    # 4. 用户手动发起 SCRM 同步 → 视为用户确认恢复,清除当天熔断
+    try:
+        bms_scheduler.reset_halt()
+    except Exception as _rh_e:
+        logger.warning(f"清除熔断标记失败(不影响手动提交): {_rh_e}")
+
+    # 5. 提交到 task_manager(与 BMS 共享全局互斥 + 冷却)
     try:
         task_id, msg = await sync_task_manager.submit(
             trigger_type="manual",
