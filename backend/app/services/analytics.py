@@ -3348,6 +3348,277 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
             status_agg[st] = status_agg.get(st, 0) + int(c or 0)
     complaint_status_all = [{"name": k, "value": v} for k, v in status_agg.items() if v]
 
+    # ═══════════════════════════════════════════════════════════
+    # 2026-08-13 新增: 近期未处理投诉列表
+    #   - 覆盖口径: 三张投诉表 (service_tickets 投诉类 + external_complaints + card_complaints)
+    #   - 待处理定义: status_bucket ∉ {已完成, 已终止}  (即 待处理/处理中/未标注 任一都算"未闭环")
+    #   - 有效信息列: 来源/编号/投诉时间/投诉人/SN/投诉标题或内容/状态/处理人
+    #   - 跨度限制: 仅当 窗口≤31 天才返回列表(用户反馈"跨度太长意义不大"),
+    #       超过 31 天 → 返回 [] + skipped=true + 提示文本,避免前端被成千上万条淹没
+    # ═══════════════════════════════════════════════════════════
+    span_days = (te - ts).days + 1
+    PENDING_LIMIT_DAYS = 31
+    PENDING_LIMIT_ROWS = 200
+
+    def _to_status_bucket(raw_st: str | None) -> str:
+        rs = raw_st or ""
+        if any(k in rs for k in ["待处理", "待接单", "待派", "未处理", "new", "open"]):
+            return "待处理"
+        if any(k in rs for k in ["处理中", "进行中", "处理", "running", "dispatch", "已派"]):
+            return "处理中"
+        if any(k in rs for k in ["已完成", "完成", "办结", "关闭", "closed", "done", "finish", "有效", "已处理"]):
+            return "已完成"
+        if any(k in rs for k in ["终止", "取消", "取消处理", "无效", "拒绝", "reject"]):
+            return "已终止"
+        return "未标注"
+
+    def _clean_handler(raw: str | None) -> str:
+        if not raw:
+            return "未分配"
+        return (raw.removeprefix("企微-").removeprefix("企微").strip()) or raw or "未分配"
+
+    complaint_pending: list[dict] = []
+    pending_skipped = False
+    pending_skip_reason = ""
+    # ═══════════════════════════════════════════════════════════
+    # 倒查窗口(创建时间范围): 不管视图选的是哪一天/哪一周,
+    # 投诉待处理列表统一取 "视图终点 向前 7 天内 创建的 + 到现在仍未闭环"
+    #   例如: 视图=08-13单日  →  创建窗口=[08-06, 08-13] (倒查7天,含今天)
+    #        视图=08-01~08-07周 → 创建窗口=[min(08-01, 07-31), 08-07] = [07-31, 08-07] (也附带7天回查)
+    #   这样即使选 "今日" 视图, 也能看到 前 6 天内积压的未闭环投诉 (否则只看当天创建的会漏掉老积压)
+    # ═══════════════════════════════════════════════════════════
+    PENDING_LOOKBACK_DAYS = 7
+    ts_pending = min(ts, te - timedelta(days=PENDING_LOOKBACK_DAYS - 1))  # 创建窗口起点(含今天,所以-1)
+    te_pending = te  # 创建窗口终点 = 视图终点(实时窗口 = now)
+
+    if span_days > PENDING_LIMIT_DAYS:
+        pending_skipped = True
+        pending_skip_reason = (
+            f"当前查询跨度 {span_days} 天, 超过 {PENDING_LIMIT_DAYS} 天阈值;"
+            " 未处理列表仅在日/周视图下提供, 请缩短时间范围后查看。"
+        )
+    else:
+        # ── A. service_tickets 投诉类工单 (未闭环) ──
+        # 注意: 创建时间用 ts_pending / te_pending(倒查7天窗口), 而不是视图原始窗口
+        st_kws = _EXTERNAL_ITEM_COMPLAINT_KW + ("商品投诉", "服务投诉", "微信投诉")
+        st_where = and_(
+            ServiceTicket.register_time.isnot(None),
+            ServiceTicket.register_time >= ts_pending,
+            ServiceTicket.register_time <= te_pending,
+            or_(
+                ServiceTicket.service_category.is_(None),
+                ServiceTicket.service_category.ilike("%投诉%"),
+                or_(*[ServiceTicket.service_item.ilike(f"%{k}%") for k in st_kws]),
+            ),
+        )
+        # ═══════════════════════════════════════════════════════════
+        # ⚠ 2026-08-13 根因修复:
+        # 旧逻辑: SQL 层 ORDER BY ASC LIMIT 201 → Python 层 bucket 过滤 → 只取到了最早 201 行,
+        #         而最早 201 条投诉 (8/6-8/7 创建的历史老单) 95%+ 都是已完成, 导致:
+        #         ① 真实未闭环 208 条 只展示了 9-13 条 (1/15 量级放大漏单)
+        #         ② 109 条 微信商户号投诉 中有大量排在 ASC 序号 #202+ 的被 LIMIT 吞掉
+        # 新策略:
+        #   1. SQL 层只做【倒查7天创建 + 投诉判定】两道前置过滤, 不做 LIMIT
+        #      (近 7 天投诉类工单仅 ~1276 条, 内存压力完全可接受, 远小于全量工单 7595 条)
+        #   2. Python 层先按 status bucket 过滤掉 已完成/已终止 → 得到真正未闭环的全集
+        #   3. 合并三表后按 occur_time ASC(最早积压排第一), 再在 Python 层统一 LIMIT 200
+        #      (超过 200 条时才截断, 并附 tooltip 提示运营优先处理最早那一批)
+        # ═══════════════════════════════════════════════════════════
+        st_pending_rows = db.execute(
+            select(
+                ServiceTicket.ticket_no,
+                ServiceTicket.register_time,
+                ServiceTicket.device_sn,
+                ServiceTicket.phone,
+                ServiceTicket.service_item,
+                ServiceTicket.service_category,
+                ServiceTicket.status,
+                ServiceTicket.handler,
+                ServiceTicket.remark,
+            )
+            .where(st_where)
+            .order_by(ServiceTicket.register_time.asc())
+            #  ⚠️ 移除 LIMIT: 让所有近 7 天内创建、命中投诉判定的行都进入 Python 层 status 过滤
+        ).mappings().all()
+        for r in st_pending_rows:
+            bucket = _to_status_bucket(r["status"])
+            if bucket in ("已完成", "已终止"):
+                continue
+            # 投诉标题/摘要: 优先 service_item, 否则 service_category, 兜底 remark 前 32 字
+            title_parts = []
+            if r["service_item"]:
+                title_parts.append(r["service_item"])
+            elif r["service_category"]:
+                title_parts.append(r["service_category"])
+            if r["remark"]:
+                _rmk = str(r["remark"])[:32]
+                if _rmk and (not title_parts or _rmk not in title_parts[-1]):
+                    title_parts.append(_rmk)
+            title = " · ".join(title_parts) or "内部投诉工单(未登记详情)"
+            complaint_pending.append({
+                "source_type": "内部投诉",
+                "no": r["ticket_no"] or "",
+                "occur_time": r["register_time"].isoformat() if r["register_time"] else "",
+                "complainant": "",
+                "complainant_phone": r["phone"] or "",
+                "device_sn": r["device_sn"] or "",
+                "title": title,
+                "status_bucket": bucket,
+                "status_raw": r["status"] or "",
+                "handler": _clean_handler(r["handler"]),
+            })
+
+        # ── B. external_complaints 外部投诉 (未闭环) ──
+        ec_where = and_(
+            ExternalComplaint.complaint_date.isnot(None),
+            ExternalComplaint.complaint_date >= ts_pending,
+            ExternalComplaint.complaint_date <= te_pending,
+        )
+        ec_pending_rows = db.execute(
+            select(
+                ExternalComplaint.complaint_no,
+                ExternalComplaint.complaint_date,
+                ExternalComplaint.complainant,
+                ExternalComplaint.complainant_phone,
+                ExternalComplaint.device_sn,
+                ExternalComplaint.platform,
+                ExternalComplaint.problem,
+                ExternalComplaint.complaint_category,
+                ExternalComplaint.result,
+                ExternalComplaint.handle_time,
+                ExternalComplaint.handle_detail,
+                ExternalComplaint.follower,
+                ExternalComplaint.reception_cs,
+            )
+            .where(ec_where)
+            .order_by(ExternalComplaint.complaint_date.asc())
+            # ⚠️ 移除 LIMIT (和 service_tickets 同理, 统一放到 Python 层 过滤完 bucket 后再 LIMIT)
+        ).mappings().all()
+        for r in ec_pending_rows:
+            # 状态推断: 复用 handler_stats 口径 (result/handle_time/handle_detail)
+            rs_raw = ""
+            if (r["result"] or "").find("有效") >= 0:
+                rs_raw = "已完成"
+            elif (r["result"] or "").find("无效") >= 0:
+                rs_raw = "已终止"
+            elif (r["result"] or "").find("处理") >= 0:
+                rs_raw = "处理中"
+            elif r["handle_time"] is not None:
+                rs_raw = "已完成"
+            elif r["handle_detail"]:
+                rs_raw = "处理中"
+            else:
+                rs_raw = "未标注"
+            bucket = _to_status_bucket(rs_raw)
+            if bucket in ("已完成", "已终止"):
+                continue
+            # 投诉摘要: 平台 + 分类/问题
+            title_parts = []
+            if r["platform"]:
+                title_parts.append(f"[{r['platform']}]")
+            if r["complaint_category"]:
+                title_parts.append(r["complaint_category"])
+            if r["problem"]:
+                _pb = str(r["problem"])[:64]
+                if _pb:
+                    title_parts.append(_pb)
+            title = " ".join(title_parts) or "外部投诉(未登记详情)"
+            handler_raw = r["follower"] or r["reception_cs"]
+            complaint_pending.append({
+                "source_type": "外部投诉",
+                "no": r["complaint_no"] or "",
+                "occur_time": r["complaint_date"].isoformat() if r["complaint_date"] else "",
+                "complainant": r["complainant"] or "",
+                "complainant_phone": r["complainant_phone"] or "",
+                "device_sn": r["device_sn"] or "",
+                "title": title,
+                "status_bucket": bucket,
+                "status_raw": r["result"] or rs_raw,
+                "handler": _clean_handler(handler_raw),
+            })
+
+        # ── C. card_complaints 卡商群投诉 (未闭环) ──
+        cc_where = and_(
+            CardComplaint.complaint_date.isnot(None),
+            CardComplaint.complaint_date >= ts_pending,
+            CardComplaint.complaint_date <= te_pending,
+        )
+        cc_pending_rows = db.execute(
+            select(
+                CardComplaint.id,
+                CardComplaint.complaint_date,
+                CardComplaint.complainant,
+                CardComplaint.complainant_phone,
+                CardComplaint.device_sn,
+                CardComplaint.complaint_group,
+                CardComplaint.problem,
+                CardComplaint.problem_category,
+                CardComplaint.result,
+                CardComplaint.handle_result,
+                CardComplaint.solution,
+                CardComplaint.handler,
+            )
+            .where(cc_where)
+            .order_by(CardComplaint.complaint_date.asc())
+            # ⚠️ 移除 LIMIT (和 service_tickets 同理, 统一放到 Python 层 过滤完 bucket 后再 LIMIT)
+        ).mappings().all()
+        for r in cc_pending_rows:
+            rs_raw = ""
+            if (r["result"] or "").find("已处理") >= 0:
+                rs_raw = "已完成"
+            elif (r["result"] or "").find("未处理") >= 0:
+                rs_raw = "待处理"
+            elif (r["result"] or "").find("处理") >= 0:
+                rs_raw = "处理中"
+            elif r["handle_result"]:
+                rs_raw = "已完成"
+            elif r["solution"]:
+                rs_raw = "处理中"
+            else:
+                rs_raw = "未标注"
+            bucket = _to_status_bucket(rs_raw)
+            if bucket in ("已完成", "已终止"):
+                continue
+            title_parts = []
+            if r["complaint_group"]:
+                title_parts.append(f"[{r['complaint_group']}]")
+            if r["problem_category"]:
+                title_parts.append(r["problem_category"])
+            if r["problem"]:
+                _pb = str(r["problem"])[:64]
+                if _pb:
+                    title_parts.append(_pb)
+            title = " ".join(title_parts) or "卡商群投诉(未登记详情)"
+            complaint_pending.append({
+                "source_type": "卡商群投诉",
+                "no": f"CC-{r['id']}" if r["id"] is not None else "",
+                "occur_time": r["complaint_date"].isoformat() if r["complaint_date"] else "",
+                "complainant": r["complainant"] or "",
+                "complainant_phone": r["complainant_phone"] or "",
+                "device_sn": r["device_sn"] or "",
+                "title": title,
+                "status_bucket": bucket,
+                "status_raw": r["result"] or rs_raw,
+                "handler": _clean_handler(r["handler"]),
+            })
+
+        # 合并三张表结果后按 投诉时间 ASC(最早积压排第一, 倒逼优先处理最久未动的工单)
+        complaint_pending.sort(
+            key=lambda x: (x["occur_time"] or "9999-12-31"),
+        )
+        # 截断超过限制,并给出提示
+        if len(complaint_pending) > PENDING_LIMIT_ROWS:
+            complaint_pending = complaint_pending[:PENDING_LIMIT_ROWS]
+            pending_skipped = True
+            pending_skip_reason = (
+                f"未闭环投诉超过 {PENDING_LIMIT_ROWS} 条, 仅展示最早需处理的前 {PENDING_LIMIT_ROWS} 条;"
+                " 请优先处理最早的投诉或缩小查询范围。"
+            )
+
+    # 注意: pending_total 口径 = "倒查 7 天窗口内仍未闭环" 的实际条数(和列表一致)
+    # 而 complaint_status_all 里的待处理/处理中统计仍然是「原视图窗口」(和饼图/处理人排行口径一致, 不改动)
+    complaint_pending_total = len(complaint_pending)
+
     return {
         "date": d_iso,
         "date_end": d_end_iso,
@@ -3363,6 +3634,11 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         # ↓↓↓ 2026-08-13 新增: 投诉处理人 + 处理状态全景 ↓↓↓
         "complaint_handlers": complaint_handlers,  # Top 15 处理人: {handler, total, by_status, by_source}
         "complaint_status_all": complaint_status_all,  # 三表合并处理状态 5 桶(对齐处理人status)
+        # ↓↓↓ 2026-08-13 新增: 近期未处理投诉列表 ↓↓↓
+        "complaint_pending_total": complaint_pending_total,   # 未闭环投诉总数(待+处理中+未标注), 与 complaint_status_all 口径一致
+        "complaint_pending_skipped": pending_skipped,         # 是否因跨度超限而被跳过(日/周视图=false, 长跨度=true)
+        "complaint_pending_skip_reason": pending_skip_reason, # 跳过/截断说明(给前端 tooltip)
+        "complaint_pending_list": complaint_pending,          # 待处理明细列表(最多200条)
     }
 
 
