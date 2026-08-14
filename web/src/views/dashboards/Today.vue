@@ -225,19 +225,34 @@
         </el-space>
       </div>
       <el-row :gutter="12">
-        <el-col :xs="24" :md="12">
-          <ChartCard title="投诉子类分布（按三大类分组着色）">
+        <el-col :xs="24" :md="8">
+          <ChartCard title="内部投诉子类（商品/服务）">
             <template #extra>
-              <span style="font-weight:400;color:#909399;font-size:11px">
-                <span style="color:#e74c3c">■</span>外部投诉(12315/工信部/消协/12345等)　
-                <span style="color:#9b59b6">■</span>商户号投诉(微信, 属外部)　
-                <span style="color:#409eff">■</span>内部投诉(商品/服务)
-              </span>
+              <span style="font-weight:400;color:#409eff;font-size:11px">■ 内部投诉</span>
             </template>
-            <BaseChart :option="complaintSubPieOption" height="300px" />
+            <BaseChart :option="complaintSubInternalPieOption" height="280px" />
           </ChartCard>
         </el-col>
-        <el-col :xs="24" :md="12">
+        <el-col :xs="24" :md="8">
+          <ChartCard title="外部投诉-商户号（微信投诉）">
+            <template #extra>
+              <span style="font-weight:400;color:#9b59b6;font-size:11px">■ 商户号投诉(属外部)</span>
+            </template>
+            <BaseChart :option="complaintSubMerchantPieOption" height="280px" />
+          </ChartCard>
+        </el-col>
+        <el-col :xs="24" :md="8">
+          <ChartCard title="外部投诉-平台（12315/工信部/消协等）">
+            <template #extra>
+              <span style="font-weight:400;color:#e74c3c;font-size:11px">■ 外部平台投诉</span>
+            </template>
+            <BaseChart :option="complaintSubExternalPieOption" height="280px" />
+          </ChartCard>
+        </el-col>
+      </el-row>
+      <!-- 投诉根因分布（独占一行） -->
+      <el-row :gutter="12" class="mt-12">
+        <el-col :xs="24">
           <ChartCard title="投诉根因分布（所有投诉工单均纳入统计）">
             <template #extra>
               <span v-if="complaintData.complaint_unmatched != null"
@@ -252,7 +267,7 @@
       </el-row>
       <!-- 模块5第二行: 处理状态饼图 + 处理人排行表 -->
       <el-row :gutter="12" class="mt-12">
-        <el-col :xs="24" :md="10">
+        <el-col :xs="24" :md="8">
           <ChartCard title="投诉处理状态分布（三表合并统一口径）">
             <template #extra>
               <span style="font-weight:400;color:#909399;font-size:11px">
@@ -262,69 +277,100 @@
             <BaseChart :option="complaintStatusPieOption" height="320px" />
           </ChartCard>
         </el-col>
-        <el-col :xs="24" :md="14">
-          <ChartCard title="投诉处理人排行（Top 15 · 三表合并）">
+        <el-col :xs="24" :md="8">
+          <ChartCard title="内部投诉处理人排行（Top 15）">
             <template #extra>
-              <span style="font-weight:400;color:#909399;font-size:11px">
-                来源: 内部工单handler + 外部投诉handler + 卡商群投诉handler
+              <span style="font-weight:400;color:#409eff;font-size:11px">
+                来源: 内部工单 service_tickets handler
               </span>
             </template>
             <el-table
-              :data="complaintData.complaint_handlers || []"
+              :data="complaintData.complaint_internal_handlers || []"
               size="small"
               stripe
               height="320px"
               style="width: 100%"
-              v-loading="!complaintData.complaint_handlers?.length && complaintData.complaint_total > 0"
+              v-loading="!complaintData.complaint_internal_handlers?.length && complaintData.complaint_total > 0"
             >
               <el-table-column label="#" width="44" align="center" type="index" />
-              <el-table-column prop="handler" label="处理人" min-width="100" align="left">
+              <el-table-column prop="handler" label="处理人" min-width="80" align="left">
                 <template #default="{ row }">
                   <span :class="row.handler === '未分配' ? 'tag-note' : ''" style="font-weight:500">
                     {{ row.handler }}
                   </span>
                 </template>
               </el-table-column>
-              <el-table-column prop="total" label="总数" width="68" align="center" sortable>
+              <el-table-column prop="total" label="总数" width="58" align="center" sortable>
                 <template #default="{ row }">
                   <b>{{ formatNum(row.total) }}</b>
                 </template>
               </el-table-column>
-              <el-table-column label="按状态(条)" min-width="220" align="center">
+              <el-table-column label="按状态" min-width="180" align="center">
                 <template #default="{ row }">
-                  <el-space wrap size="4">
+                  <el-space wrap size="3">
                     <el-tag v-if="row.by_status?.['待处理']" type="danger" size="small" effect="plain">
-                      待处理 {{ formatNum(row.by_status['待处理']) }}
+                      待 {{ formatNum(row.by_status['待处理']) }}
                     </el-tag>
                     <el-tag v-if="row.by_status?.['处理中']" type="warning" size="small" effect="plain">
-                      处理中 {{ formatNum(row.by_status['处理中']) }}
+                      处理 {{ formatNum(row.by_status['处理中']) }}
                     </el-tag>
                     <el-tag v-if="row.by_status?.['已完成']" type="success" size="small" effect="plain">
-                      已完成 {{ formatNum(row.by_status['已完成']) }}
+                      完成 {{ formatNum(row.by_status['已完成']) }}
                     </el-tag>
                     <el-tag v-if="row.by_status?.['已终止']" type="info" size="small" effect="plain">
-                      已终止 {{ formatNum(row.by_status['已终止']) }}
-                    </el-tag>
-                    <el-tag v-if="row.by_status?.['未标注']" size="small" effect="plain" style="background:#f4f4f5;color:#909399;border-color:#e9e9eb">
-                      未标注 {{ formatNum(row.by_status['未标注']) }}
+                      终止 {{ formatNum(row.by_status['已终止']) }}
                     </el-tag>
                     <span v-if="!Object.values(row.by_status || {}).some(v => v)" class="tag-note">—</span>
                   </el-space>
                 </template>
               </el-table-column>
-              <el-table-column label="按来源(条)" min-width="200" align="center">
+            </el-table>
+          </ChartCard>
+        </el-col>
+        <el-col :xs="24" :md="8">
+          <ChartCard title="外部投诉处理人排行（Top 15）">
+            <template #extra>
+              <span style="font-weight:400;color:#e74c3c;font-size:11px">
+                来源: 外部投诉 + 卡商群投诉 handler
+              </span>
+            </template>
+            <el-table
+              :data="complaintData.complaint_external_handlers || []"
+              size="small"
+              stripe
+              height="320px"
+              style="width: 100%"
+              v-loading="!complaintData.complaint_external_handlers?.length && complaintData.complaint_total > 0"
+            >
+              <el-table-column label="#" width="44" align="center" type="index" />
+              <el-table-column prop="handler" label="处理人" min-width="80" align="left">
                 <template #default="{ row }">
-                  <el-space wrap size="4">
-                    <el-tag v-if="row.by_source?.['内部投诉']" type="primary" size="small" effect="plain">
-                      内部 {{ formatNum(row.by_source['内部投诉']) }}
+                  <span :class="row.handler === '未分配' ? 'tag-note' : ''" style="font-weight:500">
+                    {{ row.handler }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="total" label="总数" width="58" align="center" sortable>
+                <template #default="{ row }">
+                  <b>{{ formatNum(row.total) }}</b>
+                </template>
+              </el-table-column>
+              <el-table-column label="按状态" min-width="180" align="center">
+                <template #default="{ row }">
+                  <el-space wrap size="3">
+                    <el-tag v-if="row.by_status?.['待处理']" type="danger" size="small" effect="plain">
+                      待 {{ formatNum(row.by_status['待处理']) }}
                     </el-tag>
-                    <el-tag v-if="row.by_source?.['外部投诉']" type="danger" size="small" effect="dark">
-                      外部 {{ formatNum(row.by_source['外部投诉']) }}
+                    <el-tag v-if="row.by_status?.['处理中']" type="warning" size="small" effect="plain">
+                      处理 {{ formatNum(row.by_status['处理中']) }}
                     </el-tag>
-                    <el-tag v-if="row.by_source?.['卡商群投诉']" type="success" size="small" effect="plain">
-                      卡商 {{ formatNum(row.by_source['卡商群投诉']) }}
+                    <el-tag v-if="row.by_status?.['已完成']" type="success" size="small" effect="plain">
+                      完成 {{ formatNum(row.by_status['已完成']) }}
                     </el-tag>
-                    <span v-if="!Object.values(row.by_source || {}).some(v => v)" class="tag-note">—</span>
+                    <el-tag v-if="row.by_status?.['已终止']" type="info" size="small" effect="plain">
+                      终止 {{ formatNum(row.by_status['已终止']) }}
+                    </el-tag>
+                    <span v-if="!Object.values(row.by_status || {}).some(v => v)" class="tag-note">—</span>
                   </el-space>
                 </template>
               </el-table-column>
@@ -373,6 +419,16 @@
             >
               <el-icon :size="22" style="color:#e6a23c;margin-right:6px;vertical-align:-4px"><WarningFilled /></el-icon>
               {{ complaintData.complaint_pending_skip_reason }}
+            </div>
+
+            <!-- 数据不一致警告: total > 0 但 list 为空 -->
+            <div
+              v-else-if="complaintData.complaint_pending_total > 0 && !complaintData.complaint_pending_list?.length"
+              style="padding:28px 20px;text-align:center;color:#e6a23c;font-size:13px;background:#fef8e7;border-radius:8px"
+            >
+              <el-icon :size="22" style="color:#e6a23c;margin-right:6px;vertical-align:-4px"><WarningFilled /></el-icon>
+              系统显示有 {{ formatNum(complaintData.complaint_pending_total) }} 条未闭环投诉，但列表数据加载异常，请尝试
+              <el-button type="primary" link size="small" @click="loadAllData">刷新页面</el-button>
             </div>
 
             <!-- 无未处理投诉 -->
@@ -1429,60 +1485,47 @@ const complaintSub = computed(() => {
   if (!total) return '暂无投诉数据'
   return `${periodName}共 ${total} 条投诉 · 外部 ${ext} 条 · 内部 ${int} 条（按来源类型独立核算分析）`
 })
-// 饼图: 投诉子类分布 (商品投诉/服务投诉/微信投诉/12315/工信部/公共服务平台)
-// 按 source_type 三大类分组着色:
-//   外部投诉 → 红色暖色系 (红/橙/深红/砖红)
-//   商户号投诉(微信, 属外部) → 紫色独立色组 (紫/深紫/洋红)
-//   内部投诉 → 蓝绿冷色系 (蓝/青绿/湖蓝)
-const complaintSubPieOption = computed(() => {
-  const rows = (complaintData.value.complaint_subs || []).filter(d => d.value > 0)
-  const EXTERNAL_WARM = ['#f56c6c', '#e74c3c', '#e6a23c', '#d35400', '#c0392b', '#e67e22']
-  const MERCHANT_PURPLE = ['#9b59b6', '#8e44ad', '#e91e63', '#b83280']  // 商户号投诉=微信: 紫色系(一眼区分)
-  const INTERNAL_COOL = ['#409eff', '#3498db', '#67c23a', '#2ecc71', '#1abc9c', '#909399', '#34495e']
-  let extIdx = 0, merIdx = 0, intIdx = 0
-  const data = rows.map(r => {
-    const st = r.source_type || '内部投诉'
-    let color, tagCh, tagHtml, suffix
-    if (st === '外部投诉') {
-      color = EXTERNAL_WARM[extIdx % EXTERNAL_WARM.length]; extIdx++
-      tagCh = '★'; tagHtml = '<span style="color:#e74c3c;font-weight:600">[外部]</span>'; suffix = ' · 外'
-    } else if (st === '商户号投诉') {
-      color = MERCHANT_PURPLE[merIdx % MERCHANT_PURPLE.length]; merIdx++
-      tagCh = '◆'; tagHtml = '<span style="color:#9b59b6;font-weight:600">[商户号·外]</span>'; suffix = ' · 商户'
-    } else {
-      color = INTERNAL_COOL[intIdx % INTERNAL_COOL.length]; intIdx++
-      tagCh = '·'; tagHtml = '<span style="color:#3498db;font-weight:600">[内部]</span>'; suffix = ' · 内'
-    }
-    return {
-      name: r.name + suffix,
-      value: r.value,
-      source_type: r.source_type,
-      itemStyle: { color },
-      _tagCh: tagCh,
-      _tagHtml: tagHtml,
-    }
-  })
+// 饼图工具函数: 按 source_type 构建分组饼图
+function buildSubPieOption(rows, colorPalette, sourceLabel) {
+  const data = rows.map((r, i) => ({
+    name: r.name,
+    value: r.value,
+    itemStyle: { color: colorPalette[i % colorPalette.length] },
+  }))
   return {
     tooltip: {
       trigger: 'item',
-      formatter: (p) => {
-        const d = p.data || {}
-        const nm = (p.name || '').replace(/ · (外|内|商户)$/, '')
-        return `${d._tagHtml || ''} ${nm}<br/>数量: ${p.value} 条<br/>占比: ${p.percent}%`
-      },
+      formatter: (p) => `${p.name}<br/>数量: ${p.value} 条<br/>占比: ${p.percent}%`,
     },
     legend: { bottom: 0, type: 'scroll', textStyle: { fontSize: 10 } },
     series: [{
-      name: '投诉子类', type: 'pie', radius: ['42%', '68%'], center: ['50%', '45%'],
+      name: sourceLabel, type: 'pie', radius: ['42%', '68%'], center: ['50%', '45%'],
       avoidLabelOverlap: true,
-      label: { show: true, formatter: (p) => {
-        const nm = (p.name || '').replace(/ · (外|内|商户)$/, '')
-        const tag = (p.data && p.data._tagCh) || '·'
-        return `${tag}${nm}\n${p.percent}%`
-      }, fontSize: 10 },
-      data: data.length ? data : [{ name: '暂无投诉', value: 1, itemStyle: { color: '#f0f0f0' }, label: { formatter: '暂无投诉 ✅' } }],
+      label: { show: true, formatter: '{b}\n{d}%', fontSize: 10 },
+      data: data.length ? data : [{ name: '暂无', value: 1, itemStyle: { color: '#f0f0f0' }, label: { formatter: '暂无数据' } }],
     }],
   }
+}
+
+// 饼图: 内部投诉子类 (source_type === '内部投诉')
+const INTERNAL_COOL = ['#409eff', '#3498db', '#67c23a', '#2ecc71', '#1abc9c', '#909399', '#34495e']
+const complaintSubInternalPieOption = computed(() => {
+  const rows = (complaintData.value.complaint_subs || []).filter(d => d.source_type === '内部投诉' && d.value > 0)
+  return buildSubPieOption(rows, INTERNAL_COOL, '内部投诉')
+})
+
+// 饼图: 商户号投诉子类 (source_type === '商户号投诉')
+const MERCHANT_PURPLE = ['#9b59b6', '#8e44ad', '#e91e63', '#b83280']
+const complaintSubMerchantPieOption = computed(() => {
+  const rows = (complaintData.value.complaint_subs || []).filter(d => d.source_type === '商户号投诉' && d.value > 0)
+  return buildSubPieOption(rows, MERCHANT_PURPLE, '商户号投诉')
+})
+
+// 饼图: 外部平台投诉子类 (source_type === '外部投诉')
+const EXTERNAL_WARM = ['#f56c6c', '#e74c3c', '#e6a23c', '#d35400', '#c0392b', '#e67e22']
+const complaintSubExternalPieOption = computed(() => {
+  const rows = (complaintData.value.complaint_subs || []).filter(d => d.source_type === '外部投诉' && d.value > 0)
+  return buildSubPieOption(rows, EXTERNAL_WARM, '外部投诉')
 })
 // 柱图: 投诉根因分布 (6标准 + 2扩展: 外部平台/卡商群)
 // SUM(count) 必须严格等于 complaint_total, 颜色映射覆盖所有扩展桶
@@ -2125,11 +2168,20 @@ async function loadAll() {
       complaint_unmatched: rdata.complaint_unmatched || 0,
       complaint_by_source: rdata.complaint_by_source || [],
       complaint_handlers: rdata.complaint_handlers || [],
+      complaint_internal_handlers: rdata.complaint_internal_handlers || [],
+      complaint_external_handlers: rdata.complaint_external_handlers || [],
       complaint_status_all: rdata.complaint_status_all || [],
-      complaint_pending_total: rdata.complaint_pending_total || 0,
+      complaint_pending_total: rdata.complaint_pending_total ?? null,
       complaint_pending_skipped: !!rdata.complaint_pending_skipped,
       complaint_pending_skip_reason: rdata.complaint_pending_skip_reason || '',
-      complaint_pending_list: rdata.complaint_pending_list || [],
+      complaint_pending_list: (() => {
+        const list = rdata.complaint_pending_list || []
+        const total = rdata.complaint_pending_total
+        if (total > 0 && list.length === 0) {
+          console.warn('[complaint_pending] 数据不一致: total=' + total + ', list为空，请刷新页面')
+        }
+        return list
+      })(),
     }
     refundData.value = rf.data || { reasons: [], methods: [] }
     queueData.value = q.data || { todos: [], tasks: [], incidents: [] }

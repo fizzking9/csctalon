@@ -8,6 +8,15 @@ from sqlalchemy import and_, case, func, literal, or_, select, text, union
 from sqlalchemy.orm import Session
 
 from app.models.cs_record import CsRecord
+# ═══════════════════════════════════════════════════════════════════
+# 2026-08-14: 投诉登记节点下的外部投诉/卡商群投诉两个文件暂不纳入
+#   系统汇总分析。设置为 False 后,所有 analytics 查询将跳过
+#   ExternalComplaint / CardComplaint 两张表,仅使用 service_tickets
+#   中的投诉分类(内部投诉/商户号投诉/外部投诉)作为统计口径。
+#   如需恢复,改为 True 即可。
+# ═══════════════════════════════════════════════════════════════════
+_INCLUDE_COMPLAINT_FILES = False
+
 from app.models.external_complaint import ExternalComplaint
 from app.models.card_complaint import CardComplaint
 from app.models.merchant_refund import MerchantRefund
@@ -1270,8 +1279,11 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
         .select_from(ServiceTicket)
         .where(_ticket_category_case() == "投诉")
     ) or 0
-    complaint_ec = db.scalar(select(func.count()).select_from(ExternalComplaint)) or 0
-    complaint_cc = db.scalar(select(func.count()).select_from(CardComplaint)) or 0
+    complaint_ec = 0
+    complaint_cc = 0
+    if _INCLUDE_COMPLAINT_FILES:
+        complaint_ec = db.scalar(select(func.count()).select_from(ExternalComplaint)) or 0
+        complaint_cc = db.scalar(select(func.count()).select_from(CardComplaint)) or 0
     complaint_total = complaint_st + complaint_ec + complaint_cc
     # 2. 投诉子类分布 (service_tickets 内部投诉分类 + 外部投诉合并)
     complaint_sub_rows = db.execute(
@@ -1309,7 +1321,7 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
         {"name": r[0], "value": int(r[1] or 0)} for r in complaint_status_rows
     ]
     # 补齐外部投诉/卡商投诉的状态缺失时,按 result 字段粗略估算 已完成(有效值)/待处理(未标注)
-    if complaint_ec:
+    if _INCLUDE_COMPLAINT_FILES and complaint_ec:
         ec_done = db.scalar(
             select(func.count()).select_from(ExternalComplaint)
             .where(func.coalesce(ExternalComplaint.result, "").ilike("%有效%"))
@@ -1317,7 +1329,7 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
         complaint_by_status.append({"name": "外部投诉-已处理", "value": int(ec_done)})
         if complaint_ec - ec_done > 0:
             complaint_by_status.append({"name": "外部投诉-待跟进", "value": int(complaint_ec - ec_done)})
-    if complaint_cc:
+    if _INCLUDE_COMPLAINT_FILES and complaint_cc:
         cc_done = db.scalar(
             select(func.count()).select_from(CardComplaint)
             .where(func.coalesce(CardComplaint.result, "").ilike("%完成%"))
@@ -1416,7 +1428,9 @@ def _operator_to_person_cte(department: str | None = None,
             func.coalesce(Person.display_name, PersonAlias.alias).label("display_name"),
             Person.department.label("department"),
             func.coalesce(Group.name, Person.group_name).label("group_name"),
-            Person.specialty.label("specialty"),
+            # 2026-08-14: 优先读取 Person.specialty (任职镜像 = 用户直接编辑的最新值), 
+            # 兜底 Person.primary_specialty (SCD Type 2 镜像, 可能滞后)
+            func.coalesce(Person.specialty, Person.primary_specialty).label("specialty"),
             Person.position.label("position"),
             Person.qw_user_id.label("qw_user_id"),
         )
@@ -2423,19 +2437,25 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
     comp_t_st = db.execute(select(func.count())
                         .where(_between(ServiceTicket.register_time, ts, te),
                                _ticket_category_case() == "投诉")).scalar() or 0
-    comp_t_ec = db.execute(select(func.count())
-                        .where(_between(ExternalComplaint.complaint_date, ts, te))).scalar() or 0
-    comp_t_cc = db.execute(select(func.count())
-                        .where(_between(CardComplaint.complaint_date, ts, te))).scalar() or 0
+    comp_t_ec = 0
+    comp_t_cc = 0
+    if _INCLUDE_COMPLAINT_FILES:
+        comp_t_ec = db.execute(select(func.count())
+                            .where(_between(ExternalComplaint.complaint_date, ts, te))).scalar() or 0
+        comp_t_cc = db.execute(select(func.count())
+                            .where(_between(CardComplaint.complaint_date, ts, te))).scalar() or 0
     comp_t = comp_t_st + comp_t_ec + comp_t_cc
 
     comp_y_st = db.execute(select(func.count())
                         .where(_between(ServiceTicket.register_time, ys, ye),
                                _ticket_category_case() == "投诉")).scalar() or 0
-    comp_y_ec = db.execute(select(func.count())
-                        .where(_between(ExternalComplaint.complaint_date, ys, ye))).scalar() or 0
-    comp_y_cc = db.execute(select(func.count())
-                        .where(_between(CardComplaint.complaint_date, ys, ye))).scalar() or 0
+    comp_y_ec = 0
+    comp_y_cc = 0
+    if _INCLUDE_COMPLAINT_FILES:
+        comp_y_ec = db.execute(select(func.count())
+                            .where(_between(ExternalComplaint.complaint_date, ys, ye))).scalar() or 0
+        comp_y_cc = db.execute(select(func.count())
+                            .where(_between(CardComplaint.complaint_date, ys, ye))).scalar() or 0
     comp_y = comp_y_st + comp_y_ec + comp_y_cc
 
     def _k(v, yv):
@@ -2733,32 +2753,33 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         if idx is None:
             continue
         cp_map[idx] = int(r.cnt or 0)
-    # 叠加 ExternalComplaint 小时/日节奏
-    ec_rows = db.execute(
-        select(_time_trunc(ExternalComplaint.complaint_date), func.count().label("cnt"))
-        .where(ExternalComplaint.complaint_date.isnot(None),
-               ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te)
-        .group_by("trunc_t")
-    ).all()
-    for r in ec_rows:
-        tt = r._mapping["trunc_t"]
-        if tt is None: continue
-        idx = _slot_idx(tt)
-        if idx is not None:
-            cp_map[idx] = cp_map.get(idx, 0) + int(r.cnt or 0)
-    # 叠加 CardComplaint 小时/日节奏
-    cc_rows = db.execute(
-        select(_time_trunc(CardComplaint.complaint_date), func.count().label("cnt"))
-        .where(CardComplaint.complaint_date.isnot(None),
-               CardComplaint.complaint_date >= ts, CardComplaint.complaint_date <= te)
-        .group_by("trunc_t")
-    ).all()
-    for r in cc_rows:
-        tt = r._mapping["trunc_t"]
-        if tt is None: continue
-        idx = _slot_idx(tt)
-        if idx is not None:
-            cp_map[idx] = cp_map.get(idx, 0) + int(r.cnt or 0)
+    if _INCLUDE_COMPLAINT_FILES:
+        # 叠加 ExternalComplaint 小时/日节奏
+        ec_rows = db.execute(
+            select(_time_trunc(ExternalComplaint.complaint_date), func.count().label("cnt"))
+            .where(ExternalComplaint.complaint_date.isnot(None),
+                   ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te)
+            .group_by("trunc_t")
+        ).all()
+        for r in ec_rows:
+            tt = r._mapping["trunc_t"]
+            if tt is None: continue
+            idx = _slot_idx(tt)
+            if idx is not None:
+                cp_map[idx] = cp_map.get(idx, 0) + int(r.cnt or 0)
+        # 叠加 CardComplaint 小时/日节奏
+        cc_rows = db.execute(
+            select(_time_trunc(CardComplaint.complaint_date), func.count().label("cnt"))
+            .where(CardComplaint.complaint_date.isnot(None),
+                   CardComplaint.complaint_date >= ts, CardComplaint.complaint_date <= te)
+            .group_by("trunc_t")
+        ).all()
+        for r in cc_rows:
+            tt = r._mapping["trunc_t"]
+            if tt is None: continue
+            idx = _slot_idx(tt)
+            if idx is not None:
+                cp_map[idx] = cp_map.get(idx, 0) + int(r.cnt or 0)
 
     # ── 填充到槽位: 单日填当前小时之前, 多日填全部(最后一天可能实时) ──
     slots = list(range(n_slots))
@@ -2937,37 +2958,42 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         for r in comp_sub_rows
     ]
     # 叠加 external_complaints 今日 (按 complaint_category 聚合,未分类则归入 "外部投诉(监督局/315等)")
-    ec_between = and_(ExternalComplaint.complaint_date.isnot(None),
-                      ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te)
-    ec_rows = db.execute(
-        select(func.coalesce(ExternalComplaint.complaint_category, "外部投诉(监督局/315等)"),
-               func.count().label("cnt"))
-        .where(ec_between)
-        .group_by(func.coalesce(ExternalComplaint.complaint_category, "外部投诉(监督局/315等)"))
-        .order_by(text("cnt DESC"))
-    ).all()
-    for r in ec_rows:
-        complaint_subs.append({
-            "name": str(r[0] or "外部投诉(监督局/315等)"),
-            "source_type": "外部投诉",
-            "value": int(r[1] or 0),
-        })
-    # 叠加 card_complaints 今日 (按 problem_category 聚合, 未分类归入 "卡商群投诉")
-    cc_between = and_(CardComplaint.complaint_date.isnot(None),
-                      CardComplaint.complaint_date >= ts, CardComplaint.complaint_date <= te)
-    cc_rows = db.execute(
-        select(func.coalesce(CardComplaint.problem_category, "卡商群投诉"),
-               func.count().label("cnt"))
-        .where(cc_between)
-        .group_by(func.coalesce(CardComplaint.problem_category, "卡商群投诉"))
-        .order_by(text("cnt DESC"))
-    ).all()
-    for r in cc_rows:
-        complaint_subs.append({
-            "name": str(r[0] or "卡商群投诉"),
-            "source_type": "内部投诉",
-            "value": int(r[1] or 0),
-        })
+    # 2026-08-14: _INCLUDE_COMPLAINT_FILES=False 时跳过, ec_between=literal(False) 使下游查询返回空
+    if _INCLUDE_COMPLAINT_FILES:
+        ec_between = and_(ExternalComplaint.complaint_date.isnot(None),
+                          ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te)
+        ec_rows = db.execute(
+            select(func.coalesce(ExternalComplaint.complaint_category, "外部投诉(监督局/315等)"),
+                   func.count().label("cnt"))
+            .where(ec_between)
+            .group_by(func.coalesce(ExternalComplaint.complaint_category, "外部投诉(监督局/315等)"))
+            .order_by(text("cnt DESC"))
+        ).all()
+        for r in ec_rows:
+            complaint_subs.append({
+                "name": str(r[0] or "外部投诉(监督局/315等)"),
+                "source_type": "外部投诉",
+                "value": int(r[1] or 0),
+            })
+        # 叠加 card_complaints 今日 (按 problem_category 聚合, 未分类归入 "卡商群投诉")
+        cc_between = and_(CardComplaint.complaint_date.isnot(None),
+                          CardComplaint.complaint_date >= ts, CardComplaint.complaint_date <= te)
+        cc_rows = db.execute(
+            select(func.coalesce(CardComplaint.problem_category, "卡商群投诉"),
+                   func.count().label("cnt"))
+            .where(cc_between)
+            .group_by(func.coalesce(CardComplaint.problem_category, "卡商群投诉"))
+            .order_by(text("cnt DESC"))
+        ).all()
+        for r in cc_rows:
+            complaint_subs.append({
+                "name": str(r[0] or "卡商群投诉"),
+                "source_type": "卡商群投诉",
+                "value": int(r[1] or 0),
+            })
+    else:
+        ec_between = literal(False)
+        cc_between = literal(False)
     if complaint_subs:
         complaint_subs.sort(key=lambda x: -x["value"])
     # 今日投诉总数 (便于前端展示 "今日共XX条投诉") = 三张独立投诉表今日之和
@@ -3349,6 +3375,60 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     complaint_status_all = [{"name": k, "value": v} for k, v in status_agg.items() if v]
 
     # ═══════════════════════════════════════════════════════════
+    # 2026-08-14: 拆分内部/外部投诉处理人排行
+    #   - 内部投诉处理人: source_type == '内部投诉' (仅 service_tickets)
+    #   - 外部投诉处理人: source_type == '外部投诉' + '卡商群投诉'
+    #   - 因数量级差异较大，分开展示更清晰
+    # ═══════════════════════════════════════════════════════════
+    internal_handlers_acc: dict[str, dict] = {}
+    external_handlers_acc: dict[str, dict] = {}
+    for hr in handler_rows:
+        raw = str(hr["raw_handler"] or "")
+        cleaned = raw.removeprefix("企微-").removeprefix("企微").strip() if raw else ""
+        handler = cleaned or raw or "未分配"
+        if not handler:
+            handler = "未分配"
+        raw_st = str(hr["raw_status"] or "未标注")
+        rs = raw_st
+        if any(k in rs for k in ["待处理", "待接单", "待派", "未处理", "new", "open"]):
+            status_bucket = "待处理"
+        elif any(k in rs for k in ["处理中", "进行中", "处理", "running", "dispatch", "已派"]):
+            status_bucket = "处理中"
+        elif any(k in rs for k in ["已完成", "完成", "办结", "关闭", "closed", "done", "finish", "有效", "已处理"]):
+            status_bucket = "已完成"
+        elif any(k in rs for k in ["终止", "取消", "取消处理", "无效", "拒绝", "reject"]):
+            status_bucket = "已终止"
+        else:
+            status_bucket = "未标注"
+        src_bucket = str(hr["source_type"] or "未标注")
+        cnt = int(hr["cnt"] or 0)
+        if src_bucket == "内部投诉":
+            acc = internal_handlers_acc.setdefault(handler, {
+                "total": 0,
+                "by_status": {"待处理": 0, "处理中": 0, "已完成": 0, "已终止": 0, "未标注": 0},
+            })
+        else:
+            acc = external_handlers_acc.setdefault(handler, {
+                "total": 0,
+                "by_status": {"待处理": 0, "处理中": 0, "已完成": 0, "已终止": 0, "未标注": 0},
+            })
+        acc["total"] += cnt
+        acc["by_status"][status_bucket] = acc["by_status"].get(status_bucket, 0) + cnt
+
+    def _build_handler_list(acc_dict, top_n=15):
+        result = []
+        if acc_dict.get("未分配"):
+            unallocated = acc_dict.pop("未分配")
+            result.append({"handler": "未分配", **unallocated})
+        sorted_names = sorted(acc_dict.keys(), key=lambda n: -acc_dict[n]["total"])[:top_n]
+        for nm in sorted_names:
+            result.append({"handler": nm, **acc_dict[nm]})
+        return result
+
+    complaint_internal_handlers = _build_handler_list(internal_handlers_acc)
+    complaint_external_handlers = _build_handler_list(external_handlers_acc)
+
+    # ═══════════════════════════════════════════════════════════
     # 2026-08-13 新增: 近期未处理投诉列表
     #   - 覆盖口径: 三张投诉表 (service_tickets 投诉类 + external_complaints + card_complaints)
     #   - 待处理定义: status_bucket ∉ {已完成, 已终止}  (即 待处理/处理中/未标注 任一都算"未闭环")
@@ -3469,6 +3549,8 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
             })
 
         # ── B. external_complaints 外部投诉 (未闭环) ──
+        # 注意: complaint_pending 的三表查询直接使用表模型，不受 _INCLUDE_COMPLAINT_FILES 标志影响
+        # 该标志仅控制投诉子类饼图/根因等聚合查询，并不阻止未闭环列表查询
         ec_where = and_(
             ExternalComplaint.complaint_date.isnot(None),
             ExternalComplaint.complaint_date >= ts_pending,
@@ -3618,6 +3700,15 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     # 注意: pending_total 口径 = "倒查 7 天窗口内仍未闭环" 的实际条数(和列表一致)
     # 而 complaint_status_all 里的待处理/处理中统计仍然是「原视图窗口」(和饼图/处理人排行口径一致, 不改动)
     complaint_pending_total = len(complaint_pending)
+    
+    # 数据一致性校验: 确保 total 与 list 长度一致，防止前端展示不一致
+    import logging
+    _log = logging.getLogger(__name__)
+    if complaint_pending_total > 0 and len(complaint_pending) == 0:
+        _log.warning(f"complaint_pending 数据不一致: total={complaint_pending_total}, list 为空")
+        complaint_pending_total = 0
+    elif complaint_pending_total != len(complaint_pending):
+        _log.warning(f"complaint_pending 数据不一致: total={complaint_pending_total}, list_len={len(complaint_pending)}")
 
     return {
         "date": d_iso,
@@ -3632,7 +3723,9 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         "complaint_roots": complaint_roots,   # 投诉根因 (柱图: 6+3+扩展桶)
         "complaint_unmatched": complaint_unmatched,  # 未匹配到接待记录的投诉数
         # ↓↓↓ 2026-08-13 新增: 投诉处理人 + 处理状态全景 ↓↓↓
-        "complaint_handlers": complaint_handlers,  # Top 15 处理人: {handler, total, by_status, by_source}
+        "complaint_handlers": complaint_handlers,  # Top 15 处理人(合并): {handler, total, by_status, by_source}
+        "complaint_internal_handlers": complaint_internal_handlers,  # 2026-08-14 新增: 内部投诉处理人 Top 15
+        "complaint_external_handlers": complaint_external_handlers,  # 2026-08-14 新增: 外部投诉处理人 Top 15
         "complaint_status_all": complaint_status_all,  # 三表合并处理状态 5 桶(对齐处理人status)
         # ↓↓↓ 2026-08-13 新增: 近期未处理投诉列表 ↓↓↓
         "complaint_pending_total": complaint_pending_total,   # 未闭环投诉总数(待+处理中+未标注), 与 complaint_status_all 口径一致
@@ -4285,7 +4378,8 @@ def today_staff_efficiency(
             select(
                 PersonAlias.alias, PersonAlias.person_id,
                 Person.id.label("pid"), Person.display_name, Person.department,
-                Person.specialty, Person.position, Person.qw_user_id,
+                func.coalesce(Person.primary_specialty, Person.specialty).label("specialty"),
+                Person.position, Person.qw_user_id,
                 func.coalesce(Group.name, Person.group_name).label("group_name"),
             )
             .select_from(PersonAlias)
@@ -4705,6 +4799,61 @@ def today_staff_efficiency(
 
     BUCK_FZ = ("咨询", "其他问题", "综合问题")
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 2026-08-14: 按天匹配专项 - 构建 person_id → {specialty_name: days_count}
+    #   解决人员周期内变更专项时，旧工作被错误按新专项系数计算的问题。
+    #   假设工作在各天均匀分布，用天数加权平均系数（单天查询完全精确）。
+    # ═══════════════════════════════════════════════════════════════════
+    from datetime import date as _date_cls, timedelta as _td
+    query_start = ts.date() if hasattr(ts, 'date') else _date_cls.fromisoformat(str(ts)[:10])
+    query_end = te.date() if hasattr(te, 'date') else _date_cls.fromisoformat(str(te)[:10])
+    date_list: list[_date_cls] = []
+    d = query_start
+    while d <= query_end:
+        date_list.append(d)
+        d += _td(days=1)
+
+    work_person_ids = {r.person_id for r in rows if r.person_id}
+    person_specialty_days: dict[int, dict[str, int]] = {}
+    if work_person_ids:
+        _sa_rows = db.execute(
+            select(
+                PersonSpecialtyAssignment.person_id,
+                PersonSpecialtyAssignment.effective_from,
+                PersonSpecialtyAssignment.effective_to,
+                Specialty.name.label("specialty_name"),
+            )
+            .select_from(PersonSpecialtyAssignment)
+            .join(Specialty, PersonSpecialtyAssignment.specialty_id == Specialty.id)
+            .where(
+                PersonSpecialtyAssignment.person_id.in_(work_person_ids),
+                PersonSpecialtyAssignment.is_primary == True,
+                or_(
+                    PersonSpecialtyAssignment.effective_to.is_(None),
+                    PersonSpecialtyAssignment.effective_to >= query_start,
+                ),
+                PersonSpecialtyAssignment.effective_from <= query_end,
+            )
+        ).all()
+        # 构建 person_id → {date: specialty_name}
+        person_daily: dict[int, dict[_date_cls, str]] = {}
+        for sa in _sa_rows:
+            pid = sa.person_id
+            sp_name = sa.specialty_name
+            eff_from = sa.effective_from
+            eff_to = sa.effective_to or query_end
+            if pid not in person_daily:
+                person_daily[pid] = {}
+            for _d in date_list:
+                if eff_from <= _d <= eff_to:
+                    person_daily[pid][_d] = sp_name
+        # 汇总为 person_id → {specialty_name: days_count}
+        for pid, daily_map in person_daily.items():
+            counts: dict[str, int] = {}
+            for sp in daily_map.values():
+                counts[sp] = counts.get(sp, 0) + 1
+            person_specialty_days[pid] = counts
+
     out: list[dict[str, Any]] = []; virtual_rows: list[dict[str, Any]] = []
     for r in rows:
         op = r.op
@@ -4768,9 +4917,20 @@ def today_staff_efficiency(
         reception_count = max(rc, reception_count)
 
         position = r.pos or ""
-        hr_cat = _hr_map(r.sp, position)
         # 管理岗判定: 主管/组长/副主管 → 跨类全系数豁免
-        mgmt = (position in ("主管", "组长", "副主管")) or hr_cat == "管理层"
+        mgmt = (position in ("主管", "组长", "副主管"))
+        # 当前主专项（用于展示，不作为唯一计算依据）
+        hr_cat = _hr_map(r.sp, position)
+
+        # 2026-08-14: 按天加权平均系数 - 替代单一 hr_cat
+        pid = r.person_id
+        sp_days = person_specialty_days.get(pid, {}) if pid else {}
+        total_days = sum(sp_days.values()) if sp_days else 0
+        # 2026-08-14 增强: SCD 无数据时, 自动用 Person.specialty 作为默认全天专项
+        # （用户刚编辑过任职记录但 SCD 还未同步的常见场景）
+        if total_days == 0 and hr_cat is not None and pid:
+            sp_days = {hr_cat: len(date_list)}
+            total_days = len(date_list)
 
         work_score = 0.0; eff_score = 0.0
         bd: dict[str, dict[str, Any]] = {}
@@ -4784,8 +4944,21 @@ def today_staff_efficiency(
                 # 管理岗: 跨类豁免, 使用大类默认系数
                 own = True
                 coef = CAT_DEFAULT_WEIGHT[cat_name]
+            elif total_days > 0:
+                # 按天加权平均系数
+                weighted_coef = 0.0
+                own_days = 0
+                for sp_name, days in sp_days.items():
+                    sp_cat = _hr_map(sp_name, position)
+                    if sp_cat and sp_cat in sp_set:
+                        weighted_coef += WEIGHT.get(sp_cat, 1.0) * days
+                        own_days += days
+                    else:
+                        weighted_coef += TRANSFER_PENALTY * days
+                coef = weighted_coef / total_days
+                own = own_days > total_days / 2  # 大部分天数是本职则标记为本职
             elif hr_cat is not None and hr_cat in sp_set:
-                # 本人主专项属于该大类 → 本职, 使用本人专项系数
+                # 回退: 无按天数据时使用单一 hr_cat
                 own = True
                 coef = WEIGHT[hr_cat]
             else:
@@ -5081,11 +5254,13 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
     from app.models.person import Person as P, PersonAlias as PA
     person_rows = db.execute(
         select(
-            PA.alias.label("operator"),
-            PA.person_id.label("pid"),
-            func.coalesce(P.display_name, PA.alias).label("display_name"),
-            P.group_name, P.specialty, P.position, P.department,
-        )
+                PA.alias.label("operator"),
+                PA.person_id.label("pid"),
+                func.coalesce(P.display_name, PA.alias).label("display_name"),
+                P.group_name,
+                func.coalesce(P.specialty, P.primary_specialty).label("specialty"),
+                P.position, P.department,
+            )
         .select_from(PA)
         .outerjoin(P, PA.person_id == P.id)
         .where(PA.is_system == False)
@@ -6212,14 +6387,16 @@ def refund_recovery_analysis(
     from app.models.person import Person as P, PersonAlias as PA
     person_rows = db.execute(
         select(
-            PA.alias.label("operator"),
-            PA.person_id.label("person_id"),
-            func.coalesce(P.display_name, PA.alias).label("display_name"),
-            P.group_name, P.specialty, P.position, P.department,
-        )
-        .select_from(PA)
-        .outerjoin(P, PA.person_id == P.id)
-        .where(PA.is_system == False)  # 排除 sys/system 等系统自动别名
+                PA.alias.label("operator"),
+                PA.person_id.label("person_id"),
+                func.coalesce(P.display_name, PA.alias).label("display_name"),
+                P.group_name,
+                func.coalesce(P.specialty, P.primary_specialty).label("specialty"),
+                P.position, P.department,
+            )
+            .select_from(PA)
+            .outerjoin(P, PA.person_id == P.id)
+            .where(PA.is_system == False)  # 排除 sys/system 等系统自动别名
     ).all()
     
     # 专职退款挽回人员 (hr_cat=退款挽回)

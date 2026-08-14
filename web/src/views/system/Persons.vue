@@ -467,8 +467,8 @@
           </el-select>
         </el-form-item>
         <el-form-item label="专项">
-          <el-select v-model="assignmentForm.specialty" clearable style="width: 100%">
-            <el-option label="接待" value="接待" /><el-option label="投诉接待" value="投诉接待" /><el-option label="主管" value="主管" />
+          <el-select v-model="assignmentForm.specialty" clearable filterable style="width: 100%">
+            <el-option v-for="s in specialtiesList" :key="s.id" :label="s.name" :value="s.name" />
           </el-select>
         </el-form-item>
         <el-form-item label="分组"><el-input v-model="assignmentForm.group_name" placeholder="可选" /></el-form-item>
@@ -530,8 +530,8 @@
         </el-form-item>
         <el-form-item label="专项">
           <el-checkbox v-model="batchApply.specialty" style="width:90px">修改</el-checkbox>
-          <el-select v-model="batchForm.specialty" clearable style="width: calc(100% - 100px)">
-            <el-option label="接待" value="接待" /><el-option label="投诉接待" value="投诉接待" /><el-option label="主管" value="主管" />
+          <el-select v-model="batchForm.specialty" clearable filterable style="width: calc(100% - 100px)">
+            <el-option v-for="s in specialtiesList" :key="s.id" :label="s.name" :value="s.name" />
           </el-select>
         </el-form-item>
       </el-form>
