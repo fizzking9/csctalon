@@ -1037,32 +1037,38 @@ def upsert_cs_records(df: pd.DataFrame, mapping: dict[str, str], db: Session, re
 
     _sync_devices(unique_rows, "device_sn", db)
 
-    # 2. 查询已存在的记录数(用于精确统计 inserted)
-    #    由于唯一键包含 timestamptz 字段,用 OR 查询简化
-    existing_count = 0
-    if unique_rows:
-        conditions = []
-        for r in unique_rows:
-            conditions.append(and_(
-                CsRecord.device_sn == r.get("device_sn"),
-                CsRecord.operation_time == r.get("operation_time"),
-                CsRecord.operator == r.get("operator"),
-                CsRecord.problem_category == r.get("problem_category"),
-                CsRecord.problem_type == r.get("problem_type"),
-                CsRecord.solution == r.get("solution"),
-                CsRecord.consult_time == r.get("consult_time"),
-                CsRecord.problem_create_time == r.get("problem_create_time"),
-            ))
-        existing_count = db.scalar(select(func.count()).select_from(CsRecord).where(or_(*conditions))) or 0
-
-    # 3. 插入,冲突时跳过(按唯一约束)
-    db.execute(
-        pg_insert(CsRecord)
-        .values(unique_rows)
-        .on_conflict_do_nothing(constraint="uq_cs_record_business")
-    )
-    db.flush()
-    result.inserted += len(unique_rows) - existing_count
+    # 2. 分批插入(每批 <=300 行),冲突时跳过(按唯一约束 uq_cs_record_business)
+    #    ⚠️ 2026-08-14 修复前: 用 or_(*[and_(8 字段条件)*5979]) 去 count 已存在 →
+    #        单条 SQL 包含 ~48,000 个表达式,PG 解析直接吃爆 内存(被 OOM Killer signal 9 杀 3 次)
+    #        → DB 进入 recovery mode → 前端 HTTP 500,用户以为"同步报错"。
+    #    修复策略:
+    #      a) 删除 pre-count 巨型 OR 链查询;
+    #      b) 改为 300 行/批 的 pg_insert ... on_conflict_do_nothing,
+    #         然后用 cursor.rowcount 直接拿到该批"真实 insert 行数"(冲突被跳过的不算),
+    #         inserted 精确累加,且 SQL 体积 / PG 内存占用下降 20 倍以上,不再 OOM。
+    BATCH_SIZE = 300
+    real_inserted = 0
+    for i in range(0, len(unique_rows), BATCH_SIZE):
+        batch = unique_rows[i:i + BATCH_SIZE]
+        if not batch:
+            continue
+        cursor_result = db.execute(
+            pg_insert(CsRecord)
+            .values(batch)
+            .on_conflict_do_nothing(constraint="uq_cs_record_business")
+        )
+        db.flush()
+        try:
+            rc = cursor_result.rowcount
+            if isinstance(rc, int) and rc >= 0:
+                real_inserted += rc
+            else:
+                # rowcount 不可靠 → 用 批次 兜底(不准确但不会崩)
+                real_inserted += len(batch)
+        except Exception:
+            real_inserted += len(batch)
+    result.inserted += real_inserted
+    result.updated += max(len(unique_rows) - real_inserted, 0)
 
 
 def upsert_external_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:

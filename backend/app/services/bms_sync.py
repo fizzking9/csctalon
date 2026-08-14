@@ -327,10 +327,14 @@ async def sync_all(
     async def _import_one_in_background(fr: FetchResult, start: datetime, end: datetime, name: str) -> dict:
         """在后台线程执行导入(因为 pandas/SQLAlchemy 同步 I/O 会阻塞 event_loop),返回单源结果 dict"""
         try:
-            def _sync_import_work() -> dict:
+            def _sync_import_work(attempt: int) -> dict:
                 inner_db = SessionLocal()
                 try:
                     if fr.success:
+                        # ⚠️ 注意: _create_sync_log 是当前事务里的第一条 DB 操作;
+                        #   如果恰好 PG 刚因 OOM/recovery/重启断开,就会抛 OperationalError.
+                        #   把 _create_sync_log + _auto_import 全部包在同一个 try 里,
+                        #   让下面的 except 能捕获任何阶段的 DB 连接错误。
                         log = _create_sync_log(inner_db, fr.data_type, start, end, trigger_type, triggered_by)
                         try:
                             import_stats = _auto_import(inner_db, fr.data_type, fr.file_path, fr.filename, triggered_by)
@@ -344,10 +348,11 @@ async def sync_all(
                                 **import_stats,
                                 "start_time": start.isoformat(),
                                 "end_time": end.isoformat(),
+                                "attempt": attempt,
                             }
                         except Exception as e:
                             _update_sync_log(inner_db, log.id, "failed", fr.file_path, fr.filename, error=str(e))
-                            logger.error(f"[{fr.data_type}] 导入失败: {e}", exc_info=True)
+                            logger.error(f"[{fr.data_type}] 导入失败(attempt={attempt}): {e}", exc_info=True)
                             return {
                                 "data_type": fr.data_type,
                                 "name": name,
@@ -356,6 +361,7 @@ async def sync_all(
                                 "file_path": fr.file_path,
                                 "start_time": start.isoformat(),
                                 "end_time": end.isoformat(),
+                                "attempt": attempt,
                             }
                     else:
                         log = _create_sync_log(inner_db, fr.data_type, start, end, trigger_type, triggered_by)
@@ -367,14 +373,53 @@ async def sync_all(
                             "error": fr.error,
                             "start_time": start.isoformat(),
                             "end_time": end.isoformat(),
+                            "attempt": attempt,
                         }
                 finally:
-                    inner_db.close()
+                    try:
+                        inner_db.close()
+                    except Exception:
+                        pass
 
             # 先把 phase 切到 importing(在此处做因为要走 async on_progress 回调)
             if on_progress:
                 await on_progress(fr.data_type, "importing", None)
-            result_dict = await asyncio.to_thread(_sync_import_work)
+
+            # ═══════════════════════════════════════════════════════════
+            # 2026-08-14 新增: OperationalError 单次自动重试
+            #   背景: PG 被 OOM Killer kill 后,连接池中的连接(以及刚 checkout 的
+            #   连接)可能都处于 "server closed unexpectedly" 或 "recovery mode" 状态,
+            #   如果直接失败 → 用户前端看到"导入崩溃"误以为是数据的问题。
+            #   处置: 第一次捕获 OperationalError/InterfaceError 时,
+            #         先 engine.dispose() 清空死连接池 + sleep 2s 等待 PG 完成 recovery,
+            #         再新建 Session 完整重试一次 upsert 工作流。
+            #         upsert 全程 on_conflict_do_update / do_nothing → 天然幂等。
+            # ═══════════════════════════════════════════════════════════
+            from sqlalchemy.exc import OperationalError as _SyncOpErr, InterfaceError as _SyncIfErr
+            import time as _tm
+            first_res = None
+            try:
+                first_res = await asyncio.to_thread(_sync_import_work, 1)
+            except (_SyncOpErr, _SyncIfErr) as _e1:
+                logger.warning(
+                    f"[{fr.data_type}] 第1次导入遇到 DB 瞬态故障(OperationalError/InterfaceError): {_e1},"
+                    " 将 engine.dispose() + 等待 2s 后重试 1 次 (upsert 幂等安全)..."
+                )
+                try:
+                    # 注意: engine 是全局单例, dispose 会关闭所有池里的连接,
+                    # 后续任何 SessionLocal() 都会拿到新 TCP 连接 + PG 已 ready。
+                    from app.core.database import engine as _sync_engine
+                    _sync_engine.dispose()
+                except Exception as _disp_err:
+                    logger.warning(f"[{fr.data_type}] engine.dispose() 忽略异常: {_disp_err}")
+                _tm.sleep(2.0)
+                first_res = await asyncio.to_thread(_sync_import_work, 2)
+                if first_res.get("success"):
+                    logger.info(f"[{fr.data_type}] 第2次重试成功 ✅ (attempt=2)")
+                else:
+                    logger.warning(f"[{fr.data_type}] 第2次重试仍失败: {first_res.get('error')}")
+
+            result_dict = first_res
 
             if on_progress:
                 await on_progress(fr.data_type, "imported" if result_dict["success"] else "failed", result_dict)

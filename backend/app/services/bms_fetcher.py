@@ -1736,106 +1736,403 @@ class BmsFetcher:
             raise RuntimeError(f"_fill_el_input: fill + evaluate 都失败 value={value!r}")
 
     async def _click_query_button(self, page) -> None:
-        """点击「查询/搜索/筛选」按钮(兼容各站点的按钮文案,避免写死 has-text("搜索"))。
+        """点击「查询/搜索/筛选」按钮(兼容各站点的按钮文案 & DOM,避免写死 has-text("搜索"))。
+
+        2026-08-14 增强: BMS 退费单管理(refund) 页面改版后, 查询按钮不再是 <button> 标签,
+        而是 <div role="button"> / <a class="btn-search"> / <span class="el-button"> 等伪按钮 DOM,
+        原 4 层兜底只扫 button tag → 全部失败 → "所有兜底均失败"。
+        现在把候选 DOM 集合 从 'button' 扩大到「button + 伪按钮」; 并额外新增 2 层兜底。
+
+        2026-08-14 调试增强: 每一层策略都打印"候选数量 / 命中细节 / 未命中原因 / 失败前全量快照",
+        方便下次出现伪按钮改版时, 仅靠日志即可还原页面 DOM, 不用远程连浏览器复现。
 
         优先级:
-          1) 文本精确匹配「查询/查 询/搜索/搜 索/筛选/开始查询」
-          2) 找不到 → 找页面上 y 坐标最靠上的筛选条区域里第一个非「重置/导出」按钮
-          3) 再找不到 → 用 JS 点击第一个匹配按钮
-          4) 仍失败 → 按 Enter 兜底触发
+          1) 文本精确匹配「查询/搜索/筛选...」 → 候选集合扩大到 button/div(role=button)/span(role=button)/a(btn类)
+          2) 找不到 → y 坐标最靠上的筛选条区域里第一个非「重置/导出」按钮 (DOM 集合同扩大)
+          3) 再找不到 → 用 JS 在整个文档扩大范围内搜 (querySelectorAll 同扩大)
+          4) 仍失败 → 按 Enter 兜底 (聚焦日期框/最后一个 input 然后 Enter)
+          5) [新增] 仍失败 → 表单 submit / [aria-label="搜索"] / [class*=submit]-btn 点击
         """
-        keywords = ["查询", "查 询", "搜索", "搜 索", "筛选", "开始查询", "查询统计", "确认查询"]
-        exclude_keywords = ["重置", "导出", "下载", "清空", "取消", "关闭"]
+        keywords = ["查询", "查 询", "搜索", "搜 索", "筛选", "开始查询", "查询统计", "确认查询", "查 询 统 计"]
+        exclude_keywords = ["重置", "导出", "下载", "清空", "取消", "关闭", "重置查询"]
+        # 扩大候选 DOM 选择器: 真按钮 + 常见伪按钮实现 (div 挂 role / a 挂 btn-class / span 挂 el-button)
+        ANY_CLICKABLE = (
+            "button:visible,"
+            "div[role='button']:visible,"
+            "span[role='button']:visible,"
+            "a[class*='btn']:visible,"
+            "a[class*='button']:visible,"
+            "div[class*='btn']:visible,"
+            "div[class*='button']:visible,"
+            "span[class*='el-button']:visible,"
+            "div[class*='el-button']:visible"
+        )
+
+        # ═══════════════════════════════════════════════════════════
+        # 2026-08-14 新增: 收集当前页 ALL 候选按钮的结构化"快照"函数
+        #   - 正常路径: 仅打数量 + 前 N 个摘要 (info 级别, 不吵)
+        #   - 即将抛错前: 全量打到 error 级别, 包含 tag/text/aria-label/class/x/y
+        # ═══════════════════════════════════════════════════════════
+        async def _build_buttons_snapshot(max_items: int | None = None):
+            try:
+                all_el = await page.query_selector_all(ANY_CLICKABLE)
+            except Exception:
+                return []
+            snap = []
+            for idx, b in enumerate(all_el):
+                try:
+                    tag = (await b.evaluate("e=>e.tagName") or "?").upper()
+                except Exception:
+                    tag = "?"
+                try:
+                    txt = (await b.inner_text() or "").strip().replace("\n", " ")
+                except Exception:
+                    txt = ""
+                try:
+                    al = (await b.get_attribute("aria-label") or "").strip()
+                except Exception:
+                    al = ""
+                try:
+                    cls = (await b.get_attribute("class") or "").strip()
+                except Exception:
+                    cls = ""
+                try:
+                    box = await b.bounding_box()
+                    if box:
+                        pos = f"({int(box['x'])},{int(box['y'])},{int(box['width'])}x{int(box['height'])})"
+                    else:
+                        pos = "(?)"
+                except Exception:
+                    pos = "(?)"
+                if len(txt) > 40:
+                    txt = txt[:40] + "…"
+                if len(cls) > 60:
+                    cls = cls[:60] + "…"
+                snap.append(f"  [#{idx}] {tag}{pos} text={txt!r} aria={al!r} class={cls!r}")
+                if max_items and idx + 1 >= max_items:
+                    snap.append(f"  ... 仅展示前 {max_items} 个, 剩余 {len(all_el) - max_items} 个省略")
+                    break
+            return snap
+
+        page_url_for_log = page.url or "<unknown>"
+        logger.info(f"  [策略总览] 开始查找查询按钮 当前页面URL={page_url_for_log} 选择器={ANY_CLICKABLE!r}")
+
+        # ═══════════════════════════════════════════════════════════
+        # 2026-08-14 新增: 关闭遮挡层预处理
+        #   生产日志(12h refund) 出现:
+        #     `<ul id="dropdown-menu-3551" class="el-dropdown-menu el-popper user-dropdown">`
+        #     intercepts pointer events 导致 Playwright 真实 click 被拦截 5s,
+        #     只能 fallback 到 `evaluate(el.click())` 才能成功。
+        #   每次调用 _click_query_button 前统一做 3 招清场(无论是否存在):
+        #     1) 发送 ESC(Element UI 的弹层/下拉几乎都会响应 ESC 关闭);
+        #     2) 对所有打开的 el-popper / el-dropdown-menu 调 JS remove() /
+        #        设置 display:none (避免 user-dropdown 这类 hover 残留的下拉);
+        #     3) 最后点击页面 body 左上角绝对空白 (x=8,y=8,一般是无元素的背景),
+        #        触发 Element UI 的"点击空白关闭"机制。
+        # ═══════════════════════════════════════════════════════════
         try:
-            btns = await page.query_selector_all("button:visible")
-            for b in btns:
+            # (1) ESC 按 2 次,间隔 50ms
+            for _esc_i in range(2):
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.05)
+            # (2) JS 移除/隐藏所有弹层: el-popper / el-dialog__wrapper / el-drawer__wrapper / el-picker-panel
+            _popper_cleaned = await page.evaluate("""() => {
+                const sel = '.el-popper,.el-dropdown-menu,.el-picker-panel,el-dialog__wrapper,.el-drawer__wrapper,el-message-box__wrapper';
+                const list = document.querySelectorAll(sel);
+                let n = 0, hid = 0, rm = 0;
+                for (let i = 0; i < list.length; i++) {
+                    const el = list[i];
+                    const style = (el.getAttribute && el.getAttribute('style')) || '';
+                    const cls = (el.className && typeof el.className === 'string') ? el.className : '';
+                    // user-dropdown / 登录头像的下拉 → 直接移除
+                    if (typeof cls === 'string' && /user-dropdown|el-dropdown-menu/.test(cls)) {
+                        try { el.parentNode && el.parentNode.removeChild(el); rm++; } catch(_) { el.style.display='none'; hid++; }
+                        n++; continue;
+                    }
+                    // 其他 popper/picker-panel → display:none 隐藏(安全不删)
+                    if (!/display\\s*:\\s*none/.test(style)) {
+                        el.setAttribute('style', (style ? style + ';' : '') + 'display:none !important');
+                        hid++;
+                    }
+                    n++;
+                }
+                return {matched: n, removed: rm, hidden: hid};
+            }""")
+            logger.info(f"  [遮挡层预处理-清理弹层] {_popper_cleaned!r}")
+            # (3) 点击左上角空白(x=8,y=8),触发 Element UI "click-outside" 关闭规则
+            try:
+                await page.mouse.click(8, 8)
+                await asyncio.sleep(0.05)
+                # 再点一次(有的弹层需要两下空白才能清掉)
+                await page.mouse.click(8, 8)
+                logger.info("  [遮挡层预处理] 左上角空白点击 2 次 OK")
+            except Exception as mc_e:
+                logger.warning(f"  [遮挡层预处理] 鼠标点空白失败(跳过): {mc_e}")
+        except Exception as pre_err:
+            logger.warning(f"  [遮挡层预处理] 整体异常(不影响后续策略): {pre_err}")
+
+        try:
+            # ── 1) 文本关键词匹配 (扩大候选 DOM) ──
+            btns = await page.query_selector_all(ANY_CLICKABLE)
+            logger.info(f"  [策略1-关键词] ANY_CLICKABLE 命中 {len(btns)} 个可见元素")
+            scanned_preview = await _build_buttons_snapshot(max_items=15)
+            if scanned_preview:
+                # 成功/失败路径都打印前 15 个的摘要, 成功路径日志也能让用户知道当前页有哪些按钮
+                logger.info("  [策略1-关键词] 候选摘要(前15个):\n" + "\n".join(scanned_preview))
+            s1_miss_reason_counts: dict[str, int] = {"no_text": 0, "excluded": 0, "kw_not_match": 0}
+            for idx, b in enumerate(btns):
                 try:
                     txt = (await b.inner_text()).strip()
                 except Exception:
                     txt = ""
+                al_source = ""
                 if not txt:
+                    # 再尝试 aria-label (伪按钮常把文案放 aria-label 而不是 innerText)
+                    try:
+                        al = await b.get_attribute("aria-label") or ""
+                        txt = al.strip()
+                        if txt:
+                            al_source = " [aria]"
+                    except Exception:
+                        txt = ""
+                if not txt:
+                    s1_miss_reason_counts["no_text"] += 1
                     continue
-                matched_kw = any(kw in txt for kw in keywords)
-                excluded = any(kw in txt for kw in exclude_keywords)
+                matched_kw = next((kw for kw in keywords if kw in txt), None)
+                excluded = next((kw for kw in exclude_keywords if kw in txt), None)
                 if matched_kw and not excluded:
-                    logger.info(f"  点击查询按钮: text={txt!r}")
+                    tag = (await b.evaluate("e=>e.tagName") or "?").upper()
+                    logger.info(
+                        f"  [策略1-关键词#{idx}] 命中! keyword={matched_kw!r} text={txt!r}{al_source} tag={tag} → 执行点击"
+                    )
                     try:
                         await b.click(timeout=5000)
-                        logger.info(f"  查询按钮 click() 已返回")
+                        logger.info(f"  [策略1-关键词#{idx}] click() 正常返回 OK")
                         return
                     except Exception as click_err:
-                        logger.warning(f"  Playwright click 超时: {click_err}, 改用 JS 点击")
+                        logger.warning(f"  [策略1-关键词#{idx}] Playwright click 异常: {click_err}, 改用 JS 点击")
                         await b.evaluate("(el) => el.click()")
-                        logger.info(f"  JS click() 已返回")
+                        logger.info(f"  [策略1-关键词#{idx}] JS evaluate click 已返回 OK")
                         return
-            # 2) 找筛选条(y 小)里第一个非「重置/导出」按钮
+                elif excluded:
+                    s1_miss_reason_counts["excluded"] += 1
+                else:
+                    s1_miss_reason_counts["kw_not_match"] += 1
+            logger.info(
+                f"  [策略1-关键词] 全部未命中 原因统计: {s1_miss_reason_counts!r}"
+                f" (无文案={s1_miss_reason_counts['no_text']} 个/被排除词命中={s1_miss_reason_counts['excluded']}"
+                f" 个/关键词不匹配={s1_miss_reason_counts['kw_not_match']} 个)"
+            )
+
+            # ── 2) 找筛选条(y 坐标合理范围) 里第一个非「重置/导出」可点击元素 ──
             y_sorted = []
-            for b in btns:
+            for idx, b in enumerate(btns):
                 try:
                     box = await b.bounding_box()
-                    if not box or box["y"] < 60 or box["y"] > 600:
+                    if not box:
                         continue
-                    txt = (await b.inner_text()).strip()
+                    # 放宽 y 上限到 800 (1080p 屏幕下筛选条不会在 800+ 位置; 之前 600 可能会漏掉高分辨率页面)
+                    if box["y"] < 60 or box["y"] > 800:
+                        continue
+                    txt = ""
+                    try:
+                        txt = (await b.inner_text()).strip()
+                    except Exception:
+                        pass
+                    if not txt:
+                        try:
+                            al = await b.get_attribute("aria-label") or ""
+                            txt = al.strip()
+                        except Exception:
+                            pass
                     if any(kw in txt for kw in exclude_keywords):
                         continue
-                    y_sorted.append((box["y"], box["x"], b, txt))
+                    y_sorted.append((box["y"], box["x"], idx, b, txt))
                 except Exception:
                     continue
             y_sorted.sort(key=lambda r: (r[0], r[1]))
+            logger.info(
+                f"  [策略2-y坐标] y∈[60,800] 且非重置/导出 候选共 {len(y_sorted)} 个"
+                + (
+                    f" → Top5: "
+                    + " / ".join(
+                        f"#{idx}[{y},{x}]{txt!r}" for (y, x, idx, _b, txt) in y_sorted[:5]
+                    )
+                    if y_sorted
+                    else " (空, 进入策略3)"
+                )
+            )
             if y_sorted:
-                _, _, b, txt = y_sorted[0]
-                logger.info(f"  文本未匹配,按坐标取筛选条第一个按钮 text={txt!r} 点击")
+                y, x, idx, b, txt = y_sorted[0]
+                tag = (await b.evaluate("e=>e.tagName") or "?").upper()
+                logger.info(
+                    f"  [策略2-y坐标] 选中第1个 候选序号=#{idx} pos=({x},{y}) tag={tag} text={txt!r} → 执行点击"
+                )
                 try:
                     await b.click(timeout=5000)
+                    logger.info(f"  [策略2-y坐标] click() 正常返回 OK")
                     return
-                except Exception:
+                except Exception as ce:
+                    logger.warning(f"  [策略2-y坐标] Playwright click 异常: {ce}, 改用 JS 点击")
                     await b.evaluate("(el) => el.click()")
+                    logger.info(f"  [策略2-y坐标] JS evaluate click 已返回 OK")
                     return
         except Exception as e:
-            logger.warning(f"  查询按钮点击策略异常: {e}")
-        # 3) JS 全局查找按钮并点击(兜底)
+            logger.warning(f"  查询按钮点击策略(1-2)异常: {e}", exc_info=True)
+        # ── 3) JS 全局查找扩大范围内可点击并点击 (兜底) ──
+        logger.info("  [策略3-JS全局] 进入 evaluate 全文档搜索(ANY_CLICKABLE 去掉 :visible)...")
         try:
-            clicked = await page.evaluate(
-                """(kw_list, excl_list) => {
-                    const btns = document.querySelectorAll('button');
-                    for (const b of btns) {
-                        const txt = (b.innerText || '').trim();
-                        if (!txt) continue;
-                        const matched = kw_list.some(k => txt.includes(k));
-                        const excluded = excl_list.some(k => txt.includes(k));
+            js_sel = ANY_CLICKABLE.replace(":visible", "")
+            clicked_and_stats = await page.evaluate(
+                """(kw_list, excl_list, any_sel) => {
+                    const btns = document.querySelectorAll(any_sel);
+                    const stats = {total: btns.length, noText: 0, excluded: 0, kwNotMatch: 0, considered: []};
+                    for (let i = 0; i < btns.length; i++) {
+                        const b = btns[i];
+                        const it = (b.innerText || '').replace(/\\s+/g,' ').trim();
+                        const al = (b.getAttribute && b.getAttribute('aria-label')) || '';
+                        const txt = (it + ' ' + al).trim();
+                        const cls = (b.className && typeof b.className === 'string') ? b.className : '';
+                        if (!txt) { stats.noText++; continue; }
+                        const matched = kw_list.find(k => txt.includes(k));
+                        const excluded = excl_list.find(k => txt.includes(k));
                         if (matched && !excluded) {
                             b.click();
-                            return txt;
+                            stats.hit = {idx: i, tag: b.tagName, text: txt, cls: cls, matchedKw: matched};
+                            return stats;
+                        }
+                        if (excluded) stats.excluded++; else stats.kwNotMatch++;
+                        if (stats.considered.length < 20) {
+                            stats.considered.push({idx:i, tag:b.tagName, text:txt.slice(0,40), cls:cls.slice(0,60)});
                         }
                     }
-                    return null;
+                    return stats;
                 }""",
-                keywords, exclude_keywords,
+                keywords, exclude_keywords, js_sel,
             )
-            if clicked:
-                logger.info(f"  JS 全局点击查询按钮成功: text={clicked!r}")
+            total = clicked_and_stats.get("total", -1)
+            if isinstance(clicked_and_stats, dict) and clicked_and_stats.get("hit"):
+                hit = clicked_and_stats["hit"]
+                logger.info(
+                    f"  [策略3-JS全局] 成功! 候选总数={total},"
+                    f" 命中 idx={hit.get('idx')} tag={hit.get('tag')} keyword={hit.get('matchedKw')!r} text={hit.get('text')!r}"
+                )
                 return
-        except Exception:
-            pass
-        # 4) Enter 兜底 - 聚焦第一个筛选框后按 Enter
+            # 没命中, 打印候选概况 (这里打到 warning 因为已经到策略3了, 意味着前面都失败, 需要多一点上下文)
+            logger.warning(
+                f"  [策略3-JS全局] evaluate 没有命中 候选={total} 个"
+                f" noText={clicked_and_stats.get('noText')} excluded={clicked_and_stats.get('excluded')}"
+                f" kwNotMatch={clicked_and_stats.get('kwNotMatch')}"
+            )
+            cons = clicked_and_stats.get("considered") or []
+            if cons:
+                logger.warning(
+                    "  [策略3-JS全局] 评估过的前" + str(len(cons)) + "个元素:\n"
+                    + "\n".join(
+                        f"    [#{c.get('idx')}] {c.get('tag')} txt={c.get('text')!r} cls={c.get('cls')!r}"
+                        for c in cons
+                    )
+                )
+        except Exception as e:
+            logger.warning(f"  [策略3-JS全局] evaluate 抛异常: {e}", exc_info=True)
+        # ── 4) Enter 兜底 - 聚焦第一个筛选框后按 Enter ──
+        logger.info("  [策略4-Enter] 进入键盘 Enter 兜底...")
         try:
             date_inp = await page.query_selector('input.el-range-input:visible')
             if date_inp:
+                logger.info("  [策略4-Enter] 找到 el-range-input, 聚焦后 Enter")
                 await date_inp.focus()
                 await asyncio.sleep(0.1)
                 await page.keyboard.press("Enter")
-                logger.info("  Enter 兜底触发查询(日期框)")
+                logger.info("  Enter 兜底触发查询(日期框) OK")
                 return
             last_inp = page.locator('input:visible').last
             if await last_inp.count() > 0:
+                try:
+                    li_place = await last_inp.get_attribute("placeholder")
+                except Exception:
+                    li_place = None
+                logger.info(f"  [策略4-Enter] 回退到最后一个可见 input (placeholder={li_place!r}) 聚焦后 Enter")
                 await last_inp.focus(timeout=1000)
                 await asyncio.sleep(0.1)
                 await page.keyboard.press("Enter")
-                logger.info("  Enter 兜底触发查询(最后一个输入框)")
+                logger.info("  Enter 兜底触发查询(最后一个输入框) OK")
                 return
-        except Exception:
-            pass
-        raise RuntimeError("找不到任何查询/搜索按钮,所有兜底均失败")
+            logger.warning("  [策略4-Enter] 页面上没有任何可见 input, 跳过")
+        except Exception as e:
+            logger.warning(f"  [策略4-Enter] 异常: {e}", exc_info=True)
+        # ── 5) 2026-08-14 新增: 最后两层终极兜底 ──
+        #    5a. 找 form 包着的输入并 submit()
+        #    5b. 找 [aria-label ~= 搜索/查询] 或 class*="submit"/"search-submit"/"query-submit" 的元素
+        logger.info("  [策略5-终极兜底] 进入 form.submit + aria-label/submit-class 兜底...")
+        try:
+            submit_ok = await page.evaluate("""() => {
+                const out = {};
+                // 5a. 找包含至少 1 个日期输入的 form, 提交它
+                const forms = document.querySelectorAll('form');
+                out.formCount = forms.length;
+                for (let i = 0; i < forms.length; i++) {
+                    const f = forms[i];
+                    const hasDate = f.querySelector('input[placeholder*="日期"],.el-date-editor,input[type="date"]');
+                    if (hasDate) {
+                        out.hitForm = {idx: i, hasDate: true, formClass: (f.className||'').slice(0,80)};
+                        if (typeof f.requestSubmit === 'function') f.requestSubmit();
+                        else f.submit();
+                        out.hitForm.by = 'requestSubmit';
+                        return out;
+                    }
+                }
+                // 5b. aria-label 搜 搜索/查询
+                const byAria = document.querySelector(
+                    '[aria-label*="搜索" i],[aria-label*="查询" i],' +
+                    '[class*="submit-btn" i],[class*="search-submit" i],[class*="query-submit" i]'
+                );
+                if (byAria && byAria.click) {
+                    out.hitAria = {
+                        tag: byAria.tagName,
+                        ariaLabel: (byAria.getAttribute && byAria.getAttribute('aria-label')) || '',
+                        className: (byAria.className && typeof byAria.className === 'string') ? byAria.className.slice(0,80) : ''
+                    };
+                    byAria.click();
+                    return out;
+                }
+                return out;
+            }""")
+            logger.info(f"  [策略5-终极兜底] evaluate 返回结果: {submit_ok!r}")
+            if submit_ok and (submit_ok.get("hitForm") or submit_ok.get("hitAria")):
+                what = submit_ok.get("hitForm") and "form.requestSubmit" or "aria-label/submit-class"
+                detail = submit_ok.get("hitForm") or submit_ok.get("hitAria")
+                logger.info(f"  [策略5-终极兜底] 命中 {what} 分支: detail={detail!r}")
+                return
+            logger.warning(
+                f"  [策略5-终极兜底] 没有命中任何分支 formCount={submit_ok.get('formCount')} 没有含日期form / aria/submit-class 也没找到"
+            )
+        except Exception as e:
+            logger.warning(f"  [策略5-终极兜底] 异常: {e}", exc_info=True)
+
+        # ═══════════════════════════════════════════════════════════
+        # 全部 5 层兜底都没命中 → 在抛错前以 ERROR 级别输出全量候选 DOM 快照
+        # ═══════════════════════════════════════════════════════════
+        try:
+            full_snap = await _build_buttons_snapshot(max_items=None)
+            if full_snap:
+                logger.error(
+                    "  [兜底全部失败] ANY_CLICKABLE 全量按钮快照("
+                    + f"URL={page_url_for_log} 共 {len(full_snap)} 个元素):\n"
+                    + "\n".join(full_snap)
+                )
+            else:
+                logger.error(
+                    f"  [兜底全部失败] 页面上 ANY_CLICKABLE 一个都没命中! URL={page_url_for_log}"
+                    " 请人工检查: 是不是按钮选择器需要再扩展?"
+                )
+        except Exception as snap_err:
+            logger.error(f"  [兜底全部失败] 打印快照失败: {snap_err}", exc_info=True)
+
+        raise RuntimeError(
+            "找不到任何查询/搜索按钮,所有兜底均失败 (候选已扩大到 div/span/a 伪按钮;"
+            " 详细排查请搜日志「[策略1-关键词] 候选摘要」与「[兜底全部失败] 全量按钮快照」)"
+        )
 
     async def _do_fetch_one(
         self,

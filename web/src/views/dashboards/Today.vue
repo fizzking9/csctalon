@@ -332,6 +332,152 @@
           </ChartCard>
         </el-col>
       </el-row>
+
+      <!-- 模块5第三行: 近期未处理投诉列表 (创建窗口 = 当前视图终点向前倒查 7 天, 状态=未闭环; 长跨度>31天不展示) -->
+      <el-row :gutter="12" class="mt-12">
+        <el-col :xs="24">
+          <ChartCard
+            title="近7天未闭环投诉（最早积压排第一 · 倒查7天创建窗口）"
+            v-loading="loadingReception"
+          >
+            <template #extra>
+              <el-space wrap size="default" style="font-size:12px;color:#606266;font-weight:400">
+                <el-tag
+                  v-if="complaintData.complaint_pending_total != null"
+                  type="danger" size="small" effect="dark"
+                >未闭环 {{ formatNum(complaintData.complaint_pending_total) }} 条</el-tag>
+                <el-tooltip
+                  v-if="complaintData.complaint_pending_skipped"
+                  :content="complaintData.complaint_pending_skip_reason || '当前跨度未展示列表'"
+                  placement="top"
+                >
+                  <el-tag type="warning" size="small" effect="plain" style="cursor:help">
+                    ⚠ 列表未展示
+                  </el-tag>
+                </el-tooltip>
+                <el-tooltip
+                  content="独立于当前日/周视图：只要投诉创建时间落在「视图终点向前7天」区间内，且至今仍未闭环（未完成/未终止）就会出现在这里，避免当日视图漏掉前几天的积压投诉。"
+                  placement="top"
+                >
+                  <span style="color:#909399;cursor:help;border-bottom:1px dashed #c0c4cc;padding-bottom:1px">
+                    口径说明：倒查7天 × 待处理/处理中/未标注（三表合并）
+                  </span>
+                </el-tooltip>
+              </el-space>
+            </template>
+
+            <!-- 列表未展示提示 -->
+            <div
+              v-if="complaintData.complaint_pending_skipped && complaintData.complaint_pending_skip_reason"
+              style="padding:28px 20px;text-align:center;color:#909399;font-size:13px;background:#fafafa;border-radius:8px"
+            >
+              <el-icon :size="22" style="color:#e6a23c;margin-right:6px;vertical-align:-4px"><WarningFilled /></el-icon>
+              {{ complaintData.complaint_pending_skip_reason }}
+            </div>
+
+            <!-- 无未处理投诉 -->
+            <div
+              v-else-if="!complaintData.complaint_pending_list?.length && complaintData.complaint_total > 0"
+              style="padding:28px 20px;text-align:center;color:#67c23a;font-size:13px;background:#f5faf3;border-radius:8px"
+            >
+              <el-icon :size="22" style="color:#67c23a;margin-right:6px;vertical-align:-4px"><CircleCheckFilled /></el-icon>
+              所有投诉均已闭环处理，暂无积压 👍
+            </div>
+            <div
+              v-else-if="!complaintData.complaint_pending_list?.length && !complaintData.complaint_total"
+              style="padding:28px 20px;text-align:center;color:#909399;font-size:13px"
+            >
+              {{ periodName }}暂无投诉记录
+            </div>
+
+            <!-- 待处理投诉明细列表 -->
+            <el-table
+              v-else
+              :data="complaintData.complaint_pending_list || []"
+              size="small"
+              stripe
+              height="420px"
+              style="width:100%"
+              row-key="no"
+            >
+              <el-table-column label="#" width="44" align="center" type="index" />
+              <el-table-column label="来源" width="100" align="center">
+                <template #default="{ row }">
+                  <el-tag v-if="row.source_type === '外部投诉'" type="danger" size="small" effect="dark">
+                    外部投诉
+                  </el-tag>
+                  <el-tag v-else-if="row.source_type === '卡商群投诉'" type="success" size="small" effect="plain">
+                    卡商群
+                  </el-tag>
+                  <el-tag v-else type="primary" size="small" effect="plain">
+                    内部投诉
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="当前状态" width="96" align="center">
+                <template #default="{ row }">
+                  <el-tag v-if="row.status_bucket === '待处理'" type="danger" size="small" effect="dark">
+                    待处理
+                  </el-tag>
+                  <el-tag v-else-if="row.status_bucket === '处理中'" type="warning" size="small" effect="plain">
+                    处理中
+                  </el-tag>
+                  <el-tag v-else size="small" effect="plain" style="background:#f4f4f5;color:#909399;border-color:#e9e9eb">
+                    {{ row.status_bucket || '未标注' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="投诉时间" width="168" align="center" prop="occur_time">
+                <template #default="{ row }">
+                  <span style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px">
+                    {{ formatShortTime(row.occur_time) }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="投诉内容（含来源标识/分类/问题描述）" min-width="340" align="left" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div style="font-weight:500;color:#303133;line-height:1.55">
+                    {{ row.title || '—' }}
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="投诉人 / 联系" width="148" align="left" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div v-if="row.complainant || row.complainant_phone" style="line-height:1.55">
+                    <div v-if="row.complainant">
+                      <el-icon :size="12" style="color:#909399"><User /></el-icon>
+                      <span style="margin-left:4px">{{ row.complainant }}</span>
+                    </div>
+                    <div v-if="row.complainant_phone" style="color:#606266;font-size:12px">
+                      📞 {{ row.complainant_phone }}
+                    </div>
+                  </div>
+                  <span v-else class="tag-note">—</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="设备 SN" width="156" align="left" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span v-if="row.device_sn" class="mono-small" style="color:#409eff">{{ row.device_sn }}</span>
+                  <span v-else class="tag-note">—</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="处理人" width="112" align="left">
+                <template #default="{ row }">
+                  <span :class="!row.handler || row.handler === '未分配' ? 'tag-note' : ''" style="font-weight:500">
+                    {{ row.handler || '未分配' }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="编号" width="176" align="left" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span v-if="row.no" class="mono-small" style="color:#606266">{{ row.no }}</span>
+                  <span v-else class="tag-note">—</span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </ChartCard>
+        </el-col>
+      </el-row>
     </section>
 
     <!-- 模块6: 处理队列 三栏（直接复用 QueuePanel） -->
@@ -1259,7 +1405,7 @@ const receptionStaffOption = computed(() => {
 })
 
 // ---------- 模块5 今日投诉分项 (新增) ----------
-// complaintData 字段来自 reception 接口响应 (complaint_total/complaint_subs/complaint_roots/complaint_unmatched/complaint_by_source/complaint_handlers/complaint_status_all)
+// complaintData 字段来自 reception 接口响应 (complaint_total/complaint_subs/complaint_roots/complaint_unmatched/complaint_by_source/complaint_handlers/complaint_status_all/complaint_pending_*)
 const complaintData = ref({
   complaint_total: 0,
   complaint_subs: [],
@@ -1268,6 +1414,11 @@ const complaintData = ref({
   complaint_by_source: [],
   complaint_handlers: [],
   complaint_status_all: [],
+  // 近期未处理投诉列表 (日/周视图下有效,长跨度会被后端跳过)
+  complaint_pending_total: 0,
+  complaint_pending_skipped: false,
+  complaint_pending_skip_reason: '',
+  complaint_pending_list: [],
 })
 // 模块5 SectionHeader 副标题: 展示今日投诉总数 & 外部/内部 两个桶
 const complaintSub = computed(() => {
@@ -1853,6 +2004,17 @@ function formatNum(v) {
   if (Number.isNaN(n)) return '0'
   return n.toLocaleString('zh-CN')
 }
+// 将 ISO 字符串 (例 2026-08-13T09:25:10+08:00) 转为 "MM-DD HH:mm" 看板友好时间
+function formatShortTime(s) {
+  if (!s) return '—'
+  try {
+    const d = dayjs(s)
+    if (!d.isValid()) return String(s).slice(0, 16).replace('T', ' ')
+    return d.format('MM-DD HH:mm')
+  } catch (e) {
+    return String(s).slice(0, 16).replace('T', ' ')
+  }
+}
 
 // ---------- 日期切换 ----------
 function onQuickDate() {
@@ -1964,6 +2126,10 @@ async function loadAll() {
       complaint_by_source: rdata.complaint_by_source || [],
       complaint_handlers: rdata.complaint_handlers || [],
       complaint_status_all: rdata.complaint_status_all || [],
+      complaint_pending_total: rdata.complaint_pending_total || 0,
+      complaint_pending_skipped: !!rdata.complaint_pending_skipped,
+      complaint_pending_skip_reason: rdata.complaint_pending_skip_reason || '',
+      complaint_pending_list: rdata.complaint_pending_list || [],
     }
     refundData.value = rf.data || { reasons: [], methods: [] }
     queueData.value = q.data || { todos: [], tasks: [], incidents: [] }
