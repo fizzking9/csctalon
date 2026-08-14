@@ -59,14 +59,14 @@ logger = logging.getLogger(__name__)
 BMS_DATA_SOURCES: dict[str, dict] = {
     "refund": {
         "name": "退费单管理",
-        "base_url": "https://support.cloud-cat.cn/bms",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
         "page_path": "/index.html#/pay/refund-manage",
         "default_sync": True,
         # 退费单默认按创建时间筛选,无需选时间字段
     },
     "ticket": {
         "name": "服务请求管理",
-        "base_url": "https://support.cloud-cat.cn/bms",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
         "page_path": "/index.html#/service-request/service-request-manage",
         "default_sync": True,
         # ⚠️  2026-08-06 修复: 原默认 time_labels=["起始完成时间","结束完成时间"] 会导致两类严重错误:
@@ -82,13 +82,13 @@ BMS_DATA_SOURCES: dict[str, dict] = {
     },
     "wallet": {
         "name": "提现操作记录",
-        "base_url": "https://support.cloud-cat.cn/bms",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
         "page_path": "/index.html#/settle/customerWalletOperationRecord",
         "default_sync": True,
     },
     "device_combo": {
         "name": "设备套餐",
-        "base_url": "https://support.cloud-cat.cn/bms",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
         "page_path": "/index.html#/device/device-combo",
         "default_sync": False,  # 默认不同步,可在手动同步时勾选
     },
@@ -126,7 +126,7 @@ BMS_DATA_SOURCES: dict[str, dict] = {
     #   (两域名指向同一套 BMS 系统,统一后可与 refund/ticket/wallet 共享登录态,避免单独登录)
     "device_tag_binding": {
         "name": "设备标签(打标明细)",
-        "base_url": "https://support.cloud-cat.cn/bms",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
         "page_path": "/index.html#/device/device-tags",
         "default_sync": False,  # 标签绑定明细变动少,按需手动同步
     },
@@ -138,7 +138,6 @@ OPERATION_INTERVAL = 65
 # 浏览器登录态保存目录(复用 storage_state 跳过验证码登录)
 # 目录结构: settings.UPLOAD_DIR/.browser_states/{data_type}.json
 STORAGE_STATE_DIR = ".browser_states"
-
 
 def _storage_state_path(data_type: str) -> Path:
     """获取某数据源的 storage_state 文件路径(随 UPLOAD_DIR 按月归档不必,登录态单独存)"""
@@ -1704,6 +1703,60 @@ class BmsFetcher:
             }}
         """)
 
+    async def _wait_until_page_has_any_clickable(
+        self, page, max_wait_sec: int = 20, interval_sec: float = 1.0
+    ) -> int:
+        """进入目标页(SPA hash 路由)后的「渲染就绪」守卫: 轮询 ANY_CLICKABLE 直到出现 ≥1 个可见元素。
+
+        2026-08-14 新增(修复 bms_sync_logs#806 偶发「找不到任何查询/搜索按钮」):
+          - 旧代码只有 goto + 固定 `asyncio.sleep(3)`,但 SPA 拉完资源后,
+            Vue 还需要请求菜单权限/页面初始接口才能把「查询」按钮渲染到 DOM;
+          - 当 BMS 接口慢(>3 秒)时,Playwright 已开始执行 `_click_query_button`,
+            但 DOM 里根本还没有按钮 → 造成"同样的页面 一会儿成功 一会儿失败"。
+          - 用户截图也证明:退费单管理「查询」一直是标准绿色 <button>, 没有改版过,
+            之前「伪按钮改版」假设推翻, 真实根因 = 固定 sleep 3s 不稳定。
+        """
+        ANY_CLICKABLE = (
+            "button:visible,"
+            "div[role='button']:visible,"
+            "span[role='button']:visible,"
+            "a[class*='btn']:visible,"
+            "a[class*='button']:visible,"
+            "div[class*='btn']:visible,"
+            "div[class*='button']:visible,"
+            "span[class*='el-button']:visible,"
+            "div[class*='el-button']:visible"
+        )
+        start = asyncio.get_event_loop().time()
+        deadline = start + max_wait_sec
+        tries = 0
+        while True:
+            tries += 1
+            try:
+                n = len(await page.query_selector_all(ANY_CLICKABLE))
+            except Exception as q_e:
+                logger.warning(f"  [渲染就绪守卫] query_selector_all 异常: {q_e}")
+                n = 0
+            if n > 0:
+                cost = asyncio.get_event_loop().time() - start
+                extra = (
+                    f" (比固定 sleep 多等了 {max(0.0, cost - 3.0):.1f}s)"
+                    if cost > 3 else ""
+                )
+                logger.info(
+                    f"  [渲染就绪守卫] OK 已就绪 cost={cost:.1f}s tries={tries}"
+                    f" ANY_CLICKABLE可见={n}{extra}"
+                )
+                return n
+            now = asyncio.get_event_loop().time()
+            if now >= deadline:
+                logger.warning(
+                    f"  [渲染就绪守卫] 已等满 {max_wait_sec}s 仍未出现 ANY_CLICKABLE 可见元素"
+                    f" (tries={tries}) → 交给 _click_query_button 继续兜底判错"
+                )
+                return 0
+            await asyncio.sleep(interval_sec)
+
     async def _fill_el_input(self, page, element, value: str):
         """填充 Element UI 日期输入框(通用 input 也能用)。
 
@@ -1738,16 +1791,17 @@ class BmsFetcher:
     async def _click_query_button(self, page) -> None:
         """点击「查询/搜索/筛选」按钮(兼容各站点的按钮文案 & DOM,避免写死 has-text("搜索"))。
 
-        2026-08-14 增强: BMS 退费单管理(refund) 页面改版后, 查询按钮不再是 <button> 标签,
-        而是 <div role="button"> / <a class="btn-search"> / <span class="el-button"> 等伪按钮 DOM,
-        原 4 层兜底只扫 button tag → 全部失败 → "所有兜底均失败"。
-        现在把候选 DOM 集合 从 'button' 扩大到「button + 伪按钮」; 并额外新增 2 层兜底。
+        2026-08-14 诊断结论: refund/wallet 等 BMS 页面的查询按钮就是标准绿色 <button>,
+        不是伪按钮。之前失败的真因是遮挡层预处理(ESC+JS移除弹层+空白点击)无条件前置 →
+        Playwright 真实 click 被干扰超时 → 降级为 JS el.click() → Vue 事件未正确触发 →
+        查询后页面状态异常、导出按钮文本变空。
 
-        2026-08-14 调试增强: 每一层策略都打印"候选数量 / 命中细节 / 未命中原因 / 失败前全量快照",
-        方便下次出现伪按钮改版时, 仅靠日志即可还原页面 DOM, 不用远程连浏览器复现。
+        修复: 新增「策略0-快速直击」——先用简单 button:has-text 直接 click(不做遮挡层清理),
+        诊断脚本已证明此路径 100% 可用。只有策略0失败时才执行遮挡层清理+后续策略级联。
 
         优先级:
-          1) 文本精确匹配「查询/搜索/筛选...」 → 候选集合扩大到 button/div(role=button)/span(role=button)/a(btn类)
+          0) [新增] 快速直击: button:has-text("搜索"/"查询") 直接 Playwright click
+          1) 文本精确匹配「查询/搜索/筛选...」→ 候选集合扩大到 button/div(role=button)/span(role=button)/a(btn类)
           2) 找不到 → y 坐标最靠上的筛选条区域里第一个非「重置/导出」按钮 (DOM 集合同扩大)
           3) 再找不到 → 用 JS 在整个文档扩大范围内搜 (querySelectorAll 同扩大)
           4) 仍失败 → 按 Enter 兜底 (聚焦日期框/最后一个 input 然后 Enter)
@@ -1818,12 +1872,31 @@ class BmsFetcher:
         logger.info(f"  [策略总览] 开始查找查询按钮 当前页面URL={page_url_for_log} 选择器={ANY_CLICKABLE!r}")
 
         # ═══════════════════════════════════════════════════════════
-        # 2026-08-14 新增: 关闭遮挡层预处理
+        # 2026-08-14 策略0-快速直击: 先用简单 button:has-text 直接 click,
+        #   不做任何遮挡层清理。诊断脚本(diag_refund_export.py)证明:
+        #   refund/wallet 页面的查询按钮就是标准绿色 <button>,
+        #   Playwright 原生 click 可以 100% 成功,不需要 ESC/JS清理/空白点击。
+        #   之前遮挡层预处理无条件前置 → Playwright click 被干扰超时 →
+        #   降级 JS el.click() → Vue 事件未正确触发 → 查询后导出按钮消失。
+        # ═══════════════════════════════════════════════════════════
+        for _kw in ["搜索", "查询", "搜 索", "查 询"]:
+            try:
+                _btn = await page.query_selector(f'button:has-text("{_kw}"):visible')
+                if _btn:
+                    # force=True: 即使按钮被 user-dropdown 遮挡也直接点击
+                    await _btn.click(timeout=5000, force=True)
+                    logger.info(f"  [策略0-快速直击] button:has-text({_kw!r}) force-click 成功 ✅")
+                    return
+            except Exception:
+                continue
+
+        # ═══════════════════════════════════════════════════════════
+        # 2026-08-14 遮挡层预处理（仅当策略0-快速直击失败后才执行）
         #   生产日志(12h refund) 出现:
         #     `<ul id="dropdown-menu-3551" class="el-dropdown-menu el-popper user-dropdown">`
         #     intercepts pointer events 导致 Playwright 真实 click 被拦截 5s,
         #     只能 fallback 到 `evaluate(el.click())` 才能成功。
-        #   每次调用 _click_query_button 前统一做 3 招清场(无论是否存在):
+        #   做 3 招清场:
         #     1) 发送 ESC(Element UI 的弹层/下拉几乎都会响应 ESC 关闭);
         #     2) 对所有打开的 el-popper / el-dropdown-menu 调 JS remove() /
         #        设置 display:none (避免 user-dropdown 这类 hover 残留的下拉);
@@ -1837,26 +1910,24 @@ class BmsFetcher:
                 await asyncio.sleep(0.05)
             # (2) JS 移除/隐藏所有弹层: el-popper / el-dialog__wrapper / el-drawer__wrapper / el-picker-panel
             _popper_cleaned = await page.evaluate("""() => {
-                const sel = '.el-popper,.el-dropdown-menu,.el-picker-panel,el-dialog__wrapper,.el-drawer__wrapper,el-message-box__wrapper';
+                // 2026-08-14 修复: 只移除 user-dropdown / el-dropdown-menu 这两类明确遮挡
+                // 点击的弹层。之前对所有 .el-popper 设 display:none 太暴力,
+                // BMS 某些页面把筛选栏也包在 .el-popper 里 → 整个查询/导出按钮
+                // 全部被隐藏 → ANY_CLICKABLE 从 26 暴跌到 3 → 后续策略只能乱点。
+                const sel = '.el-dropdown-menu, .user-dropdown';
                 const list = document.querySelectorAll(sel);
-                let n = 0, hid = 0, rm = 0;
+                let n = 0, rm = 0;
                 for (let i = 0; i < list.length; i++) {
                     const el = list[i];
-                    const style = (el.getAttribute && el.getAttribute('style')) || '';
-                    const cls = (el.className && typeof el.className === 'string') ? el.className : '';
-                    // user-dropdown / 登录头像的下拉 → 直接移除
-                    if (typeof cls === 'string' && /user-dropdown|el-dropdown-menu/.test(cls)) {
-                        try { el.parentNode && el.parentNode.removeChild(el); rm++; } catch(_) { el.style.display='none'; hid++; }
-                        n++; continue;
-                    }
-                    // 其他 popper/picker-panel → display:none 隐藏(安全不删)
-                    if (!/display\\s*:\\s*none/.test(style)) {
-                        el.setAttribute('style', (style ? style + ';' : '') + 'display:none !important');
-                        hid++;
+                    try {
+                        el.parentNode && el.parentNode.removeChild(el);
+                        rm++;
+                    } catch(_) {
+                        el.style.display = 'none';
                     }
                     n++;
                 }
-                return {matched: n, removed: rm, hidden: hid};
+                return {matched: n, removed: rm};
             }""")
             logger.info(f"  [遮挡层预处理-清理弹层] {_popper_cleaned!r}")
             # (3) 点击左上角空白(x=8,y=8),触发 Element UI "click-outside" 关闭规则
@@ -1870,6 +1941,23 @@ class BmsFetcher:
                 logger.warning(f"  [遮挡层预处理] 鼠标点空白失败(跳过): {mc_e}")
         except Exception as pre_err:
             logger.warning(f"  [遮挡层预处理] 整体异常(不影响后续策略): {pre_err}")
+
+        # ═══════════════════════════════════════════════════════════
+        # 策略0-retry: 遮挡层清理后,重新查询按钮再试一次 Playwright 原生 click
+        #   关键: 遮挡层清理可能通过 removeChild 把按钮的父元素也删了,
+        #   导致旧 element handle 变成 detached DOM → Playwright click 报
+        #   "Element is not attached to the DOM" → 降级 JS click → Vue 不触发。
+        #   所以这里用全新的 query_selector 重新获取按钮引用。
+        # ═══════════════════════════════════════════════════════════
+        for _kw in ["搜索", "查询", "搜 索", "查 询"]:
+            try:
+                _btn = await page.query_selector(f'button:has-text("{_kw}"):visible')
+                if _btn:
+                    await _btn.click(timeout=5000, force=True)
+                    logger.info(f"  [策略0-重试] 遮挡层清理后 button:has-text({_kw!r}) force-click 成功 ✅")
+                    return
+            except Exception:
+                continue
 
         try:
             # ── 1) 文本关键词匹配 (扩大候选 DOM) ──
@@ -2261,6 +2349,8 @@ class BmsFetcher:
                 logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")
                 await page.goto(page_url, wait_until="networkidle")
                 await asyncio.sleep(3)
+
+                await self._wait_until_page_has_any_clickable(page)
 
             # ⚠️ 2026-08-12: 标记登录已完成(无论 storage_state 有效还是刚登录成功)
             result.logged_in = True
@@ -3099,6 +3189,8 @@ class BmsFetcher:
         logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")
         await page.goto(page_url, wait_until="networkidle")
         await asyncio.sleep(3)
+
+        await self._wait_until_page_has_any_clickable(page)
 
         # 3. 设置时间范围
         start_str = start_date.strftime("%Y-%m-%d %H:%M:%S")
