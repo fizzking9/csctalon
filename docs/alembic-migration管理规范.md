@@ -18,9 +18,10 @@ d9b7f1b89c1d (init)
               n1b2c3d4e5f6 (add groups + specialties tables)       [当前 head]
 ```
 
-- 总版本数：34 个 migration
-- 当前 head：**1 个**（`n1b2c3d4e5f6`）
+- 总版本数：35 个 migration
+- 当前 head：**1 个**（`o1b2c3d4e5f6`）
 - 曾有 2 个 head（`a2c4e6f8b0d2` + `aa11bb22cc33`），已通过 merge migration 合并
+- `o1b2c3d4e5f6`：补齐 persons 表的 `current_group_id` 和 `primary_specialty` 两列（n1b2c3d4e5f6 遗漏的 ALTER TABLE）
 
 ## 二、常用命令
 

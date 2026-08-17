@@ -173,6 +173,12 @@
       <el-row :gutter="12">
         <el-col :xs="24" :md="12">
           <ChartCard title="接待分类分布">
+            <template #extra>
+              <el-radio-group v-model="receptionPerspective" size="small">
+                <el-radio-button value="count">接待量(次)</el-radio-button>
+                <el-radio-button value="device">设备量(台)</el-radio-button>
+              </el-radio-group>
+            </template>
             <BaseChart :option="receptionPieOption" height="280px" />
           </ChartCard>
         </el-col>
@@ -844,6 +850,7 @@ import { listGroups } from '@/api/group'
 import { listSpecialties } from '@/api/specialty'
 import BaseChart from '@/components/BaseChart.vue'
 import { formatMoney } from '@/utils/format'
+import { escapeHtml } from '@/utils/sanitize'
 import dayjs from 'dayjs'
 import isoWeek from 'dayjs/plugin/isoWeek'
 import quarterOfYear from 'dayjs/plugin/quarterOfYear'
@@ -1410,17 +1417,22 @@ const hourlyOption = computed(() => {
 })
 
 // ---------- 模块3 接待分项 ----------
-const receptionData = ref({ categories: [], top_staff: [] })
+const receptionData = ref({ categories: [], categories_device: [], top_staff: [] })
+const receptionPerspective = ref('count') // 'count'=接待量, 'device'=设备量
 const receptionPieOption = computed(() => {
-  const data = (receptionData.value.categories || []).filter(d => d.value > 0)
+  const src = receptionPerspective.value === 'device'
+    ? (receptionData.value.categories_device || [])
+    : (receptionData.value.categories || [])
+  const unit = receptionPerspective.value === 'device' ? '台' : '次'
+  const data = src.filter(d => d.value > 0)
   return {
-    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+    tooltip: { trigger: 'item', formatter: `{b}: {c} ${unit} ({d}%)` },
     legend: { bottom: 0, type: 'scroll' },
     color: ['#f56c6c', '#e6a23c', '#409eff', '#67c23a', '#909399', '#9b59b6'],
     series: [{
       name: '接待分类', type: 'pie', radius: ['42%', '68%'], center: ['50%', '45%'],
       avoidLabelOverlap: true,
-      label: { show: true, formatter: '{b}\n{d}%', fontSize: 10 },
+      label: { show: true, formatter: `{b}\n{c} ${unit} · {d}%`, fontSize: 10 },
       data: data.length ? data : [{ name: '暂无数据', value: 1, itemStyle: { color: '#f0f0f0' }, label: { formatter: '暂无数据' } }],
     }],
   }
@@ -2016,13 +2028,20 @@ function scoreTooltipHtml(r, mode) {
     { k: '外部投诉', short: '外诉', color: '#c0392b', fallback_s: r.sp_waibu, fallback_p: r.pp_waibu ?? 0 },
   ]
   // 头部: 人员+岗位+分组+专项
+  // P0-5: name/position/group/sp/hr_category 来自同步数据, 可能含 HTML, 必须转义后再嵌入
+  const av = escapeHtml((r.name || '?').slice(0, 1))
+  const nm = escapeHtml(r.name || '')
+  const pos = escapeHtml(r.position || '—')
+  const grp = escapeHtml(r.group || '部门统管')
+  const spE = escapeHtml(sp)
+  const hrE = escapeHtml(r.hr_category || '')
   const headerHtml = `
     <div class="stp-head">
       <div class="stp-name">
-        <span class="stp-avatar">${(r.name || '?').slice(0,1)}</span>
+        <span class="stp-avatar">${av}</span>
         <div>
-          <div class="stp-nameline"><b>${r.name || ''}</b> <span class="stp-meta">${r.position || '—'}</span></div>
-          <div class="stp-subline">${r.group || '部门统管'} · 专项 <b>${sp}</b>${r.is_management ? ' · <span class=\"stp-tag mgmt\">管理层·全系数</span>' : ''}${r.hr_category ? ` · <span class=\"stp-tag hr\">HR=${r.hr_category}</span>` : ''}</div>
+          <div class="stp-nameline"><b>${nm}</b> <span class="stp-meta">${pos}</span></div>
+          <div class="stp-subline">${grp} · 专项 <b>${spE}</b>${r.is_management ? ' · <span class=\"stp-tag mgmt\">管理层·全系数</span>' : ''}${r.hr_category ? ` · <span class=\"stp-tag hr\">HR=${hrE}</span>` : ''}</div>
         </div>
       </div>
       <div class="stp-mode" style="border-color:${modeColor}33;background:${modeColor}0d;color:${modeColor}">
@@ -2203,6 +2222,7 @@ async function loadAll() {
     const rdata = r.data || {}
     receptionData.value = {
       categories: rdata.categories || [],
+      categories_device: rdata.categories_device || [],
       top_staff: rdata.top_staff || [],
     }
     complaintData.value = {

@@ -136,12 +136,11 @@ BMS_DATA_SOURCES: dict[str, dict] = {
 OPERATION_INTERVAL = 65
 
 # 浏览器登录态保存目录(复用 storage_state 跳过验证码登录)
-# 目录结构: settings.UPLOAD_DIR/.browser_states/{data_type}.json
-STORAGE_STATE_DIR = ".browser_states"
-
+# ⚠️ 独立于 UPLOAD_DIR: 不在 /uploads 静态挂载下, 避免登录 cookie 被任意下载(会话劫持)
+# 目录结构: settings.BROWSER_STATE_DIR/{data_type}.json
 def _storage_state_path(data_type: str) -> Path:
-    """获取某数据源的 storage_state 文件路径(随 UPLOAD_DIR 按月归档不必,登录态单独存)"""
-    base = Path(settings.UPLOAD_DIR) / STORAGE_STATE_DIR
+    """获取某数据源的 storage_state 文件路径(登录态单独存于 BROWSER_STATE_DIR)"""
+    base = Path(settings.BROWSER_STATE_DIR)
     base.mkdir(parents=True, exist_ok=True)
     return base / f"{data_type}.json"
 

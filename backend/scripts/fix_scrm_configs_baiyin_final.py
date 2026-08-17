@@ -23,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.core.config import settings
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.database import SessionLocal
 from app.models.sync_source_config import SyncSourceConfig
@@ -41,12 +42,29 @@ BAIYIN_LOGIN_BASE_OPTIONS = {
 }
 
 # Playwright 网页登录凭证 (白音管理后台 管理员账号)
-PW_USERNAME = "<手机号>"
-PW_PASSWORD = "<密码>"
+# ⚠️ 严禁硬编码: 从环境变量读取 (SCRM_WEB_USERNAME / SCRM_WEB_PASSWORD)
+PW_USERNAME = settings.SCRM_WEB_USERNAME
+PW_PASSWORD = settings.SCRM_WEB_PASSWORD
+if not PW_USERNAME or not PW_PASSWORD:
+    print(
+        "❌ 缺少白音 SCRM 网页登录凭证。请通过环境变量或 .env 设置:\n"
+        "     SCRM_WEB_USERNAME=<手机号>  SCRM_WEB_PASSWORD=<密码>",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 PW_USER_ENC = encrypt_secret(PW_USERNAME)
 PW_PWD_ENC = encrypt_secret(PW_PASSWORD)
 
 BASE_URL_BAIYIN = "https://scrm.baiyinqifu.com"
+
+
+def _mask(secret: str, keep: int = 4) -> str:
+    """脱敏显示: 仅保留末尾 keep 位,前面用 * 填充"""
+    if not secret:
+        return "(空)"
+    if len(secret) <= keep:
+        return "*" * len(secret)
+    return "*" * (len(secret) - keep) + secret[-keep:]
 
 
 def _merge_options(old: dict | None, overrides: dict) -> dict:
@@ -134,8 +152,16 @@ with SessionLocal() as db:
     print(f"  [✓] scrm_operator(name={op_row.name!r}): entry_path → /wxWork/personalityManagement")
 
     # ----- 2. scrm_session_private / group / virtual -----
-    OPENAPI_CLIENT_ID = "<ClientId>"
-    OPENAPI_CLIENT_SECRET = "<ClientSecret>"
+    # OpenAPI 网关凭证: 从环境变量读取 (SCRM_CLIENT_ID / SCRM_CLIENT_SECRET)
+    OPENAPI_CLIENT_ID = settings.SCRM_CLIENT_ID
+    OPENAPI_CLIENT_SECRET = settings.SCRM_CLIENT_SECRET
+    if not OPENAPI_CLIENT_ID or not OPENAPI_CLIENT_SECRET:
+        print(
+            "❌ 缺少 SCRM OpenAPI 凭证。请通过环境变量或 .env 设置:\n"
+            "     SCRM_CLIENT_ID=<ClientId>  SCRM_CLIENT_SECRET=<ClientSecret>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     for dt, nm, page_path, so, sync_default in [
         ("scrm_session_private", "SCRM-私聊会话列表", "/tuoke/customer/chatRecord", 8, True),
         ("scrm_session_group", "SCRM-群聊会话列表", "/tuoke/customer/chatRecord", 9, True),
@@ -208,11 +234,12 @@ with SessionLocal() as db:
         opts = r.options or {}
         wu = opts.get("web_username")
         wp = opts.get("web_password")
-        wu_dec = decrypt_secret(wu) if wu and isinstance(wu, str) and wu.startswith("ENC:") else wu
-        wp_dec = decrypt_secret(wp) if wp and isinstance(wp, str) and wp.startswith("ENC:") else wp
+        wu_dec = decrypt_secret(wu) if wu and isinstance(wu, str) and wu.startswith("ENC:") else (wu or "")
+        wp_dec = decrypt_secret(wp) if wp and isinstance(wp, str) and wp.startswith("ENC:") else (wp or "")
         print(f"[{r.id:>2}] {r.data_type:<30} name={r.name!r:<20}  sync={r.default_sync}  enabled={r.enabled}")
         print(f"     base_url={r.base_url}   page_path={r.page_path}")
-        print(f"     列 username/password(OpenAPI 凭证): {col_u!r}  /  {'*' * len(col_p) if col_p else '(空)'}")
-        print(f"     options.web_*(Playwright 登录):     {wu_dec!r}  /  {'*' * len(wp_dec) if wp_dec else '(空)'}")
+        # 凭证一律脱敏,严禁打印明文
+        print(f"     列 username/password(OpenAPI 凭证): {_mask(col_u)}  /  {_mask(col_p)}")
+        print(f"     options.web_*(Playwright 登录):     {_mask(wu_dec)}  /  {_mask(wp_dec)}")
         other_opts = {k: v for k, v in opts.items() if k not in ("web_username", "web_password")}
         print(f"     其他 options keys: {list(other_opts.keys())}")

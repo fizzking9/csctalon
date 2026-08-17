@@ -135,11 +135,9 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
-import { marked } from 'marked'
+import { renderMarkdown } from '@/utils/sanitize'
 import { listStrategy, createStrategy, updateStrategy, deleteStrategy, publishStrategy, newVersion, getReceipts, getStrategy } from '@/api/strategy'
 import dayjs from 'dayjs'
-
-marked.setOptions({ breaks: true, gfm: true })
 
 const list = ref([])
 const total = ref(0)
@@ -156,11 +154,8 @@ const receiptData = reactive({ title: '', total: 0, read_count: 0, unread_count:
 
 const previewHtml = computed(() => {
   if (!editing.content) return '<p style="color:#c0c4cc">暂无内容</p>'
-  try {
-    return marked.parse(editing.content)
-  } catch {
-    return `<pre>${editing.content}</pre>`
-  }
+  // P0-5: marked 解析后经 DOMPurify 消毒, 防存储型 XSS
+  return renderMarkdown(editing.content)
 })
 
 function onEditorOpen() {
