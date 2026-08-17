@@ -314,12 +314,15 @@ def create_app() -> FastAPI:
             },
         )
 
-    # 静态文件: 挂载 uploads 目录,审计贴图等附件可通过 /uploads/... 访问
-    from fastapi.staticfiles import StaticFiles
+    # 静态文件: 挂载 uploads 目录(审计贴图等图片附件)
+    # ⚠️ 用 SafeStaticFiles 加固: 仅放行图片扩展名, 拒绝 dotfiles/路径穿越, 加 nosniff
+    #    阻断 .browser_states 登录态、CSV/XLSX 业务文件、.html 存储型 XSS 的静态暴露
+    #    (.browser_states 已移至 BROWSER_STATE_DIR, 不在 UPLOAD_DIR 下; 此处为纵深防御)
+    from app.core.safe_static import SafeStaticFiles
 
     uploads_path = Path(settings.UPLOAD_DIR)
     uploads_path.mkdir(parents=True, exist_ok=True)
-    app.mount("/uploads", StaticFiles(directory=str(uploads_path)), name="uploads")
+    app.mount("/uploads", SafeStaticFiles(directory=str(uploads_path)), name="uploads")
 
     app.include_router(api_router, prefix="/api/v1")
 

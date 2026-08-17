@@ -2895,14 +2895,22 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                       ServiceTicket.register_time >= ts, ServiceTicket.register_time <= te)
 
     # 左1: 智能接待分类饼 (复用 _category_case)
+    # 两个视角: 接待量(会话次数) vs 设备量(去重SN数)
     bucket = _category_case()
     cat_rows = db.execute(
         select(bucket, func.count().label("cnt"))
         .where(between)
         .group_by("category_bucket")
     ).all()
+    cat_device_rows = db.execute(
+        select(bucket, func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("dcnt"))
+        .where(between)
+        .group_by("category_bucket")
+    ).all()
     categories = []
+    categories_device = []
     order = ["投诉", "退款", "套餐问题", "咨询", "综合问题", "其他问题"]
+    # 接待量
     for r in cat_rows:
         cat = r.category_bucket if r.category_bucket in order else "其他问题"
         categories.append({"name": cat, "value": int(r.cnt or 0)})
@@ -2910,6 +2918,14 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     for nm in order:
         if nm not in present:
             categories.append({"name": nm, "value": 0})
+    # 设备量 (独立设备SN去重)
+    for r in cat_device_rows:
+        cat = r.category_bucket if r.category_bucket in order else "其他问题"
+        categories_device.append({"name": cat, "value": int(r.dcnt or 0)})
+    present_d = {c["name"] for c in categories_device}
+    for nm in order:
+        if nm not in present_d:
+            categories_device.append({"name": nm, "value": 0})
 
     # 右1: Top10客服 (按operator分组count, 关联PersonAlias→Person拿group_name/display_name)
     #     2026-08-02 加设备SN去重计数: 设备接待台数, 体现覆盖面, 1台设备多次进线算1台
@@ -3715,6 +3731,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         "date_end": d_end_iso,
         # 原接待分类
         "categories": sorted(categories, key=lambda x: -x["value"]),
+        "categories_device": sorted(categories_device, key=lambda x: -x["value"]),
         "top_staff": top_staff,
         # 新增: 今日投诉
         "complaint_total": complaint_total,

@@ -1,7 +1,6 @@
 """数据上传与导入路由"""
 
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
@@ -11,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import CurrentUser, DBSession
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.storage import resolve_upload_path
 from app.models.data_source import DataSource
 from app.models.upload import UploadRecord
 from app.schemas.common import PageBase, R
@@ -44,10 +44,9 @@ async def parse_upload(
     if data_type not in DATA_TYPES:
         raise HTTPException(status_code=400, detail=f"不支持的数据类型,可选: {DATA_TYPES}")
 
-    base = Path(settings.UPLOAD_DIR)
     if stored_path:
-        # 已有文件模式
-        path = base / stored_path
+        # 已有文件模式(路径穿越校验)
+        path = resolve_upload_path(stored_path)
         if not path.exists():
             raise HTTPException(status_code=404, detail="文件不存在")
         actual_stored_path = stored_path
@@ -56,7 +55,11 @@ async def parse_upload(
         content = await file.read()
         if len(content) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
             raise HTTPException(status_code=413, detail=f"文件超过 {settings.MAX_UPLOAD_SIZE_MB}MB 限制")
-        path, actual_stored_path = save_upload_file(content, file.filename or "upload")
+        try:
+            # P0-3: save_upload_file 落盘前校验扩展名白名单 + magic bytes
+            path, actual_stored_path = save_upload_file(content, file.filename or "upload")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
         filename = file.filename
     else:
         raise HTTPException(status_code=400, detail="必须提供 file 或 stored_path 参数")
@@ -86,8 +89,7 @@ async def preview_diff(
     if payload.data_type not in DATA_TYPES:
         raise HTTPException(status_code=400, detail=f"不支持的数据类型,可选: {DATA_TYPES}")
 
-    base = Path(settings.UPLOAD_DIR)
-    path = base / payload.stored_path if payload.stored_path else base / Path(payload.filename).name
+    path = resolve_upload_path(payload.stored_path, payload.filename)
     if not path.exists():
         raise HTTPException(status_code=404, detail="上传文件不存在,请重新上传")
 
@@ -123,9 +125,8 @@ async def confirm_import(
     sheet_name = payload.get("sheet_name")
     encoding = payload.get("encoding")
 
-    # 优先用 stored_path 找文件（归档后路径），兼容旧 filename
-    base = Path(settings.UPLOAD_DIR)
-    path = base / stored_path if stored_path else base / Path(filename).name
+    # 优先用 stored_path 找文件（归档后路径），兼容旧 filename；路径穿越校验
+    path = resolve_upload_path(stored_path, filename)
     if not path.exists():
         raise HTTPException(status_code=404, detail="上传文件不存在,请重新上传")
 

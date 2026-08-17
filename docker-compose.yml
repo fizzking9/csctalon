@@ -57,6 +57,7 @@ services:
       - .env
     volumes:
       - ./backend/uploads:/app/uploads
+      - ./data/browser_states:/app/data/browser_states   # Playwright 登录态(独立于 uploads, 不被静态挂载暴露)
       - ./logs/backend:/app/logs   # 持久化日志文件,避免容器重建丢失 500 堆栈
     ports:
       - "127.0.0.1:8000:8000"   # 仅本机可连；前端经 nginx 反代访问

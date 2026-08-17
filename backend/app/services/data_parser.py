@@ -659,12 +659,48 @@ def load_dataframe(path: Path | str, sheet_name: str | None = None, encoding: st
     return df
 
 
+# 上传文件扩展名白名单(P0-3: 拒绝 html/svg/exe 等, 防存储型 XSS 与可执行文件)
+ALLOWED_UPLOAD_EXT = {".csv", ".xlsx", ".xls"}
+# magic bytes 校验: 防止改扩展名伪装(xlsx=ZIP, xls=OLE2 复合文档; csv 为文本无固定头)
+_UPLOAD_MAGIC: dict[str, bytes] = {
+    ".xlsx": b"PK\x03\x04",
+    ".xls": b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
+}
+
+
+def _validate_upload_content(content: bytes, filename: str) -> str:
+    """上传内容校验(P0-3): 扩展名白名单 + magic bytes + 大小上限, 落盘前拒绝非法文件。
+
+    返回规范化扩展名(小写); 校验失败抛 ValueError, 由调用方转 400。
+    """
+    ext = Path(filename).suffix.lower()
+    if ext not in ALLOWED_UPLOAD_EXT:
+        raise ValueError(
+            f"不支持的文件类型 {ext or '(无扩展名)'}, 仅允许 {sorted(ALLOWED_UPLOAD_EXT)}"
+        )
+    if len(content) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise ValueError(f"文件超过 {settings.MAX_UPLOAD_SIZE_MB}MB 限制")
+    if ext == ".csv":
+        # CSV 为文本: 前 4KB 不应含 NUL 字节(二进制伪装特征)
+        if b"\x00" in content[:4096]:
+            raise ValueError("CSV 文件含二进制内容, 疑似伪装")
+    else:
+        magic = _UPLOAD_MAGIC[ext]
+        if not content.startswith(magic):
+            raise ValueError(f"{ext} 文件内容与扩展名不匹配(magic bytes 校验失败)")
+    return ext
+
+
 def save_upload_file(content: bytes, filename: str) -> tuple[Path, str]:
     """保存上传文件到 uploads/yyyy-MM/原文件名,返回 (绝对路径, 相对路径 stored_path)
 
     按月归档便于存档追溯；同名文件加时间戳后缀避免覆盖。
+    P0-3: 落盘前先做扩展名白名单 + magic bytes + 大小校验, 拒绝 html/svg/exe 等。
     """
     from datetime import datetime
+
+    # 落盘前校验(原实现先落盘后由 parse_file 校验, .html 会残留在 /uploads 下)
+    _validate_upload_content(content, filename)
 
     now = datetime.now()
     month_dir = now.strftime("%Y-%m")

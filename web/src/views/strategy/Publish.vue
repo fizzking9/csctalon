@@ -104,7 +104,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Check } from '@element-plus/icons-vue'
-import { marked } from 'marked'
+import { renderMarkdown } from '@/utils/sanitize'
 import { listStrategy, getStrategy, markRead } from '@/api/strategy'
 import dayjs from 'dayjs'
 
@@ -115,8 +115,6 @@ const current = ref(null)
 const marking = ref(false)
 const filter = reactive({ category: '', keyword: '', onlyUnread: false })
 const categories = ['退款策略', '清退策略', '服务规范', '通用']
-
-marked.setOptions({ breaks: true, gfm: true })
 
 const stats = computed(() => {
   const total = list.value.length
@@ -136,11 +134,8 @@ const filteredList = computed(() => {
 
 const renderedContent = computed(() => {
   if (!current.value?.content) return '<p class="empty-content">该文档无正文内容</p>'
-  try {
-    return marked.parse(current.value.content)
-  } catch {
-    return `<pre>${current.value.content}</pre>`
-  }
+  // P0-5: marked 解析后经 DOMPurify 消毒, 防存储型 XSS(策略正文对所有用户展示)
+  return renderMarkdown(current.value.content)
 })
 
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-')

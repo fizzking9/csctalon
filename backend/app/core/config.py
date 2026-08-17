@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     # 上传
     UPLOAD_DIR: str = "./uploads"
     MAX_UPLOAD_SIZE_MB: int = 200
+    # Playwright 登录态保存目录(独立于 UPLOAD_DIR, 不被 /uploads 静态挂载暴露)
+    BROWSER_STATE_DIR: str = "./data/browser_states"
 
     # BMS 平台(定时同步用,手动同步时前端传入)
     BMS_USERNAME: str = ""
@@ -57,6 +59,10 @@ class Settings(BaseSettings):
     SCRM_BASE_URL: str = "https://gateway.bilinl.com"  # 平台 OpenAPI 基础地址
     SCRM_CLIENT_ID: str = ""  # ClientId(对应 SyncSourceConfig.username=Fernet(clientId))
     SCRM_CLIENT_SECRET: str = ""  # ClientSecret(对应 SyncSourceConfig.password=Fernet(secret))
+    # 白音 SCRM 后台 Playwright 网页登录凭证(手机号/密码) —— 仅 fix 脚本灌入用,运行时从 DB 读
+    # ⚠️ 严禁硬编码进脚本/入库; 通过环境变量或 .env 注入
+    SCRM_WEB_USERNAME: str = ""
+    SCRM_WEB_PASSWORD: str = ""
 
     # 跨域(局域网部署,允许内网访问)
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"

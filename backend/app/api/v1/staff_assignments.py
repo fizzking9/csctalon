@@ -13,7 +13,6 @@
 
 import io
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import quote
 
 import pandas as pd
@@ -23,7 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import AdminOrSupervisor, AdminUser, CurrentUser, DBSession
-from app.core.config import settings
+from app.core.storage import resolve_upload_path
 from app.models.person import Person, PersonAlias
 from app.models.staff_assignment import StaffAssignment
 from app.models.upload import UploadRecord
@@ -139,7 +138,7 @@ def import_snapshot_preview(
     mapping = payload.get("column_mapping") or {}
     if not stored_path:
         raise HTTPException(status_code=400, detail="stored_path 缺失")
-    path = Path(settings.UPLOAD_DIR) / stored_path
+    path = resolve_upload_path(stored_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="上传文件不存在,请重新上传")
     df = load_dataframe(path, sheet_name=sheet_name, encoding=encoding)
@@ -165,8 +164,7 @@ async def import_snapshot(
     if not stored_path:
         raise HTTPException(status_code=400, detail="stored_path 缺失")
 
-    base = Path(settings.UPLOAD_DIR)
-    path = base / stored_path
+    path = resolve_upload_path(stored_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="上传文件不存在,请重新上传")
 

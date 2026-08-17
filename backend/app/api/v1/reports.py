@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Query, UploadFile
 from sqlalchemy import func, select, update
 
 from app.api.deps import AdminOrSupervisor, CurrentUser, DBSession
-from app.core.storage import ALLOWED_IMAGE_EXT, MAX_IMAGE_SIZE, save_audit_attachment
+from app.core.storage import ALLOWED_IMAGE_EXT, MAX_IMAGE_SIZE, save_audit_attachment, validate_image_content
 from app.models.audit_note import AuditJudgment, AuditNote
 from app.models.measure import Measure, MeasureSource, MeasureStatus
 from app.models.report import Report, ReportStatus, ReportType
@@ -273,6 +273,11 @@ def upload_attachment(
     content = file.file.read()
     if len(content) > MAX_IMAGE_SIZE:
         raise HTTPException(status_code=400, detail=f"图片大小不能超过 {MAX_IMAGE_SIZE // 1024 // 1024}MB")
+    # P0-3: magic bytes 校验, 防止 .html 等改扩展名伪装成图片上传
+    try:
+        validate_image_content(content, ext)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     file.file.seek(0)
     rel, url = save_audit_attachment(file, report_id)
     return R(data={"path": rel, "url": url})
