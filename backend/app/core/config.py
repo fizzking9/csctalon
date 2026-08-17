@@ -3,7 +3,16 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 生产环境禁止使用的弱默认值(fail-fast: 漏配 .env 即裸奔)
+_PROD_FORBIDDEN_DEFAULTS = {
+    "POSTGRES_PASSWORD": "csctalon123",
+    "JWT_SECRET_KEY": "CHANGE_ME_IN_PRODUCTION_PLEASE_USE_A_LONG_RANDOM_STRING",
+    "INIT_ADMIN_PASSWORD": "admin123",
+    "REDIS_PASSWORD": "",
+}
 
 
 class Settings(BaseSettings):
@@ -34,6 +43,7 @@ class Settings(BaseSettings):
     REDIS_HOST: str = "localhost"
     REDIS_PORT: str = "6379"
     REDIS_DB: str = "0"
+    REDIS_PASSWORD: str = ""  # 生产必填(fail-fast 校验); 为空则连 redis 无密码
 
     # JWT
     JWT_SECRET_KEY: str = "CHANGE_ME_IN_PRODUCTION_PLEASE_USE_A_LONG_RANDOM_STRING"
@@ -71,6 +81,33 @@ class Settings(BaseSettings):
     INIT_ADMIN_USERNAME: str = "admin"
     INIT_ADMIN_PASSWORD: str = "admin123"
 
+    @model_validator(mode="after")
+    def _enforce_prod_secrets(self) -> "Settings":
+        """生产环境 fail-fast: 拒绝使用弱默认密钥/口令。
+
+        ENV=prod 时若仍用默认 POSTGRES_PASSWORD/JWT_SECRET_KEY/INIT_ADMIN_PASSWORD/REDIS_PASSWORD,
+        立即抛错阻止启动——漏配 .env 即裸奔是真实事故场景。
+        dev/test 环境放宽, 便于本地开箱即用。
+        """
+        if self.ENV != "prod":
+            return self
+        problems = []
+        if self.POSTGRES_PASSWORD == _PROD_FORBIDDEN_DEFAULTS["POSTGRES_PASSWORD"]:
+            problems.append("POSTGRES_PASSWORD 仍为默认值 csctalon123")
+        if self.JWT_SECRET_KEY == _PROD_FORBIDDEN_DEFAULTS["JWT_SECRET_KEY"]:
+            problems.append("JWT_SECRET_KEY 仍为默认占位值, 可被伪造任意用户 token")
+        if self.INIT_ADMIN_PASSWORD == _PROD_FORBIDDEN_DEFAULTS["INIT_ADMIN_PASSWORD"]:
+            problems.append("INIT_ADMIN_PASSWORD 仍为 admin123")
+        if not self.REDIS_PASSWORD:
+            problems.append("REDIS_PASSWORD 为空, Redis 无密码裸奔")
+        if problems:
+            raise ValueError(
+                "生产环境(ENV=prod)安全配置校验失败, 拒绝启动:\n  - "
+                + "\n  - ".join(problems)
+                + "\n请在 .env 中设置强随机值后再启动。"
+            )
+        return self
+
     @property
     def database_url(self) -> str:
         return (
@@ -91,6 +128,9 @@ class Settings(BaseSettings):
 
     @property
     def redis_url(self) -> str:
+        # 带 password 的 redis URL; 无密码时省略避免 redis://:None@...
+        if self.REDIS_PASSWORD:
+            return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
 

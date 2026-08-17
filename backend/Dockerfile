@@ -45,8 +45,11 @@ RUN mkdir -p /app/uploads
 EXPOSE 8000
 
 # gunicorn + uvicorn worker
-# --preload: 在主进程加载应用,lifespan(迁移+注册)只执行一次,避免多 worker 并发冲突
-# 但在某些情况下会导致 worker boot 失败,暂时移除
-# 日志: gunicorn/uvicorn/app 日志统一走 stdout/stderr,由 docker json-file 轮转(10m×3)捕获,
-#       用 `docker compose logs backend` 查看;nginx 访问日志另以文件形式落在 ./logs/nginx。
-CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "900", "--log-level", "info"]
+# -w 1: 单 worker, 与 docker-compose 一致。
+#   原因: 同步任务管理器/登录限速用进程内内存互斥锁(asyncio.Lock/字典), 多 worker 下各自计数
+#   会导致重复同步与限速失效。如需多 worker 并发, 须先将这些状态迁至 Redis(M5)。
+# --timeout 900s: sync-all 多源抓取含 65s 间隔, 全程 5-8 分钟, 默认 120s 会被 gunicorn
+#   判超时 SIGABRT → 前端 502。
+# 日志: gunicorn/uvicorn/app 日志统一走 stdout/stderr, 由 docker json-file 轮转(10m×3)捕获,
+#       用 `docker compose logs backend` 查看; nginx 访问日志另以文件形式落在 ./logs/nginx。
+CMD ["gunicorn", "app.main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "900", "--log-level", "info"]

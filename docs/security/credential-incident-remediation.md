@@ -42,16 +42,27 @@ pip install git-filter-repo
 
 #### 2.2 创建替换规则文件
 
-在仓库根目录创建 `/tmp/creds-replace.txt`, 每行 `旧值==>新值`:
+> ⚠️ 真实凭证值不写进本文档(避免再次入库)。执行前先从泄露提交中提取 4 个真实值,
+> 仅写入本地 `/tmp/creds-replace.txt`(该文件在仓库外, 不会被提交)。
+
+**先提取真实值**(在 filter-repo 重写之前, ed3ddcc 仍可访问):
+
+```bash
+# 查看泄露提交中的 4 个真实凭证值(手机号/密码/OpenAPI ClientId/ClientSecret)
+git show ed3ddcc -- backend/scripts/fix_scrm_configs_baiyin_final.py | grep -E "PW_USERNAME|PW_PASSWORD|OPENAPI_CLIENT_ID|OPENAPI_CLIENT_SECRET"
+```
+
+把上一步看到的 4 个真实值填入 `/tmp/creds-replace.txt`, 每行 `旧值==>新值`:
 
 ```
-<手机号>==><手机号>
-!*2026Bl0727#==><密码>
-<ClientId>==><ClientId>
-<ClientSecret>==><ClientSecret>
+<真实手机号>==><手机号>
+<真实密码>==><密码>
+<真实ClientId>==><ClientId>
+<真实ClientSecret>==><ClientSecret>
 ```
 
-> 注意: 密码 `<密码>` 含 `#`, 在替换文件中需完整写出(包括 `#@`), 避免被当作注释.
+> 注意: 密码若含 `#` 等特殊字符, 在替换文件中需完整原样写出, 避免被当作注释.
+> 提取后建议立即在终端 history 清除或用 `history -d` 删除该条, 避免明文留存 shell 历史.
 
 #### 2.3 执行重写(在仓库根目录)
 
@@ -71,8 +82,9 @@ git remote add origin <你的远程地址>
 #### 2.4 验证重写结果
 
 ```bash
-# 确认历史中已无明文凭证
-git log --all -p | rg "<手机号>|2026Bl0727|<ClientId>|<ClientSecret>"
+# 确认历史中已无明文凭证: 用 2.2 提取的真实值逐个搜索
+# (此处不列出真实值, 自行替换 <真实值> 占位)
+git log --all -p | rg "<真实手机号>|<真实密码>|<真实ClientId>|<真实ClientSecret>"
 # 期望: 无输出(若仍有输出说明替换规则未覆盖, 需补全 /tmp/creds-replace.txt 后重跑)
 
 # 确认当前工作区代码仍正常(应已是改读环境变量的版本)

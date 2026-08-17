@@ -47,7 +47,8 @@ request.interceptors.response.use(
       }
       if (status === 401) {
         const authStore = useAuthStore()
-        authStore.logout()
+        // 用 localLogout 而非 logout: 此时 token 已失效, 调 /auth/logout 会再 401 形成递归
+        authStore.localLogout()
         router.push('/login')
         ElMessage.error('登录已过期,请重新登录')
       } else if (!silent) {

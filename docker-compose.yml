@@ -34,7 +34,11 @@ services:
   redis:
     image: redis:7-alpine
     container_name: csctalon-redis
-    command: redis-server --appendonly yes   # 开启 AOF 持久化，重启不丢缓存任务状态
+    # requirepass 从环境变量取(空则无密码, 仅 dev 直连场景); maxmemory 防止 Redis 无限增长拖垮宿主
+    # 生产由 backend config fail-fast 强制 REDIS_PASSWORD 非空, 这里随之生效
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    command: ["sh", "-c", "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$$REDIS_PASSWORD\"; else redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru; fi"]
     volumes:
       - ./data/redis:/data
     ports:

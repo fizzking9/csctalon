@@ -3,7 +3,7 @@
 from fastapi import APIRouter
 from sqlalchemy import func, select
 
-from app.api.deps import CurrentUser, DBSession
+from app.api.deps import AdminUser, CurrentUser, DBSession
 from app.models.refund_wide import RefundWide
 from app.models.upload import DataMatchRelation
 from app.schemas.common import R
@@ -13,12 +13,13 @@ router = APIRouter(prefix="/wide-tables", tags=["数据中心-物化宽表"])
 
 
 @router.post("/refund-wide/rebuild", response_model=R, summary="手动重建退费宽表(全量)")
-def rebuild_refund_wide(db: DBSession, _: CurrentUser):
+def rebuild_refund_wide(db: DBSession, _: AdminUser):
     """全量重建 refund_wide 物化宽表
 
     遍历所有退费单,重新拉取关联关系与外部投诉聚合,upsert 到 refund_wide 表。
     适用于:首次构建、修复脏数据、matcher 逻辑变更后重建。
     日常增量构建由 BMS 同步/上传后置钩子自动触发,无需手动调用。
+    收紧为管理员: 全量重建扫全库, 普通用户反复触发可拖垮 DB(M6)。
     """
     stats = build_refund_wide(db, only_refund_nos=None)
     return R(data=stats, message=f"退费宽表重建完成: built={stats['built']}, skipped={stats['skipped']}")

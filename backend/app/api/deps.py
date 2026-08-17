@@ -37,6 +37,15 @@ async def get_current_user(
     user = db.get(User, user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已停用")
+    # M7: JWT 吊销校验 —— token 中 tkv 必须与 user.token_version 一致。
+    # 旧 token(无 tkv)或改密/登出后版本不匹配 → 失效, 强制重新登录。
+    tkv = payload.get("tkv")
+    if tkv is None or tkv != user.token_version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="令牌已失效, 请重新登录",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return user
 
 

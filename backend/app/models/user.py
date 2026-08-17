@@ -2,7 +2,7 @@
 
 import enum
 
-from sqlalchemy import Boolean, String
+from sqlalchemy import Boolean, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -31,4 +31,7 @@ class User(IDMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # 绑定企微姓名(用于匹配数据中的"企微-XXX"操作人)
     qw_name: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="企业微信姓名")
+    # JWT 吊销版本号(M7): 签发 token 时写入 tkv, 校验时与该值比对;
+    # 改密/登出时 +1, 使所有已签发 token 立即失效。0=初始。
+    token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0", comment="JWT吊销版本号")
 

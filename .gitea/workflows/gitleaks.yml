@@ -1,0 +1,30 @@
+# Gitea Actions: gitleaks 凭证扫描
+# 在 push / PR 时扫描全仓库, 命中真实凭证即阻断流水线。
+# 本地已有 pre-commit 钩子(仅扫暂存区), 本 CI 作为最后一道防线扫描全量历史 + 当前快照。
+# 与钩子互补: 钩子防"新提交带入凭证", CI 防"已入库凭证"/"绕过钩子(--no-verify)的提交"。
+
+name: gitleaks
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 扫描完整历史(不只单次提交), 以发现历史泄漏
+          fetch-depth: 0
+
+      - name: gitleaks scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          # 扫描配置: 项目根 .gitleaks.toml (自定义规则 + 继承 gitleaks 默认规则)
+          GITLEAKS_ENABLE_COMMENTS: true
+          GITLEAKS_CONFIG: .gitleaks.toml
+        # GITHUB_TOKEN/GITEA_TOKEN 由 runner 自动注入; gitleaks-action 需要它来发评论

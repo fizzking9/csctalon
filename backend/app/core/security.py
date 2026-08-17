@@ -37,12 +37,18 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
-def create_access_token(subject: str | int, extra: dict[str, Any] | None = None) -> str:
+def create_access_token(
+    subject: str | int,
+    extra: dict[str, Any] | None = None,
+    token_version: int | None = None,
+) -> str:
     """生成 JWT access token
 
     Args:
         subject: 用户ID(字符串形式)
         extra: 额外载荷(如 role, username)
+        token_version: JWT 吊销版本号(M7); 写入 tkv, 校验时与 user.token_version 比对,
+            不一致即失效。改密/登出时 +1 使旧 token 失效。
     """
     now = datetime.now(timezone.utc)
     expire = now + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -51,6 +57,8 @@ def create_access_token(subject: str | int, extra: dict[str, Any] | None = None)
         "exp": expire,
         "iat": now,
     }
+    if token_version is not None:
+        to_encode["tkv"] = token_version
     if extra:
         to_encode.update(extra)
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=ALGORITHM)

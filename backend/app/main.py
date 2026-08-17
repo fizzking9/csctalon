@@ -118,25 +118,26 @@ async def lifespan(app: FastAPI):
 
 
 def _run_migrations_on_startup() -> None:
-    """启动时执行 alembic upgrade heads（统一走迁移，不再用 create_all）
-    
-    临时禁用自动迁移(2026-08-11): alembic多head分支导致upgrade卡住，数据库已是最新状态无需迁移
+    """启动时执行 alembic upgrade head（统一走迁移，不再用 create_all）
+
+    历史: 2026-08-11 因 alembic 多 head 分支导致 upgrade 卡住而临时禁用;
+          后经 merge migration(m0a1b2c3d4e5) 合并双 head, 链已恢复单 head
+          (o1b2c3d4e5f6, 37 版本)。现恢复自动迁移, 解决新环境 docker compose up
+          拿到空库导致 UndefinedTable/UndefinedColumn 500 的问题。
+          仅由持有启动咨询锁(99887766)的 worker 执行, 避免多 worker 重复迁移。
     """
-    logger.info("跳过自动迁移(数据库已是最新版本)")
-    return
-    
     from alembic import command
     from alembic.config import Config
 
     cfg = Config(str(_BACKEND_DIR / "alembic.ini"))
     cfg.set_main_option("script_location", str(_BACKEND_DIR / "alembic"))
-    # 使用 heads (复数) 处理多分支迁移 (multiple head revisions)
+    # 单 head(已验证: o1b2c3d4e5f6); 用 "head" 而非 "heads" 避免多 head 时的歧义
     try:
-        command.upgrade(cfg, "heads")
-        logger.info("数据库迁移已执行至 heads")
+        command.upgrade(cfg, "head")
+        logger.info("数据库迁移已执行至 head")
     except Exception as e:
-        logger.error(f"数据库迁移失败(非致命): {e}", exc_info=True)
-        # 迁移失败不阻塞服务启动
+        logger.error(f"数据库迁移失败(非致命, 服务继续启动): {e}", exc_info=True)
+        # 迁移失败不阻塞服务启动(由 lifespan 外层 try-except 兜底)
 
 
 def _init_admin() -> None:
