@@ -26,8 +26,11 @@ cat > "$HOOK_FILE" <<'EOF'
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
-# 仅扫描暂存区变更, 避免全量扫描拖慢提交
-if ! gitleaks protect --staged --source "$REPO_ROOT" \
+# 仅扫描暂存区变更(gitleaks 8.x 推荐 git --pre-commit --staged), 避免全量扫描拖慢提交
+# 注意: gitleaks 8.x 的 git 子命令不接受 --source 标志(那是 detect 子命令的),
+#       仓库路径作为位置参数传递; 否则 gitleaks 报 unknown flag 退出非 0,
+#       钩子会误判为"检测到凭证"阻止所有提交。
+if ! gitleaks git --pre-commit --staged "$REPO_ROOT" \
       --config "$REPO_ROOT/.gitleaks.toml" --redact --no-banner; then
   echo ""
   echo "❌ gitleaks 检测到疑似凭证, 已阻止提交。" >&2

@@ -12,17 +12,20 @@ useDefault = true
 # ---------- 全局白名单 ----------
 [allowlist]
 description = "允许的路径/示例值"
+# 注意: 不再整体放行 docs/*.md —— 处置手册等文档必须被扫描,
+# 防止把真实凭证当示例写进文档再次入库。文档中只允许出现占位符。
 paths = [
     '''^\.env\.example$''',
     '''^backend/\.env\.example$''',
     '''^\.gitleaks\.toml$''',
     '''package-lock\.json$''',
     '''yarn\.lock$''',
-    '''^docs/.*\.md$''',
 ]
 # 占位符/示例值不报警
 regexes = [
     '''<请修改.*>''',
+    '''<真实.*>''',
+    '''REDACTED_''',
     '''CHANGE_ME_IN_PRODUCTION''',
     '''admin123''',  # 仅 .env.example/初始化默认值,首次启动强制改密
     '''csctalon123''',  # 同上,默认占位

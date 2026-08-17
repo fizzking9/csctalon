@@ -27,6 +27,8 @@ class UserUpdate(BaseModel):
     qw_name: str | None = None
     is_active: bool | None = None
     password: str | None = None
+    # M7: 改密验旧 —— 用户改自己密码时必须提供原密码; 管理员重置他人密码时可不传
+    old_password: str | None = None
 
 
 class UserOut(UserBase):

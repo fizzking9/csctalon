@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import CurrentUser, DBSession
+from app.api.deps import AdminUser, CurrentUser, DBSession
 from app.core.database import get_db
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
@@ -16,7 +16,8 @@ router = APIRouter(prefix="/match", tags=["数据中心-关联匹配"])
 
 
 @router.post("/run", response_model=R, summary="手动触发全量关联匹配")
-def run_match(db: DBSession, current_user: CurrentUser, only_unmatched: bool = Query(True)):
+def run_match(db: DBSession, _: AdminUser, only_unmatched: bool = Query(True)):
+    # 收紧为管理员: 全量匹配扫描全库, 普通用户反复触发可拖垮 DB(M6)
     stats = match_all(db, only_unmatched=only_unmatched)
     return R(data=stats, message=f"匹配完成,新增关联 {sum(stats.values())} 条")
 

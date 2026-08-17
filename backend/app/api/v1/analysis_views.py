@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import CurrentUser, DBSession
 from app.models.analysis_view import AnalysisView, ClassificationRule
 from app.models.data_source import DataSource
+from app.models.user import RoleEnum
 from app.schemas.analysis_view import (
     AnalysisViewCreate,
     AnalysisViewExecuteRequest,
@@ -26,6 +27,26 @@ from app.services.analysis_engine import _build_classification_case, _execute_se
 from sqlalchemy import case
 
 router = APIRouter(prefix="/analysis-views", tags=["分析-视图"])
+
+
+def _is_admin(user) -> bool:
+    return user.role == RoleEnum.ADMIN.value
+
+
+def _can_modify_view(user, view: AnalysisView) -> bool:
+    """属主/预设保护(M8): 管理员可改任意; 预设视图仅管理员可改; 自定义视图仅属主可改"""
+    if _is_admin(user):
+        return True
+    if view.is_preset:
+        return False  # 预设视图非管理员不可改
+    return view.owner_id == user.id
+
+
+def _can_modify_rule(user, rule: ClassificationRule) -> bool:
+    """分类规则属主保护: 管理员可改任意; 否则仅属主"""
+    if _is_admin(user):
+        return True
+    return rule.owner_id == user.id
 
 
 # ---------- 视图 CRUD ----------
@@ -94,10 +115,13 @@ def create_view(db: DBSession, user: CurrentUser, payload: AnalysisViewCreate):
 
 
 @router.put("/{view_id}", response_model=R, summary="更新视图")
-def update_view(db: DBSession, _: CurrentUser, view_id: int, payload: AnalysisViewUpdate):
+def update_view(db: DBSession, user: CurrentUser, view_id: int, payload: AnalysisViewUpdate):
     v = db.get(AnalysisView, view_id)
     if not v:
         raise HTTPException(404, "视图不存在")
+    # M8: 属主/预设保护 —— 预设仅管理员可改, 自定义仅属主可改
+    if not _can_modify_view(user, v):
+        raise HTTPException(403, "无权修改该视图(仅属主或管理员)")
     data = payload.model_dump(exclude_unset=True)
     for k, val in data.items():
         setattr(v, k, val)
@@ -107,12 +131,15 @@ def update_view(db: DBSession, _: CurrentUser, view_id: int, payload: AnalysisVi
 
 
 @router.delete("/{view_id}", response_model=R, summary="删除视图(预设不可删)")
-def delete_view(db: DBSession, _: CurrentUser, view_id: int):
+def delete_view(db: DBSession, user: CurrentUser, view_id: int):
     v = db.get(AnalysisView, view_id)
     if not v:
         raise HTTPException(404, "视图不存在")
     if v.is_preset:
         raise HTTPException(400, "预设视图不可删除,可改为 archived")
+    # M8: 仅属主或管理员可删自定义视图
+    if not _can_modify_view(user, v):
+        raise HTTPException(403, "无权删除该视图(仅属主或管理员)")
     db.delete(v)
     db.commit()
     return R(message="已删除")
@@ -184,10 +211,13 @@ def create_rule(db: DBSession, user: CurrentUser, payload: ClassificationRuleCre
 
 
 @rules_router.put("/{rule_id}", response_model=R, summary="更新分类规则")
-def update_rule(db: DBSession, _: CurrentUser, rule_id: int, payload: ClassificationRuleUpdate):
+def update_rule(db: DBSession, user: CurrentUser, rule_id: int, payload: ClassificationRuleUpdate):
     r = db.get(ClassificationRule, rule_id)
     if not r:
         raise HTTPException(404, "规则不存在")
+    # M8: 仅属主或管理员可改
+    if not _can_modify_rule(user, r):
+        raise HTTPException(403, "无权修改该规则(仅属主或管理员)")
     data = payload.model_dump(exclude_unset=True)
     for k, val in data.items():
         setattr(r, k, val)
@@ -197,10 +227,13 @@ def update_rule(db: DBSession, _: CurrentUser, rule_id: int, payload: Classifica
 
 
 @rules_router.delete("/{rule_id}", response_model=R, summary="删除分类规则")
-def delete_rule(db: DBSession, _: CurrentUser, rule_id: int):
+def delete_rule(db: DBSession, user: CurrentUser, rule_id: int):
     r = db.get(ClassificationRule, rule_id)
     if not r:
         raise HTTPException(404, "规则不存在")
+    # M8: 仅属主或管理员可删
+    if not _can_modify_rule(user, r):
+        raise HTTPException(403, "无权删除该规则(仅属主或管理员)")
     db.delete(r)
     db.commit()
     return R(message="已删除")

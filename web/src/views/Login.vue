@@ -38,9 +38,6 @@
           </el-button>
         </el-form-item>
       </el-form>
-      <div class="tips">
-        <el-text type="info" size="small">默认管理员:admin / admin123</el-text>
-      </div>
     </el-card>
   </div>
 </template>

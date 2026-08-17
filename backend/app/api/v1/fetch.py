@@ -717,8 +717,11 @@ def scrm_sync_logs(
 
 
 @router.get("/test", response_model=R[bool], summary="测试浏览器可用性")
-async def test_browser():
-    """测试 Playwright 浏览器是否可用"""
+async def test_browser(_: CurrentUser):
+    """测试 Playwright 浏览器是否可用
+
+    需登录鉴权: 该接口会拉起 Chromium 实例, 未认证开放可被无限并发触发导致 DoS/OOM。
+    """
     async with BmsFetcher() as fetcher:
         result = await fetcher.test_connection()
     return R(data=result)

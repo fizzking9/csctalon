@@ -62,8 +62,23 @@ def update_user(user_id: int, payload: UserUpdate, db: DBSession, current: Curre
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
     data = payload.model_dump(exclude_unset=True)
+    password_changed = False
     if password := data.pop("password", None):
+        # 验旧密码: 用户改自己密码必须验旧(防会话劫持后改密锁户);
+        # 管理员重置他人密码(current.id != user_id)不强制验旧
+        old_password = data.pop("old_password", None)
+        require_old = current.id == user_id
+        if require_old:
+            if not old_password:
+                raise HTTPException(status_code=400, detail="修改自己的密码需提供原密码(old_password)")
+            from app.core.security import verify_password
+            if not verify_password(old_password, user.hashed_password):
+                raise HTTPException(status_code=400, detail="原密码错误")
         user.hashed_password = hash_password(password)
+        password_changed = True
+    else:
+        # 即便不改密, old_password 字段也不应残留入库
+        data.pop("old_password", None)
     # 非管理员不能改角色
     if current.role != RoleEnum.ADMIN.value:
         data.pop("role", None)
@@ -74,6 +89,9 @@ def update_user(user_id: int, payload: UserUpdate, db: DBSession, current: Curre
             data["role"] = payload.role.value if payload.role else data["role"]
     for k, v in data.items():
         setattr(user, k, v)
+    # M7: 改密后自增 token_version, 使该用户所有已签发 token 立即失效(含当前会话, 需重新登录)
+    if password_changed:
+        user.token_version = (user.token_version or 0) + 1
     db.commit()
     db.refresh(user)
     return R(data=UserOut.model_validate(user))
