@@ -594,12 +594,18 @@
           <el-select v-model="filterSpecialtyId" placeholder="全部专项" clearable size="small" style="width: 140px">
             <el-option v-for="s in specialtiesList" :key="s.id" :label="s.name" :value="s.id" />
           </el-select>
+          <el-checkbox
+            v-if="filterSpecialtyId"
+            v-model="specialtyIncludeCross"
+            size="small"
+            style="margin-left:4px"
+          >包含跨专项处理</el-checkbox>
           <el-button
             v-if="filterDepartment || filterGroupId || filterSpecialtyId"
             size="small"
             text
             type="primary"
-            @click="filterDepartment=''; filterGroupId=null; filterSpecialtyId=null"
+            @click="filterDepartment=''; filterGroupId=null; filterSpecialtyId=null; specialtyIncludeCross=false"
           >重置筛选</el-button>
           <span v-if="staffRows.length !== rawStaffRows.length" class="text-muted" style="font-size:12px; margin-left:8px">
             共 {{ staffRows.length }} / {{ rawStaffRows.length }} 人
@@ -855,6 +861,7 @@ const loading = ref(false)
 const filterDepartment = ref('')
 const filterGroupId = ref(null)
 const filterSpecialtyId = ref(null)
+const specialtyIncludeCross = ref(false)  // 默认关闭: 专项筛选只匹配本职, 不混入跨专项转接人员
 const groupsList = ref([])
 const specialtiesList = ref([])
 
@@ -1732,15 +1739,16 @@ const staffRows = computed(() => {
     }
   }
   
-  // 专项筛选：本职专项匹配 OR 有对应专项工作量的人员也显示
-  // (2026-08-11修正: 本职专项匹配 + 有该专项工作量的人员都显示)
-  // 原则: 专项筛选 = "谁做了这个专项的工作"; 本职人员 + 跨专项处理人员都应显示;
-  //        譬如投诉专员处理了套餐问题,也应出现在套餐专项筛选中,通过工作量列区分主次
+  // 专项筛选：默认只匹配本职 (对齐用户心智"筛选XX专项 = 看该专项专职人员")
+  // 2026-08-17 修正: 新增"包含跨专项处理"开关(默认关闭)
+  //   - 关闭(默认): 仅条件1 (Person.specialty 或 hr_category 精确匹配目标专项)
+  //       → 投诉专员不会出现在咨询接待/套餐专项筛选里 (解决用户反馈的苏紫依/邵晨雨混进来问题)
+  //   - 打开(勾选复选框后): 条件1 + 条件2 (做过该专项的任何工作量 ≥ 1 笔也显示)
+  //       → 用于查看跨专项转接情况, 仍通过工作量列的数值区分主次
   if (filterSpecialtyId.value) {
     const specialty = specialtiesList.value.find(s => s.id === filterSpecialtyId.value)
     if (specialty) {
       const targetName = specialty.name
-      // 专项名称 → 对应的sp工作量字段映射
       const SP_FIELD_MAP = {
         '咨询接待': 'sp_zixun',
         '套餐专项': 'sp_taocan',
@@ -1753,11 +1761,13 @@ const staffRows = computed(() => {
       rows = rows.filter(r => {
         const cs = (r.current_specialty || '').trim()
         const hc = (r.hr_category || '').trim()
-        // 条件1: 本职专项匹配 (Person.specialty 或 hr_category 匹配目标专项; 空值不匹配)
-        if (cs && (cs === targetName || cs.includes(targetName) || targetName.includes(cs))) return true
-        if (hc && hc !== '管理层' && (hc === targetName || hc.includes(targetName) || targetName.includes(hc))) return true
-        // 条件2: 有对应专项的实际工作量 → 跨专项处理也计入 (做了就显示)
-        if (spField && Number(r[spField]) > 0) return true
+        // 条件1: 本职专项匹配 (Person.specialty 或 hr_category 匹配目标专项)
+        const ownMatch =
+          (cs && (cs === targetName || cs.includes(targetName) || targetName.includes(cs))) ||
+          (hc && hc !== '管理层' && (hc === targetName || hc.includes(targetName) || targetName.includes(hc)))
+        if (ownMatch) return true
+        // 条件2: 跨专项工作量 (仅在勾选"包含跨专项处理"时才启用)
+        if (specialtyIncludeCross.value && spField && Number(r[spField]) > 0) return true
         return false
       })
     }
@@ -1859,37 +1869,71 @@ function specialtyTagType(s) {
   return SPECIALTY_COLOR_MAP[s] || 'info'
 }
 // 推断人员主专项显示 (2026-08-11修正: 优先用current_specialty, 不按组名硬编码, 分组≠专项)
-// 原则: 分组(group_name)是行政/管理维度, 专项(specialty)是业务内容维度, 同一组内可有多专项(如朱海洋组既有套餐又有退款挽回)
+// 2026-08-17 优化: 投诉大类合并判断 (内诉+外诉), 避免投诉专员因转接了1-2笔咨询就显示成"咨询接待"
+//   原则: 当工作量中 内部投诉+外部投诉 合并后是最大桶时, 即使单独 内/外诉 没超过咨询, 也优先按投诉大类显示
+//         对齐用户心智: "邵晨雨/苏紫依是做投诉的, 不管今天接了几个咨询转接, 都应该归投诉桶显示"
 function inferSpecialty(r) {
-  // 1. 优先使用后端返回的current_specialty (已在维表正确登记的专项)
   const STANDARD_SPECIALTIES = ['咨询接待', '套餐专项', '退款挽回', '退款处理', '内部投诉', '外部投诉']
+  // 1. 优先使用后端返回的 current_specialty / hr_category (维表已登记的, 100%信任, 哪怕当天全是跨专项)
   if (r.current_specialty && STANDARD_SPECIALTIES.includes(r.current_specialty)) {
     return r.current_specialty
   }
-  
-  // 2. 看实际做了什么(Top 2 专项), 从会话数自动推断
-  // 先看实际做了什么(Top 2 专项) 自动生成 (2026-08-11: 更新为6个独立专项)
-  const items = [
-    { name: '咨询接待', n: Number(r.sp_zixun) || 0 },
-    { name: '套餐专项', n: Number(r.sp_taocan) || 0 },
-    { name: '退款挽回', n: Number(r.sp_wanhui) || 0 },
-    { name: '退款处理', n: Number(r.sp_tuikuan) || 0 },
-    { name: '内部投诉', n: Number(r.sp_neibu) || 0 },
-    { name: '外部投诉', n: Number(r.sp_waibu) || 0 },
-  ].filter(x => x.n > 0).sort((a, b) => b.n - a.n)
-  if (items.length) {
-    if (items.length === 1) return items[0].name
-    return items.slice(0, 2).map(i => i.name).join('+')
+  if (r.hr_category && STANDARD_SPECIALTIES.includes(r.hr_category)) {
+    return r.hr_category
   }
-  // 3. 管理岗(组长/主管/副主管)且无工作数据, 显示"管理岗"
+
+  // 2. 按实际工作量自动推断 (仅当维表完全未登记时才走到这里, 合并投诉大类避免误判)
+  const zixun = Number(r.sp_zixun) || 0
+  const taocan = Number(r.sp_taocan) || 0
+  const wanhui = Number(r.sp_wanhui) || 0
+  const tuikuan = Number(r.sp_tuikuan) || 0
+  const neibu = Number(r.sp_neibu) || 0
+  const waibu = Number(r.sp_waibu) || 0
+  const complaint_total = neibu + waibu  // 投诉合并桶(内诉+外诉), 独立与其他4专项平级比较
+  const items = [
+    { name: '咨询接待', n: zixun },
+    { name: '套餐专项', n: taocan },
+    { name: '退款挽回', n: wanhui },
+    { name: '退款处理', n: tuikuan },
+    { name: '投诉', n: complaint_total, is_complaint_bucket: true },  // 合并桶, 胜出后再细分内/外诉
+  ].filter(x => x.n > 0).sort((a, b) => b.n - a.n)
+
+  if (items.length) {
+    // 最大桶胜出
+    const top = items[0]
+    if (top.is_complaint_bucket) {
+      // 投诉合并桶胜出 → 再细分: 内诉≥外诉? 内诉多就"内部投诉", 外诉多就"外部投诉"
+      if (neibu >= waibu && neibu > 0) {
+        // 如果还有相当比例的外诉(≥30%), 直接合并显示更准确
+        if (waibu / neibu >= 0.3 && waibu > 0) return '内部投诉+外部投诉'
+        return '内部投诉'
+      }
+      if (waibu > 0) {
+        if (neibu / waibu >= 0.3 && neibu > 0) return '外部投诉+内部投诉'
+        return '外部投诉'
+      }
+      return '投诉接待'
+    }
+    // 非投诉桶胜出, 但有投诉工作辅助? 看第二名
+    if (items.length >= 2) {
+      const second = items[1]
+      // 第二名是投诉桶 且 占第一名的比例 ≥ 40% → 主专项+投诉
+      if (second.is_complaint_bucket && second.n / top.n >= 0.4) {
+        const subComplaint = (neibu >= waibu && neibu > 0) ? '内部投诉' : (waibu > 0 ? '外部投诉' : '投诉')
+        return `${top.name}+${subComplaint}`
+      }
+      return `${top.name}+${second.name}`
+    }
+    return top.name
+  }
+  // 3. 管理岗兜底
   if (r.position && ['组长', '主管', '副主管'].includes(r.position)) {
     return '管理岗'
   }
   if (r.current_specialty === '组长') {
     return '管理岗'
   }
-  
-  // 4. 兜底: 未分组显示"—", 其他显示"综合"
+  // 4. 最终兜底
   return (r.group === '未分组') ? '—' : '综合'
 }
 // 工作量 / 效率 通用 tooltip (纯文本, 兼容旧逻辑; 新渲染统一走 scoreTooltipHtml 返回结构化HTML)
