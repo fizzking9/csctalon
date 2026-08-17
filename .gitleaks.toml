@@ -50,8 +50,11 @@ tags = ["scrm", "openapi", "credential"]
 [[rules]]
 id = "hardcoded-strong-password"
 description = "疑似硬编码强密码(字母+数字+特殊符号)"
-regex = '''(?i)(password|passwd|pwd|secret)\s*[:=]\s*["'][^"']{8,}["']'''
+# 值首字符不为 < : 排除 <密码>/<ClientSecret> 等占位符(真实密码极少以 < 开头)
+regex = '''(?i)(password|passwd|pwd|secret)\s*[:=]\s*["'][^"'<][^"']{7,}["']'''
 # 排除明显占位
+# 注意: 规则内 allowlist 覆盖全局 allowlist, REDACTED 须在此重复声明,
+# 否则 filter-repo 替换后的历史占位(如 PW_PASSWORD="REDACTED_PASSWORD")会被误报
 [rules.allowlist]
 regexes = [
     '''<.*>''',
@@ -59,6 +62,7 @@ regexes = [
     '''example''',
     '''your[_-]?password''',
     '''请修改''',
+    '''REDACTED''',
 ]
 tags = ["password", "hardcoded"]
 
