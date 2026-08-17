@@ -86,7 +86,8 @@ pgdata/
 redis-data/
 backend-data/
 # 部署数据/日志 bind mount 到宿主机（PG、Redis 持久化数据 + 应用日志）
-data/
+# 注意：必须用 /data/（绝对路径），否则会错误忽略 web/src/views/data/ 下的所有源文件
+/data/
 
 
 # ---------- 日志 ----------
