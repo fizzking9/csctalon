@@ -2,7 +2,7 @@
 
 > 版本：v1.0 · 日期：2026-08-17
 > 关联代码：[backend/alembic/](../backend/alembic/)
-> 当前 head：`n1b2c3d4e5f6`（单一 head）
+> 当前 head：`o1b2c3d4e5f6`（单一 head）
 
 ## 一、版本链现状
 
