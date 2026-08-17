@@ -1,0 +1,22 @@
+# 本地 macOS (colima) 启动覆盖文件
+# 用途: 仅用于本机 colima 环境启动,不提交(gitignore),不影响服务器部署的 docker-compose.yml。
+#
+# 原因: colima 的 virtiofs 把 ./data/postgres bind-mount 进容器后, postgres(uid 999)
+# 在 CREATE INDEX 等 PG 内部数据文件操作上报 "could not open file base/...: Permission denied"。
+# 改用 docker named volume(由 docker 管理权限)即可正常建表/建索引。
+# 部署到 Linux 服务器时不需要本文件,仍用 docker-compose.yml 的 bind mount(宿主机直接备份)。
+#
+# 用法: docker compose up -d --build  (compose 会自动合并本 override)
+
+services:
+  db:
+    volumes:
+      - csctalon-pgdata:/var/lib/postgresql/data
+
+  redis:
+    volumes:
+      - csctalon-redisdata:/data
+
+volumes:
+  csctalon-pgdata:
+  csctalon-redisdata:
