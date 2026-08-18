@@ -113,31 +113,110 @@ def set_alert_status(alert_id: int, payload: dict, db: DBSession, _: ManagerUser
     return R(message="已更新")
 
 
-@router.post("/scan", response_model=R, summary="手动触发预警扫描(占位)")
+@router.post("/scan", response_model=R, summary="手动触发预警扫描(多规则)")
 def scan_alerts(db: DBSession, _: ManagerUser):
-    """首版占位: 扫描规则并生成预警记录。当前仅做退款激增的简化检测。"""
+    """扫描所有启用的规则并生成预警记录。支持:
+    - refund_surge: 近 24h 退款单量超阈值
+    - ticket_backlog: 当前待处理工单数超阈值
+    - incident_surge: 当日新增异常事件超阈值
+    - complaint_surge: 近 N 天外部投诉量超阈值
+    幂等: 同一规则同一日只生成一条 pending 预警(避免重复刷)。
+    """
     from datetime import datetime, timedelta, timezone
-    from app.models.refund import Refund
 
-    created = 0
+    from app.models.cs_record import CsRecord
+    from app.models.external_complaint import ExternalComplaint
+    from app.models.incident import Incident
+    from app.models.refund import Refund
+    from app.models.ticket import ServiceTicket
+
     now = datetime.now(timezone.utc)
+    today_start = datetime.combine(now.date(), datetime.min.time(), tzinfo=timezone.utc)
     day_start = now - timedelta(days=1)
-    # 简化: 检查最近1天退款单量, 超过阈值则预警(阈值取配置或默认)
-    rules = db.scalars(select(AlertRule).where(AlertRule.enabled.is_(True), AlertRule.type == "refund_surge"))
-    for rule in rules:
-        cnt = db.scalar(select(func.count()).select_from(Refund).where(Refund.created_at >= day_start)) or 0
-        threshold = rule.threshold or 100
-        if cnt >= threshold:
-            db.add(
-                Alert(
-                    rule_id=rule.id,
-                    title=f"退款激增预警: 近24小时退款 {cnt} 笔(阈值 {int(threshold)})",
-                    level="high" if cnt >= threshold * 2 else "medium",
-                    detail=f"规则「{rule.name}」触发",
-                    occurred_at=now,
-                    status="pending",
-                )
+    week_start = now - timedelta(days=7)
+
+    # 幂等: 同 rule + 同日不重复(查 today 已存在 pending 的 rule_id)
+    today_pending_rule_ids = set(
+        db.scalars(
+            select(Alert.rule_id).where(
+                Alert.rule_id.isnot(None),
+                Alert.status == "pending",
+                Alert.occurred_at >= today_start,
             )
-            created += 1
+        )
+    )
+
+    rules = db.scalars(select(AlertRule).where(AlertRule.enabled.is_(True)))
+    created = 0
+    detail_log = []
+
+    for rule in rules:
+        if rule.id in today_pending_rule_ids:
+            continue  # 当日已生成 pending, 不重复
+        rtype = (rule.type or "").lower()
+        threshold = rule.threshold or 0
+
+        try:
+            if rtype == "refund_surge":
+                cnt = db.scalar(select(func.count()).select_from(Refund).where(Refund.created_at >= day_start)) or 0
+                if threshold and cnt >= threshold:
+                    db.add(Alert(
+                        rule_id=rule.id,
+                        title=f"退款激增预警: 近24h退款 {cnt} 笔(阈值 {int(threshold)})",
+                        level="high" if cnt >= threshold * 2 else "medium",
+                        detail=f"规则「{rule.name}」触发: 近24h退款 {cnt} 笔",
+                        occurred_at=now, status="pending",
+                    ))
+                    created += 1
+                    detail_log.append(f"refund_surge: {cnt}>={int(threshold)}")
+
+            elif rtype == "ticket_backlog":
+                # 待处理工单数(ServiceTicket.status in 待处理/未结案)
+                cnt = db.scalar(
+                    select(func.count()).select_from(ServiceTicket).where(
+                        ServiceTicket.status.in_(["待处理", "处理中", "未结案", "open", "pending"])
+                    )
+                ) or 0
+                if threshold and cnt >= threshold:
+                    db.add(Alert(
+                        rule_id=rule.id,
+                        title=f"工单积压预警: 当前待处理工单 {cnt} 个(阈值 {int(threshold)})",
+                        level="high" if cnt >= threshold * 2 else "medium",
+                        detail=f"规则「{rule.name}」触发: 待处理工单 {cnt} 个",
+                        occurred_at=now, status="pending",
+                    ))
+                    created += 1
+                    detail_log.append(f"ticket_backlog: {cnt}>={int(threshold)}")
+
+            elif rtype == "incident_surge":
+                cnt = db.scalar(select(func.count()).select_from(Incident).where(Incident.created_at >= today_start)) or 0
+                if threshold and cnt >= threshold:
+                    db.add(Alert(
+                        rule_id=rule.id,
+                        title=f"异常事件激增预警: 今日新增 {cnt} 条(阈值 {int(threshold)})",
+                        level="high" if cnt >= threshold * 2 else "medium",
+                        detail=f"规则「{rule.name}」触发: 今日新增异常 {cnt} 条",
+                        occurred_at=now, status="pending",
+                    ))
+                    created += 1
+                    detail_log.append(f"incident_surge: {cnt}>={int(threshold)}")
+
+            elif rtype == "complaint_surge":
+                # 近 7 天外部投诉总量
+                cnt = db.scalar(select(func.count()).select_from(ExternalComplaint).where(ExternalComplaint.complaint_date >= week_start.date())) or 0
+                if threshold and cnt >= threshold:
+                    db.add(Alert(
+                        rule_id=rule.id,
+                        title=f"外部投诉激增预警: 近7天 {cnt} 条(阈值 {int(threshold)})",
+                        level="high" if cnt >= threshold * 2 else "medium",
+                        detail=f"规则「{rule.name}」触发: 近7天外部投诉 {cnt} 条",
+                        occurred_at=now, status="pending",
+                    ))
+                    created += 1
+                    detail_log.append(f"complaint_surge: {cnt}>={int(threshold)}")
+        except Exception as e:  # noqa: BLE001 单条规则出错不影响其他规则
+            detail_log.append(f"{rtype}: 扫描异常 {e}")
+            continue
+
     db.commit()
-    return R(data={"created": created})
+    return R(data={"created": created, "details": detail_log})

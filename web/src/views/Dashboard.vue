@@ -9,12 +9,14 @@
       <el-tag :type="roleTagType" effect="plain">{{ roleLabel }}</el-tag>
     </div>
 
-    <!-- ============ 管理层工作台 (次之: 待办/任务/快捷入口导向) ============ -->
-    <template v-if="authStore.isManager">
-      <!-- 一、快捷入口 (最大卡片, 一点直达 运营看板/决策看板/核心管理页) -->
+    <!-- ========================================================== -->
+    <!-- 1. 系统管理员工作台: 系统配置 + 数据源 + 操作日志 + 全局待办 -->
+    <!-- ========================================================== -->
+    <template v-if="authStore.isAdmin">
+      <!-- 快捷入口: 系统管理为主 -->
       <el-card class="mb-16" shadow="never">
         <template #header>
-          <span style="font-weight:600">快捷入口</span>
+          <span style="font-weight:600">系统管理快捷入口</span>
         </template>
         <div class="shortcut-grid">
           <div class="shortcut-item shortcut-hero is-primary" @click="$router.push('/dashboards/today')">
@@ -29,79 +31,34 @@
           <el-divider direction="vertical" style="height: 96px" />
 
           <div class="shortcut-item-group">
-            <div class="si-subtitle" style="font-size:12px;color:#909399;margin-bottom:8px">决策看板 · 专项深入分析透视 (仅管理层)</div>
+            <div class="si-subtitle">系统配置</div>
             <div class="shortcut-row">
-              <div class="shortcut-chip" @click="$router.push('/dashboards/refund')">
-                <el-icon color="#e6a23c"><Wallet /></el-icon>
-                <span>退款看板</span>
+              <div class="shortcut-chip" @click="$router.push('/system/users')">
+                <el-icon color="#409eff"><UserFilled /></el-icon><span>用户管理</span>
               </div>
-              <div class="shortcut-chip" @click="$router.push('/dashboards/complaint')">
-                <el-icon color="#f56c6c"><WarningFilled /></el-icon>
-                <span>投诉看板</span>
+              <div class="shortcut-chip" @click="$router.push('/system/persons')">
+                <el-icon color="#67c23a"><User /></el-icon><span>人员管理</span>
               </div>
-              <div class="shortcut-chip" @click="$router.push('/dashboards/reception')">
-                <el-icon color="#409eff"><Service /></el-icon>
-                <span>接待看板</span>
+              <div class="shortcut-chip" @click="$router.push('/data/ingest')">
+                <el-icon color="#e6a23c"><Upload /></el-icon><span>数据采集</span>
               </div>
-              <div class="shortcut-chip" @click="$router.push('/dashboards/refund-withdrawal')">
-                <el-icon color="#9b59b6"><Money /></el-icon>
-                <span>提现全链路</span>
+              <div class="shortcut-chip" @click="$router.push('/system/classification-rules')">
+                <el-icon color="#9b59b6"><Filter /></el-icon><span>分类规则</span>
               </div>
-              <div class="shortcut-chip" @click="$router.push('/dashboards/performance')">
-                <el-icon color="#67c23a"><UserFilled /></el-icon>
-                <span>绩效看板</span>
+              <div class="shortcut-chip" @click="$router.push('/system/data-quality')">
+                <el-icon color="#16a085"><CircleCheck /></el-icon><span>数据质量</span>
               </div>
-              <div class="shortcut-chip" @click="$router.push('/dashboards/special')">
-                <el-icon color="#909399"><Aim /></el-icon>
-                <span>专项跟进</span>
-              </div>
-            </div>
-          </div>
-
-          <el-divider direction="vertical" style="height: 96px" />
-
-          <div class="shortcut-item-group">
-            <div class="si-subtitle" style="font-size:12px;color:#909399;margin-bottom:8px">管理闭环 · 日常流程</div>
-            <div class="shortcut-row">
-              <div class="shortcut-chip" @click="$router.push('/todos')">
-                <el-icon color="#e6a23c"><Bell /></el-icon>
-                <span>待办事项</span>
-                <el-badge v-if="todoCount" :value="todoCount" class="sc-badge" />
-              </div>
-              <div class="shortcut-chip" @click="$router.push('/tasks')">
-                <el-icon color="#409eff"><List /></el-icon>
-                <span>专项任务</span>
-                <el-badge v-if="taskCount" :value="taskCount" class="sc-badge" />
-              </div>
-              <div class="shortcut-chip" @click="$router.push('/management/reports')">
-                <el-icon color="#34495e"><Document /></el-icon>
-                <span>报告索引</span>
-              </div>
-              <div class="shortcut-chip" @click="$router.push('/management/weekly')">
-                <el-icon color="#16a085"><Calendar /></el-icon>
-                <span>周报看板</span>
-              </div>
-              <div class="shortcut-chip" @click="$router.push('/management/measures')">
-                <el-icon color="#d35400"><Flag /></el-icon>
-                <span>管理措施</span>
-              </div>
-              <div class="shortcut-chip" @click="$router.push('/strategy/manage')">
-                <el-icon color="#8e44ad"><EditPen /></el-icon>
-                <span>策略管理</span>
-              </div>
-              <div class="shortcut-chip" @click="$router.push('/report/center')">
-                <el-icon color="#2c3e50"><Printer /></el-icon>
-                <span>报表中心</span>
+              <div class="shortcut-chip" @click="$router.push('/system/operation-logs')">
+                <el-icon color="#909399"><Tickets /></el-icon><span>操作日志</span>
               </div>
             </div>
           </div>
         </div>
       </el-card>
 
-      <!-- 二、两栏: 待办事项 + 专项任务 (左) | 未读策略 + 最近操作 (右) -->
       <el-row :gutter="16">
         <el-col :xs="24" :md="14">
-          <!-- 待办事项 (Top 10, 直接点击可跳转详情) -->
+          <!-- 待办事项 -->
           <el-card class="mb-16" shadow="never">
             <template #header>
               <div class="flex-between" style="margin:-8px 0">
@@ -116,57 +73,14 @@
                 <span class="mli-time">{{ formatDay(t.due_date || t.created_at) }}</span>
                 <el-tag size="small" :type="todoStatusTag(t.status)" effect="plain">{{ t.status || '待处理' }}</el-tag>
               </li>
-              <li v-if="!loadingTodos && !todoList.length" class="mli-empty">暂无待办，去 <el-link type="primary" @click.stop="$router.push('/todos')">创建一条</el-link> 吧 ✅</li>
-            </ul>
-          </el-card>
-
-          <!-- 专项任务 (Top 10) -->
-          <el-card class="mb-16" shadow="never">
-            <template #header>
-              <div class="flex-between" style="margin:-8px 0">
-                <span>专项任务 <el-tag size="small" type="primary" round style="margin-left:6px">{{ taskCount }} 个进行中</el-tag></span>
-                <el-button link type="primary" @click="$router.push('/tasks')">全部任务 ›</el-button>
-              </div>
-            </template>
-            <ul class="mini-list" v-loading="loadingTasks">
-              <li v-for="tk in taskList" :key="tk.id" class="mini-list-item" @click="$router.push(`/tasks/${tk.id}`)">
-                <el-icon color="#409eff" style="flex-shrink:0"><List /></el-icon>
-                <span class="mli-title">{{ tk.title }}</span>
-                <div class="mli-progress" v-if="tk.progress != null">
-                  <el-progress :percentage="Number(tk.progress) || 0" :stroke-width="6" :show-text="false" style="width: 120px" />
-                  <span class="mli-progress-text">{{ tk.progress }}%</span>
-                </div>
-                <span class="mli-time">{{ formatDay(tk.end_date || tk.start_date || tk.created_at) }}</span>
-                <el-tag size="small" :type="taskStatusTag(tk.status)" effect="dark">{{ tk.status || '进行中' }}</el-tag>
-              </li>
-              <li v-if="!loadingTasks && !taskList.length" class="mli-empty">暂无专项任务，去 <el-link type="primary" @click.stop="$router.push('/tasks')">新建任务</el-link></li>
+              <li v-if="!loadingTodos && !todoList.length" class="mli-empty">暂无待办 ✅</li>
             </ul>
           </el-card>
         </el-col>
 
         <el-col :xs="24" :md="10">
-          <!-- 未读策略 -->
-          <el-card class="mb-16" shadow="never" v-if="unreadStrategies.length || loadingStrategies">
-            <template #header>
-              <div class="flex-between" style="margin:-8px 0">
-                <span>未读策略规范 <el-tag v-if="unreadStrategies.length" size="small" type="warning" round>{{ unreadStrategies.length }} 条</el-tag></span>
-                <el-button link type="primary" @click="$router.push('/strategy/publish')">全部策略 ›</el-button>
-              </div>
-            </template>
-            <div class="strategy-list" v-loading="loadingStrategies">
-              <div v-for="s in unreadStrategies" :key="s.id" class="strategy-item" @click="$router.push('/strategy/publish')">
-                <span class="unread-dot" />
-                <span class="strategy-title">{{ s.title }}</span>
-                <el-tag size="small" effect="plain">{{ s.category || '通用' }}</el-tag>
-              </div>
-              <div v-if="!loadingStrategies && !unreadStrategies.length" class="text-muted" style="text-align:center;padding:16px">
-                策略规范已全部阅读 ✅
-              </div>
-            </div>
-          </el-card>
-
-          <!-- 最近操作(仅 admin) -->
-          <el-card v-if="authStore.isAdmin" shadow="never">
+          <!-- 最近系统操作 -->
+          <el-card shadow="never">
             <template #header>
               <div class="flex-between" style="margin: -8px 0">
                 <span>最近系统操作</span>
@@ -190,11 +104,433 @@
       </el-row>
     </template>
 
-    <!-- ============ 客服工作台 (次之: 快捷入口 + 策略 + 个人待办) ============ -->
+    <!-- ========================================================== -->
+    <!-- 2. 主管工作台: 决策看板 + 管理闭环 + 全局待办 + 专项任务   -->
+    <!-- ========================================================== -->
+    <template v-else-if="authStore.isSupervisor">
+      <!-- 快捷入口: 决策看板 + 管理闭环 -->
+      <el-card class="mb-16" shadow="never">
+        <template #header>
+          <span style="font-weight:600">快捷入口</span>
+        </template>
+        <div class="shortcut-grid">
+          <div class="shortcut-item shortcut-hero is-primary" @click="$router.push('/dashboards/today')">
+            <el-icon :size="40"><DataLine /></el-icon>
+            <div class="si-info">
+              <div class="si-title">运营看板</div>
+              <div class="si-desc">日 / 周 / 月 / 季度 · 全员工作一览</div>
+            </div>
+            <el-icon class="si-arrow"><ArrowRight /></el-icon>
+          </div>
+
+          <el-divider direction="vertical" style="height: 96px" />
+
+          <div class="shortcut-item-group">
+            <div class="si-subtitle">决策看板 · 专项深入分析透视</div>
+            <div class="shortcut-row">
+              <div class="shortcut-chip" @click="$router.push('/dashboards/refund')">
+                <el-icon color="#e6a23c"><Wallet /></el-icon><span>退款看板</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/dashboards/complaint')">
+                <el-icon color="#f56c6c"><WarningFilled /></el-icon><span>投诉看板</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/dashboards/reception')">
+                <el-icon color="#409eff"><Service /></el-icon><span>接待看板</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/dashboards/refund-withdrawal')">
+                <el-icon color="#9b59b6"><Money /></el-icon><span>提现全链路</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/dashboards/performance')">
+                <el-icon color="#67c23a"><UserFilled /></el-icon><span>绩效看板</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/dashboards/special')">
+                <el-icon color="#909399"><Aim /></el-icon><span>专项跟进</span>
+              </div>
+            </div>
+          </div>
+
+          <el-divider direction="vertical" style="height: 96px" />
+
+          <div class="shortcut-item-group">
+            <div class="si-subtitle">管理闭环 · 日常流程</div>
+            <div class="shortcut-row">
+              <div class="shortcut-chip" @click="$router.push('/todos')">
+                <el-icon color="#e6a23c"><Bell /></el-icon><span>待办事项</span>
+                <el-badge v-if="todoCount" :value="todoCount" class="sc-badge" />
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/tasks')">
+                <el-icon color="#409eff"><List /></el-icon><span>专项任务</span>
+                <el-badge v-if="taskCount" :value="taskCount" class="sc-badge" />
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/reports')">
+                <el-icon color="#34495e"><Document /></el-icon><span>报告索引</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/weekly')">
+                <el-icon color="#16a085"><Calendar /></el-icon><span>周报看板</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/measures')">
+                <el-icon color="#d35400"><Flag /></el-icon><span>管理措施</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/policies')">
+                <el-icon color="#8e44ad"><Document /></el-icon><span>政策措施</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/alerts')">
+                <el-icon color="#f56c6c"><AlarmClock /></el-icon><span>预警中心</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/report/center')">
+                <el-icon color="#2c3e50"><Printer /></el-icon><span>报表中心</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-card>
+
+      <el-row :gutter="16">
+        <el-col :xs="24" :md="14">
+          <!-- 待办事项 -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>
+              <div class="flex-between" style="margin:-8px 0">
+                <span>待办事项 <el-tag size="small" type="warning" round style="margin-left:6px">{{ todoCount }} 条</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/todos')">全部待办 ›</el-button>
+              </div>
+            </template>
+            <ul class="mini-list" v-loading="loadingTodos">
+              <li v-for="t in todoList" :key="t.id" class="mini-list-item" @click="$router.push(`/todos/${t.id}`)">
+                <el-tag size="small" :type="todoPrioTag(t.priority)" effect="plain" class="mr-8">{{ t.priority || '中' }}</el-tag>
+                <span class="mli-title">{{ t.title }}</span>
+                <span class="mli-time">{{ formatDay(t.due_date || t.created_at) }}</span>
+                <el-tag size="small" :type="todoStatusTag(t.status)" effect="plain">{{ t.status || '待处理' }}</el-tag>
+              </li>
+              <li v-if="!loadingTodos && !todoList.length" class="mli-empty">暂无待办 ✅</li>
+            </ul>
+          </el-card>
+
+          <!-- 专项任务 -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>
+              <div class="flex-between" style="margin:-8px 0">
+                <span>专项任务 <el-tag size="small" type="primary" round style="margin-left:6px">{{ taskCount }} 个进行中</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/tasks')">全部任务 ›</el-button>
+              </div>
+            </template>
+            <ul class="mini-list" v-loading="loadingTasks">
+              <li v-for="tk in taskList" :key="tk.id" class="mini-list-item" @click="$router.push(`/tasks/${tk.id}`)">
+                <el-icon color="#409eff" style="flex-shrink:0"><List /></el-icon>
+                <span class="mli-title">{{ tk.title }}</span>
+                <div class="mli-progress" v-if="tk.progress != null">
+                  <el-progress :percentage="Number(tk.progress) || 0" :stroke-width="6" :show-text="false" style="width: 120px" />
+                  <span class="mli-progress-text">{{ tk.progress }}%</span>
+                </div>
+                <span class="mli-time">{{ formatDay(tk.end_date || tk.start_date || tk.created_at) }}</span>
+                <el-tag size="small" :type="taskStatusTag(tk.status)" effect="dark">{{ tk.status || '进行中' }}</el-tag>
+              </li>
+              <li v-if="!loadingTasks && !taskList.length" class="mli-empty">暂无专项任务</li>
+            </ul>
+          </el-card>
+        </el-col>
+
+        <el-col :xs="24" :md="10">
+          <!-- 未读策略 -->
+          <el-card class="mb-16" shadow="never" v-if="unreadStrategies.length || loadingStrategies">
+            <template #header>
+              <div class="flex-between" style="margin:-8px 0">
+                <span>未读策略规范 <el-tag v-if="unreadStrategies.length" size="small" type="warning" round>{{ unreadStrategies.length }} 条</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/strategy/publish')">全部策略 ›</el-button>
+              </div>
+            </template>
+            <div class="strategy-list" v-loading="loadingStrategies">
+              <div v-for="s in unreadStrategies" :key="s.id" class="strategy-item" @click="$router.push('/strategy/publish')">
+                <span class="unread-dot" />
+                <span class="strategy-title">{{ s.title }}</span>
+                <el-tag size="small" effect="plain">{{ s.category || '通用' }}</el-tag>
+              </div>
+            </div>
+          </el-card>
+
+          <!-- 管理闭环快捷 -->
+          <el-card shadow="never">
+            <template #header>管理闭环</template>
+            <div class="preset-grid">
+              <div class="preset-item" @click="$router.push('/management/incidents')">
+                <el-icon color="#f56c6c"><WarningFilled /></el-icon>
+                <span class="preset-name">异常事件</span>
+                <el-icon class="preset-arrow"><ArrowRight /></el-icon>
+              </div>
+              <div class="preset-item" @click="$router.push('/management/schedule')">
+                <el-icon color="#409eff"><Calendar /></el-icon>
+                <span class="preset-name">排班管理</span>
+                <el-icon class="preset-arrow"><ArrowRight /></el-icon>
+              </div>
+              <div class="preset-item" @click="$router.push('/management/upstream-tickets')">
+                <el-icon color="#9b59b6"><Connection /></el-icon>
+                <span class="preset-name">跨部门协作</span>
+                <el-icon class="preset-arrow"><ArrowRight /></el-icon>
+              </div>
+              <div class="preset-item" @click="$router.push('/management/templates')">
+                <el-icon color="#16a085"><Files /></el-icon>
+                <span class="preset-name">看板模板</span>
+                <el-icon class="preset-arrow"><ArrowRight /></el-icon>
+              </div>
+            </div>
+          </el-card>
+        </el-col>
+      </el-row>
+    </template>
+
+    <!-- ========================================================== -->
+    <!-- 3. 专项组长工作台: 专项任务 + 组员管理 + 知识库 + 排班      -->
+    <!-- ========================================================== -->
+    <template v-else-if="authStore.isSpecialtyLead">
+      <el-card class="mb-16" shadow="never">
+        <template #header>
+          <span style="font-weight:600">专项管理快捷入口</span>
+        </template>
+        <div class="shortcut-grid">
+          <div class="shortcut-item shortcut-hero is-primary" @click="$router.push('/dashboards/today')">
+            <el-icon :size="40"><DataLine /></el-icon>
+            <div class="si-info">
+              <div class="si-title">运营看板</div>
+              <div class="si-desc">本组工作一览 · 组员效率</div>
+            </div>
+            <el-icon class="si-arrow"><ArrowRight /></el-icon>
+          </div>
+
+          <el-divider direction="vertical" style="height: 96px" />
+
+          <div class="shortcut-item-group">
+            <div class="si-subtitle">专项管理</div>
+            <div class="shortcut-row">
+              <div class="shortcut-chip" @click="$router.push('/tasks')">
+                <el-icon color="#409eff"><List /></el-icon><span>专项任务</span>
+                <el-badge v-if="taskCount" :value="taskCount" class="sc-badge" />
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/kb-articles')">
+                <el-icon color="#16a085"><Reading /></el-icon><span>知识库管理</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/schedule')">
+                <el-icon color="#e6a23c"><Calendar /></el-icon><span>排班管理</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/upstream-tickets')">
+                <el-icon color="#9b59b6"><Connection /></el-icon><span>跨部门协作</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/device-tags')">
+                <el-icon color="#909399"><CollectionTag /></el-icon><span>设备专项标签</span>
+              </div>
+              <div class="shortcut-chip" @click="$router.push('/management/policies')">
+                <el-icon color="#8e44ad"><Document /></el-icon><span>政策措施</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-card>
+
+      <el-row :gutter="16">
+        <el-col :xs="24" :md="14">
+          <!-- 待办事项 -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>
+              <div class="flex-between" style="margin:-8px 0">
+                <span>待办事项 <el-tag size="small" type="warning" round style="margin-left:6px">{{ todoCount }} 条</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/todos')">全部待办 ›</el-button>
+              </div>
+            </template>
+            <ul class="mini-list" v-loading="loadingTodos">
+              <li v-for="t in todoList" :key="t.id" class="mini-list-item" @click="$router.push(`/todos/${t.id}`)">
+                <el-tag size="small" :type="todoPrioTag(t.priority)" effect="plain" class="mr-8">{{ t.priority || '中' }}</el-tag>
+                <span class="mli-title">{{ t.title }}</span>
+                <span class="mli-time">{{ formatDay(t.due_date || t.created_at) }}</span>
+                <el-tag size="small" :type="todoStatusTag(t.status)" effect="plain">{{ t.status || '待处理' }}</el-tag>
+              </li>
+              <li v-if="!loadingTodos && !todoList.length" class="mli-empty">暂无待办 ✅</li>
+            </ul>
+          </el-card>
+
+          <!-- 专项任务 -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>
+              <div class="flex-between" style="margin:-8px 0">
+                <span>专项任务 <el-tag size="small" type="primary" round style="margin-left:6px">{{ taskCount }} 个进行中</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/tasks')">全部任务 ›</el-button>
+              </div>
+            </template>
+            <ul class="mini-list" v-loading="loadingTasks">
+              <li v-for="tk in taskList" :key="tk.id" class="mini-list-item" @click="$router.push(`/tasks/${tk.id}`)">
+                <el-icon color="#409eff" style="flex-shrink:0"><List /></el-icon>
+                <span class="mli-title">{{ tk.title }}</span>
+                <div class="mli-progress" v-if="tk.progress != null">
+                  <el-progress :percentage="Number(tk.progress) || 0" :stroke-width="6" :show-text="false" style="width: 120px" />
+                  <span class="mli-progress-text">{{ tk.progress }}%</span>
+                </div>
+                <span class="mli-time">{{ formatDay(tk.end_date || tk.start_date || tk.created_at) }}</span>
+                <el-tag size="small" :type="taskStatusTag(tk.status)" effect="dark">{{ tk.status || '进行中' }}</el-tag>
+              </li>
+              <li v-if="!loadingTasks && !taskList.length" class="mli-empty">暂无专项任务</li>
+            </ul>
+          </el-card>
+        </el-col>
+
+        <el-col :xs="24" :md="10">
+          <!-- 未读策略 -->
+          <el-card class="mb-16" shadow="never" v-if="unreadStrategies.length || loadingStrategies">
+            <template #header>
+              <div class="flex-between" style="margin:-8px 0">
+                <span>未读策略规范 <el-tag v-if="unreadStrategies.length" size="small" type="warning" round>{{ unreadStrategies.length }} 条</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/strategy/publish')">全部策略 ›</el-button>
+              </div>
+            </template>
+            <div class="strategy-list" v-loading="loadingStrategies">
+              <div v-for="s in unreadStrategies" :key="s.id" class="strategy-item" @click="$router.push('/strategy/publish')">
+                <span class="unread-dot" />
+                <span class="strategy-title">{{ s.title }}</span>
+                <el-tag size="small" effect="plain">{{ s.category || '通用' }}</el-tag>
+              </div>
+            </div>
+          </el-card>
+
+          <!-- 知识库快捷 -->
+          <el-card shadow="never">
+            <template #header>知识库 / 话术库</template>
+            <div class="preset-grid">
+              <div class="preset-item" @click="$router.push('/management/kb-articles')">
+                <el-icon color="#16a085"><Reading /></el-icon>
+                <span class="preset-name">条目管理</span>
+                <el-icon class="preset-arrow"><ArrowRight /></el-icon>
+              </div>
+              <div class="preset-item" @click="$router.push('/strategy/publish')">
+                <el-icon color="#9b59b6"><Document /></el-icon>
+                <span class="preset-name">策略发布</span>
+                <el-icon class="preset-arrow"><ArrowRight /></el-icon>
+              </div>
+              <div class="preset-item" @click="$router.push('/management/incidents')">
+                <el-icon color="#f56c6c"><WarningFilled /></el-icon>
+                <span class="preset-name">异常事件</span>
+                <el-icon class="preset-arrow"><ArrowRight /></el-icon>
+              </div>
+              <div class="preset-item" @click="$router.push('/management/alerts')">
+                <el-icon color="#e6a23c"><AlarmClock /></el-icon>
+                <span class="preset-name">预警中心</span>
+                <el-icon class="preset-arrow"><ArrowRight /></el-icon>
+              </div>
+            </div>
+          </el-card>
+        </el-col>
+      </el-row>
+    </template>
+
+    <!-- ========================================================== -->
+    <!-- 4. 专员工作台: 个人待办 + 专项任务 + 策略 + 知识库查阅      -->
+    <!-- ========================================================== -->
+    <template v-else-if="authStore.isSpecialist">
+      <el-row :gutter="16">
+        <el-col :xs="24" :md="15">
+          <!-- 未读策略 -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>
+              <div class="flex-between" style="margin: -8px 0">
+                <span>策略规范 <el-tag v-if="unreadStrategies.length" size="small" type="warning" round>{{ unreadStrategies.length }} 未读</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/strategy/publish')">查看全部 ›</el-button>
+              </div>
+            </template>
+            <div v-if="unreadStrategies.length || loadingStrategies" class="strategy-list" v-loading="loadingStrategies">
+              <div v-for="s in unreadStrategies" :key="s.id" class="strategy-item" @click="$router.push('/strategy/publish')">
+                <span class="unread-dot" />
+                <span class="strategy-title">{{ s.title }}</span>
+                <el-tag size="small" effect="plain">{{ s.category || '通用' }}</el-tag>
+              </div>
+            </div>
+            <el-result v-else icon="success" title="策略已全部阅读" sub-title="当前没有未读的策略与规范">
+              <template #extra>
+                <el-button type="primary" @click="$router.push('/strategy/publish')">前往策略发布页</el-button>
+              </template>
+            </el-result>
+          </el-card>
+
+          <!-- 个人待办 -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>
+              <div class="flex-between" style="margin:-8px 0">
+                <span>我的待办 <el-tag size="small" type="warning" round style="margin-left:6px">{{ todoCount }} 条</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/todos')">全部待办 ›</el-button>
+              </div>
+            </template>
+            <ul class="mini-list" v-loading="loadingTodos">
+              <li v-for="t in todoList" :key="t.id" class="mini-list-item" @click="$router.push(`/todos/${t.id}`)">
+                <el-tag size="small" :type="todoPrioTag(t.priority)" effect="plain">{{ t.priority || '中' }}</el-tag>
+                <span class="mli-title">{{ t.title }}</span>
+                <span class="mli-time">{{ formatDay(t.due_date || t.created_at) }}</span>
+              </li>
+              <li v-if="!loadingTodos && !todoList.length" class="mli-empty">暂无待办 👍</li>
+            </ul>
+          </el-card>
+
+          <!-- 专项任务 -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>
+              <div class="flex-between" style="margin:-8px 0">
+                <span>我的专项任务 <el-tag size="small" type="primary" round style="margin-left:6px">{{ taskCount }} 个</el-tag></span>
+                <el-button link type="primary" @click="$router.push('/tasks')">全部任务 ›</el-button>
+              </div>
+            </template>
+            <ul class="mini-list" v-loading="loadingTasks">
+              <li v-for="tk in taskList" :key="tk.id" class="mini-list-item" @click="$router.push(`/tasks/${tk.id}`)">
+                <el-icon color="#409eff" style="flex-shrink:0"><List /></el-icon>
+                <span class="mli-title">{{ tk.title }}</span>
+                <div class="mli-progress" v-if="tk.progress != null">
+                  <el-progress :percentage="Number(tk.progress) || 0" :stroke-width="6" :show-text="false" style="width: 100px" />
+                  <span class="mli-progress-text">{{ tk.progress }}%</span>
+                </div>
+                <el-tag size="small" :type="taskStatusTag(tk.status)" effect="dark">{{ tk.status || '进行中' }}</el-tag>
+              </li>
+              <li v-if="!loadingTasks && !taskList.length" class="mli-empty">暂无专项任务</li>
+            </ul>
+          </el-card>
+        </el-col>
+
+        <el-col :xs="24" :md="9">
+          <!-- 快捷入口 -->
+          <el-card class="mb-16" shadow="never">
+            <template #header>快捷入口</template>
+            <div class="agent-shortcuts">
+              <div class="shortcut-tile" @click="$router.push('/dashboards/today')">
+                <el-icon :size="32" color="#409eff"><DataLine /></el-icon>
+                <span>运营看板</span>
+              </div>
+              <div class="shortcut-tile" @click="$router.push('/strategy/publish')">
+                <el-icon :size="32" color="#9b59b6"><Document /></el-icon>
+                <span>策略发布</span>
+              </div>
+              <div class="shortcut-tile" @click="$router.push('/todos')">
+                <el-icon :size="32" color="#e6a23c"><Bell /></el-icon>
+                <span>事项跟进</span>
+                <el-badge v-if="todoCount" :value="todoCount" class="shortcut-badge" />
+              </div>
+              <div class="shortcut-tile" @click="$router.push('/tasks')">
+                <el-icon :size="32" color="#16a085"><List /></el-icon>
+                <span>专项任务</span>
+                <el-badge v-if="taskCount" :value="taskCount" class="shortcut-badge" />
+              </div>
+              <div class="shortcut-tile" @click="$router.push('/management/kb-articles')">
+                <el-icon :size="32" color="#34495e"><Reading /></el-icon>
+                <span>知识库</span>
+              </div>
+              <div class="shortcut-tile" @click="$router.push('/management/invoices')">
+                <el-icon :size="32" color="#d35400"><Tickets /></el-icon>
+                <span>发票登记</span>
+              </div>
+            </div>
+          </el-card>
+        </el-col>
+      </el-row>
+    </template>
+
+    <!-- ========================================================== -->
+    <!-- 5. 普通客服工作台: 策略 + 个人待办 + 最简快捷入口          -->
+    <!-- ========================================================== -->
     <template v-else>
       <el-row :gutter="16">
         <el-col :xs="24" :md="15">
-          <!-- 未读策略(最关键) -->
+          <!-- 未读策略 -->
           <el-card class="mb-16" shadow="never">
             <template #header>
               <div class="flex-between" style="margin: -8px 0">
@@ -253,10 +589,9 @@
                 <span>事项跟进</span>
                 <el-badge v-if="todoCount" :value="todoCount" class="shortcut-badge" />
               </div>
-              <div class="shortcut-tile" @click="$router.push('/tasks')">
-                <el-icon :size="32" color="#16a085"><List /></el-icon>
-                <span>专项任务</span>
-                <el-badge v-if="taskCount" :value="taskCount" class="shortcut-badge" />
+              <div class="shortcut-tile" @click="$router.push('/management/kb-articles')">
+                <el-icon :size="32" color="#34495e"><Reading /></el-icon>
+                <span>知识库</span>
               </div>
             </div>
           </el-card>
@@ -277,6 +612,8 @@ import dayjs from 'dayjs'
 import {
   ArrowRight, Bell, List, Calendar, Flag, EditPen, Printer,
   Wallet, WarningFilled, Service, Money, UserFilled, Aim, Document, DataLine,
+  Upload, User, Filter, CircleCheck, Tickets, Reading, CollectionTag,
+  Connection, Files, AlarmClock,
 } from '@element-plus/icons-vue'
 
 const authStore = useAuthStore()
@@ -302,12 +639,15 @@ const greeting = computed(() => {
 })
 const todayText = computed(() => {
   const wd = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][dayjs().day()]
-  return dayjs().format('YYYY年MM月DD日') + ' ' + wd + ' · ' + (authStore.isManager ? '管理层工作台' : '客服工作台')
+  return dayjs().format('YYYY年MM月DD日') + ' ' + wd + ' · ' + roleLabel.value + '工作台'
 })
-const roleLabel = computed(() => ({ admin: '管理员', supervisor: '主管', agent: '客服' }[authStore.role] || ''))
-const roleTagType = computed(() => (authStore.role === 'admin' ? 'danger' : authStore.role === 'supervisor' ? 'warning' : 'info'))
+const roleLabel = computed(() => ({
+  admin: '系统管理员', supervisor: '主管', specialty_lead: '专项组长', specialist: '专员', agent: '客服',
+}[authStore.role] || ''))
+const roleTagType = computed(() => ({
+  admin: 'danger', supervisor: 'warning', specialty_lead: 'primary', specialist: 'success', agent: 'info',
+}[authStore.role] || 'info'))
 
-const formatNum = (v) => (v == null ? '0' : Number(v).toLocaleString('zh-CN'))
 const formatTime = (t) => (t ? dayjs(t).format('MM-DD HH:mm') : '-')
 const formatDay = (t) => (t ? dayjs(t).format('YYYY-MM-DD') : '-')
 
@@ -390,7 +730,8 @@ async function loadRecentOps() {
 
 onMounted(async () => {
   await Promise.all([
-    loadTodos(), loadTasks(), loadStrategies(), authStore.isManager && loadRecentOps(),
+    loadTodos(), loadTasks(), loadStrategies(),
+    authStore.isAdmin && loadRecentOps(),
   ].filter(Boolean))
 })
 </script>
@@ -408,34 +749,179 @@ onMounted(async () => {
   font-size: 13px;
   margin-top: 4px;
 }
-.card-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+
+/* 快捷入口网格 */
+.shortcut-grid {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.shortcut-item.shortcut-hero {
+  display: flex;
+  align-items: center;
   gap: 12px;
-  margin-bottom: 16px;
-}
-.card-row > div {
+  padding: 16px 20px;
+  border-radius: 8px;
   cursor: pointer;
+  transition: all 0.15s;
+  background: linear-gradient(135deg, #ecf5ff 0%, #f0f9eb 100%);
+  border: 1px solid #d9ecff;
+}
+.shortcut-item.shortcut-hero:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.15);
+}
+.si-info { display: flex; flex-direction: column; gap: 2px; }
+.si-title { font-size: 16px; font-weight: 600; color: #303133; }
+.si-desc { font-size: 12px; color: #909399; }
+.si-arrow { color: #c0c4cc; }
+.shortcut-item-group { display: flex; flex-direction: column; }
+.si-subtitle { font-size: 12px; color: #909399; margin-bottom: 8px; }
+.shortcut-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.shortcut-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 20px;
+  cursor: pointer;
+  transition: all 0.15s;
+  position: relative;
+  background: #fff;
+}
+.shortcut-chip:hover {
+  border-color: #409eff;
+  background: #ecf5ff;
+  transform: translateY(-1px);
+}
+.shortcut-chip span { font-size: 13px; color: #303133; }
+.sc-badge { margin-left: 4px; }
+
+/* 待办/任务列表 */
+.mini-list { list-style: none; padding: 0; margin: 0; }
+.mini-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid #f5f5f5;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.mini-list-item:last-child { border-bottom: none; }
+.mini-list-item:hover { background: #f5f7fa; }
+.mli-title {
+  flex: 1;
+  font-size: 13px;
+  color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mli-time { font-size: 12px; color: #909399; }
+.mli-progress { display: flex; align-items: center; gap: 6px; }
+.mli-progress-text { font-size: 12px; color: #606266; min-width: 32px; }
+.mli-empty {
+  text-align: center;
+  color: #909399;
+  padding: 24px 0;
+  font-size: 13px;
+}
+.mr-8 { margin-right: 8px; }
+
+/* 策略列表 */
+.strategy-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.strategy-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.strategy-item:hover { background: #f5f7fa; }
+.unread-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e6a23c;
+  flex-shrink: 0;
+}
+.strategy-title {
+  flex: 1;
+  font-size: 13px;
+  color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* 投诉工单卡片的 extra 占比样式 */
-.card-complaint-extra {
-  display: inline-block;
+/* 操作日志 */
+.op-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.op-item {
+  padding: 6px 0;
+  border-bottom: 1px solid #f5f5f5;
+}
+.op-item:last-child { border-bottom: none; }
+.op-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2px;
+}
+.op-time { font-size: 12px; color: #909399; }
+.op-meta {
   font-size: 12px;
-  font-weight: 500;
-  color: #f56c6c;
-  margin-top: 6px;
-  padding: 1px 8px;
-  background: #fef0f0;
-  border-radius: 10px;
+  color: #909399;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'SF Mono', Menlo, monospace;
 }
 
-/*
-以下样式已迁移到 components/dashboard/* 组件:
-  .stat / .stat-icon / .stat-label / .stat-value / .stat-unit / .stat-sub  → KpiCard.vue
-  .route-card / .route-sum / .route-label / .route-amount / .route-count / .route-tip → RouteSplit.vue
-*/
+/* 客服快捷入口磁贴 */
+.agent-shortcuts {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.shortcut-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 20px 28px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+  position: relative;
+  min-width: 120px;
+}
+.shortcut-tile:hover {
+  border-color: #409eff;
+  background: #ecf5ff;
+  transform: translateY(-2px);
+}
+.shortcut-tile span { font-size: 14px; color: #303133; }
+.shortcut-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
 
+/* 预设网格 */
 .preset-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -463,124 +949,8 @@ onMounted(async () => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.preset-arrow {
-  color: #c0c4cc;
-}
-.strategy-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.strategy-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.strategy-item:hover {
-  background: #f5f7fa;
-}
-.unread-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #e6a23c;
-  flex-shrink: 0;
-}
-.strategy-title {
-  flex: 1;
-  font-size: 13px;
-  color: #303133;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.mini-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 0;
-  border-bottom: 1px solid #f0f0f0;
-  cursor: pointer;
-}
-.mini-row:last-child {
-  border-bottom: none;
-}
-.mini-row:hover .mini-label { color: #409eff; }
-.mini-label {
-  flex: 1;
-  font-size: 14px;
-  color: #303133;
-}
-.mini-count {
-  font-size: 18px;
-  font-weight: 600;
-  color: #303133;
-}
-.mini-arrow { color: #c0c4cc; }
-.op-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.op-item {
-  padding: 6px 0;
-  border-bottom: 1px solid #f5f5f5;
-}
-.op-item:last-child { border-bottom: none; }
-.op-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 2px;
-}
-.op-time {
-  font-size: 12px;
-  color: #909399;
-}
-.op-meta {
-  font-size: 12px;
-  color: #909399;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: 'SF Mono', Menlo, monospace;
-}
-.agent-shortcuts {
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.shortcut-tile {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 20px 28px;
-  border: 1px solid #ebeef5;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: all 0.15s;
-  position: relative;
-  min-width: 120px;
-}
-.shortcut-tile:hover {
-  border-color: #409eff;
-  background: #ecf5ff;
-  transform: translateY(-2px);
-}
-.shortcut-tile span {
-  font-size: 14px;
-  color: #303133;
-}
-.shortcut-badge {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-}
+.preset-arrow { color: #c0c4cc; }
+
 .text-muted { color: #c0c4cc; }
 .mb-16 { margin-bottom: 16px; }
 .flex-between { display: flex; justify-content: space-between; align-items: center; }

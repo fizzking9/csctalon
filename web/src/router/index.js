@@ -81,12 +81,12 @@ const routes = [
         component: () => import('@/views/analytics/ViewRender.vue'),
         meta: { title: '视图详情', hidden: true },
       },
-      // 看板配置(数据中心)
+      // 看板配置(数据中心): 仅 admin + supervisor 可配置全局看板
       {
         path: 'dashboards/designer',
         name: 'DashboardDesigner',
         component: () => import('@/views/dashboards/Designer.vue'),
-        meta: { title: '看板配置', icon: 'Grid', manager: true },
+        meta: { title: '看板配置', icon: 'Grid', manager: true, roles: ['admin', 'supervisor'] },
       },
       // 决策看板(新,manager 可见)
       {
@@ -223,14 +223,14 @@ const routes = [
         path: 'strategy/manage',
         name: 'StrategyManage',
         component: () => import('@/views/strategy/Manage.vue'),
-        meta: { title: '策略管理', icon: 'EditPen', manager: true },
+        meta: { title: '策略管理', icon: 'EditPen', manager: true, roles: ['admin', 'supervisor'] },
       },
-      // 报表中心(规划占位,manager 可见)
+      // 报表中心(规划占位): admin + supervisor 可见(全量报表)
       {
         path: 'report/center',
         name: 'ReportCenter',
         component: () => import('@/views/report/Center.vue'),
-        meta: { title: '报表中心', icon: 'Printer', manager: true },
+        meta: { title: '报表中心', icon: 'Printer', manager: true, roles: ['admin', 'supervisor'] },
       },
       // 管理闭环(报告→审计→措施→跟进→回看)
       {
@@ -262,6 +262,12 @@ const routes = [
         name: 'ManagementMeasures',
         component: () => import('@/views/management/Measures.vue'),
         meta: { title: '管理措施', icon: 'Flag', manager: true },
+      },
+      {
+        path: 'management/policies',
+        name: 'ManagementPolicies',
+        component: () => import('@/views/management/Policies.vue'),
+        meta: { title: '政策措施', icon: 'Document', manager: true },
       },
       {
         path: 'management/incidents',
@@ -315,7 +321,7 @@ const routes = [
         path: 'management/templates',
         name: 'ManagementTemplates',
         component: () => import('@/views/management/ReportTemplates.vue'),
-        meta: { title: '看板模板', icon: 'Files', manager: true },
+        meta: { title: '看板模板', icon: 'Files', manager: true, roles: ['admin', 'supervisor'] },
       },
       // 系统
       {
@@ -347,6 +353,12 @@ const routes = [
         meta: { title: '分类规则', icon: 'Filter', admin: true },
       },
       {
+        path: 'system/data-quality',
+        name: 'SystemDataQuality',
+        component: () => import('@/views/management/DataQuality.vue'),
+        meta: { title: '数据质量', icon: 'CircleCheck', admin: true },
+      },
+      {
         path: 'system/operation-logs',
         name: 'SystemOperationLogs',
         component: () => import('@/views/system/OperationLogs.vue'),
@@ -372,18 +384,25 @@ const router = createRouter({
   routes,
 })
 
-// 路由守卫:登录校验 + 角色分流
+// 路由守卫:登录校验 + 角色分流(五角色: admin/supervisor/specialty_lead/specialist/agent)
 router.beforeEach((to) => {
   const authStore = useAuthStore()
   document.title = to.meta.title ? `${to.meta.title} - 客服中心管理系统` : '客服中心管理系统'
   if (!to.meta.public && !authStore.isLoggedIn) {
     return { name: 'Login', query: { redirect: to.fullPath } }
   }
+  // 1. admin 专属(系统管理): 仅 admin
   if (to.meta.admin && !authStore.isAdmin) {
     return { name: 'Dashboard' }
   }
-  // manager 仅 admin/supervisor 可访问(如策略管理)
+  // 2. manager 专属(决策看板/管理闭环): admin + supervisor + specialty_lead
   if (to.meta.manager && !authStore.isManager) {
+    return { name: 'Dashboard' }
+  }
+  // 3. 精确角色白名单(meta.roles 数组): 优先级最高, 命中即校验
+  //    例: meta.roles: ['admin', 'supervisor'] → 仅主管+管理员可见
+  //    例: meta.roles: ['specialty_lead', 'supervisor'] → 主管+组长可见
+  if (Array.isArray(to.meta.roles) && to.meta.roles.length && !to.meta.roles.includes(authStore.role)) {
     return { name: 'Dashboard' }
   }
 })

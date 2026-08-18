@@ -59,7 +59,7 @@
           <el-menu-item index="/analytics/views">分析视图</el-menu-item>
           <el-menu-item index="/audit/device">设备审计</el-menu-item>
           <el-menu-item index="/audit/person">人员审计</el-menu-item>
-          <el-menu-item v-if="authStore.isManager" index="/dashboards/designer">看板配置</el-menu-item>
+          <el-menu-item v-if="authStore.isAdmin || authStore.isSupervisor" index="/dashboards/designer">看板配置</el-menu-item>
         </el-sub-menu>
 
         <el-menu-item index="/todos">
@@ -93,7 +93,7 @@
             <el-icon><Document /></el-icon>
             <span>策略发布</span>
           </template>
-          <el-menu-item index="/strategy/manage">策略管理</el-menu-item>
+          <el-menu-item v-if="authStore.isAdmin || authStore.isSupervisor" index="/strategy/manage">策略管理</el-menu-item>
           <el-menu-item index="/strategy/publish">文档查阅</el-menu-item>
         </el-sub-menu>
         <el-menu-item v-else index="/strategy/publish">
@@ -101,8 +101,8 @@
           <span>策略发布</span>
         </el-menu-item>
 
-        <!-- 报表中心(管理层,规划占位) -->
-        <el-menu-item v-if="authStore.isManager" index="/report/center">
+        <!-- 报表中心(管理层,规划占位): 仅 admin + supervisor 可见全量报表 -->
+        <el-menu-item v-if="authStore.isAdmin || authStore.isSupervisor" index="/report/center">
           <el-icon><Printer /></el-icon>
           <span>报表中心</span>
         </el-menu-item>
@@ -116,11 +116,12 @@
           <el-menu-item index="/management/reports">报告索引</el-menu-item>
           <el-menu-item index="/management/weekly">周报看板</el-menu-item>
           <el-menu-item index="/management/measures">管理措施</el-menu-item>
+          <el-menu-item index="/management/policies">政策措施</el-menu-item>
           <el-menu-item index="/management/incidents">异常事件</el-menu-item>
           <el-menu-item index="/management/schedule">排班管理</el-menu-item>
           <el-menu-item index="/management/alerts">预警中心</el-menu-item>
           <el-menu-item index="/management/upstream-tickets">跨部门协作</el-menu-item>
-          <el-menu-item index="/management/templates">看板模板</el-menu-item>
+          <el-menu-item v-if="authStore.isAdmin || authStore.isSupervisor" index="/management/templates">看板模板</el-menu-item>
         </el-sub-menu>
 
         <el-sub-menu v-if="authStore.isAdmin" index="system">
@@ -131,6 +132,7 @@
           <el-menu-item index="/system/users">用户管理</el-menu-item>
           <el-menu-item index="/system/persons">人员管理</el-menu-item>
           <el-menu-item index="/system/classification-rules">分类规则</el-menu-item>
+          <el-menu-item index="/system/data-quality">数据质量</el-menu-item>
           <el-menu-item index="/system/operation-logs">操作日志</el-menu-item>
         </el-sub-menu>
       </el-menu>
