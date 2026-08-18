@@ -224,13 +224,17 @@
       <el-button type="danger" plain class="mobile-logout" @click="logout">退出登录</el-button>
     </div>
   </el-drawer>
-</template>
+
+    <!-- 全局审计弹窗(点击任意 SN / 人员 唤起) -->
+    <AuditDialog />
+  </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { taskStatus } from '@/api/fetch'
+import AuditDialog from '@/components/AuditDialog.vue'
 
 const route = useRoute()
 const router = useRouter()

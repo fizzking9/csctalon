@@ -29,6 +29,19 @@ def _parse_dt(s: str | None) -> datetime | None:
         return None
 
 
+def _parse_dt_end(s: str | None) -> datetime | None:
+    """end 边界解析: 若为纯日期(YYYY-MM-DD), 归一到当日 23:59:59.999999, 避免漏掉当天数据。"""
+    if not s:
+        return None
+    s = s.strip()
+    if len(s) == 10:
+        try:
+            return datetime.strptime(s, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+        except ValueError:
+            return None
+    return _parse_dt(s)
+
+
 def _trend(rows, key="day"):
     return [{"day": str(r[0]), "count": int(r[1] or 0)} for r in rows]
 
@@ -41,7 +54,7 @@ def complaint_summary(
     end: str | None = None,
 ):
     ts = _parse_dt(start)
-    te = _parse_dt(end)
+    te = _parse_dt_end(end)
 
     def _tk_where(stmt):
         stmt = stmt.where(_ticket_category_case() == "投诉")
@@ -170,6 +183,118 @@ def complaint_summary(
             },
         }
     )
+
+
+# ---------- 投诉明细(三源统一) ----------
+
+
+@router.get("/detail", response_model=R, summary="投诉明细列表(三源合并: 内部/商户号/外部)")
+def complaint_detail(
+    db: DBSession,
+    _: CurrentUser,
+    start: str | None = None,
+    end: str | None = None,
+    source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉"),
+    limit: int = Query(500, ge=1, le=2000),
+):
+    ts = _parse_dt(start)
+    te = _parse_dt_end(end)
+    src_expr = _complaint_source_type_case()
+
+    def _iso(dt):
+        return dt.isoformat() if dt else None
+
+    records: list[dict] = []
+
+    # 1. 服务工单投诉 (内部/商户号/外部按 service_item 归一化)
+    stmt = (
+        select(
+            ServiceTicket.ticket_no,
+            ServiceTicket.device_sn,
+            src_expr,
+            ServiceTicket.service_item,
+            ServiceTicket.remark,
+            ServiceTicket.handler,
+            ServiceTicket.register_time,
+            ServiceTicket.status,
+        )
+        .where(_ticket_category_case() == "投诉")
+    )
+    if ts:
+        stmt = stmt.where(ServiceTicket.register_time >= ts)
+    if te:
+        stmt = stmt.where(ServiceTicket.register_time <= te)
+    if source_type:
+        stmt = stmt.where(src_expr == source_type)
+    for r in db.execute(stmt.order_by(ServiceTicket.register_time.desc().nulls_last())).all():
+        records.append({
+            "source": r[2] or "内部投诉",
+            "no": r[0],
+            "device_sn": r[1],
+            "category": r[3],
+            "problem": r[4],
+            "handler": r[5],
+            "time": _iso(r[6]),
+            "status": r[7],
+        })
+
+    # 2. 外部投诉表 (监督局/315等平台投诉)
+    if source_type is None or source_type == "外部投诉":
+        ec_stmt = select(
+            ExternalComplaint.complaint_no,
+            ExternalComplaint.device_sn,
+            ExternalComplaint.complaint_category,
+            ExternalComplaint.problem,
+            ExternalComplaint.follower,
+            ExternalComplaint.complaint_date,
+            ExternalComplaint.result,
+        )
+        if ts:
+            ec_stmt = ec_stmt.where(ExternalComplaint.complaint_date >= ts)
+        if te:
+            ec_stmt = ec_stmt.where(ExternalComplaint.complaint_date <= te)
+        for r in db.execute(ec_stmt.order_by(ExternalComplaint.complaint_date.desc().nulls_last())).all():
+            records.append({
+                "source": "外部投诉",
+                "no": r[0],
+                "device_sn": r[1],
+                "category": r[2],
+                "problem": r[3],
+                "handler": r[4],
+                "time": _iso(r[5]),
+                "status": r[6],
+            })
+
+    # 3. 卡商群投诉 (商户号投诉)
+    if source_type is None or source_type == "商户号投诉":
+        cc_stmt = select(
+            CardComplaint.id,
+            CardComplaint.device_sn,
+            CardComplaint.problem_category,
+            CardComplaint.problem,
+            CardComplaint.handler,
+            CardComplaint.complaint_date,
+            CardComplaint.result,
+        )
+        if ts:
+            cc_stmt = cc_stmt.where(CardComplaint.complaint_date >= ts)
+        if te:
+            cc_stmt = cc_stmt.where(CardComplaint.complaint_date <= te)
+        for r in db.execute(cc_stmt.order_by(CardComplaint.complaint_date.desc().nulls_last())).all():
+            records.append({
+                "source": "商户号投诉",
+                "no": str(r[0]) if r[0] is not None else None,
+                "device_sn": r[1],
+                "category": r[2],
+                "problem": r[3],
+                "handler": r[4],
+                "time": _iso(r[5]),
+                "status": r[6],
+            })
+
+    # 合并后按时间降序
+    records.sort(key=lambda x: x["time"] or "", reverse=True)
+    return R(data={"items": records[:limit], "total": len(records)})
 
 
 # ---------- 单个投诉审计(规划设计 §4.6) ----------

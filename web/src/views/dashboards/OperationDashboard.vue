@@ -10,6 +10,7 @@
       </div>
       <FilterBar
         v-model:modelValue="quickGrainOpt"
+        v-model:range="customDateRange"
         :quick-options="grainQuickOptions"
         :show-custom="true"
         show-grain="false"
@@ -40,9 +41,6 @@
             <el-option label="按周聚合" value="week" />
             <el-option label="按月聚合" value="month" />
           </el-select>
-          <el-button size="small" :type="customDateRange ? 'primary' : 'default'" @click="toggleCustomRange">
-            {{ customDateRange ? '自定义范围' : '自定义范围' }}
-          </el-button>
         </template>
       </FilterBar>
     </div>
@@ -115,13 +113,20 @@
               <el-option v-for="d in departmentOptions" :key="d" :label="d" :value="d" />
             </el-select>
             <el-select v-model="filterGroupId" placeholder="全部分组" clearable size="small" style="width: 140px">
-              <el-option v-for="g in groupsList" :key="g.id" :label="g.name" :value="g.id" />
+              <el-option v-for="g in groupsList" :key="g.id" :label="g.name" :value="g.name" />
             </el-select>
             <el-radio-group v-model="staffFilter.aggregateBy" size="small">
               <el-radio-button label="person">按人</el-radio-button>
               <el-radio-button label="group">按分组</el-radio-button>
               <el-radio-button label="all">全员</el-radio-button>
             </el-radio-group>
+            <el-checkbox
+              v-model="showAllStaff"
+              size="small"
+              :disabled="staffFilter.aggregateBy !== 'person'"
+            >
+              显示所有人(含非企微)
+            </el-checkbox>
           </el-space>
         </template>
       </SectionHeader>
@@ -137,7 +142,7 @@
           </el-table-column>
           <el-table-column v-if="staffFilter.aggregateBy === 'person'" label="人员" width="140">
             <template #default="{ row }">
-              <span style="font-weight:600">{{ row.name }}</span>
+              <el-link type="primary" :underline="false" @click="openPersonAudit(row.name, row.person_id)">{{ row.name }}</el-link>
             </template>
           </el-table-column>
           <el-table-column v-else-if="staffFilter.aggregateBy === 'group'" label="分组" width="140">
@@ -222,51 +227,14 @@
         <template #header>
           <div class="flex-between">
             <span style="font-weight:600">各人员挽回详情</span>
-            <el-tag size="small" type="info">点击行展开查看SN明细</el-tag>
           </div>
         </template>
-        <el-table
-          :data="recoveryStaffList"
-          size="small"
-          border
-          stripe
-          row-key="staff_key"
-          :expand-row-keys="expandedRows"
-          @expand-change="onExpandChange"
-        >
-          <el-table-column type="expand">
+        <el-table :data="recoveryStaffList" size="small" border stripe>
+          <el-table-column label="人员" width="140">
             <template #default="{ row }">
-              <div class="expanded-content">
-                <el-descriptions :column="4" border size="small" class="mb-12">
-                  <el-descriptions-item label="人员">{{ row.name }}</el-descriptions-item>
-                  <el-descriptions-item label="分组">{{ row.group || '—' }}</el-descriptions-item>
-                  <el-descriptions-item label="成功率">
-                    <el-tag :type="row.success_rate >= 0.5 ? 'success' : row.success_rate >= 0.3 ? 'warning' : 'danger'" size="small">
-                      {{ (row.success_rate * 100).toFixed(1) }}%
-                    </el-tag>
-                  </el-descriptions-item>
-                  <el-descriptions-item label="挽回金额">¥{{ formatMoney(row.refund_amount || 0) }}</el-descriptions-item>
-                </el-descriptions>
-                <el-table :data="row.sn_list || []" size="small" border>
-                  <el-table-column prop="sn" label="设备SN" width="160" />
-                  <el-table-column prop="result" label="结果" width="100">
-                    <template #default="{ row: snRow }">
-                      <el-tag :type="snRow.result === 'success' ? 'success' : 'danger'" size="small">
-                        {{ snRow.result === 'success' ? '成功' : '失败' }}
-                      </el-tag>
-                    </template>
-                  </el-table-column>
-                  <el-table-column prop="reason" label="退款原因" min-width="120" />
-                  <el-table-column prop="time" label="时间" width="160">
-                    <template #default="{ row: snRow }">
-                      <span class="mono-small">{{ formatTime(snRow.time) }}</span>
-                    </template>
-                  </el-table-column>
-                </el-table>
-              </div>
+              <el-link type="primary" :underline="false" @click="openPersonAudit(row.name)">{{ row.name }}</el-link>
             </template>
           </el-table-column>
-          <el-table-column prop="name" label="人员" width="140" />
           <el-table-column prop="group" label="分组" width="120">
             <template #default="{ row }">{{ row.group || '—' }}</template>
           </el-table-column>
@@ -291,13 +259,6 @@
               />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="80" align="center">
-            <template #default="{ row }">
-              <el-button size="small" type="primary" link @click="toggleExpand(row)">
-                {{ expandedRows.includes(row.staff_key) ? '收起' : '展开' }}
-              </el-button>
-            </template>
-          </el-table-column>
         </el-table>
       </el-card>
     </section>
@@ -309,7 +270,7 @@ import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { today } from '@/api/analytics'
 import { listGroups } from '@/api/group'
 import BaseChart from '@/components/BaseChart.vue'
-import { formatMoney } from '@/utils/format'
+import { useAudit } from '@/composables/useAudit'
 import dayjs from 'dayjs'
 import isoWeek from 'dayjs/plugin/isoWeek'
 import quarterOfYear from 'dayjs/plugin/quarterOfYear'
@@ -327,7 +288,6 @@ const monthOffset = ref(0)
 const quarterOffset = ref(0)
 const yearOffset = ref(0)
 const customDateRange = ref(null)
-const customRangeVisible = ref(false)
 const trendGrain = ref('day')
 const quickGrainOpt = ref('all')
 const grainQuickOptions = [{ label: '全部', value: 'all' }]
@@ -341,6 +301,12 @@ const staffFilter = reactive({
   aggregateBy: 'person',
 })
 
+// 人均效率: 默认仅显示企微人员, 勾选后显示所有人
+const showAllStaff = ref(false)
+
+// 审计弹窗(点击人员唤起)
+const { openPersonAudit } = useAudit()
+
 // ========== 图表配置 ==========
 const receptionPerspective = ref('count')
 
@@ -352,7 +318,6 @@ const refundData = ref({})
 const staffData = ref({})
 const recoveryData = ref({})
 const hasRecovery = computed(() => recoveryData.value && recoveryData.value.kpi)
-const expandedRows = ref([])
 
 // ========== 选项 ==========
 const weekOptions = computed(() => {
@@ -496,30 +461,39 @@ function getDateRange() {
 }
 
 // ========== KPI卡 ==========
+function _pctDelta(cur, prev) {
+  if (prev == null || Number(prev) === 0) return null
+  return Math.round(((Number(cur) - Number(prev)) / Number(prev)) * 1000) / 10
+}
 const kpiCards = computed(() => {
-  const d = kpiData.value
+  const d = kpiData.value || {}
+  const reception = d.reception || {}
+  const refundCnt = d.refund_count || {}
+  const refundAmt = d.refund_amount || {}
+  const complaint = d.complaint || {}
+  const recoveryRate = recoveryData.value?.kpi?.success_rate
   return [
-    { key: 'reception', label: '接待数', value: d.reception_count, unit: '个', icon: 'Service', bg: '#eff6ff', color: '#2563eb', yoy_key: 'reception_yoy', yoy_pct: d.reception_yoy_pct, yoy_value: d.reception_yoy_value, device_count: d.reception_device_count, tip: '接待设备去重数' },
-    { key: 'session', label: '会话数', value: d.session_count, unit: '次', icon: 'ChatDotRound', bg: '#f0fdf4', color: '#16a34a', yoy_key: 'session_yoy', yoy_pct: d.session_yoy_pct, yoy_value: d.session_yoy_value, tip: '含客服接待+系统处理' },
-    { key: 'refund_count', label: '退款笔数', value: d.refund_count, unit: '笔', icon: 'Warning', bg: '#fef2f2', color: '#dc2626', yoy_key: 'refund_count_yoy', yoy_pct: d.refund_count_yoy_pct, yoy_value: d.refund_count_yoy_value, tip: '含BMS退款单+工单退款' },
-    { key: 'refund_amount', label: '退款金额', value: d.refund_amount, money: true, icon: 'Money', bg: '#fff7ed', color: '#ea580c', yoy_key: 'refund_amount_yoy', yoy_pct: d.refund_amount_yoy_pct, yoy_value: d.refund_amount_yoy_value, tip: '实际退款金额（不含钱包退回）' },
-    { key: 'complaint', label: '投诉数', value: d.complaint_count, unit: '条', icon: 'Bell', bg: '#faf5ff', color: '#7c3aed', yoy_key: 'complaint_yoy', yoy_pct: d.complaint_yoy_pct, yoy_value: d.complaint_yoy_value, tip: '内部+外部投诉合计' },
-    { key: 'recovery', label: '挽回率', value: d.recovery_rate, unit: '%', icon: 'SuccessFilled', bg: '#ecfdf5', color: '#059669', yoy_key: 'recovery_yoy', yoy_pct: d.recovery_yoy_pct, yoy_value: d.recovery_yoy_value, tip: '退款挽回成功率' },
+    { key: 'reception', label: '接待数', value: reception.device_count, unit: '个', icon: 'Service', bg: '#eff6ff', color: '#2563eb', yoy_key: 'reception', yoy_pct: _pctDelta(reception.device_count, reception.device_count_yoy), yoy_value: reception.device_count_yoy, device_count: null, tip: '接待设备去重数' },
+    { key: 'session', label: '会话数', value: reception.value, unit: '次', icon: 'ChatDotRound', bg: '#f0fdf4', color: '#16a34a', yoy_key: 'session', yoy_pct: reception.yoy_pct, yoy_value: reception.yoy_value, tip: '含客服接待+系统处理' },
+    { key: 'refund_count', label: '退款笔数', value: refundCnt.value, unit: '笔', icon: 'Warning', bg: '#fef2f2', color: '#dc2626', yoy_key: 'refund_count', yoy_pct: refundCnt.yoy_pct, yoy_value: refundCnt.yoy_value, tip: '四路经营合计 A+B+C+D' },
+    { key: 'refund_amount', label: '退款金额', value: refundAmt.value, money: true, icon: 'Money', bg: '#fff7ed', color: '#ea580c', yoy_key: 'refund_amount', yoy_pct: refundAmt.yoy_pct, yoy_value: refundAmt.yoy_value, tip: '四路经营合计退款金额' },
+    { key: 'complaint', label: '投诉数', value: complaint.value, unit: '条', icon: 'Bell', bg: '#faf5ff', color: '#7c3aed', yoy_key: 'complaint', yoy_pct: complaint.yoy_pct, yoy_value: complaint.yoy_value, tip: '内部+外部投诉合计' },
+    { key: 'recovery', label: '挽回率', value: Number(recoveryRate || 0), unit: '%', icon: 'SuccessFilled', bg: '#ecfdf5', color: '#059669', yoy_key: 'recovery', yoy_pct: null, yoy_value: null, tip: '退款挽回成功率' },
   ]
 })
 
 // ========== 图表配置 ==========
 const hourlyOption = computed(() => {
   const data = hourlyData.value
-  const dates = data?.dates || []
+  const labels = data?.slot_labels || data?.hour_labels || data?.hours || []
   const reception = data?.reception || []
-  const refund = data?.refund || []
+  const refund = data?.refund_amount || []
   const complaint = data?.complaint || []
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
     legend: { data: ['接待', '退款金额', '投诉'], top: 0 },
     grid: { left: 50, right: 60, bottom: 30, top: 40 },
-    xAxis: [{ type: 'category', data: dates, axisPointer: { type: 'shadow' } }],
+    xAxis: [{ type: 'category', data: labels, axisPointer: { type: 'shadow' } }],
     yAxis: [
       { type: 'value', name: '接待/投诉', position: 'left' },
       { type: 'value', name: '金额(元)', position: 'right', axisLine: { show: true, lineStyle: { color: '#ea580c' } } },
@@ -533,8 +507,10 @@ const hourlyOption = computed(() => {
 })
 
 const receptionPieOption = computed(() => {
-  const data = receptionData.value?.breakdown || []
-  const valueKey = receptionPerspective.value === 'count' ? 'sessions' : 'devices'
+  const data = receptionData.value
+  const items = receptionPerspective.value === 'count'
+    ? (data?.categories || [])
+    : (data?.categories_device || [])
   return {
     tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
     legend: { orient: 'vertical', right: 10, top: 'center' },
@@ -543,13 +519,13 @@ const receptionPieOption = computed(() => {
       radius: ['40%', '70%'],
       avoidLabelOverlap: false,
       label: { show: false },
-      data: data.map(d => ({ name: d.name, value: d[valueKey] || 0 })),
+      data: items.map(d => ({ name: d.name, value: d.value || 0 })),
     }],
   }
 })
 
 const refundReasonOption = computed(() => {
-  const data = refundData.value?.reason_top || []
+  const data = refundData.value?.reasons || []
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     grid: { left: 120, right: 60, bottom: 30, top: 10 },
@@ -565,19 +541,23 @@ const refundReasonOption = computed(() => {
 // ========== 人均效率表 ==========
 const departmentOptions = computed(() => {
   const depts = new Set()
-  ;(staffData.value?.items || []).forEach(r => {
+  ;(staffData.value?.data || []).forEach(r => {
     if (r.department && r.department !== '未分配') depts.add(r.department)
   })
   return Array.from(depts).sort()
 })
 
 const staffRows = computed(() => {
-  let rows = staffData.value?.items || []
+  let rows = staffData.value?.data || []
+  // 按人视图下默认仅显示企微人员, 勾选后显示所有人
+  if (staffFilter.aggregateBy === 'person' && !showAllStaff.value) {
+    rows = rows.filter(r => (r.qw_user_id || '').trim())
+  }
   if (filterDepartment.value) {
     rows = rows.filter(r => r.department === filterDepartment.value)
   }
   if (filterGroupId.value) {
-    rows = rows.filter(r => r.group_id === filterGroupId.value)
+    rows = rows.filter(r => r.group === filterGroupId.value)
   }
   return rows
 })
@@ -586,30 +566,20 @@ const staffRows = computed(() => {
 const recoveryStaffList = computed(() => {
   const details = recoveryData.value?.staff_details || recoveryData.value?.staff_detail || []
   return details.map(d => ({
-    staff_key: `${d.name}_${d.group}`,
     name: d.name,
     group: d.group,
     total_count: d.total_sn,
     success_count: d.success_sn,
     failed_count: d.failed_sn,
     success_rate: d.total_sn > 0 ? d.success_sn / d.total_sn : 0,
-    refund_amount: d.refund_op_amount || d.refund_amount,
-    sn_list: d.sn_list || [],
   }))
 })
 
-function onExpandChange(row, expandedRows) {
-  expandedRows.value = expandedRows
-}
-
-function toggleExpand(row) {
-  const key = row.staff_key
-  const idx = expandedRows.value.indexOf(key)
-  if (idx > -1) {
-    expandedRows.value.splice(idx, 1)
-  } else {
-    expandedRows.value.push(key)
-  }
+function formatNum(v) {
+  if (v == null || v === '') return '0'
+  const n = Number(v)
+  if (Number.isNaN(n)) return '0'
+  return n.toLocaleString('zh-CN')
 }
 
 function scoreTagType(score, a, b, c) {
@@ -619,38 +589,28 @@ function scoreTagType(score, a, b, c) {
   return 'info'
 }
 
-function formatTime(t) {
-  if (!t) return '-'
-  return dayjs(t).format('YYYY-MM-DD HH:mm')
-}
-
 // ========== 数据加载 ==========
 async function loadAll() {
   loading.value = true
   const { start, end } = getDateRange()
   const params = { start, end, trend_grain: trendGrain.value }
-  
+
   try {
     const [kpiRes, hourlyRes, receptionRes, refundRes, staffRes, recoveryRes] = await Promise.all([
       today.kpi(params),
       today.hourlyTrend(params),
       today.reception(params),
       today.refund(params),
-      today.staff({ ...params, aggregate_by: staffFilter.aggregateBy, topn: 100 }),
+      today.staff({ ...params, aggregate_by: staffFilter.aggregateBy, topn: 200 }),
       today.refundRecovery(params),
     ])
-    
+
     if (kpiRes.data) kpiData.value = kpiRes.data
     if (hourlyRes.data) hourlyData.value = hourlyRes.data
     if (receptionRes.data) receptionData.value = receptionRes.data
     if (refundRes.data) refundData.value = refundRes.data
     if (staffRes.data) staffData.value = staffRes.data
     if (recoveryRes.data) recoveryData.value = recoveryRes.data
-    
-    // 展开第一行
-    if (recoveryStaffList.value.length > 0 && expandedRows.value.length === 0) {
-      expandedRows.value = [recoveryStaffList.value[0].staff_key]
-    }
   } catch (e) {
     console.error('加载数据失败', e)
   } finally {
@@ -663,13 +623,6 @@ async function loadGroups() {
     const res = await listGroups()
     groupsList.value = res.data || []
   } catch {}
-}
-
-function toggleCustomRange() {
-  customRangeVisible.value = !customRangeVisible.value
-  if (!customRangeVisible.value) {
-    customDateRange.value = null
-  }
 }
 
 onMounted(async () => {

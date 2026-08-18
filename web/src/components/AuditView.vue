@@ -47,12 +47,14 @@
           </el-select>
         </template>
 
-        <el-select v-model="days" style="width: 110px" @change="loadTimeline">
-          <el-option label="近 30 天" :value="30" />
-          <el-option label="近 90 天" :value="90" />
-          <el-option label="近 180 天" :value="180" />
-          <el-option label="近 365 天" :value="365" />
-          <el-option label="不限" :value="0" />
+        <el-select v-model="days" style="width: 120px" @change="loadTimeline">
+          <el-option label="当天" :value="1" />
+          <el-option label="一周" :value="7" />
+          <el-option label="一个月" :value="30" />
+          <el-option label="三个月" :value="90" />
+          <el-option label="半年" :value="180" />
+          <el-option label="一年" :value="365" />
+          <el-option label="所有" :value="0" />
         </el-select>
         <el-select v-model="limit" style="width: 100px" @change="loadTimeline">
           <el-option :value="50" label="50 条" />
@@ -144,6 +146,8 @@ const props = defineProps({
     type: [String, Number],
     default: null,
   },
+  /** 初始人员姓名关键字(无 person_id 时, 按姓名搜索并自动选中首条) */
+  initialKeyword: { type: String, default: '' },
   /** 标题(为空时根据 subjectKind 显示默认) */
   title: { type: String, default: '' },
   /** 搜索框宽度 */
@@ -264,6 +268,15 @@ function applyInitialId() {
   }
 }
 
+async function applyInitialKeyword() {
+  if (props.subjectKind !== 'person' || !props.initialKeyword) return
+  await searchPersons(props.initialKeyword)
+  if (personOptions.value.length) {
+    personId.value = personOptions.value[0].id
+    loadTimeline()
+  }
+}
+
 onMounted(() => {
   // 1) route query 优先级高(独立页面时使用)
   if (route) {
@@ -285,6 +298,8 @@ onMounted(() => {
   }
   // 2) props.initialId(嵌入式调用时使用)
   applyInitialId()
+  // 3) props.initialKeyword(按姓名搜索并选中首条, 供点击人员唤起)
+  applyInitialKeyword()
 })
 
 // initialId 动态变化时刷新(便于从其他面板直接点击跳转联动)
