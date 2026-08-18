@@ -4,9 +4,9 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import AdminUser, CurrentUser, DBSession
+from app.api.deps import AdminUser, CurrentUser, DBSession, ManagerUser
 from app.core.database import get_db
-from app.models.device import Device, DeviceTag, device_tag_rel
+from app.models.device import Device, DeviceTag, DeviceTagBatch, DeviceTagBinding, device_tag_rel
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
@@ -206,3 +206,146 @@ def remove_tag(sn: str, tag_id: int, db: DBSession, _: AdminUser):
         device.tags.remove(tag)
         db.commit()
     return R(message="移除成功")
+
+
+# ---------- 设备专项标签批量导入(规划设计 §4.3) ----------
+
+
+def _gen_batch_no() -> str:
+    from datetime import datetime as _dt
+    return "BT" + _dt.now().strftime("%Y%m%d%H%M%S%f")
+
+
+@router.post("/tags/batch-import", response_model=R, summary="批量导入SN打标")
+def batch_import(payload: dict, db: DBSession, current_user: ManagerUser):
+    """批量 SN 打标: 提交 SN 清单, 系统校验设备是否存在并打标, 回执成功/已存在/无效。
+
+    payload: {tag_id, title?, sn_list: [str], note?}
+    """
+    tag_id = payload.get("tag_id")
+    if not tag_id:
+        raise HTTPException(status_code=400, detail="缺少 tag_id")
+    tag = db.get(DeviceTag, tag_id)
+    if not tag:
+        raise HTTPException(status_code=404, detail="标签不存在")
+    raw_sns = [str(s).strip() for s in payload.get("sn_list", []) if str(s).strip()]
+    # 去重保序
+    seen = set()
+    sns = []
+    for s in raw_sns:
+        if s not in seen:
+            seen.add(s)
+            sns.append(s)
+
+    batch = DeviceTagBatch(
+        batch_no=_gen_batch_no(),
+        tag_id=tag_id,
+        title=payload.get("title"),
+        note=payload.get("note"),
+        total_count=len(sns),
+        matched_count=0,
+        created_by=current_user.username,
+    )
+    db.add(batch)
+    db.flush()
+
+    matched = 0
+    already = 0
+    invalid = []
+    for sn in sns:
+        dev = db.get(Device, sn)
+        if not dev:
+            invalid.append(sn)
+            continue
+        # 检查是否已打标(按 sn+tag_id)
+        existing = db.scalar(
+            select(DeviceTagBinding).where(
+                DeviceTagBinding.device_sn == sn, DeviceTagBinding.tag_id == tag_id
+            )
+        )
+        if existing:
+            if existing.batch_id is None:
+                existing.batch_id = batch.id
+            if existing.status != "active":
+                existing.status = "active"
+            already += 1
+            continue
+        db.add(
+            DeviceTagBinding(
+                device_sn=sn,
+                tag_id=tag_id,
+                created_by=current_user.username,
+                batch_id=batch.id,
+                status="active",
+            )
+        )
+        matched += 1
+    batch.matched_count = matched
+    batch.total_count = len(sns)
+    db.commit()
+    db.refresh(batch)
+    return R(
+        data={
+            "batch_id": batch.id,
+            "batch_no": batch.batch_no,
+            "total": len(sns),
+            "matched": matched,
+            "already": already,
+            "invalid": invalid,
+            "invalid_count": len(invalid),
+        }
+    )
+
+
+@router.get("/tags/batches", response_model=R, summary="标签批次列表")
+def list_batches(
+    db: DBSession,
+    _: CurrentUser,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    stmt = select(DeviceTagBatch).order_by(DeviceTagBatch.id.desc())
+    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
+    items = list(db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)))
+    tag_names = {t.id: t.tag_name for t in db.scalars(select(DeviceTag))}
+    return R(
+        data=PageBase(
+            items=[
+                {
+                    "id": b.id,
+                    "batch_no": b.batch_no,
+                    "tag_id": b.tag_id,
+                    "tag_name": tag_names.get(b.tag_id),
+                    "title": b.title,
+                    "total_count": b.total_count,
+                    "matched_count": b.matched_count,
+                    "note": b.note,
+                    "created_by": b.created_by,
+                    "created_at": b.created_at.isoformat() if b.created_at else None,
+                }
+                for b in items
+            ],
+            total=total or 0,
+            page=page,
+            page_size=page_size,
+        )
+    )
+
+
+@router.get("/tags/stats", response_model=R, summary="标签统计(各标签SN数)")
+def tag_stats(db: DBSession, _: CurrentUser):
+    rows = db.execute(
+        select(
+            device_tag_rel.c.tag_id,
+            func.count().label("cnt"),
+        )
+        .where(device_tag_rel.c.status == "active")
+        .group_by(device_tag_rel.c.tag_id)
+    ).all()
+    tag_names = {t.id: t.tag_name for t in db.scalars(select(DeviceTag))}
+    data = [
+        {"tag_id": tag_id, "tag_name": tag_names.get(tag_id), "sn_count": int(cnt)}
+        for tag_id, cnt in rows
+    ]
+    data.sort(key=lambda x: -x["sn_count"])
+    return R(data=data)

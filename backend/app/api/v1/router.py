@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import analysis_views, analytics, auth, dashboards, data_sources, dept_info_syncs, devices, fetch, groups, incidents, match, measures, operation_logs, persons, policies, recharges, report_comments, report_templates, reports, scrm_chat, scrm_staff, specialties, staff_assignments, strategy, system, tasks, todos, uploads, users, weekly_reports, wide_tables
+from app.api.v1 import agenda, alerts, analysis_views, analytics, auth, complaints, dashboards, data_quality, data_sources, dept_info_syncs, devices, fetch, groups, incidents, invoices, kb_articles, match, measures, notifications, operation_logs, persons, policies, recharges, report_comments, report_templates, reports, schedules, scrm_chat, scrm_staff, specialties, staff_assignments, strategy, system, tasks, todos, upstream_tickets, uploads, users, weekly_reports, wide_tables
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
@@ -37,3 +37,12 @@ api_router.include_router(system.router)
 api_router.include_router(wide_tables.router)
 api_router.include_router(scrm_staff.router)
 api_router.include_router(scrm_chat.router)
+api_router.include_router(notifications.router)
+api_router.include_router(agenda.router)
+api_router.include_router(complaints.router)
+api_router.include_router(schedules.router)
+api_router.include_router(invoices.router)
+api_router.include_router(kb_articles.router)
+api_router.include_router(alerts.router)
+api_router.include_router(upstream_tickets.router)
+api_router.include_router(data_quality.router)

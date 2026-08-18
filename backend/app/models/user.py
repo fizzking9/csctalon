@@ -10,11 +10,22 @@ from app.models.base import IDMixin, TimestampMixin
 
 
 class RoleEnum(str, enum.Enum):
-    """三级角色"""
+    """五级角色(规划设计 v0.5 §二)
 
-    ADMIN = "admin"  # 管理员:全量
-    SUPERVISOR = "supervisor"  # 主管:本组
-    AGENT = "agent"  # 客服:仅本人
+    系统管理员 admin / 主管 supervisor / 专项组长 specialty_lead / 专员 specialist / 普通客服 agent。
+    数据范围: admin=全量; supervisor=全部组+全部专项; specialty_lead=本专项(业务专项负责人);
+    specialist=本人+被指派专项; agent(普通客服)=仅本人。
+    """
+
+    ADMIN = "admin"  # 系统管理员:全量
+    SUPERVISOR = "supervisor"  # 主管:全部组+全部专项
+    SPECIALTY_LEAD = "specialty_lead"  # 专项组长:本专项(业务专项负责人)
+    SPECIALIST = "specialist"  # 专员:本人+被指派专项
+    AGENT = "agent"  # 普通客服:仅本人
+
+
+# 管理层角色(可看决策看板/管理闭环): 管理员 + 主管 + 专项组长
+MANAGER_ROLES = (RoleEnum.ADMIN.value, RoleEnum.SUPERVISOR.value, RoleEnum.SPECIALTY_LEAD.value)
 
 
 class User(IDMixin, TimestampMixin, Base):

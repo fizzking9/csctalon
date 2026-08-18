@@ -54,3 +54,38 @@ class Incident(IDMixin, TimestampMixin, Base):
     )
     review_note: Mapped[str | None] = mapped_column(Text, nullable=True, comment="复盘结论/备注")
     created_by: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="创建人")
+    # ---- v0.5 增强字段(规划设计 §4.2) ----
+    category: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True, comment="来源/类型:生产/运营/商务部/店铺/系统平台开发/其他服务商"
+    )
+    department: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="涉及部门(首版单选,JSONB预留多选扩展)"
+    )
+    severity: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, default="中", comment="严重程度:高/中/低"
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="解决时间"
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="闭环时间"
+    )
+    is_closed: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, comment="是否闭环(与状态解耦)"
+    )
+
+
+class IncidentFollowup(IDMixin, TimestampMixin, Base):
+    """异常事故跟进时间线(规划设计 §4.2.2)"""
+
+    __tablename__ = "incident_followups"
+
+    incident_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("incidents.id", ondelete="CASCADE"), index=True, nullable=False, comment="关联异常事故"
+    )
+    author_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id"), nullable=True, comment="跟进人(用户)"
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False, comment="跟进内容")
+    status_change: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="状态变更记录")
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="跟进人姓名")

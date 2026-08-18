@@ -56,9 +56,11 @@
         </el-form-item>
         <el-form-item label="角色">
           <el-select v-model="form.role" style="width: 100%">
-            <el-option label="管理员" value="admin" />
+            <el-option label="系统管理员" value="admin" />
             <el-option label="主管" value="supervisor" />
-            <el-option label="客服" value="agent" />
+            <el-option label="专项组长" value="specialty_lead" />
+            <el-option label="专员" value="specialist" />
+            <el-option label="普通客服" value="agent" />
           </el-select>
         </el-form-item>
         <el-form-item label="所属组">
@@ -92,9 +94,9 @@ const submitting = ref(false)
 const editing = ref(null)
 const form = reactive({ username: '', display_name: '', password: '', role: 'agent', group_name: '', qw_name: '' })
 
-const roleMap = { admin: '管理员', supervisor: '主管', agent: '客服' }
+const roleMap = { admin: '系统管理员', supervisor: '主管', specialty_lead: '专项组长', specialist: '专员', agent: '普通客服' }
 const roleLabel = (r) => roleMap[r] || r
-const roleType = (r) => ({ admin: 'danger', supervisor: 'warning', agent: '' }[r] || '')
+const roleType = (r) => ({ admin: 'danger', supervisor: 'warning', specialty_lead: 'primary', specialist: 'success', agent: '' }[r] || '')
 
 async function loadData() {
   loading.value = true

@@ -1,12 +1,15 @@
 """模型汇总 - 导入所有模型,供 Alembic 与应用初始化使用"""
 
 from app.models.analysis_view import AnalysisView, ClassificationRule  # noqa: F401
+from app.models.alert import Alert, AlertRule  # noqa: F401
 from app.models.audit_note import AuditJudgment, AuditNote  # noqa: F401
 from app.models.base import IDMixin, TimestampMixin  # noqa: F401
 from app.models.bms_sync_log import BmsSyncLog  # noqa: F401
 from app.models.card_complaint import CardComplaint  # noqa: F401
+from app.models.complaint_audit import ComplaintAudit  # noqa: F401
 from app.models.cs_record import CsRecord  # noqa: F401
 from app.models.dashboard import Dashboard  # noqa: F401
+from app.models.data_quality import DataQualityRule  # noqa: F401
 from app.models.data_source import (  # noqa: F401
     DataSource,
     DataSourceField,
@@ -14,13 +17,16 @@ from app.models.data_source import (  # noqa: F401
     SourceType,
 )
 from app.models.dept_info_sync import DeptInfoSync  # noqa: F401
-from app.models.device import Device, DeviceTag, DeviceTagBinding, device_tag_rel  # noqa: F401
+from app.models.device import Device, DeviceTag, DeviceTagBatch, DeviceTagBinding, device_tag_rel  # noqa: F401
 from app.models.device_combo import DeviceCombo  # noqa: F401
+from app.models.expense import ExpenseInvoice, Reimbursement, ReimbursementItem  # noqa: F401
 from app.models.external_complaint import ExternalComplaint  # noqa: F401
-from app.models.incident import Incident  # noqa: F401
+from app.models.incident import Incident, IncidentFollowup  # noqa: F401
+from app.models.kb_article import KbArticle  # noqa: F401
 from app.models.measure import Measure  # noqa: F401
 from app.models.merchant import Merchant  # noqa: F401
 from app.models.merchant_refund import MerchantRefund  # noqa: F401
+from app.models.notification import Notification  # noqa: F401
 from app.models.operation_log import OperationLog  # noqa: F401
 from app.models.group import Group, GroupLeadershipHistory, PersonGroupMembership  # noqa: F401
 from app.models.person import Person, PersonAlias  # noqa: F401
@@ -31,6 +37,7 @@ from app.models.refund_wide import RefundWide  # noqa: F401
 from app.models.report import Report, ReportStatus, ReportType  # noqa: F401
 from app.models.report_comment import CommentTarget, ReportComment  # noqa: F401
 from app.models.report_template import ReportTemplate  # noqa: F401
+from app.models.schedule import Attendance, Schedule, ShiftTemplate  # noqa: F401
 from app.models.scrm_operator import ScrmOperator  # noqa: F401
 from app.models.scrm_session import ScrmSession  # noqa: F401
 from app.models.scrm_session_transfer import ScrmSessionTransfer  # noqa: F401
@@ -44,6 +51,7 @@ from app.models.ticket import ServiceTicket  # noqa: F401
 from app.models.ticket_action_log import TicketActionLog  # noqa: F401
 from app.models.todo import TodoFollowup, TodoItem  # noqa: F401
 from app.models.upload import DataMatchRelation, UploadRecord  # noqa: F401
+from app.models.upstream_ticket import UpstreamTicket  # noqa: F401
 from app.models.user import RoleEnum, User  # noqa: F401
 from app.models.wallet import WalletWithdrawal  # noqa: F401
 from app.models.weekly_report import WeeklyReport, WeeklyReportStatus  # noqa: F401
@@ -51,26 +59,35 @@ from app.models.weekly_section_binding import WeeklySectionBinding  # noqa: F401
 
 __all__ = [
     "AnalysisView",
+    "Alert",
+    "AlertRule",
     "AuditJudgment",
     "AuditNote",
     "ClassificationRule",
     "Dashboard",
     "CardComplaint",
+    "ComplaintAudit",
     "CsRecord",
     "BmsSyncLog",
+    "DataQualityRule",
     "DeptInfoSync",
     "Device",
     "DeviceCombo",
     "DeviceTag",
+    "DeviceTagBatch",
     "DeviceTagBinding",
+    "ExpenseInvoice",
     "ExternalComplaint",
     "Group",
     "GroupLeadershipHistory",
     "PersonGroupMembership",
     "Incident",
+    "IncidentFollowup",
+    "KbArticle",
     "Measure",
     "Merchant",
     "MerchantRefund",
+    "Notification",
     "OperationLog",
     "Policy",
     "Person",
@@ -83,6 +100,11 @@ __all__ = [
     "ReportComment",
     "CommentTarget",
     "ReportTemplate",
+    "Reimbursement",
+    "ReimbursementItem",
+    "Schedule",
+    "ShiftTemplate",
+    "Attendance",
     "Specialty",
     "SpecialtyLeadershipHistory",
     "PersonSpecialtyAssignment",
@@ -103,6 +125,7 @@ __all__ = [
     "RoleEnum",
     "TodoItem",
     "TodoFollowup",
+    "UpstreamTicket",
     "SpecialTask",
     "TaskDevice",
     "TaskFollowup",

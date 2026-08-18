@@ -29,3 +29,11 @@ export function convertIncident(id, payload) {
 export function deleteIncident(id) {
   return request.delete(`/incidents/${id}`)
 }
+
+// ---- 跟进时间线 ----
+export function listFollowups(id) {
+  return request.get(`/incidents/${id}/followups`)
+}
+export function addFollowup(id, payload) {
+  return request.post(`/incidents/${id}/followups`, payload)
+}

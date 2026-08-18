@@ -10,9 +10,11 @@ export const useAuthStore = defineStore('auth', () => {
   const role = computed(() => user.value?.role || '')
   const isAdmin = computed(() => role.value === 'admin')
   const isSupervisor = computed(() => role.value === 'supervisor')
+  const isSpecialtyLead = computed(() => role.value === 'specialty_lead')
+  const isSpecialist = computed(() => role.value === 'specialist')
   const isAgent = computed(() => role.value === 'agent')
-  // 管理层:admin + supervisor(可编辑/发布策略)
-  const isManager = computed(() => role.value === 'admin' || role.value === 'supervisor')
+  // 管理层:admin + supervisor + specialty_lead(可看决策看板/管理闭环, 见规划设计 v0.5 §二)
+  const isManager = computed(() => ['admin', 'supervisor', 'specialty_lead'].includes(role.value))
   const displayName = computed(() => user.value?.display_name || '用户')
 
   async function login(username, password) {
@@ -52,7 +54,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   return {
-    token, user, isLoggedIn, role, isAdmin, isSupervisor, isAgent, isManager, displayName,
+    token, user, isLoggedIn, role, isAdmin, isSupervisor, isSpecialtyLead, isSpecialist, isAgent, isManager, displayName,
     login, logout, localLogout, fetchMe,
   }
 })
