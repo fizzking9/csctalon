@@ -70,13 +70,73 @@
     </el-tabs>
 
     <!-- 登记发票 -->
-    <el-dialog v-model="invVisible" title="登记发票" width="560px">
+    <el-dialog v-model="invVisible" title="登记发票" width="640px">
       <el-alert type="info" :closable="false" class="mb-8" show-icon>
-        粘贴电子发票二维码内容(全电发票)可自动识别; 或手工填写字段。
+        <template #title>三种录入方式</template>
+        <div style="font-size: 12px; line-height: 1.6">
+          1. 上传发票图片 → 本地解码二维码自动识别(推荐, 规划设计 §4.5)<br>
+          2. 粘贴电子发票二维码文本内容(全电发票)<br>
+          3. 手工填写下方字段
+        </div>
       </el-alert>
+
+      <!-- 二维码图片上传解码 -->
+      <div class="qr-upload-block mb-8">
+        <el-upload
+          :show-file-list="false"
+          :before-upload="handleQrBeforeUpload"
+          :http-request="handleQrUpload"
+          accept="image/png,image/jpeg,image/jpg,image/bmp"
+          drag
+        >
+          <el-icon class="el-icon--upload" v-if="!qrDecoding"><UploadFilled /></el-icon>
+          <el-icon v-else class="el-icon--upload is-loading"><Loading /></el-icon>
+          <div class="el-upload__text">
+            <span v-if="qrDecoding">正在解码...</span>
+            <template v-else>
+              拖拽或<em>点击上传</em>发票图片(PNG/JPG), 自动解码二维码
+            </template>
+          </div>
+        </el-upload>
+
+        <!-- 预览图 + 解码结果 -->
+        <div v-if="qrPreviewUrl || qrResult" class="qr-result-block">
+          <div v-if="qrPreviewUrl" class="qr-preview">
+            <img :src="qrPreviewUrl" alt="发票预览" />
+          </div>
+          <div v-if="qrResult" class="qr-result-info">
+            <div class="qr-result-title">
+              <el-tag :type="qrResult.decoded ? 'success' : 'warning'" size="small">
+                {{ qrResult.decoded ? '解码成功' : '未检测到二维码' }}
+              </el-tag>
+              <el-button v-if="qrResult.decoded" link type="primary" @click="applyParsedToForm">填入表单 ›</el-button>
+            </div>
+            <div v-if="qrResult.parsed" class="qr-parsed">
+              <div v-if="qrResult.parsed.invoice_no">
+                <span class="qr-label">发票号:</span><b>{{ qrResult.parsed.invoice_no }}</b>
+              </div>
+              <div v-if="qrResult.parsed.invoice_code">
+                <span class="qr-label">代码:</span><b>{{ qrResult.parsed.invoice_code }}</b>
+              </div>
+              <div v-if="qrResult.parsed.total_amount != null">
+                <span class="qr-label">价税合计:</span><b>¥{{ Number(qrResult.parsed.total_amount).toFixed(2) }}</b>
+              </div>
+              <div v-if="qrResult.parsed.invoice_date">
+                <span class="qr-label">开票日期:</span><b>{{ qrResult.parsed.invoice_date }}</b>
+              </div>
+            </div>
+            <div v-if="qrResult.qr_texts && qrResult.qr_texts.length" class="qr-raw-text">
+              <span class="qr-label">二维码原文:</span>
+              <code>{{ qrResult.used_text }}</code>
+            </div>
+            <div v-if="qrResult.message" class="text-muted">{{ qrResult.message }}</div>
+          </div>
+        </div>
+      </div>
+
       <el-form :model="invForm" label-width="90px">
         <el-form-item label="二维码内容">
-          <el-input v-model="invForm.qr_text" type="textarea" :rows="3" placeholder="粘贴发票二维码识别出的文本" />
+          <el-input v-model="invForm.qr_text" type="textarea" :rows="3" placeholder="粘贴发票二维码识别出的文本(与图片二选一)" />
         </el-form-item>
         <el-form-item label="发票号码"><el-input v-model="invForm.invoice_no" /></el-form-item>
         <el-form-item label="发票代码"><el-input v-model="invForm.invoice_code" /></el-form-item>
@@ -121,8 +181,8 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh } from '@element-plus/icons-vue'
-import { listInvoices, createInvoice, updateInvoice, deleteInvoice, listReimbursements, createReimbursement, approveReimbursement, exportReimbursement } from '@/api/invoice'
+import { Plus, Refresh, UploadFilled, Loading } from '@element-plus/icons-vue'
+import { listInvoices, createInvoice, updateInvoice, deleteInvoice, decodeInvoiceImage, listReimbursements, createReimbursement, approveReimbursement, exportReimbursement } from '@/api/invoice'
 
 const tab = ref('invoices')
 const invoices = ref([])
@@ -137,6 +197,12 @@ const invVisible = ref(false)
 const rbVisible = ref(false)
 const invForm = reactive({ qr_text: '', invoice_no: '', invoice_code: '', invoice_type: '全电', seller_name: '', buyer_name: '', amount: null, tax_amount: null, total_amount: null, invoice_date: null, remark: '' })
 const rbForm = reactive({ title: '', invoice_ids: [], remark: '' })
+
+// 二维码图片解码状态
+const qrDecoding = ref(false)
+const qrPreviewUrl = ref('')
+const qrResult = ref(null)
+
 const fmt = (v) => (v == null ? '0.00' : Number(v).toFixed(2))
 const invStatusType = (s) => ({ 待识别: 'info', 已识别: 'success', 待核对: 'warning', 已入账: 'primary', 已报销: 'success' }[s] || 'info')
 const rbStatusType = (s) => ({ 草稿: 'info', 待审核: 'warning', 已通过: 'primary', 已报销: 'success' }[s] || 'info')
@@ -165,8 +231,66 @@ async function loadReimbursements() {
   }
 }
 
+function resetQrState() {
+  qrDecoding.value = false
+  if (qrPreviewUrl.value) URL.revokeObjectURL(qrPreviewUrl.value)
+  qrPreviewUrl.value = ''
+  qrResult.value = null
+}
+
+// 二维码图片上传前校验: 类型 + 大小
+function handleQrBeforeUpload(file) {
+  const allowed = ['image/png', 'image/jpeg', 'image/jpg', 'image/bmp']
+  if (!allowed.includes(file.type)) {
+    ElMessage.warning('仅支持 PNG/JPG/BMP 图片')
+    return false
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    ElMessage.warning('图片大小不能超过 10MB')
+    return false
+  }
+  return true
+}
+
+// 自定义上传: 调本地解码接口
+async function handleQrUpload({ file }) {
+  resetQrState()
+  qrDecoding.value = true
+  // 生成本地预览 URL
+  qrPreviewUrl.value = URL.createObjectURL(file)
+  try {
+    const res = await decodeInvoiceImage(file)
+    qrResult.value = res.data
+    if (res.data?.decoded && res.data?.parsed?.invoice_no) {
+      ElMessage.success('解码成功, 可点击"填入表单"自动回填')
+    } else if (res.data?.decoded) {
+      ElMessage.info('已解码二维码, 但未识别出结构化发票信息, 请手工核对')
+    } else {
+      ElMessage.warning(res.data?.message || '未检测到二维码, 请确认图片清晰或改用文本粘贴')
+    }
+  } catch (e) {
+    ElMessage.error('解码失败: ' + (e?.message || '服务异常'))
+    qrResult.value = null
+  } finally {
+    qrDecoding.value = false
+  }
+}
+
+// 把解码结果填入表单(用户确认后才填, 避免覆盖已手工填的内容)
+function applyParsedToForm() {
+  const p = qrResult.value?.parsed
+  if (!p) return
+  if (p.invoice_no) invForm.invoice_no = p.invoice_no
+  if (p.invoice_code) invForm.invoice_code = p.invoice_code
+  if (p.total_amount != null) invForm.total_amount = Number(p.total_amount)
+  if (p.invoice_date) invForm.invoice_date = p.invoice_date
+  if (qrResult.value?.used_text) invForm.qr_text = qrResult.value.used_text
+  ElMessage.success('已填入表单, 请核对销方/购方/金额等字段后保存')
+}
+
 function openInvoice() {
   Object.assign(invForm, { qr_text: '', invoice_no: '', invoice_code: '', invoice_type: '全电', seller_name: '', buyer_name: '', amount: null, tax_amount: null, total_amount: null, invoice_date: null, remark: '' })
+  resetQrState()
   invVisible.value = true
 }
 
@@ -176,6 +300,7 @@ async function handleCreateInvoice() {
     await createInvoice({ ...invForm })
     ElMessage.success('登记成功')
     invVisible.value = false
+    resetQrState()
     loadInvoices()
   } finally {
     submitting.value = false
@@ -185,6 +310,7 @@ async function handleCreateInvoice() {
 function openEditInvoice(row) {
   Object.assign(invForm, { qr_text: '', invoice_no: row.invoice_no, invoice_code: row.invoice_code, invoice_type: row.invoice_type, seller_name: row.seller_name, buyer_name: row.buyer_name, amount: row.amount, tax_amount: row.tax_amount, total_amount: row.total_amount, invoice_date: row.invoice_date ? String(row.invoice_date).slice(0, 10) : null, remark: row.remark })
   invForm._id = row.id
+  resetQrState()
   invVisible.value = true
 }
 
@@ -251,4 +377,34 @@ onMounted(() => {
 .flex { display: flex; align-items: center; }
 .flex-between { display: flex; justify-content: space-between; align-items: center; }
 .gap-8 { gap: 8px; }
+.text-muted { color: #909399; font-size: 12px; }
+
+/* 二维码上传解码区 */
+.qr-upload-block { border: 1px solid #ebeef5; border-radius: 6px; padding: 12px; background: #fafbfc; }
+.qr-upload-block :deep(.el-upload-dragger) { padding: 16px; }
+.qr-upload-block :deep(.el-upload-dragger .el-icon--upload) { font-size: 40px; color: #c0c4cc; margin-bottom: 6px; }
+.qr-upload-block :deep(.el-upload-dragger .el-icon--upload.is-loading) { color: #409eff; animation: rotating 1.5s linear infinite; }
+.qr-upload-block :deep(.el-upload__text) { font-size: 13px; color: #606266; }
+.qr-upload-block :deep(.el-upload__text em) { color: #409eff; font-style: normal; }
+
+.qr-result-block {
+  display: flex; gap: 12px; margin-top: 12px; padding: 10px;
+  background: #fff; border-radius: 4px; border: 1px solid #ebeef5;
+}
+.qr-preview { flex-shrink: 0; }
+.qr-preview img { max-width: 160px; max-height: 160px; border-radius: 4px; border: 1px solid #ebeef5; }
+.qr-result-info { flex: 1; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.qr-result-title { display: flex; align-items: center; gap: 8px; }
+.qr-parsed { display: flex; flex-wrap: wrap; gap: 12px; }
+.qr-parsed > div { font-size: 12px; color: #606266; }
+.qr-label { color: #909399; margin-right: 4px; }
+.qr-parsed b { color: #303133; }
+.qr-raw-text { font-size: 11px; }
+.qr-raw-text code {
+  display: inline-block; max-width: 100%; word-break: break-all;
+  background: #f5f7fa; padding: 2px 6px; border-radius: 3px; color: #606266;
+  font-family: 'SF Mono', Menlo, monospace;
+}
+
+@keyframes rotating { from { transform: rotate(0); } to { transform: rotate(360deg); } }
 </style>

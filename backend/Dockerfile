@@ -8,9 +8,11 @@ RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian.o
     || sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list 2>/dev/null \
     || true
 
-# 系统依赖(libpq 编译所需)
+# 系统依赖(libpq 编译所需 + libzbar 用于发票二维码解码)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libpq-dev \
+    # 发票二维码本地解码(规划设计 §4.5, pyzbar 依赖)
+    libzbar0 \
     # Playwright/Chromium 依赖
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
@@ -32,7 +34,9 @@ RUN pip install --no-cache-dir \
     "pypinyin>=0.50.0" "httpx>=0.27.0" \
     "playwright>=1.45.0" \
     # 验证码自动识别(ddddocr + ONNX Runtime,纯 Python,无外部系统依赖)
-    "ddddocr>=1.4.11" "onnxruntime>=1.17.0"
+    "ddddocr>=1.4.11" "onnxruntime>=1.17.0" \
+    # 发票二维码图本地解码(规划设计 §4.5 全电发票识别链路)
+    "pyzbar>=0.1.9" "pillow>=10.0.0"
 
 # 安装 Chromium 浏览器
 RUN playwright install chromium --with-deps

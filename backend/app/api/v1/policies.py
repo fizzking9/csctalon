@@ -40,6 +40,8 @@ def list_policies(
     status: str | None = Query(None, description="状态: draft/pending_approval/published/archived"),
     keyword: str | None = Query(None, description="标题/摘要关键词"),
     only_published: bool = Query(False, description="只看已发布"),
+    topic: str | None = Query(None, description="主题标签(精确匹配 topic_tags 数组元素)"),
+    has_replacement: bool | None = Query(None, description="是否有替代关系(True=被替代/已废止替代链存在)"),
 ):
     stmt = select(Policy)
     if category:
@@ -57,6 +59,11 @@ def list_policies(
     if keyword:
         like = f"%{keyword}%"
         stmt = stmt.where((Policy.title.ilike(like)) | (Policy.summary.ilike(like)))
+    if topic:
+        # JSONB 数组包含某元素
+        stmt = stmt.where(Policy.topic_tags.contains([topic]))
+    if has_replacement is True:
+        stmt = stmt.where((Policy.replaces_policy_id.isnot(None)) | (Policy.replaced_by_policy_id.isnot(None)))
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     items = list(
         db.scalars(
@@ -210,6 +217,91 @@ def archive_policy(policy_id: int, payload: dict, db: DBSession, current_user: A
     db.commit()
     db.refresh(p)
     return R(data=_serialize(p))
+
+
+@router.post("/{policy_id}/supersede", response_model=R, summary="被新政策替代(建立替代链)")
+def supersede_policy(policy_id: int, payload: dict, db: DBSession, current_user: AdminOrSupervisor):
+    """当前政策被新政策替代: 当前 → ARCHIVED + replaced_by_policy_id 指向新政策;
+    新政策 → replaces_policy_id 指向当前。双向冗余维护。"""
+    p = db.get(Policy, policy_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="制度不存在")
+    new_id = payload.get("new_policy_id")
+    if not new_id:
+        raise HTTPException(status_code=400, detail="缺少 new_policy_id")
+    new_p = db.get(Policy, int(new_id))
+    if not new_p:
+        raise HTTPException(status_code=404, detail="新政策不存在")
+    if int(new_id) == policy_id:
+        raise HTTPException(status_code=400, detail="不能替代自身")
+    # 双向冗余
+    p.replaced_by_policy_id = int(new_id)
+    p.status = PolicyStatus.ARCHIVED.value
+    new_p.replaces_policy_id = policy_id
+    if payload.get("remark"):
+        p.remark = (p.remark or "") + f"\n[被替代@{datetime.now().isoformat(timespec='minutes')}] 由 #{new_id} 替代: {payload['remark']}"
+    db.commit()
+    db.refresh(p)
+    return R(data=_serialize(p))
+
+
+@router.get("/{policy_id}/chain", response_model=R, summary="替代链可视化(replaces 链 + replaced_by 链)")
+def get_policy_chain(policy_id: int, db: DBSession, _: CurrentUser):
+    """返回当前政策的替代链:
+    - predecessors: 向前看(replaces_policy_id 递归), 历任被替代政策
+    - successors:   向后看(replaced_by_policy_id 递归), 后续替代政策
+    用于前端「政策演进时间轴」可视化。
+    """
+    p = db.get(Policy, policy_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="制度不存在")
+    # 防止循环引用导致死循环: 收集已访问 id
+    # 向前看 predecessors (replaces_policy_id)
+    predecessors = []
+    visited = {policy_id}
+    cur = p
+    while cur and cur.replaces_policy_id and cur.replaces_policy_id not in visited:
+        visited.add(cur.replaces_policy_id)
+        prev = db.get(Policy, cur.replaces_policy_id)
+        if not prev:
+            break
+        predecessors.append({
+            "id": prev.id, "title": prev.title, "status": prev.status,
+            "valid_from": prev.valid_from.isoformat() if prev.valid_from else None,
+            "valid_to": prev.valid_to.isoformat() if prev.valid_to else None,
+            "archived_at": prev.updated_at.isoformat() if prev.updated_at else None,
+        })
+        cur = prev
+    # 向后看 successors (replaced_by_policy_id)
+    successors = []
+    cur = p
+    while cur and cur.replaced_by_policy_id and cur.replaced_by_policy_id not in visited:
+        visited.add(cur.replaced_by_policy_id)
+        nxt = db.get(Policy, cur.replaced_by_policy_id)
+        if not nxt:
+            break
+        successors.append({
+            "id": nxt.id, "title": nxt.title, "status": nxt.status,
+            "valid_from": nxt.valid_from.isoformat() if nxt.valid_from else None,
+            "valid_to": nxt.valid_to.isoformat() if nxt.valid_to else None,
+            "approved_at": nxt.approved_at.isoformat() if nxt.approved_at else None,
+        })
+        cur = nxt
+    return R(data={
+        "current": {"id": p.id, "title": p.title, "status": p.status,
+                    "valid_from": p.valid_from.isoformat() if p.valid_from else None,
+                    "valid_to": p.valid_to.isoformat() if p.valid_to else None},
+        "predecessors": predecessors,
+        "successors": successors,
+    })
+
+
+@router.get("/meta/topics", response_model=R, summary="已用主题标签列表(用于筛选下拉)")
+def list_topics(db: DBSession, _: CurrentUser):
+    """聚合所有非空 topic_tags 数组元素, 用于筛选下拉源"""
+    from sqlalchemy import func as _f
+    rows = db.scalars(select(_f.distinct(_f.jsonb_array_elements_text(Policy.topic_tags))).where(Policy.topic_tags.isnot(None)))
+    return R(data=sorted([r for r in rows if r]))
 
 
 @router.delete("/{policy_id}", response_model=R, summary="删除制度草稿")

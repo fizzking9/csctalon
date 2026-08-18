@@ -70,6 +70,8 @@ class BmsScheduler:
         self._catch_up_done = False  # 启动补跑是否已执行(避免反复补跑)
         # 专项级熔断: date_str -> set(已失败暂停的 data_type 名称)
         self._halted_types: dict[str, set[str]] = {}
+        # 预警扫描: date_str -> set(已扫描的小时), 一小时最多扫一次(scan_alerts 已做日幂等)
+        self._alert_scanned_hours: dict[str, set[int]] = {}
 
     @property
     def is_running(self) -> bool:
@@ -305,6 +307,15 @@ class BmsScheduler:
                 biz_key = biz_date.strftime("%Y-%m-%d")
                 halted_today = self._halted_types.get(biz_key) or set()
 
+                # ── 预警扫描(每小时最多一次, scan_alerts 内部做当日幂等) ──
+                alert_done = self._alert_scanned_hours.setdefault(date_str, set())
+                if now_cn.minute < TRIGGER_WINDOW_MINUTES and now_cn.hour not in alert_done:
+                    alert_done.add(now_cn.hour)
+                    try:
+                        await self._scan_alerts_safe()
+                    except Exception as ae:  # noqa: BLE001
+                        logger.warning(f"[调度器] 预警扫描异常: {ae}")
+
                 # ── 启动补跑(仅一次): DAYTIME_HOURS 中 <= 当前小时且未成功的,立即补一次 ──
                 if first_tick and not self._catch_up_done:
                     self._catch_up_done = True
@@ -395,6 +406,26 @@ class BmsScheduler:
                 logger.error(f"调度器异常: {e}", exc_info=True)
 
             await asyncio.sleep(CHECK_INTERVAL)
+
+    async def _scan_alerts_safe(self):
+        """定时触发预警扫描(规划设计 §8.1)。
+        复用 alerts.py 的 scan_alerts 逻辑, 在独立 session 中执行,
+        失败不影响后续同步任务。当日幂等由 scan_alerts 内部保证。
+        """
+        from app.api.v1.alerts import scan_alerts
+
+        db = SessionLocal()
+        try:
+            # scan_alerts 不依赖 ManagerUser(脚本调用时跳过权限校验)
+            # 直接调用其函数体(传 None 当 user), 函数本身只读不依赖 current_user
+            result = scan_alerts(db=db, _=None)
+            if result.data and result.data.get("created"):
+                logger.info(
+                    f"[调度器] 预警扫描完成: 生成 {result.data['created']} 条预警"
+                    f" ({result.data.get('details', [])})"
+                )
+        finally:
+            db.close()
 
     async def _do_scheduled_sync(
         self,

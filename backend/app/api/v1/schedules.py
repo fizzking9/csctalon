@@ -175,9 +175,143 @@ def delete_schedule(schedule_id: int, db: DBSession, _: ManagerUser):
     return R()
 
 
-@router.get("/comparison", response_model=R, summary="排班×接待×工单对照")
+# ---------- 考勤打卡(规划设计 §4.1.4) ----------
+
+
+@router.get("/attendance", response_model=R, summary="考勤记录(按日期范围)")
+def list_attendance(
+    db: DBSession,
+    _: CurrentUser,
+    start: str = Query(..., description="开始日期 yyyy-mm-dd"),
+    end: str | None = Query(None, description="结束日期 yyyy-mm-dd"),
+    person_id: int | None = Query(None),
+):
+    d0 = date.fromisoformat(start)
+    d1 = date.fromisoformat(end) if end else d0
+    stmt = select(Attendance).where(Attendance.attendance_date >= d0, Attendance.attendance_date <= d1)
+    if person_id:
+        stmt = stmt.where(Attendance.person_id == person_id)
+    rows = db.scalars(stmt.order_by(Attendance.attendance_date, Attendance.person_id))
+    persons = {p.id: p.display_name for p in db.scalars(select(Person))}
+    return R(
+        data=[
+            {
+                "id": a.id,
+                "person_id": a.person_id,
+                "person_name": persons.get(a.person_id),
+                "attendance_date": a.attendance_date.isoformat(),
+                "check_in_at": a.check_in_at.isoformat() if a.check_in_at else None,
+                "check_out_at": a.check_out_at.isoformat() if a.check_out_at else None,
+                "source": a.source,
+            }
+            for a in rows
+        ]
+    )
+
+
+@router.post("/attendance", response_model=R, summary="登记考勤(手动/兜底)")
+def create_attendance(payload: dict, db: DBSession, _: ManagerUser):
+    """payload: {person_id, attendance_date, check_in_at?, check_out_at?, source?, raw?}"""
+    pid = int(payload["person_id"])
+    if not db.get(Person, pid):
+        raise HTTPException(status_code=404, detail="人员不存在")
+    d = date.fromisoformat(payload["attendance_date"])
+    existing = db.scalar(
+        select(Attendance).where(Attendance.person_id == pid, Attendance.attendance_date == d)
+    )
+    def _parse_dt(s):
+        if not s:
+            return None
+        return datetime.fromisoformat(s.replace("Z", "+00:00")) if isinstance(s, str) else s
+    if existing:
+        if payload.get("check_in_at"):
+            existing.check_in_at = _parse_dt(payload["check_in_at"])
+        if payload.get("check_out_at"):
+            existing.check_out_at = _parse_dt(payload["check_out_at"])
+        if payload.get("source"):
+            existing.source = payload["source"]
+        db.commit()
+        db.refresh(existing)
+        a = existing
+    else:
+        a = Attendance(
+            person_id=pid,
+            attendance_date=d,
+            check_in_at=_parse_dt(payload.get("check_in_at")),
+            check_out_at=_parse_dt(payload.get("check_out_at")),
+            source=payload.get("source", "manual"),
+            raw=payload.get("raw"),
+        )
+        db.add(a)
+        db.commit()
+        db.refresh(a)
+    return R(data={"id": a.id, "person_id": a.person_id, "attendance_date": a.attendance_date.isoformat()})
+
+
+@router.post("/attendance/bulk", response_model=R, summary="批量导入考勤(Excel/CSV)")
+def bulk_attendance(payload: dict, db: DBSession, current_user: ManagerUser):
+    """payload: {rows: [{person_id, attendance_date, check_in_at?, check_out_at?}, ...], source?}
+    重复按 (person_id, attendance_date) upsert。
+    """
+    rows = payload.get("rows") or []
+    source = payload.get("source", "manual")
+    if not rows:
+        raise HTTPException(status_code=400, detail="无数据")
+    valid_pids = set(db.scalars(select(Person.id).where(Person.id.in_([r.get("person_id") for r in rows if r.get("person_id")]))))
+    created, updated, invalid = 0, 0, 0
+    for r in rows:
+        pid = r.get("person_id")
+        if not pid or int(pid) not in valid_pids:
+            invalid += 1
+            continue
+        try:
+            d = date.fromisoformat(str(r["attendance_date"])[:10])
+        except (KeyError, ValueError):
+            invalid += 1
+            continue
+        def _parse_dt(s):
+            if not s:
+                return None
+            try:
+                return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        existing = db.scalar(select(Attendance).where(Attendance.person_id == int(pid), Attendance.attendance_date == d))
+        if existing:
+            ci = _parse_dt(r.get("check_in_at"))
+            co = _parse_dt(r.get("check_out_at"))
+            if ci:
+                existing.check_in_at = ci
+            if co:
+                existing.check_out_at = co
+            existing.source = source
+            updated += 1
+        else:
+            db.add(Attendance(
+                person_id=int(pid),
+                attendance_date=d,
+                check_in_at=_parse_dt(r.get("check_in_at")),
+                check_out_at=_parse_dt(r.get("check_out_at")),
+                source=source,
+            ))
+            created += 1
+    db.commit()
+    return R(data={"created": created, "updated": updated, "invalid": invalid, "total": len(rows)})
+
+
+@router.delete("/attendance/{attendance_id}", response_model=R, summary="删除考勤记录")
+def delete_attendance(attendance_id: int, db: DBSession, _: ManagerUser):
+    a = db.get(Attendance, attendance_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="考勤记录不存在")
+    db.delete(a)
+    db.commit()
+    return R()
+
+
+@router.get("/comparison", response_model=R, summary="排班×考勤×接待×工单对照")
 def comparison(db: DBSession, _: CurrentUser, day: str = Query(..., description="日期 yyyy-mm-dd")):
-    """当日排班 vs 实际接待/工单对照(四源: 排班/考勤/接待/工单)。"""
+    """当日排班 vs 考勤 vs 实际接待/工单对照(四源: 排班/考勤/接待/工单)。"""
     d = date.fromisoformat(day)
     dt_start = datetime.combine(d, time.min, tzinfo=timezone.utc)
     dt_end = datetime.combine(d + timedelta(days=1), time.min, tzinfo=timezone.utc)
@@ -185,6 +319,10 @@ def comparison(db: DBSession, _: CurrentUser, day: str = Query(..., description=
     schedules = list(
         db.scalars(select(Schedule).where(Schedule.schedule_date == d).order_by(Schedule.person_id))
     )
+    # 当日考勤(按 person_id 索引)
+    attendances = {
+        a.person_id: a for a in db.scalars(select(Attendance).where(Attendance.attendance_date == d))
+    }
     persons = {p.id: p for p in db.scalars(select(Person))}
     # 每个人员对应的所有名字(display_name/qw_name/别名)
     aliases = db.scalars(select(PersonAlias).where(PersonAlias.person_id.in_([s.person_id for s in schedules])))
@@ -222,6 +360,7 @@ def comparison(db: DBSession, _: CurrentUser, day: str = Query(..., description=
         rec_cnt = sum(c for n, c in op_count.items() if n in names)
         tkt_cnt = sum(c for n, c in handler_count.items() if n in names)
         sh = shifts.get(s.shift_template_id)
+        att = attendances.get(s.person_id)
         detail.append(
             {
                 "person_id": s.person_id,
@@ -230,6 +369,9 @@ def comparison(db: DBSession, _: CurrentUser, day: str = Query(..., description=
                 "start_time": s.start_time or (sh.start_time if sh else None),
                 "end_time": s.end_time or (sh.end_time if sh else None),
                 "status": s.status,
+                "check_in_at": att.check_in_at.isoformat() if att and att.check_in_at else None,
+                "check_out_at": att.check_out_at.isoformat() if att and att.check_out_at else None,
+                "is_present": bool(att and (att.check_in_at or att.check_out_at)),
                 "reception_count": rec_cnt,
                 "ticket_count": tkt_cnt,
             }
@@ -242,11 +384,26 @@ def comparison(db: DBSession, _: CurrentUser, day: str = Query(..., description=
                 active_reception_persons.add(pid)
                 break
 
+    # 仅有考勤但无排班(疑似漏排/顶班)
+    present_no_schedule = [
+        {"person_id": pid, "person_name": persons.get(pid, Person(display_name="")).display_name if pid in persons else None,
+         "check_in_at": a.check_in_at.isoformat() if a.check_in_at else None}
+        for pid, a in attendances.items() if pid not in {s.person_id for s in schedules}
+    ]
+    # 有排班但无考勤(疑似请假/脱岗)
+    scheduled_no_present = [
+        {"person_id": s.person_id, "person_name": persons.get(s.person_id, Person(display_name="")).display_name if s.person_id in persons else None}
+        for s in schedules if s.person_id not in attendances
+    ]
+
     return R(
         data={
             "date": d.isoformat(),
             "scheduled_count": len(schedules),
+            "present_count": len(attendances),
             "active_reception_count": len(active_reception_persons),
+            "present_no_schedule": present_no_schedule,
+            "scheduled_no_present": scheduled_no_present,
             "detail": detail,
         }
     )

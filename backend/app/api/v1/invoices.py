@@ -4,9 +4,10 @@
 首版: 全电发票二维码内容解析(本地,无第三方) + 手工字段兜底 + 人工核对。
 """
 
+import io
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 
@@ -15,6 +16,24 @@ from app.models.expense import ExpenseInvoice, Reimbursement, ReimbursementItem
 from app.schemas.common import PageBase, R
 
 router = APIRouter(prefix="/invoices", tags=["发票登记"])
+
+
+def _decode_qr_from_image(img_bytes: bytes) -> list[str]:
+    """从图片字节中本地解码二维码(pyzbar), 返回所有二维码文本列表。
+
+    依赖 pyzbar + 系统库 libzbar(zbar)。未安装时返回空列表, 由调用方降级到人工录入。
+    """
+    try:
+        from PIL import Image  # type: ignore
+        from pyzbar.pyzbar import decode  # type: ignore
+    except ImportError:
+        return []
+    try:
+        img = Image.open(io.BytesIO(img_bytes))
+        results = decode(img)
+        return [r.data.decode("utf-8", errors="replace") for r in results if r.data]
+    except Exception:  # noqa: BLE001 解码失败返回空, 不影响主流程
+        return []
 
 
 def _gen_batch_no() -> str:
@@ -122,6 +141,56 @@ def create_invoice(payload: dict, db: DBSession, current_user: CurrentUser):
     db.commit()
     db.refresh(inv)
     return R(data=_serialize_inv(inv))
+
+
+@router.post("/decode-image", response_model=R, summary="上传发票图片本地解码二维码(规划设计 §4.5)")
+async def decode_invoice_image(file: UploadFile = File(...), _: CurrentUser = None):
+    """上传电子发票截图/拍图(PNG/JPG), 本地解码二维码返回结构化数据。
+
+    依赖 pyzbar + 系统库 libzbar。未安装时返回 parsed=None + 安装提示, 前端引导用户改用
+    手工录入或文本粘贴。返回的 parsed 字段可经人工核对后调用 POST /invoices 写入。
+    """
+    if not file:
+        raise HTTPException(status_code=400, detail="未提供文件")
+    img_bytes = await file.read()
+    if not img_bytes:
+        raise HTTPException(status_code=400, detail="文件为空")
+    # 限制 10MB
+    if len(img_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件过大(>10MB)")
+    qr_texts = _decode_qr_from_image(img_bytes)
+    if not qr_texts:
+        # 未检测到二维码 - 可能是无二维码图、模糊、遮挡, 或 pyzbar 未安装
+        return R(
+            data={
+                "decoded": False,
+                "qr_texts": [],
+                "parsed": None,
+                "message": "未检测到二维码。请确认图片清晰、二维码无遮挡; 或改用文本粘贴录入。",
+            }
+        )
+    # 取第一个能解析出 invoice_no 的二维码; 否则用第一个文本
+    parsed = None
+    used_text = qr_texts[0]
+    for t in qr_texts:
+        p = parse_qr_invoice(t)
+        if p.get("invoice_no"):
+            parsed = p
+            used_text = t
+            break
+    if parsed is None:
+        parsed = parse_qr_invoice(qr_texts[0])
+    return R(
+        data={
+            "decoded": True,
+            "qr_texts": qr_texts,
+            "used_text": used_text,
+            "parsed": parsed,
+            "filename": file.filename,
+            "content_type": file.content_type,
+            "file_size": len(img_bytes),
+        }
+    )
 
 
 @router.put("/{invoice_id}", response_model=R, summary="更新发票")

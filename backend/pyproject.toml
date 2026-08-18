@@ -26,6 +26,10 @@ dependencies = [
     # ddddocr 1.x 对常见 4-6 位数字/字母混合验证码识别率>95%
     "ddddocr>=1.4.11",
     "onnxruntime>=1.17.0",
+    # 发票二维码图本地解码(规划设计 §4.5 全电发票识别链路)
+    # pyzbar 依赖系统库 libzbar0(Dockerfile apt install libzbar0; mac brew install zbar)
+    "pyzbar>=0.1.9",
+    "pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
