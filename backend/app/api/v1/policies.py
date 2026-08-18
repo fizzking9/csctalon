@@ -93,6 +93,10 @@ def create_policy(payload: dict, db: DBSession, current_user: AdminOrSupervisor)
         "version": payload.get("version"),
         "owner_id": payload.get("owner_id"),
         "remark": payload.get("remark"),
+        "topic_tags": payload.get("topic_tags"),
+        "replaces_policy_id": payload.get("replaces_policy_id"),
+        "replaced_by_policy_id": payload.get("replaced_by_policy_id"),
+        "diagram_urls": payload.get("diagram_urls"),
     }
     for k in _DT_KEYS:
         v = payload.get(k)
@@ -114,7 +118,8 @@ def update_policy(policy_id: int, payload: dict, db: DBSession, current_user: Ad
     if not p:
         raise HTTPException(status_code=404, detail="制度不存在")
     updatable = ("title", "category", "summary", "content", "attachment_urls",
-                 "version", "owner_id", "remark")
+                 "version", "owner_id", "remark", "topic_tags", "replaces_policy_id",
+                 "replaced_by_policy_id", "diagram_urls")
     for k in updatable:
         if k in payload:
             setattr(p, k, payload[k])

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import decode_access_token
-from app.models.user import RoleEnum, User
+from app.models.user import MANAGER_ROLES, RoleEnum, User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_PREFIX if hasattr(settings, 'API_PREFIX') else '/api/v1'}/auth/login", auto_error=False)
 
@@ -66,4 +66,6 @@ def require_role(*roles: RoleEnum):
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminUser = Annotated[User, Depends(require_role(RoleEnum.ADMIN))]
 AdminOrSupervisor = Annotated[User, Depends(require_role(RoleEnum.ADMIN, RoleEnum.SUPERVISOR))]
+# 管理层: 管理员 + 主管 + 专项组长(可看决策看板/管理闭环, 见规划设计 v0.5 §二)
+ManagerUser = Annotated[User, Depends(require_role(*[RoleEnum(r) for r in MANAGER_ROLES]))]
 DBSession = Annotated[Session, Depends(get_db)]

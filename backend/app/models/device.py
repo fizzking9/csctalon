@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Table, Column
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Table, Column, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -16,6 +16,10 @@ device_tag_rel = Table(
     Column("tag_id", Integer, ForeignKey("device_tags.id"), primary_key=True),
     Column("created_at", DateTime(timezone=True), server_default="now()", nullable=False),
     Column("created_by", String(64), nullable=True, comment="打标人"),
+    # v0.5 增强(规划设计 §4.3): 标签批次 + 生命周期
+    Column("batch_id", Integer, nullable=True, comment="来源批次(device_tag_batches.id)"),
+    Column("status", String(16), server_default="active", nullable=False, comment="active/inactive"),
+    Column("expired_at", DateTime(timezone=True), nullable=True, comment="失效时间"),
 )
 
 
@@ -68,3 +72,29 @@ class DeviceTagBinding(Base):
         DateTime(timezone=True), server_default="now()", nullable=False, comment="打标时间"
     )
     created_by: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="打标人")
+    batch_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="来源批次(device_tag_batches.id)")
+    status: Mapped[str] = mapped_column(
+        String(16), server_default="active", nullable=False, comment="active/inactive"
+    )
+    expired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="失效时间"
+    )
+
+
+class DeviceTagBatch(IDMixin, TimestampMixin, Base):
+    """设备专项标签批量导入批次(规划设计 §4.3.1)"""
+
+    __tablename__ = "device_tag_batches"
+
+    batch_no: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True, nullable=False, comment="批次号"
+    )
+    tag_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("device_tags.id"), index=True, nullable=False, comment="打标标签"
+    )
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="批次标题")
+    source_file: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="来源文件名")
+    total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False, comment="提交总数")
+    matched_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False, comment="成功打标数")
+    note: Mapped[str | None] = mapped_column(Text, nullable=True, comment="备注")
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="创建人")

@@ -25,6 +25,13 @@ const routes = [
         component: () => import('@/views/Dashboard.vue'),
         meta: { title: '工作台', icon: 'HomeFilled' },
       },
+      // 我的待办(统一待办中心)
+      {
+        path: 'agenda',
+        name: 'Agenda',
+        component: () => import('@/views/agenda/Agenda.vue'),
+        meta: { title: '我的待办', icon: 'Bell' },
+      },
       // 数据中心
       {
         path: 'data/ingest',
@@ -93,6 +100,18 @@ const routes = [
         name: 'DashboardComplaint',
         component: () => import('@/views/dashboards/DashboardView.vue'),
         meta: { title: '投诉看板', icon: 'Warning', manager: true },
+      },
+      {
+        path: 'dashboards/complaint-analysis',
+        name: 'ComplaintAnalysis',
+        component: () => import('@/views/dashboards/ComplaintAnalysis.vue'),
+        meta: { title: '投诉分析', icon: 'Warning', manager: true },
+      },
+      {
+        path: 'dashboards/complaint-audit',
+        name: 'ComplaintAudit',
+        component: () => import('@/views/dashboards/ComplaintAudit.vue'),
+        meta: { title: '投诉审计', icon: 'Warning', manager: true },
       },
       {
         path: 'dashboards/reception',
@@ -249,6 +268,42 @@ const routes = [
         name: 'ManagementIncidents',
         component: () => import('@/views/management/Incidents.vue'),
         meta: { title: '异常事件', icon: 'Warning', manager: true },
+      },
+      {
+        path: 'management/device-tags',
+        name: 'ManagementDeviceTags',
+        component: () => import('@/views/management/DeviceTags.vue'),
+        meta: { title: '设备专项标签', icon: 'CollectionTag' },
+      },
+      {
+        path: 'management/schedule',
+        name: 'ManagementSchedule',
+        component: () => import('@/views/management/Schedule.vue'),
+        meta: { title: '排班管理', icon: 'Calendar', manager: true },
+      },
+      {
+        path: 'management/invoices',
+        name: 'ManagementInvoices',
+        component: () => import('@/views/management/Invoices.vue'),
+        meta: { title: '发票登记', icon: 'Tickets' },
+      },
+      {
+        path: 'management/kb-articles',
+        name: 'ManagementKbArticles',
+        component: () => import('@/views/management/KbArticles.vue'),
+        meta: { title: '知识库', icon: 'Reading' },
+      },
+      {
+        path: 'management/alerts',
+        name: 'ManagementAlerts',
+        component: () => import('@/views/management/Alerts.vue'),
+        meta: { title: '预警中心', icon: 'AlarmClock', manager: true },
+      },
+      {
+        path: 'management/upstream-tickets',
+        name: 'ManagementUpstreamTickets',
+        component: () => import('@/views/management/UpstreamTickets.vue'),
+        meta: { title: '跨部门协作', icon: 'Connection', manager: true },
       },
       {
         path: 'management/registry',

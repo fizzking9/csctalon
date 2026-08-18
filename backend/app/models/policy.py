@@ -60,3 +60,10 @@ class Policy(IDMixin, TimestampMixin, Base):
     view_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False, comment="查阅次数")
     created_by: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="创建人")
     remark: Mapped[str | None] = mapped_column(Text, nullable=True, comment="备注/调整记录")
+    # ---- v0.5 增强(规划设计 §4.4) ----
+    topic_tags: Mapped[list | None] = mapped_column(JSONB, nullable=True, comment="主题/关联内容标签")
+    replaces_policy_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="替代的政策ID(self-FK,政策演进链)"
+    )
+    replaced_by_policy_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="被哪条新政策替代(冗余)")
+    diagram_urls: Mapped[list | None] = mapped_column(JSONB, nullable=True, comment="示意图URL列表")

@@ -26,6 +26,12 @@
           <span>工作台</span>
         </el-menu-item>
 
+        <!-- 2.5 我的待办(统一待办中心, 全员可见) -->
+        <el-menu-item index="/agenda">
+          <el-icon><Bell /></el-icon>
+          <span>我的待办</span>
+        </el-menu-item>
+
         <!-- 3. 决策看板:管理层可见, 专项深入分析透视(退款/投诉/接待/提现全链路/绩效/专项跟进) -->
         <el-sub-menu v-if="authStore.isManager" index="dashboards">
           <template #title>
@@ -34,6 +40,8 @@
           </template>
           <el-menu-item index="/dashboards/refund">退款看板</el-menu-item>
           <el-menu-item index="/dashboards/complaint">投诉看板</el-menu-item>
+          <el-menu-item index="/dashboards/complaint-analysis">投诉分析</el-menu-item>
+          <el-menu-item index="/dashboards/complaint-audit">投诉审计</el-menu-item>
           <el-menu-item index="/dashboards/reception">接待看板</el-menu-item>
           <el-menu-item index="/dashboards/refund-withdrawal">退款-提现全链路看板</el-menu-item>
           <el-menu-item index="/dashboards/performance">绩效看板</el-menu-item>
@@ -62,6 +70,21 @@
         <el-menu-item index="/tasks">
           <el-icon><List /></el-icon>
           <span>专项任务</span>
+        </el-menu-item>
+
+        <el-menu-item index="/management/device-tags">
+          <el-icon><CollectionTag /></el-icon>
+          <span>设备专项标签</span>
+        </el-menu-item>
+
+        <el-menu-item index="/management/invoices">
+          <el-icon><Tickets /></el-icon>
+          <span>发票登记</span>
+        </el-menu-item>
+
+        <el-menu-item index="/management/kb-articles">
+          <el-icon><Reading /></el-icon>
+          <span>知识库</span>
         </el-menu-item>
 
         <!-- 策略发布:管理层看子菜单(管理+查阅),客服只看发布页 -->
@@ -94,6 +117,9 @@
           <el-menu-item index="/management/weekly">周报看板</el-menu-item>
           <el-menu-item index="/management/measures">管理措施</el-menu-item>
           <el-menu-item index="/management/incidents">异常事件</el-menu-item>
+          <el-menu-item index="/management/schedule">排班管理</el-menu-item>
+          <el-menu-item index="/management/alerts">预警中心</el-menu-item>
+          <el-menu-item index="/management/upstream-tickets">跨部门协作</el-menu-item>
           <el-menu-item index="/management/templates">看板模板</el-menu-item>
         </el-sub-menu>
 
@@ -186,7 +212,7 @@ const isCollapse = ref(false)
 const activeMenu = computed(() => route.path)
 const currentTitle = computed(() => route.meta.title || '')
 const roleLabel = computed(() => {
-  const map = { admin: '管理员', supervisor: '主管', agent: '客服' }
+  const map = { admin: '系统管理员', supervisor: '主管', specialty_lead: '专项组长', specialist: '专员', agent: '普通客服' }
   return map[authStore.role] || ''
 })
 

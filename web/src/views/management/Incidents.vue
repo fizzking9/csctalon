@@ -80,6 +80,21 @@
         <el-form-item label="影响">
           <el-input v-model="form.impact" type="textarea" :rows="2" placeholder="量化:工单增量/涉及金额/影响人数" />
         </el-form-item>
+        <el-form-item label="来源/类型">
+          <el-select v-model="form.category" placeholder="选择来源部门" clearable style="width: 100%">
+            <el-option v-for="c in categoryOptions" :key="c" :label="c" :value="c" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="涉及部门">
+          <el-input v-model="form.department" placeholder="涉及部门(单选)" />
+        </el-form-item>
+        <el-form-item label="严重程度">
+          <el-radio-group v-model="form.severity">
+            <el-radio-button label="高" />
+            <el-radio-button label="中" />
+            <el-radio-button label="低" />
+          </el-radio-group>
+        </el-form-item>
         <el-form-item label="明细描述">
           <el-input v-model="form.detail" type="textarea" :rows="3" />
         </el-form-item>
@@ -112,6 +127,28 @@
         </el-descriptions-item>
         <el-descriptions-item label="复盘结论">{{ current.review_note || '-' }}</el-descriptions-item>
       </el-descriptions>
+
+      <el-divider content-position="left">跟进记录</el-divider>
+      <el-timeline v-if="followups.length" style="max-height: 240px; overflow-y: auto">
+        <el-timeline-item
+          v-for="f in followups"
+          :key="f.id"
+          :timestamp="formatTime(f.created_at)"
+          :type="f.status_change ? 'primary' : ''"
+        >
+          <div>{{ f.content }}</div>
+          <div v-if="f.status_change" class="followup-status">状态变更: {{ f.status_change }}</div>
+          <div class="followup-author">{{ f.created_by || '-' }}</div>
+        </el-timeline-item>
+      </el-timeline>
+      <el-empty v-else description="暂无跟进记录" :image-size="40" />
+      <div class="mt-8">
+        <el-input v-model="followupInput" placeholder="一句话跟进(可选状态变更)" @keyup.enter="handleAddFollowup">
+          <template #append>
+            <el-button :loading="submitting" @click="handleAddFollowup">跟进</el-button>
+          </template>
+        </el-input>
+      </div>
     </el-dialog>
 
     <!-- 转预期对话框 -->
@@ -136,7 +173,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
-import { listIncidents, createIncident, convertIncident, deleteIncident } from '@/api/incident'
+import { listIncidents, createIncident, convertIncident, deleteIncident, listFollowups, addFollowup } from '@/api/incident'
 import dayjs from 'dayjs'
 
 const list = ref([])
@@ -151,13 +188,16 @@ const submitting = ref(false)
 const current = ref(null)
 const form = reactive(emptyForm())
 const convertForm = reactive({ review_note: '' })
+const followups = ref([])
+const followupInput = ref('')
 
 const statusMap = { registered: '登记', processing: '处理中', calmed: '已平息', reviewed: '已复盘' }
 const statusType = (s) => ({ registered: 'danger', processing: 'warning', calmed: 'info', reviewed: 'success' }[s] || 'info')
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-')
+const categoryOptions = ['生产', '运营', '商务部', '店铺', '系统平台开发', '其他服务商']
 
 function emptyForm() {
-  return { title: '', subject: '', occurred_at: null, duration_minutes: null, impact: '', detail: '', ticketsInput: '' }
+  return { title: '', subject: '', occurred_at: null, duration_minutes: null, impact: '', detail: '', ticketsInput: '', category: '', department: '', severity: '中' }
 }
 
 async function loadData() {
@@ -204,6 +244,9 @@ async function handleCreate() {
       impact: form.impact || null,
       detail: form.detail || null,
       related_tickets: tickets.length ? tickets : null,
+      category: form.category || null,
+      department: form.department || null,
+      severity: form.severity || '中',
     })
     ElMessage.success('登记成功')
     dialogVisible.value = false
@@ -213,9 +256,34 @@ async function handleCreate() {
   }
 }
 
-function openDetail(row) {
+async function openDetail(row) {
   current.value = row
+  followups.value = []
+  followupInput.value = ''
   detailVisible.value = true
+  try {
+    const res = await listFollowups(row.id)
+    followups.value = res.data || []
+  } catch (e) {
+    followups.value = []
+  }
+}
+
+async function handleAddFollowup() {
+  if (!followupInput.value.trim()) {
+    ElMessage.warning('请输入跟进内容')
+    return
+  }
+  submitting.value = true
+  try {
+    await addFollowup(current.value.id, { content: followupInput.value })
+    followupInput.value = ''
+    ElMessage.success('已跟进')
+    const res = await listFollowups(current.value.id)
+    followups.value = res.data || []
+  } finally {
+    submitting.value = false
+  }
 }
 
 function openConvert(row) {
@@ -257,5 +325,16 @@ onMounted(loadData)
 }
 .mb-16 {
   margin-bottom: 16px;
+}
+.mt-8 {
+  margin-top: 8px;
+}
+.followup-status {
+  font-size: 12px;
+  color: #409eff;
+}
+.followup-author {
+  font-size: 12px;
+  color: #909399;
 }
 </style>
