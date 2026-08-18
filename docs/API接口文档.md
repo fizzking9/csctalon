@@ -38,6 +38,8 @@
 | SCRM聊天 | `/scrm-chat-records` | scrm_chat.py | SCRM聊天记录 |
 | 操作日志 | `/operation-logs` | operation_logs.py | 操作审计 |
 | 系统 | `/system` | system.py | 系统配置 |
+| 微信 | `/wechat` | wechat.py | 扫码注册/登录/审批 |
+| 小程序 | `/miniapp` | miniapp.py | 精简看板/采集触发 |
 
 ## 二、核心接口详情
 
@@ -136,6 +138,33 @@
 | DELETE | `/analysis-views/{id}` | 删除视图 |
 | POST | `/analysis-views/{id}/render` | 渲染视图 |
 | GET | `/analysis-views/rules` | 分类规则列表 |
+
+### 2.9 微信 `/wechat`
+
+扫码注册与小程序登录（`code-login` 无需 JWT，其余审批接口需管理员权限）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/wechat/auth/code-login` | 微信 code 登录/自动创建待审批申请（返回 `status`：`approved`/`pending`；approved 时返回 JWT） |
+| POST | `/wechat/auth/register` | 提交注册资料（pending 等待审批） |
+| GET | `/wechat/registrations/pending` | 管理员：待审批注册列表（`?status=` 可筛选） |
+| POST | `/wechat/registrations/{id}/approve` | 管理员：审批通过（创建 User + 绑定 WechatAccount）或驳回 |
+
+- `code-login` 流程：`wx.login()` 取 code → 后端 `code2session` 换 openid/unionid：
+  - 已绑定 `WechatAccount` → 直接返回 JWT；
+  - 存在 pending 申请 → 返回 `registration_id` 引导等待；
+  - 首次扫码 → 创建 pending 申请并返回 `registration_id`。
+- 本地开发未配置 `WECHAT_APPID/WECHAT_SECRET` 时，`code` 作为 `mock-` 前缀 openid 使用。
+
+### 2.10 小程序 `/miniapp`
+
+小程序精简看板与数据采集触发（需 JWT，前端经 `code-login` 获取）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/miniapp/summary` | 精简看板摘要（今日 KPI + 退款挽回专项，复用 `today:*` 缓存），任意登录用户 |
+| GET | `/miniapp/sync/status` | 查询当前采集任务进度，仅管理员 |
+| POST | `/miniapp/sync/trigger` | 超级管理员启动数据采集（BMS+SCRM 并发，`time_range`：`incremental`/`today`），仅管理员 |
 
 ## 三、通用约定
 

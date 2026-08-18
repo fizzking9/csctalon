@@ -445,7 +445,8 @@ class BmsScheduler:
             biz_key: 业务日期字符串(YYYY-MM-DD),专项熔断集合归属的日期;
                      None 时按 now 即时推导
 
-        同一时间窗口内串行跑: BMS sync_all → SCRM sync_scrm_all
+        同一时间窗口内并发跑: BMS sync_all 与 SCRM sync_scrm_all 各自 runner,
+        经 asyncio.gather 并发执行(冷却期间穿插其他数据源)。
         """
         reason = f" [{why}]" if why else ""
         TZ_CN = timezone(timedelta(hours=8))
@@ -520,10 +521,12 @@ class BmsScheduler:
             f" mode={'前一天全量(忽略熔断)' if yesterday_full_sync else '白天增量(专项级过滤)'})"
         )
 
-        async def runner(task_id: str, on_progress_cb):
-            combined = []
-            # ── 1) BMS 子任务 ──
-            if sync_types_bms:
+        # ── 并发子任务: BMS 与 SCRM 各自独立 runner, 经 asyncio.gather 并发执行 ──
+        # 目的: BMS 内部同域 1 分钟下载间隔冷却 sleep 期间, SCRM(不同域)可继续抓取,
+        #       实现「冷却期间穿插其他数据源」, 缩短整体同步总耗时。
+        runners: list = []
+        if sync_types_bms:
+            async def bms_runner(task_id: str, on_progress_cb):
                 logger.info(f"[定时同步{reason}] ▶▶▶ BMS 子任务开始: data_types={sync_types_bms}")
                 try:
                     bms_res = await sync_all(
@@ -533,17 +536,20 @@ class BmsScheduler:
                         data_types=sync_types_bms,
                         time_ranges=time_ranges_bms_dt,
                     )
-                    combined.extend(bms_res if isinstance(bms_res, list) else [])
-                    ok_n = sum(1 for r in (bms_res or []) if isinstance(r, dict) and r.get("success"))
+                    res = bms_res if isinstance(bms_res, list) else []
+                    ok_n = sum(1 for r in res if isinstance(r, dict) and r.get("success"))
                     logger.info(
                         f"[定时同步{reason}] ◀◀◀ BMS 子任务完成: "
                         f"{ok_n}/{len(sync_types_bms)} 成功"
                     )
+                    return res
                 except Exception as e:  # noqa: BLE001
                     logger.exception(f"[定时同步{reason}] ◀◀◀ BMS 子任务异常(全标失败): {e}")
-                    combined.extend([{"data_type": dt, "success": False, "error": str(e)} for dt in sync_types_bms])
-            # ── 2) SCRM 子任务 ──
-            if sync_types_scrm:
+                    return [{"data_type": dt, "success": False, "error": str(e)} for dt in sync_types_bms]
+            runners.append(bms_runner)
+
+        if sync_types_scrm:
+            async def scrm_runner(task_id: str, on_progress_cb):
                 logger.info(f"[定时同步{reason}] ▶▶▶ SCRM 子任务开始: data_types={sync_types_scrm}")
                 try:
                     scrm_res = await sync_scrm_all(
@@ -552,34 +558,27 @@ class BmsScheduler:
                         on_progress=on_progress_cb,
                         sync_types=sync_types_scrm,
                     )
-                    combined.extend(scrm_res if isinstance(scrm_res, list) else [])
-                    ok_n = sum(1 for r in (scrm_res or []) if isinstance(r, dict) and r.get("success"))
+                    res = scrm_res if isinstance(scrm_res, list) else []
+                    ok_n = sum(1 for r in res if isinstance(r, dict) and r.get("success"))
                     logger.info(
                         f"[定时同步{reason}] ◀◀◀ SCRM 子任务完成: "
                         f"{ok_n}/{len(sync_types_scrm)} 成功"
                     )
+                    return res
                 except Exception as e:  # noqa: BLE001
                     logger.exception(f"[定时同步{reason}] ◀◀◀ SCRM 子任务异常(全标失败): {e}")
-                    combined.extend([{"data_type": dt, "success": False, "error": str(e)} for dt in sync_types_scrm])
-            total_ok = sum(1 for r in combined if isinstance(r, dict) and r.get("success"))
-            logger.info(
-                f"[定时同步{reason}] 全部子任务结束: {total_ok}/{len(combined)} 成功"
-                + (
-                    f", failures={[(r.get('data_type'), r.get('error')) for r in combined if isinstance(r, dict) and not r.get('success')]}"
-                    if total_ok != len(combined) else ""
-                )
-            )
-            return combined
+                    return [{"data_type": dt, "success": False, "error": str(e)} for dt in sync_types_scrm]
+            runners.append(scrm_runner)
 
         task_id: str | None = None
         try:
-            task_id, msg = await sync_task_manager.submit(
+            task_id, msg = await sync_task_manager.submit_multi(
                 trigger_type="scheduled",
                 triggered_by="scheduler",
                 data_types=all_types,
                 time_ranges={**time_ranges_bms_dt},
                 time_ranges_display=time_ranges_display,
-                runner_coro=runner,
+                runners=runners,
                 ignore_cooldown=True,
             )
             logger.info(f"[定时同步{reason}] 已提交: task_id={task_id}, {msg}")

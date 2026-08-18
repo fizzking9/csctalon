@@ -1,6 +1,6 @@
 <template>
   <el-container class="layout-container">
-    <el-aside :width="isCollapse ? '64px' : '220px'" class="aside">
+    <el-aside v-if="!isMobile" :width="isCollapse ? '64px' : '220px'" class="aside">
       <div class="logo">
         <el-icon :size="24"><Monitor /></el-icon>
         <span v-show="!isCollapse" class="logo-text">客服中心管理</span>
@@ -48,20 +48,7 @@
           <el-menu-item index="/dashboards/special">专项跟进</el-menu-item>
         </el-sub-menu>
 
-        <!-- 4. 数据中心 -->
-        <el-sub-menu index="data">
-          <template #title>
-            <el-icon><FolderOpened /></el-icon>
-            <span>数据中心</span>
-          </template>
-          <el-menu-item index="/data/ingest">数据采集</el-menu-item>
-          <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
-          <el-menu-item index="/analytics/views">分析视图</el-menu-item>
-          <el-menu-item index="/audit/device">设备审计</el-menu-item>
-          <el-menu-item index="/audit/person">人员审计</el-menu-item>
-          <el-menu-item v-if="authStore.isAdmin || authStore.isSupervisor" index="/dashboards/designer">看板配置</el-menu-item>
-        </el-sub-menu>
-
+        <!-- 设备/人员时序审计:业务功能(从退款看板-人员/设备分析「时序」跳转),不进入主菜单 -->
         <el-menu-item index="/todos">
           <el-icon><Bell /></el-icon>
           <span>事项跟进</span>
@@ -131,6 +118,10 @@
           </template>
           <el-menu-item index="/system/users">用户管理</el-menu-item>
           <el-menu-item index="/system/persons">人员管理</el-menu-item>
+          <el-menu-item index="/data/ingest">数据采集</el-menu-item>
+          <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
+          <el-menu-item index="/analytics/views">视图清单</el-menu-item>
+          <el-menu-item index="/dashboards/designer">看板配置</el-menu-item>
           <el-menu-item index="/system/classification-rules">分类规则</el-menu-item>
           <el-menu-item index="/system/data-quality">数据质量</el-menu-item>
           <el-menu-item index="/system/operation-logs">操作日志</el-menu-item>
@@ -141,12 +132,15 @@
     <el-container>
       <el-header class="header">
         <div class="header-left">
-          <el-icon class="collapse-btn" @click="isCollapse = !isCollapse">
+          <el-icon v-if="!isMobile" class="collapse-btn" @click="isCollapse = !isCollapse">
             <Fold v-if="!isCollapse" />
             <Expand v-else />
           </el-icon>
+          <el-icon v-else class="collapse-btn" @click="mobileMenuOpen = true">
+            <Menu />
+          </el-icon>
           <el-breadcrumb separator="/">
-            <el-breadcrumb-item :to="{ path: '/dashboard' }">首页</el-breadcrumb-item>
+            <el-breadcrumb-item v-if="!isMobile" :to="{ path: '/dashboard' }">首页</el-breadcrumb-item>
             <el-breadcrumb-item>{{ currentTitle }}</el-breadcrumb-item>
           </el-breadcrumb>
         </div>
@@ -154,8 +148,8 @@
           <el-dropdown @command="handleCommand">
             <span class="user-info">
               <el-icon><UserFilled /></el-icon>
-              {{ authStore.displayName }}
-              <el-tag size="small" type="info" effect="plain" style="margin-left: 6px">
+              <span class="user-name">{{ authStore.displayName }}</span>
+              <el-tag class="role-tag" size="small" type="info" effect="plain">
                 {{ roleLabel }}
               </el-tag>
             </span>
@@ -198,6 +192,38 @@
       </el-main>
     </el-container>
   </el-container>
+
+  <!-- 移动端抽屉菜单(仅开放: 今日看板 / 运营看板 / 数据采集[管理员]) -->
+  <el-drawer
+    v-model="mobileMenuOpen"
+    direction="ltr"
+    size="72%"
+    :with-header="false"
+    class="mobile-drawer"
+  >
+    <div class="mobile-menu">
+      <div class="mobile-menu-user">
+        <el-icon><UserFilled /></el-icon>
+        <span class="mobile-menu-name">{{ authStore.displayName }}</span>
+        <el-tag size="small" type="info" effect="plain">{{ roleLabel }}</el-tag>
+      </div>
+      <el-menu :default-active="activeMenu" router @select="mobileMenuOpen = false">
+        <el-menu-item index="/dashboards/today">
+          <el-icon><DataLine /></el-icon>
+          <span>今日看板</span>
+        </el-menu-item>
+        <el-menu-item index="/dashboards/operation">
+          <el-icon><TrendCharts /></el-icon>
+          <span>运营看板</span>
+        </el-menu-item>
+        <el-menu-item v-if="authStore.isAdmin" index="/data/ingest">
+          <el-icon><Upload /></el-icon>
+          <span>数据采集</span>
+        </el-menu-item>
+      </el-menu>
+      <el-button type="danger" plain class="mobile-logout" @click="logout">退出登录</el-button>
+    </div>
+  </el-drawer>
 </template>
 
 <script setup>
@@ -210,6 +236,8 @@ const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 const isCollapse = ref(false)
+const isMobile = ref(false)
+const mobileMenuOpen = ref(false)
 
 const activeMenu = computed(() => route.path)
 const currentTitle = computed(() => route.meta.title || '')
@@ -232,6 +260,11 @@ const rawSync = reactive({
 })
 
 let _pollTimer = null
+let _mq = null
+
+function _onMediaChange(e) {
+  isMobile.value = e.matches
+}
 
 async function _pollSyncOnce() {
   try {
@@ -285,21 +318,32 @@ const syncBanner = computed(() => {
 })
 
 onMounted(() => {
+  _mq = window.matchMedia('(max-width: 768px)')
+  isMobile.value = _mq.matches
+  _mq.addEventListener('change', _onMediaChange)
   _pollSyncOnce()
   _pollTimer = setInterval(_pollSyncOnce, SYNC_POLL_MS)
 })
 
 onBeforeUnmount(() => {
+  if (_mq) {
+    _mq.removeEventListener('change', _onMediaChange)
+    _mq = null
+  }
   if (_pollTimer) {
     clearInterval(_pollTimer)
     _pollTimer = null
   }
 })
 
+async function logout() {
+  await authStore.logout()
+  router.push('/login')
+}
+
 async function handleCommand(cmd) {
   if (cmd === 'logout') {
-    await authStore.logout()
-    router.push('/login')
+    await logout()
   }
 }
 </script>
@@ -376,5 +420,60 @@ async function handleCommand(cmd) {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+/* 角色标签(桌面端头部用户信息) */
+.role-tag {
+  margin-left: 6px;
+}
+
+/* 移动端抽屉菜单 */
+.mobile-drawer :deep(.el-drawer__body) {
+  padding: 0;
+}
+.mobile-menu {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.mobile-menu-user {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px;
+  border-bottom: 1px solid #eee;
+}
+.mobile-menu-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.mobile-menu :deep(.el-menu) {
+  border-right: none;
+}
+.mobile-logout {
+  margin: auto 16px 16px;
+}
+
+/* 移动端响应式(<768px) */
+@media (max-width: 768px) {
+  .header {
+    padding: 0 8px;
+  }
+  .header-left {
+    gap: 8px;
+  }
+  .user-name,
+  .role-tag {
+    display: none;
+  }
+  .main {
+    padding: 8px;
+  }
+  .sync-banner {
+    margin: 0 8px;
+  }
 }
 </style>

@@ -45,4 +45,7 @@ class User(IDMixin, TimestampMixin, Base):
     # JWT 吊销版本号(M7): 签发 token 时写入 tkv, 校验时与该值比对;
     # 改密/登出时 +1, 使所有已签发 token 立即失效。0=初始。
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0", comment="JWT吊销版本号")
+    # 微信侧: 便于扫码登录时快速查询 (openid/unionid 真正的多对多关系见 WechatAccount)
+    wechat_openid: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="绑定的主微信 openid")
+    wechat_unionid: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="绑定的主微信 unionid")
 

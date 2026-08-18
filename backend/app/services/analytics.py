@@ -6813,6 +6813,49 @@ def refund_recovery_analysis(
         -(x.get("success_rate") or -1),       # 再次: 成功率降序
     ))
 
+    # ---- 5b. SN 明细 (供前端折叠/表格展示) ----
+    #   每个 SN 一行: 设备SN / 结果(成功/失败) / 处理人 / 退款原因 / 首次接待时间 / 金额
+    sn_details: list[dict] = []
+    sn_result_map: dict[str, str] = {}
+    for sn in global_host_sns:
+        sn_result_map[sn] = "failed" if sn in global_fail_sns else "success"
+    # 按 (staff, sn) 聚合: 每人只保留自己接待过的 SN, 避免重复展示
+    for op, info in staff_operators.items():
+        cs_host = op_host_sns.get(op, set())
+        op_display = info.get("name") or op
+        op_group = info.get("group") or "未分组"
+        for sn in cs_host:
+            result = sn_result_map.get(sn, "success")
+            reason = sn_host_reason.get(sn) or ""
+            ftime = sn_first_op_time.get(sn)
+            fmeta = sn_failed_meta.get(sn, {}) if result == "failed" else {}
+            amount = float(fmeta.get("amount") or 0) if result == "failed" else 0.0
+            status = (fmeta.get("status") or "") if result == "failed" else ""
+            src = (fmeta.get("src") or "") if result == "failed" else ""
+            sn_details.append({
+                "sn": sn,
+                "result": result,
+                "staff": op_display,
+                "staff_group": op_group,
+                "reason": reason,
+                "time": ftime.isoformat() if ftime else None,
+                "amount": round(amount, 2),
+                "status": status,
+                "src": src,
+            })
+    # 按结果 + 时间排序 (最新在前)
+    sn_details.sort(key=lambda x: (
+        0 if x["result"] == "failed" else 1,
+        -(x["time"] and _dt.datetime.fromisoformat(x["time"]).timestamp() or 0),
+    ))
+
+    # ---- 5c. 将 sn_list 回填到 staff_detail, 供"每人展开查看SN明细" ----
+    op_sn_list_map: dict[str, list] = {}
+    for sd in sn_details:
+        op_sn_list_map.setdefault(sd["staff"], []).append(sd)
+    for row in staff_detail:
+        row["sn_list"] = op_sn_list_map.get(row["name"], [])
+
     # ---- 6. 总体 KPI ----
     total_host = len(global_host_sns)
     total_fail = len(global_fail_sns)
@@ -7282,6 +7325,8 @@ def refund_recovery_analysis(
         "wish_reason_dist": wish_reason_dist,
         "success_reason_dist": success_reason_dist,
         "staff_detail": staff_detail,
+        "staff_details": staff_detail,  # 兼容前端两种命名
+        "sn_details": sn_details,
         "weekly_trend": weekly_trend,
         "daily_reason": daily_reason,
         "daily_trend": daily_trend,

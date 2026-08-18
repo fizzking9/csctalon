@@ -313,6 +313,48 @@ class SyncTaskManager:
 
         return task_id, "任务已提交,可通过 /fetch/task/status 轮询进度"
 
+    async def submit_multi(
+        self,
+        trigger_type: str,
+        triggered_by: str,
+        data_types: list[str],
+        time_ranges: dict[str, tuple[datetime, datetime]],
+        time_ranges_display: dict[str, tuple[str, str]],
+        runners: list,
+        force: bool = False,
+        ignore_cooldown: bool = False,
+    ) -> tuple[str, str]:
+        """提交并发多 runner 任务(冷却期间穿插其他数据源)。
+
+        BMS 与 SCRM 等相互独立的数据源拆成多个 runner 后通过 asyncio.gather
+        并发执行: 当 BMS 内部因「同域 1 分钟下载间隔」冷却 sleep 时, SCRM(不同域)
+        的抓取可继续推进, 显著缩短整体同步耗时。结果自动合并为 list[dict]。
+        """
+        async def combined_runner(task_id: str, on_progress_cb) -> list[dict]:
+            gathered = await asyncio.gather(
+                *[r(task_id, on_progress_cb) for r in runners],
+                return_exceptions=True,
+            )
+            combined: list[dict] = []
+            for res in gathered:
+                if isinstance(res, BaseException):
+                    logger.error(f"[SyncTask:{task_id}] 并发子 runner 异常: {res}")
+                    combined.append({"success": False, "error": str(res)[:500]})
+                elif isinstance(res, list):
+                    combined.extend(res)
+            return combined
+
+        return await self.submit(
+            trigger_type=trigger_type,
+            triggered_by=triggered_by,
+            data_types=data_types,
+            time_ranges=time_ranges,
+            time_ranges_display=time_ranges_display,
+            runner_coro=combined_runner,
+            force=force,
+            ignore_cooldown=ignore_cooldown,
+        )
+
     async def _run_background(self, task: SyncTask, runner_coro, on_progress):
         try:
             results = await runner_coro(task.task_id, on_progress)
@@ -336,6 +378,14 @@ class SyncTaskManager:
             async with self._lock:
                 self._executing = False
                 # _current_task 保留到下一个任务开始前,方便查询
+            # 缓存失效兜底: 同步完成后统一失效分析看板缓存 (含 BMS/SCRM 并发合并任务),
+            # 避免同步后仍读到旧聚合结果。
+            try:
+                from app.core.redis_client import cache_invalidate_pattern
+                for pat in ("today:*", "refund:*"):
+                    cache_invalidate_pattern(pat)
+            except Exception as ce:  # noqa: BLE001
+                logger.debug(f"缓存失效兜底失败(不影响同步): {ce}")
 
     async def _on_progress(self, task_id: str, data_type: str, phase: str, data: Any):
         """进度回调写入 task 状态"""

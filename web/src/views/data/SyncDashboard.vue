@@ -529,24 +529,35 @@
       <div class="sync-right-sticky">
         <el-card shadow="hover" class="right-card">
           <template #header>
-            <div class="flex justify-between items-center">
-              <div class="flex items-center gap-8">
+            <div class="sync-header-row">
+              <!-- 左侧:标题 + 任务ID -->
+              <div class="sync-header-title">
                 <el-icon size="16" color="#409eff"><DataAnalysis /></el-icon>
                 <span class="right-title"><b>同步日志</b></span>
                 <span v-if="runningTask" class="task-id dim">#{{ runningTask.task_id }}</span>
               </div>
-              <span v-if="runningTask" class="dim">
+
+              <!-- 右侧:状态 + 进度条 + 文字 单行紧凑展示 -->
+              <div v-if="runningTask" class="sync-header-progress">
                 <el-tag
                   size="small"
                   effect="dark"
                   :type="runningTask.status === 'success' ? 'success' : runningTask.status === 'failed' ? 'danger' : 'warning'"
+                  class="status-tag"
                 >{{ runningStatusLabel(runningTask.status) }}</el-tag>
-                <span class="ml-4 task-meta">{{ runningTask.done_sources }}/{{ runningTask.total_sources }}</span>
-                <span v-if="runningTask.current_source" class="ml-4">
-                  · <b>{{ dsName(runningTask.current_source) }}</b>
+                <el-progress
+                  class="inline-progress"
+                  :percentage="runningTask.percent || 0"
+                  :stroke-width="8"
+                  :show-text="false"
+                  :status="runningTask.status === 'success' ? 'success' : runningTask.status === 'failed' ? 'exception' : undefined"
+                />
+                <span class="progress-text">
+                  <b>{{ runningTask.done_sources }}/{{ runningTask.total_sources }}</b>
+                  <span v-if="runningTask.current_source"> · {{ dsName(runningTask.current_source) }}</span>
                   <span v-if="runningTask.current_phase"> · {{ runningTask.current_phase }}</span>
                 </span>
-              </span>
+              </div>
               <span v-else class="dim">等待任务…所有操作会按顺序追加在这里</span>
             </div>
           </template>
@@ -1699,6 +1710,10 @@ function formatTime(iso) {
 .panel-inner {
   padding: 16px 12px 8px 4px;
 }
+.sync-left :deep(.el-radio-group) {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
 .sync-right {
   flex: 0 0 540px;
   max-width: 540px;
@@ -1709,6 +1724,22 @@ function formatTime(iso) {
 @media (max-width: 1200px) {
   .sync-layout { flex-direction: column; }
   .sync-right { flex: 0 0 auto; max-width: 100%; width: 100%; }
+}
+@media (max-width: 768px) {
+  /* 列布局下取消 sticky,避免右栏日志遮挡上方左栏内容 */
+  .sync-right-sticky { position: static; }
+  .right-log-stream {
+    max-height: 320px;
+    min-height: 200px;
+  }
+  .sync-header-row { flex-wrap: wrap; }
+  .sync-header-progress { flex: 1 1 100%; }
+  .panel-inner { padding: 12px 4px 8px; }
+  /* el-descriptions 三列 → 单列堆叠,避免窄屏挤压 */
+  .sync-left :deep(.el-descriptions__table),
+  .sync-left :deep(.el-descriptions__table tbody) { display: block; }
+  .sync-left :deep(.el-descriptions__table tr) { display: flex; flex-wrap: wrap; }
+  .sync-left :deep(.el-descriptions__cell) { flex: 1 1 100%; box-sizing: border-box; }
 }
 
 /* 右栏 sticky */
@@ -1732,6 +1763,51 @@ function formatTime(iso) {
   overflow-y: auto;
 }
 .right-title { font-size: 14px; }
+
+/* 顶部单行进度条: 紧凑, 不挤占垂直空间 */
+.sync-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+.sync-header-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.sync-header-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.sync-header-progress .status-tag { flex-shrink: 0; }
+.sync-header-progress .inline-progress {
+  flex: 0 0 90px;
+  margin: 0;
+}
+.sync-header-progress .inline-progress :deep(.el-progress-bar__outer) {
+  background-color: #f0f2f5;
+  border-radius: 4px;
+}
+.sync-header-progress .progress-text {
+  font-size: 12px;
+  color: #606266;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+}
+.sync-header-progress .progress-text b { color: #303133; font-weight: 600; }
+@media (max-width: 1400px) {
+  .sync-header-progress .inline-progress { flex-basis: 70px; }
+  .sync-header-progress .progress-text { font-size: 11px; }
+}
 
 /* 结果汇总:底部单行文字,不再弹一堆 tag */
 .right-result-summary {
@@ -1843,7 +1919,7 @@ function formatTime(iso) {
 .link { color: var(--el-color-primary); text-decoration: underline; }
 .credential-group { white-space: nowrap; }
 .range-list { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-.range-item { display: flex; gap: 10px; align-items: baseline; }
+.range-item { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
 .range-chip {
   display: inline-block;
   padding: 1px 6px;
