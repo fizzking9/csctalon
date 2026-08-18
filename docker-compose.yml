@@ -59,6 +59,9 @@ services:
     command: ["gunicorn", "app.main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "900", "--log-level", "info"]
     env_file:
       - .env
+    # ENV 是 dsh 保留变量, 不能在 .env 中声明; 此处显式注入以维持生产 fail-fast 校验
+    environment:
+      - ENV=prod
     volumes:
       - ./backend/uploads:/app/uploads
       - ./data/browser_states:/app/data/browser_states   # Playwright 登录态(独立于 uploads, 不被静态挂载暴露)
