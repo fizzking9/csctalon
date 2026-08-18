@@ -53,6 +53,7 @@ from app.models.todo import TodoFollowup, TodoItem  # noqa: F401
 from app.models.upload import DataMatchRelation, UploadRecord  # noqa: F401
 from app.models.upstream_ticket import UpstreamTicket  # noqa: F401
 from app.models.user import RoleEnum, User  # noqa: F401
+from app.models.wechat import RegisterSource, RegisterStatus, WechatAccount, WechatRegistration  # noqa: F401
 from app.models.wallet import WalletWithdrawal  # noqa: F401
 from app.models.weekly_report import WeeklyReport, WeeklyReportStatus  # noqa: F401
 from app.models.weekly_section_binding import WeeklySectionBinding  # noqa: F401
@@ -123,6 +124,10 @@ __all__ = [
     "DataMatchRelation",
     "User",
     "RoleEnum",
+    "WechatRegistration",
+    "WechatAccount",
+    "RegisterStatus",
+    "RegisterSource",
     "TodoItem",
     "TodoFollowup",
     "UpstreamTicket",

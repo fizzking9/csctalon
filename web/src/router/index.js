@@ -17,7 +17,13 @@ const routes = [
         path: 'dashboards/today',
         name: 'DashboardToday',
         component: () => import('@/views/dashboards/Today.vue'),
-        meta: { title: '运营看板', icon: 'DataLine' },
+        meta: { title: '今日看板', icon: 'DataLine' },
+      },
+      {
+        path: 'dashboards/operation',
+        name: 'DashboardOperation',
+        component: () => import('@/views/dashboards/OperationDashboard.vue'),
+        meta: { title: '运营看板', icon: 'TrendCharts' },
       },
       {
         path: 'dashboard',
@@ -37,7 +43,7 @@ const routes = [
         path: 'data/ingest',
         name: 'DataIngest',
         component: () => import('@/views/data/Ingest.vue'),
-        meta: { title: '数据采集', icon: 'Upload' },
+        meta: { title: '数据采集', icon: 'Upload', admin: true },
       },
       // 兼容旧路径
       { path: 'data/upload', redirect: '/data/ingest?tab=upload' },
@@ -67,13 +73,13 @@ const routes = [
         path: 'analytics/views',
         name: 'AnalyticsViews',
         component: () => import('@/views/analytics/ViewList.vue'),
-        meta: { title: '分析视图', icon: 'DataAnalysis' },
+        meta: { title: '分析视图', icon: 'DataAnalysis', admin: true },
       },
       {
         path: 'analytics/builder',
         name: 'AnalyticsBuilder',
         component: () => import('@/views/analytics/ViewBuilder.vue'),
-        meta: { title: '视图构建器', icon: 'EditPen' },
+        meta: { title: '视图构建器', icon: 'EditPen', admin: true },
       },
       {
         path: 'analytics/views/:id',
@@ -81,12 +87,12 @@ const routes = [
         component: () => import('@/views/analytics/ViewRender.vue'),
         meta: { title: '视图详情', hidden: true },
       },
-      // 看板配置(数据中心): 仅 admin + supervisor 可配置全局看板
+      // 看板配置(系统管理): 仅 admin 可配置全局看板
       {
         path: 'dashboards/designer',
         name: 'DashboardDesigner',
         component: () => import('@/views/dashboards/Designer.vue'),
-        meta: { title: '看板配置', icon: 'Grid', manager: true, roles: ['admin', 'supervisor'] },
+        meta: { title: '看板配置', icon: 'Grid', admin: true },
       },
       // 决策看板(新,manager 可见)
       {
