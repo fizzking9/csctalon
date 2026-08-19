@@ -183,7 +183,7 @@ def local_combo_by_sn(sn: str, db: DBSession, _: CurrentUser, limit: int = Query
             .limit(limit)
         )
     )
-    total_amount = sum(r.actual_amount or 0.0 for r in rows)
+    total_amount = sum(float(r.actual_amount) for r in rows if r.actual_amount is not None)
     remain = sum((r.remaining_traffic or 0) for r in rows if (r.remaining_traffic or 0) != -1)
     summary = {
         "count": len(rows),
