@@ -38,6 +38,10 @@ def _serialize(i: Incident) -> dict:
         "resolved_at": i.resolved_at.isoformat() if i.resolved_at else None,
         "closed_at": i.closed_at.isoformat() if i.closed_at else None,
         "is_closed": i.is_closed,
+        "is_recurring": i.is_recurring,
+        "recurrence_pattern": i.recurrence_pattern,
+        "valid_from": i.valid_from.isoformat() if i.valid_from else None,
+        "valid_to": i.valid_to.isoformat() if i.valid_to else None,
         "created_by": i.created_by,
         "created_at": i.created_at.isoformat() if i.created_at else None,
         "updated_at": i.updated_at.isoformat() if i.updated_at else None,
@@ -104,6 +108,10 @@ def create_incident(payload: dict, db: DBSession, current_user: AdminOrSuperviso
         category=payload.get("category"),
         department=payload.get("department"),
         severity=payload.get("severity", "中"),
+        is_recurring=bool(payload.get("is_recurring", False)),
+        recurrence_pattern=payload.get("recurrence_pattern"),
+        valid_from=datetime.fromisoformat(payload["valid_from"]) if payload.get("valid_from") else None,
+        valid_to=datetime.fromisoformat(payload["valid_to"]) if payload.get("valid_to") else None,
         created_by=current_user.username,
     )
     db.add(i)
@@ -132,7 +140,7 @@ def update_incident(incident_id: int, payload: dict, db: DBSession, current_user
     if not i:
         raise HTTPException(status_code=404, detail="异常事件不存在")
     for k in ("title", "subject", "detail", "impact", "duration_minutes", "related_tickets", "review_note",
-              "category", "department", "severity"):
+              "category", "department", "severity", "recurrence_pattern"):
         if k in payload:
             setattr(i, k, payload[k])
     if "occurred_at" in payload:
@@ -141,6 +149,12 @@ def update_incident(incident_id: int, payload: dict, db: DBSession, current_user
         i.resolved_at = datetime.fromisoformat(payload["resolved_at"]) if payload["resolved_at"] else None
     if "closed_at" in payload:
         i.closed_at = datetime.fromisoformat(payload["closed_at"]) if payload["closed_at"] else None
+    if "valid_from" in payload:
+        i.valid_from = datetime.fromisoformat(payload["valid_from"]) if payload["valid_from"] else None
+    if "valid_to" in payload:
+        i.valid_to = datetime.fromisoformat(payload["valid_to"]) if payload["valid_to"] else None
+    if "is_recurring" in payload:
+        i.is_recurring = bool(payload["is_recurring"])
     if "is_closed" in payload:
         i.is_closed = bool(payload["is_closed"])
         if i.is_closed and not i.closed_at:

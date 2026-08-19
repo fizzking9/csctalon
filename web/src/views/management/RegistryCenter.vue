@@ -3,7 +3,7 @@
     <div class="flex-between mb-16">
       <div>
         <div class="page-title" style="margin: 0">登记中心</div>
-        <div class="page-sub">异常事件 · 管理措施 · 管理制度(SOP/规范/话术) · 部门间信息同步,统一入口录入 / 查看 / 调整 / 审核审计,所有变更操作自动落操作日志</div>
+        <div class="page-sub">影响事件 · 管理措施 · 管理制度(SOP/规范/话术) · 部门间信息同步,统一入口录入 / 查看 / 调整 / 审核审计,所有变更操作自动落操作日志</div>
       </div>
       <el-button type="primary" :icon="Plus" @click="openCreateDialog">新建登记</el-button>
     </div>
@@ -27,7 +27,7 @@
         <el-select v-if="activeTab === 'measure'" v-model="filter.source" placeholder="来源" clearable style="width: 140px" @change="resetAndLoad">
           <el-option label="审计输出" value="audit" />
           <el-option label="周报输出" value="weekly" />
-          <el-option label="异常事件转化" value="incident" />
+          <el-option label="影响事件转化" value="incident" />
           <el-option label="手工新建" value="manual" />
         </el-select>
         <!-- 关键词 -->
@@ -50,7 +50,7 @@
     <!-- 四 Tab:Incidents/Measures/Policies/DeptInfoSyncs -->
     <el-card shadow="never">
       <el-tabs v-model="activeTab" type="border-card">
-        <el-tab-pane label="异常事件" name="incident">
+        <el-tab-pane label="影响事件" name="incident">
           <div class="todo-hint">
             <el-alert type="info" :closable="false" show-icon>
               <template #title>TODO 占位:复杂的行级动作(转预期/复盘批注)保留在 <code>management/Incidents.vue</code> 独立页,此处仅作「快速录入 / 简易列表预览 + 跳转」。</template>
@@ -172,7 +172,7 @@ const formSubmitting = ref(false)
 const formData = reactive({})
 
 const formTitle = computed(() => {
-  const t = { incident: '登记异常事件', measure: '新建管理措施', policy: '新建管理制度', deptSync: '登记部门同步' }
+  const t = { incident: '登记影响事件', measure: '新建管理措施', policy: '新建管理制度', deptSync: '登记部门同步' }
   return t[activeTab.value] || '新建登记'
 })
 

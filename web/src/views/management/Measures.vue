@@ -194,7 +194,7 @@ const statusMap = {
   archived: '已归档',
 }
 const statusType = (s) => ({ draft: 'info', executing: 'warning', pending_review: 'danger', effective: 'success', ineffective: 'info', archived: 'info' }[s] || 'info')
-const sourceMap = { audit: '审计', weekly: '周报', incident: '异常事件', manual: '手工' }
+const sourceMap = { audit: '审计', weekly: '周报', incident: '影响事件', manual: '手工' }
 const typeMap = { internal: '内部管理', external: '外部协调' }
 const reviewResultMap = { effective: '生效', partial: '部分生效', ineffective: '未生效', adjust: '需调整' }
 const formatDate = (t) => (t ? dayjs(t).format('YY/MM/DD') : '-')

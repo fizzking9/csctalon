@@ -1,6 +1,6 @@
 import { reactive } from 'vue'
 
-// 全局单例审计弹窗状态(跨组件共享, 点击任意 SN/人员即可唤起)
+// 全局单例分析弹窗状态(跨组件共享, 点击任意 SN/人员即可唤起)
 const state = reactive({
   visible: false,
   kind: 'device', // 'device' | 'person'
@@ -25,9 +25,17 @@ export function useAudit() {
     state.visible = true
   }
 
+  // 快捷分析入口(无预设ID, 打开弹窗供用户搜索)
+  function openQuickAnalysis(kind = 'device') {
+    state.kind = kind
+    state.id = null
+    state.name = ''
+    state.visible = true
+  }
+
   function closeAudit() {
     state.visible = false
   }
 
-  return { state, openDeviceAudit, openPersonAudit, closeAudit }
+  return { state, openDeviceAudit, openPersonAudit, openQuickAnalysis, closeAudit }
 }

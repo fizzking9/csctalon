@@ -41,7 +41,7 @@
           <el-menu-item index="/dashboards/refund">退款看板</el-menu-item>
           <el-menu-item index="/dashboards/complaint">投诉看板</el-menu-item>
           <el-menu-item index="/dashboards/complaint-analysis">投诉分析</el-menu-item>
-          <el-menu-item index="/dashboards/complaint-audit">投诉审计</el-menu-item>
+          <el-menu-item index="/dashboards/complaint-audit">投诉处理核查</el-menu-item>
           <el-menu-item index="/dashboards/reception">接待看板</el-menu-item>
           <el-menu-item index="/dashboards/refund-withdrawal">退款-提现全链路看板</el-menu-item>
           <el-menu-item index="/dashboards/performance">绩效看板</el-menu-item>
@@ -104,7 +104,7 @@
           <el-menu-item index="/management/weekly">周报看板</el-menu-item>
           <el-menu-item index="/management/measures">管理措施</el-menu-item>
           <el-menu-item index="/management/policies">政策措施</el-menu-item>
-          <el-menu-item index="/management/incidents">异常事件</el-menu-item>
+          <el-menu-item index="/management/incidents">影响事件</el-menu-item>
           <el-menu-item index="/management/schedule">排班管理</el-menu-item>
           <el-menu-item index="/management/alerts">预警中心</el-menu-item>
           <el-menu-item index="/management/upstream-tickets">跨部门协作</el-menu-item>
@@ -145,6 +145,18 @@
           </el-breadcrumb>
         </div>
         <div class="header-right">
+          <!-- 快捷工具:人员分析/设备分析/数据同步(仅admin) -->
+          <div class="quick-tools">
+            <el-tooltip content="人员分析" placement="bottom">
+              <el-button :icon="User" circle size="small" text @click="openPersonAnalysis" />
+            </el-tooltip>
+            <el-tooltip content="设备分析" placement="bottom">
+              <el-button :icon="Monitor" circle size="small" text @click="openDeviceAnalysis" />
+            </el-tooltip>
+            <el-tooltip v-if="authStore.isAdmin" content="数据采集同步" placement="bottom">
+              <el-button :icon="Upload" circle size="small" text @click="goToDataIngest" />
+            </el-tooltip>
+          </div>
           <el-dropdown @command="handleCommand">
             <span class="user-info">
               <el-icon><UserFilled /></el-icon>
@@ -232,9 +244,13 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { User, Monitor, Upload } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { taskStatus } from '@/api/fetch'
 import AuditDialog from '@/components/AuditDialog.vue'
+import { useAudit } from '@/composables/useAudit'
+
+const { openQuickAnalysis } = useAudit()
 
 const route = useRoute()
 const router = useRouter()
@@ -350,6 +366,16 @@ async function handleCommand(cmd) {
     await logout()
   }
 }
+
+function openPersonAnalysis() {
+  openQuickAnalysis('person')
+}
+function openDeviceAnalysis() {
+  openQuickAnalysis('device')
+}
+function goToDataIngest() {
+  router.push('/data/ingest')
+}
 </script>
 
 <style scoped>
@@ -394,6 +420,26 @@ async function handleCommand(cmd) {
 .collapse-btn {
   font-size: 20px;
   cursor: pointer;
+}
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.quick-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 8px;
+  padding-right: 8px;
+  border-right: 1px solid #e5e7eb;
+}
+.quick-tools .el-button {
+  color: #6b7280;
+}
+.quick-tools .el-button:hover {
+  color: #2563eb;
+  background: #eff6ff;
 }
 .header-right .user-info {
   display: flex;
@@ -472,6 +518,13 @@ async function handleCommand(cmd) {
   .user-name,
   .role-tag {
     display: none;
+  }
+  .quick-tools {
+    margin-right: 4px;
+    padding-right: 4px;
+  }
+  .quick-tools .el-button {
+    padding: 6px;
   }
   .main {
     padding: 8px;

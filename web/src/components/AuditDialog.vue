@@ -9,10 +9,10 @@
   >
     <template #header>
       <div class="audit-dialog-header">
-        <span class="audit-dialog-title">审计</span>
+        <span class="audit-dialog-title">分析</span>
         <el-radio-group v-model="kind" size="small">
-          <el-radio-button value="device">设备审计</el-radio-button>
-          <el-radio-button value="person">人员审计</el-radio-button>
+          <el-radio-button value="device">设备分析</el-radio-button>
+          <el-radio-button value="person">人员分析</el-radio-button>
         </el-radio-group>
       </div>
     </template>

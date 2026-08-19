@@ -312,7 +312,7 @@ const sectionTypeOptions = [
   { value: 'view', label: '视图(数据看板)' },
   { value: 'text', label: '文本(说明记录)' },
   { value: 'measures', label: '措施(跟进/计划)' },
-  { value: 'incidents', label: '异常事件' },
+  { value: 'incidents', label: '影响事件' },
 ]
 const summaryPlaceholder = (section) => {
   if (section.section_type === 'measures') return '本周措施跟进情况/完成进度'
