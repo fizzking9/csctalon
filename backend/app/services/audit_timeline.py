@@ -1,12 +1,18 @@
 """审计时序服务 - 跨表合并设备/人员相关业务记录为统一时序流
 
 为设备审计页 / 人员审计页提供后端数据支撑:
-- 设备视角: 按 device_sn 查 7 张业务表(refund/ticket/wallet/merchant_refund/cs_record/external_complaint/card_complaint)
+- 设备视角: 按 device_sn 查 5 张业务表(refund/ticket/wallet/merchant_refund/cs_record)
 - 人员视角: 先查 PersonAlias → 用别名在各业务表人名字段 IN 查询
+
+说明:
+  投诉类(内部投诉/微信投诉/工信部投诉/12315等)已全部归集到 service_tickets 表,
+  通过 service_item 字段区分具体投诉类型(商品投诉/服务投诉/微信投诉/工信部投诉/全国12315平台等),
+  统一在"服务工单"tab下展示。不再单独维护 external_complaints / card_complaints 两张补充表,
+  避免名称污染和空tab误导。
 
 输出统一 TimelineItem 结构:
     {
-        "type": "refund"|"ticket"|"wallet"|"merchant_refund"|"cs_record"|"external_complaint"|"card_complaint",
+        "type": "refund"|"ticket"|"wallet"|"merchant_refund"|"cs_record",
         "time": datetime,           # 主时间字段(用于排序)
         "ref_id": str,               # 业务主键/标识
         "title": str,                # 时序节点标题
@@ -18,10 +24,8 @@
 设计要点:
 1. 各表查询独立,字段精简(用户要求"酌情显示部分有效信息,不需要全部显示")
 2. 时间字段统一用各表的主业务时间(refund.created_at_raw / ticket.finish_time / wallet.op_time /
-   merchant_refund.trade_time / cs_record.operation_time / external_complaint.complaint_date /
-   card_complaint.complaint_date)
+   merchant_refund.trade_time / cs_record.operation_time)
 3. 合并后按 time 倒序,截断 limit 条
-4. 人员视角的自由文本字段(external_complaints.reception_cs)用 LIKE 匹配,性能可控(别名数有限)
 """
 
 from datetime import datetime, timedelta, timezone
@@ -30,9 +34,7 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
-from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
@@ -45,8 +47,6 @@ EVENT_TYPE_META: dict[str, dict[str, str]] = {
     "wallet": {"label": "钱包流水", "color": "primary", "icon": "Wallet"},
     "merchant_refund": {"label": "商户退款", "color": "warning", "icon": "CreditCard"},
     "cs_record": {"label": "客服接待", "color": "info", "icon": "Service"},
-    "external_complaint": {"label": "外部投诉", "color": "danger", "icon": "Warning"},
-    "card_complaint": {"label": "卡商投诉", "color": "warning", "icon": "WarningFilled"},
 }
 
 
@@ -205,7 +205,6 @@ def _build_merchant_refund_items(rows: list[MerchantRefund], include_device_sn: 
             "商户订单号": m.merchant_order_no,
             "商品名称": m.product_name,
         }
-        # merchant_refund 表字段名叫 device_no (如果模型里是 device_sn 就用 device_sn, 否则看 device_no)
         device_sn_val = getattr(m, "device_sn", None) or getattr(m, "device_no", None)
         if include_device_sn and device_sn_val:
             fields["设备SN"] = device_sn_val
@@ -217,7 +216,7 @@ def _build_merchant_refund_items(rows: list[MerchantRefund], include_device_sn: 
             "summary": " · ".join(parts) or "商户号现金流",
             "amount": amount,
             "device_sn": device_sn_val if include_device_sn else None,
-            "person_names": None,  # merchant_refund 无操作人字段
+            "person_names": None,
             "fields": fields,
         })
     return items
@@ -262,86 +261,6 @@ def _build_cs_record_items(rows: list[CsRecord], include_device_sn: bool = False
     return items
 
 
-def _build_external_complaint_items(rows: list[ExternalComplaint], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
-    items: list[dict] = []
-    for e in rows:
-        amount = _amount(e.negotiate_refund_amount)
-        parts = []
-        if e.complaint_category:
-            parts.append(e.complaint_category)
-        if e.result:
-            parts.append(e.result)
-        if include_person_name and e.follower:
-            parts.append(f"跟进:{e.follower}")
-        fields = {
-            "投诉编号": e.complaint_no,
-            "投诉日期": _dt_iso(e.complaint_date),
-            "平台": e.platform,
-            "投诉分类": e.complaint_category,
-            "投诉问题": e.problem,
-            "关键词": e.keyword,
-            "结果": e.result,
-            "跟进人": e.follower,
-            "接待客服": e.reception_cs,
-            "协商退款金额": amount,
-            "套餐名称": e.package_name,
-        }
-        if include_device_sn:
-            fields["设备SN"] = e.device_sn
-        persons = [n for n in (e.follower, e.reception_cs) if n] if include_person_name else None
-        items.append({
-            "type": "external_complaint",
-            "time": e.complaint_date,
-            "ref_id": e.complaint_no or f"E{e.id}",
-            "title": f"外部投诉 {e.complaint_no or e.id}",
-            "summary": " · ".join(parts) or "外部投诉",
-            "amount": amount,
-            "device_sn": e.device_sn if include_device_sn else None,
-            "person_names": persons or None,
-            "fields": fields,
-        })
-    return items
-
-
-def _build_card_complaint_items(rows: list[CardComplaint], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
-    items: list[dict] = []
-    for c in rows:
-        parts = []
-        if c.complaint_group:
-            parts.append(c.complaint_group)
-        if c.problem_category:
-            parts.append(c.problem_category)
-        if include_person_name and c.handler:
-            parts.append(f"处理:{c.handler}")
-        if c.result:
-            parts.append(c.result)
-        fields = {
-            "记录ID": c.id,
-            "投诉群": c.complaint_group,
-            "投诉日期": _dt_iso(c.complaint_date),
-            "投诉人": c.complainant,
-            "问题分类": c.problem_category,
-            "投诉问题": c.problem,
-            "结果": c.result,
-            "解决方案": c.solution,
-            "处理人": c.handler,
-        }
-        if include_device_sn:
-            fields["设备SN"] = c.device_sn
-        items.append({
-            "type": "card_complaint",
-            "time": c.complaint_date,
-            "ref_id": f"K{c.id}",
-            "title": f"卡商投诉 #{c.id}",
-            "summary": " · ".join(parts) or "卡商投诉",
-            "amount": None,
-            "device_sn": c.device_sn if include_device_sn else None,
-            "person_names": [c.handler] if include_person_name and c.handler else None,
-            "fields": fields,
-        })
-    return items
-
-
 def _merge_and_sort(item_lists: list[list[dict]], limit: int) -> list[dict]:
     """合并各表 items,按 time 倒序,截断 limit。无 time 的排末尾。"""
     merged: list[dict] = []
@@ -368,66 +287,41 @@ def build_device_timeline(
 ) -> dict:
     """构建设备维度的审计时序流
 
-    查 7 张表(device_sn 外键关联;merchant_refund 字段名是 device_no):
-        refund / ticket / wallet / merchant_refund / cs_record / external_complaint / card_complaint
+    查 5 张业务表(device_sn 外键关联;merchant_refund 字段名是 device_no):
+        refund / ticket / wallet / merchant_refund / cs_record
 
-    Args:
-        include_person_name: 每条事件补充「操作人姓名」汇总到 person_names 字段及 fields 中(默认 True,满足设备审计要含人员姓名)
-        include_device_sn: 补设备 SN 字段到每条事件(设备视角默认 False,因为 subject 已带 SN)
+    投诉类工单(商品投诉/服务投诉/微信投诉/工信部投诉/12315等)均已归集到 service_tickets,
+    在"服务工单"tab下通过 service_item 区分具体类型。
     """
     since = _resolve_time_window(days)
-    per_table_limit = max(limit, 200)  # 每表多取一些,合并后再截断 limit
+    per_table_limit = max(limit, 200)
 
-    # refund
     refund_stmt = select(Refund).where(Refund.device_sn == sn)
     if since:
         refund_stmt = refund_stmt.where(Refund.created_at_raw >= since)
-    refund_stmt = refund_stmt.order_by(Refund.created_at_raw.desc()).limit(per_table_limit)
-    refunds = list(db.scalars(refund_stmt))
+    refunds = list(db.scalars(refund_stmt.order_by(Refund.created_at_raw.desc()).limit(per_table_limit)))
 
-    # ticket
     ticket_stmt = select(ServiceTicket).where(ServiceTicket.device_sn == sn)
     if since:
         ticket_stmt = ticket_stmt.where(
             or_(ServiceTicket.finish_time >= since, ServiceTicket.register_time >= since)
         )
-    ticket_stmt = ticket_stmt.order_by(ServiceTicket.finish_time.desc().nullslast()).limit(per_table_limit)
-    tickets = list(db.scalars(ticket_stmt))
+    tickets = list(db.scalars(ticket_stmt.order_by(ServiceTicket.finish_time.desc().nullslast()).limit(per_table_limit)))
 
-    # wallet
     wallet_stmt = select(WalletWithdrawal).where(WalletWithdrawal.device_sn == sn)
     if since:
         wallet_stmt = wallet_stmt.where(WalletWithdrawal.op_time >= since)
-    wallet_stmt = wallet_stmt.order_by(WalletWithdrawal.op_time.desc()).limit(per_table_limit)
-    wallets = list(db.scalars(wallet_stmt))
+    wallets = list(db.scalars(wallet_stmt.order_by(WalletWithdrawal.op_time.desc()).limit(per_table_limit)))
 
-    # merchant_refund(字段名是 device_no,不是 device_sn)
     mr_stmt = select(MerchantRefund).where(MerchantRefund.device_no == sn)
     if since:
         mr_stmt = mr_stmt.where(MerchantRefund.trade_time >= since)
-    mr_stmt = mr_stmt.order_by(MerchantRefund.trade_time.desc()).limit(per_table_limit)
-    merchant_refunds = list(db.scalars(mr_stmt))
+    merchant_refunds = list(db.scalars(mr_stmt.order_by(MerchantRefund.trade_time.desc()).limit(per_table_limit)))
 
-    # cs_record
     cs_stmt = select(CsRecord).where(CsRecord.device_sn == sn)
     if since:
         cs_stmt = cs_stmt.where(CsRecord.operation_time >= since)
-    cs_stmt = cs_stmt.order_by(CsRecord.operation_time.desc()).limit(per_table_limit)
-    cs_records = list(db.scalars(cs_stmt))
-
-    # external_complaint
-    ec_stmt = select(ExternalComplaint).where(ExternalComplaint.device_sn == sn)
-    if since:
-        ec_stmt = ec_stmt.where(ExternalComplaint.complaint_date >= since)
-    ec_stmt = ec_stmt.order_by(ExternalComplaint.complaint_date.desc()).limit(per_table_limit)
-    external_complaints = list(db.scalars(ec_stmt))
-
-    # card_complaint
-    cc_stmt = select(CardComplaint).where(CardComplaint.device_sn == sn)
-    if since:
-        cc_stmt = cc_stmt.where(CardComplaint.complaint_date >= since)
-    cc_stmt = cc_stmt.order_by(CardComplaint.complaint_date.desc()).limit(per_table_limit)
-    card_complaints = list(db.scalars(cc_stmt))
+    cs_records = list(db.scalars(cs_stmt.order_by(CsRecord.operation_time.desc()).limit(per_table_limit)))
 
     items = _merge_and_sort(
         [
@@ -436,13 +330,10 @@ def build_device_timeline(
             _build_wallet_items(wallets, include_device_sn=include_device_sn, include_person_name=include_person_name),
             _build_merchant_refund_items(merchant_refunds, include_device_sn=include_device_sn, include_person_name=include_person_name),
             _build_cs_record_items(cs_records, include_device_sn=include_device_sn, include_person_name=include_person_name),
-            _build_external_complaint_items(external_complaints, include_device_sn=include_device_sn, include_person_name=include_person_name),
-            _build_card_complaint_items(card_complaints, include_device_sn=include_device_sn, include_person_name=include_person_name),
         ],
         limit,
     )
 
-    # 各类型计数
     counts: dict[str, int] = {}
     for it in items:
         counts[it["type"]] = counts.get(it["type"], 0) + 1
@@ -467,14 +358,9 @@ def build_person_timeline(
     """构建人员维度的审计时序流
 
     流程:
-        1. 查 PersonAlias where person_id=person_id → 别名列表(含 is_system 的 sys/system)
+        1. 查 PersonAlias where person_id=person_id → 别名列表
         2. 各业务表人名字段 IN(aliases) 查询
-        3. 自由文本字段(external_complaints.reception_cs)用 LIKE 匹配
     注:merchant_refund 无人员字段,不参与人员视角时序
-
-    Args:
-        include_device_sn: 每条事件补充「设备 SN」字段到 fields 中(默认 True,满足人员审计要含设备 SN)
-        include_person_name: 补操作人姓名字段(人员视角默认 False,因为 subject 已带姓名)
     """
     from app.models.person import Person, PersonAlias
 
@@ -496,14 +382,11 @@ def build_person_timeline(
     since = _resolve_time_window(days)
     per_table_limit = max(limit, 200)
 
-    # refund: operator / auditor
     refund_stmt = select(Refund).where(or_(Refund.operator.in_(alias_vals), Refund.auditor.in_(alias_vals)))
     if since:
         refund_stmt = refund_stmt.where(Refund.created_at_raw >= since)
-    refund_stmt = refund_stmt.order_by(Refund.created_at_raw.desc()).limit(per_table_limit)
-    refunds = list(db.scalars(refund_stmt))
+    refunds = list(db.scalars(refund_stmt.order_by(Refund.created_at_raw.desc()).limit(per_table_limit)))
 
-    # ticket: handler / registrant
     ticket_stmt = select(ServiceTicket).where(
         or_(ServiceTicket.handler.in_(alias_vals), ServiceTicket.registrant.in_(alias_vals))
     )
@@ -511,40 +394,17 @@ def build_person_timeline(
         ticket_stmt = ticket_stmt.where(
             or_(ServiceTicket.finish_time >= since, ServiceTicket.register_time >= since)
         )
-    ticket_stmt = ticket_stmt.order_by(ServiceTicket.finish_time.desc().nullslast()).limit(per_table_limit)
-    tickets = list(db.scalars(ticket_stmt))
+    tickets = list(db.scalars(ticket_stmt.order_by(ServiceTicket.finish_time.desc().nullslast()).limit(per_table_limit)))
 
-    # wallet: operator
     wallet_stmt = select(WalletWithdrawal).where(WalletWithdrawal.operator.in_(alias_vals))
     if since:
         wallet_stmt = wallet_stmt.where(WalletWithdrawal.op_time >= since)
-    wallet_stmt = wallet_stmt.order_by(WalletWithdrawal.op_time.desc()).limit(per_table_limit)
-    wallets = list(db.scalars(wallet_stmt))
+    wallets = list(db.scalars(wallet_stmt.order_by(WalletWithdrawal.op_time.desc()).limit(per_table_limit)))
 
-    # cs_record: operator
     cs_stmt = select(CsRecord).where(CsRecord.operator.in_(alias_vals))
     if since:
         cs_stmt = cs_stmt.where(CsRecord.operation_time >= since)
-    cs_stmt = cs_stmt.order_by(CsRecord.operation_time.desc()).limit(per_table_limit)
-    cs_records = list(db.scalars(cs_stmt))
-
-    # external_complaint: follower 精确 + reception_cs 自由文本 LIKE
-    ec_conditions = [ExternalComplaint.follower.in_(alias_vals)]
-    for av in alias_vals:
-        escaped = av.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        ec_conditions.append(ExternalComplaint.reception_cs.like(f"%{escaped}%", escape="\\"))
-    ec_stmt = select(ExternalComplaint).where(or_(*ec_conditions))
-    if since:
-        ec_stmt = ec_stmt.where(ExternalComplaint.complaint_date >= since)
-    ec_stmt = ec_stmt.order_by(ExternalComplaint.complaint_date.desc()).limit(per_table_limit)
-    external_complaints = list(db.scalars(ec_stmt))
-
-    # card_complaint: handler
-    cc_stmt = select(CardComplaint).where(CardComplaint.handler.in_(alias_vals))
-    if since:
-        cc_stmt = cc_stmt.where(CardComplaint.complaint_date >= since)
-    cc_stmt = cc_stmt.order_by(CardComplaint.complaint_date.desc()).limit(per_table_limit)
-    card_complaints = list(db.scalars(cc_stmt))
+    cs_records = list(db.scalars(cs_stmt.order_by(CsRecord.operation_time.desc()).limit(per_table_limit)))
 
     items = _merge_and_sort(
         [
@@ -552,8 +412,6 @@ def build_person_timeline(
             _build_ticket_items(tickets, include_device_sn=include_device_sn, include_person_name=include_person_name),
             _build_wallet_items(wallets, include_device_sn=include_device_sn, include_person_name=include_person_name),
             _build_cs_record_items(cs_records, include_device_sn=include_device_sn, include_person_name=include_person_name),
-            _build_external_complaint_items(external_complaints, include_device_sn=include_device_sn, include_person_name=include_person_name),
-            _build_card_complaint_items(card_complaints, include_device_sn=include_device_sn, include_person_name=include_person_name),
         ],
         limit,
     )

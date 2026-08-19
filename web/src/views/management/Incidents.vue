@@ -2,7 +2,7 @@
   <div class="page-container">
     <div class="flex-between mb-16">
       <div>
-        <div class="page-title" style="margin: 0">异常事件登记</div>
+        <div class="page-title" style="margin: 0">影响事件登记</div>
         <div class="page-sub">未通知的非预期事项导致客服负荷激增 · 登记用于改进不用于问责 · 复盘后转预期事项提前部署</div>
       </div>
       <el-button type="primary" :icon="Plus" @click="openCreate">登记异常</el-button>
@@ -63,7 +63,7 @@
     </el-card>
 
     <!-- 登记异常对话框 -->
-    <el-dialog v-model="dialogVisible" title="登记异常事件" width="640px">
+    <el-dialog v-model="dialogVisible" title="登记影响事件" width="640px">
       <el-form :model="form" label-width="100px">
         <el-form-item label="事项名" required>
           <el-input v-model="form.title" placeholder="如 XX系统异常导致工单激增" />
@@ -101,6 +101,35 @@
         <el-form-item label="关联工单号">
           <el-input v-model="form.ticketsInput" placeholder="多个工单号用逗号分隔" />
         </el-form-item>
+        <el-form-item label="周期性事件">
+          <el-switch v-model="form.is_recurring" active-text="是" inactive-text="否" />
+          <span class="form-hint">广告推送/定期维护等阶段性影响事件,每日生效时在首页突出显示</span>
+        </el-form-item>
+        <template v-if="form.is_recurring">
+          <el-form-item label="周期模式">
+            <el-select v-model="form.recurrence_pattern" style="width: 100%">
+              <el-option label="每日(daily)" value="daily" />
+              <el-option label="工作日(周一~周五)" value="weekday" />
+              <el-option label="每周(同周几)" value="weekly" />
+              <el-option label="每月(同几号)" value="monthly" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="生效起止">
+            <el-date-picker
+              v-model="form.valid_from"
+              type="datetime"
+              placeholder="生效起始(含)"
+              style="width: 48%"
+            />
+            <span style="margin: 0 4px; color: #909399">~</span>
+            <el-date-picker
+              v-model="form.valid_to"
+              type="datetime"
+              placeholder="结束(空=无限期)"
+              style="width: 48%"
+            />
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -109,7 +138,7 @@
     </el-dialog>
 
     <!-- 详情/复盘对话框 -->
-    <el-dialog v-model="detailVisible" title="异常事件详情" width="640px">
+    <el-dialog v-model="detailVisible" title="影响事件详情" width="640px">
       <el-descriptions v-if="current" :column="1" border>
         <el-descriptions-item label="事项名">{{ current.title }}</el-descriptions-item>
         <el-descriptions-item label="主体">{{ current.subject || '-' }}</el-descriptions-item>
@@ -121,6 +150,14 @@
         <el-descriptions-item label="影响">{{ current.impact || '-' }}</el-descriptions-item>
         <el-descriptions-item label="明细">{{ current.detail || '-' }}</el-descriptions-item>
         <el-descriptions-item label="关联工单">{{ (current.related_tickets || []).join('、') || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="周期性">
+          <template v-if="current.is_recurring">
+            <el-tag type="warning" size="small" effect="dark">周期</el-tag>
+            <span style="margin-left:6px">{{ recurrenceLabel(current.recurrence_pattern) }}</span>
+            <span v-if="current.valid_from" style="margin-left:6px;color:#909399">{{ formatTime(current.valid_from) }}{{ current.valid_to ? ' ~ ' + formatTime(current.valid_to) : ' ~ 无限期' }}</span>
+          </template>
+          <span v-else>否</span>
+        </el-descriptions-item>
         <el-descriptions-item label="转预期">
           <el-tag v-if="current.converted_to_expected" type="success" size="small">已转预期</el-tag>
           <span v-else>否</span>
@@ -194,10 +231,11 @@ const followupInput = ref('')
 const statusMap = { registered: '登记', processing: '处理中', calmed: '已平息', reviewed: '已复盘' }
 const statusType = (s) => ({ registered: 'danger', processing: 'warning', calmed: 'info', reviewed: 'success' }[s] || 'info')
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-')
+const recurrenceLabel = (p) => ({ daily: '每日', weekday: '工作日', weekly: '每周', monthly: '每月' }[p] || (p || '每日'))
 const categoryOptions = ['生产', '运营', '商务部', '店铺', '系统平台开发', '其他服务商']
 
 function emptyForm() {
-  return { title: '', subject: '', occurred_at: null, duration_minutes: null, impact: '', detail: '', ticketsInput: '', category: '', department: '', severity: '中' }
+  return { title: '', subject: '', occurred_at: null, duration_minutes: null, impact: '', detail: '', ticketsInput: '', category: '', department: '', severity: '中', is_recurring: false, recurrence_pattern: 'daily', valid_from: null, valid_to: null }
 }
 
 async function loadData() {
@@ -247,6 +285,10 @@ async function handleCreate() {
       category: form.category || null,
       department: form.department || null,
       severity: form.severity || '中',
+      is_recurring: !!form.is_recurring,
+      recurrence_pattern: form.is_recurring ? (form.recurrence_pattern || 'daily') : null,
+      valid_from: form.is_recurring && form.valid_from ? dayjs(form.valid_from).toISOString() : null,
+      valid_to: form.is_recurring && form.valid_to ? dayjs(form.valid_to).toISOString() : null,
     })
     ElMessage.success('登记成功')
     dialogVisible.value = false
@@ -305,7 +347,7 @@ async function handleConvert() {
 }
 
 async function handleDelete(row) {
-  await ElMessageBox.confirm('确认删除该异常事件?', '提示', { type: 'warning' })
+  await ElMessageBox.confirm('确认删除该影响事件?', '提示', { type: 'warning' })
   await deleteIncident(row.id)
   ElMessage.success('已删除')
   loadData()
@@ -336,5 +378,10 @@ onMounted(loadData)
 .followup-author {
   font-size: 12px;
   color: #909399;
+}
+.form-hint {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #c0c4cc;
 }
 </style>

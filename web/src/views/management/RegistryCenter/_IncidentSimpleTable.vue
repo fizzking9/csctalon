@@ -2,7 +2,7 @@
   <div class="incident-simple-table">
     <el-alert type="info" :closable="false" class="mb-16">
       <template #title>
-        快速预览 · 完整列表 / 转预期 / 复盘批注见「管理 → 异常事件」。转预期动作会写操作日志:「异常事件.转预期事项」。
+        快速预览 · 完整列表 / 转预期 / 复盘批注见「管理 → 影响事件」。转预期动作会写操作日志:「影响事件.转预期事项」。
       </template>
     </el-alert>
     <el-table :data="list" v-loading="loading" border stripe @row-click="(row) => $emit('view', row)" style="cursor: pointer">

@@ -41,6 +41,12 @@
                     {{ labelOf(it.type) }}
                   </el-tag>
                   <span class="event-title">{{ it.title }}</span>
+                  <span
+                    v-if="it.device_sn"
+                    class="event-sn"
+                    title="点击查看设备分析"
+                    @click="emit('sn-click', it.device_sn)"
+                  >SN: {{ it.device_sn }}</span>
                   <span v-if="it.amount != null" class="event-amount">
                     ¥ {{ Number(it.amount).toFixed(2) }}
                   </span>
@@ -76,6 +82,18 @@
             </template>
           </el-table-column>
           <el-table-column prop="ref_id" label="单号/标识" width="180" show-overflow-tooltip />
+          <el-table-column v-if="hasSn" label="设备SN" width="160" show-overflow-tooltip>
+            <template #default="{ row }">
+              <el-button
+                v-if="row.device_sn"
+                link
+                type="primary"
+                size="small"
+                @click="emit('sn-click', row.device_sn)"
+              >{{ row.device_sn }}</el-button>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="summary" label="摘要" min-width="260" show-overflow-tooltip />
           <el-table-column label="金额" width="120" align="right">
             <template #default="{ row }">
@@ -115,9 +133,14 @@ const props = defineProps({
   loading: { type: Boolean, default: false },
 })
 
+const emit = defineEmits(['sn-click'])
+
 const activeType = ref('')
 const keyword = ref('')
 const view = ref('timeline')
+
+// 是否存在带设备SN的记录(决定明细表是否显示SN列)
+const hasSn = computed(() => props.items.some((it) => it.device_sn))
 
 const typeList = computed(() => {
   return Object.entries(props.typeMeta || {}).map(([key, meta]) => ({ key, label: meta.label }))
@@ -150,10 +173,12 @@ const filtered = computed(() => {
   return list
 })
 
-// 时序卡片只显示前 6 个字段,避免过长
+// 时序卡片只显示前 6 个字段,避免过长;"设备SN"单独以可点击chip展示,不重复出现在字段里
 function visibleFields(fields) {
   if (!fields) return {}
-  const entries = Object.entries(fields).filter(([, v]) => v != null && v !== '')
+  const entries = Object.entries(fields).filter(
+    ([k, v]) => v != null && v !== '' && k !== '设备SN'
+  )
   return Object.fromEntries(entries.slice(0, 6))
 }
 
@@ -195,6 +220,20 @@ function fmtVal(v) {
   margin-bottom: 4px;
 }
 .event-title { font-weight: 600; color: #303133; }
+.event-sn {
+  margin-left: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #409eff;
+  background: #ecf5ff;
+  padding: 1px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+  word-break: break-all;
+}
+.event-sn:hover { background: #d9ecff; }
 .event-amount {
   margin-left: auto;
   font-weight: 700;

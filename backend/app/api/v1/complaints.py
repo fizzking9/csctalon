@@ -4,39 +4,54 @@
 复用 analytics 服务的口径 helper, 保证与既有看板一致。
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta as _timedelta
 
 from fastapi import APIRouter, Query
-from sqlalchemy import case, func, literal, or_, select
+from sqlalchemy import case, func, or_, select, and_
 
 from app.api.deps import CurrentUser, DBSession, ManagerUser
-from app.models.card_complaint import CardComplaint
 from app.models.complaint_audit import ComplaintAudit
-from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
 from app.schemas.common import PageBase, R
-from app.services.analytics import _complaint_source_type_case, _ticket_category_case
+from app.services.analytics import _complaint_source_type_case, _ticket_category_case, TZ
 
 router = APIRouter(prefix="/complaints", tags=["投诉分析"])
 
 
 def _parse_dt(s: str | None) -> datetime | None:
+    """解析时间字符串为 naive UTC datetime (用于与timestamptz列比较).
+    - YYYY-MM-DD → 北京时间00:00 → 转naive UTC
+    - ISO含时区 → 直接转UTC后去tz
+    - ISO不含时区 → 视为北京时间,转UTC
+    """
     if not s:
         return None
+    s = s.strip()
     try:
-        return datetime.fromisoformat(s)
-    except ValueError:
+        if len(s) == 10:
+            # 纯日期 YYYY-MM-DD: 视为北京时间00:00
+            d = datetime.strptime(s, "%Y-%m-%d")
+            dt_sh = d.replace(tzinfo=TZ)
+            return dt_sh.astimezone(timezone.utc).replace(tzinfo=None)
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            # 无时区信息,视为北京时间
+            dt = dt.replace(tzinfo=TZ)
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    except (ValueError, TypeError):
         return None
 
 
 def _parse_dt_end(s: str | None) -> datetime | None:
-    """end 边界解析: 若为纯日期(YYYY-MM-DD), 归一到当日 23:59:59.999999, 避免漏掉当天数据。"""
+    """end 边界解析: 若为纯日期(YYYY-MM-DD), 归一到北京时间当日 23:59:59.999999 → 转naive UTC."""
     if not s:
         return None
     s = s.strip()
     if len(s) == 10:
         try:
-            return datetime.strptime(s, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+            d = datetime.strptime(s, "%Y-%m-%d")
+            dt_sh = d.replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=TZ)
+            return dt_sh.astimezone(timezone.utc).replace(tzinfo=None)
         except ValueError:
             return None
     return _parse_dt(s)
@@ -46,27 +61,175 @@ def _trend(rows, key="day"):
     return [{"day": str(r[0]), "count": int(r[1] or 0)} for r in rows]
 
 
-@router.get("/summary", response_model=R, summary="三源投诉统计汇总")
+def _day_trunc(col):
+    """按 Asia/Shanghai 时区截断到日, 避免 UTC 凌晨被算到前一天.
+    与 analytics.py 的 func.date_trunc("day", func.timezone("Asia/Shanghai", col)) 同口径.
+    所有投诉日期字段(register_time/complaint_date)都是 timestamptz,
+    直接 date_trunc('day', col) 会按 UTC 截断, 导致 CST 00:00~07:59 的记录落到前一天。"""
+    return func.date_trunc("day", func.timezone("Asia/Shanghai", col))
+
+
+def _handler_fallback_cols():
+    """工单处理人多级fallback: handler(已指派并填写) → assignee(派单分配) → updated_by_raw(上游最后操作人) → registrant(登记人)
+    场景: 历史工单 handler 字段未规范化填写, 但实际上有最后操作人 updated_by_raw 或 assignee/registrant
+    仅用于统计汇总与展示, 不改变 DB 原始值。"""
+    return case(
+        (ServiceTicket.handler.isnot(None) & (ServiceTicket.handler != ""), ServiceTicket.handler),
+        (ServiceTicket.assignee.isnot(None) & (ServiceTicket.assignee != ""), ServiceTicket.assignee),
+        (ServiceTicket.updated_by_raw.isnot(None) & (ServiceTicket.updated_by_raw != ""), ServiceTicket.updated_by_raw),
+        else_=ServiceTicket.registrant,
+    )
+
+
+# 系统自动登记人关键词(非真实处理人)
+_SYS_HANDLERS = {"wechat", "sys", "客户", "customer", "system", "sns", ""}
+
+
+def _has_real_handler(handler_val: str | None) -> bool:
+    """判断是否有真实处理人(排除系统自动登记值 wechat/sys/客户 等)."""
+    if not handler_val:
+        return False
+    v = handler_val.strip().lower()
+    if not v:
+        return False
+    if v in _SYS_HANDLERS:
+        return False
+    return True
+
+
+def _is_real_finish(finish_time, register_time) -> bool:
+    """判断finish_time是否是真实完成时间.
+    系统创建工单时会将finish_time默认设置为register_time(或相差几秒),
+    只有当finish_time明显晚于register_time(>=3分钟)时才认为真实完成."""
+    if finish_time is None or register_time is None:
+        return False
+    try:
+        delta = finish_time - register_time
+        return delta.total_seconds() >= 180  # 3分钟以上视为真实完成
+    except Exception:
+        return False
+
+
+def _norm_status(source: str, status_val: str | None, finish_time, register_time, handler_val: str | None) -> str:
+    """投诉状态归一化显示,空值根据 finish_time/handler 推断,避免大量"待处理"误报.
+    返回语义: 已完成/处理中/待处理/待跟进 等。
+
+    规则:
+    1. 显式已完成类状态 → 已完成
+    2. 显式处理中类状态 → 处理中
+    3. 待处理类状态:
+       - 有真实处理人(非wechat/sys/客户) → 处理中
+       - 有真实finish_time(晚于登记时间3分钟+) → 已完成
+       - 否则 → 待处理
+    4. 无原始状态值: 根据 finish/handler/source 推断
+    """
+    has_handler = _has_real_handler(handler_val)
+    has_real_finish = _is_real_finish(finish_time, register_time)
+    if status_val:
+        v = status_val.strip()
+        if v in ("已结案", "已完成", "完成", "已解决", "已回复", "已反馈", "已关闭", "终止", "已终止"):
+            return "已完成"
+        if v in ("处理中", "跟进中", "跟进", "进行中"):
+            return "处理中"
+        if v in ("待处理", "未处理", "待分派", "pending", "待跟进"):
+            if has_handler:
+                return "处理中"
+            if has_real_finish:
+                return "已完成"
+            return "待处理"
+        return v
+    # 无状态原始值, 推断
+    if has_real_finish:
+        return "已完成"
+    if has_handler:
+        return "处理中"
+    if source == "外部投诉":
+        return "待跟进"
+    if source == "商户号投诉":
+        return "待跟进"
+    return "待处理"
+
+
+def _norm_handler(h: str | None) -> str:
+    """归一化处理人: 系统值/空值 → '未分配', 企微前缀('企微-xxx') → 纯姓名."""
+    if h is None:
+        return "未分配"
+    v = str(h).strip()
+    if not v or v.lower() in _SYS_HANDLERS:
+        return "未分配"
+    # 去企微前缀
+    if v.startswith("企微-"):
+        v = v[3:]
+    return v or "未分配"
+
+
+def _to_sh_iso(dt) -> str | None:
+    """将 datetime (naive UTC 或 tz-aware) 转为北京时间 ISO 字符串 (naive, 无时区后缀)."""
+    if dt is None:
+        return None
+    import datetime as _dt_mod
+    if dt.tzinfo is None:
+        # naive UTC → 视为UTC
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt_sh = dt.astimezone(TZ)
+    return dt_sh.strftime("%Y-%m-%d %H:%M")
+
+
+@router.get("/summary", response_model=R, summary="三源投诉统计汇总(工单为主,卡商/外部投诉为前期参考补充)")
 def complaint_summary(
     db: DBSession,
     _: CurrentUser,
     start: str | None = None,
     end: str | None = None,
 ):
+    """投诉统计汇总接口。
+
+    口径说明(需求变更):
+    - 三大分类(内部/商户号/外部)的 **总数/分类分布/处理人分布/趋势** 四要素
+      全部以 service_tickets(工单) 为唯一主数据来源。
+      这是运营实际考核与追踪的"主台账"。
+    - card_complaints(卡商群) / external_complaints(监督局-315) 仅作为
+      "前期参考补充"——帮助识别"可能还没落成工单、因此工单口径里暂时缺失"
+      的早期投诉线索。它们在返回值中单独位于 merchant.supplementary /
+      external.supplementary 子对象,绝不合并入主口径。
+    """
     ts = _parse_dt(start)
     te = _parse_dt_end(end)
 
-    def _tk_where(stmt):
-        stmt = stmt.where(_ticket_category_case() == "投诉")
+    def _time_filter(reg_col, fin_col):
+        """生成时间过滤条件:register_time在范围内 OR finish_time在范围内(真实完成).
+        与 complaint_detail 保持一致口径,解决历史工单今日完成不出现在统计里的问题."""
+        conds = []
+        reg_c = []
         if ts:
-            stmt = stmt.where(ServiceTicket.register_time >= ts)
+            reg_c.append(reg_col >= ts)
         if te:
-            stmt = stmt.where(ServiceTicket.register_time <= te)
+            reg_c.append(reg_col <= te)
+        fin_c = [fin_col.isnot(None)]
+        if ts:
+            fin_c.append(fin_col >= ts)
+        if te:
+            fin_c.append(fin_col <= te)
+        return or_(and_(*reg_c), and_(*fin_c))
+
+    def _tk_where(stmt, use_action_time: bool = True):
+        stmt = stmt.where(_ticket_category_case() == "投诉")
+        if ts or te:
+            if use_action_time:
+                # KPI/分类/处理人: 包含今日新增 + 今日完成
+                stmt = stmt.where(_time_filter(ServiceTicket.register_time, ServiceTicket.finish_time))
+            else:
+                # trend: 按登记时间统计每日新增
+                if ts:
+                    stmt = stmt.where(ServiceTicket.register_time >= ts)
+                if te:
+                    stmt = stmt.where(ServiceTicket.register_time <= te)
         return stmt
 
     src_expr = _complaint_source_type_case()
+    handler_expr = _handler_fallback_cols()
 
-    # ---- 内部投诉 (service_tickets) ----
+    # ---- 内部投诉 (仅工单) ----
     internal_total = db.scalar(_tk_where(select(func.count())).where(src_expr == "内部投诉")) or 0
     internal_by_cat = db.execute(
         _tk_where(select(ServiceTicket.service_item, func.count()).where(src_expr == "内部投诉"))
@@ -75,111 +238,129 @@ def complaint_summary(
         .limit(20)
     ).all()
     internal_by_handler = db.execute(
-        _tk_where(select(ServiceTicket.handler, func.count()).where(src_expr == "内部投诉"))
-        .where(ServiceTicket.handler.isnot(None))
-        .group_by(ServiceTicket.handler)
+        _tk_where(select(handler_expr, func.count()).where(src_expr == "内部投诉"))
+        .where(handler_expr.isnot(None))
+        .group_by(handler_expr)
         .order_by(func.count().desc())
         .limit(20)
     ).all()
     internal_trend = db.execute(
-        _tk_where(select(func.date_trunc("day", ServiceTicket.register_time), func.count()).where(src_expr == "内部投诉"))
-        .group_by(func.date_trunc("day", ServiceTicket.register_time))
-        .order_by(func.date_trunc("day", ServiceTicket.register_time))
+        _tk_where(select(_day_trunc(ServiceTicket.register_time), func.count()).where(src_expr == "内部投诉"), use_action_time=False)
+        .group_by(_day_trunc(ServiceTicket.register_time))
+        .order_by(_day_trunc(ServiceTicket.register_time))
     ).all()
 
-    # ---- 商户号投诉 (service_tickets 微信 + card_complaints) ----
-    merchant_ticket = db.scalar(_tk_where(select(func.count())).where(src_expr == "商户号投诉")) or 0
-    cc_stmt = select(func.count()).select_from(CardComplaint)
-    if ts:
-        cc_stmt = cc_stmt.where(CardComplaint.complaint_date >= ts)
-    if te:
-        cc_stmt = cc_stmt.where(CardComplaint.complaint_date <= te)
-    cc_total = db.scalar(cc_stmt) or 0
-    merchant_total = merchant_ticket + cc_total
-
-    cc_by_cat = db.execute(
-        select(CardComplaint.problem_category, func.count())
-        .where(CardComplaint.problem_category.isnot(None))
-        .group_by(CardComplaint.problem_category)
+    # ---- 商户号投诉 (主: service_tickets 微信类工单; 参考补充: card_complaints 卡商群) ----
+    merchant_ticket_total = db.scalar(_tk_where(select(func.count())).where(src_expr == "商户号投诉")) or 0
+    merchant_by_cat = db.execute(
+        _tk_where(select(ServiceTicket.service_item, func.count()).where(src_expr == "商户号投诉"))
+        .group_by(ServiceTicket.service_item)
         .order_by(func.count().desc())
         .limit(20)
     ).all()
-    merchant_by_cat = [{"name": r[0], "count": int(r[1] or 0)} for r in cc_by_cat]
-    if merchant_ticket:
-        merchant_by_cat.insert(0, {"name": "微信投诉(工单)", "count": int(merchant_ticket)})
-
-    cc_by_handler = db.execute(
-        select(CardComplaint.handler, func.count())
-        .where(CardComplaint.handler.isnot(None))
-        .group_by(CardComplaint.handler)
+    merchant_by_handler = db.execute(
+        _tk_where(select(handler_expr, func.count()).where(src_expr == "商户号投诉"))
+        .where(handler_expr.isnot(None))
+        .group_by(handler_expr)
         .order_by(func.count().desc())
         .limit(20)
     ).all()
-    merchant_by_handler = [{"name": r[0], "count": int(r[1] or 0)} for r in cc_by_handler]
-
-    cc_trend = db.execute(
-        select(func.date_trunc("day", CardComplaint.complaint_date), func.count())
-        .group_by(func.date_trunc("day", CardComplaint.complaint_date))
-        .order_by(func.date_trunc("day", CardComplaint.complaint_date))
+    merchant_trend = db.execute(
+        _tk_where(select(_day_trunc(ServiceTicket.register_time), func.count()).where(src_expr == "商户号投诉"), use_action_time=False)
+        .group_by(_day_trunc(ServiceTicket.register_time))
+        .order_by(_day_trunc(ServiceTicket.register_time))
     ).all()
-    merchant_trend = _trend(cc_trend)
 
-    # ---- 外部投诉 (service_tickets 平台 + external_complaints) ----
-    external_ticket = db.scalar(_tk_where(select(func.count())).where(src_expr == "外部投诉")) or 0
-    ec_stmt = select(func.count()).select_from(ExternalComplaint)
-    if ts:
-        ec_stmt = ec_stmt.where(ExternalComplaint.complaint_date >= ts)
-    if te:
-        ec_stmt = ec_stmt.where(ExternalComplaint.complaint_date <= te)
-    ec_total = db.scalar(ec_stmt) or 0
-    external_total = external_ticket + ec_total
-
-    ec_by_cat = db.execute(
-        select(ExternalComplaint.complaint_category, func.count())
-        .where(ExternalComplaint.complaint_category.isnot(None))
-        .group_by(ExternalComplaint.complaint_category)
+    # ---- 外部投诉 (service_tickets 平台类工单: 工信部/12315/消协等) ----
+    external_ticket_total = db.scalar(_tk_where(select(func.count())).where(src_expr == "外部投诉")) or 0
+    external_by_cat = db.execute(
+        _tk_where(select(ServiceTicket.service_item, func.count()).where(src_expr == "外部投诉"))
+        .group_by(ServiceTicket.service_item)
         .order_by(func.count().desc())
         .limit(20)
     ).all()
-    external_by_cat = [{"name": r[0], "count": int(r[1] or 0)} for r in ec_by_cat]
-    if external_ticket:
-        external_by_cat.insert(0, {"name": "平台投诉(工单)", "count": int(external_ticket)})
-
-    ec_by_handler = db.execute(
-        select(ExternalComplaint.follower, func.count())
-        .where(ExternalComplaint.follower.isnot(None))
-        .group_by(ExternalComplaint.follower)
+    external_by_handler = db.execute(
+        _tk_where(select(handler_expr, func.count()).where(src_expr == "外部投诉"))
+        .where(handler_expr.isnot(None))
+        .group_by(handler_expr)
         .order_by(func.count().desc())
         .limit(20)
     ).all()
-    external_by_handler = [{"name": r[0], "count": int(r[1] or 0)} for r in ec_by_handler]
-
-    ec_trend = db.execute(
-        select(func.date_trunc("day", ExternalComplaint.complaint_date), func.count())
-        .group_by(func.date_trunc("day", ExternalComplaint.complaint_date))
-        .order_by(func.date_trunc("day", ExternalComplaint.complaint_date))
+    external_trend = db.execute(
+        _tk_where(select(_day_trunc(ServiceTicket.register_time), func.count()).where(src_expr == "外部投诉"), use_action_time=False)
+        .group_by(_day_trunc(ServiceTicket.register_time))
+        .order_by(_day_trunc(ServiceTicket.register_time))
     ).all()
-    external_trend = _trend(ec_trend)
+
+    def _handler_rows(rows):
+        """归一化处理人后聚合 by_handler 结果,过滤系统值."""
+        agg: dict[str, int] = {}
+        for r in rows:
+            nm = _norm_handler(r[0])
+            if nm == "未分配":
+                continue
+            agg[nm] = agg.get(nm, 0) + int(r[1] or 0)
+        return [{"name": k, "count": v} for k, v in sorted(agg.items(), key=lambda x: -x[1])]
+
+    # ---- 积压未处理投诉(全量未完成, 不限今日) ----
+    # 口径: 投诉类工单, status 不在已完成类集合, 且无真实 finish_time
+    _done_status_set = {"已结案", "已完成", "完成", "已解决", "已回复", "已反馈", "已关闭", "终止", "已终止"}
+    _backlog_stmt = (
+        select(func.count())
+        .where(_ticket_category_case() == "投诉")
+        .where(
+            or_(
+                ServiceTicket.status.is_(None),
+                ServiceTicket.status == "",
+                ~ServiceTicket.status.in_(_done_status_set),
+            )
+        )
+    )
+    # 额外排除: finish_time明显晚于register_time的(虽status未更新但实际已完成)
+    backlog_total = db.scalar(_backlog_stmt) or 0
+    # 按分类统计积压
+    _backlog_cat_stmt = (
+        select(ServiceTicket.service_item, func.count())
+        .where(_ticket_category_case() == "投诉")
+        .where(
+            or_(
+                ServiceTicket.status.is_(None),
+                ServiceTicket.status == "",
+                ~ServiceTicket.status.in_(_done_status_set),
+            )
+        )
+        .group_by(ServiceTicket.service_item)
+        .order_by(func.count().desc())
+        .limit(20)
+    )
+    backlog_by_cat = [
+        {"name": r[0] or "未标注", "count": int(r[1] or 0)}
+        for r in db.execute(_backlog_cat_stmt).all()
+    ]
 
     return R(
         data={
+            "backlog": {
+                "total": int(backlog_total),
+                "by_category": backlog_by_cat,
+            },
             "internal": {
                 "total": int(internal_total),
                 "by_category": [{"name": r[0] or "未标注", "count": int(r[1] or 0)} for r in internal_by_cat],
-                "by_handler": [{"name": r[0], "count": int(r[1] or 0)} for r in internal_by_handler],
+                "by_handler": _handler_rows(internal_by_handler),
                 "trend": _trend(internal_trend),
             },
             "merchant": {
-                "total": int(merchant_total),
-                "by_category": merchant_by_cat,
-                "by_handler": merchant_by_handler,
-                "trend": merchant_trend,
+                "total": int(merchant_ticket_total),
+                "by_category": [{"name": r[0] or "未标注", "count": int(r[1] or 0)} for r in merchant_by_cat],
+                "by_handler": _handler_rows(merchant_by_handler),
+                "trend": _trend(merchant_trend),
             },
             "external": {
-                "total": int(external_total),
-                "by_category": external_by_cat,
-                "by_handler": external_by_handler,
-                "trend": external_trend,
+                "total": int(external_ticket_total),
+                "by_category": [{"name": r[0] or "未标注", "count": int(r[1] or 0)} for r in external_by_cat],
+                "by_handler": _handler_rows(external_by_handler),
+                "trend": _trend(external_trend),
             },
         }
     )
@@ -200,13 +381,13 @@ def complaint_detail(
     ts = _parse_dt(start)
     te = _parse_dt_end(end)
     src_expr = _complaint_source_type_case()
-
-    def _iso(dt):
-        return dt.isoformat() if dt else None
+    handler_expr = _handler_fallback_cols()
 
     records: list[dict] = []
 
-    # 1. 服务工单投诉 (内部/商户号/外部按 service_item 归一化)
+    # 1. 服务工单投诉 (主台账) → is_primary=True, 前端排序在前
+    #    查询范围: register_time在区间内(今日新增) OR finish_time在区间内(今日完成)
+    #    解决历史登记但今日才处理完成的工单不出现在明细里的问题
     stmt = (
         select(
             ServiceTicket.ticket_no,
@@ -214,86 +395,66 @@ def complaint_detail(
             src_expr,
             ServiceTicket.service_item,
             ServiceTicket.remark,
-            ServiceTicket.handler,
+            handler_expr,        # 工单 handler: 多级 fallback, 不再只看 handler 字段
             ServiceTicket.register_time,
             ServiceTicket.status,
+            ServiceTicket.finish_time,
         )
         .where(_ticket_category_case() == "投诉")
     )
+    # finish_time 在区间内
+    # 说明: 如果finish_time ≈ register_time(系统默认值),二者几乎相同,
+    # 此时 register_time 和 finish_time 要么同时在范围内,要么同时不在,不会漏掉也不会重复计算.
+    finish_conds = [ServiceTicket.finish_time.isnot(None)]
+    time_conds = []
     if ts:
-        stmt = stmt.where(ServiceTicket.register_time >= ts)
+        time_conds.append(ServiceTicket.register_time >= ts)
+        finish_conds.append(ServiceTicket.finish_time >= ts)
     if te:
-        stmt = stmt.where(ServiceTicket.register_time <= te)
+        time_conds.append(ServiceTicket.register_time <= te)
+        finish_conds.append(ServiceTicket.finish_time <= te)
+    finish_in_range = and_(*finish_conds)
+    if time_conds:
+        reg_in_range = and_(*time_conds)
+        stmt = stmt.where(or_(reg_in_range, finish_in_range))
+    else:
+        stmt = stmt.where(finish_in_range)
     if source_type:
         stmt = stmt.where(src_expr == source_type)
-    for r in db.execute(stmt.order_by(ServiceTicket.register_time.desc().nulls_last())).all():
+    # 按"动作时间"排序: 用 GREATEST(register_time, COALESCE(finish_time, register_time)) 近似最近动作时间
+    action_time = func.greatest(
+        ServiceTicket.register_time,
+        func.coalesce(ServiceTicket.finish_time, ServiceTicket.register_time),
+    )
+    for r in db.execute(stmt.order_by(action_time.desc().nulls_last())).all():
+        source = r[2] or "内部投诉"
+        raw_status = r[7]
+        raw_handler = r[5]
+        finish = r[8]
+        register = r[6]
+        # 展示时间:取最近动作时间(完成优先于登记,但如果完成时间不合理则用登记时间)
+        display_dt = register
+        if _is_real_finish(finish, register):
+            # finish 在查询区间内(今日完成)或register也在区间内(今日登记今日完成):取较晚者
+            if finish and register and finish > register:
+                display_dt = finish
         records.append({
-            "source": r[2] or "内部投诉",
+            "source": source,
+            "source_role": "primary",
+            "is_primary": True,
             "no": r[0],
             "device_sn": r[1],
             "category": r[3],
             "problem": r[4],
-            "handler": r[5],
-            "time": _iso(r[6]),
-            "status": r[7],
+            "handler": _norm_handler(raw_handler),
+            "time": _to_sh_iso(display_dt),
+            "register_time": _to_sh_iso(register),
+            "finish_time": _to_sh_iso(finish) if _is_real_finish(finish, register) else None,
+            "status": _norm_status(source, raw_status, finish, register, raw_handler),
         })
 
-    # 2. 外部投诉表 (监督局/315等平台投诉)
-    if source_type is None or source_type == "外部投诉":
-        ec_stmt = select(
-            ExternalComplaint.complaint_no,
-            ExternalComplaint.device_sn,
-            ExternalComplaint.complaint_category,
-            ExternalComplaint.problem,
-            ExternalComplaint.follower,
-            ExternalComplaint.complaint_date,
-            ExternalComplaint.result,
-        )
-        if ts:
-            ec_stmt = ec_stmt.where(ExternalComplaint.complaint_date >= ts)
-        if te:
-            ec_stmt = ec_stmt.where(ExternalComplaint.complaint_date <= te)
-        for r in db.execute(ec_stmt.order_by(ExternalComplaint.complaint_date.desc().nulls_last())).all():
-            records.append({
-                "source": "外部投诉",
-                "no": r[0],
-                "device_sn": r[1],
-                "category": r[2],
-                "problem": r[3],
-                "handler": r[4],
-                "time": _iso(r[5]),
-                "status": r[6],
-            })
-
-    # 3. 卡商群投诉 (商户号投诉)
-    if source_type is None or source_type == "商户号投诉":
-        cc_stmt = select(
-            CardComplaint.id,
-            CardComplaint.device_sn,
-            CardComplaint.problem_category,
-            CardComplaint.problem,
-            CardComplaint.handler,
-            CardComplaint.complaint_date,
-            CardComplaint.result,
-        )
-        if ts:
-            cc_stmt = cc_stmt.where(CardComplaint.complaint_date >= ts)
-        if te:
-            cc_stmt = cc_stmt.where(CardComplaint.complaint_date <= te)
-        for r in db.execute(cc_stmt.order_by(CardComplaint.complaint_date.desc().nulls_last())).all():
-            records.append({
-                "source": "商户号投诉",
-                "no": str(r[0]) if r[0] is not None else None,
-                "device_sn": r[1],
-                "category": r[2],
-                "problem": r[3],
-                "handler": r[4],
-                "time": _iso(r[5]),
-                "status": r[6],
-            })
-
-    # 合并后按时间降序
-    records.sort(key=lambda x: x["time"] or "", reverse=True)
+    # 按动作时间降序排列
+    records.sort(key=lambda x: x.get("time") or "", reverse=True)
     return R(data={"items": records[:limit], "total": len(records)})
 
 

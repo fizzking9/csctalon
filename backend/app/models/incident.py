@@ -73,6 +73,19 @@ class Incident(IDMixin, TimestampMixin, Base):
     is_closed: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, comment="是否闭环(与状态解耦)"
     )
+    # ---- 周期性事件(2026-08-19): 广告推送/定期维护等阶段性影响事件 ----
+    is_recurring: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, comment="是否周期性事件(广告推送/定期维护等阶段性影响)"
+    )
+    recurrence_pattern: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, comment="周期模式: daily/weekly/weekday/monthly(is_recurring=True时生效)"
+    )
+    valid_from: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True, comment="周期生效起始(含)"
+    )
+    valid_to: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="周期生效结束(含, NULL=无限期)"
+    )
 
 
 class IncidentFollowup(IDMixin, TimestampMixin, Base):

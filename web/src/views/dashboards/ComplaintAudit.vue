@@ -2,15 +2,15 @@
   <div class="page-container">
     <div class="flex-between mb-16">
       <div>
-        <div class="page-title" style="margin: 0">投诉审计</div>
-        <div class="page-sub">单个投诉审计: 设备SN / 涉及人员 / 接待过程 / 归因 / 审计结论</div>
+        <div class="page-title" style="margin: 0">投诉处理核查</div>
+        <div class="page-sub">投诉核查: 设备SN / 涉及人员 / 接待过程 / 归因 / 核查结论</div>
       </div>
     </div>
 
     <el-row :gutter="16">
       <el-col :xs="24" :lg="10">
         <el-card class="mb-16">
-          <template #header><span style="font-weight: 600">新增审计</span></template>
+          <template #header><span style="font-weight: 600">新增核查</span></template>
           <el-form :model="form" label-width="90px">
             <el-form-item label="来源">
               <el-select v-model="form.source_type" style="width: 100%">
@@ -33,17 +33,17 @@
                 <el-radio-button label="需改进" />
               </el-radio-group>
             </el-form-item>
-            <el-form-item label="审计结论">
-              <el-input v-model="form.conclusion" type="textarea" :rows="4" placeholder="审计结论" />
+            <el-form-item label="核查结论">
+              <el-input v-model="form.conclusion" type="textarea" :rows="4" placeholder="核查结论" />
             </el-form-item>
             <el-form-item>
-              <el-button type="primary" :loading="submitting" @click="handleSave">保存审计</el-button>
+              <el-button type="primary" :loading="submitting" @click="handleSave">保存核查</el-button>
             </el-form-item>
           </el-form>
         </el-card>
 
         <el-card>
-          <template #header><span style="font-weight: 600">已审计列表</span></template>
+          <template #header><span style="font-weight: 600">核查记录</span></template>
           <el-table :data="audits" v-loading="loading" border stripe size="small" max-height="360">
             <el-table-column label="来源" width="90">
               <template #default="{ row }">{{ sourceLabel(row.source_type) }}</template>
@@ -51,7 +51,7 @@
             <el-table-column prop="device_sn" label="SN" width="130" />
             <el-table-column prop="attribution" label="归因" width="100" />
             <el-table-column prop="conclusion" label="结论" show-overflow-tooltip />
-            <el-table-column label="审计时间" width="140">
+            <el-table-column label="核查时间" width="140">
               <template #default="{ row }">{{ formatTime(row.audited_at) }}</template>
             </el-table-column>
           </el-table>
@@ -132,7 +132,7 @@ async function handleSave() {
   submitting.value = true
   try {
     await createAudit({ ...form })
-    ElMessage.success('审计已保存')
+    ElMessage.success('核查已保存')
     form.conclusion = ''
     loadAudits()
   } finally {

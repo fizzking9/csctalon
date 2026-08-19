@@ -4151,6 +4151,33 @@ def today_refund_breakdown(db: Session, date: str | None = None, start: str | No
     }
 
 
+def _recurring_matches_today(pattern: str | None, valid_from, target_date) -> bool:
+    """判断周期性事件在 target_date 当日是否生效.
+    pattern: daily(每日) / weekly(同周几) / weekday(工作日) / monthly(同日)
+    valid_from: 周期起始(用于确定 周几/几号 基准). 无 pattern 默认按 daily.
+    """
+    if pattern is None or pattern == "" or pattern == "daily":
+        return True
+    vf = valid_from
+    if vf is None:
+        return True
+    # 统一取 weekday(0=Mon..6=Sun) 与 day(月内日)
+    try:
+        vf_wd = vf.weekday() if hasattr(vf, "weekday") else None
+        vf_day = vf.day if hasattr(vf, "day") else None
+        tgt_wd = target_date.weekday() if hasattr(target_date, "weekday") else None
+        tgt_day = target_date.day if hasattr(target_date, "day") else None
+    except Exception:
+        return True
+    if pattern == "weekly":
+        return vf_wd is not None and tgt_wd is not None and vf_wd == tgt_wd
+    if pattern == "weekday":
+        return tgt_wd is not None and tgt_wd < 5  # 周一~周五
+    if pattern == "monthly":
+        return vf_day is not None and tgt_day is not None and vf_day == tgt_day
+    return True
+
+
 def today_queue(db: Session, date: str | None = None, start: str | None = None, end: str | None = None) -> dict[str, Any]:
     """模块5: 今日处理队列 = 今日截止待办 + 进行中专项 + 今日异常事件.
     每项最多10条, 点击可跳转详情页.
@@ -4206,23 +4233,74 @@ def today_queue(db: Session, date: str | None = None, start: str | None = None, 
         "deadline": r.deadline.isoformat() if r.deadline else None,
     } for r in task_rows]
 
-    # 3. 今日异常事件: occurred_at或created_at 落在今天
+    # 3. 今日影响事件:
+    #    (a) 未闭环(is_closed=False)的非周期事件 持续每天显示, 直到闭环 —— "状态不注明就持续影响每天"
+    #    (b) 当日新发生/登记的非周期事件
+    #    (c) 周期性事件(is_recurring=True): 在 [valid_from, valid_to] 生效区间内 + 周期模式命中当日
+    #        用于广告推送/定期维护等阶段性影响, 每日生效时明确显示
+    #    排序: 周期性/未闭环在前(按发生时间倒序), 已闭环的当日事件在后
     inc_between = or_(
         and_(Incident.occurred_at.isnot(None), Incident.occurred_at >= today_start, Incident.occurred_at <= today_end),
         and_(Incident.created_at.isnot(None), Incident.created_at >= today_start, Incident.created_at <= today_end),
     )
-    inc_rows = db.execute(
+    # 非周期事件: 未闭环 或 当日发生
+    non_recur_rows = db.execute(
         select(Incident.id, Incident.title, Incident.status, Incident.subject,
-               Incident.occurred_at, Incident.duration_minutes)
-        .where(inc_between)
-        .order_by(Incident.occurred_at.desc().nullslast(), Incident.created_at.desc())
+               Incident.occurred_at, Incident.duration_minutes, Incident.is_closed,
+               Incident.severity, Incident.is_recurring, Incident.recurrence_pattern)
+        .where(Incident.is_recurring == False, or_(Incident.is_closed == False, inc_between))  # noqa: E712
+        .order_by(Incident.is_closed.asc(), Incident.occurred_at.desc().nullslast(), Incident.created_at.desc())
         .limit(10)
     ).all()
+    seen_ids = {r.id for r in non_recur_rows}
     incidents = [{
         "id": r.id, "title": r.title, "status": r.status, "subject": r.subject,
         "occurred_at": r.occurred_at.isoformat() if r.occurred_at else None,
         "duration_minutes": r.duration_minutes,
-    } for r in inc_rows]
+        "is_closed": bool(r.is_closed),
+        "severity": r.severity,
+        "is_recurring": False, "recurrence_pattern": None,
+    } for r in non_recur_rows]
+
+    # 周期性事件: 生效区间覆盖当日 + 周期模式命中
+    recur_rows = db.execute(
+        select(Incident.id, Incident.title, Incident.status, Incident.subject,
+               Incident.occurred_at, Incident.duration_minutes, Incident.is_closed,
+               Incident.severity, Incident.is_recurring, Incident.recurrence_pattern,
+               Incident.valid_from, Incident.valid_to)
+        .where(
+            Incident.is_recurring == True,  # noqa: E712
+            Incident.valid_from.isnot(None),
+            Incident.valid_from <= today_end,
+            or_(Incident.valid_to.is_(None), Incident.valid_to >= today_start),
+        )
+        .order_by(Incident.occurred_at.desc().nullslast())
+        .limit(30)
+    ).all()
+    # 当日目标日期(本地时区)用于周期模式命中判定
+    target_date = today_start.astimezone(TZ).date() if today_start.tzinfo else today_start.date()
+    for r in recur_rows:
+        if r.id in seen_ids:
+            continue
+        if not _recurring_matches_today(r.recurrence_pattern, r.valid_from, target_date):
+            continue
+        seen_ids.add(r.id)
+        incidents.append({
+            "id": r.id, "title": r.title, "status": r.status, "subject": r.subject,
+            "occurred_at": r.occurred_at.isoformat() if r.occurred_at else None,
+            "duration_minutes": r.duration_minutes,
+            "is_closed": bool(r.is_closed),
+            "severity": r.severity,
+            "is_recurring": True, "recurrence_pattern": r.recurrence_pattern,
+        })
+    # 周期性在前, 其次未闭环, 最后已闭环当日
+    def _inc_sort_key(inc):
+        return (
+            0 if inc["is_recurring"] else (1 if not inc["is_closed"] else 2),
+            inc["occurred_at"] or "",
+        )
+    incidents.sort(key=_inc_sort_key, reverse=True)
+    incidents = incidents[:10]
 
     return {
         "date": d_iso,
@@ -4257,10 +4335,12 @@ def today_staff_efficiency(
          系统自动产生的记录排除: cs_record 中 sys/system/系统自动 等 operator,
          以及 description/execution_result/solution 中明确是自动触发的关键词.
 
-    本职判定:
-      - HR 预设专项 与 计算专项 同一大类 → 本职, 全系数
-      - 岗位=主管/组长, 或HR专项属于管理层/投诉 → 全部本职, 豁免转接惩罚
-      - HR未登记的新人 → 默认全部本职 (避免新人刚进来全部被打折)
+    本职判定 (2026-08-19 v4 三级豁免):
+      - ①岗位精确: 主管/组长/副主管 → 全豁免
+      - ②岗位模式: 岗位含"专员"(投诉专员/应急专员/退款挽回专员/...) → 全豁免
+      - ③专项兜底: 专项属投诉/应急/退款挽回类 → 全豁免 (即使岗位不含"专员")
+      - 常规人员: HR预设专项与计算专项同一大类 → 本职全系数; 跨类 → 转接固定0.2
+      - HR未登记新人 → 默认全部本职 (避免新人刚进来全部被打折)
 
     非本职 = 跨专项转接, 固定折算 TRANSFER_PENALTY (0.2), 不再 × 专项难度系数.
     系统/用户自助 虚拟账户 → 不进真人员工排名, 补在末尾 rank=NULL.
@@ -4741,6 +4821,16 @@ def today_staff_efficiency(
     #   本职 → coef = WEIGHT[hr_cat] (本人主专项系数)
     #   转接 → coef = TRANSFER_PENALTY (固定, 不再乘以 WEIGHT[c])
     #   管理岗 → coef = CAT_DEFAULT_WEIGHT[cat] (大类默认系数, 跨类豁免全系数)
+    #   专项岗(投诉/应急等) → coef = CAT_DEFAULT_WEIGHT[cat] (同管理岗, 跨类全豁免)
+    # 2026-08-19 扩展: 投诉专员/应急专员 等专项岗 获得同管理岗跨类全豁免待遇
+    # 豁免判定三级制:
+    #   ① 岗位精确匹配: 主管/组长/副主管 → 全豁免
+    #   ② 岗位模式匹配: 位置含"专员" → 全豁免 (投诉专员/应急专员/退款挽回专员/...)
+    #   ③ 专项精确+模式匹配: 专项为投诉/应急/退款挽回类 → 全豁免 (即使岗位不含"专员")
+    EXEMPT_POSITIONS = {"主管", "组长", "副主管"}
+    EXEMPT_POSITION_PATTERNS = ("专员",)  # 岗位名称含"专员" → 跨类全豁免
+    EXEMPT_CATEGORIES = {"内部投诉", "外部投诉", "退款挽回"}  # 专项精确名称
+    EXEMPT_CATEGORY_PATTERNS = ("投诉", "应急", "退款挽回")  # 专项名称含这些关键词 → 跨类全豁免
     SYSTEM_VIRTUAL_EXACT = {
         "用户自助", "系统自动", "客户自助", "企微用户自助", "企微系统自动",
         # 2026-08-11 补充: 实测今年范围内出现的系统/第三方账户
@@ -4792,12 +4882,26 @@ def today_staff_efficiency(
         return False
 
     def _hr_map(hr_sp: str | None, pos: str | None) -> str | None:
-        """人员主专项归一化映射 (2026-08-10 细分后)
+        """人员主专项归一化映射 (2026-08-19 修订)
         返回: 专项名称 | "管理层" | None
+        
+        新增: 专项岗(专员)显式识别, 与管理岗同等待遇 → 跨类全豁免
         """
-        # 管理岗（主管/组长）→ 跨类全豁免
+        # ① 管理岗（主管/组长/副主管）→ 跨类全豁免
         if (pos or "") in ("主管", "组长", "副主管"):
             return "管理层"
+        # ② 专项岗(专员) 显式识别: 投诉专员/应急专员/退款挽回专员 等
+        #    即使 hr_sp 为空, 也按岗位名称识别专项类别
+        p = (pos or "").strip()
+        if "专员" in p:
+            if "投诉" in p:
+                return "外部投诉" if "外部" in p else "内部投诉"
+            if "挽回" in p:
+                return "退款挽回"
+            if "应急" in p:
+                return "内部投诉"  # 应急专员默认归为内部投诉类(跨类全豁免)
+            # 其他专员 → 默认按内部投诉(高难度系数)处理
+            return "内部投诉"
         if not hr_sp:
             return None
         # 精确匹配6个标准专项名称
@@ -4934,10 +5038,20 @@ def today_staff_efficiency(
         reception_count = max(rc, reception_count)
 
         position = r.pos or ""
-        # 管理岗判定: 主管/组长/副主管 → 跨类全系数豁免
-        mgmt = (position in ("主管", "组长", "副主管"))
-        # 当前主专项（用于展示，不作为唯一计算依据）
+        # 跨类全豁免判定 (三级制):
+        #   ① 岗位精确匹配: 主管/组长/副主管
+        #   ② 岗位模式匹配: 位置含"专员" (投诉专员/应急专员/退款挽回专员/...)
+        #   ③ 专项精确+模式匹配: 专项为投诉/应急/退款挽回类
+        mgmt = (
+            position in EXEMPT_POSITIONS
+            or any(p in position for p in EXEMPT_POSITION_PATTERNS)
+        )
+        # 当前主专项（用于展示和兜底判定）
         hr_cat = _hr_map(r.sp, position)
+        # 专项岗豁免: 即使岗位不含"专员", 只要专项属于投诉/应急/退款挽回类 → 跨类全系数
+        if not mgmt and hr_cat:
+            if hr_cat in EXEMPT_CATEGORIES or any(p in hr_cat for p in EXEMPT_CATEGORY_PATTERNS):
+                mgmt = True
 
         # 2026-08-14: 按天加权平均系数 - 替代单一 hr_cat
         pid = r.person_id
@@ -4948,6 +5062,19 @@ def today_staff_efficiency(
         if total_days == 0 and hr_cat is not None and pid:
             sp_days = {hr_cat: len(date_list)}
             total_days = len(date_list)
+        # 2026-08-19 增强: SCD 数据与 Person.specialty 不符时的兜底策略
+        # 场景: SCD 有旧数据但 Person.specialty 已更新(如覃克泳:Person.specialty=退款挽回但 SCD 只有咨询接待)
+        # 策略:
+        #   a) SCD 与 Person.specialty 一致 → 完全信任 SCD (保持原行为)
+        #   b) SCD 完全不含 Person.specialty → 覆盖:sp_days 全部按 hr_cat 计
+        #   c) SCD 部分匹配 → SCD 保持, 额外追加 hr_cat 一天作为加权
+        if total_days > 0 and hr_cat is not None:
+            sp_cat_from_scd = {_hr_map(sp_name, position) for sp_name in sp_days.keys() if _hr_map(sp_name, position)}
+            if hr_cat not in sp_cat_from_scd and total_days <= len(date_list):
+                # 场景(b): SCD 完全不含 Person.specialty → 整个 sp_days 覆盖为 hr_cat
+                # 用 hr_cat 覆盖所有 SCD 天 (SCD 是旧的, Person.specialty 是当前真实的)
+                sp_days = {hr_cat: total_days}
+                total_days = total_days
 
         work_score = 0.0; eff_score = 0.0
         bd: dict[str, dict[str, Any]] = {}
@@ -4972,8 +5099,8 @@ def today_staff_efficiency(
                         own_days += days
                     else:
                         weighted_coef += TRANSFER_PENALTY * days
-                coef = weighted_coef / total_days
-                own = own_days > total_days / 2  # 大部分天数是本职则标记为本职
+                coef = weighted_coef / total_days if total_days > 0 else TRANSFER_PENALTY
+                own = own_days > total_days / 2
             elif hr_cat is not None and hr_cat in sp_set:
                 # 回退: 无按天数据时使用单一 hr_cat
                 own = True
@@ -5025,7 +5152,7 @@ def today_staff_efficiency(
             "_calc_note": {
                 "sessions_merge": "会话次数(次)=cs_record条数 + 对应专项工单完工条数; 退款挽回=退款类接待; 退款处理=实际退款操作+退款工单",
                 "sn_merge_rule": "接待个数(个)=智能助手SN ∪ 工单SN 跨表去重, 按人员×专项独立核算; 排除sys/system/系统自动产生的记录",
-                "weight_rule": "本职: 主专项系数(外诉×5.0/内诉×3.0/退款挽回×2.2/退款处理×2.0/套餐×1.8/咨询×1.0); 转接: 固定×0.2; 管理岗: 各专项默认系数",
+                "weight_rule": "本职: 主专项系数(外诉×5.0/内诉×3.0/退款挽回×2.2/退款处理×2.0/套餐×1.8/咨询×1.0); 转接: 固定×0.2; 管理岗/专员岗: 各专项默认系数(跨类全豁免,三级判定:①岗位=主管/组长/副主管 ②岗位含\"专员\" ③专项属投诉/应急/退款挽回类)",
                 "recovery_def": "退款挽回: cs_record接待problem_category='退款'的客户(沟通挽留工作)",
                 "processing_def": "退款处理: refunds表实际退款操作 + service_tickets退款类工单完工(执行退款)",
             },
@@ -5251,8 +5378,24 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
         return ~and_(*[func.coalesce(col, "").ilike(f"%{k}%") for k in SYS_KW])
 
     def _hr_map(hr_sp: str | None, pos: str | None) -> str | None:
+        """人员主专项归一化映射 (2026-08-19 修订)
+        返回: 专项名称 | "管理层" | None
+        
+        新增: 专项岗(专员)显式识别, 与管理岗同等待遇 → 跨类全豁免
+        """
+        # ① 管理岗（主管/组长/副主管）→ 跨类全豁免
         if (pos or "") in ("主管", "组长", "副主管"):
             return "管理层"
+        # ② 专项岗(专员) 显式识别: 投诉专员/应急专员/退款挽回专员 等
+        p = (pos or "").strip()
+        if "专员" in p:
+            if "投诉" in p:
+                return "外部投诉" if "外部" in p else "内部投诉"
+            if "挽回" in p:
+                return "退款挽回"
+            if "应急" in p:
+                return "内部投诉"
+            return "内部投诉"
         if not hr_sp:
             return None
         s = (hr_sp or "").strip()
@@ -6378,11 +6521,24 @@ def refund_recovery_analysis(
 
     # ---- HR 专项 映射 (2026-08-10 细分后版本, 与 today_staff_efficiency 保持一致) ----
     def _hr_map(hr_sp: str | None, pos: str | None) -> str | None:
-        """人员主专项归一化映射
+        """人员主专项归一化映射 (2026-08-19 修订)
         返回: 专项名称 | "管理层" | None
+        
+        新增: 专项岗(专员)显式识别, 与管理岗同等待遇 → 跨类全豁免
         """
+        # ① 管理岗（主管/组长/副主管）→ 跨类全豁免
         if (pos or "") in ("主管", "组长", "副主管"):
             return "管理层"
+        # ② 专项岗(专员) 显式识别: 投诉专员/应急专员/退款挽回专员 等
+        p = (pos or "").strip()
+        if "专员" in p:
+            if "投诉" in p:
+                return "外部投诉" if "外部" in p else "内部投诉"
+            if "挽回" in p:
+                return "退款挽回"
+            if "应急" in p:
+                return "内部投诉"
+            return "内部投诉"
         if not hr_sp:
             return None
         s = (hr_sp or "").strip()
@@ -6409,7 +6565,7 @@ def refund_recovery_analysis(
                 func.coalesce(P.display_name, PA.alias).label("display_name"),
                 P.group_name,
                 func.coalesce(P.specialty, P.primary_specialty).label("specialty"),
-                P.position, P.department,
+                P.position, P.department, P.qw_user_id,
             )
             .select_from(PA)
             .outerjoin(P, PA.person_id == P.id)
@@ -6433,6 +6589,7 @@ def refund_recovery_analysis(
             "specialty": pr.specialty,
             "position": pr.position,
             "dept": pr.department or "未设置",
+            "qw_user_id": pr.qw_user_id,
             "hr_cat": hr_cat,
             "is_recovery_staff": _is_refund_staff(pr.group_name, hr_cat),
         }
@@ -6501,6 +6658,7 @@ def refund_recovery_analysis(
                     "specialty": p.specialty or None,
                     "position": p.position or "",
                     "dept": p.department or "未设置",
+                    "qw_user_id": getattr(p, "qw_user_id", None),
                     "is_recovery_staff": (p.specialty in REFUND_RECOVERY_HR_CATS),
                 }
             else:
@@ -6511,6 +6669,7 @@ def refund_recovery_analysis(
                     "specialty": None,
                     "position": "",
                     "dept": "未设置",
+                    "qw_user_id": None,
                     "is_recovery_staff": False,
                 }
 
@@ -6711,7 +6870,7 @@ def refund_recovery_analysis(
     for op in refund_op_sns.keys():
         if op not in staff_operators and op not in SYS_OP_BLACKLIST_RR:
             # 纯退款执行人 (没出现在 CS 接待侧) → 从维表补 meta
-            staff_operators[op] = {"person_id": None, "name": op, "group": "退款执行", "specialty": None, "position": "退款执行人", "dept": "售后"}
+            staff_operators[op] = {"person_id": None, "name": op, "group": "退款执行", "specialty": None, "position": "退款执行人", "dept": "售后", "qw_user_id": None}
     # 再精确补一次维表信息(有可能维表里有但之前没圈进来)
     for pr in person_rows:
         op = pr.operator or ""
@@ -6725,6 +6884,8 @@ def refund_recovery_analysis(
                 info["position"] = pr.position or info.get("position")
             info["dept"] = pr.department or info.get("dept") or "未设置"
             info["name"] = pr.display_name or op
+            if not info.get("qw_user_id"):
+                info["qw_user_id"] = getattr(pr, "qw_user_id", None)
 
     # ---- 5b. 按 person_id 归一合并多 alias, 避免同一人显示多次 (2026-08-12) ----
     #   person_id 相同的 alias: 合倂 op_host_sns / refund_op_sns / refund_op_amt, 选 canonical op
@@ -6767,6 +6928,19 @@ def refund_recovery_analysis(
             # 移除 alias 条目
             staff_operators.pop(alias, None)
 
+    def _is_qw_person(op: str, info: dict) -> bool:
+        """企微人员判定: 别名以'企微'开头 / 部门为'企微' / 已绑定企微 qw_user_id。
+        用于过滤退款挽回详情里 非企微(店铺/研发/生产/财务/测试等)人员 与 纯占位人员,
+        避免大量 0 数据或无关人员干扰明细统计与展示。
+        """
+        if (op or "").startswith("企微"):
+            return True
+        if (info.get("dept") or "") == "企微":
+            return True
+        if (info.get("qw_user_id") or "").strip():
+            return True
+        return False
+
     staff_detail = []
     for op, info in staff_operators.items():
         # CS 接待工作量: 接待的真退款类SN
@@ -6784,6 +6958,9 @@ def refund_recovery_analysis(
 
         # 跳过既没有接待也没有退款操作的人员 (避免无关人员出现在列表中)
         if total_cs == 0 and ro_cnt == 0:
+            continue
+        # 跳过非企微人员 (店铺/研发/生产/财务/测试等), 明细仅保留企微侧人员
+        if not _is_qw_person(op, info):
             continue
             
         # 成功率口径: 基于 CS 接待侧
@@ -6821,6 +6998,9 @@ def refund_recovery_analysis(
         sn_result_map[sn] = "failed" if sn in global_fail_sns else "success"
     # 按 (staff, sn) 聚合: 每人只保留自己接待过的 SN, 避免重复展示
     for op, info in staff_operators.items():
+        # SN 明细同样仅保留企微侧人员, 与 staff_detail 过滤口径一致
+        if not _is_qw_person(op, info):
+            continue
         cs_host = op_host_sns.get(op, set())
         op_display = info.get("name") or op
         op_group = info.get("group") or "未分组"

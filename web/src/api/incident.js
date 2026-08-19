@@ -1,21 +1,21 @@
 import request from '@/api'
 
-// 异常事件列表(分页,支持 status/start/end)
+// 影响事件列表(分页,支持 status/start/end)
 export function listIncidents(params) {
   return request.get('/incidents', { params })
 }
 
-// 异常事件详情
+// 影响事件详情
 export function getIncident(id) {
   return request.get(`/incidents/${id}`)
 }
 
-// 登记异常事件
+// 登记影响事件
 export function createIncident(payload) {
   return request.post('/incidents', payload)
 }
 
-// 更新异常事件
+// 更新影响事件
 export function updateIncident(id, payload) {
   return request.put(`/incidents/${id}`, payload)
 }
@@ -25,7 +25,7 @@ export function convertIncident(id, payload) {
   return request.post(`/incidents/${id}/convert`, payload)
 }
 
-// 删除异常事件
+// 删除影响事件
 export function deleteIncident(id) {
   return request.delete(`/incidents/${id}`)
 }

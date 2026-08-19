@@ -254,7 +254,7 @@
             <div class="preset-grid">
               <div class="preset-item" @click="$router.push('/management/incidents')">
                 <el-icon color="#f56c6c"><WarningFilled /></el-icon>
-                <span class="preset-name">异常事件</span>
+                <span class="preset-name">影响事件</span>
                 <el-icon class="preset-arrow"><ArrowRight /></el-icon>
               </div>
               <div class="preset-item" @click="$router.push('/management/schedule')">
@@ -404,7 +404,7 @@
               </div>
               <div class="preset-item" @click="$router.push('/management/incidents')">
                 <el-icon color="#f56c6c"><WarningFilled /></el-icon>
-                <span class="preset-name">异常事件</span>
+                <span class="preset-name">影响事件</span>
                 <el-icon class="preset-arrow"><ArrowRight /></el-icon>
               </div>
               <div class="preset-item" @click="$router.push('/management/alerts')">

@@ -66,7 +66,7 @@
           <el-select v-model="ruleForm.type" style="width: 100%">
             <el-option label="退款激增" value="refund_surge" />
             <el-option label="工单积压" value="ticket_backlog" />
-            <el-option label="异常事件" value="incident_surge" />
+            <el-option label="影响事件" value="incident_surge" />
           </el-select>
         </el-form-item>
         <el-form-item label="阈值"><el-input-number v-model="ruleForm.threshold" :min="1" style="width: 100%" /></el-form-item>
@@ -95,7 +95,7 @@ const submitting = ref(false)
 const ruleVisible = ref(false)
 const ruleForm = reactive({ name: '', type: 'refund_surge', threshold: 100 })
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-')
-const ruleTypeLabel = (t) => ({ refund_surge: '退款激增', ticket_backlog: '工单积压', incident_surge: '异常事件' }[t] || t)
+const ruleTypeLabel = (t) => ({ refund_surge: '退款激增', ticket_backlog: '工单积压', incident_surge: '影响事件' }[t] || t)
 const levelType = (l) => ({ high: 'danger', medium: 'warning', low: 'info' }[l] || 'info')
 const levelLabel = (l) => ({ high: '高', medium: '中', low: '低' }[l] || l)
 const alertStatusType = (s) => ({ pending: 'warning', confirmed: 'success', ignored: 'info' }[s] || 'info')

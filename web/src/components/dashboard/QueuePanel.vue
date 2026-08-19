@@ -50,14 +50,14 @@
       </el-card>
     </el-col>
 
-    <!-- 异常事件 -->
+    <!-- 影响事件 -->
     <el-col :xs="24" :md="8">
       <el-card shadow="hover" class="queue-card">
         <template #header>
           <div class="flex-between">
             <span class="queue-title">
               <el-icon color="#f56c6c"><Warning /></el-icon>
-              {{ incidentTitle || '今日异常事件' }}
+              {{ incidentTitle || '今日影响事件' }}
             </span>
             <el-badge :value="(incidents || []).length" :max="99" />
           </div>
@@ -70,7 +70,7 @@
             <span class="queue-item-title">{{ inc.title }}</span>
             <span class="queue-deadline">{{ fmtDeadline(inc.occurred_at, 'time') }}</span>
           </div>
-          <el-empty v-if="!(incidents || []).length" :description="incidentEmptyDesc || '今日无异常事件 ✅'" :image-size="60" />
+          <el-empty v-if="!(incidents || []).length" :description="incidentEmptyDesc || '今日无影响事件 ✅'" :image-size="60" />
         </div>
       </el-card>
     </el-col>

@@ -117,7 +117,7 @@ const routes = [
         path: 'dashboards/complaint-audit',
         name: 'ComplaintAudit',
         component: () => import('@/views/dashboards/ComplaintAudit.vue'),
-        meta: { title: '投诉审计', icon: 'Warning', manager: true },
+        meta: { title: '投诉处理核查', icon: 'Warning', manager: true },
       },
       {
         path: 'dashboards/reception',
@@ -179,18 +179,18 @@ const routes = [
         component: () => import('@/views/analytics/Operator.vue'),
         meta: { title: '人员操作', icon: 'User' },
       },
-      // 审计时序页(隐藏入口,从设备/人员详情跳转或直接访问)
+      // 行为分析时序页(隐藏入口,从设备/人员详情或右上角快捷工具跳转)
       {
         path: 'audit/device',
         name: 'AuditDevice',
         component: () => import('@/views/audit/DeviceAudit.vue'),
-        meta: { title: '设备审计', hidden: true },
+        meta: { title: '设备分析', hidden: true },
       },
       {
         path: 'audit/person',
         name: 'AuditPerson',
         component: () => import('@/views/audit/PersonAudit.vue'),
-        meta: { title: '人员审计', hidden: true },
+        meta: { title: '人员分析', hidden: true },
       },
       // 待办
       {
@@ -279,7 +279,7 @@ const routes = [
         path: 'management/incidents',
         name: 'ManagementIncidents',
         component: () => import('@/views/management/Incidents.vue'),
-        meta: { title: '异常事件', icon: 'Warning', manager: true },
+        meta: { title: '影响事件', icon: 'Warning', manager: true },
       },
       {
         path: 'management/device-tags',

@@ -1,10 +1,10 @@
 <template>
   <div class="audit-view">
-    <div class="flex-between mb-16">
+    <div class="flex-between mb-16 av-header">
       <div class="page-title" style="margin: 0">
-        {{ title || (subjectKind === 'person' ? '人员审计时序' : '设备审计时序') }}
+        {{ title || (subjectKind === 'person' ? '人员行为分析' : '设备行为分析') }}
       </div>
-      <div class="flex" style="gap: 8px; align-items: center">
+      <div class="flex av-toolbar">
         <!-- 搜索选择器 -->
         <template v-if="subjectKind === 'person'">
           <el-select
@@ -15,7 +15,7 @@
             placeholder="搜索人员姓名"
             :remote-method="searchPersons"
             :loading="searching"
-            :style="{ width: searchWidth }"
+            class="av-select"
             @change="onSubjectChange"
           >
             <el-option
@@ -35,7 +35,7 @@
             placeholder="输入设备 SN 搜索"
             :remote-method="searchDevices"
             :loading="searching"
-            :style="{ width: searchWidth }"
+            class="av-select"
             @change="onSubjectChange"
           >
             <el-option
@@ -47,7 +47,7 @@
           </el-select>
         </template>
 
-        <el-select v-model="days" style="width: 120px" @change="loadTimeline">
+        <el-select v-model="days" class="av-select av-select-sm" @change="loadTimeline">
           <el-option label="当天" :value="1" />
           <el-option label="一周" :value="7" />
           <el-option label="一个月" :value="30" />
@@ -56,64 +56,172 @@
           <el-option label="一年" :value="365" />
           <el-option label="所有" :value="0" />
         </el-select>
-        <el-select v-model="limit" style="width: 100px" @change="loadTimeline">
+        <el-select v-model="limit" class="av-select av-select-sm" @change="loadTimeline">
           <el-option :value="50" label="50 条" />
           <el-option :value="100" label="100 条" />
           <el-option :value="200" label="200 条" />
           <el-option :value="500" label="500 条" />
         </el-select>
-        <el-button type="primary" :icon="Refresh" @click="loadTimeline" :disabled="!hasSubject">刷新</el-button>
+        <el-button type="primary" :icon="Refresh" @click="loadTimeline" :disabled="!hasSubject" size="small">刷新</el-button>
       </div>
     </div>
 
-    <!-- Subject 信息卡片 -->
-    <el-card v-if="subject && subjectKind === 'person'" class="mb-16" shadow="never">
-      <el-descriptions :column="4" border size="small">
-        <el-descriptions-item label="姓名">{{ subject.name }}</el-descriptions-item>
-        <el-descriptions-item label="部门">{{ subject.department || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="角色">{{ subject.role || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="记录总数">{{ total }}</el-descriptions-item>
-        <el-descriptions-item label="归并别名" :span="4">
-          <el-tag
-            v-for="a in subject.aliases || []"
-            :key="a"
-            size="small"
-            effect="plain"
-            style="margin-right: 4px; margin-bottom: 4px"
-          >
-            {{ a }}
-          </el-tag>
-          <span v-if="!(subject.aliases || []).length">-</span>
-        </el-descriptions-item>
-      </el-descriptions>
-    </el-card>
+    <!-- Subject 信息卡片(人事/设备档案 默认折叠, 避免占用主时序区域) -->
+    <el-collapse v-if="subject" class="av-subject-collapse mb-16">
+      <el-collapse-item :name="subjectKind">
+        <template #title>
+          <span class="av-collapse-title">
+            <el-icon><UserFilled v-if="subjectKind === 'person'" /><Monitor v-else /></el-icon>
+            {{ subjectKind === 'person' ? '人事档案' : '设备档案' }}
+            <span class="av-collapse-sub">{{ subjectKind === 'person' ? subject.name : subject.sn }}</span>
+          </span>
+        </template>
+        <div v-if="subjectKind === 'person'" v-loading="extraLoading">
+          <el-descriptions :column="descColumn" border size="small">
+            <el-descriptions-item label="姓名">{{ subject.name }}</el-descriptions-item>
+            <el-descriptions-item label="部门">{{ subject.department || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="分组">{{ personGroupName || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="角色">{{ subject.role || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="在职状态">
+              <el-tag size="small" :type="(personDetail?.employment_status || '').includes('离职') ? 'danger' : (personDetail?.is_active ? 'success' : 'info')" effect="plain">
+                {{ personDetail?.employment_status || (subject.is_active ? '在职' : '-') }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="入职日期">{{ fmtDateOnly(personDetail?.hire_date) }}</el-descriptions-item>
+            <el-descriptions-item label="试用期止">{{ fmtDateOnly(personDetail?.probation_end_date) }}</el-descriptions-item>
+            <el-descriptions-item label="转正日期">{{ fmtDateOnly(personDetail?.regularization_date) }}</el-descriptions-item>
+            <el-descriptions-item label="记录总数">{{ total }}</el-descriptions-item>
+            <el-descriptions-item label="当前专项" :span="descColumn">
+              <el-tag
+                v-for="s in personSpecialties"
+                :key="s.id"
+                size="small"
+                :type="s.is_primary ? 'primary' : 'info'"
+                :effect="s.is_primary ? 'dark' : 'plain'"
+                style="margin-right: 4px; margin-bottom: 4px"
+              >
+                {{ s.name }}{{ s.is_primary ? '(主)' : '' }}
+              </el-tag>
+              <span v-if="!personSpecialties.length">-</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="归并别名" :span="descColumn">
+              <el-tag
+                v-for="a in subject.aliases || []"
+                :key="a"
+                size="small"
+                effect="plain"
+                style="margin-right: 4px; margin-bottom: 4px"
+              >
+                {{ a }}
+              </el-tag>
+              <span v-if="!(subject.aliases || []).length">-</span>
+            </el-descriptions-item>
+          </el-descriptions>
 
-    <el-card v-else-if="subject && subjectKind === 'device'" class="mb-16" shadow="never">
-      <el-descriptions :column="4" border size="small">
-        <el-descriptions-item label="设备 SN">{{ subject.sn }}</el-descriptions-item>
-        <el-descriptions-item label="设备类型">{{ subject.device_type || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="类型备注">{{ subject.device_type_remark || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="商户">{{ subject.merchant_name || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="状态">{{ subject.status || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="激活时间">{{ fmtDate(subject.active_time) }}</el-descriptions-item>
-        <el-descriptions-item label="标签">
-          <el-tag
-            v-for="t in subject.tags || []"
-            :key="t.id"
-            size="small"
-            :color="t.color"
-            style="margin-right: 4px; color: #fff"
-          >
-            {{ t.name }}
-          </el-tag>
-          <span v-if="!(subject.tags || []).length">-</span>
-        </el-descriptions-item>
-        <el-descriptions-item label="记录总数">{{ total }}</el-descriptions-item>
-      </el-descriptions>
-    </el-card>
+          <!-- 近期排班 -->
+          <div class="av-sub-section">
+            <div class="av-sub-title">近期排班 <span class="av-sub-hint">(前14天~后14天)</span></div>
+            <div v-if="schedules.length" class="av-sched-list">
+              <div v-for="s in schedules" :key="s.id" class="av-sched-item">
+                <span class="av-sched-date">{{ s.schedule_date }}</span>
+                <el-tag size="small" :type="s.status === '调班' ? 'warning' : (s.status === '请假' ? 'danger' : 'success')" effect="plain">
+                  {{ s.shift_name || s.status || '-' }}
+                </el-tag>
+                <span class="av-sched-time">{{ fmtTimeRange(s.start_time, s.end_time) }}</span>
+                <span v-if="s.note" class="av-sched-note">{{ s.note }}</span>
+              </div>
+            </div>
+            <div v-else class="av-sub-empty">无排班记录</div>
+          </div>
+        </div>
+        <div v-else v-loading="extraLoading">
+          <el-descriptions :column="descColumn" border size="small" class="av-desc">
+            <el-descriptions-item label="设备 SN" class="av-desc-sn">{{ subject.sn }}</el-descriptions-item>
+            <el-descriptions-item label="设备类型">{{ subject.device_type || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="类型备注">{{ subject.device_type_remark || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="商户">{{ subject.merchant_name || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="状态">{{ subject.status || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="激活时间">{{ fmtDate(subject.active_time) }}</el-descriptions-item>
+            <el-descriptions-item label="标签" :span="descColumn - 1">
+              <el-tag
+                v-for="t in subject.tags || []"
+                :key="t.id"
+                size="small"
+                :color="t.color"
+                style="margin-right: 4px; color: #fff"
+              >
+                {{ t.name }}
+              </el-tag>
+              <span v-if="!(subject.tags || []).length">-</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="记录总数">{{ total }}</el-descriptions-item>
+          </el-descriptions>
+
+          <!-- 套餐&充值&流量汇总 -->
+          <div class="av-sub-section">
+            <div class="av-sub-title">套餐 / 充值 / 流量</div>
+            <div v-if="comboSummary" class="av-combo-summary">
+              <span class="av-cs-item"><b>{{ comboSummary.count }}</b> 笔充值</span>
+              <span class="av-cs-item">总金额 ¥{{ Number(comboSummary.total_amount || 0).toFixed(2) }}</span>
+              <span class="av-cs-item">剩余流量 <b>{{ comboSummary.remaining_traffic_human || '-' }}</b></span>
+            </div>
+            <div v-else class="av-sub-empty">无套餐/充值记录</div>
+
+            <!-- 充值套餐明细(可折叠) -->
+            <el-collapse v-if="comboItems.length" class="av-combo-collapse">
+              <el-collapse-item :title="`充值套餐明细 (${comboItems.length})`">
+                <el-table :data="comboItems" size="small" border stripe max-height="320" class="av-combo-table">
+                  <el-table-column label="套餐" min-width="140" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.package_name || '-' }}<span v-if="row.package_type" class="av-combo-sub"> · {{ row.package_type }}</span></template>
+                  </el-table-column>
+                  <el-table-column label="金额" width="80" align="right">
+                    <template #default="{ row }">{{ row.actual_amount != null ? '¥' + Number(row.actual_amount).toFixed(2) : '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="流量(可用/已用/剩余)" min-width="180" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div class="av-traffic-row">
+                        <span>{{ row.available_traffic_human || '-' }}</span>
+                        <span class="av-traffic-sep">/</span>
+                        <span>{{ row.used_traffic_human || '-' }}</span>
+                        <span class="av-traffic-sep">/</span>
+                        <span class="av-traffic-remain">{{ row.remaining_traffic_human || '-' }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="有效期" width="180" show-overflow-tooltip>
+                    <template #default="{ row }">{{ fmtDateOnly(row.start_date) }} ~ {{ fmtDateOnly(row.end_date) }}</template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="90">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="row.status && row.status.includes('正常') ? 'success' : 'info'" effect="plain">{{ row.status || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </el-collapse-item>
+            </el-collapse>
+          </div>
+
+          <!-- 实时流量查询 -->
+          <div class="av-sub-section av-traffic-section">
+            <div class="av-sub-title">
+              实时流量
+              <el-button size="small" type="primary" plain :loading="trafficLoading" @click="queryTraffic" style="margin-left: 8px">查询实时流量</el-button>
+            </div>
+            <div v-if="trafficInfo" class="av-traffic-result">
+              <template v-if="trafficInfo.device_sn">
+                <span class="av-cs-item">可用 <b>{{ trafficInfo.available_human || trafficInfo.available_bytes || '-' }}</b></span>
+                <span class="av-cs-item">已用 <b>{{ trafficInfo.used_human || trafficInfo.used_bytes || '-' }}</b></span>
+                <span class="av-cs-item">剩余 <b>{{ trafficInfo.remaining_human || trafficInfo.remaining_bytes || '-' }}</b></span>
+              </template>
+              <el-alert v-else :title="trafficInfo._hint || '上游流量接口未接入'" type="info" :closable="false" show-icon style="margin-top: 4px" />
+            </div>
+          </div>
+        </div>
+      </el-collapse-item>
+    </el-collapse>
 
     <!-- 空状态 -->
-    <el-empty v-if="!hasSubject" :description="subjectKind === 'person' ? '请选择人员查看审计时序' : '请选择设备 SN 查看审计时序'" />
+    <el-empty v-if="!hasSubject" :description="subjectKind === 'person' ? '请选择人员查看行为分析' : '请选择设备 SN 查看行为分析'" />
 
     <!-- 时序流 + 明细表双视图 -->
     <AuditTimeline
@@ -121,18 +229,24 @@
       :items="items"
       :type-meta="typeMeta"
       :loading="loading"
+      @sn-click="onSnClick"
     />
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, UserFilled, Monitor } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import AuditTimeline from '@/components/AuditTimeline.vue'
 import { getDeviceTimeline, getPersonTimeline, searchDevices as searchDevicesApi } from '@/api/audit'
-import { listPersons } from '@/api/person'
+import { listPersons, getPerson } from '@/api/person'
+import { listSchedules } from '@/api/schedule'
+import { getLocalComboBySn, queryUpstreamTraffic } from '@/api/recharge'
+import { useAudit } from '@/composables/useAudit'
+
+const { openDeviceAudit } = useAudit()
 
 const props = defineProps({
   /** 审计主体:person 或 device */
@@ -177,6 +291,19 @@ const loading = ref(false)
 const personOptions = ref([])
 const deviceOptions = ref([])
 const searching = ref(false)
+const isMobile = ref(false)
+let _mq = null
+
+// 扩展信息(人员:人事/专项/排班; 设备:套餐/充值/流量)
+const personDetail = ref(null)   // getPerson 返回的完整详情
+const schedules = ref([])        // 近期排班
+const comboData = ref(null)      // 设备套餐&流量
+const trafficInfo = ref(null)    // 上游实时流量(占位, 待接入)
+const trafficLoading = ref(false)
+const extraLoading = ref(false)
+
+// 手机端 desc 展示列数从 4 降到 2, 避免被挤成竖排文字
+const descColumn = computed(() => (isMobile.value ? 2 : 4))
 
 const hasSubject = computed(() =>
   props.subjectKind === 'person' ? !!personId.value : !!sn.value,
@@ -241,9 +368,82 @@ async function loadTimeline() {
     subject.value = data.subject || null
     total.value = data.total || 0
     emit('loaded', data)
+    // 加载扩展信息(人事/专项/排班 或 套餐/流量), 失败不阻塞主时序
+    loadExtraInfo()
   } finally {
     loading.value = false
   }
+}
+
+// 加载扩展信息:人员→人事/专项/排班; 设备→套餐/充值/流量
+async function loadExtraInfo() {
+  personDetail.value = null
+  schedules.value = []
+  comboData.value = null
+  trafficInfo.value = null
+  if (!hasSubject.value) return
+  extraLoading.value = true
+  try {
+    if (props.subjectKind === 'person') {
+      // 排班范围: 前14天~后14天, 覆盖近期与未来排班
+      const start = dayjs().subtract(14, 'day').format('YYYY-MM-DD')
+      const end = dayjs().add(14, 'day').format('YYYY-MM-DD')
+      const [detailRes, schedRes] = await Promise.all([
+        getPerson(personId.value),
+        listSchedules({ person_id: personId.value, start, end }).catch(() => ({ data: [] })),
+      ])
+      personDetail.value = detailRes.data || null
+      schedules.value = schedRes.data || []
+    } else {
+      const res = await getLocalComboBySn(sn.value, { limit: 50 })
+      comboData.value = res.data || null
+    }
+  } catch (e) {
+    // 静默失败, 不影响审计主流程
+    console.warn('[audit] loadExtraInfo failed', e)
+  } finally {
+    extraLoading.value = false
+  }
+}
+
+// 查询上游实时流量(占位接口, 后端未接入真实数据源时返回 _hint)
+async function queryTraffic() {
+  if (!sn.value) return
+  trafficLoading.value = true
+  try {
+    const res = await queryUpstreamTraffic({ sn: sn.value })
+    trafficInfo.value = res.data || null
+  } catch (e) {
+    trafficInfo.value = { _hint: '查询失败:无权限或上游接口未接入' }
+  } finally {
+    trafficLoading.value = false
+  }
+}
+
+// 时序流中点击设备SN → 切换到设备审计(弹窗内切换 kind, 全局单例)
+function onSnClick(snVal) {
+  if (!snVal) return
+  openDeviceAudit(snVal)
+}
+
+// 人员当前专项(主专项在前)
+const personSpecialties = computed(() => personDetail.value?.current_specialties || [])
+// 人员当前分组
+const personGroupName = computed(() => personDetail.value?.current_group?.name || subject.value?.group_name || '')
+// 设备套餐汇总
+const comboSummary = computed(() => comboData.value?.summary || null)
+const comboItems = computed(() => comboData.value?.items || [])
+
+function fmtDateOnly(t) {
+  if (!t) return '-'
+  return dayjs(t).format('YYYY-MM-DD')
+}
+
+function fmtTimeRange(start, end) {
+  const s = start ? start.slice(0, 5) : ''
+  const e = end ? end.slice(0, 5) : ''
+  if (!s && !e) return '-'
+  return `${s}~${e}`
 }
 
 function fmtDate(t) {
@@ -278,6 +478,11 @@ async function applyInitialKeyword() {
 }
 
 onMounted(() => {
+  // 响应式断点
+  _mq = window.matchMedia('(max-width: 768px)')
+  isMobile.value = _mq.matches
+  _mq.addEventListener('change', (e) => { isMobile.value = e.matches })
+
   // 1) route query 优先级高(独立页面时使用)
   if (route) {
     if (props.subjectKind === 'person' && route.query.person_id) {
@@ -325,6 +530,13 @@ watch(
   },
 )
 
+onBeforeUnmount(() => {
+  if (_mq) {
+    _mq.removeEventListener('change', (e) => { isMobile.value = e.matches })
+    _mq = null
+  }
+})
+
 defineExpose({ loadTimeline, subject, items, total })
 </script>
 
@@ -333,4 +545,163 @@ defineExpose({ loadTimeline, subject, items, total })
 .flex-between { display: flex; align-items: center; justify-content: space-between; }
 .mb-16 { margin-bottom: 16px; }
 .page-title { font-size: 18px; font-weight: 600; color: #303133; }
+
+.av-header {
+  position: relative;
+  z-index: 2;
+}
+.av-toolbar {
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.av-select {
+  width: 260px;
+}
+.av-select-sm {
+  width: 120px;
+}
+
+/* 审计信息卡:SN 超长用等宽字体省略号显示,避免撑破表格 */
+.av-desc-sn :deep(.el-descriptions__content) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+
+/* 主体档案折叠(默认收起,不占主时序空间) */
+.av-subject-collapse {
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+}
+.av-subject-collapse :deep(.el-collapse-item__header) {
+  height: 36px;
+  line-height: 36px;
+  padding: 0 12px;
+  background: #fafafa;
+  font-weight: 500;
+  font-size: 13px;
+}
+.av-subject-collapse :deep(.el-collapse-item__wrap) {
+  border-bottom: none;
+}
+.av-subject-collapse :deep(.el-collapse-item__content) {
+  padding: 10px 12px;
+}
+.av-collapse-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #606266;
+}
+.av-collapse-title .el-icon { font-size: 14px; }
+.av-collapse-sub {
+  font-weight: 600;
+  color: #303133;
+  margin-left: 4px;
+}
+
+/* 信息卡内子区块(排班/套餐/流量) */
+.av-sub-section {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px dashed #ebeef5;
+}
+.av-sub-section:first-of-type {
+  border-top: none;
+  margin-top: 4px;
+}
+.av-sub-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #606266;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.av-sub-hint {
+  font-size: 12px;
+  color: #c0c4cc;
+  font-weight: 400;
+  margin-left: 4px;
+}
+.av-sub-empty {
+  font-size: 12px;
+  color: #c0c4cc;
+  padding: 4px 0;
+}
+
+/* 排班列表 */
+.av-sched-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+.av-sched-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #606266;
+  background: #f5f7fa;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+.av-sched-date {
+  font-weight: 600;
+  color: #303133;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.av-sched-time { color: #909399; }
+.av-sched-note { color: #c0c4cc; font-size: 11px; }
+
+/* 套餐汇总 */
+.av-combo-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  font-size: 13px;
+  color: #606266;
+}
+.av-cs-item b { color: #303133; }
+.av-combo-sub { color: #909399; font-size: 11px; }
+.av-combo-collapse { margin-top: 8px; }
+.av-combo-table :deep(.el-table) { font-size: 12px; }
+
+/* 流量三列 */
+.av-traffic-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.av-traffic-sep { color: #c0c4cc; }
+.av-traffic-remain { color: #67c23a; font-weight: 600; }
+.av-traffic-result { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; color: #606266; margin-top: 6px; }
+
+@media (max-width: 768px) {
+  .av-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .av-toolbar {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 6px;
+  }
+  .av-select {
+    width: 100%;
+  }
+  .av-select-sm {
+    width: calc(50% - 3px);
+    min-width: 90px;
+  }
+  .page-title {
+    font-size: 16px;
+  }
+  .mb-16 { margin-bottom: 12px; }
+  .av-sub-title { font-size: 12px; }
+  .av-sched-item { padding: 2px 6px; font-size: 11px; }
+  .av-combo-summary { gap: 6px 12px; font-size: 12px; }
+  /* 移动端套餐明细表横向滚动 */
+  .av-combo-table { width: 100%; overflow-x: auto; }
+  .av-combo-table :deep(.el-table) { width: 560px; }
+}
 </style>
