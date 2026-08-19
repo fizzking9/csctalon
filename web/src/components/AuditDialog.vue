@@ -2,8 +2,8 @@
   <el-dialog
     v-model="visible"
     append-to-body
-    :width="'min(1000px, 96vw)'"
-    top="3vh"
+    :width="'min(1100px, 96vw)'"
+    top="2vh"
     class="audit-dialog"
     destroy-on-close
   >
@@ -25,6 +25,7 @@
       :initial-keyword="state.name"
       :default-days="1"
       search-width="100%"
+      compact
     />
   </el-dialog>
 </template>
@@ -63,8 +64,25 @@ const viewKey = computed(
   justify-content: space-between;
 }
 .audit-dialog-title {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
   color: #303133;
+}
+</style>
+
+<style>
+/* 弹窗内容区紧凑化:缩小 header/body/footer 间距, body 可滚动 */
+.audit-dialog :deep(.el-dialog__header) {
+  padding: 10px 16px 8px;
+  margin-right: 40px;
+  border-bottom: 1px solid #f0f0f0;
+}
+.audit-dialog :deep(.el-dialog__body) {
+  padding: 8px 12px 10px;
+  max-height: calc(96vh - 100px);
+  overflow-y: auto;
+}
+.audit-dialog :deep(.el-dialog__headerbtn) {
+  top: 10px;
 }
 </style>

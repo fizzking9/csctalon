@@ -153,8 +153,16 @@
             <el-tooltip content="设备分析" placement="bottom">
               <el-button :icon="Monitor" circle size="small" text @click="openDeviceAnalysis" />
             </el-tooltip>
-            <el-tooltip v-if="authStore.isAdmin" content="数据采集同步" placement="bottom">
-              <el-button :icon="Upload" circle size="small" text @click="goToDataIngest" />
+            <el-tooltip v-if="authStore.isAdmin" content="手动同步(增量)" placement="bottom">
+              <el-button
+                :icon="Upload"
+                circle
+                size="small"
+                text
+                :loading="manualSyncLoading"
+                :disabled="rawSync.is_syncing"
+                @click="handleManualSync"
+              />
             </el-tooltip>
           </div>
           <el-dropdown @command="handleCommand">
@@ -174,24 +182,26 @@
         </div>
       </el-header>
 
-      <!-- 同步中提示条: 不阻塞任何功能, 只是告诉用户此刻数据可能稍旧,
+      <!-- 同步中提示条(单行小字): 不阻塞任何功能, 只是告诉用户此刻数据可能稍旧,
            用户正常读写不受影响, PostgreSQL MVCC 天然支持并发。 -->
       <el-alert
         v-if="syncBanner.visible"
-        :title="syncBanner.title"
         :type="syncBanner.type"
-        :description="syncBanner.description"
         show-icon
         :closable="false"
         class="sync-banner"
       >
-        <template v-if="syncBanner.percent != null" #default>
-          <el-progress
-            :percentage="syncBanner.percent"
-            :stroke-width="8"
-            :text-inside="false"
-            :status="syncBanner.progressStatus"
-          />
+        <template #default>
+          <div class="sync-banner-inner">
+            <span class="sync-banner-text">{{ syncBanner.text }}</span>
+            <el-progress
+              v-if="syncBanner.percent != null"
+              class="sync-banner-progress"
+              :percentage="syncBanner.percent"
+              :stroke-width="6"
+              :status="syncBanner.progressStatus"
+            />
+          </div>
         </template>
       </el-alert>
 
@@ -244,9 +254,10 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { User, Monitor, Upload } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
-import { taskStatus } from '@/api/fetch'
+import { taskStatus, taskSubmit } from '@/api/fetch'
 import AuditDialog from '@/components/AuditDialog.vue'
 import { useAudit } from '@/composables/useAudit'
 
@@ -258,6 +269,7 @@ const authStore = useAuthStore()
 const isCollapse = ref(false)
 const isMobile = ref(false)
 const mobileMenuOpen = ref(false)
+const manualSyncLoading = ref(false)
 
 const activeMenu = computed(() => route.path)
 const currentTitle = computed(() => route.meta.title || '')
@@ -306,33 +318,24 @@ const syncBanner = computed(() => {
   if (!rawSync.is_syncing && !rawSync.is_writing_heavy) {
     return { visible: false }
   }
-  const sourceLabel = rawSync.current_source === '__post_sync__'
-    ? '后处理(关联匹配/宽表物化/统计刷新)'
-    : rawSync.current_source
-    ? `数据源「${rawSync.current_source}」`
-    : ''
-  const phaseLabel = rawSync.current_phase ? ` · 当前:${rawSync.current_phase}` : ''
+  const pct = rawSync.percent ?? 0
+  const phase = rawSync.current_phase ? ` · ${rawSync.current_phase}` : ''
   if (rawSync.is_writing_heavy) {
     // 写入高峰(红色 warning→danger 级): 正在导入/构建宽表,缓存策略已切换
-    const descParts = []
-    descParts.push(`正在批量写入数据库${sourceLabel ? ' — ' + sourceLabel : ''}${phaseLabel}`)
-    descParts.push('所有页面照常可用(PostgreSQL MVCC 读写不互锁)，展示的可能是几分钟前的缓存数据,同步完成后会自动刷新。')
     return {
       visible: true,
       type: 'warning',
-      title: `🔥 写入高峰期 · 同步中 ${rawSync.percent ?? 0}%`,
-      description: descParts.join('  \n'),
-      percent: rawSync.percent ?? null,
-      progressStatus: rawSync.percent >= 100 ? 'success' : '',
+      text: `后台同步中(写入高峰) ${pct}%${phase}`,
+      percent: pct,
+      progressStatus: pct >= 100 ? 'success' : '',
     }
   }
   // 仅抓取/等待阶段(黄色 info): 主要是 Playwright 等待 BMS, 对 DB 没压力
   return {
     visible: true,
     type: 'info',
-    title: `后台同步最新数据中 · 进度 ${rawSync.percent ?? 0}%`,
-    description: `正在自动抓取/整理最新记录${phaseLabel}。所有功能正常使用，同步完成后自动更新缓存。`,
-    percent: rawSync.percent ?? null,
+    text: `后台同步最新数据中 ${pct}%${phase}`,
+    percent: pct,
     progressStatus: '',
   }
 })
@@ -373,8 +376,22 @@ function openPersonAnalysis() {
 function openDeviceAnalysis() {
   openQuickAnalysis('device')
 }
-function goToDataIngest() {
-  router.push('/data/ingest')
+
+// 右上角手动同步: 默认增量模式提交全部默认源,无需进入数据采集页面
+async function handleManualSync() {
+  if (manualSyncLoading.value) return
+  manualSyncLoading.value = true
+  try {
+    const res = await taskSubmit({ time_range: 'incremental' })
+    const taskId = res.data?.task_id
+    ElMessage.success(res.data?.message || `同步任务已提交${taskId ? `(${taskId})` : ''},后台执行中…`)
+    // 立即拉取一次进度,让顶部提示条尽快出现
+    await _pollSyncOnce()
+  } catch (e) {
+    // 请求拦截器已弹错误详情(忙碌/冷却中/凭证缺失等),这里不再重复提示
+  } finally {
+    manualSyncLoading.value = false
+  }
 }
 </script>
 
@@ -455,13 +472,31 @@ function goToDataIngest() {
 .sync-banner {
   margin: 0 16px;
   border-radius: 6px;
+  padding: 5px 12px;
+  flex: none;
 }
-.sync-banner :deep(.el-alert__description) {
-  white-space: pre-line;
+.sync-banner :deep(.el-alert__icon) {
+  font-size: 14px;
 }
-.sync-banner :deep(.el-progress) {
-  margin-top: 6px;
-  max-width: 480px;
+.sync-banner-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 16px;
+}
+.sync-banner-text {
+  font-size: 12px;
+  line-height: 1.4;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sync-banner-progress {
+  flex: 0 0 180px;
+}
+.sync-banner-progress :deep(.el-progress__text) {
+  font-size: 12px;
 }
 .fade-enter-active,
 .fade-leave-active {

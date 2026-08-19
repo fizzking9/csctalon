@@ -1,11 +1,31 @@
 <template>
-  <div class="audit-view">
-    <div class="flex-between mb-16 av-header">
-      <div class="page-title" style="margin: 0">
-        {{ title || (subjectKind === 'person' ? '人员行为分析' : '设备行为分析') }}
+  <div class="audit-view" :class="{ 'av-compact': compact }">
+    <!-- 顶部:第1行=标题+时间范围/条数/刷新; 第2行=主体搜索选择器 -->
+    <div class="av-header">
+      <div class="av-header-row av-header-row--top">
+        <div class="page-title" style="margin: 0">
+          {{ title || (subjectKind === 'person' ? '人员行为分析' : '设备行为分析') }}
+        </div>
+        <div class="av-toolbar">
+          <el-select v-model="days" size="small" class="av-select-sm" @change="loadTimeline">
+            <el-option label="当天" :value="1" />
+            <el-option label="一周" :value="7" />
+            <el-option label="一个月" :value="30" />
+            <el-option label="三个月" :value="90" />
+            <el-option label="半年" :value="180" />
+            <el-option label="一年" :value="365" />
+            <el-option label="所有" :value="0" />
+          </el-select>
+          <el-select v-model="limit" size="small" class="av-select-sm" @change="loadTimeline">
+            <el-option :value="50" label="50 条" />
+            <el-option :value="100" label="100 条" />
+            <el-option :value="200" label="200 条" />
+            <el-option :value="500" label="500 条" />
+          </el-select>
+          <el-button type="primary" :icon="Refresh" size="small" @click="loadTimeline" :disabled="!hasSubject">刷新</el-button>
+        </div>
       </div>
-      <div class="flex av-toolbar">
-        <!-- 搜索选择器 -->
+      <div class="av-header-row av-header-row--search">
         <template v-if="subjectKind === 'person'">
           <el-select
             v-model="personId"
@@ -15,7 +35,8 @@
             placeholder="搜索人员姓名"
             :remote-method="searchPersons"
             :loading="searching"
-            class="av-select"
+            size="small"
+            class="av-subject-select"
             @change="onSubjectChange"
           >
             <el-option
@@ -35,7 +56,8 @@
             placeholder="输入设备 SN 搜索"
             :remote-method="searchDevices"
             :loading="searching"
-            class="av-select"
+            size="small"
+            class="av-subject-select"
             @change="onSubjectChange"
           >
             <el-option
@@ -46,23 +68,6 @@
             />
           </el-select>
         </template>
-
-        <el-select v-model="days" class="av-select av-select-sm" @change="loadTimeline">
-          <el-option label="当天" :value="1" />
-          <el-option label="一周" :value="7" />
-          <el-option label="一个月" :value="30" />
-          <el-option label="三个月" :value="90" />
-          <el-option label="半年" :value="180" />
-          <el-option label="一年" :value="365" />
-          <el-option label="所有" :value="0" />
-        </el-select>
-        <el-select v-model="limit" class="av-select av-select-sm" @change="loadTimeline">
-          <el-option :value="50" label="50 条" />
-          <el-option :value="100" label="100 条" />
-          <el-option :value="200" label="200 条" />
-          <el-option :value="500" label="500 条" />
-        </el-select>
-        <el-button type="primary" :icon="Refresh" @click="loadTimeline" :disabled="!hasSubject" size="small">刷新</el-button>
       </div>
     </div>
 
@@ -77,7 +82,7 @@
           </span>
         </template>
         <div v-if="subjectKind === 'person'" v-loading="extraLoading">
-          <el-descriptions :column="descColumn" border size="small">
+          <el-descriptions :column="descColumn" border size="small" class="av-desc">
             <el-descriptions-item label="姓名">{{ subject.name }}</el-descriptions-item>
             <el-descriptions-item label="部门">{{ subject.department || '-' }}</el-descriptions-item>
             <el-descriptions-item label="分组">{{ personGroupName || '-' }}</el-descriptions-item>
@@ -229,6 +234,7 @@
       :items="items"
       :type-meta="typeMeta"
       :loading="loading"
+      :compact="compact"
       @sn-click="onSnClick"
     />
   </div>
@@ -272,6 +278,8 @@ const props = defineProps({
   defaultDays: { type: Number, default: 90 },
   /** 初始返回条数 */
   defaultLimit: { type: Number, default: 100 },
+  /** 紧凑模式(弹窗内使用):顶部压缩为2行,减小间距 */
+  compact: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['loaded', 'subject-changed'])
@@ -543,24 +551,95 @@ defineExpose({ loadTimeline, subject, items, total })
 <style scoped>
 .flex { display: flex; }
 .flex-between { display: flex; align-items: center; justify-content: space-between; }
-.mb-16 { margin-bottom: 16px; }
-.page-title { font-size: 18px; font-weight: 600; color: #303133; }
+.mb-16 { margin-bottom: 12px; }
+.page-title { font-size: 15px; font-weight: 600; color: #303133; line-height: 1.3; }
 
+/* 顶部2行布局:第1行=标题+工具控件;第2行=主体搜索 */
 .av-header {
   position: relative;
   z-index: 2;
+  margin-bottom: 8px;
+}
+.av-header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.av-header-row--top {
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.av-header-row--search {
+  width: 100%;
+}
+.av-subject-select {
+  flex: 1;
+  min-width: 0;
 }
 .av-toolbar {
-  gap: 8px;
+  display: flex;
+  gap: 6px;
   align-items: center;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-.av-select {
-  width: 260px;
+  flex-shrink: 0;
 }
 .av-select-sm {
-  width: 120px;
+  width: 90px;
+}
+
+/* 紧凑模式(弹窗内) */
+.av-compact .page-title { font-size: 14px; }
+.av-compact .mb-16 { margin-bottom: 8px; }
+.av-compact .av-header { margin-bottom: 6px; }
+.av-compact .av-header-row--top { margin-bottom: 4px; }
+
+/* 主体档案折叠(默认收起,不占主时序空间) */
+.av-subject-collapse {
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+}
+.av-subject-collapse :deep(.el-collapse-item__header) {
+  height: 30px;
+  line-height: 30px;
+  padding: 0 10px;
+  background: #fafafa;
+  font-weight: 500;
+  font-size: 12px;
+}
+.av-subject-collapse :deep(.el-collapse-item__wrap) {
+  border-bottom: none;
+}
+.av-subject-collapse :deep(.el-collapse-item__content) {
+  padding: 8px 10px;
+}
+.av-collapse-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #606266;
+}
+.av-collapse-title .el-icon { font-size: 13px; }
+.av-collapse-sub {
+  font-weight: 600;
+  color: #303133;
+  margin-left: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.av-compact .av-subject-collapse :deep(.el-collapse-item__header) {
+  height: 28px;
+  line-height: 28px;
+  font-size: 12px;
+  padding: 0 8px;
+}
+.av-compact .av-subject-collapse :deep(.el-collapse-item__content) {
+  padding: 6px 8px;
+}
+.av-compact .av-desc :deep(.el-descriptions__body) {
+  font-size: 12px;
+}
+.av-compact .av-desc :deep(.el-descriptions__label),
+.av-compact .av-desc :deep(.el-descriptions__content) {
+  padding: 5px 8px;
 }
 
 /* 审计信息卡:SN 超长用等宽字体省略号显示,避免撑破表格 */
@@ -569,139 +648,110 @@ defineExpose({ loadTimeline, subject, items, total })
   word-break: break-all;
 }
 
-/* 主体档案折叠(默认收起,不占主时序空间) */
-.av-subject-collapse {
-  border: 1px solid #ebeef5;
-  border-radius: 4px;
-}
-.av-subject-collapse :deep(.el-collapse-item__header) {
-  height: 36px;
-  line-height: 36px;
-  padding: 0 12px;
-  background: #fafafa;
-  font-weight: 500;
-  font-size: 13px;
-}
-.av-subject-collapse :deep(.el-collapse-item__wrap) {
-  border-bottom: none;
-}
-.av-subject-collapse :deep(.el-collapse-item__content) {
-  padding: 10px 12px;
-}
-.av-collapse-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: #606266;
-}
-.av-collapse-title .el-icon { font-size: 14px; }
-.av-collapse-sub {
-  font-weight: 600;
-  color: #303133;
-  margin-left: 4px;
-}
-
 /* 信息卡内子区块(排班/套餐/流量) */
 .av-sub-section {
-  margin-top: 12px;
-  padding-top: 8px;
+  margin-top: 8px;
+  padding-top: 6px;
   border-top: 1px dashed #ebeef5;
 }
 .av-sub-section:first-of-type {
   border-top: none;
-  margin-top: 4px;
+  margin-top: 2px;
+  padding-top: 0;
 }
 .av-sub-title {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: #606266;
-  margin-bottom: 8px;
+  margin-bottom: 5px;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
 }
 .av-sub-hint {
-  font-size: 12px;
+  font-size: 11px;
   color: #c0c4cc;
   font-weight: 400;
   margin-left: 4px;
 }
 .av-sub-empty {
-  font-size: 12px;
+  font-size: 11px;
   color: #c0c4cc;
-  padding: 4px 0;
+  padding: 2px 0;
 }
 
 /* 排班列表 */
 .av-sched-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 10px;
+  gap: 4px 8px;
 }
 .av-sched-item {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: 4px;
+  font-size: 11px;
   color: #606266;
   background: #f5f7fa;
-  padding: 3px 8px;
-  border-radius: 4px;
+  padding: 2px 6px;
+  border-radius: 3px;
 }
 .av-sched-date {
   font-weight: 600;
   color: #303133;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-.av-sched-time { color: #909399; }
-.av-sched-note { color: #c0c4cc; font-size: 11px; }
+.av-sched-time { color: #909399; font-size: 11px; }
+.av-sched-note { color: #c0c4cc; font-size: 10px; }
 
 /* 套餐汇总 */
 .av-combo-summary {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 18px;
-  font-size: 13px;
+  gap: 4px 14px;
+  font-size: 12px;
   color: #606266;
 }
 .av-cs-item b { color: #303133; }
 .av-combo-sub { color: #909399; font-size: 11px; }
-.av-combo-collapse { margin-top: 8px; }
-.av-combo-table :deep(.el-table) { font-size: 12px; }
+.av-combo-collapse { margin-top: 6px; }
+.av-combo-table :deep(.el-table) { font-size: 11px; }
+.av-combo-table :deep(.el-table th.el-table__cell),
+.av-combo-table :deep(.el-table td.el-table__cell) {
+  padding: 3px 0;
+}
 
 /* 流量三列 */
-.av-traffic-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.av-traffic-row { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; font-size: 11px; }
 .av-traffic-sep { color: #c0c4cc; }
 .av-traffic-remain { color: #67c23a; font-weight: 600; }
-.av-traffic-result { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; color: #606266; margin-top: 6px; }
+.av-traffic-result { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: #606266; margin-top: 4px; }
+.av-traffic-section :deep(.el-button) {
+  padding: 4px 8px;
+  font-size: 11px;
+}
 
 @media (max-width: 768px) {
-  .av-header {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 10px;
+  .av-header-row--top {
+    flex-wrap: wrap;
+    gap: 4px;
   }
   .av-toolbar {
     width: 100%;
     justify-content: flex-start;
-    gap: 6px;
-  }
-  .av-select {
-    width: 100%;
+    gap: 4px;
   }
   .av-select-sm {
-    width: calc(50% - 3px);
-    min-width: 90px;
+    width: calc(50% - 2px);
+    min-width: 80px;
   }
   .page-title {
-    font-size: 16px;
+    font-size: 14px;
   }
-  .mb-16 { margin-bottom: 12px; }
-  .av-sub-title { font-size: 12px; }
-  .av-sched-item { padding: 2px 6px; font-size: 11px; }
-  .av-combo-summary { gap: 6px 12px; font-size: 12px; }
-  /* 移动端套餐明细表横向滚动 */
+  .av-sub-title { font-size: 11px; }
+  .av-sched-item { padding: 2px 5px; font-size: 10px; }
+  .av-combo-summary { gap: 4px 10px; font-size: 11px; }
   .av-combo-table { width: 100%; overflow-x: auto; }
-  .av-combo-table :deep(.el-table) { width: 560px; }
+  .av-combo-table :deep(.el-table) { width: 520px; }
 }
 </style>
