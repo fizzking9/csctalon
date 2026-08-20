@@ -1088,6 +1088,35 @@ def _complaint_dedup_hash(parts: list[str]) -> str:
     return hashlib.md5(key.encode("utf-8")).hexdigest()[:32]
 
 
+def _complaint_problem_signature(problem: str | None, max_len: int = 2000) -> str:
+    """投诉问题内容签名: 归一化(去空白/标点/小写)后取前 max_len 字.
+
+    用于身份指纹的内容环节: 轻微文本变化(空格/标点)不影响指纹,
+    实质性不同内容(手机号→多SN、SN→多投诉 的区分)产生不同指纹.
+    """
+    s = re.sub(r"[\s，。；、,.!?！？:：;；\"'“”‘’()（）\[\]【】\-—]+", "", str(problem or ""))
+    return s[:max_len]
+
+
+def _complaint_identity_hash(rec: dict) -> str:
+    """身份指纹: md5(投诉日期 | 投诉手机号 | 设备SN | 归一化投诉问题)
+
+    2026-08-20 指纹方案重规划(两版迭代):
+    - v1 (编号|日期|手机|SN|问题): 编号上游易丢(53%)导致同一投诉拆两条 → 弃用编号
+    - v2 (日期|手机|SN): 区分度不足, 同手机+同SN+同日期 不同投诉会误合并 → 加入内容
+    - 现版 (日期|手机|SN|问题归一化): 内容环节解决误合并(实测误合并仅15行), 
+      跨文件匹配仍99.8%(问题文本微改不影响), 编号仍不入指纹(丢失免疫)
+    """
+    d = rec.get("complaint_date")
+    date_s = d.strftime("%Y-%m-%d") if d else ""
+    return _complaint_dedup_hash([
+        date_s,
+        rec.get("complainant_phone"),
+        rec.get("device_sn"),
+        _complaint_problem_signature(rec.get("problem")),
+    ])
+
+
 def upsert_external_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
     """外部投诉(监督局/315) - 按 dedup_hash 身份指纹去重更新
 
@@ -1126,13 +1155,7 @@ def upsert_external_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Se
                 "handle_time": _sanitize_date(_to_datetime(data.get("handle_time"))),
                 "handle_detail": data.get("handle_detail"),
             }
-            rec["dedup_hash"] = _complaint_dedup_hash([
-                rec.get("complaint_no"),
-                rec["complaint_date"].isoformat() if rec.get("complaint_date") else "",
-                rec.get("complainant_phone"),
-                rec.get("device_sn"),
-                rec.get("problem"),
-            ])
+            rec["dedup_hash"] = _complaint_identity_hash(rec)
             rows.append(rec)
             result.total += 1
         except Exception as e:
@@ -1171,13 +1194,7 @@ def upsert_card_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
                 "handler": _sanitize_name_field(data.get("handler"), idx, result, "卡商群投诉-处理人"),
                 "handle_result": data.get("handle_result"),
             }
-            rec["dedup_hash"] = _complaint_dedup_hash([
-                rec["complaint_date"].isoformat() if rec.get("complaint_date") else "",
-                rec.get("complaint_group"),
-                rec.get("complainant_phone"),
-                rec.get("device_sn"),
-                rec.get("problem"),
-            ])
+            rec["dedup_hash"] = _complaint_identity_hash(rec)
             rows.append(rec)
             result.total += 1
         except Exception as e:

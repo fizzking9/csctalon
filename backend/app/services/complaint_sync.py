@@ -18,7 +18,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -227,6 +227,26 @@ def _sn_to_ticket_map(db: Session, sns: set[str]) -> dict[str, list[str]]:
     return result
 
 
+def _identity_dedup_hash(rec: dict[str, Any]) -> str:
+    """身份指纹: md5(投诉日期 | 投诉手机号 | 设备SN | 归一化投诉问题)
+
+    2026-08-20 指纹方案重规划(与 upsert._complaint_identity_hash 同一口径):
+    - 编号不入指纹: 上游 workbuddy 推送会丢失/改写(实测 53%), 纳入会导致同一投诉拆两条
+    - 问题以归一化签名入指纹: 区分"同手机同SN同日期但不同投诉"(手机号→多SN/SN→多投诉
+      等小概率误合并场景, 实测误合并仅15行), 且跨文件匹配仍 99.8%(文本微改不影响)
+    """
+    from app.services.upsert import _complaint_problem_signature
+
+    date = rec.get("complaint_date")
+    date_s = date.strftime("%Y-%m-%d") if date else ""
+    return _dedup_hash([
+        date_s,
+        rec.get("complainant_phone"),
+        rec.get("device_sn"),
+        _complaint_problem_signature(rec.get("problem")),
+    ])
+
+
 def _upsert_external(db: Session, rows: list[dict], result: SyncRowResult, sn_ticket_map: dict[str, list[str]]) -> None:
     """315外部投诉 upsert: 按 dedup_hash 冲突更新(含关联工单字段)"""
     if not rows:
@@ -234,13 +254,7 @@ def _upsert_external(db: Session, rows: list[dict], result: SyncRowResult, sn_ti
     now = datetime.now(timezone.utc)
     now_dt = now
     for r in rows:
-        r["dedup_hash"] = _dedup_hash([
-            r.get("complaint_no"),
-            r.get("complaint_date").isoformat() if r.get("complaint_date") else "",
-            r.get("complainant_phone"),
-            r.get("device_sn"),
-            r.get("problem"),
-        ])
+        r["dedup_hash"] = _identity_dedup_hash(r)
         # SN 关联工单(取最早一张作为代表)
         ticket_nos = sn_ticket_map.get(r.get("device_sn")) if r.get("device_sn") else None
         if ticket_nos:
@@ -259,13 +273,7 @@ def _upsert_card(db: Session, rows: list[dict], result: SyncRowResult, sn_ticket
         return
     now = datetime.now(timezone.utc)
     for r in rows:
-        r["dedup_hash"] = _dedup_hash([
-            r.get("complaint_date").isoformat() if r.get("complaint_date") else "",
-            r.get("complaint_group"),
-            r.get("complainant_phone"),
-            r.get("device_sn"),
-            r.get("problem"),
-        ])
+        r["dedup_hash"] = _identity_dedup_hash(r)
         ticket_nos = sn_ticket_map.get(r.get("device_sn")) if r.get("device_sn") else None
         if ticket_nos:
             r["matched_ticket_no"] = ticket_nos[0]
@@ -308,6 +316,13 @@ def _batch_upsert(db: Session, model, rows: list[dict], result: SyncRowResult) -
         batch = unique_rows[i:i + BATCH]
         stmt = pg_insert(model).values(batch)
         update_cols = {c: stmt.excluded[c] for c in batch[0] if c != "dedup_hash"}
+        # 编号保护(仅315表): 推送行有编号才覆盖, 无编号保留库中已有编号。
+        # 避免 workbuddy 数据编号缺失时, 同指纹 update 把已回填的编号清空。
+        if model.__tablename__ == "external_complaints" and "complaint_no" in update_cols:
+            update_cols["complaint_no"] = case(
+                (stmt.excluded.complaint_no.isnot(None), stmt.excluded.complaint_no),
+                else_=model.complaint_no,
+            )
         stmt = stmt.on_conflict_do_update(index_elements=["dedup_hash"], set_=update_cols)
         db.execute(stmt)
         db.flush()

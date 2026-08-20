@@ -364,6 +364,12 @@
         </el-col>
       </el-row>
 
+      <!-- 补充数据源汇总(315/卡商, workbuddy推送, 按SN关联工单) -->
+      <div v-if="supplSummaryText" class="suppl-strip">
+        <el-icon style="margin-right:4px"><WarningFilled /></el-icon>
+        <span>{{ supplSummaryText }}</span>
+      </div>
+
       <el-collapse v-model="complaintCollapseActive" class="complaint-collapse">
         <el-collapse-item name="detail">
           <template #title>
@@ -388,6 +394,10 @@
             <el-table-column label="完成时间" width="88">
               <template #default="{ row }">
                 <span v-if="row.finish_time">{{ formatShortTime(row.finish_time) }}</span>
+                <template v-else-if="row.suppl_finish_time">
+                  <span>{{ formatShortTime(row.suppl_finish_time) }}</span>
+                  <div class="text-muted" style="font-size:10px;line-height:1">补</div>
+                </template>
                 <span v-else class="text-muted">—</span>
               </template>
             </el-table-column>
@@ -408,7 +418,20 @@
                 <span v-if="row.category && row.category !== row.source" class="text-muted" style="font-size:11px">{{ row.category }}</span>
               </template>
             </el-table-column>
-            <el-table-column prop="problem" label="投诉内容" min-width="180" show-overflow-tooltip />
+            <el-table-column label="投诉内容" min-width="180" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span>{{ row.problem || row.suppl_problem || '—' }}</span>
+                <el-tag v-if="row.suppl_problem && !row.problem" size="small" type="warning" effect="plain" style="margin-left:4px">补</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="补充" width="70" align="center">
+              <template #default="{ row }">
+                <el-tooltip v-if="row.suppl_count" placement="top" :content="supplTooltip(row)">
+                  <el-tag size="small" type="warning" effect="plain" style="cursor:pointer">补{{ row.suppl_count }}</el-tag>
+                </el-tooltip>
+                <span v-else class="text-muted">—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="处理/跟进" width="90" show-overflow-tooltip>
               <template #default="{ row }">
                 <el-link v-if="row.handler && row.handler !== '未分配'" type="primary" :underline="false" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
@@ -752,6 +775,28 @@ const complaintFilteredList = computed(() => {
     return true
   })
 })
+
+// 补充数据源汇总文本(315/卡商, workbuddy推送)
+const supplSummaryText = computed(() => {
+  const s = complaintSummaryData.value?.supplementary || {}
+  const ext = s.external || { total: 0, matched: 0 }
+  const card = s.card || { total: 0, matched: 0 }
+  if (!ext.total && !card.total) return ''
+  return `补充数据源(按SN关联工单): 315外部投诉 ${formatNum(ext.total)} 条(已关联 ${formatNum(ext.matched)}) · 卡商群投诉 ${formatNum(card.total)} 条(已关联 ${formatNum(card.matched)})`
+})
+
+// 补充明细 tooltip 文案(来源/日期/内容/处理明细/完成时间)
+function supplTooltip(row) {
+  const list = row.supplementary || []
+  if (!list.length) return '无补充明细'
+  return list.map(s => {
+    const parts = [`[${s.source}]${s.complaint_date || ''}`]
+    if (s.problem) parts.push((s.problem || '').slice(0, 60))
+    if (s.handle_detail) parts.push(`处理:${(s.handle_detail || '').slice(0, 40)}`)
+    if (s.handle_time) parts.push(`完成:${s.handle_time}`)
+    return parts.join(' ')
+  }).join('\n')
+}
 
 // 影响事件状态映射 (后端 Incident.status: registered/processing/calmed/reviewed)
 const INCIDENT_STATUS = {
@@ -1266,7 +1311,7 @@ async function loadAll() {
       today.queue(params),
       today.refundRecovery(params),
       complaintSummary(params),
-      complaintDetail({ ...params, limit: viewMode.value === 'week' ? 1000 : 500 }),
+      complaintDetail({ ...params, limit: viewMode.value === 'week' ? 1000 : 500, include_supplementary: true }),
     ])
     
     if (kpiRes.data) kpiData.value = kpiRes.data
@@ -1688,6 +1733,17 @@ onBeforeUnmount(() => {
   flex-direction: column;
   justify-content: center;
   min-height: 120px;
+}
+.suppl-strip {
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  color: #92400e;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin-bottom: 8px;
 }
 .backlog-watermark.backlog-warn {
   background: linear-gradient(135deg, #fff7ed, #fed7aa);
