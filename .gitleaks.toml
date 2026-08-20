@@ -22,13 +22,14 @@ paths = [
     '''yarn\.lock$''',
 ]
 # 占位符/示例值不报警
+# 注意: admin123/csctalon123 已从全局 allowlist 移除(2026-08-20 审计 OPS-11):
+#   - .env.example 中的默认值已由上方 paths allowlist 覆盖;
+#   - 业务代码/脚本里再出现这些弱口令必须被扫描报警, 不允许静默放行。
 regexes = [
     '''<请修改.*>''',
     '''<真实.*>''',
     '''REDACTED_''',
     '''CHANGE_ME_IN_PRODUCTION''',
-    '''admin123''',  # 仅 .env.example/初始化默认值,首次启动强制改密
-    '''csctalon123''',  # 同上,默认占位
 ]
 
 # ---------- 自定义规则 ----------
@@ -72,3 +73,12 @@ id = "hardcoded-phone-number"
 description = "疑似硬编码手机号(11位 1开头)"
 regex = '''["']?(1[3-9]\d{9})["']?\s*[,\)#]'''
 tags = ["phone", "pii"]
+
+# 规则4: 杉猫(BMS)平台凭证(2026-08-20 审计 C-1 新增)
+# 覆盖两种形态: SHANMAO_PASS = "值" 直接赋值, 与 os.environ.get("SHANMAO_PASS", "值") 回退默认值
+# 值需非空、非占位符(<开头)、至少 2 字符, 避免误报 .env.example 的空值占位
+[[rules]]
+id = "shanmao-platform-credentials"
+description = "杉猫平台账号密码(含 os.environ.get 回退默认值形态)"
+regex = '''(?i)SHANMAO_(?:USER|PASS|PASSWORD|USERNAME)\s*[=:]\s*["'][^"'\s<][^"']*["']|SHANMAO_(?:USER|PASS|PASSWORD|USERNAME)["']\s*,\s*["'][^"'\s<][^"']*["']'''
+tags = ["shanmao", "bms", "credential"]

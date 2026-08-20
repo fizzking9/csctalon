@@ -257,8 +257,19 @@ def list_reimbursements(
 
 @router.post("/reimbursements", response_model=R, summary="新建报销单(含发票明细)")
 def create_reimbursement(payload: dict, db: DBSession, current_user: CurrentUser):
+    # 2026-08-20 审计 H-2/API-01 修复: 状态由服务端强制为"待审核", 不接受客户端指定(防绕过主管审核)
+    client_status = payload.get("status")
+    if client_status and client_status != "待审核":
+        raise HTTPException(status_code=400, detail="新建报销单状态只能为待审核, 审核请走审核接口")
     invoice_ids = payload.get("invoice_ids") or []
     invoices = list(db.scalars(select(ExpenseInvoice).where(ExpenseInvoice.id.in_(invoice_ids)))) if invoice_ids else []
+    if len(invoices) != len(set(invoice_ids)):
+        raise HTTPException(status_code=400, detail="存在无效的发票 ID")
+    # 2026-08-20 审计 H-2/API-02 修复: 拦截已占用/已报销发票(防同一发票重复报销)
+    occupied = [i for i in invoices if i.status in ("已入账", "已报销")]
+    if occupied:
+        nos = ", ".join((i.invoice_no or f"#{i.id}") for i in occupied[:5])
+        raise HTTPException(status_code=400, detail=f"以下发票已被占用或已报销, 不能加入报销单: {nos}")
     total = sum(float(i.total_amount or 0) for i in invoices)
     rb = Reimbursement(
         batch_no=_gen_batch_no(),
@@ -266,15 +277,14 @@ def create_reimbursement(payload: dict, db: DBSession, current_user: CurrentUser
         submitter_id=current_user.id,
         total_amount=total,
         invoice_count=len(invoices),
-        status=payload.get("status", "待审核"),
+        status="待审核",
         remark=payload.get("remark"),
     )
     db.add(rb)
     db.flush()
     for i in invoices:
         db.add(ReimbursementItem(reimbursement_id=rb.id, invoice_id=i.id, amount=i.total_amount))
-        if i.status != "已报销":
-            i.status = "已入账"
+        i.status = "已入账"  # 占用标记: 审核通过后置"已报销", 驳回后释放
     db.commit()
     db.refresh(rb)
     return R(data={"id": rb.id, "batch_no": rb.batch_no, "total_amount": float(rb.total_amount or 0), "invoice_count": rb.invoice_count})
@@ -285,9 +295,22 @@ def approve_reimbursement(rb_id: int, payload: dict, db: DBSession, current_user
     rb = db.get(Reimbursement, rb_id)
     if not rb:
         raise HTTPException(status_code=404, detail="报销单不存在")
-    rb.status = payload.get("status", "已通过")
+    # 2026-08-20 审计 H-2/API-01 修复: 仅允许 待审核 → 已通过/已驳回, 不可重复审核
+    if rb.status != "待审核":
+        raise HTTPException(status_code=409, detail=f"当前状态为 {rb.status}, 只有待审核的报销单可被审核")
+    new_status = payload.get("status", "已通过")
+    if new_status not in ("已通过", "已驳回"):
+        raise HTTPException(status_code=400, detail="审核结果只能为: 已通过 / 已驳回")
+    rb.status = new_status
     rb.approved_by = current_user.id
     rb.approved_at = datetime.now(timezone.utc)
+    # 2026-08-20 审计 H-2/API-02 修复: 审核通过 → 发票置"已报销"(全库首个赋值路径); 驳回 → 释放发票供重新提交
+    items = list(db.scalars(select(ReimbursementItem).where(ReimbursementItem.reimbursement_id == rb_id)))
+    for it in items:
+        inv = db.get(ExpenseInvoice, it.invoice_id)
+        if not inv:
+            continue
+        inv.status = "已报销" if new_status == "已通过" else "待核对"
     db.commit()
     return R(message="审核完成")
 

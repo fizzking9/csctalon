@@ -33,7 +33,15 @@ async def get_current_user(
             detail="令牌无效或已过期",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    user_id = int(payload["sub"])
+    # 2026-08-20 审计 SEC-08 修复: sub 非整数(畸形/伪造 token)按 401 处理, 而非 int() 抛 ValueError 打 500
+    try:
+        user_id = int(payload["sub"])
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="令牌无效或已过期",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     user = db.get(User, user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已停用")

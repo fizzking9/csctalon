@@ -205,7 +205,7 @@ const qrResult = ref(null)
 
 const fmt = (v) => (v == null ? '0.00' : Number(v).toFixed(2))
 const invStatusType = (s) => ({ 待识别: 'info', 已识别: 'success', 待核对: 'warning', 已入账: 'primary', 已报销: 'success' }[s] || 'info')
-const rbStatusType = (s) => ({ 草稿: 'info', 待审核: 'warning', 已通过: 'primary', 已报销: 'success' }[s] || 'info')
+const rbStatusType = (s) => ({ 草稿: 'info', 待审核: 'warning', 已通过: 'primary', 已驳回: 'danger', 已报销: 'success' }[s] || 'info')
 
 const payableInvoices = computed(() => invoices.value.filter((i) => i.status !== '已报销' && i.status !== '已入账'))
 
@@ -297,8 +297,16 @@ function openInvoice() {
 async function handleCreateInvoice() {
   submitting.value = true
   try {
-    await createInvoice({ ...invForm })
-    ElMessage.success('登记成功')
+    // 2026-08-20 审计 FEVM-01 修复: 编辑(_id 存在)时走 update, 否则走 create
+    // (原实现无条件 createInvoice, 行点击编辑后保存会生成重复发票)
+    const { _id, ...payload } = invForm
+    if (_id) {
+      await updateInvoice(_id, payload)
+      ElMessage.success('已保存修改')
+    } else {
+      await createInvoice(payload)
+      ElMessage.success('登记成功')
+    }
     invVisible.value = false
     resetQrState()
     loadInvoices()

@@ -99,8 +99,14 @@ async def sniffer():
         db_cfg = get_sync_source_config(db, data_type) or {}
     finally:
         db.close()
-    cfg["username"] = db_cfg.get("username") or "TZK"
-    cfg["password"] = db_cfg.get("password") or "Tzk@2026"
+    cfg["username"] = db_cfg.get("username") or os.environ.get("SHANMAO_USER", "")
+    cfg["password"] = db_cfg.get("password") or os.environ.get("SHANMAO_PASS", "")
+    if not cfg["username"] or not cfg["password"]:
+        print(
+            "[FATAL] 缺少杉猫平台凭证: 请先在 sync_source_configs 配置或设置环境变量 SHANMAO_USER/SHANMAO_PASS",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
     fetcher = BmsFetcher()
     ctx = None

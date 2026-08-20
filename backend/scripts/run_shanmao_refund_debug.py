@@ -52,11 +52,18 @@ async def main():
     this_cfg_from_db = (db_cfg or {}).get(data_type, {})
     base_cfg["username"] = this_cfg_from_db.get("username")
     base_cfg["password"] = this_cfg_from_db.get("password")
-    # 如果 seed 里有 username/password 就用 seed 的
+    # 凭证只从 DB sync_source_configs / 环境变量读取,严禁硬编码默认值
+    # (2026-08-20 审计 C-1: 原 os.environ.get("SHANMAO_PASS", "<真实密码>") 真实密码硬编码已删除)
     if not base_cfg["username"]:
-        base_cfg["username"] = os.environ.get("SHANMAO_USER", "TZK")
+        base_cfg["username"] = os.environ.get("SHANMAO_USER", "")
     if not base_cfg["password"]:
-        base_cfg["password"] = os.environ.get("SHANMAO_PASS", "Tzk@2026")
+        base_cfg["password"] = os.environ.get("SHANMAO_PASS", "")
+    if not base_cfg["username"] or not base_cfg["password"]:
+        print(
+            "[FATAL] 缺少杉猫平台凭证: 请先在 sync_source_configs 配置或设置环境变量 SHANMAO_USER/SHANMAO_PASS",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
     print(f"[配置] data_type={data_type}")
     print(f"[配置] time_format={base_cfg.get('time_format','<default>')}")

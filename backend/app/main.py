@@ -159,7 +159,8 @@ def _init_admin() -> None:
             )
             db.add(admin)
             db.commit()
-            logger.info(f"已创建默认管理员: {settings.INIT_ADMIN_USERNAME} / {settings.INIT_ADMIN_PASSWORD}")
+            # 2026-08-20 审计 H-7/OPS-08: 禁止把初始密码明文写日志(持久化到 ./logs/backend 与 docker json-file)
+            logger.info("已创建默认管理员: %s (初始密码来自 INIT_ADMIN_PASSWORD 配置, 首次登录后请尽快修改)", settings.INIT_ADMIN_USERNAME)
     finally:
         db.close()
 

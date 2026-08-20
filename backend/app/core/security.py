@@ -15,17 +15,23 @@ from app.core.config import settings
 
 ALGORITHM = settings.JWT_ALGORITHM
 
-# bcrypt 密文长度上限为 72 字节,超出截断(防 bcrypt 4.x 抛错)
+# bcrypt 密文长度上限为 72 字节
 _BCRYPT_MAX = 72
 
 
 def _truncate(secret: str) -> bytes:
-    """编码并截断到 bcrypt 允许的最大长度"""
+    """编码并截断到 bcrypt 允许的最大长度(仅用于兼容校验历史哈希)"""
     return secret.encode("utf-8")[:_BCRYPT_MAX]
 
 
 def hash_password(password: str) -> str:
-    """生成密码哈希(bcrypt)"""
+    """生成密码哈希(bcrypt)
+
+    2026-08-20 审计 SEC-13 修复: 超过 72 字节(UTF-8)的密码直接拒绝,
+    不再静默截断(截断会导致不同长密码碰撞且用户不知情)。调用方需捕获 ValueError 转 400。
+    """
+    if len(password.encode("utf-8")) > _BCRYPT_MAX:
+        raise ValueError("密码过长: bcrypt 仅支持 72 字节(UTF-8), 请缩短密码")
     return bcrypt.hashpw(_truncate(password), bcrypt.gensalt()).decode("utf-8")
 
 
