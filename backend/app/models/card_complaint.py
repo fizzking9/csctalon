@@ -41,5 +41,5 @@ class CardComplaint(IDMixin, TimestampMixin, Base):
         DateTime(timezone=True), nullable=True, comment="关联工单时间"
     )
     dedup_hash: Mapped[str | None] = mapped_column(
-        String(32), unique=True, index=True, nullable=True, comment="业务去重指纹(md5):日期+群+手机号+SN+问题"
+        String(32), unique=True, index=True, nullable=True, comment="业务去重指纹(md5):投诉日期+手机号+SN+归一化问题"
     )

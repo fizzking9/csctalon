@@ -517,7 +517,14 @@ def complaint_detail(
             _collect(ExternalComplaint, "device_sn", "315外部投诉")
             _collect(CardComplaint, "device_sn", "卡商群投诉")
             for r in records:
-                r["supplementary"] = suppl_by_sn.get(r.get("device_sn"), [])
+                suppl = suppl_by_sn.get(r.get("device_sn"), [])
+                r["supplementary"] = suppl
+                if suppl:
+                    # 便捷合并字段: 补充表里更详细的 完成时间/投诉内容(供明细表直接展示)
+                    times = [s.get("handle_time") for s in suppl if s.get("handle_time")]
+                    r["suppl_finish_time"] = max(times) if times else None
+                    r["suppl_problem"] = next((s.get("problem") for s in suppl if s.get("problem")), None)
+                    r["suppl_count"] = len(suppl)
 
     # 按动作时间降序排列
     records.sort(key=lambda x: x.get("time") or "", reverse=True)
