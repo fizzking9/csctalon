@@ -19,10 +19,11 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
 from app.api.deps import AdminUser, DBSession
+from app.core.config import settings
 from app.core.security import create_access_token, hash_password
 from app.models.user import RoleEnum, User
 from app.models.wechat import (
@@ -33,6 +34,10 @@ from app.models.wechat import (
 )
 
 router = APIRouter(prefix="/wechat", tags=["微信扫码注册"])
+
+# 2026-08-20 审计 H-3/SEC-04 修复: 申请者可选角色仅限一线低权限角色, 管理角色只能由管理员显式指定
+APPLICANT_ALLOWED_ROLES = {RoleEnum.AGENT.value, RoleEnum.SPECIALIST.value}
+_ALL_ROLE_VALUES = {r.value for r in RoleEnum}
 
 
 # ===================== 请求/响应模型 =====================
@@ -61,6 +66,14 @@ class RegisterSubmitRequest(BaseModel):
     qw_name: str | None = Field(default=None, description="企微姓名")
     remark: str | None = None
 
+    # 2026-08-20 审计 H-3/SEC-04 修复: 申请者只能自报一线角色, 防提权
+    @field_validator("desired_role")
+    @classmethod
+    def _validate_desired_role(cls, v: str) -> str:
+        if v not in APPLICANT_ALLOWED_ROLES:
+            raise ValueError(f"申请角色只能为: {sorted(APPLICANT_ALLOWED_ROLES)} (管理角色需管理员审批时指定)")
+        return v
+
 
 class ApproveRequest(BaseModel):
     """管理员审批注册申请"""
@@ -69,6 +82,14 @@ class ApproveRequest(BaseModel):
     assign_group: str | None = None
     assign_username: str | None = None
     reject_reason: str | None = None
+
+    # 2026-08-20 审计 H-3/SEC-04 修复: 审批指定的角色必须是合法枚举值
+    @field_validator("assign_role")
+    @classmethod
+    def _validate_assign_role(cls, v: str | None) -> str | None:
+        if v is not None and v not in _ALL_ROLE_VALUES:
+            raise ValueError(f"非法的角色值: {v} (可选: {sorted(_ALL_ROLE_VALUES)})")
+        return v
 
 
 # ===================== 辅助函数 =====================
@@ -80,10 +101,14 @@ def _exchange_code(code: str, source: str) -> dict[str, Any]:
       - 小程序: https://api.weixin.qq.com/sns/jscode2session
       - 公众号: https://api.weixin.qq.com/sns/oauth2/access_token
 
-    为便于本地调试, 如已配置环境变量 WECHAT_APPID/WECHAT_SECRET 则真实调用,
-    否则返回占位 openid (前缀=mock-), 由管理员在后台审批时人工核实。
+    2026-08-20 审计 H-1/SEC-03 修复: mock 占位 openid 默认禁用。
+    仅当显式设置 WECHAT_MOCK_ALLOWED=true 且非生产环境(ENV != prod)时才允许 mock,
+    否则未配置 WECHAT_APPID/WECHAT_SECRET 时直接拒绝(503), 防止生产环境身份验证失效。
     """
+    import logging
     import os
+
+    log = logging.getLogger(__name__)
     appid = os.environ.get("WECHAT_APPID", "")
     secret = os.environ.get("WECHAT_SECRET", "")
     if appid and secret and code and not code.startswith("mock-"):
@@ -101,8 +126,13 @@ def _exchange_code(code: str, source: str) -> dict[str, Any]:
             "unionid": data.get("unionid"),
             "session_key": data.get("session_key"),
         }
-    # 本地开发: 直接用 code 作为 mock openid
-    return {"openid": f"mock-{code}", "unionid": None, "session_key": None}
+    if settings.WECHAT_MOCK_ALLOWED and settings.ENV != "prod":
+        log.warning(f"微信 mock 模式生效(openid=mock-{code}), 仅限开发调试")
+        return {"openid": f"mock-{code}", "unionid": None, "session_key": None}
+    raise HTTPException(
+        status_code=503,
+        detail="微信登录未配置: 请设置 WECHAT_APPID/WECHAT_SECRET(生产), 或开发环境显式设置 WECHAT_MOCK_ALLOWED=true",
+    )
 
 
 def _ensure_wechat_account(db, user_id: int, openid: str, unionid: str | None, source: str) -> None:
@@ -202,6 +232,9 @@ def wechat_submit_register(payload: RegisterSubmitRequest, db: DBSession):
     if not reg:
         reg = WechatRegistration(openid=openid, unionid=wx.get("unionid"), source=RegisterSource.MINIAPP.value)
         db.add(reg)
+    elif reg.status != RegisterStatus.PENDING.value:
+        # 2026-08-20 审计 SEC-12 修复: 已审批/已驳回的申请不可被申请者重置回 pending
+        raise HTTPException(status_code=400, detail="该注册申请已审批, 如需重新申请请联系管理员")
     reg.desired_username = payload.desired_username
     reg.desired_display_name = payload.desired_display_name
     reg.desired_role = payload.desired_role
@@ -269,6 +302,11 @@ def approve_registration(
     # 审批通过: 创建 User 并绑定 WechatAccount
     username = payload.assign_username or reg.desired_username or f"wx_{reg.openid[-8:]}"
     display_name = reg.desired_display_name or username
+    # 2026-08-20 审计 H-3/SEC-04 修复: 角色只能取管理员显式指定的合法角色;
+    # 未显式指定时, 仅当申请者自报的是低权限角色才沿用, 否则一律降级为 agent(防提权)
+    assign_role = payload.assign_role or reg.desired_role or RoleEnum.AGENT.value
+    if payload.assign_role is None and reg.desired_role not in APPLICANT_ALLOWED_ROLES:
+        assign_role = RoleEnum.AGENT.value
     # 随机初始密码, 首次登录后引导修改
     import secrets
     initial_pwd = secrets.token_urlsafe(12)
@@ -276,7 +314,7 @@ def approve_registration(
         username=username,
         display_name=display_name,
         hashed_password=hash_password(initial_pwd),
-        role=payload.assign_role or reg.desired_role or RoleEnum.AGENT.value,
+        role=assign_role,
         group_name=payload.assign_group or reg.desired_group,
         is_active=True,
         qw_name=reg.qw_name,

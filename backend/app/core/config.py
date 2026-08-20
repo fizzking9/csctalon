@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     SCRM_WEB_USERNAME: str = ""
     SCRM_WEB_PASSWORD: str = ""
 
+    # 微信扫码登录(2026-08-20 审计 H-1/SEC-03):
+    # 未配置 WECHAT_APPID/WECHAT_SECRET 时, 仅当本开关=true 且 ENV != prod 才允许 mock openid;
+    # 生产环境必须配置真实微信凭证, 否则 code-login/register 返回 503(拒绝降级)。
+    WECHAT_MOCK_ALLOWED: bool = False
+
     # 跨域(局域网部署,允许内网访问)
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 
@@ -83,23 +88,53 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _enforce_prod_secrets(self) -> "Settings":
-        """生产环境 fail-fast: 拒绝使用弱默认密钥/口令。
+        """生产环境 fail-fast: 拒绝弱默认密钥/口令与占位符。
 
-        ENV=prod 时若仍用默认 POSTGRES_PASSWORD/JWT_SECRET_KEY/INIT_ADMIN_PASSWORD/REDIS_PASSWORD,
-        立即抛错阻止启动——漏配 .env 即裸奔是真实事故场景。
-        dev/test 环境放宽, 便于本地开箱即用。
+        2026-08-20 审计 H-4/OPS-04 升级:
+        - 原实现只精确比对 4 个字面默认值, .env.example 的占位符(如 <请修改为随机长字符串>)
+          非空且不等于默认串即可绕过 → 弱密钥静默上线。
+        - 现增加占位词/长度校验(尤其 JWT_SECRET_KEY, 它同时派生 Fernet 凭证加密密钥)。
+        注意: 轮换 JWT_SECRET_KEY 前必须先设置独立 CONFIG_ENCRYPTION_KEY 并重加密
+        sync_source_configs 存量凭证(见 .env.example 注释与审计报告 C-P0-4)。
         """
         if self.ENV != "prod":
             return self
         problems = []
+
+        def _has_placeholder(value: str) -> bool:
+            low = value.lower()
+            return any(k in low for k in ("please", "change_me", "changeme", "random", "example", "请修改", "<", ">"))
+
         if self.POSTGRES_PASSWORD == _PROD_FORBIDDEN_DEFAULTS["POSTGRES_PASSWORD"]:
             problems.append("POSTGRES_PASSWORD 仍为默认值 csctalon123")
+        elif len(self.POSTGRES_PASSWORD) < 12:
+            problems.append("POSTGRES_PASSWORD 过短(<12), 建议使用强密码")
+        elif _has_placeholder(self.POSTGRES_PASSWORD):
+            problems.append("POSTGRES_PASSWORD 疑似占位符(含 <请修改...> 等), 必须改为强随机口令")
+
         if self.JWT_SECRET_KEY == _PROD_FORBIDDEN_DEFAULTS["JWT_SECRET_KEY"]:
             problems.append("JWT_SECRET_KEY 仍为默认占位值, 可被伪造任意用户 token")
+        elif len(self.JWT_SECRET_KEY) < 32:
+            problems.append("JWT_SECRET_KEY 长度不足 32 字符, 必须使用强随机密钥")
+        elif _has_placeholder(self.JWT_SECRET_KEY):
+            problems.append(
+                "JWT_SECRET_KEY 疑似占位短语(含 please/change/random/请修改 等词), 必须改为强随机密钥"
+            )
+
         if self.INIT_ADMIN_PASSWORD == _PROD_FORBIDDEN_DEFAULTS["INIT_ADMIN_PASSWORD"]:
             problems.append("INIT_ADMIN_PASSWORD 仍为 admin123")
+        elif len(self.INIT_ADMIN_PASSWORD) < 8:
+            problems.append("INIT_ADMIN_PASSWORD 过短(<8)")
+        elif _has_placeholder(self.INIT_ADMIN_PASSWORD):
+            problems.append("INIT_ADMIN_PASSWORD 疑似占位符(含 <请修改...> 等), 必须改为强口令")
+
         if not self.REDIS_PASSWORD:
             problems.append("REDIS_PASSWORD 为空, Redis 无密码裸奔")
+        elif len(self.REDIS_PASSWORD) < 8:
+            problems.append("REDIS_PASSWORD 过短(<8)")
+        elif _has_placeholder(self.REDIS_PASSWORD):
+            problems.append("REDIS_PASSWORD 疑似占位符(含 <请修改...> 等), 必须改为强口令")
+
         if problems:
             raise ValueError(
                 "生产环境(ENV=prod)安全配置校验失败, 拒绝启动:\n  - "

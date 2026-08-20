@@ -33,6 +33,16 @@ WRITING_TTL_MIN = 300
 WRITING_TTL_MAX = 3600
 
 
+def _sanitize_redis_url(url: str) -> str:
+    """日志脱敏: redis://:PASSWORD@host:port/db → redis://:***@host:port/db (2026-08-20 审计 SEC-09)"""
+    if "://:" in url and "@" in url:
+        scheme, rest = url.split("://:", 1)
+        if "@" in rest:
+            host_part = rest.split("@", 1)[1]
+            return f"{scheme}://:***@{host_part}"
+    return url
+
+
 def get_redis() -> redis.Redis | None:
     """获取 Redis 客户端单例; 连接失败时返回 None(业务降级到无缓存)"""
     global _redis_client
@@ -48,7 +58,8 @@ def get_redis() -> redis.Redis | None:
         )
         client.ping()
         _redis_client = client
-        logger.info("Redis 连接成功: %s", settings.redis_url)
+        # 只打 host:port, 不打密码明文
+        logger.info("Redis 连接成功: %s", _sanitize_redis_url(settings.redis_url))
         return _redis_client
     except RedisError as e:
         # Redis 不可用不影响业务, 仅记日志, 后续走无缓存路径

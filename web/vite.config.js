@@ -24,6 +24,11 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
+      // 附件静态资源(2026-08-20 审计 H-6/FEA-13 修复): dev 与 prod nginx 行为对齐
+      '/uploads': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     },
   },
 })

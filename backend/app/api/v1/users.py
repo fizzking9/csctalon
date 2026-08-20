@@ -39,10 +39,15 @@ def list_users(
 def create_user(payload: UserCreate, db: DBSession, _: AdminUser):
     if db.scalar(select(User).where(User.username == payload.username)):
         raise HTTPException(status_code=400, detail="用户名已存在")
+    # 2026-08-20 审计 SEC-13: bcrypt 仅支持 72 字节, 超长密码转 400 而非 500
+    try:
+        hashed = hash_password(payload.password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     user = User(
         username=payload.username,
         display_name=payload.display_name,
-        hashed_password=hash_password(payload.password),
+        hashed_password=hashed,
         role=payload.role.value,
         group_name=payload.group_name,
         qw_name=payload.qw_name,
@@ -74,7 +79,11 @@ def update_user(user_id: int, payload: UserUpdate, db: DBSession, current: Curre
             from app.core.security import verify_password
             if not verify_password(old_password, user.hashed_password):
                 raise HTTPException(status_code=400, detail="原密码错误")
-        user.hashed_password = hash_password(password)
+        # 2026-08-20 审计 SEC-13: 超长密码(>72 字节)转 400
+        try:
+            user.hashed_password = hash_password(password)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         password_changed = True
     else:
         # 即便不改密, old_password 字段也不应残留入库

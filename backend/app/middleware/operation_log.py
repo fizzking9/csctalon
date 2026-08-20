@@ -76,7 +76,9 @@ class OperationLogMiddleware(BaseHTTPMiddleware):
         # 客户端 IP(支持反向代理)
         xff = request.headers.get("x-forwarded-for")
         if xff:
-            ip = xff.split(",")[0].strip()
+            # 2026-08-20 审计 SEC-06 修复: 取末段 = 反代追加的真实 IP;
+            # 首段是客户端自己传的 X-Forwarded-For, 可被伪造(与 auth.py 口径对齐)
+            ip = xff.split(",")[-1].strip()
         else:
             ip = request.client.host if request.client else None
 

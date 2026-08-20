@@ -50,7 +50,7 @@ class Reimbursement(IDMixin, TimestampMixin, Base):
     total_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="总金额")
     invoice_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False, comment="发票张数")
     status: Mapped[str] = mapped_column(
-        String(32), default="草稿", nullable=False, index=True, comment="草稿/待审核/已通过/已报销"
+        String(32), default="草稿", nullable=False, index=True, comment="草稿/待审核/已通过/已驳回/已报销"
     )
     approved_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, comment="审核人")
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="审核时间")
@@ -66,7 +66,8 @@ class ReimbursementItem(IDMixin, TimestampMixin, Base):
     reimbursement_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("reimbursements.id", ondelete="CASCADE"), index=True, nullable=False, comment="报销单"
     )
+    # 2026-08-20 审计 H-2/API-02 修复: invoice_id 唯一, 防同一发票进入多张报销单(重复报销)
     invoice_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("expense_invoices.id"), index=True, nullable=False, comment="发票"
+        Integer, ForeignKey("expense_invoices.id"), unique=True, nullable=False, comment="发票(唯一, 防重复报销)"
     )
     amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="金额")
