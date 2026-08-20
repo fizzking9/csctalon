@@ -429,7 +429,7 @@ PRESET_VIEWS: list[dict] = [
     {
         "code": "preset_external_complaint_by_follower",
         "name": "外部投诉跟进人统计",
-        "description": "按跟进人汇总投诉量与协商退款金额(工作量与成本)",
+        "description": "按跟进人汇总投诉量(2026-08-20 协商退款金额字段已随精简下线)",
         "chart_type": "bar",
         "segments": [{
             "source_code": "external_complaint",
@@ -437,7 +437,6 @@ PRESET_VIEWS: list[dict] = [
             "dimensions": [{"field": "follower", "alias": "跟进人", "role": "person"}],
             "measures": [
                 {"field": "*", "agg": "count", "alias": "投诉量"},
-                {"field": "negotiate_refund_amount", "agg": "sum", "alias": "协商退款金额"},
             ],
             "filters": [{"field": "follower", "op": "is_not_null", "value": None}],
             "limit": 30,

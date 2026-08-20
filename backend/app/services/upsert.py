@@ -228,6 +228,12 @@ def _to_datetime(val: Any) -> datetime | None:
         return val
     if isinstance(val, str) and val.strip() == "":
         return None
+    # Excel 序列日期(1899-12-30 起算的天数): 纯整数且落在 1900~2100 年合理区间。
+    # 315投诉表「处理时间」列存在 229 个此类值(如 46187),原实现直接判 None 丢失。
+    if isinstance(val, str):
+        s = val.strip()
+        if s.isdigit() and 20000 <= int(s) <= 80000:
+            return (datetime(1899, 12, 30) + timedelta(days=int(s))).replace(tzinfo=_TZ_CN).astimezone(timezone.utc)
     try:
         result = pd.to_datetime(val)
         if pd.isna(result):
@@ -1071,20 +1077,34 @@ def upsert_cs_records(df: pd.DataFrame, mapping: dict[str, str], db: Session, re
     result.updated += max(len(unique_rows) - real_inserted, 0)
 
 
-def upsert_external_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
-    """外部投诉(监督局/315) - 投诉编号去重更新,无编号的行简单插入
+def _complaint_dedup_hash(parts: list[str]) -> str:
+    """投诉身份指纹(md5前32位): 拼接规范化身份字段, 供 dedup_hash 列去重.
 
-    投诉编号有 \n 前缀,导入时剥离。无编号的行(~3%)按 on_conflict_do_nothing 插入,
-    重复导入会累计(与 cs_record 一致),有编号的 96% 走 upsert 精确去重更新。
+    与 workbuddy 同步服务(complaint_sync.py)保持同一口径, 保证手动导入与推送共用去重.
     """
-    with_pk: list[dict] = []
-    without_pk: list[dict] = []
+    import hashlib
+
+    key = "|".join((p or "").strip() for p in parts)
+    return hashlib.md5(key.encode("utf-8")).hexdigest()[:32]
+
+
+def upsert_external_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """外部投诉(监督局/315) - 按 dedup_hash 身份指纹去重更新
+
+    2026-08-20 变更: 原按 complaint_no 去重, 但样例文件中存在同编号多条不同投诉
+    (含 "/" 等垃圾编号), 单一编号不可靠。现改用身份指纹
+    md5(编号|日期|手机号|SN|问题) 去重: 指纹相同视为同一条投诉 → 更新,
+    指纹不同(含编号相同但内容不同的投诉) → 各自保留。重复推送不会累积脏数据。
+    """
+    rows: list[dict] = []
     for idx, row in enumerate(df.to_dict("records")):
         try:
             data = apply_mapping(row, mapping)
-            # 投诉编号剥离 \n/空白
+            # 投诉编号剥离 \n/空白, 非法值(垃圾编号)置空
             raw_no = data.get("complaint_no")
             complaint_no = raw_no.replace("\n", "").strip() if isinstance(raw_no, str) else None
+            if complaint_no and not re.fullmatch(r"[0-9A-Za-z\-]{6,64}", complaint_no):
+                complaint_no = None
             rec = {
                 "complaint_no": complaint_no or None,
                 "complaint_date": _sanitize_date(_to_datetime(data.get("complaint_date"))),
@@ -1105,37 +1125,31 @@ def upsert_external_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Se
                 "follower": _sanitize_name_field(data.get("follower"), idx, result, "外部投诉-跟进人"),
                 "handle_time": _sanitize_date(_to_datetime(data.get("handle_time"))),
                 "handle_detail": data.get("handle_detail"),
-                "internal_analysis": data.get("internal_analysis"),
-                "external_analysis": data.get("external_analysis"),
-                "reception_cs": _sanitize_name_field(data.get("reception_cs"), idx, result, "外部投诉-接待客服"),
-                "package_order_no": data.get("package_order_no"),
-                "package_name": data.get("package_name"),
-                "package_price": _to_float(data.get("package_price")),
-                "actual_pay_amount": _to_float(data.get("actual_pay_amount")),
-                "negotiate_refund_amount": _to_float(data.get("negotiate_refund_amount")),
             }
-            (with_pk if complaint_no else without_pk).append(rec)
+            rec["dedup_hash"] = _complaint_dedup_hash([
+                rec.get("complaint_no"),
+                rec["complaint_date"].isoformat() if rec.get("complaint_date") else "",
+                rec.get("complainant_phone"),
+                rec.get("device_sn"),
+                rec.get("problem"),
+            ])
+            rows.append(rec)
             result.total += 1
         except Exception as e:
             result.add_error(idx, f"行解析失败: {e}")
-    all_rows = with_pk + without_pk
+    all_rows = rows
     if not all_rows:
         return
     _sync_devices(all_rows, "device_sn", db)
-    # 有编号:upsert 精确去重更新
-    if with_pk:
-        _execute_upsert(db, ExternalComplaint, "complaint_no", with_pk, result)
-    # 无编号:简单插入(null 不触发 unique 冲突,重复导入会累计)
-    if without_pk:
-        db.execute(pg_insert(ExternalComplaint).values(without_pk).on_conflict_do_nothing())
-        db.flush()
-        result.inserted += len(without_pk)
+    _execute_upsert(db, ExternalComplaint, "dedup_hash", all_rows, result)
 
 
 def upsert_card_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
-    """卡商群投诉 - 无天然唯一键,简单 insert(on_conflict_do_nothing 兜底),与 cs_record 一致
+    """卡商群投诉 - 按 dedup_hash 身份指纹去重更新
 
-    device_sn 单元格可能含多个 SN(换行分隔),取首个以保证 varchar(64) 与外键约束。
+    2026-08-20 变更: 原为无唯一键简单 insert(重复导入会累积),现改用身份指纹
+    md5(日期|群|手机号|SN|问题) 去重, 重复推送不累积。device_sn 单元格可能含
+    多个 SN(换行分隔)或备注,取首个有效 SN 以保证 varchar(64) 与外键约束。
     """
     rows: list[dict] = []
     for idx, row in enumerate(df.to_dict("records")):
@@ -1144,7 +1158,7 @@ def upsert_card_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
             # device_sn 取首个(单元格可能含多个 SN,换行分隔)
             raw_sn = data.get("device_sn")
             device_sn = raw_sn.split("\n")[0].strip() if isinstance(raw_sn, str) and raw_sn.strip() else None
-            rows.append({
+            rec = {
                 "complaint_date": _sanitize_date(_to_datetime(data.get("complaint_date"))),
                 "complaint_group": data.get("complaint_group"),
                 "complainant": _sanitize_name_field(data.get("complainant"), idx, result, "卡商群投诉-投诉人"),
@@ -1156,16 +1170,22 @@ def upsert_card_complaints(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
                 "solution": data.get("solution"),
                 "handler": _sanitize_name_field(data.get("handler"), idx, result, "卡商群投诉-处理人"),
                 "handle_result": data.get("handle_result"),
-            })
+            }
+            rec["dedup_hash"] = _complaint_dedup_hash([
+                rec["complaint_date"].isoformat() if rec.get("complaint_date") else "",
+                rec.get("complaint_group"),
+                rec.get("complainant_phone"),
+                rec.get("device_sn"),
+                rec.get("problem"),
+            ])
+            rows.append(rec)
             result.total += 1
         except Exception as e:
             result.add_error(idx, f"行解析失败: {e}")
     if not rows:
         return
     _sync_devices(rows, "device_sn", db)
-    db.execute(pg_insert(CardComplaint).values(rows).on_conflict_do_nothing())
-    db.flush()
-    result.inserted += len(rows)
+    _execute_upsert(db, CardComplaint, "dedup_hash", rows, result)
 
 
 def upsert_device_combos(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:

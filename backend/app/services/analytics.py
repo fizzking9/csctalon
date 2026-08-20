@@ -3287,8 +3287,8 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         ),
         ec_h AS (
             SELECT
-                -- external_complaints 没有 handler 列: 优先用 follower(跟进人), 兜底 reception_cs(接待客服) → 都是人员别名
-                COALESCE(NULLIF(TRIM(ec.follower), ''), NULLIF(TRIM(ec.reception_cs), ''), '未分配') AS raw_handler,
+                -- external_complaints 处理人: follower(跟进人)
+                COALESCE(NULLIF(TRIM(ec.follower), ''), '未分配') AS raw_handler,
                 -- 没有 status 列, 直接基于 result + handle_time 判断状态
                 CASE
                     WHEN COALESCE(ec.result, '') ILIKE '%有效%' THEN '已完成'
@@ -3586,7 +3586,6 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                 ExternalComplaint.handle_time,
                 ExternalComplaint.handle_detail,
                 ExternalComplaint.follower,
-                ExternalComplaint.reception_cs,
             )
             .where(ec_where)
             .order_by(ExternalComplaint.complaint_date.asc())
@@ -3621,7 +3620,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                 if _pb:
                     title_parts.append(_pb)
             title = " ".join(title_parts) or "外部投诉(未登记详情)"
-            handler_raw = r["follower"] or r["reception_cs"]
+            handler_raw = r["follower"]
             complaint_pending.append({
                 "source_type": "外部投诉",
                 "no": r["complaint_no"] or "",

@@ -34,3 +34,12 @@ class CardComplaint(IDMixin, TimestampMixin, Base):
     solution: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True, comment="解决方案")
     handler: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="处理人(人员别名来源)")
     handle_result: Mapped[str | None] = mapped_column(Text, nullable=True, comment="处理结果")
+    matched_ticket_no: Mapped[str | None] = mapped_column(
+        String(64), index=True, nullable=True, comment="关联服务工单号(按设备SN匹配外部投诉类工单)"
+    )
+    matched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="关联工单时间"
+    )
+    dedup_hash: Mapped[str | None] = mapped_column(
+        String(32), unique=True, index=True, nullable=True, comment="业务去重指纹(md5):日期+群+手机号+SN+问题"
+    )

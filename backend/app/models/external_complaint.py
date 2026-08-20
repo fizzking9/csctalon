@@ -20,7 +20,8 @@ class ExternalComplaint(IDMixin, TimestampMixin, Base):
     __tablename__ = "external_complaints"
 
     complaint_no: Mapped[str | None] = mapped_column(
-        String(64), unique=True, index=True, nullable=True, comment="投诉编号(部分缺失,缺失时不去重)"
+        String(64), index=True, nullable=True,
+        comment="投诉编号(同一编号可对应多条投诉, 去重以 dedup_hash 指纹为准)",
     )
     complaint_date: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True, nullable=True, comment="投诉日期(主时间字段)"
@@ -46,11 +47,12 @@ class ExternalComplaint(IDMixin, TimestampMixin, Base):
     follower: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="跟进人(人员别名来源)")
     handle_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="处理时间")
     handle_detail: Mapped[str | None] = mapped_column(Text, nullable=True, comment="处理明细")
-    internal_analysis: Mapped[str | None] = mapped_column(Text, nullable=True, comment="内部分析")
-    external_analysis: Mapped[str | None] = mapped_column(Text, nullable=True, comment="外部分析")
-    reception_cs: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="接待客服(人员别名来源)")
-    package_order_no: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="套餐订单号")
-    package_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="套餐名称")
-    package_price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="套餐价格")
-    actual_pay_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="实际支付金额")
-    negotiate_refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="协商退款金额")
+    matched_ticket_no: Mapped[str | None] = mapped_column(
+        String(64), index=True, nullable=True, comment="关联服务工单号(按设备SN匹配外部投诉类工单)"
+    )
+    matched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="关联工单时间"
+    )
+    dedup_hash: Mapped[str | None] = mapped_column(
+        String(32), unique=True, index=True, nullable=True, comment="业务去重指纹(md5):编号+日期+手机号+SN+问题"
+    )

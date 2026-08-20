@@ -35,7 +35,6 @@ FIELD_LABELS: dict[str, str] = {
     "handler": "处理人",
     "registrant": "登记人",
     "follower": "跟进人",
-    "reception_cs": "接待客服",
 }
 
 # 公司缩写前缀(云客猫=YKM),剥后才是人名拼音首字母(YKM_LJF → LJF)

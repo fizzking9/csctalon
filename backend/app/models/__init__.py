@@ -7,6 +7,7 @@ from app.models.base import IDMixin, TimestampMixin  # noqa: F401
 from app.models.bms_sync_log import BmsSyncLog  # noqa: F401
 from app.models.card_complaint import CardComplaint  # noqa: F401
 from app.models.complaint_audit import ComplaintAudit  # noqa: F401
+from app.models.complaint_sync_log import ComplaintSyncLog  # noqa: F401
 from app.models.cs_record import CsRecord  # noqa: F401
 from app.models.dashboard import Dashboard  # noqa: F401
 from app.models.data_quality import DataQualityRule  # noqa: F401
@@ -68,6 +69,7 @@ __all__ = [
     "Dashboard",
     "CardComplaint",
     "ComplaintAudit",
+    "ComplaintSyncLog",
     "CsRecord",
     "BmsSyncLog",
     "DataQualityRule",

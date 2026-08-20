@@ -6,7 +6,6 @@ sys/system 标记为系统自动操作（is_system=true），不建 person。
 
 归一化(_normalize_alias)剥离「企微/客服/云客猫/随身WiFi/店铺」等系统/部门前缀,
 使跨表同指向别名(企微-洪佳 / 云客猫-洪佳)归并到同一 normalized key。
-自由文本字段(external_complaints.reception_cs)先取首段人名再归一化。
 """
 
 import re
@@ -97,7 +96,6 @@ PERSON_FIELD_SOURCES = [
     (WalletWithdrawal, WalletWithdrawal.operator, "wallet_withdrawals", "operator"),
     (CsRecord, CsRecord.operator, "cs_records", "operator"),
     (ExternalComplaint, ExternalComplaint.follower, "external_complaints", "follower"),
-    (ExternalComplaint, ExternalComplaint.reception_cs, "external_complaints", "reception_cs"),
     (CardComplaint, CardComplaint.handler, "card_complaints", "handler"),
     # ---- SCRM 聚合平台新增数据源(operator_name 用于别名归一 → Person) ----
     (ScrmOperator, ScrmOperator.operator_name, "scrm_operators", "operator_name"),
@@ -107,7 +105,7 @@ PERSON_FIELD_SOURCES = [
 ]
 
 # 自由文本字段: 源数据混了名字+投诉叙述,需先取首段人名
-FREETEXT_FIELDS = {("external_complaints", "reception_cs")}
+FREETEXT_FIELDS: set[tuple[str, str]] = set()
 
 # 句子分隔符(取首段时截断)
 _SENTENCE_SEPS = ("，", "。", "；", ";", ",", "、", "\n", "\r")
@@ -198,7 +196,7 @@ def _is_placeholder(raw: str) -> bool:
 
 
 def _extract_name_token(raw: str) -> str | None:
-    """从自由文本(如 reception_cs)提取首段人名。
+    """从自由文本提取首段人名。
 
     - 取首个句子分隔符(，。；,、换行)前的片段
     - 再截首个 2+ 空白前(两人名 / 名字+备注)
@@ -274,7 +272,7 @@ def extract_person_aliases(db: Session) -> dict:
 
     - sys/system/空/nan 跳过（sys/system 入库标 is_system 供审计）
     - 时间戳/纯标点/非人名 denylist 跳过
-    - 自由文本字段(reception_cs)先取首段人名
+    - 自由文本字段先取首段人名
     - alias 已存在(含已归并到 HR 的)则只更新 last_seen_at
     - 新 alias 只入待归并队列(person_id=None),不建 Person
     - 先按 alias_val 跨源去重(同别名多源出现只入库一次,首次来源为准),
@@ -355,7 +353,7 @@ def count_alias_occurrences(db: Session, alias_vals: list[str]) -> dict[str, lis
 
     返回 {alias_val: [{table, field, count}]}。
     - 非自由文本字段(operator/auditor/handler 等):精确匹配 IN(alias_vals) 批量统计
-    - 自由文本字段(reception_cs):别名是提取的人名 token,原文含 token → LIKE 匹配
+    - 自由文本字段:别名是提取的人名 token,原文含 token → LIKE 匹配
     """
     if not alias_vals:
         return {}
