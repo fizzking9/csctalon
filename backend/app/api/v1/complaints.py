@@ -10,7 +10,9 @@ from fastapi import APIRouter, Query
 from sqlalchemy import case, func, or_, select, and_
 
 from app.api.deps import CurrentUser, DBSession, ManagerUser
+from app.models.card_complaint import CardComplaint
 from app.models.complaint_audit import ComplaintAudit
+from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
 from app.schemas.common import PageBase, R
 from app.services.analytics import _complaint_source_type_case, _ticket_category_case, TZ
@@ -338,8 +340,29 @@ def complaint_summary(
         for r in db.execute(_backlog_cat_stmt).all()
     ]
 
+    # ---- 补充明细数据源统计(315外部投诉 / 卡商群投诉,workbuddy推送) ----
+    # 口径: 两张补充表按投诉日期统计总数与"已关联服务工单"数。
+    # 关联 = 按 device_sn 匹配到外部投诉类工单(matched_ticket_no 非空)。
+    # 它们是对 service_tickets 工单口径的更详细补充, 不并入主口径三源合计。
+    def _suppl_stats(model, date_col, matched_col):
+        """补充表统计: 总数(时间范围内) + 已关联工单数(同一时间范围)"""
+        conds: list = []
+        if ts:
+            conds.append(date_col >= ts)
+        if te:
+            conds.append(date_col <= te)
+        total = db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
+        matched = db.scalar(select(func.count()).select_from(model).where(matched_col.isnot(None), *conds)) or 0
+        return {"total": int(total), "matched": int(matched)}
+
+    supplementary = {
+        "external": _suppl_stats(ExternalComplaint, ExternalComplaint.complaint_date, ExternalComplaint.matched_ticket_no),
+        "card": _suppl_stats(CardComplaint, CardComplaint.complaint_date, CardComplaint.matched_ticket_no),
+    }
+
     return R(
         data={
+            "supplementary": supplementary,
             "backlog": {
                 "total": int(backlog_total),
                 "by_category": backlog_by_cat,
@@ -377,6 +400,7 @@ def complaint_detail(
     end: str | None = None,
     source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉"),
     limit: int = Query(500, ge=1, le=2000),
+    include_supplementary: bool = Query(False, description="为true时按设备SN附加315/卡商补充明细(关联合并)"),
 ):
     ts = _parse_dt(start)
     te = _parse_dt_end(end)
@@ -453,9 +477,115 @@ def complaint_detail(
             "status": _norm_status(source, raw_status, finish, register, raw_handler),
         })
 
+    # ---- 关联合并: 按设备SN附加 315外部投诉/卡商群投诉 补充明细 ----
+    # 两张补充表(workbuddy推送)是对工单口径的更详细描述(投诉问题/处理明细/跟进人等),
+    # 核心匹配键为 device_sn, 一个SN可对应多条补充记录(用户可能多次投诉)。
+    # 默认不附加(避免大页负载), 显式 include_supplementary=true 时附加。
+    if include_supplementary:
+        sns = {r["device_sn"] for r in records if r.get("device_sn")}
+        if sns:
+            suppl_by_sn: dict[str, list[dict]] = {}
+
+            def _collect(model, sn_field_name: str, source_name, limit_per_sn=10):
+                rows = db.scalars(
+                    select(model).where(getattr(model, sn_field_name).in_(sns)).order_by(model.complaint_date.desc().nullslast())
+                ).all()
+                for c in rows:
+                    sn = getattr(c, sn_field_name)
+                    if not sn:
+                        continue
+                    suppl_by_sn.setdefault(sn, [])
+                    if len(suppl_by_sn[sn]) >= limit_per_sn:
+                        continue
+                    suppl_by_sn[sn].append({
+                        "source": source_name,
+                        "complaint_no": getattr(c, "complaint_no", None),
+                        "complaint_date": _to_sh_iso(c.complaint_date),
+                        "complainant": c.complainant,
+                        "complainant_phone": c.complainant_phone,
+                        "platform": getattr(c, "platform", None),
+                        "complaint_group": getattr(c, "complaint_group", None),
+                        "problem": c.problem,
+                        "solution": c.solution,
+                        "result": c.result,
+                        "handler": getattr(c, "handler", None) or getattr(c, "follower", None),
+                        "handle_detail": getattr(c, "handle_detail", None) or getattr(c, "handle_result", None),
+                        "handle_time": _to_sh_iso(c.handle_time) if hasattr(c, "handle_time") else None,
+                        "matched_ticket_no": c.matched_ticket_no,
+                    })
+
+            _collect(ExternalComplaint, "device_sn", "315外部投诉")
+            _collect(CardComplaint, "device_sn", "卡商群投诉")
+            for r in records:
+                r["supplementary"] = suppl_by_sn.get(r.get("device_sn"), [])
+
     # 按动作时间降序排列
     records.sort(key=lambda x: x.get("time") or "", reverse=True)
     return R(data={"items": records[:limit], "total": len(records)})
+
+
+# ---------- 补充明细(315外部投诉 / 卡商群投诉,workbuddy推送) ----------
+
+
+@router.get("/supplementary", response_model=R, summary="投诉补充明细列表(315/卡商,workbuddy推送)")
+def complaint_supplementary(
+    db: DBSession,
+    _: CurrentUser,
+    start: str | None = None,
+    end: str | None = None,
+    source_type: str | None = Query(None, description="external=315外部投诉/card=卡商群投诉, 缺省查全部"),
+    matched: bool | None = Query(None, description="true=仅已关联工单, false=仅未关联"),
+    limit: int = Query(500, ge=1, le=2000),
+):
+    """查询两张投诉补充表明细(按投诉日期过滤), 支持按来源/关联状态筛选。
+
+    数据由 workbuddy 定期推送, 是对 service_tickets 工单口径的更详细补充。
+    关联 = 按 device_sn 匹配到外部投诉类工单(matched_ticket_no 非空)。
+    """
+    ts = _parse_dt(start)
+    te = _parse_dt_end(end)
+
+    def _items(model, sn_field, source_name):
+        stmt = select(model).where(True)
+        if ts:
+            stmt = stmt.where(model.complaint_date >= ts)
+        if te:
+            stmt = stmt.where(model.complaint_date <= te)
+        if matched is True:
+            stmt = stmt.where(model.matched_ticket_no.isnot(None))
+        elif matched is False:
+            stmt = stmt.where(model.matched_ticket_no.is_(None))
+        rows = db.scalars(stmt.order_by(model.complaint_date.desc().nullslast())).all()
+        return [
+            {
+                "source": source_name,
+                "complaint_no": getattr(c, "complaint_no", None),
+                "complaint_date": _to_sh_iso(c.complaint_date),
+                "complaint_group": getattr(c, "complaint_group", None),
+                "complainant": c.complainant,
+                "complainant_phone": c.complainant_phone,
+                "device_sn": getattr(c, sn_field, None),
+                "platform": getattr(c, "platform", None),
+                "problem": c.problem,
+                "problem_category": getattr(c, "problem_category", None) or getattr(c, "complaint_category", None),
+                "solution": c.solution,
+                "result": c.result,
+                "handler": getattr(c, "handler", None) or getattr(c, "follower", None),
+                "handle_detail": getattr(c, "handle_detail", None) or getattr(c, "handle_result", None),
+                "handle_time": _to_sh_iso(c.handle_time) if hasattr(c, "handle_time") else None,
+                "matched_ticket_no": c.matched_ticket_no,
+            }
+            for c in rows
+        ]
+
+    items: list[dict] = []
+    if source_type in (None, "external", "315"):
+        items.extend(_items(ExternalComplaint, "device_sn", "315外部投诉"))
+    if source_type in (None, "card", "卡商"):
+        items.extend(_items(CardComplaint, "device_sn", "卡商群投诉"))
+    # 按投诉日期降序(主排序), 无日期的排末尾
+    items.sort(key=lambda x: (x.get("complaint_date") is None, x.get("complaint_date") or ""), reverse=True)
+    return R(data={"items": items[:limit], "total": len(items)})
 
 
 # ---------- 单个投诉审计(规划设计 §4.6) ----------

@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CSCTalon 项目审计报告</title>
+<style>
+  :root {
+    --bg: #f8f9fa;
+    --card-bg: #ffffff;
+    --border: #e2e8f0;
+    --text: #1a202c;
+    --text-muted: #64748b;
+    --accent: #3b82f6;
+    --green: #10b981;
+    --yellow: #f59e0b;
+    --red: #ef4444;
+    --purple: #8b5cf6;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 24px;
+  }
+  .container { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  h2 {
+    font-size: 20px; font-weight: 600; margin: 32px 0 16px;
+    padding-bottom: 8px; border-bottom: 2px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+  }
+  h3 { font-size: 16px; font-weight: 600; margin: 20px 0 8px; }
+  .meta { color: var(--text-muted); font-size: 14px; margin-bottom: 24px; }
+  .score-bar {
+    display: flex; gap: 16px; margin: 24px 0; flex-wrap: wrap;
+  }
+  .score-card {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 24px; flex: 1; min-width: 140px;
+    text-align: center;
+  }
+  .score-card .num { font-size: 32px; font-weight: 700; }
+  .score-card .label { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+  .score-green .num { color: var(--green); }
+  .score-yellow .num { color: var(--yellow); }
+  .score-red .num { color: var(--red); }
+  .card {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px; margin-bottom: 16px;
+  }
+  .finding {
+    display: flex; gap: 12px; align-items: flex-start;
+    padding: 14px 16px; border-radius: 8px; margin-bottom: 10px;
+  }
+  .finding-severity {
+    font-size: 11px; font-weight: 700; padding: 2px 10px;
+    border-radius: 20px; white-space: nowrap; flex-shrink: 0;
+  }
+  .sev-high { background: #fef2f2; color: var(--red); }
+  .sev-medium { background: #fffbeb; color: var(--yellow); }
+  .sev-low { background: #f0fdf4; color: var(--green); }
+  .finding-body { flex: 1; }
+  .finding-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+  .finding-desc { font-size: 13px; color: var(--text-muted); }
+  .finding-desc code {
+    background: #f1f5f9; padding: 1px 6px; border-radius: 4px;
+    font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .tag {
+    display: inline-block; font-size: 11px; padding: 2px 8px;
+    border-radius: 4px; margin-right: 4px;
+  }
+  .tag-good { background: #f0fdf4; color: var(--green); }
+  .tag-issue { background: #fef2f2; color: var(--red); }
+  table {
+    width: 100%; border-collapse: collapse; margin: 12px 0;
+    font-size: 13px;
+  }
+  th { text-align: left; padding: 8px 12px; background: #f1f5f9; font-weight: 600; }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  code.inline {
+    background: #f1f5f9; padding: 1px 6px; border-radius: 4px;
+    font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .summary-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0;
+  }
+  @media (max-width: 640px) {
+    .summary-grid { grid-template-columns: 1fr; }
+    .score-bar { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>CSCTalon 项目审计报告</h1>
+<div class="meta">
+  审计日期: 2026-08-20 &nbsp;|&nbsp; 项目: CSCTalon 客服中心数据分析决策与工作流系统<br>
+  代码库: /Users/tanzk/dev/csctalon &nbsp;|&nbsp; 最近提交: 8b61f1e (全栈审计v0.7 P0 安全修复)
+</div>
+
+<div class="score-bar">
+  <div class="score-card score-green">
+    <div class="num">A-</div>
+    <div class="label">安全防护</div>
+  </div>
+  <div class="score-card score-yellow">
+    <div class="num">C+</div>
+    <div class="label">代码质量</div>
+  </div>
+  <div class="score-card score-red">
+    <div class="num">F</div>
+    <div class="label">测试覆盖</div>
+  </div>
+  <div class="score-card score-green">
+    <div class="num">B+</div>
+    <div class="label">运维部署</div>
+  </div>
+</div>
+
+<h2>一、项目概览</h2>
+<div class="card">
+  <table>
+    <tr><th>维度</th><th>详情</th></tr>
+    <tr><td>定位</td><td>客服中心运营数据采集→清洗→分析→决策→闭环管理一体化平台</td></tr>
+    <tr><td>技术栈</td><td>Vue 3 + Vite + Element Plus / FastAPI + SQLAlchemy 2.0 + Gunicorn / PostgreSQL 15 / Redis 7</td></tr>
+    <tr><td>代码规模</td><td>后端 243 个 .py 文件 / 前端 9000+ 个 JS/TS 文件（含 node_modules） / 37 个 Alembic 迁移 / 56 张数据表</td></tr>
+    <tr><td>部署方式</td><td>Docker Compose（4 服务: db/redis/backend/web），局域网单机部署</td></tr>
+    <tr><td>数据采集</td><td>Playwright 浏览器自动化 + ddddocr OCR 自动登录 BMS/SCRM 平台</td></tr>
+  </table>
+</div>
+
+<h2>二、审计发现总览</h2>
+
+<div class="summary-grid">
+  <div class="card">
+    <h3 style="color:var(--green)">做得好的方面</h3>
+    <div class="finding">
+      <span class="finding-severity sev-low">优秀</span>
+      <div class="finding-body">
+        <div class="finding-title">生产环境 fail-fast 安全校验</div>
+        <div class="finding-desc">ENV=prod 时拒绝弱默认密码、占位符、短密钥，从源头杜绝裸奔上线</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-low">优秀</span>
+      <div class="finding-body">
+        <div class="finding-title">JWT 令牌吊销机制</div>
+        <div class="finding-desc">token_version 字段实现改密/登出后即时失效，防止旧 token 继续使用</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-low">优秀</span>
+      <div class="finding-body">
+        <div class="finding-title">SafeStaticFiles 静态文件加固</div>
+        <div class="finding-desc">扩展名白名单 + 路径穿越防御 + nosniff，阻断登录态泄露和存储型 XSS</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-low">优秀</span>
+      <div class="finding-body">
+        <div class="finding-title">上传文件 magic bytes 校验</div>
+        <div class="finding-desc">图片上传时校验文件头魔数，防扩展名伪装攻击</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-low">优秀</span>
+      <div class="finding-body">
+        <div class="finding-title">Fernet 加密存储第三方凭证</div>
+        <div class="finding-desc">BMS/SCRM 账号密码使用 Fernet 对称加密入库，非明文存储</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-low">优秀</span>
+      <div class="finding-body">
+        <div class="finding-title">Nginx 安全响应头完备</div>
+        <div class="finding-desc">CSP / X-Frame-Options / nosniff / Referrer-Policy / Permissions-Policy 全覆盖</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-low">优秀</span>
+      <div class="finding-body">
+        <div class="finding-title">DOMPurify 前端 XSS 防护</div>
+        <div class="finding-desc">v-html 使用前经 DOMPurify 消毒，限制允许标签和属性</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-low">优秀</span>
+      <div class="finding-body">
+        <div class="finding-title">登录限速防爆破</div>
+        <div class="finding-desc">按 IP 限流（5 分钟 10 次），失败/成功均记录操作日志</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-low">优秀</span>
+      <div class="finding-body">
+        <div class="finding-title">.env 文件未入库</div>
+        <div class="finding-desc">已验证 .env 未被 git 跟踪，.gitignore 配置正确</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="color:var(--red)">需改进的方面</h3>
+    <div class="finding">
+      <span class="finding-severity sev-high">P0 严重</span>
+      <div class="finding-body">
+        <div class="finding-title">零测试覆盖</div>
+        <div class="finding-desc"><code>backend/tests/</code> 目录为空，无任何测试用例</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-high">P1 高</span>
+      <div class="finding-body">
+        <div class="finding-title">超大型文件难以维护</div>
+        <div class="finding-desc">analytics.py 8508 行 / bms_fetcher.py 3273 行 / fetch.py 1199 行</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-high">P1 高</span>
+      <div class="finding-body">
+        <div class="finding-title">大量裸 except 吞异常</div>
+        <div class="finding-desc">30+ 处 <code>except Exception:</code> 静默吞掉错误，排查困难</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-medium">P2 中</span>
+      <div class="finding-body">
+        <div class="finding-title">死依赖 passlib</div>
+        <div class="finding-desc">pyproject.toml 仍声明 passlib[bcrypt]，但代码已改用 bcrypt 直调</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-medium">P2 中</span>
+      <div class="finding-body">
+        <div class="finding-title">前端无 TypeScript</div>
+        <div class="finding-desc">全部 .vue/.js 为纯 JS，缺少类型约束，重构风险高</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-medium">P2 中</span>
+      <div class="finding-body">
+        <div class="finding-title">限速为进程内内存</div>
+        <div class="finding-desc">多 worker 部署时限速失效（当前 -w 1 规避了此问题）</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-medium">P2 中</span>
+      <div class="finding-body">
+        <div class="finding-title">无 CI/CD 流水线</div>
+        <div class="finding-desc">无自动化构建/测试/部署流水线配置文件</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-low">P3 低</span>
+      <div class="finding-body">
+        <div class="finding-title">CONFIG_ENCRYPTION_KEY 与 JWT 耦合</div>
+        <div class="finding-desc">加密 key 默认从 JWT_SECRET_KEY 派生，轮换 JWT 会导致凭证解密失败</div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="finding-severity sev-low">P3 低</span>
+      <div class="finding-body">
+        <div class="finding-title">前端大组件</div>
+        <div class="finding-desc">SyncDashboard.vue 2010 行 / Today.vue 1816 行，应拆分</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h2>三、详细审计</h2>
+
+<h3>3.1 架构与配置</h3>
+<div class="card">
+  <table>
+    <tr><th>检查项</th><th>状态</th><th>说明</th></tr>
+    <tr><td>目录结构</td><td><span class="tag tag-good">合规</span></td><td>backend/web/docs/data 分层清晰，职责分明</td></tr>
+    <tr><td>.gitignore</td><td><span class="tag tag-good">合规</span></td><td>.env / uploads / 样本数据 / 日志均正确忽略</td></tr>
+    <tr><td>.env 未入库</td><td><span class="tag tag-good">合规</span></td><td>git ls-files 验证 .env 未被跟踪</td></tr>
+    <tr><td>.env.example 模板</td><td><span class="tag tag-good">合规</span></td><td>含占位符和安全注释，未暴露真实密钥</td></tr>
+    <tr><td>.gitleaks.toml</td><td><span class="tag tag-good">合规</span></td><td>已配置密钥泄露扫描规则</td></tr>
+    <tr><td>Docker Compose 健康检查</td><td><span class="tag tag-good">合规</span></td><td>db/backend 均有 healthcheck，web depends_on healthy</td></tr>
+    <tr><td>端口暴露</td><td><span class="tag tag-good">合规</span></td><td>DB/Redis 仅绑定 127.0.0.1，仅 80 对外</td></tr>
+    <tr><td>日志轮转</td><td><span class="tag tag-good">合规</span></td><td>json-file 10m×3 轮转 + 后端 RotatingFileHandler</td></tr>
+    <tr><td>依赖锁定</td><td><span class="tag tag-issue">需改进</span></td><td>后端用 ≥ 版本范围非精确锁定；前端有 package-lock.json</td></tr>
+    <tr><td>CI/CD</td><td><span class="tag tag-issue">缺失</span></td><td>无 .github/workflows / .gitea/workflows 等 CI 配置</td></tr>
+  </table>
+</div>
+
+<h3>3.2 后端代码质量</h3>
+<div class="card">
+  <table>
+    <tr><th>检查项</th><th>状态</th><th>说明</th></tr>
+    <tr><td>分层架构</td><td><span class="tag tag-good">良好</span></td><td>models / services / api / core / schemas / middleware 分层清晰</td></tr>
+    <tr><td>SQLAlchemy 2.0 用法</td><td><span class="tag tag-good">良好</span></td><td>使用 select() 新风格，无字符串拼接 SQL（仅 debug 脚本有 f-string SQL）</td></tr>
+    <tr><td>SQL 注入风险</td><td><span class="tag tag-good">无风险</span></td><td>生产代码全部使用 ORM 参数化查询</td></tr>
+    <tr><td>eval/exec 使用</td><td><span class="tag tag-good">无</span></td><td>未发现 eval/exec/os.system 调用</td></tr>
+    <tr><td>Ruff lint</td><td><span class="tag tag-good">已配置</span></td><td>line-length=100, select E/F/I/W</td></tr>
+    <tr><td>文件大小</td><td><span class="tag tag-issue">超标</span></td><td>analytics.py 8508 行、bms_fetcher.py 3273 行严重超标</td></tr>
+    <tr><td>异常处理</td><td><span class="tag tag-issue">需改进</span></td><td>30+ 处裸 except Exception 静默吞错</td></tr>
+    <tr><td>测试覆盖</td><td><span class="tag tag-issue">零覆盖</span></td><td>tests/ 目录为空，pytest 已在 dev 依赖但无用例</td></tr>
+    <tr><td>死依赖</td><td><span class="tag tag-issue">存在</span></td><td>passlib[bcrypt] 仍在 pyproject.toml 但代码未使用</td></tr>
+    <tr><td>Dockerfile 重复安装</td><td><span class="tag tag-issue">冗余</span></td><td>Dockerfile 内联 pip install 与 pyproject.toml 重复，未用 pip install -e .</td></tr>
+  </table>
+</div>
+
+<h3>3.3 前端代码质量</h3>
+<div class="card">
+  <table>
+    <tr><th>检查项</th><th>状态</th><th>说明</th></tr>
+    <tr><td>Vue 3 Composition API</td><td><span class="tag tag-good">良好</span></td><td>Pinia store 使用 setup 语法</td></tr>
+    <tr><td>路由懒加载</td><td><span class="tag tag-good">良好</span></td><td>全部路由使用动态 import() 按需加载</td></tr>
+    <tr><td>路由守卫</td><td><span class="tag tag-good">良好</span></td><td>三层权限: admin / manager / roles 白名单</td></tr>
+    <tr><td>Axios 拦截器</td><td><span class="tag tag-good">良好</span></td><td>统一 token 注入 + 401 自动登出 + 错误提示</td></tr>
+    <tr><td>XSS 防护</td><td><span class="tag tag-good">良好</span></td><td>DOMPurify + escapeHtml 双重防护</td></tr>
+    <tr><td>TypeScript</td><td><span class="tag tag-issue">缺失</span></td><td>全项目纯 JS，无类型约束</td></tr>
+    <tr><td>ESLint/Prettier</td><td><span class="tag tag-issue">缺失</span></td><td>无 lint/format 配置文件</td></tr>
+    <tr><td>组件大小</td><td><span class="tag tag-issue">超标</span></td><td>SyncDashboard.vue 2010 行 / Today.vue 1816 行</td></tr>
+    <tr><td>Token 存储</td><td><span class="tag tag-issue">可接受</span></td><td>localStorage 存储（XSS 风险，但 CSP 已缓解）</td></tr>
+  </table>
+</div>
+
+<h3>3.4 数据库与数据层</h3>
+<div class="card">
+  <table>
+    <tr><th>检查项</th><th>状态</th><th>说明</th></tr>
+    <tr><td>模型数量</td><td><span class="tag tag-good">完整</span></td><td>56 张表，覆盖全业务域</td></tr>
+    <tr><td>SCD Type 2 历史追溯</td><td><span class="tag tag-good">良好</span></td><td>人员分组/专项变更历史可追溯</td></tr>
+    <tr><td>Alembic 迁移</td><td><span class="tag tag-good">良好</span></td><td>37 个版本，单一 head（已 merge），启动自动 upgrade</td></tr>
+    <tr><td>连接池配置</td><td><span class="tag tag-good">良好</span></td><td>pool_pre_ping + keepalive + pool_recycle=1800 + pool_use_lifo</td></tr>
+    <tr><td>启动咨询锁</td><td><span class="tag tag-good">良好</span></td><td>pg_try_advisory_lock 防多 worker 重复迁移/种子</td></tr>
+    <tr><td>僵尸任务清理</td><td><span class="tag tag-good">良好</span></td><td>启动时清理 running→failed，防误判跳过同步</td></tr>
+  </table>
+</div>
+
+<h3>3.5 安全审计</h3>
+<div class="card">
+  <table>
+    <tr><th>检查项</th><th>状态</th><th>说明</th></tr>
+    <tr><td>密码哈希</td><td><span class="tag tag-good">bcrypt</span></td><td>直接用 bcrypt（非 passlib），超 72 字节拒绝而非截断</td></tr>
+    <tr><td>JWT 签发与校验</td><td><span class="tag tag-good">良好</span></td><td>HS256 + token_version 吊销 + sub 整数校验防 500</td></tr>
+    <tr><td>登录限速</td><td><span class="tag tag-good">已实施</span></td><td>5 分钟 10 次/IP（内存滑动窗口）</td></tr>
+    <tr><td>CORS 配置</td><td><span class="tag tag-good">受限</span></td><td>仅允许 localhost/127.0.0.1，allow_credentials=True</td></tr>
+    <tr><td>静态文件安全</td><td><span class="tag tag-good">加固</span></td><td>SafeStaticFiles: 白名单扩展名 + 路径穿越防御 + nosniff</td></tr>
+    <tr><td>上传校验</td><td><span class="tag tag-good">加固</span></td><td>扩展名白名单 + magic bytes 校验 + 路径穿越防御</td></tr>
+    <tr><td>凭证加密存储</td><td><span class="tag tag-good">Fernet</span></td><td>BMS/SCRM 凭证 Fernet 加密入库</td></tr>
+    <tr><td>CSP / 安全头</td><td><span class="tag tag-good">完备</span></td><td>CSP + X-Frame-Options + nosniff + Referrer-Policy + Permissions-Policy</td></tr>
+    <tr><td>v-html XSS 防护</td><td><span class="tag tag-good">DOMPurify</span></td><td>marked + DOMPurify 消毒，限制允许标签/属性</td></tr>
+    <tr><td>微信扫码认证</td><td><span class="tag tag-good">已加固</span></td><td>申请者角色限制（防提权）+ prod 拒绝 mock openid</td></tr>
+    <tr><td>X-Forwarded-For 取值</td><td><span class="tag tag-good">正确</span></td><td>取末段（反代追加的真实 IP），非首段（可伪造）</td></tr>
+    <tr><td>500 异常处理</td><td><span class="tag tag-good">良好</span></td><td>全局 handler 记录完整 traceback 到日志，prod 不暴露堆栈</td></tr>
+    <tr><td>操作日志审计</td><td><span class="tag tag-good">完备</span></td><td>POST/PUT/PATCH/DELETE 全记录，含用户/IP/操作类型</td></tr>
+    <tr><td>改密验旧密码</td><td><span class="tag tag-good">良好</span></td><td>用户改自己密码需验旧密码（防会话劫持后锁户）</td></tr>
+    <tr><td>限速多 worker 兼容</td><td><span class="tag tag-issue">潜在风险</span></td><td>内存限速，多 worker 下各自计数（当前 -w 1 规避）</td></tr>
+    <tr><td>加密 key 耦合</td><td><span class="tag tag-issue">潜在风险</span></td><td>CONFIG_ENCRYPTION_KEY 默认从 JWT_SECRET_KEY 派生</td></tr>
+  </table>
+</div>
+
+<h2>四、改进建议优先级</h2>
+
+<div class="card">
+  <h3>P0 — 立即行动</h3>
+  <div class="finding">
+    <span class="finding-severity sev-high">P0</span>
+    <div class="finding-body">
+      <div class="finding-title">建立测试体系</div>
+      <div class="finding-desc">
+        <strong>现状:</strong> tests/ 目录完全为空，pytest 已在 dev 依赖中但无用例。<br>
+        <strong>建议:</strong> 至少为核心模块编写测试：认证流程（登录/登出/改密）、analytics 关键计算逻辑、数据同步 upsert 逻辑。使用 pytest + httpx AsyncClient 做集成测试，目标覆盖核心路径 60%+。
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3>P1 — 短期改进（1-2 周）</h3>
+  <div class="finding">
+    <span class="finding-severity sev-high">P1</span>
+    <div class="finding-body">
+      <div class="finding-title">拆分超大文件</div>
+      <div class="finding-desc">
+        analytics.py（8508 行）按业务域拆分为 analytics/refund.py、analytics/complaint.py、analytics/reception.py 等；bms_fetcher.py（3273 行）按功能拆分为 fetcher/、parser/、auth/ 等。目标单文件不超过 800 行。
+      </div>
+    </div>
+  </div>
+  <div class="finding">
+    <span class="finding-severity sev-high">P1</span>
+    <div class="finding-body">
+      <div class="finding-title">清理裸 except 异常处理</div>
+      <div class="finding-desc">
+        30+ 处 <code>except Exception:</code> 静默吞错。至少应加 <code>logger.warning()</code> 或 <code>logger.debug()</code> 记录被吞掉的异常，避免出现"功能不工作但日志里什么都没有"的排查惨案。
+      </div>
+    </div>
+  </div>
+  <div class="finding">
+    <span class="finding-severity sev-high">P1</span>
+    <div class="finding-body">
+      <div class="finding-title">清理死依赖</div>
+      <div class="finding-desc">
+        从 pyproject.toml 和 Dockerfile 中移除 <code>passlib[bcrypt]</code>（代码已直接使用 bcrypt 库）。Dockerfile 内联 pip install 改为 <code>pip install -e .</code> 统一从 pyproject.toml 安装，消除双重维护。
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3>P2 — 中期改进（1 个月内）</h3>
+  <div class="finding">
+    <span class="finding-severity sev-medium">P2</span>
+    <div class="finding-body">
+      <div class="finding-title">引入 TypeScript</div>
+      <div class="finding-desc">逐步将前端 .vue/.js 迁移到 TypeScript，优先改造 API 层和 store 层，利用 Vue 3 + Vite 的 TS 原生支持。</div>
+    </div>
+  </div>
+  <div class="finding">
+    <span class="finding-severity sev-medium">P2</span>
+    <div class="finding-body">
+      <div class="finding-title">添加 ESLint + Prettier</div>
+      <div class="finding-desc">前端缺少代码规范工具，建议配置 eslint-plugin-vue + @typescript-eslint + prettier。</div>
+    </div>
+  </div>
+  <div class="finding">
+    <span class="finding-severity sev-medium">P2</span>
+    <div class="finding-body">
+      <div class="finding-title">建立 CI/CD 流水线</div>
+      <div class="finding-desc">配置 Gitea Actions 或 GitHub Actions：lint → test → build → docker push，每次 PR 自动检查。</div>
+    </div>
+  </div>
+  <div class="finding">
+    <span class="finding-severity sev-medium">P2</span>
+    <div class="finding-body">
+      <div class="finding-title">限速迁移至 Redis</div>
+      <div class="finding-desc">将登录限速从进程内内存改为 Redis 实现，为未来多 worker 扩展做准备。代码注释中已标注此为 M5 待办。</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3>P3 — 长期优化</h3>
+  <div class="finding">
+    <span class="finding-severity sev-low">P3</span>
+    <div class="finding-body">
+      <div class="finding-title">CONFIG_ENCRYPTION_KEY 独立化</div>
+      <div class="finding-desc">生产环境显式设置独立 CONFIG_ENCRYPTION_KEY，解除与 JWT_SECRET_KEY 的派生耦合。.env.example 中已提示但默认留空。</div>
+    </div>
+  </div>
+  <div class="finding">
+    <span class="finding-severity sev-low">P3</span>
+    <div class="finding-body">
+      <div class="finding-title">前端大组件拆分</div>
+      <div class="finding-desc">SyncDashboard.vue（2010 行）和 Today.vue（1816 行）按功能区域拆分为子组件，提高复用性和可维护性。</div>
+    </div>
+  </div>
+  <div class="finding">
+    <span class="finding-severity sev-low">P3</span>
+    <div class="finding-body">
+      <div class="finding-title">依赖版本精确锁定</div>
+      <div class="finding-desc">后端 pyproject.toml 使用 <code>==</code> 精确锁定版本或生成 requirements.lock，确保构建可复现。</div>
+    </div>
+  </div>
+</div>
+
+<h2>五、审计结论</h2>
+<div class="card">
+  <p>CSCTalon 是一个功能完整、安全意识较强的内部系统。从 git 历史可见团队已进行过多轮安全加固（v0.7 P0 修复、安全加固专项），核心安全机制（认证、授权、加密、限速、安全头、XSS 防护）均已到位且实现质量较高。</p>
+  <br>
+  <p><strong>最大风险点</strong>是零测试覆盖——56 张表、8500 行分析引擎、3273 行数据抓取器，全部没有自动化测试保护，任何重构或修改都存在引入回归的高风险。建议优先建立核心路径的集成测试。</p>
+  <br>
+  <p><strong>最大技术债</strong>是超大文件（analytics.py 8508 行）——这会严重拖慢后续开发效率和代码审查质量，建议尽快按业务域拆分。</p>
+  <br>
+  <p>整体而言，项目在安全性和架构设计上表现优秀（A-），在代码质量和工程规范上有较大改进空间（C+），测试覆盖需要紧急补齐（F），运维部署配置合理（B+）。</p>
+</div>
+
+</div>
+</body>
+</html>

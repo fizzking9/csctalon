@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     # 生产环境必须配置真实微信凭证, 否则 code-login/register 返回 503(拒绝降级)。
     WECHAT_MOCK_ALLOWED: bool = False
 
+    # workbuddy 投诉数据推送鉴权 token(315投诉/卡商投诉同步)。
+    # 为空时同步接口返回 503;请配置强随机串并告知 workbuddy 以 Authorization: Bearer <token> 调用。
+    WORKBUDDY_SYNC_TOKEN: str = ""
+
     # 跨域(局域网部署,允许内网访问)
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 
