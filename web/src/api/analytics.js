@@ -51,6 +51,7 @@ export const refundWithdrawal = {
   dailySplit: (params) => request.get('/analytics/refund-withdrawal/daily-split', { params }),
   dimensions: (params) => request.get('/analytics/refund-withdrawal/dimensions', { params }),
   detail: (params) => request.get('/analytics/refund-withdrawal/detail', { params }),
+  sleeping: (params) => request.get('/analytics/refund-withdrawal/sleeping', { params }),
 }
 
 // 今日看板 (单日切面 + 实时节奏)
@@ -77,5 +78,11 @@ export const refundDeep = {
   typeTrend: (params) => request.get('/analytics/refund/type-trend', { params }),
   problemTypeDetail: (params) => request.get('/analytics/refund/problem-type-detail', { params }),
   groupComparison: (params) => request.get('/analytics/refund/group-comparison', { params }),
+  decisionOverview: (params) => request.get('/analytics/refund/decision-overview', { params }),
+}
+
+// 退款明细导出 Excel(blob)
+export function refundExport(params) {
+  return request.get('/analytics/refund/export', { params, responseType: 'blob', timeout: 120000 })
 }
 

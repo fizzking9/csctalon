@@ -126,22 +126,22 @@
           <el-divider direction="vertical" style="height: 96px" />
 
           <div class="shortcut-item-group">
-            <div class="si-subtitle">决策看板 · 专项深入分析透视</div>
+            <div class="si-subtitle">专项分析 · 专项深入分析透视</div>
             <div class="shortcut-row">
               <div class="shortcut-chip" @click="$router.push('/dashboards/refund')">
-                <el-icon color="#e6a23c"><Wallet /></el-icon><span>退款看板</span>
+                <el-icon color="#e6a23c"><Wallet /></el-icon><span>退款分析</span>
               </div>
               <div class="shortcut-chip" @click="$router.push('/dashboards/complaint')">
-                <el-icon color="#f56c6c"><WarningFilled /></el-icon><span>投诉看板</span>
+                <el-icon color="#f56c6c"><WarningFilled /></el-icon><span>投诉总览</span>
               </div>
               <div class="shortcut-chip" @click="$router.push('/dashboards/reception')">
-                <el-icon color="#409eff"><Service /></el-icon><span>接待看板</span>
+                <el-icon color="#409eff"><Service /></el-icon><span>接待分析</span>
               </div>
-              <div class="shortcut-chip" @click="$router.push('/dashboards/refund-withdrawal')">
-                <el-icon color="#9b59b6"><Money /></el-icon><span>提现全链路</span>
+              <div class="shortcut-chip" @click="$router.push('/dashboards/refund')">
+                <el-icon color="#9b59b6"><Money /></el-icon><span>提现时效</span>
               </div>
               <div class="shortcut-chip" @click="$router.push('/dashboards/performance')">
-                <el-icon color="#67c23a"><UserFilled /></el-icon><span>绩效看板</span>
+                <el-icon color="#67c23a"><UserFilled /></el-icon><span>绩效分析</span>
               </div>
               <div class="shortcut-chip" @click="$router.push('/dashboards/special')">
                 <el-icon color="#909399"><Aim /></el-icon><span>专项跟进</span>

@@ -2,7 +2,7 @@
   <div class="page-container reception-dashboard">
     <!-- 顶部标题 + 时间筛选 -->
     <div class="flex-between mb-16">
-      <div class="page-title" style="margin: 0">接待看板 <el-tag size="small" type="warning" effect="plain" style="margin-left: 8px">对齐周报</el-tag></div>
+      <div class="page-title" style="margin: 0">接待分析 <el-tag size="small" type="warning" effect="plain" style="margin-left: 8px">对齐周报</el-tag></div>
       <FilterBar
         v-model:modelValue="rangeMode"
         v-model:range="customRange"

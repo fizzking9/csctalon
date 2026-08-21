@@ -176,6 +176,13 @@ def rw_daily_split(db: DBSession, _: CurrentUser, start: str | None = None, end:
     return R(data=A.refund_withdrawal_daily_split(db, start, end))
 
 
+@router.get("/refund-withdrawal/sleeping", response_model=R, summary="提现时效-钱包沉淀清单(转入未提现,分页)")
+def rw_sleeping(db: DBSession, _: CurrentUser,
+                start: str | None = None, end: str | None = None,
+                page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500)):
+    return R(data=A.refund_withdrawal_sleeping(db, start, end, page=page, page_size=page_size))
+
+
 # ---------- 看板7: 今日看板 (单日切面 + 实时节奏) ----------
 
 
@@ -358,3 +365,38 @@ def refund_group_comparison_endpoint(
 ):
     key = f"refund:gc:{start}:{end}"
     return R(data=cached_call(key, 120, A.refund_group_comparison, db, start, end))
+
+
+@router.get("/refund/decision-overview", response_model=R, summary="退款看板-决策概览(资金全景/钱包水位/涉诉归因/原因人员)")
+def refund_decision_overview_endpoint(
+    db: DBSession, _: CurrentUser,
+    start: str | None = Query(None), end: str | None = Query(None),
+    grain: str = Query("day", pattern="^(day|week)$"),
+):
+    key = f"refund:do:{start}:{end}:{grain}"
+    return R(data=cached_call(key, 60, A.refund_decision_overview, db, start, end, grain=grain))
+
+
+@router.get("/refund/export", summary="退款明细导出Excel(原始数据,自定义分析用)")
+def refund_export_endpoint(
+    db: DBSession, _: CurrentUser,
+    start: str | None = Query(None), end: str | None = Query(None),
+):
+    """导出当前筛选区间内退款单原始明细 Excel(含涉诉分类/归一操作人/关联工单服务项)."""
+    import io
+    import pandas as pd
+    from urllib.parse import quote
+    from fastapi.responses import StreamingResponse
+
+    rows = A.refund_export_original(db, start, end)
+    df = pd.DataFrame(rows)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="退款明细")
+    buf.seek(0)
+    fname = quote(f"退款明细_{start or '全量'}_{end or '至今'}.xlsx")
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{fname}"},
+    )
