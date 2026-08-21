@@ -402,9 +402,16 @@
             <div class="kpi-mini-label" style="color:#dc2626">外部投诉</div>
             <div class="kpi-mini-value" style="color:#dc2626">{{ formatNum(complaintSummaryData.external?.total) }}</div>
             <div class="kpi-mini-hint">点击筛选明细</div>
+            <div class="kpi-mini-suppl" v-if="supplExternal.total">315补充 {{ formatNum(supplExternal.total) }}条(已关联 {{ formatNum(supplExternal.matched) }})</div>
           </div>
         </el-col>
       </el-row>
+
+      <!-- workbuddy 推送补充数据源汇总(315/卡商, 按SN关联工单) -->
+      <div v-if="supplSummaryText" class="suppl-strip">
+        <span class="suppl-dot" />
+        <span>{{ supplSummaryText }}</span>
+      </div>
 
       <!-- 来源分布 + 处理人Top -->
       <el-row :gutter="12" class="mb-16">
@@ -541,6 +548,16 @@ const hasRecovery = computed(() => recoveryData.value && recoveryData.value.kpi)
 // 投诉专项数据
 const complaintSummaryData = ref({})
 const complaintList = ref([])
+
+// workbuddy 推送补充数据源(315/卡商, 按SN关联工单)
+const supplExternal = computed(() => complaintSummaryData.value?.supplementary?.external || { total: 0, matched: 0 })
+const supplSummaryText = computed(() => {
+  const s = complaintSummaryData.value?.supplementary || {}
+  const ext = s.external || { total: 0, matched: 0 }
+  const card = s.card || { total: 0, matched: 0 }
+  if (!ext.total && !card.total) return ''
+  return `补充数据源(按SN关联工单): 315外部投诉 ${formatNum(ext.total)} 条(已关联 ${formatNum(ext.matched)}) · 卡商群投诉 ${formatNum(card.total)} 条(已关联 ${formatNum(card.matched)})`
+})
 
 // 投诉明细表 筛选/排序状态 (KPI 卡片点击 = 来源筛选)
 const complaintSourceFilter = ref('')
@@ -1024,7 +1041,7 @@ async function loadAll() {
       today.staff({ ...params, aggregate_by: staffFilter.aggregateBy, topn: 200 }),
       today.refundRecovery(params),
       complaintSummary({ start, end }),
-      complaintDetail({ start, end, limit: 500 }),
+      complaintDetail({ start, end, limit: 500, include_supplementary: true }),
     ])
 
     if (kpiRes.data) kpiData.value = kpiRes.data
@@ -1118,6 +1135,33 @@ watch([grain, weekOffset, monthOffset, quarterOffset, yearOffset, customDateRang
   letter-spacing: 0.5px;
 }
 .kpi-clickable.kpi-active .kpi-mini-hint { color: #2563eb; }
+/* 外部投诉KPI下的 315补充数据(workbuddy推送) */
+.kpi-mini-suppl {
+  font-size: 11px;
+  color: #b91c1c;
+  margin-top: 3px;
+  font-weight: 600;
+}
+/* workbuddy 推送补充数据源汇总条 */
+.suppl-strip {
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  color: #92400e;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin-bottom: 12px;
+}
+.suppl-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f59e0b;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
 .kpi-mini-label {
   font-size: 12px;
   color: #6b7280;
