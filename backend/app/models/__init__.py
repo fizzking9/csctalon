@@ -1,7 +1,7 @@
 """模型汇总 - 导入所有模型,供 Alembic 与应用初始化使用"""
 
 from app.models.analysis_view import AnalysisView, ClassificationRule  # noqa: F401
-from app.models.alert import Alert, AlertRule  # noqa: F401
+from app.models.alert import Alert, AlertDelivery, AlertRule  # noqa: F401
 from app.models.audit_note import AuditJudgment, AuditNote  # noqa: F401
 from app.models.base import IDMixin, TimestampMixin  # noqa: F401
 from app.models.bms_sync_log import BmsSyncLog  # noqa: F401
@@ -25,6 +25,8 @@ from app.models.external_complaint import ExternalComplaint  # noqa: F401
 from app.models.incident import Incident, IncidentFollowup  # noqa: F401
 from app.models.kb_article import KbArticle  # noqa: F401
 from app.models.measure import Measure  # noqa: F401
+from app.models.metric import MetricDailySnapshot, MetricRegistry, MetricThreshold  # noqa: F401
+from app.models.notification_channel import NotificationChannel  # noqa: F401
 from app.models.merchant import Merchant  # noqa: F401
 from app.models.merchant_refund import MerchantRefund  # noqa: F401
 from app.models.notification import Notification  # noqa: F401
@@ -63,6 +65,11 @@ __all__ = [
     "AnalysisView",
     "Alert",
     "AlertRule",
+    "AlertDelivery",
+    "MetricRegistry",
+    "MetricThreshold",
+    "MetricDailySnapshot",
+    "NotificationChannel",
     "AuditJudgment",
     "AuditNote",
     "ClassificationRule",

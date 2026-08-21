@@ -341,6 +341,7 @@
             <div class="ck-cell" style="background:#fef2f2">
               <div class="ck-label">外部投诉</div>
               <div class="ck-value" style="color:#dc2626">{{ formatNum(complaintSummaryData.external?.total) }}</div>
+              <div v-if="supplExternal.total" class="ck-sub">315补充 {{ formatNum(supplExternal.total) }}条</div>
             </div>
           </div>
           <div v-if="complaintCategoryOption" class="compact-pie-wrap">
@@ -777,6 +778,7 @@ const complaintFilteredList = computed(() => {
 })
 
 // 补充数据源汇总文本(315/卡商, workbuddy推送)
+const supplExternal = computed(() => complaintSummaryData.value?.supplementary?.external || { total: 0, matched: 0 })
 const supplSummaryText = computed(() => {
   const s = complaintSummaryData.value?.supplementary || {}
   const ext = s.external || { total: 0, matched: 0 }
@@ -1671,6 +1673,12 @@ onBeforeUnmount(() => {
   line-height: 1.2;
   margin-top: 2px;
   color: #111827;
+}
+.ck-sub {
+  font-size: 10px;
+  color: #b91c1c;
+  line-height: 1.2;
+  margin-top: 2px;
 }
 .compact-pie-wrap {
   border-radius: 6px;
