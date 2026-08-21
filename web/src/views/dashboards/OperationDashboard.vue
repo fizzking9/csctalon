@@ -282,7 +282,7 @@
         <template #extra>
           <el-tag size="small" effect="dark" type="danger" style="margin-right:6px">{{ recoveryData.date }}~{{ recoveryData.date_end || recoveryData.date }}</el-tag>
           <el-button size="small" type="primary" plain @click="$router.push('/dashboards/refund')">
-            查看退款看板详情 →
+            查看退款分析详情 →
           </el-button>
         </template>
       </SectionHeader>

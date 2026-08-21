@@ -32,19 +32,19 @@
           <span>我的待办</span>
         </el-menu-item>
 
-        <!-- 3. 决策看板:管理层可见, 专项深入分析透视(退款/投诉/接待/提现全链路/绩效/专项跟进) -->
+        <!-- 3. 专项分析:管理层可见, 专项深入分析透视(退款/投诉/接待/提现全链路/绩效/专项跟进) -->
         <el-sub-menu v-if="authStore.isManager" index="dashboards">
           <template #title>
             <el-icon><DataAnalysis /></el-icon>
-            <span>决策看板</span>
+            <span>专项分析</span>
           </template>
-          <el-menu-item index="/dashboards/refund">退款看板</el-menu-item>
-          <el-menu-item index="/dashboards/complaint">投诉看板</el-menu-item>
+          <el-menu-item index="/dashboards/refund">退款分析</el-menu-item>
+          <el-menu-item index="/dashboards/refund-recovery">挽回分析</el-menu-item>
+          <el-menu-item index="/dashboards/complaint">投诉总览</el-menu-item>
           <el-menu-item index="/dashboards/complaint-analysis">投诉分析</el-menu-item>
-          <el-menu-item index="/dashboards/complaint-audit">投诉处理核查</el-menu-item>
-          <el-menu-item index="/dashboards/reception">接待看板</el-menu-item>
-          <el-menu-item index="/dashboards/refund-withdrawal">退款-提现全链路看板</el-menu-item>
-          <el-menu-item index="/dashboards/performance">绩效看板</el-menu-item>
+          <el-menu-item index="/dashboards/complaint-audit">投诉核查</el-menu-item>
+          <el-menu-item index="/dashboards/reception">接待分析</el-menu-item>
+          <el-menu-item index="/dashboards/performance">绩效分析</el-menu-item>
           <el-menu-item index="/dashboards/special">专项跟进</el-menu-item>
         </el-sub-menu>
 

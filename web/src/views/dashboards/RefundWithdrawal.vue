@@ -1,543 +1,363 @@
 <template>
-  <div class="refund-withdrawal-board page-container">
-    <el-card class="filter-card" shadow="never">
-      <el-form :inline="true" :model="filters" size="default" label-width="auto">
-        <el-form-item label="实际出款日期">
-          <el-date-picker
-            v-model="filters.range"
-            type="daterange"
-            range-separator="至"
-            start-placeholder="开始日期(出款)"
-            end-placeholder="结束日期(出款)"
-            value-format="YYYY-MM-DD"
-            :shortcuts="dateShortcuts"
-            @change="loadAll"
-          />
-        </el-form-item>
-        <el-form-item label="路径筛选">
-          <el-select v-model="filters.path" @change="loadAll" style="width: 160px;">
-            <el-option label="全部路径" value="ALL" />
-            <el-option label="A + B 已出款" value="AB" />
-            <el-option label="A 转入提现账户" value="A" />
-            <el-option label="B 直退 (微信/支付宝等)" value="B" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="明细慢单>3天">
-          <el-switch v-model="filters.slowOnly" @change="loadDetail" />
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" @click="loadAll">重新加载</el-button>
-        </el-form-item>
-      </el-form>
-    </el-card>
+  <div class="timeliness">
+    <!-- 筛选: 日期范围 + 趋势粒度 -->
+    <section class="block-card mb-16">
+      <div class="filter-bar">
+        <span class="block-title" style="margin:0">提现时效</span>
+        <el-date-picker
+          v-model="filters.range"
+          type="daterange"
+          range-separator="至"
+          start-placeholder="开始"
+          end-placeholder="结束"
+          value-format="YYYY-MM-DD"
+          :shortcuts="dateShortcuts"
+          size="small"
+          @change="loadAll"
+        />
+        <el-radio-group v-model="grain" size="small" @change="renderTrend">
+          <el-radio-button label="day">按日</el-radio-button>
+          <el-radio-button label="week">按周</el-radio-button>
+          <el-radio-button label="month">按月</el-radio-button>
+        </el-radio-group>
+        <el-button type="primary" size="small" :icon="Search" :loading="loading" @click="loadAll">分析</el-button>
+      </div>
+    </section>
 
-    <!-- KPI 卡片区：总体 + 钱包沉淀 -->
-    <el-row :gutter="16" class="kpi-row">
-      <el-col :xs="12" :sm="8" :md="6" :lg="4" v-for="k in topKpis" :key="k.label">
-        <el-card shadow="hover" class="kpi-card" :class="k.type">
-          <div class="kpi-label">{{ k.label }}</div>
-          <div class="kpi-value">{{ k.value }}</div>
-          <div class="kpi-sub">{{ k.sub }}</div>
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <!-- 本窗口内实际出款结构（核心关注项）：合计 + 直接线上退款 + 钱包历史沉淀今日提现 -->
-    <el-row :gutter="16" class="kpi-row split-kpi-row">
-      <el-col :xs="24" :sm="8" v-for="(k, i) in cashoutSplitCards" :key="i">
-        <el-card shadow="hover" class="kpi-card" :class="k.type">
-          <div class="kpi-label">{{ k.label }}</div>
-          <div class="kpi-value">{{ k.value }}</div>
-          <div class="kpi-sub" v-html="k.sub"></div>
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <!-- 钱包路径出款时效分析卡片：只有 A 路径需要分析耗时，B 直退均为秒级/当天 → 耗时分布与 A 对比无意义 -->
-    <el-row :gutter="16" class="metric-row">
-      <el-col :lg="24" v-for="p in pathMetrics" :key="p.key">
-        <el-card shadow="never" class="metric-card">
-          <template #header>
-            <div class="card-head">
-              <span class="path-tag" :class="p.key">{{ p.title }}</span>
-              <span class="path-desc">{{ p.desc }}</span>
-            </div>
-          </template>
-          <div v-if="p.data.count" class="metric-grid">
-            <div class="metric-item"><div class="l">退款单数</div><div class="v">{{ p.data.count.toLocaleString() }} 笔</div></div>
-            <div class="metric-item"><div class="l">退款金额</div><div class="v">¥ {{ p.data.amount.toLocaleString() }}</div></div>
-            <div class="metric-item"><div class="l">平均耗时</div><div class="v days">{{ fmtD(p.data.avg_days) }} 天</div></div>
-            <div class="metric-item"><div class="l">中位数</div><div class="v days">{{ fmtD(p.data.median_days) }} 天</div></div>
-            <div class="metric-item"><div class="l">P75</div><div class="v days">{{ fmtD(p.data.p75_days) }} 天</div></div>
-            <div class="metric-item"><div class="l">P95</div><div class="v days warn">{{ fmtD(p.data.p95_days) }} 天</div></div>
-            <div class="metric-item"><div class="l">≤1天到账率</div><div class="v pct ok">{{ p.data.pct_within_1d }}%</div></div>
-            <div class="metric-item"><div class="l">≤3天到账率</div><div class="v pct ok">{{ p.data.pct_within_3d }}%</div></div>
-            <div class="metric-item"><div class="l">≤7天到账率</div><div class="v pct ok">{{ p.data.pct_within_7d }}%</div></div>
-            <div class="metric-item"><div class="l">＞15天占比</div><div class="v pct danger">{{ p.data.pct_over_15d }}%</div></div>
-            <div class="metric-item" title="退款工单录入 → 订单退费转入钱包的平均耗时：体现客服/财务入钱包的速度">
-              <div class="l">工单→入钱包(均)</div>
-              <div class="v days">{{ fmtD(p.data.avg_days_1_2) }} 天</div>
-            </div>
-            <div class="metric-item" title="钱躺在钱包里直到用户主动提现的平均耗时：体现用户提现意愿 / 拖延">
-              <div class="l">入钱包→用户提现(均)</div>
-              <div class="v days warn">{{ fmtD(p.data.avg_days_2_4) }} 天</div>
-            </div>
+    <!-- KPI 条 -->
+    <section class="block-card mb-16">
+      <div class="block-head"><span class="block-title">钱包沉淀与提现时效</span><span class="block-hint">判断: 沉淀高=用户不提现(资金滞留风险) · 拖延天久=提现体验/催促缺失</span></div>
+      <el-row :gutter="12">
+        <el-col :xs="12" :sm="8" :md="4">
+          <div class="kpi-card" style="background:#fef2f2">
+            <div class="kpi-label" style="color:#dc2626">钱包沉淀</div>
+            <div class="kpi-value">{{ sleep.count }}<span class="unit">笔</span></div>
+            <div class="kpi-sub">占转入 {{ sleep.pct }}%</div>
           </div>
-          <el-empty v-else description="暂无已出款数据" :image-size="80" />
-        </el-card>
-      </el-col>
-    </el-row>
+        </el-col>
+        <el-col :xs="12" :sm="8" :md="4">
+          <div class="kpi-card" style="background:#fef2f2">
+            <div class="kpi-label" style="color:#dc2626">沉淀金额</div>
+            <div class="kpi-value">¥{{ formatMoney(sleep.amount) }}</div>
+            <div class="kpi-sub">钱仍躺在提现钱包</div>
+          </div>
+        </el-col>
+        <el-col :xs="12" :sm="8" :md="4">
+          <div class="kpi-card" style="background:#fff7ed">
+            <div class="kpi-label" style="color:#ea580c">入钱包→提现(均)</div>
+            <div class="kpi-value">{{ fmtD(timeliness.avg) }}<span class="unit">天</span></div>
+            <div class="kpi-sub">中位 {{ fmtD(timeliness.median) }} 天</div>
+          </div>
+        </el-col>
+        <el-col :xs="12" :sm="8" :md="4">
+          <div class="kpi-card" style="background:#fff7ed">
+            <div class="kpi-label" style="color:#ea580c">发起→入钱包(均)</div>
+            <div class="kpi-value">{{ fmtD(timeliness.avg12) }}<span class="unit">天</span></div>
+            <div class="kpi-sub">工单到入钱包速度</div>
+          </div>
+        </el-col>
+        <el-col :xs="12" :sm="8" :md="4">
+          <div class="kpi-card" style="background:#f0fdf4">
+            <div class="kpi-label" style="color:#16a34a">≤1天提现占比</div>
+            <div class="kpi-value">{{ timeliness.pct1 }}<span class="unit">%</span></div>
+            <div class="kpi-sub">入钱包后当天提现</div>
+          </div>
+        </el-col>
+        <el-col :xs="12" :sm="8" :md="4">
+          <div class="kpi-card" style="background:#eff6ff">
+            <div class="kpi-label" style="color:#2563eb">区间提现笔数</div>
+            <div class="kpi-value">{{ timeliness.count }}<span class="unit">笔</span></div>
+            <div class="kpi-sub">¥{{ formatMoney(timeliness.amount) }}</div>
+          </div>
+        </el-col>
+      </el-row>
+    </section>
 
-    <!-- 两个 ECharts 图表：钱包路径耗时分布 + 钱包路径到账率（B 直退均为秒级，对比无意义，已移除） -->
-    <el-row :gutter="16" class="chart-row">
-      <el-col :lg="14">
-        <el-card shadow="never">
-          <template #header><div class="card-head-title">钱包路径出款耗时分布（A）</div></template>
-          <div ref="barChartRef" class="chart"></div>
-        </el-card>
-      </el-col>
-      <el-col :lg="10">
-        <el-card shadow="never">
-          <template #header><div class="card-head-title">钱包路径到账率（A：≤1 / ≤3 / ≤7 天 与 ＞15天占比）</div></template>
-          <div ref="radarChartRef" class="chart"></div>
-        </el-card>
-      </el-col>
-    </el-row>
+    <!-- 图1: 提现拖延趋势 -->
+    <section class="block-card mb-16">
+      <div class="block-head">
+        <span class="block-title">提现拖延趋势</span>
+        <span class="block-hint">柱=提现笔数(钱包流) · 线=平均拖延天数(入钱包→用户提现)</span>
+      </div>
+      <BaseChart v-if="trendOption.series?.length" :option="trendOption" height="300px" />
+      <el-empty v-else description="所选区间无钱包提现数据" :image-size="60" />
+    </section>
 
-    <!-- 每日实际出款两条流堆叠图：当天出款总量 = 当天直接线上退款 + 当天钱包提现(历史工单进钱包后今天才出款) -->
-    <el-row :gutter="16" class="chart-row">
-      <el-col :lg="24">
-        <el-card shadow="never">
-          <template #header>
-            <div class="card-head">
-              <div class="card-head-title">每日实际出款两条流（直退 vs 钱包提现）</div>
-              <span class="muted">柱子总高度=当天实际出款总笔数；绿色=当天线上直退、橙色=历史入钱包后今天才被用户提现拿走的笔数</span>
-            </div>
-          </template>
-          <div ref="dailySplitChartRef" class="chart" style="height:360px"></div>
-        </el-card>
-      </el-col>
-    </el-row>
+    <!-- 图2: 沉淀与清理 -->
+    <section class="block-card mb-16">
+      <div class="block-head">
+        <span class="block-title">钱包资金流入 vs 提现流出</span>
+        <span class="block-hint">柱=转入(订单退费转入)/提现 · 线=当日净水位(转入−转出)</span>
+      </div>
+      <BaseChart v-if="waterOption.series?.length" :option="waterOption" height="300px" />
+      <el-empty v-else description="暂无钱包水位数据" :image-size="60" />
+    </section>
 
-    <!-- 三个维度聚合表 Tab：处理人 / 原因 / 方式 -->
-    <el-card shadow="never" class="dim-card">
-      <template #header>
-        <div class="card-head-title">Top N 维度聚合表（按 count 降序）</div>
-      </template>
-      <el-tabs v-model="dimTab">
-        <el-tab-pane label="按处理人 Top" name="operator">
-          <el-table :data="dimData.by_operator" stripe size="small" max-height="420">
-            <el-table-column prop="name" label="处理人" min-width="160" fixed />
-            <el-table-column prop="count" label="单数" width="90" align="right" sortable />
-            <el-table-column prop="count_ratio" label="占比" width="80" align="right" :formatter="fmtPct" />
-            <el-table-column prop="amount" label="金额(¥)" width="130" align="right" :formatter="fmtMoney" sortable />
-            <el-table-column prop="avg_amount" label="均单(¥)" width="120" align="right" :formatter="fmtMoney" />
-            <el-table-column prop="avg_days" label="均耗时(天)" width="120" align="right" sortable :formatter="fmtDcol" />
-            <el-table-column prop="median_days" label="中位(天)" width="110" align="right" :formatter="fmtDcol" />
-            <el-table-column prop="p95_days" label="P95(天)" width="110" align="right" :formatter="fmtDcol" class-name="col-warn" />
-            <el-table-column prop="max_days" label="最慢(天)" width="110" align="right" class-name="col-danger" sortable :formatter="fmtDcol" />
-          </el-table>
-        </el-tab-pane>
-        <el-tab-pane label="按退款原因 Top" name="reason">
-          <el-table :data="dimData.by_reason" stripe size="small" max-height="420">
-            <el-table-column prop="name" label="退款原因" min-width="220" fixed show-overflow-tooltip />
-            <el-table-column prop="count" label="单数" width="90" align="right" sortable />
-            <el-table-column prop="count_ratio" label="占比" width="80" align="right" :formatter="fmtPct" />
-            <el-table-column prop="amount" label="金额(¥)" width="130" align="right" :formatter="fmtMoney" sortable />
-            <el-table-column prop="avg_days" label="均耗时(天)" width="120" align="right" sortable :formatter="fmtDcol" />
-            <el-table-column prop="median_days" label="中位(天)" width="110" align="right" :formatter="fmtDcol" />
-            <el-table-column prop="p95_days" label="P95(天)" width="110" align="right" :formatter="fmtDcol" class-name="col-warn" />
-            <el-table-column prop="max_days" label="最慢(天)" width="110" align="right" class-name="col-danger" sortable :formatter="fmtDcol" />
-          </el-table>
-        </el-tab-pane>
-        <el-tab-pane label="按退款方式 Top" name="method">
-          <el-table :data="dimData.by_method" stripe size="small" max-height="420">
-            <el-table-column prop="name" label="退款方式" min-width="220" fixed show-overflow-tooltip />
-            <el-table-column prop="count" label="单数" width="90" align="right" sortable />
-            <el-table-column prop="count_ratio" label="占比" width="80" align="right" :formatter="fmtPct" />
-            <el-table-column prop="amount" label="金额(¥)" width="130" align="right" :formatter="fmtMoney" sortable />
-            <el-table-column prop="avg_days" label="均耗时(天)" width="120" align="right" sortable :formatter="fmtDcol" />
-            <el-table-column prop="median_days" label="中位(天)" width="110" align="right" :formatter="fmtDcol" />
-            <el-table-column prop="p95_days" label="P95(天)" width="110" align="right" :formatter="fmtDcol" class-name="col-warn" />
-            <el-table-column prop="max_days" label="最慢(天)" width="110" align="right" class-name="col-danger" sortable :formatter="fmtDcol" />
-          </el-table>
-        </el-tab-pane>
-      </el-tabs>
-    </el-card>
-
-    <!-- 明细表：支持排序下拉 + 分页 -->
-    <el-card shadow="never" class="detail-card">
-      <template #header>
-        <div class="card-head">
-          <div class="card-head-title">出款明细（默认最慢单在最前，方便快速发现卡壳问题）</div>
-          <el-form :inline="true" size="small" label-width="auto">
-            <el-form-item label="明细排序">
-              <el-select v-model="detailSort" @change="loadDetail" style="width:180px">
-                <el-option label="耗时 降序（最慢先）" value="days_desc" />
-                <el-option label="耗时 升序（最快先）" value="days_asc" />
-                <el-option label="金额 降序" value="amount_desc" />
-                <el-option label="发起时间 降序" value="d1_desc" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="共">
-              <span class="muted">{{ detailTotal.toLocaleString() }} 条</span>
-            </el-form-item>
-          </el-form>
-        </div>
-      </template>
-      <el-table :data="detailList" stripe size="small" border max-height="640">
-        <el-table-column label="路径" width="70" align="center" fixed>
+    <!-- 沉淀清单 -->
+    <section class="block-card">
+      <div class="block-head">
+        <span class="block-title">沉淀清单（转入钱包未提现）</span>
+        <span class="block-hint">共 {{ sleepTotal }} 条 · 点击 SN 可查看设备审计 · 拖延越久越需催提</span>
+      </div>
+      <el-table :data="sleepList" border stripe size="small" max-height="420">
+        <el-table-column prop="refund_no" label="退款单号" width="160" fixed show-overflow-tooltip />
+        <el-table-column prop="device_sn" label="设备SN" width="140" fixed>
           <template #default="{ row }">
-            <el-tag v-if="row.path==='A'" type="warning" effect="plain" size="small">A钱包</el-tag>
-            <el-tag v-else-if="row.path==='B'" type="success" effect="plain" size="small">B直退</el-tag>
-            <el-tag v-else type="info" effect="plain" size="small">X未知</el-tag>
+            <span v-if="row.device_sn" class="sn-chip" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</span>
+            <span v-else style="color:#9ca3af">—</span>
           </template>
         </el-table-column>
-        <el-table-column prop="refund_no" label="退款单号" width="160" fixed show-overflow-tooltip />
-        <el-table-column prop="device_sn" label="设备SN" width="140" show-overflow-tooltip />
-        <el-table-column prop="refund_method" label="退款方式" min-width="140" show-overflow-tooltip />
-        <el-table-column prop="refund_reason" label="退款原因" min-width="150" show-overflow-tooltip />
-        <el-table-column prop="operator" label="处理人" width="120" show-overflow-tooltip />
-        <el-table-column prop="refund_amount" label="金额(¥)" width="110" align="right" :formatter="fmtMoney" />
-        <el-table-column
-          prop="days_1_4"
-          label="发起→到账(天)"
-          width="130" align="right" sortable
-          :cell-class-name="daysCellCls"
-          :formatter="fmtDcol"
-        />
-        <el-table-column prop="days_1_2" label="发起→入钱包" width="120" align="right" :formatter="fmtDcol" />
-        <el-table-column prop="days_2_4" label="入钱包→提现" width="130" align="right" :formatter="fmtDcol" />
-        <el-table-column prop="d1_refund_created" label="发起时间(D1)" width="160" show-overflow-tooltip />
-        <el-table-column prop="d2_wallet_in" label="入钱包(D2)" width="160" show-overflow-tooltip />
-        <el-table-column prop="d4_actual_cashout" label="实际出款(D4)" width="160" show-overflow-tooltip />
-        <el-table-column prop="platform_order_no" label="平台单号" width="160" show-overflow-tooltip />
-        <el-table-column prop="withdraw_id" label="提现ID" width="100" show-overflow-tooltip />
+        <el-table-column prop="refund_amount" label="金额(¥)" width="110" align="right" sortable>
+          <template #default="{ row }">{{ formatMoney(row.refund_amount) }}</template>
+        </el-table-column>
+        <el-table-column prop="operator" label="操作人" width="100" show-overflow-tooltip />
+        <el-table-column prop="d1_refund_created" label="转入时间" width="160" show-overflow-tooltip />
+        <el-table-column prop="waiting_days" label="已滞留(天)" width="100" align="right" sortable>
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.waiting_days > 7 ? 'danger' : row.waiting_days > 3 ? 'warning' : 'info'">
+              {{ row.waiting_days ?? '—' }}
+            </el-tag>
+          </template>
+        </el-table-column>
       </el-table>
       <div class="pag-wrap">
         <el-pagination
-          v-model:current-page="detailPage"
-          v-model:page-size="detailPageSize"
-          :total="detailTotal"
-          :page-sizes="[30, 50, 100, 200]"
+          v-model:current-page="sleepPage"
+          v-model:page-size="sleepPageSize"
+          :total="sleepTotal"
+          :page-sizes="[30, 50, 100]"
           layout="total, sizes, prev, pager, next, jumper"
           background
-          @current-change="loadDetail"
-          @size-change="detailPage=1;loadDetail()"
+          small
+          @current-change="loadSleeping"
+          @size-change="sleepPage = 1; loadSleeping()"
         />
       </div>
-    </el-card>
-
-    <div class="tips">
-      <el-alert
-        type="info" :closable="false" show-icon
-        title="口径说明"
-        description="A路径（转入提现账户）= 发起退款（D1）→ 订单退费转入钱包（D2，可能为空）→ 用户提现实际出款（D4，真正现金到账）；B路径（微信/支付宝/银行卡直退）= 发起退款（D1）→ 退费单更新完成（D4，以接口回调/审核完成时刻为现金真实到账近似）。到账率指对应分档内的退款单占该路径总数百分比。钱包沉淀 = 已发起转入提现账户、但仍未匹配到用户提现操作的退款单，金额仍躺在提现钱包中。"
-      />
-    </div>
+    </section>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
+import { Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import * as echarts from 'echarts'
-import { refundWithdrawal as rwApi } from '@/api/analytics'
+import BaseChart from '@/components/BaseChart.vue'
+import { refundWithdrawal as rwApi, cash } from '@/api/analytics'
+import { useAudit } from '@/composables/useAudit'
+import { formatMoney } from '@/utils/format'
+
+const { openDeviceAudit } = useAudit()
 
 const today = new Date()
-const last30 = new Date(today.getTime() - 30 * 86400000)
+const last30 = new Date(today.getTime() - 29 * 86400000)
 const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
 
-const filters = reactive({
-  range: [fmt(last30), fmt(today)],
-  path: 'ALL',
-  slowOnly: false,
-})
-
-const dimTab = ref('operator')
-const detailSort = ref('days_desc')
-const detailPage = ref(1)
-const detailPageSize = ref(50)
-const detailTotal = ref(0)
-const detailList = ref([])
+const filters = reactive({ range: [fmt(last30), fmt(today)] })
+const grain = ref('day')
+const loading = ref(false)
 
 const dateShortcuts = [
   { text: '最近7天', value: () => { const e = new Date(); const s = new Date(e - 6*864e5); return [s, e] } },
   { text: '最近30天', value: () => { const e = new Date(); const s = new Date(e - 29*864e5); return [s, e] } },
   { text: '最近90天', value: () => { const e = new Date(); const s = new Date(e - 89*864e5); return [s, e] } },
-  { text: '今年至今', value: () => { const e = new Date(); const s = new Date(e.getFullYear(), 0, 1); return [s, e] } },
 ]
 
-const overview = ref({ scope: {}, paths: {}, wallet_sleep: {}, cashout_split: {} })
-const distData = ref([])
+const overview = ref({ wallet_sleep: {}, paths: {} })
 const dailySplit = ref([])
-const dimData = ref({ by_operator: [], by_reason: [], by_method: [] })
+const walletWater = ref([])
+const sleepList = ref([])
+const sleepTotal = ref(0)
+const sleepPage = ref(1)
+const sleepPageSize = ref(50)
 
-const topKpis = computed(() => {
-  const o = overview.value?.paths?.AB_merged || {}
+function fmtD(v) {
+  if (v == null || isNaN(v)) return '—'
+  return Number(v).toFixed(1)
+}
+
+const sleep = computed(() => {
   const ws = overview.value?.wallet_sleep || {}
-  const a = overview.value?.paths?.A_wallet || {}
-  const b = overview.value?.paths?.B_direct || {}
-  return [
-    { label: '出款总单量', value: (o.count || 0).toLocaleString(), sub: '笔 (A+B 已完成出款)', type: 'primary' },
-    { label: '出款总金额', value: `¥ ${(o.amount || 0).toLocaleString()}`, sub: '已完成现金出款 (元)', type: 'primary' },
-    { label: '全局平均耗时', value: fmtD(o.avg_days), sub: `中位 ${fmtD(o.median_days)} / P95 ${fmtD(o.p95_days)} 天`, type: 'primary' },
-    { label: '≤3天到账率', value: `${o.pct_within_3d ?? 0}%`, sub: `≤1天 ${o.pct_within_1d ?? 0}% / ≤7天 ${o.pct_within_7d ?? 0}%`, type: 'ok' },
-    { label: 'A路径(钱包)单量', value: (a.count || 0).toLocaleString(), sub: `均耗时 ${fmtD(a.avg_days)} 天`, type: 'warning' },
-    { label: 'B路径(直退)单量', value: (b.count || 0).toLocaleString(), sub: `均耗时 ${fmtD(b.avg_days)} 天`, type: 'success' },
-    { label: '钱包沉淀(未提现)', value: (ws.still_in_wallet_count || 0).toLocaleString() + ' 笔', sub: `占转入 ${ws.still_in_wallet_pct ?? 0}%`, type: 'danger' },
-    { label: '钱包沉淀金额', value: `¥ ${(ws.still_in_wallet_amount || 0).toLocaleString()}`, sub: '仍躺在提现钱包中', type: 'danger' },
-  ]
+  return { count: ws.still_in_wallet_count || 0, pct: ws.still_in_wallet_pct ?? 0, amount: ws.still_in_wallet_amount || 0 }
 })
 
-const cashoutSplitCards = computed(() => {
-  const sp = overview.value?.cashout_split || {}
-  const dr = sp.direct_refund || {}      // B流: 本窗口内直接线上退款 (今天直退的)
-  const ww = sp.wallet_withdrawal || {}  // A流: 之前在钱包里, 本窗口内才被用户提现拿走的
-  const tc = sp.total_count || 0
-  const ta = sp.total_amount || 0
-  return [
-    {
-      label: '本窗口实际出款合计',
-      value: tc.toLocaleString() + ' 笔',
-      sub: `总金额 ¥ ${Number(ta).toLocaleString()}<br>（筛选日期=实际出款D4，不再是退款发起D1）`,
-      type: 'primary',
-    },
-    {
-      label: 'B 流：直接线上退款出款',
-      value: `${(dr.count || 0).toLocaleString()} 笔`,
-      sub: `占当天出款 <b>${dr.count_ratio ?? 0}%</b><br>金额 ¥ ${Number(dr.amount || 0).toLocaleString()}<br>（今天线上接口直接退出去的单）`,
-      type: 'ok',
-    },
-    {
-      label: 'A 流：钱包历史沉淀·今日提现出款',
-      value: `${(ww.count || 0).toLocaleString()} 笔`,
-      sub: `占当天出款 <b>${ww.count_ratio ?? 0}%</b><br>金额 ¥ ${Number(ww.amount || 0).toLocaleString()}<br>（之前就进了钱包，<b>今天才被用户提现拿走</b>的单）<br>入钱包均耗 ${fmtD(ww.avg_days_1_2)} · 用户提现拖延 ${fmtD(ww.avg_days_2_4)} 天`,
-      type: 'warning',
-    },
-  ]
+const timeliness = computed(() => {
+  const a = overview.value?.paths?.A_wallet || {}
+  const d24 = dailySplit.value || []
+  const totalCount = d24.reduce((s, r) => s + (r.wallet_count || 0), 0)
+  const totalAmount = d24.reduce((s, r) => s + (r.wallet_amount || 0), 0)
+  // ≤1天提现占比: 从日粒度数据按 wallet_count 加权估算
+  let le1 = 0
+  const weights = []
+  d24.forEach(r => {
+    if (r.wallet_avg_days_2_4 != null && r.wallet_count) {
+      weights.push({ w: r.wallet_count, v: r.wallet_avg_days_2_4 })
+    }
+  })
+  if (weights.length) {
+    const totalW = weights.reduce((s, x) => s + x.w, 0)
+    const avg = weights.reduce((s, x) => s + x.v * x.w, 0) / totalW
+    le1 = avg <= 1 ? 100 : Math.max(0, Math.round((1 / avg) * 100))
+  }
+  return {
+    avg: a.avg_days_2_4 ?? 0, median: a.median_days_2_4 ?? 0,
+    avg12: a.avg_days_1_2 ?? 0, pct1: le1,
+    count: totalCount, amount: totalAmount,
+  }
 })
 
-const pathMetrics = computed(() => [
-  { key: 'A', title: 'A 路径：转入提现账户 → 用户提现', desc: '真实现金出款时刻 = 用户提现 op_time（实际到账给用户的时刻），含两个子阶段：入钱包速度 + 用户提现拖延', data: overview.value?.paths?.A_wallet || {} },
-])
-
-function fmtD(v) { return v == null || isNaN(v) ? '-' : (v < 1 ? (Number(v*24).toFixed(1)) + 'h' : Number(v).toFixed(2)) }
-function fmtDcol(_r,_c,v){ return fmtD(v) }
-function fmtMoney(_r,_c,v){ return v == null ? '-' : '¥ ' + Number(v).toLocaleString() }
-function fmtPct(_r,_c,v){ return v == null ? '-' : v + '%' }
-function daysCellCls({ row }) {
-  const d = row?.days_1_4
-  if (d == null) return ''
-  if (d > 15) return 'cell-danger'
-  if (d > 7) return 'cell-warn'
-  if (d <= 1) return 'cell-ok'
-  return ''
-}
-
-const barChartRef = ref(null)
-const radarChartRef = ref(null)
-const dailySplitChartRef = ref(null)
-let barChart = null
-let radarChart = null
-let dailySplitChart = null
-
-function renderBar() {
-  if (!barChartRef.value) return
-  barChart = barChart || echarts.init(barChartRef.value)
-  const bins = distData.value.map(r => r.bin)
-  barChart.setOption({
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, valueFormatter: v => v.toLocaleString() },
-    legend: { data: ['A-钱包出款(笔)'] },
-    grid: { left: 40, right: 20, top: 40, bottom: 40 },
-    xAxis: { type: 'category', data: bins, axisLabel: { interval: 0, rotate: 0 } },
-    yAxis: { type: 'value' },
+// ---- 图1: 提现拖延趋势 (按日/周/月聚合) ----
+const trendOption = computed(() => {
+  const agg = aggregateTrend()
+  if (!agg.labels.length) return {}
+  return {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+    legend: { data: ['提现笔数', '平均拖延(天)'], top: 0, textStyle: { fontSize: 11 } },
+    grid: { left: 56, right: 64, bottom: 44, top: 40 },
+    xAxis: { type: 'category', data: agg.labels, axisLabel: { fontSize: 11, rotate: agg.labels.length > 12 ? 30 : 0 } },
+    yAxis: [
+      { type: 'value', name: '笔数', axisLabel: { fontSize: 11 }, splitLine: { lineStyle: { type: 'dashed' } } },
+      { type: 'value', name: '天数', axisLabel: { fontSize: 11 }, splitLine: { show: false } },
+    ],
     series: [
-      { name: 'A-钱包出款(笔)', type: 'bar', data: distData.value.map(r => r.wallet_count || 0), itemStyle: { color: '#E6A23C' },
-        label: { show: true, position: 'top' } },
-    ]
-  })
-}
+      { name: '提现笔数', type: 'bar', data: agg.counts, barMaxWidth: 28, itemStyle: { color: '#93c5fd', borderRadius: [4, 4, 0, 0] } },
+      { name: '平均拖延(天)', type: 'line', yAxisIndex: 1, data: agg.avgDays, smooth: true, symbol: 'circle', symbolSize: 6,
+        itemStyle: { color: '#f59e0b' }, lineStyle: { width: 2.5, color: '#f59e0b' } },
+    ],
+  }
+})
 
-function renderRadar() {
-  if (!radarChartRef.value) return
-  radarChart = radarChart || echarts.init(radarChartRef.value)
-  const a = overview.value?.paths?.A_wallet || {}
-  radarChart.setOption({
-    tooltip: { valueFormatter: v => (v == null ? '-' : v + '%') },
-    legend: { data: ['A-钱包到账率'], bottom: 0 },
-    grid: { left: 40, right: 20, top: 30, bottom: 60 },
-    xAxis: {
-      type: 'category',
-      data: ['≤1天到账率', '≤3天到账率', '≤7天到账率', '>15天占比(反向)'],
-      axisLabel: { interval: 0 },
-    },
-    yAxis: { type: 'value', max: 100, axisLabel: { formatter: '{value}%' } },
-    series: [
-      { name: 'A-钱包到账率', type: 'bar', data: [
-        a.pct_within_1d ?? 0, a.pct_within_3d ?? 0, a.pct_within_7d ?? 0, a.pct_over_15d ?? 0,
-      ], itemStyle: { color: '#E6A23C' }, barWidth: 40,
-        label: { show: true, position: 'top', formatter: '{c}%' } },
-    ]
-  })
-}
-
-function renderDailySplit() {
-  if (!dailySplitChartRef.value) return
-  dailySplitChart = dailySplitChart || echarts.init(dailySplitChartRef.value)
+function aggregateTrend() {
   const rows = dailySplit.value || []
-  const dates = rows.map(r => r.date)
-  dailySplitChart.setOption({
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'shadow' },
-      formatter: (params) => {
-        if (!params || !params.length) return ''
-        const row = rows[params[0].dataIndex] || {}
-        const lines = [`<b>${row.date}</b> 出款合计 <b>${row.total_count || 0} 笔</b> / ¥ ${Number(row.total_amount || 0).toLocaleString()}`]
-        params.forEach(p => {
-          lines.push(`${p.marker}${p.seriesName}: ${Number(p.value || 0).toLocaleString()} 笔`)
-        })
-        if (row.wallet_avg_days_1_2 != null || row.wallet_avg_days_2_4 != null) {
-          lines.push(`<span style="color:#909399;font-size:12px;">钱包入款平均: ${row.wallet_avg_days_1_2 ?? '-'} 天 · 用户提现拖延平均: ${row.wallet_avg_days_2_4 ?? '-'} 天</span>`)
-        }
-        return lines.join('<br>')
-      }
-    },
-    legend: { data: ['B-直接线上退款', 'A-钱包沉淀今日提现'] },
-    grid: { left: 50, right: 20, top: 50, bottom: 60 },
-    xAxis: {
-      type: 'category',
-      data: dates,
-      axisLabel: { interval: 0, rotate: dates.length > 20 ? 45 : 0, fontSize: 11 },
-    },
-    yAxis: {
-      type: 'value',
-      axisLabel: { formatter: '{value} 笔' },
-    },
-    series: [
-      {
-        name: 'B-直接线上退款',
-        type: 'bar',
-        stack: 'cashout',
-        data: rows.map(r => r.direct_count || 0),
-        itemStyle: { color: '#67C23A' },
-        emphasis: { focus: 'series' },
-        label: { show: dates.length <= 31, position: 'inside', color: '#fff', formatter: p => p.value || '' },
-      },
-      {
-        name: 'A-钱包沉淀今日提现',
-        type: 'bar',
-        stack: 'cashout',
-        data: rows.map(r => r.wallet_count || 0),
-        itemStyle: { color: '#E6A23C' },
-        emphasis: { focus: 'series' },
-        label: { show: dates.length <= 31, position: 'inside', color: '#fff', formatter: p => p.value || '' },
-      },
-    ]
+  if (!rows.length) return { labels: [], counts: [], avgDays: [] }
+  if (grain.value === 'day') {
+    return {
+      labels: rows.map(r => r.date.slice(5)),
+      counts: rows.map(r => r.wallet_count || 0),
+      avgDays: rows.map(r => (r.wallet_avg_days_2_4 == null ? null : Number(r.wallet_avg_days_2_4).toFixed(1))),
+    }
+  }
+  // 按周/月聚合: 加权平均拖延天数
+  const groups = new Map()
+  rows.forEach(r => {
+    const d = new Date(r.date)
+    let key, label
+    if (grain.value === 'week') {
+      const iso = getISOWeek(d)
+      key = `${d.getFullYear()}-W${iso}`
+      label = `${d.getMonth()+1}/${d.getDate()}周`
+    } else {
+      key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`
+      label = `${d.getFullYear()}-${d.getMonth()+1}`
+    }
+    if (!groups.has(key)) { groups.set(key, { sum: 0, n: 0, count: 0, label }) }
+    const g = groups.get(key)
+    g.count += r.wallet_count || 0
+    if (r.wallet_avg_days_2_4 != null) { g.sum += r.wallet_avg_days_2_4 * (r.wallet_count || 0); g.n += (r.wallet_count || 0) }
   })
+  const sorted = [...groups.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1)
+  return {
+    labels: sorted.map(([, g]) => g.label),
+    counts: sorted.map(([, g]) => g.count),
+    avgDays: sorted.map(([, g]) => (g.n ? (g.sum / g.n).toFixed(1) : null)),
+  }
 }
 
-const resizeHandler = () => {
-  barChart && barChart.resize()
-  radarChart && radarChart.resize()
-  dailySplitChart && dailySplitChart.resize()
+function getISOWeek(date) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
+  const dayNum = d.getUTCDay() || 7
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum)
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+  return Math.ceil((((d - yearStart) / 86400000) + 1) / 7)
+}
+
+// ---- 图2: 沉淀与清理 ----
+const waterOption = computed(() => {
+  const rows = walletWater.value || []
+  if (!rows.length) return {}
+  const dates = rows.map(r => String(r.date).slice(5))
+  return {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { data: ['转入', '提现', '净水位'], top: 0, textStyle: { fontSize: 11 } },
+    grid: { left: 56, right: 64, bottom: 44, top: 40 },
+    xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 11, rotate: dates.length > 14 ? 30 : 0 } },
+    yAxis: [
+      { type: 'value', name: '金额(元)', axisLabel: { fontSize: 11 }, splitLine: { lineStyle: { type: 'dashed' } } },
+      { type: 'value', name: '净水位', axisLabel: { fontSize: 11 }, splitLine: { show: false } },
+    ],
+    series: [
+      { name: '转入', type: 'bar', data: rows.map(r => r.wallet_in), itemStyle: { color: '#10b981' }, barMaxWidth: 26 },
+      { name: '提现', type: 'bar', data: rows.map(r => r.withdraw), itemStyle: { color: '#f87171' }, barMaxWidth: 26 },
+      { name: '净水位', type: 'line', yAxisIndex: 1, data: rows.map(r => (r.wallet_in - r.withdraw)), smooth: true, symbol: 'circle', symbolSize: 6,
+        itemStyle: { color: '#2563eb' }, lineStyle: { width: 2.5, color: '#2563eb' },
+        markLine: { silent: true, symbol: 'none', lineStyle: { color: '#9ca3af', type: 'dashed' }, data: [{ yAxis: 0 }] } },
+    ],
+  }
+})
+
+function renderTrend() {
+  // grain 变化直接由 trendOption computed 重新计算
+}
+
+function rangeParams() {
+  const params = {}
+  if (filters.range && filters.range.length === 2) {
+    params.start = filters.range[0] + 'T00:00:00'
+    params.end = filters.range[1] + 'T23:59:59'
+  }
+  return params
+}
+
+async function loadSleeping() {
+  const params = rangeParams()
+  params.page = sleepPage.value
+  params.page_size = sleepPageSize.value
+  try {
+    const res = await rwApi.sleeping(params)
+    sleepTotal.value = res?.data?.total || 0
+    sleepList.value = res?.data?.list || []
+  } catch (e) {
+    sleepList.value = []
+  }
 }
 
 async function loadAll() {
-  const params = {}
-  if (filters.range && filters.range.length === 2) {
-    params.start = filters.range[0] + 'T00:00:00'
-    params.end = filters.range[1] + 'T23:59:59'
-  }
+  loading.value = true
   try {
-    const [o, d, ds, dim] = await Promise.all([
+    const params = rangeParams()
+    const [o, ds, wv] = await Promise.all([
       rwApi.overview(params),
-      rwApi.timeDistribution(params),
       rwApi.dailySplit(params),
-      rwApi.dimensions({ ...params, topn: 30 }),
+      cash.walletVsWithdraw(params),
     ])
     overview.value = o?.data || {}
-    distData.value = d?.data || []
     dailySplit.value = ds?.data || []
-    dimData.value = dim?.data || { by_operator: [], by_reason: [], by_method: [] }
-    await nextTick()
-    renderBar()
-    renderRadar()
-    renderDailySplit()
-    detailPage.value = 1
-    loadDetail()
+    walletWater.value = wv?.data || []
+    sleepPage.value = 1
+    await loadSleeping()
   } catch (e) {
-    ElMessage.error('看板数据加载失败: ' + (e?.message || e))
+    ElMessage.error('加载失败: ' + (e?.message || e))
+  } finally {
+    loading.value = false
   }
 }
 
-async function loadDetail() {
-  const params = {}
-  if (filters.range && filters.range.length === 2) {
-    params.start = filters.range[0] + 'T00:00:00'
-    params.end = filters.range[1] + 'T23:59:59'
-  }
-  params.sort = detailSort.value
-  params.page = detailPage.value
-  params.page_size = detailPageSize.value
-  params.slow_only = filters.slowOnly
-  params.path = filters.path
-  try {
-    const res = await rwApi.detail(params)
-    detailTotal.value = res?.data?.total || 0
-    detailList.value = res?.data?.list || []
-  } catch (e) {
-    ElMessage.error('明细加载失败: ' + (e?.message || e))
-  }
-}
-
-onMounted(() => {
-  window.addEventListener('resize', resizeHandler)
-  loadAll()
-})
-onBeforeUnmount(() => {
-  window.removeEventListener('resize', resizeHandler)
-  barChart && barChart.dispose()
-  radarChart && radarChart.dispose()
-  dailySplitChart && dailySplitChart.dispose()
-})
+onMounted(loadAll)
 </script>
 
 <style scoped>
-.refund-withdrawal-board { padding: 12px 16px; background: #f5f7fa; min-height: 100%; }
-.filter-card { margin-bottom: 14px; }
-.kpi-row, .metric-row, .chart-row { margin-bottom: 16px; }
-.kpi-card { border-radius: 8px; }
-.kpi-card .kpi-label { font-size: 13px; color: #909399; }
-.kpi-card .kpi-value { font-size: 24px; font-weight: 600; margin: 8px 0 4px; letter-spacing: .3px; }
-.kpi-card .kpi-sub { font-size: 12px; color: #909399; line-height: 1.5; }
-.kpi-card.primary .kpi-value { color: #409EFF; }
-.kpi-card.ok .kpi-value { color: #67C23A; }
-.kpi-card.warning .kpi-value { color: #E6A23C; }
-.kpi-card.danger .kpi-value { color: #F56C6C; }
-.metric-card .card-head { display: flex; align-items: center; gap: 10px; }
-.metric-card .card-head .path-desc { font-size: 12px; color: #909399; }
-.metric-card .path-tag { padding: 3px 8px; border-radius: 4px; font-weight: 600; color: #fff; }
-.metric-card .path-tag.A { background: #E6A23C; }
-.metric-card .path-tag.B { background: #67C23A; }
-.metric-card .metric-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px 16px; }
-.metric-card .metric-grid .metric-item { padding: 8px 10px; background: #fafbfc; border-radius: 6px; }
-.metric-card .metric-grid .l { font-size: 12px; color: #909399; }
-.metric-card .metric-grid .v { font-size: 16px; font-weight: 600; color: #303133; margin-top: 4px; }
-.metric-card .metric-grid .v.days.warn { color: #E6A23C; }
-.metric-card .metric-grid .v.pct.ok { color: #67C23A; }
-.metric-card .metric-grid .v.pct.danger { color: #F56C6C; }
-.chart { width: 100%; height: 340px; }
-.card-head-title { font-weight: 600; font-size: 15px; }
-.card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
-.dim-card, .detail-card { margin-bottom: 16px; }
+.timeliness { width: 100%; }
+.block-card { background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+.block-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.block-title { font-size: 15px; font-weight: 600; color: #111827; }
+.block-hint { font-size: 12px; color: #6b7280; }
+.mb-16 { margin-bottom: 16px; }
+.filter-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.kpi-card { border-radius: 10px; padding: 12px 14px 10px; border: 1px solid rgba(148,163,184,0.15); display: flex; flex-direction: column; gap: 3px; min-height: 84px; }
+.kpi-label { font-size: 12px; font-weight: 600; }
+.kpi-value { margin-top: 2px; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.3px; }
+.kpi-sub { font-size: 10.5px; color: #6b7280; line-height: 1.3; }
+.unit { font-size: 12px; font-weight: 500; margin-left: 2px; opacity: 0.85; }
+.sn-chip { color: #2563eb; cursor: pointer; font-weight: 600; text-decoration: underline; text-decoration-style: dotted; }
+.sn-chip:hover { color: #1d4ed8; }
 .pag-wrap { display: flex; justify-content: flex-end; margin-top: 12px; }
-.muted { color: #909399; }
-.tips { margin-top: 18px; }
-:deep(.cell-danger) { color: #F56C6C; font-weight: 600; }
-:deep(.cell-warn) { color: #E6A23C; }
-:deep(.cell-ok) { color: #67C23A; }
-:deep(.col-warn .cell) { color: #E6A23C !important; }
-:deep(.col-danger .cell) { color: #F56C6C !important; }
 </style>

@@ -2186,7 +2186,32 @@ def refund_withdrawal_detail(db: Session, start: str | None = None, end: str | N
     total = len(rows)
     page = max(1, page or 1); ps = max(1, min(500, page_size or 50))
     sl = slice((page - 1) * ps, page * ps)
-    return {"total": total, "page": page, "page_size": ps, "list": rows[sl]}
+    # 操作人姓名归一 (PersonAlias→display_name), 与决策概览/人员统计展示口径一致
+    alias_map: dict[str, str] = {}
+    for a, dn in db.execute(
+        select(PersonAlias.alias, func.coalesce(Person.display_name, PersonAlias.alias))
+        .select_from(PersonAlias).outerjoin(Person, PersonAlias.person_id == Person.id)
+    ):
+        if a:
+            alias_map[str(a)] = str(dn)
+
+    def _norm(op):
+        if not op:
+            return op
+        raw = str(op)
+        if raw in alias_map:
+            return _strip_qw_prefix(alias_map[raw])
+        stripped = _strip_qw_prefix(raw)
+        if stripped != raw and stripped in alias_map:
+            return _strip_qw_prefix(alias_map[stripped])
+        return stripped or raw
+
+    page_rows = []
+    for r in rows[sl]:
+        if r.get("operator"):
+            r["operator"] = _norm(r["operator"])
+        page_rows.append(r)
+    return {"total": total, "page": page, "page_size": ps, "list": page_rows}
 
 
 def refund_withdrawal_daily_split(db: Session, start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
@@ -2248,6 +2273,74 @@ def refund_withdrawal_daily_split(db: Session, start: str | None = None, end: st
             "wallet_avg_days_2_4": round(b["a_d24_sum"] / b["a_d24_n"], 3) if b["a_d24_n"] else None,
         })
     return out
+
+
+def refund_withdrawal_sleeping(
+    db: Session, start: str | None = None, end: str | None = None,
+    page: int = 1, page_size: int = 50,
+) -> dict[str, Any]:
+    """钱包沉淀清单: 转入提现账户但尚未被用户提现的退款单 (分页).
+
+    匹配口径与 _build_chain_rows 的 A 路径一致:
+      按退款单号(RF)命中用户提现 remark → 已提现; 兜底 device_sn+金额 且提现时间>=发起时间 → 已提现.
+      未命中任何用户提现 → 沉淀(钱仍躺在提现钱包).
+    """
+    s = datetime.fromisoformat(start) if start else None
+    e = datetime.fromisoformat(end) if end else None
+    rf_rows = db.execute(text("""
+        SELECT refund_no, device_sn, refund_amount, created_at_raw, operator
+        FROM refunds
+        WHERE refund_method LIKE '%转入提现%'
+          AND created_at_raw >= :ts AND created_at_raw <= :te
+        ORDER BY created_at_raw
+    """), {"ts": s, "te": e}).fetchall()
+    wd_rows = db.execute(text("""
+        SELECT remark, device_sn, op_amount, op_time FROM wallet_withdrawals WHERE op_type = '用户提现'
+    """)).fetchall()
+
+    wd_by_rfn: dict[str, list] = {}
+    wd_by_sn: dict[str, list] = {}
+    for w in wd_rows:
+        m = _RFN_RE.search(w.remark or "")
+        if m:
+            wd_by_rfn.setdefault(m.group(1), []).append(w)
+        sn = (w.device_sn or "").strip()
+        if sn:
+            wd_by_sn.setdefault(sn, []).append(w)
+
+    sleep_rows: list[dict[str, Any]] = []
+    for r in rf_rows:
+        amt = round(float(r.refund_amount or 0), 2)
+        d1 = _naive(r.created_at_raw)
+        if not d1:
+            d1 = datetime.min
+        matched = False
+        for w in wd_by_rfn.get(r.refund_no, []):
+            wo = _naive(w.op_time)
+            if wo and wo >= d1 and abs(float(w.op_amount or 0) - amt) < 0.01:
+                matched = True
+                break
+        if not matched and r.device_sn:
+            sn = str(r.device_sn).strip()
+            for w in wd_by_sn.get(sn, []):
+                wo = _naive(w.op_time)
+                if wo and wo >= d1 and abs(float(w.op_amount or 0) - amt) < 0.01:
+                    matched = True
+                    break
+        if matched:
+            continue
+        sleep_rows.append({
+            "refund_no": r.refund_no,
+            "device_sn": (r.device_sn or "").strip() or None,
+            "refund_amount": amt,
+            "operator": (r.operator or "").strip() or "SYS/系统",
+            "d1_refund_created": d1.astimezone(TZ).isoformat() if r.created_at_raw else None,
+            "waiting_days": round((datetime.now() - d1).total_seconds() / 86400.0, 1) if r.created_at_raw else None,
+        })
+
+    total = len(sleep_rows)
+    page = max(1, page or 1); ps = max(1, min(500, page_size or 50))
+    return {"total": total, "page": page, "page_size": ps, "list": sleep_rows[(page - 1) * ps: page * ps]}
 
 
 # ---------- 看板7: 今日看板 (单日切面 + 实时节奏) ----------
@@ -6376,6 +6469,423 @@ def refund_type_trend(
                                "failed_sn": len(fail), "success_rate": rate})
             series.append({"staff_type": st, "trend": trend})
         return {"dates": [str(d) for d in dates_list], "staff_types": staff_types, "series": series}
+
+
+def refund_decision_overview(
+    db: Session, start: str | None = None, end: str | None = None, grain: str = "day",
+) -> dict[str, Any]:
+    """退款决策概览 (2026-08-21 退款看板重构)
+
+    五大块, 每块对应一个管理决策问题:
+    1. summary         - KPI + 自动结论(钱出去多少/环比/涉诉占比/钱包水位)
+    2. routes_daily    - 资金流出全景: 线上直退/用户提现/线下/转入未提现 每日笔数金额
+    3. wallet_water    - 钱包水位: 转入/转出/净水位/系统扣费 每日
+    4. complaint_split - 涉诉 vs 普通 (线上直退, SN关联工单分类: 外部>商户号>内部 优先级)
+    5. reason_operator - 退款原因Top + 操作人员Top (线上直退)
+    """
+    cur_s, cur_e, prev_s, prev_e, _rt, _disp = _resolve_windows(None, start, end)
+
+    def _day(col: str) -> str:
+        # 注意: 会话时区为 Etc/UTC, 必须用 col AT TIME ZONE 'Asia/Shanghai' 得到上海本地
+        # naive 时间后再 DATE(), 不能先转 UTC 再转上海(那会导致 DATE(timestamptz) 按 UTC 截断-8h)
+        expr = f"{col} AT TIME ZONE 'Asia/Shanghai'"
+        return f"DATE({expr})" if grain == "day" else f"DATE_TRUNC('week', {expr})::date"
+
+    # ── 2. 钱包水位 (转入/转出/系统扣费 按日) ──
+    wallet_rows = db.execute(text(f"""
+        SELECT {_day("w.op_time")} AS d, w.op_type,
+               count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
+        FROM wallet_withdrawals w
+        WHERE w.op_time >= :ts AND w.op_time <= :te
+          AND w.op_type IN ('订单退费转入', '用户提现', '系统扣费')
+        GROUP BY 1, 2 ORDER BY 1, 2
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    wallet_water = {"dates": [], "transfer_in_cnt": [], "transfer_in_amt": [],
+                    "withdraw_cnt": [], "withdraw_amt": [], "fee_cnt": [], "fee_amt": [],
+                    "net": [], "cum_net": []}
+    wmap: dict[str, dict[str, list]] = {}
+    for r in wallet_rows:
+        wmap.setdefault(str(r.d), {})[r.op_type] = (int(r.cnt or 0), float(r.amt or 0))
+    cum = 0.0
+    for d in sorted(wmap):
+        tin = wmap[d].get("订单退费转入", (0, 0.0))
+        wd = wmap[d].get("用户提现", (0, 0.0))
+        fee = wmap[d].get("系统扣费", (0, 0.0))
+        net = tin[1] - wd[1] - fee[1]
+        cum += net
+        wallet_water["dates"].append(d)
+        wallet_water["transfer_in_cnt"].append(tin[0])
+        wallet_water["transfer_in_amt"].append(round(tin[1], 2))
+        wallet_water["withdraw_cnt"].append(wd[0])
+        wallet_water["withdraw_amt"].append(round(wd[1], 2))
+        wallet_water["fee_cnt"].append(fee[0])
+        wallet_water["fee_amt"].append(round(fee[1], 2))
+        wallet_water["net"].append(round(net, 2))
+        wallet_water["cum_net"].append(round(cum, 2))
+
+    # ── 3. 涉诉 vs 普通: 每单按 SN 关联工单 bool_or 判定, 优先级 外部>商户号>内部 ──
+    #     (与投诉专项/之前验证口径一致: SN 存在任一相关投诉工单即归该桶)
+    comp_rows = db.execute(text(f"""
+        SELECT {_day("r.created_at_raw")} AS d, r.refund_amount,
+               bool_or(st.service_item ILIKE '%工信部%' OR st.service_item ILIKE '%12315%'
+                   OR st.service_item ILIKE '%公共服务平台%' OR st.service_item ILIKE '%消费者协会%'
+                   OR st.service_item ILIKE '%消协%' OR st.service_item ILIKE '%监督局%'
+                   OR st.service_item ILIKE '%市场监管%' OR st.service_item ILIKE '%市监%'
+                   OR st.service_item ILIKE '%315平台%' OR st.service_item ILIKE '%12345%'
+                   OR st.service_item ILIKE '%政务平台%') AS has_ext,
+               bool_or(st.service_item ILIKE '%微信%') AS has_merchant,
+               bool_or(st.service_item ILIKE '%商品投诉%' OR st.service_item ILIKE '%服务投诉%') AS has_int
+        FROM refunds r
+        LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
+        WHERE r.refund_method = '线上' AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+        GROUP BY 1, r.refund_no
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    cs_map: dict[str, dict[str, list]] = {}
+    for r in comp_rows:
+        day = str(r.d)
+        if r.has_ext:
+            ctype = "外部投诉"
+        elif r.has_merchant:
+            ctype = "商户号投诉"
+        elif r.has_int:
+            ctype = "内部投诉"
+        else:
+            ctype = "普通退款"
+        b = cs_map.setdefault(day, {})
+        for k in ("内部投诉", "商户号投诉", "外部投诉", "普通退款"):
+            b.setdefault(k, [0, 0.0])
+        b[ctype][0] += 1
+        b[ctype][1] += float(r.refund_amount or 0)
+    complaint_split = {"dates": [], "internal_cnt": [], "internal_amt": [],
+                       "merchant_cnt": [], "merchant_amt": [], "external_cnt": [], "external_amt": [],
+                       "complaint_cnt": [], "complaint_amt": [], "normal_cnt": [], "normal_amt": [],
+                       "ratio": []}
+    for d in sorted(cs_map):
+        b = cs_map[d]
+        int_ = b["内部投诉"]; mer = b["商户号投诉"]; ext = b["外部投诉"]; nor = b["普通退款"]
+        comp_cnt = int_[0] + mer[0] + ext[0]
+        comp_amt = int_[1] + mer[1] + ext[1]
+        total_amt = comp_amt + nor[1]
+        complaint_split["dates"].append(d)
+        complaint_split["internal_cnt"].append(int_[0]); complaint_split["internal_amt"].append(round(int_[1], 2))
+        complaint_split["merchant_cnt"].append(mer[0]); complaint_split["merchant_amt"].append(round(mer[1], 2))
+        complaint_split["external_cnt"].append(ext[0]); complaint_split["external_amt"].append(round(ext[1], 2))
+        complaint_split["complaint_cnt"].append(comp_cnt); complaint_split["complaint_amt"].append(round(comp_amt, 2))
+        complaint_split["normal_cnt"].append(nor[0]); complaint_split["normal_amt"].append(round(nor[1], 2))
+        complaint_split["ratio"].append(round(comp_amt / total_amt * 100, 1) if total_amt else 0.0)
+
+    # ── 5. 退款原因Top + 操作人员Top: 每单取最新完工工单的服务项作为原因 ──
+    reason_rows = db.execute(text(f"""
+        WITH rel AS (
+            SELECT DISTINCT ON (r.refund_no)
+                r.refund_no, r.refund_amount, r.operator,
+                COALESCE(NULLIF(st.service_item, ''), '<未关联工单>') AS reason
+            FROM refunds r
+            LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
+            WHERE r.refund_method = '线上' AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+            ORDER BY r.refund_no, st.finish_time DESC NULLS LAST
+        )
+        SELECT reason, operator, count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
+        FROM rel GROUP BY 1, 2
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    reason_map: dict[str, list] = {}
+    op_map: dict[str, list] = {}
+    # 姓名归一: PersonAlias.alias → Person.display_name, 未命中再尝试去部门前缀后匹配
+    alias_map: dict[str, str] = {}
+    for a, dn in db.execute(
+        select(PersonAlias.alias, func.coalesce(Person.display_name, PersonAlias.alias))
+        .select_from(PersonAlias).outerjoin(Person, PersonAlias.person_id == Person.id)
+    ):
+        if a:
+            alias_map[str(a)] = str(dn)
+
+    def _norm_op(op: str | None) -> str:
+        if not op:
+            return "<系统>"
+        raw = str(op)
+        if raw.strip().lower() in ("sys", "system"):
+            return "<系统>"
+        if raw in alias_map:
+            return _strip_qw_prefix(alias_map[raw])
+        stripped = _strip_qw_prefix(raw)
+        if stripped != raw and stripped in alias_map:
+            return _strip_qw_prefix(alias_map[stripped])
+        return stripped or raw
+
+    for r in reason_rows:
+        reason_map.setdefault(r.reason, [0, 0.0])
+        reason_map[r.reason][0] += int(r.cnt or 0)
+        reason_map[r.reason][1] += float(r.amt or 0)
+        op = _norm_op(r.operator)
+        op_map.setdefault(op, [0, 0.0])
+        op_map[op][0] += int(r.cnt or 0)
+        op_map[op][1] += float(r.amt or 0)
+    reasons = sorted(reason_map.items(), key=lambda x: (-x[1][0], -x[1][1]))[:12]
+    operators = sorted(op_map.items(), key=lambda x: -x[1][1])[:10]
+    total_reason_amt = sum(v[1] for v in reason_map.values())
+    reason_operator = {
+        "reasons": [{"name": k, "count": v[0], "amount": round(v[1], 2),
+                     "ratio": round(v[1] / total_reason_amt * 100, 1) if total_reason_amt else 0.0}
+                    for k, v in reasons],
+        "operators": [{"name": k, "count": v[0], "amount": round(v[1], 2),
+                       "avg_amount": round(v[1] / v[0], 2) if v[0] else 0.0} for k, v in operators],
+    }
+
+    # ── 1. 资金流出全景: 严格四路经营 A线上直退 / B钱包提现 / C闪猫退款 / D商户号直退 ──
+    #     线下退款、转入提现账户(钱包内部流转)不属于四路, 不计入现金流全景
+    route_rows = db.execute(text(f"""
+        SELECT {_day("r.created_at_raw")} AS d,
+               count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
+        FROM refunds r
+        WHERE r.refund_method = '线上' AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+        GROUP BY 1
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    wd_rows = db.execute(text(f"""
+        SELECT {_day("w.op_time")} AS d,
+               count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
+        FROM wallet_withdrawals w
+        WHERE w.op_time >= :ts AND w.op_time <= :te AND w.op_type = '用户提现'
+        GROUP BY 1
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    # C 闪猫退款 (独立业务表)
+    # 注意: refund_time/apply_time 字段无数据(上游未填), created_at 是批量导入时间(聚集在导入当天,不可用),
+    #       真实业务时间用 audit_time(审核时间, 1916/1999 条有值), 缺失回退 created_at
+    sm_rows = db.execute(text(f"""
+        SELECT {_day("COALESCE(s.audit_time, s.created_at)")} AS d,
+               count(*) AS cnt, COALESCE(sum(COALESCE(s.actual_amount, s.refund_amount, 0)), 0) AS amt
+        FROM shanmao_refunds s
+        WHERE COALESCE(s.audit_time, s.created_at) >= :ts AND COALESCE(s.audit_time, s.created_at) <= :te
+          AND s.status = '已退款'
+        GROUP BY 1
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    # D 商户号直退 (微信商户号退款流水, 数据源同步后自动并入)
+    mr_rows = db.execute(text(f"""
+        SELECT {_day("m.trade_time")} AS d,
+               count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
+        FROM merchant_refunds m
+        WHERE m.trade_time >= :ts AND m.trade_time <= :te AND m.refund_amount > 0
+        GROUP BY 1
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+
+    route_keys = ["A 线上直退", "B 钱包提现", "C 闪猫退款", "D 商户号直退"]
+    route_map: dict[str, dict[str, list]] = {}
+    for rows, k in ((route_rows, "A 线上直退"), (wd_rows, "B 钱包提现"), (sm_rows, "C 闪猫退款"), (mr_rows, "D 商户号直退")):
+        for r in rows:
+            d = str(r.d)
+            b = route_map.setdefault(d, {})
+            b.setdefault(k, [0, 0.0])
+            b[k][0] += int(r.cnt or 0)
+            b[k][1] += float(r.amt or 0)
+    routes_daily = {"dates": [], "series": {k: {"counts": [], "amounts": []} for k in route_keys}, "table": []}
+    for d in sorted(route_map):
+        b = route_map[d]
+        row = {"date": d}
+        total_cnt = total_amt = 0
+        for k in route_keys:
+            v = b.get(k, [0, 0.0])
+            row[f"{k}_cnt"] = v[0]
+            row[f"{k}_amt"] = round(v[1], 2)
+            routes_daily["series"][k]["counts"].append(v[0])
+            routes_daily["series"][k]["amounts"].append(round(v[1], 2))
+            total_cnt += v[0]
+            total_amt += v[1]
+        row["total_cnt"] = total_cnt
+        row["total_amt"] = round(total_amt, 2)
+        routes_daily["table"].append(row)
+        routes_daily["dates"].append(d)
+
+    # ── summary: KPI + 环比 + 结论 (四路口径 A+B+C+D) ──
+    def _window_totals(s: _dt.datetime, e: _dt.datetime) -> dict:
+        tot = {"online_cnt": 0, "online_amt": 0.0, "withdraw_cnt": 0, "withdraw_amt": 0.0,
+               "sm_cnt": 0, "sm_amt": 0.0, "mr_cnt": 0, "mr_amt": 0.0}
+        for r in db.execute(text("""
+            SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
+            FROM refunds r WHERE r.refund_method = '线上' AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+        """), {"ts": s, "te": e}).fetchall():
+            tot["online_cnt"] += int(r.cnt or 0); tot["online_amt"] += float(r.amt or 0)
+        for r in db.execute(text("""
+            SELECT count(*) AS cnt, COALESCE(sum(op_amount), 0) AS amt
+            FROM wallet_withdrawals w WHERE w.op_time >= :ts AND w.op_time <= :te AND w.op_type = '用户提现'
+        """), {"ts": s, "te": e}).fetchall():
+            tot["withdraw_cnt"] += int(r.cnt or 0); tot["withdraw_amt"] += float(r.amt or 0)
+        for r in db.execute(text("""
+            SELECT count(*) AS cnt, COALESCE(sum(COALESCE(actual_amount, refund_amount, 0)), 0) AS amt
+            FROM shanmao_refunds s
+            WHERE COALESCE(s.audit_time, s.created_at) >= :ts AND COALESCE(s.audit_time, s.created_at) <= :te
+              AND s.status = '已退款'
+        """), {"ts": s, "te": e}).fetchall():
+            tot["sm_cnt"] += int(r.cnt or 0); tot["sm_amt"] += float(r.amt or 0)
+        for r in db.execute(text("""
+            SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
+            FROM merchant_refunds m WHERE m.trade_time >= :ts AND m.trade_time <= :te AND m.refund_amount > 0
+        """), {"ts": s, "te": e}).fetchall():
+            tot["mr_cnt"] += int(r.cnt or 0); tot["mr_amt"] += float(r.amt or 0)
+        return tot
+
+    cur_tot = _window_totals(cur_s, cur_e)
+    prev_tot = _window_totals(prev_s, prev_e) if prev_s and prev_e else dict.fromkeys(cur_tot, 0)
+    cur_cash = cur_tot["online_amt"] + cur_tot["withdraw_amt"] + cur_tot["sm_amt"] + cur_tot["mr_amt"]
+    prev_cash = prev_tot["online_amt"] + prev_tot["withdraw_amt"] + prev_tot["sm_amt"] + prev_tot["mr_amt"]
+    chain_pct = round((cur_cash - prev_cash) / prev_cash * 100, 1) if prev_cash else None
+    w_total_in = sum(wallet_water["transfer_in_amt"])
+    w_total_out = sum(wallet_water["withdraw_amt"]) + sum(wallet_water["fee_amt"])
+    wallet_net = round(w_total_in - w_total_out, 2)
+    online_amt = cur_tot["online_amt"]
+    comp_amt = sum(complaint_split["complaint_amt"])
+    comp_ratio = round(comp_amt / online_amt * 100, 1) if online_amt else 0.0
+
+    conclusions = []
+    extra = ""
+    if cur_tot["sm_cnt"] or cur_tot["mr_cnt"]:
+        extra = f"，闪猫/商户号 {cur_tot['sm_cnt'] + cur_tot['mr_cnt']}笔/¥{cur_tot['sm_amt'] + cur_tot['mr_amt']:,.0f}"
+    conclusions.append(
+        f"区间退款现金流出 ¥{cur_cash:,.0f}（线上直退 {cur_tot['online_cnt']}笔/¥{cur_tot['online_amt']:,.0f}，"
+        f"钱包提现 {cur_tot['withdraw_cnt']}笔/¥{cur_tot['withdraw_amt']:,.0f}{extra}）。"
+        + (f"较上一周期 {chain_pct:+.1f}%" if chain_pct is not None else "")
+    )
+    if reasons:
+        top1, top2 = reasons[0], reasons[1] if len(reasons) > 1 else None
+        conclusions.append(f"退款主因: {top1[0]} {top1[1][0]}笔/¥{top1[1][1]:,.0f}"
+                           + (f"，其次 {top2[0]} {top2[1][0]}笔" if top2 else "") + "。")
+    conclusions.append(
+        f"涉诉退款 ¥{comp_amt:,.0f}，占线上直退 {comp_ratio:.1f}%"
+        + f"（内部 {sum(complaint_split['internal_cnt'])}笔/商户号 {sum(complaint_split['merchant_cnt'])}笔/外部 {sum(complaint_split['external_cnt'])}笔）。"
+    )
+    conclusions.append(
+        f"钱包净水位 {wallet_net:+,.0f} 元（转入 ¥{w_total_in:,.0f} − 转出 ¥{w_total_out:,.0f}），累计 {sum(wallet_water['cum_net']):+,.0f} 元。"
+        + ("水位偏高，注意退款沉淀风险。" if wallet_net > 0 else "水位偏低/为负，转入量不足。")
+    )
+
+    summary = {
+        "cash_out_total": round(cur_cash, 2),
+        "cash_out_count": cur_tot["online_cnt"] + cur_tot["withdraw_cnt"] + cur_tot["sm_cnt"] + cur_tot["mr_cnt"],
+        "chain_pct": chain_pct,
+        "online_count": cur_tot["online_cnt"],
+        "online_amount": round(cur_tot["online_amt"], 2),
+        "withdraw_amount": round(cur_tot["withdraw_amt"], 2),
+        "wallet_net": wallet_net,
+        "complaint_ratio": comp_ratio,
+        "complaint_amount": round(comp_amt, 2),
+        "conclusions": conclusions,
+    }
+
+    return {
+        "summary": summary,
+        "routes_daily": routes_daily,
+        "wallet_water": wallet_water,
+        "complaint_split": complaint_split,
+        "reason_operator": reason_operator,
+    }
+
+
+def refund_export_original(
+    db: Session, start: str | None = None, end: str | None = None,
+) -> list[dict[str, Any]]:
+    """导出退款原始明细 (Excel 自定义分析用)
+
+    每笔退费单一行, 含四路标记(线上直退/钱包提现/闪猫/商户号/线下/转入提现账户/未填写),
+    涉诉分类(按 SN 关联工单 bool_or 优先级 外部>商户号>内部) 与归一操作人。
+    钱包提现与闪猫/商户号退款不属于 refunds 表, 由前端调用方分别导出或仅导出 refunds 明细。
+    """
+    cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
+
+    # 涉诉分类 (与决策概览口径一致)
+    comp_map: dict[str, str] = {}
+    for r in db.execute(text("""
+        SELECT r.refund_no,
+               bool_or(st.service_item ILIKE '%工信部%' OR st.service_item ILIKE '%12315%'
+                   OR st.service_item ILIKE '%公共服务平台%' OR st.service_item ILIKE '%消费者协会%'
+                   OR st.service_item ILIKE '%消协%' OR st.service_item ILIKE '%监督局%'
+                   OR st.service_item ILIKE '%市场监管%' OR st.service_item ILIKE '%市监%'
+                   OR st.service_item ILIKE '%315平台%' OR st.service_item ILIKE '%12345%'
+                   OR st.service_item ILIKE '%政务平台%') AS has_ext,
+               bool_or(st.service_item ILIKE '%微信%') AS has_merchant,
+               bool_or(st.service_item ILIKE '%商品投诉%' OR st.service_item ILIKE '%服务投诉%') AS has_int
+        FROM refunds r
+        LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
+        WHERE r.created_at_raw >= :ts AND r.created_at_raw <= :te
+        GROUP BY r.refund_no
+    """), {"ts": cur_s, "te": cur_e}).fetchall():
+        comp_map[str(r.refund_no)] = "外部投诉" if r.has_ext else ("商户号投诉" if r.has_merchant else ("内部投诉" if r.has_int else ""))
+
+    # 姓名归一映射
+    alias_map: dict[str, str] = {}
+    for a, dn in db.execute(
+        select(PersonAlias.alias, func.coalesce(Person.display_name, PersonAlias.alias))
+        .select_from(PersonAlias).outerjoin(Person, PersonAlias.person_id == Person.id)
+    ):
+        if a:
+            alias_map[str(a)] = str(dn)
+
+    def _norm_op(op: str | None) -> str:
+        if not op:
+            return ""
+        raw = str(op)
+        if raw.strip().lower() in ("sys", "system"):
+            return "系统自动"
+        if raw in alias_map:
+            return _strip_qw_prefix(alias_map[raw])
+        stripped = _strip_qw_prefix(raw)
+        if stripped != raw and stripped in alias_map:
+            return _strip_qw_prefix(alias_map[stripped])
+        return stripped or raw
+
+    def _route_of(m: str | None) -> str:
+        if not m:
+            return "未填写"
+        s = m.strip()
+        if s == "线上":
+            return "A 线上直退"
+        if s == "线下":
+            return "线下退款"
+        if "转入提现" in s or "提现" in s:
+            return "转入提现账户(钱包内部)"
+        return s
+
+    rows = db.execute(text("""
+        WITH rel AS (
+            SELECT DISTINCT ON (r.refund_no)
+                r.refund_no, r.platform_order_no, r.third_order_no, r.device_sn,
+                r.refund_method, r.refund_reason, r.operator, r.auditor,
+                r.refund_amount, r.actual_amount, r.status, r.merchant_name, r.package_name, r.remark,
+                r.created_at_raw, r.updated_at_raw,
+                COALESCE(NULLIF(st.service_item, ''), '') AS service_item
+            FROM refunds r
+            LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
+            WHERE r.created_at_raw >= :ts AND r.created_at_raw <= :te
+            ORDER BY r.refund_no, st.finish_time DESC NULLS LAST
+        )
+        SELECT * FROM rel ORDER BY created_at_raw
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+
+    def _sh(dt) -> str:
+        if not dt:
+            return ""
+        return dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    out = []
+    for r in rows:
+        out.append({
+            "退款单号": r.refund_no,
+            "平台订单号": r.platform_order_no or "",
+            "三方订单号": r.third_order_no or "",
+            "设备SN": r.device_sn or "",
+            "退款路线": _route_of(r.refund_method),
+            "退款原因": r.refund_reason or "",
+            "关联工单服务项": r.service_item or "",
+            "涉诉分类": comp_map.get(r.refund_no, "") or "",
+            "操作人": _norm_op(r.operator),
+            "审核人": _norm_op(r.auditor),
+            "退款金额": float(r.refund_amount or 0),
+            "实退金额": float(r.actual_amount or 0) if r.actual_amount is not None else "",
+            "状态": r.status or "",
+            "商户名称": r.merchant_name or "",
+            "套餐名称": r.package_name or "",
+            "创建时间": _sh(r.created_at_raw),
+            "更新时间": _sh(r.updated_at_raw),
+            "备注": (r.remark or "").replace("\n", " "),
+        })
+    return out
 
 
 def refund_problem_type_detail(
