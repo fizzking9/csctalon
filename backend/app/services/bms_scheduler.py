@@ -316,6 +316,12 @@ class BmsScheduler:
                     except Exception as ae:  # noqa: BLE001
                         logger.warning(f"[调度器] 预警扫描异常: {ae}")
 
+                # ── 共享文档(腾讯文档)同步: 按间隔轮询, 到点且空闲时执行 ──
+                try:
+                    await self._maybe_sync_tencent_doc()
+                except Exception as de:  # noqa: BLE001
+                    logger.warning(f"[调度器] 共享文档同步检查异常: {de}")
+
                 # ── 启动补跑(仅一次): DAYTIME_HOURS 中 <= 当前小时且未成功的,立即补一次 ──
                 if first_tick and not self._catch_up_done:
                     self._catch_up_done = True
@@ -426,6 +432,24 @@ class BmsScheduler:
                 )
         finally:
             db.close()
+
+    async def _maybe_sync_tencent_doc(self):
+        """共享文档(腾讯文档)定时轮询同步。
+
+        每次主循环检查: 配置启用 + 已授权 + 到轮询间隔 + 无其他同步任务在跑
+        → 在线程池执行(同步 DB 操作不阻塞事件循环)。
+        """
+        from app.services.doc_sync_service import should_sync_tencent_doc, sync_tencent_doc_safe
+
+        if sync_task_manager.is_busy():
+            return
+        if not should_sync_tencent_doc():
+            return
+        logger.info("[调度器] 腾讯文档到点, 开始轮询同步投诉数据")
+        try:
+            await asyncio.to_thread(sync_tencent_doc_safe, "scheduled")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[调度器] 腾讯文档轮询同步异常: {e}", exc_info=True)
 
     async def _do_scheduled_sync(
         self,

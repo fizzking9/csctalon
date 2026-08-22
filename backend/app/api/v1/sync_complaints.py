@@ -13,7 +13,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 
-from app.api.deps import CurrentUser, DBSession
+from app.api.deps import AdminUser, CurrentUser, DBSession
 from app.core.config import settings
 from app.models.complaint_sync_log import ComplaintSyncLog
 from app.schemas.common import PageBase, R
@@ -73,6 +73,11 @@ def push_complaints(
         if not settings.WORKBUDDY_SYNC_TOKEN:
             raise HTTPException(status_code=503, detail="WORKBUDDY_SYNC_TOKEN 未配置, 同步接口未启用")
         raise HTTPException(status_code=401, detail="同步 token 无效")
+    # 采集方式总开关: 被动推送关闭则拒绝接收
+    from app.services.ingest_mode_service import is_ingest_mode_enabled
+
+    if not is_ingest_mode_enabled(db, "push"):
+        raise HTTPException(status_code=503, detail="被动推送采集方式已关闭(可在 数据采集→投诉接入→采集方式 中开启)")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
     source_file = (payload.get("source_file") or "").strip() or None
@@ -84,6 +89,33 @@ def push_complaints(
         logger.exception(f"投诉推送失败: {e}")
         raise HTTPException(status_code=500, detail=f"同步失败: {e}") from e
     return R(data=stats)
+
+
+@router.get("/config", response_model=R, summary="投诉推送接入配置状态(内部)")
+def sync_push_config(db: DBSession, _: CurrentUser):
+    """被动推送模式(WorkBuddy/外部工具)接入状态: 是否已配置 token"""
+    return R(data={"token_configured": bool(settings.WORKBUDDY_SYNC_TOKEN)})
+
+
+@router.get("/ingest-modes", response_model=R, summary="投诉数据采集方式开关列表")
+def list_ingest_modes(db: DBSession, _: CurrentUser):
+    """三种采集方式(主动监测/被动推送/文件导入)的开启状态"""
+    from app.services.ingest_mode_service import list_ingest_modes as _list
+
+    return R(data=_list(db))
+
+
+@router.post("/ingest-modes", response_model=R, summary="设置投诉数据采集方式开关")
+def set_ingest_mode(payload: dict, db: DBSession, _: AdminUser):
+    """body: {mode: "monitor"|"push"|"import", enabled: bool}"""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+    from app.services.ingest_mode_service import update_ingest_mode
+
+    ok = update_ingest_mode(db, payload.get("mode", ""), bool(payload.get("enabled")))
+    if not ok:
+        raise HTTPException(status_code=400, detail="mode 非法, 允许值: monitor/push/import")
+    return R(data={"ok": True})
 
 
 @router.get("/logs", response_model=R[PageBase], summary="投诉同步日志列表(内部)")

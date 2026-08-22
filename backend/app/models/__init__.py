@@ -19,10 +19,12 @@ from app.models.data_source import (  # noqa: F401
 )
 from app.models.dept_info_sync import DeptInfoSync  # noqa: F401
 from app.models.device import Device, DeviceTag, DeviceTagBatch, DeviceTagBinding, device_tag_rel  # noqa: F401
+from app.models.doc_sync_config import DocSyncConfig  # noqa: F401
 from app.models.device_combo import DeviceCombo  # noqa: F401
 from app.models.expense import ExpenseInvoice, Reimbursement, ReimbursementItem  # noqa: F401
 from app.models.external_complaint import ExternalComplaint  # noqa: F401
 from app.models.incident import Incident, IncidentFollowup  # noqa: F401
+from app.models.ingest_mode_config import IngestModeConfig  # noqa: F401
 from app.models.kb_article import KbArticle  # noqa: F401
 from app.models.measure import Measure  # noqa: F401
 from app.models.metric import MetricDailySnapshot, MetricRegistry, MetricThreshold  # noqa: F401
@@ -86,6 +88,7 @@ __all__ = [
     "DeviceTag",
     "DeviceTagBatch",
     "DeviceTagBinding",
+    "DocSyncConfig",
     "ExpenseInvoice",
     "ExternalComplaint",
     "Group",
@@ -93,6 +96,7 @@ __all__ = [
     "PersonGroupMembership",
     "Incident",
     "IncidentFollowup",
+    "IngestModeConfig",
     "KbArticle",
     "Measure",
     "Merchant",
