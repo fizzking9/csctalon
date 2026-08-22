@@ -10,6 +10,9 @@
       <el-tab-pane label="文件上传" name="upload">
         <Upload />
       </el-tab-pane>
+      <el-tab-pane v-if="isAdmin" label="投诉接入" name="doc-sync">
+        <ComplaintIngest />
+      </el-tab-pane>
       <el-tab-pane label="采集记录" name="records">
         <Records :embedded="true" />
       </el-tab-pane>
@@ -28,6 +31,7 @@ import Upload from './Upload.vue'
 import SyncDashboard from './SyncDashboard.vue'
 import Browser from './Browser.vue'
 import Records from './Records.vue'
+import ComplaintIngest from './ComplaintIngest.vue'
 import DataSources from '@/views/system/DataSources.vue'
 
 const route = useRoute()
@@ -35,7 +39,7 @@ const router = useRouter()
 const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.isAdmin)
 
-const ALL_TABS = ['browser', 'sync', 'upload', 'records', 'data-sources']
+const ALL_TABS = ['browser', 'sync', 'upload', 'doc-sync', 'records', 'data-sources']
 const PUBLIC_TABS = ['browser', 'sync', 'upload', 'records']
 
 function resolveInitialTab() {
@@ -50,7 +54,7 @@ function resolveInitialTab() {
     return 'sync'
   }
   if (want && ALL_TABS.includes(want)) {
-    if (!isAdmin.value && want === 'data-sources') return 'sync'
+    if (!isAdmin.value && (want === 'data-sources' || want === 'doc-sync')) return 'sync'
     return want
   }
   // ?ingest=fetch 旧兼容 → 新统一入口
