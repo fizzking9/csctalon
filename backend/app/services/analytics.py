@@ -1885,6 +1885,10 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
         wi_bucket[key].append(w)
     for k in wi_bucket:
         wi_bucket[k].sort(key=lambda x: x.op_time or datetime.min)
+    # 已匹配的入钱包记录 id 集合: 不能用对象属性打标记(w._used),
+    # 否则同一 Session 内重复调用本函数时, SQLAlchemy identity map 会返回
+    # 同一批对象实例, 残留的 _used=True 导致第二次调用 D2 匹配率掉到 0%。
+    used_wi_ids: set[int] = set()
 
     rows: list[dict[str, Any]] = []
     for r in all_rf:
@@ -1930,14 +1934,14 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
             key2 = ((best_wd.account_id or ""), "", amt)
             for cand in (key, key2):
                 for w in wi_bucket.get(cand, []):
-                    if getattr(w, "_used", False):
+                    if w.id in used_wi_ids:
                         continue
                     if (w.op_time or datetime.min) < d1:
                         continue
                     if w.op_time > (d_out or datetime.max):
                         continue
                     d2 = w.op_time
-                    w._used = True  # type: ignore[attr-defined]
+                    used_wi_ids.add(w.id)
                     break
                 if d2:
                     break
@@ -2000,6 +2004,48 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
             "withdraw_id": withdraw_id,
             "withdraw_remark": withdraw_remark,
         })
+
+    # 4. D 路: 手动退款 (manual_refunds, is_refunded='是')
+    #    客服在商户号后台手动操作的退款登记台账, 时效 = 登记时间(register_time) → 实际退款操作时间(op_time)
+    all_mr = list(db.execute(
+        select(ManualRefund).where(ManualRefund.is_refunded == "是")
+    ).scalars().all())
+    for mr in all_mr:
+        d1 = _naive(mr.register_time)
+        d_out = _naive(mr.op_time) or d1
+        if not d1 or not d_out:
+            continue
+        # 时间筛选: 与 A/B 一致, 按实际出款时刻 (op_time) 落在窗口
+        if start and d_out < start:
+            continue
+        if end and d_out > end:
+            continue
+        m_amt = round(float(mr.refund_amount or 0), 2)
+        op = (mr.refund_operator or "").strip() or (mr.registrant or "").strip() or "未填写"
+        rows.append({
+            "path": "D",
+            "refund_no": f"MR{mr.id}",
+            "platform_order_no": (mr.order_no or "").strip() or "",
+            "device_sn": (mr.device_sn or "").strip() or None,
+            "account_id": "",
+            "refund_method": "手动退款",
+            "refund_reason": "手动商户号操作",
+            "operator": op,
+            "auditor": "",
+            "status": (mr.is_refunded or "").strip() or "",
+            "package_name": "",
+            "merchant_name": (mr.merchant_id or "").strip() or "",
+            "refund_amount": m_amt,
+            "actual_amount": m_amt,
+            "d1_refund_created": d1.isoformat() if mr.register_time else None,
+            "d2_wallet_in": None,
+            "d4_actual_cashout": d_out.isoformat() if d_out else None,
+            "days_1_4": _days(d_out, d1),
+            "days_1_2": None,
+            "days_2_4": None,
+            "withdraw_id": None,
+            "withdraw_remark": "",
+        })
     return rows
 
 
@@ -2008,13 +2054,19 @@ def _pct(v: float, tot: float) -> float:
 
 
 def refund_withdrawal_overview(db: Session, start: str | None = None, end: str | None = None) -> dict[str, Any]:
-    """看板顶部 KPI 汇总卡片 + 路径对比 + 到账率分档 (窗口按实际出款D4统计)。"""
+    """看板顶部 KPI 汇总卡片 + 路径对比 + 到账率分档 (窗口按实际出款D4统计)。
+
+    覆盖三路有时效的退款路径:
+      A 钱包提现(转入提现账户→用户提现) / B 直接线上退款 / D 手动退款(商户号后台手动操作)
+    """
     s = datetime.fromisoformat(start) if start else None
     e = datetime.fromisoformat(end) if end else None
     rows = _build_chain_rows(db, s, e)
 
     a = [r for r in rows if r["path"] == "A"]
     b = [r for r in rows if r["path"] == "B"]
+    d = [r for r in rows if r["path"] == "D"]
+    abd = a + b + d
     ab = a + b
 
     def _arr(field: str, rs):
@@ -2061,7 +2113,9 @@ def refund_withdrawal_overview(db: Session, start: str | None = None, end: str |
 
     a_metrics = _metrics(a)
     b_metrics = _metrics(b)
+    d_metrics = _metrics(d)
     ab_metrics = _metrics(ab)
+    abd_metrics = _metrics(abd)
     # A 钱包路径两个子阶段耗时: D1→D2 = 工单到入钱包速度; D2→D4 = 钱躺在钱包里的时长
     a_d12 = [r["days_1_2"] for r in a if r["days_1_2"] is not None]
     a_d24 = [r["days_2_4"] for r in a if r["days_2_4"] is not None]
@@ -2070,34 +2124,44 @@ def refund_withdrawal_overview(db: Session, start: str | None = None, end: str |
         a_metrics["median_days_1_2"] = round(sorted(a_d12)[len(a_d12) // 2], 3) if a_d12 else 0.0
         a_metrics["avg_days_2_4"] = round(sum(a_d24) / len(a_d24), 3) if a_d24 else 0.0
         a_metrics["median_days_2_4"] = round(sorted(a_d24)[len(a_d24) // 2], 3) if a_d24 else 0.0
-    # 本窗口内实际出款 两条流结构汇总 (用中文命名, 直接供前端顶部醒目三张KPI卡展示)
+    # 本窗口内实际出款 三路流结构汇总 (用中文命名, 直接供前端顶部醒目KPI卡展示)
     split = {
-        "total_count": len(ab),
-        "total_amount": round((ab_metrics or {}).get("amount", 0.0) or 0.0, 2),
+        "total_count": len(abd),
+        "total_amount": round((abd_metrics or {}).get("amount", 0.0) or 0.0, 2),
         # B 流: 本窗口内直接线上退款(当天发起当天退, 或历史发起今天才线上完成)
         "direct_refund": {
             "count": (b_metrics or {}).get("count", 0) or 0,
             "amount": round((b_metrics or {}).get("amount", 0.0) or 0.0, 2),
-            "count_ratio": _pct((b_metrics or {}).get("count", 0) or 0, len(ab)),
+            "count_ratio": _pct((b_metrics or {}).get("count", 0) or 0, len(abd)),
         },
         # A 流: 之前已经进了钱包, 本窗口内才被用户提现拿走 (相当于"历史沉淀今天才真正出款")
         "wallet_withdrawal": {
             "count": (a_metrics or {}).get("count", 0) or 0,
             "amount": round((a_metrics or {}).get("amount", 0.0) or 0.0, 2),
-            "count_ratio": _pct((a_metrics or {}).get("count", 0) or 0, len(ab)),
+            "count_ratio": _pct((a_metrics or {}).get("count", 0) or 0, len(abd)),
             # A 流内部两个阶段, 用于解释这个"拖延效应"
             "avg_days_1_2": a_metrics.get("avg_days_1_2", 0.0),
             "avg_days_2_4": a_metrics.get("avg_days_2_4", 0.0),
+        },
+        # D 流: 客服在商户号后台手动操作的退款登记台账, 时效 = 登记→实际退款操作
+        "manual_refund": {
+            "count": (d_metrics or {}).get("count", 0) or 0,
+            "amount": round((d_metrics or {}).get("amount", 0.0) or 0.0, 2),
+            "count_ratio": _pct((d_metrics or {}).get("count", 0) or 0, len(abd)),
+            "avg_days": (d_metrics or {}).get("avg_days", 0.0) or 0.0,
+            "median_days": (d_metrics or {}).get("median_days") or 0.0,
         },
     }
 
     return {
         "scope": {"start": start, "end": end, "rows_total": len(rows), "filter_on": "D4_actual_cashout"},
-        "cashout_split": split,  # 顶部三条流结构看板 (本窗口实际出款 = 直接线上退款 + 钱包内历史款今日提现)
+        "cashout_split": split,  # 顶部三路流结构看板 (本窗口实际出款 = 直接线上退款 + 钱包提现 + 手动退款)
         "paths": {
             "A_wallet": a_metrics,
             "B_direct": b_metrics,
+            "D_manual": d_metrics,
             "AB_merged": ab_metrics,
+            "ABD_merged": abd_metrics,
         },
         "wallet_sleep": {  # 全局沉淀口径, 不随窗口变化 (总览指标)
             "a_total_refund_count": a_total_cnt,
@@ -2110,7 +2174,7 @@ def refund_withdrawal_overview(db: Session, start: str | None = None, end: str |
 
 
 def refund_withdrawal_time_distribution(db: Session, start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
-    """两条路径各自的耗时分桶 (用于 ECharts 堆叠柱状图)。"""
+    """三路路径各自的耗时分桶 (用于 ECharts 堆叠柱状图)。"""
     s = datetime.fromisoformat(start) if start else None
     e = datetime.fromisoformat(end) if end else None
     rows = _build_chain_rows(db, s, e)
@@ -2119,7 +2183,7 @@ def refund_withdrawal_time_distribution(db: Session, start: str | None = None, e
         if lbl == "<0异常":
             continue
         row: dict[str, Any] = {"bin": lbl}
-        for path, pname in (("A", "wallet_count",), ("B", "direct_count",)):
+        for path, pname in (("A", "wallet_count",), ("B", "direct_count",), ("D", "manual_count",)):
             rs = [r for r in rows if r["path"] == path and r["days_1_4"] is not None]
             c = sum(1 for r in rs if _bin_label(r["days_1_4"]) == lbl)
             a = round(sum(r["refund_amount"] for r in rs if _bin_label(r["days_1_4"]) == lbl), 2)
@@ -2131,10 +2195,10 @@ def refund_withdrawal_time_distribution(db: Session, start: str | None = None, e
 
 
 def refund_withdrawal_dimensions(db: Session, start: str | None = None, end: str | None = None, topn: int = 20) -> dict[str, Any]:
-    """聚合维度: 按处理人 / 退款原因 / 退款方式, 返回 Top N。"""
+    """聚合维度: 按处理人 / 退款原因 / 退款方式, 返回 Top N (三路 A/B/D)。"""
     s = datetime.fromisoformat(start) if start else None
     e = datetime.fromisoformat(end) if end else None
-    rows = [r for r in _build_chain_rows(db, s, e) if r["path"] in ("A", "B")]
+    rows = [r for r in _build_chain_rows(db, s, e) if r["path"] in ("A", "B", "D")]
 
     def _group(key):
         g: dict[str, list] = {}
@@ -2171,14 +2235,16 @@ def refund_withdrawal_dimensions(db: Session, start: str | None = None, end: str
 def refund_withdrawal_detail(db: Session, start: str | None = None, end: str | None = None,
                               sort: str = "days_desc", page: int = 1, page_size: int = 50,
                               slow_only: bool = False, path: str = "ALL") -> dict[str, Any]:
-    """明细列表: 支持分页、排序、路径筛选、慢单筛选。"""
+    """明细列表: 支持分页、排序、路径筛选(ALL/ABD/AB/A/B/D)、慢单筛选。"""
     s = datetime.fromisoformat(start) if start else None
     e = datetime.fromisoformat(end) if end else None
     rows = _build_chain_rows(db, s, e)
-    if path in ("A", "B"):
+    if path in ("A", "B", "D"):
         rows = [r for r in rows if r["path"] == path]
     elif path == "AB":
         rows = [r for r in rows if r["path"] in ("A", "B")]
+    elif path == "ABD":
+        rows = [r for r in rows if r["path"] in ("A", "B", "D")]
     rows = [r for r in rows if r["days_1_4"] is not None]
     if slow_only:
         rows = [r for r in rows if (r["days_1_4"] or 0) > 3]
@@ -2223,12 +2289,13 @@ def refund_withdrawal_detail(db: Session, start: str | None = None, end: str | N
 
 
 def refund_withdrawal_daily_split(db: Session, start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
-    """按**实际出款日 D4** 逐天拆分两条流: 直接线上退款出款 vs 钱包沉淀后提现出款.
+    """按**实际出款日 D4** 逐天拆分三条流: 直接线上退款出款 / 钱包沉淀后提现出款 / 手动退款出款.
 
-    用于 ECharts 按日堆叠柱状图: 让用户一眼看到"每天这 N 笔实际退款里, 多少是今天直退的, 多少是之前进了钱包今天才被提现的".
+    用于 ECharts 按日堆叠柱状图: 让用户一眼看到"每天这 N 笔实际退款里, 多少是今天直退的, 多少是之前进了钱包今天才被提现的, 多少是手动商户号操作的".
     返回数组按 date 升序, 每天一行:
-      date, direct_count/amount (B直退), wallet_count/amount (A钱包提现), total_count/amount
-      同时 A 流附带 avg_days_1_2 (工单→入钱包) / avg_days_2_4 (入钱包→用户提现拖延) 两个子阶段日均值.
+      date, direct_count/amount (B直退), wallet_count/amount (A钱包提现), manual_count/amount (D手动退款), total_count/amount
+      同时 A 流附带 avg_days_1_2 (工单→入钱包) / avg_days_2_4 (入钱包→用户提现拖延) 两个子阶段日均值,
+      D 流附带 manual_avg_days (登记→实际退款时效日均值).
     """
     s = datetime.fromisoformat(start) if start else None
     e = datetime.fromisoformat(end) if end else None
@@ -2246,8 +2313,10 @@ def refund_withdrawal_daily_split(db: Session, start: str | None = None, end: st
                 "date": day,
                 "direct_count": 0, "direct_amount": 0.0,
                 "wallet_count": 0, "wallet_amount": 0.0,
+                "manual_count": 0, "manual_amount": 0.0,
                 "a_d12_sum": 0.0, "a_d12_n": 0,
                 "a_d24_sum": 0.0, "a_d24_n": 0,
+                "d14_sum": 0.0, "d14_n": 0,
             }
         bucket = g[day]
         amt = r["refund_amount"] or 0.0
@@ -2263,22 +2332,32 @@ def refund_withdrawal_daily_split(db: Session, start: str | None = None, end: st
             if r.get("days_2_4") is not None:
                 bucket["a_d24_sum"] += r["days_2_4"]
                 bucket["a_d24_n"] += 1
+        elif r["path"] == "D":
+            bucket["manual_count"] += 1
+            bucket["manual_amount"] += amt
+            if r.get("days_1_4") is not None:
+                bucket["d14_sum"] += r["days_1_4"]
+                bucket["d14_n"] += 1
     out = []
     for day in sorted(g.keys()):
         b = g[day]
-        tc = b["direct_count"] + b["wallet_count"]
-        ta = round(b["direct_amount"] + b["wallet_amount"], 2)
+        tc = b["direct_count"] + b["wallet_count"] + b["manual_count"]
+        ta = round(b["direct_amount"] + b["wallet_amount"] + b["manual_amount"], 2)
         out.append({
             "date": day,
             "direct_count": b["direct_count"],
             "direct_amount": round(b["direct_amount"], 2),
             "wallet_count": b["wallet_count"],
             "wallet_amount": round(b["wallet_amount"], 2),
+            "manual_count": b["manual_count"],
+            "manual_amount": round(b["manual_amount"], 2),
             "total_count": tc,
             "total_amount": ta,
             # A 流两个子阶段日均值 (帮助定位到底是入钱包慢还是用户提现慢)
             "wallet_avg_days_1_2": round(b["a_d12_sum"] / b["a_d12_n"], 3) if b["a_d12_n"] else None,
             "wallet_avg_days_2_4": round(b["a_d24_sum"] / b["a_d24_n"], 3) if b["a_d24_n"] else None,
+            # D 流时效日均值 (登记→实际退款)
+            "manual_avg_days": round(b["d14_sum"] / b["d14_n"], 3) if b["d14_n"] else None,
         })
     return out
 

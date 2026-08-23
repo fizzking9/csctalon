@@ -10,9 +10,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 from app.models.base import TimestampMixin
+from app.models.quality_mixin import QualityMixin
 
 
-class ServiceTicket(TimestampMixin, Base):
+class ServiceTicket(QualityMixin, TimestampMixin, Base):
     """服务退款工单"""
 
     __tablename__ = "service_tickets"

@@ -123,7 +123,6 @@
           <el-menu-item index="/analytics/views">视图清单</el-menu-item>
           <el-menu-item index="/dashboards/designer">看板配置</el-menu-item>
           <el-menu-item index="/system/classification-rules">分类规则</el-menu-item>
-          <el-menu-item index="/system/data-quality">数据质量</el-menu-item>
           <el-menu-item index="/system/operation-logs">操作日志</el-menu-item>
         </el-sub-menu>
       </el-menu>

@@ -13,8 +13,11 @@
       <el-tab-pane v-if="isAdmin" label="投诉接入" name="doc-sync">
         <ComplaintIngest />
       </el-tab-pane>
-      <el-tab-pane label="采集记录" name="records">
-        <Records :embedded="true" />
+      <el-tab-pane label="采集日志" name="logs">
+        <CollectionLogs :embedded="true" />
+      </el-tab-pane>
+      <el-tab-pane v-if="isAdmin" label="数据质量" name="data-quality">
+        <DataQuality />
       </el-tab-pane>
       <el-tab-pane v-if="isAdmin" label="数据源管理" name="data-sources">
         <DataSources :embedded="true" />
@@ -30,7 +33,8 @@ import { useAuthStore } from '@/stores/auth'
 import Upload from './Upload.vue'
 import SyncDashboard from './SyncDashboard.vue'
 import Browser from './Browser.vue'
-import Records from './Records.vue'
+import CollectionLogs from './CollectionLogs.vue'
+import DataQuality from '@/views/management/DataQuality.vue'
 import ComplaintIngest from './ComplaintIngest.vue'
 import DataSources from '@/views/system/DataSources.vue'
 
@@ -39,13 +43,15 @@ const router = useRouter()
 const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.isAdmin)
 
-const ALL_TABS = ['browser', 'sync', 'upload', 'doc-sync', 'records', 'data-sources']
-const PUBLIC_TABS = ['browser', 'sync', 'upload', 'records']
+const ALL_TABS = ['browser', 'sync', 'upload', 'doc-sync', 'logs', 'data-quality', 'data-sources']
+const PUBLIC_TABS = ['browser', 'sync', 'upload', 'logs']
 
 function resolveInitialTab() {
   const want = route.query.tab
   // 旧 tab 名兼容: 原来的 fetch(BMS同步) / scrm(SCRM同步) / sync-settings(旧同步设置) 都重定向到新的统一入口 sync
   if (want === 'fetch' || want === 'scrm') return 'sync'
+  // 旧采集记录 → 重定向到新的统一采集日志
+  if (want === 'records') return 'logs'
   // 旧同步设置 Tab → 重定向到 sync Tab,并展开「抓取模式 & 凭证设置」手风琴面板
   if (want === 'sync-settings') {
     router.replace({
