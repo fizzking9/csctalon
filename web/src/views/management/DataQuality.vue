@@ -85,8 +85,9 @@
         </el-dialog>
       </el-tab-pane>
 
-      <el-tab-pane label="手动退款质量审核" name="manual">
-        <ManualRefundQuality />
+      <!-- 通用数据质量审核(L3): 各业务表单按 L2 导入自动校验结果人工确认/修正 -->
+      <el-tab-pane v-for="t in auditTables" :key="t.code" :label="t.label" :name="t.code">
+        <QualityAudit :table="t.code" />
       </el-tab-pane>
     </el-tabs>
   </div>
@@ -98,7 +99,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { listRules, createRule, updateRule, deleteRule } from '@/api/dataQuality'
-import ManualRefundQuality from './ManualRefundQuality.vue'
+import QualityAudit from './QualityAudit.vue'
 
 const authStore = useAuthStore()
 const activeTab = ref('rules')
@@ -107,6 +108,15 @@ const loading = ref(false)
 const submitting = ref(false)
 const editVisible = ref(false)
 const editForm = reactive({ id: null, name: '', target: '', condition: '', description: '', enabled: true })
+
+// 通用质量审核支持的业务表单
+const auditTables = [
+  { code: 'manual_refund', label: '手动退款' },
+  { code: 'refund', label: '退费单' },
+  { code: 'ticket', label: '服务工单' },
+  { code: 'wallet', label: '钱包流水' },
+  { code: 'shanmao', label: '闪猫退款' },
+]
 
 async function loadRules() {
   loading.value = true

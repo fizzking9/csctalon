@@ -150,40 +150,46 @@ def reception_group(db: DBSession, _: CurrentUser, start: str | None = None, end
 # ---------- 看板6: 退款-提现全链路看板 (合并 SN对账 + 发起退款→实际到账时效分析) ----------
 
 
-@router.get("/refund-withdrawal/overview", response_model=R, summary="提现全链路看板-顶部KPI总览(路径对比+到账率)")
+@router.get("/refund-withdrawal/overview", response_model=R, summary="提现全链路看板-顶部KPI总览(三路对比:直退/钱包提现/手动退款+到账率)")
 def rw_overview(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.refund_withdrawal_overview(db, start, end))
+    key = f"rw:overview:{start}:{end}"
+    return R(data=cached_call(key, 60, A.refund_withdrawal_overview, db, start, end))
 
 
-@router.get("/refund-withdrawal/time-distribution", response_model=R, summary="提现全链路看板-两条路径耗时分桶(用于柱状图)")
+@router.get("/refund-withdrawal/time-distribution", response_model=R, summary="提现全链路看板-三路耗时分桶(用于柱状图)")
 def rw_time_dist(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.refund_withdrawal_time_distribution(db, start, end))
+    key = f"rw:timedist:{start}:{end}"
+    return R(data=cached_call(key, 60, A.refund_withdrawal_time_distribution, db, start, end))
 
 
 @router.get("/refund-withdrawal/dimensions", response_model=R, summary="提现全链路看板-按处理人/原因/方式TopN聚合")
 def rw_dims(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None,
             topn: int = Query(20, ge=1, le=100)):
-    return R(data=A.refund_withdrawal_dimensions(db, start, end, topn))
+    key = f"rw:dims:{start}:{end}:{topn}"
+    return R(data=cached_call(key, 60, A.refund_withdrawal_dimensions, db, start, end, topn))
 
 
 @router.get("/refund-withdrawal/detail", response_model=R, summary="提现全链路看板-明细列表(支持排序/慢单筛选/分页)")
 def rw_detail(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None,
               sort: str = Query("days_desc", pattern=r"^(days_(desc|asc)|amount_desc|d1_desc)$"),
               page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500),
-              slow_only: bool = False, path: str = Query("ALL", pattern=r"^(ALL|AB|A|B|X)$")):
-    return R(data=A.refund_withdrawal_detail(db, start, end, sort, page, page_size, slow_only, path))
+              slow_only: bool = False, path: str = Query("ALL", pattern=r"^(ALL|ABD|AB|A|B|D)$")):
+    key = f"rw:detail:{start}:{end}:{sort}:{page}:{page_size}:{int(slow_only)}:{path}"
+    return R(data=cached_call(key, 60, A.refund_withdrawal_detail, db, start, end, sort, page, page_size, slow_only, path))
 
 
-@router.get("/refund-withdrawal/daily-split", response_model=R, summary="提现全链路看板-按实际出款日拆分两条流(直退vs钱包提现)堆叠图")
+@router.get("/refund-withdrawal/daily-split", response_model=R, summary="提现全链路看板-按实际出款日拆分三路(直退/钱包提现/手动退款)堆叠图")
 def rw_daily_split(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.refund_withdrawal_daily_split(db, start, end))
+    key = f"rw:dailysplit:{start}:{end}"
+    return R(data=cached_call(key, 60, A.refund_withdrawal_daily_split, db, start, end))
 
 
 @router.get("/refund-withdrawal/sleeping", response_model=R, summary="提现时效-钱包沉淀清单(转入未提现,分页)")
 def rw_sleeping(db: DBSession, _: CurrentUser,
                 start: str | None = None, end: str | None = None,
                 page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500)):
-    return R(data=A.refund_withdrawal_sleeping(db, start, end, page=page, page_size=page_size))
+    key = f"rw:sleeping:{start}:{end}:{page}:{page_size}"
+    return R(data=cached_call(key, 60, A.refund_withdrawal_sleeping, db, start, end, page=page, page_size=page_size))
 
 
 # ---------- 看板7: 今日看板 (单日切面 + 实时节奏) ----------

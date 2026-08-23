@@ -364,9 +364,13 @@ const routes = [
       },
       {
         path: 'system/data-quality',
+        redirect: '/data/ingest?tab=data-quality',
+      },
+      {
+        path: 'system/data-quality',
         name: 'SystemDataQuality',
         component: () => import('@/views/management/DataQuality.vue'),
-        meta: { title: '数据质量', icon: 'CircleCheck', admin: true },
+        meta: { title: '数据质量', icon: 'CircleCheck', admin: true, hidden: true },
       },
       {
         path: 'system/operation-logs',

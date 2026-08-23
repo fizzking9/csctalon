@@ -26,7 +26,7 @@
 
     <!-- KPI 条 -->
     <section class="block-card mb-16">
-      <div class="block-head"><span class="block-title">钱包沉淀与提现时效</span><span class="block-hint">判断: 沉淀高=用户不提现(资金滞留风险) · 拖延天久=提现体验/催促缺失</span></div>
+      <div class="block-head"><span class="block-title">钱包沉淀与退款时效</span><span class="block-hint">三路有时效的退款: 直接线上退款 · 钱包提现 · 手动商户号操作 · 沉淀高=用户不提现(资金滞留风险)</span></div>
       <el-row :gutter="12">
         <el-col :xs="12" :sm="8" :md="4">
           <div class="kpi-card" style="background:#fef2f2">
@@ -44,16 +44,23 @@
         </el-col>
         <el-col :xs="12" :sm="8" :md="4">
           <div class="kpi-card" style="background:#fff7ed">
-            <div class="kpi-label" style="color:#ea580c">入钱包→提现(均)</div>
+            <div class="kpi-label" style="color:#ea580c">钱包提现时效(均)</div>
             <div class="kpi-value">{{ fmtD(timeliness.avg) }}<span class="unit">天</span></div>
-            <div class="kpi-sub">中位 {{ fmtD(timeliness.median) }} 天</div>
+            <div class="kpi-sub">入钱包→提现, 中位 {{ fmtD(timeliness.median) }} 天</div>
           </div>
         </el-col>
         <el-col :xs="12" :sm="8" :md="4">
-          <div class="kpi-card" style="background:#fff7ed">
-            <div class="kpi-label" style="color:#ea580c">发起→入钱包(均)</div>
-            <div class="kpi-value">{{ fmtD(timeliness.avg12) }}<span class="unit">天</span></div>
-            <div class="kpi-sub">工单到入钱包速度</div>
+          <div class="kpi-card" style="background:#eff6ff">
+            <div class="kpi-label" style="color:#2563eb">直接退款时效(均)</div>
+            <div class="kpi-value">{{ fmtD(timeliness.directAvg) }}<span class="unit">天</span></div>
+            <div class="kpi-sub">线上直退, 发起→实际到账</div>
+          </div>
+        </el-col>
+        <el-col :xs="12" :sm="8" :md="4">
+          <div class="kpi-card" style="background:#f5f3ff">
+            <div class="kpi-label" style="color:#7c3aed">手动退款时效(均)</div>
+            <div class="kpi-value">{{ fmtD(timeliness.manualAvg) }}<span class="unit">天</span></div>
+            <div class="kpi-sub">商户号手动操作, 登记→实际退款</div>
           </div>
         </el-col>
         <el-col :xs="12" :sm="8" :md="4">
@@ -64,23 +71,23 @@
           </div>
         </el-col>
         <el-col :xs="12" :sm="8" :md="4">
-          <div class="kpi-card" style="background:#eff6ff">
-            <div class="kpi-label" style="color:#2563eb">区间提现笔数</div>
+          <div class="kpi-card" style="background:#f8fafc">
+            <div class="kpi-label" style="color:#475569">区间出款笔数</div>
             <div class="kpi-value">{{ timeliness.count }}<span class="unit">笔</span></div>
-            <div class="kpi-sub">¥{{ formatMoney(timeliness.amount) }}</div>
+            <div class="kpi-sub">三路合计 ¥{{ formatMoney(timeliness.amount) }}</div>
           </div>
         </el-col>
       </el-row>
     </section>
 
-    <!-- 图1: 提现拖延趋势 -->
+    <!-- 图1: 三路出款趋势 -->
     <section class="block-card mb-16">
       <div class="block-head">
-        <span class="block-title">提现拖延趋势</span>
-        <span class="block-hint">柱=提现笔数(钱包流) · 线=平均拖延天数(入钱包→用户提现)</span>
+        <span class="block-title">三路实际出款趋势</span>
+        <span class="block-hint">柱=每日实际出款笔数(直退/钱包提现/手动退款堆叠) · 线=钱包平均拖延天数(入钱包→用户提现)</span>
       </div>
       <BaseChart v-if="trendOption.series?.length" :option="trendOption" height="300px" />
-      <el-empty v-else description="所选区间无钱包提现数据" :image-size="60" />
+      <el-empty v-else description="所选区间无出款数据" :image-size="60" />
     </section>
 
     <!-- 图2: 沉淀与清理 -->
@@ -182,9 +189,11 @@ const sleep = computed(() => {
 
 const timeliness = computed(() => {
   const a = overview.value?.paths?.A_wallet || {}
+  const b = overview.value?.paths?.B_direct || {}
+  const m = overview.value?.cashout_split?.manual_refund || {}
   const d24 = dailySplit.value || []
-  const totalCount = d24.reduce((s, r) => s + (r.wallet_count || 0), 0)
-  const totalAmount = d24.reduce((s, r) => s + (r.wallet_amount || 0), 0)
+  const totalCount = d24.reduce((s, r) => s + (r.total_count || 0), 0)
+  const totalAmount = d24.reduce((s, r) => s + (r.total_amount || 0), 0)
   // ≤1天提现占比: 从日粒度数据按 wallet_count 加权估算
   let le1 = 0
   const weights = []
@@ -196,22 +205,24 @@ const timeliness = computed(() => {
   if (weights.length) {
     const totalW = weights.reduce((s, x) => s + x.w, 0)
     const avg = weights.reduce((s, x) => s + x.v * x.w, 0) / totalW
-    le1 = avg <= 1 ? 100 : Math.max(0, Math.round((1 / avg) * 100))
+    // avg=0 也视为当天提现(占比100%), 避免 1/0 → Infinity 显示异常
+    le1 = avg > 1 ? Math.max(0, Math.round(100 / avg)) : 100
   }
   return {
     avg: a.avg_days_2_4 ?? 0, median: a.median_days_2_4 ?? 0,
-    avg12: a.avg_days_1_2 ?? 0, pct1: le1,
+    directAvg: b.avg_days ?? 0, manualAvg: m.avg_days ?? 0,
+    pct1: le1,
     count: totalCount, amount: totalAmount,
   }
 })
 
-// ---- 图1: 提现拖延趋势 (按日/周/月聚合) ----
+// ---- 图1: 三路实际出款趋势 (按日/周/月聚合) ----
 const trendOption = computed(() => {
   const agg = aggregateTrend()
   if (!agg.labels.length) return {}
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-    legend: { data: ['提现笔数', '平均拖延(天)'], top: 0, textStyle: { fontSize: 11 } },
+    legend: { data: ['直退笔数', '钱包提现笔数', '手动退款笔数', '平均拖延(天)'], top: 0, textStyle: { fontSize: 11 } },
     grid: { left: 56, right: 64, bottom: 44, top: 40 },
     xAxis: { type: 'category', data: agg.labels, axisLabel: { fontSize: 11, rotate: agg.labels.length > 12 ? 30 : 0 } },
     yAxis: [
@@ -219,7 +230,9 @@ const trendOption = computed(() => {
       { type: 'value', name: '天数', axisLabel: { fontSize: 11 }, splitLine: { show: false } },
     ],
     series: [
-      { name: '提现笔数', type: 'bar', data: agg.counts, barMaxWidth: 28, itemStyle: { color: '#93c5fd', borderRadius: [4, 4, 0, 0] } },
+      { name: '直退笔数', type: 'bar', stack: 'out', data: agg.directCounts, barMaxWidth: 22, itemStyle: { color: '#93c5fd', borderRadius: [2, 2, 0, 0] } },
+      { name: '钱包提现笔数', type: 'bar', stack: 'out', data: agg.walletCounts, barMaxWidth: 22, itemStyle: { color: '#fbbf24' } },
+      { name: '手动退款笔数', type: 'bar', stack: 'out', data: agg.manualCounts, barMaxWidth: 22, itemStyle: { color: '#c4b5fd', borderRadius: [4, 4, 0, 0] } },
       { name: '平均拖延(天)', type: 'line', yAxisIndex: 1, data: agg.avgDays, smooth: true, symbol: 'circle', symbolSize: 6,
         itemStyle: { color: '#f59e0b' }, lineStyle: { width: 2.5, color: '#f59e0b' } },
     ],
@@ -228,11 +241,13 @@ const trendOption = computed(() => {
 
 function aggregateTrend() {
   const rows = dailySplit.value || []
-  if (!rows.length) return { labels: [], counts: [], avgDays: [] }
+  if (!rows.length) return { labels: [], directCounts: [], walletCounts: [], manualCounts: [], avgDays: [] }
   if (grain.value === 'day') {
     return {
       labels: rows.map(r => r.date.slice(5)),
-      counts: rows.map(r => r.wallet_count || 0),
+      directCounts: rows.map(r => r.direct_count || 0),
+      walletCounts: rows.map(r => r.wallet_count || 0),
+      manualCounts: rows.map(r => r.manual_count || 0),
       avgDays: rows.map(r => (r.wallet_avg_days_2_4 == null ? null : Number(r.wallet_avg_days_2_4).toFixed(1))),
     }
   }
@@ -249,15 +264,19 @@ function aggregateTrend() {
       key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`
       label = `${d.getFullYear()}-${d.getMonth()+1}`
     }
-    if (!groups.has(key)) { groups.set(key, { sum: 0, n: 0, count: 0, label }) }
+    if (!groups.has(key)) { groups.set(key, { sum: 0, n: 0, dc: 0, wc: 0, mc: 0, label }) }
     const g = groups.get(key)
-    g.count += r.wallet_count || 0
+    g.dc += r.direct_count || 0
+    g.wc += r.wallet_count || 0
+    g.mc += r.manual_count || 0
     if (r.wallet_avg_days_2_4 != null) { g.sum += r.wallet_avg_days_2_4 * (r.wallet_count || 0); g.n += (r.wallet_count || 0) }
   })
   const sorted = [...groups.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1)
   return {
     labels: sorted.map(([, g]) => g.label),
-    counts: sorted.map(([, g]) => g.count),
+    directCounts: sorted.map(([, g]) => g.dc),
+    walletCounts: sorted.map(([, g]) => g.wc),
+    manualCounts: sorted.map(([, g]) => g.mc),
     avgDays: sorted.map(([, g]) => (g.n ? (g.sum / g.n).toFixed(1) : null)),
   }
 }

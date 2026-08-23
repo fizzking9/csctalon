@@ -2,13 +2,14 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import agenda, alerts, analysis_views, analytics, auth, channels, complaints, dashboards, data_quality, data_sources, dept_info_syncs, devices, doc_sync, fetch, groups, incidents, invoices, kb_articles, match, measures, metrics, miniapp, notifications, operation_logs, persons, policies, recharges, report_comments, report_templates, reports, schedules, scrm_chat, scrm_staff, specialties, staff_assignments, strategy, sync_complaints, system, tasks, todos, upstream_tickets, uploads, users, wechat, weekly_reports, wide_tables
+from app.api.v1 import agenda, alerts, analysis_views, analytics, auth, channels, collection_logs, complaints, dashboards, data_quality, data_sources, dept_info_syncs, devices, doc_sync, fetch, groups, incidents, invoices, kb_articles, match, measures, metrics, miniapp, notifications, operation_logs, persons, policies, recharges, report_comments, report_templates, reports, schedules, scrm_chat, scrm_staff, specialties, staff_assignments, strategy, sync_complaints, system, tasks, todos, upstream_tickets, uploads, users, wechat, weekly_reports, wide_tables
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
 api_router.include_router(users.router)
 api_router.include_router(uploads.router)
 api_router.include_router(fetch.router)
+api_router.include_router(collection_logs.router)
 api_router.include_router(match.router)
 api_router.include_router(analytics.router)
 api_router.include_router(devices.router)

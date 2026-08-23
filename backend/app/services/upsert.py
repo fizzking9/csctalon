@@ -9,6 +9,7 @@
 import json
 import logging
 import re
+import types
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -16,6 +17,13 @@ import pandas as pd
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
+
+from app.services.quality_check import (
+    check_refund_row,
+    check_shanmao_row,
+    check_ticket_row,
+    check_wallet_row,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -545,7 +553,7 @@ def upsert_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
             # operator / auditor 必须像人名(不能是数字,否则是金额列映射错位)
             operator = _sanitize_name_field(data.get("operator"), idx, result, "退费单-操作人")
             auditor = _sanitize_name_field(data.get("auditor"), idx, result, "退费单-审核人")
-            rows.append({
+            row_dict = {
                 "refund_no": refund_no,
                 "platform_order_no": data.get("platform_order_no"),
                 "third_order_no": data.get("third_order_no"),
@@ -564,7 +572,12 @@ def upsert_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
                 "created_at_raw": _to_datetime(data.get("created_at_raw")),
                 "updated_at_raw": _to_datetime(data.get("updated_at_raw")),
                 "package_price": _to_float(data.get("package_price")),
-            })
+            }
+            # 通用数据质量校验(L2): 时间异常/枚举脏值/金额异常/必填缺失
+            row_dict["quality_status"], row_dict["quality_note"] = check_refund_row(
+                types.SimpleNamespace(**row_dict)
+            )
+            rows.append(row_dict)
             result.total += 1
         except Exception as e:
             result.add_error(idx, f"行解析失败: {e}")
@@ -599,7 +612,7 @@ def upsert_wallet(df: pd.DataFrame, mapping: dict[str, str], db: Session, result
                     {"device_sn": data.get("device_sn"), "remark": (data.get("remark") or "")[:80]},
                 )
                 continue
-            rows.append({
+            row_dict = {
                 "account_id": data.get("account_id"),
                 "wallet_balance": _to_float(data.get("wallet_balance")),
                 "device_sn": data.get("device_sn"),
@@ -608,7 +621,12 @@ def upsert_wallet(df: pd.DataFrame, mapping: dict[str, str], db: Session, result
                 "remark": data.get("remark"),
                 "op_time": op_time,
                 "operator": _sanitize_name_field(data.get("operator"), idx, result, "钱包提现-操作人"),
-            })
+            }
+            # 通用数据质量校验(L2)
+            row_dict["quality_status"], row_dict["quality_note"] = check_wallet_row(
+                types.SimpleNamespace(**row_dict)
+            )
+            rows.append(row_dict)
             result.total += 1
         except Exception as e:
             result.add_error(idx, f"行解析失败: {e}")
@@ -676,7 +694,7 @@ def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
             if not ticket_no:
                 result.add_error(idx, "工单号为空")
                 continue
-            rows.append({
+            row_dict = {
                 "ticket_no": ticket_no,
                 "device_sn": _truncate_str(data.get("device_sn"), 64),
                 "device_type": _truncate_str(data.get("device_type"), 64),
@@ -724,7 +742,12 @@ def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
                     _sanitize_name_field(data.get("last_urge_by"), idx, result, "工单-最后催单人"), 64
                 ),
                 "last_urge_time": _to_datetime(data.get("last_urge_time")),
-            })
+            }
+            # 通用数据质量校验(L2)
+            row_dict["quality_status"], row_dict["quality_note"] = check_ticket_row(
+                types.SimpleNamespace(**row_dict)
+            )
+            rows.append(row_dict)
             result.total += 1
         except Exception as e:
             result.add_error(idx, f"行解析失败: {e}")
@@ -1285,7 +1308,7 @@ def upsert_shanmao_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
             auditor = _sanitize_name_field(data.get("auditor"), idx, result, "闪猫退款-审核人")
             operator = _sanitize_name_field(data.get("operator"), idx, result, "闪猫退款-操作人")
 
-            rows.append({
+            row_dict = {
                 "refund_no": refund_no,
                 "order_no": data.get("order_no"),
                 "phone": data.get("phone"),
@@ -1306,7 +1329,12 @@ def upsert_shanmao_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
                 "refund_time": _to_datetime(data.get("refund_time")),
                 "remark": data.get("remark"),
                 "audit_remark": data.get("audit_remark"),
-            })
+            }
+            # 通用数据质量校验(L2)
+            row_dict["quality_status"], row_dict["quality_note"] = check_shanmao_row(
+                types.SimpleNamespace(**row_dict)
+            )
+            rows.append(row_dict)
             result.total += 1
         except Exception as e:
             result.add_error(idx, f"行解析失败: {e}")

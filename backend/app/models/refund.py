@@ -8,9 +8,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 from app.models.base import TimestampMixin
+from app.models.quality_mixin import QualityMixin
 
 
-class Refund(TimestampMixin, Base):
+class Refund(QualityMixin, TimestampMixin, Base):
     """退费单 - 退费行为记录
 
     关键业务规则:operator 为 sys/system 表示退到会员钱包(非真实现金流出)
