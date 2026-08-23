@@ -5,6 +5,7 @@
   - BMS 主动同步 (BmsSyncLog)
   - SCRM 主动同步 (ScrmSyncLog)
   - 投诉推送/文档同步 (ComplaintSyncLog)
+  - 手动退款推送 (ManualRefundSyncLog)
 
 所有采集过程统一按时间倒序查询，支持按来源/状态/时间范围筛选。
 """
@@ -21,6 +22,7 @@ from sqlalchemy.sql import literal_column
 from app.api.deps import CurrentUser, DBSession
 from app.models.bms_sync_log import BmsSyncLog
 from app.models.complaint_sync_log import ComplaintSyncLog
+from app.models.manual_refund_sync_log import ManualRefundSyncLog
 from app.models.scrm_sync_log import ScrmSyncLog
 from app.models.upload import UploadRecord
 from app.schemas.common import R
@@ -58,7 +60,7 @@ SOURCE_LABELS = {
     "upload": "文件上传",
     "bms": "BMS同步",
     "scrm": "SCRM同步",
-    "push": "投诉推送",
+    "push": "外部推送",
 }
 
 # 数据类型标签映射
@@ -73,6 +75,7 @@ DATA_TYPE_LABELS = {
     "cs_record": "智能助手记录",
     "external_complaint": "外部投诉",
     "card_complaint": "卡商投诉",
+    "manual_refund": "手动退款登记",
     "staff": "人员",
     "scrm_operator": "SCRM客服",
     "scrm_session_private": "SCRM单聊",
@@ -265,7 +268,7 @@ def list_collection_logs(
                 CollectionLogItem(
                     id=r.id,
                     source="push",
-                    source_label="投诉推送",
+                    source_label="外部推送",
                     data_type="complaint",
                     data_type_label="投诉数据",
                     status=r.status,
@@ -274,6 +277,35 @@ def list_collection_logs(
                     inserted_rows=inserted,
                     updated_rows=updated,
                     failed_rows=failed,
+                    trigger_type="push",
+                    trigger_label="推送",
+                    triggered_by=r.sync_source,
+                    filename=r.source_file,
+                    error=r.error,
+                    created_at=_format_dt(r.created_at),
+                    finished_at=_format_dt(r.finished_at),
+                )
+            )
+
+    # ── 5. 手动退款推送 ──
+    if not source or source == "push":
+        stmt = select(ManualRefundSyncLog).order_by(ManualRefundSyncLog.id.desc()).limit(limit)
+        if status:
+            stmt = stmt.where(ManualRefundSyncLog.status == status)
+        for r in db.scalars(stmt):
+            results.append(
+                CollectionLogItem(
+                    id=r.id,
+                    source="push",
+                    source_label="外部推送",
+                    data_type="manual_refund",
+                    data_type_label="手动退款登记",
+                    status=r.status,
+                    status_label=_make_status_label(r.status),
+                    total_rows=r.total,
+                    inserted_rows=r.inserted,
+                    updated_rows=r.updated,
+                    failed_rows=r.failed,
                     trigger_type="push",
                     trigger_label="推送",
                     triggered_by=r.sync_source,
