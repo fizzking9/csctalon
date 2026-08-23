@@ -773,12 +773,12 @@ const kpiCards = computed(() => {
 })
 
 // ========== 图表配置 ==========
-// 四路经营退款路线配色 (A 线上直退 / B 钱包取现 / C 闪猫退款 / D 其他退款)
+// 四路经营退款路线配色 (A 线上直退 / B 钱包取现 / C 闪猫退款 / D 手动退款)
 const REFUND_ROUTES = [
   { key: 'a', label: 'A线上直退', short: 'A直退', color: '#ef4444' },
   { key: 'b', label: 'B钱包取现', short: 'B取现', color: '#f97316' },
   { key: 'c', label: 'C闪猫退款', short: 'C闪猫', color: '#a855f7' },
-  { key: 'd', label: 'D其他退款', short: 'D其他', color: '#94a3b8' },
+  { key: 'd', label: 'D手动退款', short: 'D手动', color: '#94a3b8' },
 ]
 function _rrLabel(r) { return isMobile.value ? (r.short || r.label) : r.label }
 

@@ -20,6 +20,7 @@ from app.models.data_source import DataSource, DataSourceField
 from app.models.device import DeviceTag, DeviceTagBinding
 from app.models.device_combo import DeviceCombo
 from app.models.external_complaint import ExternalComplaint
+from app.models.manual_refund import ManualRefund
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
 from app.models.refund_wide import RefundWide
@@ -103,6 +104,17 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "pk_strategy": "primary_key",
         "sync_source": "bms",
         "category": "现金流",
+    },
+    {
+        "code": "manual_refund",
+        "model": ManualRefund,
+        "name_cn": "手动退款登记",
+        "time_field": "register_time",
+        "sn_field": "device_sn",
+        "pk_field": None,
+        "pk_strategy": "none",
+        "category": "现金流",
+        "description": "客服在商户号后台手动操作的退款登记台账(商户号手机退款处理登记)。是否已退款=是 的行构成 D 路(手动退款)经营出款;未退款行 = 登记蓄水(水位)。",
     },
     {
         "code": "cs_record",
@@ -285,6 +297,17 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("shanmao_refund", "apply_time"): {"role": "time", "name_cn": "申请时间(主时间)"},
     ("shanmao_refund", "audit_time"): {"role": "time", "name_cn": "审核时间"},
     ("shanmao_refund", "refund_time"): {"role": "time", "name_cn": "退款完成时间"},
+    # manual_refund (手动退款登记 D路)
+    ("manual_refund", "register_time"): {"role": "time", "name_cn": "登记日期(主时间)"},
+    ("manual_refund", "device_sn"): {"role": "sn"},
+    ("manual_refund", "order_no"): {"role": "dimension", "is_filterable": True, "name_cn": "订单号"},
+    ("manual_refund", "merchant_id"): {"role": "category", "name_cn": "商户ID"},
+    ("manual_refund", "order_amount"): {"role": "amount", "agg": "sum", "name_cn": "订单金额"},
+    ("manual_refund", "registrant"): {"role": "person", "name_cn": "登记人"},
+    ("manual_refund", "is_refunded"): {"role": "category", "enum": ["是", "否"], "name_cn": "是否已退款"},
+    ("manual_refund", "refund_amount"): {"role": "amount", "agg": "sum"},
+    ("manual_refund", "refund_operator"): {"role": "person", "name_cn": "退款操作人"},
+    ("manual_refund", "op_time"): {"role": "time", "name_cn": "操作时间(实际退款操作时间)"},
     # wallet
     ("wallet", "op_amount"): {"role": "amount", "agg": "sum"},
     ("wallet", "wallet_balance"): {"role": "amount", "agg": "sum"},

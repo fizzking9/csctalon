@@ -29,6 +29,7 @@ from app.models.cs_record import CsRecord
 from app.models.device import Device, DeviceTag, DeviceTagBinding
 from app.models.device_combo import DeviceCombo
 from app.models.external_complaint import ExternalComplaint
+from app.models.manual_refund import ManualRefund
 from app.models.merchant import Merchant
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
@@ -46,10 +47,14 @@ class ImportResult:
         self.updated = 0
         self.failed = 0
         self.errors: list[dict[str, Any]] = []
+        self.warnings: list[dict[str, Any]] = []  # 提示/自动纠错类(非失败, 不阻断)
 
     def add_error(self, row_idx: int, msg: str, data: dict | None = None) -> None:
         self.failed += 1
         self.errors.append({"row": row_idx, "message": msg, "data": data})
+
+    def add_warning(self, row_idx: int, msg: str, data: dict | None = None) -> None:
+        self.warnings.append({"row": row_idx, "message": msg, "data": data})
 
 
 # ---------- 类型转换工具 ----------
@@ -1311,6 +1316,132 @@ def upsert_shanmao_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
     _execute_upsert(db, ShanmaoRefund, "refund_no", rows, result)
 
 
+# ---------- 手动退款登记 数据质量校验(2026-08-23) ----------
+# 业务规律: 登记日期应连续(基本同日/隔日), 不可能晚于今年或过早年份。
+# 规则:
+#   R1 示例模板行: 备注='示例' → 跳过导入
+#   R2 登记日期超出合理范围[当前年-2 的1/1, 今天+3天]:
+#      - 有操作时间佐证(在合理范围内) → 年份按 op_time 修正(保留月日), quality=auto_fixed
+#      - 无佐证或修正后仍异常 → quality=pending(待人工确认)
+#   R3 时间倒挂(op_time 早于 register_time 超过1天) → quality=pending
+def _manual_refund_quality_check(
+    register_time: datetime | None,
+    op_time: datetime | None,
+    row_idx: int,
+    result: ImportResult,
+) -> tuple[datetime | None, str | None, str | None]:
+    """手动退款登记时间质量校验: 返回 (修正后register_time, quality_status, quality_note)
+
+    - R2 年份/范围异常(有操作时间佐证 → auto_fixed 修正年份; 无佐证 → pending)
+    - R3 时间倒挂(操作早于登记超过1天) → pending(覆盖 R2 结果)
+    """
+    if register_time is None:
+        return register_time, None, None
+    now = datetime.now(timezone.utc)
+    low = datetime(now.year - 2, 1, 1, tzinfo=timezone.utc)
+    high = now + timedelta(days=3)
+    status: str | None = None
+    note: str | None = None
+    if not (low <= register_time <= high):
+        # R2 年份/范围异常
+        orig = register_time
+        if op_time is not None and low <= op_time <= high:
+            fixed = register_time.replace(year=op_time.year)
+            if low <= fixed <= high:
+                status, note = "auto_fixed", (
+                    f"登记日期年份异常(原始 {orig:%Y-%m-%d}), "
+                    f"按操作时间 {op_time:%Y-%m-%d} 佐证修正为 {fixed:%Y-%m-%d}")
+                register_time = fixed
+        if status is None:
+            status, note = "pending", f"登记日期超出合理范围(原始 {orig:%Y-%m-%d}), 无可靠佐证, 待人工确认"
+    # R3 时间倒挂(操作早于登记超过1天)
+    if op_time is not None and register_time is not None and op_time < register_time - timedelta(days=1):
+        status, note = "pending", (
+            f"操作时间 {op_time:%Y-%m-%d} 早于登记日期 {register_time:%Y-%m-%d} 超过1天, 待人工确认")
+    if status:
+        result.add_warning(row_idx, note)
+    return register_time, status, note
+
+
+def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """手动退款登记(商户号手机退款处理登记) - 按 (register_time, order_no, refund_amount) 复合键去重 upsert
+
+    同一订单可分期多次退款(不同登记日期/退款金额),故去重键含登记日期+订单号+退款金额,
+    重复导入按此键更新而非累计。is_refunded 归一: 非"是"一律"否"(含空 → 未退款,计入登记蓄水)。
+    缺登记日期或订单号的行无法定位,跳过。导入时做时间质量校验(自动纠错/待人工确认, 见
+    _manual_refund_quality_check), 结果写入 quality_status/quality_note 供数据质量审核。
+    """
+    rows: list[dict] = []
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            register_time = _to_datetime(data.get("register_time"))
+            order_no = (data.get("order_no") or "").strip() if data.get("order_no") else None
+            if register_time is None or not order_no:
+                result.add_error(idx, "缺少登记日期或订单号,无法去重定位(跳过)")
+                continue
+            remark = (data.get("remark") or "").strip() if data.get("remark") is not None else ""
+            # R1 示例模板行跳过
+            if remark == "示例":
+                result.add_warning(idx, "备注为'示例'的模板数据行,已跳过")
+                continue
+            op_time = _to_datetime(data.get("op_time"))
+            # R2/R3 时间质量校验(含自动纠错/待确认标记)
+            register_time, quality_status, quality_note = _manual_refund_quality_check(
+                register_time, op_time, idx, result)
+            registrant = _sanitize_name_field(data.get("registrant"), idx, result, "手动退款-登记人")
+            refund_operator = _sanitize_name_field(data.get("refund_operator"), idx, result, "手动退款-退款操作人")
+            raw_refunded = (data.get("is_refunded") or "").strip() if data.get("is_refunded") is not None else ""
+            rows.append({
+                "register_time": register_time,
+                "device_sn": (data.get("device_sn") or "").strip() if data.get("device_sn") else None,
+                "order_no": order_no,
+                "merchant_id": (data.get("merchant_id") or "").strip() if data.get("merchant_id") else None,
+                "order_amount": _to_float(data.get("order_amount")),
+                "registrant": registrant,
+                "is_refunded": "是" if raw_refunded == "是" else "否",
+                "refund_amount": _to_float(data.get("refund_amount")),
+                "refund_operator": refund_operator,
+                "op_time": op_time,
+                "remark": data.get("remark"),
+                "quality_status": quality_status,
+                "quality_note": quality_note,
+            })
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
+    _sync_devices(rows, "device_sn", db)
+    # 同批次内复合键去重(Excel 中可能存在完全相同的 登记日期+订单号+退款金额 行,
+    # PG ON CONFLICT DO UPDATE 不允许同一语句内二次命中,保留最后一条)
+    seen: dict[tuple, dict] = {}
+    for r in rows:
+        amt_key = r["refund_amount"] if r["refund_amount"] is not None else 0.0
+        seen[(r["register_time"], r["order_no"], amt_key)] = r
+    rows = list(seen.values())
+    # 分批 on_conflict_do_update:按 (register_time, order_no, COALESCE(refund_amount,0)) 表达式部分唯一索引去重更新
+    # (refund_amount=NULL 的行由 COALESCE 归一为 0 参与去重, 避免同订单同日空金额行重复导入)
+    before = db.scalar(select(func.count()).select_from(ManualRefund)) or 0
+    BATCH = 2000
+    for i in range(0, len(rows), BATCH):
+        batch = rows[i:i + BATCH]
+        stmt = pg_insert(ManualRefund).values(batch)
+        update_cols = {c: stmt.excluded[c] for c in batch[0].keys()
+                       if c not in ("register_time", "order_no", "refund_amount")}
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["register_time", "order_no", "COALESCE(refund_amount, 0)"],
+            index_where=text("order_no IS NOT NULL"),
+            set_=update_cols,
+        )
+        db.execute(stmt)
+        db.flush()
+    after = db.scalar(select(func.count()).select_from(ManualRefund)) or 0
+    inserted = max(after - before, 0)
+    result.inserted += inserted
+    result.updated += max(len(rows) - inserted, 0)
+
+
 def upsert_device_tags(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
     """设备标签定义 - 主键 id,无 id 时按 tag_name upsert(避免重复名)
 
@@ -1509,6 +1640,7 @@ UPSERT_DISPATCH = {
     "external_complaint": upsert_external_complaints,
     "card_complaint": upsert_card_complaints,
     "shanmao_refund": upsert_shanmao_refunds,
+    "manual_refund": upsert_manual_refunds,
     "device_tag": upsert_device_tags,
     "device_tag_binding": upsert_device_tag_bindings,
 }

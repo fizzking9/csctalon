@@ -112,7 +112,7 @@ const stackSegs = computed(() => {
     { key: 'route_a', label: 'A', name: 'A. 线上直退', cls: 'seg-a', dotCls: 'd-a' },
     { key: 'route_b', label: 'B', name: 'B. 用户取现', cls: 'seg-b', dotCls: 'd-b' },
     { key: 'route_c', label: 'C', name: 'C. 闪猫退款', cls: 'seg-c', dotCls: 'd-c' },
-    { key: 'route_d', label: 'D', name: 'D. 其他退款', cls: 'seg-d', dotCls: 'd-d' },
+    { key: 'route_d', label: 'D', name: 'D. 手动退款', cls: 'seg-d', dotCls: 'd-d' },
   ]
   const totalAmt = Math.max(0, Number(op.value.amount ?? 0))
   return defs.map(d => {

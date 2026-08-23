@@ -74,6 +74,7 @@ class ImportResponse(BaseModel):
     matched_rows: int
     status: str
     errors: list[dict[str, Any]] | None = None
+    warnings: list[dict[str, Any]] | None = None  # 提示/自动纠错类(如手动退款登记时间校验)
     finished_at: datetime | None = None
 
 

@@ -101,7 +101,7 @@ PRESET_VIEWS: list[dict] = [
     {
         "code": "preset_cash_trend",
         "name": "已登记现金流趋势(估算)",
-        "description": "直接退款(线上+人工) + 用户提现,按日相加=已登记估算现金流(商户号实际现金流的组成部分,不含闪猫/其他退款)",
+        "description": "四路经营出款(线上直退+用户提现+闪猫退款+手动退款)按日合计=已登记估算现金流(商户号实际现金流的组成部分,对账基准为商户号现金流E)",
         "chart_type": "line",
         "segments": [
             {
@@ -517,12 +517,12 @@ PRESET_VIEWS: list[dict] = [
         "classification_rule_ids": [],
         "time_range_default": {"days": 30},
     },
-    # ---------- 退款现金流量视图体系(重构) [全域统一核算 v3] ----------
+    # ---------- 退款现金流量视图体系 [全域统一核算 v4] ----------
     # 视图1:整体趋势(四路经营A/B/C/D柱状堆积 vs 实际现金流E曲线)
-    # 业务关系 v3: A(退费单线上直退)/B(钱包用户取现)/C(闪猫退款独立表)/D(其他退款独立表)
-    #             四路经营出款(来自经营报表导出,data_source=business类型)
-    #             E(商户号现金流)是微信侧实际真扣款(第五张独立表,对账基准)
-    #   经营估算 = A+B+C+D (C/D独立表未建=暂0,建表后自动并入)
+    # 业务关系 v4: A(退费单线上直退)/B(钱包用户取现)/C(闪猫退款 shanmao_refunds 已建表)
+    #              D(手动退款 manual_refunds 已建表, is_refunded=是 计入)
+    #              E(商户号现金流)是微信侧实际真扣款(第五张独立表,对账基准,商户号流水同步)
+    #   经营估算 = A+B+C+D
     #   实际现金流 = E (merchant_refunds.refund_status='SUCCESS' 合计,不分ORIGINAL/BALANCE桶)
     #   对账偏差 = 经营估算 − 实际现金流 (正值表示有未登记的商户侧退款)
     # 因此商户号现金流E不与经营四路堆叠相加(否则重复计算),而是独立曲线 overlay
@@ -530,7 +530,7 @@ PRESET_VIEWS: list[dict] = [
     {
         "code": "preset_cash_trend_v2",
         "name": "现金流趋势(四路经营 vs 实际对账)",
-        "description": "【v3统一核算】四路经营出款(A.退费单线上直退+B.钱包用户取现+C.闪猫退款+D.其他退款,柱状堆积=经营估算) vs 实际现金流E(merchant_refunds.refund_status='SUCCESS'合计,曲线overlay,对账基准)。对账偏差=柱顶(A+B+C+D) − 曲线高度(E),正值=未登记的商户侧退款,C/D独立表未建暂=0",
+        "description": "【v4统一核算】四路经营出款(A.退费单线上直退+B.钱包用户取现+C.闪猫退款+D.手动退款,柱状堆积=经营估算) vs 实际现金流E(merchant_refunds.refund_status='SUCCESS'合计,曲线overlay,对账基准)。对账偏差=柱顶(A+B+C+D) − 曲线高度(E),正值=商户侧已扣款但未登记四路的退款。E为商户号流水快照(截止日见数据提示),对账偏差仅供参考",
         "chart_type": "bar",
         "segments": [
             {

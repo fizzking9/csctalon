@@ -22,7 +22,7 @@
         <el-card shadow="hover" body-style="padding: 16px 20px">
           <div class="stat-label">已登记估算现金流</div>
           <div class="stat-value" style="color: #909399">¥ {{ fmt(breakdown.total) }}</div>
-          <div class="stat-sub">直接退款 + 用户提现</div>
+          <div class="stat-sub">四路经营合计（A+B+C+D）</div>
         </el-card>
       </el-col>
       <el-col :span="6">
@@ -41,7 +41,7 @@
       </el-col>
     </el-row>
 
-    <!-- 偏差提示:实际-估算=未登记退款(闪猫+其他) -->
+    <!-- 偏差提示:实际-估算=未登记商户侧退款 -->
     <el-alert
       class="mb-16"
       :type="diffType"
@@ -50,7 +50,7 @@
     >
       <template #title>
         偏差(实际 - 估算)= <b>¥ {{ fmt(breakdown.diff) }}</b>
-        <span class="diff-hint"> — 商户号现金流已包含直接退款/用户提现,差额为尚未登记的闪猫退款+其他退款</span>
+        <span class="diff-hint"> — 商户号现金流不与经营数据累加,差额 = 商户侧已扣款但尚未登记到四路的退款(商户号流水同步后对账更完整)</span>
       </template>
     </el-alert>
 
