@@ -1458,7 +1458,8 @@ def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session
         update_cols = {c: stmt.excluded[c] for c in batch[0].keys()
                        if c not in ("register_time", "order_no", "refund_amount")}
         stmt = stmt.on_conflict_do_update(
-            index_elements=["register_time", "order_no", "COALESCE(refund_amount, 0)"],
+            # 列名用 Column 对象(渲染为标识符), 表达式索引 COALESCE 用 text() 原样渲染
+            index_elements=[ManualRefund.register_time, ManualRefund.order_no, text("COALESCE(refund_amount, 0)")],
             index_where=text("order_no IS NOT NULL"),
             set_=update_cols,
         )
