@@ -122,6 +122,26 @@ def _format_dt(dt) -> str:
     return str(dt)
 
 
+def _extract_error_detail(error_detail) -> str | None:
+    """从 error_detail(JSON) 中提取第一条错误文本, 兼容 dict/str/列表嵌套结构"""
+    if not error_detail:
+        return None
+    if isinstance(error_detail, str):
+        return error_detail[:500]
+    if isinstance(error_detail, dict):
+        errors = error_detail.get("errors")
+        if isinstance(errors, list) and errors:
+            first = errors[0]
+            if isinstance(first, str):
+                return first[:500]
+            if isinstance(first, dict):
+                return str(first.get("message") or first)[:500]
+        msg = error_detail.get("message")
+        if msg:
+            return str(msg)[:500]
+    return None
+
+
 @router.get("", response_model=R[list[CollectionLogItem]], summary="统一采集日志列表")
 def list_collection_logs(
     db: DBSession,
@@ -162,7 +182,7 @@ def list_collection_logs(
                     trigger_label="手动",
                     triggered_by=r.uploaded_by,
                     filename=r.filename,
-                    error=r.error_detail.get("errors", [None])[0] if r.error_detail else None,
+                    error=_extract_error_detail(r.error_detail),
                     created_at=_format_dt(r.created_at),
                     finished_at=_format_dt(r.finished_at),
                 )
