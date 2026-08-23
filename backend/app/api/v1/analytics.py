@@ -15,10 +15,13 @@
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Body, Depends, Query
+from sqlalchemy.orm import Session
 
-from app.api.deps import CurrentUser, DBSession
+from app.api.deps import CurrentUser, DBSession, get_current_user
+from app.core.database import get_db
 from app.core.redis_client import cached_call
+from app.models.user import User
 from app.schemas.common import R
 from app.services import analytics as A
 
@@ -400,3 +403,28 @@ def refund_export_endpoint(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{fname}"},
     )
+
+
+# ---------- 手动退款登记 数据质量审核 (L3) ----------
+@router.get("/manual-refund/quality", response_model=R, summary="手动退款登记-数据质量审核列表(自动纠错记录+待人工确认)")
+def manual_refund_quality_endpoint(
+    db: DBSession, _: CurrentUser,
+    status: str = Query("all", pattern="^(all|pending|auto_fixed|ok)$"),
+    page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
+):
+    return R(data=A.manual_refund_quality_list(db, status, page, page_size))
+
+
+@router.post("/manual-refund/quality/{rid}/confirm", response_model=R, summary="手动退款登记-人工确认通过(置ok)")
+def manual_refund_quality_confirm_endpoint(rid: int, db: DBSession, _: CurrentUser):
+    return R(data=A.manual_refund_quality_confirm(db, rid))
+
+
+@router.post("/manual-refund/quality/{rid}/fix", response_model=R, summary="手动退款登记-人工修正字段(置ok)")
+def manual_refund_quality_fix_endpoint(
+    rid: int,
+    payload: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return R(data=A.manual_refund_quality_fix(db, rid, payload))

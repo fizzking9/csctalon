@@ -20,6 +20,7 @@ _INCLUDE_COMPLAINT_FILES = False
 from app.models.external_complaint import ExternalComplaint
 from app.models.card_complaint import CardComplaint
 from app.models.merchant_refund import MerchantRefund
+from app.models.manual_refund import ManualRefund
 from app.models.person import Person, PersonAlias
 from app.models.group import Group, PersonGroupMembership
 from app.models.specialty import Specialty, PersonSpecialtyAssignment
@@ -214,14 +215,14 @@ def operation_method_dist(db: Session) -> list[dict]:
 # │   (钱从钱包真实提出到用户银行卡,构成现金流)                                    │
 # │ C. 闪猫退款         shanmao_refunds 独立业务表 (data_sources.code=shanmao_refund)│
 # │   已建表有数据,按 status='已退款' + audit_time 聚合                            │
-# │ D. 其他退款         other_refund (规划中,物理表未建)                           │
-# │   占位表名 _placeholder_other_refund,表不存在时 _table_exists 检查跳过返回 0   │
+# │ D. 手动退款         manual_refunds 独立业务表 (data_sources.code=manual_refund)│
+# │   客服商户号手动退款登记台账,按 is_refunded='是' + COALESCE(op_time,register_time)│
 # ├─────────────────── 实际现金流 (财务侧,微信商户号真实扣款,独立第五张表) ──────────┤
 # │ E. 商户号现金流     merchant_refunds 表 WHERE refund_status = 'SUCCESS'       │
 # │   不区分 refund_type 字段 (ORIGINAL+BALANCE 全部合计,不分桶C/D)               │
 # │   (data_sources.code=merchant_refund, name_cn="商户号现金流" = 对账基准)      │
 # ├─────────────────── 合计口径 ───────────────────────────────────────────────────┤
-# │ 经营估算 (经营侧四路总登记出款) = A + B + C + D  (D未建表时 = 0)              │
+# │ 经营估算 (经营侧四路总登记出款) = A + B + C + D                           │
 # │ 实际现金流 (财务侧商户号真扣) = E  (merchant_refunds SUCCESS 合计)            │
 # │ 对账偏差 = 经营估算 − 实际现金流 = (A+B+C+D) − E                               │
 # │                                                                                │
@@ -229,15 +230,18 @@ def operation_method_dist(db: Session) -> list[dict]:
 # │   "今日退款笔数/金额" = 路线 A  (退费单线上直退, 业务退款口径)                 │
 # │   "真实现金流出 / 现金流出" = A+B+C+D (经营侧四路出款估算)                     │
 # │   "商户号实际现金流" = E (merchant_refunds SUCCESS,对账基准)                  │
-# │   "对账偏差" = 经营估算 − 实际现金流 (D未建表时 = A+B+C − E)                  │
+# │   "对账偏差" = 经营估算 − 实际现金流 = (A+B+C+D) − E                          │
 # └────────────────────────────────────────────────────────────────────────────────┘
 #
 # 【v2 → v3 改动】(2026-08-02,用户明确纠正):
 #   v2错误: 把 C/D 当成 merchant_refunds.refund_type 分桶(ORIGINAL/BALANCE),
 #           把 C+D 当成"财务实际"与 A+B 当成"经营估算",导致商户号流水被重复使用
-#   v3纠正: C/D 是独立的两张业务表 (闪猫退款 / 其他退款, data_source已注册占位),
+#   v3纠正: C/D 是独立的两张业务表 (闪猫退款 / 手动退款, data_source已注册),
 #           merchant_refunds 只对应 E = 实际现金流 (独立第五张表,对账基准),
 #           经营估算 = A+B+C+D, 实际 = E, 对账偏差 = 经营 − 实际
+# 【v3 → v4 改动】(2026-08-23): D 路(手动退款)物理表 manual_refunds 已建并导入
+#   商户号手机退款处理登记.xlsx, 不再依赖占位表返回 0; 决策概览移除"商户号直退=E"
+#   的错误累加, E 只作对账基准独立展示, 并新增登记退款水位(已登记未退款=蓄水)。
 
 # ---------- 路线A 退费单线上直退 ----------
 def _route_a_online_refund_filter():
@@ -262,7 +266,7 @@ _C_SHANMAO_STATUS_COL = "status"
 _C_SHANMAO_STATUS_OK = "已退款"
 
 # 表存在性缓存: {table_name: (exists, checked_at_monotonic)}
-# 避免反复查询不存在的占位表(如 _placeholder_other_refund)导致 PG 日志刷屏 ERROR。
+# 避免反复查询不存在的表(如尚未建物理表的数据源)导致 PG 日志刷屏 ERROR。
 # to_regclass() 查不到返回 NULL,不会产生 ERROR 日志;缓存 10 分钟,建表后自动生效。
 _table_exists_cache: dict[str, tuple[bool, float]] = {}
 _TABLE_EXISTS_RECHECK_SEC = 600.0
@@ -319,15 +323,19 @@ def _route_c_shanmao_agg(db: Session, start, end) -> tuple[int, float]:
         # 表未建或列未匹配: 静默返回 0, 等建表/改常量后自动生效
         return 0, 0.0
 
-# ---------- 路线D 其他退款 (独立业务表) ----------
-_D_OTHER_TABLE = "_placeholder_other_refund"   # data_sources.code=other_refund 的物理表占位名
+# ---------- 路线D 手动退款 (独立业务表) ----------
+# 真实表名: manual_refunds (alembic: f0e1d2c3b4a5_create_manual_refunds)
+# 数据源: 商户号手机退款处理登记.xlsx (客服在商户号后台手动操作退款台账)
+#   金额: refund_amount(退款金额); 状态: is_refunded='是' 计入经营出款, '否' = 登记蓄水(水位)
+#   时间: op_time(实际退款操作时间) 为主, 缺失回退 register_time(登记日期)
+_D_OTHER_TABLE = "manual_refunds"
 _D_OTHER_AMOUNT_COL = "refund_amount"
-_D_OTHER_TIME_COL = "refund_time"
-_D_OTHER_STATUS_COL = "refund_status"
-_D_OTHER_STATUS_OK = "SUCCESS"
+_D_OTHER_TIME_COL = "COALESCE(op_time, register_time)"
+_D_OTHER_STATUS_COL = "is_refunded"
+_D_OTHER_STATUS_OK = "是"
 
 def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
-    """【路线D】其他退款独立表聚合 (表不存在则返回 0,0,不报错).
+    """【路线D】手动退款(manual_refunds)独立表聚合 (表不存在则返回 0,0,不报错).
 
     同 _route_c_shanmao_agg: 必须用 savepoint 隔离 PG 事务失败状态。
     """
@@ -400,7 +408,7 @@ def _route_c_shanmao_trend(db: Session, start, end, grain: str, slot_idx_fn) -> 
 
 
 def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tuple[dict[int, int], dict[int, float]]:
-    """【路线D】其他退款按时间分组聚合 (表不存在则返回空map)."""
+    """【路线D】手动退款按时间分组聚合 (表不存在则返回空map)."""
     if not _table_exists(db, _D_OTHER_TABLE):
         return {}, {}
     trunc_expr = "date_trunc(:grain, timezone('Asia/Shanghai', " + _D_OTHER_TIME_COL + "))"
@@ -498,9 +506,9 @@ def _cash_routes_total(db: Session,
     )).first() or (0, 0)
     b_cnt, b_amt = int(b_row[0] or 0), float(b_row[1] or 0)
 
-    # ── C 闪猫退款独立表 (占位,表未建→0) ──
+    # ── C 闪猫退款独立表 (shanmao_refunds, status=已退款) ──
     c_cnt, c_amt = _route_c_shanmao_agg(db, start, end)
-    # ── D 其他退款独立表 (占位,表未建→0) ──
+    # ── D 手动退款独立表 (manual_refunds, is_refunded='是') ──
     d_cnt, d_amt = _route_d_other_agg(db, start, end)
 
     # ── E 实际现金流: merchant_refunds SUCCESS 合计 (不分 refund_type 桶) ──
@@ -523,14 +531,14 @@ def _cash_routes_total(db: Session,
         "route_a": {"count": a_cnt, "amount": round(a_amt, 2)},   # A.退费单线上直退
         "route_b": {"count": b_cnt, "amount": round(b_amt, 2)},   # B.钱包-用户取现
         "route_c": {"count": c_cnt, "amount": round(c_amt, 2)},   # C.闪猫退款(独立表,暂0)
-        "route_d": {"count": d_cnt, "amount": round(d_amt, 2)},   # D.其他退款(独立表,暂0)
+        "route_d": {"count": d_cnt, "amount": round(d_amt, 2)},   # D.手动退款(manual_refunds)
         "actual_cashflow":  # E.商户号实际现金流 SUCCESS合计 (对账基准,不分C/D桶)
             {"count": e_cnt, "amount": round(e_amt, 2)},
         "operational":     # 经营侧四路总登记出款估算 = A+B+C+D
             {"count": op_cnt, "amount": round(op_amt, 2)},
         "financial":       # 向后兼容键: 财务实际 = actual_cashflow = E
             {"count": fc_cnt, "amount": round(fc_amt, 2)},
-        "diff":            # 对账偏差 = 经营估算 − 实际现金流 (C/D建表后自动并入)
+        "diff":            # 对账偏差 = 经营估算 − 实际现金流
             {"count": op_cnt - fc_cnt, "amount": round(op_amt - fc_amt, 2)},
     }
 
@@ -555,7 +563,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
     对账偏差 diff = 经营(total) − 实际(merchant);
     每 day 返回 direct(A) withdraw(B) shanmao(C) other_refund(D), total(=A+B+C+D),
     merchant(=E 实际现金流), diff(=total−merchant), 及各自 count.
-    C/D 独立表未建 → 读 0, 建表后自动生效.
+    D 手动退款(manual_refunds) 已建表自动生效.
     """
     start, end = _date_range(start, end)
     s, e = start, end
@@ -602,7 +610,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
             shanmao_map = {r[0]: {"amount": float(r[2] or 0), "count": int(r[1] or 0)} for r in sm_rows}
         except Exception:
             pass   # 表未建 → 空 (savepoint 已隔离 PG 事务失败状态)
-    # ── D 其他退款按日 (独立表 other_refund 占位) ──
+    # ── D 手动退款按日 (manual_refunds, is_refunded='是') ──
     other_map: dict[str, dict] = {}
     if _table_exists(db, _D_OTHER_TABLE):
         try:
@@ -654,7 +662,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
             # C 闪猫退款 (独立表)
             "shanmao":        _d(shanmao_map, d, "amount"),
             "shanmao_count":  _d(shanmao_map, d, "count"),
-            # D 其他退款 (独立表)
+            # D 手动退款 (manual_refunds)
             "other_refund":        _d(other_map, d, "amount"),
             "other_refund_count":  _d(other_map, d, "count"),
             # 经营估算 = A+B+C+D (四路经营出款)
@@ -715,8 +723,8 @@ def wallet_vs_withdraw(db: Session, start: datetime | None = None, end: datetime
 def cash_out_breakdown(db: Session) -> dict[str, Any]:
     """真实现金流构成明细 【全域统一核算 v3】
 
-    四路经营出款: A 退费单线上直退 / B 钱包用户取现 / C 闪猫退款(独立表,暂0) / D 其他退款(独立表,暂0)
-    经营估算 = A+B+C+D (四路登记出款合计, C/D建表后自动并入)
+    四路经营出款: A 退费单线上直退 / B 钱包用户取现 / C 闪猫退款 / D 手动退款(manual_refunds)
+    经营估算 = A+B+C+D (四路登记出款合计)
     实际现金流 = E (merchant_refunds SUCCESS 合计, 对账基准, 不分C/D桶)
     对账偏差 = 经营估算 − 实际现金流
     """
@@ -733,23 +741,23 @@ def cash_out_breakdown(db: Session) -> dict[str, Any]:
         # ── 四路线拆分 ──
         "route_a": a,  # A.退费单-线上直退 (refund_method='线上')
         "route_b": b,  # B.钱包-用户取现 (op_type='用户提现')
-        "route_c": c,  # C.闪猫退款 (独立业务表 shenmao_refund, 暂未建表=0)
-        "route_d": d,  # D.其他退款 (独立业务表 other_refund, 暂未建表=0)
+        "route_c": c,  # C.闪猫退款 (独立业务表 shanmao_refunds)
+        "route_d": d,  # D.手动退款 (独立业务表 manual_refunds)
         # ── 双视角合计 ──
         "direct_refund": a["amount"],       # 兼容旧键: 直接退款 = A
         "user_withdraw": b["amount"],       # 兼容旧键: 用户提现 = B
-        "total": op["amount"],              # 兼容旧键: 经营估算 = A+B+C+D (原 total = A+B, 现升级含C/D)
+        "total": op["amount"],              # 兼容旧键: 经营估算 = A+B+C+D
         "total_count": op["count"],         # 经营侧估算笔数
         "actual_cashflow": e["amount"],     # (新) 实际现金流 E = 商户号SUCCESS合计
         "actual_cashflow_count": e["count"],# (新) 实际现金流笔数
         "merchant_cash": fc["amount"],      # 兼容旧键: 商户号现金流 = E = actual_cashflow (财务实际)
         "merchant_cash_count": fc["count"], # 兼容旧键: 财务侧实际笔数
-        "diff": diff["amount"],             # 兼容旧键: 对账偏差 = 经营估算 − 实际现金流 (C/D未建表时=A+B−E)
+        "diff": diff["amount"],             # 兼容旧键: 对账偏差 = 经营估算 − 实际现金流
         "diff_count": diff["count"],        # 对账偏差笔数
         "_spec": {
-            "total": "经营估算 = 四路经营出款 A+B+C+D (C/D独立表建表后自动并入)",
+            "total": "经营估算 = 四路经营出款 A+B+C+D (A线上直退+B钱包取现+C闪猫退款+D手动退款)",
             "merchant_cash": "实际现金流(对账基准) = merchant_refunds.refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
-            "diff": "对账偏差 = 经营估算 − 实际现金流 (C/D独立表未建时暂为 A+B − E)",
+            "diff": "对账偏差 = 经营估算 − 实际现金流 (商户号现金流不与经营数据累加)",
         },
     }
 
@@ -1252,12 +1260,12 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
     routes = _cash_routes_total(db)
     a = routes["route_a"]   # A.退费单线上直退 (refunds refund_method='线上')
     b = routes["route_b"]   # B.钱包用户取现 (wallet op_type='用户提现')
-    c = routes["route_c"]   # C.闪猫退款 (独立业务表 shenmao_refund, 暂未建表=0)
-    d = routes["route_d"]   # D.其他退款 (独立业务表 other_refund, 暂未建表=0)
+    c = routes["route_c"]   # C.闪猫退款 (独立业务表 shanmao_refunds)
+    d = routes["route_d"]   # D.手动退款 (独立业务表 manual_refunds)
     op = routes["operational"]          # 经营估算 = A+B+C+D (四路经营出款)
     e = routes["actual_cashflow"]       # 实际现金流 E = merchant_refunds SUCCESS合计 (对账基准,不分C/D桶)
     fc = routes["financial"]            # 向后兼容: financial = actual_cashflow = E
-    diff = routes["diff"]               # 对账偏差 = 经营 − 实际 (C/D未建表时=A+B−E)
+    diff = routes["diff"]               # 对账偏差 = 经营 − 实际
 
     # 兼容旧键: "退款总金额/笔数" 严格按路线A (退费单线上直退)
     refund_total = float(a["amount"])
@@ -1344,7 +1352,7 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
         # ── 兼容旧键: 保持向后兼容 ──
         "refund_total": refund_total,          # 退款总金额 = 路线A(退费单线上直退)
         "refund_count": refund_count,          # 退款总笔数 = 路线A(退费单线上直退)
-        "cash_out_total": estimated,           # 经营估算现金流 = A+B+C+D (C/D建表后自动并入)
+        "cash_out_total": estimated,           # 经营估算现金流 = A+B+C+D
         "cash_out_direct": a["amount"],        # 直接退款 = A
         "cash_out_withdraw": b["amount"],      # 用户提现 = B
         "actual_cashflow": e["amount"],        # (新) 实际现金流 E = 商户号SUCCESS合计
@@ -1362,8 +1370,8 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
         "cash_routes": {
             "route_a": a,    # {count, amount} A.退费单线上直退
             "route_b": b,    # {count, amount} B.钱包用户取现
-            "route_c": c,    # {count, amount} C.闪猫退款 (独立表占位,暂0)
-            "route_d": d,    # {count, amount} D.其他退款 (独立表占位,暂0)
+            "route_c": c,    # {count, amount} C.闪猫退款 (独立业务表 shanmao_refunds)
+            "route_d": d,    # {count, amount} D.手动退款 (独立业务表 manual_refunds)
             "operational": op,              # {count, amount} 经营估算 = A+B+C+D
             "actual_cashflow": e,           # {count, amount} 实际现金流 = E (商户号SUCCESS合计,对账基准)
             "financial": fc,                # {count, amount} 向后兼容: 财务实际 = actual_cashflow = E
@@ -1372,10 +1380,10 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
         # ── 口径说明注释 (前端tooltip可直接显示) ──
         "_spec": {
             "refund_total": "路线A.退费单线上直退 (refunds WHERE refund_method='线上')",
-            "cash_out_total": "经营估算(四路经营出款合计) = A线上直退 + B用户取现 + C闪猫退款(独立表) + D其他退款(独立表), C/D建表后自动并入",
+            "cash_out_total": "经营估算(四路经营出款合计) = A线上直退 + B用户取现 + C闪猫退款 + D手动退款",
             "actual_cashflow": "实际现金流(对账基准) = merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
             "merchant_cash": "实际现金流(对账基准,同actual_cashflow) = 商户号SUCCESS退款合计",
-            "cash_diff": "对账偏差 = 经营估算 − 实际现金流 (C/D独立表未建时临时为 A+B − E)",
+            "cash_diff": "对账偏差 = 经营估算 − 实际现金流 (商户号现金流不与经营数据累加)",
         },
     }
 
@@ -2581,7 +2589,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
             "route_a": a_t,  # A.退费单线上直退
             "route_b": b_t,  # B.钱包用户取现
             "route_c": c_t,  # C.闪猫退款 (独立表 shanmao_refunds, status=已退款 计入)
-            "route_d": d_t,  # D.其他退款 (独立表占位,暂0)
+            "route_d": d_t,  # D.手动退款 (独立业务表 manual_refunds, is_refunded=是 计入)
             "operational":     routes_t["operational"],     # 经营估算 A+B+C+D
             "actual_cashflow": routes_t["actual_cashflow"], # 实际现金流 E (商户号SUCCESS合计)
             "financial":       routes_t["financial"],       # 向后兼容: 财务实际 = E
@@ -2589,7 +2597,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         },
         # ── 口径注释 (前端标题tooltip) ──
         "_spec": {
-            "refund_count":     "退款笔数 = 四路经营合计 A线上直退 + B用户取现 + C闪猫退款 + D其他退款",
+            "refund_count":     "退款笔数 = 四路经营合计 A线上直退 + B用户取现 + C闪猫退款 + D手动退款",
             "refund_amount":    "退款金额 = 四路经营合计 A+B+C+D (经营侧登记的所有退款出款)",
             "cash_out":         "真实现金流(对账基准) = merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
             "actual_cashflow":  "实际现金流(对账基准) = merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
@@ -2611,7 +2619,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
       【工作量组】左Y柱:
         - 会话数(次) / 接待数(个): 独立柱
       【款项组】左Y柱(笔数堆叠) + 右Y面积(金额堆叠):
-        - 退款笔数: 四路堆叠柱 → A(线上直退) + B(钱包提现) + C(闪猫退款) + D(其他退款) = 经营合计
+        - 退款笔数: 四路堆叠柱 → A(线上直退) + B(钱包提现) + C(闪猫退款) + D(手动退款) = 经营合计
         - 退款金额: 四路堆叠面积 → A+B+C+D = 经营合计; 独立虚线 = E(商户号实际现金流)
       【投诉组】左Y柱:
         - 投诉量: 独立柱
@@ -2804,7 +2812,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
     # --- 路线C: 闪猫退款(按粒度 笔数+金额) ---
     c_cnt_map, c_amt_map = _route_c_shanmao_trend(db, ts, te, grain, _slot_idx)
 
-    # --- 路线D: 其他退款(按粒度 笔数+金额) ---
+    # --- 路线D: 手动退款(按粒度 笔数+金额) ---
     d_cnt_map, d_amt_map = _route_d_other_trend(db, ts, te, grain, _slot_idx)
 
     # --- 路线E: 商户号实际现金流(按粒度 笔数+金额) ---
@@ -2933,7 +2941,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         "refund_count_a":     r_cnt_a,           # 路线A 退费单线上直退
         "refund_count_b":     r_cnt_b,           # 路线B 钱包用户取现
         "refund_count_c":     r_cnt_c,           # 路线C 闪猫退款
-        "refund_count_d":     r_cnt_d,           # 路线D 其他退款
+        "refund_count_d":     r_cnt_d,           # 路线D 手动退款
         "refund_count_direct":  r_cnt_a,         # 向后兼容: direct = A
         "refund_count_withdraw": r_cnt_b,        # 向后兼容: withdraw = B
         "refund_count_total":  r_cnt_total,      # 四路合计 A+B+C+D
@@ -2955,12 +2963,12 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
             "refund_count_a":  "路线A: 退费单 refund_method='线上' (线上直退)",
             "refund_count_b":  "路线B: 钱包提现 op_type='用户提现'",
             "refund_count_c":  "路线C: 闪猫退款 (shanmao_refunds status=已退款)",
-            "refund_count_d":  "路线D: 其他退款 (独立表占位)",
+            "refund_count_d":  "路线D: 手动退款 (manual_refunds)",
             "refund_count_total": "四路经营合计 A+B+C+D",
             "refund_amount_a": "路线A: 退费单线上直退金额",
             "refund_amount_b": "路线B: 钱包用户取现金额",
             "refund_amount_c": "路线C: 闪猫退款金额",
-            "refund_amount_d": "路线D: 其他退款金额",
+            "refund_amount_d": "路线D: 手动退款金额",
             "refund_amount_e": "路线E: 商户号实际现金流 (merchant_refunds SUCCESS)",
             "refund_amount_total": "四路经营合计金额 A+B+C+D",
             "reception":     "会话数(次) = cs_record 计数；接待数(个) = 去重设备SN计数(去NULL/空串)",
@@ -6474,14 +6482,16 @@ def refund_type_trend(
 def refund_decision_overview(
     db: Session, start: str | None = None, end: str | None = None, grain: str = "day",
 ) -> dict[str, Any]:
-    """退款决策概览 (2026-08-21 退款看板重构)
+    """退款决策概览 (2026-08-23 v4: 四路经营 + E 独立对账 + 登记退款水位)
 
     五大块, 每块对应一个管理决策问题:
-    1. summary         - KPI + 自动结论(钱出去多少/环比/涉诉占比/钱包水位)
-    2. routes_daily    - 资金流出全景: 线上直退/用户提现/线下/转入未提现 每日笔数金额
+    1. summary         - KPI + 自动结论(钱出去多少/环比/涉诉占比/钱包水位/对账偏差)
+    2. routes_daily    - 资金流出全景: A线上直退/B钱包提现/C闪猫退款/D手动退款 每日
+                          + E实际现金流(商户号SUCCESS,对账基准,独立展示不累加)
     3. wallet_water    - 钱包水位: 转入/转出/净水位/系统扣费 每日
-    4. complaint_split - 涉诉 vs 普通 (线上直退, SN关联工单分类: 外部>商户号>内部 优先级)
-    5. reason_operator - 退款原因Top + 操作人员Top (线上直退)
+    4. manual_water    - 手动退款登记水位: 登记 vs 已退 = 蓄水 每日
+    5. complaint_split - 涉诉 vs 普通 (线上直退, SN关联工单分类: 外部>商户号>内部 优先级)
+    6. reason_operator - 退款原因Top + 操作人员Top (线上直退)
     """
     cur_s, cur_e, prev_s, prev_e, _rt, _disp = _resolve_windows(None, start, end)
 
@@ -6631,7 +6641,7 @@ def refund_decision_overview(
                        "avg_amount": round(v[1] / v[0], 2) if v[0] else 0.0} for k, v in operators],
     }
 
-    # ── 1. 资金流出全景: 严格四路经营 A线上直退 / B钱包提现 / C闪猫退款 / D商户号直退 ──
+    # ── 1. 资金流出全景: 严格四路经营 A线上直退 / B钱包提现 / C闪猫退款 / D手动退款 ──
     #     线下退款、转入提现账户(钱包内部流转)不属于四路, 不计入现金流全景
     route_rows = db.execute(text(f"""
         SELECT {_day("r.created_at_raw")} AS d,
@@ -6658,24 +6668,38 @@ def refund_decision_overview(
           AND s.status = '已退款'
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
-    # D 商户号直退 (微信商户号退款流水, 数据源同步后自动并入)
-    mr_rows = db.execute(text(f"""
+    # D 手动退款 (manual_refunds, is_refunded='是'; 时间取实际操作时间, 缺失回退登记日期)
+    d_rows = db.execute(text(f"""
+        SELECT {_day("COALESCE(m.op_time, m.register_time)")} AS d,
+               count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
+        FROM manual_refunds m
+        WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
+          AND m.is_refunded = '是'
+        GROUP BY 1
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    # E 实际现金流 (merchant_refunds refund_status='SUCCESS', 对账基准, 独立展示不与四路累加)
+    e_rows = db.execute(text(f"""
         SELECT {_day("m.trade_time")} AS d,
                count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
         FROM merchant_refunds m
-        WHERE m.trade_time >= :ts AND m.trade_time <= :te AND m.refund_amount > 0
+        WHERE m.trade_time >= :ts AND m.trade_time <= :te AND m.refund_status = 'SUCCESS'
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
 
-    route_keys = ["A 线上直退", "B 钱包提现", "C 闪猫退款", "D 商户号直退"]
+    route_keys = ["A 线上直退", "B 钱包提现", "C 闪猫退款", "D 手动退款"]
     route_map: dict[str, dict[str, list]] = {}
-    for rows, k in ((route_rows, "A 线上直退"), (wd_rows, "B 钱包提现"), (sm_rows, "C 闪猫退款"), (mr_rows, "D 商户号直退")):
+    for rows, k in ((route_rows, "A 线上直退"), (wd_rows, "B 钱包提现"), (sm_rows, "C 闪猫退款"), (d_rows, "D 手动退款")):
         for r in rows:
             d = str(r.d)
             b = route_map.setdefault(d, {})
             b.setdefault(k, [0, 0.0])
             b[k][0] += int(r.cnt or 0)
             b[k][1] += float(r.amt or 0)
+    e_map: dict[str, list] = {}
+    for r in e_rows:
+        e_map.setdefault(str(r.d), [0, 0.0])
+        e_map[str(r.d)][0] += int(r.cnt or 0)
+        e_map[str(r.d)][1] += float(r.amt or 0)
     routes_daily = {"dates": [], "series": {k: {"counts": [], "amounts": []} for k in route_keys}, "table": []}
     for d in sorted(route_map):
         b = route_map[d]
@@ -6691,13 +6715,16 @@ def refund_decision_overview(
             total_amt += v[1]
         row["total_cnt"] = total_cnt
         row["total_amt"] = round(total_amt, 2)
+        row["actual_cnt"] = e_map.get(d, [0, 0.0])[0]   # E 实际现金流(对账基准)
+        row["actual_amt"] = round(e_map.get(d, [0, 0.0])[1], 2)
+        row["diff_amt"] = round(total_amt - row["actual_amt"], 2)  # 对账偏差 = 经营四路 − E
         routes_daily["table"].append(row)
         routes_daily["dates"].append(d)
 
     # ── summary: KPI + 环比 + 结论 (四路口径 A+B+C+D) ──
     def _window_totals(s: _dt.datetime, e: _dt.datetime) -> dict:
         tot = {"online_cnt": 0, "online_amt": 0.0, "withdraw_cnt": 0, "withdraw_amt": 0.0,
-               "sm_cnt": 0, "sm_amt": 0.0, "mr_cnt": 0, "mr_amt": 0.0}
+               "sm_cnt": 0, "sm_amt": 0.0, "d_cnt": 0, "d_amt": 0.0, "e_cnt": 0, "e_amt": 0.0}
         for r in db.execute(text("""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
             FROM refunds r WHERE r.refund_method = '线上' AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
@@ -6715,17 +6742,26 @@ def refund_decision_overview(
               AND s.status = '已退款'
         """), {"ts": s, "te": e}).fetchall():
             tot["sm_cnt"] += int(r.cnt or 0); tot["sm_amt"] += float(r.amt or 0)
+        # D 手动退款 (is_refunded='是')
         for r in db.execute(text("""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
-            FROM merchant_refunds m WHERE m.trade_time >= :ts AND m.trade_time <= :te AND m.refund_amount > 0
+            FROM manual_refunds m
+            WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
+              AND m.is_refunded = '是'
         """), {"ts": s, "te": e}).fetchall():
-            tot["mr_cnt"] += int(r.cnt or 0); tot["mr_amt"] += float(r.amt or 0)
+            tot["d_cnt"] += int(r.cnt or 0); tot["d_amt"] += float(r.amt or 0)
+        # E 实际现金流 (merchant_refunds SUCCESS, 对账基准)
+        for r in db.execute(text("""
+            SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
+            FROM merchant_refunds m WHERE m.trade_time >= :ts AND m.trade_time <= :te AND m.refund_status = 'SUCCESS'
+        """), {"ts": s, "te": e}).fetchall():
+            tot["e_cnt"] += int(r.cnt or 0); tot["e_amt"] += float(r.amt or 0)
         return tot
 
     cur_tot = _window_totals(cur_s, cur_e)
     prev_tot = _window_totals(prev_s, prev_e) if prev_s and prev_e else dict.fromkeys(cur_tot, 0)
-    cur_cash = cur_tot["online_amt"] + cur_tot["withdraw_amt"] + cur_tot["sm_amt"] + cur_tot["mr_amt"]
-    prev_cash = prev_tot["online_amt"] + prev_tot["withdraw_amt"] + prev_tot["sm_amt"] + prev_tot["mr_amt"]
+    cur_cash = cur_tot["online_amt"] + cur_tot["withdraw_amt"] + cur_tot["sm_amt"] + cur_tot["d_amt"]
+    prev_cash = prev_tot["online_amt"] + prev_tot["withdraw_amt"] + prev_tot["sm_amt"] + prev_tot["d_amt"]
     chain_pct = round((cur_cash - prev_cash) / prev_cash * 100, 1) if prev_cash else None
     w_total_in = sum(wallet_water["transfer_in_amt"])
     w_total_out = sum(wallet_water["withdraw_amt"]) + sum(wallet_water["fee_amt"])
@@ -6733,15 +6769,62 @@ def refund_decision_overview(
     online_amt = cur_tot["online_amt"]
     comp_amt = sum(complaint_split["complaint_amt"])
     comp_ratio = round(comp_amt / online_amt * 100, 1) if online_amt else 0.0
+    actual_cash = cur_tot["e_amt"]                        # E 实际现金流(对账基准)
+    reconcile_diff = round(cur_cash - actual_cash, 2)     # 对账偏差 = 经营四路 − E
+
+    # ── 4. 手动退款登记水位 (与钱包水位同构: 登记 vs 已退款完成 = 蓄水) ──
+    mreg_rows = db.execute(text(f"""
+        SELECT {_day("m.register_time")} AS d,
+               count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
+        FROM manual_refunds m
+        WHERE m.register_time >= :ts AND m.register_time <= :te
+        GROUP BY 1 ORDER BY 1
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    mdone_rows = db.execute(text(f"""
+        SELECT {_day("COALESCE(m.op_time, m.register_time)")} AS d,
+               count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
+        FROM manual_refunds m
+        WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
+          AND m.is_refunded = '是'
+        GROUP BY 1 ORDER BY 1
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    manual_water = {"dates": [], "reg_cnt": [], "reg_amt": [], "done_cnt": [], "done_amt": [],
+                    "net": [], "cum_net": []}
+    mreg_map = {str(r.d): (int(r.cnt or 0), float(r.amt or 0)) for r in mreg_rows}
+    mdone_map = {str(r.d): (int(r.cnt or 0), float(r.amt or 0)) for r in mdone_rows}
+    m_cum = 0.0
+    for d in sorted(set(mreg_map) | set(mdone_map)):
+        reg = mreg_map.get(d, (0, 0.0))
+        done = mdone_map.get(d, (0, 0.0))
+        net = reg[1] - done[1]
+        m_cum += net
+        manual_water["dates"].append(d)
+        manual_water["reg_cnt"].append(reg[0]); manual_water["reg_amt"].append(round(reg[1], 2))
+        manual_water["done_cnt"].append(done[0]); manual_water["done_amt"].append(round(done[1], 2))
+        manual_water["net"].append(round(net, 2))
+        manual_water["cum_net"].append(round(m_cum, 2))
+
+    # E 数据截止日(商户号现金流为快照, 7/20 后无数据, 对账偏差仅截止日前可信)
+    e_data_until = None
+    e_max = db.execute(text(
+        "SELECT max(trade_time) FROM merchant_refunds WHERE refund_status='SUCCESS'"
+    )).scalar()
+    if e_max is not None:
+        e_data_until = e_max.astimezone(TZ).strftime("%Y-%m-%d")
 
     conclusions = []
     extra = ""
-    if cur_tot["sm_cnt"] or cur_tot["mr_cnt"]:
-        extra = f"，闪猫/商户号 {cur_tot['sm_cnt'] + cur_tot['mr_cnt']}笔/¥{cur_tot['sm_amt'] + cur_tot['mr_amt']:,.0f}"
+    if cur_tot["sm_cnt"] or cur_tot["d_cnt"]:
+        extra = f"，闪猫/手动 {cur_tot['sm_cnt'] + cur_tot['d_cnt']}笔/¥{cur_tot['sm_amt'] + cur_tot['d_amt']:,.0f}"
     conclusions.append(
         f"区间退款现金流出 ¥{cur_cash:,.0f}（线上直退 {cur_tot['online_cnt']}笔/¥{cur_tot['online_amt']:,.0f}，"
         f"钱包提现 {cur_tot['withdraw_cnt']}笔/¥{cur_tot['withdraw_amt']:,.0f}{extra}）。"
         + (f"较上一周期 {chain_pct:+.1f}%" if chain_pct is not None else "")
+    )
+    conclusions.append(
+        f"商户号实际现金流 ¥{actual_cash:,.0f}，对账偏差(经营−实际) ¥{reconcile_diff:+,.0f}"
+        + (f"（E 数据截止 {e_data_until}，截止日后对账仅供参考）" if e_data_until else "")
+        + "。"
     )
     if reasons:
         top1, top2 = reasons[0], reasons[1] if len(reasons) > 1 else None
@@ -6755,10 +6838,16 @@ def refund_decision_overview(
         f"钱包净水位 {wallet_net:+,.0f} 元（转入 ¥{w_total_in:,.0f} − 转出 ¥{w_total_out:,.0f}），累计 {sum(wallet_water['cum_net']):+,.0f} 元。"
         + ("水位偏高，注意退款沉淀风险。" if wallet_net > 0 else "水位偏低/为负，转入量不足。")
     )
+    m_cum_final = manual_water["cum_net"][-1] if manual_water["cum_net"] else 0.0
+    conclusions.append(
+        f"手动退款登记蓄水 ¥{m_cum_final:+,.0f} 元（登记 {sum(manual_water['reg_amt']):,.0f} − 已退 {sum(manual_water['done_amt']):,.0f}），"
+        "即已登记但未完成退款的部分。"
+        + ("登记蓄水偏高，注意未退积压。" if m_cum_final > 0 else "")
+    )
 
     summary = {
         "cash_out_total": round(cur_cash, 2),
-        "cash_out_count": cur_tot["online_cnt"] + cur_tot["withdraw_cnt"] + cur_tot["sm_cnt"] + cur_tot["mr_cnt"],
+        "cash_out_count": cur_tot["online_cnt"] + cur_tot["withdraw_cnt"] + cur_tot["sm_cnt"] + cur_tot["d_cnt"],
         "chain_pct": chain_pct,
         "online_count": cur_tot["online_cnt"],
         "online_amount": round(cur_tot["online_amt"], 2),
@@ -6766,6 +6855,11 @@ def refund_decision_overview(
         "wallet_net": wallet_net,
         "complaint_ratio": comp_ratio,
         "complaint_amount": round(comp_amt, 2),
+        "actual_cashflow": round(actual_cash, 2),        # E 实际现金流(对账基准)
+        "actual_cashflow_count": cur_tot["e_cnt"],
+        "reconcile_diff": reconcile_diff,                # 对账偏差 = 经营四路 − E
+        "e_data_until": e_data_until,                    # E 数据截止日(快照)
+        "manual_water_total": round(m_cum_final, 2),     # 手动退款登记蓄水
         "conclusions": conclusions,
     }
 
@@ -6773,9 +6867,97 @@ def refund_decision_overview(
         "summary": summary,
         "routes_daily": routes_daily,
         "wallet_water": wallet_water,
+        "manual_water": manual_water,
         "complaint_split": complaint_split,
         "reason_operator": reason_operator,
     }
+
+
+# ---------- 手动退款登记 数据质量审核 (L3: 自动纠错记录 + 待人工确认) ----------
+def _mr_quality_out(r: ManualRefund) -> dict[str, Any]:
+    """手动退款登记行 → 质量审核输出"""
+    def _sh(dt):
+        return dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S") if dt else None
+    return {
+        "id": r.id,
+        "register_time": _sh(r.register_time),
+        "op_time": _sh(r.op_time),
+        "is_refunded": r.is_refunded,
+        "refund_amount": float(r.refund_amount or 0),
+        "order_amount": float(r.order_amount or 0),
+        "device_sn": r.device_sn,
+        "order_no": r.order_no,
+        "merchant_id": r.merchant_id,
+        "registrant": r.registrant,
+        "refund_operator": r.refund_operator,
+        "remark": r.remark,
+        "quality_status": r.quality_status,
+        "quality_note": r.quality_note,
+    }
+
+
+def manual_refund_quality_list(db: Session, status: str = "all", page: int = 1, page_size: int = 50) -> dict[str, Any]:
+    """手动退款登记质量审核列表: status = all/pending/auto_fixed/ok
+
+    统计摘要: 各状态计数(供前端徽标)。列表按登记日期倒序。
+    """
+    summary = {}
+    for st in ("pending", "auto_fixed", "ok"):
+        summary[st] = db.scalar(
+            select(func.count()).select_from(ManualRefund).where(ManualRefund.quality_status == st)
+        ) or 0
+    q = select(ManualRefund)
+    if status in ("pending", "auto_fixed", "ok"):
+        q = q.where(ManualRefund.quality_status == status)
+    total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
+    rows = db.execute(
+        q.order_by(ManualRefund.register_time.desc())
+        .offset((page - 1) * page_size).limit(page_size)
+    ).scalars().all()
+    return {"total": total, "summary": summary,
+            "list": [_mr_quality_out(r) for r in rows]}
+
+
+def manual_refund_quality_confirm(db: Session, rid: int) -> dict[str, Any]:
+    """人工确认通过: quality_status → ok (保留纠错说明, 追加确认标记)"""
+    r = db.get(ManualRefund, rid)
+    if not r:
+        raise ValueError(f"手动退款记录不存在: id={rid}")
+    r.quality_status = "ok"
+    r.quality_note = ((r.quality_note or "") + " | 人工确认通过") if r.quality_note else "人工确认通过"
+    db.commit()
+    return {"id": rid, "quality_status": "ok"}
+
+
+def manual_refund_quality_fix(db: Session, rid: int, payload: dict[str, Any]) -> dict[str, Any]:
+    """人工修正: 更新指定字段(register_time/op_time/is_refunded/refund_amount/order_no/device_sn等),
+    修正后置 ok。仅接受白名单字段, 时间字段支持 'YYYY-MM-DD' / 'YYYY-MM-DD HH:MM:SS' / ISO 格式。
+    """
+    r = db.get(ManualRefund, rid)
+    if not r:
+        raise ValueError(f"手动退款记录不存在: id={rid}")
+    allowed = {"register_time", "op_time", "is_refunded", "refund_amount", "order_amount",
+               "order_no", "device_sn", "merchant_id", "registrant", "refund_operator", "remark"}
+    changes = []
+    for k, v in (payload or {}).items():
+        if k not in allowed or v is None:
+            continue
+        if k in ("register_time", "op_time"):
+            setattr(r, k, _dt.datetime.fromisoformat(str(v)) if isinstance(v, str) and "T" in str(v)
+                    else _dt.datetime.strptime(str(v), "%Y-%m-%d %H:%M:%S")
+                    if isinstance(v, str) and len(str(v)) > 10
+                    else _dt.datetime.strptime(str(v), "%Y-%m-%d"))
+            changes.append(k)
+        elif k in ("refund_amount", "order_amount"):
+            setattr(r, k, float(v))
+            changes.append(k)
+        else:
+            setattr(r, k, str(v))
+            changes.append(k)
+    r.quality_status = "ok"
+    r.quality_note = ((r.quality_note or "") + f" | 人工修正字段: {','.join(changes)}") if changes else (r.quality_note or "")
+    db.commit()
+    return {"id": rid, "quality_status": "ok", "changed": changes}
 
 
 def refund_export_original(
@@ -6783,9 +6965,9 @@ def refund_export_original(
 ) -> list[dict[str, Any]]:
     """导出退款原始明细 (Excel 自定义分析用)
 
-    每笔退费单一行, 含四路标记(线上直退/钱包提现/闪猫/商户号/线下/转入提现账户/未填写),
+    每笔退费单一行, 含退款路线标记(线上直退/线下/转入提现账户/未填写),
     涉诉分类(按 SN 关联工单 bool_or 优先级 外部>商户号>内部) 与归一操作人。
-    钱包提现与闪猫/商户号退款不属于 refunds 表, 由前端调用方分别导出或仅导出 refunds 明细。
+    钱包提现/闪猫退款/手动退款(D路)不属于 refunds 表, 由前端调用方分别导出或仅导出 refunds 明细。
     """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
 

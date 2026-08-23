@@ -86,3 +86,10 @@ export function refundExport(params) {
   return request.get('/analytics/refund/export', { params, responseType: 'blob', timeout: 120000 })
 }
 
+// 手动退款登记 数据质量审核(L3: 自动纠错记录 + 待人工确认)
+export const manualRefundQuality = {
+  list: (params) => request.get('/analytics/manual-refund/quality', { params }),
+  confirm: (id) => request.post(`/analytics/manual-refund/quality/${id}/confirm`),
+  fix: (id, payload) => request.post(`/analytics/manual-refund/quality/${id}/fix`, payload),
+}
+

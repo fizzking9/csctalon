@@ -13,7 +13,7 @@
             <div class="kpi-card" style="background:#eff6ff">
               <div class="kpi-label" style="color:#2563eb">现金流出总额</div>
               <div class="kpi-value">¥{{ formatMoney(summary.cash_out_total) }}</div>
-              <div class="kpi-sub">{{ summary.cash_out_count }} 笔（线上+提现+线下）</div>
+              <div class="kpi-sub">{{ summary.cash_out_count }} 笔 · 四路经营合计</div>
             </div>
           </el-col>
           <el-col :xs="12" :sm="8" :md="4">
@@ -45,10 +45,17 @@
             </div>
           </el-col>
           <el-col :xs="12" :sm="8" :md="4">
+            <div class="kpi-card" style="background:#fefce8">
+              <div class="kpi-label" style="color:#ca8a04">商户号实际现金流</div>
+              <div class="kpi-value">¥{{ formatMoney(summary.actual_cashflow) }}</div>
+              <div class="kpi-sub">{{ summary.actual_cashflow_count }} 笔 · 对账基准 E<template v-if="summary.e_data_until">（数据截止 {{ summary.e_data_until }}）</template></div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="4">
             <div class="kpi-card" style="background:#f0fdfa">
-              <div class="kpi-label" style="color:#0f766e">用户提现</div>
-              <div class="kpi-value">¥{{ formatMoney(summary.withdraw_amount) }}</div>
-              <div class="kpi-sub">真实现金流出（钱包）</div>
+              <div class="kpi-label" style="color:#0f766e">对账偏差</div>
+              <div class="kpi-value" :style="{ color: (summary.reconcile_diff ?? 0) >= 0 ? '#dc2626' : '#16a34a' }">{{ (summary.reconcile_diff ?? 0) >= 0 ? '+' : '' }}{{ formatMoney(summary.reconcile_diff) }}</div>
+              <div class="kpi-sub">经营四路 − 实际E（不累加）</div>
             </div>
           </el-col>
         </el-row>
@@ -64,8 +71,11 @@
       <section class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">一、资金流出全景</span>
-          <span class="block-hint">判断: 哪条路线异常放大 → 行动: 关注对应路线</span>
+          <span class="block-hint">四路经营 A/B/C/D（堆叠）= 经营估算 · E 商户号实际现金流（曲线，对账基准，不与四路累加）</span>
         </div>
+        <el-alert v-if="summary.e_data_until" type="warning" :closable="false" show-icon class="mb-12">
+          <template #title>商户号现金流(E)为数据快照，截止 {{ summary.e_data_until }}。截止日后 E=0，对账偏差仅供参考，需持续同步商户号流水。</template>
+        </el-alert>
         <BaseChart v-if="routeOption.series?.length" :option="routeOption" height="300px" />
         <el-empty v-else description="暂无资金流出数据" :image-size="60" />
         <el-table :data="routes.table" border stripe size="small" class="mt-12" max-height="260">
@@ -88,16 +98,27 @@
               <span class="amt">¥{{ formatMoney(row['C 闪猫退款_amt']) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="D 商户号直退" align="right">
+          <el-table-column label="D 手动退款" align="right">
             <template #default="{ row }">
-              <span class="num">{{ row['D 商户号直退_cnt'] }}笔</span>
-              <span class="amt">¥{{ formatMoney(row['D 商户号直退_amt']) }}</span>
+              <span class="num">{{ row['D 手动退款_cnt'] }}笔</span>
+              <span class="amt">¥{{ formatMoney(row['D 手动退款_amt']) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="四路合计" align="right" fixed="right" width="150">
+          <el-table-column label="四路合计" align="right" width="150">
             <template #default="{ row }">
               <span class="num strong">{{ row.total_cnt }}笔</span>
               <span class="amt strong">¥{{ formatMoney(row.total_amt) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="商户号实际(E)" align="right" width="150">
+            <template #default="{ row }">
+              <span class="num">{{ row.actual_cnt }}笔</span>
+              <span class="amt" style="color:#ca8a04">¥{{ formatMoney(row.actual_amt) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="对账偏差" align="right" fixed="right" width="150">
+            <template #default="{ row }">
+              <span class="amt" :style="{ color: (row.diff_amt ?? 0) >= 0 ? '#dc2626' : '#16a34a' }">{{ (row.diff_amt ?? 0) >= 0 ? '+' : '' }}{{ formatMoney(row.diff_amt) }}</span>
             </template>
           </el-table-column>
         </el-table>
@@ -135,10 +156,43 @@
         </el-table>
       </section>
 
-      <!-- ===== 区块3: 涉诉归因(风险敞口) ===== -->
+      <!-- ===== 区块3: 手动退款登记水位(登记 vs 已退 = 蓄水) ===== -->
       <section class="block-card mb-16">
         <div class="block-head">
-          <span class="block-title">三、涉诉 vs 普通退款</span>
+          <span class="block-title">三、手动退款登记水位</span>
+          <span class="block-hint">登记(商户号手机退款处理登记) − 已退款完成 = 蓄水 · 手动操作为主,存在登记后未退的积压</span>
+        </div>
+        <div class="water-summary mb-12" v-if="manualWaterTable.length">
+          登记蓄水总额 <b :class="manualWaterTotal >= 0 ? 'pos' : 'neg'">{{ manualWaterTotal >= 0 ? '+' : '' }}¥{{ formatMoney(manualWaterTotal) }}</b>
+          （登记 ¥{{ formatMoney(manualRegTotal) }} − 已退 ¥{{ formatMoney(manualDoneTotal) }}）
+        </div>
+        <BaseChart v-if="manualWaterOption.series?.length" :option="manualWaterOption" height="300px" />
+        <el-empty v-else description="暂无手动退款登记数据" :image-size="60" />
+        <el-table :data="manualWaterTable" border stripe size="small" class="mt-12" max-height="240">
+          <el-table-column prop="date" label="日期" width="100" fixed />
+          <el-table-column label="登记(登记日期)" align="right">
+            <template #default="{ row }"><span class="num">{{ row.reg_cnt }}笔</span><span class="amt">¥{{ formatMoney(row.reg_amt) }}</span></template>
+          </el-table-column>
+          <el-table-column label="已退款完成(操作时间)" align="right">
+            <template #default="{ row }"><span class="num">{{ row.done_cnt }}笔</span><span class="amt">¥{{ formatMoney(row.done_amt) }}</span></template>
+          </el-table-column>
+          <el-table-column label="当日蓄水" align="right" width="150">
+            <template #default="{ row }">
+              <span :class="row.net >= 0 ? 'pos' : 'neg'">{{ row.net >= 0 ? '+' : '' }}{{ formatMoney(row.net) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="累计蓄水" align="right" width="150">
+            <template #default="{ row }">
+              <span :class="row.cum >= 0 ? 'pos' : 'neg'">{{ row.cum >= 0 ? '+' : '' }}{{ formatMoney(row.cum) }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </section>
+
+      <!-- ===== 区块4: 涉诉归因(风险敞口) ===== -->
+      <section class="block-card mb-16">
+        <div class="block-head">
+          <span class="block-title">四、涉诉 vs 普通退款</span>
           <span class="block-hint">线上直退 · SN关联工单分类(外部&gt;商户号&gt;内部优先级) · 判断: 客诉引发占比是否抬头 → 行动: 转投诉/商品质量专项</span>
         </div>
         <BaseChart v-if="complaintOption.series?.length" :option="complaintOption" height="300px" />
@@ -166,10 +220,10 @@
         </el-table>
       </section>
 
-      <!-- ===== 区块4: 原因归因 + 人员归因(为什么退/谁在退) ===== -->
+      <!-- ===== 区块5: 原因归因 + 人员归因(为什么退/谁在退) ===== -->
       <section class="block-card mb-16">
         <div class="block-head">
-          <span class="block-title">四、退款原因 & 操作人员</span>
+          <span class="block-title">五、退款原因 & 操作人员</span>
           <span class="block-hint">线上直退 · 判断: 主因类别与主力人员 → 行动: 针对性处理(网络质量/商品问题/话术)</span>
         </div>
         <el-row :gutter="16">
@@ -194,10 +248,10 @@
         </el-row>
       </section>
 
-      <!-- ===== 区块5: 明细下钻(可查可追) ===== -->
+      <!-- ===== 区块6: 明细下钻(可查可追) ===== -->
       <section class="block-card">
         <div class="block-head">
-          <span class="block-title">五、退款明细</span>
+          <span class="block-title">六、退款明细</span>
           <span class="block-hint">共 {{ detailTotal }} 条 · 点击 SN 可查看设备审计 · 全量数据可点右上角「导出」下载 Excel</span>
         </div>
         <el-table :data="detailList" border stripe size="small" max-height="420">
@@ -285,6 +339,47 @@ const waterTable = computed(() => {
   }))
 })
 
+// ---- 手动退款登记水位(登记 vs 已退 = 蓄水) ----
+const mwater = computed(() => data.value?.manual_water || { dates: [], reg_cnt: [], reg_amt: [], done_cnt: [], done_amt: [], net: [], cum_net: [] })
+const manualWaterTable = computed(() => {
+  const m = mwater.value
+  if (!m.dates?.length) return []
+  return m.dates.map((d, i) => ({
+    date: d,
+    reg_cnt: m.reg_cnt?.[i] ?? 0, reg_amt: m.reg_amt?.[i] ?? 0,
+    done_cnt: m.done_cnt?.[i] ?? 0, done_amt: m.done_amt?.[i] ?? 0,
+    net: m.net?.[i] ?? 0, cum: m.cum_net?.[i] ?? 0,
+  }))
+})
+const manualWaterTotal = computed(() => data.value?.summary?.manual_water_total ?? 0)
+const manualRegTotal = computed(() => mwater.value.reg_amt?.reduce((a, b) => a + (b || 0), 0) || 0)
+const manualDoneTotal = computed(() => mwater.value.done_amt?.reduce((a, b) => a + (b || 0), 0) || 0)
+
+const manualWaterOption = computed(() => {
+  const m = mwater.value
+  if (!m.dates?.length) return {}
+  const dates = m.dates.map(d => String(d).slice(5))
+  return {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { data: ['登记', '已退', '蓄水', '累计蓄水'], top: 0, type: 'scroll', textStyle: { fontSize: 11 } },
+    grid: { left: 56, right: 64, bottom: 44, top: 40 },
+    xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 11 } },
+    yAxis: [
+      { type: 'value', name: '金额(元)', axisLabel: { fontSize: 11 }, splitLine: { lineStyle: { type: 'dashed' } } },
+      { type: 'value', name: '蓄水', axisLabel: { fontSize: 11 }, splitLine: { show: false } },
+    ],
+    series: [
+      { name: '登记', type: 'bar', stack: 'm', data: m.reg_amt, itemStyle: { color: '#f59e0b' }, barMaxWidth: 30 },
+      { name: '已退', type: 'bar', stack: 'm', data: m.done_amt, itemStyle: { color: '#34d399' }, barMaxWidth: 30 },
+      { name: '蓄水', type: 'line', yAxisIndex: 1, data: m.net, smooth: true, symbol: 'circle', symbolSize: 6,
+        itemStyle: { color: '#2563eb' }, lineStyle: { width: 2.5, color: '#2563eb' },
+        markLine: { silent: true, symbol: 'none', lineStyle: { color: '#9ca3af', type: 'dashed' }, data: [{ yAxis: 0 }] } },
+      { name: '累计蓄水', type: 'line', yAxisIndex: 1, data: m.cum_net, smooth: true, symbol: 'circle', symbolSize: 5,
+        itemStyle: { color: '#7c3aed' }, lineStyle: { width: 2, color: '#7c3aed', type: 'dashed' } },
+    ],
+  }
+})
+
 const complaintTable = computed(() => {
   const c = complaint.value
   if (!c.dates?.length) return []
@@ -301,24 +396,33 @@ const complaintTable = computed(() => {
 
 // ---- 图表 ----
 const ROUTE_COLORS = {
-  'A 线上直退': '#2563eb', 'B 钱包提现': '#f59e0b', 'C 闪猫退款': '#10b981', 'D 商户号直退': '#a78bfa',
+  'A 线上直退': '#2563eb', 'B 钱包提现': '#f59e0b', 'C 闪猫退款': '#10b981', 'D 手动退款': '#a78bfa',
 }
 
 const routeOption = computed(() => {
   const r = routes.value
   if (!r.dates?.length) return {}
   const keys = Object.keys(ROUTE_COLORS)
+  // E 实际现金流(对账基准) 作为独立曲线 overlay, 不与四路堆叠累加
+  const eAmt = (r.table || []).map(row => row.actual_amt ?? 0)
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    legend: { data: keys, top: 0, type: 'scroll', textStyle: { fontSize: 11 } },
-    grid: { left: 56, right: 24, bottom: 44, top: 40 },
+    legend: { data: [...keys, '商户号实际(E)'], top: 0, type: 'scroll', textStyle: { fontSize: 11 } },
+    grid: { left: 56, right: 64, bottom: 44, top: 40 },
     xAxis: { type: 'category', data: r.dates.map(d => String(d).slice(5)), axisLabel: { fontSize: 11 } },
-    yAxis: { type: 'value', name: '金额(元)', axisLabel: { fontSize: 11 }, splitLine: { lineStyle: { type: 'dashed' } } },
-    series: keys.map(k => ({
-      name: k, type: 'bar', stack: 'routes', barMaxWidth: 40,
-      data: r.series[k]?.amounts || [],
-      itemStyle: { color: ROUTE_COLORS[k] },
-    })),
+    yAxis: [
+      { type: 'value', name: '金额(元)', axisLabel: { fontSize: 11 }, splitLine: { lineStyle: { type: 'dashed' } } },
+      { type: 'value', name: '实际(E)', axisLabel: { fontSize: 11 }, splitLine: { show: false } },
+    ],
+    series: [
+      ...keys.map(k => ({
+        name: k, type: 'bar', stack: 'routes', barMaxWidth: 40,
+        data: r.series[k]?.amounts || [],
+        itemStyle: { color: ROUTE_COLORS[k] },
+      })),
+      { name: '商户号实际(E)', type: 'line', yAxisIndex: 1, data: eAmt, smooth: true, symbol: 'circle', symbolSize: 6,
+        itemStyle: { color: '#ca8a04' }, lineStyle: { width: 2.5, color: '#ca8a04' }, z: 10 },
+    ],
   }
 })
 
@@ -457,6 +561,8 @@ onMounted(load)
 .amt.strong { font-weight: 600; color: #374151; }
 .pos { color: #ea580c; font-weight: 600; }
 .neg { color: #16a34a; font-weight: 600; }
+.water-summary { font-size: 13px; color: #374151; padding: 8px 12px; background: #f8fafc; border-radius: 6px; border: 1px solid #e2e8f0; }
+.water-summary b { font-size: 14px; margin-left: 4px; }
 .sn-chip { color: #2563eb; cursor: pointer; font-weight: 600; text-decoration: underline; text-decoration-style: dotted; }
 .sn-chip:hover { color: #1d4ed8; }
 .pag-wrap { display: flex; justify-content: flex-end; margin-top: 12px; }

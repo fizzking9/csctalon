@@ -26,6 +26,7 @@ from app.models.external_complaint import ExternalComplaint  # noqa: F401
 from app.models.incident import Incident, IncidentFollowup  # noqa: F401
 from app.models.ingest_mode_config import IngestModeConfig  # noqa: F401
 from app.models.kb_article import KbArticle  # noqa: F401
+from app.models.manual_refund import ManualRefund  # noqa: F401
 from app.models.measure import Measure  # noqa: F401
 from app.models.metric import MetricDailySnapshot, MetricRegistry, MetricThreshold  # noqa: F401
 from app.models.notification_channel import NotificationChannel  # noqa: F401
@@ -99,6 +100,7 @@ __all__ = [
     "IngestModeConfig",
     "KbArticle",
     "Measure",
+    "ManualRefund",
     "Merchant",
     "MerchantRefund",
     "Notification",

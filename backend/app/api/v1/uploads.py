@@ -158,7 +158,7 @@ async def confirm_import(
         record.status = "imported"
         record.finished_at = datetime.now(timezone.utc)
         if result.errors:
-            record.error_detail = {"errors": result.errors[:50]}  # 仅存前50条错误
+            record.error_detail = {"errors": result.errors[:50], "warnings": result.warnings[:50]}  # 仅存前50条
         db.commit()
         db.refresh(record)
 
@@ -177,6 +177,7 @@ async def confirm_import(
                 matched_rows=0,  # 关联匹配在后台执行
                 status=record.status,
                 errors=result.errors[:50] if result.errors else None,
+                warnings=result.warnings[:50] if result.warnings else None,
                 finished_at=record.finished_at,
             )
         )
