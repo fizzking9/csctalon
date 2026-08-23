@@ -60,6 +60,7 @@ class SyncRowResult:
         self.inserted = 0
         self.updated = 0
         self.dropped = 0
+        self.filtered = 0
         self.warnings = 0
         self.matched = 0
         self.errors: list[dict[str, Any]] = []
@@ -203,6 +204,26 @@ def _clean_card_row(row: dict[str, Any], idx: int, result: SyncRowResult) -> dic
         result.add_dropped(idx, f"卡商行解析失败: {e}")
         return None
     return rec
+
+
+def _is_empty_external_rec(rec: dict[str, Any]) -> bool:
+    """判断 315 外部投诉行是否全空(无任何有效信息) → 应过滤, 不落库
+    Excel 末尾常有多余空行, 同步时若不过滤会产生"全空记录"。"""
+    keys = (
+        "complaint_no", "complaint_date", "platform", "company_entity",
+        "complaint_shop", "complainant", "complainant_phone", "device_sn",
+        "problem", "complaint_category", "result", "follower",
+    )
+    return all((rec.get(k) is None or str(rec.get(k)).strip() == "") for k in keys)
+
+
+def _is_empty_card_rec(rec: dict[str, Any]) -> bool:
+    """判断 卡商群投诉行是否全空 → 应过滤, 不落库"""
+    keys = (
+        "complaint_date", "complaint_group", "complainant", "complainant_phone",
+        "device_sn", "problem", "problem_category", "result", "handler",
+    )
+    return all((rec.get(k) is None or str(rec.get(k)).strip() == "") for k in keys)
 
 
 def _sn_to_ticket_map(db: Session, sns: set[str]) -> dict[str, list[str]]:
@@ -361,8 +382,12 @@ def sync_complaints_from_payload(
                 ext_result.add_dropped(idx, "315行不是对象")
                 continue
             rec = _clean_external_row(row, idx, ext_result)
-            if rec is not None:
-                ext_rows.append(rec)
+            if rec is None:
+                continue
+            if _is_empty_external_rec(rec):
+                ext_result.filtered += 1
+                continue
+            ext_rows.append(rec)
         ext_result.total = len(ext_rows_raw)
 
         card_rows: list[dict] = []
@@ -371,8 +396,12 @@ def sync_complaints_from_payload(
                 card_result.add_dropped(idx, "卡商行不是对象")
                 continue
             rec = _clean_card_row(row, idx, card_result)
-            if rec is not None:
-                card_rows.append(rec)
+            if rec is None:
+                continue
+            if _is_empty_card_rec(rec):
+                card_result.filtered += 1
+                continue
+            card_rows.append(rec)
         card_result.total = len(card_rows_raw)
 
         # 收集需要关联工单的 SN(两张表共用,避免重复查)
@@ -403,6 +432,10 @@ def sync_complaints_from_payload(
         all_errors = (ext_result.errors + card_result.errors)[:50]
         if all_errors:
             log.error = str(all_errors)
+        # 空行过滤信息写入日志(供排查"全空记录"来源)
+        if ext_result.filtered or card_result.filtered:
+            _info = f"过滤全空行: 315={ext_result.filtered} 卡商={card_result.filtered}"
+            log.error = (f"{_info} | " + str(all_errors)) if all_errors else _info
         if ext_result.dropped or card_result.dropped:
             log.status = "partial"
         else:
@@ -424,6 +457,7 @@ def sync_complaints_from_payload(
                 "inserted": ext_result.inserted,
                 "updated": ext_result.updated,
                 "failed": ext_result.dropped,
+                "filtered": ext_result.filtered,
                 "warnings": ext_result.warnings,
                 "matched": ext_result.matched,
                 "errors": ext_result.errors[:50],
@@ -433,6 +467,7 @@ def sync_complaints_from_payload(
                 "inserted": card_result.inserted,
                 "updated": card_result.updated,
                 "failed": card_result.dropped,
+                "filtered": card_result.filtered,
                 "warnings": card_result.warnings,
                 "matched": card_result.matched,
                 "errors": card_result.errors[:50],

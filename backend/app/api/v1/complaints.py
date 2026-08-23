@@ -444,6 +444,20 @@ def complaint_detail(
     src_expr = _complaint_source_type_case()
     handler_expr = _handler_fallback_cols()
 
+    # 被投诉商户主体名集合(registrant 去重): 用于过滤上游把商户号名称误写入 handler 的脏数据
+    # 商户号投诉的"处理人"必须是客服人员, 不能是商户主体名。
+    entity_set: set[str] = set()
+    if not source_type or source_type == "商户号投诉":
+        entity_set = set(
+            db.scalars(
+                select(ServiceTicket.registrant)
+                .where(_ticket_category_case() == "投诉")
+                .where(src_expr == "商户号投诉")
+                .where(ServiceTicket.registrant.isnot(None), ServiceTicket.registrant != "")
+                .distinct()
+            ).all()
+        )
+
     records: list[dict] = []
 
     # 1. 服务工单投诉 (主台账) → is_primary=True, 前端排序在前
@@ -460,6 +474,7 @@ def complaint_detail(
             ServiceTicket.register_time,
             ServiceTicket.status,
             ServiceTicket.finish_time,
+            ServiceTicket.registrant,  # 被投诉商户主体名(商户号投诉场景; 内部/外部投诉时多为处理人或空)
         )
         .where(_ticket_category_case() == "投诉")
     )
@@ -507,7 +522,9 @@ def complaint_detail(
             "device_sn": r[1],
             "category": r[3],
             "problem": r[4],
-            "handler": _norm_handler(raw_handler),
+            # 商户号投诉: handler 若落在被投诉主体名集合 → 该行无真实处理人(上游脏数据)
+            "handler": "未分配" if (source == "商户号投诉" and raw_handler in entity_set) else _norm_handler(raw_handler),
+            "entity": r[9],  # 被投诉商户主体名(registrant)
             "time": _to_sh_iso(display_dt),
             "register_time": _to_sh_iso(register),
             "finish_time": _to_sh_iso(finish) if _is_real_finish(finish, register) else None,
@@ -644,12 +661,14 @@ def complaint_supplementary(
                 "platform": getattr(c, "platform", None),
                 "problem": c.problem,
                 "problem_category": getattr(c, "problem_category", None) or getattr(c, "complaint_category", None),
+                "company_entity": getattr(c, "company_entity", None),
                 "solution": c.solution,
                 "result": c.result,
                 "handler": getattr(c, "handler", None) or getattr(c, "follower", None),
                 "handle_detail": getattr(c, "handle_detail", None) or getattr(c, "handle_result", None),
                 "handle_time": _to_sh_iso(c.handle_time) if hasattr(c, "handle_time") else None,
                 "matched_ticket_no": c.matched_ticket_no,
+                "created_at": _to_sh_iso(c.created_at) if hasattr(c, "created_at") else None,
             }
             for c in rows
         ]
@@ -702,6 +721,403 @@ def list_audits(
             page=page,
             page_size=page_size,
         )
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# 综合分析 (决策看板用)
+# ─────────────────────────────────────────────────────────────
+
+
+@router.get("/analysis", response_model=R, summary="投诉决策分析(管理摘要/平台分布/时效/处理人效率)")
+def complaint_analysis(
+    db: DBSession,
+    _: CurrentUser,
+    start: str | None = None,
+    end: str | None = None,
+):
+    """投诉决策分析接口，返回管理摘要、平台分布、趋势、时效、处理人效率等维度。
+    与 /summary 共享口径，但提供更多分析维度供决策看板使用。
+    """
+    ts = _parse_dt(start)
+    te = _parse_dt_end(end)
+
+    src_expr = _complaint_source_type_case()
+    handler_expr = _handler_fallback_cols()
+
+    # 辅助: 时间过滤 (register 或 finish 在范围内)
+    def _action_filter(stmt):
+        if ts:
+            stmt = stmt.where(ServiceTicket.register_time >= ts)
+        if te:
+            stmt = stmt.where(ServiceTicket.register_time <= te)
+        return stmt
+
+    def _tk_base():
+        """基础: 投诉类工单"""
+        return select(ServiceTicket).where(_ticket_category_case() == "投诉")
+
+    # ── 1. 管理摘要 ──
+    total = db.scalar(_action_filter(_tk_base().with_only_columns(func.count()))) or 0
+
+    # 三源统计
+    internal_total = db.scalar(
+        _action_filter(_tk_base().with_only_columns(func.count()).where(src_expr == "内部投诉"))
+    ) or 0
+    merchant_total = db.scalar(
+        _action_filter(_tk_base().with_only_columns(func.count()).where(src_expr == "商户号投诉"))
+    ) or 0
+    external_total = db.scalar(
+        _action_filter(_tk_base().with_only_columns(func.count()).where(src_expr == "外部投诉"))
+    ) or 0
+
+    # 积压: 全量未完成(不限时间)
+    _done_set = {"已结案", "已完成", "完成", "已解决", "已回复", "已反馈", "已关闭", "终止", "已终止"}
+    backlog_total = db.scalar(
+        _tk_base().with_only_columns(func.count()).where(
+            or_(
+                ServiceTicket.status.is_(None),
+                ServiceTicket.status == "",
+                ~ServiceTicket.status.in_(_done_set),
+            )
+        )
+    ) or 0
+
+    # 已完成: 有真实完成时间
+    done_total = db.scalar(
+        _action_filter(
+            _tk_base().with_only_columns(func.count()).where(
+                ServiceTicket.finish_time.isnot(None),
+                ServiceTicket.finish_time > ServiceTicket.register_time,
+            )
+        )
+    ) or 0
+    completion_rate = round(done_total / total, 4) if total > 0 else 0
+
+    # 平均处理时长(小时) — 仅统计有真实完成时间的
+    avg_handle_row = db.execute(
+        _action_filter(
+            _tk_base().with_only_columns(
+                func.avg(
+                    func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) / 3600
+                )
+            ).where(
+                ServiceTicket.finish_time.isnot(None),
+                ServiceTicket.finish_time > ServiceTicket.register_time,
+            )
+        )
+    ).scalar()
+    avg_handle_hours = round(float(avg_handle_row), 1) if avg_handle_row else 0
+
+    # ── 2. 来源分布 ──
+    source_dist = db.execute(
+        _action_filter(
+            _tk_base().with_only_columns(src_expr, func.count())
+            .group_by(src_expr)
+            .order_by(func.count().desc())
+        )
+    ).all()
+    source_distribution = [
+        {"name": r[0] or "内部投诉", "count": int(r[1] or 0)}
+        for r in source_dist
+    ]
+
+    # ── 3. 趋势(按日, 三源堆叠) ──
+    day_trunc = func.date_trunc("day", func.timezone("Asia/Shanghai", ServiceTicket.register_time))
+    trend_rows = db.execute(
+        _action_filter(
+            _tk_base().with_only_columns(day_trunc, src_expr, func.count())
+            .group_by(day_trunc, src_expr)
+            .order_by(day_trunc)
+        )
+    ).all()
+    # 合并为 {day: {source: count}} 结构
+    trend_map: dict[str, dict[str, int]] = {}
+    for r in trend_rows:
+        day = str(r[0])[:10] if r[0] else ""
+        src = r[1] or "内部投诉"
+        cnt = int(r[2] or 0)
+        if day not in trend_map:
+            trend_map[day] = {}
+        trend_map[day][src] = trend_map[day].get(src, 0) + cnt
+    trend = [
+        {
+            "day": d,
+            "内部投诉": v.get("内部投诉", 0),
+            "商户号投诉": v.get("商户号投诉", 0),
+            "外部投诉": v.get("外部投诉", 0),
+        }
+        for d, v in sorted(trend_map.items())[:90]
+    ]
+
+    # ── 4. 处理人 Top10 ──
+    handler_rows = db.execute(
+        _action_filter(
+            _tk_base().with_only_columns(handler_expr, func.count())
+            .where(handler_expr.isnot(None))
+            .group_by(handler_expr)
+            .order_by(func.count().desc())
+            .limit(10)
+        )
+    ).all()
+    handler_top = [
+        {"name": _norm_handler(r[0]), "count": int(r[1] or 0)}
+        for r in handler_rows
+        if _norm_handler(r[0]) != "未分配"
+    ][:10]
+
+    # ── 5. 外部投诉平台分布 (以 315 补充表为主口径, 含完整投诉内容) ──
+    # 工单口径 remark 全空且数量少; 315 补充表(external_complaints)有完整 problem/平台/分类。
+    ext_conds = []
+    if ts:
+        ext_conds.append(ExternalComplaint.complaint_date >= ts)
+    if te:
+        ext_conds.append(ExternalComplaint.complaint_date <= te)
+
+    # 平台分布 (315 表 platform 字段)
+    ext_plat_rows = db.execute(
+        select(ExternalComplaint.platform, func.count())
+        .where(*ext_conds)
+        .group_by(ExternalComplaint.platform)
+        .order_by(func.count().desc())
+        .limit(15)
+    ).all()
+    platform_distribution = [
+        {"name": r[0] or "未标注", "count": int(r[1] or 0)}
+        for r in ext_plat_rows
+    ]
+
+    # 问题分类分布 (315 表 complaint_category 字段)
+    ext_cat_rows = db.execute(
+        select(ExternalComplaint.complaint_category, func.count())
+        .where(*ext_conds)
+        .group_by(ExternalComplaint.complaint_category)
+        .order_by(func.count().desc())
+        .limit(15)
+    ).all()
+    external_category_distribution = [
+        {"name": r[0] or "未标注", "count": int(r[1] or 0)}
+        for r in ext_cat_rows
+    ]
+
+    # 外部投诉趋势 (315 表按日)
+    ext_day_trunc = func.date_trunc("day", func.timezone("Asia/Shanghai", ExternalComplaint.complaint_date))
+    ext_trend_rows = db.execute(
+        select(ext_day_trunc, func.count())
+        .where(*ext_conds)
+        .group_by(ext_day_trunc)
+        .order_by(ext_day_trunc)
+    ).all()
+    external_trend = [
+        {"day": str(r[0])[:10], "count": int(r[1] or 0)}
+        for r in ext_trend_rows
+    ]
+
+    # 外部投诉总数/关联状态 (315 表)
+    ext_total = db.scalar(select(func.count()).select_from(ExternalComplaint).where(*ext_conds)) or 0
+    ext_matched = db.scalar(
+        select(func.count()).select_from(ExternalComplaint)
+        .where(*ext_conds)
+        .where(ExternalComplaint.matched_ticket_no.isnot(None))
+    ) or 0
+
+    # 今日登记的外部投诉数(按 created_at 北京时间当天): 独立于筛选范围
+    # 用户关注"今天同步/登记进来了几条", 与"投诉日期"口径区分(投诉日期可能早于登记日)
+    now_sh = datetime.now(TZ)
+    today_start_utc = now_sh.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    ext_today_registered = db.scalar(
+        select(func.count()).select_from(ExternalComplaint)
+        .where(ExternalComplaint.created_at >= today_start_utc)
+    ) or 0
+
+    # 商户号投诉分类 (工单 service_item)
+    merchant_rows = db.execute(
+        _action_filter(
+            _tk_base().with_only_columns(ServiceTicket.service_item, func.count())
+            .where(src_expr == "商户号投诉")
+            .group_by(ServiceTicket.service_item)
+            .order_by(func.count().desc())
+            .limit(10)
+        )
+    ).all()
+    merchant_category = [
+        {"name": r[0] or "未标注", "count": int(r[1] or 0)}
+        for r in merchant_rows
+    ]
+
+    # ── 5.1 商户号被投诉主体分布 (registrant 字段存被投诉商户主体名, 非处理人) ──
+    merchant_entity_rows = db.execute(
+        _action_filter(
+            _tk_base().with_only_columns(ServiceTicket.registrant, func.count())
+            .where(src_expr == "商户号投诉")
+            .where(ServiceTicket.registrant.isnot(None), ServiceTicket.registrant != "")
+            .group_by(ServiceTicket.registrant)
+            .order_by(func.count().desc())
+            .limit(15)
+        )
+    ).all()
+    merchant_entity_distribution = [
+        {"name": r[0] or "未标注", "count": int(r[1] or 0)}
+        for r in merchant_entity_rows
+    ]
+
+    # 商户号处理人分布 (handler, 排除被投诉主体名)
+    merchant_handler_rows = db.execute(
+        _action_filter(
+            _tk_base().with_only_columns(handler_expr, func.count())
+            .where(src_expr == "商户号投诉")
+            .where(handler_expr.isnot(None))
+            .group_by(handler_expr)
+            .order_by(func.count().desc())
+            .limit(10)
+        )
+    ).all()
+    merchant_entity_names = {r[0] for r in merchant_entity_rows if r[0]}
+    merchant_handler_distribution = [
+        {"name": _norm_handler(r[0]), "count": int(r[1] or 0)}
+        for r in merchant_handler_rows
+        if _norm_handler(r[0]) != "未分配" and r[0] not in merchant_entity_names
+    ]
+
+    # ── 6. 时效分布(处理时长分布) ──
+    # 按处理时长(天)分桶: <1天, 1-3天, 3-7天, 7-14天, 14-30天, >30天
+    _bucket = case(
+        (
+            func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) / 3600 <= 24,
+            "<1天",
+        ),
+        (
+            func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) / 3600 <= 72,
+            "1-3天",
+        ),
+        (
+            func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) / 3600 <= 168,
+            "3-7天",
+        ),
+        (
+            func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) / 3600 <= 336,
+            "7-14天",
+        ),
+        (
+            func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) / 3600 <= 720,
+            "14-30天",
+        ),
+        else_=">30天",
+    )
+    timeliness_rows = db.execute(
+        _action_filter(
+            _tk_base().with_only_columns(_bucket, func.count())
+            .where(
+                ServiceTicket.finish_time.isnot(None),
+                ServiceTicket.finish_time > ServiceTicket.register_time,
+            )
+            .group_by(_bucket)
+        )
+    ).all()
+    # 确保桶顺序
+    _bucket_order = ["<1天", "1-3天", "3-7天", "7-14天", "14-30天", ">30天"]
+    timeliness_map = {r[0]: int(r[1] or 0) for r in timeliness_rows}
+    timeliness = [
+        {"name": b, "count": timeliness_map.get(b, 0)}
+        for b in _bucket_order
+    ]
+
+    # ── 7. 处理人效率 (按三源分组: 内部/商户号/外部 是不同维度的任务) ──
+    _done_case = case(
+        (ServiceTicket.finish_time.isnot(None), 1),
+        else_=0,
+    )
+    _hours_case = case(
+        (
+            ServiceTicket.finish_time.isnot(None),
+            func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) / 3600,
+        ),
+        else_=None,
+    )
+
+    def _eff_rows(src_val: str, entity_set: set[str] | None = None) -> list[dict]:
+        eff = db.execute(
+            _action_filter(
+                _tk_base().with_only_columns(
+                    handler_expr,
+                    func.count().label("total"),
+                    func.sum(_done_case).label("done"),
+                    func.avg(_hours_case).label("avg_hours"),
+                )
+                .where(src_expr == src_val)
+                .where(handler_expr.isnot(None))
+                .group_by(handler_expr)
+                .order_by(func.count().desc())
+                .limit(15)
+            )
+        ).all()
+        return [
+            {
+                "name": _norm_handler(r[0]),
+                "total": int(r[1] or 0),
+                "done": int(r[2] or 0),
+                "avg_hours": round(float(r[3]), 1) if r[3] else 0,
+            }
+            for r in eff
+            if _norm_handler(r[0]) != "未分配"
+            and (not entity_set or r[0] not in entity_set)
+        ]
+
+    handler_efficiency = {
+        "internal": _eff_rows("内部投诉"),
+        "merchant": _eff_rows("商户号投诉", entity_set=merchant_entity_names),
+        "external": _eff_rows("外部投诉"),
+    }
+
+    # ── 8. 外部投诉平台趋势 (315 表按平台) ──
+    ext_plat_trend_rows = db.execute(
+        select(ext_day_trunc, ExternalComplaint.platform, func.count())
+        .where(*ext_conds)
+        .group_by(ext_day_trunc, ExternalComplaint.platform)
+        .order_by(ext_day_trunc)
+    ).all()
+    ext_plat_trend_map: dict[str, dict[str, int]] = {}
+    for r in ext_plat_trend_rows:
+        day = str(r[0])[:10] if r[0] else ""
+        platform = r[1] or "未标注"
+        cnt = int(r[2] or 0)
+        if day not in ext_plat_trend_map:
+            ext_plat_trend_map[day] = {}
+        ext_plat_trend_map[day][platform] = ext_plat_trend_map[day].get(platform, 0) + cnt
+    external_platform_trend = [
+        {"day": d, **v}
+        for d, v in sorted(ext_plat_trend_map.items())[:90]
+    ]
+
+    return R(
+        data={
+            "summary": {
+                "total": total,
+                "internal_total": internal_total,
+                "merchant_total": merchant_total,
+                "external_total": external_total,
+                "backlog_total": backlog_total,
+                "done_total": done_total,
+                "completion_rate": completion_rate,
+                "avg_handle_hours": avg_handle_hours,
+            },
+            "source_distribution": source_distribution,
+            "trend": trend,
+            "handler_top": handler_top,
+            "platform_distribution": platform_distribution,
+            "external_category_distribution": external_category_distribution,
+            "external_trend": external_trend,
+            "external_total": ext_total,
+            "external_matched": ext_matched,
+            "external_unmatched": ext_total - ext_matched,
+            "external_today_registered": ext_today_registered,
+            "merchant_category": merchant_category,
+            "merchant_entity_distribution": merchant_entity_distribution,
+            "merchant_handler_distribution": merchant_handler_distribution,
+            "timeliness": timeliness,
+            "handler_efficiency": handler_efficiency,
+            "external_platform_trend": external_platform_trend,
+        }
     )
 
 

@@ -113,9 +113,7 @@ const routes = [
       },
       {
         path: 'dashboards/complaint',
-        name: 'DashboardComplaint',
-        component: () => import('@/views/dashboards/DashboardView.vue'),
-        meta: { title: '投诉总览', icon: 'Warning', manager: true },
+        redirect: '/dashboards/complaint-analysis',
       },
       {
         path: 'dashboards/complaint-analysis',

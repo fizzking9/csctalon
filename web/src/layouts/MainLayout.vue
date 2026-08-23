@@ -40,7 +40,6 @@
           </template>
           <el-menu-item index="/dashboards/refund">退款分析</el-menu-item>
           <el-menu-item index="/dashboards/refund-recovery">挽回分析</el-menu-item>
-          <el-menu-item index="/dashboards/complaint">投诉总览</el-menu-item>
           <el-menu-item index="/dashboards/complaint-analysis">投诉分析</el-menu-item>
           <el-menu-item index="/dashboards/complaint-audit">投诉核查</el-menu-item>
           <el-menu-item index="/dashboards/reception">接待分析</el-menu-item>

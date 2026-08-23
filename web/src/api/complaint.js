@@ -1,5 +1,10 @@
 import request from '@/api'
 
+// 投诉决策分析(管理摘要/平台分布/时效/处理人效率)
+export function complaintAnalysis(params) {
+  return request.get('/complaints/analysis', { params })
+}
+
 // 三源投诉统计汇总
 export function complaintSummary(params) {
   return request.get('/complaints/summary', { params })
