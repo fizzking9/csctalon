@@ -75,10 +75,9 @@ import { getDashboard, listDashboards, executeDashboard } from '@/api/dashboard'
 
 const route = useRoute()
 
-// 预设看板路由名 → code 映射(接待看板已独立为 Reception.vue,此处无)
+// 预设看板路由名 → code 映射(投诉总览已下线重定向至投诉分析,此处无)
 const CODE_BY_NAME = {
   DashboardRefund: 'preset_dashboard_refund',
-  DashboardComplaint: 'preset_dashboard_complaint',
   DashboardPerformance: 'preset_dashboard_performance',
 }
 

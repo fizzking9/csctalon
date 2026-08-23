@@ -131,8 +131,8 @@
               <div class="shortcut-chip" @click="$router.push('/dashboards/refund')">
                 <el-icon color="#e6a23c"><Wallet /></el-icon><span>退款分析</span>
               </div>
-              <div class="shortcut-chip" @click="$router.push('/dashboards/complaint')">
-                <el-icon color="#f56c6c"><WarningFilled /></el-icon><span>投诉总览</span>
+              <div class="shortcut-chip" @click="$router.push('/dashboards/complaint-analysis')">
+                <el-icon color="#f56c6c"><WarningFilled /></el-icon><span>投诉分析</span>
               </div>
               <div class="shortcut-chip" @click="$router.push('/dashboards/reception')">
                 <el-icon color="#409eff"><Service /></el-icon><span>接待分析</span>
