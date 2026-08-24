@@ -4,23 +4,40 @@
 # 前提: 服务器能访问 gitea(http://10.147.17.41:3000), 已装 git(未装会自动装)。
 #
 # 用法(服务器上, root 或 sudo):
-#   curl -fsSL http://10.147.17.41:3000/tanzk/csctalon/raw/branch/main/deploy/bootstrap.sh | sudo bash
+#   普通安装:
+#     curl -fsSL http://10.147.17.41:3000/tanzk/csctalon/raw/branch/main/deploy/bootstrap.sh | sudo bash
+#   首次部署含数据导入(推荐, 位置参数经 bash -s 透传, 不受 sudo 清环境变量影响):
+#     curl -fsSL http://10.147.17.41:3000/tanzk/csctalon/raw/branch/main/deploy/bootstrap.sh | \
+#       sudo bash -s -- --env-file /root/csctalon-prod.env --restore /opt/csctalon/packages/csctalon-backup-*.tar.gz
 #
-# 可传环境变量:
-#   REPO=...       # git 仓库地址(默认 http://10.147.17.41:3000/tanzk/csctalon.git)
-#   BRANCH=...     # 分支(默认 main)
-#   ENV_FILE=...   # 现成 .env 绝对路径(推荐: 本地 backend/.env 按部署手册改好后上传)
-#   RESTORE_FILE=...# 数据备份包绝对路径(首次迁移用 backup.sh 的产物)
-#   SKIP_DOCKER=1  # 已装 docker 时跳过安装
+# 支持的位置参数(透传给 install-server.sh):
+#   --env-file <路径>   现成 .env 绝对路径(推荐: 本地 .env 按部署手册改好后上传)
+#   --restore <备份包>  数据备份包绝对路径(首次迁移用 backup.sh 的产物)
+#   --skip-install-docker 已装 docker 时跳过安装
 #
-# 示例(首次部署含数据导入):
-#   curl -fsSL http://10.147.17.41:3000/tanzk/csctalon/raw/branch/main/deploy/bootstrap.sh | \
-#     ENV_FILE=/root/csctalon.env RESTORE_FILE=/root/csctalon-backup-20260824.tar.gz sudo bash
+# 兼容旧用法(环境变量方式, 注意 sudo 会清空环境, 建议改用上面 bash -s 方式):
+#   REPO=... BRANCH=... ENV_FILE=... RESTORE_FILE=... SKIP_DOCKER=1
 # =============================================================================
 set -euo pipefail
 
 REPO="${REPO:-http://10.147.17.41:3000/tanzk/csctalon.git}"
 BRANCH="${BRANCH:-main}"
+
+# ---------- 参数解析(支持 bash -s -- 透传 + 环境变量兼容) ----------
+ENV_FILE="${ENV_FILE:-}"
+RESTORE_FILE="${RESTORE_FILE:-}"
+SKIP_DOCKER="${SKIP_DOCKER:-}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --env-file) ENV_FILE="${2:?--env-file 需要路径}"; shift 2 ;;
+    --restore) RESTORE_FILE="${2:?--restore 需要备份包路径}"; shift 2 ;;
+    --skip-install-docker) SKIP_DOCKER=1; shift ;;
+    --repo) REPO="${2:?--repo 需要仓库地址}"; shift 2 ;;
+    --branch) BRANCH="${2:?--branch 需要分支名}"; shift 2 ;;
+    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "✘ 未知参数: $1" >&2; exit 1 ;;
+  esac
+done
 
 c() { echo -e "\033[36m▶ $*\033[0m"; }
 ok() { echo -e "\033[32m✔ $*\033[0m"; }

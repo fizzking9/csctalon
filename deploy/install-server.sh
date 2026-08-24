@@ -124,6 +124,14 @@ if [[ -n "$ENV_FILE" ]]; then
   ok "已使用 --env-file 提供的 .env"
 else
   if [[ -f "$ENV_TARGET" ]]; then
+    # 沿用已有 .env 时校验生产关键变量, 防止旧模板导致数据落到错误目录
+    if ! grep -qE "^(DB_DATA_DIR|ENV_FILE)=" "$ENV_TARGET"; then
+      err "$APP_DIR/.env 缺少生产关键变量(DB_DATA_DIR/ENV_FILE), 可能是旧模板或未按生产配置"
+      echo ""
+      echo "  请改用 --env-file 提供完整生产 .env(参考 deploy/env.production.example), 例如:"
+      echo "    bash $0 --src-dir ${SRC_DIR:---pkg $PKG} --env-file /path/to/csctalon-prod.env"
+      exit 1
+    fi
     ok "已存在 $APP_DIR/.env, 沿用"
   else
     cp "$RELEASE_DIR/.env.example" "$ENV_TARGET"
@@ -145,6 +153,8 @@ fi
 
 # ---------- 6. 软链 current + 构建启动 ----------
 ln -sfn "$RELEASE_DIR" "$APP_DIR/current"
+# 兜底: 让 compose 在代码目录内也能找到生产 .env(env_file: .env 相对 compose 目录解析)
+ln -sf "$APP_DIR/.env" "$APP_DIR/current/.env" 2>/dev/null || true
 c "启动服务 (docker compose up -d --build, 首次构建较慢)..."
 cd "$APP_DIR/current"
 # compose 自动加载同目录 .env; 生产 .env 在 $APP_DIR/.env, 用 env-file 方式指过去
