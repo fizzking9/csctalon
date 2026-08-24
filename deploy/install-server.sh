@@ -100,10 +100,10 @@ if [[ -n "$SRC_DIR" ]]; then
   fi
   c "复制代码 → $RELEASE_DIR (来源: $SRC_DIR)"
   mkdir -p "$RELEASE_DIR"
-  # 排除 .git 等, 保持干净
+  # 排除 .git/node_modules/__pycache__ 即可: git clone 目录本就无 data/logs/dist;
+  # 注意不能用 --exclude='data', 会误伤 web/src/views/data/ 源码目录(曾致前端构建失败)
   tar czf - -C "$SRC_DIR" \
     --exclude='.git' --exclude='node_modules' --exclude='__pycache__' \
-    --exclude='data' --exclude='logs' --exclude='dist' --exclude='backups' \
     . 2>/dev/null | tar xzf - -C "$RELEASE_DIR"
 else
   VER="$(tar xzf "$PKG" -O VERSION.tmp 2>/dev/null || basename "$PKG" .tar.gz | sed 's/^csctalon-//')"
