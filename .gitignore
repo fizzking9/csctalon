@@ -95,3 +95,6 @@ backend-data/
 *.log
 logs/
 backend/logs/
+
+# ---------- 部署产物(本地打包/备份,勿入库) ----------
+backups/
