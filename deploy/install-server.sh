@@ -7,9 +7,12 @@
 # 用法:
 #   sudo ./deploy/install-server.sh                                # 自动找 packages 里最新发布包
 #   sudo ./deploy/install-server.sh --pkg /opt/csctalon/packages/csctalon-xxx.tar.gz
+#   sudo ./deploy/install-server.sh --src-dir /tmp/csctalon-src    # 代码来自已有目录(如 git clone 产物)
 #   sudo ./deploy/install-server.sh --env-file /root/csctalon.env  # 使用现成 .env(推荐: 从本地 .env 改)
 #   sudo ./deploy/install-server.sh --restore /root/csctalon-backup-xxx.tar.gz  # 同时恢复数据
 #   sudo ./deploy/install-server.sh --skip-install-docker          # Docker 已装好时跳过安装
+#   git 一键安装(服务器能访问 gitea 时):
+#     curl -fsSL http://10.147.17.41:3000/tanzk/csctalon/raw/branch/main/deploy/bootstrap.sh | sudo bash
 #
 # 目录约定(数据固定, 代码随版本切换):
 #   /opt/csctalon/releases/<版本>/   每版代码(解压发布包)
@@ -26,6 +29,7 @@ set -euo pipefail
 
 APP_DIR="/opt/csctalon"
 PKG=""
+SRC_DIR=""
 ENV_FILE=""
 RESTORE_FILE=""
 SKIP_DOCKER=0
@@ -34,11 +38,12 @@ SKIP_DOCKER=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --pkg) PKG="${2:?--pkg 需要发布包路径}"; shift 2 ;;
+    --src-dir) SRC_DIR="${2:?--src-dir 需要代码目录路径}"; shift 2 ;;
     --env-file) ENV_FILE="${2:?--env-file 需要 .env 路径}"; shift 2 ;;
     --restore) RESTORE_FILE="${2:?--restore 需要备份包路径}"; shift 2 ;;
     --skip-install-docker) SKIP_DOCKER=1; shift ;;
     -h|--help)
-      sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "✘ 未知参数: $1"; exit 1 ;;
   esac
@@ -66,31 +71,51 @@ fi
 docker compose version >/dev/null 2>&1 || { err "Docker Compose 不可用, 请手动安装"; exit 1; }
 ok "Docker 环境就绪"
 
-# ---------- 2. 定位发布包 ----------
-if [[ -z "$PKG" ]]; then
-  PKG="$(ls -t "$APP_DIR/packages/"*.tar.gz 2>/dev/null | head -1 || true)"
+# ---------- 2. 定位代码来源(发布包 或 git clone 目录) ----------
+if [[ -n "$SRC_DIR" ]]; then
+  SRC_DIR="$(realpath "$SRC_DIR")"
+  [[ -f "$SRC_DIR/docker-compose.yml" ]] || { err "--src-dir 不是有效代码目录(缺少 docker-compose.yml): $SRC_DIR"; exit 1; }
+else
+  if [[ -z "$PKG" ]]; then
+    PKG="$(ls -t "$APP_DIR/packages/"*.tar.gz 2>/dev/null | head -1 || true)"
+  fi
+  if [[ -z "$PKG" || ! -f "$PKG" ]]; then
+    err "未找到发布包。请先用 upload.sh 上传, 或用 --pkg/--src-dir 指定来源"
+    exit 1
+  fi
+  PKG="$(realpath "$PKG")"
 fi
-if [[ -z "$PKG" || ! -f "$PKG" ]]; then
-  err "未找到发布包。请先用 upload.sh 上传, 或用 --pkg 指定路径"
-  exit 1
-fi
-PKG="$(realpath "$PKG")"
 
 # ---------- 3. 建目录 ----------
 mkdir -p "$APP_DIR"/{releases,packages,backups,data,logs,uploads,browser_states}
 mkdir -p "$APP_DIR/data/postgres" "$APP_DIR/data/redis"
 mkdir -p "$APP_DIR/logs/nginx" "$APP_DIR/logs/backend"
 
-# ---------- 4. 解压代码到版本目录 ----------
-VER="$(tar xzf "$PKG" -O VERSION.tmp 2>/dev/null || basename "$PKG" .tar.gz | sed 's/^csctalon-//')"
-RELEASE_DIR="$APP_DIR/releases/$VER"
-if [[ -e "$RELEASE_DIR" ]]; then
-  # 同版本重复发布 → 追加时间戳
-  RELEASE_DIR="$APP_DIR/releases/${VER}-$(date +%Y%m%d%H%M%S)"
+# ---------- 4. 落盘代码到版本目录 ----------
+if [[ -n "$SRC_DIR" ]]; then
+  VER="$(cd "$SRC_DIR" && git describe --tags --always 2>/dev/null || basename "$SRC_DIR")"
+  RELEASE_DIR="$APP_DIR/releases/$VER"
+  if [[ -e "$RELEASE_DIR" ]]; then
+    RELEASE_DIR="$APP_DIR/releases/${VER}-$(date +%Y%m%d%H%M%S)"
+  fi
+  c "复制代码 → $RELEASE_DIR (来源: $SRC_DIR)"
+  mkdir -p "$RELEASE_DIR"
+  # 排除 .git 等, 保持干净
+  tar czf - -C "$SRC_DIR" \
+    --exclude='.git' --exclude='node_modules' --exclude='__pycache__' \
+    --exclude='data' --exclude='logs' --exclude='dist' --exclude='backups' \
+    . 2>/dev/null | tar xzf - -C "$RELEASE_DIR"
+else
+  VER="$(tar xzf "$PKG" -O VERSION.tmp 2>/dev/null || basename "$PKG" .tar.gz | sed 's/^csctalon-//')"
+  RELEASE_DIR="$APP_DIR/releases/$VER"
+  if [[ -e "$RELEASE_DIR" ]]; then
+    # 同版本重复发布 → 追加时间戳
+    RELEASE_DIR="$APP_DIR/releases/${VER}-$(date +%Y%m%d%H%M%S)"
+  fi
+  c "解压发布包 → $RELEASE_DIR"
+  mkdir -p "$RELEASE_DIR"
+  tar xzf "$PKG" -C "$RELEASE_DIR"
 fi
-c "解压发布包 → $RELEASE_DIR"
-mkdir -p "$RELEASE_DIR"
-tar xzf "$PKG" -C "$RELEASE_DIR"
 
 # ---------- 5. 准备 .env ----------
 ENV_TARGET="$APP_DIR/.env"
@@ -113,7 +138,7 @@ else
     echo "      BROWSER_STATES_DIR=$APP_DIR/browser_states"
     echo "      BACKEND_LOGS_DIR=$APP_DIR/logs/backend"
     echo "      NGINX_LOGS_DIR=$APP_DIR/logs/nginx"
-    echo "  编辑完成后重新执行本脚本(--pkg $PKG)"
+    echo "  编辑完成后重新执行本脚本(--src-dir ${SRC_DIR:---pkg $PKG})"
     exit 1
   fi
 fi
