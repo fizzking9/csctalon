@@ -98,8 +98,10 @@ services:
     volumes:
       - ${NGINX_LOGS_DIR:-./logs/nginx}:/var/log/nginx
       - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro   # 挂载配置,容器重启不丢失,本地改完 nginx -s reload 即生效
+      - ${CERTS_DIR:-./certs}:/etc/nginx/certs:ro             # SSL 证书(HTTPS, 阿里云免费证书 nginx 格式上传到此)
     ports:
       - "80:80"
+      - "443:443"                                             # HTTPS
     depends_on:
       backend:
         condition: service_healthy   # 等后端就绪再启动 nginx,消除 host not found in upstream emerg
