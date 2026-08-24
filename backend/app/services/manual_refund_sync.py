@@ -23,6 +23,7 @@ from app.models.manual_refund import ManualRefund
 from app.models.manual_refund_sync_log import ManualRefundSyncLog
 from app.services.data_parser import COLUMN_TEMPLATES
 from app.services.upsert import (
+    _ensure_afternoon_time,
     _manual_refund_quality_check,
     _sanitize_name_field,
     _sync_devices,
@@ -96,7 +97,7 @@ def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult) ->
     """清洗单条手动退款行 → 模型字段值"""
     data = _map_row(row)
     try:
-        register_time = _to_datetime(data.get("register_time"))
+        register_time = _ensure_afternoon_time(_to_datetime(data.get("register_time")))
         order_no = _to_str(data.get("order_no"))
         if register_time is None or not order_no:
             result.add_dropped(idx, "缺少登记日期或订单号,无法去重定位(跳过)")
@@ -106,7 +107,7 @@ def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult) ->
         if remark == "示例":
             result.add_warning(idx, "备注为'示例'的模板数据行,已跳过")
             return None
-        op_time = _to_datetime(data.get("op_time"))
+        op_time = _ensure_afternoon_time(_to_datetime(data.get("op_time")))
         # 时间质量校验(年份纠错 auto_fixed / 待人工确认 pending, 覆盖 R2/R3)
         register_time, quality_status, quality_note = _manual_refund_quality_check(
             register_time, op_time, idx, result)
