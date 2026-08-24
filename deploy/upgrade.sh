@@ -91,11 +91,13 @@ fi
 # ---------- 3. 切换软链并重建 ----------
 ln -sfn "$CURRENT" "$APP_DIR/current.old"   # 回滚锚点
 ln -sfn "$RELEASE_DIR" "$CURRENT"
+ln -sf "$ENV_FILE" "$CURRENT/.env" 2>/dev/null || true   # 兜底: compose 相对目录找 .env
 c "重建并启动服务 (后端启动自动执行 alembic 迁移)..."
 cd "$CURRENT"
 if ! docker compose --env-file "$ENV_FILE" up -d --build; then
   err "启动失败, 自动回滚..."
   ln -sfn "$(readlink "$APP_DIR/current.old")" "$CURRENT"
+  ln -sf "$ENV_FILE" "$CURRENT/.env" 2>/dev/null || true
   cd "$CURRENT"
   docker compose --env-file "$ENV_FILE" up -d --build || true
   exit 1

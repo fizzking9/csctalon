@@ -69,6 +69,7 @@ fi
 
 c "切换代码: $(readlink "$CURRENT") → $VERSION"
 ln -sfn "$VERSION" "$CURRENT"
+ln -sf "$ENV_FILE" "$CURRENT/.env" 2>/dev/null || true   # 兜底: compose 相对目录找 .env
 cd "$CURRENT"
 docker compose --env-file "$ENV_FILE" up -d --build
 
