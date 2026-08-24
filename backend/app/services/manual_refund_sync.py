@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -24,6 +24,8 @@ from app.models.manual_refund_sync_log import ManualRefundSyncLog
 from app.services.data_parser import COLUMN_TEMPLATES
 from app.services.upsert import (
     _ensure_afternoon_time,
+    _manual_dedup_key,
+    _manual_dedup_register_date,
     _manual_refund_quality_check,
     _sanitize_name_field,
     _sync_devices,
@@ -134,27 +136,26 @@ def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult) ->
 
 
 def _dedup_in_batch(rows: list[dict]) -> list[dict]:
-    """同批次内复合键去重(文件里可能存在完全相同的 登记日期+订单号+退款金额 行,
+    """同批次内去重: 按 (登记日期, 订单号, 设备号, 登记人) 键(文件里可能存在重复行,
     PG ON CONFLICT DO UPDATE 不允许同一语句内二次命中,保留最后一条)"""
     seen: dict[tuple, dict] = {}
     for r in rows:
-        amt_key = r["refund_amount"] if r["refund_amount"] is not None else 0.0
-        seen[(r["register_time"], r["order_no"], amt_key)] = r
+        seen[_manual_dedup_key(r)] = r
     return list(seen.values())
 
 
 def _batch_upsert(db: Session, rows: list[dict], result: ManualRefundSyncResult) -> None:
-    """按 (register_time, order_no, COALESCE(refund_amount,0)) 复合键做 on_conflict_do_update
+    """按 (北京登记日期, order_no, COALESCE(device_sn,''), COALESCE(registrant,'')) 去重 upsert
 
-    与本地导入(upsert.upsert_manual_refunds)同口径: 同一订单可分期多次退款,
-    故去重键含登记日期+订单号+退款金额。分批写入避免单条 SQL 绑定参数超 PG 上限。
+    与本地导入(upsert.upsert_manual_refunds)同口径: 设备号+订单号+登记日期+登记人 确定一笔退款单,
+    退款金额/状态修改走 UPDATE。分批写入避免单条 SQL 绑定参数超 PG 上限。
     """
     if not rows:
         return
     unique_rows = _dedup_in_batch(rows)
     dup_in_batch = len(rows) - len(unique_rows)
     if dup_in_batch:
-        logger.info(f"[manual_refund_sync] 批次内重复复合键 {dup_in_batch} 行(保留最后一条)")
+        logger.info(f"[manual_refund_sync] 批次内重复去重键 {dup_in_batch} 行(保留最后一条)")
 
     before = db.scalar(select(func.count()).select_from(ManualRefund)) or 0
     BATCH = 2000
@@ -162,10 +163,15 @@ def _batch_upsert(db: Session, rows: list[dict], result: ManualRefundSyncResult)
         batch = unique_rows[i:i + BATCH]
         stmt = pg_insert(ManualRefund).values(batch)
         update_cols = {c: stmt.excluded[c] for c in batch[0].keys()
-                       if c not in ("register_time", "order_no", "refund_amount")}
+                       if c not in ("register_time", "order_no", "device_sn", "registrant")}
         stmt = stmt.on_conflict_do_update(
-            # 列名用 Column 对象(渲染为标识符), 表达式索引 COALESCE 用 text() 原样渲染
-            index_elements=[ManualRefund.register_time, ManualRefund.order_no, text("COALESCE(refund_amount, 0)")],
+            # 表达式部分唯一索引 (北京登记日期, order_no, COALESCE(device_sn,''), COALESCE(registrant,''))
+            index_elements=[
+                text("((register_time AT TIME ZONE 'Asia/Shanghai')::date)"),
+                text("order_no"),
+                text("COALESCE(device_sn, '')"),
+                text("COALESCE(registrant, '')"),
+            ],
             index_where=text("order_no IS NOT NULL"),
             set_=update_cols,
         )
@@ -175,6 +181,27 @@ def _batch_upsert(db: Session, rows: list[dict], result: ManualRefundSyncResult)
     inserted = max(after - before, 0)
     result.inserted += inserted
     result.updated += max(len(unique_rows) - inserted, 0)
+
+
+def _reconcile_full(db: Session, keys_in_payload: set[tuple]) -> int:
+    """全量对账: 删除库中不在本次推送内的行(按新去重键)。返回删除行数。
+
+    要求 workbuddy 每次全量推送文件全部行(payload 带 full_sync=true)。
+    只处理 order_no 非空的行; order_no 为空的历史脏行不受影响。
+    """
+    rows = db.execute(
+        select(ManualRefund.id, ManualRefund.register_time, ManualRefund.order_no,
+               ManualRefund.device_sn, ManualRefund.registrant)
+        .where(ManualRefund.order_no.isnot(None))
+    ).all()
+    stale_ids: list[int] = []
+    for rid, rt, on, sn, reg in rows:
+        k = (str(_manual_dedup_register_date(rt)), on, (sn or "").strip(), (reg or "").strip())
+        if k not in keys_in_payload:
+            stale_ids.append(rid)
+    if stale_ids:
+        db.execute(delete(ManualRefund).where(ManualRefund.id.in_(stale_ids)))
+    return len(stale_ids)
 
 
 def sync_manual_refunds_from_payload(
@@ -189,6 +216,8 @@ def sync_manual_refunds_from_payload(
     {
       "source_file": "商户号手机退款处理登记.xlsx",   # 可选
       "manual_refunds": [ {...中文列名行...} ],      # 必填
+      "full_sync": true,                            # 可选; 每次全量推送文件全部行时置 true,
+                                                     # 系统会删除库中不在本次推送内的残留行(全量对账)
     }
     行内字段名兼容 xlsx 中文列名与英文字段名。
     返回统计(与 manual_refund_sync_logs 记录一致)。
@@ -198,6 +227,7 @@ def sync_manual_refunds_from_payload(
     result = ManualRefundSyncResult()
     try:
         rows_raw = payload.get("manual_refunds") or []
+        full_sync = bool(payload.get("full_sync"))
         if not isinstance(rows_raw, list):
             raise ValueError("manual_refunds 必须是数组")
 
@@ -216,10 +246,19 @@ def sync_manual_refunds_from_payload(
         _sync_devices(rows, "device_sn", db)
         _batch_upsert(db, rows, result)
 
+        # 全量对账: 删除库中不在本次推送内的行(防止文件版本回退/删除行导致残留累积)
+        deleted = 0
+        if full_sync and rows:
+            keys_in_payload = {_manual_dedup_key(r) for r in rows}
+            deleted = _reconcile_full(db, keys_in_payload)
+            if deleted:
+                logger.info(f"[manual_refund_sync] 全量对账删除残留行 {deleted} 行")
+
         # 统计写日志(dropped=硬失败行, 影响状态; warnings=软警告仅记录)
         log.total = result.total
         log.inserted = result.inserted
         log.updated = result.updated
+        log.deleted = deleted
         log.failed = result.dropped
         log.warnings = result.warnings
         all_errors = result.errors[:50]
@@ -232,7 +271,7 @@ def sync_manual_refunds_from_payload(
 
         logger.info(
             f"[manual_refund_sync] {source_file or 'workbuddy-push'} 完成: "
-            f"{result.total}(+{result.inserted}/~{result.updated}/!{result.dropped}/!w{result.warnings})"
+            f"{result.total}(+{result.inserted}/~{result.updated}/-{deleted}/!{result.dropped}/!w{result.warnings})"
         )
         return {
             "log_id": log.id,
@@ -240,6 +279,7 @@ def sync_manual_refunds_from_payload(
             "total": result.total,
             "inserted": result.inserted,
             "updated": result.updated,
+            "deleted": deleted,
             "failed": result.dropped,
             "filtered": result.filtered,
             "warnings": result.warnings,

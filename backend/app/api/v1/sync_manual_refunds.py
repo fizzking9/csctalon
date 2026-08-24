@@ -65,7 +65,8 @@ def push_manual_refunds(
     }
     ```
     行内字段名兼容 xlsx 中文列名(见 docs/workbuddy手动退款数据同步接入规范.md)与英文字段名。
-    服务会做: 数据清洗(时间质量校验/姓名/金额) → 按 (登记日期,订单号,退款金额) 复合键去重 upsert。
+    服务会做: 数据清洗(时间质量校验/姓名/金额) → 按 (登记日期,订单号,设备号,登记人) 去重 upsert。
+    payload 带 "full_sync": true 时, 还会删除库中不在本次推送内的残留行(全量对账, 要求每次推送文件全部行)。
     """
     if not token_ok:
         if not settings.WORKBUDDY_SYNC_TOKEN:
@@ -121,6 +122,7 @@ def list_sync_logs(
                     "total": log.total,
                     "inserted": log.inserted,
                     "updated": log.updated,
+                    "deleted": log.deleted,
                     "failed": log.failed,
                     "warnings": log.warnings,
                     "error": log.error,

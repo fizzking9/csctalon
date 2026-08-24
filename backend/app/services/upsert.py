@@ -1408,11 +1408,39 @@ def _manual_refund_quality_check(
     return register_time, status, note
 
 
-def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
-    """手动退款登记(商户号手机退款处理登记) - 按 (register_time, order_no, refund_amount) 复合键去重 upsert
+def _manual_dedup_register_date(register_time: datetime | None) -> datetime | None:
+    """登记日期(北京时间, 去时分秒) — 手动退款去重键用。
 
-    同一订单可分期多次退款(不同登记日期/退款金额),故去重键含登记日期+订单号+退款金额,
-    重复导入按此键更新而非累计。is_refunded 归一: 非"是"一律"否"(含空 → 未退款,计入登记蓄水)。
+    兼容历史版本解析差异(同一日期可能存成北京 00:00 或 15:00), 统一按北京日期参与去重。
+    """
+    if register_time is None:
+        return None
+    try:
+        return register_time.astimezone(_TZ_CN).date()
+    except (ValueError, OSError):
+        return register_time.date()
+
+
+def _manual_dedup_key(r: dict) -> tuple:
+    """手动退款去重键: (登记日期, 订单号, 设备号, 登记人)。
+
+    这四列即可确定一笔退款单; 退款金额/状态被修改时按该键 UPDATE 而非新增,
+    避免因金额变化产生新行导致历史残留累积。
+    """
+    return (
+        str(_manual_dedup_register_date(r.get("register_time"))),
+        r.get("order_no"),
+        (r.get("device_sn") or "").strip(),
+        (r.get("registrant") or "").strip(),
+    )
+
+
+def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """手动退款登记(商户号手机退款处理登记) - 按 (登记日期, 订单号, 设备号, 登记人) 去重 upsert
+
+    设备号+订单号+登记日期+登记人 即可确定一笔退款单(见 _manual_dedup_key),
+    重复导入按该键更新而非累计; 退款金额/状态被修改时更新同一行, 不再因金额变化产生新行。
+    is_refunded 归一: 非"是"一律"否"(含空 → 未退款,计入登记蓄水)。
     缺登记日期或订单号的行无法定位,跳过。导入时做时间质量校验(自动纠错/待人工确认, 见
     _manual_refund_quality_check), 结果写入 quality_status/quality_note 供数据质量审核。
     """
@@ -1458,25 +1486,29 @@ def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session
     if not rows:
         return
     _sync_devices(rows, "device_sn", db)
-    # 同批次内复合键去重(Excel 中可能存在完全相同的 登记日期+订单号+退款金额 行,
+    # 同批次内去重: 按 (登记日期, 订单号, 设备号, 登记人) 键(Excel 中可能存在重复行,
     # PG ON CONFLICT DO UPDATE 不允许同一语句内二次命中,保留最后一条)
     seen: dict[tuple, dict] = {}
     for r in rows:
-        amt_key = r["refund_amount"] if r["refund_amount"] is not None else 0.0
-        seen[(r["register_time"], r["order_no"], amt_key)] = r
+        seen[_manual_dedup_key(r)] = r
     rows = list(seen.values())
-    # 分批 on_conflict_do_update:按 (register_time, order_no, COALESCE(refund_amount,0)) 表达式部分唯一索引去重更新
-    # (refund_amount=NULL 的行由 COALESCE 归一为 0 参与去重, 避免同订单同日空金额行重复导入)
+    # 分批 on_conflict_do_update: 按 (北京登记日期, order_no, COALESCE(device_sn,''), COALESCE(registrant,''))
+    # 部分唯一索引去重更新(退款金额不参与键, 金额修改走 UPDATE)
     before = db.scalar(select(func.count()).select_from(ManualRefund)) or 0
     BATCH = 2000
     for i in range(0, len(rows), BATCH):
         batch = rows[i:i + BATCH]
         stmt = pg_insert(ManualRefund).values(batch)
         update_cols = {c: stmt.excluded[c] for c in batch[0].keys()
-                       if c not in ("register_time", "order_no", "refund_amount")}
+                       if c not in ("register_time", "order_no", "device_sn", "registrant")}
         stmt = stmt.on_conflict_do_update(
-            # 列名用 Column 对象(渲染为标识符), 表达式索引 COALESCE 用 text() 原样渲染
-            index_elements=[ManualRefund.register_time, ManualRefund.order_no, text("COALESCE(refund_amount, 0)")],
+            # 表达式部分唯一索引 (北京登记日期, order_no, COALESCE(device_sn,''), COALESCE(registrant,''))
+            index_elements=[
+                text("((register_time AT TIME ZONE 'Asia/Shanghai')::date)"),
+                text("order_no"),
+                text("COALESCE(device_sn, '')"),
+                text("COALESCE(registrant, '')"),
+            ],
             index_where=text("order_no IS NOT NULL"),
             set_=update_cols,
         )

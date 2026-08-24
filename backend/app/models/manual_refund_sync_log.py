@@ -25,6 +25,7 @@ class ManualRefundSyncLog(IDMixin, TimestampMixin, Base):
     total: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="收到总行数")
     inserted: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="新增行数")
     updated: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="更新行数")
+    deleted: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="全量对账删除行数")
     failed: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="失败行数(硬失败被丢弃)")
     warnings: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="软警告数(字段被清洗但行保留)")
 
