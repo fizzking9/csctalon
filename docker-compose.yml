@@ -6,6 +6,10 @@
 # 数据: PG / Redis 数据 bind mount 到 ./data，宿主机可直接备份。
 # 日志: ① 所有容器 stdout 走 json-file 轮转（单文件 10m，保留 3 份），防止撑爆磁盘；
 #       ② 后端 gunicorn access/error 日志 + nginx 日志额外写文件到 ./logs，便于直接查看。
+#
+# 挂载路径变量化(生产部署用): 服务器上通过 .env 把数据/日志/附件指到固定绝对目录
+# (如 /opt/csctalon/data), 这样代码目录可随版本切换(releases/current), 数据不随代码变动。
+# 本地不设置这些变量时, 回退到默认相对路径 ./data 等, 行为与之前完全一致。
 
 services:
   db:
@@ -16,7 +20,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-csctalon}
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data
+      - ${DB_DATA_DIR:-./data/postgres}:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:5432:5432"   # 仅本机可连，不对局域网暴露
     healthcheck:
@@ -40,7 +44,7 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
     command: ["sh", "-c", "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$$REDIS_PASSWORD\"; else redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru; fi"]
     volumes:
-      - ./data/redis:/data
+      - ${REDIS_DATA_DIR:-./data/redis}:/data
     ports:
       - "127.0.0.1:6379:6379"   # 仅本机可连
     restart: unless-stopped
@@ -63,9 +67,9 @@ services:
     environment:
       - ENV=prod
     volumes:
-      - ./backend/uploads:/app/uploads
-      - ./data/browser_states:/app/data/browser_states   # Playwright 登录态(独立于 uploads, 不被静态挂载暴露)
-      - ./logs/backend:/app/logs   # 持久化日志文件,避免容器重建丢失 500 堆栈
+      - ${UPLOADS_DIR:-./backend/uploads}:/app/uploads
+      - ${BROWSER_STATES_DIR:-./data/browser_states}:/app/data/browser_states   # Playwright 登录态(独立于 uploads, 不被静态挂载暴露)
+      - ${BACKEND_LOGS_DIR:-./logs/backend}:/app/logs   # 持久化日志文件,避免容器重建丢失 500 堆栈
     ports:
       - "127.0.0.1:8000:8000"   # 仅本机可连；前端经 nginx 反代访问
     healthcheck:
@@ -90,7 +94,7 @@ services:
     build: ./web
     container_name: csctalon-web
     volumes:
-      - ./logs/nginx:/var/log/nginx
+      - ${NGINX_LOGS_DIR:-./logs/nginx}:/var/log/nginx
       - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro   # 挂载配置,容器重启不丢失,本地改完 nginx -s reload 即生效
     ports:
       - "80:80"
