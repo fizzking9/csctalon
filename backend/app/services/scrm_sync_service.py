@@ -177,7 +177,15 @@ def _has_playwright_credentials(cfg: dict) -> bool:
 
 
 def _to_utc_aware(ts: Any) -> datetime | None:
-    """宽松解析 SCRM 各种时间字段 → 带 UTC 时区的 datetime;失败返回 None"""
+    """宽松解析 SCRM 各种时间字段 → 带 UTC 时区的 datetime;失败返回 None
+
+    ⚠️ 时区假设待核实(2026-08-24 备注, SCRM 数据暂未同步无实证):
+       - 当前把 naive 时间一律视为 UTC 存储;
+       - 但查询参数是按东八区发送的(_fmt_scrm_ts, "SCRM 平台要求东八区")。
+       若上游接口返回的其实是北京时间 naive, 这里会偏 8 小时(读回北京后 +8h)。
+       待 SCRM 首次同步有数据后, 需用实际数据验证(startTime 换算北京是否落在
+       客服上班时段 08:00~23:59), 确认后再决定 naive 分支是否改为按北京解释。
+    """
     if ts is None or ts == "":
         return None
     if isinstance(ts, datetime):

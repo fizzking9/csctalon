@@ -595,7 +595,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
         try:
             with db.begin_nested():
                 sm_rows = db.execute(text(f"""
-                SELECT to_char({_C_SHANMAO_TIME_COL}, 'YYYY-MM-DD') AS date,
+                SELECT to_char(timezone('Asia/Shanghai', {_C_SHANMAO_TIME_COL}), 'YYYY-MM-DD') AS date,
                        COUNT(*) AS cnt,
                        COALESCE(SUM({_C_SHANMAO_AMOUNT_COL})::numeric,0) AS amt
                 FROM {_C_SHANMAO_TABLE}
@@ -616,7 +616,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
         try:
             with db.begin_nested():
                 ot_rows = db.execute(text(f"""
-                SELECT to_char({_D_OTHER_TIME_COL}, 'YYYY-MM-DD') AS date,
+                SELECT to_char(timezone('Asia/Shanghai', {_D_OTHER_TIME_COL}), 'YYYY-MM-DD') AS date,
                        COUNT(*) AS cnt,
                        COALESCE(SUM({_D_OTHER_AMOUNT_COL})::numeric,0) AS amt
                 FROM {_D_OTHER_TABLE}
