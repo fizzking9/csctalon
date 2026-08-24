@@ -9,6 +9,8 @@
 #   sudo ./deploy/upgrade.sh /opt/csctalon/packages/csctalon-v1.1.0-xxxx.tar.gz
 #   sudo ./deploy/upgrade.sh /opt/csctalon/packages/latest.tar.gz
 #   sudo ./deploy/upgrade.sh <包> --no-backup      # 跳过升级前自动备份(不推荐)
+#   sudo ./deploy/upgrade.sh --git                 # 直接从 gitea 拉取最新 main 升级
+#   sudo ./deploy/upgrade.sh --git --branch dev    # 指定分支
 #
 # 备份产物: /opt/csctalon/backups/  (供 rollback.sh 恢复)
 # =============================================================================
@@ -18,19 +20,25 @@ APP_DIR="/opt/csctalon"
 CURRENT="$APP_DIR/current"
 ENV_FILE="$APP_DIR/.env"
 DO_BACKUP=1
+GIT_MODE=0
+REPO="http://10.147.17.41:3000/tanzk/csctalon.git"
+BRANCH="main"
 
 PKG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-backup) DO_BACKUP=0; shift ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --git) GIT_MODE=1; shift ;;
+    --repo) REPO="${2:?--repo 需要仓库地址}"; shift 2 ;;
+    --branch) BRANCH="${2:?--branch 需要分支名}"; shift 2 ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) PKG="$1"; shift ;;
   esac
 done
 
 if [[ $EUID -ne 0 ]]; then echo "✘ 请用 root 或 sudo 执行" >&2; exit 1; fi
-if [[ -z "$PKG" || ! -f "$PKG" ]]; then
-  echo "✘ 用法: sudo ./deploy/upgrade.sh <发布包路径>" >&2; exit 1
+if [[ $GIT_MODE -eq 0 && ( -z "$PKG" || ! -f "$PKG" ) ]]; then
+  echo "✘ 用法: sudo ./deploy/upgrade.sh <发布包路径>  或  sudo ./deploy/upgrade.sh --git" >&2; exit 1
 fi
 if [[ ! -L "$CURRENT" ]]; then
   echo "✘ 未检测到 $CURRENT 软链, 请确认已执行过 install-server.sh" >&2; exit 1
@@ -43,9 +51,15 @@ c() { echo -e "\033[36m▶ $*\033[0m"; }
 ok() { echo -e "\033[32m✔ $*\033[0m"; }
 err() { echo -e "\033[31m✘ $*\033[0m" >&2; }
 
-PKG="$(realpath "$PKG")"
+if [[ $GIT_MODE -eq 1 ]]; then
+  PKG=""
+  NEW_VER="$(git ls-remote --tags "$REPO" "refs/tags/$BRANCH" 2>/dev/null | head -1 | cut -f1 | cut -c1-12 || true)"
+  [[ -z "$NEW_VER" ]] && NEW_VER="git-$(date +%Y%m%d%H%M%S)"
+else
+  PKG="$(realpath "$PKG")"
+  NEW_VER="$(tar xzf "$PKG" -O VERSION.tmp 2>/dev/null || basename "$PKG" .tar.gz | sed 's/^csctalon-//')"
+fi
 OLD_VER="$(cat "$CURRENT/VERSION.tmp" 2>/dev/null || basename "$(readlink "$CURRENT")")"
-NEW_VER="$(tar xzf "$PKG" -O VERSION.tmp 2>/dev/null || basename "$PKG" .tar.gz | sed 's/^csctalon-//')"
 RELEASE_DIR="$APP_DIR/releases/$NEW_VER"
 if [[ -e "$RELEASE_DIR" ]]; then
   RELEASE_DIR="$APP_DIR/releases/${NEW_VER}-$(date +%Y%m%d%H%M%S)"
@@ -60,10 +74,19 @@ if [[ $DO_BACKUP -eq 1 ]]; then
   bash "$CURRENT/deploy/backup.sh" --env-file "$ENV_FILE" --output "$APP_DIR/backups" --keep 7
 fi
 
-# ---------- 2. 解压新包 ----------
-c "解压发布包 → $RELEASE_DIR"
+# ---------- 2. 获取新代码(tar 解包 或 git clone) ----------
 mkdir -p "$RELEASE_DIR"
-tar xzf "$PKG" -C "$RELEASE_DIR"
+if [[ $GIT_MODE -eq 1 ]]; then
+  c "从 gitea 拉取代码: $REPO ($BRANCH) → $RELEASE_DIR"
+  git clone --depth 1 -b "$BRANCH" "$REPO" "$RELEASE_DIR" || {
+    err "git clone 失败(确认服务器能访问 $REPO), 已中止, 未做任何改动"
+    rm -rf "$RELEASE_DIR"
+    exit 1
+  }
+else
+  c "解压发布包 → $RELEASE_DIR"
+  tar xzf "$PKG" -C "$RELEASE_DIR"
+fi
 
 # ---------- 3. 切换软链并重建 ----------
 ln -sfn "$CURRENT" "$APP_DIR/current.old"   # 回滚锚点
