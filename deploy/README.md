@@ -180,7 +180,7 @@ sudo /opt/csctalon/current/deploy/restore.sh /opt/csctalon/backups/csctalon-back
 ## 7. 安全清单（上线前逐项确认）
 
 - [ ] 安全组仅放行 `80`（+未来 `443`）与 `22`（限办公 IP），`5432/6379/8000` 不对公网
-- [ ] `.env` 未入 git；密码均为强随机；`JWT_SECRET_KEY/CONFIG_ENCRYPTION_KEY` 已按 §2.3 处理
+- [ ] `.env` 未入 git；密码均为强随机；`JWT_SECRET_KEY/CONFIG_ENCRYPTION_KEY` 已按 §2.4 处理
 - [ ] 初始 `admin` 已登录并改密
 - [ ] `WORKBUDDY_SYNC_TOKEN` 已设置（空则推送接口 503）
 - [ ] 每日备份 cron 已配置且成功跑过一次
