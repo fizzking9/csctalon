@@ -38,7 +38,8 @@ RUN pip install --no-cache-dir \
     # 发票二维码图本地解码(规划设计 §4.5 全电发票识别链路)
     "pyzbar>=0.1.9" "pillow>=10.0.0"
 
-# 安装 Chromium 浏览器
+# 安装 Chromium 浏览器(浏览器二进制走 npmmirror 镜像,避免 cdn.playwright.dev 国内无法访问)
+ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/
 RUN playwright install chromium --with-deps
 
 COPY . /app
