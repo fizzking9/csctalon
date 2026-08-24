@@ -39,13 +39,13 @@ mkdir -p "$OUT_DIR"
 echo "${VERSION}" > "$ROOT_DIR/VERSION.tmp"
 
 # ---------- 打包 ----------
+# 注意: 根 data/logs/dist/backups 不在显式清单里, 无需 exclude;
+#       tar --exclude 不能写 data/logs(会匹配任意层级, 误伤 web/src/views/data/
+#       源码目录——曾导致前端 Ingest.vue 缺失构建失败)
 tar czf "$OUT_FILE" \
   --exclude='.git' \
   --exclude='.gitignore' \
   --exclude='node_modules' \
-  --exclude='data' \
-  --exclude='logs' \
-  --exclude='dist' \
   --exclude='__pycache__' \
   --exclude='.venv' \
   --exclude='.venv_test' \
