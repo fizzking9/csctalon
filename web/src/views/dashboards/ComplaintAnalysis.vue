@@ -368,46 +368,220 @@
             </el-table-column>
           </el-table>
         </el-card>
+      </section>
 
-        <!-- 积压未处理明细 -->
+      <!-- ============ TAB: 积压审核 ============ -->
+      <section v-if="activeTab === 'backlog'" class="block-card">
+        <div class="block-head">
+          <span class="block-title">积压未处理投诉审核</span>
+          <span class="block-hint">统一口径: 归一化状态非已完成 · 默认最旧积压优先 · 支持核查留痕(归因/评判/结论)</span>
+        </div>
+
+        <!-- 筛选 -->
+        <div class="filter-bar mb-12">
+          <el-select v-model="backlogFilters.source_type" size="small" placeholder="来源" clearable style="width:130px" @change="backlogPage = 1; loadBacklog()">
+            <el-option label="内部投诉" value="内部投诉" />
+            <el-option label="商户号投诉" value="商户号投诉" />
+            <el-option label="外部投诉" value="外部投诉" />
+          </el-select>
+          <el-select v-model="backlogFilters.status" size="small" placeholder="状态" clearable style="width:110px" @change="backlogPage = 1; loadBacklog()">
+            <el-option label="处理中" value="处理中" />
+            <el-option label="待处理" value="待处理" />
+            <el-option label="待跟进" value="待跟进" />
+          </el-select>
+          <el-select v-model="backlogFilters.has_handler" size="small" placeholder="分派" clearable style="width:110px" @change="backlogPage = 1; loadBacklog()">
+            <el-option label="待分派" :value="false" />
+            <el-option label="已分派" :value="true" />
+          </el-select>
+          <el-button size="small" :icon="Refresh" @click="loadBacklog">刷新</el-button>
+        </div>
+
+        <!-- KPI -->
+        <el-row :gutter="12" class="mb-16">
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="kpi-card" style="background:#fef2f2">
+              <div class="kpi-label" style="color:#dc2626">积压总量</div>
+              <div class="kpi-value">{{ formatNum(b.total) }}</div>
+              <div class="kpi-sub">内{{ b.by_source?.find(x => x.name === '内部投诉')?.count ?? 0 }} · 商{{ b.by_source?.find(x => x.name === '商户号投诉')?.count ?? 0 }} · 外{{ b.by_source?.find(x => x.name === '外部投诉')?.count ?? 0 }}</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="kpi-card" style="background:#fff7ed">
+              <div class="kpi-label" style="color:#ea580c">超期积压(&gt;7天)</div>
+              <div class="kpi-value">{{ formatNum(b.overdue) }}</div>
+              <div class="kpi-sub">登记满7天仍未完成 · 优先审核</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="kpi-card" style="background:#fffbeb">
+              <div class="kpi-label" style="color:#b45309">待分派</div>
+              <div class="kpi-value">{{ formatNum(b.unassigned) }}</div>
+              <div class="kpi-sub">无真实处理人 · 无人认领</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="kpi-card" style="background:#f0fdf4">
+              <div class="kpi-label" style="color:#16a34a">已核查</div>
+              <div class="kpi-value">{{ formatNum(b.audited) }}</div>
+              <div class="kpi-sub">已落核查记录 · 避免重复</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="kpi-card" style="background:#eff6ff">
+              <div class="kpi-label" style="color:#2563eb">最旧积压</div>
+              <div class="kpi-value">{{ oldestAging }}<span class="unit">天</span></div>
+              <div class="kpi-sub">当前未处理工单最大龄期</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="kpi-card" style="background:#f5f3ff">
+              <div class="kpi-label" style="color:#7c3aed">处理中占比</div>
+              <div class="kpi-value">{{ doingPct }}<span class="unit">%</span></div>
+              <div class="kpi-sub">已有处理人的积压占比</div>
+            </div>
+          </el-col>
+        </el-row>
+
+        <!-- 图表 -->
+        <el-row :gutter="16" class="mb-16">
+          <el-col :xs="24" :md="12">
+            <div class="chart-card">
+              <div class="chart-title">积压来源分布</div>
+              <BaseChart v-if="backlogSourceOption" :option="backlogSourceOption" height="240px" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :md="12">
+            <div class="chart-card">
+              <div class="chart-title">积压龄期分布</div>
+              <BaseChart v-if="backlogAgingOption" :option="backlogAgingOption" height="240px" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :md="12">
+            <div class="chart-card">
+              <div class="chart-title">积压分类 Top</div>
+              <BaseChart v-if="backlogCategoryOption" :option="backlogCategoryOption" height="240px" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :md="12">
+            <div class="chart-card">
+              <div class="chart-title">处理人积压 Top</div>
+              <BaseChart v-if="backlogHandlerOption" :option="backlogHandlerOption" height="240px" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+        </el-row>
+
+        <!-- 积压明细表 -->
         <el-card shadow="never">
           <template #header>
             <div class="flex-between">
-              <span style="font-weight:600">积压未处理 ({{ s.summary.backlog_total }} 条)</span>
-              <el-button size="small" @click="loadBacklog">刷新</el-button>
+              <span style="font-weight:600">积压明细（{{ backlogTotal }} 条）</span>
+              <div class="flex gap-8">
+                <el-tag size="small" type="warning">超期 {{ b.overdue }}</el-tag>
+                <el-tag size="small" type="info">待分派 {{ b.unassigned }}</el-tag>
+                <el-tag size="small" type="success">已核查 {{ b.audited }}</el-tag>
+              </div>
             </div>
           </template>
-          <el-table :data="backlogList" v-loading="backlogLoading" border stripe size="small" max-height="360">
-            <el-table-column label="来源" width="100">
+          <el-table :data="backlogItems" v-loading="backlogLoading" border stripe size="small" max-height="420">
+            <el-table-column prop="ticket_no" label="工单号" width="150" show-overflow-tooltip />
+            <el-table-column label="来源" width="90">
               <template #default="{ row }">
                 <el-tag :type="sourceTagType(row.source)" size="small" effect="plain">{{ row.source }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="登记时间" width="120" sortable>
+            <el-table-column label="登记时间" width="110" sortable>
               <template #default="{ row }">{{ formatTime(row.register_time) }}</template>
             </el-table-column>
-            <el-table-column label="被投诉主体" width="150" show-overflow-tooltip>
+            <el-table-column label="积压天数" width="90" sortable>
               <template #default="{ row }">
-                <el-tag v-if="row.entity" size="small" effect="plain" type="warning">{{ row.entity }}</el-tag>
+                <el-tag v-if="row.aging_days != null" size="small" :type="row.aging_days >= 8 ? 'danger' : row.aging_days >= 4 ? 'warning' : 'info'">{{ row.aging_days }}天</el-tag>
                 <span v-else class="dim">—</span>
               </template>
             </el-table-column>
-            <el-table-column prop="category" label="分类" width="120" show-overflow-tooltip />
-            <el-table-column prop="device_sn" label="设备SN" width="130">
+            <el-table-column prop="category" label="分类" width="130" show-overflow-tooltip />
+            <el-table-column label="设备SN" width="130">
               <template #default="{ row }">
                 <el-link v-if="row.device_sn" type="primary" :underline="false" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
                 <span v-else class="dim">—</span>
               </template>
             </el-table-column>
             <el-table-column prop="problem" label="投诉内容" min-width="180" show-overflow-tooltip />
-            <el-table-column label="处理人" width="90">
+            <el-table-column label="处理人" width="100">
               <template #default="{ row }">
-                <el-link v-if="row.handler && row.handler !== '未分配'" type="primary" :underline="false" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
+                <el-link v-if="row.handler !== '未分配'" type="primary" :underline="false" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
+                <span v-else class="dim">未分配</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="80">
+              <template #default="{ row }">
+                <el-tag :type="row.status === '处理中' ? 'warning' : row.status === '待跟进' ? 'info' : 'danger'" size="small">{{ row.status }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="核查" width="70">
+              <template #default="{ row }">
+                <el-tag v-if="row.audited" size="small" type="success" effect="plain">已核查</el-tag>
                 <span v-else class="dim">—</span>
               </template>
             </el-table-column>
+            <el-table-column label="操作" width="130" fixed="right">
+              <template #default="{ row }">
+                <el-button v-if="row.device_sn" size="small" text type="primary" @click="openDeviceAudit(row.device_sn)">时序</el-button>
+                <el-button size="small" text type="warning" @click="openAudit(row)">核查</el-button>
+              </template>
+            </el-table-column>
           </el-table>
+          <div class="pag-wrap">
+            <el-pagination
+              v-model:current-page="backlogPage"
+              v-model:page-size="backlogPageSize"
+              :total="backlogTotal"
+              :page-sizes="[20, 50, 100]"
+              layout="total, sizes, prev, pager, next, jumper"
+              background
+              small
+              @current-change="loadBacklog"
+              @size-change="backlogPage = 1; loadBacklog()"
+            />
+          </div>
         </el-card>
+
+        <!-- 核查弹窗 -->
+        <el-dialog v-model="auditVisible" title="积压投诉核查" width="480px" append-to-body>
+          <el-form :model="auditForm" label-width="80px">
+            <el-form-item label="来源">
+              <el-select v-model="auditForm.source_type" style="width:100%">
+                <el-option label="内部投诉" value="internal" />
+                <el-option label="商户号投诉" value="merchant" />
+                <el-option label="外部投诉" value="external" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="工单号"><el-input v-model="auditForm.ref_id" disabled /></el-form-item>
+            <el-form-item label="设备SN"><el-input v-model="auditForm.device_sn" disabled /></el-form-item>
+            <el-form-item label="归因">
+              <el-select v-model="auditForm.attribution" style="width:100%">
+                <el-option v-for="a in attributions" :key="a" :label="a" :value="a" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="评判">
+              <el-radio-group v-model="auditForm.judgment">
+                <el-radio-button label="通过" />
+                <el-radio-button label="有问题" />
+                <el-radio-button label="需改进" />
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item label="核查结论">
+              <el-input v-model="auditForm.conclusion" type="textarea" :rows="4" placeholder="核查结论" />
+            </el-form-item>
+          </el-form>
+          <template #footer>
+            <el-button @click="auditVisible = false">取消</el-button>
+            <el-button type="primary" :loading="auditSubmitting" @click="submitAudit">保存核查</el-button>
+          </template>
+        </el-dialog>
       </section>
     </template>
 
@@ -418,17 +592,19 @@
         <el-radio-button label="external">外部投诉重点</el-radio-button>
         <el-radio-button label="merchant">商户号投诉</el-radio-button>
         <el-radio-button label="handling">受理分析</el-radio-button>
+        <el-radio-button label="backlog">积压审核</el-radio-button>
       </el-radio-group>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { Search } from '@element-plus/icons-vue'
+import { ref, computed, reactive, onMounted } from 'vue'
+import { Search, Refresh } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
 import BaseChart from '@/components/BaseChart.vue'
-import { complaintAnalysis, complaintDetail, complaintSupplementary } from '@/api/complaint'
+import { complaintAnalysis, complaintDetail, complaintSupplementary, complaintBacklog, createAudit } from '@/api/complaint'
 import { useAudit } from '@/composables/useAudit'
 
 const { openDeviceAudit, openPersonAudit } = useAudit()
@@ -437,15 +613,92 @@ const loaded = ref(false)
 const loading = ref(false)
 const extDetailLoading = ref(false)
 const merDetailLoading = ref(false)
-const backlogLoading = ref(false)
 const activeTab = ref('overview')
 const rangeMode = ref('30')
 const customRange = ref([])
 const data = ref(null)
 const externalDetail = ref([])
 const merchantDetail = ref([])
-const backlogList = ref([])
 const effSource = ref('internal')
+
+// ── 积压审核(backlog tab) ──
+const backlogData = ref(null)
+const backlogLoading = ref(false)
+const backlogPage = ref(1)
+const backlogPageSize = ref(50)
+const backlogTotal = ref(0)
+const backlogFilters = reactive({ source_type: '', status: '', has_handler: null })
+const auditVisible = ref(false)
+const auditSubmitting = ref(false)
+const auditForm = reactive({ source_type: 'internal', ref_id: '', device_sn: '', attribution: '其他', judgment: '通过', conclusion: '' })
+const attributions = ['网络质量', '套餐争议', '退款协商失败', '降成争议', '其他', '未关联SN']
+
+const b = computed(() => backlogData.value || {})
+const backlogItems = computed(() => b.value.items || [])
+const oldestAging = computed(() => (b.value.max_aging != null ? b.value.max_aging : '—'))
+const doingPct = computed(() => {
+  const t = b.value.total || 0
+  if (!t) return 0
+  return ((t - (b.value.unassigned || 0)) / t * 100).toFixed(1)
+})
+const backlogSourceOption = computed(() => {
+  const d = b.value.by_source || []
+  if (!d.length) return null
+  return {
+    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+    legend: { bottom: 0, left: 'center', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 11 } },
+    series: [{
+      type: 'pie', radius: ['40%', '65%'], center: ['50%', '45%'],
+      label: { show: false }, labelLine: { show: false },
+      data: d.map((x, i) => ({ ...x, itemStyle: { color: sourcePieColors[i] } })),
+    }],
+  }
+})
+const backlogAgingOption = computed(() => {
+  const d = b.value.by_aging || []
+  if (!d.length) return null
+  return {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    grid: { left: 48, right: 24, bottom: 32, top: 8 },
+    xAxis: { type: 'category', data: d.map(x => x.name), axisLabel: { fontSize: 11 } },
+    yAxis: { type: 'value', name: '工单数' },
+    series: [{
+      type: 'bar', data: d.map(x => x.count), barMaxWidth: 28,
+      itemStyle: { color: '#eab308', borderRadius: [4, 4, 0, 0] },
+      label: { show: true, position: 'top', fontSize: 11 },
+    }],
+  }
+})
+const backlogCategoryOption = computed(() => {
+  const d = b.value.by_category || []
+  if (!d.length) return null
+  const items = [...d].reverse()
+  return {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    grid: { left: 110, right: 40, bottom: 24, top: 8 },
+    xAxis: { type: 'value' },
+    yAxis: { type: 'category', data: items.map(x => x.name), axisLabel: { fontSize: 11 } },
+    series: [{
+      type: 'bar', data: items.map(x => x.count),
+      itemStyle: { color: '#dc2626', borderRadius: [0, 4, 4, 0] }, barMaxWidth: 16,
+    }],
+  }
+})
+const backlogHandlerOption = computed(() => {
+  const d = b.value.by_handler || []
+  if (!d.length) return null
+  const items = [...d].reverse()
+  return {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    grid: { left: 80, right: 40, bottom: 24, top: 8 },
+    xAxis: { type: 'value' },
+    yAxis: { type: 'category', data: items.map(x => x.name), axisLabel: { fontSize: 11 } },
+    series: [{
+      type: 'bar', data: items.map(x => x.count),
+      itemStyle: { color: '#7c3aed', borderRadius: [0, 4, 4, 0] }, barMaxWidth: 16,
+    }],
+  }
+})
 
 const s = computed(() => data.value || {
   summary: { total: 0, internal_total: 0, merchant_total: 0, external_total: 0, backlog_total: 0, done_total: 0, completion_rate: 0, avg_handle_hours: 0 },
@@ -744,11 +997,47 @@ async function loadMerchantDetail() {
 async function loadBacklog() {
   backlogLoading.value = true
   try {
-    const p = { ...params.value, limit: 200, include_supplementary: false }
-    const res = await complaintDetail(p)
-    backlogList.value = (res.data?.items || []).filter(r => r.status !== '已完成')
+    const p = {
+      page: backlogPage.value,
+      page_size: backlogPageSize.value,
+      sort: 'aging_asc',
+    }
+    if (backlogFilters.source_type) p.source_type = backlogFilters.source_type
+    if (backlogFilters.status) p.status = backlogFilters.status
+    if (backlogFilters.has_handler != null) p.has_handler = backlogFilters.has_handler
+    const res = await complaintBacklog(p)
+    backlogData.value = res.data || {}
+    backlogTotal.value = res.data?.total || 0
   } finally {
     backlogLoading.value = false
+  }
+}
+
+const SOURCE_TO_AUDIT = { '内部投诉': 'internal', '商户号投诉': 'merchant', '外部投诉': 'external' }
+
+function openAudit(row) {
+  auditForm.source_type = SOURCE_TO_AUDIT[row.source] || 'internal'
+  auditForm.ref_id = row.ticket_no || ''
+  auditForm.device_sn = row.device_sn || ''
+  auditForm.attribution = '其他'
+  auditForm.judgment = '通过'
+  auditForm.conclusion = ''
+  auditVisible.value = true
+}
+
+async function submitAudit() {
+  if (!auditForm.device_sn.trim() && !auditForm.ref_id.trim()) {
+    ElMessage.warning('该工单无SN且无工单号，无法关联核查')
+    return
+  }
+  auditSubmitting.value = true
+  try {
+    await createAudit({ ...auditForm })
+    ElMessage.success('核查已保存')
+    auditVisible.value = false
+    loadBacklog()
+  } finally {
+    auditSubmitting.value = false
   }
 }
 
