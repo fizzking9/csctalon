@@ -4,6 +4,7 @@
 复用 analytics 服务的口径 helper, 保证与既有看板一致。
 """
 
+from collections import Counter
 from datetime import datetime, timezone, timedelta as _timedelta
 
 from fastapi import APIRouter, Query
@@ -681,6 +682,184 @@ def complaint_supplementary(
     # 按投诉日期降序(主排序), 无日期的排末尾
     items.sort(key=lambda x: (x.get("complaint_date") is None, x.get("complaint_date") or ""), reverse=True)
     return R(data={"items": items[:limit], "total": len(items)})
+
+
+# ---------- 积压未处理投诉 审核分析 ----------
+
+
+# 积压口径统一 (与 /detail 的 _norm_status 完全一致):
+# 积压 = 投诉类工单, 归一化状态 != '已完成'。
+# SQL 粗过滤排除显式完成类状态, Python 层用 _norm_status 兜底(排除"待处理/空状态但存在真实完成时间")。
+_BACKLOG_DONE_SET = {"已结案", "已完成", "完成", "已解决", "已回复", "已反馈", "已关闭", "终止", "已终止"}
+# 积压龄期分桶 (按登记时间距今天数)
+_BACKLOG_AGING_BUCKETS = [("今天", 0, 0), ("1-3天", 1, 3), ("4-7天", 4, 7), ("8-14天", 8, 14), (">14天", 15, None)]
+
+
+@router.get("/backlog", response_model=R, summary="积压未处理投诉审核分析(统一口径: 归一化状态非已完成)")
+def complaint_backlog(
+    db: DBSession,
+    _: CurrentUser,
+    start: str | None = None,
+    end: str | None = None,
+    source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉"),
+    status: str | None = Query(None, description="归一化状态: 处理中/待处理/待跟进"),
+    category: str | None = Query(None, description="按工单服务项(分类)过滤"),
+    has_handler: bool | None = Query(None, description="true=已分派(有真实处理人) / false=待分派(无处理人)"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    sort: str = Query("aging_asc", description="aging_asc=最旧积压优先(默认) / register_desc / register_asc"),
+):
+    """积压未处理投诉的查询/统计/审核分析。
+
+    与 /summary、/analysis 的积压口径不同点: 本接口统一用 _norm_status 归一化判定,
+    排除"状态仍为待处理但实际已真实完成(finish_time 晚于登记 3 分钟)"的工单,
+    避免统计数与明细表对不上。
+    统计维度(不受分页影响): 来源/分类/龄期/处理人/待分派/超期/已核查。
+    """
+    ts = _parse_dt(start)
+    te = _parse_dt_end(end)
+    src_expr = _complaint_source_type_case()
+
+    def _fb_handler(t: ServiceTicket) -> str | None:
+        """Python 侧处理人 fallback, 与 _handler_fallback_cols 一致: handler→assignee→updated_by_raw→registrant"""
+        for v in (t.handler, t.assignee, t.updated_by_raw, t.registrant):
+            if v is not None and str(v).strip():
+                return str(v)
+        return None
+
+    def _aging_days(reg) -> int | None:
+        if reg is None:
+            return None
+        dt = reg
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(TZ).date() - dt.astimezone(TZ).date()).days
+
+    # SQL 粗过滤: 投诉类 + 非显式完成状态(空/未填/非完成集合); 有登记时间范围则按登记时间收窄
+    stmt = (
+        select(ServiceTicket, src_expr)
+        .where(_ticket_category_case() == "投诉")
+        .where(
+            or_(
+                ServiceTicket.status.is_(None),
+                ServiceTicket.status == "",
+                ~ServiceTicket.status.in_(_BACKLOG_DONE_SET),
+            )
+        )
+        .order_by(ServiceTicket.register_time.asc().nulls_last())
+    )
+    if ts:
+        stmt = stmt.where(ServiceTicket.register_time >= ts)
+    if te:
+        stmt = stmt.where(ServiceTicket.register_time <= te)
+
+    # 商户号投诉: 被投诉主体名集合(registrant 去重), 与 /detail 一致——
+    # 上游把商户号名称误写入 handler 时, 该行视为无真实处理人(未分派)
+    entity_set: set[str] = set()
+    if not source_type or source_type == "商户号投诉":
+        entity_set = set(db.scalars(
+            select(ServiceTicket.registrant)
+            .where(_ticket_category_case() == "投诉")
+            .where(src_expr == "商户号投诉")
+            .where(ServiceTicket.registrant.isnot(None), ServiceTicket.registrant != "")
+            .distinct()
+        ).all())
+
+    # Python 归一化兜底, 保证与明细口径 100% 一致
+    backlog: list[dict] = []
+    for t, src in db.execute(stmt).all():
+        norm = _norm_status(src, t.status, t.finish_time, t.register_time, _fb_handler(t))
+        if norm == "已完成":
+            continue
+        raw_h = _fb_handler(t)
+        norm_h = _norm_handler(raw_h)
+        if src == "商户号投诉" and raw_h in entity_set:
+            norm_h = "未分配"  # 上游把被投诉主体名写入处理人 → 无真实处理人
+        backlog.append({
+            "ticket_no": t.ticket_no,
+            "device_sn": t.device_sn,
+            "source": src,
+            "category": t.service_item or "未标注",
+            "problem": t.remark,
+            "handler": norm_h,
+            "status": norm,
+            "register_time": _to_sh_iso(t.register_time),
+            "finish_time": _to_sh_iso(t.finish_time) if _is_real_finish(t.finish_time, t.register_time) else None,
+            "aging_days": _aging_days(t.register_time),
+        })
+
+    # 筛选(与分页解耦, 统计基于筛选后的全量)
+    if source_type:
+        backlog = [r for r in backlog if r["source"] == source_type]
+    if status:
+        backlog = [r for r in backlog if r["status"] == status]
+    if category:
+        backlog = [r for r in backlog if r["category"] == category]
+    if has_handler is True:
+        backlog = [r for r in backlog if r["handler"] != "未分配"]
+    elif has_handler is False:
+        backlog = [r for r in backlog if r["handler"] == "未分配"]
+
+    # 排序
+    if sort == "register_desc":
+        backlog.sort(key=lambda r: r["register_time"] or "", reverse=True)
+    elif sort == "register_asc":
+        backlog.sort(key=lambda r: r["register_time"] or "")
+    else:  # aging_asc: 最旧积压优先 (登记时间升序)
+        backlog.sort(key=lambda r: (r["register_time"] is None, r["register_time"] or ""))
+
+    # 已核查标识: 核查表里按 device_sn 或 ref_id(工单号) 关联
+    audited_sns = set(db.scalars(select(ComplaintAudit.device_sn).where(ComplaintAudit.device_sn.isnot(None))).all())
+    audited_refs = set(db.scalars(
+        select(ComplaintAudit.ref_id).where(ComplaintAudit.ref_id.isnot(None), ComplaintAudit.ref_id != "")
+    ).all())
+
+    def _audited(r: dict) -> bool:
+        return bool(r["device_sn"] in audited_sns or r["ticket_no"] in audited_refs)
+
+    # 统计维度
+    by_source = [{"name": k, "count": v} for k, v in sorted(Counter(r["source"] for r in backlog).items(), key=lambda x: -x[1])]
+    by_category = [
+        {"name": k, "count": v}
+        for k, v in sorted(Counter(r["category"] for r in backlog).items(), key=lambda x: -x[1])[:15]
+    ]
+    aging_counter = Counter()
+    for r in backlog:
+        ad = r["aging_days"]
+        if ad is None:
+            continue  # 无登记时间, 不进龄期分桶
+        bucket = next((b for b, lo, hi in _BACKLOG_AGING_BUCKETS if lo <= ad and (hi is None or ad <= hi)), ">14天")
+        aging_counter[bucket] += 1
+    by_aging = [{"name": b, "count": aging_counter.get(b, 0)} for b, _, _ in _BACKLOG_AGING_BUCKETS]
+    by_handler = [
+        {"name": k, "count": v}
+        for k, v in sorted(Counter(r["handler"] for r in backlog).items(), key=lambda x: -x[1])[:15]
+    ]
+    unassigned = sum(1 for r in backlog if r["handler"] == "未分配")
+    overdue = sum(1 for r in backlog if r["aging_days"] is not None and r["aging_days"] >= 8)  # 登记满7天未完成
+    audited_total = sum(1 for r in backlog if _audited(r))
+
+    total = len(backlog)
+    max_aging = max((r["aging_days"] for r in backlog if r["aging_days"] is not None), default=0)
+    start_idx = (page - 1) * page_size
+    items = backlog[start_idx:start_idx + page_size]
+    for r in items:
+        r["audited"] = _audited(r)
+
+    return R(data={
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "max_aging": max_aging,
+        "by_source": by_source,
+        "by_category": by_category,
+        "by_aging": by_aging,
+        "by_handler": by_handler,
+        "unassigned": unassigned,
+        "overdue": overdue,
+        "audited": audited_total,
+        "items": items,
+    })
 
 
 # ---------- 单个投诉审计(规划设计 §4.6) ----------

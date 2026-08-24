@@ -20,6 +20,11 @@ export function complaintSupplementary(params) {
   return request.get('/complaints/supplementary', { params })
 }
 
+// 积压未处理投诉审核分析(统一口径: 归一化状态非已完成)
+export function complaintBacklog(params) {
+  return request.get('/complaints/backlog', { params })
+}
+
 // workbuddy 投诉推送同步日志(内部查看)
 export function listComplaintSyncLogs(params) {
   return request.get('/sync/complaints/logs', { params })
