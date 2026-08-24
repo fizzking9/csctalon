@@ -117,7 +117,9 @@ async function handleExport() {
     if (effectiveStart.value) params.start = effectiveStart.value
     if (effectiveEnd.value) params.end = effectiveEnd.value
     const res = await refundExport(params)
-    const blob = new Blob([res.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    // 响应拦截器对 blob 成功响应返回 response.data(即 Blob);兼容返回完整 response 的情况
+    const blobData = res instanceof Blob ? res : res?.data
+    const blob = new Blob([blobData], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
     let fname = `退款明细_${effectiveStart.value || '全量'}_${effectiveEnd.value || '至今'}.xlsx`
     const cd = res.headers?.['content-disposition'] || ''
     const m = /filename\*=UTF-8''([^;]+)/i.exec(cd)

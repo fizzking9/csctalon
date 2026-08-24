@@ -7196,6 +7196,156 @@ def refund_export_original(
     return out
 
 
+def refund_export_all(
+    db: Session, start: str | None = None, end: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """导出四路经营退款明细 Excel(多 sheet): A线上直退 / B钱包提现 / C闪猫退款 / D手动退款 + 按日汇总.
+
+    口径与 refund_decision_overview.routes_daily 完全一致:
+    - A 线上直退: refunds.refund_method='线上', 时间=created_at_raw (含涉诉分类/归一操作人)
+    - B 钱包提现: wallet_withdrawals.op_type='用户提现', 时间=op_time
+    - C 闪猫退款: shanmao_refunds.status='已退款', 时间=COALESCE(audit_time, created_at)
+    - D 手动退款: manual_refunds.is_refunded='是', 时间=COALESCE(op_time, register_time)
+    """
+    cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
+    sheets: dict[str, list[dict[str, Any]]] = {}
+
+    # A 线上直退 (复用单表导出, 含涉诉分类)
+    sheets["A线上直退"] = refund_export_original(db, start, end)
+
+    def _sh(dt) -> str:
+        if not dt:
+            return ""
+        return dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    # B 钱包提现 (仅'用户提现'为真实现金流出)
+    b_rows = db.execute(text("""
+        SELECT account_id, device_sn, op_type, op_amount, wallet_balance, operator, op_time, remark
+        FROM wallet_withdrawals
+        WHERE op_time >= :ts AND op_time <= :te AND op_type = '用户提现'
+        ORDER BY op_time
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    sheets["B钱包提现"] = [{
+        "账户ID": r.account_id or "",
+        "设备SN": r.device_sn or "",
+        "操作类型": r.op_type or "",
+        "提现金额": float(r.op_amount or 0),
+        "钱包余额": float(r.wallet_balance) if r.wallet_balance is not None else "",
+        "操作人": r.operator or "",
+        "操作时间": _sh(r.op_time),
+        "备注": (r.remark or "").replace("\n", " "),
+    } for r in b_rows]
+
+    # C 闪猫退款 (已退款; 时间取审核时间, 缺失回退导入时间, 与决策概览一致)
+    c_rows = db.execute(text("""
+        SELECT refund_no, order_no, device_sn, phone, paid_amount, refund_amount, actual_amount,
+               package_name, merchant_name, refund_reason, refund_method, status,
+               applicant, auditor, operator, apply_time, audit_time, refund_time, remark, audit_remark
+        FROM shanmao_refunds
+        WHERE COALESCE(audit_time, created_at) >= :ts AND COALESCE(audit_time, created_at) <= :te
+          AND status = '已退款'
+        ORDER BY COALESCE(audit_time, created_at)
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    sheets["C闪猫退款"] = [{
+        "退款单号": r.refund_no or "",
+        "订单号": r.order_no or "",
+        "设备SN": r.device_sn or "",
+        "手机号": r.phone or "",
+        "实付金额": float(r.paid_amount) if r.paid_amount is not None else "",
+        "申请退款金额": float(r.refund_amount) if r.refund_amount is not None else "",
+        "实际退款金额": float(r.actual_amount) if r.actual_amount is not None else "",
+        "套餐名称": r.package_name or "",
+        "商户名称": r.merchant_name or "",
+        "退款原因": r.refund_reason or "",
+        "退款方式": r.refund_method or "",
+        "状态": r.status or "",
+        "申请人": r.applicant or "",
+        "审核人": r.auditor or "",
+        "操作人": r.operator or "",
+        "申请时间": _sh(r.apply_time),
+        "审核时间": _sh(r.audit_time),
+        "退款时间": _sh(r.refund_time),
+        "备注": (r.remark or "").replace("\n", " "),
+        "审核备注": (r.audit_remark or "").replace("\n", " "),
+    } for r in c_rows]
+
+    # D 手动退款 (已退款; 时间取操作时间, 缺失回退登记日期)
+    d_rows = db.execute(text("""
+        SELECT register_time, device_sn, order_no, merchant_id, order_amount, refund_amount,
+               registrant, is_refunded, refund_operator, op_time, remark
+        FROM manual_refunds
+        WHERE COALESCE(op_time, register_time) >= :ts AND COALESCE(op_time, register_time) <= :te
+          AND is_refunded = '是'
+        ORDER BY COALESCE(op_time, register_time)
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    sheets["D手动退款"] = [{
+        "登记时间": _sh(r.register_time),
+        "设备号": r.device_sn or "",
+        "订单号": r.order_no or "",
+        "商户ID": r.merchant_id or "",
+        "订单金额": float(r.order_amount) if r.order_amount is not None else "",
+        "退款金额": float(r.refund_amount) if r.refund_amount is not None else "",
+        "登记人": r.registrant or "",
+        "是否已退款": r.is_refunded or "",
+        "退款操作人": r.refund_operator or "",
+        "操作时间": _sh(r.op_time),
+        "备注": (r.remark or "").replace("\n", " "),
+    } for r in d_rows]
+
+    # 四路按日汇总 (口径与决策概览 routes_daily 一致, 上海时区截断)
+    def _day(col: str) -> str:
+        return f"DATE({col} AT TIME ZONE 'Asia/Shanghai')"
+
+    agg_queries = [
+        ("A 线上直退", f"""
+            SELECT {_day("r.created_at_raw")} AS d, count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
+            FROM refunds r WHERE r.refund_method = '线上' AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+            GROUP BY 1"""),
+        ("B 钱包提现", f"""
+            SELECT {_day("w.op_time")} AS d, count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
+            FROM wallet_withdrawals w WHERE w.op_type = '用户提现' AND w.op_time >= :ts AND w.op_time <= :te
+            GROUP BY 1"""),
+        ("C 闪猫退款", f"""
+            SELECT {_day("COALESCE(s.audit_time, s.created_at)")} AS d, count(*) AS cnt,
+                   COALESCE(sum(COALESCE(s.actual_amount, s.refund_amount, 0)), 0) AS amt
+            FROM shanmao_refunds s
+            WHERE COALESCE(s.audit_time, s.created_at) >= :ts AND COALESCE(s.audit_time, s.created_at) <= :te
+              AND s.status = '已退款'
+            GROUP BY 1"""),
+        ("D 手动退款", f"""
+            SELECT {_day("COALESCE(m.op_time, m.register_time)")} AS d, count(*) AS cnt,
+                   COALESCE(sum(m.refund_amount), 0) AS amt
+            FROM manual_refunds m
+            WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
+              AND m.is_refunded = '是'
+            GROUP BY 1"""),
+    ]
+    route_map: dict[str, dict[str, list]] = {}
+    for name, sql in agg_queries:
+        for r in db.execute(text(sql), {"ts": cur_s, "te": cur_e}).fetchall():
+            b = route_map.setdefault(str(r.d), {})
+            b.setdefault(name, [0, 0.0])
+            b[name][0] += int(r.cnt or 0)
+            b[name][1] += float(r.amt or 0)
+    summary = []
+    for d in sorted(route_map):
+        b = route_map[d]
+        row = {"日期": d}
+        total_cnt = total_amt = 0
+        for name, _ in agg_queries:
+            v = b.get(name, [0, 0.0])
+            row[f"{name}笔数"] = v[0]
+            row[f"{name}金额"] = round(v[1], 2)
+            total_cnt += v[0]
+            total_amt += v[1]
+        row["合计笔数"] = total_cnt
+        row["合计金额"] = round(total_amt, 2)
+        summary.append(row)
+    sheets["四路汇总"] = summary
+
+    return sheets
+
+
 def refund_problem_type_detail(
     db: Session, start: str | None = None, end: str | None = None, top: int = 10,
 ) -> dict[str, Any]:
