@@ -386,22 +386,25 @@ def refund_decision_overview_endpoint(
     return R(data=cached_call(key, 60, A.refund_decision_overview, db, start, end, grain=grain))
 
 
-@router.get("/refund/export", summary="退款明细导出Excel(原始数据,自定义分析用)")
+@router.get("/refund/export", summary="退款明细导出Excel(四路经营:线上直退/钱包提现/闪猫退款/手动退款+按日汇总)")
 def refund_export_endpoint(
     db: DBSession, _: CurrentUser,
     start: str | None = Query(None), end: str | None = Query(None),
 ):
-    """导出当前筛选区间内退款单原始明细 Excel(含涉诉分类/归一操作人/关联工单服务项)."""
+    """导出当前筛选区间内四路经营退款明细 Excel(多 sheet):
+    A线上直退(含涉诉分类/归一操作人) / B钱包提现 / C闪猫退款 / D手动退款 + 四路按日汇总.
+    口径与决策概览 routes_daily 一致.
+    """
     import io
     import pandas as pd
     from urllib.parse import quote
     from fastapi.responses import StreamingResponse
 
-    rows = A.refund_export_original(db, start, end)
-    df = pd.DataFrame(rows)
+    sheets = A.refund_export_all(db, start, end)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="退款明细")
+        for name, rows in sheets.items():
+            pd.DataFrame(rows).to_excel(writer, index=False, sheet_name=name)
     buf.seek(0)
     fname = quote(f"退款明细_{start or '全量'}_{end or '至今'}.xlsx")
     return StreamingResponse(
