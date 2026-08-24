@@ -6916,21 +6916,59 @@ def refund_decision_overview(
     )
     if reasons:
         top1, top2 = reasons[0], reasons[1] if len(reasons) > 1 else None
-        conclusions.append(f"退款主因: {top1[0]} {top1[1][0]}笔/¥{top1[1][1]:,.0f}"
-                           + (f"，其次 {top2[0]} {top2[1][0]}笔" if top2 else "") + "。")
-    conclusions.append(
-        f"涉诉退款 ¥{comp_amt:,.0f}，占线上直退 {comp_ratio:.1f}%"
-        + f"（内部 {sum(complaint_split['internal_cnt'])}笔/商户号 {sum(complaint_split['merchant_cnt'])}笔/外部 {sum(complaint_split['external_cnt'])}笔）。"
-    )
+        reason_line = f"退款主因: {top1[0]} {top1[1][0]}笔/¥{top1[1][1]:,.0f}"
+        if top2:
+            reason_line += f"，其次 {top2[0]} {top2[1][0]}笔"
+        # 原因覆盖率警示: <未关联工单> 占比高 → 原因分析失真, 需先补工单关联再做原因治理
+        reason_total_cnt = sum(v[0] for v in reason_map.values())
+        no_ticket_cnt = reason_map.get("<未关联工单>", [0, 0.0])[0]
+        no_ticket_ratio = round(no_ticket_cnt / reason_total_cnt * 100, 1) if reason_total_cnt else 0.0
+        if no_ticket_ratio >= 20:
+            reason_line += f"。注意: 未关联工单 {no_ticket_cnt}笔({no_ticket_ratio:.0f}%)，原因覆盖不足，建议先核查工单关联再做原因治理。"
+        else:
+            reason_line += "。"
+        conclusions.append(reason_line)
+    # 涉诉比率解读(2026-08-24): 高=该退才退/控制到位(但需同时盯投诉绝对量); 低=大量退款无客诉驱动,警惕宽松
+    comp_detail = (f"（内部 {sum(complaint_split['internal_cnt'])}笔/商户号 "
+                   f"{sum(complaint_split['merchant_cnt'])}笔/外部 {sum(complaint_split['external_cnt'])}笔）")
+    if comp_ratio >= 40:
+        comp_reading = (f"涉诉占比 {comp_ratio:.1f}% 偏高: 退款大多由客诉/工单驱动、该退才退，控制到位；"
+                        f"但同时需关注投诉绝对量（涉诉 {sum(complaint_split['complaint_cnt'])}笔）是否上升。")
+    elif comp_ratio <= 15:
+        comp_reading = (f"涉诉占比 {comp_ratio:.1f}% 偏低: 大量退款无客诉/工单关联，警惕退款政策过于宽松。")
+    else:
+        comp_reading = f"涉诉占比 {comp_ratio:.1f}% 处于常规区间，退款把关基本正常。"
+    conclusions.append(f"涉诉退款 ¥{comp_amt:,.0f}{comp_detail}。{comp_reading}")
+    # 钱包水位解读: 净水位是窗口内净流量, 须结合转入/转出量区分"过账快"与"转入不足"两种低水位成因
+    w_max = max(w_total_in, w_total_out)
+    if w_max == 0:
+        wallet_note = "区间无钱包转入/转出流水，水位无变化。"
+    elif abs(wallet_net) / w_max < 0.25:
+        wallet_note = (f"水位基本平衡(+{wallet_net:,.0f} 元)但过账快: 退款到账后即被提走，流程顺畅；"
+                       "若同时涉诉比率偏低，需警惕退款把关是否偏松。")
+    elif wallet_net > 0:
+        wallet_note = (f"水位偏高(+{wallet_net:,.0f} 元): 退款到账后滞留钱包未提走，既是沉淀风险（资金滞留），"
+                       "也是待提现负债——若提现受阻或政策变动易集中挤兑并引发投诉，建议排查提现顺畅度、必要时引导提现。")
+    elif w_total_in < w_total_out * 0.6:
+        wallet_note = (f"水位偏低({wallet_net:,.0f} 元): 转入明显低于转出，退款业务量下降或转入端异常，建议排查转入。")
+    else:
+        wallet_note = (f"水位为负({wallet_net:,.0f} 元): 转出大于转入、用户提现活跃，"
+                       "需关注是否出现集中提现（挤兑）或历史沉淀集中释放。")
     conclusions.append(
         f"钱包净水位 {wallet_net:+,.0f} 元（转入 ¥{w_total_in:,.0f} − 转出 ¥{w_total_out:,.0f}），累计 {sum(wallet_water['cum_net']):+,.0f} 元。"
-        + ("水位偏高，注意退款沉淀风险。" if wallet_net > 0 else "水位偏低/为负，转入量不足。")
+        + wallet_note
     )
     m_cum_final = manual_water["cum_net"][-1] if manual_water["cum_net"] else 0.0
+    if m_cum_final > 0:
+        m_note = "登记蓄水偏高，存在未退积压，用户等待可能引发投诉，建议排查未退清单并加快处理。"
+    elif m_cum_final < 0:
+        m_note = "蓄水为负: 退款完成量超过登记量，处理及时、历史积压被清理，属健康状态。"
+    else:
+        m_note = "蓄水平衡，登记与完成基本同步。"
     conclusions.append(
         f"手动退款登记蓄水 ¥{m_cum_final:+,.0f} 元（登记 {sum(manual_water['reg_amt']):,.0f} − 已退 {sum(manual_water['done_amt']):,.0f}），"
         "即已登记但未完成退款的部分。"
-        + ("登记蓄水偏高，注意未退积压。" if m_cum_final > 0 else "")
+        + m_note
     )
 
     summary = {

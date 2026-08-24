@@ -128,7 +128,7 @@
       <section class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">二、钱包水位监控</span>
-          <span class="block-hint">判断: 净水位过高=沉淀风险(用户不提现) / 过低=经营效果差 → 行动: 推提现或查转入异常</span>
+          <span class="block-hint">判断: 净水位过高=沉淀+待提现负债(挤兑/投诉风险) · 过低需区分转入不足 vs 过账快(结合涉诉比率判把关) → 行动: 排查提现顺畅度/查转入端/审视退款政策</span>
         </div>
         <BaseChart v-if="waterOption.series?.length" :option="waterOption" height="300px" />
         <el-empty v-else description="暂无钱包水位数据" :image-size="60" />
@@ -193,7 +193,7 @@
       <section class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">四、涉诉 vs 普通退款</span>
-          <span class="block-hint">线上直退 · 涉诉=SN关联工单(外部&gt;商户号&gt;内部) 或 审核备注投诉标识(涉投诉/客诉/315/争议等) · 判断: 客诉引发占比是否抬头 → 行动: 转投诉/商品质量专项</span>
+          <span class="block-hint">线上直退 · 涉诉=SN关联工单(外部&gt;商户号&gt;内部) 或 审核备注投诉标识(涉投诉/客诉/315/争议等) · 判断: 占比高=该退才退(控制到位,同时盯投诉绝对量) / 占比低=警惕宽松退款 → 行动: 转投诉/商品质量专项</span>
         </div>
         <BaseChart v-if="complaintOption.series?.length" :option="complaintOption" height="300px" />
         <el-empty v-else description="暂无涉诉归因数据" :image-size="60" />
@@ -227,7 +227,7 @@
       <section class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">五、退款原因 & 操作人员</span>
-          <span class="block-hint">线上直退 · 判断: 主因类别与主力人员 → 行动: 针对性处理(网络质量/商品问题/话术)</span>
+          <span class="block-hint">线上直退 · 判断: 主因类别与主力人员 → 行动: 针对主因解决上游问题(网络质量/商品问题/话术)以减少退款 · 未关联工单占比高时原因覆盖不足</span>
         </div>
         <el-row :gutter="16">
           <el-col :xs="24" :md="14" class="mb-12">
