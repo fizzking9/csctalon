@@ -10,6 +10,8 @@
 # 挂载路径变量化(生产部署用): 服务器上通过 .env 把数据/日志/附件指到固定绝对目录
 # (如 /opt/csctalon/data), 这样代码目录可随版本切换(releases/current), 数据不随代码变动。
 # 本地不设置这些变量时, 回退到默认相对路径 ./data 等, 行为与之前完全一致。
+# ENV_FILE: 生产把 .env 放到代码目录外(如 /opt/csctalon/.env)时, 用它指过去(供容器 env_file 用);
+#           本地不设置则默认用 compose 同目录的 .env。
 
 services:
   db:
@@ -62,7 +64,7 @@ services:
     # --timeout 900s: sync-all多源抓取含65s间隔,全程5-8分钟,默认120s会被gunicorn判超时SIGABRT→前端502
     command: ["gunicorn", "app.main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "900", "--log-level", "info"]
     env_file:
-      - .env
+      - ${ENV_FILE:-.env}
     # ENV 是 dsh 保留变量, 不能在 .env 中声明; 此处显式注入以维持生产 fail-fast 校验
     environment:
       - ENV=prod
