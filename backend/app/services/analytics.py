@@ -6613,9 +6613,12 @@ def refund_decision_overview(
         wallet_water["cum_net"].append(round(cum, 2))
 
     # ── 3. 涉诉 vs 普通: 每单按 SN 关联工单 bool_or 判定, 优先级 外部>商户号>内部 ──
-    #     (与投诉专项/之前验证口径一致: SN 存在任一相关投诉工单即归该桶)
+    #     (2026-08-24 口径升级: 涉诉 = SN 关联投诉工单 OR 退款记录审核备注/备注含投诉类标识。
+    #      后者是退款人员对"尚未进入投诉但预判可能投诉"的单做的类型标识, 同样计入涉诉。)
+    _REMARK_COMPLAINT_MARKERS = ("涉投诉", "客诉", "投诉", "315", "争议", "催退")
     comp_rows = db.execute(text(f"""
         SELECT {_day("r.created_at_raw")} AS d, r.refund_amount,
+               MAX(r.audit_remark) AS ar, MAX(r.remark) AS rm,
                bool_or(st.service_item ILIKE '%工信部%' OR st.service_item ILIKE '%12315%'
                    OR st.service_item ILIKE '%公共服务平台%' OR st.service_item ILIKE '%消费者协会%'
                    OR st.service_item ILIKE '%消协%' OR st.service_item ILIKE '%监督局%'
@@ -6638,27 +6641,33 @@ def refund_decision_overview(
             ctype = "商户号投诉"
         elif r.has_int:
             ctype = "内部投诉"
+        elif any(m in ((r.ar or "") + (r.rm or "")) for m in _REMARK_COMPLAINT_MARKERS):
+            # 无 SN 投诉工单, 但退款人员在审核备注/备注中标识了投诉/客诉/争议/催退等
+            ctype = "备注涉诉"
         else:
             ctype = "普通退款"
         b = cs_map.setdefault(day, {})
-        for k in ("内部投诉", "商户号投诉", "外部投诉", "普通退款"):
+        for k in ("内部投诉", "商户号投诉", "外部投诉", "备注涉诉", "普通退款"):
             b.setdefault(k, [0, 0.0])
         b[ctype][0] += 1
         b[ctype][1] += float(r.refund_amount or 0)
     complaint_split = {"dates": [], "internal_cnt": [], "internal_amt": [],
                        "merchant_cnt": [], "merchant_amt": [], "external_cnt": [], "external_amt": [],
+                       "remark_cnt": [], "remark_amt": [],
                        "complaint_cnt": [], "complaint_amt": [], "normal_cnt": [], "normal_amt": [],
                        "ratio": []}
     for d in sorted(cs_map):
         b = cs_map[d]
-        int_ = b["内部投诉"]; mer = b["商户号投诉"]; ext = b["外部投诉"]; nor = b["普通退款"]
-        comp_cnt = int_[0] + mer[0] + ext[0]
-        comp_amt = int_[1] + mer[1] + ext[1]
+        int_ = b["内部投诉"]; mer = b["商户号投诉"]; ext = b["外部投诉"]
+        rmk = b["备注涉诉"]; nor = b["普通退款"]
+        comp_cnt = int_[0] + mer[0] + ext[0] + rmk[0]
+        comp_amt = int_[1] + mer[1] + ext[1] + rmk[1]
         total_amt = comp_amt + nor[1]
         complaint_split["dates"].append(d)
         complaint_split["internal_cnt"].append(int_[0]); complaint_split["internal_amt"].append(round(int_[1], 2))
         complaint_split["merchant_cnt"].append(mer[0]); complaint_split["merchant_amt"].append(round(mer[1], 2))
         complaint_split["external_cnt"].append(ext[0]); complaint_split["external_amt"].append(round(ext[1], 2))
+        complaint_split["remark_cnt"].append(rmk[0]); complaint_split["remark_amt"].append(round(rmk[1], 2))
         complaint_split["complaint_cnt"].append(comp_cnt); complaint_split["complaint_amt"].append(round(comp_amt, 2))
         complaint_split["normal_cnt"].append(nor[0]); complaint_split["normal_amt"].append(round(nor[1], 2))
         complaint_split["ratio"].append(round(comp_amt / total_amt * 100, 1) if total_amt else 0.0)

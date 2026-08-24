@@ -193,7 +193,7 @@
       <section class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">四、涉诉 vs 普通退款</span>
-          <span class="block-hint">线上直退 · SN关联工单分类(外部&gt;商户号&gt;内部优先级) · 判断: 客诉引发占比是否抬头 → 行动: 转投诉/商品质量专项</span>
+          <span class="block-hint">线上直退 · 涉诉=SN关联工单(外部&gt;商户号&gt;内部) 或 审核备注投诉标识(涉投诉/客诉/315/争议等) · 判断: 客诉引发占比是否抬头 → 行动: 转投诉/商品质量专项</span>
         </div>
         <BaseChart v-if="complaintOption.series?.length" :option="complaintOption" height="300px" />
         <el-empty v-else description="暂无涉诉归因数据" :image-size="60" />
@@ -207,6 +207,9 @@
           </el-table-column>
           <el-table-column label="外部投诉" align="right">
             <template #default="{ row }"><span class="num">{{ row.ext_cnt }}笔</span><span class="amt">¥{{ formatMoney(row.ext_amt) }}</span></template>
+          </el-table-column>
+          <el-table-column label="备注涉诉" align="right">
+            <template #default="{ row }"><span class="num">{{ row.rmk_cnt }}笔</span><span class="amt">¥{{ formatMoney(row.rmk_amt) }}</span></template>
           </el-table-column>
           <el-table-column label="涉诉合计" align="right">
             <template #default="{ row }"><span class="num strong">{{ row.comp_cnt }}笔</span><span class="amt strong">¥{{ formatMoney(row.comp_amt) }}</span></template>
@@ -388,6 +391,7 @@ const complaintTable = computed(() => {
     int_cnt: c.internal_cnt?.[i] ?? 0, int_amt: c.internal_amt?.[i] ?? 0,
     mer_cnt: c.merchant_cnt?.[i] ?? 0, mer_amt: c.merchant_amt?.[i] ?? 0,
     ext_cnt: c.external_cnt?.[i] ?? 0, ext_amt: c.external_amt?.[i] ?? 0,
+    rmk_cnt: c.remark_cnt?.[i] ?? 0, rmk_amt: c.remark_amt?.[i] ?? 0,
     comp_cnt: c.complaint_cnt?.[i] ?? 0, comp_amt: c.complaint_amt?.[i] ?? 0,
     nor_cnt: c.normal_cnt?.[i] ?? 0, nor_amt: c.normal_amt?.[i] ?? 0,
     ratio: c.ratio?.[i] ?? 0,
@@ -451,7 +455,7 @@ const waterOption = computed(() => {
   }
 })
 
-const COMP_COLORS = { '内部投诉': '#f97316', '商户号投诉': '#eab308', '外部投诉': '#dc2626', '普通退款': '#9ca3af' }
+const COMP_COLORS = { '内部投诉': '#f97316', '商户号投诉': '#eab308', '外部投诉': '#dc2626', '备注涉诉': '#8b5cf6', '普通退款': '#9ca3af' }
 
 const complaintOption = computed(() => {
   const c = complaint.value
@@ -470,6 +474,7 @@ const complaintOption = computed(() => {
       { name: '内部投诉', type: 'bar', stack: 'c', data: c.internal_amt, itemStyle: { color: COMP_COLORS['内部投诉'] }, barMaxWidth: 40 },
       { name: '商户号投诉', type: 'bar', stack: 'c', data: c.merchant_amt, itemStyle: { color: COMP_COLORS['商户号投诉'] }, barMaxWidth: 40 },
       { name: '外部投诉', type: 'bar', stack: 'c', data: c.external_amt, itemStyle: { color: COMP_COLORS['外部投诉'] }, barMaxWidth: 40 },
+      { name: '备注涉诉', type: 'bar', stack: 'c', data: c.remark_amt, itemStyle: { color: COMP_COLORS['备注涉诉'] }, barMaxWidth: 40 },
       { name: '普通退款', type: 'bar', stack: 'c', data: c.normal_amt, itemStyle: { color: COMP_COLORS['普通退款'] }, barMaxWidth: 40 },
       { name: '涉诉占比%', type: 'line', yAxisIndex: 1, data: c.ratio, smooth: true, symbol: 'circle', symbolSize: 6,
         itemStyle: { color: '#2563eb' }, lineStyle: { width: 2.5, color: '#2563eb' } },
