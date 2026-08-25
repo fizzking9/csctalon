@@ -8,6 +8,11 @@
   - 出错熔断: 白天任何一次同步失败(partial/failed), 当天剩余自动同步全部停止,
     需手动(触发手动同步或调用 /schedule/start)恢复
 
+2026-08-25 调度策略增强(应对 BMS 数据按登记时间分批滞后 1~2 天):
+  - 8:00 改为「近 7 天窗口」全量兜底同步(覆盖补全数据回填, 忽略专项熔断)
+  - 9:00~23:00, 00:00 保持「当天窗口」增量同步(带专项熔断过滤)
+  - 3:00 前一天补跑保持不变
+
 2026-08-02 优化:
   - 接入 SyncTaskManager 全局互斥锁,防止手动同步时定时任务并发冲突
   - 定时任务失败也会写入 task 状态,进度可通过 /task/status 统一查询
@@ -38,6 +43,9 @@ logger = logging.getLogger(__name__)
 DAYTIME_HOURS: frozenset[int] = frozenset([*range(8, 24), 0])
 # 凌晨 3 点: 对前一天做整体同步
 CATCHUP_HOUR: int = 3
+# 早上 8:00 全量兜底同步窗口(天): BMS 数据按登记时间分批滞后 1~2 天,
+# 8 点用近 N 天窗口主动拉一次, 确保补全数据回填(与 BMS 导出近 7 天滚动对齐)
+FULL_WINDOW_DAYS: int = 7
 # 合并后全部需要检测的小时(用于 schedule_hours 对外展示)
 SCHEDULE_HOURS = sorted([*DAYTIME_HOURS, CATCHUP_HOUR])
 
@@ -403,6 +411,7 @@ class BmsScheduler:
                         await self._do_scheduled_sync(
                             why=f"定时触发 {now_cn.hour:02d}:00",
                             yesterday_full_sync=False,
+                            full_window_days=FULL_WINDOW_DAYS if now_cn.hour == 8 else 0,
                             biz_key=biz_key,
                         )
 
@@ -455,6 +464,7 @@ class BmsScheduler:
         self,
         why: str | None = None,
         yesterday_full_sync: bool = False,
+        full_window_days: int = 0,
         biz_key: str | None = None,
     ):
         """执行定时同步 - 通过 SyncTaskManager 提交(全局互斥)
@@ -466,6 +476,10 @@ class BmsScheduler:
                                  False=白天正常同步,时间「今天 0 点~now」,
                                  执行前先跳过 biz_key 对应日期里已熔断的专项,
                                  完成后逐个失败 data_type 写入熔断集合
+            full_window_days: >0 时(早上 8 点全量兜底),时间范围 = 近 N 天 0 点~now,
+                              忽略专项熔断,失败不写入熔断(与 3 点补跑同性质,
+                              用于回填 BMS 分批滞后 1~2 天的补全数据);
+                              0 时按 yesterday_full_sync/白天逻辑
             biz_key: 业务日期字符串(YYYY-MM-DD),专项熔断集合归属的日期;
                      None 时按 now 即时推导
 
@@ -479,11 +493,13 @@ class BmsScheduler:
             biz_date = now_cn.date() if now_cn.hour >= 4 else (now_cn - timedelta(days=1)).date()
             biz_key = biz_date.strftime("%Y-%m-%d")
         halted_set = set(self._halted_types.get(biz_key) or set())  # copy,避免中途被改
+        # 兜底模式(3 点补跑 / 8 点全量): 忽略专项熔断,失败也不写入熔断
+        force_all = yesterday_full_sync or full_window_days > 0
 
         has_bms = self._default_sources_have_credentials()
         has_scrm = self._scrm_sources_have_credentials()
 
-        # ── 时间范围: 补跑模式=昨天整天; 白天模式=今天 0 点~now ──
+        # ── 时间范围: 3点补跑=昨天整天; 8点全量=近N天0点~now; 白天=今天 0 点~now ──
         if yesterday_full_sync:
             yesterday_date = now_cn.date() - timedelta(days=1)
             range_start = datetime(yesterday_date.year, yesterday_date.month, yesterday_date.day,
@@ -491,18 +507,24 @@ class BmsScheduler:
             range_end = datetime(now_cn.year, now_cn.month, now_cn.day,
                                  0, 0, 0, tzinfo=TZ_CN)
             start_disp = range_start.strftime("%m-%d 00:00(前一天全量)")
+        elif full_window_days > 0:
+            window_date = now_cn.date() - timedelta(days=full_window_days)
+            range_start = datetime(window_date.year, window_date.month, window_date.day,
+                                   0, 0, 0, tzinfo=TZ_CN)
+            range_end = now_cn
+            start_disp = range_start.strftime("%m-%d 00:00") + f"(近{full_window_days}天全量兜底)"
         else:
             range_start = now_cn.replace(hour=0, minute=0, second=0, microsecond=0)
             range_end = now_cn
             start_disp = range_start.strftime("%m-%d 00:00(今日定时-全量)")
 
-        # ── 过滤专项级熔断(仅白天同步生效;3 点补跑强制全部执行) ──
+        # ── 过滤专项级熔断(仅白天增量生效;3 点补跑 / 8 点全量强制全部执行) ──
         sync_types_bms_raw = list(DEFAULT_SYNC_TYPES) if has_bms else []
         sync_types_scrm_raw = [
             DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_PRIVATE,
             DATA_TYPE_SESSION_GROUP, DATA_TYPE_SESSION_VIRTUAL,
         ] if has_scrm else []
-        if yesterday_full_sync:
+        if force_all:
             sync_types_bms = sync_types_bms_raw
             sync_types_scrm = sync_types_scrm_raw
         else:
@@ -542,7 +564,7 @@ class BmsScheduler:
             f"[定时同步{reason}] 数据源={all_types}"
             f" (BMS={'ON' if sync_types_bms else 'SKIP'},"
             f" SCRM={'ON' if sync_types_scrm else 'SKIP'},"
-            f" mode={'前一天全量(忽略熔断)' if yesterday_full_sync else '白天增量(专项级过滤)'})"
+            f" mode={'前一天全量(忽略熔断)' if yesterday_full_sync else (f'近{full_window_days}天全量兜底(忽略熔断)' if full_window_days > 0 else '白天增量(专项级过滤)')})"
         )
 
         # ── 并发子任务: BMS 与 SCRM 各自独立 runner, 经 asyncio.gather 并发执行 ──
@@ -623,9 +645,9 @@ class BmsScheduler:
                 task_results = t.results
                 break
         if task_results is None:
-            # 超时拿不到结果 → 保守把本轮 all_types 全部视为失败(仅白天模式写熔断)
+            # 超时拿不到结果 → 保守把本轮 all_types 全部视为失败(仅白天增量模式写熔断)
             logger.warning(f"[定时同步{reason}] 等待任务完成超时(task_id={task_id})")
-            if not yesterday_full_sync:
+            if not force_all:
                 s = self._halted_types.setdefault(biz_key, set())
                 for dt in all_types:
                     s.add(dt)
@@ -645,8 +667,8 @@ class BmsScheduler:
             f" 失败专项={failed_types}"
         )
 
-        # 专项级熔断: 仅白天模式,逐个失败 data_type 写入集合(已有的不重复加)
-        if not yesterday_full_sync and failed_types:
+        # 专项级熔断: 仅白天增量模式,逐个失败 data_type 写入集合(已有的不重复加)
+        if not force_all and failed_types:
             s = self._halted_types.setdefault(biz_key, set())
             newly_halted = [dt for dt in failed_types if dt not in s]
             for dt in failed_types:
