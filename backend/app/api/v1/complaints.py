@@ -183,6 +183,28 @@ def _to_sh_iso(dt) -> str | None:
     return dt_sh.strftime("%Y-%m-%d %H:%M")
 
 
+# 被投诉主体归一(2026-08-25): 同一家公司不同商户号/别名 → 规范名, **仅在被投诉主体维度聚合时使用**。
+# 商户号投诉 tab 仍按商户号细分(不合并), 避免丢失「云客猫 vs 大秦WiFi管家」等商户号差异。
+# 例: 深圳市云客猫科技有限公司 与 云客猫 是同一家公司 → 被投诉主体聚合时都归入「云客猫」。
+_SUBJECT_ENTITY_ALIASES: dict[str, str] = {
+    "深圳市云客猫科技有限公司": "云客猫",
+}
+
+
+def _norm_subject_entity(name: str | None) -> str | None:
+    """归一化被投诉主体名: 命中公司别名映射 → 规范名; 含「云客猫」的主体也归入「云客猫」。"""
+    if not name:
+        return name
+    v = str(name).strip()
+    if not v:
+        return v
+    if v in _SUBJECT_ENTITY_ALIASES:
+        return _SUBJECT_ENTITY_ALIASES[v]
+    if "云客猫" in v:
+        return "云客猫"
+    return v
+
+
 @router.get("/summary", response_model=R, summary="三源投诉统计汇总(工单为主,卡商/外部投诉为前期参考补充)")
 @cached_json(lambda *a, **kw: f"complaint:summary:{kw.get('start')}:{kw.get('end')}", ttl=60)
 def complaint_summary(
@@ -805,30 +827,21 @@ def _map_315_category(cat: str | None) -> str | None:
     return None
 
 
-@router.get("/backlog", response_model=R, summary="积压未处理投诉审核分析(统一口径: 归一化状态非已完成)")
-@cached_json(lambda *a, **kw: f"complaint:backlog:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('status')}:{kw.get('category')}:{kw.get('has_handler')}:{kw.get('page')}:{kw.get('page_size')}:{kw.get('sort')}", ttl=60)
-def complaint_backlog(
+def _query_backlog_rows(
     db: DBSession,
-    _: CurrentUser,
-    start: str | None = None,
-    end: str | None = None,
-    source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉"),
-    status: str | None = Query(None, description="归一化状态: 处理中/待处理/待跟进"),
-    category: str | None = Query(None, description="按工单服务项(分类)过滤"),
-    has_handler: bool | None = Query(None, description="true=已分派(有真实处理人) / false=待分派(无处理人)"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=500),
-    sort: str = Query("aging_asc", description="aging_asc=最旧积压优先(默认) / register_desc / register_asc"),
-):
-    """积压未处理投诉的查询/统计/审核分析。
+    ts: datetime | None,
+    te: datetime | None,
+    source_type: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    has_handler: bool | None = None,
+    sort: str = "aging_asc",
+) -> list[dict]:
+    """查询积压工单全量行(统一归一化口径, 与 /backlog 完全一致).
 
-    与 /summary、/analysis 的积压口径不同点: 本接口统一用 _norm_status 归一化判定,
-    排除"状态仍为待处理但实际已真实完成(finish_time 晚于登记 3 分钟)"的工单,
-    避免统计数与明细表对不上。
-    统计维度(不受分页影响): 来源/分类/龄期/处理人/待分派/超期/已核查。
+    供 /backlog(分页+统计) 与 /backlog/export(导出Excel) 共用, 保证两处口径 100% 一致。
+    返回列表已按 sort 排序, 每行含 audited 字段(已核查标识)。
     """
-    ts = _parse_dt(start)
-    te = _parse_dt_end(end)
     src_expr = _complaint_source_type_case()
 
     def _fb_handler(t: ServiceTicket) -> str | None:
@@ -941,9 +954,36 @@ def complaint_backlog(
     audited_refs = set(db.scalars(
         select(ComplaintAudit.ref_id).where(ComplaintAudit.ref_id.isnot(None), ComplaintAudit.ref_id != "")
     ).all())
+    for r in backlog:
+        r["audited"] = bool(r["device_sn"] in audited_sns or r["ticket_no"] in audited_refs)
+    return backlog
 
-    def _audited(r: dict) -> bool:
-        return bool(r["device_sn"] in audited_sns or r["ticket_no"] in audited_refs)
+
+@router.get("/backlog", response_model=R, summary="积压未处理投诉审核分析(统一口径: 归一化状态非已完成)")
+@cached_json(lambda *a, **kw: f"complaint:backlog:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('status')}:{kw.get('category')}:{kw.get('has_handler')}:{kw.get('page')}:{kw.get('page_size')}:{kw.get('sort')}", ttl=60)
+def complaint_backlog(
+    db: DBSession,
+    _: CurrentUser,
+    start: str | None = None,
+    end: str | None = None,
+    source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉"),
+    status: str | None = Query(None, description="归一化状态: 处理中/待处理/待跟进"),
+    category: str | None = Query(None, description="按工单服务项(分类)过滤"),
+    has_handler: bool | None = Query(None, description="true=已分派(有真实处理人) / false=待分派(无处理人)"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    sort: str = Query("aging_asc", description="aging_asc=最旧积压优先(默认) / register_desc / register_asc"),
+):
+    """积压未处理投诉的查询/统计/审核分析。
+
+    与 /summary、/analysis 的积压口径不同点: 本接口统一用 _norm_status 归一化判定,
+    排除"状态仍为待处理但实际已真实完成(finish_time 晚于登记 3 分钟)"的工单,
+    避免统计数与明细表对不上。
+    统计维度(不受分页影响): 来源/分类/龄期/处理人/待分派/超期/已核查。
+    """
+    ts = _parse_dt(start)
+    te = _parse_dt_end(end)
+    backlog = _query_backlog_rows(db, ts, te, source_type, status, category, has_handler, sort)
 
     # 统计维度
     by_source = [{"name": k, "count": v} for k, v in sorted(Counter(r["source"] for r in backlog).items(), key=lambda x: -x[1])]
@@ -995,14 +1035,12 @@ def complaint_backlog(
     ]
     unassigned = sum(1 for r in backlog if r["handler"] == "未分配")
     overdue = sum(1 for r in backlog if r["aging_days"] is not None and r["aging_days"] >= 8)  # 登记满7天未完成
-    audited_total = sum(1 for r in backlog if _audited(r))
+    audited_total = sum(1 for r in backlog if r["audited"])
 
     total = len(backlog)
     max_aging = max((r["aging_days"] for r in backlog if r["aging_days"] is not None), default=0)
     start_idx = (page - 1) * page_size
     items = backlog[start_idx:start_idx + page_size]
-    for r in items:
-        r["audited"] = _audited(r)
 
     return R(data={
         "total": total,
@@ -1020,6 +1058,59 @@ def complaint_backlog(
         "audited": audited_total,
         "items": items,
     })
+
+
+@router.get("/backlog/export", summary="积压未处理投诉明细导出Excel")
+def complaint_backlog_export(
+    db: DBSession,
+    _: CurrentUser,
+    start: str | None = None,
+    end: str | None = None,
+    source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉"),
+    status: str | None = Query(None, description="归一化状态: 处理中/待处理/待跟进"),
+    category: str | None = Query(None, description="按工单服务项(分类)过滤"),
+    has_handler: bool | None = Query(None, description="true=已分派 / false=待分派"),
+    sort: str = Query("aging_asc", description="aging_asc=最旧积压优先(默认) / register_desc / register_asc"),
+):
+    """导出积压未处理投诉明细 Excel。
+
+    与 /backlog 完全同口径(_query_backlog_rows 统一归一化), 不受分页限制, 导出筛选后的全量行。
+    """
+    import io
+    import pandas as pd
+    from urllib.parse import quote
+    from fastapi.responses import StreamingResponse
+    from app.utils.excel import clean_df_for_excel
+
+    ts = _parse_dt(start)
+    te = _parse_dt_end(end)
+    rows = _query_backlog_rows(db, ts, te, source_type, status, category, has_handler, sort)
+
+    df = pd.DataFrame([{
+        "工单号": r["ticket_no"],
+        "来源": r["source"],
+        "分类": r["category"],
+        "投诉原因": r["reason"],
+        "登记时间": r["register_time"],
+        "积压天数": r["aging_days"],
+        "设备SN": r["device_sn"],
+        "投诉内容": r["problem"],
+        "处理人": r["handler"],
+        "状态": r["status"],
+        "完成时间": r["finish_time"],
+        "已核查": "是" if r["audited"] else "否",
+    } for r in rows])
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        clean_df_for_excel(df).to_excel(writer, index=False, sheet_name="积压投诉")
+    buf.seek(0)
+    fname = quote(f"积压投诉明细_{start or '全量'}_{end or '至今'}.xlsx")
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{fname}"},
+    )
 
 
 # ---------- 被投诉主体维度分析 ----------
@@ -1076,7 +1167,7 @@ def complaint_subject_analysis(
     merchant_total = len(merchant_rows)
     merchant_by_subject: dict[str, dict] = {}
     for registrant, sn, rt in merchant_rows:
-        subject = str(registrant).strip()
+        subject = _norm_subject_entity(registrant)
         if not subject:
             continue
         b = merchant_by_subject.setdefault(subject, {"merchant_count": 0, "external_count": 0, "sns": set(), "trend": {}})
@@ -1104,9 +1195,9 @@ def complaint_subject_analysis(
     for company_entity, complaint_shop, sn, cd in ext_rows:
         subject = None
         if company_entity and str(company_entity).strip():
-            subject = str(company_entity).strip()
+            subject = _norm_subject_entity(company_entity)
         elif complaint_shop and str(complaint_shop).strip() not in _IGNORE_SHOP:
-            subject = str(complaint_shop).strip()
+            subject = _norm_subject_entity(complaint_shop)
         if not subject:
             external_unattributed += 1
             continue
@@ -1603,6 +1694,32 @@ def complaint_analysis(
         for r in merchant_entity_rows
     ]
 
+    # ── 5.2 商户号被投诉主体趋势(按日, 不同主体堆叠柱; 商户号内细分, 不合并同名公司) ──
+    merchant_entity_day_rows = db.execute(
+        _action_filter(
+            _tk_base().with_only_columns(day_trunc, ServiceTicket.registrant, func.count())
+            .where(src_expr == "商户号投诉")
+            .where(ServiceTicket.registrant.isnot(None), ServiceTicket.registrant != "")
+            .group_by(day_trunc, ServiceTicket.registrant)
+        )
+    ).all()
+    entity_total_map: dict[str, int] = {}
+    for r in merchant_entity_day_rows:
+        ent = r[1] or "未标注"
+        entity_total_map[ent] = entity_total_map.get(ent, 0) + int(r[2] or 0)
+    # 主体按总量降序(全部列示, 商户号内细分到具体商户号)
+    entity_order = [e for e, _ in sorted(entity_total_map.items(), key=lambda x: -x[1])]
+    entity_trend_map: dict[str, dict[str, int]] = {}
+    for r in merchant_entity_day_rows:
+        day = str(r[0])[:10] if r[0] else ""
+        ent = r[1] or "未标注"
+        b = entity_trend_map.setdefault(day, {})
+        b[ent] = b.get(ent, 0) + int(r[2] or 0)
+    merchant_entity_trend = [
+        {"day": d, **{e: v.get(e, 0) for e in entity_order}}
+        for d, v in sorted(entity_trend_map.items())[:90]
+    ]
+
     # 商户号处理人分布 (handler, 排除被投诉主体名)
     merchant_handler_rows = db.execute(
         _action_filter(
@@ -1756,6 +1873,7 @@ def complaint_analysis(
             "external_today_registered": ext_today_registered,
             "merchant_category": merchant_category,
             "merchant_entity_distribution": merchant_entity_distribution,
+            "merchant_entity_trend": merchant_entity_trend,
             "merchant_handler_distribution": merchant_handler_distribution,
             "timeliness": timeliness,
             "handler_efficiency": handler_efficiency,

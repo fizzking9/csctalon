@@ -295,6 +295,40 @@ def warm_idle() -> None:
     _run("空闲", _do)
 
 
+def start_warm_loop():
+    """独立启动缓存预热后台循环(不依赖 BMS 调度器)。
+
+    背景(2026-08-25): 此前 warm_on_startup / warm_idle 挂在 bms_scheduler.start()
+    与调度器主循环里, 当 BMS_SCHEDULE_AUTOSTART=False(调度器不启动)时永不执行 →
+    看板缓存只能靠路由层 60s TTL 按需回填, 过期后再访问即冷加载重查询, 负载高时易超时。
+    本函数在 lifespan 中直接启动: 延迟 8s 做启动预热(force), 之后每分钟空闲预热(白天/非同步/ttl节流)。
+    若调度器也启动, 两边都会调 warm_idle, 由单飞锁 _warm_lock 互斥, 无重复重算。
+    """
+    import asyncio
+
+    async def _loop():
+        try:
+            await asyncio.sleep(8)
+            await asyncio.to_thread(warm_on_startup)
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001  预热失败不影响服务
+            pass
+        while True:
+            try:
+                await asyncio.sleep(60)
+                await asyncio.to_thread(warm_idle)
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001
+                pass
+
+    try:
+        return asyncio.get_running_loop().create_task(_loop())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def is_warming() -> bool:
     """当前是否有预热在跑(供状态查询)"""
     return _warm_lock.locked()

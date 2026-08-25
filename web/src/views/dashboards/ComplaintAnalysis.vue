@@ -350,6 +350,13 @@
           </el-col>
         </el-row>
 
+        <!-- 被投诉主体趋势(按日堆叠柱, 商户号内细分到具体商户号) -->
+        <div class="chart-card mb-16">
+          <div class="chart-title">被投诉主体趋势（按日 · 堆叠）<span class="dim-text"> · 商户号内细分, 云客猫/大秦WiFi管家等按商户号分开</span></div>
+          <BaseChart v-if="merchantEntityTrendOption" :option="merchantEntityTrendOption" height="280px" />
+          <el-empty v-else description="暂无趋势数据" :image-size="40" />
+        </div>
+
         <!-- 商户号投诉明细表 -->
         <el-card shadow="never">
           <template #header>
@@ -550,6 +557,7 @@
                 <el-tag size="small" type="warning">超期 {{ b.overdue }}</el-tag>
                 <el-tag size="small" type="info">待分派 {{ b.unassigned }}</el-tag>
                 <el-tag size="small" type="success">已核查 {{ b.audited }}</el-tag>
+                <el-button size="small" type="primary" plain :icon="Download" :loading="backlogExporting" @click="handleBacklogExport">导出Excel</el-button>
               </div>
             </div>
           </template>
@@ -808,11 +816,11 @@
 
 <script setup>
 import { ref, computed, reactive, onMounted } from 'vue'
-import { Search, Refresh } from '@element-plus/icons-vue'
+import { Search, Refresh, Download } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
 import BaseChart from '@/components/BaseChart.vue'
-import { complaintAnalysis, complaintDetail, complaintSupplementary, complaintBacklog, complaintSubjectAnalysis, createAudit } from '@/api/complaint'
+import { complaintAnalysis, complaintDetail, complaintSupplementary, complaintBacklog, complaintBacklogExport, complaintSubjectAnalysis, createAudit } from '@/api/complaint'
 import { useAudit } from '@/composables/useAudit'
 
 const { openDeviceAudit, openPersonAudit } = useAudit()
@@ -832,6 +840,7 @@ const effSource = ref('internal')
 // ── 积压审核(backlog tab) ──
 const backlogData = ref(null)
 const backlogLoading = ref(false)
+const backlogExporting = ref(false)
 const backlogPage = ref(1)
 const backlogPageSize = ref(50)
 const backlogTotal = ref(0)
@@ -1079,6 +1088,7 @@ const s = computed(() => data.value || {
   external_today_registered: 0,
   merchant_category: [],
   merchant_entity_distribution: [],
+  merchant_entity_trend: [],
   merchant_handler_distribution: [],
   timeliness: [],
   handler_efficiency: { internal: [], merchant: [], external: [] },
@@ -1170,7 +1180,7 @@ const sourcePieOption = computed(() => {
     series: [{
       type: 'pie', radius: ['40%', '65%'], center: ['50%', '45%'],
       label: { show: false }, labelLine: { show: false },
-      data: d.map((x, i) => ({ ...x, itemStyle: { color: sourcePieColors[i] } })),
+      data: d.map((x, i) => ({ name: x.name, value: x.count, itemStyle: { color: sourcePieColors[i] } })),
     }],
   }
 })
@@ -1240,7 +1250,7 @@ const platformPieOption = computed(() => {
     series: [{
       type: 'pie', radius: ['40%', '65%'], center: ['50%', '45%'],
       label: { show: false }, labelLine: { show: false },
-      data: p.map((x, i) => ({ ...x, itemStyle: { color: platformColors[i % platformColors.length] } })),
+      data: p.map((x, i) => ({ name: x.name, value: x.count, itemStyle: { color: platformColors[i % platformColors.length] } })),
     }],
   }
 })
@@ -1292,6 +1302,27 @@ const merchantEntityOption = computed(() => {
       itemStyle: { color: '#ca8a04', borderRadius: [0, 4, 4, 0] },
       barMaxWidth: 16,
     }],
+  }
+})
+
+// ── 商户号被投诉主体趋势(按日, 不同主体堆叠柱; 商户号内细分) ──
+const merchantEntityColors = ['#7c3aed', '#ea580c', '#0891b2', '#ca8a04', '#dc2626', '#2563eb', '#16a34a', '#db2777', '#4f46e5']
+const merchantEntityTrendOption = computed(() => {
+  const t = s.value.merchant_entity_trend || []
+  if (!t.length) return null
+  const entities = Object.keys(t[0]).filter(k => k !== 'day')
+  return {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { bottom: 0, left: 'center', type: 'scroll', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 10 } },
+    grid: { left: 48, right: 24, bottom: 44, top: 16 },
+    xAxis: { type: 'category', data: t.map(r => r.day), axisLabel: { fontSize: 10, rotate: 45 } },
+    yAxis: { type: 'value', name: '投诉数' },
+    series: entities.map((e, i) => ({
+      name: e, type: 'bar', stack: 'total',
+      data: t.map(r => r[e] || 0),
+      itemStyle: { color: merchantEntityColors[i % merchantEntityColors.length] },
+      barMaxWidth: 18,
+    })),
   }
 })
 
@@ -1427,6 +1458,37 @@ async function loadBacklog() {
     backlogTotal.value = res.data?.total || 0
   } finally {
     backlogLoading.value = false
+  }
+}
+
+// 导出积压明细 Excel(与 /backlog 同口径, 含当前筛选, 不受分页限制)
+async function handleBacklogExport() {
+  backlogExporting.value = true
+  try {
+    const p = { sort: 'aging_asc', ...params.value }
+    if (backlogFilters.source_type) p.source_type = backlogFilters.source_type
+    if (backlogFilters.status) p.status = backlogFilters.status
+    if (backlogFilters.has_handler != null) p.has_handler = backlogFilters.has_handler
+    const res = await complaintBacklogExport(p)
+    const blobData = res instanceof Blob ? res : res?.data
+    const blob = new Blob([blobData], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    let fname = `积压投诉明细_${effectiveStart.value || '全量'}_${effectiveEnd.value || '至今'}.xlsx`
+    const cd = res.headers?.['content-disposition'] || ''
+    const m = /filename\*=UTF-8''([^;]+)/i.exec(cd)
+    if (m) fname = decodeURIComponent(m[1])
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fname
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    ElMessage.success('已导出 ' + (backlogTotal.value || 0) + ' 条')
+  } catch (e) {
+    ElMessage.error('导出失败: ' + (e?.message || e))
+  } finally {
+    backlogExporting.value = false
   }
 }
 
