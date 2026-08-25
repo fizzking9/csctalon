@@ -197,6 +197,29 @@ def cache_get_json(key: str) -> Any | None:
         return None
 
 
+def _json_default(obj: Any) -> Any:
+    """json.dumps 的 default: 处理非原生类型, 避免把 pydantic 响应对象序列化成 repr 字符串。
+
+    背景(2026-08-25 修复投毒 bug): 此前用 default=str, 把 FastAPI 路由返回的 R(pydantic)
+    响应对象直接 json.dumps → 落进 Redis 的是 R 的 repr 字符串而非 JSON 对象; 命中缓存
+    读出 str 后, cached_json 原样返回, FastAPI response_model=R 校验 str 失败 → 500。
+    现统一转成 JSON 安全结构: pydantic→model_dump(mode='json'), 日期→isoformat,
+    Decimal→float, set→list, 其余兜底 str(只对真正无法结构化的对象)。
+    """
+    # pydantic v2 响应对象(R/BaseModel)→ JSON 安全 dict
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(mode="json")
+    import datetime as _dt
+    if isinstance(obj, (_dt.datetime, _dt.date)):
+        return obj.isoformat()
+    from decimal import Decimal as _Decimal
+    if isinstance(obj, _Decimal):
+        return float(obj)
+    if isinstance(obj, (set, frozenset)):
+        return list(obj)
+    return str(obj)
+
+
 def cache_set_json(key: str, value: Any, ttl: int = 60) -> bool:
     """写缓存; ttl 秒后过期. 写入高峰期自动延长 TTL 防 DB 打爆. 失败静默(不影响业务)"""
     r = get_redis()
@@ -205,9 +228,9 @@ def cache_set_json(key: str, value: Any, ttl: int = 60) -> bool:
     try:
         eff_ttl = _effective_ttl(ttl)
         if eff_ttl > 0:
-            r.setex(key, eff_ttl, json.dumps(value, default=str, ensure_ascii=False))
+            r.setex(key, eff_ttl, json.dumps(value, default=_json_default, ensure_ascii=False))
         else:
-            r.set(key, json.dumps(value, default=str, ensure_ascii=False))
+            r.set(key, json.dumps(value, default=_json_default, ensure_ascii=False))
         return True
     except (RedisError, TypeError) as e:
         logger.debug("缓存写失败 key=%s: %s", key, e)
@@ -330,7 +353,10 @@ def cached_json(key_fn: Callable[..., str], ttl: int = 60) -> Callable:
                 key = None
             if key:
                 hit = cache_get_json(key)
-                if hit is not None:
+                # 仅信任 dict 形态: 旧版 cache_set_json(default=str) 曾把 R pydantic
+                # 响应对象序列化成 repr 字符串投毒缓存, 命中返 str 会触发
+                # response_model=R 校验失败 500; 遇非 dict(历史投毒条目)跳过让其重算自愈。
+                if hit is not None and isinstance(hit, dict):
                     return hit
             result = func(*args, **kwargs)
             if key and result is not None:
