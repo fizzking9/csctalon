@@ -50,8 +50,10 @@ from app.models.scrm_session import ScrmSession  # noqa: F401
 from app.models.scrm_session_transfer import ScrmSessionTransfer  # noqa: F401
 from app.models.scrm_staff_profile import ScrmStaffProfile  # noqa: F401
 from app.models.scrm_sync_log import ScrmSyncLog  # noqa: F401
+from app.models.source_group import SourceGroup  # noqa: F401
 from app.models.staff_assignment import StaffAssignment  # noqa: F401
 from app.models.strategy import StrategyDoc, StrategyReadReceipt  # noqa: F401
+from app.models.system_event import SystemEvent  # noqa: F401
 from app.models.sync_source_config import SyncSourceConfig  # noqa: F401
 from app.models.task import SpecialTask, TaskDevice, TaskFollowup  # noqa: F401
 from app.models.ticket import ServiceTicket  # noqa: F401
@@ -132,6 +134,8 @@ __all__ = [
     "ScrmSessionTransfer",
     "ScrmStaffProfile",
     "ScrmSyncLog",
+    "SourceGroup",
+    "SystemEvent",
     "ServiceTicket",
     "StaffAssignment",
     "TicketActionLog",

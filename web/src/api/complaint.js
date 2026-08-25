@@ -25,6 +25,11 @@ export function complaintBacklog(params) {
   return request.get('/complaints/backlog', { params })
 }
 
+// 被投诉主体维度分析(主体统计/严重性分布/升级链/退款关联)
+export function complaintSubjectAnalysis(params) {
+  return request.get('/complaints/subject-analysis', { params })
+}
+
 // workbuddy 投诉推送同步日志(内部查看)
 export function listComplaintSyncLogs(params) {
   return request.get('/sync/complaints/logs', { params })

@@ -209,112 +209,11 @@
         <!-- ② 面板2: 抓取模式 & 凭证设置 (仅管理员可见, 默认折叠) -->
         <el-collapse-item
           v-if="isAdmin"
-          title="抓取模式 & 凭证设置 (管理员) — 账号密码加密存储 / 抓取模式选择 / 验证码登录"
+          title="抓取模式 & 凭证设置 (管理员) — 按平台分组 / 组级统一凭证 / 单源覆盖 / 测试登录"
           name="settings"
         >
           <div class="panel-inner">
-            <el-alert type="info" :closable="false" show-icon class="mb-16">
-              <p class="alert-text">
-                每个数据源独立配置地址与账号密码(加密存储)。<br/>
-                • <strong>BMS</strong>: 不同子域名(wifi/support.cloud-cat.cn)可能用不同账号。Playwright 页面抓取模式。<br/>
-                • <strong>SCRM</strong>: 支持三种抓取模式:
-                <span style="color:#2f6feb">OpenAPI (默认,稳定)</span> /
-                <span style="color:#e6a23c">Playwright 网页(数学验证码兜底)</span> /
-                <span style="color:#67c23a">双模式(OpenAPI优先,失败自动回退网页)</span>。<br/>
-                「默认同步」控制是否纳入定时同步与手动同步的默认勾选。账号/密码留空表示不修改原值。
-              </p>
-            </el-alert>
-
-            <el-table :data="sources" border size="small" v-loading="sourcesLoading">
-              <el-table-column prop="name" label="数据源" width="130" />
-              <el-table-column prop="data_type" label="代码" width="130" />
-              <el-table-column label="抓取模式" width="150">
-                <template #default="{ row }">
-                  <template v-if="isScrmSource(row)">
-                    <el-tag
-                      v-if="row.fetch_mode === 'openapi'"
-                      size="small"
-                      effect="light"
-                    >OpenAPI</el-tag>
-                    <el-tag
-                      v-else-if="row.fetch_mode === 'playwright'"
-                      type="warning"
-                      size="small"
-                      effect="light"
-                    >网页(数学验证码)</el-tag>
-                    <el-tag
-                      v-else-if="row.fetch_mode === 'dual'"
-                      type="success"
-                      size="small"
-                      effect="light"
-                    >双模式兜底</el-tag>
-                    <el-tag v-else size="small" effect="light">—</el-tag>
-                  </template>
-                  <el-tag v-else size="small" effect="light">Playwright</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="凭证" width="80">
-                <template #default="{ row }">
-                  <el-tag v-if="row.has_credentials" type="success" size="small">已配</el-tag>
-                  <el-tag v-else type="danger" size="small">未配</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="默认同步" width="80">
-                <template #default="{ row }">
-                  <el-tag v-if="row.default_sync" type="primary" size="small">纳入</el-tag>
-                  <el-tag v-else type="info" size="small">不纳入</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="启用" width="60">
-                <template #default="{ row }">
-                  <el-tag v-if="row.enabled" type="success" size="small">是</el-tag>
-                  <el-tag v-else type="info" size="small">否</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column v-if="hasCaptchaSources" label="验证码登录" width="200">
-                <template #default="{ row }">
-                  <template v-if="row.requires_captcha">
-                    <div class="captcha-login-cell">
-                      <el-tag
-                        :type="loginStates[row.data_type]?.has_storage_state ? 'success' : 'warning'"
-                        size="small"
-                        effect="light"
-                        class="mr-8"
-                      >
-                        {{ loginStates[row.data_type]?.has_storage_state ? '已登录' : '未登录' }}
-                      </el-tag>
-                      <el-button
-                        link
-                        type="primary"
-                        size="small"
-                        :loading="loginStates[row.data_type]?.busy"
-                        @click="openCaptchaLogin(row)"
-                      >
-                        {{ loginStates[row.data_type]?.has_storage_state ? '重新登录' : '登录' }}
-                      </el-button>
-                      <el-button
-                        v-if="loginStates[row.data_type]?.has_storage_state"
-                        link
-                        type="danger"
-                        size="small"
-                        @click="handleLogout(row)"
-                      >
-                        退出
-                      </el-button>
-                    </div>
-                  </template>
-                  <span v-else class="muted">—</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="BMS 页面" show-overflow-tooltip>
-                <template #default="{ row }">{{ row.base_url }}{{ row.page_path }}</template>
-              </el-table-column>
-              <el-table-column label="操作" width="80" fixed="right">
-                <template #default="{ row }">
-                  <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
+            <SyncSettings embedded />
           </div>
         </el-collapse-item>
 
@@ -778,6 +677,7 @@ import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Setting, Clock, DataAnalysis, Loading } from '@element-plus/icons-vue'
+import SyncSettings from '../system/SyncSettings.vue'
 import {
   listSyncDataSources,
   taskPreflight,

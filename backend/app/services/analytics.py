@@ -861,41 +861,49 @@ def _complaint_subitem_case():
     ).label("complaint_sub")
 
 
-# 投诉来源类型(从 service_tickets.service_item 归一化): 区分三大类
-#   外部投诉(平台): 工信部投诉 / 全国12315平台 / 公共服务平台 / 消费者协会 / 315 / 监督局 等
-#   商户号投诉: 微信投诉 (也是外部投诉的一种, 但为了展示清晰独立分组)
-#   内部投诉: 商品投诉 / 服务投诉 / 未标注 / 其它
-# 全域适用规则:
-#   外部投诉 = {公共服务平台, 全国12315平台, 消费者协会, 工信部投诉, 微信投诉(商户号)}
-#   内部投诉 = {服务投诉, 商品投诉}
-# 用于分析时独立核算、独立展示、独立出报表
+# ═══════════════════════════════════════════════════════════════════
+# 投诉三源分类约定(2026-08-25 固化, 全系统唯一口径)
+# ───────────────────────────────────────────────────────────────────
+#   商户号投诉 = service_item 含「微信」(微信投诉, 本质是外部投诉但独立分组)
+#   内部投诉   = service_item = 商品投诉 / 服务投诉 (工单直接登记, 未走外部渠道)
+#   外部投诉   = service_item 含外部监管/平台关键词(12315/工信部/公共服务平台/
+#                消费者协会/消协/监督局/市场监管/市监/315平台/12345/政务平台)
+#                + **未标注/其它 一律兜底归外部投诉**(2026-08-25 用户确认: 外部为兜底桶)
+# 判定优先级: 外部平台关键词 > 微信 > 商品/服务投诉 > else=外部投诉(未标注/其它)
+#   ⚠️ 外部平台关键词优先: 若 service_item 同时含外部关键词与微信(如"12315微信投诉"),
+#      归「外部投诉」(监管渠道更重)。
+# 全域统一: 所有投诉统计/明细/看板/涉诉 均复用本函数(_complaint_source_type_case),
+#   不得另写关键词判断(涉诉 SQL 硬编码处见 analytics.py 6628/7110, 与本法一致, 仅原生SQL场景)。
+# ═══════════════════════════════════════════════════════════════════
 _EXTERNAL_PLATFORM_KEYWORDS = (
     "工信部", "12315", "公共服务平台", "消费者协会", "消协",
     "监督局", "市场监管", "市监", "315平台", "12345", "政务平台",
 )
 _MERCHANT_COMPLAINT_KEYWORDS = ("微信",)
+_INTERNAL_COMPLAINT_KEYWORDS = ("商品投诉", "服务投诉")
 def _complaint_source_type_case(col=ServiceTicket.service_item):
-    """返回 CASE WHEN 表达式: '外部投诉' / '商户号投诉' / '内部投诉'
-    注: 商户号投诉(微信) 本质也是外部投诉, 为展示细分独立出分组"""
+    """三源投诉分类(CASE WHEN): '外部投诉' / '商户号投诉' / '内部投诉'
+    见上方约定: 微信→商户号; 商品投诉/服务投诉→内部; 外部平台关键词及未标注/其它→外部。"""
     si = func.coalesce(col, literal(""))
     platform_whens = [si.ilike(f"%{k}%") for k in _EXTERNAL_PLATFORM_KEYWORDS]
     merchant_whens = [si.ilike(f"%{k}%") for k in _MERCHANT_COMPLAINT_KEYWORDS]
+    internal_whens = [si.ilike(f"%{k}%") for k in _INTERNAL_COMPLAINT_KEYWORDS]
     return case(
         (or_(*platform_whens), "外部投诉"),
         (or_(*merchant_whens), "商户号投诉"),
-        else_="内部投诉",
+        (or_(*internal_whens), "内部投诉"),
+        else_="外部投诉",  # 未标注/其它 → 外部(兜底桶, 2026-08-25 用户确认)
     ).label("complaint_source_type")
 
 # 简化版: 仅区分 外部投诉 vs 内部投诉 (用于需要两桶口径的统计, 如 complaint_by_source 中微信归入外部)
 def _complaint_source_type_simple_case(col=ServiceTicket.service_item):
     """返回 CASE WHEN 表达式: '外部投诉' / '内部投诉'
-    商户号投诉(微信) 在此处归入外部投诉桶"""
+    内部=商品投诉/服务投诉; 其余(微信/外部平台/未标注)一律归外部(与三源约定兜底一致)"""
     si = func.coalesce(col, literal(""))
-    all_external_kws = _EXTERNAL_PLATFORM_KEYWORDS + _MERCHANT_COMPLAINT_KEYWORDS
-    whens = [si.ilike(f"%{k}%") for k in all_external_kws]
+    internal_whens = [si.ilike(f"%{k}%") for k in _INTERNAL_COMPLAINT_KEYWORDS]
     return case(
-        (or_(*whens), "外部投诉"),
-        else_="内部投诉",
+        (or_(*internal_whens), "内部投诉"),
+        else_="外部投诉",
     ).label("complaint_source_type_simple")
 
 
@@ -6615,6 +6623,7 @@ def refund_decision_overview(
     # ── 3. 涉诉 vs 普通: 每单按 SN 关联工单 bool_or 判定, 优先级 外部>商户号>内部 ──
     #     (2026-08-24 口径升级: 涉诉 = SN 关联投诉工单 OR 退款记录审核备注/备注含投诉类标识。
     #      后者是退款人员对"尚未进入投诉但预判可能投诉"的单做的类型标识, 同样计入涉诉。)
+    #     三源关键词与 analytics._complaint_source_type_case 约定一致(2026-08-25 固化, 原生SQL场景)。
     _REMARK_COMPLAINT_MARKERS = ("涉投诉", "客诉", "投诉", "315", "争议", "催退")
     comp_rows = db.execute(text(f"""
         SELECT {_day("r.created_at_raw")} AS d, r.refund_amount,
@@ -7097,7 +7106,7 @@ def refund_export_original(
     """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
 
-    # 涉诉分类 (与决策概览口径一致)
+    # 涉诉分类 (与决策概览口径一致; 三源关键词与 _complaint_source_type_case 约定一致)
     comp_map: dict[str, str] = {}
     for r in db.execute(text("""
         SELECT r.refund_no,

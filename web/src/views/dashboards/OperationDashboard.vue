@@ -413,16 +413,22 @@
         <span>{{ supplSummaryText }}</span>
       </div>
 
-      <!-- 来源分布 + 处理人Top -->
+      <!-- 来源分布 + 处理人Top + 被投诉主体Top -->
       <el-row :gutter="12" class="mb-16">
-        <el-col :xs="24" :md="12">
+        <el-col :xs="24" :md="8">
           <ChartCard title="投诉来源分布">
             <BaseChart :option="complaintSourcePie" height="240px" />
           </ChartCard>
         </el-col>
-        <el-col :xs="24" :md="12">
+        <el-col :xs="24" :md="8">
           <ChartCard title="处理人 Top10">
             <BaseChart :option="complaintHandlerOption" height="240px" />
+          </ChartCard>
+        </el-col>
+        <el-col :xs="24" :md="8">
+          <ChartCard title="被投诉主体 Top5">
+            <BaseChart v-if="complaintSubjectTopOption" :option="complaintSubjectTopOption" height="240px" />
+            <el-empty v-else description="暂无数据" :image-size="40" />
           </ChartCard>
         </el-col>
       </el-row>
@@ -456,6 +462,12 @@
               <el-link type="primary" :underline="false" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn || '—' }}</el-link>
             </template>
           </el-table-column>
+          <el-table-column label="被投诉主体" width="150" show-overflow-tooltip>
+            <template #default="{ row }">
+              <el-tag v-if="row.entity" size="small" effect="plain" type="warning">{{ row.entity }}</el-tag>
+              <span v-else class="text-muted">—</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="category" label="分类" width="130" show-overflow-tooltip :filters="complaintCategoryFilters" :filter-method="(v,row)=>row.category===v" filter-placement="bottom-end" />
           <el-table-column prop="problem" label="投诉内容" min-width="180" show-overflow-tooltip />
           <el-table-column label="处理/跟进" width="110" show-overflow-tooltip>
@@ -474,7 +486,7 @@
 import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { today } from '@/api/analytics'
 import { listGroups } from '@/api/group'
-import { complaintSummary, complaintDetail } from '@/api/complaint'
+import { complaintSummary, complaintDetail, complaintSubjectAnalysis } from '@/api/complaint'
 import BaseChart from '@/components/BaseChart.vue'
 import { useAudit } from '@/composables/useAudit'
 import dayjs from 'dayjs'
@@ -548,6 +560,8 @@ const hasRecovery = computed(() => recoveryData.value && recoveryData.value.kpi)
 // 投诉专项数据
 const complaintSummaryData = ref({})
 const complaintList = ref([])
+// 被投诉主体维度数据
+const complaintSubjectData = ref({})
 
 // workbuddy 推送补充数据源(315/卡商, 按SN关联工单)
 const supplExternal = computed(() => complaintSummaryData.value?.supplementary?.external || { total: 0, matched: 0 })
@@ -1005,6 +1019,32 @@ function complaintSourceType(source) {
   return 'info'
 }
 
+// 被投诉主体 Top5 (商户号+外部 堆叠, 仅统计有主体的来源)
+const complaintSubjectTopOption = computed(() => {
+  const rows = (complaintSubjectData.value?.subject_ranking || []).slice(0, 5)
+  if (!rows.length) return null
+  const items = [...rows].reverse()
+  return {
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      formatter: (ps) => {
+        const p = ps[0]
+        const row = rows.find(x => x.name === p?.name)
+        if (!row) return ''
+        return `${row.name}<br/>商户号: ${row.merchant_count}<br/>外部: ${row.external_count}<br/>关联退款: ${row.refund_count}笔 ¥${Number(row.refund_amount || 0).toLocaleString('zh-CN')}`
+      }
+    },
+    legend: { top: 0, right: 0, itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 10 } },
+    grid: { left: 10, right: 10, bottom: 8, top: 28, containLabel: true },
+    xAxis: { type: 'value' },
+    yAxis: { type: 'category', data: items.map(x => x.name), axisLabel: { fontSize: 11 } },
+    series: [
+      { name: '商户号投诉', type: 'bar', stack: 's', data: items.map(x => x.merchant_count), itemStyle: { color: '#7c3aed' }, barMaxWidth: 16 },
+      { name: '外部投诉', type: 'bar', stack: 's', data: items.map(x => x.external_count), itemStyle: { color: '#dc2626' }, barMaxWidth: 16 },
+    ],
+  }
+})
+
 function formatShortTime(t) {
   if (t === null || t === undefined || t === '' || t === '-') return '-'
   const d = dayjs(t)
@@ -1033,7 +1073,7 @@ async function loadAll() {
   const params = { start, end, trend_grain: trendGrain.value }
 
   try {
-    const [kpiRes, hourlyRes, receptionRes, refundRes, staffRes, recoveryRes, complaintSummaryRes, complaintDetailRes] = await Promise.all([
+    const [kpiRes, hourlyRes, receptionRes, refundRes, staffRes, recoveryRes, complaintSummaryRes, complaintDetailRes, subjectRes] = await Promise.all([
       today.kpi(params),
       today.hourlyTrend(params),
       today.reception(params),
@@ -1042,6 +1082,7 @@ async function loadAll() {
       today.refundRecovery(params),
       complaintSummary({ start, end }),
       complaintDetail({ start, end, limit: 500, include_supplementary: true }),
+      complaintSubjectAnalysis({ start, end }),
     ])
 
     if (kpiRes.data) kpiData.value = kpiRes.data
@@ -1052,6 +1093,7 @@ async function loadAll() {
     if (recoveryRes.data) recoveryData.value = recoveryRes.data
     if (complaintSummaryRes.data) complaintSummaryData.value = complaintSummaryRes.data
     if (complaintDetailRes.data) complaintList.value = complaintDetailRes.data?.items || []
+    if (subjectRes.data) complaintSubjectData.value = subjectRes.data
   } catch (e) {
     console.error('加载数据失败', e)
   } finally {

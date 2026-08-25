@@ -14,6 +14,7 @@ from app.api.deps import CurrentUser, DBSession, ManagerUser
 from app.models.card_complaint import CardComplaint
 from app.models.complaint_audit import ComplaintAudit
 from app.models.external_complaint import ExternalComplaint
+from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.schemas.common import PageBase, R
 from app.services.analytics import _complaint_source_type_case, _ticket_category_case, TZ
@@ -133,6 +134,9 @@ def _norm_status(source: str, status_val: str | None, finish_time, register_time
         if v in ("已结案", "已完成", "完成", "已解决", "已回复", "已反馈", "已关闭", "终止", "已终止"):
             return "已完成"
         if v in ("处理中", "跟进中", "跟进", "进行中"):
+            # 与「待处理」分支一致(2026-08-25): 状态字段常未同步, 以 finish 真实完成判定优先
+            if has_real_finish:
+                return "已完成"
             return "处理中"
         if v in ("待处理", "未处理", "待分派", "pending", "待跟进"):
             if has_handler:
@@ -362,33 +366,40 @@ def complaint_summary(
             agg[nm] = agg.get(nm, 0) + int(r[1] or 0)
         return [{"name": k, "count": v} for k, v in sorted(agg.items(), key=lambda x: -x[1])]
 
-    # ---- 积压未处理投诉(全量未完成, 不限今日) ----
-    # 口径: 投诉类工单, status 不在已完成类集合, 且无真实 finish_time
+    # ---- 积压未处理投诉(窗口内登记的未完成, 跟随 start/end; 不再无限累积历史遗留) ----
+    # 口径(2026-08-25): 积压 = 投诉类工单, status 不在已完成类集合,
+    #   且 register_time 落在 start~end 窗口内(默认近30天)。超出窗口的历史遗留不再计入,
+    #   避免陈年失效数据无限堆叠污染"近期处理及时性"判断。
     _done_status_set = {"已结案", "已完成", "完成", "已解决", "已回复", "已反馈", "已关闭", "终止", "已终止"}
+    _backlog_status_where = or_(
+        ServiceTicket.status.is_(None),
+        ServiceTicket.status == "",
+        ~ServiceTicket.status.in_(_done_status_set),
+    )
+    _backlog_reg_conds = []
+    if ts:
+        _backlog_reg_conds.append(ServiceTicket.register_time >= ts)
+    if te:
+        _backlog_reg_conds.append(ServiceTicket.register_time <= te)
+    # 积压闭环: 外部投诉工单关联的 315 登记已办结(result∈办结类) → 视为已完成, 不进积压
+    _ext_done_sns = _external_done_sns(db)
+    if _ext_done_sns:
+        _backlog_reg_conds.append(
+            or_(src_expr != "外部投诉", ServiceTicket.device_sn.notin_(_ext_done_sns))
+        )
     _backlog_stmt = (
         select(func.count())
         .where(_ticket_category_case() == "投诉")
-        .where(
-            or_(
-                ServiceTicket.status.is_(None),
-                ServiceTicket.status == "",
-                ~ServiceTicket.status.in_(_done_status_set),
-            )
-        )
+        .where(_backlog_status_where)
+        .where(*_backlog_reg_conds)
     )
-    # 额外排除: finish_time明显晚于register_time的(虽status未更新但实际已完成)
     backlog_total = db.scalar(_backlog_stmt) or 0
     # 按分类统计积压
     _backlog_cat_stmt = (
         select(ServiceTicket.service_item, func.count())
         .where(_ticket_category_case() == "投诉")
-        .where(
-            or_(
-                ServiceTicket.status.is_(None),
-                ServiceTicket.status == "",
-                ~ServiceTicket.status.in_(_done_status_set),
-            )
-        )
+        .where(_backlog_status_where)
+        .where(*_backlog_reg_conds)
         .group_by(ServiceTicket.service_item)
         .order_by(func.count().desc())
         .limit(20)
@@ -503,12 +514,17 @@ def complaint_detail(
         ServiceTicket.register_time,
         func.coalesce(ServiceTicket.finish_time, ServiceTicket.register_time),
     )
+    # 315登记已办结的SN: 外部投诉工单状态未同步但实际已办结 → 明细状态显示已完成(与积压口径一致)
+    ext_done_sns = _external_done_sns(db)
     for r in db.execute(stmt.order_by(action_time.desc().nulls_last())).all():
         source = r[2] or "内部投诉"
         raw_status = r[7]
         raw_handler = r[5]
         finish = r[8]
         register = r[6]
+        norm_status = _norm_status(source, raw_status, finish, register, raw_handler)
+        if source == "外部投诉" and r[1] in ext_done_sns:
+            norm_status = "已完成"  # 积压闭环: 315登记已办结 → 工单视为已完成
         # 展示时间:取最近动作时间(完成优先于登记,但如果完成时间不合理则用登记时间)
         display_dt = register
         if _is_real_finish(finish, register):
@@ -525,11 +541,12 @@ def complaint_detail(
             "problem": r[4],
             # 商户号投诉: handler 若落在被投诉主体名集合 → 该行无真实处理人(上游脏数据)
             "handler": "未分配" if (source == "商户号投诉" and raw_handler in entity_set) else _norm_handler(raw_handler),
-            "entity": r[9],  # 被投诉商户主体名(registrant)
+            # 被投诉主体: 仅商户号投诉的 registrant 是主体; 内部/外部投诉 registrant 多为处理人或系统值, 由补充表回填
+            "entity": r[9] if source == "商户号投诉" else None,
             "time": _to_sh_iso(display_dt),
             "register_time": _to_sh_iso(register),
             "finish_time": _to_sh_iso(finish) if _is_real_finish(finish, register) else None,
-            "status": _norm_status(source, raw_status, finish, register, raw_handler),
+            "status": norm_status,
         })
 
     # ---- 关联合并: 按设备SN附加 315外部投诉/卡商群投诉 补充明细 ----
@@ -558,6 +575,8 @@ def complaint_detail(
                     "complainant_phone": c.complainant_phone,
                     "platform": getattr(c, "platform", None),
                     "complaint_group": getattr(c, "complaint_group", None),
+                    "company_entity": getattr(c, "company_entity", None),
+                    "complaint_shop": getattr(c, "complaint_shop", None),
                     "problem": c.problem,
                     "solution": c.solution,
                     "result": c.result,
@@ -566,6 +585,12 @@ def complaint_detail(
                     "handle_time": _to_sh_iso(c.handle_time) if hasattr(c, "handle_time") else None,
                     "matched_ticket_no": c.matched_ticket_no,
                 }
+                # 被投诉主体(仅315外部投诉有: 公司主体 → 投诉店铺兜底)
+                entity = None
+                if source_name == "315外部投诉":
+                    ce = (suppl_item.get("company_entity") or "").strip()
+                    cs = (suppl_item.get("complaint_shop") or "").strip()
+                    entity = ce or (cs if cs and cs not in ("/", "-") else None)
                 # 命中工单SN → 附加到对应工单行(补充说明)
                 targets = [r for r in records if r.get("device_sn") == sn] if sn else []
                 if targets:
@@ -584,14 +609,18 @@ def complaint_detail(
                     "is_primary": False,
                     "no": suppl_item["complaint_no"] or suppl_item["matched_ticket_no"],
                     "device_sn": sn,
-                    # 分类显示平台类型(315表: 全国12315平台/公共服务平台等) / 投诉群(卡商表), 与工单 service_item 口径对齐
-                    "category": getattr(c, "platform", None) if is_315 else getattr(c, "complaint_group", None),
+                    # 分类: 315表=平台(全国12315平台/公共服务平台等, 属外部投诉) /
+                    #      卡商表=投诉群名无分类意义(群/主体名, 如"小皮丘&深圳联通"), 统一归入商户号投诉子类「微信投诉」
+                    #      避免明细/看板分类筛选出现主体群名(2026-08-25)
+                    "category": getattr(c, "platform", None) if is_315 else "微信投诉",
                     "problem": c.problem,
                     "handler": _norm_handler(suppl_item["handler"]),
+                    "entity": entity,
                     "time": suppl_item["handle_time"] or suppl_item["complaint_date"],
                     "register_time": suppl_item["complaint_date"],
                     "finish_time": suppl_item["handle_time"],
-                    "status": c.result or "补充记录",
+                    # 315行状态归一化(办结类→已完成, 与积压口径一致); 卡商行保持原文
+                    "status": _norm_external_result_status(c.result) if is_315 else (c.result or "补充记录"),
                     "supplementary": [suppl_item],
                     "suppl_finish_time": suppl_item["handle_time"],
                     "suppl_problem": c.problem,
@@ -610,6 +639,9 @@ def complaint_detail(
                 r["suppl_finish_time"] = max(times) if times else None
                 r["suppl_problem"] = next((s.get("problem") for s in suppl if s.get("problem")), None)
                 r["suppl_count"] = len(suppl)
+                # 外部投诉工单 registrant 多为处理人(无主体), 用补充表的公司主体回填
+                if not r.get("entity"):
+                    r["entity"] = next((s.get("company_entity") for s in suppl if s.get("company_entity")), None)
 
         records.extend(extra_rows)
 
@@ -694,6 +726,81 @@ _BACKLOG_DONE_SET = {"已结案", "已完成", "完成", "已解决", "已回复
 # 积压龄期分桶 (按登记时间距今天数)
 _BACKLOG_AGING_BUCKETS = [("今天", 0, 0), ("1-3天", 1, 3), ("4-7天", 4, 7), ("8-14天", 8, 14), (">14天", 15, None)]
 
+# 315 外部投诉登记「办结类」结果集合(2026-08-25 积压闭环):
+# 外部投诉工单 status 常停留在"待处理"(上游 BMS 状态同步不完整), 但对应 315 登记里已办结
+# (result=和解结案/撤销结案/调解结案等 + 处理时间/明细)。此时工单应视为已完成, 不计入积压。
+# 「未达成一致方案/暂行办理/需跟进/空」等不算办结(可能仍需跟进), 保持积压。
+_EXTERNAL_DONE_RESULTS = {
+    "和解结案", "撤销结案", "暂行办结", "调解结案", "调节结案",
+    "投诉无效", "重复投诉", "终止调节", "退回消委会",
+}
+
+
+def _external_done_sns(db) -> set[str]:
+    """315登记已办结(result∈办结类)的设备SN集合。
+
+    用于三处积压统计(backlog/summary/analysis)统一排除: 外部投诉工单的 SN 命中该集合,
+    且该工单本身是外部投诉来源时, 视为已处理(工单状态未同步的兜底), 不进入积压。
+    """
+    return set(db.scalars(
+        select(ExternalComplaint.device_sn)
+        .where(ExternalComplaint.result.in_(_EXTERNAL_DONE_RESULTS))
+        .where(ExternalComplaint.device_sn.isnot(None))
+    ).all())
+
+
+def _norm_external_result_status(result: str | None) -> str:
+    """315登记结果 → 归一化状态(明细表展示用, 与积压口径一致):
+    办结类 → 已完成; 需跟进/暂行办理/未达成一致方案 → 处理中; 空 → 待跟进; 其它保持原文。
+    """
+    if not result or not str(result).strip():
+        return "待跟进"
+    v = str(result).strip()
+    if v in _EXTERNAL_DONE_RESULTS:
+        return "已完成"
+    if v in ("需跟进", "暂行办理", "未达成一致方案"):
+        return "处理中"
+    return v
+
+
+# 投诉原因归类(2026-08-25): 基于 remark 投诉内容关键词, 对齐 315 官方分类五大类。
+# 用于积压/投诉的原因维度统计(替代区分度低的 service_item 来源子类)。
+_REASON_RULES = [
+    ("退款/售后", ["退款", "退钱", "退费", "不退", "撤销退款", "退卡", "退货", "售后", "催退", "退不回", "要退", "没退"]),
+    ("网络/技术", ["卡", "网速", "断网", "离线", "信号", "连不上", "连接", "用不了", "打不开", "不稳定", "假信号", "故障", "设备", "无法使用", "登录不上", "黑屏", "没网", "无网络"]),
+    ("套餐/计费", ["套餐", "计费", "扣费", "自动扣", "乱扣", "多扣", "扣款", "流量计算", "扣流量", "价格", "费用", "资费", "涨价", "贵"]),
+    ("充值/规则", ["充值", "充钱", "充了", "购买", "订购", "续费", "会员", "规则", "欺诈", "骗"]),
+]
+
+
+def _complaint_reason(text: str | None) -> str:
+    """投诉原因: 按关键词从投诉内容文本归类, 未命中→其他, 无文本→未填写。"""
+    if not text or not str(text).strip():
+        return "未填写"
+    t = str(text)
+    for label, kws in _REASON_RULES:
+        if any(k in t for k in kws):
+            return label
+    return "其他"
+
+
+_315_CATEGORY_MAP = [
+    ("退款/售后", ["退款", "售后"]),
+    ("网络/技术", ["网络", "流量", "技术"]),
+    ("套餐/计费", ["套餐", "计费", "涨价", "价格"]),
+    ("充值/规则", ["充值", "钱包", "规则"]),
+]
+
+
+def _map_315_category(cat: str | None) -> str | None:
+    """315登记细分分类 → 投诉原因五大类映射(用于外部投诉 remark 为空时的原因补充)。"""
+    if not cat:
+        return None
+    for label, kws in _315_CATEGORY_MAP:
+        if any(k in cat for k in kws):
+            return label
+    return None
+
 
 @router.get("/backlog", response_model=R, summary="积压未处理投诉审核分析(统一口径: 归一化状态非已完成)")
 def complaint_backlog(
@@ -765,9 +872,21 @@ def complaint_backlog(
             .distinct()
         ).all())
 
+    # 315登记已办结的SN: 外部投诉工单状态未同步(停"待处理")但实际已办结 → 视为已完成, 不进积压
+    ext_done_sns = _external_done_sns(db)
+    # SN → 315登记细分分类(用于外部投诉 remark 为空时的投诉原因补充)
+    sn_315_cat: dict[str, str] = dict(db.execute(
+        select(ExternalComplaint.device_sn, ExternalComplaint.complaint_category)
+        .where(ExternalComplaint.device_sn.isnot(None))
+        .where(ExternalComplaint.complaint_category.isnot(None), ExternalComplaint.complaint_category != "")
+    ).all())
+
     # Python 归一化兜底, 保证与明细口径 100% 一致
     backlog: list[dict] = []
     for t, src in db.execute(stmt).all():
+        # 积压闭环(2026-08-25): 外部投诉工单关联的 315 登记已办结(result∈办结类) → 视为已完成
+        if src == "外部投诉" and t.device_sn in ext_done_sns:
+            continue
         norm = _norm_status(src, t.status, t.finish_time, t.register_time, _fb_handler(t))
         if norm == "已完成":
             continue
@@ -775,11 +894,16 @@ def complaint_backlog(
         norm_h = _norm_handler(raw_h)
         if src == "商户号投诉" and raw_h in entity_set:
             norm_h = "未分配"  # 上游把被投诉主体名写入处理人 → 无真实处理人
+        # 投诉原因: remark 关键词归类为主; 外部投诉 remark 空时用 315 登记细分分类映射补充
+        reason = _complaint_reason(t.remark)
+        if reason == "未填写" and src == "外部投诉" and t.device_sn in sn_315_cat:
+            reason = _map_315_category(sn_315_cat[t.device_sn]) or reason
         backlog.append({
             "ticket_no": t.ticket_no,
             "device_sn": t.device_sn,
             "source": src,
             "category": t.service_item or "未标注",
+            "reason": reason,
             "problem": t.remark,
             "handler": norm_h,
             "status": norm,
@@ -823,6 +947,18 @@ def complaint_backlog(
         {"name": k, "count": v}
         for k, v in sorted(Counter(r["category"] for r in backlog).items(), key=lambda x: -x[1])[:15]
     ]
+    # 投诉原因分布(替代区分度低的来源子类分类)
+    _REASON_ORDER = ["退款/售后", "网络/技术", "套餐/计费", "充值/规则", "其他", "未填写"]
+    _reason_counter = Counter(r["reason"] for r in backlog)
+    by_reason = [
+        {"name": k, "count": _reason_counter.get(k, 0)}
+        for k in _REASON_ORDER
+        if _reason_counter.get(k)
+    ] + [
+        {"name": k, "count": v}
+        for k, v in sorted(_reason_counter.items(), key=lambda x: -x[1])
+        if k not in _REASON_ORDER
+    ]
     aging_counter = Counter()
     for r in backlog:
         ad = r["aging_days"]
@@ -831,6 +967,24 @@ def complaint_backlog(
         bucket = next((b for b, lo, hi in _BACKLOG_AGING_BUCKETS if lo <= ad and (hi is None or ad <= hi)), ">14天")
         aging_counter[bucket] += 1
     by_aging = [{"name": b, "count": aging_counter.get(b, 0)} for b, _, _ in _BACKLOG_AGING_BUCKETS]
+    # 来源×龄期交叉统计: 每个来源(内部/商户号/外部)的龄期分布, 回答「哪个来源积压最久」
+    _SOURCE_ORDER = ["内部投诉", "商户号投诉", "外部投诉"]
+    _sa_map: dict[str, dict[str, int]] = {}
+    for r in backlog:
+        ad = r["aging_days"]
+        src = r["source"]
+        if ad is None:
+            continue
+        bucket = next((b for b, lo, hi in _BACKLOG_AGING_BUCKETS if lo <= ad and (hi is None or ad <= hi)), ">14天")
+        _sa_map.setdefault(src, {b: 0 for b, _, _ in _BACKLOG_AGING_BUCKETS})[bucket] += 1
+    by_source_aging = [
+        {
+            "source": src,
+            "buckets": [{"name": b, "count": _sa_map.get(src, {}).get(b, 0)} for b, _, _ in _BACKLOG_AGING_BUCKETS],
+        }
+        for src in _SOURCE_ORDER
+        if _sa_map.get(src)
+    ]
     by_handler = [
         {"name": k, "count": v}
         for k, v in sorted(Counter(r["handler"] for r in backlog).items(), key=lambda x: -x[1])[:15]
@@ -853,12 +1007,264 @@ def complaint_backlog(
         "max_aging": max_aging,
         "by_source": by_source,
         "by_category": by_category,
+        "by_reason": by_reason,
         "by_aging": by_aging,
+        "by_source_aging": by_source_aging,
         "by_handler": by_handler,
         "unassigned": unassigned,
         "overdue": overdue,
         "audited": audited_total,
         "items": items,
+    })
+
+
+# ---------- 被投诉主体维度分析 ----------
+
+
+@router.get("/subject-analysis", response_model=R, summary="被投诉主体维度分析(主体统计/严重性分布/升级链/退款关联)")
+def complaint_subject_analysis(
+    db: DBSession,
+    _: CurrentUser,
+    start: str | None = None,
+    end: str | None = None,
+):
+    """被投诉主体维度分析。
+
+    口径(2026-08-25 用户确认):
+    - 主体统计仅覆盖有真实主体字段的两类来源:
+      商户号投诉(工单 registrant=被投诉商户主体名) 与 外部投诉(external_complaints.company_entity/投诉店铺)。
+      内部投诉(商品/服务投诉)工单无主体字段, 不纳入主体统计。
+    - 严重性(内部<商户号<外部)以各来源数量分布呈现, 主体级以「外部投诉占比」体现严重度。
+    - 升级链(传递性): 按设备SN汇总三源投诉组合, 呈现 内部→商户号→外部 升级漏斗。
+    - 退款关联: 主体投诉SN关联的线上退款(refund_method='线上', created_at_raw 在范围内)笔数/金额,
+      体现「投诉处理不好最终导致退款」。
+    """
+    ts = _parse_dt(start)
+    te = _parse_dt_end(end)
+    src_expr = _complaint_source_type_case()
+
+    def _reg_conds(col):
+        conds = []
+        if ts:
+            conds.append(col >= ts)
+        if te:
+            conds.append(col <= te)
+        return conds
+
+    def _day_str(dt) -> str | None:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return str(dt.astimezone(TZ).date())
+
+    # ── 1. 商户号投诉主体 (工单 registrant=被投诉商户主体名) ──
+    merchant_rows = db.execute(
+        select(
+            ServiceTicket.registrant,
+            ServiceTicket.device_sn,
+            ServiceTicket.register_time,
+        )
+        .where(src_expr == "商户号投诉")
+        .where(ServiceTicket.registrant.isnot(None), ServiceTicket.registrant != "")
+        .where(*_reg_conds(ServiceTicket.register_time))
+    ).all()
+    merchant_total = len(merchant_rows)
+    merchant_by_subject: dict[str, dict] = {}
+    for registrant, sn, rt in merchant_rows:
+        subject = str(registrant).strip()
+        if not subject:
+            continue
+        b = merchant_by_subject.setdefault(subject, {"merchant_count": 0, "external_count": 0, "sns": set(), "trend": {}})
+        b["merchant_count"] += 1
+        if sn:
+            b["sns"].add(sn)
+        if rt:
+            d = _day_str(rt)
+            if d:
+                b["trend"][d] = b["trend"].get(d, 0) + 1
+
+    # ── 2. 外部投诉主体 (external_complaints.company_entity / 投诉店铺) ──
+    _IGNORE_SHOP = {"/", "-", ""}
+    ext_rows = db.execute(
+        select(
+            ExternalComplaint.company_entity,
+            ExternalComplaint.complaint_shop,
+            ExternalComplaint.device_sn,
+            ExternalComplaint.complaint_date,
+        ).where(*_reg_conds(ExternalComplaint.complaint_date))
+    ).all()
+    external_total = len(ext_rows)
+    external_unattributed = 0
+    external_by_subject: dict[str, dict] = {}
+    for company_entity, complaint_shop, sn, cd in ext_rows:
+        subject = None
+        if company_entity and str(company_entity).strip():
+            subject = str(company_entity).strip()
+        elif complaint_shop and str(complaint_shop).strip() not in _IGNORE_SHOP:
+            subject = str(complaint_shop).strip()
+        if not subject:
+            external_unattributed += 1
+            continue
+        b = external_by_subject.setdefault(subject, {"merchant_count": 0, "external_count": 0, "sns": set(), "trend": {}})
+        b["external_count"] += 1
+        if sn:
+            b["sns"].add(sn)
+        if cd:
+            d = _day_str(cd)
+            if d:
+                b["trend"][d] = b["trend"].get(d, 0) + 1
+
+    # ── 3. 主体合并 (商户号+外部 同名主体合并) ──
+    subjects: dict[str, dict] = {}
+    for name, b in merchant_by_subject.items():
+        subjects[name] = {
+            "name": name,
+            "merchant_count": b["merchant_count"],
+            "external_count": 0,
+            "sns": set(b["sns"]),
+            "trend": dict(b["trend"]),
+        }
+    for name, b in external_by_subject.items():
+        s = subjects.setdefault(name, {
+            "name": name, "merchant_count": 0, "external_count": 0, "sns": set(), "trend": {},
+        })
+        s["external_count"] = b["external_count"]
+        s["sns"].update(b["sns"])
+        for d, c in b["trend"].items():
+            s["trend"][d] = s["trend"].get(d, 0) + c
+
+    # ── 4. 升级链漏斗 (按SN: 内部/商户号/外部 出现组合) ──
+    sn_sources: dict[str, set] = {}
+    for sn, src in db.execute(
+        select(ServiceTicket.device_sn, src_expr)
+        .where(_ticket_category_case() == "投诉")
+        .where(ServiceTicket.device_sn.isnot(None))
+        .where(*_reg_conds(ServiceTicket.register_time))
+    ).all():
+        sn_sources.setdefault(sn, set()).add(src or "内部投诉")
+    for company_entity, complaint_shop, sn, _cd in ext_rows:
+        if sn:
+            sn_sources.setdefault(sn, set()).add("外部投诉")
+
+    _FUNNEL_ORDER = [
+        ("internal_only", "仅内部投诉"),
+        ("merchant_only", "仅商户号投诉"),
+        ("external_only", "仅外部投诉"),
+        ("internal_merchant", "内部→商户号"),
+        ("internal_external", "内部→外部"),
+        ("merchant_external", "商户号→外部"),
+        ("full_chain", "内部→商户号→外部"),
+    ]
+    funnel: dict[str, int] = {k: 0 for k, _ in _FUNNEL_ORDER}
+    for srcs in sn_sources.values():
+        has_int = "内部投诉" in srcs
+        has_mer = "商户号投诉" in srcs
+        has_ext = "外部投诉" in srcs
+        if has_int and has_mer and has_ext:
+            funnel["full_chain"] += 1
+        elif has_int and has_mer:
+            funnel["internal_merchant"] += 1
+        elif has_int and has_ext:
+            funnel["internal_external"] += 1
+        elif has_mer and has_ext:
+            funnel["merchant_external"] += 1
+        elif has_int:
+            funnel["internal_only"] += 1
+        elif has_mer:
+            funnel["merchant_only"] += 1
+        elif has_ext:
+            funnel["external_only"] += 1
+    escalation_funnel = [{"key": k, "name": n, "count": funnel[k]} for k, n in _FUNNEL_ORDER]
+
+    # ── 5. 退款关联 (主体投诉SN → 线上退款) ──
+    all_subject_sns: set[str] = set()
+    for s in subjects.values():
+        all_subject_sns.update(s["sns"])
+    refund_by_sn: dict[str, tuple[int, float]] = {}
+    if all_subject_sns:
+        for sn, cnt, amt in db.execute(
+            select(Refund.device_sn, func.count(), func.coalesce(func.sum(Refund.refund_amount), 0))
+            .where(Refund.refund_method == "线上")
+            .where(Refund.device_sn.in_(all_subject_sns))
+            .where(*_reg_conds(Refund.created_at_raw))
+            .group_by(Refund.device_sn)
+        ).all():
+            refund_by_sn[sn] = (int(cnt), float(amt))
+
+    refund_total_count = 0
+    refund_total_amount = 0.0
+    for s in subjects.values():
+        rc = sum(refund_by_sn[sn][0] for sn in s["sns"] if sn in refund_by_sn)
+        ra = sum(refund_by_sn[sn][1] for sn in s["sns"] if sn in refund_by_sn)
+        s["refund_count"] = rc
+        s["refund_amount"] = round(ra, 2)
+        refund_total_count += rc
+        refund_total_amount += ra
+        s["total"] = s["merchant_count"] + s["external_count"]
+        s["escalated"] = s["merchant_count"] > 0 and s["external_count"] > 0
+        s.pop("sns", None)
+
+    # ── 6. 主体Top榜 (按总量降序) ──
+    subject_ranking = sorted(
+        subjects.values(),
+        key=lambda x: (-x["total"], -x["external_count"], x["name"]),
+    )[:20]
+
+    # ── 7. 严重性数量分布 (商户号投诉 vs 外部投诉, 含主体识别口径) ──
+    severity_distribution = [
+        {"name": "商户号投诉", "count": merchant_total},
+        {"name": "外部投诉", "count": external_total},
+    ]
+
+    # ── 8. 趋势: 全量按日 (商户号工单登记日 + 外部投诉日期) ──
+    trend_map: dict[str, dict[str, int]] = {}
+    for registrant, _sn, rt in merchant_rows:
+        d = _day_str(rt)
+        if not d:
+            continue
+        b = trend_map.setdefault(d, {"商户号投诉": 0, "外部投诉": 0})
+        b["商户号投诉"] += 1
+    for _ce, _cs, _sn, cd in ext_rows:
+        d = _day_str(cd)
+        if not d:
+            continue
+        b = trend_map.setdefault(d, {"商户号投诉": 0, "外部投诉": 0})
+        b["外部投诉"] += 1
+    subject_trend = [
+        {"day": d, "商户号投诉": v["商户号投诉"], "外部投诉": v["外部投诉"]}
+        for d, v in sorted(trend_map.items())
+    ]
+
+    # ── 9. Top5 主体逐日趋势 ──
+    top5 = subject_ranking[:5]
+    top_subject_trend = []
+    for s in top5:
+        trend = s.get("trend") or {}
+        top_subject_trend.append({
+            "name": s["name"],
+            "trend": [{"day": d, "count": trend[d]} for d in sorted(trend)],
+        })
+
+    # 排名项不携带逐日 trend(仅Top5趋势需要, 避免响应体膨胀)
+    for s in subject_ranking:
+        s.pop("trend", None)
+
+    return R(data={
+        "summary": {
+            "subject_total": len(subjects),
+            "merchant_total": merchant_total,
+            "external_total": external_total,
+            "external_attributed": external_total - external_unattributed,
+            "external_unattributed": external_unattributed,
+            "refund_count": refund_total_count,
+            "refund_amount": round(refund_total_amount, 2),
+        },
+        "subject_ranking": subject_ranking,
+        "severity_distribution": severity_distribution,
+        "escalation_funnel": escalation_funnel,
+        "subject_trend": subject_trend,
+        "top_subject_trend": top_subject_trend,
     })
 
 
@@ -950,17 +1356,23 @@ def complaint_analysis(
         _action_filter(_tk_base().with_only_columns(func.count()).where(src_expr == "外部投诉"))
     ) or 0
 
-    # 积压: 全量未完成(不限时间)
+    # 积压: 窗口内登记的未完成(跟随 start/end, 默认近30天; 不再无限累积历史遗留)
     _done_set = {"已结案", "已完成", "完成", "已解决", "已回复", "已反馈", "已关闭", "终止", "已终止"}
-    backlog_total = db.scalar(
-        _tk_base().with_only_columns(func.count()).where(
-            or_(
-                ServiceTicket.status.is_(None),
-                ServiceTicket.status == "",
-                ~ServiceTicket.status.in_(_done_set),
-            )
+    _backlog_status_where = or_(
+        ServiceTicket.status.is_(None),
+        ServiceTicket.status == "",
+        ~ServiceTicket.status.in_(_done_set),
+    )
+    _backlog_stmt = _action_filter(
+        _tk_base().with_only_columns(func.count()).where(_backlog_status_where)
+    )
+    # 积压闭环: 外部投诉工单关联的 315 登记已办结 → 视为已完成, 不进积压
+    _ext_done_sns = _external_done_sns(db)
+    if _ext_done_sns:
+        _backlog_stmt = _backlog_stmt.where(
+            or_(src_expr != "外部投诉", ServiceTicket.device_sn.notin_(_ext_done_sns))
         )
-    ) or 0
+    backlog_total = db.scalar(_backlog_stmt) or 0
 
     # 已完成: 有真实完成时间
     done_total = db.scalar(
@@ -1028,6 +1440,53 @@ def complaint_analysis(
         }
         for d, v in sorted(trend_map.items())[:90]
     ]
+
+    # ── 3.5 投诉水位(2026-08-25 v2 口径修正): 进水/出水必须对称, 否则净水位与积压不自洽
+    #    进水 = 窗口内按日新增登记(register_time in window)
+    #    出水 = 窗口内登记 且 已完成(register in window AND finish 真实完成, finish<=te)
+    #          → 出水⊂进水, 净水位=进-出=窗口内登记仍未完成数, 累计净水位最终值 ≈ 当前积压量
+    #    v1 缺陷: 出水把"窗口外登记、窗口内完成"的老投诉也算进去(它们的进水不在窗口内),
+    #          导致出水虚高、净水位为负, 与积压快照(266)方向相反。
+    finish_day = func.date_trunc("day", func.timezone("Asia/Shanghai", ServiceTicket.finish_time))
+    in_rows = db.execute(
+        _action_filter(
+            _tk_base().with_only_columns(day_trunc, func.count()).group_by(day_trunc)
+        )
+    ).all()
+    # 出水 = 窗口内登记 且 已完成; 已完成判定与积压闭环一致:
+    #   真实完成(finish 晚于 register 3分钟+) OR 外部投诉工单关联315登记已办结
+    _real_finish_cond = and_(
+        ServiceTicket.finish_time.isnot(None),
+        ServiceTicket.finish_time > ServiceTicket.register_time,
+    )
+    _done_cond = _real_finish_cond
+    _ext_done_sns = _external_done_sns(db)
+    if _ext_done_sns:
+        _done_cond = or_(
+            _real_finish_cond,
+            and_(src_expr == "外部投诉", ServiceTicket.device_sn.in_(_ext_done_sns)),
+        )
+    out_stmt = (
+        select(finish_day, func.count())
+        .select_from(ServiceTicket)
+        .where(_ticket_category_case() == "投诉")
+        .where(_done_cond)
+    )
+    if ts:
+        out_stmt = out_stmt.where(ServiceTicket.register_time >= ts)  # 与进水对称: 仅窗口内登记
+    if te:
+        out_stmt = out_stmt.where(ServiceTicket.register_time <= te)
+    out_rows = db.execute(out_stmt.group_by(finish_day)).all()
+    in_map = {str(r[0])[:10]: int(r[1]) for r in in_rows if r[0]}
+    out_map = {str(r[0])[:10]: int(r[1]) for r in out_rows if r[0]}
+    water_dates = sorted(set(in_map) | set(out_map))
+    water_cum = 0
+    water = []
+    for d in water_dates:
+        inn = in_map.get(d, 0)
+        outt = out_map.get(d, 0)
+        water_cum += (inn - outt)
+        water.append({"day": d, "in": inn, "out": outt, "net": inn - outt, "cum_net": water_cum})
 
     # ── 4. 处理人 Top10 ──
     handler_rows = db.execute(
@@ -1281,6 +1740,7 @@ def complaint_analysis(
                 "avg_handle_hours": avg_handle_hours,
             },
             "source_distribution": source_distribution,
+            "water": water,
             "trend": trend,
             "handler_top": handler_top,
             "platform_distribution": platform_distribution,

@@ -377,6 +377,12 @@ const routes = [
         meta: { title: '操作日志', icon: 'Tickets', admin: true },
       },
       {
+        path: 'system/system-events',
+        name: 'SystemEvents',
+        component: () => import('@/views/system/SystemEvents.vue'),
+        meta: { title: '事务通知', icon: 'Bell', admin: true },
+      },
+      {
         path: 'system/sync-settings',
         redirect: '/data/ingest?tab=sync-settings',
       },

@@ -27,6 +27,7 @@ from app.core.crypto import decrypt_secret, encrypt_secret
 from app.models.sync_source_config import SyncSourceConfig
 from app.services.bms_fetcher import BMS_DATA_SOURCES
 from app.services.scrm_client import SCRM_DATA_SOURCES
+from app.services.source_group_service import ensure_source_groups_registered, resolve_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,11 @@ def ensure_sync_sources_registered(db: Session) -> dict:
                         )
     if created or updated_options or patched_fields:
         db.commit()
+    # 自动归组(按 base_url): 幂等, 仅对未归组源生效
+    try:
+        ensure_source_groups_registered(db)
+    except Exception as e:
+        logger.warning(f"数据源自动归组失败(不影响主流程): {e}")
     total = len(all_sources)
     logger.info(
         f"同步源配置注册完成: 新建 {created} 个, 补默认 options {updated_options} 个, "
@@ -240,8 +246,11 @@ def _decrypt_options_secrets(raw_opts: dict | None) -> dict:
     return opts
 
 
-def _row_to_config(row: SyncSourceConfig) -> dict:
-    """DB 行 → 运行配置 dict(解密凭证 + 合并 options,并抛出顶层关键字段)"""
+def _row_to_config(db: Session | None, row: SyncSourceConfig) -> dict:
+    """DB 行 → 运行配置 dict(解密凭证 + 合并 options,并抛出顶层关键字段)
+
+    凭证解析: 单源凭证 > 组凭证(source_groups) > 种子/.env。
+    """
     seed = _seed_of(row.data_type)
     seed_with_dt = {**seed, "data_type": row.data_type}
     # ⚠️ 注意: _resolve_effective_options 的入参 row.options 仍是"加密状态的原始 options",
@@ -255,14 +264,21 @@ def _row_to_config(row: SyncSourceConfig) -> dict:
     )
     captcha_type = effective_options.get("captcha_type", "none")
     requires_captcha = _requires_captcha_from_options(effective_options)
+    # 凭证: 单源优先, 空则继承组级凭证(同域共享登录态)
+    if db is not None:
+        username, password = resolve_credentials(db, row)
+    else:
+        username = decrypt_secret(row.username) if row.username else None
+        password = decrypt_secret(row.password) if row.password else None
     return {
         "data_type": row.data_type,
         "name": row.name,
         "base_url": row.base_url,
         "page_path": row.page_path,
         "time_labels": row.time_labels,
-        "username": decrypt_secret(row.username),
-        "password": decrypt_secret(row.password),
+        "group_key": row.group_key,
+        "username": username,
+        "password": password,
         "options": effective_options,
         # ── 顶层关键字段(便于下游直接使用) ──
         "fetch_mode": fetch_mode,
@@ -275,10 +291,10 @@ def _row_to_config(row: SyncSourceConfig) -> dict:
 
 
 def get_sync_source_config(db: Session, data_type: str) -> dict | None:
-    """读取单个源运行配置(解密凭证);DB 缺失时回退到种子 + .env 凭证"""
+    """读取单个源运行配置(解密凭证, 单源优先继承组凭证);DB 缺失时回退到种子 + .env 凭证"""
     row = db.scalar(select(SyncSourceConfig).where(SyncSourceConfig.data_type == data_type))
     if row:
-        return _row_to_config(row)
+        return _row_to_config(db, row)
     # 回退(理论上 seed 后不会走到)
     cfg = _seed_of(data_type)
     if not cfg:
@@ -346,6 +362,7 @@ def list_sync_source_configs(db: Session) -> list[dict]:
                 "base_url": row.base_url,
                 "page_path": row.page_path,
                 "time_labels": row.time_labels,
+                "group_key": row.group_key,
                 "username": row.username,  # 加密原文,前端判断是否已配置(空=未改过)
                 "password": row.password,  # 同上
                 "has_credentials": bool(row.username and row.password),

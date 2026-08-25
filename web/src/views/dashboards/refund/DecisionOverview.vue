@@ -372,8 +372,9 @@ const manualWaterOption = computed(() => {
       { type: 'value', name: '蓄水', axisLabel: { fontSize: 11 }, splitLine: { show: false } },
     ],
     series: [
-      { name: '登记', type: 'bar', stack: 'm', data: m.reg_amt, itemStyle: { color: '#f59e0b' }, barMaxWidth: 30 },
-      { name: '已退', type: 'bar', stack: 'm', data: m.done_amt, itemStyle: { color: '#34d399' }, barMaxWidth: 30 },
+      // 登记 vs 已退 = 蓄水关系的进水/出水: 并列柱(不堆叠, 便于直接对比), 而非相加的堆叠
+      { name: '登记', type: 'bar', data: m.reg_amt, itemStyle: { color: '#f59e0b' }, barMaxWidth: 26 },
+      { name: '已退', type: 'bar', data: m.done_amt, itemStyle: { color: '#34d399' }, barMaxWidth: 26 },
       { name: '蓄水', type: 'line', yAxisIndex: 1, data: m.net, smooth: true, symbol: 'circle', symbolSize: 6,
         itemStyle: { color: '#2563eb' }, lineStyle: { width: 2.5, color: '#2563eb' },
         markLine: { silent: true, symbol: 'none', lineStyle: { color: '#9ca3af', type: 'dashed' }, data: [{ yAxis: 0 }] } },
@@ -444,8 +445,9 @@ const waterOption = computed(() => {
       { type: 'value', name: '净水位', axisLabel: { fontSize: 11 }, splitLine: { show: false } },
     ],
     series: [
-      { name: '转入', type: 'bar', stack: 'w', data: w.transfer_in_amt, itemStyle: { color: '#10b981' }, barMaxWidth: 30 },
-      { name: '转出', type: 'bar', stack: 'w', data: w.withdraw_amt, itemStyle: { color: '#f87171' }, barMaxWidth: 30 },
+      // 转入 vs 转出 = 进水/出水的此消彼长关系: 并列柱(不堆叠, 便于直接对比), 而非相加的堆叠
+      { name: '转入', type: 'bar', data: w.transfer_in_amt, itemStyle: { color: '#10b981' }, barMaxWidth: 26 },
+      { name: '转出', type: 'bar', data: w.withdraw_amt, itemStyle: { color: '#f87171' }, barMaxWidth: 26 },
       { name: '净水位', type: 'line', yAxisIndex: 1, data: w.net, smooth: true, symbol: 'circle', symbolSize: 6,
         itemStyle: { color: '#2563eb' }, lineStyle: { width: 2.5, color: '#2563eb' },
         markLine: { silent: true, symbol: 'none', lineStyle: { color: '#9ca3af', type: 'dashed' }, data: [{ yAxis: 0 }] } },

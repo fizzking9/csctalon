@@ -123,6 +123,12 @@
           <el-menu-item index="/dashboards/designer">看板配置</el-menu-item>
           <el-menu-item index="/system/classification-rules">分类规则</el-menu-item>
           <el-menu-item index="/system/operation-logs">操作日志</el-menu-item>
+          <el-menu-item index="/system/system-events">
+            <el-badge v-if="eventUnread > 0" :value="eventUnread" :max="99" class="menu-badge">
+              <span>事务通知</span>
+            </el-badge>
+            <span v-else>事务通知</span>
+          </el-menu-item>
         </el-sub-menu>
       </el-menu>
     </el-aside>
@@ -161,6 +167,11 @@
                 :disabled="rawSync.is_syncing"
                 @click="handleManualSync"
               />
+            </el-tooltip>
+            <el-tooltip v-if="authStore.isAdmin" content="事务通知" placement="bottom">
+              <el-badge :value="eventUnread" :max="99" :hidden="eventUnread === 0" class="event-bell">
+                <el-button :icon="Bell" circle size="small" text @click="router.push('/system/system-events')" />
+              </el-badge>
             </el-tooltip>
           </div>
           <el-dropdown @command="handleCommand">
@@ -253,9 +264,10 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { User, Monitor, Upload } from '@element-plus/icons-vue'
+import { Bell, User, Monitor, Upload } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { taskStatus, taskSubmit } from '@/api/fetch'
+import { systemEventSummary } from '@/api/systemEvent'
 import AuditDialog from '@/components/AuditDialog.vue'
 import { useAudit } from '@/composables/useAudit'
 
@@ -290,7 +302,19 @@ const rawSync = reactive({
 })
 
 let _pollTimer = null
+let _pollTimer2 = null
 let _mq = null
+// 系统事务通知未读数(侧边栏/顶部角标, 15s 轮询)
+const eventUnread = ref(0)
+
+async function _pollEventUnread() {
+  try {
+    const res = await systemEventSummary()
+    eventUnread.value = res.data?.unread || 0
+  } catch (e) {
+    // 静默: 接口异常不影响主布局
+  }
+}
 
 function _onMediaChange(e) {
   isMobile.value = e.matches
@@ -344,6 +368,9 @@ onMounted(() => {
   _mq.addEventListener('change', _onMediaChange)
   _pollSyncOnce()
   _pollTimer = setInterval(_pollSyncOnce, SYNC_POLL_MS)
+  _pollEventUnread()
+  // 事务通知角标与同步状态同节奏轮询
+  _pollTimer2 = setInterval(_pollEventUnread, SYNC_POLL_MS)
 })
 
 onBeforeUnmount(() => {
@@ -354,6 +381,10 @@ onBeforeUnmount(() => {
   if (_pollTimer) {
     clearInterval(_pollTimer)
     _pollTimer = null
+  }
+  if (_pollTimer2) {
+    clearInterval(_pollTimer2)
+    _pollTimer2 = null
   }
 })
 
@@ -455,6 +486,12 @@ async function handleManualSync() {
 .quick-tools .el-button:hover {
   color: #2563eb;
   background: #eff6ff;
+}
+.event-bell .el-badge__content {
+  font-size: 10px;
+}
+.menu-badge .el-badge__content {
+  font-size: 10px;
 }
 .header-right .user-info {
   display: flex;
