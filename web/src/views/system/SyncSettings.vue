@@ -5,116 +5,113 @@
     <el-card>
       <template #header>
         <div class="flex justify-between items-center">
-          <span>BMS / SCRM 同步源配置</span>
+          <span>同步源配置（分组管理）</span>
           <el-button v-if="!embedded" text type="primary" @click="$router.push('/data/fetch')">返回 BMS 同步</el-button>
         </div>
       </template>
 
       <el-alert type="info" :closable="false" show-icon class="mb-16">
         <p class="alert-text">
-          每个数据源独立配置地址与账号密码(加密存储)。<br/>
+          按<strong>平台/域名分组</strong>管理：同一 Web 源下的多个数据源共用登录凭证，可在<strong>组级统一配置账号密码</strong>，
+          也可对<strong>单个数据源单独配置</strong>（单源优先）。保存后可用「测试登录」验证账号密码是否有效。<br/>
           • <strong>BMS</strong>: 不同子域名(wifi/support.cloud-cat.cn)可能用不同账号。Playwright 页面抓取模式。<br/>
-          • <strong>SCRM</strong>: 支持三种抓取模式:
-          <span style="color:#2f6feb">OpenAPI (默认,稳定)</span> /
-          <span style="color:#e6a23c">Playwright 网页(数学验证码兜底)</span> /
-          <span style="color:#67c23a">双模式(OpenAPI优先,失败自动回退网页)</span>。<br/>
+          • <strong>SCRM</strong>: 支持 OpenAPI(默认,稳定) / Playwright 网页(数学验证码兜底) / 双模式。<br/>
           「默认同步」控制是否纳入定时同步与手动同步的默认勾选。账号/密码留空表示不修改原值。
         </p>
       </el-alert>
 
-      <el-table :data="sources" border size="small" v-loading="loading">
-        <el-table-column prop="name" label="数据源" width="130" />
-        <el-table-column prop="data_type" label="代码" width="110" />
-        <el-table-column label="抓取模式" width="150">
-          <template #default="{ row }">
-            <template v-if="isScrmSource(row)">
-              <el-tag
-                v-if="row.fetch_mode === 'openapi'"
-                size="small"
-                effect="light"
-              >OpenAPI</el-tag>
-              <el-tag
-                v-else-if="row.fetch_mode === 'playwright'"
-                type="warning"
-                size="small"
-                effect="light"
-              >网页(数学验证码)</el-tag>
-              <el-tag
-                v-else-if="row.fetch_mode === 'dual'"
-                type="success"
-                size="small"
-                effect="light"
-              >双模式兜底</el-tag>
-              <el-tag v-else size="small" effect="light">—</el-tag>
-            </template>
-            <el-tag v-else size="small" effect="light">Playwright</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="凭证" width="90">
-          <template #default="{ row }">
-            <el-tag v-if="row.has_credentials" type="success" size="small">已配置</el-tag>
-            <el-tag v-else type="danger" size="small">未配置</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="默认同步" width="90">
-          <template #default="{ row }">
-            <el-tag v-if="row.default_sync" type="primary" size="small">纳入</el-tag>
-            <el-tag v-else type="info" size="small">不纳入</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="启用" width="70">
-          <template #default="{ row }">
-            <el-tag v-if="row.enabled" type="success" size="small">是</el-tag>
-            <el-tag v-else type="info" size="small">否</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column v-if="hasCaptchaSources" label="验证码登录" width="180">
-          <template #default="{ row }">
-            <template v-if="row.requires_captcha">
-              <div class="captcha-login-cell">
-                <el-tag
-                  :type="loginStates[row.data_type]?.has_storage_state ? 'success' : 'warning'"
-                  size="small"
-                  effect="light"
-                  class="mr-8"
-                >
-                  {{ loginStates[row.data_type]?.has_storage_state ? '已登录' : '未登录' }}
-                </el-tag>
-                <el-button
-                  link
-                  type="primary"
-                  size="small"
-                  :loading="loginStates[row.data_type]?.busy"
-                  @click="openCaptchaLogin(row)"
-                >
-                  {{ loginStates[row.data_type]?.has_storage_state ? '重新登录' : '登录' }}
-                </el-button>
-                <el-button
-                  v-if="loginStates[row.data_type]?.has_storage_state"
-                  link
-                  type="danger"
-                  size="small"
-                  @click="handleLogout(row)"
-                >
-                  退出
-                </el-button>
-              </div>
-            </template>
-            <span v-else class="muted">—</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="BMS 页面" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.base_url }}{{ row.page_path }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="80" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+      <div v-loading="loading">
+        <!-- 分组卡片 -->
+        <div v-for="g in groups" :key="g.group_key" class="group-card mb-16">
+          <div class="group-head">
+            <div class="group-title">
+              <span class="group-name">{{ g.group_name || g.group_key }}</span>
+              <el-tag v-if="g.group_key" size="small" type="info" effect="plain">{{ g.group_key }}</el-tag>
+              <span v-if="g.base_url" class="group-url">{{ g.base_url }}</span>
+              <el-tag v-if="g.has_credentials" size="small" type="success">组凭证已配置</el-tag>
+              <el-tag v-else size="small" type="danger">组凭证未配置</el-tag>
+              <el-tag size="small" type="info" effect="plain">{{ g.sources.length }} 个源</el-tag>
+            </div>
+            <div class="group-actions">
+              <el-button size="small" type="primary" plain @click="openGroupEdit(g)">统一配置凭证</el-button>
+              <el-button size="small" :loading="groupTesting[g.group_key]" @click="testGroupLogin(g)">测试组登录</el-button>
+            </div>
+          </div>
+
+          <el-table :data="g.sources" border size="small">
+            <el-table-column prop="name" label="数据源" width="160" />
+            <el-table-column prop="data_type" label="代码" width="130" />
+            <el-table-column label="抓取模式" width="130">
+              <template #default="{ row }">
+                <el-tag v-if="isScrmSource(row)" size="small" :type="scrmModeTagType(row.fetch_mode)" effect="light">{{ scrmModeLabel(row.fetch_mode) }}</el-tag>
+                <el-tag v-else-if="row.fetch_mode === 'http'" size="small" type="warning" effect="light">HTTP API</el-tag>
+                <el-tag v-else size="small" effect="light">Playwright</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="凭证" width="120">
+              <template #default="{ row }">
+                <el-tag v-if="row.has_credentials" type="success" size="small">单源已配置</el-tag>
+                <el-tag v-else-if="g.has_credentials" type="primary" size="small" effect="plain">继承组</el-tag>
+                <el-tag v-else type="danger" size="small">未配置</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="默认同步" width="90">
+              <template #default="{ row }">
+                <el-tag v-if="row.default_sync" type="primary" size="small">纳入</el-tag>
+                <el-tag v-else type="info" size="small">不纳入</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="启用" width="70">
+              <template #default="{ row }">
+                <el-tag v-if="row.enabled" type="success" size="small">是</el-tag>
+                <el-tag v-else type="info" size="small">否</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="190" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+                <el-button link size="small" :loading="singleTesting[row.data_type]" @click="testSingleLogin(row)">测试</el-button>
+                <template v-if="row.requires_captcha">
+                  <el-button link type="warning" size="small" :loading="loginStates[row.data_type]?.busy" @click="openCaptchaLogin(row)">
+                    {{ loginStates[row.data_type]?.has_storage_state ? '重新登录' : '验证码登录' }}
+                  </el-button>
+                  <el-button v-if="loginStates[row.data_type]?.has_storage_state" link type="danger" size="small" @click="handleLogout(row)">退出</el-button>
+                </template>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+        <el-empty v-if="!loading && !groups.length" description="暂无同步源配置" :image-size="60" />
+      </div>
     </el-card>
 
-    <!-- 编辑对话框 -->
+    <!-- 组配置弹窗(统一凭证) -->
+    <el-dialog v-model="groupDialogVisible" :title="`统一配置凭证 - ${groupEdit.group_name || groupEdit.group_key}`" width="480px">
+      <el-alert type="info" :closable="false" show-icon class="mb-12" size="small">
+        组级账号密码对该组下<strong>未单独配置凭证</strong>的源生效(同域共享登录态)。单个源单独配置后优先于组。
+      </el-alert>
+      <el-form :model="groupEdit" label-width="90px">
+        <el-form-item label="组名">
+          <el-input v-model="groupEdit.group_name" />
+        </el-form-item>
+        <el-form-item label="域名">
+          <el-input v-model="groupEdit.base_url" placeholder="如 https://wifi.cloud-cat.cn/bms" />
+        </el-form-item>
+        <el-form-item label="组账号">
+          <el-input v-model="groupEdit.username" :placeholder="groupEdit.has_credentials ? '已配置, 留空=不改' : '组级登录账号'" />
+        </el-form-item>
+        <el-form-item label="组密码">
+          <el-input v-model="groupEdit.password" type="password" show-password :placeholder="groupEdit.has_credentials ? '已配置, 留空=不改' : '组级登录密码'" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="groupDialogVisible = false">取消</el-button>
+        <el-button :loading="groupSaving" @click="saveGroup">保存</el-button>
+        <el-button type="primary" :loading="groupTesting[groupEdit.group_key]" @click="saveGroup(true)">保存并测试</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 单源编辑对话框 -->
     <el-dialog v-model="dialogVisible" :title="`编辑同步源 - ${editForm.name || editForm.data_type}`" width="560px">
       <el-form :model="editForm" label-width="110px">
         <el-form-item label="显示名">
@@ -152,17 +149,12 @@
         <el-form-item label="启用">
           <el-switch v-model="editForm.enabled" active-text="启用" inactive-text="停用" />
         </el-form-item>
-        <!-- 主账号密码: SCRM=ClientID/ClientSecret 或 OpenAPI; BMS=BMS 网页登录账号 -->
         <el-form-item :label="scrmLabel[0]">
           <el-input v-model="editForm.username" :placeholder="scrmUsernamePlaceholder" />
         </el-form-item>
         <el-form-item :label="scrmLabel[1]">
           <el-input v-model="editForm.password" type="password" show-password :placeholder="scrmPasswordPlaceholder" />
         </el-form-item>
-        <!-- Playwright / Dual 模式下需要独立再配置一对「网页登录账号密码」(SCRM 专属,和 OpenAPI 凭证分离) -->
-        <!-- ⚠️ 2026-08-06: 对齐用户心智模型(和 SyncDashboard.vue 完全一致):
-             - Playwright 模式: 主字段 username/password 直接就是「SCRM 网页账号/SCRM 网页密码」,不再额外加一对 web_ 字段
-             - Dual 模式(OpenAPI+Playwright 双模式): 主字段是 OpenAPI ClientID/ClientSecret, 下方 web_username/web_password 才是独立的网页登录凭证 -->
         <template v-if="isScrmSource(editForm) && editForm.fetch_mode === 'dual'">
           <el-divider content-position="left">Playwright 网页登录凭证(双模式下独立配置)</el-divider>
           <el-alert type="warning" :closable="false" show-icon class="mb-8" size="small">
@@ -170,24 +162,17 @@
             留空表示不修改之前保存过的值。
           </el-alert>
           <el-form-item label="SCRM 网页账号">
-            <el-input
-              v-model="editForm.web_username"
-              :placeholder="webUsernamePlaceholder"
-            />
+            <el-input v-model="editForm.web_username" :placeholder="webUsernamePlaceholder" />
           </el-form-item>
           <el-form-item label="SCRM 网页密码">
-            <el-input
-              v-model="editForm.web_password"
-              type="password"
-              show-password
-              :placeholder="webPasswordPlaceholder"
-            />
+            <el-input v-model="editForm.web_password" type="password" show-password :placeholder="webPasswordPlaceholder" />
           </el-form-item>
         </template>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="handleSave">保存</el-button>
+        <el-button :loading="saving" @click="handleSave(false)">保存</el-button>
+        <el-button type="primary" :loading="saving" @click="handleSave(true)">保存并测试</el-button>
       </template>
     </el-dialog>
 
@@ -260,7 +245,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 
@@ -268,6 +253,7 @@ defineProps({
   embedded: { type: Boolean, default: false },
 })
 import { listSyncSources, updateSyncSource } from '@/api/system'
+import { listSourceGroups, updateSourceGroup, testSourceLogin } from '@/api/sourceGroup'
 import {
   captchaLoginCheck,
   captchaLoginStart,
@@ -278,7 +264,12 @@ import {
 const loading = ref(false)
 const saving = ref(false)
 const sources = ref([])
+const groups = ref([])
 const dialogVisible = ref(false)
+const groupDialogVisible = ref(false)
+const groupSaving = ref(false)
+const groupTesting = reactive({})
+const singleTesting = reactive({})
 
 const editForm = reactive({
   data_type: '',
@@ -288,28 +279,38 @@ const editForm = reactive({
   time_labels_text: '',
   default_sync: true,
   enabled: true,
-  fetch_mode: 'openapi', // SCRM 模式: openapi / playwright / dual
-  username: '',         // SCRM: ClientID 或 OpenAPI 主账号; BMS: BMS 网页登录账号
-  password: '',         // SCRM: ClientSecret 或 OpenAPI 主密码; BMS: BMS 网页登录密码
-  web_username: '',     // SCRM Playwright/Dual 模式: 网页登录账号(真实手机号/邮箱)
-  web_password: '',     // SCRM Playwright/Dual 模式: 网页登录密码
+  fetch_mode: 'openapi',
+  username: '',
+  password: '',
+  web_username: '',
+  web_password: '',
+})
+const groupEdit = reactive({
+  group_key: '',
+  group_name: '',
+  base_url: '',
+  username: '',
+  password: '',
+  has_credentials: false,
 })
 
 // ============== 工具: SCRM / math 验证码 ==============
 function isScrmSource(row) {
   return !!(row && typeof row.data_type === 'string' && row.data_type.startsWith('scrm_'))
 }
-// SCRM 编辑表单: 账号/密码 标签随抓取模式切换
+function scrmModeLabel(mode) {
+  return { openapi: 'OpenAPI', playwright: '网页', dual: '双模式' }[mode] || '—'
+}
+function scrmModeTagType(mode) {
+  return { openapi: '', playwright: 'warning', dual: 'success' }[mode] || 'info'
+}
 const scrmLabel = computed(() => {
   if (!isScrmSource(editForm)) return ['BMS 账号', 'BMS 密码']
   const mode = editForm.fetch_mode || 'openapi'
-  // Playwright 模式: 主字段直接就是网页登录凭证（用户最直观）
   if (mode === 'openapi') return ['Client ID', 'Client Secret']
   if (mode === 'playwright') return ['SCRM 网页账号', 'SCRM 网页密码']
-  // Dual 模式: 主字段是 OpenAPI,下方再额外补一对 web_ 网页凭证
   return ['OpenAPI Client ID', 'OpenAPI Client Secret']
 })
-// 动态 placeholder, 已配置/未配置时提示不同
 const _credPlaceholder = (label, configured, emptyHint) => {
   if (configured) return `${label}(已配置,留空=不修改,输入新值覆盖)`
   return emptyHint || `请输入${label},留空表示不修改`
@@ -319,7 +320,6 @@ const scrmUsernamePlaceholder = computed(() => {
   const mode = editForm.fetch_mode || 'openapi'
   if (mode === 'openapi') return _credPlaceholder('SCRM OpenAPI Client ID', credentialsState.username_configured, 'SCRM OpenAPI Client ID,留空表示不修改')
   if (mode === 'playwright') return _credPlaceholder('SCRM 网页登录账号', credentialsState.username_configured, 'SCRM 后台真实登录账号(手机号/邮箱),不要填 ClientID')
-  // Dual
   return _credPlaceholder('OpenAPI Client ID', credentialsState.username_configured, '双模式主字段填 OpenAPI Client ID,SCRM 网页账号请填下面独立的 web_ 字段')
 })
 const scrmPasswordPlaceholder = computed(() => {
@@ -327,53 +327,32 @@ const scrmPasswordPlaceholder = computed(() => {
   const mode = editForm.fetch_mode || 'openapi'
   if (mode === 'openapi') return _credPlaceholder('SCRM OpenAPI Client Secret', credentialsState.password_configured, 'SCRM OpenAPI Client Secret,留空表示不修改')
   if (mode === 'playwright') return _credPlaceholder('SCRM 网页登录密码', credentialsState.password_configured, 'SCRM 后台登录密码,不要填 ClientSecret')
-  // Dual
   return _credPlaceholder('OpenAPI Client Secret', credentialsState.password_configured, '双模式主字段填 OpenAPI Client Secret,SCRM 网页密码请填下面独立的 web_ 字段')
 })
-// SCRM 网页凭证的 placeholder(动态) —— 仅 Dual 模式显示
 const webUsernamePlaceholder = computed(() =>
   _credPlaceholder('SCRM 网页登录账号(手机号/邮箱)', credentialsState.web_username_configured, 'SCRM 后台管理页面实际登录用的账号,不要填 ClientID;留空=不改'))
 const webPasswordPlaceholder = computed(() =>
   _credPlaceholder('SCRM 网页登录密码', credentialsState.web_password_configured, 'SCRM 后台管理页面实际登录用的密码;留空=不改'))
-function onFetchModeChange() {
-  // 切换模式时,提示用户需要重新配置账号密码
-  if (dialogVisible.value && isScrmSource(editForm)) {
-    // 不做打断式提示,只在 form-hint 里说明
-  }
-}
+function onFetchModeChange() {}
 
-// 当前验证码登录框是否为数学验证码
+// ============== 验证码登录态 ==============
 const isMathCaptcha = computed(
   () => !!(captchaRow.value && isScrmSource(captchaRow.value) && captchaRow.value?.captcha_type === 'math'),
 )
-// 提示文本的 HTML 版本(把后端 auto_msg 里的答案用 <strong> 包起来)
 const captchaHintHtml = computed(() => {
   const t = captchaHint.value || ''
   if (!t) return ''
-  // 简单转义 < & >,再把识别出的数字答案用蓝色加粗样式标出来
   const escaped = t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   return escaped.replace(/'(\d+)'/g, ' <b style="color:#409eff;font-weight:600">\'$1\'</b> ')
 })
-
-// 是否包含需要验证码登录的源(控制"验证码登录"列显示)
-const hasCaptchaSources = computed(
-  () => Array.isArray(sources.value) && sources.value.some(r => r.requires_captcha),
-)
-
-// 每个验证码源的登录态 { data_type: { has_storage_state, state_mtime, busy } }
 const loginStates = reactive({})
-
-// 验证码登录对话框相关
 const captchaDialogVisible = ref(false)
 const captchaRow = ref(null)
 const captchaLoading = ref(false)
 const captchaSubmitting = ref(false)
 const captchaImage = ref('')
 const captchaHint = ref('')
-const captchaForm = reactive({
-  sessionId: '',
-  captcha: '',
-})
+const captchaForm = reactive({ sessionId: '', captcha: '' })
 
 onMounted(() => {
   loadSources()
@@ -382,13 +361,17 @@ onMounted(() => {
 async function loadSources() {
   loading.value = true
   try {
-    const res = await listSyncSources()
-    sources.value = res.data
-    // 为需要验证码的源并行拉登录态
+    const [groupsRes, sourcesRes] = await Promise.all([listSourceGroups(), listSyncSources()])
+    const srcMap = {}
+    ;(sourcesRes.data || []).forEach(s => { srcMap[s.data_type] = s })
+    // 合并: 组内源补充完整配置字段(供编辑弹窗)
+    groups.value = (groupsRes.data || []).map(g => ({
+      ...g,
+      sources: (g.sources || []).map(s => ({ ...s, ...(srcMap[s.data_type] || {}) })),
+    }))
+    sources.value = sourcesRes.data || []
     await Promise.all(
-      (sources.value || [])
-        .filter(r => r.requires_captcha)
-        .map(r => loadLoginState(r.data_type)),
+      (sources.value || []).filter(r => r.requires_captcha).map(r => loadLoginState(r.data_type)),
     )
   } catch (e) {
     ElMessage.error(`加载失败: ${e.message}`)
@@ -405,16 +388,13 @@ async function loadLoginState(dataType) {
     const d = res.data
     loginStates[dataType].has_storage_state = !!d?.has_storage_state
     loginStates[dataType].state_mtime = d?.state_mtime || null
-    loginStates[dataType].state_path = d?.state_path || null
   } catch (e) {
-    // 不打失败提示(接口可能尚未部署),但保留空状态
     loginStates[dataType] = loginStates[dataType] || { has_storage_state: false, busy: false }
   } finally {
     loginStates[dataType].busy = false
   }
 }
 
-// 打开编辑框时, row 里已经拿到"是否配置过凭证"的状态
 const credentialsState = reactive({
   username_configured: false,
   password_configured: false,
@@ -422,6 +402,70 @@ const credentialsState = reactive({
   web_password_configured: false,
 })
 
+// ============== 组配置 ==============
+function openGroupEdit(g) {
+  groupEdit.group_key = g.group_key
+  groupEdit.group_name = g.group_name || g.group_key
+  groupEdit.base_url = g.base_url || ''
+  groupEdit.username = ''
+  groupEdit.password = ''
+  groupEdit.has_credentials = !!g.has_credentials
+  groupDialogVisible.value = true
+}
+
+async function saveGroup(andTest = false) {
+  groupSaving.value = true
+  try {
+    const payload = {}
+    if (groupEdit.group_name) payload.group_name = groupEdit.group_name
+    if (groupEdit.base_url) payload.base_url = groupEdit.base_url
+    if (groupEdit.username) payload.username = groupEdit.username
+    if (groupEdit.password) payload.password = groupEdit.password
+    await updateSourceGroup(groupEdit.group_key, payload)
+    ElMessage.success('组配置已保存')
+    groupDialogVisible.value = false
+    await loadSources()
+    if (andTest) {
+      // 组内第一个有凭证的源做代表测试
+      const g = groups.value.find(x => x.group_key === groupEdit.group_key)
+      const src = g?.sources?.find(s => !s.requires_captcha) || g?.sources?.[0]
+      if (src) await runTest(src.data_type, groupTesting)
+    }
+  } catch (e) {
+    ElMessage.error(`保存失败: ${e.message}`)
+  } finally {
+    groupSaving.value = false
+  }
+}
+
+async function testGroupLogin(g) {
+  const src = g.sources.find(s => !s.requires_captcha) || g.sources[0]
+  if (!src) return
+  await runTest(src.data_type, groupTesting, g.group_key)
+}
+
+async function testSingleLogin(row) {
+  await runTest(row.data_type, singleTesting)
+}
+
+async function runTest(dataType, stateMap, key) {
+  const k = key || dataType
+  stateMap[k] = true
+  try {
+    const res = await testSourceLogin(dataType, {})
+    if (res.data?.success) {
+      ElMessage.success(res.message || '登录成功')
+    } else {
+      ElMessageBox.alert(res.message || '登录失败', '验证结果', { type: 'warning', confirmButtonText: '确定' })
+    }
+  } catch (e) {
+    ElMessage.error(`验证失败: ${e.message}`)
+  } finally {
+    stateMap[k] = false
+  }
+}
+
+// ============== 单源编辑 ==============
 function openEdit(row) {
   editForm.data_type = row.data_type
   editForm.name = row.name
@@ -431,18 +475,11 @@ function openEdit(row) {
   editForm.default_sync = row.default_sync
   editForm.enabled = row.enabled
   editForm.fetch_mode = isScrmSource(row) ? (row.fetch_mode || 'openapi') : 'playwright'
-
-  // ---- 凭证回填: 前端拿到的是加密密文(security 考虑), 所以不直接填到表单里 ----
-  //   避免: 加密串直接被用户看到或误编辑再次提交 → 重复加密成垃圾值。
-  //   正确语义: 留空 = 不修改原值, 有值输入 = 用新明文覆盖加密保存。
-  //   但 UI 必须明确告诉用户"已保存过,只是为了安全没回显明文", 否则用户会以为"保存了重新打开又没了"。
   credentialsState.username_configured = !!(row.username || row.has_credentials)
   credentialsState.password_configured = !!(row.password || row.has_credentials)
-  // web_username / web_password: 从 row.options(解密后) 拿(后端会把 options 里的 web_* 解密返回给前端编辑态用, 或只返回 boolean 标志位)
   const opts = (typeof row.options === 'object' && row.options) ? row.options : {}
   credentialsState.web_username_configured = !!(opts.web_username_configured || opts.web_username)
   credentialsState.web_password_configured = !!(opts.web_password_configured || opts.web_password)
-  // 表单输入框统一清空(留空=不修改)
   editForm.username = ''
   editForm.password = ''
   editForm.web_username = ''
@@ -450,7 +487,7 @@ function openEdit(row) {
   dialogVisible.value = true
 }
 
-async function handleSave() {
+async function handleSave(andTest = false) {
   saving.value = true
   try {
     const payload = {
@@ -463,27 +500,20 @@ async function handleSave() {
       default_sync: editForm.default_sync,
       enabled: editForm.enabled,
     }
-    // SCRM 才提交 fetch_mode
-    if (isScrmSource(editForm) && editForm.fetch_mode) {
-      payload.fetch_mode = editForm.fetch_mode
-    }
-    // 主账号密码: 仅当非空时传(后端:空表示不改)
+    if (isScrmSource(editForm) && editForm.fetch_mode) payload.fetch_mode = editForm.fetch_mode
     if (editForm.username) payload.username = editForm.username
     if (editForm.password) payload.password = editForm.password
-    // SCRM Dual 模式下: web_username / web_password → 合并进 options patch
-    //   (后端会自动把 options.patch 的 key 合并进 DB options 列,加密后保存)
-    //   Playwright 模式: 主字段 username/password 直接就是网页登录凭证,不需要 web_*
     if (isScrmSource(editForm) && editForm.fetch_mode === 'dual') {
       const optsPatch = {}
       if (editForm.web_username) optsPatch.web_username = editForm.web_username
       if (editForm.web_password) optsPatch.web_password = editForm.web_password
       if (Object.keys(optsPatch).length > 0) payload.options = optsPatch
     }
-
     await updateSyncSource(editForm.data_type, payload)
     ElMessage.success('保存成功')
     dialogVisible.value = false
     await loadSources()
+    if (andTest) await runTest(editForm.data_type, singleTesting)
   } catch (e) {
     ElMessage.error(`保存失败: ${e.message}`)
   } finally {
@@ -491,8 +521,7 @@ async function handleSave() {
   }
 }
 
-// ---------- 验证码登录流程(不切页面,在当前对话框完成) ----------
-
+// ============== 验证码登录流程 ==============
 function openCaptchaLogin(row) {
   if (!row?.has_credentials) {
     ElMessage.warning('请先配置账号密码,再进行验证码登录')
@@ -502,7 +531,6 @@ function openCaptchaLogin(row) {
   captchaRow.value = row
   captchaDialogVisible.value = true
   resetCaptchaForm()
-  // 打开对话框后立即拉取验证码
   startCaptchaLogin()
 }
 
@@ -526,24 +554,18 @@ async function startCaptchaLogin() {
     captchaForm.sessionId = d?.session_id || ''
     captchaImage.value = d?.captcha_image || ''
     captchaHint.value = d?.hint || ''
-
-    // 后端 OCR 自动登录成功 → 直接提示并关对话
     if (d?.auto_login_success) {
       ElMessage.success(d?.auto_login_message || d?.message || '后端已自动识别并登录成功')
       captchaDialogVisible.value = false
       if (captchaRow.value) await loadLoginState(captchaRow.value.data_type)
       return
     }
-    // 如果是数学验证码且 OCR 识别出了答案 → 自动填充到输入框,用户只需点提交
     const captchaType = d?.captcha_type || (isScrmSource(captchaRow.value) ? 'math' : 'text')
     const recognized = d?.ocr_recognized_text
     if (captchaType === 'math' && recognized && !captchaForm.captcha) {
       captchaForm.captcha = recognized
-      // 追加一个本地提示
       const extra = `识别出的答案已自动填入: '${recognized}' —— 请核对图片是否一致再提交。`
-      captchaHint.value = captchaHint.value
-        ? captchaHint.value + ' | ' + extra
-        : extra
+      captchaHint.value = captchaHint.value ? captchaHint.value + ' | ' + extra : extra
     }
   } catch (e) {
     ElMessage.error(`获取验证码失败: ${e.message}`)
@@ -553,7 +575,6 @@ async function startCaptchaLogin() {
 }
 
 function refreshCaptcha() {
-  // 重新 start 即可(后端会开新会话)
   startCaptchaLogin()
 }
 
@@ -573,7 +594,6 @@ async function submitCaptcha() {
     if (d?.success) {
       ElMessage.success(d?.message || '登录成功')
       captchaDialogVisible.value = false
-      // 刷新登录态展示
       if (captchaRow.value) await loadLoginState(captchaRow.value.data_type)
     } else {
       ElMessageBox.alert(
@@ -581,7 +601,6 @@ async function submitCaptcha() {
         '登录失败',
         { type: 'warning', confirmButtonText: '确定' },
       )
-      // 失败后自动换一张验证码(除非已关闭)
       if (captchaDialogVisible.value) setTimeout(startCaptchaLogin, 400)
     }
   } catch (e) {
@@ -628,6 +647,9 @@ async function handleLogout(row) {
 .mb-16 {
   margin-bottom: 16px;
 }
+.mb-12 {
+  margin-bottom: 12px;
+}
 .mt-8 {
   margin-top: 8px;
 }
@@ -640,6 +662,44 @@ async function handleLogout(row) {
 .muted {
   color: #909399;
   font-size: 12px;
+}
+/* 分组卡片 */
+.group-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e5e7eb;
+  flex-wrap: wrap;
+}
+.group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.group-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1f2937;
+}
+.group-url {
+  font-size: 12px;
+  color: #9ca3af;
+}
+.group-actions {
+  display: flex;
+  gap: 8px;
+}
+.group-card .el-table {
+  --el-table-header-bg-color: #fbfcfe;
 }
 .captcha-login-cell {
   display: flex;

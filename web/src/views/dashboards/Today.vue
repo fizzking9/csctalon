@@ -349,17 +349,17 @@
             <BaseChart :option="complaintCategoryOption" height="150px" />
           </div>
         </el-col>
-        <!-- 积压待处理(独立水位维度,不是当日新增,而是截止当前所有未完成) -->
+        <!-- 积压待处理(独立水位维度, 近30天窗口内登记的未完成) -->
         <el-col :xs="24" :md="8">
-          <div class="backlog-watermark" :class="{ 'backlog-warn': (complaintSummaryData.backlog?.total || 0) >= 20, 'backlog-danger': (complaintSummaryData.backlog?.total || 0) >= 50 }">
+          <div class="backlog-watermark" :class="{ 'backlog-warn': (backlogTotal || 0) >= 20, 'backlog-danger': (backlogTotal || 0) >= 50 }">
             <div class="bw-head">
               <el-icon :size="16"><WarningFilled /></el-icon>
               <span class="bw-label">积压待处理</span>
-              <el-tooltip content="截止当前所有未完成的投诉工单总数(含历史遗留),需优先消化" placement="top">
+              <el-tooltip content="近30天登记的未完成投诉工单数(不含更早历史遗留),反映近期投诉消化情况" placement="top">
                 <el-icon style="color:inherit;opacity:.7"><QuestionFilled /></el-icon>
               </el-tooltip>
             </div>
-            <div class="bw-value">{{ formatNum(complaintSummaryData.backlog?.total) }}</div>
+            <div class="bw-value">{{ formatNum(backlogTotal) }}</div>
             <div class="bw-sub">件未结案</div>
           </div>
         </el-col>
@@ -595,7 +595,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { Timer, Refresh, WarningFilled, Document, Bell, List, CircleCheckFilled, QuestionFilled } from '@element-plus/icons-vue'
 import { today } from '@/api/analytics'
-import { complaintSummary, complaintDetail } from '@/api/complaint'
+import { complaintSummary, complaintDetail, complaintBacklog } from '@/api/complaint'
 import BaseChart from '@/components/BaseChart.vue'
 import { useAudit } from '@/composables/useAudit'
 import dayjs from 'dayjs'
@@ -620,6 +620,8 @@ const hasRecovery = computed(() => !!recoveryData.value?.kpi)
 const complaintSummaryData = ref({})
 const complaintList = ref([])
 const complaintCollapseActive = ref(['detail'])
+// 积压待处理(近30天窗口内登记的未完成, 不随今日/本周切换)
+const backlogTotal = ref(0)
 
 // 人均效率: 默认仅显示企微人员, 勾选后显示所有人
 const showAllStaff = ref(false)
@@ -1306,7 +1308,7 @@ async function loadAll() {
     const params = { start, end }
     const grain = viewMode.value === 'week' ? 'day' : 'hour'
     
-    const [kpiRes, hourlyRes, staffRes, queueRes, recoveryRes, complaintSummaryRes, complaintDetailRes] = await Promise.all([
+    const [kpiRes, hourlyRes, staffRes, queueRes, recoveryRes, complaintSummaryRes, complaintDetailRes, backlogRes] = await Promise.all([
       today.kpi(params),
       today.hourlyTrend({ ...params, trend_grain: grain }),
       today.staff({ ...params, aggregate_by: 'person', topn: 200 }),
@@ -1314,6 +1316,8 @@ async function loadAll() {
       today.refundRecovery(params),
       complaintSummary(params),
       complaintDetail({ ...params, limit: viewMode.value === 'week' ? 1000 : 500, include_supplementary: true }),
+      // 积压水位: 固定近30天窗口(登记日期落在窗口内的未完成), 避免历史遗留无限堆叠
+      complaintBacklog({ start: dayjs().subtract(30, 'day').format('YYYY-MM-DD'), end: dayjs().format('YYYY-MM-DD') }),
     ])
     
     if (kpiRes.data) kpiData.value = kpiRes.data
@@ -1323,6 +1327,7 @@ async function loadAll() {
     if (recoveryRes.data) recoveryData.value = recoveryRes.data
     if (complaintSummaryRes.data) complaintSummaryData.value = complaintSummaryRes.data
     if (complaintDetailRes.data) complaintList.value = complaintDetailRes.data?.items || []
+    if (backlogRes.data) backlogTotal.value = backlogRes.data?.total || 0
     
     lastUpdate.value = dayjs().format('HH:mm:ss')
   } catch (e) {

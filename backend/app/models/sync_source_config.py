@@ -38,6 +38,9 @@ class SyncSourceConfig(IDMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(64), nullable=False, comment="显示名")
     base_url: Mapped[str] = mapped_column(String(256), nullable=False, comment="基础地址(域名+子路径前缀)")
     page_path: Mapped[str] = mapped_column(String(256), nullable=False, comment="页面路径/接口路径")
+    group_key: Mapped[str | None] = mapped_column(
+        String(64), index=True, nullable=True, comment="所属数据源分组(source_groups.group_key), 组级凭证继承"
+    )
     time_labels: Mapped[list | None] = mapped_column(
         JSONB, nullable=True, comment="时间筛选标签(页面上有多个时间框时按标签精确填,如 ticket)"
     )

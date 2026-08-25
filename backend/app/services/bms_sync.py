@@ -790,6 +790,38 @@ async def sync_all(
             except Exception:
                 pass
 
+    # 系统事务通知: 每个数据源的同步结果写入概要事件(独立于详细日志, 供「事务通知」页查看)
+    try:
+        from app.services.system_event_service import record_system_event
+        ev_db = SessionLocal()
+        try:
+            for r in results:
+                if not isinstance(r, dict) or not r.get("data_type"):
+                    continue
+                ok = bool(r.get("success"))
+                if ok:
+                    summary = (
+                        f"新增 {r.get('inserted_rows', 0)} / 更新 {r.get('updated_rows', 0)}"
+                        f" / 失败 {r.get('failed_rows', 0)}"
+                    )
+                    detail = f"data_type={r.get('data_type')} 范围 {r.get('start_time', '')}~{r.get('end_time', '')}"
+                else:
+                    summary = str(r.get("error") or "同步失败")[:200]
+                    detail = f"data_type={r.get('data_type')} 触发={trigger_type}"
+                record_system_event(
+                    ev_db,
+                    category="sync",
+                    action="bms_sync",
+                    title=f"数据同步: {r.get('name', r.get('data_type'))}",
+                    summary=summary,
+                    status="success" if ok else "failed",
+                    detail=detail,
+                )
+        finally:
+            ev_db.close()
+    except Exception as ev_err:
+        logger.warning(f"[system_event] 同步结果写入事务事件失败(不影响主流程): {ev_err}")
+
     return results
 
 

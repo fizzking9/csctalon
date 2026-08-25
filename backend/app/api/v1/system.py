@@ -23,10 +23,15 @@ class SyncSourceOut(BaseModel):
     base_url: str
     page_path: str
     time_labels: list | None = None
+    group_key: str | None = None
     has_credentials: bool
     default_sync: bool
     enabled: bool
     sort_order: int
+    fetch_mode: str | None = None
+    captcha_type: str | None = None
+    requires_captcha: bool | None = None
+    options: dict | None = None
 
 
 class SyncSourceUpdate(BaseModel):

@@ -444,6 +444,24 @@ def sync_complaints_from_payload(
         db.commit()
         db.refresh(log)
 
+        # 系统事务通知: 投诉推送接收结果(独立于详细日志, 供「事务通知」页查看)
+        try:
+            from app.services.system_event_service import record_system_event
+            record_system_event(
+                db,
+                category="push",
+                action="complaint_push",
+                title=f"投诉数据推送接收: {source_file or 'workbuddy-push'}",
+                summary=(
+                    f"315={ext_result.total}(+{ext_result.inserted}/~{ext_result.updated}/关联{ext_result.matched})"
+                    f" 卡商={card_result.total}(+{card_result.inserted}/~{card_result.updated}/关联{card_result.matched})"
+                ),
+                status="success" if log.status == "success" else "partial",
+                detail=f"sync_source={sync_source} log_id={log.id} 来源文件={source_file or '-'}",
+            )
+        except Exception as ev_err:
+            logger.warning(f"[system_event] 投诉推送事务事件写入失败(不影响主流程): {ev_err}")
+
         logger.info(
             f"[complaint_sync] {source_file or 'workbuddy-push'} 完成: "
             f"315={ext_result.total}(+{ext_result.inserted}/~{ext_result.updated}/!{ext_result.dropped}/关联{ext_result.matched}) "
