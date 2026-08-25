@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Callable
 
 import redis
@@ -43,9 +44,47 @@ def _sanitize_redis_url(url: str) -> str:
     return url
 
 
+# Redis 连接失败告警节流: get_redis() 失败会高频重试, 每 N 秒最多写一条事务通知避免刷屏
+_REDIS_ALERT_INTERVAL = 300  # 5 分钟
+_last_redis_alert_ts: float = 0.0
+
+
+def _record_redis_failure_alert(err: Exception) -> None:
+    """Redis 连接失败时写一条 alert 级事务通知(节流 5min/条)。
+
+    Redis 不可用会让所有缓存降级直连 DB(看板/接口变慢), 属重要运维事件,
+    需让管理员在「事务通知」中心看到。节流避免 get_redis() 高频重试刷屏。
+    延迟 import 避免与 system_event_service/database 的循环导入。
+    """
+    global _last_redis_alert_ts
+    now = time.monotonic()
+    if now - _last_redis_alert_ts < _REDIS_ALERT_INTERVAL:
+        return
+    _last_redis_alert_ts = now
+    try:
+        from app.core.database import SessionLocal
+        from app.services.system_event_service import record_system_event
+
+        db = SessionLocal()
+        try:
+            record_system_event(
+                db,
+                category="alert",
+                action="redis_unavailable",
+                title="Redis 缓存连接失败",
+                summary=f"Redis 不可用, 所有缓存已降级直连 DB(看板/接口变慢)。错误: {err}",
+                status="failed",
+                detail=f"redis_url={_sanitize_redis_url(settings.redis_url)}\nerror: {err}",
+            )
+        finally:
+            db.close()
+    except Exception as notify_err:  # noqa: BLE001  DB/通知写入失败不影响业务
+        logger.debug("记录 Redis 失败告警失败(不影响业务): %s", notify_err)
+
+
 def get_redis() -> redis.Redis | None:
     """获取 Redis 客户端单例; 连接失败时返回 None(业务降级到无缓存)"""
-    global _redis_client
+    global _redis_client, _last_redis_alert_ts
     if _redis_client is not None:
         return _redis_client
     try:
@@ -58,6 +97,7 @@ def get_redis() -> redis.Redis | None:
         )
         client.ping()
         _redis_client = client
+        _last_redis_alert_ts = 0.0  # 恢复后重置节流, 下次失败能立即告警
         # 只打 host:port, 不打密码明文
         logger.info("Redis 连接成功: %s", _sanitize_redis_url(settings.redis_url))
         return _redis_client
@@ -65,6 +105,7 @@ def get_redis() -> redis.Redis | None:
         # Redis 不可用不影响业务, 仅记日志, 后续走无缓存路径
         logger.warning("Redis 连接失败, 缓存将不可用: %s", e)
         _redis_client = None
+        _record_redis_failure_alert(e)  # 写事务通知让管理员知晓
         return None
 
 

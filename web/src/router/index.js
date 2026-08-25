@@ -383,6 +383,12 @@ const routes = [
         meta: { title: '事务通知', icon: 'Bell', admin: true },
       },
       {
+        path: 'system/cache',
+        name: 'SystemCache',
+        component: () => import('@/views/system/CacheAdmin.vue'),
+        meta: { title: '缓存管理', icon: 'Cpu', admin: true },
+      },
+      {
         path: 'system/sync-settings',
         redirect: '/data/ingest?tab=sync-settings',
       },

@@ -34,7 +34,7 @@ def _parse_dt(s: str | None) -> datetime | None:
 
 @router.get("/summary", response_model=R, summary="首页汇总卡片")
 def summary(db: DBSession, _: CurrentUser):
-    return R(data=A.dashboard_summary(db))
+    return R(data=cached_call("summary", 60, A.dashboard_summary, db))
 
 
 # ---------- 看板1:运营分析 ----------
@@ -42,22 +42,22 @@ def summary(db: DBSession, _: CurrentUser):
 
 @router.get("/operation/trend", response_model=R, summary="退款趋势(按日)")
 def op_trend(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.operation_trend(db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"op:trend:{start}:{end}", 60, A.operation_trend, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/operation/status", response_model=R, summary="退费状态分布")
 def op_status(db: DBSession, _: CurrentUser):
-    return R(data=A.operation_status_dist(db))
+    return R(data=cached_call("op:status", 60, A.operation_status_dist, db))
 
 
 @router.get("/operation/reason", response_model=R, summary="退费原因TOP")
 def op_reason(db: DBSession, _: CurrentUser, limit: int = Query(10, ge=1, le=50)):
-    return R(data=A.operation_reason_top(db, limit))
+    return R(data=cached_call(f"op:reason:{limit}", 60, A.operation_reason_top, db, limit))
 
 
 @router.get("/operation/method", response_model=R, summary="退款方式占比")
 def op_method(db: DBSession, _: CurrentUser):
-    return R(data=A.operation_method_dist(db))
+    return R(data=cached_call("op:method", 60, A.operation_method_dist, db))
 
 
 # ---------- 看板2:现金流分析 ----------
@@ -65,27 +65,27 @@ def op_method(db: DBSession, _: CurrentUser):
 
 @router.get("/cash/trend", response_model=R, summary="真实现金流出趋势")
 def cash_trend(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.cash_out_trend(db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"cash:trend:{start}:{end}", 60, A.cash_out_trend, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/cash/breakdown", response_model=R, summary="真实现金流构成(直接退款+用户提现)")
 def cash_breakdown(db: DBSession, _: CurrentUser):
-    return R(data=A.cash_out_breakdown(db))
+    return R(data=cached_call("cash:breakdown", 60, A.cash_out_breakdown, db))
 
 
 @router.get("/cash/wallet-vs-withdraw", response_model=R, summary="退回钱包vs实际提现")
 def cash_compare(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.wallet_vs_withdraw(db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"cash:wallet:{start}:{end}", 60, A.wallet_vs_withdraw, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/cash/merchant", response_model=R, summary="商户号对账")
 def cash_merchant(db: DBSession, _: CurrentUser):
-    return R(data=A.merchant_cash_summary(db))
+    return R(data=cached_call("cash:merchant", 60, A.merchant_cash_summary, db))
 
 
 @router.get("/cash/wallet-balance", response_model=R, summary="钱包余额分布")
 def cash_balance(db: DBSession, _: CurrentUser, limit: int = Query(20, ge=1, le=100)):
-    return R(data=A.wallet_balance_top(db, limit))
+    return R(data=cached_call(f"cash:balance:{limit}", 60, A.wallet_balance_top, db, limit))
 
 
 # ---------- 看板3:退款分类分析 ----------
@@ -93,17 +93,17 @@ def cash_balance(db: DBSession, _: CurrentUser, limit: int = Query(20, ge=1, le=
 
 @router.get("/category/service-item", response_model=R, summary="按服务项分类")
 def cat_service(db: DBSession, _: CurrentUser):
-    return R(data=A.category_by_service_item(db))
+    return R(data=cached_call("cat:service", 60, A.category_by_service_item, db))
 
 
 @router.get("/category/merchant", response_model=R, summary="按商户分类")
 def cat_merchant(db: DBSession, _: CurrentUser, limit: int = Query(20, ge=1, le=100)):
-    return R(data=A.category_by_merchant(db, limit))
+    return R(data=cached_call(f"cat:merchant:{limit}", 60, A.category_by_merchant, db, limit))
 
 
 @router.get("/category/package", response_model=R, summary="按套餐分类")
 def cat_package(db: DBSession, _: CurrentUser, limit: int = Query(20, ge=1, le=100)):
-    return R(data=A.category_by_package(db, limit))
+    return R(data=cached_call(f"cat:package:{limit}", 60, A.category_by_package, db, limit))
 
 
 # ---------- 看板4:人员操作分析 ----------
@@ -111,17 +111,17 @@ def cat_package(db: DBSession, _: CurrentUser, limit: int = Query(20, ge=1, le=1
 
 @router.get("/operator/ticket", response_model=R, summary="人员工单处理统计")
 def op_ticket(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.operator_ticket_stats(db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"operator:ticket:{start}:{end}", 60, A.operator_ticket_stats, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/operator/audit", response_model=R, summary="人员审核统计")
 def op_audit(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.operator_audit_stats(db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"operator:audit:{start}:{end}", 60, A.operator_audit_stats, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/operator/refund", response_model=R, summary="人员退费操作统计")
 def op_refund(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.operator_refund_stats(db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"operator:refund:{start}:{end}", 60, A.operator_refund_stats, db, _parse_dt(start), _parse_dt(end)))
 
 
 # ---------- 看板5: 客服接待看板 (对齐周报4模块) ----------
@@ -129,22 +129,22 @@ def op_refund(db: DBSession, _: CurrentUser, start: str | None = None, end: str 
 
 @router.get("/reception/overview", response_model=R, summary="接待看板-总体接待量(按周)")
 def reception_overview(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.reception_overview_trend(db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"reception:overview:{start}:{end}", 60, A.reception_overview_trend, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/reception/category-summary", response_model=R, summary="接待看板-接待分项汇总(按周×分类)")
 def reception_category(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.reception_category_summary(db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"reception:catsum:{start}:{end}", 60, A.reception_category_summary, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/reception/per-capita", response_model=R, summary="接待看板-接待分项人均工作(按周×专项组)")
 def reception_pc(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.reception_per_capita(db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"reception:percapita:{start}:{end}", 60, A.reception_per_capita, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/reception/group-detail", response_model=R, summary="接待看板-各组接待明细(按组×人员×日)")
 def reception_group(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=A.reception_group_detail(db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"reception:group:{start}:{end}", 60, A.reception_group_detail, db, _parse_dt(start), _parse_dt(end)))
 
 
 # ---------- 看板6: 退款-提现全链路看板 (合并 SN对账 + 发起退款→实际到账时效分析) ----------

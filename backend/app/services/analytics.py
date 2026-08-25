@@ -4052,14 +4052,19 @@ def _ensure_service_tickets_for_unmatched_refunds(
     # 3. 对没工单的退款 建 service_ticket
     inserted = 0
     skipped = 0
-    for r in refunds_rows:
-        if r.refund_no in have_ticket:
-            continue
+    # 批量查重(避免循环内逐条 SELECT 的 N+1): 一次性取出已存在的 GDREF_ 工单号集合,
+    # 循环里直接 in 判断, 把 N 次 SELECT 降为 1 次(窗口内退款多时尤其明显)。
+    unmatched_rows = [r for r in refunds_rows if r.refund_no not in have_ticket]
+    candidate_tickets = ["GDREF_" + r.refund_no for r in unmatched_rows]
+    existing_tickets: set[str] = set()
+    if candidate_tickets:
+        existing_tickets = set(db.scalars(
+            select(ServiceTicket.ticket_no).where(ServiceTicket.ticket_no.in_(candidate_tickets))
+        ).all())
+    for r in unmatched_rows:
         # 幂等: 工单号 = GDREF_{refund_no}  (64 字符限制 OK, refund_no ~ 22 字符)
         ticket_no = "GDREF_" + r.refund_no
-        # 查重(已有同 ticket_no 已建过)
-        ex = db.execute(select(ServiceTicket.ticket_no).where(ServiceTicket.ticket_no == ticket_no)).first()
-        if ex:
+        if ticket_no in existing_tickets:
             skipped += 1
             have_ticket.add(r.refund_no)
             continue
