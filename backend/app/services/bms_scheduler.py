@@ -78,8 +78,10 @@ class BmsScheduler:
         self._catch_up_done = False  # 启动补跑是否已执行(避免反复补跑)
         # 专项级熔断: date_str -> set(已失败暂停的 data_type 名称)
         self._halted_types: dict[str, set[str]] = {}
-        # 预警扫描: date_str -> set(已扫描的小时), 一小时最多扫一次(scan_alerts 已做日幂等)
+        # 预警扫描: date_str -> set(已扫描的小时), 一小时最多一次(scan_alerts 已做日幂等)
         self._alert_scanned_hours: dict[str, set[int]] = {}
+        # 启动后延迟预热任务句柄(防 GC 中断)
+        self._warm_task: asyncio.Task | None = None
 
     @property
     def is_running(self) -> bool:
@@ -282,10 +284,24 @@ class BmsScheduler:
         self._reload_today_completed_hours()
         self._catch_up_done = False
         self._task = asyncio.create_task(self._run_loop())
+        # 启动后延迟预热今日看板(让首个用户命中热缓存); 与同步互斥由 warmer 内部保证,
+        # 若此时启动补跑同步正在进行, warmer 会跳过, 改由同步完成后的预热兜底。
+        self._warm_task = asyncio.create_task(self._startup_warm_delayed())
         logger.info(
             f"BMS 定时同步已启动, 白天小时(8-23+0)={sorted(DAYTIME_HOURS)},"
             f" 补跑={CATCHUP_HOUR}:00, 宽容窗口{TRIGGER_WINDOW_MINUTES}分钟"
         )
+
+    async def _startup_warm_delayed(self) -> None:
+        """启动后延迟预热今日看板(等迁移/调度器先稳定)"""
+        try:
+            await asyncio.sleep(8)
+            from app.services.cache_warmer import warm_on_startup
+            await asyncio.to_thread(warm_on_startup)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:  # noqa: BLE001  预热失败不影响服务
+            logger.debug(f"启动预热失败(不影响): {e}")
 
     def stop(self):
         """停止调度器"""
@@ -293,6 +309,9 @@ class BmsScheduler:
         if self._task and not self._task.done():
             self._task.cancel()
         self._task = None
+        if self._warm_task and not self._warm_task.done():
+            self._warm_task.cancel()
+        self._warm_task = None
         logger.info("BMS 定时同步已停止")
 
     async def _run_loop(self):
@@ -414,6 +433,14 @@ class BmsScheduler:
                             full_window_days=FULL_WINDOW_DAYS if now_cn.hour == 8 else 0,
                             biz_key=biz_key,
                         )
+
+                # ── 空闲期缓存预热(白天每分钟自检; warmer 内部按 ttl 节流+同步互斥,
+                #    仍新鲜/夜间/同步中均快速跳过, 仅缓存将过期时才重算) ──
+                try:
+                    from app.services.cache_warmer import warm_idle
+                    await asyncio.to_thread(warm_idle)
+                except Exception as we:  # noqa: BLE001
+                    logger.debug(f"空闲预热失败(不影响): {we}")
 
             except asyncio.CancelledError:
                 break

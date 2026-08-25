@@ -444,6 +444,24 @@ def sync_complaints_from_payload(
         db.commit()
         db.refresh(log)
 
+        # 缓存失效+预热: 投诉推送入库后, 投诉看板(complaint:*)与今日看板投诉区块(today:*)
+        # 必须刷新, 否则看板显示旧数据直到 60s 缓存自然过期(见 数据源接入与缓存加速规范.md §九 G1)
+        has_writes = (
+            ext_result.inserted + ext_result.updated
+            + card_result.inserted + card_result.updated
+        ) > 0
+        if has_writes:
+            try:
+                from app.core.redis_client import cache_invalidate_pattern
+                for pat in ("complaint:*", "today:*"):
+                    cache_invalidate_pattern(pat)
+                # 预热今日视图(含投诉区块), 让首访命中热缓存; 投诉推送频率低(约20min/次),
+                # 复用同步后预热入口(含单飞锁+can_warm检查), 月报顺带刷新成本可忽略
+                from app.services.cache_warmer import warm_after_sync
+                warm_after_sync()
+            except Exception as cache_err:
+                logger.warning(f"[complaint_sync] 缓存失效/预热失败(不影响主流程): {cache_err}")
+
         # 系统事务通知: 投诉推送接收结果(独立于详细日志, 供「事务通知」页查看)
         try:
             from app.services.system_event_service import record_system_event

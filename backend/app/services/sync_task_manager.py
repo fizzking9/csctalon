@@ -146,6 +146,8 @@ class SyncTaskManager:
         self._last_success_at: datetime | None = None
         # 冷却阈值(秒)
         self.cooldown_seconds = DEFAULT_COOLDOWN_SECONDS
+        # 同步后预热任务的引用持有器(防 GC 中断预热)
+        self._warm_bg_tasks: set = set()
 
     # ---------- 对外: 预检 / 锁判断 ----------
 
@@ -378,14 +380,24 @@ class SyncTaskManager:
             async with self._lock:
                 self._executing = False
                 # _current_task 保留到下一个任务开始前,方便查询
-            # 缓存失效兜底: 同步完成后统一失效分析看板缓存 (含 BMS/SCRM 并发合并任务),
-            # 避免同步后仍读到旧聚合结果。
+            # 缓存失效兜底: 同步完成后统一失效看板缓存 (含 BMS/SCRM 并发合并任务),
+            # 避免同步后仍读到旧聚合结果。complaint:* 一并失效(BMS 投诉工单同步后会变)。
             try:
                 from app.core.redis_client import cache_invalidate_pattern
-                for pat in ("today:*", "refund:*"):
+                for pat in ("today:*", "refund:*", "complaint:*"):
                     cache_invalidate_pattern(pat)
             except Exception as ce:  # noqa: BLE001
                 logger.debug(f"缓存失效兜底失败(不影响同步): {ce}")
+            # 同步后预热今日看板: 数据已更新, 主动填充缓存让下次访问命中热缓存。
+            # 仅在有源成功(success/partial)时预热, 全失败则跳过(无新数据)。
+            if task.status in ("success", "partial"):
+                try:
+                    from app.services.cache_warmer import warm_after_sync
+                    wt = asyncio.create_task(asyncio.to_thread(warm_after_sync))
+                    self._warm_bg_tasks.add(wt)
+                    wt.add_done_callback(self._warm_bg_tasks.discard)
+                except Exception as we:  # noqa: BLE001  预热调度失败不影响同步
+                    logger.debug(f"同步后预热调度失败(不影响): {we}")
 
     async def _on_progress(self, task_id: str, data_type: str, phase: str, data: Any):
         """进度回调写入 task 状态"""

@@ -16,6 +16,7 @@ from app.models.complaint_audit import ComplaintAudit
 from app.models.external_complaint import ExternalComplaint
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
+from app.core.redis_client import cached_json
 from app.schemas.common import PageBase, R
 from app.services.analytics import _complaint_source_type_case, _ticket_category_case, TZ
 
@@ -183,6 +184,7 @@ def _to_sh_iso(dt) -> str | None:
 
 
 @router.get("/summary", response_model=R, summary="三源投诉统计汇总(工单为主,卡商/外部投诉为前期参考补充)")
+@cached_json(lambda *a, **kw: f"complaint:summary:{kw.get('start')}:{kw.get('end')}", ttl=60)
 def complaint_summary(
     db: DBSession,
     _: CurrentUser,
@@ -442,6 +444,7 @@ def complaint_summary(
 
 
 @router.get("/detail", response_model=R, summary="投诉明细列表(三源合并: 内部/商户号/外部)")
+@cached_json(lambda *a, **kw: f"complaint:detail:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('limit')}:{int(bool(kw.get('include_supplementary')))}", ttl=60)
 def complaint_detail(
     db: DBSession,
     _: CurrentUser,
@@ -803,6 +806,7 @@ def _map_315_category(cat: str | None) -> str | None:
 
 
 @router.get("/backlog", response_model=R, summary="积压未处理投诉审核分析(统一口径: 归一化状态非已完成)")
+@cached_json(lambda *a, **kw: f"complaint:backlog:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('status')}:{kw.get('category')}:{kw.get('has_handler')}:{kw.get('page')}:{kw.get('page_size')}:{kw.get('sort')}", ttl=60)
 def complaint_backlog(
     db: DBSession,
     _: CurrentUser,
