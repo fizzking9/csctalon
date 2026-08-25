@@ -145,6 +145,7 @@
                   <span class="snapshot-rank">{{ i + 1 }}</span>
                   <el-tag :type="sourceTagType(it.source)" size="small" effect="plain">{{ it.source }}</el-tag>
                   <span class="snapshot-no">{{ it.ticket_no }}</span>
+                  <el-link v-if="it.device_sn" type="primary" :underline="false" class="snapshot-sn" @click="openDeviceAudit(it.device_sn)">{{ it.device_sn }}</el-link>
                   <el-tag v-if="it.aging_days != null" size="small" :type="it.aging_days >= 8 ? 'danger' : it.aging_days >= 4 ? 'warning' : 'info'">{{ it.aging_days }}天</el-tag>
                 </div>
               </div>
@@ -153,10 +154,10 @@
           </el-col>
         </el-row>
 
-        <!-- 投诉水位(进水/出水/净水位 = 积压增减的流量视角) -->
+        <!-- 投诉水位(新增投诉/处理投诉/净水位 = 积压增减的流量视角) -->
         <div class="block-head" style="margin-top:4px">
           <span class="block-title" style="font-size:14px">投诉水位</span>
-          <span class="block-hint">进水=窗口内按日新增登记 · 出水=窗口内登记且已完成(与进水对称) · 净水位=进-出 · 累计净水位最终值=当前积压量(应与上方积压快照一致)</span>
+          <span class="block-hint">新增投诉=窗口内按日新增登记 · 处理投诉=窗口内登记且已完成(与新增对称) · 净水位=新增-处理 · 累计净水位最终值=当前积压量(应与上方积压快照一致)</span>
         </div>
         <div class="chart-card mb-16">
           <BaseChart v-if="complaintWaterOption" :option="complaintWaterOption" height="260px" />
@@ -706,7 +707,7 @@
         <el-row :gutter="16" class="mb-16">
           <el-col :xs="24" :md="8">
             <div class="chart-card">
-              <div class="chart-title">严重性数量分布<span class="dim-text"> · 外部投诉更重</span></div>
+              <div class="chart-title">被投诉主体来源分布<span class="dim-text"> · 商户号 vs 外部投诉占比</span></div>
               <BaseChart v-if="subjectSeverityOption" :option="subjectSeverityOption" height="240px" />
               <el-empty v-else description="暂无数据" :image-size="40" />
             </div>
@@ -953,20 +954,41 @@ function extRatioColor(ratio) {
   return '#16a34a'
 }
 
-// 严重性数量分布(商户号 vs 外部)
+// 严重性数量分布(堆叠柱状图, 显示商户号vs外部投诉占比)
 const subjectSeverityOption = computed(() => {
   const d = subj.value.severity_distribution || []
   if (!d.length || d.every(x => !x.count)) return null
+  const total = d.reduce((sum, x) => sum + x.count, 0)
   return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: 90, right: 24, bottom: 28, top: 8 },
-    xAxis: { type: 'value' },
-    yAxis: { type: 'category', data: d.map(x => x.name).reverse(), axisLabel: { fontSize: 11 } },
-    series: [{
-      type: 'bar', data: d.map(x => x.count).reverse(), barMaxWidth: 22,
-      itemStyle: { color: (p) => ['#7c3aed', '#dc2626'][p.dataIndex], borderRadius: [0, 4, 4, 0] },
-      label: { show: true, position: 'right', fontSize: 11, fontWeight: 600 },
-    }],
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
+      formatter: (params) => {
+        const p = params[0]
+        const item = d.find(x => x.name === p.seriesName)
+        if (!item) return ''
+        const pct = total > 0 ? (item.count / total * 100).toFixed(1) : 0
+        return `${item.name}<br/>数量: ${item.count}<br/>占比: ${pct}%`
+      }
+    },
+    legend: { bottom: 0, left: 'center', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 11 } },
+    grid: { left: 48, right: 24, bottom: 36, top: 8 },
+    xAxis: { type: 'value', name: '投诉数' },
+    yAxis: { type: 'category', data: [''], axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false } },
+    series: [
+      { name: '商户号投诉', type: 'bar', stack: 'total',
+        data: d.find(x => x.name === '商户号投诉') ? [d.find(x => x.name === '商户号投诉').count] : [0],
+        itemStyle: { color: '#7c3aed', borderRadius: [4, 0, 0, 4] },
+        barMaxWidth: 28,
+        label: { show: true, position: 'inside', fontSize: 12, fontWeight: 600,
+          formatter: (p) => p.value > 0 ? `${p.value}` : '' },
+      },
+      { name: '外部投诉', type: 'bar', stack: 'total',
+        data: d.find(x => x.name === '外部投诉') ? [d.find(x => x.name === '外部投诉').count] : [0],
+        itemStyle: { color: '#dc2626', borderRadius: [0, 4, 4, 0] },
+        barMaxWidth: 28,
+        label: { show: true, position: 'inside', fontSize: 12, fontWeight: 600,
+          formatter: (p) => p.value > 0 ? `${p.value}` : '' },
+      },
+    ],
   }
 })
 
@@ -1003,10 +1025,14 @@ const subjectTrendOption = computed(() => {
     legend: { bottom: 0, left: 'center', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 11 } },
     grid: { left: 48, right: 24, bottom: 44, top: 16 },
     xAxis: { type: 'category', data: x, axisLabel: { fontSize: 10, rotate: 45 } },
-    yAxis: { type: 'value' },
+    yAxis: { type: 'value', name: '投诉数' },
     series: [
-      { name: '商户号投诉', type: 'bar', stack: 'total', data: t.map(r => r['商户号投诉'] || 0), itemStyle: { color: '#7c3aed' }, barMaxWidth: 18 },
-      { name: '外部投诉', type: 'bar', stack: 'total', data: t.map(r => r['外部投诉'] || 0), itemStyle: { color: '#dc2626' }, barMaxWidth: 18 },
+      { name: '商户号投诉', type: 'line', stack: 'total', smooth: true,
+        areaStyle: { opacity: 0.6 },
+        data: t.map(r => r['商户号投诉'] || 0), itemStyle: { color: '#7c3aed' }, lineStyle: { width: 2 }, symbol: 'circle', symbolSize: 4 },
+      { name: '外部投诉', type: 'line', stack: 'total', smooth: true,
+        areaStyle: { opacity: 0.6 },
+        data: t.map(r => r['外部投诉'] || 0), itemStyle: { color: '#dc2626' }, lineStyle: { width: 2 }, symbol: 'circle', symbolSize: 4 },
     ],
   }
 })
@@ -1067,7 +1093,7 @@ const complaintWaterOption = computed(() => {
   const dates = w.map(x => (x.day || '').slice(5))
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    legend: { data: ['进水', '出水', '净水位', '累计净水位'], top: 0, textStyle: { fontSize: 11 } },
+    legend: { data: ['新增投诉', '处理投诉', '净水位', '累计净水位'], top: 0, textStyle: { fontSize: 11 } },
     grid: { left: 48, right: 56, bottom: 44, top: 36 },
     xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 10, rotate: 45 } },
     yAxis: [
@@ -1075,9 +1101,9 @@ const complaintWaterOption = computed(() => {
       { type: 'value', name: '净水位', axisLabel: { fontSize: 11 }, splitLine: { show: false } },
     ],
     series: [
-      // 进水 vs 出水 = 此消彼长的比较关系: 并列柱(不同颜色, 不堆叠)
-      { name: '进水', type: 'bar', data: w.map(x => x.in), itemStyle: { color: '#10b981' }, barMaxWidth: 24 },
-      { name: '出水', type: 'bar', data: w.map(x => x.out), itemStyle: { color: '#f87171' }, barMaxWidth: 24 },
+      // 新增投诉 vs 处理投诉 = 此消彼长的比较关系: 并列柱(不同颜色, 不堆叠)
+      { name: '新增投诉', type: 'bar', data: w.map(x => x.in), itemStyle: { color: '#f87171' }, barMaxWidth: 24 },
+      { name: '处理投诉', type: 'bar', data: w.map(x => x.out), itemStyle: { color: '#10b981' }, barMaxWidth: 24 },
       { name: '净水位', type: 'line', yAxisIndex: 1, data: w.map(x => x.net), smooth: true, symbol: 'circle', symbolSize: 6,
         itemStyle: { color: '#2563eb' }, lineStyle: { width: 2.5, color: '#2563eb' },
         markLine: { silent: true, symbol: 'none', lineStyle: { color: '#9ca3af', type: 'dashed' }, data: [{ yAxis: 0 }] } },
@@ -1122,11 +1148,22 @@ const params = computed(() => {
   return p
 })
 
-// ── 来源分布饼图 ──
+// ── 来源分布饼图(含兜底: source_distribution 为空时用 summary 三源数) ──
 const sourcePieColors = ['#2563eb', '#7c3aed', '#dc2626']
 const sourcePieOption = computed(() => {
-  const d = s.value.source_distribution || []
-  if (!d.length) return null
+  let d = s.value.source_distribution || []
+  if (!d.length) {
+    const sm = s.value.summary || {}
+    const internal = sm.internal_total || 0
+    const merchant = sm.merchant_total || 0
+    const external = sm.external_total || 0
+    if (internal + merchant + external === 0) return null
+    d = [
+      { name: '内部投诉', count: internal },
+      { name: '商户号投诉', count: merchant },
+      { name: '外部投诉', count: external },
+    ]
+  }
   return {
     tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
     legend: { bottom: 0, left: 'center', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 11 } },
@@ -1471,6 +1508,7 @@ onMounted(() => {
 .snapshot-row { display: flex; align-items: center; gap: 6px; padding: 5px 2px; border-bottom: 1px dashed #f1f3f5; }
 .snapshot-rank { width: 16px; font-size: 11px; color: #9ca3af; text-align: center; }
 .snapshot-no { flex: 1; font-size: 12px; color: #374151; font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.snapshot-sn { font-size: 11px; font-family: ui-monospace, monospace; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .empty-hint { margin-top: 60px; }
 .empty-tip { text-align: center; }
