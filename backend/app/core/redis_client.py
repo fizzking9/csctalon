@@ -231,6 +231,65 @@ def cache_invalidate_pattern(pattern: str) -> int:
         return 0
 
 
+def cache_stats(pattern: str, *, limit: int = 500) -> dict:
+    """统计指定 pattern 下缓存 key 的情况(只读, 不修改)。
+
+    供缓存管理页展示「缓存了哪些 / 各多少 / 即将过期多少」。
+    返回:
+      available: Redis 是否可用
+      count: 匹配到的 key 数(limit 截断, 见 truncated)
+      truncated: 是否因 limit 截断(实际可能更多)
+      min_ttl / avg_ttl: 有效 TTL(key=-1 无过期 不计入)的统计(秒)
+      expiring_count: ttl <= 60 的数量(即将过期, 预热/访问会重算)
+      no_ttl_count: ttl == -1(无过期, 异常) 数量
+    """
+    r = get_redis()
+    if r is None:
+        return {"available": False, "count": 0, "truncated": False,
+                "min_ttl": 0, "avg_ttl": 0, "expiring_count": 0, "no_ttl_count": 0}
+    try:
+        keys = []
+        truncated = False
+        for key in r.scan_iter(match=pattern, count=500):
+            keys.append(key)
+            if len(keys) >= limit:
+                truncated = True
+                break
+        count = len(keys)
+        if count == 0:
+            return {"available": True, "count": 0, "truncated": truncated,
+                    "min_ttl": 0, "avg_ttl": 0, "expiring_count": 0, "no_ttl_count": 0}
+        ttls: list[int] = []
+        expiring = 0
+        no_ttl = 0
+        for k in keys:
+            try:
+                ttl = r.ttl(k)  # -2=不存在, -1=无过期, 否则剩余秒
+            except Exception:
+                continue
+            if not isinstance(ttl, int):
+                continue
+            if ttl == -1:
+                no_ttl += 1
+            elif ttl > 0:
+                ttls.append(ttl)
+                if ttl <= 60:
+                    expiring += 1
+        return {
+            "available": True,
+            "count": count,
+            "truncated": truncated,
+            "min_ttl": min(ttls) if ttls else 0,
+            "avg_ttl": round(sum(ttls) / len(ttls)) if ttls else 0,
+            "expiring_count": expiring,
+            "no_ttl_count": no_ttl,
+        }
+    except RedisError as e:
+        logger.debug("缓存统计失败 pattern=%s: %s", pattern, e)
+        return {"available": False, "count": 0, "truncated": False,
+                "min_ttl": 0, "avg_ttl": 0, "expiring_count": 0, "no_ttl_count": 0}
+
+
 def cached_call(key: str, ttl: int, fn: Callable, *args, **kwargs) -> Any:
     """带 Redis 缓存的函数调用 (同步版)
 

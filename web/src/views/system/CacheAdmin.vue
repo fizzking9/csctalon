@@ -13,21 +13,28 @@
 
     <!-- 状态条 -->
     <el-row :gutter="12" class="mb-16">
-      <el-col :xs="12" :sm="8">
+      <el-col :xs="12" :sm="6">
         <div class="kpi-card" :style="redisOk ? greenCard : redCard">
           <div class="kpi-label" :style="redisOk ? greenText : redText">Redis 缓存</div>
           <div class="kpi-value">{{ redisOk ? '可用' : '不可用' }}</div>
-          <div class="kpi-sub">{{ redisOk ? '缓存正常读写' : '已降级直连 DB' }}</div>
+          <div class="kpi-sub">{{ redisOk ? `共 ${info.dbsize ?? 0} 键` : '已降级直连 DB' }}</div>
         </div>
       </el-col>
-      <el-col :xs="12" :sm="8">
+      <el-col :xs="12" :sm="6">
+        <div class="kpi-card" :style="greenCard">
+          <div class="kpi-label" :style="greenText">看板缓存键</div>
+          <div class="kpi-value">{{ info.cached_keys ?? 0 }}</div>
+          <div class="kpi-sub">{{ expiringTotal ? `${expiringTotal} 个即将过期` : '全部新鲜' }}</div>
+        </div>
+      </el-col>
+      <el-col :xs="12" :sm="6">
         <div class="kpi-card" :style="syncBusy ? amberCard : greenCard">
           <div class="kpi-label" :style="syncBusy ? amberText : greenText">数据同步</div>
           <div class="kpi-value">{{ syncBusy ? '进行中' : '空闲' }}</div>
           <div class="kpi-sub">{{ syncBusy ? '重建会被拒绝, 请稍后' : '可安全重建' }}</div>
         </div>
       </el-col>
-      <el-col :xs="12" :sm="8">
+      <el-col :xs="12" :sm="6">
         <div class="kpi-card" :style="info.is_warming ? amberCard : greenCard">
           <div class="kpi-label" :style="info.is_warming ? amberText : greenText">预热任务</div>
           <div class="kpi-value">{{ info.is_warming ? '运行中' : '空闲' }}</div>
@@ -45,6 +52,46 @@
       description="重建会重算数据但无法写入缓存, 看板仍走直连 DB(变慢)。请先恢复 Redis 连接。"
       show-icon
     />
+
+    <!-- 缓存清单: 各前缀的键数量/TTL/即将过期/是否预热 -->
+    <el-card shadow="never" class="mb-16">
+      <div class="flex-between" style="margin-bottom: 8px">
+        <div class="page-title" style="margin: 0">缓存清单 · 按业务前缀</div>
+        <span class="page-sub">键数量越多覆盖越广 · 即将过期(TTL≤60s)会被预热/访问重算 · 未预热前缀靠路由层 60s 自然过期</span>
+      </div>
+      <el-table :data="groups" v-loading="loading" border stripe size="small" max-height="420">
+        <el-table-column label="业务域" min-width="120">
+          <template #default="{ row }">{{ row.label }}</template>
+        </el-table-column>
+        <el-table-column label="前缀(pattern)" min-width="130">
+          <template #default="{ row }"><code class="mono">{{ row.pattern }}</code></template>
+        </el-table-column>
+        <el-table-column label="键数量" width="90" align="right">
+          <template #default="{ row }">
+            <span :style="row.count > 0 ? 'font-weight:600' : ''">{{ row.count }}</span>
+            <span v-if="row.truncated" class="page-sub">+</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="即将过期" width="100" align="right">
+          <template #default="{ row }">
+            <span v-if="row.expiring_count > 0" style="color:#d97706; font-weight:600">{{ row.expiring_count }}</span>
+            <span v-else class="page-sub">0</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="平均TTL" width="100" align="right">
+          <template #default="{ row }">
+            <span v-if="row.avg_ttl > 0">{{ row.avg_ttl }}s</span>
+            <span v-else class="page-sub">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="预热" width="90" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.preheated" size="small" type="success" effect="plain">已预热</el-tag>
+            <el-tag v-else size="small" type="info" effect="plain">未预热</el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
 
     <el-card shadow="never">
       <div class="page-title" style="margin: 0 0 12px">选择重建范围</div>
@@ -118,11 +165,16 @@ const scopes = ref([
 const scope = ref('today')
 const invalidateOnly = ref(false)
 const rebuilding = ref(false)
+const loading = ref(false)
 const lastResult = ref(null)
-const info = ref({ redis_available: true, is_warming: false, sync_busy: false })
+const info = ref({ redis_available: true, is_warming: false, sync_busy: false, dbsize: 0, cached_keys: 0 })
+const groups = ref([])
 
 const redisOk = computed(() => info.value.redis_available)
 const syncBusy = computed(() => info.value.sync_busy)
+const expiringTotal = computed(() =>
+  groups.value.reduce((s, g) => s + (g.expiring_count || 0), 0),
+)
 
 const greenCard = 'background:#f0fdf4'
 const greenText = 'color:#16a34a'
@@ -136,6 +188,7 @@ function scopeLabel(v) {
 }
 
 async function loadInfo() {
+  loading.value = true
   try {
     const res = await cacheInfo()
     const d = res.data || res
@@ -144,9 +197,14 @@ async function loadInfo() {
       redis_available: d?.redis_available ?? true,
       is_warming: d?.is_warming ?? false,
       sync_busy: d?.sync_busy ?? false,
+      dbsize: d?.dbsize ?? 0,
+      cached_keys: d?.cached_keys ?? 0,
     }
+    groups.value = d?.groups || []
   } catch (e) {
     // 拦截器已弹错误
+  } finally {
+    loading.value = false
   }
 }
 
@@ -190,5 +248,10 @@ onMounted(loadInfo)
   margin-top: 20px;
   padding-top: 16px;
   border-top: 1px solid var(--el-border-color-lighter);
+}
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 </style>

@@ -20,9 +20,24 @@ from app.services.cache_warmer import (
     is_warming,
     rebuild_cache,
 )
-from app.core.redis_client import get_redis
+from app.core.redis_client import cache_stats, get_redis
 
 router = APIRouter(prefix="/system/cache", tags=["系统设置-缓存管理"])
+
+# 缓存前缀分组(与 docs/数据源接入与缓存加速规范.md §五命名规范对齐)
+# (pattern, 业务标签, 是否纳入预热)
+CACHE_PREFIX_GROUPS = [
+    ("today:*", "今日看板", True),
+    ("complaint:*", "投诉分析", True),
+    ("op:*", "运营看板", True),
+    ("cash:*", "现金流看板", True),
+    ("cat:*", "退款分类", True),
+    ("operator:*", "人员操作", True),
+    ("summary", "看板总览", True),
+    ("reception:*", "接待分析", False),
+    ("refund:*", "退款分析", False),
+    ("rw:*", "提现全链路", False),
+]
 
 
 class CacheRebuildReq(BaseModel):
@@ -32,20 +47,46 @@ class CacheRebuildReq(BaseModel):
     )
 
 
-@router.get("/info", response_model=R, summary="缓存管理信息(可用范围+状态)")
+@router.get("/info", response_model=R, summary="缓存管理信息(可用范围+状态+各前缀统计)")
 def cache_info(db: DBSession, user: AdminUser):
-    """返回可用重建范围、Redis 是否可用、当前是否在预热、同步是否进行中"""
+    """返回可用重建范围、Redis/预热/同步状态, 以及各缓存前缀的键数量/TTL分布/即将过期数。
+
+    groups 按前缀分组(与命名规范对齐), 每组含 count/expiring_count/avg_ttl 等,
+    让管理员看清「缓存了哪些 / 各多少 / 哪些即将过期 / 是否纳入预热」。
+    """
     sync_busy = False
     try:
         from app.services.sync_task_manager import sync_task_manager
         sync_busy = sync_task_manager.is_busy()
     except Exception:
         pass
+    r = get_redis()
+    redis_ok = r is not None
+    groups = []
+    cached_keys = 0
+    dbsize = 0
+    if redis_ok and r is not None:
+        try:
+            dbsize = r.dbsize()
+        except Exception:
+            dbsize = 0
+        for pat, label, preheated in CACHE_PREFIX_GROUPS:
+            st = cache_stats(pat)
+            groups.append({
+                "pattern": pat,
+                "label": label,
+                "preheated": preheated,
+                **st,
+            })
+            cached_keys += st.get("count", 0)
     return R(data={
         "scopes": [{"value": v, "label": SCOPE_LABELS.get(v, v)} for v in AVAILABLE_SCOPES],
-        "redis_available": get_redis() is not None,
+        "redis_available": redis_ok,
         "is_warming": is_warming(),
         "sync_busy": sync_busy,
+        "dbsize": dbsize,            # Redis 内全部 key 数(含非缓存 key 如同步标记)
+        "cached_keys": cached_keys,  # 已分类缓存 key 数(各组 count 之和)
+        "groups": groups,
     })
 
 
