@@ -25,6 +25,11 @@ export function complaintBacklog(params) {
   return request.get('/complaints/backlog', { params })
 }
 
+// 积压未处理投诉明细导出Excel(同口径, 不受分页限制)
+export function complaintBacklogExport(params) {
+  return request.get('/complaints/backlog/export', { params, responseType: 'blob', timeout: 120000 })
+}
+
 // 被投诉主体维度分析(主体统计/严重性分布/升级链/退款关联)
 export function complaintSubjectAnalysis(params) {
   return request.get('/complaints/subject-analysis', { params })
