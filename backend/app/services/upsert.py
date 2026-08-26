@@ -357,6 +357,13 @@ def _looks_like_bad_refund_no(val: str | None) -> bool:
     return bool(_REFUND_NO_BAD_RE.search(val))
 
 
+# 时间戳/日期类字符串(如 "2026-04-26 16:00:37" / "2026/4/26"),用于识别写进人名字段的污染值
+_DATETIME_LIKE_RE = re.compile(r"^\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}")
+# 人名字段不应出现的字符(核算/备注类污染)
+_ILLEGAL_NAME_CHARS = "【】÷＝=＊"
+_MAX_NAME_LEN = 24  # 仅作护栏,span人名/英文账号几乎不可能超过
+
+
 def _sanitize_name_field(
     val: Any,
     row_idx: int,
@@ -371,10 +378,10 @@ def _sanitize_name_field(
     s = _to_str(val)
     if s is None:
         return None
-    if _is_numeric_like(s):
+    if _is_numeric_like(s) or _DATETIME_LIKE_RE.match(s) or any(c in s for c in _ILLEGAL_NAME_CHARS) or len(s) > _MAX_NAME_LEN:
         result.add_error(
             row_idx,
-            f"{field_label}='{s}' 格式异常(疑似金额/数字,可能是 Excel 列映射错位),已置空请核对列映射",
+            f"{field_label}='{s}' 格式异常(疑似数字/时间戳/备注或超长,可能是 Excel 列映射错位或源数据污染),已置空请核对列映射",
             {"field": field_label, "raw_value": s},
         )
         return None

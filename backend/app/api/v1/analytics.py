@@ -169,13 +169,22 @@ def rw_dims(db: DBSession, _: CurrentUser, start: str | None = None, end: str | 
     return R(data=cached_call(key, 60, A.refund_withdrawal_dimensions, db, start, end, topn))
 
 
-@router.get("/refund-withdrawal/detail", response_model=R, summary="提现全链路看板-明细列表(支持排序/慢单筛选/分页)")
+@router.get("/refund-withdrawal/detail", response_model=R, summary="提现全链路看板-明细列表(支持排序/慢单筛选/涉诉/操作人/退款原因筛选/分页)")
 def rw_detail(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None,
               sort: str = Query("days_desc", pattern=r"^(days_(desc|asc)|amount_desc|d1_desc)$"),
               page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500),
-              slow_only: bool = False, path: str = Query("ALL", pattern=r"^(ALL|ABD|AB|A|B|D)$")):
-    key = f"rw:detail:{start}:{end}:{sort}:{page}:{page_size}:{int(slow_only)}:{path}"
-    return R(data=cached_call(key, 60, A.refund_withdrawal_detail, db, start, end, sort, page, page_size, slow_only, path))
+              slow_only: bool = False, path: str = Query("ALL", pattern=r"^(ALL|ABD|AB|A|B|D)$"),
+              comp: str = Query("all", pattern=r"^(all|any|internal|merchant|external|remark|normal)$"),
+              operator: str = Query("", max_length=50),
+              reason: str = Query("", max_length=200)):
+    key = f"rw:detail:{start}:{end}:{sort}:{page}:{page_size}:{int(slow_only)}:{path}:{comp}:{operator}:{reason}"
+    return R(data=cached_call(key, 60, A.refund_withdrawal_detail, db, start, end, sort, page, page_size, slow_only, path, comp, operator, reason))
+
+
+@router.get("/refund-withdrawal/facets", response_model=R, summary="提现全链路看板-明细筛选候选项(操作人/退款原因)")
+def rw_facets(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
+    key = f"rw:facets:{start}:{end}"
+    return R(data=cached_call(key, 120, A.refund_withdrawal_facets, db, start, end))
 
 
 @router.get("/refund-withdrawal/daily-split", response_model=R, summary="提现全链路看板-按实际出款日拆分三路(直退/钱包提现/手动退款)堆叠图")

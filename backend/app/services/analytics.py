@@ -1878,11 +1878,14 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
 
     # 2. 按 refund_no 建 用户提现 索引
     wd_by_rfn: dict[str, list] = {}
+    wd_by_sn: dict[str, list] = {}
     for w in all_wd:
         m = _RFN_RE.search(w.remark or "")
-        if not m:
-            continue
-        wd_by_rfn.setdefault(m.group(1), []).append(w)
+        if m:
+            wd_by_rfn.setdefault(m.group(1), []).append(w)
+        sn = (w.device_sn or "").strip() or ""
+        if sn:
+            wd_by_sn.setdefault(sn, []).append(w)
 
     # 3. 订单退费转入 按 (account_id, device_sn, amount) 建桶 (贪心匹配A路径的入钱包时刻)
     from collections import defaultdict as _dd
@@ -1920,12 +1923,10 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
                     continue
                 if best_wd is None or w.op_time < best_wd.op_time:
                     best_wd = w
-            # 兜底: device_sn + 金额
+            # 兜底: device_sn + 金额 (用 device_sn 索引代替全量重扫, 避免大 O 兜底拖慢看板)
             if best_wd is None and r.device_sn:
                 sn = r.device_sn.strip()
-                for w in all_wd:
-                    if (w.device_sn or "").strip() != sn:
-                        continue
+                for w in wd_by_sn.get(sn, []):
                     if abs(float(w.op_amount or 0) - amt) >= 0.01:
                         continue
                     if (w.op_time or datetime.min) < d1:
@@ -1996,8 +1997,9 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
             "account_id": account_id,
             "refund_method": m_raw,
             "refund_reason": (r.refund_reason or "").strip() or "未填写",
-            "operator": (r.operator or "").strip() or "SYS/系统",
             "auditor": (r.auditor or "").strip() or "",
+            # 退款人: 以审核人为准(用户口径), 无审核人时回退操作人
+            "operator": (r.auditor or "").strip() or (r.operator or "").strip() or "SYS/系统",
             "status": (r.status or "").strip() or "",
             "package_name": (r.package_name or "")[:40],
             "merchant_name": (r.merchant_name or "")[:40],
@@ -2240,10 +2242,159 @@ def refund_withdrawal_dimensions(db: Session, start: str | None = None, end: str
     }
 
 
+_REFUND_REMARK_COMPLAINT_MARKERS = ("涉投诉", "客诉", "投诉", "315", "争议", "催退")
+
+# 涉诉分类 → 用户风险等级 (2026-08-26 用户口径): 外部/商户号投诉=高风险, 内部投诉及备注涉诉=中风险, 普通退款=低风险
+_RISK_LEVEL_BY_COMPLAINT = {
+    "外部投诉": "高风险", "商户号投诉": "高风险",
+    "内部投诉": "中风险", "备注涉诉": "中风险",
+    "普通退款": "低风险",
+}
+
+
+def _is_meta_junk_operator(s) -> bool:
+    """识别被同步时间戳/占位符污染的 operator 字段, 供筛选候选项清洗(不影响明细行展示)。"""
+    s = (s or "").strip()
+    if not s:
+        return True
+    if s in ("系统", "SYS", "系统自动", "SYS/系统自动", "未填写", "-", "/"):
+        return True
+    if _re.match(r"^\d{4}-\d{2}-\d{2}", s):
+        return True
+    # 纯数字/符号的杂串(如 "37.7÷2=18"), 姓名不可能仅含这些
+    if _re.fullmatch(r"[\d\s÷×=+\-*/%.<>()\[\]]+", s):
+        return True
+    return False
+
+
+def _chain_alias_map(db: Session) -> dict[str, str]:
+    """PersonAlias→display_name 归一映射, 与决策概览/人员统计展示口径一致。"""
+    alias_map: dict[str, str] = {}
+    for a, dn in db.execute(
+        select(PersonAlias.alias, func.coalesce(Person.display_name, PersonAlias.alias))
+        .select_from(PersonAlias).outerjoin(Person, PersonAlias.person_id == Person.id)
+    ):
+        if a:
+            alias_map[str(a)] = str(dn)
+    return alias_map
+
+
+def _norm_chain_operator(op, alias_map: dict[str, str]) -> str:
+    if not op:
+        return ""
+    raw = str(op)
+    if raw in alias_map:
+        return _strip_qw_prefix(alias_map[raw])
+    stripped = _strip_qw_prefix(raw)
+    if stripped != raw and stripped in alias_map:
+        return _strip_qw_prefix(alias_map[stripped])
+    return stripped or raw
+
+
+def _chain_sn_complaint_map(db: Session, sns) -> dict[str, str]:
+    """按设备SN关联工单的三源投诉分类映射 {sn: 涉诉分类}, 优先级 外部投诉>商户号投诉>内部投诉。
+
+    关键词与 decision_overview 涉诉 SQL / _complaint_source_type_case 约定一致(2026-08-25 固化)。
+    无关联工单 / 关联工单无投诉分类的 SN 不返回(由调用方兜底为普通退款)。
+    """
+    sns = list({s for s in sns if s})
+    if not sns:
+        return {}
+    out: dict[str, str] = {}
+    for i in range(0, len(sns), 500):
+        chunk = sns[i:i + 500]
+        ph = ",".join(f":sn{j}" for j in range(len(chunk)))
+        rows = db.execute(text(f"""
+            SELECT s.device_sn AS sn,
+                bool_or(s.service_item ILIKE '%工信部%' OR s.service_item ILIKE '%12315%'
+                    OR s.service_item ILIKE '%公共服务平台%' OR s.service_item ILIKE '%消费者协会%'
+                    OR s.service_item ILIKE '%消协%' OR s.service_item ILIKE '%监督局%'
+                    OR s.service_item ILIKE '%市场监管%' OR s.service_item ILIKE '%市监%'
+                    OR s.service_item ILIKE '%315平台%' OR s.service_item ILIKE '%12345%'
+                    OR s.service_item ILIKE '%政务平台%') AS has_ext,
+                bool_or(s.service_item ILIKE '%微信%') AS has_merchant,
+                bool_or(s.service_item ILIKE '%商品投诉%' OR s.service_item ILIKE '%服务投诉%') AS has_int
+            FROM service_tickets s
+            WHERE s.device_sn IN ({ph})
+            GROUP BY s.device_sn
+        """), {f"sn{j}": sn for j, sn in enumerate(chunk)}).fetchall()
+        for r in rows:
+            if r.has_ext:
+                out[r.sn] = "外部投诉"
+            elif r.has_merchant:
+                out[r.sn] = "商户号投诉"
+            elif r.has_int:
+                out[r.sn] = "内部投诉"
+    return out
+
+
+def _annotate_chain_litigation(db: Session, rows):
+    """为全链路明细行计算涉诉分类 complaint_type (普通退款/内部投诉/商户号投诉/外部投诉/备注涉诉)。
+
+    - 优先按设备SN关联投诉工单判断(外部>商户号>内部);
+    - 无单关联且路径为 A/B(线上直退)时, 回退到退款记录审核备注/备注含投诉类标识 → 备注涉诉;
+    - 其余 → 普通退款。
+    """
+    comp_map = _chain_sn_complaint_map(db, [r.get("device_sn") for r in rows])
+    ab_nos = [r["refund_no"] for r in rows if r["path"] in ("A", "B")]
+    remark_map: dict[str, str] = {}
+    for i in range(0, len(ab_nos), 500):
+        chunk = ab_nos[i:i + 500]
+        for no, ar, rm in db.execute(
+            select(Refund.refund_no, Refund.audit_remark, Refund.remark).where(Refund.refund_no.in_(chunk))
+        ):
+            remark_map[str(no)] = ((ar or "") + (rm or ""))
+    for r in rows:
+        ctype = comp_map.get(r.get("device_sn"))
+        if not ctype and r["path"] in ("A", "B"):
+            txt = remark_map.get(str(r["refund_no"]), "")
+            if any(m in txt for m in _REFUND_REMARK_COMPLAINT_MARKERS):
+                ctype = "备注涉诉"
+        r["complaint_type"] = ctype or "普通退款"
+        r["risk_level"] = _RISK_LEVEL_BY_COMPLAINT.get(r["complaint_type"], "低风险")
+    return rows
+
+
+def _chain_complaint_filter(ctype: str, comp: str) -> bool:
+    if comp in (None, "", "all"):
+        return True
+    if comp == "any":
+        return ctype != "普通退款"
+    label = {
+        "internal": "内部投诉", "merchant": "商户号投诉",
+        "external": "外部投诉", "remark": "备注涉诉", "normal": "普通退款",
+    }.get(comp)
+    return label == ctype
+
+
+def refund_withdrawal_facets(db: Session, start: str | None = None, end: str | None = None) -> dict[str, list[str]]:
+    """退款明细清单的筛选候选项(操作人/退款原因), 用于前端下拉筛选"""
+    s = datetime.fromisoformat(start) if start else None
+    e = datetime.fromisoformat(end) if end else None
+    rows = _build_chain_rows(db, s, e)
+    rows = [r for r in rows if r["path"] in ("A", "B", "D") and r["days_1_4"] is not None]
+    alias_map = _chain_alias_map(db)
+    ops: set[str] = set()
+    reasons: set[str] = set()
+    for r in rows:
+        op = _norm_chain_operator(r.get("operator"), alias_map)
+        # 清洗被同步时间戳/占位符污染的 operator, 下拉只保留真实人员名
+        if op and not _is_meta_junk_operator(op):
+            ops.add(op)
+        rsn = (r.get("refund_reason") or "").strip() or ""
+        if rsn:
+            reasons.add(rsn)
+    return {
+        "operators": sorted(ops, key=str.lower),
+        "reasons": sorted(reasons, key=str.lower),
+    }
+
+
 def refund_withdrawal_detail(db: Session, start: str | None = None, end: str | None = None,
                               sort: str = "days_desc", page: int = 1, page_size: int = 50,
-                              slow_only: bool = False, path: str = "ALL") -> dict[str, Any]:
-    """明细列表: 支持分页、排序、路径筛选(ALL/ABD/AB/A/B/D)、慢单筛选。"""
+                              slow_only: bool = False, path: str = "ALL",
+                              comp: str = "all", operator: str = "", reason: str = "") -> dict[str, Any]:
+    """明细列表: 支持分页、排序、路径筛选(ALL/ABD/AB/A/B/D)、慢单筛选、涉诉/操作人/退款原因筛选。"""
     s = datetime.fromisoformat(start) if start else None
     e = datetime.fromisoformat(end) if end else None
     rows = _build_chain_rows(db, s, e)
@@ -2256,6 +2407,17 @@ def refund_withdrawal_detail(db: Session, start: str | None = None, end: str | N
     rows = [r for r in rows if r["days_1_4"] is not None]
     if slow_only:
         rows = [r for r in rows if (r["days_1_4"] or 0) > 3]
+    # 操作人归一(全量, 供筛选与展示口径一致)
+    alias_map = _chain_alias_map(db)
+    for r in rows:
+        r["operator"] = _norm_chain_operator(r.get("operator"), alias_map)
+    # 涉诉分类(须在筛选与分页前全量计算, 以保证 total 正确)
+    rows = _annotate_chain_litigation(db, rows)
+    # 筛选
+    rows = [r for r in rows
+            if _chain_complaint_filter(r["complaint_type"], comp)
+            and (not operator or (r.get("operator") or "").lower() == operator.lower())
+            and (not reason or (reason in (r.get("refund_reason") or "")))]
     # 排序
     sort = sort or "days_desc"
     key_fn_map = {
@@ -2266,34 +2428,15 @@ def refund_withdrawal_detail(db: Session, start: str | None = None, end: str | N
     }
     rows.sort(key=key_fn_map.get(sort, key_fn_map["days_desc"]), reverse=("d1" in sort))
     total = len(rows)
+    # 风险概览(基于当前筛选后的整批行, 供明细头部展示)
+    risk_summary = {
+        "high": sum(1 for r in rows if r.get("risk_level") == "高风险"),
+        "medium": sum(1 for r in rows if r.get("risk_level") == "中风险"),
+        "low": sum(1 for r in rows if r.get("risk_level") != "高风险" and r.get("risk_level") != "中风险"),
+    }
     page = max(1, page or 1); ps = max(1, min(500, page_size or 50))
     sl = slice((page - 1) * ps, page * ps)
-    # 操作人姓名归一 (PersonAlias→display_name), 与决策概览/人员统计展示口径一致
-    alias_map: dict[str, str] = {}
-    for a, dn in db.execute(
-        select(PersonAlias.alias, func.coalesce(Person.display_name, PersonAlias.alias))
-        .select_from(PersonAlias).outerjoin(Person, PersonAlias.person_id == Person.id)
-    ):
-        if a:
-            alias_map[str(a)] = str(dn)
-
-    def _norm(op):
-        if not op:
-            return op
-        raw = str(op)
-        if raw in alias_map:
-            return _strip_qw_prefix(alias_map[raw])
-        stripped = _strip_qw_prefix(raw)
-        if stripped != raw and stripped in alias_map:
-            return _strip_qw_prefix(alias_map[stripped])
-        return stripped or raw
-
-    page_rows = []
-    for r in rows[sl]:
-        if r.get("operator"):
-            r["operator"] = _norm(r["operator"])
-        page_rows.append(r)
-    return {"total": total, "page": page, "page_size": ps, "list": page_rows}
+    return {"total": total, "page": page, "page_size": ps, "risk_summary": risk_summary, "list": rows[sl]}
 
 
 def refund_withdrawal_daily_split(db: Session, start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
