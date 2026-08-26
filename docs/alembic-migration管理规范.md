@@ -1,27 +1,42 @@
 # Alembic Migration 管理规范
 
-> 版本：v1.0 · 日期：2026-08-17
+> 版本：v1.1 · 日期：2026-08-26
 > 关联代码：[backend/alembic/](../backend/alembic/)
-> 当前 head：`o1b2c3d4e5f6`（单一 head）
+> 当前 head：`73a7922ec598`（单一 head）
 
 ## 一、版本链现状
 
 ```
 d9b7f1b89c1d (init)
-  └── ... 31 个版本 ...
-      └── z9y8x7w6v5u4 (add_scrm_models)
+  └── ... 34 个版本 ...
+      └── z9y8x7w6v5u4 (add_scrm_models)                           [branchpoint]
           ├── a1b2c3d4e5f7 → ... → aa11bb22cc33 (expand varchars)  [分支A]
-          └── a2c4e6f8b0d2 (add policies + dept_syncs)              [分支B]
+          └── a2c4e6f8b0d2 (add policies + dept_syncs)             [分支B]
                                    ↓
               m0a1b2c3d4e5 (merge heads: A + B)                    [merge]
                                    ↓
-              n1b2c3d4e5f6 (add groups + specialties tables)       [当前 head]
+              n1b2c3d4e5f6 → o1b2c3d4e5f6 → p1b2c3d4e5f6 → a0b1c2d3e4f5
+              → b0c1d2e3f4a5 → c0d1e2f3a4b5 → w1x2y3z4a5b6 → r6f7a8b9c0d1
+              → 64a584531400 → x2b3c4d5e6f7 → x3c4d5e6f7a8 → x4a5b6c7d8e9f
+              → n9a8b7c6d5e4f → d5f6a7b8c9d0 → e1f2a3b4c5d6 → f0e1d2c3b4a5
+              → f1e2d3c4b5a6 → f2e3d4c5b6a7 → g1a2b3c4d5e6 → h1i2j3k4l5m6
+              → m7n8o9p0q1r2
+                                   ↓
+              73a7922ec598 (add_system_events_and_source_groups)  [当前 head]
 ```
 
-- 总版本数：35 个 migration
-- 当前 head：**1 个**（`o1b2c3d4e5f6`）
-- 曾有 2 个 head（`a2c4e6f8b0d2` + `aa11bb22cc33`），已通过 merge migration 合并
-- `o1b2c3d4e5f6`：补齐 persons 表的 `current_group_id` 和 `primary_specialty` 两列（n1b2c3d4e5f6 遗漏的 ALTER TABLE）
+- 总版本数：57 个 migration
+- 当前 head：**1 个**（`73a7922ec598`，`alembic heads` 实测验证）
+- 曾有 2 个 head（`a2c4e6f8b0d2` + `aa11bb22cc33`），已通过 merge migration `m0a1b2c3d4e5` 合并
+- 关键里程碑：
+  - `n1b2c3d4e5f6` + `o1b2c3d4e5f6`：Group/Specialty 双体系 + persons 冗余列
+  - `p1b2c3d4e5f6`：users.token_version（JWT 吊销）
+  - `a0b1c2d3e4f5`：Phase B（排班/发票/知识库/预警）
+  - `b0c1d2e3f4a5`：Phase C（政策措施/投诉审计/跨部门协作/数据质量）
+  - `c0d1e2f3a4b5`：微信注册/账号表 + users 微信字段
+  - `y4d5e6f7a8b0`：merchant_refunds 主键 wx_refund_no → 自增 id
+  - `y4d5e6f7a8b0` 之后新增 `refund_wide` 宽表、`shanmao_refunds`、`manual_refunds`、`ingest_mode_configs`、`doc_sync_configs`、指标预警、`system_events`/`source_groups` 等
+- **注意**：若遇到"多个 head"提示，执行 `alembic heads` 排查后，用 merge 迁移合并。
 
 ## 二、常用命令
 

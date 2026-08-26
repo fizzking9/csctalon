@@ -187,7 +187,7 @@
               <span v-else style="color:#c0c4cc">-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="role" label="角色" width="62" column-key="role" :filtered-value="roleFilter" :filters="[{text:'客服',value:'agent'},{text:'主管',value:'supervisor'},{text:'管理员',value:'admin'}]">
+          <el-table-column prop="role" label="角色" width="90" column-key="role" :filtered-value="roleFilter" :filters="[{text:'客服',value:'agent'},{text:'专员',value:'specialist'},{text:'专项组长',value:'specialty_lead'},{text:'主管',value:'supervisor'},{text:'管理员',value:'admin'}]">
             <template #default="{ row }">
               <template v-if="row._nodeType === 'person'">{{ roleLabels[row.role] || row.role }}</template>
               <span v-else style="color:#c0c4cc">-</span>
@@ -251,6 +251,8 @@
             <el-form-item label="角色">
               <el-select v-model="editForm.role" style="width:100%">
                 <el-option label="客服" value="agent" />
+                <el-option label="专员" value="specialist" />
+                <el-option label="专项组长" value="specialty_lead" />
                 <el-option label="主管" value="supervisor" />
                 <el-option label="管理员" value="admin" />
               </el-select>
@@ -374,7 +376,7 @@
         </el-form-item>
         <el-form-item label="角色">
           <el-select v-model="mergeNewForm.role" style="width: 100%">
-            <el-option label="客服" value="agent" /><el-option label="主管" value="supervisor" /><el-option label="管理员" value="admin" />
+            <el-option label="客服" value="agent" /><el-option label="专员" value="specialist" /><el-option label="专项组长" value="specialty_lead" /><el-option label="主管" value="supervisor" /><el-option label="管理员" value="admin" />
           </el-select>
         </el-form-item>
         <el-form-item label="部门">
@@ -493,7 +495,7 @@
         <el-form-item label="角色">
           <el-checkbox v-model="batchApply.role" style="width:90px">修改</el-checkbox>
           <el-select v-model="batchForm.role" style="width: calc(100% - 100px)">
-            <el-option label="客服" value="agent" /><el-option label="主管" value="supervisor" /><el-option label="管理员" value="admin" />
+            <el-option label="客服" value="agent" /><el-option label="专员" value="specialist" /><el-option label="专项组长" value="specialty_lead" /><el-option label="主管" value="supervisor" /><el-option label="管理员" value="admin" />
           </el-select>
         </el-form-item>
         <el-form-item label="在职状态">
@@ -730,7 +732,7 @@ const importMappingRows = ref([])
 const importDiff = ref({ summary: { total: 0, new: 0, update: 0, skip: 0, conflict: 0 }, rows: [] })
 const importResult = ref({ success: false, total_rows: 0, inserted_rows: 0, updated_rows: 0, failed_rows: 0, error: '' })
 
-const roleLabels = { admin: '管理员', supervisor: '主管', agent: '客服' }
+const roleLabels = { admin: '管理员', supervisor: '主管', specialty_lead: '专项组长', specialist: '专员', agent: '客服' }
 const sourceLabels = { manual: '手工', xlsx_import: '快照导入' }
 const employmentStatusLabels = { 
   active: '待入职', probation: '试用期', regular: '正式', 
