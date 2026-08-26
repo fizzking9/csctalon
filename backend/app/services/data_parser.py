@@ -667,6 +667,112 @@ def load_dataframe(path: Path | str, sheet_name: str | None = None, encoding: st
     return df
 
 
+# ── CSV 修复与校验(修复优先 + 后校验, 用于 BMS 裁剪路径) ──
+_RE_REFUND_NO = re.compile(r'^(RF|RB|RE)\d{10,}')
+
+
+def _refund_no_validate(fields: list[str]) -> bool:
+    """校验修复后的行是否包含有效的退费单号(首字段)"""
+    return bool(fields and _RE_REFUND_NO.match(str(fields[0]).strip()))
+
+
+def repair_csv_blocks(
+    raw_lines: list[str],
+    header_len: int,
+    *,
+    validate_fn=_refund_no_validate,
+    bms_clean: bool = True,
+    log_prefix: str = "",
+    logger=None,
+) -> tuple[list[list[str]], int]:
+    """修复并校验 CSV 行块: 贪婪拼接截断行 + 后校验
+
+    处理流程:
+    1. 对每行用 split_fields 解析(支持引号/转义引号)
+    2. 字段不足时贪婪拼接后续行直到字段数 >= header_len
+    3. 拼接后仍不足则补空串
+    4. 字段多于表头则合并多余到末列
+    5. 对修复后的行执行 validate_fn 校验
+    6. 校验不通过的行计入 skipped
+
+    Args:
+        raw_lines: 数据行列表(不含表头)
+        header_len: 期望字段数
+        validate_fn: 修复后的行校验函数, 接收 fields 返回 bool
+        bms_clean: 是否执行 BMS 特有清洗(去尾部 \\t + 去末尾空字段)
+        log_prefix: 日志前缀(如 "[refund]")
+        logger: 日志记录器
+
+    Returns:
+        (cleaned_rows, skipped_count)
+    """
+    cleaned: list[list[str]] = []
+    skipped = 0
+    i = 0
+    n = len(raw_lines)
+
+    while i < n:
+        line = raw_lines[i].strip()
+        if not line:
+            i += 1
+            continue
+
+        # 闭合引号修复
+        line = fix_unclosed_quote(line)
+        fields = split_fields(line)
+
+        # 尝试修复(备注引号未闭合导致字段被吞)
+        if len(fields) < header_len:
+            fixed = fix_unclosed_quote_in_long_field(line)
+            if fixed != line:
+                ff = split_fields(fixed)
+                if len(ff) > len(fields):
+                    line = fixed
+                    fields = ff
+
+        # 贪婪拼接后续行(直到字段数 >= header_len)
+        joined = line
+        j = i + 1
+        while len(fields) < header_len and j < n:
+            nxt = raw_lines[j].strip()
+            j += 1
+            if not nxt:
+                continue
+            joined = joined + ' ' + nxt
+            joined = fix_unclosed_quote(joined)
+            fields = split_fields(joined)
+
+        # BMS 特有清洗: 去尾部 \t + 去末尾多余空字段
+        if bms_clean:
+            fields = [f.rstrip("\t") for f in fields]
+            while len(fields) > header_len and fields[-1] == "":
+                fields.pop()
+
+        # 多于表头: 合并多余到末列
+        if len(fields) > header_len:
+            extra = fields[header_len - 1:]
+            fields = fields[:header_len - 1] + [','.join(extra)]
+
+        # 补齐
+        if len(fields) < header_len:
+            fields = fields + [""] * (header_len - len(fields))
+
+        # 校验
+        if validate_fn(fields):
+            cleaned.append(fields)
+        else:
+            skipped += 1
+            if logger:
+                logger.warning(
+                    f"{log_prefix} 行{i} 校验失败(已跳过): "
+                    f"fields[0]={str(fields[0])[:60] if fields else 'None'}"
+                )
+
+        i = j  # 跳到拼接的最后一行之后
+
+    return cleaned, skipped
+
+
 # 上传文件扩展名白名单(P0-3: 拒绝 html/svg/exe 等, 防存储型 XSS 与可执行文件)
 ALLOWED_UPLOAD_EXT = {".csv", ".xlsx", ".xls"}
 # magic bytes 校验: 防止改扩展名伪装(xlsx=ZIP, xls=OLE2 复合文档; csv 为文本无固定头)
