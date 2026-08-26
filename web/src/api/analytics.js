@@ -51,6 +51,7 @@ export const refundWithdrawal = {
   dailySplit: (params) => request.get('/analytics/refund-withdrawal/daily-split', { params }),
   dimensions: (params) => request.get('/analytics/refund-withdrawal/dimensions', { params }),
   detail: (params) => request.get('/analytics/refund-withdrawal/detail', { params }),
+  facets: (params) => request.get('/analytics/refund-withdrawal/facets', { params }),
   sleeping: (params) => request.get('/analytics/refund-withdrawal/sleeping', { params }),
 }
 

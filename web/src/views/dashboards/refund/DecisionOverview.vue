@@ -257,15 +257,64 @@
           <span class="block-title">六、退款明细</span>
           <span class="block-hint">共 {{ detailTotal }} 条 · 点击 SN 可查看设备审计 · 全量数据可点右上角「导出」下载 Excel</span>
         </div>
+        <!-- 风险概览 -->
+        <div class="risk-summary mb-12" v-if="detailLoaded">
+          涉诉风险：
+          <span class="risk-high">{{ detailRisk.high }} 笔高风险</span>
+          <span class="risk-med">{{ detailRisk.medium }} 笔中风险</span>
+          <span class="risk-low">{{ detailRisk.low }} 笔低风险</span>
+        </div>
+        <!-- 明细筛选 -->
+        <div class="detail-filters mb-12">
+          <el-select v-model="filter.comp" placeholder="涉诉" size="small" clearable style="width: 120px">
+            <el-option label="涉诉" value="any" />
+            <el-option label="非涉诉" value="normal" />
+            <el-option label="内部投诉" value="internal" />
+            <el-option label="商户号投诉" value="merchant" />
+            <el-option label="外部投诉" value="external" />
+            <el-option label="备注涉诉" value="remark" />
+          </el-select>
+          <el-select v-model="filter.path" placeholder="退款路径" size="small" clearable style="width: 140px">
+            <el-option label="线上直退" value="B" />
+            <el-option label="钱包提现" value="A" />
+            <el-option label="手动退款" value="D" />
+            <el-option label="线上直退+钱包提现" value="AB" />
+          </el-select>
+          <el-select v-model="filter.operator" placeholder="退款人" size="small" clearable filterable style="width: 150px">
+            <el-option v-for="o in facetOperators" :key="o" :label="o" :value="o" />
+          </el-select>
+          <el-select v-model="filter.reason" placeholder="退款原因" size="small" clearable filterable style="min-width: 180px">
+            <el-option v-for="rs in facetReasons" :key="rs" :label="rs" :value="rs" />
+          </el-select>
+          <el-button size="small" :icon="RefreshLeft" @click="resetFilters">重置</el-button>
+        </div>
         <el-table :data="detailList" border stripe size="small" max-height="420">
           <el-table-column prop="refund_no" label="退款单号" width="150" fixed show-overflow-tooltip />
-          <el-table-column prop="device_sn" label="设备SN" width="140" fixed>
+          <el-table-column prop="device_sn" label="设备SN" width="130" fixed>
             <template #default="{ row }">
               <span class="sn-chip" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</span>
             </template>
           </el-table-column>
-          <el-table-column prop="refund_reason" label="退款原因" min-width="130" show-overflow-tooltip />
-          <el-table-column prop="operator" label="操作人" width="110" show-overflow-tooltip />
+          <el-table-column label="退款路径" width="90" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" :type="pathTagType(row.path)">{{ pathLabel(row.path) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="涉诉" width="96" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.complaint_type && row.complaint_type !== '普通退款'" size="small" :type="compTagType(row.complaint_type)">{{ row.complaint_type }}</el-tag>
+              <span v-else class="comp-normal">普通退款</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="风险" width="80" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" :type="riskTagType(row.risk_level)">{{ row.risk_level || '低风险' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="refund_reason" label="退款原因" min-width="140" show-overflow-tooltip />
+          <el-table-column label="退款人" width="110" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.operator || '-' }}</template>
+          </el-table-column>
           <el-table-column prop="refund_amount" label="金额(¥)" width="110" align="right" sortable>
             <template #default="{ row }">{{ formatMoney(row.refund_amount) }}</template>
           </el-table-column>
@@ -291,6 +340,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
+import { RefreshLeft } from '@element-plus/icons-vue'
 import BaseChart from '@/components/BaseChart.vue'
 import { refundDeep, refundWithdrawal } from '@/api/analytics'
 import { useAudit } from '@/composables/useAudit'
@@ -312,6 +362,25 @@ const detailList = ref([])
 const detailPage = ref(1)
 const detailPageSize = ref(50)
 const detailTotal = ref(0)
+const detailLoaded = ref(false)
+const detailRisk = ref({ high: 0, medium: 0, low: 0 })
+// 明细筛选 & 筛选候选项
+const filter = ref({ comp: '', path: '', operator: '', reason: '' })
+const facetOperators = ref([])
+const facetReasons = ref([])
+
+const PATH_LABEL = { A: '钱包提现', B: '线上直退', D: '手动退款' }
+function pathLabel(p) { return PATH_LABEL[p] || p || '-' }
+function pathTagType(p) { return p === 'B' ? 'success' : p === 'A' ? 'warning' : p === 'D' ? 'danger' : 'info' }
+function compTagType(c) { return c === '外部投诉' ? 'danger' : c === '商户号投诉' ? 'warning' : c === '内部投诉' ? 'primary' : c === '备注涉诉' ? 'info' : '' }
+function riskTagType(r) { return r === '高风险' ? 'danger' : r === '中风险' ? 'warning' : 'success' }
+
+function resetFilters() {
+  filter.value = { comp: '', path: '', operator: '', reason: '' }
+  detailPage.value = 1
+  loadDetail()
+}
+watch(filter, () => { detailPage.value = 1; loadDetail() }, { deep: true })
 
 const summary = computed(() => data.value?.summary || {})
 const routes = computed(() => data.value?.routes_daily || { dates: [], series: {}, table: [] })
@@ -514,12 +583,32 @@ async function loadDetail() {
   params.sort = 'd1_desc'
   params.page = detailPage.value
   params.page_size = detailPageSize.value
+  if (filter.value.comp) params.comp = filter.value.comp
+  if (filter.value.path) params.path = filter.value.path
+  if (filter.value.operator) params.operator = filter.value.operator
+  if (filter.value.reason) params.reason = filter.value.reason
   try {
     const res = await refundWithdrawal.detail(params)
     detailTotal.value = res?.data?.total || 0
     detailList.value = res?.data?.list || []
+    detailRisk.value = res?.data?.risk_summary || { high: 0, medium: 0, low: 0 }
+    detailLoaded.value = true
   } catch (e) {
     detailList.value = []
+    detailLoaded.value = false
+  }
+}
+
+async function loadFacets() {
+  const params = {}
+  if (props.start) params.start = props.start
+  if (props.end) params.end = props.end
+  try {
+    const res = await refundWithdrawal.facets(params)
+    facetOperators.value = res?.data?.operators || []
+    facetReasons.value = res?.data?.reasons || []
+  } catch (e) {
+    /* 筛选候选项加载失败不阻塞明细列表 */
   }
 }
 
@@ -534,6 +623,7 @@ async function load() {
     data.value = ovRes?.data || null
     detailPage.value = 1
     loadDetail()
+    loadFacets()
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '加载决策概览失败'
   } finally {
@@ -572,5 +662,12 @@ onMounted(load)
 .water-summary b { font-size: 14px; margin-left: 4px; }
 .sn-chip { color: #2563eb; cursor: pointer; font-weight: 600; text-decoration: underline; text-decoration-style: dotted; }
 .sn-chip:hover { color: #1d4ed8; }
+.detail-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mb-12 { margin-bottom: 12px; }
+.risk-summary { display: flex; align-items: center; gap: 16px; font-size: 12px; color: #6b7280; }
+.risk-summary .risk-high { color: #dc2626; font-weight: 600; }
+.risk-summary .risk-med { color: #d97706; font-weight: 600; }
+.risk-summary .risk-low { color: #16a34a; }
+.comp-normal { color: #9ca3af; font-size: 12px; }
 .pag-wrap { display: flex; justify-content: flex-end; margin-top: 12px; }
 </style>
