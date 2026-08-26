@@ -2630,10 +2630,8 @@ class BmsFetcher:
                 #   (2) 部分行内部含换行/\t 导致字段严重错位(如 18→10 字段)
                 #   (3) pandas on_bad_lines="skip" 在"字段数+1"场景下会硬塞,
                 #       导致"实退金额"列被塞入【退微信】等文本→数值溢出
-                # 修复: 逐行用 csv.reader 解析,
-                #   ① 去除每个字段尾部 \t
-                #   ② 去除末尾多出的空字段(BMS 末尾多一个 \t 的特性)
-                #   ③ 严格校验字段数==表头字段数,不匹配的直接跳过(100% 是截断/错位)
+                # 修复: 用 data_parser 的修复+校验方案 (2026-08-26)
+                #   贪婪拼接截断行(含跨行换行), 合并多余字段, 后校验退费单号
                 import csv as _csv
                 import io as _io
                 raw_text = Path(dest_path).read_text(encoding="utf-8-sig", errors="replace")
@@ -2646,37 +2644,26 @@ class BmsFetcher:
                 header_fields = [h.rstrip("\t") for h in header_fields]
                 expected_n = len(header_fields)
 
-                clean_rows = [header_fields]
-                skipped = 0
-                for line in raw_lines[1:]:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        fields = next(_csv.reader(_io.StringIO(line)))
-                    except (StopIteration, _csv.Error):
-                        skipped += 1
-                        continue
-                    # 去除每个字段尾部 \t
-                    fields = [f.rstrip("\t") for f in fields]
-                    # 去除末尾多出的空字段(BMS 每行末尾多一个 \t → 多一个空字段)
-                    while len(fields) > expected_n and fields[-1] == "":
-                        fields.pop()
-                    # ★ 严格校验: 字段数必须完全匹配表头,否则跳过(100% 是截断/错位)
-                    if len(fields) != expected_n:
-                        skipped += 1
-                        continue
-                    clean_rows.append(fields)
+                # 修复+校验: 贪婪拼接截断行, 多于字段合并到末列, 后校验退费单号
+                from app.services.data_parser import repair_csv_blocks
+                clean_rows, skipped = repair_csv_blocks(
+                    raw_lines=raw_lines[1:],
+                    header_len=expected_n,
+                    bms_clean=True,
+                    log_prefix=f"[{data_type}]",
+                    logger=logger,
+                )
 
                 # 重新拼成 CSV 文本交给 pandas
                 buf = _io.StringIO()
                 w = _csv.writer(buf)
+                w.writerow(header_fields)
                 for r in clean_rows:
                     w.writerow(r)
                 df = pd.read_csv(_io.StringIO(buf.getvalue()), dtype=str)
                 if skipped > 0:
                     logger.info(
-                        f"[{data_type}] CSV 严格校验: 跳过 {skipped} 行字段数不匹配的截断行"
+                        f"[{data_type}] 修复+校验: 跳过 {skipped} 行校验失败的截断行"
                         f"(期望 {expected_n} 字段), 保留 {len(df)} 行"
                     )
 
