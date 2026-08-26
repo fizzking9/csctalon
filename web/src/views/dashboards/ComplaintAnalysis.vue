@@ -350,9 +350,16 @@
           </el-col>
         </el-row>
 
-        <!-- 被投诉主体趋势(按日堆叠柱, 商户号内细分到具体商户号) -->
+        <!-- 被投诉主体趋势(堆叠面积, 商户号内细分到具体商户号; 支持按日/周/月) -->
         <div class="chart-card mb-16">
-          <div class="chart-title">被投诉主体趋势（按日 · 堆叠）<span class="dim-text"> · 商户号内细分, 云客猫/大秦WiFi管家等按商户号分开</span></div>
+          <div class="flex-between">
+            <div class="chart-title">被投诉主体趋势（堆叠面积）<span class="dim-text"> · 商户号内细分, 云客猫/大秦WiFi管家等按商户号分开</span></div>
+            <el-radio-group v-model="merchantEntityTrendGrain" size="small">
+              <el-radio-button label="day">按日</el-radio-button>
+              <el-radio-button label="week">按周</el-radio-button>
+              <el-radio-button label="month">按月</el-radio-button>
+            </el-radio-group>
+          </div>
           <BaseChart v-if="merchantEntityTrendOption" :option="merchantEntityTrendOption" height="280px" />
           <el-empty v-else description="暂无趋势数据" :image-size="40" />
         </div>
@@ -729,18 +736,32 @@
           </el-col>
         </el-row>
 
-        <!-- 主体趋势 + Top5主体趋势 -->
+        <!-- 主体趋势 + Top5主体趋势 (支持按日/周/月汇聚) -->
         <el-row :gutter="16" class="mb-16">
           <el-col :xs="24" :md="12">
             <div class="chart-card">
-              <div class="chart-title">主体投诉趋势（按日）</div>
+              <div class="flex-between">
+                <div class="chart-title">主体投诉趋势<span class="dim-text"> · 商户号+外部投诉汇聚</span></div>
+                <el-radio-group v-model="subjectTrendGrain" size="small">
+                  <el-radio-button label="day">按日</el-radio-button>
+                  <el-radio-button label="week">按周</el-radio-button>
+                  <el-radio-button label="month">按月</el-radio-button>
+                </el-radio-group>
+              </div>
               <BaseChart v-if="subjectTrendOption" :option="subjectTrendOption" height="250px" />
               <el-empty v-else description="暂无趋势数据" :image-size="40" />
             </div>
           </el-col>
           <el-col :xs="24" :md="12">
             <div class="chart-card">
-              <div class="chart-title">Top5 被投诉主体趋势（按日）</div>
+              <div class="flex-between">
+                <div class="chart-title">Top5 被投诉主体趋势<span class="dim-text"> · 汇聚后按主体总量排序</span></div>
+                <el-radio-group v-model="topSubjectTrendGrain" size="small">
+                  <el-radio-button label="day">按日</el-radio-button>
+                  <el-radio-button label="week">按周</el-radio-button>
+                  <el-radio-button label="month">按月</el-radio-button>
+                </el-radio-group>
+              </div>
               <BaseChart v-if="topSubjectTrendOption" :option="topSubjectTrendOption" height="250px" />
               <el-empty v-else description="暂无趋势数据" :image-size="40" />
             </div>
@@ -819,6 +840,8 @@ import { ref, computed, reactive, onMounted } from 'vue'
 import { Search, Refresh, Download } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
+import isoWeek from 'dayjs/plugin/isoWeek'
+dayjs.extend(isoWeek)
 import BaseChart from '@/components/BaseChart.vue'
 import { complaintAnalysis, complaintDetail, complaintSupplementary, complaintBacklog, complaintBacklogExport, complaintSubjectAnalysis, createAudit } from '@/api/complaint'
 import { useAudit } from '@/composables/useAudit'
@@ -833,6 +856,10 @@ const activeTab = ref('overview')
 const rangeMode = ref('30')
 const customRange = ref([])
 const data = ref(null)
+// 趋势图粒度(按日/周/月): 周=ISO自然周, 月=自然月; 前端对后端按日数据做汇聚
+const merchantEntityTrendGrain = ref('day')
+const subjectTrendGrain = ref('day')
+const topSubjectTrendGrain = ref('day')
 const externalDetail = ref([])
 const merchantDetail = ref([])
 const effSource = ref('internal')
@@ -1024,53 +1051,65 @@ const escalationChainOption = computed(() => {
   }
 })
 
-// 主体投诉趋势(商户号+外部堆叠)
+// 主体投诉趋势(商户号+外部 堆叠面积; 支持按日/周/月汇聚)
 const subjectTrendOption = computed(() => {
   const t = subj.value.subject_trend || []
   if (!t.length) return null
-  const x = t.map(r => r.day)
+  const srcs = ['商户号投诉', '外部投诉']
+  const bySource = { '商户号投诉': {}, '外部投诉': {} }
+  t.forEach(r => {
+    srcs.forEach(s => { if (r[s]) bySource[s][r.day] = (bySource[s][r.day] || 0) + r[s] })
+  })
+  const agg = aggregateMultiSeries(bySource, subjectTrendGrain.value)
   return {
     tooltip: { trigger: 'axis' },
     legend: { bottom: 0, left: 'center', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 11 } },
     grid: { left: 48, right: 24, bottom: 44, top: 16 },
-    xAxis: { type: 'category', data: x, axisLabel: { fontSize: 10, rotate: 45 } },
+    xAxis: { type: 'category', data: agg.buckets.map(b => b.label), axisLabel: { fontSize: 10, rotate: agg.buckets.length > 12 ? 30 : 0 } },
     yAxis: { type: 'value', name: '投诉数' },
     series: [
       { name: '商户号投诉', type: 'line', stack: 'total', smooth: true,
         areaStyle: { opacity: 0.6 },
-        data: t.map(r => r['商户号投诉'] || 0), itemStyle: { color: '#7c3aed' }, lineStyle: { width: 2 }, symbol: 'circle', symbolSize: 4 },
+        data: agg.byName['商户号投诉'].values, itemStyle: { color: '#7c3aed' }, lineStyle: { width: 2 }, symbol: 'circle', symbolSize: 4 },
       { name: '外部投诉', type: 'line', stack: 'total', smooth: true,
         areaStyle: { opacity: 0.6 },
-        data: t.map(r => r['外部投诉'] || 0), itemStyle: { color: '#dc2626' }, lineStyle: { width: 2 }, symbol: 'circle', symbolSize: 4 },
+        data: agg.byName['外部投诉'].values, itemStyle: { color: '#dc2626' }, lineStyle: { width: 2 }, symbol: 'circle', symbolSize: 4 },
     ],
   }
 })
 
-// Top5 被投诉主体趋势(折线)
+// Top5 被投诉主体趋势(堆叠面积, 支持按日/周/月汇聚; Top5按汇聚总量重新排序)
 const topSubjectColors = ['#dc2626', '#ea580c', '#ca8a04', '#0891b2', '#7c3aed']
 const topSubjectTrendOption = computed(() => {
   const t = subj.value.top_subject_trend || []
   if (!t.length) return null
-  const days = new Set()
-  t.forEach(s => (s.trend || []).forEach(p => days.add(p.day)))
-  const x = [...days].sort()
+  // 各主体 {day: count}
+  const bySubject = {}
+  t.forEach(s => {
+    const m = {}
+    ;(s.trend || []).forEach(p => { m[p.day] = (m[p.day] || 0) + p.count })
+    bySubject[s.name] = m
+  })
+  const agg = aggregateMultiSeries(bySubject, topSubjectTrendGrain.value)
+  // Top5: 按当前粒度下的汇聚总量降序取前5
+  const ranked = agg.names
+    .map(n => ({ name: n, total: agg.byName[n].values.reduce((s, v) => s + v, 0) }))
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 5)
   return {
     tooltip: { trigger: 'axis' },
     legend: { bottom: 0, left: 'center', type: 'scroll', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 10 } },
     grid: { left: 48, right: 24, bottom: 44, top: 16 },
-    xAxis: { type: 'category', data: x, axisLabel: { fontSize: 10, rotate: 45 } },
+    xAxis: { type: 'category', data: agg.buckets.map(b => b.label), axisLabel: { fontSize: 10, rotate: agg.buckets.length > 12 ? 30 : 0 } },
     yAxis: { type: 'value' },
-    series: t.map((s, i) => {
-      const m = {}
-      ;(s.trend || []).forEach(p => { m[p.day] = p.count })
-      return {
-        name: s.name, type: 'line', smooth: true,
-        data: x.map(d => m[d] || 0),
-        itemStyle: { color: topSubjectColors[i % topSubjectColors.length] },
-        lineStyle: { color: topSubjectColors[i % topSubjectColors.length], width: 2 },
-        symbolSize: 4,
-      }
-    }),
+    series: ranked.map((s, i) => ({
+      name: s.name, type: 'line', stack: 'total', smooth: true,
+      data: agg.byName[s.name].values,
+      itemStyle: { color: topSubjectColors[i % topSubjectColors.length] },
+      lineStyle: { color: topSubjectColors[i % topSubjectColors.length], width: 2 },
+      areaStyle: { opacity: 0.55 },
+      symbolSize: 4,
+    })),
   }
 })
 
@@ -1305,23 +1344,31 @@ const merchantEntityOption = computed(() => {
   }
 })
 
-// ── 商户号被投诉主体趋势(按日, 不同主体堆叠柱; 商户号内细分) ──
+// ── 商户号被投诉主体趋势(堆叠面积, 商户号内细分; 支持按日/周/月汇聚) ──
 const merchantEntityColors = ['#7c3aed', '#ea580c', '#0891b2', '#ca8a04', '#dc2626', '#2563eb', '#16a34a', '#db2777', '#4f46e5']
 const merchantEntityTrendOption = computed(() => {
   const t = s.value.merchant_entity_trend || []
   if (!t.length) return null
   const entities = Object.keys(t[0]).filter(k => k !== 'day')
+  const byEntity = {}
+  entities.forEach(e => { byEntity[e] = {} })
+  t.forEach(r => {
+    entities.forEach(e => { if (r[e]) byEntity[e][r.day] = (byEntity[e][r.day] || 0) + r[e] })
+  })
+  const agg = aggregateMultiSeries(byEntity, merchantEntityTrendGrain.value)
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: { bottom: 0, left: 'center', type: 'scroll', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 10 } },
     grid: { left: 48, right: 24, bottom: 44, top: 16 },
-    xAxis: { type: 'category', data: t.map(r => r.day), axisLabel: { fontSize: 10, rotate: 45 } },
+    xAxis: { type: 'category', data: agg.buckets.map(b => b.label), axisLabel: { fontSize: 10, rotate: agg.buckets.length > 12 ? 30 : 0 } },
     yAxis: { type: 'value', name: '投诉数' },
     series: entities.map((e, i) => ({
-      name: e, type: 'bar', stack: 'total',
-      data: t.map(r => r[e] || 0),
+      name: e, type: 'line', stack: 'total', smooth: true,
+      data: agg.byName[e].values,
       itemStyle: { color: merchantEntityColors[i % merchantEntityColors.length] },
-      barMaxWidth: 18,
+      lineStyle: { color: merchantEntityColors[i % merchantEntityColors.length], width: 2 },
+      areaStyle: { opacity: 0.55 },
+      symbolSize: 4,
     })),
   }
 })
@@ -1388,6 +1435,66 @@ function formatTime(t) {
   if (!t) return '—'
   const d = dayjs(t)
   return d.isValid() ? d.format('MM-DD HH:mm') : '—'
+}
+
+// ── 趋势粒度汇聚工具: 把按日序列(day→count)按周/月聚合成带标签的序列 ──
+function aggregateSeries(dayMap, grain) {
+  if (grain === 'day') {
+    const sorted = Object.keys(dayMap).sort()
+    return {
+      labels: sorted.map(d => d.slice(5)),
+      keys: sorted,
+      values: sorted.map(d => dayMap[d]),
+    }
+  }
+  const groups = new Map()
+  Object.entries(dayMap).forEach(([d, v]) => {
+    const dt = dayjs(d)
+    if (!dt.isValid()) return
+    let key, label
+    if (grain === 'week') {
+      const ws = dt.startOf('isoWeek')
+      const we = ws.add(6, 'day')
+      key = ws.format('YYYY-MM-DD')
+      label = `${ws.format('MM-DD')}~${we.format('MM-DD')}`
+    } else {
+      key = dt.format('YYYY-MM')
+      label = dt.format('YYYY-MM')
+    }
+    const g = groups.get(key) || { label, value: 0 }
+    g.value += v
+    groups.set(key, g)
+  })
+  const sorted = [...groups.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+  return {
+    labels: sorted.map(([, g]) => g.label),
+    keys: sorted.map(([k]) => k),
+    values: sorted.map(([, g]) => g.value),
+  }
+}
+// 多序列汇聚: series 形如 { name: {day: count} }, 返回 { names, buckets, byName(values 对齐 buckets) }
+function aggregateMultiSeries(series, grain) {
+  const names = Object.keys(series)
+  if (!names.length) return { names: [], buckets: [], byName: {} }
+  const byName = {}
+  names.forEach(n => { byName[n] = aggregateSeries(series[n], grain) })
+  // 统一 key 集合(并集, 升序)
+  const keys = new Set()
+  names.forEach(n => byName[n].keys.forEach(k => keys.add(k)))
+  const sortedKeys = [...keys].sort()
+  // key → label 映射(取任一存在的 label)
+  const labelOf = {}
+  names.forEach(n => {
+    byName[n].keys.forEach((k, i) => { if (!labelOf[k]) labelOf[k] = byName[n].labels[i] })
+  })
+  const buckets = sortedKeys.map(k => ({ key: k, label: labelOf[k] || k }))
+  // 每个序列对齐到统一 buckets(缺失补0)
+  names.forEach(n => {
+    const m = {}
+    byName[n].keys.forEach((k, i) => { m[k] = byName[n].values[i] })
+    byName[n].values = buckets.map(b => m[b.key] || 0)
+  })
+  return { names, buckets, byName }
 }
 
 // ── 加载数据 ──
