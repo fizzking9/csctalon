@@ -20,14 +20,14 @@
 │  └─────┬────┘ └─────┬────┘ └──────────┘ └──────────┘ └──────────┘ │
 │        │            │                                                 │
 │  ┌─────┴────┐ ┌─────┴────────────────────────────────────────────┐  │
-│  │ Playwright│ │ SQLAlchemy ORM (56张表) + Alembic (34个migration) │  │
+│  │ Playwright│ │ SQLAlchemy ORM (86张表) + Alembic (57个migration) │  │
 │  │ OCR登录   │ └─────┬────────────────────────────────────────────┘  │
 │  └──────────┘       │                                                │
 └─────────────────────┼────────────────────────────────────────────────┘
                       │
               ┌───────┴───────┐
               │ PostgreSQL 15  │     Redis 7 (缓存+任务队列)
-              │   (56张表)     │
+              │   (86张表)     │
               └───────────────┘
 ```
 
@@ -35,12 +35,12 @@
 
 | 层级 | 技术 | 说明 |
 |---|---|---|
-| 前端 | Vue 3 + Vite 5 + Element Plus | SPA, 50+ 页面组件 |
+| 前端 | Vue 3 + Vite 5 + Element Plus | SPA, 75+ 页面组件 |
 | 后端 | FastAPI + SQLAlchemy 2.0 + Gunicorn | 单 worker 保证互斥锁有效 |
-| 数据库 | PostgreSQL 15 | 56 张表, SCD Type 2 历史表 |
+| 数据库 | PostgreSQL 15 | 86 张表, SCD Type 2 历史表 |
 | 缓存 | Redis 7 (AOF 持久化) | 任务队列 + 缓存 |
 | 数据采集 | Playwright + ddddocr | 浏览器自动化 + OCR 自动登录 |
-| 迁移 | Alembic | 34 个版本, 单一 head |
+| 迁移 | Alembic | 57 个版本, 单一 head |
 | 部署 | Docker Compose | 4 个服务: db/redis/backend/web |
 
 ## 快速启动
@@ -90,19 +90,19 @@ npm run dev   # http://localhost:5173
 csctalon/
 ├── backend/                       # FastAPI 后端
 │   ├── app/
-│   │   ├── models/                # 56 张数据表定义
+│   │   ├── models/                # 86 张数据表定义
 │   │   ├── services/              # 业务逻辑 (analytics.py 是核心分析引擎)
-│   │   ├── api/v1/                # 30+ API 路由
+│   │   ├── api/v1/                # 50+ API 路由 (~375 端点)
 │   │   ├── core/                  # 配置/数据库/安全
 │   │   ├── schemas/               # Pydantic 请求/响应模型
 │   │   └── utils/                 # 工具函数
 │   ├── alembic/                   # 数据库迁移
-│   │   └── versions/              # 34 个 migration (单一 head)
+│   │   └── versions/              # 57 个 migration (单一 head)
 │   └── scripts/                   # 数据导入/维护脚本
 ├── web/                           # Vue 3 前端
 │   └── src/
-│       ├── views/                 # 页面组件
-│       │   ├── dashboards/        # 运营看板 + 决策看板(6大子菜单)
+│       ├── views/                 # 页面组件 (75 个 .vue)
+│       │   ├── dashboards/        # 运营看板 + 决策看板(10+子菜单)
 │       │   ├── data/              # 数据采集统一入口(SyncDashboard)
 │       │   ├── management/        # 工作台 + 管理闭环(报告/周报/制度/措施)
 │       │   ├── analytics/         # 分析视图构建器
@@ -121,8 +121,8 @@ csctalon/
 │   ├── 数据时间字段使用规范.md      # 时间字段口径
 │   ├── 人均效率算法说明.md          # 工作量分/效率分计算
 │   ├── Group-Specialty双体系设计.md # 行政分组+业务专项
-│   ├── API接口文档.md              # 30+ 路由端点
-│   ├── 数据库表结构说明.md          # 56 张表
+│   ├── API接口文档.md              # 50+ 路由端点
+│   ├── 数据库表结构说明.md          # 86 张表
 │   ├── alembic-migration管理规范.md # 迁移管理
 │   └── debug/                     # 调试文档归档
 ├── data/                          # Docker 数据卷 (gitignore)
@@ -172,8 +172,8 @@ csctalon/
 | [人均效率算法说明.md](docs/人均效率算法说明.md) | 工作量分/效率分计算、6专项系数、SN去重 |
 | [Group-Specialty双体系设计.md](docs/Group-Specialty双体系设计.md) | 行政分组与业务专项双维度模型 |
 | [数据时间字段使用规范.md](docs/数据时间字段使用规范.md) | 各表时间字段口径定义 |
-| [API接口文档.md](docs/API接口文档.md) | 30+ 路由端点/参数/响应 |
-| [数据库表结构说明.md](docs/数据库表结构说明.md) | 56 张表用途/关系/索引 |
+| [API接口文档.md](docs/API接口文档.md) | 50+ 路由端点/参数/响应 |
+| [数据库表结构说明.md](docs/数据库表结构说明.md) | 86 张表用途/关系/索引 |
 | [alembic-migration管理规范.md](docs/alembic-migration管理规范.md) | 版本链管理、merge head、幂等升级 |
 
 ## 环境变量

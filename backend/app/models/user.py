@@ -37,7 +37,7 @@ class User(IDMixin, TimestampMixin, Base):
     """登录账号"""
     display_name: Mapped[str] = mapped_column(String(64), nullable=False, comment="显示姓名")
     hashed_password: Mapped[str] = mapped_column(String(128), nullable=False)
-    role: Mapped[str] = mapped_column(String(32), default=RoleEnum.AGENT.value, nullable=False, comment="角色:admin/supervisor/agent")
+    role: Mapped[str] = mapped_column(String(32), default=RoleEnum.AGENT.value, nullable=False, comment="角色:admin/supervisor/specialty_lead/specialist/agent")
     group_name: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="所属组(主管用)")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # 绑定企微姓名(用于匹配数据中的"企微-XXX"操作人)
