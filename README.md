@@ -84,6 +84,17 @@ npm install
 npm run dev   # http://localhost:5173
 ```
 
+## 部署方式
+
+系统支持两种部署形态，按数据存放位置选择：
+
+| 方式 | 数据位置 | 适用场景 | 文档 |
+|---|---|---|---|
+| **frp 内网穿透**（推荐） | 数据/计算全在**本地内网**，云端仅做 TLS 终止 + 端口转发 | 频繁数据更新、高频计算、数据留内网、外网可访问 | [deploy/frp/README.md](deploy/frp/README.md) |
+| **整体上云** | 数据/计算在云端服务器 | 无本地机房、需云端托管 | [deploy/README.md](deploy/README.md) |
+
+两种方式可互补：frp 为主部署、云上同时作为异地备份仓库（`deploy/frp/local/sync-backup-to-cloud.sh`）。
+
 ## 目录结构
 
 ```
