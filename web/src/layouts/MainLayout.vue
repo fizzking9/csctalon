@@ -3,7 +3,7 @@
     <el-aside v-if="!isMobile" :width="isCollapse ? '64px' : '220px'" class="aside">
       <div class="logo">
         <el-icon :size="24"><Monitor /></el-icon>
-        <span v-show="!isCollapse" class="logo-text">客服中心管理</span>
+        <span v-show="!isCollapse" class="logo-text">数据分析工具应用</span>
       </div>
       <el-menu
         :default-active="activeMenu"
@@ -221,6 +221,17 @@
             <component :is="Component" />
           </transition>
         </router-view>
+        <!-- 全局页脚: 备案信息(网站备案要求) -->
+        <footer class="global-footer">
+          <span v-if="siteInfo.beian_note" class="footer-note">{{ siteInfo.beian_note }}</span>
+          <a v-if="siteInfo.icp_no" href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">{{ siteInfo.icp_no }}</a>
+          <a v-else href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">ICP备案号：待备案</a>
+          <template v-if="siteInfo.psb_no">
+            <span class="sep">|</span>
+            <a href="https://beian.mps.gov.cn/" target="_blank" rel="noopener noreferrer">{{ siteInfo.psb_no }}</a>
+          </template>
+          <span class="copyright">© {{ currentYear }} {{ siteInfo.copyright_holder || 'tanzk' }} · {{ siteInfo.site_name || '数据分析工具应用' }}</span>
+        </footer>
       </el-main>
     </el-container>
   </el-container>
@@ -269,6 +280,7 @@ import { Bell, User, Monitor, Upload } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { taskStatus, taskSubmit } from '@/api/fetch'
 import { systemEventSummary } from '@/api/systemEvent'
+import { getSiteInfo } from '@/api/siteInfo'
 import AuditDialog from '@/components/AuditDialog.vue'
 import { useAudit } from '@/composables/useAudit'
 
@@ -281,6 +293,19 @@ const isCollapse = ref(false)
 const isMobile = ref(false)
 const mobileMenuOpen = ref(false)
 const manualSyncLoading = ref(false)
+
+// 站点备案信息(全局页脚展示)
+const currentYear = new Date().getFullYear()
+const siteInfo = ref({})
+async function loadSiteInfo() {
+  try {
+    const res = await getSiteInfo()
+    siteInfo.value = res.data || {}
+  } catch (e) {
+    siteInfo.value = {}
+  }
+}
+onMounted(loadSiteInfo)
 
 const activeMenu = computed(() => route.path)
 const currentTitle = computed(() => route.meta.title || '')
@@ -504,6 +529,33 @@ async function handleManualSync() {
   background: #f0f2f5;
   padding: 16px;
   overflow-y: auto;
+}
+/* 全局页脚: 备案信息 */
+.global-footer {
+  margin-top: 24px;
+  padding: 16px 0 4px;
+  text-align: center;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.8;
+  border-top: 1px solid #e6e6e6;
+}
+.global-footer a {
+  color: #909399;
+  text-decoration: none;
+}
+.global-footer a:hover {
+  color: #409eff;
+}
+.global-footer .footer-note {
+  margin-right: 12px;
+}
+.global-footer .sep {
+  margin: 0 8px;
+  color: #c0c4cc;
+}
+.global-footer .copyright {
+  margin-left: 12px;
 }
 .sync-banner {
   margin: 0 16px;

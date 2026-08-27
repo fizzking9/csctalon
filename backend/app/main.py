@@ -283,7 +283,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
         version=settings.APP_VERSION,
-        description="客服中心管理系统 - 内部工作流与数据辅助平台",
+        description="数据分析工具应用 - 数据分析与内部工作流辅助平台",
         lifespan=lifespan,
     )
 

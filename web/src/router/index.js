@@ -411,7 +411,7 @@ const router = createRouter({
 // 路由守卫:登录校验 + 角色分流(五角色: admin/supervisor/specialty_lead/specialist/agent)
 router.beforeEach((to) => {
   const authStore = useAuthStore()
-  document.title = to.meta.title ? `${to.meta.title} - 客服中心管理系统` : '客服中心管理系统'
+  document.title = to.meta.title ? `${to.meta.title} - 数据分析工具应用` : '数据分析工具应用'
   if (!to.meta.public && !authStore.isLoggedIn) {
     return { name: 'Login', query: { redirect: to.fullPath } }
   }
