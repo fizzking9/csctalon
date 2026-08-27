@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import agenda, alerts, analysis_views, analytics, auth, cache_admin, channels, collection_logs, complaints, dashboards, data_quality, data_sources, dept_info_syncs, devices, doc_sync, fetch, groups, incidents, invoices, kb_articles, match, measures, metrics, miniapp, notifications, operation_logs, persons, policies, recharges, report_comments, report_templates, reports, schedules, scrm_chat, scrm_staff, source_groups, specialties, staff_assignments, strategy, sync_complaints, sync_manual_refunds, system, system_events, tasks, todos, upstream_tickets, uploads, users, wechat, weekly_reports, wide_tables
+from app.api.v1 import agenda, alerts, analysis_views, analytics, auth, cache_admin, channels, collection_logs, complaints, dashboards, data_quality, data_sources, dept_info_syncs, devices, doc_sync, fetch, groups, incidents, invoices, kb_articles, match, measures, metrics, miniapp, notifications, operation_logs, persons, policies, recharges, report_comments, report_templates, reports, schedules, scrm_chat, scrm_staff, site_info, source_groups, specialties, staff_assignments, strategy, sync_complaints, sync_manual_refunds, system, system_events, tasks, todos, upstream_tickets, uploads, users, wechat, weekly_reports, wide_tables
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
@@ -57,3 +57,4 @@ api_router.include_router(miniapp.router)
 api_router.include_router(sync_complaints.router)
 api_router.include_router(sync_manual_refunds.router)
 api_router.include_router(doc_sync.router)
+api_router.include_router(site_info.router)

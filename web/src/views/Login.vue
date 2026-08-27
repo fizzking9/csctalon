@@ -3,8 +3,8 @@
     <el-card class="login-card">
       <div class="login-header">
         <el-icon :size="40" color="#409eff"><Monitor /></el-icon>
-        <h2>客服中心管理系统</h2>
-        <p class="sub">客户服务中心内部工作流与数据辅助平台</p>
+        <h2>{{ siteInfo.site_name || '数据分析工具应用' }}</h2>
+        <p class="sub">{{ siteInfo.site_subtitle || '专注数据分析与内部工具' }}</p>
       </div>
       <el-form ref="formRef" :model="form" :rules="rules" @submit.prevent="handleLogin">
         <el-form-item prop="username">
@@ -38,22 +38,49 @@
           </el-button>
         </el-form-item>
       </el-form>
+      <div class="login-footer">
+        <p v-if="siteInfo.beian_note" class="site-note">{{ siteInfo.beian_note }}</p>
+        <p class="site-info">
+          <a v-if="siteInfo.icp_no" href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">{{ siteInfo.icp_no }}</a>
+          <a v-else href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">ICP备案号：待备案</a>
+          <template v-if="siteInfo.psb_no">
+            <span class="sep">|</span>
+            <a href="https://beian.mps.gov.cn/" target="_blank" rel="noopener noreferrer">{{ siteInfo.psb_no }}</a>
+          </template>
+        </p>
+        <p class="copyright">© {{ currentYear }} {{ siteInfo.copyright_holder || 'tanzk' }} · {{ siteInfo.site_name || '数据分析工具应用' }}</p>
+      </div>
     </el-card>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { User, Lock } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import { getSiteInfo } from '@/api/siteInfo'
 
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 const formRef = ref()
 const loading = ref(false)
+
+const currentYear = new Date().getFullYear()
+const siteInfo = ref({})
+
+async function loadSiteInfo() {
+  try {
+    const res = await getSiteInfo()
+    siteInfo.value = res.data || {}
+  } catch (e) {
+    // 接口异常不影响登录, 使用内置默认值
+    siteInfo.value = {}
+  }
+}
+onMounted(loadSiteInfo)
 
 const form = reactive({ username: '', password: '' })
 const rules = {
@@ -106,5 +133,26 @@ async function handleLogin() {
 }
 .tips {
   text-align: center;
+}
+.login-footer {
+  margin-top: 20px;
+  text-align: center;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.login-footer .site-note {
+  color: #b0b3b8;
+}
+.login-footer .sep {
+  margin: 0 8px;
+  color: #c0c4cc;
+}
+.login-footer a {
+  color: #909399;
+  text-decoration: none;
+}
+.login-footer a:hover {
+  color: #409eff;
 }
 </style>

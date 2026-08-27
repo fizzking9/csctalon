@@ -24,13 +24,25 @@ class Settings(BaseSettings):
     )
 
     # 应用
-    APP_NAME: str = "客服中心管理系统"
+    APP_NAME: str = "数据分析工具应用"
     APP_VERSION: str = "0.1.0"
     ENV: Literal["dev", "prod", "test"] = "dev"
     DEBUG: bool = True
     # SQLAlchemy SQL 语句打印(engine echo)。默认关闭——即使 DEBUG=true 也不全量打 SQL,
     # 避免 SQL 噪音淹没真正错误、撑大日志。需要排障时显式设 SQL_ECHO=true。
     SQL_ECHO: bool = False
+
+    # 网站备案信息(网站备案要求展示, 空则前端显示占位)
+    # ICP 备案号, 如 "京ICP备12345678号-1"
+    ICP_BEIAN_NO: str = ""
+    # 公安备案号, 如 "京公网安备 11010502000000号"
+    PSB_BEIAN_NO: str = ""
+    # 备案备注/网站性质说明, 如 "个人开发数据分析系统应用测试，内部数据和流程测试"
+    BEIAN_NOTE: str = ""
+    # 网站版权主体
+    COPYRIGHT_HOLDER: str = "tanzk"
+    # 网站副标题
+    SITE_SUBTITLE: str = "专注数据分析与内部工具"
 
     # 数据库
     POSTGRES_USER: str = "csctalon"
