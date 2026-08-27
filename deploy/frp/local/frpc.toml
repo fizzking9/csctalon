@@ -1,0 +1,30 @@
+# =============================================================================
+# frpc.toml — frp 客户端配置 (本地服务器, 数据/计算/存储所在地)
+# 由 deploy/frp/local/install-frpc.sh 从占位符生成后落盘到 <部署目录>/frpc.toml
+# 生成后如需调整, 直接编辑后按所用方式重启:
+#   binary+systemd: systemctl restart frpc
+#   docker        : docker compose -f docker-compose.frpc.yml restart
+# =============================================================================
+
+# 云端 frps 的地址(域名或公网 IP) 与端口
+serverAddr = "REPLACE_FRP_SERVER_HOST"
+serverPort = 7000
+
+# 认证: 与云端 frps 完全一致的 token
+auth.method = "token"
+auth.token = "REPLACE_FRP_TOKEN"
+
+# 心跳/断线自动重连(本地断电恢复、网络抖动后自动恢复隧道)
+transport.heartbeatInterval = 10
+transport.heartbeatTimeout = 30
+
+# -----------------------------------------------------------------------------
+# HTTP 代理: 把本地 nginx web 容器(80)通过隧道暴露到域名
+# customDomains 必须与云端 nginx server_name、DNS 解析指向的域名一致
+# -----------------------------------------------------------------------------
+[[proxies]]
+name = "web-http"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 80
+customDomains = ["REPLACE_FRP_DOMAIN"]

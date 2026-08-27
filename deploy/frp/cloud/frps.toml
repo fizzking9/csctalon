@@ -1,0 +1,28 @@
+# =============================================================================
+# frps.toml — frp 服务端配置 (云端转发机)
+# 由 deploy/frp/cloud/deploy-frps.sh 从占位符生成后落盘到 /etc/frp/frps.toml
+# 生成后如需调整, 直接编辑 /etc/frp/frps.toml 后 systemctl restart frps 生效。
+# =============================================================================
+
+# frpc 连接端口 (云端安全组必须放行, 建议仅对办公/内网出口 IP 开放)
+bindPort = 7000
+
+# 认证: frps/frpc 共享同一 token, 务必强随机 (openssl rand -hex 32)
+auth.method = "token"
+auth.token = "REPLACE_FRP_TOKEN"
+
+# vhostHTTPPort: 云端 nginx 把 443 流量反代到此端口(仅绑 127.0.0.1, 不对公网开放),
+# frps 依据 HTTP Host 头把请求通过隧道转发到内网 frpc 对应 customDomains 的代理。
+# 因此云端只需开放 443(nginx) 与 7000(frps), 业务数据零落地云端。
+vhostHTTPPort = 8080
+
+# Dashboard 面板: 仅监听本机, 通过 SSH 隧道访问, 不对公网暴露
+webServer.addr = "127.0.0.1"
+webServer.port = 7500
+webServer.user = "admin"
+webServer.password = "REPLACE_FRP_DASH_PWD"
+
+# 日志: 轮转保留 7 天
+log.to = "/var/log/frps/frps.log"
+log.level = "info"
+log.maxDays = 7
