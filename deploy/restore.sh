@@ -70,10 +70,32 @@ docker exec csctalon-db pg_isready -U "$PG_USER" >/dev/null 2>&1 || { err "数�
 c "pg_restore 恢复数据库 ${PG_DB} (将覆盖现有数据)..."
 docker cp "$STAGE/csctalon.dump" "csctalon-db:/tmp/csctalon_restore.dump"
 # --clean --if-exists: 先清空再重建, 与备份结构保持一致
+#
+# ⚠️ pg_restore 已知无害错误容忍(2026-08-28):
+#   groups/specialties 表的 ix_groups_name / ix_specialties_code / ix_specialties_name
+#   在"create_all 环境"(本地/开发机, 唯一索引)与"alembic 迁移环境"(全新服务器, 唯一约束)
+#   之间命名相同但对象类型不同。恢复时 --clean 阶段执行 DROP INDEX 会报:
+#     "cannot drop index ... because constraint ... requires it"
+#   这 3 个错误发生在 DROP 清理阶段, 数据导入(CREATE TABLE + COPY)不受影响,
+#   恢复后对象会被正确重建为唯一索引。但 pg_restore 因此返回非 0 退出码,
+#   在 set -e 下会中断脚本 → 后续"启动服务"不执行。
+#   处理: 不因 pg_restore 退出码中断, 改为恢复后做数据完整性校验(见下)。
 docker exec csctalon-db pg_restore -U "$PG_USER" -d "$PG_DB" --clean --if-exists --no-owner \
-  /tmp/csctalon_restore.dump
+  /tmp/csctalon_restore.dump || true
 docker exec csctalon-db rm -f /tmp/csctalon_restore.dump
-ok "数据库恢复完成"
+
+# 数据完整性校验: 确认关键表确实恢复(而非因真实错误半途而废)
+# 校验 users(账号) + refunds(核心业务表) 均有数据; 失败则中止, 避免"假成功"
+_PGCHECK() { docker exec csctalon-db psql -U "$PG_USER" -d "$PG_DB" -tA -c "$1" 2>/dev/null | tr -d '[:space:]'; }
+_CK_USERS="$(_PGCHECK 'SELECT count(*) FROM users;' 2>/dev/null || echo 0)"
+_CK_REFS="$(_PGCHECK 'SELECT count(*) FROM refunds;' 2>/dev/null || echo 0)"
+if [[ -z "$_CK_USERS" || "$_CK_USERS" -eq 0 || -z "$_CK_REFS" || "$_CK_REFS" -eq 0 ]]; then
+  err "数据库恢复校验失败: users=$_CK_USERS refunds=$_CK_REFS (疑似 pg_restore 真实错误, 非已知 DROP 警告)"
+  err "  查看完整 pg_restore 输出排查; 若为历史遗留脏库, 可先手动清空后重试:"
+  err "  docker exec csctalon-db psql -U $PG_USER -d $PG_DB -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'"
+  exit 1
+fi
+ok "数据库恢复完成 (users=$_CK_USERS, refunds=$_CK_REFS)"
 
 # ---------- 4. 恢复附件(可选) ----------
 if [[ $DB_ONLY -eq 0 ]]; then
