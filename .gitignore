@@ -22,6 +22,11 @@ desktop.ini
 .pydevproject
 .settings/
 
+# ---------- Docker 本地覆盖 ----------
+# docker-compose.override.yml 仅用于本地 macOS colima(改用 named volume 解决权限),
+# 生产服务器不需要也不应加载; 误提交后已移除跟踪, 此处忽略防止再次提交。
+docker-compose.override.yml
+
 # ---------- Python ----------
 __pycache__/
 *.pyc
