@@ -2,6 +2,14 @@
 # 使用: docker compose up -d --build
 # 访问: http://<服务器IP>:80 (前端), http://<服务器IP>:8000 (后端API,可选)
 #
+# ⚠️ 固定 project name = csctalon:
+#   部署脚本在 /opt/csctalon/current(软链, 指向 releases/<版本>)下运行 compose,
+#   若不加 name, project name 默认取目录名 → 每次切版本(目录名=版本号)都会变,
+#   导致容器/卷归属不同 project, 重装/升级时报 "container name already in use" 冲突、
+#   或产生 920f48e_* 这种随版本漂移的残留卷。
+#   固定 name 后, 无论从哪个目录跑 compose, 都用同一 project, 容器/卷/网络稳定复用。
+name: csctalon
+#
 # 配置: 所有密钥/环境变量从同目录 .env 读取（已 gitignore），勿提交真实 .env。
 # 数据: PG / Redis 数据 bind mount 到 ./data，宿主机可直接备份。
 # 日志: ① 所有容器 stdout 走 json-file 轮转（单文件 10m，保留 3 份），防止撑爆磁盘；
