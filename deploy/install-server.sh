@@ -34,6 +34,19 @@ ENV_FILE=""
 RESTORE_FILE=""
 SKIP_DOCKER=0
 
+# 生产数据/日志目录(install 脚本会创建; 与 deploy/env.production.example 保持一致)
+# 用于"已有 .env 缺关键变量时自动补齐", 防止旧模板(根目录 .env.example 无这些变量)
+# 导致数据落到代码目录内、升级切版本时数据"丢失"。
+PROD_DIR_VARS=(
+  "DB_DATA_DIR=$APP_DIR/data/postgres"
+  "REDIS_DATA_DIR=$APP_DIR/data/redis"
+  "UPLOADS_DIR=$APP_DIR/uploads"
+  "BROWSER_STATES_DIR=$APP_DIR/browser_states"
+  "BACKEND_LOGS_DIR=$APP_DIR/logs/backend"
+  "NGINX_LOGS_DIR=$APP_DIR/logs/nginx"
+  "ENV_FILE=$APP_DIR/.env"
+)
+
 # ---------- 参数解析 ----------
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -55,6 +68,7 @@ fi
 
 c() { echo -e "\033[36m▶ $*\033[0m"; }
 ok() { echo -e "\033[32m✔ $*\033[0m"; }
+warn() { echo -e "\033[33m⚠ $*\033[0m"; }
 err() { echo -e "\033[31m✘ $*\033[0m" >&2; }
 
 # ---------- 1. 安装 Docker ----------
@@ -124,13 +138,27 @@ if [[ -n "$ENV_FILE" ]]; then
   ok "已使用 --env-file 提供的 .env"
 else
   if [[ -f "$ENV_TARGET" ]]; then
-    # 沿用已有 .env 时校验生产关键变量, 防止旧模板导致数据落到错误目录
+    # 沿用已有 .env 时校验生产关键变量(DB_DATA_DIR/ENV_FILE)。
+    # 旧模板(根目录 .env.example)无这些变量 → 自动补齐生产目录变量, 保留用户已有配置,
+    # 避免旧 .env 导致数据落到代码目录内、升级切版本时数据"丢失"。
     if ! grep -qE "^(DB_DATA_DIR|ENV_FILE)=" "$ENV_TARGET"; then
-      err "$APP_DIR/.env 缺少生产关键变量(DB_DATA_DIR/ENV_FILE), 可能是旧模板或未按生产配置"
-      echo ""
-      echo "  请改用 --env-file 提供完整生产 .env(参考 deploy/env.production.example), 例如:"
-      echo "    bash $0 --src-dir ${SRC_DIR:---pkg $PKG} --env-file /path/to/csctalon-prod.env"
-      exit 1
+      warn "$APP_DIR/.env 缺少生产关键变量(DB_DATA_DIR/ENV_FILE), 疑似旧模板 → 自动补齐生产目录变量"
+      # 仅追加缺失的变量(逐行检查, 已存在则跳过), 不动用户已配置的密钥/密码等
+      for _pv in "${PROD_DIR_VARS[@]}"; do
+        _key="${_pv%%=*}"
+        if ! grep -qE "^${_key}=" "$ENV_TARGET"; then
+          echo "$_pv" >> "$ENV_TARGET"
+          ok "  已补充 $_pv"
+        fi
+      done
+      # 补齐后若密钥仍是占位符(旧模板 <请修改...>), 提示用户(否则后端 fail-fast 拒启)
+      if grep -qE "POSTGRES_PASSWORD=.*(<|请修改|please|random)" "$ENV_TARGET" \
+         || grep -qE "JWT_SECRET_KEY=.*(<|请修改|please|random|CHANGE_ME)" "$ENV_TARGET" \
+         || grep -qE "INIT_ADMIN_PASSWORD=.*(<|请修改|admin123)" "$ENV_TARGET" \
+         || grep -qE "REDIS_PASSWORD=(<|请修改|$)" "$ENV_TARGET"; then
+        warn "检测到 .env 仍含占位符密钥(POSTGRES_PASSWORD/JWT_SECRET_KEY/INIT_ADMIN_PASSWORD/REDIS_PASSWORD)"
+        warn "  生产后端启动会 fail-fast 拒绝。请先编辑 $APP_DIR/.env 改为强随机值(参考 deploy/env.production.example)"
+      fi
     fi
     ok "已存在 $APP_DIR/.env, 沿用"
   else

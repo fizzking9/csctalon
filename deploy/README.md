@@ -184,6 +184,7 @@ sudo bash /opt/csctalon/packages/csctalon-vX.Y.Z-*/deploy/upgrade.sh /opt/csctal
 |---|---|---|
 | `升级版本: .env` 且备份报"未找到 csctalon-db" | 把 bootstrap 的参数（`--env-file` 等）传给了 upgrade.sh，被当成发布包路径 | 用 §4.1 的正确命令，不带多余参数 |
 | 备份报"未找到运行中的 csctalon-db 容器" | 服务器服务未启动，或执行机器不对 | `docker compose ps` 确认；未启动先 `docker compose --env-file /opt/csctalon/.env up -d` |
+| 安装报"缺少生产关键变量(DB_DATA_DIR/ENV_FILE)" | `/opt/csctalon/.env` 是旧模板生成的（根目录 `.env.example` 无生产目录变量） | 新版 install-server.sh 已改为**自动补齐**目录变量后继续；若提示"仍含占位符密钥"，则需编辑 `.env` 改强随机值再重跑 |
 
 ---
 
