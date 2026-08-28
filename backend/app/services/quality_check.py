@@ -167,8 +167,24 @@ def check_ticket_row(r: ServiceTicket) -> tuple[str | None, str | None]:
     return _finalize(notes)
 
 
+# 2026-08-28: 提现失败/冻结备注关键词 (BMS 提现操作记录中, 备注含"提现申请-冻结"等
+# 表示提现申请被冻结/拒绝, 非成功退款, 不计入成功退款统计)。
+_WITHDRAW_FAIL_REMARK_KEYWORDS = ("冻结", "退款失败", "提现失败", "超期订单不允许退款", "驳回", "拒绝", "未到账")
+
+
+def is_withdraw_fail_remark(remark: str | None) -> bool:
+    """备注是否为"失败/冻结"类(冻结/退款失败/超期订单不允许退款等)。"""
+    if not remark:
+        return False
+    return any(k in remark for k in _WITHDRAW_FAIL_REMARK_KEYWORDS)
+
+
 def check_wallet_row(r: WalletWithdrawal) -> tuple[str | None, str | None]:
-    """钱包流水: 数据质量整体好, 只标明确异常(操作类型脏值/金额负值/操作时间异常)。"""
+    """钱包流水: 数据质量整体好, 只标明确异常(操作类型脏值/金额负值/操作时间异常)。
+
+    2026-08-28: 备注含"提现申请-冻结"等失败/冻结关键词的记录标记为 pending,
+    便于数据质量页识别(此类记录不计入成功退款统计, 属业务标记而非数据异常)。
+    """
     notes: list[str | None] = [
         _required_note(r.op_amount, "操作金额"),
         _enum_note(r.op_type, WALLET_OP_TYPE_SET, "操作类型"),
@@ -180,6 +196,8 @@ def check_wallet_row(r: WalletWithdrawal) -> tuple[str | None, str | None]:
                 notes.append(f"操作金额为负({r.op_amount})")
         except (TypeError, ValueError):
             notes.append(f"操作金额非数值({r.op_amount})")
+    if is_withdraw_fail_remark(r.remark):
+        notes.append("提现失败/冻结备注(不计入成功退款统计)")
     return _finalize(notes)
 
 
