@@ -13,7 +13,7 @@
 
 ```
 ┌─────────────── 云端转发机 (1C2G 起步) ───────────────┐
-│  nginx:443 (TLS 终止, 域名证书)                      │
+│  1Panel + OpenResty:443 (TLS 终止, 证书自动签发)      │
 │    └─ proxy_pass → 127.0.0.1:8080 (frps vhostHTTPPort)│
 │  frps 容器 (frp server, 端口 7000 隧道口)             │
 │  ⚠️ 不跑任何业务容器, 业务数据零落地云端              │
@@ -36,7 +36,7 @@
 用户浏览器
    │ ① DNS 解析 kf.example.com → 云端公网 IP
    ▼
-云端 nginx (443 / TLS 终止)
+云端 1Panel + OpenResty (443 / TLS 终止, 证书由 1Panel 自动签发/续期)
    │ ② 反代 → 127.0.0.1:8080 (frps vhostHTTPPort)
    ▼
 frps (云端容器, 只绑 127.0.0.1)
@@ -63,7 +63,7 @@ csctalon 后端 → PostgreSQL / Redis / Playwright (全部在本地)
 |---|---|
 | 数据留在内网 | PG/Redis/uploads/登录态全在本地，云端只做 TLS 终止 + 端口转发，**业务数据不出内网** |
 | 频繁更新/高频计算 | 定时同步 8/12/16/20/24 点、Playwright 抓取、分析计算全部跑在本地，不受云端小机器资源限制 |
-| 外网访问 | 外网用户 → 域名:443 → 云端 nginx → frps → frp 隧道 → 本地 frpc → 本地 nginx:80，与内网体验一致 |
+| 外网访问 | 外网用户 → 域名:443 → 云端 1Panel OpenResty → frps → frp 隧道 → 本地 frpc → 本地 nginx:80，与内网体验一致 |
 | 内网直连不受影响 | 内网用户仍直接访问本地 nginx，流量完全不走 frp |
 | 成本 | 云端只需 1C2G 轻量机 + 域名证书，比整系统上云便宜得多 |
 
@@ -81,8 +81,10 @@ csctalon 后端 → PostgreSQL / Redis / Playwright (全部在本地)
 ### 2.1 云端服务器
 
 - 腾讯云/阿里云轻量或 CVM，**1C2G 起步**，系统 Ubuntu 22.04/Debian 12。
-- 一个**已备案域名**（如 `kf.example.com`），DNS 加一条 **A 记录 → 云端公网 IP**。
-- 域名 SSL 证书（腾讯云/阿里云免费证书，Nginx 格式 `.crt` + `.key`）。
+- 安装 **1Panel**（推荐，证书自动签发/续期）：云端由 1Panel 的 **OpenResty** 承担 443 TLS 终止 + 反代 frps。
+- 一个**已备案域名**（如 `kf.example.com`），DNS 加一条 **A 记录 → 云端公网 IP**（Let's Encrypt 验证需要）。
+- 域名 SSL 证书：**不用自己申请**，1Panel 网站→SSL 里选 Let's Encrypt 即可（免费、自动续期）。
+- 备选：不想用 1Panel 时，`deploy-frps.sh --mode nginx` 走原方案（宿主 nginx + 手动证书，见 §3.2 方式三）。
 
 ### 2.2 本地服务器
 
@@ -93,14 +95,15 @@ csctalon 后端 → PostgreSQL / Redis / Playwright (全部在本地)
 
 | 端口 | 监听位置 | 用途 | 安全组建议 |
 |---|---|---|---|
-| `443` | 云端 nginx | HTTPS，对外访问入口 | `0.0.0.0/0` |
-| `80` | 云端 nginx | HTTP → 301 跳转 HTTPS | `0.0.0.0/0` |
+| `443` | 云端 1Panel OpenResty | HTTPS，对外访问入口 | `0.0.0.0/0` |
+| `80` | 云端 1Panel OpenResty | HTTP → 301 跳转 HTTPS | `0.0.0.0/0` |
 | `7000` | 云端 frps | frp 隧道口（frpc 出站连接） | **仅办公/内网出口 IP**（一般固定） |
-| `8080` | 云端 frps | `vhostHTTPPort`，nginx 反代目标 | **不开放**（只绑 127.0.0.1） |
+| `8080` | 云端 frps | `vhostHTTPPort`，1Panel OpenResty 反代目标 | **不开放**（只绑 127.0.0.1） |
 | `7500` | 云端 frps | Dashboard 面板 | **不开放**（只绑 127.0.0.1，SSH 隧道访问） |
 | `5432`/`6379`/`8000` | 本地 | PG/Redis/后端 | **不开放**（本地 compose 已只绑 127.0.0.1） |
 
 > 云端只需放行 `443`/`80`/`7000`（+`22` 限办公 IP）。`8080`/`7500` 都只监听 `127.0.0.1`，公网不可达。
+> ⚠️ 若云端口被 1Panel 的 OpenResty 占用，不要与其它服务抢 80/443；frps 的 8080 保持只绑 127.0.0.1 即可。
 
 ### 2.4 执行方式说明（重要）
 
@@ -132,9 +135,15 @@ openssl rand -hex 32
 # 记下输出, 云端 deploy-frps.sh 与本地 install-frpc.sh 都要用
 ```
 
-### 3.2 云端：一键部署 frps + nginx
+### 3.2 云端：一键部署 frps + TLS 入口
 
-**方式一（推荐）：git raw 一条命令**（无需克隆/上传，模板自动从 gitea 拉取）：
+云端 TLS 入口**默认走 1Panel OpenResty**（证书自动签发/续期），脚本只负责部署 frps 容器并打印反代配置。
+
+**方式一（推荐）：1Panel OpenResty（默认）**
+
+先装好 **1Panel**（1Panel 自带 OpenResty；如果 1Panel 里没有，先到 1Panel「应用商店」安装 OpenResty 并启动）。
+
+再执行 git raw 一条命令（无需克隆/上传，模板自动从 gitea 拉取）：
 
 ```bash
 curl -fsSL http://10.147.17.41:3000/tanzk/csctalon/raw/branch/main/deploy/frp/cloud/deploy-frps.sh | \
@@ -144,19 +153,38 @@ curl -fsSL http://10.147.17.41:3000/tanzk/csctalon/raw/branch/main/deploy/frp/cl
     --dash-pwd <frp面板密码>
 ```
 
-**方式二：本地脚本**（已克隆/上传仓库时）：
+脚本会：装 Docker → 生成 `/etc/frp/frps.toml` → 启动 frps 容器 → **打印 1Panel OpenResty 反代配置**。
+
+然后到 1Panel 界面完成 TLS 入口：
+
+1. **1Panel → 网站 → 网站** → 添加（或反向代理）：绑定域名 `kf.example.com`。
+2. **SSL** → 申请证书 → **Let's Encrypt**（免费，自动续期；需要域名已解析到本机公网 IP）。
+3. 把脚本打印的反代配置粘贴到该网站的 **配置文件** 中（替换默认内容；注意 `proxy_pass http://127.0.0.1:8080;`，8080 即 frps 的 vhostHTTPPort）。
+4. 保存后 1Panel 自动 reload OpenResty 生效。
+
+**方式二：1Panel 已就绪，只生成配置不启动 frps**
+
+```bash
+# 先让 1Panel/OpenResty 把 80/443 接管好，再启动 frps
+curl -fsSL http://10.147.17.41:3000/tanzk/csctalon/raw/branch/main/deploy/frp/cloud/deploy-frps.sh | \
+  sudo bash -s -- --domain kf.example.com --token <token> --dash-pwd <密码> \
+    --no-install-docker --skip-frps
+```
+
+**方式三：不用 1Panel，宿主 nginx（原方案）**
 
 ```bash
 bash deploy/frp/cloud/deploy-frps.sh \
   --domain kf.example.com \
   --token <上一步的token> \
   --dash-pwd <frp面板密码> \
+  --mode nginx \
   --cert /path/to/kf.example.com.crt --key /path/to/kf.example.com.key
 ```
 
 脚本会：装 Docker/nginx → 生成 `/etc/frp/frps.toml` 与 nginx 站点 → 启动 frps 容器 + nginx → 校验。
 
-> 证书未提前上传时，可先不传 `--cert/--key`，脚本生成占位配置，稍后把证书放到 `/etc/nginx/certs/<域名>.crt/.key` 并 `systemctl reload nginx`。
+> 方式三证书未提前上传时，可先不传 `--cert/--key`，脚本生成占位配置，稍后把证书放到 `/etc/nginx/certs/<域名>.crt/.key` 并 `systemctl reload nginx`。
 
 ### 3.3 本地：一键接入 frpc
 
@@ -223,21 +251,25 @@ curl -sI https://kf.example.com/ | head -1   # 期望 200
 
 三个脚本均可通过 `--help` 查看内嵌用法（git raw 管道方式同样可用）。
 
-### 4.1 deploy-frps.sh（云端，frp 服务端 + nginx TLS）
+### 4.1 deploy-frps.sh（云端，frp 服务端 + TLS 入口）
 
 | 参数 | 必填 | 默认 | 说明 |
 |---|---|---|---|
-| `--domain <域名>` | ✅ | — | 对外访问域名（与 DNS、本地 customDomains、nginx server_name 一致） |
+| `--domain <域名>` | ✅ | — | 对外访问域名（与 DNS、本地 customDomains、TLS 入口 server_name 一致） |
 | `--token <token>` | ✅ | — | frp 认证 token（与本地 frpc **完全一致**，`openssl rand -hex 32`） |
 | `--dash-pwd <密码>` | ✅ | — | frp Dashboard 面板密码 |
-| `--cert <证书>` | 选 | — | nginx 证书 `.crt` 路径；不传则生成占位配置 |
-| `--key <私钥>` | 选 | — | nginx 私钥 `.key` 路径；须与 `--cert` 成对 |
+| `--mode <openresty\|nginx>` | 选 | `openresty` | TLS 入口模式：`openresty`=1Panel OpenResty 反代（默认，证书自动签发）；`nginx`=宿主 apt nginx 承担 443（原方案） |
+| `--cert <证书>` | 选 | — | nginx 模式证书 `.crt` 路径；不传则生成占位配置 |
+| `--key <私钥>` | 选 | — | nginx 模式私钥 `.key` 路径；须与 `--cert` 成对 |
 | `--repo <raw_base>` | 选 | gitea main | 模板来源 git raw base |
 | `--frp-version <v>` | 选 | `0.61.1` | frps 镜像版本 |
-| `--vhost-port <端口>` | 选 | `8080` | frps `vhostHTTPPort`（须与云端 nginx 反代目标一致） |
+| `--vhost-port <端口>` | 选 | `8080` | frps `vhostHTTPPort`（须与 TLS 入口反代目标一致） |
 | `--skip-install-docker` | 选 | 关 | 已装 Docker 时跳过安装 |
+| `--skip-frps` | 选 | 关 | 不启动 frps 容器（仅生成 TLS 入口配置，供 1Panel OpenResty 先行接管） |
 
-**脚本做的事**：装 Docker/nginx → 生成 `/etc/frp/frps.toml` → 处理证书（`/etc/nginx/certs/`）→ 生成 `/etc/nginx/conf.d/csctalon-frp.conf` → 启动 frps 容器（`--network host`）→ 重启 nginx → 输出公网 IP 与后续指引。
+**openresty 模式（默认）做的事**：装 Docker → 生成 `/etc/frp/frps.toml` → 启动 frps 容器（`--network host`）→ **打印 1Panel OpenResty 反代配置**（用户粘贴到 1Panel 网站配置文件，证书在 1Panel 内申请 Let's Encrypt）。
+
+**nginx 模式做的事**：装 Docker/nginx → 生成 `/etc/frp/frps.toml` → 处理证书（`/etc/nginx/certs/`）→ 生成 `/etc/nginx/conf.d/csctalon-frp.conf` → 启动 frps 容器（`--network host`）→ 重启 nginx → 输出公网 IP 与后续指引。
 
 ### 4.2 install-frpc.sh（本地，frp 客户端接入）
 
@@ -281,7 +313,7 @@ curl -sI https://kf.example.com/ | head -1   # 期望 200
 |---|---|---|
 | `bindPort` | `7000` | frpc 连接口，安全组只对办公 IP 开放 |
 | `auth.token` | 强随机 | 与 frpc 一致 |
-| `vhostHTTPPort` | `8080` | 云端 nginx 反代目标；**只绑 127.0.0.1** |
+| `vhostHTTPPort` | `8080` | 1Panel OpenResty 反代目标；**只绑 127.0.0.1** |
 | `webServer` | `127.0.0.1:7500` | 面板仅本机，SSH 隧道访问 |
 | `log.to` | `/var/log/frps/frps.log` | 日志，轮转保留 7 天 |
 
@@ -295,7 +327,7 @@ curl -sI https://kf.example.com/ | head -1   # 期望 200
 | `transport.heartbeatInterval/Timeout` | `10`/`30` | 心跳与断线自动重连 |
 | `proxies[].type` | `http` | HTTP 代理，按 Host 分流 |
 | `proxies[].localIP/localPort` | `127.0.0.1:80` | 本地 web 容器 nginx |
-| `proxies[].customDomains` | 域名 | 与云端 nginx server_name 一致 |
+| `proxies[].customDomains` | 域名 | 与云端 TLS 入口 server_name 一致 |
 
 ### 5.3 本地方案不动现有 compose
 
@@ -380,7 +412,9 @@ docker restart csctalon-frpc
 ### 7.3 更换证书 / 更新 frp 版本
 
 ```bash
-# 证书: 替换 /etc/nginx/certs/<域名>.crt/.key → 云端 reload nginx
+# 证书(1Panel OpenResty 模式): 证书由 1Panel 自动签发/续期, 无需手动换
+#   → 1Panel 网站→SSL 里查看/续期即可; 若手动换, 直接覆盖后 OpenResty reload
+# 证书(宿主 nginx 模式): 替换 /etc/nginx/certs/<域名>.crt/.key → 云端 reload nginx
 ssh root@<云端IP> "cp 新证书 /etc/nginx/certs/ && nginx -t && systemctl reload nginx"
 # frp 版本: 云端重跑 deploy-frps.sh --frp-version <新版本>(幂等, 会重建容器)
 #          本地 binary 重跑 install-frpc.sh --frp-version <新版本>(重新下载并重启)
@@ -402,7 +436,7 @@ sudo bash /opt/csctalon/current/deploy/upgrade.sh <发布包>   # 或 --git
 - [ ] 云端安全组仅放行 `443`/`7000`(限办公IP)/`22`(限办公IP)，`8080/7500/5432/6379` 不开放
 - [ ] frp token 为强随机（`openssl rand -hex 32`），云端/本地一致
 - [ ] frp 面板密码已设置，面板仅本机监听
-- [ ] 域名 HTTPS 证书已配置并强制 301 跳转
+- [ ] 域名 HTTPS 证书已配置（1Panel 自动签发 Let's Encrypt）并强制 301 跳转
 - [ ] 本地 `.env` 的 `CORS_ORIGINS` 已包含 `https://<域名>`（后端校验来源）
 - [ ] 每日异地备份 cron 已配置且成功跑过一次
 - [ ] 本地 UPS + 断网自恢复就绪
@@ -413,12 +447,13 @@ sudo bash /opt/csctalon/current/deploy/upgrade.sh <发布包>   # 或 --git
 
 | 现象 | 排查 |
 |---|---|
-| 外网打不开域名 | ① 云端 frps 容器是否 running；② 安全组 7000/443 是否放行；③ 本地 frpc 是否在线（`systemctl status frpc`/`docker ps`）；④ DNS 是否指向云端 IP |
+| 外网打不开域名 | ① 云端 frps 容器是否 running；② 安全组 7000/443 是否放行；③ 本地 frpc 是否在线（`systemctl status frpc`/`docker ps`）；④ DNS 是否指向云端 IP；⑤ 1Panel OpenResty 反代是否已保存（反代目标 `127.0.0.1:8080`） |
 | 本地正常、外网 502 | frpc 隧道断了：`journalctl -u frpc -f`（binary）或 `docker logs -f csctalon-frpc`（docker）看是否报 **auth 失败**（token 不一致）/ **连接失败**（7000 不通） |
 | 外网登录报 CORS / 接口被拦 | 本地 `.env` 的 `CORS_ORIGINS` 没加 `https://<域名>`，或加了没重启 backend（见 §3.4） |
 | 报 `auth token not match` | 云端 frps 与本地 frpc 的 token 不一致。重跑对应脚本用同一 token，或改其中一端后同步另一端（见 §7.2） |
 | 上传/导出大文件很慢 | 受本地**上行带宽**限制（家宽上行通常 20-50Mbps）。内网用户不受影响；可评估升级宽带套餐 |
-| 域名打不开但 IP 能开 | 证书/server_name 未对齐，`nginx -t` + 检查 `/etc/nginx/conf.d/csctalon-frp.conf` |
+| 域名打不开但 IP 能开 | 证书/server_name 未对齐。1Panel OpenResty 模式：检查 1Panel 网站绑定域名与证书是否匹配；宿主 nginx 模式：`nginx -t` + 检查 `/etc/nginx/conf.d/csctalon-frp.conf` |
+| 1Panel 里申请 Let's Encrypt 失败 | 域名 A 记录是否已解析到本机公网 IP、80 端口公网可达（HTTP 验证需要）；否则改用 DNS 验证（1Panel 支持阿里云/腾讯云 DNS API） |
 | 本地断电恢复后外网仍不通 | frpc `Restart=always`/`restart: unless-stopped` 会自动重连，等 10-30s；仍不行 `systemctl restart frpc`（binary）/`docker restart csctalon-frpc`（docker） |
 | docker 模式提示 `network_mode: host` 不支持 | host 网络仅 Linux 支持；macOS/Windows 的 Docker 请用 `--mode binary` |
 | 想访问 frp Dashboard | 不要对公网开放 7500；用 SSH 隧道 `ssh -L 7500:127.0.0.1:7500 root@<云端IP>` 后访问 `http://127.0.0.1:7500` |
@@ -433,7 +468,8 @@ deploy/frp/
 ├── README.md                     # 本手册
 ├── cloud/
 │   ├── frps.toml                 # frp 服务端配置模板
-│   ├── nginx.conf                # 云端 nginx TLS 配置模板
+│   ├── openresty.conf            # 1Panel OpenResty 反代配置模板(默认模式, 由脚本打印)
+│   ├── nginx.conf                # 宿主 nginx TLS 配置模板(--mode nginx)
 │   └── deploy-frps.sh            # 云端一键部署脚本(支持 git raw 一条命令)
 └── local/
     ├── frpc.toml                 # frp 客户端配置模板
