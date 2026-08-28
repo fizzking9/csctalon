@@ -124,7 +124,14 @@ PRESET_VIEWS: list[dict] = [
                     {"field": "op_time", "alias": "日期", "role": "time", "time_grain": "day"}
                 ],
                 "measures": [{"field": "op_amount", "agg": "sum", "alias": "金额"}],
-                "filters": [{"field": "op_type", "op": "eq", "value": "用户提现"}],
+                "filters": [
+                    {"field": "op_type", "op": "eq", "value": "用户提现"},
+                    # 2026-08-28: 排除"提现申请-冻结"等失败/冻结备注(非成功退款)
+                    {"field": "remark", "op": "not_contains", "value": "冻结"},
+                    {"field": "remark", "op": "not_contains", "value": "退款失败"},
+                    {"field": "remark", "op": "not_contains", "value": "提现失败"},
+                    {"field": "remark", "op": "not_contains", "value": "超期订单不允许退款"},
+                ],
             },
         ],
         "merge_strategy": "add",
@@ -153,7 +160,14 @@ PRESET_VIEWS: list[dict] = [
                     {"field": "op_time", "alias": "日期", "role": "time", "time_grain": "day"}
                 ],
                 "measures": [{"field": "op_amount", "agg": "sum", "alias": "实际提现"}],
-                "filters": [{"field": "op_type", "op": "eq", "value": "用户提现"}],
+                "filters": [
+                    {"field": "op_type", "op": "eq", "value": "用户提现"},
+                    # 2026-08-28: 排除"提现申请-冻结"等失败/冻结备注(非成功退款)
+                    {"field": "remark", "op": "not_contains", "value": "冻结"},
+                    {"field": "remark", "op": "not_contains", "value": "退款失败"},
+                    {"field": "remark", "op": "not_contains", "value": "提现失败"},
+                    {"field": "remark", "op": "not_contains", "value": "超期订单不允许退款"},
+                ],
             },
         ],
         "merge_strategy": "add",
@@ -550,7 +564,14 @@ PRESET_VIEWS: list[dict] = [
                 "label": "用户提现",
                 "dimensions": [{"field": "op_time", "alias": "日期", "role": "time", "time_grain": "day"}],
                 "measures": [{"field": "op_amount", "agg": "sum", "alias": "用户提现"}],
-                "filters": [{"field": "op_type", "op": "eq", "value": "用户提现"}],
+                "filters": [
+                    {"field": "op_type", "op": "eq", "value": "用户提现"},
+                    # 2026-08-28: 排除失败/冻结备注(非成功退款)
+                    {"field": "remark", "op": "not_contains", "value": "冻结"},
+                    {"field": "remark", "op": "not_contains", "value": "退款失败"},
+                    {"field": "remark", "op": "not_contains", "value": "提现失败"},
+                    {"field": "remark", "op": "not_contains", "value": "超期订单不允许退款"},
+                ],
                 "stack_group": "估算",
             },
             {
@@ -608,7 +629,14 @@ PRESET_VIEWS: list[dict] = [
                 "label": "提现",
                 "dimensions": [{"field": "op_time", "alias": "日期", "role": "time", "time_grain": "day"}],
                 "measures": [{"field": "op_amount", "agg": "sum", "alias": "提现"}],
-                "filters": [{"field": "op_type", "op": "eq", "value": "用户提现"}],
+                "filters": [
+                    {"field": "op_type", "op": "eq", "value": "用户提现"},
+                    # 2026-08-28: 排除失败/冻结备注(非成功退款)
+                    {"field": "remark", "op": "not_contains", "value": "冻结"},
+                    {"field": "remark", "op": "not_contains", "value": "退款失败"},
+                    {"field": "remark", "op": "not_contains", "value": "提现失败"},
+                    {"field": "remark", "op": "not_contains", "value": "超期订单不允许退款"},
+                ],
             },
         ],
         "merge_strategy": "add",

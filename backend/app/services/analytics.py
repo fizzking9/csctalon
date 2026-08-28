@@ -249,9 +249,52 @@ def _route_a_online_refund_filter():
     return (Refund.refund_method == "线上",)
 
 # ---------- 路线B 钱包用户取现 ----------
+# ⚠️ 2026-08-28 口径修复: BMS 提现操作记录中, 备注含"提现申请-冻结,提现单号WD..."
+#    的记录代表"提现申请被冻结/拒绝", 并非成功退款(钱并未实际出账给用户)。
+#    但它们 op_type 仍是 '用户提现', 若全量计入会导致"成功退款"虚高。
+#    同时同一笔提现会出现"冻结记录+成功记录"成对(同一 WD 提现单号):
+#       - 冻结记录: 备注='提现申请-冻结，提现单号WD...', op_time=申请时刻, SN 多为空
+#       - 成功记录: 备注='用户提现-退费单RF...-提现单号WD...', op_time=实际出款时刻
+#    历史也出现过失败备注: '用户提现-退费单RF... 微信退款失败：超期订单不允许退款'
+#    统一口径(用户确认): 所有失败/冻结备注的提现记录均不计入成功退款统计。
+#
+# 失败/冻结备注关键词(统一识别所有失败形态, 含历史数据):
+_WITHDRAW_FAIL_REMARK_KEYWORDS = ("冻结", "退款失败", "提现失败", "超期订单不允许退款", "驳回", "拒绝", "未到账")
+
+
+def _is_withdraw_fail_remark(remark: str | None) -> bool:
+    """备注是否为"失败/冻结"类(冻结/退款失败/超期订单不允许退款等)。
+
+    命中任一关键词即视为失败提现, 不计入成功退款统计。
+    """
+    if not remark:
+        return False
+    return any(k in remark for k in _WITHDRAW_FAIL_REMARK_KEYWORDS)
+
+
+def _withdraw_fail_remark_sql_cond() -> str:
+    """原生 SQL 的失败备注排除条件片段 (用于内联 SQL, 表别名必须为 w)。
+
+    形如: AND COALESCE(w.remark,'') NOT LIKE '%冻结%' AND ... (全部关键词)
+    """
+    conds = " AND ".join(
+        f"COALESCE(w.remark, '') NOT LIKE '%{k}%'" for k in _WITHDRAW_FAIL_REMARK_KEYWORDS
+    )
+    return conds
+
+
+# ---------- 路线B 钱包用户取现 ----------
 def _route_b_withdraw_filter():
-    """【路线B】钱包-用户取现: op_type='用户提现'"""
-    return (WalletWithdrawal.op_type == "用户提现",)
+    """【路线B】钱包-用户取现: op_type='用户提现' 且 备注非失败/冻结 (成功提现口径)。
+
+    2026-08-28 修复: 排除"提现申请-冻结"等失败/冻结备注的提现记录,
+    避免被冻结/拒绝的提现被误计入成功退款统计。
+    备注为 NULL 视为非失败(COALESCE 保护), 正常计入。
+    """
+    conds = [WalletWithdrawal.op_type == "用户提现"]
+    for _k in _WITHDRAW_FAIL_REMARK_KEYWORDS:
+        conds.append(func.coalesce(WalletWithdrawal.remark, "").notlike(f"%{_k}%"))
+    return tuple(conds)
 
 # ---------- 路线C 闪猫退款 (独立业务表) ----------
 # 真实表名: shanmao_refunds (alembic: b8c9d0e1f2a3_create_shanmao_refunds)
@@ -703,13 +746,13 @@ def wallet_vs_withdraw(db: Session, start: datetime | None = None, end: datetime
         .group_by("date")
     ).all()
     wallet_in_map = {r.date: float(r.amount or 0) for r in wallet_in}
-    # 实际提现: op_type='用户提现'
+    # 实际提现: op_type='用户提现' 且 备注非失败/冻结 (2026-08-28 排除冻结记录)
     withdraw = db.execute(
         select(
             func.to_char(WalletWithdrawal.op_time, "YYYY-MM-DD").label("date"),
             func.coalesce(func.sum(WalletWithdrawal.op_amount), 0).label("amount"),
         )
-        .where(WalletWithdrawal.op_time.between(start, end), WalletWithdrawal.op_type == "用户提现")
+        .where(WalletWithdrawal.op_time.between(start, end), *_route_b_withdraw_filter())
         .group_by("date")
     ).all()
     withdraw_map = {r.date: float(r.amount or 0) for r in withdraw}
@@ -1864,7 +1907,10 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
     """
     # 1. 取全量数据 (66k rows, 内存可容纳)
     all_rf = list(db.execute(select(Refund)).scalars().all())
-    all_wd = list(db.execute(select(WalletWithdrawal).where(WalletWithdrawal.op_type == "用户提现")).scalars().all())
+    # 2026-08-28: 只取"成功提现"(排除 提现申请-冻结 等失败/冻结备注), 避免冻结记录被当作真实出款
+    all_wd = list(db.execute(
+        select(WalletWithdrawal).where(*_route_b_withdraw_filter())
+    ).scalars().all())
     all_wi = list(db.execute(select(WalletWithdrawal).where(WalletWithdrawal.op_type == "订单退费转入")).scalars().all())
 
     # 所有 datetime 先统一 naive, 避免 tz 比较报错
@@ -2532,8 +2578,9 @@ def refund_withdrawal_sleeping(
           AND created_at_raw >= :ts AND created_at_raw <= :te
         ORDER BY created_at_raw
     """), {"ts": s, "te": e}).fetchall()
-    wd_rows = db.execute(text("""
-        SELECT remark, device_sn, op_amount, op_time FROM wallet_withdrawals WHERE op_type = '用户提现'
+    wd_rows = db.execute(text(f"""
+        SELECT remark, device_sn, op_amount, op_time FROM wallet_withdrawals w
+        WHERE w.op_type = '用户提现' AND {_withdraw_fail_remark_sql_cond()}
     """)).fetchall()
 
     wd_by_rfn: dict[str, list] = {}
@@ -6737,12 +6784,14 @@ def refund_decision_overview(
         return f"DATE({expr})" if grain == "day" else f"DATE_TRUNC('week', {expr})::date"
 
     # ── 2. 钱包水位 (转入/转出/系统扣费 按日) ──
+    #    2026-08-28: 排除"提现申请-冻结"等失败/冻结备注(冻结非真实出账, 不属"用户提现"转出)
     wallet_rows = db.execute(text(f"""
         SELECT {_day("w.op_time")} AS d, w.op_type,
                count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
         FROM wallet_withdrawals w
         WHERE w.op_time >= :ts AND w.op_time <= :te
           AND w.op_type IN ('订单退费转入', '用户提现', '系统扣费')
+          AND {_withdraw_fail_remark_sql_cond()}
         GROUP BY 1, 2 ORDER BY 1, 2
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     wallet_water = {"dates": [], "transfer_in_cnt": [], "transfer_in_amt": [],
@@ -6900,6 +6949,7 @@ def refund_decision_overview(
                count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
         FROM wallet_withdrawals w
         WHERE w.op_time >= :ts AND w.op_time <= :te AND w.op_type = '用户提现'
+          AND {_withdraw_fail_remark_sql_cond()}
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     # C 闪猫退款 (独立业务表)
@@ -6975,9 +7025,10 @@ def refund_decision_overview(
             FROM refunds r WHERE r.refund_method = '线上' AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
         """), {"ts": s, "te": e}).fetchall():
             tot["online_cnt"] += int(r.cnt or 0); tot["online_amt"] += float(r.amt or 0)
-        for r in db.execute(text("""
+        for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(op_amount), 0) AS amt
             FROM wallet_withdrawals w WHERE w.op_time >= :ts AND w.op_time <= :te AND w.op_type = '用户提现'
+              AND {_withdraw_fail_remark_sql_cond()}
         """), {"ts": s, "te": e}).fetchall():
             tot["withdraw_cnt"] += int(r.cnt or 0); tot["withdraw_amt"] += float(r.amt or 0)
         for r in db.execute(text("""
@@ -7375,12 +7426,13 @@ def refund_export_all(
             return ""
         return dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-    # B 钱包提现 (仅'用户提现'为真实现金流出)
-    b_rows = db.execute(text("""
+    # B 钱包提现 (仅'用户提现'为真实现金流出; 2026-08-28 排除失败/冻结备注)
+    b_rows = db.execute(text(f"""
         SELECT account_id, device_sn, op_type, op_amount, wallet_balance, operator, op_time, remark
-        FROM wallet_withdrawals
-        WHERE op_time >= :ts AND op_time <= :te AND op_type = '用户提现'
-        ORDER BY op_time
+        FROM wallet_withdrawals w
+        WHERE w.op_time >= :ts AND w.op_time <= :te AND w.op_type = '用户提现'
+          AND {_withdraw_fail_remark_sql_cond()}
+        ORDER BY w.op_time
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     sheets["B钱包提现"] = [{
         "账户ID": r.account_id or "",
@@ -7461,6 +7513,7 @@ def refund_export_all(
         ("B 钱包提现", f"""
             SELECT {_day("w.op_time")} AS d, count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
             FROM wallet_withdrawals w WHERE w.op_type = '用户提现' AND w.op_time >= :ts AND w.op_time <= :te
+              AND {_withdraw_fail_remark_sql_cond()}
             GROUP BY 1"""),
         ("C 闪猫退款", f"""
             SELECT {_day("COALESCE(s.audit_time, s.created_at)")} AS d, count(*) AS cnt,
