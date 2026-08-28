@@ -469,6 +469,7 @@ deploy/frp/
 ├── cloud/
 │   ├── frps.toml                 # frp 服务端配置模板
 │   ├── openresty.conf            # 1Panel OpenResty 反代配置模板(默认模式, 由脚本打印)
+│   ├── openresty-default-server.conf  # 1Panel OpenResty 兜底配置: 拦截未匹配域名/IP 访问, 不暴露 frp
 │   ├── nginx.conf                # 宿主 nginx TLS 配置模板(--mode nginx)
 │   └── deploy-frps.sh            # 云端一键部署脚本(支持 git raw 一条命令)
 └── local/
@@ -479,3 +480,78 @@ deploy/frp/
 ```
 
 > 所有脚本均支持两种执行方式：**git raw 一条命令**（`curl ... | sudo bash -s -- ...`，模板自动从仓库拉取）与**本地脚本**（已克隆/上传仓库）。git raw 模式默认从 gitea `main` 分支拉取模板，可用 `--repo <raw_base>` 覆盖来源。
+
+---
+
+## 11. 实战部署实录与排障 FAQ（2026-08-29）
+
+> 本节基于真实部署过程整理，覆盖从「一键脚本」到「域名 HTTPS 可访问」全流程遇到的坑与解法。
+> 场景：云端 1Panel + OpenResty（默认 openresty 模式），本地 frpc，域名 `www.kimirock.top`（阿里云备案），云端 `42.193.247.117`（腾讯云）。
+
+### 11.1 部署全流程（推荐顺序）
+
+```
+① 云端装 1Panel + 启动 OpenResty（应用商店）
+② 生成 token（openssl rand -hex 32，两端共用）
+③ 云端执行 deploy-frps.sh（默认 openresty 模式）→ 启动 frps 容器 + 打印 1Panel 反代配置
+④ 1Panel → 网站 → 反向代理 绑定域名 → SSL 申请证书（详见 §11.3）→ 粘贴反代配置
+⑤ 本地执行 install-frpc.sh → frpc 连上云端 7000
+⑥ 云端 ufw deny 8080 + 安全组收紧（7000 限办公 IP）
+⑦ 本地 .env 加 CORS_ORIGINS 并重启 backend
+⑧ 浏览器验证 https://<域名>
+```
+
+> ⚠️ **代码需先推送到 gitea**：`deploy-frps.sh` 走 git raw 从 gitea main 拉取，**本地提交后必须先 `git push`**，云端才能拿到最新版。否则云端拿到旧脚本（如旧版装宿主 nginx + 旧 `http2` 指令），会报 `unknown directive "http2"`。
+
+### 11.2 排障 FAQ（按现象）
+
+| 现象 | 根因 | 解决 |
+|---|---|---|
+| frpc 报 `dial tcp <云端IP>:7000: i/o timeout` | **云端 UFW/安全组没放行 7000**（frps 在 `*:7000` 监听≠公网可达，UFW 默认 deny 入站） | 云端 `ufw allow 7000/tcp`（建议收紧到办公 IP）；并确认云安全组放行 7000 |
+| frpc 日志 `proxy [web-http] already exists` | 云端 frps 残留了旧的同名代理（上次连接没清干净） | 云端 `docker restart frps` 清残留 → 本地 `systemctl restart frpc`；若有多个 frpc 进程残留 `pkill -f frpc` 再重启 |
+| 直接输 IP 访问 → frp 提示页/404 | frp 按 **Host 头分流**，IP 的 Host 匹配不到 `customDomains`，落到 frps 兜底 | **预期行为**。正规用 `https://<域名>`；不想暴露 frp → 用 `openresty-default-server.conf` 兜底（return 444/自定义 403）+ `ufw deny 8080`（见 §11.4） |
+| 1Panel 申请 Let's Encrypt 报 `x509: cannot parse IP address of length 0` | 1Panel/acme 预检域名解析异常；且 **HTTP 验证在 frp 架构下必失败**（验证请求带域名 Host 被反代进隧道，返回 SPA 而非挑战文件） | **改用 DNS 验证**（阿里云/腾讯云 DNS API），或**换 ZeroSSL 签发机构**（本次实战 ZeroSSL 可走通） |
+| 证书申请报 `DomainRecordDuplicate: The DNS record already exists` | 之前申请失败时残留的 `_acme-challenge` TXT 记录没删 | 去阿里云/腾讯云 DNS 控制台**删除残留 `_acme-challenge` TXT 记录**，再重新申请 |
+| 证书验证通过但 Safari 打不开 / Edge 能开 | ① Safari 缓存了旧连接/失败状态 ② 腾讯云备案拦截（见下条） | 先 Cmd+Q 退出 Safari / 隐私窗口 / 清网站数据；仍不行查备案拦截 |
+| 访问显示「网站暂时无法访问 / 您的网站未完成备案」 | **备案与接入商绑定**：域名在阿里云备案，但服务器在腾讯云，腾讯云对未做**接入备案**的域名强制拦截 | 在**腾讯云**做**接入备案**（控制台→网站备案→接入备案），审核通过后解除拦截。或把服务器换到备案同厂商 |
+| 本地 `curl https://127.0.0.1/ -H "Host: 域名"` 200、公网打不开 | 拦截/网络发生在**云厂商公网入口**，对服务器本机回环不生效 | 在**外部机器**（手机流量/本地）测 `https://<域名>`；若被拦则多为备案拦截或安全组 |
+| `curl -I -H "Host: <域名>" http://<云端IP>/` 返回 200，但 `http://<IP>/` 404 | frp 按 Host 分流：带域名 Host 才匹配代理 | 用域名访问（或加 `customDomains` 里 IP，但不建议） |
+| 外网 502/504 | frpc 隧道断了（token 不一致 / 7000 不通 / 本地 nginx 没起） | 见 §9 与 §7.2 |
+| 部署脚本报旧版 `http2` 指令错误 | **云端拉到了 gitea 旧版脚本** | 本地 `git push` 后再重跑；旧脚本残留的宿主 nginx 需停用（`systemctl stop/disable nginx`，必要时 `apt-get remove nginx`） |
+
+### 11.3 证书申请（frp 架构下）推荐做法
+
+1. **首选 ZeroSSL + DNS 验证**（本次实战验证可行）：
+   - 1Panel → 网站 → SSL → 申请证书 → 签发机构 **ZeroSSL**、验证方式 **DNS**、DNS 厂商选 **阿里云/腾讯云**（填 API 密钥）。
+   - DNS-01 走 API 加 TXT 记录，**完全绕开 frp 隧道**，不受 Host 分流影响。
+2. **Let's Encrypt**：HTTP-01 在 frp 架构下会被反代进隧道导致验证失败，**不推荐**；除非给 `/.well-known/acme-challenge/` 单独配不走隧道的位置（较麻烦）。
+3. 申请失败 `DomainRecordDuplicate` → 删残留 `_acme-challenge` TXT 记录后重试。
+
+### 11.4 不暴露 frp 的兜底配置（直接输 IP 时）
+
+直接输 IP 会落到 frps 默认提示页（暴露 frp 组件信息）。处理：
+
+```bash
+# ① 云端封掉 frps vhostHTTPPort 的公网直连（防 frps 兜底被探到）
+ufw deny 8080
+
+# ② 在 1Panel OpenResty 加 default_server 兜底（见 openresty-default-server.conf）
+#    拦掉未匹配 Host 的请求：return 444（断开连接）或自定义 403 页
+#    注意：只拦 80 即可覆盖"输 IP"场景；443 兜底需配占位自签名证书，且不能影响正常站点
+```
+
+> 参考文件：`deploy/frp/cloud/openresty-default-server.conf`（含完整配置与说明）。
+
+### 11.5 域名/证书相关核对清单
+
+- DNS A 记录：`www`（和可选 `@`）→ 云端公网 IP（本地 `dig +short www.<域名>` 确认）。
+- 三处域名一致：DNS、本地 frpc `customDomains`、云端 OpenResty server_name。
+- 证书链完整（Safari 校验严格）：`echo \| openssl s_client -connect <域名>:443 -showcerts 2>/dev/null \| grep -E "^ 0 s:|^ 1 s:|^ 2 s:"` 应有 叶子+中间+根 三层。
+- 若想裸域名也可访问：本地 `frpc.toml` 的 `customDomains` 加 `"<裸域名>"`，1Panel 同步绑定 + 证书覆盖。
+
+### 11.6 上线收尾（必做）
+
+1. **换 token**（若曾在对话/日志暴露）：两端一起改，重启 frps + frpc。
+2. **本地 `.env` 的 `CORS_ORIGINS`** 加 `https://<域名>` 并重启 backend（否则外网登录被 CORS 拦）。
+3. **UFW deny 8080** + 7000 收紧到办公 IP + 安全组仅放 443/80/7000/22。
+4. 确认登录限流、`INIT_ADMIN_PASSWORD` 已改、WAF（1Panel）已开。
