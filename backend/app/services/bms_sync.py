@@ -558,6 +558,7 @@ async def sync_all(
                         hook_db = SessionLocal()
                         try:
                             from sqlalchemy import func as _func
+                            from app.models.refund import Refund
 
                             def _report(name: str, phase: str = "importing"):
                                 """跨线程向主 event loop 投递进度事件(fire-and-forget)"""

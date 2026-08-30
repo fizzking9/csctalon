@@ -318,103 +318,6 @@ def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tup
             header = [str(c).replace("\t", "").strip() for c in physical_lines[0].split(',')]
             header_len = len(header)
             
-            def _fix_unclosed_quote(line: str) -> str:
-                """修复未闭合的引号问题
-                
-                场景:备注字段以双引号开头,末尾有转义双引号"",但缺少闭合引号
-                导致后面所有字段都被合并到备注字段中
-                
-                策略:找到转义双引号""的位置,在其后面添加闭合引号
-                """
-                # 查找转义双引号""的位置
-                pos = line.find('""')
-                while pos > 0:
-                    # 检查""后面是否是逗号(字段分隔符)
-                    if pos + 2 < len(line) and line[pos + 2] == ',':
-                        # 检查""前面是否有未闭合的引号
-                        before_double_quote = line[:pos]
-                        quote_count = before_double_quote.count('"')
-                        if quote_count % 2 != 0:
-                            # 有未闭合的引号,在""后面添加闭合引号
-                            line = line[:pos + 2] + '"' + line[pos + 2:]
-                    pos = line.find('""', pos + 2)
-                return line
-            
-            def _split_fields(text: str) -> list[str]:
-                """按逗号分割字段,正确处理双引号和转义双引号"""""
-                fields = []
-                buf = []
-                in_quote = False
-                i = 0
-                n = len(text)
-                while i < n:
-                    ch = text[i]
-                    if in_quote:
-                        if ch == '"':
-                            # 检查是否是转义的双引号("")
-                            if i + 1 < n and text[i + 1] == '"':
-                                buf.append('"')
-                                i += 2
-                                continue
-                            # 闭合引号
-                            in_quote = False
-                        else:
-                            buf.append(ch)
-                        i += 1
-                    else:
-                        if ch == '"':
-                            in_quote = True
-                            i += 1
-                        elif ch == ',':
-                            fields.append(''.join(buf))
-                            buf = []
-                            i += 1
-                        else:
-                            buf.append(ch)
-                            i += 1
-                # 添加最后一个字段
-                if buf:
-                    fields.append(''.join(buf))
-                return fields
-
-            def _fix_unclosed_quote_in_long_field(line: str) -> str:
-                """修复备注字段引号未闭合导致后续字段被吞的问题
-
-                场景: BMS 导出 CSV 中,备注字段(投诉文本)以 " 开头但未闭合,
-                后续的日期时间等字段被吞进备注,直到提交参数 JSON 里的某个 "
-                被误认为闭合引号(引号总数为偶数,_fix_unclosed_quote 检测不到)。
-
-                策略: 模拟 _split_fields 的引号状态机,在引号内找第一个
-                "逗号+日期时间(yyyy-mm-dd)"模式,在逗号前补闭合引号。
-                备注字段后面紧跟的是登记时间(日期时间格式),补引号后字段恢复对齐。
-                """
-                in_quote = False
-                i = 0
-                n = len(line)
-                while i < n:
-                    ch = line[i]
-                    if in_quote:
-                        if ch == '"':
-                            # 转义引号 ""
-                            if i + 1 < n and line[i + 1] == '"':
-                                i += 2
-                                continue
-                            in_quote = False
-                            i += 1
-                        else:
-                            # 在引号内,检查是否是 "逗号+日期时间" 模式
-                            if ch == ',' and i + 11 <= n:
-                                rest = line[i + 1:i + 11]
-                                if re.match(r'\d{4}-\d{2}-\d{2}', rest):
-                                    # 找到!在逗号前补闭合引号
-                                    return line[:i] + '"' + line[i:]
-                            i += 1
-                    else:
-                        if ch == '"':
-                            in_quote = True
-                        i += 1
-                return line
-            
             # 逐行解析数据
             data_rows = []
             i = 1
@@ -667,6 +570,106 @@ def load_dataframe(path: Path | str, sheet_name: str | None = None, encoding: st
     return df
 
 
+def _fix_unclosed_quote(line: str) -> str:
+    """修复未闭合的引号问题
+
+    场景:备注字段以双引号开头,末尾有转义双引号"",但缺少闭合引号
+    导致后面所有字段都被合并到备注字段中
+
+    策略:找到转义双引号""的位置,在其后面添加闭合引号
+    """
+    # 查找转义双引号""的位置
+    pos = line.find('""')
+    while pos > 0:
+        # 检查""后面是否是逗号(字段分隔符)
+        if pos + 2 < len(line) and line[pos + 2] == ',':
+            # 检查""前面是否有未闭合的引号
+            before_double_quote = line[:pos]
+            quote_count = before_double_quote.count('"')
+            if quote_count % 2 != 0:
+                # 有未闭合的引号,在""后面添加闭合引号
+                line = line[:pos + 2] + '"' + line[pos + 2:]
+        pos = line.find('""', pos + 2)
+    return line
+
+
+def _split_fields(text: str) -> list[str]:
+    """按逗号分割字段,正确处理双引号和转义双引号"""""
+    fields = []
+    buf = []
+    in_quote = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_quote:
+            if ch == '"':
+                # 检查是否是转义的双引号("")
+                if i + 1 < n and text[i + 1] == '"':
+                    buf.append('"')
+                    i += 2
+                    continue
+                # 闭合引号
+                in_quote = False
+            else:
+                buf.append(ch)
+            i += 1
+        else:
+            if ch == '"':
+                in_quote = True
+                i += 1
+            elif ch == ',':
+                fields.append(''.join(buf))
+                buf = []
+                i += 1
+            else:
+                buf.append(ch)
+                i += 1
+    # 添加最后一个字段
+    if buf:
+        fields.append(''.join(buf))
+    return fields
+
+
+def _fix_unclosed_quote_in_long_field(line: str) -> str:
+    """修复备注字段引号未闭合导致后续字段被吞的问题
+
+    场景: BMS 导出 CSV 中,备注字段(投诉文本)以 " 开头但未闭合,
+    后续的日期时间等字段被吞进备注,直到提交参数 JSON 里的某个 "
+    被误认为闭合引号(引号总数为偶数,_fix_unclosed_quote 检测不到)。
+
+    策略: 模拟 _split_fields 的引号状态机,在引号内找第一个
+    "逗号+日期时间(yyyy-mm-dd)"模式,在逗号前补闭合引号。
+    备注字段后面紧跟的是登记时间(日期时间格式),补引号后字段恢复对齐。
+    """
+    in_quote = False
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if in_quote:
+            if ch == '"':
+                # 转义引号 ""
+                if i + 1 < n and line[i + 1] == '"':
+                    i += 2
+                    continue
+                in_quote = False
+                i += 1
+            else:
+                # 在引号内,检查是否是 "逗号+日期时间" 模式
+                if ch == ',' and i + 11 <= n:
+                    rest = line[i + 1:i + 11]
+                    if re.match(r'\d{4}-\d{2}-\d{2}', rest):
+                        # 找到!在逗号前补闭合引号
+                        return line[:i] + '"' + line[i:]
+                i += 1
+        else:
+            if ch == '"':
+                in_quote = True
+            i += 1
+    return line
+
+
 # ── CSV 修复与校验(修复优先 + 后校验, 用于 BMS 裁剪路径) ──
 _RE_REFUND_NO = re.compile(r'^(RF|RB|RE)\d{10,}')
 
@@ -718,14 +721,14 @@ def repair_csv_blocks(
             continue
 
         # 闭合引号修复
-        line = fix_unclosed_quote(line)
-        fields = split_fields(line)
+        line = _fix_unclosed_quote(line)
+        fields = _split_fields(line)
 
         # 尝试修复(备注引号未闭合导致字段被吞)
         if len(fields) < header_len:
-            fixed = fix_unclosed_quote_in_long_field(line)
+            fixed = _fix_unclosed_quote_in_long_field(line)
             if fixed != line:
-                ff = split_fields(fixed)
+                ff = _split_fields(fixed)
                 if len(ff) > len(fields):
                     line = fixed
                     fields = ff
@@ -739,8 +742,8 @@ def repair_csv_blocks(
             if not nxt:
                 continue
             joined = joined + ' ' + nxt
-            joined = fix_unclosed_quote(joined)
-            fields = split_fields(joined)
+            joined = _fix_unclosed_quote(joined)
+            fields = _split_fields(joined)
 
         # BMS 特有清洗: 去尾部 \t + 去末尾多余空字段
         if bms_clean:
