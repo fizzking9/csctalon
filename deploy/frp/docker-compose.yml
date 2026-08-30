@@ -1,0 +1,73 @@
+# =============================================================================
+# docker-compose.yml — frp 统一部署(一份文件, 双端共用, profile 区分)
+#
+# 前置(两端都要):
+#   - 先准备好对应 toml 配置(从仓库模板复制并替换占位符):
+#       服务端: cloud/frps.toml   → 替换 REPLACE_FRP_TOKEN / REPLACE_FRP_DASH_PWD
+#       客户端: local/frpc.toml   → 替换 REPLACE_FRP_SERVER_HOST / REPLACE_FRP_TOKEN / REPLACE_FRP_DOMAIN
+#     (也可复用已生成的 /etc/frp/frps.toml、/opt/csctalon/frpc/frpc.toml, 见下方环境变量)
+#
+# 启动(分别在两端机器上执行):
+#   服务端(云端转发机):  docker compose --profile frps up -d
+#   客户端(本地服务器):  docker compose --profile frpc up -d
+#
+# 常用运维:
+#   改配置后重启:    docker compose --profile frps restart   (两端各自用自己 profile)
+#   查看日志:        docker logs -f frps | docker logs -f csctalon-frpc
+#   停止:            docker compose --profile frps down
+#
+# 环境变量(可选覆盖配置路径, 默认读 compose 同目录模板):
+#   FRPS_CONFIG=路径   服务端配置, 默认 ./cloud/frps.toml
+#   FRPC_CONFIG=路径   客户端配置, 默认 ./local/frpc.toml
+#   例(用已生成配置): FRPS_CONFIG=/etc/frp/frps.toml docker compose --profile frps up -d
+#
+# 说明:
+#   - network_mode: host → 容器共享宿主网络栈(frp 需直接绑宿主端口/访问宿主
+#     127.0.0.1:80), 仅 Linux 支持; macOS/Windows 的 Docker 请用二进制方式。
+#   - 与主 compose(web/backend/db/redis) 完全解耦, 不影响现有服务。
+#   - 镜像版本 0.61.1, 需 frp v0.52+(TOML 配置); 与 deploy/frp 脚本默认版本一致。
+#   - 端口安全: 云端只放行 443/80/7000; 8080/7500 均只绑 127.0.0.1, 详见 README §2.3。
+# =============================================================================
+
+name: frp
+
+x-frp-common: &frp-common
+  image: snowdreamtech/frp:0.61.1
+  restart: unless-stopped
+  network_mode: host
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # ---------------------------------------------------------------------------
+  # frps — 服务端(云端转发机)
+  # 监听: 7000(frpc 隧道口, 安全组需放行, 建议仅办公 IP) +
+  #       8080(vhostHTTPPort, 仅 127.0.0.1, 供 TLS 入口反代) +
+  #       7500(Dashboard, 仅 127.0.0.1, SSH 隧道访问)
+  # ---------------------------------------------------------------------------
+  frps:
+    <<: *frp-common
+    profiles: ["frps"]
+    container_name: frps
+    command: ["-c", "/etc/frp/frps.toml"]
+    volumes:
+      # frps.toml 的 log.to 指向 /var/log/frps/frps.log, 确保宿主目录存在且有写权限:
+      #   mkdir -p /var/log/frps
+      - ${FRPS_CONFIG:-./cloud/frps.toml}:/etc/frp/frps.toml:ro
+      - /var/log/frps:/var/log/frps
+
+  # ---------------------------------------------------------------------------
+  # frpc — 客户端(本地服务器)
+  # 出站连云端 7000, 把本地 web 容器(127.0.0.1:80)通过隧道暴露到域名。
+  # 需按实际填好 frpc.toml 的 serverAddr / token / customDomains。
+  # ---------------------------------------------------------------------------
+  frpc:
+    <<: *frp-common
+    profiles: ["frpc"]
+    container_name: csctalon-frpc
+    command: ["-c", "/etc/frp/frpc.toml"]
+    volumes:
+      - ${FRPC_CONFIG:-./local/frpc.toml}:/etc/frp/frpc.toml:ro
