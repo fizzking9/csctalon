@@ -77,7 +77,7 @@ if [[ $PURGE -eq 1 ]]; then
   c "--purge: 删除安装目录($INSTALL_DIR)与镜像..."
   rm -rf "$INSTALL_DIR"
   ok "已删除 $INSTALL_DIR"
-  docker rmi snowdreamtech/frpc:0.61.1 2>/dev/null || warn "frpc 镜像不存在或已被删(可忽略)"
+  docker rmi snowdreamtech/frpc:0.71.0-alpine 2>/dev/null || warn "frpc 镜像不存在或已被删(可忽略)"
   docker image prune -f >/dev/null 2>&1 || true
 else
   warn "未加 --purge: 保留安装目录($INSTALL_DIR), 便于重新部署复用"
