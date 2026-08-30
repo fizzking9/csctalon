@@ -153,7 +153,15 @@
             <el-card shadow="never">
               <template #header>
                 <div style="display:flex; align-items:center; justify-content:space-between">
-                  <span style="font-weight:600">今日 按小时 · 挽回趋势 (00:00 ~ 当前)</span>
+                  <span style="font-weight:600">
+                    今日 按小时 · 挽回趋势 (00:00 ~ 当前)
+                    <el-tooltip
+                      content="失败 = 接待后 7 天内出现退款(退款单/退款工单/退款操作记录)。今日接待的退款可能未走完 7 天窗口，失败数偏低、成功率偏高，仅供参考"
+                      placement="top"
+                    >
+                      <el-icon style="vertical-align:-2px;color:#b45309;cursor:help"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
                   <el-tag size="small" effect="plain" type="success">日视图 · 小时粒度</el-tag>
                 </div>
               </template>
@@ -165,7 +173,15 @@
             <el-card shadow="never">
               <template #header>
                 <div style="display:flex; align-items:center; justify-content:space-between">
-                  <span style="font-weight:600">近 7 天 · 按日 挽回趋势</span>
+                  <span style="font-weight:600">
+                    近 7 天 · 按日 挽回趋势
+                    <el-tooltip
+                      content="失败 = 接待后 7 天内出现退款即判失败(T+7)。退款工单可能未同步，漏判会导致失败偏低、成功率偏高，仅供参考"
+                      placement="top"
+                    >
+                      <el-icon style="vertical-align:-2px;color:#b45309;cursor:help"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
                   <el-tag size="small" effect="plain" type="warning">日视图 · 日粒度</el-tag>
                 </div>
               </template>
@@ -293,7 +309,7 @@
 
 <script setup>
 import { ref, computed } from 'vue'
-import { Search } from '@element-plus/icons-vue'
+import { Search, QuestionFilled } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import BaseChart from '@/components/BaseChart.vue'
 import PersonnelAnalysis from './refund/PersonnelAnalysis.vue'
@@ -399,7 +415,7 @@ const recoveryData = ref({
   top_risk_devices: [], amount_buckets: [],
 })
 
-function _buildDoubleYOption({ x, barSeries = [], lineSeries = [], y2Min = null, y2Max = null, y2Suffix = '', legend = [] }) {
+function _buildDoubleYOption({ x, barSeries = [], lineSeries = [], y2Min = null, y2Max = null, y2Suffix = '', legend = [], stack = false }) {
   const y1 = { type: 'value', name: '数量', axisLabel: { fontSize: 11 }, splitLine: { lineStyle: { type: 'dashed' } } }
   const y2 = {
     type: 'value', name: y2Suffix ? `百分比(${y2Suffix})` : '右',
@@ -410,13 +426,39 @@ function _buildDoubleYOption({ x, barSeries = [], lineSeries = [], y2Min = null,
   if (y2Max !== null && y2Max !== undefined) y2.max = y2Max
   const series = []
   for (const b of barSeries) {
-    series.push({ name: b.name, type: 'bar', data: b.data, barMaxWidth: 16, itemStyle: { color: b.color || '#93c5fd', borderRadius: [4, 4, 0, 0] } })
+    series.push({
+      name: b.name, type: 'bar', data: b.data, barMaxWidth: 20,
+      stack: stack ? 'total' : undefined,
+      itemStyle: { color: b.color || '#93c5fd', borderRadius: stack ? [0, 0, 0, 0] : [4, 4, 0, 0] },
+    })
+  }
+  // 堆叠模式: 最后一根柱子的顶部加圆角, 形成圆顶效果
+  if (stack && series.length) {
+    const lastBar = series[series.length - 1]
+    lastBar.itemStyle = { ...lastBar.itemStyle, borderRadius: [4, 4, 0, 0] }
   }
   for (const l of lineSeries) {
     series.push({ name: l.name, type: 'line', yAxisIndex: 1, data: l.data, smooth: true, symbol: 'circle', symbolSize: 7, itemStyle: { color: l.color || '#15803d' }, lineStyle: { width: l.lineWidth || 3, color: l.color || '#15803d' } })
   }
   return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'cross' },
+      formatter: stack ? (params) => {
+        // 堆叠模式: 汇总柱状系列总量, 并附带成功率线
+        if (!params || !params.length) return ''
+        const bars = params.filter(p => p.seriesType === 'bar')
+        const line = params.find(p => p.seriesType === 'line')
+        let html = `<b>${params[0].axisValue}</b>`
+        let total = 0
+        for (const b of bars) {
+          total += Number(b.value) || 0
+          html += `<br/>${b.marker}${b.seriesName}: <b>${Number(b.value) || 0}</b>`
+        }
+        if (line) html += `<br/>${line.marker}${line.seriesName}: <b>${line.value}</b>`
+        html += `<br/>合计: <b>${total}</b>`
+        return html
+      } : undefined,
+    },
     legend: { data: legend || [], top: 0, type: 'scroll' },
     grid: { left: 56, right: 72, bottom: 44, top: 44 },
     xAxis: { type: 'category', data: x, boundaryGap: true, axisLabel: { fontSize: 11 } },
@@ -430,7 +472,6 @@ const todayHourlyOption = computed(() => {
   const hl = recoveryData.value?.hourly_today || []
   if (!hl || !hl.length) return {}
   const x = hl.map(r => r.hour)
-  const total = hl.map(r => Number(r.total_sn) || 0)
   const succ = hl.map(r => Number(r.success_sn) || 0)
   const fail = hl.map(r => Number(r.failed_sn) || 0)
   const rates = hl.map(r => {
@@ -438,14 +479,14 @@ const todayHourlyOption = computed(() => {
     return t ? round2(Number(r.success_sn) / t * 100) : 0
   })
   return _buildDoubleYOption({
-    x, barSeries: [
-      { name: '总接待SN', data: total, color: '#bfdbfe' },
-      { name: '挽留成功SN', data: succ, color: '#34d399' },
-      { name: '挽留失败SN', data: fail, color: '#fca5a5' },
+    x, stack: true, barSeries: [
+      // 失败在下(红)、成功在上(绿), 堆叠总高 = 总接待量
+      { name: '失败数', data: fail, color: '#fca5a5' },
+      { name: '成功数', data: succ, color: '#34d399' },
     ],
     lineSeries: [{ name: '成功率%', data: rates, color: '#047857', lineWidth: 3 }],
     y2Min: 0, y2Max: 100, y2Suffix: '%',
-    legend: ['总接待SN', '挽留成功SN', '挽留失败SN', '成功率%'],
+    legend: ['成功数', '失败数', '成功率%'],
   })
 })
 
@@ -455,19 +496,18 @@ const dailyTrendOption = computed(() => {
   const sliceN = Math.min(7, dl.length)
   const arr = dl.slice(-sliceN)
   const x = arr.map(r => r.date ? String(r.date).slice(5) : '')
-  const total = arr.map(r => Number(r.total_sn) || 0)
   const succ = arr.map(r => Number(r.success_sn) || 0)
   const fail = arr.map(r => Number(r.failed_sn) || 0)
   const rates = arr.map(r => round2(Number(r.success_rate) || 0))
   return _buildDoubleYOption({
-    x, barSeries: [
-      { name: '总接待SN', data: total, color: '#93c5fd' },
-      { name: '挽留成功SN', data: succ, color: '#4ade80' },
-      { name: '挽留失败SN', data: fail, color: '#f87171' },
+    x, stack: true, barSeries: [
+      // 失败在下(红)、成功在上(绿), 堆叠总高 = 总接待量
+      { name: '失败数', data: fail, color: '#f87171' },
+      { name: '成功数', data: succ, color: '#4ade80' },
     ],
     lineSeries: [{ name: '成功率%', data: rates, color: '#059669', lineWidth: 3 }],
     y2Min: 0, y2Max: 100, y2Suffix: '%',
-    legend: ['总接待SN', '挽留成功SN', '挽留失败SN', '成功率%'],
+    legend: ['成功数', '失败数', '成功率%'],
   })
 })
 
