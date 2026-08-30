@@ -321,7 +321,20 @@ curl -sI https://kf.example.com/ | head -1   # 期望 200
 
 > **docker 模式说明**：`--mode docker` 使用 `docker-compose.frpc.yml`（`snowdreamtech/frpc:<version>` 镜像 + `network_mode: host`）。host 网络仅 **Linux** 支持，macOS/Windows 的 Docker 请用 binary 模式。两种模式产物都在 `--install-dir`（默认 `/opt/csctalon/frpc`），便于 `docker compose -f ... restart` 或 `systemctl restart frpc` 复用。
 
-### 4.3 sync-backup-to-cloud.sh（本地，异地备份）
+### 4.3 cleanup-frps.sh / cleanup-frpc.sh（清理）
+
+| 参数 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `--purge` | 选 | 关 | 彻底删除：云端删 `/etc/frp`+`/var/log/frps`+镜像；本地删安装目录+镜像。默认只停服务保留数据 |
+| `--compose-dir <目录>` | 选 | 自动探测 | 云端专用，统一 compose 所在目录（当前目录或 `/opt/csctalon/frp`） |
+| `--install-dir <路径>` | 选 | `/opt/csctalon/frpc` | 本地专用，frpc 安装目录 |
+| `--repo <raw_base>` | 选 | gitea main | 模板来源 git raw base |
+
+**cleanup-frps.sh（云端）做的事**：删 frps 容器（旧 `docker run` 与统一 compose 两种方式）→ `--purge` 时删 `/etc/frp`、`/var/log/frps`、frps 镜像。**不处理** 1Panel 反代/证书/防火墙（需手动，见 §8.5）。
+
+**cleanup-frpc.sh（本地）做的事**：停用并删 `frpc.service`（binary 方式）+ 删 `csctalon-frpc` 容器（docker 方式）→ `--purge` 时删 `/opt/csctalon/frpc` 与 frpc 镜像。**不处理** `.env` CORS 与备份 cron（需手动，见 §8.5）。
+
+### 4.4 sync-backup-to-cloud.sh（本地，异地备份）
 
 | 参数 | 必填 | 默认 | 说明 |
 |---|---|---|---|
@@ -440,7 +453,7 @@ vi /opt/csctalon/frpc/frpc.toml
 docker restart csctalon-frpc
 ```
 
-> 注意：token 是云端 frps 与本地 frpc 的共享密钥，**改了任一端必须同步改另一端**，否则隧道认证失败（见 §9 排障）。
+> 注意：token 是云端 frps 与本地 frpc 的共享密钥，**改了任一端必须同步改另一端**，否则隧道认证失败（见 §10 排障）。
 
 ### 7.3 更换证书 / 更新 frp 版本
 
@@ -476,7 +489,49 @@ sudo bash /opt/csctalon/current/deploy/upgrade.sh <发布包>   # 或 --git
 
 ---
 
-## 9. 常见问题
+## 9. 卸载 / 清理（不再需要 frp 时）
+
+> 两个一键清理脚本：**云端** `cleanup-frps.sh`、**本地** `cleanup-frpc.sh`，均支持 git raw 一条命令，默认**只停服务不删数据**（安全），加 `--purge` 才彻底删除。
+
+**云端（frps）**：
+
+```bash
+# 方式一: git raw 一条命令
+curl -fsSL http://10.147.17.41:3000/tanzk/csctalon/raw/branch/main/deploy/frp/cloud/cleanup-frps.sh | \
+  sudo bash -s -- --purge
+# 方式二: 本地脚本
+sudo bash deploy/frp/cloud/cleanup-frps.sh --purge
+```
+
+脚本会：删 frps 容器（旧 `docker run` 与统一 compose 两种方式都处理）→ `--purge` 时删 `/etc/frp`、`/var/log/frps`、frps 镜像。
+
+**本地（frpc）**：
+
+```bash
+# binary+systemd 或 docker 两种方式都会被处理
+curl -fsSL http://10.147.17.41:3000/tanzk/csctalon/raw/branch/main/deploy/frp/local/cleanup-frpc.sh | \
+  sudo bash -s -- --purge
+# 或本地脚本
+sudo bash deploy/frp/local/cleanup-frpc.sh --purge
+```
+
+脚本会：停用并删 `frpc.service`（binary）→ 删 `csctalon-frpc` 容器（docker）→ `--purge` 时删 `/opt/csctalon/frpc` 与 frpc 镜像。
+
+**脚本不自动处理、需手动收尾的事项**：
+
+| 位置 | 事项 | 操作 |
+|---|---|---|
+| 云端 | 1Panel OpenResty 反代站点 + 证书 | 1Panel 网站 → 停用/删除绑定域名的反代站点；证书在 网站→SSL 里删除 |
+| 云端 | 防火墙/安全组 | 不再需要 frp 时 `ufw deny 7000`、`ufw deny 8080`，并删安全组对应放行规则 |
+| 云端 | 兜底配置(若加过) | 删除 `openresty-default-server.conf` 兜底站点(见 §12.4) |
+| 本地 | `.env` 的 `CORS_ORIGINS` | 移除 `https://<域名>` 后 `docker compose --env-file /opt/csctalon/.env restart backend`(不删也不影响内网) |
+| 本地 | 备份 cron | 停掉或改目标 `sync-backup-to-cloud.sh`(§6.1), 否则会持续报错/推送到已停的服务 |
+
+> 清理后外网域名立即不可达是**预期行为**（说明隧道已断开）；内网直连不受影响。
+
+---
+
+## 10. 常见问题
 
 | 现象 | 排查 |
 |---|---|
@@ -494,7 +549,7 @@ sudo bash /opt/csctalon/current/deploy/upgrade.sh <发布包>   # 或 --git
 
 ---
 
-## 10. 文件清单
+## 11. 文件清单
 
 ```
 deploy/frp/
@@ -505,11 +560,13 @@ deploy/frp/
 │   ├── openresty.conf            # 1Panel OpenResty 反代配置模板(默认模式, 由脚本打印)
 │   ├── openresty-default-server.conf  # 1Panel OpenResty 兜底配置: 拦截未匹配域名/IP 访问, 不暴露 frp
 │   ├── nginx.conf                # 宿主 nginx TLS 配置模板(--mode nginx)
-│   └── deploy-frps.sh            # 云端一键部署脚本(支持 git raw 一条命令)
+│   ├── deploy-frps.sh            # 云端一键部署脚本(支持 git raw 一条命令)
+│   └── cleanup-frps.sh           # 云端一键清理脚本(--purge 彻底删除, 见 §9)
 └── local/
     ├── frpc.toml                 # frp 客户端配置模板
     ├── docker-compose.frpc.yml   # frpc docker 方式
     ├── install-frpc.sh           # 本地一键接入脚本(支持 git raw 一条命令)
+    ├── cleanup-frpc.sh           # 本地一键清理脚本(--purge 彻底删除, 见 §9)
     └── sync-backup-to-cloud.sh   # 异地备份脚本(支持 git raw 一条命令)
 ```
 
@@ -517,18 +574,18 @@ deploy/frp/
 
 ---
 
-## 11. 实战部署实录与排障 FAQ（2026-08-29）
+## 12. 实战部署实录与排障 FAQ（2026-08-29）
 
 > 本节基于真实部署过程整理，覆盖从「一键脚本」到「域名 HTTPS 可访问」全流程遇到的坑与解法。
 > 场景：云端 1Panel + OpenResty（默认 openresty 模式），本地 frpc，域名 `www.kimirock.top`（阿里云备案），云端 `42.193.247.117`（腾讯云）。
 
-### 11.1 部署全流程（推荐顺序）
+### 12.1 部署全流程（推荐顺序）
 
 ```
 ① 云端装 1Panel + 启动 OpenResty（应用商店）
 ② 生成 token（openssl rand -hex 32，两端共用）
 ③ 云端执行 deploy-frps.sh（默认 openresty 模式）→ 启动 frps 容器 + 打印 1Panel 反代配置
-④ 1Panel → 网站 → 反向代理 绑定域名 → SSL 申请证书（详见 §11.3）→ 粘贴反代配置
+④ 1Panel → 网站 → 反向代理 绑定域名 → SSL 申请证书（详见 §12.3）→ 粘贴反代配置
 ⑤ 本地执行 install-frpc.sh → frpc 连上云端 7000
 ⑥ 云端 ufw deny 8080 + 安全组收紧（7000 限办公 IP）
 ⑦ 本地 .env 加 CORS_ORIGINS 并重启 backend
@@ -537,23 +594,23 @@ deploy/frp/
 
 > ⚠️ **代码需先推送到 gitea**：`deploy-frps.sh` 走 git raw 从 gitea main 拉取，**本地提交后必须先 `git push`**，云端才能拿到最新版。否则云端拿到旧脚本（如旧版装宿主 nginx + 旧 `http2` 指令），会报 `unknown directive "http2"`。
 
-### 11.2 排障 FAQ（按现象）
+### 12.2 排障 FAQ（按现象）
 
 | 现象 | 根因 | 解决 |
 |---|---|---|
 | frpc 报 `dial tcp <云端IP>:7000: i/o timeout` | **云端 UFW/安全组没放行 7000**（frps 在 `*:7000` 监听≠公网可达，UFW 默认 deny 入站） | 云端 `ufw allow 7000/tcp`（建议收紧到办公 IP）；并确认云安全组放行 7000 |
 | frpc 日志 `proxy [web-http] already exists` | 云端 frps 残留了旧的同名代理（上次连接没清干净） | 云端 `docker restart frps` 清残留 → 本地 `systemctl restart frpc`；若有多个 frpc 进程残留 `pkill -f frpc` 再重启 |
-| 直接输 IP 访问 → frp 提示页/404 | frp 按 **Host 头分流**，IP 的 Host 匹配不到 `customDomains`，落到 frps 兜底 | **预期行为**。正规用 `https://<域名>`；不想暴露 frp → 用 `openresty-default-server.conf` 兜底（return 444/自定义 403）+ `ufw deny 8080`（见 §11.4） |
+| 直接输 IP 访问 → frp 提示页/404 | frp 按 **Host 头分流**，IP 的 Host 匹配不到 `customDomains`，落到 frps 兜底 | **预期行为**。正规用 `https://<域名>`；不想暴露 frp → 用 `openresty-default-server.conf` 兜底（return 444/自定义 403）+ `ufw deny 8080`（见 §12.4） |
 | 1Panel 申请 Let's Encrypt 报 `x509: cannot parse IP address of length 0` | 1Panel/acme 预检域名解析异常；且 **HTTP 验证在 frp 架构下必失败**（验证请求带域名 Host 被反代进隧道，返回 SPA 而非挑战文件） | **改用 DNS 验证**（阿里云/腾讯云 DNS API），或**换 ZeroSSL 签发机构**（本次实战 ZeroSSL 可走通） |
 | 证书申请报 `DomainRecordDuplicate: The DNS record already exists` | 之前申请失败时残留的 `_acme-challenge` TXT 记录没删 | 去阿里云/腾讯云 DNS 控制台**删除残留 `_acme-challenge` TXT 记录**，再重新申请 |
 | 证书验证通过但 Safari 打不开 / Edge 能开 | ① Safari 缓存了旧连接/失败状态 ② 腾讯云备案拦截（见下条） | 先 Cmd+Q 退出 Safari / 隐私窗口 / 清网站数据；仍不行查备案拦截 |
 | 访问显示「网站暂时无法访问 / 您的网站未完成备案」 | **备案与接入商绑定**：域名在阿里云备案，但服务器在腾讯云，腾讯云对未做**接入备案**的域名强制拦截 | 在**腾讯云**做**接入备案**（控制台→网站备案→接入备案），审核通过后解除拦截。或把服务器换到备案同厂商 |
 | 本地 `curl https://127.0.0.1/ -H "Host: 域名"` 200、公网打不开 | 拦截/网络发生在**云厂商公网入口**，对服务器本机回环不生效 | 在**外部机器**（手机流量/本地）测 `https://<域名>`；若被拦则多为备案拦截或安全组 |
 | `curl -I -H "Host: <域名>" http://<云端IP>/` 返回 200，但 `http://<IP>/` 404 | frp 按 Host 分流：带域名 Host 才匹配代理 | 用域名访问（或加 `customDomains` 里 IP，但不建议） |
-| 外网 502/504 | frpc 隧道断了（token 不一致 / 7000 不通 / 本地 nginx 没起） | 见 §9 与 §7.2 |
+| 外网 502/504 | frpc 隧道断了（token 不一致 / 7000 不通 / 本地 nginx 没起） | 见 §10 与 §7.2 |
 | 部署脚本报旧版 `http2` 指令错误 | **云端拉到了 gitea 旧版脚本** | 本地 `git push` 后再重跑；旧脚本残留的宿主 nginx 需停用（`systemctl stop/disable nginx`，必要时 `apt-get remove nginx`） |
 
-### 11.3 证书申请（frp 架构下）推荐做法
+### 12.3 证书申请（frp 架构下）推荐做法
 
 1. **首选 ZeroSSL + DNS 验证**（本次实战验证可行）：
    - 1Panel → 网站 → SSL → 申请证书 → 签发机构 **ZeroSSL**、验证方式 **DNS**、DNS 厂商选 **阿里云/腾讯云**（填 API 密钥）。
@@ -561,7 +618,7 @@ deploy/frp/
 2. **Let's Encrypt**：HTTP-01 在 frp 架构下会被反代进隧道导致验证失败，**不推荐**；除非给 `/.well-known/acme-challenge/` 单独配不走隧道的位置（较麻烦）。
 3. 申请失败 `DomainRecordDuplicate` → 删残留 `_acme-challenge` TXT 记录后重试。
 
-### 11.4 不暴露 frp 的兜底配置（直接输 IP 时）
+### 12.4 不暴露 frp 的兜底配置（直接输 IP 时）
 
 直接输 IP 会落到 frps 默认提示页（暴露 frp 组件信息）。处理：
 
@@ -576,14 +633,14 @@ ufw deny 8080
 
 > 参考文件：`deploy/frp/cloud/openresty-default-server.conf`（含完整配置与说明）。
 
-### 11.5 域名/证书相关核对清单
+### 12.5 域名/证书相关核对清单
 
 - DNS A 记录：`www`（和可选 `@`）→ 云端公网 IP（本地 `dig +short www.<域名>` 确认）。
 - 三处域名一致：DNS、本地 frpc `customDomains`、云端 OpenResty server_name。
 - 证书链完整（Safari 校验严格）：`echo \| openssl s_client -connect <域名>:443 -showcerts 2>/dev/null \| grep -E "^ 0 s:|^ 1 s:|^ 2 s:"` 应有 叶子+中间+根 三层。
 - 若想裸域名也可访问：本地 `frpc.toml` 的 `customDomains` 加 `"<裸域名>"`，1Panel 同步绑定 + 证书覆盖。
 
-### 11.6 上线收尾（必做）
+### 12.6 上线收尾（必做）
 
 1. **换 token**（若曾在对话/日志暴露）：两端一起改，重启 frps + frpc。
 2. **本地 `.env` 的 `CORS_ORIGINS`** 加 `https://<域名>` 并重启 backend（否则外网登录被 CORS 拦）。
