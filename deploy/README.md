@@ -1,12 +1,90 @@
 # 客服中心管理系统 · 阿里云部署运维手册
 
-> 版本: v1.2 · 2026-08-24
+> 版本: v1.3 · 2026-08-30
 > 部署方式: 支持 **git 直连一键部署**（推荐）与 **tar 包发布** 两种，单机 Docker Compose，够用且易回滚。
 > 目录: `deploy/` 下的脚本 + 本手册，覆盖 **安装 / 部署 / 升级 / 备份 / 数据导入导出 / 回滚 / 数字证书(HTTPS)** 全流程。
 >
 > 📌 **本手册 = 整体上云（数据在云端）**。若你需要 **数据留内网、计算在本地、外网可访问**，
 > 请改用 [deploy/frp/README.md](frp/README.md) 的 **frp 内网穿透方案**（本地为主 + 云端转发），
 > 两者可互补：frp 为主部署、云上作为异地备份仓库。
+
+---
+
+## 0. 高频运维指令速查 ⚡
+
+> 服务器 = 部署机 `/opt/csctalon`。`current` 是软链 → `releases/<版本>`；**数据库/Redis 数据固定挂载在 `/opt/csctalon/data`（不随代码切换）**，代码目录随便切版本不影响数据。
+
+**① 看状态 & 健康**
+```bash
+docker compose --env-file /opt/csctalon/.env ps     # 4 个容器: db/redis/backend/web
+curl -sf http://127.0.0.1:8000/health && echo OK    # 后端健康
+```
+
+**② 升级发布（拉最新 main 并重建）**
+```bash
+curl -fsSL http://10.147.17.41:3000/tanzk/csctalon/raw/branch/main/deploy/upgrade.sh | sudo bash -s -- --git
+# 升级前会自动备份; 失败自动回滚
+```
+
+**③ 备份（升级 / 大改动前必做）**
+```bash
+sudo /opt/csctalon/current/deploy/backup.sh --env-file /opt/csctalon/.env --output /opt/csctalon/backups --keep 14
+```
+
+**④ 恢复数据（误删 / 升级后"数据变空/异常"）**
+```bash
+sudo /opt/csctalon/current/deploy/restore.sh /opt/csctalon/backups/csctalon-backup-最近的.tar.gz --env-file /opt/csctalon/.env
+```
+
+**⑤ 回滚代码（功能异常回到上一版本）**
+```bash
+sudo /opt/csctalon/current/deploy/rollback.sh
+# 数据也要退回升级前: sudo /opt/csctalon/current/deploy/rollback.sh --restore /opt/csctalon/backups/<升级前备份包>
+```
+
+**⑥ 查日志**
+```bash
+tail -n 200 -f /opt/csctalon/logs/backend/app.log    # 后端: 同步/调度/报错
+docker logs --tail 200 csctalon-backend              # 容器内附加输出
+docker logs --tail 200 csctalon-web                  # nginx 访问/错误
+```
+
+**⑦ 重置 admin 密码（登录一直报"用户名或密码错误"时）**
+```bash
+docker exec -i -e NEW_ADMIN_PASSWORD='新强密码' csctalon-backend python3 < py 脚本
+```
+inline 脚本（见下方一段；用户名若非 `admin` 则替换）：
+
+```python
+from sqlalchemy import select
+from app.core.database import SessionLocal
+from app.core.security import hash_password
+from app.models.user import User
+import os
+db = SessionLocal()
+u = db.scalar(select(User).where(User.username == 'admin'))
+if u is None:
+    from app.models.user import RoleEnum
+    u = User(username='admin', display_name='管理员', hashed_password=hash_password(os.environ['NEW_ADMIN_PASSWORD']), role=RoleEnum.ADMIN.value); db.add(u)
+u.hashed_password = hash_password(os.environ['NEW_ADMIN_PASSWORD'])
+db.commit(); db.close(); print('admin 密码已重置')
+```
+
+**⑧ 升级/迁移后"数据全空"急救三连（先判库，别急着删）**
+```bash
+# 1) 核心业务表到底有没有数据(0 或缺表 = 接错库/新空库)
+docker exec csctalon-db psql -U csctalon -d csctalon -tAc "select 'refunds='||count(*) from refunds; select 'tickets='||count(*) from service_tickets;"
+# 2) 旧数据中心目录还在不在
+du -sh /opt/csctalon/data
+# 3) 直接用它恢复(升级会自动先备到 backups/)
+sudo /opt/csctalon/current/deploy/restore.sh /opt/csctalon/backups/csctalon-backup-最近的.tar.gz --env-file /opt/csctalon/.env
+```
+
+> **注意**
+> - `INIT_ADMIN_PASSWORD` **只在首次创建管理员时生效**，之后改 `.env` 不会同步改 DB 密码 → 忘密码用 ⑦ 重置，别指望改 `.env`。
+> - `current` 软链若异常（曾出现自引用死循环），用 `ls -l /opt/csctalon/current /opt/csctalon/current.old` 检查，并手工修正：
+>   `ln -sfn /opt/csctalon/releases/<版本> /opt/csctalon/current`。
+> - 千万别把数据目录建进 `releases/<版本>/data`（用相对 `./data/postgres` 就会"每切版本换个空库"，正是 "数据全空" 的常见根因）。
 
 ---
 
@@ -261,6 +339,9 @@ sudo /opt/csctalon/current/deploy/restore.sh <备份包> --db-only
 |---|---|
 | 服务启动但 `http://IP/` 打不开 | 安全组是否放行 80；`docker compose ps` 是否全 running；nginx 日志 `logs/nginx/` |
 | 升级后登录报"凭证解密失败" | `.env` 的 `JWT_SECRET_KEY/CONFIG_ENCRYPTION_KEY` 与迁移前不一致 → 恢复原值重启 |
+| 登录一直 401(用户名或密码错误) | 密码记错，或改了 `INIT_ADMIN_PASSWORD` 但**首次建管理员后不生效** → 用 §0⑦ 直接重置 DB 里的 admin 密码 |
+| 升级/迁移后系统"数据全空"(业务表全 0 或缺关键表) | 容器连到了新建的空库（数据目录落进了 `releases/<版本>/data` 或相对 `./data/postgres`）→ 先 `du -sh /opt/csctalon/data` + psql 查 `refunds` 计数，用升级前备份 §0④ 恢复 |
+| `cd /opt/csctalon/current` 报"符号链接的层数过" | `current`/`current.old` 软链自引用（upgrade.sh 回滚锚点生成 bug）→ 用 `ls -l /opt/csctalon/current` 检查后 `ln -sfn /opt/csctalon/releases/<版本> /opt/csctalon/current` 手工扶正 |
 | 恢复后数据不对 | 备份是时间点快照；确认用的是期望时刻的备份包 |
 | 同步任务不跑 | `BMS_SCHEDULE_AUTOSTART` 是否为 true；看 `logs/backend/` 同步日志 |
 | docker build 卡在 Downloading Chrome for Testing | Playwright 浏览器下载走 npmmirror 镜像（Dockerfile 已内置 `PLAYWRIGHT_DOWNLOAD_HOST`），重试构建即可 |
