@@ -694,6 +694,23 @@ class BmsScheduler:
             f" 失败专项={failed_types}"
         )
 
+        # 专项级熔断: 仅白天增量模式。为避免偶发超时/限流直接把专项熔断一整天
+        # (造成当日数据缺口, P1 审计 2026-08-30), 先对本次失败专项单次重试, 仍失败才熔断。
+        if not force_all and failed_types:
+            retried_failed = await self._retry_failed_types_once(
+                failed_types,
+                range_start=range_start,
+                range_end=range_end,
+                start_disp=start_disp,
+                reason=reason,
+            )
+            recovered = sorted(set(failed_types) - set(retried_failed))
+            if recovered:
+                logger.info(f"[定时同步{reason}] 专项重试恢复: {recovered}")
+            if retried_failed != failed_types:
+                logger.info(f"[定时同步{reason}] 专项重试后仍失败: {sorted(retried_failed)}")
+            failed_types = retried_failed
+
         # 专项级熔断: 仅白天增量模式,逐个失败 data_type 写入集合(已有的不重复加)
         if not force_all and failed_types:
             s = self._halted_types.setdefault(biz_key, set())
@@ -706,6 +723,118 @@ class BmsScheduler:
                     f" 本轮新增暂停={newly_halted},"
                     f" 累计已暂停专项={sorted(s)}"
                 )
+
+
+    async def _retry_failed_types_once(
+        self,
+        failed_types: list[str],
+        *,
+        range_start,
+        range_end,
+        start_disp: str,
+        reason: str,
+    ) -> list[str]:
+        """P1(2026-08-30 审计): 白天增量模式下, 对本次失败专项**单次重试**一次,
+        仍失败才交由调用方写入熔断。
+
+        复用同一轮的时间窗口, 仅针对失败专项, 并经 SyncTaskManager 全局互斥
+        提交(与定时/手动任务并发隔离, 避免重复导入)。适用于偶发超时/限流——
+        一次重试即可恢复, 而不必把该专项熔断一整天。
+
+        Returns: 重试后仍失败的 data_type 列表(含未重试的未知类型原样保留)。
+        """
+        if not failed_types:
+            return []
+
+        bms_types = [dt for dt in failed_types if dt in set(DEFAULT_SYNC_TYPES)]
+        scrm_known = {
+            DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_PRIVATE,
+            DATA_TYPE_SESSION_GROUP, DATA_TYPE_SESSION_VIRTUAL,
+        }
+        scrm_types = [dt for dt in failed_types if dt in scrm_known]
+        # 未知类型无法定向重试, 原样保留为失败
+        unknown = [dt for dt in failed_types if dt not in set(bms_types) and dt not in scrm_known]
+        retry_types = bms_types + scrm_types
+        if not retry_types:
+            return failed_types
+
+        if sync_task_manager.is_busy():
+            logger.warning(f"[定时同步{reason}] 专项重试跳过(任务忙): {retry_types}")
+            return failed_types
+
+        runners: list = []
+        time_ranges_bms_retry = {dt: (range_start, range_end) for dt in bms_types}
+        if bms_types:
+            async def bms_retry_runner(task_id: str, on_progress_cb):
+                try:
+                    res = await sync_all(
+                        trigger_type="scheduled",
+                        triggered_by="scheduler-retry",
+                        on_progress=on_progress_cb,
+                        data_types=bms_types,
+                        time_ranges=time_ranges_bms_retry,
+                    )
+                    return res if isinstance(res, list) else []
+                except Exception as e:  # noqa: BLE001
+                    return [{"data_type": dt, "success": False, "error": str(e)} for dt in bms_types]
+            runners.append(bms_retry_runner)
+
+        if scrm_types:
+            async def scrm_retry_runner(task_id: str, on_progress_cb):
+                try:
+                    res = await sync_scrm_all(
+                        trigger_type="scheduled",
+                        triggered_by="scheduler-retry",
+                        on_progress=on_progress_cb,
+                        sync_types=scrm_types,
+                    )
+                    return res if isinstance(res, list) else []
+                except Exception as e:  # noqa: BLE001
+                    return [{"data_type": dt, "success": False, "error": str(e)} for dt in scrm_types]
+            runners.append(scrm_retry_runner)
+
+        retry_display = {}
+        for dt in bms_types:
+            retry_display[dt] = (start_disp, range_end.strftime("%m-%d %H:%M:%S"))
+        for dt in scrm_types:
+            retry_display[dt] = ("专项重试(按last_success)", range_end.strftime("%m-%d %H:%M:%S"))
+
+        try:
+            tid, msg = await sync_task_manager.submit_multi(
+                trigger_type="scheduled",
+                triggered_by="scheduler-retry",
+                data_types=retry_types,
+                time_ranges=time_ranges_bms_retry,
+                time_ranges_display=retry_display,
+                runners=runners,
+                ignore_cooldown=True,
+            )
+            logger.info(f"[定时同步{reason}] 已提交专项重试: task_id={tid}, {msg}")
+        except RuntimeError as e:
+            logger.warning(f"[定时同步{reason}] 专项重试未执行: {e}")
+            return failed_types
+
+        if not tid:
+            return failed_types
+
+        poll = 0
+        results: list[dict] | None = None
+        while poll < 60 * 60 * 4:  # 最多 4 小时兜底
+            await asyncio.sleep(15)
+            poll += 1
+            t = sync_task_manager.get_task(tid)
+            if t and t.status in ("success", "failed", "partial"):
+                results = t.results
+                break
+        if results is None:
+            logger.warning(f"[定时同步{reason}] 专项重试等待超时(task_id={tid}), 仍按失败处理")
+            still_failed = retry_types
+        else:
+            still_failed = [
+                r.get("data_type") for r in results
+                if isinstance(r, dict) and not r.get("success") and r.get("data_type")
+            ]
+        return sorted(set(still_failed) | set(unknown))
 
 
 # 全局单例

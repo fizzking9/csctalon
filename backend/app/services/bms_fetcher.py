@@ -356,6 +356,11 @@ async def _download_with_retry(
                 )
                 await asyncio.sleep(2)
             continue
+        finally:
+            # ⚠️ 无论 成功/异常/被取消, 都清理被 asyncio.shield 保护的 download_task。
+            #    shield 不会随外层协程取消而停止: 若外层被取消/页面关闭, 残留 task 会
+            #    一直运行到页面关闭抛异常且无人 retrieve → "Task exception was never retrieved"。
+            _drain_task(download_task)
 
     # 所有重试都用完了 → 把最后一次异常抛出去
     raise RuntimeError(

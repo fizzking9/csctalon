@@ -2,8 +2,21 @@
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+
+# ⚠️ 日志时间戳统一为北京时间(容器默认 TZ=UTC, 否则 asctime 落后 8h, 与前端/调度标签混淆)。
+#    仅调整日志 Formatter 渲染, 不影响进程/业务用 datetime.now(timezone.utc) 的 UTC 存储语义。
+_TZ_CN = timezone(timedelta(hours=8))
+
+
+def _beijing_localtime(ts: float):
+    return datetime.fromtimestamp(ts, _TZ_CN).timetuple()
+
+
+logging.Formatter.converter = staticmethod(_beijing_localtime)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
