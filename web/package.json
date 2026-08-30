@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:release": "vite build --mode production",
+    "build:debug": "VITE_BUILD_MODE=debug vite build",
     "preview": "vite preview --port 5173"
   },
   "dependencies": {

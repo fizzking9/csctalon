@@ -101,7 +101,13 @@ services:
         max-file: "3"
 
   web:
-    build: ./web
+    build:
+      context: ./web
+      # 前端构建模式: debug=全量菜单(内测) / release=收敛菜单(生产默认)
+      # 本地/内测: 在 .env 设 WEB_BUILD_MODE=debug 后 docker compose up -d --build 即全量菜单
+      # 生产部署: 不设置则默认 release, 只显示核心菜单(运营看板/工作台/我的待办/专项分析3项/系统管理)
+      args:
+        BUILD_MODE: ${WEB_BUILD_MODE:-release}
     container_name: csctalon-web
     volumes:
       - ${NGINX_LOGS_DIR:-./logs/nginx}:/var/log/nginx

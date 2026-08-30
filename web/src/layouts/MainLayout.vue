@@ -41,40 +41,40 @@
           <el-menu-item index="/dashboards/refund">退款分析</el-menu-item>
           <el-menu-item index="/dashboards/refund-recovery">挽回分析</el-menu-item>
           <el-menu-item index="/dashboards/complaint-analysis">投诉分析</el-menu-item>
-          <el-menu-item index="/dashboards/complaint-audit">投诉核查</el-menu-item>
-          <el-menu-item index="/dashboards/reception">接待分析</el-menu-item>
-          <el-menu-item index="/dashboards/performance">绩效分析</el-menu-item>
-          <el-menu-item index="/dashboards/special">专项跟进</el-menu-item>
+          <el-menu-item v-if="showByVisibility('debug_only')" index="/dashboards/complaint-audit">投诉核查</el-menu-item>
+          <el-menu-item v-if="showByVisibility('debug_only')" index="/dashboards/reception">接待分析</el-menu-item>
+          <el-menu-item v-if="showByVisibility('debug_only')" index="/dashboards/performance">绩效分析</el-menu-item>
+          <el-menu-item v-if="showByVisibility('debug_only')" index="/dashboards/special">专项跟进</el-menu-item>
         </el-sub-menu>
 
         <!-- 设备/人员时序审计:业务功能(从退款看板-人员/设备分析「时序」跳转),不进入主菜单 -->
-        <el-menu-item index="/todos">
+        <el-menu-item v-if="showByVisibility('debug_only')" index="/todos">
           <el-icon><Bell /></el-icon>
           <span>事项跟进</span>
         </el-menu-item>
 
-        <el-menu-item index="/tasks">
+        <el-menu-item v-if="showByVisibility('debug_only')" index="/tasks">
           <el-icon><List /></el-icon>
           <span>专项任务</span>
         </el-menu-item>
 
-        <el-menu-item index="/management/device-tags">
+        <el-menu-item v-if="showByVisibility('debug_only')" index="/management/device-tags">
           <el-icon><CollectionTag /></el-icon>
           <span>设备专项标签</span>
         </el-menu-item>
 
-        <el-menu-item index="/management/invoices">
+        <el-menu-item v-if="showByVisibility('debug_only')" index="/management/invoices">
           <el-icon><Tickets /></el-icon>
           <span>发票登记</span>
         </el-menu-item>
 
-        <el-menu-item index="/management/kb-articles">
+        <el-menu-item v-if="showByVisibility('debug_only')" index="/management/kb-articles">
           <el-icon><Reading /></el-icon>
           <span>知识库</span>
         </el-menu-item>
 
         <!-- 策略发布:管理层看子菜单(管理+查阅),客服只看发布页 -->
-        <el-sub-menu v-if="authStore.isManager" index="strategy">
+        <el-sub-menu v-if="authStore.isManager && showByVisibility('debug_only')" index="strategy">
           <template #title>
             <el-icon><Document /></el-icon>
             <span>策略发布</span>
@@ -82,19 +82,19 @@
           <el-menu-item v-if="authStore.isAdmin || authStore.isSupervisor" index="/strategy/manage">策略管理</el-menu-item>
           <el-menu-item index="/strategy/publish">文档查阅</el-menu-item>
         </el-sub-menu>
-        <el-menu-item v-else index="/strategy/publish">
+        <el-menu-item v-else-if="showByVisibility('debug_only')" index="/strategy/publish">
           <el-icon><Document /></el-icon>
           <span>策略发布</span>
         </el-menu-item>
 
         <!-- 报表中心(管理层,规划占位): 仅 admin + supervisor 可见全量报表 -->
-        <el-menu-item v-if="authStore.isAdmin || authStore.isSupervisor" index="/report/center">
+        <el-menu-item v-if="(authStore.isAdmin || authStore.isSupervisor) && showByVisibility('debug_only')" index="/report/center">
           <el-icon><Printer /></el-icon>
           <span>报表中心</span>
         </el-menu-item>
 
         <!-- 管理闭环:报告→审计→措施→跟进→回看(管理层可见) -->
-        <el-sub-menu v-if="authStore.isManager" index="management">
+        <el-sub-menu v-if="authStore.isManager && showByVisibility('debug_only')" index="management">
           <template #title>
             <el-icon><Flag /></el-icon>
             <span>管理闭环</span>
@@ -283,6 +283,7 @@ import { systemEventSummary } from '@/api/systemEvent'
 import { getSiteInfo } from '@/api/siteInfo'
 import AuditDialog from '@/components/AuditDialog.vue'
 import { useAudit } from '@/composables/useAudit'
+import { showByVisibility } from '@/utils/env'
 
 const { openQuickAnalysis } = useAudit()
 

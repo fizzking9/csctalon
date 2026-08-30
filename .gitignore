@@ -78,6 +78,7 @@ backend/.env
 # 保留模板文件
 !.env.example
 !backend/.env.example
+!web/.env.example
 
 # ---------- 运行时数据 ----------
 # 上传的业务文件(运行时挂载,仅保留目录占位)
