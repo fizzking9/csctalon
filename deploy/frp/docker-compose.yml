@@ -21,25 +21,25 @@
 #   FRPC_CONFIG=路径   客户端配置, 默认 ./local/frpc.toml
 #   例(用已生成配置): FRPS_CONFIG=/etc/frp/frps.toml docker compose --profile frps up -d
 #
-# 镜像源(国内拉 Docker Hub 超时时用代理源):
-#   FRP_IMAGE=镜像名   默认 snowdreamtech/frp:0.61.1
-#   例(国内): FRP_IMAGE=docker.m.daocloud.io/snowdreamtech/frp:0.61.1 \
-#              docker compose --profile frps up -d
-#   注意: 改 FRP_IMAGE 后需先 docker pull 对应镜像(或让 compose 自己拉),
-#         否则 compose 按默认 tag 仍会去 Docker Hub 拉导致超时。
+# 镜像源(国内拉 Docker Hub 超时时, 优先给 Docker 配加速器/registry-mirrors,
+# 然后直接用官方镜像名拉取; 确需指定其他镜像源时用 FRP_IMAGE 覆盖):
+#   FRP_IMAGE=镜像名   可选, 覆盖 frps/frpc 的镜像(默认见各 service)
+#   例: FRP_IMAGE=docker.m.daocloud.io/snowdreamtech/frps:0.71.0-alpine \
+#                  docker compose --profile frps up -d
+#   注意: 镜像名需精确匹配本地已拉取的镜像, 否则 compose 会按该名字再去拉取。
 #
 # 说明:
 #   - network_mode: host → 容器共享宿主网络栈(frp 需直接绑宿主端口/访问宿主
 #     127.0.0.1:80), 仅 Linux 支持; macOS/Windows 的 Docker 请用二进制方式。
 #   - 与主 compose(web/backend/db/redis) 完全解耦, 不影响现有服务。
-#   - 镜像版本 0.61.1, 需 frp v0.52+(TOML 配置); 与 deploy/frp 脚本默认版本一致。
+#   - 镜像默认 snowdreamtech/frps、snowdreamtech/frpc(注意仓库名是 frps/frpc, 不是 frp),
+#     版本 0.71.0-alpine; 需 frp v0.52+(TOML 配置)。
 #   - 端口安全: 云端只放行 443/80/7000; 8080/7500 均只绑 127.0.0.1, 详见 README §2.3。
 # =============================================================================
 
 name: frp
 
 x-frp-common: &frp-common
-  image: ${FRP_IMAGE:-snowdreamtech/frp:0.61.1}
   restart: unless-stopped
   network_mode: host
   logging:
@@ -59,6 +59,7 @@ services:
     <<: *frp-common
     profiles: ["frps"]
     container_name: frps
+    image: ${FRP_IMAGE:-snowdreamtech/frps:0.71.0-alpine}
     command: ["-c", "/etc/frp/frps.toml"]
     volumes:
       # frps.toml 的 log.to 指向 /var/log/frps/frps.log, 确保宿主目录存在且有写权限:
@@ -75,6 +76,7 @@ services:
     <<: *frp-common
     profiles: ["frpc"]
     container_name: csctalon-frpc
+    image: ${FRP_IMAGE:-snowdreamtech/frpc:0.71.0-alpine}
     command: ["-c", "/etc/frp/frpc.toml"]
     volumes:
       - ${FRPC_CONFIG:-./local/frpc.toml}:/etc/frp/frpc.toml:ro

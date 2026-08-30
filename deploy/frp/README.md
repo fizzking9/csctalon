@@ -235,16 +235,14 @@ FRPC_CONFIG=./frpc.toml docker compose --profile frpc up -d
 **国内拉镜像超时怎么办（Docker Hub 连不上）**：
 
 ```bash
-# 用 FRP_IMAGE 指定代理源镜像（compose 按该镜像名拉取, 不再去 Docker Hub）
-# 云端 frps:
-FRP_IMAGE=docker.m.daocloud.io/snowdreamtech/frp:0.61.1 \
-  FRPS_CONFIG=./frps.toml docker compose --profile frps up -d
-# 本地 frpc:
-FRP_IMAGE=docker.m.daocloud.io/snowdreamtech/frp:0.61.1 \
-  FRPC_CONFIG=./frpc.toml docker compose --profile frpc up -d
+# 推荐: 给 Docker 配加速器, 然后用官方镜像名直接拉(无需改 compose)
+#   1Panel: 容器→设置→加速器→添加 https://docker.1panel.live 保存(自动重启 Docker)
+#   或 /etc/docker/daemon.json 写 registry-mirrors 后 systemctl restart docker
+# 然后直接启动即可(compose 走加速器拉取):
+FRPS_CONFIG=./frps.toml docker compose --profile frps up -d
 ```
 
-> 可用代理源前缀：`docker.m.daocloud.io/`、`docker.1panel.live/`、`dockerproxy.com/`。也可先 `docker pull <代理源>/snowdreamtech/frp:0.61.1` 再 `docker tag` 成 `snowdreamtech/frp:0.61.1`，或给 Docker 配 registry-mirrors（1Panel → 容器 → 设置 → 加速器）。**注意：compose 按 `image:` 精确匹配本地镜像，tag 不一致会再去 Docker Hub 拉导致超时**（这就是上面用 `FRP_IMAGE` 而不是手动 `docker pull`+`docker tag` 的原因）。
+> 统一 compose 默认镜像：frps = `snowdreamtech/frps:0.71.0-alpine`、frpc = `snowdreamtech/frpc:0.71.0-alpine`（注意仓库名是 **frps/frpc**，不是 `frp`）。若确需指定其他镜像源，用 `FRP_IMAGE` 覆盖（需与本地已拉取的镜像名完全一致）。
 
 常用运维（两端各自用自己 profile）：
 
@@ -257,7 +255,7 @@ FRP_IMAGE=docker.m.daocloud.io/snowdreamtech/frp:0.61.1 \
 > 说明：
 > - 统一 compose 使用 `network_mode: host`（frp 需绑宿主端口/访问宿主 `127.0.0.1:80`），仅 **Linux** 支持；macOS/Windows 的 Docker 请用 §3.2/§3.3 的二进制方式。
 > - 配置路径可用环境变量覆盖：服务端 `FRPS_CONFIG`（默认 `./cloud/frps.toml`）、客户端 `FRPC_CONFIG`（默认 `./local/frpc.toml`）。若已用脚本生成过配置，可直接 `FRPS_CONFIG=/etc/frp/frps.toml` 或 `FRPC_CONFIG=/opt/csctalon/frpc/frpc.toml` 复用，无需再生成。
-> - 镜像可用 `FRP_IMAGE` 覆盖（默认 `snowdreamtech/frp:0.61.1`），国内拉 Docker Hub 超时用代理源（见上方示例）。镜像版本 `0.61.1`，与脚本默认版本一致；`/var/log/frps` 需宿主持有（`mkdir -p /var/log/frps`），否则 frps 日志目录写不进去。
+> - 镜像可用 `FRP_IMAGE` 覆盖（默认 frps=`snowdreamtech/frps:0.71.0-alpine`、frpc=`snowdreamtech/frpc:0.71.0-alpine`，仓库名是 frps/frpc 不是 frp）。国内拉 Docker Hub 超时优先配加速器（见上方示例）；`/var/log/frps` 需宿主持有（`mkdir -p /var/log/frps`），否则 frps 日志目录写不进去。
 > - 云端端口安全同上：只放行 `443/80/7000`；`8080`/`7500` 均只绑 `127.0.0.1`（host 网络下 frps.toml 里 `webServer.addr = "127.0.0.1"` 已保证）。
 
 ### 3.5 本地 CORS 配置（必须，否则外网登录/接口被拦截）

@@ -90,7 +90,7 @@ if [[ $PURGE -eq 1 ]]; then
   c "--purge: 删除配置/日志/镜像..."
   rm -rf /etc/frp /var/log/frps
   ok "已删除 /etc/frp、/var/log/frps"
-  docker rmi snowdreamtech/frps:0.61.1 2>/dev/null || warn "frps 镜像不存在或已被删(可忽略)"
+  docker rmi snowdreamtech/frps:0.71.0-alpine 2>/dev/null || warn "frps 镜像不存在或已被删(可忽略)"
   docker image prune -f >/dev/null 2>&1 || true
 else
   warn "未加 --purge: 保留配置(/etc/frp)与日志(/var/log/frps), 便于重新部署复用"
