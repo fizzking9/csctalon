@@ -6310,7 +6310,7 @@ def refund_personnel_trend(
         for r in db.execute(text(
             """
             SELECT c.operator AS op, NULLIF(TRIM(c.device_sn),'') AS sn,
-                   DATE_TRUNC('week', c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date AS wk
+                   DATE_TRUNC('week', c.operation_time AT TIME ZONE 'Asia/Shanghai')::date AS wk
             FROM cs_records c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
@@ -6328,7 +6328,7 @@ def refund_personnel_trend(
         for r in db.execute(text(
             """
             SELECT c.operator AS op, NULLIF(TRIM(c.device_sn),'') AS sn,
-                   DATE(c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS d
+                   DATE(c.operation_time AT TIME ZONE 'Asia/Shanghai') AS d
             FROM cs_records c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
@@ -6346,12 +6346,13 @@ def refund_personnel_trend(
         meta = core["all_ops_meta"].get(op, {})
         trend = []
         for d_key in dates_list:
-            host = day_op_host.get(d_key, {}).get(op, set())
+            # day_op_host 的 key 是 str(r.d)('YYYY-MM-DD'), 而 dates_list 存的是 date 对象 → 必须 str() 统一
+            host = day_op_host.get(str(d_key), {}).get(op, set())
             fail = host & global_fail_sns
             total = len(host)
             succ = total - len(fail)
             rate = round(succ / total * 100, 2) if total else 0.0
-            trend.append({"date": d_key, "total_sn": total, "success_sn": succ,
+            trend.append({"date": str(d_key), "total_sn": total, "success_sn": succ,
                            "failed_sn": len(fail), "success_rate": rate})
         persons.append({"operator": op, "name": meta.get("name", op), "trend": trend})
 
@@ -6702,9 +6703,9 @@ def refund_type_trend(
     op_staff_type = {sd["operator"]: sd["staff_type"] for sd in staff_detail}
 
     if grain == "week":
-        date_col = f"DATE_TRUNC('week', c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date"
+        date_col = f"DATE_TRUNC('week', c.operation_time AT TIME ZONE 'Asia/Shanghai')::date"
     else:
-        date_col = f"DATE(c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')"
+        date_col = f"DATE(c.operation_time AT TIME ZONE 'Asia/Shanghai')"
 
     for r in db.execute(text(
         f"""
@@ -8443,7 +8444,7 @@ def refund_recovery_analysis(
             SELECT sn, MIN(day) AS first_day
             FROM (
                 SELECT NULLIF(TRIM(r.device_sn),'') AS sn,
-                       DATE(r.created_at_raw AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS day
+                       DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai') AS day
                 FROM refunds r
                 WHERE r.created_at_raw IS NOT NULL
                   AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
@@ -8451,7 +8452,7 @@ def refund_recovery_analysis(
                   AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
                 UNION ALL
                 SELECT NULLIF(TRIM(st.device_sn),'') AS sn,
-                       DATE(st.register_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS day
+                       DATE(st.register_time AT TIME ZONE 'Asia/Shanghai') AS day
                 FROM service_tickets st
                 WHERE st.register_time IS NOT NULL
                   AND st.register_time >= :ts AND st.register_time <= :te7
@@ -8519,7 +8520,7 @@ def refund_recovery_analysis(
             # 日粒度 分母SN (按天, 2026-08-11: 包含所有人员,不只专职挽回)
             day_host_rows = db.execute(text(
                 """
-                SELECT DATE(c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS d,
+                SELECT DATE(c.operation_time AT TIME ZONE 'Asia/Shanghai') AS d,
                        NULLIF(TRIM(c.device_sn),'') AS sn
                 FROM cs_records c
                 WHERE c.operation_time IS NOT NULL
@@ -8540,6 +8541,8 @@ def refund_recovery_analysis(
                 key = str(r.d)
                 day_to_host.setdefault(key, set()).add(r.sn)
             # 日粒度 失败SN (T+7, 修正口径: 不限制operator/refund_method, 工单用register_time)
+            # 与 KPI global_fail_sns 一致: refunds + 退款工单 + cs_record关键词 三来源
+            ck = _RR_CS_FAIL_KW
             day_fail_rows = db.execute(text(
                 """
                 SELECT NULLIF(TRIM(r.device_sn),'') AS sn
@@ -8556,8 +8559,20 @@ def refund_recovery_analysis(
                   AND COALESCE(st.service_category,'') = '退款'
                   AND COALESCE(st.status, '') != '终止'
                   AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+                UNION
+                SELECT NULLIF(TRIM(c.device_sn),'') AS sn
+                FROM cs_records c
+                WHERE c.operation_time IS NOT NULL
+                  AND c.operation_time >= :ts AND c.operation_time <= :te7
+                  AND c.problem_category = '退款'
+                  AND NOT (c.operator = ANY(:sys_bl))
+                  AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+                  AND (COALESCE(c.description,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4])
+                    OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4])
+                    OR COALESCE(c.solution,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4]))
                 """
-            ), {"ts": ts0, "te7": te0_7}).fetchall()
+            ), {"ts": ts0, "te7": te0_7, "sys_bl": list(SYS_OP_BLACKLIST_RR),
+                "ck1": f"%{ck[0]}%", "ck2": f"%{ck[1]}%", "ck3": f"%{ck[2]}%", "ck4": f"%{ck[3]}%"}).fetchall()
             fail_sn_set = set(r.sn for r in day_fail_rows if r.sn)
             daily_trend = []
             for d_obj in dates_list:
@@ -8588,7 +8603,7 @@ def refund_recovery_analysis(
         # 今日 分母SN (按小时, 2026-08-11: 包含所有人员,不只专职挽回)
         hr_rows = db.execute(text(
             """
-            SELECT EXTRACT(HOUR FROM c.operation_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai') AS hh,
+            SELECT EXTRACT(HOUR FROM c.operation_time AT TIME ZONE 'Asia/Shanghai') AS hh,
                    NULLIF(TRIM(c.device_sn),'') AS sn
             FROM cs_records c
             WHERE c.operation_time IS NOT NULL
@@ -8614,6 +8629,8 @@ def refund_recovery_analysis(
             today_all_sns.update(s)
         today_fail_sns: set[str] = set()
         if today_all_sns:
+            # 与 KPI global_fail_sns 口径一致: refunds + 退款工单 + cs_record关键词 三来源
+            ck = _RR_CS_FAIL_KW
             tfr = db.execute(text(
                 """
                 WITH arr AS (SELECT unnest(CAST(:sn_arr AS text[])) AS sn)
@@ -8622,8 +8639,17 @@ def refund_recovery_analysis(
                 UNION
                 SELECT DISTINCT NULLIF(TRIM(st.device_sn),'') AS sn FROM service_tickets st JOIN arr a ON NULLIF(TRIM(st.device_sn),'') = a.sn
                  WHERE COALESCE(st.service_category,'') = '退款' AND COALESCE(st.status, '') != '终止'
+                UNION
+                SELECT DISTINCT NULLIF(TRIM(c.device_sn),'') AS sn
+                FROM cs_records c JOIN arr a ON NULLIF(TRIM(c.device_sn),'') = a.sn
+                 WHERE c.problem_category = '退款'
+                   AND NOT (c.operator = ANY(:sys_bl))
+                   AND (COALESCE(c.description,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4])
+                     OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4])
+                     OR COALESCE(c.solution,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4]))
                 """
-            ), {"sn_arr": list(today_all_sns)}).fetchall()
+            ), {"sn_arr": list(today_all_sns), "sys_bl": list(SYS_OP_BLACKLIST_RR),
+                "ck1": f"%{ck[0]}%", "ck2": f"%{ck[1]}%", "ck3": f"%{ck[2]}%", "ck4": f"%{ck[3]}%"}).fetchall()
             today_fail_sns = set(r.sn for r in tfr if r.sn)
         max_hh = _dt.datetime.now(TZ).hour
         hourly_today = []
