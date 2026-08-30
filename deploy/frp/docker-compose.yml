@@ -21,6 +21,13 @@
 #   FRPC_CONFIG=路径   客户端配置, 默认 ./local/frpc.toml
 #   例(用已生成配置): FRPS_CONFIG=/etc/frp/frps.toml docker compose --profile frps up -d
 #
+# 镜像源(国内拉 Docker Hub 超时时用代理源):
+#   FRP_IMAGE=镜像名   默认 snowdreamtech/frp:0.61.1
+#   例(国内): FRP_IMAGE=docker.m.daocloud.io/snowdreamtech/frp:0.61.1 \
+#              docker compose --profile frps up -d
+#   注意: 改 FRP_IMAGE 后需先 docker pull 对应镜像(或让 compose 自己拉),
+#         否则 compose 按默认 tag 仍会去 Docker Hub 拉导致超时。
+#
 # 说明:
 #   - network_mode: host → 容器共享宿主网络栈(frp 需直接绑宿主端口/访问宿主
 #     127.0.0.1:80), 仅 Linux 支持; macOS/Windows 的 Docker 请用二进制方式。
@@ -32,7 +39,7 @@
 name: frp
 
 x-frp-common: &frp-common
-  image: snowdreamtech/frp:0.61.1
+  image: ${FRP_IMAGE:-snowdreamtech/frp:0.61.1}
   restart: unless-stopped
   network_mode: host
   logging:

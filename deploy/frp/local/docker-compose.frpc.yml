@@ -9,11 +9,14 @@
 #   - network_mode: host  → frpc 直接访问宿主 127.0.0.1:80(即 web 容器 nginx),
 #     无需关心容器间网络; macOS/Windows 的 Docker 不支持 host 网络, 请改用 binary 方式。
 #   - 镜像版本需与 frp 二进制一致(TOML 配置要求 v0.52+), 默认 0.61.1。
+#   - 国内拉 Docker Hub 超时时, 用 FRP_IMAGE 指定代理源镜像:
+#       FRP_IMAGE=docker.m.daocloud.io/snowdreamtech/frpc:0.61.1 \
+#         docker compose -f docker-compose.frpc.yml up -d
 #   - 与主 compose(web/backend/db/redis) 完全解耦, 不影响现有服务。
 # =============================================================================
 services:
   frpc:
-    image: snowdreamtech/frpc:0.61.1
+    image: ${FRP_IMAGE:-snowdreamtech/frpc:0.61.1}
     container_name: csctalon-frpc
     network_mode: host
     volumes:
