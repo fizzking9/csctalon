@@ -836,7 +836,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted } from 'vue'
+import { ref, computed, reactive, onMounted, onBeforeUnmount } from 'vue'
 import { Search, Refresh, Download } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
@@ -856,6 +856,17 @@ const activeTab = ref('overview')
 const rangeMode = ref('30')
 const customRange = ref([])
 const data = ref(null)
+
+// 移动端响应式: 简化描述文字/控件
+const isMobile = ref(false)
+let _mq = null
+function _onMediaChange(e) { isMobile.value = e.matches }
+onMounted(() => {
+  _mq = window.matchMedia('(max-width: 768px)')
+  isMobile.value = _mq.matches
+  _mq.addEventListener('change', _onMediaChange)
+})
+onBeforeUnmount(() => { _mq?.removeEventListener('change', _onMediaChange) })
 // 趋势图粒度(按日/周/月): 周=ISO自然周, 月=自然月; 前端对后端按日数据做汇聚
 const merchantEntityTrendGrain = ref('day')
 const subjectTrendGrain = ref('day')
@@ -1683,4 +1694,24 @@ onMounted(() => {
 .empty-tip { text-align: center; }
 .empty-main { font-size: 15px; color: #6b7280; margin-bottom: 8px; }
 .empty-sub { font-size: 13px; color: #9ca3af; }
+
+/* ===== 移动端优化 (<=768px) ===== */
+@media (max-width: 768px) {
+  .page-sub { font-size: 11px; }
+  .filter-bar { gap: 6px; }
+  .block-title { font-size: 14px; }
+  .block-hint { font-size: 11px; display: block; }
+  .block-head { flex-wrap: wrap; gap: 6px; }
+  .kpi-card { padding: 8px 10px; min-height: 60px; }
+  .kpi-label { font-size: 11px; }
+  .kpi-value { font-size: 19px; }
+  .kpi-sub { font-size: 10px; }
+  .chart-card { padding: 8px; }
+  .chart-title { font-size: 12px; }
+  /* 表格在手机上保持可横向滚动 */
+  :deep(.el-table) { min-width: 560px; }
+  :deep(.el-table__body-wrapper) { overflow-x: auto; }
+  :deep(.el-card) { overflow: hidden; }
+  .block-tabs { padding: 6px 10px; }
+}
 </style>

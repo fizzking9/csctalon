@@ -2,14 +2,14 @@
   <div class="page-container">
     <div class="flex-between mb-16">
       <div class="page-title" style="margin: 0">挽回分析</div>
-      <div class="filter-bar">
-        <el-radio-group v-model="tabMode" size="small" @change="onTabChange">
-          <el-radio-button label="today">今日挽回</el-radio-button>
-          <el-radio-button label="personnel">人员分析</el-radio-button>
-          <el-radio-button label="device">设备分析</el-radio-button>
-          <el-radio-button label="type">类型趋势</el-radio-button>
+      <div class="filter-bar" :class="{ 'is-mobile': isMobile }">
+        <el-radio-group v-model="tabMode" size="small" @change="onTabChange" class="tab-mode-group">
+          <el-radio-button label="today">今日</el-radio-button>
+          <el-radio-button label="personnel">人员</el-radio-button>
+          <el-radio-button label="device">设备</el-radio-button>
+          <el-radio-button label="type">类型</el-radio-button>
         </el-radio-group>
-        <el-radio-group v-if="tabMode !== 'today'" v-model="rangeMode" size="small">
+        <el-radio-group v-if="tabMode !== 'today'" v-model="rangeMode" size="small" class="range-mode-group">
           <el-radio-button label="7">近7天</el-radio-button>
           <el-radio-button label="30">近30天</el-radio-button>
           <el-radio-button label="90">近90天</el-radio-button>
@@ -165,7 +165,7 @@
                   <el-tag size="small" effect="plain" type="success">日视图 · 小时粒度</el-tag>
                 </div>
               </template>
-              <BaseChart v-if="todayHourlyOption.series?.length" :option="todayHourlyOption" height="340px" />
+              <BaseChart v-if="todayHourlyOption.series?.length" :option="todayHourlyOption" :height="isMobile ? '250px' : '340px'" />
               <el-empty v-else description="今日暂无小时级趋势数据" />
             </el-card>
           </el-col>
@@ -185,7 +185,7 @@
                   <el-tag size="small" effect="plain" type="warning">日视图 · 日粒度</el-tag>
                 </div>
               </template>
-              <BaseChart v-if="dailyTrendOption.series?.length" :option="dailyTrendOption" height="340px" />
+              <BaseChart v-if="dailyTrendOption.series?.length" :option="dailyTrendOption" :height="isMobile ? '250px' : '340px'" />
               <el-empty v-else description="暂无日趋势数据" />
             </el-card>
           </el-col>
@@ -308,7 +308,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { Search, QuestionFilled } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import BaseChart from '@/components/BaseChart.vue'
@@ -324,6 +324,17 @@ const customRange = ref([])
 const loading = ref(false)
 const analyzed = ref(false)
 const analyzing = ref(false)
+
+// 移动端响应式: 简化筛选栏文字/隐藏次要控件
+const isMobile = ref(false)
+let _mq = null
+function _onMediaChange(e) { isMobile.value = e.matches }
+onMounted(() => {
+  _mq = window.matchMedia('(max-width: 768px)')
+  isMobile.value = _mq.matches
+  _mq.addEventListener('change', _onMediaChange)
+})
+onBeforeUnmount(() => { _mq?.removeEventListener('change', _onMediaChange) })
 
 const todayDateStr = computed(() => dayjs().format('YYYY-MM-DD (dddd)'))
 
@@ -609,4 +620,23 @@ async function loadAll() {
 .kpi-mini-value { margin-top: 2px; font-size: 22px; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; letter-spacing: -0.3px; }
 .kpi-mini-unit { font-size: 13px; font-weight: 500; margin-left: 2px; opacity: 0.85; }
 .kpi-mini-money { margin-top: 1px; font-size: 11.5px; font-weight: 500; color: #374151; opacity: 0.92; }
+
+/* ===== 移动端优化 (<=768px) ===== */
+@media (max-width: 768px) {
+  .filter-bar { gap: 8px; }
+  .filter-bar.is-mobile .el-radio-group { margin-bottom: 2px; }
+  .page-title { font-size: 18px; }
+  .block-title { font-size: 15px; }
+  .block-sub { font-size: 11px; }
+  .section-card { padding: 12px; }
+  .kpi-mini-card { padding: 8px 10px 8px; min-height: 72px; }
+  .kpi-mini-label { font-size: 11px; }
+  .kpi-mini-value { font-size: 19px; }
+  .kpi-mini-sub { font-size: 9.5px; }
+  .kpi-mini-money { font-size: 10.5px; }
+  /* 表格在手机上保持可横向滚动 */
+  :deep(.el-card) { overflow: hidden; }
+  :deep(.el-table) { min-width: 560px; }
+  :deep(.el-table__body-wrapper) { overflow-x: auto; }
+}
 </style>

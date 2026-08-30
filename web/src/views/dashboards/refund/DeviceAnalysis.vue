@@ -679,4 +679,15 @@ const receptionCountOption = computed(() => {
   font-weight: 500;
   word-break: break-all;
 }
+
+/* ===== 移动端优化 (<=768px) ===== */
+@media (max-width: 768px) {
+  .filter-row, .flex-between { flex-wrap: wrap; gap: 6px; }
+  .block-title { font-size: 14px; }
+  .section-card { padding: 12px; }
+  :deep(.el-table) { min-width: 620px; }
+  :deep(.el-table__body-wrapper) { overflow-x: auto; }
+  :deep(.el-card) { overflow: hidden; }
+  .risk-card { padding: 10px; }
+}
 </style>

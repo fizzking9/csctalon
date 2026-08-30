@@ -20,18 +20,6 @@
           <span>运营看板</span>
         </el-menu-item>
 
-        <!-- 2. 工作台(次之: 待办/任务/快捷入口导向) -->
-        <el-menu-item index="/dashboard">
-          <el-icon><HomeFilled /></el-icon>
-          <span>工作台</span>
-        </el-menu-item>
-
-        <!-- 2.5 我的待办(统一待办中心, 全员可见) -->
-        <el-menu-item index="/agenda">
-          <el-icon><Bell /></el-icon>
-          <span>我的待办</span>
-        </el-menu-item>
-
         <!-- 3. 专项分析:管理层可见, 专项深入分析透视(退款/投诉/接待/提现全链路/绩效/专项跟进) -->
         <el-sub-menu v-if="authStore.isManager" index="dashboards">
           <template #title>
@@ -185,7 +173,13 @@
             </span>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+                <el-dropdown-item command="dashboard" divided>
+                  <el-icon style="margin-right:6px"><HomeFilled /></el-icon>工作台
+                </el-dropdown-item>
+                <el-dropdown-item command="agenda">
+                  <el-icon style="margin-right:6px"><Bell /></el-icon>我的待办
+                </el-dropdown-item>
+                <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
@@ -423,6 +417,10 @@ async function logout() {
 async function handleCommand(cmd) {
   if (cmd === 'logout') {
     await logout()
+  } else if (cmd === 'dashboard') {
+    router.push('/dashboard')
+  } else if (cmd === 'agenda') {
+    router.push('/agenda')
   }
 }
 
