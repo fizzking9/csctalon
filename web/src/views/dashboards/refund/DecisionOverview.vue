@@ -339,7 +339,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { RefreshLeft } from '@element-plus/icons-vue'
 import BaseChart from '@/components/BaseChart.vue'
 import { refundDeep, refundWithdrawal } from '@/api/analytics'
@@ -368,6 +368,17 @@ const detailRisk = ref({ high: 0, medium: 0, low: 0 })
 const filter = ref({ comp: '', path: '', operator: '', reason: '' })
 const facetOperators = ref([])
 const facetReasons = ref([])
+
+// 移动端响应式: 简化描述文字/控件
+const isMobile = ref(false)
+let _mq = null
+function _onMediaChange(e) { isMobile.value = e.matches }
+onMounted(() => {
+  _mq = window.matchMedia('(max-width: 768px)')
+  isMobile.value = _mq.matches
+  _mq.addEventListener('change', _onMediaChange)
+})
+onBeforeUnmount(() => { _mq?.removeEventListener('change', _onMediaChange) })
 
 const PATH_LABEL = { A: '钱包提现', B: '线上直退', D: '手动退款' }
 function pathLabel(p) { return PATH_LABEL[p] || p || '-' }
@@ -670,4 +681,21 @@ onMounted(load)
 .risk-summary .risk-low { color: #16a34a; }
 .comp-normal { color: #9ca3af; font-size: 12px; }
 .pag-wrap { display: flex; justify-content: flex-end; margin-top: 12px; }
+
+/* ===== 移动端优化 (<=768px) ===== */
+@media (max-width: 768px) {
+  .block-card { padding: 12px; }
+  .block-title { font-size: 14px; }
+  .block-hint { font-size: 11px; }
+  .kpi-card { padding: 8px 10px; min-height: 68px; }
+  .kpi-label { font-size: 11px; }
+  .kpi-value { font-size: 18px; }
+  .kpi-sub { font-size: 10px; }
+  .conclusion-line { font-size: 12px; line-height: 1.7; }
+  /* 表格在手机上保持可横向滚动 */
+  :deep(.el-table) { min-width: 620px; }
+  :deep(.el-table__body-wrapper) { overflow-x: auto; }
+  :deep(.el-card) { overflow: hidden; }
+  .detail-filters { gap: 6px; }
+}
 </style>

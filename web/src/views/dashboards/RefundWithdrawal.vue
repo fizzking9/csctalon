@@ -145,7 +145,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import BaseChart from '@/components/BaseChart.vue'
@@ -154,6 +154,17 @@ import { useAudit } from '@/composables/useAudit'
 import { formatMoney } from '@/utils/format'
 
 const { openDeviceAudit } = useAudit()
+
+// 移动端响应式: 简化描述文字/控件
+const isMobile = ref(false)
+let _mq = null
+function _onMediaChange(e) { isMobile.value = e.matches }
+onMounted(() => {
+  _mq = window.matchMedia('(max-width: 768px)')
+  isMobile.value = _mq.matches
+  _mq.addEventListener('change', _onMediaChange)
+})
+onBeforeUnmount(() => { _mq?.removeEventListener('change', _onMediaChange) })
 
 const today = new Date()
 const last30 = new Date(today.getTime() - 29 * 86400000)
@@ -379,4 +390,19 @@ onMounted(loadAll)
 .sn-chip { color: #2563eb; cursor: pointer; font-weight: 600; text-decoration: underline; text-decoration-style: dotted; }
 .sn-chip:hover { color: #1d4ed8; }
 .pag-wrap { display: flex; justify-content: flex-end; margin-top: 12px; }
+
+/* ===== 移动端优化 (<=768px) ===== */
+@media (max-width: 768px) {
+  .block-card { padding: 12px; }
+  .block-title { font-size: 14px; }
+  .block-hint { font-size: 11px; }
+  .filter-bar { gap: 6px; }
+  .kpi-card { padding: 8px 10px; min-height: 68px; }
+  .kpi-label { font-size: 11px; }
+  .kpi-value { font-size: 18px; }
+  .kpi-sub { font-size: 10px; }
+  :deep(.el-table) { min-width: 620px; }
+  :deep(.el-table__body-wrapper) { overflow-x: auto; }
+  :deep(.el-card) { overflow: hidden; }
+}
 </style>

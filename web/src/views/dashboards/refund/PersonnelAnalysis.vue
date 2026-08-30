@@ -591,4 +591,17 @@ onMounted(loadAll)
   align-items: center;
   margin-bottom: 12px;
 }
+
+/* ===== 移动端优化 (<=768px) ===== */
+@media (max-width: 768px) {
+  .filter-bar { gap: 6px; }
+  .block-title { font-size: 14px; }
+  .summary-line { font-size: 11px; flex-wrap: wrap; }
+  .trend-hint { font-size: 11px; }
+  .section-card { padding: 12px; }
+  :deep(.el-table) { min-width: 620px; }
+  :deep(.el-table__body-wrapper) { overflow-x: auto; }
+  :deep(.el-card) { overflow: hidden; }
+  .chart-toolbar, .device-toolbar { flex-wrap: wrap; gap: 6px; }
+}
 </style>
