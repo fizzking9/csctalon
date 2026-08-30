@@ -13,7 +13,9 @@ COPY package.json ./
 # npm 源用淘宝(npmmirror)加速依赖安装
 RUN npm config set registry https://registry.npmmirror.com && npm install --silent
 COPY . .
-RUN npm run build
+# 构建模式: debug=全量菜单 / release=收敛菜单(与 Dockerfile 行为一致)
+ARG BUILD_MODE=release
+RUN if [ "$BUILD_MODE" = "debug" ]; then npm run build:debug; else npm run build; fi
 
 # 阶段2: 复用现有 csctalon-web(含 nginx + nginx.conf) 托管新 dist,无需拉取 nginx:alpine
 FROM csctalon-web:latest
