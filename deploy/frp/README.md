@@ -1,8 +1,9 @@
 # frp 内网穿透部署方案 — 云端转发 + 本地主数据
 
-> 版本: v2.0 · 2026-08-28
+> 版本: v2.1 · 2026-08-30
 > 定位: 在现有「阿里云/腾讯云整体部署」之外，新增一套 **「本地为主 + 云端转发」** 的部署方式，满足**数据留内网、计算在本地、外网可访问**的核心诉求。
 > 目录: `deploy/frp/` 下的模板与脚本。
+> v2.1 更新: 新增统一 `docker-compose.yml`（profile 区分 frps/frpc，双端共用，见 §3.4）。
 > v2.0 更新: 全部脚本支持 **git raw 一条命令** 部署（`curl ... | sudo bash -s -- ...`，模板自动从仓库拉取），并补齐参数/配置/运维/排障的完整说明。
 
 ---
@@ -23,7 +24,7 @@
 │ 本地服务器 (csctalon 数据/计算/存储所在地)             │
 │  nginx :80 (现有 web 容器, 零改动)                    │
 │  backend :8000 / postgres / redis / Playwright        │
-│  frpc 客户端 (binary+systemd 或 docker)               │
+│  frpc 客户端 (binary+systemd 或 docker compose)      │
 │  backup.sh + sync-backup-to-cloud.sh (每日异地备份)    │
 └──────────────────────────────────────────────────────┘
 ```
@@ -213,7 +214,39 @@ bash deploy/frp/local/install-frpc.sh \
 
 > 两种方式均支持 `--repo <raw_base>` 指定模板来源（默认 gitea main 分支）。git raw 方式下模板会自动从仓库拉取，无需本地文件。
 
-### 3.4 本地 CORS 配置（必须，否则外网登录/接口被拦截）
+### 3.4 docker compose 方式（统一文件，双端共用，推荐）
+
+如果你两端都已装 docker，可以用**同一份** `deploy/frp/docker-compose.yml`，用 **profile** 区分服务端/客户端，一份文件两端各自启动：
+
+```bash
+# ① 分别准备好 toml 配置（从仓库模板复制并替换占位符）：
+#    服务端: cp cloud/frps.toml ./frps.toml   → 替换 REPLACE_FRP_TOKEN / REPLACE_FRP_DASH_PWD
+#    客户端: cp local/frpc.toml ./frpc.toml   → 替换 REPLACE_FRP_SERVER_HOST / REPLACE_FRP_TOKEN / REPLACE_FRP_DOMAIN
+
+# ② 在各自机器上启动（无需整个仓库，docker-compose.yml + 对应 toml 两个文件即可）：
+#    云端转发机：
+mkdir -p /var/log/frps
+FRPS_CONFIG=./frps.toml docker compose --profile frps up -d
+
+#    本地服务器：
+FRPC_CONFIG=./frpc.toml docker compose --profile frpc up -d
+```
+
+常用运维（两端各自用自己 profile）：
+
+```bash
+# 改配置后重启 / 看日志 / 停止
+# 服务端: docker compose --profile frps restart | logs -f frps | down
+# 客户端: docker compose --profile frpc restart | logs -f csctalon-frpc | down
+```
+
+> 说明：
+> - 统一 compose 使用 `network_mode: host`（frp 需绑宿主端口/访问宿主 `127.0.0.1:80`），仅 **Linux** 支持；macOS/Windows 的 Docker 请用 §3.2/§3.3 的二进制方式。
+> - 配置路径可用环境变量覆盖：服务端 `FRPS_CONFIG`（默认 `./cloud/frps.toml`）、客户端 `FRPC_CONFIG`（默认 `./local/frpc.toml`）。若已用脚本生成过配置，可直接 `FRPS_CONFIG=/etc/frp/frps.toml` 或 `FRPC_CONFIG=/opt/csctalon/frpc/frpc.toml` 复用，无需再生成。
+> - 镜像版本 `0.61.1`，与脚本默认版本一致；`/var/log/frps` 需宿主持有（`mkdir -p /var/log/frps`），否则 frps 日志目录写不进去。
+> - 云端端口安全同上：只放行 `443/80/7000`；`8080`/`7500` 均只绑 `127.0.0.1`（host 网络下 frps.toml 里 `webServer.addr = "127.0.0.1"` 已保证）。
+
+### 3.5 本地 CORS 配置（必须，否则外网登录/接口被拦截）
 
 后端按 `CORS_ORIGINS` 校验请求来源。启用 frp 外网访问后，**本地 `.env` 必须把外网域名加进 `CORS_ORIGINS`**，否则外网浏览器请求会被后端拒绝（内网访问不受影响）。
 
@@ -230,7 +263,7 @@ docker compose --env-file /opt/csctalon/.env restart backend
 
 > 模板参考 `deploy/env.production.example` 中的 `CORS_ORIGINS` 注释。
 
-### 3.5 验证
+### 3.6 验证
 
 ```bash
 # 本地
@@ -240,7 +273,7 @@ curl -sI https://kf.example.com/ | head -1   # 期望 200
 # 外网登录一次 + 打开一个看板页面, 确认 API 不被 CORS 拦截
 ```
 
-### 3.6 备份/恢复与迁移
+### 3.7 备份/恢复与迁移
 
 - **异地备份**（强烈建议，见 §6）：每日 `sync-backup-to-cloud.sh` 把 `backup.sh` 产物推到云端。
 - **整机迁移/灾备**：用现有 `deploy/README.md` 的 `backup.sh` → 云端 `restore.sh` 可把整套系统恢复到云端（当本地整体故障时）。
@@ -449,7 +482,7 @@ sudo bash /opt/csctalon/current/deploy/upgrade.sh <发布包>   # 或 --git
 |---|---|
 | 外网打不开域名 | ① 云端 frps 容器是否 running；② 安全组 7000/443 是否放行；③ 本地 frpc 是否在线（`systemctl status frpc`/`docker ps`）；④ DNS 是否指向云端 IP；⑤ 1Panel OpenResty 反代是否已保存（反代目标 `127.0.0.1:8080`） |
 | 本地正常、外网 502 | frpc 隧道断了：`journalctl -u frpc -f`（binary）或 `docker logs -f csctalon-frpc`（docker）看是否报 **auth 失败**（token 不一致）/ **连接失败**（7000 不通） |
-| 外网登录报 CORS / 接口被拦 | 本地 `.env` 的 `CORS_ORIGINS` 没加 `https://<域名>`，或加了没重启 backend（见 §3.4） |
+| 外网登录报 CORS / 接口被拦 | 本地 `.env` 的 `CORS_ORIGINS` 没加 `https://<域名>`，或加了没重启 backend（见 §3.5） |
 | 报 `auth token not match` | 云端 frps 与本地 frpc 的 token 不一致。重跑对应脚本用同一 token，或改其中一端后同步另一端（见 §7.2） |
 | 上传/导出大文件很慢 | 受本地**上行带宽**限制（家宽上行通常 20-50Mbps）。内网用户不受影响；可评估升级宽带套餐 |
 | 域名打不开但 IP 能开 | 证书/server_name 未对齐。1Panel OpenResty 模式：检查 1Panel 网站绑定域名与证书是否匹配；宿主 nginx 模式：`nginx -t` + 检查 `/etc/nginx/conf.d/csctalon-frp.conf` |
@@ -466,6 +499,7 @@ sudo bash /opt/csctalon/current/deploy/upgrade.sh <发布包>   # 或 --git
 ```
 deploy/frp/
 ├── README.md                     # 本手册
+├── docker-compose.yml            # 统一 compose(profile 区分 frps/frpc, 双端共用, 见 §3.4)
 ├── cloud/
 │   ├── frps.toml                 # frp 服务端配置模板
 │   ├── openresty.conf            # 1Panel OpenResty 反代配置模板(默认模式, 由脚本打印)
