@@ -154,7 +154,7 @@
               <template #header>
                 <div style="display:flex; align-items:center; justify-content:space-between">
                   <span style="font-weight:600">
-                    今日 按小时 · 挽回趋势 (00:00 ~ 当前)
+                    今日 按小时 · 挽回趋势 (08:00 ~ 当前)
                     <el-tooltip
                       content="失败 = 接待后 7 天内出现退款(退款单/退款工单/退款操作记录)。今日接待的退款可能未走完 7 天窗口，失败数偏低、成功率偏高，仅供参考"
                       placement="top"
@@ -471,10 +471,16 @@ function _buildDoubleYOption({ x, barSeries = [], lineSeries = [], y2Min = null,
 const todayHourlyOption = computed(() => {
   const hl = recoveryData.value?.hourly_today || []
   if (!hl || !hl.length) return {}
-  const x = hl.map(r => r.hour)
-  const succ = hl.map(r => Number(r.success_sn) || 0)
-  const fail = hl.map(r => Number(r.failed_sn) || 0)
-  const rates = hl.map(r => {
+  // 客服工作时段: 只展示 08:00 ~ 23:59, 过滤凌晨 0~7 点(基本无接待,全是空)
+  const workHours = hl.filter(r => {
+    const h = parseInt(r.hour, 10)
+    return !isNaN(h) && h >= 8 && h <= 23
+  })
+  if (!workHours.length) return {}
+  const x = workHours.map(r => r.hour)
+  const succ = workHours.map(r => Number(r.success_sn) || 0)
+  const fail = workHours.map(r => Number(r.failed_sn) || 0)
+  const rates = workHours.map(r => {
     const t = Number(r.total_sn) || 0
     return t ? round2(Number(r.success_sn) / t * 100) : 0
   })
