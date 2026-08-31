@@ -96,14 +96,16 @@ import dayjs from 'dayjs'
 const form = reactive({ source_type: 'internal', device_sn: '', ref_id: '', attribution: '其他', conclusion: '', judgment: '通过' })
 const audits = ref([])
 const timeline = ref([])
+const typeMeta = ref({})
 const loading = ref(false)
 const submitting = ref(false)
 const attributions = ['网络质量', '套餐争议', '退款协商失败', '降成争议', '其他', '未关联SN']
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-')
 const sourceLabel = (s) => ({ internal: '内部投诉', merchant: '商户号投诉', external: '外部投诉' }[s] || s)
-const kindLabel = (k) => ({ refund: '退费', ticket: '工单', wallet: '钱包', merchant_refund: '商户退款', cs_record: '接待', external_complaint: '外部投诉', card_complaint: '卡商投诉' }[k] || k)
-const kindTag = (k) => ({ external_complaint: 'danger', card_complaint: 'warning', ticket: 'primary', cs_record: 'success' }[k] || 'info')
-const timelineType = (k) => ({ external_complaint: 'danger', card_complaint: 'warning' }[k] || 'primary')
+// 设备时序类型: 优先用后端返回的 type_meta(含 设备套餐/手动退款/闪猫退款 等新增类型), 兜底老映射
+const kindLabel = (k) => typeMeta.value?.[k]?.label || ({ refund: '退费', ticket: '工单', wallet: '钱包', merchant_refund: '商户退款', cs_record: '接待', external_complaint: '外部投诉', card_complaint: '卡商投诉', device_combo: '设备套餐', manual_refund: '手动退款', shanmao_refund: '闪猫退款' }[k] || k)
+const kindTag = (k) => typeMeta.value?.[k]?.color || ({ external_complaint: 'danger', card_complaint: 'warning', ticket: 'primary', cs_record: 'success', device_combo: 'primary', manual_refund: 'warning', shanmao_refund: 'danger' }[k] || 'info')
+const timelineType = (k) => kindTag(k) || 'primary'
 
 async function loadAudits() {
   loading.value = true
@@ -121,7 +123,8 @@ async function loadTimeline() {
     return
   }
   const res = await getDeviceTimeline(form.device_sn.trim(), { limit: 50 })
-  timeline.value = (res.data && res.data.events) || []
+  timeline.value = (res.data && res.data.items) || []
+  typeMeta.value = (res.data && res.data.type_meta) || {}
 }
 
 async function handleSave() {
