@@ -253,6 +253,16 @@
           <el-icon><TrendCharts /></el-icon>
           <span>运营看板</span>
         </el-menu-item>
+        <!-- 专项分析: 管理层可见(与桌面端一致, 含退款/挽回/投诉) -->
+        <el-sub-menu v-if="authStore.isManager" index="mobile-dashboards">
+          <template #title>
+            <el-icon><DataAnalysis /></el-icon>
+            <span>专项分析</span>
+          </template>
+          <el-menu-item index="/dashboards/refund">退款分析</el-menu-item>
+          <el-menu-item index="/dashboards/refund-recovery">挽回分析</el-menu-item>
+          <el-menu-item index="/dashboards/complaint-analysis">投诉分析</el-menu-item>
+        </el-sub-menu>
         <el-menu-item v-if="authStore.isAdmin" index="/data/ingest">
           <el-icon><Upload /></el-icon>
           <span>数据采集</span>
