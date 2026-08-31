@@ -37,11 +37,13 @@ SKIP_DOCKER=0
 # 生产数据/日志目录(install 脚本会创建; 与 deploy/env.production.example 保持一致)
 # 用于"已有 .env 缺关键变量时自动补齐", 防止旧模板(根目录 .env.example 无这些变量)
 # 导致数据落到代码目录内、升级切版本时数据"丢失"。
+# ⚠️ 变量名与 docker-compose.yml 挂载变量、deploy/env.production.example 保持同名(单数):
+#    UPLOAD_DIR/BROWSER_STATE_DIR(与后端代码 settings 一致), 不用复数 UPLOADS_DIR/BROWSER_STATES_DIR(2026-08-30 已统一)。
 PROD_DIR_VARS=(
   "DB_DATA_DIR=$APP_DIR/data/postgres"
   "REDIS_DATA_DIR=$APP_DIR/data/redis"
-  "UPLOADS_DIR=$APP_DIR/uploads"
-  "BROWSER_STATES_DIR=$APP_DIR/browser_states"
+  "UPLOAD_DIR=$APP_DIR/uploads"
+  "BROWSER_STATE_DIR=$APP_DIR/browser_states"
   "BACKEND_LOGS_DIR=$APP_DIR/logs/backend"
   "NGINX_LOGS_DIR=$APP_DIR/logs/nginx"
   "ENV_FILE=$APP_DIR/.env"
@@ -104,6 +106,10 @@ fi
 mkdir -p "$APP_DIR"/{releases,packages,backups,data,logs,uploads,browser_states}
 mkdir -p "$APP_DIR/data/postgres" "$APP_DIR/data/redis"
 mkdir -p "$APP_DIR/logs/nginx" "$APP_DIR/logs/backend"
+# PG 数据目录属主固定为 postgres(uid 999): 容器内 db 以 999 运行(见 docker-compose.yml user: "999:999"),
+# bind mount 目录若属主不对会导致 PG 无法写数据文件。显式 chown 后宿主侧可清晰看到 999 属主
+# (而非 root 都难遍历的错位 uid), 便于 backup.sh/巡检直接读取(2026-08-30 部署审计)。
+chown -R 999:999 "$APP_DIR/data/postgres" 2>/dev/null || true
 
 # ---------- 4. 落盘代码到版本目录 ----------
 if [[ -n "$SRC_DIR" ]]; then
@@ -114,10 +120,13 @@ if [[ -n "$SRC_DIR" ]]; then
   fi
   c "复制代码 → $RELEASE_DIR (来源: $SRC_DIR)"
   mkdir -p "$RELEASE_DIR"
-  # 排除 .git/node_modules/__pycache__ 即可: git clone 目录本就无 data/logs/dist;
+  # 排除 git 来源的开发杂质(.git/node_modules/__pycache__ 之外, 与 upgrade.sh --git / package.sh
+  # 同一口径): .trae/.dsh/.gitea/.workbuddy/docs/scripts 等不进 current(2026-08-30 部署审计)。
   # 注意不能用 --exclude='data', 会误伤 web/src/views/data/ 源码目录(曾致前端构建失败)
   tar czf - -C "$SRC_DIR" \
     --exclude='.git' --exclude='node_modules' --exclude='__pycache__' \
+    --exclude='.trae' --exclude='.dsh' --exclude='.gitea' --exclude='.workbuddy' \
+    --exclude='docs' --exclude='scripts' --exclude='backend/scripts' --exclude='backend/tests' \
     . 2>/dev/null | tar xzf - -C "$RELEASE_DIR"
 else
   VER="$(tar xzf "$PKG" -O VERSION.tmp 2>/dev/null || basename "$PKG" .tar.gz | sed 's/^csctalon-//')"
@@ -170,8 +179,8 @@ else
     echo "  ② 数据目录(建议):"
     echo "      DB_DATA_DIR=$APP_DIR/data/postgres"
     echo "      REDIS_DATA_DIR=$APP_DIR/data/redis"
-    echo "      UPLOADS_DIR=$APP_DIR/uploads"
-    echo "      BROWSER_STATES_DIR=$APP_DIR/browser_states"
+    echo "      UPLOAD_DIR=$APP_DIR/uploads"
+    echo "      BROWSER_STATE_DIR=$APP_DIR/browser_states"
     echo "      BACKEND_LOGS_DIR=$APP_DIR/logs/backend"
     echo "      NGINX_LOGS_DIR=$APP_DIR/logs/nginx"
     echo "  编辑完成后重新执行本脚本(--src-dir ${SRC_DIR:---pkg $PKG})"

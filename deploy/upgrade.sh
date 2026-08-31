@@ -75,6 +75,10 @@ if [[ $DO_BACKUP -eq 1 ]]; then
 fi
 
 # ---------- 2. 获取新代码(tar 解包 或 git clone) ----------
+# ⚠️ 发布纯净性: git 模式会原样拉取整个仓库, 必须清理开发/AI 工具产物与文档,
+#    只保留运行期需要的 backend/web/deploy/docker-compose.yml/.env* 等,
+#    否则杂质(.trae/.dsh/.gitea/.workbuddy/docs/scripts 等)随发布进入 current,
+#    每次 release 多出 ~8.8MB 冗余, 也易把探针/调试脚本带入生产(2026-08-30 部署审计)。
 mkdir -p "$RELEASE_DIR"
 if [[ $GIT_MODE -eq 1 ]]; then
   c "从 gitea 拉取代码: $REPO ($BRANCH) → $RELEASE_DIR"
@@ -83,6 +87,22 @@ if [[ $GIT_MODE -eq 1 ]]; then
     rm -rf "$RELEASE_DIR"
     exit 1
   }
+  # 清理 git 模式带入的开发杂质(与 package.sh 的排除清单保持同一口径)
+  c "git 模式清理发布杂质(与 package.sh 排除清单一致)..."
+  rm -rf \
+    "$RELEASE_DIR/.git" \
+    "$RELEASE_DIR/.gitignore" \
+    "$RELEASE_DIR/.gitea" \
+    "$RELEASE_DIR/.dsh" \
+    "$RELEASE_DIR/.trae" \
+    "$RELEASE_DIR/.workbuddy" \
+    "$RELEASE_DIR/docs" \
+    "$RELEASE_DIR/scripts" \
+    "$RELEASE_DIR/backups" \
+    "$RELEASE_DIR/backend/scripts" \
+    "$RELEASE_DIR/backend/tests" \
+    "$RELEASE_DIR/backend/uploads" \
+    "$RELEASE_DIR/VERSION.tmp"
 else
   c "解压发布包 → $RELEASE_DIR"
   tar xzf "$PKG" -C "$RELEASE_DIR"

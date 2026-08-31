@@ -14,6 +14,11 @@
 # 排除内容: .git / node_modules / data / logs / backend/uploads / dist /
 #           __pycache__ / .venv / .env / docker-compose.override.yml 等
 #           (数据、日志、附件、生产 .env 均在服务器侧管理, 不进发布包)
+# ⚠️ 发布纯净性(2026-08-30 部署审计): 与 upgrade.sh 的 --git 模式清理清单保持同一口径,
+#    只带运行期内容(backend/web/deploy/docker-compose.yml/.env.example/README.md)。
+#    - docs/ 纯设计/审查文档, 不进发布包(git 模式同样清理)
+#    - .trae/.dsh/.gitea/.workbuddy 等 AI/CI 工具产物不进发布包
+#    - scripts/ backend/scripts/ 调试探针脚本不进发布包(backend/.dockerignore 也已排除)
 # =============================================================================
 set -euo pipefail
 
@@ -45,6 +50,10 @@ echo "${VERSION}" > "$ROOT_DIR/VERSION.tmp"
 tar czf "$OUT_FILE" \
   --exclude='.git' \
   --exclude='.gitignore' \
+  --exclude='.gitea' \
+  --exclude='.dsh' \
+  --exclude='.trae' \
+  --exclude='.workbuddy' \
   --exclude='node_modules' \
   --exclude='__pycache__' \
   --exclude='.venv' \
@@ -59,6 +68,8 @@ tar czf "$OUT_FILE" \
   --exclude='backend/uploads' \
   --exclude='backend/scripts' \
   --exclude='backend/tests' \
+  --exclude='scripts' \
+  --exclude='docs' \
   --exclude='*.dump' \
   --exclude='*.sql' \
   docker-compose.yml \
@@ -67,7 +78,6 @@ tar czf "$OUT_FILE" \
   backend \
   web \
   deploy \
-  docs \
   VERSION.tmp 2>/dev/null
 rm -f "$ROOT_DIR/VERSION.tmp"
 

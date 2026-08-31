@@ -58,8 +58,10 @@ var()     { grep -E "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'
 
 PG_USER="$(pg_user "${ENV_FILE:-/dev/null}")"
 PG_DB="$(pg_db "${ENV_FILE:-/dev/null}")"
-UPLOADS_DIR="$(var "${ENV_FILE:-/dev/null}" UPLOADS_DIR "$SCRIPT_DIR/../backend/uploads")"
-BROWSER_STATES_DIR="$(var "${ENV_FILE:-/dev/null}" BROWSER_STATES_DIR "$SCRIPT_DIR/../data/browser_states")"
+# ⚠️ 读取单数 UPLOAD_DIR/BROWSER_STATE_DIR(与 docker-compose 挂载变量/后端 settings 一致,
+#    2026-08-30 已废弃复数 UPLOADS_DIR/BROWSER_STATES_DIR; 用旧名读不到 → 回退相对路径、备份漏附件)
+UPLOAD_DIR="$(var "${ENV_FILE:-/dev/null}" UPLOAD_DIR "$SCRIPT_DIR/../backend/uploads")"
+BROWSER_STATE_DIR="$(var "${ENV_FILE:-/dev/null}" BROWSER_STATE_DIR "$SCRIPT_DIR/../data/browser_states")"
 
 # ---------- 前置检查 ----------
 command -v docker >/dev/null 2>&1 || { err "需要 docker"; exit 1; }
@@ -79,13 +81,13 @@ docker exec csctalon-db rm -f "/tmp/csctalon_${TS}.dump"
 ok "数据库导出完成: $(du -h "$STAGE/csctalon.dump" | cut -f1)"
 
 # ---------- 2. 附件打包 ----------
-c "打包附件 uploads=${UPLOADS_DIR} browser_states=${BROWSER_STATES_DIR}"
+c "打包附件 uploads=${UPLOAD_DIR} browser_states=${BROWSER_STATE_DIR}"
 mkdir -p "$STAGE/uploads" "$STAGE/browser_states"
-if [[ -d "$UPLOADS_DIR" && -n "$(ls -A "$UPLOADS_DIR" 2>/dev/null)" ]]; then
-  cp -a "$UPLOADS_DIR/." "$STAGE/uploads/"
+if [[ -d "$UPLOAD_DIR" && -n "$(ls -A "$UPLOAD_DIR" 2>/dev/null)" ]]; then
+  cp -a "$UPLOAD_DIR/." "$STAGE/uploads/"
 fi
-if [[ -d "$BROWSER_STATES_DIR" && -n "$(ls -A "$BROWSER_STATES_DIR" 2>/dev/null)" ]]; then
-  cp -a "$BROWSER_STATES_DIR/." "$STAGE/browser_states/"
+if [[ -d "$BROWSER_STATE_DIR" && -n "$(ls -A "$BROWSER_STATE_DIR" 2>/dev/null)" ]]; then
+  cp -a "$BROWSER_STATE_DIR/." "$STAGE/browser_states/"
 fi
 
 # 元信息
