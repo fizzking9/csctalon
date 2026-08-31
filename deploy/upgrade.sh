@@ -49,6 +49,7 @@ fi
 
 c() { echo -e "\033[36m▶ $*\033[0m"; }
 ok() { echo -e "\033[32m✔ $*\033[0m"; }
+warn() { echo -e "\033[33m⚠ $*\033[0m"; }
 err() { echo -e "\033[31m✘ $*\033[0m" >&2; }
 
 if [[ $GIT_MODE -eq 1 ]]; then
@@ -109,6 +110,18 @@ else
 fi
 
 # ---------- 3. 切换软链并重建 ----------
+# 错误/废弃的上传路径变量守卫(2026-08-31 事故复发防护, 与 install-server.sh 一致):
+# 服务器上 UPLOAD_DIR=./uploads 会挂到容器内空目录 /app/uploads, 上传/附件静默不可见。
+# 复数 UPLOADS_DIR/BROWSER_STATES_DIR 已废弃, 出现即提示; 仅 warn 不自动改, 防止覆盖用户配置。
+if grep -qE "^(UPLOADS_DIR|BROWSER_STATES_DIR)=" "$ENV_FILE" \
+   || grep -qE "^UPLOAD_DIR=(\./|/app)" "$ENV_FILE" \
+   || grep -qE "^BROWSER_STATE_DIR=(\./|/app)" "$ENV_FILE"; then
+  warn "$ENV_FILE 存在已废弃/错误的上传路径变量"
+  warn "  - 复数 UPLOADS_DIR/BROWSER_STATES_DIR 已废弃(2026-08-30 统一为单数), 删除或用单数"
+  warn "  - UPLOAD_DIR/BROWSER_STATE_DIR 不能是相对路径(./)或 /app 开头(容器内空目录)"
+  warn "  请改为绝对路径: UPLOAD_DIR=$APP_DIR/uploads, BROWSER_STATE_DIR=$APP_DIR/browser_states"
+  warn "  否则 backend 会把 /app/uploads 挂到空目录, 上传/附件不可见"
+fi
 ln -sfn "$CURRENT" "$APP_DIR/current.old"   # 回滚锚点
 ln -sfn "$RELEASE_DIR" "$CURRENT"
 ln -sf "$ENV_FILE" "$CURRENT/.env" 2>/dev/null || true   # 兜底: compose 相对目录找 .env

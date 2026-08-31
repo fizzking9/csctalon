@@ -169,6 +169,21 @@ else
         warn "  生产后端启动会 fail-fast 拒绝。请先编辑 $APP_DIR/.env 改为强随机值(参考 deploy/env.production.example)"
       fi
     fi
+    # 错误/废弃的上传路径变量守卫(2026-08-31 事故复发防护):
+    # 只处理"缺失"(上面补齐), 不处理"错误值已存在"——UPLOAD_DIR=./uploads 这种相对路径
+    # 在服务器上会挂到容器内空目录 /app/uploads, 上传/附件静默不可见。复数 UPLOADS_DIR/
+    # BROWSER_STATES_DIR 已废弃, 出现即提示。生产脚本此处命中一律 warn(不自动改, 防止覆盖用户配置)。
+    if grep -qE "^(UPLOADS_DIR|BROWSER_STATES_DIR)=" "$ENV_TARGET" \
+       || grep -qE "^UPLOAD_DIR=(\./|/app)" "$ENV_TARGET" \
+       || grep -qE "^BROWSER_STATE_DIR=(\./|/app)" "$ENV_TARGET"; then
+      warn "$APP_DIR/.env 存在已废弃/错误的上传路径变量"
+      warn "  - 复数 UPLOADS_DIR/BROWSER_STATES_DIR 已废弃(2026-08-30 统一为单数), 删除或用单数"
+      warn "  - UPLOAD_DIR/BROWSER_STATE_DIR 不能是相对路径(./)或 /app 开头(容器内空目录)"
+      warn "  请改为绝对路径:"
+      warn "      UPLOAD_DIR=$APP_DIR/uploads"
+      warn "      BROWSER_STATE_DIR=$APP_DIR/browser_states"
+      warn "  否则 backend 会把 /app/uploads 挂到空目录, 上传/附件不可见"
+    fi
     ok "已存在 $APP_DIR/.env, 沿用"
   else
     cp "$RELEASE_DIR/.env.example" "$ENV_TARGET"
