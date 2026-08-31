@@ -363,6 +363,10 @@ rm -rf .git .gitea .dsh .trae .workbuddy docs scripts backend/scripts backend/te
 `DB_DATA_DIR / REDIS_DATA_DIR / UPLOAD_DIR / BROWSER_STATE_DIR / BACKEND_LOGS_DIR / NGINX_LOGS_DIR / ENV_FILE`。
 若仍有失效的 `UPLOAD_DIR=./uploads`（相对容器内路径）或复数 `UPLOADS_DIR/BROWSER_STATES_DIR`，删掉旧的、保留绝对值。
 
+> 自 2026-08-31 起 `install-server.sh` 与 `upgrade.sh` 内置**上传路径变量守卫**：检测到复数废弃变量
+> （`UPLOADS_DIR/BROWSER_STATES_DIR`）或相对/`/app` 开头的单数变量（`UPLOAD_DIR/BROWSER_STATE_DIR`）时
+> 会打印黄色告警，提示改为绝对路径（仅告警不自动改，防止覆盖用户配置）。
+
 **④ PG 数据目录属主**：db 容器固定以 uid 999 运行（compose `user: "999:999"`），数据目录应属主 `999:999`
 （宿主侧显示为数字 999 而非错位的 `dnsmasq`）。若宿主 root 仍无法遍历：
 
