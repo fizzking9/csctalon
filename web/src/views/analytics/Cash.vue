@@ -2,11 +2,18 @@
   <div class="page-container">
     <div class="flex-between mb-16">
       <div class="page-title" style="margin: 0">现金流分析</div>
-      <el-radio-group v-model="range" size="small" @change="loadAll">
-        <el-radio-button label="7">近7天</el-radio-button>
-        <el-radio-button label="30">近30天</el-radio-button>
-        <el-radio-button label="90">近90天</el-radio-button>
-      </el-radio-group>
+      <div class="filter-bar">
+        <el-radio-group v-model="range" size="small" @change="loadAll">
+          <el-radio-button label="7">近7天</el-radio-button>
+          <el-radio-button label="30">近30天</el-radio-button>
+          <el-radio-button label="90">近90天</el-radio-button>
+        </el-radio-group>
+        <el-radio-group v-model="grain" size="small" @change="loadAll">
+          <el-radio-button label="day">按日</el-radio-button>
+          <el-radio-button label="week">按周</el-radio-button>
+          <el-radio-button label="month">按月</el-radio-button>
+        </el-radio-group>
+      </div>
     </div>
 
     <!-- 现金流对账卡片:商户号实际 vs 已登记估算 -->
@@ -97,8 +104,11 @@ import BaseChart from '@/components/BaseChart.vue'
 import { cash } from '@/api/analytics'
 import { formatMoney, formatAxisWan } from '@/utils/format'
 import dayjs from 'dayjs'
+import isoWeek from 'dayjs/plugin/isoWeek'
+dayjs.extend(isoWeek)
 
 const range = ref('30')
+const grain = ref('day') // 趋势粒度: 日/周/月; 前端对后端按日数据做汇聚
 const cashTrend = ref([])
 const compare = ref([])
 const merchants = ref([])
@@ -113,6 +123,47 @@ function dateRange() {
 // 金额格式化:≥1万 用"万"为单位,2位小数
 function fmt(v) { return formatMoney(v) }
 
+// 把按日序列按周/月聚合成带标签的序列(前端纯计算, 后端无改动)
+// rows: 形如 {date, ...数值字段} 的数组; 返回 { labels, keys, rows: [{label, key, ...聚合后数值字段}] }
+function aggregateByGrain(rows, g) {
+  if (g === 'day') {
+    return {
+      labels: rows.map(r => r.date.slice(5)),
+      keys: rows.map(r => r.date),
+      rows: rows.map(r => ({ label: r.date.slice(5), key: r.date, ...r })),
+    }
+  }
+  const groups = new Map()
+  rows.forEach(r => {
+    const dt = dayjs(r.date)
+    if (!dt.isValid()) return
+    let key, label
+    if (g === 'week') {
+      const ws = dt.startOf('isoWeek')
+      const we = ws.add(6, 'day')
+      key = ws.format('YYYY-MM-DD')
+      label = `${ws.format('MM-DD')}~${we.format('MM-DD')}`
+    } else {
+      key = dt.format('YYYY-MM')
+      label = dt.format('YYYY-MM')
+    }
+    const g0 = groups.get(key) || { label, key, count: 0 }
+    // 数值字段(除 date/label/key/count 外)做求和; count 字段也求和(若无则跳过)
+    Object.entries(r).forEach(([k, v]) => {
+      if (k === 'date' || k === 'label' || k === 'key') return
+      if (typeof v !== 'number') return
+      g0[k] = (g0[k] || 0) + v
+    })
+    groups.set(key, g0)
+  })
+  const sorted = [...groups.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+  return {
+    labels: sorted.map(([, g0]) => g0.label),
+    keys: sorted.map(([k]) => k),
+    rows: sorted.map(([, g0]) => g0),
+  }
+}
+
 // 偏差类型:正偏差(实际>估算,有未登记退款)用 warning;负偏差(估算>实际)用 error
 const diffType = computed(() => {
   const d = Number(breakdown.value.diff || 0)
@@ -121,71 +172,77 @@ const diffType = computed(() => {
   return 'success'
 })
 
-const cashTrendOption = computed(() => ({
-  tooltip: {
-    trigger: 'axis',
-    formatter: (params) => {
-      const date = params[0]?.axisValue || ''
-      const lines = [date]
-      params.forEach((p) => {
-        lines.push(`${p.marker} ${p.seriesName}: ¥${formatMoney(p.value)}`)
-      })
-      return lines.join('<br/>')
+const cashTrendOption = computed(() => {
+  const agg = aggregateByGrain(cashTrend.value, grain.value)
+  return {
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params) => {
+        const date = params[0]?.axisValue || ''
+        const lines = [date]
+        params.forEach((p) => {
+          lines.push(`${p.marker} ${p.seriesName}: ¥${formatMoney(p.value)}`)
+        })
+        return lines.join('<br/>')
+      },
     },
-  },
-  legend: { data: ['直接退款', '用户提现', '商户号现金流(实际)'] },
-  grid: { left: 60, right: 30, bottom: 30, top: 40 },
-  xAxis: { type: 'category', data: cashTrend.value.map((d) => d.date) },
-  yAxis: { type: 'value', name: '金额(万元)', axisLabel: { formatter: formatAxisWan } },
-  series: [
-    {
-      name: '直接退款',
-      type: 'bar',
-      stack: '估算',
-      itemStyle: { color: '#e6a23c' },
-      data: cashTrend.value.map((d) => d.direct),
-    },
-    {
-      name: '用户提现',
-      type: 'bar',
-      stack: '估算',
-      itemStyle: { color: '#409eff' },
-      data: cashTrend.value.map((d) => d.withdraw),
-    },
-    {
-      name: '商户号现金流(实际)',
-      type: 'line',
-      smooth: true,
-      symbol: 'circle',
-      symbolSize: 6,
-      itemStyle: { color: '#f56c6c' },
-      lineStyle: { width: 2.5 },
-      data: cashTrend.value.map((d) => d.merchant),
-    },
-  ],
-}))
+    legend: { data: ['直接退款', '用户提现', '商户号现金流(实际)'] },
+    grid: { left: 60, right: 30, bottom: 30, top: 40 },
+    xAxis: { type: 'category', data: agg.labels, axisLabel: { rotate: agg.labels.length > 12 ? 30 : 0 } },
+    yAxis: { type: 'value', name: '金额(万元)', axisLabel: { formatter: formatAxisWan } },
+    series: [
+      {
+        name: '直接退款',
+        type: 'bar',
+        stack: '估算',
+        itemStyle: { color: '#e6a23c' },
+        data: agg.rows.map((d) => d.direct || 0),
+      },
+      {
+        name: '用户提现',
+        type: 'bar',
+        stack: '估算',
+        itemStyle: { color: '#409eff' },
+        data: agg.rows.map((d) => d.withdraw || 0),
+      },
+      {
+        name: '商户号现金流(实际)',
+        type: 'line',
+        smooth: true,
+        symbol: 'circle',
+        symbolSize: 6,
+        itemStyle: { color: '#f56c6c' },
+        lineStyle: { width: 2.5 },
+        data: agg.rows.map((d) => d.merchant || 0),
+      },
+    ],
+  }
+})
 
-const compareOption = computed(() => ({
-  tooltip: {
-    trigger: 'axis',
-    formatter: (params) => {
-      const date = params[0]?.axisValue || ''
-      const lines = [date]
-      params.forEach((p) => {
-        lines.push(`${p.marker} ${p.seriesName}: ¥${formatMoney(p.value)}`)
-      })
-      return lines.join('<br/>')
+const compareOption = computed(() => {
+  const agg = aggregateByGrain(compare.value, grain.value)
+  return {
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params) => {
+        const date = params[0]?.axisValue || ''
+        const lines = [date]
+        params.forEach((p) => {
+          lines.push(`${p.marker} ${p.seriesName}: ¥${formatMoney(p.value)}`)
+        })
+        return lines.join('<br/>')
+      },
     },
-  },
-  legend: { data: ['退回钱包', '实际提现'] },
-  grid: { left: 60, right: 30, bottom: 30, top: 40 },
-  xAxis: { type: 'category', data: compare.value.map((d) => d.date) },
-  yAxis: { type: 'value', name: '金额(万元)', axisLabel: { formatter: formatAxisWan } },
-  series: [
-    { name: '退回钱包', type: 'bar', data: compare.value.map((d) => d.wallet_in) },
-    { name: '实际提现', type: 'bar', data: compare.value.map((d) => d.withdraw) },
-  ],
-}))
+    legend: { data: ['退回钱包', '实际提现'] },
+    grid: { left: 60, right: 30, bottom: 30, top: 40 },
+    xAxis: { type: 'category', data: agg.labels, axisLabel: { rotate: agg.labels.length > 12 ? 30 : 0 } },
+    yAxis: { type: 'value', name: '金额(万元)', axisLabel: { formatter: formatAxisWan } },
+    series: [
+      { name: '退回钱包', type: 'bar', data: agg.rows.map((d) => d.wallet_in || 0) },
+      { name: '实际提现', type: 'bar', data: agg.rows.map((d) => d.withdraw || 0) },
+    ],
+  }
+})
 
 async function loadAll() {
   const r = dateRange()

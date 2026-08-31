@@ -175,7 +175,14 @@
           </el-col>
           <el-col :xs="24" :md="16">
             <div class="chart-card">
-              <div class="chart-title">三源趋势(按日)</div>
+              <div class="flex-between">
+                <div class="chart-title">三源趋势<span class="dim-text"> · 内/商/外堆叠</span></div>
+                <el-radio-group v-model="trendStackGrain" size="small">
+                  <el-radio-button label="day">按日</el-radio-button>
+                  <el-radio-button label="week">按周</el-radio-button>
+                  <el-radio-button label="month">按月</el-radio-button>
+                </el-radio-group>
+              </div>
               <BaseChart v-if="trendStackOption" :option="trendStackOption" height="260px" />
               <el-empty v-else description="暂无趋势数据" :image-size="40" />
             </div>
@@ -258,7 +265,14 @@
           </el-col>
           <el-col :xs="24" :md="8">
             <div class="chart-card">
-              <div class="chart-title">外部投诉趋势(按日)</div>
+              <div class="flex-between">
+                <div class="chart-title">外部投诉趋势<span class="dim-text"> · 按投诉日期</span></div>
+                <el-radio-group v-model="externalTrendGrain" size="small">
+                  <el-radio-button label="day">按日</el-radio-button>
+                  <el-radio-button label="week">按周</el-radio-button>
+                  <el-radio-button label="month">按月</el-radio-button>
+                </el-radio-group>
+              </div>
               <BaseChart v-if="externalTrendOption" :option="externalTrendOption" height="260px" />
               <el-empty v-else description="暂无趋势数据" :image-size="40" />
             </div>
@@ -871,6 +885,8 @@ onBeforeUnmount(() => { _mq?.removeEventListener('change', _onMediaChange) })
 const merchantEntityTrendGrain = ref('day')
 const subjectTrendGrain = ref('day')
 const topSubjectTrendGrain = ref('day')
+const externalTrendGrain = ref('day')
+const trendStackGrain = ref('day')
 const externalDetail = ref([])
 const merchantDetail = ref([])
 const effSource = ref('internal')
@@ -1235,21 +1251,26 @@ const sourcePieOption = computed(() => {
   }
 })
 
-// ── 三源趋势堆叠图 ──
+// ── 三源趋势堆叠图(支持按日/周/月汇聚) ──
 const trendStackOption = computed(() => {
   const t = s.value.trend || []
   if (!t.length) return null
-  const x = t.map(r => r.day)
+  const srcs = ['内部投诉', '商户号投诉', '外部投诉']
+  const bySource = { '内部投诉': {}, '商户号投诉': {}, '外部投诉': {} }
+  t.forEach(r => {
+    srcs.forEach(s => { if (r.day != null && r[s] != null) bySource[s][r.day] = (bySource[s][r.day] || 0) + r[s] })
+  })
+  const agg = aggregateMultiSeries(bySource, trendStackGrain.value)
   return {
     tooltip: { trigger: 'axis' },
     legend: { bottom: 0, left: 'center', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 11 } },
-    grid: { left: 48, right: 24, bottom: 48, top: 16 },
-    xAxis: { type: 'category', data: x, axisLabel: { fontSize: 10, rotate: 45 } },
+    grid: { left: 48, right: 24, bottom: 44, top: 16 },
+    xAxis: { type: 'category', data: agg.buckets.map(b => b.label), axisLabel: { fontSize: 10, rotate: agg.buckets.length > 12 ? 45 : 0 } },
     yAxis: { type: 'value' },
     series: [
-      { name: '内部投诉', type: 'bar', stack: 'total', data: t.map(r => r['内部投诉'] || 0), itemStyle: { color: '#2563eb' } },
-      { name: '商户号投诉', type: 'bar', stack: 'total', data: t.map(r => r['商户号投诉'] || 0), itemStyle: { color: '#7c3aed' } },
-      { name: '外部投诉', type: 'bar', stack: 'total', data: t.map(r => r['外部投诉'] || 0), itemStyle: { color: '#dc2626' } },
+      { name: '内部投诉', type: 'bar', stack: 'total', data: agg.byName['内部投诉'].values, itemStyle: { color: '#2563eb' } },
+      { name: '商户号投诉', type: 'bar', stack: 'total', data: agg.byName['商户号投诉'].values, itemStyle: { color: '#7c3aed' } },
+      { name: '外部投诉', type: 'bar', stack: 'total', data: agg.byName['外部投诉'].values, itemStyle: { color: '#dc2626' } },
     ],
   }
 })
@@ -1322,17 +1343,20 @@ const externalCategoryOption = computed(() => {
   }
 })
 
-// ── 外部投诉趋势(按日) ──
+// ── 外部投诉趋势(支持按日/周/月汇聚) ──
 const externalTrendOption = computed(() => {
   const t = s.value.external_trend || []
   if (!t.length) return null
+  const dayMap = {}
+  t.forEach(r => { if (r.day != null) dayMap[r.day] = (dayMap[r.day] || 0) + (r.count || 0) })
+  const agg = aggregateSeries(dayMap, externalTrendGrain.value)
   return {
     tooltip: { trigger: 'axis' },
     grid: { left: 48, right: 24, bottom: 40, top: 16 },
-    xAxis: { type: 'category', data: t.map(r => r.day), axisLabel: { fontSize: 10, rotate: 45 } },
+    xAxis: { type: 'category', data: agg.labels, axisLabel: { fontSize: 10, rotate: agg.labels.length > 12 ? 45 : 0 } },
     yAxis: { type: 'value', name: '投诉数' },
     series: [{
-      type: 'line', data: t.map(r => r.count), smooth: true,
+      type: 'line', data: agg.values, smooth: true,
       areaStyle: { opacity: 0.15 }, itemStyle: { color: '#dc2626' }, lineStyle: { color: '#dc2626' },
     }],
   }
