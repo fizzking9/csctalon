@@ -332,6 +332,45 @@ sudo /opt/csctalon/current/deploy/restore.sh <备份包> --db-only
 - [ ] 每日备份 cron 已配置且成功跑过一次
 - [ ] SSH 密钥登录已启用（如可能关闭密码登录）
 - [ ] 日志轮转生效（json-file 10m×3 + /opt/csctalon/logs）
+- [ ] 无孤儿 Docker 卷 / 发布杂质（2026-08-30 部署审计，见下）
+
+### 8.1 部署巡检与残留清理（2026-08-30 部署审计）
+
+生产勘查确认过 4 类可收敛项，代码侧已修复（发布链路统一清理、`.env` 路径变量统一、PG 属主固定），
+以下为**服务器上人工执行一次**的收尾动作：
+
+**① 清理孤儿 Docker 卷**（早期 project 漂移残留，当前容器走 bind mount 不在其中，删掉不影响业务）：
+
+```bash
+docker volume rm \
+  920f48e_csctalon-pgdata  current_csctalon-pgdata \
+  920f48e_csctalon-redisdata current_csctalon-redisdata
+```
+
+> 删除前先确认：`docker ps` 中 db/redis 容器挂载是 bind（`docker inspect csctalon-db --format '{{range .Mounts}}{{.Type}} {{.Source}} {{.Destination}}{{end}}'`），
+> 且 `/opt/csctalon/data/postgres` 非空（`du -sh /opt/csctalon/data/postgres`）。
+
+**② 删除 `current` 里 git 模式带入的历史杂质目录**（新代码已由 upgrade.sh/install-server.sh 清理，旧 release 残留可删）：
+
+```bash
+cd /opt/csctalon/current
+rm -rf .git .gitea .dsh .trae .workbuddy docs scripts backend/scripts backend/tests
+```
+
+> 若历史 `releases/<版本>` 内也有，一并清理（保留最近 5 个之外会被自动清理）。
+
+**③ 收敛 `.env` 路径变量**：生产 `/opt/csctalon/.env` 应只有一套**单数**路径变量（与后端代码 `settings.UPLOAD_DIR/BROWSER_STATE_DIR` 一致）：
+`DB_DATA_DIR / REDIS_DATA_DIR / UPLOAD_DIR / BROWSER_STATE_DIR / BACKEND_LOGS_DIR / NGINX_LOGS_DIR / ENV_FILE`。
+若仍有失效的 `UPLOAD_DIR=./uploads`（相对容器内路径）或复数 `UPLOADS_DIR/BROWSER_STATES_DIR`，删掉旧的、保留绝对值。
+
+**④ PG 数据目录属主**：db 容器固定以 uid 999 运行（compose `user: "999:999"`），数据目录应属主 `999:999`
+（宿主侧显示为数字 999 而非错位的 `dnsmasq`）。若宿主 root 仍无法遍历：
+
+```bash
+chown -R 999:999 /opt/csctalon/data/postgres
+```
+
+> 注意：仅当 PG 停止或容器重建时执行，避免运行中改属主引发异常。
 
 ## 9. 常见问题
 

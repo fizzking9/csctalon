@@ -43,8 +43,9 @@ err() { echo -e "\033[31m✘ $*\033[0m" >&2; }
 var() { grep -E "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || echo "$3"; }
 PG_USER="$(var "$ENV_FILE" POSTGRES_USER csctalon)"
 PG_DB="$(var "$ENV_FILE" POSTGRES_DB csctalon)"
-UPLOADS_DIR="$(var "$ENV_FILE" UPLOADS_DIR "$COMPOSE_DIR/backend/uploads")"
-BROWSER_STATES_DIR="$(var "$ENV_FILE" BROWSER_STATES_DIR "$COMPOSE_DIR/data/browser_states")"
+# ⚠️ 单数 UPLOAD_DIR/BROWSER_STATE_DIR(与 docker-compose 挂载变量/backup.sh 一致, 2026-08-30 统一; 复数已废弃)
+UPLOAD_DIR="$(var "$ENV_FILE" UPLOAD_DIR "$COMPOSE_DIR/backend/uploads")"
+BROWSER_STATE_DIR="$(var "$ENV_FILE" BROWSER_STATE_DIR "$COMPOSE_DIR/data/browser_states")"
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
@@ -100,14 +101,14 @@ ok "数据库恢复完成 (users=$_CK_USERS, refunds=$_CK_REFS)"
 # ---------- 4. 恢复附件(可选) ----------
 if [[ $DB_ONLY -eq 0 ]]; then
   if [[ -d "$STAGE/uploads" && -n "$(ls -A "$STAGE/uploads" 2>/dev/null)" ]]; then
-    c "恢复附件 → $UPLOADS_DIR"
-    mkdir -p "$UPLOADS_DIR"
-    cp -a "$STAGE/uploads/." "$UPLOADS_DIR/"
+    c "恢复附件 → $UPLOAD_DIR"
+    mkdir -p "$UPLOAD_DIR"
+    cp -a "$STAGE/uploads/." "$UPLOAD_DIR/"
   fi
   if [[ -d "$STAGE/browser_states" && -n "$(ls -A "$STAGE/browser_states" 2>/dev/null)" ]]; then
-    c "恢复登录态 → $BROWSER_STATES_DIR"
-    mkdir -p "$BROWSER_STATES_DIR"
-    cp -a "$STAGE/browser_states/." "$BROWSER_STATES_DIR/"
+    c "恢复登录态 → $BROWSER_STATE_DIR"
+    mkdir -p "$BROWSER_STATE_DIR"
+    cp -a "$STAGE/browser_states/." "$BROWSER_STATE_DIR/"
   fi
 fi
 

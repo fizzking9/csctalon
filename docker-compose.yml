@@ -2,6 +2,11 @@
 # 使用: docker compose up -d --build
 # 访问: http://<服务器IP>:80 (前端), http://<服务器IP>:8000 (后端API,可选)
 #
+# ⚠️ 发布纯净性(2026-08-30 部署审计): 部署脚本 upgrade.sh 支持 tar 包 与 --git 两种来源,
+#    --git 模式 clone 后会清理 .trae/.dsh/.gitea/.workbuddy/docs/scripts 等开发杂质;
+#    package.sh tar 模式同样排除(清单一致)。请勿在 git 里新增"随发布走"的开发/AI 工具目录,
+#    否则会作为杂质进入 current 并进后端镜像。
+#
 # ⚠️ 固定 project name = csctalon:
 #   部署脚本在 /opt/csctalon/current(软链, 指向 releases/<版本>)下运行 compose,
 #   若不加 name, project name 默认取目录名 → 每次切版本(目录名=版本号)都会变,
@@ -29,6 +34,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-csctalon}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-csctalon}
+    # 固定容器用户为 postgres(uid 999): 官方镜像默认即 999, 显式声明使 bind mount 数据目录
+    # 属主清晰可辨(宿主侧显示 999 而非错位的 dnsmasq), 便于 backup.sh/巡检直接遍历。
+    # install-server.sh 已把 ${DB_DATA_DIR:-./data/postgres} 建好并 chown 999:999。
+    user: "999:999"
     volumes:
       - ${DB_DATA_DIR:-./data/postgres}:/var/lib/postgresql/data
     ports:
@@ -77,8 +86,10 @@ services:
     environment:
       - ENV=prod
     volumes:
-      - ${UPLOADS_DIR:-./backend/uploads}:/app/uploads
-      - ${BROWSER_STATES_DIR:-./data/browser_states}:/app/data/browser_states   # Playwright 登录态(独立于 uploads, 不被静态挂载暴露)
+      # 挂载变量与后端代码读取的 settings.UPLOAD_DIR / BROWSER_STATE_DIR 保持同名(单数),
+      # 避免 UPLOADS_DIR/BROWSER_STATES_DIR 复数写法与代码不一致、.env 配串导致路径错配(2026-08-30 部署审计)
+      - ${UPLOAD_DIR:-./backend/uploads}:/app/uploads
+      - ${BROWSER_STATE_DIR:-./data/browser_states}:/app/data/browser_states   # Playwright 登录态(独立于 uploads, 不被静态挂载暴露)
       - ${BACKEND_LOGS_DIR:-./logs/backend}:/app/logs   # 持久化日志文件,避免容器重建丢失 500 堆栈
     ports:
       - "127.0.0.1:8000:8000"   # 仅本机可连；前端经 nginx 反代访问
