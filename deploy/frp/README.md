@@ -535,7 +535,7 @@ sudo bash deploy/frp/local/cleanup-frpc.sh --purge
 |---|---|---|
 | 云端 | 1Panel OpenResty 反代站点 + 证书 | 1Panel 网站 → 停用/删除绑定域名的反代站点；证书在 网站→SSL 里删除 |
 | 云端 | 防火墙/安全组 | 不再需要 frp 时 `ufw deny 7000`、`ufw deny 8080`，并删安全组对应放行规则 |
-| 云端 | 兜底配置(若加过) | 删除 `openresty-default-server.conf` 兜底站点(见 §12.4) |
+| 云端 | 兜底配置(若加过) | 删除 `openresty-default-server.conf` 兜底站点(见 §12.5) |
 | 本地 | `.env` 的 `CORS_ORIGINS` | 移除 `https://<域名>` 后 `docker compose --env-file /opt/csctalon/.env restart backend`(不删也不影响内网) |
 | 本地 | 备份 cron | 停掉或改目标 `sync-backup-to-cloud.sh`(§6.1), 否则会持续报错/推送到已停的服务 |
 
@@ -597,7 +597,7 @@ deploy/frp/
 ① 云端装 1Panel + 启动 OpenResty（应用商店）
 ② 生成 token（openssl rand -hex 32，两端共用）
 ③ 云端执行 deploy-frps.sh（默认 openresty 模式）→ 启动 frps 容器 + 打印 1Panel 反代配置
-④ 1Panel → 网站 → 反向代理 绑定域名 → SSL 申请证书（详见 §12.3）→ 粘贴反代配置
+④ 1Panel → 网站 → 反向代理 绑定域名 → SSL 申请证书（详见 §12.4）→ 粘贴反代配置
 ⑤ 本地执行 install-frpc.sh → frpc 连上云端 7000
 ⑥ 云端 ufw deny 8080 + 安全组收紧（7000 限办公 IP）
 ⑦ 本地 .env 加 CORS_ORIGINS 并重启 backend
@@ -612,7 +612,7 @@ deploy/frp/
 |---|---|---|
 | frpc 报 `dial tcp <云端IP>:7000: i/o timeout` | **云端 UFW/安全组没放行 7000**（frps 在 `*:7000` 监听≠公网可达，UFW 默认 deny 入站） | 云端 `ufw allow 7000/tcp`（建议收紧到办公 IP）；并确认云安全组放行 7000 |
 | frpc 日志 `proxy [web-http] already exists` | 云端 frps 残留了旧的同名代理（上次连接没清干净） | 云端 `docker restart frps` 清残留 → 本地 `systemctl restart frpc`；若有多个 frpc 进程残留 `pkill -f frpc` 再重启 |
-| 直接输 IP 访问 → frp 提示页/404 | frp 按 **Host 头分流**，IP 的 Host 匹配不到 `customDomains`，落到 frps 兜底 | **预期行为**。正规用 `https://<域名>`；不想暴露 frp → 用 `openresty-default-server.conf` 兜底（return 444/自定义 403）+ `ufw deny 8080`（见 §12.4） |
+| 直接输 IP 访问 → frp 提示页/404 | frp 按 **Host 头分流**，IP 的 Host 匹配不到 `customDomains`，落到 frps 兜底 | **预期行为**。正规用 `https://<域名>`；不想暴露 frp → 用 `openresty-default-server.conf` 兜底（return 444/自定义 403）+ `ufw deny 8080`（见 §12.5） |
 | 1Panel 申请 Let's Encrypt 报 `x509: cannot parse IP address of length 0` | 1Panel/acme 预检域名解析异常；且 **HTTP 验证在 frp 架构下必失败**（验证请求带域名 Host 被反代进隧道，返回 SPA 而非挑战文件） | **改用 DNS 验证**（阿里云/腾讯云 DNS API），或**换 ZeroSSL 签发机构**（本次实战 ZeroSSL 可走通） |
 | 证书申请报 `DomainRecordDuplicate: The DNS record already exists` | 之前申请失败时残留的 `_acme-challenge` TXT 记录没删 | 去阿里云/腾讯云 DNS 控制台**删除残留 `_acme-challenge` TXT 记录**，再重新申请 |
 | 证书验证通过但 Safari 打不开 / Edge 能开 | ① Safari 缓存了旧连接/失败状态 ② 腾讯云备案拦截（见下条） | 先 Cmd+Q 退出 Safari / 隐私窗口 / 清网站数据；仍不行查备案拦截 |
@@ -620,9 +620,65 @@ deploy/frp/
 | 本地 `curl https://127.0.0.1/ -H "Host: 域名"` 200、公网打不开 | 拦截/网络发生在**云厂商公网入口**，对服务器本机回环不生效 | 在**外部机器**（手机流量/本地）测 `https://<域名>`；若被拦则多为备案拦截或安全组 |
 | `curl -I -H "Host: <域名>" http://<云端IP>/` 返回 200，但 `http://<IP>/` 404 | frp 按 Host 分流：带域名 Host 才匹配代理 | 用域名访问（或加 `customDomains` 里 IP，但不建议） |
 | 外网 502/504 | frpc 隧道断了（token 不一致 / 7000 不通 / 本地 nginx 没起） | 见 §10 与 §7.2 |
+| 页面间歇性加载不全/静态资源 404（OpenResty error.log 报 `limiting connections by zone "perip"`） | **1Panel 自动生成的站点配置带按 IP 限并发** `limit_conn perip 25`，办公 NAT 出口多人共用 IP 时并发打满，`/assets/*.js|css` 被掐断 | 调大或对 `/assets/` 豁免，见 §12.3 |
 | 部署脚本报旧版 `http2` 指令错误 | **云端拉到了 gitea 旧版脚本** | 本地 `git push` 后再重跑；旧脚本残留的宿主 nginx 需停用（`systemctl stop/disable nginx`，必要时 `apt-get remove nginx`） |
 
-### 12.3 证书申请（frp 架构下）推荐做法
+### 12.3 OpenResty `perip` 限流（按 IP 并发）调优
+
+**现象**：OpenResty error.log 出现 `limiting connections by zone "perip"`，被拦的往往是**同段办公出口 NAT IP**（多人共用一个公网 IP），请求是页面加载瞬间的 `/assets/*.js`、`*.css` 并发；表现为页面间歇性白屏/样式丢失/JS 加载不全。
+
+**根因**：1Panel 给每个站点自动生成的配置里默认带按 IP 并发限制（主配置只定义 zone，站点配置里才引用）：
+
+```nginx
+# /usr/local/openresty/nginx/conf/nginx.conf(http 块, 仅定义 zone, 不用改)
+limit_conn_zone $binary_remote_addr zone=perip:10m;
+limit_conn_zone $server_name zone=perserver:10m;
+
+# /usr/local/openresty/nginx/conf/conf.d/www.kimirock.top.conf(站点配置, 限制在这里)
+limit_conn perserver 300;    # 整个域名并发上限
+limit_conn perip 25;         # ← 每个 IP 并发上限, 办公 NAT 下太紧
+```
+
+**定位**：进 OpenResty 容器搜引用位置
+
+```bash
+docker exec -it 1Panel-openresty-iTSM sh
+grep -rn "limit_conn perip\|limit_conn perserver\|limit_req" /usr/local/openresty/nginx/conf/
+# → conf.d/www.kimirock.top.conf:19  limit_conn perserver 300;
+# → conf.d/www.kimirock.top.conf:20  limit_conn perip 25;
+```
+
+**解决（二选一）**：
+
+1. **简单调大**（推荐先做）：`limit_conn perip 25` → `100`（办公 NAT 后几十人共用 IP 足够，仍能挡扫描器）
+   ```bash
+   docker exec -it 1Panel-openresty-iTSM sh
+   sed -i 's/limit_conn perip 25;/limit_conn perip 100;/' \
+     /usr/local/openresty/nginx/conf/conf.d/www.kimirock.top.conf
+   nginx -t && nginx -s reload
+   ```
+
+2. **静态资源豁免**（更精细，可选）：在站点 server 块加 `/assets/` 专属 location，用更大额度 zone 覆盖继承的 `perip` 限制，让 JS/CSS 永不限流、`/api/` 保持 25 防攻击：
+   ```nginx
+   # http 块先定义(与 perip 同级):
+   #   limit_conn_zone $binary_remote_addr zone=perip_static:10m;
+   location /assets/ {
+       limit_conn perip_static 1000;      # 覆盖继承的 perip, 静态资源近乎不限制
+       proxy_pass http://127.0.0.1:8080;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+       proxy_read_timeout 900s;
+       client_max_body_size 200m;
+   }
+   ```
+
+> ⚠️ **注意**：`conf.d/www.kimirock.top.conf` 是 1Panel 网站管理自动生成的站点配置，**在 1Panel 网站界面再点保存/改站点设置时可能被重新生成覆盖**。想一劳永逸请在 1Panel 面板内该站点的「配置文件」入口里改；改文件方式则注意别在面板里再动该站点。
+>
+> 另：error.log 里 `GET /.bashrc`、`GET /api/settings`（海外 IP 段）这类是**公网扫描器探测**，被 `perip` 拦下是**预期且有益**的，不用管。
+
+### 12.4 证书申请（frp 架构下）推荐做法
 
 1. **首选 ZeroSSL + DNS 验证**（本次实战验证可行）：
    - 1Panel → 网站 → SSL → 申请证书 → 签发机构 **ZeroSSL**、验证方式 **DNS**、DNS 厂商选 **阿里云/腾讯云**（填 API 密钥）。
@@ -630,7 +686,7 @@ deploy/frp/
 2. **Let's Encrypt**：HTTP-01 在 frp 架构下会被反代进隧道导致验证失败，**不推荐**；除非给 `/.well-known/acme-challenge/` 单独配不走隧道的位置（较麻烦）。
 3. 申请失败 `DomainRecordDuplicate` → 删残留 `_acme-challenge` TXT 记录后重试。
 
-### 12.4 不暴露 frp 的兜底配置（直接输 IP 时）
+### 12.5 不暴露 frp 的兜底配置（直接输 IP 时）
 
 直接输 IP 会落到 frps 默认提示页（暴露 frp 组件信息）。处理：
 
@@ -645,14 +701,14 @@ ufw deny 8080
 
 > 参考文件：`deploy/frp/cloud/openresty-default-server.conf`（含完整配置与说明）。
 
-### 12.5 域名/证书相关核对清单
+### 12.6 域名/证书相关核对清单
 
 - DNS A 记录：`www`（和可选 `@`）→ 云端公网 IP（本地 `dig +short www.<域名>` 确认）。
 - 三处域名一致：DNS、本地 frpc `customDomains`、云端 OpenResty server_name。
 - 证书链完整（Safari 校验严格）：`echo \| openssl s_client -connect <域名>:443 -showcerts 2>/dev/null \| grep -E "^ 0 s:|^ 1 s:|^ 2 s:"` 应有 叶子+中间+根 三层。
 - 若想裸域名也可访问：本地 `frpc.toml` 的 `customDomains` 加 `"<裸域名>"`，1Panel 同步绑定 + 证书覆盖。
 
-### 12.6 上线收尾（必做）
+### 12.7 上线收尾（必做）
 
 1. **换 token**（若曾在对话/日志暴露）：两端一起改，重启 frps + frpc。
 2. **本地 `.env` 的 `CORS_ORIGINS`** 加 `https://<域名>` 并重启 backend（否则外网登录被 CORS 拦）。
