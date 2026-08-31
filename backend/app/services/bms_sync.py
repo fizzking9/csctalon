@@ -775,11 +775,11 @@ async def sync_all(
                 # complaint:* 一并失效: BMS 工单同步后投诉主台账(service_tickets)会变,
                 # 投诉看板(analysis/subject/summary/detail/backlog)需同步刷新
                 try:
-                    from app.core.redis_client import cache_invalidate_pattern
-                    n = cache_invalidate_pattern("today:*")
-                    n += cache_invalidate_pattern("complaint:*")
+                    from app.core.redis_client import cache_invalidate_recent_days
+                    n = cache_invalidate_recent_days("today:*")
+                    n += cache_invalidate_recent_days("complaint:*")
                     if n:
-                        logger.info(f"已失效 {n} 条 today:*/complaint:* 缓存")
+                        logger.info(f"已失效 {n} 条 today:*/complaint:* 缓存(近N天窗口,保留历史)")
                 except Exception as ce:
                     logger.debug(f"缓存失效失败(不影响同步): {ce}")
             except Exception as e:

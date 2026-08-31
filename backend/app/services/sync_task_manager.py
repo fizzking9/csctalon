@@ -383,9 +383,9 @@ class SyncTaskManager:
             # 缓存失效兜底: 同步完成后统一失效看板缓存 (含 BMS/SCRM 并发合并任务),
             # 避免同步后仍读到旧聚合结果。complaint:* 一并失效(BMS 投诉工单同步后会变)。
             try:
-                from app.core.redis_client import cache_invalidate_pattern
+                from app.core.redis_client import cache_invalidate_recent_days
                 for pat in ("today:*", "refund:*", "complaint:*"):
-                    cache_invalidate_pattern(pat)
+                    cache_invalidate_recent_days(pat)
             except Exception as ce:  # noqa: BLE001
                 logger.debug(f"缓存失效兜底失败(不影响同步): {ce}")
             # 同步后预热今日看板: 数据已更新, 主动填充缓存让下次访问命中热缓存。

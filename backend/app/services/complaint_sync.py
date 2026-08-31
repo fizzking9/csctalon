@@ -452,9 +452,9 @@ def sync_complaints_from_payload(
         ) > 0
         if has_writes:
             try:
-                from app.core.redis_client import cache_invalidate_pattern
+                from app.core.redis_client import cache_invalidate_recent_days
                 for pat in ("complaint:*", "today:*"):
-                    cache_invalidate_pattern(pat)
+                    cache_invalidate_recent_days(pat)
                 # 预热今日视图(含投诉区块), 让首访命中热缓存; 投诉推送频率低(约20min/次),
                 # 复用同步后预热入口(含单飞锁+can_warm检查), 月报顺带刷新成本可忽略
                 from app.services.cache_warmer import warm_after_sync

@@ -6,13 +6,21 @@
 - Redis 不可用时静默降级(返回 None), 不阻塞业务请求
 - 缓存序列化用 JSON, 兼容 FastAPI 响应模型
 - 同步写入高峰期: 自动延长缓存 TTL 防 DB 缓存击穿 + 雪崩
+
+日期感知 TTL(2026-08-31 新增):
+  历史窗口(end < 今天)数据已定型不再变化, TTL 拉长到 24h, 避免用户切历史日期
+  反复冷查询(冷聚合 2~4s); 含今天的窗口(数据还在同步变动)保持短 TTL。
+  数据一致性兜底: 每次同步完成后仍会失效「今日+近 N 天」缓存(见
+  cache_invalidate_recent_days), 历史 TTL 拉长不会造成数据陈旧。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import redis
@@ -21,6 +29,17 @@ from redis.exceptions import RedisError
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# 东八区(与全项目对齐)
+TZ_CN = timezone(timedelta(hours=8))
+
+# 日期感知 TTL(秒): 含今天窗口保持短 TTL; 纯历史窗口拉长到 24h(数据已定型)
+HISTORY_TTL_SECONDS = 24 * 3600
+# 同步后失效保留窗口(天): 仅失效「含今天 + 近 N 天」的缓存, 更早的历史缓存长期驻留
+# (历史 TTL 已拉到 24h, 同步不涉及历史窗口, 无需清掉)
+SYNC_INVALIDATE_RECENT_DAYS = 7
+# 缓存 key 中的日期片段模式(用于按窗口范围失效)
+_CACHE_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 
 # 全局单例(进程级复用连接池)
 _redis_client: redis.Redis | None = None
@@ -180,6 +199,93 @@ def _maybe_extend_hit_ttl(key: str, r: redis.Redis) -> None:
         pass
 
 
+def parse_date(s: str | None) -> datetime | None:
+    """解析 'YYYY-MM-DD' → naive 北京时间 datetime; 无法解析返回 None。
+
+    用于日期感知 TTL: 路由层把 start/end(字符串)传进来判断窗口是否含今天。
+    """
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        return datetime.strptime(s.strip()[:10], "%Y-%m-%d").replace(tzinfo=TZ_CN)
+    except (ValueError, TypeError):
+        return None
+
+
+def is_historical_window(start: str | None, end: str | None, *, now: datetime | None = None) -> bool:
+    """判断窗口是否为「纯历史」(end 严格早于今天) → 数据已定型, 可长缓存。
+
+    - 未给 end(静态端点/空窗口) → 视为含今天, 走短 TTL(数据可能实时变动)
+    - end 落在今天或未来(含今天) → 短 TTL
+    - end 严格 < 今天 00:00 → 纯历史 → 长 TTL
+    """
+    now = now or datetime.now(TZ_CN)
+    end_dt = parse_date(end)
+    if end_dt is None:
+        return False
+    today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return end_dt < today0
+
+
+def cache_ttl_for(start: str | None, end: str | None, base_ttl: int) -> int:
+    """日期感知 TTL: 纯历史窗口 → 24h; 含今天窗口 → 原 base_ttl。
+
+    用法: 路由层 cached_call(key, cache_ttl_for(start, end, 60), ...)
+    注意: 若 base_ttl 本身较大(如 120), 历史窗口仍用 HISTORY_TTL 统一 24h。
+    """
+    if is_historical_window(start, end):
+        return HISTORY_TTL_SECONDS
+    return base_ttl
+
+
+def cache_invalidate_recent_days(
+    prefix_pattern: str,
+    *,
+    recent_days: int = SYNC_INVALIDATE_RECENT_DAYS,
+) -> int:
+    """按前缀失效「含今天 + 近 N 天窗口」的缓存, 保留更早的历史缓存。
+
+    背景(2026-08-31): 此前同步后全量失效 today:*/complaint:*/refund:*, 会把
+    「历史窗口缓存(已拉长到 24h TTL)」一并清掉 → 历史缓存永远驻留不住。
+    现改为: 仅失效 key 中任一日期落在 [今天-N 天, 今天] 内的条目。
+    同步只影响今天/近几天数据, 历史窗口不受影响, 无需清掉。
+
+    实现: SCAN 前缀 → 提取 key 中所有 YYYY-MM-DD 片段 → 若任一在近 N 天内则删除。
+    无日期片段的 key(如静态 summary/op:status)视为敏感, 全部失效。
+    返回删除条数。
+    """
+    r = get_redis()
+    if r is None:
+        return 0
+    now = datetime.now(TZ_CN)
+    today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    min_date = today0 - timedelta(days=recent_days)
+    deleted = 0
+    try:
+        for key in r.scan_iter(match=prefix_pattern, count=500):
+            dates = _CACHE_DATE_RE.findall(key)
+            if not dates:
+                # 静态 key(无日期窗口, 如 summary / op:status): 数据实时变动, 全量失效
+                r.delete(key)
+                deleted += 1
+                continue
+            keep = True
+            for ds in dates:
+                try:
+                    d = datetime.strptime(ds, "%Y-%m-%d").replace(tzinfo=TZ_CN)
+                except ValueError:
+                    continue
+                if min_date <= d <= now:
+                    keep = False  # 命中近 N 天窗口 → 需失效
+                    break
+            if not keep:
+                r.delete(key)
+                deleted += 1
+    except RedisError as e:
+        logger.debug("缓存按近N天失效失败 prefix=%s: %s", prefix_pattern, e)
+    return deleted
+
+
 def cache_get_json(key: str) -> Any | None:
     """读缓存; 命中返回反序列化后的对象, 未命中或异常返回 None"""
     r = get_redis()
@@ -333,7 +439,7 @@ def cached_call(key: str, ttl: int, fn: Callable, *args, **kwargs) -> Any:
     return result
 
 
-def cached_json(key_fn: Callable[..., str], ttl: int = 60) -> Callable:
+def cached_json(key_fn: Callable[..., str], ttl: int | Callable[..., int] = 60) -> Callable:
     """装饰器: 给 FastAPI 同步路由加 JSON 缓存
 
     用法:
@@ -341,6 +447,11 @@ def cached_json(key_fn: Callable[..., str], ttl: int = 60) -> Callable:
         @cached_json(lambda date, **kw: f"today:kpi:{date}:{kw}")
         def today_kpi(date: str = None):
             ...
+
+    ttl 参数:
+      - int: 固定 TTL(默认 60s)
+      - callable: 每次写入时调用 `ttl(**kwargs)` 动态计算 TTL(如日期感知:
+        `lambda **kw: cache_ttl_for(kw.get('start'), kw.get('end'), 60)`)
 
     注意: 装饰器需在 @router.get 之下(先应用), 这样 FastAPI 拿到的是包装后的函数.
     """
@@ -360,7 +471,8 @@ def cached_json(key_fn: Callable[..., str], ttl: int = 60) -> Callable:
                     return hit
             result = func(*args, **kwargs)
             if key and result is not None:
-                cache_set_json(key, result, ttl)
+                eff_ttl = ttl(**kwargs) if callable(ttl) else ttl
+                cache_set_json(key, result, eff_ttl)
             return result
 
         # 保留原函数元数据(FastAPI 依赖注入需要)

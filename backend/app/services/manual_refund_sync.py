@@ -272,12 +272,12 @@ def sync_manual_refunds_from_payload(
         # 手动退款入库后失效看板缓存(退款看板/运营看板/今日看板), 避免旧聚合
         # (被动推送独立于 sync_task_manager, 需在此显式失效)
         try:
-            from app.core.redis_client import cache_invalidate_pattern
+            from app.core.redis_client import cache_invalidate_recent_days
             n = 0
             for pat in ("refund:*", "today:*"):
-                n += cache_invalidate_pattern(pat)
+                n += cache_invalidate_recent_days(pat)
             if n:
-                logger.info(f"[manual_refund_sync] 失效 {n} 条看板缓存")
+                logger.info(f"[manual_refund_sync] 失效 {n} 条看板缓存(近N天窗口,保留历史)")
         except Exception as ce:
             logger.debug(f"[manual_refund_sync] 缓存失效失败(不影响同步): {ce}")
 

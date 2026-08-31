@@ -21,7 +21,7 @@
           style="width: 150px"
           @change="onDateChange"
         />
-        <el-button size="small" @click="loadAll" :loading="loading">
+        <el-button size="small" @click="loadAll({ force: true })" :loading="loading">
           <el-icon><Refresh /></el-icon>刷新
         </el-button>
         <el-tag v-if="lastUpdate && showRealtimeTag" size="small" effect="plain" type="info">
@@ -852,6 +852,18 @@ function taskStatusLabel(s) {
 const selectedDate = ref(dayjs().format('YYYY-MM-DD'))
 const isToday = computed(() => selectedDate.value === dayjs().format('YYYY-MM-DD'))
 
+// ── 前端内存缓存: 按 viewMode+start+end 缓存上次加载结果, 切回同窗口秒开 ──
+// 背景(2026-08-31): 后端历史窗口缓存 TTL 已拉长到 24h, 但前端切日期仍会
+// Promise.all 重拉 8 个接口。历史数据不变化, 切回同一天直接用内存数据即可,
+// 不必等后端缓存命中(省一次网络往返)。仅「日视图·今天」手动/自动刷新强制重拉。
+const _viewCacheKey = () => {
+  const { start, end } = getRange()
+  return `${viewMode.value}|${start}|${end}`
+}
+let _viewCache = null  // { key, data: {...8个响应} } 单条(最近一次加载的窗口)
+// 是否强制刷新: 仅「日视图·今天」的手动刷新/自动刷新; 切换窗口一律走缓存
+const _forceRefresh = () => viewMode.value === 'day' && isToday.value
+
 // 周视图的起止日期(周一00:00 到 周日23:59;如果周日晚于今天则截止到今天结束)
 function getWeekRange() {
   const d = dayjs(selectedDate.value)
@@ -1301,7 +1313,14 @@ const successRateColor = computed(() => {
 })
 
 // 加载数据
-async function loadAll() {
+// 前端内存缓存: 切回同窗口直接用上次结果(历史数据不变化), 不发请求秒开。
+// 仅「日视图·今天」手动/自动刷新走 force=true 强制重拉。
+async function loadAll({ force = false } = {}) {
+  // 命中内存缓存且非强制刷新 → 直接渲染(不发网络请求)
+  if (!force && !_forceRefresh() && _viewCache && _viewCache.key === _viewCacheKey()) {
+    applyViewData(_viewCache.data)
+    return
+  }
   loading.value = true
   try {
     const { start, end } = getRange()
@@ -1320,14 +1339,9 @@ async function loadAll() {
       complaintBacklog({ start: dayjs().subtract(30, 'day').format('YYYY-MM-DD'), end: dayjs().format('YYYY-MM-DD') }),
     ])
     
-    if (kpiRes.data) kpiData.value = kpiRes.data
-    if (hourlyRes.data) hourlyData.value = hourlyRes.data
-    if (staffRes.data) staffData.value = staffRes.data
-    if (queueRes.data) queueData.value = queueRes.data
-    if (recoveryRes.data) recoveryData.value = recoveryRes.data
-    if (complaintSummaryRes.data) complaintSummaryData.value = complaintSummaryRes.data
-    if (complaintDetailRes.data) complaintList.value = complaintDetailRes.data?.items || []
-    if (backlogRes.data) backlogTotal.value = backlogRes.data?.total || 0
+    const data = { kpiRes, hourlyRes, staffRes, queueRes, recoveryRes, complaintSummaryRes, complaintDetailRes, backlogRes }
+    _viewCache = { key: _viewCacheKey(), data }
+    applyViewData(data)
     
     lastUpdate.value = dayjs().format('HH:mm:ss')
   } catch (e) {
@@ -1335,6 +1349,18 @@ async function loadAll() {
   } finally {
     loading.value = false
   }
+}
+
+// 把一次加载结果应用到各响应式状态
+function applyViewData({ kpiRes, hourlyRes, staffRes, queueRes, recoveryRes, complaintSummaryRes, complaintDetailRes, backlogRes }) {
+  if (kpiRes.data) kpiData.value = kpiRes.data
+  if (hourlyRes.data) hourlyData.value = hourlyRes.data
+  if (staffRes.data) staffData.value = staffRes.data
+  if (queueRes.data) queueData.value = queueRes.data
+  if (recoveryRes.data) recoveryData.value = recoveryRes.data
+  if (complaintSummaryRes.data) complaintSummaryData.value = complaintSummaryRes.data
+  if (complaintDetailRes.data) complaintList.value = complaintDetailRes.data?.items || []
+  if (backlogRes.data) backlogTotal.value = backlogRes.data?.total || 0
 }
 
 let autoRefreshTimer = null
@@ -1348,9 +1374,10 @@ onMounted(() => {
   isMobile.value = _mq.matches
   _mq.addEventListener('change', _onMediaChange)
   loadAll()
-  // 仅「日视图·今天」时每60秒自动刷新; 周视图/历史日期数据不需要轮询
+  // 仅「日视图·今天」时每60秒自动刷新; 周视图/历史日期数据不需要轮询。
+  // force=true: 今天是实时窗口, 自动刷新必须真正重拉(不走内存缓存)。
   autoRefreshTimer = setInterval(() => {
-    if (viewMode.value === 'day' && isToday.value) loadAll()
+    if (viewMode.value === 'day' && isToday.value) loadAll({ force: true })
   }, 60000)
 })
 
