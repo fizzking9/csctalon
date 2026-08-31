@@ -2,16 +2,23 @@
   <div class="page-container">
     <div class="flex-between mb-16">
       <div class="page-title" style="margin: 0">运营分析</div>
-      <el-radio-group v-model="range" size="small" @change="loadAll">
-        <el-radio-button label="7">近7天</el-radio-button>
-        <el-radio-button label="30">近30天</el-radio-button>
-        <el-radio-button label="90">近90天</el-radio-button>
-      </el-radio-group>
+      <div class="filter-bar">
+        <el-radio-group v-model="range" size="small" @change="loadAll">
+          <el-radio-button label="7">近7天</el-radio-button>
+          <el-radio-button label="30">近30天</el-radio-button>
+          <el-radio-button label="90">近90天</el-radio-button>
+        </el-radio-group>
+        <el-radio-group v-model="grain" size="small" @change="loadAll">
+          <el-radio-button label="day">按日</el-radio-button>
+          <el-radio-button label="week">按周</el-radio-button>
+          <el-radio-button label="month">按月</el-radio-button>
+        </el-radio-group>
+      </div>
     </div>
 
     <el-row :gutter="16" class="mb-16">
       <el-col :span="16">
-        <el-card header="退款趋势(按日)">
+        <el-card header="退款趋势">
           <BaseChart :option="trendOption" height="320px" />
         </el-card>
       </el-col>
@@ -42,8 +49,11 @@ import { ref, computed, onMounted } from 'vue'
 import BaseChart from '@/components/BaseChart.vue'
 import { operation } from '@/api/analytics'
 import dayjs from 'dayjs'
+import isoWeek from 'dayjs/plugin/isoWeek'
+dayjs.extend(isoWeek)
 
 const range = ref('30')
+const grain = ref('day') // 趋势粒度: 日/周/月; 前端对后端按日数据做汇聚
 const trend = ref([])
 const status = ref([])
 const reason = ref([])
@@ -55,20 +65,59 @@ function dateRange() {
   return { start: start.format('YYYY-MM-DD'), end: end.format('YYYY-MM-DD') }
 }
 
-const trendOption = computed(() => ({
-  tooltip: { trigger: 'axis' },
-  legend: { data: ['退款金额', '退款笔数'] },
-  grid: { left: 50, right: 50, bottom: 30, top: 40 },
-  xAxis: { type: 'category', data: trend.value.map((d) => d.date) },
-  yAxis: [
-    { type: 'value', name: '金额(元)' },
-    { type: 'value', name: '笔数' },
-  ],
-  series: [
-    { name: '退款金额', type: 'line', smooth: true, areaStyle: {}, data: trend.value.map((d) => d.value) },
-    { name: '退款笔数', type: 'bar', yAxisIndex: 1, data: trend.value.map((d) => d.count) },
-  ],
-}))
+// 把按日序列(date→{value,count})按周/月聚合成带标签的序列(前端纯计算, 后端无改动)
+function aggregateTrend(rows, g) {
+  if (g === 'day') {
+    return {
+      labels: rows.map(d => d.date.slice(5)),
+      values: rows.map(d => d.value),
+      counts: rows.map(d => d.count),
+    }
+  }
+  const groups = new Map()
+  rows.forEach(r => {
+    const dt = dayjs(r.date)
+    if (!dt.isValid()) return
+    let key, label
+    if (g === 'week') {
+      const ws = dt.startOf('isoWeek')
+      const we = ws.add(6, 'day')
+      key = ws.format('YYYY-MM-DD')
+      label = `${ws.format('MM-DD')}~${we.format('MM-DD')}`
+    } else {
+      key = dt.format('YYYY-MM')
+      label = dt.format('YYYY-MM')
+    }
+    const g0 = groups.get(key) || { label, value: 0, count: 0 }
+    g0.value += r.value || 0
+    g0.count += r.count || 0
+    groups.set(key, g0)
+  })
+  const sorted = [...groups.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+  return {
+    labels: sorted.map(([, g0]) => g0.label),
+    values: sorted.map(([, g0]) => g0.value),
+    counts: sorted.map(([, g0]) => g0.count),
+  }
+}
+
+const trendOption = computed(() => {
+  const agg = aggregateTrend(trend.value, grain.value)
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['退款金额', '退款笔数'] },
+    grid: { left: 50, right: 50, bottom: 30, top: 40 },
+    xAxis: { type: 'category', data: agg.labels, axisLabel: { rotate: agg.labels.length > 12 ? 30 : 0 } },
+    yAxis: [
+      { type: 'value', name: '金额(元)' },
+      { type: 'value', name: '笔数' },
+    ],
+    series: [
+      { name: '退款金额', type: 'line', smooth: true, areaStyle: {}, data: agg.values },
+      { name: '退款笔数', type: 'bar', yAxisIndex: 1, data: agg.counts },
+    ],
+  }
+})
 
 const statusOption = computed(() => ({
   tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
