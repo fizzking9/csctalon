@@ -152,13 +152,19 @@ def _warm_complaints(
     db, start: str, end: str, detail_limit: int, label: str,
     *, backlog_start: str | None = None, force: bool = False,
 ) -> int:
-    """预热今日看板 3 个 complaint 接口 (summary/detail/backlog)。返回成功预热条数。
+    """预热今日看板 complaint 接口 (summary/detail/subject-analysis/backlog)。返回成功预热条数。
 
     调用路由函数的 __wrapped__ 原函数(cached_json 装饰前的本体)计算,
-    再用 cache_set_json 写 WARM_TTL 缓存 —— 绕开装饰器内置 60s TTL 以获得更长热窗口。
+    再用 cache_set_json 写 WARM_TTL 缓存 —— 绕开装饰器内置 TTL 以获得更长热窗口。
     key 与 complaints.py 路由层逐字符对齐。
     """
-    from app.api.v1.complaints import complaint_backlog, complaint_detail, complaint_summary
+    from app.api.v1.complaints import (
+        complaint_analysis,
+        complaint_backlog,
+        complaint_detail,
+        complaint_subject_analysis,
+        complaint_summary,
+    )
 
     n = _warm_one(
         f"complaint:summary:{start}:{end}",
@@ -170,6 +176,17 @@ def _warm_complaints(
         complaint_detail.__wrapped__, (db, None),
         {"start": start, "end": end, "source_type": None, "limit": detail_limit, "include_supplementary": True},
         f"{label}:complaint:detail", force=force,
+    )
+    # 被投诉主体分析 + 投诉决策分析(看板高频, 历史无缓存缺口): 与 summary 同窗口
+    n += _warm_one(
+        f"complaint:subject:{start}:{end}",
+        complaint_subject_analysis.__wrapped__, (db, None), {"start": start, "end": end},
+        f"{label}:complaint:subject", force=force,
+    )
+    n += _warm_one(
+        f"complaint:analysis:{start}:{end}",
+        complaint_analysis.__wrapped__, (db, None), {"start": start, "end": end},
+        f"{label}:complaint:analysis", force=force,
     )
     # backlog 固定近30天窗口(与视图无关), 只需预热一次 → 由调用方传 backlog_start
     if backlog_start:
@@ -201,16 +218,18 @@ def _warm_week_view(db, *, force: bool = False) -> int:
 
 
 def _warm_reports(db, *, force: bool = False) -> int:
-    """预热运营/现金流/退款分类/人员操作看板(月报场景)。返回成功预热条数。
+    """预热运营/现金流/退款分类/人员操作/投诉决策看板(月报场景)。返回成功预热条数。
 
     含 静态(无窗口, 任意查看都命中) + 近30天窗口(月报常用) 两类端点。
     由 warm_after_sync 调用(每小时刷新一次, 数据同步后保持月报新鲜)。
-    key 与 analytics.py 路由层逐字符对齐; 窗口端点 service 取 datetime(_dt)。
+    key 与 analytics.py / complaints.py 路由层逐字符对齐; 窗口端点 service 取 datetime(_dt)。
     """
     from app.services import analytics as A
+    from app.api.v1.complaints import complaint_analysis, complaint_subject_analysis
 
     s = _days_ago_str(29)   # 近30天 = 月报窗口
     e = _today_str()
+    s30 = _days_ago_str(30)  # 投诉决策看板默认窗口: 前端 dayjs().subtract(30,'day') ~ 今天
     sd, ed = _dt(s), _dt(e)
     specs = [
         # 静态(无窗口, 任意查看都命中同一 key)
@@ -231,6 +250,11 @@ def _warm_reports(db, *, force: bool = False) -> int:
         ("operator:ticket", f"operator:ticket:{s}:{e}",    A.operator_ticket_stats,  (db, sd, ed), {}),
         ("operator:audit",  f"operator:audit:{s}:{e}",    A.operator_audit_stats,   (db, sd, ed), {}),
         ("operator:refund", f"operator:refund:{s}:{e}",   A.operator_refund_stats,  (db, sd, ed), {}),
+        # 投诉决策/被投诉主体看板(ComplaintAnalysis.vue 默认近30天: subtract(30)~today)
+        ("complaint:analysis", f"complaint:analysis:{s30}:{e}",
+         complaint_analysis.__wrapped__, (db, None), {"start": s30, "end": e}),
+        ("complaint:subject",  f"complaint:subject:{s30}:{e}",
+         complaint_subject_analysis.__wrapped__, (db, None), {"start": s30, "end": e}),
     ]
     return sum(
         _warm_one(key, fn, args, kw, f"月报:{name}", force=force)

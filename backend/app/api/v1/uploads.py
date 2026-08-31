@@ -258,6 +258,23 @@ def _run_post_import_tasks(data_type: str):
                 logging.getLogger(__name__).warning(
                     f"refund_wide 重建失败(data_type={data_type},不影响导入): {we}"
                 )
+            # 导入会更新工单/退款等主台账 → 失效看板缓存(含投诉), 避免旧聚合
+            # (见 数据源接入与缓存加速规范.md §九: 每个写入入口必须失效缓存)
+            try:
+                from app.core.redis_client import cache_invalidate_pattern
+                n = 0
+                for pat in ("today:*", "refund:*", "complaint:*"):
+                    n += cache_invalidate_pattern(pat)
+                if n:
+                    import logging
+                    logging.getLogger(__name__).info(
+                        f"上传导入后失效 {n} 条看板缓存(data_type={data_type})"
+                    )
+            except Exception as ce:
+                import logging
+                logging.getLogger(__name__).debug(
+                    f"上传导入后缓存失效失败(data_type={data_type},不影响导入): {ce}"
+                )
         finally:
             db.close()
     except Exception as e:
