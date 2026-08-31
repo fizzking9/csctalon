@@ -16,7 +16,7 @@ from app.models.complaint_audit import ComplaintAudit
 from app.models.external_complaint import ExternalComplaint
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
-from app.core.redis_client import cached_json
+from app.core.redis_client import cache_ttl_for, cached_json
 from app.schemas.common import PageBase, R
 from app.services.analytics import _complaint_source_type_case, _ticket_category_case, TZ
 
@@ -206,7 +206,8 @@ def _norm_subject_entity(name: str | None) -> str | None:
 
 
 @router.get("/summary", response_model=R, summary="三源投诉统计汇总(工单为主,卡商/外部投诉为前期参考补充)")
-@cached_json(lambda *a, **kw: f"complaint:summary:{kw.get('start')}:{kw.get('end')}", ttl=60)
+@cached_json(lambda *a, **kw: f"complaint:summary:{kw.get('start')}:{kw.get('end')}",
+             ttl=lambda **kw: cache_ttl_for(kw.get('start'), kw.get('end'), 60))
 def complaint_summary(
     db: DBSession,
     _: CurrentUser,
@@ -466,7 +467,8 @@ def complaint_summary(
 
 
 @router.get("/detail", response_model=R, summary="投诉明细列表(三源合并: 内部/商户号/外部)")
-@cached_json(lambda *a, **kw: f"complaint:detail:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('limit')}:{int(bool(kw.get('include_supplementary')))}", ttl=60)
+@cached_json(lambda *a, **kw: f"complaint:detail:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('limit')}:{int(bool(kw.get('include_supplementary')))}",
+             ttl=lambda **kw: cache_ttl_for(kw.get('start'), kw.get('end'), 60))
 def complaint_detail(
     db: DBSession,
     _: CurrentUser,
@@ -960,7 +962,8 @@ def _query_backlog_rows(
 
 
 @router.get("/backlog", response_model=R, summary="积压未处理投诉审核分析(统一口径: 归一化状态非已完成)")
-@cached_json(lambda *a, **kw: f"complaint:backlog:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('status')}:{kw.get('category')}:{kw.get('has_handler')}:{kw.get('page')}:{kw.get('page_size')}:{kw.get('sort')}", ttl=60)
+@cached_json(lambda *a, **kw: f"complaint:backlog:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('status')}:{kw.get('category')}:{kw.get('has_handler')}:{kw.get('page')}:{kw.get('page_size')}:{kw.get('sort')}",
+             ttl=lambda **kw: cache_ttl_for(kw.get('start'), kw.get('end'), 60))
 def complaint_backlog(
     db: DBSession,
     _: CurrentUser,
@@ -1117,7 +1120,8 @@ def complaint_backlog_export(
 
 
 @router.get("/subject-analysis", response_model=R, summary="被投诉主体维度分析(主体统计/严重性分布/升级链/退款关联)")
-@cached_json(lambda *a, **kw: f"complaint:subject:{kw.get('start')}:{kw.get('end')}", ttl=120)
+@cached_json(lambda *a, **kw: f"complaint:subject:{kw.get('start')}:{kw.get('end')}",
+             ttl=lambda **kw: cache_ttl_for(kw.get('start'), kw.get('end'), 120))
 def complaint_subject_analysis(
     db: DBSession,
     _: CurrentUser,
@@ -1411,7 +1415,8 @@ def list_audits(
 
 
 @router.get("/analysis", response_model=R, summary="投诉决策分析(管理摘要/平台分布/时效/处理人效率)")
-@cached_json(lambda *a, **kw: f"complaint:analysis:{kw.get('start')}:{kw.get('end')}", ttl=120)
+@cached_json(lambda *a, **kw: f"complaint:analysis:{kw.get('start')}:{kw.get('end')}",
+             ttl=lambda **kw: cache_ttl_for(kw.get('start'), kw.get('end'), 120))
 def complaint_analysis(
     db: DBSession,
     _: CurrentUser,
