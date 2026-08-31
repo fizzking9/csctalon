@@ -66,12 +66,96 @@ def _trend(rows, key="day"):
     return [{"day": str(r[0]), "count": int(r[1] or 0)} for r in rows]
 
 
+def _merge_trend(trend_rows, suppl_rows):
+    """把补充表(workbuddy推送)趋势并入工单趋势, 逐日去重.
+
+    - trend_rows : 工单按日计数 [(day, count)], 与 _trend 输入一致
+    - suppl_rows : _suppl_trend_rows 输出 [{day, total, overlap}]
+    合并口径: 工单计数 + 补充表当日( total - overlap )
+    (overlap = 已关联到本范围内工单的补充记录, 工单侧已计入, 去重不计)。
+    返回 [{day, count}], 与 _trend 输出结构一致, 保证 逐日累加 == 总数口径。
+    """
+    merged: dict[str, int] = {}
+    for d, c in trend_rows:
+        if d:
+            merged[str(d)[:10]] = merged.get(str(d)[:10], 0) + int(c or 0)
+    for r in suppl_rows:
+        day = r["day"]
+        net = int(r["total"] or 0) - int(r["overlap"] or 0)
+        if net:
+            merged[day] = merged.get(day, 0) + net
+    return [{"day": d, "count": merged[d]} for d in sorted(merged)]
+
+
 def _day_trunc(col):
     """按 Asia/Shanghai 时区截断到日, 避免 UTC 凌晨被算到前一天.
     与 analytics.py 的 func.date_trunc("day", func.timezone("Asia/Shanghai", col)) 同口径.
     所有投诉日期字段(register_time/complaint_date)都是 timestamptz,
     直接 date_trunc('day', col) 会按 UTC 截断, 导致 CST 00:00~07:59 的记录落到前一天。"""
     return func.date_trunc("day", func.timezone("Asia/Shanghai", col))
+
+
+def _suppl_trend_rows(
+    db,
+    model,
+    src_expr_val: str,
+    ts: datetime | None,
+    te: datetime | None,
+):
+    """补充表(workbuddy推送)按投诉日期分组的趋势行, 含'已关联本范围内工单'的计数.
+
+    返回 [{day, total, overlap}], 其中:
+      - total   = 投诉日期在本范围内 的补充记录数(全部, 不论是否关联工单)
+      - overlap = 其中已关联到"本统计范围内"工单(matched_ticket_no 对应工单 register/finish
+                  也在范围内)的记录数。这部分与工单在趋势里是同一投诉的两视角, 需去重:
+                  趋势计入时 total - overlap(仅计未落范围内工单的部分)。
+    口径与 /summary 的 _overlap_suppl / 三源总数合并完全一致, 保证 趋势逐日累加 == 总数。
+    """
+    conds = []
+    if ts:
+        conds.append(model.complaint_date >= ts)
+    if te:
+        conds.append(model.complaint_date <= te)
+
+    # 本范围内 投诉类 且 归属指定三源 的工单号子查询(与 _overlap_suppl 同口径:
+    # 补充记录关联工单的 register_time 或真实 finish_time 在本范围内 → 视为工单已计入)
+    t_sub = (
+        select(ServiceTicket.ticket_no)
+        .where(_ticket_category_case() == "投诉")
+        .where(_complaint_source_type_case() == src_expr_val)
+    )
+    if ts or te:
+        # register 在范围内 OR (finish 非空 且 finish 在范围内)
+        reg_conds, fin_conds = [], []
+        if ts:
+            reg_conds.append(ServiceTicket.register_time >= ts)
+            fin_conds.append(and_(ServiceTicket.finish_time.isnot(None), ServiceTicket.finish_time >= ts))
+        if te:
+            reg_conds.append(ServiceTicket.register_time <= te)
+            fin_conds.append(and_(ServiceTicket.finish_time.isnot(None), ServiceTicket.finish_time <= te))
+        t_sub = t_sub.where(or_(and_(*reg_conds), and_(*fin_conds)))
+
+    day_expr = _day_trunc(model.complaint_date)
+    total_rows = db.execute(
+        select(day_expr, func.count())
+        .select_from(model)
+        .where(*conds)
+        .group_by(day_expr)
+    ).all()
+    overlap_rows = db.execute(
+        select(day_expr, func.count())
+        .select_from(model)
+        .where(*conds)
+        .where(model.matched_ticket_no.isnot(None))
+        .where(model.matched_ticket_no.in_(t_sub))
+        .group_by(day_expr)
+    ).all()
+    total_map = {str(r[0])[:10]: int(r[1]) for r in total_rows if r[0]}
+    overlap_map = {str(r[0])[:10]: int(r[1]) for r in overlap_rows if r[0]}
+    return [
+        {"day": d, "total": total_map.get(d, 0), "overlap": overlap_map.get(d, 0)}
+        for d in sorted(set(total_map) | set(overlap_map))
+    ]
 
 
 def _handler_fallback_cols():
@@ -381,6 +465,16 @@ def complaint_summary(
     external_total = int(external_ticket_total) + supplementary["external"]["total"] - _overlap_suppl(ExternalComplaint, "外部投诉")
     merchant_total = int(merchant_ticket_total) + supplementary["card"]["total"] - _overlap_suppl(CardComplaint, "商户号投诉")
 
+    # ---- 三源趋势合并补充表(逐日去重) ----
+    # 趋势与总数同口径: 工单按日计数 + 补充表按投诉日期 (total - overlap)。
+    # overlap = 当日已关联到本范围内工单的补充记录(工单已计入, 去重)。
+    # 使「推送了但未落工单」的外部/卡商投诉也能在趋势里按投诉日期体现。
+    external_suppl_trend = _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te)
+    card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "商户号投诉", ts, te)
+    external_trend_merged = _merge_trend(external_trend, external_suppl_trend)
+    merchant_trend_merged = _merge_trend(merchant_trend, card_suppl_trend)
+    internal_trend_merged = _merge_trend(internal_trend, [])  # 内部投诉无补充表
+
     def _handler_rows(rows):
         """归一化处理人后聚合 by_handler 结果,过滤系统值."""
         agg: dict[str, int] = {}
@@ -445,19 +539,19 @@ def complaint_summary(
                 "total": int(internal_total),
                 "by_category": [{"name": r[0] or "未标注", "count": int(r[1] or 0)} for r in internal_by_cat],
                 "by_handler": _handler_rows(internal_by_handler),
-                "trend": _trend(internal_trend),
+                "trend": internal_trend_merged,
             },
             "merchant": {
                 "total": int(merchant_total),
                 "by_category": [{"name": r[0] or "未标注", "count": int(r[1] or 0)} for r in merchant_by_cat],
                 "by_handler": _handler_rows(merchant_by_handler),
-                "trend": _trend(merchant_trend),
+                "trend": merchant_trend_merged,
             },
             "external": {
                 "total": int(external_total),
                 "by_category": [{"name": r[0] or "未标注", "count": int(r[1] or 0)} for r in external_by_cat],
                 "by_handler": _handler_rows(external_by_handler),
-                "trend": _trend(external_trend),
+                "trend": external_trend_merged,
             },
         }
     )
@@ -1447,16 +1541,25 @@ def complaint_analysis(
     # ── 1. 管理摘要 ──
     total = db.scalar(_action_filter(_tk_base().with_only_columns(func.count()))) or 0
 
-    # 三源统计
+    # 三源统计 (工单主台账 + workbuddy推送补充表, 去重口径与 /summary 一致)
     internal_total = db.scalar(
         _action_filter(_tk_base().with_only_columns(func.count()).where(src_expr == "内部投诉"))
     ) or 0
-    merchant_total = db.scalar(
+    merchant_ticket_total = db.scalar(
         _action_filter(_tk_base().with_only_columns(func.count()).where(src_expr == "商户号投诉"))
     ) or 0
-    external_total = db.scalar(
+    external_ticket_total = db.scalar(
         _action_filter(_tk_base().with_only_columns(func.count()).where(src_expr == "外部投诉"))
     ) or 0
+
+    # 补充表趋势(按日, 含 overlap)供总数与趋势共用同一去重口径
+    _ext_suppl_trend = _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te)
+    _card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "商户号投诉", ts, te)
+    # 补充表净计入总数 = total - overlap (overlap 已关联本范围内工单 → 工单已计入, 去重)
+    _ext_suppl_net = sum(int(r["total"] or 0) - int(r["overlap"] or 0) for r in _ext_suppl_trend)
+    _card_suppl_net = sum(int(r["total"] or 0) - int(r["overlap"] or 0) for r in _card_suppl_trend)
+    merchant_total = int(merchant_ticket_total) + _card_suppl_net
+    external_total = int(external_ticket_total) + _ext_suppl_net
 
     # 积压: 窗口内登记的未完成(跟随 start/end, 默认近30天; 不再无限累积历史遗留)
     _done_set = {"已结案", "已完成", "完成", "已解决", "已回复", "已反馈", "已关闭", "终止", "已终止"}
@@ -1533,6 +1636,22 @@ def complaint_analysis(
         if day not in trend_map:
             trend_map[day] = {}
         trend_map[day][src] = trend_map[day].get(src, 0) + cnt
+
+    # 三源趋势并入补充表(workbuddy推送, 与 /summary 同口径逐日去重):
+    #   external_complaints(315) → 外部投诉;  card_complaints(卡商) → 商户号投诉。
+    #   补充记录若已关联到本范围内工单(overlap) → 工单已计入, 去重; 否则按投诉日期计入。
+    #   解决「推送了有数据、但趋势当天没数据」(推送记录未落工单/日期错位)。
+    for r in _ext_suppl_trend:
+        net = int(r["total"] or 0) - int(r["overlap"] or 0)
+        if net:
+            b = trend_map.setdefault(r["day"], {})
+            b["外部投诉"] = b.get("外部投诉", 0) + net
+    for r in _card_suppl_trend:
+        net = int(r["total"] or 0) - int(r["overlap"] or 0)
+        if net:
+            b = trend_map.setdefault(r["day"], {})
+            b["商户号投诉"] = b.get("商户号投诉", 0) + net
+
     trend = [
         {
             "day": d,

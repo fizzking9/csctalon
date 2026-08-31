@@ -1,7 +1,8 @@
 """审计时序服务 - 跨表合并设备/人员相关业务记录为统一时序流
 
 为设备审计页 / 人员审计页提供后端数据支撑:
-- 设备视角: 按 device_sn 查业务表(refund/ticket/wallet/merchant_refund/cs_record/external_complaint/card_complaint)
+- 设备视角: 按 device_sn 查业务表(refund/ticket/wallet/merchant_refund/cs_record/external_complaint/
+            card_complaint/device_combo/manual_refund/shanmao_refund)
 - 人员视角: 先查 PersonAlias → 用别名在各业务表人名字段 IN 查询
 
 投诉类说明:
@@ -11,7 +12,8 @@
 
 输出统一 TimelineItem 结构:
     {
-        "type": "refund"|"ticket"|"wallet"|"merchant_refund"|"cs_record"|"external_complaint"|"card_complaint",
+        "type": "refund"|"ticket"|"wallet"|"merchant_refund"|"cs_record"|"external_complaint"|"card_complaint"
+              |"device_combo"|"manual_refund"|"shanmao_refund",
         "time": datetime,           # 主时间字段(用于排序)
         "ref_id": str,               # 业务主键/标识
         "title": str,                # 时序节点标题
@@ -23,7 +25,8 @@
 设计要点:
 1. 各表查询独立,字段精简(用户要求"酌情显示部分有效信息,不需要全部显示")
 2. 时间字段统一用各表的主业务时间(refund.created_at_raw / ticket.finish_time / wallet.op_time /
-   merchant_refund.trade_time / cs_record.operation_time / complaint.complaint_date)
+   merchant_refund.trade_time / cs_record.operation_time / complaint.complaint_date /
+   device_combo.created_at_raw / manual_refund.register_time / shanmao_refund.apply_time)
 3. 合并后按 time 倒序,截断 limit 条
 """
 
@@ -35,9 +38,12 @@ from sqlalchemy.orm import Session
 
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
+from app.models.device_combo import DeviceCombo
 from app.models.external_complaint import ExternalComplaint
+from app.models.manual_refund import ManualRefund
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
+from app.models.shanmao_refund import ShanmaoRefund
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 
@@ -50,6 +56,9 @@ EVENT_TYPE_META: dict[str, dict[str, str]] = {
     "cs_record": {"label": "客服接待", "color": "info", "icon": "Service"},
     "external_complaint": {"label": "315外部投诉", "color": "danger", "icon": "Warning"},
     "card_complaint": {"label": "卡商群投诉", "color": "warning", "icon": "ChatDotRound"},
+    "device_combo": {"label": "设备套餐", "color": "primary", "icon": "Goods"},
+    "manual_refund": {"label": "手动退款登记", "color": "warning", "icon": "Wallet"},
+    "shanmao_refund": {"label": "闪猫退款", "color": "danger", "icon": "Money"},
 }
 
 
@@ -350,6 +359,133 @@ def _build_card_complaint_items(rows: list[CardComplaint], include_device_sn: bo
     return items
 
 
+def _build_device_combo_items(rows: list[DeviceCombo], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
+    """设备套餐购买/流量时序项"""
+    items: list[dict] = []
+    for c in rows:
+        parts = []
+        if c.package_name:
+            parts.append(c.package_name)
+        if c.package_type:
+            parts.append(c.package_type)
+        if c.status:
+            parts.append(c.status)
+        amount = _amount(c.actual_amount)
+        fields = {
+            "充值订单号": c.recharge_order_no,
+            "套餐名称": c.package_name,
+            "套餐类型": c.package_type,
+            "流量类型": c.traffic_type,
+            "商户名称": c.merchant_name,
+            "实付金额": amount,
+            "套餐开始": _dt_iso(c.start_date),
+            "套餐结束": _dt_iso(c.end_date),
+            "套餐状态": c.status,
+            "创建时间": _dt_iso(c.created_at_raw),
+        }
+        if include_device_sn:
+            fields["设备SN"] = c.device_sn
+        items.append({
+            "type": "device_combo",
+            "time": c.created_at_raw,
+            "ref_id": c.recharge_order_no,
+            "title": f"套餐 {c.package_name or c.recharge_order_no}",
+            "summary": " · ".join(parts) or "设备套餐",
+            "amount": amount,
+            "device_sn": c.device_sn if include_device_sn else None,
+            "person_names": [c.creator] if include_person_name and c.creator else None,
+            "fields": fields,
+        })
+    return items
+
+
+def _build_manual_refund_items(rows: list[ManualRefund], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
+    """手动退款登记(商户号后台操作)时序项"""
+    items: list[dict] = []
+    for m in rows:
+        parts = []
+        if m.is_refunded:
+            parts.append("已退款" if str(m.is_refunded) in ("是", "Y", "y", "1") else "未退款")
+        if m.refund_amount:
+            parts.append(f"¥{m.refund_amount}")
+        if m.order_no:
+            parts.append(f"订单:{m.order_no}")
+        if include_person_name and m.registrant:
+            parts.append(f"登记:{m.registrant}")
+        fields = {
+            "订单号": m.order_no,
+            "商户ID": m.merchant_id,
+            "订单金额": _amount(m.order_amount),
+            "退款金额": _amount(m.refund_amount),
+            "是否已退款": m.is_refunded,
+            "登记人": m.registrant,
+            "退款操作人": m.refund_operator,
+            "登记时间": _dt_iso(m.register_time),
+            "退款时间": _dt_iso(m.op_time),
+            "备注": (m.remark or "")[:200],
+        }
+        if include_device_sn:
+            fields["设备SN"] = m.device_sn
+        items.append({
+            "type": "manual_refund",
+            "time": m.register_time,
+            "ref_id": m.order_no or f"M{m.id}",
+            "title": f"手动退款登记 {m.order_no or f'#{m.id}'}",
+            "summary": " · ".join(parts) or "手动退款登记",
+            "amount": _amount(m.refund_amount),
+            "device_sn": m.device_sn if include_device_sn else None,
+            "person_names": [n for n in (m.registrant, m.refund_operator) if n] if include_person_name else None,
+            "fields": fields,
+        })
+    return items
+
+
+def _build_shanmao_refund_items(rows: list[ShanmaoRefund], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
+    """闪猫退款时序项"""
+    items: list[dict] = []
+    for s in rows:
+        parts = []
+        if s.status:
+            parts.append(s.status)
+        if s.refund_amount:
+            parts.append(f"¥{s.refund_amount}")
+        if include_person_name and s.applicant:
+            parts.append(f"申请:{s.applicant}")
+        fields = {
+            "闪猫退款单号": s.refund_no,
+            "订单号": s.order_no,
+            "套餐": s.package_name,
+            "商户名称": s.merchant_name,
+            "支付金额": _amount(s.paid_amount),
+            "申请退款金额": _amount(s.refund_amount),
+            "实际退款金额": _amount(s.actual_amount),
+            "状态": s.status,
+            "退款原因": s.refund_reason,
+            "退款方式": s.refund_method,
+            "申请人": s.applicant,
+            "审核人": s.auditor,
+            "操作人": s.operator,
+            "申请时间": _dt_iso(s.apply_time),
+            "审核时间": _dt_iso(s.audit_time),
+            "退款时间": _dt_iso(s.refund_time),
+            "手机号": s.phone,
+        }
+        if include_device_sn:
+            fields["设备SN"] = s.device_sn
+        items.append({
+            "type": "shanmao_refund",
+            "time": s.apply_time or s.refund_time,
+            "ref_id": s.refund_no,
+            "title": f"闪猫退款 {s.refund_no}",
+            "summary": " · ".join(parts) or "闪猫退款",
+            "amount": _amount(s.refund_amount),
+            "device_sn": s.device_sn if include_device_sn else None,
+            "person_names": [n for n in (s.applicant, s.auditor, s.operator) if n] if include_person_name else None,
+            "fields": fields,
+        })
+    return items
+
+
 def _merge_and_sort(item_lists: list[list[dict]], limit: int) -> list[dict]:
     """合并各表 items,按 time 倒序,截断 limit。无 time 的排末尾。"""
     merged: list[dict] = []
@@ -378,6 +514,7 @@ def build_device_timeline(
 
     查业务表(device_sn 外键关联;merchant_refund 字段名是 device_no):
         refund / ticket / wallet / merchant_refund / cs_record / external_complaint / card_complaint
+        / device_combo(设备套餐) / manual_refund(手动退款登记) / shanmao_refund(闪猫退款)
     """
     since = _resolve_time_window(days)
     per_table_limit = max(limit, 200)
@@ -419,12 +556,35 @@ def build_device_timeline(
         cc_stmt = cc_stmt.where(CardComplaint.complaint_date >= since)
     card_complaints = list(db.scalars(cc_stmt.order_by(CardComplaint.complaint_date.desc().nullslast()).limit(per_table_limit)))
 
+    # 设备套餐(device_combos): 主时间=created_at_raw(购买时间), 无则退 start_date
+    combo_stmt = select(DeviceCombo).where(DeviceCombo.device_sn == sn)
+    if since:
+        combo_stmt = combo_stmt.where(
+            or_(DeviceCombo.created_at_raw >= since, DeviceCombo.start_date >= since)
+        )
+    device_combos = list(db.scalars(combo_stmt.order_by(DeviceCombo.created_at_raw.desc().nullslast()).limit(per_table_limit)))
+
+    # 手动退款登记(manual_refunds): 主时间=register_time
+    manual_stmt = select(ManualRefund).where(ManualRefund.device_sn == sn)
+    if since:
+        manual_stmt = manual_stmt.where(ManualRefund.register_time >= since)
+    manual_refunds = list(db.scalars(manual_stmt.order_by(ManualRefund.register_time.desc().nullslast()).limit(per_table_limit)))
+
+    # 闪猫退款(shanmao_refunds): 主时间=apply_time
+    shanmao_stmt = select(ShanmaoRefund).where(ShanmaoRefund.device_sn == sn)
+    if since:
+        shanmao_stmt = shanmao_stmt.where(ShanmaoRefund.apply_time >= since)
+    shanmao_refunds = list(db.scalars(shanmao_stmt.order_by(ShanmaoRefund.apply_time.desc().nullslast()).limit(per_table_limit)))
+
     items = _merge_and_sort(
         [
             _build_refund_items(refunds, include_device_sn=include_device_sn, include_person_name=include_person_name),
             _build_ticket_items(tickets, include_device_sn=include_device_sn, include_person_name=include_person_name),
             _build_wallet_items(wallets, include_device_sn=include_device_sn, include_person_name=include_person_name),
             _build_merchant_refund_items(merchant_refunds, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_device_combo_items(device_combos, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_manual_refund_items(manual_refunds, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_shanmao_refund_items(shanmao_refunds, include_device_sn=include_device_sn, include_person_name=include_person_name),
             _build_cs_record_items(cs_records, include_device_sn=include_device_sn, include_person_name=include_person_name),
             _build_external_complaint_items(external_complaints, include_device_sn=include_device_sn, include_person_name=include_person_name),
             _build_card_complaint_items(card_complaints, include_device_sn=include_device_sn, include_person_name=include_person_name),
