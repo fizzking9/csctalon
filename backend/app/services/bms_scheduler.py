@@ -4,14 +4,15 @@
 
 2026-08-13 调度策略变更:
   - 白天同步: 8:00, 9:00, 10:00, ..., 23:00, 00:00 (每小时一次,共 17 次)
-  - 补跑同步: 3:00 对前一天做整体同步(兜底确保数据完整)
+  - 补跑同步: 5:00 对前一天做整体同步(兜底确保数据完整)
   - 出错熔断: 白天任何一次同步失败(partial/failed), 当天剩余自动同步全部停止,
     需手动(触发手动同步或调用 /schedule/start)恢复
 
 2026-08-25 调度策略增强(应对 BMS 数据按登记时间分批滞后 1~2 天):
   - 8:00 改为「近 7 天窗口」全量兜底同步(覆盖补全数据回填, 忽略专项熔断)
   - 9:00~23:00, 00:00 保持「当天窗口」增量同步(带专项熔断过滤)
-  - 3:00 前一天补跑保持不变
+  - 5:00 前一天补跑(2026-08-31 调整: 原 3:00, 因 BMS 平台凌晨维护时段采集易失败,
+    挪到 5:00 避开维护窗口, 语义不变仍是「前一天整体兜底」)
 
 2026-08-02 优化:
   - 接入 SyncTaskManager 全局互斥锁,防止手动同步时定时任务并发冲突
@@ -41,8 +42,8 @@ logger = logging.getLogger(__name__)
 # ── 调度时间配置 ──────────────────────────────────────────────────────
 # 白天每小时同步: 8,9,...,23,0  (共 17 次, 0 即 24:00 午夜)
 DAYTIME_HOURS: frozenset[int] = frozenset([*range(8, 24), 0])
-# 凌晨 3 点: 对前一天做整体同步
-CATCHUP_HOUR: int = 3
+# 凌晨 5 点: 对前一天做整体同步(2026-08-31 由 3:00 调整, 避开 BMS 凌晨维护时段)
+CATCHUP_HOUR: int = 5
 # 早上 8:00 全量兜底同步窗口(天): BMS 数据按登记时间分批滞后 1~2 天,
 # 8 点用近 N 天窗口主动拉一次, 确保补全数据回填(与 BMS 导出近 7 天滚动对齐)
 FULL_WINDOW_DAYS: int = 7
@@ -68,7 +69,7 @@ class BmsScheduler:
       - 专项级熔断(2026-08-13 调整): 白天同步中, 若某个 data_type(专项)同步失败,
         则**仅该专项**在当天剩余自动同步中暂停执行(跳过); 其他成功的专项照常每小时同步。
         手动触发任何同步 / 调用 /schedule/start 会清除当前业务日期的全部专项熔断标记。
-        凌晨 3:00 的「前一天补跑」不受熔断影响(强制跑所有源)。
+        凌晨 5:00 的「前一天补跑」不受熔断影响(强制跑所有源)。
     """
 
     def __init__(self):
@@ -320,7 +321,7 @@ class BmsScheduler:
         调度策略(2026-08-13 调整为专项级熔断):
           - 白天: DAYTIME_HOURS (8,9,...,23,0) 每小时同步;
             若某 data_type(专项)失败 → 仅暂停该专项当天后续小时; 其他专项不受影响
-          - 凌晨 CATCHUP_HOUR (3:00): 对「前一天」做整体补跑,忽略所有专项熔断
+          - 凌晨 CATCHUP_HOUR (5:00): 对「前一天」做整体补跑,忽略所有专项熔断
         """
         TZ_CN = timezone(timedelta(hours=8))
         first_tick = True
@@ -379,7 +380,7 @@ class BmsScheduler:
                         continue
                     first_tick = False
 
-                # ── 1) 3:00 补跑: 对前一天整体同步(强制跑所有源,忽略专项熔断) ──
+                # ── 1) 5:00 补跑: 对前一天整体同步(强制跑所有源,忽略专项熔断) ──
                 if (
                     now_cn.hour == CATCHUP_HOUR
                     and now_cn.minute < TRIGGER_WINDOW_MINUTES
@@ -498,13 +499,13 @@ class BmsScheduler:
 
         Args:
             why: 人类可读的触发原因(打日志用)
-            yesterday_full_sync: True=凌晨 3 点补跑模式,时间范围锁定「前一天整天」,
+            yesterday_full_sync: True=凌晨 5 点补跑模式,时间范围锁定「前一天整天」,
                                  忽略专项熔断,失败也不写入熔断;
                                  False=白天正常同步,时间「今天 0 点~now」,
                                  执行前先跳过 biz_key 对应日期里已熔断的专项,
                                  完成后逐个失败 data_type 写入熔断集合
             full_window_days: >0 时(早上 8 点全量兜底),时间范围 = 近 N 天 0 点~now,
-                              忽略专项熔断,失败不写入熔断(与 3 点补跑同性质,
+                              忽略专项熔断,失败不写入熔断(与 5 点补跑同性质,
                               用于回填 BMS 分批滞后 1~2 天的补全数据);
                               0 时按 yesterday_full_sync/白天逻辑
             biz_key: 业务日期字符串(YYYY-MM-DD),专项熔断集合归属的日期;
@@ -520,13 +521,13 @@ class BmsScheduler:
             biz_date = now_cn.date() if now_cn.hour >= 4 else (now_cn - timedelta(days=1)).date()
             biz_key = biz_date.strftime("%Y-%m-%d")
         halted_set = set(self._halted_types.get(biz_key) or set())  # copy,避免中途被改
-        # 兜底模式(3 点补跑 / 8 点全量): 忽略专项熔断,失败也不写入熔断
+        # 兜底模式(5 点补跑 / 8 点全量): 忽略专项熔断,失败也不写入熔断
         force_all = yesterday_full_sync or full_window_days > 0
 
         has_bms = self._default_sources_have_credentials()
         has_scrm = self._scrm_sources_have_credentials()
 
-        # ── 时间范围: 3点补跑=昨天整天; 8点全量=近N天0点~now; 白天=今天 0 点~now ──
+        # ── 时间范围: 5点补跑=昨天整天; 8点全量=近N天0点~now; 白天=今天 0 点~now ──
         if yesterday_full_sync:
             yesterday_date = now_cn.date() - timedelta(days=1)
             range_start = datetime(yesterday_date.year, yesterday_date.month, yesterday_date.day,
@@ -545,7 +546,7 @@ class BmsScheduler:
             range_end = now_cn
             start_disp = range_start.strftime("%m-%d 00:00(今日定时-全量)")
 
-        # ── 过滤专项级熔断(仅白天增量生效;3 点补跑 / 8 点全量强制全部执行) ──
+        # ── 过滤专项级熔断(仅白天增量生效;5 点补跑 / 8 点全量强制全部执行) ──
         sync_types_bms_raw = list(DEFAULT_SYNC_TYPES) if has_bms else []
         sync_types_scrm_raw = [
             DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_PRIVATE,

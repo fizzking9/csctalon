@@ -196,7 +196,6 @@ csctalon/
 | POSTGRES_PASSWORD | 数据库密码 | （必填） |
 | JWT_SECRET | JWT 签名密钥 | （必填） |
 | BMS_SCHEDULE_AUTOSTART | 调度器自动启动 | True |
-| BMS_SCHEDULE_HOURS | 定时同步小时 | 0,8,12,16,20 |
 
 ## 许可
 

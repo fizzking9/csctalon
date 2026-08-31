@@ -506,7 +506,7 @@ def get_schedule_status(_: CurrentUser):
 
 @router.post("/schedule/start", response_model=R[ScheduleStatus], summary="启动定时同步")
 async def start_schedule(current_user: CurrentUser):
-    """启动 BMS + SCRM 定时同步(8/12/16/20/24 点各执行一次)
+    """启动 BMS + SCRM 定时同步(8-23/0 每小时 + 5:00 补跑 + 8:00 全量兜底)
 
     前提: BMS 的退款/工单/钱包 或 SCRM 的 clientId/secret 至少一项已在同步设置中配置
     """

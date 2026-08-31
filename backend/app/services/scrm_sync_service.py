@@ -18,7 +18,7 @@
   - SyncSourceConfig 存储 clientId / clientSecret 或 网页账号密码 (Fernet 加密,用户名=clientId/登录账号,密码=clientSecret/登录密码)
   - ScrmClient 封装 token / 分页 / 错误处理
   - ScrmWebFetcher 独立服务,Playwright + 数学验证码 OCR
-  - BmsScheduler 后续接入节奏(SCHEDULE_HOURS: 0/8/12/16/20)
+  - BmsScheduler 后续接入节奏(SCHEDULE_HOURS: 8~23+0 每小时 + 5:00 补跑 + 8:00 全量兜底)
 """
 
 from __future__ import annotations
