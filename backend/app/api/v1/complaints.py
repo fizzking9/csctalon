@@ -1117,6 +1117,7 @@ def complaint_backlog_export(
 
 
 @router.get("/subject-analysis", response_model=R, summary="被投诉主体维度分析(主体统计/严重性分布/升级链/退款关联)")
+@cached_json(lambda *a, **kw: f"complaint:subject:{kw.get('start')}:{kw.get('end')}", ttl=120)
 def complaint_subject_analysis(
     db: DBSession,
     _: CurrentUser,
@@ -1410,6 +1411,7 @@ def list_audits(
 
 
 @router.get("/analysis", response_model=R, summary="投诉决策分析(管理摘要/平台分布/时效/处理人效率)")
+@cached_json(lambda *a, **kw: f"complaint:analysis:{kw.get('start')}:{kw.get('end')}", ttl=120)
 def complaint_analysis(
     db: DBSession,
     _: CurrentUser,

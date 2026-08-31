@@ -772,11 +772,14 @@ async def sync_all(
                 await asyncio.to_thread(_sync_post_sync_hook)
 
                 # 失效 Redis 缓存 (today:* 等), 避免同步后仍读到旧聚合结果
+                # complaint:* 一并失效: BMS 工单同步后投诉主台账(service_tickets)会变,
+                # 投诉看板(analysis/subject/summary/detail/backlog)需同步刷新
                 try:
                     from app.core.redis_client import cache_invalidate_pattern
                     n = cache_invalidate_pattern("today:*")
+                    n += cache_invalidate_pattern("complaint:*")
                     if n:
-                        logger.info(f"已失效 {n} 条 today:* 缓存")
+                        logger.info(f"已失效 {n} 条 today:*/complaint:* 缓存")
                 except Exception as ce:
                     logger.debug(f"缓存失效失败(不影响同步): {ce}")
             except Exception as e:
