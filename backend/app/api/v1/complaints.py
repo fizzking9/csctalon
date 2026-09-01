@@ -471,9 +471,12 @@ def complaint_summary(
     # 趋势与总数同口径: 工单按日计数 + 补充表按投诉日期 (total - overlap)。
     # overlap = 当日已关联到本范围内工单的补充记录(工单已计入, 去重)。
     # 使「推送了但未落工单」的外部/卡商投诉也能在趋势里按投诉日期体现。
+    # 卡商群投诉归「外部投诉」桶(2026-09-01 用户确认口径): 外部趋势 = 工单 + 315净 + 卡商净。
+    # ⚠️ 不可嵌套调用 _merge_trend(其第一参数要求 (day,count) 元组列表, 嵌套会把
+    #    {day,count} 字典解包 → int('count') 崩溃)。两个补充表 dict 列表直接相加后一次合并。
     external_suppl_trend = _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te)
     card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "外部投诉", ts, te)
-    external_trend_merged = _merge_trend(_merge_trend(external_trend, external_suppl_trend), card_suppl_trend)
+    external_trend_merged = _merge_trend(external_trend, external_suppl_trend + card_suppl_trend)
     merchant_trend_merged = _merge_trend(merchant_trend, [])
     internal_trend_merged = _merge_trend(internal_trend, [])  # 内部投诉无补充表
 
