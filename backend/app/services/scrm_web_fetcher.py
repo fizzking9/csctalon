@@ -125,6 +125,10 @@ class ScrmWebFetcher:
                 ),
                 viewport={"width": 1680, "height": 960},
                 locale="zh-CN",
+                # ⚠️ 2026-09-01: 强制浏览器时区=Asia/Shanghai, 与 BMS fetcher 一致。
+                #   防止前端 DatePicker 用容器默认 UTC 时区作为"当前时刻"导致查询窗口
+                #   被截断到 8h 前(稳定 8h 滞后)。
+                timezone_id="Asia/Shanghai",
             )
             self._page = await self._context.new_page()
             # Playwright 默认 30s; SCRM 偶尔慢,给 45s

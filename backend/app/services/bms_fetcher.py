@@ -165,26 +165,25 @@ def _parse_filename_utc_ts(filename: str) -> datetime | None:
 
 
 # BMS 网页版时间填入的时区开关。
-# 背景(2026-09-01 生产审查 + 本地实证): 容器内 Playwright 浏览器时区 = UTC(已验证),
-# BMS 前端是 Vue/Element UI DatePicker。可观测的稳定规律:
-#   - 代码填入"北京时间字符串"(如 2026-08-30 21:44:00) → BMS 返回的数据只到
-#     ≈「执行时刻 UTC」=「北京当前 − 8h」(refund/ticket/wallet 全部如此, 稳定 8h 轮次滞后)
-#   - cs_record(ai-acc HTTP API 直连, 参数不经 Vue) 无此滞后(数据分布正常)
-#   - 入库后 created_at_raw(UTC) 与文件内"创建时间"(北京时间) 完全吻合 → 解析/入库无问题
-# 推断根因: BMS 前端把输入字符串按浏览器时区(UTC)解析成 Date, 与后端北京时间语义错位,
-#           导致查询窗口 end 被理解为"北京+8h=未来", 被平台按当前时刻截断 → 少 8h。
-# 修复方向: 填入 UTC 字符串(北京时间−8h), 让 DatePicker 解析后内部时间正确。
-# 验证/回退: 部署后先跑一次同步, 对比返回文件的最大"创建时间(北京)"应覆盖到北京当前
-#           (此前只到执行时刻UTC)。若反而变早/丢数据, 在 sync_source_configs 对应源
-#           的 options 里设 time_fill_utc=false 回退(每源独立)。
-_BMS_FILL_TZ_UTC_DEFAULT = True
+# 背景(2026-09-01 三次排查后定案): 稳定 8h 滞后的**真正根因是容器 Playwright 浏览器时区 = UTC**。
+#   BMS 前端 Vue DatePicker 用浏览器本地时间作为"当前时刻"并据此截断查询窗口:
+#   - 容器浏览器 UTC → BMS 认为当前是 UTC(北京-8h) → 即使填入正确北京时间 end,
+#     也会被截断到 8h 前 → 数据只到「执行时刻 UTC」=「北京当前-8h」
+#   - 用户手动在 BMS 页面导出(浏览器=北京) → 当前时刻正确 → 数据完整
+# 修复: 在 new_context 设置 timezone_id='Asia/Shanghai'(两处), 让 BMS 前端当前时刻=北京。
+# 在此前提下, 填入 BMS 的时间字符串**应保持北京时间**(BMS 按字面值解析), 即 fill_utc=False。
+# ⚠️ 曾误判: 之前以为 BMS 按浏览器时区解析输入字符串 → 把北京时间转 UTC 填入(fill_utc=True),
+#   反而让生产同步窗口变成 8h 前(只拿到凌晨 51 行)。方向反了, 已改回 False。
+# 每源仍可经 config time_fill_utc 覆盖。
+_BMS_FILL_TZ_UTC_DEFAULT = False
 
 
 def _bms_time_str(dt: datetime, time_format: str = "%Y-%m-%d %H:%M:%S", fill_utc: bool = True) -> str:
     """生成填入 BMS 日期输入框的时间字符串。
 
-    - fill_utc=True(默认): 把北京 aware 时间转成 UTC 再格式化(修复 8h 轮次滞后)。
-    - fill_utc=False: 原行为, 按 dt 自身时区格式化(北京时间), 用于回退。
+    - fill_utc=True: 把北京 aware 时间转成 UTC 再格式化(已废弃, 曾误判为修复)。
+    - fill_utc=False(默认): 按 dt 自身时区格式化(北京时间)。配合浏览器时区=Asia/Shanghai,
+      BMS 按字面北京时间解析 + 当前时刻=北京 → 窗口正确。
     """
     if fill_utc and dt.tzinfo is not None:
         return dt.astimezone(timezone.utc).strftime(time_format)
@@ -2353,6 +2352,11 @@ class BmsFetcher:
         context_kwargs = {
             "accept_downloads": True,
             "viewport": {"width": 1920, "height": 1080},
+            # ⚠️ 2026-09-01 真根因修复: BMS 前端 Vue DatePicker 用浏览器本地时间作为
+            #   "当前时刻"并据此截断查询窗口。容器默认时区=UTC, 导致 BMS 认为当前是 UTC
+            #   (北京-8h), 即使填入正确的北京时间 end, 也会被截断到 8h 前 → 稳定 8h 滞后。
+            #   这里强制浏览器时区=Asia/Shanghai, 让 BMS 前端的"当前时刻"= 北京时间。
+            "timezone_id": "Asia/Shanghai",
         }
         if storage_state:
             context_kwargs["storage_state"] = storage_state
@@ -2456,9 +2460,8 @@ class BmsFetcher:
 
             # 3. 设置时间范围
             time_format = config.get("time_format", "%Y-%m-%d %H:%M:%S")
-            # ⚠️ 2026-09-01 时区修复: BMS 前端 Vue DatePicker 按浏览器时区(容器UTC)解析输入字符串,
-            #   原本填"北京时间字符串"会被当 UTC → 数据只到当前UTC(=北京-8h) → 稳定8h滞后。
-            #   默认转 UTC 填入(fill_utc 可从 config 覆盖, 默认开启)。
+            # ⚠️ 2026-09-01 修复: 真根因是浏览器时区=UTC导致 BMS 前端"当前时刻"错位,
+            #   已在 new_context 设 timezone_id='Asia/Shanghai'。因此这里填**北京时间**(fill_utc=False), 与用户手动导出一致。
             fill_utc = bool(config.get("time_fill_utc", _BMS_FILL_TZ_UTC_DEFAULT))
             start_str = _bms_time_str(start_date, time_format, fill_utc=fill_utc)
             end_str = _bms_time_str(end_date, time_format, fill_utc=fill_utc)
@@ -2997,6 +3000,9 @@ class BmsFetcher:
             context_kwargs = {
                 "accept_downloads": True,
                 "viewport": {"width": 1920, "height": 1080},
+                # ⚠️ 2026-09-01 真根因修复: 同 _do_fetch_one, 强制浏览器时区=Asia/Shanghai,
+                #   让 BMS 前端 DatePicker 的"当前时刻"= 北京时间, 避免查询窗口被截断到 8h 前。
+                "timezone_id": "Asia/Shanghai",
             }
             if group_storage_state:
                 context_kwargs["storage_state"] = group_storage_state
@@ -3338,9 +3344,8 @@ class BmsFetcher:
         await self._wait_until_page_has_any_clickable(page)
 
         # 3. 设置时间范围
-        # ⚠️ 2026-09-01 时区修复: 同 _do_fetch_one, BMS 前端 Vue DatePicker 按浏览器时区(容器UTC)
-        #   解析输入字符串 → 填"北京时间字符串"会被当 UTC → 数据只到当前UTC(=北京-8h) → 稳定8h滞后。
-        #   默认转 UTC 填入(fill_utc 可从 config 覆盖)。
+        # ⚠️ 2026-09-01 修复: 同 _do_fetch_one, 真根因是浏览器时区=UTC(已设 timezone_id=Asia/Shanghai),
+        #   这里填**北京时间**(fill_utc=False), 与用户手动导出一致。
         _time_format = config.get("time_format", "%Y-%m-%d %H:%M:%S")
         _fill_utc = bool(config.get("time_fill_utc", _BMS_FILL_TZ_UTC_DEFAULT))
         start_str = _bms_time_str(start_date, _time_format, fill_utc=_fill_utc)
