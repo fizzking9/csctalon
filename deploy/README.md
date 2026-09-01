@@ -112,6 +112,7 @@ deploy/backup.sh  导出   ──┘      releases/<版本>/ ← 每版代码
 - **升级即切版本**：新代码落到独立目录 → 切软链 → `docker compose up -d --build` 重建。后端启动自动执行 `alembic upgrade head`（幂等），**数据库结构无需手动迁移**。
 - **备份/导入是独立脚本**：`backup.sh`（数据导出）、`restore.sh`（数据导入）单独使用，与安装/升级解耦，可随时手动跑或配置 cron。
 - **免重复同步**：本地库已是全量数据，用 `backup.sh` 导出 → 服务器 `restore.sh` 导入，同步配置（含加密凭证）随库一起迁移。
+- **开发环境取生产数据**：本地开发缺数据时，用 `sync-from-prod.sh`（本地执行）在生产机跑 `backup.sh` 生成快照 → 拉回本地 `pg_restore`。全程**只读生产**（生产 DB/Redis 均不写入），破坏性操作只作用本地。详见该脚本头部注释。
 
 ### 脚本清单
 
@@ -123,6 +124,7 @@ deploy/backup.sh  导出   ──┘      releases/<版本>/ ← 每版代码
 | `rollback.sh` | 服务器 | 回滚：代码切回历史版本 + 可选恢复备份数据 |
 | `backup.sh` | 本地或服务器 | **数据导出**：数据库 + 附件 + 登录态（本地=导出迁移包；服务器=日常/升级前备份） |
 | `restore.sh` | 服务器 | **数据导入**：从备份包恢复数据库 + 附件，支持 `--db-only` |
+| `sync-from-prod.sh` | 本地开发机 | **开发取数**：生产机 `backup.sh` 快照 → 拉回本地 `pg_restore`（只读生产；Redis 默认不动，见其注释） |
 | `package.sh` | 本地 | 打发布包 `dist/csctalon-<版本>-<时间戳>.tar.gz`（仅 tar 包方式需要） |
 | `upload.sh` | 本地 | 发布包 scp 上传到服务器 `packages/`（仅 tar 包方式需要） |
 
@@ -292,6 +294,29 @@ sudo bash /opt/csctalon/packages/csctalon-vX.Y.Z-*/deploy/upgrade.sh /opt/csctal
 ```bash
 0 4 * * * rsync -avz --delete /opt/csctalon/backups/ root@<备份机>:/backup/csctalon/
 ```
+
+---
+
+## 5.5 开发环境从生产取数（sync-from-prod.sh）
+
+本地开发缺数据、生产不便直接联调时，用 [sync-from-prod.sh](sync-from-prod.sh) 在**本地开发机**执行：
+
+```bash
+./deploy/sync-from-prod.sh --ssh-prod root@<生产IP> --env-file .env
+# 只恢复数据库，不覆盖本地附件/登录态:
+./deploy/sync-from-prod.sh --ssh-prod root@<生产IP> --db-only
+```
+
+**机制**：① 生产机内跑 `backup.sh`（优先复用 `/opt/csctalon/current` 已部署版本，否则从仓库拉）生成快照；② `rsync` 拉回本地；③ 本地 `pg_restore` 覆盖开发库；④ 数据完整性校验（`users`/`refunds` 计数）。
+
+**🔒 生产只读**：
+- 对生产只做读操作（`backup.sh`/`pg_dump`）+ 建/删临时目录；**生产 DB 与 Redis 均不写入**。
+- `pg_restore --clean`、`redis-cli FLUSHALL` 等破坏性操作**全部作用在本地开发环境**。
+- `--ssh-prod` 误指本机（localhost/127.0.0.1）或生产 db 容器 IP 与本地相同时会**拒绝执行**（双重防误连）。
+
+**⚠️ Redis 无需同步**：本系统 Redis 只有可重建的看板缓存（TTL 自动过期，`cache_warmer` 重建）+ 无状态标记（同步互斥锁在内存/DB），没有必须随库迁移的持久数据。因此脚本**默认不清 Redis**；仅调试需要时加 `--clear-redis` 显式清**本地** Redis。
+
+**注意**：同步源加密凭证由生产 `CONFIG_ENCRYPTION_KEY` 派生，拉回本地后可能无法解密；若解密失败，用本地 `.env` 的 `CONFIG_ENCRYPTION_KEY` 重加密或重填凭证（见 `.env.example` 注释）。
 
 ---
 

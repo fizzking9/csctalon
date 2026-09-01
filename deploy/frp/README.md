@@ -431,6 +431,17 @@ rsync -avz root@<云端IP>:/backup/csctalon/csctalon-backup-*.tar.gz ./
 sudo bash /opt/csctalon/current/deploy/restore.sh ./csctalon-backup-xxx.tar.gz
 ```
 
+### 6.3 开发环境从生产取数
+
+本地开发缺数据、联调需生产快照时（frp 方案下生产=本地内网机）：
+
+```bash
+# 在开发机执行，生产机跑 backup.sh 生成快照 → 拉回本地 pg_restore（生产只读）
+bash deploy/sync-from-prod.sh --ssh-prod root@<生产IP> --env-file .env
+```
+
+详见 [deploy/README.md §5.5](../README.md#55-开发环境从生产取数sync-from-prodsh)。
+
 ---
 
 ## 7. 日常运维
