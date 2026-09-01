@@ -2793,6 +2793,24 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
     if range_end_iso == today_d_iso and merchant_today == 0:
         merchant_tip = "商户号流水通常T+1导入，本日/本周期数据可能为空"
 
+    # ⚠️ 2026-09-01 补充口径: "当日完成退款(已退款)" —— 按退款完成时刻(updated_at_raw)
+    #   统计路线A(线上直退)里"当天实际完成退款"的单(可能几天前创建)。
+    #   背景: BMS 页面"实际退款时间"= 更新时间; 原统计按 created_at_raw(创建时间),
+    #   会把"几天前创建、今天才完成退款"的单归到创建那天, 导致今日看板"已退款"看不到。
+    #   这里仅作**新增指标**返回, 不改变原 routes/refund_count 口径(保持历史一致)。
+    def _route_a_done_in_window(s: _dt.datetime, e: _dt.datetime) -> dict:
+        row = db.execute(select(
+            func.count(),
+            func.coalesce(func.sum(Refund.refund_amount), 0),
+        ).where(
+            *_route_a_online_refund_filter(),
+            Refund.status == "已退款",
+            _between(Refund.updated_at_raw, s, e),
+        )).first() or (0, 0)
+        return {"count": int(row[0] or 0), "amount": round(float(row[1] or 0), 2)}
+    a_done_t = _route_a_done_in_window(ts, te)
+    a_done_y = _route_a_done_in_window(ys, ye)
+
     # 5. 今日已完工单 (新口径:有效完工时间推算)
     #    - 背景: finish_time 89% 被批量覆盖/同步填充(详见 docs/数据时间审核报告.md L67-L70)
     #    - 推算链: 真实完成样本(白名单) → handle_duration 秒 → handler 近 30 天真实平均 → 全局真实平均
@@ -2857,13 +2875,16 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         "refund_amount":  _k(round(rf_amt_t, 2), round(rf_amt_y, 2)),
         "cash_out":       _k(round(cash_t, 2), round(cash_y, 2)),      # 经营估算 A+B+C+D
         "actual_cashflow":_k(round(e_t["amount"], 2), round(e_y["amount"], 2)), # (新) 实际现金流E
+        # ⚠️ 2026-09-01 新增: 当日完成退款(已退款,按更新时间) —— 补 BMS"实际退款时间"口径
+        "refund_done_today": {**_k(a_done_t["count"], a_done_y["count"]), "amount": a_done_t["amount"], "amount_yoy": a_done_y["amount"]},
         "ticket_done":    {**_k(int(done_t), int(done_y)), "real_done_today": int(real_done_t), "real_done_yoy": int(real_done_y)},
         "staff_on_duty":  _k(int(staff_t), int(staff_y)),
         "complaint":      _k(int(comp_t), int(comp_y)),
         "merchant_tip":   merchant_tip,
         # ── 新增: 今日四路线拆分 + 实际现金流E + 对账偏差 (前端tooltip/明细卡) ──
         "cash_routes_today": {
-            "route_a": a_t,  # A.退费单线上直退
+            "route_a": a_t,  # A.退费单线上直退(按创建时间)
+            "route_a_done": a_done_t,  # A.线上直退"当日完成(已退款,按更新时间)" 补充口径
             "route_b": b_t,  # B.钱包用户取现
             "route_c": c_t,  # C.闪猫退款 (独立表 shanmao_refunds, status=已退款 计入)
             "route_d": d_t,  # D.手动退款 (独立业务表 manual_refunds, is_refunded=是 计入)
@@ -2874,8 +2895,9 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         },
         # ── 口径注释 (前端标题tooltip) ──
         "_spec": {
-            "refund_count":     "退款笔数 = 四路经营合计 A线上直退 + B用户取现 + C闪猫退款 + D手动退款",
+            "refund_count":     "退款笔数 = 四路经营合计 A线上直退 + B用户取现 + C闪猫退款 + D手动退款 (按创建时间)",
             "refund_amount":    "退款金额 = 四路经营合计 A+B+C+D (经营侧登记的所有退款出款)",
+            "refund_done_today":"当日完成退款 = 路线A(线上直退) 中 status=已退款 且 更新时间(退款完成时刻)∈ 当日, 含几天前创建今天才完成的单 (BMS 实际退款时间口径)",
             "cash_out":         "真实现金流(对账基准) = merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
             "actual_cashflow":  "实际现金流(对账基准) = merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
             "ticket_done":      "有效完工时间推算: 10.7% 真实完成(白名单:status=已完成且finish在register+12h内且handler非空非SYS) → handle_duration秒 → 该handler近30天真实平均耗时 → 全局真实平均。仅status=已完成视为完工, 避免finish_time被BMS 03:15批量覆盖导致的虚高。",

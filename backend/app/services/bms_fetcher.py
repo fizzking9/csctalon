@@ -2794,29 +2794,67 @@ class BmsFetcher:
             except Exception:
                 sd_naive = ed_naive = None
 
-            # 策略1(主): 创建时间 between —— 最可靠,因为 BMS 日期筛选器就是按"实际退款时间"筛选的
+            # ⚠️ 2026-09-01 口径修复: BMS 页面"实际退款时间"筛选 = 更新时间(退款完成时刻),
+            #   而"几天前创建、今天完成退款(已退款)"的单创建时间不在当天, 原实现按"创建时间"
+            #   裁剪会把这批单全踢掉 → 看板"今日退款(已退款)"看不到当天实际完成的单。
+            #   修复: 保留「创建时间 ∈ 窗口」∪「更新时间 ∈ 窗口 且 status=已退款」并集。
+            #   注意: 更新时间含少量 03:15 SYS 批量覆盖(文档已注明), 因此只对 status='已退款'
+            #   的单用更新时间补充, 避免把"系统批量触碰"的未退款单误拉入。
+            mask_created = None
+            mask_updated_refunded = None
+
+            # 子集1(主): 创建时间 between —— 当天创建的退费单(含未完成)
             if "创建时间" in df.columns:
                 try:
                     vs = pd.to_datetime(df["创建时间"], errors="coerce")
                     if sd_naive is not None:
-                        mask = (vs >= sd_naive) & (vs <= ed_naive)
+                        mask_created = (vs >= sd_naive) & (vs <= ed_naive)
                     else:
-                        mask = pd.Series(False, index=vs.index)
-                    mask = mask.fillna(False)
-                    chosen_col = f"创建时间 between [{sd_naive},{ed_naive}]"
+                        mask_created = pd.Series(False, index=vs.index)
+                    mask_created = mask_created.fillna(False)
                     logger.info(
-                        f"[{data_type}] 策略1(创建时间): 命中 {mask.sum()}/{orig_rows} 行"
+                        f"[{data_type}] 裁剪-创建时间: 命中 {mask_created.sum()}/{orig_rows} 行"
                     )
                 except Exception:
-                    mask = None
+                    mask_created = None
 
-            # 策略2(辅): 退费单号中嵌入日期 —— BMS 单号如 BR2026022502165999775
-            #   前缀(2-3字母) + YYYYMMDD + 序号
+            # 子集2(补): 更新时间 ∈ 窗口 且 status=已退款 —— 当天实际完成退款的单
+            #   (可能创建于几天前, 按 BMS"实际退款时间"口径应计入当天)
+            if "更新时间" in df.columns and "状态" in df.columns:
+                try:
+                    vu = pd.to_datetime(df["更新时间"], errors="coerce")
+                    if sd_naive is not None:
+                        mask_updated_refunded = (vu >= sd_naive) & (vu <= ed_naive) & (df["状态"].astype(str).str.strip() == "已退款")
+                    else:
+                        mask_updated_refunded = pd.Series(False, index=df.index)
+                    mask_updated_refunded = mask_updated_refunded.fillna(False)
+                    logger.info(
+                        f"[{data_type}] 裁剪-更新时间(已退款): 命中 {mask_updated_refunded.sum()}/{orig_rows} 行"
+                    )
+                except Exception:
+                    mask_updated_refunded = None
+
+            # 合并: 并集(创建时间 或 更新时间已退款); 兜底退费单号/更新时间
+            if mask_created is not None or mask_updated_refunded is not None:
+                if mask_created is not None and mask_updated_refunded is not None:
+                    mask = mask_created | mask_updated_refunded
+                    chosen_col = "创建时间∈窗口 ∪ 更新时间∈窗口且已退款"
+                    logger.info(
+                        f"[{data_type}] 裁剪-并集: 保留 {mask.sum()}/{orig_rows} 行"
+                    )
+                elif mask_created is not None:
+                    mask = mask_created
+                    chosen_col = "创建时间 between"
+                else:
+                    mask = mask_updated_refunded
+                    chosen_col = "更新时间∈窗口且已退款"
+
+            # 兜底: 若上面都失效(如列缺失), 退费单号中嵌入日期 / 更新时间
             if mask is None or (isinstance(mask, pd.Series) and mask.sum() == 0):
+                # 退费单号中嵌入日期 —— BMS 单号如 BR2026022502165999775(创建日期)
                 if "退费单号" in df.columns:
                     try:
                         _nos = df["退费单号"].astype(str).str.strip()
-                        # 尝试提取 YYYYMMDD: 跳过前缀字母(2-3位),取后续 8 位数字
                         _ymd = _nos.str.extract(r'^[A-Z]{2,3}(\d{4})(\d{2})(\d{2})', expand=False)
                         if _ymd is not None and len(_ymd) > 0:
                             _dates = pd.to_datetime(
@@ -2829,12 +2867,12 @@ class BmsFetcher:
                             mask = mask.fillna(False)
                             chosen_col = f"退费单号嵌入日期 in range"
                             logger.info(
-                                f"[{data_type}] 策略2(退费单号): 命中 {mask.sum()}/{orig_rows} 行"
+                                f"[{data_type}] 裁剪-退费单号: 命中 {mask.sum()}/{orig_rows} 行"
                             )
                     except Exception:
                         mask = None
 
-            # 策略3(兜底): 更新时间 between
+            # 最后兜底: 更新时间 between(仅当前面全失效时)
             if mask is None or (isinstance(mask, pd.Series) and mask.sum() == 0):
                 if "更新时间" in df.columns:
                     try:
@@ -2846,7 +2884,7 @@ class BmsFetcher:
                         mask = mask.fillna(False)
                         chosen_col = f"更新时间 between [{sd_naive},{ed_naive}]"
                         logger.info(
-                            f"[{data_type}] 策略3(更新时间): 命中 {mask.sum()}/{orig_rows} 行"
+                            f"[{data_type}] 裁剪-更新时间兜底: 命中 {mask.sum()}/{orig_rows} 行"
                         )
                     except Exception:
                         mask = None
