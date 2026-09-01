@@ -84,6 +84,8 @@ backend/.env
 # 上传的业务文件(运行时挂载,仅保留目录占位)
 backend/uploads/*
 !backend/uploads/.gitkeep
+# 根目录 uploads/ = compose 挂载的同步下载目录(运行时生成,不入库)
+uploads/
 
 # 样本数据(真实业务数据,含退费单号/商户信息等敏感内容,不入库)
 01样本数据/

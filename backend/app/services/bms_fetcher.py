@@ -1294,6 +1294,67 @@ class BmsFetcher:
 
         return result
 
+    async def _fill_daterange_inputs(self, page, start_inp, end_inp, start_str, end_str):
+        """填 Element UI datetimerange 的两个 input 并确保 Vue v-model 更新。
+
+        背景(2026-09-01): 时间框需先展开高级筛选(.show-more)才可见。
+        - Element UI DatePicker 的 input 需**先 click 聚焦**才可 fill, 否则 fill 会
+          超时(8s)退化为 evaluate setter; 而 setter 有时不触发 Vue v-model 更新 →
+          查询用默认近一周 → 窗口不精确, 甚至导出按钮状态异常。
+        - 这里对每个 input: click 聚焦 → fill(缩短超时) → evaluate 兜底 setter+事件,
+          确保 Vue 更新。
+        - ⚠️ 不要用 page.mouse.click(5,5) 关闭面板: 会改变页面滚动/点击位置导致不稳定;
+          改用 ESC + blur 关闭 picker。
+        """
+        for i_el, val in [(start_inp, start_str), (end_inp, end_str)]:
+            try:
+                # 先 click 聚焦, 让 Element UI 进入可编辑状态(避免 fill 超时)
+                await i_el.click(timeout=5000)
+                await asyncio.sleep(0.15)
+            except Exception as _ce:
+                logger.warning(f"  [填值] click 聚焦失败(继续): {_ce}")
+            try:
+                await i_el.fill(val, timeout=4000)
+            except Exception as _fe:
+                logger.warning(f"  [填值] fill 超时/失败,退化为 evaluate setter: {_fe}")
+                try:
+                    await i_el.evaluate(
+                        """(el, v) => {
+                            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                            if (setter) setter.call(el, v); else el.value = v;
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        }""",
+                        val,
+                    )
+                except Exception as _e2:
+                    logger.warning(f"  [填值] evaluate setter 失败(忽略): {_e2}")
+            await asyncio.sleep(0.2)
+        # 触发 blur + ESC, 让 DatePicker 面板收起并同步 v-model
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        try:
+            s_ph = await start_inp.get_attribute("placeholder") or ""
+            e_ph = await end_inp.get_attribute("placeholder") or ""
+            await page.evaluate(
+                """([sSel, eSel]) => {
+                    const s = document.querySelector(sSel);
+                    const e = document.querySelector(eSel);
+                    for (const el of [s, e]) {
+                        if (el) {
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                            el.blur && el.blur();
+                        }
+                    }
+                }""",
+                [f'input[placeholder="{s_ph}"]', f'input[placeholder="{e_ph}"]'],
+            )
+        except Exception as _fe:
+            logger.warning(f"  [填值] 触发 blur 异常(忽略): {_fe}")
+        await asyncio.sleep(0.5)
+
     async def _set_time_by_labels(self, page, start_label: str, end_label: str, start_str: str, end_str: str):
         """按表单标签精确查找日期输入框并设置时间
 
@@ -1306,6 +1367,39 @@ class BmsFetcher:
         策略: 找包含目标标签文本的最近表单项(.el-form-item),操作其中的可见 input
         """
         logger.info(f"按标签查找时间输入框: '{start_label}' / '{end_label}'")
+
+        # ⚠️ 策略0(2026-09-01): BMS 服务请求管理页的"起始登记时间/完成时间/催单时间"
+        #   在**高级筛选**里, 默认折叠不可见(visible=False, 本地实测), 需先点 `.show-more` 展开。
+        #   不展开则 placeholder 匹配命中但 is_visible=False → click/fill 全超时。
+        try:
+            sm = page.locator(".show-more, a.show-more").first
+            if await sm.count() > 0 and not await sm.get_attribute("disabled"):
+                # 先检查登记/完成时间框是否已可见, 不可见才展开(避免每次重复点击切换收起)
+                need_expand = not await page.locator(f'input[placeholder="{start_label}"]').first.is_visible()
+                if need_expand:
+                    logger.info("  [展开高级筛选] 点击 .show-more 展开时间筛选区")
+                    try:
+                        await sm.click(timeout=5000)
+                    except Exception:
+                        await page.evaluate("document.querySelector('.show-more') && document.querySelector('.show-more').click()")
+                    await asyncio.sleep(1.2)
+        except Exception as _se:
+            logger.warning(f"  [展开高级筛选] 异常(忽略): {_se}")
+
+        # ⚠️ 策略0(新增 2026-09-01): BMS 页面"起始登记时间/结束登记时间"等是 **placeholder**,
+        #   不是 `.el-form-item__label` 元素(本地 DOM 实测 label 列表为空)。原 _fill_input_by_label
+        #   找 label 永远失败 → 回退通用策略 → 通用策略选"第一个 datetimerange 容器"(登记时间,碰巧对)
+        #   但 fill 超时 + evaluate 不触发 Vue v-model → 查询仍用默认近一周 → 窗口不精确。
+        #   这里按 placeholder 精确匹配, 直接定位到正确的登记/完成时间框, 用键盘输入确保生效。
+        start_inp = page.locator(f'input[placeholder="{start_label}"]').first
+        end_inp = page.locator(f'input[placeholder="{end_label}"]').first
+        if await start_inp.count() > 0 and await end_inp.count() > 0:
+            logger.info(
+                f"  [策略0-按placeholder] 命中 '{start_label}' / '{end_label}' → "
+                f"键盘输入 start={start_str!r} end={end_str!r}"
+            )
+            await self._fill_daterange_inputs(page, start_inp, end_inp, start_str, end_str)
+            return
 
         # 查找起始时间输入框
         start_filled = await self._fill_input_by_label(page, start_label, start_str)
