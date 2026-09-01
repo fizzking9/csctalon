@@ -20,7 +20,8 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -145,6 +146,74 @@ def _storage_state_path(data_type: str) -> Path:
     return base / f"{data_type}.json"
 
 
+def _parse_filename_utc_ts(filename: str) -> datetime | None:
+    """从 BMS 导出文件名中解析内嵌的 UTC 时间戳。
+
+    文件名形如: 退费单导出列表-2026-09-01_01_40_25_108_20260901014025.csv
+    前半段 `2026-09-01_01_40_25` 是 BMS 服务端生成导出时的 UTC 时刻
+    (容器内 Playwright 浏览器时区 = UTC, BMS 前端把该时刻写进文件名)。
+    解析失败返回 None(不阻塞主流程)。
+    """
+    try:
+        m = re.search(r"(\d{4})-(\d{2})-(\d{2})_(\d{2})_(\d{2})_(\d{2})", filename)
+        if not m:
+            return None
+        y, mo, d, h, mi, s = (int(x) for x in m.groups())
+        return datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+# BMS 网页版时间填入的时区开关。
+# 背景(2026-09-01 生产审查 + 本地实证): 容器内 Playwright 浏览器时区 = UTC(已验证),
+# BMS 前端是 Vue/Element UI DatePicker。可观测的稳定规律:
+#   - 代码填入"北京时间字符串"(如 2026-08-30 21:44:00) → BMS 返回的数据只到
+#     ≈「执行时刻 UTC」=「北京当前 − 8h」(refund/ticket/wallet 全部如此, 稳定 8h 轮次滞后)
+#   - cs_record(ai-acc HTTP API 直连, 参数不经 Vue) 无此滞后(数据分布正常)
+#   - 入库后 created_at_raw(UTC) 与文件内"创建时间"(北京时间) 完全吻合 → 解析/入库无问题
+# 推断根因: BMS 前端把输入字符串按浏览器时区(UTC)解析成 Date, 与后端北京时间语义错位,
+#           导致查询窗口 end 被理解为"北京+8h=未来", 被平台按当前时刻截断 → 少 8h。
+# 修复方向: 填入 UTC 字符串(北京时间−8h), 让 DatePicker 解析后内部时间正确。
+# 验证/回退: 部署后先跑一次同步, 对比返回文件的最大"创建时间(北京)"应覆盖到北京当前
+#           (此前只到执行时刻UTC)。若反而变早/丢数据, 在 sync_source_configs 对应源
+#           的 options 里设 time_fill_utc=false 回退(每源独立)。
+_BMS_FILL_TZ_UTC_DEFAULT = True
+
+
+def _bms_time_str(dt: datetime, time_format: str = "%Y-%m-%d %H:%M:%S", fill_utc: bool = True) -> str:
+    """生成填入 BMS 日期输入框的时间字符串。
+
+    - fill_utc=True(默认): 把北京 aware 时间转成 UTC 再格式化(修复 8h 轮次滞后)。
+    - fill_utc=False: 原行为, 按 dt 自身时区格式化(北京时间), 用于回退。
+    """
+    if fill_utc and dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).strftime(time_format)
+    return dt.strftime(time_format)
+
+
+def _crop_bounds_naive(start_date: datetime, end_date: datetime):
+    """把裁剪边界统一转成 naive 北京时间 pandas Timestamp, 用于与文件内时间列比较。
+
+    背景(2026-09-01): BMS/闪猫导出文件里的时间列(创建时间/审核时间/申请时间等)
+    是 naive 北京时间字符串(如 "2026-08-30 21:44:00"), 而传入的 start_date/end_date
+    是 aware UTC+8 datetime。原实现 `pd.to_datetime(start_date)` 得到 aware Timestamp,
+    与 naive 的列值比较会抛 `TypeError: Cannot compare tz-naive and tz-aware` →
+    被 except 吞 → mask=None → **裁剪从未真正生效(全量保留)**。
+
+    修复: 把边界按北京时区转成 naive 字面值(与列值同语义), 比较才有效。
+    返回值: (start_naive, end_naive) 均为 naive pd.Timestamp。
+    """
+    import pandas as pd
+    TZ_CN = timezone(timedelta(hours=8))
+
+    def _to_naive(dt: datetime):
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(TZ_CN).replace(tzinfo=None)
+        return pd.Timestamp(dt)
+
+    return _to_naive(start_date), _to_naive(end_date)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # P1-1: 导出下载超时控制 + 自动重试
 #       - wallet(提现操作记录):数据量大,导出通常需要 3-10 分钟,给 600s 超时 + 最多 2 次重试
@@ -215,6 +284,7 @@ async def _download_with_retry(
     page,
     data_type: str,
     logger_obj,
+    expect_end_dt: datetime | None = None,
 ):
     """封装 Playwright 导出下载:按 data_type 配置超时 + 最多 N 次重试。
 
@@ -227,6 +297,11 @@ async def _download_with_retry(
       - 监听 export 响应,如果返回 JSON({"success":false,...})说明被限流
       - 被限流时不会触发 download 事件,需等待 60s+ 后重试
       - wallet 的 max_retries=2,每次 600s 超时,足够等待限流解除
+
+    Args:
+        expect_end_dt: 期望窗口结束时间(北京时间 aware, 即本次要拉的 end)。
+            用于校验 BMS 返回文件名里内嵌的 UTC 时间戳是否与期望窗口吻合,
+            记录告警(不改变流程)——用于监控"8小时轮次滞后"是否仍存在。
     """
     timeout_ms = _DOWNLOAD_TIMEOUT_MS.get(data_type, _DOWNLOAD_DEFAULT_TIMEOUT_MS)
     max_retries = _DOWNLOAD_MAX_RETRIES.get(data_type, _DOWNLOAD_DEFAULT_RETRIES)
@@ -335,6 +410,26 @@ async def _download_with_retry(
                 "[%s] 文件下载成功(尝试 %d/%d):%s",
                 data_type, attempt + 1, max_retries + 1, download.suggested_filename,
             )
+            # ── 2026-09-01: 文件名内嵌 UTC 时间戳 vs 当前时刻交叉校验(监控用) ──
+            #   BMS 文件名形如 退费单导出列表-2026-09-01_01_40_25_xxx.csv, 前半段为导出任务
+            #   生成的 UTC 时刻(容器浏览器时区=UTC)。正常情况它应 ≈ 当前 UTC 时刻。
+            #   若文件名时间戳比当前 UTC 落后 ≥2h, 说明 download 事件命中的是"历史轮次的旧导出缓存"
+            #   (BMS 导入导出中心复用旧任务), 而不是本次点击生成的新导出。
+            #   这里仅记录告警(不改变流程), 便于核对 fill_utc 修复是否生效 / 是否偶发命中旧缓存。
+            try:
+                fname_ts = _parse_filename_utc_ts(download.suggested_filename or "")
+                if fname_ts is not None:
+                    now_utc = datetime.now(timezone.utc)
+                    lag_hours = (now_utc - fname_ts).total_seconds() / 3600.0
+                    if lag_hours > 2.0:
+                        logger_obj.warning(
+                            "[%s] 导出文件名时间戳(%s UTC) 比当前时刻(%s UTC) 落后 %.1fh,"
+                            " 疑似命中历史轮次导出缓存(BMS 导入导出中心复用旧任务)。"
+                            " 若持续出现请检查 BMS 导出任务队列是否被旧任务占用",
+                            data_type, fname_ts.strftime("%m-%d %H:%M"), now_utc.strftime("%m-%d %H:%M"), lag_hours,
+                        )
+            except Exception as _fe:
+                logger_obj.warning(f"[{data_type}] 文件名时间戳校验异常(忽略): {_fe}")
             return download
         except Exception as e:
             # ⚠️ 清理:移除 response listener + 取消残留 download_task,避免泄漏
@@ -2361,9 +2456,15 @@ class BmsFetcher:
 
             # 3. 设置时间范围
             time_format = config.get("time_format", "%Y-%m-%d %H:%M:%S")
-            start_str = start_date.strftime(time_format)
-            end_str = end_date.strftime(time_format)
-            logger.info(f"[{data_type}] 设置时间范围: {start_str} ~ {end_str} (format={time_format})")
+            # ⚠️ 2026-09-01 时区修复: BMS 前端 Vue DatePicker 按浏览器时区(容器UTC)解析输入字符串,
+            #   原本填"北京时间字符串"会被当 UTC → 数据只到当前UTC(=北京-8h) → 稳定8h滞后。
+            #   默认转 UTC 填入(fill_utc 可从 config 覆盖, 默认开启)。
+            fill_utc = bool(config.get("time_fill_utc", _BMS_FILL_TZ_UTC_DEFAULT))
+            start_str = _bms_time_str(start_date, time_format, fill_utc=fill_utc)
+            end_str = _bms_time_str(end_date, time_format, fill_utc=fill_utc)
+            logger.info(
+                f"[{data_type}] 设置时间范围: {start_str} ~ {end_str} (fill_utc={fill_utc}, format={time_format})"
+            )
 
             # 3.1 如果配置了 time_labels(页面有多个时间筛选框),按标签精确查找
             time_labels = config.get("time_labels")
@@ -2431,7 +2532,7 @@ class BmsFetcher:
             #       筛选逻辑改到第 6.1 步:用 pandas 按「退费单号前缀 TFYYYYMMDD 或时间列」
             #       精确裁剪,只保留目标日期范围内的行再覆盖写回同一个 dest_path。
             # P1-1: 调用统一的 _download_with_retry (自动按 data_type 配置超时 + 重试)
-            download = await _download_with_retry(page, data_type, logger)
+            download = await _download_with_retry(page, data_type, logger, expect_end_dt=end_date)
 
             # 6. 保存
             original_filename = download.suggested_filename or f"{data_type}_export.csv"
@@ -2542,14 +2643,21 @@ class BmsFetcher:
                         pass
             # 策略2: 审核时间 / 申请时间 / 打款时间 等 between
             if mask is None:
+                # ⚠️ 2026-09-01: 边界统一转 naive 北京时间, 与文件内 naive 时间列比较,
+                #   否则 aware vs naive 抛 TypeError → 裁剪静默失效(全量保留)。
+                try:
+                    sd_naive, ed_naive = _crop_bounds_naive(start_date, end_date)
+                except Exception:
+                    sd_naive = ed_naive = None
                 for col in ("审核时间", "申请时间", "退款时间", "创建时间", "打款时间"):
                     if col in df.columns:
                         try:
                             vs = pd.to_datetime(df[col].dropna(), errors="coerce")
-                            sd = pd.to_datetime(start_date)
-                            ed = pd.to_datetime(end_date)
-                            mask = (vs >= sd) & (vs <= ed)
-                            chosen_col = f"{col} between [{start_date},{end_date}]"
+                            if sd_naive is not None:
+                                mask = (vs >= sd_naive) & (vs <= ed_naive)
+                            else:
+                                mask = pd.Series(False, index=vs.index)
+                            chosen_col = f"{col} between [{sd_naive},{ed_naive}]"
                             # 把空行(NaT)视为 False
                             mask = mask.fillna(False)
                             if len(mask) != len(df):
@@ -2679,16 +2787,23 @@ class BmsFetcher:
             orig_rows = len(df)
             mask = None
             chosen_col = None
+            # ⚠️ 2026-09-01: 边界统一转 naive 北京时间, 与文件内 naive 时间列比较,
+            #   否则 aware vs naive 抛 TypeError → 裁剪静默失效(全量保留)。
+            try:
+                sd_naive, ed_naive = _crop_bounds_naive(start_date, end_date)
+            except Exception:
+                sd_naive = ed_naive = None
 
             # 策略1(主): 创建时间 between —— 最可靠,因为 BMS 日期筛选器就是按"实际退款时间"筛选的
             if "创建时间" in df.columns:
                 try:
                     vs = pd.to_datetime(df["创建时间"], errors="coerce")
-                    sd = pd.to_datetime(start_date)
-                    ed = pd.to_datetime(end_date)
-                    mask = (vs >= sd) & (vs <= ed)
+                    if sd_naive is not None:
+                        mask = (vs >= sd_naive) & (vs <= ed_naive)
+                    else:
+                        mask = pd.Series(False, index=vs.index)
                     mask = mask.fillna(False)
-                    chosen_col = f"创建时间 between [{start_date},{end_date}]"
+                    chosen_col = f"创建时间 between [{sd_naive},{ed_naive}]"
                     logger.info(
                         f"[{data_type}] 策略1(创建时间): 命中 {mask.sum()}/{orig_rows} 行"
                     )
@@ -2708,9 +2823,9 @@ class BmsFetcher:
                                 _ymd[0].fillna('') + _ymd[1].fillna('') + _ymd[2].fillna(''),
                                 format="%Y%m%d", errors="coerce"
                             )
-                            sd = pd.to_datetime(start_date.date())
-                            ed = pd.to_datetime(end_date.date())
-                            mask = (_dates >= sd) & (_dates <= ed)
+                            sd_d = pd.Timestamp(start_date.date()) if start_date.tzinfo is None else pd.Timestamp(start_date.astimezone(timezone(timedelta(hours=8))).date())
+                            ed_d = pd.Timestamp(end_date.date()) if end_date.tzinfo is None else pd.Timestamp(end_date.astimezone(timezone(timedelta(hours=8))).date())
+                            mask = (_dates >= sd_d) & (_dates <= ed_d)
                             mask = mask.fillna(False)
                             chosen_col = f"退费单号嵌入日期 in range"
                             logger.info(
@@ -2724,11 +2839,12 @@ class BmsFetcher:
                 if "更新时间" in df.columns:
                     try:
                         vs = pd.to_datetime(df["更新时间"], errors="coerce")
-                        sd = pd.to_datetime(start_date)
-                        ed = pd.to_datetime(end_date)
-                        mask = (vs >= sd) & (vs <= ed)
+                        if sd_naive is not None:
+                            mask = (vs >= sd_naive) & (vs <= ed_naive)
+                        else:
+                            mask = pd.Series(False, index=vs.index)
                         mask = mask.fillna(False)
-                        chosen_col = f"更新时间 between [{start_date},{end_date}]"
+                        chosen_col = f"更新时间 between [{sd_naive},{ed_naive}]"
                         logger.info(
                             f"[{data_type}] 策略3(更新时间): 命中 {mask.sum()}/{orig_rows} 行"
                         )
@@ -3184,9 +3300,14 @@ class BmsFetcher:
         await self._wait_until_page_has_any_clickable(page)
 
         # 3. 设置时间范围
-        start_str = start_date.strftime("%Y-%m-%d %H:%M:%S")
-        end_str = end_date.strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(f"[{data_type}] 设置时间范围: {start_str} ~ {end_str}")
+        # ⚠️ 2026-09-01 时区修复: 同 _do_fetch_one, BMS 前端 Vue DatePicker 按浏览器时区(容器UTC)
+        #   解析输入字符串 → 填"北京时间字符串"会被当 UTC → 数据只到当前UTC(=北京-8h) → 稳定8h滞后。
+        #   默认转 UTC 填入(fill_utc 可从 config 覆盖)。
+        _time_format = config.get("time_format", "%Y-%m-%d %H:%M:%S")
+        _fill_utc = bool(config.get("time_fill_utc", _BMS_FILL_TZ_UTC_DEFAULT))
+        start_str = _bms_time_str(start_date, _time_format, fill_utc=_fill_utc)
+        end_str = _bms_time_str(end_date, _time_format, fill_utc=_fill_utc)
+        logger.info(f"[{data_type}] 设置时间范围: {start_str} ~ {end_str} (fill_utc={_fill_utc})")
 
         time_labels = config.get("time_labels")
         if time_labels and len(time_labels) >= 2:
@@ -3217,7 +3338,7 @@ class BmsFetcher:
         # P1-1: 调用统一的 _download_with_retry (自动按 data_type 配置超时 + 重试)
         #       - wallet: 600s + 2次重试 (数据量大,经常超时)
         #       - refund/ticket: 180s + 1次重试
-        download = await _download_with_retry(page, data_type, logger)
+        download = await _download_with_retry(page, data_type, logger, expect_end_dt=end_date)
 
         # 6. 保存
         original_filename = download.suggested_filename or f"{data_type}_export.csv"
