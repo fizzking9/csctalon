@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 # 导致按北京显示时偏后 8 小时。这里把 naive 视为北京时间,转 UTC 后再存。
 _TZ_CN = timezone(timedelta(hours=8))
 
+
+def _op_str(d: datetime) -> str:
+    """wallet 时间窗口校验用: datetime → 可读字符串(UTC 统一打印)"""
+    return d.strftime("%Y-%m-%d %H:%M:%S") if getattr(d, "tzinfo", None) else str(d)
+
+
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
 from app.models.device import Device, DeviceTag, DeviceTagBinding
@@ -678,6 +684,22 @@ def upsert_wallet(df: pd.DataFrame, mapping: dict[str, str], db: Session, result
     if dup_in_batch > 0:
         logger.info(f"[wallet] 同批次内去重: {len(rows)} → {len(unique_rows)} 行 (移除 {dup_in_batch} 条重复)")
 
+    # ⚠️ 2026-09-01 审计建议3: 时间窗口二次校验(仅监控,不阻断)。
+    #   BMS 页面时间窗口设置失败时, 拉回的 op_time 会落在"默认近一周/上次范围",
+    #   而非期望的 [start,end] 窗口 —— 生产 09-01 14:05 轮: 同步窗口应为 00:00~14:05,
+    #   实际拉回却大多落在前一天深夜~凌晨。这里输出实际 op_time 分布,
+    #   便于运维对照同步日志里的"设置时间范围"判断窗口是否真的生效。
+    #   (op_time 在 upsert_wallet 中已做北京时间→UTC 转换, 这里统一按 UTC 打印)
+    _op_times = [r["op_time"] for r in unique_rows if r.get("op_time") is not None]
+    if _op_times:
+        _op_min, _op_max = min(_op_times), max(_op_times)
+        logger.info(
+            "[wallet] 实际入库 %d 行 op_time 范围: %s ~ %s",
+            len(unique_rows),
+            _op_str(_op_min),
+            _op_str(_op_max),
+        )
+
     _sync_devices(unique_rows, "device_sn", db)
 
     # 2. 查询已存在记录数(精确统计)
@@ -706,7 +728,22 @@ def upsert_wallet(df: pd.DataFrame, mapping: dict[str, str], db: Session, result
         .on_conflict_do_nothing(constraint="uq_wallet_withdrawals_business")
     )
     db.flush()
-    result.inserted += len(unique_rows) - existing_count
+    # ⚠️ 2026-09-01 审计修复: 原 result.inserted += len(unique_rows) - existing_count
+    #   在「BMS 页面时间窗口未设置成功、拉到大量已存在旧流水」时(existing_count > unique_rows),
+    #   会产生负数"新增"(生产日志 -4885/-587/-515/-153/-15)。
+    #   这里:
+    #     a) inserted 不为负(统计口径真实 = 本次实际新增条数)
+    #     b) 负数即告警: 提示"本轮拉到大量已存在旧数据, 疑似 BMS 时间窗口未设置成功"
+    #        (窗口失败 → 拉到默认近一周 → 大多是已入库旧流水 → 便于早发现早修复)
+    net_inserted = len(unique_rows) - existing_count
+    if net_inserted < 0:
+        logger.warning(
+            "[wallet] 疑似时间窗口未设置成功: 本轮拉回 %d 行中 %d 行已存在于库内"
+            " (净新增 %d<0)。BMS 页面可能保留了默认/上次时间范围, 建议检查该轮"
+            " '设置时间范围' 日志与导出行 op_time 分布。",
+            len(unique_rows), existing_count, net_inserted,
+        )
+    result.inserted += max(net_inserted, 0)
 
 
 def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:

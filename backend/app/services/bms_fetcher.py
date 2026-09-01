@@ -354,6 +354,11 @@ async def _download_with_retry(
 
             # ★ 监听 export 响应:如果返回 JSON(限流),提前抛错触发重试
             export_rate_limited = {"hit": False, "msg": ""}
+            # ⚠️ 2026-09-01 审计 P2-1: 追踪后台 _read_body 任务,
+            #   避免页面/上下文关闭后 "Task exception was never retrieved" 泄漏
+            #   (生产 08-28 出现 2 次)。create_task 的后台协程若在页面关闭后
+            #   被取消/抛 TargetClosedError, 无人消费其异常 → asyncio 报错。
+            _body_tasks: list[asyncio.Task] = []
 
             def _on_response(resp):
                 try:
@@ -368,8 +373,14 @@ async def _download_with_retry(
                                     export_rate_limited["msg"] = body[:200]
                                 except Exception:
                                     export_rate_limited["msg"] = "(body 读取失败)"
-                            # 用 create_task 挂后台,避免同步回调里直接 await 协程
-                            asyncio.create_task(_read_body())
+                            # 用 create_task 挂后台,避免同步回调里直接 await 协程;
+                            # 记录到 _body_tasks,结束时统一消费/取消,防止任务异常泄漏
+                            try:
+                                _t = asyncio.create_task(_read_body())
+                                _body_tasks.append(_t)
+                                _t.add_done_callback(lambda fut: _body_tasks.remove(fut) if fut in _body_tasks else None)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
             page.on("response", _on_response)
@@ -455,6 +466,15 @@ async def _download_with_retry(
             #    shield 不会随外层协程取消而停止: 若外层被取消/页面关闭, 残留 task 会
             #    一直运行到页面关闭抛异常且无人 retrieve → "Task exception was never retrieved"。
             _drain_task(download_task)
+            # ⚠️ 2026-09-01 审计 P2-1: 一并清理 _read_body 后台任务(消费结果/取消),
+            #   避免页面关闭后它们抛 TargetClosedError 无人 retrieve。
+            for _bt in list(_body_tasks):
+                try:
+                    if not _bt.done():
+                        _bt.cancel()
+                except Exception:
+                    pass
+            _body_tasks.clear()
 
     # 所有重试都用完了 → 把最后一次异常抛出去
     raise RuntimeError(
@@ -1882,9 +1902,21 @@ class BmsFetcher:
             if filled:
                 return
         # 最后兜底: evaluate 直接找 range
+        # ⚠️ 2026-09-01 审计修复: 原 querySelectorAll('input.el-range-input:visible, ...')
+        #   ':visible' 是 jQuery 伪类, 原生 querySelectorAll 不识别 → 直接抛 SyntaxError,
+        #   导致 wallet 12:05/15:05 轮次抓取中断、窗口回退默认范围 → 负数新增。
+        #   改为: 先按类名选中, 再用 JS 过滤可见性(rect + computedStyle)。
         await page.evaluate(f"""
             () => {{
-                const inputs = document.querySelectorAll('input.el-range-input:visible, .el-date-editor input:visible');
+                const isVisible = (el) => {{
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0
+                        && style.visibility !== 'hidden' && style.display !== 'none';
+                }};
+                const inputs = Array.from(
+                    document.querySelectorAll('input.el-range-input, .el-date-editor input')
+                ).filter(isVisible);
                 if (inputs.length >= 2) {{
                     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
                     setter.call(inputs[0], '{start_str}');
