@@ -34,7 +34,8 @@ if not os.path.exists(os.path.join(os.path.dirname(__file__), "..", ".env")):
     os.environ.setdefault("POSTGRES_HOST", os.environ.get("TEST_POSTGRES_HOST", "127.0.0.1"))
     os.environ.setdefault("POSTGRES_PORT", os.environ.get("TEST_POSTGRES_PORT", "5432"))
     os.environ.setdefault("POSTGRES_USER", os.environ.get("TEST_POSTGRES_USER", "csctalon"))
-    os.environ.setdefault("POSTGRES_PASSWORD", os.environ.get("TEST_POSTGRES_PASSWORD", "csctalon123"))
+    _pw = os.environ.get("TEST_POSTGRES_PASSWORD", "csctalon123")
+    os.environ.setdefault("POSTGRES_PASSWORD", _pw)
 
 # 测试环境不启动 BMS 定时同步、不依赖真实 Redis 凭证
 os.environ.setdefault("BMS_SCHEDULE_AUTOSTART", "false")

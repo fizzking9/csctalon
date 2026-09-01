@@ -135,12 +135,44 @@ csctalon/
 │   ├── API接口文档.md              # 50+ 路由端点
 │   ├── 数据库表结构说明.md          # 86 张表
 │   ├── alembic-migration管理规范.md # 迁移管理
+│   ├── arch/                      # 已锁定架构文档 + _pending/ 待审核
+│   ├── standards/                 # 规范(error-code/review-checklist/派工单)
 │   └── debug/                     # 调试文档归档
 ├── data/                          # Docker 数据卷 (gitignore)
 ├── logs/                          # 运行时日志 (gitignore)
 ├── .env.example                   # 环境变量模板
+├── AGENTS.md                      # AI 全局行为约束(Copilot 自动加载)
+├── .github/agents/                # 三阶段自定义 Agent(架构师/开发者/审查员)
+├── .gitea/workflows/              # CI(gitleaks + backend-test)
 ├── docker-compose.yml             # 4 个服务编排
 └── README.md                      # 本文件
+```
+
+## AI 协作治理规范
+
+> 本仓库已落地「AI 协作治理体系」(上下文资产化 + 三阶段角色 + 机器验证), 详见 [docs/arch/README.md](docs/arch/README.md) 与 [docs/standards/task-work-order.md](docs/standards/task-work-order.md)。
+
+| 组成 | 位置 | 说明 |
+|---|---|---|
+| 全局约束 | [AGENTS.md](AGENTS.md) | AI 行为铁律(禁止 console.log/拼接SQL/硬编码密钥等), 自动加载 |
+| 三阶段 Agent | `.github/agents/` | 架构师(只设计) / 开发者(实现) / 审查员(只审查) |
+| 架构锁定 | `docs/arch/` | 已锁定架构文档 + `_pending/` 待人工审核 |
+| 规范 | `docs/standards/` | 错误码 / 审查清单 / 任务派工单模板 |
+| 测试 | `backend/tests/` | pytest 基建, 独立 `csctalon_test` 库, 隔离开发/生产 |
+| CI | `.gitea/workflows/` | gitleaks 凭证扫描 + backend-test(ruff + pytest 强制) |
+
+**协作流程**: 需求 → 架构师出设计 → 人工锁定(`docs/arch/` + git tag) → 开发者实现 → 审查员审查 → 人工终审合并。测试与 lint 由 CI 机器验证, 不依赖 AI 口头声称。
+
+## 运行测试
+
+```bash
+cd backend
+# 依赖 dev 扩展(含 pytest/ruff)
+pip install -e ".[dev]"
+# 运行全部测试(需本地 PG 可达, 自动使用独立 csctalon_test 库)
+pytest
+# 静态检查
+ruff check app/ tests/
 ```
 
 ## 核心功能模块
@@ -178,7 +210,7 @@ csctalon/
 | 文档 | 说明 |
 |---|---|
 | [规划设计.md](docs/规划设计.md) | 系统架构、模块设计、技术路线 |
-| [运营指标阈值化与预警通知设计.md](.trae/documents/metric-alerting-notification-design.md) | 指标注册表/四级阈值/预警引擎/通知通道设计与实施状态 |
+| [运营指标阈值化与预警通知设计.md](docs/arch/_pending/metric-alerting-notification-design.md) | 指标注册表/四级阈值/预警引擎/通知通道设计与实施状态 |
 | [数据同步与加工说明.md](docs/数据同步与加工说明.md) | BMS/SCRM 数据采集与清洗链路 |
 | [人均效率算法说明.md](docs/人均效率算法说明.md) | 工作量分/效率分计算、6专项系数、SN去重 |
 | [Group-Specialty双体系设计.md](docs/Group-Specialty双体系设计.md) | 行政分组与业务专项双维度模型 |
