@@ -18,6 +18,14 @@
 | git tag | 锁定后打 `arch/A-YYYYMMDD-序号` 标签 |
 | 修改 | 人工审核 → 更新文件 → 版本号 +1 → 重新打 tag |
 
+## 子目录：`_pending/`（待审核设计文档）
+
+`docs/arch/_pending/` 存放**已迁移但未经架构锁定流程**的历史设计文档（原 `.trae/documents/`，20 份）。
+
+- **状态**：`PENDING`（待人工审核），**不是 LOCKED**
+- **规则**：AI 可阅读参考，但**不得视为已锁定架构**；开发前若引用其中设计，须先经人工审核确认
+- **迁移**：审核通过后按 `A-YYYYMMDD-序号-简述.md` 重命名、标注 `状态: LOCKED` 并移到 `docs/arch/` 根目录、打 `arch/` tag
+
 ## 文档模板
 
 ```markdown
