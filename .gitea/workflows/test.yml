@@ -44,6 +44,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install system libs
+        # pyzbar 依赖系统库 libzbar0(与 backend/Dockerfile 的 apt install 对齐)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libzbar0
+
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -56,6 +62,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          # 不安装 playwright 浏览器二进制(测试不需要浏览器, 仅 import app 链)
 
       - name: Lint (ruff, 仅测试代码)
         # 说明: 既有 app/ 存在大量历史 lint 债(2499 项, 如 analytics.py 525 项),
