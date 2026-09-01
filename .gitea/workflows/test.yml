@@ -1,0 +1,71 @@
+# Gitea Actions: 后端 lint + 测试
+# 目的: 落实"AI 协作治理规范" 4.1 铁律 4(不可信原则)——
+#   AI 声称"测试通过"必须经 CI 机器验证, 阻断未过 lint/测试的合并。
+# 在 push / PR 时运行 ruff 静态检查 + pytest(独立 postgres 测试库)。
+
+name: backend-test
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    # 为测试提供独立 PostgreSQL 服务(密码仅 CI 内部使用, 非生产凭证)
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: csctalon
+          POSTGRES_PASSWORD: csctalon123
+          POSTGRES_DB: csctalon_test
+        ports:
+          - 5432:5432
+        # 等待 PG 就绪
+        options: >-
+          --health-cmd "pg_isready -U csctalon"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('backend/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install backend + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check app/ tests/
+
+      - name: Run tests (pytest)
+        env:
+          # 连接 CI 提供的 postgres 服务(host=postgres 为 service 容器名)
+          TEST_POSTGRES_HOST: postgres
+          TEST_POSTGRES_PORT: "5432"
+          TEST_POSTGRES_USER: csctalon
+          TEST_POSTGRES_PASSWORD: csctalon123
+          TEST_POSTGRES_DB: csctalon_test
+        run: pytest

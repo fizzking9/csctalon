@@ -19,11 +19,22 @@ import pytest
 # ---- 在导入 app 之前注入测试环境变量 --------------------------------------
 # 必须放在模块顶层: 任何 `from app.xxx import ...` 之前执行。
 #
-# 设计: 仅强制 ENV=test 与独立测试库名; host/port/user/password 由 settings
-# 从 backend/.env 自动加载(与开发环境同库连接, 但库名隔离), 避免在代码中
-# 硬编码密码(对应 AGENTS.md 绝对禁止第 3 条)。
+# 设计(三态):
+# 1. 本地开发(backend/.env 存在): 仅强制 ENV=test + 独立测试库名, host/user/
+#    password 由 settings 从 backend/.env 自动加载(与开发库同连接, 库名隔离)。
+# 2. CI / 无 .env 场景: 通过 TEST_POSTGRES_* 环境变量注入完整连接参数
+#    (CI 工作流自行提供 postgres 服务, 见 .gitea/workflows/test.yml)。
+# 3. 绝不硬编码密码在仓库(对应 AGENTS.md 绝对禁止第 3 条)。
 os.environ.setdefault("ENV", "test")
 os.environ.setdefault("POSTGRES_DB", os.environ.get("TEST_POSTGRES_DB", "csctalon_test"))
+
+# 仅当 backend/.env 不存在时, 才用 TEST_POSTGRES_* / 默认值注入完整连接参数;
+# 否则让 settings 优先读取 .env 的真实连接(避免环境变量遮蔽 .env 密码)。
+if not os.path.exists(os.path.join(os.path.dirname(__file__), "..", ".env")):
+    os.environ.setdefault("POSTGRES_HOST", os.environ.get("TEST_POSTGRES_HOST", "127.0.0.1"))
+    os.environ.setdefault("POSTGRES_PORT", os.environ.get("TEST_POSTGRES_PORT", "5432"))
+    os.environ.setdefault("POSTGRES_USER", os.environ.get("TEST_POSTGRES_USER", "csctalon"))
+    os.environ.setdefault("POSTGRES_PASSWORD", os.environ.get("TEST_POSTGRES_PASSWORD", "csctalon123"))
 
 # 测试环境不启动 BMS 定时同步、不依赖真实 Redis 凭证
 os.environ.setdefault("BMS_SCHEDULE_AUTOSTART", "false")
