@@ -1,6 +1,6 @@
 """投诉统计路由(规划设计 §4.6 三源统一统计)
 
-三源: 内部投诉(service_tickets) / 商户号投诉(service_tickets微信 + card_complaints卡商群) / 外部投诉(service_tickets平台 + external_complaints)。
+三源: 内部投诉(service_tickets商品/服务投诉) / 商户号投诉(service_tickets微信投诉) / 外部投诉(service_tickets平台类 + external_complaints + card_complaints卡商群)。
 复用 analytics 服务的口径 helper, 保证与既有看板一致。
 """
 
@@ -302,12 +302,14 @@ def complaint_summary(
 
     口径说明(需求变更):
     - 三大分类(内部/商户号/外部)的 **总数/分类分布/处理人分布/趋势** 四要素
-      全部以 service_tickets(工单) 为唯一主数据来源。
+      以 service_tickets(工单) 为唯一主数据来源。
       这是运营实际考核与追踪的"主台账"。
-    - card_complaints(卡商群) / external_complaints(监督局-315) 仅作为
-      "前期参考补充"——帮助识别"可能还没落成工单、因此工单口径里暂时缺失"
-      的早期投诉线索。它们在返回值中单独位于 merchant.supplementary /
-      external.supplementary 子对象,绝不合并入主口径。
+    - card_complaints(卡商群) / external_complaints(监督局-315) 两张补充表
+      作为"前期参考补充"——帮助识别"可能还没落成工单、因此工单口径里暂时缺失"
+      的早期投诉线索。它们在返回值中单独位于 supplementary.external /
+      supplementary.card 子对象(不合并进 by_category/by_handler),但**计数上
+      计入对应三源桶**(315与卡商均→外部投诉, 2026-09-01 用户确认口径)。
+      三源总数/趋势 = 工单 + 补充表(已关联本范围工单的按 matched 去重)。
     """
     ts = _parse_dt(start)
     te = _parse_dt_end(end)
@@ -366,7 +368,7 @@ def complaint_summary(
         .order_by(_day_trunc(ServiceTicket.register_time))
     ).all()
 
-    # ---- 商户号投诉 (主: service_tickets 微信类工单; 参考补充: card_complaints 卡商群) ----
+    # ---- 商户号投诉 (主: service_tickets 微信类工单) ----
     merchant_ticket_total = db.scalar(_tk_where(select(func.count())).where(src_expr == "商户号投诉")) or 0
     merchant_by_cat = db.execute(
         _tk_where(select(ServiceTicket.service_item, func.count()).where(src_expr == "商户号投诉"))
@@ -429,7 +431,7 @@ def complaint_summary(
     }
 
     # ---- 三源总数合并补充表(去重) ----
-    # 补充表(workbuddy推送)是对应主台账的更详细描述: 315→外部投诉工单, 卡商→商户号投诉(微信)工单。
+    # 补充表(workbuddy推送)是对应主台账的更详细描述: 315→外部投诉工单, 卡商→外部投诉工单。
     # 合并口径: 补充记录若已关联到"本统计范围内"的工单(matched_ticket_no 对应工单的
     # register_time 或真实 finish_time 在范围内), 视为与工单同一条(去重), 不计入补充部分;
     # 未落工单的补充记录计入对应来源总数。
@@ -462,17 +464,17 @@ def complaint_summary(
             or 0
         )
 
-    external_total = int(external_ticket_total) + supplementary["external"]["total"] - _overlap_suppl(ExternalComplaint, "外部投诉")
-    merchant_total = int(merchant_ticket_total) + supplementary["card"]["total"] - _overlap_suppl(CardComplaint, "商户号投诉")
+    external_total = int(external_ticket_total) + supplementary["external"]["total"] - _overlap_suppl(ExternalComplaint, "外部投诉") + supplementary["card"]["total"] - _overlap_suppl(CardComplaint, "外部投诉")
+    merchant_total = int(merchant_ticket_total)
 
     # ---- 三源趋势合并补充表(逐日去重) ----
     # 趋势与总数同口径: 工单按日计数 + 补充表按投诉日期 (total - overlap)。
     # overlap = 当日已关联到本范围内工单的补充记录(工单已计入, 去重)。
     # 使「推送了但未落工单」的外部/卡商投诉也能在趋势里按投诉日期体现。
     external_suppl_trend = _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te)
-    card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "商户号投诉", ts, te)
-    external_trend_merged = _merge_trend(external_trend, external_suppl_trend)
-    merchant_trend_merged = _merge_trend(merchant_trend, card_suppl_trend)
+    card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "外部投诉", ts, te)
+    external_trend_merged = _merge_trend(_merge_trend(external_trend, external_suppl_trend), card_suppl_trend)
+    merchant_trend_merged = _merge_trend(merchant_trend, [])
     internal_trend_merged = _merge_trend(internal_trend, [])  # 内部投诉无补充表
 
     def _handler_rows(rows):
@@ -721,9 +723,9 @@ def complaint_detail(
                             continue
                         rec["supplementary"].append(suppl_item)
                     continue
-                # 未关联工单(或SN为空) → 独立行, 归入对应三源口径(315→外部投诉, 卡商→商户号投诉)
+                # 未关联工单(或SN为空) → 独立行, 归入对应三源口径(315→外部投诉, 卡商→外部投诉)
                 is_315 = source_name == "315外部投诉"
-                main_source = "外部投诉" if is_315 else "商户号投诉"
+                main_source = "外部投诉"
                 extra_rows.append({
                     "source": main_source,
                     "source_role": "supplementary",
@@ -731,9 +733,9 @@ def complaint_detail(
                     "no": suppl_item["complaint_no"] or suppl_item["matched_ticket_no"],
                     "device_sn": sn,
                     # 分类: 315表=平台(全国12315平台/公共服务平台等, 属外部投诉) /
-                    #      卡商表=投诉群名无分类意义(群/主体名, 如"小皮丘&深圳联通"), 统一归入商户号投诉子类「微信投诉」
-                    #      避免明细/看板分类筛选出现主体群名(2026-08-25)
-                    "category": getattr(c, "platform", None) if is_315 else "微信投诉",
+                    #      卡商表=投诉群名无分类意义(群/主体名, 如"小皮丘&深圳联通"), 统一归入外部投诉子类「卡商群投诉」
+                    #      避免明细/看板分类筛选出现主体群名
+                    "category": getattr(c, "platform", None) if is_315 else "卡商群投诉",
                     "problem": c.problem,
                     "handler": _norm_handler(suppl_item["handler"]),
                     "entity": entity,
@@ -1554,12 +1556,12 @@ def complaint_analysis(
 
     # 补充表趋势(按日, 含 overlap)供总数与趋势共用同一去重口径
     _ext_suppl_trend = _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te)
-    _card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "商户号投诉", ts, te)
+    _card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "外部投诉", ts, te)
     # 补充表净计入总数 = total - overlap (overlap 已关联本范围内工单 → 工单已计入, 去重)
     _ext_suppl_net = sum(int(r["total"] or 0) - int(r["overlap"] or 0) for r in _ext_suppl_trend)
     _card_suppl_net = sum(int(r["total"] or 0) - int(r["overlap"] or 0) for r in _card_suppl_trend)
-    merchant_total = int(merchant_ticket_total) + _card_suppl_net
-    external_total = int(external_ticket_total) + _ext_suppl_net
+    merchant_total = int(merchant_ticket_total)
+    external_total = int(external_ticket_total) + _ext_suppl_net + _card_suppl_net
 
     # 积压: 窗口内登记的未完成(跟随 start/end, 默认近30天; 不再无限累积历史遗留)
     _done_set = {"已结案", "已完成", "完成", "已解决", "已回复", "已反馈", "已关闭", "终止", "已终止"}
@@ -1605,7 +1607,7 @@ def complaint_analysis(
     ).scalar()
     avg_handle_hours = round(float(avg_handle_row), 1) if avg_handle_row else 0
 
-    # ── 2. 来源分布 ──
+    # ── 2. 来源分布 (工单三源 + 补充表并入外部桶, 与 /summary 同口径) ──
     source_dist = db.execute(
         _action_filter(
             _tk_base().with_only_columns(src_expr, func.count())
@@ -1617,6 +1619,16 @@ def complaint_analysis(
         {"name": r[0] or "内部投诉", "count": int(r[1] or 0)}
         for r in source_dist
     ]
+    # 补充表(315外部投诉/卡商群投诉)未关联范围内工单的净记录并入外部桶(去重口径与 /summary 一致)
+    _suppl_net_external = _ext_suppl_net + _card_suppl_net
+    if _suppl_net_external:
+        found_ext = False
+        for x in source_distribution:
+            if x["name"] == "外部投诉":
+                x["count"] += _suppl_net_external; found_ext = True; break
+        if not found_ext:
+            source_distribution.append({"name": "外部投诉", "count": _suppl_net_external})
+        source_distribution.sort(key=lambda x: -x["count"])
 
     # ── 3. 趋势(按日, 三源堆叠) ──
     day_trunc = func.date_trunc("day", func.timezone("Asia/Shanghai", ServiceTicket.register_time))
@@ -1638,7 +1650,7 @@ def complaint_analysis(
         trend_map[day][src] = trend_map[day].get(src, 0) + cnt
 
     # 三源趋势并入补充表(workbuddy推送, 与 /summary 同口径逐日去重):
-    #   external_complaints(315) → 外部投诉;  card_complaints(卡商) → 商户号投诉。
+    #   external_complaints(315) → 外部投诉;  card_complaints(卡商) → 外部投诉。
     #   补充记录若已关联到本范围内工单(overlap) → 工单已计入, 去重; 否则按投诉日期计入。
     #   解决「推送了有数据、但趋势当天没数据」(推送记录未落工单/日期错位)。
     for r in _ext_suppl_trend:
@@ -1650,7 +1662,7 @@ def complaint_analysis(
         net = int(r["total"] or 0) - int(r["overlap"] or 0)
         if net:
             b = trend_map.setdefault(r["day"], {})
-            b["商户号投诉"] = b.get("商户号投诉", 0) + net
+            b["外部投诉"] = b.get("外部投诉", 0) + net
 
     trend = [
         {

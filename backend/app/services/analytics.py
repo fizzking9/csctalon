@@ -874,13 +874,15 @@ def _ticket_category_case(
 ):
     # item 命中外部投诉关键词 → 强制归为"投诉"
     item_whens = [func.coalesce(item_col, literal("")).ilike(f"%{k}%") for k in _EXTERNAL_ITEM_COMPLAINT_KW]
-    # item 命中内部投诉关键词 → 归为"投诉"
-    internal_kws = ("商品投诉", "服务投诉", "微信投诉")
-    internal_whens = [func.coalesce(item_col, literal("")).ilike(f"%{k}%") for k in internal_kws]
+    # item 命中投诉类关键词(商品/服务/微信投诉) → 归为"投诉"
+    # 注意: 这里仅判定"是否属于投诉"(service_category 兜底), 不是三源分桶。
+    #       "微信投诉"在三源归类中归「商户号投诉」(见 _complaint_source_type_case)。
+    complaint_item_kws = ("商品投诉", "服务投诉", "微信投诉")
+    complaint_item_whens = [func.coalesce(item_col, literal("")).ilike(f"%{k}%") for k in complaint_item_kws]
     return case(
         (col.is_(None), "投诉"),
         (col.ilike("%投诉%"), "投诉"),
-        (or_(*(item_whens + internal_whens)), "投诉"),
+        (or_(*(item_whens + complaint_item_whens)), "投诉"),
         else_=col,
     ).label("ticket_category")
 
@@ -3430,7 +3432,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         {"name": r[0] or "内部投诉", "value": int(r[1] or 0)}
         for r in comp_src_rows
     ]
-    # 外部投诉平台(ExternalComplaint) 归入外部桶; CardComplaint=卡商群投诉 归入内部桶
+    # 外部投诉平台(ExternalComplaint) 归入外部桶; CardComplaint=卡商群投诉 归入外部桶
     if _cnt_ec > 0:
         found_outer = False
         for x in complaint_by_source:
@@ -3439,13 +3441,13 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         if not found_outer:
             complaint_by_source.append({"name": "外部投诉", "value": int(_cnt_ec)})
     if _cnt_cc > 0:
-        # 卡商群投诉 = 内部投诉
-        found_inner = False
+        # 卡商群投诉 = 外部投诉
+        found_outer = False
         for x in complaint_by_source:
-            if x["name"] == "内部投诉":
-                x["value"] += int(_cnt_cc); found_inner = True; break
-        if not found_inner:
-            complaint_by_source.append({"name": "内部投诉", "value": int(_cnt_cc)})
+            if x["name"] == "外部投诉":
+                x["value"] += int(_cnt_cc); found_outer = True; break
+        if not found_outer:
+            complaint_by_source.append({"name": "外部投诉", "value": int(_cnt_cc)})
     # 补齐"内部投诉""外部投诉"两个桶,缺失补0 (前端颜色固定)
     _src_present = {x["name"] for x in complaint_by_source}
     for nm in ("外部投诉", "内部投诉"):

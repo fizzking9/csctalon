@@ -377,22 +377,20 @@
             <span class="collapse-title">投诉明细（{{ complaintFilteredList.length }}/{{ complaintList.length }} 条）</span>
           </template>
           <div class="sn-filter-bar">
-            <el-select v-model="complaintFilterCategory" placeholder="分类" size="small" clearable filterable style="width:130px;margin-right:6px">
-              <el-option v-for="c in complaintCategoryOptions" :key="c" :label="c" :value="c" />
+            <el-select v-model="complaintFilterSource" placeholder="来源" size="small" clearable filterable style="width:140px;margin-right:6px">
+              <el-option v-for="s in COMPLAINT_SOURCE_OPTIONS" :key="s" :label="s" :value="s" />
             </el-select>
-            <el-select v-model="complaintFilterStatus" placeholder="状态" size="small" clearable filterable style="width:120px">
-              <el-option v-for="s in complaintStatusOptions" :key="s" :label="s" :value="s" />
-            </el-select>
+            <span class="sn-filter-hint">分类/状态可在表格列头筛选排序</span>
           </div>
           <el-table :data="complaintFilteredList" size="small" border stripe max-height="360">
-            <el-table-column label="登记时间" width="88">
+            <el-table-column label="登记时间" width="88" sortable :sort-method="(a,b)=>sortTimeStr(a.register_time||a.time||'', b.register_time||b.time||'')">
               <template #default="{ row }">
                 <span>{{ formatShortTime(row.register_time || row.time) }}</span>
                 <div v-if="row.finish_time && row.register_time && row.register_time.slice(0,10) !== row.finish_time.slice(0,10)"
                      class="text-muted" style="font-size:10px;line-height:1">历史单</div>
               </template>
             </el-table-column>
-            <el-table-column label="完成时间" width="88">
+            <el-table-column label="完成时间" width="88" sortable :sort-method="(a,b)=>sortTimeStr(a.finish_time||a.suppl_finish_time||'', b.finish_time||b.suppl_finish_time||'')">
               <template #default="{ row }">
                 <span v-if="row.finish_time">{{ formatShortTime(row.finish_time) }}</span>
                 <template v-else-if="row.suppl_finish_time">
@@ -408,15 +406,26 @@
                 <span v-else class="text-muted">—</span>
               </template>
             </el-table-column>
-            <el-table-column label="结果/状态" width="80" align="center">
+            <el-table-column label="结果/状态" width="90" align="center" sortable
+              :filters="complaintStatusColumnFilters"
+              :filter-method="(v,row)=>row.status===v" filter-placement="bottom-end">
               <template #default="{ row }">
                 <el-tag :type="complaintStatusType(row.status)" size="small">{{ row.status || '—' }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="分类" width="110" show-overflow-tooltip>
+            <el-table-column label="来源" width="92" align="center"
+              :filters="complaintSourceColumnFilters"
+              :filter-method="(v,row)=>row.source===v" filter-placement="bottom-end">
               <template #default="{ row }">
-                <el-tag :type="complaintSourceType(row.source)" size="small" effect="plain" style="margin-right:2px">{{ row.source }}</el-tag>
-                <span v-if="row.category && row.category !== row.source" class="text-muted" style="font-size:11px">{{ row.category }}</span>
+                <el-tag :type="complaintSourceType(row.source)" size="small" effect="plain">{{ row.source }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="分类" width="100" show-overflow-tooltip sortable
+              :filters="complaintCategoryColumnFilters"
+              :filter-method="(v,row)=>row.category===v" filter-placement="bottom-end">
+              <template #default="{ row }">
+                <span v-if="row.category">{{ row.category }}</span>
+                <span v-else class="text-muted">—</span>
               </template>
             </el-table-column>
             <el-table-column label="投诉内容" min-width="180" show-overflow-tooltip>
@@ -638,9 +647,9 @@ const recoveryCollapseActive = ref([])
 const refundFilterResult = ref('')
 const refundFilterHandler = ref('')
 const refundFilterReason = ref('')
-// 投诉筛选
-const complaintFilterCategory = ref('')
-const complaintFilterStatus = ref('')
+// 投诉筛选: 明细区仅按来源(三源)筛选; 分类/状态等筛选排序移到表格列头
+const COMPLAINT_SOURCE_OPTIONS = ['内部投诉', '商户号投诉', '外部投诉']
+const complaintFilterSource = ref('')
 
 // 当前政策 (静态配置，后续可从接口获取)
 const currentPolicies = ref([
@@ -760,24 +769,33 @@ const complaintCategoryOption = computed(() => {
   }
 })
 
-// 投诉筛选选项
-const complaintCategoryOptions = computed(() => {
-  const set = new Set()
-  complaintList.value.forEach(d => { if (d.category) set.add(d.category) })
-  return Array.from(set).sort()
+// 明细表列头筛选选项(来源/分类/状态, el-table :filters 需要 {text,value})
+const complaintSourceColumnFilters = computed(() => {
+  const set = new Set(complaintList.value.map(r => r.source).filter(Boolean))
+  return [...set].map(v => ({ text: v, value: v }))
 })
-const complaintStatusOptions = computed(() => {
-  const set = new Set()
-  complaintList.value.forEach(d => { if (d.status) set.add(d.status) })
-  return Array.from(set).sort()
+const complaintCategoryColumnFilters = computed(() => {
+  const set = new Set(complaintList.value.map(r => r.category).filter(Boolean))
+  return [...set].map(v => ({ text: v, value: v }))
 })
+const complaintStatusColumnFilters = computed(() => {
+  const set = new Set(complaintList.value.map(r => r.status).filter(Boolean))
+  return [...set].map(v => ({ text: v, value: v }))
+})
+
+// 明细区仅按来源(三源)筛选; 分类/状态筛选与排序在表格列头
 const complaintFilteredList = computed(() => {
-  return complaintList.value.filter(d => {
-    if (complaintFilterCategory.value && d.category !== complaintFilterCategory.value) return false
-    if (complaintFilterStatus.value && d.status !== complaintFilterStatus.value) return false
-    return true
-  })
+  if (!complaintFilterSource.value) return complaintList.value
+  return complaintList.value.filter(d => d.source === complaintFilterSource.value)
 })
+
+// 时间字符串排序(ISO), 空值排后(供表格列 sort-method)
+function sortTimeStr(a, b) {
+  const va = a || ''
+  const vb = b || ''
+  if (va === vb) return 0
+  return va < vb ? -1 : 1
+}
 
 // 补充数据源汇总文本(315/卡商, workbuddy推送)
 const supplExternal = computed(() => complaintSummaryData.value?.supplementary?.external || { total: 0, matched: 0 })
@@ -1861,6 +1879,11 @@ onBeforeUnmount(() => {
   padding: 6px 0 8px;
   gap: 4px;
   flex-wrap: wrap;
+}
+.sn-filter-hint {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-left: 2px;
 }
 
 /* 窄屏自适应 */
