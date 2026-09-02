@@ -221,7 +221,6 @@ class SyncTaskManager:
         result: dict[str, tuple[datetime, datetime, str, str]] = {}
         for dt in data_types:
             last = _get_last_sync_time(db_session, dt)  # naive or aware
-            last_cn: datetime
             if last is None:
                 start = today_start
                 note = "首次同步/今日无记录,从00:00开始"
