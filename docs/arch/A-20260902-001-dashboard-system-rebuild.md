@@ -1,5 +1,10 @@
 # 看板(Dashboard)体系重构实施方案
 
+**状态**：LOCKED（v1.0）
+**锁定日期**：20260902
+**锁定脚本**：scripts/lock-arch-docs.sh
+
+
 ## Context
 
 产品已确立三层架构：**数据源 → 视图 → 看板**。视图层（AnalysisView + execute_view 引擎）已成熟，24 个预设视图已 seed 覆盖运营/现金流/退款分类/人员操作/客服接待/投诉专项 6 组。但"看板层"缺失：现有 4 个决策看板是硬编码页面（Operation/Cash/Category/Operator），调用 [DEPRECATED] 的 analytics 旧 API，无法配置、无权限分层、与视图引擎脱节。
