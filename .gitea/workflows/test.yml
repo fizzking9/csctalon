@@ -79,11 +79,13 @@ jobs:
           git clone --quiet http://127.0.0.1:3000/tanzk/csctalon.git /workspace/ci-repo
           cd /workspace/ci-repo && git log --oneline -1
 
-      - name: 前端 lint + test (docker node:20)
+      - name: 前端 lint + test (docker node:24)
         run: |
+          # node:24: jsdom 30/undici 8 需要 Node 22+ 的 webidl API(node:20 会报
+          # webidl.util.markAsUncloneable is not a function)
           docker run --rm \
             -v /vol2/@appcenter/gitea-runner/workspace/ci-repo/web:/app -w /app \
-            node:20 bash -c "
+            node:24 bash -c "
               set -e
               echo '== npm ci =='
               npm ci
