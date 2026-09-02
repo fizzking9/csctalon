@@ -110,7 +110,7 @@ def refund_urge_kpi(db: Session, params: dict | None) -> dict:
     - 催单≥3次占比(%)
     """
     T = ServiceTicket
-    now_utc = _dt.now(_tz.utc)
+    _dt.now(_tz.utc)
 
     # total_cnt / avg_wait_h / avg_urge_cnt / urge_ge3_cnt
     # ⚠️ wait_h 直接使用 hours 数值表达式 (epoch_diff / 3600) → 不能再套一层 extract("epoch", ...)

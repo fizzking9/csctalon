@@ -316,7 +316,6 @@ def complaint_summary(
     def _time_filter(reg_col, fin_col):
         """生成时间过滤条件:register_time在范围内 OR finish_time在范围内(真实完成).
         与 complaint_detail 保持一致口径,解决历史工单今日完成不出现在统计里的问题."""
-        conds = []
         reg_c = []
         if ts:
             reg_c.append(reg_col >= ts)

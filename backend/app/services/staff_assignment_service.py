@@ -128,7 +128,7 @@ def update_assignment(
     payload: StaffAssignmentUpdate,
 ) -> StaffAssignment:
     """编辑任职记录非键字段;改 current 的 position/specialty/group_name 会同步镜像
-    
+
     2026-08-14 修正: 不再仅依赖 is_current 标志，改为按 effective_from 判断最近一条任职。
     避免因 is_current 标志异常导致镜像不同步，使运营看板展示过期专项。
     """

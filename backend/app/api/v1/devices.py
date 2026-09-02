@@ -66,8 +66,8 @@ def get_device(sn: str, db: DBSession, _: CurrentUser):
     # 聚合退费单
     refunds = list(db.scalars(select(Refund).where(Refund.device_sn == sn).order_by(Refund.created_at_raw.desc()).limit(50)))
     tickets = list(db.scalars(select(ServiceTicket).where(ServiceTicket.device_sn == sn).order_by(ServiceTicket.register_time.desc()).limit(20)))
-    wallets = list(db.scalars(select(WalletWithdrawal).where(WalletWithdrawal.device_sn == sn).order_by(WalletWithdrawal.op_time.desc()).limit(20)))
-    merchant_refunds = list(db.scalars(select(MerchantRefund).where(MerchantRefund.device_no == sn).order_by(MerchantRefund.trade_time.desc()).limit(20)))
+    list(db.scalars(select(WalletWithdrawal).where(WalletWithdrawal.device_sn == sn).order_by(WalletWithdrawal.op_time.desc()).limit(20)))
+    list(db.scalars(select(MerchantRefund).where(MerchantRefund.device_no == sn).order_by(MerchantRefund.trade_time.desc()).limit(20)))
     return R(
         data={
             "device": {

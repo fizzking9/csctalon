@@ -275,7 +275,7 @@ def preview_rule(db: DBSession, _: CurrentUser, payload: ClassificationRulePrevi
 
     # 查询 distinct target_field 值
     target_col = _get_column(model, payload.target_field)
-    rows = db.execute(
+    db.execute(
         select(target_col).where(target_col.isnot(None)).group_by(target_col).limit(payload.limit)
     ).all()
 

@@ -894,7 +894,6 @@ async def _try_auto_login_via_ocr(
         return False, "验证码自动识别未启用(ddddocr 未加载)"
 
     last_err: str = ""
-    account_password_filled = False  # 第 1 次填过后,后续点击刷新验证码就不用重填账号密码了
     cap_elem = None
 
     # P1-2: 根据 data_type 自动切换验证码识别模式
@@ -921,7 +920,6 @@ async def _try_auto_login_via_ocr(
                 log.warning(f"[{data_type}] {last_err}")
                 continue
             await _fill_accounts(page, username, password)
-            account_password_filled = True
         else:
             # 后续尝试:优先点验证码图片刷新;失败才 reload
             refreshed = await _refresh_captcha_image(page, cap_elem)
@@ -930,7 +928,6 @@ async def _try_auto_login_via_ocr(
                     await page.reload(wait_until="networkidle", timeout=60000)
                     await asyncio.sleep(2)
                     await _fill_accounts(page, username, password)
-                    account_password_filled = True
                 except Exception as e:
                     last_err = f"第{attempt}次: reload 登录页失败: {e}"
                     log.warning(f"[{data_type}] {last_err}")
@@ -950,7 +947,6 @@ async def _try_auto_login_via_ocr(
                     pval = await page.locator(p_sel).first.input_value(timeout=1500)
                     if (not uval) or (not pval):
                         await _fill_accounts(page, username, password)
-                        account_password_filled = True
                     # 验证码输入框:清空之前可能填过但提交失败的旧值
                     try:
                         captcha_inp = page.locator(
@@ -1093,7 +1089,7 @@ async def _try_auto_login_via_ocr(
             log.warning(f"[{data_type}] {last_err}")
             continue
 
-        url_skipped = asyncio.create_task(asyncio.sleep(0))  # placeholder,实际下面覆盖
+        asyncio.create_task(asyncio.sleep(0))  # placeholder,实际下面覆盖
 
         async def _wait_url_jump() -> bool:
             try:
@@ -2612,7 +2608,6 @@ class BmsFetcher:
             #     原问题:闪猫退款前端组件 v-model 可能更新不及时,或用户筛选条件未同步到查询接口,
             #           导致查询结果仍为全量(1976 条),后续导出也必为全量。
             initial_total = None
-            after_total = None
             try:
                 for poll_i in range(20):
                     await asyncio.sleep(1.0 if poll_i < 8 else 0.75)
@@ -2633,7 +2628,6 @@ class BmsFetcher:
                                 if initial_total is None:
                                     initial_total = tn
                                 else:
-                                    after_total = tn
                                     # 若明显减少 (>100 条差距) 或 <100,认为筛选生效
                                     if (initial_total - tn > 100) or (tn < 100):
                                         logger.info(

@@ -324,7 +324,7 @@ def quality_list(db: Session, table: str, status: str = "all",
 def quality_confirm(db: Session, table: str, pk: str | int) -> dict[str, Any]:
     """人工确认通过: quality_status → ok"""
     cfg = get_table_config(table)
-    model = cfg["model"]
+    cfg["model"]
     r = _get_by_pk(db, cfg, pk)
     r.quality_status = "ok"
     r.quality_note = ((r.quality_note or "") + " | 人工确认通过") if r.quality_note else "人工确认通过"

@@ -882,7 +882,6 @@ async def _sync_one_session_type(
         # ── 第 1 轮: OpenAPI ──
         try_openapi = fetch_mode in ("openapi", "dual")
         records: list[dict] | None = None
-        transfers_records: list[dict] | None = None  # 仅 web 模式下 scrm_session_transfers 会用到
         if try_openapi:
             try:
                 async with client:

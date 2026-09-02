@@ -34,7 +34,7 @@ STANDARD_SPECIALTIES = {
 
 class Specialty(IDMixin, TimestampMixin, Base):
     """业务专项 (如: 咨询接待、投诉接待、套餐专项、退款挽回等)
-    
+
     专项是任务分配属性,负责人可能轮岗,支持临时专项。
     一个人同一时间可以分配到多个专项(有主/辅之分)。
     """
@@ -63,7 +63,7 @@ class Specialty(IDMixin, TimestampMixin, Base):
 
 class SpecialtyLeadershipHistory(IDMixin, TimestampMixin, Base):
     """专项负责人变更历史 (SCD Type 2)
-    
+
     记录专项负责人的任免历史,支持轮岗。
     专项负责人轮岗相对频繁,需要完整追溯。
     """
@@ -88,7 +88,7 @@ class SpecialtyLeadershipHistory(IDMixin, TimestampMixin, Base):
 
 class PersonSpecialtyAssignment(IDMixin, TimestampMixin, Base):
     """人员专项分配历史 (SCD Type 2)
-    
+
     记录人员被分配到哪个专项,支持:
     - 一个人同时承担多个专项(主专项+辅助专项)
     - 专项之间轮岗

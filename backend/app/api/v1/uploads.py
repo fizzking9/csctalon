@@ -245,9 +245,9 @@ def _run_post_import_tasks(data_type: str):
         db = SessionLocal()
         try:
             # 触发关联匹配(增量)
-            match_stats = match_all(db, only_unmatched=True)
+            match_all(db, only_unmatched=True)
             # 触发人员别名提取(增量,幂等)
-            person_stats = extract_person_aliases(db)
+            extract_person_aliases(db)
             db.commit()
             # 重建退费宽表(全量,确保源数据更新后宽表同步刷新;失败不阻塞)
             try:

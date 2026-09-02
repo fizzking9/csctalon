@@ -842,9 +842,7 @@ def _touch_ticket_action_logs_after_upsert(
     _DONE_STATUS = {"已完成", "已解决", "已关闭", "无需处理", "已取消", "已撤销"}
 
 
-    from app.models.ticket_action_log import TicketActionLog
 
-    tlog_tbl = TicketActionLog.__table__
 
     # ---------- 每类动作:构造 (ticket_no, action_type, action_at, operator, detail, remark) 的待插集 ----------
     pending: list[dict] = []
@@ -912,7 +910,7 @@ def _touch_ticket_action_logs_after_upsert(
 
     # ---------- 幂等 INSERT:对每条 (ticket_no,action_type,action_at) 先 SELECT, 不存在才插 ----------
     # 用 raw SQL + VALUES 做一整批, 避免 N 次往返
-    sql = text(
+    text(
         """
         INSERT INTO ticket_action_logs
             (ticket_no, action_type, operator, action_at, detail, remark, created_at, updated_at)
@@ -1193,7 +1191,7 @@ def _complaint_identity_hash(rec: dict) -> str:
     2026-08-20 指纹方案重规划(两版迭代):
     - v1 (编号|日期|手机|SN|问题): 编号上游易丢(53%)导致同一投诉拆两条 → 弃用编号
     - v2 (日期|手机|SN): 区分度不足, 同手机+同SN+同日期 不同投诉会误合并 → 加入内容
-    - 现版 (日期|手机|SN|问题归一化): 内容环节解决误合并(实测误合并仅15行), 
+    - 现版 (日期|手机|SN|问题归一化): 内容环节解决误合并(实测误合并仅15行),
       跨文件匹配仍99.8%(问题文本微改不影响), 编号仍不入指纹(丢失免疫)
     """
     d = rec.get("complaint_date")

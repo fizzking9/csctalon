@@ -36,8 +36,8 @@ def list_groups(
             .join(PersonGroupMembership, PersonGroupMembership.person_id == Person.id)
             .where(
                 PersonGroupMembership.group_id == g.id,
-                PersonGroupMembership.is_current == True,
-                Person.is_active == True,
+                PersonGroupMembership.is_current is True,
+                Person.is_active is True,
             )
         ) or 0
 
@@ -78,7 +78,7 @@ def get_group(
         .join(PersonGroupMembership, PersonGroupMembership.person_id == Person.id)
         .where(
             PersonGroupMembership.group_id == g.id,
-            PersonGroupMembership.is_current == True,
+            PersonGroupMembership.is_current is True,
         )
         .order_by(Person.display_name)
     ))
@@ -152,7 +152,7 @@ def transfer_leadership(
             select(GroupLeadershipHistory).where(
                 GroupLeadershipHistory.group_id == g.id,
                 GroupLeadershipHistory.role == "leader",
-                GroupLeadershipHistory.is_current == True,
+                GroupLeadershipHistory.is_current is True,
             )
         )
         if current_hist:
@@ -163,7 +163,7 @@ def transfer_leadership(
             select(GroupLeadershipHistory).where(
                 GroupLeadershipHistory.group_id == g.id,
                 GroupLeadershipHistory.role == "deputy",
-                GroupLeadershipHistory.is_current == True,
+                GroupLeadershipHistory.is_current is True,
             )
         )
         if current_hist:
@@ -192,7 +192,7 @@ def transfer_leadership(
     existing_membership = db.scalar(
         select(PersonGroupMembership).where(
             PersonGroupMembership.person_id == p.id,
-            PersonGroupMembership.is_current == True,
+            PersonGroupMembership.is_current is True,
         )
     )
     if existing_membership and existing_membership.group_id != g.id:

@@ -70,7 +70,7 @@ def _apply_person_filters(stmt, person_alias,
         exists_g = select(1).where(
             PersonGroupMembership.person_id == person_alias.id,
             PersonGroupMembership.group_id == group_id,
-            PersonGroupMembership.is_current == True,
+            PersonGroupMembership.is_current is True,
         )
         stmt = stmt.where(exists_g.exists())
     if specialty_id is not None:
@@ -78,7 +78,7 @@ def _apply_person_filters(stmt, person_alias,
         exists_s = select(1).where(
             PersonSpecialtyAssignment.person_id == person_alias.id,
             PersonSpecialtyAssignment.specialty_id == specialty_id,
-            PersonSpecialtyAssignment.is_current == True,
+            PersonSpecialtyAssignment.is_current is True,
         )
         stmt = stmt.where(exists_s.exists())
     return stmt
@@ -898,7 +898,7 @@ def _ticket_category_case(
 def _complaint_subitem_case():
     si = ServiceTicket.service_item
     return case(
-        (si == None, "未标注"),
+        (si is None, "未标注"),
         (si.ilike("%商品%"), "商品投诉"),
         (si.ilike("%服务%"), "服务投诉"),
         (si.ilike("%微信%"), "微信投诉"),
@@ -1059,7 +1059,7 @@ def _ticket_effective_finish_time_where(db: Session, start_time: datetime, end_t
     done_cnt = 0
     real_done_cnt = 0
     for r in rows:
-        reg, fin, hd, hdlr, st = (r.register_time, r.finish_time, r.handle_duration, r.handler, r.status)
+        reg, fin, hd, hdlr, _st = (r.register_time, r.finish_time, r.handle_duration, r.handler, r.status)
         if not reg:
             continue
         # 把 reg/fin 都转成 UTC aware, 保证加 timedelta 后仍能和 _s/_e 比较
@@ -1506,7 +1506,7 @@ def _operator_to_person_cte(department: str | None = None,
             PersonGroupMembership,
             and_(
                 PersonGroupMembership.person_id == Person.id,
-                PersonGroupMembership.is_current == True,
+                PersonGroupMembership.is_current is True,
             ),
         )
         .outerjoin(Group, PersonGroupMembership.group_id == Group.id)
@@ -2780,9 +2780,9 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
     routes_t = _cash_routes_total(db, start=ts, end=te)
     routes_y = _cash_routes_total(db, start=ys, end=ye)
     a_t, b_t = routes_t["route_a"], routes_t["route_b"]
-    a_y, b_y = routes_y["route_a"], routes_y["route_b"]
+    _a_y, _b_y = routes_y["route_a"], routes_y["route_b"]
     c_t, d_t = routes_t["route_c"], routes_t["route_d"]
-    c_y, d_y = routes_y["route_c"], routes_y["route_d"]
+    _c_y, _d_y = routes_y["route_c"], routes_y["route_d"]
     e_t = routes_t["actual_cashflow"]          # 实际现金流 E (今日)
     e_y = routes_y["actual_cashflow"]          # 实际现金流 E (昨日)
     op_t = routes_t["operational"]             # 经营估算 A+B+C+D (今日)
@@ -2964,7 +2964,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         return d
     if grain == "hour":
         # 小时轴: 0~23 小时
-        slots_hours = list(range(24))
+        list(range(24))
         is_today_like = is_realtime
         max_slot = now_sh.hour if is_today_like else 23
         def _slot_idx(trunc_t_local: _dt.datetime) -> int | None:
@@ -3041,7 +3041,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
             slots_days.append(cur)
             cur += timedelta(days=1)
         max_slot = len(slots_days) - 1
-        today_date = now_sh.date()
+        now_sh.date()
         def _slot_idx(trunc_t_local: _dt.datetime) -> int | None:
             d_local = _to_date(trunc_t_local)
             if d_local in slots_days:
@@ -3420,7 +3420,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     if complaint_subs:
         complaint_subs.sort(key=lambda x: -x["value"])
     # 今日投诉总数 (便于前端展示 "今日共XX条投诉") = 三张独立投诉表今日之和
-    st_cnt = int(sum((x["value"] for x in complaint_subs if x["name"] not in ("外部投诉(监督局/315等)", "卡商群投诉") or (x["source_type"] == "外部投诉" and x["name"].startswith("外部投诉"))), 0))
+    int(sum((x["value"] for x in complaint_subs if x["name"] not in ("外部投诉(监督局/315等)", "卡商群投诉") or (x["source_type"] == "外部投诉" and x["name"].startswith("外部投诉"))), 0))
     # 为避免重复计算,直接重算 total = 三表独立相加
     _cnt_st = db.execute(select(func.count()).where(tk_between, _ticket_category_case() == "投诉")).scalar() or 0
     _cnt_ec = db.execute(select(func.count()).where(ec_between)).scalar() or 0
@@ -3645,7 +3645,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     # ---------- 汇总根因 ----------
     complaint_roots = [{"name": k, "count": v} for k, v in complaint_roots_map.items()]
     # 所有根因的总数 = complaint_total (保证柱图总数与投诉总数匹配)
-    root_total = sum(r["count"] for r in complaint_roots)
+    sum(r["count"] for r in complaint_roots)
     # 补齐标准根因桶 (6 标准 + 2 扩展 + A3新增3桶 + 待标注) 缺失补 0
     #   新增: 商品质量/售后类 / 服务态度/时效类 / 微信商户号投诉类 — 来自 service_tickets.service_item 大类名
     root_order = [
@@ -4892,7 +4892,7 @@ def today_staff_efficiency(
             )
             .select_from(PersonAlias)
             .outerjoin(Person, PersonAlias.person_id == Person.id)
-            .outerjoin(PersonGroupMembership, and_(PersonGroupMembership.person_id == Person.id, PersonGroupMembership.is_current == True))
+            .outerjoin(PersonGroupMembership, and_(PersonGroupMembership.person_id == Person.id, PersonGroupMembership.is_current is True))
             .outerjoin(Group, PersonGroupMembership.group_id == Group.id)
         ).all()
         # 建 "去前缀后缀 → person 信息" 索引 (取第一个匹配, 多个匹配时优先企微部门)
@@ -4968,8 +4968,8 @@ def today_staff_efficiency(
     for r in db.execute(select(cs_cat_q)).all():
         cs_cat_by_op.setdefault(r.op, {})[r.bucket] = (int(r.scnt or 0), int(r.pcnt or 0))
     rf_by_op: dict[str, tuple[int, int]] = {r.op: (int(r.sc or 0), int(r.pc or 0)) for r in db.execute(select(rf_q)).all()}
-    cm_by_op: dict[str, tuple[int, int]] = {r.op: (int(r.sc or 0), int(r.pc or 0)) for r in db.execute(select(cm_q)).all()}
-    tk_all_by_op: dict[str, tuple[int, int]] = {r.op: (int(r.sc or 0), int(r.pc or 0)) for r in db.execute(select(tk_all_q)).all()}
+    {r.op: (int(r.sc or 0), int(r.pc or 0)) for r in db.execute(select(cm_q)).all()}
+    {r.op: (int(r.sc or 0), int(r.pc or 0)) for r in db.execute(select(tk_all_q)).all()}
 
     # ─────────────────────────────────────────────────────────────────────
     # v3 2026-08-11: 6个专项明确区分 - 退款挽回/退款处理/内部投诉/外部投诉
@@ -5295,7 +5295,7 @@ def today_staff_efficiency(
     def _hr_map(hr_sp: str | None, pos: str | None) -> str | None:
         """人员主专项归一化映射 (2026-08-19 修订)
         返回: 专项名称 | "管理层" | None
-        
+
         新增: 专项岗(专员)显式识别, 与管理岗同等待遇 → 跨类全豁免
         """
         # ① 管理岗（主管/组长/副主管）→ 跨类全豁免
@@ -5360,7 +5360,7 @@ def today_staff_efficiency(
             .join(Specialty, PersonSpecialtyAssignment.specialty_id == Specialty.id)
             .where(
                 PersonSpecialtyAssignment.person_id.in_(work_person_ids),
-                PersonSpecialtyAssignment.is_primary == True,
+                PersonSpecialtyAssignment.is_primary is True,
                 or_(
                     PersonSpecialtyAssignment.effective_to.is_(None),
                     PersonSpecialtyAssignment.effective_to >= query_start,
@@ -5792,7 +5792,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
     def _hr_map(hr_sp: str | None, pos: str | None) -> str | None:
         """人员主专项归一化映射 (2026-08-19 修订)
         返回: 专项名称 | "管理层" | None
-        
+
         新增: 专项岗(专员)显式识别, 与管理岗同等待遇 → 跨类全豁免
         """
         # ① 管理岗（主管/组长/副主管）→ 跨类全豁免
@@ -5836,7 +5836,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
             )
         .select_from(PA)
         .outerjoin(P, PA.person_id == P.id)
-        .where(PA.is_system == False)
+        .where(PA.is_system is False)
     ).all()
 
     recovery_ops: dict[str, dict] = {}
@@ -6227,7 +6227,7 @@ def refund_person_devices(
     host_sns = core["op_host_sns"].get(operator, set())
     global_fail_sns = core["global_fail_sns"]
     sn_failed_meta = core["sn_failed_meta"]
-    sn_host_reason = core["sn_host_reason"]
+    core["sn_host_reason"]
     all_ops_meta = core["all_ops_meta"]
 
     meta = all_ops_meta.get(operator, {})
@@ -6316,7 +6316,7 @@ def refund_personnel_trend(
     core = _refund_recovery_core(db, cur_s, cur_e)
     staff_detail = core["staff_detail"]
     global_fail_sns = core["global_fail_sns"]
-    op_host_sns = core["op_host_sns"]
+    core["op_host_sns"]
 
     # 选人: 有 operators 参数用指定的, 否则取 Top10 (按接待量)
     if operators:
@@ -6712,9 +6712,9 @@ def refund_type_trend(
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
     core = _refund_recovery_core(db, cur_s, cur_e)
     global_fail_sns = core["global_fail_sns"]
-    sn_host_reason = core["sn_host_reason"]
-    sn_host_ops = core["sn_host_ops"]
-    all_ops_meta = core["all_ops_meta"]
+    core["sn_host_reason"]
+    core["sn_host_ops"]
+    core["all_ops_meta"]
     staff_detail = core["staff_detail"]
 
     # 生成日期序列
@@ -7732,7 +7732,7 @@ def refund_recovery_analysis(
     def _hr_map(hr_sp: str | None, pos: str | None) -> str | None:
         """人员主专项归一化映射 (2026-08-19 修订)
         返回: 专项名称 | "管理层" | None
-        
+
         新增: 专项岗(专员)显式识别, 与管理岗同等待遇 → 跨类全豁免
         """
         # ① 管理岗（主管/组长/副主管）→ 跨类全豁免
@@ -7779,7 +7779,7 @@ def refund_recovery_analysis(
             )
             .select_from(PA)
             .outerjoin(P, PA.person_id == P.id)
-            .where(PA.is_system == False)  # 排除 sys/system 等系统自动别名
+            .where(PA.is_system is False)  # 排除 sys/system 等系统自动别名
     ).all()
 
     # 专职退款挽回人员 (hr_cat=退款挽回)
@@ -9186,7 +9186,7 @@ def _view_ticket_work_top20(db: Session, params: _PARAMS_T) -> _RET_T:
             func.count(func.distinct(func.nullif(func.trim(ServiceTicket.device_sn), ""))).label("sn_cnt"),
             func.count(func.distinct(phone_clean)).label("phone_cnt"),
             func.coalesce(func.avg(case(
-                (and_(ServiceTicket.handle_duration != None, ServiceTicket.handle_duration > 0),
+                (and_(ServiceTicket.handle_duration is not None, ServiceTicket.handle_duration > 0),
                  ServiceTicket.handle_duration / 60.0),
                 else_=func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) / 60.0
             )), 0.0).label("avg_dur_min"),
@@ -9540,7 +9540,7 @@ def _view_today_handler_sn_rank(db: Session, params: _PARAMS_T) -> _RET_T:
         select(
             ServiceTicket.handler,
             func.avg(case(
-                (and_(ServiceTicket.handle_duration != None, ServiceTicket.handle_duration > 0),
+                (and_(ServiceTicket.handle_duration is not None, ServiceTicket.handle_duration > 0),
                  ServiceTicket.handle_duration),
                 else_=func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time)
             )).label("avg_dur"),
@@ -9641,7 +9641,7 @@ def _view_today_cold_tickets(db: Session, params: _PARAMS_T) -> _RET_T:
     # 冷工单不依赖"今日窗口",而是"当前所有在途"。
     # 不过 params.date 如果指定了日期, 就按「当日登记的在途工单 >24h」展示 (用于历史回溯)
     ts_utc, te_utc = _sh_parse_params(params)
-    now_utc = datetime.now() if True else _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
+    datetime.now() if True else _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
     # now 转 naive UTC (因为 ServiceTicket.register_time 取出时若 tz-aware, 会兼容比较)
     import datetime as __dt
     now = __dt.datetime.now(__dt.timezone.utc).replace(tzinfo=None)
@@ -9650,7 +9650,7 @@ def _view_today_cold_tickets(db: Session, params: _PARAMS_T) -> _RET_T:
     # 距登记 > 24h
     cold_cond = now - ServiceTicket.register_time >= text("INTERVAL '24 hours'")
     # 如果是"非今日日期"模式 (params.date 不等于今天) → 就限定 register_time 落在 [ts_utc,te_utc] (当日视角)
-    d_today = __dt.date.today()  # system date (we'll compare to sh today to decide)
+    __dt.date.today()  # system date (we'll compare to sh today to decide)
     from zoneinfo import ZoneInfo as _ZI
     _TODAY_SH = __dt.datetime.now(_ZI("Asia/Shanghai")).date()
     # 用 te_utc 反推 display 日期
