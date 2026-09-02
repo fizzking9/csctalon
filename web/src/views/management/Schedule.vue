@@ -26,7 +26,7 @@
           </div>
         </el-card>
         <el-card>
-          <el-table :data="schedules" v-loading="loading" border stripe>
+          <el-table v-loading="loading" :data="schedules" border stripe>
             <el-table-column prop="schedule_date" label="日期" width="120" />
             <el-table-column label="人员" width="140">
               <template #default="{ row }">

@@ -68,7 +68,7 @@
 
       <!-- ========== 预警记录 ========== -->
       <el-tab-pane label="预警记录" name="alerts">
-        <el-table :data="alerts" v-loading="loading" border stripe size="small">
+        <el-table v-loading="loading" :data="alerts" border stripe size="small">
           <el-table-column label="级别" width="80">
             <template #default="{ row }"><el-tag :type="levelType(row.level)" size="small">{{ levelLabel(row.level) }}</el-tag></template>
           </el-table-column>

@@ -13,7 +13,7 @@
     </div>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe>
+      <el-table v-loading="loading" :data="list" border stripe>
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column prop="name" label="名称" min-width="180" show-overflow-tooltip />
         <el-table-column label="类型" width="100">

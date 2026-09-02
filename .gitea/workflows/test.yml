@@ -79,3 +79,30 @@ jobs:
           TEST_POSTGRES_PASSWORD: csctalon123
           TEST_POSTGRES_DB: csctalon_test
         run: pytest
+
+  frontend-lint-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Lint (eslint)
+        # 前端历史 lint 债已治理至 0 errors(仅少量风格 warning), 强制 error 级别阻断
+        run: npm run lint
+
+      - name: Test (vitest)
+        run: npm test

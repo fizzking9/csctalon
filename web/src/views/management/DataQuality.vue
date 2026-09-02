@@ -25,7 +25,7 @@
               <el-button :icon="Refresh" link @click="loadRules">刷新</el-button>
             </div>
           </template>
-          <el-table :data="rules" v-loading="loading" border stripe>
+          <el-table v-loading="loading" :data="rules" border stripe>
             <el-table-column prop="name" label="规则名" min-width="180" show-overflow-tooltip />
             <el-table-column prop="target" label="作用对象" width="180" show-overflow-tooltip>
               <template #default="{ row }">

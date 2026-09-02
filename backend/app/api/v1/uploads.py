@@ -23,6 +23,7 @@ from app.schemas.upload import DiffPreviewRequest, ImportResponse, UploadRecordO
 from app.services.data_parser import load_dataframe, parse_file, save_upload_file
 from app.services.diff_preview import compute_diff
 from app.services.matcher import match_all
+from app.services.person_extractor import extract_person_aliases
 from app.services.upsert import run_upsert
 
 router = APIRouter(prefix="/uploads", tags=["数据中心-上传"])

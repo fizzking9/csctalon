@@ -55,7 +55,7 @@
               <el-tag v-else type="info" size="small">待配置</el-tag>
             </el-descriptions-item>
           </el-descriptions>
-          <el-button type="primary" plain @click="authorize" :disabled="!status.app_configured">
+          <el-button type="primary" plain :disabled="!status.app_configured" @click="authorize">
             重新授权
           </el-button>
           <el-button type="danger" plain @click="revoke">解除授权</el-button>

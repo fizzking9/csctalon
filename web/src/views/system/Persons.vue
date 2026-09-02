@@ -109,8 +109,8 @@
           </el-button>
         </div>
         <el-table
-          :data="treeList"
           v-loading="loading"
+          :data="treeList"
           size="small"
           border
           stripe
@@ -318,7 +318,7 @@
             <span class="section-title">任职历史</span>
             <el-button size="small" type="primary" :icon="Plus" @click="openAssignmentDialog()">新增任职</el-button>
           </div>
-          <el-table :data="assignments" size="small" border v-loading="assignmentsLoading" max-height="180">
+          <el-table v-loading="assignmentsLoading" :data="assignments" size="small" border max-height="180">
             <el-table-column prop="effective_from" label="生效起" width="100" />
             <el-table-column label="生效止" width="100">
               <template #default="{ row }">{{ row.effective_to || '至今' }}</template>

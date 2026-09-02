@@ -59,7 +59,7 @@
         <div class="page-title" style="margin: 0">缓存清单 · 按业务前缀</div>
         <span class="page-sub">键数量越多覆盖越广 · 即将过期(TTL≤60s)会被预热/访问重算 · 未预热前缀靠路由层 60s 自然过期</span>
       </div>
-      <el-table :data="groups" v-loading="loading" border stripe size="small" max-height="420">
+      <el-table v-loading="loading" :data="groups" border stripe size="small" max-height="420">
         <el-table-column label="业务域" min-width="120">
           <template #default="{ row }">{{ row.label }}</template>
         </el-table-column>

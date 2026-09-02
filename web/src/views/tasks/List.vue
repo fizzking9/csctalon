@@ -22,7 +22,7 @@
     </el-card>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe @row-click="goDetail" style="cursor: pointer">
+      <el-table v-loading="loading" :data="list" border stripe style="cursor: pointer" @row-click="goDetail">
         <el-table-column label="类型" width="90">
           <template #default="{ row }">
             <el-tag size="small" :type="typeTagType(row.task_type)">{{ row.task_type || '-' }}</el-tag>

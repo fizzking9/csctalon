@@ -27,7 +27,7 @@
 
     <slot name="middle" />
 
-    <el-button v-if="showRefresh" :icon="Refresh" :loading="loading" @click="onRefresh" style="margin-left:8px">刷新</el-button>
+    <el-button v-if="showRefresh" :icon="Refresh" :loading="loading" style="margin-left:8px" @click="onRefresh">刷新</el-button>
 
     <slot name="right" />
   </div>

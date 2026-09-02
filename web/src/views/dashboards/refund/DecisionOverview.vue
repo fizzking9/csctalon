@@ -1,5 +1,5 @@
 <template>
-  <div class="decision-overview" v-loading="loading">
+  <div v-loading="loading" class="decision-overview">
     <div v-if="errorMsg" class="error-msg">{{ errorMsg }}</div>
     <template v-if="data">
       <!-- ===== 区块0: 管理摘要(结论条 + KPI) ===== -->
@@ -162,7 +162,7 @@
           <span class="block-title">三、手动退款登记水位</span>
           <span class="block-hint">登记(商户号手机退款处理登记) − 已退款完成 = 蓄水 · 手动操作为主,存在登记后未退的积压</span>
         </div>
-        <div class="water-summary mb-12" v-if="manualWaterTable.length">
+        <div v-if="manualWaterTable.length" class="water-summary mb-12">
           登记蓄水总额 <b :class="manualWaterTotal >= 0 ? 'pos' : 'neg'">{{ manualWaterTotal >= 0 ? '+' : '' }}¥{{ formatMoney(manualWaterTotal) }}</b>
           （登记 ¥{{ formatMoney(manualRegTotal) }} − 已退 ¥{{ formatMoney(manualDoneTotal) }}）
         </div>
@@ -258,7 +258,7 @@
           <span class="block-hint">共 {{ detailTotal }} 条 · 点击 SN 可查看设备审计 · 全量数据可点右上角「导出」下载 Excel</span>
         </div>
         <!-- 风险概览 -->
-        <div class="risk-summary mb-12" v-if="detailLoaded">
+        <div v-if="detailLoaded" class="risk-summary mb-12">
           涉诉风险：
           <span class="risk-high">{{ detailRisk.high }} 笔高风险</span>
           <span class="risk-med">{{ detailRisk.medium }} 笔中风险</span>

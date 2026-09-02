@@ -37,7 +37,7 @@
     </el-card>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe>
+      <el-table v-loading="loading" :data="list" border stripe>
         <el-table-column label="时间" width="160">
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>

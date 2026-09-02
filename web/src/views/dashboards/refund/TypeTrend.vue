@@ -16,7 +16,7 @@
     <div v-if="errorMsg" class="error-msg">{{ errorMsg }}</div>
 
     <!-- ============ 1. 各原因类型 接待量&成功率 (双Y轴堆叠柱+多线) ============ -->
-    <section class="section-card" v-loading="loading">
+    <section v-loading="loading" class="section-card">
       <div class="chart-header">
         <span class="block-title" style="margin: 0">各原因类型 接待量 & 成功率</span>
         <span class="trend-hint">左Y=SN数(7大原因堆叠) · 右Y=成功率%(每原因一条线)</span>
@@ -26,7 +26,7 @@
     </section>
 
     <!-- ============ 2. 各人员类型 接待量&成功率 (双Y轴分组柱+多线) ============ -->
-    <section class="section-card" v-loading="loading">
+    <section v-loading="loading" class="section-card">
       <div class="chart-header">
         <span class="block-title" style="margin: 0">各人员类型 接待量 & 成功率</span>
         <span class="trend-hint">左Y=SN数(分组柱) · 右Y=成功率%(每类型一条线)</span>
@@ -50,7 +50,7 @@
     </section>
 
     <!-- ============ 4. problem_type 细分 Top10 (横向堆叠柱) ============ -->
-    <section class="section-card" v-loading="loading">
+    <section v-loading="loading" class="section-card">
       <div class="chart-header">
         <span class="block-title" style="margin: 0">problem_type 细分 Top10</span>
         <span class="trend-hint">横向堆叠柱(成功/失败) · 旁注成功率%</span>
@@ -60,7 +60,7 @@
     </section>
 
     <!-- ============ 5. 组间对比 (el-table + BaseChart横向柱) ============ -->
-    <section class="section-card" v-loading="loading">
+    <section v-loading="loading" class="section-card">
       <div class="block-title">组间对比</div>
       <el-row :gutter="16">
         <el-col :xs="24" :md="14">

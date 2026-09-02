@@ -18,7 +18,7 @@
     </el-alert>
 
     <el-row :gutter="16">
-      <el-col :xs="24" :md="8" v-for="cap in capabilities" :key="cap.key">
+      <el-col v-for="cap in capabilities" :key="cap.key" :xs="24" :md="8">
         <el-card class="cap-card" shadow="hover">
           <div class="cap-header">
             <el-icon :size="28" :color="cap.color"><component :is="cap.icon" /></el-icon>

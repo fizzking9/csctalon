@@ -6,7 +6,7 @@
     </div>
 
     <!-- 基本信息 -->
-    <el-card class="mb-16" v-loading="loading">
+    <el-card v-loading="loading" class="mb-16">
       <el-descriptions :column="3" border>
         <el-descriptions-item label="状态">
           <el-tag :type="statusType(task.status)">{{ statusLabel(task.status) }}</el-tag>
@@ -59,7 +59,7 @@
         <el-button :icon="Refresh" @click="loadDevices">刷新</el-button>
       </div>
 
-      <el-table :data="devices" v-loading="deviceLoading" border stripe size="small">
+      <el-table v-loading="deviceLoading" :data="devices" border stripe size="small">
         <el-table-column prop="device_sn" label="设备SN" min-width="180" show-overflow-tooltip />
         <el-table-column label="状态" width="140">
           <template #default="{ row }">

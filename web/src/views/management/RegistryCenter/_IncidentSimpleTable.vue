@@ -5,7 +5,7 @@
         快速预览 · 完整列表 / 转预期 / 复盘批注见「管理 → 影响事件」。转预期动作会写操作日志:「影响事件.转预期事项」。
       </template>
     </el-alert>
-    <el-table :data="list" v-loading="loading" border stripe @row-click="(row) => $emit('view', row)" style="cursor: pointer">
+    <el-table v-loading="loading" :data="list" border stripe style="cursor: pointer" @row-click="(row) => $emit('view', row)">
       <el-table-column label="状态" width="90">
         <template #default="{ row }">
           <el-tag :type="statusType(row.status)" size="small" effect="plain">{{ statusMap[row.status] || row.status }}</el-tag>

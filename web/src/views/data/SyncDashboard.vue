@@ -17,10 +17,10 @@
                     <el-tag v-else type="info">已停止</el-tag>
                     <el-switch
                       v-model="scheduleEnabled"
-                      @change="toggleSchedule"
                       :loading="scheduleToggling"
                       active-text="启用"
                       inactive-text="停止"
+                      @change="toggleSchedule"
                     />
                   </div>
                 </div>
@@ -90,7 +90,7 @@
                   </el-button>
                 </div>
               </template>
-              <el-form :model="form" label-width="110px" :rules="rules" ref="formRef">
+              <el-form ref="formRef" :model="form" label-width="110px" :rules="rules">
                 <el-form-item label="BMS 数据源" prop="bmsTypes">
                   <el-checkbox-group v-model="form.bmsTypes">
                     <el-checkbox
@@ -124,7 +124,7 @@
                   </el-checkbox-group>
                 </el-form-item>
                 <el-form-item label="时间范围" prop="timeRange">
-                  <el-radio-group v-model="form.timeRange" @change="onTimeRangeChange" :disabled="busyRunning">
+                  <el-radio-group v-model="form.timeRange" :disabled="busyRunning" @change="onTimeRangeChange">
                     <el-radio-button label="incremental">增量接续(推荐)</el-radio-button>
                     <el-radio-button label="today">今天</el-radio-button>
                     <el-radio-button label="yesterday">昨天</el-radio-button>
@@ -145,8 +145,8 @@
                       <div v-if="form.scrmTypes.includes(r.data_type)" class="range-item">
                         <span class="range-chip range-chip-scrm">SCRM</span>
                         <span class="range-ds">{{ dsName(r.data_type) }}</span>
-                        <span class="range-desc" v-if="r.status === 'never'">（首次）30 天前 → 现在</span>
-                        <span class="range-desc" v-else>上次 {{ formatTime(r.last_start) }} 后 (重叠2h) → 现在</span>
+                        <span v-if="r.status === 'never'" class="range-desc">（首次）30 天前 → 现在</span>
+                        <span v-else class="range-desc">上次 {{ formatTime(r.last_start) }} 后 (重叠2h) → 现在</span>
                       </div>
                     </template>
                   </div>
@@ -182,8 +182,8 @@
                   <el-button
                     type="primary"
                     :loading="submitLoading"
-                    @click="handleSyncAll"
                     :disabled="busyRunning || totalSelectedCount === 0 || submitDisabledByCool"
+                    @click="handleSyncAll"
                   >
                     <el-icon><Refresh /></el-icon>
                     <span v-if="busyRunning">任务执行中…(实时状态看右侧)</span>
@@ -194,12 +194,12 @@
                     v-if="form.timeRange === 'incremental' && cooldownRemaining > 0 && !busyRunning"
                     type="warning"
                     plain
-                    @click="handleSyncAll(true)"
                     :loading="submitLoading"
+                    @click="handleSyncAll(true)"
                   >
                     强制同步(跳过冷却)
                   </el-button>
-                  <el-button @click="handleTest" :loading="testing" v-if="hasAnyCaptchaSources">测试浏览器</el-button>
+                  <el-button v-if="hasAnyCaptchaSources" :loading="testing" @click="handleTest">测试浏览器</el-button>
                 </el-form-item>
               </el-form>
             </el-card>
@@ -339,9 +339,9 @@
                   placeholder="数据源"
                   size="small"
                   style="width: 180px"
-                  @change="loadMergedLogs"
                   filterable
                   clearable
+                  @change="loadMergedLogs"
                 >
                   <el-option
                     v-for="opt in mergedDataTypeOptions"
@@ -470,8 +470,8 @@
               size="small"
               plain
               text
-              @click="clearLogView"
               :disabled="!runningTask || !runningTask.recent_logs || !runningTask.recent_logs.length"
+              @click="clearLogView"
             >
               清空视图
             </el-button>
@@ -480,8 +480,8 @@
               size="small"
               type="primary"
               plain
-              @click="scrollToBottom(true)"
               class="ml-auto"
+              @click="scrollToBottom(true)"
             >
               ⬇ 回到底部
             </el-button>
@@ -489,8 +489,8 @@
 
           <!-- ② 彩色日志流(永久展开,按顺序一直输出,不折叠) -->
           <div
-            class="right-log-stream"
             ref="logStreamRef"
+            class="right-log-stream"
             @scroll="onLogScroll"
           >
             <div
@@ -613,7 +613,7 @@
       <el-alert :type="isMathCaptcha ? 'warning' : 'info'" :closable="false" show-icon class="mb-16" size="small">
         <template v-if="isMathCaptcha">
           SCRM 登录使用<strong>数学计算式</strong>验证码。下方图片显示的是如「7*0=?」的算式,
-          请在输入框中填入<strong>计算结果数字</strong>(如 0、63)。<br/>
+          请在输入框中填入<strong>计算结果数字</strong>(如 0、63)。<br />
           若 OCR 自动识别出了答案,已经帮你填好了,请核对后直接点「提交并登录」。
         </template>
         <template v-else>
@@ -632,8 +632,8 @@
             :src="captchaImage"
             alt="验证码"
             class="captcha-img"
-            @click="refreshCaptcha"
             title="点击图片重试(注意:后端会话会重新生成)"
+            @click="refreshCaptcha"
           />
           <div v-else class="captcha-empty">验证码加载失败</div>
         </div>

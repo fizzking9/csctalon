@@ -25,7 +25,7 @@
     </section>
 
     <!-- 2. 设备风险分布 KPI -->
-    <section class="section-card" v-loading="loading">
+    <section v-loading="loading" class="section-card">
       <div class="block-title">设备风险分布</div>
       <el-row :gutter="12">
         <el-col :xs="12" :sm="12" :md="6">
@@ -60,7 +60,7 @@
     </section>
 
     <!-- 3. Top20 高风险设备表 -->
-    <section class="section-card" v-loading="loading">
+    <section v-loading="loading" class="section-card">
       <div class="flex-between mb-12">
         <div class="block-title">Top20 高风险设备</div>
         <el-tag size="small" type="info" effect="plain">默认按退款金额倒序</el-tag>

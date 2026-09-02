@@ -28,7 +28,7 @@
     </el-card>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe @row-click="openDetail" style="cursor: pointer">
+      <el-table v-loading="loading" :data="list" border stripe style="cursor: pointer" @row-click="openDetail">
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
             <el-tag :type="statusType(row.status)" size="small" effect="plain">{{ statusMap[row.status] || row.status }}</el-tag>

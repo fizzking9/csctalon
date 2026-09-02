@@ -40,6 +40,7 @@ from app.services.captcha_session import (
     try_ocr_captcha,
     try_ocr_math_captcha,
 )
+from app.services.scrm_client import SCRM_DATA_SOURCES
 from app.services.scrm_sync_service import (
     DATA_TYPE_OPERATOR,
     DATA_TYPE_SESSION_GROUP,
@@ -949,7 +950,8 @@ async def captcha_login_start(payload: CaptchaLoginStartRequest, _: CurrentUser,
     sess = await captcha_session_manager.create(
         data_type=data_type,
         base_url=base_url,
-        page_path=page_path,
+        # page_path 从种子配置读取(BMS/SCRM 的 DATA_SOURCES 均有该字段)
+        page_path=seed.get("page_path") or "",
         username=cfg["username"],
         password=cfg["password"],
         state_path=state_path,

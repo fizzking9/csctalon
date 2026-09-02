@@ -103,7 +103,7 @@
         <el-alert type="info" :closable="false" class="mb-16" show-icon>
           草稿阶段(纯快照模式):请填入关键结果快照(视图配置+执行结果JSON),确认后固化,不再随源数据变。或上方"套用模板"启用看板模式。
         </el-alert>
-        <el-input v-model="snapshotText" type="textarea" :rows="10" placeholder='快照JSON,如 {"views":[...],"results":[...]}' />
+        <el-input v-model="snapshotText" type="textarea" :rows="10" placeholder="快照JSON,如 {&quot;views&quot;:[...],&quot;results&quot;:[...]}" />
       </div>
       <div v-else>
         <pre v-if="report.snapshot" class="snapshot-pre">{{ formatJson(report.snapshot) }}</pre>

@@ -10,7 +10,7 @@
 
     <!-- 状态统计卡(可点击筛选) -->
     <el-row :gutter="12" class="mb-16">
-      <el-col :xs="12" :sm="6" v-for="c in statCards" :key="c.key">
+      <el-col v-for="c in statCards" :key="c.key" :xs="12" :sm="6">
         <div class="stat-card" :class="{ 'stat-active': status === c.key }" @click="switchStatus(c.key)">
           <div class="stat-label">{{ c.label }}</div>
           <div class="stat-value" :style="{ color: c.color }">{{ summary[c.key] ?? 0 }}</div>
@@ -23,7 +23,7 @@
     </el-alert>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe size="small" max-height="520">
+      <el-table v-loading="loading" :data="list" border stripe size="small" max-height="520">
         <el-table-column prop="register_time" label="登记日期" width="150" fixed show-overflow-tooltip>
           <template #default="{ row }">
             <span :class="row.quality_status === 'pending' ? 'pending-text' : ''">{{ row.register_time || '—' }}</span>
@@ -100,7 +100,7 @@
           <el-input v-model="editForm.remark" type="textarea" :rows="2" placeholder="可选" />
         </el-form-item>
       </el-form>
-      <div class="quality-note" v-if="editRow?.quality_note">原质量说明: {{ editRow.quality_note }}</div>
+      <div v-if="editRow?.quality_note" class="quality-note">原质量说明: {{ editRow.quality_note }}</div>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="onFix">保存修正</el-button>

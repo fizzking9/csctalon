@@ -3,7 +3,7 @@
     <div class="flex-between mb-16">
       <div class="page-title" style="margin: 0">挽回分析</div>
       <div class="filter-bar" :class="{ 'is-mobile': isMobile }">
-        <el-radio-group v-model="tabMode" size="small" @change="onTabChange" class="tab-mode-group">
+        <el-radio-group v-model="tabMode" size="small" class="tab-mode-group" @change="onTabChange">
           <el-radio-button label="today">今日</el-radio-button>
           <el-radio-button label="personnel">人员</el-radio-button>
           <el-radio-button label="device">设备</el-radio-button>
@@ -270,23 +270,23 @@
                 </div>
               </template>
               <el-table :data="recoveryData.staff_detail || []" border stripe size="small" max-height="360">
-                <el-table-column label="姓名" width="100" fixed><template #default="{row}"><span style="font-weight:600">{{row.name}}</span></template></el-table-column>
-                <el-table-column label="组" width="96"><template #default="{row}"><el-tag size="small" effect="plain" :type="grpTagType(row.group)">{{row.group||'未分组'}}</el-tag></template></el-table-column>
-                <el-table-column prop="total_sn" label="接待SN" width="82" align="right" sortable><template #default="{row}">{{formatNum(row.total_sn)}}个</template></el-table-column>
-                <el-table-column prop="success_sn" label="成功" width="64" align="right"><template #default="{row}"><span style="color:#16a34a">{{formatNum(row.success_sn)}}</span></template></el-table-column>
-                <el-table-column prop="failed_sn" label="失败" width="64" align="right"><template #default="{row}"><span style="color:#dc2626">{{formatNum(row.failed_sn)}}</span></template></el-table-column>
+                <el-table-column label="姓名" width="100" fixed><template #default="{row}"><span style="font-weight:600">{{ row.name }}</span></template></el-table-column>
+                <el-table-column label="组" width="96"><template #default="{row}"><el-tag size="small" effect="plain" :type="grpTagType(row.group)">{{ row.group||'未分组' }}</el-tag></template></el-table-column>
+                <el-table-column prop="total_sn" label="接待SN" width="82" align="right" sortable><template #default="{row}">{{ formatNum(row.total_sn) }}个</template></el-table-column>
+                <el-table-column prop="success_sn" label="成功" width="64" align="right"><template #default="{row}"><span style="color:#16a34a">{{ formatNum(row.success_sn) }}</span></template></el-table-column>
+                <el-table-column prop="failed_sn" label="失败" width="64" align="right"><template #default="{row}"><span style="color:#dc2626">{{ formatNum(row.failed_sn) }}</span></template></el-table-column>
                 <el-table-column prop="success_rate" label="成功率" width="84" align="right" sortable :sort-method="(a,b)=>Number(a.success_rate??-1)-Number(b.success_rate??-1)">
                   <template #default="{row}">
                     <template v-if="row.success_rate==null"><span style="color:#9ca3af">—</span></template>
                     <template v-else>
                       <el-tag size="small" :effect="Number(row.success_rate||0)>=38?'dark':'plain'" :type="Number(row.success_rate||0)>=38?'success':(Number(row.success_rate||0)>=30?'warning':'danger')">
-                        {{Number(row.success_rate||0).toFixed(1)}}%
+                        {{ Number(row.success_rate||0).toFixed(1) }}%
                       </el-tag>
                     </template>
                   </template>
                 </el-table-column>
-                <el-table-column prop="refund_op_cnt" label="退款操作SN" width="100" align="right" sortable><template #default="{row}"><span :style="{color:Number(row.refund_op_cnt||0)>0?'#1d4ed8':'#9ca3af',fontWeight:Number(row.refund_op_cnt||0)>0?600:400}">{{formatNum(row.refund_op_cnt)}}个</span></template></el-table-column>
-                <el-table-column prop="refund_op_amount" label="退款操作金额" width="116" align="right" sortable><template #default="{row}"><span :style="{color:Number(row.refund_op_amount||0)>0?'#b91c1c':'#9ca3af',fontWeight:Number(row.refund_op_amount||0)>0?600:400}">¥{{formatMoney(row.refund_op_amount)}}</span></template></el-table-column>
+                <el-table-column prop="refund_op_cnt" label="退款操作SN" width="100" align="right" sortable><template #default="{row}"><span :style="{color:Number(row.refund_op_cnt||0)>0?'#1d4ed8':'#9ca3af',fontWeight:Number(row.refund_op_cnt||0)>0?600:400}">{{ formatNum(row.refund_op_cnt) }}个</span></template></el-table-column>
+                <el-table-column prop="refund_op_amount" label="退款操作金额" width="116" align="right" sortable><template #default="{row}"><span :style="{color:Number(row.refund_op_amount||0)>0?'#b91c1c':'#9ca3af',fontWeight:Number(row.refund_op_amount||0)>0?600:400}">¥{{ formatMoney(row.refund_op_amount) }}</span></template></el-table-column>
               </el-table>
               <el-empty v-if="!recoveryData.staff_detail?.length" description="暂无人员数据" />
             </el-card>

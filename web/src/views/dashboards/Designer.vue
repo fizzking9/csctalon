@@ -6,7 +6,7 @@
     </div>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe>
+      <el-table v-loading="loading" :data="list" border stripe>
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column prop="name" label="看板名称" min-width="140" />
         <el-table-column label="代码" min-width="180">

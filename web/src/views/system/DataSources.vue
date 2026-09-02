@@ -6,13 +6,13 @@
     </div>
 
     <el-card>
-      <template #header v-if="embedded">
+      <template v-if="embedded" #header>
         <div class="flex justify-between items-center">
           <span>数据源管理</span>
           <el-button type="primary" :icon="Refresh" :loading="refreshing" @click="handleRefresh">重建元数据</el-button>
         </div>
       </template>
-      <el-table :data="list" v-loading="loading" border stripe>
+      <el-table v-loading="loading" :data="list" border stripe>
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column prop="code" label="代码" width="140" />
         <el-table-column prop="name_cn" label="中文名" width="140" />

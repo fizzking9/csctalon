@@ -22,7 +22,7 @@
               <el-option label="卡商群投诉" value="card_complaint" />
             </el-select>
           </el-form-item>
-          <el-form-item v-if="form.data_type" label="Sheet" >
+          <el-form-item v-if="form.data_type" label="Sheet">
             <el-select v-model="form.sheet_name" placeholder="留空自动取第一个" clearable style="width: 100%">
               <el-option v-for="s in sheetNames" :key="s" :label="s" :value="s" />
             </el-select>
@@ -220,7 +220,7 @@
 
           <div class="mt-16 flex gap-8">
             <el-button @click="step = 1">上一步</el-button>
-            <el-button @click="runDiff" :loading="diffing">重新计算</el-button>
+            <el-button :loading="diffing" @click="runDiff">重新计算</el-button>
             <el-button type="primary" @click="goImport">下一步:确认导入</el-button>
           </div>
         </template>

@@ -66,7 +66,7 @@
                 <el-button link type="primary" @click="$router.push('/todos')">全部待办 ›</el-button>
               </div>
             </template>
-            <ul class="mini-list" v-loading="loadingTodos">
+            <ul v-loading="loadingTodos" class="mini-list">
               <li v-for="t in todoList" :key="t.id" class="mini-list-item" @click="$router.push(`/todos/${t.id}`)">
                 <el-tag size="small" :type="todoPrioTag(t.priority)" effect="plain" class="mr-8">{{ t.priority || '中' }}</el-tag>
                 <span class="mli-title">{{ t.title }}</span>
@@ -87,7 +87,7 @@
                 <el-button link type="primary" @click="$router.push('/system/operation-logs')">全部日志 ›</el-button>
               </div>
             </template>
-            <div class="op-list" v-loading="loadingOps">
+            <div v-loading="loadingOps" class="op-list">
               <div v-for="op in recentOps" :key="op.id" class="op-item">
                 <div class="op-top">
                   <el-tag size="small" :type="opTagType(op.action)">{{ op.action }}</el-tag>
@@ -195,7 +195,7 @@
                 <el-button link type="primary" @click="$router.push('/todos')">全部待办 ›</el-button>
               </div>
             </template>
-            <ul class="mini-list" v-loading="loadingTodos">
+            <ul v-loading="loadingTodos" class="mini-list">
               <li v-for="t in todoList" :key="t.id" class="mini-list-item" @click="$router.push(`/todos/${t.id}`)">
                 <el-tag size="small" :type="todoPrioTag(t.priority)" effect="plain" class="mr-8">{{ t.priority || '中' }}</el-tag>
                 <span class="mli-title">{{ t.title }}</span>
@@ -214,11 +214,11 @@
                 <el-button link type="primary" @click="$router.push('/tasks')">全部任务 ›</el-button>
               </div>
             </template>
-            <ul class="mini-list" v-loading="loadingTasks">
+            <ul v-loading="loadingTasks" class="mini-list">
               <li v-for="tk in taskList" :key="tk.id" class="mini-list-item" @click="$router.push(`/tasks/${tk.id}`)">
                 <el-icon color="#409eff" style="flex-shrink:0"><List /></el-icon>
                 <span class="mli-title">{{ tk.title }}</span>
-                <div class="mli-progress" v-if="tk.progress != null">
+                <div v-if="tk.progress != null" class="mli-progress">
                   <el-progress :percentage="Number(tk.progress) || 0" :stroke-width="6" :show-text="false" style="width: 120px" />
                   <span class="mli-progress-text">{{ tk.progress }}%</span>
                 </div>
@@ -232,14 +232,14 @@
 
         <el-col :xs="24" :md="10">
           <!-- 未读策略 -->
-          <el-card class="mb-16" shadow="never" v-if="unreadStrategies.length || loadingStrategies">
+          <el-card v-if="unreadStrategies.length || loadingStrategies" class="mb-16" shadow="never">
             <template #header>
               <div class="flex-between" style="margin:-8px 0">
                 <span>未读策略规范 <el-tag v-if="unreadStrategies.length" size="small" type="warning" round>{{ unreadStrategies.length }} 条</el-tag></span>
                 <el-button link type="primary" @click="$router.push('/strategy/publish')">全部策略 ›</el-button>
               </div>
             </template>
-            <div class="strategy-list" v-loading="loadingStrategies">
+            <div v-loading="loadingStrategies" class="strategy-list">
               <div v-for="s in unreadStrategies" :key="s.id" class="strategy-item" @click="$router.push('/strategy/publish')">
                 <span class="unread-dot" />
                 <span class="strategy-title">{{ s.title }}</span>
@@ -335,7 +335,7 @@
                 <el-button link type="primary" @click="$router.push('/todos')">全部待办 ›</el-button>
               </div>
             </template>
-            <ul class="mini-list" v-loading="loadingTodos">
+            <ul v-loading="loadingTodos" class="mini-list">
               <li v-for="t in todoList" :key="t.id" class="mini-list-item" @click="$router.push(`/todos/${t.id}`)">
                 <el-tag size="small" :type="todoPrioTag(t.priority)" effect="plain" class="mr-8">{{ t.priority || '中' }}</el-tag>
                 <span class="mli-title">{{ t.title }}</span>
@@ -354,11 +354,11 @@
                 <el-button link type="primary" @click="$router.push('/tasks')">全部任务 ›</el-button>
               </div>
             </template>
-            <ul class="mini-list" v-loading="loadingTasks">
+            <ul v-loading="loadingTasks" class="mini-list">
               <li v-for="tk in taskList" :key="tk.id" class="mini-list-item" @click="$router.push(`/tasks/${tk.id}`)">
                 <el-icon color="#409eff" style="flex-shrink:0"><List /></el-icon>
                 <span class="mli-title">{{ tk.title }}</span>
-                <div class="mli-progress" v-if="tk.progress != null">
+                <div v-if="tk.progress != null" class="mli-progress">
                   <el-progress :percentage="Number(tk.progress) || 0" :stroke-width="6" :show-text="false" style="width: 120px" />
                   <span class="mli-progress-text">{{ tk.progress }}%</span>
                 </div>
@@ -372,14 +372,14 @@
 
         <el-col :xs="24" :md="10">
           <!-- 未读策略 -->
-          <el-card class="mb-16" shadow="never" v-if="unreadStrategies.length || loadingStrategies">
+          <el-card v-if="unreadStrategies.length || loadingStrategies" class="mb-16" shadow="never">
             <template #header>
               <div class="flex-between" style="margin:-8px 0">
                 <span>未读策略规范 <el-tag v-if="unreadStrategies.length" size="small" type="warning" round>{{ unreadStrategies.length }} 条</el-tag></span>
                 <el-button link type="primary" @click="$router.push('/strategy/publish')">全部策略 ›</el-button>
               </div>
             </template>
-            <div class="strategy-list" v-loading="loadingStrategies">
+            <div v-loading="loadingStrategies" class="strategy-list">
               <div v-for="s in unreadStrategies" :key="s.id" class="strategy-item" @click="$router.push('/strategy/publish')">
                 <span class="unread-dot" />
                 <span class="strategy-title">{{ s.title }}</span>
@@ -432,7 +432,7 @@
                 <el-button link type="primary" @click="$router.push('/strategy/publish')">查看全部 ›</el-button>
               </div>
             </template>
-            <div v-if="unreadStrategies.length || loadingStrategies" class="strategy-list" v-loading="loadingStrategies">
+            <div v-if="unreadStrategies.length || loadingStrategies" v-loading="loadingStrategies" class="strategy-list">
               <div v-for="s in unreadStrategies" :key="s.id" class="strategy-item" @click="$router.push('/strategy/publish')">
                 <span class="unread-dot" />
                 <span class="strategy-title">{{ s.title }}</span>
@@ -454,7 +454,7 @@
                 <el-button link type="primary" @click="$router.push('/todos')">全部待办 ›</el-button>
               </div>
             </template>
-            <ul class="mini-list" v-loading="loadingTodos">
+            <ul v-loading="loadingTodos" class="mini-list">
               <li v-for="t in todoList" :key="t.id" class="mini-list-item" @click="$router.push(`/todos/${t.id}`)">
                 <el-tag size="small" :type="todoPrioTag(t.priority)" effect="plain">{{ t.priority || '中' }}</el-tag>
                 <span class="mli-title">{{ t.title }}</span>
@@ -472,11 +472,11 @@
                 <el-button link type="primary" @click="$router.push('/tasks')">全部任务 ›</el-button>
               </div>
             </template>
-            <ul class="mini-list" v-loading="loadingTasks">
+            <ul v-loading="loadingTasks" class="mini-list">
               <li v-for="tk in taskList" :key="tk.id" class="mini-list-item" @click="$router.push(`/tasks/${tk.id}`)">
                 <el-icon color="#409eff" style="flex-shrink:0"><List /></el-icon>
                 <span class="mli-title">{{ tk.title }}</span>
-                <div class="mli-progress" v-if="tk.progress != null">
+                <div v-if="tk.progress != null" class="mli-progress">
                   <el-progress :percentage="Number(tk.progress) || 0" :stroke-width="6" :show-text="false" style="width: 100px" />
                   <span class="mli-progress-text">{{ tk.progress }}%</span>
                 </div>
@@ -538,7 +538,7 @@
                 <el-button link type="primary" @click="$router.push('/strategy/publish')">查看全部 ›</el-button>
               </div>
             </template>
-            <div v-if="unreadStrategies.length || loadingStrategies" class="strategy-list" v-loading="loadingStrategies">
+            <div v-if="unreadStrategies.length || loadingStrategies" v-loading="loadingStrategies" class="strategy-list">
               <div v-for="s in unreadStrategies" :key="s.id" class="strategy-item" @click="$router.push('/strategy/publish')">
                 <span class="unread-dot" />
                 <span class="strategy-title">{{ s.title }}</span>
@@ -560,7 +560,7 @@
                 <el-button link type="primary" @click="$router.push('/todos')">全部待办 ›</el-button>
               </div>
             </template>
-            <ul class="mini-list" v-loading="loadingTodos">
+            <ul v-loading="loadingTodos" class="mini-list">
               <li v-for="t in todoList" :key="t.id" class="mini-list-item" @click="$router.push(`/todos/${t.id}`)">
                 <el-tag size="small" :type="todoPrioTag(t.priority)" effect="plain">{{ t.priority || '中' }}</el-tag>
                 <span class="mli-title">{{ t.title }}</span>

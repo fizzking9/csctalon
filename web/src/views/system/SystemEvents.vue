@@ -54,7 +54,7 @@
     </el-row>
 
     <el-card shadow="never">
-      <el-table :data="events" v-loading="loading" border stripe size="small" max-height="560">
+      <el-table v-loading="loading" :data="events" border stripe size="small" max-height="560">
         <el-table-column label="时间" width="150" sortable>
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>

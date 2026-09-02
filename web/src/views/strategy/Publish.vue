@@ -45,7 +45,7 @@
     </div>
 
     <!-- 主体:左列表 + 右详情 -->
-    <div class="page-container publish-body" v-loading="loading">
+    <div v-loading="loading" class="page-container publish-body">
       <div class="doc-list">
         <div v-if="!filteredList.length && !loading" class="empty-tip">
           <el-empty description="暂无已发布文档" />
@@ -58,7 +58,7 @@
           @click="selectDoc(d)"
         >
           <div class="doc-item-title">
-            <span class="unread-dot" v-if="!d.has_read" />
+            <span v-if="!d.has_read" class="unread-dot" />
             {{ d.title }}
           </div>
           <div class="doc-item-meta">

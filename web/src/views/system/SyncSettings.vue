@@ -13,9 +13,9 @@
       <el-alert type="info" :closable="false" show-icon class="mb-16">
         <p class="alert-text">
           按<strong>平台/域名分组</strong>管理：同一 Web 源下的多个数据源共用登录凭证，可在<strong>组级统一配置账号密码</strong>，
-          也可对<strong>单个数据源单独配置</strong>（单源优先）。保存后可用「测试登录」验证账号密码是否有效。<br/>
-          • <strong>BMS</strong>: 不同子域名(wifi/support.cloud-cat.cn)可能用不同账号。Playwright 页面抓取模式。<br/>
-          • <strong>SCRM</strong>: 支持 OpenAPI(默认,稳定) / Playwright 网页(数学验证码兜底) / 双模式。<br/>
+          也可对<strong>单个数据源单独配置</strong>（单源优先）。保存后可用「测试登录」验证账号密码是否有效。<br />
+          • <strong>BMS</strong>: 不同子域名(wifi/support.cloud-cat.cn)可能用不同账号。Playwright 页面抓取模式。<br />
+          • <strong>SCRM</strong>: 支持 OpenAPI(默认,稳定) / Playwright 网页(数学验证码兜底) / 双模式。<br />
           「默认同步」控制是否纳入定时同步与手动同步的默认勾选。账号/密码留空表示不修改原值。
         </p>
       </el-alert>
@@ -187,7 +187,7 @@
       <el-alert :type="isMathCaptcha ? 'warning' : 'info'" :closable="false" show-icon class="mb-16" size="small">
         <template v-if="isMathCaptcha">
           SCRM 登录使用<strong>数学计算式</strong>验证码。下方图片显示的是如「7*0=?」的算式,
-          请在输入框中填入<strong>计算结果数字</strong>(如 0、63)。<br/>
+          请在输入框中填入<strong>计算结果数字</strong>(如 0、63)。<br />
           若 OCR 自动识别出了答案,已经帮你填好了,请核对后直接点「提交并登录」。
         </template>
         <template v-else>
@@ -206,8 +206,8 @@
             :src="captchaImage"
             alt="验证码"
             class="captcha-img"
-            @click="refreshCaptcha"
             title="点击图片重试(注意:后端会话会重新生成)"
+            @click="refreshCaptcha"
           />
           <div v-else class="captcha-empty">验证码加载失败</div>
         </div>

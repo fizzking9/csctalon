@@ -10,10 +10,10 @@
             <el-tag v-else type="info">已停止</el-tag>
             <el-switch
               v-model="scheduleStatus.enabled"
-              @change="toggleSchedule"
               :loading="scheduleToggling"
               active-text="启用"
               inactive-text="停止"
+              @change="toggleSchedule"
             />
           </div>
         </div>
@@ -79,7 +79,7 @@
           </el-button>
         </div>
       </template>
-      <el-form :model="form" label-width="110px" style="max-width: 760px" :rules="rules" ref="formRef">
+      <el-form ref="formRef" :model="form" label-width="110px" style="max-width: 760px" :rules="rules">
         <el-form-item label="同步数据源" prop="dataTypes">
           <el-checkbox-group v-model="form.dataTypes">
             <el-checkbox
@@ -99,7 +99,7 @@
           </el-checkbox-group>
         </el-form-item>
         <el-form-item label="时间范围" prop="timeRange">
-          <el-radio-group v-model="form.timeRange" @change="onTimeRangeChange" :disabled="busyRunning">
+          <el-radio-group v-model="form.timeRange" :disabled="busyRunning" @change="onTimeRangeChange">
             <el-radio-button label="incremental">增量接续(推荐)</el-radio-button>
             <el-radio-button label="today">今天</el-radio-button>
             <el-radio-button label="yesterday">昨天</el-radio-button>
@@ -152,8 +152,8 @@
           <el-button
             type="primary"
             :loading="submitLoading"
-            @click="handleSyncAll"
             :disabled="busyRunning || form.dataTypes.length === 0 || submitDisabledByCool"
+            @click="handleSyncAll"
           >
             <el-icon><Refresh /></el-icon>
             <span v-if="busyRunning">任务执行中,请等待…</span>
@@ -164,12 +164,12 @@
             v-if="form.timeRange === 'incremental' && cooldownRemaining > 0 && !busyRunning"
             type="warning"
             plain
-            @click="handleSyncAll(true)"
             :loading="submitLoading"
+            @click="handleSyncAll(true)"
           >
             强制同步(跳过冷却)
           </el-button>
-          <el-button @click="handleTest" :loading="testing">测试浏览器</el-button>
+          <el-button :loading="testing" @click="handleTest">测试浏览器</el-button>
         </el-form-item>
       </el-form>
 
@@ -198,7 +198,7 @@
         <!-- 日志流 -->
         <el-collapse v-model="logPanelOpen" class="mt-16 log-collapse">
           <el-collapse-item title="详细日志流" name="logs">
-            <div class="log-stream" ref="logStreamRef">
+            <div ref="logStreamRef" class="log-stream">
               <div
                 v-for="(log, i) in (runningTask && runningTask.recent_logs || [])"
                 :key="i"

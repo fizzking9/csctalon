@@ -22,7 +22,7 @@
     </el-card>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe @row-click="goDetail" style="cursor: pointer">
+      <el-table v-loading="loading" :data="list" border stripe style="cursor: pointer" @row-click="goDetail">
         <el-table-column prop="name" label="周报看板名" show-overflow-tooltip min-width="220" />
         <el-table-column label="周次" width="220">
           <template #default="{ row }">{{ formatDate(row.week_start) }} ~ {{ formatDate(row.week_end) }}</template>

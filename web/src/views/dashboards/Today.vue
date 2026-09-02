@@ -21,7 +21,7 @@
           style="width: 150px"
           @change="onDateChange"
         />
-        <el-button size="small" @click="loadAll({ force: true })" :loading="loading">
+        <el-button size="small" :loading="loading" @click="loadAll({ force: true })">
           <el-icon><Refresh /></el-icon>刷新
         </el-button>
         <el-tag v-if="lastUpdate && showRealtimeTag" size="small" effect="plain" type="info">
@@ -75,7 +75,7 @@
           <span v-if="inc.is_recurring" class="impact-recur-mark">周期</span>
           {{ inc.title }}
         </el-tag>
-        <el-link v-if="activeIncidents.length > 4" type="primary" :underline="false" @click="goToImpactSection" style="margin-left:4px">
+        <el-link v-if="activeIncidents.length > 4" type="primary" :underline="false" style="margin-left:4px" @click="goToImpactSection">
           +{{ activeIncidents.length - 4 }} 更多
         </el-link>
       </div>
@@ -263,7 +263,7 @@
             <div class="rs-title">成功率解读</div>
             <div class="rs-row"><span class="rs-dot" style="background:#16a34a"></span>达标 (≥38%)</div>
             <div class="rs-row"><span class="rs-dot" style="background:#ca8a04"></span>预警 (30%-38%)</div>
-            <div class="rs-row"><span class="rs-dot" style="background:#dc2626"></span>告警 (<30%)</div>
+            <div class="rs-row"><span class="rs-dot" style="background:#dc2626"></span>告警 (&lt;30%)</div>
             <div class="rs-hint">
               {{ Number(recoveryData.kpi.success_rate || 0) >= 38 ? '当前挽回率达标,继续保持' : (Number(recoveryData.kpi.success_rate || 0) >= 30 ? '挽回率处于预警区间,请关注重点原因' : '挽回率偏低,需主管介入') }}
             </div>
@@ -583,7 +583,7 @@
                   <span class="score-tip-cat">归类</span>
                   <span>{{ row.hr_category }} ({{ row.is_management ? '管理岗·跨类全豁免' : '本职·按专项系数' }})</span>
                 </div>
-                <div class="score-tip-note" v-if="row._calc_note">
+                <div v-if="row._calc_note" class="score-tip-note">
                   <div v-if="row._calc_note.sessions_merge">• {{ row._calc_note.sessions_merge }}</div>
                   <div v-if="row._calc_note.sn_merge_rule">• {{ row._calc_note.sn_merge_rule }}</div>
                   <div v-if="row._calc_note.weight_rule">• {{ row._calc_note.weight_rule }}</div>

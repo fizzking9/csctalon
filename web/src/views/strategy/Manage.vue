@@ -24,7 +24,7 @@
     </el-card>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe>
+      <el-table v-loading="loading" :data="list" border stripe>
         <el-table-column prop="title" label="标题" min-width="180" show-overflow-tooltip />
         <el-table-column label="分类" width="110">
           <template #default="{ row }">

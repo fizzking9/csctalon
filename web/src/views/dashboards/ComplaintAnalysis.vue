@@ -287,7 +287,7 @@
               <el-button size="small" @click="loadExternalDetail">刷新</el-button>
             </div>
           </template>
-          <el-table :data="externalDetail" v-loading="extDetailLoading" border stripe size="small" max-height="400">
+          <el-table v-loading="extDetailLoading" :data="externalDetail" border stripe size="small" max-height="400">
             <el-table-column label="投诉日期" width="100" sortable>
               <template #default="{ row }">{{ formatTime(row.complaint_date) }}</template>
             </el-table-column>
@@ -386,7 +386,7 @@
               <el-button size="small" @click="loadMerchantDetail">刷新</el-button>
             </div>
           </template>
-          <el-table :data="merchantDetail" v-loading="merDetailLoading" border stripe size="small" max-height="400">
+          <el-table v-loading="merDetailLoading" :data="merchantDetail" border stripe size="small" max-height="400">
             <el-table-column label="时间" width="120" sortable>
               <template #default="{ row }">{{ formatTime(row.time) }}</template>
             </el-table-column>
@@ -582,7 +582,7 @@
               </div>
             </div>
           </template>
-          <el-table :data="backlogItems" v-loading="backlogLoading" border stripe size="small" max-height="420">
+          <el-table v-loading="backlogLoading" :data="backlogItems" border stripe size="small" max-height="420">
             <el-table-column prop="ticket_no" label="工单号" width="150" show-overflow-tooltip />
             <el-table-column label="来源" width="90">
               <template #default="{ row }">

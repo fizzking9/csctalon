@@ -15,7 +15,7 @@
               </template>
             </el-input>
           </div>
-          <el-table :data="list" v-loading="loading" border stripe>
+          <el-table v-loading="loading" :data="list" border stripe>
             <el-table-column prop="id" label="ID" width="70" />
             <el-table-column prop="username" label="账号" width="140" />
             <el-table-column prop="display_name" label="姓名" width="120" />
@@ -57,7 +57,7 @@
             </el-select>
             <el-button :icon="Refresh" @click="loadRegistrations">刷新</el-button>
           </div>
-          <el-table :data="regList" v-loading="regLoading" border stripe>
+          <el-table v-loading="regLoading" :data="regList" border stripe>
             <el-table-column prop="id" label="ID" width="70" />
             <el-table-column prop="desired_username" label="期望账号" width="120" />
             <el-table-column prop="desired_display_name" label="期望姓名" width="110" />

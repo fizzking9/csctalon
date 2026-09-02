@@ -20,7 +20,7 @@
               <el-button :icon="Refresh" text @click="loadTags">刷新</el-button>
             </div>
           </template>
-          <el-table :data="tags" v-loading="loading" border stripe>
+          <el-table v-loading="loading" :data="tags" border stripe>
             <el-table-column prop="tag_name" label="标签名" />
             <el-table-column label="类型" width="100">
               <template #default="{ row }">
@@ -37,7 +37,7 @@
       <el-col :xs="24" :md="8">
         <el-card>
           <template #header><span style="font-weight: 600">标签统计(激活SN数)</span></template>
-          <el-table :data="stats" v-loading="statsLoading" border stripe size="small">
+          <el-table v-loading="statsLoading" :data="stats" border stripe size="small">
             <el-table-column prop="tag_name" label="标签" />
             <el-table-column prop="sn_count" label="SN数" width="80" align="right" />
           </el-table>
@@ -53,7 +53,7 @@
           <el-button :icon="Refresh" text @click="loadBatches">刷新</el-button>
         </div>
       </template>
-      <el-table :data="batches" v-loading="batchesLoading" border stripe>
+      <el-table v-loading="batchesLoading" :data="batches" border stripe>
         <el-table-column prop="batch_no" label="批次号" width="200" />
         <el-table-column prop="tag_name" label="标签" width="120" />
         <el-table-column prop="title" label="标题" show-overflow-tooltip />

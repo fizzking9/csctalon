@@ -20,6 +20,12 @@ paths = [
     '''^\.gitleaks\.toml$''',
     '''package-lock\.json$''',
     '''yarn\.lock$''',
+    # CI 工作流: postgres service 测试密码(非业务凭证, 与 config.py 默认一致)。
+    # 仅用于 CI 隔离测试库, 生产走 .env 注入; 属于测试基础设施豁免, 不违反 OPS-11。
+    '''^\.gitea/workflows/.*\.yml$''',
+    # 后端测试: 测试用的假手机号/假数据(如 13812345678), 非真实凭证。
+    # 测试文件可能构造各种"像凭证"的样例数据, 豁免避免误报拖慢开发。
+    '''^backend/tests/.*\.py$''',
 ]
 # 占位符/示例值不报警
 # 注意: admin123/csctalon123 已从全局 allowlist 移除(2026-08-20 审计 OPS-11):

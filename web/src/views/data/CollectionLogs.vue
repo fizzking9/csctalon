@@ -21,7 +21,7 @@
 
     <!-- 日志表格 -->
     <el-card :shadow="embedded ? 'never' : 'always'">
-      <el-table :data="list" v-loading="loading" border stripe size="small" max-height="540" :max-height="tableMaxHeight">
+      <el-table v-loading="loading" :data="list" border stripe size="small" :max-height="tableMaxHeight">
         <el-table-column label="来源" width="90" fixed>
           <template #default="{ row }">
             <el-tag :type="sourceTagType(row.source)" size="small">{{ row.source_label }}</el-tag>

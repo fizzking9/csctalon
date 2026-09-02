@@ -54,7 +54,7 @@
           <el-button :icon="Refresh" text @click="loadUnmatched">刷新</el-button>
         </div>
       </template>
-      <el-table :data="unmatchedList" v-loading="loading" border stripe size="small">
+      <el-table v-loading="loading" :data="unmatchedList" border stripe size="small">
         <el-table-column prop="refund_no" label="退费单号" width="220" />
         <el-table-column prop="platform_order_no" label="平台订单号" width="200" show-overflow-tooltip />
         <el-table-column prop="device_sn" label="设备SN" width="160" />

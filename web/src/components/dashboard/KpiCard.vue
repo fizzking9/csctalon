@@ -13,7 +13,7 @@
     </div>
     <div class="kpi-value">
       <template v-if="money">{{ fmtMoney(value) }}</template>
-      <template v-else>{{ fmtNum(value) }}<span class="kpi-unit" v-if="unit">{{ unit }}</span></template>
+      <template v-else>{{ fmtNum(value) }}<span v-if="unit" class="kpi-unit">{{ unit }}</span></template>
     </div>
     <!-- 接待量专用追加行: 接待数(去重设备近似独立客户人数) -->
     <div v-if="deviceCount != null" class="kpi-device-sub">

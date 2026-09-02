@@ -48,25 +48,25 @@
         <!-- 汇总 -->
         <el-row :gutter="16" class="mb-16">
           <el-col :span="6">
-            <el-card shadow="hover" v-loading="summaryLoading">
+            <el-card v-loading="summaryLoading" shadow="hover">
               <div class="stat-label">充值笔数</div>
               <div class="stat-value">{{ summary.recharge_count || 0 }}</div>
             </el-card>
           </el-col>
           <el-col :span="6">
-            <el-card shadow="hover" v-loading="summaryLoading">
+            <el-card v-loading="summaryLoading" shadow="hover">
               <div class="stat-label">总金额(¥)</div>
               <div class="stat-value">{{ Number(summary.total_amount || 0).toFixed(2) }}</div>
             </el-card>
           </el-col>
           <el-col :span="6">
-            <el-card shadow="hover" v-loading="summaryLoading">
+            <el-card v-loading="summaryLoading" shadow="hover">
               <div class="stat-label">已用流量</div>
               <div class="stat-value">{{ summary.used_traffic_human || '-' }}</div>
             </el-card>
           </el-col>
           <el-col :span="6">
-            <el-card shadow="hover" v-loading="summaryLoading">
+            <el-card v-loading="summaryLoading" shadow="hover">
               <div class="stat-label">剩余流量</div>
               <div class="stat-value">{{ summary.remaining_traffic_human || '-' }}</div>
             </el-card>
@@ -75,7 +75,7 @@
 
         <!-- 列表 -->
         <el-card shadow="never">
-          <el-table :data="list" v-loading="loading" border stripe max-height="560">
+          <el-table v-loading="loading" :data="list" border stripe max-height="560">
             <el-table-column prop="recharge_order_no" label="充值订单号" width="200" show-overflow-tooltip />
             <el-table-column prop="device_sn" label="设备SN" width="180" show-overflow-tooltip />
             <el-table-column prop="package_name" label="套餐" min-width="180" show-overflow-tooltip />

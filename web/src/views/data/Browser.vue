@@ -46,7 +46,7 @@
       </div>
 
       <!-- 右侧主区域 -->
-      <div class="main-area" v-if="currentSource">
+      <div v-if="currentSource" class="main-area">
         <!-- 占位数据源:规划中,暂未实现 -->
         <div v-if="isPlaceholder" class="placeholder-area">
           <el-empty :image-size="140" description="该数据源正在规划中，暂未实现">
@@ -56,7 +56,7 @@
         </div>
 
         <!-- 数据汇总卡片 -->
-        <div class="summary-cards" v-if="summary">
+        <div v-if="summary" class="summary-cards">
           <div class="summary-item">
             <span class="summary-label">总记录数</span>
             <span class="summary-value">{{ summary.total_count.toLocaleString() }}</span>
@@ -78,7 +78,7 @@
         </div>
 
         <!-- 导入记录列表 -->
-        <div class="upload-section" v-if="uploadRecords.length">
+        <div v-if="uploadRecords.length" class="upload-section">
           <div class="section-header">
             <el-icon><Upload /></el-icon>
             <span class="section-title">导入记录</span>
@@ -102,7 +102,7 @@
         </div>
 
         <!-- 表格区域 -->
-        <div class="table-area" v-if="!isPlaceholder">
+        <div v-if="!isPlaceholder" class="table-area">
           <div class="table-header">
             <div class="header-info">
               <el-icon><Database /></el-icon>
@@ -168,7 +168,7 @@
       </div>
 
       <!-- 空状态 -->
-      <div class="empty-area" v-else>
+      <div v-else class="empty-area">
         <el-empty description="请选择一个数据源查看数据" :image-size="120">
           <template #image><el-icon size="64"><Database /></el-icon></template>
         </el-empty>

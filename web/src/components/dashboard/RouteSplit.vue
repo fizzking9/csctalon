@@ -55,7 +55,7 @@
     </el-row>
 
     <!-- 四路堆叠条 -->
-    <div class="stack-wrap mt-8" v-if="!compact || stackSegs.length">
+    <div v-if="!compact || stackSegs.length" class="stack-wrap mt-8">
       <div class="stack-bar">
         <template v-for="(seg, k) in stackSegs" :key="k">
           <div class="stack-seg"

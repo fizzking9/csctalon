@@ -1,6 +1,7 @@
 """分析查询服务 - 4 大看板的数据查询逻辑"""
 
 import datetime as _dt
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -8,6 +9,9 @@ from sqlalchemy import and_, case, func, literal, or_, select, text, union
 from sqlalchemy.orm import Session
 
 from app.models.cs_record import CsRecord
+
+# 模块级 logger(供全模块使用, 包括 8622/8696 行的 logger.warning)
+logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
 # 2026-08-14: 投诉登记节点下的外部投诉/卡商群投诉两个文件暂不纳入

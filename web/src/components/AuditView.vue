@@ -22,7 +22,7 @@
             <el-option :value="200" label="200 条" />
             <el-option :value="500" label="500 条" />
           </el-select>
-          <el-button type="primary" :icon="Refresh" size="small" @click="loadTimeline" :disabled="!hasSubject">刷新</el-button>
+          <el-button type="primary" :icon="Refresh" size="small" :disabled="!hasSubject" @click="loadTimeline">刷新</el-button>
         </div>
       </div>
       <div class="av-header-row av-header-row--search">
@@ -210,7 +210,7 @@
           <div class="av-sub-section av-traffic-section">
             <div class="av-sub-title">
               实时流量
-              <el-button size="small" type="primary" plain :loading="trafficLoading" @click="queryTraffic" style="margin-left: 8px">查询实时流量</el-button>
+              <el-button size="small" type="primary" plain :loading="trafficLoading" style="margin-left: 8px" @click="queryTraffic">查询实时流量</el-button>
             </div>
             <div v-if="trafficInfo" class="av-traffic-result">
               <template v-if="trafficInfo.device_sn">

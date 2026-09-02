@@ -1,12 +1,12 @@
 <template>
   <div class="common-list-table">
     <el-table
-      :data="list"
       v-loading="loading"
+      :data="list"
       border
       stripe
-      @row-click="(row) => $emit('view', row)"
       style="cursor: pointer"
+      @row-click="(row) => $emit('view', row)"
     >
       <el-table-column
         v-for="col in columns"

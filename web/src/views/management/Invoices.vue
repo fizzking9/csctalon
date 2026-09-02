@@ -22,7 +22,7 @@
           </div>
         </el-card>
         <el-card>
-          <el-table :data="invoices" v-loading="loading" border stripe @row-click="openEditInvoice" style="cursor: pointer">
+          <el-table v-loading="loading" :data="invoices" border stripe style="cursor: pointer" @row-click="openEditInvoice">
             <el-table-column prop="invoice_no" label="发票号码" width="160" />
             <el-table-column prop="invoice_type" label="类型" width="80" />
             <el-table-column prop="seller_name" label="销方" show-overflow-tooltip />
@@ -48,7 +48,7 @@
 
       <el-tab-pane label="报销单" name="reimburse">
         <el-card>
-          <el-table :data="reimbursements" v-loading="rbLoading" border stripe>
+          <el-table v-loading="rbLoading" :data="reimbursements" border stripe>
             <el-table-column prop="batch_no" label="报销单号" width="200" />
             <el-table-column prop="title" label="标题" show-overflow-tooltip />
             <el-table-column label="总金额" width="110" align="right">
@@ -89,7 +89,7 @@
           accept="image/png,image/jpeg,image/jpg,image/bmp"
           drag
         >
-          <el-icon class="el-icon--upload" v-if="!qrDecoding"><UploadFilled /></el-icon>
+          <el-icon v-if="!qrDecoding" class="el-icon--upload"><UploadFilled /></el-icon>
           <el-icon v-else class="el-icon--upload is-loading"><Loading /></el-icon>
           <div class="el-upload__text">
             <span v-if="qrDecoding">正在解码...</span>

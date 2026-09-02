@@ -9,7 +9,7 @@
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, func, or_, select
 
 from app.api.deps import AdminOrSupervisor, CurrentUser, DBSession
 from app.models.dept_info_sync import DeptInfoSync, SyncCategory, SyncPriority, SyncStatus

@@ -24,7 +24,7 @@
     </el-card>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe @row-click="goDetail" style="cursor: pointer">
+      <el-table v-loading="loading" :data="list" border stripe style="cursor: pointer" @row-click="goDetail">
         <el-table-column label="优先级" width="90">
           <template #default="{ row }">
             <el-tag :type="priorityType(row.priority)" size="small">{{ priorityLabel(row.priority) }}</el-tag>

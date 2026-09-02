@@ -9,7 +9,7 @@
         <el-tag size="small" :type="grainTagType" effect="plain" style="margin-left: 8px">{{ grainLabel }}</el-tag>
       </div>
       <FilterBar
-        v-model:modelValue="quickGrainOpt"
+        v-model:model-value="quickGrainOpt"
         v-model:range="customDateRange"
         :quick-options="grainQuickOptions"
         :show-custom="true"
@@ -49,7 +49,7 @@
     <section class="section-card mb-20">
       <SectionHeader :title="'核心指标'" :sub="'对比' + compareName + '同时段 · ' + periodName" />
       <el-row :gutter="10">
-        <el-col :xs="12" :sm="8" :md="4" v-for="c in kpiCards" :key="c.key">
+        <el-col v-for="c in kpiCards" :key="c.key" :xs="12" :sm="8" :md="4">
           <KpiCard
             :label="c.label"
             :value="c.value"
@@ -277,7 +277,7 @@
     </section>
 
     <!-- 模块5: 退款挽回专项分析 -->
-    <section class="section-card mb-24" v-if="hasRecovery">
+    <section v-if="hasRecovery" class="section-card mb-24">
       <SectionHeader title="退款挽回专项分析" :sub="`${periodName} · 成功率统计`">
         <template #extra>
           <el-tag size="small" effect="dark" type="danger" style="margin-right:6px">{{ recoveryData.date }}~{{ recoveryData.date_end || recoveryData.date }}</el-tag>
@@ -402,7 +402,7 @@
             <div class="kpi-mini-label" style="color:#dc2626">外部投诉</div>
             <div class="kpi-mini-value" style="color:#dc2626">{{ formatNum(complaintSummaryData.external?.total) }}</div>
             <div class="kpi-mini-hint">点击筛选明细</div>
-            <div class="kpi-mini-suppl" v-if="supplExternal.total">315补充 {{ formatNum(supplExternal.total) }}条(已关联 {{ formatNum(supplExternal.matched) }})</div>
+            <div v-if="supplExternal.total" class="kpi-mini-suppl">315补充 {{ formatNum(supplExternal.total) }}条(已关联 {{ formatNum(supplExternal.matched) }})</div>
           </div>
         </el-col>
       </el-row>

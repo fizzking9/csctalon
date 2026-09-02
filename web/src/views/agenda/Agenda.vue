@@ -23,7 +23,7 @@
             </div>
           </div>
 
-          <el-table :data="items" v-loading="loading" border stripe>
+          <el-table v-loading="loading" :data="items" border stripe>
             <el-table-column label="类别" width="110">
               <template #default="{ row }">
                 <el-tag :type="catType(row.category)" size="small" effect="plain">{{ row.category }}</el-tag>
@@ -58,7 +58,7 @@
             <span class="page-sub">站内通知与提醒</span>
             <el-button v-if="unread" link type="primary" @click="handleMarkAll">全部已读</el-button>
           </div>
-          <el-table :data="notifications" v-loading="notifLoading" border stripe>
+          <el-table v-loading="notifLoading" :data="notifications" border stripe>
             <el-table-column label="" width="60" align="center">
               <template #default="{ row }">
                 <el-badge is-dot :hidden="row.is_read" />

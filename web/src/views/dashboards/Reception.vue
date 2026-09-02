@@ -4,7 +4,7 @@
     <div class="flex-between mb-16">
       <div class="page-title" style="margin: 0">接待分析 <el-tag size="small" type="warning" effect="plain" style="margin-left: 8px">对齐周报</el-tag></div>
       <FilterBar
-        v-model:modelValue="rangeMode"
+        v-model:model-value="rangeMode"
         v-model:range="customRange"
         :quick-options="receptionQuickOptions"
         date-picker-type="daterange"
