@@ -21,17 +21,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码 (显式 clone)
-        # 仓库公开, 无需凭据。runner(:host) 工作目录不保证含 .git,
-        # 显式 clone 到固定目录最可靠。127.0.0.1 = 群晖本机(Gitea 所在)
+        # 仓库公开, 无需凭据。clone 到 /workspace(宿主机共享目录, runner 容器内视角),
+        # 这样 docker run(daemon=宿主机) 能挂载到同一份代码。
+        # 宿主机绝对路径 = /vol2/@appcenter/gitea-runner/workspace/ci-repo
         run: |
-          rm -rf /tmp/ci-repo
-          git clone --quiet http://127.0.0.1:3000/tanzk/csctalon.git /tmp/ci-repo
-          cd /tmp/ci-repo && git log --oneline -1
+          rm -rf /workspace/ci-repo
+          git clone --quiet http://127.0.0.1:3000/tanzk/csctalon.git /workspace/ci-repo
+          cd /workspace/ci-repo && git log --oneline -1
+          ls .gitleaks.toml
 
       - name: gitleaks scan (docker)
         run: |
-          # 用本地 gitleaks 镜像全量扫描(需能访问 docker hub, 已验证可用)
+          # docker run 挂载的是宿主机视角路径(daemon 解析), 必须用宿主机绝对路径
           docker run --rm \
-            -v /tmp/ci-repo:/repo -w /repo \
+            -v /vol2/@appcenter/gitea-runner/workspace/ci-repo:/repo -w /repo \
             zricethezav/gitleaks:latest \
             detect --source . --config .gitleaks.toml --redact --no-banner
