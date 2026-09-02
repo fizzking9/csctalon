@@ -18,6 +18,7 @@ from app.api.v1 import (
     dept_info_syncs,
     devices,
     doc_sync,
+    external,
     fetch,
     groups,
     incidents,
@@ -110,4 +111,5 @@ api_router.include_router(miniapp.router)
 api_router.include_router(sync_complaints.router)
 api_router.include_router(sync_manual_refunds.router)
 api_router.include_router(doc_sync.router)
+api_router.include_router(external.router)
 api_router.include_router(site_info.router)

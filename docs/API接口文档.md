@@ -61,6 +61,7 @@
 | 缓存管理 | `/system/cache` | cache_admin.py | 缓存信息/重建 |
 | 微信 | `/wechat` | wechat.py | 扫码注册/登录/审批 |
 | 小程序 | `/miniapp` | miniapp.py | 精简看板/采集触发 |
+| 外部只读 | `/external` | external.py | 对外只读开放平台(token+scope, 三核心+简报) |
 
 ## 二、核心接口详情
 
@@ -267,6 +268,33 @@
 | GET | `/miniapp/sync/status` | 查询当前采集任务进度，仅管理员 |
 | POST | `/miniapp/sync/trigger` | 超级管理员启动数据采集（BMS+SCRM 并发，`time_range`：`incremental`/`today`），仅管理员 |
 
+### 2.11 外部只读开放平台 `/external`
+
+供 workbuddy 等外部工具用 **token + scope** 拉取经营数据/简报（详见 `外部只读数据接入规范.md`）。
+鉴权：`Authorization: Bearer <token>`（token 由系统管理员在「系统管理 → 外部接入」生成并分发；库中仅存 hash）。
+默认 `EXTERNAL_API_ENABLED=false` 时外部端点返回 503；需在 `.env` 开启。
+
+**对外只读端点（外部 token，非内部 JWT）：**
+
+| 方法 | 路径 | 所需 scope | 说明 |
+|---|---|---|---|
+| GET | `/external/reception` | `reception` | 当日/指定日接待量 + 服务设备数 + 环比（`date` 缺省今天，北京时间） |
+| GET | `/external/refund` | `refund` | 退款笔数/金额（四路经营合计）+ 当日完成退款 + 实际现金流 E；金额单位=元 |
+| GET | `/external/complaint` | `complaint` | 投诉量（三表并集，落当日） |
+| GET | `/external/brief` | `brief` | 一键经营简报，`period=daily/weekly/monthly`；含接待专项/退款(四路+涉诉率)/投诉(三源×登记/处理/积压) |
+
+**管理端点（内部 JWT，仅 admin）：**
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/external/tokens` | token 列表（不含明文，仅 prefix） |
+| POST | `/external/tokens` | 生成 token（明文仅此一次返回）；body：`{name, scopes[], rate_limit_per_min?, expires_at?}` |
+| PATCH | `/external/tokens/{id}` | 更新 name/scopes/rate_limit_per_min/enabled |
+| POST | `/external/tokens/{id}/revoke` | 吊销（软删，即时生效） |
+| GET | `/external/config` | 启用状态 + 默认限频 + 可用 scope |
+
+**错误**：`503`（未启用）/ `401`（token 无效/吊销/过期）/ `403`（scope 不足）/ `429`（限频）。
+
 ## 三、通用约定
 
 ### 3.1 分页
@@ -298,4 +326,4 @@ GET /xxx?page=1&page_size=20
 }
 ```
 
-常见状态码：200 成功 / 201 创建 / 400 参数错误 / 401 未认证 / 403 无权限 / 404 不存在 / 500 服务器错误
+常见状态码：200 成功 / 201 创建 / 400 参数错误 / 401 未认证 / 403 无权限 / 404 不存在 / 429 请求过多(限频) / 500 服务器错误

@@ -398,6 +398,12 @@ const routes = [
         component: () => import('@/views/system/SyncSettings.vue'),
         meta: { title: '同步设置', icon: 'Setting', admin: true, hidden: true },
       },
+      {
+        path: 'system/external-access',
+        name: 'SystemExternalAccess',
+        component: () => import('@/views/system/ExternalAccess.vue'),
+        meta: { title: '外部接入', icon: 'Key', admin: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },

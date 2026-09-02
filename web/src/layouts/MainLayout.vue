@@ -118,6 +118,7 @@
             <span v-else>事务通知</span>
           </el-menu-item>
           <el-menu-item index="/system/cache">缓存管理</el-menu-item>
+          <el-menu-item index="/system/external-access">外部接入</el-menu-item>
         </el-sub-menu>
       </el-menu>
     </el-aside>

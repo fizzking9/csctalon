@@ -95,6 +95,12 @@ class Settings(BaseSettings):
     # 为空时同步接口返回 503;请配置强随机串并告知 workbuddy 以 Authorization: Bearer <token> 调用。
     WORKBUDDY_SYNC_TOKEN: str = ""
 
+    # ── 外部只读开放平台(见 docs/arch/A-20260902-021 LOCKED) ──
+    # 是否启用 /api/v1/external 只读接口。false 时外部端点一律 503(默认关闭, 需显式开启)。
+    EXTERNAL_API_ENABLED: bool = False
+    # 全局默认限频(次/分钟): token 未配 rate_limit_per_min 时使用(每半小时 1 次绰绰有余)。
+    EXTERNAL_RATE_LIMIT_DEFAULT_PER_MIN: int = 60
+
     # 跨域(局域网部署,允许内网访问)
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 

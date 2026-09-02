@@ -29,6 +29,7 @@ from app.models.device_combo import DeviceCombo  # noqa: F401
 from app.models.doc_sync_config import DocSyncConfig  # noqa: F401
 from app.models.expense import ExpenseInvoice, Reimbursement, ReimbursementItem  # noqa: F401
 from app.models.external_complaint import ExternalComplaint  # noqa: F401
+from app.models.external_token import ExternalAccessToken  # noqa: F401
 from app.models.group import Group, GroupLeadershipHistory, PersonGroupMembership  # noqa: F401
 from app.models.incident import Incident, IncidentFollowup  # noqa: F401
 from app.models.ingest_mode_config import IngestModeConfig  # noqa: F401
@@ -111,6 +112,7 @@ __all__ = [
     "DocSyncConfig",
     "ExpenseInvoice",
     "ExternalComplaint",
+    "ExternalAccessToken",
     "Group",
     "GroupLeadershipHistory",
     "PersonGroupMembership",
