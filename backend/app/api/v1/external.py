@@ -18,12 +18,15 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Query
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, DBSession
+from app.api.v1.complaints import _BACKLOG_DONE_SET, _external_done_sns
 from app.core.config import settings
-from app.core.redis_client import cached_call
+from app.core.redis_client import cache_ttl_for, cached_call
+from app.models.card_complaint import CardComplaint
+from app.models.external_complaint import ExternalComplaint
 from app.models.external_token import ExternalAccessToken
 from app.models.person import Person
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
@@ -43,12 +46,40 @@ router = APIRouter(prefix="/external", tags=["外部只读开放平台"])
 
 TZ_CN = _dt.timezone(_dt.timedelta(hours=8))
 
-# 投诉工单"已完成"状态集合(与 complaints.complaint_summary 一致)
-_DONE_STATUS = ("已结案", "已完成", "完成", "已解决", "已回复", "已反馈", "已关闭", "终止", "已终止")
+# 投诉"已完成"状态集合 — 单一来源: 复用 complaints._BACKLOG_DONE_SET(避免两处集合漂移)
+_DONE_STATUS = _BACKLOG_DONE_SET
+
+# 归一化后可能判为"已完成"的非完成态集合(与 complaints._norm_status 语义一致, 2026-08-25):
+#   处理中类 / 待处理类状态 + 空状态, 若存在真实完成(finish>=register+3min) → _norm_status 判为已完成 → 不进积压。
+_NORM_DONE_CANDIDATE_STATUS = {
+    # 处理中类
+    "处理中", "跟进中", "跟进", "进行中",
+    # 待处理类
+    "待处理", "未处理", "待分派", "pending", "待跟进",
+}
+
+# 真实完成判定 = finish_time 晚于 register_time ≥ 3 分钟(SQL 层表达, 与 complaints._is_real_finish 一致)
+_REAL_FINISH_INTERVAL_SECS = 180
 
 
 def _now_cn() -> datetime:
     return datetime.now(TZ_CN)
+
+
+def _valid_date_or_400(date: str | None) -> str | None:
+    """校验 date 参数(YYYY-MM-DD)。非法 → 400(架构 §2.1/§八: 非法格式→400)。
+
+    date 仅接受"纯日期 YYYY-MM-DD"(单日/窗口起点由 _resolve_windows 按北京时区解释);
+    传 None 或非法格式统一抛 400, 避免落入聚合层 ValueError → 500。
+    """
+    if date is None:
+        return None
+    d = (date or "").strip()
+    try:
+        _dt.date.fromisoformat(d)
+    except (ValueError, TypeError):
+        raise HTTPException(400, f"date 参数非法: {date!r}, 应为 YYYY-MM-DD")
+    return d
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -90,6 +121,7 @@ def external_reception(
     row = _auth(db, authorization)
     S.require_scope(row, "reception")
     S.record_external_access(db, row, "reception")
+    date = _valid_date_or_400(date)
     kpi = _kpi(db, date)
     return R(data={
         "date": kpi.get("date"),
@@ -108,6 +140,7 @@ def external_refund(
     row = _auth(db, authorization)
     S.require_scope(row, "refund")
     S.record_external_access(db, row, "refund")
+    date = _valid_date_or_400(date)
     kpi = _kpi(db, date)
     return R(data={
         "date": kpi.get("date"),
@@ -134,6 +167,7 @@ def external_complaint(
     row = _auth(db, authorization)
     S.require_scope(row, "complaint")
     S.record_external_access(db, row, "complaint")
+    date = _valid_date_or_400(date)
     kpi = _kpi(db, date)
     return R(data={
         "date": kpi.get("date"),
@@ -163,15 +197,16 @@ def _window(period: str, date: str | None) -> dict:
     """period/date → 时间窗口(架构 §2.2 口径)
 
     daily=当日0点起(实时), date 给定则该整天; weekly=整周(周一起); monthly=整月(未满月则1日到当前)。
-    返回 start/end(YYYY-MM-DD, 供 analytics 按北京时区解释)。
+    返回 start/end(YYYY-MM-DD, 供 analytics 按北京时区解释); grain 供 refund_decision_overview(daily→day, weekly/monthly→week)。
     """
     now = _now_cn()
     today = now.date()
     if period == "daily":
-        d = _dt.date.fromisoformat(date) if date else today
+        d = _valid_date_or_400(date)
+        d = _dt.date.fromisoformat(d) if d else today
         is_realtime = (d == today)
         return {
-            "period": "daily", "date": d.isoformat(),
+            "period": "daily", "date": d.isoformat(), "grain": "day",
             "date_start": f"{d.isoformat()}T00:00:00+08:00",
             "date_end": now.isoformat() if is_realtime else f"{d.isoformat()}T23:59:59+08:00",
             "is_realtime": is_realtime, "start": d.isoformat(), "end": d.isoformat(),
@@ -179,7 +214,7 @@ def _window(period: str, date: str | None) -> dict:
     if period == "weekly":
         monday = today - _dt.timedelta(days=today.weekday())
         return {
-            "period": "weekly",
+            "period": "weekly", "grain": "week",
             "date_start": f"{monday.isoformat()}T00:00:00+08:00",
             "date_end": now.isoformat(), "is_realtime": True,
             "start": monday.isoformat(), "end": today.isoformat(),
@@ -188,7 +223,7 @@ def _window(period: str, date: str | None) -> dict:
     last_day = calendar.monthrange(today.year, today.month)[1]
     is_realtime = today.day != last_day
     return {
-        "period": "monthly",
+        "period": "monthly", "grain": "week",
         "date_start": f"{month_start.isoformat()}T00:00:00+08:00",
         "date_end": now.isoformat() if is_realtime else f"{today.isoformat()}T23:59:59+08:00",
         "is_realtime": is_realtime,
@@ -203,8 +238,10 @@ def _build_brief(db: Session, period: str, date: str | None) -> dict:
     #   end==今天→实时截止 now; 否则整天; cash_routes_today 即同窗口四路+E)
     kpi = cached_call(f"today:kpi:None:{start_s}:{end_s}", 60, A.today_kpi, db, None, start_s, end_s)
     cash = kpi.get("cash_routes_today") or {}
-    # 涉诉率: decision_overview 同窗口(start/end 字符串, 内部自行处理北京时区)
-    dec = A.refund_decision_overview(db, start=start_s, end=end_s)
+    # 涉诉率/四路涉诉金额: refund_decision_overview 同窗口(start/end 字符串), grain 按架构 §2.2 映射
+    #   (daily→day, weekly/monthly→week); 走 cached_call 复用内部 refund:do:* 缓存(架构 §5.4)
+    _do_key = f"refund:do:{start_s}:{end_s}:{win['grain']}"
+    dec = cached_call(_do_key, cache_ttl_for(start_s, end_s, 60), A.refund_decision_overview, db, start_s, end_s, grain=win["grain"])
     summary = dec.get("summary", {}) or {}
     # 投诉增强(三源×registered/handled/backlog)
     complaint = _complaint_enhanced(db, start_s, end_s)
@@ -242,18 +279,26 @@ def _build_brief(db: Session, period: str, date: str | None) -> dict:
 # 投诉增强: 三源(内部/商户号/外部) × registered/handled/backlog
 # ─────────────────────────────────────────────────────────────────────
 def _complaint_enhanced(db: Session, start_s: str, end_s: str) -> dict:
-    """三源 × 登记/完成/积压。
+    """三源 × 登记/完成/积压(口径与 complaints.complaint_summary/backlog 严格一致)。
 
-    口径(与 complaints.complaint_summary/backlog 一致):
-      registered = 窗口内登记的投诉工单(register_time∈窗口) + 315/卡商补充表(complaint_date∈窗口, 并入外部)
-      handled    = 窗口内真实完成的投诉工单(finish_time∈窗口 且 非"同瞬填充")
-      backlog    = 当前未闭环存量: 窗口内登记且归一化状态非已完成(工单)
+      registered = 窗口内登记的投诉工单(register_time∈窗口)
+                   + 315/卡商补充表净新增(complaint_date∈窗口, 减 matched 到窗口内工单的重叠, 并入外部)
+      handled    = 窗口内真实完成的投诉工单(finish_time∈窗口 且 finish >= register+3min,
+                   即 complaints._is_real_finish 语义; 排除同瞬填充/批量覆盖)
+      backlog    = 窗口内登记且"归一化后未闭环"的存量:
+                   状态非已完成 且 非(状态∈处理中/待处理/空 但有真实完成≥3min → _norm_status=已完成)
+                   且 非(外部投诉工单 SN 命中 315 已办结登记 → 视为已处理, _external_done_sns)
     """
     # 北京时区窗口 → naive UTC 边界(timestamptz 列比较正确性, 与 analytics 一致)
     ts, te = S.parse_bj_window(start_s, end_s)
     src = _src_case()
     cat = _cat_case()
     sources = ["内部投诉", "商户号投诉", "外部投诉"]
+    # 真实完成(SQL 表达 = complaints._is_real_finish 的 ≥3min): epoch(finish - register) >= 180s
+    #   注: 不能用 func.make_interval(secs=...) — SQLAlchemy 会把关键字当函数参数名导致编译 TypeError
+    real_finish = ServiceTicket.finish_time.isnot(None) & ServiceTicket.register_time.isnot(None) & (
+        func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) >= _REAL_FINISH_INTERVAL_SECS
+    )
     by_source = []
 
     def _reg_conds(src_cond):
@@ -264,31 +309,69 @@ def _complaint_enhanced(db: Session, start_s: str, end_s: str) -> dict:
             conds.append(ServiceTicket.register_time <= te)
         return conds
 
+    def _fin_conds(src_cond):
+        conds = [cat == "投诉", src_cond, real_finish]
+        if ts:
+            conds.append(ServiceTicket.finish_time >= ts)
+        if te:
+            conds.append(ServiceTicket.finish_time <= te)
+        return conds
+
     for source in sources:
         src_cond = src == source
         # registered: 窗口内登记(register_time)
         reg = db.scalar(
             select(func.count()).select_from(ServiceTicket).where(*_reg_conds(src_cond))
         ) or 0
-        # handled: 窗口内真实完成(finish_time 落窗口且晚于登记, 排除同瞬填充)
-        fin_conds = [cat == "投诉", src_cond, ServiceTicket.finish_time.isnot(None),
-                     ServiceTicket.finish_time > ServiceTicket.register_time]
-        if ts:
-            fin_conds.append(ServiceTicket.finish_time >= ts)
-        if te:
-            fin_conds.append(ServiceTicket.finish_time <= te)
-        fin = db.scalar(select(func.count()).select_from(ServiceTicket).where(*fin_conds)) or 0
-        # backlog: 当前未闭环(状态非已完成)且窗口内登记
+        # handled: 窗口内真实完成(finish 落窗口 且 finish >= register+3min, 对齐 _is_real_finish)
+        fin = db.scalar(
+            select(func.count()).select_from(ServiceTicket).where(*_fin_conds(src_cond))
+        ) or 0
+        # backlog: 窗口内登记 且 归一化后未闭环
+        #   ① 状态非已完成(含空)
+        #   ② 状态∈{处理中/待处理/空} 但已有真实完成(≥3min) → _norm_status=已完成 → 剔除
+        #   ③ 外部投诉工单 SN 命中 315 已办结登记(ext_done_sns) → 视为已处理 → 剔除
         bl_conds = _reg_conds(src_cond) + [
             or_(ServiceTicket.status.is_(None), ServiceTicket.status == "",
-                ~ServiceTicket.status.in_(_DONE_STATUS))
+                ~ServiceTicket.status.in_(_DONE_STATUS)),
+            ~and_(
+                real_finish,
+                or_(
+                    ServiceTicket.status.is_(None),
+                    ServiceTicket.status == "",
+                    ServiceTicket.status.in_(_NORM_DONE_CANDIDATE_STATUS),
+                ),
+            ),
         ]
+        if source == "外部投诉":
+            # 315 登记已办结的 SN 对应的外部投诉工单(状态未同步)不进积压 — 与 complaints._query_backlog_rows 一致
+            ext_done = _external_done_sns(db)
+            if ext_done:
+                bl_conds.append(or_(
+                    ServiceTicket.device_sn.is_(None),
+                    ~ServiceTicket.device_sn.in_(ext_done),
+                ))
         bl = db.scalar(select(func.count()).select_from(ServiceTicket).where(*bl_conds)) or 0
         by_source.append({"source": source, "registered": int(reg), "handled": int(fin), "backlog": int(bl)})
 
-    # 补充表(315/卡商) → 外部投诉 registered(complaint_date 落窗口)
-    from app.models.card_complaint import CardComplaint
-    from app.models.external_complaint import ExternalComplaint
+    # 补充表(315/卡商) → 外部投诉 registered: 净新增 = 窗口内补充记录 - 已 matched 到"窗口内登记工单"的重叠
+    #   (与 complaints.complaint_summary 的 total - overlap 同语义; 避免同一投诉在工单+补充表双计)
+    def _suppl_overlap(model) -> int:
+        """补充记录 matched_ticket_no 指向"窗口内登记的投诉工单"的条数(= 工单侧已计入 registered 的部分)"""
+        sub_conds = [cat == "投诉", ServiceTicket.register_time.isnot(None)]
+        if ts:
+            sub_conds.append(ServiceTicket.register_time >= ts)
+        if te:
+            sub_conds.append(ServiceTicket.register_time <= te)
+        sub = select(ServiceTicket.ticket_no).where(*sub_conds)
+        conds = [model.complaint_date.isnot(None), model.matched_ticket_no.isnot(None),
+                 model.matched_ticket_no.in_(sub)]
+        if ts:
+            conds.append(model.complaint_date >= ts)
+        if te:
+            conds.append(model.complaint_date <= te)
+        return db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
+
     ext_reg = 0
     for model in (ExternalComplaint, CardComplaint):
         conds = [model.complaint_date.isnot(None)]
@@ -296,11 +379,12 @@ def _complaint_enhanced(db: Session, start_s: str, end_s: str) -> dict:
             conds.append(model.complaint_date >= ts)
         if te:
             conds.append(model.complaint_date <= te)
-        ext_reg += db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
-    # 外部投诉桶并入补充表登记
+        suppl_total = db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
+        ext_reg += int(suppl_total) - _suppl_overlap(model)
+    # 外部投诉桶并入补充表净新增(不为负)
     for item in by_source:
         if item["source"] == "外部投诉":
-            item["registered"] = int(item["registered"]) + int(ext_reg)
+            item["registered"] = int(item["registered"]) + max(int(ext_reg), 0)
 
     total = {
         "registered": sum(int(x["registered"]) for x in by_source),
@@ -332,6 +416,10 @@ def _reception_specialty(db: Session, start_s: str, end_s: str) -> list[dict]:
     }
     result = []
     for s in specs:
+        # 组织分配名单(person_specialty_assignments.is_current, 含主/辅专项)
+        # ⚠️ 桶映射: BUCKET 键=6 个正式专项名(与 today_staff_efficiency 的 sp_*/pp_* 内容桶同名)。
+        #   临时专项/名称不匹配的专项会兜底到"咨询接待"桶——与架构 §7.4 风险4 的"unassigned 兜底"理想态
+        #   存在偏差; 当前 DB 无临时专项(6 个正式专项名完全匹配), 故维持现状, 若引入临时专项需改为内容桶映射。
         assignments = list(db.scalars(
             select(PersonSpecialtyAssignment).where(
                 PersonSpecialtyAssignment.specialty_id == s.id,
@@ -381,7 +469,10 @@ def _spec_brief() -> dict:
         "money_unit": "金额单位=元(Numeric(12,2), 2位小数)",
         "period": "daily=当日0点起; weekly=整周(周一起); monthly=整月(未满月则1日到当前)",
         "litigation_ratio": "A路直退涉诉率=涉诉金额/A路(线上直退)金额×100; 涉诉=SN关联投诉工单(外部>商户号>内部) OR 备注含投诉标识; 清退不算",
-        "complaint": "registered=窗口登记; handled=窗口完成(有效finish); backlog=当前未闭环(状态非已完成)",
+        "complaint": ("registered=窗口内新登记(工单按 register_time; 315/卡商补充表按 complaint_date 并"
+                        "入外部桶, 已 matched 到窗口内工单的去重); handled=窗口内真实完成(finish_time∈窗口 且"
+                        "finish 晚于登记 ≥3min, 排除同瞬填充); backlog=窗口内登记且归一化后未闭环(状态非已完成,"
+                        "排除有真实完成≥3min 的待处理; 315 已办结 SN 外部投诉视为已处理)"),
     }
 
 

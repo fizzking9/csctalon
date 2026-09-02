@@ -163,3 +163,34 @@ def test_reception_endpoint_structure(admin_client, db):
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert "reception" in data and "date" in data and "_spec" in data
+
+
+def test_external_invalid_date_returns_400(admin_client, db):
+    """CRITICAL-非法date回归: 三个单日端点 + brief daily 传非法 date → 400(架构 §2.1/§八)。
+
+    旧实现会把非法 date 透传给聚合层抛 ValueError → 500; 修复后须在路由层拦截返回 400。
+    """
+    # 给每个端点配齐对应 scope 的 token
+    tok = {}
+    for scope in ("reception", "refund", "complaint", "brief"):
+        raw, _ = S.generate_token(db, f"d-{scope}", [scope], created_by="admin")
+        tok[scope] = {"Authorization": f"Bearer {raw}"}
+
+    for path, scope in (("/reception", "reception"), ("/refund", "refund"),
+                        ("/complaint", "complaint")):
+        for bad in ("abc", "2026-13-01", "2026/09/01", "2026-9-1"):
+            r = admin_client.get(f"/api/v1/external{path}?date={bad}", headers=tok[scope])
+            assert r.status_code == 400, f"{path} date={bad!r} 应 400, 实得 {r.status_code}"
+    # brief daily 非法 date
+    for bad in ("abc", "2026-13-01", "2026/09/01"):
+        r = admin_client.get(f"/api/v1/external/brief?period=daily&date={bad}", headers=tok["brief"])
+        assert r.status_code == 400, f"brief date={bad!r} 应 400, 实得 {r.status_code}"
+
+
+def test_external_valid_historical_date_ok(admin_client, db):
+    """正向: 合法历史 date(整天, 非实时) → 200(不误伤)。"""
+    raw, _ = S.generate_token(db, "h1", ["reception"], created_by="admin")
+    resp = admin_client.get("/api/v1/external/reception?date=2026-07-01",
+                            headers={"Authorization": f"Bearer {raw}"})
+    assert resp.status_code == 200
+

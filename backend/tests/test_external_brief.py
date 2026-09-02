@@ -9,15 +9,17 @@
 """
 
 import datetime as _dt
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.api.deps import get_current_user
-from app.api.v1.external import _window
+from app.api.v1.external import TZ_CN, _complaint_enhanced, _window
 from app.core.config import settings
 from app.core.database import get_db
 from app.main import app
+from app.models.ticket import ServiceTicket
 from app.models.user import RoleEnum, User
 from app.services import external_service as S
 
@@ -118,3 +120,92 @@ def test_brief_invalid_period(brief_client, db):
     raw, _ = S.generate_token(db, "b1", ["brief"], created_by="admin")
     resp = brief_client.get("/api/v1/external/brief?period=yearly", headers={"Authorization": f"Bearer {raw}"})
     assert resp.status_code == 422
+
+
+# ---- 投诉增强口径(修复审查 CRITICAL): handled 需 finish>=register+3min, backlog 需归一化 ----
+
+_REVIEW_DAY = "2026-07-15"  # 固定历史日(测试库空, 与真实数据无冲突)
+
+
+def _mk_ticket(db, no: str, *, item: str = "商品投诉", status: str | None = "待处理",
+               reg_delta_min: int = 0, fin_delta_min: int | None = None):
+    """构造投诉工单: register_time 固定于 _REVIEW_DAY 00:00(+reg_delta_min), finish 可选(+fin_delta_min)。"""
+    reg = _dt.datetime.strptime(_REVIEW_DAY, "%Y-%m-%d").replace(tzinfo=TZ_CN) + timedelta(minutes=reg_delta_min)
+    fin = reg + timedelta(minutes=fin_delta_min) if fin_delta_min is not None else None
+    db.add(ServiceTicket(
+        ticket_no=no, service_category="投诉", service_item=item, status=status,
+        register_time=reg, finish_time=fin,
+    ))
+    db.flush()
+
+
+def test_complaint_enhanced_handled_requires_real_finish(db):
+    """CRITICAL-1 回归: handled 仅统计 finish>=register+3min 的真实完成(同 _is_real_finish)。
+
+    - T1: finish 晚 2min(<3min, 同瞬填充) → 不计 handled
+    - T2: finish 晚 10min(真实完成)        → 计 handled
+    两单都在窗口内登记(registered=2)。
+    """
+    _mk_ticket(db, "T-R-001", fin_delta_min=2)     # 非真实完成(2min)
+    _mk_ticket(db, "T-R-002", fin_delta_min=10)    # 真实完成(10min)
+    out = _complaint_enhanced(db, _REVIEW_DAY, _REVIEW_DAY)
+    internal = next(x for x in out["by_source"] if x["source"] == "内部投诉")
+    assert internal["registered"] == 2
+    assert internal["handled"] == 1    # 仅 T-R-002
+
+
+def test_complaint_enhanced_backlog_excludes_norm_done(db):
+    """CRITICAL-2 回归: backlog 排除"状态待处理但实际已真实完成(≥3min)"(同 _norm_status)。
+
+    - T1: 状态=待处理, finish 晚 10min(真实完成) → _norm_status=已完成 → 不进 backlog
+    - T2: 状态=待处理, finish=None(真未处理)      → 进 backlog
+    """
+    _mk_ticket(db, "T-R-011", status="待处理", fin_delta_min=10)
+    _mk_ticket(db, "T-R-012", status="待处理", fin_delta_min=None)
+    out = _complaint_enhanced(db, _REVIEW_DAY, _REVIEW_DAY)
+    internal = next(x for x in out["by_source"] if x["source"] == "内部投诉")
+    assert internal["registered"] == 2
+    assert internal["backlog"] == 1    # 仅 T-R-012
+
+
+def test_complaint_enhanced_backlog_done_status_excluded(db):
+    """backlog 基线: 显式已完成状态不进 backlog; 真待处理进。"""
+    _mk_ticket(db, "T-R-021", status="已完成", fin_delta_min=None)
+    _mk_ticket(db, "T-R-022", status="待处理", fin_delta_min=None)
+    out = _complaint_enhanced(db, _REVIEW_DAY, _REVIEW_DAY)
+    internal = next(x for x in out["by_source"] if x["source"] == "内部投诉")
+    assert internal["registered"] == 2
+    assert internal["backlog"] == 1    # 仅 T-R-022
+
+
+def test_complaint_enhanced_external_registered_dedup_matched(db):
+    """CRITICAL-3 回归: 外部投诉 registered 补充表减 matched 重叠(同 complaint_summary)。
+
+    场景(2026-08 实测: 97 工单 + 243 补充, 其中 37 matched 重叠需去重):
+      - 外部投诉工单 T-EXT-1(12315, 窗口内登记)
+      - 补充表记录 matched 到 T-EXT-1(同一投诉两种视角) → 应从 registered 中减掉, 防双计
+      - 补充表记录 matched 到"窗口外"工单(或不 matched) → 保留计外部
+    构造:
+      ec1.complaint_date 窗口内 + matched=T-EXT-1        → 重叠(工单侧已计) → 去重
+      ec2.complaint_date 窗口内 + matched=None           → 净新增 → 计入
+      ec3.complaint_date 窗口内 + matched=窗口外工单号     → 净新增 → 计入(窗口外工单未计)
+    """
+    from app.models.external_complaint import ExternalComplaint
+    # 窗口内登记的外部投诉工单(12315 → 外部桶)
+    _mk_ticket(db, "T-EXT-1", item="12315", status="已完成", fin_delta_min=None)
+    # 补充表: complaint_date 用窗口日(+1min 避开午界)
+    base = _dt.datetime.strptime(_REVIEW_DAY, "%Y-%m-%d").replace(tzinfo=TZ_CN)
+    db.add_all([
+        ExternalComplaint(complaint_no="EC-1", complaint_date=base + timedelta(minutes=1),
+                          matched_ticket_no="T-EXT-1", platform="315"),
+        ExternalComplaint(complaint_no="EC-2", complaint_date=base + timedelta(minutes=2),
+                          matched_ticket_no=None, platform="315"),
+        ExternalComplaint(complaint_no="EC-3", complaint_date=base + timedelta(minutes=3),
+                          matched_ticket_no="T-OUTSIDE-WINDOW", platform="315"),
+    ])
+    db.flush()
+    out = _complaint_enhanced(db, _REVIEW_DAY, _REVIEW_DAY)
+    external = next(x for x in out["by_source"] if x["source"] == "外部投诉")
+    # 工单 1(T-EXT-1) + 补充净新增 2(EC-2/EC-3, EC-1 重叠去重) = 3
+    assert external["registered"] == 3, f"registered={external['registered']}, 期望 3"
+
