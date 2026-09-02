@@ -20,10 +20,13 @@ jobs:
   backend-lint-test:
     runs-on: ubuntu-latest
     steps:
-      - name: 确认代码已检出
+      - name: 检出代码 (显式 clone)
+        # 仓库公开, 无需凭据。runner(:host) 工作目录不保证含 .git,
+        # 显式 clone 到固定目录最可靠。127.0.0.1 = 群晖本机(Gitea 所在)
         run: |
-          test -d .git && echo "✅ 代码已检出: $PWD"
-          git log --oneline -1
+          rm -rf /tmp/ci-repo
+          git clone --quiet http://127.0.0.1:3000/tanzk/csctalon.git /tmp/ci-repo
+          cd /tmp/ci-repo && git log --oneline -1
 
       - name: 启动 postgres 测试库容器
         run: |
@@ -44,7 +47,7 @@ jobs:
       - name: 后端测试 (docker python:3.11-slim)
         run: |
           docker run --rm --network ci-net \
-            -v "$PWD/backend":/app -w /app \
+            -v /tmp/ci-repo/backend:/app -w /app \
             -e TEST_POSTGRES_HOST=ci-pg \
             -e TEST_POSTGRES_PORT=5432 \
             -e TEST_POSTGRES_USER=csctalon \
@@ -70,15 +73,16 @@ jobs:
   frontend-lint-test:
     runs-on: ubuntu-latest
     steps:
-      - name: 确认代码已检出
+      - name: 检出代码 (显式 clone)
         run: |
-          test -d .git && echo "✅ 代码已检出: $PWD"
-          git log --oneline -1
+          rm -rf /tmp/ci-repo
+          git clone --quiet http://127.0.0.1:3000/tanzk/csctalon.git /tmp/ci-repo
+          cd /tmp/ci-repo && git log --oneline -1
 
       - name: 前端 lint + test (docker node:20)
         run: |
           docker run --rm \
-            -v "$PWD/web":/app -w /app \
+            -v /tmp/ci-repo/web:/app -w /app \
             node:20 bash -c "
               set -e
               echo '== npm ci =='
