@@ -1,5 +1,10 @@
 # 可编辑报告看板（ReportTemplate）实现计划
 
+**状态**：LOCKED（v1.0）
+**锁定日期**：20260902
+**锁定脚本**：scripts/lock-arch-docs.sh
+
+
 ## Context
 
 当前周报看板（WeeklyReport）使用**固定10项框架**（`WEEKLY_FRAMEWORK_SECTIONS` 硬编码），`_normalize_framework` 强制对齐这10项，无法增删/调整顺序。专项报告（Report）只有 snapshot JSON，没有看板体验。对照实际周报PDF还发现"组长培训记录"等内容无法加入。

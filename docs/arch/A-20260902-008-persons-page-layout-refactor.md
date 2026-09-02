@@ -1,5 +1,10 @@
 # 人员管理页面布局重构方案
 
+**状态**：LOCKED（v1.0）
+**锁定日期**：20260902
+**锁定脚本**：scripts/lock-arch-docs.sh
+
+
 ## Context(为什么改)
 
 当前 [Persons.vue](file:///Users/tanzk/dev/csctalon/web/src/views/system/Persons.vue) 存在三类体验问题(用户反馈):
