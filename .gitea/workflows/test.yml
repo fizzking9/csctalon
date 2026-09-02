@@ -1,7 +1,12 @@
-# Gitea Actions: 后端 lint + 测试
-# 目的: 落实"AI 协作治理规范" 4.1 铁律 4(不可信原则)——
-#   AI 声称"测试通过"必须经 CI 机器验证, 阻断未过 lint/测试的合并。
-# 在 push / PR 时运行 ruff 静态检查 + pytest(独立 postgres 测试库)。
+# Gitea Actions: 后端 lint + 测试(纯 Docker 方案)
+#
+# ⚠️ 2026-09-02 改造: runner 运行在群晖内网(无法访问 github.com),
+#    原 `uses:` 的 GitHub action(actions/checkout/setup-python/setup-node/cache)
+#    无法下载, job 卡死在 "Set up job"。改为纯本地 docker 执行:
+#    - checkout: runner(:host) 已自动 clone 代码到工作目录
+#    - 后端: docker run postgres:15(测试库) + docker run python:3.11-slim(pytest)
+#    - 前端: docker run node:20(npm ci + lint + vitest)
+#    前提: 群晖可访问 docker hub(已验证 python:3.11-slim/gitleaks 可拉取)
 
 name: backend-test
 
@@ -12,97 +17,75 @@ on:
     branches: [main, master]
 
 jobs:
-  lint-and-test:
+  backend-lint-test:
     runs-on: ubuntu-latest
-    # 为测试提供独立 PostgreSQL 服务(密码仅 CI 内部使用, 非生产凭证)
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: csctalon
-          POSTGRES_PASSWORD: csctalon123
-          POSTGRES_DB: csctalon_test
-        ports:
-          - 5432:5432
-        # 等待 PG 就绪
-        options: >-
-          --health-cmd "pg_isready -U csctalon"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
-    defaults:
-      run:
-        working-directory: backend
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install system libs
-        # pyzbar 依赖系统库 libzbar0(与 backend/Dockerfile 的 apt install 对齐)
+      - name: 确认代码已检出
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libzbar0
+          test -d .git && echo "✅ 代码已检出: $PWD"
+          git log --oneline -1
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('backend/pyproject.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install backend + dev deps
+      - name: 启动 postgres 测试库容器
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          # 不安装 playwright 浏览器二进制(测试不需要浏览器, 仅 import app 链)
+          # 清理残留(失败时)
+          docker rm -f ci-pg 2>/dev/null || true
+          docker network create ci-net 2>/dev/null || true
+          docker run -d --name ci-pg --network ci-net \
+            -e POSTGRES_USER=csctalon \
+            -e POSTGRES_PASSWORD=csctalon123 \
+            -e POSTGRES_DB=csctalon_test \
+            postgres:15
+          # 等待 PG 就绪(最多 30s)
+          for i in $(seq 1 30); do
+            docker exec ci-pg pg_isready -U csctalon && break
+            sleep 1
+          done
 
-      - name: Lint (ruff, 仅测试代码)
-        # 说明: 既有 app/ 存在大量历史 lint 债(2499 项, 如 analytics.py 525 项),
-        #       无法一夜清完, 单独列为治理项。CI 只强制新增测试代码 lint 干净,
-        #       防止既有债务掩盖新引入问题。
-        run: ruff check tests/
+      - name: 后端测试 (docker python:3.11-slim)
+        run: |
+          docker run --rm --network ci-net \
+            -v "$PWD/backend":/app -w /app \
+            -e TEST_POSTGRES_HOST=ci-pg \
+            -e TEST_POSTGRES_PORT=5432 \
+            -e TEST_POSTGRES_USER=csctalon \
+            -e TEST_POSTGRES_PASSWORD=csctalon123 \
+            -e TEST_POSTGRES_DB=csctalon_test \
+            python:3.11-slim bash -c "
+              set -e
+              apt-get update -qq && apt-get install -y -qq libzbar0 libpq-dev gcc >/dev/null 2>&1
+              pip install -q --upgrade pip >/dev/null 2>&1
+              pip install -q -e '.[dev]' >/dev/null 2>&1
+              echo '== ruff (tests/) =='
+              ruff check tests/
+              echo '== pytest =='
+              pytest
+            "
 
-      - name: Run tests (pytest)
-        env:
-          # 连接 CI 提供的 postgres 服务(host=postgres 为 service 容器名)
-          TEST_POSTGRES_HOST: postgres
-          TEST_POSTGRES_PORT: "5432"
-          TEST_POSTGRES_USER: csctalon
-          TEST_POSTGRES_PASSWORD: csctalon123
-          TEST_POSTGRES_DB: csctalon_test
-        run: pytest
+      - name: 清理 postgres 容器
+        run: |
+          docker rm -f ci-pg 2>/dev/null || true
+          docker network rm ci-net 2>/dev/null || true
+          echo "已清理测试容器"
 
   frontend-lint-test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: 确认代码已检出
+        run: |
+          test -d .git && echo "✅ 代码已检出: $PWD"
+          git log --oneline -1
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+      - name: 前端 lint + test (docker node:20)
+        run: |
+          docker run --rm \
+            -v "$PWD/web":/app -w /app \
+            node:20 bash -c "
+              set -e
+              echo '== npm ci =='
+              npm ci
+              echo '== eslint =='
+              npm run lint
+              echo '== vitest =='
+              npm test
+            "
 
-      - name: Install deps
-        run: npm ci
-
-      - name: Lint (eslint)
-        # 前端历史 lint 债已治理至 0 errors(仅少量风格 warning), 强制 error 级别阻断
-        run: npm run lint
-
-      - name: Test (vitest)
-        run: npm test
