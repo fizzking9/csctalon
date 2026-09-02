@@ -13,7 +13,7 @@ from app.models.cs_record import CsRecord
 from app.models.person import Person, PersonAlias
 from app.models.schedule import Attendance, Schedule, ShiftTemplate
 from app.models.ticket import ServiceTicket
-from app.schemas.common import PageBase, R
+from app.schemas.common import R
 
 router = APIRouter(prefix="/schedules", tags=["排班管理"])
 

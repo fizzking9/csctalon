@@ -5,7 +5,7 @@ from pypinyin import Style, lazy_pinyin
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
-from app.api.deps import AdminUser, AdminOrSupervisor, CurrentUser, DBSession
+from app.api.deps import AdminOrSupervisor, AdminUser, CurrentUser, DBSession
 from app.models.data_source import DataSource
 from app.models.group import Group, PersonGroupMembership
 from app.models.person import Person, PersonAlias
@@ -18,13 +18,15 @@ from app.schemas.person import (
     MergeNewRequest,
     MergeRequest,
     PersonAliasOut,
-    PersonDetail,
-    PersonOut,
     PersonUpdate,
     SplitRequest,
 )
 from app.services.audit_timeline import build_person_timeline
-from app.services.person_extractor import count_alias_occurrences, extract_person_aliases, rebuild_unclaimed_aliases
+from app.services.person_extractor import (
+    count_alias_occurrences,
+    extract_person_aliases,
+    rebuild_unclaimed_aliases,
+)
 
 router = APIRouter(prefix="/persons", tags=["系统-人员"])
 
@@ -166,14 +168,14 @@ def _with_alias_count(db: Session, p: Person) -> dict:
     cnt = db.scalar(
         select(func.count()).select_from(PersonAlias).where(PersonAlias.person_id == p.id, PersonAlias.is_system.is_(False))
     ) or 0
-    
+
     # 获取当前分组信息
     current_group = None
     if p.current_group_id:
         g = db.get(Group, p.current_group_id)
         if g:
             current_group = {"id": g.id, "name": g.name}
-    
+
     # 获取当前所有专项(主+辅)
     current_specialties = []
     assigns = list(db.scalars(
@@ -197,7 +199,7 @@ def _with_alias_count(db: Session, p: Person) -> dict:
                     "difficulty_weight": specs[a.specialty_id].difficulty_weight,
                     "workload_ratio": a.workload_ratio,
                 })
-    
+
     out = {
         "id": p.id,
         "display_name": p.display_name,
@@ -259,7 +261,7 @@ def list_persons(
         # 通过 PersonGroupMembership 关联筛选
         stmt = stmt.join(
             PersonGroupMembership,
-            (PersonGroupMembership.person_id == Person.id) & 
+            (PersonGroupMembership.person_id == Person.id) &
             (PersonGroupMembership.group_id == group_id) &
             (PersonGroupMembership.is_current == True)
         )
@@ -334,14 +336,14 @@ def get_person(person_id: int, db: DBSession, _: CurrentUser):
     p = db.get(Person, person_id)
     if not p:
         raise HTTPException(status_code=404, detail="人员不存在")
-    
+
     # 获取当前分组信息
     current_group = None
     if p.current_group_id:
         g = db.get(Group, p.current_group_id)
         if g:
             current_group = {"id": g.id, "name": g.name}
-    
+
     # 获取当前所有专项
     current_specialties = []
     assigns = list(db.scalars(
@@ -366,7 +368,7 @@ def get_person(person_id: int, db: DBSession, _: CurrentUser):
                     "workload_ratio": a.workload_ratio,
                     "effective_from": a.effective_from,
                 })
-    
+
     # 基础信息
     detail = {
         "id": p.id,
@@ -392,7 +394,7 @@ def get_person(person_id: int, db: DBSession, _: CurrentUser):
         "current_group": current_group,
         "current_specialties": current_specialties,
     }
-    
+
     aliases = list(db.scalars(select(PersonAlias).where(PersonAlias.person_id == person_id).order_by(PersonAlias.id)))
     _attach_alias_labels(db, aliases)
     # 注入每个别名在各业务表的出现位置(回答"别名在哪些地方出现")

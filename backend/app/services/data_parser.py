@@ -304,20 +304,20 @@ def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tup
         try:
             with open(path, encoding=enc, newline="") as f:
                 content = f.read()
-            
+
             # 统一换行符
             content = content.replace("\r\n", "\n").replace("\r", "\n")
             physical_lines = content.split("\n")
-            
+
             if physical_lines and physical_lines[-1] == "":
                 physical_lines.pop()
             if not physical_lines:
                 return pd.DataFrame(), enc
-            
+
             # 解析表头
             header = [str(c).replace("\t", "").strip() for c in physical_lines[0].split(',')]
             header_len = len(header)
-            
+
             # 逐行解析数据
             data_rows = []
             i = 1
@@ -326,7 +326,7 @@ def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tup
                 if not line:
                     i += 1
                     continue
-                
+
                 # 场景1: 先修复未闭合的引号问题
                 line = _fix_unclosed_quote(line)
 
@@ -356,7 +356,7 @@ def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tup
                             line = _fix_unclosed_quote(line)
                             fields = _split_fields(line)
                             i += 1  # 跳过已合并的行
-                
+
                 # 场景3: 字段数多于表头,合并多余的字段到最后一个字段
                 # (通常是提交参数等包含JSON的字段,内部有逗号但未加引号)
                 if len(fields) > header_len:
@@ -364,14 +364,14 @@ def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tup
                     extra_fields = fields[header_len - 1:]
                     merged_field = ','.join(extra_fields)
                     fields = fields[:header_len - 1] + [merged_field]
-                
+
                 # 补齐到表头长度
                 if len(fields) < header_len:
                     fields = fields + [""] * (header_len - len(fields))
-                
+
                 data_rows.append(fields)
                 i += 1
-            
+
             df = pd.DataFrame(data_rows, columns=header, dtype=str)
             return df, enc
         except (UnicodeDecodeError, UnicodeError) as e:

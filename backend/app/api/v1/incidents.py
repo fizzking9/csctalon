@@ -12,7 +12,6 @@ from sqlalchemy import func, select
 
 from app.api.deps import AdminOrSupervisor, CurrentUser, DBSession
 from app.models.incident import Incident, IncidentFollowup, IncidentStatus
-from app.models.user import MANAGER_ROLES
 from app.schemas.common import PageBase, R
 
 router = APIRouter(prefix="/incidents", tags=["异常事件登记"])

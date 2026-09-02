@@ -8,6 +8,7 @@ from sqlalchemy import and_, case, func, literal, or_, select, text, union
 from sqlalchemy.orm import Session
 
 from app.models.cs_record import CsRecord
+
 # ═══════════════════════════════════════════════════════════════════
 # 2026-08-14: 投诉登记节点下的外部投诉/卡商群投诉两个文件暂不纳入
 #   系统汇总分析。设置为 False 后,所有 analytics 查询将跳过
@@ -17,18 +18,18 @@ from app.models.cs_record import CsRecord
 # ═══════════════════════════════════════════════════════════════════
 _INCLUDE_COMPLAINT_FILES = False
 
-from app.models.external_complaint import ExternalComplaint
 from app.models.card_complaint import CardComplaint
-from app.models.merchant_refund import MerchantRefund
-from app.models.manual_refund import ManualRefund
-from app.models.person import Person, PersonAlias
+from app.models.external_complaint import ExternalComplaint
 from app.models.group import Group, PersonGroupMembership
-from app.models.specialty import Specialty, PersonSpecialtyAssignment
+from app.models.incident import Incident
+from app.models.manual_refund import ManualRefund
+from app.models.merchant_refund import MerchantRefund
+from app.models.person import Person, PersonAlias
 from app.models.refund import Refund
+from app.models.specialty import PersonSpecialtyAssignment, Specialty
+from app.models.task import SpecialTask
 from app.models.ticket import ServiceTicket
 from app.models.todo import TodoItem
-from app.models.task import SpecialTask
-from app.models.incident import Incident
 from app.models.wallet import WalletWithdrawal
 
 
@@ -1489,7 +1490,7 @@ def _operator_to_person_cte(department: str | None = None,
             func.coalesce(Person.display_name, PersonAlias.alias).label("display_name"),
             Person.department.label("department"),
             func.coalesce(Group.name, Person.group_name).label("group_name"),
-            # 2026-08-14: 优先读取 Person.specialty (任职镜像 = 用户直接编辑的最新值), 
+            # 2026-08-14: 优先读取 Person.specialty (任职镜像 = 用户直接编辑的最新值),
             # 兜底 Person.primary_specialty (SCD Type 2 镜像, 可能滞后)
             func.coalesce(Person.specialty, Person.primary_specialty).label("specialty"),
             Person.position.label("position"),
@@ -4117,7 +4118,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     # 注意: pending_total 口径 = "倒查 7 天窗口内仍未闭环" 的实际条数(和列表一致)
     # 而 complaint_status_all 里的待处理/处理中统计仍然是「原视图窗口」(和饼图/处理人排行口径一致, 不改动)
     complaint_pending_total = len(complaint_pending)
-    
+
     # 数据一致性校验: 确保 total 与 list 长度一致，防止前端展示不一致
     import logging
     _log = logging.getLogger(__name__)
@@ -5331,7 +5332,8 @@ def today_staff_efficiency(
     #   解决人员周期内变更专项时，旧工作被错误按新专项系数计算的问题。
     #   假设工作在各天均匀分布，用天数加权平均系数（单天查询完全精确）。
     # ═══════════════════════════════════════════════════════════════════
-    from datetime import date as _date_cls, timedelta as _td
+    from datetime import date as _date_cls
+    from datetime import timedelta as _td
     query_start = ts.date() if hasattr(ts, 'date') else _date_cls.fromisoformat(str(ts)[:10])
     query_end = te.date() if hasattr(te, 'date') else _date_cls.fromisoformat(str(te)[:10])
     date_list: list[_date_cls] = []
@@ -5398,7 +5400,7 @@ def today_staff_efficiency(
         # cs_record 中投诉 → 内部投诉会话 (外部投诉主要在工单侧区分)
         internal_sess_cs = buckets.get("投诉", (0,0))[0]
         external_sess_cs = 0  # cs_record中暂不区分外部投诉
-        
+
         # 加上工单按专项分类的条数
         tk_sess = tk_spec_by_op.get(op or "", {})
         # 咨询接待: cs_record 咨询/其他/综合 + 工单 咨询接待
@@ -5413,7 +5415,7 @@ def today_staff_efficiency(
         internal_sess = internal_sess_cs + tk_sess.get("内部投诉", 0)
         # 外部投诉: 工单 外部投诉
         external_sess = external_sess_cs + tk_sess.get("外部投诉", 0)
-        
+
         rf_op_count = rf_by_op.get(op, (0,0))[0]
 
         # 接待个数 (people, SN去重跨表合并): 使用 SQL 侧预先算出的 merged_pp
@@ -5536,7 +5538,7 @@ def today_staff_efficiency(
             "reception_device_count": reception_device_count,
             "refund_op_count": rf_op_count,
             # 6个专项: 会话次数(次)
-            "sp_zixun": z_sess, "sp_taocan": t_sess, 
+            "sp_zixun": z_sess, "sp_taocan": t_sess,
             "sp_recovery": recovery_sess, "sp_processing": processing_sess,
             "sp_internal": internal_sess, "sp_external": external_sess,
             # 兼容字段别名 (前端使用)
@@ -5817,7 +5819,8 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
         return None
 
     # ---- 2. 人员维表 ----
-    from app.models.person import Person as P, PersonAlias as PA
+    from app.models.person import Person as P
+    from app.models.person import PersonAlias as PA
     person_rows = db.execute(
         select(
                 PA.alias.label("operator"),
@@ -6727,9 +6730,9 @@ def refund_type_trend(
     op_staff_type = {sd["operator"]: sd["staff_type"] for sd in staff_detail}
 
     if grain == "week":
-        date_col = f"DATE_TRUNC('week', c.operation_time AT TIME ZONE 'Asia/Shanghai')::date"
+        date_col = "DATE_TRUNC('week', c.operation_time AT TIME ZONE 'Asia/Shanghai')::date"
     else:
-        date_col = f"DATE(c.operation_time AT TIME ZONE 'Asia/Shanghai')"
+        date_col = "DATE(c.operation_time AT TIME ZONE 'Asia/Shanghai')"
 
     for r in db.execute(text(
         f"""
@@ -6904,7 +6907,7 @@ def refund_decision_overview(
         complaint_split["ratio"].append(round(comp_amt / total_amt * 100, 1) if total_amt else 0.0)
 
     # ── 5. 退款原因Top + 操作人员Top: 每单取最新完工工单的服务项作为原因 ──
-    reason_rows = db.execute(text(f"""
+    reason_rows = db.execute(text("""
         WITH rel AS (
             SELECT DISTINCT ON (r.refund_no)
                 r.refund_no, r.refund_amount, r.operator,
@@ -7759,7 +7762,8 @@ def refund_recovery_analysis(
 
     # ---- 2. 先找 Person 维表: 建立所有人员的meta信息 ----
     #   注意: PersonAlias.alias = 业务表的 operator (如 "企微-叶珍凤"), 通过 person_id 关联到 Person (统一实体)
-    from app.models.person import Person as P, PersonAlias as PA
+    from app.models.person import Person as P
+    from app.models.person import PersonAlias as PA
     person_rows = db.execute(
         select(
                 PA.alias.label("operator"),
@@ -7773,12 +7777,12 @@ def refund_recovery_analysis(
             .outerjoin(P, PA.person_id == P.id)
             .where(PA.is_system == False)  # 排除 sys/system 等系统自动别名
     ).all()
-    
+
     # 专职退款挽回人员 (hr_cat=退款挽回)
     recovery_ops: dict[str, dict] = {}
     # 所有人员的meta信息 (用于非专职人员接待退款时的挽回统计)
     all_ops_meta: dict[str, dict] = {}
-    
+
     for pr in person_rows:
         op = pr.operator or ""
         if not op:
@@ -7846,7 +7850,7 @@ def refund_recovery_analysis(
     for r in cs_sn_rows:
         if r.op:
             all_cs_ops.add(r.op)
-    
+
     # 将cs_records中出现但不在person_rows中的operator也加入all_ops_meta
     person_op_map = {p.operator: p for p in person_rows}
     for op in all_cs_ops:
@@ -8164,7 +8168,7 @@ def refund_recovery_analysis(
         # 跳过非企微人员 (店铺/研发/生产/财务/测试等), 明细仅保留企微侧人员
         if not _is_qw_person(op, info):
             continue
-            
+
         # 成功率口径: 基于 CS 接待侧
         # - 有接待的人员: 计算成功率
         # - 纯退款执行人(无CS接待): 成功率记为 None(空)
@@ -9704,7 +9708,7 @@ def _view_today_cold_tickets(db: Session, params: _PARAMS_T) -> _RET_T:
     return {
         "chart_type": "table",
         "data": {
-            "title": f"在途冷工单 Top50 (仍未结 + 距登记 > 24h, 按压单时长倒序, 主管优先处理)",
+            "title": "在途冷工单 Top50 (仍未结 + 距登记 > 24h, 按压单时长倒序, 主管优先处理)",
             "columns": cols,
             "rows": rows,
             "_scope": {"display_date": display_date.isoformat(), "now": __dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")},

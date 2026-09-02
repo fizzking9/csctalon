@@ -841,8 +841,8 @@ def _touch_ticket_action_logs_after_upsert(
     # 终态集合(判定结单用),和 ticket.py _ticket_category_case 里的终态白名单对齐
     _DONE_STATUS = {"已完成", "已解决", "已关闭", "无需处理", "已取消", "已撤销"}
 
+
     from app.models.ticket_action_log import TicketActionLog
-    from sqlalchemy import literal_column, bindparam
 
     tlog_tbl = TicketActionLog.__table__
 
@@ -1627,7 +1627,8 @@ def upsert_device_tags(df: pd.DataFrame, mapping: dict[str, str], db: Session, r
                 pass
         # Fallback: query max(id) + 1(纯内存自增,有并发风险但 device_tags 导入很少,且 tag_name 有唯一索引兜底)
         try:
-            from sqlalchemy import select as sa_sel, func as sa_fn
+            from sqlalchemy import func as sa_fn
+            from sqlalchemy import select as sa_sel
             max_id = db.scalar(sa_sel(sa_fn.max(DeviceTag.id))) or 0
             # 临时用 max_id+offset:tag_name 唯一索引会冲突时在 on_conflict 里 merge, 不影响正确性
             r["id"] = int(max_id) + len(rows) + rows.index(r) + 1  # 确保本批次内不重复

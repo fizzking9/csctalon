@@ -2,10 +2,8 @@
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, CurrentUser, DBSession, ManagerUser
-from app.core.database import get_db
 from app.models.device import Device, DeviceTag, DeviceTagBatch, DeviceTagBinding, device_tag_rel
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund

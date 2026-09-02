@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-
 # ⚠️ 日志时间戳统一为北京时间(容器默认 TZ=UTC, 否则 asctime 落后 8h, 与前端/调度标签混淆)。
 #    仅调整日志 Formatter 渲染, 不影响进程/业务用 datetime.now(timezone.utc) 的 UTC 存储语义。
 _TZ_CN = timezone(timedelta(hours=8))
@@ -58,6 +57,7 @@ async def lifespan(app: FastAPI):
     其他 worker 等待数秒 (保证第一个 worker 完成 DDL/种子 UPSERT 提交) 后跳过即可。
     """
     import asyncio as _aio
+
     from sqlalchemy import text as _tx
 
     STARTUP_LOCK_KEY = 99887766
@@ -75,7 +75,7 @@ async def lifespan(app: FastAPI):
 
     try:
         if got_lock:
-            logger.info(f"[lifespan] worker 持有启动锁(99887766),开始执行迁移/种子/调度器")
+            logger.info("[lifespan] worker 持有启动锁(99887766),开始执行迁移/种子/调度器")
             # 单独包一层 try-except: 迁移/种子/调度器 任一失败都不要让 worker 崩掉 (gunicorn exit code 3 → master kill 全集群)
             # 只记录错误日志, 之后仍让 HTTP 服务正常启动。
             try:
@@ -238,7 +238,6 @@ def _cleanup_zombie_running_tasks() -> None:
 
     解决:服务启动时将所有 running 状态的同步日志标记为 failed。
     """
-    from datetime import datetime, timezone
 
     from sqlalchemy import text as _tx
 
@@ -312,9 +311,10 @@ def create_app() -> FastAPI:
     # P2-4: 全局 500 异常 traceback 记录器 (FastAPI 异常处理器)
     #       生产环境用户侧只能看到「服务器内部错误」，但服务端必须把完整 traceback 打到日志里，
     #       避免出现「前端 500 后端日志里啥都没有」的排查惨案。
+    import traceback as _tb
+
     from fastapi import Request as _Request
     from fastapi.responses import JSONResponse as _JSONResponse
-    import traceback as _tb
 
     @app.exception_handler(Exception)
     async def _global_unhandled_exception_handler(request: _Request, exc: Exception):
@@ -327,7 +327,7 @@ def create_app() -> FastAPI:
             user_agent = request.headers.get("user-agent", "-")[:200]
             req_summary = f"{method} {url}{('?' + qs) if qs else ''} (from {client}) UA={user_agent}"
         except Exception:
-            req_summary = f"<unable to extract request info>"
+            req_summary = "<unable to extract request info>"
         # 打完整 traceback 到 error 日志
         logger.error(
             f"[HTTP 500] 未处理异常: {type(exc).__name__}: {exc!r}\n"

@@ -24,7 +24,7 @@ from app.schemas.data_source import (
     DataSourceUpdate,
 )
 from app.services.data_source_registry import DATA_SOURCE_SEEDS, ensure_data_sources_registered
-from app.utils.excel import clean_df_for_excel, sanitize_cell_value
+from app.utils.excel import clean_df_for_excel
 
 # 导出 Excel 单次最大行数(防止 OOM;超出提示加筛选条件)
 EXPORT_MAX_ROWS = 200_000

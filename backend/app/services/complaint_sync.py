@@ -33,7 +33,6 @@ from app.services.upsert import (
     _sanitize_name_field,
     _sync_devices,
     _to_datetime,
-    _to_float,
     _to_str,
     _truncate_str,
 )

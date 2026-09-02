@@ -338,8 +338,8 @@ def try_ocr_captcha(png_bytes: bytes) -> Optional[str]:
         # 兼容旧逻辑:识别格式异常时,仍然尝试把图片存到 /tmp 便于复盘
         if png_bytes:
             try:
-                import uuid
                 import tempfile
+                import uuid
                 fn = Path(tempfile.gettempdir()) / f"captcha_failed_{uuid.uuid4().hex[:8]}.png"
                 fn.write_bytes(png_bytes)
                 logger.info(f"[CaptchaOCR] 两个模型均未识别出合法验证码,图片已存: {fn}")

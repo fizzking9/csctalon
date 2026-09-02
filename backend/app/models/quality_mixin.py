@@ -8,7 +8,7 @@
 (web DataQuality.vue) 统一审核。manual_refunds 表内联了同名字段, 不继承本 Mixin。
 """
 
-from sqlalchemy import String, Text
+from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column
 
 

@@ -2,14 +2,19 @@
 
 from datetime import datetime, timezone
 
-import pandas as pd
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, DBSession
 from app.core.config import settings
-from app.core.database import get_db
 from app.core.storage import resolve_upload_path
 from app.models.data_source import DataSource
 from app.models.upload import UploadRecord
@@ -18,7 +23,6 @@ from app.schemas.upload import DiffPreviewRequest, ImportResponse, UploadRecordO
 from app.services.data_parser import load_dataframe, parse_file, save_upload_file
 from app.services.diff_preview import compute_diff
 from app.services.matcher import match_all
-from app.services.person_extractor import extract_person_aliases
 from app.services.upsert import run_upsert
 
 router = APIRouter(prefix="/uploads", tags=["数据中心-上传"])
@@ -234,8 +238,6 @@ def get_record(record_id: int, db: DBSession, _: CurrentUser):
 def _run_post_import_tasks(data_type: str):
     """后台任务:关联匹配、人员别名提取、退费宽表物化"""
     from app.core.database import SessionLocal
-    from app.services.matcher import match_all
-    from app.services.person_extractor import extract_person_aliases
     from app.services.wide_table_builder import build_refund_wide
 
     try:

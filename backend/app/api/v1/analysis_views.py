@@ -6,7 +6,6 @@
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, DBSession
 from app.models.analysis_view import AnalysisView, ClassificationRule
@@ -23,8 +22,12 @@ from app.schemas.analysis_view import (
     ClassificationRuleUpdate,
 )
 from app.schemas.common import PageBase, R
-from app.services.analysis_engine import _build_classification_case, _execute_segment, _get_column, _MODEL_REGISTRY, execute_view
-from sqlalchemy import case
+from app.services.analysis_engine import (
+    _MODEL_REGISTRY,
+    _build_classification_case,
+    _get_column,
+    execute_view,
+)
 
 router = APIRouter(prefix="/analysis-views", tags=["分析-视图"])
 

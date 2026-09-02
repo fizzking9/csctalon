@@ -18,8 +18,7 @@ from urllib.parse import quote
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from app.api.deps import AdminOrSupervisor, AdminUser, CurrentUser, DBSession
 from app.core.storage import resolve_upload_path

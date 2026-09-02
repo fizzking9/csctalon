@@ -224,8 +224,8 @@ def _warm_reports(db, *, force: bool = False) -> int:
     由 warm_after_sync 调用(每小时刷新一次, 数据同步后保持月报新鲜)。
     key 与 analytics.py / complaints.py 路由层逐字符对齐; 窗口端点 service 取 datetime(_dt)。
     """
-    from app.services import analytics as A
     from app.api.v1.complaints import complaint_analysis, complaint_subject_analysis
+    from app.services import analytics as A
 
     s = _days_ago_str(29)   # 近30天 = 月报窗口
     e = _today_str()

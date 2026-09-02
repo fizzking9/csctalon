@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.deps import AdminUser, DBSession
+from app.core.redis_client import cache_stats, get_redis
 from app.schemas.common import R
 from app.services.cache_warmer import (
     AVAILABLE_SCOPES,
@@ -20,7 +21,6 @@ from app.services.cache_warmer import (
     is_warming,
     rebuild_cache,
 )
-from app.core.redis_client import cache_stats, get_redis
 
 router = APIRouter(prefix="/system/cache", tags=["系统设置-缓存管理"])
 

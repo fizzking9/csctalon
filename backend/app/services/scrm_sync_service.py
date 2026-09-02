@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -56,6 +56,7 @@ SCRM_SYNC_PER_SOURCE_TIMEOUT_SEC = 300  # 5 分钟
 _PW_LOGIN_FAIL_CACHE_GLOBAL: dict[tuple[str, str], tuple[float, str]] = {}
 _PW_LOGIN_FAIL_CACHE_TTL_SEC = 600  # 10 分钟
 import asyncio as _asyncio_global
+
 _PW_LOGIN_FAIL_CACHE_LOCK = _asyncio_global.Lock()
 
 

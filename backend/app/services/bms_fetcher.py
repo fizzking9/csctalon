@@ -33,13 +33,13 @@ from app.core.config import settings
 # P1-2: 新增数学计算式验证码识别(闪猫/SCRM 等平台使用 7*0=? / 9-5=? 形式)
 try:
     from app.services.captcha_session import (  # type: ignore
+        _OCR_AVG_PROB,
+        _OCR_MIN_CHAR_PROB,
+        _OCR_PRECHECK_MAX_REFRESH,
         try_ocr_captcha,
         try_ocr_captcha_with_confidence,
         try_ocr_math_captcha,
         try_ocr_math_captcha_with_confidence,
-        _OCR_MIN_CHAR_PROB,
-        _OCR_AVG_PROB,
-        _OCR_PRECHECK_MAX_REFRESH,
     )
 except Exception as _e_import_ocr:  # pragma: no cover - 导入失败不影响运行,只是 OCR 自动识别不可用
     try_ocr_captcha = None  # type: ignore
@@ -262,7 +262,7 @@ async def _click_export_button(page) -> None:
             try:
                 await b.click(timeout=15000)
                 clicked = True
-                _log.info(f"  [导出按钮] 遍历点击成功")
+                _log.info("  [导出按钮] 遍历点击成功")
                 break
             except Exception as ce:
                 _log.warning(f"  [导出按钮] 遍历点击失败: {ce}")
@@ -1468,27 +1468,27 @@ class BmsFetcher:
 
         # 策略3: 用 JS 精确查找(遍历所有 label 文本,找匹配的,定位到同 form-item 的 input)
         try:
-            found = await page.evaluate(f"""
-                (labelText) => {{
+            found = await page.evaluate("""
+                (labelText) => {
                     const labels = document.querySelectorAll('.el-form-item__label, label, .form-label');
-                    for (const lab of labels) {{
-                        if (lab.textContent.trim() === labelText || lab.textContent.trim().includes(labelText)) {{
+                    for (const lab of labels) {
+                        if (lab.textContent.trim() === labelText || lab.textContent.trim().includes(labelText)) {
                             // 找最近的 form-item 祖先
                             let formItem = lab.closest('.el-form-item') || lab.parentElement;
                             if (!formItem) continue;
                             // 找里面的可见 input
                             const inputs = formItem.querySelectorAll('input');
-                            for (const inp of inputs) {{
+                            for (const inp of inputs) {
                                 const rect = inp.getBoundingClientRect();
                                 const style = window.getComputedStyle(inp);
-                                if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {{
+                                if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {
                                     return true;
-                                }}
-                            }}
-                        }}
-                    }}
+                                }
+                            }
+                        }
+                    }
                     return false;
-                }}
+                }
             """, label)
             if found:
                 # 用 JS 找到了,重新用 locator 定位填充
@@ -2266,7 +2266,7 @@ class BmsFetcher:
             logger.info(
                 f"  [策略2-y坐标] y∈[60,800] 且非重置/导出 候选共 {len(y_sorted)} 个"
                 + (
-                    f" → Top5: "
+                    " → Top5: "
                     + " / ".join(
                         f"#{idx}[{y},{x}]{txt!r}" for (y, x, idx, _b, txt) in y_sorted[:5]
                     )
@@ -2282,12 +2282,12 @@ class BmsFetcher:
                 )
                 try:
                     await b.click(timeout=5000)
-                    logger.info(f"  [策略2-y坐标] click() 正常返回 OK")
+                    logger.info("  [策略2-y坐标] click() 正常返回 OK")
                     return
                 except Exception as ce:
                     logger.warning(f"  [策略2-y坐标] Playwright click 异常: {ce}, 改用 JS 点击")
                     await b.evaluate("(el) => el.click()")
-                    logger.info(f"  [策略2-y坐标] JS evaluate click 已返回 OK")
+                    logger.info("  [策略2-y坐标] JS evaluate click 已返回 OK")
                     return
         except Exception as e:
             logger.warning(f"  查询按钮点击策略(1-2)异常: {e}", exc_info=True)
@@ -2994,7 +2994,7 @@ class BmsFetcher:
                             ed_d = pd.Timestamp(end_date.date()) if end_date.tzinfo is None else pd.Timestamp(end_date.astimezone(timezone(timedelta(hours=8))).date())
                             mask = (_dates >= sd_d) & (_dates <= ed_d)
                             mask = mask.fillna(False)
-                            chosen_col = f"退费单号嵌入日期 in range"
+                            chosen_col = "退费单号嵌入日期 in range"
                             logger.info(
                                 f"[{data_type}] 裁剪-退费单号: 命中 {mask.sum()}/{orig_rows} 行"
                             )

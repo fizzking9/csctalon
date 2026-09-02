@@ -16,7 +16,7 @@ Channel 接口:
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session

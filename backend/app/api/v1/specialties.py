@@ -1,13 +1,13 @@
 """业务专项 API - 专项列表/详情/负责人变更/临时专项等"""
 
 from datetime import date
+
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, CurrentUser, DBSession
-from app.models.specialty import Specialty, SpecialtyLeadershipHistory, PersonSpecialtyAssignment
 from app.models.person import Person
+from app.models.specialty import PersonSpecialtyAssignment, Specialty, SpecialtyLeadershipHistory
 from app.schemas.common import R
 
 router = APIRouter(prefix="/specialties", tags=["系统-业务专项"])
@@ -27,7 +27,7 @@ def list_specialties(
         stmt = stmt.where(Specialty.is_temporary == False)
     stmt = stmt.order_by(Specialty.display_order, Specialty.name)
     specialties = list(db.scalars(stmt))
-    
+
     result = []
     for s in specialties:
         # 统计当前分配人数
@@ -40,7 +40,7 @@ def list_specialties(
                 Person.is_active == True,
             )
         ) or 0
-        
+
         result.append({
             "id": s.id,
             "code": s.code,
@@ -75,7 +75,7 @@ def get_specialty(
     s = db.get(Specialty, specialty_id)
     if not s:
         raise HTTPException(status_code=404, detail="专项不存在")
-    
+
     # 查询当前分配人员
     assignments = list(db.scalars(
         select(PersonSpecialtyAssignment)
@@ -84,16 +84,16 @@ def get_specialty(
             PersonSpecialtyAssignment.is_current == True,
         )
     ))
-    
+
     persons_map = {p.id: p for p in db.scalars(select(Person).where(Person.id.in_([a.person_id for a in assignments]))).all()}
-    
+
     # 查询负责人历史
     leadership_history = list(db.scalars(
         select(SpecialtyLeadershipHistory)
         .where(SpecialtyLeadershipHistory.specialty_id == s.id)
         .order_by(SpecialtyLeadershipHistory.effective_from.desc())
     ))
-    
+
     return R(data={
         "id": s.id,
         "code": s.code,
@@ -151,8 +151,7 @@ def create_specialty(
     existing = db.scalar(select(Specialty).where(Specialty.name == name))
     if existing:
         raise HTTPException(status_code=400, detail=f"专项 {name} 已存在")
-    
-    import datetime
+
     s = Specialty(
         code=code,
         name=name,
@@ -164,16 +163,16 @@ def create_specialty(
         valid_to=valid_to,
         display_order=99 if is_temporary else 10,
     )
-    
+
     if current_lead_id:
         lead = db.get(Person, current_lead_id)
         if not lead:
             raise HTTPException(status_code=404, detail="负责人不存在")
         s.current_lead_id = current_lead_id
-    
+
     db.add(s)
     db.flush()
-    
+
     # 如果有负责人，创建负责人历史
     if current_lead_id:
         hist = SpecialtyLeadershipHistory(
@@ -186,7 +185,7 @@ def create_specialty(
             source="manual",
         )
         db.add(hist)
-    
+
     db.commit()
     db.refresh(s)
     return R(data={"id": s.id, "name": s.name, "is_temporary": s.is_temporary})
@@ -208,12 +207,12 @@ def transfer_lead(
     p = db.get(Person, person_id)
     if not p:
         raise HTTPException(status_code=404, detail="人员不存在")
-    
+
     if role not in ("lead", "deputy"):
         raise HTTPException(status_code=400, detail="role必须是lead或deputy")
-    
+
     effective_date = effective_from or date.today()
-    
+
     # 结束当前负责人任职
     if role == "lead" and s.current_lead_id:
         current_hist = db.scalar(
@@ -237,7 +236,7 @@ def transfer_lead(
         if current_hist:
             current_hist.is_current = False
             current_hist.effective_to = effective_date
-    
+
     # 创建新负责人历史
     new_hist = SpecialtyLeadershipHistory(
         specialty_id=s.id,
@@ -249,13 +248,13 @@ def transfer_lead(
         source="manual",
     )
     db.add(new_hist)
-    
+
     # 更新镜像字段
     if role == "lead":
         s.current_lead_id = p.id
     else:
         s.current_deputy_lead_id = p.id
-    
+
     # 自动分配人员到专项
     existing_assign = db.scalar(
         select(PersonSpecialtyAssignment).where(
@@ -276,7 +275,7 @@ def transfer_lead(
             source="manual",
         )
         db.add(assign)
-    
+
     db.commit()
     return R(data={"ok": True, "specialty": s.name, "new_lead": p.display_name, "role": role})
 
@@ -295,15 +294,15 @@ def assign_persons(
     s = db.get(Specialty, specialty_id)
     if not s:
         raise HTTPException(status_code=404, detail="专项不存在")
-    
+
     effective_date = effective_from or date.today()
     assigned = 0
-    
+
     for pid in person_ids:
         p = db.get(Person, pid)
         if not p:
             continue
-        
+
         # 结束旧的同专项分配
         old = db.scalar(
             select(PersonSpecialtyAssignment).where(
@@ -315,7 +314,7 @@ def assign_persons(
         if old:
             old.is_current = False
             old.effective_to = effective_date
-        
+
         # 如果设为主专项，结束其他主专项
         if is_primary:
             old_primary = db.scalars(
@@ -328,7 +327,7 @@ def assign_persons(
             ).all()
             for op in old_primary:
                 op.is_primary = False
-        
+
         # 创建新分配
         assign = PersonSpecialtyAssignment(
             person_id=pid,
@@ -341,14 +340,14 @@ def assign_persons(
             source="manual",
         )
         db.add(assign)
-        
+
         # 同步镜像字段
         if is_primary:
             p.primary_specialty = s.name
             p.specialty = s.name
-        
+
         assigned += 1
-    
+
     db.commit()
     return R(data={"assigned": assigned, "specialty": s.name})
 
@@ -362,10 +361,10 @@ def archive_specialty(
     s = db.get(Specialty, specialty_id)
     if not s:
         raise HTTPException(status_code=404, detail="专项不存在")
-    
+
     s.is_active = False
     s.valid_to = date.today()
-    
+
     # 结束所有当前分配
     current_assigns = db.scalars(
         select(PersonSpecialtyAssignment).where(
@@ -377,6 +376,6 @@ def archive_specialty(
         a.is_current = False
         a.effective_to = date.today()
         a.change_reason = "专项归档"
-    
+
     db.commit()
     return R(data={"ok": True, "archived": s.name})

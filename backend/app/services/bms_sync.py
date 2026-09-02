@@ -20,7 +20,8 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.database import SessionLocal, engine as _db_engine
+from app.core.database import SessionLocal
+from app.core.database import engine as _db_engine
 from app.models.bms_sync_log import BmsSyncLog
 from app.models.upload import UploadRecord
 from app.services.bms_fetcher import BMS_DATA_SOURCES, BmsFetcher, FetchResult
@@ -99,7 +100,7 @@ def _auto_import(db: Session, data_type: str, file_path: str, filename: str, tri
     """
     # 2026-08-11 双维度同步: ticket_finish 是 ticket 的按完成时间补充抓取,按 ticket 导入
     if data_type == "ticket_finish":
-        logger.info(f"[ticket_finish] 映射为 ticket 进行导入(按完成时间补充抓取)")
+        logger.info("[ticket_finish] 映射为 ticket 进行导入(按完成时间补充抓取)")
         data_type = "ticket"
     base = Path(settings.UPLOAD_DIR)
     full_path = base / file_path
@@ -300,7 +301,7 @@ async def sync_all(
                     "end": end,
                     "config": finish_config,
                 })
-                logger.info(f"[ticket] 双维度同步: 已添加按完成时间抓取任务(覆盖老工单完工handler回填)")
+                logger.info("[ticket] 双维度同步: 已添加按完成时间抓取任务(覆盖老工单完工handler回填)")
     finally:
         db.close()
 
@@ -395,8 +396,10 @@ async def sync_all(
             #         再新建 Session 完整重试一次 upsert 工作流。
             #         upsert 全程 on_conflict_do_update / do_nothing → 天然幂等。
             # ═══════════════════════════════════════════════════════════
-            from sqlalchemy.exc import OperationalError as _SyncOpErr, InterfaceError as _SyncIfErr
             import time as _tm
+
+            from sqlalchemy.exc import InterfaceError as _SyncIfErr
+            from sqlalchemy.exc import OperationalError as _SyncOpErr
             first_res = None
             try:
                 first_res = await asyncio.to_thread(_sync_import_work, 1)
@@ -551,13 +554,15 @@ async def sync_all(
                 loop = asyncio.get_running_loop()
 
                 def _sync_post_sync_hook() -> tuple[dict, dict]:
-                    from sqlalchemy.exc import OperationalError as _OpErr
                     import time as _time
+
+                    from sqlalchemy.exc import OperationalError as _OpErr
 
                     def _run_hook_once(first_try: bool) -> tuple[dict, dict]:
                         hook_db = SessionLocal()
                         try:
                             from sqlalchemy import func as _func
+
                             from app.models.refund import Refund
 
                             def _report(name: str, phase: str = "importing"):
@@ -582,12 +587,13 @@ async def sync_all(
                             def _collect_affected_from_imports(imp_results: list[dict], db: Session) -> set[str]:
                                 """从成功导入记录中,收集需要刷新宽表的 refund_no 集合"""
                                 from datetime import datetime as _dt
+
+                                from app.models.external_complaint import ExternalComplaint
+                                from app.models.merchant_refund import MerchantRefund
                                 from app.models.refund import Refund
                                 from app.models.ticket import ServiceTicket
-                                from app.models.wallet import WalletWithdrawal
-                                from app.models.merchant_refund import MerchantRefund
-                                from app.models.external_complaint import ExternalComplaint
                                 from app.models.upload import DataMatchRelation
+                                from app.models.wallet import WalletWithdrawal
 
                                 affected: set[str] = set()
                                 for r in imp_results:

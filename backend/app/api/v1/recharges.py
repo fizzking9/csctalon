@@ -11,11 +11,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import and_, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
 
 from app.api.deps import AdminOrSupervisor, CurrentUser, DBSession
 from app.models.device_combo import DeviceCombo

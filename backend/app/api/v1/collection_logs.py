@@ -11,13 +11,11 @@
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import Text as SA_Text, func, select, union_all
-from sqlalchemy.sql import literal_column
+from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DBSession
 from app.models.bms_sync_log import BmsSyncLog

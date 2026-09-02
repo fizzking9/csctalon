@@ -210,7 +210,6 @@ def scan_alerts(db: DBSession, _: ManagerUser):
     """
     from datetime import datetime, timedelta, timezone
 
-    from app.models.cs_record import CsRecord
     from app.models.external_complaint import ExternalComplaint
     from app.models.incident import Incident
     from app.models.refund import Refund

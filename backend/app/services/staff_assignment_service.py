@@ -143,7 +143,7 @@ def update_assignment(
     data = payload.model_dump(exclude_unset=True)
     for k, v in data.items():
         setattr(a, k, v)
-    
+
     # 判断是否为最近一条任职 (按 effective_from 倒序)
     most_recent = db.scalar(
         select(StaffAssignment)
@@ -152,7 +152,7 @@ def update_assignment(
         .limit(1)
     )
     should_sync = (most_recent is not None and most_recent.id == a.id) or a.is_current
-    
+
     if should_sync:
         person = db.get(Person, person_id)
         _apply_current_to_person(person, a)

@@ -48,7 +48,7 @@ from app.services.scrm_sync_service import (
     get_scrm_sync_status,
     sync_scrm_all,
 )
-from app.services.sync_source_config_service import get_all_configs, get_sync_source_config
+from app.services.sync_source_config_service import get_sync_source_config
 from app.services.sync_task_manager import sync_task_manager
 
 logger = logging.getLogger(__name__)

@@ -82,8 +82,9 @@ async def test_login(data_type: str, payload: dict | None = None, db: DBSession 
     # HTTP 源: 直接调登录 API
     if fetch_mode == "http":
         try:
-            from app.services.ai_acc_fetcher import _login
             import httpx
+
+            from app.services.ai_acc_fetcher import _login
             async with httpx.AsyncClient(timeout=15) as client:
                 token = await _login(client, cfg["base_url"], username, password)
             from app.services.system_event_service import record_system_event

@@ -10,7 +10,6 @@
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
@@ -64,8 +63,8 @@ def execute_view(db: Session, view: AnalysisView | dict, params: dict | None = N
     # ── 手动视图分派 (2026-08-03 加): 若 view.code 在 urge_analysis.HANDLERS / analytics.HANDLERS 中注册,直接调用专用实现
     # 用于 engine 无法表达的复杂派生逻辑:如催单分桶/待处理时长/投诉转化率/退款挽回等
     try:
-        from app.services.urge_analysis import HANDLERS as _URGE_HANDLERS
         from app.services.analytics import HANDLERS as _ANALYTICS_HANDLERS
+        from app.services.urge_analysis import HANDLERS as _URGE_HANDLERS
         _HANDLER_POOL: dict = {}
         _HANDLER_POOL.update(_URGE_HANDLERS or {})
         _HANDLER_POOL.update(_ANALYTICS_HANDLERS or {})

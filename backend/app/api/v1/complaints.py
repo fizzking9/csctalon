@@ -5,20 +5,20 @@
 """
 
 from collections import Counter
-from datetime import datetime, timezone, timedelta as _timedelta
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query
-from sqlalchemy import case, func, or_, select, and_
+from sqlalchemy import and_, case, func, or_, select
 
 from app.api.deps import CurrentUser, DBSession, ManagerUser
+from app.core.redis_client import cache_ttl_for, cached_json
 from app.models.card_complaint import CardComplaint
 from app.models.complaint_audit import ComplaintAudit
 from app.models.external_complaint import ExternalComplaint
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
-from app.core.redis_client import cache_ttl_for, cached_json
 from app.schemas.common import PageBase, R
-from app.services.analytics import _complaint_source_type_case, _ticket_category_case, TZ
+from app.services.analytics import TZ, _complaint_source_type_case, _ticket_category_case
 
 router = APIRouter(prefix="/complaints", tags=["投诉分析"])
 
@@ -259,7 +259,6 @@ def _to_sh_iso(dt) -> str | None:
     """将 datetime (naive UTC 或 tz-aware) 转为北京时间 ISO 字符串 (naive, 无时区后缀)."""
     if dt is None:
         return None
-    import datetime as _dt_mod
     if dt.tzinfo is None:
         # naive UTC → 视为UTC
         dt = dt.replace(tzinfo=timezone.utc)
@@ -1179,9 +1178,11 @@ def complaint_backlog_export(
     与 /backlog 完全同口径(_query_backlog_rows 统一归一化), 不受分页限制, 导出筛选后的全量行。
     """
     import io
-    import pandas as pd
     from urllib.parse import quote
+
+    import pandas as pd
     from fastapi.responses import StreamingResponse
+
     from app.utils.excel import clean_df_for_excel
 
     ts = _parse_dt(start)

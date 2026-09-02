@@ -5,13 +5,18 @@
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DBSession, ManagerUser
 from app.models.metric import MetricDailySnapshot, MetricThreshold
 from app.schemas.common import R
-from app.services.metric_registry_service import METRIC_DEFS, evaluate_metric, get_threshold, list_metrics_status
+from app.services.metric_registry_service import (
+    METRIC_DEFS,
+    evaluate_metric,
+    get_threshold,
+    list_metrics_status,
+)
 
 router = APIRouter(prefix="/metrics", tags=["运营指标"])
 

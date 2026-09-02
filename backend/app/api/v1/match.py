@@ -2,11 +2,8 @@
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, CurrentUser, DBSession
-from app.core.database import get_db
-from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
 from app.models.upload import DataMatchRelation
 from app.schemas.common import PageBase, R

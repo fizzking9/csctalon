@@ -1,6 +1,5 @@
 """认证路由:登录、当前用户信息"""
 
-from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -11,7 +10,7 @@ from app.api.deps import CurrentUser, DBSession
 from app.core.database import get_db
 from app.core.rate_limit import check_login_rate
 from app.core.security import create_access_token, verify_password
-from app.models.user import RoleEnum, User
+from app.models.user import User
 from app.schemas.common import R
 from app.schemas.user import LoginRequest, Token, UserOut
 from app.services.operation_logger import log_operation

@@ -11,12 +11,24 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+from datetime import datetime as _dt
+from datetime import timedelta as _td
+from datetime import timezone as _tz
 from typing import Callable
-
-from sqlalchemy import and_, case, cast, Date, desc, extract, func, Integer, Numeric, or_, select, text
-from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
+
+from sqlalchemy import (
+    Date,
+    Numeric,
+    and_,
+    case,
+    cast,
+    desc,
+    func,
+    select,
+    text,
+)
+from sqlalchemy.orm import Session
 
 from app.models.card_complaint import CardComplaint
 from app.models.external_complaint import ExternalComplaint

@@ -25,29 +25,29 @@
 
 from __future__ import annotations
 
-import base64
-import io
 import logging
-import time
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from playwright.async_api import (
     Browser,
     BrowserContext,
     Page,
     Playwright,
-    TimeoutError as PWTimeoutError,
     async_playwright,
+)
+from playwright.async_api import (
+    TimeoutError as PWTimeoutError,
 )
 
 # 跨服务: 复用数学验证码 OCR 逻辑 + 纯文本验证码 OCR 逻辑
 # 注意: OCR 函数是 CPU 密集型 (ddddocr), 调用方请用 asyncio.to_thread 包裹
 from app.services.captcha_session import (
-    try_ocr_math_captcha,
     try_ocr_captcha,
+    try_ocr_math_captcha,
 )
+
 # 种子配置: 各 SCRM 源的 base_url / page_path / 默认 options 等
 from app.services.scrm_client import SCRM_DATA_SOURCES
 
@@ -565,7 +565,6 @@ class ScrmWebFetcher:
         注意: 只抓当前页(定时同步一般每天跑,数据量通常一页能装下;
         若超过一页,由调用方(同步服务)按日期分片或做翻页抓取)
         """
-        import asyncio
         page = self._page
         assert page is not None
         # 等 el-table 出来

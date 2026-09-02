@@ -9,18 +9,23 @@
 """
 
 import logging
-from datetime import date as date_type, datetime, time, timedelta, timezone
+from datetime import date as date_type
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models.alert import AlertRule
 from app.models.external_complaint import ExternalComplaint
 from app.models.metric import MetricDailySnapshot, MetricRegistry, MetricThreshold
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
-from app.services.analytics import _complaint_source_type_case, _ticket_category_case, TZ, refund_recovery_analysis
+from app.services.analytics import (
+    TZ,
+    _complaint_source_type_case,
+    _ticket_category_case,
+    refund_recovery_analysis,
+)
 
 logger = logging.getLogger(__name__)
 
