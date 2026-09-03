@@ -182,7 +182,7 @@ def _with_alias_count(db: Session, p: Person) -> dict:
         select(PersonSpecialtyAssignment)
         .where(
             PersonSpecialtyAssignment.person_id == p.id,
-            PersonSpecialtyAssignment.is_current is True,
+            PersonSpecialtyAssignment.is_current.is_(True),
         )
         .order_by(PersonSpecialtyAssignment.is_primary.desc(), PersonSpecialtyAssignment.effective_from.desc())
     ))
@@ -263,7 +263,7 @@ def list_persons(
             PersonGroupMembership,
             (PersonGroupMembership.person_id == Person.id) &
             (PersonGroupMembership.group_id == group_id) &
-            (PersonGroupMembership.is_current is True)
+            (PersonGroupMembership.is_current.is_(True))
         )
     if specialty_id:
         # 通过 PersonSpecialtyAssignment 关联筛选
@@ -271,7 +271,7 @@ def list_persons(
             PersonSpecialtyAssignment,
             (PersonSpecialtyAssignment.person_id == Person.id) &
             (PersonSpecialtyAssignment.specialty_id == specialty_id) &
-            (PersonSpecialtyAssignment.is_current is True)
+            (PersonSpecialtyAssignment.is_current.is_(True))
         )
     if role:
         stmt = stmt.where(Person.role == role)
@@ -350,7 +350,7 @@ def get_person(person_id: int, db: DBSession, _: CurrentUser):
         select(PersonSpecialtyAssignment)
         .where(
             PersonSpecialtyAssignment.person_id == p.id,
-            PersonSpecialtyAssignment.is_current is True,
+            PersonSpecialtyAssignment.is_current.is_(True),
         )
         .order_by(PersonSpecialtyAssignment.is_primary.desc())
     ))

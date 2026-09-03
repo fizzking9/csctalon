@@ -24,7 +24,7 @@ def list_specialties(
     if is_active is not None:
         stmt = stmt.where(Specialty.is_active == is_active)
     if include_temporary is False:
-        stmt = stmt.where(Specialty.is_temporary is False)
+        stmt = stmt.where(Specialty.is_temporary.is_(False))
     stmt = stmt.order_by(Specialty.display_order, Specialty.name)
     specialties = list(db.scalars(stmt))
 
@@ -36,8 +36,8 @@ def list_specialties(
             .join(PersonSpecialtyAssignment, PersonSpecialtyAssignment.person_id == Person.id)
             .where(
                 PersonSpecialtyAssignment.specialty_id == s.id,
-                PersonSpecialtyAssignment.is_current is True,
-                Person.is_active is True,
+                PersonSpecialtyAssignment.is_current.is_(True),
+                Person.is_active.is_(True),
             )
         ) or 0
 
@@ -81,7 +81,7 @@ def get_specialty(
         select(PersonSpecialtyAssignment)
         .where(
             PersonSpecialtyAssignment.specialty_id == s.id,
-            PersonSpecialtyAssignment.is_current is True,
+            PersonSpecialtyAssignment.is_current.is_(True),
         )
     ))
 
@@ -219,7 +219,7 @@ def transfer_lead(
             select(SpecialtyLeadershipHistory).where(
                 SpecialtyLeadershipHistory.specialty_id == s.id,
                 SpecialtyLeadershipHistory.role == "lead",
-                SpecialtyLeadershipHistory.is_current is True,
+                SpecialtyLeadershipHistory.is_current.is_(True),
             )
         )
         if current_hist:
@@ -230,7 +230,7 @@ def transfer_lead(
             select(SpecialtyLeadershipHistory).where(
                 SpecialtyLeadershipHistory.specialty_id == s.id,
                 SpecialtyLeadershipHistory.role == "deputy",
-                SpecialtyLeadershipHistory.is_current is True,
+                SpecialtyLeadershipHistory.is_current.is_(True),
             )
         )
         if current_hist:
@@ -260,7 +260,7 @@ def transfer_lead(
         select(PersonSpecialtyAssignment).where(
             PersonSpecialtyAssignment.person_id == p.id,
             PersonSpecialtyAssignment.specialty_id == s.id,
-            PersonSpecialtyAssignment.is_current is True,
+            PersonSpecialtyAssignment.is_current.is_(True),
         )
     )
     if not existing_assign:
@@ -308,7 +308,7 @@ def assign_persons(
             select(PersonSpecialtyAssignment).where(
                 PersonSpecialtyAssignment.person_id == pid,
                 PersonSpecialtyAssignment.specialty_id == s.id,
-                PersonSpecialtyAssignment.is_current is True,
+                PersonSpecialtyAssignment.is_current.is_(True),
             )
         )
         if old:
@@ -320,8 +320,8 @@ def assign_persons(
             old_primary = db.scalars(
                 select(PersonSpecialtyAssignment).where(
                     PersonSpecialtyAssignment.person_id == pid,
-                    PersonSpecialtyAssignment.is_primary is True,
-                    PersonSpecialtyAssignment.is_current is True,
+                    PersonSpecialtyAssignment.is_primary.is_(True),
+                    PersonSpecialtyAssignment.is_current.is_(True),
                     PersonSpecialtyAssignment.specialty_id != s.id,
                 )
             ).all()
@@ -369,7 +369,7 @@ def archive_specialty(
     current_assigns = db.scalars(
         select(PersonSpecialtyAssignment).where(
             PersonSpecialtyAssignment.specialty_id == s.id,
-            PersonSpecialtyAssignment.is_current is True,
+            PersonSpecialtyAssignment.is_current.is_(True),
         )
     ).all()
     for a in current_assigns:

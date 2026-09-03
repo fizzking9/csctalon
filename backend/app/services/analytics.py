@@ -70,7 +70,7 @@ def _apply_person_filters(stmt, person_alias,
         exists_g = select(1).where(
             PersonGroupMembership.person_id == person_alias.id,
             PersonGroupMembership.group_id == group_id,
-            PersonGroupMembership.is_current is True,
+            PersonGroupMembership.is_current.is_(True),
         )
         stmt = stmt.where(exists_g.exists())
     if specialty_id is not None:
@@ -78,7 +78,7 @@ def _apply_person_filters(stmt, person_alias,
         exists_s = select(1).where(
             PersonSpecialtyAssignment.person_id == person_alias.id,
             PersonSpecialtyAssignment.specialty_id == specialty_id,
-            PersonSpecialtyAssignment.is_current is True,
+            PersonSpecialtyAssignment.is_current.is_(True),
         )
         stmt = stmt.where(exists_s.exists())
     return stmt
@@ -1506,7 +1506,7 @@ def _operator_to_person_cte(department: str | None = None,
             PersonGroupMembership,
             and_(
                 PersonGroupMembership.person_id == Person.id,
-                PersonGroupMembership.is_current is True,
+                PersonGroupMembership.is_current.is_(True),
             ),
         )
         .outerjoin(Group, PersonGroupMembership.group_id == Group.id)
@@ -4892,7 +4892,7 @@ def today_staff_efficiency(
             )
             .select_from(PersonAlias)
             .outerjoin(Person, PersonAlias.person_id == Person.id)
-            .outerjoin(PersonGroupMembership, and_(PersonGroupMembership.person_id == Person.id, PersonGroupMembership.is_current is True))
+            .outerjoin(PersonGroupMembership, and_(PersonGroupMembership.person_id == Person.id, PersonGroupMembership.is_current.is_(True)))
             .outerjoin(Group, PersonGroupMembership.group_id == Group.id)
         ).all()
         # 建 "去前缀后缀 → person 信息" 索引 (取第一个匹配, 多个匹配时优先企微部门)
@@ -5360,7 +5360,7 @@ def today_staff_efficiency(
             .join(Specialty, PersonSpecialtyAssignment.specialty_id == Specialty.id)
             .where(
                 PersonSpecialtyAssignment.person_id.in_(work_person_ids),
-                PersonSpecialtyAssignment.is_primary is True,
+                PersonSpecialtyAssignment.is_primary.is_(True),
                 or_(
                     PersonSpecialtyAssignment.effective_to.is_(None),
                     PersonSpecialtyAssignment.effective_to >= query_start,
@@ -5836,7 +5836,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
             )
         .select_from(PA)
         .outerjoin(P, PA.person_id == P.id)
-        .where(PA.is_system is False)
+        .where(PA.is_system.is_(False))
     ).all()
 
     recovery_ops: dict[str, dict] = {}
@@ -7779,7 +7779,7 @@ def refund_recovery_analysis(
             )
             .select_from(PA)
             .outerjoin(P, PA.person_id == P.id)
-            .where(PA.is_system is False)  # 排除 sys/system 等系统自动别名
+            .where(PA.is_system.is_(False))  # 排除 sys/system 等系统自动别名
     ).all()
 
     # 专职退款挽回人员 (hr_cat=退款挽回)
