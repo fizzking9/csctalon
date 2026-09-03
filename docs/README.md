@@ -93,3 +93,61 @@
 
 > 原则：手册跟随代码仓库，不单独部署到运行环境；如确需服务器现场可查，可在 `.env` 指向的 `logs/` 同级放一份拷贝，但**不要**改发布打包清单。
 
+---
+
+## 五、存量迁移 SOP（未来再次归位时复用）
+
+> 本次（2026-09-03）已完成首轮归位。若未来再次新增分类或调整命名，按此 SOP 执行，避免断链。
+
+### 5.1 步骤
+
+1. **先建工单**（governance 类），明确迁移映射表（旧路径 → 新路径）。
+2. **盘点交叉引用**：`grep -rn '旧文件名' --include='*.md'` 找全引用方。
+3. **先改引用，再移动**（或移动后立即同步改，顺序必须闭环）：
+   - `docs/xxx.md` 绝对路径引用 → 直接替换为新路径；
+   - `](xxx.md)` 相对路径引用 → 按「当前文件目录到目标文件目录」重算相对路径。
+4. **用 `git mv` 移动**（保留历史，git 识别 rename）。
+5. **验证断链**：遍历所有 `.md` 的相对链接，逐一检查目标文件是否存在。
+6. **提交并关联工单号**，gitleaks 通过后推送。
+
+### 5.2 断链验证脚本（可直接复用）
+
+```bash
+cd <repo_root>
+python3 - <<'PY'
+import os, re
+broken = []
+for root, dirs, fs in os.walk("."):
+    if ".git" in root or "node_modules" in root or ".venv" in root:
+        continue
+    for f in fs:
+        if not f.endswith(".md"):
+            continue
+        path = os.path.join(root, f)
+        content = open(path, encoding="utf-8").read()
+        for m in re.finditer(r'\]\(([^)]+)\)', content):
+            t = m.group(1)
+            if t.startswith(("http://", "https://", "file://", "#")):
+                continue
+            tc = t.split("#")[0]
+            if not tc.endswith(".md"):
+                continue
+            tp = os.path.normpath(os.path.join(root, tc))
+            if not os.path.exists(tp):
+                broken.append((path, t))
+if broken:
+    print("BROKEN:")
+    for p, t in broken:
+        print("  ", p, "->", t)
+else:
+    print("NO BROKEN LINKS")
+PY
+```
+
+### 5.3 易错点（本次踩坑）
+
+- **相对路径 vs 绝对路径**：`docs/xxx.md` 开头的引用不受文件位置影响，可直接 sed 全局替换；`](xxx.md)` 相对引用必须按新位置重算 `../` 层级。
+- **跨目录 `../` 数量**：文件从根目录移入 `docs/design/` 后，引用仓库根文件需从 `../AGENTS.md` 改为 `../../AGENTS.md`。
+- **历史遗留链接**：指向已迁移目录（如 `.trae/documents/`）的链接，应改指向 arch 里对应的锁定文档。
+- **README 目录树与索引**：移动后必须同步更新 README 的目录树代码块和文档索引表。
+
