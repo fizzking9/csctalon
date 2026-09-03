@@ -25,6 +25,7 @@
 - [ ] 事务回滚逻辑（多步写操作是否包在事务里，异常是否回滚）
 - [ ] 金额是否为整数（分），无浮点精度隐患
 - [ ] 时间字段是否遵守 `docs/standards/数据时间字段使用规范.md`（`Asia/Shanghai` 时区、`SYS/system` 排除）
+- [ ] **禁止对 ORM 列使用 `X.col is True/False`**（`InstrumentedAttribute is True` 恒为 False → `.where()` 恒假 → 查询静默返回空，见 `#4` 事故）；布尔列必须用 `X.col.is_(True/False)` 或 `== True/False`；`is True/False` 仅可用于普通 Python 变量
 
 ### 一致性
 
