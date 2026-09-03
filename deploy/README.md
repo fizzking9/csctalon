@@ -412,7 +412,7 @@ chown -R 999:999 /opt/csctalon/data/postgres
 | `cd /opt/csctalon/current` 报"符号链接的层数过" | `current`/`current.old` 软链自引用（upgrade.sh 回滚锚点生成 bug）→ 用 `ls -l /opt/csctalon/current` 检查后 `ln -sfn /opt/csctalon/releases/<版本> /opt/csctalon/current` 手工扶正 |
 | 恢复后数据不对 | 备份是时间点快照；确认用的是期望时刻的备份包 |
 | 同步任务不跑 | `BMS_SCHEDULE_AUTOSTART` 是否为 true；看 `logs/backend/` 同步日志 |
-| 同步后当天数据缺失 / `[wallet] 导入完成: 新增` 为负数 | **BMS 页面时间窗口设置失败**（页面保留默认/上次范围，拉到旧流水）。看同步日志：① `设置时间范围: X ~ Y` 是否 = 期望窗口；② 是否有 `[wallet] 疑似时间窗口未设置成功` WARNING；③ `[wallet] 实际入库 N 行 op_time 范围` 是否落在窗口内。均为 2026-09-01 修复项（`timezone_id=Asia/Shanghai` + `fill_utc=False` + ticket placeholder/`.show-more` + `:visible` 非法选择器），确认部署版本含 `f8e3b3d` 之后代码；详见 `docs/数据同步与加工说明.md §4.5` |
+| 同步后当天数据缺失 / `[wallet] 导入完成: 新增` 为负数 | **BMS 页面时间窗口设置失败**（页面保留默认/上次范围，拉到旧流水）。看同步日志：① `设置时间范围: X ~ Y` 是否 = 期望窗口；② 是否有 `[wallet] 疑似时间窗口未设置成功` WARNING；③ `[wallet] 实际入库 N 行 op_time 范围` 是否落在窗口内。均为 2026-09-01 修复项（`timezone_id=Asia/Shanghai` + `fill_utc=False` + ticket placeholder/`.show-more` + `:visible` 非法选择器），确认部署版本含 `f8e3b3d` 之后代码；详见 `docs/standards/数据同步与加工说明.md §4.5` |
 | docker build 卡在 Downloading Chrome for Testing | Playwright 浏览器下载走 npmmirror 镜像（Dockerfile 已内置 `PLAYWRIGHT_DOWNLOAD_HOST`），重试构建即可 |
 
 ## 10. HTTPS（阿里云免费证书）

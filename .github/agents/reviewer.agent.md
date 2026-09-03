@@ -23,7 +23,7 @@ user-invocable: true
 - [ ] 与架构文档的一致性（`docs/arch/` 是否擅自改接口）
 - [ ] 性能隐患（N+1 查询、循环内调接口）
 - [ ] 金额单位（是否统一"分"，无浮点）
-- [ ] 时区处理（`Asia/Shanghai`、`SYS/system` 排除，见 `docs/数据时间字段使用规范.md`）
+- [ ] 时区处理（`Asia/Shanghai`、`SYS/system` 排除，见 `docs/standards/数据时间字段使用规范.md`）
 - [ ] 表结构变更是否走 Alembic migration
 
 ## 输出格式（分级报告）

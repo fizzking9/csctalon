@@ -22,7 +22,7 @@
 2. 禁止无参数化地拼接 SQL。允许 `text()` + 绑定参数（如 `db.execute(text(...), {...})`），禁止字符串 `f"...{var}..."` 直接拼进 SQL。
 3. 禁止在代码中硬编码密码、密钥、内网 IP、数据库账号，必须走环境变量（`.env` / `settings`）。
 4. 禁止擅自修改已锁定的架构文档（`docs/arch/` 下标记为 `LOCKED` 的文件），修改必须先走人工审核流程。
-5. 禁止删除或绕过 `docs/数据时间字段使用规范.md` 中规定的时区换算（`AT TIME ZONE 'Asia/Shanghai'`）与 `SYS/system` 系统操作人排除标准。
+5. 禁止删除或绕过 `docs/standards/数据时间字段使用规范.md` 中规定的时区换算（`AT TIME ZONE 'Asia/Shanghai'`）与 `SYS/system` 系统操作人排除标准。
 6. 禁止绕过 Alembic 直接改表结构；表结构变更必须新增 migration 版本。
 
 ## 输出风格

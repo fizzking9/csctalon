@@ -36,7 +36,7 @@
 ## 参考
 - 现有类似接口：<docs/api/xxx.md>
 - 错误码规范：docs/standards/error-code.md
-- 数据时间规范：docs/数据时间字段使用规范.md
+- 数据时间规范：docs/standards/数据时间字段使用规范.md
 
 ## 禁止事项
 1. 禁止直接拼接 SQL（须 text() + 绑定参数）

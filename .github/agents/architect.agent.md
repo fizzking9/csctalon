@@ -16,7 +16,7 @@ user-invocable: true
 ## 输入
 
 - 需求描述（优先使用 `docs/standards/task-work-order.md` 派工单格式）
-- 现有代码 / 表结构（`docs/数据库表结构说明.md`、`backend/app/models/`）
+- 现有代码 / 表结构（`docs/standards/数据库表结构说明.md`、`backend/app/models/`）
 - 已有架构文档（`docs/arch/`、`.trae/documents/`）
 
 ## 输出物标准（写入 docs/arch/A-YYYYMMDD-序号-简述.md）
@@ -31,7 +31,7 @@ user-invocable: true
 1. 优先复用现有模块（`backend/app/services/`、`backend/app/api/v1/`），禁止重复造轮子
 2. 接口设计必须考虑幂等性（尤其同步、导入类接口）
 3. 数据流必须标注敏感字段（PII、金额）的脱敏点
-4. 金额一律以"分"为单位（整数），时间字段遵守 `docs/数据时间字段使用规范.md`
+4. 金额一律以"分"为单位（整数），时间字段遵守 `docs/standards/数据时间字段使用规范.md`
 
 ## 模型选择建议（模型版本锁定）
 

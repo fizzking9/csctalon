@@ -126,18 +126,19 @@ csctalon/
 │       ├── api/                   # API 调用封装
 │       ├── components/            # 公共组件
 │       └── store/                 # Pinia 状态管理
-├── docs/                          # 设计文档与说明
+├── docs/                          # 设计文档与说明（组织规范见 docs/README.md）
+│   ├── README.md                  # docs 目录组织与命名规范
 │   ├── 规划设计.md                 # 系统架构设计(v0.4)
-│   ├── 数据同步与加工说明.md        # BMS/SCRM 同步链路(v0.4)
-│   ├── 数据时间字段使用规范.md      # 时间字段口径
-│   ├── 人均效率算法说明.md          # 工作量分/效率分计算
-│   ├── Group-Specialty双体系设计.md # 行政分组+业务专项
+│   ├── 规划设计-v0.5.md            # 规划 v0.5 评审定稿
 │   ├── API接口文档.md              # 50+ 路由端点
-│   ├── 数据库表结构说明.md          # 86 张表
-│   ├── alembic-migration管理规范.md # 迁移管理
+│   ├── 审查行动项登记.md           # 审查/审计行动项台账
 │   ├── arch/                      # 已锁定架构文档 + _pending/ 待审核
-│   ├── standards/                 # 规范(error-code/review-checklist/派工单)
-│   └── debug/                     # 调试文档归档
+│   ├── standards/                 # 规范/清单/派工单模板
+│   ├── reports/                   # 审计/审查/审核报告
+│   ├── design/                    # 未锁定设计方案
+│   ├── ops/                       # 运维手册/SOP
+│   ├── debug/                     # 调试文档归档
+│   └── security/                  # 安全事件/凭证整改
 ├── data/                          # Docker 数据卷 (gitignore)
 ├── logs/                          # 运行时日志 (gitignore)
 ├── .env.example                   # 环境变量模板
@@ -211,15 +212,15 @@ ruff check app/ tests/
 | 文档 | 说明 |
 |---|---|
 | [规划设计.md](docs/规划设计.md) | 系统架构、模块设计、技术路线 |
-| [运营指标阈值化与预警通知设计.md](docs/arch/_pending/metric-alerting-notification-design.md) | 指标注册表/四级阈值/预警引擎/通知通道设计与实施状态 |
-| [数据同步与加工说明.md](docs/数据同步与加工说明.md) | BMS/SCRM 数据采集与清洗链路 |
-| [数据采集运维手册.md](docs/数据采集运维手册.md) | 采集故障排查、缺口恢复、巡检 SOP |
-| [人均效率算法说明.md](docs/人均效率算法说明.md) | 工作量分/效率分计算、6专项系数、SN去重 |
-| [Group-Specialty双体系设计.md](docs/Group-Specialty双体系设计.md) | 行政分组与业务专项双维度模型 |
-| [数据时间字段使用规范.md](docs/数据时间字段使用规范.md) | 各表时间字段口径定义 |
+| [运营指标阈值化与预警通知设计.md](docs/arch/A-20260902-004-metric-alerting-notification-design.md) | 指标注册表/四级阈值/预警引擎/通知通道设计与实施状态 |
+| [数据同步与加工说明.md](docs/standards/数据同步与加工说明.md) | BMS/SCRM 数据采集与清洗链路 |
+| [数据采集运维手册.md](docs/ops/数据采集-运维手册.md) | 采集故障排查、缺口恢复、巡检 SOP |
+| [人均效率算法说明.md](docs/standards/人均效率算法说明.md) | 工作量分/效率分计算、6专项系数、SN去重 |
+| [Group-Specialty双体系设计.md](docs/design/Group-Specialty双体系设计.md) | 行政分组与业务专项双维度模型 |
+| [数据时间字段使用规范.md](docs/standards/数据时间字段使用规范.md) | 各表时间字段口径定义 |
 | [API接口文档.md](docs/API接口文档.md) | 50+ 路由端点/参数/响应 |
-| [数据库表结构说明.md](docs/数据库表结构说明.md) | 86 张表用途/关系/索引 |
-| [alembic-migration管理规范.md](docs/alembic-migration管理规范.md) | 版本链管理、merge head、幂等升级 |
+| [数据库表结构说明.md](docs/standards/数据库表结构说明.md) | 86 张表用途/关系/索引 |
+| [alembic-migration管理规范.md](docs/standards/alembic-migration管理规范.md) | 版本链管理、merge head、幂等升级 |
 
 ## 环境变量
 
