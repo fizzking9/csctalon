@@ -2,7 +2,7 @@
 
 **生效日期**：2026-09-01
 **适用范围**：所有交给 AI 的单项开发任务（对应"AI 协作治理规范" 4.4）
-**关联文档**：AGENTS.md（全局约束）、[error-code.md](error-code.md)、[review-checklist.md](review-checklist.md)
+**关联文档**：AGENTS.md（全局约束）、[error-code.md](error-code.md)、[review-checklist.md](review-checklist.md)、[issue-workflow.md](issue-workflow.md)（工单驱动工作流，先建工单再派工）
 
 > 目的：把模糊需求（"帮我写个接口"）转成结构化派工单，减少 AI 猜测，提高一次通过率。
 > 用法：复制下方模板，按任务填写 `## 任务` 之后的每个部分，再交给 Developer 阶段执行。

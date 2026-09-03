@@ -157,11 +157,11 @@ csctalon/
 | 全局约束 | [AGENTS.md](AGENTS.md) | AI 行为铁律(禁止 console.log/拼接SQL/硬编码密钥等), 自动加载 |
 | 三阶段 Agent | `.github/agents/` | 架构师(只设计) / 开发者(实现) / 审查员(只审查) |
 | 架构锁定 | `docs/arch/` | 已锁定架构文档 + `_pending/` 待人工审核 |
-| 规范 | `docs/standards/` | 错误码 / 审查清单 / 任务派工单模板 |
+| 规范 | `docs/standards/` | 错误码 / 审查清单 / 任务派工单模板 / 工单驱动工作流 |
 | 测试 | `backend/tests/` | pytest 基建, 独立 `csctalon_test` 库, 隔离开发/生产 |
 | CI | `.gitea/workflows/` | gitleaks 凭证扫描 + backend-test(ruff + pytest 强制) |
 
-**协作流程**: 需求 → 架构师出设计 → 人工锁定(`docs/arch/` + git tag) → 开发者实现 → 审查员审查 → 人工终审合并。测试与 lint 由 CI 机器验证, 不依赖 AI 口头声称。
+**协作流程**: 需求/事件 → **建 Gitea 工单**（见 [docs/standards/issue-workflow.md](docs/standards/issue-workflow.md)，事故拆单：incident + governance）→ 架构师出设计 → 人工锁定(`docs/arch/` + git tag) → 开发者实现（提交/PR 关联 `#issue号`）→ 审查员审查 → 人工终审合并。测试与 lint 由 CI 机器验证, 不依赖 AI 口头声称。
 
 ## 运行测试
 

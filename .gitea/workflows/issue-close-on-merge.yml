@@ -1,0 +1,84 @@
+# Gitea Actions: 合并后工单状态自动流转 (G3)
+#
+# 对应锁定设计 docs/arch/A-20260903-001-issue-automation-gates.md §2.3
+# 规则:
+#   - PR 合并(closed 且 merged)后, 从标题/描述解析 #<issue号>
+#   - incident 事故单不自动关闭(必须人工结案)
+#   - 其他类型: 若无剩余未关闭子工单则置 Closed, 否则仅评论
+# 注: 内网 runner, 纯 shell + curl + Gitea API。
+
+name: issue-close-on-merge
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  close-issue:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: 解析工单号并流转状态
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HTML_URL: ${{ github.event.pull_request.html_url }}
+          GITEA_TOKEN: ${{ secrets.GITEATOKEN }}
+        run: |
+          set -e
+          title="${PR_TITLE:-}"
+          body="${PR_BODY:-}"
+          num="${PR_NUMBER:-}"
+          html="${PR_HTML_URL:-}"
+          api="http://127.0.0.1:3000/api/v1/repos/tanzk/csctalon"
+
+          # 从标题+描述提取所有 #数字, 取第一个作为主工单
+          issue_no=$(printf '%s\n%s\n' "$title" "$body" | grep -Eo '#[0-9]+' | head -1 | tr -d '#')
+          if [ -z "$issue_no" ]; then
+            echo "⚠️ 未解析到工单号, 跳过状态流转"
+            exit 0
+          fi
+
+          echo "== 关联工单 #${issue_no} =="
+
+          # 读取工单标签, 判断是否为 incident (单行 python, 避免 YAML block 缩进破坏)
+          labels=$(curl -s -H "Authorization: token ${GITEA_TOKEN}" "$api/issues/${issue_no}/labels" | python3 -c "import sys,json; print(','.join(x.get('name','') for x in json.load(sys.stdin)))" 2>/dev/null || true)
+          echo "labels = $labels"
+
+          comment="✅ 已由 PR #${num} 合并交付：${html}"
+
+          if echo "$labels" | grep -q 'incident'; then
+            echo "⏸ incident 事故单, 不自动关闭(需人工结案), 仅追加评论"
+            curl -s -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 -c "import json,sys; print(json.dumps({'body': sys.argv[1]}))" "$comment")" \
+              "$api/issues/${issue_no}/comments" > /dev/null
+            exit 0
+          fi
+
+          # 读取当前工单状态 (单行 python)
+          state=$(curl -s -H "Authorization: token ${GITEA_TOKEN}" "$api/issues/${issue_no}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('state',''))" 2>/dev/null || true)
+          echo "current state = $state"
+
+          # 若已关闭, 只追加评论
+          if [ "$state" = "closed" ]; then
+            echo "工单已关闭, 仅追加评论"
+            curl -s -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 -c "import json,sys; print(json.dumps({'body': sys.argv[1]}))" "$comment")" \
+              "$api/issues/${issue_no}/comments" > /dev/null
+            exit 0
+          fi
+
+          # 关闭工单 + 评论
+          echo "✅ 关闭工单 #${issue_no}"
+          curl -s -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(python3 -c "import json,sys; print(json.dumps({'body': sys.argv[1]}))" "$comment")" \
+            "$api/issues/${issue_no}/comments" > /dev/null
+          curl -s -X PATCH -H "Authorization: token ${GITEA_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"state":"closed"}' \
+            "$api/issues/${issue_no}" > /dev/null
+          echo "done"

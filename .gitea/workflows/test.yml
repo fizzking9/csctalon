@@ -44,6 +44,7 @@ jobs:
           done
 
       - name: 后端测试 (docker python:3.11-slim)
+        id: backend-test
         run: |
           # 挂宿主机绝对路径 /vol2/@appcenter/gitea-runner/workspace/ci-repo/backend
           docker run --rm --network ci-net \
@@ -63,6 +64,35 @@ jobs:
               echo '== pytest =='
               pytest
             "
+
+      - name: 回写 CI 结果到工单 (G2)
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEATOKEN }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          SHA: ${{ github.sha }}
+          TEST_OUTCOME: ${{ steps.backend-test.outcome }}
+        run: |
+          # 对应锁定设计 A-20260903-001 §2.2: pytest/ruff 结果回写工单评论, 幂等去重
+          issue_no=$(printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | grep -Eo '#[0-9]+' | head -1 | tr -d '#')
+          [ -n "$issue_no" ] || { echo "未解析到工单号, 跳过回写"; exit 0; }
+          api="http://127.0.0.1:3000/api/v1/repos/tanzk/csctalon"
+
+          # 幂等: 该工单已有同 commit 的 CI 评论则跳过
+          existing=$(curl -s -H "Authorization: token ${GITEA_TOKEN}" "$api/issues/${issue_no}/comments")
+          if echo "$existing" | grep -q "${SHA}"; then
+            echo "已存在同 commit CI 评论, 跳过(幂等)"
+            exit 0
+          fi
+
+          outcome="${TEST_OUTCOME:-unknown}"
+          body="🤖 CI 自动回写: commit \`${SHA}\` 后端测试(ruff+pytest) = **${outcome}**"
+          curl -s -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(python3 -c "import json,sys; print(json.dumps({'body': sys.argv[1]}))" "$body")" \
+            "$api/issues/${issue_no}/comments" > /dev/null
+          echo "已回写 CI 结果到工单 #${issue_no}"
 
       - name: 清理 postgres 容器
         run: |
