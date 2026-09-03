@@ -212,6 +212,7 @@ ruff check app/ tests/
 | [规划设计.md](docs/规划设计.md) | 系统架构、模块设计、技术路线 |
 | [运营指标阈值化与预警通知设计.md](docs/arch/_pending/metric-alerting-notification-design.md) | 指标注册表/四级阈值/预警引擎/通知通道设计与实施状态 |
 | [数据同步与加工说明.md](docs/数据同步与加工说明.md) | BMS/SCRM 数据采集与清洗链路 |
+| [数据采集运维手册.md](docs/数据采集运维手册.md) | 采集故障排查、缺口恢复、巡检 SOP |
 | [人均效率算法说明.md](docs/人均效率算法说明.md) | 工作量分/效率分计算、6专项系数、SN去重 |
 | [Group-Specialty双体系设计.md](docs/Group-Specialty双体系设计.md) | 行政分组与业务专项双维度模型 |
 | [数据时间字段使用规范.md](docs/数据时间字段使用规范.md) | 各表时间字段口径定义 |
