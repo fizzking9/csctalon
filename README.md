@@ -158,6 +158,7 @@ csctalon/
 | 三阶段 Agent | `.github/agents/` | 架构师(只设计) / 开发者(实现) / 审查员(只审查) |
 | 架构锁定 | `docs/arch/` | 已锁定架构文档 + `_pending/` 待人工审核 |
 | 规范 | `docs/standards/` | 错误码 / 审查清单 / 任务派工单模板 / 工单驱动工作流 |
+| 文档组织 | `docs/README.md` | docs 目录职责 / 文件命名规范 / 运维手册分发 |
 | 测试 | `backend/tests/` | pytest 基建, 独立 `csctalon_test` 库, 隔离开发/生产 |
 | CI | `.gitea/workflows/` | gitleaks 凭证扫描 + backend-test(ruff + pytest 强制) |
 
