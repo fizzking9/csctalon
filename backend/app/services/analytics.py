@@ -1202,6 +1202,102 @@ def category_by_package(db: Session, limit: int = 20) -> list[dict]:
 # ---------- 看板4:人员操作分析 ----------
 
 
+# 2026-09-04 F-P1-1: 首页"今日工作效率"同一人多次出现的根因修复。
+# today_staff_efficiency 的 SQL 按源表 operator/handler 字符串 GROUP BY, 同一人在
+# cs_records.operator / refunds.operator / service_tickets.handler 三套文本里写法不一致
+# (空格/企微-前缀/别名未登记/跨表变体)时, 经 PersonAlias 等值 join 会出多行(部分 person_id=None),
+# 而 person 聚合模式此前"原样返回"不归并 → 界面同一人出现多行。
+# 本函数: aggregate_by=person 时按人归并 — 归并键 = person_id(非空) 兜底 归一 name。
+# 6 个专项桶名须与 today_staff_efficiency 内 CATS 保持一致。
+_PERSON_CAT_NAMES = ("咨询接待", "套餐专项", "退款挽回", "退款处理", "内部投诉", "外部投诉")
+_PERSON_MERGE_NUM_KEYS = (
+    "reception_count", "reception_device_count", "refund_op_count",
+    "sp_zixun", "sp_taocan", "sp_recovery", "sp_processing", "sp_internal", "sp_external",
+    "pp_zixun", "pp_taocan", "pp_recovery", "pp_processing", "pp_internal", "pp_external",
+    "work_score", "eff_score",
+)
+_PERSON_MERGE_ATTR_KEYS = (
+    "operator", "name", "person_id", "department", "group", "position",
+    "current_specialty", "hr_category", "qw_user_id", "weights", "transfer_penalty",
+)
+
+
+def _merge_person_rows(recs: list[dict]) -> list[dict]:
+    """真人员工记录按人归并(aggregate_by=person 专用)。
+
+    - 归并键: person_id 非空 → "pid:{person_id}"; 否则 → "name:{归一 name}"
+      (同名但均未登记到 PersonAlias 才可能误合并, 本项目人名唯一性强 + alias 覆盖率高, 风险极低)
+    - 数值字段直接加总; 人员属性取"第一个有值", qw_user_id 非空优先
+    - breakdown 6 桶 sessions/people/work_contrib/eff_contrib 加总,
+      coef 展示用 work_contrib/sessions(加权平均系数, 与 specialty 聚合后语义一致)
+    - work_score/eff_score = 各行直接加总后 round(与 tooltip"合计=score"一致)
+    """
+    if not recs:
+        return recs
+
+    def _mkey(r: dict) -> str:
+        pid = r.get("person_id")
+        return f"pid:{pid}" if pid is not None else f"name:{r.get('name') or ''}"
+
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for r in recs:
+        k = _mkey(r)
+        if k not in merged:
+            order.append(k)
+            base = {kk: r.get(kk) for kk in _PERSON_MERGE_ATTR_KEYS}
+            base["is_management"] = bool(r.get("is_management"))
+            base["breakdown"] = {
+                c: {
+                    "sessions": 0, "people": 0,
+                    "weight": ((r.get("breakdown") or {}).get(c) or {}).get("weight", 1.0),
+                    "coef": 0.0, "is_own": True, "work_contrib": 0.0, "eff_contrib": 0.0,
+                }
+                for c in _PERSON_CAT_NAMES
+            }
+            for kk in _PERSON_MERGE_NUM_KEYS:
+                base[kk] = 0
+            base["rank"] = None
+            base["is_virtual"] = False
+            base["_calc_note"] = {
+                **((r.get("_calc_note") or {})),
+                "merge_note": "同人多行已按人归并(2026-09-04): person_id/归一名相同行合并",
+            }
+            merged[k] = base
+        else:
+            b = merged[k]
+            for kk in _PERSON_MERGE_ATTR_KEYS:  # 属性取"更优值": 空/占位值(未设置/未分组)被更有值行覆盖, qw_user_id 优先企微行
+                cur = b.get(kk)
+                nxt = r.get(kk)
+                if not cur or str(cur).strip() in ("未设置", "未分组", "—"):
+                    if nxt:
+                        b[kk] = nxt
+            if r.get("is_management"):
+                b["is_management"] = True
+        b = merged[k]
+        for kk in _PERSON_MERGE_NUM_KEYS:
+            b[kk] = b[kk] + (r.get(kk) or 0)
+        rb = r.get("breakdown") or {}
+        for c in _PERSON_CAT_NAMES:
+            rbv = rb.get(c) or {}
+            bbv = b["breakdown"][c]
+            bbv["sessions"] += int(rbv.get("sessions") or 0)
+            bbv["people"] += int(rbv.get("people") or 0)
+            bbv["work_contrib"] += float(rbv.get("work_contrib") or 0.0)
+            bbv["eff_contrib"] += float(rbv.get("eff_contrib") or 0.0)
+    out_list = [merged[k] for k in order]
+    for b in out_list:
+        b["work_score"] = round(float(b["work_score"] or 0), 2)
+        b["eff_score"] = round(float(b["eff_score"] or 0), 2)
+        for c in _PERSON_CAT_NAMES:
+            bbv = b["breakdown"][c]
+            bbv["work_contrib"] = round(float(bbv["work_contrib"]), 1)
+            bbv["eff_contrib"] = round(float(bbv["eff_contrib"]), 1)
+            if bbv.get("sessions"):
+                bbv["coef"] = round(float(bbv["work_contrib"]) / float(bbv["sessions"]), 3)
+    return out_list
+
+
 def _strip_qw_prefix(x: str | None) -> str | None:
     """终极兜底: Python端去掉人名前的部门/系统前缀(企微-/店铺-/生产-/财务-/云客猫-/全球wifi- 等),
     避免维表漏登记或 display_name 带前缀导致同一人分两桶。仅作为 display_name 兜底用。
@@ -5532,8 +5628,11 @@ def today_staff_efficiency(
         raw_name = r.name or op or "未知"
         norm_name = _strip_qw_prefix(raw_name) or raw_name
         _qw = getattr(r, "qw_user_id", None)
+        # 2026-09-04 F-P1-1: 输出 person_id(可为 None)。此前 record 不含 person_id,
+        # 导致同一人多行无法在后端按人归并、前端 person audit 也拿不到 id。
         record: dict[str, Any] = {
             "operator": op, "name": norm_name,
+            "person_id": pid,
             "department": r.dept or "未设置", "group": r.grp or "未分组",
             "position": r.pos, "current_specialty": r.sp,
             "hr_category": hr_cat, "is_management": mgmt,
@@ -5585,10 +5684,12 @@ def today_staff_efficiency(
 
     def _aggregate_records(recs: list[dict], mode: str) -> list[dict]:
         """按 mode 聚合真人员工记录.
-        mode: person (不聚合) / specialty (按hr_category) / group (按组) / all (全员一行)
+        mode: person (按 person_id/归一名 归并同一人多行) / specialty (按hr_category) / group (按组) / all (全员一行)
         """
         if mode == "person":
-            return recs
+            # F-P1-1: 同一人跨表写法不一致 → 按 person_id(兜底 name)归并, 不再原样返回。
+            # 逻辑在模块级 `_merge_person_rows`(可单测), 6 桶名单与 CATS 一致。
+            return _merge_person_rows(recs)
         if not recs:
             return recs
         SUM_KEYS = [
