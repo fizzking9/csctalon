@@ -147,6 +147,9 @@
             <el-tooltip content="设备分析" placement="bottom">
               <el-button :icon="Monitor" circle size="small" text @click="openDeviceAnalysis" />
             </el-tooltip>
+            <el-tooltip v-if="authStore.isManager" content="AI 分析助手" placement="bottom">
+              <el-button :icon="MagicStick" circle size="small" text @click="openAssistant" />
+            </el-tooltip>
             <el-tooltip v-if="authStore.isAdmin" content="手动同步(增量)" placement="bottom">
               <el-button
                 :icon="Upload"
@@ -275,22 +278,28 @@
 
     <!-- 全局审计弹窗(点击任意 SN / 人员 唤起) -->
     <AuditDialog />
+
+    <!-- 全局 AI 分析助手(右上角按钮唤起, 管理层可见) -->
+    <AssistantDrawer />
   </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Bell, User, Monitor, Upload } from '@element-plus/icons-vue'
+import { Bell, User, Monitor, Upload, MagicStick } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { taskStatus, taskSubmit } from '@/api/fetch'
 import { systemEventSummary } from '@/api/systemEvent'
 import { getSiteInfo } from '@/api/siteInfo'
 import AuditDialog from '@/components/AuditDialog.vue'
+import AssistantDrawer from '@/components/AssistantDrawer.vue'
 import { useAudit } from '@/composables/useAudit'
+import { useAssistant } from '@/composables/useAssistant'
 import { showByVisibility } from '@/utils/env'
 
 const { openQuickAnalysis } = useAudit()
+const { openAssistant } = useAssistant()
 
 const route = useRoute()
 const router = useRouter()
