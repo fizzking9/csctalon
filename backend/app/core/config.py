@@ -146,6 +146,9 @@ class Settings(BaseSettings):
     # AI 任务结果在内存保留时间(秒)与历史条数(单 worker 内存态)。
     AI_TASK_TTL_S: int = 600
     AI_TASK_HISTORY: int = 20
+    # AI 单次回答最大输出 token(防超长生成拖慢响应); analyze 首查同步等待上限(秒)。
+    AI_MAX_TOKENS: int = 1500
+    AI_SYNC_WAIT_S: float = 6.0
 
     # 跨域(局域网部署,允许内网访问)
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"

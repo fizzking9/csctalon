@@ -162,9 +162,21 @@ async function submit() {
   scrollBottom()
   try {
     const res = await aiAnalyze({ question: q, period: period.value })
-    const taskId = res.data?.task_id
-    if (!taskId) throw new Error('未返回 task_id')
-    await pollTask(taskId, aiMsg)
+    const d = res.data || {}
+    // 后端 analyze 已同步等待: status=success 直接带 result_md(无需轮询); 否则轮询
+    if (d.status === 'success') {
+      aiMsg.loading = false
+      aiMsg.content = d.result_md || '(无输出)'
+      scrollBottom()
+    } else if (d.status === 'failed') {
+      aiMsg.loading = false
+      aiMsg.content = '⚠️ 分析失败: ' + (d.error || '未知错误')
+      scrollBottom()
+    } else if (d.task_id) {
+      await pollTask(d.task_id, aiMsg)
+    } else {
+      throw new Error('未返回 task_id')
+    }
   } catch (e) {
     aiMsg.loading = false
     aiMsg.content = '⚠️ 提交失败: ' + (e?.message || e || '未知错误')
@@ -198,7 +210,7 @@ async function pollTask(taskId, aiMsg) {
         scrollBottom()
         return
       }
-      await sleep(2000)
+      await sleep(1000)
     }
   } finally {
     clearTimer()

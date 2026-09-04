@@ -8,6 +8,7 @@
 - 权限: ManagerUser; LLM_ENABLED=false → 503
 """
 
+import asyncio
 import logging
 from typing import Literal
 
@@ -73,7 +74,10 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
                 db.close()
             # 记录注入的 data 规模日志(不含明细)
             logger.info("ai task %s: period=%s question_len=%d", task.task_id, payload.period, len(q))
-            result = await llm_client.chat_completion(messages)
+            result = await llm_client.chat_completion(
+                messages,
+                max_tokens=int(getattr(settings, "AI_MAX_TOKENS", 1500) or 1500),
+            )
             task.result_md = result
         except llm_client.LLMError as e:
             task.error = str(e)
@@ -83,7 +87,25 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
             raise
 
     task_id = ai_task_manager.submit(q, payload.period, payload.date, _runner)
-    return R(data={"task_id": task_id, "message": "已提交, 请轮询 GET /api/v1/ai/tasks/{task_id}"})
+    # 首查同步等待(2026-09-04 提速): AI 任务通常 3~6s 完成, 前端若走 2s 轮询需等
+    # 8~10s 才有输出。这里最多等 AI_SYNC_WAIT_S 秒直接拿结果; 超时才返回 task_id 走轮询兜底。
+    wait_s = float(getattr(settings, "AI_SYNC_WAIT_S", 6.0) or 6.0)
+    deadline = asyncio.get_event_loop().time() + wait_s
+    while True:
+        task = ai_task_manager.get(task_id)
+        if task is not None and task.status in ("success", "failed"):
+            break
+        if asyncio.get_event_loop().time() >= deadline:
+            break
+        await asyncio.sleep(0.15)
+    task = ai_task_manager.get(task_id)
+    if task is not None and task.status == "success":
+        # 一次请求直接返回结果, 前端无需轮询
+        return R(data={"task_id": task_id, "status": "success", "result_md": task.result_md})
+    if task is not None and task.status == "failed":
+        return R(data={"task_id": task_id, "status": "failed", "error": task.error})
+    # 超时未完成 → 回 task_id 走轮询
+    return R(data={"task_id": task_id, "status": "running", "message": "已提交, 请轮询 GET /api/v1/ai/tasks/{task_id}"})
 
 
 @router.get("/tasks/{task_id}", response_model=R, summary="查询 AI 分析任务结果(轮询)")
