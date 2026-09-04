@@ -888,7 +888,17 @@ def complaint_detail(
 
     # 按动作时间降序排列
     records.sort(key=lambda x: x.get("time") or "", reverse=True)
-    return R(data={"items": records[:limit], "total": len(records)})
+    # F-P1-2: 明细接口返回窗口内 registered/handled 计数(供前端明细标题显示
+    # "登记 X / 处理 Y"; 与 /summary 同口径, source_type 已按三源过滤时仍返回全量三源,
+    # 前端按当前明细来源取对应字段即可)
+    _reg_handled = _sources_reg_handled(db, ts, te)
+    return R(data={
+        "items": records[:limit],
+        "total": len(records),
+        "reg_handled": _reg_handled,
+        "registered": _reg_handled.get(source_type, {}).get("registered", 0) if source_type else _reg_handled["total"]["registered"],
+        "handled": _reg_handled.get(source_type, {}).get("handled", 0) if source_type else _reg_handled["total"]["handled"],
+    })
 
 
 # ---------- 补充明细(315外部投诉 / 卡商群投诉,workbuddy推送) ----------
@@ -954,7 +964,33 @@ def complaint_supplementary(
         items.extend(_items(CardComplaint, "device_sn", "卡商群投诉"))
     # 按投诉日期降序(主排序), 无日期的排末尾
     items.sort(key=lambda x: (x.get("complaint_date") is None, x.get("complaint_date") or ""), reverse=True)
-    return R(data={"items": items[:limit], "total": len(items)})
+    # F-P1-2: 补充记录 登记/处理 计数(明细标题展示)
+    #   registered = 窗口内投诉日期记录数(= 查询已按 complaint_date 过滤, 即全部 items)
+    #   handled    = 已办结记录数: 315 result∈办结类, 或 handle_time 落在窗口内
+    _day_start = start[:10] if start else None
+    _day_end = end[:10] if end else None
+
+    def _is_handled(it: dict) -> bool:
+        if (it.get("result") or "").strip() in _EXTERNAL_DONE_RESULTS:
+            return True
+        ht = it.get("handle_time")
+        if ht and len(ht) >= 10:
+            hd = ht[:10]
+            if _day_start and hd < _day_start:
+                return False
+            if _day_end and hd > _day_end:
+                return False
+            return True
+        return False
+
+    _registered = len(items)
+    _handled = sum(1 for it in items if _is_handled(it))
+    return R(data={
+        "items": items[:limit],
+        "total": len(items),
+        "registered": _registered,
+        "handled": _handled,
+    })
 
 
 # ---------- 积压未处理投诉 审核分析 ----------

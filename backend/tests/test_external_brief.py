@@ -258,3 +258,33 @@ def test_sources_reg_handled_three_buckets(db):
     assert out["total"]["registered"] >= 3
     assert out["total"]["handled"] >= 3
 
+
+def test_supplementary_registered_handled(db):
+    """/supplementary 返回 登记/处理 计数(F-P1-2)。
+
+    - 3 条 315 记录(窗口内 complaint_date): registered=3
+    - 其中 1 条 result∈办结类(和解结案) → handled=1; 1 条 result=空但 handle_time 窗口内 → handled+1
+    """
+    from app.api.v1.complaints import complaint_supplementary
+    from app.models.external_complaint import ExternalComplaint
+    base = _dt.datetime.strptime(_REVIEW_DAY, "%Y-%m-%d").replace(tzinfo=TZ_CN)
+    db.add_all([
+        ExternalComplaint(complaint_no="SP-1", complaint_date=base + timedelta(minutes=1),
+                          result="和解结案", handle_time=None, platform="315"),
+        ExternalComplaint(complaint_no="SP-2", complaint_date=base + timedelta(minutes=2),
+                          result="待跟进", handle_time=base + timedelta(minutes=30), platform="315"),
+        ExternalComplaint(complaint_no="SP-3", complaint_date=base + timedelta(minutes=3),
+                          result=None, handle_time=None, platform="315"),
+    ])
+    db.flush()
+    resp = complaint_supplementary(db, None, start=_REVIEW_DAY, end=_REVIEW_DAY,
+                                   source_type="external", matched=None, limit=100)
+    # FastAPI 端点用 R(data=...) 返回; 兼容 R 模型(.data)或裸 dict
+    data = getattr(resp, "data", resp)
+    if data is None and isinstance(resp, dict):
+        data = resp.get("data", resp)
+    body = data if isinstance(data, dict) else (data.model_dump() if hasattr(data, "model_dump") else {})
+    assert body["registered"] == 3   # SP-1/2/3 均在窗口
+    assert body["handled"] == 2      # SP-1 办结类 + SP-2 handle_time 窗口内
+    assert body["total"] == 3
+
