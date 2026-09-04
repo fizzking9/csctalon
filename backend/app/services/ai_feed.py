@@ -72,7 +72,33 @@ def _build_feed(db: Session, period: str, date: str | None) -> dict:
                 logger.warning("ai_feed 删除坏缓存失败: %s", e)
         # 重算一次(此时缓存已删, _build_brief 内部 cached_call 会直调 today_kpi)
         feed = _build_brief(db, period, date)
+    # 精简 reception.by_specialty(2026-09-04): _build_brief 的 by_specialty 含完整成员
+    # 名单(数十人姓名)会占满 AI_ANALYZE_MAX_CHARS, 把 refund/complaint 关键段挤出截断
+    # → 模型答"四路未提供"。AI 只需负责人+规模, 不需要逐人名单, 压缩后 feed 显著变小。
+    if isinstance(feed.get("reception"), dict):
+        feed["reception"] = {**feed["reception"], "by_specialty": _compact_specialty(feed["reception"].get("by_specialty"))}
     return feed
+
+
+def _compact_specialty(by_specialty) -> list[dict]:
+    """压缩 by_specialty: 每专项只留 specialty/负责人 lead/成员数/会话数/设备数(去逐人名单)。"""
+    if not isinstance(by_specialty, list):
+        return by_specialty
+    out = []
+    for s in by_specialty:
+        if not isinstance(s, dict):
+            continue
+        members = s.get("members") or []
+        sessions = (s.get("sessions") or {}).get("value")
+        devices = (s.get("devices") or {}).get("value")
+        out.append({
+            "specialty": s.get("specialty"),
+            "lead": (s.get("lead") or {}).get("name") if s.get("lead") else None,
+            "member_count": len(members),
+            "sessions": sessions,
+            "devices": devices,
+        })
+    return out
 
 
 def _trim_feed(feed: dict) -> str:

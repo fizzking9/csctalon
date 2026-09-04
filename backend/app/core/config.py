@@ -141,7 +141,8 @@ class Settings(BaseSettings):
     LLM_RETRY_BASE_S: float = 1.0
     LLM_RETRY_CAP_S: float = 30.0
     # 喂给模型的数据底座(feed)长度上限(字符), 防 token 超限与延迟。
-    AI_ANALYZE_MAX_CHARS: int = 6000
+    # by_specialty 已精简(2026-09-04), 正常 feed <3KB; 此值作兜底防超长。
+    AI_ANALYZE_MAX_CHARS: int = 12000
     # AI 任务结果在内存保留时间(秒)与历史条数(单 worker 内存态)。
     AI_TASK_TTL_S: int = 600
     AI_TASK_HISTORY: int = 20
