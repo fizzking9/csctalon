@@ -16,6 +16,8 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.models.bms_sync_log import BmsSyncLog
+from app.models.cs_record import CsRecord
 from app.models.external_complaint import ExternalComplaint
 from app.models.metric import MetricDailySnapshot, MetricRegistry, MetricThreshold
 from app.models.refund import Refund
@@ -122,6 +124,117 @@ def _eval_internal_complaint_daily(db: Session, ts: datetime, te: datetime) -> d
     return {"value": float(cnt), "data_ok": True, "detail": f"区间 {ts}~{te}"}
 
 
+# ============================================================
+# 采集健康指标(工单 #5 / A-20260904-001 LOCKED)
+# 与业务指标不同: 入表量骤降/断流 = 要告警的故障信号, 不能被 data_ok 吞掉
+# data_ok 三态: True=正常 / "no_sync"=当日无采集 / "sync_failed"=当日采集失败
+# ============================================================
+# 北京时间当日 08:00~次日 02:00 为计划采集小时(8-23+0); 5:00 补跑; 见 bms_scheduler
+_PLANNED_HOUR_START = 8   # 白天首采 08:00
+_PLANNED_HOUR_END = 26    # 次日 02:00(即 hour 0~2 归前一天, 用 24+hour 表达)
+
+
+def _sh_now() -> datetime:
+    """当前北京时间(naive)"""
+    return datetime.now(TZ).replace(tzinfo=None)
+
+
+def _day_bounds_utc(d: date_type) -> tuple[datetime, datetime]:
+    """北京时间某日 [00:00, 次日00:00) → naive UTC(与 _window 同口径)"""
+    start = datetime.combine(d, time.min).replace(tzinfo=TZ).astimezone(timezone.utc).replace(tzinfo=None)
+    return start, start + timedelta(days=1)
+
+
+def _eval_ingest_volume_cs_record(db: Session, ts: datetime, te: datetime) -> dict:
+    """采集健康: cs_record 当日入表量相对近7日(不含当日)同时段均值的比例(%).
+
+    返回 data_ok:
+      - True: 有采集、量正常或未跌破阈值
+      - "no_sync": 当日尚未有任何该源采集尝试(scheduled/manual 均无) → 断流风险
+      - "sync_failed": 当日存在 status='failed' 采集记录 → 采集失败
+    value: ratio% (今日实际量 / 近7日同时段均值期望), 基线不足或无采集时为 None
+    """
+    today_sh = _sh_now().date()
+    # ts/te 为 naive UTC(当日窗口); 换算回北京时间判断"当天"
+    t_start_sh = ts.replace(tzinfo=timezone.utc).astimezone(TZ).date()
+    period_is_today = (t_start_sh == today_sh)
+
+    # 1. 当日实际入表量(operation_time 北京时间当日)
+    today_cnt = db.scalar(
+        select(func.count()).select_from(CsRecord).where(
+            CsRecord.operation_time >= ts, CsRecord.operation_time < te
+        )
+    ) or 0
+
+    # 2. 近7日基线(不含当日): 每日入表量 → 均值
+    base_days: list[int] = []
+    for back in range(1, 8):
+        d = t_start_sh - timedelta(days=back)
+        ds, de = _day_bounds_utc(d)
+        cnt = db.scalar(
+            select(func.count()).select_from(CsRecord).where(
+                CsRecord.operation_time >= ds, CsRecord.operation_time < de
+            )
+        ) or 0
+        base_days.append(cnt)
+    baseline = (sum(base_days) / len(base_days)) if base_days else 0.0
+
+    # 3. 当日采集运行健康(查 bms_sync_logs: 该源当日 scheduled/manual 尝试)
+    biz_start_utc = _day_bounds_utc(t_start_sh)[0]
+    biz_end_utc = _day_bounds_utc(t_start_sh)[1]
+    sync_rows = db.execute(
+        select(BmsSyncLog.status, BmsSyncLog.trigger_type)
+        .where(
+            BmsSyncLog.data_type == "cs_record",
+            BmsSyncLog.finished_at >= biz_start_utc,
+            BmsSyncLog.finished_at < biz_end_utc,
+        )
+    ).all()
+    sync_attempted = len(sync_rows) > 0
+    sync_failed = any(r.status == "failed" for r in sync_rows)
+
+    # 4. 归一系数: 当天已过多少计划采集小时(避免早上 8 点误报"今天量少")
+    #    计划采集 08:00~02:00(+1天); 计算当天已完成的比例
+    now_sh = _sh_now()
+    hours_passed = 0.0
+    if period_is_today:
+        # 计算今天 08:00 起到现在的计划小时数(含 0~2 点归属)
+        if now_sh.hour >= _PLANNED_HOUR_START:
+            hours_passed = now_sh.hour - _PLANNED_HOUR_START + 1
+        elif now_sh.hour < 3:  # 凌晨 0-2 点仍属前一天尾段, 今天还没开始
+            hours_passed = 0.0
+        else:  # 3-7 点: 今天还没开始白采(补跑在5点), 视为 0 期望避免误报
+            hours_passed = 0.0
+        total_hours = _PLANNED_HOUR_END - _PLANNED_HOUR_START  # 18h
+        norm = min(hours_passed / total_hours, 1.0) if total_hours else 1.0
+    else:
+        norm = 1.0  # 历史日(如补看昨天): 全天已过
+
+    # 5. 期望值 = 基线 × 归一系数; 比值
+    expected = baseline * norm
+    ratio = (today_cnt / expected * 100.0) if expected > 0 else None
+
+    # 6. data_ok 三态判定
+    #    sync_failed: 任何日期, 只要该日存在采集失败记录 → 采集故障信号
+    #    no_sync: 仅当天(若已过 08:00 且当日无任何采集尝试 → 断流风险; 历史日无
+    #             sync 记录可能是当时没跑, 不据此误判)
+    data_ok: bool | str = True
+    if sync_failed:
+        data_ok = "sync_failed"
+    elif period_is_today and not sync_attempted and now_sh.hour >= _PLANNED_HOUR_START:
+        data_ok = "no_sync"
+
+    d_label = "今日" if period_is_today else t_start_sh.strftime("%m-%d")
+    detail = (f"{d_label} {today_cnt} 条 / 近7日均值 {baseline:.0f} 条"
+              f"(已过 {hours_passed:.0f}/{total_hours if period_is_today else '—'} 计划小时, "
+              f"期望 {expected:.0f})")
+    if sync_attempted:
+        detail += f"; 采集尝试 {len(sync_rows)} 次, failed={sum(1 for r in sync_rows if r.status == 'failed')}"
+    else:
+        detail += "; 该日无采集记录"
+    return {"value": ratio, "data_ok": data_ok, "detail": detail}
+
+
 # 指标注册表(代码层): code → 元数据 + 求值函数
 METRIC_DEFS: dict[str, dict[str, Any]] = {
     "recovery_rate": {
@@ -149,6 +262,14 @@ METRIC_DEFS: dict[str, dict[str, Any]] = {
         "name_cn": "当日内部投诉量", "direction": LOWER, "period": "day", "unit": "条",
         "data_sources": ["service_tickets"], "description": "当日内部投诉工单数(商品/服务投诉)",
         "evaluate": _eval_internal_complaint_daily,
+    },
+    # 采集健康(工单 #5): kind=ingest_health, 区别于业务指标
+    "ingest_volume_cs_record": {
+        "name_cn": "智能助手记录每日入表量", "direction": HIGHER, "period": "day", "unit": "%",
+        "data_sources": ["cs_record", "bms_sync_logs"],
+        "kind": "ingest_health",
+        "description": "采集健康: cs_record 当日入表量相对近7日均值比例(骤降/断流告警, 非业务指标)",
+        "evaluate": _eval_ingest_volume_cs_record,
     },
 }
 
@@ -223,6 +344,11 @@ def snapshot_metric(db: Session, code: str, period_date: date_type | None = None
     r = evaluate_metric(db, code, period_date)
     if r.get("value") is None:
         r["level"] = "data_missing"
+    # data_ok 列是 Boolean; 采集健康指标可能返回字符串标记(no_sync/sync_failed),
+    # 快照里归一化为 True(该状态由 detail 文本承载, 告警判定用 evaluate 返回值而非快照)
+    data_ok_bool = r.get("data_ok", True)
+    if not isinstance(data_ok_bool, bool):
+        data_ok_bool = True
     row = db.scalar(
         select(MetricDailySnapshot).where(
             MetricDailySnapshot.metric_code == code,
@@ -232,7 +358,7 @@ def snapshot_metric(db: Session, code: str, period_date: date_type | None = None
     if row:
         row.value = r.get("value")
         row.level = r.get("level")
-        row.data_ok = r.get("data_ok", True)
+        row.data_ok = data_ok_bool
         row.detail = r.get("detail")
     else:
         db.add(MetricDailySnapshot(
@@ -240,7 +366,7 @@ def snapshot_metric(db: Session, code: str, period_date: date_type | None = None
             value=r.get("value"),
             period_date=(period_date or datetime.now(TZ).date()).isoformat(),
             level=r.get("level"),
-            data_ok=r.get("data_ok", True),
+            data_ok=data_ok_bool,
             detail=r.get("detail"),
         ))
     db.flush()

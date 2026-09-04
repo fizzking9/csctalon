@@ -5,6 +5,8 @@
 services/metric_registry_service.py 求值, 走四级分级/恢复自愈/通知分发。
 """
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
@@ -13,6 +15,8 @@ from app.models.alert import Alert, AlertRule
 from app.schemas.common import PageBase, R
 from app.services.metric_registry_service import METRIC_DEFS, evaluate_metric, snapshot_metric
 from app.services.notification_channel import dispatch_alert
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/alerts", tags=["预警中心"])
 
@@ -123,6 +127,70 @@ def set_alert_status(alert_id: int, payload: dict, db: DBSession, _: ManagerUser
     return R(message="已更新")
 
 
+def _auto_register_ingest_incident(db, rule: AlertRule, alert, now) -> None:
+    """采集健康 critical 告警 → 自动登记 Incident(事件进入系统化闭环)。
+
+    幂等: 同一 (来源=数据采集, 标题含指标 code + 告警 period 日期) 只登记一次。
+    目的: 根治 09-02 事故"补跑了但 Incident/工单无留痕"的断层——
+          采集故障自动进 incidents 台账, 有状态流转(登记→处理→复盘), 可追踪。
+    """
+    from app.models.incident import Incident as IncidentModel
+
+    try:
+        # 幂等检查: 同规则同 period 已登记则不重复(按标题前缀 + period_start 近似匹配)
+        period_key = None
+        if alert.period_start:
+            period_key = alert.period_start.strftime("%Y-%m-%d")
+        if period_key:
+            dup = db.scalar(
+                select(func.count())
+                .select_from(IncidentModel)
+                .where(
+                    IncidentModel.category == "数据采集",
+                    IncidentModel.created_by == "system-alert",
+                    IncidentModel.detail.ilike(f"%{period_key}%"),
+                    IncidentModel.title.ilike(f"%{rule.metric_code}%"),
+                )
+            )
+            if dup:
+                return  # 已登记, 幂等跳过
+        i = IncidentModel(
+            title=f"数据采集异常: {rule.metric_code} {period_key or ''}",
+            subject=f"{rule.metric_code} 入表量异常",
+            detail=(
+                f"采集健康告警自动登记(工单 #5)。\n指标: {rule.metric_code}\n"
+                f"周期: {period_key or alert.period_start}\n告警: {alert.title}\n{alert.detail or ''}\n"
+                f"处置指引: docs/ops/数据采集-运维手册.md §4.1 单日补跑"
+            ),
+            impact="cs_record 接待数据可能缺口(影响接待量/退款挽回等分析口径)",
+            occurred_at=alert.occurred_at or now,
+            status="registered",
+            category="数据采集",
+            department="数据采集",
+            severity="高" if (alert.metric_value is None or (alert.metric_value or 0) < 40) else "中",
+            is_recurring=False,
+            created_by="system-alert",
+        )
+        db.add(i)
+        db.flush()
+        # 通知管理员/主管(事故登记知情)
+        try:
+            from app.services.notifier import notify_all_admins_and_supervisors
+            notify_all_admins_and_supervisors(
+                db,
+                type="incident",
+                title=f"数据采集异常已登记: {rule.metric_code}",
+                content=i.detail or "",
+                ref_type="incident",
+                ref_id=str(i.id),
+            )
+        except Exception:  # noqa: BLE001 通知失败不影响主流程
+            pass
+        db.flush()
+    except Exception as _e:  # noqa: BLE001 Incident 登记失败不影响告警主流程
+        logger.warning(f"[alerts] Incident 自动登记失败(忽略): {_e}")
+
+
 def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[str]]:
     """指标注册表模式扫描: 求值 → 四级分级 → 幂等/升级/恢复自愈 → 通知分发
 
@@ -157,17 +225,35 @@ def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[st
         )
 
     logs: list[str] = []
+    # ── 采集健康指标(kind=ingest_health): data_ok 为字符串标记时 = 采集故障, 必须告警 ──
+    #    与业务指标不同: 采集断流(no_sync/sync_failed) 是要感知的故障信号, 不能被
+    #    "data_ok=False → 跳过" 吞掉(09-02 事故教训)。见 A-20260904-001 LOCKED。
+    ingest_fault = None
+    if meta.get("kind") == "ingest_health" and isinstance(data_ok, str):
+        if data_ok == "no_sync":
+            ingest_fault = "当日尚无采集执行(疑似断流/调度未跑)"
+        elif data_ok == "sync_failed":
+            ingest_fault = "当日采集存在失败记录(疑似上游故障/熔断)"
     if not data_ok or value is None:
-        return 0, [f"metric:{rule.metric_code}: 数据不完整(值={value}), 跳过告警(防假告警)"]
+        # 业务指标: data_ok=False 跳过(防假告警); 采集健康带字符串标记时继续走告警
+        if ingest_fault is None:
+            return 0, [f"metric:{rule.metric_code}: 数据不完整(值={value}), 跳过告警(防假告警)"]
 
-    if level in ("warning", "critical"):
-        is_critical = level == "critical"
+    if ingest_fault or level in ("warning", "critical"):
+        is_critical = bool(ingest_fault) or level == "critical"
         # 阈值以指标层配置为准(metric_thresholds, evaluate_metric 分级已按它判断)
         thr_map = r.get("threshold") or {}
         thr_val = thr_map.get("critical_value") if is_critical else thr_map.get("warning_value")
         lv_name = "告警" if is_critical else "预警"
-        title = f"{name}{lv_name}: {value}{unit}(阈值 {thr_val}{unit})"
-        content = f"指标「{name}」当前值 {value}{unit}, 触发{lv_name}线 {thr_val}{unit}。口径: {meta['description']}"
+        if ingest_fault:
+            # 采集故障: 用故障描述做标题/内容(值可能为 None)
+            title = f"{name}异常: {ingest_fault}"
+            content = (f"指标「{name}」{ingest_fault}。详情: {r.get('detail','')}。"
+                       f"\n处置: 参考运维手册单日补跑 SOP -> docs/ops/数据采集-运维手册.md §4.1"
+                       f"(curl 指定日期补跑 cs_record)")
+        else:
+            title = f"{name}{lv_name}: {value}{unit}(阈值 {thr_val}{unit})"
+            content = f"指标「{name}」当前值 {value}{unit}, 触发{lv_name}线 {thr_val}{unit}。口径: {meta['description']}"
         if existing:
             if is_critical and existing.level != "critical":
                 # 预警 → 告警 升级
@@ -181,13 +267,18 @@ def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[st
                 logs.append(f"metric:{rule.metric_code}: 升级为critical({value})")
                 return 0, logs
             return 0, [f"metric:{rule.metric_code}: 同级别已有pending, 幂等跳过({value})"]
-        a = AlertModel(rule_id=rule.id, title=title, level=level, detail=content, occurred_at=now,
-                       status="pending", metric_code=rule.metric_code, metric_value=value,
-                       threshold_value=thr_val, period_start=period_start, period_end=period_end, data_ok=data_ok)
+        a = AlertModel(rule_id=rule.id, title=title, level="critical" if is_critical else level,
+                       detail=content, occurred_at=now, status="pending",
+                       metric_code=rule.metric_code, metric_value=value,
+                       threshold_value=thr_val, period_start=period_start, period_end=period_end,
+                       data_ok=bool(data_ok) if not isinstance(data_ok, str) else True)
         db.add(a)
         db.flush()
         dispatch_alert(db, a.id, title, content, rule.channels, rule.recipient_roles, rule.silence_window)
-        return 1, [f"metric:{rule.metric_code}: 创建{lv_name}({value})"]
+        # 采集健康首次 critical → 自动登记 Incident(事件进入系统化闭环, 幂等: 同 period 不重复)
+        if meta.get("kind") == "ingest_health" and is_critical:
+            _auto_register_ingest_incident(db, rule, a, now)
+        return 1, [f"metric:{rule.metric_code}: 创建{lv_name}({value or ingest_fault})"]
 
     # 恢复自愈: 回稳且有未恢复告警
     if existing and existing.status in ("pending", "confirmed"):
