@@ -132,6 +132,9 @@ def _eval_internal_complaint_daily(db: Session, ts: datetime, te: datetime) -> d
 # 北京时间当日 08:00~次日 02:00 为计划采集小时(8-23+0); 5:00 补跑; 见 bms_scheduler
 _PLANNED_HOUR_START = 8   # 白天首采 08:00
 _PLANNED_HOUR_END = 26    # 次日 02:00(即 hour 0~2 归前一天, 用 24+hour 表达)
+# no_sync 首采保护: 08:00 定时同步触发后需数分钟完成(浏览器启动+登录+抓取+导入),
+# 扫描若在 8 点整先跑会误判"无采集" → no_sync 误报。此时间前不判 no_sync。
+_NO_SYNC_GRACE_HOUR = 9   # 北京 09:00 前不做 no_sync 断流判定
 
 
 def _sh_now() -> datetime:
@@ -166,7 +169,7 @@ def _eval_ingest_volume_cs_record(db: Session, ts: datetime, te: datetime) -> di
         )
     ) or 0
 
-    # 2. 近7日基线(不含当日): 每日入表量 → 均值
+    # 2. 近7日基线(不含当日): 每日入表量 → 均值 + 有效天数
     base_days: list[int] = []
     for back in range(1, 8):
         d = t_start_sh - timedelta(days=back)
@@ -177,6 +180,7 @@ def _eval_ingest_volume_cs_record(db: Session, ts: datetime, te: datetime) -> di
             )
         ) or 0
         base_days.append(cnt)
+    valid_base_days = sum(1 for c in base_days if c > 0)
     baseline = (sum(base_days) / len(base_days)) if base_days else 0.0
 
     # 3. 当日采集运行健康(查 bms_sync_logs: 该源当日 scheduled/manual 尝试)
@@ -214,19 +218,22 @@ def _eval_ingest_volume_cs_record(db: Session, ts: datetime, te: datetime) -> di
     expected = baseline * norm
     ratio = (today_cnt / expected * 100.0) if expected > 0 else None
 
-    # 6. data_ok 三态判定
-    #    sync_failed: 任何日期, 只要该日存在采集失败记录 → 采集故障信号
-    #    no_sync: 仅当天(若已过 08:00 且当日无任何采集尝试 → 断流风险; 历史日无
-    #             sync 记录可能是当时没跑, 不据此误判)
+    # 6. data_ok 判定(冷启动保护优先: 近7日有效基线 < 3 天 → 只记录不告警)
     data_ok: bool | str = True
-    if sync_failed:
+    if valid_base_days < 3:
+        # 冷启动: 基线未积累(LOCKED §六 风险缓解), 只记录不告警, 避免新部署误报
+        data_ok = "cold_start"
+    elif sync_failed:
+        # 采集失败: 任何日期, 只要该日存在采集失败记录 → 采集故障信号
         data_ok = "sync_failed"
-    elif period_is_today and not sync_attempted and now_sh.hour >= _PLANNED_HOUR_START:
+    elif period_is_today and not sync_attempted and now_sh.hour >= _NO_SYNC_GRACE_HOUR:
+        # no_sync: 仅当天; 已过首采保护时间(默认 09:00, 给 8:00 同步留完成窗口防误报)
         data_ok = "no_sync"
 
     d_label = "今日" if period_is_today else t_start_sh.strftime("%m-%d")
     detail = (f"{d_label} {today_cnt} 条 / 近7日均值 {baseline:.0f} 条"
-              f"(已过 {hours_passed:.0f}/{total_hours if period_is_today else '—'} 计划小时, "
+              f"(有效基线日 {valid_base_days}/7, "
+              f"已过 {hours_passed:.0f}/{total_hours if period_is_today else '—'} 计划小时, "
               f"期望 {expected:.0f})")
     if sync_attempted:
         detail += f"; 采集尝试 {len(sync_rows)} 次, failed={sum(1 for r in sync_rows if r.status == 'failed')}"

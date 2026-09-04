@@ -25,6 +25,12 @@ from app.services.metric_registry_service import METRIC_DEFS, evaluate_metric
 
 TZ8 = timezone(timedelta(hours=8))
 NOW_UTC = datetime(2026, 9, 4, 4, 0, tzinfo=timezone.utc)  # 北京 12:00
+# 测试基准日: 用真实"今天"(函数内部 _window/_sh_now 均基于真实当天, 保持 period_is_today 一致)
+TODAY = datetime.now(TZ8).date()
+TODAY_S = TODAY.strftime("%Y-%m-%d")
+TODAY_12_SH = datetime(TODAY.year, TODAY.month, TODAY.day, 12, 0)
+TODAY_0805_SH = datetime(TODAY.year, TODAY.month, TODAY.day, 8, 5)
+
 
 # 采集健康指标 code
 CODE = "ingest_volume_cs_record"
@@ -72,6 +78,13 @@ def _utc_from_sh(sh_date: str, hour: int = 12) -> datetime:
     return sh.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _seed_baseline(db, base_date: datetime, per_day: int = 10) -> None:
+    """造 base_date 前 7 天基线(避开冷启动保护 valid_base_days<3)。"""
+    for back in range(1, 8):
+        d_sh = (base_date - timedelta(days=back)).strftime("%Y-%m-%d")
+        _seed_cs(db, _utc_from_sh(d_sh, 12), per_day, op="企微-基线")
+
+
 def test_ingest_normal_ratio(db):
     """正常: 今日有采集且接近基线 → data_ok=True, 不触发(level 非 critical)。"""
     # 近7日每天 100 条(北京 9/1 前), 今日(北京 9/2) 造 100 条
@@ -92,36 +105,40 @@ def test_ingest_normal_ratio(db):
     assert r["value"] is not None and r["value"] > 50, f"ratio 应>50%, 实际 {r['value']}"
 
 
-def test_ingest_no_sync_fault(db):
-    """断流: 今日(真实当天)已过 08:00 且无采集尝试 → data_ok='no_sync'(故障信号)。
-    仅当此刻北京已过 08:00 才断言(避免早上跑测试误判); 历史日不误报。
-    """
-    _seed_cs(db, _utc_from_sh("2026-09-01", 12), 5)  # 只有历史, 今日无采集日志
-    # 历史日(9/1): 无 sync 记录不报 no_sync(避免历史日误判)
-    r_hist = evaluate_metric(db, CODE, period_date=datetime(2026, 9, 1).date())
-    assert r_hist["data_ok"] is True or r_hist["data_ok"] == "no_sync"
-    # 真实当天: 若已过 8 点且无采集 → no_sync
-    from datetime import datetime as _dt
-    now_bj = _dt.now(TZ8)
-    if now_bj.hour >= 8:
-        r = evaluate_metric(db, CODE)  # 默认当天
-        assert r["data_ok"] == "no_sync", f"当天无采集应 no_sync, 实际 {r['data_ok']}"
+def test_ingest_no_sync_fault(db, monkeypatch):
+    """断流: 当天已过 9 点保护且无采集尝试 → data_ok='no_sync'(故障信号)。"""
+    from app.services import metric_registry_service as mrs
+
+    fake_now = TODAY_12_SH  # 北京 12:00(过 9 点保护)
+    monkeypatch.setattr(mrs, "_sh_now", lambda: fake_now)
+    _seed_baseline(db, TODAY)
+    # 当天(9/4)无任何采集日志 + 无数据
+    r = evaluate_metric(db, CODE, period_date=TODAY)
+    assert r["data_ok"] == "no_sync", f"当天无采集应 no_sync, 实际 {r['data_ok']}"
 
 
-def test_ingest_sync_failed_fault(db):
-    """采集失败: 某日 bms_sync_logs 有 failed → data_ok='sync_failed'(任何日期)。"""
-    _seed_cs(db, _utc_from_sh("2026-09-01", 12), 5)
-    # finished_at 必须落在 9/1 窗口内(查询按 biz_date 过滤)
+def test_ingest_sync_failed_fault(db, monkeypatch):
+    """采集失败: 当天 bms_sync_logs 有 failed → data_ok='sync_failed'(任何日期)。"""
+    from app.services import metric_registry_service as mrs
+
+    fake_now = TODAY_12_SH
+    monkeypatch.setattr(mrs, "_sh_now", lambda: fake_now)
+    _seed_baseline(db, TODAY)
+    # 当天(9/4)有 failed 日志
     db.add(BmsSyncLog(data_type="cs_record", status="failed", trigger_type="scheduled",
-                      start_time=_utc_from_sh("2026-09-01", 0), end_time=_utc_from_sh("2026-09-01", 23),
-                      finished_at=_utc_from_sh("2026-09-01", 10)))
+                      start_time=_utc_from_sh(TODAY_S, 0), end_time=_utc_from_sh(TODAY_S, 23),
+                      finished_at=datetime(TODAY.year, TODAY.month, TODAY.day, 5, tzinfo=timezone.utc)))
     db.flush()
-    r = evaluate_metric(db, CODE, period_date=datetime(2026, 9, 1).date())
+    r = evaluate_metric(db, CODE, period_date=TODAY)
     assert r["data_ok"] == "sync_failed", f"应 sync_failed, 实际 {r['data_ok']}"
 
 
-def test_scan_metric_rule_ingest_fault_creates_alert_and_incident(db):
+def test_scan_metric_rule_ingest_fault_creates_alert_and_incident(db, monkeypatch):
     """核心: _scan_metric_rule 对 ingest_health 故障标记 → 生成 critical + 自动登记 Incident。"""
+    from app.services import metric_registry_service as mrs
+
+    fake_now = TODAY_12_SH
+    monkeypatch.setattr(mrs, "_sh_now", lambda: fake_now)
     # 造一条启用的采集健康规则
     rule = AlertRule(
         name="采集健康-测试", type="metric", enabled=True, metric_code=CODE,
@@ -130,17 +147,13 @@ def test_scan_metric_rule_ingest_fault_creates_alert_and_incident(db):
     )
     db.add(rule)
     db.flush()
-    # 造"当天采集失败"场景: 真实当天插入一条 failed 日志 → evaluate 当天返回 sync_failed
-    # (不依赖"今天是否已过8点/是否有采集", 有 failed 记录即故障)
-    from datetime import datetime as _dt
-    from datetime import timezone as _tz
-    now_utc = _dt.now(_tz.utc)
+    _seed_baseline(db, TODAY)
+    # 造"当天采集失败"场景: 当天(9/4)插入 failed 日志 → evaluate 返回 sync_failed
     db.add(BmsSyncLog(data_type="cs_record", status="failed", trigger_type="scheduled",
-                      start_time=now_utc - timedelta(hours=1), end_time=now_utc,
-                      finished_at=now_utc))
+                      start_time=_utc_from_sh(TODAY_S, 0), end_time=_utc_from_sh(TODAY_S, 23),
+                      finished_at=datetime(TODAY.year, TODAY.month, TODAY.day, 5, tzinfo=timezone.utc)))
     db.flush()
-    _seed_cs(db, _utc_from_sh("2026-09-01", 12), 5)
-    created, logs = _scan_metric_rule(db, rule, NOW_UTC)
+    created, logs = _scan_metric_rule(db, rule, datetime(TODAY.year, TODAY.month, TODAY.day, 5, tzinfo=timezone.utc))
     db.flush()
 
     # 应创建 1 条 critical 告警
@@ -175,3 +188,125 @@ def test_business_metric_data_missing_skipped(db):
     db.flush()
     # 不应创建告警(0 笔未超 critical 50)
     assert created == 0, f"退款0笔不应告警, created={created}"
+
+
+# ---- C1 回归: 预警→告警升级路径也应登记 Incident ----
+def test_ingest_escalation_registers_incident(db, monkeypatch):
+    """C1: warning 升级到 critical(sync_failed) → 必须登记 Incident(不依赖 ratio 精确值)。"""
+    from app.services import metric_registry_service as mrs
+
+    fake_now = TODAY_12_SH  # 北京 12:00
+    monkeypatch.setattr(mrs, "_sh_now", lambda: fake_now)
+    # 基线(7天) + 今天少量数据
+    for back in range(1, 8):
+        d_sh = (TODAY - timedelta(days=back)).strftime("%Y-%m-%d")
+        _seed_cs(db, _utc_from_sh(d_sh, 12), 10, op="企微-基线")
+    _seed_cs(db, _utc_from_sh(TODAY_S, 12), 5, op="企微-今日")
+    # 当天已有成功采集(避免 no_sync 干扰升级语义)
+    db.add(BmsSyncLog(data_type="cs_record", status="success", trigger_type="scheduled",
+                      start_time=_utc_from_sh(TODAY_S, 0), end_time=_utc_from_sh(TODAY_S, 23),
+                      finished_at=datetime(TODAY.year, TODAY.month, TODAY.day, 4, tzinfo=timezone.utc)))
+    db.flush()
+    rule = AlertRule(name="采集健康-升级", type="metric", enabled=True, metric_code=CODE,
+                     warning_value=70.0, critical_value=40.0,
+                     channels=["inapp"], recipient_roles=["admin"])
+    db.add(rule)
+    db.flush()
+    # 手动构造一条"已存在未恢复的 warning 告警"(模拟第一次扫描产生的 warning)
+    # period_start 用真实当天窗口起(与 evaluate 一致)
+    from app.services.metric_registry_service import _window
+    ps, pe = _window("day", None)
+    db.add(Alert(rule_id=rule.id, title="预警", level="warning", detail="预警",
+                 occurred_at=datetime(TODAY.year, TODAY.month, TODAY.day, 4, tzinfo=timezone.utc), status="pending",
+                 metric_code=CODE, metric_value=50.0, threshold_value=70.0,
+                 period_start=ps, period_end=pe, data_ok=True))
+    db.flush()
+    inc0 = db.scalar(select(func.count()).select_from(Incident).where(Incident.category == "数据采集")) or 0
+    assert inc0 == 0, "warning 阶段不应有 Incident"
+    # 插入当日 failed 日志 → 扫描触发升级 critical → 必须登记 Incident(C1)
+    db.add(BmsSyncLog(data_type="cs_record", status="failed", trigger_type="scheduled",
+                      start_time=_utc_from_sh(TODAY_S, 0), end_time=_utc_from_sh(TODAY_S, 23),
+                      finished_at=datetime(TODAY.year, TODAY.month, TODAY.day, 5, tzinfo=timezone.utc)))
+    db.flush()
+    created2, logs2 = _scan_metric_rule(db, rule, datetime(TODAY.year, TODAY.month, TODAY.day, 5, tzinfo=timezone.utc))
+    db.flush()
+    inc1 = db.scalar(select(func.count()).select_from(Incident).where(Incident.category == "数据采集")) or 0
+    assert inc1 == 1, f"升级到 critical 应登记 Incident, 实际 {inc1}, logs={logs2}"
+
+
+# ---- C2 回归: no_sync 首采保护(9点前不误报) + 恢复自动平息 Incident ----
+def test_ingest_no_sync_grace_before_9am(db, monkeypatch):
+    """C2: 北京 8 点(定时同步尚未完成) → 不判 no_sync, 避免误报。"""
+    from app.services import metric_registry_service as mrs
+
+    fake_now = TODAY_0805_SH  # 北京 08:05
+    monkeypatch.setattr(mrs, "_sh_now", lambda: fake_now)
+    for back in range(1, 8):
+        d_sh = (TODAY - timedelta(days=back)).strftime("%Y-%m-%d")
+        _seed_cs(db, _utc_from_sh(d_sh, 12), 10, op="企微-基线")
+    # 今天无任何采集日志也无数据(模拟 8 点扫描先于同步)
+    r = evaluate_metric(db, CODE)  # 默认当天(9/4)
+    assert r["data_ok"] is True, f"9点前不应 no_sync, 实际 {r['data_ok']}"
+
+
+def test_ingest_cold_start_no_alert(db, monkeypatch):
+    """W1: 冷启动(近7日有效基线<3天) → 只记录不告警。"""
+    from app.services import metric_registry_service as mrs
+
+    fake_now = TODAY_12_SH
+    monkeypatch.setattr(mrs, "_sh_now", lambda: fake_now)
+    # 只有 1 天基线(不足 3 天)
+    _seed_cs(db, _utc_from_sh("2026-09-03", 12), 10, op="企微-基线")
+    # 今天有 failed 日志(即便有故障, 冷启动也应抑制告警)
+    db.add(BmsSyncLog(data_type="cs_record", status="failed", trigger_type="scheduled",
+                      start_time=_utc_from_sh(TODAY_S, 0), end_time=_utc_from_sh(TODAY_S, 23),
+                      finished_at=datetime(TODAY.year, TODAY.month, TODAY.day, 5, tzinfo=timezone.utc)))
+    db.flush()
+    r = evaluate_metric(db, CODE)
+    assert r["data_ok"] == "cold_start", f"冷启动应 cold_start, 实际 {r['data_ok']}"
+    rule = AlertRule(name="采集健康-冷启动", type="metric", enabled=True, metric_code=CODE,
+                     warning_value=70.0, critical_value=40.0,
+                     channels=["inapp"], recipient_roles=["admin"])
+    db.add(rule)
+    db.flush()
+    created, logs = _scan_metric_rule(db, rule, datetime(TODAY.year, TODAY.month, TODAY.day, 5, tzinfo=timezone.utc))
+    db.flush()
+    assert created == 0, f"冷启动不应告警, created={created}, logs={logs}"
+
+
+def test_ingest_recovery_closes_incident(db, monkeypatch):
+    """C2: 告警恢复 → 对应 Incident 自动标记已平息(不滞留台账)。"""
+    from app.services import metric_registry_service as mrs
+
+    fake_now = TODAY_12_SH
+    monkeypatch.setattr(mrs, "_sh_now", lambda: fake_now)
+    for back in range(1, 8):
+        d_sh = (TODAY - timedelta(days=back)).strftime("%Y-%m-%d")
+        _seed_cs(db, _utc_from_sh(d_sh, 12), 10, op="企微-基线")
+    # 今天有 failed → 触发 critical + Incident
+    db.add(BmsSyncLog(data_type="cs_record", status="failed", trigger_type="scheduled",
+                      start_time=_utc_from_sh(TODAY_S, 0), end_time=_utc_from_sh(TODAY_S, 23),
+                      finished_at=datetime(TODAY.year, TODAY.month, TODAY.day, 5, tzinfo=timezone.utc)))
+    db.flush()
+    rule = AlertRule(name="采集健康-恢复", type="metric", enabled=True, metric_code=CODE,
+                     warning_value=70.0, critical_value=40.0,
+                     channels=["inapp"], recipient_roles=["admin"])
+    db.add(rule)
+    db.flush()
+    _scan_metric_rule(db, rule, datetime(TODAY.year, TODAY.month, TODAY.day, 5, tzinfo=timezone.utc))
+    db.flush()
+    inc = db.scalar(select(Incident).where(Incident.category == "数据采集").order_by(Incident.id.desc()).limit(1))
+    assert inc is not None and inc.is_closed is False, "应先登记未闭环 Incident"
+    # 今天补足数据 + 清掉 failed → 恢复
+    _seed_cs(db, _utc_from_sh(TODAY_S, 12), 10, op="企微-今日")
+    # 删除 failed 日志, 加 success → data_ok=True, ratio 高 → 恢复
+    db.execute(BmsSyncLog.__table__.delete().where(BmsSyncLog.data_type == "cs_record"))
+    db.flush()
+    db.add(BmsSyncLog(data_type="cs_record", status="success", trigger_type="scheduled",
+                      start_time=_utc_from_sh(TODAY_S, 0), end_time=_utc_from_sh(TODAY_S, 23),
+                      finished_at=datetime(TODAY.year, TODAY.month, TODAY.day, 6, tzinfo=timezone.utc)))
+    db.flush()
+    _scan_metric_rule(db, rule, datetime(TODAY.year, TODAY.month, TODAY.day, 6, tzinfo=timezone.utc))
+    db.flush()
+    inc2 = db.get(Incident, inc.id)
+    assert inc2.is_closed is True, "恢复后 Incident 应自动平息"

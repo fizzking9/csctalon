@@ -225,17 +225,20 @@ def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[st
         )
 
     logs: list[str] = []
-    # ── 采集健康指标(kind=ingest_health): data_ok 为字符串标记时 = 采集故障, 必须告警 ──
-    #    与业务指标不同: 采集断流(no_sync/sync_failed) 是要感知的故障信号, 不能被
-    #    "data_ok=False → 跳过" 吞掉(09-02 事故教训)。见 A-20260904-001 LOCKED。
+    # ── 采集健康指标(kind=ingest_health): data_ok 为字符串标记时的语义 ──
+    #    no_sync/sync_failed = 采集故障 → 必须告警(不能被 data_ok 吞掉, 09-02 教训)
+    #    cold_start          = 冷启动(基线未积累) → 只记录不告警, 避免新部署误报
     ingest_fault = None
     if meta.get("kind") == "ingest_health" and isinstance(data_ok, str):
         if data_ok == "no_sync":
             ingest_fault = "当日尚无采集执行(疑似断流/调度未跑)"
         elif data_ok == "sync_failed":
             ingest_fault = "当日采集存在失败记录(疑似上游故障/熔断)"
+        elif data_ok == "cold_start":
+            # 冷启动: 只记录快照不告警(近7日有效基线 < 3 天, LOCKED §六)
+            return 0, [f"metric:{rule.metric_code}: 冷启动(基线未积累), 只记录不告警"]
     if not data_ok or value is None:
-        # 业务指标: data_ok=False 跳过(防假告警); 采集健康带字符串标记时继续走告警
+        # 业务指标: data_ok=False 跳过(防假告警); 采集健康带故障标记时继续走告警
         if ingest_fault is None:
             return 0, [f"metric:{rule.metric_code}: 数据不完整(值={value}), 跳过告警(防假告警)"]
 
@@ -265,6 +268,9 @@ def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[st
                 db.flush()
                 dispatch_alert(db, existing.id, title, content, rule.channels, rule.recipient_roles, rule.silence_window)
                 logs.append(f"metric:{rule.metric_code}: 升级为critical({value})")
+                # 采集健康升级到 critical → 补登记 Incident(C1 修复: 首次 critical 必须闭环)
+                if meta.get("kind") == "ingest_health" and is_critical:
+                    _auto_register_ingest_incident(db, rule, existing, now)
                 return 0, logs
             return 0, [f"metric:{rule.metric_code}: 同级别已有pending, 幂等跳过({value})"]
         a = AlertModel(rule_id=rule.id, title=title, level="critical" if is_critical else level,
@@ -288,8 +294,49 @@ def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[st
         dispatch_alert(db, existing.id, f"{name}已恢复",
                        f"指标「{name}」当前值 {value}{unit}, 已回到正常区间。",
                        rule.channels, rule.recipient_roles, rule.silence_window)
+        # 采集健康恢复 → 自动把对应 Incident 标记为已平息(避免误登记 Incident 永久滞留台账)
+        if meta.get("kind") == "ingest_health":
+            _close_ingest_incident(db, rule, existing, now)
         return 0, [f"metric:{rule.metric_code}: 恢复({value})"]
     return 0, [f"metric:{rule.metric_code}: 达标({value})"]
+
+
+def _close_ingest_incident(db, rule: AlertRule, alert, now) -> None:
+    """采集健康告警恢复 → 把对应 Incident(同源同周期)标记为已平息/闭环。
+
+    目的: 若告警是因瞬时误报/快速恢复产生, Incident 不永久滞留台账;
+          也覆盖 C2 场景(no_sync 误报恢复后 Incident 自动关闭)。
+    """
+    from app.models.incident import Incident as IncidentModel
+
+    try:
+        period_key = None
+        if alert.period_start:
+            period_key = alert.period_start.strftime("%Y-%m-%d")
+        if not period_key:
+            return
+        rows = db.scalars(
+            select(IncidentModel)
+            .where(
+                IncidentModel.category == "数据采集",
+                IncidentModel.created_by == "system-alert",
+                IncidentModel.is_closed.is_(False),
+                IncidentModel.detail.ilike(f"%{period_key}%"),
+                IncidentModel.title.ilike(f"%{rule.metric_code}%"),
+            )
+        ).all()
+        for i in rows:
+            i.status = "calmed"      # 已平息
+            i.is_closed = True
+            i.closed_at = now
+            if i.review_note:
+                i.review_note += f" | 告警恢复自动平息 {now.isoformat()}"
+            else:
+                i.review_note = f"告警恢复自动平息 {now.isoformat()}"
+        if rows:
+            db.flush()
+    except Exception as _e:  # noqa: BLE001 Incident 关闭失败不影响告警主流程
+        logger.warning(f"[alerts] Incident 自动平息失败(忽略): {_e}")
 
 
 @router.post("/scan", response_model=R, summary="手动触发预警扫描(多规则)")
