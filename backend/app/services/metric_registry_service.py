@@ -197,8 +197,9 @@ def _eval_data_arrival(db: Session, data_type: str, ts: datetime, te: datetime) 
     sync_success = False
     sync_failed = False
     if not is_push:
-        # bms_sync_logs(含 scrm_* 源也落此? 否, scrm 落 scrm_sync_logs —— 简化: scrm 源不在此, 由注册表 future 扩展)
-        # ticket 有 ticket_finish 伴生别名, 任一 success 即算到达
+        # bms_sync_logs; ticket 有 ticket_finish 伴生别名
+        # C-1 修复: sync_failed 仅当"当日完全无 success 且存在 failed"(真断流)才报;
+        #           success+failed 并存 = 到达但部分失败, 不算数据未到达, 不报 critical
         types = [data_type]
         if data_type == "ticket":
             types.append("ticket_finish")
@@ -207,7 +208,8 @@ def _eval_data_arrival(db: Session, data_type: str, ts: datetime, te: datetime) 
             .where(BmsSyncLog.data_type.in_(types), BmsSyncLog.finished_at >= biz_start, BmsSyncLog.finished_at < biz_end)
         ).all()
         sync_success = any(r.status == "success" for r in rows)
-        sync_failed = any(r.status == "failed" for r in rows)
+        any_failed = any(r.status == "failed" for r in rows)
+        sync_failed = (not sync_success) and any_failed  # 无 success 且有 failed → 真断流
 
     # 2. 被动推送渠道
     push_failed = False
@@ -226,13 +228,15 @@ def _eval_data_arrival(db: Session, data_type: str, ts: datetime, te: datetime) 
             rows = []
         push_status = [r.status for r in rows]
         sync_success = any(s in ("success", "partial") for s in push_status)  # partial 也算推了
-        push_failed = any(s == "failed" for s in push_status)
+        # 同 C-1 语义: 仅当当日完全无 success/partial 且有 failed 才报 push_failed
+        push_failed = (not sync_success) and any(s == "failed" for s in push_status)
 
-    # 3. 手动导入兜底(所有源): upload_records 当日有 imported
+    # 3. 手动导入兜底(所有源): upload_records 当日有 imported(限 manual/bms 来源, 对齐设计)
     up_cnt = db.scalar(
         select(func.count()).select_from(UploadRecord).where(
             UploadRecord.data_type == data_type,
             UploadRecord.status == "imported",
+            UploadRecord.source.in_(("manual", "bms")),
             UploadRecord.finished_at >= biz_start,
             UploadRecord.finished_at < biz_end,
         )
@@ -253,22 +257,14 @@ def _eval_data_arrival(db: Session, data_type: str, ts: datetime, te: datetime) 
     elif not reached:
         # 未到达: 区分"预期窗口是否已过"避免过早误报
         if is_push:
-            # 被动推送: 仅白天时段判停滞(避免夜间无推也不算异常)
+            # 被动推送(W-1 修复): 判定对象 = "今天是否到达过".
+            # 今日已有推送(sync_success)已在上层处理(reached=True); 到这说明今日无推送.
+            # 仅白天时段 + 距当天首采窗口(09:00)已过 ≥4h 才判 no_arrival, 避免清晨/夜间误报.
             if period_is_today and PUSH_DAY_START <= now_sh.hour <= PUSH_DAY_END:
-                # 查最近一次推送时间
-                if push_log_model == "complaint":
-                    last_push = db.scalar(select(func.max(ComplaintSyncLog.finished_at)))
-                elif push_log_model == "manual_refund":
-                    last_push = db.scalar(select(func.max(ManualRefundSyncLog.finished_at)))
-                else:
-                    last_push = None
-                if last_push is not None:
-                    gap_h = (now_sh - last_push.astimezone(TZ).replace(tzinfo=None)).total_seconds() / 3600
-                else:
-                    gap_h = 999  # 从未推过
-                if gap_h >= PUSH_STALL_HOURS:
+                hours_since_start = now_sh.hour - PUSH_DAY_START  # 从 9 点起已过小时
+                if hours_since_start >= PUSH_STALL_HOURS:
                     data_ok = "no_arrival"
-                    reason_parts.append(f"白天 {PUSH_STALL_HOURS}h 无推送(距上次 {gap_h:.1f}h)")
+                    reason_parts.append(f"今日白天 {PUSH_STALL_HOURS}h 无任何推送")
             else:
                 data_ok = True  # 夜间/非今天: 不判(等待窗口)
         else:

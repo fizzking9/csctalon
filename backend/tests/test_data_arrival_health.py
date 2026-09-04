@@ -73,7 +73,7 @@ def _push_log(db, model, status, dt=None) -> None:
 @pytest.fixture(autouse=True)
 def _seed_registry(db):
     """确保 data_arrival_cs_record 与业务指标在 metric_registry(外键)。"""
-    for code in (CODE, "refund_count", "recovery_rate", "data_arrival_external_complaint", "data_arrival_manual_refund"):
+    for code in (CODE, "refund_count", "recovery_rate", "data_arrival_external_complaint", "data_arrival_manual_refund", "data_arrival_ticket"):
         exists = db.scalar(select(func.count()).select_from(MetricRegistry).where(MetricRegistry.code == code)) or 0
         if not exists:
             db.add(MetricRegistry(code=code, name_cn=code, direction="higher_better",
@@ -120,14 +120,30 @@ def test_arrival_no_sync_no_manual(db, monkeypatch):
 
 
 def test_arrival_push_stalled(db, monkeypatch):
-    """推送源: 白天 ≥4h 无推送 → no_arrival。"""
+    """推送源: 今日白天(≥9点)已过 4h 仍无任何推送 → no_arrival。"""
     now = datetime.now(TZ8).replace(hour=15, minute=0, second=0, microsecond=0)
     monkeypatch.setattr(mrs, "_sh_now", lambda: now.replace(tzinfo=None))
-    # 最近推送在 5h 前(仍在今天), 但已 ≥4h 无新推送
-    _push_log(db, ComplaintSyncLog, "success", dt=datetime.now(timezone.utc) - timedelta(hours=5))
+    # 今日(15点)无任何推送记录(已过 9 点 6h ≥ 4h 阈值) → no_arrival
     r = evaluate_metric(db, "data_arrival_external_complaint")
-    # 有推送(5h前) → 当天到达过; 但已停滞 ≥4h → 按设计判 no_arrival
-    assert r["data_ok"] in ("no_arrival", True), f"推送停滞判定, 实际 {r['data_ok']}: {r['detail']}"
+    assert r["data_ok"] == "no_arrival", f"今日白天无推送应 no_arrival, 实际 {r['data_ok']}: {r['detail']}"
+
+
+def test_arrival_push_today_has_push_no_stall(db, monkeypatch):
+    """推送源: 今日已有推送(success) → 到达, 不判 no_arrival。"""
+    now = datetime.now(TZ8).replace(hour=15, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(mrs, "_sh_now", lambda: now.replace(tzinfo=None))
+    _push_log(db, ComplaintSyncLog, "success")  # 今日有推送
+    r = evaluate_metric(db, "data_arrival_external_complaint")
+    assert r["data_ok"] is True, f"今日有推送不应告警, 实际 {r['data_ok']}: {r['detail']}"
+
+
+def test_arrival_ticket_success_plus_failed_no_critical(db, monkeypatch):
+    """C-1 回归: ticket 当日 success+failed 并存(常态) → 不报 sync_failed critical。"""
+    monkeypatch.setattr(mrs, "_sh_now", lambda: datetime.now(TZ8).replace(tzinfo=None))
+    _sync_log(db, "ticket", "success")
+    _sync_log(db, "ticket", "failed")
+    r = evaluate_metric(db, "data_arrival_ticket")
+    assert r["data_ok"] is True, f"success+failed 并存不应报 sync_failed, 实际 {r['data_ok']}: {r['detail']}"
 
 
 def test_arrival_push_failed(db, monkeypatch):
