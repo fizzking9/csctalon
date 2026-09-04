@@ -1,10 +1,10 @@
 # 采集数据健康告警与事故自动登记 设计（A-20260902-004 的 M5 扩展）
 
-**状态**：LOCKED（v1.1）
+**状态**：LOCKED（v1.2）
 **锁定日期**：20260904
-**v1.1 修订日期**：20260904（人工评审通过）
+**v1.2 修订日期**：20260904（人工评审通过）
 **锁定脚本**：scripts/lock-arch-docs.sh
-**关联工单**：`tanzk/csctalon#5`（采集数据健康告警 + 事故自动登记闭环）
+**关联工单**：`tanzk/csctalon#5`（采集数据健康告警）/ `#6`（重构：数据到达心跳 + 注册表驱动）
 **架构依据**：`A-20260902-004-metric-alerting-notification-design.md`（LOCKED v1.0，本设计为其 **M5 扩展落地**）
 **事故来源**：`#1`（09-02 cs_records 缺口）/ `#2`（ai-acc 治理）
 **审查结论**：人工终审通过（2026-09-04）
@@ -16,7 +16,8 @@
 | 版本 | 日期 | 修订内容 | 原因 |
 |---|---|---|---|
 | v1.0 | 2026-09-04 | 初版 | — |
-| **v1.1** | 2026-09-04 | **§2.1 判定从「入表量相对基线比例」改为「数据到达心跳」**；§2.5/四/六 同步更新 | 生产验证发现接待量日/日内波动大(日间 3334~5874 近 2 倍, 8点 408 vs 9点 1134)，用业务量比例判断采集健康会产生误报。用户确认应改为「正常采集执行且不报错即 OK；该采没采/报错/被动推送未到达才告警」。 |
+| v1.1 | 2026-09-04 | §2.1 判定从「入表量相对基线比例」改为「数据到达心跳」 | 生产验证发现接待量波动大易误报 |
+| **v1.2** | 2026-09-04 | **§2.1 改为「注册表驱动自动发现」（方案A）** | 用户关注「后续扩充新数据源能否自动纳入」，确认用注册表驱动而非硬编码域列表 |
 
 ---
 
@@ -62,58 +63,61 @@ v1.0 曾设计为「cs_record 每日入表量相对近 7 日均值比例」作�
 
 ## 二、总体设计（v1.1）
 
-### 2.1 新增「数据到达健康」指标（核心）
+### 2.1 注册表驱动的「数据到达健康」指标（核心）
 
-**不新造引擎**，复用 A-20260902-004 的指标注册表 + 扫描 + 通知 + 自愈框架。按**数据域**注册指标，每个指标判"该域数据今天是否按预期到达"。
+**关键设计（方案A）：监控对象不是硬编码，而是由系统既有注册表动态发现** ——
+新数据源接入时只要注册到 `sync_source_configs` / `data_sources`，健康监控自动纳入，
+**零代码改动**。
 
-#### 指标定义（按域，每个一个）
+#### 数据源自动发现（不写死域列表）
 
 ```
-code          = data_arrival_<domain>        # 每数据域一个: refund/ticket/cs_record/wallet/complaint/manual_refund
-name_cn       = <域>数据到达健康
-period        = day
-direction     = higher_better                # 到达即健康; 阈值语义: 用"距今未到达小时数"
-unit          = -                            # 该指标值仅用于展示, 告警靠 data_ok 状态
-data_sources  = 该域涉及的渠道日志表
+监控对象 = 动态扫描注册表:
+  ① 主动抓取源 ← sync_source_configs WHERE enabled=true AND default_sync=true
+     (refund/ticket/wallet/cs_record/...; 未来新增源标 default_sync=true 即自动纳入)
+  ② 被动推送源 ← data_sources WHERE sync_source IN ('workbuddy','tencent_doc')
+     (external_complaint/card_complaint/manual_refund; 未来新增 workbuddy 推送源即自动纳入)
+  ③ 手动导入(兜底信号) ← upload_records 白名单(uploads.py DATA_TYPES), source='manual'
+非定时源(default_sync=false, 如 device_combo/device_tag) → 不纳入每日断流告警(按需型)
+```
+
+#### 指标命名（每数据源动态生成）
+
+```
+code = data_arrival_<data_type>   # 每源一个, 由注册表扫描自动生成并 seed 到 metric_registry
 ```
 
 #### 求值函数（核心：看"到达心跳"，不看业务量）
 
-对每个数据域，判断"当日是否有任一渠道的成功到达记录"，并给出状态：
+对每个被发现的源，判断"当日是否有任一渠道的成功到达记录"：
 
 ```
-def _eval_data_arrival(db, domain, ts, te) -> dict:
-    # ① 主动抓取到达: bms_sync_logs 该域当日存在 status='success'
-    #    (cs_record/refund/ticket/wallet → data_type 过滤; ticket 含 ticket_finish 别名)
+def _eval_data_arrival(db, data_type, ts, te) -> dict:
+    # ① 主动抓取到达: bms_sync_logs 该 data_type 当日存在 status='success'
+    #    (ticket 含 ticket_finish 别名; SCRM 源看 scrm_sync_logs)
     # ② 被动推送到达: complaint_sync_logs / manual_refund_sync_logs 当日存在行
-    #    (success/partial 都算"推了", partial=有失败行但主体到达)
-    #    + 投诉域可参考 doc_sync_configs.last_sync_at(系统侧腾讯文档轮询)
-    # ③ 手动导入到达: upload_records(source='manual' 或 'bms', status='imported') 当日存在
-    #    —— 手动补导 = 数据已到, 视为该域今日已到达
+    #    (success/partial 都算"推了"; 投诉域另参考 doc_sync_configs.last_sync_at)
+    # ③ 手动导入到达: upload_records(source IN ('manual','bms'), status='imported')
+    #    当日存在 → 手动补导 = 数据已到, 视为该域今日已到达(关键兜底)
 
     reached = (①有success) or (②有推送) or (③有imported)
-    last_arrival = 最近一次到达时间(跨①/②/③取 max)
-
-    # 各渠道异常信号(不看业务量):
+    # 异常信号(不看业务量):
     #   sync_failed = ①当日存在 status='failed'(主动抓取明确报错)
     #   push_failed = ②当日存在 status='failed'(被动推送明确报错)
-    #   no_arrival   = 已过预期窗口仍 reached=False(该采没采 + 没推 + 没手动导)
-
-    return { value: 距上次到达小时数(展示) 或 0,
-             data_ok: True / "sync_failed" / "push_failed" / "no_arrival",
-             detail: 各渠道最近到达/失败时间 + 失败次数 }
+    #   no_arrival  = 已过预期窗口仍 reached=False(该采没采+没推+没手动导)
+    return { value: 距上次到达小时数(展示), data_ok: True/"sync_failed"/"push_failed"/"no_arrival", ... }
 ```
 
-#### 判定阈值（按域预期节奏，参数化可配置）
+#### 判定节奏（按源类型，自动区分）
 
-| 数据域 | 预期到达节奏 | 判定 |
+| 源类型 | 来源判定 | 异常判定 |
 |---|---|---|
-| refund/ticket/wallet/cs_record(主动抓取) | 白天每小时调度 | 当日无任何 success 且**已过 9 点首采保护** → `no_arrival`；有 failed → `sync_failed` |
-| 315投诉/卡商投诉(被动推送) | 实测约每 1-2h 一次(09-23点) | 白天(09:00-23:00)**连续 ≥4h 无推送** 且无手动导入 → `no_arrival`；推送 failed → `push_failed` |
-| 手动退款(被动推送) | 实测约每小时一次(09-24点) | 同上(≥4h 无推送 → `no_arrival`) |
+| 主动抓取(default_sync=true) | `sync_source_configs` | 当日无 success 且**过 9 点首采保护** → no_arrival；有 failed → sync_failed |
+| 被动推送(workbuddy/tencent_doc) | `data_sources.sync_source` | 白天(09-23点)连续 ≥4h 无推送且无手动导入 → no_arrival；推送 failed → push_failed |
+| 手动导入 | `upload_records` | 仅作"已到达"兜底信号，不主动判异常 |
 
 > 首采保护(9点)与冷启动保护沿用 v1.0 设计(见 §六)。
-> **完全不比较业务数据量** → 彻底消除 v1.0 的误报根源。
+> **完全不比较业务数据量** → 消除 v1.0 误报根源。
 
 ### 2.2 引擎 `data_ok` 语义扩展
 
@@ -140,22 +144,21 @@ def _eval_data_arrival(db, domain, ts, te) -> dict:
 
 | 文件 | 改动 |
 |---|---|
-| `backend/app/services/metric_registry_service.py` | **替换** `ingest_volume_cs_record` 为按域 `data_arrival_<domain>` 求值函数（看到达日志, 不看业务量） |
+| `backend/app/services/metric_registry_service.py` | **替换** `ingest_volume_cs_record` 为注册表驱动 `data_arrival_<data_type>` 求值（扫描 sync_source_configs/data_sources 自动发现源；看到达日志, 不看业务量） |
 | `backend/app/api/v1/alerts.py` | `_scan_metric_rule` 已支持 data_ok 字符串 → critical + Incident 钩子（v1.0 已实现, 复用） |
-| `alembic/versions/` | 新 migration：停用旧 `ingest_volume_cs_record` 指标/规则；注册 `data_arrival_*` 域指标 + 规则 |
-| `docs/ops/数据采集-运维手册.md` | §2.2 改"看数据到达" |
-
----
+| `alembic/versions/` | 新 migration：停用旧 `ingest_volume_cs_record`；动态 seed `data_arrival_*`（从注册表现有源生成） |
+| `docs/ops/数据采集-运维手册.md` | §2.2 改"看数据到达" + 说明"新增源如何自动纳入" |
 
 ## 四、验收标准（v1.1）
 
-1. 指标注册表出现 `data_arrival_<domain>`（refund/ticket/cs_record/wallet/complaint/manual_refund），scan_alerts 能求值
+1. 指标注册表出现 `data_arrival_<data_type>`（从 sync_source_configs default_sync=true + data_sources workbuddy 自动生成），scan_alerts 能求值
 2. 旧 `ingest_volume_cs_record` 指标/规则已停用（不再误报）
-3. 模拟"某域当日抓取 failed 且无手动导入"→ `sync_failed` → critical + Incident
-4. 模拟"被动推送域白天 ≥4h 无推送"→ `no_arrival` → critical
+3. 模拟"某源当日抓取 failed 且无手动导入"→ `sync_failed` → critical + Incident
+4. 模拟"被动推送源白天 ≥4h 无推送"→ `no_arrival` → critical
 5. 模拟"自动抓取 failed 但有手动导入(imported)"→ **不告警**(数据已到达) —— 关键回归
-6. 首次 critical → Incident 自动登记(幂等)；恢复 → 自动平息
-7. 现有业务指标行为不变；pytest/ruff/CI 全绿；审查无 CRITICAL
+6. **新增源自动纳入**：向 sync_source_configs 插入一条 default_sync=true 的新源记录 → 无需改代码，下轮扫描自动生成 data_arrival_* 监控（关键验收）
+7. 首次 critical → Incident 自动登记(幂等)；恢复 → 自动平息
+8. 现有业务指标行为不变；pytest/ruff/CI 全绿；审查无 CRITICAL
 
 ---
 
