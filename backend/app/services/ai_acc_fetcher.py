@@ -163,17 +163,24 @@ def _chunk_time_range(
 
 
 async def _login(client: httpx.AsyncClient, base_url: str, username: str, password: str) -> str:
-    """登录返回 token(ai-acc token 在顶层,兼容嵌套 data.token 的服务)"""
+    """登录返回 token(ai-acc token 在顶层,兼容嵌套 data.token 的服务)。
+
+    失败抛 ClassifiedFetchError: 5xx/429 → transient(可重试), 4xx/无 token → permanent。
+    """
     resp = await client.post(
         f"{base_url}{LOGIN_API_PATH}",
         json={"username": username, "password": password},
     )
     if resp.status_code != 200:
-        raise RuntimeError(f"登录失败: HTTP {resp.status_code}: {resp.text[:200]}")
+        # 登录 5xx/429 → 上游瞬时, transient; 4xx(401/403 凭证错) → permanent
+        raise _classify_http_error(resp)
     data = resp.json()
     token = data.get("token") or (data.get("data") or {}).get("token")
     if not token:
-        raise RuntimeError(f"登录失败: 响应无 token 字段: {str(data)[:200]}")
+        raise ClassifiedFetchError(
+            FetchErrorClass.PERMANENT,
+            f"登录失败: 响应无 token 字段: {str(data)[:200]}",
+        )
     return token
 
 
@@ -366,12 +373,6 @@ async def fetch_one(task: dict) -> FetchResult:
                         f" 仍失败 {len(still_failed)} 片"
                     )
                 failed_chunks = still_failed
-                if day_retried:
-                    logger.warning(
-                        f"[{data_type}] 按日降级重试成功 {len(day_retried)} 天: {day_retried},"
-                        f" 仍失败 {len(still_failed)} 片"
-                    )
-                failed_chunks = still_failed
 
             # ── 全失败快速返回(避免生成空文件) ──
             if not frames:
@@ -428,13 +429,25 @@ async def fetch_one(task: dict) -> FetchResult:
                 partial_failures=failed_chunks or None,
             )
 
-    except httpx.ConnectError as e:
-        return FetchResult(data_type=data_type, success=False, error=f"连接失败: {e}",
+    except ClassifiedFetchError as e:
+        # 登录阶段失败(5xx/429→transient, 4xx/凭证错→permanent)
+        return FetchResult(
+            data_type=data_type,
+            success=False,
+            error=str(e),
+            error_class=e.error_class.value,
+        )
+    except httpx.TransportError as e:
+        # 覆盖 ConnectError/ReadError/WriteError/RemoteProtocolError 等网络瞬态(transient)
+        return FetchResult(data_type=data_type, success=False, error=f"网络错误: {e}",
                            error_class=FetchErrorClass.TRANSIENT.value)
     except httpx.TimeoutException as e:
         return FetchResult(data_type=data_type, success=False, error=f"请求超时: {e}",
                            error_class=FetchErrorClass.TRANSIENT.value)
     except Exception as e:
+        # 兜底: 登录/其它阶段未知异常。若为网络类(如 httpx 在旧版本非 TransportError 子类的
+        # 异常)保守按 transient, 让上层重试; 明确业务异常会由 _export_chunk 抛 ClassifiedFetchError
+        # 在片级已被捕获分类, 到此处多为登录阶段异常。
         logger.error(f"[{data_type}] 抓取异常", exc_info=True)
         return FetchResult(data_type=data_type, success=False, error=f"抓取失败: {e}",
-                           error_class=FetchErrorClass.PERMANENT.value)
+                           error_class=FetchErrorClass.TRANSIENT.value)

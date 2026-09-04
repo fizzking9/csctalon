@@ -50,7 +50,11 @@ def _biz_date_of(dt: datetime | str | None) -> str | None:
 
 
 def _upsert_gap(db, biz_date: str, data_type: str, **updates) -> GapRecord:
-    """按 (biz_date, data_type) upsert 缺口记录(保留 first_gap_at, 更新其它)。"""
+    """按 (biz_date, data_type) upsert 缺口记录(保留 first_gap_at, 更新其它)。
+
+    并发安全: 唯一键冲突(理论仅并发插入触发, 单 worker 少见)用 savepoint
+    (begin_nested) 局部回滚重查, 避免 rollback 整个外层事务丢其它已 flush 记账。
+    """
     row = db.scalar(
         select(GapRecord).where(
             GapRecord.biz_date == biz_date,
@@ -72,18 +76,28 @@ def _upsert_gap(db, biz_date: str, data_type: str, **updates) -> GapRecord:
     try:
         db.flush()
     except IntegrityError:
-        db.rollback()
-        row = db.scalar(
-            select(GapRecord).where(
-                GapRecord.biz_date == biz_date,
-                GapRecord.data_type == data_type,
+        # 唯一键并发冲突: 只回滚到 savepoint, 重查已存在行再更新
+        try:
+            with db.begin_nested():
+                row = db.scalar(
+                    select(GapRecord).where(
+                        GapRecord.biz_date == biz_date,
+                        GapRecord.data_type == data_type,
+                    )
+                )
+                if row is not None:
+                    for k, v in updates.items():
+                        if v is not None:
+                            setattr(row, k, v)
+                db.flush()
+        except Exception:  # noqa: BLE001 savepoint 内再失败则回滚 savepoint 即可
+            db.rollback()
+            row = db.scalar(
+                select(GapRecord).where(
+                    GapRecord.biz_date == biz_date,
+                    GapRecord.data_type == data_type,
+                )
             )
-        )
-        if row is not None:
-            for k, v in updates.items():
-                if v is not None:
-                    setattr(row, k, v)
-            db.flush()
     return row
 
 
@@ -134,10 +148,23 @@ def record_from_sync_results(
                 changed += 1
             continue
         if success and partial:
-            # 部分成功: 失败片范围记录为缺口
+            # 部分成功: 失败片范围记录为缺口(结构化 source_range + remark 摘要)
             ranges = []
+            min_start = None
+            max_end = None
             for p in partial:
-                ranges.append(f"{p.get('start', '?')}~{p.get('end', '?')}")
+                s = p.get("start")
+                e = p.get("end")
+                ranges.append(f"{s}~{e}")
+                try:
+                    sd = datetime.fromisoformat(s) if s else None
+                    ed = datetime.fromisoformat(e) if e else None
+                    if sd and (min_start is None or sd < min_start):
+                        min_start = sd
+                    if ed and (max_end is None or ed > max_end):
+                        max_end = ed
+                except ValueError:
+                    pass
             _upsert_gap(
                 db,
                 biz_date,
@@ -146,10 +173,25 @@ def record_from_sync_results(
                 error=(r.get("error") or "部分分片失败")[:2000],
                 remark="; ".join(ranges[:20])[:500],
                 last_try_at=datetime.now(TZ_CN),
+                source_range_start=min_start,
+                source_range_end=max_end,
             )
             changed += 1
             continue
-        # 失败
+        # 失败(整窗未取到数据): 范围 = 本次同步窗口(若可解析)
+        src_start = None
+        src_end = None
+        try:
+            if isinstance(start, str):
+                src_start = datetime.fromisoformat(start)
+        except ValueError:
+            pass
+        try:
+            end_s = r.get("end_time")
+            if isinstance(end_s, str):
+                src_end = datetime.fromisoformat(end_s)
+        except ValueError:
+            pass
         _upsert_gap(
             db,
             biz_date,
@@ -158,6 +200,8 @@ def record_from_sync_results(
             error=(r.get("error") or "同步失败")[:2000],
             remark=r.get("error_class", ""),
             last_try_at=datetime.now(TZ_CN),
+            source_range_start=src_start,
+            source_range_end=src_end,
         )
         changed += 1
     db.commit()
@@ -269,6 +313,9 @@ async def settle_and_backfill_yesterday(db, yesterday: str | None = None) -> dic
       + try_count+1
     - 结果记录到 bms_sync_logs(trigger_type=catch_up)
     - 补跑会忽略熔断(补跑语义本就是强制)
+
+    注意: 本函数内部逐源 commit(自管提交), 调用方须传入**独立 session**
+    并在调用后负责 close; 不应在更大外层事务中调用本函数。
 
     Returns: {"total": n, "backfilled": [...], "still_failed": [...]}
     """

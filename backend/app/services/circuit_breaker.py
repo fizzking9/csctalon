@@ -66,9 +66,10 @@ def reset_circuit(biz_key: str, data_type: str) -> None:
 def record_failure(biz_key: str, data_type: str) -> bool:
     """记录一次失败, 返回 True = 已达熔断阈值(应熔断该源当天)。
 
-    - Redis: INCR + EXPIRE(滑动窗口 TTL)。返回计数 >= 阈值。
-    - Redis 不可用: 内存计数; 且降级为"单次失败即熔断"(阈值视为 1),
-      保证熔断机制不因 Redis 故障失效(保守安全)。
+    - Redis: INCR + EXPIRE。窗口语义为「从首次失败起固定 TTL」(EXPIRE 只在首次
+      设置; 后续失败不刷新)。实际影响有限(连续失败通常集中, 单 worker 单进程)。
+      返回计数 >= 阈值。
+    - Redis 不可用: 降级进程内存计数, 仍按同一阈值判断(熔断不因 Redis 故障失效)。
     """
     threshold = max(int(settings.CIRCUIT_FAIL_THRESHOLD), 1)
     window = int(settings.CIRCUIT_WINDOW_SECONDS)
@@ -87,9 +88,9 @@ def record_failure(biz_key: str, data_type: str) -> bool:
                 )
             return tripped
     except Exception as e:  # noqa: BLE001 Redis 故障降级
-        logger.warning(f"[circuit] record 时 Redis 异常(降级内存+保守熔断): {e}")
+        logger.warning(f"[circuit] record 时 Redis 异常(降级内存): {e}")
 
-    # 内存兜底
+    # 内存兜底(与 Redis 同语义: 固定窗口 TTL + 同一阈值)
     now = time.time()
     cur_cnt, cur_ts = _mem_fail.get((biz_key, data_type), (0, now))
     if now - cur_ts > window:
@@ -97,8 +98,6 @@ def record_failure(biz_key: str, data_type: str) -> bool:
     cur_cnt += 1
     _mem_fail[(biz_key, data_type)] = (cur_cnt, now)
     _mem_cleanup()
-    # 内存降级路径: 直接按阈值判断(若 Redis 正常时我们仍用同一阈值; 注释里说明的
-    # "保守=1"只在连阈值都读不到时触发——但 settings 总是可读, 故内存路径用同一阈值)
     tripped = cur_cnt >= threshold
     if tripped:
         logger.warning(f"[circuit] {biz_key}/{data_type} 内存计数 {cur_cnt} 达阈值 → 熔断")

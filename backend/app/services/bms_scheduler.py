@@ -419,9 +419,11 @@ class BmsScheduler:
                             logger.info(
                                 f"[调度器] 5:00 补跑: {y_date} 存在缺口记录, 走缺口清点补跑(只补缺口源)"
                             )
-                            r = await settle_and_backfill_yesterday(
-                                SessionLocal(), yesterday=y_date
-                            )
+                            gap_db = SessionLocal()
+                            try:
+                                r = await settle_and_backfill_yesterday(gap_db, yesterday=y_date)
+                            finally:
+                                gap_db.close()
                             logger.info(
                                 f"[调度器] 5:00 缺口清点补跑完成: 补成功 "
                                 f"{len(r.get('backfilled', []))}, 仍失败 {len(r.get('still_failed', []))}"
