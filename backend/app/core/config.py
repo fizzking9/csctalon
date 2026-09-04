@@ -76,6 +76,17 @@ class Settings(BaseSettings):
     BMS_PASSWORD: str = ""
     BMS_SCHEDULE_AUTOSTART: bool = True  # 启动时是否自动开启定时同步(默认开启,否则跨日/重启后整小时窗口都漏)
 
+    # ── 采集链路可靠性(A-20260904-002 LOCKED / 工单#2 3.1 错误分级重试) ──
+    # 分片级重试: 单片瞬时失败(5xx/JSON500/超时)的最大重试次数
+    AI_ACC_RETRY_MAX: int = 3
+    # 指数退避基线与上限(秒); 实际 sleep = min(base * 2**attempt, cap) * jitter(±20%)
+    AI_ACC_RETRY_BASE_S: float = 1.0
+    AI_ACC_RETRY_CAP_S: float = 30.0
+    # 尊重上游 Retry-After 头时, 额外等待上限(秒)
+    AI_ACC_RETRY_AFTER_CAP_S: float = 60.0
+    # 整窗(>1天)失败后按日降级重试的最大日片数兜底(架构 3.1 按日降级)
+    AI_ACC_DAY_DEGRADE_MAX_DAYS: int = 7
+
     # SCRM 微信聚合平台(对接客服接待评估报表)
     # 说明:默认种子值仅用于首次启动灌入 SyncSourceConfig(加密),实际以 DB 配置为准
     SCRM_BASE_URL: str = "https://gateway.bilinl.com"  # 平台 OpenAPI 基础地址

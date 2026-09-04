@@ -340,6 +340,8 @@ async def sync_all(
                         try:
                             import_stats = _auto_import(inner_db, fr.data_type, fr.file_path, fr.filename, triggered_by)
                             _update_sync_log(inner_db, log.id, "success", fr.file_path, fr.filename, import_stats)
+                            # 工单#2/A-20260904-002 3.1: 部分成功时传播失败片(gap 队列记账用)
+                            partial = getattr(fr, "partial_failures", None)
                             return {
                                 "data_type": fr.data_type,
                                 "name": name,
@@ -350,6 +352,7 @@ async def sync_all(
                                 "start_time": start.isoformat(),
                                 "end_time": end.isoformat(),
                                 "attempt": attempt,
+                                "partial_failures": partial,
                             }
                         except Exception as e:
                             _update_sync_log(inner_db, log.id, "failed", fr.file_path, fr.filename, error=str(e))
@@ -367,6 +370,7 @@ async def sync_all(
                     else:
                         log = _create_sync_log(inner_db, fr.data_type, start, end, trigger_type, triggered_by)
                         _update_sync_log(inner_db, log.id, "failed", error=fr.error)
+                        # 工单#2/A-20260904-002 3.1: 传播错误分级给调度器(熔断/重试决策用)
                         return {
                             "data_type": fr.data_type,
                             "name": name,
@@ -375,6 +379,8 @@ async def sync_all(
                             "start_time": start.isoformat(),
                             "end_time": end.isoformat(),
                             "attempt": attempt,
+                            "error_class": getattr(fr, "error_class", "permanent"),
+                            "partial_failures": getattr(fr, "partial_failures", None),
                         }
                 finally:
                     try:

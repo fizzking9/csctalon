@@ -1206,6 +1206,14 @@ class FetchResult:
         filename: Optional[str] = None,
         total_rows: Optional[int] = None,
         error: Optional[str] = None,
+        # 工单#2/A-20260904-002 3.1: 错误分级
+        #   transient = 瞬时错误(5xx/JSON500/超时/限流),可重试
+        #   permanent = 凭证/参数/业务错误(401/403/4xx),重试无意义
+        error_class: str = "permanent",
+        # 工单#2/A-20260904-002 3.1: 分片级抓取的部分失败清单
+        #   success=True 且 partial_failures 非空 = 部分成功(部分片失败,范围已记录)
+        #   每项 dict: {start, end, error, error_class}
+        partial_failures: Optional[list] = None,
     ):
         self.data_type = data_type
         self.success = success
@@ -1213,6 +1221,8 @@ class FetchResult:
         self.filename = filename
         self.total_rows = total_rows
         self.error = error
+        self.error_class = error_class
+        self.partial_failures = partial_failures
         # ⚠️ 2026-08-12: 标记本源是否已完成登录(即使后续下载超时/失败,登录态仍可复用)
         #   解决: refund 登录成功但下载超时 → logged_in_ok 未传递 → ticket 在残留的
         #   refund 页面上"重新登录" → 命中 readonly el-select → 全组连锁失败
