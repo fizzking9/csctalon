@@ -319,3 +319,38 @@ def test_detail_subject_filter_normalized(db):
     assert items[0]["entity"] == "深圳市云客猫科技有限公司"  # 保留 RAW, 归一仅用于过滤
     assert body["total"] == 1
 
+
+def test_detail_subject_filter_matches_attached_315(db):
+    """/detail subject 命中挂靠到工单行的 315 补充(W2 回归, 2026-09-04)。
+
+    315 记录 SN 匹配到"商户号工单"(registrant=大秦WiFi) → include_supplementary 时
+    315 挂在主行 supplementary 下, 主行 entity=大秦WiFi 非该 315 主体。
+    主体 subject=云客猫 应能通过 supplementary[].company_entity=云客猫科技 命中该行。
+    """
+    from app.api.v1.complaints import complaint_detail
+    from app.models.device import Device
+    from app.models.external_complaint import ExternalComplaint
+    base = _dt.datetime.strptime(_REVIEW_DAY, "%Y-%m-%d").replace(tzinfo=TZ_CN)
+    db.add(Device(sn="DEV-W2"))  # 满足 external_complaints.device_sn 外键
+    # 商户号工单 SN=DEV-W2(registrant=大秦WiFi)
+    db.add(ServiceTicket(ticket_no="SUB-W2", service_category="投诉", service_item="微信投诉",
+                         status="已完成", device_sn="DEV-W2",
+                         register_time=base + timedelta(minutes=1),
+                         finish_time=base + timedelta(minutes=10), registrant="大秦WiFi管家"))
+    # 315 同 SN + company_entity=深圳市云客猫科技有限公司 + matched 到该工单 → 挂靠
+    db.add(ExternalComplaint(complaint_no="EC-W2", device_sn="DEV-W2",
+                             complaint_date=base + timedelta(minutes=2),
+                             company_entity="深圳市云客猫科技有限公司", platform="315",
+                             matched_ticket_no="SUB-W2"))
+    db.flush()
+    resp = complaint_detail(db, None, start=_REVIEW_DAY, end=_REVIEW_DAY,
+                            source_type="商户号投诉", subject="云客猫", limit=100,
+                            include_supplementary=True)
+    body = resp["data"] if isinstance(resp, dict) and "data" in resp else resp
+    items = body.get("items") or []
+    assert len(items) == 1, f"期望经 supplementary 命中云客猫主体行, 实际 {len(items)}"
+    assert items[0]["no"] == "SUB-W2"
+    # 主行 entity 回填补充 company_entity(或保留 registrant), supplementary 含云客猫
+    suppl_ents = [s.get("company_entity") for s in (items[0].get("supplementary") or []) if s.get("company_entity")]
+    assert any("云客猫" in (e or "") for e in suppl_ents), f"supplementary 应含云客猫主体: {suppl_ents}"
+

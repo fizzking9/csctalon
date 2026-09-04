@@ -889,13 +889,36 @@ def complaint_detail(
 
     # 按动作时间降序排列
     records.sort(key=lambda x: x.get("time") or "", reverse=True)
-    # F-P2-4 (问题4): 按被投诉主体过滤(归一化比较)。subject_ranking 的名是归一后
-    # 主体名(如 云客猫), 而 records 的 entity 来自 registrant/company_entity(可能未归一),
-    # 故两侧都经 _norm_subject_entity 归一后比较。卡商群无主体(entity=None)不入主体下钻。
+    # F-P2-4 (问题4) + 审查 W2 修订(2026-09-04): 按被投诉主体过滤(归一化比较)。
+    # subject_ranking 的口径 = 商户号工单主体(registrant) + 315/卡商补充表主体
+    # (company_entity/投诉店铺)。detail 中同一投诉可能有两种落点:
+    #   ① 主行 entity: 商户号行=registrant; 315 未匹配工单→独立行 entity=company_entity
+    #   ② 挂靠: include_supplementary 时 315/卡商记录若 SN 匹配到工单, 挂在主行
+    #      supplementary 下(主行 entity 可能是商户号/内部主体, 非该 315 的主体)
+    # 故 subject 过滤需同时看 主行 entity 与 supplementary[] 里各补充项的 company_entity,
+    # 任一归一命中 subject 即保留 —— 避免"315 挂靠到其它主体工单行"导致漏出(W2)。
+    def _record_subject_entities(r: dict) -> set:
+        """该明细行涉及的所有归一被投诉主体(主行 entity + 挂靠 315 的 company_entity/店铺)。"""
+        out = set()
+        ent = r.get("entity")
+        if ent:
+            norm = _norm_subject_entity(ent)
+            if norm:
+                out.add(norm)
+        for s in (r.get("supplementary") or []):
+            ce = (s.get("company_entity") or "").strip()
+            cs = (s.get("complaint_shop") or "").strip()
+            for v in (ce, cs):
+                if v and v not in ("/", "-"):
+                    norm = _norm_subject_entity(v)
+                    if norm:
+                        out.add(norm)
+        return out
+
     if subject:
         _norm_subject = _norm_subject_entity(subject)
         if _norm_subject:
-            records = [r for r in records if _norm_subject_entity(r.get("entity")) == _norm_subject]
+            records = [r for r in records if _norm_subject in _record_subject_entities(r)]
     # F-P1-2(审查 W3 修订 2026-09-04): registered/handled 计数统一基于"过滤后明细行"
     # 计算, 与 items 集合同口径(消除与全窗口 _sources_reg_handled 的口径差):
     #   registered = 行 register_time 落在窗口(start~end 北京日);  hand handled = 行 finish_time 非空
