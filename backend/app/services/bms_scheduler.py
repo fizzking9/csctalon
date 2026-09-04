@@ -391,22 +391,57 @@ class BmsScheduler:
                         continue
                     first_tick = False
 
-                # ── 1) 5:00 补跑: 对前一天整体同步(强制跑所有源,忽略专项熔断) ──
+                # ── 1) 5:00 补跑: 优先"缺口清点补跑", 无缺口退回前一天全天兜底 ──
+                #    (工单#2/A-20260904-002 3.3: 只补真缺口, 不重复无缺口源)
                 if (
                     now_cn.hour == CATCHUP_HOUR
                     and now_cn.minute < TRIGGER_WINDOW_MINUTES
                     and CATCHUP_HOUR not in today_done
                 ):
                     today_done.add(CATCHUP_HOUR)
-                    logger.info(
-                        f"触发凌晨补跑({date_str} 0{CATCHUP_HOUR}:00, {now_cn.minute}分窗口内)"
-                        " → 对前一天(整天)做整体同步(忽略熔断)"
-                    )
-                    await self._do_scheduled_sync(
-                        why=f"凌晨补跑 前一天全量 {CATCHUP_HOUR}:00",
-                        yesterday_full_sync=True,
-                        biz_key=biz_key,
-                    )
+                    # 昨天业务日
+                    y_date = (now_cn.date() - timedelta(days=1)).strftime("%Y-%m-%d")
+                    has_gaps = False
+                    try:
+                        from app.services.gap_queue_service import (
+                            list_gaps,
+                            settle_and_backfill_yesterday,
+                        )
+
+                        db0 = SessionLocal()
+                        try:
+                            open_gaps = list_gaps(db0, biz_date=y_date, status=None)
+                            has_gaps = bool(open_gaps)
+                        finally:
+                            db0.close()
+                        # 有昨天缺口记录(open/partial) → 走缺口清点补跑
+                        if has_gaps:
+                            logger.info(
+                                f"[调度器] 5:00 补跑: {y_date} 存在缺口记录, 走缺口清点补跑(只补缺口源)"
+                            )
+                            r = await settle_and_backfill_yesterday(
+                                SessionLocal(), yesterday=y_date
+                            )
+                            logger.info(
+                                f"[调度器] 5:00 缺口清点补跑完成: 补成功 "
+                                f"{len(r.get('backfilled', []))}, 仍失败 {len(r.get('still_failed', []))}"
+                            )
+                        else:
+                            logger.info(
+                                f"[调度器] 5:00 补跑: {y_date} 无缺口记录, 退回归一前一天(整天)整体同步(忽略熔断)"
+                            )
+                            await self._do_scheduled_sync(
+                                why=f"凌晨补跑 前一天全量 {CATCHUP_HOUR}:00",
+                                yesterday_full_sync=True,
+                                biz_key=biz_key,
+                            )
+                    except Exception as e:  # noqa: BLE001 缺口补跑异常 → 退回全天兜底
+                        logger.warning(f"[调度器] 5:00 缺口清点补跑异常,退回前一天全量兜底: {e}")
+                        await self._do_scheduled_sync(
+                            why=f"凌晨补跑 前一天全量 {CATCHUP_HOUR}:00",
+                            yesterday_full_sync=True,
+                            biz_key=biz_key,
+                        )
 
                 # ── 2) 白天每小时同步(8~23, 0) ──
                 if now_cn.hour in DAYTIME_HOURS and now_cn.minute < TRIGGER_WINDOW_MINUTES and now_cn.hour not in today_done:
@@ -890,6 +925,28 @@ class BmsScheduler:
                     f" 本轮新增熔断={newly_halted}(连续失败达阈值),"
                     f" 累计已熔断专项={sorted(s)}"
                 )
+
+        # ── 缺口记账(工单#2/A-20260904-002 3.3) ──
+        # 失败/部分成功 → gap_records(open/partial), 供次日 5:00 清点补跑。
+        # force_all(5:00 前一天全天 / 8:00 近N天全量兜底)成功 → 打 full_day=True 标 filled。
+        # 独立 session, 记账失败不影响调度主流程。
+        if task_results is not None and task_results:
+            try:
+                from app.services.gap_queue_service import record_from_sync_results
+
+                if force_all:
+                    for r in task_results:
+                        if isinstance(r, dict) and r.get("success"):
+                            r["full_day"] = True
+                gap_db = SessionLocal()
+                try:
+                    n = record_from_sync_results(gap_db, task_results, trigger_type="scheduled")
+                    if n:
+                        logger.info(f"[调度器] 缺口记账: {n} 条更新(gap_records)")
+                finally:
+                    gap_db.close()
+            except Exception as gap_err:  # noqa: BLE001
+                logger.warning(f"[调度器] 缺口记账失败(忽略): {gap_err}")
 
     def _register_circuit_alert(self, biz_key: str, data_type: str) -> None:
         """熔断触发 → 写一条事务通知(站内信), 事件留痕(3.2)。
