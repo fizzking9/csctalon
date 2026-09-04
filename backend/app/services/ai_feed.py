@@ -11,8 +11,9 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from app.api.v1.external import _build_brief
+from app.api.v1.external import _build_brief, _window
 from app.core.config import settings
+from app.core.redis_client import get_redis
 from app.services.ai_glossary import glossary_all, glossary_for_question
 
 logger = logging.getLogger(__name__)
@@ -43,8 +44,35 @@ def _build_feed(db: Session, period: str, date: str | None) -> dict:
     - period: daily/weekly/monthly
     - date:   period=daily 时可指定某整天(缺省=今天实时)
     返回 brief 结构(纯只读, 命中 today:kpi/refund:do/complaint:* 既有缓存)。
+
+    自愈(2026-09-04 事故): BMS 写入高峰期 today:kpi 缓存 TTL 被放大到 300s+,
+    若同步中某次写入空 routes 会污染缓存 → AI/看板读到"四路未提供"。检测到
+    "退款总额有值但四路 routes 全空"即判定坏缓存 → 删除该 key 强制重算一次。
     """
-    return _build_brief(db, period, date)
+    feed = _build_brief(db, period, date)
+
+    def _routes_empty(rf: dict) -> bool:
+        routes = (rf.get("routes") or {})
+        amounts = [(v or {}).get("amount") for v in (routes.get("route_a"), routes.get("route_b"),
+                                                     routes.get("route_c"), routes.get("route_d"))]
+        return all(a is None for a in amounts)
+
+    rf = feed.get("refund") or {}
+    total_amt = ((rf.get("total_amount") or {}).get("value")) if isinstance(rf.get("total_amount"), dict) else None
+    # 退款总额有值(说明数据存在) 但四路 amount 全 None → 坏缓存(空 routes 被缓存)
+    if total_amt is not None and _routes_empty(rf):
+        win = _window(period, date)
+        key = f"today:kpi:None:{win['start']}:{win['end']}"
+        r = get_redis()
+        if r is not None:
+            try:
+                r.delete(key)
+                logger.warning("ai_feed 检测到 today:kpi 空 routes 坏缓存, 已删除 key=%s 强制重算", key)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("ai_feed 删除坏缓存失败: %s", e)
+        # 重算一次(此时缓存已删, _build_brief 内部 cached_call 会直调 today_kpi)
+        feed = _build_brief(db, period, date)
+    return feed
 
 
 def _trim_feed(feed: dict) -> str:
