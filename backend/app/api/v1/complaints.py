@@ -199,6 +199,112 @@ def _is_real_finish(finish_time, register_time) -> bool:
         return False
 
 
+# ═══════════════════════════════════════════════════════════════════
+# F-P1-2 (2026-09-04): 三源 × registered/handled 口径共享函数
+#   registered = 窗口内「新登记」(register_time ∈ 窗口)
+#   handled    = 窗口内「真实完成」(finish_time ∈ 窗口 且 finish − register ≥ 3min,
+#                即 _is_real_finish 语义; 排除同瞬填充/批量覆盖)。**含窗口外登记、
+#                窗口内办结的历史单** —— 用户 2026-09-04 拍板: "当日处理=finish 落当日即算"。
+#   供 /summary 与 /analysis 复用(与 external._complaint_enhanced 同口径, 避免漂移)。
+#   注意: 本口径与投诉水位 water.out(v2 自洽: 出水⊂进水, 仅窗口内登记且完成)不同,
+#         water 保留 v2(净水位=积压); registered/handled 作为独立"登记/处理"KPI 展示。
+# ═══════════════════════════════════════════════════════════════════
+_REAL_FINISH_EPOCH_SECS = 180
+
+
+def _source_reg_handled(db, src_val: str, ts, te,
+                        include_suppl_external: bool = True) -> tuple[int, int]:
+    """返回某三源桶的 (registered, handled)。
+
+    - registered: 工单 register_time ∈ [ts,te]; external 桶再并入 315/卡商补充表
+      净新增(complaint_date∈窗口 − 已 matched 到窗口内登记工单的重叠), 与 /summary 三源
+      总数 external_total 的合并口径一致。
+    - handled: 工单 finish_time ∈ [ts,te] 且真实完成(finish−register≥3min)。
+      (补充表未并入 handled: 315/卡商的 handle_time/result 办结语义与工单完成不同,
+      避免混淆; 外部处理进度由明细/主体/积压维度呈现)
+    """
+    src_expr = _complaint_source_type_case()
+
+    def _reg_where():
+        conds = [
+            _ticket_category_case() == "投诉",
+            src_expr == src_val,
+            ServiceTicket.register_time.isnot(None),
+        ]
+        if ts:
+            conds.append(ServiceTicket.register_time >= ts)
+        if te:
+            conds.append(ServiceTicket.register_time <= te)
+        return conds
+
+    def _fin_where():
+        conds = [
+            _ticket_category_case() == "投诉",
+            src_expr == src_val,
+            ServiceTicket.finish_time.isnot(None),
+            ServiceTicket.register_time.isnot(None),
+            func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) >= _REAL_FINISH_EPOCH_SECS,
+        ]
+        if ts:
+            conds.append(ServiceTicket.finish_time >= ts)
+        if te:
+            conds.append(ServiceTicket.finish_time <= te)
+        return conds
+
+    registered = db.scalar(select(func.count()).select_from(ServiceTicket).where(*_reg_where())) or 0
+    handled = db.scalar(select(func.count()).select_from(ServiceTicket).where(*_fin_where())) or 0
+
+    # external 桶: 并入补充表(315/卡商)净新增 registered(与 external_total 合并口径一致)
+    if include_suppl_external and src_val == "外部投诉":
+        def _overlap(model):
+            """补充记录 matched_ticket_no 指向"窗口内登记投诉工单"的条数(= 工单侧已计, 需去重)"""
+            sub_conds = [
+                _ticket_category_case() == "投诉",
+                ServiceTicket.register_time.isnot(None),
+            ]
+            if ts:
+                sub_conds.append(ServiceTicket.register_time >= ts)
+            if te:
+                sub_conds.append(ServiceTicket.register_time <= te)
+            sub = select(ServiceTicket.ticket_no).where(*sub_conds)
+            conds = [
+                model.complaint_date.isnot(None),
+                model.matched_ticket_no.isnot(None),
+                model.matched_ticket_no.in_(sub),
+            ]
+            if ts:
+                conds.append(model.complaint_date >= ts)
+            if te:
+                conds.append(model.complaint_date <= te)
+            return db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
+
+        ext_reg = 0
+        for model in (ExternalComplaint, CardComplaint):
+            conds = [model.complaint_date.isnot(None)]
+            if ts:
+                conds.append(model.complaint_date >= ts)
+            if te:
+                conds.append(model.complaint_date <= te)
+            total = db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
+            ext_reg += int(total) - int(_overlap(model))
+        registered += max(ext_reg, 0)
+
+    return int(registered), int(handled)
+
+
+def _sources_reg_handled(db, ts, te) -> dict:
+    """三源 registered/handled 汇总: {source: {registered, handled}} + total。"""
+    out = {}
+    reg_sum = handled_sum = 0
+    for src in ("内部投诉", "商户号投诉", "外部投诉"):
+        reg, hdl = _source_reg_handled(db, src, ts, te)
+        out[src] = {"registered": reg, "handled": hdl}
+        reg_sum += reg
+        handled_sum += hdl
+    out["total"] = {"registered": reg_sum, "handled": handled_sum}
+    return out
+
+
 def _norm_status(source: str, status_val: str | None, finish_time, register_time, handler_val: str | None) -> str:
     """投诉状态归一化显示,空值根据 finish_time/handler 推断,避免大量"待处理"误报.
     返回语义: 已完成/处理中/待处理/待跟进 等。
@@ -531,27 +637,38 @@ def complaint_summary(
         for r in db.execute(_backlog_cat_stmt).all()
     ]
 
+    # F-P1-2: 三源 registered/handled(首页/运营看板三源 KPI 双值用)
+    #   registered=窗口内新登记; handled=窗口内真实完成(finish落窗口, ≥3min, 含历史单今日办结)
+    _reg_handled = _sources_reg_handled(db, ts, te)
+
     return R(
         data={
             "supplementary": supplementary,
+            "reg_handled": _reg_handled,
             "backlog": {
                 "total": int(backlog_total),
                 "by_category": backlog_by_cat,
             },
             "internal": {
                 "total": int(internal_total),
+                "registered": _reg_handled["内部投诉"]["registered"],
+                "handled": _reg_handled["内部投诉"]["handled"],
                 "by_category": [{"name": r[0] or "未标注", "count": int(r[1] or 0)} for r in internal_by_cat],
                 "by_handler": _handler_rows(internal_by_handler),
                 "trend": internal_trend_merged,
             },
             "merchant": {
                 "total": int(merchant_total),
+                "registered": _reg_handled["商户号投诉"]["registered"],
+                "handled": _reg_handled["商户号投诉"]["handled"],
                 "by_category": [{"name": r[0] or "未标注", "count": int(r[1] or 0)} for r in merchant_by_cat],
                 "by_handler": _handler_rows(merchant_by_handler),
                 "trend": merchant_trend_merged,
             },
             "external": {
                 "total": int(external_total),
+                "registered": _reg_handled["外部投诉"]["registered"],
+                "handled": _reg_handled["外部投诉"]["handled"],
                 "by_category": [{"name": r[0] or "未标注", "count": int(r[1] or 0)} for r in external_by_cat],
                 "by_handler": _handler_rows(external_by_handler),
                 "trend": external_trend_merged,
@@ -1989,6 +2106,9 @@ def complaint_analysis(
         for d, v in sorted(ext_plat_trend_map.items())[:90]
     ]
 
+    # F-P1-2: 三源 registered/handled(投诉分析页管理摘要双值; 口径同 /summary/_sources_reg_handled)
+    _reg_handled = _sources_reg_handled(db, ts, te)
+
     return R(
         data={
             "summary": {
@@ -2001,6 +2121,7 @@ def complaint_analysis(
                 "completion_rate": completion_rate,
                 "avg_handle_hours": avg_handle_hours,
             },
+            "reg_handled": _reg_handled,
             "source_distribution": source_distribution,
             "water": water,
             "trend": trend,

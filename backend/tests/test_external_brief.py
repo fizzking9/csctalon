@@ -209,3 +209,52 @@ def test_complaint_enhanced_external_registered_dedup_matched(db):
     # 工单 1(T-EXT-1) + 补充净新增 2(EC-2/EC-3, EC-1 重叠去重) = 3
     assert external["registered"] == 3, f"registered={external['registered']}, 期望 3"
 
+
+# ---- complaints._source_reg_handled / _sources_reg_handled (F-P1-2, 2026-09-04) ----
+# 共享 helper 供 /summary、/analysis 输出"三源 × 当日登记/当日处理(真实完成)"。
+# 与 external._complaint_enhanced 同口径: registered=register∈窗口; handled=finish∈窗口
+# 且 finish−register≥3min(含窗口外登记、窗口内办结的历史单 —— 用户拍板"处理=finish 落窗口即算")。
+
+
+def test_source_reg_handled_real_finish_and_historical_finish(db):
+    """handled 口径: 真实完成(finish−register≥3min) 且 finish 落窗口。
+
+    - T1: register 窗口内、finish 窗口内+10min(真实完成) → registered=1, handled=1
+    - T2: register 窗口内、finish 窗口内+2min(同瞬填充) → registered=1, handled=0
+    - T3: register 窗口外(前一日)、finish 窗口内+30min(历史单今日办结) → registered=0, handled=1
+    """
+    from app.api.v1.complaints import _parse_dt, _parse_dt_end, _source_reg_handled
+    base = _dt.datetime.strptime(_REVIEW_DAY, "%Y-%m-%d").replace(tzinfo=TZ_CN)
+    # T1/T2: 窗口内登记
+    _mk_ticket(db, "RH-1", fin_delta_min=10)    # 真实完成
+    _mk_ticket(db, "RH-2", fin_delta_min=2)     # 非真实(同瞬填充)
+    # T3: 窗口外登记(前一日) + 窗口内完成(历史单今日办结)
+    db.add(ServiceTicket(
+        ticket_no="RH-3", service_category="投诉", service_item="商品投诉",
+        status="已完成", register_time=base - timedelta(days=1),
+        finish_time=base + timedelta(minutes=30),
+    ))
+    db.flush()
+    ts = _parse_dt(_REVIEW_DAY)
+    te = _parse_dt_end(_REVIEW_DAY)
+    reg, hdl = _source_reg_handled(db, "内部投诉", ts, te)
+    assert reg == 2      # RH-1 + RH-2(窗口内登记)
+    assert hdl == 2      # RH-1(真实) + RH-3(历史单今日完成); RH-2 同瞬填充不计
+
+
+def test_sources_reg_handled_three_buckets(db):
+    """三源分桶: 商品投诉→内部 / 微信→商户号 / 12315→外部; total 汇总。"""
+    from app.api.v1.complaints import _parse_dt, _parse_dt_end, _sources_reg_handled
+    _mk_ticket(db, "S-1", item="商品投诉", fin_delta_min=10)
+    _mk_ticket(db, "S-2", item="微信投诉", fin_delta_min=10)
+    _mk_ticket(db, "S-3", item="12315", fin_delta_min=10)
+    db.flush()
+    ts = _parse_dt(_REVIEW_DAY)
+    te = _parse_dt_end(_REVIEW_DAY)
+    out = _sources_reg_handled(db, ts, te)
+    assert out["内部投诉"] == {"registered": 1, "handled": 1}
+    assert out["商户号投诉"] == {"registered": 1, "handled": 1}
+    assert out["外部投诉"]["registered"] >= 1   # 含 315/卡商补充表净新增(库中历史补充表可能计入)
+    assert out["total"]["registered"] >= 3
+    assert out["total"]["handled"] >= 3
+
