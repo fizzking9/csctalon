@@ -374,7 +374,11 @@
               <div v-if="supplExternal.total" class="ck-sub">315补充 {{ formatNum(supplExternal.total) }}条</div>
             </div>
           </div>
-          <div v-if="complaintCategoryOption" class="compact-pie-wrap">
+          <div v-if="complaintRegHandledOption" class="compact-pie-wrap">
+            <div class="compact-pie-title">投诉来源 · 登记/处理（双柱）</div>
+            <BaseChart :option="complaintRegHandledOption" height="170px" />
+          </div>
+          <div v-else-if="complaintCategoryOption" class="compact-pie-wrap">
             <div class="compact-pie-title">投诉分类分布</div>
             <BaseChart :option="complaintCategoryOption" height="150px" />
           </div>
@@ -404,7 +408,14 @@
       <el-collapse v-model="complaintCollapseActive" class="complaint-collapse">
         <el-collapse-item name="detail">
           <template #title>
-            <span class="collapse-title">投诉明细（{{ complaintFilteredList.length }}/{{ complaintList.length }} 条）</span>
+            <span class="collapse-title">
+              投诉明细
+              <span style="font-weight:600;color:#2563eb">登记 {{ formatNum(complaintDetailCount.registered) }}</span>
+              <span style="margin:0 3px;color:#d1d5db">·</span>
+              <span style="font-weight:600;color:#16a34a">处理 {{ formatNum(complaintDetailCount.handled) }}</span>
+              <span style="margin:0 3px;color:#d1d5db">·</span>
+              <span class="dim-text">共 {{ complaintDetailCount.total }} 条 · 当前 {{ complaintFilteredList.length }} 条</span>
+            </span>
           </template>
           <div class="sn-filter-bar">
             <el-select v-model="complaintFilterSource" placeholder="来源" size="small" clearable filterable style="width:140px;margin-right:6px">
@@ -448,6 +459,13 @@
               :filter-method="(v,row)=>row.source===v" filter-placement="bottom-end">
               <template #default="{ row }">
                 <el-tag :type="complaintSourceType(row.source)" size="small" effect="plain">{{ row.source }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="被投诉主体" width="130" show-overflow-tooltip :filters="complaintEntityColumnFilters"
+              :filter-method="(v,row)=>(row.entity||'—')===v" filter-placement="bottom-end">
+              <template #default="{ row }">
+                <el-tag v-if="row.entity" size="small" effect="plain" type="warning">{{ row.entity }}</el-tag>
+                <span v-else class="text-muted">—</span>
               </template>
             </el-table-column>
             <el-table-column label="分类" width="100" show-overflow-tooltip sortable
@@ -658,6 +676,8 @@ const hasRecovery = computed(() => !!recoveryData.value?.kpi)
 // 投诉专项
 const complaintSummaryData = ref({})
 const complaintList = ref([])
+// F-P1-2: 明细窗口内 登记/处理 计数(标题展示)
+const complaintDetailCount = ref({ registered: 0, handled: 0, total: 0 })
 const complaintCollapseActive = ref(['detail'])
 // 积压待处理(近30天窗口内登记的未完成, 不随今日/本周切换)
 const backlogTotal = ref(0)
@@ -753,6 +773,35 @@ function complaintStatusType(status) {
   return 'info'
 }
 
+// 投诉来源 登记/处理 双柱图 (F-P1-2)
+const complaintRegHandledOption = computed(() => {
+  const src = complaintSummaryData.value
+  const data = ['内部投诉', '商户号投诉', '外部投诉'].map(k => {
+    const s = src[k === '内部投诉' ? 'internal' : k === '商户号投诉' ? 'merchant' : 'external'] || {}
+    return {
+      name: k,
+      registered: Number(s.registered ?? s.total) || 0,
+      handled: Number(s.handled) || 0,
+    }
+  })
+  if (!data.some(d => d.registered || d.handled)) return null
+  return {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { bottom: 0, left: 'center', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 11 } },
+    grid: { left: 8, right: 8, bottom: 32, top: 8, containLabel: true },
+    xAxis: { type: 'category', data: data.map(d => d.name), axisLabel: { fontSize: 10, interval: 0 } },
+    yAxis: { type: 'value', axisLabel: { fontSize: 10 }, minInterval: 1 },
+    series: [
+      { name: '登记', type: 'bar', data: data.map(d => d.registered),
+        itemStyle: { color: '#2563eb', borderRadius: [3, 3, 0, 0] }, barMaxWidth: 16,
+        label: { show: true, position: 'top', fontSize: 10 } },
+      { name: '处理', type: 'bar', data: data.map(d => d.handled),
+        itemStyle: { color: '#10b981', borderRadius: [3, 3, 0, 0] }, barMaxWidth: 16,
+        label: { show: true, position: 'top', fontSize: 10 } },
+    ],
+  }
+})
+
 // 投诉分类柱状图选项
 const complaintCategoryOption = computed(() => {
   // 合并三个来源的by_category
@@ -806,6 +855,10 @@ const complaintSourceColumnFilters = computed(() => {
 })
 const complaintCategoryColumnFilters = computed(() => {
   const set = new Set(complaintList.value.map(r => r.category).filter(Boolean))
+  return [...set].map(v => ({ text: v, value: v }))
+})
+const complaintEntityColumnFilters = computed(() => {
+  const set = new Set(complaintList.value.map(r => r.entity || '—').filter(Boolean))
   return [...set].map(v => ({ text: v, value: v }))
 })
 const complaintStatusColumnFilters = computed(() => {
@@ -1407,7 +1460,16 @@ function applyViewData({ kpiRes, hourlyRes, staffRes, queueRes, recoveryRes, com
   if (queueRes.data) queueData.value = queueRes.data
   if (recoveryRes.data) recoveryData.value = recoveryRes.data
   if (complaintSummaryRes.data) complaintSummaryData.value = complaintSummaryRes.data
-  if (complaintDetailRes.data) complaintList.value = complaintDetailRes.data?.items || []
+  if (complaintDetailRes.data) {
+    complaintList.value = complaintDetailRes.data?.items || []
+    // F-P1-2: 明细窗口 登记/处理 计数(标题展示)
+    const d = complaintDetailRes.data
+    complaintDetailCount.value = {
+      registered: Number(d.registered) || 0,
+      handled: Number(d.handled) || 0,
+      total: Number(d.total) || (d.items?.length || 0),
+    }
+  }
   if (backlogRes.data) backlogTotal.value = backlogRes.data?.total || 0
 }
 

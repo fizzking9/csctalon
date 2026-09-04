@@ -298,7 +298,11 @@
         <el-card shadow="never">
           <template #header>
             <div class="flex-between">
-              <span style="font-weight:600">外部投诉明细（{{ externalDetail.length }} 条）</span>
+              <span style="font-weight:600">外部投诉明细
+                <el-tag size="small" effect="plain" style="margin-left:6px;color:#2563eb">登记 {{ formatNum(externalDetailCount.registered) }}</el-tag>
+                <el-tag size="small" effect="plain" style="color:#16a34a">处理 {{ formatNum(externalDetailCount.handled) }}</el-tag>
+                <span class="dim" style="margin-left:6px;font-weight:400">共 {{ externalDetail.length }} 条</span>
+              </span>
               <el-button size="small" @click="loadExternalDetail">刷新</el-button>
             </div>
           </template>
@@ -397,7 +401,11 @@
         <el-card shadow="never">
           <template #header>
             <div class="flex-between">
-              <span style="font-weight:600">商户号投诉明细（{{ merchantDetail.length }} 条）</span>
+              <span style="font-weight:600">商户号投诉明细
+                <el-tag size="small" effect="plain" style="margin-left:6px;color:#7c3aed">登记 {{ formatNum(merchantDetailCount.registered) }}</el-tag>
+                <el-tag size="small" effect="plain" style="color:#16a34a">处理 {{ formatNum(merchantDetailCount.handled) }}</el-tag>
+                <span class="dim" style="margin-left:6px">共 {{ merchantDetail.length }} 条</span>
+              </span>
               <el-button size="small" @click="loadMerchantDetail">刷新</el-button>
             </div>
           </template>
@@ -904,6 +912,9 @@ const externalTrendGrain = ref('day')
 const trendStackGrain = ref('day')
 const externalDetail = ref([])
 const merchantDetail = ref([])
+// F-P1-2: 明细 登记/处理 计数(标题展示)
+const externalDetailCount = ref({ registered: 0, handled: 0 })
+const merchantDetailCount = ref({ registered: 0, handled: 0 })
 const effSource = ref('internal')
 
 // ── 积压审核(backlog tab) ──
@@ -1588,6 +1599,10 @@ async function loadExternalDetail() {
     const res = await complaintSupplementary(p)
     // 补充 entity 字段 (315表无 entity 字段, 用 company_entity 兼容)
     externalDetail.value = (res.data?.items || []).map(it => ({ ...it, entity: it.entity || it.company_entity }))
+    externalDetailCount.value = {
+      registered: Number(res.data?.registered) || 0,
+      handled: Number(res.data?.handled) || 0,
+    }
   } finally {
     extDetailLoading.value = false
   }
@@ -1599,6 +1614,10 @@ async function loadMerchantDetail() {
     const p = { ...params.value, limit: 200, include_supplementary: false, source_type: '商户号投诉' }
     const res = await complaintDetail(p)
     merchantDetail.value = res.data?.items || []
+    merchantDetailCount.value = {
+      registered: Number(res.data?.registered) || 0,
+      handled: Number(res.data?.handled) || 0,
+    }
   } finally {
     merDetailLoading.value = false
   }
