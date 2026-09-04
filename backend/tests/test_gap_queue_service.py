@@ -76,6 +76,39 @@ def test_record_daytime_success_no_filled(db):
     assert n == 0
 
 
+def test_record_full_range_marks_old_gaps_filled(db):
+    """近 N 天全量窗口成功 → 窗口内该源历史 open/partial 一并标 filled。"""
+    # 先造 3 天前的缺口 + 2 天前的缺口
+    d3 = (datetime(2026, 9, 1, 10, 0, tzinfo=TZ_CN)).isoformat()
+    d2 = (datetime(2026, 9, 2, 10, 0, tzinfo=TZ_CN)).isoformat()
+    gq.record_from_sync_results(db, [{"data_type": "cs_record", "success": False, "error": "x",
+                                      "start_time": d3, "end_time": d3}])
+    gq.record_from_sync_results(db, [{"data_type": "cs_record", "success": False, "error": "x",
+                                      "start_time": d2, "end_time": d2}])
+    assert db.query(GapRecord).filter_by(data_type="cs_record", status="open").count() == 2
+
+    # 8:00 近 7 天全量成功覆盖该源 → 传 full_range=[09-01, 09-08] → 旧缺口全 filled
+    res = [{"data_type": "cs_record", "success": True, "start_time": d3, "end_time": d3}]
+    gq.record_from_sync_results(db, res, full_range=("2026-09-01", "2026-09-08"))
+    filled = db.query(GapRecord).filter_by(data_type="cs_record", status="filled").all()
+    assert len(filled) == 2
+    assert db.query(GapRecord).filter_by(data_type="cs_record", status="open").count() == 0
+
+
+def test_record_full_range_only_matching_type(db):
+    """full_range 只清匹配 data_type 的缺口, 其它源不受影响。"""
+    d3 = (datetime(2026, 9, 1, 10, 0, tzinfo=TZ_CN)).isoformat()
+    gq.record_from_sync_results(db, [{"data_type": "cs_record", "success": False, "error": "x",
+                                      "start_time": d3, "end_time": d3}])
+    gq.record_from_sync_results(db, [{"data_type": "refund", "success": False, "error": "x",
+                                      "start_time": d3, "end_time": d3}])
+    res = [{"data_type": "cs_record", "success": True, "start_time": d3, "end_time": d3}]
+    gq.record_from_sync_results(db, res, full_range=("2026-09-01", "2026-09-08"))
+    # cs_record 已 filled, refund 仍 open
+    assert db.query(GapRecord).filter_by(data_type="cs_record", status="filled").count() == 1
+    assert db.query(GapRecord).filter_by(data_type="refund", status="open").count() == 1
+
+
 def test_record_upsert_idempotent(db):
     """同一源同日多次失败 → 只保留一行(upsert 幂等)。"""
     gq.record_from_sync_results(db, [_res("cs_record", False, error="e1")])

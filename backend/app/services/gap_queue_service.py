@@ -87,14 +87,21 @@ def _upsert_gap(db, biz_date: str, data_type: str, **updates) -> GapRecord:
     return row
 
 
-def record_from_sync_results(db, results: list[dict], trigger_type: str = "") -> int:
+def record_from_sync_results(
+    db,
+    results: list[dict],
+    trigger_type: str = "",
+    full_range: tuple[str, str] | None = None,
+) -> int:
     """同步结果聚合后统一记账(在 sync_all 收尾调用, 覆盖所有触发方式)。
 
     规则:
       1) 失败源(success=False)      → open(记录错误)
       2) 部分成功(partial_failures) → partial(记录失败片范围/摘要)
-      3) 全天覆盖成功(trigger_type 为补跑类且窗口含整天 / 由调用方标记
-         full_day=True 在 result 里) → filled
+      3) 全天覆盖成功(由调用方标记 full_day=True / full_range 窗口) → filled
+         - full_day: 单日覆盖(5:00 前一天全天) → 该 biz_date 标 filled
+         - full_range: 近N天窗口(8:00 全量兜底) → 该源窗口内所有 open/partial 标 filled
+           (避免 8:00 全量已成功覆盖后, 缺口队列仍把窗口内的旧缺口当"待补"重复补跑)
     白天增量(trigger_type=scheduled 且非常规补跑)不做 filled(当天未结束)。
 
     Returns: 本次记账影响的缺口行数。
@@ -109,11 +116,16 @@ def record_from_sync_results(db, results: list[dict], trigger_type: str = "") ->
             data_type = "ticket"
         start = r.get("start_time")
         biz_date = _biz_date_of(start)
-        if not biz_date:
-            continue
         success = bool(r.get("success"))
         partial = r.get("partial_failures") or []
         full_day = bool(r.get("full_day"))  # 调用方标记: 本次覆盖整天
+
+        # 近 N 天全量窗口成功 → 把该源窗口内历史 open/partial 一并标 filled
+        if full_range and success and not partial:
+            _mark_range_filled(db, data_type, full_range[0], full_range[1])
+            continue
+        if not biz_date:
+            continue
 
         if success and not partial:
             # 成功且无失败片: 仅当"全天覆盖"才可标 filled(白天增量不标)
@@ -150,6 +162,34 @@ def record_from_sync_results(db, results: list[dict], trigger_type: str = "") ->
         changed += 1
     db.commit()
     return changed
+
+
+def _mark_range_filled(db, data_type: str, start_date: str, end_date: str) -> int:
+    """把某源在 [start_date, end_date] 日期范围内的 open/partial 缺口标为 filled。
+
+    用于近 N 天全量兜底(8:00)成功覆盖后, 清理该窗口内已被实际导入覆盖的旧缺口。
+    Returns: 标记数量。
+    """
+    from sqlalchemy import update
+
+    n = 0
+    try:
+        result = db.execute(
+            update(GapRecord)
+            .where(
+                GapRecord.data_type == data_type,
+                GapRecord.biz_date >= start_date,
+                GapRecord.biz_date <= end_date,
+                GapRecord.status.in_(("open", "partial")),
+            )
+            .values(status="filled", remark="近N天全量兜底成功覆盖")
+        )
+        db.flush()
+        n = result.rowcount or 0
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        logger.warning(f"[gap] _mark_range_filled 失败({data_type}): {e}")
+    return n
 
 
 # ───────────────────────── 查询 ─────────────────────────

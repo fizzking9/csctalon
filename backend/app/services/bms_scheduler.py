@@ -928,19 +928,36 @@ class BmsScheduler:
 
         # ── 缺口记账(工单#2/A-20260904-002 3.3) ──
         # 失败/部分成功 → gap_records(open/partial), 供次日 5:00 清点补跑。
-        # force_all(5:00 前一天全天 / 8:00 近N天全量兜底)成功 → 打 full_day=True 标 filled。
+        # force_all(5:00 前一天全天 / 8:00 近N天全量兜底)成功 → 打 full_day=True 标 filled;
+        # 8:00 近N天窗口额外传 full_range, 把窗口内该源历史 open/partial 一并标 filled
+        # (避免 8:00 全量已覆盖后, 缺口队列仍把窗口内旧缺口当"待补"重复补跑)。
         # 独立 session, 记账失败不影响调度主流程。
         if task_results is not None and task_results:
             try:
                 from app.services.gap_queue_service import record_from_sync_results
 
+                full_range: tuple[str, str] | None = None
                 if force_all:
                     for r in task_results:
                         if isinstance(r, dict) and r.get("success"):
                             r["full_day"] = True
+                    if full_window_days > 0:
+                        # 近 N 天窗口: [range_start 日期, range_end 日期](UTC → 北京日期)
+                        try:
+                            if range_start.tzinfo is None:
+                                rs_cn = range_start.replace(tzinfo=timezone.utc).astimezone(TZ_CN)
+                            else:
+                                rs_cn = range_start.astimezone(TZ_CN)
+                            if range_end.tzinfo is None:
+                                re_cn = range_end.replace(tzinfo=timezone.utc).astimezone(TZ_CN)
+                            else:
+                                re_cn = range_end.astimezone(TZ_CN)
+                            full_range = (rs_cn.strftime("%Y-%m-%d"), re_cn.strftime("%Y-%m-%d"))
+                        except Exception:  # noqa: BLE001
+                            full_range = None
                 gap_db = SessionLocal()
                 try:
-                    n = record_from_sync_results(gap_db, task_results, trigger_type="scheduled")
+                    n = record_from_sync_results(gap_db, task_results, trigger_type="scheduled", full_range=full_range)
                     if n:
                         logger.info(f"[调度器] 缺口记账: {n} 条更新(gap_records)")
                 finally:
