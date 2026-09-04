@@ -960,7 +960,7 @@ def _complaint_source_type_simple_case(col=ServiceTicket.service_item):
 # ============================================================
 # 模块: 工单有效完工时间推算 (effective_finish_time)
 # ============================================================
-# 背景: ticket.finish_time 89% 被批量覆盖/同步填充(详见 docs/数据时间审核报告.md L67-L70)
+# 背景: ticket.finish_time 89% 被批量覆盖/同步填充(详见 docs/reports/20260801-数据时间审核-审计报告.md L67-L70)
 #   - 50% finish > register+12h (BMS 03:15 批量覆盖)
 #   - 23% finish == register (导入时同步填充)
 #   - 17% 更早于 register (同瞬填充)
@@ -2819,7 +2819,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
     a_done_y = _route_a_done_in_window(ys, ye)
 
     # 5. 今日已完工单 (新口径:有效完工时间推算)
-    #    - 背景: finish_time 89% 被批量覆盖/同步填充(详见 docs/数据时间审核报告.md L67-L70)
+    #    - 背景: finish_time 89% 被批量覆盖/同步填充(详见 docs/reports/20260801-数据时间审核-审计报告.md L67-L70)
     #    - 推算链: 真实完成样本(白名单) → handle_duration 秒 → handler 近 30 天真实平均 → 全局真实平均
     #    - 仅统计 status='已完成' 的工单 (在途不视为完工)
     done_t, real_done_t = _ticket_effective_finish_time_where(db, ts, te)
