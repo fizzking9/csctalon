@@ -17,11 +17,13 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.bms_sync_log import BmsSyncLog
-from app.models.cs_record import CsRecord
+from app.models.complaint_sync_log import ComplaintSyncLog
 from app.models.external_complaint import ExternalComplaint
+from app.models.manual_refund_sync_log import ManualRefundSyncLog
 from app.models.metric import MetricDailySnapshot, MetricRegistry, MetricThreshold
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
+from app.models.upload import UploadRecord
 from app.services.analytics import (
     TZ,
     _complaint_source_type_case,
@@ -123,20 +125,6 @@ def _eval_internal_complaint_daily(db: Session, ts: datetime, te: datetime) -> d
     cnt = db.scalar(stmt) or 0
     return {"value": float(cnt), "data_ok": True, "detail": f"区间 {ts}~{te}"}
 
-
-# ============================================================
-# 采集健康指标(工单 #5 / A-20260904-001 LOCKED)
-# 与业务指标不同: 入表量骤降/断流 = 要告警的故障信号, 不能被 data_ok 吞掉
-# data_ok 三态: True=正常 / "no_sync"=当日无采集 / "sync_failed"=当日采集失败
-# ============================================================
-# 北京时间当日 08:00~次日 02:00 为计划采集小时(8-23+0); 5:00 补跑; 见 bms_scheduler
-_PLANNED_HOUR_START = 8   # 白天首采 08:00
-_PLANNED_HOUR_END = 26    # 次日 02:00(即 hour 0~2 归前一天, 用 24+hour 表达)
-# no_sync 首采保护: 08:00 定时同步触发后需数分钟完成(浏览器启动+登录+抓取+导入),
-# 扫描若在 8 点整先跑会误判"无采集" → no_sync 误报。此时间前不判 no_sync。
-_NO_SYNC_GRACE_HOUR = 9   # 北京 09:00 前不做 no_sync 断流判定
-
-
 def _sh_now() -> datetime:
     """当前北京时间(naive)"""
     return datetime.now(TZ).replace(tzinfo=None)
@@ -148,98 +136,166 @@ def _day_bounds_utc(d: date_type) -> tuple[datetime, datetime]:
     return start, start + timedelta(days=1)
 
 
-def _eval_ingest_volume_cs_record(db: Session, ts: datetime, te: datetime) -> dict:
-    """采集健康: cs_record 当日入表量相对近7日(不含当日)同时段均值的比例(%).
+# ============================================================
+# 采集健康: 数据到达心跳 (工单 #6 / A-20260904-001 v1.2 LOCKED)
+# 判定 = 该数据源当日是否有任一渠道的到达记录(主动抓取 success / 被动推送 /
+#         手动导入 imported), 不看业务数据量(接待量波动大, 不做判据)。
+# data_ok: True / "sync_failed" / "push_failed" / "no_arrival" / "cold_start"
+# ============================================================
+# 被动推送域: 白天(09-23)预期每 1-2h 一次, 连续 ≥N 小时无推送视为停滞(参数化)
+PUSH_STALL_HOURS = 4      # 白天连续几小时无被动推送视为异常(可配置)
+PUSH_DAY_START = 9        # 被动推送判定白昼起点(北京时间)
+PUSH_DAY_END = 23         # 被动推送判定白昼终点
+_NO_ARRIVAL_GRACE_HOUR = 9  # 主动抓取: 9 点前不判 no_arrival(给 8:00 同步留窗口)
 
-    返回 data_ok:
-      - True: 有采集、量正常或未跌破阈值
-      - "no_sync": 当日尚未有任何该源采集尝试(scheduled/manual 均无) → 断流风险
-      - "sync_failed": 当日存在 status='failed' 采集记录 → 采集失败
-    value: ratio% (今日实际量 / 近7日同时段均值期望), 基线不足或无采集时为 None
+# 被动推送源 → 其推送日志表 (data_source.code → 日志模型)
+#   external_complaint/card_complaint → complaint_sync_logs(一次推 315+卡商)
+#   manual_refund                      → manual_refund_sync_logs
+_PUSH_LOG_TYPES: dict[str, str] = {
+    "external_complaint": "complaint",
+    "card_complaint": "complaint",
+    "manual_refund": "manual_refund",
+}
+
+
+def _is_push_type(data_type: str) -> bool:
+    """该 data_type 是否被动推送源(由 data_sources.sync_source=workbuddy/tencent_doc 推导)。
+    兼容: manual_refund 不在 data_sources 的 bms 分组, 单独识别。"""
+    return data_type in _PUSH_LOG_TYPES
+
+
+def _eval_data_arrival(db: Session, data_type: str, ts: datetime, te: datetime) -> dict:
+    """数据到达健康: 该 data_type 当日是否有任一渠道到达记录(不看业务量).
+
+    渠道(按源类型):
+      - 主动抓取源(bms/scrm): bms_sync_logs/scrm_sync_logs status=success;
+                              manual_refund 无此渠道
+      - 被动推送源(workbuddy): complaint_sync_logs/manual_refund_sync_logs
+                              (success/partial 都算"推了")
+      - 手动导入(所有源):     upload_records(source IN manual/bms, status=imported)
+                              —— 手动补导 = 数据已到, 关键兜底不误报
+    异常信号:
+      - sync_failed  = 当日主动抓取存在 status='failed'
+      - push_failed  = 当日被动推送存在 status='failed'
+      - no_arrival   = 已过预期窗口仍无任何到达(且非 cold_start)
+    value: 距最近一次到达的小时数(浮点, 展示用; 无到达为 None)
     """
-    today_sh = _sh_now().date()
-    # ts/te 为 naive UTC(当日窗口); 换算回北京时间判断"当天"
     t_start_sh = ts.replace(tzinfo=timezone.utc).astimezone(TZ).date()
-    period_is_today = (t_start_sh == today_sh)
+    now_sh = _sh_now()
+    period_is_today = (t_start_sh == now_sh.date())
+    d_label = "今日" if period_is_today else t_start_sh.strftime("%m-%d")
+    biz_start = _day_bounds_utc(t_start_sh)[0]
+    biz_end = _day_bounds_utc(t_start_sh)[1]
+    is_push = _is_push_type(data_type)
 
-    # 1. 当日实际入表量(operation_time 北京时间当日)
-    today_cnt = db.scalar(
-        select(func.count()).select_from(CsRecord).where(
-            CsRecord.operation_time >= ts, CsRecord.operation_time < te
+    # 该源是否有被动推送日志(统一到"complaint"表时, external/card 共用, 去重计数)
+    push_log_model = _PUSH_LOG_TYPES.get(data_type)
+    push_status = []  # 当日该源的推送 status 列表
+    manual_imported = False
+
+    # 1. 主动抓取渠道 (非推送源才有; manual_refund/complaint 无主动抓取)
+    sync_success = False
+    sync_failed = False
+    if not is_push:
+        # bms_sync_logs(含 scrm_* 源也落此? 否, scrm 落 scrm_sync_logs —— 简化: scrm 源不在此, 由注册表 future 扩展)
+        # ticket 有 ticket_finish 伴生别名, 任一 success 即算到达
+        types = [data_type]
+        if data_type == "ticket":
+            types.append("ticket_finish")
+        rows = db.execute(
+            select(BmsSyncLog.status)
+            .where(BmsSyncLog.data_type.in_(types), BmsSyncLog.finished_at >= biz_start, BmsSyncLog.finished_at < biz_end)
+        ).all()
+        sync_success = any(r.status == "success" for r in rows)
+        sync_failed = any(r.status == "failed" for r in rows)
+
+    # 2. 被动推送渠道
+    push_failed = False
+    if is_push:
+        if push_log_model == "complaint":
+            rows = db.execute(
+                select(ComplaintSyncLog.status)
+                .where(ComplaintSyncLog.finished_at >= biz_start, ComplaintSyncLog.finished_at < biz_end)
+            ).all()
+        elif push_log_model == "manual_refund":
+            rows = db.execute(
+                select(ManualRefundSyncLog.status)
+                .where(ManualRefundSyncLog.finished_at >= biz_start, ManualRefundSyncLog.finished_at < biz_end)
+            ).all()
+        else:
+            rows = []
+        push_status = [r.status for r in rows]
+        sync_success = any(s in ("success", "partial") for s in push_status)  # partial 也算推了
+        push_failed = any(s == "failed" for s in push_status)
+
+    # 3. 手动导入兜底(所有源): upload_records 当日有 imported
+    up_cnt = db.scalar(
+        select(func.count()).select_from(UploadRecord).where(
+            UploadRecord.data_type == data_type,
+            UploadRecord.status == "imported",
+            UploadRecord.finished_at >= biz_start,
+            UploadRecord.finished_at < biz_end,
         )
     ) or 0
+    manual_imported = up_cnt > 0
 
-    # 2. 近7日基线(不含当日): 每日入表量 → 均值 + 有效天数
-    base_days: list[int] = []
-    for back in range(1, 8):
-        d = t_start_sh - timedelta(days=back)
-        ds, de = _day_bounds_utc(d)
-        cnt = db.scalar(
-            select(func.count()).select_from(CsRecord).where(
-                CsRecord.operation_time >= ds, CsRecord.operation_time < de
-            )
-        ) or 0
-        base_days.append(cnt)
-    valid_base_days = sum(1 for c in base_days if c > 0)
-    baseline = (sum(base_days) / len(base_days)) if base_days else 0.0
+    reached = sync_success or manual_imported
 
-    # 3. 当日采集运行健康(查 bms_sync_logs: 该源当日 scheduled/manual 尝试)
-    biz_start_utc = _day_bounds_utc(t_start_sh)[0]
-    biz_end_utc = _day_bounds_utc(t_start_sh)[1]
-    sync_rows = db.execute(
-        select(BmsSyncLog.status, BmsSyncLog.trigger_type)
-        .where(
-            BmsSyncLog.data_type == "cs_record",
-            BmsSyncLog.finished_at >= biz_start_utc,
-            BmsSyncLog.finished_at < biz_end_utc,
-        )
-    ).all()
-    sync_attempted = len(sync_rows) > 0
-    sync_failed = any(r.status == "failed" for r in sync_rows)
-
-    # 4. 归一系数: 当天已过多少计划采集小时(避免早上 8 点误报"今天量少")
-    #    计划采集 08:00~02:00(+1天); 计算当天已完成的比例
-    now_sh = _sh_now()
-    hours_passed = 0.0
-    if period_is_today:
-        # 计算今天 08:00 起到现在的计划小时数(含 0~2 点归属)
-        if now_sh.hour >= _PLANNED_HOUR_START:
-            hours_passed = now_sh.hour - _PLANNED_HOUR_START + 1
-        elif now_sh.hour < 3:  # 凌晨 0-2 点仍属前一天尾段, 今天还没开始
-            hours_passed = 0.0
-        else:  # 3-7 点: 今天还没开始白采(补跑在5点), 视为 0 期望避免误报
-            hours_passed = 0.0
-        total_hours = _PLANNED_HOUR_END - _PLANNED_HOUR_START  # 18h
-        norm = min(hours_passed / total_hours, 1.0) if total_hours else 1.0
-    else:
-        norm = 1.0  # 历史日(如补看昨天): 全天已过
-
-    # 5. 期望值 = 基线 × 归一系数; 比值
-    expected = baseline * norm
-    ratio = (today_cnt / expected * 100.0) if expected > 0 else None
-
-    # 6. data_ok 判定(冷启动保护优先: 近7日有效基线 < 3 天 → 只记录不告警)
+    # 4. data_ok 判定
     data_ok: bool | str = True
-    if valid_base_days < 3:
-        # 冷启动: 基线未积累(LOCKED §六 风险缓解), 只记录不告警, 避免新部署误报
-        data_ok = "cold_start"
-    elif sync_failed:
-        # 采集失败: 任何日期, 只要该日存在采集失败记录 → 采集故障信号
+    reason_parts = []
+    if is_push and push_failed:
+        data_ok = "push_failed"
+        reason_parts.append("推送失败")
+    elif (not is_push) and sync_failed:
         data_ok = "sync_failed"
-    elif period_is_today and not sync_attempted and now_sh.hour >= _NO_SYNC_GRACE_HOUR:
-        # no_sync: 仅当天; 已过首采保护时间(默认 09:00, 给 8:00 同步留完成窗口防误报)
-        data_ok = "no_sync"
+        reason_parts.append("抓取失败")
+    elif not reached:
+        # 未到达: 区分"预期窗口是否已过"避免过早误报
+        if is_push:
+            # 被动推送: 仅白天时段判停滞(避免夜间无推也不算异常)
+            if period_is_today and PUSH_DAY_START <= now_sh.hour <= PUSH_DAY_END:
+                # 查最近一次推送时间
+                if push_log_model == "complaint":
+                    last_push = db.scalar(select(func.max(ComplaintSyncLog.finished_at)))
+                elif push_log_model == "manual_refund":
+                    last_push = db.scalar(select(func.max(ManualRefundSyncLog.finished_at)))
+                else:
+                    last_push = None
+                if last_push is not None:
+                    gap_h = (now_sh - last_push.astimezone(TZ).replace(tzinfo=None)).total_seconds() / 3600
+                else:
+                    gap_h = 999  # 从未推过
+                if gap_h >= PUSH_STALL_HOURS:
+                    data_ok = "no_arrival"
+                    reason_parts.append(f"白天 {PUSH_STALL_HOURS}h 无推送(距上次 {gap_h:.1f}h)")
+            else:
+                data_ok = True  # 夜间/非今天: 不判(等待窗口)
+        else:
+            # 主动抓取: 过 9 点首采保护后才判 no_arrival
+            if period_is_today and now_sh.hour >= _NO_ARRIVAL_GRACE_HOUR:
+                data_ok = "no_arrival"
+                reason_parts.append("当日无到达且无手动导入")
+            else:
+                data_ok = True
 
-    d_label = "今日" if period_is_today else t_start_sh.strftime("%m-%d")
-    detail = (f"{d_label} {today_cnt} 条 / 近7日均值 {baseline:.0f} 条"
-              f"(有效基线日 {valid_base_days}/7, "
-              f"已过 {hours_passed:.0f}/{total_hours if period_is_today else '—'} 计划小时, "
-              f"期望 {expected:.0f})")
-    if sync_attempted:
-        detail += f"; 采集尝试 {len(sync_rows)} 次, failed={sum(1 for r in sync_rows if r.status == 'failed')}"
-    else:
-        detail += "; 该日无采集记录"
-    return {"value": ratio, "data_ok": data_ok, "detail": detail}
+    # 组装 detail
+    detail = f"{d_label} {data_type}"
+    if sync_success:
+        detail += " 已到达(抓取/推送 success)"
+    if manual_imported:
+        detail += f" + 手动导入 {up_cnt} 次"
+    if not reached:
+        detail += " 未到达"
+    if is_push and push_failed:
+        detail += "; 推送失败记录存在"
+    elif (not is_push) and sync_failed:
+        detail += "; 抓取失败记录存在"
+    if push_status:
+        detail += f"; 推送[{','.join(push_status[:5])}]"
+    if reason_parts:
+        detail += "; " + "; ".join(reason_parts)
+    return {"value": None, "data_ok": data_ok, "detail": detail}
 
 
 # 指标注册表(代码层): code → 元数据 + 求值函数
@@ -269,14 +325,6 @@ METRIC_DEFS: dict[str, dict[str, Any]] = {
         "name_cn": "当日内部投诉量", "direction": LOWER, "period": "day", "unit": "条",
         "data_sources": ["service_tickets"], "description": "当日内部投诉工单数(商品/服务投诉)",
         "evaluate": _eval_internal_complaint_daily,
-    },
-    # 采集健康(工单 #5): kind=ingest_health, 区别于业务指标
-    "ingest_volume_cs_record": {
-        "name_cn": "智能助手记录每日入表量", "direction": HIGHER, "period": "day", "unit": "%",
-        "data_sources": ["cs_record", "bms_sync_logs"],
-        "kind": "ingest_health",
-        "description": "采集健康: cs_record 当日入表量相对近7日均值比例(骤降/断流告警, 非业务指标)",
-        "evaluate": _eval_ingest_volume_cs_record,
     },
 }
 
@@ -313,16 +361,46 @@ def classify(value: float | None, thr: MetricThreshold | None, direction: str) -
     return "green"
 
 
+def _resolve_metric_meta(code: str) -> tuple[dict | None, str | None]:
+    """解析指标元数据。
+
+    支持两类:
+    - 精确注册: METRIC_DEFS[code](业务指标 + 历史 ingest_volume)
+    - 注册表驱动(方案A, 工单#6): code 形如 data_arrival_<data_type>, 由
+      sync_source_configs/data_sources 动态发现的源, 不预注册到 METRIC_DEFS,
+      统一走 _eval_data_arrival 求值(按 data_type 查渠道到达日志)。
+    Returns: (meta, data_type)  data_type 仅对 data_arrival_* 非 None
+    """
+    meta = METRIC_DEFS.get(code)
+    if meta:
+        return meta, None
+    if code.startswith("data_arrival_"):
+        data_type = code[len("data_arrival_"):]
+        if data_type:
+            return {
+                "name_cn": f"{data_type} 数据到达健康",
+                "direction": HIGHER, "period": "day", "unit": "",
+                "data_sources": ["bms_sync_logs", "upload_records", "complaint_sync_logs", "manual_refund_sync_logs"],
+                "kind": "ingest_health",
+                "description": "采集健康(注册表驱动): 该源当日是否有任一渠道(success/推送/手动导入)到达记录",
+                "evaluate": None,  # 统一走 _eval_data_arrival
+            }, data_type
+    return None, None
+
+
 def evaluate_metric(db: Session, code: str, period_date: date_type | None = None) -> dict:
     """指标求值 + 分级(不写库)
 
     Returns: {metric_code, value, data_ok, level, ts, te, detail, threshold:{...}}
     """
-    meta = METRIC_DEFS.get(code)
+    meta, data_type = _resolve_metric_meta(code)
     if not meta:
         return {"metric_code": code, "value": None, "data_ok": False, "level": None, "detail": "未注册"}
     ts, te = _window(meta["period"], period_date)
-    r = meta["evaluate"](db, ts, te)
+    if data_type is not None:
+        r = _eval_data_arrival(db, data_type, ts, te)
+    else:
+        r = meta["evaluate"](db, ts, te)
     thr = get_threshold(db, code)
     level = classify(r.get("value"), thr, meta["direction"])
     thr_dict = None

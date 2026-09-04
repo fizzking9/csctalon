@@ -13,7 +13,11 @@ from sqlalchemy import func, select
 from app.api.deps import AdminUser, CurrentUser, DBSession, ManagerUser
 from app.models.alert import Alert, AlertRule
 from app.schemas.common import PageBase, R
-from app.services.metric_registry_service import METRIC_DEFS, evaluate_metric, snapshot_metric
+from app.services.metric_registry_service import (
+    _resolve_metric_meta,
+    evaluate_metric,
+    snapshot_metric,
+)
 from app.services.notification_channel import dispatch_alert
 
 logger = logging.getLogger(__name__)
@@ -202,7 +206,7 @@ def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[st
     """
     from app.models.alert import Alert as AlertModel
 
-    meta = METRIC_DEFS.get(rule.metric_code or "")
+    meta, _dt = _resolve_metric_meta(rule.metric_code or "")
     if not meta:
         return 0, [f"metric:{rule.metric_code}: 未注册"]
     r = evaluate_metric(db, rule.metric_code)
@@ -226,17 +230,19 @@ def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[st
 
     logs: list[str] = []
     # ── 采集健康指标(kind=ingest_health): data_ok 为字符串标记时的语义 ──
-    #    no_sync/sync_failed = 采集故障 → 必须告警(不能被 data_ok 吞掉, 09-02 教训)
-    #    cold_start          = 冷启动(基线未积累) → 只记录不告警, 避免新部署误报
+    #    no_arrival/sync_failed/push_failed = 数据未到达/采集推送故障 → 必须告警
+    #    cold_start = 冷启动 → 只记录不告警
     ingest_fault = None
     if meta.get("kind") == "ingest_health" and isinstance(data_ok, str):
-        if data_ok == "no_sync":
-            ingest_fault = "当日尚无采集执行(疑似断流/调度未跑)"
+        if data_ok in ("no_arrival", "no_sync"):  # no_sync 兼容历史
+            ingest_fault = "该源当日无数据到达(采集/推送/手动导入均无, 疑似断流)"
         elif data_ok == "sync_failed":
-            ingest_fault = "当日采集存在失败记录(疑似上游故障/熔断)"
+            ingest_fault = "该源当日存在抓取失败记录(疑似上游故障/熔断)"
+        elif data_ok == "push_failed":
+            ingest_fault = "该源当日被动推送失败(疑似 workbuddy/上游异常)"
         elif data_ok == "cold_start":
-            # 冷启动: 只记录快照不告警(近7日有效基线 < 3 天, LOCKED §六)
-            return 0, [f"metric:{rule.metric_code}: 冷启动(基线未积累), 只记录不告警"]
+            # 冷启动: 只记录快照不告警(样本不足, LOCKED §六)
+            return 0, [f"metric:{rule.metric_code}: 冷启动(样本不足), 只记录不告警"]
     if not data_ok or value is None:
         # 业务指标: data_ok=False 跳过(防假告警); 采集健康带故障标记时继续走告警
         if ingest_fault is None:
