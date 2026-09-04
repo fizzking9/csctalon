@@ -137,6 +137,23 @@ if grep -qE "^(UPLOADS_DIR|BROWSER_STATES_DIR)=" "$ENV_FILE" \
   warn "  请改为绝对路径: UPLOAD_DIR=$APP_DIR/uploads, BROWSER_STATE_DIR=$APP_DIR/browser_states"
   warn "  否则 backend 会把 /app/uploads 挂到空目录, 上传/附件不可见"
 fi
+# .env 布尔变量合法性预检(2026-09-04 事故 H-3): EXTERNAL_API_ENABLED=tru 等非法值
+# 会让 backend pydantic fail-fast 崩溃(unhealthy)再触发回滚; 这里在 compose up 前提前拦截。
+# 规则: 变量名以 ENABLED/ALLOWED/AUTOSTART 结尾或等于 DEBUG 的, 值必须 true/false(忽略空/注释)。
+_BOOL_KEYS=$(grep -oE "^(DEBUG|[A-Z_]+_(ENABLED|ALLOWED|AUTOSTART))=" "$ENV_FILE" | sed 's/=$//' | sort -u || true)
+_BAD_BOOL=0
+while IFS= read -r _bk; do
+  [[ -z "$_bk" ]] && continue
+  _bv="$(grep -E "^${_bk}=" "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '[:space:]')"
+  if [[ -n "$_bv" && "$_bv" != "true" && "$_bv" != "false" ]]; then
+    err "✘ .env 布尔变量非法: $_bk=$_bv (应为 true 或 false) → backend 会启动失败!"
+    err "  请修正 $ENV_FILE 后重试(如: sudo sed -i 's/^$_bk=.*/$_bk=false/' $ENV_FILE)"
+    _BAD_BOOL=1
+  fi
+done <<< "$_BOOL_KEYS"
+if [[ $_BAD_BOOL -ne 0 ]]; then
+  exit 1
+fi
 # 回滚辅助: 切回 current.old 指向的真实版本; 防 current/current.old 自引用循环(2026-09-04 事故)
 rollback_current() {
   local target
