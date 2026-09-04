@@ -25,9 +25,17 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import desc, distinct, select
 
+from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.bms_sync_log import BmsSyncLog
 from app.services.bms_sync import DEFAULT_SYNC_TYPES, sync_all
+from app.services.circuit_breaker import (
+    clear_halt_recovery,
+    mark_probed,
+    record_failure,
+    reset_circuit,
+    should_probe,
+)
 from app.services.scrm_sync_service import (
     DATA_TYPE_OPERATOR,
     DATA_TYPE_SESSION_GROUP,
@@ -128,6 +136,9 @@ class BmsScheduler:
         halted_set = self._halted_types.get(biz_key)
         if halted_set:
             n = len(halted_set)
+            # 3.2: 一并清除这些源的滑动窗口失败计数(避免手动恢复后残留计数导致快速再熔断)
+            for dt in halted_set:
+                reset_circuit(biz_key, dt)
             self._halted_types[biz_key] = set()
             logger.info(f"[调度器] 已清除 {biz_key} 的 {n} 个专项熔断标记({sorted(halted_set)}),自动同步恢复")
 
@@ -435,6 +446,13 @@ class BmsScheduler:
                             biz_key=biz_key,
                         )
 
+                # ── 半开探测(3.2): 熔断源每 HALF_OPEN_INTERVAL 放一次单片试探,
+                #    成功即摘除熔断自动续采; 失败保持熔断等下一探测窗口 ──
+                try:
+                    await self._maybe_half_open_probe(biz_key, now_cn)
+                except Exception as pe:  # noqa: BLE001
+                    logger.warning(f"[调度器] 半开探测异常: {pe}")
+
                 # ── 空闲期缓存预热(白天每分钟自检; warmer 内部按 ttl 节流+同步互斥,
                 #    仍新鲜/夜间/同步中均快速跳过, 仅缓存将过期时才重算) ──
                 try:
@@ -449,6 +467,127 @@ class BmsScheduler:
                 logger.error(f"调度器异常: {e}", exc_info=True)
 
             await asyncio.sleep(CHECK_INTERVAL)
+
+    async def _maybe_half_open_probe(self, biz_key: str, now_cn) -> None:
+        """半开探测(A-20260904-002 / 工单#2 3.2): 熔断源周期性单片试探。
+
+        - 触发条件: 白天(DAYTIME_HOURS)非整点强制窗口、当前无任务忙、
+          源已熔断(_halted_types[biz_key])、且距上次探测 >= HALF_OPEN_INTERVAL。
+        - 探测方式: 仅对该源做「当前小时窗口」单源同步(近 1h 短窗, 轻量试探)。
+        - 成功 → 摘除熔断(_halted_types 移除) + 清零失败计数(reset_circuit),
+                该源立即恢复, 后续整点正常调度自动续采。
+        - 失败 → 保持熔断 + mark_probed(记探测时间), 等下一探测窗口再试。
+        - 半开探测失败**不累加熔断计数**(避免探测本身把已熔断源推向更深故障态)。
+        """
+        halted_set = set(self._halted_types.get(biz_key) or set())
+        if not halted_set:
+            return
+        # 仅白天增量时段探测(5:00/8:00 兜底本就忽略熔断强制全跑, 无需半开)
+        if now_cn.hour not in DAYTIME_HOURS:
+            return
+        if sync_task_manager.is_busy():
+            return  # 有任务在跑, 下一分钟再探
+        # 5/8 点整点前 30 分钟窗口内也跳过(避免与兜底/全量撞车)
+        if now_cn.minute < TRIGGER_WINDOW_MINUTES and now_cn.hour in (CATCHUP_HOUR, 8):
+            return
+
+        # 归一化到北京时间(now_cn 已带 tz)
+        for dt in sorted(halted_set):
+            if not should_probe(biz_key, dt):
+                continue
+            mark_probed(biz_key, dt)  # 先记账, 防止异常重入导致高频探测
+            logger.info(f"[调度器] 半开探测: {biz_key}/{dt} 熔断中, 放单片试探(近1h窗口)")
+            try:
+                ok = await self._half_open_probe_once(biz_key, dt, now_cn)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[调度器] 半开探测异常({dt}): {e}")
+                ok = False
+            if ok:
+                # 探测成功 → 摘除熔断, 该源恢复调度
+                self._halted_types.setdefault(biz_key, set()).discard(dt)
+                clear_halt_recovery(biz_key, dt)
+                logger.info(f"[调度器] 半开探测成功: {biz_key}/{dt} 上游已恢复, 摘除熔断, 恢复自动采集")
+            else:
+                logger.warning(f"[调度器] 半开探测失败: {biz_key}/{dt} 仍不可用, 保持熔断(下一窗口再试)")
+            return  # 每分钟最多探测一个源(避免多个源同时探测互相干扰)
+
+    async def _half_open_probe_once(self, biz_key: str, dt: str, now_cn) -> bool:
+        """对单个熔断源做近 1h 短窗同步试探, 成功返回 True。
+
+        复用 sync_all / sync_scrm_all 按 data_type 分流, 经 SyncTaskManager
+        全局互斥提交(与定时/手动任务并发隔离)。
+        """
+        probe_start = now_cn - timedelta(hours=1)
+        probe_end = now_cn
+
+        bms_known = set(DEFAULT_SYNC_TYPES)
+        scrm_known = {
+            DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_GROUP,
+            DATA_TYPE_SESSION_PRIVATE, DATA_TYPE_SESSION_VIRTUAL,
+        }
+        if dt in bms_known:
+            async def probe_runner(task_id: str, on_progress_cb):
+                try:
+                    res = await sync_all(
+                        trigger_type="half_open",  # 独立类型, 避免污染 scheduled 整点回填
+                        triggered_by="scheduler-half-open",
+                        on_progress=on_progress_cb,
+                        data_types=[dt],
+                        time_ranges={dt: (probe_start, probe_end)},
+                    )
+                    return res if isinstance(res, list) else []
+                except Exception as e:  # noqa: BLE001
+                    return [{"data_type": dt, "success": False, "error": str(e)}]
+        elif dt in scrm_known:
+            async def probe_runner(task_id: str, on_progress_cb):
+                try:
+                    res = await sync_scrm_all(
+                        trigger_type="half_open",  # 独立类型, 避免污染 scheduled 整点回填
+                        triggered_by="scheduler-half-open",
+                        on_progress=on_progress_cb,
+                        sync_types=[dt],
+                    )
+                    return res if isinstance(res, list) else []
+                except Exception as e:  # noqa: BLE001
+                    return [{"data_type": dt, "success": False, "error": str(e)}]
+        else:
+            logger.warning(f"[调度器] 半开探测: 未知 data_type={dt}, 无法定向试探")
+            return False
+
+        display = {dt: ("半开探测(近1h)", probe_end.strftime("%m-%d %H:%M:%S"))}
+        try:
+            tid, msg = await sync_task_manager.submit_multi(
+                trigger_type="half_open",
+                triggered_by="scheduler-half-open",
+                data_types=[dt],
+                time_ranges={dt: (probe_start, probe_end)},
+                time_ranges_display=display,
+                runners=[probe_runner],
+                ignore_cooldown=True,
+            )
+        except RuntimeError as e:
+            logger.warning(f"[调度器] 半开探测未执行({dt}): {e}")
+            return False
+        if not tid:
+            return False
+
+        # 等待结果(短窗同步, 最多 10 分钟)
+        poll = 0
+        while poll < 40:  # 40 * 15s = 10min
+            await asyncio.sleep(15)
+            poll += 1
+            t = sync_task_manager.get_task(tid)
+            if t and t.status in ("success", "failed", "partial"):
+                break
+        else:
+            logger.warning(f"[调度器] 半开探测等待超时({dt}), 视为失败")
+            return False
+        results = t.results or []
+        ok = any(
+            isinstance(r, dict) and r.get("success") and r.get("data_type") == dt
+            for r in results
+        )
+        return ok
 
     async def _scan_alerts_safe(self):
         """定时触发预警扫描(规划设计 §8.1)。
@@ -695,35 +834,90 @@ class BmsScheduler:
             f" 失败专项={failed_types}"
         )
 
-        # 专项级熔断: 仅白天增量模式。为避免偶发超时/限流直接把专项熔断一整天
-        # (造成当日数据缺口, P1 审计 2026-08-30), 先对本次失败专项单次重试, 仍失败才熔断。
-        if not force_all and failed_types:
-            retried_failed = await self._retry_failed_types_once(
-                failed_types,
-                range_start=range_start,
-                range_end=range_end,
-                start_disp=start_disp,
-                reason=reason,
-            )
-            recovered = sorted(set(failed_types) - set(retried_failed))
-            if recovered:
-                logger.info(f"[定时同步{reason}] 专项重试恢复: {recovered}")
-            if retried_failed != failed_types:
-                logger.info(f"[定时同步{reason}] 专项重试后仍失败: {sorted(retried_failed)}")
-            failed_types = retried_failed
+        # ── 专项级熔断(3.2 滑动窗口计数): 仅白天增量模式 ──
+        # 改造(A-20260904-002 / 工单#2): 不再"单轮重试后仍失败即熔断一整天"。
+        # 改为: 成功源清零计数(reset_circuit);
+        #       失败源 record_failure 在 6h 滑动窗口内累计, 连续失败 >= 阈值(默认3)
+        #       才真正写入 _halted_types(熔断)。偶发单次失败不熔断。
+        if not force_all:
+            # 1) 成功源: 清零连续失败计数(连续失败语义 = 成功即打断累计)
+            all_done_types = {
+                r.get("data_type") for r in task_results
+                if isinstance(r, dict) and r.get("success") and r.get("data_type")
+            }
+            for dt in all_done_types:
+                reset_circuit(biz_key, dt)
 
-        # 专项级熔断: 仅白天增量模式,逐个失败 data_type 写入集合(已有的不重复加)
-        if not force_all and failed_types:
+            # 2) 失败源: 单次重试(保留既有 P1 行为), 仍失败才计入熔断滑动窗口
+            if failed_types:
+                retried_failed = await self._retry_failed_types_once(
+                    failed_types,
+                    range_start=range_start,
+                    range_end=range_end,
+                    start_disp=start_disp,
+                    reason=reason,
+                )
+                recovered = sorted(set(failed_types) - set(retried_failed))
+                if recovered:
+                    logger.info(f"[定时同步{reason}] 专项重试恢复: {recovered}")
+                    for dt in recovered:
+                        reset_circuit(biz_key, dt)
+                if retried_failed != failed_types:
+                    logger.info(f"[定时同步{reason}] 专项重试后仍失败: {sorted(retried_failed)}")
+                failed_types = retried_failed
+
+            # 3) 滑动窗口熔断判定: 连续失败达阈值才熔断(未达阈值只计数, 下次仍尝试)
             s = self._halted_types.setdefault(biz_key, set())
-            newly_halted = [dt for dt in failed_types if dt not in s]
+            newly_halted: list[str] = []
             for dt in failed_types:
-                s.add(dt)
+                if dt in s:
+                    continue  # 已熔断
+                if record_failure(biz_key, dt):
+                    s.add(dt)
+                    newly_halted.append(dt)
+                    try:
+                        self._register_circuit_alert(biz_key, dt)
+                    except Exception as ae:  # noqa: BLE001 告警失败不影响熔断
+                        logger.warning(f"[调度器] 熔断告警登记失败(忽略): {ae}")
+                else:
+                    logger.warning(
+                        f"[调度器] {biz_key}/{dt} 本轮失败(单次重试后仍失败),"
+                        f" 未达熔断阈值, 计数累计待下次判定"
+                    )
             if newly_halted:
                 logger.error(
-                    f"[调度器] 专项熔断更新: biz_date={biz_key},"
-                    f" 本轮新增暂停={newly_halted},"
-                    f" 累计已暂停专项={sorted(s)}"
+                    f"[调度器] 滑动窗口熔断: biz_date={biz_key},"
+                    f" 本轮新增熔断={newly_halted}(连续失败达阈值),"
+                    f" 累计已熔断专项={sorted(s)}"
                 )
+
+    def _register_circuit_alert(self, biz_key: str, data_type: str) -> None:
+        """熔断触发 → 写一条事务通知(站内信), 事件留痕(3.2)。
+
+        复用 notifier 通知管理员/主管; 不做 Incident 自动登记(熔断本身会
+        被次日 5:00 补跑/8:00 兜底/半开探测自动恢复, 属"已知告警"而非事故)。
+        若需要正式 Incident 台账, 可后续接 _auto_register_ingest_incident。
+        """
+        try:
+            from app.services.notifier import notify_all_admins_and_supervisors
+            db = SessionLocal()
+            try:
+                notify_all_admins_and_supervisors(
+                    db,
+                    type="alert",
+                    title=f"采集熔断: {data_type} ({biz_key})",
+                    content=(
+                        f"数据源 {data_type} 在业务日 {biz_key} 连续失败达阈值被熔断暂停。\n"
+                        f"处置: 熔断后每 {settings.CIRCUIT_HALF_OPEN_INTERVAL_SECONDS // 3600}h "
+                        f"自动半开探测, 上游恢复即自动续采; 也可手动触发同步恢复。"
+                    ),
+                    ref_type="alert",
+                    ref_id=data_type,
+                )
+            finally:
+                db.close()
+        except Exception as e:  # noqa: BLE001 通知失败不影响熔断主流程
+            logger.warning(f"[调度器] 熔断通知失败(忽略): {e}")
 
 
     async def _retry_failed_types_once(

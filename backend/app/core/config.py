@@ -87,6 +87,15 @@ class Settings(BaseSettings):
     # 整窗(>1天)失败后按日降级重试的最大日片数兜底(架构 3.1 按日降级)
     AI_ACC_DAY_DEGRADE_MAX_DAYS: int = 7
 
+    # ── 熔断优化(A-20260904-002 LOCKED / 工单#2 3.2) ──
+    # 滑动窗口熔断: 同一业务日同一源连续失败 >= N 次(6h 滑动窗口内)才熔断,
+    # 替代"单轮失败即熔断一整天"。偶发单次失败(如 9/2 15:00)不再直接熔断。
+    CIRCUIT_FAIL_THRESHOLD: int = 3
+    # 滑动窗口(秒): 计数 TTL, 窗口内连续失败达阈值才熔断
+    CIRCUIT_WINDOW_SECONDS: int = 6 * 3600
+    # 半开探测间隔(秒): 熔断后每 X 秒放一次单片探测, 成功即摘除熔断自动续采
+    CIRCUIT_HALF_OPEN_INTERVAL_SECONDS: int = 2 * 3600
+
     # SCRM 微信聚合平台(对接客服接待评估报表)
     # 说明:默认种子值仅用于首次启动灌入 SyncSourceConfig(加密),实际以 DB 配置为准
     SCRM_BASE_URL: str = "https://gateway.bilinl.com"  # 平台 OpenAPI 基础地址
