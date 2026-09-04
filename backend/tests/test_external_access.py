@@ -194,3 +194,41 @@ def test_external_valid_historical_date_ok(admin_client, db):
                             headers={"Authorization": f"Bearer {raw}"})
     assert resp.status_code == 200
 
+
+# ── F-P2-5 (2026-09-04): owner_note 责任人/用途备注 ────────────────
+def test_generate_token_owner_note_persisted(db):
+    """service: generate_token 带 owner_note → 持久化。"""
+    _, row = S.generate_token(db, "wb-brief", ["brief"], created_by="admin",
+                              owner_note="workbuddy-日报-李四跟进")
+    assert row.owner_note == "workbuddy-日报-李四跟进"
+    assert row.owner_note[:255] == row.owner_note
+
+
+def test_tokens_crud_owner_note(admin_client, db):
+    """HTTP: create 带 owner_note → list 返回 owner_note; update 可改。"""
+    # 创建带 owner_note
+    resp = admin_client.post("/api/v1/external/tokens", json={
+        "name": "wb-owner", "scopes": ["reception"], "owner_note": "责任人: 张三",
+    })
+    assert resp.status_code == 200
+    created = resp.json()["data"]
+    assert created.get("owner_note") == "责任人: 张三"
+    tid = created["id"]
+
+    # list 含 owner_note(created_by_display 在无真实 User 时为空, 允许)
+    lst = admin_client.get("/api/v1/external/tokens")
+    assert lst.status_code == 200
+    row = next(x for x in lst.json()["data"] if x["id"] == tid)
+    assert row["owner_note"] == "责任人: 张三"
+    assert "created_by_display" in row  # 字段存在(可为 None, 因 fake user 未入库)
+
+    # update 修改 owner_note
+    up = admin_client.patch(f"/api/v1/external/tokens/{tid}", json={"owner_note": "已转交李四"})
+    assert up.status_code == 200
+    assert up.json()["data"]["owner_note"] == "已转交李四"
+
+    # update 清空(None 不清, 显式空串清)
+    up2 = admin_client.patch(f"/api/v1/external/tokens/{tid}", json={"owner_note": ""})
+    assert up2.status_code == 200
+    assert up2.json()["data"]["owner_note"] == ""
+

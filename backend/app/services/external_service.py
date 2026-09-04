@@ -82,6 +82,7 @@ def _now_cn() -> datetime:
 def generate_token(db: Session, name: str, scopes: list[str], *,
                    rate_limit_per_min: int | None = None,
                    expires_at: datetime | None = None,
+                   owner_note: str | None = None,
                    created_by: str | None = None) -> tuple[str, ExternalAccessToken]:
     """生成新 token: 明文仅本次返回; 库中存 hash + prefix。
 
@@ -99,6 +100,7 @@ def generate_token(db: Session, name: str, scopes: list[str], *,
         scopes=list(dict.fromkeys(scopes)),  # 去重保序
         rate_limit_per_min=rate_limit_per_min,
         expires_at=expires_at,
+        owner_note=(owner_note or "")[:255],
         enabled=True,
         created_by=(created_by or "")[:64],
     )

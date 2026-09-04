@@ -15,6 +15,7 @@ class ExternalTokenCreate(BaseModel):
     scopes: list[str] = Field(..., min_length=1, description="权限范围: reception/refund/complaint/brief")
     rate_limit_per_min: int | None = Field(None, ge=1, description="个性化限频(次/分钟); 空=全局默认")
     expires_at: datetime | None = Field(None, description="可选过期时间(北京时间)")
+    owner_note: str | None = Field(None, max_length=255, description="责任人/用途备注(可选)")
 
 
 class ExternalTokenUpdate(BaseModel):
@@ -23,6 +24,7 @@ class ExternalTokenUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=64)
     scopes: list[str] | None = Field(None, min_length=1)
     rate_limit_per_min: int | None = Field(None, ge=1)
+    owner_note: str | None = Field(None, max_length=255, description="责任人/用途备注")
     enabled: bool | None = None
 
 
@@ -39,7 +41,9 @@ class ExternalTokenOut(BaseModel):
     enabled: bool
     expires_at: datetime | None = None
     last_used_at: datetime | None = None
+    owner_note: str | None = None
     created_by: str | None = None
+    created_by_display: str | None = None
     revoked_by: str | None = None
     created_at: datetime
 

@@ -52,8 +52,18 @@
         <el-table-column label="最后使用" width="130">
           <template #default="{ row }">{{ row.last_used_at ? fmt(row.last_used_at) : '—' }}</template>
         </el-table-column>
+        <el-table-column label="责任人" width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.owner_note" class="owner-note">{{ row.owner_note }}</span>
+            <span v-else class="dim">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="创建人" width="90">
-          <template #default="{ row }">{{ row.created_by || '—' }}</template>
+          <template #default="{ row }">
+            <el-tooltip :content="row.created_by || ''" placement="top" :disabled="!row.created_by">
+              <span>{{ row.created_by_display || row.created_by || '—' }}</span>
+            </el-tooltip>
+          </template>
         </el-table-column>
         <el-table-column label="操作" width="170" fixed="right">
           <template #default="{ row }">
@@ -89,6 +99,10 @@
         <el-form-item label="过期时间">
           <el-date-picker v-model="form.expires_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss+08:00" placeholder="可选, 留空=不过期" />
         </el-form-item>
+        <el-form-item label="责任人/用途">
+          <el-input v-model="form.owner_note" placeholder="如: workbuddy-日报-李四跟进" maxlength="255" show-word-limit />
+          <div class="sub-tip">可选, 记录该 token 责任人或用途说明</div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
@@ -123,6 +137,9 @@
           <el-input-number v-model="editForm.rate_limit_per_min" :min="1" :max="100000" />
           <div class="sub-tip">留空=全局默认</div>
         </el-form-item>
+        <el-form-item label="责任人/用途">
+          <el-input v-model="editForm.owner_note" maxlength="255" show-word-limit />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
@@ -152,13 +169,13 @@ const baseUrl = window.location.origin
 
 const createVisible = ref(false)
 const saving = ref(false)
-const form = reactive({ name: '', scopes: [], rate_limit_per_min: null, expires_at: null })
+const form = reactive({ name: '', scopes: [], rate_limit_per_min: null, expires_at: null, owner_note: '' })
 
 const tokenVisible = ref(false)
 const createdToken = ref('')
 
 const editVisible = ref(false)
-const editForm = reactive({ id: null, name: '', scopes: [], rate_limit_per_min: null })
+const editForm = reactive({ id: null, name: '', scopes: [], rate_limit_per_min: null, owner_note: '' })
 const currentRow = ref(null)
 
 function fmt(v) {
@@ -181,6 +198,7 @@ function openCreate() {
   form.scopes = []
   form.rate_limit_per_min = null
   form.expires_at = null
+  form.owner_note = ''
   createVisible.value = true
 }
 
@@ -192,6 +210,7 @@ async function submitCreate() {
     const payload = { name: form.name, scopes: form.scopes }
     if (form.rate_limit_per_min) payload.rate_limit_per_min = form.rate_limit_per_min
     if (form.expires_at) payload.expires_at = form.expires_at
+    if (form.owner_note) payload.owner_note = form.owner_note
     const res = await createExternalToken(payload)
     createdToken.value = res.data.token
     createVisible.value = false
@@ -214,6 +233,7 @@ function openEdit(row) {
   editForm.name = row.name
   editForm.scopes = [...(row.scopes || [])]
   editForm.rate_limit_per_min = row.rate_limit_per_min ?? null
+  editForm.owner_note = row.owner_note || ''
   editVisible.value = true
 }
 
@@ -223,6 +243,7 @@ async function submitEdit() {
   saving.value = true
   try {
     const payload = { name: editForm.name, scopes: editForm.scopes, rate_limit_per_min: editForm.rate_limit_per_min }
+    if (editForm.owner_note) payload.owner_note = editForm.owner_note
     await updateExternalToken(editForm.id, payload)
     ElMessage.success('已保存')
     editVisible.value = false

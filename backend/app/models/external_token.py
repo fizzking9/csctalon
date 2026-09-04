@@ -41,5 +41,8 @@ class ExternalAccessToken(IDMixin, TimestampMixin, Base):
     last_used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="最后使用时间(管理界面看活跃度)"
     )
+    owner_note: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, comment="责任人/用途备注(可选, F-P2-5)"
+    )
     created_by: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="创建人账号")
     revoked_by: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="吊销人账号")

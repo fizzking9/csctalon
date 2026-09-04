@@ -31,6 +31,7 @@ from app.models.external_token import ExternalAccessToken
 from app.models.person import Person
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.ticket import ServiceTicket
+from app.models.user import User
 from app.schemas.common import R
 from app.schemas.external_token import (
     ExternalTokenCreate,
@@ -482,7 +483,18 @@ def _spec_brief() -> dict:
 @router.get("/tokens", response_model=R, summary="外部只读 token 列表(内部)")
 def list_tokens(db: DBSession, _: AdminUser):
     rows = db.scalars(select(ExternalAccessToken).order_by(ExternalAccessToken.id.desc())).all()
-    return R(data=[ExternalTokenOut.model_validate(t) for t in rows])
+    # F-P2-5: created_by(username) → display_name 映射(创建人可读姓名), 找不到则保留 username
+    unames = {t.created_by for t in rows if t.created_by}
+    disp_map: dict[str, str] = {}
+    if unames:
+        for u in db.scalars(select(User).where(User.username.in_(unames))).all():
+            disp_map[u.username] = u.display_name or u.qw_name or u.username
+    items = []
+    for t in rows:
+        d = ExternalTokenOut.model_validate(t)
+        d.created_by_display = disp_map.get(t.created_by) if t.created_by else None
+        items.append(d)
+    return R(data=items)
 
 
 @router.post("/tokens", response_model=R, summary="生成外部只读 token(明文仅此一次, 内部)")
@@ -491,6 +503,7 @@ def create_token(payload: ExternalTokenCreate, db: DBSession, me: AdminUser):
         db, payload.name, payload.scopes,
         rate_limit_per_min=payload.rate_limit_per_min,
         expires_at=payload.expires_at,
+        owner_note=payload.owner_note,
         created_by=me.username,
     )
     return R(data={
@@ -501,6 +514,7 @@ def create_token(payload: ExternalTokenCreate, db: DBSession, me: AdminUser):
         "scopes": row.scopes,
         "rate_limit_per_min": row.rate_limit_per_min,
         "expires_at": row.expires_at,
+        "owner_note": row.owner_note,
     })
 
 
@@ -518,6 +532,8 @@ def update_token(token_id: int, payload: ExternalTokenUpdate, db: DBSession, _: 
         row.scopes = list(dict.fromkeys(payload.scopes))
     if payload.rate_limit_per_min is not None:
         row.rate_limit_per_min = payload.rate_limit_per_min
+    if payload.owner_note is not None:
+        row.owner_note = payload.owner_note[:255]
     if payload.enabled is not None:
         row.enabled = payload.enabled
     db.commit()
