@@ -52,6 +52,21 @@ ok() { echo -e "\033[32m✔ $*\033[0m"; }
 warn() { echo -e "\033[33m⚠ $*\033[0m"; }
 err() { echo -e "\033[31m✘ $*\033[0m" >&2; }
 
+# current 自引用/循环自检(2026-09-04 事故: current→current 软链循环导致部署/回滚 cd 失败)。
+# 若 current 指向自身 或 目标不存在 → 自动修正为 releases 最新真实版本目录并提示。
+_cur_target="$(readlink "$CURRENT" 2>/dev/null || true)"
+if [[ -z "$_cur_target" || "$_cur_target" == "$CURRENT" || "$_cur_target" == "$APP_DIR/current.old" || ! -d "$_cur_target" ]]; then
+  warn "检测到 $CURRENT 软链异常(目标=${_cur_target:-空}/自引用/不存在), 自动修正为 releases 最新"
+  _fix_target="$(ls -1dt "$APP_DIR"/releases/* 2>/dev/null | head -1 || true)"
+  if [[ -z "$_fix_target" || ! -d "$_fix_target" ]]; then
+    err "releases 为空, 无法自动修正; 请先手工恢复 /opt/csctalon/current"
+    exit 1
+  fi
+  ln -sfn "$_fix_target" "$CURRENT"
+  rm -f "$APP_DIR/current.old"   # 清掉可能的循环锚点(本次会重建)
+  ok "已修正: current -> $_fix_target"
+fi
+
 if [[ $GIT_MODE -eq 1 ]]; then
   PKG=""
   NEW_VER="$(git ls-remote --tags "$REPO" "refs/tags/$BRANCH" 2>/dev/null | head -1 | cut -f1 | cut -c1-12 || true)"
@@ -122,6 +137,25 @@ if grep -qE "^(UPLOADS_DIR|BROWSER_STATES_DIR)=" "$ENV_FILE" \
   warn "  请改为绝对路径: UPLOAD_DIR=$APP_DIR/uploads, BROWSER_STATE_DIR=$APP_DIR/browser_states"
   warn "  否则 backend 会把 /app/uploads 挂到空目录, 上传/附件不可见"
 fi
+# 回滚辅助: 切回 current.old 指向的真实版本; 防 current/current.old 自引用循环(2026-09-04 事故)
+rollback_current() {
+  local target
+  target="$(readlink "$APP_DIR/current.old" 2>/dev/null || true)"
+  # 防自引用/循环: 目标等于 current 自身/current.old 或为空 → 退回 releases 最新目录
+  if [[ -z "$target" || "$target" == "$CURRENT" || "$target" == "$APP_DIR/current.old" ]]; then
+    warn "current.old 无效或自引用(${target:-空}), 回滚目标改为 releases 最新"
+    target="$(ls -1dt "$APP_DIR"/releases/* 2>/dev/null | head -1 || true)"
+  fi
+  if [[ -z "$target" || ! -d "$target" ]]; then
+    err "找不到可回滚的版本目录(releases 为空?), 请手工执行:"
+    err "  sudo ln -sfn /opt/csctalon/releases/<版本> /opt/csctalon/current"
+    exit 1
+  fi
+  ln -sfn "$target" "$CURRENT"
+  ln -sf "$ENV_FILE" "$CURRENT/.env" 2>/dev/null || true
+  cd "$CURRENT"
+  docker compose --env-file "$ENV_FILE" up -d --build || true
+}
 ln -sfn "$CURRENT" "$APP_DIR/current.old"   # 回滚锚点
 ln -sfn "$RELEASE_DIR" "$CURRENT"
 ln -sf "$ENV_FILE" "$CURRENT/.env" 2>/dev/null || true   # 兜底: compose 相对目录找 .env
@@ -129,10 +163,7 @@ c "重建并启动服务 (后端启动自动执行 alembic 迁移)..."
 cd "$CURRENT"
 if ! docker compose --env-file "$ENV_FILE" up -d --build; then
   err "启动失败, 自动回滚..."
-  ln -sfn "$(readlink "$APP_DIR/current.old")" "$CURRENT"
-  ln -sf "$ENV_FILE" "$CURRENT/.env" 2>/dev/null || true
-  cd "$CURRENT"
-  docker compose --env-file "$ENV_FILE" up -d --build || true
+  rollback_current
   exit 1
 fi
 
@@ -149,9 +180,7 @@ done
 
 if [[ $HEALTHY -eq 0 ]]; then
   err "升级后服务未健康, 自动回滚到 $OLD_VER ..."
-  ln -sfn "$(readlink "$APP_DIR/current.old")" "$CURRENT"
-  cd "$CURRENT"
-  docker compose --env-file "$ENV_FILE" up -d --build || true
+  rollback_current
   ok "已回滚到 $OLD_VER(数据为升级前备份状态, 如需完全一致请用 rollback.sh 恢复备份)"
   exit 1
 fi
