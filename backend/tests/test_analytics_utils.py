@@ -205,3 +205,26 @@ def test_merge_person_rows_breakdown_coef_weighted_avg():
 def test_merge_person_rows_empty():
     """边界: 空列表原样返回。"""
     assert _merge_person_rows([]) == []
+
+
+# ---- 问题3 回归(2026-09-04): 商户号投诉(微信)不得并入外部桶 ----
+def test_two_bucket_simple_case_removed():
+    """两桶简化版(_complaint_source_type_simple_case, 微信归外部)已删除, 防死代码回归。
+
+    唯一调用点(today_reception_breakdown.complaint_by_source)已改三源
+    _complaint_source_type_case()。若未来有人再 import 该函数应失败。
+    """
+    import app.services.analytics as A
+    assert not hasattr(A, "_complaint_source_type_simple_case"), \
+        "两桶 helper 应已删除(微信并入外部是问题3 要消除的口径)"
+
+
+def test_three_source_case_keyword_priority():
+    """三源 CASE 关键词优先级常量: 微信→商户号桶(独立), 不并入外部。"""
+    import app.services.analytics as A
+    # 商户号=微信关键词桶(独立于外部)
+    assert "微信" in A._MERCHANT_COMPLAINT_KEYWORDS
+    # 外部平台词不含"微信"(避免平台词误吞微信)
+    assert "微信" not in A._EXTERNAL_PLATFORM_KEYWORDS
+    # 平台词优先级在微信之前(12315微信投诉 → 外部, 监管更重, 既有口径)
+    assert "12315" in A._EXTERNAL_PLATFORM_KEYWORDS

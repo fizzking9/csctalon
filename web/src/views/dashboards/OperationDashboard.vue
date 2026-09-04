@@ -784,7 +784,7 @@ const kpiCards = computed(() => {
     { key: 'session', label: '会话数', value: reception.value, unit: '次', icon: 'ChatDotRound', bg: '#f0fdf4', color: '#16a34a', yoy_key: 'session', yoy_pct: reception.yoy_pct, yoy_value: reception.yoy_value, tip: '含客服接待+系统处理' },
     { key: 'refund_count', label: '退款笔数', value: refundCnt.value, unit: '笔', icon: 'Warning', bg: '#fef2f2', color: '#dc2626', yoy_key: 'refund_count', yoy_pct: refundCnt.yoy_pct, yoy_value: refundCnt.yoy_value, tip: '四路经营合计 A+B+C+D' },
     { key: 'refund_amount', label: '退款金额', value: refundAmt.value, money: true, icon: 'Money', bg: '#fff7ed', color: '#ea580c', yoy_key: 'refund_amount', yoy_pct: refundAmt.yoy_pct, yoy_value: refundAmt.yoy_value, tip: '四路经营合计退款金额' },
-    { key: 'complaint', label: '投诉数', value: complaint.value, unit: '条', icon: 'Bell', bg: '#faf5ff', color: '#7c3aed', yoy_key: 'complaint', yoy_pct: complaint.yoy_pct, yoy_value: complaint.yoy_value, tip: '内部+外部投诉合计' },
+    { key: 'complaint', label: '投诉数', value: complaint.value, unit: '条', icon: 'Bell', bg: '#faf5ff', color: '#7c3aed', yoy_key: 'complaint', yoy_pct: complaint.yoy_pct, yoy_value: complaint.yoy_value, tip: '投诉合计(内部/商户号/外部 + 315/卡商推送)' },
     { key: 'recovery', label: '挽回率', value: Number(recoveryRate || 0), unit: '%', icon: 'SuccessFilled', bg: '#ecfdf5', color: '#059669', yoy_key: 'recovery', yoy_pct: null, yoy_value: null, tip: '退款挽回成功率' },
   ]
 })

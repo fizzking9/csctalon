@@ -945,18 +945,6 @@ def _complaint_source_type_case(col=ServiceTicket.service_item):
         else_="外部投诉",  # 未标注/其它 → 外部(兜底桶, 2026-08-25 用户确认)
     ).label("complaint_source_type")
 
-# 简化版: 仅区分 外部投诉 vs 内部投诉 (用于需要两桶口径的统计, 如 complaint_by_source 中微信归入外部)
-def _complaint_source_type_simple_case(col=ServiceTicket.service_item):
-    """返回 CASE WHEN 表达式: '外部投诉' / '内部投诉'
-    内部=商品投诉/服务投诉; 其余(微信/外部平台/未标注)一律归外部(与三源约定兜底一致)"""
-    si = func.coalesce(col, literal(""))
-    internal_whens = [si.ilike(f"%{k}%") for k in _INTERNAL_COMPLAINT_KEYWORDS]
-    return case(
-        (or_(*internal_whens), "内部投诉"),
-        else_="外部投诉",
-    ).label("complaint_source_type_simple")
-
-
 # ============================================================
 # 模块: 工单有效完工时间推算 (effective_finish_time)
 # ============================================================
@@ -3522,15 +3510,17 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     _cnt_ec = db.execute(select(func.count()).where(ec_between)).scalar() or 0
     _cnt_cc = db.execute(select(func.count()).where(cc_between)).scalar() or 0
     complaint_total = int(_cnt_st) + int(_cnt_ec) + int(_cnt_cc)
-    # 投诉来源类型聚合: 外部投诉 vs 内部投诉 各自数量与占比(两桶口径, 商户号投诉=微信归入外部)
+    # 投诉来源类型聚合(F-P1-2/问题3): 内部/商户号/外部 三源单列
+    # 2026-09-04 用户确认: 商户号投诉(微信)不得并入外部桶, 单列展示。
+    # 原两桶口径 _complaint_source_type_simple_case(微信归外部) 已弃用。
     comp_src_rows = db.execute(
-        select(_complaint_source_type_simple_case(), func.count().label("cnt"))
+        select(_complaint_source_type_case(), func.count().label("cnt"))
         .where(tk_between, _ticket_category_case() == "投诉")
-        .group_by("complaint_source_type_simple")
+        .group_by("complaint_source_type")
         .order_by(text("cnt DESC"))
     ).all()
     complaint_by_source = [
-        {"name": r[0] or "内部投诉", "value": int(r[1] or 0)}
+        {"name": r[0] or "外部投诉", "value": int(r[1] or 0)}
         for r in comp_src_rows
     ]
     # 外部投诉平台(ExternalComplaint) 归入外部桶; CardComplaint=卡商群投诉 归入外部桶
@@ -3549,9 +3539,9 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                 x["value"] += int(_cnt_cc); found_outer = True; break
         if not found_outer:
             complaint_by_source.append({"name": "外部投诉", "value": int(_cnt_cc)})
-    # 补齐"内部投诉""外部投诉"两个桶,缺失补0 (前端颜色固定)
+    # 补齐三源桶,缺失补0 (前端颜色固定)
     _src_present = {x["name"] for x in complaint_by_source}
-    for nm in ("外部投诉", "内部投诉"):
+    for nm in ("内部投诉", "商户号投诉", "外部投诉"):
         if nm not in _src_present:
             complaint_by_source.append({"name": nm, "value": 0})
     complaint_by_source.sort(key=lambda x: -x["value"])
@@ -4238,7 +4228,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         # 新增: 今日投诉
         "complaint_total": complaint_total,
         "complaint_subs": complaint_subs,     # 投诉子类 (饼图: 商品投诉/服务投诉/微信投诉/12315/工信部/公共服务平台, 每项带 source_type)
-        "complaint_by_source": complaint_by_source,  # 投诉来源(内部/外部) 两个桶独立占比
+        "complaint_by_source": complaint_by_source,  # 投诉来源 内部/商户号/外部 三源单列占比(2026-09-04 问题3: 商户号不并入外部)
         "complaint_roots": complaint_roots,   # 投诉根因 (柱图: 6+3+扩展桶)
         "complaint_unmatched": complaint_unmatched,  # 未匹配到接待记录的投诉数
         # ↓↓↓ 2026-08-13 新增: 投诉处理人 + 处理状态全景 ↓↓↓
