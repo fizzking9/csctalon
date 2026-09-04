@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     agenda,
+    ai,
     alerts,
     analysis_views,
     analytics,
@@ -96,6 +97,7 @@ api_router.include_router(scrm_staff.router)
 api_router.include_router(scrm_chat.router)
 api_router.include_router(notifications.router)
 api_router.include_router(agenda.router)
+api_router.include_router(ai.router)
 api_router.include_router(complaints.router)
 api_router.include_router(schedules.router)
 api_router.include_router(source_groups.router)

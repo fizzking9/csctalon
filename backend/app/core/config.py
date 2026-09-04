@@ -121,6 +121,31 @@ class Settings(BaseSettings):
     # 全局默认限频(次/分钟): token 未配 rate_limit_per_min 时使用(每半小时 1 次绰绰有余)。
     EXTERNAL_RATE_LIMIT_DEFAULT_PER_MIN: int = 60
 
+    # ── LLM / AI 分析助手(见 docs/arch/A-20260904-003 LOCKED v1.0) ──
+    # 是否启用 /api/v1/ai 助手。false 时 ai 端点一律 503(默认关闭, 需显式开启)。
+    LLM_ENABLED: bool = False
+    # OpenAI 兼容完整前缀(是否含 /v1 以服务商为准, llm_client 统一拼 /chat/completions):
+    #   DeepSeek 官方 = https://api.deepseek.com (不带 /v1)
+    #   本地 Ollama = http://127.0.0.1:11434/v1
+    LLM_BASE_URL: str = ""
+    # API key(DeepSeek 等云端必填); 经环境变量注入, 严禁硬编码/入库/进日志。本地无鉴权服务可留空。
+    LLM_API_KEY: str = ""
+    # 模型名(一期=deepseek-v4-flash; 二期切本地私有化如 qwen2.5:27b, 仅改本配置)。
+    LLM_MODEL: str = ""
+    # DeepSeek 思考模式(取数问答建议 disabled 或 low 以省 token/降延迟): disabled/low/high。
+    LLM_THINKING: str = "disabled"
+    # 生成 read 超时(秒); 云端/本地生成可能数十秒, 单独放宽。
+    LLM_TIMEOUT_S: float = 120.0
+    # 瞬时失败(5xx/429/超时)指数退避重试。
+    LLM_RETRY_MAX: int = 2
+    LLM_RETRY_BASE_S: float = 1.0
+    LLM_RETRY_CAP_S: float = 30.0
+    # 喂给模型的数据底座(feed)长度上限(字符), 防 token 超限与延迟。
+    AI_ANALYZE_MAX_CHARS: int = 6000
+    # AI 任务结果在内存保留时间(秒)与历史条数(单 worker 内存态)。
+    AI_TASK_TTL_S: int = 600
+    AI_TASK_HISTORY: int = 20
+
     # 跨域(局域网部署,允许内网访问)
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 
