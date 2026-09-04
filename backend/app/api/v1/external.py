@@ -492,7 +492,8 @@ def list_tokens(db: DBSession, _: AdminUser):
     items = []
     for t in rows:
         d = ExternalTokenOut.model_validate(t)
-        d.created_by_display = disp_map.get(t.created_by) if t.created_by else None
+        # F-P2-5: created_by(username) → display_name; pydantic 用 model_copy 规范更新
+        d = d.model_copy(update={"created_by_display": disp_map.get(t.created_by) if t.created_by else None})
         items.append(d)
     return R(data=items)
 

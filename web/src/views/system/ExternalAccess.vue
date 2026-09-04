@@ -243,7 +243,9 @@ async function submitEdit() {
   saving.value = true
   try {
     const payload = { name: editForm.name, scopes: editForm.scopes, rate_limit_per_min: editForm.rate_limit_per_min }
-    if (editForm.owner_note) payload.owner_note = editForm.owner_note
+    // 始终发送 owner_note(含空串): 后端 update 对 None 不更新、对空串清空。
+    // 若此处用 if(非空)才发, 用户清空"责任人"保存将无效(W1, 2026-09-04 审查)。
+    payload.owner_note = editForm.owner_note || ''
     await updateExternalToken(editForm.id, payload)
     ElMessage.success('已保存')
     editVisible.value = false

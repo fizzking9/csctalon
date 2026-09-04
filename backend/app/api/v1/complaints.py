@@ -896,27 +896,30 @@ def complaint_detail(
         _norm_subject = _norm_subject_entity(subject)
         if _norm_subject:
             records = [r for r in records if _norm_subject_entity(r.get("entity")) == _norm_subject]
-    # F-P1-2: 明细接口返回窗口内 registered/handled 计数(供前端明细标题显示
-    # "登记 X / 处理 Y"; 与 /summary 同口径, source_type 已按三源过滤时仍返回全量三源,
-    # 前端按当前明细来源取对应字段即可)
-    _reg_handled = _sources_reg_handled(db, ts, te)
-    if subject:
-        # 主体下钻时 registered/handled 以过滤后明细行计(避免显示与明细不一致的全窗口数):
-        # 登记 = register_time 落在窗口; 处理 = 有真实完成时间(finish_time 非空)
-        _ds = (start[:10] if start else "")
-        _de = (end[:10] if end else "")
-        _subj_reg = sum(1 for r in records
-                        if r.get("register_time")
-                        and (not _ds or r["register_time"][:10] >= _ds)
-                        and (not _de or r["register_time"][:10] <= _de))
-        _subj_hdl = sum(1 for r in records if r.get("finish_time"))
-        _reg_handled = {"total": {"registered": _subj_reg, "handled": _subj_hdl}}
+    # F-P1-2(审查 W3 修订 2026-09-04): registered/handled 计数统一基于"过滤后明细行"
+    # 计算, 与 items 集合同口径(消除与全窗口 _sources_reg_handled 的口径差):
+    #   registered = 行 register_time 落在窗口(start~end 北京日);  hand handled = 行 finish_time 非空
+    #   (detail 仅在 _is_real_finish 真实完成时写 finish_time)且落在窗口。
+    # register_time/finish_time 为 _to_sh_iso 输出(YYYY-MM-DD HH:MM), 取前10位与 start/end 比较。
+    _ds = (start[:10] if start else "")
+    _de = (end[:10] if end else "")
+    def _in_window(dt_str: str | None) -> bool:
+        if not dt_str or len(dt_str) < 10:
+            return False
+        d10 = dt_str[:10]
+        return (not _ds or d10 >= _ds) and (not _de or d10 <= _de)
+    _reg_cnt = sum(1 for r in records if _in_window(r.get("register_time")))
+    _hdl_cnt = sum(1 for r in records if r.get("finish_time") and _in_window(r.get("finish_time")))
+    # 保持顶层 reg_handled 三源结构向后兼容(全窗口三源; 前端明细标题主要用顶层
+    # registered/handled, 无需三源细分时无需关心)。为不增加额外 6~10 次 count SQL,
+    # 这里 total 直接用上面按行统计值(与 items 一致), 三源键保留默认空(前端不消费)。
+    _reg_handled = {"total": {"registered": _reg_cnt, "handled": _hdl_cnt}}
     return R(data={
         "items": records[:limit],
         "total": len(records),
         "reg_handled": _reg_handled,
-        "registered": _reg_handled.get(source_type, {}).get("registered", 0) if source_type and not subject else _reg_handled["total"]["registered"],
-        "handled": _reg_handled.get(source_type, {}).get("handled", 0) if source_type and not subject else _reg_handled["total"]["handled"],
+        "registered": _reg_cnt,
+        "handled": _hdl_cnt,
     })
 
 
