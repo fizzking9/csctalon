@@ -681,7 +681,7 @@ def complaint_summary(
 
 
 @router.get("/detail", response_model=R, summary="投诉明细列表(三源合并: 内部/商户号/外部)")
-@cached_json(lambda *a, **kw: f"complaint:detail:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('limit')}:{int(bool(kw.get('include_supplementary')))}",
+@cached_json(lambda *a, **kw: f"complaint:detail:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('subject')}:{kw.get('limit')}:{int(bool(kw.get('include_supplementary')))}",
              ttl=lambda **kw: cache_ttl_for(kw.get('start'), kw.get('end'), 60))
 def complaint_detail(
     db: DBSession,
@@ -689,6 +689,7 @@ def complaint_detail(
     start: str | None = None,
     end: str | None = None,
     source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉"),
+    subject: str | None = Query(None, description="按被投诉主体(归一化名, 如 云客猫)过滤明细"),
     limit: int = Query(500, ge=1, le=2000),
     include_supplementary: bool = Query(False, description="为true时按设备SN附加315/卡商补充明细(关联合并)"),
 ):
@@ -888,16 +889,34 @@ def complaint_detail(
 
     # 按动作时间降序排列
     records.sort(key=lambda x: x.get("time") or "", reverse=True)
+    # F-P2-4 (问题4): 按被投诉主体过滤(归一化比较)。subject_ranking 的名是归一后
+    # 主体名(如 云客猫), 而 records 的 entity 来自 registrant/company_entity(可能未归一),
+    # 故两侧都经 _norm_subject_entity 归一后比较。卡商群无主体(entity=None)不入主体下钻。
+    if subject:
+        _norm_subject = _norm_subject_entity(subject)
+        if _norm_subject:
+            records = [r for r in records if _norm_subject_entity(r.get("entity")) == _norm_subject]
     # F-P1-2: 明细接口返回窗口内 registered/handled 计数(供前端明细标题显示
     # "登记 X / 处理 Y"; 与 /summary 同口径, source_type 已按三源过滤时仍返回全量三源,
     # 前端按当前明细来源取对应字段即可)
     _reg_handled = _sources_reg_handled(db, ts, te)
+    if subject:
+        # 主体下钻时 registered/handled 以过滤后明细行计(避免显示与明细不一致的全窗口数):
+        # 登记 = register_time 落在窗口; 处理 = 有真实完成时间(finish_time 非空)
+        _ds = (start[:10] if start else "")
+        _de = (end[:10] if end else "")
+        _subj_reg = sum(1 for r in records
+                        if r.get("register_time")
+                        and (not _ds or r["register_time"][:10] >= _ds)
+                        and (not _de or r["register_time"][:10] <= _de))
+        _subj_hdl = sum(1 for r in records if r.get("finish_time"))
+        _reg_handled = {"total": {"registered": _subj_reg, "handled": _subj_hdl}}
     return R(data={
         "items": records[:limit],
         "total": len(records),
         "reg_handled": _reg_handled,
-        "registered": _reg_handled.get(source_type, {}).get("registered", 0) if source_type else _reg_handled["total"]["registered"],
-        "handled": _reg_handled.get(source_type, {}).get("handled", 0) if source_type else _reg_handled["total"]["handled"],
+        "registered": _reg_handled.get(source_type, {}).get("registered", 0) if source_type and not subject else _reg_handled["total"]["registered"],
+        "handled": _reg_handled.get(source_type, {}).get("handled", 0) if source_type and not subject else _reg_handled["total"]["handled"],
     })
 
 

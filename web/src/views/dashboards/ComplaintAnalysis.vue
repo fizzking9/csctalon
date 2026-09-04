@@ -817,7 +817,9 @@
             <el-table-column label="排名" width="60" type="index" />
             <el-table-column label="被投诉主体" min-width="180" show-overflow-tooltip>
               <template #default="{ row }">
-                <span class="subject-name">{{ row.name }}</span>
+                <el-link type="primary" :underline="false" class="subject-link" @click="openSubjectDetail(row.name)">
+                  <span class="subject-name">{{ row.name }}</span>
+                </el-link>
                 <el-tag v-if="row.escalated" size="small" type="danger" effect="plain" style="margin-left:6px">升级</el-tag>
               </template>
             </el-table-column>
@@ -857,6 +859,45 @@
             </el-table-column>
           </el-table>
         </el-card>
+
+        <!-- F-P2-4: 主体下钻抽屉(点 Top 榜主体行 → 看该主体投诉明细) -->
+        <el-drawer v-model="subjectDrawerVisible" :title="`被投诉主体明细 · ${currentSubject || ''}`" size="60%">
+          <div class="sub-tip mb-16" style="color:#909399;font-size:12px">
+            窗口内该主体的商户号 + 外部(315)投诉明细 · 点 SN/处理人可进一步审计
+          </div>
+          <el-table v-loading="subjectDetailLoading" :data="subjectDetailList" border stripe size="small" max-height="520">
+            <el-table-column label="来源" width="92" align="center">
+              <template #default="{ row }">
+                <el-tag :type="sourceTagType(row.source)" size="small" effect="plain">{{ row.source }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="时间" width="120" sortable :sort-method="(a,b)=>sortTimeStr(a.time,b.time)">
+              <template #default="{ row }">{{ formatTime(row.time) }}</template>
+            </el-table-column>
+            <el-table-column prop="category" label="分类" width="120" show-overflow-tooltip />
+            <el-table-column label="设备SN" width="140" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-link v-if="row.device_sn" type="primary" :underline="false" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
+                <span v-else class="dim">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="投诉内容" min-width="200" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.problem || row.suppl_problem || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="处理人" width="100" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-link v-if="row.handler && row.handler !== '未分配'" type="primary" :underline="false" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
+                <span v-else class="dim">未分配</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90" align="center">
+              <template #default="{ row }">
+                <el-tag :type="row.status === '已完成' ? 'success' : row.status === '处理中' ? 'warning' : row.status === '待跟进' ? 'info' : 'danger'" size="small">{{ row.status || '—' }}</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!subjectDetailLoading && !subjectDetailList.length" description="该主体暂无明细(内部投诉无主体字段不纳入)" :image-size="50" />
+        </el-drawer>
       </section>
     </template>
     <div v-if="loaded" class="block-tabs">
@@ -893,6 +934,12 @@ const activeTab = ref('overview')
 const rangeMode = ref('30')
 const customRange = ref([])
 const data = ref(null)
+
+// F-P2-4: 被投诉主体下钻抽屉 state
+const subjectDrawerVisible = ref(false)
+const subjectDetailLoading = ref(false)
+const currentSubject = ref('')
+const subjectDetailList = ref([])
 
 // 移动端响应式: 简化描述文字/控件
 const isMobile = ref(false)
@@ -1590,6 +1637,33 @@ async function loadSubjectAnalysis() {
   } finally {
     subjectLoading.value = false
   }
+}
+
+// F-P2-4: 主体下钻 - 打开抽屉并拉该主体明细(detail 支持 subject 归一化过滤)
+async function openSubjectDetail(name) {
+  if (!name) return
+  currentSubject.value = name
+  subjectDrawerVisible.value = true
+  subjectDetailLoading.value = true
+  subjectDetailList.value = []
+  try {
+    const p = { ...params.value, limit: 500, include_supplementary: true, subject: name }
+    const res = await complaintDetail(p)
+    // 兼容 detail 返回 items; 未命中 source 参数时全三源(内部投诉无主体不返回)
+    subjectDetailList.value = res.data?.items || []
+  } finally {
+    subjectDetailLoading.value = false
+  }
+}
+
+// 时间字符串排序(ISO/MM-DD HH:mm), 空值排后
+function sortTimeStr(a, b) {
+  const va = a || ''
+  const vb = b || ''
+  if (va === vb) return 0
+  if (!va) return 1
+  if (!vb) return -1
+  return va < vb ? -1 : 1
 }
 
 async function loadExternalDetail() {
