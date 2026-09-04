@@ -51,6 +51,11 @@
               <div class="kpi-label" style="color:#2563eb">投诉总量</div>
               <div class="kpi-value">{{ formatNum(s.summary.total) }}</div>
               <div class="kpi-sub">内{{ s.summary.internal_total }} · 商{{ s.summary.merchant_total }} · 外{{ s.summary.external_total }}</div>
+              <div class="kpi-sub" style="color:#2563eb">
+                <span style="font-weight:600">新登记</span> {{ formatNum(s.reg_handled.total.registered) }}
+                <span style="margin:0 4px">·</span>
+                <span style="font-weight:600">处理</span> <span style="color:#16a34a">{{ formatNum(s.reg_handled.total.handled) }}</span>
+              </div>
             </div>
           </el-col>
           <el-col :xs="12" :sm="8" :md="4">
@@ -79,6 +84,11 @@
               <div class="kpi-label" style="color:#7c3aed">外部投诉</div>
               <div class="kpi-value">{{ formatNum(s.external_total) }}</div>
               <div class="kpi-sub">315平台 · 关联{{ formatNum(s.external_matched) }} · 未关联{{ formatNum(s.external_unmatched) }}</div>
+              <div class="kpi-sub" style="color:#7c3aed">
+                <span style="font-weight:600">新登记</span> {{ formatNum(s.reg_handled['外部投诉'].registered) }}
+                <span style="margin:0 4px">·</span>
+                <span style="font-weight:600">处理</span> <span style="color:#16a34a">{{ formatNum(s.reg_handled['外部投诉'].handled) }}</span>
+              </div>
             </div>
           </el-col>
           <el-col :xs="12" :sm="8" :md="4">
@@ -86,6 +96,11 @@
               <div class="kpi-label" style="color:#ca8a04">商户号投诉</div>
               <div class="kpi-value">{{ formatNum(s.summary.merchant_total) }}</div>
               <div class="kpi-sub">{{ merchantEntitySummary }}</div>
+              <div class="kpi-sub" style="color:#ca8a04">
+                <span style="font-weight:600">新登记</span> {{ formatNum(s.reg_handled['商户号投诉'].registered) }}
+                <span style="margin:0 4px">·</span>
+                <span style="font-weight:600">处理</span> <span style="color:#16a34a">{{ formatNum(s.reg_handled['商户号投诉'].handled) }}</span>
+              </div>
             </div>
           </el-col>
         </el-row>
@@ -1142,6 +1157,12 @@ const topSubjectTrendOption = computed(() => {
 
 const s = computed(() => data.value || {
   summary: { total: 0, internal_total: 0, merchant_total: 0, external_total: 0, backlog_total: 0, done_total: 0, completion_rate: 0, avg_handle_hours: 0 },
+  reg_handled: {
+    total: { registered: 0, handled: 0 },
+    '内部投诉': { registered: 0, handled: 0 },
+    '商户号投诉': { registered: 0, handled: 0 },
+    '外部投诉': { registered: 0, handled: 0 },
+  },
   source_distribution: [],
   trend: [],
   handler_top: [],

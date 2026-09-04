@@ -326,21 +326,51 @@
         <el-link type="primary" :underline="false" @click="$router.push('/dashboards/complaint-analysis')">投诉分析 →</el-link>
       </div>
 
-      <!-- 第一行: 今日/本周投诉来源(3个) + 积压水位(独立维度) -->
+      <!-- 第一行: 今日/本周投诉来源(3个, 每个展示 登记/处理 双值) + 积压水位(独立维度) -->
       <el-row :gutter="10" class="mb-8">
         <el-col :xs="24" :md="16">
           <div class="compact-kpi-row">
             <div class="ck-cell" style="background:#eff6ff">
               <div class="ck-label">内部投诉</div>
-              <div class="ck-value" style="color:#1d4ed8">{{ formatNum(complaintSummaryData.internal?.total) }}</div>
+              <div class="ck-rh">
+                <div class="ck-rh-item">
+                  <span class="ck-rh-num" style="color:#1d4ed8">{{ formatNum(complaintSummaryData.internal?.registered ?? complaintSummaryData.internal?.total) }}</span>
+                  <span class="ck-rh-tag">登记</span>
+                </div>
+                <div class="ck-rh-divider" />
+                <div class="ck-rh-item">
+                  <span class="ck-rh-num" style="color:#16a34a">{{ formatNum(complaintSummaryData.internal?.handled) }}</span>
+                  <span class="ck-rh-tag">处理</span>
+                </div>
+              </div>
             </div>
             <div class="ck-cell" style="background:#f5f3ff">
               <div class="ck-label">商户号投诉</div>
-              <div class="ck-value" style="color:#6d28d9">{{ formatNum(complaintSummaryData.merchant?.total) }}</div>
+              <div class="ck-rh">
+                <div class="ck-rh-item">
+                  <span class="ck-rh-num" style="color:#6d28d9">{{ formatNum(complaintSummaryData.merchant?.registered ?? complaintSummaryData.merchant?.total) }}</span>
+                  <span class="ck-rh-tag">登记</span>
+                </div>
+                <div class="ck-rh-divider" />
+                <div class="ck-rh-item">
+                  <span class="ck-rh-num" style="color:#16a34a">{{ formatNum(complaintSummaryData.merchant?.handled) }}</span>
+                  <span class="ck-rh-tag">处理</span>
+                </div>
+              </div>
             </div>
             <div class="ck-cell" style="background:#fef2f2">
               <div class="ck-label">外部投诉</div>
-              <div class="ck-value" style="color:#dc2626">{{ formatNum(complaintSummaryData.external?.total) }}</div>
+              <div class="ck-rh">
+                <div class="ck-rh-item">
+                  <span class="ck-rh-num" style="color:#dc2626">{{ formatNum(complaintSummaryData.external?.registered ?? complaintSummaryData.external?.total) }}</span>
+                  <span class="ck-rh-tag">登记</span>
+                </div>
+                <div class="ck-rh-divider" />
+                <div class="ck-rh-item">
+                  <span class="ck-rh-num" style="color:#16a34a">{{ formatNum(complaintSummaryData.external?.handled) }}</span>
+                  <span class="ck-rh-tag">处理</span>
+                </div>
+              </div>
               <div v-if="supplExternal.total" class="ck-sub">315补充 {{ formatNum(supplExternal.total) }}条</div>
             </div>
           </div>
@@ -1729,6 +1759,32 @@ onBeforeUnmount(() => {
   color: #b91c1c;
   line-height: 1.2;
   margin-top: 2px;
+}
+/* F-P1-2: 投诉三源卡 登记/处理 双值并排 */
+.ck-rh {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 3px;
+}
+.ck-rh-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+}
+.ck-rh-num {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.ck-rh-tag {
+  font-size: 10px;
+  color: #9ca3af;
+}
+.ck-rh-divider {
+  width: 1px;
+  align-self: stretch;
+  background: #e5e7eb;
 }
 .compact-pie-wrap {
   border-radius: 6px;

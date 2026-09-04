@@ -366,7 +366,7 @@
         </template>
       </SectionHeader>
 
-      <!-- 三源 KPI (点击即作为下方明细表的来源筛选) -->
+      <!-- 三源 KPI (点击即作为下方明细表的来源筛选; 主值=登记, 副行=处理, F-P1-2) -->
       <el-row :gutter="12" class="mb-16">
         <el-col :xs="8">
           <div
@@ -376,7 +376,8 @@
             @click="toggleComplaintSourceFilter('内部投诉')"
           >
             <div class="kpi-mini-label" style="color:#2563eb">内部投诉</div>
-            <div class="kpi-mini-value" style="color:#2563eb">{{ formatNum(complaintSummaryData.internal?.total) }}</div>
+            <div class="kpi-mini-value" style="color:#2563eb">{{ formatNum(complaintSummaryData.internal?.registered ?? complaintSummaryData.internal?.total) }}</div>
+            <div class="kpi-mini-sub"><span class="rh-label">登记</span> · 处理 <span style="color:#16a34a;font-weight:600">{{ formatNum(complaintSummaryData.internal?.handled) }}</span></div>
             <div class="kpi-mini-hint">点击筛选明细</div>
           </div>
         </el-col>
@@ -388,7 +389,8 @@
             @click="toggleComplaintSourceFilter('商户号投诉')"
           >
             <div class="kpi-mini-label" style="color:#7c3aed">商户号投诉</div>
-            <div class="kpi-mini-value" style="color:#7c3aed">{{ formatNum(complaintSummaryData.merchant?.total) }}</div>
+            <div class="kpi-mini-value" style="color:#7c3aed">{{ formatNum(complaintSummaryData.merchant?.registered ?? complaintSummaryData.merchant?.total) }}</div>
+            <div class="kpi-mini-sub"><span class="rh-label">登记</span> · 处理 <span style="color:#16a34a;font-weight:600">{{ formatNum(complaintSummaryData.merchant?.handled) }}</span></div>
             <div class="kpi-mini-hint">点击筛选明细</div>
           </div>
         </el-col>
@@ -400,7 +402,8 @@
             @click="toggleComplaintSourceFilter('外部投诉')"
           >
             <div class="kpi-mini-label" style="color:#dc2626">外部投诉</div>
-            <div class="kpi-mini-value" style="color:#dc2626">{{ formatNum(complaintSummaryData.external?.total) }}</div>
+            <div class="kpi-mini-value" style="color:#dc2626">{{ formatNum(complaintSummaryData.external?.registered ?? complaintSummaryData.external?.total) }}</div>
+            <div class="kpi-mini-sub"><span class="rh-label">登记</span> · 处理 <span style="color:#16a34a;font-weight:600">{{ formatNum(complaintSummaryData.external?.handled) }}</span></div>
             <div class="kpi-mini-hint">点击筛选明细</div>
             <div v-if="supplExternal.total" class="kpi-mini-suppl">315补充 {{ formatNum(supplExternal.total) }}条(已关联 {{ formatNum(supplExternal.matched) }})</div>
           </div>
@@ -1182,6 +1185,17 @@ watch([grain, weekOffset, monthOffset, quarterOffset, yearOffset, customDateRang
   font-size: 11px;
   color: #b91c1c;
   margin-top: 3px;
+  font-weight: 600;
+}
+/* F-P1-2: 投诉三源卡 登记/处理 副行 */
+.kpi-mini-sub {
+  font-size: 12px;
+  color: #6b7280;
+  margin-top: 2px;
+  line-height: 1.4;
+}
+.rh-label {
+  color: #6b7280;
   font-weight: 600;
 }
 /* workbuddy 推送补充数据源汇总条 */
