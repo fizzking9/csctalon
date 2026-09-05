@@ -14,16 +14,20 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
+from app.models.bms_order import BmsOrder
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
 from app.models.data_source import DataSource, DataSourceField
 from app.models.device import DeviceTag, DeviceTagBinding
 from app.models.device_combo import DeviceCombo
+from app.models.device_flow_usage import DeviceFlowUsage
 from app.models.external_complaint import ExternalComplaint
 from app.models.manual_refund import ManualRefund
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
+from app.models.refund_record_report import RefundRecordReport
 from app.models.refund_wide import RefundWide
+from app.models.return_tracking import ReturnTracking
 from app.models.scrm_operator import ScrmOperator
 from app.models.scrm_session import ScrmSession
 from app.models.scrm_session_transfer import ScrmSessionTransfer
@@ -185,6 +189,54 @@ DATA_SOURCE_SEEDS: list[dict] = [
         "sync_source": "bms",
         "category": "基础数据",
         "description": "每台设备被打的所有标签(设备SN × 标签ID 多对多,含打标人)",
+    },
+    # ===== BMS 五源扩容(2026-09-05, A-20260905-001) =====
+    {
+        "code": "refund_record_report",
+        "model": RefundRecordReport,
+        "name_cn": "退款记录报表",
+        "time_field": "refund_time",
+        "sn_field": "device_sn",
+        "pk_field": None,
+        "pk_strategy": "none",
+        "sync_source": "bms",
+        "category": "现金流",
+        "description": "BMS 财务退款记录报表(线上退款水单,E路对账补充;含精确退款时间/商户号/设备号)。",
+    },
+    {
+        "code": "bms_order",
+        "model": BmsOrder,
+        "name_cn": "订单管理",
+        "time_field": "create_date",
+        "sn_field": "device_sn",
+        "pk_field": "order_no",
+        "pk_strategy": "primary_key",
+        "sync_source": "bms",
+        "category": "现金流",
+        "description": "BMS 支付管理订单台账(含设备SN/商户/支付/激活时间),佐证退费单来源订单。",
+    },
+    {
+        "code": "return_tracking",
+        "model": ReturnTracking,
+        "name_cn": "退货跟踪",
+        "time_field": "created_at_raw",
+        "sn_field": "device_sn",
+        "pk_field": None,
+        "pk_strategy": "none",
+        "sync_source": "bms",
+        "category": "工单与客服",
+        "description": "BMS 售后退货/换货全流程跟踪(设备SN维度,含退货类型/签收/快递/原因)。",
+    },
+    {
+        "code": "device_flow_usage",
+        "model": DeviceFlowUsage,
+        "name_cn": "设备月流量",
+        "time_field": "fetched_at",
+        "sn_field": "device_sn",
+        "pk_field": None,
+        "pk_strategy": "none",
+        "category": "基础数据",
+        "description": "设备月流量使用(单SN×月汇总,设备审计;来自设备流量 HTTP API)。",
     },
     # ===== SCRM 微信聚合平台(客服接待评估报表) =====
     {
@@ -473,6 +525,55 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("scrm_session_transfer", "to_operator_name"):   {"role": "person", "name_cn": "转入客服名"},
     ("scrm_session_transfer", "transfer_time"): {"role": "time", "name_cn": "转接时间"},
     ("scrm_session_transfer", "transfer_reason"): {"role": "category", "name_cn": "转接原因"},
+    # ===== BMS 五源扩容(2026-09-05) =====
+    # refund_record_report 退款记录报表(E路水单)
+    ("refund_record_report", "platform_order_no"): {"role": "dimension", "is_filterable": True, "name_cn": "平台订单号"},
+    ("refund_record_report", "wx_order_no"): {"role": "dimension", "name_cn": "微信订单号"},
+    ("refund_record_report", "merchant_id"): {"role": "category", "name_cn": "商户号(对账锚点)"},
+    ("refund_record_report", "merchant_name"): {"role": "category", "name_cn": "商户名"},
+    ("refund_record_report", "device_sn"): {"role": "sn"},
+    ("refund_record_report", "product_name"): {"role": "category", "name_cn": "商品名称"},
+    ("refund_record_report", "refund_time"): {"role": "time", "name_cn": "退款时间(精确到秒)"},
+    ("refund_record_report", "apply_refund_amount"): {"role": "amount", "agg": "sum", "name_cn": "申请退款金额"},
+    ("refund_record_report", "refund_amount"): {"role": "amount", "agg": "sum", "name_cn": "退款金额"},
+    ("refund_record_report", "refund_status"): {"role": "category", "name_cn": "退款状态"},
+    # bms_order 订单管理
+    ("bms_order", "order_no"): {"role": "dimension", "is_pk": True, "is_filterable": False, "name_cn": "订单号"},
+    ("bms_order", "device_sn"): {"role": "sn"},
+    ("bms_order", "combo_name"): {"role": "category", "name_cn": "套餐名称"},
+    ("bms_order", "combo_price"): {"role": "amount", "agg": "sum", "name_cn": "套餐价格"},
+    ("bms_order", "payable_price"): {"role": "amount", "agg": "sum", "name_cn": "应付价格"},
+    ("bms_order", "actual_pay_price"): {"role": "amount", "agg": "sum", "name_cn": "实际支付价格"},
+    ("bms_order", "order_status"): {"role": "category", "name_cn": "订单状态"},
+    ("bms_order", "pay_type"): {"role": "category", "name_cn": "支付类型"},
+    ("bms_order", "pay_date"): {"role": "time", "name_cn": "支付时间"},
+    ("bms_order", "create_date"): {"role": "time", "name_cn": "创建时间(同步锚点)"},
+    ("bms_order", "business_name"): {"role": "category", "name_cn": "商户名称"},
+    ("bms_order", "business_id"): {"role": "category", "name_cn": "内部商户ID"},
+    ("bms_order", "mch_id"): {"role": "category", "name_cn": "微信商户Id"},
+    ("bms_order", "active_date"): {"role": "time", "name_cn": "激活时间"},
+    # return_tracking 退货跟踪
+    ("return_tracking", "device_sn"): {"role": "sn"},
+    ("return_tracking", "shop"): {"role": "category", "name_cn": "店铺"},
+    ("return_tracking", "merchant"): {"role": "category", "name_cn": "商户"},
+    ("return_tracking", "paid_amount"): {"role": "amount", "agg": "sum", "name_cn": "实付金额"},
+    ("return_tracking", "return_type"): {"role": "category", "name_cn": "退货类型"},
+    ("return_tracking", "refund_amount"): {"role": "amount", "agg": "sum", "name_cn": "退款金额"},
+    ("return_tracking", "return_sign_status"): {"role": "category", "name_cn": "退货签收状态"},
+    ("return_tracking", "return_express_no"): {"role": "dimension", "name_cn": "退货快递单号"},
+    ("return_tracking", "return_reason"): {"role": "category", "name_cn": "退货原因"},
+    ("return_tracking", "order_time"): {"role": "time", "name_cn": "下单时间"},
+    ("return_tracking", "return_time"): {"role": "time", "name_cn": "退货时间"},
+    ("return_tracking", "sign_time"): {"role": "time", "name_cn": "签收时间"},
+    ("return_tracking", "created_at_raw"): {"role": "time", "name_cn": "创建时间(同步锚点)"},
+    # device_flow_usage 设备月流量
+    ("device_flow_usage", "device_sn"): {"role": "sn"},
+    ("device_flow_usage", "merchant_id"): {"role": "category", "name_cn": "商户ID"},
+    ("device_flow_usage", "merchant_name"): {"role": "category", "name_cn": "商户名称"},
+    ("device_flow_usage", "stat_month"): {"role": "category", "name_cn": "月份"},
+    ("device_flow_usage", "flow_gb"): {"role": "amount", "agg": "sum", "name_cn": "月流量GB"},
+    ("device_flow_usage", "month_complete"): {"role": "category", "name_cn": "是否完整月"},
+    ("device_flow_usage", "fetched_at"): {"role": "time", "name_cn": "抓取时间"},
 }
 
 # 反射时排除的系统字段（TimestampMixin 的系统时间 + raw_extra 冗余）

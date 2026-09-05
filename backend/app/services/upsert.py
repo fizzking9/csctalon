@@ -38,15 +38,19 @@ def _op_str(d: datetime) -> str:
     return d.strftime("%Y-%m-%d %H:%M:%S") if getattr(d, "tzinfo", None) else str(d)
 
 
+from app.models.bms_order import BmsOrder
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
 from app.models.device import Device, DeviceTag, DeviceTagBinding
 from app.models.device_combo import DeviceCombo
+from app.models.device_flow_usage import DeviceFlowUsage
 from app.models.external_complaint import ExternalComplaint
 from app.models.manual_refund import ManualRefund
 from app.models.merchant import Merchant
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
+from app.models.refund_record_report import RefundRecordReport
+from app.models.return_tracking import ReturnTracking
 from app.models.shanmao_refund import ShanmaoRefund
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
@@ -1750,6 +1754,263 @@ def upsert_device_tag_bindings(df: pd.DataFrame, mapping: dict[str, str], db: Se
     db.flush()
 
 
+def upsert_device_flow_usage(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """设备月流量使用 - (device_sn, stat_month) 复合唯一键幂等 upsert
+
+    来源: BMS 设备流量 HTTP API(flowDate 留空=全量有流量月份 / 指定月单查)。
+    逐行解析后 on_conflict_do_update(唯一约束 uq_device_flow_usage_sn_month) 覆盖更新。
+    不完整月(stat_month == 当前北京月)反复重取 = 覆盖更新, 不新增(用户需求)。
+    """
+    from datetime import datetime as _dt
+    _now_cn = _dt.now(_TZ_CN)
+    _cur_month = _now_cn.strftime("%Y-%m")
+    rows: list[dict] = []
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            device_sn = (_to_str(data.get("device_sn")) or "").strip() or None
+            stat_month = (_to_str(data.get("stat_month")) or "").strip() or None
+            if not device_sn or not stat_month:
+                result.add_error(idx, "缺少 device_sn 或 stat_month,无法去重定位(跳过)")
+                continue
+            flow_gb = _to_float(data.get("flow_gb"))
+            rows.append({
+                "device_sn": device_sn,
+                "merchant_id": _truncate_str(_to_str(data.get("merchant_id")), 64),
+                "merchant_name": _truncate_str(_to_str(data.get("merchant_name")), 128),
+                "device_type_name": _truncate_str(_to_str(data.get("device_type_name")), 64),
+                "device_group_name": _truncate_str(_to_str(data.get("device_group_name")), 64),
+                "device_combo_name": _truncate_str(_to_str(data.get("device_combo_name")), 128),
+                "stat_month": stat_month,
+                "flow_gb": flow_gb,
+                "month_complete": stat_month < _cur_month,  # 非当前月视为完整(可历史补全); 当前月=false 可重取
+                "fetched_at": _dt.now(_TZ_CN),
+            })
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
+    _sync_devices(rows, "device_sn", db, fill_fields=["merchant_name"])
+    seen: dict[tuple, dict] = {}
+    for r in rows:
+        seen[(r["device_sn"], r["stat_month"])] = r
+    rows = list(seen.values())
+    before = db.scalar(select(func.count()).select_from(DeviceFlowUsage)) or 0
+    BATCH = 2000
+    for i in range(0, len(rows), BATCH):
+        batch = rows[i:i + BATCH]
+        stmt = pg_insert(DeviceFlowUsage).values(batch)
+        update_cols = {c: stmt.excluded[c] for c in batch[0]
+                       if c not in ("device_sn", "stat_month")}
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["device_sn", "stat_month"],
+            set_=update_cols,
+        )
+        db.execute(stmt)
+        db.flush()
+    after = db.scalar(select(func.count()).select_from(DeviceFlowUsage)) or 0
+    inserted = max(after - before, 0)
+    result.inserted += inserted
+    result.updated += max(len(rows) - inserted, 0)
+
+
+def upsert_refund_record_reports(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """退款记录报表 - (platform_order_no, refund_time, refund_amount) 幂等 upsert
+
+    来源: BMS 退款记录报表导出 CSV(10列实测)。E 路线上退款水单。
+    时间 refund_time naive-北京 → UTC(经 _to_datetime)。
+    """
+    from datetime import datetime as _dt
+    _now = _dt.now(timezone.utc)
+    rows: list[dict] = []
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            platform_order_no = (_to_str(data.get("platform_order_no")) or "").strip() or None
+            if not platform_order_no:
+                result.add_error(idx, "缺少平台订单号(跳过)")
+                continue
+            refund_time = _to_datetime(data.get("refund_time"))
+            if refund_time is None:
+                result.add_error(idx, "退款时间为空(跳过)")
+                continue
+            refund_amount = _to_float(data.get("refund_amount"))
+            if refund_amount is None:
+                result.add_error(idx, "退款金额为空(跳过)")
+                continue
+            device_sn = (_to_str(data.get("device_sn")) or "").strip() or None
+            rows.append({
+                "platform_order_no": platform_order_no,
+                "wx_order_no": _truncate_str((_to_str(data.get("wx_order_no")) or "").strip(), 128) or None,
+                "merchant_id": _truncate_str((_to_str(data.get("merchant_id")) or "").strip(), 64) or None,
+                "merchant_name": _truncate_str((_to_str(data.get("merchant_name")) or "").strip(), 128) or None,
+                "device_sn": device_sn,
+                "product_name": _truncate_str((_to_str(data.get("product_name")) or "").strip(), 128) or None,
+                "refund_time": refund_time,
+                "apply_refund_amount": _to_float(data.get("apply_refund_amount")),
+                "refund_amount": refund_amount,
+                "refund_status": _truncate_str((_to_str(data.get("refund_status")) or "").strip(), 32) or None,
+                "synced_at": _now,
+            })
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
+    _sync_devices(rows, "device_sn", db, fill_fields=["merchant_name"])
+    seen: dict[tuple, dict] = {}
+    for r in rows:
+        # 金额转字符串归一,避免 Decimal('19.00') vs '19' 视为不同键
+        seen[(r["platform_order_no"], _str_ts(r["refund_time"]), str(r["refund_amount"]))] = r
+    rows = list(seen.values())
+    before = db.scalar(select(func.count()).select_from(RefundRecordReport)) or 0
+    BATCH = 2000
+    for i in range(0, len(rows), BATCH):
+        batch = rows[i:i + BATCH]
+        stmt = pg_insert(RefundRecordReport).values(batch)
+        update_cols = {c: stmt.excluded[c] for c in batch[0]
+                       if c not in ("platform_order_no", "refund_time", "refund_amount")}
+        # ⚠️ 唯一索引是表达式(经 _to_datetime 后 refund_time 已是 timestamptz, PG 存毫秒级),
+        #    直接用列 on_conflict_do_update 可能不命中表达式唯一索引; 但 uq 是普通列唯一约束
+        #    (platform_order_no, refund_time, refund_amount), 故 index_elements 用三列即可。
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["platform_order_no", "refund_time", "refund_amount"],
+            set_=update_cols,
+        )
+        db.execute(stmt)
+        db.flush()
+    after = db.scalar(select(func.count()).select_from(RefundRecordReport)) or 0
+    inserted = max(after - before, 0)
+    result.inserted += inserted
+    result.updated += max(len(rows) - inserted, 0)
+
+
+def upsert_bms_orders(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """订单管理 - order_no 主键 upsert(幂等)
+
+    来源: BMS 订单管理(导出/HTTP findPageList)。同步锚点=创建时间 create_date。
+    订单量可能大(8月全月43万), 分批 2000 走 _execute_upsert 语义(单主键)。
+    """
+    rows: list[dict] = []
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            order_no = (_to_str(data.get("order_no")) or "").strip()
+            if not order_no:
+                result.add_error(idx, "缺少订单号(跳过)")
+                continue
+            rows.append({
+                "order_no": order_no,
+                "order_type": _truncate_str((_to_str(data.get("order_type")) or "").strip(), 32) or None,
+                "device_sn": (_to_str(data.get("device_sn")) or (_to_str(data.get("sn")) or "")).strip() or None,
+                "combo_name": _truncate_str((_to_str(data.get("combo_name")) or "").strip(), 128) or None,
+                "combo_price": _to_float(data.get("combo_price")),
+                "payable_price": _to_float(data.get("payable_price")),
+                "actual_pay_price": _to_float(data.get("actual_pay_price")),
+                "balance_pay_price": _to_float(data.get("balance_pay_price")),
+                "wx_order_no": _truncate_str((_to_str(data.get("wx_order_no")) or "").strip(), 128) or None,
+                "pay_date": _to_datetime(data.get("pay_date")),
+                "pay_type": _truncate_str((_to_str(data.get("pay_type")) or "").strip(), 32) or None,
+                "order_status": _truncate_str((_to_str(data.get("order_status")) or "").strip(), 32) or None,
+                "order_result": (data.get("order_result") or None) if data.get("order_result") is not None else None,
+                "order_status_raw": _to_int(data.get("order_status_raw")),
+                "create_user": _truncate_str((_to_str(data.get("create_user")) or "").strip(), 64) or None,
+                "create_date": _to_datetime(data.get("create_date")),
+                "business_name": _truncate_str((_to_str(data.get("business_name")) or "").strip(), 128) or None,
+                "business_id": _truncate_str((_to_str(data.get("business_id")) or "").strip(), 64) or None,
+                "device_type_name": _truncate_str((_to_str(data.get("device_type_name")) or "").strip(), 64) or None,
+                "refund_status": _truncate_str((_to_str(data.get("refund_status")) or "").strip(), 32) or None,
+                "active_date": _to_datetime(data.get("active_date")),
+                "last_stored_time": _to_datetime(data.get("last_stored_time")),
+                "mch_id": _truncate_str((_to_str(data.get("mch_id")) or "").strip(), 64) or None,
+                "merchant_name": _truncate_str((_to_str(data.get("merchant_name")) or "").strip(), 128) or None,
+                "before_serve_valid_date": _to_datetime(data.get("before_serve_valid_date")),
+                "after_serve_valid_date": _to_datetime(data.get("after_serve_valid_date")),
+                "days": _to_int(data.get("days")),
+                "synced_at": datetime.now(timezone.utc),
+            })
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
+    _sync_devices(rows, "device_sn", db, fill_fields=["merchant_name"])
+    _execute_upsert(db, BmsOrder, "order_no", rows, result)
+
+
+def upsert_return_trackings(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """退货跟踪 - 幂等 upsert
+
+    来源: BMS 退货跟踪(导出/API)。因导出样本未定, 采用批次内自去重 + 全量 INSERT 策略
+    (BMS 页面本身可复现同一退货单, 但无稳定唯一键前不覆盖删行)。
+    时间 naive-北京 → UTC。
+    """
+    from datetime import datetime as _dt
+    _now = _dt.now(timezone.utc)
+    rows: list[dict] = []
+    seen_key: set[tuple] = set()
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            device_sn = (_to_str(data.get("device_sn")) or (_to_str(data.get("sn")) or "")).strip() or None
+            order_no = (_to_str(data.get("order_no")) or (_to_str(data.get("sales_order_no")) or "")).strip() or None
+            # 批次内去重锚: device_sn + order_no + 退货类型 + 退货时间(若有)
+            return_time = _to_datetime(data.get("return_time"))
+            dedup_key = (device_sn or "", order_no or "", (_to_str(data.get("return_type")) or "").strip(), _str_ts(return_time) if return_time else "")
+            if dedup_key in seen_key:
+                continue
+            seen_key.add(dedup_key)
+            rows.append({
+                "device_sn": device_sn,
+                "device_type": _truncate_str((_to_str(data.get("device_type")) or "").strip(), 64) or None,
+                "shop": _truncate_str((_to_str(data.get("shop")) or "").strip(), 128) or None,
+                "merchant": _truncate_str((_to_str(data.get("merchant")) or "").strip(), 128) or None,
+                "paid_amount": _to_float(data.get("paid_amount")),
+                "return_type": _truncate_str((_to_str(data.get("return_type")) or "").strip(), 32) or None,
+                "refund_amount": _to_float(data.get("refund_amount")),
+                "return_sign_status": _truncate_str((_to_str(data.get("return_sign_status")) or "").strip(), 32) or None,
+                "return_express_no": _truncate_str((_to_str(data.get("return_express_no")) or "").strip(), 64) or None,
+                "return_reason": _truncate_str((_to_str(data.get("return_reason")) or "").strip(), 128) or None,
+                "order_no": order_no,
+                "order_time": _to_datetime(data.get("order_time")),
+                "return_time": return_time,
+                "sign_time": _to_datetime(data.get("sign_time")),
+                "creator": _truncate_str((_to_str(data.get("creator")) or "").strip(), 64) or None,
+                "updater": _truncate_str((_to_str(data.get("updater")) or "").strip(), 64) or None,
+                "created_at_raw": _to_datetime(data.get("created_at_raw")),
+                "updated_at_raw": _to_datetime(data.get("updated_at_raw")),
+                "remark": data.get("remark") or None,
+                "synced_at": _now,
+            })
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
+    _sync_devices(rows, "device_sn", db, fill_fields=["merchant_name"])
+    before = db.scalar(select(func.count()).select_from(ReturnTracking)) or 0
+    BATCH = 2000
+    for i in range(0, len(rows), BATCH):
+        batch = rows[i:i + BATCH]
+        stmt = pg_insert(ReturnTracking).values(batch)
+        stmt = stmt.on_conflict_do_nothing()  # 无稳定唯一键: 冲突跳过(靠批次内去重防同文件重复)
+        db.execute(stmt)
+        db.flush()
+    after = db.scalar(select(func.count()).select_from(ReturnTracking)) or 0
+    result.inserted += max(after - before, 0)
+    result.updated += 0
+
+
+def _str_ts(dt) -> str:
+    """datetime → 稳定字符串(去重键用, 处理 aware/naive 混用)"""
+    if dt is None:
+        return ""
+    if getattr(dt, "tzinfo", None):
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 UPSERT_DISPATCH = {
     "refund": upsert_refunds,
     "wallet": upsert_wallet,
@@ -1764,6 +2025,10 @@ UPSERT_DISPATCH = {
     "manual_refund": upsert_manual_refunds,
     "device_tag": upsert_device_tags,
     "device_tag_binding": upsert_device_tag_bindings,
+    "device_flow_usage": upsert_device_flow_usage,
+    "refund_record_report": upsert_refund_record_reports,
+    "bms_order": upsert_bms_orders,
+    "return_tracking": upsert_return_trackings,
 }
 
 

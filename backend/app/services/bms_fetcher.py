@@ -131,6 +131,42 @@ BMS_DATA_SOURCES: dict[str, dict] = {
         "page_path": "/index.html#/device/device-tags",
         "default_sync": False,  # 标签绑定明细变动少,按需手动同步
     },
+    # ===== BMS 五源扩容(2026-09-05, A-20260905-001) =====
+    # 退款记录报表(财务>退款记录报表): 线上退款水单(E 路对账补充)
+    #   实测 CSV 列: 平台订单号,微信订单号,商户号,商户名,设备号,商品名称,
+    #               退款时间,申请退款金额,退款金额,退款状态
+    #   时间筛选标签= "退款开始时间/退款结束时间"(按退款时间), 附加筛选: 设备SN/退款状态
+    #   default_sync=False(D3: 先手动跑通, 验证后评估纳入定时)
+    "refund_record_report": {
+        "name": "退款记录报表",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/settle/refund-record-report",
+        "default_sync": False,
+        "time_labels": ["退款开始时间", "退款结束时间"],
+    },
+    # 订单管理(支付管理>订单管理): 订单台账
+    #   API item 确认: orderNo/sn/comboName/payablePrice/actualPayPrice/wxOrderNo/
+    #   payDate/payType/orderStatus/orderType/createUser/createDate/businessName/
+    #   deviceTypeName/refundStatus/activeDate/lastStoredTime/mchId/merchantName
+    #   时间锚点=创建时间(页面"开始时间/结束时间"即 createDate 窗, 实测)
+    "bms_order": {
+        "name": "订单管理",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/pay/pay-manage",
+        "default_sync": False,
+        "time_labels": ["开始时间", "结束时间"],
+    },
+    # 退货跟踪(售后>退货跟踪): 退货/换货全流程
+    #   DOM 列: 设备类型/店铺/商户/实付金额/退货类型/退款金额/退货签收状态/退货快递单号/
+    #           退货原因/下单时间/退货时间/签收时间/创建人/更新人/创建时间/更新时间/备注
+    #   时间锚点=创建时间(推断; 实现时以真实导出样本校准)
+    "return_tracking": {
+        "name": "退货跟踪",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/user/returnTracking",
+        "default_sync": False,
+        "time_labels": ["开始时间", "结束时间"],
+    },
 }
 
 # 每次操作之间的最小间隔(秒),BMS 系统限制1分钟

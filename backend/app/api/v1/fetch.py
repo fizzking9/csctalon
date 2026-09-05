@@ -59,6 +59,14 @@ router = APIRouter(prefix="/fetch", tags=["数据中心-BMS同步"])
 # 东八区
 TZ_CN = timezone(timedelta(hours=8))
 
+# BMS 可同步数据类型(手动触发/定时校验用)
+# 含五源扩容新增的 3 个 Playwright 源(BMS_DATA_SOURCES 里有但非 default_sync 也可手动勾选)
+BMS_VALID_TYPES = {
+    "refund", "shanmao_refund", "ticket", "wallet", "device_combo",
+    "cs_record", "device_tag", "device_tag_binding",
+    "refund_record_report", "bms_order", "return_tracking",
+}
+
 
 def _compute_time_range(
     range_type: str,
@@ -240,7 +248,7 @@ async def sync_all_data(payload: SyncAllRequest, current_user: CurrentUser):
     若前端未升级,这里为了兼容仍返回 task 执行完成后的 SyncAllResponse,
     通过在后端侧等待最长 8 分钟实现)。
     """
-    valid_types = {"refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record", "device_tag", "device_tag_binding"}
+    valid_types = BMS_VALID_TYPES
     data_types = payload.data_types if payload.data_types else None
     if data_types:
         for dt in data_types:
@@ -280,9 +288,7 @@ def task_preflight(db: DBSession, _: CurrentUser, data_types: str = ""):
      - 若现在执行(增量模式),每个源会抓从什么时间~什么时间
      - 各源凭证状态
     """
-    dts = [s for s in data_types.split(",") if s] if data_types else [
-        "refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record",
-    ]
+    dts = [s for s in data_types.split(",") if s] if data_types else sorted(BMS_VALID_TYPES - {"device_tag", "device_tag_binding"})
     statuses = get_sync_status(db)
     has_credentials: dict[str, bool] = {}
     names: dict[str, str] = {}
@@ -324,7 +330,7 @@ def task_preflight(db: DBSession, _: CurrentUser, data_types: str = ""):
 
 async def _do_submit(payload: SyncAllRequest, current_user) -> SubmitResponse:
     """内部: 提交同步任务到 SyncTaskManager"""
-    valid_types = {"refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record", "device_tag", "device_tag_binding"}
+    valid_types = BMS_VALID_TYPES
     data_types = payload.data_types if payload.data_types else [
         dt for dt in valid_types
     ]  # None 时默认全量包含,但在 sync_all 内部会再按 default_sync 过滤?不,这里按默认勾选源
