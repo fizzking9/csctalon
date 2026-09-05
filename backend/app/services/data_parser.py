@@ -174,6 +174,25 @@ COLUMN_TEMPLATES: dict[str, dict[str, list[str]]] = {
         "super_admin": ["超级管理员"],
     },
     # ── BMS 五源扩容(2026-09-05, A-20260905-001) ──────────────────────
+    # 设备管理档案(设备管理页导出, P4 回填 devices 主表)
+    # 实测导出列(14): 设备号,设备类型,所属商户,主商户,是否激活,激活时间,服务有效期,
+    #                当前套餐,启动卡ICCID,虚拟卡ICCID,应用版本,区域,创建时间,批次号
+    "device_profile": {
+        "device_sn": ["设备号", "设备SN", "SN", "sn"],
+        "device_type": ["设备类型"],
+        "merchant_name": ["所属商户", "商户名称", "商户"],
+        "main_merchant_name": ["主商户", "根商户名称", "主商户名称"],
+        "active_flag": ["是否激活", "激活状态"],
+        "active_time": ["激活时间"],
+        "service_valid_until": ["服务有效期", "服务到期时间", "服务有效期至"],
+        "current_combo_name": ["当前套餐", "套餐名称"],
+        "start_iccid": ["启动卡ICCID", "启动卡ID"],
+        "virtual_iccid": ["虚拟卡ICCID", "虚卡ICCID", "虚拟卡ID"],
+        "app_version": ["应用版本", "APP版本", "设备版本"],
+        "region": ["区域", "所有区域"],
+        "created_at_raw": ["创建时间"],
+        "batch_no": ["批次号", "分发批次号"],
+    },
     # 设备月流量(HTTP API items → df; sn 与 device_sn 同列映射)
     "device_flow_usage": {
         "device_sn": ["sn", "设备SN", "设备号"],

@@ -64,7 +64,7 @@ TZ_CN = timezone(timedelta(hours=8))
 BMS_VALID_TYPES = {
     "refund", "shanmao_refund", "ticket", "wallet", "device_combo",
     "cs_record", "device_tag", "device_tag_binding",
-    "refund_record_report", "bms_order", "return_tracking",
+    "refund_record_report", "bms_order", "return_tracking", "device_profile",
 }
 
 

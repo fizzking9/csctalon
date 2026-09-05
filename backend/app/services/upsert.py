@@ -2011,6 +2011,64 @@ def _str_ts(dt) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def upsert_device_profiles(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
+    """设备管理档案(P4, #18) - 回填 devices 主表(不建独立表)
+
+    来源: BMS 设备管理导出 CSV(14列实测, 激活时间窗)。sn 主键 on_conflict_do_update,
+    补齐 active_time/device_type/merchant_name/主商户/ICCID/版本/区域/批次 等档案字段。
+    """
+    rows: list[dict] = []
+    for idx, row in enumerate(df.to_dict("records")):
+        try:
+            data = apply_mapping(row, mapping)
+            sn = (_to_str(data.get("device_sn")) or "").strip()
+            if not sn:
+                result.add_error(idx, "缺少设备号(跳过)")
+                continue
+            rows.append({
+                "sn": sn,
+                "device_type": _truncate_str((_to_str(data.get("device_type")) or "").strip(), 64) or None,
+                "device_type_remark": None,
+                "active_time": _to_datetime(data.get("active_time")),
+                "merchant_name": _truncate_str((_to_str(data.get("merchant_name")) or "").strip(), 128) or None,
+                "status": "正常",
+                "main_merchant_name": _truncate_str((_to_str(data.get("main_merchant_name")) or "").strip(), 128) or None,
+                "active_flag": _truncate_str((_to_str(data.get("active_flag")) or "").strip(), 16) or None,
+                "service_valid_until": _to_datetime(data.get("service_valid_until")),
+                "current_combo_name": _truncate_str((_to_str(data.get("current_combo_name")) or "").strip(), 128) or None,
+                "start_iccid": _truncate_str((_to_str(data.get("start_iccid")) or "").strip(), 64) or None,
+                "virtual_iccid": _truncate_str((_to_str(data.get("virtual_iccid")) or "").strip(), 64) or None,
+                "app_version": _truncate_str((_to_str(data.get("app_version")) or "").strip(), 64) or None,
+                "region": _truncate_str((_to_str(data.get("region")) or "").strip(), 128) or None,
+                "batch_no": _truncate_str((_to_str(data.get("batch_no")) or "").strip(), 64) or None,
+            })
+            result.total += 1
+        except Exception as e:
+            result.add_error(idx, f"行解析失败: {e}")
+    if not rows:
+        return
+    # sn 批内去重(保留最后一条)
+    seen: dict[str, dict] = {}
+    for r in rows:
+        seen[r["sn"]] = r
+    rows = list(seen.values())
+    # 精确区分 insert/update: 先查这批 sn 已有数(原本不存在 = insert, 存在 = update)
+    existing_sns = set(
+        db.scalars(select(Device.sn).where(Device.sn.in_([r["sn"] for r in rows])))
+    )
+    inserted = sum(1 for r in rows if r["sn"] not in existing_sns)
+    BATCH = 2000
+    for i in range(0, len(rows), BATCH):
+        batch = rows[i:i + BATCH]
+        stmt = pg_insert(Device).values(batch)
+        update_cols = {c: stmt.excluded[c] for c in batch[0] if c != "sn"}
+        stmt = stmt.on_conflict_do_update(index_elements=["sn"], set_=update_cols)
+        db.execute(stmt)
+        db.flush()
+    result.inserted += inserted
+    result.updated += max(len(rows) - inserted, 0)
+
+
 UPSERT_DISPATCH = {
     "refund": upsert_refunds,
     "wallet": upsert_wallet,
@@ -2026,6 +2084,7 @@ UPSERT_DISPATCH = {
     "device_tag": upsert_device_tags,
     "device_tag_binding": upsert_device_tag_bindings,
     "device_flow_usage": upsert_device_flow_usage,
+    "device_profile": upsert_device_profiles,
     "refund_record_report": upsert_refund_record_reports,
     "bms_order": upsert_bms_orders,
     "return_tracking": upsert_return_trackings,

@@ -167,6 +167,17 @@ BMS_DATA_SOURCES: dict[str, dict] = {
         "default_sync": False,
         "time_labels": ["开始时间", "结束时间"],
     },
+    # 设备管理(设备管理>设备管理): 设备档案(P4, 回填 devices 主表)
+    #   实测导出列(14): 设备号,设备类型,所属商户,主商户,是否激活,激活时间,服务有效期,
+    #                  当前套餐,启动卡ICCID,虚拟卡ICCID,应用版本,区域,创建时间,批次号
+    #   时间范围=激活时间(页面筛选即 激活开始/结束时间)
+    "device_profile": {
+        "name": "设备管理",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/device/device-manage",
+        "default_sync": False,  # 低频,手动/定期刷新设备档案
+        "time_labels": ["激活开始时间", "激活结束时间"],
+    },
 }
 
 # 每次操作之间的最小间隔(秒),BMS 系统限制1分钟

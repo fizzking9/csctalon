@@ -35,6 +35,23 @@ class Device(TimestampMixin, Base):
     merchant_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="所属商户名称")
     status: Mapped[str | None] = mapped_column(String(32), nullable=True, default="正常", comment="设备状态")
 
+    # ── BMS 设备管理档案扩展(P4, A-20260905-001 / #18, 2026-09-05) ──
+    main_merchant_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="主商户名称(设备管理CSV: 主商户)"
+    )
+    active_flag: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="是否激活(已激活/未激活)")
+    service_valid_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="服务有效期至"
+    )
+    current_combo_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="当前套餐"
+    )
+    start_iccid: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="启动卡ICCID")
+    virtual_iccid: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="虚拟卡ICCID")
+    app_version: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="应用版本")
+    region: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="区域")
+    batch_no: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="批次号")
+
     tags: Mapped[list["DeviceTag"]] = relationship(secondary=device_tag_rel, lazy="selectin")
 
 
