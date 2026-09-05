@@ -308,11 +308,15 @@ def test_detail_subject_filter_normalized(db):
                       finish_time=base + timedelta(minutes=11), registrant="大秦WiFi管家"),
     ])
     db.flush()
-    # 端点被 @cached_json 包装, 直接调用返回 dict {code,message,data}
-    resp = complaint_detail(db, None, start=_REVIEW_DAY, end=_REVIEW_DAY,
-                            source_type="商户号投诉", subject="云客猫", limit=100,
-                            include_supplementary=False)
-    body = resp["data"] if isinstance(resp, dict) and "data" in resp else resp
+    # ⚠️ 绕过 @cached_json 直接测原始业务函数(2026-09-05 修复):
+    #   包装版在 Redis 命中时可能返回其它测试写入的"空 items 旧缓存" → 偶发 items=0;
+    #   CI 无 Redis 时 cache miss 返回 R 对象, 原测试只认 dict 会崩。
+    #   用 __wrapped__ 取原始函数, 测真实 subject 过滤逻辑(不依赖缓存/Redis)。
+    resp = complaint_detail.__wrapped__(db, None, start=_REVIEW_DAY, end=_REVIEW_DAY,
+                                        source_type="商户号投诉", subject="云客猫", limit=100,
+                                        include_supplementary=False)
+    data = getattr(resp, "data", resp)
+    body = data if isinstance(data, dict) else (data.model_dump() if hasattr(data, "model_dump") else {})
     items = body.get("items") or []
     assert len(items) == 1, f"期望只命中云客猫主体, 实际 {len(items)}"
     assert items[0]["no"] == "SUB-1"  # detail 输出 no 字段
@@ -343,10 +347,12 @@ def test_detail_subject_filter_matches_attached_315(db):
                              company_entity="深圳市云客猫科技有限公司", platform="315",
                              matched_ticket_no="SUB-W2"))
     db.flush()
-    resp = complaint_detail(db, None, start=_REVIEW_DAY, end=_REVIEW_DAY,
-                            source_type="商户号投诉", subject="云客猫", limit=100,
-                            include_supplementary=True)
-    body = resp["data"] if isinstance(resp, dict) and "data" in resp else resp
+    # 绕过 cached_json 直接测原始业务函数(2026-09-05: 避免 Redis 缓存/无缓存下行为差异)
+    resp = complaint_detail.__wrapped__(db, None, start=_REVIEW_DAY, end=_REVIEW_DAY,
+                                        source_type="商户号投诉", subject="云客猫", limit=100,
+                                        include_supplementary=True)
+    data = getattr(resp, "data", resp)
+    body = data if isinstance(data, dict) else (data.model_dump() if hasattr(data, "model_dump") else {})
     items = body.get("items") or []
     assert len(items) == 1, f"期望经 supplementary 命中云客猫主体行, 实际 {len(items)}"
     assert items[0]["no"] == "SUB-W2"
