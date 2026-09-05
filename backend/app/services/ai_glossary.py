@@ -24,7 +24,8 @@ GLOSSARY: dict[str, str] = {
     ),
     "refund_routes": (
         "退款金额口径=四路经营合计: A线上直退 + B钱包提现 + C闪猫退款 + D手动退款(按创建时间); "
-        "E=真实现金流(商户号退款 SUCCESS, 仅作对账基准, 不并入四路)。金额单位=元。"
+        "E=真实现金流(退款记录报表 refund_record_reports 退款成功, 仅作对账基准, 不并入四路; "
+        "2026-09-05 起替代旧 merchant_refunds 快照)。金额单位=元。"
     ),
     "refund_litigation": (
         "涉诉率=涉诉金额 / A路(线上直退)总金额 ×100%; "
