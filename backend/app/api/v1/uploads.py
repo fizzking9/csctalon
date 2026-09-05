@@ -1,5 +1,7 @@
 """数据上传与导入路由"""
 
+import csv
+import io
 from datetime import datetime, timezone
 
 from fastapi import (
@@ -11,6 +13,7 @@ from fastapi import (
     Query,
     UploadFile,
 )
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DBSession
@@ -20,7 +23,7 @@ from app.models.data_source import DataSource
 from app.models.upload import UploadRecord
 from app.schemas.common import PageBase, R
 from app.schemas.upload import DiffPreviewRequest, ImportResponse, UploadRecordOut
-from app.services.data_parser import load_dataframe, parse_file, save_upload_file
+from app.services.data_parser import COLUMN_TEMPLATES, load_dataframe, parse_file, save_upload_file
 from app.services.diff_preview import compute_diff
 from app.services.matcher import match_all
 from app.services.person_extractor import extract_person_aliases
@@ -242,6 +245,63 @@ def get_record(record_id: int, db: DBSession, _: CurrentUser):
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
     return R(data=UploadRecordOut.model_validate(record))
+
+
+@router.get("/template", summary="下载导入模板(CSV, 按类型)")
+def download_template(
+    _: CurrentUser,
+    data_type: str = Query(..., description="数据类型(与上传下拉一致)"),
+):
+    """生成 CSV 导入模板: 表头 = 该类型建议映射列(COLUMN_TEMPLATES 首个候选中文列名)。
+
+    用户下载后按列填数, 再走 上传→解析→映射→导入; 用于 BMS 五源新表的历史补录。
+    输出 UTF-8 BOM, Excel 打开不乱码。
+    """
+    if data_type not in DATA_TYPES:
+        raise HTTPException(status_code=400, detail=f"不支持的数据类型,可选: {sorted(DATA_TYPES)}")
+    tpl = COLUMN_TEMPLATES.get(data_type)
+    if not tpl:
+        raise HTTPException(status_code=404, detail=f"{data_type} 暂无列模板,无法生成")
+    # 每个目标字段取第一个候选中文列名作为模板表头(与 suggest_mapping 一致)
+    headers: list[str] = []
+    for target, candidates in tpl.items():
+        cand = candidates[0] if candidates else target
+        headers.append(cand)
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(headers)
+    csv_bytes = ("\ufeff" + buf.getvalue()).encode("utf-8")
+    fname = f"template_{data_type}_{datetime.now().strftime('%Y%m%d')}.csv"
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@router.get("/file", summary="下载已上传/采集的原始文件")
+def download_upload_file(
+    db: DBSession,
+    _: CurrentUser,
+    record_id: int = Query(..., description="上传记录 ID(upload_records)"),
+):
+    """下载 upload_records 中某条记录对应的原始 CSV/XLSX(含 BMS 采集落盘的)。
+
+    安全: 经 resolve_upload_path 校验路径在 UPLOAD_DIR 内; 仅登录用户可访问。
+    用于回看采集到的原始文件 / 校验导入依据 / 导出发给他人参考。
+    """
+    record = db.get(UploadRecord, record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    path = resolve_upload_path(record.stored_path, record.filename)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="原始文件不存在,可能已被清理")
+    return FileResponse(
+        path=str(path),
+        filename=record.filename or path.name,
+        media_type="application/octet-stream",
+    )
 
 
 def _run_post_import_tasks(data_type: str):

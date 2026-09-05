@@ -57,6 +57,10 @@
             <el-button type="primary" :loading="parsing" :disabled="!form.data_type || !currentFile" @click="handleParse">
               解析文件
             </el-button>
+            <el-button :disabled="!form.data_type" :loading="templateLoading" @click="handleDownloadTemplate">
+              下载模板({{ typeLabel }})
+            </el-button>
+            <el-text type="info" size="small" style="margin-left: 8px">新表历史补录:可先下载模板填数,再上传导入</el-text>
           </el-form-item>
         </el-form>
       </div>
@@ -276,13 +280,14 @@
 import { ref, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Loading } from '@element-plus/icons-vue'
-import { parseUpload, previewDiff, confirmImport } from '@/api/upload'
+import { parseUpload, previewDiff, confirmImport, downloadUploadTemplate } from '@/api/upload'
 import { COLUMN_TEMPLATES, TYPE_LABELS } from './templates'
 
 const step = ref(0)
 const parsing = ref(false)
 const diffing = ref(false)
 const importing = ref(false)
+const templateLoading = ref(false)
 const currentFile = ref(null)
 const sheetNames = ref([])
 const preview = ref({})
@@ -335,6 +340,36 @@ function getSample(col) {
 function handleFileChange(file) {
   currentFile.value = file.raw
   sheetNames.value = []
+}
+
+// 下载当前数据类型的导入模板(CSV, 表头=建议列中文名)
+async function handleDownloadTemplate() {
+  templateLoading.value = true
+  try {
+    const res = await downloadUploadTemplate(form.data_type)
+    const blobData = res instanceof Blob ? res : res?.data
+    const blob = new Blob([blobData], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `template_${form.data_type}_${new Date().toISOString().slice(0, 10)}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    ElMessage.success('模板已下载,按列填数后拖回本页上传即可')
+  } catch (e) {
+    if (e?.response?.data instanceof Blob) {
+      try {
+        const txt = await e.response.data.text()
+        ElMessage.error(txt || '模板下载失败')
+        return
+      } catch (_) { /* ignore */ }
+    }
+    ElMessage.error(e?.message || '模板下载失败')
+  } finally {
+    templateLoading.value = false
+  }
 }
 
 async function handleParse() {

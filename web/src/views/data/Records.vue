@@ -43,6 +43,15 @@
         <el-table-column label="时间" width="170">
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
+        <el-table-column label="操作" width="90" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              link type="primary" size="small"
+              :disabled="!row.filename"
+              @click="downloadFile(row)"
+            >下载文件</el-button>
+          </template>
+        </el-table-column>
       </el-table>
       <div class="mt-16 flex-between">
         <span>共 {{ total }} 条</span>
@@ -60,8 +69,9 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
-import { listUploadRecords } from '@/api/upload'
+import { listUploadRecords, downloadUploadFile } from '@/api/upload'
 import { TYPE_LABELS } from './templates'
 import dayjs from 'dayjs'
 
@@ -97,6 +107,35 @@ async function loadData() {
     total.value = res.data.total
   } finally {
     loading.value = false
+  }
+}
+
+// 下载该记录对应的原始文件(含 BMS 采集落盘 / 手动上传)
+async function downloadFile(row) {
+  try {
+    const res = await downloadUploadFile(row.id)
+    // axios 拦截器对 blob 成功返回 response.data(Blob);兼容完整 response
+    const blobData = res instanceof Blob ? res : res?.data
+    const blob = new Blob([blobData])
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = row.filename || `record_${row.id}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    ElMessage.success('已开始下载')
+  } catch (e) {
+    // 后端错误可能以 blob 形式返回,尝试读文本取 detail
+    if (e?.response?.data instanceof Blob) {
+      try {
+        const txt = await e.response.data.text()
+        ElMessage.error(txt || '下载失败')
+        return
+      } catch (_) { /* ignore */ }
+    }
+    ElMessage.error(e?.message || '下载失败')
   }
 }
 
