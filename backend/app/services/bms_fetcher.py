@@ -265,15 +265,23 @@ def _crop_bounds_naive(start_date: datetime, end_date: datetime):
 #       - wallet(提现操作记录):数据量大,导出通常需要 3-10 分钟,给 600s 超时 + 最多 2 次重试
 #       - shanmao_refund(闪猫退款):文件不大(~172KB),默认 90s 即可,但给 1 次重试对付偶发 500
 #       - 其他(refund/ticket/device_combo):通常 90s 够用,给 1 次重试
+# ⚠️ 2026-09-05: 补 BMS 五源扩容新增源(refund_record_report 等)超时/重试配置。
+#   此前它们不在白名单 → 走默认 120s, 大导出易超时且无重试。
 # ──────────────────────────────────────────────────────────────────────
 _DOWNLOAD_TIMEOUT_MS: dict[str, int] = {
-    "wallet": 600_000,       # 10 分钟
+    "wallet": 600_000,       # 10 分钟(提现操作记录,数据量大)
     "shanmao_refund": 90_000,
     "refund": 180_000,       # 退费单也经常较大,放宽到 3 分钟
     "ticket": 180_000,
+    "ticket_finish": 180_000,   # ticket 双维度补抓(按完成时间),同 ticket 量级
     "device_combo": 90_000,
     "device_tag": 90_000,
     "device_tag_binding": 90_000,
+    # BMS 五源扩容新增(2026-09-05, A-20260905-001)
+    "refund_record_report": 180_000,  # 退款记录报表:当天全量可达数千行,给 3 分钟
+    "bms_order": 300_000,             # 订单管理:月 43 万单量级,导出慢,给 5 分钟
+    "return_tracking": 180_000,       # 退货跟踪:中量,3 分钟
+    "device_profile": 180_000,        # 设备管理:实测单日导出 8720 行,3 分钟
 }
 _DOWNLOAD_DEFAULT_TIMEOUT_MS = 120_000  # 未知类型默认 2 分钟
 _DOWNLOAD_MAX_RETRIES: dict[str, int] = {
@@ -281,8 +289,36 @@ _DOWNLOAD_MAX_RETRIES: dict[str, int] = {
     "shanmao_refund": 1,
     "refund": 1,
     "ticket": 1,
+    "ticket_finish": 1,
+    # 新源: 数据量大/导出易慢,给 1 次重试兜底偶发超时/限流
+    "refund_record_report": 1,
+    "bms_order": 1,
+    "return_tracking": 1,
+    "device_profile": 1,
 }
 _DOWNLOAD_DEFAULT_RETRIES = 1
+
+# 单源抓取外层 wait_for 的前置环节裕量(秒): 覆盖登录态复用/跳页/设置时间/查询/渲染等待。
+# 真正下载由 _download_with_retry 内部控制(单次超时 + 重试),外层只兜底防「非下载环节」无限挂起。
+_FETCH_LEAD_SECONDS = 90
+
+
+def _fetch_total_budget_sec(data_type: str) -> int:
+    """该源一次抓取的外层总预算(秒) = 内层下载最坏总耗时(含全部重试) + 前置环节裕量。
+
+    ⚠️ 2026-09-05 修复: 之前 fetch_all/fetch_one 外层 `asyncio.wait_for` 超时 =
+    `_DOWNLOAD_TIMEOUT_MS.get(data_type)`(单次下载超时), 与内层 _download_with_retry
+    的单次超时**同值** → 内层第 1 次下载卡到单次超时时, 外层同时到点取消整个协程,
+    内层「重试」根本没有机会执行 → 表现为点导出后干等 N 秒直接"抓取超时", 无任何重试日志。
+
+    修复: 外层预算 = 单次下载超时 × (重试次数+1) + 前置裕量, 保证内层完整重试窗口不被外层掐断。
+    内层限流等待(60s×重试)额外计 60s×retries 裕量(限流是内层主动 sleep, 不算在下载超时内)。
+    """
+    timeout_ms = _DOWNLOAD_TIMEOUT_MS.get(data_type, _DOWNLOAD_DEFAULT_TIMEOUT_MS)
+    retries = _DOWNLOAD_MAX_RETRIES.get(data_type, _DOWNLOAD_DEFAULT_RETRIES)
+    download_sec = (timeout_ms // 1000) * (retries + 1)
+    rate_limit_wait = 60 * retries  # 被限流时每次重试前多等 60s
+    return download_sec + rate_limit_wait + _FETCH_LEAD_SECONDS
 
 
 async def _click_export_button(page) -> None:
@@ -1341,7 +1377,7 @@ class BmsFetcher:
         start_date: datetime,
         end_date: datetime,
         config: dict,
-        timeout: int = 180,
+        timeout: int | None = None,
     ) -> FetchResult:
         """抓取单个数据源
 
@@ -1350,7 +1386,7 @@ class BmsFetcher:
             start_date: 开始时间
             end_date: 结束时间
             config: 该源的运行配置(base_url/page_path/time_labels/username/password/name,来自 sync_source_configs)
-            timeout: 超时时间(秒)
+            timeout: 超时时间(秒); None=按该源下载最坏总耗时自动计算(_fetch_total_budget_sec)
         """
         result = FetchResult()
         result.data_type = data_type
@@ -1361,6 +1397,12 @@ class BmsFetcher:
         if not config.get("username") or not config.get("password"):
             result.error = f"数据源未配置账号密码: {data_type}(请在系统管理-同步设置中配置)"
             return result
+
+        # ⚠️ 2026-09-05: timeout 未显式传时, 按该源下载最坏总耗时(含重试)自动计算,
+        #   避免默认 180s 对 wallet(600s 下载)等大源过早掐断(吞掉内层下载重试)。
+        if timeout is None:
+            timeout = _fetch_total_budget_sec(data_type)
+            logger.info(f"[{data_type}] 单源抓取外层预算 = {timeout}s(按下载最坏总耗时自动计算)")
 
         try:
             await asyncio.wait_for(
@@ -3294,10 +3336,9 @@ class BmsFetcher:
                             continue
 
                         # 单源抓取 + 复用登录态(组内首个源登录)
-                        # ⚠️ 超时按 data_type 取(与 _download_with_retry 的超时配置一致):
-                        #   wallet 600s / refund 180s / ticket 180s / 其他 120s
-                        #   历史问题: 之前硬编码 timeout=180 导致 wallet 抓取 1-2 月大数据量时超时失败
-                        _fetch_timeout = _DOWNLOAD_TIMEOUT_MS.get(data_type, _DOWNLOAD_DEFAULT_TIMEOUT_MS) // 1000
+                        # ⚠️ 外层超时 = _fetch_total_budget_sec(下载最坏总耗时含重试 + 前置裕量),
+                        #   而非单次下载超时。见 helper 注释(2026-09-05: 内外同值会吞掉内层下载重试)。
+                        _fetch_timeout = _fetch_total_budget_sec(data_type)
                         await asyncio.wait_for(
                             self._do_fetch_one_shared(
                                 data_type=data_type,
