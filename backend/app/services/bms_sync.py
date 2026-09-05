@@ -749,8 +749,40 @@ async def sync_all(
 
                             _report("刷新数据库统计...")
                             _analyze_key_tables(hook_db)
+
+                            # ── 2026-09-05 (#20): 现金流(退款记录报表)采集后自动回填 ──
+                            # 本次同步若导入了 refund_record_report(E 路线上退款水单),
+                            # 用其(SN+金额+精准退款时间)尝试回填 manual_refunds(D 路手动登记)
+                            # 缺失/倒挂的 op_time(架构 A-20260905-002 LOCKED, 幂等 + auto_filled 标记)。
+                            # 仅当该源有成功导入时触发(5:00/8:00 现金流采集), 常规 refund/ticket 同步不触发。
+                            # 失败不阻塞主流程(回填是增值, 非关键路径)。
+                            _imported_rrr = any(
+                                isinstance(r, dict)
+                                and r.get("data_type") == "refund_record_report"
+                                and r.get("success")
+                                and ((r.get("inserted_rows") or 0) + (r.get("updated_rows") or 0)) > 0
+                                for r in results
+                            )
+                            _backfill_stats = None
+                            if _imported_rrr:
+                                try:
+                                    from app.services.reconcile import backfill_d_op_time
+                                    _report("回填手动登记退款时间(现金流水单匹配)...")
+                                    _backfill_stats = backfill_d_op_time(hook_db, limit=50000)
+                                    logger.info(
+                                        f"[post-sync] 退款记录报表导入后自动回填 D 路 op_time: "
+                                        f"{_backfill_stats}"
+                                    )
+                                except Exception as _bf_e:
+                                    # 回填失败不影响同步主流程(仅记日志)
+                                    logger.warning(
+                                        f"[post-sync] 自动回填 D 路 op_time 异常(忽略, 不影响同步): {_bf_e}",
+                                        exc_info=True,
+                                    )
+
                             logger.info(
                                 f"post-sync 钩子完成: match={match_stats}, wide={wide_stats}"
+                                + (f", backfill={_backfill_stats}" if _backfill_stats else "")
                             )
                             _report("post-sync 完成", phase="imported")
                             return match_stats, wide_stats
