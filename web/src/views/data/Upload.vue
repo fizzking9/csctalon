@@ -15,11 +15,19 @@
               <el-option label="退费单管理" value="refund" />
               <el-option label="提现操作记录" value="wallet" />
               <el-option label="服务请求管理" value="ticket" />
-              <el-option label="商户号现金流" value="merchant_refund" />
+              <el-option label="商户号现金流(旧,作废)" value="merchant_refund" />
               <el-option label="商户主数据" value="merchant" />
               <el-option label="智能助手处理记录" value="cs_record" />
               <el-option label="外部投诉(315/监督局)" value="external_complaint" />
               <el-option label="卡商群投诉" value="card_complaint" />
+              <el-option label="设备套餐" value="device_combo" />
+              <el-option label="手动退款登记" value="manual_refund" />
+              <el-option label="商户号现金(退)/退款记录报表" value="refund_record_report" />
+              <el-option label="订单管理" value="bms_order" />
+              <el-option label="退货跟踪" value="return_tracking" />
+              <el-option label="设备月流量" value="device_flow_usage" />
+              <el-option label="设备管理档案" value="device_profile" />
+              <el-option label="设备标签(打标明细)" value="device_tag_binding" />
             </el-select>
           </el-form-item>
           <el-form-item v-if="form.data_type" label="Sheet">
@@ -269,7 +277,7 @@ import { ref, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Loading } from '@element-plus/icons-vue'
 import { parseUpload, previewDiff, confirmImport } from '@/api/upload'
-import { COLUMN_TEMPLATES } from './templates'
+import { COLUMN_TEMPLATES, TYPE_LABELS } from './templates'
 
 const step = ref(0)
 const parsing = ref(false)
@@ -283,7 +291,7 @@ const importResult = ref(null)
 
 const form = reactive({ data_type: '', sheet_name: null })
 
-const typeLabel = computed(() => ({ refund: '退费单', wallet: '钱包提现操作', ticket: '服务退款工单', merchant_refund: '商户号现金流', merchant: '商户主数据' }[form.data_type] || ''))
+const typeLabel = computed(() => TYPE_LABELS[form.data_type] || form.data_type || '')
 const targetFields = computed(() => Object.keys(COLUMN_TEMPLATES[form.data_type] || {}))
 const mappingRows = computed(() => (preview.value.columns || []).map((c) => ({ source: c, target: suggestedMapping()[c] || '' })))
 const mappingFieldCount = computed(() => mappingRows.value.filter((r) => r.target).length)

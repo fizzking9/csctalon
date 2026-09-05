@@ -28,7 +28,15 @@ from app.services.upsert import run_upsert
 
 router = APIRouter(prefix="/uploads", tags=["数据中心-上传"])
 
-DATA_TYPES = {"refund", "shanmao_refund", "wallet", "ticket", "merchant_refund", "merchant", "cs_record", "external_complaint", "card_complaint", "staff"}
+DATA_TYPES = {
+    "refund", "shanmao_refund", "wallet", "ticket", "merchant_refund", "merchant",
+    "cs_record", "external_complaint", "card_complaint", "staff",
+    # BMS 五源扩容新增(2026-09-05, A-20260905-001): 支持文件导入回补/补录
+    "refund_record_report", "bms_order", "return_tracking",
+    "device_flow_usage", "device_profile",
+    # 其它既有可导入类型(补齐 Upload 未暴露/历史遗漏)
+    "manual_refund", "device_combo", "device_tag", "device_tag_binding",
+}
 
 
 @router.post("/parse", response_model=R, summary="上传并解析文件(返回预览)")
