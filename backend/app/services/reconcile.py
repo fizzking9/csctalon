@@ -148,6 +148,8 @@ def backfill_d_op_time(db, limit: int = 5000) -> dict:
         old_op = m.op_time
         m.op_time = report.refund_time
         m.quality_status = "auto_filled"
+        # ⚠️ 2026-09-05 (#20): 结构化溯源列(替代/补充解析 quality_note 文本)
+        m.backfill_refund_record_report_id = str(report.id)
         m.quality_note = (
             f"由退款记录报表 refund_time 回填, 来源 refund_record_reports.id={report.id}"
             + (f", 原 op_time={old_op}" if old_op else "")

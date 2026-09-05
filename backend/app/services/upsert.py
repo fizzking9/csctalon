@@ -1506,6 +1506,7 @@ def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session
                 continue
             op_time = _ensure_afternoon_time(_to_datetime(data.get("op_time")))
             # R2/R3 时间质量校验(含自动纠错/待确认标记)
+            register_time_before = register_time  # 纠错前原始值(存 register_time_raw)
             register_time, quality_status, quality_note = _manual_refund_quality_check(
                 register_time, op_time, idx, result)
             registrant = _sanitize_name_field(data.get("registrant"), idx, result, "手动退款-登记人")
@@ -1513,6 +1514,9 @@ def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session
             raw_refunded = (data.get("is_refunded") or "").strip() if data.get("is_refunded") is not None else ""
             rows.append({
                 "register_time": register_time,
+                # ⚠️ 2026-09-05 (#20): 纠错(auto_fixed)发生时保留原始值到 register_time_raw,
+                #   供审计/回滚; 未纠错(值与 register_time 相同)则置 NULL
+                "register_time_raw": register_time_before if quality_status == "auto_fixed" else None,
                 "device_sn": (data.get("device_sn") or "").strip() if data.get("device_sn") else None,
                 "order_no": order_no,
                 "merchant_id": (data.get("merchant_id") or "").strip() if data.get("merchant_id") else None,

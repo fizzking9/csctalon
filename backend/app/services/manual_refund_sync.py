@@ -111,12 +111,15 @@ def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult) ->
             return None
         op_time = _ensure_afternoon_time(_to_datetime(data.get("op_time")))
         # 时间质量校验(年份纠错 auto_fixed / 待人工确认 pending, 覆盖 R2/R3)
+        register_time_before = register_time  # 纠错前原始值(存 register_time_raw)
         register_time, quality_status, quality_note = _manual_refund_quality_check(
             register_time, op_time, idx, result)
         raw_refunded = _to_str(data.get("is_refunded"))
         device_sn = _to_str(data.get("device_sn"))
         return {
             "register_time": register_time,
+            # ⚠️ 2026-09-05 (#20): 纠错(auto_fixed)发生时保留原始值到 register_time_raw
+            "register_time_raw": register_time_before if quality_status == "auto_fixed" else None,
             "device_sn": device_sn[:64] if device_sn else None,
             "order_no": order_no,
             "merchant_id": _truncate_str(data.get("merchant_id"), 64),

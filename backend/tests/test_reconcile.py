@@ -114,6 +114,8 @@ def test_backfill_op_time_l2_match(_test_session):
     assert m.op_time == r.refund_time
     assert m.quality_status == "auto_filled"
     assert "refund_record_reports.id" in (m.quality_note or "")
+    # ⚠️ 2026-09-05 (#20): 结构化溯源列被写入(双向溯源)
+    assert m.backfill_refund_record_report_id == str(r.id)
 
 
 def test_backfill_op_time_l1_order_match(_test_session):

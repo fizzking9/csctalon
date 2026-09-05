@@ -65,5 +65,16 @@ class ManualRefund(IDMixin, TimestampMixin, Base):
     quality_note: Mapped[str | None] = mapped_column(
         String(512), nullable=True, comment="质量说明(自动纠错或待确认原因, 含原始值)"
     )
+    # ── 辅助列(2026-09-05, #20): 数据修复/回填溯源 ──────────────
+    # 登记日期原始值(纠错前): 导入时若 register_time 被自动纠错(auto_fixed), 此处保留
+    # 原始值(如 Excel 里误填的未来年份), 供审计/回滚; 正常行 = NULL(与 register_time 相同)
+    register_time_raw: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="登记日期原始值(纠错前保留, 正常行=NULL)"
+    )
+    # 回填来源: op_time 由退款记录报表(refund_record_reports)回填时, 记录来源现金流行 id,
+    # 与 refund_record_reports.backfill_manual_refund_id 构成双向溯源(替代解析 quality_note 文本)
+    backfill_refund_record_report_id: Mapped[str | None] = mapped_column(
+        String(64), index=True, nullable=True, comment="op_time 回填来源 refund_record_reports.id"
+    )
 
     # created_at/updated_at 来自 TimestampMixin(系统导入时间)
