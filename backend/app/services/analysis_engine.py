@@ -23,7 +23,10 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.person import Person, PersonAlias
 from app.models.refund import Refund
+from app.models.refund_record_report import RefundRecordReport
 from app.models.refund_wide import RefundWide
+from app.models.scrm_session import ScrmSession
+from app.models.scrm_session_transfer import ScrmSessionTransfer
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 
@@ -35,6 +38,9 @@ _MODEL_REGISTRY: dict[str, type] = {
     ServiceTicket.__tablename__: ServiceTicket,
     DeviceCombo.__tablename__: DeviceCombo,
     MerchantRefund.__tablename__: MerchantRefund,
+    RefundRecordReport.__tablename__: RefundRecordReport,
+    ScrmSession.__tablename__: ScrmSession,
+    ScrmSessionTransfer.__tablename__: ScrmSessionTransfer,
     CsRecord.__tablename__: CsRecord,
     ExternalComplaint.__tablename__: ExternalComplaint,
     CardComplaint.__tablename__: CardComplaint,

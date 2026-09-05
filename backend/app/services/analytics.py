@@ -146,11 +146,23 @@ def _clean_col_expr(col):
 
 
 def _date_range(start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:
-    if not end:
-        end = datetime.now()
-    if not start:
+    """时间窗: 缺省=最近30天(UTC aware); naive 入参统一按北京时间解释转 UTC aware。
+
+    ⚠️ 2026-09-06 审查修复(#20): API 层 _parse_dt 产出 naive(前端传北京 YYYY-MM-DD),
+    若直接与 timestamptz 列比较, PG 按会话时区(UTC)解释 naive → 北京 00:00-08:00 数据
+    落在窗外(窗口整体偏 8h)。这里把 naive 视为北京时间 → UTC aware, 消除偏移。
+    """
+    if end is None:
+        end = _dt.datetime.now(_dt.timezone.utc)
+    if start is None:
         start = end - timedelta(days=30)
-    return start, end
+
+    def _as_utc(dt: datetime) -> datetime:
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=TZ).astimezone(_dt.timezone.utc)  # naive=北京 → UTC
+        return dt.astimezone(_dt.timezone.utc)  # aware 统一转 UTC
+
+    return _as_utc(start), _as_utc(end)
 
 
 # ---------- 看板1:运营分析 ----------

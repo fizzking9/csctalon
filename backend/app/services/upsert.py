@@ -1417,6 +1417,19 @@ def upsert_shanmao_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
 #   R3 时间倒挂(op_time 早于 register_time 超过1天) → quality=pending
 #   R4 op_time 自身未来/异常年份(> now+3d): 有正常 register_time 佐证 → 年份按 register_time 修正(保留月日时分), auto_fixed
 #       (2026-09-05 补, #20: 曾发现 register_time=2026 正常但 op_time=2029 的录入笔误)
+def _safe_replace_year(dt: datetime, year: int) -> datetime:
+    """把 dt 的年份改为 year, 处理闰年 2/29 边界(2026-09-06 审查发现, #20)。
+
+    datetime.replace(year) 在 2/29 且目标年非闰年时抛 ValueError → 原实现会让
+    脏 2/29 数据整行丢弃。此 helper 退到 2/28(最小相邻日修正), 保留时分秒, 不丢行。
+    """
+    try:
+        return dt.replace(year=year)
+    except ValueError:
+        # 2/29 → 目标非闰年: 退到 2/28
+        return dt.replace(year=year, month=2, day=28)
+
+
 def _manual_refund_quality_check(
     register_time: datetime | None,
     op_time: datetime | None,
@@ -1439,7 +1452,7 @@ def _manual_refund_quality_check(
     if register_time is not None and not (low <= register_time <= high):
         orig = register_time
         if op_time is not None and low <= op_time <= high:
-            fixed = register_time.replace(year=op_time.year)
+            fixed = _safe_replace_year(register_time, op_time.year)
             if low <= fixed <= high:
                 status, note = "auto_fixed", (
                     f"登记日期年份异常(原始 {orig:%Y-%m-%d}), "
@@ -1450,7 +1463,7 @@ def _manual_refund_quality_check(
 
     # R4 操作时间自身未来/异常年份(> now+3d): 有正常登记日期佐证 → 修正 op_time 年份
     if op_time is not None and op_time > high and register_time is not None and (low <= register_time <= high):
-        fixed_op = op_time.replace(year=register_time.year)
+        fixed_op = _safe_replace_year(op_time, register_time.year)
         # 仅当修正后 op_time 不再未来且与登记日期不倒挂(允许同日)才算合理
         if low <= fixed_op <= high:
             if status is None:
