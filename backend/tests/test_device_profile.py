@@ -17,13 +17,30 @@ from sqlalchemy.orm import Session
 
 @pytest.fixture()
 def _test_session(_engine):
-    """独立 session(让 run_upsert 的 commit 生效); 清 devices(避免污染其它用例)"""
+    """独立 session(让 run_upsert 的 commit 生效)。
+
+    关键: 本文件测试用 run_upsert 会真实 commit 落库(devices 等共享表),
+    必须在 teardown 清理本文件写入的前缀数据, 否则残留污染其它依赖共享表的测试
+    (曾导致 test_external_brief 等偶发失败)。
+    """
+    from app.models.device import Device
+    from app.models.sync_source_config import SyncSourceConfig
+
     session = Session(_engine, autocommit=False, autoflush=False)
-    # 注意: devices 是全局共享表, 清空会影响其它用例依赖的设备; 因此不清空,
-    # 只用唯一 SN 避免冲突, 结束 rollback 即可
     try:
         yield session
     finally:
+        # 清理本文件可能写入的测试数据(前缀隔离)
+        try:
+            session.execute(SyncSourceConfig.__table__.delete().where(
+                SyncSourceConfig.data_type == "__d6_test__"
+            ))
+            session.execute(Device.__table__.delete().where(
+                Device.sn.like("SN-P4-%")
+            ))
+            session.commit()
+        except Exception:
+            session.rollback()
         session.rollback()
         session.close()
 

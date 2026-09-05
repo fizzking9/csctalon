@@ -26,14 +26,24 @@ def _dt(s: str) -> datetime:
 @pytest.fixture()
 def _test_session(_engine):
     session = Session(_engine, autocommit=False, autoflush=False)
-    from app.models import ManualRefund, Refund, RefundRecordReport
+    from app.models import Device, ManualRefund, Refund, RefundRecordReport
 
     for cls in (RefundRecordReport, ManualRefund, Refund):
         session.execute(cls.__table__.delete())
+    # 清理本文件可能残留的测试设备(_ensure_device commit 落库)
+    session.execute(Device.__table__.delete().where(Device.sn.like("SN-D-%")))
     session.commit()
     try:
         yield session
     finally:
+        # teardown: 清理本文件写入的共享表数据(避免污染其它测试)
+        try:
+            for cls in (RefundRecordReport, ManualRefund, Refund):
+                session.execute(cls.__table__.delete())
+            session.execute(Device.__table__.delete().where(Device.sn.like("SN-D-%")))
+            session.commit()
+        except Exception:
+            session.rollback()
         session.rollback()
         session.close()
 

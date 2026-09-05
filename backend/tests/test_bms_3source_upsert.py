@@ -18,8 +18,15 @@ from sqlalchemy.orm import Session
 
 @pytest.fixture()
 def _test_session(_engine):
-    """独立 session(非 db fixture 显式事务), 让 run_upsert 的 commit 生效"""
+    """独立 session(非 db fixture 显式事务), 让 run_upsert 的 commit 生效。
+
+    run_upsert 会真实 commit 且经 _sync_devices 建 devices(测试 SN), teardown 需清理,
+    否则残留污染其它依赖共享表的测试(曾致 test_external_brief 偶发失败)。
+    """
+    from app.models import Device
+
     session = Session(_engine, autocommit=False, autoflush=False)
+    _TEST_SNS = ["68772550194237", "69212633321709", "68772612318169", "SN-TEST-1"]
     for model in (
         "RefundRecordReport", "BmsOrder", "ReturnTracking",
     ):
@@ -27,10 +34,21 @@ def _test_session(_engine):
 
         cls = m[model]
         session.execute(cls.__table__.delete())
+    session.execute(Device.__table__.delete().where(Device.sn.in_(_TEST_SNS)))
     session.commit()
     try:
         yield session
     finally:
+        # teardown: 清理本文件写入的共享表数据
+        try:
+            for model in ("RefundRecordReport", "BmsOrder", "ReturnTracking"):
+                from app.models import __dict__ as m
+
+                session.execute(m[model].__table__.delete())
+            session.execute(Device.__table__.delete().where(Device.sn.in_(_TEST_SNS)))
+            session.commit()
+        except Exception:
+            session.rollback()
         session.rollback()
         session.close()
 

@@ -18,17 +18,31 @@ from sqlalchemy.orm import Session
 
 @pytest.fixture()
 def _test_session(_engine):
-    """独立 session(非 db fixture 的显式事务), 让 run_upsert 的 commit 生效"""
+    """独立 session(非 db fixture 的显式事务), 让 run_upsert 的 commit 生效。
+
+    注意: run_upsert 会真实 commit 且经 _sync_devices 把测试 SN 建进 devices 共享表,
+    teardown 必须清理(device_flow_usage + 本文件建的 devices), 否则污染其它测试
+    (曾导致 test_external_brief 等偶发失败)。
+    """
     engine = _engine
     session = Session(engine, autocommit=False, autoflush=False)
-    # 清空目标表(避免与既有数据互相影响; 该表是本次新增, 测试库为空)
+    from app.models.device import Device
     from app.models.device_flow_usage import DeviceFlowUsage
 
+    # 清空目标表 + 本文件用到的测试设备(避免与既有数据互相影响)
     session.execute(DeviceFlowUsage.__table__.delete())
+    session.execute(Device.__table__.delete().where(Device.sn.in_(["68772550194237", "69212627276896"])))
     session.commit()
     try:
         yield session
     finally:
+        # teardown 清理本文件可能写入的数据
+        try:
+            session.execute(DeviceFlowUsage.__table__.delete())
+            session.execute(Device.__table__.delete().where(Device.sn.in_(["68772550194237", "69212627276896"])))
+            session.commit()
+        except Exception:
+            session.rollback()
         session.rollback()
         session.close()
 
