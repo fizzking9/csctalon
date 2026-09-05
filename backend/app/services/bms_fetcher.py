@@ -1242,6 +1242,15 @@ async def _try_auto_login_via_ocr(
     return False, last_err or f"自动识别{_CAPTCHA_OCR_MAX_RETRY}次均失败"
 
 
+class BmsSessionExpired(RuntimeError):
+    """BMS 登录态中途失效(复用登录态跳页后被踢回 #/login)。
+
+    与「账号密码错误」不同: 不是凭证问题, 是会话被 BMS 侧失效(并发登录互踢/超时/僵尸会话),
+    重新登录即可恢复。上层(fetch_all 组循环)捕获后应把 logged_in_ok 置 False,
+    让同组下一个源以 already_logged_in=False 重新登录, 而不是熔断跳过整组。
+    """
+
+
 class FetchResult:
     """单次抓取结果"""
 
@@ -3304,6 +3313,19 @@ class BmsFetcher:
                         )
                         if fr.success:
                             logged_in_ok = True
+                    except BmsSessionExpired as e:
+                        # ── 2026-09-05: 复用登录态中途失效(被踢回登录页) ──
+                        # 本源快速失败(error_class=transient 可重试), 但**不熔断**同组后续源:
+                        # 把 logged_in_ok 置 False → 同组下一个源以 already_logged_in=False
+                        # 真正重新登录 → 后续源恢复正常(避免整批 180~600s 盲目重试后全挂)。
+                        fr.error = str(e)
+                        fr.error_class = "transient"
+                        logger.error(fr.error)
+                        logged_in_ok = False
+                        logger.info(
+                            f"[组{group_idx+1}] {data_type} 会话过期,已重置登录态;"
+                            "同组后续源将重新登录"
+                        )
                     except asyncio.TimeoutError:
                         fr.error = f"抓取超时({_fetch_timeout}秒): {config.get('name', data_type)}"
                         logger.error(fr.error)
@@ -3506,18 +3528,40 @@ class BmsFetcher:
 
                     logger.info(f"[{data_type}] 登录成功(后续同组源复用登录态)")
         else:
-            # 复用登录态: 不重新登录,直接跳页
-            logger.info(f"[{data_type}] 复用登录态,直接跳转目标页")
+            # ⚠️ 复用登录态: 不直接信任 already_logged_in, 先跳目标页校验是否仍有效。
+            #    2026-09-05 生产事故: refund 登录成功后, 组内下一源(ticket)隔 65s 冷却再跳页时
+            #    BMS 会话已被踢下线(同账号并发/僵尸会话冲突) → 页面落回 #/login?redirect=...
+            #    旧代码不校验 → 把"登录"按钮当查询按钮点 → 各源盲目重试 180~600s 后才报
+            #    "未找到导出按钮"(误导), 整批 2/4 失败。
+            #    修复: 复用登录态跳页后立即校验, 若落回登录页 → 抛 BmsSessionExpired,
+            #    上层捕获后让同组下一源重新登录(而非熔断跳过/盲目重试)。
+            logger.info(f"[{data_type}] 复用登录态,跳转目标页校验是否仍有效...")
+            await page.goto(page_url, wait_until="networkidle")
+            await asyncio.sleep(2)
+            if "login" in (page.url or "").lower():
+                logger.warning(
+                    f"[{data_type}] 复用登录态已失效: 跳转 {page_url} 后落回登录页({page.url}), "
+                    "下一源将重新登录"
+                )
+                # 不设置 result.logged_in → 上层不会把失效登录态传给后续同组源
+                raise BmsSessionExpired(
+                    f"{data_type} BMS 会话已过期(页面落回登录页), 同组下一源将重新登录"
+                )
+            logger.info(f"[{data_type}] 复用登录态校验通过,当前页面已就绪")
 
         # ⚠️ 2026-08-12: 标记登录已完成 — 即使后续下载超时被 asyncio.wait_for 取消,
         #   此标记已写入 result,调用方可据此让同组后续源复用登录态,避免在残留页面上"重新登录"
         result.logged_in = True
 
         # 2. 进入目标页面
-        logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")
-        await page.goto(page_url, wait_until="networkidle")
-        await asyncio.sleep(3)
+        #    - 首次登录/无登录态: 这里统一 goto 目标页
+        #    - 复用登录态: 上面 else 分支已 goto 校验过(成功则停在目标页), 这里不再重复 goto
+        if not already_logged_in:
+            logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")
+            await page.goto(page_url, wait_until="networkidle")
+            await asyncio.sleep(3)
 
+        # 渲染就绪守卫(两种路径都执行; 复用成功路径已停在目标页, 直接轮询其按钮渲染)
         await self._wait_until_page_has_any_clickable(page)
 
         # 3. 设置时间范围
