@@ -144,3 +144,25 @@ def test_a_route_bj_midnight_buckets_to_bj_day(_test_session):
     m = _day_map_of(rows)
     assert m.get("2026-09-05", {}).get("direct", 0) == 50.00
     assert m.get("2026-09-04", {}).get("direct", 0) == 0.0
+
+
+def test_naive_param_treated_as_bj_window(_test_session):
+    """naive 入参按北京窗口(2026-09-06 修复): 前端传 YYYY-MM-DD(naive),
+    北京 9/1 00:30 的退款(UTC 8/31 16:30)必须被包含 —— 若 naive 被当 UTC 窗口
+    (UTC 9/1 0:00 起)会漏掉它"""
+    from datetime import datetime as _py_dt
+    from app.services.analytics import cash_out_trend
+
+    # 北京 2026-09-01 00:30 = UTC 2026-08-31 16:30
+    bj_midnight = _bj("2026-09-01 00:30:00")
+    _seed_report(_test_session, "SN-TZ-N1", "66.00", bj_midnight)
+
+    # naive 入参(模拟前端 dateRange 传 YYYY-MM-DD)
+    start = _py_dt.fromisoformat("2026-09-01")   # naive 北京
+    end = _py_dt.fromisoformat("2026-09-10")     # naive 北京
+    rows = cash_out_trend(_test_session, start, end)
+    m = _day_map_of(rows)
+    # 修复前: naive 当 UTC → start=UTC 9/1 0:00, 数据 UTC 8/31 16:30 被漏
+    # 修复后: naive 按北京 → start=UTC 8/31 16:00, 数据被包含
+    assert m.get("2026-09-01", {}).get("merchant", 0) == 66.00
+    assert m.get("2026-08-31", {}).get("merchant", 0) == 0.0  # 北京日归属 9/1

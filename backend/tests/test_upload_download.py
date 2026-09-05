@@ -75,6 +75,57 @@ def test_file_download_missing_record(admin_client):
     assert resp.status_code == 404
 
 
+def test_resolve_upload_path_traversal_blocked(tmp_path, monkeypatch):
+    """路径穿越防护(2026-09-06 审查补): stored_path='../' 越界必须 400"""
+    from fastapi import HTTPException
+
+    from app.core.config import settings
+    from app.core.storage import resolve_upload_path
+
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
+    # 越界尝试: ../ 跳出 UPLOAD_DIR(注: URL 编码 ..%2F 不会被 Path 解码, 不构成穿越)
+    for evil in ("../evil.csv", "../../etc/passwd", "a/../../secret.csv"):
+        try:
+            resolve_upload_path(evil)
+            assert False, f"应拒绝路径穿越: {evil}"
+        except HTTPException as e:
+            assert e.status_code == 400
+    # 合法相对路径(base 内)应通过
+    (tmp_path / "2026-09").mkdir(exist_ok=True)
+    (tmp_path / "2026-09" / "ok.csv").write_text("a,b\n", encoding="utf-8")
+    p = resolve_upload_path("2026-09/ok.csv")
+    assert p.exists()
+
+
+def test_file_download_stored_path_traversal(admin_client, _engine, tmp_path, monkeypatch):
+    """下载端点对越界 stored_path 记录 → 400(而非读盘外文件)"""
+    from sqlalchemy.orm import Session
+
+    from app.core.config import settings
+    from app.models.upload import UploadRecord
+
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
+    session = Session(_engine, autocommit=False, autoflush=False)
+    try:
+        rec = UploadRecord(
+            data_type="refund_record_report",
+            filename="evil.csv",
+            stored_path="../evil.csv",  # 恶意越界
+            status="imported",
+            uploaded_by="admin",
+            source="manual",
+        )
+        session.add(rec)
+        session.commit()
+        session.refresh(rec)
+        rec_id = rec.id
+    finally:
+        session.close()
+
+    resp = admin_client.get("/api/v1/uploads/file", params={"record_id": rec_id})
+    assert resp.status_code == 400  # 路径越界被拒
+
+
 def test_file_download_ok(admin_client, _engine, tmp_path, monkeypatch):
     """已存在的 UploadRecord → 200 返回原始文件内容"""
     from sqlalchemy.orm import Session

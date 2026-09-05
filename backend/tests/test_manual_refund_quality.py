@@ -99,3 +99,35 @@ def test_future_op_time_no_register_pending():
     assert op_out == op           # 不自动改
     assert reg_out == reg
     assert "待人工" in (note or "")
+
+
+def test_future_op_time_leap_day_safe(_test_session=None):
+    """R4 闰年兜底(2026-09-06 审查修复): op_time=2028-02-29(闰年未来) + register 2026-02 邻近 → 修正为 2026-02-28 不抛错"""
+    from app.services.upsert import _manual_refund_quality_check
+
+    r = _FakeResult()
+    # register_time 2026-02-27 正常(与修正后 2/28 相邻, 不倒挂); op 2028-02-29 闰年未来触发 R4
+    reg = datetime(2026, 2, 27, 7, 0, tzinfo=_TZ)
+    op = datetime(2028, 2, 29, 7, 0, tzinfo=_TZ)      # replace(year=2026) 会抛 ValueError(2/29→非闰)
+    reg_out, op_out, status, note = _manual_refund_quality_check(reg, op, 0, r)
+    # 应 auto_fixed(不抛错), op_time 修正到 2026-02-28(2/28 兜底)
+    assert status == "auto_fixed"
+    assert op_out is not None
+    assert op_out.year == 2026
+    assert (op_out.month, op_out.day) == (2, 28)  # 闰日退到 2/28
+    assert reg_out == reg
+
+
+def test_future_register_leap_day_safe(_test_session=None):
+    """R2 闰年兜底(2026-09-06 审查修复): register_time=2028-02-29 + op 2026-02-27 佐证 → 修正 2026-02-28 不抛错"""
+    from app.services.upsert import _manual_refund_quality_check
+
+    r = _FakeResult()
+    reg = datetime(2028, 2, 29, 7, 0, tzinfo=_TZ)     # 脏: 未来闰日
+    op = datetime(2026, 2, 27, 7, 0, tzinfo=_TZ)      # 佐证: 2026(与修正后相邻, 不倒挂)
+    reg_out, op_out, status, note = _manual_refund_quality_check(reg, op, 0, r)
+    assert status == "auto_fixed"
+    assert reg_out is not None
+    assert reg_out.year == 2026
+    assert (reg_out.month, reg_out.day) == (2, 28)    # 闰日退到 2/28
+    assert op_out == op

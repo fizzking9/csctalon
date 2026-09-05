@@ -5,7 +5,7 @@
 锁定与业务规范一致的关键口径。
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.services.analytics import (
     _clean_phone,
@@ -55,26 +55,34 @@ def test_clean_phone_invalid_length_or_prefix():
 
 
 # ---- _date_range: 默认时间范围 ----
+# ⚠️ 2026-09-06 审查修复(#20): naive 入参按北京时间解释转 UTC aware(消除 API naive
+#    窗口偏 8h); aware 入参统一转 UTC。
 
 def test_date_range_both_provided():
-    """正向: 同时给 start/end 原样返回。"""
+    """正向: naive start/end 视为北京时间 → 转 UTC aware。"""
     s, e = datetime(2026, 9, 1), datetime(2026, 9, 30)
-    assert _date_range(s, e) == (s, e)
+    start, end = _date_range(s, e)
+    # 北京 9/1 00:00 = UTC 8/31 16:00; 北京 9/30 00:00 = UTC 9/29 16:00
+    assert start == datetime(2026, 8, 31, 16, 0, tzinfo=timezone.utc)
+    assert end == datetime(2026, 9, 29, 16, 0, tzinfo=timezone.utc)
 
 
 def test_date_range_default_end_now():
-    """边界: 只给 start, end 默认当前时间。"""
+    """边界: 只给 start(naive 北京), end 默认当前时间。"""
     s = datetime(2026, 9, 1)
     start, end = _date_range(s, None)
-    assert start == s
+    # start 被解释为北京 9/1 0:00 → UTC aware
+    assert start == datetime(2026, 8, 31, 16, 0, tzinfo=timezone.utc)
     assert end is not None
-    assert end > s
+    assert end.tzinfo is not None  # aware
+    assert end > start
 
 
 def test_date_range_default_both():
-    """边界: 都不给, 默认近 30 天。"""
+    """边界: 都不给, 默认近 30 天(aware)。"""
     start, end = _date_range(None, None)
     assert end is not None
+    assert end.tzinfo is not None
     assert start == end - timedelta(days=30)
 
 
