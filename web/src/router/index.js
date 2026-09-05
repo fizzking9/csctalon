@@ -68,6 +68,12 @@ const routes = [
         component: () => import('@/views/data/RechargeTraffic.vue'),
         meta: { title: '流量与充值查询', icon: 'Coin' },
       },
+      {
+        path: 'data/device-flow-audit',
+        name: 'DataDeviceFlowAudit',
+        component: () => import('@/views/data/DeviceFlowAudit.vue'),
+        meta: { title: '设备流量审计', icon: 'Odometer' },
+      },
       // 分析看板
       {
         path: 'analytics/views',

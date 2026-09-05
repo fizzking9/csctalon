@@ -106,6 +106,7 @@
           <el-menu-item index="/system/users">用户管理</el-menu-item>
           <el-menu-item index="/system/persons">人员管理</el-menu-item>
           <el-menu-item index="/data/ingest">数据采集</el-menu-item>
+          <el-menu-item index="/data/device-flow-audit">设备流量审计</el-menu-item>
           <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
           <el-menu-item index="/analytics/views">视图清单</el-menu-item>
           <el-menu-item index="/dashboards/designer">看板配置</el-menu-item>

@@ -17,6 +17,7 @@ from app.api.v1 import (
     data_quality,
     data_sources,
     dept_info_syncs,
+    device_flow,
     devices,
     doc_sync,
     external,
@@ -68,6 +69,7 @@ api_router.include_router(collection_logs.router)
 api_router.include_router(match.router)
 api_router.include_router(analytics.router)
 api_router.include_router(devices.router)
+api_router.include_router(device_flow.router)
 api_router.include_router(todos.router)
 api_router.include_router(tasks.router)
 api_router.include_router(measures.router)
