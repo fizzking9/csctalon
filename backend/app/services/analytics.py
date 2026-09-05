@@ -222,19 +222,20 @@ def operation_method_dist(db: Session) -> list[dict]:
 # │   已建表有数据,按 status='已退款' + audit_time 聚合                            │
 # │ D. 手动退款         manual_refunds 独立业务表 (data_sources.code=manual_refund)│
 # │   客服商户号手动退款登记台账,按 is_refunded='是' + COALESCE(op_time,register_time)│
-# ├─────────────────── 实际现金流 (财务侧,微信商户号真实扣款,独立第五张表) ──────────┤
-# │ E. 商户号现金流     merchant_refunds 表 WHERE refund_status = 'SUCCESS'       │
+# ├─────────────────── 实际现金流 (财务侧,微信商户号真实扣款,对账基准) ────────────┤
+# │ E. 商户号现金流     refund_record_reports 表 WHERE refund_status IN            │
+# │                      ('退款成功','成功','SUCCESS')   (2026-09-05 v1.1 起切换) │
 # │   不区分 refund_type 字段 (ORIGINAL+BALANCE 全部合计,不分桶C/D)               │
-# │   (data_sources.code=merchant_refund, name_cn="商户号现金流" = 对账基准)      │
+# │   (data_sources.code=refund_record_report, name_cn="退款记录报表" = 对账基准) │
 # ├─────────────────── 合计口径 ───────────────────────────────────────────────────┤
 # │ 经营估算 (经营侧四路总登记出款) = A + B + C + D                           │
-# │ 实际现金流 (财务侧商户号真扣) = E  (merchant_refunds SUCCESS 合计)            │
+# │ 实际现金流 (财务侧商户号真扣) = E  (refund_record_reports 退款成功合计)       │
 # │ 对账偏差 = 经营估算 − 实际现金流 = (A+B+C+D) − E                               │
 # │                                                                                │
 # │ 术语对齐:                                                                      │
 # │   "今日退款笔数/金额" = 路线 A  (退费单线上直退, 业务退款口径)                 │
 # │   "真实现金流出 / 现金流出" = A+B+C+D (经营侧四路出款估算)                     │
-# │   "商户号实际现金流" = E (merchant_refunds SUCCESS,对账基准)                  │
+# │   "商户号实际现金流" = E (refund_record_reports 退款成功,对账基准)            │
 # │   "对账偏差" = 经营估算 − 实际现金流 = (A+B+C+D) − E                          │
 # └────────────────────────────────────────────────────────────────────────────────┘
 #
@@ -242,11 +243,13 @@ def operation_method_dist(db: Session) -> list[dict]:
 #   v2错误: 把 C/D 当成 merchant_refunds.refund_type 分桶(ORIGINAL/BALANCE),
 #           把 C+D 当成"财务实际"与 A+B 当成"经营估算",导致商户号流水被重复使用
 #   v3纠正: C/D 是独立的两张业务表 (闪猫退款 / 手动退款, data_source已注册),
-#           merchant_refunds 只对应 E = 实际现金流 (独立第五张表,对账基准),
-#           经营估算 = A+B+C+D, 实际 = E, 对账偏差 = 经营 − 实际
+#           E 只作对账基准独立展示, 经营估算 = A+B+C+D, 实际 = E, 对账偏差 = 经营 − 实际
 # 【v3 → v4 改动】(2026-08-23): D 路(手动退款)物理表 manual_refunds 已建并导入
 #   商户号手机退款处理登记.xlsx, 不再依赖占位表返回 0; 决策概览移除"商户号直退=E"
 #   的错误累加, E 只作对账基准独立展示, 并新增登记退款水位(已登记未退款=蓄水)。
+# 【v4 → v1.1 改动】(2026-09-05,#20): E 路数据源由 merchant_refunds(一次性 Excel
+#   快照) 切换为 refund_record_reports(BMS 退款记录报表,每天采集+导入补历史);
+#   旧表 merchant_refunds 保留供 matcher/wide 关联, 不再作 E 统计取数。
 
 # ---------- 路线A 退费单线上直退 ----------
 def _route_a_online_refund_filter():
@@ -588,7 +591,7 @@ def _cash_routes_total(db: Session,
         "route_b": {"count": b_cnt, "amount": round(b_amt, 2)},   # B.钱包-用户取现
         "route_c": {"count": c_cnt, "amount": round(c_amt, 2)},   # C.闪猫退款(独立表,暂0)
         "route_d": {"count": d_cnt, "amount": round(d_amt, 2)},   # D.手动退款(manual_refunds)
-        "actual_cashflow":  # E.商户号实际现金流 SUCCESS合计 (对账基准,不分C/D桶)
+        "actual_cashflow":  # E.商户号实际现金流 退款记录报表退款成功合计 (对账基准,不分C/D桶)
             {"count": e_cnt, "amount": round(e_amt, 2)},
         "operational":     # 经营侧四路总登记出款估算 = A+B+C+D
             {"count": op_cnt, "amount": round(op_amt, 2)},
@@ -615,8 +618,8 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
     """真实现金流出趋势(按日) 【全域统一核算 v3】
 
     四路经营出款 (A/B/C/D) 单独按日堆叠 = 经营估算 total;
-    实际现金流 E (merchant_refunds SUCCESS合计,不分桶) 作为独立曲线 overlay;
-    对账偏差 diff = 经营(total) − 实际(merchant);
+    实际现金流 E (refund_record_reports 退款成功,不分桶) 作为独立曲线 overlay;
+    对账偏差 diff = 经营(total) − 实际(E);
     每 day 返回 direct(A) withdraw(B) shanmao(C) other_refund(D), total(=A+B+C+D),
     merchant(=E 实际现金流), diff(=total−merchant), 及各自 count.
     D 手动退款(manual_refunds) 已建表自动生效.
@@ -726,7 +729,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
                       + _d(shanmao_map, d, "amount") + _d(other_map, d, "amount")),
             "total_count": (_d(direct_map, d, "count") + _d(withdraw_map, d, "count")
                             + _d(shanmao_map, d, "count") + _d(other_map, d, "count")),
-            # 实际现金流 E = merchant_refunds SUCCESS 合计 (对账基准)
+            # 实际现金流 E = refund_record_reports 退款成功 合计 (对账基准)
             "merchant":       _d(actual_map, d, "amount"),
             "merchant_count": _d(actual_map, d, "count"),
             # 对账偏差 = 经营估算 − 实际现金流
@@ -781,7 +784,7 @@ def cash_out_breakdown(db: Session) -> dict[str, Any]:
 
     四路经营出款: A 退费单线上直退 / B 钱包用户取现 / C 闪猫退款 / D 手动退款(manual_refunds)
     经营估算 = A+B+C+D (四路登记出款合计)
-    实际现金流 = E (merchant_refunds SUCCESS 合计, 对账基准, 不分C/D桶)
+    实际现金流 = E (refund_record_reports 退款成功合计, 对账基准, 不分C/D桶)
     对账偏差 = 经营估算 − 实际现金流
     """
     routes = _cash_routes_total(db)
@@ -790,7 +793,7 @@ def cash_out_breakdown(db: Session) -> dict[str, Any]:
     c = routes["route_c"]
     d = routes["route_d"]
     op = routes["operational"]        # 经营估算 = A+B+C+D
-    e = routes["actual_cashflow"]     # 实际现金流 = E = 商户号SUCCESS合计
+    e = routes["actual_cashflow"]     # 实际现金流 = E = 退款记录报表退款成功合计
     fc = routes["financial"]          # 向后兼容: financial = actual_cashflow = E
     diff = routes["diff"]             # 对账偏差 = 经营 − 实际
     return {
@@ -804,7 +807,7 @@ def cash_out_breakdown(db: Session) -> dict[str, Any]:
         "user_withdraw": b["amount"],       # 兼容旧键: 用户提现 = B
         "total": op["amount"],              # 兼容旧键: 经营估算 = A+B+C+D
         "total_count": op["count"],         # 经营侧估算笔数
-        "actual_cashflow": e["amount"],     # (新) 实际现金流 E = 商户号SUCCESS合计
+        "actual_cashflow": e["amount"],     # (新) 实际现金流 E = 退款记录报表退款成功合计
         "actual_cashflow_count": e["count"],# (新) 实际现金流笔数
         "merchant_cash": fc["amount"],      # 兼容旧键: 商户号现金流 = E = actual_cashflow (财务实际)
         "merchant_cash_count": fc["count"], # 兼容旧键: 财务侧实际笔数
@@ -812,7 +815,7 @@ def cash_out_breakdown(db: Session) -> dict[str, Any]:
         "diff_count": diff["count"],        # 对账偏差笔数
         "_spec": {
             "total": "经营估算 = 四路经营出款 A+B+C+D (A线上直退+B钱包取现+C闪猫退款+D手动退款)",
-            "merchant_cash": "实际现金流(对账基准) = merchant_refunds.refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
+            "merchant_cash": "实际现金流(对账基准) = refund_record_reports 退款成功合计, 不分ORIGINAL/BALANCE桶",
             "diff": "对账偏差 = 经营估算 − 实际现金流 (商户号现金流不与经营数据累加)",
         },
     }
@@ -1413,7 +1416,7 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
     c = routes["route_c"]   # C.闪猫退款 (独立业务表 shanmao_refunds)
     d = routes["route_d"]   # D.手动退款 (独立业务表 manual_refunds)
     op = routes["operational"]          # 经营估算 = A+B+C+D (四路经营出款)
-    e = routes["actual_cashflow"]       # 实际现金流 E = merchant_refunds SUCCESS合计 (对账基准,不分C/D桶)
+    e = routes["actual_cashflow"]       # 实际现金流 E = refund_record_reports 退款成功合计 (对账基准,不分C/D桶)
     fc = routes["financial"]            # 向后兼容: financial = actual_cashflow = E
     diff = routes["diff"]               # 对账偏差 = 经营 − 实际
 
@@ -1505,7 +1508,7 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
         "cash_out_total": estimated,           # 经营估算现金流 = A+B+C+D
         "cash_out_direct": a["amount"],        # 直接退款 = A
         "cash_out_withdraw": b["amount"],      # 用户提现 = B
-        "actual_cashflow": e["amount"],        # (新) 实际现金流 E = 商户号SUCCESS合计
+        "actual_cashflow": e["amount"],        # (新) 实际现金流 E = 退款记录报表退款成功合计
         "merchant_cash": merchant_cash,        # 兼容旧键: 商户号现金流 = E = actual_cashflow
         "cash_diff": diff["amount"],           # 对账偏差 = 经营估算 − 实际现金流 (C/D未建=A+B−E)
         "wallet_balance_total": float(wallet_balance),
@@ -1523,7 +1526,7 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
             "route_c": c,    # {count, amount} C.闪猫退款 (独立业务表 shanmao_refunds)
             "route_d": d,    # {count, amount} D.手动退款 (独立业务表 manual_refunds)
             "operational": op,              # {count, amount} 经营估算 = A+B+C+D
-            "actual_cashflow": e,           # {count, amount} 实际现金流 = E (商户号SUCCESS合计,对账基准)
+            "actual_cashflow": e,           # {count, amount} 实际现金流 = E (退款记录报表退款成功,对账基准)
             "financial": fc,                # {count, amount} 向后兼容: 财务实际 = actual_cashflow = E
             "diff": diff,                   # {count, amount} 对账偏差 = 经营 − 实际
         },
@@ -1531,8 +1534,8 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
         "_spec": {
             "refund_total": "路线A.退费单线上直退 (refunds WHERE refund_method='线上')",
             "cash_out_total": "经营估算(四路经营出款合计) = A线上直退 + B用户取现 + C闪猫退款 + D手动退款",
-            "actual_cashflow": "实际现金流(对账基准) = merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
-            "merchant_cash": "实际现金流(对账基准,同actual_cashflow) = 商户号SUCCESS退款合计",
+            "actual_cashflow": "实际现金流(对账基准) = refund_record_reports WHERE refund_status IN ('退款成功','成功','SUCCESS') 合计, 不分ORIGINAL/BALANCE桶 (2026-09-05 v1.1 起替代 merchant_refunds)",
+            "merchant_cash": "实际现金流(对账基准,同actual_cashflow) = 退款记录报表退款成功合计", 
             "cash_diff": "对账偏差 = 经营估算 − 实际现金流 (商户号现金流不与经营数据累加)",
         },
     }
@@ -2843,7 +2846,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
       3. date=None 实时今天 → 昨天同时段做环比
     口径严格对齐 v4 规范 (2026-08-10 用户调整):
       - 退款笔数/金额 = 四路经营合计 A+B+C+D (经营侧登记的所有退款出款)
-      - 真实现金流 = E (merchant_refunds WHERE refund_status='SUCCESS' 合计, 对账基准)
+      - 真实现金流 = E (refund_record_reports 退款成功合计, 对账基准, 2026-09-05 起替代 merchant_refunds)
       - 对账偏差 = 经营估算 − 实际现金流
     """
     ts, te, ys, ye, is_realtime, disp_range = _resolve_windows(date=date, start=start, end=end)
@@ -2882,7 +2885,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
     # 退款笔数/金额 = 四路经营合计
     rf_cnt_t, rf_amt_t = op_t["count"], op_t["amount"]
     rf_cnt_y, rf_amt_y = op_y["count"], op_y["amount"]
-    # 真实现金流 = 实际现金流 E (merchant_refunds SUCCESS合计)
+    # 真实现金流 = 实际现金流 E (refund_record_reports 退款成功合计)
     cash_t = e_t["amount"]
     cash_y = e_y["amount"]
     merchant_today = e_t["count"]              # 实际现金流笔数
@@ -2988,7 +2991,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
             "route_c": c_t,  # C.闪猫退款 (独立表 shanmao_refunds, status=已退款 计入)
             "route_d": d_t,  # D.手动退款 (独立业务表 manual_refunds, is_refunded=是 计入)
             "operational":     routes_t["operational"],     # 经营估算 A+B+C+D
-            "actual_cashflow": routes_t["actual_cashflow"], # 实际现金流 E (商户号SUCCESS合计)
+            "actual_cashflow": routes_t["actual_cashflow"], # 实际现金流 E (退款记录报表退款成功合计)
             "financial":       routes_t["financial"],       # 向后兼容: 财务实际 = E
             "diff":            routes_t["diff"],            # 对账偏差 = 经营 − 实际
         },
@@ -2997,8 +3000,8 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
             "refund_count":     "退款笔数 = 四路经营合计 A线上直退 + B用户取现 + C闪猫退款 + D手动退款 (按创建时间)",
             "refund_amount":    "退款金额 = 四路经营合计 A+B+C+D (经营侧登记的所有退款出款)",
             "refund_done_today":"当日完成退款 = 路线A(线上直退) 中 status=已退款 且 更新时间(退款完成时刻)∈ 当日, 含几天前创建今天才完成的单 (BMS 实际退款时间口径)",
-            "cash_out":         "真实现金流(对账基准) = merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
-            "actual_cashflow":  "实际现金流(对账基准) = merchant_refunds WHERE refund_status='SUCCESS' 合计, 不分ORIGINAL/BALANCE桶",
+            "cash_out":         "真实现金流(对账基准) = refund_record_reports 退款成功合计, 不分ORIGINAL/BALANCE桶 (2026-09-05 v1.1 起替代 merchant_refunds)",
+            "actual_cashflow":  "实际现金流(对账基准) = refund_record_reports 退款成功合计, 不分ORIGINAL/BALANCE桶", 
             "ticket_done":      "有效完工时间推算: 10.7% 真实完成(白名单:status=已完成且finish在register+12h内且handler非空非SYS) → handle_duration秒 → 该handler近30天真实平均耗时 → 全局真实平均。仅status=已完成视为完工, 避免finish_time被BMS 03:15批量覆盖导致的虚高。",
         },
     }
@@ -3367,7 +3370,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
             "refund_amount_b": "路线B: 钱包用户取现金额",
             "refund_amount_c": "路线C: 闪猫退款金额",
             "refund_amount_d": "路线D: 手动退款金额",
-            "refund_amount_e": "路线E: 商户号实际现金流 (merchant_refunds SUCCESS)",
+            "refund_amount_e": "路线E: 商户号实际现金流 (refund_record_reports 退款成功)",
             "refund_amount_total": "四路经营合计金额 A+B+C+D",
             "reception":     "会话数(次) = cs_record 计数；接待数(个) = 去重设备SN计数(去NULL/空串)",
             "groups":        "工作量: 会话/接待 · 款项: 退款笔数(四路堆叠)/退款金额(四路堆叠面积+实际现金流E线) · 投诉: 投诉量",

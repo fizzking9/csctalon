@@ -154,7 +154,7 @@ def external_refund(
             "refund_count": "退款笔数=四路经营合计 A线上直退+B钱包取现+C闪猫+D手动 (按创建时间)",
             "refund_amount": "退款金额=四路经营合计, 单位=元, 2位小数",
             "refund_done_today": "当日完成退款=路线A status=已退款 且更新时间∈当日",
-            "actual_cashflow": "真实现金流E=merchant_refunds SUCCESS合计(对账基准), 元",
+            "actual_cashflow": "真实现金流E=refund_record_reports 退款成功合计(对账基准, 2026-09-05 v1.1 起替代 merchant_refunds), 元",
         },
     })
 
