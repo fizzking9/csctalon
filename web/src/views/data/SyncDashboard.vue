@@ -100,6 +100,7 @@
                       :disabled="busyRunning"
                     >
                       {{ ds.name }}
+                      <span v-if="ds.data_type === 'refund_record_report'" class="src-alias">（商户号现金流 E 路）</span>
                       <el-tag v-if="!ds.has_credentials" type="danger" size="small" class="ml-4">未配凭证</el-tag>
                       <el-tag v-else-if="ds.requires_captcha && !captchaStates[ds.data_type]?.has_storage_state"
                               type="warning" size="small" class="ml-4">需验证码登录</el-tag>
@@ -1793,6 +1794,7 @@ function formatTime(iso) {
 /* 通用 utility */
 .alert-text { margin: 0; font-size: 13px; line-height: 1.5; }
 .form-hint { color: #909399; font-size: 12px; line-height: 1.5; }
+.src-alias { color: #909399; font-size: 12px; margin-left: 4px; font-weight: 400; }
 .mr-4 { margin-right: 4px; }
 .ml-4 { margin-left: 4px; }
 .mt-8 { margin-top: 8px; }
