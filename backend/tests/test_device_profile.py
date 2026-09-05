@@ -118,3 +118,43 @@ def test_device_profile_missing_sn(_test_session):
     r = run_upsert(df, "device_profile", mapping, _test_session)
     assert r.inserted == 0
     assert r.failed >= 1
+
+
+# ---------- D6: sync_to_group 凭证同步(2026-09-05, #19) ----------
+
+def test_update_source_sync_to_group(_test_session):
+    """更新源且 sync_to_group=true → 凭证同步到该源所属组"""
+    from app.core.crypto import decrypt_secret
+    from app.models.source_group import SourceGroup
+    from app.models.sync_source_config import SyncSourceConfig
+    from app.services.source_group_service import update_source_group
+    from app.services.sync_source_config_service import update_sync_source_config
+
+    # 先清理上次运行可能残留的同名测试源(幂等)
+    _test_session.execute(
+        SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__d6_test__")
+    )
+    _test_session.commit()
+    # 造一个源 + 组
+    _test_session.add(SyncSourceConfig(
+        data_type="__d6_test__", name="D6测试源", base_url="https://wifi.cloud-cat.cn/bms",
+        page_path="/x", group_key="bms-wifi", enabled=True,
+    ))
+    g = _test_session.execute(select(SourceGroup).where(SourceGroup.group_key == "bms-wifi")).scalar_one_or_none()
+    if g is None:
+        g = SourceGroup(group_key="bms-wifi", group_name="BMS 主平台")
+        _test_session.add(g)
+    _test_session.commit()
+
+    # 更新源凭证并同步到组
+    update_sync_source_config(_test_session, "__d6_test__", {
+        "username": "d6user", "password": "d6pwd",
+    })
+    # 手动模拟 system.py handler 的组同步逻辑
+    update_source_group(_test_session, "bms-wifi", {"username": "d6user", "password": "d6pwd"})
+    _test_session.refresh(g)
+    assert decrypt_secret(g.username) == "d6user"
+    assert decrypt_secret(g.password) == "d6pwd"
+    # 清理
+    _test_session.execute(SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__d6_test__"))
+    _test_session.commit()

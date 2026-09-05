@@ -514,7 +514,9 @@ def update_sync_source_config(db: Session, data_type: str, payload: dict) -> dic
 
     db.commit()
     db.refresh(row)
-    return _row_to_config(row)
+    # ⚠️ 2026-09-05 修复: _row_to_config 需 db(用于 resolve_credentials 组凭证回退),
+    #   原漏传 db 导致 update_sync_source_config 一调用即 TypeError
+    return _row_to_config(db, row)
 
 
 # ---------- 兼容别名 (旧代码引用) ----------

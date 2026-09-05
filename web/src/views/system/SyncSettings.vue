@@ -69,7 +69,7 @@
             </el-table-column>
             <el-table-column label="操作" width="190" fixed="right">
               <template #default="{ row }">
-                <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+                <el-button link type="primary" size="small" @click="openEdit(row, g.group_key, g.has_credentials)">编辑</el-button>
                 <el-button link size="small" :loading="singleTesting[row.data_type]" @click="testSingleLogin(row)">测试</el-button>
                 <template v-if="row.requires_captcha">
                   <el-button link type="warning" size="small" :loading="loginStates[row.data_type]?.busy" @click="openCaptchaLogin(row)">
@@ -154,6 +154,27 @@
         </el-form-item>
         <el-form-item :label="scrmLabel[1]">
           <el-input v-model="editForm.password" type="password" show-password :placeholder="scrmPasswordPlaceholder" />
+        </el-form-item>
+        <!-- D6(2026-09-05, #19): 分组凭证复用提示 + 单源凭证同步到组 -->
+        <el-form-item v-if="!isScrmSource(editForm) && editForm.group_key" label="分组凭证">
+          <div style="width: 100%">
+            <el-alert
+              :type="editForm.group_has_credentials ? 'success' : 'info'"
+              :closable="false"
+              show-icon
+              class="mb-8"
+              size="small"
+            >
+              <template #title>
+                已归组 <strong>{{ editForm.group_key }}</strong>
+                <span v-if="editForm.group_has_credentials">(组凭证已配置,本源可留空自动复用)</span>
+                <span v-else>(组凭证未配置)</span>
+              </template>
+            </el-alert>
+            <el-checkbox v-model="editForm.sync_to_group">
+              同时设为组凭证(作用于同组所有源, 免逐源配置)
+            </el-checkbox>
+          </div>
         </el-form-item>
         <template v-if="isScrmSource(editForm) && editForm.fetch_mode === 'dual'">
           <el-divider content-position="left">Playwright 网页登录凭证(双模式下独立配置)</el-divider>
@@ -284,6 +305,10 @@ const editForm = reactive({
   password: '',
   web_username: '',
   web_password: '',
+  // D6(2026-09-05, #19): 分组凭证增强
+  group_key: '',
+  group_has_credentials: false,
+  sync_to_group: false,
 })
 const groupEdit = reactive({
   group_key: '',
@@ -466,7 +491,7 @@ async function runTest(dataType, stateMap, key) {
 }
 
 // ============== 单源编辑 ==============
-function openEdit(row) {
+function openEdit(row, groupKey = '', groupHasCreds = false) {
   editForm.data_type = row.data_type
   editForm.name = row.name
   editForm.base_url = row.base_url
@@ -477,6 +502,10 @@ function openEdit(row) {
   editForm.fetch_mode = isScrmSource(row) ? (row.fetch_mode || 'openapi') : 'playwright'
   credentialsState.username_configured = !!(row.username || row.has_credentials)
   credentialsState.password_configured = !!(row.password || row.has_credentials)
+  // D6: 记录归属组 + 组凭证状态(从组卡片上下文传入)
+  editForm.group_key = groupKey || row.group_key || ''
+  editForm.group_has_credentials = !!(groupHasCreds || row.group_has_credentials)
+  editForm.sync_to_group = false
   const opts = (typeof row.options === 'object' && row.options) ? row.options : {}
   credentialsState.web_username_configured = !!(opts.web_username_configured || opts.web_username)
   credentialsState.web_password_configured = !!(opts.web_password_configured || opts.web_password)
@@ -500,6 +529,8 @@ async function handleSave(andTest = false) {
       default_sync: editForm.default_sync,
       enabled: editForm.enabled,
     }
+    // D6: 填了凭证且勾选"同步到组" → 后端把凭证写入该源所属组(作用于同组所有源)
+    if (editForm.username && editForm.sync_to_group) payload.sync_to_group = true
     if (isScrmSource(editForm) && editForm.fetch_mode) payload.fetch_mode = editForm.fetch_mode
     if (editForm.username) payload.username = editForm.username
     if (editForm.password) payload.password = editForm.password
@@ -510,7 +541,7 @@ async function handleSave(andTest = false) {
       if (Object.keys(optsPatch).length > 0) payload.options = optsPatch
     }
     await updateSyncSource(editForm.data_type, payload)
-    ElMessage.success('保存成功')
+    ElMessage.success(editForm.sync_to_group ? '保存成功,并已同步到同组凭证' : '保存成功')
     dialogVisible.value = false
     await loadSources()
     if (andTest) await runTest(editForm.data_type, singleTesting)
