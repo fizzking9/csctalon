@@ -149,3 +149,44 @@ def test_match_refund_wallet_by_sn(db):
     count, affected = matcher._match_refund_wallet_by_sn(db, only_unmatched=True)
     assert count == 1
     assert "RF0000000006" in affected
+
+
+# ---- 2026-09-05 回归: affected 只含「真正新增关联」的退费单 ----
+# 背景: _match_refund_ticket_by_sn / _match_refund_wallet_by_sn 无条件把「有 SN 但无匹配目标」
+# 的退费单也计入 affected → match_all 返回 ~15万(全表) → post-sync 宽表每次都全量重建(~2分钟)。
+
+def test_ticket_by_sn_unmatched_sn_not_in_affected(db):
+    """反向: 退费单 SN 有值但工单里无该 SN → 不建关系、不进 affected(否则全表进 affected)。"""
+    _mk_device(db, "SN-NO-TICKET-1")
+    _mk_refund(db, "RF0000000007", device_sn="SN-NO-TICKET-1")  # 无任何工单对应
+    db.flush()
+
+    count, affected = matcher._match_refund_ticket_by_sn(db, only_unmatched=True)
+    assert count == 0
+    assert "RF0000000007" not in affected  # 关键: 不进 affected
+
+
+def test_ticket_by_sn_mixed_matched_and_unmatched(db):
+    """混合: 只有真正匹配到工单的退费单进 affected; 无匹配的 SN 不进。"""
+    _mk_device(db, "SN-MIX-1")
+    _mk_device(db, "SN-MIX-2")
+    _mk_refund(db, "RF0000000008", device_sn="SN-MIX-1")  # 有工单
+    _mk_refund(db, "RF0000000009", device_sn="SN-MIX-2")  # 无工单
+    db.add(ServiceTicket(ticket_no="GDC0099", device_sn="SN-MIX-1"))
+    db.flush()
+
+    count, affected = matcher._match_refund_ticket_by_sn(db, only_unmatched=True)
+    assert count == 1
+    assert "RF0000000008" in affected
+    assert "RF0000000009" not in affected  # 关键: 无匹配不进 affected
+
+
+def test_wallet_by_sn_unmatched_sn_not_in_affected(db):
+    """反向: 退费单 SN 有值但钱包流水里无该 SN → 不建关系、不进 affected。"""
+    _mk_device(db, "SN-NO-WALLET-1")
+    _mk_refund(db, "RF0000000010", device_sn="SN-NO-WALLET-1")
+    db.flush()
+
+    count, affected = matcher._match_refund_wallet_by_sn(db, only_unmatched=True)
+    assert count == 0
+    assert "RF0000000010" not in affected  # 关键: 不进 affected
