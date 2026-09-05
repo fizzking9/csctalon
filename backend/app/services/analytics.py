@@ -161,7 +161,7 @@ def operation_trend(db: Session, start: datetime | None = None, end: datetime | 
     start, end = _date_range(start, end)
     rows = db.execute(
         select(
-            func.to_char(Refund.created_at_raw, "YYYY-MM-DD").label("date"),
+            func.to_char(func.timezone("Asia/Shanghai", Refund.created_at_raw), "YYYY-MM-DD").label("date"),
             func.coalesce(func.sum(Refund.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
@@ -627,9 +627,10 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
     start, end = _date_range(start, end)
     s, e = start, end
     # ── A 直接退款按日 (路线A refunds线上直退) ──
+    # 日分桶统一按北京日 (AT TIME ZONE 'Asia/Shanghai'), 与 C/D/E 路及决策概览口径一致 (2026-09-05 修正 UTC 截日 bug)
     direct_rows = db.execute(
         select(
-            func.to_char(Refund.created_at_raw, "YYYY-MM-DD").label("date"),
+            func.to_char(func.timezone("Asia/Shanghai", Refund.created_at_raw), "YYYY-MM-DD").label("date"),
             func.coalesce(func.sum(Refund.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
@@ -640,7 +641,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
     # ── B 用户提现按日 (路线B wallet) ──
     withdraw_rows = db.execute(
         select(
-            func.to_char(WalletWithdrawal.op_time, "YYYY-MM-DD").label("date"),
+            func.to_char(func.timezone("Asia/Shanghai", WalletWithdrawal.op_time), "YYYY-MM-DD").label("date"),
             func.coalesce(func.sum(WalletWithdrawal.op_amount), 0).label("amount"),
             func.count().label("count"),
         )
@@ -691,9 +692,10 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
         except Exception:
             pass
     # ── E 实际现金流按日 (refund_record_reports 退款成功合计, 对账基准) ──
+    # 日分桶统一按北京日 (与决策概览 _day AT TIME ZONE 口径一致)
     actual_rows = db.execute(
         select(
-            func.to_char(RefundRecordReport.refund_time, "YYYY-MM-DD").label("date"),
+            func.to_char(func.timezone("Asia/Shanghai", RefundRecordReport.refund_time), "YYYY-MM-DD").label("date"),
             func.coalesce(func.sum(RefundRecordReport.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
@@ -755,7 +757,7 @@ def wallet_vs_withdraw(db: Session, start: datetime | None = None, end: datetime
     # 退回钱包: wallet 中 op_type='订单退费转入'
     wallet_in = db.execute(
         select(
-            func.to_char(WalletWithdrawal.op_time, "YYYY-MM-DD").label("date"),
+            func.to_char(func.timezone("Asia/Shanghai", WalletWithdrawal.op_time), "YYYY-MM-DD").label("date"),
             func.coalesce(func.sum(WalletWithdrawal.op_amount), 0).label("amount"),
         )
         .where(WalletWithdrawal.op_time.between(start, end), WalletWithdrawal.op_type == "订单退费转入")
@@ -765,7 +767,7 @@ def wallet_vs_withdraw(db: Session, start: datetime | None = None, end: datetime
     # 实际提现: op_type='用户提现' 且 备注非失败/冻结 (2026-08-28 排除冻结记录)
     withdraw = db.execute(
         select(
-            func.to_char(WalletWithdrawal.op_time, "YYYY-MM-DD").label("date"),
+            func.to_char(func.timezone("Asia/Shanghai", WalletWithdrawal.op_time), "YYYY-MM-DD").label("date"),
             func.coalesce(func.sum(WalletWithdrawal.op_amount), 0).label("amount"),
         )
         .where(WalletWithdrawal.op_time.between(start, end), *_route_b_withdraw_filter())

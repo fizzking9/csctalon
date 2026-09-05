@@ -229,6 +229,47 @@ def test_water_statement_filter_status(_test_session):
     assert res["items"][0]["platform_order_no"] == "WS-NOMATCH"
 
 
+def test_water_statement_naive_bj_param(_test_session):
+    """naive 参数按北京时间解释(2026-09-05 修复, #20)
+
+    前端传 "2026-09-05T00:00:00"(naive, 北京时间) → 应命中北京 09-05 的退款,
+    而非被当成 UTC(会整体偏 8h, 把北京 00:00-07:59 的退款漏掉)。
+    """
+    from datetime import datetime as _py_dt
+    from app.services.reconcile import water_statement
+
+    # report 退款时间 = 北京 2026-09-05 06:00 (UTC 2026-09-04 22:00)
+    # 若 naive 参数被当 UTC, 窗口 UTC[09-05 00:00, 09-05 23:59] 会漏掉它(它在 UTC 09-04 22:00)
+    _seed_report(_test_session, platform_order_no="WS-BJ-EARLY", amount="19.00", refund_time="2026-09-05 06:00:00")
+
+    # naive 北京时间窗(模拟前端 fromisoformat 后原样传入)
+    start = _py_dt.fromisoformat("2026-09-05 00:00:00")  # naive
+    end = _py_dt.fromisoformat("2026-09-05 23:59:59")    # naive
+    res = water_statement(_test_session, start, end)
+    assert res["total_report_count"] == 1
+    assert res["by_route"]["unmatched"] == 1
+
+
+def test_water_statement_returns_bj_iso(_test_session):
+    """序列化 refund_time/date_start/date_end 应带 +08:00(北京时间, 2026-09-05 修复)"""
+    from app.services.reconcile import water_statement
+
+    _seed_report(_test_session, platform_order_no="WS-ISO-CHK", amount="19.00", refund_time="2026-09-05 10:00:00")
+
+    res = water_statement(
+        _test_session,
+        _dt("2026-09-05 00:00:00"),
+        _dt("2026-09-05 23:59:59"),
+    )
+    # date_start/date_end 应输出 +08:00 后缀(而非 +00:00 或 naive)
+    assert res["date_start"].endswith("+08:00")
+    assert res["date_end"].endswith("+08:00")
+    # items[0].refund_time 应为北京 10:00 且带 +08:00
+    item_t = res["items"][0]["refund_time"]
+    assert item_t.endswith("+08:00")
+    assert "T10:00:00" in item_t
+
+
 # ---------- API 层 ----------
 
 @pytest.fixture()

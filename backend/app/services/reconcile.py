@@ -55,6 +55,27 @@ def _dt_or_none(v):
     return v
 
 
+def _to_utc_aware(dt: datetime) -> datetime:
+    """把时间窗参数统一成 UTC aware, 消除 naive 歧义(2026-09-05 修复)。
+
+    约定: API 参数按"北京时间"传入(A-20260905-002 §五 description)。
+    - naive datetime  → 视为北京时间 → 转 UTC aware
+    - aware (+08:00)  → 视为北京时间 → 转 UTC aware
+    - aware (UTC)     → 原样保留
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=_TZ_CN).astimezone(timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _to_cn(dt: datetime) -> datetime:
+    """UTC aware → 北京时间(用于序列化返回给前端, 与参数口径对称)"""
+    if dt.tzinfo is None:
+        # 若仍是 naive(异常), 按 UTC 解释转北京, 不抛错
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_TZ_CN)
+
+
 # ─────────────────────────────────────────────────────────────
 # 1. D 路 op_time 回填
 # ─────────────────────────────────────────────────────────────
@@ -277,6 +298,9 @@ def water_statement(
     输出: 总笔数/金额, matched(按 A/B/C/D 分布), 未登记(unmatched), 明细分页。
     金额单位: 元(与退款报表一致)。不改变任何现有核算。
     """
+    # 时间窗归一化: 参数按北京时间传入 → 统一 UTC aware 过滤 (2026-09-05 修复偏 8h)
+    start = _to_utc_aware(start)
+    end = _to_utc_aware(end)
     base = select(RefundRecordReport).where(
         RefundRecordReport.refund_status.in_(_SUCCESS_STATUSES),
         RefundRecordReport.refund_time >= start,
@@ -324,14 +348,14 @@ def water_statement(
             "merchant_name": r.merchant_name,
             "device_sn": r.device_sn,
             "product_name": r.product_name,
-            "refund_time": r.refund_time.isoformat() if r.refund_time else None,
+            "refund_time": _to_cn(r.refund_time).isoformat() if r.refund_time else None,
             "refund_amount": float(r.refund_amount) if r.refund_amount is not None else None,
             "route": c["route"],
         }
 
     return {
-        "date_start": start.isoformat(),
-        "date_end": end.isoformat(),
+        "date_start": _to_cn(start).isoformat(),
+        "date_end": _to_cn(end).isoformat(),
         "total_report_count": total,
         "total_report_amount": float(total_amt),
         "matched_count": matched_count,
