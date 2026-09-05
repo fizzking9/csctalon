@@ -15,7 +15,7 @@
             <div>D. 其他退款 → 暂无数据 (=0)</div>
             <hr style="margin:8px 0; opacity:.3">
             <div style="font-weight:600; color:#409eff">经营估算 = A + B + C + D</div>
-            <div style="font-weight:600; color:#f56c6c">实际现金流 (对账基准) = merchant_refunds SUCCESS 合计</div>
+            <div style="font-weight:600; color:#f56c6c">实际现金流 (对账基准) = 退款记录报表(商户号退款)合计</div>
             <div style="font-weight:600">对账偏差 = 经营 − 实际</div>
           </div>
         </template>
@@ -39,7 +39,7 @@
           <div class="rs-sum-head">实际现金流 <span class="tip">（对账基准）</span></div>
           <div class="rs-sum-body">
             <span class="rs-sum-val">{{ fmtMoney(fc.amount) }}</span>
-            <span class="rs-sum-sub">{{ fmtNum(fc.count) }}笔 · 商户号 SUCCESS</span>
+            <span class="rs-sum-sub">{{ fmtNum(fc.count) }}笔 · 商户号退款</span>
           </div>
         </div>
       </el-col>

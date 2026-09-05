@@ -73,8 +73,8 @@
           <span class="block-title">一、资金流出全景</span>
           <span class="block-hint">四路经营 A/B/C/D（堆叠）= 经营估算 · E 商户号实际现金流（曲线，对账基准，不与四路累加）</span>
         </div>
-        <el-alert v-if="summary.e_data_until" type="warning" :closable="false" show-icon class="mb-12">
-          <template #title>商户号现金流(E)为数据快照，截止 {{ summary.e_data_until }}。截止日后 E=0，对账偏差仅供参考，需持续同步商户号流水。</template>
+        <el-alert v-if="summary.e_data_until" type="info" :closable="false" show-icon class="mb-12">
+          <template #title>商户号现金流(E)以「退款记录报表」为对账基准，当前数据更新至 {{ summary.e_data_until }}。若窗口晚于该日，对账偏差仅供参考，请先补充当日采集/导入的退款流水。</template>
         </el-alert>
         <BaseChart v-if="routeOption.series?.length" :option="routeOption" height="300px" />
         <el-empty v-else description="暂无资金流出数据" :image-size="60" />

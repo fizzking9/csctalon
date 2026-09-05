@@ -27,9 +27,9 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.manual_refund import ManualRefund
-from app.models.merchant_refund import MerchantRefund
 from app.models.person import Person, PersonAlias
 from app.models.refund import Refund
+from app.models.refund_record_report import RefundRecordReport
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask
 from app.models.ticket import ServiceTicket
@@ -497,16 +497,24 @@ def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tu
     return cnt_map, amt_map
 
 
-# ---------- 实际现金流 E: 商户号现金流表 (独立对账基准) ----------
-def _route_e_merchant_cashflow_filter():
-    """【实际现金流 E】merchant_refunds: refund_status='SUCCESS' 全部 (不区分 refund_type 不分C/D桶)"""
-    return (MerchantRefund.refund_status == "SUCCESS",)
+# ---------- 实际现金流 E: 商户号退款水单表 (独立对账基准) ----------
+# ⚠️ 2026-09-05 (#20): E 路对账数据源从 merchant_refunds(旧 Excel 快照) 切换到
+#   refund_record_reports(BMS 退款记录报表, 每天采集, 用户补录历史)。旧表保留
+#   (供 matcher/wide 关联等), 但不再作为 E 路对账基准。
+#   - 时间列: trade_time → refund_time
+#   - 状态:   'SUCCESS' → '退款成功'(兼容 '成功'/'SUCCESS' 变体)
+_E_ROUTE_SUCCESS_STATUSES = ("退款成功", "成功", "SUCCESS")
+
+
+def _route_e_cashflow_filter():
+    """【实际现金流 E】refund_record_reports: refund_status 为退款成功 全部"""
+    return (RefundRecordReport.refund_status.in_(_E_ROUTE_SUCCESS_STATUSES),)
 
 
 def _cash_routes_total(db: Session,
                        col_a: Any = Refund.created_at_raw,
                        col_b: Any = WalletWithdrawal.op_time,
-                       col_e: Any = MerchantRefund.trade_time,
+                       col_e: Any = RefundRecordReport.refund_time,
                        start: _dt.datetime | None = None,
                        end: _dt.datetime | None = None) -> dict[str, Any]:
     """【统一核算聚合器 v3】四路经营A/B/C/D + 实际现金流E + 对账偏差.
@@ -514,7 +522,7 @@ def _cash_routes_total(db: Session,
     Args:
         col_a: 路线A 时间列 (默认 refunds.created_at_raw)
         col_b: 路线B 时间列 (默认 wallet_withdrawals.op_time)
-        col_e: 实际现金流 E 时间列 (默认 merchant_refunds.trade_time)
+        col_e: 实际现金流 E 时间列 (默认 refund_record_reports.refund_time)
         start/end: 时间窗边界 (None = 全表)
     Returns:
         {route_a/b/c/d: {count, amount},
@@ -559,12 +567,12 @@ def _cash_routes_total(db: Session,
     # ── D 手动退款独立表 (manual_refunds, is_refunded='是') ──
     d_cnt, d_amt = _route_d_other_agg(db, start, end)
 
-    # ── E 实际现金流: merchant_refunds SUCCESS 合计 (不分 refund_type 桶) ──
+    # ── E 实际现金流: refund_record_reports 退款成功合计 (对账基准) ──
     e_row = db.execute(select(
         func.count(),
-        func.coalesce(func.sum(MerchantRefund.refund_amount), 0),
+        func.coalesce(func.sum(RefundRecordReport.refund_amount), 0),
     ).where(
-        *_route_e_merchant_cashflow_filter(),
+        *_route_e_cashflow_filter(),
         _between(col_e, start, end),
     )).first() or (0, 0)
     e_cnt, e_amt = int(e_row[0] or 0), float(e_row[1] or 0)
@@ -679,14 +687,14 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
             other_map = {r[0]: {"amount": float(r[2] or 0), "count": int(r[1] or 0)} for r in ot_rows}
         except Exception:
             pass
-    # ── E 实际现金流按日 (merchant_refunds.SUCCESS 合计, 不分 refund_type 桶) ──
+    # ── E 实际现金流按日 (refund_record_reports 退款成功合计, 对账基准) ──
     actual_rows = db.execute(
         select(
-            func.to_char(MerchantRefund.trade_time, "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(MerchantRefund.refund_amount), 0).label("amount"),
+            func.to_char(RefundRecordReport.refund_time, "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(RefundRecordReport.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
-        .where(MerchantRefund.trade_time.between(s, e), *_route_e_merchant_cashflow_filter())
+        .where(RefundRecordReport.refund_time.between(s, e), *_route_e_cashflow_filter())
         .group_by("date")
     ).all()
     actual_map = {r.date: {"amount": float(r.amount or 0), "count": r.count} for r in actual_rows}
@@ -811,22 +819,22 @@ def cash_out_breakdown(db: Session) -> dict[str, Any]:
 
 
 def merchant_cash_summary(db: Session) -> list[dict]:
-    """商户号现金流对账(按商户号) 【统一口径: 实际现金流E, refund_status='SUCCESS' 不分桶】
+    """商户号退款对账(按商户号) 【统一口径: 实际现金流E, 退款成功 不分桶】
 
-    实际现金流 E = merchant_refunds.refund_status='SUCCESS' 全部合计 (ORIGINAL+BALANCE 均算入,
-    不拆分 C/D 桶); 此结果对应对账基准(商户侧真实扣款), 与四路经营出款做对账差异分析.
-    原 trade_status='REFUND' 口径废弃 (该字段是微信侧状态位, 混有非成功退款的中间态).
+    ⚠️ 2026-09-05 (#20): 数据源从 merchant_refunds(旧快照, 含 fee) 切换到
+    refund_record_reports(BMS 退款记录报表)。新表无 fee(手续费)字段 → 返回 fee 恒 0
+    (前端兼容保留该键, 实际手续费需另行评估或由旧表参考)。
+    实际现金流 E = refund_record_reports.refund_status='退款成功' 全部合计, 对账基准.
     """
     rows = db.execute(
         select(
-            MerchantRefund.merchant_id,
-            func.coalesce(func.sum(MerchantRefund.refund_amount), 0).label("amount"),
+            RefundRecordReport.merchant_id,
+            func.coalesce(func.sum(RefundRecordReport.refund_amount), 0).label("amount"),
             func.count().label("count"),
-            func.coalesce(func.sum(MerchantRefund.fee), 0).label("fee"),
         )
-        .where(MerchantRefund.refund_status == "SUCCESS")
-        .group_by(MerchantRefund.merchant_id)
-        .order_by(func.sum(MerchantRefund.refund_amount).desc())
+        .where(*_route_e_cashflow_filter())
+        .group_by(RefundRecordReport.merchant_id)
+        .order_by(func.sum(RefundRecordReport.refund_amount).desc())
         .limit(50)
     ).all()
     return [
@@ -834,7 +842,7 @@ def merchant_cash_summary(db: Session) -> list[dict]:
             "merchant_id": r[0],
             "refund_amount": float(r[1] or 0),
             "count": r[2],
-            "fee": float(r[3] or 0),
+            "fee": 0.0,  # ⚠️ 新表 refund_record_reports 无 fee 字段, 恒 0
         }
         for r in rows
     ]
@@ -3205,14 +3213,14 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
     # --- 路线D: 手动退款(按粒度 笔数+金额) ---
     d_cnt_map, d_amt_map = _route_d_other_trend(db, ts, te, grain, _slot_idx)
 
-    # --- 路线E: 商户号实际现金流(按粒度 笔数+金额) ---
+    # --- 路线E: 商户号实际现金流(按粒度 笔数+金额, 数据源=refund_record_reports) ---
     e_rows = db.execute(
-        select(_time_trunc(MerchantRefund.trade_time),
+        select(_time_trunc(RefundRecordReport.refund_time),
                func.count().label("cnt"),
-               func.coalesce(func.sum(MerchantRefund.refund_amount), 0).label("amt"))
-        .where(MerchantRefund.trade_time.isnot(None),
-               MerchantRefund.trade_time >= ts, MerchantRefund.trade_time <= te,
-               *_route_e_merchant_cashflow_filter())
+               func.coalesce(func.sum(RefundRecordReport.refund_amount), 0).label("amt"))
+        .where(RefundRecordReport.refund_time.isnot(None),
+               RefundRecordReport.refund_time >= ts, RefundRecordReport.refund_time <= te,
+               *_route_e_cashflow_filter())
         .group_by("trunc_t")
     ).all()
     e_cnt_map: dict[int, int] = {}
@@ -7095,12 +7103,13 @@ def refund_decision_overview(
           AND m.is_refunded = '是'
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
-    # E 实际现金流 (merchant_refunds refund_status='SUCCESS', 对账基准, 独立展示不与四路累加)
+    # E 实际现金流 (refund_record_reports 退款成功, 对账基准, 独立展示不与四路累加)
     e_rows = db.execute(text(f"""
-        SELECT {_day("m.trade_time")} AS d,
-               count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
-        FROM merchant_refunds m
-        WHERE m.trade_time >= :ts AND m.trade_time <= :te AND m.refund_status = 'SUCCESS'
+        SELECT {_day("e.refund_time")} AS d,
+               count(*) AS cnt, COALESCE(sum(e.refund_amount), 0) AS amt
+        FROM refund_record_reports e
+        WHERE e.refund_time >= :ts AND e.refund_time <= :te
+          AND e.refund_status IN ('退款成功', '成功', 'SUCCESS')
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
 
@@ -7169,10 +7178,12 @@ def refund_decision_overview(
               AND m.is_refunded = '是'
         """), {"ts": s, "te": e}).fetchall():
             tot["d_cnt"] += int(r.cnt or 0); tot["d_amt"] += float(r.amt or 0)
-        # E 实际现金流 (merchant_refunds SUCCESS, 对账基准)
+        # E 实际现金流 (refund_record_reports 退款成功, 对账基准)
         for r in db.execute(text("""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
-            FROM merchant_refunds m WHERE m.trade_time >= :ts AND m.trade_time <= :te AND m.refund_status = 'SUCCESS'
+            FROM refund_record_reports e
+            WHERE e.refund_time >= :ts AND e.refund_time <= :te
+              AND e.refund_status IN ('退款成功', '成功', 'SUCCESS')
         """), {"ts": s, "te": e}).fetchall():
             tot["e_cnt"] += int(r.cnt or 0); tot["e_amt"] += float(r.amt or 0)
         return tot
@@ -7223,10 +7234,11 @@ def refund_decision_overview(
         manual_water["net"].append(round(net, 2))
         manual_water["cum_net"].append(round(m_cum, 2))
 
-    # E 数据截止日(商户号现金流为快照, 7/20 后无数据, 对账偏差仅截止日前可信)
+    # E 数据最新日(refund_record_reports 持续采集, 显示其最新退款日作参考)
     e_data_until = None
     e_max = db.execute(text(
-        "SELECT max(trade_time) FROM merchant_refunds WHERE refund_status='SUCCESS'"
+        "SELECT max(refund_time) FROM refund_record_reports "
+        "WHERE refund_status IN ('退款成功', '成功', 'SUCCESS')"
     )).scalar()
     if e_max is not None:
         e_data_until = e_max.astimezone(TZ).strftime("%Y-%m-%d")
