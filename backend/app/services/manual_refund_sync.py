@@ -110,9 +110,9 @@ def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult) ->
             result.add_warning(idx, "备注为'示例'的模板数据行,已跳过")
             return None
         op_time = _ensure_afternoon_time(_to_datetime(data.get("op_time")))
-        # 时间质量校验(年份纠错 auto_fixed / 待人工确认 pending, 覆盖 R2/R3)
+        # 时间质量校验(年份纠错 auto_fixed / 待人工确认 pending, 覆盖 R2/R3/R4; R4 也修正 op_time 未来年份)
         register_time_before = register_time  # 纠错前原始值(存 register_time_raw)
-        register_time, quality_status, quality_note = _manual_refund_quality_check(
+        register_time, op_time, quality_status, quality_note = _manual_refund_quality_check(
             register_time, op_time, idx, result)
         raw_refunded = _to_str(data.get("is_refunded"))
         device_sn = _to_str(data.get("device_sn"))

@@ -1415,26 +1415,28 @@ def upsert_shanmao_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
 #      - 有操作时间佐证(在合理范围内) → 年份按 op_time 修正(保留月日), quality=auto_fixed
 #      - 无佐证或修正后仍异常 → quality=pending(待人工确认)
 #   R3 时间倒挂(op_time 早于 register_time 超过1天) → quality=pending
+#   R4 op_time 自身未来/异常年份(> now+3d): 有正常 register_time 佐证 → 年份按 register_time 修正(保留月日时分), auto_fixed
+#       (2026-09-05 补, #20: 曾发现 register_time=2026 正常但 op_time=2029 的录入笔误)
 def _manual_refund_quality_check(
     register_time: datetime | None,
     op_time: datetime | None,
     row_idx: int,
     result: ImportResult,
-) -> tuple[datetime | None, str | None, str | None]:
-    """手动退款登记时间质量校验: 返回 (修正后register_time, quality_status, quality_note)
+) -> tuple[datetime | None, datetime | None, str | None, str | None]:
+    """手动退款登记时间质量校验: 返回 (修正后register_time, 修正后op_time, quality_status, quality_note)
 
     - R2 年份/范围异常(有操作时间佐证 → auto_fixed 修正年份; 无佐证 → pending)
     - R3 时间倒挂(操作早于登记超过1天) → pending(覆盖 R2 结果)
+    - R4 op_time 未来年份(> now+3d): 有正常 register_time 佐证 → 修正 op_time 年份(auto_fixed)
     """
-    if register_time is None:
-        return register_time, None, None
     now = datetime.now(timezone.utc)
     low = datetime(now.year - 2, 1, 1, tzinfo=timezone.utc)
     high = now + timedelta(days=3)
     status: str | None = None
     note: str | None = None
-    if not (low <= register_time <= high):
-        # R2 年份/范围异常
+
+    # R2 登记日期年份/范围异常
+    if register_time is not None and not (low <= register_time <= high):
         orig = register_time
         if op_time is not None and low <= op_time <= high:
             fixed = register_time.replace(year=op_time.year)
@@ -1445,13 +1447,29 @@ def _manual_refund_quality_check(
                 register_time = fixed
         if status is None:
             status, note = "pending", f"登记日期超出合理范围(原始 {orig:%Y-%m-%d}), 无可靠佐证, 待人工确认"
+
+    # R4 操作时间自身未来/异常年份(> now+3d): 有正常登记日期佐证 → 修正 op_time 年份
+    if op_time is not None and op_time > high and register_time is not None and (low <= register_time <= high):
+        fixed_op = op_time.replace(year=register_time.year)
+        # 仅当修正后 op_time 不再未来且与登记日期不倒挂(允许同日)才算合理
+        if low <= fixed_op <= high:
+            if status is None:
+                status, note = "auto_fixed", ""
+            note = (note + " " if note else "") + (
+                f"操作时间年份异常(原始 {op_time:%Y-%m-%d}), 按登记日期 {register_time:%Y-%m-%d} 佐证修正为 {fixed_op:%Y-%m-%d}")
+            op_time = fixed_op
+        else:
+            if status is None:
+                status, note = "pending", (
+                    f"操作时间超出合理范围(原始 {op_time:%Y-%m-%d}), 无可靠佐证, 待人工确认")
+
     # R3 时间倒挂(操作早于登记超过1天)
     if op_time is not None and register_time is not None and op_time < register_time - timedelta(days=1):
         status, note = "pending", (
             f"操作时间 {op_time:%Y-%m-%d} 早于登记日期 {register_time:%Y-%m-%d} 超过1天, 待人工确认")
     if status:
         result.add_warning(row_idx, note)
-    return register_time, status, note
+    return register_time, op_time, status, note
 
 
 def _manual_dedup_register_date(register_time: datetime | None) -> datetime | None:
@@ -1505,9 +1523,9 @@ def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session
                 result.add_warning(idx, "备注为'示例'的模板数据行,已跳过")
                 continue
             op_time = _ensure_afternoon_time(_to_datetime(data.get("op_time")))
-            # R2/R3 时间质量校验(含自动纠错/待确认标记)
+            # R2/R3/R4 时间质量校验(含自动纠错/待确认标记; R4 2026-09-05 起也修正 op_time 未来年份)
             register_time_before = register_time  # 纠错前原始值(存 register_time_raw)
-            register_time, quality_status, quality_note = _manual_refund_quality_check(
+            register_time, op_time, quality_status, quality_note = _manual_refund_quality_check(
                 register_time, op_time, idx, result)
             registrant = _sanitize_name_field(data.get("registrant"), idx, result, "手动退款-登记人")
             refund_operator = _sanitize_name_field(data.get("refund_operator"), idx, result, "手动退款-退款操作人")
