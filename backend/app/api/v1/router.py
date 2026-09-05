@@ -35,6 +35,7 @@ from app.api.v1 import (
     persons,
     policies,
     recharges,
+    reconcile,
     report_comments,
     report_templates,
     reports,
@@ -77,6 +78,7 @@ api_router.include_router(incidents.router)
 api_router.include_router(policies.router)
 api_router.include_router(dept_info_syncs.router)
 api_router.include_router(recharges.router)
+api_router.include_router(reconcile.router)
 api_router.include_router(reports.router)
 api_router.include_router(weekly_reports.router)
 api_router.include_router(report_templates.router)
