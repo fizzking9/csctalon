@@ -4,6 +4,7 @@ from app.models.alert import Alert, AlertDelivery, AlertRule  # noqa: F401
 from app.models.analysis_view import AnalysisView, ClassificationRule  # noqa: F401
 from app.models.audit_note import AuditJudgment, AuditNote  # noqa: F401
 from app.models.base import IDMixin, TimestampMixin  # noqa: F401
+from app.models.bms_order import BmsOrder  # noqa: F401
 from app.models.bms_sync_log import BmsSyncLog  # noqa: F401
 from app.models.card_complaint import CardComplaint  # noqa: F401
 from app.models.complaint_audit import ComplaintAudit  # noqa: F401
@@ -26,6 +27,7 @@ from app.models.device import (  # noqa: F401
     device_tag_rel,
 )
 from app.models.device_combo import DeviceCombo  # noqa: F401
+from app.models.device_flow_usage import DeviceFlowUsage  # noqa: F401
 from app.models.doc_sync_config import DocSyncConfig  # noqa: F401
 from app.models.expense import ExpenseInvoice, Reimbursement, ReimbursementItem  # noqa: F401
 from app.models.external_complaint import ExternalComplaint  # noqa: F401
@@ -47,10 +49,12 @@ from app.models.operation_log import OperationLog  # noqa: F401
 from app.models.person import Person, PersonAlias  # noqa: F401
 from app.models.policy import Policy  # noqa: F401
 from app.models.refund import Refund  # noqa: F401
+from app.models.refund_record_report import RefundRecordReport  # noqa: F401
 from app.models.refund_wide import RefundWide  # noqa: F401
 from app.models.report import Report, ReportStatus, ReportType  # noqa: F401
 from app.models.report_comment import CommentTarget, ReportComment  # noqa: F401
 from app.models.report_template import ReportTemplate  # noqa: F401
+from app.models.return_tracking import ReturnTracking  # noqa: F401
 from app.models.schedule import Attendance, Schedule, ShiftTemplate  # noqa: F401
 from app.models.scrm_operator import ScrmOperator  # noqa: F401
 from app.models.scrm_session import ScrmSession  # noqa: F401
@@ -107,6 +111,7 @@ __all__ = [
     "DeptInfoSync",
     "Device",
     "DeviceCombo",
+    "DeviceFlowUsage",
     "DeviceTag",
     "DeviceTagBatch",
     "DeviceTagBinding",
@@ -126,6 +131,9 @@ __all__ = [
     "ManualRefundSyncLog",
     "Merchant",
     "MerchantRefund",
+    "BmsOrder",
+    "RefundRecordReport",
+    "ReturnTracking",
     "Notification",
     "OperationLog",
     "Policy",
