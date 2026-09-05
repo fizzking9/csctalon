@@ -171,6 +171,60 @@ def test_backfill_idempotent(_test_session):
     assert m.quality_status == "auto_filled"  # 保持已回填状态
 
 
+def test_backfill_low_precision_op_time_upgrade(_test_session):
+    """低精度 op_time(北京15:00 默认) + 唯一 L2 匹配 → 提升为精确 refund_time (#20)"""
+    from app.services.reconcile import backfill_d_op_time
+
+    # E 路 report: 精确退款时间 北京 2026-09-05 17:17:38
+    r = _seed_report(_test_session, platform_order_no="WS-PREC-1", device_sn="SN-D-LP1",
+                     amount="199.00", refund_time="2026-09-05 17:17:38")
+    # D 路 manual: op_time 为低精度默认(北京 15:00:00), 同日登记
+    m = _seed_manual(_test_session, device_sn="SN-D-LP1", order_no="WS-OTHER-X",
+                     amount="199.00", op_time=_dt("2026-09-05 15:00:00"),
+                     register_time="2026-09-05 09:00:00")
+
+    stats = backfill_d_op_time(_test_session)
+    assert stats["precision_upgraded"] == 1
+    assert stats["backfilled"] == 1
+    _test_session.refresh(m)
+    # op_time 被提升为 E 路精确 refund_time(非 15:00 整点)
+    assert m.op_time == r.refund_time
+    assert _dt("2026-09-05 15:00:00") != r.refund_time  # 确保不是同值(确实发生了升级)
+    assert m.quality_status == "auto_filled"
+    assert "低精度默认" in (m.quality_note or "")
+    assert m.backfill_refund_record_report_id == str(r.id)
+
+
+def test_backfill_low_precision_no_candidate_keep(_test_session):
+    """低精度 op_time 但无唯一 E 路匹配 → 不误改原值"""
+    from app.services.reconcile import backfill_d_op_time
+
+    _seed_manual(_test_session, device_sn="SN-D-NONE", order_no="WS-NOLP",
+                 amount="88.88", op_time=_dt("2026-09-05 15:00:00"),
+                 register_time="2026-09-05 09:00:00")
+    stats = backfill_d_op_time(_test_session)
+    assert stats["backfilled"] == 0
+    assert stats["precision_upgraded"] == 0
+    # 原 15:00 低精度值保留(未误改)
+    assert stats["skipped_no_candidate"] >= 1
+
+
+def test_backfill_low_precision_idempotent(_test_session):
+    """低精度升级为 auto_filled 后重跑 → 不再重复处理"""
+    from app.services.reconcile import backfill_d_op_time
+
+    _seed_report(_test_session, platform_order_no="WS-PREC-2", device_sn="SN-D-LP2",
+                 amount="50.00", refund_time="2026-09-05 16:20:11")
+    _seed_manual(_test_session, device_sn="SN-D-LP2", order_no="WS-OTHER-Y",
+                 amount="50.00", op_time=_dt("2026-09-05 15:00:00"),
+                 register_time="2026-09-05 09:00:00")
+    s1 = backfill_d_op_time(_test_session)
+    assert s1["precision_upgraded"] == 1
+    s2 = backfill_d_op_time(_test_session)
+    assert s2["precision_upgraded"] == 0  # 已精确, 不再升级
+    assert s2["backfilled"] == 0
+
+
 # ---------- 水单勾稽 ----------
 
 def _seed_refund_a(session, platform_order_no="WS2026090500000001"):

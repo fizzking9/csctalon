@@ -19,7 +19,7 @@ D 路回填匹配优先级(LOCKED A-20260905-002 §3.3):
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from app.models.manual_refund import ManualRefund
 from app.models.refund import Refund
@@ -76,17 +76,53 @@ def _to_cn(dt: datetime) -> datetime:
     return dt.astimezone(_TZ_CN)
 
 
+def _is_low_precision_op_time(op: datetime | None) -> bool:
+    """op_time 是否为"日级低精度默认"(北京时间 15:00:00 整点)。
+
+    _ensure_afternoon_time(upsert.py): 台账原始只有日期(00:00:00)时统一置为
+    15:00:00 —— 该值是"当天近似"而非真实退款时刻。E 路唯一匹配上时可用
+    refund_time(秒级精确) 提升精度。真实人工填的 15:00 也覆盖(有溯源可回滚)。
+    """
+    if op is None:
+        return False
+    try:
+        cn = op.astimezone(_TZ_CN)
+        return cn.hour == 15 and cn.minute == 0 and cn.second == 0
+    except (ValueError, OSError):
+        return False
+
+
 # ─────────────────────────────────────────────────────────────
 # 1. D 路 op_time 回填
 # ─────────────────────────────────────────────────────────────
 def backfill_d_op_time(db, limit: int = 5000) -> dict:
-    """D 路(manual_refunds)缺失/倒挂 op_time → 用退款记录报表退款时间回填。
+    """D 路(manual_refunds) op_time 缺失/倒挂/低精度 → 用退款记录报表退款时间回填。
 
-    仅回填 is_refunded='是' 且 op_time IS NULL 或 op_time 明显早于登记(倒挂>1天)的行。
-    幂等: 已 auto_filled 的来源 report 已标记 backfill_manual_refund_id 的行跳过。
+    覆盖三类(均 is_refunded='是'):
+      1. op_time IS NULL                     → 缺失, 直接回填
+      2. op_time 早于 register_time >1天     → 倒挂, 视为异常重填
+      3. op_time 为低精度默认(北京15:00:00)  → 台账"只记日期"的近似(_ensure_afternoon_time),
+                                              若 E 路唯一匹配(L1订单号/L2设备+金额), 用
+                                              refund_time 秒级精确值提升精度(2026-09-05, #20)
+    匹配优先级: L1 订单号 == report.platform_order_no; L2 设备号+金额(±0.01);
+               L3 设备号+登记前后7天唯一候选(仅缺/倒挂场景用, 低精度提升不用 L3 防误改)
+    幂等: 已 auto_filled 且 op_time 非空 → 跳过(重跑不覆盖已精确回填)。
+    溯源: quality_status=auto_filled + note(留原值) + backfill_refund_record_report_id。
     """
-    stats = {"scanned": 0, "matched": 0, "backfilled": 0, "pending": 0, "skipped_no_candidate": 0}
-    # 候选 manual 行: 已退款 且 op_time 缺失/倒挂
+    stats = {
+        "scanned": 0, "matched": 0, "backfilled": 0, "precision_upgraded": 0,
+        "pending": 0, "skipped_no_candidate": 0,
+    }
+    # 低精度默认判断: op_time(UTC) 换算北京后为 15:00:00 → 台账"只记日期"的近似
+    #   UTC 07:00 == 北京 15:00; 用 extract(timezone('Asia/Shanghai', op_time)) 精确表达
+    op_cn = func.timezone("Asia/Shanghai", ManualRefund.op_time)
+    low_prec_cond = and_(
+        ManualRefund.op_time.isnot(None),
+        func.extract("hour", op_cn) == 15,
+        func.extract("minute", op_cn) == 0,
+        func.extract("second", op_cn) == 0,
+    )
+    # 候选 manual 行: 已退款 且 op_time 缺失 / 倒挂 / 低精度默认
     candidates = list(
         db.scalars(
             select(ManualRefund)
@@ -96,6 +132,7 @@ def backfill_d_op_time(db, limit: int = 5000) -> dict:
                     ManualRefund.op_time.is_(None),
                     # 倒挂: op_time 比 register_time 早超过 1 天(视为异常,可重填)
                     ManualRefund.op_time < ManualRefund.register_time - timedelta(days=1),
+                    low_prec_cond,
                 ),
             )
             .order_by(ManualRefund.id)
@@ -104,16 +141,12 @@ def backfill_d_op_time(db, limit: int = 5000) -> dict:
     )
     stats["scanned"] = len(candidates)
 
-    for m in candidates:
-        # 已回填过(auto_filled)且来源仍在 → 跳过
-        if m.quality_status == "auto_filled" and m.op_time is not None:
-            stats["matched"] += 1
-            continue
-
+    def _match_report(m: ManualRefund, allow_l3: bool) -> list[RefundRecordReport]:
+        """L1/L2(/L3) 匹配, 返回唯一候选(多候选返回空由调用方判 pending)"""
         # L1: 订单号精确匹配(manual.order_no ↔ report.platform_order_no)
-        matched_reports: list[RefundRecordReport] = []
+        matched: list[RefundRecordReport] = []
         if m.order_no:
-            matched_reports = list(
+            matched = list(
                 db.scalars(
                     select(RefundRecordReport).where(
                         RefundRecordReport.platform_order_no == m.order_no.strip(),
@@ -122,7 +155,7 @@ def backfill_d_op_time(db, limit: int = 5000) -> dict:
                 )
             )
         # L2: 设备号 + 金额
-        if not matched_reports and m.device_sn:
+        if not matched and m.device_sn:
             cands = list(
                 db.scalars(
                     select(RefundRecordReport).where(
@@ -131,10 +164,9 @@ def backfill_d_op_time(db, limit: int = 5000) -> dict:
                     )
                 )
             )
-            matched_reports = [r for r in cands if _amount_eq(r.refund_amount, m.refund_amount)]
-
-        # L3: 设备号 + 时间窗(登记前后7天, 唯一候选)
-        if not matched_reports and m.device_sn and m.register_time:
+            matched = [r for r in cands if _amount_eq(r.refund_amount, m.refund_amount)]
+        # L3: 设备号 + 时间窗(登记前后7天, 唯一候选) —— 仅缺/倒挂场景
+        if not matched and allow_l3 and m.device_sn and m.register_time:
             reg = m.register_time
             window_start = reg - timedelta(days=7)
             window_end = reg + timedelta(days=7)
@@ -149,7 +181,26 @@ def backfill_d_op_time(db, limit: int = 5000) -> dict:
                 )
             )
             # 时间窗候选里只取唯一(避免多月重取产生重复)
-            matched_reports = cands if len(cands) == 1 else []
+            matched = cands if len(cands) == 1 else []
+        return matched
+
+    for m in candidates:
+        # 已回填过(auto_filled)且 op_time 非空 → 跳过(幂等)
+        if m.quality_status == "auto_filled" and m.op_time is not None:
+            stats["matched"] += 1
+            continue
+
+        # 归入场景: 缺/倒挂(可走 L3) vs 低精度提升(只走 L1/L2 防误改)
+        is_missing = m.op_time is None
+        is_reversed = (m.op_time is not None and m.register_time is not None
+                       and m.op_time < m.register_time - timedelta(days=1))
+        is_low_prec = (not is_missing and not is_reversed
+                       and _is_low_precision_op_time(m.op_time))
+        if not (is_missing or is_reversed or is_low_prec):
+            # 非三类候选(例如 limit 放宽捞出的正常精确时间行) → 跳过不计 skipped
+            continue
+
+        matched_reports = _match_report(m, allow_l3=(is_missing or is_reversed))
 
         if not matched_reports:
             stats["skipped_no_candidate"] += 1
@@ -171,10 +222,17 @@ def backfill_d_op_time(db, limit: int = 5000) -> dict:
         m.quality_status = "auto_filled"
         # ⚠️ 2026-09-05 (#20): 结构化溯源列(替代/补充解析 quality_note 文本)
         m.backfill_refund_record_report_id = str(report.id)
-        m.quality_note = (
-            f"由退款记录报表 refund_time 回填, 来源 refund_record_reports.id={report.id}"
-            + (f", 原 op_time={old_op}" if old_op else "")
-        )
+        if is_low_prec:
+            m.quality_note = (
+                f"op_time 为低精度默认(15:00)被 E 路精确回填, 来源 refund_record_reports.id={report.id}"
+                + (f", 原 op_time={_to_cn(old_op).isoformat()}" if old_op else "")
+            )
+            stats["precision_upgraded"] += 1
+        else:
+            m.quality_note = (
+                f"由退款记录报表 refund_time 回填, 来源 refund_record_reports.id={report.id}"
+                + (f", 原 op_time={old_op}" if old_op else "")
+            )
         # 反向溯源(幂等: 同 report 只标一次)
         if not report.backfill_manual_refund_id:
             report.backfill_manual_refund_id = str(m.id)
