@@ -58,6 +58,13 @@ FULL_WINDOW_DAYS: int = 7
 # 合并后全部需要检测的小时(用于 schedule_hours 对外展示)
 SCHEDULE_HOURS = sorted([*DAYTIME_HOURS, CATCHUP_HOUR])
 
+# ── T+1 延迟数据源(2026-09-05)─────────────────────────────────────────
+# 某些 BMS 报表「当天不产生数据, 只能次日抓前一天」(实测: 退款记录报表 E 路,
+# 页面当天无记录, 早上去查才有前一天全天数据)。
+# 这些源**不参与白天每小时**(当天查 = 空 + 导出易超时/卡), 只在 5:00「前一天全量」
+# 补跑时纳入, 窗口天然 = 前一天整天。若后续有同类报表, 直接加进此集合即可。
+T_PLUS_ONE_BMS_TYPES: frozenset[str] = frozenset({"refund_record_report"})
+
 # 检查间隔(秒)
 CHECK_INTERVAL = 60
 
@@ -724,6 +731,19 @@ class BmsScheduler:
 
         # ── 过滤专项级熔断(仅白天增量生效;5 点补跑 / 8 点全量强制全部执行) ──
         sync_types_bms_raw = list(DEFAULT_SYNC_TYPES) if has_bms else []
+        # ⚠️ 2026-09-05: T+1 延迟源(如退款记录报表 E 路)只在「兜底模式」纳入:
+        #   - 5:00 前一天全量(yesterday_full_sync): 窗口=前一天整天 ← 每天自动抓前一天的入口
+        #   - 8:00 近 N 天全量兜底(full_window_days>0): 窗口=近N天, 补漏(幂等, 首次兼补历史)
+        #   这类报表当天无数据(实测手动登录当天查不到, 次日才有前一天全天),
+        #   白天每小时同步**不跑**它们(当天查=空 + 导出易超时卡住)。
+        if has_bms and (yesterday_full_sync or full_window_days > 0):
+            _t1_added = [dt for dt in T_PLUS_ONE_BMS_TYPES if dt not in sync_types_bms_raw]
+            if _t1_added:
+                sync_types_bms_raw = sync_types_bms_raw + _t1_added
+                logger.info(
+                    f"[定时同步{reason}] 兜底模式纳入 T+1 延迟源: {_t1_added}"
+                    f"(前一天全量={yesterday_full_sync}, 近{full_window_days}天全量)"
+                )
         sync_types_scrm_raw = [
             DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_PRIVATE,
             DATA_TYPE_SESSION_GROUP, DATA_TYPE_SESSION_VIRTUAL,
