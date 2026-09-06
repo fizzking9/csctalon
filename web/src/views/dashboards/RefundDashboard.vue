@@ -6,6 +6,7 @@
         <el-radio-group v-model="tabMode" size="small" @change="onTabChange">
           <el-radio-button label="overview">决策概览</el-radio-button>
           <el-radio-button label="withdrawal">提现时效</el-radio-button>
+          <el-radio-button label="reconcile">对账复核</el-radio-button>
         </el-radio-group>
         <el-radio-group v-if="tabMode === 'overview'" v-model="rangeMode" size="small">
           <el-radio-button label="day">单日·{{ dailyLabel }}</el-radio-button>
@@ -56,6 +57,14 @@
 
     <!-- ============ TAB2: 退款-提现全链路 ============ -->
     <RefundWithdrawal v-else-if="analyzed && tabMode === 'withdrawal'" />
+
+    <!-- ============ TAB3: 五路对账复核 (A-20260906-002 / #22) ============ -->
+    <ReconcileCheck
+      v-else-if="tabMode === 'reconcile'"
+      :start="effectiveStart"
+      :end="effectiveEnd"
+      :reload-key="reloadKey"
+    />
   </div>
 </template>
 
@@ -66,6 +75,7 @@ import { Search, Download } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import DecisionOverview from './refund/DecisionOverview.vue'
 import RefundWithdrawal from './RefundWithdrawal.vue'
+import ReconcileCheck from './refund/ReconcileCheck.vue'
 import { refundExport } from '@/api/analytics'
 
 const tabMode = ref('overview')
