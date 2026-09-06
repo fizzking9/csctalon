@@ -725,7 +725,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
                 FROM {_D_OTHER_TABLE}
                 WHERE {_D_OTHER_TIME_COL} IS NOT NULL
                   {'AND ' + _D_OTHER_STATUS_COL + ' = :st' if _D_OTHER_STATUS_COL else ''}
-                  {'AND COALESCE(quality_status,\'\') <> :excl' if _excl_q else ''}
+                  {"AND COALESCE(quality_status,'') <> :excl" if _excl_q else ''}
                   AND {_D_OTHER_TIME_COL} >= :s AND {_D_OTHER_TIME_COL} <= :e
                 GROUP BY 1
                 """), {
@@ -7160,7 +7160,7 @@ def refund_decision_overview(
         FROM manual_refunds m
         WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
           AND m.is_refunded = '是'
-          {'AND COALESCE(m.quality_status,\'\') <> :excl' if _d_excl_q else ''}
+          {"AND COALESCE(m.quality_status,'') <> :excl" if _d_excl_q else ''}
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e, **({"excl": _d_excl_q} if _d_excl_q else {})}).fetchall()
     # E 实际现金流 (refund_record_reports 退款成功, 对账基准, 独立展示不与四路累加)
@@ -7236,7 +7236,7 @@ def refund_decision_overview(
             FROM manual_refunds m
             WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
               AND m.is_refunded = '是'
-              {'AND COALESCE(m.quality_status,\'\') <> :excl' if _d_excl_q else ''}
+              {"AND COALESCE(m.quality_status,'') <> :excl" if _d_excl_q else ''}
         """), {"ts": s, "te": e, **({"excl": _d_excl_q} if _d_excl_q else {})}).fetchall():
             tot["d_cnt"] += int(r.cnt or 0); tot["d_amt"] += float(r.amt or 0)
         # E 实际现金流 (refund_record_reports 退款成功, 对账基准)
@@ -7727,7 +7727,7 @@ def refund_export_all(
             FROM manual_refunds m
             WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
               AND m.is_refunded = '是'
-              {'AND COALESCE(m.quality_status,\'\') <> :excl' if _d_excl_q else ''}
+              {"AND COALESCE(m.quality_status,'') <> :excl" if _d_excl_q else ''}
             GROUP BY 1"""),
     ]
     route_map: dict[str, dict[str, list]] = {}
