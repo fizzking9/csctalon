@@ -12,7 +12,7 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.crypto import decrypt_secret, encrypt_secret
+from app.core.crypto import decrypt_secret, encrypt_secret, is_fernet_ciphertext
 from app.models.source_group import SourceGroup
 from app.models.sync_source_config import SyncSourceConfig
 
@@ -87,6 +87,25 @@ def ensure_source_groups_registered(db: Session) -> dict:
 
 
 # ── 凭证解析 ────────────────────────────────────────────────────────
+def _safe_decrypt(ciphertext: str | None) -> str | None:
+    """解密凭证字段; 解密结果若仍是 Fernet 密文(密钥不匹配/脏数据) → 视为不可用返回 None。
+
+    背景(2026-09-06): decrypt_secret 解密失败回退返回原值(兼容历史明文), 但旧密钥
+    加密的密文在密钥轮换后解密失败会原样返回 `gAAAA...` → 若被当作有效明文账号使用
+    会登录报"用户名不存在或密码错误"(生产 device_combo 事故)。这里兜底识别该场景,
+    让调用方走组级回退/提示重配, 而不是把密文当账号。
+    """
+    if not ciphertext:
+        return None
+    decrypted = decrypt_secret(ciphertext)
+    if decrypted is None:
+        return None
+    if is_fernet_ciphertext(decrypted):
+        # 解密失败且原文本身是密文(密钥不匹配) → 不可用
+        return None
+    return decrypted
+
+
 def get_group_credentials(db: Session, group_key: str | None) -> tuple[str | None, str | None]:
     """取组级凭证(解密); 无组或无凭证返回 (None, None)"""
     if not group_key:
@@ -94,16 +113,20 @@ def get_group_credentials(db: Session, group_key: str | None) -> tuple[str | Non
     g = db.scalar(select(SourceGroup).where(SourceGroup.group_key == group_key))
     if not g:
         return None, None
-    user = decrypt_secret(g.username) if g.username else None
-    pwd = decrypt_secret(g.password) if g.password else None
+    user = _safe_decrypt(g.username) if g.username else None
+    pwd = _safe_decrypt(g.password) if g.password else None
     return user, pwd
 
 
 def resolve_credentials(db: Session, row: SyncSourceConfig) -> tuple[str | None, str | None]:
     """运行时凭证解析: 单源凭证 > 组凭证 > (None)
-    供 get_sync_source_config 使用, 单源已配置时优先, 否则继承组凭证。"""
-    own_user = decrypt_secret(row.username) if row.username else None
-    own_pwd = decrypt_secret(row.password) if row.password else None
+    供 get_sync_source_config 使用, 单源已配置且**可解密**时优先, 否则继承组凭证。
+
+    ⚠️ 2026-09-06 加固: 单源解密结果若是 Fernet 密文特征(旧密钥脏数据) → 视为未配置,
+      回退继承组级凭证(否则会把 `gAAAA...` 密文当账号登录报错, 并连累同组其它源)。
+    """
+    own_user = _safe_decrypt(row.username) if row.username else None
+    own_pwd = _safe_decrypt(row.password) if row.password else None
     if own_user and own_pwd:
         return own_user, own_pwd
     group_user, group_pwd = get_group_credentials(db, row.group_key)

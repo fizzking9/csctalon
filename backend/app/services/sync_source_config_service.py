@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.crypto import decrypt_secret, encrypt_secret
+from app.core.crypto import decrypt_secret, encrypt_secret, is_fernet_ciphertext
 from app.models.sync_source_config import SyncSourceConfig
 from app.services.bms_fetcher import BMS_DATA_SOURCES
 from app.services.scrm_client import SCRM_DATA_SOURCES
@@ -268,8 +268,13 @@ def _row_to_config(db: Session | None, row: SyncSourceConfig) -> dict:
     if db is not None:
         username, password = resolve_credentials(db, row)
     else:
+        # 无 db 退化分支: 直接解密 + 兜底识别"解密失败仍为密文"的脏数据(密钥轮换后)
         username = decrypt_secret(row.username) if row.username else None
         password = decrypt_secret(row.password) if row.password else None
+        if is_fernet_ciphertext(username):
+            username = None
+        if is_fernet_ciphertext(password):
+            password = None
     return {
         "data_type": row.data_type,
         "name": row.name,
