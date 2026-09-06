@@ -115,36 +115,63 @@
       </el-tab-pane>
 
       <!-- 上游占位 -->
-      <el-tab-pane label="上游实时(占位)" name="upstream">
+      <el-tab-pane label="上游实时" name="upstream">
         <el-card shadow="never">
-          <el-alert type="warning" :closable="false" show-icon class="mb-16">
-            <template #title>上游实时接口占位,尚未接入真实数据源。</template>
+          <el-alert type="info" :closable="false" show-icon class="mb-16">
+            <template #title>实时流量已接入 BMS 真实上游(deviceFlow/sn/pageList); 充值订单查询仍占位。</template>
             <div style="margin-top: 8px; line-height: 1.8">
-              <div>请向 BMS / 运营商 / 支付侧索要或自行抓包整理以下信息后填充后端 <code>app/api/v1/recharges.py</code> 内的两个私有函数即可,前端无需改动:</div>
-              <ul style="margin: 8px 0 0 20px">
-                <li>充值订单查询:接口 URL、鉴权方式(Token / 签名 / mTLS)、请求参数规则、响应字段</li>
-                <li>实时流量查询:接口 URL、鉴权方式、设备SN/商户维度、返回(可用/已用/剩余流量单位)等</li>
-              </ul>
-              <div style="margin-top: 8px">如提供 HAR,可直接拖到后端 <code>uploads/</code>,或直接贴接口文档片段。</div>
+              <div>实时流量 = 本地套餐快照(device_combos) + 月流量使用(device_flow_usage, 本地无该SN数据时自动拉一次上游)。</div>
+              <div style="margin-top: 4px">充值订单查询待提供真实接口文档/抓包后填充后端 <code>app/api/v1/recharges.py::_upstream_query_recharges</code>。</div>
             </div>
           </el-alert>
           <div class="flex gap-8" style="flex-wrap: wrap">
-            <el-input v-model="upstreamFilter.sn" placeholder="设备SN(单台)" clearable style="width: 220px" />
-            <el-input v-model="upstreamFilter.merchant" placeholder="商户" clearable style="width: 220px" />
-            <el-date-picker
-              v-model="upstreamFilter.range"
-              type="daterange"
-              range-separator="至"
-              start-placeholder="起"
-              end-placeholder="止"
-              value-format="YYYY-MM-DD"
-              style="width: 260px"
-            />
-            <el-button type="primary" :disabled @click="queryUpstream">查询充值</el-button>
-            <el-button type="success" :disabled @click="queryUpstreamTrafficClick">查询流量</el-button>
+            <el-input v-model="upstreamFilter.sn" placeholder="设备SN(单台)" clearable style="width: 220px" @keyup.enter="queryUpstreamTrafficClick" />
+            <el-button type="success" :loading="trafficLoading" @click="queryUpstreamTrafficClick">查询流量(拉最新)</el-button>
+            <el-button type="primary" disabled @click="queryUpstream">查询充值(未接入)</el-button>
           </div>
-          <div class="mt-16 todo-result">
-            <el-empty description="上游未接入,无返回数据" />
+          <div class="mt-8" style="color: #909399; font-size: 12px; line-height: 1.7">
+            本地已有该 SN 数据也会先展示(秒回), 本工具页「查询流量」会再触发一次 BMS 上游拉取覆盖入库;
+            设备行为分析里的「流量」区块默认只读本地, 点「刷新最新数据」才拉上游。
+          </div>
+
+          <!-- 实时流量结果 -->
+          <div v-if="trafficInfo" class="mt-16">
+            <el-descriptions :column="1" border size="small">
+              <el-descriptions-item label="设备SN">{{ trafficInfo.device_sn || '-' }}</el-descriptions-item>
+              <el-descriptions-item v-if="trafficInfo.quota_latest" label="当前套餐">
+                {{ trafficInfo.quota_latest.package_name || '-' }}
+                <el-tag v-if="trafficInfo.quota_latest.status" size="small" effect="plain" style="margin-left: 6px">{{ trafficInfo.quota_latest.status }}</el-tag>
+                <span v-if="trafficInfo.quota_latest.end_date" style="margin-left: 8px; color: #909399">至 {{ fmt(trafficInfo.quota_latest.end_date) }}</span>
+              </el-descriptions-item>
+              <el-descriptions-item v-if="trafficInfo.quota_latest" label="套餐流量">
+                可用 {{ trafficInfo.quota_latest.available_human || '-' }} · 已用 {{ trafficInfo.quota_latest.used_human || '-' }} · 剩余 {{ trafficInfo.quota_latest.remaining_human || '-' }}
+              </el-descriptions-item>
+              <el-descriptions-item v-if="trafficInfo.quota_summary" label="累计充值">
+                {{ trafficInfo.quota_summary.count || 0 }} 笔 · ¥{{ Number(trafficInfo.quota_summary.total_amount || 0).toFixed(2) }} · 剩余 {{ trafficInfo.quota_summary.remaining_human || '-' }}
+              </el-descriptions-item>
+            </el-descriptions>
+
+            <div class="mt-16">
+              <div style="margin-bottom: 6px; font-weight: 600">月流量使用({{ trafficInfo.monthly_usage?.length || 0 }} 个月, 共 {{ trafficInfo.total_flow_gb || 0 }} GB)</div>
+              <el-table v-if="trafficInfo.monthly_usage && trafficInfo.monthly_usage.length" :data="trafficInfo.monthly_usage" size="small" border stripe max-height="320">
+                <el-table-column prop="stat_month" label="月份" width="110" />
+                <el-table-column label="流量(GB)" width="120" align="right">
+                  <template #default="{ row }">{{ row.flow_gb != null ? Number(row.flow_gb) : '-' }}</template>
+                </el-table-column>
+                <el-table-column label="完整月" width="100" align="center">
+                  <template #default="{ row }">
+                    <el-tag v-if="row.month_complete" type="success" size="small">完整</el-tag>
+                    <el-tag v-else type="warning" size="small">进行中</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="device_combo_name" label="当前套餐" min-width="140" show-overflow-tooltip />
+              </el-table>
+              <el-empty v-else description="上游未返回月流量记录" :image-size="60" />
+              <div v-if="trafficInfo.fetch_msg" class="mt-8" style="color: #909399; font-size: 12px">{{ trafficInfo.fetch_msg }}</div>
+            </div>
+          </div>
+          <div v-else class="mt-16 todo-result">
+            <el-empty description="输入设备 SN 后点击「查询流量」" />
           </div>
         </el-card>
       </el-tab-pane>
@@ -155,6 +182,7 @@
 <script setup>
 import { reactive, ref, watch } from 'vue'
 import dayjs from 'dayjs'
+import { ElMessage } from 'element-plus'
 import {
   listLocalCombos,
   getLocalCombosSummary,
@@ -211,8 +239,10 @@ function resetFilter() {
 // initial load
 onSearch()
 
-// ---------- 上游占位(按钮 disabled 占位,保留代码骨架,等你给真实接口再激活) ----------
+// ---------- 上游(流量已接入真实 BMS; 充值查询仍占位,保留骨架) ----------
 const upstreamFilter = reactive({ sn: '', merchant: '', range: [] })
+const trafficInfo = ref(null)
+const trafficLoading = ref(false)
 
 async function queryUpstream() {
   const params = { sn: upstreamFilter.sn, merchant: upstreamFilter.merchant }
@@ -224,7 +254,19 @@ async function queryUpstream() {
 }
 
 async function queryUpstreamTrafficClick() {
-  await queryUpstreamTraffic({ sn: upstreamFilter.sn, merchant: upstreamFilter.merchant })
+  const sn = (upstreamFilter.sn || '').trim()
+  if (!sn) { ElMessage.warning('请输入设备SN'); return }
+  trafficLoading.value = true
+  trafficInfo.value = null
+  try {
+    // 工具页=主动拉最新(refresh=true 触发 BMS 上游覆盖入库后重读)
+    const res = await queryUpstreamTraffic({ sn, refresh: true })
+    trafficInfo.value = res.data?.result || null
+  } catch (e) {
+    ElMessage.error(`查询失败: ${e.message}`)
+  } finally {
+    trafficLoading.value = false
+  }
 }
 </script>
 

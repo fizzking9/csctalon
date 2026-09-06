@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
@@ -18,6 +19,8 @@ from sqlalchemy import func, select
 from app.api.deps import AdminOrSupervisor, CurrentUser, DBSession
 from app.models.device_combo import DeviceCombo
 from app.schemas.common import PageBase, R
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/recharges", tags=["流量与充值"])
 
@@ -207,13 +210,137 @@ def _upstream_query_recharges(params: dict) -> list[dict]:
     return []
 
 
-def _upstream_query_traffic(params: dict) -> dict | None:
-    """TODO: 真实流量余额/使用量上游查询(按设备 SN 或 商户)。
+def _upstream_query_traffic(db, params: dict) -> dict | None:
+    """真实流量查询: 套餐快照(本地 device_combos) + 月流量使用(本地 device_flow_usage).
 
-    预期映射: { device_sn, available_bytes, used_bytes, remaining_bytes,
-                quota_type, updated_at, raw_response }
+    上游 = BMS 设备流量 HTTP API(deviceFlow/sn/pageList), 已由 device_flow_sync
+    封装(Playwright 登录态 + 页面内 fetch), 实测可用。
+    设计(用户 2026-09-06 确认): **默认只读本地**, 进入/浏览时秒回已有数据;
+    仅 refresh=True(用户点「刷新」)才触发上游拉取(sync_device_flow_sn)。
+
+    Args:
+        params: { sn(必填), merchant(兼容保留), refresh(可选, true=拉上游最新) }
+    Returns:
+        { device_sn, quota_latest, quota_summary, monthly_usage, total_flow_gb,
+          fetched, fetch_msg, has_local, source }
     """
-    return None
+    from app.services.device_flow_sync import sync_device_flow_sn
+
+    sn = (params.get("sn") or "").strip()
+    refresh = bool(params.get("refresh"))
+    if not sn:
+        return None
+
+    # ── 1. 套餐快照(本地 device_combos, 字节口径 -1=无限) ──
+    combos = list(
+        db.scalars(
+            select(DeviceCombo)
+            .where(DeviceCombo.device_sn == sn)
+            .order_by(DeviceCombo.created_at_raw.desc().nullslast())
+            .limit(50)
+        )
+    )
+    # 最新一条"流量正常"套餐(当前生效); 无则取最新一条
+    normal = next((c for c in combos if c.status and "正常" in str(c.status)), None)
+    latest = combos[0] if combos else None
+    cur = normal or latest
+    quota_latest = None
+    if cur:
+        quota_latest = {
+            "recharge_order_no": cur.recharge_order_no,
+            "package_name": cur.package_name,
+            "package_type": cur.package_type,
+            "traffic_type": cur.traffic_type,
+            "merchant_name": cur.merchant_name,
+            "status": cur.status,
+            "start_date": cur.start_date.isoformat() if cur.start_date else None,
+            "end_date": cur.end_date.isoformat() if cur.end_date else None,
+            "available_bytes": cur.available_traffic,
+            "used_bytes": cur.used_traffic,
+            "remaining_bytes": cur.remaining_traffic,
+            "available_human": _bytes_to_human(cur.available_traffic),
+            "used_human": _bytes_to_human(cur.used_traffic),
+            "remaining_human": _bytes_to_human(cur.remaining_traffic),
+        }
+    # 汇总口径与 local_combo_by_sn 一致(排除 -1 无限, 避免 -1 污染累计)
+    total_amount = sum(float(r.actual_amount) for r in combos if r.actual_amount is not None)
+    remain = sum((r.remaining_traffic or 0) for r in combos if (r.remaining_traffic or 0) != -1)
+    quota_summary = {
+        "count": len(combos),
+        "total_amount": round(total_amount, 2),
+        "remaining_bytes": remain,
+        "remaining_human": _bytes_to_human(remain),
+    }
+
+    # ── 2. 月流量使用(本地 device_flow_usage) ──
+    from app.models.device_flow_usage import DeviceFlowUsage
+
+    def _read_monthly() -> list[dict]:
+        rows = list(
+            db.scalars(
+                select(DeviceFlowUsage)
+                .where(DeviceFlowUsage.device_sn == sn)
+                .order_by(DeviceFlowUsage.stat_month.desc().nullslast())
+            )
+        )
+        return [
+            {
+                "stat_month": r.stat_month,
+                "flow_gb": float(r.flow_gb) if r.flow_gb is not None else None,
+                "month_complete": bool(r.month_complete),
+                "device_combo_name": r.device_combo_name,
+                "merchant_name": r.merchant_name,
+                "fetched_at": r.fetched_at.isoformat() if r.fetched_at else None,
+            }
+            for r in rows
+        ]
+
+    monthly = _read_monthly()
+    fetched = False
+    fetch_msg = None
+    if refresh:
+        # 仅用户显式点「刷新」才触发一次真实上游拉取(与 DeviceFlowAudit 同底座);
+        # 默认浏览不拉上游, 避免每次进入设备都起 Playwright/撞 BMS 限流。
+        try:
+            # 凭证优先读 refund 源(同域 bms-wifi 组), 与 device_flow.py 一致
+            base_url = "https://wifi.cloud-cat.cn/bms"
+            u = p = None
+            from app.services.sync_source_config_service import get_sync_source_config
+
+            cfg = get_sync_source_config(db, "refund")
+            if cfg and cfg.get("username") and cfg.get("password"):
+                base_url = cfg.get("base_url") or base_url
+                u = cfg["username"]
+                p = cfg["password"]
+            else:
+                from app.core.config import settings
+
+                if settings.BMS_USERNAME and settings.BMS_PASSWORD:
+                    u = settings.BMS_USERNAME
+                    p = settings.BMS_PASSWORD
+            if u and p:
+                result = sync_device_flow_sn(sn=sn, month=None, username=u, password=p, base_url=base_url)
+                fetched = True
+                fetch_msg = result.get("message")
+                monthly = _read_monthly()  # 拉取后重读本地
+            else:
+                fetch_msg = "未配置 BMS 凭证, 无法拉取上游月流量(仅展示本地套餐快照)"
+        except Exception as e:  # noqa: BLE001 上游拉取失败降级为仅本地展示
+            fetch_msg = f"上游月流量拉取失败(降级本地): {e}"
+            logger.warning(f"[recharges] _upstream_query_traffic 上游拉取异常: {e}")
+
+    total_flow = sum(float(m["flow_gb"] or 0) for m in monthly)
+    return {
+        "device_sn": sn,
+        "quota_latest": quota_latest,
+        "quota_summary": quota_summary,
+        "monthly_usage": monthly,
+        "total_flow_gb": round(total_flow, 4),
+        "fetched": fetched,
+        "fetch_msg": fetch_msg,
+        "has_local": bool(combos) or bool(monthly),
+        "source": "bms-device-flow",
+    }
 
 
 @router.get("/upstream", response_model=R, summary="[占位]上游-实时充值订单查询")
@@ -251,19 +378,18 @@ def upstream_recharges(
 
 @router.get("/traffic/upstream", response_model=R, summary="[占位]上游-实时流量余额/使用量查询")
 def upstream_traffic(
-    _db: DBSession,
+    db: DBSession,
     _user: AdminOrSupervisor,
     sn: str | None = Query(None, description="设备SN(按设备查)"),
-    merchant: str | None = Query(None, description="商户(按商户汇总查)"),
+    merchant: str | None = Query(None, description="商户(按商户汇总查, 兼容保留)"),
+    refresh: bool = Query(False, description="true=强制拉取上游月流量(本地无数据时也会自动拉一次)"),
 ):
     """
-    **占位接口**: 调用上游查询设备/商户实时流量(例如运营商流量平台、BMS 套餐查询)。
+    **实时流量查询**: 套餐快照 + 月流量使用(接入 BMS 设备流量真实上游, 与设备流量审计同底座)。
 
-    当前未接入真实凭据/文档,返回空结果并提示。接入方式同上:提供接口文档或抓包,
-    填充 `_upstream_query_traffic`。
+    - 套餐快照(quota_latest/quota_summary): 本地 device_combos(设备套餐页导出, 字节口径)
+    - 月流量使用(monthly_usage): 本地 device_flow_usage; 本地无该 SN 数据或 refresh=true 时
+      触发一次 BMS 上游拉取(deviceFlow/sn/pageList, Playwright 登录态, 数秒~数十秒)
     """
-    data = _upstream_query_traffic({"sn": sn, "merchant": merchant})
-    return R(data={
-        "result": data,
-        "_hint": "上游接口未接入,请提供真实接口文档/抓包后填充 _upstream_query_traffic。",
-    })
+    data = _upstream_query_traffic(db, {"sn": sn, "merchant": merchant, "refresh": refresh})
+    return R(data={"result": data})

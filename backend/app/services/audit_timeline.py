@@ -36,6 +36,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.models.bms_order import BmsOrder
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
 from app.models.device_combo import DeviceCombo
@@ -43,6 +44,8 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.manual_refund import ManualRefund
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
+from app.models.refund_record_report import RefundRecordReport
+from app.models.return_tracking import ReturnTracking
 from app.models.shanmao_refund import ShanmaoRefund
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
@@ -59,6 +62,10 @@ EVENT_TYPE_META: dict[str, dict[str, str]] = {
     "device_combo": {"label": "设备套餐", "color": "primary", "icon": "Goods"},
     "manual_refund": {"label": "手动退款登记", "color": "warning", "icon": "Wallet"},
     "shanmao_refund": {"label": "闪猫退款", "color": "danger", "icon": "Money"},
+    # 2026-09-06 设备行为分析完善新增(BMS 五源扩容后入库的新表)
+    "bms_order": {"label": "订单", "color": "success", "icon": "ShoppingCart"},
+    "return_tracking": {"label": "退货跟踪", "color": "warning", "icon": "RefreshLeft"},
+    "refund_record_report": {"label": "线上退款水单", "color": "danger", "icon": "Tickets"},
 }
 
 
@@ -486,6 +493,131 @@ def _build_shanmao_refund_items(rows: list[ShanmaoRefund], include_device_sn: bo
     return items
 
 
+def _build_bms_order_items(rows: list[BmsOrder], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
+    """订单管理(bms_orders)时序项 - BMS 支付订单台账(微信续费/储值卡/后台充值/预存等)"""
+    items: list[dict] = []
+    for o in rows:
+        parts = []
+        if o.order_type:
+            parts.append(o.order_type)
+        if o.order_status:
+            # 存库为中文(支付成功/未支付/已关闭等)或原始码, 统一展示原文
+            parts.append(str(o.order_status))
+        amount = _amount(o.actual_pay_price) if o.actual_pay_price is not None else _amount(o.combo_price)
+        fields = {
+            "订单号": o.order_no,
+            "订单类型": o.order_type,
+            "套餐": o.combo_name,
+            "套餐价格": _amount(o.combo_price),
+            "实付金额": _amount(o.actual_pay_price),
+            "余额支付": _amount(o.balance_pay_price),
+            "支付方式": o.pay_type,
+            "订单状态": o.order_status,
+            "退款状态": o.refund_status,
+            "商户名称": o.business_name or o.merchant_name,
+            "创建人": o.create_user,
+            "支付时间": _dt_iso(o.pay_date),
+            "创建时间": _dt_iso(o.create_date),
+        }
+        if include_device_sn:
+            fields["设备SN"] = o.device_sn
+        items.append({
+            "type": "bms_order",
+            "time": o.create_date or o.pay_date,
+            "ref_id": o.order_no,
+            "title": f"订单 {o.order_no}",
+            "summary": " · ".join(parts) or "订单",
+            "amount": amount,
+            "device_sn": o.device_sn if include_device_sn else None,
+            "person_names": [o.create_user] if include_person_name and o.create_user else None,
+            "fields": fields,
+        })
+    return items
+
+
+def _build_return_tracking_items(rows: list[ReturnTracking], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
+    """退货跟踪(return_trackings)时序项 - 设备退货/换货全流程"""
+    items: list[dict] = []
+    for r in rows:
+        parts = []
+        if r.return_type:
+            parts.append(r.return_type)
+        if r.return_sign_status:
+            parts.append(f"签收:{r.return_sign_status}")
+        if r.return_reason:
+            parts.append(r.return_reason)
+        amount = _amount(r.refund_amount)
+        fields = {
+            "退货类型": r.return_type,
+            "退货原因": r.return_reason,
+            "退款金额": amount,
+            "实付金额": _amount(r.paid_amount),
+            "签收状态": r.return_sign_status,
+            "快递单号": r.return_express_no,
+            "店铺": r.shop,
+            "商户": r.merchant,
+            "销售订单号": r.order_no,
+            "下单时间": _dt_iso(r.order_time),
+            "退货时间": _dt_iso(r.return_time),
+            "签收时间": _dt_iso(r.sign_time),
+            "创建人": r.creator,
+            "备注": (r.remark or "")[:200],
+        }
+        if include_device_sn:
+            fields["设备SN"] = r.device_sn
+        items.append({
+            "type": "return_tracking",
+            "time": r.return_time or r.sign_time or r.created_at_raw or r.order_time,
+            "ref_id": r.order_no or f"RT{r.id}",
+            "title": f"退货 {r.return_type or r.order_no or f'#{r.id}'}",
+            "summary": " · ".join(parts) or "退货跟踪",
+            "amount": amount,
+            "device_sn": r.device_sn if include_device_sn else None,
+            "person_names": [n for n in (r.creator, r.updater) if n] if include_person_name else None,
+            "fields": fields,
+        })
+    return items
+
+
+def _build_refund_record_report_items(rows: list[RefundRecordReport], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
+    """线上退款水单(refund_record_reports, E 路)时序项 - BMS 财务退款记录报表持续采集"""
+    items: list[dict] = []
+    for r in rows:
+        parts = []
+        if r.refund_status:
+            parts.append(r.refund_status)
+        amount = _amount(r.refund_amount)
+        if amount is not None:
+            parts.append(f"¥{amount}")
+        if r.merchant_name:
+            parts.append(r.merchant_name)
+        fields = {
+            "平台订单号": r.platform_order_no,
+            "微信订单号": r.wx_order_no,
+            "商户号": r.merchant_id,
+            "商户名": r.merchant_name,
+            "商品名称": r.product_name,
+            "申请退款金额": _amount(r.apply_refund_amount),
+            "退款金额": amount,
+            "退款状态": r.refund_status,
+            "退款时间": _dt_iso(r.refund_time),
+        }
+        if include_device_sn:
+            fields["设备SN"] = r.device_sn
+        items.append({
+            "type": "refund_record_report",
+            "time": r.refund_time,
+            "ref_id": r.platform_order_no or r.wx_order_no or f"RRR{r.id}",
+            "title": f"线上退款 {r.platform_order_no or f'#{r.id}'}",
+            "summary": " · ".join(parts) or "线上退款水单",
+            "amount": amount,
+            "device_sn": r.device_sn if include_device_sn else None,
+            "person_names": None,
+            "fields": fields,
+        })
+    return items
+
+
 def _merge_and_sort(item_lists: list[list[dict]], limit: int) -> list[dict]:
     """合并各表 items,按 time 倒序,截断 limit。无 time 的排末尾。"""
     merged: list[dict] = []
@@ -576,6 +708,32 @@ def build_device_timeline(
         shanmao_stmt = shanmao_stmt.where(ShanmaoRefund.apply_time >= since)
     shanmao_refunds = list(db.scalars(shanmao_stmt.order_by(ShanmaoRefund.apply_time.desc().nullslast()).limit(per_table_limit)))
 
+    # 订单管理(bms_orders): 主时间=create_date(订单创建/同步锚点), 退 create_date
+    order_stmt = select(BmsOrder).where(BmsOrder.device_sn == sn)
+    if since:
+        order_stmt = order_stmt.where(
+            or_(BmsOrder.create_date >= since, BmsOrder.pay_date >= since)
+        )
+    bms_orders = list(db.scalars(order_stmt.order_by(BmsOrder.create_date.desc().nullslast()).limit(per_table_limit)))
+
+    # 退货跟踪(return_trackings): 主时间=return_time(退货发生), 退 created_at_raw/order_time
+    rt_stmt = select(ReturnTracking).where(ReturnTracking.device_sn == sn)
+    if since:
+        rt_stmt = rt_stmt.where(
+            or_(
+                ReturnTracking.return_time >= since,
+                ReturnTracking.sign_time >= since,
+                ReturnTracking.created_at_raw >= since,
+            )
+        )
+    return_trackings = list(db.scalars(rt_stmt.order_by(ReturnTracking.return_time.desc().nullslast()).limit(per_table_limit)))
+
+    # 线上退款水单(refund_record_reports, E路): 主时间=refund_time
+    rrr_stmt = select(RefundRecordReport).where(RefundRecordReport.device_sn == sn)
+    if since:
+        rrr_stmt = rrr_stmt.where(RefundRecordReport.refund_time >= since)
+    refund_record_reports = list(db.scalars(rrr_stmt.order_by(RefundRecordReport.refund_time.desc().nullslast()).limit(per_table_limit)))
+
     items = _merge_and_sort(
         [
             _build_refund_items(refunds, include_device_sn=include_device_sn, include_person_name=include_person_name),
@@ -588,6 +746,9 @@ def build_device_timeline(
             _build_cs_record_items(cs_records, include_device_sn=include_device_sn, include_person_name=include_person_name),
             _build_external_complaint_items(external_complaints, include_device_sn=include_device_sn, include_person_name=include_person_name),
             _build_card_complaint_items(card_complaints, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_bms_order_items(bms_orders, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_return_tracking_items(return_trackings, include_device_sn=include_device_sn, include_person_name=include_person_name),
+            _build_refund_record_report_items(refund_record_reports, include_device_sn=include_device_sn, include_person_name=include_person_name),
         ],
         limit,
     )

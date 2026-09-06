@@ -171,3 +171,86 @@ def test_build_wallet_items():
     assert it["fields"]["钱包余额"] == 500.0
     assert it["person_names"] == ["客服甲"]
     assert it["summary"] == "用户提现 · 操作:客服甲"
+
+
+# ============================================================
+# 2026-09-06 设备行为分析完善新增 3 类事件(bms_order/return_tracking/
+# refund_record_report) — 纯函数组装测试
+# ============================================================
+from app.models.bms_order import BmsOrder
+from app.models.refund_record_report import RefundRecordReport
+from app.models.return_tracking import ReturnTracking
+from app.services.audit_timeline import (
+    _build_bms_order_items,
+    _build_refund_record_report_items,
+    _build_return_tracking_items,
+)
+
+
+def test_build_bms_order_items():
+    """正向: bms_order item 组装正确(主时间=create_date)。"""
+    o = BmsOrder(
+        order_no="SP202609010001",
+        order_type="储值卡充值订单",
+        combo_name="100G【用30天】",
+        actual_pay_price=99.0,
+        order_status="支付成功",
+        device_sn="SN-ORD-1",
+        create_date=datetime(2026, 9, 1, 10, tzinfo=timezone.utc),
+        pay_date=datetime(2026, 9, 1, 10, 5, tzinfo=timezone.utc),
+        business_name="测试商户",
+        create_user="WeChat",
+    )
+    it = _build_bms_order_items([o], include_device_sn=True)[0]
+    assert it["type"] == "bms_order"
+    assert it["ref_id"] == "SP202609010001"
+    assert it["amount"] == 99.0
+    assert it["fields"]["订单号"] == "SP202609010001"
+    assert it["fields"]["设备SN"] == "SN-ORD-1"
+    assert it["person_names"] == ["WeChat"]
+    assert it["time"] == o.create_date
+
+
+def test_build_return_tracking_items():
+    """正向: return_tracking item 组装正确(主时间=return_time)。"""
+    r = ReturnTracking(
+        id=7,
+        device_sn="SN-RT-1",
+        return_type="已激活退货",
+        return_reason="质量问题",
+        refund_amount=88.0,
+        return_sign_status="已收到",
+        return_express_no="SF123456",
+        merchant="测试商户",
+        return_time=datetime(2026, 9, 2, 9, tzinfo=timezone.utc),
+    )
+    it = _build_return_tracking_items([r], include_device_sn=True)[0]
+    assert it["type"] == "return_tracking"
+    assert it["ref_id"] == "RT7"
+    assert it["amount"] == 88.0
+    assert it["fields"]["退货类型"] == "已激活退货"
+    assert it["fields"]["设备SN"] == "SN-RT-1"
+    assert it["summary"] == "已激活退货 · 签收:已收到 · 质量问题"
+
+
+def test_build_refund_record_report_items():
+    """正向: refund_record_report(E路水单) item 组装正确。"""
+    r = RefundRecordReport(
+        id=11,
+        platform_order_no="WX20260901001",
+        wx_order_no="WX-TRANS-001",
+        merchant_id="M1001",
+        merchant_name="测试商户",
+        product_name="流量套餐",
+        refund_amount=50.0,
+        refund_status="退款成功",
+        refund_time=datetime(2026, 9, 1, 15, tzinfo=timezone.utc),
+        device_sn="SN-RRR-1",
+    )
+    it = _build_refund_record_report_items([r], include_device_sn=True)[0]
+    assert it["type"] == "refund_record_report"
+    assert it["ref_id"] == "WX20260901001"
+    assert it["amount"] == 50.0
+    assert it["fields"]["微信订单号"] == "WX-TRANS-001"
+    assert it["fields"]["设备SN"] == "SN-RRR-1"
+    assert it["summary"] == "退款成功 · ¥50.0 · 测试商户"
