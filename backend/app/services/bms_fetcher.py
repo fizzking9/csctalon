@@ -496,19 +496,28 @@ async def _is_clickable_button(handle) -> tuple[bool, str]:
     return False, summary
 
 
-async def _click_export_button(page) -> None:
-    """点击「导出」按钮,找不到标准按钮时 fallback 遍历所有可见按钮。
+async def _locate_export_button(page, dry_run: bool = False):
+    """定位「导出」按钮并返回可点击的 ElementHandle(不执行点击)。
+
+    ⚠️ 用途: 开发/联调/回归验证阶段, 只需确认"能稳定找到真正的导出按钮"即可初步
+      判定采集链路可行 —— **不要执行点击/下载**。BMS 的 1 分钟操作限制(OPERATION_INTERVAL
+      =65s)只约束真实查询/导出/下载, 定位按钮不触发该限制; 而真点击会触发 60s 冷却,
+      若每次都真下载做验证会撞限流、白等 180~600s、污染账号。
+
+    本函数 = _click_export_button 的"定位"部分(dry_run=True 时纯定位不点击, 供测试/
+      验证脚本复用); dry_run=False 时也仅定位返回, 点击由 _click_export_button 负责。
+
+    返回: 定位到的按钮 ElementHandle(已通过 _is_clickable_button 身份校验)。
+    抛错: BmsSessionExpired(会话被踢落登录页) / RuntimeError("未找到导出按钮")。
 
     ⚠️ 2026-09-06 事故修复(3d48c1f 引入回归, 生产 8:55 起全源 download 超时):
       旧实现标准 selector 混入 `div:has-text("导出") >> nth=0`, 会点到含"导出"文案的
       祖先容器/工具栏/模态框内部(has-text 子串匹配 + nth=0 对整个列表取第1个),
       page.click 对容器也返回"成功" → 误记「命中成功」却永不触发 download。
-
       本次修复原则:
       1) 只接受"按钮语义"元素(tag=button / class 含 btn|button / role=button), 点击前先身份校验,
          命中非按钮(容器/文本) → 跳过并记 warning, 绝不无把握记「命中成功」;
-      2) 候选选择器同样收敛到 _EXPORT_ANY_CLICKABLE(带按钮标识), 不再用裸 div:has-text;
-      3) 点击后由调用方(_download_with_retry)做"是否有网络请求"的生效判据, 点空快速失败(见该函数)。
+      2) 候选选择器同样收敛到 _EXPORT_ANY_CLICKABLE(带按钮标识), 不再用裸 div:has-text。
     """
     import logging as _lg
     _log = _lg.getLogger(__name__)
@@ -532,20 +541,20 @@ async def _click_export_button(page) -> None:
                     "判定会话失效 → 抛 BmsSessionExpired"
                 )
                 raise BmsSessionExpired(
-                    "点击导出前检测到页面仅剩登录按钮(会话被踢/失效), 同组下一源将重新登录"
+                    "定位导出前检测到页面仅剩登录按钮(会话被踢/失效), 同组下一源将重新登录"
                 )
     except BmsSessionExpired:
         raise
     except Exception:
         pass
 
-    # 点击前先关闭可能遮挡的模态「提示」框
+    # 定位前先关闭可能遮挡的模态「提示」框(不影响按钮定位, 仅清障)
     try:
         await _dismiss_modal_dialogs(page)
     except Exception as _de:
         _log.warning(f"  [导出按钮] 关闭模态框异常(忽略,继续): {_de}")
 
-    _log.info("  [导出按钮] 开始定位导出按钮...")
+    _log.info("  [导出按钮] 开始定位导出按钮..." + ("(dry_run 仅验证不点击)" if dry_run else ""))
 
     # ── ① 标准按钮精确匹配(旧代码路径, 生产 8:00/8:24 证明可靠) ──
     #    仅限真实 <button> / span.el-button(Element UI), 绝不混入裸 div:has-text。
@@ -565,14 +574,13 @@ async def _click_export_button(page) -> None:
             except Exception:
                 continue
             if "导出" in t and "导入" not in t and "重置" not in t:
-                ok, summary = await _is_clickable_button(await el.element_handle())
+                handle = await el.element_handle()
+                ok, summary = await _is_clickable_button(handle)
                 if not ok:
                     _log.warning(f"  [导出按钮] 候选 #{i} 非按钮(跳过): {summary}")
                     continue
                 _log.info(f"  [导出按钮] 标准命中 #{i}: {summary}")
-                await el.click(timeout=8000)
-                _log.info("  [导出按钮] 标准 selector 命中并点击成功")
-                return
+                return handle
         _log.info(f"  [导出按钮] 标准 selector 无有效按钮(共{n}个候选), 改遍历")
     except Exception as e:
         _log.info(f"  [导出按钮] 标准 selector 未命中: {type(e).__name__}, 改为遍历候选")
@@ -583,7 +591,6 @@ async def _click_export_button(page) -> None:
     except Exception:
         btns = await page.query_selector_all("button:visible")
     _log.info(f"  [导出按钮] 页面候选按钮数: {len(btns)}")
-    clicked = False
     for idx, b in enumerate(btns):
         try:
             t = (await b.inner_text()).strip()
@@ -595,42 +602,52 @@ async def _click_export_button(page) -> None:
             if not ok:
                 _log.warning(f"  [导出按钮] 遍历候选 #{idx} 非按钮, 跳过: {summary}")
                 continue
-            _log.info(f"  [导出按钮] 遍历命中第 {idx} 个: {summary}, 准备点击")
-            # 点击前再次关闭模态框(前一次点击可能刚触发新弹窗)
+            _log.info(f"  [导出按钮] 遍历命中第 {idx} 个: {summary}")
+            # 命中前再次关闭模态框(前一次点击可能刚触发新弹窗)
             try:
                 await _dismiss_modal_dialogs(page)
             except Exception:
                 pass
+            return b
+    # 列出所有候选按钮文本 + 身份, 方便诊断
+    all_texts = []
+    for b in btns:
+        try:
+            all_texts.append((await b.inner_text()).strip())
+        except Exception:
+            pass
+    _log.warning(f"  [导出按钮] 未找到导出按钮! 所有候选文本: {all_texts[:20]}")
+    raise RuntimeError("未找到导出按钮")
+
+
+async def _click_export_button(page) -> None:
+    """定位并点击「导出」按钮(触发真实导出 → 由 _download_with_retry 等待 download)。
+
+    定位逻辑见 _locate_export_button(含 3d48c1f 回归修复说明)。此处仅负责:
+      1) 调 _locate_export_button 拿到已通过身份校验的真按钮;
+      2) 点击它(若被模态框拦截则 dismiss 后 force-click 兜底)。
+    """
+    import logging as _lg
+    _log = _lg.getLogger(__name__)
+    btn = await _locate_export_button(page, dry_run=False)
+    try:
+        await btn.click(timeout=8000)
+        _log.info("  [导出按钮] 标准 selector 命中并点击成功")
+        return
+    except Exception as ce:
+        err = str(ce)
+        if "intercepts pointer events" in err or "el-message-box" in err:
+            _log.warning(f"  [导出按钮] 点击被模态框拦截, 先关闭再重试: {ce}")
             try:
-                await b.click(timeout=8000)
-                clicked = True
-                _log.info("  [导出按钮] 遍历点击成功")
-                break
-            except Exception as ce:
-                err = str(ce)
-                if "intercepts pointer events" in err or "el-message-box" in err:
-                    _log.warning(f"  [导出按钮] 遍历点击被模态框拦截, 先关闭再重试: {ce}")
-                    try:
-                        await _dismiss_modal_dialogs(page)
-                        await b.click(timeout=8000, force=True)
-                        clicked = True
-                        _log.info("  [导出按钮] 关闭模态框后 force-click 成功")
-                        break
-                    except Exception as ce2:
-                        _log.warning(f"  [导出按钮] 关闭模态框后仍点击失败: {ce2}")
-                else:
-                    _log.warning(f"  [导出按钮] 遍历点击失败: {ce}")
-                continue
-    if not clicked:
-        # 列出所有候选按钮文本 + 身份, 方便诊断
-        all_texts = []
-        for b in btns:
-            try:
-                all_texts.append((await b.inner_text()).strip())
-            except Exception:
-                pass
-        _log.warning(f"  [导出按钮] 未找到导出按钮! 所有候选文本: {all_texts[:20]}")
-        raise RuntimeError("未找到导出按钮")
+                await _dismiss_modal_dialogs(page)
+                await btn.click(timeout=8000, force=True)
+                _log.info("  [导出按钮] 关闭模态框后 force-click 成功")
+                return
+            except Exception as ce2:
+                _log.warning(f"  [导出按钮] 关闭模态框后仍点击失败: {ce2}")
+                raise
+        _log.warning(f"  [导出按钮] 点击失败: {ce}")
+        raise
 
 
 async def _download_with_retry(

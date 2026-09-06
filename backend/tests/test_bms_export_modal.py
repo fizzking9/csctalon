@@ -30,6 +30,7 @@ from app.services.bms_fetcher import (
     BmsSessionExpired,
     _click_export_button,
     _dismiss_modal_dialogs,
+    _locate_export_button,
 )
 
 
@@ -333,3 +334,63 @@ async def test_click_export_modal_dismissed_then_success():
     await _click_export_button(page)
     assert page.message_box_visible is False  # 模态框已被关闭
     assert export_btn.clicked == 1
+
+
+# ─────────────────────────────────────────────────────────────
+# _locate_export_button: dry-run 定位验证(不点击 → 不触发 60s 下载限流)
+# ─────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_locate_export_dry_run_finds_but_never_clicks():
+    """dry_run 定位: 能找到真正导出按钮, 但**绝不执行点击**(不触发 BMS 60s 限流)。
+
+    核心: 开发验证阶段只需"能稳定找到按钮"即可判可行; 点击/下载才会触发限流。
+    """
+    page = FakePage()
+    export_btn = _FakeHandle(tag="BUTTON", text="导出")
+    page.standard_handles = [export_btn]
+    page.all_buttons = [export_btn]
+    found = await _locate_export_button(page, dry_run=True)
+    # 返回的是同一个按钮句柄
+    assert found is export_btn
+    # dry_run 必须零点击 → 不会触发 BMS 的 1 分钟导出/下载限流
+    assert export_btn.clicked == 0
+
+
+@pytest.mark.asyncio
+async def test_locate_export_dry_run_ignores_container_div():
+    """dry_run 定位核心回归: 含"导出"文案的祖先容器 div 绝不被当作按钮(不返回它)。"""
+    page = FakePage()
+    toolbar_div = _FakeHandle(tag="DIV", text="导出管理", cls="toolbar")  # 非按钮, 必须跳过
+    export_btn = _FakeHandle(tag="BUTTON", text="导出")
+    page.standard_handles = [export_btn]
+    # 遍历候选里混入容器 div 在最前 → 应被 _is_clickable_button 拦截
+    page.all_buttons = [toolbar_div, export_btn]
+    found = await _locate_export_button(page, dry_run=True)
+    assert found is export_btn, "dry_run 必须命中真正的导出按钮而非容器 div"
+    assert toolbar_div.clicked == 0
+    assert export_btn.clicked == 0
+
+
+@pytest.mark.asyncio
+async def test_locate_export_dry_run_login_raises_session_expired():
+    """dry_run 定位时页面只剩登录按钮(会话失效) → 抛 BmsSessionExpired, 不点击任何东西。"""
+    page = FakePage()
+    page.url_value = "https://wifi.cloud-cat.cn/bms/index.html#/login"
+    login_btn = _FakeHandle(tag="BUTTON", text="登录")
+    page.login_btn = login_btn
+    page.all_buttons = [login_btn]
+    with pytest.raises(BmsSessionExpired):
+        await _locate_export_button(page, dry_run=True)
+    assert login_btn.clicked == 0
+
+
+@pytest.mark.asyncio
+async def test_locate_export_dry_run_no_button_raises():
+    """dry_run 定位找不到导出按钮 → 抛「未找到导出按钮」, 不执行任何点击。"""
+    page = FakePage()
+    page.url_value = "https://wifi.cloud-cat.cn/bms/index.html#/settle/refund-record-report"
+    page.all_buttons = [_FakeHandle(tag="BUTTON", text="搜索"), _FakeHandle(tag="BUTTON", text="重置")]
+    with pytest.raises(RuntimeError, match="未找到导出按钮"):
+        await _locate_export_button(page, dry_run=True)
+    # 无任何按钮被点击
+    assert all(b.clicked == 0 for b in page.all_buttons)
