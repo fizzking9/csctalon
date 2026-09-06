@@ -186,3 +186,118 @@ def test_business_metric_data_missing_skipped(db):
     created, logs = _scan_metric_rule(db, rule, datetime.now(timezone.utc))
     db.flush()
     assert created == 0, f"业务指标不应告警, created={created}, logs={logs}"
+
+
+# ============================================================
+# 2026-09-06 生产缺陷回归: 「推送恢复但告警不消失」
+# 根因: data_arrival_* 指标恒 value=None, 恢复后 _scan_metric_rule 在
+#       `if not data_ok or value is None` 处提前 return(打印"数据不完整跳过"),
+#       永远到不了"恢复自愈"分支 → pending 告警无法自动 recovered。
+# 修复: 采集健康指标(kind=ingest_health)不受 value is None 约束,
+#       无故障标记(ingest_fault is None)即视为已回稳 → 放行恢复自愈。
+# ============================================================
+def test_arrival_fault_then_recovery_auto_recovers(db, monkeypatch):
+    """采集健康当天 no_arrival → 当天推送恢复 → 自动 recovered + Incident 平息。
+
+    复现生产路径(9-06): workbuddy 停摆触发 no_arrival critical,
+    随后推送恢复(当日), 再次扫描必须把同周期 pending 告警标 recovered,
+    并把关联 Incident 标已平息(is_closed=True)。
+    """
+    from app.models.incident import Incident as IncidentModel
+
+    PUSH_CODE = "data_arrival_external_complaint"
+    rule = AlertRule(name="数据到达-推送", type="metric", enabled=True, metric_code=PUSH_CODE,
+                     channels=["inapp"], recipient_roles=["admin"])
+    db.add(rule)
+    db.flush()
+
+    # 阶段1: 白天 15:00(过 9 点 ≥4h)无推送 → no_arrival → critical + Incident
+    now15 = datetime.now(TZ8).replace(hour=15, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(mrs, "_sh_now", lambda: now15.replace(tzinfo=None))
+    created, logs = _scan_metric_rule(db, rule, datetime.now(timezone.utc))
+    db.flush()
+    assert created == 1, f"no_arrival 应创建告警, logs={logs}"
+    alert = db.scalar(select(Alert).where(Alert.rule_id == rule.id).order_by(Alert.id.desc()).limit(1))
+    assert alert is not None and alert.status == "pending" and alert.level == "critical"
+    inc = db.scalar(select(IncidentModel).where(IncidentModel.category == "数据采集").order_by(IncidentModel.id.desc()).limit(1))
+    assert inc is not None and not inc.is_closed, "no_arrival 应登记未平息 Incident"
+
+    # 阶段2: 同日 18:00 推送恢复(success) → 再扫描 → 告警 recovered + Incident 平息
+    now18 = datetime.now(TZ8).replace(hour=18, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(mrs, "_sh_now", lambda: now18.replace(tzinfo=None))
+    _push_log(db, ComplaintSyncLog, "success")  # 今日已推送
+    created2, logs2 = _scan_metric_rule(db, rule, datetime.now(timezone.utc))
+    db.flush()
+    # 不应再创建新告警
+    assert created2 == 0, f"推送恢复后不应新建告警, logs={logs2}"
+    db.refresh(alert)
+    assert alert.status == "recovered", f"推送恢复后告警应自动 recovered, 实际 {alert.status}: {logs2}"
+    assert alert.recovered_at is not None
+    db.refresh(inc)
+    assert inc.is_closed and inc.status == "calmed", "恢复后 Incident 应自动平息"
+
+
+def test_arrival_healthy_with_value_none_not_skipped_as_missing(db, monkeypatch):
+    """采集健康到达(data_ok=True)即使 value=None 也不得误判"数据不完整跳过"。
+
+    回归锚点: 修复前, data_arrival_* value 恒 None → 恢复后打印
+    "数据不完整(值=None), 跳过告警(防假告警)" 并提前 return, 无法走到恢复分支。
+    修复后应表现为"达标/恢复"而非"跳过"。
+    """
+    PUSH_CODE = "data_arrival_manual_refund"
+    rule = AlertRule(name="数据到达-手动退款", type="metric", enabled=True, metric_code=PUSH_CODE,
+                     channels=["inapp"], recipient_roles=["admin"])
+    db.add(rule)
+    db.flush()
+    now = datetime.now(TZ8).replace(hour=18, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(mrs, "_sh_now", lambda: now.replace(tzinfo=None))
+    # 今日已有成功推送 → 到达
+    from app.models.manual_refund_sync_log import ManualRefundSyncLog
+    _push_log(db, ManualRefundSyncLog, "success")
+    created, logs = _scan_metric_rule(db, rule, datetime.now(timezone.utc))
+    db.flush()
+    assert created == 0, f"到达不应建告警, logs={logs}"
+    assert not any("数据不完整" in log for log in logs), f"到达不应误判数据不完整跳过: {logs}"
+    assert any("达标" in log for log in logs), f"到达应判达标(无告警可恢复时), logs={logs}"
+
+
+# ============================================================
+# 2026-09-06 附带缺陷回归: Incident 周期日期时区错位
+# 根因: period_start 存 naive UTC(上海 00:00 = UTC 前日 16:00), 旧代码直接
+#       strftime("%Y-%m-%d") 取 UTC 日期 → 标题/匹配早一天。
+# 修复: _period_biz_day() 统一按 Asia/Shanghai 换算业务日。
+# ============================================================
+def test_incident_period_uses_shanghai_biz_day(db, monkeypatch):
+    """Incident 标题/周期必须用上海业务日(UTC 前日 16:00 窗口→当日), 不得早一天。"""
+    from datetime import timezone as _tz
+
+    from app.api.v1 import alerts as alerts_mod
+    from app.models.alert import Alert as AlertModel
+    from app.models.incident import Incident as IncidentModel
+
+    # 构造一个"上海某日"的 period_start: 上海 2026-09-06 00:00 = UTC 2026-09-05 16:00(naive)
+    sh_day = datetime(2026, 9, 6, tzinfo=TZ8)
+    period_start_utc_naive = sh_day.astimezone(_tz.utc).replace(tzinfo=None)  # 2026-09-05 16:00 naive UTC
+    assert period_start_utc_naive.strftime("%Y-%m-%d") == "2026-09-05", "前置: naive UTC 日期确实早一天"
+
+    # 直接断言换算 helper
+    assert alerts_mod._period_biz_day(period_start_utc_naive) == "2026-09-06", "应换算成上海业务日 09-06"
+
+    # 端到端: 手动触发 Incident 自动登记, 标题/周期必须用上海业务日
+    PUSH_CODE = "data_arrival_external_complaint"
+    rule = AlertRule(name="数据到达-外部投诉", type="metric", enabled=True, metric_code=PUSH_CODE,
+                     channels=["inapp"], recipient_roles=["admin"])
+    db.add(rule)
+    db.flush()
+    alert = AlertModel(rule_id=rule.id, title="外部投诉数据到达健康异常: no_arrival",
+                       level="critical", status="pending", metric_code=PUSH_CODE,
+                       period_start=period_start_utc_naive,  # 上海 09-06 窗口(naive UTC)
+                       data_ok=True, occurred_at=datetime.now(timezone.utc))
+    db.add(alert)
+    db.flush()
+    alerts_mod._auto_register_ingest_incident(db, rule, alert, datetime.now(timezone.utc))
+    db.flush()
+    inc = db.scalar(select(IncidentModel).where(IncidentModel.category == "数据采集").order_by(IncidentModel.id.desc()).limit(1))
+    assert inc is not None, "应登记 Incident"
+    assert "2026-09-06" in inc.title, f"Incident 标题应含上海业务日 09-06, 实际: {inc.title}"
+    assert "2026-09-06" in (inc.detail or ""), f"Incident detail 应含上海业务日 09-06, 实际: {inc.detail}"

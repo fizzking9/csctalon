@@ -6,6 +6,8 @@ services/metric_registry_service.py 求值, 走四级分级/恢复自愈/通知�
 """
 
 import logging
+from datetime import timezone as _dt_timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
@@ -21,6 +23,24 @@ from app.services.metric_registry_service import (
 from app.services.notification_channel import dispatch_alert
 
 logger = logging.getLogger(__name__)
+
+# 业务日口径: 统计窗口 period_start/period_end 存 naive UTC(上海 00:00 = UTC 前一日
+# 16:00), 转"业务日 YYYY-MM-DD"必须按 Asia/Shanghai 换算, 不能直接 strftime
+# (否则 UTC 日期比上海业务日早一天 → Incident 标题/匹配错位, 2026-09-06 缺陷)。
+_TZ_CN = ZoneInfo("Asia/Shanghai")
+
+
+def _period_biz_day(dt) -> str | None:
+    """把 naive/aware UTC 的 period_start 转成上海业务日 YYYY-MM-DD。
+
+    与 analytics/metric_registry 的看板口径一致(北京日), 供 Incident 登记/平息匹配。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dt_timezone.utc)
+    return dt.astimezone(_TZ_CN).strftime("%Y-%m-%d")
+
 
 router = APIRouter(prefix="/alerts", tags=["预警中心"])
 
@@ -142,9 +162,7 @@ def _auto_register_ingest_incident(db, rule: AlertRule, alert, now) -> None:
 
     try:
         # 幂等检查: 同规则同 period 已登记则不重复(按标题前缀 + period_start 近似匹配)
-        period_key = None
-        if alert.period_start:
-            period_key = alert.period_start.strftime("%Y-%m-%d")
+        period_key = _period_biz_day(alert.period_start)
         if period_key:
             dup = db.scalar(
                 select(func.count())
@@ -243,7 +261,15 @@ def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[st
         elif data_ok == "cold_start":
             # 冷启动: 只记录快照不告警(样本不足, LOCKED §六)
             return 0, [f"metric:{rule.metric_code}: 冷启动(样本不足), 只记录不告警"]
-    if not data_ok or value is None:
+    # 数据完整性守卫:
+    # - 业务指标: data_ok=False 或值缺失 → 跳过(防假告警)
+    # - 采集健康(data_arrival_*, kind=ingest_health): data_ok 是故障标记字符串或 True,
+    #   值(value)恒为 None(该指标只表达"到达/未到达", 没有业务数值)——
+    #   因此不能因 value is None 提前跳过, 否则「推送恢复后 value=None」会误走"跳过",
+    #   永远到不了下方"恢复自愈"分支 → 告警滞留 pending 无法自动恢复(2026-09-06 缺陷)。
+    #   正确语义: 无故障标记(ingest_fault is None)即视为"已回稳", 放行到恢复自愈。
+    is_ingest_health = meta.get("kind") == "ingest_health"
+    if (not data_ok or value is None) and not is_ingest_health:
         # 业务指标: data_ok=False 跳过(防假告警); 采集健康带故障标记时继续走告警
         if ingest_fault is None:
             return 0, [f"metric:{rule.metric_code}: 数据不完整(值={value}), 跳过告警(防假告警)"]
@@ -316,9 +342,7 @@ def _close_ingest_incident(db, rule: AlertRule, alert, now) -> None:
     from app.models.incident import Incident as IncidentModel
 
     try:
-        period_key = None
-        if alert.period_start:
-            period_key = alert.period_start.strftime("%Y-%m-%d")
+        period_key = _period_biz_day(alert.period_start)
         if not period_key:
             return
         rows = db.scalars(
