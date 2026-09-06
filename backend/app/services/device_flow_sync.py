@@ -106,93 +106,122 @@ async def fetch_device_flow(
     password: str | None = None,
     base_url: str = "https://wifi.cloud-cat.cn/bms",
 ) -> list[dict]:
-    """拉取单 SN 月流量明细(登录一次, 复用 storage_state)
+    """拉取单 SN 月流量明细(登录一次, 复用 storage_state; 失效自动剔除重试)
 
     Args:
         sn: 设备 SN(必填, 上游一次只能一个 SN)
         month: "YYYY-MM"; None = 该 SN 全量有流量月份
     Returns:
         items: [{sn, businessId, businessName, flowDate, flowValue, ...}]
+
+    健壮性(2026-09-06 修复): 已保存登录态(storage_state)可能过期/失效, 带失效
+    cookie 访问 login 页会干扰登录(点登录后 url 仍在 login → 误报"凭证错误")。
+    处理: 首次带 state 尝试; 若登录失败(url 仍 login) → 剔除失效 state, 用全新
+    context 重试一次(此时才真正确认凭证是否正确)。
     """
     from playwright.async_api import async_playwright
 
     state_path = _storage_state_path()
+
+    class _LoginFailed(RuntimeError):
+        pass
+
+    async def _ensure_logged_in(page, context) -> None:
+        """进入登录页; 已登录(state 有效)直接返回; 否则表单登录; 失败抛 _LoginFailed。"""
+        await page.goto(f"{base_url}/index.html#/login", wait_until="domcontentloaded")
+        # 显式等待登录表单(SPA hash 路由, 用 domcontentloaded + 轮询)
+        try:
+            await page.wait_for_selector(
+                'input[name="username"], input[placeholder*="账号" i]',
+                state="visible", timeout=10000,
+            )
+        except Exception:
+            await asyncio.sleep(2)
+        # 若已登录(storage_state 有效, 登录页会自动跳走)则直接返回
+        if "login" not in page.url.lower():
+            logger.info("device_flow 复用已保存登录态")
+            return
+        # 表单登录
+        user_sel = (
+            'input[name="username"]:not([readonly]):not([disabled]),'
+            'input[placeholder*="账号" i]:not([readonly]):not([disabled]),'
+            'input[type="text"]:not([readonly]):not([disabled])'
+        )
+        try:
+            await page.locator(user_sel).first.fill(username or "", timeout=15000)
+        except Exception:
+            await page.locator("input:visible:not([readonly]):not([disabled])").first.fill(username or "", timeout=15000)
+        pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
+        await page.locator(pwd_sel).first.fill(password or "", timeout=15000)
+        # ⚠️ 2026-09-06: 登录按钮可能被已弹出的「提示」框(el-message-box)遮挡
+        await _dismiss_modal_dialogs(page)
+        await page.click('button:has-text("登录"), button[type="submit"]')
+        await page.wait_for_load_state("networkidle", timeout=15000)
+        await asyncio.sleep(3)
+        # 登录成功常弹「提示」框, 关闭避免遮挡后续导航/操作
+        await _dismiss_modal_dialogs(page)
+        if "login" in page.url.lower():
+            raise _LoginFailed("设备流量采集登录失败(请检查 bms-wifi 组凭证)")
+        # 登录成功存 storage_state(下次免登)
+        try:
+            await context.storage_state(path=str(state_path))
+            logger.info("device_flow 登录成功, 登录态已保存")
+        except Exception as e:
+            logger.warning(f"保存 device_flow storage_state 失败: {e}")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        state = str(state_path) if state_path.exists() else None
-        context = await browser.new_context(
-            storage_state=state if state else None,
-            timezone_id="Asia/Shanghai",  # ⚠️ BMS 前端用浏览器本地时间, 必须北京时区(经验)
-        )
-        page = await context.new_page()
-        try:
-            # ── 1. 登录(wifi 域无验证码, 表单登录即可) ──
-            await page.goto(f"{base_url}/index.html#/login", wait_until="domcontentloaded")
-            # 显式等待登录表单
-            try:
-                await page.wait_for_selector(
-                    'input[name="username"], input[placeholder*="账号" i]',
-                    state="visible", timeout=10000,
-                )
-            except Exception:
-                await asyncio.sleep(2)
-            # 若已登录(storage_state 有效)则跳过
-            if "login" in page.url.lower():
-                user_sel = (
-                    'input[name="username"]:not([readonly]):not([disabled]),'
-                    'input[placeholder*="账号" i]:not([readonly]):not([disabled]),'
-                    'input[type="text"]:not([readonly]):not([disabled])'
-                )
-                await page.locator(user_sel).first.fill(username or "", timeout=15000)
-                pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
-                await page.locator(pwd_sel).first.fill(password or "", timeout=15000)
-                # ⚠️ 2026-09-06: 登录按钮可能被已弹出的「提示」框(el-message-box)遮挡,
-                #    先关一次再点, 避免 click 被拦截 30s 超时
-                await _dismiss_modal_dialogs(page)
-                await page.click('button:has-text("登录"), button[type="submit"]')
-                await page.wait_for_load_state("networkidle", timeout=15000)
-                await asyncio.sleep(3)
-                # 登录成功常弹「提示」框, 关闭避免遮挡后续导航/操作
-                await _dismiss_modal_dialogs(page)
-                if "login" in page.url.lower():
-                    raise RuntimeError("设备流量采集登录失败(请检查 bms-wifi 组凭证)")
-                # 登录成功存 storage_state(下次免登)
+        last_err: Exception | None = None
+        for attempt in (1, 2):
+            # 第 2 次重试前剔除失效 state(全新 context 不带旧 cookie 登录)
+            if attempt == 2:
                 try:
-                    await context.storage_state(path=str(state_path))
-                except Exception as e:
-                    logger.warning(f"保存 device_flow storage_state 失败: {e}")
-            else:
-                logger.info("device_flow 复用已保存登录态")
-
-            # ── 2. 进设备流量页(建立会话上下文) ──
-            await page.goto(FLOW_PAGE_URL, wait_until="domcontentloaded")
-            await asyncio.sleep(2)
-            await _dismiss_modal_dialogs(page)
-
-            # ── 3. 页面内 fetch API(自动带登录 cookie) ──
-            params = f"page=1&rows={PAGE_ROWS}&sn={sn}&timeType=2"
-            if month:
-                params += f"&flowDate={month}"
-            api_url = f"{FLOW_API_BASE}{FLOW_API_PATH}?{params}"
-            payload = await page.evaluate(
-                """async (url) => {
-                    const r = await fetch(url, {headers: {'Accept': 'application/json'}});
-                    if (!r.ok) return {httpError: r.status, body: (await r.text()).slice(0, 300)};
-                    return await r.json();
-                }""",
-                api_url,
+                    state_path.unlink(missing_ok=True)
+                    logger.warning("device_flow 登录态失效, 剔除后全新登录重试")
+                except Exception:
+                    pass
+            state = str(state_path) if state_path.exists() else None
+            context = await browser.new_context(
+                storage_state=state if state else None,
+                timezone_id="Asia/Shanghai",  # ⚠️ BMS 前端用浏览器本地时间, 必须北京时区(经验)
             )
-            if payload.get("httpError"):
-                raise RuntimeError(f"设备流量 API 请求失败 HTTP {payload['httpError']}: {payload.get('body')}")
-            code = payload.get("code")
-            if code not in ("0", 0, 0.0):
-                raise RuntimeError(f"设备流量 API 返回业务错误 code={code}: {str(payload)[:300]}")
-            data = payload.get("data") or {}
-            items = data.get("items") or []
-            return items
-        finally:
-            await context.close()
-            await browser.close()
+            page = await context.new_page()
+            try:
+                await _ensure_logged_in(page, context)
+                # ── 进设备流量页(建立会话上下文) ──
+                await page.goto(FLOW_PAGE_URL, wait_until="domcontentloaded")
+                await asyncio.sleep(2)
+                await _dismiss_modal_dialogs(page)
+
+                # ── 页面内 fetch API(自动带登录 cookie) ──
+                params = f"page=1&rows={PAGE_ROWS}&sn={sn}&timeType=2"
+                if month:
+                    params += f"&flowDate={month}"
+                api_url = f"{FLOW_API_BASE}{FLOW_API_PATH}?{params}"
+                payload = await page.evaluate(
+                    """async (url) => {
+                        const r = await fetch(url, {headers: {'Accept': 'application/json'}});
+                        if (!r.ok) return {httpError: r.status, body: (await r.text()).slice(0, 300)};
+                        return await r.json();
+                    }""",
+                    api_url,
+                )
+                if payload.get("httpError"):
+                    raise RuntimeError(f"设备流量 API 请求失败 HTTP {payload['httpError']}: {payload.get('body')}")
+                code = payload.get("code")
+                if code not in ("0", 0, 0.0):
+                    raise RuntimeError(f"设备流量 API 返回业务错误 code={code}: {str(payload)[:300]}")
+                data = payload.get("data") or {}
+                items = data.get("items") or []
+                return items
+            except _LoginFailed as e:
+                last_err = e
+                logger.warning(f"device_flow 登录失败(第 {attempt} 次): {e}")
+                continue  # 剔除失效 state 后重试
+            finally:
+                await context.close()
+        # 两次都失败(第 2 次为全新登录仍失败 = 凭证确实有问题)
+        raise RuntimeError(str(last_err or "设备流量采集登录失败"))
 
 
 def _items_to_dataframe(items: list[dict]) -> pd.DataFrame:
