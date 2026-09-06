@@ -165,3 +165,89 @@ def check_conclusion(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     return R(data=_ser_check(check))
+
+
+# ─────────────────────────────────────────────────────────────
+# 逐笔勾稽明细核对 (A-20260906-002 v1.1 / #22): 仅打标不改源
+# ─────────────────────────────────────────────────────────────
+# 逐笔确认状态(与 reconcile_check.CONFIRM_STATUSES 一致)
+_CHECK_LINE_STATUSES = ("已核对一致", "差异已确认", "存疑待查", "已排除重复", "待核对")
+
+
+@router.get("/check/{check_id}/lines", response_model=R, summary="批次逐笔勾稽列表")
+def check_lines(
+    db: DBSession,
+    _: CurrentUser,
+    check_id: int,
+    route: str | None = Query(None, description="过滤 auto_route: A/B/C/D/unmatched"),
+    status: str | None = Query(None, description="过滤 confirm_status"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+):
+    if route and route not in ("A", "B", "C", "D", "unmatched"):
+        raise HTTPException(status_code=400, detail="route 非法")
+    if status and status not in _CHECK_LINE_STATUSES:
+        raise HTTPException(status_code=400, detail="status 非法")
+    from app.services.reconcile_check import list_lines
+
+    try:
+        return R(data=list_lines(db, check_id, route=route, status=status, page=page, page_size=page_size))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@router.get("/check/{check_id}/lines-summary", response_model=R, summary="批次逐笔确认进度")
+def check_lines_summary(
+    db: DBSession,
+    _: CurrentUser,
+    check_id: int,
+):
+    from app.services.reconcile_check import lines_summary
+
+    try:
+        return R(data=lines_summary(db, check_id))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@router.get("/check/line-candidates", response_model=R, summary="E 笔候选匹配经营单明细")
+def check_line_candidates(
+    db: DBSession,
+    _: CurrentUser,
+    report_id: int = Query(..., ge=1, description="E 退款记录报表 id"),
+):
+    from app.models.refund_record_report import RefundRecordReport
+    from app.services.reconcile_check import _route_candidates
+
+    report = db.get(RefundRecordReport, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="E 退款记录报表不存在")
+    cand = _route_candidates(db, report)
+    return R(data={
+        "report_id": report.id,
+        "platform_order_no": report.platform_order_no,
+        "refund_amount": float(report.refund_amount) if report.refund_amount is not None else None,
+        "auto_route": cand["auto_route"],
+        "candidates": cand["candidates"],
+    })
+
+
+@router.post("/check/{check_id}/line-confirm", response_model=R, summary="对单笔打确认状态(不改源)")
+def check_line_confirm(
+    db: DBSession,
+    user: AdminOrSupervisor,
+    check_id: int,
+    report_id: int = Query(..., ge=1, description="E 退款记录报表 id"),
+    confirm_status: str = Query(..., description="已核对一致/差异已确认/存疑待查/已排除重复/待核对"),
+    confirm_note: str | None = Query(None, description="备注"),
+):
+    if confirm_status not in _CHECK_LINE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"confirm_status 非法: {confirm_status}")
+    from app.services.reconcile_check import _ser_line, confirm_line
+
+    try:
+        line = confirm_line(db, user, check_id, report_id,
+                            confirm_status=confirm_status, confirm_note=confirm_note)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return R(data=_ser_line(line))

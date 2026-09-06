@@ -22,7 +22,11 @@ from sqlalchemy import func, select
 
 from app.models.manual_refund import ManualRefund
 from app.models.reconcile_check import ReconcileCheck
+from app.models.reconcile_match import ReconcileMatch
+from app.models.refund import Refund
 from app.models.refund_record_report import RefundRecordReport
+from app.models.shanmao_refund import ShanmaoRefund
+from app.models.wallet import WalletWithdrawal
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,9 @@ _E_ROUTE_SUCCESS_STATUSES = ("退款成功", "成功", "SUCCESS")
 
 # 复核结论枚举(校验用)
 CONCLUSIONS = ("一致", "差异已确认", "存疑待查")
+
+# 逐笔勾稽人工确认状态(A-20260906-002 v1.1 / #22)
+CONFIRM_STATUSES = ("已核对一致", "差异已确认", "存疑待查", "已排除重复", "待核对")
 
 # 残留脏行判定年份(与 reconcile.backfill 护栏一致: 无SN + 年份异常)
 _CURRENT_YEARS = (2025, 2026)
@@ -288,4 +295,193 @@ def _ser_check(r: ReconcileCheck) -> dict:
         "reviewed_name": r.reviewed_name,
         "reviewed_at": _to_cn(r.reviewed_at).isoformat() if r.reviewed_at else None,
         "created_at": _to_cn(r.created_at).isoformat() if r.created_at else None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# 逐笔勾稽明细核对 (A-20260906-002 v1.1 / #22)
+# E 水单每笔 → 自动归类 + 候选 ABCD 经营单 → 人工确认(仅打标, 不改源)
+# ─────────────────────────────────────────────────────────────
+def _route_candidates(db, report: RefundRecordReport) -> dict:
+    """某 E 笔的候选匹配 ABCD 经营单明细(供人工确认)。
+
+    复用 water_statement 分类语义(订单号命中 A/D、设备+金额命中 D/B/C), 但返回
+    更细的候选列表(matched_ref), 而非仅 route 标签。只读不改源。
+    """
+    from app.services.reconcile import _build_route_maps, _classify_report, _is_success_status
+
+    if not _is_success_status(report.refund_status):
+        return {"auto_route": None, "candidates": []}
+
+    order_no = (report.platform_order_no or "").strip()
+    sn = (report.device_sn or "").strip()
+    amt = float(report.refund_amount) if report.refund_amount is not None else None
+
+    maps = _build_route_maps(db, None, None)
+    auto_route = _classify_report(report, maps)
+
+    candidates: list[dict] = []
+    # A 路: platform_order_no 命中退费单
+    if order_no:
+        a_rows = db.execute(
+            select(Refund.refund_no, Refund.refund_amount, Refund.device_sn)
+            .where(Refund.platform_order_no == order_no)
+            .limit(10)
+        ).all()
+        for rno, ramt, rsn in a_rows:
+            candidates.append({
+                "route": "A", "source": "refunds", "ref_no": rno,
+                "amount": float(ramt) if ramt is not None else None, "sn": rsn,
+            })
+    # D 路: order_no 命中手动台账
+    if order_no:
+        d_rows = db.execute(
+            select(ManualRefund.id, ManualRefund.refund_amount, ManualRefund.device_sn,
+                   ManualRefund.registrant)
+            .where(ManualRefund.order_no == order_no, ManualRefund.is_refunded == "是")
+            .limit(10)
+        ).all()
+        for mid, mamt, msn, mreg in d_rows:
+            candidates.append({
+                "route": "D", "source": "manual_refunds", "source_id": mid,
+                "ref_no": order_no, "amount": float(mamt) if mamt is not None else None,
+                "sn": msn, "extra": mreg,
+            })
+    # B 路: 设备+金额 命中钱包提现
+    if sn and amt is not None:
+        b_rows = db.execute(
+            select(WalletWithdrawal.id, WalletWithdrawal.op_amount, WalletWithdrawal.remark)
+            .where(WalletWithdrawal.device_sn == sn, WalletWithdrawal.op_type == "用户提现")
+            .limit(10)
+        ).all()
+        for wid, wamt, wremark in b_rows:
+            if wamt is not None and abs(float(wamt) - amt) <= 0.01:
+                candidates.append({
+                    "route": "B", "source": "wallet_withdrawals", "source_id": wid,
+                    "amount": float(wamt), "sn": sn, "extra": (wremark or "")[:40],
+                })
+    # C 路: 设备命中闪猫
+    if sn:
+        c_rows = db.execute(
+            select(ShanmaoRefund.refund_no, ShanmaoRefund.actual_amount)
+            .where(ShanmaoRefund.device_sn == sn, ShanmaoRefund.status == "已退款")
+            .limit(10)
+        ).all()
+        for cno, camt in c_rows:
+            candidates.append({
+                "route": "C", "source": "shanmao_refunds", "source_id": cno,
+                "amount": float(camt) if camt is not None else None, "sn": sn,
+            })
+
+    return {"auto_route": auto_route, "candidates": candidates}
+
+
+def ensure_line(db, check_id: int | None, report: RefundRecordReport) -> ReconcileMatch:
+    """确保 reconcile_matches 有该 E 笔的记录(不存在则按自动归类创建)。"""
+    line = db.scalar(
+        select(ReconcileMatch).where(
+            ReconcileMatch.check_id == check_id,
+            ReconcileMatch.report_id == report.id,
+        )
+    )
+    if line:
+        return line
+    cand = _route_candidates(db, report)
+    line = ReconcileMatch(
+        check_id=check_id,
+        report_id=report.id,
+        platform_order_no=report.platform_order_no,
+        refund_amount=report.refund_amount,
+        refund_time=report.refund_time,
+        auto_route=cand["auto_route"],
+        matched_ref=cand["candidates"],
+        confirm_status="待核对",
+    )
+    db.add(line)
+    db.commit()
+    db.refresh(line)
+    return line
+
+
+def list_lines(db, check_id: int, route: str | None = None, status: str | None = None,
+               page: int = 1, page_size: int = 50) -> dict:
+    """批次逐笔勾稽列表(E 笔 + auto_route + 人工状态)。"""
+    check = db.get(ReconcileCheck, check_id)
+    if not check:
+        raise ValueError("复核批次不存在")
+
+    q = select(ReconcileMatch).where(ReconcileMatch.check_id == check_id)
+    if route:
+        q = q.where(ReconcileMatch.auto_route == route)
+    if status:
+        q = q.where(ReconcileMatch.confirm_status == status)
+    total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
+    rows = db.scalars(
+        q.order_by(ReconcileMatch.refund_time.desc().nullslast(), ReconcileMatch.id)
+        .offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return {"items": [_ser_line(r) for r in rows], "total": total,
+            "page": page, "page_size": page_size}
+
+
+def lines_summary(db, check_id: int) -> dict:
+    """批次内逐笔确认进度。"""
+    rows = db.execute(
+        select(ReconcileMatch.auto_route, ReconcileMatch.confirm_status, func.count())
+        .where(ReconcileMatch.check_id == check_id)
+        .group_by(ReconcileMatch.auto_route, ReconcileMatch.confirm_status)
+    ).all()
+    by_route: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    total = 0
+    confirmed = 0
+    for route, status, cnt in rows:
+        total += int(cnt)
+        by_route[route or "?"] = by_route.get(route or "?", 0) + int(cnt)
+        st = status or "待核对"
+        by_status[st] = by_status.get(st, 0) + int(cnt)
+        if st != "待核对":
+            confirmed += int(cnt)
+    return {"total": total, "confirmed": confirmed, "by_route": by_route,
+            "by_status": by_status}
+
+
+def confirm_line(db, user, check_id: int, report_id: int, confirm_status: str,
+                 confirm_note: str | None = None) -> ReconcileMatch:
+    """对单笔打确认状态(仅写 reconcile_matches, 不改任何源表)。"""
+    if confirm_status not in CONFIRM_STATUSES:
+        raise ValueError(f"confirm_status 非法: {confirm_status}, 应为 {CONFIRM_STATUSES}")
+    check = db.get(ReconcileCheck, check_id)
+    if not check:
+        raise ValueError("复核批次不存在")
+    report = db.get(RefundRecordReport, report_id)
+    if not report:
+        raise ValueError("E 退款记录报表不存在")
+
+    line = ensure_line(db, check_id, report)
+    line.confirm_status = confirm_status
+    if confirm_note is not None:
+        line.confirm_note = confirm_note
+    line.confirmed_by = user.id if user else None
+    line.confirmed_name = _user_display_name(user)
+    line.confirmed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(line)
+    return line
+
+
+def _ser_line(r: ReconcileMatch) -> dict:
+    return {
+        "id": r.id,
+        "check_id": r.check_id,
+        "report_id": r.report_id,
+        "platform_order_no": r.platform_order_no,
+        "refund_amount": float(r.refund_amount) if r.refund_amount is not None else None,
+        "refund_time": _to_cn(r.refund_time).isoformat() if r.refund_time else None,
+        "auto_route": r.auto_route,
+        "matched_ref": r.matched_ref or [],
+        "confirm_status": r.confirm_status,
+        "confirm_note": r.confirm_note,
+        "confirmed_name": r.confirmed_name,
+        "confirmed_at": _to_cn(r.confirmed_at).isoformat() if r.confirmed_at else None,
     }

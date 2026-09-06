@@ -41,11 +41,13 @@ def _test_session(_engine):
         Device,
         ManualRefund,
         ReconcileCheck,
+        ReconcileMatch,
         Refund,
         RefundRecordReport,
     )
 
-    for cls in (ReconcileCheck, RefundRecordReport, ManualRefund, Refund):
+    # 先删子表(reconcile_matches FK→reconcile_checks), 再删主表
+    for cls in (ReconcileMatch, ReconcileCheck, RefundRecordReport, ManualRefund, Refund):
         session.execute(cls.__table__.delete())
     session.execute(Device.__table__.delete().where(Device.sn.like("SN-C-%")))
     session.commit()
@@ -53,7 +55,7 @@ def _test_session(_engine):
         yield session
     finally:
         try:
-            for cls in (ReconcileCheck, RefundRecordReport, ManualRefund, Refund):
+            for cls in (ReconcileMatch, ReconcileCheck, RefundRecordReport, ManualRefund, Refund):
                 session.execute(cls.__table__.delete())
             session.execute(Device.__table__.delete().where(Device.sn.like("SN-C-%")))
             session.commit()
@@ -406,3 +408,119 @@ def test_api_check_confirm_then_conclusion(_api_env, _test_session):
     r3 = client.get("/api/v1/reconcile/check/list")
     assert r3.status_code == 200
     assert any(x["id"] == cid for x in r3.json()["data"]["items"])
+
+
+# ---------- #22 v1.1 逐笔勾稽明细核对 ----------
+
+def _mk_check(session, user=None, start="2026-09-01 00:00:00", end="2026-09-30 23:59:59"):
+    """helper: 建一个复核批次并返回"""
+    from app.services.reconcile_check import confirm_check
+
+    return confirm_check(session, user or _fake_user(), _dt(start), _dt(end))
+
+
+def test_ensure_line_auto_route(_test_session):
+    """E 笔命中 A 退费单 → ensure_line 建行, auto_route=A"""
+    from app.models import ReconcileMatch
+    from app.services.reconcile_check import ensure_line
+
+    rpt = _seed_report(_test_session, platform_order_no="WS-LINE-A", amount="19.00")
+    _seed_refund_a(_test_session, platform_order_no="WS-LINE-A")
+    check = _mk_check(_test_session)
+
+    line = ensure_line(_test_session, check.id, rpt)
+    assert line.auto_route == "A"
+    assert line.confirm_status == "待核对"
+    # matched_ref 含 A 路候选
+    assert any(c["route"] == "A" for c in (line.matched_ref or []))
+    # 幂等: 再 ensure 不新建
+    cnt = _test_session.scalar(
+        select(func.count()).select_from(ReconcileMatch).where(ReconcileMatch.check_id == check.id)
+    )
+    assert cnt == 1
+
+
+def test_line_candidates_d_by_order(_test_session):
+    """E 笔订单号命中 D 手动台账 → candidates 含 D"""
+    from app.services.reconcile_check import _route_candidates
+
+    rpt = _seed_report(_test_session, platform_order_no="WS-LINE-D", amount="19.00")
+    _seed_manual(_test_session, device_sn="SN-C-1", order_no="WS-LINE-D", amount="19.00",
+                 op_time=_dt("2026-09-05 11:00:00"))
+    cand = _route_candidates(_test_session, rpt)
+    assert cand["auto_route"] in ("A", "D")  # order_no 命中 D(或 A)
+    assert any(c["route"] == "D" for c in cand["candidates"])
+
+
+def test_confirm_line_persist(_test_session):
+    """confirm_line 打标落库 + 不改源表"""
+    from app.models import ManualRefund
+    from app.services.reconcile_check import confirm_line
+
+    rpt = _seed_report(_test_session, platform_order_no="WS-LINE-CF", amount="19.00")
+    m = _seed_manual(_test_session, device_sn="SN-C-1", order_no="WS-LINE-CF", amount="19.00",
+                     op_time=_dt("2026-09-05 11:00:00"))
+    check = _mk_check(_test_session)
+    user = _fake_user()
+
+    line = confirm_line(_test_session, user, check.id, rpt.id,
+                        confirm_status="已核对一致", confirm_note="与 D 台账一致")
+    assert line.confirm_status == "已核对一致"
+    assert line.confirmed_name == "管理员"
+    assert line.confirm_note == "与 D 台账一致"
+    # 不改源表: manual 行 quality_status/金额/op_time 都不变
+    _test_session.expire_all()
+    m2 = _test_session.get(ManualRefund, m.id)
+    assert m2.quality_status is None or m2.quality_status == ""
+    assert float(m2.refund_amount) == 19.00
+
+
+def test_list_lines_and_summary(_test_session):
+    """list_lines 过滤 + lines_summary 进度"""
+    from app.services.reconcile_check import confirm_line, lines_summary, list_lines
+
+    r1 = _seed_report(_test_session, platform_order_no="WS-LINE-1", amount="19.00",
+                      refund_time="2026-09-05 10:00:00")
+    _seed_report(_test_session, platform_order_no="WS-LINE-2", amount="88.00",
+                 refund_time="2026-09-06 10:00:00")  # unmatched(E 无对应)
+    check = _mk_check(_test_session)
+    user = _fake_user()
+
+    # 逐笔 ensure 两条(report_id 来自种子)
+    from app.services.reconcile_check import ensure_line
+
+    ensure_line(_test_session, check.id, r1)
+    # confirm r1
+    confirm_line(_test_session, user, check.id, r1.id, confirm_status="已核对一致")
+
+    lst = list_lines(_test_session, check.id)
+    assert lst["total"] >= 1  # 至少 ensure 过的行
+    assert all(x["check_id"] == check.id for x in lst["items"])
+    summ = lines_summary(_test_session, check.id)
+    assert summ["total"] >= 1
+    assert summ["by_status"].get("已核对一致", 0) >= 1
+
+
+def test_api_line_confirm_permission(_api_env, _test_session):
+    """line-confirm 仅 Admin/Supervisor(agent 403); 成功打标"""
+    client, state, _make = _api_env
+    rpt = _seed_report(_test_session, platform_order_no="WS-LINE-API", amount="19.00")
+    state["user"] = _make("admin")
+    r = client.post("/api/v1/reconcile/check/confirm",
+                    params={"start": "2026-09-01T00:00:00", "end": "2026-09-05T23:59:59"})
+    cid = r.json()["data"]["id"]
+
+    state["user"] = _make("agent")
+    r2 = client.post(f"/api/v1/reconcile/check/{cid}/line-confirm",
+                     params={"report_id": rpt.id, "confirm_status": "已核对一致"})
+    assert r2.status_code == 403, r2.text
+
+    state["user"] = _make("supervisor")
+    r3 = client.post(f"/api/v1/reconcile/check/{cid}/line-confirm",
+                     params={"report_id": rpt.id, "confirm_status": "已核对一致", "confirm_note": "OK"})
+    assert r3.status_code == 200, r3.text
+    assert r3.json()["data"]["confirm_status"] == "已核对一致"
+    # lines-summary 可读
+    r4 = client.get(f"/api/v1/reconcile/check/{cid}/lines-summary")
+    assert r4.status_code == 200
+    assert r4.json()["data"]["total"] >= 1

@@ -49,6 +49,7 @@ from app.models.operation_log import OperationLog  # noqa: F401
 from app.models.person import Person, PersonAlias  # noqa: F401
 from app.models.policy import Policy  # noqa: F401
 from app.models.reconcile_check import ReconcileCheck  # noqa: F401
+from app.models.reconcile_match import ReconcileMatch  # noqa: F401
 from app.models.refund import Refund  # noqa: F401
 from app.models.refund_record_report import RefundRecordReport  # noqa: F401
 from app.models.refund_wide import RefundWide  # noqa: F401
@@ -141,6 +142,7 @@ __all__ = [
     "Person",
     "PersonAlias",
     "ReconcileCheck",
+    "ReconcileMatch",
     "Refund",
     "RefundWide",
     "Report",
