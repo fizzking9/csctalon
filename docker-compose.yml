@@ -85,6 +85,14 @@ services:
     # ENV 是 dsh 保留变量, 不能在 .env 中声明; 此处显式注入以维持生产 fail-fast 校验
     environment:
       - ENV=prod
+      # ⚠️ 2026-09-06 修复(UPLOAD_DIR 容器内外路径错位):
+      #    .env 的 UPLOAD_DIR/BROWSER_STATE_DIR 是**宿主机挂载源路径**(如 /opt/csctalon/uploads),
+      #    经 env_file 注入容器后, 后端 settings 会把它当成**容器内写入路径** → 采集文件/登录态
+      #    写进容器内非挂载目录(/opt/csctalon/uploads), 宿主看不到、容器重建即丢。
+      #    这里用 environment 显式覆盖为**容器内挂载点路径**(/app/uploads 等), 保证进程内读写落
+      #    在 bind mount 上(对应宿主机固定目录), 与上方 volumes 挂载一一对应。
+      - UPLOAD_DIR=/app/uploads
+      - BROWSER_STATE_DIR=/app/data/browser_states
     volumes:
       # 挂载变量与后端代码读取的 settings.UPLOAD_DIR / BROWSER_STATE_DIR 保持同名(单数),
       # 避免 UPLOADS_DIR/BROWSER_STATES_DIR 复数写法与代码不一致、.env 配串导致路径错配(2026-08-30 部署审计)

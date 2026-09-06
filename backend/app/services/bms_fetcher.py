@@ -321,34 +321,215 @@ def _fetch_total_budget_sec(data_type: str) -> int:
     return download_sec + rate_limit_wait + _FETCH_LEAD_SECONDS
 
 
-async def _click_export_button(page) -> None:
-    """点击「导出」按钮,找不到标准按钮时 fallback 遍历所有可见按钮"""
+# 导出/查询按钮候选 DOM 选择器(与查询按钮 ANY_CLICKABLE 一致)
+# BMS 页面按钮既可能是标准 <button>, 也可能是 Element UI 的
+# <span class="el-button">/<div role="button"> 等伪按钮实现。
+_EXPORT_ANY_CLICKABLE = (
+    "button:visible,"
+    "div[role='button']:visible,"
+    "span[role='button']:visible,"
+    "a[class*='btn']:visible,"
+    "a[class*='button']:visible,"
+    "span[class*='el-button']:visible,"
+    "div[class*='el-button']:visible"
+)
+
+
+async def _dismiss_modal_dialogs(page, max_wait_sec: float = 3.0) -> int:
+    """识别并关闭遮挡点击的 Element UI 模态提示框(el-message-box / el-dialog)。
+
+    背景(2026-09-06 定案): BMS 页面(尤其大窗口查询后)会弹
+      `<div role="dialog" aria-label="提示" class="el-message-box__wrapper">`
+    模态「提示」框(带确定/关闭按钮), 用户手动会点掉, 但脚本从不处理 →
+    它 intercepts pointer events 挡住后续导出/查询按钮的真实点击,
+    最终被误报成「未找到导出按钮」(全日志 12 次拦截, 按钮文本其实存在)。
+
+    关闭顺序(由礼貌到暴力):
+      1) 优先点 MessageBox 的「确定/OK/知道了/关闭」按钮(触发 Vue 正常回调);
+      2) 找不到按钮 → ESC(Element UI 弹层几乎都响应 ESC);
+      3) 仍残留 → JS 移除 .el-message-box__wrapper / .el-dialog__wrapper
+         (仅这两类模态容器, 不碰 .el-popper 以免误伤筛选栏)。
+
+    Returns: 关闭的模态框数量(仅诊断用)。
+    """
     import logging as _lg
     _log = _lg.getLogger(__name__)
-    _log.info("  [导出按钮] 开始定位导出按钮...")
+    dismissed = 0
     try:
-        await page.click('button:has-text("导出")', timeout=15000)
+        for _round in range(2):  # 最多两轮(新弹窗可能在关闭后异步再弹)
+            n = await page.evaluate("""() => {
+                const sels = ['.el-message-box__wrapper', '.el-dialog__wrapper'];
+                let n = 0;
+                for (const sel of sels) {
+                    document.querySelectorAll(sel).forEach((el) => {
+                        const cs = window.getComputedStyle(el);
+                        if (cs.display !== 'none' && cs.visibility !== 'hidden' && el.offsetParent !== null) {
+                            n++;
+                        }
+                    });
+                }
+                return n;
+            }""")
+            if not n:
+                return dismissed
+            _log.info(f"  [模态弹窗] 检测到 {n} 个可见模态框, 尝试关闭(第 {_round + 1} 轮)...")
+            # (1) 点确认/关闭按钮(Element UI MessageBox 按钮在 .el-message-box__btns 内)
+            btn_clicked = False
+            for sel in (
+                ".el-message-box__btns button:visible",
+                ".el-message-box button:visible",
+                ".el-dialog__wrapper .el-dialog__footer button:visible",
+                ".el-dialog__wrapper button:visible",
+            ):
+                try:
+                    btns = await page.query_selector_all(sel)
+                    for b in btns:
+                        try:
+                            t = (await b.inner_text()).strip()
+                        except Exception:
+                            t = ""
+                        # 确定/OK/知道了 等为"接受"语义, 关闭/X 为"取消"
+                        if t in ("确定", "OK", "知道了", "确认", "好的", "关闭", "关 闭", "×", "X", "取消"):
+                            try:
+                                await b.click(timeout=3000, force=True)
+                                btn_clicked = True
+                                dismissed += 1
+                                _log.info(f"  [模态弹窗] 已点击按钮 text={t!r}")
+                                break
+                            except Exception as ce:
+                                _log.warning(f"  [模态弹窗] 点按钮 {t!r} 失败: {ce}")
+                    if btn_clicked:
+                        break
+                except Exception:
+                    continue
+            if btn_clicked:
+                await asyncio.sleep(0.3)
+                continue
+            # (2) ESC
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+            # (3) JS 移除模态容器(仅 MessageBox/Dialog, 不影响页面本体)
+            try:
+                removed = await page.evaluate("""() => {
+                    const sels = ['.el-message-box__wrapper', '.el-dialog__wrapper'];
+                    let rm = 0;
+                    for (const sel of sels) {
+                        document.querySelectorAll(sel).forEach((el) => {
+                            try {
+                                el.parentNode && el.parentNode.removeChild(el);
+                                rm++;
+                            } catch (_) {
+                                el.style.display = 'none';
+                            }
+                        });
+                    }
+                    return rm;
+                }""")
+                if removed:
+                    dismissed += removed
+                    _log.info(f"  [模态弹窗] JS 移除 {removed} 个模态容器(最后手段)")
+                    await asyncio.sleep(0.3)
+            except Exception as me:
+                _log.warning(f"  [模态弹窗] JS 移除失败: {me}")
+    except Exception as e:
+        _log.warning(f"  [模态弹窗] 处理异常(忽略): {e}")
+    return dismissed
+
+
+async def _click_export_button(page) -> None:
+    """点击「导出」按钮,找不到标准按钮时 fallback 遍历所有可见按钮。
+
+    ⚠️ 2026-09-06 加固(真根因 = el-message-box 模态提示框遮挡):
+      - 点击前先 _dismiss_modal_dialogs 关闭遮挡的模态「提示」框(否则真实点击被拦截 15s
+        后误报「未找到导出按钮」, 全日志 12 次)。
+      - 候选从裸 button 扩到 _EXPORT_ANY_CLICKABLE(Element UI 伪按钮/角色按钮)。
+      - 若页面只剩「登录」按钮 → 抛 BmsSessionExpired(会话被踢落登录页),
+        不再抛误导性的「未找到导出按钮」(参照 3576 行注释的旧教训)。
+    """
+    import logging as _lg
+    _log = _lg.getLogger(__name__)
+    # 判断当前是否已落回登录页(会话失效), 避免把"登录"当导出按钮 / 误导性报错
+    try:
+        url_lower = (page.url or "").lower()
+        login_btn = await page.query_selector('button:has-text("登录")')
+        if "login" in url_lower or login_btn is not None:
+            btns_text = []
+            try:
+                for b in await page.query_selector_all("button:visible"):
+                    try:
+                        btns_text.append((await b.inner_text()).strip())
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            if btns_text and set(btns_text) <= {"登录", ""}:
+                _log.warning(
+                    f"  [导出按钮] 页面疑似已落回登录页(仅按钮: {btns_text[:10]}), "
+                    "判定会话失效 → 抛 BmsSessionExpired"
+                )
+                raise BmsSessionExpired(
+                    "点击导出前检测到页面仅剩登录按钮(会话被踢/失效), 同组下一源将重新登录"
+                )
+    except BmsSessionExpired:
+        raise
+    except Exception:
+        pass
+
+    # 点击前先关闭可能遮挡的模态「提示」框(2026-09-06 真根因)
+    try:
+        await _dismiss_modal_dialogs(page)
+    except Exception as _de:
+        _log.warning(f"  [导出按钮] 关闭模态框异常(忽略,继续): {_de}")
+
+    _log.info("  [导出按钮] 开始定位导出按钮...")
+    # ── 标准 selector 尝试 ──
+    clicked = False
+    try:
+        await page.click('button:has-text("导出"):visible, span.el-button:has-text("导出"):visible, div:has-text("导出"):visible >> nth=0', timeout=8000)
         _log.info("  [导出按钮] 标准 selector 命中并点击成功")
         return
     except Exception as e:
-        _log.info(f"  [导出按钮] 标准 selector 未命中: {type(e).__name__}, 改为遍历所有按钮")
-    btns = await page.query_selector_all('button:visible')
+        _log.info(f"  [导出按钮] 标准 selector 未命中: {type(e).__name__}, 改为遍历所有可见按钮")
+    # ── 遍历候选按钮(伪按钮也覆盖) ──
+    try:
+        btns = await page.query_selector_all(_EXPORT_ANY_CLICKABLE)
+    except Exception:
+        btns = await page.query_selector_all("button:visible")
     _log.info(f"  [导出按钮] 页面可见按钮数: {len(btns)}")
-    clicked = False
     for idx, b in enumerate(btns):
         try:
             t = (await b.inner_text()).strip()
         except Exception:
             t = ""
-        if "导出" in t and "重置" not in t:
+        if "导出" in t and "重置" not in t and "导入" not in t:
+            # 点击前再次关闭模态框(前一次点击可能刚触发新弹窗)
+            try:
+                await _dismiss_modal_dialogs(page)
+            except Exception:
+                pass
             _log.info(f"  [导出按钮] 遍历命中第 {idx} 个: text={t!r}, 准备点击")
             try:
-                await b.click(timeout=15000)
+                await b.click(timeout=8000)
                 clicked = True
                 _log.info("  [导出按钮] 遍历点击成功")
                 break
             except Exception as ce:
-                _log.warning(f"  [导出按钮] 遍历点击失败: {ce}")
+                err = str(ce)
+                if "intercepts pointer events" in err or "el-message-box" in err:
+                    _log.warning(f"  [导出按钮] 遍历点击被模态框拦截, 先关闭再重试: {ce}")
+                    try:
+                        await _dismiss_modal_dialogs(page)
+                        await b.click(timeout=8000, force=True)
+                        clicked = True
+                        _log.info("  [导出按钮] 关闭模态框后 force-click 成功")
+                        break
+                    except Exception as ce2:
+                        _log.warning(f"  [导出按钮] 关闭模态框后仍点击失败: {ce2}")
+                else:
+                    _log.warning(f"  [导出按钮] 遍历点击失败: {ce}")
                 continue
     if not clicked:
         # 列出所有按钮文本,方便诊断
@@ -528,6 +709,11 @@ async def _download_with_retry(
             # ⚠️ 清理:移除 response listener + 取消残留 download_task,避免泄漏
             _remove_response_listener(page)
             _drain_task(download_task)
+            # ⚠️ 2026-09-06: 会话失效(BmsSessionExpired)不重试, 直接冒泡
+            #   让上层重新登录(否则本源内盲目重试会白等 180~600s×N 才报误导性错误)。
+            #   BmsSessionExpired 是 RuntimeError 子类, 需在通用 except 前特判。
+            if isinstance(e, BmsSessionExpired):
+                raise
             last_exc = e
             err_msg = str(e)
             # 如果是被限流,等待 60 秒再重试(BMS 限流窗口是 1 分钟)
@@ -3605,6 +3791,14 @@ class BmsFetcher:
         # 渲染就绪守卫(两种路径都执行; 复用成功路径已停在目标页, 直接轮询其按钮渲染)
         await self._wait_until_page_has_any_clickable(page)
 
+        # ⚠️ 2026-09-06: 页面就绪后先关闭可能的模态「提示」框(el-message-box),
+        #   否则它 intercepts pointer events 挡住后续填时间/查询的点击
+        #   (9/1 wallet 填时间被挡 30s、9/5 refund_record_report 点导出被挡误报, 同根因)。
+        try:
+            await _dismiss_modal_dialogs(page)
+        except Exception as _md_e:
+            logger.warning(f"[{data_type}] 页面就绪后关闭模态框异常(忽略): {_md_e}")
+
         # 3. 设置时间范围
         # ⚠️ 2026-09-01 修复: 同 _do_fetch_one, 真根因是浏览器时区=UTC(已设 timezone_id=Asia/Shanghai),
         #   这里填**北京时间**(fill_utc=False), 与用户手动导出一致。
@@ -3637,6 +3831,12 @@ class BmsFetcher:
         except Exception as e:
             logger.info(f"[{data_type}] networkidle 等待结束(超时或异常,忽略): {type(e).__name__}: {e}")
         await asyncio.sleep(2)
+        # ⚠️ 2026-09-06: 查询后/导出前再关一次模态框(BMS 大窗口查询可能刚弹出「提示」框,
+        #   9/5 22:44 铁证: 点查询后 22:44:39 点导出被 el-message-box 拦截 30s 误报)。
+        try:
+            await _dismiss_modal_dialogs(page)
+        except Exception as _md_e2:
+            logger.warning(f"[{data_type}] 查询后关闭模态框异常(忽略): {_md_e2}")
         logger.info(f"[{data_type}] 准备点击导出按钮并等待下载...")
 
         # 5. 导出
