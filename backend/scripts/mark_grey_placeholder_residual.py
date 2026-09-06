@@ -69,6 +69,8 @@ def _is_grey_placeholder(m: ManualRefund) -> bool:
 def main() -> None:
     ap = argparse.ArgumentParser(description="D 路灰色占位残留行治理(预览/标记)")
     ap.add_argument("--apply", action="store_true", help="执行标记(默认仅预览不写库)")
+    ap.add_argument("--include-e-multi", action="store_true",
+                    help="连带治理 E 水单多笔 order 的灰色行(默认排除, 见 v1.2 安全护栏; 2026-09-06 用户裁定 12 行都治)")
     args = ap.parse_args()
 
     from app.core.database import SessionLocal
@@ -121,8 +123,8 @@ def main() -> None:
                     continue  # 已治理过(第一类)
                 if not _is_grey_placeholder(m):
                     continue
-                if order_no in e_multi_orders:
-                    # E 分笔扣款的 order → 灰色行可能是真实总额登记, 转人工不自动治
+                if order_no in e_multi_orders and not args.include_e_multi:
+                    # E 分笔扣款的 order → 灰色行可能是真实总额登记, 默认转人工不自动治
                     skipped_e_multi.append(m)
                     continue
                 targets.append(m)
