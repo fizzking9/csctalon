@@ -10,6 +10,34 @@
       </template>
     </el-alert>
 
+    <!-- ===== 时间窗选择(对账复核自带, 不依赖父级 overview 筛选) ===== -->
+    <section class="block-card mb-16">
+      <div class="flex-between win-bar">
+        <div>
+          <span class="win-label">复核时间窗：</span>
+          <el-radio-group v-model="quickRange" size="small" class="mr-12">
+            <el-radio-button label="today">今日</el-radio-button>
+            <el-radio-button label="yesterday">昨日</el-radio-button>
+            <el-radio-button label="7">近7天</el-radio-button>
+            <el-radio-button label="30">近30天</el-radio-button>
+            <el-radio-button label="custom">自定义</el-radio-button>
+          </el-radio-group>
+          <el-date-picker
+            v-model="winRange"
+            type="daterange"
+            size="small"
+            value-format="YYYY-MM-DD"
+            :disabled="quickRange !== 'custom'"
+            start-placeholder="开始"
+            end-placeholder="结束"
+            style="width: 240px"
+          />
+          <el-button type="primary" size="small" :icon="Search" :loading="loading" @click="load">生成预览</el-button>
+          <span v-if="winStart && winEnd" class="win-hint">当前预览：{{ winStart }} ~ {{ winEnd }}</span>
+        </div>
+      </div>
+    </section>
+
     <section class="block-card mb-16">
       <div class="flex-between">
         <div class="block-head" style="border:none;padding:0">
@@ -194,14 +222,14 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Check, Refresh } from '@element-plus/icons-vue'
+import { Check, Refresh, Search } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { useAuthStore } from '@/stores/auth'
 import { reconcile } from '@/api/reconcile'
 import ReconcileLines from './ReconcileLines.vue'
 
 const props = defineProps({
-  start: { type: String, default: '' },   // YYYY-MM-DD
+  start: { type: String, default: '' },   // YYYY-MM-DD (仅作初始默认; 复核自带窗口可改)
   end: { type: String, default: '' },
   reloadKey: { type: Number, default: 0 },
 })
@@ -219,13 +247,30 @@ const detail = ref(null)
 const activeCheckId = ref(null)   // 当前逐笔核对批次 id(confirm 或历史行进入)
 const activeCheckNo = ref('')
 
+// ── 复核时间窗(自包含, 不依赖父级 overview 筛选) ──
+const quickRange = ref('30')   // today/yesterday/7/30/custom
+const winRange = ref([])       // [start, end] YYYY-MM-DD (custom 时编辑)
+
 // 复核写权限: 仅 admin/supervisor(与后端 AdminOrSupervisor 一致)。
 // 用 Pinia auth store 的 role(auth.role = user.role, 来自登录态), 响应式随登录态变化。
 const canWrite = computed(() => ['admin', 'supervisor'].includes(auth.role))
 
+// 由 quickRange/winRange 算出生效窗口
+const winStart = computed(() => {
+  if (quickRange.value === 'custom') return winRange.value?.[0] || ''
+  if (quickRange.value === 'today') return dayjs().format('YYYY-MM-DD')
+  if (quickRange.value === 'yesterday') return dayjs().subtract(1, 'day').format('YYYY-MM-DD')
+  return dayjs().subtract(Number(quickRange.value), 'day').format('YYYY-MM-DD')
+})
+const winEnd = computed(() => {
+  if (quickRange.value === 'custom') return winRange.value?.[1] || ''
+  if (quickRange.value === 'today' || quickRange.value === 'yesterday') return winStart.value
+  return dayjs().format('YYYY-MM-DD')
+})
+
 function winLabel() {
-  if (!props.start && !props.end) return ''
-  return `${props.start || '全量'} ~ ${props.end || '至今'}`
+  if (!winStart.value || !winEnd.value) return ''
+  return `${winStart.value} ~ ${winEnd.value}`
 }
 
 function fmt(n) {
@@ -269,18 +314,20 @@ function conclusionType(c) {
 }
 
 async function load() {
-  if (!props.start || !props.end) {
-    errorMsg.value = '请先在上方选择时间区间后点击「分析」'
+  if (!winStart.value || !winEnd.value) {
+    errorMsg.value = '请选择复核时间窗后点击「生成预览」'
     snapshot.value = null
     return
   }
   loading.value = true
   errorMsg.value = ''
   try {
-    const res = await reconcile.checkRun({ start: `${props.start}T00:00:00`, end: `${props.end}T23:59:59` })
+    const res = await reconcile.checkRun({ start: `${winStart.value}T00:00:00`, end: `${winEnd.value}T23:59:59` })
     snapshot.value = res.data
     conclusion.value = ''
     note.value = ''
+    activeCheckId.value = null
+    activeCheckNo.value = ''
   } catch (e) {
     errorMsg.value = '预览失败: ' + (e?.message || e)
   } finally {
@@ -291,7 +338,7 @@ async function load() {
 async function confirm() {
   if (!snapshot.value) return
   try {
-    const params = { start: `${props.start}T00:00:00`, end: `${props.end}T23:59:59` }
+    const params = { start: `${winStart.value}T00:00:00`, end: `${winEnd.value}T23:59:59` }
     if (conclusion.value) params.conclusion = conclusion.value
     if (note.value) params.note = note.value
     const res = await reconcile.checkConfirm(params)
@@ -349,12 +396,26 @@ const detailRouteRows = computed(() => {
 })
 
 // 权限提示: 仅 admin/supervisor 可写(与后端一致; 后端仍强制校验)
+// 父级窗口变化(来自 overview 分析/重进): 同步自定义窗口并加载; 不 immediate(避免与 onMounted 双触发)
 watch([() => props.start, () => props.end, () => props.reloadKey], () => {
-  if (props.start && props.end) load()
+  if (props.start && props.end && quickRange.value !== 'custom') {
+    quickRange.value = 'custom'
+    winRange.value = [props.start, props.end]
+    load()
+  }
 })
+
+// 初始化: 默认近30天; 若父已带窗口则用之并加载
 onMounted(() => {
+  if (props.start && props.end) {
+    quickRange.value = 'custom'
+    winRange.value = [props.start, props.end]
+  } else {
+    quickRange.value = '30'
+    winRange.value = [dayjs().subtract(29, 'day').format('YYYY-MM-DD'), dayjs().format('YYYY-MM-DD')]
+  }
   loadHistory()
-  if (props.start && props.end) load()
+  load()
 })
 </script>
 
@@ -367,6 +428,9 @@ onMounted(() => {
 .block-hint { font-size: 12px; color: #9ca3af; }
 .flex-between { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
 .check-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.win-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.win-label { font-size: 13px; font-weight: 600; color: #374151; margin-right: 4px; }
+.win-hint { font-size: 12px; color: #2563eb; margin-left: 8px; }
 .mt-12 { margin-top: 12px; }
 .mb-12 { margin-bottom: 12px; }
 .mb-16 { margin-bottom: 16px; }

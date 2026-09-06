@@ -29,13 +29,13 @@
           <el-radio-button label="day">按日</el-radio-button>
           <el-radio-button label="week">按周</el-radio-button>
         </el-radio-group>
-        <el-button type="primary" :icon="Search" :loading="analyzing" @click="runAnalysis">分析</el-button>
+        <el-button v-if="tabMode !== 'reconcile'" type="primary" :icon="Search" :loading="analyzing" @click="runAnalysis">分析</el-button>
         <el-button v-if="tabMode === 'overview' && analyzed" :icon="Download" @click="handleExport">导出</el-button>
       </div>
     </div>
 
-    <!-- 未分析时的空态提示 -->
-    <section v-if="!analyzed" class="empty-hint">
+    <!-- 未分析时的空态提示(决策概览/提现时效专属; 对账复核自带窗口选择, 不依赖此空态) -->
+    <section v-if="!analyzed && tabMode !== 'reconcile'" class="empty-hint">
       <el-empty :image-size="96" description="">
         <template #description>
           <div class="empty-tip">
@@ -48,7 +48,7 @@
 
     <!-- ============ TAB1: 决策概览 (0~5 区块) ============ -->
     <DecisionOverview
-      v-else-if="tabMode === 'overview'"
+      v-else-if="tabMode === 'overview' && analyzed"
       :start="effectiveStart"
       :end="effectiveEnd"
       :grain="grainMode"
@@ -59,8 +59,9 @@
     <RefundWithdrawal v-else-if="analyzed && tabMode === 'withdrawal'" />
 
     <!-- ============ TAB3: 五路对账复核 (A-20260906-002 / #22) ============ -->
+    <!-- 独立渲染: 不依赖 analyzed(对账复核自带时间窗选择与生成预览按钮) -->
     <ReconcileCheck
-      v-else-if="tabMode === 'reconcile'"
+      v-if="tabMode === 'reconcile'"
       :start="effectiveStart"
       :end="effectiveEnd"
       :reload-key="reloadKey"
