@@ -94,8 +94,6 @@ def _e_by_route(db, start: datetime, end: datetime) -> dict:
 def _dupe_detect(db, start: datetime, end: datetime) -> dict:
     """D 路重复/脏数据检出(辅助复核; 不阻塞)"""
     # 同 order_no 多行(窗口内已退款, 按 COALESCE(op_time,register_time) 落窗)
-    cn_s = _to_cn(start).date()
-    cn_e = _to_cn(end).date()
     rows = db.execute(
         select(
             ManualRefund.order_no,
@@ -108,6 +106,9 @@ def _dupe_detect(db, start: datetime, end: datetime) -> dict:
             ManualRefund.order_no.is_not(None),
             ManualRefund.order_no != "",
             func.coalesce(ManualRefund.op_time, ManualRefund.register_time).is_not(None),
+            # 落窗过滤: 与第二段 no_sn_weird 口径一致(均在所选时间窗内), 避免"全域 vs 窗口"口径矛盾 (#21/#22 Reviewer W2)
+            func.coalesce(ManualRefund.op_time, ManualRefund.register_time) >= start,
+            func.coalesce(ManualRefund.op_time, ManualRefund.register_time) <= end,
         )
         .group_by(ManualRefund.order_no)
         .having(func.count() > 1)
@@ -117,13 +118,16 @@ def _dupe_detect(db, start: datetime, end: datetime) -> dict:
     for _o, n, _ws, amt in rows:
         dup_groups += 1
         dup_amt += float(amt or 0) * (n - 1) / n  # 超额占比估算(每单多出 n-1/n)
-    # 无SN+年份异常残留行(全窗, 与治理脚本同口径)
+    # 无SN+年份异常残留行(窗口内, 与治理脚本同口径; 行数可控, 逐行判年份可接受)
     residual_rows = 0
     residual_amt = 0.0
     for m in db.scalars(
         select(ManualRefund).where(
             ManualRefund.is_refunded == "是",
             (ManualRefund.device_sn.is_(None)) | (ManualRefund.device_sn == ""),
+            func.coalesce(ManualRefund.op_time, ManualRefund.register_time).is_not(None),
+            func.coalesce(ManualRefund.op_time, ManualRefund.register_time) >= start,
+            func.coalesce(ManualRefund.op_time, ManualRefund.register_time) <= end,
         )
     ).all():
         if m.register_time is None:
@@ -133,21 +137,16 @@ def _dupe_detect(db, start: datetime, end: datetime) -> dict:
         except (ValueError, OSError):
             continue
         if yr not in _CURRENT_YEARS:
-            # 窗口判定: 该行 COALESCE(op_time,register_time) 是否落在复核窗口(若被回填到窗口内才影响)
-            eff = m.op_time or m.register_time
-            if eff is None:
-                continue
-            eff_cn = _to_cn(eff).date()
-            if cn_s <= eff_cn <= cn_e:
-                residual_rows += 1
-                residual_amt += float(m.refund_amount or 0)
+            # 该行 COALESCE(op_time,register_time) 已落在窗口(上面 SQL 已过滤), 直接计
+            residual_rows += 1
+            residual_amt += float(m.refund_amount or 0)
 
     return {
         "dup_order_groups": dup_groups,
         "dup_amount_est": round(dup_amt, 2),
         "no_sn_weird_rows_in_win": residual_rows,
         "no_sn_weird_amt_in_win": round(residual_amt, 2),
-        "note": "仅辅助提示: dup_amount_est 为同单多行超额占比估算, no_sn_weird 为无SN+乱年份残留行(治理#21 目标)",
+        "note": "仅辅助提示(限所选窗口): dup_amount_est 为同单多行超额占比估算, no_sn_weird 为无SN+乱年份残留行(治理#21 目标)",
     }
 
 

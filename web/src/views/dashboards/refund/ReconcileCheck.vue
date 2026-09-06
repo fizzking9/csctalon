@@ -180,6 +180,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Check, Refresh } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
+import { useAuthStore } from '@/stores/auth'
 import { reconcile } from '@/api/reconcile'
 
 const props = defineProps({
@@ -188,7 +189,7 @@ const props = defineProps({
   reloadKey: { type: Number, default: 0 },
 })
 
-const canWrite = ref(false)
+const auth = useAuthStore()
 const loading = ref(false)
 const errorMsg = ref('')
 const snapshot = ref(null)
@@ -199,9 +200,9 @@ const histLoading = ref(false)
 const drawer = ref(false)
 const detail = ref(null)
 
-// 后端元数据标记(可在 onMounted 由接口返回判断; 简化: 读角色来自 localStorage/全局——由父组件传入)
-// 实际权限由后端接口保证; 前端按 localStorage role 提示
-const userRole = localStorage.getItem('user_role') || ''
+// 复核写权限: 仅 admin/supervisor(与后端 AdminOrSupervisor 一致)。
+// 用 Pinia auth store 的 role(localStorage user JSON), 响应式随登录态变化。
+const canWrite = computed(() => ['admin', 'supervisor'].includes(auth.role))
 
 function winLabel() {
   if (!props.start && !props.end) return ''
@@ -322,7 +323,6 @@ watch([() => props.start, () => props.end, () => props.reloadKey], () => {
   if (props.start && props.end) load()
 })
 onMounted(() => {
-  canWrite.value = ['admin', 'supervisor'].includes(userRole)
   loadHistory()
   if (props.start && props.end) load()
 })

@@ -163,8 +163,7 @@ def main() -> None:
             print(f"\n✅ 已标记 {n} 行为 dup_residual (可回滚)")
         elif not args.apply:
             print("\n(预览模式, 未写库)")
-
-        db.rollback()
+            db.rollback()
     finally:
         db.close()
 

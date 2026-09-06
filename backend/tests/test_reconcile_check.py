@@ -293,6 +293,25 @@ def test_dupe_detect_finds_dup(_test_session):
     assert res["dupe_detect"]["no_sn_weird_rows_in_win"] >= 1
 
 
+def test_dupe_detect_respects_window(_test_session):
+    """dupe_detect 限窗口: 窗口外的同单多行不计数(2026-09-06 Reviewer W2 修复)"""
+    from app.services.reconcile_check import preview_check
+
+    # 重复行在 7 月(窗口 9 月之外)
+    _seed_manual(_test_session, device_sn="SN-C-1", order_no="WS-DUP-OUT", amount="19.00",
+                 op_time=_dt("2026-07-05 11:00:00"))
+    _seed_manual(_test_session, device_sn=None, order_no="WS-DUP-OUT", amount="100.00",
+                 op_time=_dt("2026-07-05 11:00:00"), register_time="2002-09-26 00:00:00")
+
+    res = preview_check(
+        _test_session,
+        _dt("2026-09-01 00:00:00"), _dt("2026-09-30 23:59:59"),
+    )
+    # 7 月的重复不应计入 9 月窗口的检出
+    assert res["dupe_detect"]["dup_order_groups"] == 0
+    assert res["dupe_detect"]["no_sn_weird_rows_in_win"] == 0
+
+
 # ---------- API 层(权限) ----------
 
 @pytest.fixture()
