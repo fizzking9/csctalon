@@ -220,8 +220,12 @@ def _source_reg_handled(db, src_val: str, ts, te,
       净新增(complaint_date∈窗口 − 已 matched 到窗口内登记工单的重叠), 与 /summary 三源
       总数 external_total 的合并口径一致。
     - handled: 工单 finish_time ∈ [ts,te] 且真实完成(finish−register≥3min)。
-      (补充表未并入 handled: 315/卡商的 handle_time/result 办结语义与工单完成不同,
-      避免混淆; 外部处理进度由明细/主体/积压维度呈现)
+      external 桶另并入 315(external_complaints)补充表「已办结」(result∈办结类):
+      315 外部投诉大量由 workbuddy 推送进补充表、未必同步生成/更新工单, 若不并入,
+      补充表已办结会被永久当"未处理" → 外部投诉 daily 处理率虚低、积压恒高(2026-09-06
+      缺陷, 用户确认口径: 补充表已办结 = 已处理)。去重: 已办结但 matched 工单已在
+      工单侧计入 handled 的排除(避免同一笔双算)。卡商(card_complaints)不并入:
+      result 语义不同(已解决/已退款完成/投诉错误...), 无办结集合, 保持不进 handled。
     """
     src_expr = _complaint_source_type_case()
 
@@ -254,30 +258,45 @@ def _source_reg_handled(db, src_val: str, ts, te,
     registered = db.scalar(select(func.count()).select_from(ServiceTicket).where(*_reg_where())) or 0
     handled = db.scalar(select(func.count()).select_from(ServiceTicket).where(*_fin_where())) or 0
 
-    # external 桶: 并入补充表(315/卡商)净新增 registered(与 external_total 合并口径一致)
+    # external 桶: 并入补充表(315/卡商)
     if include_suppl_external and src_val == "外部投诉":
-        def _overlap(model):
-            """补充记录 matched_ticket_no 指向"窗口内登记投诉工单"的条数(= 工单侧已计, 需去重)"""
+        def _overlap(model, done_only: bool = False, handled_side: bool = False):
+            """补充记录 matched_ticket_no 指向"窗口内登记投诉工单"的条数.
+
+            done_only=True: 只数 result∈办结类 的补充记录(供 handled 并入去重用)。
+            handled_side=True: 只数 matched 工单"窗口内真实完成"的那部分
+              (即工单侧 handled 已计; 补充办结若指向这类工单则不应重复计入)。
+            """
             sub_conds = [
                 _ticket_category_case() == "投诉",
-                ServiceTicket.register_time.isnot(None),
             ]
+            if handled_side:
+                sub_conds += [
+                    ServiceTicket.finish_time.isnot(None),
+                    ServiceTicket.register_time.isnot(None),
+                    func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) >= _REAL_FINISH_EPOCH_SECS,
+                ]
+            else:
+                sub_conds.append(ServiceTicket.register_time.isnot(None))
             if ts:
-                sub_conds.append(ServiceTicket.register_time >= ts)
+                sub_conds.append(ServiceTicket.register_time >= ts if not handled_side else ServiceTicket.finish_time >= ts)
             if te:
-                sub_conds.append(ServiceTicket.register_time <= te)
+                sub_conds.append(ServiceTicket.register_time <= te if not handled_side else ServiceTicket.finish_time <= te)
             sub = select(ServiceTicket.ticket_no).where(*sub_conds)
             conds = [
                 model.complaint_date.isnot(None),
                 model.matched_ticket_no.isnot(None),
                 model.matched_ticket_no.in_(sub),
             ]
+            if done_only:
+                conds.append(model.result.in_(_EXTERNAL_DONE_RESULTS))
             if ts:
                 conds.append(model.complaint_date >= ts)
             if te:
                 conds.append(model.complaint_date <= te)
             return db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
 
+        # registered 并入: 净新增(总数 − 已 matched 窗口内登记工单) —— 两表都并入(既有口径)
         ext_reg = 0
         for model in (ExternalComplaint, CardComplaint):
             conds = [model.complaint_date.isnot(None)]
@@ -286,8 +305,23 @@ def _source_reg_handled(db, src_val: str, ts, te,
             if te:
                 conds.append(model.complaint_date <= te)
             total = db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
-            ext_reg += int(total) - int(_overlap(model))
+            ext_reg += int(total) - int(_overlap(model, done_only=False, handled_side=False))
         registered += max(ext_reg, 0)
+
+        # handled 并入: 仅 315(external_complaints) 补充表已办结(result∈办结类)。
+        # ⚠️ 卡商(card_complaints)不并入: 其 result 是另一套语义(已解决/已退款完成/投诉错误/流量虚...),
+        #    无统一"办结类"判定集合, 套用 315 办结集合会恒为 0, 误判卡商永不处理 → 保持不进 handled。
+        model = ExternalComplaint
+        conds = [model.complaint_date.isnot(None)]
+        if ts:
+            conds.append(model.complaint_date >= ts)
+        if te:
+            conds.append(model.complaint_date <= te)
+        conds_done = list(conds) + [model.result.in_(_EXTERNAL_DONE_RESULTS)]
+        ext_done = db.scalar(select(func.count()).select_from(model).where(*conds_done)) or 0
+        # matched 到"窗口内真实完成工单"的已办结 → 工单侧 handled 已计, 不重复加
+        ext_done_overlap_handled = int(_overlap(model, done_only=True, handled_side=True))
+        handled += max(int(ext_done) - int(ext_done_overlap_handled), 0)
 
     return int(registered), int(handled)
 

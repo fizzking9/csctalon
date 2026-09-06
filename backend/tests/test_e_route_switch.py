@@ -28,14 +28,17 @@ def _dt(s: str) -> datetime:
 @pytest.fixture()
 def _test_session(_engine):
     """独立 session, 清理 E 路相关表(避免污染其它共享表测试)"""
-    from app.models import Device
+    from app.models import Device, ManualRefund
 
     session = Session(_engine, autocommit=False, autoflush=False)
     from app.models import Refund, RefundRecordReport
 
     for cls in (RefundRecordReport, Refund):
         session.execute(cls.__table__.delete())
+    # 本文件 D 路回归测试建的 manual(SN-D-*) 也清理, 防污染
+    session.execute(ManualRefund.__table__.delete().where(ManualRefund.device_sn.like("SN-D-%")))
     session.execute(Device.__table__.delete().where(Device.sn.like("SN-E-%")))
+    session.execute(Device.__table__.delete().where(Device.sn.like("SN-D-%")))
     session.commit()
     try:
         yield session
@@ -43,7 +46,9 @@ def _test_session(_engine):
         try:
             for cls in (RefundRecordReport, Refund):
                 session.execute(cls.__table__.delete())
+            session.execute(ManualRefund.__table__.delete().where(ManualRefund.device_sn.like("SN-D-%")))
             session.execute(Device.__table__.delete().where(Device.sn.like("SN-E-%")))
+            session.execute(Device.__table__.delete().where(Device.sn.like("SN-D-%")))
             session.commit()
         except Exception:
             session.rollback()
@@ -124,3 +129,61 @@ def test_route_e_time_window(_test_session):
     ac = res["actual_cashflow"]
     assert ac["count"] == 1
     assert abs(ac["amount"] - 19.00) < 0.01
+
+
+# ============================================================
+# 2026-09-06 缺陷回归: D 路统计必须排除 quality_status='dup_residual' 重复行
+# 根因: #21 治理把确凿重复标 dup_residual(不物理删), 但 _route_d_other_agg / trend
+#       未排除 → 已治理重复仍计入 D 路经营(生产 9月窗口差 ¥4.8万)。
+# ============================================================
+def _seed_manual(session, sn, amount, op_time, is_refunded="是", quality_status=None):
+    from app.models import ManualRefund
+
+    if sn:
+        _ensure_device(session, sn)
+    m = ManualRefund(
+        device_sn=sn,
+        order_no=f"WS-D-{sn}-{amount}",
+        merchant_id="1611876437",
+        refund_amount=amount,
+        register_time=_dt("2026-09-03 09:00:00"),
+        op_time=_dt(op_time),
+        is_refunded=is_refunded,
+        registrant="测试员",
+        quality_status=quality_status,
+    )
+    session.add(m)
+    session.commit()
+    session.refresh(m)
+    return m
+
+
+def test_route_d_excludes_dup_residual(_test_session):
+    """D 路: quality_status='dup_residual' 的已治理重复行不计入 route_d 经营。"""
+    from app.services.analytics import _cash_routes_total
+
+    s = _dt("2026-09-01 00:00:00")
+    e = _dt("2026-09-10 23:59:59")
+    # 1 笔正常行 + 1 笔 dup_residual 重复行(同金额同单)
+    _seed_manual(_test_session, "SN-D-1", "19.00", "2026-09-05 10:00:00", quality_status=None)
+    _seed_manual(_test_session, "SN-D-1", "19.00", "2026-09-05 10:00:00", quality_status="dup_residual")
+
+    res = _cash_routes_total(_test_session, start=s, end=e)
+    rd = res["route_d"]
+    assert rd["count"] == 1, f"route_d.count={rd['count']}, 期望 1(dup_residual 应排除)"
+    assert abs(rd["amount"] - 19.00) < 0.01, f"route_d.amount={rd['amount']}, 期望 19.00"
+
+
+def test_route_d_keeps_normal_and_pending(_test_session):
+    """D 路: 正常行 + quality_status='pending'(待人工, 非确凿重复) 仍计入。"""
+    from app.services.analytics import _cash_routes_total
+
+    s = _dt("2026-09-01 00:00:00")
+    e = _dt("2026-09-10 23:59:59")
+    _seed_manual(_test_session, "SN-D-2", "19.00", "2026-09-05 10:00:00", quality_status=None)
+    _seed_manual(_test_session, "SN-D-3", "5.00", "2026-09-05 11:00:00", quality_status="pending")
+
+    res = _cash_routes_total(_test_session, start=s, end=e)
+    rd = res["route_d"]
+    assert rd["count"] == 2, f"route_d.count={rd['count']}, 期望 2"
+    assert abs(rd["amount"] - 24.00) < 0.01, f"route_d.amount={rd['amount']}, 期望 24.00"

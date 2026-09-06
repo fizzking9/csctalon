@@ -396,26 +396,52 @@ _D_OTHER_AMOUNT_COL = "refund_amount"
 _D_OTHER_TIME_COL = "COALESCE(op_time, register_time)"
 _D_OTHER_STATUS_COL = "is_refunded"
 _D_OTHER_STATUS_OK = "是"
+# ⚠️ 2026-09-06 (#21 治理 P4): D 路统计必须排除已治理的重复行。
+#    清理脚本(cleanup_manual_duplicate_residual / mark_grey_placeholder_residual)
+#    把确凿重复标记为 quality_status='dup_residual' (不物理删除), 若不排除,
+#    这些重复仍被算进 D 路 → D 路重复统计依旧虚高(生产 9月窗口曾差 ¥4.8万)。
+_D_OTHER_EXCLUDE_QSTATUS = "dup_residual"
+
+
+def _manual_refunds_has_quality_col(db: Session) -> bool:
+    """manual_refunds 是否有 quality_status 列(旧环境/旧表无该列时跳过排除, 不报错)。"""
+    if not _table_exists(db, _D_OTHER_TABLE):
+        return False
+    try:
+        with db.begin_nested():
+            row = db.execute(text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name=:t AND column_name='quality_status'"
+            ), {"t": _D_OTHER_TABLE}).first()
+        return bool(row)
+    except Exception:
+        return False
+
 
 def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
     """【路线D】手动退款(manual_refunds)独立表聚合 (表不存在则返回 0,0,不报错).
 
     同 _route_c_shanmao_agg: 必须用 savepoint 隔离 PG 事务失败状态。
+    排除 quality_status='dup_residual'(已治理重复, 见常量注释)。
     """
     if not _table_exists(db, _D_OTHER_TABLE):
         return 0, 0.0
+    exclude_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
     sql_tpl = f"""
     SELECT COUNT(*) AS cnt,
            COALESCE(SUM({_D_OTHER_AMOUNT_COL})::numeric,0) AS amt
     FROM {_D_OTHER_TABLE}
     WHERE {_D_OTHER_TIME_COL} IS NOT NULL
       {"AND " + _D_OTHER_STATUS_COL + " = :st" if _D_OTHER_STATUS_COL else ""}
+      {"AND COALESCE(quality_status,'') <> :excl" if exclude_q else ""}
       {"AND " + _D_OTHER_TIME_COL + " >= :s" if start else ""}
       {"AND " + _D_OTHER_TIME_COL + " <= :e" if end else ""}
     """
     params: dict[str, Any] = {}
     if _D_OTHER_STATUS_COL:
         params["st"] = _D_OTHER_STATUS_OK
+    if exclude_q:
+        params["excl"] = exclude_q
     if start is not None:
         params["s"] = start
     if end is not None:
@@ -471,9 +497,10 @@ def _route_c_shanmao_trend(db: Session, start, end, grain: str, slot_idx_fn) -> 
 
 
 def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tuple[dict[int, int], dict[int, float]]:
-    """【路线D】手动退款按时间分组聚合 (表不存在则返回空map)."""
+    """【路线D】手动退款按时间分组聚合 (表不存在则返回空map; 排除 dup_residual 重复行)."""
     if not _table_exists(db, _D_OTHER_TABLE):
         return {}, {}
+    exclude_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
     trunc_expr = "date_trunc(:grain, timezone('Asia/Shanghai', " + _D_OTHER_TIME_COL + "))"
     sql_tpl = f"""
     SELECT {trunc_expr} AS trunc_t,
@@ -482,6 +509,7 @@ def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tu
     FROM {_D_OTHER_TABLE}
     WHERE {_D_OTHER_TIME_COL} IS NOT NULL
       {"AND " + _D_OTHER_STATUS_COL + " = :st" if _D_OTHER_STATUS_COL else ""}
+      {"AND COALESCE(quality_status,'') <> :excl" if exclude_q else ""}
       {"AND " + _D_OTHER_TIME_COL + " >= :s" if start else ""}
       {"AND " + _D_OTHER_TIME_COL + " <= :e" if end else ""}
     GROUP BY trunc_t
@@ -489,6 +517,8 @@ def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tu
     params: dict[str, Any] = {"grain": grain}
     if _D_OTHER_STATUS_COL:
         params["st"] = _D_OTHER_STATUS_OK
+    if exclude_q:
+        params["excl"] = exclude_q
     if start is not None:
         params["s"] = start
     if end is not None:
@@ -682,9 +712,10 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
             shanmao_map = {r[0]: {"amount": float(r[2] or 0), "count": int(r[1] or 0)} for r in sm_rows}
         except Exception:
             pass   # 表未建 → 空 (savepoint 已隔离 PG 事务失败状态)
-    # ── D 手动退款按日 (manual_refunds, is_refunded='是') ──
+    # ── D 手动退款按日 (manual_refunds, is_refunded='是'; 排除 dup_residual 重复行) ──
     other_map: dict[str, dict] = {}
     if _table_exists(db, _D_OTHER_TABLE):
+        _excl_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
         try:
             with db.begin_nested():
                 ot_rows = db.execute(text(f"""
@@ -694,10 +725,12 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
                 FROM {_D_OTHER_TABLE}
                 WHERE {_D_OTHER_TIME_COL} IS NOT NULL
                   {'AND ' + _D_OTHER_STATUS_COL + ' = :st' if _D_OTHER_STATUS_COL else ''}
+                  {'AND COALESCE(quality_status,\'\') <> :excl' if _excl_q else ''}
                   AND {_D_OTHER_TIME_COL} >= :s AND {_D_OTHER_TIME_COL} <= :e
                 GROUP BY 1
                 """), {
                     **({"st": _D_OTHER_STATUS_OK} if _D_OTHER_STATUS_COL else {}),
+                    **({"excl": _excl_q} if _excl_q else {}),
                     "s": s, "e": e,
                 }).all()
             other_map = {r[0]: {"amount": float(r[2] or 0), "count": int(r[1] or 0)} for r in ot_rows}
@@ -2179,8 +2212,15 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
 
     # 4. D 路: 手动退款 (manual_refunds, is_refunded='是')
     #    客服在商户号后台手动操作的退款登记台账, 时效 = 登记时间(register_time) → 实际退款操作时间(op_time)
+    #    2026-09-06: 排除 quality_status='dup_residual' 已治理重复(不视为独立一笔实际退款出款)
     all_mr = list(db.execute(
-        select(ManualRefund).where(ManualRefund.is_refunded == "是")
+        select(ManualRefund).where(
+            ManualRefund.is_refunded == "是",
+            or_(
+                ManualRefund.quality_status.is_(None),
+                ManualRefund.quality_status != _D_OTHER_EXCLUDE_QSTATUS,
+            ),
+        )
     ).scalars().all())
     for mr in all_mr:
         d1 = _naive(mr.register_time)
@@ -7111,15 +7151,18 @@ def refund_decision_overview(
           AND s.status = '已退款'
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
-    # D 手动退款 (manual_refunds, is_refunded='是'; 时间取实际操作时间, 缺失回退登记日期)
+    # D 手动退款 (manual_refunds, is_refunded='是'; 时间取实际操作时间, 缺失回退登记日期;
+    #    排除 quality_status='dup_residual' 已治理重复行 → 经营口径不与重复虚高)
+    _d_excl_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
     d_rows = db.execute(text(f"""
         SELECT {_day("COALESCE(m.op_time, m.register_time)")} AS d,
                count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
         FROM manual_refunds m
         WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
           AND m.is_refunded = '是'
+          {'AND COALESCE(m.quality_status,\'\') <> :excl' if _d_excl_q else ''}
         GROUP BY 1
-    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    """), {"ts": cur_s, "te": cur_e, **({"excl": _d_excl_q} if _d_excl_q else {})}).fetchall()
     # E 实际现金流 (refund_record_reports 退款成功, 对账基准, 独立展示不与四路累加)
     e_rows = db.execute(text(f"""
         SELECT {_day("e.refund_time")} AS d,
@@ -7187,13 +7230,14 @@ def refund_decision_overview(
               AND s.status = '已退款'
         """), {"ts": s, "te": e}).fetchall():
             tot["sm_cnt"] += int(r.cnt or 0); tot["sm_amt"] += float(r.amt or 0)
-        # D 手动退款 (is_refunded='是')
-        for r in db.execute(text("""
+        # D 手动退款 (is_refunded='是'; 排除 dup_residual 已治理重复行)
+        for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
             FROM manual_refunds m
             WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
               AND m.is_refunded = '是'
-        """), {"ts": s, "te": e}).fetchall():
+              {'AND COALESCE(m.quality_status,\'\') <> :excl' if _d_excl_q else ''}
+        """), {"ts": s, "te": e, **({"excl": _d_excl_q} if _d_excl_q else {})}).fetchall():
             tot["d_cnt"] += int(r.cnt or 0); tot["d_amt"] += float(r.amt or 0)
         # E 实际现金流 (refund_record_reports 退款成功, 对账基准)
         for r in db.execute(text("""
@@ -7569,6 +7613,8 @@ def refund_export_all(
     """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
     sheets: dict[str, list[dict[str, Any]]] = {}
+    # D 路 quality_status 排除标记(dup_residual=已治理重复): 汇总 sheet 排除, 明细 sheet 保留但加列标注
+    _d_excl_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
 
     # A 线上直退 (复用单表导出, 含涉诉分类)
     sheets["A线上直退"] = refund_export_original(db, start, end)
@@ -7630,10 +7676,10 @@ def refund_export_all(
         "审核备注": (r.audit_remark or "").replace("\n", " "),
     } for r in c_rows]
 
-    # D 手动退款 (已退款; 时间取操作时间, 缺失回退登记日期)
+    # D 手动退款 (已退款; 时间取操作时间, 缺失回退登记日期; 明细保留全部, 附 quality_status 便于识别治理重复)
     d_rows = db.execute(text("""
         SELECT register_time, device_sn, order_no, merchant_id, order_amount, refund_amount,
-               registrant, is_refunded, refund_operator, op_time, remark
+               registrant, is_refunded, refund_operator, op_time, remark, quality_status
         FROM manual_refunds
         WHERE COALESCE(op_time, register_time) >= :ts AND COALESCE(op_time, register_time) <= :te
           AND is_refunded = '是'
@@ -7650,6 +7696,7 @@ def refund_export_all(
         "是否已退款": r.is_refunded or "",
         "退款操作人": r.refund_operator or "",
         "操作时间": _sh(r.op_time),
+        "质量状态": r.quality_status or "",
         "备注": (r.remark or "").replace("\n", " "),
     } for r in d_rows]
 
@@ -7680,11 +7727,12 @@ def refund_export_all(
             FROM manual_refunds m
             WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
               AND m.is_refunded = '是'
+              {'AND COALESCE(m.quality_status,\'\') <> :excl' if _d_excl_q else ''}
             GROUP BY 1"""),
     ]
     route_map: dict[str, dict[str, list]] = {}
     for name, sql in agg_queries:
-        for r in db.execute(text(sql), {"ts": cur_s, "te": cur_e}).fetchall():
+        for r in db.execute(text(sql), {"ts": cur_s, "te": cur_e, **({"excl": _d_excl_q} if _d_excl_q else {})}).fetchall():
             b = route_map.setdefault(str(r.d), {})
             b.setdefault(name, [0, 0.0])
             b[name][0] += int(r.cnt or 0)
