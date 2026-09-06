@@ -172,7 +172,36 @@ def _create_sync_log(
     trigger_type: str,
     triggered_by: str,
 ) -> BmsSyncLog:
-    """创建同步日志记录(初始状态 running)"""
+    """创建同步日志记录(初始状态 running)。
+
+    ⚠️ 2026-09-06 实时化: 采集过程中表格应实时显示"进行中", 而非抓取完成才突然出现。
+      改为幂等 —— 若已存在该 data_type + trigger_type 的 running 记录(尚未结束的,
+      如同一轮同步里抓取阶段预建的), 直接复用更新窗口, 不重复建。
+      这保证: ①抓取开始时表格即出现 running; ②导入完成 update 到同一条记录。
+    """
+    # 复用同任务里已预建的 running 日志(避免同一轮同步出现两条)
+    try:
+        existing = db.scalar(
+            select(BmsSyncLog)
+            .where(
+                BmsSyncLog.data_type == data_type,
+                BmsSyncLog.trigger_type == trigger_type,
+                BmsSyncLog.status == "running",
+                BmsSyncLog.finished_at.is_(None),
+            )
+            .order_by(BmsSyncLog.id.desc())
+        )
+        if existing is not None:
+            existing.start_time = start_time
+            existing.end_time = end_time
+            if triggered_by:
+                existing.triggered_by = triggered_by
+            db.commit()
+            db.refresh(existing)
+            return existing
+    except Exception:  # noqa: BLE001
+        db.rollback()  # 查询失败不阻塞, 走新建
+
     log = BmsSyncLog(
         data_type=data_type,
         start_time=start_time,
@@ -312,6 +341,30 @@ async def sync_all(
     # 分流:fetch_mode="http" 的源走 ai_acc_fetcher(HTTP API),其余走 BmsFetcher(Playwright)
     http_tasks = [t for t in tasks if t["config"].get("fetch_mode") == "http"]
     pw_tasks = [t for t in tasks if t["config"].get("fetch_mode") != "http"]
+
+    # ── 2026-09-06 实时化: 抓取前为每个源预建 running 日志 ──
+    #    让「采集日志」表格在抓取一开始就看到"进行中", 而不是等该源抓完(可能 180~600s)
+    #    才突然出现一条。幂等(_create_sync_log 复用同轮 running), 导入完成 update 到同一条。
+    #    失败源也会在导入阶段(或下方兜底)把这条 running 更新为 failed, 不会残留 running。
+    try:
+        _pre_db = SessionLocal()
+        try:
+            for _t in tasks:
+                try:
+                    _create_sync_log(
+                        _pre_db,
+                        _t["data_type"],
+                        _t["start"],
+                        _t["end"],
+                        trigger_type,
+                        triggered_by,
+                    )
+                except Exception as _ple:  # noqa: BLE001
+                    logger.warning(f"[{_t['data_type']}] 预建 running 日志失败(忽略): {_ple}")
+        finally:
+            _pre_db.close()
+    except Exception as _pe:  # noqa: BLE001
+        logger.warning(f"预建同步日志整体失败(忽略, 不影响抓取): {_pe}")
 
     # 每个源完成抓取后,立刻在此处挂一个 asyncio.Task 做后台导入(用 to_thread 避免阻塞 event_loop)
     pending_imports: dict[str, asyncio.Task] = {}
@@ -837,6 +890,37 @@ async def sync_all(
                 mark_sync_writing(False)
             except Exception:
                 pass
+
+        # ── 2026-09-06 残留 running 清理 ──
+        #    抓取前预建的 running 日志, 若因异常路径(源没走到导入更新)残留为 running,
+        #    会永久显示"进行中"。这里把本轮涉及的、仍 running 的日志统一置 failed,
+        #    避免前端表格卡在 running。幂等: 已结束(success/failed)的不动。
+        try:
+            _clean_db = SessionLocal()
+            try:
+                _now = datetime.now(timezone.utc)
+                _cutoff = _now - timedelta(minutes=30)
+                for _t in tasks:
+                    _dt = _t["data_type"]
+                    rows = _clean_db.scalars(
+                        select(BmsSyncLog)
+                        .where(
+                            BmsSyncLog.data_type == _dt,
+                            BmsSyncLog.status == "running",
+                            BmsSyncLog.created_at >= _cutoff,
+                        )
+                    ).all()
+                    for _log in rows:
+                        # 若抓取/导入真实成功会更新成终态; 走到这里仍 running = 异常残留
+                        _log.status = "failed"
+                        _log.error = (_log.error or "") + " [sync_all 收尾: 本轮未完成, 标记失败]"
+                        _log.finished_at = datetime.now(timezone.utc)
+                    if rows:
+                        _clean_db.commit()
+            finally:
+                _clean_db.close()
+        except Exception as _cle:  # noqa: BLE001
+            logger.warning(f"[sync_all] 残留 running 日志清理失败(忽略): {_cle}")
 
     # 系统事务通知: 每个数据源的同步结果写入概要事件(独立于详细日志, 供「事务通知」页查看)
     try:

@@ -111,6 +111,11 @@ const pageSize = ref(50)
 const filter = reactive({ source: '', data_type: '', status: '' })
 const sourceOptions = ref([])
 const typeOptions = ref([])
+// 采集进行中(表格存在 running 记录) → 加快轮询, 让用户实时看到进度
+const hasRunning = ref(false)
+// 轮询间隔: 有 running 5s; 空闲 30s
+let pollTimer = null
+let _polling = false
 
 const tableMaxHeight = computed(() => props.embedded ? 560 : 640)
 
@@ -123,9 +128,9 @@ const sourceTagType = (s) => ({
 
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm:ss') : '')
 
-let refreshTimer = null
-
 async function loadData() {
+  if (_polling) return // 防重入(慢响应时避免叠请求)
+  _polling = true
   loading.value = true
   try {
     const params = {
@@ -137,10 +142,14 @@ async function loadData() {
     if (filter.data_type) params.data_type = filter.data_type
     if (filter.status) params.status = filter.status
     const res = await listCollectionLogs(params)
-    list.value = res.data || []
-    total.value = list.value.length
+    const rows = res.data || []
+    // 判断是否有进行中任务 → 动态调整刷新节奏
+    hasRunning.value = rows.some((r) => r.status === 'running' || r.status === 'pending' || r.status === 'parsing')
+    list.value = rows
+    total.value = rows.length
   } finally {
     loading.value = false
+    _polling = false
   }
 }
 
@@ -157,15 +166,24 @@ async function loadOptions() {
   }
 }
 
+// 轮询: 采集进行中 5s(实时看进度), 空闲 30s(省资源)。递归 setTimeout, 避免 interval 叠加。
+function _schedulePoll() {
+  const intervalMs = hasRunning.value ? 5000 : 30000
+  if (pollTimer) clearTimeout(pollTimer)
+  pollTimer = setTimeout(async () => {
+    await loadData()
+    _schedulePoll() // 依据最新 hasRunning 决定下一轮间隔
+  }, intervalMs)
+}
+
 onMounted(() => {
   loadData()
   loadOptions()
-  // 自动刷新：每 30 秒刷新一次
-  refreshTimer = setInterval(loadData, 30000)
+  _schedulePoll()
 })
 
 onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer)
+  if (pollTimer) clearTimeout(pollTimer)
 })
 </script>
 
