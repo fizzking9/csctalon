@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""D 路手动退款 历史残留脏数据 治理脚本(A-20260906-001 §3.2 / #21 P2)
+"""D 路手动退款 确凿重复治理脚本(A-20260906-001 v1.1 §3.2 / #21 P2)
 
-目标: manual_refunds 中"与同 order_no 有SN真实行成对"的无SN乱年份残留行
-(金额100占位 / register_time 乱年份 / remark=余额已清除·押金 等), 它们与真实行
-成对出现并被回填后拉进近期统计窗口 → D 路重复计入经营。
+目标(2026-09-06 业务裁定, v1.1 收紧口径): 仅治理**确凿重复** ——
+同一 E 水单(refund_record_reports.id)被 backfill_d_op_time 回填到 **多行**
+manual_refunds(同 backfill_refund_record_report_id 的多行, 即一对多回填产物)。
+这类是同一笔真实退款在台账里被记了多行 → D 路重复计入经营。
+
+判定(严格, 防误伤; 生产预览曾发现"无SN+年份异常"一刀切会误伤真实多批次登记, 已废弃):
+  1. is_refunded = '是'
+  2. backfill_refund_record_report_id IS NOT NULL
+  3. 该 backfill_refund_record_report_id 被 >= 2 行 manual 引用(一对多)
+  4. 每组保留 1 行(优先: 有SN 且 id 最小 = 最早登记的真实行), 其余标 duplicate_residual
 
 治理方式: **不物理删除**, 标 quality_status='duplicate_residual' + quality_note
-(写 reason + 成对真实行 id), 可回滚(改回即可)。是否从统计排除走口径评审。
-
-判定(严格, 防误伤):
-  1. is_refunded = '是'
-  2. device_sn IS NULL 或 ''
-  3. register_time 年份不在 2025~2026(乱年份残留)
-  4. 同一 order_no 存在另一行: 有SN 且 is_refunded='是'  (成对 → 判定为重复残留)
-     → 不与任何有SN真实行成对的历史行(如 2001-2025 真实历史台账) 不标记
+(写 reason + 保留行 id + 同组行 id), 可回滚(改回即可)。是否从统计排除走口径评审。
 
 用法:
   cd backend
@@ -30,31 +30,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import func, select  # noqa: E402
 
 from app.models.manual_refund import ManualRefund  # noqa: E402
 
 _TZ_CN = timezone(timedelta(hours=8))
 
-# 与业务无关的历史台账年份(真实历史登记 2001-2025 是逐年递减自然分布, 但若与同单有SN行成对则判定残留)
-_CURRENT_YEARS = (2025, 2026)
-
-
-def _is_target_residual(m: ManualRefund) -> bool:
-    """残留判定: 无SN + 登记年份异常"""
-    if m.device_sn:
-        return False
-    if m.register_time is None:
-        return False  # 无登记时间无法判年份, 保守不标记
-    try:
-        yr = m.register_time.astimezone(_TZ_CN).year
-    except (ValueError, OSError):
-        return False
-    return yr not in _CURRENT_YEARS
-
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="D 路残留脏数据治理(预览/标记)")
+    ap = argparse.ArgumentParser(description="D 路确凿重复(同report一对多)治理(预览/标记)")
     ap.add_argument("--apply", action="store_true", help="执行标记(默认仅预览不写库)")
     ap.add_argument("--limit", type=int, default=0, help="最多处理行数(0=全部)")
     args = ap.parse_args()
@@ -63,85 +47,81 @@ def main() -> None:
 
     db = SessionLocal()
     try:
-        # 候选: 已退款 + 无SN + 年份异常
-        cand = list(
-            db.scalars(
-                select(ManualRefund).where(
-                    ManualRefund.is_refunded == "是",
-                    (ManualRefund.device_sn.is_(None)) | (ManualRefund.device_sn == ""),
+        # 1) 找被 >=2 行 manual 引用的 report(一对多回填的 report 集合)
+        dup_report_rows = db.execute(
+            select(
+                ManualRefund.backfill_refund_record_report_id,
+                func.count().label("n"),
+            )
+            .where(
+                ManualRefund.backfill_refund_record_report_id.is_not(None),
+                ManualRefund.is_refunded == "是",
+            )
+            .group_by(ManualRefund.backfill_refund_record_report_id)
+            .having(func.count() > 1)
+        ).all()
+        dup_report_ids = [r[0] for r in dup_report_rows]
+
+        # 2) 拉出这些 report 关联的全部 manual 行
+        if dup_report_ids:
+            rows = list(
+                db.scalars(
+                    select(ManualRefund).where(
+                        ManualRefund.backfill_refund_record_report_id.in_(dup_report_ids),
+                        ManualRefund.is_refunded == "是",
+                    ).order_by(ManualRefund.id)
                 )
             )
-        )
-        targets = [m for m in cand if _is_target_residual(m)]
+        else:
+            rows = []
 
-        # 只保留"与同 order_no 有SN真实行成对"的(排除真实历史台账 2001-2025 无对行)
-        paired: list[ManualRefund] = []
-        unpaired_count = 0
-        paired_amt = 0.0
-        for m in targets:
-            if not m.order_no:
-                unpaired_count += 1
-                continue
-            mate = db.execute(
-                select(ManualRefund.id)
-                .where(
-                    ManualRefund.order_no == m.order_no,
-                    ManualRefund.device_sn.is_not(None),
-                    ManualRefund.device_sn != "",
-                    ManualRefund.is_refunded == "是",
-                )
-                .limit(1)
-            ).scalar_one_or_none()
-            if mate:
-                paired.append(m)
-                paired_amt += float(m.refund_amount or 0)
-            else:
-                unpaired_count += 1
+        # 3) 分组: 每组保留 1 行(优先有SN, 再按 id), 其余为超额(治理目标)
+        from collections import defaultdict
+
+        groups: dict[str, list[ManualRefund]] = defaultdict(list)
+        for m in rows:
+            groups[m.backfill_refund_record_report_id].append(m)
+
+        targets: list[ManualRefund] = []
+        keep_map: dict[str, int] = {}  # report_id -> keep manual id
+        for rid, members in groups.items():
+            members.sort(key=lambda x: (0 if x.device_sn else 1, x.id))
+            keep = members[0]
+            keep_map[rid] = keep.id
+            targets.extend(members[1:])  # 其余全部是确凿重复
 
         if args.limit:
-            paired = paired[: args.limit]
+            targets = targets[: args.limit]
 
+        t_amt = sum(float(m.refund_amount or 0) for m in targets)
         print("=" * 70)
-        print("D 路残留脏数据治理 (A-20260906-001 / #21 P2)")
+        print("D 路确凿重复治理 (A-20260906-001 v1.1 / #21 P2)")
         print(f"模式: {'执行标记 --apply' if args.apply else '仅预览(加 --apply 才写库)'}")
-        print(f"无SN+年份异常候选: {len(targets)} 行")
-        print(f"  其中 与同单有SN真实行成对(残留): {len(paired)} 行 / ¥{paired_amt:,.2f}")
-        print(f"  无成对(可能是真实历史台账, 不标记): {unpaired_count} 行")
+        print(f"一对多 report 组数: {len(groups)}")
+        print(f"  每组保留 1 行后, 超额(确凿重复)行: {len(targets)} 行 / ¥{t_amt:,.2f}")
         print("=" * 70)
 
-        # 展示前 10 行供人工确认
-        for i, m in enumerate(paired[:10], 1):
+        for i, m in enumerate(targets[:10], 1):
             reg = m.register_time
             reg_s = reg.strftime("%Y-%m-%d") if reg else "-"
             print(
                 f"  #{i:<3} id={m.id:<8} order_no={m.order_no or '':<26} "
-                f"金额={float(m.refund_amount or 0):>10.2f} 登记={reg_s} 备注={(m.remark or '')[:20]}"
+                f"金额={float(m.refund_amount or 0):>10.2f} 登记={reg_s} "
+                f"SN={'有' if m.device_sn else '无':<3} report={m.backfill_refund_record_report_id}"
             )
-        if len(paired) > 10:
-            print(f"  ... 其余 {len(paired) - 10} 行省略")
+        if len(targets) > 10:
+            print(f"  ... 其余 {len(targets) - 10} 行省略")
 
-        if args.apply and paired:
-            # 标记 duplicate_residual(可回滚: 改回 quality_status/清 note 即可)
+        if args.apply and targets:
             n = 0
-            for m in paired:
+            for m in targets:
                 if m.quality_status == "duplicate_residual":
                     continue
-                # 找成对的真实行(带SN)
-                mate_id = db.execute(
-                    select(ManualRefund.id)
-                    .where(
-                        ManualRefund.order_no == m.order_no,
-                        ManualRefund.device_sn.is_not(None),
-                        ManualRefund.device_sn != "",
-                        ManualRefund.is_refunded == "是",
-                    )
-                    .order_by(ManualRefund.id)
-                    .limit(1)
-                ).scalar_one_or_none()
                 m.quality_status = "duplicate_residual"
                 m.quality_note = (
-                    f"治理#21: 与同 order_no 有SN真实行成对的残留行, 判定重复登记; "
-                    f"成对真实行 id={mate_id}; 如需恢复请清除本标记"
+                    f"治理#21(v1.1): 同 E 水单 report={m.backfill_refund_record_report_id} "
+                    f"被回填到多行 manual, 本行判定确凿重复(保留行 id={keep_map.get(m.backfill_refund_record_report_id)}); "
+                    "如需恢复请清除本标记"
                 )
                 n += 1
             db.commit()
