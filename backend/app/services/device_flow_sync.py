@@ -47,6 +47,58 @@ def _storage_state_path() -> Path:
     return base / "device_flow_usage.json"
 
 
+async def _dismiss_modal_dialogs(page, max_rounds: int = 3) -> None:
+    """关闭 BMS 登录后可能弹出的 Element UI 模态提示框(el-message-box)。
+
+    背景(2026-09-06): wifi 域登录成功后会弹「提示」确认框(el-message-box__wrapper),
+    遮挡后续按钮点击 → device_flow 重新登录时 fetch_device_flow 在
+    `page.click('button:has-text("登录")')` 处被拦截 30s 超时。
+    处理(与 bms_fetcher._dismiss_modal_dialogs 同思路, 最小实现):
+      1. 点 .el-message-box__btns 内"确定/知道了/关闭"类确认按钮;
+      2. 仍残留 → JS 移除 .el-message-box__wrapper(仅提示框, 不碰 el-dialog 业务面板)。
+    """
+    import re
+
+    try:
+        for _round in range(max_rounds):
+            try:
+                n = await page.locator(".el-message-box__wrapper:visible").count()
+            except Exception:
+                n = 0
+            if n == 0:
+                return
+            # (1) 点确认按钮(Element UI MessageBox 按钮)
+            clicked = False
+            for sel in (".el-message-box__btns button:visible", ".el-message-box button:visible"):
+                try:
+                    btns = page.locator(sel)
+                    cnt = await btns.count()
+                    for i in range(cnt):
+                        txt = (await btns.nth(i).text_content() or "").strip()
+                        # 只点"接受/确认"语义按钮关闭提示; 破坏性(删除/危险)不点
+                        if txt and not re.search(r"删除|危险|确定删除", txt):
+                            await btns.nth(i).click(timeout=3000)
+                            clicked = True
+                            break
+                    if clicked:
+                        break
+                except Exception:
+                    continue
+            if clicked:
+                await page.wait_for_timeout(600)
+                continue
+            # (2) JS 移除 message-box 容器(仅此类)
+            try:
+                await page.evaluate(
+                    """() => { document.querySelectorAll('.el-message-box__wrapper').forEach(el => el.remove()); }"""
+                )
+            except Exception:
+                pass
+            await page.wait_for_timeout(400)
+    except Exception as e:  # noqa: BLE001 弹框关闭失败不影响后续
+        logger.warning(f"[device_flow] 模态提示框关闭异常(忽略): {e}")
+
+
 async def fetch_device_flow(
     sn: str,
     month: str | None = None,
@@ -94,9 +146,14 @@ async def fetch_device_flow(
                 await page.locator(user_sel).first.fill(username or "", timeout=15000)
                 pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
                 await page.locator(pwd_sel).first.fill(password or "", timeout=15000)
+                # ⚠️ 2026-09-06: 登录按钮可能被已弹出的「提示」框(el-message-box)遮挡,
+                #    先关一次再点, 避免 click 被拦截 30s 超时
+                await _dismiss_modal_dialogs(page)
                 await page.click('button:has-text("登录"), button[type="submit"]')
                 await page.wait_for_load_state("networkidle", timeout=15000)
                 await asyncio.sleep(3)
+                # 登录成功常弹「提示」框, 关闭避免遮挡后续导航/操作
+                await _dismiss_modal_dialogs(page)
                 if "login" in page.url.lower():
                     raise RuntimeError("设备流量采集登录失败(请检查 bms-wifi 组凭证)")
                 # 登录成功存 storage_state(下次免登)
@@ -110,6 +167,7 @@ async def fetch_device_flow(
             # ── 2. 进设备流量页(建立会话上下文) ──
             await page.goto(FLOW_PAGE_URL, wait_until="domcontentloaded")
             await asyncio.sleep(2)
+            await _dismiss_modal_dialogs(page)
 
             # ── 3. 页面内 fetch API(自动带登录 cookie) ──
             params = f"page=1&rows={PAGE_ROWS}&sn={sn}&timeType=2"
