@@ -28,9 +28,11 @@ import pytest
 
 from app.services.bms_fetcher import (
     BmsSessionExpired,
+    EmptyQueryResult,
     _click_export_button,
     _dismiss_modal_dialogs,
     _locate_export_button,
+    _page_shows_no_data,
 )
 
 
@@ -103,6 +105,14 @@ class _FakeLocator:
             raise TimeoutError("no element")
         await self._handles[0].click(timeout=timeout, force=force)
 
+    @property
+    def first(self):
+        """Playwright Locator.first(取第 1 个); 简化直接返回 self(单元素场景足够)。"""
+        return self
+
+    async def is_visible(self) -> bool:
+        return len(self._handles) > 0
+
 
 class FakePage:
     """模拟 Playwright Page(新接口): locator / query_selector_all / evaluate / keyboard。"""
@@ -120,6 +130,8 @@ class FakePage:
         self.message_box_visible = False
         self.dialog_visible = False   # el-dialog 业务面板(不应被移除)
         self.dialog_removed = False
+        # 空数据空态: True=页面表格显示"暂无数据"(._page_shows_no_data 用)
+        self.empty_state_visible = False
         self.keyboard_esc_calls = 0
         self.clicked_handles: list[str] = []
 
@@ -132,6 +144,11 @@ class FakePage:
         # 标准导出按钮 selector(button/span.el-button 含"导出")
         if 'has-text("导出")' in selector:
             return _FakeLocator(list(self.standard_handles))
+        # 空数据空态选择器(.el-table__empty-text 等)
+        if "el-table__empty" in selector or "暂无数据" in selector or "没有数据" in selector or "No Data" in selector:
+            if self.empty_state_visible:
+                return _FakeLocator([_FakeHandle(tag="DIV", text="暂无数据", cls="el-table__empty-text")])
+            return _FakeLocator([])
         return _FakeLocator([])
 
     # ---- query_selector_all ----
@@ -394,3 +411,28 @@ async def test_locate_export_dry_run_no_button_raises():
         await _locate_export_button(page, dry_run=True)
     # 无任何按钮被点击
     assert all(b.clicked == 0 for b in page.all_buttons)
+
+
+# ─────────────────────────────────────────────────────────────
+# _page_shows_no_data: 空查询识别(2026-09-06, refund_record_report 无数据下载误判)
+# ─────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_page_shows_no_data_detects_empty_state():
+    """页面表格显示"暂无数据"(空态) → 识别为 True。"""
+    page = FakePage()
+    page.empty_state_visible = True
+    assert await _page_shows_no_data(page) is True
+
+
+@pytest.mark.asyncio
+async def test_page_shows_no_data_false_when_has_rows():
+    """页面有数据(无空态) → 识别为 False(不误判空)。"""
+    page = FakePage()
+    page.empty_state_visible = False
+    assert await _page_shows_no_data(page) is False
+
+
+@pytest.mark.asyncio
+async def test_empty_query_result_is_runtime_error():
+    """EmptyQueryResult 是 RuntimeError 子类, 能被 _download_with_retry 的 except 捕获后特判冒泡。"""
+    assert issubclass(EmptyQueryResult, RuntimeError)

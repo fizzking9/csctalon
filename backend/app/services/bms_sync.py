@@ -384,6 +384,30 @@ async def sync_all(
             def _sync_import_work(attempt: int) -> dict:
                 inner_db = SessionLocal()
                 try:
+                    if getattr(fr, "empty_result", False):
+                        # ⚠️ 2026-09-06: 查询结果为空(BMS 页面"暂无数据"), 无导出文件。
+                        #   属正常业务态(窗口内无记录), 直接记 0 行成功, 不调 _auto_import(无文件可导)。
+                        log = _create_sync_log(inner_db, fr.data_type, start, end, trigger_type, triggered_by)
+                        import_stats = {
+                            "total_rows": 0,
+                            "inserted_rows": 0,
+                            "updated_rows": 0,
+                            "failed_rows": 0,
+                        }
+                        _update_sync_log(inner_db, log.id, "success", None, None, import_stats)
+                        logger.info(f"[{fr.data_type}] 查询结果为空(0 行), 按成功记录")
+                        return {
+                            "data_type": fr.data_type,
+                            "name": name,
+                            "success": True,
+                            "file_path": None,
+                            "filename": None,
+                            **import_stats,
+                            "start_time": start.isoformat(),
+                            "end_time": end.isoformat(),
+                            "attempt": attempt,
+                            "empty_result": True,
+                        }
                     if fr.success:
                         # ⚠️ 注意: _create_sync_log 是当前事务里的第一条 DB 操作;
                         #   如果恰好 PG 刚因 OOM/recovery/重启断开,就会抛 OperationalError.

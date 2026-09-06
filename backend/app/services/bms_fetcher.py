@@ -650,6 +650,36 @@ async def _click_export_button(page) -> None:
         raise
 
 
+# Element UI 表格"无数据"空态选择器(兼容 el-table / el-table-v2 / 各版本文案)
+_EMPTY_STATE_SELECTORS = (
+    ".el-table__empty-text:visible",          # Element Plus 表格空态
+    ".el-table__empty-block:visible",         # Element UI 旧版空态容器
+    "text=暂无数据",                            # 中文空态文案
+    "text=没有数据",                            # 备用文案
+    "text=No Data",                            # 英文
+)
+
+
+async def _page_shows_no_data(page) -> bool:
+    """检测页面表格是否处于"无数据"空态(查询结果为空)。
+
+    2026-09-06 修复: BMS 某些源(refund_record_report 等)在时间窗口内无数据时,
+    点导出不会触发任何 download/网络请求 → 会被「4s 无网络快速失败」误判为点空失败。
+    正确语义: 空结果是正常业务态, 应识别出来按"0 行成功"处理而非抓取失败。
+    """
+    try:
+        for sel in _EMPTY_STATE_SELECTORS:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
 async def _download_with_retry(
     page,
     data_type: str,
@@ -811,13 +841,23 @@ async def _download_with_retry(
                         f"BMS 导出返回 JSON(疑似限流或异常): {export_rate_limited['msg']}"
                     )
                 # ⚠️ 点空快速失败: 点击后 4s 内无任何新请求, 且 download 也未触发
-                #   → 极可能点到的是非按钮容器(选择器误匹配), 立即失败让上层重试/告警,
-                #     避免空等满 timeout_ms(本次生产事故放大因素)。
+                #   → 两种可能: ①点到非按钮容器(选择器误匹配) ②**查询结果为空**(BMS 不触发下载)
+                #   先排除②: 若页面显示"暂无数据", 属正常空结果, 抛 EmptyQueryResult
+                #   由上层按"0 行成功"处理(而非误报抓取失败); 否则才是真点空, 立即失败。
                 #   仅在"点击后首次"检查一次; 若已有网络活动则说明点击生效, 后续安心等 download。
                 now_t = asyncio.get_event_loop().time()
                 if (not _click_effect_checked) and now_t >= no_req_deadline:
                     _click_effect_checked = True
                     if not _request_seen_after_click and download is None:
+                        # ① 空数据(正常业务态: 窗口内无记录) → 不重试/不失败, 上层按成功空结果
+                        if await _page_shows_no_data(page):
+                            _remove_request_listener(page)
+                            _remove_response_listener(page)
+                            _drain_task(download_task)
+                            raise EmptyQueryResult(
+                                f"[{data_type}] 查询结果为空(BMS 页面暂无数据), 无导出下载属正常"
+                            )
+                        # ② 真点空/点错元素 → 快速失败让上层重试/告警
                         _remove_request_listener(page)
                         _remove_response_listener(page)
                         _drain_task(download_task)
@@ -877,6 +917,10 @@ async def _download_with_retry(
             #   让上层重新登录(否则本源内盲目重试会白等 180~600s×N 才报误导性错误)。
             #   BmsSessionExpired 是 RuntimeError 子类, 需在通用 except 前特判。
             if isinstance(e, BmsSessionExpired):
+                raise
+            # ⚠️ 2026-09-06: 空查询结果(EmptyQueryResult)不重试, 直接冒泡
+            #   上层按"0 行成功"处理; 重试无意义(再查也是空)。
+            if isinstance(e, EmptyQueryResult):
                 raise
             last_exc = e
             err_msg = str(e)
@@ -1646,6 +1690,16 @@ class BmsSessionExpired(RuntimeError):
     """
 
 
+class EmptyQueryResult(RuntimeError):
+    """查询结果为空(BMS 页面显示"暂无数据"), 导出不会产生 download/网络请求。
+
+    2026-09-06 修复: refund_record_report 等源在时间窗口内无数据时, 点导出后 BMS
+    不触发任何下载 → 被「4s 无网络快速失败」误判为"点错元素"而失败。
+    正确语义: 空结果是正常业务态(窗口内无新增), 应视为 0 行成功, 而非抓取失败。
+    上层(_download_with_retry 调用方)捕获后按"空结果成功"处理。
+    """
+
+
 class FetchResult:
     """单次抓取结果"""
 
@@ -1678,6 +1732,10 @@ class FetchResult:
         #   解决: refund 登录成功但下载超时 → logged_in_ok 未传递 → ticket 在残留的
         #   refund 页面上"重新登录" → 命中 readonly el-select → 全组连锁失败
         self.logged_in: bool = False
+        # ⚠️ 2026-09-06: 查询结果为空(BMS 页面"暂无数据") → 无导出文件, 但属正常业务态。
+        #   置 success=True + empty_result=True + file_path=None, 导入阶段按 0 行成功处理
+        #   (而非误报抓取失败)。见 EmptyQueryResult / bms_sync._sync_import_work。
+        self.empty_result: bool = False
 
 
 class BmsFetcher:
@@ -3122,7 +3180,17 @@ class BmsFetcher:
             #       筛选逻辑改到第 6.1 步:用 pandas 按「退费单号前缀 TFYYYYMMDD 或时间列」
             #       精确裁剪,只保留目标日期范围内的行再覆盖写回同一个 dest_path。
             # P1-1: 调用统一的 _download_with_retry (自动按 data_type 配置超时 + 重试)
-            download = await _download_with_retry(page, data_type, logger, expect_end_dt=end_date)
+            try:
+                download = await _download_with_retry(page, data_type, logger, expect_end_dt=end_date)
+            except EmptyQueryResult as eqe:
+                # ⚠️ 2026-09-06: 查询结果为空 → 正常业务态, 按 0 行成功(与 _do_fetch_one_shared 一致)
+                logger.info(f"[{data_type}] {eqe}")
+                result.success = True
+                result.empty_result = True
+                result.total_rows = 0
+                result.file_path = None
+                result.filename = None
+                return
 
             # 6. 保存
             original_filename = download.suggested_filename or f"{data_type}_export.csv"
@@ -4016,7 +4084,19 @@ class BmsFetcher:
         # P1-1: 调用统一的 _download_with_retry (自动按 data_type 配置超时 + 重试)
         #       - wallet: 600s + 2次重试 (数据量大,经常超时)
         #       - refund/ticket: 180s + 1次重试
-        download = await _download_with_retry(page, data_type, logger, expect_end_dt=end_date)
+        try:
+            download = await _download_with_retry(page, data_type, logger, expect_end_dt=end_date)
+        except EmptyQueryResult as eqe:
+            # ⚠️ 2026-09-06: 查询结果为空(页面"暂无数据") → BMS 不触发导出下载。
+            #   这是正常业务态(窗口内无记录), 不是抓取失败。按 0 行成功处理:
+            #   置 empty_result=True, 导入阶段跳过文件直接记成功(见 bms_sync._sync_import_work)。
+            logger.info(f"[{data_type}] {eqe}")
+            result.success = True
+            result.empty_result = True
+            result.total_rows = 0
+            result.file_path = None
+            result.filename = None
+            return
 
         # 6. 保存
         original_filename = download.suggested_filename or f"{data_type}_export.csv"
