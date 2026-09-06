@@ -95,6 +95,28 @@ def _is_low_precision_op_time(op: datetime | None) -> bool:
 # ─────────────────────────────────────────────────────────────
 # 1. D 路 op_time 回填
 # ─────────────────────────────────────────────────────────────
+def _is_residual_no_sn_row(m: ManualRefund) -> bool:
+    """疑似历史残留脏行: 无设备号 且 登记年份明显异常(非近两年真实经营期)。
+
+    生产实证(#21, 2026-09-06): manual_refunds 存在大量"无SN + register_time
+    乱年份(2001~2005/2031) + remark=余额已清除/押金"的占位残留行, 与同 order_no
+    的有SN真实行成对。若给这类行自动回填 op_time, 会被 COALESCE(op_time,
+    register_time) 拉进近期统计窗口 → D 路重复计入经营。
+    护栏: 有SN → 绝不判残留(真实历史台账不受影响); 无SN且登记年份不在
+    2025~2026 → 不进自动回填(转 pending 人工复核)。
+    """
+    if m.device_sn:
+        return False
+    if m.register_time is None:
+        # 无SN且无登记时间 → 无佐证, 保守不进自动回填
+        return True
+    try:
+        yr = m.register_time.astimezone(_TZ_CN).year
+    except (ValueError, OSError):
+        return True
+    return yr < 2025 or yr > 2026
+
+
 def backfill_d_op_time(db, limit: int = 5000) -> dict:
     """D 路(manual_refunds) op_time 缺失/倒挂/低精度 → 用退款记录报表退款时间回填。
 
@@ -106,12 +128,16 @@ def backfill_d_op_time(db, limit: int = 5000) -> dict:
                                               refund_time 秒级精确值提升精度(2026-09-05, #20)
     匹配优先级: L1 订单号 == report.platform_order_no; L2 设备号+金额(±0.01);
                L3 设备号+登记前后7天唯一候选(仅缺/倒挂场景用, 低精度提升不用 L3 防误改)
+    护栏(A-20260906-001 §3.1, #21):
+      - 疑似残留脏行(无SN+乱年份) 不自动回填 → 标 pending 人工
+      - 同一 report(backfill_manual_refund_id 已置位) 不再回填其它 manual 行
     幂等: 已 auto_filled 且 op_time 非空 → 跳过(重跑不覆盖已精确回填)。
     溯源: quality_status=auto_filled + note(留原值) + backfill_refund_record_report_id。
     """
     stats = {
         "scanned": 0, "matched": 0, "backfilled": 0, "precision_upgraded": 0,
-        "pending": 0, "skipped_no_candidate": 0,
+        "pending": 0, "skipped_no_candidate": 0, "residual_skipped": 0,
+        "report_occupied_skipped": 0,
     }
     # 低精度默认判断: op_time(UTC) 换算北京后为 15:00:00 → 台账"只记日期"的近似
     #   UTC 07:00 == 北京 15:00; 用 extract(timezone('Asia/Shanghai', op_time)) 精确表达
@@ -190,6 +216,17 @@ def backfill_d_op_time(db, limit: int = 5000) -> dict:
             stats["matched"] += 1
             continue
 
+        # 护栏1(A-20260906-001 §3.1, #21): 疑似残留脏行(无SN+乱年份) 不自动回填
+        if _is_residual_no_sn_row(m):
+            if m.quality_status != "pending":
+                m.quality_status = "pending"
+                m.quality_note = (
+                    "疑似历史残留脏行(无设备号且登记年份异常), 不自动回填 op_time,"
+                    "需人工复核确认是否真实退款"
+                )
+            stats["residual_skipped"] += 1
+            continue
+
         # 归入场景: 缺/倒挂(可走 L3) vs 低精度提升(只走 L1/L2 防误改)
         is_missing = m.op_time is None
         is_reversed = (m.op_time is not None and m.register_time is not None
@@ -216,6 +253,17 @@ def backfill_d_op_time(db, limit: int = 5000) -> dict:
             continue
 
         report = matched_reports[0]
+        # 护栏2(A-20260906-001 §3.1, #21): 同一 report 已回填过其它 manual 行 →
+        # 说明该 report 已被占用, 当前行不得重复回填(避免一对多造成 D 路重复)。
+        if report.backfill_manual_refund_id:
+            m.quality_status = "pending"
+            m.quality_note = (
+                f"对账回填冲突: 退款记录报表 id={report.id} 已回填到"
+                f" manual id={report.backfill_manual_refund_id}, 本行(order_no="
+                f"{m.order_no})不再自动回填, 需人工确认是否真实退款"
+            )
+            stats["report_occupied_skipped"] += 1
+            continue
         # 唯一命中 → 回填
         old_op = m.op_time
         m.op_time = report.refund_time

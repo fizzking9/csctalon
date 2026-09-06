@@ -81,7 +81,8 @@ def _seed_manual(session, device_sn="SN-D-1", order_no="WS2026090500000001",
                  amount="19.00", op_time=None, is_refunded="是", register_time="2026-09-05 09:00:00"):
     from app.models import ManualRefund
 
-    _ensure_device(session, device_sn)
+    if device_sn:
+        _ensure_device(session, device_sn)
     m = ManualRefund(
         device_sn=device_sn,
         order_no=order_no,
@@ -225,6 +226,79 @@ def test_backfill_low_precision_idempotent(_test_session):
     assert s2["backfilled"] == 0
 
 
+# ---------- #21 护栏: 残留脏行不自动回填 + 同 report 不重复回填 ----------
+
+def test_backfill_residual_no_sn_weird_year_skip(_test_session):
+    """护栏1(#21): 无SN + 登记年份异常(如 2002)的残留行 → 不自动回填, 标 pending
+
+    生产实证: 同一 order_no 存在"无SN行(金额100/乱年份 register_time/remark=余额已清除)"
+    + "有SN真实行" 成对; 若不拦, 无SN残留行会被回填后拉进近期窗口重复计入 D 路。
+    """
+    from app.services.reconcile import backfill_d_op_time
+
+    # E 水单(会被 L1 order_no 匹配到)
+    _seed_report(_test_session, platform_order_no="WS-RES-1", device_sn="SN-D-REAL",
+                 amount="19.00", refund_time="2026-09-05 10:30:00")
+    # 残留脏行: 无SN + 乱年份(2002) + 缺 op_time
+    m = _seed_manual(_test_session, device_sn=None, order_no="WS-RES-1",
+                     amount="100.00", op_time=None, register_time="2002-09-26 00:00:00")
+
+    stats = backfill_d_op_time(_test_session)
+    assert stats["residual_skipped"] >= 1
+    assert stats["backfilled"] == 0
+    _test_session.refresh(m)
+    assert m.op_time is None          # 未被自动回填
+    assert m.quality_status == "pending"  # 转人工
+    assert "残留" in (m.quality_note or "")
+
+
+def test_backfill_residual_with_sn_ok(_test_session):
+    """有SN + 真实登记年份 → 不被误判残留, 正常回填"""
+    from app.services.reconcile import backfill_d_op_time
+
+    _seed_report(_test_session, platform_order_no="WS-OK-1", device_sn="SN-D-OK",
+                 amount="19.00", refund_time="2026-09-05 10:30:00")
+    m = _seed_manual(_test_session, device_sn="SN-D-OK", order_no="WS-OK-1",
+                     amount="19.00", op_time=None, register_time="2026-09-01 09:00:00")
+    stats = backfill_d_op_time(_test_session)
+    assert stats["backfilled"] == 1
+    assert stats["residual_skipped"] == 0
+    _test_session.refresh(m)
+    assert m.op_time is not None
+    assert m.quality_status == "auto_filled"
+
+
+def test_backfill_same_report_not_double_backfill(_test_session):
+    """护栏2(#21): 同一 E 水单 report 已回填到其它 manual 行 → 不再回填当前行(pending)"""
+    from app.models import RefundRecordReport
+    from app.services.reconcile import backfill_d_op_time
+
+    # 唯一 report, 会被两个同 order_no 的 manual 行 L1 匹配到
+    r = _seed_report(_test_session, platform_order_no="WS-1TO2-1", device_sn="SN-D-PR",
+                     amount="19.00", refund_time="2026-09-05 10:30:00")
+    # 第一条 manual(带SN真实行): 低精度 → 走 L1/L2 匹配并回填
+    _seed_manual(_test_session, device_sn="SN-D-PR", order_no="WS-1TO2-1",
+                 amount="19.00", op_time=_dt("2026-09-05 15:00:00"),
+                 register_time="2026-09-05 09:00:00")
+    # 第二条 manual(无SN同单同额候选, 登记年份正常 2026, 缺 op_time)
+    m2 = _seed_manual(_test_session, device_sn=None, order_no="WS-1TO2-1",
+                      amount="19.00", op_time=None, register_time="2026-09-05 09:00:00")
+
+    s1 = backfill_d_op_time(_test_session)
+    # 第一次跑: 带SN行先回填(占用了该 report); 无SN行缺op_time是候选, 但 report 已被占用 → 拦下
+    assert s1["backfilled"] == 1
+    assert s1["report_occupied_skipped"] >= 1
+    _test_session.refresh(m2)
+    assert m2.op_time is None
+    assert m2.quality_status == "pending"  # 被护栏拦下转人工
+    # 反向确认: 该 report 只被回填给了一条 manual(带SN行)
+    _test_session.expire_all()
+    occupied = _test_session.execute(
+        select(RefundRecordReport).where(RefundRecordReport.id == r.id)
+    ).scalar_one()
+    assert occupied.backfill_manual_refund_id is not None
+
+
 # ---------- 水单勾稽 ----------
 
 def _seed_refund_a(session, platform_order_no="WS2026090500000001"):
@@ -290,6 +364,7 @@ def test_water_statement_naive_bj_param(_test_session):
     而非被当成 UTC(会整体偏 8h, 把北京 00:00-07:59 的退款漏掉)。
     """
     from datetime import datetime as _py_dt
+
     from app.services.reconcile import water_statement
 
     # report 退款时间 = 北京 2026-09-05 06:00 (UTC 2026-09-04 22:00)
