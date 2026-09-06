@@ -10,10 +10,11 @@ manual_refunds(同 backfill_refund_record_report_id 的多行, 即一对多回�
   1. is_refunded = '是'
   2. backfill_refund_record_report_id IS NOT NULL
   3. 该 backfill_refund_record_report_id 被 >= 2 行 manual 引用(一对多)
-  4. 每组保留 1 行(优先: 有SN 且 id 最小 = 最早登记的真实行), 其余标 duplicate_residual
+  4. 每组保留 1 行(优先: 有SN 且 id 最小 = 最早登记的真实行), 其余标 dup_residual
 
-治理方式: **不物理删除**, 标 quality_status='duplicate_residual' + quality_note
-(写 reason + 保留行 id + 同组行 id), 可回滚(改回即可)。是否从统计排除走口径评审。
+治理方式: **不物理删除**, 标 quality_status='dup_residual'(≤16字符, 满足
+String(16) 列约束) + quality_note(写 reason + 保留行 id), 可回滚(改回即可)。
+是否从统计排除走口径评审。
 
 用法:
   cd backend
@@ -115,9 +116,9 @@ def main() -> None:
         if args.apply and targets:
             n = 0
             for m in targets:
-                if m.quality_status == "duplicate_residual":
+                if m.quality_status == "dup_residual":
                     continue
-                m.quality_status = "duplicate_residual"
+                m.quality_status = "dup_residual"
                 m.quality_note = (
                     f"治理#21(v1.1): 同 E 水单 report={m.backfill_refund_record_report_id} "
                     f"被回填到多行 manual, 本行判定确凿重复(保留行 id={keep_map.get(m.backfill_refund_record_report_id)}); "
@@ -125,7 +126,7 @@ def main() -> None:
                 )
                 n += 1
             db.commit()
-            print(f"\n✅ 已标记 {n} 行为 duplicate_residual (可回滚)")
+            print(f"\n✅ 已标记 {n} 行为 dup_residual (可回滚)")
         elif not args.apply:
             print("\n(预览模式, 未写库)")
 
