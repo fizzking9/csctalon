@@ -12,6 +12,11 @@ export const reconcile = {
   checkList: (params) => request.get('/reconcile/check/list', { params }),
   checkDetail: (params) => request.get('/reconcile/check/detail', { params }),
   checkConclusion: (checkId, params) => request.post(`/reconcile/check/${checkId}/conclusion`, null, { params }),
+  // ── 逐笔勾稽明细核对(A-20260906-002 v1.1 / #22) ──
+  checkLines: (checkId, params) => request.get(`/reconcile/check/${checkId}/lines`, { params }),               // 批次逐笔列表
+  checkLinesSummary: (checkId) => request.get(`/reconcile/check/${checkId}/lines-summary`),                    // 逐笔确认进度
+  checkLineCandidates: (params) => request.get('/reconcile/check/line-candidates', { params }),                 // E笔候选
+  checkLineConfirm: (checkId, params) => request.post(`/reconcile/check/${checkId}/line-confirm`, null, { params }), // 打标(Admin/Supervisor)
 }
 
 export default reconcile

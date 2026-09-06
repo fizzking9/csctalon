@@ -122,6 +122,21 @@
       <el-empty v-else description="本窗口无 E 水单数据" :image-size="60" />
     </section>
 
+    <!-- ===== 逐笔核对区 (A-20260906-002 v1.1 / #22) ===== -->
+    <section v-if="activeCheckId" class="block-card mb-16 reconcile-lines-block">
+      <div class="block-head">
+        <span class="block-title">逐笔勾稽核对（E 水单 → ABCD 一一对应）</span>
+        <span class="block-hint">批次 {{ activeCheckNo }} · 逐笔打标仅留痕，不改任何源数据；先建批次后逐笔核对</span>
+      </div>
+      <el-alert type="info" :closable="false" show-icon class="mb-12">
+        <template #title>
+          以 E 退款记录报表每笔为基准核对：自动归类(A/B/C/D/未登记) + 候选匹配经营单 → 人工确认"已核对一致/差异/存疑/已排除重复"。
+          <b>需先在上方「确认复核落库」建立批次</b>，再进入逐笔核对。
+        </template>
+      </el-alert>
+      <ReconcileLines :check-id="activeCheckId" :can-write="canWrite" />
+    </section>
+
     <!-- ===== 历史复核批次 ===== -->
     <section class="block-card">
       <div class="block-head">
@@ -143,9 +158,10 @@
           <template #default="{ row }">{{ row.reviewed_name || '—' }}</template>
         </el-table-column>
         <el-table-column prop="note" label="备注" min-width="180" show-overflow-tooltip />
-        <el-table-column label="操作" width="110" fixed="right">
+        <el-table-column label="操作" width="170" fixed="right">
           <template #default="{ row }">
             <el-button size="small" text type="primary" @click="viewDetail(row)">查看</el-button>
+            <el-button size="small" text type="primary" @click="gotoLines(row)">逐笔核对</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -182,6 +198,7 @@ import { Check, Refresh } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { useAuthStore } from '@/stores/auth'
 import { reconcile } from '@/api/reconcile'
+import ReconcileLines from './ReconcileLines.vue'
 
 const props = defineProps({
   start: { type: String, default: '' },   // YYYY-MM-DD
@@ -199,6 +216,8 @@ const history = ref([])
 const histLoading = ref(false)
 const drawer = ref(false)
 const detail = ref(null)
+const activeCheckId = ref(null)   // 当前逐笔核对批次 id(confirm 或历史行进入)
+const activeCheckNo = ref('')
 
 // 复核写权限: 仅 admin/supervisor(与后端 AdminOrSupervisor 一致)。
 // 用 Pinia auth store 的 role(auth.role = user.role, 来自登录态), 响应式随登录态变化。
@@ -277,6 +296,9 @@ async function confirm() {
     if (note.value) params.note = note.value
     const res = await reconcile.checkConfirm(params)
     ElMessage.success(`复核已落库: ${res.data.check_no}`)
+    // 落库后自动进入逐笔核对
+    activeCheckId.value = res.data.id
+    activeCheckNo.value = res.data.check_no
     note.value = ''
     conclusion.value = ''
     loadHistory()
@@ -305,6 +327,14 @@ async function viewDetail(row) {
   } catch (e) {
     ElMessage.error('详情加载失败: ' + (e?.message || e))
   }
+}
+
+function gotoLines(row) {
+  // 从历史批次进入逐笔核对(滚动到逐笔区)
+  activeCheckId.value = row.id
+  activeCheckNo.value = row.check_no
+  const el = document.querySelector('.reconcile-lines-block')
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 const detailRouteRows = computed(() => {
