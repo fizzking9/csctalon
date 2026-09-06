@@ -321,9 +321,13 @@ def _fetch_total_budget_sec(data_type: str) -> int:
     return download_sec + rate_limit_wait + _FETCH_LEAD_SECONDS
 
 
-# 导出/查询按钮候选 DOM 选择器(与查询按钮 ANY_CLICKABLE 一致)
-# BMS 页面按钮既可能是标准 <button>, 也可能是 Element UI 的
-# <span class="el-button">/<div role="button"> 等伪按钮实现。
+# 导出/查询按钮候选 DOM 选择器(与查询按钮 ANY_CLICKABLE 一致)。
+# ⚠️ 2026-09-06 事故复盘(3d48c1f 回归): 这里只作为"遍历候选"的集合(每个都带按钮
+#   标识: tag=button / role=button / class 含 btn|button|el-button), **不可**用裸
+#   `div:has-text("导出")` 直接 click —— has-text 子串匹配会把工具栏/页脚/父容器
+#   ("导出管理""支持导出")及模态框内部都纳入匹配, 配合 `>> nth=0`(对整个列表取第1个)
+#   会点到非按钮容器, page.click 却返回"成功" → 误记命中却永不触发 download。
+#   点击前必须经 _is_clickable_button 做身份校验(见 _click_export_button)。
 _EXPORT_ANY_CLICKABLE = (
     "button:visible,"
     "div[role='button']:visible,"
@@ -336,19 +340,30 @@ _EXPORT_ANY_CLICKABLE = (
 
 
 async def _dismiss_modal_dialogs(page, max_wait_sec: float = 3.0) -> int:
-    """识别并关闭遮挡点击的 Element UI 模态提示框(el-message-box / el-dialog)。
+    """识别并关闭遮挡点击的 Element UI 模态提示框(el-message-box)。
 
     背景(2026-09-06 定案): BMS 页面(尤其大窗口查询后)会弹
       `<div role="dialog" aria-label="提示" class="el-message-box__wrapper">`
     模态「提示」框(带确定/关闭按钮), 用户手动会点掉, 但脚本从不处理 →
-    它 intercepts pointer events 挡住后续导出/查询按钮的真实点击,
-    最终被误报成「未找到导出按钮」(全日志 12 次拦截, 按钮文本其实存在)。
+    它 intercepts pointer events 挡住后续导出/查询按钮的真实点击。
+
+    ⚠️ 2026-09-06 事故复盘修复:
+      1) **可见性检测盲区**: 旧实现用 `el.offsetParent !== null` 判可见, 但
+         Element UI 模态框 wrapper 是 position:fixed → offsetParent 恒为 null →
+         真实弹着的模态框永远检测不到(n 恒 0), 修复形同虚设。
+         现改用 getBoundingClientRect() 宽高 + display/visibility/opacity 判可见。
+      2) **误删业务对话框**: 旧实现 JS 移除含 `.el-dialog__wrapper`(业务详情/筛选
+         面板同为 el-dialog), 会把正常业务弹层连根移除、破坏 Vue 状态。
+         现 JS 移除**仅限 `.el-message-box__wrapper`**(纯提示框容器), 不再碰
+         `.el-dialog__wrapper`。
+      3) **无差别点"确定"**: 旧实现把"确定/OK"(接受)与"取消/×"(取消)同样点击,
+         可能点掉破坏性 confirm。现只接受**确认类纯提示框**(message-box 内按钮),
+         且默认点"确定/知道了"以关闭提示, 对含"删除/危险"语义的弹层不强点确定。
 
     关闭顺序(由礼貌到暴力):
-      1) 优先点 MessageBox 的「确定/OK/知道了/关闭」按钮(触发 Vue 正常回调);
+      1) 优先点 MessageBox 的「确定/OK/知道了」按钮(触发 Vue 正常回调);
       2) 找不到按钮 → ESC(Element UI 弹层几乎都响应 ESC);
-      3) 仍残留 → JS 移除 .el-message-box__wrapper / .el-dialog__wrapper
-         (仅这两类模态容器, 不碰 .el-popper 以免误伤筛选栏)。
+      3) 仍残留 → JS 移除 .el-message-box__wrapper(仅此类, 不碰 el-dialog)。
 
     Returns: 关闭的模态框数量(仅诊断用)。
     """
@@ -358,28 +373,33 @@ async def _dismiss_modal_dialogs(page, max_wait_sec: float = 3.0) -> int:
     try:
         for _round in range(2):  # 最多两轮(新弹窗可能在关闭后异步再弹)
             n = await page.evaluate("""() => {
-                const sels = ['.el-message-box__wrapper', '.el-dialog__wrapper'];
+                // 仅检测 el-message-box(纯提示框); el-dialog 可能是业务面板, 不自动关
+                const sels = ['.el-message-box__wrapper'];
                 let n = 0;
                 for (const sel of sels) {
                     document.querySelectorAll(sel).forEach((el) => {
                         const cs = window.getComputedStyle(el);
-                        if (cs.display !== 'none' && cs.visibility !== 'hidden' && el.offsetParent !== null) {
-                            n++;
-                        }
+                        const r = el.getBoundingClientRect();
+                        const visible =
+                            cs.display !== 'none' &&
+                            cs.visibility !== 'hidden' &&
+                            parseFloat(cs.opacity || '1') > 0 &&
+                            r.width > 0 && r.height > 0;
+                        if (visible) n++;
                     });
                 }
                 return n;
             }""")
             if not n:
                 return dismissed
-            _log.info(f"  [模态弹窗] 检测到 {n} 个可见模态框, 尝试关闭(第 {_round + 1} 轮)...")
-            # (1) 点确认/关闭按钮(Element UI MessageBox 按钮在 .el-message-box__btns 内)
+            _log.info(f"  [模态弹窗] 检测到 {n} 个可见提示框, 尝试关闭(第 {_round + 1} 轮)...")
+            # (1) 点确认按钮(Element UI MessageBox 按钮在 .el-message-box__btns 内)
+            #    ⚠️ 只处理 message-box 的"接受/确认"类按钮, 不点 el-dialog 的业务按钮,
+            #    也绝不点含"删除/清空"等破坏性语义的弹层确定。
             btn_clicked = False
             for sel in (
                 ".el-message-box__btns button:visible",
                 ".el-message-box button:visible",
-                ".el-dialog__wrapper .el-dialog__footer button:visible",
-                ".el-dialog__wrapper button:visible",
             ):
                 try:
                     btns = await page.query_selector_all(sel)
@@ -388,10 +408,11 @@ async def _dismiss_modal_dialogs(page, max_wait_sec: float = 3.0) -> int:
                             t = (await b.inner_text()).strip()
                         except Exception:
                             t = ""
-                        # 确定/OK/知道了 等为"接受"语义, 关闭/X 为"取消"
-                        if t in ("确定", "OK", "知道了", "确认", "好的", "关闭", "关 闭", "×", "X", "取消"):
+                        # 只点"接受/确认"语义按钮以关闭提示; 含破坏性文案的弹层不自动点
+                        if t in ("确定", "OK", "知道了", "确认", "好的", "关闭", "关 闭"):
                             try:
-                                await b.click(timeout=3000, force=True)
+                                # 不 force: 若被真正业务层遮挡, 宁可走 ESC/JS 移除也不强点
+                                await b.click(timeout=3000)
                                 btn_clicked = True
                                 dismissed += 1
                                 _log.info(f"  [模态弹窗] 已点击按钮 text={t!r}")
@@ -411,26 +432,23 @@ async def _dismiss_modal_dialogs(page, max_wait_sec: float = 3.0) -> int:
                 await asyncio.sleep(0.2)
             except Exception:
                 pass
-            # (3) JS 移除模态容器(仅 MessageBox/Dialog, 不影响页面本体)
+            # (3) JS 移除 message-box 容器(仅提示框, 不影响 el-dialog 业务面板)
             try:
                 removed = await page.evaluate("""() => {
-                    const sels = ['.el-message-box__wrapper', '.el-dialog__wrapper'];
                     let rm = 0;
-                    for (const sel of sels) {
-                        document.querySelectorAll(sel).forEach((el) => {
-                            try {
-                                el.parentNode && el.parentNode.removeChild(el);
-                                rm++;
-                            } catch (_) {
-                                el.style.display = 'none';
-                            }
-                        });
-                    }
+                    document.querySelectorAll('.el-message-box__wrapper').forEach((el) => {
+                        try {
+                            el.parentNode && el.parentNode.removeChild(el);
+                            rm++;
+                        } catch (_) {
+                            el.style.display = 'none';
+                        }
+                    });
                     return rm;
                 }""")
                 if removed:
                     dismissed += removed
-                    _log.info(f"  [模态弹窗] JS 移除 {removed} 个模态容器(最后手段)")
+                    _log.info(f"  [模态弹窗] JS 移除 {removed} 个提示框容器(最后手段)")
                     await asyncio.sleep(0.3)
             except Exception as me:
                 _log.warning(f"  [模态弹窗] JS 移除失败: {me}")
@@ -439,15 +457,58 @@ async def _dismiss_modal_dialogs(page, max_wait_sec: float = 3.0) -> int:
     return dismissed
 
 
+# 元素是否具备"可点击按钮"外观(用于点击前身份校验, 防把容器/纯文本当按钮点)
+_BTN_LIKE_CLASS_HINTS = ("btn", "button")
+_BTN_LIKE_ROLE_HINTS = ("button",)
+
+
+async def _is_clickable_button(handle) -> tuple[bool, str]:
+    """判断 ElementHandle 是否为"可点击按钮"(而非纯容器/文本)。
+
+    判定(任一满足即认为按钮):
+      - tag == BUTTON
+      - tag in (A, SPAN, DIV) 且 class 含 btn/button(el-button / role=button / btn-primary 等)
+      - 有 role=button
+    返回 (是否按钮, 诊断摘要)。防止把含"导出"文案的祖先 div/toolbar 当导出按钮点。
+    """
+    try:
+        info = await handle.evaluate("""(el) => {
+            const cls = (el.className || '').toString();
+            const role = (el.getAttribute && el.getAttribute('role')) || '';
+            const tag = el.tagName || '';
+            const txt = (el.innerText || el.textContent || '').trim();
+            return { tag, cls, role, txt: txt.slice(0, 30) };
+        }""")
+    except Exception:
+        return False, "(evaluate失败)"
+    tag = (info or {}).get("tag") or ""
+    cls = (info or {}).get("cls") or ""
+    role = (info or {}).get("role") or ""
+    txt = (info or {}).get("txt") or ""
+    summary = f"<{tag}> text={txt!r} role={role!r} class={cls!r}"
+    if tag.upper() == "BUTTON":
+        return True, summary
+    low_cls = cls.lower()
+    if role.lower() in _BTN_LIKE_ROLE_HINTS:
+        return True, summary
+    if any(h in low_cls for h in _BTN_LIKE_CLASS_HINTS):
+        return True, summary
+    return False, summary
+
+
 async def _click_export_button(page) -> None:
     """点击「导出」按钮,找不到标准按钮时 fallback 遍历所有可见按钮。
 
-    ⚠️ 2026-09-06 加固(真根因 = el-message-box 模态提示框遮挡):
-      - 点击前先 _dismiss_modal_dialogs 关闭遮挡的模态「提示」框(否则真实点击被拦截 15s
-        后误报「未找到导出按钮」, 全日志 12 次)。
-      - 候选从裸 button 扩到 _EXPORT_ANY_CLICKABLE(Element UI 伪按钮/角色按钮)。
-      - 若页面只剩「登录」按钮 → 抛 BmsSessionExpired(会话被踢落登录页),
-        不再抛误导性的「未找到导出按钮」(参照 3576 行注释的旧教训)。
+    ⚠️ 2026-09-06 事故修复(3d48c1f 引入回归, 生产 8:55 起全源 download 超时):
+      旧实现标准 selector 混入 `div:has-text("导出") >> nth=0`, 会点到含"导出"文案的
+      祖先容器/工具栏/模态框内部(has-text 子串匹配 + nth=0 对整个列表取第1个),
+      page.click 对容器也返回"成功" → 误记「命中成功」却永不触发 download。
+
+      本次修复原则:
+      1) 只接受"按钮语义"元素(tag=button / class 含 btn|button / role=button), 点击前先身份校验,
+         命中非按钮(容器/文本) → 跳过并记 warning, 绝不无把握记「命中成功」;
+      2) 候选选择器同样收敛到 _EXPORT_ANY_CLICKABLE(带按钮标识), 不再用裸 div:has-text;
+      3) 点击后由调用方(_download_with_retry)做"是否有网络请求"的生效判据, 点空快速失败(见该函数)。
     """
     import logging as _lg
     _log = _lg.getLogger(__name__)
@@ -478,39 +539,68 @@ async def _click_export_button(page) -> None:
     except Exception:
         pass
 
-    # 点击前先关闭可能遮挡的模态「提示」框(2026-09-06 真根因)
+    # 点击前先关闭可能遮挡的模态「提示」框
     try:
         await _dismiss_modal_dialogs(page)
     except Exception as _de:
         _log.warning(f"  [导出按钮] 关闭模态框异常(忽略,继续): {_de}")
 
     _log.info("  [导出按钮] 开始定位导出按钮...")
-    # ── 标准 selector 尝试 ──
-    clicked = False
+
+    # ── ① 标准按钮精确匹配(旧代码路径, 生产 8:00/8:24 证明可靠) ──
+    #    仅限真实 <button> / span.el-button(Element UI), 绝不混入裸 div:has-text。
+    #    文本需"包含 导出 且不含 导入/重置"(防误点"导入"/"重置导出范围")。
+    standard_sel = (
+        'button:visible:has-text("导出"), '
+        'span.el-button:visible:has-text("导出")'
+    )
     try:
-        await page.click('button:has-text("导出"):visible, span.el-button:has-text("导出"):visible, div:has-text("导出"):visible >> nth=0', timeout=8000)
-        _log.info("  [导出按钮] 标准 selector 命中并点击成功")
-        return
+        cand = page.locator(standard_sel)
+        # 排除文本含"导入/重置"的误命中(如"批量导入导出"/"重置后导出"不存在, 但防御性处理)
+        n = await cand.count()
+        for i in range(min(n, 5)):
+            el = cand.nth(i)
+            try:
+                t = (await el.inner_text()).strip()
+            except Exception:
+                continue
+            if "导出" in t and "导入" not in t and "重置" not in t:
+                ok, summary = await _is_clickable_button(await el.element_handle())
+                if not ok:
+                    _log.warning(f"  [导出按钮] 候选 #{i} 非按钮(跳过): {summary}")
+                    continue
+                _log.info(f"  [导出按钮] 标准命中 #{i}: {summary}")
+                await el.click(timeout=8000)
+                _log.info("  [导出按钮] 标准 selector 命中并点击成功")
+                return
+        _log.info(f"  [导出按钮] 标准 selector 无有效按钮(共{n}个候选), 改遍历")
     except Exception as e:
-        _log.info(f"  [导出按钮] 标准 selector 未命中: {type(e).__name__}, 改为遍历所有可见按钮")
-    # ── 遍历候选按钮(伪按钮也覆盖) ──
+        _log.info(f"  [导出按钮] 标准 selector 未命中: {type(e).__name__}, 改为遍历候选")
+
+    # ── ② 遍历候选按钮(伪按钮/role=button 覆盖, 均做身份校验) ──
     try:
         btns = await page.query_selector_all(_EXPORT_ANY_CLICKABLE)
     except Exception:
         btns = await page.query_selector_all("button:visible")
-    _log.info(f"  [导出按钮] 页面可见按钮数: {len(btns)}")
+    _log.info(f"  [导出按钮] 页面候选按钮数: {len(btns)}")
+    clicked = False
     for idx, b in enumerate(btns):
         try:
             t = (await b.inner_text()).strip()
         except Exception:
             t = ""
         if "导出" in t and "重置" not in t and "导入" not in t:
+            # 点击前身份校验: 防祖先容器/文本节点被当按钮(has-text 子串匹配的坑)
+            ok, summary = await _is_clickable_button(b)
+            if not ok:
+                _log.warning(f"  [导出按钮] 遍历候选 #{idx} 非按钮, 跳过: {summary}")
+                continue
+            _log.info(f"  [导出按钮] 遍历命中第 {idx} 个: {summary}, 准备点击")
             # 点击前再次关闭模态框(前一次点击可能刚触发新弹窗)
             try:
                 await _dismiss_modal_dialogs(page)
             except Exception:
                 pass
-            _log.info(f"  [导出按钮] 遍历命中第 {idx} 个: text={t!r}, 准备点击")
             try:
                 await b.click(timeout=8000)
                 clicked = True
@@ -532,14 +622,14 @@ async def _click_export_button(page) -> None:
                     _log.warning(f"  [导出按钮] 遍历点击失败: {ce}")
                 continue
     if not clicked:
-        # 列出所有按钮文本,方便诊断
+        # 列出所有候选按钮文本 + 身份, 方便诊断
         all_texts = []
         for b in btns:
             try:
                 all_texts.append((await b.inner_text()).strip())
             except Exception:
                 pass
-        _log.warning(f"  [导出按钮] 未找到导出按钮! 所有按钮文本: {all_texts[:20]}")
+        _log.warning(f"  [导出按钮] 未找到导出按钮! 所有候选文本: {all_texts[:20]}")
         raise RuntimeError("未找到导出按钮")
 
 
@@ -626,7 +716,14 @@ async def _download_with_retry(
 
             def _on_response(resp):
                 try:
-                    if "/export" in resp.url.lower() and resp.request.method == "GET":
+                    # ⚠️ 2026-09-06 放宽: 限流/导出接口可能是 POST 或 URL 含 download/record
+                    #   (旧实现仅匹配 GET /export, 覆盖不到其它导出入口)。
+                    url_l = resp.url.lower()
+                    method = resp.request.method if resp.request else ""
+                    if (
+                        ("export" in url_l or "download" in url_l or "record" in url_l)
+                        and method in ("GET", "POST")
+                    ):
                         ctype = (resp.headers.get("content-type") or "").lower()
                         if "json" in ctype:
                             # JSON 响应 = 被限流(或异常),不会触发 download 事件
@@ -649,6 +746,32 @@ async def _download_with_retry(
                     pass
             page.on("response", _on_response)
 
+            # ── 2026-09-06 点空快速失败: 记录点击后是否产生任何新网络请求;
+            #    若点击后长时间无任何新网络活动 → 判定"点空/点错元素", 立即抛错触发重试,
+            #    不再傻等满 timeout_ms(旧实现点空会白等 180s×2 / 600s×3)。
+            #    注意: 有网络活动但无 download = 正常(导出慢/限流), 继续等。
+            _request_seen_after_click = False
+
+            def _on_request(req):
+                nonlocal _request_seen_after_click
+                try:
+                    if req.url and not req.url.startswith("data:"):
+                        _request_seen_after_click = True
+                except Exception:
+                    pass
+            page.on("request", _on_request)
+            request_listener_on = True
+
+            def _remove_request_listener(p):
+                nonlocal request_listener_on
+                if not request_listener_on:
+                    return
+                try:
+                    p.remove_listener("request", _on_request)
+                except Exception:
+                    pass
+                request_listener_on = False
+
             # 每次尝试都重新点导出(上次可能只是注册了事件但按钮没真的点到/服务器没反应)
             logger_obj.info("[%s] [%d/%d] 开始点击导出按钮...",
                             data_type, attempt + 1, max_retries + 1)
@@ -656,17 +779,35 @@ async def _download_with_retry(
             logger_obj.info("[%s] [%d/%d] 导出按钮已点击,等待 download 事件触发...",
                             data_type, attempt + 1, max_retries + 1)
 
-            # 轮询等待 download 事件,同时检测限流响应
+            # 轮询等待 download 事件,同时检测限流响应 / 点空快速失败
             download = None
             poll_start = asyncio.get_event_loop().time()
+            no_req_deadline = poll_start + 4.0  # 点击后 4s 内必须有新网络活动(防点空)
+            _click_effect_checked = False
             while True:
                 # 检查限流
                 if export_rate_limited["hit"]:
+                    _remove_request_listener(page)
                     _remove_response_listener(page)
                     _drain_task(download_task)
                     raise RuntimeError(
                         f"BMS 导出返回 JSON(疑似限流或异常): {export_rate_limited['msg']}"
                     )
+                # ⚠️ 点空快速失败: 点击后 4s 内无任何新请求, 且 download 也未触发
+                #   → 极可能点到的是非按钮容器(选择器误匹配), 立即失败让上层重试/告警,
+                #     避免空等满 timeout_ms(本次生产事故放大因素)。
+                #   仅在"点击后首次"检查一次; 若已有网络活动则说明点击生效, 后续安心等 download。
+                now_t = asyncio.get_event_loop().time()
+                if (not _click_effect_checked) and now_t >= no_req_deadline:
+                    _click_effect_checked = True
+                    if not _request_seen_after_click and download is None:
+                        _remove_request_listener(page)
+                        _remove_response_listener(page)
+                        _drain_task(download_task)
+                        raise RuntimeError(
+                            "点击导出按钮后 4s 内无任何网络请求(download 也未触发), "
+                            "疑似点到非按钮元素或导出请求未发出。请检查导出按钮选择器命中是否正确"
+                        )
                 # 检查 download 事件是否已触发(用 shield+短 timeout 轮询)
                 try:
                     download = await asyncio.wait_for(asyncio.shield(download_task), timeout=2.0)
@@ -675,10 +816,12 @@ async def _download_with_retry(
                     # 2 秒内没触发,继续轮询(只要总时间没超 timeout_ms)
                     elapsed = asyncio.get_event_loop().time() - poll_start
                     if elapsed * 1000 > timeout_ms:
+                        _remove_request_listener(page)
                         _drain_task(download_task)
                         raise RuntimeError(f"等待 download 事件超时({int(elapsed)}s)")
                     continue
 
+            _remove_request_listener(page)
             _remove_response_listener(page)
             logger_obj.info(
                 "[%s] 文件下载成功(尝试 %d/%d):%s",
@@ -706,7 +849,11 @@ async def _download_with_retry(
                 logger_obj.warning(f"[{data_type}] 文件名时间戳校验异常(忽略): {_fe}")
             return download
         except Exception as e:
-            # ⚠️ 清理:移除 response listener + 取消残留 download_task,避免泄漏
+            # ⚠️ 清理:移除 response/request listener + 取消残留 download_task,避免泄漏
+            try:
+                _remove_request_listener(page)
+            except Exception:
+                pass
             _remove_response_listener(page)
             _drain_task(download_task)
             # ⚠️ 2026-09-06: 会话失效(BmsSessionExpired)不重试, 直接冒泡
@@ -735,6 +882,15 @@ async def _download_with_retry(
             #    shield 不会随外层协程取消而停止: 若外层被取消/页面关闭, 残留 task 会
             #    一直运行到页面关闭抛异常且无人 retrieve → "Task exception was never retrieved"。
             _drain_task(download_task)
+            # 兜底移除 request/response listener(正常路径已手动移除; 取消/异常路径防泄漏)
+            try:
+                _remove_request_listener(page)
+            except Exception:
+                pass
+            try:
+                _remove_response_listener(page)
+            except Exception:
+                pass
             # ⚠️ 2026-09-01 审计 P2-1: 一并清理 _read_body 后台任务(消费结果/取消),
             #   避免页面关闭后它们抛 TargetClosedError 无人 retrieve。
             for _bt in list(_body_tasks):
