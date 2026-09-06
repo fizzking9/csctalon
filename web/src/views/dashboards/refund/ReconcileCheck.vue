@@ -201,7 +201,7 @@ const drawer = ref(false)
 const detail = ref(null)
 
 // 复核写权限: 仅 admin/supervisor(与后端 AdminOrSupervisor 一致)。
-// 用 Pinia auth store 的 role(localStorage user JSON), 响应式随登录态变化。
+// 用 Pinia auth store 的 role(auth.role = user.role, 来自登录态), 响应式随登录态变化。
 const canWrite = computed(() => ['admin', 'supervisor'].includes(auth.role))
 
 function winLabel() {

@@ -130,6 +130,9 @@ def main() -> None:
         elif not args.apply:
             print("\n(预览模式, 未写库)")
             db.rollback()
+        else:
+            # --apply 但无目标行: 提示 0 行而非静默(Reviewer INFO)
+            print("\n(--apply 模式, 无待治理目标行, 未写库)")
     finally:
         db.close()
 
