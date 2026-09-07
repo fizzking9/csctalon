@@ -61,9 +61,10 @@ def _engine():
         #   建表 → 与 create_all 已建的表冲突(DuplicateTable: data_match_relations)。
         #   stamp 后 upgrade 检测到已是最新即跳过, 消除 CI 偶发失败。
         try:
+            from pathlib import Path
+
             from alembic import command
             from alembic.config import Config
-            from pathlib import Path
 
             _backend_dir = Path(__file__).resolve().parents[1]
             _cfg = Config(str(_backend_dir / "alembic.ini"))
