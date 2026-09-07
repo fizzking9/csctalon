@@ -87,6 +87,9 @@ backend/uploads/*
 # 根目录 uploads/ = compose 挂载的同步下载目录(运行时生成,不入库)
 uploads/
 
+# 后端运行时数据(登录态/下载/临时,含 cookie/会话凭证,严禁入库)
+backend/data/
+
 # 样本数据(真实业务数据,含退费单号/商户信息等敏感内容,不入库)
 01样本数据/
 
