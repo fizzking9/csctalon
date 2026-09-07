@@ -55,6 +55,23 @@ def _engine():
         from app.core.database import Base
 
         Base.metadata.create_all(bind=engine)
+        # ⚠️ 2026-09-07 修复: create_all 建表后 stamp alembic 到 head。
+        #   否则 app lifespan(_run_migrations_on_startup) 在 TestClient 启动时会再次
+        #   alembic upgrade head, 对全新测试库(无 alembic_version)从 d9b7f1 重跑全部
+        #   建表 → 与 create_all 已建的表冲突(DuplicateTable: data_match_relations)。
+        #   stamp 后 upgrade 检测到已是最新即跳过, 消除 CI 偶发失败。
+        try:
+            from alembic import command
+            from alembic.config import Config
+            from pathlib import Path
+
+            _backend_dir = Path(__file__).resolve().parents[1]
+            _cfg = Config(str(_backend_dir / "alembic.ini"))
+            _cfg.set_main_option("script_location", str(_backend_dir / "alembic"))
+            command.stamp(_cfg, "head")
+        except Exception:
+            # stamp 失败不阻塞测试(create_all 已建表, 顶多 app 启动重跑 migration 冲突)
+            pass
         yield engine
     finally:
         engine.dispose()
