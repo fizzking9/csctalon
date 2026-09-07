@@ -63,8 +63,9 @@ def _engine():
         try:
             from pathlib import Path
 
-            from alembic import command
             from alembic.config import Config
+
+            from alembic import command
 
             _backend_dir = Path(__file__).resolve().parents[1]
             _cfg = Config(str(_backend_dir / "alembic.ini"))
