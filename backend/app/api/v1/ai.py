@@ -38,6 +38,42 @@ class AiAnalyzeRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=500, description="经营数据问题(如: 今日退款和涉诉如何?)")
     period: Literal["daily", "weekly", "monthly"] = Field("daily", description="数据窗口: daily/weekly/monthly")
     date: str | None = Field(None, description="period=daily 可指定某整天 YYYY-MM-DD(缺省=今天实时)")
+    # v1.1(2026-09-07): 任意区间(与 external brief 同源同护栏; 同时给出则优先于 period/date)
+    start: str | None = Field(None, description="任意区间起点, 仅纯日期 YYYY-MM-DD(与 end 成对; 历史标准周回看)")
+    end: str | None = Field(None, description="任意区间终点, 仅纯日期 YYYY-MM-DD(与 start 成对; end=今天则实时)")
+
+
+class _AiWindow:
+    """解析并校验 AI 查询窗口: period/date 或 start/end(与 external._window 同规则)。"""
+
+    def __init__(self, payload: AiAnalyzeRequest):
+        self.period = payload.period
+        self.date = payload.date
+        self.start = payload.start
+        self.end = payload.end
+        self._validate()
+
+    def _validate(self) -> None:
+        import datetime as _dt
+        if self.date:
+            parts = self.date.split("-")
+            if len(parts) != 3 or not all(len(p) == (4 if i == 0 else 2) and p.isdigit() for i, p in enumerate(parts)):
+                raise HTTPException(400, f"date 参数非法: {self.date!r}, 应为 YYYY-MM-DD")
+        # start/end 成对校验(纯日期)
+        if self.start is not None or self.end is not None:
+            if self.start is None or self.end is None:
+                raise HTTPException(400, "start/end 必须成对提供(YYYY-MM-DD)")
+            for name, val in (("start", self.start), ("end", self.end)):
+                try:
+                    _dt.date.fromisoformat(val.strip())
+                except (ValueError, TypeError):
+                    raise HTTPException(400, f"{name} 参数非法: {val!r}, 应为 YYYY-MM-DD")
+
+    def effective(self) -> dict:
+        """返回供 ai_feed 使用的窗口参数(仅当显式给了 start/end 才透传)。"""
+        if self.start is not None or self.end is not None:
+            return {"period": self.period, "date": None, "start": self.start, "end": self.end}
+        return {"period": self.period, "date": self.date, "start": None, "end": None}
 
 
 @router.get("/config", response_model=R, summary="AI 助手启用状态与快捷问(内部)")
@@ -58,22 +94,24 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
     q = (payload.question or "").strip()
     if not q:
         raise HTTPException(400, "question 不能为空")
-    if payload.date:
-        # date 基础格式校验
-        parts = payload.date.split("-")
-        if len(parts) != 3 or not all(len(p) == (4 if i == 0 else 2) and p.isdigit() for i, p in enumerate(parts)):
-            raise HTTPException(400, f"date 参数非法: {payload.date!r}, 应为 YYYY-MM-DD")
+    # 窗口解析(period/date 或 start/end 成对校验)
+    win = _AiWindow(payload)
+    eff = win.effective()
 
     async def _runner(task):
         """后台执行: 建独立 Session 组装 feed → 调 LLM → 写回 task。"""
         try:
             db = SessionLocal()
             try:
-                messages = ai_feed.build_messages(db, payload.period, payload.date, q)
+                messages = ai_feed.build_messages(
+                    db, eff["period"], eff["date"], q,
+                    start=eff["start"], end=eff["end"],
+                )
             finally:
                 db.close()
             # 记录注入的 data 规模日志(不含明细)
-            logger.info("ai task %s: period=%s question_len=%d", task.task_id, payload.period, len(q))
+            logger.info("ai task %s: period=%s date=%s start=%s end=%s question_len=%d",
+                        task.task_id, eff["period"], eff["date"], eff["start"], eff["end"], len(q))
             result = await llm_client.chat_completion(
                 messages,
                 max_tokens=int(getattr(settings, "AI_MAX_TOKENS", 1500) or 1500),
@@ -86,7 +124,8 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
             task.error = f"分析失败: {e}"
             raise
 
-    task_id = ai_task_manager.submit(q, payload.period, payload.date, _runner)
+    task_id = ai_task_manager.submit(q, eff["period"], eff["date"], _runner,
+                                     start=eff["start"], end=eff["end"])
     # 首查同步等待(2026-09-04 提速): AI 任务通常 3~6s 完成, 前端若走 2s 轮询需等
     # 8~10s 才有输出。这里最多等 AI_SYNC_WAIT_S 秒直接拿结果; 超时才返回 task_id 走轮询兜底。
     wait_s = float(getattr(settings, "AI_SYNC_WAIT_S", 6.0) or 6.0)

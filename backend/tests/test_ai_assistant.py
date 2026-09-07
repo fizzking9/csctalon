@@ -99,6 +99,26 @@ def test_build_feed_matches_brief(db):
         assert key in feed
 
 
+def test_build_feed_range_start_end(db):
+    """v1.1: _build_feed 支持 start/end 任意区间(透传 external._build_brief range)。"""
+    from app.services import ai_feed
+    feed = ai_feed._build_feed(db, period="daily", date=None, start="2026-07-01", end="2026-07-07")
+    assert feed["period"] == "range"
+    assert feed["range"]["span_days"] == 7
+    assert feed["date_start"].startswith("2026-07-01T00:00:00")
+    for key in ("reception", "refund", "complaint", "_spec"):
+        assert key in feed
+
+
+def test_build_messages_range_window_label(db):
+    """v1.1: build_messages 传 start/end → 窗口说明标注 range。"""
+    from app.services import ai_feed
+    msgs = ai_feed.build_messages(db, period="weekly", date=None, question="这个区间经营如何?",
+                                  start="2026-07-01", end="2026-07-07")
+    user_content = msgs[1]["content"]
+    assert "period=range(start=2026-07-01, end=2026-07-07)" in user_content
+
+
 # ── llm_client ───────────────────────────────────────────────
 def _mk_response(status: int, content: str | None = None) -> httpx.Response:
     if status == 200:

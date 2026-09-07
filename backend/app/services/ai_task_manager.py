@@ -26,6 +26,8 @@ class AiTask:
     question: str
     period: str
     date: str | None
+    start: str | None = None          # v1.1: 任意区间起点(纯日期, 与 external brief 同源)
+    end: str | None = None            # v1.1: 任意区间终点
     created_at: datetime = field(default_factory=datetime.now)
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -40,6 +42,8 @@ class AiTask:
             "question": self.question,
             "period": self.period,
             "date": self.date,
+            "start": self.start,
+            "end": self.end,
             "result_md": self.result_md,
             "error": self.error,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -74,14 +78,16 @@ class AiTaskManager:
             self._tasks.pop(oldest, None)
 
     def submit(self, question: str, period: str, date: str | None,
-               runner) -> str:
+               runner, start: str | None = None, end: str | None = None) -> str:
         """创建任务并后台执行。
 
         runner: 可等待协程工厂 `async def runner(task) -> None`(内部把结果写回 task)。
+        start/end: v1.1 任意区间(纯日期); 透传存任务供展示/调试。
         返回 task_id(立即)。
         """
         task_id = self._new_task_id()
-        task = AiTask(task_id=task_id, question=question, period=period, date=date)
+        task = AiTask(task_id=task_id, question=question, period=period, date=date,
+                      start=start, end=end)
         self._tasks[task_id] = task
         self._order.append(task_id)
         self._prune()
