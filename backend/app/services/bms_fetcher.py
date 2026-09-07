@@ -193,6 +193,54 @@ def _storage_state_path(data_type: str) -> Path:
     return base / f"{data_type}.json"
 
 
+def group_fetch_tasks(
+    tasks: list[dict],
+) -> list[tuple[str, str | None, list[dict]]]:
+    """把待抓取任务按 (base_url, username) 分组(纯函数, 供单测)。
+
+    返回 [(base_url, username, [task,...]), ...], 保持各组首次出现的顺序;
+    组内保持任务原顺序。
+
+    #29(2026-09-07): 登录态共享粒度 = 同域名 + 同账号。
+      - 同 base_url 且同账号的源共享一个 browser context(登录态), 省重复登录;
+      - 同 base_url 但账号不同的源拆到不同组(独立 context/独立登录),
+        防止串号——否则组内首源(own 独立账号)登录成功后, 后续用组账号的源
+        复用其登录态, 实际抓取 own 账号权限下的数据(见 #28 WARNING-3)。
+      - username 取 config["username"](_row_to_config 已 resolve 为最终登录明文;
+        未配置凭证为 None, 会归入 (base_url, None) 独立组, 不乱入有凭证组)。
+      - ticket / ticket_finish 同账号 → 自然同组, 不拆散双维度任务。
+    """
+    groups: list[tuple[str, str | None, list[dict]]] = []
+    for t in tasks:
+        cfg = t.get("config") or {}
+        base = cfg.get("base_url", "")
+        # 归一化: 空串/None 一律按 None(未配置凭证)处理, 避免同账号被 "" 与 None 拆成两组
+        user = cfg.get("username") or None
+        key = (base, user)
+        found = False
+        for i, (g_base, g_user, g_list) in enumerate(groups):
+            if (g_base, g_user) == key:
+                g_list.append(t)
+                found = True
+                break
+        if not found:
+            groups.append((base, user, [t]))
+    return groups
+
+
+def should_wait_between_groups(prev_base: str, next_base: str) -> bool:
+    """两组之间是否需要 65s 冷却(纯函数, 供单测)。
+
+    同域(base_url 相同, 即使换账号) = 同一物理 BMS Web 系统 → 需等 65s(1 分钟限制);
+    跨域(base_url 不同, 如 wifi → fast/闪猫) = 不同 Web 系统 → 不需等待。
+
+    #29(2026-09-07): 拆组为 (base_url, username) 后, 同 base_url 不同账号会形成
+    多个相邻组, 它们仍是同一 BMS 系统, 换账号重登后紧接查询/导出仍受 1 分钟限制,
+    故必须返回 True(原"跨组=跨域名"假设不再成立)。
+    """
+    return prev_base == next_base
+
+
 def _parse_filename_utc_ts(filename: str) -> datetime | None:
     """从 BMS 导出文件名中解析内嵌的 UTC 时间戳。
 
@@ -3639,43 +3687,36 @@ class BmsFetcher:
         tasks: list[dict],
         on_progress: callable = None,
     ) -> list[FetchResult]:
-        """批量抓取多个数据源 - 优化:按 base_url 分组复用登录 context
+        """批量抓取多个数据源 - 优化:按 (base_url, username) 分组复用登录 context
 
         原有行为兼容: 保持 BMS 1 分钟限制(两个源之间间隔 OPERATION_INTERVAL 秒)。
-        优化内容:
-          - 把同 base_url 的任务放在一组(如 ticket/wallet/device_combo 都是
-            support.cloud-cat.cn, 组内共享同一个 browser context),组内第 1 个源登录后
-            其余源直接跳转,省去重复登录耗时。
+        #29(2026-09-07): 分组 key = base_url + 账号。
+          - 同 base_url 同账号的任务一组(组内共享同一 browser context),组内第 1 个源
+            登录后其余源直接跳转,省去重复登录耗时。
+          - 同 base_url 不同账号拆到不同组(独立 context/独立登录), 防止串号。
           - 不同 base_url 的组仍是独立 context(跨域不共享登录态)。
+          - 相邻组同 base_url(同域换账号)仍守 65s 冷却; 跨域组之间不等待。
         """
         results_map: dict[str, FetchResult] = {}
         # 保留原始顺序(避免按 base_url 重排导致前端 Steps 错乱)
         original_order = [t["data_type"] for t in tasks]
 
-        # 1. 按 base_url 分组(并保持每组分内的出现顺序)
-        groups: list[tuple[str, list[dict]]] = []  # [(base_url, [task, ...]), ...]
-        for t in tasks:
-            base = t["config"].get("base_url", "")
-            if not groups or groups[-1][0] != base:
-                # 看是否之前已有同 base 的组
-                found = False
-                for existing_base, existing_list in groups:
-                    if existing_base == base:
-                        existing_list.append(t)
-                        found = True
-                        break
-                if not found:
-                    groups.append((base, [t]))
-            else:
-                groups[-1][1].append(t)
+        # 1. 按 (base_url, username) 分组(并保持每组分内的出现顺序)
+        #    #29(2026-09-07): 登录态共享粒度 = 同域名 + 同账号。
+        #    同 base_url 但账号不同的源拆到不同组(各自独立 context/独立登录),
+        #    防止串号。分组纯函数见 group_fetch_tasks(可单测)。
+        groups: list[tuple[str, str | None, list[dict]]] = group_fetch_tasks(tasks)
 
         logger.info(
-            f"fetch_all 分组: 共 {len(tasks)} 个源, 拆为 {len(groups)} 个域名组: "
-            + ", ".join(f"{b.split('//')[-1] if '//' in b else b}({len(ts)}个)" for b, ts in groups)
+            f"fetch_all 分组: 共 {len(tasks)} 个源, 拆为 {len(groups)} 个(域名+账号)组: "
+            + ", ".join(
+                f"{(b.split('//')[-1] if '//' in b else b)}|{(u or '无凭证')}({len(ts)}个)"
+                for b, u, ts in groups
+            )
         )
 
         # 2. 依次处理每个组(复用 context)
-        for group_idx, (base_url, group_tasks) in enumerate(groups):
+        for group_idx, (base_url, group_username, group_tasks) in enumerate(groups):
             if not group_tasks:
                 continue
             await self._init_browser()
@@ -3723,29 +3764,21 @@ class BmsFetcher:
 
             logged_in_ok = state_logged_in  # 组内首个成功登录后为 True,后续跳过
             # ── 组级登录失败熔断记忆 ──
-            # 同组 (base_url相同) 下的多个源共用一套账号密码;
+            # 同组 (base_url + username 相同) 下的多个源共用一套账号密码;
             # 组内第一个源如果因"登录类错误"失败(账号/密码/验证码/页面跳转仍在/login),
             # 后续同组源直接跳过登录和抓取,复用同一个登录失败错误,避免 2/3 次相同登录错误反复弹日志。
+            # #29(2026-09-07): 拆组后每组单账号, 熔断只影响该 (域名,账号) 组, 天然隔离。
             group_login_failed_err: str | None = None
 
-            # ── 2026-09-07 账号一致性诊断 ──
-            # 同组共享登录态的前提是「所有源用同一账号」。若组内出现个别源配了单源凭证且
-            # 与组账号不同, 共享登录态会互相干扰(首源单源登录成功后, 后续源复用该登录态,
-            # 实际抓的是首源账号的数据)。这里仅记录诊断日志暴露隐患, 不阻断抓取。
-            _group_acct = first_cfg.get("username")
-            _acct_set = {t["config"].get("username") for t in group_tasks if t["config"].get("username")}
-            if len(_acct_set) > 1:
-                _own_srcs = [
-                    f"{t['data_type']}({t['config'].get('username')!r})"
-                    for t in group_tasks if t["config"].get("credential_is_own")
-                ]
-                logger.warning(
-                    "[组%s] ⚠️ 同组源账号不一致(%d 个不同账号: %s); 单源独立凭证源=%s。"
-                    "共享登录态下仅首个登录的账号生效, 请确认这些源是否确需独立凭证"
-                    "(若单源凭证登录失败, 已按独立凭证处理不再连坐同组)",
-                    group_idx + 1, len(_acct_set), sorted(str(x) for x in _acct_set),
-                    _own_srcs or "无",
-                )
+            # ── 2026-09-07 #29: 组标识日志(替代原"同组账号不一致"告警) ──
+            # 原告警因"按 base_url 分组、组内可能混入独立账号"而生; 现分组已按
+            # (base_url, username) 拆组, 每组单账号, 该场景已由拆组根治, 故改为
+            # 打印组账号标识便于日志排查(某组登录失败可定位到具体账号)。
+            _src_kind = "独立凭证" if first_cfg.get("credential_is_own") else "组/共享凭证"
+            logger.info(
+                "[组%s] 处理域名 %s, 账号=%r(%s), 共 %d 个源",
+                group_idx + 1, base_url, group_username, _src_kind, len(group_tasks),
+            )
 
             try:
                 for i, task in enumerate(group_tasks):
@@ -3810,9 +3843,8 @@ class BmsFetcher:
                             if on_progress:
                                 await on_progress(data_type, "done", fr)
                             # 即使跳过也要假装走了等待逻辑:组内非末位仍要等 65s,否则后续源在错误的时刻启动
-                            is_last_in_group = (i == len(group_tasks) - 1)
-                            is_last_group = (group_idx == len(groups) - 1)
-                            if not is_last_in_group:
+                            # (末位跳过 → 循环自然结束 → 组级 finally 统一做跨组等待, 见 #29)
+                            if i < len(group_tasks) - 1:
                                 next_type = group_tasks[i + 1]["data_type"]
                                 next_name = group_tasks[i + 1]["config"].get("name", next_type)
                                 logger.info(
@@ -3923,10 +3955,10 @@ class BmsFetcher:
                         await on_progress(data_type, "done", fr)
 
                     # 是否需要等待:
-                    #  - 组内(同 base_url)两个源之间: 必须等 65 秒(同一个 BMS Web 系统 1 分钟查询限制)
-                    #  - 跨组(不同域名): 两个不同 Web 系统,各自独立限流,无需等待
+                    #  - 组内(同 base_url 同账号)两个源之间: 必须等 65 秒(同一个 BMS Web 系统 1 分钟查询限制)
+                    #  - 跨组等待统一收敛到组级收尾(finally 前), 覆盖"末位源正常/熔断/异常"全部路径,
+                    #    避免散落各处漏判(见 #29 熔断跳过分支曾漏跨组冷却)。
                     is_last_in_group = (i == len(group_tasks) - 1)
-                    is_last_group = (group_idx == len(groups) - 1)
                     if not is_last_in_group:
                         # 组内后续源: 等待 65s (同域名 BMS 限制)
                         next_type = group_tasks[i + 1]["data_type"]
@@ -3938,17 +3970,33 @@ class BmsFetcher:
                         if on_progress:
                             await on_progress(next_type, "waiting", None)
                         await asyncio.sleep(OPERATION_INTERVAL)
-                    elif not is_last_group:
-                        # 组与组之间是不同域名(如 wifi → support),属于两个不同 Web,无需等 65s
-                        next_group = groups[group_idx + 1]
-                        next_first = next_group[1][0]
-                        next_type = next_first["data_type"]
-                        next_name = next_first["config"].get("name", next_type)
-                        logger.info(
-                            f"[跨域名跳过等待] 下一个源 {next_name} 是不同 BMS 域名,直接切换不等待"
-                        )
-                        # 直接进入下一组,不 sleep
             finally:
+                # ── #29 组收尾: 跨组等待统一在此执行 ──
+                # 无论本组如何结束(末位源正常走完 / 熔断 continue 后循环自然结束 /
+                # 中间源异常冒泡), 只要后面还有组, 就在关 context 前统一判断:
+                #   相邻组 base_url 相同(同域换账号) → 同一物理 BMS Web 系统, 等 65s;
+                #   base_url 不同(如 wifi → fast/闪猫) → 不同 Web 系统, 不等。
+                # 修复: 原"跨组等待"散落在每个源循环尾部, 熔断跳过分支(continue)漏掉了
+                # "末位源熔断 → 下一同域组"的冷却(见 #29 Review CRITICAL)。
+                if group_idx < len(groups) - 1:
+                    next_base, next_user, next_tasks = groups[group_idx + 1]
+                    next_first = next_tasks[0]
+                    next_type = next_first["data_type"]
+                    next_name = next_first["config"].get("name", next_type)
+                    if should_wait_between_groups(base_url, next_base):
+                        logger.info(
+                            f"[同域换账号等待] 本组结束, 下一组 {next_name} 仍属 {base_url} 同域"
+                            f"(账号 {group_username!r} → {next_user!r}), 等待 {OPERATION_INTERVAL} 秒"
+                            f"(同一 BMS 系统 1 分钟限制, 覆盖熔断/正常/异常路径)"
+                        )
+                        if on_progress:
+                            await on_progress(next_type, "waiting", None)
+                        await asyncio.sleep(OPERATION_INTERVAL)
+                    else:
+                        # 不同域名: 两个不同 Web,无需等 65s
+                        logger.info(
+                            f"[跨域名跳过等待] 本组结束, 下一个源 {next_name} 是不同 BMS 域名,直接切换不等待"
+                        )
                 # 关闭当前 page,再关闭 context(Playwright 官方推荐顺序,避免上下文泄露)
                 try:
                     if page is not None:
