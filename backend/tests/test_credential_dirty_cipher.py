@@ -151,3 +151,87 @@ def test_resolve_credentials_no_source_uses_group(db):
     user, pwd = resolve_credentials(db, row)
     assert user == "GROUP-USER"
     assert pwd == "GROUP-PWD"
+
+
+# ════════════════════════════════════════════════════════════════════
+# 2026-09-07 加固: 凭证来源标记 + 列表接口"单源独立(异于组)"标记
+# 背景: device_combo 单源被误填成本系统账号 tanzk(与组 YKM-TZK 不同),
+#       登录失败后组级熔断连坐同组 5 源。加固后:
+#       - resolve_credentials_with_source 返回 own/group/none 供熔断细化
+#       - 列表接口用 own_cred_differs_group 标记"单源账号≠组账号"供前端警示
+# ════════════════════════════════════════════════════════════════════
+from app.services.source_group_service import resolve_credentials_with_source  # noqa: E402
+from app.services.sync_source_config_service import (  # noqa: E402
+    _own_cred_differs_group,
+    _row_effective_source,
+)
+
+
+def test_resolve_source_own_when_valid_single_source(db):
+    """单源凭证解密有效 → source=own。"""
+    gk = "bms-wifi-test-srcown"
+    _make_group(db, gk, user="GROUP-USER", pwd="GROUP-PWD")
+    row = _make_source(
+        db, "dev_test_combo_own", gk,
+        username=encrypt_secret("tanzk"),  # 误填场景: 单源与组账号不同但可解密
+        password=encrypt_secret("somepwd"),
+    )
+    user, pwd, src = resolve_credentials_with_source(db, row)
+    assert src == "own"
+    assert user == "tanzk"
+
+
+def test_resolve_source_group_when_no_single_source(db):
+    """单源无凭证 → 继承组, source=group。"""
+    gk = "bms-wifi-test-srcgrp"
+    _make_group(db, gk, user="GROUP-USER", pwd="GROUP-PWD")
+    row = _make_source(db, "dev_test_order_grp", gk)
+    user, pwd, src = resolve_credentials_with_source(db, row)
+    assert src == "group"
+    assert user == "GROUP-USER"
+
+
+def test_resolve_source_none_when_no_credentials(db):
+    """无组无单源 → source=none。"""
+    gk = "bms-wifi-test-srcnone"
+    row = _make_source(db, "dev_test_orphan_none", gk)  # 组行不存在, 无单源
+    user, pwd, src = resolve_credentials_with_source(db, row)
+    assert src == "none"
+    assert user is None and pwd is None
+
+
+def test_row_effective_source_marks_own_vs_group(db):
+    """列表接口标记: 单源有效=own / 继承=group / 无=..."""
+    gk = "bms-wifi-test-effsrc"
+    _make_group(db, gk, user="GROUP-USER", pwd="GROUP-PWD")
+    own_row = _make_source(db, "dev_test_a_own", gk,
+                           username=encrypt_secret("tanzk"), password=encrypt_secret("pwd1"))
+    grp_row = _make_source(db, "dev_test_b_grp", gk)
+    assert _row_effective_source(db, own_row) == "own"
+    assert _row_effective_source(db, grp_row) == "group"
+
+
+def test_own_cred_differs_group_true_when_different_account(db):
+    """单源账号与组账号不同 → own_cred_differs_group=True(前端标黄提示)。"""
+    gk = "bms-wifi-test-diff1"
+    _make_group(db, gk, user="YKM-TZK", pwd="P@ssw0rd123")
+    row = _make_source(db, "dev_test_combo_diff", gk,
+                       username=encrypt_secret("tanzk"), password=encrypt_secret("pwdX"))
+    assert _own_cred_differs_group(db, row) is True
+
+
+def test_own_cred_differs_group_false_when_same_account(db):
+    """单源账号与组账号相同 → False(冗余但不误报)。"""
+    gk = "bms-wifi-test-same1"
+    _make_group(db, gk, user="YKM-TZK", pwd="P@ssw0rd123")
+    row = _make_source(db, "dev_test_refund_same", gk,
+                       username=encrypt_secret("YKM-TZK"), password=encrypt_secret("P@ssw0rd123"))
+    assert _own_cred_differs_group(db, row) is False
+
+
+def test_own_cred_differs_group_false_when_inherit(db):
+    """继承组(无单源) → False。"""
+    gk = "bms-wifi-test-inherit1"
+    _make_group(db, gk, user="YKM-TZK", pwd="P@ssw0rd123")
+    row = _make_source(db, "dev_test_order_inherit", gk)
+    assert _own_cred_differs_group(db, row) is False

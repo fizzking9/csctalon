@@ -27,7 +27,11 @@ from app.core.crypto import decrypt_secret, encrypt_secret, is_fernet_ciphertext
 from app.models.sync_source_config import SyncSourceConfig
 from app.services.bms_fetcher import BMS_DATA_SOURCES
 from app.services.scrm_client import SCRM_DATA_SOURCES
-from app.services.source_group_service import ensure_source_groups_registered, resolve_credentials
+from app.services.source_group_service import (
+    ensure_source_groups_registered,
+    get_group_credentials,
+    resolve_credentials_with_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +250,45 @@ def _decrypt_options_secrets(raw_opts: dict | None) -> dict:
     return opts
 
 
+def _row_effective_source(db: Session | None, row: SyncSourceConfig) -> str:
+    """DB 行 → 凭证生效来源标记(own/group/none)
+
+    - own  : 单源凭证解密有效, 运行时实际用该源独立凭证
+    - group: 单源为空/脏密文不可用 → 实际继承组凭证(或 .env/种子)
+    - none : 无任何可用凭证
+    """
+    if db is not None:
+        _u, _p, src = resolve_credentials_with_source(db, row)
+        return src
+    # 无 db 退化: 仅凭密文原文推断(与 _row_to_config 无 db 分支一致)
+    u = decrypt_secret(row.username) if row.username else None
+    p = decrypt_secret(row.password) if row.password else None
+    if u and p and not is_fernet_ciphertext(u) and not is_fernet_ciphertext(p):
+        return "own"
+    if row.group_key:
+        return "group"
+    return "none"
+
+
+def _own_cred_differs_group(db: Session | None, row: SyncSourceConfig) -> bool:
+    """本源是否配置了与组账号不同的单源凭证(仅用于前端提示, 不泄露明文)
+
+    判定条件: 单源凭证解密有效(source=own) 且 单源账号 != 组账号。
+    - 若本源未配单源(继承组) → False
+    - 若本源单源账号与组账号相同(冗余但等价) → False
+    - 若本源单源账号与组账号不同(本次事故场景) → True → 前端标黄提示
+    """
+    if not row.username or not row.password:
+        return False
+    own_u = decrypt_secret(row.username) if row.username else None
+    if not own_u or is_fernet_ciphertext(own_u):
+        return False
+    gu, _gp = get_group_credentials(db, row.group_key) if db is not None else (None, None)
+    if not gu:
+        return False  # 无组凭证可比, 不误报
+    return own_u != gu
+
+
 def _row_to_config(db: Session | None, row: SyncSourceConfig) -> dict:
     """DB 行 → 运行配置 dict(解密凭证 + 合并 options,并抛出顶层关键字段)
 
@@ -265,8 +308,10 @@ def _row_to_config(db: Session | None, row: SyncSourceConfig) -> dict:
     captcha_type = effective_options.get("captcha_type", "none")
     requires_captcha = _requires_captcha_from_options(effective_options)
     # 凭证: 单源优先, 空则继承组级凭证(同域共享登录态)
+    # ⚠️ 2026-09-07: 增加 credential_source(own/group/none) 与 credential_is_own,
+    #   供 bms_fetcher.fetch_all 熔断细化(单源凭证失败不连累同组)与前端提示使用。
     if db is not None:
-        username, password = resolve_credentials(db, row)
+        username, password, credential_source = resolve_credentials_with_source(db, row)
     else:
         # 无 db 退化分支: 直接解密 + 兜底识别"解密失败仍为密文"的脏数据(密钥轮换后)
         username = decrypt_secret(row.username) if row.username else None
@@ -275,6 +320,12 @@ def _row_to_config(db: Session | None, row: SyncSourceConfig) -> dict:
             username = None
         if is_fernet_ciphertext(password):
             password = None
+        credential_source = "own" if (username and password) else "none"
+    # 组级账号明文(供前端/熔断提示"本源与组账号是否一致"), 无组返回 None
+    group_username = None
+    if db is not None:
+        gu, _gp = get_group_credentials(db, row.group_key)
+        group_username = gu
     return {
         "data_type": row.data_type,
         "name": row.name,
@@ -284,6 +335,9 @@ def _row_to_config(db: Session | None, row: SyncSourceConfig) -> dict:
         "group_key": row.group_key,
         "username": username,
         "password": password,
+        "credential_source": credential_source,
+        "credential_is_own": credential_source == "own",
+        "group_username": group_username,
         "options": effective_options,
         # ── 顶层关键字段(便于下游直接使用) ──
         "fetch_mode": fetch_mode,
@@ -312,14 +366,20 @@ def get_sync_source_config(db: Session, data_type: str) -> dict | None:
         env_user = getattr(settings, "BMS_USERNAME", "") or ""
         env_pwd = getattr(settings, "BMS_PASSWORD", "") or ""
     effective_options = _resolve_effective_options(None, {**cfg, "data_type": data_type})
+    user = env_user or None
+    pwd = env_pwd or None
     return {
         "data_type": data_type,
         "name": cfg["name"],
         "base_url": cfg.get("base_url", getattr(settings, "SCRM_BASE_URL", "") if is_scrm else cfg.get("base_url", "")),
         "page_path": cfg.get("page_path", ""),
         "time_labels": cfg.get("time_labels"),
-        "username": env_user or None,
-        "password": env_pwd or None,
+        "username": user,
+        "password": pwd,
+        # 种子/.env 回退场景统一视为组/共享级来源(登录失败应熔断整组)
+        "credential_source": "own" if user else "none",
+        "credential_is_own": bool(user),
+        "group_username": None,
         "options": effective_options,
         "fetch_mode": effective_options.get("fetch_mode", "playwright" if is_scrm else "playwright"),
         "captcha_type": effective_options.get("captcha_type", "none"),
@@ -371,6 +431,12 @@ def list_sync_source_configs(db: Session) -> list[dict]:
                 "username": row.username,  # 加密原文,前端判断是否已配置(空=未改过)
                 "password": row.password,  # 同上
                 "has_credentials": bool(row.username and row.password),
+                # ── 2026-09-07: 凭证来源标记(供前端提示"单源独立 vs 继承组") ──
+                # 注意: has_credentials 是"密文原文是否非空"; credential_source 才是
+                # "解密后实际生效来源"。脏密文(row.username 非空但解密失败)时 has_credentials=True
+                # 但 credential_source 可能是 group(回退组凭证)——前端应以此为准提示用户清理。
+                "credential_source": _row_effective_source(db, row),
+                "own_cred_differs_group": _own_cred_differs_group(db, row),
                 "default_sync": row.default_sync,
                 "enabled": row.enabled,
                 "sort_order": row.sort_order,
@@ -425,11 +491,23 @@ def update_sync_source_config(db: Session, data_type: str, payload: dict) -> dic
         row.default_sync = bool(payload["default_sync"])
     if "enabled" in payload:
         row.enabled = bool(payload["enabled"])
-    # 凭证:仅当显式传非空字符串时更新(前端清空表示不改)
-    if payload.get("username"):
-        row.username = encrypt_secret(payload["username"])
-    if payload.get("password"):
-        row.password = encrypt_secret(payload["password"])
+    # ── 凭证字段 ──
+    # 语义(2026-09-07 修订, 修复"UI 清空凭证无效"治理缺口 #28):
+    #   - payload 中**不含** username/password key  → 不改(兼容旧调用: 只改其它字段)
+    #   - key 存在且值为**非空字符串**            → 覆盖为新凭证(加密入库)
+    #   - key 存在且值为 None/空串                 → **显式清空**(置 NULL, 回退继承组凭证)
+    # 背景: 此前"空串=不改"导致前端提示「清空账号密码以继承组凭证」实际无效——
+    #       用户无法通过 UI 清除误填的单源凭证(device_combo 误填 tanzk 无法回退组)。
+    if "username" in payload:
+        if payload["username"]:
+            row.username = encrypt_secret(payload["username"])
+        else:
+            row.username = None  # 显式清空 → 运行时继承组凭证
+    if "password" in payload:
+        if payload["password"]:
+            row.password = encrypt_secret(payload["password"])
+        else:
+            row.password = None  # 显式清空 → 运行时继承组凭证
 
     # ── options 合并:顶层特殊 key (fetch_mode/captcha_type) + options.patch + 其他未知顶层 key ──
     _VALID_FETCH_MODES = {"openapi", "playwright", "dual", "http"}

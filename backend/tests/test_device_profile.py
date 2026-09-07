@@ -175,3 +175,73 @@ def test_update_source_sync_to_group(_test_session):
     # 清理
     _test_session.execute(SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__d6_test__"))
     _test_session.commit()
+
+
+# ---------- #28(2026-09-07): 显式清空单源凭证(回退继承组) ----------
+
+def test_update_source_clear_credentials(_test_session):
+    """update_sync_source_config 显式清空(username/password 传 None) → 单源凭证置 NULL。
+
+    治理缺口(#28, Review 发现): 此前"空串=不改"导致用户无法通过 UI 清除误填的单源
+    凭证(device_combo 误填 tanzk 无法回退组凭证)。修复后 key 存在且值为空 → 显式清空。
+    """
+    from app.core.crypto import encrypt_secret
+    from app.models.sync_source_config import SyncSourceConfig
+    from app.services.sync_source_config_service import update_sync_source_config
+
+    # 清理残留 + 造带单源凭证的源
+    _test_session.execute(
+        SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__clear_test__")
+    )
+    _test_session.commit()
+    _test_session.add(SyncSourceConfig(
+        data_type="__clear_test__", name="清空测试源", base_url="https://wifi.cloud-cat.cn/bms",
+        page_path="/x", group_key="bms-wifi",
+        username=encrypt_secret("tanzk"), password=encrypt_secret("pwd123"),
+        enabled=True,
+    ))
+    _test_session.commit()
+
+    # 显式清空: username/password key 存在但为 None
+    update_sync_source_config(_test_session, "__clear_test__", {"username": None, "password": None})
+    _test_session.refresh(_test_session.scalar(
+        select(SyncSourceConfig).where(SyncSourceConfig.data_type == "__clear_test__")
+    ))
+    row = _test_session.scalar(
+        select(SyncSourceConfig).where(SyncSourceConfig.data_type == "__clear_test__")
+    )
+    assert row.username is None
+    assert row.password is None
+    # 清理
+    _test_session.execute(SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__clear_test__"))
+    _test_session.commit()
+
+
+def test_update_source_absent_cred_key_keeps_existing(_test_session):
+    """不传 username/password key → 保持原有单源凭证不变(兼容只改其它字段)。"""
+    from app.core.crypto import decrypt_secret, encrypt_secret
+    from app.models.sync_source_config import SyncSourceConfig
+    from app.services.sync_source_config_service import update_sync_source_config
+
+    _test_session.execute(
+        SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__keep_test__")
+    )
+    _test_session.commit()
+    _test_session.add(SyncSourceConfig(
+        data_type="__keep_test__", name="保留测试源", base_url="https://wifi.cloud-cat.cn/bms",
+        page_path="/x", group_key="bms-wifi",
+        username=encrypt_secret("YKM-TZK"), password=encrypt_secret("pwdx"),
+        enabled=True,
+    ))
+    _test_session.commit()
+
+    # 只改 name, 不传凭证 → 凭证保持
+    update_sync_source_config(_test_session, "__keep_test__", {"name": "改名"})
+    row = _test_session.scalar(
+        select(SyncSourceConfig).where(SyncSourceConfig.data_type == "__keep_test__")
+    )
+    assert decrypt_secret(row.username) == "YKM-TZK"
+    assert decrypt_secret(row.password) == "pwdx"
+    assert row.name == "改名"
+    _test_session.execute(SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__keep_test__"))
+    _test_session.commit()

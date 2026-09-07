@@ -984,6 +984,48 @@ _ACCOUNT_ERROR_KEYS = (
 )
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 登录类错误熔断判定(2026-09-07 抽取纯函数, 供 fetch_all 熔断记忆 + 单测)
+# ──────────────────────────────────────────────────────────────────────
+# 宽松"登录类"关键词(fetch_all 通用 except 分支用, 命中即视为登录环节出问题)
+_LOGIN_CLASS_KEYS = (
+    "登录失败", "账号或密码", "账号或密码错误", "用户名或密码",
+    "验证码自动识别登录失败", "登录", "密码", "验证码",
+    "captcha", "vcode",
+)
+
+
+def is_login_class_error(err_txt: str, page_crashed: bool = False) -> bool:
+    """错误文本是否属于"登录类错误"(登录/账号/密码/验证码环节失败)。
+
+    排除 page_crashed(浏览器崩溃属另一类, 由调用方单独处理)。
+    """
+    if page_crashed:
+        return False
+    if not err_txt:
+        return False
+    lower = err_txt.lower()
+    return any(k in lower for k in _LOGIN_CLASS_KEYS)
+
+
+def should_circuit_break_group_on_login_error(
+    err_txt: str, *, credential_is_own: bool, page_crashed: bool = False,
+) -> bool:
+    """登录类错误后, 是否应熔断(跳过)同组剩余源。
+
+    - 本源用**组/共享凭证**(credential_is_own=False): 共享账号坏 → 同组后续源用同一
+      账号也必失败 → 熔断整组(True)。
+    - 本源用**单源独立凭证**(credential_is_own=True): 只是该源自己的账号坏, 同组其它
+      源用组凭证仍可能成功 → 不熔断(False), 让后续源以 already_logged_in=False 重新登录。
+
+    修复 2026-09-07 device_combo 误填 tanzk 连坐同组 5 源事故。
+    """
+    if not is_login_class_error(err_txt, page_crashed=page_crashed):
+        return False
+    # 单源独立凭证失败 → 不连坐同组
+    return not credential_is_own
+
+
 async def _locate_captcha_element(page) -> tuple[object | None, bytes | None]:
     """定位验证码元素并截图(返回:元素 locator, png_bytes)。
 
@@ -3686,6 +3728,25 @@ class BmsFetcher:
             # 后续同组源直接跳过登录和抓取,复用同一个登录失败错误,避免 2/3 次相同登录错误反复弹日志。
             group_login_failed_err: str | None = None
 
+            # ── 2026-09-07 账号一致性诊断 ──
+            # 同组共享登录态的前提是「所有源用同一账号」。若组内出现个别源配了单源凭证且
+            # 与组账号不同, 共享登录态会互相干扰(首源单源登录成功后, 后续源复用该登录态,
+            # 实际抓的是首源账号的数据)。这里仅记录诊断日志暴露隐患, 不阻断抓取。
+            _group_acct = first_cfg.get("username")
+            _acct_set = {t["config"].get("username") for t in group_tasks if t["config"].get("username")}
+            if len(_acct_set) > 1:
+                _own_srcs = [
+                    f"{t['data_type']}({t['config'].get('username')!r})"
+                    for t in group_tasks if t["config"].get("credential_is_own")
+                ]
+                logger.warning(
+                    "[组%s] ⚠️ 同组源账号不一致(%d 个不同账号: %s); 单源独立凭证源=%s。"
+                    "共享登录态下仅首个登录的账号生效, 请确认这些源是否确需独立凭证"
+                    "(若单源凭证登录失败, 已按独立凭证处理不再连坐同组)",
+                    group_idx + 1, len(_acct_set), sorted(str(x) for x in _acct_set),
+                    _own_srcs or "无",
+                )
+
             try:
                 for i, task in enumerate(group_tasks):
                     # ═══════════════════════════════════════════════════════════
@@ -3818,17 +3879,39 @@ class BmsFetcher:
                             logged_in_ok = True
                         fr.error = f"抓取失败: {err_txt_full}"
                         logger.error(fr.error, exc_info=True)
-                        # ⚠️ 记忆化: 如果是"登录类错误",写入 group_login_failed_err
-                        if any(k in err_txt_lower for k in (
-                            "登录失败", "账号或密码", "账号或密码错误", "用户名或密码", "验证码自动识别登录失败",
-                            "登录", "密码", "验证码", "captcha", "vcode",
-                        )) and not page_crashed:
+                        # ⚠️ 登录类错误熔断记忆(2026-09-07 细化, 逻辑见 should_circuit_break_group_on_login_error):
+                        #   a) 本源使用**组/共享凭证**登录失败 → 共享账号坏 → 熔断整组(既有行为)。
+                        #   b) 本源使用**单源独立凭证**登录失败 → 只是该源自己的账号坏,
+                        #      不连累同组用组凭证的源 → 不写熔断记忆, 仅 logged_in_ok=False
+                        #      让同组下一源以 already_logged_in=False 重新登录(用组凭证)。
+                        #      修复 2026-09-07 device_combo 误填 tanzk 连坐 5 源事故。
+                        if should_circuit_break_group_on_login_error(
+                            err_txt_full,
+                            credential_is_own=bool(config.get("credential_is_own")),
+                            page_crashed=page_crashed,
+                        ):
                             group_login_failed_err = err_txt_full
                             logger.warning(
-                                "[组%s] 源 %s 登录类失败:%r; 组内剩余 %d 个同源将直接跳过登录抓取",
+                                "[组%s] 源 %s 登录类失败(组/共享凭证):%r; 组内剩余 %d 个同源将直接跳过登录抓取",
                                 group_idx + 1, data_type, group_login_failed_err,
                                 max(0, len(group_tasks) - i - 1),
                             )
+                        elif is_login_class_error(err_txt_full, page_crashed=page_crashed):
+                            if fr.logged_in:
+                                # 登录已成功, 只是下载/后续阶段错误文本恰含"登录/密码"等宽松词
+                                # → 登录态仍有效可复用, 不重置(避免误让下一源重复登录)
+                                logger.info(
+                                    "[组%s] 源 %s 错误文本含登录类词但登录已成功(%r), 登录态保留",
+                                    group_idx + 1, data_type, err_txt_full,
+                                )
+                            else:
+                                # 单源独立凭证登录失败 → 不熔断同组, 让后续源重新登录(组凭证)
+                                logged_in_ok = False
+                                logger.warning(
+                                    "[组%s] 源 %s 登录类失败(本源独立凭证):%r; "
+                                    "不熔断同组, 后续源将用组/共享凭证重新登录",
+                                    group_idx + 1, data_type, err_txt_full,
+                                )
                         # ⚠️ 2026-08-12: 非登录类错误(如下载/设置时间失败)发生在登录之后,
                         #   登录态仍可复用,避免后续源在残留页面上"重新登录"
                         if fr.logged_in and not group_login_failed_err:

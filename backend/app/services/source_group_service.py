@@ -124,13 +124,36 @@ def resolve_credentials(db: Session, row: SyncSourceConfig) -> tuple[str | None,
 
     ⚠️ 2026-09-06 加固: 单源解密结果若是 Fernet 密文特征(旧密钥脏数据) → 视为未配置,
       回退继承组级凭证(否则会把 `gAAAA...` 密文当账号登录报错, 并连累同组其它源)。
+
+    ⚠️ 2026-09-07 加固: 返回增加"凭证来源"标记(own/group/none), 供 fetch_all 熔断细化使用——
+      单源(own)凭证失败只熔断本源, 不再连累同组用组凭证的源(见 bms_fetcher.fetch_all)。
+    """
+    user, pwd, _src = resolve_credentials_with_source(db, row)
+    return user, pwd
+
+
+def resolve_credentials_with_source(
+    db: Session, row: SyncSourceConfig
+) -> tuple[str | None, str | None, str]:
+    """运行时凭证解析(带来源标记): 单源凭证 > 组凭证 > (None)
+
+    返回 (username, password, source):
+      - source = "own"   : 命中该源独立配置的单源凭证(解密有效)
+      - source = "group" : 继承组级凭证(同域共享登录态, 组凭证坏则整组受影响)
+      - source = "none"  : 无任何可用凭证
+
+    设计背景(2026-09-07): 单源凭证是"该源私有覆盖", 登录失败不应连累同组其它用
+    组凭证的源; 组凭证是"同组共享", 登录失败说明整组共享账号出问题, 应熔断整组。
+    调用方(fetch_all 熔断逻辑 / 前端提示)需靠 source 区分这两种场景。
     """
     own_user = _safe_decrypt(row.username) if row.username else None
     own_pwd = _safe_decrypt(row.password) if row.password else None
     if own_user and own_pwd:
-        return own_user, own_pwd
+        return own_user, own_pwd, "own"
     group_user, group_pwd = get_group_credentials(db, row.group_key)
-    return own_user or group_user, own_pwd or group_pwd
+    if (own_user or group_user) and (own_pwd or group_pwd):
+        return own_user or group_user, own_pwd or group_pwd, "group"
+    return None, None, "none"
 
 
 # ── API ─────────────────────────────────────────────────────────────
