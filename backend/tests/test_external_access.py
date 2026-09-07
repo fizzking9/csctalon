@@ -232,3 +232,93 @@ def test_tokens_crud_owner_note(admin_client, db):
     assert up2.status_code == 200
     assert up2.json()["data"]["owner_note"] == ""
 
+
+# ---- v1.2: 限频 0=不限制(三分支语义) ----
+class _FakeRedis:
+    """最小 Redis fake: incr/expire/get(供 check_rate_limit 测试)。"""
+
+    def __init__(self):
+        self.store: dict[str, str] = {}
+        self.ttl: dict[str, int] = {}
+
+    def incr(self, key: str) -> int:
+        self.store[key] = str(int(self.store.get(key, "0")) + 1)
+        return int(self.store[key])
+
+    def expire(self, key: str, seconds: int) -> bool:
+        self.ttl[key] = seconds
+        return True
+
+    def get(self, key: str):
+        return self.store.get(key)
+
+
+@pytest.fixture()
+def _fake_redis(monkeypatch):
+    fr = _FakeRedis()
+    monkeypatch.setattr(S, "get_redis", lambda: fr)
+    return fr
+
+
+def test_rate_limit_zero_unlimited_service(db, _fake_redis, _enable_external):
+    """service: rate_limit_per_min=0 → check_rate_limit 直接 return(不计数/不 429)。
+
+    v1.2 语义: 0=不限制(免除限频)。
+    """
+    _, row = S.generate_token(db, "unlimited", ["brief"], rate_limit_per_min=0)
+    assert row.rate_limit_per_min == 0
+    # 反复调用不抛(不限)
+    for _ in range(10):
+        S.check_rate_limit(row)  # 不抛
+    # 且不做任何 Redis 计数(store 为空)
+    assert _fake_redis.store == {}
+
+
+def test_rate_limit_positive_enforced_service(db, _fake_redis, _enable_external):
+    """service: rate_limit_per_min=1 → 超 1 次后抛 429。"""
+    _, row = S.generate_token(db, "limited", ["brief"], rate_limit_per_min=1)
+    S.check_rate_limit(row)  # 第 1 次 OK
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        S.check_rate_limit(row)  # 第 2 次 > 1 → 429
+    assert exc.value.status_code == 429
+
+
+def test_rate_limit_none_uses_global_default_service(db, _fake_redis, _enable_external):
+    """service: rate_limit_per_min=None → 用全局默认(1000), 多次不超。"""
+    _, row = S.generate_token(db, "global-default", ["brief"])
+    assert row.rate_limit_per_min is None
+    for _ in range(5):
+        S.check_rate_limit(row)  # 1000 阈值, 不抛
+    assert len(_fake_redis.store) == 1  # 已计数(key 存在)
+
+
+def test_token_create_rate_limit_zero_http(admin_client, db):
+    """HTTP: 创建 token 带 rate_limit_per_min=0(schema ge=0 放行) → 落库 0。"""
+    resp = admin_client.post("/api/v1/external/tokens", json={
+        "name": "wb-unlimited", "scopes": ["brief"], "rate_limit_per_min": 0,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["data"]["rate_limit_per_min"] == 0
+
+
+def test_token_update_rate_limit_clear_to_null_http(admin_client, db):
+    """HTTP: update 显式 null → 清回全局默认(None); 显式 0 → 不限。
+
+    v1.2 用 model_fields_set 区分"未传(不改)"与"显式 null(清回默认)"。
+    """
+    # 创建带 5
+    c = admin_client.post("/api/v1/external/tokens", json={
+        "name": "wb-rl", "scopes": ["brief"], "rate_limit_per_min": 5,
+    })
+    tid = c.json()["data"]["id"]
+    # 显式 null → 清回默认(None)
+    u1 = admin_client.patch(f"/api/v1/external/tokens/{tid}", json={"rate_limit_per_min": None})
+    assert u1.status_code == 200
+    assert u1.json()["data"]["rate_limit_per_min"] is None
+    # 显式 0 → 不限
+    u2 = admin_client.patch(f"/api/v1/external/tokens/{tid}", json={"rate_limit_per_min": 0})
+    assert u2.status_code == 200
+    assert u2.json()["data"]["rate_limit_per_min"] == 0
+

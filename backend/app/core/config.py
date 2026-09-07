@@ -120,6 +120,11 @@ class Settings(BaseSettings):
     EXTERNAL_API_ENABLED: bool = False
     # 全局默认限频(次/分钟): token 未配 rate_limit_per_min 时使用(每半小时 1 次绰绰有余)。
     EXTERNAL_RATE_LIMIT_DEFAULT_PER_MIN: int = 60
+    # brief 单次 start/end 任意区间允许的最大跨度(天)。护栏: 防一次拉太宽历史窗口
+    # 压库/被当全量导出工具滥用。默认 93 天(≈1 季度, 覆盖季度简报/回看)。end 传未来日期
+    # (晚于今天)固定拒绝 400(不随本配置放宽, 防时间穿越)。单日端点(reception/refund/complaint)
+    # 仅收单日 date, 不受此限制。
+    EXTERNAL_BRIEF_MAX_RANGE_DAYS: int = 93
 
     # ── LLM / AI 分析助手(见 docs/arch/A-20260904-003 LOCKED v1.0) ──
     # 是否启用 /api/v1/ai 助手。false 时 ai 端点一律 503(默认关闭, 需显式开启)。

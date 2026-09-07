@@ -181,27 +181,64 @@ def external_complaint(
 # ─────────────────────────────────────────────────────────────────────
 # 对外只读: 一键经营简报 brief (period 日/周/月)
 # ─────────────────────────────────────────────────────────────────────
-@router.get("/brief", response_model=R, summary="外部-一键经营简报(日/周/月)")
+@router.get("/brief", response_model=R, summary="外部-一键经营简报(日/周/月/任意区间)")
 def external_brief(
     db: DBSession,
     period: str = Query("daily", pattern="^(daily|weekly|monthly)$", description="daily/weekly/monthly"),
     date: str | None = Query(None, description="period=daily 时指定某整天 YYYY-MM-DD(缺省=今天实时)"),
+    start: str | None = Query(None, description="任意区间起点, 仅纯日期 YYYY-MM-DD(与 end 成对; 给定则优先于 period/date, 支持历史标准周回看; 起点日 00:00:00 起)"),
+    end: str | None = Query(None, description="任意区间终点, 仅纯日期 YYYY-MM-DD(与 start 成对; end=今天则实时截止 now, 否则整天 23:59:59)"),
     authorization: Annotated[str | None, Header()] = None,
 ):
     row = _auth(db, authorization)
     S.require_scope(row, "brief")
-    S.record_external_access(db, row, f"brief:{period}")
-    return R(data=_build_brief(db, period, date))
+    tag = f"brief:{period}" if (start is None and end is None) else f"brief:range:{start}:{end}"
+    S.record_external_access(db, row, tag)
+    return R(data=_build_brief(db, period, date, start=start, end=end))
 
 
-def _window(period: str, date: str | None) -> dict:
-    """period/date → 时间窗口(架构 §2.2 口径)
+def _window(period: str, date: str | None, start: str | None = None, end: str | None = None) -> dict:
+    """period/date 或 start/end → 时间窗口(架构 §2.2 口径 + v1.2 range 扩展)
 
-    daily=当日0点起(实时), date 给定则该整天; weekly=整周(周一起); monthly=整月(未满月则1日到当前)。
-    返回 start/end(YYYY-MM-DD, 供 analytics 按北京时区解释); grain 供 refund_decision_overview(daily→day, weekly/monthly→week)。
+    - 默认: daily=当日0点起(实时), date 给定则该整天; weekly=整周(周一起); monthly=整月(未满月则1日到当前)。
+    - v1.2 range 扩展: start/end 同时给出 → 任意连续区间(历史标准周回看 = 传该周周一~周日);
+      仅收纯日期 YYYY-MM-DD; 跨天区间默认整天(起点 00:00:00 ~ 终点 23:59:59), end==今天 → 实时截止 now。
+      只给一个 → 400。
+    返回 start/end(YYYY-MM-DD, 供 analytics 按北京时区解释); grain 供 refund_decision_overview(单日→day, 区间→week)。
     """
     now = _now_cn()
     today = now.date()
+
+    # ── v1.2: start/end 任意区间模式(成对校验 + 宽度/未来护栏) ──
+    if start is not None or end is not None:
+        if start is None or end is None:
+            raise HTTPException(400, "start/end 必须成对提供(YYYY-MM-DD)")
+        s = _valid_date_or_400(start)
+        e = _valid_date_or_400(end)
+        s_d = _dt.date.fromisoformat(s)
+        e_d = _dt.date.fromisoformat(e)
+        if s_d > e_d:
+            raise HTTPException(400, f"start({s}) 不能晚于 end({e})")
+        # ⚠️ 护栏(2026-09-07): end 晚于今天(北京) → 400(防时间穿越/未来空窗, 不静默截断)。
+        if e_d > today:
+            raise HTTPException(400, f"end({e}) 不能晚于今天({today.isoformat()})")
+        span_days = (e_d - s_d).days + 1
+        # ⚠️ 护栏: 单次区间跨度上限(settings.EXTERNAL_BRIEF_MAX_RANGE_DAYS, 默认 93 天≈1季度)。
+        #   防一次拉太宽历史窗口压库/被当全量导出工具滥用; 与限频(频次)正交, 这是"单次宽度"层护栏。
+        max_days = int(getattr(settings, "EXTERNAL_BRIEF_MAX_RANGE_DAYS", 93) or 93)
+        if span_days > max_days:
+            raise HTTPException(
+                400, f"start/end 跨度 {span_days} 天超过上限 {max_days} 天; 请缩短日期范围后重试"
+            )
+        is_realtime = (e_d == today)
+        return {
+            "period": "range", "date": None, "grain": "day" if span_days <= 1 else "week",
+            "date_start": f"{s}T00:00:00+08:00",
+            "date_end": now.isoformat() if is_realtime else f"{e}T23:59:59+08:00",
+            "is_realtime": is_realtime, "start": s, "end": e,
+            "range": {"start": s, "end": e, "span_days": span_days},
+        }
+
     if period == "daily":
         d = _valid_date_or_400(date)
         d = _dt.date.fromisoformat(d) if d else today
@@ -213,12 +250,20 @@ def _window(period: str, date: str | None) -> dict:
             "is_realtime": is_realtime, "start": d.isoformat(), "end": d.isoformat(),
         }
     if period == "weekly":
-        monday = today - _dt.timedelta(days=today.weekday())
+        # date 给定 → 取该日所在 ISO 自然周的周一~周日(历史周整天; 若该周含今天则实时截止 now);
+        # date 缺省 → 本周周一~今天(实时, 向后兼容 v1.0 行为不变)。
+        base = _valid_date_or_400(date)
+        base_d = _dt.date.fromisoformat(base) if base else today
+        monday = base_d - _dt.timedelta(days=base_d.weekday())
+        sunday = monday + _dt.timedelta(days=6)
+        is_realtime = (base is None) or (sunday >= today and monday <= today)
+        end_d = today if is_realtime else sunday
         return {
-            "period": "weekly", "grain": "week",
+            "period": "weekly", "date": base_d.isoformat() if base else None, "grain": "week",
             "date_start": f"{monday.isoformat()}T00:00:00+08:00",
-            "date_end": now.isoformat(), "is_realtime": True,
-            "start": monday.isoformat(), "end": today.isoformat(),
+            "date_end": now.isoformat() if is_realtime else f"{sunday.isoformat()}T23:59:59+08:00",
+            "is_realtime": is_realtime,
+            "start": monday.isoformat(), "end": end_d.isoformat(),
         }
     month_start = today.replace(day=1)
     last_day = calendar.monthrange(today.year, today.month)[1]
@@ -232,8 +277,14 @@ def _window(period: str, date: str | None) -> dict:
     }
 
 
-def _build_brief(db: Session, period: str, date: str | None) -> dict:
-    win = _window(period, date)
+def _build_brief(db: Session, period: str, date: str | None,
+                 start: str | None = None, end: str | None = None) -> dict:
+    """组装 brief(period 模式或 v1.2 start/end 任意区间模式)。
+
+    start/end 同时给出 → 覆盖 period/date(历史标准周/任意区间回看, 架构 §一.1.1);
+    否则走既有 period(+date) 窗口逻辑(向后兼容, 行为不变)。
+    """
+    win = _window(period, date, start=start, end=end)
     start_s, end_s = win["start"], win["end"]
     # KPI/退款四路/现金流: 复用 today_kpi(内部 _resolve_windows 已按北京时区解释 start/end;
     #   end==今天→实时截止 now; 否则整天; cash_routes_today 即同窗口四路+E)
@@ -248,7 +299,7 @@ def _build_brief(db: Session, period: str, date: str | None) -> dict:
     complaint = _complaint_enhanced(db, start_s, end_s)
     # 接待专项增强(名单+会话+设备)
     reception_spec = _reception_specialty(db, start_s, end_s)
-    return {
+    out = {
         "period": win["period"],
         "date": win.get("date"),
         "date_start": win["date_start"],
@@ -274,6 +325,10 @@ def _build_brief(db: Session, period: str, date: str | None) -> dict:
         },
         "_spec": _spec_brief(),
     }
+    # v1.2: start/end 区间模式透出 range(便于调用方核对窗口; period 模式无此字段, 向后兼容)
+    if win.get("range"):
+        out["range"] = win["range"]
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -468,7 +523,8 @@ def _reception_specialty(db: Session, start_s: str, end_s: str) -> list[dict]:
 def _spec_brief() -> dict:
     return {
         "money_unit": "金额单位=元(Numeric(12,2), 2位小数)",
-        "period": "daily=当日0点起; weekly=整周(周一起); monthly=整月(未满月则1日到当前)",
+        "period": "daily=当日0点起; weekly=整周(周一起); monthly=整月(未满月则1日到当前); 传 start/end 则优先(任意连续区间/历史标准周回看, end=今天实时截止)",
+        "range": "start/end 同时给出 → 该闭区间(YYYY-MM-DD, 北京时间整天; end=今天则实时截止 now); 单日区间等价 period=daily&date",
         "litigation_ratio": "A路直退涉诉率=涉诉金额/A路(线上直退)金额×100; 涉诉=SN关联投诉工单(外部>商户号>内部) OR 备注含投诉标识; 清退不算",
         "complaint": ("registered=窗口内新登记(工单按 register_time; 315/卡商补充表按 complaint_date 并"
                         "入外部桶, 已 matched 到窗口内工单的去重); handled=窗口内真实完成(finish_time∈窗口 且"
@@ -531,7 +587,10 @@ def update_token(token_id: int, payload: ExternalTokenUpdate, db: DBSession, _: 
         if invalid:
             raise HTTPException(400, f"非法 scope: {', '.join(invalid)}")
         row.scopes = list(dict.fromkeys(payload.scopes))
-    if payload.rate_limit_per_min is not None:
+    # v1.2: rate_limit_per_min 三值语义(0=不限 / null=全局默认 / >0=个性化)。
+    #   用 model_fields_set 判断"是否显式传入"(含显式 null), 才能把限频"清回全局默认";
+    #   未传该字段(=部分更新)则保持原值, 与 name/scopes 部分更新语义一致。
+    if "rate_limit_per_min" in payload.model_fields_set:
         row.rate_limit_per_min = payload.rate_limit_per_min
     if payload.owner_note is not None:
         row.owner_note = payload.owner_note[:255]

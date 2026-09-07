@@ -73,6 +73,18 @@ def test_window_weekly_monday():
     assert w["start"] == monday.isoformat()
 
 
+def test_window_weekly_given_date_full_week():
+    """v1.1: weekly + date → 该 date 所在 ISO 周(周一~周日), 历史周整天。"""
+    # 2026-08-05 是周三 → 所在周 2026-08-03(周一) ~ 2026-08-09(周日)
+    w = _window("weekly", "2026-08-05")
+    assert w["start"] == "2026-08-03"
+    assert w["end"] == "2026-08-09"
+    assert w["date"] == "2026-08-05"
+    assert w["is_realtime"] is False
+    assert w["date_start"].startswith("2026-08-03T00:00:00")
+    assert w["date_end"].startswith("2026-08-09T23:59:59")
+
+
 def test_window_monthly_first_to_current():
     """monthly → 1 日到当前(未满月时实时)。"""
     w = _window("monthly", None)
@@ -82,6 +94,125 @@ def test_window_monthly_first_to_current():
     last_day = calendar.monthrange(today.year, today.month)[1]
     if today.day != last_day:
         assert w["is_realtime"] is True
+
+
+# ---- v1.2: _window start/end 任意区间模式(历史标准周/单日/非法) ----
+def test_window_range_historical_full_week():
+    """range: start/end 历史整周(周一~周日) → 整天非实时, grain=week。"""
+    # 2026-08-03 是周一? 校验: 取 2026-08-03 所在周的周一~周日(ISO 自然周)。
+    s, e = "2026-08-03", "2026-08-09"
+    w = _window("range", None, start=s, end=e)
+    assert w["period"] == "range"
+    assert w["start"] == s and w["end"] == e
+    assert w["is_realtime"] is False
+    assert w["grain"] == "week"
+    assert w["range"] == {"start": s, "end": e, "span_days": 7}
+    assert w["date_start"].startswith(f"{s}T00:00:00")
+    assert w["date_end"].startswith(f"{e}T23:59:59")
+
+
+def test_window_range_single_day():
+    """range: start==end(单日) → 整天, grain=day(等价 period=daily&date)。"""
+    w = _window("range", None, start="2026-08-01", end="2026-08-01")
+    assert w["grain"] == "day"
+    assert w["is_realtime"] is False
+    assert w["range"]["span_days"] == 1
+    assert w["date_start"].startswith("2026-08-01T00:00:00")
+
+
+def test_window_range_end_today_realtime():
+    """range: end==今天 → 实时截止 now。"""
+    today = _dt.datetime.now(TZ).date().isoformat()
+    # start 取今天前 6 天(=滚动 7 天区间, 非 ISO 周)
+    import datetime as _dt2
+    s = (_dt2.date.fromisoformat(today) - _dt.timedelta(days=6)).isoformat()
+    w = _window("range", None, start=s, end=today)
+    assert w["is_realtime"] is True
+    assert w["grain"] == "week"
+
+
+def test_window_range_invalid():
+    """range: 非法参数/起>止/只传一个 → 400。"""
+    import pytest
+    from fastapi import HTTPException
+    # 只传 start
+    with pytest.raises(HTTPException) as e1:
+        _window("range", None, start="2026-08-01")
+    assert e1.value.status_code == 400
+    # 只传 end
+    with pytest.raises(HTTPException) as e2:
+        _window("range", None, end="2026-08-01")
+    assert e2.value.status_code == 400
+    # 起>止
+    with pytest.raises(HTTPException) as e3:
+        _window("range", None, start="2026-08-09", end="2026-08-03")
+    assert e3.value.status_code == 400
+    # 非法格式
+    with pytest.raises(HTTPException) as e4:
+        _window("range", None, start="abc", end="2026-08-03")
+    assert e4.value.status_code == 400
+
+
+def test_window_range_future_end_rejected():
+    """护栏: end 晚于今天(北京) → 400(防时间穿越/未来空窗)。"""
+    import pytest
+    from fastapi import HTTPException
+    today = _dt.datetime.now(TZ).date()
+    future = (today + timedelta(days=1)).isoformat()
+    past = (today - timedelta(days=7)).isoformat()
+    with pytest.raises(HTTPException) as exc:
+        _window("range", None, start=past, end=future)
+    assert exc.value.status_code == 400
+    assert "不能晚于今天" in exc.value.detail
+
+
+def test_window_range_exceeds_max_days_rejected(monkeypatch):
+    """护栏: 跨度超过 EXTERNAL_BRIEF_MAX_RANGE_DAYS → 400。"""
+    import pytest
+    from fastapi import HTTPException
+
+    from app.core.config import settings
+    # 临时把上限调小到 7 天, 构造 8 天区间验证拦截(避免依赖真实 93 天造 94 天跨年数据)
+    monkeypatch.setattr(settings, "EXTERNAL_BRIEF_MAX_RANGE_DAYS", 7)
+    today = _dt.datetime.now(TZ).date()
+    # 8 天区间(今天往前 7 天 ~ 今天) → 超过 7 天上限
+    s = (today - timedelta(days=7)).isoformat()
+    e = today.isoformat()
+    with pytest.raises(HTTPException) as exc:
+        _window("range", None, start=s, end=e)
+    assert exc.value.status_code == 400
+    assert "跨度" in exc.value.detail and "上限" in exc.value.detail
+    # 还原上限后, 同 8 天区间允许(默认 93 天)
+    monkeypatch.undo()
+    w = _window("range", None, start=s, end=e)
+    assert w["range"]["span_days"] == 8
+
+
+def test_brief_range_exceeds_max_days_http(brief_client, db, monkeypatch):
+    """HTTP: brief start/end 超跨度上限 → 400。"""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "EXTERNAL_BRIEF_MAX_RANGE_DAYS", 7)
+    raw, _ = S.generate_token(db, "brief-wide", ["brief"], created_by="admin")
+    today = _dt.datetime.now(TZ).date()
+    s = (today - timedelta(days=7)).isoformat()
+    resp = brief_client.get(
+        f"/api/v1/external/brief?start={s}&end={today.isoformat()}",
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_brief_range_future_end_http(brief_client, db):
+    """HTTP: brief start/end end 为未来 → 400。"""
+    raw, _ = S.generate_token(db, "brief-future", ["brief"], created_by="admin")
+    today = _dt.datetime.now(TZ).date()
+    s = (today - timedelta(days=1)).isoformat()
+    future = (today + timedelta(days=1)).isoformat()
+    resp = brief_client.get(
+        f"/api/v1/external/brief?start={s}&end={future}",
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert resp.status_code == 400
 
 
 # ---- brief 组装/接口 ----
@@ -120,6 +251,40 @@ def test_brief_invalid_period(brief_client, db):
     raw, _ = S.generate_token(db, "b1", ["brief"], created_by="admin")
     resp = brief_client.get("/api/v1/external/brief?period=yearly", headers={"Authorization": f"Bearer {raw}"})
     assert resp.status_code == 422
+
+
+# ---- v1.2: brief start/end 任意区间 HTTP 回看 ----
+def test_brief_range_endpoint_historical_week(brief_client, db):
+    """HTTP: brief?start=&end= 历史标准周 → 200, 结构与 period 模式一致 + range 透出。"""
+    raw, _ = S.generate_token(db, "brief-range", ["brief"], created_by="admin")
+    # 历史 ISO 自然周(2026-08-03 周一 ~ 08-09 周日)
+    resp = brief_client.get(
+        "/api/v1/external/brief?start=2026-08-03&end=2026-08-09",
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["period"] == "range"
+    assert data["range"] == {"start": "2026-08-03", "end": "2026-08-09", "span_days": 7}
+    assert data["date_start"].startswith("2026-08-03T00:00:00")
+    # 结构与 period 模式一致(核心段齐全)
+    assert "total" in data["reception"] and "by_specialty" in data["reception"]
+    assert set(data["refund"]["routes"].keys()) == {"route_a", "route_b", "route_c", "route_d"}
+    assert set(data["complaint"].keys()) == {"total", "by_source"}
+    assert "_spec" in data
+
+
+def test_brief_range_requires_pair(brief_client, db):
+    """边界: 只传 start/end 之一 → 400。"""
+    raw, _ = S.generate_token(db, "brief-range-bad", ["brief"], created_by="admin")
+    h = {"Authorization": f"Bearer {raw}"}
+    r1 = brief_client.get("/api/v1/external/brief?start=2026-08-03", headers=h)
+    assert r1.status_code == 400
+    r2 = brief_client.get("/api/v1/external/brief?end=2026-08-03", headers=h)
+    assert r2.status_code == 400
+    # 起>止
+    r3 = brief_client.get("/api/v1/external/brief?start=2026-08-09&end=2026-08-03", headers=h)
+    assert r3.status_code == 400
 
 
 # ---- 投诉增强口径(修复审查 CRITICAL): handled 需 finish>=register+3min, backlog 需归一化 ----

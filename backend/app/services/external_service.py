@@ -167,8 +167,20 @@ def touch_last_used(db: Session, row: ExternalAccessToken) -> None:
 # ─────────────────────────────────────────────────────────────────────
 # Redis 固定窗口限频
 # ─────────────────────────────────────────────────────────────────────
+def _is_unlimited(row: ExternalAccessToken) -> bool:
+    """token 显式 rate_limit_per_min=0 → 不限制(免除限频)。
+
+    v1.2 三值语义: 0=不限制 / NULL=用全局默认 / >0=个性化。
+    """
+    return row.rate_limit_per_min == 0
+
+
 def _token_quota(row: ExternalAccessToken) -> int:
-    if row.rate_limit_per_min and row.rate_limit_per_min > 0:
+    """返回该 token 的限频阈值(次/分钟)。
+
+    仅处理 >0(个性化) 与 NULL(全局默认); 0=不限制由 check_rate_limit 提前短路。
+    """
+    if row.rate_limit_per_min is not None and row.rate_limit_per_min > 0:
         return row.rate_limit_per_min
     return settings.EXTERNAL_RATE_LIMIT_DEFAULT_PER_MIN or 60
 
@@ -176,8 +188,11 @@ def _token_quota(row: ExternalAccessToken) -> int:
 def check_rate_limit(row: ExternalAccessToken) -> None:
     """固定窗口: rate:ext:{token_hash 前16}:{YYYYMMDDHHmm} → INCR, 首次 EXPIRE 60。
 
+    v1.2: rate_limit_per_min=0 → 不限(直接 return, 不做 INCR/计数)。
     Redis 不可用 → 放行(降级, 不阻塞只读业务)。
     """
+    if _is_unlimited(row):
+        return
     r = get_redis()
     if r is None:
         return

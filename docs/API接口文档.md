@@ -281,15 +281,15 @@
 | GET | `/external/reception` | `reception` | 当日/指定日接待量 + 服务设备数 + 环比（`date` 缺省今天，北京时间） |
 | GET | `/external/refund` | `refund` | 退款笔数/金额（四路经营合计）+ 当日完成退款 + 实际现金流 E；金额单位=元 |
 | GET | `/external/complaint` | `complaint` | 投诉量（三表并集，落当日） |
-| GET | `/external/brief` | `brief` | 一键经营简报，`period=daily/weekly/monthly`；含接待专项/退款(四路+涉诉率)/投诉(三源×登记/处理/积压) |
+| GET | `/external/brief` | `brief` | 一键经营简报，`period=daily/weekly/monthly`；含接待专项/退款(四路+涉诉率)/投诉(三源×登记/处理/积压)。v1.1 支持 `start/end` 任意区间（历史标准周回看=传周一~周日，`period` 模式向后兼容；`end` 不能晚于今天；单次跨度上限 93 天可配 `EXTERNAL_BRIEF_MAX_RANGE_DAYS`；`start/end` 仅收纯日期 `YYYY-MM-DD`，跨天默认整天 `00:00:00~23:59:59`，`end=今天` 实时截止 now） |
 
 **管理端点（内部 JWT，仅 admin）：**
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/external/tokens` | token 列表（不含明文，仅 prefix） |
-| POST | `/external/tokens` | 生成 token（明文仅此一次返回）；body：`{name, scopes[], rate_limit_per_min?, expires_at?}` |
-| PATCH | `/external/tokens/{id}` | 更新 name/scopes/rate_limit_per_min/enabled |
+| POST | `/external/tokens` | 生成 token（明文仅此一次返回）；body：`{name, scopes[], rate_limit_per_min?, expires_at?}`（`rate_limit_per_min`: 0=不限制 / 空=全局默认 / >0=个性化） |
+| PATCH | `/external/tokens/{id}` | 更新 name/scopes/rate_limit_per_min(0=不限/null=全局默认/>0=个性化)/enabled |
 | POST | `/external/tokens/{id}/revoke` | 吊销（软删，即时生效） |
 | GET | `/external/config` | 启用状态 + 默认限频 + 可用 scope |
 

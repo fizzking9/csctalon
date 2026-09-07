@@ -38,7 +38,10 @@
           </template>
         </el-table-column>
         <el-table-column label="限频(次/分)" width="100">
-          <template #default="{ row }">{{ row.rate_limit_per_min ?? '全局默认' }}</template>
+          <template #default="{ row }">
+            <el-tag v-if="row.rate_limit_per_min === 0" type="warning" size="small">不限制</el-tag>
+            <template v-else>{{ row.rate_limit_per_min ?? '全局默认' }}</template>
+          </template>
         </el-table-column>
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
@@ -93,8 +96,8 @@
           <div class="sub-tip">reception=接待 / refund=退款 / complaint=投诉 / brief=经营简报</div>
         </el-form-item>
         <el-form-item label="限频(次/分)">
-          <el-input-number v-model="form.rate_limit_per_min" :min="1" :max="100000" />
-          <div class="sub-tip">留空=使用全局默认({{ cfg?.default_rate_limit_per_min }} 次/分钟)</div>
+          <el-input-number v-model="form.rate_limit_per_min" :min="0" :max="100000" />
+          <div class="sub-tip">0=不限制 / 留空=使用全局默认({{ cfg?.default_rate_limit_per_min }} 次/分钟)</div>
         </el-form-item>
         <el-form-item label="过期时间">
           <el-date-picker v-model="form.expires_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss+08:00" placeholder="可选, 留空=不过期" />
@@ -134,8 +137,8 @@
           </el-checkbox-group>
         </el-form-item>
         <el-form-item label="限频(次/分)">
-          <el-input-number v-model="editForm.rate_limit_per_min" :min="1" :max="100000" />
-          <div class="sub-tip">留空=全局默认</div>
+          <el-input-number v-model="editForm.rate_limit_per_min" :min="0" :max="100000" />
+          <div class="sub-tip">0=不限制 / 空=全局默认({{ cfg?.default_rate_limit_per_min }} 次/分钟) / &gt;0=个性化</div>
         </el-form-item>
         <el-form-item label="责任人/用途">
           <el-input v-model="editForm.owner_note" maxlength="255" show-word-limit />
@@ -208,7 +211,10 @@ async function submitCreate() {
   saving.value = true
   try {
     const payload = { name: form.name, scopes: form.scopes }
-    if (form.rate_limit_per_min) payload.rate_limit_per_min = form.rate_limit_per_min
+    // ⚠️ v1.2: rate_limit_per_min 三值语义(0=不限制/null=全局默认/>0=个性化)。
+    //   0 是真值但语义为"不限制", 必须用 !== null/undefined 判断(不能 if(x) 把 0 丢掉);
+    //   null/undefined 不发 → 后端落 NULL(全局默认)。
+    if (form.rate_limit_per_min !== null && form.rate_limit_per_min !== undefined) payload.rate_limit_per_min = form.rate_limit_per_min
     if (form.expires_at) payload.expires_at = form.expires_at
     if (form.owner_note) payload.owner_note = form.owner_note
     const res = await createExternalToken(payload)
@@ -242,7 +248,14 @@ async function submitEdit() {
   if (!editForm.scopes.length) { ElMessage.warning('请至少选择一个权限范围'); return }
   saving.value = true
   try {
-    const payload = { name: editForm.name, scopes: editForm.scopes, rate_limit_per_min: editForm.rate_limit_per_min }
+    // ⚠️ v1.2: rate_limit_per_min 三值语义。
+    //   el-input-number 为空时 v-model 为 null(要发显式 null 表示"清回全局默认",
+    //   不能省略——否则后端视为"部分更新不改"); 0 表示不限制, 必须显式发送。
+    const payload = {
+      name: editForm.name,
+      scopes: editForm.scopes,
+      rate_limit_per_min: editForm.rate_limit_per_min ?? null,
+    }
     // 始终发送 owner_note(含空串): 后端 update 对 None 不更新、对空串清空。
     // 若此处用 if(非空)才发, 用户清空"责任人"保存将无效(W1, 2026-09-04 审查)。
     payload.owner_note = editForm.owner_note || ''

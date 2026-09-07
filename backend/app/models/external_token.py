@@ -32,7 +32,7 @@ class ExternalAccessToken(IDMixin, TimestampMixin, Base):
         JSONB, nullable=False, comment="权限范围: reception/refund/complaint/brief, 可扩展"
     )
     rate_limit_per_min: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, comment="每 token 个性化限频(次/分钟); NULL=用全局默认"
+        Integer, nullable=True, comment="每 token 个性化限频(次/分钟); 0=不限制 / NULL=用全局默认 / >0=个性化"
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, comment="总开关: false=已吊销(软删)")
     expires_at: Mapped[datetime | None] = mapped_column(
