@@ -194,6 +194,18 @@ def test_traffic_upstream_refresh_triggers_fetch(admin_client, monkeypatch, db):
     db.flush()
     captured = {"called": False}
     _patch_sync_fetch(monkeypatch, captured)
+    # ⚠️ 2026-09-07 修复 CI 环境依赖: _upstream_query_traffic 在 refresh=true 时需
+    #   先取到非空 BMS 凭证(u/p) 才会调用 sync_device_flow_sn。本地持久测试库
+    #   sync_source_configs 有 seed 凭证故通过; CI 全新库为空表 → u/p=None → 不走
+    #   上游分支 → captured["called"]=False 断言失败。此处显式注入凭证 config,
+    #   使测试不依赖环境 seed(只验证 refresh 触发逻辑本身)。
+    import app.services.sync_source_config_service as sscs
+
+    fake_cfg = {
+        "username": "ci-test-user", "password": "ci-test-pwd",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+    }
+    monkeypatch.setattr(sscs, "get_sync_source_config", lambda db_, dt: fake_cfg if dt == "refund" else None)
     resp = admin_client.get("/api/v1/recharges/traffic/upstream",
                             params={"sn": "SN-REFRESH-1", "refresh": "true"})
     assert resp.status_code == 200
