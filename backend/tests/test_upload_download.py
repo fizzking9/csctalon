@@ -12,8 +12,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 
@@ -132,7 +130,6 @@ def test_file_download_ok(admin_client, _engine, tmp_path, monkeypatch):
 
     from app.core.config import settings
     from app.models.upload import UploadRecord
-    from app.services.data_parser import COLUMN_TEMPLATES
 
     # 造一个真实落盘文件(monkeypatch UPLOAD_DIR 到 tmp)
     monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))

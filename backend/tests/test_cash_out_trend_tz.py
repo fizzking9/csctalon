@@ -151,6 +151,7 @@ def test_naive_param_treated_as_bj_window(_test_session):
     北京 9/1 00:30 的退款(UTC 8/31 16:30)必须被包含 —— 若 naive 被当 UTC 窗口
     (UTC 9/1 0:00 起)会漏掉它"""
     from datetime import datetime as _py_dt
+
     from app.services.analytics import cash_out_trend
 
     # 北京 2026-09-01 00:30 = UTC 2026-08-31 16:30
