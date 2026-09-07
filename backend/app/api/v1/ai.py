@@ -15,11 +15,12 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.api.deps import ManagerUser
+from app.api.deps import AdminUser, DBSession, ManagerUser
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.schemas.ai_focus import AiFocusCreate, AiFocusUpdate
 from app.schemas.common import R
-from app.services import ai_feed, llm_client
+from app.services import ai_feed, ai_focus_service, llm_client
 from app.services.ai_task_manager import ai_task_manager
 
 logger = logging.getLogger(__name__)
@@ -160,3 +161,30 @@ def ai_task_status(task_id: str, _: ManagerUser):
 def ai_task_latest(_: ManagerUser):
     latest = ai_task_manager.get_latest()
     return R(data={"latest": latest.to_public_dict() if latest else None})
+
+
+# ─────────────────────────────────────────────────────────────────────
+# AI 助手关注点/分析视角配置管理(#26, A-20260904-003 v1.2)
+#   AdminUser(改提示词=高风险); 不依赖 LLM_ENABLED(可先配置后启用)。
+# ─────────────────────────────────────────────────────────────────────
+@router.get("/focus-configs", response_model=R, summary="AI 关注点/分析视角配置列表(内部)")
+def ai_focus_list(db: DBSession, _: AdminUser):
+    return R(data=ai_focus_service.list_configs(db))
+
+
+@router.post("/focus-configs", response_model=R, summary="新建 AI 关注点(内部)")
+def ai_focus_create(payload: AiFocusCreate, db: DBSession, me: AdminUser):
+    return R(data=ai_focus_service.create_config(db, payload, me.username))
+
+
+@router.patch("/focus-configs/{config_id}", response_model=R, summary="更新 AI 关注点(内部)")
+def ai_focus_update(config_id: int, payload: AiFocusUpdate, db: DBSession, me: AdminUser):
+    return R(data=ai_focus_service.update_config(db, config_id, payload, me.username))
+
+
+@router.delete("/focus-configs/{config_id}", response_model=R, summary="删除 AI 关注点(内部)")
+def ai_focus_delete(config_id: int, db: DBSession, _: AdminUser):
+    ok = ai_focus_service.delete_config(db, config_id)
+    if not ok:
+        raise HTTPException(404, "关注点不存在")
+    return R(data={"ok": True})

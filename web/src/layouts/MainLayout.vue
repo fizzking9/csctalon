@@ -120,6 +120,7 @@
           </el-menu-item>
           <el-menu-item index="/system/cache">缓存管理</el-menu-item>
           <el-menu-item index="/system/external-access">外部接入</el-menu-item>
+          <el-menu-item index="/system/ai-focus-configs">AI 助手提示词</el-menu-item>
         </el-sub-menu>
       </el-menu>
     </el-aside>

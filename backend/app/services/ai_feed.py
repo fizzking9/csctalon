@@ -131,11 +131,27 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
         f" {win_label}; date_start={feed.get('date_start')}; date_end={feed.get('date_end')}; " +
         f" generated_at={feed.get('generated_at')}"
     )
+    # 关注点/分析视角(#26, A-20260904-003 v1.2): DB 配置的建议性指导, 注入于口径与数据之间。
+    # 空库/无命中 → 空串, 保持改造前输出一致(回归安全)。仅作运营侧重参考, 数据仍以 feed 为准。
+    focus = ""
+    try:
+        from app.services.ai_focus_service import focus_for_question
+        focus = focus_for_question(db, question)
+    except Exception:  # noqa: BLE001  Focus 故障不影响主链路
+        logger.warning("ai_feed 加载 focus 失败(忽略): 保持无 focus 输出")
     data_ctx = "【给定数据(JSON, 金额单位=元)】\n" + feed_json
     system = _SYSTEM_PROMPT
+    if focus:
+        body = (
+            f"{business_ctx}\n\n"
+            "【本期关注点 / 分析视角(运营侧重参考, 供你组织回答时侧重; 数据仍以给定数据为准)】\n"
+            f"{focus}\n\n{data_ctx}\n\n请回答以下问题：{question}"
+        )
+    else:
+        body = f"{business_ctx}\n\n{data_ctx}\n\n请回答以下问题：{question}"
     return [
         {"role": "system", "content": system},
-        {"role": "user", "content": f"{business_ctx}\n\n{data_ctx}\n\n请回答以下问题：{question}"},
+        {"role": "user", "content": body},
     ]
 
 

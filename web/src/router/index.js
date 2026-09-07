@@ -410,6 +410,12 @@ const routes = [
         component: () => import('@/views/system/ExternalAccess.vue'),
         meta: { title: '外部接入', icon: 'Key', admin: true },
       },
+      {
+        path: 'system/ai-focus-configs',
+        name: 'SystemAiFocusConfigs',
+        component: () => import('@/views/system/AiFocusConfigs.vue'),
+        meta: { title: 'AI 助手提示词', icon: 'MagicStick', admin: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
