@@ -389,6 +389,41 @@ def get_sync_source_config(db: Session, data_type: str) -> dict | None:
     }
 
 
+def list_scheduled_bms_sources(db: Session) -> dict[str, list[str]]:
+    """读取"应纳入定时采集"的 BMS 源集合, 按高频/低频分档(A-20260907-001 LOCKED / #31)。
+
+    返回 {"all": [...], "high": [...], "low": [...]}:
+      - all  = sync_source_configs 中 default_sync=true AND enabled=true 且非 SCRM 的源
+              (data_type 不以 scrm_ 开头), 按 sort_order 排序 —— UI「纳入周期采集」开关的真源。
+      - high = all ∩ 代码种子 DEFAULT_SYNC_TYPES(内置核心高频源: refund/ticket/wallet/cs_record)
+               —— 白天每小时 + 5:00/8:00 兜底档跑这些。
+      - low  = all − high —— 大表/报表/档案型低频源, 每天 1 次(低频档 6:00)跑。
+
+    设计背景: 原调度器用代码常量 DEFAULT_SYNC_TYPES 决定定时源, 从不读 DB default_sync,
+    导致 UI「纳入周期采集」开关(改 DB)不生效(生产 12 源 true 但定时只跑 4 个)。
+    本函数把"调度源集合"收敛到 DB(default_sync=true), 高频/低频用"是否种子核心源"区分。
+
+    注意: 内部延迟 import bms_sync.DEFAULT_SYNC_TYPES, 避免与 bms_sync 的循环依赖。
+    """
+    rows = db.scalars(
+        select(SyncSourceConfig)
+        .where(
+            SyncSourceConfig.default_sync.is_(True),
+            SyncSourceConfig.enabled.is_(True),
+            ~SyncSourceConfig.data_type.like("scrm_%"),
+        )
+        .order_by(SyncSourceConfig.sort_order, SyncSourceConfig.data_type)
+    ).all()
+    all_types = [r.data_type for r in rows]
+    # 延迟 import 规避循环依赖(bms_sync → sync_source_config_service)
+    from app.services.bms_sync import DEFAULT_SYNC_TYPES
+
+    high_set = set(DEFAULT_SYNC_TYPES)
+    high = [dt for dt in all_types if dt in high_set]
+    low = [dt for dt in all_types if dt not in high_set]
+    return {"all": all_types, "high": high, "low": low}
+
+
 def list_sync_source_configs(db: Session) -> list[dict]:
     """列出所有同步源配置(API 用,凭证掩码;带 fetch_mode/captcha_type/options 给前端表单)"""
     rows = db.scalars(select(SyncSourceConfig).order_by(SyncSourceConfig.sort_order, SyncSourceConfig.id)).all()

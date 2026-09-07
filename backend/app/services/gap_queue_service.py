@@ -335,8 +335,13 @@ async def settle_and_backfill_yesterday(db, yesterday: str | None = None) -> dic
         logger.info(f"[gap] {yesterday} 无缺口待补, 跳过清点补跑")
         return {"total": 0, "backfilled": [], "still_failed": []}
 
-    # 只补可定向的源(BMS HTTP/Playwright 默认源; 其它如 SCRM 不在此队列范围)
-    bms_known = set(DEFAULT_SYNC_TYPES)
+    # 只补可定向的源(BMS 主动抓取源 = DB default_sync=true 全集合; #31 使低频源缺口也能按天补)
+    from app.services.sync_source_config_service import list_scheduled_bms_sources
+
+    try:
+        bms_known = set((list_scheduled_bms_sources(db).get("all") or []))
+    except Exception:  # noqa: BLE001 读库失败降级代码常量
+        bms_known = set(DEFAULT_SYNC_TYPES)
     backfilled: list[str] = []
     still_failed: list[str] = []
 

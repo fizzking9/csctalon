@@ -55,21 +55,50 @@ CATCHUP_HOUR: int = 5
 # 早上 8:00 全量兜底同步窗口(天): BMS 数据按登记时间分批滞后 1~2 天,
 # 8 点用近 N 天窗口主动拉一次, 确保补全数据回填(与 BMS 导出近 7 天滚动对齐)
 FULL_WINDOW_DAYS: int = 7
+# 低频源每日定时档(时)(A-20260907-001 LOCKED / #31): 每天该整点对「DB default_sync=true
+# 且非高频 4 源」的大表/报表源(device_combo/bms_order/退货/设备标签/退款记录报表/闪猫等)
+# 跑"前一天整天"。默认 6:00(避开 5:00 缺口清点与 8:00 全量); settings.LOW_FREQ_HOUR<=0 禁用。
+LOW_FREQ_HOUR: int = max(0, int(getattr(settings, "LOW_FREQ_HOUR", 6) or 0))
 # 合并后全部需要检测的小时(用于 schedule_hours 对外展示)
-SCHEDULE_HOURS = sorted([*DAYTIME_HOURS, CATCHUP_HOUR])
+SCHEDULE_HOURS = sorted([*DAYTIME_HOURS, CATCHUP_HOUR] + ([LOW_FREQ_HOUR] if LOW_FREQ_HOUR > 0 else []))
+# 低频档忙碌顺延结束小时: 6:00 启动后若一直忙, 直到该小时前必须尝试启动(超过则当日放弃让位 8:00)
+LOW_FREQ_DEADLINE_HOUR: int = 7
 
-# ── T+1 延迟数据源(2026-09-05)─────────────────────────────────────────
-# 某些 BMS 报表「当天不产生数据, 只能次日抓前一天」(实测: 退款记录报表 E 路,
-# 页面当天无记录, 早上去查才有前一天全天数据)。
-# 这些源**不参与白天每小时**(当天查 = 空 + 导出易超时/卡), 只在 5:00「前一天全量」
-# 补跑时纳入, 窗口天然 = 前一天整天。若后续有同类报表, 直接加进此集合即可。
-T_PLUS_ONE_BMS_TYPES: frozenset[str] = frozenset({"refund_record_report"})
-
-# 检查间隔(秒)
+# ── 检查间隔(秒) ──
 CHECK_INTERVAL = 60
 
 # 整点触发宽容窗口(分钟): 在该窗口内命中 SCHEDULE_HOURS 都可触发
 TRIGGER_WINDOW_MINUTES = 30
+
+
+def should_run_low_freq(
+    now_hour: int,
+    *,
+    low_freq_hour: int = LOW_FREQ_HOUR,
+    deadline_hour: int = LOW_FREQ_DEADLINE_HOUR,
+    done: bool = False,
+    busy: bool = False,
+) -> bool:
+    """低频档本轮是否应执行(纯函数, 供单测锁定忙顺延语义)。
+
+    #31 / A-20260907-001 LOCKED。修复 Review CRITICAL(2026-09-07):
+      旧实现 _in_low_slack 用 `6 < hour < 7` 恒 False + 遇忙先置 done → 静默丢档。
+    新语义:
+      - 触发窗口 = [low_freq_hour, deadline_hour) 即 6:00~6:59;
+      - 窗口内且**空闲**(not busy) → True(执行并记 done);
+      - 窗口内 busy → False(不记 done, 下分钟 tick 重试 = 真忙顺延);
+      - 达到 deadline_hour(7:00)→ False + 上层记 done 放弃(告警)。
+    """
+    if done:
+        return False
+    if low_freq_hour <= 0:
+        return False
+    if now_hour >= deadline_hour:
+        return False  # 已过截止, 上层置 done + 告警放弃
+    if now_hour < low_freq_hour:
+        return False  # 未到低频小时
+    # low_freq_hour <= now_hour < deadline_hour
+    return not busy
 
 
 class BmsScheduler:
@@ -96,6 +125,9 @@ class BmsScheduler:
         self._halted_types: dict[str, set[str]] = {}
         # 预警扫描: date_str -> set(已扫描的小时), 一小时最多一次(scan_alerts 已做日幂等)
         self._alert_scanned_hours: dict[str, set[int]] = {}
+        # 低频档当日是否已执行/已尝试(A-20260907-001 / #31): date_str -> bool
+        # 与 _last_run_hour 分开: 低频小时(6:00)不在 DAYTIME_HOURS, 用独立日标记防重复
+        self._low_freq_done: dict[str, bool] = {}
         # 启动后延迟预热任务句柄(防 GC 中断)
         self._warm_task: asyncio.Task | None = None
 
@@ -243,6 +275,15 @@ class BmsScheduler:
                     hours_done.add(fin_cn.hour)
             today_key = now_cn.strftime("%Y-%m-%d")
             self._last_run_hour = {today_key: hours_done}
+            # ── #31: 低频档回填 ──
+            # 低频小时(LOW_FREQ_HOUR)不在 DAYTIME_HOURS, _last_run_hour 不直接体现。
+            # 若今天低频小时已有 scheduled 成功记录(任一低频源成功即认为本轮已尝试,
+            # 因为整档一次 sync_all 提交, 部分源失败也会整档成功结束), 置 _low_freq_done
+            # 避免重启后重复跑低频档。
+            self._low_freq_done = {}
+            if LOW_FREQ_HOUR > 0 and LOW_FREQ_HOUR in hours_done:
+                self._low_freq_done[today_key] = True
+                logger.info(f"[调度器] 低频档回填: 今日 {LOW_FREQ_HOUR}:00 已执行过, 重启不重复触发")
 
             # ── 回填专项熔断(最佳努力): 逐个 data_type 扫描失败记录 ──
             halted_dt: set[str] = set()
@@ -452,12 +493,81 @@ class BmsScheduler:
                             biz_key=biz_key,
                         )
 
+                # ── 1.5) 低频源每日定时档(A-20260907-001 / #31) ──
+                # 每天 LOW_FREQ_HOUR(默认6:00) 对"DB default_sync=true − 高频4源"的低频源
+                # 跑"前一天整天"。触发/顺延规则(修复 Review CRITICAL, 2026-09-07):
+                #   - 触发窗口 = LOW_FREQ_HOUR(6:00) 起至 LOW_FREQ_DEADLINE_HOUR(7:00) 前,
+                #     整段(6:00~6:59)内**空闲**即执行并记 done;
+                #   - 窗口内 busy(5:00 缺口清点/前一天全量未结束/手动任务占锁)→ **不记 done**,
+                #     下一分钟 tick 再试(真正的忙顺延, 不再静默丢档);
+                #   - 到达 LOW_FREQ_DEADLINE_HOUR(7:00)→ 当日放弃(让位 8:00 全量),
+                #     记 done + 告警, 靠低频源失败进 gap → 次日 5:00 缺口清点兜底。
+                if (
+                    LOW_FREQ_HOUR > 0
+                    and not self._low_freq_done.get(date_str, False)
+                ):
+                    if should_run_low_freq(
+                        now_cn.hour,
+                        done=self._low_freq_done.get(date_str, False),
+                        busy=sync_task_manager.is_busy(),
+                    ):
+                        # 空闲 → 置 done(防本日重复)后提交; 提交前已确认空闲,
+                        # 不会出现"置 done 但 _do_scheduled_sync 因 busy return 丢档"
+                        self._low_freq_done[date_str] = True
+                        # 低频集合非空才提交(读库 helper)
+                        _lf_db = SessionLocal()
+                        try:
+                            from app.services.sync_source_config_service import (
+                                list_scheduled_bms_sources,
+                            )
+
+                            _lf_set = list_scheduled_bms_sources(_lf_db)
+                            _low_types = _lf_set.get("low") or []
+                        except Exception as _lfe:  # noqa: BLE001
+                            logger.warning(f"[调度器] 低频档读库失败, 跳过本轮: {_lfe}")
+                            _low_types = []
+                        finally:
+                            _lf_db.close()
+                        if _low_types:
+                            logger.info(
+                                f"[调度器] 低频档触发 {date_str} {now_cn.hour:02d}:{now_cn.minute:02d},"
+                                f" 低频源={_low_types}(前一天整天, 每天1次)"
+                            )
+                            await self._do_scheduled_sync(
+                                why=f"低频源每日档 {now_cn.hour:02d}:00",
+                                yesterday_full_sync=True,
+                                biz_key=biz_key,
+                                source_tier="low",
+                            )
+                        else:
+                            logger.info(
+                                f"[调度器] 低频档 {now_cn.hour:02d}:00 无低频源(DB default_sync 未开启), 跳过"
+                            )
+                    elif now_cn.hour >= LOW_FREQ_DEADLINE_HOUR:
+                        # 已过顺延截止, 当日放弃(不再反复尝试); 让位 8:00 全量
+                        self._low_freq_done[date_str] = True
+                        logger.warning(
+                            f"[调度器] 低频档 {LOW_FREQ_HOUR}:00 因持续忙碌错过(>={LOW_FREQ_DEADLINE_HOUR}:00),"
+                            f" 当日放弃; 依赖低频源失败进 gap → 次日 5:00 缺口清点兜底"
+                        )
+
                 # ── 2) 白天每小时同步(8~23, 0) ──
                 if now_cn.hour in DAYTIME_HOURS and now_cn.minute < TRIGGER_WINDOW_MINUTES and now_cn.hour not in today_done:
                     today_done.add(now_cn.hour)
-                    # 快速预检: 当前有资格同步的数据源 = (BMS 默认 + SCRM 有凭证) ∩ 未熔断
-                    # 预检失败 → 整小时跳过(打一行提示,避免空 task)
-                    bms_candidate = list(DEFAULT_SYNC_TYPES) if self._default_sources_have_credentials() else []
+                    # 快速预检: 当前有资格同步的数据源 = (BMS 高频 + SCRM 有凭证) ∩ 未熔断
+                    # #31: BMS 高频候选改为读 DB default_sync=true 的 high 档(原代码常量已不适用)
+                    _hh_db = SessionLocal()
+                    try:
+                        from app.services.sync_source_config_service import (
+                            list_scheduled_bms_sources,
+                        )
+
+                        _bms_high = (list_scheduled_bms_sources(_hh_db).get("high") or [])
+                    except Exception:  # noqa: BLE001 读库失败降级代码常量
+                        _bms_high = list(DEFAULT_SYNC_TYPES)
+                    finally:
+                        _hh_db.close()
+                    bms_candidate = _bms_high if self._default_sources_have_credentials() else []
                     scrm_candidate = [
                         DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_PRIVATE,
                         DATA_TYPE_SESSION_GROUP, DATA_TYPE_SESSION_VIRTUAL,
@@ -564,7 +674,17 @@ class BmsScheduler:
         probe_start = now_cn - timedelta(hours=1)
         probe_end = now_cn
 
-        bms_known = set(DEFAULT_SYNC_TYPES)
+        # #31: BMS 已知名单改为读 DB default_sync=true 全集合(高频+低频),
+        # 使任何纳入定时的源熔断后都能被半开探测恢复(原仅种子4源)。
+        _hk_db = SessionLocal()
+        try:
+            from app.services.sync_source_config_service import list_scheduled_bms_sources
+
+            bms_known = set((list_scheduled_bms_sources(_hk_db).get("all") or []))
+        except Exception:  # noqa: BLE001
+            bms_known = set(DEFAULT_SYNC_TYPES)
+        finally:
+            _hk_db.close()
         scrm_known = {
             DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_GROUP,
             DATA_TYPE_SESSION_PRIVATE, DATA_TYPE_SESSION_VIRTUAL,
@@ -677,6 +797,7 @@ class BmsScheduler:
         yesterday_full_sync: bool = False,
         full_window_days: int = 0,
         biz_key: str | None = None,
+        source_tier: str = "high",
     ):
         """执行定时同步 - 通过 SyncTaskManager 提交(全局互斥)
 
@@ -693,6 +814,12 @@ class BmsScheduler:
                               0 时按 yesterday_full_sync/白天逻辑
             biz_key: 业务日期字符串(YYYY-MM-DD),专项熔断集合归属的日期;
                      None 时按 now 即时推导
+            source_tier: 本轮要跑的 BMS 源档位(A-20260907-001 LOCKED / #31):
+                     "high"=高频档(DB true ∩ 种子核心源, 白天/5点/8点)
+                     "low" =低频档(DB true − 高频, 每天 1 次, 低频小时触发)
+                     "all" =DB true 全集合(强制兜底用)
+                     源集合一律读 DB sync_source_configs.default_sync(=UI「纳入周期采集」),
+                     不再用代码常量 DEFAULT_SYNC_TYPES 决定"哪些源定时"。
 
         同一时间窗口内并发跑: BMS sync_all 与 SCRM sync_scrm_all 各自 runner,
         经 asyncio.gather 并发执行(冷却期间穿插其他数据源)。
@@ -707,10 +834,7 @@ class BmsScheduler:
         # 兜底模式(5 点补跑 / 8 点全量): 忽略专项熔断,失败也不写入熔断
         force_all = yesterday_full_sync or full_window_days > 0
 
-        has_bms = self._default_sources_have_credentials()
-        has_scrm = self._scrm_sources_have_credentials()
-
-        # ── 时间范围: 5点补跑=昨天整天; 8点全量=近N天0点~now; 白天=今天 0 点~now ──
+        # ── 时间范围: 5点补跑=昨天整天; 8点全量=近N天0点~now; 白天=今天 0 点~now; 低频=昨天整天 ──
         if yesterday_full_sync:
             yesterday_date = now_cn.date() - timedelta(days=1)
             range_start = datetime(yesterday_date.year, yesterday_date.month, yesterday_date.day,
@@ -729,21 +853,48 @@ class BmsScheduler:
             range_end = now_cn
             start_disp = range_start.strftime("%m-%d 00:00(今日定时-全量)")
 
-        # ── 过滤专项级熔断(仅白天增量生效;5 点补跑 / 8 点全量强制全部执行) ──
-        sync_types_bms_raw = list(DEFAULT_SYNC_TYPES) if has_bms else []
-        # ⚠️ 2026-09-05: T+1 延迟源(如退款记录报表 E 路)只在「兜底模式」纳入:
-        #   - 5:00 前一天全量(yesterday_full_sync): 窗口=前一天整天 ← 每天自动抓前一天的入口
-        #   - 8:00 近 N 天全量兜底(full_window_days>0): 窗口=近N天, 补漏(幂等, 首次兼补历史)
-        #   这类报表当天无数据(实测手动登录当天查不到, 次日才有前一天全天),
-        #   白天每小时同步**不跑**它们(当天查=空 + 导出易超时卡住)。
-        if has_bms and (yesterday_full_sync or full_window_days > 0):
-            _t1_added = [dt for dt in T_PLUS_ONE_BMS_TYPES if dt not in sync_types_bms_raw]
-            if _t1_added:
-                sync_types_bms_raw = sync_types_bms_raw + _t1_added
-                logger.info(
-                    f"[定时同步{reason}] 兜底模式纳入 T+1 延迟源: {_t1_added}"
-                    f"(前一天全量={yesterday_full_sync}, 近{full_window_days}天全量)"
-                )
+        # ── 源集合: 读 DB default_sync=true(UI「纳入周期采集」), 按 source_tier 分档 ──
+        # A-20260907-001 LOCKED / #31: 原用代码常量 DEFAULT_SYNC_TYPES(仅种子4源),
+        # 不读 DB → UI 开关(改 DB default_sync)不生效。现改为统一读库分档:
+        #   high = DB true ∩ 种子核心源(白天每小时/5点/8点)
+        #   low  = DB true − 高频(低频档每天1次)
+        #   all  = DB true 全集合
+        # 注: T_PLUS_ONE_BMS_TYPES(退款记录报表 E 路)特殊逻辑已退役——它 DB true 时
+        #     自动归入 low 档(低频每天抓前一天 = 天然 T+1), DB false 时不进任何定时。
+        _sched_set: dict[str, list[str]] = {"high": [], "low": [], "all": []}
+        _db0 = SessionLocal()
+        try:
+            from app.services.sync_source_config_service import list_scheduled_bms_sources
+
+            _sched_set = list_scheduled_bms_sources(_db0)
+        except Exception as _se:  # noqa: BLE001 读库失败降级为代码常量, 不阻塞调度
+            logger.warning(f"[定时同步{reason}] 读库源集合失败, 降级用代码常量: {_se}")
+            _sched_set = {
+                "high": list(DEFAULT_SYNC_TYPES),
+                "low": [],
+                "all": list(DEFAULT_SYNC_TYPES),
+            }
+        finally:
+            _db0.close()
+
+        _tier = source_tier if source_tier in _sched_set else "high"
+        _tier_types = list(_sched_set[_tier])
+        # 凭证预检: high/all 档要求高频核心源凭证齐(沿用 _default_sources_have_credentials);
+        # low 档不做全局凭证预检——但注意 sync_all 只 skip enabled=False 的源, 不 skip 无凭证源;
+        # 故 DB true 但未配凭证/登录态的低频源(如 requires_captcha 且无 storage_state 的闪猫)
+        # 会真实失败并记入 gap。按架构灰度 G3 管控: 上线初期应将这类源临时 default_sync=false,
+        # 待验证 storage_state 可用后再纳入(见 A-20260907-001 §九)。
+        if _tier == "low":
+            has_bms = bool(_tier_types)
+        else:
+            has_bms = bool(_tier_types) and self._default_sources_have_credentials()
+        has_scrm = self._scrm_sources_have_credentials()
+
+        sync_types_bms_raw = _tier_types if has_bms else []
+        logger.info(
+            f"[定时同步{reason}] BMS 源集合 source_tier={_tier}: {sync_types_bms_raw}"
+            f" (来自 DB default_sync=true, {len(sync_types_bms_raw)} 源)"
+        )
         sync_types_scrm_raw = [
             DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_PRIVATE,
             DATA_TYPE_SESSION_GROUP, DATA_TYPE_SESSION_VIRTUAL,
@@ -1037,14 +1188,24 @@ class BmsScheduler:
         if not failed_types:
             return []
 
-        bms_types = [dt for dt in failed_types if dt in set(DEFAULT_SYNC_TYPES)]
+        # #31: BMS 已知名单读 DB default_sync=true 全集合(高频+低频), 与半开探测一致
+        _rk_db = SessionLocal()
+        try:
+            from app.services.sync_source_config_service import list_scheduled_bms_sources
+
+            _bms_known = set((list_scheduled_bms_sources(_rk_db).get("all") or []))
+        except Exception:  # noqa: BLE001
+            _bms_known = set(DEFAULT_SYNC_TYPES)
+        finally:
+            _rk_db.close()
+        bms_types = [dt for dt in failed_types if dt in _bms_known]
         scrm_known = {
             DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_PRIVATE,
             DATA_TYPE_SESSION_GROUP, DATA_TYPE_SESSION_VIRTUAL,
         }
         scrm_types = [dt for dt in failed_types if dt in scrm_known]
         # 未知类型无法定向重试, 原样保留为失败
-        unknown = [dt for dt in failed_types if dt not in set(bms_types) and dt not in scrm_known]
+        unknown = [dt for dt in failed_types if dt not in _bms_known and dt not in scrm_known]
         retry_types = bms_types + scrm_types
         if not retry_types:
             return failed_types

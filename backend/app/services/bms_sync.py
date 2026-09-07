@@ -34,7 +34,11 @@ logger = logging.getLogger(__name__)
 # 全部可同步的数据类型(状态展示/UI 复选框遍历用)
 SYNC_DATA_TYPES = list(BMS_DATA_SOURCES.keys())  # refund/ticket/wallet/device_combo
 
-# 默认同步的数据类型(default_sync=True):定时同步 + 手动同步默认勾选用
+# 内置核心高频源(A-20260907-001 LOCKED / #31 语义重定义):
+#   种子 default_sync=True 的源 = ①高频定时档(白天每小时/5点/8点, 与 DB true 求交)
+#   ②手动同步默认勾选 ③每日必达监控名单。不再代表"全部定时源"——
+#   调度器实际跑哪些已改为读 DB sync_source_configs.default_sync(见
+#   sync_source_config_service.list_scheduled_bms_sources)。
 DEFAULT_SYNC_TYPES = [dt for dt, cfg in BMS_DATA_SOURCES.items() if cfg.get("default_sync", True)]
 
 

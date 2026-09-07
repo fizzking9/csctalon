@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     BMS_USERNAME: str = ""
     BMS_PASSWORD: str = ""
     BMS_SCHEDULE_AUTOSTART: bool = True  # 启动时是否自动开启定时同步(默认开启,否则跨日/重启后整小时窗口都漏)
+    # 低频源每日定时档(时)(A-20260907-001 LOCKED / 工单#31): 每天该整点对
+    # 「DB default_sync=true 且非高频 4 源」的大表/报表源跑"前一天整天"。
+    # 默认 6:00(避开 5:00 缺口清点与 8:00 全量); 置空/负值可禁用低频档。
+    LOW_FREQ_HOUR: int = 6
 
     # ── 采集链路可靠性(A-20260904-002 LOCKED / 工单#2 3.1 错误分级重试) ──
     # 分片级重试: 单片瞬时失败(5xx/JSON500/超时)的最大重试次数
