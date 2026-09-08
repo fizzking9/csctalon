@@ -42,6 +42,7 @@ from app.api.v1 import (
     schedules,
     scrm_chat,
     scrm_staff,
+    shared_doc_sync,
     site_info,
     source_groups,
     specialties,
@@ -117,5 +118,6 @@ api_router.include_router(miniapp.router)
 api_router.include_router(sync_complaints.router)
 api_router.include_router(sync_manual_refunds.router)
 api_router.include_router(doc_sync.router)
+api_router.include_router(shared_doc_sync.router)
 api_router.include_router(external.router)
 api_router.include_router(site_info.router)

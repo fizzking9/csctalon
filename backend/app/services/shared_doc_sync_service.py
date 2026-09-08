@@ -1,0 +1,492 @@
+"""共享文档在线采集同步服务 (#33, A-20260907-002)
+
+目标: 把原先经 workbuddy 被动推送的两类文件(315投诉/卡商群投诉、商户号手机退款)
+转为「共享文档在线采集」—— 每个采集源(doc_sync_sources 一行)对应一份共享文档:
+
+  导出 xlsx(官方 UI + 登录态) → pandas(calamine) 读 Sheet → 中文表头 dict 行
+  → 复用既有入库管线:
+      complaint       → complaint_sync.sync_complaints_from_payload
+                         (external_complaints / card_complaints, 按 sheet_rules 分 Sheet)
+      manual_refund   → manual_refund_sync.sync_manual_refunds_from_payload
+                         (manual_refunds, ⚠️ full_sync 必须 false——在线采集是增量 upsert,
+                          全量对账会删除库中不在文档内的行, 见记忆 shared-doc-fullsync-lesson)
+
+浏览器导出逻辑封装自 scripts/tencent_doc_export.py / scripts/kdocs_export.py:
+- 登录态文件: settings.BROWSER_STATE_DIR / (tencent_doc.json | kdocs.json), 硬编码禁止
+- 两者均为 headless 下已实测可行的 playwright sync 导出流程
+"""
+from __future__ import annotations
+
+import logging
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.core.database import SessionLocal
+from app.models.doc_sync_source import DocSyncSource
+from app.services.complaint_sync import sync_complaints_from_payload
+from app.services.manual_refund_sync import sync_manual_refunds_from_payload
+
+logger = logging.getLogger(__name__)
+
+# ── 平台 / 目标类型常量 ──────────────────────────────────────────────
+PLATFORM_TENCENT = "tencent"
+PLATFORM_KDOCS = "kdocs"
+TARGET_COMPLAINT = "complaint"
+TARGET_MANUAL_REFUND = "manual_refund"
+
+# 各平台默认登录态文件名(可用配置行 state_file 覆盖)
+_DEFAULT_STATE_FILE = {PLATFORM_TENCENT: "tencent_doc.json", PLATFORM_KDOCS: "kdocs.json"}
+
+# 腾讯 UI 导出坐标与菜单(与 scripts/tencent_doc_export.py 保持一致)
+_TENCENT_MENU_XY = (1361, 15)
+# 金山左上角菜单坐标(与 scripts/kdocs_export.py 保持一致)
+_KDOCS_MENU_XY = (95, 15)
+
+# xlsx 读取引擎(与 POC _poc_shared_doc_reader.py 一致: 快 + 免疫 WPS/腾讯导出样式崩溃)
+_EXCEL_ENGINE = "calamine"
+
+
+def _export_tencent_xlsx(doc_url: str, out_path: str) -> str:
+    """用腾讯登录态打开共享表 → 更多菜单 → 导出为 → 本地Excel(.xlsx)
+
+    返回下载建议文件名。无登录态或导出失败时抛出异常(由调用方记录状态)。
+    """
+    from playwright.sync_api import sync_playwright
+
+    state_path = Path(settings.BROWSER_STATE_DIR) / _DEFAULT_STATE_FILE[PLATFORM_TENCENT]
+    if not state_path.exists():
+        raise FileNotFoundError(
+            f"未找到腾讯登录态 {state_path}。请先运行 scripts/tencent_doc_login.py 扫码登录"
+        )
+    out = str(Path(out_path).resolve())
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            storage_state=str(state_path),
+            viewport={"width": 1600, "height": 1000},
+            accept_downloads=True,
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+            ),
+        )
+        page = ctx.new_page()
+        try:
+            page.goto(doc_url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(8000)  # 等 SPA + 表格渲染
+            # 点击右上角 ⋯(更多)菜单
+            page.mouse.click(*_TENCENT_MENU_XY)
+            page.wait_for_timeout(1500)
+            # hover「导出为」展开子菜单, 再点「本地Excel表格 (.xlsx)」
+            page.hover("text=导出为")
+            page.wait_for_timeout(800)
+            with page.expect_download(timeout=90000) as dl_info:
+                page.click("text=本地Excel表格 (.xlsx)")
+            dl = dl_info.value
+            dl.save_as(out)
+            return dl.suggested_filename
+        finally:
+            browser.close()
+
+
+def _export_kdocs_xlsx(doc_url: str, out_path: str) -> str:
+    """用金山登录态打开共享表 → 左上角菜单 → 导出为 → 导出为 Excel(.xlsx)
+
+    返回下载建议文件名。无登录态或导出失败时抛出异常。
+    """
+    from playwright.sync_api import sync_playwright
+
+    state_path = Path(settings.BROWSER_STATE_DIR) / _DEFAULT_STATE_FILE[PLATFORM_KDOCS]
+    if not state_path.exists():
+        raise FileNotFoundError(
+            f"未找到金山登录态 {state_path}。请先运行 scripts/kdocs_login.py 扫码登录"
+        )
+    out = str(Path(out_path).resolve())
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            storage_state=str(state_path),
+            viewport={"width": 1600, "height": 1000},
+            accept_downloads=True,
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+            ),
+        )
+        page = ctx.new_page()
+        try:
+            page.goto(doc_url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(10000)
+            # 1. 点左上角菜单图标
+            page.mouse.click(*_KDOCS_MENU_XY)
+            page.wait_for_timeout(1500)
+            # 2. 精确定位"导出为"(排除 导出为PDF/图片/多维表格)
+            clicked = page.evaluate(
+                """() => {
+                    const all=[...document.querySelectorAll('*')];
+                    const targets = all.filter(e => (e.innerText||'').trim() === '导出为' && e.children.length===0);
+                    if (!targets.length) return false;
+                    targets[0].click();
+                    return true;
+                }"""
+            )
+            if not clicked:
+                raise RuntimeError("菜单中未找到'导出为'入口(金山前端可能变动)")
+            page.wait_for_timeout(1500)
+            # 3. 点「导出为 Excel(.xlsx)」并捕获下载
+            with page.expect_download(timeout=90000) as dl_info:
+                page.click("text=导出为 Excel(.xlsx)", timeout=8000)
+            dl = dl_info.value
+            dl.save_as(out)
+            return dl.suggested_filename
+        finally:
+            browser.close()
+
+
+def export_doc_xlsx(platform: str, doc_url: str, out_path: str) -> str:
+    """按平台分发导出 xlsx, 返回下载建议文件名(供 source_file 展示)"""
+    if platform == PLATFORM_TENCENT:
+        return _export_tencent_xlsx(doc_url, out_path)
+    if platform == PLATFORM_KDOCS:
+        return _export_kdocs_xlsx(doc_url, out_path)
+    raise ValueError(f"不支持的共享文档平台: {platform}")
+
+
+# ── xlsx 读取层: Sheet → 中文表头 dict 行(参考 _poc_shared_doc_reader) ──
+def _norm_header(h: Any) -> str:
+    """表头归一化: 去首尾空白/全角空格/换行; 合并单元格产生的 Unnamed 视为无效"""
+    if h is None:
+        return ""
+    s = str(h).strip().replace("\u3000", " ").replace("\n", "")
+    if s.startswith("Unnamed:"):
+        return ""
+    return s
+
+
+def _sheet_names(path: str) -> list[str]:
+    """列出 xlsx 内所有 Sheet 名"""
+    xl = pd.ExcelFile(path, engine=_EXCEL_ENGINE)
+    return list(xl.sheet_names)
+
+
+def _read_sheet_records(path: str, sheet_name: str) -> list[dict[str, Any]]:
+    """读单个 Sheet → [ {中文表头: 值}, ... ]
+
+    只负责取数(NaN→None, 丢全空列/空表头, **过滤全空行**), 不做字段映射/清洗
+    —— 那是 complaint_sync / manual_refund_sync 内部的事。
+
+    过滤全空行原因: 共享文档(尤其金山)常预留空白模板行(仅部分列/全空),
+    若不滤掉会作为"缺登记日期/订单号"的脏行计入 failed, 污染同步统计与日志
+    (实测金山登记明细 4244 行中含 1146 空行, 有效仅 ~3117)。
+    """
+    df = pd.read_excel(path, sheet_name=sheet_name, header=0, engine=_EXCEL_ENGINE)
+    df = df.dropna(axis=1, how="all")  # 丢弃全空列(合并表头/末尾多余列)
+    df.columns = [_norm_header(c) for c in df.columns]
+    df = df.loc[:, [c for c in df.columns if c != ""]]
+    records: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        rec = {str(col): (None if pd.isna(v) else v) for col, v in row.items()}
+        # 过滤全空行(所有字段均为 None/空): 与 complaint_sync._is_empty_*_rec 同语义,
+        # 避免空白模板行进入入库管线被判 dropped/failed
+        if all(v is None or (isinstance(v, str) and v.strip() == "") for v in rec.values()):
+            continue
+        records.append(rec)
+    return records
+
+
+def _sheet_matches(sheet_name: str, keywords: tuple[str, ...]) -> bool:
+    """Sheet 名是否含任一关键词(用于无 sheet_rules 时的自动匹配)"""
+    s = sheet_name.strip().lower()
+    return any(k.lower() in s for k in keywords)
+
+
+def _pick_complaint_sheets(
+    file_path: str, rules: list[dict] | None
+) -> dict[str, list[dict[str, Any]]]:
+    """从导出的 xlsx 里取 315/卡商 两个 Sheet 的数据
+
+    - 有 sheet_rules: 按 [{'sheet': 名, 'target': 'external_complaint'|'card_complaint'}]
+      逐条匹配(命中即读该 sheet)
+    - 无 sheet_rules: 遍历所有非空 sheet, 按表头关键词自动匹配
+      (315 表头含「投诉编号」, 卡商表头含「投诉群」)
+    返回 {"external_complaint": [...], "card_complaint": [...]}, 未命中的为空列表。
+    """
+    ext_rules: list[str] = []
+    card_rules: list[str] = []
+    if rules:
+        for r in rules:
+            if not isinstance(r, dict):
+                continue
+            sheet = str(r.get("sheet") or "").strip()
+            target = str(r.get("target") or "")
+            if target == "external_complaint" and sheet:
+                ext_rules.append(sheet)
+            elif target == "card_complaint" and sheet:
+                card_rules.append(sheet)
+
+    sheets = _sheet_names(file_path)
+    # 校验配置的 sheet 名确实存在(避免静默漏采)
+    known = {s.strip() for s in sheets}
+    for r in rules or []:
+        if isinstance(r, dict) and str(r.get("sheet") or "").strip() and r["sheet"].strip() not in known:
+            logger.warning(f"[shared_doc] sheet_rules 配置的 Sheet 不存在于导出文件: {r['sheet']}")
+
+    def _collect(wanted: list[str], keywords: tuple[str, ...]) -> list[dict[str, Any]]:
+        if wanted:
+            recs: list[dict[str, Any]] = []
+            for name in wanted:
+                recs.extend(_read_sheet_records(file_path, name))
+            return recs
+        # 自动匹配: 遍历所有有数据的 sheet, Sheet 名或任一表头列名含关键词即命中
+        # (315 表头列名含「投诉编号」, 卡商表头含「投诉群」)
+        kw = tuple(k.lower() for k in keywords)
+        for name in sheets:
+            recs = _read_sheet_records(file_path, name)
+            if not recs:
+                continue
+            if _sheet_matches(name, keywords):
+                return recs
+            headers = {str(k).strip().lower() for k in recs[0].keys()}
+            if any(any(k in h for k in kw) for h in headers):
+                return recs
+        return []
+
+    external = _collect(ext_rules, ("投诉编号",))
+    card = _collect(card_rules, ("投诉群",))
+    return {"external_complaint": external, "card_complaint": card}
+
+
+def _pick_manual_refund_sheet(file_path: str, rules: list[dict] | None) -> list[dict[str, Any]]:
+    """取 manual_refund 目标 sheet 的数据
+
+    优先 sheet_rules 里声明的 sheet(首个), 否则读「登记明细」(或第一张有数据的)。
+    """
+    if rules:
+        for r in rules:
+            if isinstance(r, dict) and str(r.get("sheet") or "").strip():
+                return _read_sheet_records(file_path, r["sheet"].strip())
+
+    sheets = _sheet_names(file_path)
+    for name in sheets:
+        if "登记明细" in name:
+            return _read_sheet_records(file_path, name)
+    # 回退: 第一张有数据的 sheet
+    for name in sheets:
+        recs = _read_sheet_records(file_path, name)
+        if recs:
+            return recs
+    return []
+
+
+# ── 配置行读写 ───────────────────────────────────────────────────────
+def _state_file_for(row: DocSyncSource) -> str:
+    """解析登录态文件名: 配置行 state_file 优先, 否则按平台默认"""
+    if row.state_file and row.state_file.strip():
+        return row.state_file.strip()
+    return _DEFAULT_STATE_FILE.get(row.platform, "")
+
+
+def row_to_dict(row: DocSyncSource) -> dict[str, Any]:
+    """ORM → 展示 dict(不暴露任何敏感字段; 本表本就不含凭证)"""
+    return {
+        "id": row.id,
+        "platform": row.platform,
+        "doc_url": row.doc_url,
+        "doc_name": row.doc_name,
+        "target_type": row.target_type,
+        "sheet_rules": row.sheet_rules,
+        "state_file": row.state_file,
+        "enabled": row.enabled,
+        "sync_interval_minutes": row.sync_interval_minutes,
+        "last_sync_at": row.last_sync_at,
+        "last_sync_status": row.last_sync_status,
+        "last_sync_summary": row.last_sync_summary,
+        "last_error": row.last_error,
+    }
+
+
+def list_doc_sources(db: Session) -> list[dict[str, Any]]:
+    """列出所有共享文档采集源配置(enabled 在前的稳定顺序)"""
+    rows = db.scalars(
+        select(DocSyncSource).order_by(DocSyncSource.enabled.desc(), DocSyncSource.id)
+    ).all()
+    return [row_to_dict(r) for r in rows]
+
+
+def get_doc_source(db: Session, source_id: int) -> DocSyncSource | None:
+    """按 id 取采集源配置行(ORM 对象, 供同步使用)"""
+    return db.get(DocSyncSource, source_id)
+
+
+# ── 单源同步主流程 ───────────────────────────────────────────────────
+def sync_one_source(db: Session, row: DocSyncSource, trigger: str = "manual") -> dict[str, Any]:
+    """同步单个共享文档采集源 → 返回统计 dict
+
+    流程:
+      1. 导出 xlsx 到临时目录(临时文件用完即清; 用 TemporaryDirectory 无论成败自动清理)
+      2. pandas(calamine) 读 target_type 对应 sheet(s) → 中文表头 dict 行
+      3. complaint: 按 sheet_rules 分 sheet 组装 payload →
+                    sync_complaints_from_payload(指纹去重 upsert)
+         manual_refund: 读「登记明细」/首个有数据 sheet → payload full_sync:false →
+                    sync_manual_refunds_from_payload(增量 upsert, 严禁全量对账)
+      4. 更新 row.last_sync_at/status/summary/error(成功记 success/partial + 行数统计;
+         失败记 failed + error)并返回统计
+
+    失败时: 状态记录后仍向上抛出(供路由层展示具体错误)。
+    """
+    # 配置错误(停用/缺链接)不启动同步, 直接抛, 不覆盖既有同步状态
+    if not row.enabled:
+        raise ValueError(f"采集源已停用(platform={row.platform}, id={row.id})")
+    if not row.doc_url:
+        raise ValueError(f"采集源缺少 doc_url(id={row.id})")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="shared_doc_") as tmpdir:
+            # 临时导出文件: playwright 下载需要以 .xlsx 结尾的绝对路径
+            out_path = str(Path(tmpdir) / f"doc_{row.platform}.xlsx")
+            stats = _do_sync(db, row, out_path, trigger)
+    except Exception as e:  # noqa: BLE001
+        # 失败状态写回配置行(时间 UTC), 然后向上抛出
+        try:
+            _record_status(db, row, "failed", None, str(e)[:2000])
+        except Exception as rec_err:  # noqa: BLE001
+            logger.error(f"[shared_doc] 失败状态写回失败(不影响错误抛出): {rec_err}")
+        raise
+    # 成功: 入库状态(complaint 可能 partial) + 行数统计写回配置行
+    _record_status(db, row, stats["status"], _summary_from_stats(row, stats), None)
+    return stats
+
+
+def _do_sync(db: Session, row: DocSyncSource, out_path: str, trigger: str) -> dict[str, Any]:
+    """导出 → 解析 → 入库(不负责配置行状态写回, 由 sync_one_source 统一处理)"""
+    source_file = row.doc_name or row.doc_url
+    try:
+        export_doc_xlsx(row.platform, row.doc_url, out_path)
+    except FileNotFoundError as e:
+        # 登录态缺失: 属于配置/环境问题, 明确提示去扫码
+        raise RuntimeError(
+            f"共享文档导出失败: {e}。请先完成 {row.platform} 登录态(scripts/{row.platform}_doc_login.py)"
+        ) from e
+    logger.info(f"[shared_doc] {source_file} 导出成功, 开始解析入库")
+
+    if row.target_type == TARGET_COMPLAINT:
+        stats = _sync_complaint_from_file(db, row, out_path, source_file)
+    elif row.target_type == TARGET_MANUAL_REFUND:
+        stats = _sync_manual_refund_from_file(db, row, out_path, source_file)
+    else:
+        raise ValueError(f"不支持的 target_type: {row.target_type}")
+    return stats
+
+
+def _sync_complaint_from_file(
+    db: Session, row: DocSyncSource, file_path: str, source_file: str
+) -> dict[str, Any]:
+    """读取投诉型文档的两个 sheet 并复用 complaint_sync 管线入库"""
+    sheets = _pick_complaint_sheets(file_path, row.sheet_rules)
+    ext_rows = sheets["external_complaint"]
+    card_rows = sheets["card_complaint"]
+    if not ext_rows and not card_rows:
+        raise RuntimeError("导出的表格中未匹配到 315/卡商 任一投诉 Sheet(无数据可入库)")
+
+    payload: dict[str, Any] = {
+        "source_file": source_file,
+        "external_complaints": ext_rows,
+        "card_complaints": card_rows,
+    }
+    # sync_source 用 shared_doc 与 workbuddy push 区分(complain_sync_logs.sync_source 展示)
+    stats = sync_complaints_from_payload(
+        db, payload, source_file=source_file, sync_source="shared_doc"
+    )
+    logger.info(
+        f"[shared_doc] {source_file} 投诉入库完成: "
+        f"315={stats['external']['total']}(+{stats['external']['inserted']}/~{stats['external']['updated']}) "
+        f"卡商={stats['card']['total']}(+{stats['card']['inserted']}/~{stats['card']['updated']}) "
+        f"status={stats['status']}"
+    )
+    return stats
+
+
+def _sync_manual_refund_from_file(
+    db: Session, row: DocSyncSource, file_path: str, source_file: str
+) -> dict[str, Any]:
+    """读取退款型文档的登记明细 sheet 并复用 manual_refund_sync 管线入库
+
+    ⚠️ full_sync 固定 false: 在线采集=增量 upsert, 全量对账会删除库中不在
+    文档内的行(文档可能只是其中一部分来源, 误删血泪教训, 见 shared-doc-fullsync-lesson)。
+    """
+    rows = _pick_manual_refund_sheet(file_path, row.sheet_rules)
+    if not rows:
+        raise RuntimeError("导出的表格中未匹配到退款登记明细 Sheet(无数据可入库)")
+
+    payload: dict[str, Any] = {
+        "source_file": source_file,
+        "manual_refunds": rows,
+        "full_sync": False,  # 增量 upsert, 严禁全量对账删除
+    }
+    stats = sync_manual_refunds_from_payload(
+        db, payload, source_file=source_file, sync_source="shared_doc"
+    )
+    logger.info(
+        f"[shared_doc] {source_file} 退款入库完成: "
+        f"{stats['total']}(+{stats['inserted']}/~{stats['updated']}/!{stats['failed']}) "
+        f"status={stats['status']}"
+    )
+    return stats
+
+
+def _record_status(db: Session, row: DocSyncSource, status: str, summary: dict | None, error: str | None) -> None:
+    """把同步结果写回配置行(时间统一 UTC 存储)"""
+    row.last_sync_at = datetime.now(timezone.utc)
+    row.last_sync_status = status
+    row.last_sync_summary = summary
+    row.last_error = error
+    db.commit()
+
+
+def sync_doc_source_safe(source_id: int, trigger: str = "manual") -> dict[str, Any] | None:
+    """独立 session 的安全入口: 失败不抛出(调度器/手动触发用)
+
+    仿 doc_sync_service.sync_tencent_doc_safe:
+      - sync_one_source 内部已负责把成功/失败状态写回配置行
+      - 本入口只在极端异常(如源不存在/状态写回也失败)时兜底返回 None,
+        绝不向调度器抛异常
+    """
+    db = SessionLocal()
+    try:
+        row = db.get(DocSyncSource, source_id)
+        if row is None:
+            logger.error(f"[shared_doc] 采集源不存在: id={source_id}")
+            return None
+        stats = sync_one_source(db, row, trigger=trigger)
+        logger.info(
+            f"[shared_doc] 源 #{source_id}({row.doc_name or row.doc_url}) {trigger} 同步成功: "
+            f"status={stats['status']}"
+        )
+        return stats
+    except Exception as e:  # noqa: BLE001  安全入口兜底, 不抛出
+        logger.exception(f"[shared_doc] 源 #{source_id} {trigger} 同步失败(已记录): {e}")
+        return None
+    finally:
+        db.close()
+
+
+def _summary_from_stats(row: DocSyncSource, stats: dict[str, Any]) -> dict[str, Any]:
+    """把入库统计压缩为配置行 last_sync_summary(JSONB 友好)"""
+    if row.target_type == TARGET_COMPLAINT:
+        return {
+            "external": {k: stats["external"][k] for k in ("total", "inserted", "updated", "failed", "matched")},
+            "card": {k: stats["card"][k] for k in ("total", "inserted", "updated", "failed", "matched")},
+        }
+    if row.target_type == TARGET_MANUAL_REFUND:
+        return {
+            k: stats[k]
+            for k in ("total", "inserted", "updated", "deleted", "failed", "warnings")
+        }
+    return {"total": stats.get("total")}
