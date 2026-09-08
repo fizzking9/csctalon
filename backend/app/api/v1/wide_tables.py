@@ -27,10 +27,13 @@ def rebuild_refund_wide(db: DBSession, _: AdminUser):
 
 @router.get("/refund-wide/stats", response_model=R, summary="退费宽表统计")
 def refund_wide_stats(db: DBSession, _: CurrentUser):
-    """返回 refund_wide 物化宽表的覆盖统计,用于诊断关联完整度"""
+    """返回 refund_wide 物化宽表的覆盖统计,用于诊断关联完整度
+
+    注: A-20260908-001 起 refund_wide 不再物化 merchant_refund(mr_*)关联,
+        with_merchant_refund 键已移除(原基于已删列 wx_refund_no)。
+    """
     total_wide = db.scalar(select(func.count()).select_from(RefundWide)) or 0
     with_ticket = db.scalar(select(func.count()).select_from(RefundWide).where(RefundWide.ticket_no.isnot(None))) or 0
-    with_merchant_refund = db.scalar(select(func.count()).select_from(RefundWide).where(RefundWide.wx_refund_no.isnot(None))) or 0
     with_wallet = db.scalar(select(func.count()).select_from(RefundWide).where(RefundWide.wallet_id.isnot(None))) or 0
     with_external_complaint = db.scalar(
         select(func.count()).select_from(RefundWide).where(RefundWide.has_external_complaint.is_(True))
@@ -44,7 +47,6 @@ def refund_wide_stats(db: DBSession, _: CurrentUser):
     return R(data={
         "total_wide_rows": total_wide,
         "with_ticket": with_ticket,
-        "with_merchant_refund": with_merchant_refund,
         "with_wallet": with_wallet,
         "with_external_complaint": with_external_complaint,
         "matched_refund_count": matched_refund_count,

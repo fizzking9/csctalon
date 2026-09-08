@@ -2,8 +2,10 @@
 """宽表构建服务测试(wide_table_builder.py)。
 
 覆盖:
-- _select_ticket / _select_merchant_refund / _select_wallet 纯选择逻辑
+- _select_ticket / _select_wallet 纯选择逻辑
 - _build_wide_batch DB 集成(退款 + 关联关系 → 宽表行组装)
+- _in_scope_refund_nos 行范围(A-20260908-001: 线上+已退款 ∪ 带wallet ∪ 外部投诉SN)
+- mr_*(商户退款)字段不再物化
 """
 
 import uuid
@@ -11,7 +13,6 @@ from datetime import datetime, timezone
 
 from app.models.device import Device
 from app.models.external_complaint import ExternalComplaint
-from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
 from app.models.refund_wide import RefundWide
 from app.models.ticket import ServiceTicket
@@ -19,7 +20,7 @@ from app.models.upload import DataMatchRelation
 from app.models.wallet import WalletWithdrawal
 from app.services.wide_table_builder import (
     _build_wide_batch,
-    _select_merchant_refund,
+    _in_scope_refund_nos,
     _select_ticket,
     _select_wallet,
 )
@@ -76,22 +77,10 @@ def test_select_wallet_latest_op_time():
     assert picked.id == 2
 
 
-# ---- _select_merchant_refund: 取第一条命中 ----
-
-def test_select_merchant_refund_first_hit():
-    """正向: 商户退款取第一条命中的。"""
-    mr1 = MerchantRefund()
-    mr1.id = 1
-    mr2 = MerchantRefund()
-    mr2.id = 2
-    picked = _select_merchant_refund([("1", "order_no"), ("2", "order_no")], {"1": mr1, "2": mr2})
-    assert picked.id == 1
-
-
 # ---- _build_wide_batch DB 集成 ----
 
 def test_build_wide_batch_assembles_row(db):
-    """正向: 退款 + 关联工单/商户退款/钱包 → 宽表行字段组装正确。"""
+    """正向: 退款 + 关联工单/钱包 → 宽表行字段组装正确(A-20260908-001: 不再含 mr_*)。"""
     sn = _uniq("SN-WIDE")
     rno = f"RFW{uuid.uuid4().hex[:8]}"
     ticket_no = f"GDC-WIDE-{uuid.uuid4().hex[:6]}"
@@ -107,9 +96,6 @@ def test_build_wide_batch_assembles_row(db):
         service_item="退费", service_category="投诉",
         finish_time=datetime(2026, 6, 1, tzinfo=timezone.utc),
     ))
-    mr = MerchantRefund(merchant_id="M123", refund_amount=90)
-    db.add(mr)
-    db.flush()
     w = WalletWithdrawal(op_amount=100)
     db.add(w)
     db.flush()
@@ -118,11 +104,6 @@ def test_build_wide_batch_assembles_row(db):
         src_table="refund", src_id=rno,
         dst_table="ticket", dst_id=ticket_no,
         match_type="device_sn", confidence=80, matched_by="auto", status="matched",
-    ))
-    db.add(DataMatchRelation(
-        src_table="refund", src_id=rno,
-        dst_table="merchant_refund", dst_id=str(mr.id),
-        match_type="order_no", confidence=100, matched_by="auto", status="matched",
     ))
     db.add(DataMatchRelation(
         src_table="refund", src_id=rno,
@@ -142,8 +123,12 @@ def test_build_wide_batch_assembles_row(db):
     assert wide.operator == "张三"
     assert wide.ticket_no == ticket_no
     assert wide.service_category == "投诉"
-    assert wide.merchant_id == "M123"
     assert wide.wallet_id == str(w.id)
+    # A-20260908-001: mr_* 字段不再物化(模型已删列)
+    assert not hasattr(wide, "wx_refund_no")
+    assert not hasattr(wide, "mr_refund_amount")
+    assert not hasattr(wide, "merchant_id")
+    assert not hasattr(wide, "ticket_finish_time")
 
 
 def test_build_wide_batch_skips_missing_refund(db):
@@ -173,3 +158,58 @@ def test_build_wide_batch_external_complaint_agg(db):
     wide = db.get(RefundWide, rno)
     assert wide.has_external_complaint is True
     assert wide.external_complaint_count == 1
+
+
+# ---- _in_scope_refund_nos 行范围(A-20260908-001 方案B) ----
+
+def test_in_scope_includes_online_refunded(db):
+    """行范围含「线上+已退款」(主体, 与 E 表一一对应)。"""
+    sn = _uniq("SN-SCOPE")
+    rno_online_done = f"RFW{uuid.uuid4().hex[:8]}"
+    rno_online_pending = f"RFW{uuid.uuid4().hex[:8]}"
+    rno_offline_done = f"RFW{uuid.uuid4().hex[:8]}"
+    db.add(Device(sn=sn))
+    db.flush()
+    db.add(Refund(refund_no=rno_online_done, device_sn=sn, refund_method="线上", status="已退款", refund_amount=100))
+    db.add(Refund(refund_no=rno_online_pending, device_sn=sn, refund_method="线上", status="申请中", refund_amount=100))
+    db.add(Refund(refund_no=rno_offline_done, device_sn=sn, refund_method="线下", status="已退款", refund_amount=100))
+    db.flush()
+
+    scope = _in_scope_refund_nos(db)
+    assert rno_online_done in scope     # 线上+已退款 → 在
+    assert rno_online_pending not in scope  # 线上但申请中 → 不在
+    assert rno_offline_done not in scope    # 线下已退款 → 不在(非 A 路)
+
+
+def test_in_scope_includes_wallet_and_complaint(db):
+    """行范围含「带 wallet 关联」与「设备有外部投诉」的退款单(审计/客诉辅助)。"""
+    sn_wallet = _uniq("SN-SCOPE-W")
+    sn_ec = _uniq("SN-SCOPE-EC")
+    sn_plain = _uniq("SN-SCOPE-P")
+    rno_wallet = f"RFW{uuid.uuid4().hex[:8]}"
+    rno_ec = f"RFW{uuid.uuid4().hex[:8]}"
+    rno_plain = f"RFW{uuid.uuid4().hex[:8]}"
+    db.add(Device(sn=sn_wallet))
+    db.add(Device(sn=sn_ec))
+    db.add(Device(sn=sn_plain))
+    db.flush()
+    # 申请中 + 带 wallet 关联 → 应保留(审计辅助)
+    db.add(Refund(refund_no=rno_wallet, device_sn=sn_wallet, refund_method="转入提现账户", status="申请中", refund_amount=100))
+    w = WalletWithdrawal(op_amount=100)
+    db.add(w)
+    db.flush()
+    db.add(DataMatchRelation(
+        src_table="refund", src_id=rno_wallet, dst_table="wallet", dst_id=str(w.id),
+        match_type="device_sn", confidence=70, matched_by="auto", status="matched",
+    ))
+    # 申请中 + 设备有外部投诉 → 应保留(客诉分类)
+    db.add(Refund(refund_no=rno_ec, device_sn=sn_ec, refund_method="线上", status="申请中", refund_amount=100))
+    db.add(ExternalComplaint(device_sn=sn_ec, complaint_date=datetime(2026, 7, 1, tzinfo=timezone.utc)))
+    # 申请中 + 无任何关联 + 独立SN(无外部投诉)→ 不在范围
+    db.add(Refund(refund_no=rno_plain, device_sn=sn_plain, refund_method="线下", status="申请中", refund_amount=100))
+    db.flush()
+
+    scope = _in_scope_refund_nos(db)
+    assert rno_wallet in scope   # 带 wallet 关联 → 在
+    assert rno_ec in scope       # 设备有外部投诉 → 在
+    assert rno_plain not in scope  # 无关联申请中(独立SN) → 不在

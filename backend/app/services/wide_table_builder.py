@@ -3,16 +3,18 @@
 把 matcher 产出的 DataMatchRelation 关联关系物化到 refund_wide 宽表,
 供分析引擎直接查询(引擎禁止 JOIN)。
 
-构建策略:
-- 全量构建(only_refund_nos=None):为 refunds 表所有退费单构建宽表行
-  (refund 主表字段始终填充;ticket/merchant_refund/wallet 关联字段在有匹配时填充,否则 NULL;
-   external_complaint 按 device_sn 聚合,与关联关系无关)
-- 增量构建(only_refund_nos=[...]):只为指定退费单重建,用于同步后钩子
+构建策略(A-20260908-001 LOCKED 精简重构):
+- 行范围: 线上+已退款 ∪ 带 wallet 关联 ∪ 设备SN有外部投诉
+  (即「最终会进入 E 表退款记录报表的线上退款」的当日即时版 + 审计/客诉辅助行)
+- 全量构建(only_refund_nos=None): 只对新行范围内的退费单构建宽表行,
+  完成后清理不在范围内的残留行(refund_wide 现存但已不满足新范围 → 物理删除)
+- 增量构建(only_refund_nos=[...]): 只为指定退费单重建,用于同步后钩子
+  (受影响单不在新行范围内 → 查询不到 → 天然 skip)
 
 同 SN 多工单选择规则:优先 order_no 命中的工单,否则取最新 finish_time 的工单。
 同 SN 多笔钱包取最新 op_time 的钱包。
-商户退款按 order_no 精确命中,至多一条。
 外部投诉按 device_sn 聚合为 count + latest_time,与 matcher 关系无关(直接查 external_complaints 表)。
+注: merchant_refund(mr_*) 关联已不再物化(零消费死字段, 见 A-20260908-001), 本模块不再拉取。
 """
 
 import logging
@@ -20,12 +22,12 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.external_complaint import ExternalComplaint
-from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
 from app.models.refund_wide import RefundWide
 from app.models.ticket import ServiceTicket
@@ -38,13 +40,12 @@ logger = logging.getLogger(__name__)
 _TZ_MIN = datetime.min.replace(tzinfo=timezone.utc)
 
 # upsert 时需更新的字段(refund_no 是冲突键,不更新)
+# 注: A-20260908-001 已删除 mr_*(wx_refund_no/mr_trade_time/...) 与 ticket_finish_time
 _WIDE_UPDATE_FIELDS = [
     "refund_method", "status", "refund_reason", "operator", "auditor", "device_sn",
     "refund_amount", "created_at_raw",
-    "ticket_no", "service_item", "service_category", "ticket_finish_time",
+    "ticket_no", "service_item", "service_category",
     "ticket_handle_duration", "ticket_handler",
-    "wx_refund_no", "mr_trade_time", "mr_refund_amount", "mr_refund_status", "mr_fee",
-    "merchant_id",
     "wallet_id", "wallet_op_time", "wallet_op_amount",
     "has_external_complaint", "external_complaint_count", "external_complaint_latest_time",
     "matched_at",
@@ -55,25 +56,61 @@ _WIDE_UPDATE_FIELDS = [
 _BATCH_SIZE = 5000
 
 
+def _in_scope_refund_nos(db: Session) -> set[str]:
+    """返回新行范围内的退费单号集合(A-20260908-001 §2.2 方案 B)。
+
+    范围 = 线上+已退款 ∪ 带 wallet 关联(refund↔wallet matched) ∪ 设备SN有外部投诉
+    - 线上+已退款: refunds.refund_method='线上' AND status='已退款' (主体, 与 E 表一一对应)
+    - 带 wallet 关联: data_match_relations dst_table='wallet' matched (视图5 提现时序审计)
+    - 外部投诉: refunds.device_sn ∈ external_complaints.device_sn (分类规则1 客诉覆盖)
+    """
+    # 1. 线上+已退款(主体)
+    main = set(db.scalars(
+        select(Refund.refund_no).where(
+            Refund.refund_method == "线上",
+            Refund.status == "已退款",
+        )
+    ))
+    # 2. 带 wallet 关联
+    wallet_nos = set(db.scalars(
+        select(DataMatchRelation.src_id).where(
+            DataMatchRelation.src_table == "refund",
+            DataMatchRelation.dst_table == "wallet",
+            DataMatchRelation.status == "matched",
+        )
+    ))
+    # 3. 设备SN有外部投诉
+    ec_sns = set(db.scalars(
+        select(ExternalComplaint.device_sn).where(ExternalComplaint.device_sn.isnot(None))
+    ))
+    ec_nos: set[str] = set()
+    if ec_sns:
+        ec_nos = set(db.scalars(
+            select(Refund.refund_no).where(Refund.device_sn.in_(list(ec_sns)))
+        ))
+    return main | wallet_nos | ec_nos
+
+
 def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None, progress_callback=None) -> dict:
     """构建 refund_wide 物化宽表(分批处理,避免 OOM)
 
     Args:
         db: 数据库会话(函数内不 commit,由调用方决定;但每批 upsert 后会 commit)
-        only_refund_nos: 指定退费单号列表(增量构建);None=全量构建所有退费单
+        only_refund_nos: 指定退费单号列表(增量构建);None=全量构建(行范围内)
         progress_callback: 可选回调 (built: int, total: int) -> None, 每批完成时调用
 
     Returns:
-        {"built": int, "updated": int, "skipped": int}
+        {"built": int, "updated": int, "skipped": int, "deleted": int}
     """
     # 1. 确定要处理的退费单号集合(仅加载字符串,内存占用极小)
     if only_refund_nos:
         target_refund_nos = list(dict.fromkeys(only_refund_nos))  # 去重保序
     else:
-        target_refund_nos = list(db.scalars(select(Refund.refund_no)))
+        # A-20260908-001: 全量构建只物化新行范围内的退费单(线上+已退款 ∪ 带wallet ∪ 外部投诉SN)
+        target_refund_nos = sorted(_in_scope_refund_nos(db))
 
     if not target_refund_nos:
-        return {"built": 0, "updated": 0, "skipped": 0}
+        return {"built": 0, "updated": 0, "skipped": 0, "deleted": 0}
 
     total_built = 0
     total_skipped = 0
@@ -100,11 +137,24 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None, pro
         if start + _BATCH_SIZE < len(target_refund_nos):
             time.sleep(0.2)
 
+    # 3. 全量构建后清理残留: 已不在新行范围的行物理删除(增量构建不触发)
+    deleted = 0
+    if not only_refund_nos:
+        scope = _in_scope_refund_nos(db)
+        stale = db.scalars(
+            select(RefundWide.refund_no).where(RefundWide.refund_no.notin_(list(scope)))
+        ).all()
+        if stale:
+            deleted = len(stale)
+            db.execute(sa_delete(RefundWide).where(RefundWide.refund_no.in_(list(stale))))
+            db.commit()
+            logger.info(f"refund_wide 残留清理: deleted={deleted}")
+
     logger.info(
         f"refund_wide 构建完成: built={total_built}, skipped={total_skipped}, "
-        f"target={len(target_refund_nos)}"
+        f"deleted={deleted}, target={len(target_refund_nos)}"
     )
-    return {"built": total_built, "updated": total_built, "skipped": total_skipped}
+    return {"built": total_built, "updated": total_built, "skipped": total_skipped, "deleted": deleted}
 
 
 def _build_wide_batch(db: Session, target_refund_nos: list[str]) -> dict:
@@ -131,26 +181,18 @@ def _build_wide_batch(db: Session, target_refund_nos: list[str]) -> dict:
         refund_rel_map[src_id][dst_table].append((dst_id, match_type))
 
     # 3. 收集本批所有 dst_id,批量拉取关联表记录
+    #    注: A-20260908-001 起不再物化 merchant_refund(mr_*)关联, 只拉 ticket/wallet
     ticket_ids: set[str] = set()
-    mr_ids: set[str] = set()
     wallet_ids: set[str] = set()
     for tables in refund_rel_map.values():
         for dst_id, _ in tables.get("ticket", []):
             ticket_ids.add(dst_id)
-        for dst_id, _ in tables.get("merchant_refund", []):
-            mr_ids.add(dst_id)
         for dst_id, _ in tables.get("wallet", []):
             wallet_ids.add(dst_id)
 
     tickets: dict[str, ServiceTicket] = {}
     if ticket_ids:
         tickets = {t.ticket_no: t for t in db.scalars(select(ServiceTicket).where(ServiceTicket.ticket_no.in_(ticket_ids)))}
-
-    merchant_refunds: dict[str, MerchantRefund] = {}
-    if mr_ids:
-        mr_int_ids = [int(mid) for mid in mr_ids if mid.isdigit()]
-        if mr_int_ids:
-            merchant_refunds = {str(m.id): m for m in db.scalars(select(MerchantRefund).where(MerchantRefund.id.in_(mr_int_ids)))}
 
     wallets: dict[str, WalletWithdrawal] = {}
     if wallet_ids:
@@ -187,8 +229,6 @@ def _build_wide_batch(db: Session, target_refund_nos: list[str]) -> dict:
 
         # 选择工单:优先 order_no 命中,否则最新 finish_time
         ticket = _select_ticket(tables.get("ticket", []), tickets)
-        # 商户退款:至多一条(order_no 精确命中)
-        merchant_refund = _select_merchant_refund(tables.get("merchant_refund", []), merchant_refunds)
         # 钱包:最新 op_time
         wallet = _select_wallet(tables.get("wallet", []), wallets)
 
@@ -210,15 +250,8 @@ def _build_wide_batch(db: Session, target_refund_nos: list[str]) -> dict:
             "ticket_no": ticket.ticket_no if ticket else None,
             "service_item": ticket.service_item if ticket else None,
             "service_category": ticket.service_category if ticket else None,
-            "ticket_finish_time": ticket.finish_time if ticket else None,
             "ticket_handle_duration": ticket.handle_duration if ticket else None,
             "ticket_handler": ticket.handler if ticket else None,
-            "wx_refund_no": merchant_refund.wx_refund_no if merchant_refund else None,
-            "mr_trade_time": merchant_refund.trade_time if merchant_refund else None,
-            "mr_refund_amount": merchant_refund.refund_amount if merchant_refund else None,
-            "mr_refund_status": merchant_refund.refund_status if merchant_refund else None,
-            "mr_fee": merchant_refund.fee if merchant_refund else None,
-            "merchant_id": merchant_refund.merchant_id if merchant_refund else None,
             "wallet_id": str(wallet.id) if wallet else None,
             "wallet_op_time": wallet.op_time if wallet else None,
             "wallet_op_amount": wallet.op_amount if wallet else None,
@@ -256,18 +289,6 @@ def _select_ticket(
         return None
     related.sort(key=lambda t: t.finish_time or _TZ_MIN, reverse=True)
     return related[0]
-
-
-def _select_merchant_refund(
-    mr_rels: list[tuple[str, str]], merchant_refunds: dict[str, MerchantRefund]
-) -> MerchantRefund | None:
-    """商户退款:至多一条(order_no 精确命中),取第一条命中的"""
-    if not mr_rels:
-        return None
-    for dst_id, _ in mr_rels:
-        if dst_id in merchant_refunds:
-            return merchant_refunds[dst_id]
-    return None
 
 
 def _select_wallet(

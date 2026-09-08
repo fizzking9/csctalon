@@ -291,20 +291,9 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("refund_wide", "ticket_no"): {"role": "dimension", "is_filterable": False},
     ("refund_wide", "service_item"): {"role": "category"},
     ("refund_wide", "service_category"): {"role": "category"},
-    # ticket_finish_time 同 ticket.finish_time,89% 不可靠,隐藏防误用(详见 docs/数据时间字段使用规范.md)
-    ("refund_wide", "ticket_finish_time"): {
-        "role": "time", "is_filterable": False,
-        "name_cn": "⚠️工单完成时间(不可靠,89%被批量覆盖)",
-    },
+    # A-20260908-001: ticket_finish_time 列已删除(89% 被批量覆盖不可靠, 见 A-20260902-005)
     ("refund_wide", "ticket_handle_duration"): {"role": "measure", "agg": "avg"},
     ("refund_wide", "ticket_handler"): {"role": "person"},
-    # merchant_refund 关联字段(mr_ 前缀避免与 refund 主表字段冲突)
-    ("refund_wide", "wx_refund_no"): {"role": "dimension", "is_filterable": False},
-    ("refund_wide", "mr_trade_time"): {"role": "time"},
-    ("refund_wide", "mr_refund_amount"): {"role": "amount", "agg": "sum"},
-    ("refund_wide", "mr_refund_status"): {"role": "category"},
-    ("refund_wide", "mr_fee"): {"role": "amount", "agg": "sum"},
-    ("refund_wide", "merchant_id"): {"role": "category"},
     # wallet 关联字段
     ("refund_wide", "wallet_id"): {"role": "dimension", "is_filterable": False},
     ("refund_wide", "wallet_op_time"): {"role": "time"},
