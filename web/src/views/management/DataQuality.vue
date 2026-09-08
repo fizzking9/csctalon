@@ -89,6 +89,11 @@
       <el-tab-pane v-for="t in auditTables" :key="t.code" :label="t.label" :name="t.code">
         <QualityAudit :table="t.code" />
       </el-tab-pane>
+
+      <!-- 拒收数据(未采纳行): A-20260908-003 数据治理框架 -->
+      <el-tab-pane label="拒收数据" name="rejected">
+        <RejectedRows />
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
@@ -100,6 +105,7 @@ import { Plus, Refresh } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { listRules, createRule, updateRule, deleteRule } from '@/api/dataQuality'
 import QualityAudit from './QualityAudit.vue'
+import RejectedRows from './RejectedRows.vue'
 
 const authStore = useAuthStore()
 const activeTab = ref('rules')

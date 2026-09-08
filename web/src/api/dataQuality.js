@@ -45,3 +45,24 @@ export function qualityFix(table, pk, payload) {
 export function qualityScan(table) {
   return request.post(`/data-quality/${table}/scan`)
 }
+
+// ── 拒收行(未采纳数据) A-20260908-003 ─────────────────────────
+/** 拒收行列表 */
+export function listRejectedRows(params) {
+  return request.get('/data-quality/rejected', { params })
+}
+
+/** 拒收行统计 */
+export function rejectedStats() {
+  return request.get('/data-quality/rejected/stats')
+}
+
+/** 人工判定单行 keep/discard */
+export function reviewRejectedRow(id, action) {
+  return request.post(`/data-quality/rejected/${id}/review`, { action })
+}
+
+/** 批量判定 */
+export function batchReviewRejected(ids, action) {
+  return request.post('/data-quality/rejected/batch-review', { row_ids: ids, action })
+}
