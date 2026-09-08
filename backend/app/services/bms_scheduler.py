@@ -101,6 +101,23 @@ def should_run_low_freq(
     return not busy
 
 
+def should_sync_shared_docs(now_hour: int, now_minute: int, done: bool = False) -> bool:
+    """共享文档在线采集是否应在本高频窗口触发(#35 统一调度, 纯函数供单测)。
+
+    语义: 并入白天高频窗口(与 BMS 白天每小时同步同条件):
+      - 仅在 DAYTIME_HOURS 整点 + TRIGGER_WINDOW 内(now_minute < TRIGGER_WINDOW_MINUTES)为 True;
+      - 同窗口已 done(已采过/已检查过)→ False(防主循环 60s 多次 tick 重复触发);
+      - 窗口未来改半小时时, 只需把 DAYTIME_HOURS/窗口粒度调细, 共享文档自然跟随。
+    """
+    if done:
+        return False
+    if now_hour not in DAYTIME_HOURS:
+        return False
+    if now_minute >= TRIGGER_WINDOW_MINUTES:
+        return False
+    return True
+
+
 class BmsScheduler:
     """BMS 定时同步调度器
 
@@ -128,6 +145,9 @@ class BmsScheduler:
         # 低频档当日是否已执行/已尝试(A-20260907-001 / #31): date_str -> bool
         # 与 _last_run_hour 分开: 低频小时(6:00)不在 DAYTIME_HOURS, 用独立日标记防重复
         self._low_freq_done: dict[str, bool] = {}
+        # 共享文档采集"窗口内已完成"(统一调度 #35): date_str -> set(已完成的高频窗口序号)
+        # 语义: 共享文档并入白天高频窗口(整点/未来半小时), 同窗口只采一次(防 60s 主循环重复触发)
+        self._shared_doc_done: dict[str, set[int]] = {}
         # 启动后延迟预热任务句柄(防 GC 中断)
         self._warm_task: asyncio.Task | None = None
 
@@ -409,9 +429,9 @@ class BmsScheduler:
                 except Exception as de:  # noqa: BLE001
                     logger.warning(f"[调度器] 共享文档同步检查异常: {de}")
 
-                # ── 共享文档在线采集(doc_sync_sources): 到点源逐个同步(#33) ──
+                # ── 共享文档在线采集(doc_sync_sources): 并入白天高频窗口, 同窗口只采一次(#35) ──
                 try:
-                    await self._maybe_sync_shared_docs()
+                    await self._maybe_sync_shared_docs(now_cn, date_str)
                 except Exception as sd:  # noqa: BLE001
                     logger.warning(f"[调度器] 共享文档在线采集检查异常: {sd}")
 
@@ -797,30 +817,46 @@ class BmsScheduler:
         except Exception as e:  # noqa: BLE001
             logger.error(f"[调度器] 腾讯文档轮询同步异常: {e}", exc_info=True)
 
-    async def _maybe_sync_shared_docs(self):
-        """共享文档在线采集(doc_sync_sources)定时轮询同步(#33)。
+    async def _maybe_sync_shared_docs(self, now_cn, date_str: str):
+        """共享文档在线采集(doc_sync_sources) — 并入白天高频窗口(#35 统一调度)。
 
-        每次主循环检查: 空闲 + 有到点源(enabled 且距上次>=interval)
-        → 逐个在线程池执行(sync_doc_source_safe 内部独立 session + 状态写回,
-        不阻塞事件循环; 单源失败不影响其它源)。
+        与 BMS 高频同一节奏: 只在白天高频窗口(DAYTIME_HOURS 整点 + TRIGGER_WINDOW 内)
+        触发一次; 同窗口不重复(用 _shared_doc_done 记录已完成的高频小时, 防主循环
+        60s 多次 tick 重复触发)。未来高频窗口改半小时时, 只需把窗口粒度从"小时"
+        调细(共享文档自然跟随, 不依赖独立计时)。
+
+        源级 interval 仍生效(due_doc_sources): 窗口触发时, 距上次 >= interval 的源才采
+        (interval=120 的源可跳过若干窗口)。空闲才跑, 单源失败不影响其它源。
         """
         from app.services.shared_doc_sync_service import due_doc_sources, sync_doc_source_safe
 
+        # 1) 窗口守卫: 仅白天高频窗口内(与 BMS 白天每小时同步同条件)才触发;
+        #    同窗口只采一次(记录已完成的高频小时)
+        done_set = self._shared_doc_done.setdefault(date_str, set())
+        if not should_sync_shared_docs(now_cn.hour, now_cn.minute, done=now_cn.hour in done_set):
+            return
+        # 2) 空闲才跑(避免与 BMS/SCRM 大同步并发 playwright)
         if sync_task_manager.is_busy():
             return
+
         db = SessionLocal()
         try:
             due = due_doc_sources(db)
         finally:
             db.close()
         if not due:
+            # 无到点源也算该窗口已检查过(避免每 tick 空转查库)
+            done_set.add(now_cn.hour)
             return
-        logger.info(f"[调度器] 共享文档在线采集到点 {len(due)} 个源, 开始轮询")
+        logger.info(f"[调度器] 共享文档在线采集(高频窗口 {now_cn.hour:02d}:00) 到点 "
+                    f"{len(due)} 个源, 开始采集")
         for row in due:
             try:
                 await asyncio.to_thread(sync_doc_source_safe, row.id, "scheduled")
             except Exception as e:  # noqa: BLE001
-                logger.error(f"[调度器] 共享文档源 #{row.id} 轮询同步异常: {e}", exc_info=True)
+                logger.error(f"[调度器] 共享文档源 #{row.id} 采集异常: {e}", exc_info=True)
+        # 无论成败, 该窗口已处理过(失败源 last_sync_at 未更新 → 下个窗口因 interval 到期会重试)
+        done_set.add(now_cn.hour)
 
     async def _do_scheduled_sync(
         self,

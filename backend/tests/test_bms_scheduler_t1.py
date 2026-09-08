@@ -131,3 +131,31 @@ def test_low_freq_skipped_when_done_or_disabled():
     assert should_run_low_freq(6, done=True, busy=False) is False
     assert should_run_low_freq(5, done=False, busy=False) is False   # 未到低频小时
     assert should_run_low_freq(6, low_freq_hour=0, done=False, busy=False) is False  # 禁用
+
+
+# ── 共享文档在线采集窗口判定(#35 统一调度, 并入白天高频窗口) ──
+def test_shared_docs_run_in_daytime_window():
+    """白天高频窗口(整点后 30 分内) → 应触发。"""
+    from app.services.bms_scheduler import should_sync_shared_docs
+
+    assert should_sync_shared_docs(10, 0, done=False) is True    # 10:00 整点
+    assert should_sync_shared_docs(10, 15, done=False) is True   # 10:15 窗口内
+    assert should_sync_shared_docs(8, 29, done=False) is True    # 8:29 窗口内(8 点首采)
+
+
+def test_shared_docs_not_run_outside_window():
+    """非白天/窗口外 → 不触发(并入高频节奏, 不独立乱采)。"""
+    from app.services.bms_scheduler import should_sync_shared_docs
+
+    assert should_sync_shared_docs(10, 30, done=False) is False   # 窗口外(>=30分)
+    assert should_sync_shared_docs(10, 45, done=False) is False   # 窗口外
+    assert should_sync_shared_docs(3, 5, done=False) is False     # 凌晨非白天
+    assert should_sync_shared_docs(6, 5, done=False) is False     # 6:00 非高频(低频档专属)
+
+
+def test_shared_docs_window_once_per_hour():
+    """同窗口只采一次(done) → 不重复触发。"""
+    from app.services.bms_scheduler import should_sync_shared_docs
+
+    assert should_sync_shared_docs(10, 5, done=True) is False     # 该小时已采过
+    assert should_sync_shared_docs(11, 5, done=False) is True     # 下个小时窗口重新可采
