@@ -22,7 +22,11 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, DBSession
-from app.api.v1.complaints import _BACKLOG_DONE_SET, _external_done_sns
+from app.api.v1.complaints import (
+    _BACKLOG_DONE_SET,
+    _EXTERNAL_DONE_RESULTS,
+    _external_done_sns,
+)
 from app.core.config import settings
 from app.core.redis_client import cache_ttl_for, cached_call
 from app.models.card_complaint import CardComplaint
@@ -159,7 +163,7 @@ def external_refund(
     })
 
 
-@router.get("/complaint", response_model=R, summary="外部-当日/指定日投诉")
+@router.get("/complaint", response_model=R, summary="外部-当日/指定日投诉(登记/处理双口径)")
 def external_complaint(
     db: DBSession,
     date: str | None = Query(None, description="YYYY-MM-DD, 缺省=今天(北京时间)"),
@@ -170,11 +174,23 @@ def external_complaint(
     S.record_external_access(db, row, "complaint")
     date = _valid_date_or_400(date)
     kpi = _kpi(db, date)
+    # 登记/处理双口径(2026-09-08 #33 用户诉求): 外部投诉"登记"与"处理"是两个口径,
+    # 单日端点除兼容总量 complaint 外, 补充 registered/handled/backlog(与 brief 同源
+    # _complaint_enhanced 单日窗口, 避免外部只看到"总量"而误判未处理)。
+    enhanced = _complaint_enhanced(db, date, date)
     return R(data={
         "date": kpi.get("date"),
         "generated_at": _now_cn().isoformat(),
         "complaint": kpi.get("complaint"),
-        "_spec": {"complaint": "投诉量=service_tickets投诉 + external_complaints + card_complaints 三表并集(落当日)"},
+        # 三源 registered(登记)/handled(处理)/backlog(积压) — 与内部看板一致
+        "by_source": enhanced.get("by_source"),
+        "registered": enhanced.get("total", {}).get("registered"),
+        "handled": enhanced.get("total", {}).get("handled"),
+        "backlog": enhanced.get("total", {}).get("backlog"),
+        "_spec": {"complaint": "投诉量=service_tickets投诉 + external_complaints + card_complaints 三表并集(落当日); "
+                               "registered=窗口内新登记(工单按 register_time, 315/卡商补充表按 complaint_date 并入外部); "
+                               "handled=窗口内真实完成(工单 finish_time∈窗口≥3min + 315已办结并入, 与内部口径一致); "
+                               "backlog=窗口内登记未闭环"},
     })
 
 
@@ -412,16 +428,32 @@ def _complaint_enhanced(db: Session, start_s: str, end_s: str) -> dict:
 
     # 补充表(315/卡商) → 外部投诉 registered: 净新增 = 窗口内补充记录 - 已 matched 到"窗口内登记工单"的重叠
     #   (与 complaints.complaint_summary 的 total - overlap 同语义; 避免同一投诉在工单+补充表双计)
-    def _suppl_overlap(model) -> int:
-        """补充记录 matched_ticket_no 指向"窗口内登记的投诉工单"的条数(= 工单侧已计入 registered 的部分)"""
-        sub_conds = [cat == "投诉", ServiceTicket.register_time.isnot(None)]
+    def _suppl_overlap(model, done_only: bool = False, handled_side: bool = False) -> int:
+        """补充记录 matched_ticket_no 指向"窗口内(登记|真实完成)投诉工单"的条数。
+
+        - done_only=True:   只数 result∈办结类 的补充记录(handled 并入去重用)。
+        - handled_side=True: 只数 matched 工单"窗口内真实完成"的那部分
+          (即工单侧 handled 已计; 办结补充若指向这类工单则不应在补充侧重复计入)。
+        与 complaints._source_reg_handled._overlap 完全同语义, 保证内外口径一致。
+        """
+        sub_conds = [cat == "投诉"]
+        if handled_side:
+            sub_conds += [
+                ServiceTicket.finish_time.isnot(None),
+                ServiceTicket.register_time.isnot(None),
+                func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) >= _REAL_FINISH_INTERVAL_SECS,
+            ]
+        else:
+            sub_conds.append(ServiceTicket.register_time.isnot(None))
         if ts:
-            sub_conds.append(ServiceTicket.register_time >= ts)
+            sub_conds.append(ServiceTicket.finish_time >= ts if handled_side else ServiceTicket.register_time >= ts)
         if te:
-            sub_conds.append(ServiceTicket.register_time <= te)
+            sub_conds.append(ServiceTicket.finish_time <= te if handled_side else ServiceTicket.register_time <= te)
         sub = select(ServiceTicket.ticket_no).where(*sub_conds)
         conds = [model.complaint_date.isnot(None), model.matched_ticket_no.isnot(None),
                  model.matched_ticket_no.in_(sub)]
+        if done_only:
+            conds.append(model.result.in_(_EXTERNAL_DONE_RESULTS))
         if ts:
             conds.append(model.complaint_date >= ts)
         if te:
@@ -441,6 +473,30 @@ def _complaint_enhanced(db: Session, start_s: str, end_s: str) -> dict:
     for item in by_source:
         if item["source"] == "外部投诉":
             item["registered"] = int(item["registered"]) + max(int(ext_reg), 0)
+
+    # ⚠️ 外部投诉桶 handled 并入(2026-09-08, #33 修复内外口径不一致):
+    #   complaints._source_reg_handled(内部看板) 2026-09-06 起把「315 补充表已办结
+    #   (result∈办结类)」并入 external handled——否则大量"登记已办结但无工单/工单状态
+    #   未同步"的 315 记录在内部看板算已处理、经外部只读 API 却显示未处理(用户反馈:
+    #   "外部调用总是显示外部投诉没处理")。
+    #   此处对齐: external handled += (315 办结数 − 已计入工单侧 handled 的重叠)。
+    #   ⚠️ 卡商(card_complaints)不并入: 其 result 是另一套语义(已解决/已退款完成/
+    #      投诉错误/流量虚...), 无统一办结集合, 套用 315 集合会恒为 0 → 保持不进 handled。
+    #  (与 complaints._source_reg_handled include_suppl_external 分支逐行对齐)
+    _suppl_done_conds = [ExternalComplaint.complaint_date.isnot(None),
+                         ExternalComplaint.result.in_(_EXTERNAL_DONE_RESULTS)]
+    if ts:
+        _suppl_done_conds.append(ExternalComplaint.complaint_date >= ts)
+    if te:
+        _suppl_done_conds.append(ExternalComplaint.complaint_date <= te)
+    _ext_done = db.scalar(select(func.count()).select_from(ExternalComplaint).where(*_suppl_done_conds)) or 0
+    # matched 到"窗口内真实完成工单"的已办结 → 工单侧 handled 已计, 不重复加
+    _ext_done_overlap_handled = _suppl_overlap(ExternalComplaint, done_only=True, handled_side=True)
+    _ext_handled_extra = max(int(_ext_done) - int(_ext_done_overlap_handled), 0)
+    if _ext_handled_extra:
+        for item in by_source:
+            if item["source"] == "外部投诉":
+                item["handled"] = int(item["handled"]) + _ext_handled_extra
 
     total = {
         "registered": sum(int(x["registered"]) for x in by_source),

@@ -586,3 +586,60 @@ def test_source_reg_handled_external_done_matched_no_double_count(db):
     # handled: 工单 1; EH-3 办结 matched 到该工单 → 工单侧已计, 不重复 → 仍 1
     assert hdl == 1, f"handled={hdl}, 期望 1(防双算, 不应为 2)"
 
+
+# ---- external._complaint_enhanced 与 complaints._source_reg_handled 对齐(#33, 2026-09-08) ----
+# 用户反馈: "外部调用本系统只读接口总是显示外部投诉没处理"。
+# 根因: complaints(内部看板) 2026-09-06 起 external handled 并入 315 办结, 但
+#       external._complaint_enhanced(外部只读 API)只算工单真实完成, 未并入 →
+#       大量"登记已办结但无工单/工单状态未同步"的 315 记录经外部 API 显示未处理。
+# 修复: external handled 并入 315 办结(扣已计入工单侧 handled 的重叠), 与内部对齐。
+# 下面两个用例与 test_source_reg_handled_external_* 一一对应, 锁定 external 侧同口径。
+
+
+def test_external_enhanced_external_handled_includes_suppl_done(db):
+    """external._complaint_enhanced: 外部投诉 handled 并入 315 办结(与 internal 对齐)。
+
+    场景(与 test_source_reg_handled_external_handled_includes_suppl_done 同构):
+      - 外部工单 T-XH-1(12315) 窗口内登记+真实完成 → handled=1(工单侧)
+      - 315 记录 XH-1: 窗口内、result=和解结案(办结)、matched=None → handled +1
+      - 315 记录 XH-2: 窗口内、result=None(未办结) → 不计 handled
+    """
+    from app.models.external_complaint import ExternalComplaint
+    base = _dt.datetime.strptime(_REVIEW_DAY, "%Y-%m-%d").replace(tzinfo=TZ_CN)
+    _mk_ticket(db, "T-XH-1", item="12315", status="已完成", fin_delta_min=10)
+    db.add_all([
+        ExternalComplaint(complaint_no="XH-1", complaint_date=base + timedelta(minutes=1),
+                          result="和解结案", platform="315"),
+        ExternalComplaint(complaint_no="XH-2", complaint_date=base + timedelta(minutes=2),
+                          result=None, platform="315"),
+    ])
+    db.flush()
+    out = _complaint_enhanced(db, _REVIEW_DAY, _REVIEW_DAY)
+    external = next(x for x in out["by_source"] if x["source"] == "外部投诉")
+    # registered: T-XH-1(1) + 补充净新增 XH-1/XH-2(2) = 3
+    assert external["registered"] == 3, f"registered={external['registered']}, 期望 3"
+    # handled: 工单 T-XH-1(真实完成 1) + 315 XH-1(办结 1) = 2; XH-2 未办结不计
+    assert external["handled"] == 2, f"handled={external['handled']}, 期望 2(工单1 + 315办结1)"
+
+
+def test_external_enhanced_external_done_matched_no_double_count(db):
+    """external._complaint_enhanced: 315 办结 matched 到"窗口内真实完成"工单 → 不重复加。
+
+    场景(与 test_source_reg_handled_external_done_matched_no_double_count 同构):
+      - 外部工单 T-XH-2(12315) 窗口内登记+真实完成(handled=1 工单侧)
+      - 315 记录 XH-3: 办结 + matched=T-XH-2 → 工单侧已计, 补充侧必须去重(防双算)
+    """
+    from app.models.external_complaint import ExternalComplaint
+    base = _dt.datetime.strptime(_REVIEW_DAY, "%Y-%m-%d").replace(tzinfo=TZ_CN)
+    _mk_ticket(db, "T-XH-2", item="12315", status="已完成", fin_delta_min=10)
+    db.add(ExternalComplaint(complaint_no="XH-3", complaint_date=base + timedelta(minutes=1),
+                             result="和解结案", platform="315",
+                             matched_ticket_no="T-XH-2"))
+    db.flush()
+    out = _complaint_enhanced(db, _REVIEW_DAY, _REVIEW_DAY)
+    external = next(x for x in out["by_source"] if x["source"] == "外部投诉")
+    # registered: T-XH-2(1) + 补充 XH-3 matched 去重(0) = 1
+    assert external["registered"] == 1, f"registered={external['registered']}, 期望 1(补充 matched 去重)"
+    # handled: 工单 1; XH-3 办结 matched 到该工单 → 不重复 → 仍 1
+    assert external["handled"] == 1, f"handled={external['handled']}, 期望 1(防双算, 不应为 2)"
+
