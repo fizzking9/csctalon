@@ -79,14 +79,17 @@ def delete_shared_doc(source_id: int, db: DBSession, _: AdminUser):
 
 @router.post("/{source_id}/toggle", response_model=R, summary="启停共享文档采集源")
 def toggle_shared_doc(source_id: int, payload: dict, db: DBSession, _: AdminUser):
-    """body: {"enabled": bool} — 启/停定时采集"""
+    """body: {"enabled": bool} — 启/停定时采集(仅接受真布尔, 拒绝字符串"false")"""
     source_id = _validate_source_id(source_id)
     row = sdss.get_doc_source(db, source_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"采集源不存在: id={source_id}")
     if not isinstance(payload, dict) or "enabled" not in payload:
         raise HTTPException(status_code=400, detail="body 需包含 enabled(bool)")
-    row.enabled = bool(payload["enabled"])
+    enabled = payload["enabled"]
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="enabled 必须是布尔值 true/false")
+    row.enabled = enabled
     db.commit()
     db.refresh(row)
     return R(data=sdss.row_to_dict(row))

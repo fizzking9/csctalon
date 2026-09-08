@@ -53,14 +53,15 @@ _KDOCS_MENU_XY = (95, 15)
 _EXCEL_ENGINE = "calamine"
 
 
-def _export_tencent_xlsx(doc_url: str, out_path: str) -> str:
+def _export_tencent_xlsx(doc_url: str, out_path: str, state_filename: str | None = None) -> str:
     """用腾讯登录态打开共享表 → 更多菜单 → 导出为 → 本地Excel(.xlsx)
 
+    state_filename: 登录态文件名(默认 tencent_doc.json; 支持配置行 state_file 覆盖)。
     返回下载建议文件名。无登录态或导出失败时抛出异常(由调用方记录状态)。
     """
     from playwright.sync_api import sync_playwright
 
-    state_path = Path(settings.BROWSER_STATE_DIR) / _DEFAULT_STATE_FILE[PLATFORM_TENCENT]
+    state_path = Path(settings.BROWSER_STATE_DIR) / (state_filename or _DEFAULT_STATE_FILE[PLATFORM_TENCENT])
     if not state_path.exists():
         raise FileNotFoundError(
             f"未找到腾讯登录态 {state_path}。请先运行 scripts/tencent_doc_login.py 扫码登录"
@@ -96,14 +97,15 @@ def _export_tencent_xlsx(doc_url: str, out_path: str) -> str:
             browser.close()
 
 
-def _export_kdocs_xlsx(doc_url: str, out_path: str) -> str:
+def _export_kdocs_xlsx(doc_url: str, out_path: str, state_filename: str | None = None) -> str:
     """用金山登录态打开共享表 → 左上角菜单 → 导出为 → 导出为 Excel(.xlsx)
 
+    state_filename: 登录态文件名(默认 kdocs.json; 支持配置行 state_file 覆盖)。
     返回下载建议文件名。无登录态或导出失败时抛出异常。
     """
     from playwright.sync_api import sync_playwright
 
-    state_path = Path(settings.BROWSER_STATE_DIR) / _DEFAULT_STATE_FILE[PLATFORM_KDOCS]
+    state_path = Path(settings.BROWSER_STATE_DIR) / (state_filename or _DEFAULT_STATE_FILE[PLATFORM_KDOCS])
     if not state_path.exists():
         raise FileNotFoundError(
             f"未找到金山登录态 {state_path}。请先运行 scripts/kdocs_login.py 扫码登录"
@@ -150,12 +152,12 @@ def _export_kdocs_xlsx(doc_url: str, out_path: str) -> str:
             browser.close()
 
 
-def export_doc_xlsx(platform: str, doc_url: str, out_path: str) -> str:
+def export_doc_xlsx(platform: str, doc_url: str, out_path: str, state_filename: str | None = None) -> str:
     """按平台分发导出 xlsx, 返回下载建议文件名(供 source_file 展示)"""
     if platform == PLATFORM_TENCENT:
-        return _export_tencent_xlsx(doc_url, out_path)
+        return _export_tencent_xlsx(doc_url, out_path, state_filename)
     if platform == PLATFORM_KDOCS:
-        return _export_kdocs_xlsx(doc_url, out_path)
+        return _export_kdocs_xlsx(doc_url, out_path, state_filename)
     raise ValueError(f"不支持的共享文档平台: {platform}")
 
 
@@ -394,23 +396,26 @@ def save_doc_source(
         if row is None:
             raise ValueError(f"采集源不存在: id={source_id}")
         # 部分更新: 仅校验并应用传入的 platform/doc_url/target_type
-        platform = str(data.get("platform") or "").strip()
-        if platform:
+        new_platform = str(data.get("platform") or "").strip() or row.platform
+        if str(data.get("platform") or "").strip():
+            platform = new_platform
             if platform not in (PLATFORM_TENCENT, PLATFORM_KDOCS):
                 raise ValueError(f"platform 必须为 {PLATFORM_TENCENT}/{PLATFORM_KDOCS}: {platform!r}")
-            row.platform = platform
-        doc_url = str(data.get("doc_url") or "").strip()
-        if doc_url:
+        new_doc_url = str(data.get("doc_url") or "").strip() or row.doc_url
+        # W3: platform 或 doc_url 任一变更后, 一律按(最终 platform, 最终 doc_url)做唯一冲突预检(排除自身),
+        #     避免只改 platform 时落到 DB 唯一约束抛 IntegrityError → 500(应在 API 层 400)
+        if (str(data.get("platform") or "").strip() or str(data.get("doc_url") or "").strip()):
             dup = db.scalar(
                 select(DocSyncSource).where(
-                    DocSyncSource.platform == (platform or row.platform),
-                    DocSyncSource.doc_url == doc_url,
+                    DocSyncSource.platform == new_platform,
+                    DocSyncSource.doc_url == new_doc_url,
                     DocSyncSource.id != row.id,
                 )
             )
             if dup:
-                raise ValueError(f"已存在同平台同链接的采集源(id={dup.id}): {doc_url}")
-            row.doc_url = doc_url
+                raise ValueError(f"已存在同平台同链接的采集源(id={dup.id}): {new_doc_url}")
+        row.platform = new_platform
+        row.doc_url = new_doc_url
         target_type = str(data.get("target_type") or "").strip()
         if target_type:
             if target_type not in (TARGET_COMPLAINT, TARGET_MANUAL_REFUND):
@@ -427,7 +432,11 @@ def save_doc_source(
         sf = str(data.get("state_file") or "").strip()
         row.state_file = sf or None
     if data.get("enabled") is not None:
-        row.enabled = bool(data["enabled"])
+        # W2: 仅接受真布尔, 拒绝 JSON 字符串 "false"(bool("false") is True 陷阱)
+        v = data["enabled"]
+        if not isinstance(v, bool):
+            raise ValueError("enabled 必须是布尔值 true/false")
+        row.enabled = v
     if data.get("sync_interval_minutes") is not None:
         row.sync_interval_minutes = max(int(data["sync_interval_minutes"]), 5)
     db.commit()
@@ -490,7 +499,8 @@ def _do_sync(db: Session, row: DocSyncSource, out_path: str, trigger: str) -> di
     """导出 → 解析 → 入库(不负责配置行状态写回, 由 sync_one_source 统一处理)"""
     source_file = row.doc_name or row.doc_url
     try:
-        export_doc_xlsx(row.platform, row.doc_url, out_path)
+        # 登录态文件: 配置行 state_file 优先, 否则按平台默认(见 _state_file_for)
+        export_doc_xlsx(row.platform, row.doc_url, out_path, _state_file_for(row))
     except FileNotFoundError as e:
         # 登录态缺失: 属于配置/环境问题, 明确提示去扫码
         raise RuntimeError(

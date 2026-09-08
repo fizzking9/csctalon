@@ -173,7 +173,7 @@ def test_sync_complaint_payload_assembled(db, seed_source, monkeypatch, tmp_path
     xlsx = _write_fake_doc(tmp_path)
     captured = {}
 
-    def _fake_export(platform, doc_url, out_path):
+    def _fake_export(platform, doc_url, out_path, state_filename=None):
         # 复制本地 xlsx 到 service 期望的导出位置
         import shutil
 
@@ -241,7 +241,7 @@ def test_sync_manual_refund_full_sync_false(db, tmp_path, monkeypatch):
 
     captured = {}
 
-    def _fake_export(platform, doc_url, out_path):
+    def _fake_export(platform, doc_url, out_path, state_filename=None):
         import shutil
 
         shutil.copy(xlsx, out_path)
