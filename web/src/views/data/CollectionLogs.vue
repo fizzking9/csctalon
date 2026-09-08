@@ -138,6 +138,9 @@ async function loadData() {
       page: page.value,
       page_size: pageSize.value,
       limit: 500,
+      // #36: 采集日志需实时; 云端 OpenResty 对 GET 有 proxy_cache(x-cache: HIT),
+      // 不带随机参数会命中旧缓存(同步成功但日志看不到最新)。加时间戳绕开缓存键。
+      _t: Date.now(),
     }
     if (filter.source) params.source = filter.source
     if (filter.data_type) params.data_type = filter.data_type

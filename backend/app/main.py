@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.middleware.cache_control import NoCacheMiddleware
 from app.middleware.operation_log import OperationLogMiddleware
 from app.models import *  # noqa: F401,F403  # 注册所有模型
 
@@ -307,6 +308,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.add_middleware(OperationLogMiddleware)
+    # #36: 动态 API 防缓存(网关 proxy_cache 会缓存 GET 导致实时数据陈旧), 见 middleware/cache_control.py
+    app.add_middleware(NoCacheMiddleware)
 
     # P2-4: 全局 500 异常 traceback 记录器 (FastAPI 异常处理器)
     #       生产环境用户侧只能看到「服务器内部错误」，但服务端必须把完整 traceback 打到日志里，
