@@ -141,23 +141,66 @@ def _format_dt(dt) -> str:
 
 
 def _extract_error_detail(error_detail) -> str | None:
-    """从 error_detail(JSON) 中提取第一条错误文本, 兼容 dict/str/列表嵌套结构"""
+    """从同步日志 error 提取友好摘要, 兼容 dict/str/列表嵌套结构。
+
+    2026-09-08 (#36 完善): 同步日志 error 存的是 result.errors 的 repr 字符串
+    (如 "[{'row':0,'level':'warning','message':...}, ...]"), 原实现整段截断展示
+    在采集日志 error 列, 一长串 JSON 看着像"大量出错"。
+    现解析后收敛:
+      - 有 level=error(硬失败) → "N 条错误: <首条message>…; 另 M 条清洗提示"
+      - 仅 warning(清洗提示, 行保留) → "M 条清洗提示(数据已保留)"
+    """
     if not error_detail:
         return None
+    # 解析可能为 list repr 的字符串(如 str(all_errors))
     if isinstance(error_detail, str):
+        items = _parse_error_list(error_detail)
+        if items is not None:
+            return _summarize_errors(items)
         return error_detail[:500]
     if isinstance(error_detail, dict):
         errors = error_detail.get("errors")
         if isinstance(errors, list) and errors:
-            first = errors[0]
-            if isinstance(first, str):
-                return first[:500]
-            if isinstance(first, dict):
-                return str(first.get("message") or first)[:500]
+            return _summarize_errors(errors)
         msg = error_detail.get("message")
         if msg:
             return str(msg)[:500]
+        return None
+    if isinstance(error_detail, list):
+        return _summarize_errors(error_detail)
+    return str(error_detail)[:500]
+
+
+def _parse_error_list(raw: str):
+    """尝试把 repr 字符串解析为 [{level,message},...]; 失败返回 None"""
+    import ast
+    s = raw.strip()
+    if not (s.startswith("[") and s.endswith("]")):
+        return None
+    try:
+        parsed = ast.literal_eval(s)
+    except (ValueError, SyntaxError):
+        return None
+    if isinstance(parsed, list):
+        return [x for x in parsed if isinstance(x, dict)]
     return None
+
+
+def _summarize_errors(items: list[dict]) -> str:
+    """按 level 收敛: error=硬失败, warning=清洗提示(行保留)"""
+    errs = [x for x in items if str(x.get("level")) == "error"]
+    warns = [x for x in items if str(x.get("level")) == "warning"]
+    parts: list[str] = []
+    if errs:
+        first = str(errs[0].get("message") or errs[0])[:120]
+        parts.append(f"{len(errs)} 条错误: {first}")
+    if warns:
+        parts.append(f"{len(warns)} 条清洗提示(行已保留)")
+    if not parts:
+        # 无 level 标记: 按文本取首条
+        return str(items[0].get("message") or items[0])[:500] if items else None  # type: ignore[return-value]
+    return "; ".join(parts)
+
 
 
 @router.get("", response_model=R[list[CollectionLogItem]], summary="统一采集日志列表")

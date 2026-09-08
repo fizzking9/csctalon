@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -174,13 +174,25 @@ def _batch_upsert(db: Session, rows: list[dict], result: ManualRefundSyncResult)
         logger.info("[manual_refund_sync] 全部行被 ok 保护冻结(无更新)")
         return
 
-    before = db.scalar(select(func.count()).select_from(ManualRefund)) or 0
+    total_ins = 0
+    total_upd = 0
     BATCH = 2000
     for i in range(0, len(unique_rows), BATCH):
         batch = unique_rows[i:i + BATCH]
         stmt = pg_insert(ManualRefund).values(batch)
-        update_cols = {c: stmt.excluded[c] for c in batch[0].keys()
-                       if c not in ("register_time", "order_no", "device_sn", "registrant")}
+        # 去重键字段不参与 set(由唯一索引定位); 其余字段作为可更新内容
+        _key_cols = ("register_time", "order_no", "device_sn", "registrant")
+        update_cols = {c: stmt.excluded[c] for c in batch[0].keys() if c not in _key_cols}
+        # 内容比较字段: 去重键与系统派生时间戳不参与"是否变化"判定, 避免每轮整表重写
+        _compare_cols = [
+            c for c in batch[0].keys()
+            if c not in _key_cols and c not in ("quality_note", "register_time_raw")
+        ]
+        _where = None
+        if _compare_cols:
+            _where = or_(*[
+                getattr(ManualRefund, c).is_distinct_from(stmt.excluded[c]) for c in _compare_cols
+            ])
         stmt = stmt.on_conflict_do_update(
             # 表达式部分唯一索引 (北京登记日期, order_no, COALESCE(device_sn,''), COALESCE(registrant,''))
             index_elements=[
@@ -191,13 +203,17 @@ def _batch_upsert(db: Session, rows: list[dict], result: ManualRefundSyncResult)
             ],
             index_where=text("order_no IS NOT NULL"),
             set_=update_cols,
+            where=_where,  # #36: 未变行不更新(避免每轮整表重写历史行)
         )
-        db.execute(stmt)
+        # RETURNING (xmax=0)=insert; 排除被 where 挡下的未变冲突行
+        ret = db.execute(
+            stmt.returning(text("(xmax = 0) AS _is_ins"))
+        ).all()
+        total_ins += sum(1 for r in ret if r[0])
+        total_upd += len(ret) - sum(1 for r in ret if r[0])
         db.flush()
-    after = db.scalar(select(func.count()).select_from(ManualRefund)) or 0
-    inserted = max(after - before, 0)
-    result.inserted += inserted
-    result.updated += max(len(unique_rows) - inserted, 0)
+    result.inserted += total_ins
+    result.updated += total_upd
 
 
 def _reconcile_full(db: Session, keys_in_payload: set[tuple]) -> int:

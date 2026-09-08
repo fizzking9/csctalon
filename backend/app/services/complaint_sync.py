@@ -18,7 +18,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -311,6 +311,11 @@ def _batch_upsert(db: Session, model, rows: list[dict], result: SyncRowResult) -
     同一批次内 dedup_hash 重复(文件里本身完全相同的行)保留最后一条,避免
     "ON CONFLICT DO UPDATE command cannot affect row a second time" 报错。
     分批写入(单批 <=500 行)避免单条 SQL 绑定参数超过 PG 65535 上限。
+
+    2026-09-08 (#36 完善): 只在实际内容变化时 UPDATE——
+      历史行每轮全量重写(updated 虚高为整表行数)无意义; 加
+      WHERE 业务字段 IS DISTINCT FROM 入库值, 未变行不更新;
+      用 RETURNING (xmax=0) 精确区分 insert/update, 计数准确。
     """
     if not rows:
         return
@@ -322,16 +327,9 @@ def _batch_upsert(db: Session, model, rows: list[dict], result: SyncRowResult) -
     if dup_in_batch:
         logger.info(f"[complaint_sync] {model.__tablename__} 批次内重复指纹 {dup_in_batch} 行(保留最后一条)")
 
-    # 精确区分 insert/update: 先查已存在的指纹数(分批 in_ 查询避免超长)
-    hashes = [r["dedup_hash"] for r in unique_rows]
-    existing_count = 0
-    for i in range(0, len(hashes), 2000):
-        chunk = hashes[i:i + 2000]
-        existing_count += (
-            db.scalar(select(func.count()).select_from(model).where(model.dedup_hash.in_(chunk))) or 0
-        )
-
     BATCH = 500
+    total_ins = 0
+    total_upd = 0
     for i in range(0, len(unique_rows), BATCH):
         batch = unique_rows[i:i + BATCH]
         stmt = pg_insert(model).values(batch)
@@ -343,12 +341,30 @@ def _batch_upsert(db: Session, model, rows: list[dict], result: SyncRowResult) -
                 (stmt.excluded.complaint_no.isnot(None), stmt.excluded.complaint_no),
                 else_=model.complaint_no,
             )
-        stmt = stmt.on_conflict_do_update(index_elements=["dedup_hash"], set_=update_cols)
-        db.execute(stmt)
+        # 内容比较字段: 排除去重键/系统派生时间戳/编号保护列——这些不应单独触发整行更新
+        _compare_cols = [
+            c for c in batch[0]
+            if c not in ("dedup_hash", "matched_at", "complaint_no")
+        ]
+        _where = None
+        if _compare_cols:
+            _where = or_(*[
+                getattr(model, c).is_distinct_from(stmt.excluded[c]) for c in _compare_cols
+            ])
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["dedup_hash"],
+            set_=update_cols,
+            where=_where,  # 未变行不更新(避免每轮整表重写)
+        )
+        # RETURNING (xmax=0)=insert; xmax!=0=update(排除被 where 挡下的未变冲突行)
+        ret = db.execute(
+            stmt.returning(text("(xmax = 0) AS _is_ins"))
+        ).all()
+        total_ins += sum(1 for r in ret if r[0])
+        total_upd += len(ret) - sum(1 for r in ret if r[0])
         db.flush()
-    result.inserted += max(len(unique_rows) - existing_count, 0)
-    result.updated += min(existing_count, len(unique_rows))
-
+    result.inserted += total_ins
+    result.updated += total_upd
 
 def sync_complaints_from_payload(
     db: Session,

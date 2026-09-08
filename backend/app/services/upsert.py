@@ -1698,13 +1698,25 @@ def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session
         return
     # 分批 on_conflict_do_update: 按 (北京登记日期, order_no, COALESCE(device_sn,''), COALESCE(registrant,''))
     # 部分唯一索引去重更新(退款金额不参与键, 金额修改走 UPDATE)
-    before = db.scalar(select(func.count()).select_from(ManualRefund)) or 0
+    # #36: 加 WHERE 内容比较——未变行不更新(避免每轮整表重写历史行), RETURNING 精确计数
+    total_ins = 0
+    total_upd = 0
     BATCH = 2000
     for i in range(0, len(rows), BATCH):
         batch = rows[i:i + BATCH]
         stmt = pg_insert(ManualRefund).values(batch)
-        update_cols = {c: stmt.excluded[c] for c in batch[0].keys()
-                       if c not in ("register_time", "order_no", "device_sn", "registrant")}
+        _key_cols = ("register_time", "order_no", "device_sn", "registrant")
+        update_cols = {c: stmt.excluded[c] for c in batch[0].keys() if c not in _key_cols}
+        # 内容比较字段: 去重键与系统派生/溯源字段不参与"是否变化"判定
+        _compare_cols = [
+            c for c in batch[0].keys()
+            if c not in _key_cols and c not in ("quality_note", "register_time_raw")
+        ]
+        _where = None
+        if _compare_cols:
+            _where = or_(*[
+                getattr(ManualRefund, c).is_distinct_from(stmt.excluded[c]) for c in _compare_cols
+            ])
         stmt = stmt.on_conflict_do_update(
             # 表达式部分唯一索引 (北京登记日期, order_no, COALESCE(device_sn,''), COALESCE(registrant,''))
             index_elements=[
@@ -1715,13 +1727,16 @@ def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session
             ],
             index_where=text("order_no IS NOT NULL"),
             set_=update_cols,
+            where=_where,
         )
-        db.execute(stmt)
+        ret = db.execute(
+            stmt.returning(text("(xmax = 0) AS _is_ins"))
+        ).all()
+        total_ins += sum(1 for r in ret if r[0])
+        total_upd += len(ret) - sum(1 for r in ret if r[0])
         db.flush()
-    after = db.scalar(select(func.count()).select_from(ManualRefund)) or 0
-    inserted = max(after - before, 0)
-    result.inserted += inserted
-    result.updated += max(len(rows) - inserted, 0)
+    result.inserted += total_ins
+    result.updated += total_upd
 
 
 def upsert_device_tags(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
