@@ -175,7 +175,7 @@ def list_collection_logs(
 
     results: list[CollectionLogItem] = []
 
-    # ── 1. 文件上传 ──
+    # ── 1. 文件上传(仅手动上传) ──
     if not source or source == "upload":
         stmt = select(UploadRecord).order_by(UploadRecord.id.desc()).limit(limit)
         if data_type:
@@ -183,6 +183,12 @@ def list_collection_logs(
         if status:
             stmt = stmt.where(UploadRecord.status == status)
         for r in db.scalars(stmt):
+            # ⚠️ 2026-09-08: BMS 定时同步也会经 _auto_import 建 UploadRecord(source='bms'),
+            # 但同批数据已由 BmsSyncLog(BMS同步来源)展示, 这里再列"文件上传"会造成同一
+            # 采集动作重复出现两行。故只展示真·手动上传(source=manual/历史null),
+            # source='bms' 的自动导入记录跳过(归 BMS同步来源展示)。
+            if r.source == "bms":
+                continue
             results.append(
                 CollectionLogItem(
                     id=r.id,
