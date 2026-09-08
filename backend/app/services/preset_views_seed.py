@@ -1155,6 +1155,75 @@ PRESET_VIEWS: list[dict] = [
         "classification_rule_ids": [],
         "time_range_default": None,
     },
+    # ============================================================
+    # 现金流水统一宽表 (A-20260908-004, #41) —— 经营四路 ABCD 运营分析
+    # 数据源 cash_flow_wide: 一行=一笔出款(A线上/B钱包提现/C闪猫/D手动), route 区分
+    # ============================================================
+    {
+        "code": "preset_cash_flow_route_trend",
+        "name": "现金流水(ABCD 按日趋势)",
+        "description": "ABCD 经营四路出款按日趋势(来自 cash_flow_wide 统一宽表). 每路独立曲线, 快速看四路资金节奏. 口径=A+B+C+D 经营估算, 不含 E(独立对账基准).",
+        "chart_type": "line",
+        "segments": [
+            {
+                "source_code": "cash_flow_wide",
+                "label": "A线上直退",
+                "dimensions": [{"field": "pay_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "pay_amount", "agg": "sum", "alias": "A线上直退"}],
+                "filters": [{"field": "route", "op": "eq", "value": "A"}],
+            },
+            {
+                "source_code": "cash_flow_wide",
+                "label": "B钱包提现",
+                "dimensions": [{"field": "pay_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "pay_amount", "agg": "sum", "alias": "B钱包提现"}],
+                "filters": [{"field": "route", "op": "eq", "value": "B"}],
+            },
+            {
+                "source_code": "cash_flow_wide",
+                "label": "C闪猫退款",
+                "dimensions": [{"field": "pay_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "pay_amount", "agg": "sum", "alias": "C闪猫退款"}],
+                "filters": [{"field": "route", "op": "eq", "value": "C"}],
+            },
+            {
+                "source_code": "cash_flow_wide",
+                "label": "D手动退款",
+                "dimensions": [{"field": "pay_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "pay_amount", "agg": "sum", "alias": "D手动退款"}],
+                "filters": [{"field": "route", "op": "eq", "value": "D"}],
+            },
+        ],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_cash_flow_operator_rank",
+        "name": "出款经手人排行(ABCD)",
+        "description": "cash_flow_wide 按 operator×route 汇总出款金额+笔数, 看谁经手最多出款. 排除系统操作(sys/system). 运营分析: 退款/提现/手动退款经手人全景.",
+        "chart_type": "table",
+        "segments": [{
+            "source_code": "cash_flow_wide",
+            "label": "出款经手人",
+            "dimensions": [
+                {"field": "operator", "alias": "经手人", "role": "person"},
+                {"field": "route", "alias": "路线", "role": "category"},
+            ],
+            "measures": [
+                {"field": "pay_amount", "agg": "sum", "alias": "出款金额"},
+                {"field": "*", "agg": "count", "alias": "笔数"},
+            ],
+            "filters": [
+                {"field": "operator", "op": "is_not_null", "value": None},
+                {"field": "operator", "op": "notin", "value": ["sys", "system", "SYS", "System"]},
+            ],
+            "limit": 30,
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
 ]
 
 
