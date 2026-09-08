@@ -178,7 +178,9 @@ def _sheet_names(path: str) -> list[str]:
     return list(xl.sheet_names)
 
 
-def _read_sheet_records(path: str, sheet_name: str) -> list[dict[str, Any]]:
+def _read_sheet_records(
+    path: str, sheet_name: str, require_any: tuple[str, ...] | None = None
+) -> list[dict[str, Any]]:
     """读单个 Sheet → [ {中文表头: 值}, ... ]
 
     只负责取数(NaN→None, 丢全空列/空表头, **过滤全空行**), 不做字段映射/清洗
@@ -187,6 +189,11 @@ def _read_sheet_records(path: str, sheet_name: str) -> list[dict[str, Any]]:
     过滤全空行原因: 共享文档(尤其金山)常预留空白模板行(仅部分列/全空),
     若不滤掉会作为"缺登记日期/订单号"的脏行计入 failed, 污染同步统计与日志
     (实测金山登记明细 4244 行中含 1146 空行, 有效仅 ~3117)。
+
+    require_any: 可选"业务字段集合"。指定后, 若某行这些字段**全空**(只有日期等
+    非业务字段有值), 视为"业务空行"一并过滤 —— 用于退款型: 登记明细行尾常有
+    "只填登记日期、无订单号/设备号/金额/登记人"的预留空行, 非真实数据, 应在读取
+    层过滤(否则 manual_refund_sync 判"缺订单号" failed, 污染日志)。
     """
     df = pd.read_excel(path, sheet_name=sheet_name, header=0, engine=_EXCEL_ENGINE)
     df = df.dropna(axis=1, how="all")  # 丢弃全空列(合并表头/末尾多余列)
@@ -199,6 +206,12 @@ def _read_sheet_records(path: str, sheet_name: str) -> list[dict[str, Any]]:
         # 避免空白模板行进入入库管线被判 dropped/failed
         if all(v is None or (isinstance(v, str) and v.strip() == "") for v in rec.values()):
             continue
+        # 业务空行过滤(仅当指定 require_any): 这些业务字段全空 → 非真实数据行
+        if require_any:
+            def _has_val(v: Any) -> bool:
+                return v is not None and not (isinstance(v, str) and v.strip() == "")
+            if not any(_has_val(rec.get(k)) for k in require_any):
+                continue
         records.append(rec)
     return records
 
@@ -269,19 +282,23 @@ def _pick_manual_refund_sheet(file_path: str, rules: list[dict] | None) -> list[
     """取 manual_refund 目标 sheet 的数据
 
     优先 sheet_rules 里声明的 sheet(首个), 否则读「登记明细」(或第一张有数据的)。
+    业务空行过滤(require_any): 只填登记日期、无 订单号/设备号/登记人/金额 的预留
+    空行视为非真实数据, 在读取层过滤(failed 归零, 不污染日志)。
     """
+    # 退款业务字段: 至少有其一才算真实登记行(登记日期 alone 不算)
+    _BUSINESS_COLS = ("订单号", "设备号", "登记人", "订单金额", "退款金额", "商户ID", "退款操作人", "处理结果")
     if rules:
         for r in rules:
             if isinstance(r, dict) and str(r.get("sheet") or "").strip():
-                return _read_sheet_records(file_path, r["sheet"].strip())
+                return _read_sheet_records(file_path, r["sheet"].strip(), require_any=_BUSINESS_COLS)
 
     sheets = _sheet_names(file_path)
     for name in sheets:
         if "登记明细" in name:
-            return _read_sheet_records(file_path, name)
+            return _read_sheet_records(file_path, name, require_any=_BUSINESS_COLS)
     # 回退: 第一张有数据的 sheet
     for name in sheets:
-        recs = _read_sheet_records(file_path, name)
+        recs = _read_sheet_records(file_path, name, require_any=_BUSINESS_COLS)
         if recs:
             return recs
     return []

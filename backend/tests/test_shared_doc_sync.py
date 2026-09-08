@@ -345,3 +345,39 @@ def test_due_doc_sources_disabled_excluded(db, seed_source):
     db.flush()
     due = sdss.due_doc_sources(db)
     assert not any(x.id == seed_source.id for x in due)
+
+
+# ---- 读取层业务空行过滤(退款"只有日期"预留行, #33 完善) ----
+def test_read_sheet_records_require_any_filters_only_date_rows(tmp_path):
+    """require_any 指定业务字段后, 只有登记日期无业务字段的行被过滤。
+
+    模拟金山登记明细行尾"只填登记日期、无订单号/设备号/金额/登记人"的预留空行:
+    - 真实行(有订单号/设备号/登记人) → 保留
+    - 只有登记日期的行 → 过滤(否则 manual_refund_sync 判缺订单号 failed)
+    - 全空行 → 过滤(既有逻辑)
+    """
+    import pandas as pd
+
+    xlsx = str(tmp_path / "doc_manual_filter.xlsx")
+    with pd.ExcelWriter(xlsx, engine="openpyxl") as xw:
+        pd.DataFrame(
+            [
+                {"登记日期": "2026-09-01", "设备号": "88000001", "订单号": "ORD1",
+                 "商户ID": "M1", "订单金额": "100", "登记人": "客服A", "是否已退款": "是",
+                 "退款金额": "100", "退款操作人": "客服A", "操作时间": "2026-09-01 10:00", "备注": ""},
+                {"登记日期": "2026-09-08 00:00:00"},   # 只有日期(预留空行) → 应过滤
+                {"登记日期": "2026-09-08 00:00:00"},   # 同上
+                { },                                    # 全空 → 应过滤
+            ]
+        ).to_excel(xw, sheet_name="登记明细", index=False)
+    # 用 _pick_manual_refund_sheet(带 require_any)
+    recs = sdss._pick_manual_refund_sheet(xlsx, None)
+    assert len(recs) == 1, f"期望只保留 1 行真实数据, 实际 {len(recs)}"
+    assert recs[0]["订单号"] == "ORD1"
+    # 直接测 _read_sheet_records 的 require_any
+    recs2 = sdss._read_sheet_records(xlsx, "登记明细", require_any=("订单号", "设备号", "登记人", "订单金额"))
+    assert len(recs2) == 1
+    # 不指定 require_any → 只有日期的 2 行会保留(交给管线判 failed), 验证参数确实改变行为
+    recs3 = sdss._read_sheet_records(xlsx, "登记明细")
+    assert len(recs3) == 3  # 1 真实 + 2 只有日期(全空行仍被既有逻辑过滤)
+
