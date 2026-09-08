@@ -59,7 +59,24 @@ SOURCE_LABELS = {
     "bms": "BMS同步",
     "scrm": "SCRM同步",
     "push": "外部推送",
+    "shared_doc": "共享文档采集",
 }
+
+# 同步日志 sync_source → 来源归类(#33/#36): shared_doc/tencent_doc 是系统主动采集
+# 共享文档(登录态+UI导出), 与 workbuddy 外部 JSON 推送是两类, 不应混标"外部推送"。
+_DOC_SYNC_SOURCES = {"shared_doc", "tencent_doc"}
+
+
+def _classify_sync_source(sync_source: str | None) -> tuple[str, str]:
+    """按 sync_source 归类投诉/手动退款同步日志的来源。
+
+    返回 (source, source_label):
+      - shared_doc/tencent_doc → ("shared_doc", "共享文档采集")
+      - 其余(workbuddy/manual/None) → ("push", "外部推送")
+    """
+    if (sync_source or "").strip() in _DOC_SYNC_SOURCES:
+        return "shared_doc", "共享文档采集"
+    return "push", "外部推送"
 
 # 数据类型标签映射
 DATA_TYPE_LABELS = {
@@ -251,12 +268,15 @@ def list_collection_logs(
                 )
             )
 
-    # ── 4. 投诉推送 ──
-    if not source or source == "push":
+    # ── 4. 投诉同步(外部推送 / 共享文档采集, 按 sync_source 区分) ──
+    if not source or source in ("push", "shared_doc"):
         stmt = select(ComplaintSyncLog).order_by(ComplaintSyncLog.id.desc()).limit(limit)
         if status:
             stmt = stmt.where(ComplaintSyncLog.status == status)
         for r in db.scalars(stmt):
+            row_source, row_label = _classify_sync_source(r.sync_source)
+            if source and row_source != source:  # 来源筛选(仅当指定了 push/shared_doc)
+                continue
             # 合并外部+卡商统计
             total = (r.external_total or 0) + (r.card_total or 0)
             inserted = (r.external_inserted or 0) + (r.card_inserted or 0)
@@ -265,8 +285,8 @@ def list_collection_logs(
             results.append(
                 CollectionLogItem(
                     id=r.id,
-                    source="push",
-                    source_label="外部推送",
+                    source=row_source,
+                    source_label=row_label,
                     data_type="complaint",
                     data_type_label="投诉数据",
                     status=r.status,
@@ -275,8 +295,8 @@ def list_collection_logs(
                     inserted_rows=inserted,
                     updated_rows=updated,
                     failed_rows=failed,
-                    trigger_type="push",
-                    trigger_label="推送",
+                    trigger_type="push" if row_source == "push" else "scheduled",
+                    trigger_label="推送" if row_source == "push" else "采集",
                     triggered_by=r.sync_source,
                     filename=r.source_file,
                     error=r.error,
@@ -285,17 +305,20 @@ def list_collection_logs(
                 )
             )
 
-    # ── 5. 手动退款推送 ──
-    if not source or source == "push":
+    # ── 5. 手动退款同步(外部推送 / 共享文档采集, 按 sync_source 区分) ──
+    if not source or source in ("push", "shared_doc"):
         stmt = select(ManualRefundSyncLog).order_by(ManualRefundSyncLog.id.desc()).limit(limit)
         if status:
             stmt = stmt.where(ManualRefundSyncLog.status == status)
         for r in db.scalars(stmt):
+            row_source, row_label = _classify_sync_source(r.sync_source)
+            if source and row_source != source:  # 来源筛选(仅当指定了 push/shared_doc)
+                continue
             results.append(
                 CollectionLogItem(
                     id=r.id,
-                    source="push",
-                    source_label="外部推送",
+                    source=row_source,
+                    source_label=row_label,
                     data_type="manual_refund",
                     data_type_label="手动退款登记",
                     status=r.status,
@@ -304,8 +327,8 @@ def list_collection_logs(
                     inserted_rows=r.inserted,
                     updated_rows=r.updated,
                     failed_rows=r.failed,
-                    trigger_type="push",
-                    trigger_label="推送",
+                    trigger_type="push" if row_source == "push" else "scheduled",
+                    trigger_label="推送" if row_source == "push" else "采集",
                     triggered_by=r.sync_source,
                     filename=r.source_file,
                     error=r.error,
@@ -332,7 +355,8 @@ def list_log_sources():
             {"value": "upload", "label": "文件上传"},
             {"value": "bms", "label": "BMS同步"},
             {"value": "scrm", "label": "SCRM同步"},
-            {"value": "push", "label": "投诉推送"},
+            {"value": "shared_doc", "label": "共享文档采集"},
+            {"value": "push", "label": "外部推送"},
         ]
     )
 

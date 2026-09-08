@@ -124,6 +124,7 @@ const sourceTagType = (s) => ({
   bms: 'success',
   scrm: 'warning',
   push: 'info',
+  shared_doc: 'primary',
 }[s] || 'info')
 
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm:ss') : '')
