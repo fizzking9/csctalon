@@ -24,6 +24,8 @@ from app.models.manual_refund_sync_log import ManualRefundSyncLog
 from app.services.data_parser import COLUMN_TEMPLATES
 from app.services.upsert import (
     _ensure_afternoon_time,
+    _freeze_ok_manual_refund_rows,
+    _is_manual_refund_name_polluted,
     _manual_dedup_key,
     _manual_dedup_register_date,
     _manual_refund_quality_check,
@@ -114,6 +116,12 @@ def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult) ->
         register_time_before = register_time  # 纠错前原始值(存 register_time_raw)
         register_time, op_time, quality_status, quality_note = _manual_refund_quality_check(
             register_time, op_time, idx, result)
+        # 人员污染检测(#36): 登记人/退款操作人被数字/时间戳/备注污染 → sanitize 会置空,
+        # 此时补打 [人员污染] pending, 让 L3 质量页可见可处理(而非仅日志 warning 不可见)
+        name_polluted = _is_manual_refund_name_polluted(data.get("registrant")) or _is_manual_refund_name_polluted(
+            data.get("refund_operator"))
+        if name_polluted and quality_status is None:
+            quality_status, quality_note = "pending", "[人员污染] 登记人/退款操作人疑似列错位被置空, 待人工核对"
         raw_refunded = _to_str(data.get("is_refunded"))
         device_sn = _to_str(data.get("device_sn"))
         return {
@@ -159,6 +167,12 @@ def _batch_upsert(db: Session, rows: list[dict], result: ManualRefundSyncResult)
     dup_in_batch = len(rows) - len(unique_rows)
     if dup_in_batch:
         logger.info(f"[manual_refund_sync] 批次内重复去重键 {dup_in_batch} 行(保留最后一条)")
+
+    # ok 保护(#36): 剔除"库内已人工确认(ok)且本次问题类别相同"的行, 冻结不更新不重报
+    unique_rows = _freeze_ok_manual_refund_rows(db, unique_rows)
+    if not unique_rows:
+        logger.info("[manual_refund_sync] 全部行被 ok 保护冻结(无更新)")
+        return
 
     before = db.scalar(select(func.count()).select_from(ManualRefund)) or 0
     BATCH = 2000

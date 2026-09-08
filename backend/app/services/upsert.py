@@ -374,6 +374,107 @@ _ILLEGAL_NAME_CHARS = "【】÷＝=＊"
 _MAX_NAME_LEN = 24  # 仅作护栏,span人名/英文账号几乎不可能超过
 
 
+def _is_manual_refund_name_polluted(val: Any) -> bool:
+    """判定手动退款"人名字段"(登记人/退款操作人)是否被列错位污染。
+
+    与 _sanitize_name_field 同一口径(数字/时间戳/非法字符/超长), 供清洗前预检:
+    若污染 → sanitize 会置空该字段, 此时应补打 [人员污染] pending(而非仅日志 warning)。
+    """
+    s = _to_str(val)
+    if s is None:
+        return False
+    return (_is_numeric_like(s) or _DATETIME_LIKE_RE.match(s)
+            or any(c in s for c in _ILLEGAL_NAME_CHARS) or len(s) > _MAX_NAME_LEN)
+
+
+# ── ok 保护: 人工确认后的质量状态不被后续同步覆盖 (#36, 2026-09-08) ──────
+def _manual_refund_quality_kind(quality_note: str | None) -> str | None:
+    """从 quality_note 提取问题类别标签(如 '[时间倒挂]')。
+
+    #36 起新写入的 note 统一带 '[类别] ' 前缀(见 _manual_refund_quality_check /
+    人员污染补打)。历史存量(无前缀)返回 None, 视为"未知类别":
+      - 未知类别行被人工确认(ok)后, 不再被无标签的新问题打回(保守保留 ok)
+      - 若源侧出现带标签的新问题且与存量 ok 类别未知 → 无法比对新旧, 保守保留 ok(不重复报)
+    """
+    if not quality_note:
+        return None
+    m = re.match(r"^\[([^\[\]]+)\]", quality_note.strip())
+    return m.group(1) if m else None
+
+
+def _freeze_ok_manual_refund_rows(db: Session, rows: list[dict]) -> list[dict]:
+    """ok 保护: 过滤掉"库内已人工确认(ok)且本次问题类别相同"的待写行。
+
+    语义(用户拍板, #36):
+      - 库内 quality_status='ok' 且 本次 note 类别 == 库内 note 类别(同型问题)
+        → 整行冻结: 不更新业务字段、不重报待办(源台账修正前不再烦人)
+      - 库内 ok 但本次类别不同(新类型问题) → 保留更新并重报 pending
+      - 其余(新增/非 ok) → 正常
+
+    实现: 在 on_conflict 前用 Python 预查库内 ok 行(按去重键), 从 batch 移除冻结行。
+    SQL 层无需复杂 CASE; 该 helper 同时供共享文档同步(manual_refund_sync)与本地导入
+    (upsert_manual_refunds)两条路径复用, 口径一致。
+    返回过滤后的 rows(冻结行已剔除)。
+    """
+    if not rows:
+        return rows
+    # 只考虑去重键完整的行(order_no 非空, 与部分唯一索引口径一致);
+    # 若没有任何键完整的行, 冻结无从谈起(全部正常放行)
+    if not any(_manual_dedup_key(r)[1] for r in rows):
+        return rows
+
+    # 候选行: 用 (order_no, device_sn, registrant) 粗查 + Python 侧精确匹配登记日期,
+    # 避免 SQL 层时区表达式与 Python str(date) 的边界不一致
+    # 粗查条件收集(按 order_no IN 分批)
+    kept_all: list[dict] = []
+    frozen = 0
+    for i in range(0, len(rows), 500):
+        batch = rows[i:i + 500]
+        batch_keys = {_manual_dedup_key(r) for r in batch if _manual_dedup_key(r)[1]}
+        if not batch_keys:
+            kept_all.extend(batch)
+            continue
+        order_nos = [k[1] for k in batch_keys]
+        db_rows = db.execute(
+            select(ManualRefund)
+            .where(ManualRefund.order_no.in_(order_nos))
+        ).scalars().all()
+        # 库内 ok 行按去重键索引
+        ok_keys: set[tuple] = set()
+        for cur in db_rows:
+            if cur.quality_status == "ok":
+                ok_keys.add(_manual_dedup_key({
+                    "register_time": cur.register_time, "order_no": cur.order_no,
+                    "device_sn": cur.device_sn, "registrant": cur.registrant,
+                }))
+        # 库内 ok 行的 note 类别(供同型判定)
+        ok_kind: dict[tuple, str | None] = {}
+        for cur in db_rows:
+            if cur.quality_status == "ok":
+                kk = _manual_dedup_key({
+                    "register_time": cur.register_time, "order_no": cur.order_no,
+                    "device_sn": cur.device_sn, "registrant": cur.registrant,
+                })
+                ok_kind[kk] = _manual_refund_quality_kind(cur.quality_note)
+        for r in batch:
+            k = _manual_dedup_key(r)
+            if k not in ok_keys:
+                kept_all.append(r)
+                continue
+            new_kind = _manual_refund_quality_kind(r.get("quality_note"))
+            cur_kind = ok_kind.get(k)
+            # 冻结条件(同型问题): 两边都无标签/未知 → 保守冻结(不重复烦人);
+            # 或 两边标签相同 → 同型冻结。
+            # 库内 ok 但无标签(历史 confirm), 本次出现带标签新问题 → 新型, 保留重报。
+            if (new_kind is None and cur_kind is None) or (new_kind is not None and cur_kind == new_kind):
+                frozen += 1
+                continue
+            kept_all.append(r)
+    if frozen:
+        logger.info(f"[manual_refund] ok 保护冻结 {frozen} 行(人工确认过, 同型问题不重复更新/重报)")
+    return kept_all
+
+
 def _sanitize_name_field(
     val: Any,
     row_idx: int,
@@ -1447,6 +1548,10 @@ def _manual_refund_quality_check(
     high = now + timedelta(days=3)
     status: str | None = None
     note: str | None = None
+    # 质量问题类别标签(2026-09-08, #36): 写入 quality_note 前缀 [xxx],
+    # 供"ok 保护"判定"同型问题已人工确认过, 不再重复报待办"。
+    # 取值: 年份异常 / 操作时间异常 / 时间倒挂(见 _manual_refund_quality_kind)
+    kind: str | None = None
 
     # R2 登记日期年份/范围异常
     if register_time is not None and not (low <= register_time <= high):
@@ -1460,6 +1565,8 @@ def _manual_refund_quality_check(
                 register_time = fixed
         if status is None:
             status, note = "pending", f"登记日期超出合理范围(原始 {orig:%Y-%m-%d}), 无可靠佐证, 待人工确认"
+        if status:
+            kind = "年份异常"
 
     # R4 操作时间自身未来/异常年份(> now+3d): 有正常登记日期佐证 → 修正 op_time 年份
     if op_time is not None and op_time > high and register_time is not None and (low <= register_time <= high):
@@ -1475,12 +1582,17 @@ def _manual_refund_quality_check(
             if status is None:
                 status, note = "pending", (
                     f"操作时间超出合理范围(原始 {op_time:%Y-%m-%d}), 无可靠佐证, 待人工确认")
+        if status and not kind:
+            kind = "操作时间异常"
 
-    # R3 时间倒挂(操作早于登记超过1天)
+    # R3 时间倒挂(操作早于登记超过1天): 优先级最高, 覆盖 R2/R4 的 pending 类别
     if op_time is not None and register_time is not None and op_time < register_time - timedelta(days=1):
         status, note = "pending", (
             f"操作时间 {op_time:%Y-%m-%d} 早于登记日期 {register_time:%Y-%m-%d} 超过1天, 待人工确认")
+        kind = "时间倒挂"
     if status:
+        # #36: 统一加类别标签前缀(ok 保护按类别比对, 同型不再重复报)
+        note = f"[{kind}] {note}" if kind else note
         result.add_warning(row_idx, note)
     return register_time, op_time, status, note
 
@@ -1540,6 +1652,12 @@ def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session
             register_time_before = register_time  # 纠错前原始值(存 register_time_raw)
             register_time, op_time, quality_status, quality_note = _manual_refund_quality_check(
                 register_time, op_time, idx, result)
+            # 人员污染检测(#36): 登记人/退款操作人被数字/时间戳/备注污染 → sanitize 会置空,
+            # 此时补打 [人员污染] pending, 让 L3 质量页可见可处理(而非仅日志 warning 不可见)
+            name_polluted = (_is_manual_refund_name_polluted(data.get("registrant"))
+                             or _is_manual_refund_name_polluted(data.get("refund_operator")))
+            if name_polluted and quality_status is None:
+                quality_status, quality_note = "pending", "[人员污染] 登记人/退款操作人疑似列错位被置空, 待人工核对"
             registrant = _sanitize_name_field(data.get("registrant"), idx, result, "手动退款-登记人")
             refund_operator = _sanitize_name_field(data.get("refund_operator"), idx, result, "手动退款-退款操作人")
             raw_refunded = (data.get("is_refunded") or "").strip() if data.get("is_refunded") is not None else ""
@@ -1573,6 +1691,11 @@ def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session
     for r in rows:
         seen[_manual_dedup_key(r)] = r
     rows = list(seen.values())
+    # ok 保护(#36): 剔除"库内已人工确认(ok)且本次问题类别相同"的行, 冻结不更新不重报
+    rows = _freeze_ok_manual_refund_rows(db, rows)
+    if not rows:
+        logger.info("[manual_refund] 全部行被 ok 保护冻结(无更新)")
+        return
     # 分批 on_conflict_do_update: 按 (北京登记日期, order_no, COALESCE(device_sn,''), COALESCE(registrant,''))
     # 部分唯一索引去重更新(退款金额不参与键, 金额修改走 UPDATE)
     before = db.scalar(select(func.count()).select_from(ManualRefund)) or 0
