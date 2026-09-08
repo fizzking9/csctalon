@@ -135,3 +135,50 @@ def test_complaint_sync_writes_rejected_on_parse_fail(_engine):
         except Exception:
             session.rollback()
         session.close()
+
+
+def test_upload_run_upsert_writes_rejected_on_bad_row(_engine):
+    """上传(run_upsert)遇坏退费单号(带 raw data) → 落拒收表 validate_fail。
+
+    run_upsert 内部 commit, 用独立 session + teardown 精确清理(防污染共享表)。
+    """
+    from sqlalchemy.orm import Session
+
+    from app.models.ingest_rejected_row import IngestRejectedRow
+    from app.models.refund import Refund
+
+    session = Session(_engine, autocommit=False, autoflush=False)
+    try:
+        import pandas as pd
+
+        from app.services.data_parser import suggest_mapping
+        from app.services.upsert import run_upsert
+
+        # 坏退费单号(含中文) → upsert_refunds add_error 且带 data
+        df = pd.DataFrame([
+            {"退费单号": "RF-坏单号-测试", "退费金额": "10.00", "操作人": "张三"},
+        ])
+        mapping = suggest_mapping("refund", list(df.columns))
+        result = run_upsert(df, "refund", mapping, session)
+
+        assert result.failed >= 1
+        cnt = session.scalar(
+            select(func.count()).select_from(IngestRejectedRow).where(
+                IngestRejectedRow.data_type == "refund",
+                IngestRejectedRow.reject_category == "validate_fail",
+                IngestRejectedRow.source == "upload",
+            )
+        ) or 0
+        assert cnt >= 1, "坏退费单号应落拒收表"
+    finally:
+        # 精确清理(该坏单号不会入库; 兜底清理可能写入的拒收行)
+        try:
+            session.execute(IngestRejectedRow.__table__.delete().where(
+                IngestRejectedRow.data_type == "refund",
+                IngestRejectedRow.source == "upload",
+            ))
+            session.execute(Refund.__table__.delete().where(Refund.refund_no.like("RF-坏单号%") ))
+            session.commit()
+        except Exception:
+            session.rollback()
+        session.close()

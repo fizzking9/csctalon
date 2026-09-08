@@ -112,11 +112,13 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
     _flush(rows)
 
     # ── B: wallet 用户提现(排除失败/冻结) ──
+    # 注: wallet.operator 恒为 op_type 文本('用户提现'), 非人名 → B 路 operator 置 None
+    #     (经手人分析主要看 A/C/D; B 路是系统/用户钱包提现, 无客服经手人语义, 见 L-4)
     b_rows = db.execute(
         select(
             WalletWithdrawal.id, WalletWithdrawal.device_sn,
             WalletWithdrawal.op_amount, WalletWithdrawal.op_time,
-            WalletWithdrawal.operator, WalletWithdrawal.remark,
+            WalletWithdrawal.remark,
             WalletWithdrawal.account_id,
         ).where(
             WalletWithdrawal.op_type == "用户提现",
@@ -135,7 +137,7 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
             "pay_time": w.op_time,
             "pay_amount": w.op_amount,
             "device_sn": w.device_sn,
-            "operator": w.operator,
+            "operator": None,  # wallet.operator 恒为 op_type 文本, 非人名(L-4)
             "e_key": m.group(0) if m else None,
             "e_matched": (m.group(0) in e_order_keys) if m else None,  # 弱关联, 未命中置 None
             "reason": None,

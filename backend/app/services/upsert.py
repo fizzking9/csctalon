@@ -2260,8 +2260,40 @@ def upsert_device_profiles(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
     result.updated += max(len(rows) - inserted, 0)
 
 
-UPSERT_DISPATCH = {
-    "refund": upsert_refunds,
+def _persist_rejected_from_errors(db: Session, data_type: str, result: ImportResult) -> None:
+    """A-20260908-003 (#40): 把 run_upsert 硬失败(丢弃未入库)的行写拒收表。
+
+    只处理 errors 中带原始行 data 的(无 data 的仅计数, 无法按行展示)。
+    savepoint 隔离: 写拒收失败不影响已完成的 upsert 与主事务。
+    """
+    import logging as _log
+
+    _lg = _log.getLogger(__name__)
+    try:
+        from app.models.ingest_rejected_row import IngestRejectedRow
+
+        to_insert = [
+            e for e in result.errors
+            if e.get("data") and isinstance(e.get("data"), dict)
+        ]
+        if not to_insert:
+            return
+        with db.begin_nested():
+            for e in to_insert[:200]:  # 上限 200 行/批, 防海量噪音
+                db.add(IngestRejectedRow(
+                    data_type=data_type,
+                    source="upload",  # 上传/导入共用 run_upsert; BMS 走此也标 upload 可后续细分
+                    reject_category="validate_fail",
+                    reject_reason=str(e.get("message"))[:500],
+                    raw_row=e.get("data"),
+                    source_row_no=e.get("row"),
+                    status="open",
+                ))
+    except Exception as _rej_e:  # noqa: BLE001
+        _lg.warning(f"[ingest_rejected] 上传错误行落拒收表失败(忽略): {_rej_e}")
+
+
+UPSERT_DISPATCH = {    "refund": upsert_refunds,
     "wallet": upsert_wallet,
     "ticket": upsert_tickets,
     "device_combo": upsert_device_combos,
@@ -2304,5 +2336,10 @@ def run_upsert(
     if not fn:
         raise ValueError(f"不支持的数据类型: {data_type}")
     fn(df, mapping, db, result)
+    # ── A-20260908-003 (#40): 未采纳行落拒收表(上传/BMS 共用 run_upsert 入口) ──
+    # result.errors = 硬失败(行被丢弃未入库), 有 raw data 的写 ingest_rejected_rows
+    # 供人工判定(open/keep/discard)。savepoint 隔离, 失败不影响主流程。
+    if result.errors:
+        _persist_rejected_from_errors(db, data_type, result)
     db.commit()
     return result
