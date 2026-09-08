@@ -409,6 +409,12 @@ class BmsScheduler:
                 except Exception as de:  # noqa: BLE001
                     logger.warning(f"[调度器] 共享文档同步检查异常: {de}")
 
+                # ── 共享文档在线采集(doc_sync_sources): 到点源逐个同步(#33) ──
+                try:
+                    await self._maybe_sync_shared_docs()
+                except Exception as sd:  # noqa: BLE001
+                    logger.warning(f"[调度器] 共享文档在线采集检查异常: {sd}")
+
                 # ── 启动补跑(仅一次): DAYTIME_HOURS 中 <= 当前小时且未成功的,立即补一次 ──
                 if first_tick and not self._catch_up_done:
                     self._catch_up_done = True
@@ -790,6 +796,31 @@ class BmsScheduler:
             await asyncio.to_thread(sync_tencent_doc_safe, "scheduled")
         except Exception as e:  # noqa: BLE001
             logger.error(f"[调度器] 腾讯文档轮询同步异常: {e}", exc_info=True)
+
+    async def _maybe_sync_shared_docs(self):
+        """共享文档在线采集(doc_sync_sources)定时轮询同步(#33)。
+
+        每次主循环检查: 空闲 + 有到点源(enabled 且距上次>=interval)
+        → 逐个在线程池执行(sync_doc_source_safe 内部独立 session + 状态写回,
+        不阻塞事件循环; 单源失败不影响其它源)。
+        """
+        from app.services.shared_doc_sync_service import due_doc_sources, sync_doc_source_safe
+
+        if sync_task_manager.is_busy():
+            return
+        db = SessionLocal()
+        try:
+            due = due_doc_sources(db)
+        finally:
+            db.close()
+        if not due:
+            return
+        logger.info(f"[调度器] 共享文档在线采集到点 {len(due)} 个源, 开始轮询")
+        for row in due:
+            try:
+                await asyncio.to_thread(sync_doc_source_safe, row.id, "scheduled")
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"[调度器] 共享文档源 #{row.id} 轮询同步异常: {e}", exc_info=True)
 
     async def _do_scheduled_sync(
         self,

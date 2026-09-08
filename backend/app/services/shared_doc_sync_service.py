@@ -325,6 +325,128 @@ def get_doc_source(db: Session, source_id: int) -> DocSyncSource | None:
     return db.get(DocSyncSource, source_id)
 
 
+def due_doc_sources(db: Session) -> list[DocSyncSource]:
+    """返回「到点需同步」的采集源(调度器轮询用)
+
+    条件: enabled + 有 doc_url + 距上次同步 >= sync_interval_minutes(首次恒到点)。
+    采集方式总开关(monitor)关闭时不轮询 —— 与 doc_sync_service.should_sync_tencent_doc
+    共用 monitor 开关, 避免"投诉接入"关闭后共享文档仍在自动采集。
+    """
+    from datetime import timedelta
+
+    from app.services.ingest_mode_service import is_ingest_mode_enabled
+
+    if not is_ingest_mode_enabled(db, "monitor"):
+        return []
+    rows = db.scalars(
+        select(DocSyncSource).where(DocSyncSource.enabled.is_(True)).order_by(DocSyncSource.id)
+    ).all()
+    now = datetime.now(timezone.utc)
+    due: list[DocSyncSource] = []
+    for r in rows:
+        if not r.doc_url:
+            continue
+        if r.last_sync_at is None:
+            due.append(r)  # 首次
+            continue
+        interval = max(r.sync_interval_minutes or 60, 5)
+        if now >= r.last_sync_at + timedelta(minutes=interval):
+            due.append(r)
+    return due
+
+
+# ── 配置 CRUD(供管理 API / 前端) ────────────────────────────────────
+def save_doc_source(
+    db: Session,
+    data: dict,
+    source_id: int | None = None,
+) -> DocSyncSource:
+    """新建/更新一个共享文档采集源配置。
+
+    - source_id 为空 → 新建(platform/doc_url/target_type 必填; platform+doc_url 唯一冲突则报错)
+    - source_id 有值 → 更新既有行(未传字段保持不变; 传了 platform/doc_url 需合法且不与其它行冲突)
+    返回更新后的 ORM 行。
+    """
+    # 新建: 必填三项; 更新: 仅校验传入的字段
+    if source_id is None:
+        platform = str(data.get("platform") or "").strip()
+        doc_url = str(data.get("doc_url") or "").strip()
+        target_type = str(data.get("target_type") or "").strip()
+        if platform not in (PLATFORM_TENCENT, PLATFORM_KDOCS):
+            raise ValueError(f"platform 必须为 {PLATFORM_TENCENT}/{PLATFORM_KDOCS}: {platform!r}")
+        if not doc_url:
+            raise ValueError("doc_url(共享文档链接)不能为空")
+        if target_type not in (TARGET_COMPLAINT, TARGET_MANUAL_REFUND):
+            raise ValueError(f"target_type 必须为 {TARGET_COMPLAINT}/{TARGET_MANUAL_REFUND}: {target_type!r}")
+        # 唯一冲突检查(先查后建, 避免新建行自匹配)
+        dup = db.scalar(
+            select(DocSyncSource).where(
+                DocSyncSource.platform == platform,
+                DocSyncSource.doc_url == doc_url,
+            )
+        )
+        if dup:
+            raise ValueError(f"已存在同平台同链接的采集源(id={dup.id}): {doc_url}")
+        row = DocSyncSource(platform=platform, doc_url=doc_url, target_type=target_type)
+        db.add(row)
+    else:
+        row = db.get(DocSyncSource, source_id)
+        if row is None:
+            raise ValueError(f"采集源不存在: id={source_id}")
+        # 部分更新: 仅校验并应用传入的 platform/doc_url/target_type
+        platform = str(data.get("platform") or "").strip()
+        if platform:
+            if platform not in (PLATFORM_TENCENT, PLATFORM_KDOCS):
+                raise ValueError(f"platform 必须为 {PLATFORM_TENCENT}/{PLATFORM_KDOCS}: {platform!r}")
+            row.platform = platform
+        doc_url = str(data.get("doc_url") or "").strip()
+        if doc_url:
+            dup = db.scalar(
+                select(DocSyncSource).where(
+                    DocSyncSource.platform == (platform or row.platform),
+                    DocSyncSource.doc_url == doc_url,
+                    DocSyncSource.id != row.id,
+                )
+            )
+            if dup:
+                raise ValueError(f"已存在同平台同链接的采集源(id={dup.id}): {doc_url}")
+            row.doc_url = doc_url
+        target_type = str(data.get("target_type") or "").strip()
+        if target_type:
+            if target_type not in (TARGET_COMPLAINT, TARGET_MANUAL_REFUND):
+                raise ValueError(f"target_type 必须为 {TARGET_COMPLAINT}/{TARGET_MANUAL_REFUND}: {target_type!r}")
+            row.target_type = target_type
+
+    # 通用字段(新建/更新都可传; 未传保持不变)
+    if data.get("doc_name") is not None:
+        row.doc_name = str(data.get("doc_name") or "").strip() or None
+    if data.get("sheet_rules") is not None:
+        sr = data.get("sheet_rules")
+        row.sheet_rules = sr if isinstance(sr, list) else None
+    if data.get("state_file") is not None:
+        sf = str(data.get("state_file") or "").strip()
+        row.state_file = sf or None
+    if data.get("enabled") is not None:
+        row.enabled = bool(data["enabled"])
+    if data.get("sync_interval_minutes") is not None:
+        row.sync_interval_minutes = max(int(data["sync_interval_minutes"]), 5)
+    db.commit()
+    db.refresh(row)
+    logger.info(f"[shared_doc] 配置 {'新建' if source_id is None else '更新'} 源 #{row.id}: "
+                f"{row.platform} {row.doc_name or row.doc_url} target={row.target_type}")
+    return row
+
+
+def delete_doc_source(db: Session, source_id: int) -> None:
+    """删除采集源配置(物理删除; 同步日志/历史数据保留在业务表)"""
+    row = db.get(DocSyncSource, source_id)
+    if row is None:
+        raise ValueError(f"采集源不存在: id={source_id}")
+    logger.info(f"[shared_doc] 删除采集源 #{row.id}: {row.platform} {row.doc_name or row.doc_url}")
+    db.delete(row)
+    db.commit()
+
+
 # ── 单源同步主流程 ───────────────────────────────────────────────────
 def sync_one_source(db: Session, row: DocSyncSource, trigger: str = "manual") -> dict[str, Any]:
     """同步单个共享文档采集源 → 返回统计 dict

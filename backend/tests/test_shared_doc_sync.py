@@ -264,3 +264,84 @@ def test_sync_manual_refund_full_sync_false(db, tmp_path, monkeypatch):
     assert len(pl["manual_refunds"]) == 1
     assert int(pl["manual_refunds"][0]["设备号"]) == 88000001  # pandas 数字列读成 int
     assert stats["status"] == "success"
+
+
+# ---- 配置 CRUD + 到点判断(调度器用) ----
+def test_save_doc_source_create_and_update(db):
+    """save_doc_source 新建→可读; 更新字段生效; 非法 platform/target 拒绝。"""
+    row = sdss.save_doc_source(db, {
+        "platform": sdss.PLATFORM_TENCENT,
+        "doc_url": "https://docs.qq.com/sheet/CRUD0001",
+        "doc_name": "CRUD测试",
+        "target_type": sdss.TARGET_COMPLAINT,
+        "sheet_rules": [{"sheet": "监督局-315投诉", "target": "external_complaint"}],
+        "enabled": True,
+        "sync_interval_minutes": 30,
+    })
+    assert row.id is not None
+    got = sdss.get_doc_source(db, row.id)
+    assert got.doc_name == "CRUD测试"
+    assert got.target_type == sdss.TARGET_COMPLAINT
+    assert got.sync_interval_minutes == 30
+    # 更新
+    sdss.save_doc_source(db, {"doc_name": "改名"}, source_id=row.id)
+    db.refresh(got)
+    assert got.doc_name == "改名"
+    # 非法值
+    import pytest
+    with pytest.raises(ValueError):
+        sdss.save_doc_source(db, {"platform": "bad", "doc_url": "x", "target_type": "t"})
+    with pytest.raises(ValueError):
+        sdss.save_doc_source(db, {"platform": "tencent", "doc_url": "", "target_type": "t"})
+
+
+def test_save_doc_source_dup_rejected(db, seed_source):
+    """同平台同链接重复新建 → 拒绝(唯一约束); 更新自身不冲突。"""
+    import pytest
+    with pytest.raises(ValueError, match="已存在同平台同链接"):
+        sdss.save_doc_source(db, {
+            "platform": sdss.PLATFORM_TENCENT,
+            "doc_url": SEED_URL_TENCENT,
+            "target_type": sdss.TARGET_COMPLAINT,
+        })
+    # 更新自身(seed_source 已是同 url)不应冲突
+    sdss.save_doc_source(db, {"doc_name": "自身更新"}, source_id=seed_source.id)
+    db.refresh(seed_source)
+    assert seed_source.doc_name == "自身更新"
+
+
+def test_delete_doc_source(db, seed_source):
+    """删除采集源后不可再读取。"""
+    sid = seed_source.id
+    sdss.delete_doc_source(db, sid)
+    assert sdss.get_doc_source(db, sid) is None
+    import pytest
+    with pytest.raises(ValueError, match="不存在"):
+        sdss.delete_doc_source(db, sid)
+
+
+def test_due_doc_sources_respects_interval(db, seed_source):
+    """due_doc_sources: 首次恒到点; 同步后未到 interval 不到点; 到点后再到点。"""
+    from datetime import datetime, timedelta, timezone
+    # seed_source.last_sync_at 为空 → 首次到点
+    due = sdss.due_doc_sources(db)
+    assert any(x.id == seed_source.id for x in due)
+    # 模拟刚同步过(now) → 未到 60min interval → 不到点
+    seed_source.last_sync_at = datetime.now(timezone.utc)
+    db.flush()
+    due = sdss.due_doc_sources(db)
+    assert not any(x.id == seed_source.id for x in due)
+    # 改小 interval 且 last_sync 很早 → 到点
+    seed_source.sync_interval_minutes = 5
+    seed_source.last_sync_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    db.flush()
+    due = sdss.due_doc_sources(db)
+    assert any(x.id == seed_source.id for x in due)
+
+
+def test_due_doc_sources_disabled_excluded(db, seed_source):
+    """停用源不进到点集合; monitor 开关关闭时全部不到点。"""
+    seed_source.enabled = False
+    db.flush()
+    due = sdss.due_doc_sources(db)
+    assert not any(x.id == seed_source.id for x in due)
