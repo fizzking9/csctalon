@@ -329,6 +329,20 @@ def _run_post_import_tasks(data_type: str):
                 logging.getLogger(__name__).warning(
                     f"refund_wide 重建失败(data_type={data_type},不影响导入): {we}"
                 )
+            # 2026-09-08 (#41/A-20260908-004): 现金流水统一宽表重建(ABCD 出款源上传后刷新;失败不阻塞)
+            if data_type in ("refund", "wallet", "shanmao_refund", "manual_refund", "refund_record_report"):
+                try:
+                    from app.services.cash_flow_wide_builder import build_cash_flow_wide
+                    _cfw_stats = build_cash_flow_wide(db)
+                    import logging
+                    logging.getLogger(__name__).info(
+                        f"cash_flow_wide 重建完成(data_type={data_type}): {_cfw_stats}"
+                    )
+                except Exception as cfe:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"cash_flow_wide 重建失败(data_type={data_type},不影响导入): {cfe}"
+                    )
             # 导入会更新工单/退款等主台账 → 失效看板缓存(含投诉), 避免旧聚合
             # (见 数据源接入与缓存加速规范.md §九: 每个写入入口必须失效缓存)
             try:

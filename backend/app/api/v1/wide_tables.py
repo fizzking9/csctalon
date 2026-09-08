@@ -4,25 +4,42 @@ from fastapi import APIRouter
 from sqlalchemy import func, select
 
 from app.api.deps import AdminUser, CurrentUser, DBSession
+from app.models.cash_flow_wide import CashFlowWide
 from app.models.refund_wide import RefundWide
 from app.models.upload import DataMatchRelation
 from app.schemas.common import R
-from app.services.wide_table_builder import build_refund_wide
+from app.services.cash_flow_wide_builder import build_cash_flow_wide
 
 router = APIRouter(prefix="/wide-tables", tags=["数据中心-物化宽表"])
 
 
-@router.post("/refund-wide/rebuild", response_model=R, summary="手动重建退费宽表(全量)")
-def rebuild_refund_wide(db: DBSession, _: AdminUser):
-    """全量重建 refund_wide 物化宽表
+@router.post("/cash-flow/rebuild", response_model=R, summary="手动重建现金流水宽表(全量)")
+def rebuild_cash_flow_wide(db: DBSession, _: AdminUser):
+    """全量重建 cash_flow_wide 物化宽表(A-20260908-004)
 
-    遍历所有退费单,重新拉取关联关系与外部投诉聚合,upsert 到 refund_wide 表。
-    适用于:首次构建、修复脏数据、matcher 逻辑变更后重建。
-    日常增量构建由 BMS 同步/上传后置钩子自动触发,无需手动调用。
-    收紧为管理员: 全量重建扫全库, 普通用户反复触发可拖垮 DB(M6)。
+    清空后按 ABCD 经营四路每笔出款物化(route 区分), 供对账/快速响应/运营多维分析。
+    收紧为管理员: 全量重建扫全库, 普通用户反复触发可拖垮 DB。
     """
-    stats = build_refund_wide(db, only_refund_nos=None)
-    return R(data=stats, message=f"退费宽表重建完成: built={stats['built']}, skipped={stats['skipped']}")
+    stats = build_cash_flow_wide(db)
+    return R(data=stats, message=f"现金流水宽表重建完成: total={stats['total']}")
+
+
+@router.get("/cash-flow/stats", response_model=R, summary="现金流水宽表统计")
+def cash_flow_wide_stats(db: DBSession, _: CurrentUser):
+    """返回 cash_flow_wide 各路线行数/金额汇总"""
+    rows = db.execute(
+        select(
+            CashFlowWide.route,
+            func.count().label("cnt"),
+            func.coalesce(func.sum(CashFlowWide.pay_amount), 0).label("amt"),
+        ).group_by(CashFlowWide.route)
+    ).all()
+    total = db.scalar(select(func.count()).select_from(CashFlowWide)) or 0
+    return R(data={
+        "total_rows": total,
+        "by_route": {r.route: {"count": int(r.cnt or 0), "amount": round(float(r.amt or 0), 2)} for r in rows},
+    })
+
 
 
 @router.get("/refund-wide/stats", response_model=R, summary="退费宽表统计")

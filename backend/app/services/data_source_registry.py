@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 from app.models.bms_order import BmsOrder
 from app.models.card_complaint import CardComplaint
+from app.models.cash_flow_wide import CashFlowWide
 from app.models.cs_record import CsRecord
 from app.models.data_source import DataSource, DataSourceField
 from app.models.device import DeviceTag, DeviceTagBinding
@@ -43,6 +44,18 @@ from app.models.wallet import WalletWithdrawal
 # 4. 外部投诉:315和质量监督局的投诉
 # category 业务分组(数据查看左侧分组用):现金流/工单与客服/投诉登记/基础数据
 DATA_SOURCE_SEEDS: list[dict] = [
+    {
+        "code": "cash_flow_wide",
+        "model": CashFlowWide,
+        "name_cn": "现金流水宽表(物化)",
+        "time_field": "pay_time",
+        "sn_field": "device_sn",
+        "pk_field": "id",
+        "pk_strategy": "primary_key",
+        "category": "现金流",
+        # internal=True 标记本表由系统物化构建,不来自 BMS/手动上传,UI 上禁止导入/同步
+        "internal": True,
+    },
     {
         "code": "refund_wide",
         "model": RefundWide,
@@ -277,6 +290,23 @@ DATA_SOURCE_SEEDS: list[dict] = [
 # 字段级 override：(source_code, field_name) → {role, agg, enum, is_filterable, is_pk}
 # 未列出的字段默认 role=dimension, is_filterable=True, is_pk=col.primary_key
 FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
+    # cash_flow_wide (现金流水统一宽表, A-20260908-004)
+    ("cash_flow_wide", "id"): {"role": "dimension", "is_pk": True, "is_filterable": False},
+    ("cash_flow_wide", "route"): {"role": "category", "enum": ["A", "B", "C", "D"], "name_cn": "路线"},
+    ("cash_flow_wide", "biz_no"): {"role": "dimension", "is_filterable": False},
+    ("cash_flow_wide", "src_id"): {"role": "dimension", "is_filterable": False},
+    ("cash_flow_wide", "pay_time"): {"role": "time"},
+    ("cash_flow_wide", "pay_amount"): {"role": "amount", "agg": "sum"},
+    ("cash_flow_wide", "device_sn"): {"role": "sn"},
+    ("cash_flow_wide", "operator"): {"role": "person"},
+    ("cash_flow_wide", "e_key"): {"role": "dimension", "is_filterable": False},
+    ("cash_flow_wide", "e_matched"): {"role": "category", "enum": [True, False]},
+    ("cash_flow_wide", "reason"): {"role": "category"},
+    ("cash_flow_wide", "merchant"): {"role": "category"},
+    ("cash_flow_wide", "package"): {"role": "category"},
+    ("cash_flow_wide", "has_external_complaint"): {"role": "category", "enum": [True, False]},
+    ("cash_flow_wide", "auditor"): {"role": "person"},
+    ("cash_flow_wide", "matched_at"): {"role": "dimension", "is_filterable": False},
     # refund_wide (物化宽表,跨表关联预计算结果)
     ("refund_wide", "refund_no"): {"role": "dimension", "is_pk": True, "is_filterable": False},
     ("refund_wide", "refund_method"): {"role": "category", "enum": ["线上", "线下", "钱包"]},

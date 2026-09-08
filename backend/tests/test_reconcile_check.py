@@ -108,7 +108,10 @@ def _seed_manual(session, device_sn="SN-C-1", order_no="WS2026090500000001",
 
 
 def _seed_refund_a(session, platform_order_no="WS2026090500000001"):
-    """A 路退费单(线上, 会出现在 E 勾稽的 A 桶)"""
+    """A 路退费单(线上+已退款, 会出现在 E 勾稽的 A 桶)
+
+    注: 2026-09-08 (#41) A 路经营口径收紧为线上+已退款, seed 须带 status='已退款'。
+    """
     from app.models import Refund
 
     _ensure_device(session, "SN-C-1")
@@ -118,6 +121,7 @@ def _seed_refund_a(session, platform_order_no="WS2026090500000001"):
         device_sn="SN-C-1",
         refund_amount=19.0,
         refund_method="线上",
+        status="已退款",
         created_at_raw=_dt("2026-09-05 09:00:00"),
     )
     session.add(r)

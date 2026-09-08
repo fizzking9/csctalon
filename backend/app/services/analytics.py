@@ -185,10 +185,14 @@ def operation_trend(db: Session, start: datetime | None = None, end: datetime | 
 
 
 def operation_status_dist(db: Session) -> list[dict]:
-    """退费状态分布 【统一口径: 路线A 退费单-线上直退】"""
+    """退费状态分布 【路线A: 线上退费单各状态占比(含申请中/无需退款/驳回, 全状态口径)】
+
+    注: 2026-09-08 起经营口径 A 路收紧为线上+已退款, 但本函数是"状态分布",
+    需展示线上退费单的全状态, 故用 _route_a_online_any_status_filter(仅 method)。
+    """
     rows = db.execute(
         select(Refund.status, func.coalesce(func.sum(Refund.refund_amount), 0), func.count())
-        .where(*_route_a_online_refund_filter())
+        .where(*_route_a_online_any_status_filter())
         .group_by(Refund.status)
     ).all()
     total = sum(r[2] for r in rows) or 1
@@ -264,8 +268,25 @@ def operation_method_dist(db: Session) -> list[dict]:
 #   旧表 merchant_refunds 保留供 matcher/wide 关联, 不再作 E 统计取数。
 
 # ---------- 路线A 退费单线上直退 ----------
+# ⚠️ 2026-09-08 (#41/A-20260908-004): A 路经营口径收紧为「线上 + 已退款」。
+#   原口径仅 refund_method='线上', 会把"无需退款(266)/驳回(15)/空状态(785)"等
+#   非成功退款算进经营出款(虚高 ¥11.8万)。用户确认: A 路只算真正退出去的钱,
+#   与 B/C/D"成功才计"语义对齐, 保证对账(A+B+C+D vs E)可信。
+#   全状态分析(如状态分布)用 _route_a_online_any_status_filter()(仅 method)。
 def _route_a_online_refund_filter():
-    """【路线A】退费单线上直退: refund_method='线上' (严格按用户要求的唯一筛选条件)"""
+    """【路线A经营口径】线上直退且已退款: refund_method='线上' AND status='已退款'。
+
+    用于经营出款/对账/趋势/排名等(钱真正退出去的场景)。
+    """
+    return (Refund.refund_method == "线上", Refund.status == "已退款")
+
+
+def _route_a_online_any_status_filter():
+    """【路线A全状态口径】仅 refund_method='线上'(不看 status)。
+
+    用于需要看全状态的分析(如 operation_status_dist 状态分布),
+    不用于经营出款统计。
+    """
     return (Refund.refund_method == "线上",)
 
 # ---------- 路线B 钱包用户取现 ----------
@@ -1582,7 +1603,7 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
             "refund_total": "路线A.退费单线上直退 (refunds WHERE refund_method='线上')",
             "cash_out_total": "经营估算(四路经营出款合计) = A线上直退 + B用户取现 + C闪猫退款 + D手动退款",
             "actual_cashflow": "实际现金流(对账基准) = refund_record_reports WHERE refund_status IN ('退款成功','成功','SUCCESS') 合计, 不分ORIGINAL/BALANCE桶 (2026-09-05 v1.1 起替代 merchant_refunds)",
-            "merchant_cash": "实际现金流(对账基准,同actual_cashflow) = 退款记录报表退款成功合计", 
+            "merchant_cash": "实际现金流(对账基准,同actual_cashflow) = 退款记录报表退款成功合计",
             "cash_diff": "对账偏差 = 经营估算 − 实际现金流 (商户号现金流不与经营数据累加)",
         },
     }
@@ -3055,7 +3076,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
             "refund_amount":    "退款金额 = 四路经营合计 A+B+C+D (经营侧登记的所有退款出款)",
             "refund_done_today":"当日完成退款 = 路线A(线上直退) 中 status=已退款 且 更新时间(退款完成时刻)∈ 当日, 含几天前创建今天才完成的单 (BMS 实际退款时间口径)",
             "cash_out":         "真实现金流(对账基准) = refund_record_reports 退款成功合计, 不分ORIGINAL/BALANCE桶 (2026-09-05 v1.1 起替代 merchant_refunds)",
-            "actual_cashflow":  "实际现金流(对账基准) = refund_record_reports 退款成功合计, 不分ORIGINAL/BALANCE桶", 
+            "actual_cashflow":  "实际现金流(对账基准) = refund_record_reports 退款成功合计, 不分ORIGINAL/BALANCE桶",
             "ticket_done":      "有效完工时间推算: 10.7% 真实完成(白名单:status=已完成且finish在register+12h内且handler非空非SYS) → handle_duration秒 → 该handler近30天真实平均耗时 → 全局真实平均。仅status=已完成视为完工, 避免finish_time被BMS 03:15批量覆盖导致的虚高。",
         },
     }
@@ -4965,6 +4986,8 @@ def today_staff_efficiency(
     ).group_by(CsRecord.operator, "bucket")).cte("cs_cat_q")
     # 3. 退款挽回实际执行: 笔数 + 去重设备个数
     #    已有 sys/system 排除, 保留
+    #    ⚠️ 2026-09-08: 工作量口径(无金额)保持全状态(any_status), 不随经营口径收紧到已退款,
+    #    否则会低估"申请中/驳回"等已投入处理动作的工作量。
     rf_q = (select(Refund.operator.label("op"),
                    func.count().label("sc"),
                    func.count(func.distinct(func.nullif(func.trim(Refund.device_sn), ""))).label("pc"))
@@ -4972,7 +4995,7 @@ def today_staff_efficiency(
                    Refund.created_at_raw >= ts, Refund.created_at_raw <= te,
                    Refund.operator.isnot(None),
                    Refund.operator.notin_(["sys", "system", "SYS", "System"]),
-                   *_route_a_online_refund_filter())
+                   *_route_a_online_any_status_filter())
             .group_by(Refund.operator)).cte("rf_q")
     # 4. 投诉类工单 处理人完工: 笔数 + 去重设备个数
     cm_q = (select(ServiceTicket.handler.label("op"),

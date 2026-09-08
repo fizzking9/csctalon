@@ -828,6 +828,31 @@ async def sync_all(
                                 wide_stats["mode"] = "full"
                                 wide_stats["total_refunds"] = total_refunds
 
+                            # ── 2026-09-08 (#41/A-20260908-004): 现金流水统一宽表重建 ──
+                            # ABCD 四路每笔出款物化(对账/快速响应/运营分析)。
+                            # 仅当本次同步导入了 cash_flow_wide 相关源(refund/wallet/shanmao/manual/E)
+                            # 才全量重建(避免 ticket/cs_record 等无关源同步也触发无谓重建)。
+                            # 全量 76k 行; 失败不阻塞主流程。
+                            _cfw_relevant = any(
+                                isinstance(r, dict)
+                                and r.get("success")
+                                and r.get("data_type") in ("refund", "wallet", "shanmao_refund",
+                                                            "manual_refund", "refund_record_report")
+                                for r in results
+                            )
+                            if _cfw_relevant:
+                                try:
+                                    from app.services.cash_flow_wide_builder import (
+                                        build_cash_flow_wide,
+                                    )
+                                    _report("构建现金流水宽表...")
+                                    _cfw_stats = build_cash_flow_wide(hook_db)
+                                    logger.info(f"[post-sync] cash_flow_wide 重建完成: {_cfw_stats}")
+                                except Exception as _cfw_e:
+                                    logger.warning(
+                                        f"[post-sync] cash_flow_wide 重建异常(忽略, 不影响同步): {_cfw_e}"
+                                    )
+
                             _report("刷新数据库统计...")
                             _analyze_key_tables(hook_db)
 

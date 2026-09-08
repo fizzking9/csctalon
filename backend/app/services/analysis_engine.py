@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.models.analysis_view import AnalysisView, ClassificationRule
 from app.models.card_complaint import CardComplaint
+from app.models.cash_flow_wide import CashFlowWide
 from app.models.cs_record import CsRecord
 from app.models.data_source import DataSource
 from app.models.device_combo import DeviceCombo
@@ -33,6 +34,7 @@ from app.models.wallet import WalletWithdrawal
 # 模型注册表:table_name → model class(用于根据 DataSource.table_name 反射获取列)
 _MODEL_REGISTRY: dict[str, type] = {
     Refund.__tablename__: Refund,
+    CashFlowWide.__tablename__: CashFlowWide,
     RefundWide.__tablename__: RefundWide,
     WalletWithdrawal.__tablename__: WalletWithdrawal,
     ServiceTicket.__tablename__: ServiceTicket,
