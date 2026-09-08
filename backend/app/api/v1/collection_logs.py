@@ -348,7 +348,7 @@ def list_collection_logs(
                     trigger_label="推送" if row_source == "push" else "采集",
                     triggered_by=r.sync_source,
                     filename=r.source_file,
-                    error=r.error,
+                    error=_extract_error_detail(r.error),
                     created_at=_format_dt(r.created_at),
                     finished_at=_format_dt(r.finished_at),
                 )
@@ -380,7 +380,7 @@ def list_collection_logs(
                     trigger_label="推送" if row_source == "push" else "采集",
                     triggered_by=r.sync_source,
                     filename=r.source_file,
-                    error=r.error,
+                    error=_extract_error_detail(r.error),
                     created_at=_format_dt(r.created_at),
                     finished_at=_format_dt(r.finished_at),
                 )
