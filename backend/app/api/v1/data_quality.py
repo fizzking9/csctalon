@@ -123,3 +123,69 @@ def quality_scan_endpoint(table: str, db: DBSession, _: AdminUser,
                           limit: int = Query(0, ge=0, le=1_000_000)):
     _get_table(table)
     return R(data=QC.quality_scan(db, table, limit=limit))
+
+
+# ─────────────────────────────────────────────────────────────
+# 拒收行(未采纳数据)管理 —— A-20260908-003 数据治理框架
+# 独立 sub-router(prefix=/data-quality/rejected), 避免与上方 /{table} 通配冲突
+# 语义: 外部数据未入库行按行显示; open(未判定)/discard 不纳入统计; keep 采纳
+# ─────────────────────────────────────────────────────────────
+rejected_router = APIRouter(prefix="/data-quality/rejected", tags=["数据质量-拒收行"])
+
+
+@rejected_router.get("", response_model=R, summary="拒收行列表(未采纳数据按行查看)")
+def rejected_list_endpoint(
+    db: DBSession, _: CurrentUser,
+    data_type: str | None = Query(None),
+    source: str | None = Query(None),
+    status: str | None = Query(None, pattern="^(open|keep|discard)$"),
+    category: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+):
+    from app.services.ingest_rejected_service import list_rejected_rows
+
+    return R(data=list_rejected_rows(
+        db, data_type=data_type, source=source, status=status,
+        category=category, page=page, page_size=page_size,
+    ))
+
+
+@rejected_router.get("/stats", response_model=R, summary="拒收行统计(各源/拒因/状态)")
+def rejected_stats_endpoint(db: DBSession, _: CurrentUser):
+    from app.services.ingest_rejected_service import rejected_stats
+
+    return R(data=rejected_stats(db))
+
+
+@rejected_router.post("/{row_id}/review", response_model=R, summary="人工判定拒收行(keep/discard)")
+def rejected_review_endpoint(
+    row_id: int, db: DBSession, current_user: CurrentUser, payload: dict = Body(...),
+):
+    from app.services.ingest_rejected_service import review_rejected_row
+
+    action = payload.get("action")
+    try:
+        row = review_rejected_row(db, row_id, action, reviewer=str(current_user.username or current_user.id))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not row:
+        raise HTTPException(status_code=404, detail="拒收行不存在")
+    return R(data=row, message=f"已标记为 {action}")
+
+
+@rejected_router.post("/batch-review", response_model=R, summary="批量判定拒收行(keep/discard)")
+def rejected_batch_review_endpoint(
+    db: DBSession, current_user: CurrentUser, payload: dict = Body(...),
+):
+    from app.services.ingest_rejected_service import batch_review_rejected_rows
+
+    row_ids = payload.get("row_ids") or []
+    action = payload.get("action")
+    if not row_ids:
+        raise HTTPException(status_code=400, detail="row_ids 不能为空")
+    try:
+        n = batch_review_rejected_rows(db, row_ids, action, reviewer=str(current_user.username or current_user.id))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data={"updated": n}, message=f"批量处理 {n} 行")

@@ -42,6 +42,37 @@ logger = logging.getLogger(__name__)
 # 有效投诉编号: 数字/字母/连字符, 长度 6~64(过滤 "/"、"1.4403020020251128E+24" 等垃圾值)
 _VALID_COMPLAINT_NO_RE = re.compile(r"^[0-9A-Za-z\-]{6,64}$")
 
+
+def _write_rejected(
+    db: Session,
+    *,
+    data_type: str,
+    source: str,
+    category: str,
+    reason: str | None = None,
+    raw_row: dict | None = None,
+    row_no: int | None = None,
+) -> None:
+    """A-20260908-003: 未采纳行落拒收表(不阻塞主流程, 用 savepoint 隔离失败)。
+
+    写入失败仅记日志, 不影响投诉/退款同步主流程。
+    """
+    try:
+        with db.begin_nested():  # savepoint: 失败只回滚本条, 不污染主事务
+            from app.models.ingest_rejected_row import IngestRejectedRow
+
+            db.add(IngestRejectedRow(
+                data_type=data_type,
+                source=source,
+                reject_category=category,
+                reject_reason=reason,
+                raw_row=raw_row,
+                source_row_no=row_no,
+                status="open",
+            ))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[ingest_rejected] 写拒收行失败(忽略): data_type={data_type} err={e}")
+
 # SN 单元格可能包含多个 SN(换行/逗号分隔)或备注(如 "18870605701（移动流量卡）"),统一取首个有效 SN
 _SN_SPLIT_RE = re.compile(r"[\n,;，;、\s]+")
 _SN_ANNOTATION_RE = re.compile(r"[（(].*?[)）]")
@@ -395,9 +426,22 @@ def sync_complaints_from_payload(
         for idx, row in enumerate(ext_rows_raw):
             if not isinstance(row, dict):
                 ext_result.add_dropped(idx, "315行不是对象")
+                # A-20260908-003: 未采纳行落拒收表(parse_fail), 供人工判定
+                _write_rejected(
+                    db, data_type="external_complaint", source=sync_source,
+                    category="parse_fail", reason="315行不是对象",
+                    raw_row={"row": row} if not isinstance(row, dict) else row,
+                    row_no=idx,
+                )
                 continue
             rec = _clean_external_row(row, idx, ext_result)
             if rec is None:
+                # 已由 add_dropped 计数; 落拒收表保留原始行供人工判定
+                _write_rejected(
+                    db, data_type="external_complaint", source=sync_source,
+                    category="validate_fail", reason="315行解析失败",
+                    raw_row=row, row_no=idx,
+                )
                 continue
             if _is_empty_external_rec(rec):
                 ext_result.filtered += 1
@@ -409,9 +453,20 @@ def sync_complaints_from_payload(
         for idx, row in enumerate(card_rows_raw):
             if not isinstance(row, dict):
                 card_result.add_dropped(idx, "卡商行不是对象")
+                _write_rejected(
+                    db, data_type="card_complaint", source=sync_source,
+                    category="parse_fail", reason="卡商行不是对象",
+                    raw_row={"row": row} if not isinstance(row, dict) else row,
+                    row_no=idx,
+                )
                 continue
             rec = _clean_card_row(row, idx, card_result)
             if rec is None:
+                _write_rejected(
+                    db, data_type="card_complaint", source=sync_source,
+                    category="validate_fail", reason="卡商行解析失败",
+                    raw_row=row, row_no=idx,
+                )
                 continue
             if _is_empty_card_rec(rec):
                 card_result.filtered += 1
