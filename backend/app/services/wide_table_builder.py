@@ -23,7 +23,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -91,6 +91,29 @@ def _in_scope_refund_nos(db: Session) -> set[str]:
     return main | wallet_nos | ec_nos
 
 
+def _scope_refund_no_subquery():
+    """返回行范围退费单号的 SQL 子查询(用于残留清理 NOT EXISTS)。
+
+    与 _in_scope_refund_nos 等价, 但以子查询形式表达(避免把数万参数塞进
+    NOT IN 参数列表, 触发 PG 65,535 绑定参数上限 — 见 A-20260908-001 §4.2)。
+    """
+    main = select(Refund.refund_no).where(
+        Refund.refund_method == "线上",
+        Refund.status == "已退款",
+    )
+    wallet = select(DataMatchRelation.src_id).where(
+        DataMatchRelation.src_table == "refund",
+        DataMatchRelation.dst_table == "wallet",
+        DataMatchRelation.status == "matched",
+    )
+    ec_refund = select(Refund.refund_no).where(
+        Refund.device_sn.in_(
+            select(ExternalComplaint.device_sn).where(ExternalComplaint.device_sn.isnot(None))
+        )
+    )
+    return main.union(wallet, ec_refund).subquery()
+
+
 def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None, progress_callback=None) -> dict:
     """构建 refund_wide 物化宽表(分批处理,避免 OOM)
 
@@ -105,9 +128,12 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None, pro
     # 1. 确定要处理的退费单号集合(仅加载字符串,内存占用极小)
     if only_refund_nos:
         target_refund_nos = list(dict.fromkeys(only_refund_nos))  # 去重保序
+        scope: set[str] = set()  # 增量构建不需 scope
     else:
         # A-20260908-001: 全量构建只物化新行范围内的退费单(线上+已退款 ∪ 带wallet ∪ 外部投诉SN)
-        target_refund_nos = sorted(_in_scope_refund_nos(db))
+        # 构建目标用内存 set(分批遍历需要); 残留清理用独立子查询(见步骤3, 规避参数上限)
+        scope = _in_scope_refund_nos(db)
+        target_refund_nos = sorted(scope)
 
     if not target_refund_nos:
         return {"built": 0, "updated": 0, "skipped": 0, "deleted": 0}
@@ -138,16 +164,21 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None, pro
             time.sleep(0.2)
 
     # 3. 全量构建后清理残留: 已不在新行范围的行物理删除(增量构建不触发)
+    #    用 NOT EXISTS 子查询(非 NOT IN 参数列表):
+    #    - 避免把数万参数塞进绑定参数触发 PG 65,535 上限(W1)
+    #    - NOT EXISTS 走 hash anti join(实测 0.4s), NOT IN 子查询会 nested loop(110s)
     deleted = 0
-    if not only_refund_nos:
-        scope = _in_scope_refund_nos(db)
-        stale = db.scalars(
-            select(RefundWide.refund_no).where(RefundWide.refund_no.notin_(list(scope)))
-        ).all()
-        if stale:
-            deleted = len(stale)
-            db.execute(sa_delete(RefundWide).where(RefundWide.refund_no.in_(list(stale))))
-            db.commit()
+    if not only_refund_nos and scope:
+        scope_sub = _scope_refund_no_subquery()
+        no_longer_in_scope = ~exists(
+            select(1).where(scope_sub.c.refund_no == RefundWide.refund_no)
+        )
+        result = db.execute(
+            sa_delete(RefundWide).where(no_longer_in_scope)
+        )
+        deleted = result.rowcount or 0
+        db.commit()
+        if deleted:
             logger.info(f"refund_wide 残留清理: deleted={deleted}")
 
     logger.info(

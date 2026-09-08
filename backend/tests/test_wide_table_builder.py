@@ -10,6 +10,10 @@
 
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import exists, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models.device import Device
 from app.models.external_complaint import ExternalComplaint
@@ -21,6 +25,7 @@ from app.models.wallet import WalletWithdrawal
 from app.services.wide_table_builder import (
     _build_wide_batch,
     _in_scope_refund_nos,
+    _scope_refund_no_subquery,
     _select_ticket,
     _select_wallet,
 )
@@ -213,3 +218,50 @@ def test_in_scope_includes_wallet_and_complaint(db):
     assert rno_wallet in scope   # 带 wallet 关联 → 在
     assert rno_ec in scope       # 设备有外部投诉 → 在
     assert rno_plain not in scope  # 无关联申请中(独立SN) → 不在
+
+
+# ---- 残留清理子查询(A-20260908-001 §4.2 / Reviewer W1) ----
+
+def test_scope_subquery_excludes_out_of_scope_row(db):
+    """残留清理子查询应命中「不在行范围」的 refund_wide 行。
+
+    说明: 不实际执行 DELETE(内部 commit 会破坏 db fixture 事务回滚),
+    只验证子查询 SQL 能正确圈定"应删除"的残留行(范围外)。
+    """
+    sn_in = _uniq("SN-SUB-IN")
+    sn_out = _uniq("SN-SUB-OUT")
+    rno_in = f"RFW{uuid.uuid4().hex[:8]}"
+    rno_out = f"RFW{uuid.uuid4().hex[:8]}"
+    db.add(Device(sn=sn_in))
+    db.add(Device(sn=sn_out))
+    db.flush()
+    # 范围内: 线上+已退款
+    db.add(Refund(refund_no=rno_in, device_sn=sn_in, refund_method="线上", status="已退款", refund_amount=100))
+    # 范围外: 线下+申请中(无 wallet/无外部投诉)
+    db.add(Refund(refund_no=rno_out, device_sn=sn_out, refund_method="线下", status="申请中", refund_amount=100))
+    db.flush()
+
+    # 预置两条宽表行(模拟旧全量残留)
+    _now = datetime.now(ZoneInfo("UTC"))
+    db.execute(pg_insert(RefundWide).values([
+        {"refund_no": rno_in, "refund_method": "线上", "status": "已退款", "refund_amount": 100,
+         "has_external_complaint": False, "external_complaint_count": 0, "matched_at": _now},
+        {"refund_no": rno_out, "refund_method": "线下", "status": "申请中", "refund_amount": 100,
+         "has_external_complaint": False, "external_complaint_count": 0, "matched_at": _now},
+    ]).on_conflict_do_nothing(index_elements=["refund_no"]))
+    db.flush()
+
+    # 残留判定用 NOT EXISTS(与 build_refund_wide 实现一致, 走 hash anti join)
+    sub = _scope_refund_no_subquery()
+    no_longer_in_scope = ~exists(
+        select(1).where(sub.c.refund_no == RefundWide.refund_no)
+    )
+    stale = db.scalars(
+        select(RefundWide.refund_no).where(no_longer_in_scope)
+    ).all()
+    assert rno_out in stale       # 范围外行 → 命中(待删)
+    assert rno_in not in stale    # 范围内行 → 不命中(保留)
+    # 子查询自身含范围内行
+    scope_in_sub = db.scalars(select(sub.c.refund_no)).all()
+    assert rno_in in scope_in_sub
+    assert rno_out not in scope_in_sub
