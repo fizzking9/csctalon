@@ -1810,6 +1810,24 @@ def upsert_device_tags(df: pd.DataFrame, mapping: dict[str, str], db: Session, r
         except Exception:
             r["id"] = 10_000 + rows.index(r)
 
+    # ── 同批 tag_name 去重(#38) ──
+    # 源文件(尤其从打标明细反推/手填字典)同一标签名可能出现多行;
+    # 若不先去重, 单条 INSERT ... ON CONFLICT(tag_name) DO UPDATE 遇同批重复冲突键
+    # 会抛 CardinalityViolation: cannot affect row a second time(PG 硬限制)。
+    # 保留最后一条(源文件靠后行为更新值, 与 on_conflict do_update 语义一致);
+    # 被去重行数是 rows 去重前后差, 不逐行告警(明细来源可能大量重复, 静默去重即可)。
+    _dedup_seen: set[str] = set()
+    _dedup_rows: list[dict] = []
+    for r in rows:
+        _key = str(r.get("tag_name") or "").strip()
+        if not _key:
+            continue
+        if _key in _dedup_seen:
+            continue
+        _dedup_seen.add(_key)
+        _dedup_rows.append(r)
+    rows = _dedup_rows
+
     # 统一使用 pg_insert on_conflict_do_update (tag_name 有唯一索引已覆盖所有冲突)
     stmt = pg_insert(DeviceTag).values(rows)
     stmt = stmt.on_conflict_do_update(

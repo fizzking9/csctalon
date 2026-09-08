@@ -414,7 +414,13 @@ def list_scheduled_bms_sources(db: Session) -> dict[str, list[str]]:
         )
         .order_by(SyncSourceConfig.sort_order, SyncSourceConfig.data_type)
     ).all()
-    all_types = [r.data_type for r in rows]
+    # 派生源不纳入周期采集(#38 / #31):
+    #   - device_tag(标签定义)不是独立 BMS 抓取源 —— 与 device_tag_binding 抓同一份打标明细 CSV,
+    #     标签定义由 device_tag_binding 导入时按 tag_name 自动补插(bms_fetcher L121-126 注释)。
+    #     device_tag 若被 UI 打开 default_sync, 调度会抓明细并按 tag_name upsert → 同批重复必炸
+    #     (CardinalityViolation, 见 upsert.py upsert_device_tags)。此处显式剔除防复发。
+    _DERIVED_NON_SCHEDULABLE = frozenset({"device_tag"})
+    all_types = [r.data_type for r in rows if r.data_type not in _DERIVED_NON_SCHEDULABLE]
     # 延迟 import 规避循环依赖(bms_sync → sync_source_config_service)
     from app.services.bms_sync import DEFAULT_SYNC_TYPES
 

@@ -159,3 +159,38 @@ def test_shared_docs_window_once_per_hour():
 
     assert should_sync_shared_docs(10, 5, done=True) is False     # 该小时已采过
     assert should_sync_shared_docs(11, 5, done=False) is True     # 下个小时窗口重新可采
+
+
+# ── #38 回归: 派生源 device_tag 不应被纳入周期采集 ──
+def test_derived_device_tag_excluded_from_schedule_even_if_db_true(db):
+    """device_tag 即使 DB default_sync=true 也不进调度集合(它是 device_tag_binding 的派生态)。
+
+    背景(#38): device_tag 与 device_tag_binding 抓同一份打标明细 CSV, 标签定义由
+    binding 导入时按 tag_name 自动补插; 若 device_tag 被纳入低频档, 会按 tag_name
+    upsert 同批重复键 → CardinalityViolation 每次必失败并熔断。
+    """
+    from app.models.sync_source_config import SyncSourceConfig
+    from app.services.sync_source_config_service import list_scheduled_bms_sources
+
+    # 强制 device_tag DB true + enabled(模拟 UI 被打开/历史遗留)
+    row = db.scalar(select(SyncSourceConfig).where(SyncSourceConfig.data_type == "device_tag"))
+    if row is None:
+        db.add(SyncSourceConfig(
+            data_type="device_tag", name="设备标签",
+            base_url="https://wifi.cloud-cat.cn/bms",
+            page_path="/index.html#/device/device-tags",
+            default_sync=True, enabled=True,
+        ))
+    else:
+        row.default_sync = True
+        row.enabled = True
+    db.flush()
+
+    sched = list_scheduled_bms_sources(db)
+    assert "device_tag" not in sched["all"], f"device_tag 不应进调度集合: all={sched['all']}"
+    assert "device_tag" not in sched["low"], f"device_tag 不应进低频: low={sched['low']}"
+    # device_tag_binding 可被调度(手动/按需), 不受此剔除影响
+    # (它 default_sync 可能 false, 仅验证不误伤: 若 true 应在集合中)
+    binding = db.scalar(select(SyncSourceConfig).where(SyncSourceConfig.data_type == "device_tag_binding"))
+    if binding is not None and binding.default_sync and binding.enabled:
+        assert "device_tag_binding" in sched["all"], "不应误伤 device_tag_binding"
