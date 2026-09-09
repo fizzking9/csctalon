@@ -884,3 +884,53 @@ def backfill_c_d_actual_refund_time(db, limit: int = 5000) -> dict:
     db.commit()
     logger.info(f"[quality_disposition] backfill_c_d_actual_refund_time {stats}")
     return stats
+
+
+# ─────────────────────────────────────────────────────────────
+# B 路(用户提现)实际扣款时间回填 (2026-09-09, 对账时间对齐)
+# B 的用户提现(成功非冻结)在 E(refund_record_reports)按 SN+金额+时间窗 唯一对应
+# (8月实测 1801/1811=99.4% 唯一命中), 回填其 refund_time 到 actual_refund_time;
+# E 滞后未匹配到的退化用 op_time。op_time 保留运营口径。
+# ─────────────────────────────────────────────────────────────
+def backfill_b_actual_refund_time(db, limit: int = 5000) -> dict:
+    """B 路(用户提现) actual_refund_time = E.refund_time 回填(SN+金额+时间窗唯一)。
+
+    仅填 actual_refund_time 为空 的用户提现成功(非冻结)行; 幂等(已填跳过)。
+    """
+    from sqlalchemy import text
+
+    stats = {"matched": 0, "no_candidate": 0, "multi": 0, "scanned": 0}
+    rows = db.execute(text("""
+        SELECT w.id, w.device_sn, w.op_amount, w.op_time
+        FROM wallet_withdrawals w
+        WHERE w.op_type='用户提现' AND w.actual_refund_time IS NULL
+          AND (w.remark IS NULL OR NOT (w.remark LIKE '%冻结%' OR w.remark LIKE '%提现失败%'
+               OR w.remark LIKE '%退款失败%' OR w.remark LIKE '%驳回%' OR w.remark LIKE '%拒绝%'
+               OR w.remark LIKE '%未到账%' OR w.remark LIKE '%超期订单不允许退款%'))
+          AND (w.quality_status IS NULL OR w.quality_status NOT IN ('dup_residual','ignored'))
+        ORDER BY w.id LIMIT :lim
+    """), {"lim": limit}).all()
+    stats["scanned"] = len(rows)
+    for r in rows:
+        if not r.device_sn or r.op_amount is None or r.op_time is None:
+            stats["no_candidate"] += 1
+            continue
+        # SN + 金额 + 时间窗(±7天) 唯一匹配 E 成功单
+        cands = db.execute(text("""
+            SELECT id, refund_time FROM refund_record_reports
+            WHERE device_sn = :s AND refund_status IN ('退款成功','成功','SUCCESS')
+              AND abs(refund_amount - :a) < 0.01
+              AND refund_time BETWEEN :lo AND :hi
+        """), {"s": r.device_sn, "a": float(r.op_amount),
+               "lo": r.op_time - timedelta(days=7), "hi": r.op_time + timedelta(days=7)}).all()
+        if len(cands) == 1:
+            db.execute(text("UPDATE wallet_withdrawals SET actual_refund_time=:t WHERE id=:i"),
+                       {"t": cands[0].refund_time, "i": r.id})
+            stats["matched"] += 1
+        elif len(cands) > 1:
+            stats["multi"] += 1
+        else:
+            stats["no_candidate"] += 1
+    db.commit()
+    logger.info(f"[quality_disposition] backfill_b_actual_refund_time {stats}")
+    return stats

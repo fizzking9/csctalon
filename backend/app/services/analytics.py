@@ -7160,11 +7160,13 @@ def refund_decision_overview(
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
+    # B 用户提现(对账归日用实际扣款时间 actual_refund_time(2026-09-09 E回填), 缺失回退 op_time)
+    # ⚠️ 口径: 决策概览/对账 B 用 actual_refund_time(实际扣款)对齐 E; 提现操作时效看 op_time 由其它视图表达
     wd_rows = db.execute(text(f"""
-        SELECT {_day("w.op_time")} AS d,
+        SELECT {_day("COALESCE(w.actual_refund_time, w.op_time)")} AS d,
                count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
         FROM wallet_withdrawals w
-        WHERE w.op_time >= :ts AND w.op_time <= :te AND w.op_type = '用户提现'
+        WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts AND COALESCE(w.actual_refund_time, w.op_time) <= :te AND w.op_type = '用户提现'
           AND {_withdraw_fail_remark_sql_cond()}
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
@@ -7249,7 +7251,8 @@ def refund_decision_overview(
             tot["online_cnt"] += int(r.cnt or 0); tot["online_amt"] += float(r.amt or 0)
         for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(op_amount), 0) AS amt
-            FROM wallet_withdrawals w WHERE w.op_time >= :ts AND w.op_time <= :te AND w.op_type = '用户提现'
+            FROM wallet_withdrawals w WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts
+              AND COALESCE(w.actual_refund_time, w.op_time) <= :te AND w.op_type = '用户提现'
               AND {_withdraw_fail_remark_sql_cond()}
         """), {"ts": s, "te": e}).fetchall():
             tot["withdraw_cnt"] += int(r.cnt or 0); tot["withdraw_amt"] += float(r.amt or 0)
