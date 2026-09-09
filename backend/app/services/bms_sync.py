@@ -870,6 +870,7 @@ async def sync_all(
                                 for r in results
                             )
                             _backfill_stats = None
+                            _art_stats = None
                             if _imported_rrr:
                                 try:
                                     from app.services.reconcile import backfill_d_op_time
@@ -883,6 +884,26 @@ async def sync_all(
                                     # 回填失败不影响同步主流程(仅记日志)
                                     logger.warning(
                                         f"[post-sync] 自动回填 D 路 op_time 异常(忽略, 不影响同步): {_bf_e}",
+                                        exc_info=True,
+                                    )
+                                # 2026-09-09: E 导入后同步回填 A/B/C/D 的 actual_refund_time
+                                # (实际扣款时间, 对账/现金流按此归日; 幂等, 失败不阻塞)
+                                try:
+                                    from app.services.quality_disposition_service import (
+                                        backfill_a_actual_refund_time,
+                                        backfill_b_actual_refund_time,
+                                        backfill_c_d_actual_refund_time,
+                                    )
+                                    _report("回填 ABCD 实际扣款时间(E路refund_time)...")
+                                    _art_stats = {
+                                        "a": backfill_a_actual_refund_time(hook_db, limit=100000),
+                                        "b": backfill_b_actual_refund_time(hook_db, limit=50000),
+                                        "cd": backfill_c_d_actual_refund_time(hook_db, limit=50000),
+                                    }
+                                    logger.info(f"[post-sync] ABCD 实际扣款时间回填: {_art_stats}")
+                                except Exception as _art_e:
+                                    logger.warning(
+                                        f"[post-sync] ABCD 实际扣款时间回填异常(忽略): {_art_e}",
                                         exc_info=True,
                                     )
 

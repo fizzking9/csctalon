@@ -943,15 +943,18 @@ def backfill_b_actual_refund_time(db, limit: int = 5000) -> dict:
 # 跨日边界错位。E 滞后未匹配退化用 created_at_raw。
 # ─────────────────────────────────────────────────────────────
 def backfill_a_actual_refund_time(db, limit: int = 20000) -> dict:
-    """A 路(线上直退已退款) actual_refund_time = E.refund_time 回填(platform_order_no 唯一)。
+    """A 路(线上直退已退款) actual_refund_time = E.refund_time 回填(platform_order_no)。
 
+    匹配: 同 platform_order_no 在 E 唯一候选 → 直接填;
+          多候选 → 取"金额最接近 A.refund_amount(±0.01 优先) 且 refund_time 最接近
+          created_at_raw"的最优单(2026-09-09 增强覆盖, 处理同单多笔 E)。
     仅填 actual_refund_time 为空 的 线上+已退款 行; 幂等(已填跳过)。
     """
     from sqlalchemy import text
 
     stats = {"matched": 0, "no_candidate": 0, "multi": 0, "scanned": 0}
     rows = db.execute(text("""
-        SELECT a.refund_no, a.platform_order_no, a.created_at_raw
+        SELECT a.refund_no, a.platform_order_no, a.created_at_raw, a.refund_amount
         FROM refunds a
         WHERE a.refund_method='线上' AND a.status='已退款'
           AND a.actual_refund_time IS NULL
@@ -962,17 +965,27 @@ def backfill_a_actual_refund_time(db, limit: int = 20000) -> dict:
     stats["scanned"] = len(rows)
     for r in rows:
         cands = db.execute(text("""
-            SELECT id, refund_time FROM refund_record_reports
+            SELECT id, refund_time, refund_amount FROM refund_record_reports
             WHERE platform_order_no = :o AND refund_status IN ('退款成功','成功','SUCCESS')
         """), {"o": str(r.platform_order_no).strip()}).all()
-        if len(cands) == 1:
-            db.execute(text("UPDATE refunds SET actual_refund_time=:t WHERE refund_no=:rf"),
-                       {"t": cands[0].refund_time, "rf": r.refund_no})
-            stats["matched"] += 1
-        elif len(cands) > 1:
-            stats["multi"] += 1
-        else:
+        if not cands:
             stats["no_candidate"] += 1
+            continue
+        if len(cands) == 1:
+            best = cands[0]
+        else:
+            # 多候选: 金额最接近优先(±0.01), 再按 refund_time 最接近 created_at_raw
+            def _score(c):
+                amt_gap = abs(float(c.refund_amount or 0) - float(r.refund_amount or 0))
+                if amt_gap < 0.01:
+                    amt_gap = 0.0
+                t_gap = abs((c.refund_time - r.created_at_raw).total_seconds()) if c.refund_time and r.created_at_raw else 1e18
+                # 主排序金额差(是否精确), 次排序时间差
+                return (1 if amt_gap > 0.01 else 0, t_gap)
+            best = min(cands, key=_score)
+        db.execute(text("UPDATE refunds SET actual_refund_time=:t WHERE refund_no=:rf"),
+                   {"t": best.refund_time, "rf": r.refund_no})
+        stats["matched"] += 1
     db.commit()
     logger.info(f"[quality_disposition] backfill_a_actual_refund_time {stats}")
     return stats
