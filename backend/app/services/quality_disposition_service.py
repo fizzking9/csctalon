@@ -297,61 +297,53 @@ def record_hit(db, rule_id: int) -> None:
 # 规则: D路(manual_refund)行 同 order_no + A路(已退款)金额一致±0.01
 #       + |D侧时间(COALESCE op/register) - A.created_at_raw| ≤ 30天 → 疑似重复
 # ─────────────────────────────────────────────────────────────
-def scan_ad_overlap_dup(db, limit: int = 200) -> dict:
+def scan_ad_overlap_dup(db, limit: int = 500) -> dict:
     """扫描 D 路与 A 路真重复候选(不自动处置, 生成建议清单供质量页/规则批量执行)。
 
+    单条 SQL(LATERAL 取每 D 行最近匹配 A 行), 全量识别不受 Python 逐行采样影响。
     返回候选行列表(manual_refund 行 + 匹配的 A 退费单信息), 供人工确认后标 dup_residual。
     验证(2026-09-09 生产实测): 非 dup_residual 金额一致 28 行 → ±30 天命中 25 行,
     排除 3 行(乱年份残留, 走残留治理)。
     """
-    from app.models.manual_refund import ManualRefund
-    from app.models.refund import Refund
+    from sqlalchemy import text
 
-    manual_rows = db.scalars(
-        select(ManualRefund).where(
-            ManualRefund.is_refunded == "是",
-            ManualRefund.order_no.isnot(None),
-            ManualRefund.quality_status.is_(None) | ManualRefund.quality_status.in_(("pending",)),
-        ).limit(limit)
-    )
-    hits = []
-    for m in manual_rows:
-        if not m.order_no:
-            continue
-        # D 侧时间(优先 op_time, 回退 register_time)
-        d_time = m.op_time or m.register_time
-        if d_time is None:
-            continue
-        # A 路匹配: 同 order_no + 金额一致 + 时间窗 ≤ 30 天
-        a_rows = db.scalars(
-            select(Refund).where(
-                Refund.platform_order_no == m.order_no.strip(),
-                Refund.status == "已退款",
-                Refund.refund_amount.isnot(None),
-            )
-        )
-        best = None
-        for a in a_rows:
-            if abs(float(a.refund_amount or 0) - float(m.refund_amount or 0)) > 0.01:
-                continue
-            if a.created_at_raw is None:
-                continue
-            gap = abs((a.created_at_raw - d_time).total_seconds())
-            if gap <= 30 * 86400:
-                if best is None or gap < best[1]:
-                    best = (a, gap)
-        if best:
-            a, gap_sec = best
-            hits.append({
-                "manual_refund_id": m.id,
-                "order_no": m.order_no,
-                "d_amount": float(m.refund_amount or 0),
-                "d_time": d_time.isoformat() if d_time else None,
-                "a_refund_no": a.refund_no,
-                "a_amount": float(a.refund_amount or 0),
-                "a_created_at": a.created_at_raw.isoformat() if a.created_at_raw else None,
-                "gap_days": round(gap_sec / 86400.0, 1),
-                "quality_status": m.quality_status,
-                "suggest": "标 dup_residual 从 D 路排除(A 已计此笔)",
-            })
+    sql = text("""
+        SELECT m.id AS manual_refund_id, m.order_no,
+               m.refund_amount AS d_amount,
+               COALESCE(m.op_time, m.register_time) AS d_time,
+               m.quality_status, m.device_sn,
+               a.refund_no AS a_refund_no, a.refund_amount AS a_amount,
+               a.created_at_raw AS a_created_at,
+               round(abs(extract(epoch FROM (a.created_at_raw - COALESCE(m.op_time, m.register_time))))/86400.0, 1) AS gap_days
+        FROM manual_refunds m
+        CROSS JOIN LATERAL (
+            SELECT a.refund_no, a.refund_amount, a.created_at_raw
+            FROM refunds a
+            WHERE a.platform_order_no = m.order_no AND a.status = '已退款'
+              AND a.refund_amount IS NOT NULL AND a.created_at_raw IS NOT NULL
+              AND abs(a.refund_amount - m.refund_amount) <= 0.01
+              AND abs(extract(epoch FROM (a.created_at_raw - COALESCE(m.op_time, m.register_time)))) <= 30 * 86400
+            ORDER BY abs(extract(epoch FROM (a.created_at_raw - COALESCE(m.op_time, m.register_time))))
+            LIMIT 1
+        ) a
+        WHERE m.is_refunded = '是' AND m.order_no IS NOT NULL
+          AND COALESCE(m.op_time, m.register_time) IS NOT NULL
+          AND (m.quality_status IS NULL OR m.quality_status = 'pending')
+        ORDER BY m.id
+        LIMIT :limit
+    """)
+    rows = db.execute(sql, {"limit": limit}).all()
+    hits = [{
+        "manual_refund_id": r.manual_refund_id,
+        "order_no": r.order_no,
+        "d_amount": float(r.d_amount or 0),
+        "d_time": r.d_time.isoformat() if r.d_time else None,
+        "quality_status": r.quality_status,
+        "device_sn": r.device_sn,
+        "a_refund_no": r.a_refund_no,
+        "a_amount": float(r.a_amount or 0),
+        "a_created_at": r.a_created_at.isoformat() if r.a_created_at else None,
+        "gap_days": float(r.gap_days or 0),
+        "suggest": "标 dup_residual 从 D 路排除(A 已计此笔)",
+    } for r in rows]
     return {"candidate_count": len(hits), "candidates": hits}

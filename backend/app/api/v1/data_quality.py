@@ -297,7 +297,7 @@ def disposition_rule_apply_test_endpoint(rule_id: int, db: DBSession, _: Current
 # ── A/D 真重复识别扫描(种子规则 ad_overlap_dup) ──────────────
 @disposition_router.get("/scan/ad-overlap-dup", response_model=R, summary="扫描 A/D 真重复候选(同单+金额一致+30天窗)")
 def disposition_scan_ad_overlap_endpoint(db: DBSession, _: CurrentUser,
-                                         limit: int = Query(200, ge=1, le=2000)):
+                                         limit: int = Query(500, ge=1, le=10000)):
     from app.services.quality_disposition_service import scan_ad_overlap_dup
 
     return R(data=scan_ad_overlap_dup(db, limit=limit))
