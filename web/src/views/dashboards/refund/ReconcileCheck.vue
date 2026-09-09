@@ -361,12 +361,15 @@ async function loadDetail() {
 
 // ── 对账差异 → 重采该路数据源(2026-09-09 用户) ──
 // 差异可能源于上游采集未到位(如 C 闪猫 default_sync=false 需手动采),
-// 提供"对当前时间窗重采对应 BMS 源"入口, 复用 /fetch/task/submit。
+// 复用 /fetch/task/submit 对"近 N 天"重采。
+// 重采范围策略(按源数据量, 2026-09-09 实证):
+//   - C 闪猫: 全表仅 2066(月~90), 但历史按月导; 默认近 90 天覆盖跨月缺口
+//   - A/B/E: 量大(近30天 2万+), 默认近 30 天补近期缺口(全量太重, 上游导出慢)
 const ROUTE_RESYNC_SOURCE = {
-  A: { data_type: 'refund', label: 'A 线上直退', src: 'BMS 退费单管理(refund)' },
-  B: { data_type: 'wallet', label: 'B 用户提现', src: 'BMS 提现操作记录(wallet)' },
-  C: { data_type: 'shanmao_refund', label: 'C 闪猫退款', src: 'BMS 闪猫退款管理(shanmao_refund)' },
-  E: { data_type: 'refund_record_report', label: 'E 商户号现金流', src: 'BMS 退款记录报表(refund_record_report)' },
+  A: { data_type: 'refund', label: 'A 线上直退', src: 'BMS 退费单管理(refund)', default_days: 30 },
+  B: { data_type: 'wallet', label: 'B 用户提现', src: 'BMS 提现操作记录(wallet)', default_days: 30 },
+  C: { data_type: 'shanmao_refund', label: 'C 闪猫退款', src: 'BMS 闪猫退款管理(shanmao_refund)', default_days: 90 },
+  E: { data_type: 'refund_record_report', label: 'E 商户号现金流', src: 'BMS 退款记录报表(refund_record_report)', default_days: 30 },
 }
 const resyncing = ref('')   // 正在重采的路(A/B/C/E)
 
@@ -374,11 +377,14 @@ async function reSyncRoute(route) {
   const cfg = ROUTE_RESYNC_SOURCE[route]
   if (!cfg) { ElMessage.warning('该路暂不支持一键重采(D 路来自共享文档, 请在数据采集页触发)'); return }
   if (resyncing.value) { ElMessage.info('已有重采任务进行中'); return }
-  if (!winStart.value || !winEnd.value) { ElMessage.warning('请先选择时间窗'); return }
+  // 重采范围 = 该路默认近 N 天(不依赖当前展示窗口; 如需更早请先到数据采集页自定义)
+  const reEnd = dayjs().format('YYYY-MM-DD')
+  const reStart = dayjs().subtract(cfg.default_days - 1, 'day').format('YYYY-MM-DD')
   try {
     await ElMessageBox.confirm(
-      `将重采「${cfg.label}」(${cfg.src})，时间范围 ${winStart.value} ~ ${winEnd.value}。\n` +
-      '适用于差异疑为上游采集未到位(如闪猫需手动采)。任务后台执行, 完成后刷新本页复查。是否继续?',
+      `将重采「${cfg.label}」(${cfg.src})，默认范围近 ${cfg.default_days} 天（${reStart} ~ ${reEnd}）。\n` +
+      `适用: 差异疑为上游采集未到位(C 闪猫量小近90天 / A/B/E 量大近30天)。\n` +
+      '如需更早/自定义范围, 请先取消, 到「数据采集 → 手动同步」勾选该源并设自定义日期。\n任务后台执行, 完成后刷新本页复查。是否继续?',
       '重采确认', { confirmButtonText: '开始重采', cancelButtonText: '取消', type: 'warning' },
     )
   } catch { return }
@@ -386,8 +392,8 @@ async function reSyncRoute(route) {
   try {
     const res = await taskSubmit({
       time_range: 'custom',
-      custom_start: `${winStart.value}T00:00:00`,
-      custom_end: `${winEnd.value}T23:59:59`,
+      custom_start: `${reStart}T00:00:00`,
+      custom_end: `${reEnd}T23:59:59`,
       data_types: [cfg.data_type],
       ignore_cooldown: true,
     })
