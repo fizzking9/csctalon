@@ -112,9 +112,13 @@
           <div class="card-head"><b>空悬 E（E 有、ABCD 无登记）</b><span class="tag-danger">漏记</span></div>
           <div class="card-nums">
             <div v-if="iss.e_orphan > 0" class="num-warn clickable" @click="openDetail('ORPHAN')">
-              ⚠️ 窗口内 E 无任何路承接 {{ fmt(iss.e_orphan) }} 笔 → 下钻（真实退款未登记，建议补录）
+              ⚠️ 窗口内 E 无任何路承接 {{ fmt(iss.e_orphan) }} 笔 → 下钻
             </div>
             <div v-else class="num-ok">✅ E 水单全部被 ABCD 承接</div>
+            <div v-if="iss.e_orphan_wxalr > 0" class="num-sub">其中 WXALR {{ fmt(iss.e_orphan_wxalr) }} 笔 = 疑 C(闪猫)漏记/缺源</div>
+            <div v-if="(iss.e_orphan - iss.e_orphan_wxalr - iss.e_orphan_recent) > 0" class="num-sub">
+              其余历史 {{ fmt(iss.e_orphan - iss.e_orphan_wxalr - iss.e_orphan_recent) }} 笔 = 大概率 D(手动)少登记
+            </div>
           </div>
           <div class="card-foot">E 已退款但 A/C/D 均无记录 = 漏记/待承接（窗口 E 共 {{ fmt(iss.e_total_in_window) }} 笔）</div>
         </div>
@@ -134,19 +138,29 @@
     <el-empty v-else-if="!loading && !errorMsg" description="选择时间窗后点击「生成预览」" :image-size="60" />
 
     <!-- ===== 差异明细下钻抽屉 ===== -->
-    <el-drawer v-model="detailDrawer" :title="detailTitle" size="55%">
-      <el-table v-loading="detailLoading" :data="detailItems" border stripe size="small" max-height="520">
-        <el-table-column prop="biz_no" label="单号" width="180" fixed show-overflow-tooltip />
-        <el-table-column prop="order_no" label="订单号/备注" min-width="160" show-overflow-tooltip />
-        <el-table-column prop="amount" label="金额" width="100" align="right">
+    <el-drawer v-model="detailDrawer" :title="detailTitle" size="62%">
+      <el-table v-loading="detailLoading" :data="detailItems" border stripe size="small" max-height="480">
+        <el-table-column prop="biz_no" label="单号" width="170" fixed show-overflow-tooltip />
+        <el-table-column prop="order_no" label="订单号/备注" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="device_sn" label="设备SN" width="130" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span :class="{ 'sn-muted': !row.device_sn }">{{ row.device_sn || '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="amount" label="金额" width="95" align="right">
           <template #default="{ row }">¥{{ fmtMoney(row.amount) }}</template>
         </el-table-column>
-        <el-table-column prop="time" label="时间" width="150" show-overflow-tooltip />
-        <el-table-column prop="who" label="经手人/商户" width="110" show-overflow-tooltip />
-        <el-table-column prop="quality_status" label="质量状态" width="100">
+        <el-table-column prop="time" label="时间" width="145" show-overflow-tooltip />
+        <el-table-column prop="who" label="经手人/商户" width="120" show-overflow-tooltip />
+        <el-table-column prop="quality_status" label="质量" width="80">
           <template #default="{ row }">
             <el-tag v-if="row.quality_status" size="small" type="warning">{{ row.quality_status }}</el-tag>
             <span v-else class="text-muted">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="detailRoute === 'ORPHAN'" prop="suggest" label="归属建议" min-width="230">
+          <template #default="{ row }">
+            <span class="suggest-text">{{ row.suggest || '—' }}</span>
           </template>
         </el-table-column>
       </el-table>
@@ -159,7 +173,8 @@
         />
       </div>
       <div v-if="detailRoute === 'ORPHAN'" class="detail-tip">
-        💡 建议：这些 E 水单是真实退款但未在 A/C/D 登记。请核对是否应补录到对应路（或属特殊渠道）。
+        💡 空悬 E 归属提示：WXALR 前缀 = 疑 C 路(闪猫)漏记/采集缺；近 2 天 = E 采集延迟待复查；
+        历史非 WXALR = 大概率 D 路(手动)少登记 → 建议补录到 D。
       </div>
       <div v-else class="detail-tip">
         💡 建议：这些登记在 E 财务流水找不到。若属近 2 天 → E 延迟待复查；若为残留/误操作 → 数据质量页彻底忽略或标重复。
@@ -233,7 +248,9 @@ const rA = computed(() => alignData.value?.routes?.A || { total: 0, matched_in_e
 const rB = computed(() => alignData.value?.routes?.B || { total: 0, chain_ok: 0, chain_break: 0 })
 const rC = computed(() => alignData.value?.routes?.C || { total: 0, matched_in_e: 0, unmatched: 0 })
 const rD = computed(() => alignData.value?.routes?.D || { total: 0, matched_in_e: 0, unmatched: 0, overlap_a: 0 })
-const iss = computed(() => alignData.value?.issues || { e_orphan: 0, e_total_in_window: 0 })
+const iss = computed(() => alignData.value?.issues || {
+  e_orphan: 0, e_orphan_wxalr: 0, e_orphan_recent: 0, e_orphan_wxalr_recent: 0, e_total_in_window: 0,
+})
 
 // ── 差异下钻抽屉 ──
 const detailDrawer = ref(false)
@@ -387,4 +404,6 @@ onMounted(() => {
 .tag-info { font-size: 11px; color: #0891b2; background: #ecfeff; padding: 1px 6px; border-radius: 4px; }
 .tag-warn { font-size: 11px; color: #d97706; background: #fffbeb; padding: 1px 6px; border-radius: 4px; }
 .tag-danger { font-size: 11px; color: #dc2626; background: #fef2f2; padding: 1px 6px; border-radius: 4px; }
+.sn-muted { color: #c0c4cc; font-style: italic; }
+.suggest-text { font-size: 12px; color: #b45309; }
 </style>

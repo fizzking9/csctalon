@@ -190,8 +190,11 @@ def per_route_alignment(db, start: datetime, end: datetime) -> dict:
     start_u, end_u = _to_utc_aware(start), _to_utc_aware(end)
     e_ok = "r.refund_status IN ('退款成功','成功','SUCCESS')"
 
-    def _count(sql_tpl: str) -> int:
-        return int(db.execute(text(sql_tpl), {"s": start_u, "e": end_u}).scalar() or 0)
+    def _count(sql_tpl: str, extra: dict | None = None) -> int:
+        params = {"s": start_u, "e": end_u}
+        if extra:
+            params.update(extra)
+        return int(db.execute(text(sql_tpl), params).scalar() or 0)
 
     # ── A 线上直退(仅 refund_method='线上') ──
     a_total = _count("""
@@ -255,15 +258,28 @@ def per_route_alignment(db, start: datetime, end: datetime) -> dict:
            WHERE a.platform_order_no = m.order_no AND a.status='已退款' AND a.refund_method='线上')""")
 
     # ── issues: E 空悬(窗口内 E 单无任何路承接) ──
+    # 空悬细分(2026-09-09 用户需求): 归属判断(空悬大概率=某路漏登记)
+    #   - WXALR 前缀 → C 路(闪猫)采集缺/漏记
+    #   - 近2天 → E 采集延迟, 待复查
+    #   - 历史非WXALR → 疑 D 路(手动)少登记(用户: ABC 无空悬且非近2天 → 大概率 D 漏登)
     e_total_win = _count(f"""
         SELECT count(*) FROM refund_record_reports r
         WHERE {e_ok} AND r.refund_time >= :s AND r.refund_time <= :e""")
-    e_orphan = _count(f"""
-        SELECT count(*) FROM refund_record_reports r
-        WHERE {e_ok} AND r.refund_time >= :s AND r.refund_time <= :e
+    _orphan_where = """
           AND NOT EXISTS (SELECT 1 FROM refunds a WHERE a.platform_order_no = r.platform_order_no AND a.status='已退款')
           AND NOT EXISTS (SELECT 1 FROM manual_refunds m WHERE m.order_no = r.platform_order_no AND m.is_refunded='是')
-          AND NOT EXISTS (SELECT 1 FROM shanmao_refunds c WHERE c.order_no = r.platform_order_no AND c.status='已退款')""")
+          AND NOT EXISTS (SELECT 1 FROM shanmao_refunds c WHERE c.order_no = r.platform_order_no AND c.status='已退款')"""
+    _orphan_base = f"""
+        SELECT count(*) FROM refund_record_reports r
+        WHERE {e_ok} AND r.refund_time >= :s AND r.refund_time <= :e""" + _orphan_where
+    e_orphan = _count(_orphan_base)
+    e_orphan_wxalr = _count(_orphan_base + " AND r.platform_order_no LIKE 'WXALR%'")
+    # 近2天(E 最新退款日之前 2 天内 → 可能延迟): 以 end_u-2天 为界
+    recent_iso = (end_u - timedelta(days=2)).isoformat()
+    e_orphan_recent = _count(_orphan_base + " AND r.refund_time >= :recent",
+                             extra={"recent": recent_iso})
+    e_orphan_wxalr_recent = _count(_orphan_base + " AND r.platform_order_no LIKE 'WXALR%' AND r.refund_time >= :recent",
+                                   extra={"recent": recent_iso})
 
     return {
         "e_data_until": _e_data_until(db),
@@ -278,6 +294,10 @@ def per_route_alignment(db, start: datetime, end: datetime) -> dict:
         },
         "issues": {
             "e_orphan": e_orphan,
+            # 空悬归属细分: wxalr=C(闪猫)缺源; recent=E延迟近端; 其余历史疑D少登记
+            "e_orphan_wxalr": e_orphan_wxalr,
+            "e_orphan_recent": e_orphan_recent,
+            "e_orphan_wxalr_recent": e_orphan_wxalr_recent,
             "a_d_overlap": d_overlap_a,
             "e_total_in_window": e_total_win,
         },
@@ -362,7 +382,19 @@ def alignment_detail(db, route: str, start: datetime, end: datetime,
 
     rows = db.execute(text(sql), params).all()
     items = []
+    recent_bound = end_u - timedelta(days=2)  # 近2天判定界(UTC aware)
     for r in rows:
+        ono = r.order_no or ""
+        sugg = None
+        if route == "ORPHAN":
+            # 空悬归属建议(2026-09-09 用户): WXALR→C缺源; 近2天→E延迟; 历史→疑D少登记
+            is_recent = r.occur_time is not None and r.occur_time >= recent_bound
+            if str(ono).startswith("WXALR"):
+                sugg = ("近2天" if is_recent else "历史") + " · 疑 C 路(闪猫)漏记/采集缺(WXALR 单)"
+            elif is_recent:
+                sugg = "近2天 · E 采集延迟, 待复查(补采后可能消失)"
+            else:
+                sugg = "历史 · ABC 无此单且非近2天, 大概率 D 路(手动)少登记, 建议补录到 D"
         items.append({
             "biz_no": r.biz_no if r.biz_no is not None else str(r.order_no or ""),
             "order_no": r.order_no,
@@ -371,6 +403,7 @@ def alignment_detail(db, route: str, start: datetime, end: datetime,
             "time": _to_cn(r.occur_time).isoformat() if r.occur_time else None,
             "who": r.who,
             "quality_status": getattr(r, "q", None),
+            "suggest": sugg,
         })
     return {"route": route, "page": page, "page_size": page_size, "items": items,
             "count": len(items), "has_more": len(items) == page_size}
