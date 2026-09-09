@@ -132,3 +132,8 @@ export function autoDisposeDDupSameAmount(limit = 2000) {
 export function autoDisposeDNoEMatch(limit = 2000) {
   return request.post('/data-quality/disposition/auto/d-no-e-match', null, { params: { limit } })
 }
+
+/** D路一键治理流水线(坏副本+同单重复+E无对应+空悬落D, 幂等) */
+export function runDGovernance(start, end, limit = 10000) {
+  return request.post('/data-quality/disposition/auto/d-governance', null, { params: { start, end, limit } })
+}

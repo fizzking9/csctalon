@@ -752,3 +752,35 @@ def auto_dispose_d_no_e_match(db, limit: int = 2000) -> dict:
         "note": "D 冗余行(金额E无对应)已标 dup_residual; 未对账窗(E滞后)已跳过待补采; 幂等可重跑可恢复",
         "samples": samples,
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# D 路一键治理流水线 (2026-09-09, 用户"沉淀一键治理入口")
+# 按对账规则串联 4 步(均幂等可重跑可恢复, 只对已对账日期生效, E滞后窗自动跳过):
+#   ① D缺SN坏副本排除  → auto_dispose_d_no_sn_bad_dup   (dup_residual)
+#   ② D同单同金额重复  → auto_dispose_d_dup_same_amount  (dup_residual, 留带SN行)
+#   ③ D金额E无对应冗余 → auto_dispose_d_no_e_match        (dup_residual, 时序护栏)
+#   ④ E空悬回填D台账   → backfill_e_orphan_to_d(start,end)(INSERT, auto_filled)
+# 顺序说明: 先剔D路自身重复/冗余(①②③, 减少噪声), 再把剩余E空悬落D承接(④)。
+# start/end 仅作用于 ④ 的空悬窗口(默认不传 = 全量); ①②③ 全库幂等跑。
+# ─────────────────────────────────────────────────────────────
+def run_d_governance_pipeline(db, start=None, end=None, limit: int = 10000) -> dict:
+    """D 路一键治理(幂等): ①坏副本 ②同单同金额 ③E无对应 ④空悬落D。
+
+    返回每步统计 + 总览, 供前端一键执行后展示。
+    """
+    r1 = auto_dispose_d_no_sn_bad_dup(db, limit=limit)
+    r2 = auto_dispose_d_dup_same_amount(db, limit=limit)
+    r3 = auto_dispose_d_no_e_match(db, limit=limit)
+    r4 = backfill_e_orphan_to_d(db, start=start, end=end, limit=limit)
+    summary = {
+        "step1_no_sn_bad_dup": r1.get("disposed", 0),
+        "step2_same_amount_dup": r2.get("disposed", 0),
+        "step3_no_e_match": r3.get("disposed", 0),
+        "step4_orphan_to_d": r4.get("inserted", 0),
+        "skipped_pending_e": r3.get("skipped_pending_e", 0),
+        "e_data_until": r3.get("e_data_until"),
+        "note": "D路一键治理完成(全幂等可恢复); E滞后窗自动跳过, 补采后重跑自动恢复",
+    }
+    logger.info(f"[quality_disposition] run_d_governance_pipeline {summary}")
+    return summary

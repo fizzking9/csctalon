@@ -359,3 +359,19 @@ def disposition_auto_d_no_e_match_endpoint(db: DBSession, _: CurrentUser,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return R(data=data, message=f"已剔除 {data.get('disposed', 0)} 行 D 冗余(E无对应, 已对账日期)")
+
+
+# ── D 路一键治理流水线 (2026-09-09) ──────────────────────────
+@disposition_router.post("/auto/d-governance", response_model=R,
+                         summary="D路一键治理(坏副本+同单重复+E无对应+空悬落D, 幂等)")
+def disposition_d_governance_endpoint(db: DBSession, _: CurrentUser,
+                                      start: str | None = Query(None, description="空悬落D窗口起(北京)"),
+                                      end: str | None = Query(None, description="空悬落D窗口止(北京)"),
+                                      limit: int = Query(10000, ge=1, le=50000)):
+    from app.services.quality_disposition_service import run_d_governance_pipeline
+
+    try:
+        data = run_d_governance_pipeline(db, start=start, end=end, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message="D路一键治理完成(幂等可恢复)")

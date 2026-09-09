@@ -92,6 +92,9 @@
             治理工具: ① 缺SN坏副本(同单已由带SN行/E表计)→ 排除; ② E空悬单(系统/自动原路退, 无ABCD登记)→ 回填D台账(备注溯源, 后续ABC补回以ABC为准)。
           </div>
           <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <el-button type="success" :icon="Refresh" :loading="govRunning" @click="runGovernance">
+              ▶ 一键治理D路(全流程)
+            </el-button>
             <el-button type="warning" :icon="Refresh" :loading="disposing" @click="autoDisposeNoSn">
               自动排除缺SN坏副本
             </el-button>
@@ -122,7 +125,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
-import { listRules, createRule, updateRule, deleteRule, autoDisposeDNoSnBadDup, backfillEOrphanToD, autoDisposeDDupSameAmount, autoDisposeDNoEMatch } from '@/api/dataQuality'
+import { listRules, createRule, updateRule, deleteRule, autoDisposeDNoSnBadDup, backfillEOrphanToD, autoDisposeDDupSameAmount, autoDisposeDNoEMatch, runDGovernance } from '@/api/dataQuality'
 import QualityAudit from './QualityAudit.vue'
 import RejectedRows from './RejectedRows.vue'
 
@@ -135,6 +138,7 @@ const disposing = ref(false)
 const backfilling = ref(false)
 const dupDispatching = ref(false)
 const noeDispatching = ref(false)
+const govRunning = ref(false)
 const refreshTick = ref(0)
 const editVisible = ref(false)
 const editForm = reactive({ id: null, name: '', target: '', condition: '', description: '', enabled: true })
@@ -155,6 +159,32 @@ async function loadRules() {
     rules.value = res.data || []
   } finally {
     loading.value = false
+  }
+}
+
+async function runGovernance() {
+  try {
+    await ElMessageBox.confirm(
+      '将按对账规则对 D 路(手动退款)执行一键治理(全幂等、可恢复):\n' +
+      '① 缺SN坏副本排除(dup_residual)\n' +
+      '② 同单同金额重复剔除(保留带SN行)\n' +
+      '③ 金额E无对应冗余剔除(仅已对账日期, E滞后窗自动跳过)\n' +
+      '④ 剩余E空悬单回填D台账(备注溯源, 后续ABC补回以ABC为准)\n\n' +
+      '治理后 E 空悬清零、D 路与 E 逐单对账收敛。是否继续?',
+      '一键治理D路(全流程)',
+      { confirmButtonText: '开始治理', cancelButtonText: '取消', type: 'success' }
+    )
+  } catch { return }
+  govRunning.value = true
+  try {
+    const res = await runDGovernance('', '', 50000)  // 空悬落D全量; 如需限月传日期
+    const d = res.data || {}
+    ElMessage.success(`一键治理完成: 坏副本 ${d.step1_no_sn_bad_dup ?? 0} / 同单重复 ${d.step2_same_amount_dup ?? 0} / E无对应 ${d.step3_no_e_match ?? 0} / 空悬落D ${d.step4_orphan_to_d ?? 0}`)
+    refreshTick.value += 1
+  } catch (err) {
+    ElMessage.error(err?.response?.data?.detail || '治理失败')
+  } finally {
+    govRunning.value = false
   }
 }
 
