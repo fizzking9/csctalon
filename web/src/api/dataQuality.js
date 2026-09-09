@@ -117,3 +117,8 @@ export function scanAdOverlapDup(limit) {
 export function autoDisposeDNoSnBadDup(limit, includeAutoFixed = false) {
   return request.post('/data-quality/disposition/auto/d-no-sn-bad-dup', null, { params: { limit, include_auto_fixed: includeAutoFixed } })
 }
+
+/** E空悬单回填D路台账(INSERT manual_refunds, 备注溯源) */
+export function backfillEOrphanToD(start, end, limit = 2000) {
+  return request.post('/data-quality/disposition/auto/backfill-e-orphan-to-d', null, { params: { start, end, limit } })
+}

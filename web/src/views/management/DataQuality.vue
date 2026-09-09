@@ -89,11 +89,16 @@
       <el-tab-pane v-for="t in auditTables" :key="t.code" :label="t.label" :name="t.code">
         <div v-if="t.code === 'manual_refund' && authStore.isAdmin" class="flex-between mb-16">
           <div class="page-sub">
-            缺SN坏副本: 同订单已由带SN行/E表计, 自动标 dup_residual 排除(可恢复)。仅处理未治理行(pending/空白)。
+            治理工具: ① 缺SN坏副本(同单已由带SN行/E表计)→ 排除; ② E空悬单(系统/自动原路退, 无ABCD登记)→ 回填D台账(备注溯源, 后续ABC补回以ABC为准)。
           </div>
-          <el-button type="warning" :icon="Refresh" :loading="disposing" @click="autoDisposeNoSn">
-            自动排除缺SN坏副本
-          </el-button>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <el-button type="warning" :icon="Refresh" :loading="disposing" @click="autoDisposeNoSn">
+              自动排除缺SN坏副本
+            </el-button>
+            <el-button type="primary" :icon="Refresh" :loading="backfilling" @click="backfillEOrphan">
+              E空悬回填D台账
+            </el-button>
+          </div>
         </div>
         <QualityAudit :table="t.code" :refresh-tick="refreshTick" />
       </el-tab-pane>
@@ -111,7 +116,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
-import { listRules, createRule, updateRule, deleteRule, autoDisposeDNoSnBadDup } from '@/api/dataQuality'
+import { listRules, createRule, updateRule, deleteRule, autoDisposeDNoSnBadDup, backfillEOrphanToD } from '@/api/dataQuality'
 import QualityAudit from './QualityAudit.vue'
 import RejectedRows from './RejectedRows.vue'
 
@@ -121,6 +126,7 @@ const rules = ref([])
 const loading = ref(false)
 const submitting = ref(false)
 const disposing = ref(false)
+const backfilling = ref(false)
 const refreshTick = ref(0)
 const editVisible = ref(false)
 const editForm = reactive({ id: null, name: '', target: '', condition: '', description: '', enabled: true })
@@ -160,6 +166,38 @@ async function autoDisposeNoSn() {
     refreshTick.value += 1  // 通知 QualityAudit 刷新
   } finally {
     disposing.value = false
+  }
+}
+
+// E空悬 → D台账回填: 收集日期范围(默认上月1日~昨日), 确认后执行
+async function backfillEOrphan() {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = now.getMonth()  // 0-based
+  // 上月 = 若本月1月则去年12月, 否则本月-1
+  const py = m === 0 ? y - 1 : y
+  const pm = m === 0 ? 11 : m - 1
+  const firstOfLast = `${py}-${String(pm + 1).padStart(2, '0')}-01`
+  const lastDay = new Date(py, pm + 1, 0).getDate() // 上月天数
+  const lastOfLast = `${py}-${String(pm + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`
+  try {
+    const { value } = await ElMessageBox.prompt(
+      'E空悬单(退款记录报表已退、ABCD无登记, 多为系统/自动原路退)将 INSERT 到手动退款台账, is_refunded=是、备注"实际对账回填"溯源。\n\n请输日期范围(YYYY-MM-DD ~ YYYY-MM-DD):',
+      'E空悬回填D台账',
+      { confirmButtonText: '开始回填', cancelButtonText: '取消', inputValue: `${firstOfLast} ~ ${lastOfLast}`, type: 'info' }
+    )
+    const parts = (value || '').split(/[~～至\s]+/).filter(Boolean)
+    if (parts.length !== 2) return ElMessage.warning('请输入形如 2026-08-01 ~ 2026-08-31 的日期范围')
+    backfilling.value = true
+    const res = await backfillEOrphanToD(parts[0].trim(), parts[1].trim(), 10000)
+    const d = res.data || {}
+    ElMessage.success(`已回填 ${d.inserted ?? 0} 笔 E 空悬到 D 台账(跳过已有 ${d.skipped_existing ?? 0})`)
+    refreshTick.value += 1
+  } catch (err) {
+    if (err === 'cancel' || err?.toString?.().includes('cancel')) return
+    ElMessage.error(err?.response?.data?.detail || '回填失败')
+  } finally {
+    backfilling.value = false
   }
 }
 

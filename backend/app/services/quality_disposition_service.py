@@ -428,3 +428,130 @@ def auto_dispose_d_no_sn_bad_dup(db, limit: int = 2000, include_auto_fixed: bool
         "note": "已标 dup_residual, 从 D 路经营统计排除(可 restore 恢复)",
         "samples": samples,
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# E 空悬 → 落 D 台账对账回填 (2026-09-09, 用户方案)
+# 背景: E(refund_record_reports 商户号真实退款)中存在"A/B/C/D 均未承接"的空悬单,
+#       经备注/设备/钱包多维度核实, 其中大量是"系统/自动原路退"(用户侧直退/无钱包/
+#       无人工退费单台账), 非客服手工登记漏项。
+# 用户决策(2026-09-09): 既然 E 是财务权威, 对账回填 ABCD 是"修复"非"删除"。
+#   → 把这些 E 空悬单 INSERT 到 D 路(manual_refunds)台账, 备注"实际对账回填",
+#     is_refunded='是' + op_time/register_time=E.refund_time, 使 E 空悬消除、对账闭合;
+#     后续若 ABC 路采集/登记补回, 以 ABC 为准(凭 order_no + "实际对账回填"标记识别让位)。
+# 幂等: 仅处理 manual_refunds 尚无同 order_no 记录的 E 空悬单(防重复执行/与已有登记撞)。
+# 仅对 WXALR(闪猫, 走 C)之外的非 C 系订单落 D; WXALR 空悬由 C 路采集解决不落 D。
+# ─────────────────────────────────────────────────────────────
+def backfill_e_orphan_to_d(db, start=None, end=None, limit: int = 2000) -> dict:
+    """E 空悬单 → D 路台账回填(INSERT manual_refunds, 幂等可追溯)。
+
+    start/end: 北京日期字符串(含), 限定 E refund_time 窗口; 默认不传时取全部。
+    每行字段取 E: order_no=platform_order_no, device_sn, refund_amount,
+    register_time=op_time=refund_time, merchant_id, is_refunded='是',
+    remark 含"实际对账回填"溯源, registrant/refund_operator='系统-对账回填',
+    quality_status='auto_filled', backfill_refund_record_report_id=E.id(双向溯源)。
+    """
+    from sqlalchemy import func, text
+
+    from app.models.manual_refund import ManualRefund
+    s_u, e_u = None, None
+    if start or end:
+        from datetime import datetime, timedelta, timezone
+
+        _tz = timezone(timedelta(hours=8))
+        if start:
+            s_u = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=_tz).astimezone(timezone.utc)
+        if end:
+            # end 视为含当天 → 北京次日 0 点
+            e_u = (datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)).replace(tzinfo=_tz).astimezone(timezone.utc)
+
+    _win = ""
+    params: dict = {"limit": limit}
+    if s_u and e_u:
+        _win = "AND r.refund_time >= :ts AND r.refund_time < :te"
+        params["ts"] = s_u
+        params["te"] = e_u
+    elif s_u:
+        _win = "AND r.refund_time >= :ts"
+        params["ts"] = s_u
+    elif e_u:
+        _win = "AND r.refund_time < :te"
+        params["te"] = e_u
+
+    sql = text(f"""
+        SELECT r.id, r.platform_order_no AS ono, r.device_sn AS esn, r.merchant_id AS mid,
+               r.merchant_name AS mname, r.refund_amount AS amt, r.apply_refund_amount AS order_amt,
+               r.refund_time AS rtime, r.product_name AS pname
+        FROM refund_record_reports r
+        WHERE r.refund_status IN ('退款成功','成功','SUCCESS')
+          AND r.platform_order_no NOT LIKE 'WXALR%'
+          AND r.platform_order_no IS NOT NULL
+          {_win}
+          AND NOT EXISTS (SELECT 1 FROM refunds a WHERE a.platform_order_no = r.platform_order_no AND a.status='已退款')
+          AND NOT EXISTS (SELECT 1 FROM manual_refunds m WHERE m.order_no = r.platform_order_no)
+          AND NOT EXISTS (SELECT 1 FROM shanmao_refunds c WHERE c.order_no = r.platform_order_no AND c.status='已退款')
+        ORDER BY r.refund_time
+        LIMIT :limit
+    """)
+    rows = db.execute(sql, params).all()
+    inserted = 0
+    skipped_existing = 0
+    samples = []
+    # 同 order_no 可能有多笔 E(同单分次/部分退)→ 聚合成一行落 D(一单一录, 金额累加,
+    # 避免撞 manual_refunds 去重唯一键 uq_manual_refunds_dedup, 也符合 D 台账按单登记语义)
+    groups: dict[str, dict] = {}
+    for r in rows:
+        key = str(r.ono)
+        if key in groups:
+            g = groups[key]
+            g["amt"] += float(r.amt or 0)
+            g["e_ids"].append(r.id)
+        else:
+            groups[key] = {"r": r, "amt": float(r.amt or 0), "e_ids": [r.id]}
+    for _key, g in groups.items():
+        r = g["r"]
+        total_amt = g["amt"]
+        e_ids = g["e_ids"]
+        # 幂等: 双检(并发/事务内避免撞) — SQL 已过滤, 此处防御
+        exists = db.scalar(
+            select(func.count()).select_from(ManualRefund).where(ManualRefund.order_no == r.ono)
+        ) or 0
+        if exists:
+            skipped_existing += 1
+            continue
+        e_ids_txt = ",".join(str(x) for x in e_ids)
+        note = (
+            f"实际对账回填: E路退款记录报表单#{e_ids_txt} 系统/自动原路退无人工台账, 由对账自动归入D路. "
+            f"op_time/金额取E(refund_time={r.rtime.isoformat() if r.rtime else '?'}, 同单{len(e_ids)}笔已聚合¥{total_amt:.2f}). "
+            "后续ABC采集补回时以ABC为准(凭本备注/order_no让位). 2026-09-09"
+        )
+        m = ManualRefund(
+            register_time=r.rtime,
+            device_sn=r.esn,
+            order_no=r.ono,
+            merchant_id=r.mid,
+            order_amount=float(r.order_amt) if r.order_amt is not None else total_amt,
+            registrant="系统-对账回填",
+            is_refunded="是",
+            refund_amount=total_amt,
+            refund_operator="系统-对账回填",
+            op_time=r.rtime,
+            remark=(f"实际对账回填: E路#{e_ids_txt} {r.mname or ''} {r.pname or ''}".strip()),
+            quality_status="auto_filled",
+            quality_note=note[:500],
+            backfill_refund_record_report_id=str(e_ids[0]),
+        )
+        db.add(m)
+        inserted += 1
+        if len(samples) < 20:
+            samples.append({"e_id": e_ids[0], "order_no": r.ono, "device_sn": r.esn,
+                            "amount": round(total_amt, 2), "refund_time": r.rtime.isoformat() if r.rtime else None})
+    db.commit()
+    logger.info(f"[quality_disposition] backfill_e_orphan_to_d inserted={inserted} skipped_existing={skipped_existing} scanned={len(rows)}")
+    return {
+        "inserted": inserted,
+        "skipped_existing": skipped_existing,
+        "scanned": len(rows),
+        "note": "E 空悬单已 INSERT 到 D 路台账(auto_filled 可追溯), 经营对账将闭合; 后续 ABC 补回以 ABC 为准",
+        "samples": samples,
+    }

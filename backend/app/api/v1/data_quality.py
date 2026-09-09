@@ -315,3 +315,19 @@ def disposition_auto_d_no_sn_bad_dup_endpoint(db: DBSession, _: CurrentUser,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return R(data=data, message=f"已自动排除 {data.get('disposed', 0)} 行缺SN坏副本")
+
+
+# ── E 空悬 → D 路台账对账回填 (2026-09-09) ──────────────────
+@disposition_router.post("/auto/backfill-e-orphan-to-d", response_model=R,
+                         summary="E空悬单回填D路台账(系统/自动原路退, INSERT manual_refunds 备注溯源)")
+def disposition_backfill_e_orphan_to_d_endpoint(db: DBSession, _: CurrentUser,
+                                                start: str | None = Query(None, description="北京日期 YYYY-MM-DD"),
+                                                end: str | None = Query(None, description="北京日期 YYYY-MM-DD"),
+                                                limit: int = Query(2000, ge=1, le=10000)):
+    from app.services.quality_disposition_service import backfill_e_orphan_to_d
+
+    try:
+        data = backfill_e_orphan_to_d(db, start=start, end=end, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message=f"已回填 {data.get('inserted', 0)} 笔 E 空悬到 D 路台账(备注溯源)")
