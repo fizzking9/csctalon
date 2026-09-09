@@ -7628,13 +7628,14 @@ def refund_export_original(
 def refund_export_all(
     db: Session, start: str | None = None, end: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """导出四路经营退款明细 Excel(多 sheet): A线上直退 / B钱包提现 / C闪猫退款 / D手动退款 + 按日汇总.
+    """导出经营退款明细 Excel(多 sheet): A线上直退 / B钱包提现 / C闪猫退款 / D手动退款 / E退款记录报表 + 按日汇总.
 
     口径与 refund_decision_overview.routes_daily 完全一致:
     - A 线上直退: refunds.refund_method='线上', 时间=created_at_raw (含涉诉分类/归一操作人)
     - B 钱包提现: wallet_withdrawals.op_type='用户提现', 时间=op_time
     - C 闪猫退款: shanmao_refunds.status='已退款', 时间=COALESCE(audit_time, created_at)
     - D 手动退款: manual_refunds.is_refunded='是', 时间=COALESCE(op_time, register_time)
+    - E 退款记录报表: refund_record_reports 退款成功(财务基准, 2026-09-09 补充), 时间=refund_time
     """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
     sheets: dict[str, list[dict[str, Any]]] = {}
@@ -7725,7 +7726,29 @@ def refund_export_all(
         "备注": (r.remark or "").replace("\n", " "),
     } for r in d_rows]
 
-    # 四路按日汇总 (口径与决策概览 routes_daily 一致, 上海时区截断)
+    # E 商户号实际现金流 (refund_record_reports 退款成功 = 对账基准; 2026-09-09 补充导出供手动比对)
+    e_rows = db.execute(text("""
+        SELECT platform_order_no, wx_order_no, merchant_id, merchant_name, device_sn,
+               product_name, refund_time, apply_refund_amount, refund_amount, refund_status
+        FROM refund_record_reports
+        WHERE refund_status IN ('退款成功','成功','SUCCESS')
+          AND refund_time >= :ts AND refund_time <= :te
+        ORDER BY refund_time
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    sheets["E退款记录报表"] = [{
+        "平台订单号": r.platform_order_no or "",
+        "微信订单号": r.wx_order_no or "",
+        "商户号": r.merchant_id or "",
+        "商户名": r.merchant_name or "",
+        "设备号": r.device_sn or "",
+        "商品名称": r.product_name or "",
+        "退款时间": _sh(r.refund_time),
+        "申请退款金额": float(r.apply_refund_amount) if r.apply_refund_amount is not None else "",
+        "退款金额": float(r.refund_amount) if r.refund_amount is not None else "",
+        "退款状态": r.refund_status or "",
+    } for r in e_rows]
+
+    # 五路按日汇总 (口径与决策概览 routes_daily 一致, 上海时区截断; E 为基准单独列)
     def _day(col: str) -> str:
         return f"DATE({col} AT TIME ZONE 'Asia/Shanghai')"
 
@@ -7754,6 +7777,13 @@ def refund_export_all(
               AND m.is_refunded = '是'
               {"AND " + _EXCL_QSTATUS_SQL if _d_excl_q else ''}
             GROUP BY 1"""),
+        ("E退款记录报表", f"""
+            SELECT {_day("r.refund_time")} AS d, count(*) AS cnt,
+                   COALESCE(sum(r.refund_amount), 0) AS amt
+            FROM refund_record_reports r
+            WHERE r.refund_status IN ('退款成功','成功','SUCCESS')
+              AND r.refund_time >= :ts AND r.refund_time <= :te
+            GROUP BY 1"""),
     ]
     route_map: dict[str, dict[str, list]] = {}
     for name, sql in agg_queries:
@@ -7762,6 +7792,7 @@ def refund_export_all(
             b.setdefault(name, [0, 0.0])
             b[name][0] += int(r.cnt or 0)
             b[name][1] += float(r.amt or 0)
+    # E 是基准不参与合计, 单独列供对比 (见下方 summary)
     summary = []
     for d in sorted(route_map):
         b = route_map[d]
@@ -7771,12 +7802,17 @@ def refund_export_all(
             v = b.get(name, [0, 0.0])
             row[f"{name}笔数"] = v[0]
             row[f"{name}金额"] = round(v[1], 2)
-            total_cnt += v[0]
-            total_amt += v[1]
-        row["合计笔数"] = total_cnt
-        row["合计金额"] = round(total_amt, 2)
+            if name != "E退款记录报表":
+                total_cnt += v[0]
+                total_amt += v[1]
+        row["经营合计(A+B+C+D)笔数"] = total_cnt
+        row["经营合计(A+B+C+D)金额"] = round(total_amt, 2)
+        # 对账偏差: 经营合计 - E (正=经营多/负=E多)
+        e = b.get("E退款记录报表", [0, 0.0])
+        row["偏差(经营-E)笔数"] = total_cnt - e[0]
+        row["偏差(经营-E)金额"] = round(total_amt - e[1], 2)
         summary.append(row)
-    sheets["四路汇总"] = summary
+    sheets["五路汇总(A-E)"] = summary
 
     return sheets
 
