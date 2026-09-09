@@ -10,7 +10,7 @@
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -784,3 +784,103 @@ def run_d_governance_pipeline(db, start=None, end=None, limit: int = 10000) -> d
     }
     logger.info(f"[quality_disposition] run_d_governance_pipeline {summary}")
     return summary
+
+
+# ─────────────────────────────────────────────────────────────
+# C/D 实际扣款时间回填 (2026-09-09, 对账时间对齐)
+# 用户方案: ABCD 与 E 按日对账偏差源于各路登记/操作时间 ≠ E 实际扣款时间。
+#   C 路 refund_time 字段空(上游未填) → 用 E.refund_time 逐单回填
+#   D 路新增 actual_refund_time(客服操作时间=op_time 不动) → 用 E.refund_time 回填
+# 匹配: L1 order_no=platform_order_no 唯一 → L2 device_sn+金额 → L3 device+登记±7天唯一;
+#       多候选/无候选跳过(不标状态, 供人工), 已填目标字段的跳过(幂等)。
+# ─────────────────────────────────────────────────────────────
+def backfill_c_d_actual_refund_time(db, limit: int = 5000) -> dict:
+    """C/D 路实际扣款时间回填(C.refund_time / D.actual_refund_time = E.refund_time)。
+
+    仅填目标字段为空的已退款行; L1/L2/L3 逐级匹配 E 成功单, 唯一候选才填。
+    返回统计(供对账时间对齐验证)。
+    """
+    from sqlalchemy import text
+
+    stats = {"c_matched": 0, "c_skipped": 0, "d_matched": 0, "d_skipped": 0,
+             "d_no_candidate": 0, "d_multi": 0}
+
+    def _e_candidates(order_no=None, device_sn=None, amount=None, reg_time=None) -> list:
+        """E 成功单候选(限传入条件, 至少一个约束)"""
+        if not (order_no or device_sn):
+            return []
+        if order_no:
+            rows = db.execute(text("""
+                SELECT id, refund_time, refund_amount FROM refund_record_reports
+                WHERE platform_order_no = :o AND refund_status IN ('退款成功','成功','SUCCESS')
+            """), {"o": str(order_no).strip()}).all()
+            if len(rows) == 1:
+                return rows
+            # order 多候选 → 回退 L2(device+amount) 或 L3
+        cands = []
+        if device_sn and amount is not None:
+            cands = db.execute(text("""
+                SELECT id, refund_time, refund_amount FROM refund_record_reports
+                WHERE device_sn = :s AND refund_status IN ('退款成功','成功','SUCCESS')
+                  AND abs(refund_amount - :a) < 0.01
+            """), {"s": device_sn, "a": float(amount)}).all()
+            if len(cands) == 1:
+                return cands
+        # L3: device + 登记±7天唯一
+        if device_sn and reg_time is not None:
+            cands = db.execute(text("""
+                SELECT id, refund_time, refund_amount FROM refund_record_reports
+                WHERE device_sn = :s AND refund_status IN ('退款成功','成功','SUCCESS')
+                  AND refund_time >= :ws AND refund_time <= :we
+            """), {"s": device_sn,
+                   "ws": reg_time - timedelta(days=7),
+                   "we": reg_time + timedelta(days=7)}).all()
+            if len(cands) == 1:
+                return cands
+        return cands
+
+    # ── C 路: 填 shanmao_refunds.refund_time ──
+    c_rows = db.execute(text("""
+        SELECT refund_no, order_no, device_sn, actual_amount, refund_amount, audit_time
+        FROM shanmao_refunds
+        WHERE status='已退款' AND refund_time IS NULL AND order_no IS NOT NULL
+        LIMIT :lim
+    """), {"lim": limit}).all()
+    for r in c_rows:
+        cands = _e_candidates(order_no=r.order_no, device_sn=r.device_sn,
+                              amount=r.actual_amount or r.refund_amount, reg_time=r.audit_time)
+        if len(cands) == 1:
+            db.execute(text(
+                "UPDATE shanmao_refunds SET refund_time=:t, "
+                "quality_note=COALESCE(quality_note,'') || ' | 实际扣款时间由E路回填(单#:id, 2026-09-09)' "
+                "WHERE refund_no=:rf"
+            ), {"t": cands[0].refund_time, "id": cands[0].id, "rf": r.refund_no})
+            stats["c_matched"] += 1
+        else:
+            stats["c_skipped"] += 1
+
+    # ── D 路: 填 manual_refunds.actual_refund_time ──
+    d_rows = db.execute(text("""
+        SELECT id, order_no, device_sn, refund_amount, register_time
+        FROM manual_refunds
+        WHERE is_refunded='是' AND actual_refund_time IS NULL
+          AND (quality_status IS NULL OR quality_status NOT IN ('dup_residual','ignored'))
+        ORDER BY id LIMIT :lim
+    """), {"lim": limit}).all()
+    for r in d_rows:
+        cands = _e_candidates(order_no=r.order_no, device_sn=r.device_sn,
+                              amount=r.refund_amount, reg_time=r.register_time)
+        if len(cands) == 1:
+            db.execute(text(
+                "UPDATE manual_refunds SET actual_refund_time=:t "
+                "WHERE id=:mid"
+            ), {"t": cands[0].refund_time, "mid": r.id})
+            stats["d_matched"] += 1
+        elif len(cands) > 1:
+            stats["d_multi"] += 1
+        else:
+            stats["d_no_candidate"] += 1
+
+    db.commit()
+    logger.info(f"[quality_disposition] backfill_c_d_actual_refund_time {stats}")
+    return stats

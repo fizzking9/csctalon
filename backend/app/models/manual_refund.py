@@ -58,6 +58,13 @@ class ManualRefund(IDMixin, TimestampMixin, Base):
     # ── 备注 ────────────────────────────────────────────────────
     remark: Mapped[str | None] = mapped_column(Text, nullable=True, comment="备注")
 
+    # ── 实际扣款时间(2026-09-09 对账时间对齐) ──────────────────
+    # E 路(refund_record_reports.refund_time)逐单回填的"实际扣款时间", 对账按此逐日
+    # 匹配, 消除 op_time(客服操作/登记时间)与 E 扣款时间的错位。op_time 保留运营口径。
+    actual_refund_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True, nullable=True, comment="实际扣款时间(E路refund_time回填, 对账用)"
+    )
+
     # ── 数据质量(导入时校验/纠错) ────────────────────────────────
     quality_status: Mapped[str | None] = mapped_column(
         String(16), index=True, nullable=True, comment="数据质量状态: ok=正常 / auto_fixed=已自动纠错 / pending=待人工确认 / auto_filled=E回填 / dup_residual=已治理重复(排除) / ignored=人工彻底忽略(排除)"
