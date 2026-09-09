@@ -286,14 +286,16 @@ function fmtDate(s) {
   return dayjs(t).format('YYYY-MM-DD HH:mm')
 }
 function pct(amt) {
-  const total = snapshot.value?.actual_cashflow?.amount || 0
+  const total = snapshot.value?.route_snapshot?.actual_cashflow?.amount || 0
   if (!total) return '0.0'
   return ((Number(amt) / total) * 100).toFixed(1)
 }
 
-const snap = computed(() => snapshot.value || null)
+// ⚠️ preview_check 返回 {window, route_snapshot{route_a..diff}, by_route_of_e, dupe_detect}
+// KPI 卡用 route_snapshot 内字段 → snap 直接解包 route_snapshot(修复: 原引用顶层导致 KPI 全 0)
+const snap = computed(() => snapshot.value?.route_snapshot || null)
 const diffColor = computed(() => {
-  const d = snapshot.value?.diff?.amount ?? 0
+  const d = snapshot.value?.route_snapshot?.diff?.amount ?? 0
   return d === 0 ? '#f0fdf4' : (d > 0 ? '#fef2f2' : '#eff6ff')
 })
 const dupeWarn = computed(() => {
