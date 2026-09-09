@@ -360,7 +360,19 @@ def _route_candidates(db, report: RefundRecordReport) -> dict:
                     "route": "B", "source": "wallet_withdrawals", "source_id": wid,
                     "amount": float(wamt), "sn": sn, "extra": (wremark or "")[:40],
                 })
-    # C 路: 设备命中闪猫
+    # C 路: 订单号(WXALR)或设备命中闪猫已退款
+    # ⚠️ 2026-09-09 (M-4): C 路 device_sn 覆盖 0%, 原仅 SN 匹配全漏配 → 优先 order_no(WXALR)
+    if order_no:
+        c_rows = db.execute(
+            select(ShanmaoRefund.refund_no, ShanmaoRefund.actual_amount, ShanmaoRefund.device_sn)
+            .where(ShanmaoRefund.order_no == order_no, ShanmaoRefund.status == "已退款")
+            .limit(10)
+        ).all()
+        for cno, camt, csn in c_rows:
+            candidates.append({
+                "route": "C", "source": "shanmao_refunds", "source_id": cno,
+                "amount": float(camt) if camt is not None else None, "sn": csn,
+            })
     if sn:
         c_rows = db.execute(
             select(ShanmaoRefund.refund_no, ShanmaoRefund.actual_amount)

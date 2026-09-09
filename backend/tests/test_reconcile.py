@@ -465,3 +465,57 @@ def test_api_water_statement_ok(admin_client, _test_session):
     body = resp.json()
     assert body["code"] == 0
     assert body["data"]["total_report_count"] == 1
+
+
+def _seed_shanmao_c(session, order_no="WXALR20260905000001", refund_no="TF202609050001",
+                     amount="59.00"):
+    """C 路闪猫已退款行(无 device_sn, 模拟真实 C 路 SN=0% 特征)"""
+    from app.models.shanmao_refund import ShanmaoRefund
+
+    c = ShanmaoRefund(
+        refund_no=refund_no,
+        order_no=order_no,
+        actual_amount=amount,
+        refund_amount=amount,
+        status="已退款",
+        apply_time=_dt("2026-09-05 09:00:00"),
+        audit_time=_dt("2026-09-05 10:00:00"),
+    )
+    session.add(c)
+    session.commit()
+    session.refresh(c)
+    return c
+
+
+def test_water_statement_classify_shanmao_wxalr(_test_session):
+    """M-4 修复: E 侧 WXALR 订单(无SN)应命中 C 路闪猫已退款(按 order_no, 非 SN)
+
+    回归验证 A-20260909-001 §2.8.3: C 路 device_sn=0%, 原 c_sns 匹配全漏配;
+    改用 order_no(WXALR 前缀)后 WXALR report → matched C。
+    """
+    from app.models.shanmao_refund import ShanmaoRefund
+
+    # 清理本测试可能残留的 WXALR 数据
+    _test_session.execute(ShanmaoRefund.__table__.delete().where(ShanmaoRefund.order_no.like("WXALR%")))
+    _test_session.commit()
+    try:
+        from app.services.reconcile import water_statement
+
+        # E 侧 WXALR 水单(device_sn 给一个但 C 侧无对应 SN)
+        _seed_report(_test_session, platform_order_no="WXALR20260905000001",
+                     device_sn="SN-D-9", amount="59.00", refund_time="2026-09-05 10:30:00")
+        # C 侧闪猫已退款(无 device_sn, 只有 order_no)
+        _seed_shanmao_c(_test_session, order_no="WXALR20260905000001", amount="59.00")
+
+        res = water_statement(
+            _test_session,
+            _dt("2026-09-05 00:00:00"),
+            _dt("2026-09-05 23:59:59"),
+        )
+        # 修复前: unmatched(SN 匹配不到 C); 修复后: matched C
+        assert res["by_route"].get("C", 0) == 1, f"WXALR 应归 C, 实际 by_route={res['by_route']}"
+        assert res["by_route"]["unmatched"] == 0
+    finally:
+        # 清理闪猫行 + report(报告由 fixture teardown 清理, 这里清闪猫)
+        _test_session.execute(ShanmaoRefund.__table__.delete().where(ShanmaoRefund.order_no.like("WXALR%")))
+        _test_session.commit()

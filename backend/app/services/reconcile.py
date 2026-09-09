@@ -317,7 +317,18 @@ def _build_route_maps(db, start, end):
         if rno:
             a_by_no.add(str(rno).strip())
 
-    # C: shanmao 设备号集合(已退款)
+    # C: shanmao 订单号集合(WXALR 前缀, 闪猫独占) + 设备号集合(兜底)
+    # ⚠️ 2026-09-09 (M-4, A-20260909-001 §2.8.3): C 路 device_sn 覆盖 0%,
+    #    原 c_sns 匹配实际全漏配 → 改用 order_no(WXALR)为主锚点。
+    c_order_nos: set[str] = set()
+    for (ono,) in db.execute(
+        select(ShanmaoRefund.order_no).where(
+            ShanmaoRefund.order_no.is_not(None),
+            ShanmaoRefund.status == "已退款",
+        )
+    ).all():
+        if ono:
+            c_order_nos.add(str(ono).strip())
     c_sns: set[str] = set()
     for (sn,) in db.execute(
         select(ShanmaoRefund.device_sn).where(ShanmaoRefund.device_sn.is_not(None))
@@ -356,6 +367,7 @@ def _build_route_maps(db, start, end):
     return {
         "a_by_order": a_by_order,
         "a_by_no": a_by_no,
+        "c_order_nos": c_order_nos,
         "c_sns": c_sns,
         "b_keys": b_keys,
         "d_keys": d_keys,
@@ -376,6 +388,11 @@ def _classify_report(report: RefundRecordReport, maps: dict) -> str:
         # report 平台订单号是否出现在退费单的 platform_order_no
         if maps["a_by_order"].get(order_no):
             return "A"
+    # C 路(闪猫): WXALR 订单号闪猫独占, 与 A/D(WS/WX/WN/WXGV)无前缀重叠 → 无归属歧义
+    # ⚠️ 2026-09-09 (M-4, A-20260909-001 §2.8.3): 改用 order_no 匹配(原 SN 匹配因 C 路
+    #    device_sn=0% 全漏配); SN 命中作为兜底保留(兼容极少数有 SN 场景)。
+    if order_no and order_no in maps["c_order_nos"]:
+        return "C"
     # D 路(order_no 命中手动台账)
     if order_no and order_no in maps["d_order_nos"]:
         return "D"
