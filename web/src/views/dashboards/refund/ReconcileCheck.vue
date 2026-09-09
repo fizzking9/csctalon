@@ -53,7 +53,13 @@
     <section v-if="alignData" class="mb-16">
       <div class="grid-cards">
         <div class="align-card">
-          <div class="card-head"><b>A 线上直退</b><span class="tag-ok">线上直退</span></div>
+          <div class="card-head">
+            <b>A 线上直退</b>
+            <div class="head-ops">
+              <el-button v-if="rA.unmatched > 0" size="small" text type="warning" :loading="resyncing==='A'" @click="reSyncRoute('A')">🔄 重采</el-button>
+              <span class="tag-ok">线上直退</span>
+            </div>
+          </div>
           <div class="card-nums">
             <div class="num-main">共 {{ fmt(rA.total) }} 笔</div>
             <div class="num-ok" :style="{color:'#16a34a'}">✅ 已对齐 E {{ fmt(rA.matched_in_e) }}（{{ pctOf(rA.matched_in_e, rA.total) }}%）</div>
@@ -66,7 +72,13 @@
         </div>
 
         <div class="align-card">
-          <div class="card-head"><b>B 用户提现</b><span class="tag-info">链路对账</span></div>
+          <div class="card-head">
+            <b>B 用户提现</b>
+            <div class="head-ops">
+              <el-button v-if="rB.chain_break > 0" size="small" text type="warning" :loading="resyncing==='B'" @click="reSyncRoute('B')">🔄 重采</el-button>
+              <span class="tag-info">链路对账</span>
+            </div>
+          </div>
           <div class="card-nums">
             <div class="num-main">共 {{ fmt(rB.total) }} 笔</div>
             <div class="num-ok" :style="{color:'#16a34a'}">✅ 链路到 E {{ fmt(rB.chain_ok) }}（{{ pctOf(rB.chain_ok, rB.total) }}%）</div>
@@ -79,7 +91,13 @@
         </div>
 
         <div class="align-card">
-          <div class="card-head"><b>C 闪猫退款</b><span class="tag-ok">WXALR</span></div>
+          <div class="card-head">
+            <b>C 闪猫退款</b>
+            <div class="head-ops">
+              <el-button v-if="rC.unmatched > 0 || rC.total > 0" size="small" text type="warning" :loading="resyncing==='C'" @click="reSyncRoute('C')">🔄 重采</el-button>
+              <span class="tag-ok">WXALR</span>
+            </div>
+          </div>
           <div class="card-nums">
             <div class="num-main">共 {{ fmt(rC.total) }} 笔</div>
             <div class="num-ok" :style="{color:'#16a34a'}">✅ 已对齐 E {{ fmt(rC.matched_in_e) }}（{{ pctOf(rC.matched_in_e, rC.total) }}%）</div>
@@ -88,7 +106,7 @@
             </div>
             <div v-else class="num-ok">✅ 无差异</div>
           </div>
-          <div class="card-foot">闪猫已退款 order_no(WXALR) ↔ E</div>
+          <div class="card-foot">闪猫已退款 order_no(WXALR) ↔ E · 注: 闪猫源需手动采集(未纳入定时), 差异多为采集缺, 点🔄重采</div>
         </div>
 
         <div class="align-card">
@@ -109,7 +127,13 @@
 
       <div class="grid-cards mt-12">
         <div class="align-card issue">
-          <div class="card-head"><b>空悬 E（E 有、ABCD 无登记）</b><span class="tag-danger">漏记</span></div>
+          <div class="card-head">
+            <b>空悬 E（E 有、ABCD 无登记）</b>
+            <div class="head-ops">
+              <el-button size="small" text type="warning" :loading="resyncing==='E'" @click="reSyncRoute('E')">🔄 重采E</el-button>
+              <span class="tag-danger">漏记</span>
+            </div>
+          </div>
           <div class="card-nums">
             <div v-if="iss.e_orphan > 0" class="num-warn clickable" @click="openDetail('ORPHAN')">
               ⚠️ 窗口内 E 无任何路承接 {{ fmt(iss.e_orphan) }} 笔 → 下钻
@@ -209,10 +233,11 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { reconcile } from '@/api/reconcile'
+import { taskSubmit } from '@/api/fetch'
 
 const props = defineProps({
   start: { type: String, default: '' },
@@ -334,6 +359,49 @@ async function loadDetail() {
   }
 }
 
+// ── 对账差异 → 重采该路数据源(2026-09-09 用户) ──
+// 差异可能源于上游采集未到位(如 C 闪猫 default_sync=false 需手动采),
+// 提供"对当前时间窗重采对应 BMS 源"入口, 复用 /fetch/task/submit。
+const ROUTE_RESYNC_SOURCE = {
+  A: { data_type: 'refund', label: 'A 线上直退', src: 'BMS 退费单管理(refund)' },
+  B: { data_type: 'wallet', label: 'B 用户提现', src: 'BMS 提现操作记录(wallet)' },
+  C: { data_type: 'shanmao_refund', label: 'C 闪猫退款', src: 'BMS 闪猫退款管理(shanmao_refund)' },
+  E: { data_type: 'refund_record_report', label: 'E 商户号现金流', src: 'BMS 退款记录报表(refund_record_report)' },
+}
+const resyncing = ref('')   // 正在重采的路(A/B/C/E)
+
+async function reSyncRoute(route) {
+  const cfg = ROUTE_RESYNC_SOURCE[route]
+  if (!cfg) { ElMessage.warning('该路暂不支持一键重采(D 路来自共享文档, 请在数据采集页触发)'); return }
+  if (resyncing.value) { ElMessage.info('已有重采任务进行中'); return }
+  if (!winStart.value || !winEnd.value) { ElMessage.warning('请先选择时间窗'); return }
+  try {
+    await ElMessageBox.confirm(
+      `将重采「${cfg.label}」(${cfg.src})，时间范围 ${winStart.value} ~ ${winEnd.value}。\n` +
+      '适用于差异疑为上游采集未到位(如闪猫需手动采)。任务后台执行, 完成后刷新本页复查。是否继续?',
+      '重采确认', { confirmButtonText: '开始重采', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch { return }
+  resyncing.value = route
+  try {
+    const res = await taskSubmit({
+      time_range: 'custom',
+      custom_start: `${winStart.value}T00:00:00`,
+      custom_end: `${winEnd.value}T23:59:59`,
+      data_types: [cfg.data_type],
+      ignore_cooldown: true,
+    })
+    const taskId = res?.data?.task_id || res?.data?.id
+    ElMessage.success(`已提交重采任务${taskId ? `(#${taskId})` : ''}, 完成前请稍候`)
+    // 提示刷新(任务后台执行)
+    ElMessage.info('重采在后台执行, 可稍后点「生成预览」复查差异是否减少')
+  } catch (e) {
+    ElMessage.error('重采提交失败: ' + (e?.message || e))
+  } finally {
+    resyncing.value = ''
+  }
+}
+
 async function loadHistory() {
   histLoading.value = true
   try {
@@ -390,6 +458,8 @@ onMounted(() => {
 .align-card { background: #fff; border-radius: 10px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); border: 1px solid #eef0f3; }
 .align-card.issue { border-left: 4px solid #f59e0b; }
 .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.head-ops { display: flex; align-items: center; gap: 4px; }
+.head-ops .el-button + .el-button { margin-left: 0; }
 .card-head b { font-size: 15px; color: #1f2937; }
 .card-nums { display: flex; flex-direction: column; gap: 6px; }
 .num-main { font-size: 13px; color: #4b5563; }
