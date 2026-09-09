@@ -168,6 +168,214 @@ def _gen_check_no(db, day: str) -> str:
     return f"{prefix}{exists + 1:03d}"
 
 
+# ─────────────────────────────────────────────────────────────
+# 2. 逐路对齐(A-20260909-002 LOCKED): 以 E 为基准调校 ABCD
+# ─────────────────────────────────────────────────────────────
+def per_route_alignment(db, start: datetime, end: datetime) -> dict:
+    """逐路对齐汇总(A-20260909-002 §〇/§2.2, 用户 2026-09-09)。
+
+    顶层口径: E(商户号真实退款流水)=财务权威基准, 用 E 调校 ABCD 运营登记台账。
+    对每一路只报: 已对齐(该路登记在 E 能找到) / 误记差异(该路有 E 无, 疑误操作/残留)。
+    "漏记/空悬"(E 有 ABCD 无) 与 A∩D 歧义 归入 issues 单列。
+    - A: 仅 refund_method='线上'(转入提现账户/线下 不对 E, §一·5)
+    - B: 仅 op_type='用户提现'(链路: remark RF → A转入(refund_no) → platform_order_no → E)
+    - C: 闪猫已退款(WXALR order_no → E)
+    - D: 手动已退款 剔 dup_residual/ignored, 剔 A线上 已承接(歧义另列)
+    匹配 E 不限窗口(键匹配即真实水单; E 覆盖起点前历史单由前端 e_data_until 提示)。
+
+    ⚠️ SQL 全部参数化(:s/:e 绑定), 不拼接用户/时间输入(AGENTS 铁律 2)。
+    """
+    from sqlalchemy import text
+
+    start_u, end_u = _to_utc_aware(start), _to_utc_aware(end)
+    e_ok = "r.refund_status IN ('退款成功','成功','SUCCESS')"
+
+    def _count(sql_tpl: str) -> int:
+        return int(db.execute(text(sql_tpl), {"s": start_u, "e": end_u}).scalar() or 0)
+
+    # ── A 线上直退(仅 refund_method='线上') ──
+    a_total = _count("""
+        SELECT count(*) FROM refunds a
+        WHERE a.status='已退款' AND a.refund_method='线上'
+          AND a.created_at_raw >= :s AND a.created_at_raw <= :e""")
+    a_in_e = _count(f"""
+        SELECT count(*) FROM refunds a
+        WHERE a.status='已退款' AND a.refund_method='线上'
+          AND a.created_at_raw >= :s AND a.created_at_raw <= :e
+          AND EXISTS (SELECT 1 FROM refund_record_reports r
+             WHERE r.platform_order_no = a.platform_order_no AND {e_ok})""")
+
+    # ── B 用户提现(链路: remark RF → A转入单 refund_no → platform_order_no → E) ──
+    b_total = _count("""
+        SELECT count(*) FROM wallet_withdrawals w
+        WHERE w.op_type='用户提现' AND w.op_time >= :s AND w.op_time <= :e
+          AND (w.remark IS NULL OR NOT (
+              w.remark LIKE '%冻结%' OR w.remark LIKE '%提现失败%' OR w.remark LIKE '%退款失败%'
+              OR w.remark LIKE '%驳回%' OR w.remark LIKE '%拒绝%' OR w.remark LIKE '%未到账%'
+              OR w.remark LIKE '%超期订单不允许退款%'))""")
+    b_chain_ok = _count(f"""
+        SELECT count(*) FROM wallet_withdrawals w
+        WHERE w.op_type='用户提现' AND w.op_time >= :s AND w.op_time <= :e
+          AND w.remark ~ 'RF[0-9]+'
+          AND EXISTS (SELECT 1 FROM refunds a
+             JOIN refund_record_reports r ON r.platform_order_no = a.platform_order_no
+             WHERE a.refund_no = substring(w.remark from 'RF[0-9]+')
+               AND a.refund_method='转入提现账户' AND a.status='已退款' AND {e_ok})""")
+
+    # ── C 闪猫已退款(order_no(WXALR) → E) ──
+    c_total = _count("""
+        SELECT count(*) FROM shanmao_refunds c
+        WHERE c.status='已退款'
+          AND COALESCE(c.audit_time, c.created_at) >= :s AND COALESCE(c.audit_time, c.created_at) <= :e""")
+    c_in_e = _count(f"""
+        SELECT count(*) FROM shanmao_refunds c
+        WHERE c.status='已退款'
+          AND COALESCE(c.audit_time, c.created_at) >= :s AND COALESCE(c.audit_time, c.created_at) <= :e
+          AND c.order_no IS NOT NULL
+          AND EXISTS (SELECT 1 FROM refund_record_reports r
+             WHERE r.platform_order_no = c.order_no AND {e_ok})""")
+
+    # ── D 手动已退款(剔 dup/ignored; order_no → E) ──
+    d_base = """
+        SELECT count(*) FROM manual_refunds m
+        WHERE m.is_refunded='是'
+          AND (m.quality_status IS NULL OR m.quality_status NOT IN ('dup_residual','ignored'))
+          AND COALESCE(m.op_time, m.register_time) >= :s AND COALESCE(m.op_time, m.register_time) <= :e
+    """
+    d_total = _count(d_base)
+    d_in_e = _count(d_base + f"""
+        AND m.order_no IS NOT NULL
+        AND EXISTS (SELECT 1 FROM refund_record_reports r
+           WHERE r.platform_order_no = m.order_no AND {e_ok})""")
+
+    # D 中与 A线上已退款重叠(order_no 也记在 A) = A∩D 归属歧义(单列, 不并入 D 差异)
+    d_overlap_a = _count(d_base + """
+        AND m.order_no IS NOT NULL
+        AND EXISTS (SELECT 1 FROM refunds a
+           WHERE a.platform_order_no = m.order_no AND a.status='已退款' AND a.refund_method='线上')""")
+
+    # ── issues: E 空悬(窗口内 E 单无任何路承接) ──
+    e_total_win = _count(f"""
+        SELECT count(*) FROM refund_record_reports r
+        WHERE {e_ok} AND r.refund_time >= :s AND r.refund_time <= :e""")
+    e_orphan = _count(f"""
+        SELECT count(*) FROM refund_record_reports r
+        WHERE {e_ok} AND r.refund_time >= :s AND r.refund_time <= :e
+          AND NOT EXISTS (SELECT 1 FROM refunds a WHERE a.platform_order_no = r.platform_order_no AND a.status='已退款')
+          AND NOT EXISTS (SELECT 1 FROM manual_refunds m WHERE m.order_no = r.platform_order_no AND m.is_refunded='是')
+          AND NOT EXISTS (SELECT 1 FROM shanmao_refunds c WHERE c.order_no = r.platform_order_no AND c.status='已退款')""")
+
+    return {
+        "e_data_until": _e_data_until(db),
+        "routes": {
+            "A": {"method": "线上", "total": a_total, "matched_in_e": a_in_e,
+                  "unmatched": a_total - a_in_e},
+            "B": {"method": "用户提现", "total": b_total, "chain_ok": b_chain_ok,
+                  "chain_break": b_total - b_chain_ok},
+            "C": {"total": c_total, "matched_in_e": c_in_e, "unmatched": c_total - c_in_e},
+            "D": {"total": d_total, "matched_in_e": d_in_e, "unmatched": d_total - d_in_e,
+                  "overlap_a": d_overlap_a},
+        },
+        "issues": {
+            "e_orphan": e_orphan,
+            "a_d_overlap": d_overlap_a,
+            "e_total_in_window": e_total_win,
+        },
+    }
+
+
+def alignment_detail(db, route: str, start: datetime, end: datetime,
+                     page: int = 1, page_size: int = 50) -> dict:
+    """逐路对齐差异明细(A-20260909-002 §2.3, 一期只读)。
+
+    route ∈ {A, B, C, D, orphan}: 返回该路"以 E 为基准未对齐/空悬"的经营单/水单列表。
+    - A: A线上已退款, created 在窗, 但 platform_order_no 在 E(成功)找不到 → 疑误记/漏采
+    - B: B用户提现 op 在窗, 链路(RF→A转入→E)断 → chain_break
+    - C: C已退款 窗内, order_no 在 E 找不到
+    - D: D已退款(非 dup/ignored) 窗内, order_no 在 E 找不到(不含与 A线上 重叠者)
+    - orphan: E 成功水单 窗内, 无任何路承接
+    匹配 E 不限窗。返回分页明细(供前端下钻展示)。
+    """
+    from sqlalchemy import text
+
+    start_u, end_u = _to_utc_aware(start), _to_utc_aware(end)
+    e_ok = "r.refund_status IN ('退款成功','成功','SUCCESS')"
+    params = {"s": start_u, "e": end_u, "lim": page_size, "off": (page - 1) * page_size}
+    route = (route or "").strip().upper()
+
+    if route == "A":
+        sql = f"""
+            SELECT a.refund_no AS biz_no, a.platform_order_no AS order_no, a.device_sn,
+                   a.refund_amount AS amount, a.created_at_raw AS occur_time, a.operator AS who
+            FROM refunds a
+            WHERE a.status='已退款' AND a.refund_method='线上'
+              AND a.created_at_raw >= :s AND a.created_at_raw <= :e
+              AND NOT EXISTS (SELECT 1 FROM refund_record_reports r WHERE r.platform_order_no=a.platform_order_no AND {e_ok})
+            ORDER BY a.created_at_raw DESC LIMIT :lim OFFSET :off"""
+    elif route == "B":
+        sql = """
+            SELECT w.id AS biz_no, w.remark AS order_no, w.device_sn,
+                   w.op_amount AS amount, w.op_time AS occur_time, w.operator AS who
+            FROM wallet_withdrawals w
+            WHERE w.op_type='用户提现' AND w.op_time >= :s AND w.op_time <= :e
+              AND (w.remark IS NULL OR NOT (
+                  w.remark LIKE '%冻结%' OR w.remark LIKE '%提现失败%' OR w.remark LIKE '%退款失败%'
+                  OR w.remark LIKE '%驳回%' OR w.remark LIKE '%拒绝%' OR w.remark LIKE '%未到账%'
+                  OR w.remark LIKE '%超期订单不允许退款%'))
+              AND NOT (w.remark ~ 'RF[0-9]+' AND EXISTS (
+                  SELECT 1 FROM refunds a JOIN refund_record_reports r ON r.platform_order_no=a.platform_order_no
+                  WHERE a.refund_no=substring(w.remark from 'RF[0-9]+')
+                    AND a.refund_method='转入提现账户' AND a.status='已退款' AND """ + e_ok + """))
+            ORDER BY w.op_time DESC LIMIT :lim OFFSET :off"""
+    elif route == "C":
+        sql = f"""
+            SELECT c.refund_no AS biz_no, c.order_no AS order_no, c.device_sn,
+                   c.actual_amount AS amount, COALESCE(c.audit_time, c.created_at) AS occur_time, c.operator AS who
+            FROM shanmao_refunds c
+            WHERE c.status='已退款'
+              AND COALESCE(c.audit_time, c.created_at) >= :s AND COALESCE(c.audit_time, c.created_at) <= :e
+              AND NOT EXISTS (SELECT 1 FROM refund_record_reports r WHERE r.platform_order_no=c.order_no AND {e_ok})
+            ORDER BY COALESCE(c.audit_time, c.created_at) DESC LIMIT :lim OFFSET :off"""
+    elif route == "D":
+        sql = f"""
+            SELECT m.id AS biz_no, m.order_no AS order_no, m.device_sn,
+                   m.refund_amount AS amount, COALESCE(m.op_time, m.register_time) AS occur_time,
+                   COALESCE(m.refund_operator, m.registrant) AS who, m.quality_status AS q
+            FROM manual_refunds m
+            WHERE m.is_refunded='是'
+              AND (m.quality_status IS NULL OR m.quality_status NOT IN ('dup_residual','ignored'))
+              AND COALESCE(m.op_time, m.register_time) >= :s AND COALESCE(m.op_time, m.register_time) <= :e
+              AND NOT EXISTS (SELECT 1 FROM refund_record_reports r WHERE r.platform_order_no=m.order_no AND {e_ok})
+            ORDER BY COALESCE(m.op_time, m.register_time) DESC LIMIT :lim OFFSET :off"""
+    elif route == "ORPHAN":
+        sql = f"""
+            SELECT r.id AS biz_no, r.platform_order_no AS order_no, r.device_sn,
+                   r.refund_amount AS amount, r.refund_time AS occur_time, r.merchant_name AS who
+            FROM refund_record_reports r
+            WHERE {e_ok} AND r.refund_time >= :s AND r.refund_time <= :e
+              AND NOT EXISTS (SELECT 1 FROM refunds a WHERE a.platform_order_no=r.platform_order_no AND a.status='已退款')
+              AND NOT EXISTS (SELECT 1 FROM manual_refunds m WHERE m.order_no=r.platform_order_no AND m.is_refunded='是')
+              AND NOT EXISTS (SELECT 1 FROM shanmao_refunds c WHERE c.order_no=r.platform_order_no AND c.status='已退款')
+            ORDER BY r.refund_time DESC LIMIT :lim OFFSET :off"""
+    else:
+        raise ValueError(f"route 非法: {route}, 应为 A/B/C/D/orphan")
+
+    rows = db.execute(text(sql), params).all()
+    items = []
+    for r in rows:
+        items.append({
+            "biz_no": r.biz_no if r.biz_no is not None else str(r.order_no or ""),
+            "order_no": r.order_no,
+            "device_sn": r.device_sn,
+            "amount": float(r.amount) if r.amount is not None else None,
+            "time": _to_cn(r.occur_time).isoformat() if r.occur_time else None,
+            "who": r.who,
+            "quality_status": getattr(r, "q", None),
+        })
+    return {"route": route, "page": page, "page_size": page_size, "items": items,
+            "count": len(items), "has_more": len(items) == page_size}
+
+
 def build_check_payload(db, start: datetime, end: datetime, grain: str) -> dict:
     """生成复核落库所需快照(route_snapshot / by_route_of_e / dupe_detect)"""
     start_u = _to_utc_aware(start)

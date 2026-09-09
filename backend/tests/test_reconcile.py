@@ -519,3 +519,50 @@ def test_water_statement_classify_shanmao_wxalr(_test_session):
         # 清理闪猫行 + report(报告由 fixture teardown 清理, 这里清闪猫)
         _test_session.execute(ShanmaoRefund.__table__.delete().where(ShanmaoRefund.order_no.like("WXALR%")))
         _test_session.commit()
+
+
+def test_per_route_alignment_a_matched_and_unmatched(_test_session):
+    """A-20260909-002: per_route_alignment 以 E 调校 A 线上直退。
+
+    A线上已退款 且 platform_order_no 在 E(成功) → matched;
+    A线上已退款 但 E 无 → unmatched(差异)。
+    """
+    from app.models import Refund
+    from app.services.reconcile_check import per_route_alignment
+
+    def _seed_a(platform_order_no, rfno):
+        _ensure_device(_test_session, "SN-D-A")
+        _test_session.add(Refund(refund_no=rfno, platform_order_no=platform_order_no,
+                                 device_sn="SN-D-A", refund_amount=19.0,
+                                 refund_method="线上", status="已退款",
+                                 created_at_raw=_dt("2026-09-05 09:00:00")))
+        _test_session.commit()
+
+    _seed_a("WS-ALIGN-OK", "RF202609050101")
+    _seed_report(_test_session, platform_order_no="WS-ALIGN-OK", amount="19.00", refund_time="2026-09-05 10:30:00")
+    _seed_a("WS-ALIGN-MISS", "RF202609050102")  # 无对应 E
+
+    res = per_route_alignment(
+        _test_session, _dt("2026-09-05 00:00:00"), _dt("2026-09-05 23:59:59"))
+    a = res["routes"]["A"]
+    assert a["total"] == 2
+    assert a["matched_in_e"] == 1
+    assert a["unmatched"] == 1
+
+
+def test_alignment_detail_returns_rows(_test_session):
+    """A-20260909-002: alignment_detail 返回 A 线上"E 找不到"的明细。"""
+    from app.models import Refund
+    from app.services.reconcile_check import alignment_detail
+
+    _ensure_device(_test_session, "SN-D-A")
+    _test_session.add(Refund(refund_no="RF202609050777", platform_order_no="WS-DETAIL-MISS",
+                             device_sn="SN-D-A", refund_amount=88.0,
+                             refund_method="线上", status="已退款",
+                             created_at_raw=_dt("2026-09-05 09:00:00")))
+    _test_session.commit()
+    detail = alignment_detail(_test_session, "A",
+                              _dt("2026-09-05 00:00:00"), _dt("2026-09-05 23:59:59"),
+                              page=1, page_size=10)
+    assert detail["route"] == "A"
+    assert any("RF202609050777" in (it["biz_no"] or "") for it in detail["items"])

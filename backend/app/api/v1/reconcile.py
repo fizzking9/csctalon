@@ -98,6 +98,48 @@ def check_run(
     return R(data=preview_check(db, d_start, d_end, grain=grain))
 
 
+@router.get("/alignment", response_model=R, summary="逐路对齐汇总(以 E 为基准调校 ABCD, A-20260909-002)")
+def route_alignment(
+    db: DBSession,
+    _: CurrentUser,
+    start: str = Query(..., description="开始时间(ISO, 北京时间)"),
+    end: str = Query(..., description="结束时间(ISO, 北京时间)"),
+):
+    """A-20260909-002: E=财务基准, 用 E 调校 ABCD。
+
+    返回每路已对齐/差异(A线上直退 / B用户提现链路 / C闪猫 / D手动)
+    + issues(E 空悬 / A∩D 歧义)。
+    """
+    d_start, d_end = _parse_win(start, end)
+    from app.services.reconcile_check import per_route_alignment
+
+    return R(data=per_route_alignment(db, d_start, d_end))
+
+
+@router.get("/alignment/detail", response_model=R, summary="逐路对齐差异明细(下钻, A-20260909-002)")
+def route_alignment_detail(
+    db: DBSession,
+    _: CurrentUser,
+    route: str = Query(..., description="A/B/C/D/orphan"),
+    start: str = Query(..., description="开始时间(ISO, 北京时间)"),
+    end: str = Query(..., description="结束时间(ISO, 北京时间)"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    """某路"以 E 为基准未对齐"的明细列表(分页, 一期只读)。
+
+    用于逐路卡差异数下钻: 点差异 → 列出具体单(单号/金额/时间/经手人/质量状态)。
+    """
+    d_start, d_end = _parse_win(start, end)
+    from app.services.reconcile_check import alignment_detail
+
+    try:
+        data = alignment_detail(db, route, d_start, d_end, page=page, page_size=page_size)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data)
+
+
 @router.post("/check/confirm", response_model=R, summary="发起对账复核并落库留痕")
 def check_confirm(
     db: DBSession,
