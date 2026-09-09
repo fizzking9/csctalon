@@ -7168,25 +7168,26 @@ def refund_decision_overview(
           AND {_withdraw_fail_remark_sql_cond()}
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
-    # C 闪猫退款 (独立业务表)
-    # 注意: refund_time/apply_time 字段无数据(上游未填), created_at 是批量导入时间(聚集在导入当天,不可用),
-    #       真实业务时间用 audit_time(审核时间, 1916/1999 条有值), 缺失回退 created_at
+    # C 闪猫退款 (独立业务表; 对账归日用实际扣款时间 refund_time(2026-09-09 E回填), 缺失回退 audit_time/created_at)
+    # ⚠️ 口径: 决策概览/对账 C 用 refund_time(实际扣款)以对齐 E; 运营登记时效看 audit_time 由其它视图表达
     sm_rows = db.execute(text(f"""
-        SELECT {_day("COALESCE(s.audit_time, s.created_at)")} AS d,
+        SELECT {_day("COALESCE(s.refund_time, s.audit_time, s.created_at)")} AS d,
                count(*) AS cnt, COALESCE(sum(COALESCE(s.actual_amount, s.refund_amount, 0)), 0) AS amt
         FROM shanmao_refunds s
-        WHERE COALESCE(s.audit_time, s.created_at) >= :ts AND COALESCE(s.audit_time, s.created_at) <= :te
+        WHERE COALESCE(s.refund_time, s.audit_time, s.created_at) >= :ts
+          AND COALESCE(s.refund_time, s.audit_time, s.created_at) <= :te
           AND s.status = '已退款'
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
-    # D 手动退款 (manual_refunds, is_refunded='是'; 时间取实际操作时间, 缺失回退登记日期;
-    #    排除 dup_residual/ignored → 经营口径不与重复/忽略行虚高; A-20260909-001)
+    # D 手动退款 (manual_refunds, is_refunded='是'; 对账归日用实际扣款时间 actual_refund_time(2026-09-09 E回填),
+    #    缺失回退 op_time/register_time; 排除 dup_residual/ignored → 经营口径不与重复/忽略行虚高; A-20260909-001)
     _d_excl_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
     d_rows = db.execute(text(f"""
-        SELECT {_day("COALESCE(m.op_time, m.register_time)")} AS d,
+        SELECT {_day("COALESCE(m.actual_refund_time, m.op_time, m.register_time)")} AS d,
                count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
         FROM manual_refunds m
-        WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
+        WHERE COALESCE(m.actual_refund_time, m.op_time, m.register_time) >= :ts
+          AND COALESCE(m.actual_refund_time, m.op_time, m.register_time) <= :te
           AND m.is_refunded = '是'
           {"AND " + _EXCL_QSTATUS_SQL if _d_excl_q else ''}
         GROUP BY 1
@@ -7255,15 +7256,17 @@ def refund_decision_overview(
         for r in db.execute(text("""
             SELECT count(*) AS cnt, COALESCE(sum(COALESCE(actual_amount, refund_amount, 0)), 0) AS amt
             FROM shanmao_refunds s
-            WHERE COALESCE(s.audit_time, s.created_at) >= :ts AND COALESCE(s.audit_time, s.created_at) <= :te
+            WHERE COALESCE(s.refund_time, s.audit_time, s.created_at) >= :ts
+              AND COALESCE(s.refund_time, s.audit_time, s.created_at) <= :te
               AND s.status = '已退款'
         """), {"ts": s, "te": e}).fetchall():
             tot["sm_cnt"] += int(r.cnt or 0); tot["sm_amt"] += float(r.amt or 0)
-        # D 手动退款 (is_refunded='是'; 排除 dup_residual/ignored 已治理行; A-20260909-001)
+        # D 手动退款 (is_refunded='是'; 归日=actual_refund_time 优先(实际扣款); 排除 dup_residual/ignored 已治理行)
         for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
             FROM manual_refunds m
-            WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
+            WHERE COALESCE(m.actual_refund_time, m.op_time, m.register_time) >= :ts
+              AND COALESCE(m.actual_refund_time, m.op_time, m.register_time) <= :te
               AND m.is_refunded = '是'
               {"AND " + _EXCL_QSTATUS_SQL if _d_excl_q else ''}
         """), {"ts": s, "te": e}).fetchall():
