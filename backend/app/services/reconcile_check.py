@@ -196,15 +196,17 @@ def per_route_alignment(db, start: datetime, end: datetime) -> dict:
             params.update(extra)
         return int(db.execute(text(sql_tpl), params).scalar() or 0)
 
-    # ── A 线上直退(仅 refund_method='线上') ──
+    # ── A 线上直退(仅 refund_method='线上'; 窗口按实际扣款/最新更新, 非登记日) ──
     a_total = _count("""
         SELECT count(*) FROM refunds a
         WHERE a.status='已退款' AND a.refund_method='线上'
-          AND a.created_at_raw >= :s AND a.created_at_raw <= :e""")
+          AND COALESCE(a.actual_refund_time, a.updated_at_raw, a.created_at_raw) >= :s
+          AND COALESCE(a.actual_refund_time, a.updated_at_raw, a.created_at_raw) <= :e""")
     a_in_e = _count(f"""
         SELECT count(*) FROM refunds a
         WHERE a.status='已退款' AND a.refund_method='线上'
-          AND a.created_at_raw >= :s AND a.created_at_raw <= :e
+          AND COALESCE(a.actual_refund_time, a.updated_at_raw, a.created_at_raw) >= :s
+          AND COALESCE(a.actual_refund_time, a.updated_at_raw, a.created_at_raw) <= :e
           AND EXISTS (SELECT 1 FROM refund_record_reports r
              WHERE r.platform_order_no = a.platform_order_no AND {e_ok})""")
 
@@ -327,12 +329,15 @@ def alignment_detail(db, route: str, start: datetime, end: datetime,
     if route == "A":
         sql = f"""
             SELECT a.refund_no AS biz_no, a.platform_order_no AS order_no, a.device_sn,
-                   a.refund_amount AS amount, a.created_at_raw AS occur_time, a.operator AS who
+                   a.refund_amount AS amount,
+                   COALESCE(a.actual_refund_time, a.updated_at_raw, a.created_at_raw) AS occur_time,
+                   a.operator AS who
             FROM refunds a
             WHERE a.status='已退款' AND a.refund_method='线上'
-              AND a.created_at_raw >= :s AND a.created_at_raw <= :e
+              AND COALESCE(a.actual_refund_time, a.updated_at_raw, a.created_at_raw) >= :s
+              AND COALESCE(a.actual_refund_time, a.updated_at_raw, a.created_at_raw) <= :e
               AND NOT EXISTS (SELECT 1 FROM refund_record_reports r WHERE r.platform_order_no=a.platform_order_no AND {e_ok})
-            ORDER BY a.created_at_raw DESC LIMIT :lim OFFSET :off"""
+            ORDER BY COALESCE(a.actual_refund_time, a.updated_at_raw, a.created_at_raw) DESC LIMIT :lim OFFSET :off"""
     elif route == "B":
         sql = """
             SELECT w.id AS biz_no, w.remark AS order_no, w.device_sn,

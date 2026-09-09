@@ -7152,14 +7152,15 @@ def refund_decision_overview(
 
     # ── 1. 资金流出全景: 严格四路经营 A线上直退 / B钱包提现 / C闪猫退款 / D手动退款 ──
     #     线下退款、转入提现账户(钱包内部流转)不属于四路, 不计入现金流全景
-    #     对账归日: A 用 actual_refund_time(E路回填实际扣款, 2026-09-09), 缺失退化 created_at_raw
+    #     对账归日: A 用 actual_refund_time(E路回填实际扣款), E滞后缺失退化 updated_at_raw
+    #     (最新更新=真实退款完成时刻, 2026-09-09; 避免登记日 created 早于实际扣款造成错位)
     route_rows = db.execute(text(f"""
-        SELECT {_day("COALESCE(r.actual_refund_time, r.created_at_raw)")} AS d,
+        SELECT {_day("COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw)")} AS d,
                count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
         FROM refunds r
         WHERE r.refund_method = '线上' AND r.status = '已退款'
-          AND COALESCE(r.actual_refund_time, r.created_at_raw) >= :ts
-          AND COALESCE(r.actual_refund_time, r.created_at_raw) <= :te
+          AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
+          AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) <= :te
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     # B 用户提现(对账归日用实际扣款时间 actual_refund_time(2026-09-09 E回填), 缺失回退 op_time)
@@ -7248,8 +7249,8 @@ def refund_decision_overview(
         for r in db.execute(text("""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
             FROM refunds r WHERE r.refund_method = '线上' AND r.status = '已退款'
-              AND COALESCE(r.actual_refund_time, r.created_at_raw) >= :ts
-              AND COALESCE(r.actual_refund_time, r.created_at_raw) <= :te
+              AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
+              AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) <= :te
         """), {"ts": s, "te": e}).fetchall():
             tot["online_cnt"] += int(r.cnt or 0); tot["online_amt"] += float(r.amt or 0)
         for r in db.execute(text(f"""
@@ -7779,27 +7780,31 @@ def refund_export_all(
 
     agg_queries = [
         ("A 线上直退", f"""
-            SELECT {_day("r.created_at_raw")} AS d, count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
+            SELECT {_day("COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw)")} AS d, count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
             FROM refunds r WHERE r.refund_method = '线上' AND r.status = '已退款'
-              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+              AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
+              AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) <= :te
             GROUP BY 1"""),
         ("B 钱包提现", f"""
-            SELECT {_day("w.op_time")} AS d, count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
-            FROM wallet_withdrawals w WHERE w.op_type = '用户提现' AND w.op_time >= :ts AND w.op_time <= :te
+            SELECT {_day("COALESCE(w.actual_refund_time, w.op_time)")} AS d, count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
+            FROM wallet_withdrawals w WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts
+              AND COALESCE(w.actual_refund_time, w.op_time) <= :te AND w.op_type = '用户提现'
               AND {_withdraw_fail_remark_sql_cond()}
             GROUP BY 1"""),
         ("C 闪猫退款", f"""
-            SELECT {_day("COALESCE(s.audit_time, s.created_at)")} AS d, count(*) AS cnt,
+            SELECT {_day("COALESCE(s.refund_time, s.audit_time, s.created_at)")} AS d, count(*) AS cnt,
                    COALESCE(sum(COALESCE(s.actual_amount, s.refund_amount, 0)), 0) AS amt
             FROM shanmao_refunds s
-            WHERE COALESCE(s.audit_time, s.created_at) >= :ts AND COALESCE(s.audit_time, s.created_at) <= :te
+            WHERE COALESCE(s.refund_time, s.audit_time, s.created_at) >= :ts
+              AND COALESCE(s.refund_time, s.audit_time, s.created_at) <= :te
               AND s.status = '已退款'
             GROUP BY 1"""),
         ("D 手动退款", f"""
-            SELECT {_day("COALESCE(m.op_time, m.register_time)")} AS d, count(*) AS cnt,
+            SELECT {_day("COALESCE(m.actual_refund_time, m.op_time, m.register_time)")} AS d, count(*) AS cnt,
                    COALESCE(sum(m.refund_amount), 0) AS amt
             FROM manual_refunds m
-            WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
+            WHERE COALESCE(m.actual_refund_time, m.op_time, m.register_time) >= :ts
+              AND COALESCE(m.actual_refund_time, m.op_time, m.register_time) <= :te
               AND m.is_refunded = '是'
               {"AND " + _EXCL_QSTATUS_SQL if _d_excl_q else ''}
             GROUP BY 1"""),
