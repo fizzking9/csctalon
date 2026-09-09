@@ -95,7 +95,7 @@ def quality_tables(db: DBSession, _: CurrentUser):
 @router.get("/{table}/list", response_model=R, summary="数据质量-表单质量记录列表")
 def quality_list_endpoint(
     table: str, db: DBSession, _: CurrentUser,
-    status: str = Query("pending", pattern="^(all|pending|auto_fixed|ok)$"),
+    status: str = Query("pending", pattern="^(all|pending|auto_fixed|ok|ignored|dup_residual)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ):
@@ -189,3 +189,115 @@ def rejected_batch_review_endpoint(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return R(data={"updated": n}, message=f"批量处理 {n} 行")
+
+
+# ─────────────────────────────────────────────────────────────
+# 质量处置(ignore/restore/suggestion) + 治理规则管理 —— A-20260909-001
+# 独立 sub-router(prefix=/data-quality/disposition), 避免与上方 /{table} 通配冲突
+# 语义: 已入库质量问题行的 L2 处置(源头打标 ignored/恢复) + L3 规则复用
+# ─────────────────────────────────────────────────────────────
+disposition_router = APIRouter(prefix="/data-quality/disposition", tags=["数据质量-治理处置"])
+
+
+@disposition_router.post("/{table}/{pk}/ignore", response_model=R, summary="彻底忽略质量问题行(quality_status→ignored)")
+def disposition_ignore_endpoint(table: str, pk: str, db: DBSession, current_user: CurrentUser,
+                                payload: dict = Body(default={})):
+    _get_table(table)
+    from app.services.quality_disposition_service import quality_ignore
+
+    op = str(current_user.username or current_user.id)
+    try:
+        data = quality_ignore(db, table, pk, operator=op, reason=payload.get("reason"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message=data.get("message", "已忽略"))
+
+
+@disposition_router.post("/{table}/{pk}/restore", response_model=R, summary="恢复质量问题行(清除 ignored/dup_residual)")
+def disposition_restore_endpoint(table: str, pk: str, db: DBSession, current_user: CurrentUser):
+    _get_table(table)
+    from app.services.quality_disposition_service import quality_restore
+
+    op = str(current_user.username or current_user.id)
+    try:
+        data = quality_restore(db, table, pk, operator=op)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message=data.get("message", "已恢复"))
+
+
+@disposition_router.get("/{table}/{pk}/suggestion", response_model=R, summary="单行治理建议(规则命中+E匹配提示)")
+def disposition_suggestion_endpoint(table: str, pk: str, db: DBSession, _: CurrentUser):
+    _get_table(table)
+    from app.services.quality_disposition_service import quality_suggestion
+
+    try:
+        data = quality_suggestion(db, table, pk)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data)
+
+
+# ── 治理规则 CRUD ────────────────────────────────────────────
+@disposition_router.get("/rules", response_model=R, summary="治理规则列表")
+def disposition_rules_endpoint(db: DBSession, _: CurrentUser,
+                               table_code: str | None = Query(None),
+                               enabled: bool | None = Query(None)):
+    from app.services.quality_disposition_service import list_rules
+
+    return R(data=list_rules(db, table_code=table_code, enabled=enabled))
+
+
+@disposition_router.post("/rules", response_model=R, summary="新建治理规则")
+def disposition_rule_create_endpoint(db: DBSession, current_user: CurrentUser, payload: dict = Body(...)):
+    from app.services.quality_disposition_service import create_rule
+
+    op = str(current_user.username or current_user.id)
+    try:
+        rule = create_rule(db, payload, operator=op)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=rule, message="规则已创建")
+
+
+@disposition_router.put("/rules/{rule_id}", response_model=R, summary="更新治理规则")
+def disposition_rule_update_endpoint(rule_id: int, db: DBSession, current_user: CurrentUser,
+                                     payload: dict = Body(...)):
+    from app.services.quality_disposition_service import update_rule
+
+    op = str(current_user.username or current_user.id)
+    try:
+        rule = update_rule(db, rule_id, payload, operator=op)
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "不存在" in str(e) else 400, detail=str(e))
+    return R(data=rule, message="规则已更新")
+
+
+@disposition_router.delete("/rules/{rule_id}", response_model=R, summary="删除治理规则")
+def disposition_rule_delete_endpoint(rule_id: int, db: DBSession, _: CurrentUser):
+    from app.services.quality_disposition_service import delete_rule
+
+    if not delete_rule(db, rule_id):
+        raise HTTPException(status_code=404, detail="规则不存在")
+    return R(message="规则已删除")
+
+
+@disposition_router.post("/rules/{rule_id}/apply-test", response_model=R, summary="规则试匹配(预览命中行,不执行)")
+def disposition_rule_apply_test_endpoint(rule_id: int, db: DBSession, _: CurrentUser,
+                                         limit: int = Query(100, ge=1, le=1000)):
+    from app.services.quality_disposition_service import apply_rule_suggest
+
+    try:
+        data = apply_rule_suggest(db, rule_id, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data)
+
+
+# ── A/D 真重复识别扫描(种子规则 ad_overlap_dup) ──────────────
+@disposition_router.get("/scan/ad-overlap-dup", response_model=R, summary="扫描 A/D 真重复候选(同单+金额一致+30天窗)")
+def disposition_scan_ad_overlap_endpoint(db: DBSession, _: CurrentUser,
+                                         limit: int = Query(200, ge=1, le=2000)):
+    from app.services.quality_disposition_service import scan_ad_overlap_dup
+
+    return R(data=scan_ad_overlap_dup(db, limit=limit))

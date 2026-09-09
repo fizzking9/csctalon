@@ -66,3 +66,49 @@ export function reviewRejectedRow(id, action) {
 export function batchReviewRejected(ids, action) {
   return request.post('/data-quality/rejected/batch-review', { row_ids: ids, action })
 }
+
+// ── 质量处置 + 治理规则 A-20260909-001 ─────────────────────────
+/** 彻底忽略(quality_status→ignored, 从经营排除) */
+export function dispositionIgnore(table, pk, reason) {
+  return request.post(`/data-quality/disposition/${table}/${pk}/ignore`, { reason })
+}
+
+/** 恢复(清除 ignored/dup_residual) */
+export function dispositionRestore(table, pk) {
+  return request.post(`/data-quality/disposition/${table}/${pk}/restore`)
+}
+
+/** 单行治理建议(规则命中 + E匹配提示) */
+export function dispositionSuggestion(table, pk) {
+  return request.get(`/data-quality/disposition/${table}/${pk}/suggestion`)
+}
+
+/** 治理规则列表 */
+export function listDispositionRules(params) {
+  return request.get('/data-quality/disposition/rules', { params })
+}
+
+/** 新建治理规则 */
+export function createDispositionRule(payload) {
+  return request.post('/data-quality/disposition/rules', payload)
+}
+
+/** 更新治理规则 */
+export function updateDispositionRule(id, payload) {
+  return request.put(`/data-quality/disposition/rules/${id}`, payload)
+}
+
+/** 删除治理规则 */
+export function deleteDispositionRule(id) {
+  return request.delete(`/data-quality/disposition/rules/${id}`)
+}
+
+/** 规则试匹配(预览命中行) */
+export function dispositionRuleApplyTest(id, limit) {
+  return request.post(`/data-quality/disposition/rules/${id}/apply-test`, null, { params: { limit } })
+}
+
+/** 扫描 A/D 真重复候选 */
+export function scanAdOverlapDup(limit) {
+  return request.get('/data-quality/disposition/scan/ad-overlap-dup', { params: { limit } })
+}

@@ -17,7 +17,7 @@ class QualityMixin:
 
     quality_status: Mapped[str | None] = mapped_column(
         String(16), index=True, nullable=True,
-        comment="数据质量状态: None=正常 / ok=已人工确认 / auto_fixed=已自动纠错 / pending=待人工确认",
+        comment="数据质量状态: None=正常 / ok=已人工确认 / auto_fixed=已自动纠错 / pending=待人工确认 / dup_residual=已治理重复(排除) / ignored=人工彻底忽略(排除)",
     )
     quality_note: Mapped[str | None] = mapped_column(
         String(512), nullable=True,

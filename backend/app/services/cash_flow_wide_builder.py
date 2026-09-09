@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 # B 路失败/冻结备注关键词(与 analytics._WITHDRAW_FAIL_REMARK_KEYWORDS 一致)
 _WITHDRAW_FAIL_KEYWORDS = ("冻结", "退款失败", "提现失败", "超期订单不允许退款", "驳回", "拒绝", "未到账")
 
+# ⚠️ A-20260909-001 §2.7: 经营宽表排除的源头质量状态集合(与 analytics._EXCL_QSTATUS_SQL 一致)
+# dup_residual=已治理重复; ignored=人工彻底忽略(A-20260909-001 新增, 由质量页 ignore 动作置位)
+_EXCLUDED_QUALITY = ("dup_residual", "ignored")
+
 _BATCH_SIZE = 5000
 
 
@@ -81,7 +85,7 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
             Refund.refund_no, Refund.platform_order_no, Refund.device_sn,
             Refund.refund_amount, Refund.created_at_raw, Refund.operator,
             Refund.refund_reason, Refund.merchant_name, Refund.package_name,
-            Refund.auditor,
+            Refund.auditor, Refund.quality_status,
         ).where(
             Refund.refund_method == "线上",
             Refund.status == "已退款",
@@ -89,6 +93,8 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
         )
     ).all()
     for r in a_rows:
+        if (r.quality_status or "") in _EXCLUDED_QUALITY:
+            continue  # dup_residual/ignored 不纳入经营宽表(A-20260909-001)
         rows.append({
             "route": "A",
             "src_id": r.refund_no,
@@ -119,12 +125,13 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
             WalletWithdrawal.id, WalletWithdrawal.device_sn,
             WalletWithdrawal.op_amount, WalletWithdrawal.op_time,
             WalletWithdrawal.remark,
-            WalletWithdrawal.account_id,
+            WalletWithdrawal.account_id, WalletWithdrawal.quality_status,
         ).where(
             WalletWithdrawal.op_type == "用户提现",
         )
     ).all()
     b_rows = [w for w in b_rows if not any(k in (w.remark or "") for k in _WITHDRAW_FAIL_KEYWORDS)]
+    b_rows = [w for w in b_rows if (w.quality_status or "") not in _EXCLUDED_QUALITY]  # dup/ignored 排除
     # B 路 biz_no: 尝试从 remark 解析 RF... 退费单号(尽力而为)
     import re
     _rf_re = re.compile(r"RF\d{10,}")
@@ -158,10 +165,12 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
             ShanmaoRefund.refund_no, ShanmaoRefund.order_no, ShanmaoRefund.device_sn,
             ShanmaoRefund.actual_amount, ShanmaoRefund.audit_time, ShanmaoRefund.created_at,
             ShanmaoRefund.operator, ShanmaoRefund.auditor, ShanmaoRefund.refund_reason,
-            ShanmaoRefund.merchant_name, ShanmaoRefund.package_name,
+            ShanmaoRefund.merchant_name, ShanmaoRefund.package_name, ShanmaoRefund.quality_status,
         ).where(ShanmaoRefund.status == "已退款")
     ).all()
     for r in c_rows:
+        if (r.quality_status or "") in _EXCLUDED_QUALITY:
+            continue  # dup_residual/ignored 不纳入经营宽表(A-20260909-001)
         pay_time = r.audit_time or r.created_at
         rows.append({
             "route": "C",
@@ -185,7 +194,7 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
             _flush(rows)
     _flush(rows)
 
-    # ── D: manual 已退款(排除 dup_residual) ──
+    # ── D: manual 已退款(排除 dup_residual/ignored) ──
     d_rows = db.execute(
         select(
             ManualRefund.id, ManualRefund.order_no, ManualRefund.device_sn,
@@ -196,8 +205,8 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
         ).where(ManualRefund.is_refunded == "是")
     ).all()
     for r in d_rows:
-        if (r.quality_status or "") == "dup_residual":
-            continue  # 已治理重复, 不纳入经营估算(口径与 _route_d_other_agg 一致)
+        if (r.quality_status or "") in _EXCLUDED_QUALITY:
+            continue  # dup_residual(已治理重复)/ignored(人工忽略) 不纳入经营估算(与 analytics 一致)
         pay_time = r.op_time or r.register_time
         rows.append({
             "route": "D",

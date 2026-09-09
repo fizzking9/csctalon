@@ -5,6 +5,13 @@
   None         正常(无问题)
   pending      检测出问题, 需人工确认(不自动改数据)
   auto_fixed   高置信问题已自动修复(当前仅手动退款时间年份错位场景, 由 upsert_manual_refunds 内部处理)
+  auto_filled  op_time 由 E 表(refund_record_reports)回填(D 路, reconcile.backfill_d_op_time)
+  ok           人工确认通过(quality_confirm/quality_fix 置位)
+  dup_residual 已治理重复(从经营统计排除, 不物理删除, 可恢复)
+  ignored      人工裁定彻底忽略(从经营统计排除, 通用"该笔不纳入", A-20260909-001 §2.2)
+
+统计排除约定(analytics/_quality_exclude): COALESCE(quality_status,'') NOT IN
+('dup_residual','ignored')  → 这两个状态的行不纳入经营四路 A/B/C/D 统计。
 
 校验规则(按表配置, 全部 4 类):
   R-时间  时间字段异常: 缺失/未来日期/年份错位(远古)/时间倒挂/跨度异常
@@ -295,11 +302,15 @@ def get_table_config(code: str) -> dict[str, Any]:
 
 
 def quality_summary(db: Session, table: str) -> dict[str, int]:
-    """各状态计数: {pending, auto_fixed, ok, total}"""
+    """各状态计数: {pending, auto_fixed, ok, ignored, dup_residual, total}
+
+    A-20260909-001: 新增 ignored(人工彻底忽略)/dup_residual(已治理重复) 计数,
+    供质量页"已忽略"筛选与看板展示。
+    """
     cfg = get_table_config(table)
     model = cfg["model"]
-    summary = {"pending": 0, "auto_fixed": 0, "ok": 0, "total": 0}
-    for st in ("pending", "auto_fixed", "ok"):
+    summary = {"pending": 0, "auto_fixed": 0, "ok": 0, "ignored": 0, "dup_residual": 0, "total": 0}
+    for st in ("pending", "auto_fixed", "ok", "ignored", "dup_residual"):
         summary[st] = db.scalar(select(func.count()).select_from(model).where(model.quality_status == st)) or 0
     summary["total"] = db.scalar(select(func.count()).select_from(model)) or 0
     return summary
@@ -307,11 +318,11 @@ def quality_summary(db: Session, table: str) -> dict[str, int]:
 
 def quality_list(db: Session, table: str, status: str = "all",
                  page: int = 1, page_size: int = 50) -> dict[str, Any]:
-    """质量记录列表: status = all/pending/auto_fixed/ok, 按时间字段倒序。"""
+    """质量记录列表: status = all/pending/auto_fixed/ok/ignored/dup_residual, 按时间字段倒序。"""
     cfg = get_table_config(table)
     model = cfg["model"]
     q = select(model)
-    if status in ("pending", "auto_fixed", "ok"):
+    if status in ("pending", "auto_fixed", "ok", "ignored", "dup_residual"):
         q = q.where(model.quality_status == status)
     total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     time_col = getattr(model, cfg["time_field"], None)

@@ -52,6 +52,7 @@ from app.models.notification_channel import NotificationChannel  # noqa: F401
 from app.models.operation_log import OperationLog  # noqa: F401
 from app.models.person import Person, PersonAlias  # noqa: F401
 from app.models.policy import Policy  # noqa: F401
+from app.models.quality_disposition_rule import QualityDispositionRule  # noqa: F401
 from app.models.reconcile_check import ReconcileCheck  # noqa: F401
 from app.models.reconcile_match import ReconcileMatch  # noqa: F401
 from app.models.refund import Refund  # noqa: F401
@@ -146,6 +147,7 @@ __all__ = [
     "Notification",
     "OperationLog",
     "Policy",
+    "QualityDispositionRule",
     "Person",
     "PersonAlias",
     "ReconcileCheck",

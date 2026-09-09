@@ -60,7 +60,7 @@ class ManualRefund(IDMixin, TimestampMixin, Base):
 
     # ── 数据质量(导入时校验/纠错) ────────────────────────────────
     quality_status: Mapped[str | None] = mapped_column(
-        String(16), index=True, nullable=True, comment="数据质量状态: ok=正常 / auto_fixed=已自动纠错 / pending=待人工确认"
+        String(16), index=True, nullable=True, comment="数据质量状态: ok=正常 / auto_fixed=已自动纠错 / pending=待人工确认 / auto_filled=E回填 / dup_residual=已治理重复(排除) / ignored=人工彻底忽略(排除)"
     )
     quality_note: Mapped[str | None] = mapped_column(
         String(512), nullable=True, comment="质量说明(自动纠错或待确认原因, 含原始值)"
