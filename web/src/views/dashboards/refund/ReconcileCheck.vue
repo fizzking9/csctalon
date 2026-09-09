@@ -57,6 +57,15 @@
       </div>
 
       <!-- 五路合计 KPI -->
+      <!-- E 数据截止警示: 窗口晚于 E 最新退款日 → E 侧未采全, 偏差仅供参考 -->
+      <el-alert
+        v-if="snapshot && eDataUntil && winEnd && winEnd > eDataUntil"
+        type="warning" :closable="false" show-icon class="mt-12 mb-12"
+        title="E 商户号实际现金流数据未覆盖完整窗口"
+      >
+        E 退款记录报表数据仅更新至 <b>{{ eDataUntil }}</b>(持续采集, 通常延迟 1~2 天)。
+        本窗口(截至 {{ winEnd }})的 E 侧笔数/金额未采全, 对账偏差「经营 − E」会虚高, 请补充采集后复查, 不宜据此作差异结论。
+      </el-alert>
       <el-row v-if="snapshot" :gutter="12" class="mt-12 mb-12">
         <el-col :xs="12" :sm="8" :md="4">
           <div class="kpi-card" style="background:#eff6ff">
@@ -238,6 +247,7 @@ const auth = useAuthStore()
 const loading = ref(false)
 const errorMsg = ref('')
 const snapshot = ref(null)
+const eDataUntil = ref('')   // E 退款记录报表数据最新日(北京); 窗口晚于该日时偏差仅供参考
 const conclusion = ref('')
 const note = ref('')
 const history = ref([])
@@ -326,6 +336,7 @@ async function load() {
   try {
     const res = await reconcile.checkRun({ start: `${winStart.value}T00:00:00`, end: `${winEnd.value}T23:59:59` })
     snapshot.value = res.data
+    eDataUntil.value = res.data?.e_data_until || ''
     conclusion.value = ''
     note.value = ''
     activeCheckId.value = null
@@ -398,24 +409,29 @@ const detailRouteRows = computed(() => {
 })
 
 // 权限提示: 仅 admin/supervisor 可写(与后端一致; 后端仍强制校验)
-// 父级窗口变化(来自 overview 分析/重进): 同步自定义窗口并加载; 不 immediate(避免与 onMounted 双触发)
-watch([() => props.start, () => props.end, () => props.reloadKey], () => {
-  if (props.start && props.end && quickRange.value !== 'custom') {
+// 对账复核默认近30天(对账看趋势; 单日窗口会因 E 采集延迟 1~2 天产生 E=0 假偏差, 误导结论)。
+// 父级窗口跟随规则: 仅当父级给了"区间"(start<end) 才跟随(如决策概览选了近7/30天);
+// 父级默认单日(start==end, 决策概览的"单日·昨日/今日") 不跟随, 保持近30天。
+function followParentWindow() {
+  if (props.start && props.end && props.start !== props.end) {
     quickRange.value = 'custom'
     winRange.value = [props.start, props.end]
-    load()
+    return true
   }
+  return false
+}
+function setDefault30d() {
+  quickRange.value = '30'
+  winRange.value = [dayjs().subtract(29, 'day').format('YYYY-MM-DD'), dayjs().format('YYYY-MM-DD')]
+}
+
+watch([() => props.start, () => props.end, () => props.reloadKey], () => {
+  if (followParentWindow()) load()
 })
 
-// 初始化: 默认近30天; 若父已带窗口则用之并加载
+// 初始化: 默认近30天; 仅父级给"区间"时跟随(单日默认不跟随, 避免 E 延迟假偏差)
 onMounted(() => {
-  if (props.start && props.end) {
-    quickRange.value = 'custom'
-    winRange.value = [props.start, props.end]
-  } else {
-    quickRange.value = '30'
-    winRange.value = [dayjs().subtract(29, 'day').format('YYYY-MM-DD'), dayjs().format('YYYY-MM-DD')]
-  }
+  if (!followParentWindow()) setDefault30d()
   loadHistory()
   load()
 })

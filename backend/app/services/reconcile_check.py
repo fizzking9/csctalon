@@ -179,6 +179,19 @@ def build_check_payload(db, start: datetime, end: datetime, grain: str) -> dict:
     }
 
 
+def _e_data_until(db) -> str | None:
+    """E 路(refund_record_reports)退款成功数据最新日期(北京)。"""
+    from sqlalchemy import text
+
+    e_max = db.execute(text(
+        "SELECT max(refund_time) FROM refund_record_reports "
+        "WHERE refund_status IN ('退款成功', '成功', 'SUCCESS')"
+    )).scalar()
+    if e_max is None:
+        return None
+    return e_max.astimezone(_TZ_CN).strftime("%Y-%m-%d")
+
+
 def preview_check(db, start: datetime, end: datetime, grain: str = "day") -> dict:
     """生成对账预览(不落库)"""
     payload = build_check_payload(db, start, end, grain)
@@ -188,6 +201,8 @@ def preview_check(db, start: datetime, end: datetime, grain: str = "day") -> dic
             "end": _to_cn(_to_utc_aware(end)).isoformat(),
             "grain": grain,
         },
+        # E 数据截止日(北京): 窗口晚于该日时 E 侧未采全, 偏差仅供参考(前端警示用)
+        "e_data_until": _e_data_until(db),
         **payload,
     }
 
