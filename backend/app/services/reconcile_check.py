@@ -208,7 +208,8 @@ def per_route_alignment(db, start: datetime, end: datetime) -> dict:
           AND EXISTS (SELECT 1 FROM refund_record_reports r
              WHERE r.platform_order_no = a.platform_order_no AND {e_ok})""")
 
-    # ── B 用户提现(链路: remark RF → A转入单 refund_no → platform_order_no → E) ──
+    # ── B 用户提现(链路: remark 退费单号 → A转入单 refund_no → platform_order_no → E) ──
+    # ⚠️ 2026-09-09 修复: 退费单号前缀含 RF/RE/RB, 原只认 RF 漏 RE(用户案例 99元) → 扩 R[FEB]
     b_total = _count("""
         SELECT count(*) FROM wallet_withdrawals w
         WHERE w.op_type='用户提现' AND w.op_time >= :s AND w.op_time <= :e
@@ -219,10 +220,10 @@ def per_route_alignment(db, start: datetime, end: datetime) -> dict:
     b_chain_ok = _count(f"""
         SELECT count(*) FROM wallet_withdrawals w
         WHERE w.op_type='用户提现' AND w.op_time >= :s AND w.op_time <= :e
-          AND w.remark ~ 'RF[0-9]+'
+          AND w.remark ~ 'R[FEB][0-9]{10,}'
           AND EXISTS (SELECT 1 FROM refunds a
              JOIN refund_record_reports r ON r.platform_order_no = a.platform_order_no
-             WHERE a.refund_no = substring(w.remark from 'RF[0-9]+')
+             WHERE a.refund_no = substring(w.remark from 'R[FEB][0-9]{10,}')
                AND a.refund_method='转入提现账户' AND a.status='已退款' AND {e_ok})""")
 
     # ── C 闪猫已退款(order_no(WXALR) → E) ──
@@ -342,9 +343,9 @@ def alignment_detail(db, route: str, start: datetime, end: datetime,
                   w.remark LIKE '%冻结%' OR w.remark LIKE '%提现失败%' OR w.remark LIKE '%退款失败%'
                   OR w.remark LIKE '%驳回%' OR w.remark LIKE '%拒绝%' OR w.remark LIKE '%未到账%'
                   OR w.remark LIKE '%超期订单不允许退款%'))
-              AND NOT (w.remark ~ 'RF[0-9]+' AND EXISTS (
+              AND NOT (w.remark ~ 'R[FEB][0-9]{10,}' AND EXISTS (
                   SELECT 1 FROM refunds a JOIN refund_record_reports r ON r.platform_order_no=a.platform_order_no
-                  WHERE a.refund_no=substring(w.remark from 'RF[0-9]+')
+                  WHERE a.refund_no=substring(w.remark from 'R[FEB][0-9]{10,}')
                     AND a.refund_method='转入提现账户' AND a.status='已退款' AND """ + e_ok + """))
             ORDER BY w.op_time DESC LIMIT :lim OFFSET :off"""
     elif route == "C":

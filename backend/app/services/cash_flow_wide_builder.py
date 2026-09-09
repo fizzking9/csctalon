@@ -132,9 +132,9 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
     ).all()
     b_rows = [w for w in b_rows if not any(k in (w.remark or "") for k in _WITHDRAW_FAIL_KEYWORDS)]
     b_rows = [w for w in b_rows if (w.quality_status or "") not in _EXCLUDED_QUALITY]  # dup/ignored 排除
-    # B 路 biz_no: 尝试从 remark 解析 RF... 退费单号(尽力而为)
+    # B 路 biz_no: 尝试从 remark 解析退费单号(尽力而为; 前缀含 RF/RE/RB, 2026-09-09 扩)
     import re
-    _rf_re = re.compile(r"RF\d{10,}")
+    _rf_re = re.compile(r"R[FEB]\d{10,}")
     for w in b_rows:
         m = _rf_re.search(w.remark or "")
         rows.append({
