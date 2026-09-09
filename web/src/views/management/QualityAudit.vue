@@ -118,7 +118,7 @@ import { qualityList, qualityConfirm, qualityFix, qualityScan, listQualityTables
 import { formatMoney } from '@/utils/format'
 import { useAuthStore } from '@/stores/auth'
 
-const props = defineProps({ table: { type: String, required: true } })
+const props = defineProps({ table: { type: String, required: true }, refreshTick: { type: Number, default: 0 } })
 const authStore = useAuthStore()
 
 // ── 表配置(前端展示列) ──
@@ -357,6 +357,8 @@ async function onScan() {
 
 onMounted(load)
 watch(() => props.table, () => { status.value = 'pending'; page.value = 1; load() })
+// 外部(如缺SN坏副本自动排除后)请求刷新
+watch(() => props.refreshTick, () => { if (props.refreshTick > 0) load() })
 </script>
 
 <style scoped>

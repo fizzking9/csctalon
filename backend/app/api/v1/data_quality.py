@@ -301,3 +301,17 @@ def disposition_scan_ad_overlap_endpoint(db: DBSession, _: CurrentUser,
     from app.services.quality_disposition_service import scan_ad_overlap_dup
 
     return R(data=scan_ad_overlap_dup(db, limit=limit))
+
+
+# ── D 路缺 SN 坏副本自动排除 (2026-09-09) ────────────────────
+@disposition_router.post("/auto/d-no-sn-bad-dup", response_model=R, summary="D路缺SN坏副本自动标dup_residual(同单已由带SN行/E表计)")
+def disposition_auto_d_no_sn_bad_dup_endpoint(db: DBSession, _: CurrentUser,
+                                              limit: int = Query(2000, ge=1, le=10000),
+                                              include_auto_fixed: bool = Query(False)):
+    from app.services.quality_disposition_service import auto_dispose_d_no_sn_bad_dup
+
+    try:
+        data = auto_dispose_d_no_sn_bad_dup(db, limit=limit, include_auto_fixed=include_auto_fixed)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message=f"已自动排除 {data.get('disposed', 0)} 行缺SN坏副本")

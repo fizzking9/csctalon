@@ -87,7 +87,15 @@
 
       <!-- 通用数据质量审核(L3): 各业务表单按 L2 导入自动校验结果人工确认/修正 -->
       <el-tab-pane v-for="t in auditTables" :key="t.code" :label="t.label" :name="t.code">
-        <QualityAudit :table="t.code" />
+        <div v-if="t.code === 'manual_refund' && authStore.isAdmin" class="flex-between mb-16">
+          <div class="page-sub">
+            缺SN坏副本: 同订单已由带SN行/E表计, 自动标 dup_residual 排除(可恢复)。仅处理未治理行(pending/空白)。
+          </div>
+          <el-button type="warning" :icon="Refresh" :loading="disposing" @click="autoDisposeNoSn">
+            自动排除缺SN坏副本
+          </el-button>
+        </div>
+        <QualityAudit :table="t.code" :refresh-tick="refreshTick" />
       </el-tab-pane>
 
       <!-- 拒收数据(未采纳行): A-20260908-003 数据治理框架 -->
@@ -103,7 +111,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
-import { listRules, createRule, updateRule, deleteRule } from '@/api/dataQuality'
+import { listRules, createRule, updateRule, deleteRule, autoDisposeDNoSnBadDup } from '@/api/dataQuality'
 import QualityAudit from './QualityAudit.vue'
 import RejectedRows from './RejectedRows.vue'
 
@@ -112,6 +120,8 @@ const activeTab = ref('rules')
 const rules = ref([])
 const loading = ref(false)
 const submitting = ref(false)
+const disposing = ref(false)
+const refreshTick = ref(0)
 const editVisible = ref(false)
 const editForm = reactive({ id: null, name: '', target: '', condition: '', description: '', enabled: true })
 
@@ -131,6 +141,25 @@ async function loadRules() {
     rules.value = res.data || []
   } finally {
     loading.value = false
+  }
+}
+
+async function autoDisposeNoSn() {
+  try {
+    await ElMessageBox.confirm(
+      '将扫描手动退款中「缺设备SN且同订单已由带SN行/E表真实出款」的已退款行，自动标记为已治理重复(dup_residual)从经营统计排除。\n\n仅处理未治理行(pending/空白)，已治理(auto_fixed 等)不动；可随时恢复。是否继续？',
+      '自动排除缺SN坏副本',
+      { confirmButtonText: '开始排除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch { return }
+  disposing.value = true
+  try {
+    const res = await autoDisposeDNoSnBadDup(2000, false)
+    const d = res.data || {}
+    ElMessage.success(`已自动排除 ${d.disposed ?? 0} 行缺SN坏副本(扫描 ${d.scanned ?? 0}, 跳过待人工 ${d.skipped_insufficient ?? 0})`)
+    refreshTick.value += 1  // 通知 QualityAudit 刷新
+  } finally {
+    disposing.value = false
   }
 }
 

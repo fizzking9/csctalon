@@ -112,3 +112,8 @@ export function dispositionRuleApplyTest(id, limit) {
 export function scanAdOverlapDup(limit) {
   return request.get('/data-quality/disposition/scan/ad-overlap-dup', { params: { limit } })
 }
+
+/** D 路缺SN坏副本自动排除(标 dup_residual, 同单已由带SN行/E表计) */
+export function autoDisposeDNoSnBadDup(limit, includeAutoFixed = false) {
+  return request.post('/data-quality/disposition/auto/d-no-sn-bad-dup', null, { params: { limit, include_auto_fixed: includeAutoFixed } })
+}

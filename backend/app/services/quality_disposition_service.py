@@ -347,3 +347,84 @@ def scan_ad_overlap_dup(db, limit: int = 500) -> dict:
         "suggest": "标 dup_residual 从 D 路排除(A 已计此笔)",
     } for r in rows]
     return {"candidate_count": len(hits), "candidates": hits}
+
+
+# ─────────────────────────────────────────────────────────────
+# D 路缺 SN 坏副本自动排除 (2026-09-09, 生产实测驱动)
+# 背景: manual_refunds 缺 SN 已退款行 987 行中, 975 行(99%)与同 order_no 的
+#       带 SN 真实行成对出现 → 登记坏副本(同单重复登记, 金额多为协商全额),
+#       真实扣款已由带 SN 的 peer 行 + E 表代表。缺 SN 行回填 SN 会把坏行
+#       "洗白"造成 D 路重复; 正确治理 = 标 dup_residual 从经营排除。
+#       实测排除 975 行 / ¥190,746.80 (D 路经营对账虚高来源)。
+# 自动范围: quality_status IS NULL / pending (未治理, 813 行);
+# auto_fixed/auto_filled(157+5) 曾被既有自动修正认定有效 → 仅出建议, 不自动推翻。
+# ─────────────────────────────────────────────────────────────
+def auto_dispose_d_no_sn_bad_dup(db, limit: int = 2000, include_auto_fixed: bool = False) -> dict:
+    """D 路缺 SN 坏副本自动排除(标 dup_residual, 幂等可恢复)。
+
+    判定(缺 SN 登记坏副本):
+      1) device_sn 为空, is_refunded='是'(在 D 路经营统计内)
+      2) quality_status 未治理(默认 NULL/pending; include_auto_fixed=True 时含 auto_fixed/auto_filled)
+      3) 同 order_no 存在另一条带 SN 且已退款的 manual_refund 行(真实行已在统计)
+      4) E 表(refund_record_reports)该 order_no 存在成功退款(财务佐证该单确已真实出款)
+
+    处置: quality_status → dup_residual(统计排除, 不物理删除, 可 quality_restore 恢复)。
+    溯源: quality_note 追加 '自动排除: 缺SN坏副本 同单<order_no>已由带SN行/E表计, 2026-09-09'。
+    """
+    from sqlalchemy import text
+
+    from app.models.manual_refund import ManualRefund
+
+    auto_statuses = "('pending')"  # NULL 单独处理
+    if include_auto_fixed:
+        auto_statuses = "('pending','auto_fixed','auto_filled')"
+
+    sql = text(f"""
+        SELECT m.id, m.order_no, m.refund_amount, m.quality_status,
+               (SELECT count(*) FROM manual_refunds m2
+                 WHERE m2.order_no = m.order_no AND m2.id <> m.id
+                   AND m2.is_refunded = '是'
+                   AND NOT (m2.device_sn IS NULL OR m2.device_sn = '')) AS peer_sn_cnt,
+               (SELECT count(*) FROM refund_record_reports r
+                 WHERE r.platform_order_no = m.order_no
+                   AND r.refund_status IN ('退款成功','成功','SUCCESS')) AS e_cnt
+        FROM manual_refunds m
+        WHERE (m.device_sn IS NULL OR m.device_sn = '')
+          AND m.is_refunded = '是'
+          AND (m.quality_status IS NULL OR m.quality_status IN {auto_statuses})
+          AND NOT (COALESCE(m.quality_status,'') IN ('dup_residual','ignored'))
+        ORDER BY m.id
+        LIMIT :limit
+    """)
+    rows = db.execute(sql, {"limit": limit}).all()
+    disposed = 0
+    skipped_insufficient = 0
+    samples = []
+    for r in rows:
+        # 护栏: 必须同单存在带SN已退款peer 且 E 表有成功退款佐证, 否则不动(留人工)
+        if not (int(r.peer_sn_cnt or 0) > 0 and int(r.e_cnt or 0) > 0):
+            skipped_insufficient += 1
+            continue
+        m = db.get(ManualRefund, r.id)
+        if m is None:
+            continue
+        old_q = m.quality_status
+        note_bits = [x for x in ((m.quality_note or "").split(" | ") if m.quality_note else []) if x]
+        note_bits.append(
+            f"自动排除: 缺SN坏副本 同单{r.order_no}已由带SN行/E表计 (2026-09-09, peer带SN={r.peer_sn_cnt}, E佐证={r.e_cnt})"
+        )
+        m.quality_status = "dup_residual"
+        m.quality_note = " | ".join(note_bits)[:500]
+        disposed += 1
+        if len(samples) < 20:
+            samples.append({"id": r.id, "order_no": r.order_no, "amount": float(r.refund_amount or 0),
+                            "old_status": old_q, "peer_sn_cnt": int(r.peer_sn_cnt or 0), "e_cnt": int(r.e_cnt or 0)})
+    db.commit()
+    logger.info(f"[quality_disposition] auto_dispose_d_no_sn_bad_dup disposed={disposed} skipped={skipped_insufficient}")
+    return {
+        "disposed": disposed,
+        "skipped_insufficient": skipped_insufficient,
+        "scanned": len(rows),
+        "note": "已标 dup_residual, 从 D 路经营统计排除(可 restore 恢复)",
+        "samples": samples,
+    }
