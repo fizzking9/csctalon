@@ -7048,7 +7048,8 @@ def refund_decision_overview(
                bool_or(st.service_item ILIKE '%商品投诉%' OR st.service_item ILIKE '%服务投诉%') AS has_int
         FROM refunds r
         LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
-        WHERE r.refund_method = '线上' AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+        WHERE r.refund_method = '线上' AND r.status = '已退款'
+          AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
         GROUP BY 1, r.refund_no
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     cs_map: dict[str, dict[str, list]] = {}
@@ -7099,7 +7100,8 @@ def refund_decision_overview(
                 COALESCE(NULLIF(st.service_item, ''), '<未关联工单>') AS reason
             FROM refunds r
             LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
-            WHERE r.refund_method = '线上' AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+            WHERE r.refund_method = '线上' AND r.status = '已退款'
+              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
             ORDER BY r.refund_no, st.finish_time DESC NULLS LAST
         )
         SELECT reason, operator, count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
@@ -7154,7 +7156,8 @@ def refund_decision_overview(
         SELECT {_day("r.created_at_raw")} AS d,
                count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
         FROM refunds r
-        WHERE r.refund_method = '线上' AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+        WHERE r.refund_method = '线上' AND r.status = '已退款'
+          AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     wd_rows = db.execute(text(f"""
@@ -7239,7 +7242,8 @@ def refund_decision_overview(
                "sm_cnt": 0, "sm_amt": 0.0, "d_cnt": 0, "d_amt": 0.0, "e_cnt": 0, "e_amt": 0.0}
         for r in db.execute(text("""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
-            FROM refunds r WHERE r.refund_method = '线上' AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+            FROM refunds r WHERE r.refund_method = '线上' AND r.status = '已退款'
+              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
         """), {"ts": s, "te": e}).fetchall():
             tot["online_cnt"] += int(r.cnt or 0); tot["online_amt"] += float(r.amt or 0)
         for r in db.execute(text(f"""
@@ -7517,18 +7521,24 @@ def manual_refund_quality_fix(db: Session, rid: int, payload: dict[str, Any]) ->
 
 def refund_export_original(
     db: Session, start: str | None = None, end: str | None = None,
+    online_refunded_only: bool = False,
 ) -> list[dict[str, Any]]:
     """导出退款原始明细 (Excel 自定义分析用)
 
     每笔退费单一行, 含退款路线标记(线上直退/线下/转入提现账户/未填写),
     涉诉分类(按 SN 关联工单 bool_or 优先级 外部>商户号>内部) 与归一操作人。
     钱包提现/闪猫退款/手动退款(D路)不属于 refunds 表, 由前端调用方分别导出或仅导出 refunds 明细。
+
+    online_refunded_only=True: 仅保留经营口径 A 路(线上直退且已退款),
+    剔除驳回/无需退款/空白状态等非成功退款 (2026-09-09 A路口径收紧, 供导出"A线上直退"经营sheet用)。
     """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
+    # A 路经营口径过滤子句 (refund_method='线上' AND status='已退款')
+    _a_scope = "AND r.refund_method = '线上' AND r.status = '已退款'" if online_refunded_only else ""
 
     # 涉诉分类 (与决策概览口径一致; 三源关键词与 _complaint_source_type_case 约定一致)
     comp_map: dict[str, str] = {}
-    for r in db.execute(text("""
+    for r in db.execute(text(f"""
         SELECT r.refund_no,
                bool_or(st.service_item ILIKE '%工信部%' OR st.service_item ILIKE '%12315%'
                    OR st.service_item ILIKE '%公共服务平台%' OR st.service_item ILIKE '%消费者协会%'
@@ -7540,7 +7550,7 @@ def refund_export_original(
                bool_or(st.service_item ILIKE '%商品投诉%' OR st.service_item ILIKE '%服务投诉%') AS has_int
         FROM refunds r
         LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
-        WHERE r.created_at_raw >= :ts AND r.created_at_raw <= :te
+        WHERE r.created_at_raw >= :ts AND r.created_at_raw <= :te {_a_scope}
         GROUP BY r.refund_no
     """), {"ts": cur_s, "te": cur_e}).fetchall():
         comp_map[str(r.refund_no)] = "外部投诉" if r.has_ext else ("商户号投诉" if r.has_merchant else ("内部投诉" if r.has_int else ""))
@@ -7579,7 +7589,7 @@ def refund_export_original(
             return "转入提现账户(钱包内部)"
         return s
 
-    rows = db.execute(text("""
+    rows = db.execute(text(f"""
         WITH rel AS (
             SELECT DISTINCT ON (r.refund_no)
                 r.refund_no, r.platform_order_no, r.third_order_no, r.device_sn,
@@ -7589,7 +7599,7 @@ def refund_export_original(
                 COALESCE(NULLIF(st.service_item, ''), '') AS service_item
             FROM refunds r
             LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
-            WHERE r.created_at_raw >= :ts AND r.created_at_raw <= :te
+            WHERE r.created_at_raw >= :ts AND r.created_at_raw <= :te {_a_scope}
             ORDER BY r.refund_no, st.finish_time DESC NULLS LAST
         )
         SELECT * FROM rel ORDER BY created_at_raw
@@ -7642,8 +7652,8 @@ def refund_export_all(
     # D 路 quality_status 排除标记(dup_residual=已治理重复): 汇总 sheet 排除, 明细 sheet 保留但加列标注
     _d_excl_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
 
-    # A 线上直退 (复用单表导出, 含涉诉分类)
-    sheets["A线上直退"] = refund_export_original(db, start, end)
+    # A 线上直退 (经营口径: 线上且已退款; 剔除驳回/无需退款/空白状态, 2026-09-09)
+    sheets["A线上直退"] = refund_export_original(db, start, end, online_refunded_only=True)
 
     def _sh(dt) -> str:
         if not dt:
@@ -7755,7 +7765,8 @@ def refund_export_all(
     agg_queries = [
         ("A 线上直退", f"""
             SELECT {_day("r.created_at_raw")} AS d, count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
-            FROM refunds r WHERE r.refund_method = '线上' AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+            FROM refunds r WHERE r.refund_method = '线上' AND r.status = '已退款'
+              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
             GROUP BY 1"""),
         ("B 钱包提现", f"""
             SELECT {_day("w.op_time")} AS d, count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
