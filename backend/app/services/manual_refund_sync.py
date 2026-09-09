@@ -40,6 +40,39 @@ from app.services.upsert import (
 logger = logging.getLogger(__name__)
 
 
+def _write_rejected(
+    db: Session,
+    *,
+    data_type: str,
+    source: str,
+    category: str,
+    reason: str | None = None,
+    raw_row: dict | None = None,
+    row_no: int | None = None,
+) -> None:
+    """A-20260908-003: 未采纳行落拒收表(不阻塞主流程, 用 savepoint 隔离失败)。
+
+    手动退款推送/共享文档采集的 dropped 行(缺订单号/解析失败/非对象)写入拒收表,
+    供数据质量页"拒收数据"可见可判。写入失败仅记日志, 不影响同步主流程。
+    与 complaint_sync._write_rejected 同模式。
+    """
+    try:
+        with db.begin_nested():  # savepoint: 失败只回滚本条, 不污染主事务
+            from app.models.ingest_rejected_row import IngestRejectedRow
+
+            db.add(IngestRejectedRow(
+                data_type=data_type,
+                source=source,
+                reject_category=category,
+                reject_reason=reason,
+                raw_row=raw_row,
+                source_row_no=row_no,
+                status="open",
+            ))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[ingest_rejected] 写拒收行失败(忽略): data_type={data_type} err={e}")
+
+
 class ManualRefundSyncResult:
     """手动退款同步结果统计
 
@@ -97,14 +130,40 @@ def _map_row(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult) -> dict[str, Any] | None:
-    """清洗单条手动退款行 → 模型字段值"""
+def _has_any_business_value(data: dict[str, Any]) -> bool:
+    """行是否有任一业务字段值(用于区分"真问题行"与"全空模板噪音行")。
+
+    业务字段: 订单号/设备号/登记人/金额/退款操作人/备注等; 仅登记日期/全空不算。
+    """
+    _BIZ_KEYS = ("order_no", "device_sn", "registrant", "refund_operator",
+                 "order_amount", "refund_amount", "remark", "is_refunded", "merchant_id")
+    for k in _BIZ_KEYS:
+        v = data.get(k)
+        if v is not None and not (isinstance(v, str) and v.strip() == ""):
+            return True
+    return False
+
+
+def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult,
+               db: Session | None = None, source: str = "workbuddy") -> dict[str, Any] | None:
+    """清洗单条手动退款行 → 模型字段值
+
+    db/source: 传入时, 硬失败行(缺登记日期/订单号, 非空行)落拒收表供质量页可见可判
+    (A-20260908-003 / 用户决策 2026-09-09: 空行计数 + 失败行落拒收)。全空行=模板噪音不落。
+    """
     data = _map_row(row)
     try:
         register_time = _ensure_afternoon_time(_to_datetime(data.get("register_time")))
         order_no = _to_str(data.get("order_no"))
         if register_time is None or not order_no:
             result.add_dropped(idx, "缺少登记日期或订单号,无法去重定位(跳过)")
+            if db is not None and _has_any_business_value(data):
+                # 有业务字段值但缺去重键 → 真问题行, 落拒收(全空行=模板噪音不落)
+                _write_rejected(
+                    db, data_type="manual_refund", source=source,
+                    category="validate_fail", reason="缺少登记日期或订单号,无法去重定位(跳过)",
+                    raw_row=row, row_no=idx,
+                )
             return None
         remark = _to_str(data.get("remark")) or ""
         # 示例模板行跳过(与本地导入同规则)
@@ -143,6 +202,12 @@ def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult) ->
         }
     except Exception as e:
         result.add_dropped(idx, f"手动退款行解析失败: {e}")
+        if db is not None:
+            _write_rejected(
+                db, data_type="manual_refund", source=source,
+                category="parse_fail", reason=f"手动退款行解析失败: {e}",
+                raw_row=row, row_no=idx,
+            )
         return None
 
 
@@ -268,8 +333,15 @@ def sync_manual_refunds_from_payload(
         for idx, row in enumerate(rows_raw):
             if not isinstance(row, dict):
                 result.add_dropped(idx, "手动退款行不是对象")
+                if row is not None:
+                    # 非对象行(如纯字符串/数字): 落拒收供查看(来源文件行号 idx)
+                    _write_rejected(
+                        db, data_type="manual_refund", source=sync_source,
+                        category="parse_fail", reason="手动退款行不是对象(跳过分隔行/异常行)",
+                        raw_row={"raw": row}, row_no=idx,
+                    )
                 continue
-            rec = _clean_row(row, idx, result)
+            rec = _clean_row(row, idx, result, db=db, source=sync_source)
             if rec is None:
                 continue
             rows.append(rec)

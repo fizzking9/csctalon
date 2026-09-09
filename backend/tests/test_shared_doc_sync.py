@@ -381,3 +381,64 @@ def test_read_sheet_records_require_any_filters_only_date_rows(tmp_path):
     recs3 = sdss._read_sheet_records(xlsx, "登记明细")
     assert len(recs3) == 3  # 1 真实 + 2 只有日期(全空行仍被既有逻辑过滤)
 
+
+def test_read_sheet_records_counters_reports_filtered_empty(tmp_path):
+    """空行过滤计数上报(counters): 预留模板空行(只填日期无业务字段)被计。
+
+    A-20260908-003 §2.4: 空模板行默认静默(仅计数不落库), 计数供 summary 展示。
+    注: pandas read_excel 会把"全空白行"在读取层丢弃(不到 iterrows), 真正到过滤
+    逻辑的是"部分填充"的预留模板行(如只填登记日期) → 计入 business_empty_rows。
+    """
+    import openpyxl
+
+    xlsx = str(tmp_path / "doc_counters.xlsx")
+    headers = ["登记日期", "设备号", "订单号", "商户ID", "订单金额", "登记人",
+               "是否已退款", "退款金额", "退款操作人", "操作时间", "备注"]
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "登记明细"
+    ws.append(headers)
+    ws.append(["2026-09-01", "88000001", "ORD1", "M1", "100", "客服A",
+               "是", "100", "客服A", "2026-09-01 10:00", ""])
+    ws.append(["2026-09-08 00:00:00"])  # 预留模板行(只填日期) → business_empty
+    ws.append(["2026-09-09 00:00:00"])  # 预留模板行(只填日期) → business_empty
+    wb.save(xlsx)
+
+    counters: dict[str, int] = {}
+    recs = sdss._pick_manual_refund_sheet(xlsx, None, counters=counters)
+    assert len(recs) == 1
+    assert counters.get("business_empty_rows") == 2  # 2 预留模板行被过滤并计数
+
+
+def test_manual_refund_sync_rejected_on_missing_order_no(db):
+    """M 项: sync_manual_refunds_from_payload 缺订单号行(有业务值)落拒收表。
+
+    A-20260908-003 / 用户决策 2026-09-09: 空行计数 + 失败行落拒收供质量页可查。
+    有业务字段值但缺订单号/登记日期 → 真问题行落拒收(全空模板行不落)。
+    """
+    from sqlalchemy import func, select
+
+    from app.models.ingest_rejected_row import IngestRejectedRow
+    from app.services.manual_refund_sync import sync_manual_refunds_from_payload
+
+    # 构造: 1 条真问题(有设备号/金额但缺订单号) + 1 条全空(模板, 不应落)
+    payload = {
+        "source_file": "test-reject.xlsx",
+        "manual_refunds": [
+            {"登记日期": "2026-09-01 10:00:00", "设备号": "88000001", "退款金额": "100",
+             "登记人": "客服A"},   # 缺 order_no → validate_fail 落拒收
+            {"登记日期": "2026-09-01 10:00:00"},   # 全空 → 不落
+        ],
+        "full_sync": False,
+    }
+    stats = sync_manual_refunds_from_payload(db, payload, source_file="test-reject.xlsx",
+                                             sync_source="shared_doc")
+    # 两行都缺订单号 → 2 dropped; 但只有"有业务值"的真问题行落拒收(全空/仅日期行=模板噪音不落)
+    assert stats["failed"] == 2
+    # 拒收表应恰好 1 条(source=shared_doc, category=validate_fail)
+    n = db.scalar(select(func.count()).select_from(IngestRejectedRow).where(
+        IngestRejectedRow.source == "shared_doc",
+        IngestRejectedRow.data_type == "manual_refund",
+    )) or 0
+    assert n == 1, f"期望 1 条拒收, 实际 {n}"
+

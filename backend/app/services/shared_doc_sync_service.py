@@ -179,7 +179,8 @@ def _sheet_names(path: str) -> list[str]:
 
 
 def _read_sheet_records(
-    path: str, sheet_name: str, require_any: tuple[str, ...] | None = None
+    path: str, sheet_name: str, require_any: tuple[str, ...] | None = None,
+    counters: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """读单个 Sheet → [ {中文表头: 值}, ... ]
 
@@ -194,25 +195,35 @@ def _read_sheet_records(
     非业务字段有值), 视为"业务空行"一并过滤 —— 用于退款型: 登记明细行尾常有
     "只填登记日期、无订单号/设备号/金额/登记人"的预留空行, 非真实数据, 应在读取
     层过滤(否则 manual_refund_sync 判"缺订单号" failed, 污染日志)。
+
+    counters: 可选 dict, 用于统计被过滤的空行数(全空/业务空行), 汇入同步 summary
+    展示 —— 空行过滤可见可查(A-20260908-003 / 用户决策 2026-09-09), 默认静默仅计数。
     """
     df = pd.read_excel(path, sheet_name=sheet_name, header=0, engine=_EXCEL_ENGINE)
     df = df.dropna(axis=1, how="all")  # 丢弃全空列(合并表头/末尾多余列)
     df.columns = [_norm_header(c) for c in df.columns]
     df = df.loc[:, [c for c in df.columns if c != ""]]
     records: list[dict[str, Any]] = []
+    n_empty = 0
+    n_biz_empty = 0
     for _, row in df.iterrows():
         rec = {str(col): (None if pd.isna(v) else v) for col, v in row.items()}
         # 过滤全空行(所有字段均为 None/空): 与 complaint_sync._is_empty_*_rec 同语义,
         # 避免空白模板行进入入库管线被判 dropped/failed
         if all(v is None or (isinstance(v, str) and v.strip() == "") for v in rec.values()):
+            n_empty += 1
             continue
         # 业务空行过滤(仅当指定 require_any): 这些业务字段全空 → 非真实数据行
         if require_any:
             def _has_val(v: Any) -> bool:
                 return v is not None and not (isinstance(v, str) and v.strip() == "")
             if not any(_has_val(rec.get(k)) for k in require_any):
+                n_biz_empty += 1
                 continue
         records.append(rec)
+    if counters is not None:
+        counters["empty_rows"] = counters.get("empty_rows", 0) + n_empty
+        counters["business_empty_rows"] = counters.get("business_empty_rows", 0) + n_biz_empty
     return records
 
 
@@ -223,7 +234,8 @@ def _sheet_matches(sheet_name: str, keywords: tuple[str, ...]) -> bool:
 
 
 def _pick_complaint_sheets(
-    file_path: str, rules: list[dict] | None
+    file_path: str, rules: list[dict] | None,
+    counters: dict[str, int] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """从导出的 xlsx 里取 315/卡商 两个 Sheet 的数据
 
@@ -232,6 +244,7 @@ def _pick_complaint_sheets(
     - 无 sheet_rules: 遍历所有非空 sheet, 按表头关键词自动匹配
       (315 表头含「投诉编号」, 卡商表头含「投诉群」)
     返回 {"external_complaint": [...], "card_complaint": [...]}, 未命中的为空列表。
+    counters: 可选, 汇聚被过滤空行计数(供 summary 展示)。
     """
     ext_rules: list[str] = []
     card_rules: list[str] = []
@@ -257,13 +270,13 @@ def _pick_complaint_sheets(
         if wanted:
             recs: list[dict[str, Any]] = []
             for name in wanted:
-                recs.extend(_read_sheet_records(file_path, name))
+                recs.extend(_read_sheet_records(file_path, name, counters=counters))
             return recs
         # 自动匹配: 遍历所有有数据的 sheet, Sheet 名或任一表头列名含关键词即命中
         # (315 表头列名含「投诉编号」, 卡商表头含「投诉群」)
         kw = tuple(k.lower() for k in keywords)
         for name in sheets:
-            recs = _read_sheet_records(file_path, name)
+            recs = _read_sheet_records(file_path, name, counters=counters)
             if not recs:
                 continue
             if _sheet_matches(name, keywords):
@@ -278,27 +291,30 @@ def _pick_complaint_sheets(
     return {"external_complaint": external, "card_complaint": card}
 
 
-def _pick_manual_refund_sheet(file_path: str, rules: list[dict] | None) -> list[dict[str, Any]]:
+def _pick_manual_refund_sheet(file_path: str, rules: list[dict] | None,
+                              counters: dict[str, int] | None = None) -> list[dict[str, Any]]:
     """取 manual_refund 目标 sheet 的数据
 
     优先 sheet_rules 里声明的 sheet(首个), 否则读「登记明细」(或第一张有数据的)。
     业务空行过滤(require_any): 只填登记日期、无 订单号/设备号/登记人/金额 的预留
     空行视为非真实数据, 在读取层过滤(failed 归零, 不污染日志)。
+    counters: 可选, 汇聚被过滤空行计数(供 summary 展示)。
     """
     # 退款业务字段: 至少有其一才算真实登记行(登记日期 alone 不算)
     _BUSINESS_COLS = ("订单号", "设备号", "登记人", "订单金额", "退款金额", "商户ID", "退款操作人", "处理结果")
     if rules:
         for r in rules:
             if isinstance(r, dict) and str(r.get("sheet") or "").strip():
-                return _read_sheet_records(file_path, r["sheet"].strip(), require_any=_BUSINESS_COLS)
+                return _read_sheet_records(file_path, r["sheet"].strip(),
+                                           require_any=_BUSINESS_COLS, counters=counters)
 
     sheets = _sheet_names(file_path)
     for name in sheets:
         if "登记明细" in name:
-            return _read_sheet_records(file_path, name, require_any=_BUSINESS_COLS)
+            return _read_sheet_records(file_path, name, require_any=_BUSINESS_COLS, counters=counters)
     # 回退: 第一张有数据的 sheet
     for name in sheets:
-        recs = _read_sheet_records(file_path, name, require_any=_BUSINESS_COLS)
+        recs = _read_sheet_records(file_path, name, require_any=_BUSINESS_COLS, counters=counters)
         if recs:
             return recs
     return []
@@ -538,7 +554,8 @@ def _sync_complaint_from_file(
     db: Session, row: DocSyncSource, file_path: str, source_file: str
 ) -> dict[str, Any]:
     """读取投诉型文档的两个 sheet 并复用 complaint_sync 管线入库"""
-    sheets = _pick_complaint_sheets(file_path, row.sheet_rules)
+    counters: dict[str, int] = {}
+    sheets = _pick_complaint_sheets(file_path, row.sheet_rules, counters=counters)
     ext_rows = sheets["external_complaint"]
     card_rows = sheets["card_complaint"]
     if not ext_rows and not card_rows:
@@ -553,11 +570,13 @@ def _sync_complaint_from_file(
     stats = sync_complaints_from_payload(
         db, payload, source_file=source_file, sync_source="shared_doc"
     )
+    # 空行计数上报(默认静默仅计数, A-20260908-003 §2.4)
+    stats["filtered_empty_rows"] = counters.get("empty_rows", 0)
     logger.info(
         f"[shared_doc] {source_file} 投诉入库完成: "
         f"315={stats['external']['total']}(+{stats['external']['inserted']}/~{stats['external']['updated']}) "
         f"卡商={stats['card']['total']}(+{stats['card']['inserted']}/~{stats['card']['updated']}) "
-        f"status={stats['status']}"
+        f"滤空行={counters.get('empty_rows', 0)} status={stats['status']}"
     )
     return stats
 
@@ -570,7 +589,8 @@ def _sync_manual_refund_from_file(
     ⚠️ full_sync 固定 false: 在线采集=增量 upsert, 全量对账会删除库中不在
     文档内的行(文档可能只是其中一部分来源, 误删血泪教训, 见 shared-doc-fullsync-lesson)。
     """
-    rows = _pick_manual_refund_sheet(file_path, row.sheet_rules)
+    counters: dict[str, int] = {}
+    rows = _pick_manual_refund_sheet(file_path, row.sheet_rules, counters=counters)
     if not rows:
         raise RuntimeError("导出的表格中未匹配到退款登记明细 Sheet(无数据可入库)")
 
@@ -582,9 +602,13 @@ def _sync_manual_refund_from_file(
     stats = sync_manual_refunds_from_payload(
         db, payload, source_file=source_file, sync_source="shared_doc"
     )
+    # 空行/业务空行计数上报(默认静默仅计数, A-20260908-003 §2.4)
+    stats["filtered_empty_rows"] = counters.get("empty_rows", 0)
+    stats["filtered_business_empty_rows"] = counters.get("business_empty_rows", 0)
     logger.info(
         f"[shared_doc] {source_file} 退款入库完成: "
         f"{stats['total']}(+{stats['inserted']}/~{stats['updated']}/!{stats['failed']}) "
+        f"滤空行={counters.get('empty_rows', 0)}/{counters.get('business_empty_rows', 0)} "
         f"status={stats['status']}"
     )
     return stats
@@ -629,13 +653,17 @@ def sync_doc_source_safe(source_id: int, trigger: str = "manual") -> dict[str, A
 def _summary_from_stats(row: DocSyncSource, stats: dict[str, Any]) -> dict[str, Any]:
     """把入库统计压缩为配置行 last_sync_summary(JSONB 友好)"""
     if row.target_type == TARGET_COMPLAINT:
-        return {
+        s = {
             "external": {k: stats["external"][k] for k in ("total", "inserted", "updated", "failed", "matched")},
             "card": {k: stats["card"][k] for k in ("total", "inserted", "updated", "failed", "matched")},
         }
+        if stats.get("filtered_empty_rows"):
+            s["filtered_empty_rows"] = stats["filtered_empty_rows"]  # 滤空行计数(默认静默仅计数)
+        return s
     if row.target_type == TARGET_MANUAL_REFUND:
-        return {
-            k: stats[k]
-            for k in ("total", "inserted", "updated", "deleted", "failed", "warnings")
-        }
+        s = {k: stats[k] for k in ("total", "inserted", "updated", "deleted", "failed", "warnings")}
+        for k in ("filtered_empty_rows", "filtered_business_empty_rows"):
+            if stats.get(k):
+                s[k] = stats[k]
+        return s
     return {"total": stats.get("total")}
