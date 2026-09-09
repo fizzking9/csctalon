@@ -220,10 +220,10 @@ def per_route_alignment(db, start: datetime, end: datetime) -> dict:
     b_chain_ok = _count(f"""
         SELECT count(*) FROM wallet_withdrawals w
         WHERE w.op_type='用户提现' AND w.op_time >= :s AND w.op_time <= :e
-          AND w.remark ~ 'R[FEB][0-9]{10,}'
+          AND w.remark ~ 'R[FEB][0-9]+'
           AND EXISTS (SELECT 1 FROM refunds a
              JOIN refund_record_reports r ON r.platform_order_no = a.platform_order_no
-             WHERE a.refund_no = substring(w.remark from 'R[FEB][0-9]{10,}')
+             WHERE a.refund_no = substring(w.remark from 'R[FEB][0-9]+')
                AND a.refund_method='转入提现账户' AND a.status='已退款' AND {e_ok})""")
 
     # ── C 闪猫已退款(order_no(WXALR) → E) ──
@@ -343,9 +343,9 @@ def alignment_detail(db, route: str, start: datetime, end: datetime,
                   w.remark LIKE '%冻结%' OR w.remark LIKE '%提现失败%' OR w.remark LIKE '%退款失败%'
                   OR w.remark LIKE '%驳回%' OR w.remark LIKE '%拒绝%' OR w.remark LIKE '%未到账%'
                   OR w.remark LIKE '%超期订单不允许退款%'))
-              AND NOT (w.remark ~ 'R[FEB][0-9]{10,}' AND EXISTS (
+              AND NOT (w.remark ~ 'R[FEB][0-9]+' AND EXISTS (
                   SELECT 1 FROM refunds a JOIN refund_record_reports r ON r.platform_order_no=a.platform_order_no
-                  WHERE a.refund_no=substring(w.remark from 'R[FEB][0-9]{10,}')
+                  WHERE a.refund_no=substring(w.remark from 'R[FEB][0-9]+')
                     AND a.refund_method='转入提现账户' AND a.status='已退款' AND """ + e_ok + """))
             ORDER BY w.op_time DESC LIMIT :lim OFFSET :off"""
     elif route == "C":
