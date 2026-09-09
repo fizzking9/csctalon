@@ -555,3 +555,110 @@ def backfill_e_orphan_to_d(db, start=None, end=None, limit: int = 2000) -> dict:
         "note": "E 空悬单已 INSERT 到 D 路台账(auto_filled 可追溯), 经营对账将闭合; 后续 ABC 补回以 ABC 为准",
         "samples": samples,
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# D 路同单同金额重复自动排除 (2026-09-09, 逐单对账驱动)
+# 背景: 逐单(订单号粒度)对账发现 D 路大量"同 order_no + 同 refund_amount 双行"
+#       = 同一退款被登记两遍(坏副本)。8月实测: 71 组, 可剔 71 行 / ¥11,205.76。
+#       典型形态: 一条带SN+quality null(真实原始登记) vs 另一条 SN空/pending/
+#       auto_fixed(副本/自动修正行); 偶见同SN双行。
+# 规则: 同单同金额多行(已退款, 非dup/ignored) → 保留"带SN 且 q=null/ok"最优行,
+#       其余行若满足护栏(SN空 或 q 非 null/ok)才自动标 dup_residual(避免误伤
+#       同SN真实分笔); 不满足护栏的留人工。E 佐证(该单 E 只退一笔同额)可增强。
+# ─────────────────────────────────────────────────────────────
+def auto_dispose_d_dup_same_amount(db, limit: int = 2000) -> dict:
+    """D 路同单同金额重复自动排除(标 dup_residual, 幂等可恢复)。
+
+    对同 order_no + 同 refund_amount 的已退款多行(非 dup/ignored):
+    - 保留: 带 SN 且 quality_status 为 null/ok 的行(视为原始真实登记)
+    - 自动剔(标 dup_residual): 其余行中 SN 空 或 quality_status 为
+      pending/auto_fixed/auto_filled 者(副本/自动修正重复行)
+    - 留人工: 其余行若带 SN 且 q 为 null/ok(两条都像真实, 可能真实分笔)不自动剔
+    幂等: 已 dup_residual/ignored 的行不再处理; 重复执行剩余候选自动跳过。
+    """
+    from sqlalchemy import text
+
+    from app.models.manual_refund import ManualRefund
+
+    # 候选: 同单同金额出现 >=2 次的行(已退款非排除)
+    sql = text("""
+        SELECT m.id, m.order_no AS ono, m.refund_amount AS amt,
+               COALESCE(m.device_sn, '') AS sn, COALESCE(m.quality_status, 'null') AS q,
+               COALESCE(m.op_time, m.register_time) AS dt,
+               (SELECT count(*) FROM manual_refunds m2
+                 WHERE m2.order_no = m.order_no AND m2.refund_amount = m.refund_amount
+                   AND m2.is_refunded = '是'
+                   AND (m2.quality_status IS NULL OR m2.quality_status NOT IN ('dup_residual','ignored'))) AS grp_n
+        FROM manual_refunds m
+        WHERE m.is_refunded = '是' AND m.order_no IS NOT NULL AND m.refund_amount IS NOT NULL
+          AND (m.quality_status IS NULL OR m.quality_status NOT IN ('dup_residual','ignored'))
+          AND EXISTS (
+            SELECT 1 FROM manual_refunds m2
+            WHERE m2.order_no = m.order_no AND m2.refund_amount = m.refund_amount
+              AND m2.is_refunded = '是' AND m2.id <> m.id
+              AND (m2.quality_status IS NULL OR m2.quality_status NOT IN ('dup_residual','ignored'))
+          )
+        ORDER BY m.order_no, m.refund_amount, m.id
+        LIMIT :limit
+    """)
+    rows = db.execute(sql, {"limit": limit}).all()
+    # 按 (order_no, amount) 分组
+    groups: dict[tuple, list] = {}
+    for r in rows:
+        groups.setdefault((r.ono, float(r.amt or 0)), []).append(r)
+
+    disposed = 0
+    kept = 0
+    left_manual = 0
+    samples = []
+    for (ono, amt), items in groups.items():
+        if len(items) < 2:
+            continue
+
+        def score(x):
+            s_ = 0
+            if x.sn:
+                s_ += 8
+            if x.q in ("null", "ok"):
+                s_ += 4
+            elif x.q == "auto_filled":
+                s_ += 2
+            elif x.q == "auto_fixed":
+                s_ += 1
+            return s_
+
+        best = max(items, key=score)
+        for x in items:
+            if x.id == best.id:
+                kept += 1
+                continue
+            # 护栏: 仅自动剔 SN空 或 q 非 null/ok 的副本行; 带SN且q=null/ok 的留人工
+            is_copy = (not x.sn) or (x.q not in ("null", "ok"))
+            if not is_copy:
+                left_manual += 1
+                continue
+            m = db.get(ManualRefund, x.id)
+            if m is None:
+                continue
+            note_bits = [z for z in ((m.quality_note or "").split(" | ") if m.quality_note else []) if z]
+            note_bits.append(
+                f"自动排除: D同单同金额重复(order={ono} ¥{amt:g}) 保留带SN行 id={best.id}, 本条为副本 (2026-09-09)"
+            )
+            m.quality_status = "dup_residual"
+            m.quality_note = " | ".join(note_bits)[:500]
+            disposed += 1
+            if len(samples) < 20:
+                samples.append({"id": x.id, "order_no": ono, "amount": amt,
+                                "sn": x.sn or None, "q": x.q if x.q != "null" else None,
+                                "keep_id": best.id, "keep_sn": best.sn or None})
+    db.commit()
+    logger.info(f"[quality_disposition] auto_dispose_d_dup_same_amount disposed={disposed} left_manual={left_manual} groups={len(groups)}")
+    return {
+        "disposed": disposed,
+        "kept": kept,
+        "left_manual": left_manual,
+        "groups": len(groups),
+        "note": "已标 dup_residual(副本行), 保留带SN/正常行; 可 restore 恢复",
+        "samples": samples,
+    }

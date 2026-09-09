@@ -98,6 +98,9 @@
             <el-button type="primary" :icon="Refresh" :loading="backfilling" @click="backfillEOrphan">
               E空悬回填D台账
             </el-button>
+            <el-button type="danger" plain :icon="Refresh" :loading="dupDispatching" @click="autoDupSameAmount">
+              排除同单同金额重复
+            </el-button>
           </div>
         </div>
         <QualityAudit :table="t.code" :refresh-tick="refreshTick" />
@@ -116,7 +119,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
-import { listRules, createRule, updateRule, deleteRule, autoDisposeDNoSnBadDup, backfillEOrphanToD } from '@/api/dataQuality'
+import { listRules, createRule, updateRule, deleteRule, autoDisposeDNoSnBadDup, backfillEOrphanToD, autoDisposeDDupSameAmount } from '@/api/dataQuality'
 import QualityAudit from './QualityAudit.vue'
 import RejectedRows from './RejectedRows.vue'
 
@@ -127,6 +130,7 @@ const loading = ref(false)
 const submitting = ref(false)
 const disposing = ref(false)
 const backfilling = ref(false)
+const dupDispatching = ref(false)
 const refreshTick = ref(0)
 const editVisible = ref(false)
 const editForm = reactive({ id: null, name: '', target: '', condition: '', description: '', enabled: true })
@@ -166,6 +170,28 @@ async function autoDisposeNoSn() {
     refreshTick.value += 1  // 通知 QualityAudit 刷新
   } finally {
     disposing.value = false
+  }
+}
+
+// D 同单同金额重复自动排除: 同一订单+同一金额被登记两遍(副本), 剔除副本保留带SN行
+async function autoDupSameAmount() {
+  try {
+    await ElMessageBox.confirm(
+      '将扫描手动退款中「同订单号 + 同退款金额」登记了两遍的重复行，自动把副本(SN空/pending/auto_fixed 行)标记为 dup_residual 排除，保留带SN/正常行。\n\n逐单对账发现 D 路此类重复约 ¥1.1万+/月。可随时恢复。是否继续？',
+      '排除同单同金额重复',
+      { confirmButtonText: '开始排除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch { return }
+  dupDispatching.value = true
+  try {
+    const res = await autoDisposeDDupSameAmount(10000)
+    const d = res.data || {}
+    ElMessage.success(`已排除 ${d.disposed ?? 0} 行同单同金额重复副本(组 ${d.groups ?? 0}, 留人工 ${d.left_manual ?? 0})`)
+    refreshTick.value += 1
+  } catch (err) {
+    ElMessage.error(err?.response?.data?.detail || '排除失败')
+  } finally {
+    dupDispatching.value = false
   }
 }
 

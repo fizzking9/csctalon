@@ -122,3 +122,8 @@ export function autoDisposeDNoSnBadDup(limit, includeAutoFixed = false) {
 export function backfillEOrphanToD(start, end, limit = 2000) {
   return request.post('/data-quality/disposition/auto/backfill-e-orphan-to-d', null, { params: { start, end, limit } })
 }
+
+/** D路同单同金额重复自动排除(标 dup_residual, 保留带SN/正常行) */
+export function autoDisposeDDupSameAmount(limit = 2000) {
+  return request.post('/data-quality/disposition/auto/d-dup-same-amount', null, { params: { limit } })
+}

@@ -331,3 +331,17 @@ def disposition_backfill_e_orphan_to_d_endpoint(db: DBSession, _: CurrentUser,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return R(data=data, message=f"已回填 {data.get('inserted', 0)} 笔 E 空悬到 D 路台账(备注溯源)")
+
+
+# ── D 路同单同金额重复自动排除 (2026-09-09) ──────────────────
+@disposition_router.post("/auto/d-dup-same-amount", response_model=R,
+                         summary="D路同单同金额重复自动标dup_residual(保留带SN/正常行, 副本剔除)")
+def disposition_auto_d_dup_same_amount_endpoint(db: DBSession, _: CurrentUser,
+                                                limit: int = Query(2000, ge=1, le=10000)):
+    from app.services.quality_disposition_service import auto_dispose_d_dup_same_amount
+
+    try:
+        data = auto_dispose_d_dup_same_amount(db, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message=f"已自动排除 {data.get('disposed', 0)} 行 D 同单同金额重复副本")
