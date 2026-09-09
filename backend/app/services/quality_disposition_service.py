@@ -341,7 +341,7 @@ def scan_ad_overlap_dup(db, limit: int = 200) -> dict:
                 if best is None or gap < best[1]:
                     best = (a, gap)
         if best:
-            a, gap_days = best
+            a, gap_sec = best
             hits.append({
                 "manual_refund_id": m.id,
                 "order_no": m.order_no,
@@ -350,7 +350,7 @@ def scan_ad_overlap_dup(db, limit: int = 200) -> dict:
                 "a_refund_no": a.refund_no,
                 "a_amount": float(a.refund_amount or 0),
                 "a_created_at": a.created_at_raw.isoformat() if a.created_at_raw else None,
-                "gap_days": round(gap_days, 1),
+                "gap_days": round(gap_sec / 86400.0, 1),
                 "quality_status": m.quality_status,
                 "suggest": "标 dup_residual 从 D 路排除(A 已计此笔)",
             })
