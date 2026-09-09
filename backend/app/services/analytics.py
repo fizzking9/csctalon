@@ -7530,7 +7530,7 @@ def refund_export_original(
     钱包提现/闪猫退款/手动退款(D路)不属于 refunds 表, 由前端调用方分别导出或仅导出 refunds 明细。
 
     online_refunded_only=True: 仅保留经营口径 A 路(线上直退且已退款),
-    剔除驳回/无需退款/空白状态等非成功退款 (2026-09-09 A路口径收紧, 供导出"A线上直退"经营sheet用)。
+    剔除驳回/无需退款/空白状态等非成功退款(统计/对账场景用; 导出明细默认全量供人工分析)。
     """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
     # A 路经营口径过滤子句 (refund_method='线上' AND status='已退款')
@@ -7638,37 +7638,45 @@ def refund_export_original(
 def refund_export_all(
     db: Session, start: str | None = None, end: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """导出经营退款明细 Excel(多 sheet): A线上直退 / B钱包提现 / C闪猫退款 / D手动退款 / E退款记录报表 + 按日汇总.
+    """导出退款分析 Excel(多 sheet): 明细(业务台账原始全量, 供人工分析) + 汇总(成功口径对账).
 
-    口径与 refund_decision_overview.routes_daily 完全一致:
-    - A 线上直退: refunds.refund_method='线上', 时间=created_at_raw (含涉诉分类/归一操作人)
-    - B 钱包提现: wallet_withdrawals.op_type='用户提现', 时间=op_time
-    - C 闪猫退款: shanmao_refunds.status='已退款', 时间=COALESCE(audit_time, created_at)
-    - D 手动退款: manual_refunds.is_refunded='是', 时间=COALESCE(op_time, register_time)
-    - E 退款记录报表: refund_record_reports 退款成功(财务基准, 2026-09-09 补充), 时间=refund_time
+    明细 sheet(2026-09-09 放宽为台账原始, 人工分析用, 不砍状态/类型行, 附状态列自筛):
+    - A退费单明细(全量): refunds 全部(线上直退/线下/转入提现账户/未填写 + 驳回/无需退款/空白), 时间=created_at_raw
+    - B钱包流水明细(全量): wallet_withdrawals 全部 op_type(用户提现/订单退费转入/系统扣费), 时间=op_time
+    - C闪猫退款明细(全量): shanmao_refunds 全部状态, 时间=COALESCE(audit_time, created_at)
+    - D手动退款明细(全量): manual_refunds 全部(is_refunded 是/否), 时间=COALESCE(op_time, register_time)
+    - E退款记录报表(全量): refund_record_reports 全部 refund_status, 时间=refund_time
+
+    汇总 sheet(五路汇总(A-E))保持成功口径, 与 refund_decision_overview.routes_daily 一致:
+    - A 线上直退: refund_method='线上' AND status='已退款'
+    - B 钱包提现: op_type='用户提现' 且非失败/冻结备注
+    - C 闪猫退款: status='已退款'
+    - D 手动退款: is_refunded='是' (剔除 dup_residual/ignored)
+    - E 退款记录报表: refund_status IN ('退款成功','成功','SUCCESS')
     """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
     sheets: dict[str, list[dict[str, Any]]] = {}
     # D 路 quality_status 排除标记(dup_residual=已治理重复): 汇总 sheet 排除, 明细 sheet 保留但加列标注
     _d_excl_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
 
-    # A 线上直退 (经营口径: 线上且已退款; 剔除驳回/无需退款/空白状态, 2026-09-09)
-    sheets["A线上直退"] = refund_export_original(db, start, end, online_refunded_only=True)
+    # A 退费单明细 (原始全量: 所有退费单行含线下/转入提现/未填写 + 驳回/无需退款/空白状态,
+    # 供人工分析自筛; 2026-09-09 由'仅线上已退款'放宽回全量)
+    sheets["A退费单明细(全量)"] = refund_export_original(db, start, end)
 
     def _sh(dt) -> str:
         if not dt:
             return ""
         return dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-    # B 钱包提现 (仅'用户提现'为真实现金流出; 2026-08-28 排除失败/冻结备注)
-    b_rows = db.execute(text(f"""
+    # B 钱包流水明细 (台账原始全量: 用户提现/订单退费转入/系统扣费等全部 op_type,
+    # 含失败/冻结备注; 附"操作类型/备注"列供人工筛出真实出款; 2026-09-09 放宽)
+    b_rows = db.execute(text("""
         SELECT account_id, device_sn, op_type, op_amount, wallet_balance, operator, op_time, remark
         FROM wallet_withdrawals w
-        WHERE w.op_time >= :ts AND w.op_time <= :te AND w.op_type = '用户提现'
-          AND {_withdraw_fail_remark_sql_cond()}
+        WHERE w.op_time >= :ts AND w.op_time <= :te
         ORDER BY w.op_time
     """), {"ts": cur_s, "te": cur_e}).fetchall()
-    sheets["B钱包提现"] = [{
+    sheets["B钱包流水明细(全量)"] = [{
         "账户ID": r.account_id or "",
         "设备SN": r.device_sn or "",
         "操作类型": r.op_type or "",
@@ -7679,17 +7687,16 @@ def refund_export_all(
         "备注": (r.remark or "").replace("\n", " "),
     } for r in b_rows]
 
-    # C 闪猫退款 (已退款; 时间取审核时间, 缺失回退导入时间, 与决策概览一致)
+    # C 闪猫退款明细 (台账原始全量: 全部状态含申请中/已驳回/已退款; 附"状态"列自筛; 2026-09-09 放宽)
     c_rows = db.execute(text("""
         SELECT refund_no, order_no, device_sn, phone, paid_amount, refund_amount, actual_amount,
                package_name, merchant_name, refund_reason, refund_method, status,
                applicant, auditor, operator, apply_time, audit_time, refund_time, remark, audit_remark
         FROM shanmao_refunds
         WHERE COALESCE(audit_time, created_at) >= :ts AND COALESCE(audit_time, created_at) <= :te
-          AND status = '已退款'
         ORDER BY COALESCE(audit_time, created_at)
     """), {"ts": cur_s, "te": cur_e}).fetchall()
-    sheets["C闪猫退款"] = [{
+    sheets["C闪猫退款明细(全量)"] = [{
         "退款单号": r.refund_no or "",
         "订单号": r.order_no or "",
         "设备SN": r.device_sn or "",
@@ -7712,16 +7719,16 @@ def refund_export_all(
         "审核备注": (r.audit_remark or "").replace("\n", " "),
     } for r in c_rows]
 
-    # D 手动退款 (已退款; 时间取操作时间, 缺失回退登记日期; 明细保留全部, 附 quality_status 便于识别治理重复)
+    # D 手动退款明细 (台账原始全量: 含 is_refunded=否 的登记(蓄水/未退)与已治理重复行;
+    # 附"是否已退款/质量状态"列自筛; 2026-09-09 放宽)
     d_rows = db.execute(text("""
         SELECT register_time, device_sn, order_no, merchant_id, order_amount, refund_amount,
                registrant, is_refunded, refund_operator, op_time, remark, quality_status
         FROM manual_refunds
         WHERE COALESCE(op_time, register_time) >= :ts AND COALESCE(op_time, register_time) <= :te
-          AND is_refunded = '是'
         ORDER BY COALESCE(op_time, register_time)
     """), {"ts": cur_s, "te": cur_e}).fetchall()
-    sheets["D手动退款"] = [{
+    sheets["D手动退款明细(全量)"] = [{
         "登记时间": _sh(r.register_time),
         "设备号": r.device_sn or "",
         "订单号": r.order_no or "",
@@ -7736,16 +7743,15 @@ def refund_export_all(
         "备注": (r.remark or "").replace("\n", " "),
     } for r in d_rows]
 
-    # E 商户号实际现金流 (refund_record_reports 退款成功 = 对账基准; 2026-09-09 补充导出供手动比对)
+    # E 退款记录报表明细 (台账原始全量: 全部 refund_status; 附"退款状态"列自筛; 2026-09-09 放宽)
     e_rows = db.execute(text("""
         SELECT platform_order_no, wx_order_no, merchant_id, merchant_name, device_sn,
                product_name, refund_time, apply_refund_amount, refund_amount, refund_status
         FROM refund_record_reports
-        WHERE refund_status IN ('退款成功','成功','SUCCESS')
-          AND refund_time >= :ts AND refund_time <= :te
+        WHERE refund_time >= :ts AND refund_time <= :te
         ORDER BY refund_time
     """), {"ts": cur_s, "te": cur_e}).fetchall()
-    sheets["E退款记录报表"] = [{
+    sheets["E退款记录报表明细(全量)"] = [{
         "平台订单号": r.platform_order_no or "",
         "微信订单号": r.wx_order_no or "",
         "商户号": r.merchant_id or "",

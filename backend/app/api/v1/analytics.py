@@ -395,14 +395,15 @@ def refund_decision_overview_endpoint(
     return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_decision_overview, db, start, end, grain=grain))
 
 
-@router.get("/refund/export", summary="退款明细导出Excel(四路经营:线上直退/钱包提现/闪猫退款/手动退款+按日汇总)")
+@router.get("/refund/export", summary="退款明细导出Excel(明细台账全量 + 五路成功口径汇总)")
 def refund_export_endpoint(
     db: DBSession, _: CurrentUser,
     start: str | None = Query(None), end: str | None = Query(None),
 ):
-    """导出当前筛选区间内四路经营退款明细 Excel(多 sheet):
-    A线上直退(含涉诉分类/归一操作人) / B钱包提现 / C闪猫退款 / D手动退款 + 四路按日汇总.
-    口径与决策概览 routes_daily 一致.
+    """导出当前筛选区间内退款分析 Excel(多 sheet):
+    明细(台账原始全量, 供人工分析): A退费单明细(全量) / B钱包流水明细(全量) / C闪猫退款明细(全量)
+    / D手动退款明细(全量) / E退款记录报表明细(全量), 各带状态/类型列可自筛;
+    汇总(五路汇总(A-E)): 成功口径(与决策概览 routes_daily 一致), A/B/C/D + E(基准) + 偏差.
     """
     import io
     from urllib.parse import quote
