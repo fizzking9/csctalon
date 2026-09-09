@@ -345,3 +345,17 @@ def disposition_auto_d_dup_same_amount_endpoint(db: DBSession, _: CurrentUser,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return R(data=data, message=f"已自动排除 {data.get('disposed', 0)} 行 D 同单同金额重复副本")
+
+
+# ── D 路"E 无对应金额笔"冗余剔除(逐笔对E + 时序护栏) (2026-09-09) ──
+@disposition_router.post("/auto/d-no-e-match", response_model=R,
+                         summary="D路冗余剔除(金额E无对应笔, 仅已对账日期; E滞后窗跳过)")
+def disposition_auto_d_no_e_match_endpoint(db: DBSession, _: CurrentUser,
+                                           limit: int = Query(2000, ge=1, le=10000)):
+    from app.services.quality_disposition_service import auto_dispose_d_no_e_match
+
+    try:
+        data = auto_dispose_d_no_e_match(db, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message=f"已剔除 {data.get('disposed', 0)} 行 D 冗余(E无对应, 已对账日期)")

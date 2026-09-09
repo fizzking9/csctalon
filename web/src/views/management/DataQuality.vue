@@ -101,6 +101,9 @@
             <el-button type="danger" plain :icon="Refresh" :loading="dupDispatching" @click="autoDupSameAmount">
               排除同单同金额重复
             </el-button>
+            <el-button type="danger" :icon="Refresh" :loading="noeDispatching" @click="autoDupNoEMatch">
+              剔除E无对应D冗余
+            </el-button>
           </div>
         </div>
         <QualityAudit :table="t.code" :refresh-tick="refreshTick" />
@@ -119,7 +122,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
-import { listRules, createRule, updateRule, deleteRule, autoDisposeDNoSnBadDup, backfillEOrphanToD, autoDisposeDDupSameAmount } from '@/api/dataQuality'
+import { listRules, createRule, updateRule, deleteRule, autoDisposeDNoSnBadDup, backfillEOrphanToD, autoDisposeDDupSameAmount, autoDisposeDNoEMatch } from '@/api/dataQuality'
 import QualityAudit from './QualityAudit.vue'
 import RejectedRows from './RejectedRows.vue'
 
@@ -131,6 +134,7 @@ const submitting = ref(false)
 const disposing = ref(false)
 const backfilling = ref(false)
 const dupDispatching = ref(false)
+const noeDispatching = ref(false)
 const refreshTick = ref(0)
 const editVisible = ref(false)
 const editForm = reactive({ id: null, name: '', target: '', condition: '', description: '', enabled: true })
@@ -192,6 +196,29 @@ async function autoDupSameAmount() {
     ElMessage.error(err?.response?.data?.detail || '排除失败')
   } finally {
     dupDispatching.value = false
+  }
+}
+
+// D 冗余剔除: 该 D 行金额在同单 E 退款里无对应笔(登记冗余/整单额坏行)
+// 时序护栏: 仅处理已对账日期(≤E最新日); E 采集滞后窗自动跳过, E补采后重跑恢复
+async function autoDupNoEMatch() {
+  try {
+    await ElMessageBox.confirm(
+      '将扫描手动退款中「金额在 E(退款记录报表)同单找不到对应笔」的已退款行，标记为 dup_residual 排除(逐笔对E判定冗余)。\n\n仅处理 E 已采集覆盖的日期(已对账)；E 滞后窗(近2天)自动跳过不误伤，E 补采后重跑自动恢复。备注/类型信息保留可查。是否继续？',
+      '剔除E无对应D冗余',
+      { confirmButtonText: '开始剔除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch { return }
+  noeDispatching.value = true
+  try {
+    const res = await autoDisposeDNoEMatch(10000)
+    const d = res.data || {}
+    ElMessage.success(`已剔除 ${d.disposed ?? 0} 行 D 冗余(E无对应, E覆盖至 ${d.e_data_until ?? '?'}; 未对账窗跳过 ${d.skipped_pending_e ?? 0})`)
+    refreshTick.value += 1
+  } catch (err) {
+    ElMessage.error(err?.response?.data?.detail || '剔除失败')
+  } finally {
+    noeDispatching.value = false
   }
 }
 

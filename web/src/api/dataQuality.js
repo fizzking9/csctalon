@@ -127,3 +127,8 @@ export function backfillEOrphanToD(start, end, limit = 2000) {
 export function autoDisposeDDupSameAmount(limit = 2000) {
   return request.post('/data-quality/disposition/auto/d-dup-same-amount', null, { params: { limit } })
 }
+
+/** D路冗余剔除(金额E无对应笔, 仅已对账日期; E滞后窗跳过) */
+export function autoDisposeDNoEMatch(limit = 2000) {
+  return request.post('/data-quality/disposition/auto/d-no-e-match', null, { params: { limit } })
+}

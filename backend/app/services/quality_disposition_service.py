@@ -662,3 +662,93 @@ def auto_dispose_d_dup_same_amount(db, limit: int = 2000) -> dict:
         "note": "已标 dup_residual(副本行), 保留带SN/正常行; 可 restore 恢复",
         "samples": samples,
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# D 路"E 无对应金额笔"冗余剔除 (2026-09-09, 逐笔对E + 时序护栏)
+# 用户对账规则(2026-09-09): E为基准(财务权威), ABC优先级高于D; D仅备注/类型作补充。
+# 但逐笔核对发现不能按"A承接同单就让位D"(A/D可能各记E的不同笔, 都是真实退款)。
+# 更准标准: **D行金额在同单E的退款里找不到≈对应笔(±0.01) → 该D行冗余**。
+# 8月实测: D已退款2145行(其单E有退款)中 2003行E可对上(¥165,682), 142行对不上(¥18,480冗余)。
+#   冗余画像: 多 sn空/auto_fixed, 金额=协商/整单额(E无此笔), 如 D¥489 vs E[20,469]。
+# 时序护栏(用户强调): E采集滞后(现约2天), 对"E尚未采集覆盖"的日期不能贸然剔D
+#   → 仅处理 D行时间(op/register)≤ E最新退款日(e_data_until)的"已对账"日期;
+#     D行时间 > e_data_until(未对账窗) 跳过不剔(skipped_pending_e), 等E补采后重跑幂等恢复。
+# ─────────────────────────────────────────────────────────────
+def auto_dispose_d_no_e_match(db, limit: int = 2000) -> dict:
+    """D 路冗余剔除: D 已退款行, 其单在 E 有退款, 但该 D 金额 E 中无对应笔 → dup_residual。
+
+    时序护栏: 仅处理 D 行时间 ≤ E 最新退款日(已对账日期); 未对账窗(>E最新日)跳过,
+    等 E 补采后重跑自动转已对账恢复判定(幂等, 无额外状态)。
+    保留: 该 D 行 remark/quality_note 溯源(用户: 备注/类型信息作补充, 不删数据, 可 restore)。
+    """
+    from sqlalchemy import text
+
+    from app.models.manual_refund import ManualRefund
+
+    # E 最新退款日(北京)
+    e_max = db.execute(text(
+        "SELECT max(refund_time) FROM refund_record_reports "
+        "WHERE refund_status IN ('退款成功', '成功', 'SUCCESS')"
+    )).scalar()
+    e_data_until = e_max.isoformat() if e_max else None
+
+    sql = text("""
+        SELECT m.id, m.order_no AS ono, m.refund_amount AS amt,
+               COALESCE(m.device_sn, '') AS sn, COALESCE(m.quality_status, 'null') AS q,
+               COALESCE(m.remark, '') AS rm, COALESCE(m.op_time, m.register_time) AS dt,
+               (SELECT count(*) FROM refund_record_reports r
+                 WHERE r.platform_order_no = m.order_no AND r.refund_status IN ('退款成功','成功','SUCCESS')
+                   AND abs(r.refund_amount - m.refund_amount) < 0.01) AS e_match_n,
+               (SELECT count(*) FROM refund_record_reports r
+                 WHERE r.platform_order_no = m.order_no AND r.refund_status IN ('退款成功','成功','SUCCESS')) AS e_any_n
+        FROM manual_refunds m
+        WHERE m.is_refunded = '是' AND m.order_no IS NOT NULL AND m.refund_amount IS NOT NULL
+          AND (m.quality_status IS NULL OR m.quality_status NOT IN ('dup_residual','ignored'))
+          AND EXISTS (SELECT 1 FROM refund_record_reports r
+            WHERE r.platform_order_no = m.order_no AND r.refund_status IN ('退款成功','成功','SUCCESS'))
+        ORDER BY m.order_no, m.id
+        LIMIT :limit
+    """)
+    rows = db.execute(sql, {"limit": limit}).all()
+    disposed = 0
+    skipped_pending_e = 0
+    matched_kept = 0
+    samples = []
+    for r in rows:
+        # 时序护栏: D 行时间晚于 E 最新日 → 未对账窗, 不判不剔
+        if r.dt is not None and e_max is not None and r.dt > e_max:
+            skipped_pending_e += 1
+            continue
+        if int(r.e_match_n or 0) > 0:
+            matched_kept += 1
+            continue
+        if int(r.e_any_n or 0) == 0:
+            # 其单 E 完全无退款(理论上被 EXISTS 排除, 防御) → 不动
+            continue
+        # 冗余: 该单 E 有退款但无 ≈ 本 D 金额的笔
+        m = db.get(ManualRefund, r.id)
+        if m is None:
+            continue
+        note_bits = [z for z in ((m.quality_note or "").split(" | ") if m.quality_note else []) if z]
+        note_bits.append(
+            f"自动排除: D行金额¥{float(r.amt or 0):g} 同单E退款无对应笔(E覆盖至{e_data_until or '?'}), 判登记冗余 (2026-09-09)"
+        )
+        m.quality_status = "dup_residual"
+        m.quality_note = " | ".join(note_bits)[:500]
+        disposed += 1
+        if len(samples) < 20:
+            samples.append({"id": r.id, "order_no": r.ono, "amount": float(r.amt or 0),
+                            "sn": r.sn or None, "q": r.q if r.q != "null" else None,
+                            "remark": r.rm[:20]})
+    db.commit()
+    logger.info(f"[quality_disposition] auto_dispose_d_no_e_match disposed={disposed} "
+                f"skipped_pending_e={skipped_pending_e} matched_kept={matched_kept} e_data_until={e_data_until}")
+    return {
+        "disposed": disposed,
+        "skipped_pending_e": skipped_pending_e,
+        "matched_kept": matched_kept,
+        "e_data_until": e_data_until,
+        "note": "D 冗余行(金额E无对应)已标 dup_residual; 未对账窗(E滞后)已跳过待补采; 幂等可重跑可恢复",
+        "samples": samples,
+    }
