@@ -934,3 +934,45 @@ def backfill_b_actual_refund_time(db, limit: int = 5000) -> dict:
     db.commit()
     logger.info(f"[quality_disposition] backfill_b_actual_refund_time {stats}")
     return stats
+
+
+# ─────────────────────────────────────────────────────────────
+# A 路(线上直退)实际扣款时间回填 (2026-09-09, 对账时间对齐)
+# A 的 platform_order_no 在 E(refund_record_reports)按订单号唯一对应(8月 unmatched
+# 仅 6-7 笔), 回填其 refund_time 到 actual_refund_time; 对账归日消除 created_at_raw
+# 跨日边界错位。E 滞后未匹配退化用 created_at_raw。
+# ─────────────────────────────────────────────────────────────
+def backfill_a_actual_refund_time(db, limit: int = 20000) -> dict:
+    """A 路(线上直退已退款) actual_refund_time = E.refund_time 回填(platform_order_no 唯一)。
+
+    仅填 actual_refund_time 为空 的 线上+已退款 行; 幂等(已填跳过)。
+    """
+    from sqlalchemy import text
+
+    stats = {"matched": 0, "no_candidate": 0, "multi": 0, "scanned": 0}
+    rows = db.execute(text("""
+        SELECT a.refund_no, a.platform_order_no, a.created_at_raw
+        FROM refunds a
+        WHERE a.refund_method='线上' AND a.status='已退款'
+          AND a.actual_refund_time IS NULL
+          AND a.platform_order_no IS NOT NULL
+        ORDER BY a.created_at_raw
+        LIMIT :lim
+    """), {"lim": limit}).all()
+    stats["scanned"] = len(rows)
+    for r in rows:
+        cands = db.execute(text("""
+            SELECT id, refund_time FROM refund_record_reports
+            WHERE platform_order_no = :o AND refund_status IN ('退款成功','成功','SUCCESS')
+        """), {"o": str(r.platform_order_no).strip()}).all()
+        if len(cands) == 1:
+            db.execute(text("UPDATE refunds SET actual_refund_time=:t WHERE refund_no=:rf"),
+                       {"t": cands[0].refund_time, "rf": r.refund_no})
+            stats["matched"] += 1
+        elif len(cands) > 1:
+            stats["multi"] += 1
+        else:
+            stats["no_candidate"] += 1
+    db.commit()
+    logger.info(f"[quality_disposition] backfill_a_actual_refund_time {stats}")
+    return stats

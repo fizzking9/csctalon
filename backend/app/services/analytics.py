@@ -7152,12 +7152,14 @@ def refund_decision_overview(
 
     # ── 1. 资金流出全景: 严格四路经营 A线上直退 / B钱包提现 / C闪猫退款 / D手动退款 ──
     #     线下退款、转入提现账户(钱包内部流转)不属于四路, 不计入现金流全景
+    #     对账归日: A 用 actual_refund_time(E路回填实际扣款, 2026-09-09), 缺失退化 created_at_raw
     route_rows = db.execute(text(f"""
-        SELECT {_day("r.created_at_raw")} AS d,
+        SELECT {_day("COALESCE(r.actual_refund_time, r.created_at_raw)")} AS d,
                count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
         FROM refunds r
         WHERE r.refund_method = '线上' AND r.status = '已退款'
-          AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+          AND COALESCE(r.actual_refund_time, r.created_at_raw) >= :ts
+          AND COALESCE(r.actual_refund_time, r.created_at_raw) <= :te
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     # B 用户提现(对账归日用实际扣款时间 actual_refund_time(2026-09-09 E回填), 缺失回退 op_time)
@@ -7246,7 +7248,8 @@ def refund_decision_overview(
         for r in db.execute(text("""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
             FROM refunds r WHERE r.refund_method = '线上' AND r.status = '已退款'
-              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+              AND COALESCE(r.actual_refund_time, r.created_at_raw) >= :ts
+              AND COALESCE(r.actual_refund_time, r.created_at_raw) <= :te
         """), {"ts": s, "te": e}).fetchall():
             tot["online_cnt"] += int(r.cnt or 0); tot["online_amt"] += float(r.amt or 0)
         for r in db.execute(text(f"""
