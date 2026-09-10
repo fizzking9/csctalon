@@ -27,6 +27,7 @@ from app.models.complaint_sync_log import ComplaintSyncLog
 from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
 from app.services.analytics import _complaint_source_type_case
+from app.services.complaint_scope import BUCKET_EXTERNAL
 from app.services.data_parser import COLUMN_TEMPLATES
 from app.services.ingest_validator import (
     summarize_severity,
@@ -276,26 +277,79 @@ def _is_empty_card_rec(rec: dict[str, Any]) -> bool:
     return all((rec.get(k) is None or str(rec.get(k)).strip() == "") for k in keys)
 
 
-def _sn_to_ticket_map(db: Session, sns: set[str]) -> dict[str, list[str]]:
-    """按 SN 建立 → 外部投诉类工单号列表(核心匹配:SN,一个SN可对应多张工单)
+def _sn_to_ticket_map(db: Session, sns: set[str]) -> dict[str, list[tuple[str, datetime]]]:
+    """按 SN 建立 → 外部投诉类工单 (工单号, 登记时间) 列表（按登记时间升序）
 
-    用 _complaint_source_type_case() == '外部投诉' 筛选(工信部/12315/消协/监督局等平台投诉)。
-    每张工单取最早登记的作为代表关联(matched_ticket_no), 完整关联在明细查询时按SN合并。
+    用 `_complaint_source_type_case() == '外部投诉'` 筛选
+    (工信部/12315/消协/监督局/公共服务平台 等平台投诉)。
+
+    ⚠️ 2026-09-10 (#47) 返回结构变更: 由 `list[ticket_no]` 改为
+       `list[(ticket_no, register_time)]` —— 供调用方**按日期就近**选代表工单。
+
+       原实现直接取 `[0]`(最早登记), 与投诉日期无关; 当同一 SN 有多张工单时
+       会选错(实测 >60 天差异的 112 对里 **93 对**该 SN 有多张工单)。
+       调用方应改用 `_pick_nearest_ticket()` 选择最接近的候选。
+
+       ⚠️ 为什么**不**加硬时间窗: 实测有一批合法投诉工单是**集中补录**的
+       (如 `消费者协会`/`全国12315平台` 工单登记于 2026-02-03 23:40~23:45,
+       投诉日期却在 2025-12 —— 相差 40~50 天)。硬窗会把这些**真实关联**误杀。
+       "就近选代表"既解决了错配, 又不会丢关联。
     """
     if not sns:
         return {}
     stmt = (
-        select(ServiceTicket.device_sn, ServiceTicket.ticket_no, ServiceTicket.register_time)
+        select(ServiceTicket.device_sn, ServiceTicket.ticket_no,
+               ServiceTicket.register_time)
         .where(
             ServiceTicket.device_sn.in_(sns),
-            _complaint_source_type_case() == "外部投诉",
+            _complaint_source_type_case() == BUCKET_EXTERNAL,
         )
         .order_by(ServiceTicket.register_time.asc().nullslast())
     )
-    result: dict[str, list[str]] = {}
-    for sn, tno, _rt in db.execute(stmt).all():
-        result.setdefault(sn, []).append(tno)
+    result: dict[str, list[tuple[str, datetime]]] = {}
+    for sn, tno, rt in db.execute(stmt).all():
+        result.setdefault(sn, []).append((tno, rt))
     return result
+
+
+def _pick_nearest_ticket(
+    candidates: list[tuple[str, datetime]] | None,
+    ref_date: datetime | None,
+) -> tuple[str | None, int | None]:
+    """从候选工单中挑**登记时间最接近投诉日期**的一张作为代表 (#47)
+
+    参数:
+      candidates: [(ticket_no, register_time), ...]  (来自 `_sn_to_ticket_map`)
+      ref_date:   补充表侧的 complaint_date
+
+    返回:
+      (ticket_no, 日期差天数)。无候选或无法比较 → (最早一张, None) / (None, None)
+
+    设计说明:
+      · ref_date 为空 → 退化为取最早登记(与原行为一致, 不引入随机性)
+      · 有 ref_date → 取 |register_time - ref_date| 最小者
+        (同距时取更早登记的, 保证结果稳定可复现)
+    """
+    if not candidates:
+        return None, None
+    if ref_date is None:
+        return candidates[0][0], None
+
+    ref = ref_date.replace(tzinfo=None) if ref_date.tzinfo else ref_date
+    best: tuple[str, int] | None = None
+    for tno, rt in candidates:
+        if rt is None:
+            continue
+        cur = rt.replace(tzinfo=None) if rt.tzinfo else rt
+        try:
+            diff = abs((cur - ref).days)
+        except (TypeError, AttributeError):
+            continue
+        if best is None or diff < best[1]:
+            best = (tno, diff)
+    if best is None:
+        return candidates[0][0], None
+    return best
 
 
 def _identity_dedup_hash(rec: dict[str, Any]) -> str:
@@ -385,10 +439,13 @@ def _upsert_external(db: Session, rows: list[dict], result: SyncRowResult, sn_ti
     now_dt = now
     for r in rows:
         r["dedup_hash"] = _identity_dedup_hash(r)
-        # SN 关联工单(取最早一张作为代表)
-        ticket_nos = sn_ticket_map.get(r.get("device_sn")) if r.get("device_sn") else None
-        if ticket_nos:
-            r["matched_ticket_no"] = ticket_nos[0]
+        # SN 关联工单: 取**登记时间最接近投诉日期**的一张作为代表(#47)
+        # ⚠️ 原实现取 [0](最早登记), 与投诉日期无关 → 同 SN 多工单时会选错
+        #    (实测 >60 天差异的 112 对里 93 对该 SN 有多张工单)。
+        cands = sn_ticket_map.get(r.get("device_sn")) if r.get("device_sn") else None
+        tno, _diff = _pick_nearest_ticket(cands, r.get("complaint_date"))
+        if tno:
+            r["matched_ticket_no"] = tno
             r["matched_at"] = now_dt
             result.matched += 1
         else:
@@ -397,16 +454,18 @@ def _upsert_external(db: Session, rows: list[dict], result: SyncRowResult, sn_ti
     _batch_upsert(db, ExternalComplaint, rows, result)
 
 
-def _upsert_card(db: Session, rows: list[dict], result: SyncRowResult, sn_ticket_map: dict[str, list[str]]) -> None:
+def _upsert_card(db: Session, rows: list[dict], result: SyncRowResult, sn_ticket_map: dict[str, list[tuple[str, datetime]]]) -> None:
     """卡商群投诉 upsert: 按 dedup_hash 冲突更新(含关联工单字段)"""
     if not rows:
         return
     now = datetime.now(timezone.utc)
     for r in rows:
         r["dedup_hash"] = _identity_dedup_hash(r)
-        ticket_nos = sn_ticket_map.get(r.get("device_sn")) if r.get("device_sn") else None
-        if ticket_nos:
-            r["matched_ticket_no"] = ticket_nos[0]
+        # 同 315: 取登记时间最接近投诉日期的工单(#47)
+        cands = sn_ticket_map.get(r.get("device_sn")) if r.get("device_sn") else None
+        tno, _diff = _pick_nearest_ticket(cands, r.get("complaint_date"))
+        if tno:
+            r["matched_ticket_no"] = tno
             r["matched_at"] = now
             result.matched += 1
         else:
@@ -573,6 +632,10 @@ def sync_complaints_from_payload(
         for r in ext_rows + card_rows:
             if r.get("device_sn"):
                 all_sns.add(r["device_sn"])
+        # ⚠️ 2026-09-10 (#47): 映射改为携带 register_time, 由 _pick_nearest_ticket
+        #    按"登记时间最接近投诉日期"选代表工单。
+        #    原实现取 [0](最早登记) → 同 SN 多工单时会错配;
+        #    但**不**加硬时间窗(实测存在集中补录的合法投诉工单, 硬窗会误杀)。
         sn_ticket_map = _sn_to_ticket_map(db, all_sns)
 
         # 维护设备主表(缺失 SN 建空壳,避免外键失败)

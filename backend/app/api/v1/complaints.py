@@ -20,6 +20,9 @@ from app.models.ticket import ServiceTicket
 from app.schemas.common import PageBase, R
 from app.services.analytics import TZ, _complaint_source_type_case, _ticket_category_case
 
+# #47 (2026-09-10): 卡商 result 前缀锚定判定 + 状态常量(与 complaint_scope 单一来源)
+from app.services.complaint_scope import STATUS_DONE, card_result_state
+
 router = APIRouter(prefix="/complaints", tags=["投诉分析"])
 
 
@@ -258,7 +261,49 @@ def _source_reg_handled(db, src_val: str, ts, te,
     registered = db.scalar(select(func.count()).select_from(ServiceTicket).where(*_reg_where())) or 0
     handled = db.scalar(select(func.count()).select_from(ServiceTicket).where(*_fin_where())) or 0
 
-    # external 桶: 并入补充表(315/卡商)
+    # ⚠️ 2026-09-10 (#47): 卡商**独立成桶** `(外)卡商` —— 不再并入外部桶。
+    #   卡商来源=card_complaints 补充表(工单侧无卡商分类)。
+    #   ⚠️ 卡商 handled 口径与 315 **不同**: 卡商 result 是**混合语义字段**
+    #      (实测 117 种取值, 含自由文本诉求), 故用**前缀锚定**而非枚举 in_()。
+    #
+    #   ⚠️ 本分支必须**独立于** `src_val == "外部投诉"` 那个 if 块 ——
+    #      否则(我曾犯错)卡商永远进不去, 表现为「total 有值但 registered/handled 全 0」。
+    if src_val == "(外)卡商":
+        _cc_conds = [CardComplaint.complaint_date.isnot(None)]
+        if ts:
+            _cc_conds.append(CardComplaint.complaint_date >= ts)
+        if te:
+            _cc_conds.append(CardComplaint.complaint_date <= te)
+        _total_cc = db.scalar(
+            select(func.count()).select_from(CardComplaint).where(*_cc_conds)
+        ) or 0
+        # 扣除已 matched 到"窗口内登记投诉工单"的重叠(工单侧已计, 避免双算)
+        _sub = select(ServiceTicket.ticket_no).where(
+            _ticket_category_case() == "投诉",
+            ServiceTicket.register_time.isnot(None),
+        )
+        if ts:
+            _sub = _sub.where(ServiceTicket.register_time >= ts)
+        if te:
+            _sub = _sub.where(ServiceTicket.register_time <= te)
+        _ov_cc = db.scalar(
+            select(func.count()).select_from(CardComplaint).where(
+                CardComplaint.complaint_date.isnot(None),
+                CardComplaint.matched_ticket_no.isnot(None),
+                CardComplaint.matched_ticket_no.in_(_sub),
+                *([CardComplaint.complaint_date >= ts] if ts else []),
+                *([CardComplaint.complaint_date <= te] if te else []),
+            )
+        ) or 0
+        _reg_cc = max(int(_total_cc) - int(_ov_cc), 0)
+        # handled: 前缀锚定判定(与 complaint_scope 单一来源, 见上方说明)
+        _done_rows = db.execute(
+            select(CardComplaint.result).where(*_cc_conds)
+        ).scalars().all()
+        _hdl_cc = sum(1 for v in _done_rows if card_result_state(v) == STATUS_DONE)
+        return int(_reg_cc), int(_hdl_cc)
+
+    # external 桶: 并入补充表(315)
     if include_suppl_external and src_val == "外部投诉":
         def _overlap(model, done_only: bool = False, handled_side: bool = False):
             """补充记录 matched_ticket_no 指向"窗口内登记投诉工单"的条数.
@@ -296,9 +341,11 @@ def _source_reg_handled(db, src_val: str, ts, te,
                 conds.append(model.complaint_date <= te)
             return db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
 
-        # registered 并入: 净新增(总数 − 已 matched 窗口内登记工单) —— 两表都并入(既有口径)
+        # registered 并入: 净新增(总数 − 已 matched 窗口内登记工单) —— 仅 315
+        #   ⚠️ #47: 卡商已拆出为**独立桶**(见函数上方 `src_val == "(外)卡商"` 分支),
+        #      此处只并入 ExternalComplaint(原先两表都并入, 会与卡商桶双算)。
         ext_reg = 0
-        for model in (ExternalComplaint, CardComplaint):
+        for model in (ExternalComplaint,):
             conds = [model.complaint_date.isnot(None)]
             if ts:
                 conds.append(model.complaint_date >= ts)
@@ -308,9 +355,9 @@ def _source_reg_handled(db, src_val: str, ts, te,
             ext_reg += int(total) - int(_overlap(model, done_only=False, handled_side=False))
         registered += max(ext_reg, 0)
 
-        # handled 并入: 仅 315(external_complaints) 补充表已办结(result∈办结类)。
-        # ⚠️ 卡商(card_complaints)不并入: 其 result 是另一套语义(已解决/已退款完成/投诉错误/流量虚...),
-        #    无统一"办结类"判定集合, 套用 315 办结集合会恒为 0, 误判卡商永不处理 → 保持不进 handled。
+        # handled 并入: 315(external_complaints) 补充表已办结(result∈办结类)。
+        #   ⚠️ #47: 卡商**有独立分支**(见函数上方 `src_val == "(外)卡商"`), 用前缀锚定判定,
+        #      不并入此处 —— 用 315 的办结枚举套卡商会恒为 0(实测卡商 result 是另一套语义)。
         model = ExternalComplaint
         conds = [model.complaint_date.isnot(None)]
         if ts:
@@ -327,10 +374,16 @@ def _source_reg_handled(db, src_val: str, ts, te,
 
 
 def _sources_reg_handled(db, ts, te) -> dict:
-    """三源 registered/handled 汇总: {source: {registered, handled}} + total。"""
+    """四源 registered/handled 汇总: {source: {registered, handled}} + total。
+
+    ⚠️ 2026-09-10 (#47): 由三源扩为**四源** —— 新增 `(外)卡商`(用户要求各统计口单列)。
+       原先卡商被并入「外部投诉」桶, 现独立; 卡商的 handled 口径见
+       `_source_reg_handled` 内的卡商分支说明(前缀锚定三态, 与
+       `complaint_scope.card_result_state` 同源)。
+    """
     out = {}
     reg_sum = handled_sum = 0
-    for src in ("内部投诉", "商户号投诉", "外部投诉"):
+    for src in ("内部投诉", "商户号投诉", "外部投诉", "(外)卡商"):
         reg, hdl = _source_reg_handled(db, src, ts, te)
         out[src] = {"registered": reg, "handled": hdl}
         reg_sum += reg
@@ -602,19 +655,26 @@ def complaint_summary(
             or 0
         )
 
-    external_total = int(external_ticket_total) + supplementary["external"]["total"] - _overlap_suppl(ExternalComplaint, "外部投诉") + supplementary["card"]["total"] - _overlap_suppl(CardComplaint, "外部投诉")
+    # ⚠️ 2026-09-10 (#47): 卡商**从外部桶拆出** → external_total 不再并入 card 补充表。
+    #   原式(2026-09-01 口径): external = 工单 + 315净 + 卡商净  ← 卡商被并进来
+    #   现式: external = 工单 + 315净; card = 卡商净(独立成桶, 见下方 "card" 返回字段)
+    external_total = int(external_ticket_total) + supplementary["external"]["total"] - _overlap_suppl(ExternalComplaint, "外部投诉")
+    card_total = int(supplementary["card"]["total"]) - _overlap_suppl(CardComplaint, "(外)卡商")
     merchant_total = int(merchant_ticket_total)
 
-    # ---- 三源趋势合并补充表(逐日去重) ----
+    # ---- 四源趋势合并补充表(逐日去重) ----
     # 趋势与总数同口径: 工单按日计数 + 补充表按投诉日期 (total - overlap)。
     # overlap = 当日已关联到本范围内工单的补充记录(工单已计入, 去重)。
     # 使「推送了但未落工单」的外部/卡商投诉也能在趋势里按投诉日期体现。
-    # 卡商群投诉归「外部投诉」桶(2026-09-01 用户确认口径): 外部趋势 = 工单 + 315净 + 卡商净。
+    # ⚠️ 2026-09-10 (#47): 卡商**独立成桶** —— 原先把卡商群投诉归入「外部投诉」桶
+    #    (2026-09-01 口径), 现拆开: 外部趋势 = 工单 + 315净; 卡商趋势 = 卡商净。
     # ⚠️ 不可嵌套调用 _merge_trend(其第一参数要求 (day,count) 元组列表, 嵌套会把
     #    {day,count} 字典解包 → int('count') 崩溃)。两个补充表 dict 列表直接相加后一次合并。
     external_suppl_trend = _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te)
-    card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "外部投诉", ts, te)
-    external_trend_merged = _merge_trend(external_trend, external_suppl_trend + card_suppl_trend)
+    card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "(外)卡商", ts, te)
+    external_trend_merged = _merge_trend(external_trend, external_suppl_trend)
+    # 卡商无工单侧来源 → 趋势直接用补充表
+    card_trend_merged = _merge_trend([], card_suppl_trend)
     merchant_trend_merged = _merge_trend(merchant_trend, [])
     internal_trend_merged = _merge_trend(internal_trend, [])  # 内部投诉无补充表
 
@@ -707,6 +767,15 @@ def complaint_summary(
                 "by_handler": _handler_rows(external_by_handler),
                 "trend": external_trend_merged,
             },
+            # #47 (2026-09-10) 新增: (外)卡商 独立桶(原先并入 external)
+            "card": {
+                "total": int(card_total),
+                "registered": _reg_handled["(外)卡商"]["registered"],
+                "handled": _reg_handled["(外)卡商"]["handled"],
+                "by_category": [],   # 卡商无工单侧分类; 分类见 complaint_subs(用 problem_category)
+                "by_handler": [],     # 卡商处理人见 analytics.complaint_card_handlers
+                "trend": card_trend_merged,
+            },
         }
     )
 
@@ -722,7 +791,7 @@ def complaint_detail(
     _: CurrentUser,
     start: str | None = None,
     end: str | None = None,
-    source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉"),
+    source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉/(外)卡商"),
     subject: str | None = Query(None, description="按被投诉主体(归一化名, 如 云客猫)过滤明细"),
     limit: int = Query(500, ge=1, le=2000),
     include_supplementary: bool = Query(False, description="为true时按设备SN附加315/卡商补充明细(关联合并)"),
@@ -876,9 +945,11 @@ def complaint_detail(
                             continue
                         rec["supplementary"].append(suppl_item)
                     continue
-                # 未关联工单(或SN为空) → 独立行, 归入对应三源口径(315→外部投诉, 卡商→外部投诉)
+                # 未关联工单(或SN为空) → 独立行, 归入对应桶
+                #   ⚠️ 2026-09-10 (#47): 卡商**独立成桶**「(外)卡商」,
+                #      原先 `main_source = "外部投诉"`(卡商被并入外部) → 已拆开。
                 is_315 = source_name == "315外部投诉"
-                main_source = "外部投诉"
+                main_source = "外部投诉" if is_315 else "(外)卡商"
                 extra_rows.append({
                     "source": main_source,
                     "source_role": "supplementary",
@@ -886,9 +957,9 @@ def complaint_detail(
                     "no": suppl_item["complaint_no"] or suppl_item["matched_ticket_no"],
                     "device_sn": sn,
                     # 分类: 315表=平台(全国12315平台/公共服务平台等, 属外部投诉) /
-                    #      卡商表=投诉群名无分类意义(群/主体名, 如"小皮丘&深圳联通"), 统一归入外部投诉子类「卡商群投诉」
+                    #      卡商表=投诉群名无分类意义(群/主体名, 如"小皮丘&深圳联通"), 统一用「(外)卡商」
                     #      避免明细/看板分类筛选出现主体群名
-                    "category": getattr(c, "platform", None) if is_315 else "卡商群投诉",
+                    "category": getattr(c, "platform", None) if is_315 else "(外)卡商",
                     "problem": c.problem,
                     "handler": _norm_handler(suppl_item["handler"]),
                     "entity": entity,
@@ -904,7 +975,8 @@ def complaint_detail(
                 })
 
         _collect(ExternalComplaint, "device_sn", "315外部投诉")
-        _collect(CardComplaint, "device_sn", "卡商群投诉")
+        # #47: 统计桶名用「(外)卡商」(与数据源字面名"卡商群投诉"区分)
+        _collect(CardComplaint, "device_sn", "(外)卡商")
 
         # 工单行便捷合并字段: 补充表里更详细的 完成时间/投诉内容(供明细表直接展示)
         for r in records:
@@ -989,7 +1061,7 @@ def complaint_supplementary(
     _: CurrentUser,
     start: str | None = None,
     end: str | None = None,
-    source_type: str | None = Query(None, description="external=315外部投诉/card=卡商群投诉, 缺省查全部"),
+    source_type: str | None = Query(None, description="external=315外部投诉/card=(外)卡商, 缺省查全部"),
     matched: bool | None = Query(None, description="true=仅已关联工单, false=仅未关联"),
     limit: int = Query(500, ge=1, le=2000),
 ):
@@ -1040,7 +1112,7 @@ def complaint_supplementary(
     if source_type in (None, "external", "315"):
         items.extend(_items(ExternalComplaint, "device_sn", "315外部投诉"))
     if source_type in (None, "card", "卡商"):
-        items.extend(_items(CardComplaint, "device_sn", "卡商群投诉"))
+        items.extend(_items(CardComplaint, "device_sn", "(外)卡商"))
     # 按投诉日期降序(主排序), 无日期的排末尾
     items.sort(key=lambda x: (x.get("complaint_date") is None, x.get("complaint_date") or ""), reverse=True)
     # F-P1-2: 补充记录 登记/处理 计数(明细标题展示)
@@ -1298,7 +1370,7 @@ def complaint_backlog(
     _: CurrentUser,
     start: str | None = None,
     end: str | None = None,
-    source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉"),
+    source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉/(外)卡商"),
     status: str | None = Query(None, description="归一化状态: 处理中/待处理/待跟进"),
     category: str | None = Query(None, description="按工单服务项(分类)过滤"),
     has_handler: bool | None = Query(None, description="true=已分派(有真实处理人) / false=待分派(无处理人)"),
@@ -1343,8 +1415,9 @@ def complaint_backlog(
         bucket = next((b for b, lo, hi in _BACKLOG_AGING_BUCKETS if lo <= ad and (hi is None or ad <= hi)), ">14天")
         aging_counter[bucket] += 1
     by_aging = [{"name": b, "count": aging_counter.get(b, 0)} for b, _, _ in _BACKLOG_AGING_BUCKETS]
-    # 来源×龄期交叉统计: 每个来源(内部/商户号/外部)的龄期分布, 回答「哪个来源积压最久」
-    _SOURCE_ORDER = ["内部投诉", "商户号投诉", "外部投诉"]
+    # 来源×龄期交叉统计: 每个来源的龄期分布, 回答「哪个来源积压最久」
+    #   ⚠️ 2026-09-10 (#47): 由三源扩为**四源** —— 新增 `(外)卡商`(用户要求各统计口单列)。
+    _SOURCE_ORDER = ["内部投诉", "商户号投诉", "外部投诉", "(外)卡商"]
     _sa_map: dict[str, dict[str, int]] = {}
     for r in backlog:
         ad = r["aging_days"]
@@ -1790,13 +1863,20 @@ def complaint_analysis(
     ) or 0
 
     # 补充表趋势(按日, 含 overlap)供总数与趋势共用同一去重口径
+    #   ⚠️ 2026-09-10 (#47): 卡商**独立成桶**(统计出口), 但传入 `_suppl_trend_rows`
+    #      的 `src_expr_val` 是 **工单侧来源桶**, 用于匹配"已落成工单"的重叠。
+    #      卡商投诉在工单侧登记为**外部投诉类**(工信部/12315/消协等平台投诉),
+    #      故此处仍传 "外部投诉" —— 传 "(外)卡商" 会使 t_sub 恒空 → overlap 恒 0
+    #      → 卡商总数虚高(实测 796 vs 真实 39)。
     _ext_suppl_trend = _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te)
     _card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "外部投诉", ts, te)
     # 补充表净计入总数 = total - overlap (overlap 已关联本范围内工单 → 工单已计入, 去重)
     _ext_suppl_net = sum(int(r["total"] or 0) - int(r["overlap"] or 0) for r in _ext_suppl_trend)
     _card_suppl_net = sum(int(r["total"] or 0) - int(r["overlap"] or 0) for r in _card_suppl_trend)
     merchant_total = int(merchant_ticket_total)
-    external_total = int(external_ticket_total) + _ext_suppl_net + _card_suppl_net
+    external_total = int(external_ticket_total) + _ext_suppl_net
+    # #47: 卡商独立总数(原先并入 external_total)
+    card_total = int(_card_suppl_net)
 
     # 积压: 窗口内登记的未完成(跟随 start/end, 默认近30天; 不再无限累积历史遗留)
     _done_set = {"已结案", "已完成", "完成", "已解决", "已回复", "已反馈", "已关闭", "终止", "已终止"}
@@ -2237,6 +2317,14 @@ def complaint_analysis(
                 "avg_handle_hours": avg_handle_hours,
             },
             "reg_handled": _reg_handled,
+            # #47 (2026-09-10): (外)卡商 独立桶(前端投诉分析页第 5 张 KPI 卡片用)
+            #   原先卡商被并入 external_total, 卡片无处体现
+            "card": {
+                "total": int(card_total),
+                "registered": _reg_handled.get("(外)卡商", {}).get("registered", 0),
+                "handled": _reg_handled.get("(外)卡商", {}).get("handled", 0),
+                "trend": _card_suppl_trend,
+            },
             "source_distribution": source_distribution,
             "water": water,
             "trend": trend,

@@ -62,7 +62,7 @@
             <div class="kpi-card kpi-clickable" style="background:#fef2f2" @click="activeTab = 'backlog'">
               <div class="kpi-label" style="color:#dc2626">积压未处理</div>
               <div class="kpi-value">{{ formatNum(b.total) }}</div>
-              <div class="kpi-sub">内{{ bySourceCount('内部投诉') }} · 商{{ bySourceCount('商户号投诉') }} · 外{{ bySourceCount('外部投诉') }} · 点击下钻</div>
+              <div class="kpi-sub">内{{ bySourceCount('内部投诉') }} · 商{{ bySourceCount('商户号投诉') }} · 外{{ bySourceCount('外部投诉') }} · 卡{{ bySourceCount('(外)卡商') }} · 点击下钻</div>
             </div>
           </el-col>
           <el-col :xs="12" :sm="8" :md="4">
@@ -103,6 +103,19 @@
               </div>
             </div>
           </el-col>
+          <!-- #47 (2026-09-10): (外)卡商 单列 —— 原先并入外部投诉 -->
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="kpi-card" style="background:#ecfdf5">
+              <div class="kpi-label" style="color:#059669">(外)卡商</div>
+              <div class="kpi-value">{{ formatNum(s.card?.total || 0) }}</div>
+              <div class="kpi-sub">卡商群 · 关联{{ formatNum(s.card?.handled || 0) }}</div>
+              <div class="kpi-sub" style="color:#059669">
+                <span style="font-weight:600">新登记</span> {{ formatNum(s.reg_handled['(外)卡商']?.registered || 0) }}
+                <span style="margin:0 4px">·</span>
+                <span style="font-weight:600">处理</span> <span style="color:#16a34a">{{ formatNum(s.reg_handled['(外)卡商']?.handled || 0) }}</span>
+              </div>
+            </div>
+          </el-col>
         </el-row>
 
         <!-- 积压快照(可下钻: 三源 + 龄期 + 明细) -->
@@ -135,7 +148,8 @@
                 </div>
               </div>
               <div class="snapshot-source-bars">
-                <div v-for="src in ['内部投诉', '商户号投诉', '外部投诉']" :key="src" class="snapshot-source-row">
+                <!-- #47 (2026-09-10): 新增 (外)卡商 -->
+                <div v-for="src in ['内部投诉', '商户号投诉', '外部投诉', '(外)卡商']" :key="src" class="snapshot-source-row">
                   <span class="snapshot-source-name">{{ src }}</span>
                   <div class="snapshot-source-track">
                     <div class="snapshot-source-fill" :style="{ width: sourceRatioPct(src), background: sourceBarColor(src) }" />
@@ -992,6 +1006,8 @@ function bySourceCount(src) {
 function sourceBarColor(src) {
   if (src === '内部投诉') return '#2563eb'
   if (src === '外部投诉') return '#dc2626'
+  // #47 (2026-09-10): 卡商单列配色
+  if (src === '(外)卡商') return '#059669'
   return '#7c3aed'
 }
 function sourceRatioPct(src) {

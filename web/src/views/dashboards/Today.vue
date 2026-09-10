@@ -373,6 +373,22 @@
               </div>
               <div v-if="supplExternal.total" class="ck-sub">315补充 {{ formatNum(supplExternal.total) }}条</div>
             </div>
+            <!-- #47 (2026-09-10): 卡商单列 —— 原口径并入外部投诉, 用户要求各统计口单列 -->
+            <div class="ck-cell" style="background:#ecfdf5">
+              <div class="ck-label">(外)卡商</div>
+              <div class="ck-rh">
+                <div class="ck-rh-item">
+                  <span class="ck-rh-num" style="color:#059669">{{ formatNum(complaintSummaryData.card?.registered ?? complaintSummaryData.card?.total) }}</span>
+                  <span class="ck-rh-tag">登记</span>
+                </div>
+                <div class="ck-rh-divider" />
+                <div class="ck-rh-item">
+                  <span class="ck-rh-num" style="color:#16a34a">{{ formatNum(complaintSummaryData.card?.handled) }}</span>
+                  <span class="ck-rh-tag">处理</span>
+                </div>
+              </div>
+              <div v-if="supplCard.total" class="ck-sub">卡商补充 {{ formatNum(supplCard.total) }}条</div>
+            </div>
           </div>
           <div v-if="complaintRegHandledOption" class="compact-pie-wrap">
             <div class="compact-pie-title">投诉来源 · 登记/处理（双柱）</div>
@@ -697,8 +713,9 @@ const recoveryCollapseActive = ref([])
 const refundFilterResult = ref('')
 const refundFilterHandler = ref('')
 const refundFilterReason = ref('')
-// 投诉筛选: 明细区仅按来源(三源)筛选; 分类/状态等筛选排序移到表格列头
-const COMPLAINT_SOURCE_OPTIONS = ['内部投诉', '商户号投诉', '外部投诉']
+// 投诉筛选: 明细区仅按来源(四类: 内部/商户号/外部/卡商)筛选; 分类/状态等筛选排序移到表格列头
+// #47 (2026-09-10): 新增 (外)卡商 —— 原三源口径会把卡商明细归入外部投诉
+const COMPLAINT_SOURCE_OPTIONS = ['内部投诉', '商户号投诉', '外部投诉', '(外)卡商']
 const complaintFilterSource = ref('')
 
 // 当前政策 (静态配置，后续可从接口获取)
@@ -762,6 +779,8 @@ function complaintSourceType(source) {
   if (source === '内部投诉') return 'warning'
   if (source === '外部投诉') return 'danger'
   if (source === '商户号投诉') return 'primary'
+  // #47 (2026-09-10): 卡商单列 —— 原先把卡商归入外部投诉, 现独立配色
+  if (source === '(外)卡商' || source === '卡商群投诉') return 'success'
   return 'info'
 }
 
@@ -774,12 +793,19 @@ function complaintStatusType(status) {
 }
 
 // 投诉来源 登记/处理 双柱图 (F-P1-2)
+// #47 (2026-09-10): 卡商单列成第 4 根柱 —— 原先把卡商并入外部投诉(需修订 LOCKED A-20260902-016)
 const complaintRegHandledOption = computed(() => {
   const src = complaintSummaryData.value
-  const data = ['内部投诉', '商户号投诉', '外部投诉'].map(k => {
-    const s = src[k === '内部投诉' ? 'internal' : k === '商户号投诉' ? 'merchant' : 'external'] || {}
+  const KEYS = [
+    { name: '内部投诉', key: 'internal' },
+    { name: '商户号投诉', key: 'merchant' },
+    { name: '外部投诉', key: 'external' },
+    { name: '(外)卡商', key: 'card' },
+  ]
+  const data = KEYS.map(({ name, key }) => {
+    const s = src[key] || {}
     return {
-      name: k,
+      name,
       registered: Number(s.registered ?? s.total) || 0,
       handled: Number(s.handled) || 0,
     }
@@ -816,6 +842,7 @@ const complaintCategoryOption = computed(() => {
   add(complaintSummaryData.value.internal?.by_category)
   add(complaintSummaryData.value.merchant?.by_category)
   add(complaintSummaryData.value.external?.by_category)
+  add(complaintSummaryData.value.card?.by_category)
   const entries = Object.entries(cats).sort((a, b) => b[1] - a[1])
   const x = entries.map(e => e[0])
   const data = entries.map(e => e[1])
@@ -866,7 +893,7 @@ const complaintStatusColumnFilters = computed(() => {
   return [...set].map(v => ({ text: v, value: v }))
 })
 
-// 明细区仅按来源(三源)筛选; 分类/状态筛选与排序在表格列头
+// 明细区仅按来源(四类)筛选; 分类/状态筛选与排序在表格列头
 const complaintFilteredList = computed(() => {
   if (!complaintFilterSource.value) return complaintList.value
   return complaintList.value.filter(d => d.source === complaintFilterSource.value)
@@ -887,8 +914,12 @@ const supplSummaryText = computed(() => {
   const ext = s.external || { total: 0, matched: 0 }
   const card = s.card || { total: 0, matched: 0 }
   if (!ext.total && !card.total) return ''
+  // #47 (2026-09-10): 卡商单列展示(不再写成'卡商群投诉'并归入外部)
   return `补充数据源(按SN关联工单): 315外部投诉 ${formatNum(ext.total)} 条(已关联 ${formatNum(ext.matched)}) · 卡商群投诉 ${formatNum(card.total)} 条(已关联 ${formatNum(card.matched)})`
 })
+
+// #47: 卡商登记/处理(来源桶新增的第 4 类)
+const supplCard = computed(() => complaintSummaryData.value?.supplementary?.card || { total: 0, matched: 0 })
 
 // 补充明细 tooltip 文案(来源/日期/内容/处理明细/完成时间)
 function supplTooltip(row) {

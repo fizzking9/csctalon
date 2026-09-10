@@ -14,13 +14,32 @@ from app.models.cs_record import CsRecord
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
-# 2026-08-14: 投诉登记节点下的外部投诉/卡商群投诉两个文件暂不纳入
-#   系统汇总分析。设置为 False 后,所有 analytics 查询将跳过
-#   ExternalComplaint / CardComplaint 两张表,仅使用 service_tickets
-#   中的投诉分类(内部投诉/商户号投诉/外部投诉)作为统计口径。
-#   如需恢复,改为 True 即可。
+# 2026-08-14: 投诉登记节点下的外部投诉/卡商群投诉两个文件曾"暂不纳入"
+#   系统汇总分析。设置为 False 后, 部分 analytics 聚合将跳过
+#   ExternalComplaint / CardComplaint 两张表, 仅使用 service_tickets
+#   中的投诉分类作为统计口径。
+#
+# ⚠️⚠️ 2026-09-10 (#47) 改为 True —— 用户拍板 ⚠️⚠️
+#   原因(实测):
+#     · 用户明确要求「(外)卡商 这个分类在各个统计口都单列出来」;
+#       但 False 时来源桶只查 service_tickets → 卡商恒为 0, 需求无法实现。
+#     · 造成**同一响应内自相矛盾**: 来源桶说"(外)卡商=0",
+#       而 `complaint_card_handlers`(处理人表, 直查三表不受本开关影响)
+#       却报"卡商 4 人/69 笔" —— 两个数字同源不同口径。
+#   量化影响(窗口 2026-07-01~09-11):
+#     外部投诉 343 → 849 (+506, 并入315);
+#     (外)卡商   0 →  67 (+67, 单列);
+#     合计 11,030 → 11,603 (+573)。
+#
+#   ⚠️ 本变更与原 LOCKED A-20260902-016 §问题4 记载的
+#      "`_INCLUDE_COMPLAINT_FILES = False`(analytics.py:17) 影响
+#       complaint_sub/roots 聚合, 但不影响 complaint_pending 的三表直接查询"
+#      **相冲突** → 需走人工审核修订该 LOCKED 文档。
+#      修订申请见 docs/arch/_pending/A-20260910-005。
+#
+#   如需回退(不建议): 改回 False 即可, 但卡商单列将失效。
 # ═══════════════════════════════════════════════════════════════════
-_INCLUDE_COMPLAINT_FILES = False
+_INCLUDE_COMPLAINT_FILES = True
 
 from app.models.card_complaint import CardComplaint
 from app.models.external_complaint import ExternalComplaint
@@ -35,6 +54,15 @@ from app.models.task import SpecialTask
 from app.models.ticket import ServiceTicket
 from app.models.todo import TodoItem
 from app.models.wallet import WalletWithdrawal
+from app.services.complaint_scope import (
+    ALL_BUCKETS,
+    BUCKET_CARD,
+    BUCKET_EXTERNAL,
+    BUCKET_INTERNAL,
+    BUCKET_OTHER,
+    complaint_bucket_case,
+    is_complaint_ticket_cond,
+)
 
 
 # ============================================================
@@ -984,17 +1012,22 @@ def _ticket_category_case(
     col=ServiceTicket.service_category,
     item_col=ServiceTicket.service_item,
 ):
-    # item 命中外部投诉关键词 → 强制归为"投诉"
-    item_whens = [func.coalesce(item_col, literal("")).ilike(f"%{k}%") for k in _EXTERNAL_ITEM_COMPLAINT_KW]
-    # item 命中投诉类关键词(商品/服务/微信投诉) → 归为"投诉"
-    # 注意: 这里仅判定"是否属于投诉"(service_category 兜底), 不是三源分桶。
-    #       "微信投诉"在三源归类中归「商户号投诉」(见 _complaint_source_type_case)。
-    complaint_item_kws = ("商品投诉", "服务投诉", "微信投诉")
-    complaint_item_whens = [func.coalesce(item_col, literal("")).ilike(f"%{k}%") for k in complaint_item_kws]
+    """工单「是否属于投诉」判定 → 归一为 '投诉' 或原 category 值
+
+    ⚠️ 口径来源已统一到 `services/complaint_scope.is_complaint_ticket_cond` (#47, 2026-09-10)。
+       业务口径（用户 2026-09-10 澄清）: **`service_category` 空白 = 投诉**
+       —— 客服登记投诉时不选类别; 工单里 `换货/其他/设备故障/套餐疑问/退款/(空白)`,
+       只有"空白"那个才是投诉。
+
+       本函数额外叠加 item 兜底(`item_col` 命中投诉类关键词 → 也算投诉),
+       用于兼容「category 误填成'退款'但 item 是'商品投诉'」的历史异常行
+       (即 `is_complaint_ticket_cond(..., item_col=item_col)` 的宽松模式)。
+       `is_complaint_ticket_cond` 内部已含 BMS 修复后的向前兼容:
+       `service_category == '投诉'` 也判为投诉。
+    """
+    complaint_cond = is_complaint_ticket_cond(col, item_col)
     return case(
-        (col.is_(None), "投诉"),
-        (col.ilike("%投诉%"), "投诉"),
-        (or_(*(item_whens + complaint_item_whens)), "投诉"),
+        (complaint_cond, "投诉"),
         else_=col,
     ).label("ticket_category")
 
@@ -1003,34 +1036,59 @@ def _ticket_category_case(
 #   商品投诉/服务投诉/微信投诉/12315/工信部/公共服务平台 → 保留原名
 #   其余 → "其它投诉"
 def _complaint_subitem_case():
+    """投诉子类归一（从 service_tickets.service_item）
+
+    ⚠️ 匹配顺序即优先级 —— **外部平台关键词必须排在「商品/服务」之前**，
+       否则 `公共服务平台` 会被 `%服务%` 抢走（实测 87 行被错标为"服务投诉"）。
+       这与 `_complaint_source_type_case` 的"外部平台关键词优先"约定保持一致
+       （2026-08-25 固化）。修复于 2026-09-10 (#47)。
+    """
     si = ServiceTicket.service_item
     return case(
         (si is None, "未标注"),
-        (si.ilike("%商品%"), "商品投诉"),
-        (si.ilike("%服务%"), "服务投诉"),
-        (si.ilike("%微信%"), "微信投诉"),
+        # ── 外部平台关键词优先(先于"商品/服务", 见 docstring) ──
         (si.ilike("%12315%"), "全国12315平台"),
         (si.ilike("%工信部%"), "工信部投诉"),
         (si.ilike("%公共%"), "公共服务平台"),
         (si.ilike("%消费者协会%"), "消费者协会"),
         (si.ilike("%消协%"), "消费者协会"),
+        # ── 内部/商户号(后置, 避免吃掉外部平台名) ──
+        (si.ilike("%商品%"), "商品投诉"),
+        (si.ilike("%服务%"), "服务投诉"),
+        (si.ilike("%微信%"), "微信投诉"),
         else_=si,
     ).label("complaint_sub")
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 投诉三源分类约定(2026-08-25 固化, 全系统唯一口径)
+# 投诉分桶约定(2026-08-25 固化 → 2026-09-10 #47 重构)
 # ───────────────────────────────────────────────────────────────────
 #   商户号投诉 = service_item 含「微信」(微信投诉, 本质是外部投诉但独立分组)
 #   内部投诉   = service_item = 商品投诉 / 服务投诉 (工单直接登记, 未走外部渠道)
 #   外部投诉   = service_item 含外部监管/平台关键词(12315/工信部/公共服务平台/
 #                消费者协会/消协/监督局/市场监管/市监/315平台/12345/政务平台)
-#                + **未标注/其它 一律兜底归外部投诉**(2026-08-25 用户确认: 外部为兜底桶)
-# 判定优先级: 外部平台关键词 > 微信 > 商品/服务投诉 > else=外部投诉(未标注/其它)
+#   其他       = 其余(service_item 为空 / 套餐扣费申诉 等) —— **不再兜底归外部**
+#
+# 判定优先级: 外部平台关键词 > 微信 > 商品/服务投诉 > 其他
 #   ⚠️ 外部平台关键词优先: 若 service_item 同时含外部关键词与微信(如"12315微信投诉"),
 #      归「外部投诉」(监管渠道更重)。
-# 全域统一: 所有投诉统计/明细/看板/涉诉 均复用本函数(_complaint_source_type_case),
-#   不得另写关键词判断(涉诉 SQL 硬编码处见 analytics.py 6628/7110, 与本法一致, 仅原生SQL场景)。
+#
+# ⚠️⚠️ 2026-09-10 (#47) 变更说明 ⚠️⚠️
+#   1. **判据修正**: 工单"投诉"判据由 `service_category ILIKE '%投诉%'`
+#      改为 **`service_category` 为空白**(用户业务澄清, 实测交叉验证 100% 成立)。
+#   2. **取消外部兜底**: 旧版 `else_="外部投诉"` → 新版 `else_="其他"`。
+#      实测空白 category 下 item 为空(81) + 套餐扣费申诉(14) = 95 行,
+#      混入外部投诉会使其虚高。
+#   3. **卡商独立**: `card_complaints` 在**所有统计口单列**为 `(外)卡商` 桶,
+#      不再并入「外部投诉」(需修订 LOCKED A-20260902-016, 见 #47 设计文档)。
+#   4. **去重**: 按 `(SN, 手机)` + 30 天窗合并同一笔多渠道投诉。
+#   5. **状态合并**: 任一渠道为完成态即视为已处理。
+#
+# 实现单一来源: `app/services/complaint_scope.py`(常量/判据/CASE 均出自该模块),
+#   本文件的 `_ticket_category_case` / `_complaint_source_type_case` 仅作薄封装,
+#   避免多处关键词判断漂移。
+# 全域统一: 所有投诉统计/明细/看板/涉诉 均复用本函数, 不得另写关键词判断
+#   (涉诉 SQL 硬编码处见 analytics.py 6628/7110, 与本法一致, 仅原生SQL场景)。
 # ═══════════════════════════════════════════════════════════════════
 _EXTERNAL_PLATFORM_KEYWORDS = (
     "工信部", "12315", "公共服务平台", "消费者协会", "消协",
@@ -1039,18 +1097,24 @@ _EXTERNAL_PLATFORM_KEYWORDS = (
 _MERCHANT_COMPLAINT_KEYWORDS = ("微信",)
 _INTERNAL_COMPLAINT_KEYWORDS = ("商品投诉", "服务投诉")
 def _complaint_source_type_case(col=ServiceTicket.service_item):
-    """三源投诉分类(CASE WHEN): '外部投诉' / '商户号投诉' / '内部投诉'
-    见上方约定: 微信→商户号; 商品投诉/服务投诉→内部; 外部平台关键词及未标注/其它→外部。"""
-    si = func.coalesce(col, literal(""))
-    platform_whens = [si.ilike(f"%{k}%") for k in _EXTERNAL_PLATFORM_KEYWORDS]
-    merchant_whens = [si.ilike(f"%{k}%") for k in _MERCHANT_COMPLAINT_KEYWORDS]
-    internal_whens = [si.ilike(f"%{k}%") for k in _INTERNAL_COMPLAINT_KEYWORDS]
-    return case(
-        (or_(*platform_whens), "外部投诉"),
-        (or_(*merchant_whens), "商户号投诉"),
-        (or_(*internal_whens), "内部投诉"),
-        else_="外部投诉",  # 未标注/其它 → 外部(兜底桶, 2026-08-25 用户确认)
-    ).label("complaint_source_type")
+    """工单投诉分桶(CASE WHEN) → 内部投诉 / 商户号投诉 / 外部投诉 / 其他
+
+    ⚠️ 口径来源已统一到 `services/complaint_scope.complaint_bucket_case` (#47, 2026-09-10)。
+
+    与旧版(2026-08-25)的**唯一实质变更**:
+      · 旧: `else_="外部投诉"`(未标注/其它**兜底归外部**)
+      · 新: `else_=BUCKET_OTHER`("其他") —— 用户 2026-09-10 澄清:
+        空白 category 的投诉里, `service_item` 为空(81)或 `套餐扣费申诉`(14)
+        共 95 行应独立成"其他"桶, **不能混进外部投诉**(否则外部投诉虚高)。
+      · **卡商不在本 CASE 内** —— 它来自 `card_complaints` 表,
+        由调用方在 UNION 时直接标注 `BUCKET_CARD`(见 §卡商独立)。
+
+    判定优先级: 外部平台关键词 > 微信(商户号) > 商品/服务(内部) > 其他
+      ⚠️ 外部平台关键词优先: "12315微信投诉"归「外部投诉」(监管渠道更重, 2026-08-25 固化)。
+    全域统一: 所有投诉统计/明细/看板/涉诉 均复用本函数, 不得另写关键词判断
+      (涉诉 SQL 硬编码处见 analytics.py 6628/7110, 与本法一致, 仅原生SQL场景)。
+    """
+    return complaint_bucket_case(col)
 
 # ============================================================
 # 模块: 工单有效完工时间推算 (effective_finish_time)
@@ -1553,10 +1617,15 @@ def dashboard_summary(db: Session) -> dict[str, Any]:
     complaint_by_sub = [
         {"name": r[0], "value": int(r[1] or 0)} for r in complaint_sub_rows
     ]
-    # 把 external_complaints 的 complaint_category 归并为 "外部投诉平台" 子类 (避免与内部投诉子类混淆,同时累加独立投诉表)
+    # 把 external_complaints 的 complaint_category 归并为 "外部投诉平台" 子类
+    # (避免与内部投诉子类混淆, 同时累加独立投诉表)
+    #
+    # ⚠️ 2026-09-10 (#47): 卡商**单列**为独立子类「(外)卡商」, 不再并入外部。
+    #    用户要求"卡商投诉 可以单独于外部投诉, 可以单列 (外)卡商 这个分类;
+    #    在各个统计口 都单列出来"。
     if complaint_ec or complaint_cc:
         _name_ec = "外部投诉(监督局/315等)"
-        _name_cc = "卡商群投诉"
+        _name_cc = BUCKET_CARD          # "(外)卡商"
         _existing_subs = {x["name"] for x in complaint_by_sub}
         if complaint_ec:
             complaint_by_sub.append({"name": _name_ec, "value": int(complaint_ec)})
@@ -3568,12 +3637,14 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                _complaint_source_type_case(),
                func.count().label("cnt"))
         .where(tk_between, _ticket_category_case() == "投诉")
-        .group_by("complaint_sub", "complaint_source_type")
+        # ⚠️ 标签名随 complaint_scope 变更为 'complaint_bucket'; SQLAlchemy 2.0 要求
+        #    text() 显式包裹(不能用裸字符串引用 label)。
+        .group_by("complaint_sub", text("complaint_bucket"))
         .order_by(text("cnt DESC"))
     ).all()
     complaint_subs = [
         {"name": r[0] or "未标注",
-         "source_type": r[1] or "内部投诉",
+         "source_type": r[1] or BUCKET_INTERNAL,
          "value": int(r[2] or 0)}
         for r in comp_sub_rows
     ]
@@ -3599,16 +3670,16 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         cc_between = and_(CardComplaint.complaint_date.isnot(None),
                           CardComplaint.complaint_date >= ts, CardComplaint.complaint_date <= te)
         cc_rows = db.execute(
-            select(func.coalesce(CardComplaint.problem_category, "卡商群投诉"),
+            select(func.coalesce(CardComplaint.problem_category, BUCKET_CARD),
                    func.count().label("cnt"))
             .where(cc_between)
-            .group_by(func.coalesce(CardComplaint.problem_category, "卡商群投诉"))
+            .group_by(func.coalesce(CardComplaint.problem_category, BUCKET_CARD))
             .order_by(text("cnt DESC"))
         ).all()
         for r in cc_rows:
             complaint_subs.append({
-                "name": str(r[0] or "卡商群投诉"),
-                "source_type": "卡商群投诉",
+                "name": str(r[0] or BUCKET_CARD),
+                "source_type": BUCKET_CARD,
                 "value": int(r[1] or 0),
             })
     else:
@@ -3617,7 +3688,8 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     if complaint_subs:
         complaint_subs.sort(key=lambda x: -x["value"])
     # 今日投诉总数 (便于前端展示 "今日共XX条投诉") = 三张独立投诉表今日之和
-    int(sum((x["value"] for x in complaint_subs if x["name"] not in ("外部投诉(监督局/315等)", "卡商群投诉") or (x["source_type"] == "外部投诉" and x["name"].startswith("外部投诉"))), 0))
+    # ⚠️ 2026-09-10 (#47): 卡商子类名已由 '卡商群投诉' 改为 BUCKET_CARD('(外)卡商')
+    int(sum((x["value"] for x in complaint_subs if x["name"] not in ("外部投诉(监督局/315等)", BUCKET_CARD) or (x["source_type"] == BUCKET_EXTERNAL and x["name"].startswith("外部投诉"))), 0))
     # 为避免重复计算,直接重算 total = 三表独立相加
     _cnt_st = db.execute(select(func.count()).where(tk_between, _ticket_category_case() == "投诉")).scalar() or 0
     _cnt_ec = db.execute(select(func.count()).where(ec_between)).scalar() or 0
@@ -3629,32 +3701,39 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     comp_src_rows = db.execute(
         select(_complaint_source_type_case(), func.count().label("cnt"))
         .where(tk_between, _ticket_category_case() == "投诉")
-        .group_by("complaint_source_type")
+        # ⚠️ 用 text() 显式包裹标签: 标签名随 complaint_scope 变更为
+        #    'complaint_bucket' (原 'complaint_source_type'),
+        #    SQLAlchemy 2.0 不允许裸字符串引用 label。
+        .group_by(text("complaint_bucket"))
         .order_by(text("cnt DESC"))
     ).all()
     complaint_by_source = [
-        {"name": r[0] or "外部投诉", "value": int(r[1] or 0)}
+        {"name": r[0] or BUCKET_OTHER, "value": int(r[1] or 0)}
         for r in comp_src_rows
     ]
-    # 外部投诉平台(ExternalComplaint) 归入外部桶; CardComplaint=卡商群投诉 归入外部桶
+    # 315 补充表(external_complaints) → 归入「外部投诉」桶
     if _cnt_ec > 0:
         found_outer = False
         for x in complaint_by_source:
-            if x["name"] == "外部投诉":
+            if x["name"] == BUCKET_EXTERNAL:
                 x["value"] += int(_cnt_ec); found_outer = True; break
         if not found_outer:
-            complaint_by_source.append({"name": "外部投诉", "value": int(_cnt_ec)})
+            complaint_by_source.append({"name": BUCKET_EXTERNAL, "value": int(_cnt_ec)})
+    # ⚠️ 2026-09-10 (#47) 卡商独立: card_complaints **单列**为「(外)卡商」桶。
+    #    旧口径 `卡商群投诉 = 外部投诉`(并入外部桶)已废弃 —— 用户 2026-09-10 明确要求
+    #    卡商投诉 可以单独于外部投诉, 可以单列 (外)卡商 这个分类; 在各个统计口 都单列出来。
+    #    "卡商投诉 可以单独于外部投诉, 可以单列 (外)卡商 这个分类; 在各个统计口 都单列出来"。
+    #    需修订 LOCKED A-20260902-016(其规定 complaint_external_handlers 合并展示)。
     if _cnt_cc > 0:
-        # 卡商群投诉 = 外部投诉
-        found_outer = False
+        found_card = False
         for x in complaint_by_source:
-            if x["name"] == "外部投诉":
-                x["value"] += int(_cnt_cc); found_outer = True; break
-        if not found_outer:
-            complaint_by_source.append({"name": "外部投诉", "value": int(_cnt_cc)})
-    # 补齐三源桶,缺失补0 (前端颜色固定)
+            if x["name"] == BUCKET_CARD:
+                x["value"] += int(_cnt_cc); found_card = True; break
+        if not found_card:
+            complaint_by_source.append({"name": BUCKET_CARD, "value": int(_cnt_cc)})
+    # 补齐各桶,缺失补0 (前端颜色固定)
     _src_present = {x["name"] for x in complaint_by_source}
-    for nm in ("内部投诉", "商户号投诉", "外部投诉"):
+    for nm in ALL_BUCKETS:
         if nm not in _src_present:
             complaint_by_source.append({"name": nm, "value": 0})
     complaint_by_source.sort(key=lambda x: -x["value"])
@@ -3971,12 +4050,16 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         acc = handlers_acc.setdefault(handler, {
             "total": 0,
             "by_status": {"待处理": 0, "处理中": 0, "已完成": 0, "已终止": 0, "未标注": 0},
-            "by_source": {"内部投诉": 0, "外部投诉": 0, "卡商群投诉": 0},
+            # ⚠️ 2026-09-10 (#47): by_source 的键为**统计分类桶**常量, 不再用字面"卡商群投诉"
+            #    ("卡商群投诉"是腾讯文档 Sheet 名/数据源名, 与统计分类是两回事)
+            "by_source": {BUCKET_INTERNAL: 0, BUCKET_EXTERNAL: 0, BUCKET_CARD: 0},
         })
         acc["total"] += cnt
         acc["by_status"][status_bucket] = acc["by_status"].get(status_bucket, 0) + cnt
-        if src_bucket in ("内部投诉", "外部投诉", "卡商群投诉"):
+        if src_bucket in (BUCKET_INTERNAL, BUCKET_EXTERNAL, BUCKET_CARD):
             acc["by_source"][src_bucket] = acc["by_source"].get(src_bucket, 0) + cnt
+        elif src_bucket == "卡商群投诉":  # 兼容旧值(未归一的上游数据)
+            acc["by_source"][BUCKET_CARD] = acc["by_source"].get(BUCKET_CARD, 0) + cnt
         else:
             acc["by_source"]["未标注"] = acc["by_source"].get("未标注", 0) + cnt
 
@@ -4001,9 +4084,20 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     #   - 内部投诉处理人: source_type == '内部投诉' (仅 service_tickets)
     #   - 外部投诉处理人: source_type == '外部投诉' + '卡商群投诉'
     #   - 因数量级差异较大，分开展示更清晰
+    #
+    # ⚠️⚠️ 2026-09-10 (#47) 变更: 卡商**从外部拆出成独立表** ⚠️⚠️
+    #   用户要求"(外)卡商 这个分类; 在各个统计口 都单列出来"。
+    #   旧口径(2026-08-14): external = '外部投诉' + '卡商群投诉'(合并)。
+    #   新口径: 三张表并列 —— 内部投诉 / 外部投诉 / (外)卡商。
+    #   ⚠️ 本变更与原 LOCKED A-20260902-016 §问题3 冲突
+    #      (其明文规定 `complaint_external_handlers = 外部投诉 + 卡商群投诉`),
+    #      需走人工审核修订该 LOCKED 文档(见 docs/arch/_pending/A-20260910-005)。
+    #      `complaint_external_handlers` 字段**保留**(向后兼容), 但语义已**不含卡商**;
+    #      新增 `complaint_card_handlers` 承载卡商。
     # ═══════════════════════════════════════════════════════════
     internal_handlers_acc: dict[str, dict] = {}
     external_handlers_acc: dict[str, dict] = {}
+    card_handlers_acc: dict[str, dict] = {}
     for hr in handler_rows:
         raw = str(hr["raw_handler"] or "")
         cleaned = raw.removeprefix("企微-").removeprefix("企微").strip() if raw else ""
@@ -4024,8 +4118,14 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
             status_bucket = "未标注"
         src_bucket = str(hr["source_type"] or "未标注")
         cnt = int(hr["cnt"] or 0)
-        if src_bucket == "内部投诉":
+        if src_bucket == BUCKET_INTERNAL:
             acc = internal_handlers_acc.setdefault(handler, {
+                "total": 0,
+                "by_status": {"待处理": 0, "处理中": 0, "已完成": 0, "已终止": 0, "未标注": 0},
+            })
+        elif src_bucket == BUCKET_CARD or src_bucket == "卡商群投诉":
+            # 卡商独立表(#47): 兼容旧值 '卡商群投诉' 与新增 BUCKET_CARD('(外)卡商')
+            acc = card_handlers_acc.setdefault(handler, {
                 "total": 0,
                 "by_status": {"待处理": 0, "处理中": 0, "已完成": 0, "已终止": 0, "未标注": 0},
             })
@@ -4048,7 +4148,10 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         return result
 
     complaint_internal_handlers = _build_handler_list(internal_handlers_acc)
+    # ⚠️ 语义变更(#47): 不再含卡商。卡商见下方 complaint_card_handlers。
     complaint_external_handlers = _build_handler_list(external_handlers_acc)
+    # 卡商处理人排行（新增, #47 卡商单列）
+    complaint_card_handlers = _build_handler_list(card_handlers_acc)
 
     # ═══════════════════════════════════════════════════════════
     # 2026-08-13 新增: 近期未处理投诉列表
@@ -4291,9 +4394,9 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                 _pb = str(r["problem"])[:64]
                 if _pb:
                     title_parts.append(_pb)
-            title = " ".join(title_parts) or "卡商群投诉(未登记详情)"
+            title = " ".join(title_parts) or "(外)卡商投诉(未登记详情)"
             complaint_pending.append({
-                "source_type": "卡商群投诉",
+                "source_type": BUCKET_CARD,   # #47: 独立桶, 不再并入外部投诉
                 "no": f"CC-{r['id']}" if r["id"] is not None else "",
                 "occur_time": r["complaint_date"].isoformat() if r["complaint_date"] else "",
                 "complainant": r["complainant"] or "",
@@ -4347,7 +4450,11 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         # ↓↓↓ 2026-08-13 新增: 投诉处理人 + 处理状态全景 ↓↓↓
         "complaint_handlers": complaint_handlers,  # Top 15 处理人(合并): {handler, total, by_status, by_source}
         "complaint_internal_handlers": complaint_internal_handlers,  # 2026-08-14 新增: 内部投诉处理人 Top 15
-        "complaint_external_handlers": complaint_external_handlers,  # 2026-08-14 新增: 外部投诉处理人 Top 15
+        # ⚠️ 2026-09-10 (#47) 语义变更: **不再含卡商**(卡商见 complaint_card_handlers)。
+        #    原 LOCKED A-20260902-016 §问题3 规定 = 外部投诉 + 卡商群投诉(合并),
+        #    现按用户要求拆开单列, 字段名保留以向后兼容。
+        "complaint_external_handlers": complaint_external_handlers,  # 外部投诉处理人 Top 15
+        "complaint_card_handlers": complaint_card_handlers,  # (#47 新增) (外)卡商处理人 Top 15
         "complaint_status_all": complaint_status_all,  # 三表合并处理状态 5 桶(对齐处理人status)
         # ↓↓↓ 2026-08-13 新增: 近期未处理投诉列表 ↓↓↓
         "complaint_pending_total": complaint_pending_total,   # 未闭环投诉总数(待+处理中+未标注), 与 complaint_status_all 口径一致
