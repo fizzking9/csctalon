@@ -140,8 +140,9 @@ def _run_migrations_on_startup() -> None:
           拿到空库导致 UndefinedTable/UndefinedColumn 500 的问题。
           仅由持有启动咨询锁(99887766)的 worker 执行, 避免多 worker 重复迁移。
     """
-    from alembic import command
     from alembic.config import Config
+
+    from alembic import command
 
     cfg = Config(str(_BACKEND_DIR / "alembic.ini"))
     cfg.set_main_option("script_location", str(_BACKEND_DIR / "alembic"))
