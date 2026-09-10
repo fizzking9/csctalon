@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.models.manual_refund import ManualRefund
 from app.models.manual_refund_sync_log import ManualRefundSyncLog
 from app.services.data_parser import COLUMN_TEMPLATES
+from app.services.ingest_validator import validate_manual_refund_row
 from app.services.upsert import (
     _ensure_afternoon_time,
     _freeze_ok_manual_refund_rows,
@@ -330,6 +331,7 @@ def sync_manual_refunds_from_payload(
     log = ManualRefundSyncLog(source_file=source_file or "workbuddy-push", sync_source=sync_source, status="success")
     db.add(log)
     result = ManualRefundSyncResult()
+    validation: list[dict[str, Any]] = []
     try:
         rows_raw = payload.get("manual_refunds") or []
         full_sync = bool(payload.get("full_sync"))
@@ -354,6 +356,12 @@ def sync_manual_refunds_from_payload(
                 continue
             rows.append(rec)
         result.total = len(rows_raw)
+
+        # #42/N-3: 入库前校验(只读 advisory) —— 手动退款通道接入, 与投诉通道同口径。
+        # 校验问题不丢弃行、不改数据, 仅写入 validation 供质量排查/治理。
+        for _i, _rec in enumerate(rows):
+            for _iss in validate_manual_refund_row(_rec, _i):
+                validation.append(_iss)
 
         # 维护设备主表(缺失 SN 建空壳,避免外键失败)
         _sync_devices(rows, "device_sn", db)
@@ -409,6 +417,8 @@ def sync_manual_refunds_from_payload(
             "deleted": deleted,
             "failed": result.dropped,
             "rejected": log_rejected,
+            # #42/N-3: 校验问题清单(只读 advisory; 与 errors 严格分离)
+            "validation": validation[:200],
             "filtered": result.filtered,
             "warnings": result.warnings,
             "errors": result.errors[:50],

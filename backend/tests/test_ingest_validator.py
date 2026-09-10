@@ -161,3 +161,41 @@ class TestBatch:
         """单行校验异常必须被吞掉(校验不得阻塞入库)"""
         bad = {"complaint_date": object()}  # 非法类型
         assert isinstance(validate_rows([bad], "external_complaint"), list)
+
+
+class TestWiredIntoProduction:
+    """N-3 回归锁: 校验器必须真正接入生产链路(而非仅存在却零调用)
+
+    背景(复审 N-3): validate_rows / validate_manual_refund_row 曾仅被测试引用,
+    生产零调用 → 校验形同虚设。本类断言各入口确实 import 并调用了校验函数。
+    """
+
+    def test_manual_refund_channel_imports_validator(self):
+        """手动退款同步模块必须导入并调用 validate_manual_refund_row"""
+        import inspect
+
+        from app.services import manual_refund_sync as mrs
+
+        src = inspect.getsource(mrs)
+        assert "validate_manual_refund_row" in src, "manual_refund_sync 未接入校验器"
+        assert "validation" in src, "manual_refund_sync 未上报 validation"
+
+    def test_complaint_channel_imports_validator(self):
+        """投诉同步模块必须导入并调用两个逐行校验函数"""
+        import inspect
+
+        from app.services import complaint_sync as cs
+
+        src = inspect.getsource(cs)
+        assert "validate_external_complaint_row" in src
+        assert "validate_card_complaint_row" in src
+        assert "add_validation" in src, "投诉通道未走独立 validation 通道"
+
+    def test_manual_refund_row_validate_returns_issues(self):
+        """手动退款校验器对问题行确实产出问题(端到端生效的语义基础)"""
+        issues = validate_manual_refund_row({
+            "order_no": "RF1", "register_time": _PAST,
+            "is_refunded": "是", "refund_amount": 0,
+        }, 0)
+        rules = {i["rule"] for i in issues}
+        assert "R-金额" in rules
