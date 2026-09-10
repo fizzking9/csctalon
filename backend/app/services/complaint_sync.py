@@ -28,6 +28,10 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
 from app.services.analytics import _complaint_source_type_case
 from app.services.data_parser import COLUMN_TEMPLATES
+from app.services.ingest_validator import (
+    validate_card_complaint_row,
+    validate_external_complaint_row,
+)
 from app.services.upsert import (
     _sanitize_date,
     _sanitize_name_field,
@@ -446,6 +450,9 @@ def sync_complaints_from_payload(
             if _is_empty_external_rec(rec):
                 ext_result.filtered += 1
                 continue
+            # #42 入库前校验(只读): 时间/枚举/必填问题可见化, 不丢弃不改数据
+            for _iss in validate_external_complaint_row(rec, idx):
+                ext_result.add_warning(idx, f"[校验]{_iss['rule']} {_iss['message']}")
             ext_rows.append(rec)
         ext_result.total = len(ext_rows_raw)
 
@@ -471,6 +478,9 @@ def sync_complaints_from_payload(
             if _is_empty_card_rec(rec):
                 card_result.filtered += 1
                 continue
+            # #42 入库前校验(只读)
+            for _iss in validate_card_complaint_row(rec, idx):
+                card_result.add_warning(idx, f"[校验]{_iss['rule']} {_iss['message']}")
             card_rows.append(rec)
         card_result.total = len(card_rows_raw)
 
@@ -506,6 +516,11 @@ def sync_complaints_from_payload(
         if ext_result.filtered or card_result.filtered:
             _info = f"过滤全空行: 315={ext_result.filtered} 卡商={card_result.filtered}"
             log.error = (f"{_info} | " + str(all_errors)) if all_errors else _info
+        # #42 校验问题计数(只读, 可见化): 汇总写入日志供质量排查
+        _val_warn = ext_result.warnings + card_result.warnings
+        if _val_warn:
+            _val_info = f"入库前校验告警: 315={ext_result.warnings} 卡商={card_result.warnings}"
+            log.error = (f"{log.error} | {_val_info}") if log.error else _val_info
         if ext_result.dropped or card_result.dropped:
             log.status = "partial"
         else:

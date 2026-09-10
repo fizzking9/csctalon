@@ -237,6 +237,8 @@ def ingest_complaints(
         "log_id": stats.get("log_id"),
         "external": {k: ext.get(k) for k in ("total", "inserted", "updated", "failed", "filtered", "matched")},
         "card": {k: card.get(k) for k in ("total", "inserted", "updated", "failed", "filtered", "matched")},
+        # #42 入库前校验告警数(只读检测, 问题可见化; 明细见同步日志)
+        "validation_warnings": int(ext.get("warnings", 0) or 0) + int(card.get("warnings", 0) or 0),
     })
     logger.info(
         f"[ingest] complaints<-{source} run={rid}: "
