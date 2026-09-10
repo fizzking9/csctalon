@@ -58,32 +58,46 @@ class TestTime:
         assert any(i["rule"] == "R-时间" and "未来" in i["message"] for i in issues)
 
     def test_pseudo_date_flagged(self):
-        """伪日期(1970 纪元, 历史 Excel 序列号 bug 产物) → R-时间
-
-        abc-a 修正: 伪日期判定改为"是否落在 1970 纪元"(而非"年份早于 2020"),
-        因为 315 平台存在 2001~2019 的**真实历史台账**。
-        """
+        """伪日期(1970 纪元, 历史 Excel 序列号 bug 产物) → R-时间"""
         pseudo = datetime(1969, 12, 31, 16, 0, tzinfo=_UTC)
         issues = validate_external_complaint_row({"complaint_date": pseudo}, 0)
-        assert any(i["rule"] == "R-时间" and "纪元伪日期" in i["message"] for i in issues)
+        assert any(i["rule"] == "R-时间" and "早于业务存在期" in i["message"] for i in issues)
 
     def test_historical_date_not_flagged(self):
-        """历史投诉(2023)是真实数据, 不应误报"""
-        hist = datetime(2023, 6, 1, tzinfo=_UTC)
+        """历史投诉(2023)是真实数据(源表最早投诉为 2023-09), 不应误报"""
+        hist = datetime(2023, 9, 1, tzinfo=_UTC)
         issues = validate_external_complaint_row({"complaint_date": hist, "result": "和解结案"}, 0)
         assert not [i for i in issues if i["rule"] == "R-时间"]
 
-    def test_historical_early_2000s_not_flagged(self):
-        """★abc-a 回归锁: 2001~2005 年代的历史台账也不得误报
+    def test_year_transposed_date_flagged(self):
+        """★回归锁: "年/月/日转置"的解析产物必须被捕获
 
-        实证: 本地库 complaint_date 落在 2001~2019 共 1556 行且逐年均匀分布
-        (每年 60~97 行) → 是真实台账。旧口径("<2020 即异常")会把这 1556 行
-        全部误报为问题行, 使治理队列 38.6% 被噪声淹没。
+        实证(源表交叉验证): 库内 2001-03-24 ← 源表真值 2025-03-01。
+        规律: 库内年 = 2000 + 真值"日"; 库内"日" = 真值年份 − 2001。
+        这类行(库内 <2024 共 1908 行)会让时效统计严重失真, 必须打标。
+
+        ⚠️ 我曾在 abc-a 首版把这类行**误判为"真实历史台账"**并放宽阈值, 方向完全错误;
+        本用例锁死正确方向, 防止再次回退。
         """
-        for year in (2001, 2005, 2012, 2019):
-            hist = datetime(year, 6, 1, tzinfo=_UTC)
+        for bad in (
+            datetime(2001, 3, 24, tzinfo=_UTC),   # ← 真值 2025-03-01
+            datetime(2009, 3, 23, tzinfo=_UTC),   # ← 真值 2024-03-09
+            datetime(2004, 5, 24, tzinfo=_UTC),   # ← 真值 2025-05-03
+        ):
+            issues = validate_external_complaint_row({"complaint_date": bad}, 0)
+            assert any(i["rule"] == "R-时间" and i["field"] == "complaint_date"
+                       for i in issues), f"{bad:%Y-%m-%d} 应被判定为解析错误"
+
+    def test_source_verified_range_not_flagged(self):
+        """源表实证的真实投诉年份区间(2023-09~2026)不得误报
+
+        源表 `投诉日期` 年份分布: 2025(1362)/2026(1136)/2024(138)/2023(7)。
+        ⚠️ 阈值取 2020, 故 2023~2026 均不应触发 R-时间。
+        """
+        for year in (2023, 2024, 2025, 2026):
+            ok = datetime(year, 9 if year == 2023 else 6, 1, tzinfo=_UTC)
             issues = validate_external_complaint_row(
-                {"complaint_date": hist, "result": "和解结案"}, 0)
+                {"complaint_date": ok, "result": "和解结案"}, 0)
             assert not [i for i in issues if i["rule"] == "R-时间"], f"{year} 不应误报"
 
     def test_inverted_time_flagged(self):
