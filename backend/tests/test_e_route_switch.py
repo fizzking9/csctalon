@@ -18,6 +18,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from tests._db_guard import safe_wipe
+
 _TZ = timezone(timedelta(hours=8))
 
 
@@ -34,21 +36,21 @@ def _test_session(_engine):
     from app.models import Refund, RefundRecordReport
 
     for cls in (RefundRecordReport, Refund):
-        session.execute(cls.__table__.delete())
+        safe_wipe(session, cls)
     # 本文件 D 路回归测试建的 manual(SN-D-*) 也清理, 防污染
-    session.execute(ManualRefund.__table__.delete().where(ManualRefund.device_sn.like("SN-D-%")))
-    session.execute(Device.__table__.delete().where(Device.sn.like("SN-E-%")))
-    session.execute(Device.__table__.delete().where(Device.sn.like("SN-D-%")))
+    safe_wipe(session, ManualRefund, where=ManualRefund.device_sn.like("SN-D-%"))
+    safe_wipe(session, Device, where=Device.sn.like("SN-E-%"))
+    safe_wipe(session, Device, where=Device.sn.like("SN-D-%"))
     session.commit()
     try:
         yield session
     finally:
         try:
             for cls in (RefundRecordReport, Refund):
-                session.execute(cls.__table__.delete())
-            session.execute(ManualRefund.__table__.delete().where(ManualRefund.device_sn.like("SN-D-%")))
-            session.execute(Device.__table__.delete().where(Device.sn.like("SN-E-%")))
-            session.execute(Device.__table__.delete().where(Device.sn.like("SN-D-%")))
+                safe_wipe(session, cls)
+            safe_wipe(session, ManualRefund, where=ManualRefund.device_sn.like("SN-D-%"))
+            safe_wipe(session, Device, where=Device.sn.like("SN-E-%"))
+            safe_wipe(session, Device, where=Device.sn.like("SN-D-%"))
             session.commit()
         except Exception:
             session.rollback()

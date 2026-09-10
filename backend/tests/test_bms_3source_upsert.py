@@ -15,6 +15,8 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from tests._db_guard import safe_wipe
+
 
 @pytest.fixture()
 def _test_session(_engine):
@@ -33,8 +35,8 @@ def _test_session(_engine):
         from app.models import __dict__ as m
 
         cls = m[model]
-        session.execute(cls.__table__.delete())
-    session.execute(Device.__table__.delete().where(Device.sn.in_(_TEST_SNS)))
+        safe_wipe(session, cls)
+    safe_wipe(session, Device, where=Device.sn.in_(_TEST_SNS))
     session.commit()
     try:
         yield session
@@ -44,8 +46,8 @@ def _test_session(_engine):
             for model in ("RefundRecordReport", "BmsOrder", "ReturnTracking"):
                 from app.models import __dict__ as m
 
-                session.execute(m[model].__table__.delete())
-            session.execute(Device.__table__.delete().where(Device.sn.in_(_TEST_SNS)))
+                safe_wipe(session, m[model])
+            safe_wipe(session, Device, where=Device.sn.in_(_TEST_SNS))
             session.commit()
         except Exception:
             session.rollback()

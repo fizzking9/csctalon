@@ -15,6 +15,8 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from tests._db_guard import safe_wipe
+
 
 @pytest.fixture()
 def _test_session(_engine):
@@ -30,16 +32,16 @@ def _test_session(_engine):
     from app.models.device_flow_usage import DeviceFlowUsage
 
     # 清空目标表 + 本文件用到的测试设备(避免与既有数据互相影响)
-    session.execute(DeviceFlowUsage.__table__.delete())
-    session.execute(Device.__table__.delete().where(Device.sn.in_(["68772550194237", "69212627276896"])))
+    safe_wipe(session, DeviceFlowUsage)
+    safe_wipe(session, Device, where=Device.sn.in_(["68772550194237", "69212627276896"]))
     session.commit()
     try:
         yield session
     finally:
         # teardown 清理本文件可能写入的数据
         try:
-            session.execute(DeviceFlowUsage.__table__.delete())
-            session.execute(Device.__table__.delete().where(Device.sn.in_(["68772550194237", "69212627276896"])))
+            safe_wipe(session, DeviceFlowUsage)
+            safe_wipe(session, Device, where=Device.sn.in_(["68772550194237", "69212627276896"]))
             session.commit()
         except Exception:
             session.rollback()

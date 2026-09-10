@@ -14,6 +14,8 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from tests._db_guard import safe_wipe
+
 
 @pytest.fixture()
 def _test_session(_engine):
@@ -32,12 +34,8 @@ def _test_session(_engine):
     finally:
         # 清理本文件可能写入的测试数据(前缀隔离)
         try:
-            session.execute(SyncSourceConfig.__table__.delete().where(
-                SyncSourceConfig.data_type == "__d6_test__"
-            ))
-            session.execute(Device.__table__.delete().where(
-                Device.sn.like("SN-P4-%")
-            ))
+            safe_wipe(session, SyncSourceConfig, where=SyncSourceConfig.data_type == "__d6_test__")
+            safe_wipe(session, Device, where=Device.sn.like("SN-P4-%"))
             session.commit()
         except Exception:
             session.rollback()
@@ -148,9 +146,7 @@ def test_update_source_sync_to_group(_test_session):
     from app.services.sync_source_config_service import update_sync_source_config
 
     # 先清理上次运行可能残留的同名测试源(幂等)
-    _test_session.execute(
-        SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__d6_test__")
-    )
+    safe_wipe(_test_session, SyncSourceConfig, where=SyncSourceConfig.data_type == "__d6_test__")
     _test_session.commit()
     # 造一个源 + 组
     _test_session.add(SyncSourceConfig(
@@ -173,7 +169,7 @@ def test_update_source_sync_to_group(_test_session):
     assert decrypt_secret(g.username) == "d6user"
     assert decrypt_secret(g.password) == "d6pwd"
     # 清理
-    _test_session.execute(SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__d6_test__"))
+    safe_wipe(_test_session, SyncSourceConfig, where=SyncSourceConfig.data_type == "__d6_test__")
     _test_session.commit()
 
 
@@ -190,9 +186,7 @@ def test_update_source_clear_credentials(_test_session):
     from app.services.sync_source_config_service import update_sync_source_config
 
     # 清理残留 + 造带单源凭证的源
-    _test_session.execute(
-        SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__clear_test__")
-    )
+    safe_wipe(_test_session, SyncSourceConfig, where=SyncSourceConfig.data_type == "__clear_test__")
     _test_session.commit()
     _test_session.add(SyncSourceConfig(
         data_type="__clear_test__", name="清空测试源", base_url="https://wifi.cloud-cat.cn/bms",
@@ -213,7 +207,7 @@ def test_update_source_clear_credentials(_test_session):
     assert row.username is None
     assert row.password is None
     # 清理
-    _test_session.execute(SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__clear_test__"))
+    safe_wipe(_test_session, SyncSourceConfig, where=SyncSourceConfig.data_type == "__clear_test__")
     _test_session.commit()
 
 
@@ -223,9 +217,7 @@ def test_update_source_absent_cred_key_keeps_existing(_test_session):
     from app.models.sync_source_config import SyncSourceConfig
     from app.services.sync_source_config_service import update_sync_source_config
 
-    _test_session.execute(
-        SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__keep_test__")
-    )
+    safe_wipe(_test_session, SyncSourceConfig, where=SyncSourceConfig.data_type == "__keep_test__")
     _test_session.commit()
     _test_session.add(SyncSourceConfig(
         data_type="__keep_test__", name="保留测试源", base_url="https://wifi.cloud-cat.cn/bms",
@@ -243,5 +235,5 @@ def test_update_source_absent_cred_key_keeps_existing(_test_session):
     assert decrypt_secret(row.username) == "YKM-TZK"
     assert decrypt_secret(row.password) == "pwdx"
     assert row.name == "改名"
-    _test_session.execute(SyncSourceConfig.__table__.delete().where(SyncSourceConfig.data_type == "__keep_test__"))
+    safe_wipe(_test_session, SyncSourceConfig, where=SyncSourceConfig.data_type == "__keep_test__")
     _test_session.commit()

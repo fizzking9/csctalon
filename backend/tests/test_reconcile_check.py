@@ -18,6 +18,8 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from tests._db_guard import safe_wipe
+
 _TZ = timezone(timedelta(hours=8))
 
 
@@ -48,16 +50,16 @@ def _test_session(_engine):
 
     # 先删子表(reconcile_matches FK→reconcile_checks), 再删主表
     for cls in (ReconcileMatch, ReconcileCheck, RefundRecordReport, ManualRefund, Refund):
-        session.execute(cls.__table__.delete())
-    session.execute(Device.__table__.delete().where(Device.sn.like("SN-C-%")))
+        safe_wipe(session, cls)
+    safe_wipe(session, Device, where=Device.sn.like("SN-C-%"))
     session.commit()
     try:
         yield session
     finally:
         try:
             for cls in (ReconcileMatch, ReconcileCheck, RefundRecordReport, ManualRefund, Refund):
-                session.execute(cls.__table__.delete())
-            session.execute(Device.__table__.delete().where(Device.sn.like("SN-C-%")))
+                safe_wipe(session, cls)
+            safe_wipe(session, Device, where=Device.sn.like("SN-C-%"))
             session.commit()
         except Exception:
             session.rollback()
@@ -359,7 +361,7 @@ def _clean_reconcile_checks(_engine):
 
     s = Session(_engine)
     try:
-        s.execute(ReconcileCheck.__table__.delete())
+        safe_wipe(s, ReconcileCheck)
         s.commit()
     finally:
         s.close()

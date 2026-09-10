@@ -25,8 +25,24 @@ import pytest
 # 2. CI / 无 .env 场景: 通过 TEST_POSTGRES_* 环境变量注入完整连接参数
 #    (CI 工作流自行提供 postgres 服务, 见 .gitea/workflows/test.yml)。
 # 3. 绝不硬编码密码在仓库(对应 AGENTS.md 绝对禁止第 3 条)。
-os.environ.setdefault("ENV", "test")
-os.environ.setdefault("POSTGRES_DB", os.environ.get("TEST_POSTGRES_DB", "csctalon_test"))
+#
+# ⚠️⚠️ 2026-09-10 数据事故修复 (工单 #42) ⚠️⚠️
+#   原实现用 `os.environ.setdefault("POSTGRES_DB", ...)`。setdefault 在"变量已存在时
+#   **不覆盖**" —— 若调用方环境里残留 POSTGRES_DB=csctalon(如开发者在同一 shell 里
+#   执行过 `set -a && . ./.env` 加载配置跑脚本), 测试就会连到**开发库**。
+#   而多个用例的清理逻辑含"无条件整表 DELETE"(如 test_bms_3source_upsert.py /
+#   test_e_route_switch.py 的 `session.execute(Model.__table__.delete())`,
+#   `TRUNCATE` 等), 在开发库上执行 = 清空整张业务表。
+#   实测后果: refunds 从 170960 → 2、refund_wide → 64313、manual_refunds → 0
+#   (已按备份逐表恢复, 见 docs/reports/)。
+#
+#   修复(两层防御):
+#     A. **强制覆盖**库名 —— 不再依赖 setdefault, 确保一定是测试库;
+#     B. **库名守卫** —— engine 建立后硬断言实际连到的库 = 期望测试库,
+#        否则立即抛错中止(宁可测试全红, 也不能写错库)。
+os.environ["ENV"] = "test"   # 强制(不用 setdefault): 防上游残留值遮蔽
+_EXPECTED_TEST_DB = os.environ.get("TEST_POSTGRES_DB", "csctalon_test")
+os.environ["POSTGRES_DB"] = _EXPECTED_TEST_DB   # 强制覆盖, 见上 A
 
 # 仅当 backend/.env 不存在时, 才用 TEST_POSTGRES_* / 默认值注入完整连接参数;
 # 否则让 settings 优先读取 .env 的真实连接(避免环境变量遮蔽 .env 密码)。
@@ -41,6 +57,24 @@ if not os.path.exists(os.path.join(os.path.dirname(__file__), "..", ".env")):
 os.environ.setdefault("BMS_SCHEDULE_AUTOSTART", "false")
 
 
+def _assert_test_database(url: str) -> None:
+    """★库名守卫(见顶部事故说明 B): 断言实际连接的是测试库, 否则立即中止。
+
+    为什么用"硬断言"而非"自动改写": 若此处静默把库名改成 csctalon_test, 而调用方
+    本意是连别的库(如独立 CI 库), 会造成"以为连 A 实际连 B"的隐性错配。宁可显式报错。
+    """
+    db_name = url.rsplit("/", 1)[-1].split("?", 1)[0]
+    if db_name != _EXPECTED_TEST_DB:
+        raise RuntimeError(
+            f"⛔ 测试库守卫拦截: 期望连接 {_EXPECTED_TEST_DB!r}, 实际 {db_name!r}。\n"
+            f"   完整连接: {url}\n"
+            f"   原因排查: 终端里是否残留 POSTGRES_DB / TEST_POSTGRES_DB 环境变量?\n"
+            f"   (常见于执行过 `set -a && . ./.env`) —— 请 `unset POSTGRES_DB` 后重跑。\n"
+            f"   ⚠️ 直接放行会令含'无条件整表 DELETE'的用例清空真实业务表。"
+        )
+
+
+
 @pytest.fixture(scope="session")
 def _engine():
     """会话级 engine: 基于测试环境变量创建, 并自动建表。"""
@@ -48,6 +82,8 @@ def _engine():
 
     from app.core.config import settings
 
+    # ★ 库名守卫: 必须在创建 engine 之前拦截, 否则后续用例可能已写库
+    _assert_test_database(settings.database_url)
     # settings 已在导入时按测试环境变量加载
     engine = create_engine(settings.database_url, pool_pre_ping=True)
     try:

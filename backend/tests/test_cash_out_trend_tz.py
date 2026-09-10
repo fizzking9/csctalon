@@ -22,6 +22,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from tests._db_guard import safe_wipe
+
 _TZ = timezone(timedelta(hours=8))
 
 
@@ -36,16 +38,16 @@ def _test_session(_engine):
     from app.models import Device, Refund, RefundRecordReport
 
     for cls in (RefundRecordReport, Refund):
-        session.execute(cls.__table__.delete())
-    session.execute(Device.__table__.delete().where(Device.sn.like("SN-TZ-%")))
+        safe_wipe(session, cls)
+    safe_wipe(session, Device, where=Device.sn.like("SN-TZ-%"))
     session.commit()
     try:
         yield session
     finally:
         try:
             for cls in (RefundRecordReport, Refund):
-                session.execute(cls.__table__.delete())
-            session.execute(Device.__table__.delete().where(Device.sn.like("SN-TZ-%")))
+                safe_wipe(session, cls)
+            safe_wipe(session, Device, where=Device.sn.like("SN-TZ-%"))
             session.commit()
         except Exception:
             session.rollback()

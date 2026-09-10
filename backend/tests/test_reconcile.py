@@ -16,6 +16,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from tests._db_guard import safe_wipe
+
 _TZ = timezone(timedelta(hours=8))
 
 
@@ -29,9 +31,9 @@ def _test_session(_engine):
     from app.models import Device, ManualRefund, Refund, RefundRecordReport
 
     for cls in (RefundRecordReport, ManualRefund, Refund):
-        session.execute(cls.__table__.delete())
+        safe_wipe(session, cls)
     # 清理本文件可能残留的测试设备(_ensure_device commit 落库)
-    session.execute(Device.__table__.delete().where(Device.sn.like("SN-D-%")))
+    safe_wipe(session, Device, where=Device.sn.like("SN-D-%"))
     session.commit()
     try:
         yield session
@@ -39,8 +41,8 @@ def _test_session(_engine):
         # teardown: 清理本文件写入的共享表数据(避免污染其它测试)
         try:
             for cls in (RefundRecordReport, ManualRefund, Refund):
-                session.execute(cls.__table__.delete())
-            session.execute(Device.__table__.delete().where(Device.sn.like("SN-D-%")))
+                safe_wipe(session, cls)
+            safe_wipe(session, Device, where=Device.sn.like("SN-D-%"))
             session.commit()
         except Exception:
             session.rollback()
@@ -496,7 +498,7 @@ def test_water_statement_classify_shanmao_wxalr(_test_session):
     from app.models.shanmao_refund import ShanmaoRefund
 
     # 清理本测试可能残留的 WXALR 数据
-    _test_session.execute(ShanmaoRefund.__table__.delete().where(ShanmaoRefund.order_no.like("WXALR%")))
+    safe_wipe(_test_session, ShanmaoRefund, where=ShanmaoRefund.order_no.like("WXALR%"))
     _test_session.commit()
     try:
         from app.services.reconcile import water_statement
@@ -517,7 +519,7 @@ def test_water_statement_classify_shanmao_wxalr(_test_session):
         assert res["by_route"]["unmatched"] == 0
     finally:
         # 清理闪猫行 + report(报告由 fixture teardown 清理, 这里清闪猫)
-        _test_session.execute(ShanmaoRefund.__table__.delete().where(ShanmaoRefund.order_no.like("WXALR%")))
+        safe_wipe(_test_session, ShanmaoRefund, where=ShanmaoRefund.order_no.like("WXALR%"))
         _test_session.commit()
 
 

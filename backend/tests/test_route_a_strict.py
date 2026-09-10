@@ -20,6 +20,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from tests._db_guard import safe_wipe
+
 _TZ = timezone(timedelta(hours=8))
 
 
@@ -35,8 +37,8 @@ def _test_session(_engine):
     session = Session(_engine, autocommit=False, autoflush=False)
     # 清掉历史残留(本文件前缀), 防跨运行污染
     for cls in (Refund,):
-        session.execute(cls.__table__.delete().where(cls.refund_no.like("RF-RA-%")))
-    session.execute(Device.__table__.delete().where(Device.sn.like("SN-RA-%")))
+        safe_wipe(session, cls, where=cls.refund_no.like("RF-RA-%"))
+    safe_wipe(session, Device, where=Device.sn.like("SN-RA-%"))
     session.commit()
     try:
         yield session
@@ -44,10 +46,10 @@ def _test_session(_engine):
         try:
             from app.models import Refund
 
-            session.execute(Refund.__table__.delete().where(Refund.refund_no.like("RF-RA-%")))
+            safe_wipe(session, Refund, where=Refund.refund_no.like("RF-RA-%"))
             from app.models import Device
 
-            session.execute(Device.__table__.delete().where(Device.sn.like("SN-RA-%")))
+            safe_wipe(session, Device, where=Device.sn.like("SN-RA-%"))
             session.commit()
         except Exception:
             session.rollback()

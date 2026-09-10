@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
+
+from tests._db_guard import safe_wipe
 
 
 def _write(db, **kw):
@@ -121,16 +123,16 @@ def test_complaint_sync_writes_rejected_on_parse_fail(_engine):
     finally:
         # 精确清理本次测试创建的数据(避免污染共享表)
         try:
-            session.execute(IngestRejectedRow.__table__.delete().where(
-                IngestRejectedRow.source_ref.is_(None), IngestRejectedRow.source_row_no == 0
-            ))
-            session.execute(ComplaintSyncLog.__table__.delete().where(
-                ComplaintSyncLog.source_file == "test-rejected.xlsx"
-            ))
+            safe_wipe(
+                session, IngestRejectedRow,
+                where=and_(
+                    IngestRejectedRow.source_ref.is_(None),
+                    IngestRejectedRow.source_row_no == 0,
+                ),
+            )
+            safe_wipe(session, ComplaintSyncLog, where=ComplaintSyncLog.source_file == "test-rejected.xlsx")
             # 本次只推了"不是对象"非 dict 行, 无成功 external 行入库; 若失败仍有残留做兜底清理
-            session.execute(ExternalComplaint.__table__.delete().where(
-                ExternalComplaint.dedup_hash.like("test-rejected%")
-            ))
+            safe_wipe(session, ExternalComplaint, where=ExternalComplaint.dedup_hash.like("test-rejected%"))
             session.commit()
         except Exception:
             session.rollback()
@@ -173,11 +175,14 @@ def test_upload_run_upsert_writes_rejected_on_bad_row(_engine):
     finally:
         # 精确清理(该坏单号不会入库; 兜底清理可能写入的拒收行)
         try:
-            session.execute(IngestRejectedRow.__table__.delete().where(
-                IngestRejectedRow.data_type == "refund",
-                IngestRejectedRow.source == "upload",
-            ))
-            session.execute(Refund.__table__.delete().where(Refund.refund_no.like("RF-坏单号%") ))
+            safe_wipe(
+                session, IngestRejectedRow,
+                where=and_(
+                    IngestRejectedRow.data_type == "refund",
+                    IngestRejectedRow.source == "upload",
+                ),
+            )
+            safe_wipe(session, Refund, where=Refund.refund_no.like("RF-坏单号%"))
             session.commit()
         except Exception:
             session.rollback()
