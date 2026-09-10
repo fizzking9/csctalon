@@ -254,6 +254,8 @@ def ingest_complaints(
         "warnings_count": int(ext.get("warnings", 0) or 0) + int(card.get("warnings", 0) or 0),
         # #42 入库前校验问题(只读检测; 与 errors 严格分离)
         "validation": (stats.get("validation", []) or [])[:50],
+        # abc-a: 按处置级别聚合(block=不可修复/优先处理, warn=可修复/常规)
+        "validation_severity": stats.get("validation_severity") or {},
     })
     logger.info(
         f"[ingest] complaints<-{source} run={rid}: "
@@ -298,6 +300,8 @@ def ingest_manual_refunds(
     res.extra.update({"log_id": stats.get("log_id"), "warnings_count": stats.get("warnings", 0)})
     # #42/N-3: 校验问题清单(只读 advisory; 与 errors 严格分离)
     res.extra["validation"] = (stats.get("validation", []) or [])[:50]
+    # abc-a: 按处置级别聚合
+    res.extra["validation_severity"] = stats.get("validation_severity") or {}
     logger.info(
         f"[ingest] manual_refund<-{source} run={rid}: "
         f"{res.total}(+{res.inserted}/~{res.updated}/-{res.deleted}/!{res.failed}) {res.status}"

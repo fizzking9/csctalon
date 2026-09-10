@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.models.manual_refund import ManualRefund
 from app.models.manual_refund_sync_log import ManualRefundSyncLog
 from app.services.data_parser import COLUMN_TEMPLATES
-from app.services.ingest_validator import validate_manual_refund_row
+from app.services.ingest_validator import summarize_severity, validate_manual_refund_row
 from app.services.upsert import (
     _ensure_afternoon_time,
     _freeze_ok_manual_refund_rows,
@@ -362,7 +362,6 @@ def sync_manual_refunds_from_payload(
                 validation.append(_iss)
             rows.append(rec)
         result.total = len(rows_raw)
-
         # 维护设备主表(缺失 SN 建空壳,避免外键失败)
         _sync_devices(rows, "device_sn", db)
         _batch_upsert(db, rows, result)
@@ -419,6 +418,8 @@ def sync_manual_refunds_from_payload(
             "rejected": log_rejected,
             # #42/N-3: 校验问题清单(只读 advisory; 与 errors 严格分离)
             "validation": validation[:200],
+            # abc-a: 按处置级别聚合(block=不可修复优先处理 / warn=常规), 供日志与前端直接展示
+            "validation_severity": summarize_severity(validation),
             "filtered": result.filtered,
             "warnings": result.warnings,
             "errors": result.errors[:50],

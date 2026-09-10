@@ -4,18 +4,30 @@
   "确保数据拿回来就是干净的, 或者少量问题在数据治理的时候再来处理"
 
 本模块提供**四类校验规则**(对齐 quality_check 既有口径):
-  R-时间  时间字段异常: 缺失/未来/远古/时间倒挂/跨度异常
+  R-时间  时间字段异常: 缺失/未来/纪元伪日期/时间倒挂
   R-枚举  枚举脏值: 值不在预期集合
   R-金额  金额异常: <=0 或缺失
   R-必填  关键字段缺失: 影响跨表关联与统计
 
-⚠️ 本期为**只读检测**(advisory): 输出问题清单供 IngestResult/summary/日志展示,
-   **不丢弃、不改数据** —— 避免一次性改变入库语义引入回归。
-   P2 给投诉表补 QualityMixin 后, 这些规则将用于自动打标 pending(进治理队列)。
+## 处置分级 (abc-a, 2026-09-10)
+
+校验结果**不丢弃数据**(入库语义与 #42 一期一致, 零回归风险), 但区分优先级:
+
+  severity="block"  → 不可修复的身份/主锚点缺失: 该行无法参与统计与关联,
+                      进入治理队列**优先**处理 (`SEV_BLOCK`)。
+  severity="warn"   → 可修复/待复核: 时间越界、倒挂、枚举脏值、金额异常等,
+                      进治理队列 (默认)。
+
+设计依据(实证): 一律拒收会丢 8.6%~26.6% 的台账行 —— 其中大量是**真实历史数据**
+(315 平台 2001~2019 台账 1556 行)。把这些行挡在业务表外, 报表口径会直接缺口,
+且被拒行仍需人工逐条判定, 治理成本远高于"入库打标 + 治理队列"。
+故采纳 D2 的**打标分支**(而非拒收分支): 不可修复 → 优先处理; 可修复 → 常规处理。
 
 用法:
     issues = validate_rows(rows, data_type="external_complaint")
-    # [{"row": 3, "rule": "R-时间", "field": "handle_time", "message": "..."}]
+    # [{"row": 3, "rule": "R-时间", "field": "handle_time",
+    #   "message": "...", "severity": "warn"}]
+    by_sev = summarize_severity(issues)   # {"block": 1, "warn": 4}
 """
 from __future__ import annotations
 
@@ -37,11 +49,26 @@ _EXTERNAL_RESULT_SET = {
 _EXTERNAL_RESULT_SET |= {"未达成一致方案"}# 注: 工单(ticket)类校验器尚未接入(本期仅投诉/手动退款); 若后续接入,
 #     其状态集合为 {待处理, 处理中, 已完成, 已关闭, 终止, 已结案, 已解决, 待分派, 跟进中, pending}。
 
-# 合理年份窗口: 未来超 1 天即异常(上游录入笔误);
-# 下限与回填脚本 fix_complaint_handle_time._BAD_BEFORE 保持一致(2020),
-# 用于捕获 1969/1970 这类伪日期(Excel 序列号解析 bug 产物)。
+# 合理年份窗口: 未来超 1 天即异常(上游录入笔误)。
+#
+# ⚠️ 2026-09-10 实证修正 (abc-a): 原下限 `_MIN_VALID_YEAR = 2020` 口径**过窄, 大规模误报**。
+#    实测本地库 external_complaints.complaint_date: 2001~2019 共 1556 行, 且逐年均匀分布
+#    (每年 60~97 行) —— 这是 315 平台的**真实历史投诉台账**, 并非解析伪日期。按 "<2020 即异常"
+#    会把这 1556 行真实数据全部打成 pending, 使治理队列 38.6% 被噪声淹没。
+#    真伪日期有明确的**结构性特征**(而非"年份早"):
+#      · 纪元伪日期: 落在 1970-01-01 附近 → Excel 序列号(如 46187)被 pd.to_datetime 当**纳秒**
+#        的旧 bug 产物, 实测库中 229 行 + 手动退款 4 行 op_time=1970-01-01。
+#        **这是唯一应判为"伪日期"的形态**, 因为它同时具备"日期远早于业务存在时间"与
+#        "秒级行为 0(0 点)"两个特征。
+#      · 未来日期: > now + 1 天 → 真异常(编号内嵌日期交叉验证: 128 行未来日期中, 29 行有编号的
+#        **全部**与编号内嵌日期不符, 如编号 ...20260427... ↔ 库内 2027-04-25)。
+_MIN_VALID_YEAR = 1900     # 兼容旧常量名(下游若有引用); 伪日期判定改用 _EPOCH_FAKE_LAST_YEAR
+_EPOCH_FAKE_LAST_YEAR = 1990   # < 此年份视为纪元伪日期(1970 附近); 真历史台账数据均 > 2000
 _MAX_FUTURE_DAYS = 1
-_MIN_VALID_YEAR = 2020
+
+# 处置分级(abc-a): block=不可修复/优先处理; warn=可修复/常规处理
+SEV_BLOCK = "block"
+SEV_WARN = "warn"
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
@@ -51,7 +78,10 @@ def _as_utc(dt: datetime | None) -> datetime | None:
 
 
 def _check_time(dt: Any, field: str, row_no: int, issues: list[dict], *, label: str) -> None:
-    """R-时间: 未来/远古 检测(缺失由具体 data_type 的必填规则另行判定)"""
+    """R-时间: 未来 / 纪元伪日期 检测(缺失由具体 data_type 的必填规则另行判定)
+
+    注意: **不**把"年份早"当异常(真实历史台账会被误杀, 见常量注释)。
+    """
     d = _as_utc(dt if isinstance(dt, datetime) else None)
     if d is None:
         return
@@ -60,11 +90,13 @@ def _check_time(dt: Any, field: str, row_no: int, issues: list[dict], *, label: 
         issues.append({
             "row": row_no, "rule": "R-时间", "field": field,
             "message": f"{label}为未来时间({d:%Y-%m-%d})",
+            "severity": SEV_WARN,
         })
-    elif d.year < _MIN_VALID_YEAR:
+    elif d.year < _EPOCH_FAKE_LAST_YEAR:
         issues.append({
             "row": row_no, "rule": "R-时间", "field": field,
-            "message": f"{label}年份异常({d:%Y-%m-%d}, 疑似伪日期/解析错误)",
+            "message": f"{label}为纪元伪日期({d:%Y-%m-%d 00:00}, 疑似解析错误: 数值被当作纳秒时间戳)",
+            "severity": SEV_WARN,
         })
 
 
@@ -91,6 +123,7 @@ def validate_external_complaint_row(rec: dict[str, Any], row_no: int = 0) -> lis
         issues.append({
             "row": row_no, "rule": "R-必填", "field": "complaint_date",
             "message": "投诉日期缺失(时效/趋势统计主锚点)",
+            "severity": SEV_BLOCK,
         })
     _check_time(cd, "complaint_date", row_no, issues, label="投诉日期")
     _check_time(ht, "handle_time", row_no, issues, label="处理时间")
@@ -101,6 +134,7 @@ def validate_external_complaint_row(rec: dict[str, Any], row_no: int = 0) -> lis
         issues.append({
             "row": row_no, "rule": "R-时间", "field": "handle_time",
             "message": f"处理时间({d_ht:%Y-%m-%d})早于投诉日期({d_cd:%Y-%m-%d})",
+            "severity": SEV_WARN,
         })
 
     result = rec.get("result")
@@ -108,6 +142,7 @@ def validate_external_complaint_row(rec: dict[str, Any], row_no: int = 0) -> lis
         issues.append({
             "row": row_no, "rule": "R-枚举", "field": "result",
             "message": f"结果值不在预期集合: {str(result)[:24]!r}",
+            "severity": SEV_WARN,
         })
     return issues
 
@@ -123,6 +158,7 @@ def validate_card_complaint_row(rec: dict[str, Any], row_no: int = 0) -> list[di
         issues.append({
             "row": row_no, "rule": "R-必填", "field": "complaint_date",
             "message": "投诉日期缺失(统计主锚点)",
+            "severity": SEV_BLOCK,
         })
     _check_time(cd, "complaint_date", row_no, issues, label="投诉日期")
     return issues
@@ -141,6 +177,7 @@ def validate_manual_refund_row(rec: dict[str, Any], row_no: int = 0) -> list[dic
         issues.append({
             "row": row_no, "rule": "R-必填", "field": "order_no",
             "message": "订单号缺失(去重键/对账关联关键字段)",
+            "severity": SEV_BLOCK,
         })
     reg, op = rec.get("register_time"), rec.get("op_time")
     _check_time(reg, "register_time", row_no, issues, label="登记时间")
@@ -150,6 +187,7 @@ def validate_manual_refund_row(rec: dict[str, Any], row_no: int = 0) -> list[dic
         issues.append({
             "row": row_no, "rule": "R-时间", "field": "op_time",
             "message": f"操作时间({d_op:%Y-%m-%d})早于登记时间({d_reg:%Y-%m-%d})",
+            "severity": SEV_WARN,
         })
     if str(rec.get("is_refunded") or "").strip() == "是":
         amt = rec.get("refund_amount")
@@ -158,13 +196,18 @@ def validate_manual_refund_row(rec: dict[str, Any], row_no: int = 0) -> list[dic
                 issues.append({
                     "row": row_no, "rule": "R-金额", "field": "refund_amount",
                     "message": f"已退款但退款金额 <= 0({amt})",
+                    "severity": SEV_WARN,
                 })
         except (TypeError, ValueError):
             issues.append({
                 "row": row_no, "rule": "R-金额", "field": "refund_amount",
                 "message": f"退款金额非数值({amt!r})",
+                "severity": SEV_WARN,
             })
     return issues
+
+
+# 处置分级常量已移至模块顶部(见 SEV_BLOCK / SEV_WARN)
 
 
 # data_type → 校验函数
@@ -198,6 +241,7 @@ def validate_rows(rows: list[dict[str, Any]], data_type: str) -> list[dict[str, 
         out.append({
             "row": -1, "rule": "R-校验器", "field": None,
             "message": f"{n_err} 行校验时发生异常(校验器可能存在缺陷, 需排查)",
+            "severity": SEV_WARN,
         })
     return out
 
@@ -209,3 +253,24 @@ def summarize_issues(issues: list[dict[str, Any]]) -> dict[str, int]:
         rule = str(it.get("rule") or "其他")
         agg[rule] = agg.get(rule, 0) + 1
     return agg
+
+
+def summarize_severity(issues: list[dict[str, Any]]) -> dict[str, int]:
+    """问题清单 → 按处置级别聚合计数 ({"block": n, "warn": m})
+
+    供 IngestResult.extra["validation_severity"] 与采集日志展示, 使"优先处理项"
+    无需人工在完整清单里翻找。
+    """
+    agg = {SEV_BLOCK: 0, SEV_WARN: 0}
+    for it in issues:
+        sev = str(it.get("severity") or SEV_WARN)
+        agg[sev] = agg.get(sev, 0) + 1
+    return agg
+
+
+def blocking_issues(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """仅保留需优先处理者(severity=block, 或校验器自身告警)"""
+    return [
+        it for it in issues
+        if str(it.get("severity") or "") == SEV_BLOCK or it.get("rule") == "R-校验器"
+    ]

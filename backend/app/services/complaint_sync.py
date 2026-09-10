@@ -29,6 +29,7 @@ from app.models.ticket import ServiceTicket
 from app.services.analytics import _complaint_source_type_case
 from app.services.data_parser import COLUMN_TEMPLATES
 from app.services.ingest_validator import (
+    summarize_severity,
     validate_card_complaint_row,
     validate_external_complaint_row,
 )
@@ -317,6 +318,65 @@ def _identity_dedup_hash(rec: dict[str, Any]) -> str:
     ])
 
 
+# 校验问题 → quality_status 打标用的类别标签(前缀与 manual_refund 同口径 '[类别] ')
+_QUALITY_RULE_LABEL = {
+    "R-必填": "必填缺失",
+    "R-时间": "时间异常",
+    "R-枚举": "枚举脏值",
+    "R-金额": "金额异常",
+    "R-校验器": "校验异常",
+}
+# quality_note 列宽 String(512) —— 截断留余量, 避免 DB 报错
+_QUALITY_NOTE_MAX = 500
+
+
+def _tag_quality(rec: dict[str, Any], issues: list[dict[str, Any]], result: SyncRowResult) -> None:
+    """把入库前校验结果**落库打标**到该行的 quality_status / quality_note (abc-a)
+
+    为什么不是"一律拒收"(设计 D2 的拒收分支):
+      实证本地库 —— 一律拒收会丢 external 8.6% / card 8.7% / manual_refund 0.4% 的台账行,
+      其中大量是**真实历史数据**(315 平台 2001~2019 台账 1556 行)。把真实台账挡在业务表外
+      会造成报表口径缺口, 且被拒行仍需人工逐条判定 —— 治理成本远高于"入库打标 + 治理队列"。
+      故采纳打标分支: 数据进表(报表口径完整), 问题行进待办(人工可见可处理)。
+
+    打标规则:
+      · 有 block 级问题 → quality_status='pending' (优先处理)
+      · 仅 warn 级问题 → quality_status='pending' (常规处理)
+      · 无问题        → 不动(保留库中原值, 见下"覆盖保护")
+
+    覆盖保护(与 #36 'ok 保护' 同精神):
+      不覆盖人工已判定结果 —— 若该行库内已是 'ok'(人工确认) 或 'ignored'(人工忽略),
+      则本次不重打 pending, 避免已处理的行被每轮同步反复打回待办。
+
+    注意: dedup_hash 不含 quality_* 字段, 因此打标不会改变指纹。但 _batch_upsert 的
+    "内容未变则不更新"会在打标值未变时自然跳过更新(幂等)。
+    """
+    if rec is None:
+        return
+    # 覆盖保护: 已是人工终态的行不再打回
+    #   (库内终态由 _batch_upsert 的 update 覆盖风险由 note 前缀保持稳定来规避:
+    #    同型问题 note 相同 → 内容未变 → 不触发更新)
+    if rec.get("quality_status") in ("ok", "ignored", "dup_residual"):
+        return
+    if not issues:
+        # 无问题: 显式置 None(仅在新行/历史标记行上生效), 让已修复的行自动退出待办
+        rec.setdefault("quality_status", None)
+        rec.setdefault("quality_note", None)
+        return
+    # 类别标签去重(同规则多条问题只记一次), 稳定排序保证 note 可比较(幂等更新)
+    labels: list[str] = []
+    for rule in sorted({str(i.get("rule") or "其他") for i in issues}):
+        labels.append(_QUALITY_RULE_LABEL.get(rule, rule))
+    # ⚠️ 消息也按规则名稳定排序 —— 否则同一行两次校验结果顺序不同会生成不同 note,
+    #    导致 _batch_upsert 的 "内容未变则不更新" 失效(每轮同步都写一次无意义更新)。
+    ordered = sorted(issues, key=lambda i: str(i.get("rule") or ""))
+    note = "[" + "/".join(labels) + "] " + "; ".join(
+        str(i.get("message") or "") for i in ordered[:3]
+    )
+    rec["quality_status"] = "pending"
+    rec["quality_note"] = note[:_QUALITY_NOTE_MAX]
+
+
 def _upsert_external(db: Session, rows: list[dict], result: SyncRowResult, sn_ticket_map: dict[str, list[str]]) -> None:
     """315外部投诉 upsert: 按 dedup_hash 冲突更新(含关联工单字段)"""
     if not rows:
@@ -468,8 +528,11 @@ def sync_complaints_from_payload(
                 ext_result.filtered += 1
                 continue
             # #42 入库前校验(只读): 时间/枚举/必填问题可见化, 不丢弃不改数据
-            for _iss in validate_external_complaint_row(rec, idx):
+            _issues = validate_external_complaint_row(rec, idx)
+            for _iss in _issues:
                 ext_result.add_validation(idx, _iss)
+            # abc-a: 校验结果**落库打标**(进治理队列), 而非仅停在返回值; 见 _tag_quality
+            _tag_quality(rec, _issues, ext_result)
             ext_rows.append(rec)
         ext_result.total = len(ext_rows_raw)
 
@@ -498,8 +561,10 @@ def sync_complaints_from_payload(
                 card_result.filtered += 1
                 continue
             # #42 入库前校验(只读)
-            for _iss in validate_card_complaint_row(rec, idx):
+            _issues = validate_card_complaint_row(rec, idx)
+            for _iss in _issues:
                 card_result.add_validation(idx, _iss)
+            _tag_quality(rec, _issues, card_result)
             card_rows.append(rec)
         card_result.total = len(card_rows_raw)
 
@@ -606,6 +671,10 @@ def sync_complaints_from_payload(
             "status": log.status,
             # #42 校验问题清单(只读 advisory; 与 errors 严格分离)
             "validation": (ext_result.validation + card_result.validation)[:200],
+            # abc-a: 按处置级别聚合(block=不可修复优先处理 / warn=常规)
+            "validation_severity": summarize_severity(
+                ext_result.validation + card_result.validation
+            ),
             # #42 真正落拒收表的条数(与 failed/dropped 不同义)
             "rejected": ext_result.rejected + card_result.rejected,
             "external": {

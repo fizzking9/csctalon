@@ -445,6 +445,33 @@ def _manual_refunds_has_quality_col(db: Session) -> bool:
         return False
 
 
+def _quality_exclude_sql(db: Session) -> str | None:
+    """★统一入口(A-20260909-001 §2.3 / abc-a): 取"排除已治理行"的 SQL 条件片段。
+
+    返回 None 表示当前环境该表无 quality_status 列(旧库/旧表) → 调用方应跳过该条件,
+    不能因为"列不存在"就让整段报表查询报错。
+
+    为什么要收敛: 原先 8 处各自写 `_D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None`,
+    其中一处误用字符串常量本身当布尔标记(可读性差, 且新增排除状态时容易漏改某处)。
+    现在口径只有一个来源, 新增"排除状态"只需改 `_D_OTHER_EXCLUDE_QSTATUS_SET`。
+    """
+    return _EXCL_QSTATUS_SQL if _manual_refunds_has_quality_col(db) else None
+
+
+def _quality_include_cond() -> list:
+    """★统一入口(ORM 侧): 与 `_quality_exclude_sql` 同口径的 SQLAlchemy 条件列表。
+
+    供 ORM 查询(而非 raw SQL)使用 —— 避免 ORM 路径与 raw SQL 路径的排除口径漂移
+    (同一份报表里两条路径混用时, 曾出现一条排除 dup_residual、另一条没排除)。
+    """
+    return [
+        or_(
+            ManualRefund.quality_status.is_(None),
+            ManualRefund.quality_status.notin_(_D_OTHER_EXCLUDE_QSTATUS_SET),
+        )
+    ]
+
+
 def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
     """【路线D】手动退款(manual_refunds)独立表聚合 (表不存在则返回 0,0,不报错).
 
@@ -453,7 +480,7 @@ def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
     """
     if not _table_exists(db, _D_OTHER_TABLE):
         return 0, 0.0
-    exclude_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
+    exclude_q = _quality_exclude_sql(db)
     sql_tpl = f"""
     SELECT COUNT(*) AS cnt,
            COALESCE(SUM({_D_OTHER_AMOUNT_COL})::numeric,0) AS amt
@@ -525,7 +552,7 @@ def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tu
     """【路线D】手动退款按时间分组聚合 (表不存在则返回空map; 排除 dup_residual/ignored 行)."""
     if not _table_exists(db, _D_OTHER_TABLE):
         return {}, {}
-    exclude_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
+    exclude_q = _quality_exclude_sql(db)
     trunc_expr = "date_trunc(:grain, timezone('Asia/Shanghai', " + _D_OTHER_TIME_COL + "))"
     sql_tpl = f"""
     SELECT {trunc_expr} AS trunc_t,
@@ -738,7 +765,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
     # ── D 手动退款按日 (manual_refunds, is_refunded='是'; 排除 dup_residual/ignored) ──
     other_map: dict[str, dict] = {}
     if _table_exists(db, _D_OTHER_TABLE):
-        _excl_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
+        _excl_q = _quality_exclude_sql(db)
         try:
             with db.begin_nested():
                 ot_rows = db.execute(text(f"""
@@ -2236,13 +2263,11 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
     #    客服在商户号后台手动操作的退款登记台账, 时效 = 登记时间(register_time) → 实际退款操作时间(op_time)
     #    2026-09-06: 排除 quality_status='dup_residual' 已治理重复(不视为独立一笔实际退款出款)
     #    2026-09-09 (A-20260909-001): 扩展排除 ignored(人工彻底忽略)
+    #    abc-a: 改用统一入口 _quality_include_cond(), 与 raw SQL 路径同口径
     all_mr = list(db.execute(
         select(ManualRefund).where(
             ManualRefund.is_refunded == "是",
-            or_(
-                ManualRefund.quality_status.is_(None),
-                ManualRefund.quality_status.notin_(_D_OTHER_EXCLUDE_QSTATUS_SET),
-            ),
+            *_quality_include_cond(),
         )
     ).scalars().all())
     for mr in all_mr:
@@ -7186,7 +7211,7 @@ def refund_decision_overview(
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     # D 手动退款 (manual_refunds, is_refunded='是'; 对账归日用实际扣款时间 actual_refund_time(2026-09-09 E回填),
     #    缺失回退 op_time/register_time; 排除 dup_residual/ignored → 经营口径不与重复/忽略行虚高; A-20260909-001)
-    _d_excl_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
+    _d_excl_q = _quality_exclude_sql(db)
     d_rows = db.execute(text(f"""
         SELECT {_day("COALESCE(m.actual_refund_time, m.op_time, m.register_time)")} AS d,
                count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
@@ -7667,7 +7692,7 @@ def refund_export_all(
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
     sheets: dict[str, list[dict[str, Any]]] = {}
     # D 路 quality_status 排除标记(dup_residual=已治理重复): 汇总 sheet 排除, 明细 sheet 保留但加列标注
-    _d_excl_q = _D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None
+    _d_excl_q = _quality_exclude_sql(db)
 
     # A 退费单明细 (原始全量: 所有退费单行含线下/转入提现/未填写 + 驳回/无需退款/空白状态,
     # 供人工分析自筛; 2026-09-09 由'仅线上已退款'放宽回全量)

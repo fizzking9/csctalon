@@ -236,3 +236,85 @@ def test_three_source_case_keyword_priority():
     assert "微信" not in A._EXTERNAL_PLATFORM_KEYWORDS
     # 平台词优先级在微信之前(12315微信投诉 → 外部, 监管更重, 既有口径)
     assert "12315" in A._EXTERNAL_PLATFORM_KEYWORDS
+
+
+# ---- 质量排除口径统一 (A-20260909-001 §2.3 / abc-a) ----
+
+def test_quality_exclude_set_is_single_source():
+    """★口径单一来源: 排除集合只在此处定义(dup_residual=已治理重复, ignored=人工忽略)"""
+    import app.services.analytics as A
+    assert set(A._D_OTHER_EXCLUDE_QSTATUS_SET) == {"dup_residual", "ignored"}
+
+
+def test_excl_sql_matches_exclude_set():
+    """★SQL 片段必须与排除集合一一对应(加状态时不得只改一处)"""
+    import app.services.analytics as A
+    sql = A._EXCL_QSTATUS_SQL
+    for st in A._D_OTHER_EXCLUDE_QSTATUS_SET:
+        assert f"'{st}'" in sql, f"SQL 排除片段漏了 {st}"
+    # 也必须放过 NULL(历史行 quality_status 为空 = 未标记, 属正常业务行)
+    assert "COALESCE" in sql, "NULL 行必须被放行, 否则历史数据全被排除"
+
+
+def test_quality_include_cond_is_list():
+    """ORM 侧统一入口返回条件列表(供 where(*cond) 展开)"""
+    import app.services.analytics as A
+    cond = A._quality_include_cond()
+    assert isinstance(cond, list) and len(cond) == 1
+
+
+def test_quality_exclude_sql_delegates_to_gate():
+    """统一入口在"无 quality 列"的旧环境必须返回 None(让调用方跳过条件, 不报错)"""
+    import app.services.analytics as A
+
+    class _Dummy:
+        pass
+
+    # 打桩: 模拟旧表无 quality_status 列
+    orig = A._manual_refunds_has_quality_col
+    try:
+        A._manual_refunds_has_quality_col = lambda db: False
+        assert A._quality_exclude_sql(_Dummy()) is None
+        A._manual_refunds_has_quality_col = lambda db: True
+        assert A._quality_exclude_sql(_Dummy()) == A._EXCL_QSTATUS_SQL
+    finally:
+        A._manual_refunds_has_quality_col = orig
+
+
+def test_no_scattered_gate_expressions():
+    """★回归锁: 不得再出现散落的 `X if _manual_refunds_has_quality_col(db) else None` 门控。
+
+    历史问题: 8 处各自内联该表达式, 其中一处误把**字符串常量本身**当布尔标记使用,
+    且新增排除状态时需要逐处修改(易漏)。现收敛为 _quality_exclude_sql() 单一入口。
+
+    判定: 用 AST 找出所有「以 _manual_refunds_has_quality_col(...) 为条件的三元表达式」,
+    仅允许出现在 _quality_exclude_sql 函数体内。语言级判定, 不受注释/文档字符串干扰。
+    """
+    import ast
+    import inspect
+
+    import app.services.analytics as A
+
+    src = inspect.getsource(A)
+    tree = ast.parse(src)
+
+    # 记录唯一入口的函数体行号区间
+    allowed: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_quality_exclude_sql":
+            allowed.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+
+    offenders: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.IfExp):
+            continue
+        cond = node.test
+        # 匹配 _manual_refunds_has_quality_col(...) 调用
+        calls = [n for n in ast.walk(cond) if isinstance(n, ast.Call)]
+        if any(getattr(c.func, "id", None) == "_manual_refunds_has_quality_col" for c in calls):
+            if node.lineno not in allowed:
+                offenders.append(node.lineno)
+
+    assert not offenders, (
+        f"仍有散落门控表达式(行 {offenders}), 请改用 _quality_exclude_sql(db)"
+    )
