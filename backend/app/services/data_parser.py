@@ -3,6 +3,7 @@
 复用现有分析逻辑,从'退费汇总.xlsx'的列结构提取列模板
 """
 
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ from typing import Any
 import pandas as pd
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 # 各数据类型的列模板(目标字段名 -> 样本源列名候选)
 # 源列名可能含尾部 \t,解析时会清洗
@@ -675,7 +678,33 @@ def load_dataframe(path: Path | str, sheet_name: str | None = None, encoding: st
     """加载完整 DataFrame(供 upsert 使用),单元格已清洗"""
     df, _, _ = read_table(path, sheet_name=sheet_name, encoding=encoding)
     df = df.map(clean_cell)  # noqa: PD003
+    # 长数字精度可疑检测(#42): 源 Excel 数字单元格 >15 位被浮点截断(尾部多 0),
+    # 读取层无法修复(源已损坏), 但必须可见 → 计数 + 告警, 提示上游把编号列设为文本格式。
+    for col, n in count_suspect_precision(df).items():
+        logger.warning(
+            f"[data_parser] {path} 列「{col}」有 {n} 个疑似浮点精度截断的长数字"
+            f"(>=15位且尾部多0); 上游应将该列设为文本格式"
+        )
     return df
+
+
+# 长数字精度可疑判据(与 shared_doc_sync_service 同口径): 纯数字 + >=15 位 + 尾部 >=4 个 0。
+# 正常业务编号极少以多个 0 结尾, 该形态高度指向「Excel 数字单元格 >15 位被截断」。
+_SUSPECT_PRECISION_RE = re.compile(r"^\d{15,}0{4,}$")
+
+
+def count_suspect_precision(df: pd.DataFrame) -> dict[str, int]:
+    """统计疑似受浮点精度影响的长数字单元格: {列名: 数量}(仅计数, 不改数据)"""
+    hits: dict[str, int] = {}
+    for col in df.columns:
+        try:
+            s = df[col].astype(str)
+        except (TypeError, ValueError):
+            continue
+        n = int(s.str.match(_SUSPECT_PRECISION_RE).sum())
+        if n:
+            hits[str(col)] = n
+    return hits
 
 
 def _fix_unclosed_quote(line: str) -> str:
