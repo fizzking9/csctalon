@@ -581,6 +581,21 @@ def sync_complaints_from_payload(
         _upsert_external(db, ext_rows, ext_result, sn_ticket_map)
         _upsert_card(db, card_rows, card_result, sn_ticket_map)
 
+        # ── #42 批次级异常检测(流程层防线) ──
+        # 动机: 2026-09-05 日期转置事件中, 字段级校验只检出该批 2532 行里的 1684 行;
+        # 余下 848 行落在"看似正常"的年份区间, 单行完全正常。这类**整批系统性错误**
+        # 在批次维度上才醒目(该批 inserted=2434 vs 正常 0~3, 异常日期占比 66.5%)。
+        # 只告警不改数据; critical 走事务通知。
+        try:
+            from app.services.ingest_anomaly import check_complaint_batch
+
+            check_complaint_batch(
+                db, rows=ext_rows, inserted=ext_result.inserted,
+                label=f"315投诉({source_file or sync_source})",
+            )
+        except Exception as an_err:  # noqa: BLE001 检测不得影响入库主流程
+            logger.warning(f"[complaint_sync] 批次异常检测失败(忽略): {an_err}")
+
         # 统计写日志(dropped=硬失败行, 影响状态; warnings=软警告仅记录)
         log.external_total = ext_result.total
         log.external_inserted = ext_result.inserted

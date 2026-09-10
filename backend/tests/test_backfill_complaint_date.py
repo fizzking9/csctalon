@@ -16,11 +16,22 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 _BACKEND = Path(__file__).resolve().parents[1]
 _SCRIPT = _BACKEND.parent / "scripts" / "backfill_complaint_date.py"
 
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
+
+# ⚠️ CI 只挂载 backend/ 目录(见 .gitea/workflows/test.yml 的 `-v .../backend:/app`),
+#    仓库根的 scripts/ 在容器内不存在 → 不能在收集期直接 exec_module(会 FileNotFoundError
+#    导致整个测试会话中断)。故改为"可选加载": 脚本不在时跳过本文件的用例。
+if not _SCRIPT.exists():
+    pytest.skip(
+        f"回填脚本不在当前环境(CI 仅挂载 backend/): {_SCRIPT}",
+        allow_module_level=True,
+    )
 
 _spec = importlib.util.spec_from_file_location("backfill_complaint_date", _SCRIPT)
 bf = importlib.util.module_from_spec(_spec)
