@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +52,27 @@ _KDOCS_MENU_XY = (95, 15)
 
 # xlsx 读取引擎(与 POC _poc_shared_doc_reader.py 一致: 快 + 免疫 WPS/腾讯导出样式崩溃)
 _EXCEL_ENGINE = "calamine"
+
+# 疑似"长编号被 Excel 数字精度截断"特征(#42 2026-09-10):
+#   源单元格为「数字型」且长度 >=15 时, Excel/浮点只保留约 15 位有效数字,
+#   超出部分被补 0(实测 1440306002024122303480530 → 14403060020241100.../尾串 00000)。
+#   读取层无法修复(源已损坏), 但必须**可见**: 计数 + 告警, 供上游改为文本列。
+_SUSPECT_PRECISION_RE = re.compile(r"^\d{15,}0{4,}$")
+
+
+def _count_suspect_precision(df: "pd.DataFrame") -> dict[str, int]:
+    """统计疑似受浮点精度影响的长数字单元格: {列名: 数量}(仅计数, 不改数据)
+
+    判据: 纯数字、长度>=15、末尾连续>=4 个 0 —— 正常业务编号极少以多个 0 结尾,
+    该形态高度指向「Excel 数字单元格 >15 位被截断」。
+    """
+    hits: dict[str, int] = {}
+    for col in df.columns:
+        s = df[col].astype(str)
+        n = int(s.str.match(_SUSPECT_PRECISION_RE).sum())
+        if n:
+            hits[str(col)] = n
+    return hits
 
 
 def _export_tencent_xlsx(doc_url: str, out_path: str, state_filename: str | None = None) -> str:
@@ -199,7 +221,21 @@ def _read_sheet_records(
     counters: 可选 dict, 用于统计被过滤的空行数(全空/业务空行), 汇入同步 summary
     展示 —— 空行过滤可见可查(A-20260908-003 / 用户决策 2026-09-09), 默认静默仅计数。
     """
-    df = pd.read_excel(path, sheet_name=sheet_name, header=0, engine=_EXCEL_ENGINE)
+    # ⚠️ #42(2026-09-10): 统一 dtype=str, 与 data_parser 读取层一致。
+    #   理由: 长编号(订单号/投诉编号)以数字型导出时会被按 float 解析, >15 位精度丢失;
+    #   显式 dtype=str 至少保证「文本型单元格」100% 原样读取(实测 647/647 一致),
+    #   数字型无法挽救但由下方 _count_suspect_precision 计数暴露。
+    df = pd.read_excel(path, sheet_name=sheet_name, header=0, engine=_EXCEL_ENGINE, dtype=str)
+    # 精度可疑计数(可见化, 不改数据; #42)
+    for _col, _n in _count_suspect_precision(df).items():
+        logger.warning(
+            f"[shared_doc] {path} sheet={sheet_name} 列「{_col}」有 {_n} 个疑似浮点精度"
+            f"截断的长数字(>=15位且尾部多0); 上游应将该列设为文本格式"
+        )
+        if counters is not None:
+            counters.setdefault("suspect_precision", {})[_col] = (
+                counters.get("suspect_precision", {}).get(_col, 0) + _n
+            )
     df = df.dropna(axis=1, how="all")  # 丢弃全空列(合并表头/末尾多余列)
     df.columns = [_norm_header(c) for c in df.columns]
     df = df.loc[:, [c for c in df.columns if c != ""]]
@@ -572,11 +608,14 @@ def _sync_complaint_from_file(
     )
     # 空行计数上报(默认静默仅计数, A-20260908-003 §2.4)
     stats["filtered_empty_rows"] = counters.get("empty_rows", 0)
+    # #42: 长数字精度可疑计数上报(可见化; 上游应把编号列改文本格式)
+    if counters.get("suspect_precision"):
+        stats["suspect_precision"] = counters["suspect_precision"]
     logger.info(
         f"[shared_doc] {source_file} 投诉入库完成: "
         f"315={stats['external']['total']}(+{stats['external']['inserted']}/~{stats['external']['updated']}) "
         f"卡商={stats['card']['total']}(+{stats['card']['inserted']}/~{stats['card']['updated']}) "
-        f"滤空行={counters.get('empty_rows', 0)} status={stats['status']}"
+        f"滤空行={counters.get('empty_rows', 0)} 精度可疑={counters.get('suspect_precision') or '无'} status={stats['status']}"
     )
     return stats
 
@@ -605,10 +644,14 @@ def _sync_manual_refund_from_file(
     # 空行/业务空行计数上报(默认静默仅计数, A-20260908-003 §2.4)
     stats["filtered_empty_rows"] = counters.get("empty_rows", 0)
     stats["filtered_business_empty_rows"] = counters.get("business_empty_rows", 0)
+    # #42: 长数字精度可疑计数上报(可见化)
+    if counters.get("suspect_precision"):
+        stats["suspect_precision"] = counters["suspect_precision"]
     logger.info(
         f"[shared_doc] {source_file} 退款入库完成: "
         f"{stats['total']}(+{stats['inserted']}/~{stats['updated']}/!{stats['failed']}) "
         f"滤空行={counters.get('empty_rows', 0)}/{counters.get('business_empty_rows', 0)} "
+        f"精度可疑={counters.get('suspect_precision') or '无'} "
         f"status={stats['status']}"
     )
     return stats
@@ -659,11 +702,15 @@ def _summary_from_stats(row: DocSyncSource, stats: dict[str, Any]) -> dict[str, 
         }
         if stats.get("filtered_empty_rows"):
             s["filtered_empty_rows"] = stats["filtered_empty_rows"]  # 滤空行计数(默认静默仅计数)
+        if stats.get("suspect_precision"):
+            s["suspect_precision"] = stats["suspect_precision"]  # #42 长数字精度可疑(上游需改文本列)
         return s
     if row.target_type == TARGET_MANUAL_REFUND:
         s = {k: stats[k] for k in ("total", "inserted", "updated", "deleted", "failed", "warnings")}
         for k in ("filtered_empty_rows", "filtered_business_empty_rows"):
             if stats.get(k):
                 s[k] = stats[k]
+        if stats.get("suspect_precision"):
+            s["suspect_precision"] = stats["suspect_precision"]
         return s
     return {"total": stats.get("total")}

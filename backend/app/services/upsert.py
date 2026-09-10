@@ -253,6 +253,54 @@ def _ensure_afternoon_time(val: datetime | None) -> datetime | None:
     return val
 
 
+# Excel 序列日期(1899-12-30 起算的天数)合理区间: ≈1954-10-03 ~ 2119-01-05。
+# 取此区间可避开日期串(20260614)、年份(2026)、金额等其他数字含义, 不会误判。
+_EXCEL_EPOCH = datetime(1899, 12, 30)
+_EXCEL_SERIAL_MIN = 20000
+_EXCEL_SERIAL_MAX = 80000
+_PURE_NUM_RE = re.compile(r"^[+-]?\d+(\.\d+)?$")
+
+
+def _try_excel_serial(val: Any) -> datetime | None:
+    """尝试把值按「Excel 序列日期」解析; 不是序列号则返回 None(绝不误判普通数字/字符串)。
+
+    ⚠️ 关键: 必须**类型无关**。上游 xlsx 同一列可能是「文本型」也可能是「数字型」
+    (WPS 导出习惯改格式):
+      - 文本型 '46187'   → 原实现已覆盖;
+      - 数字型 46187/46187.0 → 原实现漏判, 落入 pd.to_datetime(46187) 被当**纳秒**,
+        解析成 1969-12-31 16:00:00.000046(实测 315 表 229 行坏值根因)。
+    Excel 约定: 整数部分=天数, 小数部分=当天时刻。
+    """
+    if isinstance(val, bool):  # bool 是 int 子类, 必须显式排除(True→1 天)
+        return None
+    num: float | None = None
+    if isinstance(val, (int, float)):
+        num = float(val)
+    elif isinstance(val, str):
+        s = val.strip()
+        # 仅接受纯数字串(可带小数); 日期串/含单位文本交给 pd.to_datetime 处理
+        if not _PURE_NUM_RE.match(s):
+            return None
+        num = float(s)
+    if num is None:
+        return None
+    try:
+        if pd.isna(num):
+            return None
+    except (TypeError, ValueError):
+        return None
+    # 浮点精度残渣(如 46187.000000000046 来自 float64 存储) → 归一到最近整数
+    if abs(num - round(num)) < 1e-6:
+        num = float(round(num))
+    if not (_EXCEL_SERIAL_MIN <= num <= _EXCEL_SERIAL_MAX):
+        return None
+    days = int(num)
+    frac = num - days
+    dt = _EXCEL_EPOCH + timedelta(days=days, seconds=round(frac * 86400))
+    # 与其它路径一致: 视为北京时间 → 转 UTC 存 timestamptz
+    return dt.replace(tzinfo=_TZ_CN).astimezone(timezone.utc)
+
+
 def _to_datetime(val: Any) -> datetime | None:
     if val is None:
         return None
@@ -268,12 +316,18 @@ def _to_datetime(val: Any) -> datetime | None:
         return val
     if isinstance(val, str) and val.strip() == "":
         return None
-    # Excel 序列日期(1899-12-30 起算的天数): 纯整数且落在 1900~2100 年合理区间。
-    # 315投诉表「处理时间」列存在 229 个此类值(如 46187),原实现直接判 None 丢失。
-    if isinstance(val, str):
-        s = val.strip()
-        if s.isdigit() and 20000 <= int(s) <= 80000:
-            return (datetime(1899, 12, 30) + timedelta(days=int(s))).replace(tzinfo=_TZ_CN).astimezone(timezone.utc)
+    # Excel 序列日期: 文本型与数字型都要走同一条归一(见 _try_excel_serial 说明)
+    _serial = _try_excel_serial(val)
+    if _serial is not None:
+        return _serial
+    # ⚠️ 纯数字但不在 Excel 序列号区间 → 不是合法日期语义(如 1 / 0 / 2026 / 12345 / 99999
+    #    / 超长编号)。若继续交给 pd.to_datetime, 会被当成**纳秒**解释, 产出 1970 年前后的
+    #    伪日期(实测 pd.to_datetime(1)→1969-12-31 16:00:00.000001), 即本函数要根除的坏值类型。
+    #    故此类值一律判为「无法解析 → None」, 由上层校验/拒收流程处理, 绝不静默造伪日期。
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)) or (isinstance(val, str) and _PURE_NUM_RE.match(val.strip())):
+        return None
     try:
         result = pd.to_datetime(val)
         if pd.isna(result):
