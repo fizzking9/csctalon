@@ -91,7 +91,7 @@ def push_manual_refunds(
     except Exception as e:
         logger.exception(f"手动退款推送失败: {e}")
         raise HTTPException(status_code=500, detail=f"同步失败: {e}") from e
-    # 响应保持既有外部契约, 追加统一批次号 run_id
+    # 响应保持既有外部契约, 追加统一字段 run_id/rejected/validation
     stats = {
         "log_id": res.extra.get("log_id"),
         "status": res.status,
@@ -103,7 +103,10 @@ def push_manual_refunds(
         "filtered": res.skipped,
         "warnings": res.extra.get("warnings_count", 0),
         "errors": res.errors[:50],
+        # #42: 统一入库结果字段(加法式扩展)
         "run_id": res.run_id,
+        "rejected": res.rejected,
+        "validation": res.extra.get("validation", []),
     }
     return R(data=stats)
 

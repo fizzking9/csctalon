@@ -92,13 +92,16 @@ def push_complaints(
     except Exception as e:
         logger.exception(f"投诉推送失败: {e}")
         raise HTTPException(status_code=500, detail=f"同步失败: {e}") from e
-    # 响应保持既有外部契约(external/card/status/log_id), 追加统一批次号 run_id
+    # 响应保持既有外部契约(external/card/status/log_id), 追加统一字段 run_id/rejected/validation
     data = {
         "log_id": res.extra.get("log_id"),
         "status": res.status,
         "external": res.extra.get("external", {}),
         "card": res.extra.get("card", {}),
+        # #42: 统一入库结果字段(加法式扩展, 不破坏既有契约)
         "run_id": res.run_id,
+        "rejected": res.rejected,          # 未采纳且已落拒收表的行数(待人工判定)
+        "validation": res.extra.get("validation", []),
     }
     return R(data=data)
 

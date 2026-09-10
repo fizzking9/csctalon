@@ -261,3 +261,29 @@ class TestIngestManualRefunds:
         res = ingest_manual_refunds(db=None, payload={"manual_refunds": []}, source="shared_doc")
         assert res.rejected == 2
         assert res.failed == 2
+
+
+class TestHTTPContractExposesUnifiedFields:
+    """W-4 回归锁: 推送 HTTP 响应必须透出 rejected / validation(design §D0 契约)
+
+    背景(复审 W-4): 服务层已正确产出 rejected/validation, 但 API 层手工白名单
+    曾把它们丢弃 → 外部 workbuddy 拿不到。本类断言 API 模块透传这两个字段。
+    """
+
+    def test_sync_complaints_exposes_rejected_and_validation(self):
+        import inspect
+
+        from app.api.v1 import sync_complaints as mod
+
+        src = inspect.getsource(mod)
+        assert '"rejected": res.rejected' in src, "投诉推送未透出 rejected"
+        assert '"validation": res.extra.get("validation"' in src, "投诉推送未透出 validation"
+
+    def test_sync_manual_refunds_exposes_rejected_and_validation(self):
+        import inspect
+
+        from app.api.v1 import sync_manual_refunds as mod
+
+        src = inspect.getsource(mod)
+        assert '"rejected": res.rejected' in src, "手动退款推送未透出 rejected"
+        assert '"validation": res.extra.get("validation"' in src, "手动退款推送未透出 validation"

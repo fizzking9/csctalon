@@ -528,7 +528,11 @@ def sync_complaints_from_payload(
         log.card_failed = card_result.dropped
         log.card_matched = card_result.matched
 
-        all_errors = (ext_result.errors + card_result.errors)[:50]
+        # ⚠️ log.error 只承载**真实错误**(level=error) —— 软警告(清洗提示)不进 error 列,
+        #    否则成功推送会在采集日志"错误"列显示 warning 文本(复审 W-3)。
+        all_errors = [
+            e for e in (ext_result.errors + card_result.errors) if e.get("level") == "error"
+        ][:50]
         if all_errors:
             log.error = str(all_errors)
         # 空行过滤信息: 仅日志记录(不写 log.error, 同 N-2 —— 空行过滤是正常噪音,

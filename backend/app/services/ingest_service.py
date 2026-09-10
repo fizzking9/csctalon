@@ -298,8 +298,6 @@ def ingest_manual_refunds(
     res.extra.update({"log_id": stats.get("log_id"), "warnings_count": stats.get("warnings", 0)})
     # #42/N-3: 校验问题清单(只读 advisory; 与 errors 严格分离)
     res.extra["validation"] = (stats.get("validation", []) or [])[:50]
-    # #42/N-3: 校验问题清单(只读 advisory; 与 errors 严格分离)
-    res.extra["validation"] = (stats.get("validation", []) or [])[:50]
     logger.info(
         f"[ingest] manual_refund<-{source} run={rid}: "
         f"{res.total}(+{res.inserted}/~{res.updated}/-{res.deleted}/!{res.failed}) {res.status}"

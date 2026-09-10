@@ -354,14 +354,14 @@ def sync_manual_refunds_from_payload(
             rec = _clean_row(row, idx, result, db=db, source=sync_source)
             if rec is None:
                 continue
+            # #42/N-3: 入库前校验(只读 advisory) —— 用**源 payload 行号 idx**
+            #   与投诉通道同口径(row=源文件行号, 便于定位)。
+            #   注: R-必填(order_no) 在本通道天然不触发 —— 缺订单号行已在 _clean_row
+            #   提前 dropped; 其余规则(时间倒挂/金额)仍有效。
+            for _iss in validate_manual_refund_row(rec, idx):
+                validation.append(_iss)
             rows.append(rec)
         result.total = len(rows_raw)
-
-        # #42/N-3: 入库前校验(只读 advisory) —— 手动退款通道接入, 与投诉通道同口径。
-        # 校验问题不丢弃行、不改数据, 仅写入 validation 供质量排查/治理。
-        for _i, _rec in enumerate(rows):
-            for _iss in validate_manual_refund_row(_rec, _i):
-                validation.append(_iss)
 
         # 维护设备主表(缺失 SN 建空壳,避免外键失败)
         _sync_devices(rows, "device_sn", db)
