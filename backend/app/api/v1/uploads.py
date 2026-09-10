@@ -25,9 +25,9 @@ from app.schemas.common import PageBase, R
 from app.schemas.upload import DiffPreviewRequest, ImportResponse, UploadRecordOut
 from app.services.data_parser import COLUMN_TEMPLATES, load_dataframe, parse_file, save_upload_file
 from app.services.diff_preview import compute_diff
+from app.services.ingest_service import ingest_table
 from app.services.matcher import match_all
 from app.services.person_extractor import extract_person_aliases
-from app.services.upsert import run_upsert
 
 router = APIRouter(prefix="/uploads", tags=["数据中心-上传"])
 
@@ -164,8 +164,12 @@ async def confirm_import(
     try:
         # 重新加载完整 DataFrame
         df = load_dataframe(path, sheet_name=sheet_name, encoding=encoding)
-        # 执行 upsert
-        result = run_upsert(df, data_type, mapping, db)
+        # 统一入库接口(#42): 所有采集入口走同一通道, 返回值统一 IngestResult
+        result = ingest_table(
+            db, data_type,
+            df=df, mapping=mapping,
+            source="upload", source_ref=f"upload_record:{record.id}",
+        )
         # 更新记录状态
         record.total_rows = result.total
         record.inserted_rows = result.inserted

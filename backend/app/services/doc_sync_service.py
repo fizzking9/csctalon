@@ -20,7 +20,7 @@ from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.database import SessionLocal
 from app.models.doc_sync_config import DocSyncConfig
 from app.services import tencent_doc_client as tdc
-from app.services.complaint_sync import sync_complaints_from_payload
+from app.services.ingest_service import ingest_complaints
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +273,15 @@ def sync_tencent_doc(db: Session, trigger: str = "manual", platform: str = PLATF
             "external_complaints": ext_records,
             "card_complaints": card_records,
         }
-        stats = sync_complaints_from_payload(db, payload, source_file=doc_name, sync_source="tencent_doc")
+        # 统一入库接口(#42)
+        _res = ingest_complaints(
+            db, payload=payload, source="tencent_doc", source_file=doc_name,
+        )
+        stats = {
+            "status": _res.status,
+            "external": _res.extra.get("external", {}),
+            "card": _res.extra.get("card", {}),
+        }
 
         # 更新平台同步状态
         row = _get_row(db, platform)

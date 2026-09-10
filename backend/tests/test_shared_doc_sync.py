@@ -183,16 +183,22 @@ def test_sync_complaint_payload_assembled(db, seed_source, monkeypatch, tmp_path
     def _fake_sync(db, payload, **kwargs):
         captured["payload"] = payload
         captured["kwargs"] = kwargs
-        return {
-            "status": "success",
-            "external": {"total": 2, "inserted": 2, "updated": 0, "failed": 0,
+        # #42 统一入库接口: 返回 IngestResult(extra 携带 external/card/log_id)
+        from app.services.ingest_service import IngestResult
+        return IngestResult(
+            data_type="external_complaint+card_complaint", source="shared_doc", run_id="testrun",
+            status="success", total=3, inserted=3, updated=0,
+            extra={
+                "log_id": 1,
+                "external": {"total": 2, "inserted": 2, "updated": 0, "failed": 0,
+                             "matched": 0, "filtered": 0, "warnings": 0, "errors": []},
+                "card": {"total": 1, "inserted": 1, "updated": 0, "failed": 0,
                          "matched": 0, "filtered": 0, "warnings": 0, "errors": []},
-            "card": {"total": 1, "inserted": 1, "updated": 0, "failed": 0,
-                     "matched": 0, "filtered": 0, "warnings": 0, "errors": []},
-        }
+            },
+        )
 
     monkeypatch.setattr(sdss, "export_doc_xlsx", _fake_export)
-    monkeypatch.setattr(sdss, "sync_complaints_from_payload", _fake_sync)
+    monkeypatch.setattr(sdss, "ingest_complaints", _fake_sync)
 
     stats = sdss.sync_one_source(db, seed_source, trigger="manual")
     # 成功 → 状态写回
@@ -207,8 +213,8 @@ def test_sync_complaint_payload_assembled(db, seed_source, monkeypatch, tmp_path
     assert len(pl["card_complaints"]) == 1
     assert pl["external_complaints"][0]["投诉编号"] == "SN202609010001"
     assert pl["card_complaints"][0]["投诉群"] == "卡商A群"
-    # sync_source 区分来源
-    assert captured["kwargs"]["sync_source"] == "shared_doc"
+    # 来源区分: 统一入库接口以 source=shared_doc 标识(#42)
+    assert captured["kwargs"]["source"] == "shared_doc"
     assert stats["external"]["total"] == 2
 
 
@@ -249,13 +255,16 @@ def test_sync_manual_refund_full_sync_false(db, tmp_path, monkeypatch):
 
     def _fake_sync(db, payload, **kwargs):
         captured["payload"] = payload
-        return {
-            "status": "success", "total": 1, "inserted": 1, "updated": 0,
-            "deleted": 0, "failed": 0, "filtered": 0, "warnings": 0, "errors": [],
-        }
+        # #42 统一入库接口: 返回 IngestResult
+        from app.services.ingest_service import IngestResult
+        return IngestResult(
+            data_type="manual_refund", source="shared_doc", run_id="testrun",
+            status="success", total=1, inserted=1, updated=0, deleted=0, failed=0,
+            extra={"log_id": 1, "warnings_count": 0},
+        )
 
     monkeypatch.setattr(sdss, "export_doc_xlsx", _fake_export)
-    monkeypatch.setattr(sdss, "sync_manual_refunds_from_payload", _fake_sync)
+    monkeypatch.setattr(sdss, "ingest_manual_refunds", _fake_sync)
 
     stats = sdss.sync_one_source(db, row, trigger="manual")
     pl = captured["payload"]

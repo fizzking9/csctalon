@@ -17,7 +17,7 @@ from app.api.deps import CurrentUser, DBSession
 from app.core.config import settings
 from app.models.manual_refund_sync_log import ManualRefundSyncLog
 from app.schemas.common import PageBase, R
-from app.services.manual_refund_sync import sync_manual_refunds_from_payload
+from app.services.ingest_service import ingest_manual_refunds
 
 logger = logging.getLogger(__name__)
 
@@ -83,10 +83,28 @@ def push_manual_refunds(
         raise HTTPException(status_code=400, detail="manual_refunds 必填且必须为数组")
     source_file = (payload.get("source_file") or "").strip() or None
     try:
-        stats = sync_manual_refunds_from_payload(db, payload, source_file=source_file, sync_source="workbuddy")
+        # 统一入库接口(#42): 内部转发现有 manual_refund_sync 管线, 口径不变
+        res = ingest_manual_refunds(
+            db, payload=payload, source="workbuddy", source_file=source_file,
+            source_ref="workbuddy_push",
+        )
     except Exception as e:
         logger.exception(f"手动退款推送失败: {e}")
         raise HTTPException(status_code=500, detail=f"同步失败: {e}") from e
+    # 响应保持既有外部契约, 追加统一批次号 run_id
+    stats = {
+        "log_id": res.extra.get("log_id"),
+        "status": res.status,
+        "total": res.total,
+        "inserted": res.inserted,
+        "updated": res.updated,
+        "deleted": res.deleted,
+        "failed": res.failed,
+        "filtered": res.skipped,
+        "warnings": res.extra.get("warnings_count", 0),
+        "errors": res.errors[:50],
+        "run_id": res.run_id,
+    }
     return R(data=stats)
 
 

@@ -26,8 +26,8 @@ from app.models.bms_sync_log import BmsSyncLog
 from app.models.upload import UploadRecord
 from app.services.bms_fetcher import BMS_DATA_SOURCES, BmsFetcher, FetchResult
 from app.services.data_parser import load_dataframe, parse_file
+from app.services.ingest_service import ingest_table
 from app.services.sync_source_config_service import get_sync_source_config
-from app.services.upsert import run_upsert
 
 logger = logging.getLogger(__name__)
 
@@ -135,9 +135,13 @@ def _auto_import(db: Session, data_type: str, file_path: str, filename: str, tri
     db.refresh(record)
 
     try:
-        # 3. 加载 DataFrame 并执行 upsert
+        # 3. 加载 DataFrame 并执行 upsert(统一入库接口 #42)
         df = load_dataframe(full_path, encoding=encoding)
-        result = run_upsert(df, data_type, mapping, db)
+        result = ingest_table(
+            db, data_type,
+            df=df, mapping=mapping,
+            source="bms", source_ref=f"upload_record:{record.id}",
+        )
 
         record.total_rows = result.total
         record.inserted_rows = result.inserted

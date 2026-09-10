@@ -17,7 +17,7 @@ from app.api.deps import AdminUser, CurrentUser, DBSession
 from app.core.config import settings
 from app.models.complaint_sync_log import ComplaintSyncLog
 from app.schemas.common import PageBase, R
-from app.services.complaint_sync import sync_complaints_from_payload
+from app.services.ingest_service import ingest_complaints
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +84,23 @@ def push_complaints(
     if not payload.get("external_complaints") and not payload.get("card_complaints"):
         raise HTTPException(status_code=400, detail="external_complaints / card_complaints 至少提供一项")
     try:
-        stats = sync_complaints_from_payload(db, payload, source_file=source_file, sync_source="workbuddy")
+        # 统一入库接口(#42): 内部转发现有 complaint_sync 管线, 口径不变
+        res = ingest_complaints(
+            db, payload=payload, source="workbuddy", source_file=source_file,
+            source_ref="workbuddy_push",
+        )
     except Exception as e:
         logger.exception(f"投诉推送失败: {e}")
         raise HTTPException(status_code=500, detail=f"同步失败: {e}") from e
-    return R(data=stats)
+    # 响应保持既有外部契约(external/card/status/log_id), 追加统一批次号 run_id
+    data = {
+        "log_id": res.extra.get("log_id"),
+        "status": res.status,
+        "external": res.extra.get("external", {}),
+        "card": res.extra.get("card", {}),
+        "run_id": res.run_id,
+    }
+    return R(data=data)
 
 
 @router.get("/config", response_model=R, summary="投诉推送接入配置状态(内部)")

@@ -268,10 +268,14 @@ def sync_device_flow_sn(
     db = SessionLocal()
     try:
         from app.services.data_parser import suggest_mapping
-        from app.services.upsert import run_upsert
+        from app.services.ingest_service import ingest_table
 
         mapping = suggest_mapping("device_flow_usage", list(df.columns))
-        result = run_upsert(df, "device_flow_usage", mapping, db)
+        result = ingest_table(
+            db, "device_flow_usage",
+            df=df, mapping=mapping,
+            source="bms_http", source_ref=f"device_flow:{sn}:{month}",
+        )
         months = sorted({str(it.get("flowDate")) for it in items if it.get("flowDate")})
         total_flow = sum(float(it.get("flowValue") or 0) for it in items)
         return {

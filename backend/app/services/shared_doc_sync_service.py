@@ -4,6 +4,8 @@
 转为「共享文档在线采集」—— 每个采集源(doc_sync_sources 一行)对应一份共享文档:
 
   导出 xlsx(官方 UI + 登录态) → pandas(calamine) 读 Sheet → 中文表头 dict 行
+  入库统一交给 ingest_service.ingest_complaints / ingest_manual_refunds(#42 统一通道;
+  内部转发现有 complaint_sync / manual_refund_sync 管线, 不改变口径)
   → 复用既有入库管线:
       complaint       → complaint_sync.sync_complaints_from_payload
                          (external_complaints / card_complaints, 按 sheet_rules 分 Sheet)
@@ -31,8 +33,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.doc_sync_source import DocSyncSource
-from app.services.complaint_sync import sync_complaints_from_payload
-from app.services.manual_refund_sync import sync_manual_refunds_from_payload
+from app.services.ingest_service import ingest_complaints, ingest_manual_refunds
 
 logger = logging.getLogger(__name__)
 
@@ -602,10 +603,19 @@ def _sync_complaint_from_file(
         "external_complaints": ext_rows,
         "card_complaints": card_rows,
     }
-    # sync_source 用 shared_doc 与 workbuddy push 区分(complain_sync_logs.sync_source 展示)
-    stats = sync_complaints_from_payload(
-        db, payload, source_file=source_file, sync_source="shared_doc"
+    # 统一入库接口(#42): 投诉通道(315+卡商 两 sheet, 含指纹去重与 SN 关联工单)
+    res = ingest_complaints(
+        db, payload=payload, source="shared_doc", source_file=source_file,
+        source_ref=f"doc_source:{row.id}",
     )
+    # 转回既有统计形状(调用方/summary 期望 external/card 子结构), 不改变对外语义
+    stats: dict[str, Any] = {
+        "log_id": res.extra.get("log_id"),
+        "status": res.status,
+        "external": res.extra.get("external", {}),
+        "card": res.extra.get("card", {}),
+        "run_id": res.run_id,
+    }
     # 空行计数上报(默认静默仅计数, A-20260908-003 §2.4)
     stats["filtered_empty_rows"] = counters.get("empty_rows", 0)
     # #42: 长数字精度可疑计数上报(可见化; 上游应把编号列改文本格式)
@@ -638,9 +648,23 @@ def _sync_manual_refund_from_file(
         "manual_refunds": rows,
         "full_sync": False,  # 增量 upsert, 严禁全量对账删除
     }
-    stats = sync_manual_refunds_from_payload(
-        db, payload, source_file=source_file, sync_source="shared_doc"
+    # 统一入库接口(#42)
+    res = ingest_manual_refunds(
+        db, payload=payload, source="shared_doc", source_file=source_file,
+        source_ref=f"doc_source:{row.id}",
     )
+    stats: dict[str, Any] = {
+        "log_id": res.extra.get("log_id"),
+        "status": res.status,
+        "total": res.total,
+        "inserted": res.inserted,
+        "updated": res.updated,
+        "deleted": res.deleted,
+        "failed": res.failed,
+        "warnings": res.extra.get("warnings_count", 0),
+        "errors": res.errors,
+        "run_id": res.run_id,
+    }
     # 空行/业务空行计数上报(默认静默仅计数, A-20260908-003 §2.4)
     stats["filtered_empty_rows"] = counters.get("empty_rows", 0)
     stats["filtered_business_empty_rows"] = counters.get("business_empty_rows", 0)
