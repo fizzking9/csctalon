@@ -23,7 +23,9 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +47,11 @@ from app.services.upsert import (  # noqa: E402
 _EXCEL_ENGINE = "calamine"
 _BAD_BEFORE = "2020-01-01"
 _SHEET_CANDIDATES = ("监督局-315投诉", "315投诉", "监督局-315")
+# 有效投诉编号(与 complaint_sync._VALID_COMPLAINT_NO_RE 同口径): 数字/字母/连字符, 长度 6~64
+_NO_RE = re.compile(r"^[0-9A-Za-z\-]{6,64}$")
+# 日期匹配容差(天): 源表 complaint_date 与库中存储可能相差 1 天
+# (源为北京日期 0 点, 入库转 UTC 后按北京归日可能落在前一日)
+_DAY_TOL = 1
 
 
 def _find_sheet(path: str) -> str:
@@ -65,12 +72,19 @@ def _load_source(path: str) -> pd.DataFrame:
     return df
 
 
+def _valid_no(v: str | None) -> str | None:
+    """投诉编号有效性: 过滤 '/'、空、纯符号等无效值(与 complaint_sync._is_valid_complaint_no 同口径)"""
+    if not v:
+        return None
+    s = str(v).replace("\n", "").strip()
+    if not s or not _NO_RE.match(s):
+        return None
+    return s
+
+
 def _key_variants(row: dict) -> list[tuple]:
     """生成候选匹配键(多级, 依次尝试)"""
-    no = _to_str(row.get("投诉编号"))
-    # 源编号可能带前导 \n
-    if no:
-        no = no.replace("\n", "").strip()
+    no = _valid_no(_to_str(row.get("投诉编号")))
     phone = _to_str(row.get("投诉手机号"))
     sn = _to_str(row.get("投诉设备号"))
     cd = _sanitize_date(_to_datetime(row.get("投诉日期")))
@@ -123,7 +137,6 @@ def main() -> None:
         if phone and sn:
             src_by_ps[(phone, sn)] = ht
     print(f"源表可解析处理时间: {recomputed} 行; 无法解析: {unparsed} 行")
-
     with SessionLocal() as db:
         bad = db.scalars(
             select(ExternalComplaint)
@@ -156,6 +169,21 @@ def main() -> None:
                     new_ht, hit_by = src_by_ps[tuple(parts)], "手机+SN"
                 if new_ht is not None:
                     break
+            # 容差匹配(编号缺失/日期跨时区的行): 手机号相同 且 日期相差 ≤1 天
+            if new_ht is None and phone:
+                for (p_, cd_s, s_), cand in src_by_pcs.items():
+                    if p_ != phone:
+                        continue
+                    if not (cd_day and cd_s):
+                        continue
+                    try:
+                        d1 = datetime.fromisoformat(cd_day)
+                        d2 = datetime.fromisoformat(cd_s)
+                    except ValueError:
+                        continue
+                    if abs((d1 - d2).days) <= _DAY_TOL:
+                        new_ht, hit_by = cand, "手机+日期±1天"
+                        break
             if new_ht is not None:
                 matched.append((row, new_ht, hit_by))
             else:
@@ -167,6 +195,15 @@ def main() -> None:
             for row, new_ht, hit_by in matched[:5]:
                 print(f"  id={row.id} 坏值={row.handle_time:%Y-%m-%d}"
                       f" → {new_ht.astimezone().strftime('%Y-%m-%d %H:%M')} [匹配={hit_by}]")
+        if missed:
+            # 未匹配行必须留痕可查(源表无对应/业务键缺失), 便于人工复核
+            print(f"\n未匹配 {len(missed)} 行(源表找不到对应, 保持原值):")
+            for row in missed[:20]:
+                print(f"  id={row.id} 编号={(row.complaint_no or '(空)')[:24]}"
+                      f" 手机={row.complainant_phone or '(空)'}"
+                      f" SN={row.device_sn or '(空)'}"
+                      f" 登记={(row.complaint_date.date().isoformat() if row.complaint_date else '(空)')}"
+                      f" 问题={(row.problem or '')[:16]}")
 
         if not args.apply:
             print("\n(预览模式; 加 --apply 才会写库)")
