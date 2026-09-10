@@ -188,3 +188,120 @@ def ai_focus_delete(config_id: int, db: DBSession, _: AdminUser):
     if not ok:
         raise HTTPException(404, "关注点不存在")
     return R(data={"ok": True})
+
+
+# ─────────────────────────────────────────────────────────────────────
+# AI 提示词分层预览 + 模型配置(只读脱敏)  (#44, A-20260910-002 LOCKED)
+#   AdminUser; 不依赖 LLM_ENABLED(可先查看配置后启用)。
+#   🔒 安全红线: LLM_API_KEY 明文绝不出现在任何响应中; 本组端点**仅 GET**(不可写)。
+# ─────────────────────────────────────────────────────────────────────
+@router.get("/prompt-layers", response_model=R, summary="AI 提示词分层总览(内部, 只读)")
+def ai_prompt_layers(_: AdminUser):
+    """返回 AI 提示词四层结构: 模型接入 + 铁律/口径卡/关注点。
+
+    设计取舍(A-20260910-002 §2.1): 前三层是**防幻觉底线**, 通过 UI 不可修改;
+    本端点只回**结构与字符数**, 正文走 /prompt-preview 只读端点, 避免前端误以为可编辑。
+    """
+    from app.services.ai_glossary import glossary_all
+
+    system_len = len(ai_feed._SYSTEM_PROMPT or "")
+    try:
+        glossary_len = len(glossary_all() or "")
+    except Exception:  # noqa: BLE001  口径卡加载异常不阻塞总览
+        logger.warning("ai prompt-layers: glossary 加载失败")
+        glossary_len = 0
+
+    return R(data={
+        "layers": [
+            {
+                "key": "model",
+                "name": "模型接入",
+                "editable": False,
+                "source": "env",
+                "reason": "服务端 .env 注入; API Key 严禁入库/前端明文展示",
+                "manage_path": None,
+            },
+            {
+                "key": "system",
+                "name": "System 铁律",
+                "editable": False,
+                "source": "code",
+                "reason": "防幻觉底线, 代码常量",
+                "char_count": system_len,
+            },
+            {
+                "key": "glossary",
+                "name": "业务口径卡",
+                "editable": False,
+                "source": "code",
+                "reason": "客观统计口径, 代码常量",
+                "char_count": glossary_len,
+            },
+            {
+                "key": "focus",
+                "name": "关注点 / 分析视角",
+                "editable": True,
+                "source": "db",
+                "reason": "运营主观偏好, 可增改/排序/启停",
+                "table": "ai_focus_configs",
+                "manage_path": "/system/ai-focus-configs",
+            },
+        ],
+        "notice": "口径卡与铁律是防幻觉底线, 不可通过界面修改; 仅「关注点」可配置。",
+    })
+
+
+@router.get("/prompt-preview", response_model=R, summary="AI 提示词分层正文预览(内部, 只读)")
+def ai_prompt_preview(layer: str, db: DBSession, _: AdminUser):
+    """只读预览某一层提示词正文(A-20260910-002: 看得见但改不动)。
+
+    本端点**只有 GET**, 不提供任何写入方法 —— 铁律/口径卡是代码常量。
+    """
+    from app.services.ai_glossary import glossary_all
+
+    if layer == "system":
+        return R(data={"layer": "system", "name": "System 铁律", "content": ai_feed._SYSTEM_PROMPT, "readonly": True})
+    if layer == "glossary":
+        return R(data={"layer": "glossary", "name": "业务口径卡", "content": glossary_all(), "readonly": True})
+    if layer == "focus":
+        # 关注点在 DB 侧(可编辑), 此处拼接为文本便于与只读两层对照查看
+        rows = ai_focus_service.list_configs(db)
+        enabled = [r for r in rows if r.get("enabled")]
+        content = "\n\n".join(
+            f"[{r.get('scope_key')}] {r.get('title')}\n{r.get('content')}" for r in enabled
+        )
+        return R(data={
+            "layer": "focus",
+            "name": "关注点 / 分析视角",
+            "content": content,
+            "readonly": False,
+            "count": len(enabled),
+        })
+    raise HTTPException(400, f"未知 layer: {layer!r}; 允许: system/glossary/focus")
+
+
+@router.get("/model-config", response_model=R, summary="AI 模型配置(内部, 脱敏只读)")
+def ai_model_config(_: AdminUser):
+    """返回模型接入配置(**脱敏**)。
+
+    🔒 安全红线(A-20260904-003 LOCKED): `LLM_API_KEY` 明文**绝不出现在响应中**。
+    本端点只回「是否已配置 + 长度」——长度为帮运维核对是否填了正确长度的 key, 不含内容。
+    有测试对该约束做断言(test_ai_model_config.py::test_no_api_key_leak)。
+    """
+    key = getattr(settings, "LLM_API_KEY", "") or ""
+    return R(data={
+        "enabled": bool(settings.LLM_ENABLED),
+        "base_url": settings.LLM_BASE_URL or "",
+        "model": settings.LLM_MODEL or "",
+        "thinking": getattr(settings, "LLM_THINKING", "disabled"),
+        "timeout_s": getattr(settings, "LLM_TIMEOUT_S", 120.0),
+        "max_tokens": getattr(settings, "AI_MAX_TOKENS", 1500),
+        "api_key_configured": bool(key),
+        "api_key_length": len(key),  # 只回长度, 不回内容
+        "source": "env",
+        "notice": (
+            "模型接入配置由服务端 .env 提供(LLM_ENABLED/LLM_BASE_URL/LLM_MODEL/LLM_API_KEY)。"
+            "API Key 严禁入库、严禁在界面展示明文; 修改需运维在服务器更新 .env 并重启后端。"
+        ),
+    })
+

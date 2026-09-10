@@ -17,7 +17,7 @@ import logging
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -44,6 +44,7 @@ from app.schemas.external_token import (
 )
 from app.services import analytics as A
 from app.services import external_service as S
+from app.services import setup_package
 
 logger = logging.getLogger(__name__)
 
@@ -662,6 +663,77 @@ def revoke_token(token_id: int, db: DBSession, me: AdminUser):
     if not ok:
         raise HTTPException(404, "token 不存在")
     return R(data={"ok": True})
+
+
+@router.post("/tokens/{token_id}/enable", response_model=R, summary="恢复已吊销 token(内部)")
+def enable_token(token_id: int, db: DBSession, me: AdminUser):
+    """恢复已吊销的 token。
+
+    A-20260910-003 (#43) v1.3: 把吊销从「终态」改为「可逆状态」, 误吊销无需重建 token。
+    幂等: 已启用的 token 再调用返回 200 且状态不变。
+    """
+    row = S.enable_token(db, token_id, restored_by=me.username)
+    if row is None:
+        raise HTTPException(404, "token 不存在")
+    # DB 时区为 timestamptz, 统一转北京时间返回
+    restored_at = _now_cn()
+    data = ExternalTokenOut.model_validate(row).model_dump(mode="json")
+    data.update({"restored_by": me.username, "restored_at": restored_at.isoformat()})
+    # 已过期的 token 恢复后仍不可用 —— 明确告警, 不静默失败
+    if row.expires_at is not None and row.expires_at <= _now_cn():
+        data["warning"] = "该 token 已过期, 恢复后仍不可用, 请同时更新过期时间"
+    return R(data=data)
+
+
+@router.post("/tokens/{token_id}/rotate", response_model=R, summary="重新生成 token 明文(旧 token 立即失效)")
+def rotate_token(token_id: int, db: DBSession, _: AdminUser):
+    """换钥: 覆盖 hash/prefix, 旧明文立即失效, 新明文仅本响应返回一次。
+
+    这是「明文只显示一次」约束下的唯一合法补救路径 —— 不是回看历史明文, 而是换一把新锁。
+    """
+    res = S.rotate_token(db, token_id)
+    if res is None:
+        raise HTTPException(404, "token 不存在")
+    raw, row = res
+    return R(data={
+        "id": row.id,
+        "name": row.name,
+        "token": raw,  # 明文仅此一次
+        "token_prefix": row.token_prefix,
+        "enabled": row.enabled,
+        "notice": "旧 token 已立即失效, 请马上更新调用方配置",
+    })
+
+
+@router.get("/tokens/{token_id}/setup-package", response_model=R, summary="生成接入配置包(内部)")
+def token_setup_package(
+    token_id: int,
+    db: DBSession,
+    request: Request,
+    _: AdminUser,
+    base_url: str | None = Query(None, description="系统对外访问地址; 缺省按请求推导"),
+):
+    """返回该 token 的可复制接入配置包(Markdown)。
+
+    ⚠️ 配置包中 token 位置固定为占位符 —— 本端点**不返回明文**, 不是明文回看后门。
+    调用方应保存生成时拿到的明文, 或走 rotate 换钥 + 重新复制配置包。
+    """
+    row = db.get(ExternalAccessToken, token_id)
+    if not row:
+        raise HTTPException(404, "token 不存在")
+    # 对外地址优先显式传入(反向代理下 request.base_url 可能是内网地址)
+    effective_base = (base_url or str(request.base_url)).rstrip("/")
+    pkg = setup_package.build_setup_package(
+        row, effective_base,
+        global_rate_limit=settings.EXTERNAL_RATE_LIMIT_DEFAULT_PER_MIN,
+    )
+    pkg.update({
+        "token_id": row.id,
+        "name": row.name,
+        "token_prefix": row.token_prefix,
+        "enabled": row.enabled,
+    })
+    return R(data=pkg)
 
 
 @router.get("/config", response_model=R, summary="外部只读接口启用状态(内部)")

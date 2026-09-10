@@ -14,114 +14,9 @@
         text-color="#b7c0cd"
         active-text-color="#fff"
       >
-        <!-- 1. 运营看板(日/周/月/季切换, 全员可见, 第一位) -->
-        <el-menu-item index="/dashboards/today">
-          <el-icon><DataLine /></el-icon>
-          <span>运营看板</span>
-        </el-menu-item>
-
-        <!-- 3. 专项分析:管理层可见, 专项深入分析透视(退款/投诉/接待/提现全链路/绩效/专项跟进) -->
-        <el-sub-menu v-if="authStore.isManager" index="dashboards">
-          <template #title>
-            <el-icon><DataAnalysis /></el-icon>
-            <span>专项分析</span>
-          </template>
-          <el-menu-item index="/dashboards/refund">退款分析</el-menu-item>
-          <el-menu-item index="/dashboards/refund-recovery">挽回分析</el-menu-item>
-          <el-menu-item index="/dashboards/complaint-analysis">投诉分析</el-menu-item>
-          <el-menu-item v-if="showByVisibility('debug_only')" index="/dashboards/complaint-audit">投诉核查</el-menu-item>
-          <el-menu-item v-if="showByVisibility('debug_only')" index="/dashboards/reception">接待分析</el-menu-item>
-          <el-menu-item v-if="showByVisibility('debug_only')" index="/dashboards/performance">绩效分析</el-menu-item>
-          <el-menu-item v-if="showByVisibility('debug_only')" index="/dashboards/special">专项跟进</el-menu-item>
-        </el-sub-menu>
-
-        <!-- 设备/人员时序审计:业务功能(从退款看板-人员/设备分析「时序」跳转),不进入主菜单 -->
-        <el-menu-item v-if="showByVisibility('debug_only')" index="/todos">
-          <el-icon><Bell /></el-icon>
-          <span>事项跟进</span>
-        </el-menu-item>
-
-        <el-menu-item v-if="showByVisibility('debug_only')" index="/tasks">
-          <el-icon><List /></el-icon>
-          <span>专项任务</span>
-        </el-menu-item>
-
-        <el-menu-item v-if="showByVisibility('debug_only')" index="/management/device-tags">
-          <el-icon><CollectionTag /></el-icon>
-          <span>设备专项标签</span>
-        </el-menu-item>
-
-        <el-menu-item v-if="showByVisibility('debug_only')" index="/management/invoices">
-          <el-icon><Tickets /></el-icon>
-          <span>发票登记</span>
-        </el-menu-item>
-
-        <el-menu-item v-if="showByVisibility('debug_only')" index="/management/kb-articles">
-          <el-icon><Reading /></el-icon>
-          <span>知识库</span>
-        </el-menu-item>
-
-        <!-- 策略发布:管理层看子菜单(管理+查阅),客服只看发布页 -->
-        <el-sub-menu v-if="authStore.isManager && showByVisibility('debug_only')" index="strategy">
-          <template #title>
-            <el-icon><Document /></el-icon>
-            <span>策略发布</span>
-          </template>
-          <el-menu-item v-if="authStore.isAdmin || authStore.isSupervisor" index="/strategy/manage">策略管理</el-menu-item>
-          <el-menu-item index="/strategy/publish">文档查阅</el-menu-item>
-        </el-sub-menu>
-        <el-menu-item v-else-if="showByVisibility('debug_only')" index="/strategy/publish">
-          <el-icon><Document /></el-icon>
-          <span>策略发布</span>
-        </el-menu-item>
-
-        <!-- 报表中心(管理层,规划占位): 仅 admin + supervisor 可见全量报表 -->
-        <el-menu-item v-if="(authStore.isAdmin || authStore.isSupervisor) && showByVisibility('debug_only')" index="/report/center">
-          <el-icon><Printer /></el-icon>
-          <span>报表中心</span>
-        </el-menu-item>
-
-        <!-- 管理闭环:报告→审计→措施→跟进→回看(管理层可见) -->
-        <el-sub-menu v-if="authStore.isManager && showByVisibility('debug_only')" index="management">
-          <template #title>
-            <el-icon><Flag /></el-icon>
-            <span>管理闭环</span>
-          </template>
-          <el-menu-item index="/management/reports">报告索引</el-menu-item>
-          <el-menu-item index="/management/weekly">周报看板</el-menu-item>
-          <el-menu-item index="/management/measures">管理措施</el-menu-item>
-          <el-menu-item index="/management/policies">政策措施</el-menu-item>
-          <el-menu-item index="/management/incidents">影响事件</el-menu-item>
-          <el-menu-item index="/management/schedule">排班管理</el-menu-item>
-          <el-menu-item index="/management/alerts">预警中心</el-menu-item>
-          <el-menu-item index="/management/upstream-tickets">跨部门协作</el-menu-item>
-          <el-menu-item v-if="authStore.isAdmin || authStore.isSupervisor" index="/management/templates">看板模板</el-menu-item>
-        </el-sub-menu>
-
-        <el-sub-menu v-if="authStore.isAdmin" index="system">
-          <template #title>
-            <el-icon><Setting /></el-icon>
-            <span>系统管理</span>
-          </template>
-          <el-menu-item index="/system/users">用户管理</el-menu-item>
-          <el-menu-item index="/system/persons">人员管理</el-menu-item>
-          <el-menu-item index="/data/ingest">数据采集</el-menu-item>
-          <el-menu-item index="/data/device-flow-audit">设备流量审计</el-menu-item>
-          <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
-          <el-menu-item index="/analytics/views">视图清单</el-menu-item>
-          <el-menu-item index="/dashboards/designer">看板配置</el-menu-item>
-          <el-menu-item index="/system/classification-rules">分类规则</el-menu-item>
-          <el-menu-item index="/system/operation-logs">操作日志</el-menu-item>
-          <el-menu-item index="/system/system-events">
-            <el-badge v-if="eventUnread > 0" :value="eventUnread" :max="99" class="menu-badge">
-              <span>事务通知</span>
-            </el-badge>
-            <span v-else>事务通知</span>
-          </el-menu-item>
-          <el-menu-item index="/system/cache">缓存管理</el-menu-item>
-          <el-menu-item index="/system/external-access">外部接入</el-menu-item>
-          <el-menu-item index="/system/ai-focus-configs">AI 助手提示词</el-menu-item>
-        </el-sub-menu>
+        <!-- 菜单由 config/menu.js 唯一驱动(见该文件顶部注释):
+             桌面端与移动端共用同一配置, 杜绝两份硬编码漂移 (#46, A-20260910-004) -->
+        <MenuTree :nodes="MENU_GROUPS" />
       </el-menu>
     </el-aside>
 
@@ -236,7 +131,7 @@
     </el-container>
   </el-container>
 
-  <!-- 移动端抽屉菜单(仅开放: 今日看板 / 运营看板 / 数据采集[管理员]) -->
+  <!-- 移动端抽屉菜单(与桌面端同源, 由 config/menu.js 驱动) -->
   <el-drawer
     v-model="mobileMenuOpen"
     direction="ltr"
@@ -250,29 +145,14 @@
         <span class="mobile-menu-name">{{ authStore.displayName }}</span>
         <el-tag size="small" type="info" effect="plain">{{ roleLabel }}</el-tag>
       </div>
-      <el-menu :default-active="activeMenu" router @select="mobileMenuOpen = false">
-        <el-menu-item index="/dashboards/today">
-          <el-icon><DataLine /></el-icon>
-          <span>今日看板</span>
-        </el-menu-item>
-        <el-menu-item index="/dashboards/operation">
-          <el-icon><TrendCharts /></el-icon>
-          <span>运营看板</span>
-        </el-menu-item>
-        <!-- 专项分析: 管理层可见(与桌面端一致, 含退款/挽回/投诉) -->
-        <el-sub-menu v-if="authStore.isManager" index="mobile-dashboards">
-          <template #title>
-            <el-icon><DataAnalysis /></el-icon>
-            <span>专项分析</span>
-          </template>
-          <el-menu-item index="/dashboards/refund">退款分析</el-menu-item>
-          <el-menu-item index="/dashboards/refund-recovery">挽回分析</el-menu-item>
-          <el-menu-item index="/dashboards/complaint-analysis">投诉分析</el-menu-item>
-        </el-sub-menu>
-        <el-menu-item v-if="authStore.isAdmin" index="/data/ingest">
-          <el-icon><Upload /></el-icon>
-          <span>数据采集</span>
-        </el-menu-item>
+      <!-- 移动端与桌面端共用同一份菜单配置(config/menu.js) ——
+           历史问题: 两端各自硬编码, 移动端只有 2 项, 与桌面严重不一致 (#46) -->
+      <el-menu
+        :default-active="activeMenu"
+        router
+        @select="mobileMenuOpen = false"
+      >
+        <MenuTree :nodes="MENU_GROUPS" />
       </el-menu>
       <el-button type="danger" plain class="mobile-logout" @click="logout">退出登录</el-button>
     </div>
@@ -296,12 +176,17 @@ import { systemEventSummary } from '@/api/systemEvent'
 import { getSiteInfo } from '@/api/siteInfo'
 import AuditDialog from '@/components/AuditDialog.vue'
 import AssistantDrawer from '@/components/AssistantDrawer.vue'
+import MenuTree from '@/components/MenuTree.vue'
+import { MENU_GROUPS } from '@/config/menu'
 import { useAudit } from '@/composables/useAudit'
 import { useAssistant } from '@/composables/useAssistant'
-import { showByVisibility } from '@/utils/env'
+import { useLayoutState, useLayoutStateWriter } from '@/composables/useLayoutState'
 
 const { openQuickAnalysis } = useAudit()
 const { openAssistant } = useAssistant()
+// 布局层共享状态: 未读数写到这里, MenuTree(递归组件)只读消费, 避免 N 倍轮询
+const { setEventUnread } = useLayoutStateWriter()
+const layoutState = useLayoutState()
 
 const route = useRoute()
 const router = useRouter()
@@ -347,13 +232,15 @@ const rawSync = reactive({
 let _pollTimer = null
 let _pollTimer2 = null
 let _mq = null
+
 // 系统事务通知未读数(侧边栏/顶部角标, 15s 轮询)
-const eventUnread = ref(0)
+// 存于 useLayoutState 共享单例(菜单树递归组件共用, 避免各自轮询)
+const eventUnread = computed(() => layoutState.eventUnread)
 
 async function _pollEventUnread() {
   try {
     const res = await systemEventSummary()
-    eventUnread.value = res.data?.unread || 0
+    setEventUnread(res.data?.unread || 0)
   } catch (e) {
     // 静默: 接口异常不影响主布局
   }

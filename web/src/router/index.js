@@ -410,6 +410,14 @@ const routes = [
         component: () => import('@/views/system/ExternalAccess.vue'),
         meta: { title: '外部接入', icon: 'Key', admin: true },
       },
+      // #44 接入中心: 登录态 / 外部 Token / 推送配置包 / AI 与模型 统一入口
+      // 旧路径(/system/external-access, /system/ai-focus-configs)保留可直达, 不破坏书签
+      {
+        path: 'system/access-center',
+        name: 'SystemAccessCenter',
+        component: () => import('@/views/system/AccessCenter.vue'),
+        meta: { title: '接入中心', icon: 'Connection', admin: true },
+      },
       {
         path: 'system/ai-focus-configs',
         name: 'SystemAiFocusConfigs',

@@ -2,12 +2,19 @@
 
 - 视图 CRUD + execute(支持已存视图或 inline 预览)
 - 分类规则 CRUD + preview
+
+⚠️ 权限矩阵 (#46, A-20260910-004 §四 权限配对):
+   菜单把「分析视图」从 admin-only 放宽到 manager(可见即可读), 因此**读接口**
+   同步从 CurrentUser 收紧为 ManagerUser —— 否则普通客服仍可经 API 直接读到
+   主管视角的分析视图, 与菜单可见性不一致。
+   写接口(create/update/delete)本应限 admin(构建器菜单也是 admin-only); 原为
+   CurrentUser 属审计项 A-P1-3「越权写」范畴, 本单顺手配对收紧。
 """
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
-from app.api.deps import CurrentUser, DBSession
+from app.api.deps import AdminUser, DBSession, ManagerUser
 from app.models.analysis_view import AnalysisView, ClassificationRule
 from app.models.data_source import DataSource
 from app.models.user import RoleEnum
@@ -58,7 +65,7 @@ def _can_modify_rule(user, rule: ClassificationRule) -> bool:
 @router.get("", response_model=R, summary="分析视图列表(分页)")
 def list_views(
     db: DBSession,
-    _: CurrentUser,
+    _: ManagerUser,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     preset: bool | None = Query(None, description="筛选预设/自定义"),
@@ -86,7 +93,7 @@ def list_views(
 
 
 @router.get("/{view_id}", response_model=R, summary="视图详情")
-def get_view(db: DBSession, _: CurrentUser, view_id: int):
+def get_view(db: DBSession, _: ManagerUser, view_id: int):
     v = db.get(AnalysisView, view_id)
     if not v:
         raise HTTPException(404, "视图不存在")
@@ -94,7 +101,7 @@ def get_view(db: DBSession, _: CurrentUser, view_id: int):
 
 
 @router.post("", response_model=R, summary="创建视图")
-def create_view(db: DBSession, user: CurrentUser, payload: AnalysisViewCreate):
+def create_view(db: DBSession, user: AdminUser, payload: AnalysisViewCreate):
     v = AnalysisView(
         code=payload.code,
         name=payload.name,
@@ -118,7 +125,7 @@ def create_view(db: DBSession, user: CurrentUser, payload: AnalysisViewCreate):
 
 
 @router.put("/{view_id}", response_model=R, summary="更新视图")
-def update_view(db: DBSession, user: CurrentUser, view_id: int, payload: AnalysisViewUpdate):
+def update_view(db: DBSession, user: AdminUser, view_id: int, payload: AnalysisViewUpdate):
     v = db.get(AnalysisView, view_id)
     if not v:
         raise HTTPException(404, "视图不存在")
@@ -134,7 +141,7 @@ def update_view(db: DBSession, user: CurrentUser, view_id: int, payload: Analysi
 
 
 @router.delete("/{view_id}", response_model=R, summary="删除视图(预设不可删)")
-def delete_view(db: DBSession, user: CurrentUser, view_id: int):
+def delete_view(db: DBSession, user: AdminUser, view_id: int):
     v = db.get(AnalysisView, view_id)
     if not v:
         raise HTTPException(404, "视图不存在")
@@ -152,7 +159,7 @@ def delete_view(db: DBSession, user: CurrentUser, view_id: int):
 
 
 @router.post("/execute", response_model=R, summary="执行视图(已存视图或 inline 预览)")
-def execute_view_endpoint(db: DBSession, _: CurrentUser, payload: AnalysisViewExecuteRequest):
+def execute_view_endpoint(db: DBSession, _: ManagerUser, payload: AnalysisViewExecuteRequest):
     """执行分析视图
 
     - view_id: 已存视图ID
@@ -182,7 +189,7 @@ rules_router = APIRouter(prefix="/classification-rules", tags=["分析-分类规
 @rules_router.get("", response_model=R, summary="分类规则列表")
 def list_rules(
     db: DBSession,
-    _: CurrentUser,
+    _: ManagerUser,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     is_active: bool | None = Query(None),
@@ -198,7 +205,7 @@ def list_rules(
 
 
 @rules_router.post("", response_model=R, summary="创建分类规则")
-def create_rule(db: DBSession, user: CurrentUser, payload: ClassificationRuleCreate):
+def create_rule(db: DBSession, user: AdminUser, payload: ClassificationRuleCreate):
     r = ClassificationRule(
         name=payload.name,
         description=payload.description,
@@ -214,7 +221,7 @@ def create_rule(db: DBSession, user: CurrentUser, payload: ClassificationRuleCre
 
 
 @rules_router.put("/{rule_id}", response_model=R, summary="更新分类规则")
-def update_rule(db: DBSession, user: CurrentUser, rule_id: int, payload: ClassificationRuleUpdate):
+def update_rule(db: DBSession, user: AdminUser, rule_id: int, payload: ClassificationRuleUpdate):
     r = db.get(ClassificationRule, rule_id)
     if not r:
         raise HTTPException(404, "规则不存在")
@@ -230,7 +237,7 @@ def update_rule(db: DBSession, user: CurrentUser, rule_id: int, payload: Classif
 
 
 @rules_router.delete("/{rule_id}", response_model=R, summary="删除分类规则")
-def delete_rule(db: DBSession, user: CurrentUser, rule_id: int):
+def delete_rule(db: DBSession, user: AdminUser, rule_id: int):
     r = db.get(ClassificationRule, rule_id)
     if not r:
         raise HTTPException(404, "规则不存在")
@@ -243,7 +250,7 @@ def delete_rule(db: DBSession, user: CurrentUser, rule_id: int):
 
 
 @rules_router.post("/preview", response_model=R, summary="预览规则效果(返回各维度值→标签映射)")
-def preview_rule(db: DBSession, _: CurrentUser, payload: ClassificationRulePreviewRequest):
+def preview_rule(db: DBSession, _: ManagerUser, payload: ClassificationRulePreviewRequest):
     """预览分类规则:对指定数据源的 target_field 应用规则,返回 distinct 值 → 标签的映射"""
     # 加载规则
     if payload.rule_id:

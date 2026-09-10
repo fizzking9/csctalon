@@ -121,6 +121,45 @@ def revoke_token(db: Session, token_id: int, revoked_by: str | None = None) -> b
     return True
 
 
+def enable_token(db: Session, token_id: int, restored_by: str | None = None) -> ExternalAccessToken | None:
+    """恢复已吊销 token(enabled=true); 不存在返回 None。
+
+    A-20260910-003 (#43) v1.3 增量:
+      - 把吊销从「终态」改为「可逆状态」, 误吊销无需重建 token + 重新分发。
+      - 幂等: 已启用的 token 再调用不报错, 状态保持不变。
+      - `revoked_by` 清空(当前态为「启用」, 恢复人写入 operation_logs 审计链)。
+    """
+    row = db.get(ExternalAccessToken, token_id)
+    if not row:
+        return None
+    row.enabled = True
+    # 清空吊销人: 该字段语义是"当前处于吊销态的吊销者", 恢复后不应残留
+    row.revoked_by = None
+    db.commit()
+    db.refresh(row)
+    logger.info("[external] token 恢复启用: id=%s name=%s by=%s", row.id, row.name, restored_by or "-")
+    return row
+
+
+def rotate_token(db: Session, token_id: int) -> tuple[str, ExternalAccessToken] | None:
+    """重新生成明文(**覆盖式**, 非回看): 旧 token 立即失效。
+
+    A-20260910-003 (#43) v1.3: 明文"仅显示一次"是安全底线(库中只存 hash),
+    唯一合法的补救路径不是"回看历史明文", 而是"换一把新锁"。
+    返回 (新明文, 行对象); 不存在返回 None。
+    """
+    row = db.get(ExternalAccessToken, token_id)
+    if not row:
+        return None
+    raw = secrets.token_urlsafe(32)
+    row.token_hash = _hash_token(raw)
+    row.token_prefix = raw[:8]
+    db.commit()
+    db.refresh(row)
+    logger.info("[external] token 换钥(旧明文立即失效): id=%s name=%s", row.id, row.name)
+    return raw, row
+
+
 def find_token_by_hash(db: Session, token_hash: str) -> ExternalAccessToken | None:
     return db.scalar(select(ExternalAccessToken).where(ExternalAccessToken.token_hash == token_hash))
 

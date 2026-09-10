@@ -117,6 +117,12 @@ async def lifespan(app: FastAPI):
             bms_scheduler.stop()
         except Exception:
             pass
+        # #45: 清理共享文档登录会话(防进程退出残留 chromium 进程占内存)
+        try:
+            from app.services.shared_doc_login_service import login_manager
+            login_manager.close_all()
+        except Exception:
+            pass
         # 释放咨询锁 (若持有)
         try:
             if got_lock:

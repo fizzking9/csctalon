@@ -17,6 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
     libgbm1 libasound2 libpangocairo-1.0-0 libpango-1.0-0 libcairo2 \
+    # 虚拟显示服务(工单 #45): 共享文档页面内扫码登录需在有头浏览器中渲染,
+    # 容器无物理显示器 → 用 Xvfb 提供虚拟 DISPLAY。xauth 供 xvfb-run 使用。
+    xvfb xauth \
     && rm -rf /var/lib/apt/lists/*
 
 # pip 使用清华源

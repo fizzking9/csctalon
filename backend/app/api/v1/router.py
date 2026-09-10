@@ -24,6 +24,7 @@ from app.api.v1 import (
     fetch,
     groups,
     incidents,
+    integrations,
     invoices,
     kb_articles,
     match,
@@ -122,4 +123,5 @@ api_router.include_router(sync_manual_refunds.router)
 api_router.include_router(doc_sync.router)
 api_router.include_router(shared_doc_sync.router)
 api_router.include_router(external.router)
+api_router.include_router(integrations.router)
 api_router.include_router(site_info.router)

@@ -4,7 +4,7 @@
     <el-alert type="info" :closable="false" show-icon class="mb-12">
       共享文档在线采集：系统用登录态打开共享链接 → 官方 UI 导出 xlsx → 解析后复用既有业务管线入库
       (315/卡商投诉 → 投诉台账；商户号退款 → manual_refunds)。<b>增量采集不删除历史数据</b>；
-      登录态在服务器 data/browser_states/(腾讯 tencent_doc.json / 金山 kdocs.json)，失效需重新扫码。
+      登录态失效时，点各行的<b>「登录」</b>按钮即可在本页扫码完成授权（无需上服务器跑脚本）。
     </el-alert>
 
     <!-- 操作栏 -->
@@ -50,15 +50,49 @@
           <span v-else class="hint-text">未同步</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="180" fixed="right">
+      <el-table-column label="操作" width="260" fixed="right">
         <template #default="{ row }">
           <el-button size="small" type="primary" :icon="VideoPlay" :loading="syncingId === row.id"
             @click="onSync(row)">同步</el-button>
+          <!-- #45: 页面内扫码登录 —— 替代「SSH 上服务器跑脚本」 -->
+          <el-button size="small" :icon="Key" @click="startLogin(row)">登录</el-button>
           <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
           <el-button size="small" type="danger" :icon="Delete" @click="onDelete(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
+
+    <!-- ===== 页面内扫码登录弹窗 (#45) ===== -->
+    <el-dialog
+      v-model="loginVisible"
+      :title="`${loginRow?.doc_name || loginRow?.doc_url || ''} — 扫码登录`"
+      width="620px"
+      :close-on-click-modal="false"
+      @closed="onLoginDialogClosed"
+    >
+      <el-alert type="info" :closable="false" show-icon class="mb-12">
+        <template #title>
+          请在弹出的浏览器窗口中完成扫码登录；登录成功后点「我已扫码完成」保存登录态。
+          同一平台同时只能有一个登录会话。
+        </template>
+      </el-alert>
+
+      <div class="login-shot">
+        <img v-if="loginScreenshot" :src="loginScreenshot" alt="登录页截图" class="shot-img" />
+        <div v-else class="shot-empty">正在启动浏览器并加载登录页…</div>
+      </div>
+
+      <div class="login-status">
+        <el-tag :type="loginStatusType(loginStatus)" size="small">{{ loginStatusText(loginStatus) }}</el-tag>
+        <span v-if="loginCurrentUrl" class="hint-text">{{ loginCurrentUrl }}</span>
+        <span v-if="loginExpiresIn" class="hint-text">剩余 {{ loginExpiresIn }} 秒</span>
+      </div>
+
+      <template #footer>
+        <el-button @click="cancelLogin">取消</el-button>
+        <el-button type="primary" :loading="confirming" @click="confirmLogin">我已扫码完成</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 新建/编辑弹窗 -->
     <el-dialog v-model="dialogVisible" :title="editingId ? '编辑采集源' : '新增采集源'" width="640px">
@@ -110,12 +144,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Edit, Delete, VideoPlay } from '@element-plus/icons-vue'
+import { Plus, Refresh, Edit, Delete, VideoPlay, Key } from '@element-plus/icons-vue'
 import {
   listSharedDocSources, createSharedDocSource, updateSharedDocSource,
   deleteSharedDocSource, toggleSharedDocSource, syncSharedDocNow,
+  startSharedDocLogin, getSharedDocLoginStatus, confirmSharedDocLogin, cancelSharedDocLogin,
 } from '@/api/sharedDoc'
 
 const sources = ref([])
@@ -278,6 +313,108 @@ async function onDelete(row) {
   }
 }
 
+// ── 页面内扫码登录 (#45) ──
+// 替代「SSH 上服务器跑 scripts/tencent_doc_login.py」的唯一路径。
+const loginVisible = ref(false)
+const loginRow = ref(null)
+const loginSessionId = ref('')
+const loginScreenshot = ref('')
+const loginStatus = ref('pending')
+const loginCurrentUrl = ref('')
+const loginExpiresIn = ref(0)
+const confirming = ref(false)
+let _loginPoll = null
+
+const loginStatusText = (v) => ({
+  pending: '等待扫码', scanned: '已扫码，待确认', authorized: '已检测到登录',
+  expired: '会话已过期', closed: '会话已关闭',
+}[v] || v)
+const loginStatusType = (v) => ({
+  pending: 'info', scanned: 'warning', authorized: 'success',
+  expired: 'danger', closed: 'info',
+}[v] || 'info')
+
+async function startLogin(row) {
+  loginRow.value = row
+  loginVisible.value = true
+  loginScreenshot.value = ''
+  loginStatus.value = 'pending'
+  loginCurrentUrl.value = ''
+  try {
+    const res = await startSharedDocLogin(row.id)
+    const d = res.data || {}
+    loginSessionId.value = d.session_id
+    loginScreenshot.value = d.screenshot || ''
+    loginCurrentUrl.value = d.current_url || ''
+    loginExpiresIn.value = d.expires_in || 0
+    startLoginPolling()
+  } catch (e) {
+    // 501 = 服务器未装 Xvfb, detail 里带可执行的一键命令, 直接展示给用户
+    ElMessage.error(e?.response?.data?.detail || '启动登录失败')
+    loginVisible.value = false
+  }
+}
+
+function startLoginPolling() {
+  stopLoginPolling()
+  _loginPoll = setInterval(async () => {
+    if (!loginSessionId.value) return
+    try {
+      const res = await getSharedDocLoginStatus(loginSessionId.value)
+      const d = res.data || {}
+      loginStatus.value = d.status
+      loginCurrentUrl.value = d.current_url || ''
+      loginExpiresIn.value = d.expires_in || 0
+      if (d.status === 'expired' || d.status === 'closed') stopLoginPolling()
+    } catch (e) {
+      stopLoginPolling()
+    }
+  }, 2000)
+}
+
+function stopLoginPolling() {
+  if (_loginPoll) { clearInterval(_loginPoll); _loginPoll = null }
+}
+
+async function confirmLogin() {
+  if (!loginSessionId.value) return
+  confirming.value = true
+  try {
+    const res = await confirmSharedDocLogin(loginSessionId.value)
+    const d = res.data || {}
+    if (d.ok) {
+      ElMessage.success(`登录态已保存（cookies ${d.cookies} 条）`)
+      loginVisible.value = false
+      await load()
+    } else {
+      // 后端轻量校验未通过 —— 明确告知, 且旧登录态未被覆盖
+      ElMessage.warning(d.message || '未检测到登录态，请完成扫码后重试')
+    }
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || '保存登录态失败')
+  } finally {
+    confirming.value = false
+  }
+}
+
+async function cancelLogin() {
+  if (loginSessionId.value) {
+    try { await cancelSharedDocLogin(loginSessionId.value) } catch (e) { /* 幂等 */ }
+  }
+  loginVisible.value = false
+}
+
+function onLoginDialogClosed() {
+  stopLoginPolling()
+  if (loginSessionId.value) {
+    // 关闭弹窗即释放会话(避免 chromium 进程泄漏)
+    cancelSharedDocLogin(loginSessionId.value).catch(() => {})
+    loginSessionId.value = ''
+  }
+}
+
+onBeforeUnmount(stopLoginPolling)
+
 onMounted(load)
 </script>
 
@@ -286,4 +423,24 @@ onMounted(load)
 .toolbar { display: flex; gap: 8px; }
 .hint-text { color: #909399; font-size: 12px; margin-left: 4px; }
 .sheet-rule-row { display: flex; align-items: center; margin-bottom: 6px; }
+/* #45 扫码登录弹窗 */
+.login-shot {
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  background: #f5f7fa;
+  min-height: 300px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.shot-img { width: 100%; display: block; }
+.shot-empty { color: #909399; font-size: 13px; }
+.login-status {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 </style>

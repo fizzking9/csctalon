@@ -40,6 +40,7 @@ from app.models.group import Group, GroupLeadershipHistory, PersonGroupMembershi
 from app.models.incident import Incident, IncidentFollowup  # noqa: F401
 from app.models.ingest_mode_config import IngestModeConfig  # noqa: F401
 from app.models.ingest_rejected_row import IngestRejectedRow  # noqa: F401
+from app.models.integration_profile import IntegrationProfile  # noqa: F401
 from app.models.kb_article import KbArticle  # noqa: F401
 from app.models.manual_refund import ManualRefund  # noqa: F401
 from app.models.manual_refund_sync_log import ManualRefundSyncLog  # noqa: F401
@@ -134,6 +135,7 @@ __all__ = [
     "Incident",
     "IncidentFollowup",
     "IngestModeConfig",
+    "IntegrationProfile",
     "IngestRejectedRow",
     "KbArticle",
     "Measure",
