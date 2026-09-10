@@ -190,7 +190,8 @@ def ingest_table(
     res.failed = int(getattr(raw, "failed", 0) or 0)
     res.errors = list(getattr(raw, "errors", []) or [])
     res.warnings = list(getattr(raw, "warnings", []) or [])
-    res.rejected = res.failed  # run_upsert 已把 errors 落拒收表
+    # rejected = 真正落拒收表(可按行可见/判定的)条数, 与 failed 不同义(#42)
+    res.rejected = int(getattr(raw, "rejected", 0) or 0)
     res.status = "partial" if res.failed else "success"
     res.extra.setdefault("label", spec.label)
     res.extra.setdefault("dedup_key", spec.dedup_key)
@@ -230,15 +231,29 @@ def ingest_complaints(
     res.updated = int(ext.get("updated", 0)) + int(card.get("updated", 0))
     res.skipped = int(ext.get("filtered", 0)) + int(card.get("filtered", 0))
     res.failed = int(ext.get("failed", 0)) + int(card.get("failed", 0))
-    res.rejected = res.failed
+    # rejected: 拒收行数(由同步函数上报; 无则 0, 不伪装成 failed)
+    res.rejected = int(stats.get("rejected", 0) or 0)
+    # ⚠️ 语义差异: 同步函数返回的 ext/card.warnings 是**计数(int)**,
+    #    而 IngestResult.warnings 是**明细列表(list[dict])** —— 不得直接赋值。
+    #    计数放 extra(供前端/日志展示), 明细由 validation 提供。
     res.errors = list(ext.get("errors", []) or []) + list(card.get("errors", []) or [])
     res.status = stats.get("status", "success")
     res.extra.update({
         "log_id": stats.get("log_id"),
-        "external": {k: ext.get(k) for k in ("total", "inserted", "updated", "failed", "filtered", "matched")},
-        "card": {k: card.get(k) for k in ("total", "inserted", "updated", "failed", "filtered", "matched")},
-        # #42 入库前校验告警数(只读检测, 问题可见化; 明细见同步日志)
-        "validation_warnings": int(ext.get("warnings", 0) or 0) + int(card.get("warnings", 0) or 0),
+        # ⚠️ 字段白名单必须与对外契约一致: warnings/errors 是 workbuddy 依赖的字段,
+        #    遗漏会让外部工具拿到 undefined(2026-09-10 审查 CRITICAL 修复)
+        "external": {
+            k: ext.get(k)
+            for k in ("total", "inserted", "updated", "failed", "filtered", "matched", "warnings", "errors")
+        },
+        "card": {
+            k: card.get(k)
+            for k in ("total", "inserted", "updated", "failed", "filtered", "matched", "warnings", "errors")
+        },
+        # warnings 计数(与对外契约同源)
+        "warnings_count": int(ext.get("warnings", 0) or 0) + int(card.get("warnings", 0) or 0),
+        # #42 入库前校验问题(只读检测; 与 errors 严格分离)
+        "validation": (stats.get("validation", []) or [])[:50],
     })
     logger.info(
         f"[ingest] complaints<-{source} run={rid}: "
@@ -276,7 +291,8 @@ def ingest_manual_refunds(
     res.deleted = int(stats.get("deleted", 0))
     res.skipped = int(stats.get("filtered", 0))
     res.failed = int(stats.get("failed", 0))
-    res.rejected = res.failed
+    # rejected: 拒收行数(由同步函数上报; 无则 0, 不伪装成 failed)
+    res.rejected = int(stats.get("rejected", 0) or 0)
     res.errors = list(stats.get("errors", []) or [])
     res.status = stats.get("status", "success")
     res.extra.update({"log_id": stats.get("log_id"), "warnings_count": stats.get("warnings", 0)})

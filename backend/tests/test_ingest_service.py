@@ -81,10 +81,15 @@ class TestIngestResult:
 
 # ---------- 3. 三个入口函数透传既有管线结果 ----------
 class _FakeImportResult:
-    """模拟 upsert.ImportResult"""
+    """模拟 upsert.ImportResult
+
+    #42 修正: rejected(真正落拒收表的行) 与 failed(硬失败行数) **不同义** ——
+    无 raw data 的失败行无法按行展示, 不计入 rejected。
+    """
 
     def __init__(self):
         self.total, self.inserted, self.updated, self.failed = 10, 7, 2, 1
+        self.rejected = 0  # 本行 errors 无 data → 不落拒收表
         self.errors = [{"row": 3, "message": "解析失败"}]
         self.warnings = [{"row": 5, "message": "姓名列被清洗"}]
 
@@ -100,10 +105,28 @@ class TestIngestTable:
             df=None, mapping={}, source="upload", source_ref="upload_record:1",
         )
         assert (res.total, res.inserted, res.updated, res.failed) == (10, 7, 2, 1)
-        assert res.rejected == 1          # 硬失败已落拒收表
+        # failed=1 但 rejected=0(该失败行无 raw data, 无法按行展示) → 二者不得混同
+        assert res.failed == 1
+        assert res.rejected == 0
+        assert res.errors  # 硬失败明细保留
         assert res.status == "partial"    # 有失败 → partial
         assert res.extra["source_ref"] == "upload_record:1"
         assert res.extra["label"] == "退费单"
+
+    def test_rejected_reported_separately(self, monkeypatch):
+        """rejected 取真实拒收计数(与 failed 解耦)"""
+        import app.services.upsert as up
+
+        class _R(_FakeImportResult):
+            def __init__(self):
+                super().__init__()
+                self.failed = 5
+                self.rejected = 3  # 其中 3 条真正落拒收表
+
+        monkeypatch.setattr(up, "run_upsert", lambda df, dt, mp, db: _R())
+        res = ingest_table(db=None, data_type="refund", df=None, mapping={}, source="upload")
+        assert res.failed == 5
+        assert res.rejected == 3
 
     def test_success_when_no_failure(self, monkeypatch):
         """无失败 → status=success"""
@@ -135,9 +158,10 @@ class TestIngestComplaints:
             return {
                 "log_id": 77, "status": "partial",
                 "external": {"total": 5, "inserted": 4, "updated": 1, "failed": 0,
-                             "filtered": 2, "matched": 3, "errors": []},
+                             "filtered": 2, "matched": 3, "warnings": 0, "errors": []},
                 "card": {"total": 3, "inserted": 3, "updated": 0, "failed": 1,
-                         "filtered": 1, "matched": 0, "errors": [{"row": 1}]},
+                         "filtered": 1, "matched": 0, "warnings": 0,
+                         "errors": [{"row": 1, "level": "error"}]},
             }
 
         monkeypatch.setattr(cs, "sync_complaints_from_payload", _fake_sync)
@@ -147,10 +171,35 @@ class TestIngestComplaints:
         assert res.updated == 1
         assert res.skipped == 3          # 2+1 空行
         assert res.failed == 1
-        assert res.rejected == 1
         assert res.status == "partial"
         assert res.extra["log_id"] == 77
         assert res.extra["external"]["total"] == 5
+
+    def test_contract_fields_preserved(self, monkeypatch):
+        """⚠️ 对外契约: external/card 必须含 warnings/errors(审查 CRITICAL 回归锁)
+
+        workbuddy 外部工具依赖这些字段; 白名单遗漏会让其拿到 undefined。
+        """
+        import app.services.complaint_sync as cs
+
+        def _fake_sync(db, payload, source_file=None, sync_source="workbuddy"):
+            return {
+                "log_id": 1, "status": "success",
+                "external": {"total": 1, "inserted": 1, "updated": 0, "failed": 0,
+                             "filtered": 0, "matched": 1, "warnings": 2,
+                             "errors": [{"row": 9, "level": "warning"}]},
+                "card": {"total": 0, "inserted": 0, "updated": 0, "failed": 0,
+                         "filtered": 0, "matched": 0, "warnings": 0, "errors": []},
+            }
+
+        monkeypatch.setattr(cs, "sync_complaints_from_payload", _fake_sync)
+        res = ingest_complaints(db=None, payload={}, source="workbuddy")
+        for key in ("total", "inserted", "updated", "failed", "filtered",
+                    "matched", "warnings", "errors"):
+            assert key in res.extra["external"], f"external 缺契约字段 {key}"
+            assert key in res.extra["card"], f"card 缺契约字段 {key}"
+        assert res.extra["external"]["warnings"] == 2
+        assert res.extra["external"]["errors"]
 
 
 class TestIngestManualRefunds:

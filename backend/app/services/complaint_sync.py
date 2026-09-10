@@ -98,6 +98,15 @@ class SyncRowResult:
         self.warnings = 0
         self.matched = 0
         self.errors: list[dict[str, Any]] = []
+        # #42: 入库前校验问题清单(只读 advisory)。
+        # ⚠️ 必须与 errors 严格分离: errors=硬失败明细(对外契约 failed/errors 语义),
+        #    validation=校验告警(不丢弃行); 混入 errors 会让 failed=0 时 errors 非空,
+        #    破坏 workbuddy 对外契约与 complaint_sync_logs.error 语义。
+        self.validation: list[dict[str, Any]] = []
+
+    def add_validation(self, row_idx: int, issue: dict) -> None:
+        """记录一条入库前校验问题(不影响 errors/failed 计数)"""
+        self.validation.append({"row": row_idx, **issue})
 
     def add_warning(self, row_idx: int, msg: str, data: dict | None = None) -> None:
         """软警告: 行保留但字段被清洗"""
@@ -452,7 +461,7 @@ def sync_complaints_from_payload(
                 continue
             # #42 入库前校验(只读): 时间/枚举/必填问题可见化, 不丢弃不改数据
             for _iss in validate_external_complaint_row(rec, idx):
-                ext_result.add_warning(idx, f"[校验]{_iss['rule']} {_iss['message']}")
+                ext_result.add_validation(idx, _iss)
             ext_rows.append(rec)
         ext_result.total = len(ext_rows_raw)
 
@@ -480,7 +489,7 @@ def sync_complaints_from_payload(
                 continue
             # #42 入库前校验(只读)
             for _iss in validate_card_complaint_row(rec, idx):
-                card_result.add_warning(idx, f"[校验]{_iss['rule']} {_iss['message']}")
+                card_result.add_validation(idx, _iss)
             card_rows.append(rec)
         card_result.total = len(card_rows_raw)
 
@@ -516,10 +525,14 @@ def sync_complaints_from_payload(
         if ext_result.filtered or card_result.filtered:
             _info = f"过滤全空行: 315={ext_result.filtered} 卡商={card_result.filtered}"
             log.error = (f"{_info} | " + str(all_errors)) if all_errors else _info
-        # #42 校验问题计数(只读, 可见化): 汇总写入日志供质量排查
-        _val_warn = ext_result.warnings + card_result.warnings
-        if _val_warn:
-            _val_info = f"入库前校验告警: 315={ext_result.warnings} 卡商={card_result.warnings}"
+        # #42 校验问题计数(只读, 可见化): 独立通道汇总写入日志供质量排查。
+        # ⚠️ 不与 errors 合并: errors 是对外契约的"硬失败明细", 校验告警不丢弃行。
+        _val_cnt = len(ext_result.validation) + len(card_result.validation)
+        if _val_cnt:
+            _val_info = (
+                f"入库前校验告警: 315={len(ext_result.validation)}"
+                f" 卡商={len(card_result.validation)}"
+            )
             log.error = (f"{log.error} | {_val_info}") if log.error else _val_info
         if ext_result.dropped or card_result.dropped:
             log.status = "partial"
@@ -573,6 +586,8 @@ def sync_complaints_from_payload(
         return {
             "log_id": log.id,
             "status": log.status,
+            # #42 校验问题清单(只读 advisory; 与 errors 严格分离)
+            "validation": (ext_result.validation + card_result.validation)[:200],
             "external": {
                 "total": ext_result.total,
                 "inserted": ext_result.inserted,

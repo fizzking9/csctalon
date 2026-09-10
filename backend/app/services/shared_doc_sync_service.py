@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +32,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.doc_sync_source import DocSyncSource
+from app.services.data_parser import count_suspect_precision
 from app.services.ingest_service import ingest_complaints, ingest_manual_refunds
 
 logger = logging.getLogger(__name__)
@@ -53,27 +53,6 @@ _KDOCS_MENU_XY = (95, 15)
 
 # xlsx 读取引擎(与 POC _poc_shared_doc_reader.py 一致: 快 + 免疫 WPS/腾讯导出样式崩溃)
 _EXCEL_ENGINE = "calamine"
-
-# 疑似"长编号被 Excel 数字精度截断"特征(#42 2026-09-10):
-#   源单元格为「数字型」且长度 >=15 时, Excel/浮点只保留约 15 位有效数字,
-#   超出部分被补 0(实测 1440306002024122303480530 → 14403060020241100.../尾串 00000)。
-#   读取层无法修复(源已损坏), 但必须**可见**: 计数 + 告警, 供上游改为文本列。
-_SUSPECT_PRECISION_RE = re.compile(r"^\d{15,}0{4,}$")
-
-
-def _count_suspect_precision(df: "pd.DataFrame") -> dict[str, int]:
-    """统计疑似受浮点精度影响的长数字单元格: {列名: 数量}(仅计数, 不改数据)
-
-    判据: 纯数字、长度>=15、末尾连续>=4 个 0 —— 正常业务编号极少以多个 0 结尾,
-    该形态高度指向「Excel 数字单元格 >15 位被截断」。
-    """
-    hits: dict[str, int] = {}
-    for col in df.columns:
-        s = df[col].astype(str)
-        n = int(s.str.match(_SUSPECT_PRECISION_RE).sum())
-        if n:
-            hits[str(col)] = n
-    return hits
 
 
 def _export_tencent_xlsx(doc_url: str, out_path: str, state_filename: str | None = None) -> str:
@@ -227,8 +206,8 @@ def _read_sheet_records(
     #   显式 dtype=str 至少保证「文本型单元格」100% 原样读取(实测 647/647 一致),
     #   数字型无法挽救但由下方 _count_suspect_precision 计数暴露。
     df = pd.read_excel(path, sheet_name=sheet_name, header=0, engine=_EXCEL_ENGINE, dtype=str)
-    # 精度可疑计数(可见化, 不改数据; #42)
-    for _col, _n in _count_suspect_precision(df).items():
+    # 精度可疑计数(可见化, 不改数据; #42): 复用 data_parser 单一实现
+    for _col, _n in count_suspect_precision(df).items():
         logger.warning(
             f"[shared_doc] {path} sheet={sheet_name} 列「{_col}」有 {_n} 个疑似浮点精度"
             f"截断的长数字(>=15位且尾部多0); 上游应将该列设为文本格式"

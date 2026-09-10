@@ -34,40 +34,69 @@ depends_on: Union[str, Sequence[str], None] = None
 _TABLES = ('external_complaints', 'card_complaints')
 
 
+def _column_exists(table_name: str, column_name: str) -> bool:
+    """列存在性检查(幂等升级规范, 见 alembic-migration管理规范.md §五)
+
+    已有表环境可能由 Base.metadata.create_all() 建表(含新列), 直接 add_column 会报
+    DuplicateColumn → 必须先查 information_schema。
+    """
+    conn = op.get_bind()
+    return bool(conn.execute(sa.text(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = :t AND column_name = :c)"
+    ), {"t": table_name, "c": column_name}).scalar())
+
+
+def _index_exists(index_name: str) -> bool:
+    """索引存在性检查(幂等)"""
+    conn = op.get_bind()
+    return bool(conn.execute(sa.text(
+        "SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = :i)"
+    ), {"i": index_name}).scalar())
+
+
 def upgrade() -> None:
-    """投诉两表补 quality_status / quality_note"""
+    """投诉两表补 quality_status / quality_note(幂等: 已存在则跳过)"""
     for table in _TABLES:
-        op.add_column(
-            table,
-            sa.Column(
-                'quality_status',
-                sa.String(length=16),
-                nullable=True,
-                comment=(
-                    '数据质量状态: None=正常 / ok=已人工确认 / auto_fixed=已自动纠错 / '
-                    'pending=待人工确认 / dup_residual=已治理重复(排除) / ignored=人工彻底忽略(排除)'
+        if not _column_exists(table, 'quality_status'):
+            op.add_column(
+                table,
+                sa.Column(
+                    'quality_status',
+                    sa.String(length=16),
+                    nullable=True,
+                    comment=(
+                        '数据质量状态: None=正常 / ok=已人工确认 / auto_fixed=已自动纠错 / '
+                        'pending=待人工确认 / dup_residual=已治理重复(排除) / ignored=人工彻底忽略(排除)'
+                    ),
                 ),
-            ),
-        )
-        op.add_column(
-            table,
-            sa.Column(
-                'quality_note',
-                sa.String(length=512),
-                nullable=True,
-                comment='质量说明(自动纠错或待确认原因, 含原始值)',
-            ),
-        )
-        op.create_index(
-            f'ix_{table}_quality_status',
-            table,
-            ['quality_status'],
-        )
+            )
+        if not _column_exists(table, 'quality_note'):
+            op.add_column(
+                table,
+                sa.Column(
+                    'quality_note',
+                    sa.String(length=512),
+                    nullable=True,
+                    comment='质量说明(自动纠错或待确认原因, 含原始值)',
+                ),
+            )
+        idx = f'ix_{table}_quality_status'
+        if not _index_exists(idx):
+            op.create_index(idx, table, ['quality_status'])
 
 
 def downgrade() -> None:
-    """回退: 删索引与两列"""
+    """回退: 删索引与两列(幂等)
+
+    ⚠️ 降级会物理删除两列 → 已写入的治理状态(pending/ok/auto_fixed 等)一并丢失且不可恢复。
+    如需降级, 请先自行导出非空 quality_status/quality_note 作为备份。
+    """
     for table in _TABLES:
-        op.drop_index(f'ix_{table}_quality_status', table_name=table)
-        op.drop_column(table, 'quality_note')
-        op.drop_column(table, 'quality_status')
+        idx = f'ix_{table}_quality_status'
+        if _index_exists(idx):
+            op.drop_index(idx, table_name=table)
+        if _column_exists(table, 'quality_note'):
+            op.drop_column(table, 'quality_note')
+        if _column_exists(table, 'quality_status'):
+            op.drop_column(table, 'quality_status')

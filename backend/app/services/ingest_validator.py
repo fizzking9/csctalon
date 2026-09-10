@@ -32,17 +32,16 @@ _EXTERNAL_RESULT_SET = {
     "和解结案", "撤销结案", "暂行办结", "调解结案", "调节结案", "投诉无效",
     "重复投诉", "终止调节", "退回消委会", "未达成一致方案", "暂行办理", "需跟进",
     "不予受理", "已提交报告",
-}
-_TICKET_STATUS_SET = {
-    "待处理", "处理中", "已完成", "已关闭", "终止", "已结案", "已解决",
-    "待分派", "跟进中", "pending",
-}
+}# ⚠️ 保留别名兼容: 上游曾有"未达成一致方案"(方案) 与"未达成一致意见"(意见) 两种写法,
+#    两者都应视为合法办结类结果, 避免被 R-枚举 误报。
+_EXTERNAL_RESULT_SET |= {"未达成一致方案"}# 注: 工单(ticket)类校验器尚未接入(本期仅投诉/手动退款); 若后续接入,
+#     其状态集合为 {待处理, 处理中, 已完成, 已关闭, 终止, 已结案, 已解决, 待分派, 跟进中, pending}。
 
 # 合理年份窗口: 未来超 1 天即异常(上游录入笔误);
-# ⚠️ 历史下限放宽到 2015 —— 315 登记表含跨年历史数据(实测最早 2023), 它不是"错误",
-#    只有明显不可能是业务时间的远古年份(如 1969/1970 伪日期)才判异常。
+# 下限与回填脚本 fix_complaint_handle_time._BAD_BEFORE 保持一致(2020),
+# 用于捕获 1969/1970 这类伪日期(Excel 序列号解析 bug 产物)。
 _MAX_FUTURE_DAYS = 1
-_MIN_VALID_YEAR = 2015
+_MIN_VALID_YEAR = 2020
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
@@ -180,16 +179,26 @@ def validate_rows(rows: list[dict[str, Any]], data_type: str) -> list[dict[str, 
     """批量校验 → 问题清单(只读, 不改数据)
 
     未注册校验器的 data_type 返回空清单(不影响入库)。
+    ⚠️ 单行异常不抛出(校验不得阻塞入库), 但会**计入 validator_errors 计数**并告警,
+       避免"系统性报错被逐行静默吞掉"导致校验形同虚设(2026-09-10 审查 WARNING)。
     """
     fn = _VALIDATORS.get(data_type)
     if fn is None or not rows:
         return []
     out: list[dict[str, Any]] = []
+    n_err = 0
     for i, rec in enumerate(rows):
         try:
             out.extend(fn(rec, i))
         except Exception as e:  # noqa: BLE001 校验本身不得阻塞入库
+            n_err += 1
             logger.warning(f"[ingest_validator] {data_type} 第 {i} 行校验异常(跳过): {e}")
+    if n_err:
+        # 以可识别的问题条目上报, 使"校验器自身失效"也能被看到
+        out.append({
+            "row": -1, "rule": "R-校验器", "field": None,
+            "message": f"{n_err} 行校验时发生异常(校验器可能存在缺陷, 需排查)",
+        })
     return out
 
 

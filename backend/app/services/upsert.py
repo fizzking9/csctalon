@@ -66,6 +66,10 @@ class ImportResult:
         self.failed = 0
         self.errors: list[dict[str, Any]] = []
         self.warnings: list[dict[str, Any]] = []  # 提示/自动纠错类(非失败, 不阻断)
+        # #42: 实际落拒收表(ingest_rejected_rows)的条数 —— 与 failed 不同义:
+        #   failed=硬失败行数; rejected=其中"带原始行、真正按行可见"的条数
+        #   (无 data 的失败行无法按行展示, 不计入 rejected)。
+        self.rejected = 0
 
     def add_error(self, row_idx: int, msg: str, data: dict | None = None) -> None:
         self.failed += 1
@@ -259,6 +263,27 @@ _EXCEL_EPOCH = datetime(1899, 12, 30)
 _EXCEL_SERIAL_MIN = 20000
 _EXCEL_SERIAL_MAX = 80000
 _PURE_NUM_RE = re.compile(r"^[+-]?\d+(\.\d+)?$")
+# 紧凑日期串 YYYYMMDD(8位, 如 20260614)。上游若把日期列改成无分隔符导出,
+# 它既不在 Excel 序列号区间(会被判 None), 也不是 pd.to_datetime 默认认识的格式。
+# 不处理会导致整列时间静默丢失(2026-09-10 审查 WARNING)。
+_COMPACT_DATE_RE = re.compile(r"^(19|20)\d{6}$")
+
+
+def _try_compact_date(val: Any) -> datetime | None:
+    """尝试把 8 位纯数字按 YYYYMMDD 解析(如 '20260614' → 2026-06-14); 不是则 None。
+
+    仅当形如 (19|20)YYMMDD 且月/日合法时才认, 避免把 8 位编号误当日 期。
+    """
+    if not isinstance(val, str):
+        return None
+    s = val.strip()
+    if not _COMPACT_DATE_RE.match(s):
+        return None
+    try:
+        dt = datetime(int(s[0:4]), int(s[4:6]), int(s[6:8]))
+    except ValueError:
+        return None  # 月/日非法(如 20261340) → 不是日期
+    return dt.replace(tzinfo=_TZ_CN).astimezone(timezone.utc)
 
 
 def _try_excel_serial(val: Any) -> datetime | None:
@@ -272,6 +297,16 @@ def _try_excel_serial(val: Any) -> datetime | None:
     Excel 约定: 整数部分=天数, 小数部分=当天时刻。
     """
     if isinstance(val, bool):  # bool 是 int 子类, 必须显式排除(True→1 天)
+        return None
+    # numpy 标量(pd.read_excel/to_dict 可能产出 np.int64/np.float64) → 归一为 Python 标量。
+    # 不归一的话 isinstance(val,(int,float)) 为 False, 会落入 pd.to_datetime(np.int64(46187))
+    # 被当纳秒 → 原 bug(1969 伪日期)复现(2026-09-10 审查 WARNING)。
+    if hasattr(val, "item") and not isinstance(val, (str, bytes)):
+        try:
+            val = val.item()
+        except (ValueError, AttributeError):
+            pass
+    if isinstance(val, bool):  # item() 后可能是 numpy.bool_
         return None
     num: float | None = None
     if isinstance(val, (int, float)):
@@ -290,7 +325,8 @@ def _try_excel_serial(val: Any) -> datetime | None:
     except (TypeError, ValueError):
         return None
     # 浮点精度残渣(如 46187.000000000046 来自 float64 存储) → 归一到最近整数
-    if abs(num - round(num)) < 1e-6:
+    # 容差取 1e-6 天≈86ms 过宽会误伤合法小数时刻, 收紧到 1e-9 天≈86µs(2026-09-10 审查)
+    if abs(num - round(num)) < 1e-9:
         num = float(round(num))
     if not (_EXCEL_SERIAL_MIN <= num <= _EXCEL_SERIAL_MAX):
         return None
@@ -316,6 +352,10 @@ def _to_datetime(val: Any) -> datetime | None:
         return val
     if isinstance(val, str) and val.strip() == "":
         return None
+    # 紧凑日期串 YYYYMMDD(8位): 必须在「区间外纯数字判 None」之前尝试
+    _compact = _try_compact_date(val)
+    if _compact is not None:
+        return _compact
     # Excel 序列日期: 文本型与数字型都要走同一条归一(见 _try_excel_serial 说明)
     _serial = _try_excel_serial(val)
     if _serial is not None:
@@ -323,10 +363,14 @@ def _to_datetime(val: Any) -> datetime | None:
     # ⚠️ 纯数字但不在 Excel 序列号区间 → 不是合法日期语义(如 1 / 0 / 2026 / 12345 / 99999
     #    / 超长编号)。若继续交给 pd.to_datetime, 会被当成**纳秒**解释, 产出 1970 年前后的
     #    伪日期(实测 pd.to_datetime(1)→1969-12-31 16:00:00.000001), 即本函数要根除的坏值类型。
-    #    故此类值一律判为「无法解析 → None」, 由上层校验/拒收流程处理, 绝不静默造伪日期。
+    #    故此类值一律判为「无法解析 → None」+ 告警(可见化), 由上层校验/拒收流程处理。
     if isinstance(val, bool):
         return None
     if isinstance(val, (int, float)) or (isinstance(val, str) and _PURE_NUM_RE.match(val.strip())):
+        logger.warning(
+            f"[upsert._to_datetime] 纯数字但不在 Excel 序列号区间({_EXCEL_SERIAL_MIN}~"
+            f"{_EXCEL_SERIAL_MAX}), 按 None 处理(避免造伪日期): {val!r}"
+        )
         return None
     try:
         result = pd.to_datetime(val)
@@ -2314,11 +2358,15 @@ def upsert_device_profiles(df: pd.DataFrame, mapping: dict[str, str], db: Sessio
     result.updated += max(len(rows) - inserted, 0)
 
 
-def _persist_rejected_from_errors(db: Session, data_type: str, result: ImportResult) -> None:
+def _persist_rejected_from_errors(db: Session, data_type: str, result: ImportResult) -> int:
     """A-20260908-003 (#40): 把 run_upsert 硬失败(丢弃未入库)的行写拒收表。
 
     只处理 errors 中带原始行 data 的(无 data 的仅计数, 无法按行展示)。
     savepoint 隔离: 写拒收失败不影响已完成的 upsert 与主事务。
+
+    返回(#42): 实际写入拒收表的条数 —— 与 failed 不同义:
+      failed  = 硬失败行数(含无 data 无法按行展示的)
+      rejected = 其中真正落库、可按行可见可判定的条数
     """
     import logging as _log
 
@@ -2331,7 +2379,8 @@ def _persist_rejected_from_errors(db: Session, data_type: str, result: ImportRes
             if e.get("data") and isinstance(e.get("data"), dict)
         ]
         if not to_insert:
-            return
+            return 0
+        inserted = 0
         with db.begin_nested():
             for e in to_insert[:200]:  # 上限 200 行/批, 防海量噪音
                 db.add(IngestRejectedRow(
@@ -2343,8 +2392,11 @@ def _persist_rejected_from_errors(db: Session, data_type: str, result: ImportRes
                     source_row_no=e.get("row"),
                     status="open",
                 ))
+                inserted += 1
+        return inserted
     except Exception as _rej_e:  # noqa: BLE001
         _lg.warning(f"[ingest_rejected] 上传错误行落拒收表失败(忽略): {_rej_e}")
+        return 0
 
 
 UPSERT_DISPATCH = {    "refund": upsert_refunds,
@@ -2394,6 +2446,6 @@ def run_upsert(
     # result.errors = 硬失败(行被丢弃未入库), 有 raw data 的写 ingest_rejected_rows
     # 供人工判定(open/keep/discard)。savepoint 隔离, 失败不影响主流程。
     if result.errors:
-        _persist_rejected_from_errors(db, data_type, result)
+        result.rejected = _persist_rejected_from_errors(db, data_type, result)
     db.commit()
     return result

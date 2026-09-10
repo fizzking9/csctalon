@@ -23,14 +23,18 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT / "backend") not in sys.path:
     sys.path.insert(0, str(_ROOT / "backend"))
+
+logger = logging.getLogger("fix_complaint_handle_time")
 
 import pandas as pd  # noqa: E402
 from sqlalchemy import select  # noqa: E402
@@ -105,10 +109,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="回填 315 handle_time 坏值(Excel 序列号解析 bug)")
     ap.add_argument("--file", required=True, help="源导出 xlsx 路径")
     ap.add_argument("--apply", action="store_true", help="实际写入(缺省仅预览)")
+    ap.add_argument("--yes", action="store_true", help="与 --apply 搭配时跳过二次确认")
+    ap.add_argument("--max-id", type=int, default=300000,
+                   help="真实主批次 id 上限(排除疑似脏副本; 不同环境 id 段不同, 需按实际调整)")
     args = ap.parse_args()
 
     df = _load_source(args.file)
-    print(f"源表: {args.file} 行数={len(df)}")
+    logger.info(f"源表: {args.file} 行数={len(df)}")
 
     # 源: 构造索引(重算 handle_time)
     src_by_no: dict[str, object] = {}
@@ -136,17 +143,17 @@ def main() -> None:
             src_by_pc[(phone, cd_day)] = ht
         if phone and sn:
             src_by_ps[(phone, sn)] = ht
-    print(f"源表可解析处理时间: {recomputed} 行; 无法解析: {unparsed} 行")
+    logger.info(f"源表可解析处理时间: {recomputed} 行; 无法解析: {unparsed} 行")
     with SessionLocal() as db:
         bad = db.scalars(
             select(ExternalComplaint)
-            .where(ExternalComplaint.id < 300000)
+            .where(ExternalComplaint.id < args.max_id)
             .where(ExternalComplaint.handle_time.isnot(None))
             .where(ExternalComplaint.handle_time < _BAD_BEFORE)
         ).all()
-        print(f"库中坏值行(< {_BAD_BEFORE}): {len(bad)}")
+        logger.info(f"库中坏值行(< {_BAD_BEFORE}, id<{args.max_id}): {len(bad)}")
 
-        matched, missed = [], []
+        matched, missed, ambiguous = [], [], []
         for row in bad:
             no = (row.complaint_no or "").replace("\n", "").strip()
             phone = (row.complainant_phone or "").strip() or None
@@ -169,12 +176,13 @@ def main() -> None:
                     new_ht, hit_by = src_by_ps[tuple(parts)], "手机+SN"
                 if new_ht is not None:
                     break
-            # 容差匹配(编号缺失/日期跨时区的行): 手机号相同 且 日期相差 ≤1 天
+            # 容差匹配(编号缺失/日期跨时区的行): 手机号相同 且 日期相差 ≤1 天。
+            # ⚠️ 安全护栏(2026-09-10 审查): 同手机号当日可能有多条不同投诉,
+            #    必须"唯一候选才回填", 多条候选宁可跳过(记入 ambiguous), 防张冠李戴。
             if new_ht is None and phone:
-                for (p_, cd_s, s_), cand in src_by_pcs.items():
-                    if p_ != phone:
-                        continue
-                    if not (cd_day and cd_s):
+                cands: list[tuple[str, Any]] = []
+                for (p_, cd_s, _s_), cand in src_by_pcs.items():
+                    if p_ != phone or not (cd_day and cd_s):
                         continue
                     try:
                         d1 = datetime.fromisoformat(cd_day)
@@ -182,31 +190,49 @@ def main() -> None:
                     except ValueError:
                         continue
                     if abs((d1 - d2).days) <= _DAY_TOL:
-                        new_ht, hit_by = cand, "手机+日期±1天"
-                        break
+                        cands.append((cd_s, cand))
+                if len(cands) == 1:
+                    new_ht, hit_by = cands[0][1], "手机+日期±1天(唯一)"
+                elif len(cands) > 1:
+                    ambiguous.append((row.id, phone, [c[0] for c in cands]))
             if new_ht is not None:
                 matched.append((row, new_ht, hit_by))
             else:
                 missed.append(row)
 
-        print(f"可回填: {len(matched)}; 未匹配: {len(missed)}")
+        logger.info(f"可回填: {len(matched)}; 未匹配: {len(missed)}; 多候选跳过: {len(ambiguous)}")
         if matched[:5]:
-            print("\n预览(前 5 条):")
+            logger.info("预览(前 5 条):")
             for row, new_ht, hit_by in matched[:5]:
-                print(f"  id={row.id} 坏值={row.handle_time:%Y-%m-%d}"
-                      f" → {new_ht.astimezone().strftime('%Y-%m-%d %H:%M')} [匹配={hit_by}]")
+                logger.info(
+                    f"  id={row.id} 坏值={row.handle_time:%Y-%m-%d}"
+                    f" → {new_ht.astimezone().strftime('%Y-%m-%d %H:%M')} [匹配={hit_by}]"
+                )
+        if ambiguous:
+            logger.warning(f"多候选无法确定 {len(ambiguous)} 行(保持原值, 需人工):")
+            for rid, ph, days in ambiguous[:20]:
+                logger.warning(f"  id={rid} 手机={ph} 候选日期={days}")
         if missed:
             # 未匹配行必须留痕可查(源表无对应/业务键缺失), 便于人工复核
-            print(f"\n未匹配 {len(missed)} 行(源表找不到对应, 保持原值):")
+            logger.warning(f"未匹配 {len(missed)} 行(源表找不到对应, 保持原值):")
             for row in missed[:20]:
-                print(f"  id={row.id} 编号={(row.complaint_no or '(空)')[:24]}"
-                      f" 手机={row.complainant_phone or '(空)'}"
-                      f" SN={row.device_sn or '(空)'}"
-                      f" 登记={(row.complaint_date.date().isoformat() if row.complaint_date else '(空)')}"
-                      f" 问题={(row.problem or '')[:16]}")
+                logger.warning(
+                    f"  id={row.id} 编号={(row.complaint_no or '(空)')[:24]}"
+                    f" 手机={row.complainant_phone or '(空)'}"
+                    f" SN={row.device_sn or '(空)'}"
+                    f" 登记={(row.complaint_date.date().isoformat() if row.complaint_date else '(空)')}"
+                    f" 问题={(row.problem or '')[:16]}"
+                )
 
         if not args.apply:
-            print("\n(预览模式; 加 --apply 才会写库)")
+            logger.info("(预览模式; 加 --apply 才会写库)")
+            return
+        # ⚠️ 写库前二次确认(2026-09-10 审查): 避免误触 --apply 直接改数。
+        if not args.yes:
+            logger.warning(
+                f"即将回填 {len(matched)} 行 handle_time(不可自动回滚)。"
+                f"确认请重跑并加 --yes。"
+            )
             return
 
         n = 0
@@ -214,8 +240,9 @@ def main() -> None:
             row.handle_time = new_ht
             n += 1
         db.commit()
-        print(f"\n✅ 已回填 {n} 行")
+        logger.info(f"✅ 已回填 {n} 行")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     main()

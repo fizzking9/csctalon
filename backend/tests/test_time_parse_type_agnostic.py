@@ -88,6 +88,14 @@ class TestBackwardCompatible:
     def test_slash_date_string(self):
         assert _to_datetime("2026/6/14") == _SERIAL_46187_UTC
 
+    def test_compact_date_string(self):
+        """8 位紧凑日期串 YYYYMMDD(上游若改格式导出, 不得整列静默丢时间)"""
+        assert _to_datetime("20260614") == _SERIAL_46187_UTC
+
+    def test_compact_date_invalid_md(self):
+        """形如 8 位但月/日非法 → 不认作日期"""
+        assert _to_datetime("20261340") is None
+
     def test_datetime_naive_as_beijing(self):
         assert _to_datetime(datetime(2026, 6, 14, 0, 0)) == _SERIAL_46187_UTC
 
@@ -103,3 +111,26 @@ class TestBackwardCompatible:
         """自由文本(投诉问题等误配到时间列) → None"""
         assert _to_datetime("商家拒绝退款") is None
         assert _to_datetime("待处理") is None
+
+    def test_fractional_serial_keeps_time_of_day(self):
+        """合法小数序列号: 小数部分=当天时刻(不得被精度归一误伤)"""
+        dt = _to_datetime(46187.5)
+        assert dt is not None
+        # 46187 = 2026-06-14(北京) 12:00 → UTC 04:00
+        assert dt == datetime(2026, 6, 14, 4, 0, tzinfo=timezone.utc)
+
+    def test_numpy_scalar_types(self):
+        """numpy 标量必须与 Python 标量等价(否则原纳秒 bug 会复现)"""
+        np = pytest.importorskip("numpy")
+        assert _to_datetime(np.int64(46187)) == _SERIAL_46187_UTC
+        assert _to_datetime(np.float64(46187.0)) == _SERIAL_46187_UTC
+        assert _to_datetime(np.bool_(True)) is None
+
+    def test_unix_timestamp_not_pseudo_date(self):
+        """Unix 秒级时间戳不在序列号区间 → None(不产伪日期)"""
+        assert _to_datetime(1712345678) is None
+        assert _to_datetime("1712345678") is None
+
+    def test_whitespace_padded_serial(self):
+        """带空白文本序列号仍可解析"""
+        assert _to_datetime("  46187  ") == _SERIAL_46187_UTC
