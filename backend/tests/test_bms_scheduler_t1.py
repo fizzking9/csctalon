@@ -133,32 +133,53 @@ def test_low_freq_skipped_when_done_or_disabled():
     assert should_run_low_freq(6, low_freq_hour=0, done=False, busy=False) is False  # 禁用
 
 
-# ── 共享文档在线采集窗口判定(#35 统一调度, 并入白天高频窗口) ──
-def test_shared_docs_run_in_daytime_window():
-    """白天高频窗口(整点后 30 分内) → 应触发。"""
+# ── 共享文档在线采集窗口判定(#35 统一调度; #51 改为**槽位**语义) ──
+def test_shared_docs_run_in_slot():
+    """命中高频槽位 → 应触发(#51 槽位语义)。
+
+    注: 原断言传 (hour, minute) 的旧接口已改为传槽位标识 —— 槽位由
+    `current_slot()` 与 BMS 共用同一判定, 保证两者永不脱钩。
+    """
     from app.services.bms_scheduler import should_sync_shared_docs
 
-    assert should_sync_shared_docs(10, 0, done=False) is True    # 10:00 整点
-    assert should_sync_shared_docs(10, 15, done=False) is True   # 10:15 窗口内
-    assert should_sync_shared_docs(8, 29, done=False) is True    # 8:29 窗口内(8 点首采)
+    assert should_sync_shared_docs("10:00", done=False) is True   # 整点槽
+    assert should_sync_shared_docs("10:30", done=False) is True   # 半小时槽(#51 新增)
+    assert should_sync_shared_docs("08:00", done=False) is True   # 首槽
 
 
-def test_shared_docs_not_run_outside_window():
-    """非白天/窗口外 → 不触发(并入高频节奏, 不独立乱采)。"""
+def test_shared_docs_not_run_outside_slot():
+    """未命中槽位 → 不触发(并入高频节奏, 不独立乱采)。"""
     from app.services.bms_scheduler import should_sync_shared_docs
 
-    assert should_sync_shared_docs(10, 30, done=False) is False   # 窗口外(>=30分)
-    assert should_sync_shared_docs(10, 45, done=False) is False   # 窗口外
-    assert should_sync_shared_docs(3, 5, done=False) is False     # 凌晨非白天
-    assert should_sync_shared_docs(6, 5, done=False) is False     # 6:00 非高频(低频档专属)
+    assert should_sync_shared_docs(None, done=False) is False     # 未命中任何槽位
 
 
-def test_shared_docs_window_once_per_hour():
-    """同窗口只采一次(done) → 不重复触发。"""
+def test_shared_docs_slot_once():
+    """同槽位只采一次(done) → 不重复触发。"""
     from app.services.bms_scheduler import should_sync_shared_docs
 
-    assert should_sync_shared_docs(10, 5, done=True) is False     # 该小时已采过
-    assert should_sync_shared_docs(11, 5, done=False) is True     # 下个小时窗口重新可采
+    assert should_sync_shared_docs("10:00", done=True) is False   # 该槽已采过
+    assert should_sync_shared_docs("10:30", done=False) is True   # 下一个槽位重新可采
+
+
+def test_shared_docs_slot_derived_from_current_slot():
+    """🔒 一致性: 槽位由 current_slot() 统一产出 —— 与 BMS 高频同源。
+
+    锁住「共享文档与 BMS 同一节奏」这条不变式(#51 架构 §六.6):
+    同一时刻算出同一个槽位, 因此不可能出现"BMS 跑了共享文档没跑"。
+    """
+    from app.services.bms_scheduler import current_slot, should_sync_shared_docs
+    from app.services.scheduler_settings_service import compute_slots
+
+    slots = compute_slots(8, 24, 30)
+    # 白天任意命中时刻 → 两者同槽
+    for hh, mm in ((10, 0), (10, 29), (10, 30), (14, 15), (23, 30)):
+        slot = current_slot(hh, mm, 30, slots)
+        assert slot is not None, f"{hh}:{mm} 应命中某槽位"
+        assert should_sync_shared_docs(slot, done=False) is True
+    # 时段外 → 都不触发
+    assert current_slot(3, 5, 30, slots) is None
+    assert current_slot(6, 5, 30, slots) is None   # 6:00 低频档专属, 不属高频槽位
 
 
 # ── #38 回归: 派生源 device_tag 不应被纳入周期采集 ──

@@ -64,6 +64,7 @@ from app.models.report_comment import CommentTarget, ReportComment  # noqa: F401
 from app.models.report_template import ReportTemplate  # noqa: F401
 from app.models.return_tracking import ReturnTracking  # noqa: F401
 from app.models.schedule import Attendance, Schedule, ShiftTemplate  # noqa: F401
+from app.models.scheduler_settings import SchedulerSettings  # noqa: F401
 from app.models.scrm_operator import ScrmOperator  # noqa: F401
 from app.models.scrm_session import ScrmSession  # noqa: F401
 from app.models.scrm_session_transfer import ScrmSessionTransfer  # noqa: F401
@@ -136,6 +137,8 @@ __all__ = [
     "IncidentFollowup",
     "IngestModeConfig",
     "IntegrationProfile",
+    "SchedulerSettings",
+    "SchedulerSettings",
     "IngestRejectedRow",
     "KbArticle",
     "Measure",

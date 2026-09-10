@@ -27,7 +27,12 @@
               </template>
               <el-descriptions :column="3" border size="small">
                 <el-descriptions-item label="定时计划">
-                  <el-tag v-for="h in scheduleStatus.schedule_hours" :key="h" size="small" class="mr-4">{{ h }}:00</el-tag>
+                  <!-- #51: 展示槽位节拍(时段+间隔), 替代"整点 tag"列表 -->
+                  <el-tag size="small" type="primary" effect="plain">
+                    {{ scheduleStatus.start_hour }}:00 ~ {{ scheduleStatus.end_hour }}:00
+                  </el-tag>
+                  <span class="ml-8">每 {{ scheduleStatus.interval_minutes }} 分钟</span>
+                  <span class="ml-8 dim">({{ scheduleStatus.slot_count }} 次/天)</span>
                 </el-descriptions-item>
                 <el-descriptions-item label="下次执行">{{ formatTime(scheduleStatus.next_run) || '-' }}</el-descriptions-item>
                 <el-descriptions-item label="凭证状态">
@@ -50,6 +55,11 @@
                   </span>
                 </el-descriptions-item>
               </el-descriptions>
+
+              <!-- #51: 高频节拍配置(时段+间隔, 管理员可改, 改后即时生效) -->
+              <el-divider content-position="left">高频采集节拍</el-divider>
+              <ScheduleConfigPanel ref="scheduleCfgRef" class="mb-12" />
+
               <el-alert
                 v-if="(!hasBmsCredentials || !hasScrmCredentials) && !isAdmin"
                 type="warning"
@@ -697,6 +707,7 @@ import {
   submitScrmSync,
   listScrmSyncLogs,
 } from '@/api/fetch'
+import ScheduleConfigPanel from '@/components/ScheduleConfigPanel.vue'
 import { listSyncSources, updateSyncSource } from '@/api/system'
 
 const route = useRoute()

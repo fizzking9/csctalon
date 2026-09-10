@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 
-from app.api.deps import CurrentUser, DBSession
+from app.api.deps import AdminUser, CurrentUser, DBSession, ManagerUser
 from app.models.bms_sync_log import BmsSyncLog
 from app.models.scrm_sync_log import ScrmSyncLog
 from app.schemas.common import R
@@ -201,6 +201,14 @@ class DataSourceStatus(BaseModel):
 
 class ScheduleStatus(BaseModel):
     enabled: bool
+    # #51: 槽位体系(新). schedule_hours/daytime_hours 保留为兼容字段
+    #   —— 旧前端按 "h:00" 渲染, 不宜直接删除(否则前后端必须同时发布)
+    slots: list[str] | None = None
+    slot_count: int | None = None
+    start_hour: int | None = None
+    end_hour: int | None = None
+    interval_minutes: int | None = None
+    next_slot: str | None = None
     schedule_hours: list[int]
     daytime_hours: list[int] | None = None
     catchup_hour: int | None = None
@@ -211,6 +219,16 @@ class ScheduleStatus(BaseModel):
     cooldown_remaining: int | None = None
     is_halted: bool | None = None
     halted_biz_date: str | None = None
+    halted_types: list[str] | None = None
+    halted_count: int | None = None
+
+
+class ScheduleConfigIn(BaseModel):
+    """高频节拍配置入参(#51)"""
+
+    start_hour: int = Field(..., description="高频时段起(含), 0~23")
+    end_hour: int = Field(..., description="高频时段止(不含), 1~24; 24 = 至当日 24:00")
+    interval_minutes: int = Field(..., description="采集间隔(分钟), 5~180")
 
 
 # ---------- API 端点 ----------
@@ -509,6 +527,46 @@ def get_schedule_status(_: CurrentUser):
     """获取定时同步调度器状态"""
     status = bms_scheduler.get_status()
     return R(data=ScheduleStatus(**status))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 高频节拍配置 (#51, A-20260910-006 LOCKED v1.0)
+#   用户诉求: "在配置界面我看没法调整" → 本组端点把「时段 + 间隔」开放为可配。
+#   低频档(6:00)/5:00 补跑/8:00 全量 **不受本配置影响**。
+# ─────────────────────────────────────────────────────────────────────
+@router.get("/schedule/config", response_model=R, summary="读取高频节拍配置")
+def get_schedule_config(db: DBSession, _: ManagerUser):
+    """读当前高频节拍配置(含派生槽位清单, 供前端直接展示)。"""
+    from app.services import scheduler_settings_service as sss
+
+    data = sss.to_dict(sss.get_settings(db))
+    data["notice"] = (
+        "修改后自下一个槽位生效, 无需重启; "
+        "低频档(每日 1 次)/凌晨补跑/首槽全量兜底 不受本配置影响。"
+    )
+    return R(data=data)
+
+
+@router.put("/schedule/config", response_model=R, summary="更新高频节拍配置(管理员)")
+def update_schedule_config(payload: ScheduleConfigIn, db: DBSession, me: AdminUser):
+    """更新高频节拍配置。
+
+    校验(非法 → 400, 不静默取默认):
+      - 间隔 5~180 分钟(下限依据: 每轮实测约 4.2 分钟, 低于此值必然重叠)
+      - 0 ≤ 起始 < 结束 ≤ 24
+      - 时段与间隔组合必须产生 ≥1 个采集点
+    """
+    from app.services import scheduler_settings_service as sss
+
+    data = sss.update_settings(
+        db,
+        start_hour=payload.start_hour,
+        end_hour=payload.end_hour,
+        interval_minutes=payload.interval_minutes,
+        actor=me.username,
+    )
+    data["notice"] = "配置已生效(下一槽位起), 无需重启后端。"
+    return R(data=data)
 
 
 @router.post("/schedule/start", response_model=R[ScheduleStatus], summary="启动定时同步")

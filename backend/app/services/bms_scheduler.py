@@ -28,6 +28,11 @@ from sqlalchemy import desc, distinct, select
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.bms_sync_log import BmsSyncLog
+from app.models.scheduler_settings import (
+    DEFAULT_END_HOUR,
+    DEFAULT_INTERVAL_MINUTES,
+    DEFAULT_START_HOUR,
+)
 from app.services.bms_sync import DEFAULT_SYNC_TYPES, sync_all
 from app.services.circuit_breaker import (
     clear_halt_recovery,
@@ -48,8 +53,19 @@ from app.services.sync_task_manager import sync_task_manager
 logger = logging.getLogger(__name__)
 
 # ── 调度时间配置 ──────────────────────────────────────────────────────
-# 白天每小时同步: 8,9,...,23,0  (共 17 次, 0 即 24:00 午夜)
-DAYTIME_HOURS: frozenset[int] = frozenset([*range(8, 24), 0])
+# ⚠️ 高频档已改为「DB 可配的时段 + 间隔」(#51 / A-20260910-006 LOCKED)。
+#   运行时以 scheduler_settings 表为准(见 scheduler_settings_service.get_cached_slots);
+#   下方 DEFAULT_DAYTIME_HOURS / DEFAULT_INTERVAL_MINUTES 仅作**缺省值来源与回归基线**,
+#   等价关系: start=8/end=24/interval=60 → 与旧 {8..23} 完全一致(有单测锁定)。
+DEFAULT_HIGH_FREQ_START_HOUR: int = DEFAULT_START_HOUR
+DEFAULT_HIGH_FREQ_END_HOUR: int = DEFAULT_END_HOUR
+DEFAULT_HIGH_FREQ_INTERVAL_MINUTES: int = DEFAULT_INTERVAL_MINUTES
+
+# 旧常量保留: 供「旧行为等价性」回归测试与兼容读取(不再作为调度唯一依据)
+DEFAULT_DAYTIME_HOURS: frozenset[int] = frozenset([*range(8, 24), 0])
+# ⚠️ DEPRECATED: 仅兼容既有引用(如 cache_warmer / 测试)。新代码请用 compute_slots()。
+DAYTIME_HOURS: frozenset[int] = DEFAULT_DAYTIME_HOURS
+
 # 凌晨 5 点: 对前一天做整体同步(2026-08-31 由 3:00 调整, 避开 BMS 凌晨维护时段)
 CATCHUP_HOUR: int = 5
 # 早上 8:00 全量兜底同步窗口(天): BMS 数据按登记时间分批滞后 1~2 天,
@@ -59,16 +75,64 @@ FULL_WINDOW_DAYS: int = 7
 # 且非高频 4 源」的大表/报表源(device_combo/bms_order/退货/设备标签/退款记录报表/闪猫等)
 # 跑"前一天整天"。默认 6:00(避开 5:00 缺口清点与 8:00 全量); settings.LOW_FREQ_HOUR<=0 禁用。
 LOW_FREQ_HOUR: int = max(0, int(getattr(settings, "LOW_FREQ_HOUR", 6) or 0))
-# 合并后全部需要检测的小时(用于 schedule_hours 对外展示)
-SCHEDULE_HOURS = sorted([*DAYTIME_HOURS, CATCHUP_HOUR] + ([LOW_FREQ_HOUR] if LOW_FREQ_HOUR > 0 else []))
 # 低频档忙碌顺延结束小时: 6:00 启动后若一直忙, 直到该小时前必须尝试启动(超过则当日放弃让位 8:00)
 LOW_FREQ_DEADLINE_HOUR: int = 7
 
 # ── 检查间隔(秒) ──
 CHECK_INTERVAL = 60
 
-# 整点触发宽容窗口(分钟): 在该窗口内命中 SCHEDULE_HOURS 都可触发
+# 槽位触发宽容窗口(分钟): 槽位时刻起该分钟内命中都可触发。
+# ⚠️ 实际窗口 = min(TRIGGER_WINDOW_MINUTES, interval_minutes) —— 见 slot_trigger_window()。
+#   若窗口 >= interval, 一个槽位的窗口会覆盖下一槽位, 造成抖动/漏槽(架构 §2.3 硬约束)。
 TRIGGER_WINDOW_MINUTES = 30
+
+
+def slot_trigger_window(interval_minutes: int) -> int:
+    """槽位触发宽容窗口(分钟) = min(TRIGGER_WINDOW_MINUTES, interval)。
+
+    纯函数, 供单测锁定「窗口不超过间隔」这条硬约束。
+    """
+    if interval_minutes <= 0:
+        return 0
+    return min(TRIGGER_WINDOW_MINUTES, interval_minutes)
+
+
+def slot_of(minute_of_day: int, interval_minutes: int) -> str | None:
+    """把一个「当日分钟数」向下取整到所属槽位标识(纯函数)。
+
+    用于重启后从 bms_sync_logs 的 finished_at 回填已完成槽位:
+        485 (08:05), interval=30 → "08:00"
+        510 (08:30)              → "08:30"
+        511 (08:31)              → "08:30"
+    interval<=0 → None(不参与槽位体系)。
+    """
+    if interval_minutes <= 0:
+        return None
+    snapped = (minute_of_day // interval_minutes) * interval_minutes
+    hh, mm = divmod(snapped, 60)
+    if hh >= 24:
+        return None
+    return f"{hh:02d}:{mm:02d}"
+
+
+def current_slot(now_hour: int, now_minute: int, interval_minutes: int,
+                 slots: list[str]) -> str | None:
+    """当前时刻命中的槽位标识(纯函数); 未命中任何槽位窗口 → None。
+
+    命中条件(架构 §2.3): 槽位时刻 <= now < 槽位时刻 + min(30, interval)
+    即窗口从槽位起算, 向下不越到前一槽、向上不盖住下一槽。
+    """
+    if not slots or interval_minutes <= 0:
+        return None
+    win = slot_trigger_window(interval_minutes)
+    now_min = now_hour * 60 + now_minute
+    # 槽位按固定间隔切分, 可直接算: 距时段起点的偏移落哪个格
+    for slot in slots:
+        sh, sm = (int(x) for x in slot.split(":"))
+        s_min = sh * 60 + sm
+        if s_min <= now_min < s_min + win:
+            return slot
+    return None
 
 
 def should_run_low_freq(
@@ -101,21 +165,17 @@ def should_run_low_freq(
     return not busy
 
 
-def should_sync_shared_docs(now_hour: int, now_minute: int, done: bool = False) -> bool:
-    """共享文档在线采集是否应在本高频窗口触发(#35 统一调度, 纯函数供单测)。
+def should_sync_shared_docs(slot: str | None, done: bool = False) -> bool:
+    """共享文档在线采集是否应在当前高频槽位触发(#35 统一调度, #51 改槽位语义)。
 
-    语义: 并入白天高频窗口(与 BMS 白天每小时同步同条件):
-      - 仅在 DAYTIME_HOURS 整点 + TRIGGER_WINDOW 内(now_minute < TRIGGER_WINDOW_MINUTES)为 True;
-      - 同窗口已 done(已采过/已检查过)→ False(防主循环 60s 多次 tick 重复触发);
-      - 窗口未来改半小时时, 只需把 DAYTIME_HOURS/窗口粒度调细, 共享文档自然跟随。
+    语义: 与 BMS 高频**同槽位节奏**(架构 §六.6 风险缓解):
+      - `slot` 为当前命中的槽位标识(由 `current_slot(...)` 得出); None = 未命中任何槽位;
+      - 同槽位已 done(已采过)→ False(防主循环 60s 多次 tick 重复触发);
+      - 与 BMS 共用同一 slot 判定 → 改配置后两者自动同步变化, 不会脱钩。
     """
     if done:
         return False
-    if now_hour not in DAYTIME_HOURS:
-        return False
-    if now_minute >= TRIGGER_WINDOW_MINUTES:
-        return False
-    return True
+    return slot is not None
 
 
 class BmsScheduler:
@@ -124,7 +184,7 @@ class BmsScheduler:
     关键机制:
       - 启动时从 bms_sync_logs 回填「今天哪些 scheduled 小时已经成功执行过」,
         避免服务重启导致重复执行或重复漏掉整点。
-      - 启动后立刻执行一次「启动补跑」: 所有 SCHEDULE_HOURS 中 <= 当前小时
+      - 启动后立刻执行一次「启动补跑」: 当日已过但未执行的槽位
         且今天没成功执行过的点,立刻补一次(因为窗口已过、不补就永远漏了)。
       - 触发窗口放宽到 30 分钟,只要当前整点仍在该窗口内就允许执行(重启等极端场景兜底)。
       - 专项级熔断(2026-08-13 调整): 白天同步中, 若某个 data_type(专项)同步失败,
@@ -136,20 +196,68 @@ class BmsScheduler:
     def __init__(self):
         self._task: asyncio.Task | None = None
         self._running = False
-        self._last_run_hour: dict[str, set[int]] = {}  # date_str -> set(hours executed OK today)
+        # #51: 已完成槽位登记 —— date_str -> set("HH:MM"); 原 _last_run_hour(小时集合)已升级
+        self._last_run_slot: dict[str, set[str]] = {}
         self._catch_up_done = False  # 启动补跑是否已执行(避免反复补跑)
         # 专项级熔断: date_str -> set(已失败暂停的 data_type 名称)
         self._halted_types: dict[str, set[str]] = {}
-        # 预警扫描: date_str -> set(已扫描的小时), 一小时最多一次(scan_alerts 已做日幂等)
-        self._alert_scanned_hours: dict[str, set[int]] = {}
+        # 预警扫描: date_str -> set(已扫描的槽位标识), 一槽位最多一次(scan_alerts 已做日幂等)
+        self._alert_scanned_slots: dict[str, set[str]] = {}
         # 低频档当日是否已执行/已尝试(A-20260907-001 / #31): date_str -> bool
-        # 与 _last_run_hour 分开: 低频小时(6:00)不在 DAYTIME_HOURS, 用独立日标记防重复
+        # 与 _last_run_slot 分开: 低频小时(6:00)不在高频槽位体系, 用独立日标记防重复
         self._low_freq_done: dict[str, bool] = {}
-        # 共享文档采集"窗口内已完成"(统一调度 #35): date_str -> set(已完成的高频窗口序号)
-        # 语义: 共享文档并入白天高频窗口(整点/未来半小时), 同窗口只采一次(防 60s 主循环重复触发)
-        self._shared_doc_done: dict[str, set[int]] = {}
+        # 共享文档采集"槽位内已完成"(统一调度 #35/#51): date_str -> set(已完成槽位标识)
+        # 语义: 共享文档与 BMS 高频同槽位节奏, 同槽位只采一次(防 60s 主循环重复触发)
+        self._shared_doc_done: dict[str, set[str]] = {}
         # 启动后延迟预热任务句柄(防 GC 中断)
         self._warm_task: asyncio.Task | None = None
+
+    # ── #51: 配置读取与变更回调 ──
+    def _load_schedule(self):
+        """读高频节拍配置(带 60s 缓存)。返回 (slots, start, end, interval)。
+
+        读库失败 → 回退代码默认值(8/24/60 等价旧行为), 保证调度不因配置读失败而停摆。
+        """
+        db = SessionLocal()
+        try:
+            from app.services.scheduler_settings_service import get_cached_slots
+
+            return get_cached_slots(db)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[调度器] 读高频节拍配置失败, 回退默认(8~24 每小时): {e}")
+            fallback = [
+                f"{h:02d}:00" for h in range(DEFAULT_HIGH_FREQ_START_HOUR, DEFAULT_HIGH_FREQ_END_HOUR)
+            ]
+            return (
+                fallback,
+                DEFAULT_HIGH_FREQ_START_HOUR,
+                DEFAULT_HIGH_FREQ_END_HOUR,
+                DEFAULT_HIGH_FREQ_INTERVAL_MINUTES,
+            )
+        finally:
+            db.close()
+
+    def on_settings_changed(self) -> None:
+        """配置变更回调(#51): 清空当日槽位登记, 按新配置重新回填。
+
+        为什么必须清空(架构 §六.4 风险): 例如 10:17 把 interval 从 60 改成 30,
+        旧登记里已有 "10:00"; 若不清空, 新槽位 "10:30" 之外的边界判断会混乱
+        (旧按小时登记没有 "10:30" 概念)。清空后按新 interval 重新回填当日已成功槽位。
+        代价: 改配置后可能触发一次补跑 —— 管理员主动操作, 可接受。
+        """
+        self._last_run_slot = {}
+        self._shared_doc_done = {}
+        self._alert_scanned_slots = {}
+        # 立即按新配置回填(不置 _catch_up_done=False, 避免重复触发启动补跑逻辑)
+        try:
+            self._reload_today_completed_hours()
+            today_key = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+            logger.info(
+                "[调度器] 节拍配置已变更, 当日槽位登记已按新配置重算: %s",
+                sorted(self._last_run_slot.get(today_key, set())),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[调度器] 变更后重算槽位失败(下次 tick 自愈): {e}")
 
     @property
     def is_running(self) -> bool:
@@ -211,15 +319,23 @@ class BmsScheduler:
         halted_types = sorted(self._halted_types.get(biz_key) or set())
         has_any_halt = bool(halted_types)
 
-        # 下一次运行: 专项级熔断不影响下一个小时的触发(仍会尝试,只是跳过已熔断的专项)
-        today_remaining = [h for h in SCHEDULE_HOURS if h > now.hour]
+        # 下一次运行: 专项级熔断不影响下一个槽位的触发(仍会尝试,只是跳过已熔断的专项)
+        slots, start_h, end_h, interval_m = self._load_schedule()
+        today_remaining = [s for s in slots if s > now.strftime("%H:%M")]
         if today_remaining:
-            next_hour = today_remaining[0]
+            next_slot = today_remaining[0]
             next_date = now.date()
-        else:
-            next_hour = SCHEDULE_HOURS[0]
+        elif slots:
+            next_slot = slots[0]
             next_date = now.date() + timedelta(days=1)
-        next_run = datetime(next_date.year, next_date.month, next_date.day, next_hour, 0, 0)
+        else:
+            next_slot = None
+            next_date = now.date()
+        if next_slot:
+            nh, nm = (int(x) for x in next_slot.split(":"))
+            next_run = datetime(next_date.year, next_date.month, next_date.day, nh, nm, 0)
+        else:
+            next_run = None
 
         # 优先展示 task_manager 维护的当前进度
         ct = sync_task_manager.get_current_task()
@@ -236,10 +352,18 @@ class BmsScheduler:
 
         return {
             "enabled": self._running,
-            "schedule_hours": SCHEDULE_HOURS,
-            "daytime_hours": sorted(DAYTIME_HOURS),
+            # #51: 槽位体系(新). schedule_hours 保留为兼容字段 —— 旧前端按 "h:00" 渲染,
+            # 若直接删除会导致前端与后端必须同时发布(架构 §3.2 兼容性说明)。
+            "slots": slots,
+            "slot_count": len(slots),
+            "start_hour": start_h,
+            "end_hour": end_h,
+            "interval_minutes": interval_m,
+            "schedule_hours": sorted({int(s.split(":")[0]) for s in slots}),
+            "daytime_hours": sorted({int(s.split(":")[0]) for s in slots}),
             "catchup_hour": CATCHUP_HOUR,
-            "next_run": next_run.isoformat(),
+            "next_run": next_run.isoformat() if next_run else None,
+            "next_slot": next_slot,
             "current_progress": current_progress,
             "has_credentials": {
                 "bms": self._default_sources_have_credentials(),
@@ -255,10 +379,15 @@ class BmsScheduler:
         }
 
     def _reload_today_completed_hours(self) -> None:
-        """从 bms_sync_logs 回填「今天哪些 scheduled 小时已经成功执行过」
+        """从 bms_sync_logs 回填「今天哪些 scheduled **槽位**已经成功执行过」。
 
+        #51 语义升级: 原按「整点小时」登记, 现按「槽位」(interval 粒度)登记。
         判断标准: 今天北京时间下, trigger_type='scheduled' 且 status='success'
-        的记录中, finished_at(北京时间)所处的整点小时数。
+        的记录中, finished_at(北京时间)**向下取整到 interval 边界**所属的槽位。
+
+        ⚠️ 边界(架构 §六.3 风险): 08:29 完成 → 归 "08:00" 槽(而不是 "08:30"),
+           因为 08:30 槽尚未开始执行。用 `slot_of()` 纯函数保证口径与调度判定一致。
+
         这样即使服务重启,也不会重复执行/也不会漏掉已经过去但没执行的点(补跑会管)。
 
         同时 best-effort 回填**专项级**熔断: 若「业务日期当天」存在
@@ -272,6 +401,8 @@ class BmsScheduler:
         biz_date = now_cn.date() if now_cn.hour >= 4 else (now_cn - timedelta(days=1)).date()
         biz_key = biz_date.strftime("%Y-%m-%d")
         today_cn = now_cn.date()
+        # #51: 回填需按当前配置的 interval 切分
+        _slots, _sh, _eh, _im = self._load_schedule()
         db = SessionLocal()
         try:
             rows = db.execute(
@@ -283,7 +414,7 @@ class BmsScheduler:
                 )
                 .order_by(desc(BmsSyncLog.finished_at))
             ).all()
-            hours_done: set[int] = set()
+            slots_done: set[str] = set()
             for (fin_at,) in rows:
                 if fin_at is None:
                     continue
@@ -292,16 +423,20 @@ class BmsScheduler:
                 else:
                     fin_cn = fin_at.astimezone(TZ_CN)
                 if fin_cn.date() == today_cn:
-                    hours_done.add(fin_cn.hour)
+                    slot = slot_of(fin_cn.hour * 60 + fin_cn.minute, _im)
+                    if slot:
+                        slots_done.add(slot)
             today_key = now_cn.strftime("%Y-%m-%d")
-            self._last_run_hour = {today_key: hours_done}
+            self._last_run_slot = {today_key: slots_done}
             # ── #31: 低频档回填 ──
-            # 低频小时(LOW_FREQ_HOUR)不在 DAYTIME_HOURS, _last_run_hour 不直接体现。
+            # 低频小时(LOW_FREQ_HOUR)不在高频槽位体系, _last_run_slot 不直接体现。
             # 若今天低频小时已有 scheduled 成功记录(任一低频源成功即认为本轮已尝试,
             # 因为整档一次 sync_all 提交, 部分源失败也会整档成功结束), 置 _low_freq_done
             # 避免重启后重复跑低频档。
             self._low_freq_done = {}
-            if LOW_FREQ_HOUR > 0 and LOW_FREQ_HOUR in hours_done:
+            if LOW_FREQ_HOUR > 0 and any(
+                s.startswith(f"{LOW_FREQ_HOUR:02d}:") for s in slots_done
+            ):
                 self._low_freq_done[today_key] = True
                 logger.info(f"[调度器] 低频档回填: 今日 {LOW_FREQ_HOUR}:00 已执行过, 重启不重复触发")
 
@@ -339,9 +474,9 @@ class BmsScheduler:
                 self._halted_types[biz_key] = halted_dt
 
             logger.info(
-                f"[调度器] 回填: 今日已成功小时={sorted(hours_done) if hours_done else '（无）'},"
+                f"[调度器] 回填: 今日已成功槽位={sorted(slots_done) if slots_done else '（无）'},"
                 f" 已熔断专项={sorted(halted_dt) if halted_dt else '无'} (biz_date={biz_key}),"
-                f" 下一次计划窗口: {[h for h in SCHEDULE_HOURS if h not in hours_done and h >= now_cn.hour]}"
+                f" 下一次计划窗口: {[s for s in _slots if s > now_cn.strftime('%H:%M')][:6]}"
             )
         except Exception as e:
             logger.warning(f"[调度器] 回填已执行小时失败(忽略,冷启动即可): {e}", exc_info=True)
@@ -355,7 +490,7 @@ class BmsScheduler:
           1. 清除当前业务日期的熔断标记(用户手动恢复)
           2. 从 bms_sync_logs 回填今天已经成功完成过的 scheduled 小时
           3. 启动后台循环
-          4. 在后台循环的第一次检查里执行「启动补跑」(SCHEDULE_HOURS 中已过但今日未成功的小时立刻补一次)
+          4. 在后台循环的第一次检查里执行「启动补跑」(当日已过但未成功执行的槽位立刻补一次)
         """
         if self._running:
             return
@@ -367,9 +502,12 @@ class BmsScheduler:
         # 启动后延迟预热今日看板(让首个用户命中热缓存); 与同步互斥由 warmer 内部保证,
         # 若此时启动补跑同步正在进行, warmer 会跳过, 改由同步完成后的预热兜底。
         self._warm_task = asyncio.create_task(self._startup_warm_delayed())
+        _slots, _sh, _eh, _im = self._load_schedule()
         logger.info(
-            f"BMS 定时同步已启动, 白天小时(8-23+0)={sorted(DAYTIME_HOURS)},"
-            f" 补跑={CATCHUP_HOUR}:00, 宽容窗口{TRIGGER_WINDOW_MINUTES}分钟"
+            f"BMS 定时同步已启动, 高频节拍={_sh}:00~{_eh}:00 每 {_im} 分钟"
+            f"({len(_slots)} 槽/天, 首槽={_slots[0] if _slots else '-'} 末槽={_slots[-1] if _slots else '-'}),"
+            f" 补跑={CATCHUP_HOUR}:00, 低频档={LOW_FREQ_HOUR}:00,"
+            f" 槽位宽容窗口=min({TRIGGER_WINDOW_MINUTES}, interval)"
         )
 
     async def _startup_warm_delayed(self) -> None:
@@ -395,12 +533,14 @@ class BmsScheduler:
         logger.info("BMS 定时同步已停止")
 
     async def _run_loop(self):
-        """主循环:每分钟检查是否到了定时;首次检查先做启动补跑
+        """主循环: 每分钟检查是否命中高频槽位; 首次检查先做启动补跑
 
-        调度策略(2026-08-13 调整为专项级熔断):
-          - 白天: DAYTIME_HOURS (8,9,...,23,0) 每小时同步;
-            若某 data_type(专项)失败 → 仅暂停该专项当天后续小时; 其他专项不受影响
+        调度策略(#51 / A-20260910-006 LOCKED):
+          - 高频档: 按 DB 配置的「起止时段 + 间隔」切分槽位(默认 8:00~24:00 每 30 分钟),
+            命中槽位窗口且该槽未执行过 → 同步;
+            若某 data_type(专项)失败 → 仅暂停该专项当天后续槽位; 其他专项不受影响
           - 凌晨 CATCHUP_HOUR (5:00): 对「前一天」做整体补跑,忽略所有专项熔断
+          - 低频档 LOW_FREQ_HOUR (6:00): 低频源跑前一天整天, 每天 1 次(不受节拍影响)
         """
         TZ_CN = timezone(timedelta(hours=8))
         first_tick = True
@@ -408,16 +548,20 @@ class BmsScheduler:
             try:
                 now_cn = datetime.now(TZ_CN)
                 date_str = now_cn.strftime("%Y-%m-%d")
-                today_done = self._last_run_hour.setdefault(date_str, set())
+                # #51: 当日已完成**槽位**集合(原 _last_run_hour 小时集合已升级)
+                today_done = self._last_run_slot.setdefault(date_str, set())
+                # 读高频节拍配置(带 60s 缓存) + 算当前命中槽位
+                slots, sch_start, sch_end, sch_interval = self._load_schedule()
+                cur_slot = current_slot(now_cn.hour, now_cn.minute, sch_interval, slots)
                 # 业务日期(用于熔断判断): hour 0~3 仍归属前一天
                 biz_date = now_cn.date() if now_cn.hour >= 4 else (now_cn - timedelta(days=1)).date()
                 biz_key = biz_date.strftime("%Y-%m-%d")
                 halted_today = self._halted_types.get(biz_key) or set()
 
-                # ── 预警扫描(每小时最多一次, scan_alerts 内部做当日幂等) ──
-                alert_done = self._alert_scanned_hours.setdefault(date_str, set())
-                if now_cn.minute < TRIGGER_WINDOW_MINUTES and now_cn.hour not in alert_done:
-                    alert_done.add(now_cn.hour)
+                # ── 预警扫描(每槽位最多一次, scan_alerts 内部做当日幂等) ──
+                alert_done = self._alert_scanned_slots.setdefault(date_str, set())
+                if cur_slot and cur_slot not in alert_done:
+                    alert_done.add(cur_slot)
                     try:
                         await self._scan_alerts_safe()
                     except Exception as ae:  # noqa: BLE001
@@ -429,38 +573,33 @@ class BmsScheduler:
                 except Exception as de:  # noqa: BLE001
                     logger.warning(f"[调度器] 共享文档同步检查异常: {de}")
 
-                # ── 共享文档在线采集(doc_sync_sources): 并入白天高频窗口, 同窗口只采一次(#35) ──
+                # ── 共享文档在线采集(doc_sync_sources): 同高频槽位节奏, 同槽只采一次(#35/#51) ──
                 try:
-                    await self._maybe_sync_shared_docs(now_cn, date_str)
+                    await self._maybe_sync_shared_docs(now_cn, date_str, cur_slot)
                 except Exception as sd:  # noqa: BLE001
                     logger.warning(f"[调度器] 共享文档在线采集检查异常: {sd}")
 
-                # ── 启动补跑(仅一次): DAYTIME_HOURS 中 <= 当前小时且未成功的,立即补一次 ──
+                # ── 启动补跑(仅一次): 今日已过但未执行的槽位, 立即补一次(#51 槽位语义) ──
                 if first_tick and not self._catch_up_done:
                     self._catch_up_done = True
-                    daytime_sorted = sorted(DAYTIME_HOURS)
-                    if now_cn.hour >= 8:
-                        candidate_hours = [h for h in daytime_sorted if 8 <= h <= now_cn.hour]
-                    elif now_cn.hour == 0:
-                        candidate_hours = [0]
-                    else:
-                        candidate_hours = []
-                    missed = [h for h in candidate_hours if h not in today_done]
+                    # 候选 = 今日已到时刻的槽位(严格早于当前时刻, 当前槽由正常分支处理)
+                    now_hm = now_cn.strftime("%H:%M")
+                    missed = [s for s in slots if s < now_hm and s not in today_done]
                     if missed:
                         # 专项级: 只要还有未熔断的专项就值得补跑(已熔断的会在 runner 里跳过)
                         logger.info(
-                            f"[调度器] 启动补跑: 今日遗漏白天小时={missed}"
-                            f", 已熔断专项={sorted(halted_today) if halted_today else '无'}, "
+                            f"[调度器] 启动补跑: 今日遗漏槽位={missed}"
+                            f"(共{len(missed)}个), 已熔断专项={sorted(halted_today) if halted_today else '无'}, "
                             f"立刻触发一次全量(00:00~now)补同步"
                         )
                         await self._do_scheduled_sync(
-                            why=f"启动补跑错过窗口{missed}",
+                            why=f"启动补跑错过槽位{len(missed)}个(末个={missed[-1]})",
                             yesterday_full_sync=False,
                             biz_key=biz_key,
                         )
                         first_tick = False
-                        for h in missed:
-                            today_done.add(h)
+                        for s in missed:
+                            today_done.add(s)
                         await asyncio.sleep(CHECK_INTERVAL)
                         continue
                     first_tick = False
@@ -577,11 +716,11 @@ class BmsScheduler:
                             f" 当日放弃; 依赖低频源失败进 gap → 次日 5:00 缺口清点兜底"
                         )
 
-                # ── 2) 白天每小时同步(8~23, 0) ──
-                if now_cn.hour in DAYTIME_HOURS and now_cn.minute < TRIGGER_WINDOW_MINUTES and now_cn.hour not in today_done:
-                    today_done.add(now_cn.hour)
+                # ── 2) 高频档槽位触发(#51: DB 可配时段+间隔, 默认 8:00~24:00 每 30 分钟) ──
+                if cur_slot and cur_slot not in today_done:
+                    today_done.add(cur_slot)
                     # 快速预检: 当前有资格同步的数据源 = (BMS 高频 + SCRM 有凭证) ∩ 未熔断
-                    # #31: BMS 高频候选改为读 DB default_sync=true 的 high 档(原代码常量已不适用)
+                    # #31: BMS 高频候选读 DB default_sync=true 的 high 档
                     _hh_db = SessionLocal()
                     try:
                         from app.services.sync_source_config_service import (
@@ -602,27 +741,29 @@ class BmsScheduler:
                         dt for dt in (bms_candidate + scrm_candidate) if dt not in halted_today
                     ]
                     if not effective_types:
-                        if now_cn.minute < 1:
-                            logger.warning(
-                                f"[调度器] {biz_key} 本次 {now_cn.hour:02d}:00 所有源均已熔断或无凭证"
-                                f" (已暂停={sorted(halted_today)}), 跳过本轮"
-                            )
+                        logger.warning(
+                            f"[调度器] {biz_key} 本次槽位 {cur_slot} 所有源均已熔断或无凭证"
+                            f" (已暂停={sorted(halted_today)}), 跳过本轮"
+                        )
                     else:
-                        if halted_today and now_cn.minute < 1:
+                        if halted_today:
                             logger.info(
-                                f"[调度器] {biz_key} {now_cn.hour:02d}:00 触发白天同步,"
+                                f"[调度器] {biz_key} 槽位 {cur_slot} 触发高频同步,"
                                 f" 已熔断专项(将跳过)={sorted(halted_today)},"
                                 f" 本次执行专项={effective_types}"
                             )
                         else:
                             logger.info(
-                                f"触发白天定时同步: {date_str} {now_cn.hour:02d}:00"
-                                f" ({now_cn.minute}分,窗口内)"
+                                f"触发高频定时同步: {date_str} 槽位 {cur_slot}"
+                                f" (当前 {now_cn.strftime('%H:%M')}, 窗口内)"
                             )
+                        # 8:00 全量兜底: 由「首槽 = 8:00」判定(而非硬编码 hour==8),
+                        #   保证管理员把时段改成 7:00 起始时, 首槽同样带全量兜底。
+                        is_first_slot = bool(slots) and cur_slot == slots[0]
                         await self._do_scheduled_sync(
-                            why=f"定时触发 {now_cn.hour:02d}:00",
+                            why=f"定时触发槽位 {cur_slot}",
                             yesterday_full_sync=False,
-                            full_window_days=FULL_WINDOW_DAYS if now_cn.hour == 8 else 0,
+                            full_window_days=FULL_WINDOW_DAYS if is_first_slot else 0,
                             biz_key=biz_key,
                         )
 
@@ -651,7 +792,7 @@ class BmsScheduler:
     async def _maybe_half_open_probe(self, biz_key: str, now_cn) -> None:
         """半开探测(A-20260904-002 / 工单#2 3.2): 熔断源周期性单片试探。
 
-        - 触发条件: 白天(DAYTIME_HOURS)非整点强制窗口、当前无任务忙、
+        - 触发条件: 落在高频时段内、避开首槽窗口、当前无任务忙、
           源已熔断(_halted_types[biz_key])、且距上次探测 >= HALF_OPEN_INTERVAL。
         - 探测方式: 仅对该源做「当前小时窗口」单源同步(近 1h 短窗, 轻量试探)。
         - 成功 → 摘除熔断(_halted_types 移除) + 清零失败计数(reset_circuit),
@@ -662,13 +803,21 @@ class BmsScheduler:
         halted_set = set(self._halted_types.get(biz_key) or set())
         if not halted_set:
             return
-        # 仅白天增量时段探测(5:00/8:00 兜底本就忽略熔断强制全跑, 无需半开)
-        if now_cn.hour not in DAYTIME_HOURS:
+        # 仅高频时段内探测(5:00 补跑/低频档本就忽略熔断强制全跑, 无需半开)
+        # #51: 判定从「命中 DAYTIME_HOURS」改为「落在高频时段 [start, end) 内」
+        _slots, _sh, _eh, _im = self._load_schedule()
+        if not (_sh <= now_cn.hour < _eh):
             return
         if sync_task_manager.is_busy():
             return  # 有任务在跑, 下一分钟再探
-        # 5/8 点整点前 30 分钟窗口内也跳过(避免与兜底/全量撞车)
-        if now_cn.minute < TRIGGER_WINDOW_MINUTES and now_cn.hour in (CATCHUP_HOUR, 8):
+        # 避开首槽(可能带全量兜底)与 5:00 补跑窗口, 减少撞车
+        first_slot = _slots[0] if _slots else None
+        if first_slot:
+            fh, fm = (int(x) for x in first_slot.split(":"))
+            f_min = fh * 60 + fm
+            if f_min <= now_cn.hour * 60 + now_cn.minute < f_min + slot_trigger_window(_im):
+                return
+        if now_cn.hour == CATCHUP_HOUR and now_cn.minute < TRIGGER_WINDOW_MINUTES:
             return
 
         # 归一化到北京时间(now_cn 已带 tz)
@@ -817,23 +966,21 @@ class BmsScheduler:
         except Exception as e:  # noqa: BLE001
             logger.error(f"[调度器] 腾讯文档轮询同步异常: {e}", exc_info=True)
 
-    async def _maybe_sync_shared_docs(self, now_cn, date_str: str):
-        """共享文档在线采集(doc_sync_sources) — 并入白天高频窗口(#35 统一调度)。
+    async def _maybe_sync_shared_docs(self, now_cn, date_str: str, cur_slot: str | None):
+        """共享文档在线采集(doc_sync_sources) — 同高频槽位节奏(#35 统一调度, #51 改槽位语义)。
 
-        与 BMS 高频同一节奏: 只在白天高频窗口(DAYTIME_HOURS 整点 + TRIGGER_WINDOW 内)
-        触发一次; 同窗口不重复(用 _shared_doc_done 记录已完成的高频小时, 防主循环
-        60s 多次 tick 重复触发)。未来高频窗口改半小时时, 只需把窗口粒度从"小时"
-        调细(共享文档自然跟随, 不依赖独立计时)。
+        与 BMS 高频**同一槽位**触发: `cur_slot` 为当前命中的槽位标识(由主循环传入,
+        与 BMS 判定共用同一个 `current_slot()` → 两者永不脱钩, 见架构 §六.6)。
+        同槽位不重复(用 _shared_doc_done 记录已完成槽位, 防主循环 60s 多次 tick 重复触发)。
 
-        源级 interval 仍生效(due_doc_sources): 窗口触发时, 距上次 >= interval 的源才采
-        (interval=120 的源可跳过若干窗口)。空闲才跑, 单源失败不影响其它源。
+        源级 interval 仍生效(due_doc_sources): 槽位触发时, 距上次 >= interval 的源才采
+        (interval=120 的源可跳过若干槽位)。空闲才跑, 单源失败不影响其它源。
         """
         from app.services.shared_doc_sync_service import due_doc_sources, sync_doc_source_safe
 
-        # 1) 窗口守卫: 仅白天高频窗口内(与 BMS 白天每小时同步同条件)才触发;
-        #    同窗口只采一次(记录已完成的高频小时)
+        # 1) 槽位守卫: 当前命中槽位 + 同槽位只采一次
         done_set = self._shared_doc_done.setdefault(date_str, set())
-        if not should_sync_shared_docs(now_cn.hour, now_cn.minute, done=now_cn.hour in done_set):
+        if not should_sync_shared_docs(cur_slot, done=cur_slot in done_set):
             return
         # 2) 空闲才跑(避免与 BMS/SCRM 大同步并发 playwright)
         if sync_task_manager.is_busy():
@@ -845,18 +992,18 @@ class BmsScheduler:
         finally:
             db.close()
         if not due:
-            # 无到点源也算该窗口已检查过(避免每 tick 空转查库)
-            done_set.add(now_cn.hour)
+            # 无到点源也算该槽位已检查过(避免每 tick 空转查库)
+            done_set.add(cur_slot)
             return
-        logger.info(f"[调度器] 共享文档在线采集(高频窗口 {now_cn.hour:02d}:00) 到点 "
+        logger.info(f"[调度器] 共享文档在线采集(高频槽位 {cur_slot}) 到点 "
                     f"{len(due)} 个源, 开始采集")
         for row in due:
             try:
                 await asyncio.to_thread(sync_doc_source_safe, row.id, "scheduled")
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[调度器] 共享文档源 #{row.id} 采集异常: {e}", exc_info=True)
-        # 无论成败, 该窗口已处理过(失败源 last_sync_at 未更新 → 下个窗口因 interval 到期会重试)
-        done_set.add(now_cn.hour)
+        # 无论成败, 该槽位已处理过(失败源 last_sync_at 未更新 → 下槽位因 interval 到期会重试)
+        done_set.add(cur_slot)
 
     async def _do_scheduled_sync(
         self,
