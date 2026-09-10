@@ -49,12 +49,13 @@ def _write_rejected(
     reason: str | None = None,
     raw_row: dict | None = None,
     row_no: int | None = None,
-) -> None:
+) -> bool:
     """A-20260908-003: 未采纳行落拒收表(不阻塞主流程, 用 savepoint 隔离失败)。
 
     手动退款推送/共享文档采集的 dropped 行(缺订单号/解析失败/非对象)写入拒收表,
     供数据质量页"拒收数据"可见可判。写入失败仅记日志, 不影响同步主流程。
     与 complaint_sync._write_rejected 同模式。
+    返回: 是否成功写入(供调用方累计 rejected 计数; #42 审查修复)
     """
     try:
         with db.begin_nested():  # savepoint: 失败只回滚本条, 不污染主事务
@@ -69,8 +70,10 @@ def _write_rejected(
                 source_row_no=row_no,
                 status="open",
             ))
+        return True
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[ingest_rejected] 写拒收行失败(忽略): data_type={data_type} err={e}")
+        return False
 
 
 class ManualRefundSyncResult:
@@ -88,6 +91,8 @@ class ManualRefundSyncResult:
         self.filtered = 0
         self.warnings = 0
         self.errors: list[dict[str, Any]] = []
+        # #42: 真正落拒收表(ingest_rejected_rows)的条数 —— 与 dropped 不同义
+        self.rejected = 0
 
     def add_warning(self, row_idx: int, msg: str, data: dict | None = None) -> None:
         """软警告: 行保留但字段被清洗"""
@@ -159,11 +164,12 @@ def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult,
             result.add_dropped(idx, "缺少登记日期或订单号,无法去重定位(跳过)")
             if db is not None and _has_any_business_value(data):
                 # 有业务字段值但缺去重键 → 真问题行, 落拒收(全空行=模板噪音不落)
-                _write_rejected(
+                if _write_rejected(
                     db, data_type="manual_refund", source=source,
                     category="validate_fail", reason="缺少登记日期或订单号,无法去重定位(跳过)",
                     raw_row=row, row_no=idx,
-                )
+                ):
+                    result.rejected += 1
             return None
         remark = _to_str(data.get("remark")) or ""
         # 示例模板行跳过(与本地导入同规则)
@@ -203,11 +209,12 @@ def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult,
     except Exception as e:
         result.add_dropped(idx, f"手动退款行解析失败: {e}")
         if db is not None:
-            _write_rejected(
+            if _write_rejected(
                 db, data_type="manual_refund", source=source,
                 category="parse_fail", reason=f"手动退款行解析失败: {e}",
                 raw_row=row, row_no=idx,
-            )
+            ):
+                result.rejected += 1
         return None
 
 
@@ -335,11 +342,12 @@ def sync_manual_refunds_from_payload(
                 result.add_dropped(idx, "手动退款行不是对象")
                 if row is not None:
                     # 非对象行(如纯字符串/数字): 落拒收供查看(来源文件行号 idx)
-                    _write_rejected(
+                    if _write_rejected(
                         db, data_type="manual_refund", source=sync_source,
                         category="parse_fail", reason="手动退款行不是对象(跳过分隔行/异常行)",
                         raw_row={"raw": row}, row_no=idx,
-                    )
+                    ):
+                        result.rejected += 1
                 continue
             rec = _clean_row(row, idx, result, db=db, source=sync_source)
             if rec is None:
@@ -366,6 +374,8 @@ def sync_manual_refunds_from_payload(
         log.deleted = deleted
         log.failed = result.dropped
         log.warnings = result.warnings
+        # #42: 真正落拒收表的条数(与 dropped 不同义; 供统一返回值)
+        log_rejected = result.rejected
         all_errors = result.errors[:50]
         if all_errors:
             log.error = str(all_errors)
@@ -398,6 +408,7 @@ def sync_manual_refunds_from_payload(
             "updated": result.updated,
             "deleted": deleted,
             "failed": result.dropped,
+            "rejected": log_rejected,
             "filtered": result.filtered,
             "warnings": result.warnings,
             "errors": result.errors[:50],

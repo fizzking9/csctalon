@@ -39,19 +39,21 @@ def _column_exists(table_name: str, column_name: str) -> bool:
 
     已有表环境可能由 Base.metadata.create_all() 建表(含新列), 直接 add_column 会报
     DuplicateColumn → 必须先查 information_schema。
+    限定 table_schema='public' 避免多 schema 同名表产生假阳性(审查 N-5)。
     """
     conn = op.get_bind()
     return bool(conn.execute(sa.text(
         "SELECT EXISTS(SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = :t AND column_name = :c)"
+        "WHERE table_schema = 'public' AND table_name = :t AND column_name = :c)"
     ), {"t": table_name, "c": column_name}).scalar())
 
 
 def _index_exists(index_name: str) -> bool:
-    """索引存在性检查(幂等)"""
+    """索引存在性检查(幂等; 限定 schemaname='public', 审查 N-5)"""
     conn = op.get_bind()
     return bool(conn.execute(sa.text(
-        "SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = :i)"
+        "SELECT EXISTS(SELECT 1 FROM pg_indexes "
+        "WHERE schemaname = 'public' AND indexname = :i)"
     ), {"i": index_name}).scalar())
 
 

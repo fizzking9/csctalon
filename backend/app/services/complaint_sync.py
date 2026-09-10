@@ -56,10 +56,11 @@ def _write_rejected(
     reason: str | None = None,
     raw_row: dict | None = None,
     row_no: int | None = None,
-) -> None:
+) -> bool:
     """A-20260908-003: 未采纳行落拒收表(不阻塞主流程, 用 savepoint 隔离失败)。
 
     写入失败仅记日志, 不影响投诉/退款同步主流程。
+    返回: 是否成功写入拒收表(供调用方累计 rejected 计数; #42 审查修复)
     """
     try:
         with db.begin_nested():  # savepoint: 失败只回滚本条, 不污染主事务
@@ -74,8 +75,10 @@ def _write_rejected(
                 source_row_no=row_no,
                 status="open",
             ))
+        return True
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[ingest_rejected] 写拒收行失败(忽略): data_type={data_type} err={e}")
+        return False
 
 # SN 单元格可能包含多个 SN(换行/逗号分隔)或备注(如 "18870605701（移动流量卡）"),统一取首个有效 SN
 _SN_SPLIT_RE = re.compile(r"[\n,;，;、\s]+")
@@ -98,6 +101,9 @@ class SyncRowResult:
         self.warnings = 0
         self.matched = 0
         self.errors: list[dict[str, Any]] = []
+        # #42: 真正落拒收表(ingest_rejected_rows)的条数 —— 与 dropped 不同义:
+        #   dropped=硬失败行数; rejected=其中成功写入拒收表、可按行人工判定的条数
+        self.rejected = 0
         # #42: 入库前校验问题清单(只读 advisory)。
         # ⚠️ 必须与 errors 严格分离: errors=硬失败明细(对外契约 failed/errors 语义),
         #    validation=校验告警(不丢弃行); 混入 errors 会让 failed=0 时 errors 非空,
@@ -440,21 +446,23 @@ def sync_complaints_from_payload(
             if not isinstance(row, dict):
                 ext_result.add_dropped(idx, "315行不是对象")
                 # A-20260908-003: 未采纳行落拒收表(parse_fail), 供人工判定
-                _write_rejected(
+                if _write_rejected(
                     db, data_type="external_complaint", source=sync_source,
                     category="parse_fail", reason="315行不是对象",
                     raw_row={"row": row} if not isinstance(row, dict) else row,
                     row_no=idx,
-                )
+                ):
+                    ext_result.rejected += 1
                 continue
             rec = _clean_external_row(row, idx, ext_result)
             if rec is None:
                 # 已由 add_dropped 计数; 落拒收表保留原始行供人工判定
-                _write_rejected(
+                if _write_rejected(
                     db, data_type="external_complaint", source=sync_source,
                     category="validate_fail", reason="315行解析失败",
                     raw_row=row, row_no=idx,
-                )
+                ):
+                    ext_result.rejected += 1
                 continue
             if _is_empty_external_rec(rec):
                 ext_result.filtered += 1
@@ -469,20 +477,22 @@ def sync_complaints_from_payload(
         for idx, row in enumerate(card_rows_raw):
             if not isinstance(row, dict):
                 card_result.add_dropped(idx, "卡商行不是对象")
-                _write_rejected(
+                if _write_rejected(
                     db, data_type="card_complaint", source=sync_source,
                     category="parse_fail", reason="卡商行不是对象",
                     raw_row={"row": row} if not isinstance(row, dict) else row,
                     row_no=idx,
-                )
+                ):
+                    card_result.rejected += 1
                 continue
             rec = _clean_card_row(row, idx, card_result)
             if rec is None:
-                _write_rejected(
+                if _write_rejected(
                     db, data_type="card_complaint", source=sync_source,
                     category="validate_fail", reason="卡商行解析失败",
                     raw_row=row, row_no=idx,
-                )
+                ):
+                    card_result.rejected += 1
                 continue
             if _is_empty_card_rec(rec):
                 card_result.filtered += 1
@@ -525,15 +535,16 @@ def sync_complaints_from_payload(
         if ext_result.filtered or card_result.filtered:
             _info = f"过滤全空行: 315={ext_result.filtered} 卡商={card_result.filtered}"
             log.error = (f"{_info} | " + str(all_errors)) if all_errors else _info
-        # #42 校验问题计数(只读, 可见化): 独立通道汇总写入日志供质量排查。
-        # ⚠️ 不与 errors 合并: errors 是对外契约的"硬失败明细", 校验告警不丢弃行。
+        # #42 校验问题计数(只读, 可见化): 独立通道汇总。
+        # ⚠️ 不写 log.error(审查 N-2): 校验告警不是同步失败, 写入 error 列会让
+        #    成功推送在采集日志"错误"列显示文本。改为 logger.warning + 返回值携带。
         _val_cnt = len(ext_result.validation) + len(card_result.validation)
         if _val_cnt:
-            _val_info = (
-                f"入库前校验告警: 315={len(ext_result.validation)}"
-                f" 卡商={len(card_result.validation)}"
+            logger.warning(
+                f"[complaint_sync] 入库前校验告警 {_val_cnt} 条"
+                f"(315={len(ext_result.validation)} 卡商={len(card_result.validation)})"
+                f"; 明细见返回 validation 字段"
             )
-            log.error = (f"{log.error} | {_val_info}") if log.error else _val_info
         if ext_result.dropped or card_result.dropped:
             log.status = "partial"
         else:
@@ -588,6 +599,8 @@ def sync_complaints_from_payload(
             "status": log.status,
             # #42 校验问题清单(只读 advisory; 与 errors 严格分离)
             "validation": (ext_result.validation + card_result.validation)[:200],
+            # #42 真正落拒收表的条数(与 failed/dropped 不同义)
+            "rejected": ext_result.rejected + card_result.rejected,
             "external": {
                 "total": ext_result.total,
                 "inserted": ext_result.inserted,

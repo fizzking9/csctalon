@@ -175,6 +175,25 @@ class TestIngestComplaints:
         assert res.extra["log_id"] == 77
         assert res.extra["external"]["total"] == 5
 
+    def test_rejected_passed_through(self, monkeypatch):
+        """⚠️ rejected 回归锁(复审 CRITICAL-3): 不得恒为 0, 应透传同步函数真实值"""
+        import app.services.complaint_sync as cs
+
+        def _fake_sync(db, payload, source_file=None, sync_source="workbuddy"):
+            return {
+                "log_id": 1, "status": "partial", "rejected": 4,
+                "external": {"total": 9, "inserted": 7, "updated": 0, "failed": 2,
+                             "filtered": 0, "matched": 0, "warnings": 0, "errors": []},
+                "card": {"total": 2, "inserted": 0, "updated": 0, "failed": 2,
+                         "filtered": 0, "matched": 0, "warnings": 0, "errors": []},
+            }
+
+        monkeypatch.setattr(cs, "sync_complaints_from_payload", _fake_sync)
+        res = ingest_complaints(db=None, payload={}, source="workbuddy")
+        assert res.rejected == 4          # 透传真实拒收行数(非 0, 非 failed)
+        assert res.failed == 4
+        assert res.rejected == 4
+
     def test_contract_fields_preserved(self, monkeypatch):
         """⚠️ 对外契约: external/card 必须含 warnings/errors(审查 CRITICAL 回归锁)
 
@@ -226,3 +245,19 @@ class TestIngestManualRefunds:
         # ⚠️ 安全约束: full_sync 必须原样透传(在线采集严禁全量对账删除)
         assert captured["payload"]["full_sync"] is False
         assert captured["sync_source"] == "shared_doc"
+
+    def test_rejected_passed_through(self, monkeypatch):
+        """⚠️ rejected 回归锁: 手动退款通道同样不得恒为 0"""
+        import app.services.manual_refund_sync as mr
+
+        def _fake_sync(db, payload, source_file=None, sync_source="workbuddy"):
+            return {
+                "log_id": 2, "status": "partial",
+                "total": 5, "inserted": 3, "updated": 0, "deleted": 0,
+                "failed": 2, "rejected": 2, "filtered": 0, "warnings": 0, "errors": [],
+            }
+
+        monkeypatch.setattr(mr, "sync_manual_refunds_from_payload", _fake_sync)
+        res = ingest_manual_refunds(db=None, payload={"manual_refunds": []}, source="shared_doc")
+        assert res.rejected == 2
+        assert res.failed == 2
