@@ -59,6 +59,32 @@
             </span>
           </template>
         </el-table-column>
+        <!-- #42 abc-c: 拒收行 / 入库前校验(校验告警≠失败, 单独列以示区分) -->
+        <el-table-column label="拒收/校验" width="120">
+          <template #default="{ row }">
+            <div class="reject-cell">
+              <el-tooltip
+                v-if="rejectedTag(row.rejected_rows).show"
+                :content="rejectedTag(row.rejected_rows).tip"
+                placement="top"
+              >
+                <el-tag type="danger" size="small" effect="plain">
+                  {{ rejectedTag(row.rejected_rows).text }}
+                </el-tag>
+              </el-tooltip>
+              <el-tooltip
+                v-if="validationTag(row.validation_count, row.validation_block, row.validation_warn).show"
+                :content="validationTag(row.validation_count, row.validation_block, row.validation_warn).tip"
+                placement="top"
+              >
+                <el-tag type="warning" size="small" effect="plain">
+                  {{ validationTag(row.validation_count, row.validation_block, row.validation_warn).text }}
+                </el-tag>
+              </el-tooltip>
+              <span v-if="showRejectPlaceholder(row.rejected_rows, row.validation_count)" class="dim">—</span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="filename" label="文件/来源" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.filename" class="filename-text">{{ row.filename }}</span>
@@ -97,6 +123,7 @@
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { listCollectionLogs, listLogSources, listLogDataTypes } from '@/api/collectionLogs'
+import { rejectedTag, validationTag, showRejectPlaceholder } from '@/utils/collectionStats'
 import dayjs from 'dayjs'
 
 const props = defineProps({
@@ -205,4 +232,7 @@ onUnmounted(() => {
 .stats-text { font-size: 12px; }
 .stats-text b { font-weight: 600; }
 .filename-text { font-size: 12px; color: #606266; }
+/* #42 abc-c: 拒收/校验列 */
+.reject-cell { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.reject-cell .dim { color: #909399; }
 </style>

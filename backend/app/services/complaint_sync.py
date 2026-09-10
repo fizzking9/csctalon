@@ -608,6 +608,14 @@ def sync_complaints_from_payload(
         log.card_failed = card_result.dropped
         log.card_matched = card_result.matched
 
+        # ── #42 abc-c: 持久化拒收与校验信息(供采集日志/推送页展示历史) ──
+        # 不写 error 列: 校验告警不是同步失败(推送可 success 且有告警),
+        # 混入会让"错误"列在成功记录里显示文本(复审 N-2 曾因此回退)。
+        _all_val = ext_result.validation + card_result.validation
+        log.rejected = ext_result.rejected + card_result.rejected
+        log.validation_count = len(_all_val)
+        log.validation_severity = summarize_severity(_all_val)
+
         # ⚠️ log.error 只承载**真实错误**(level=error) —— 软警告(清洗提示)不进 error 列,
         #    否则成功推送会在采集日志"错误"列显示 warning 文本(复审 W-3)。
         all_errors = [
@@ -624,11 +632,11 @@ def sync_complaints_from_payload(
             )
         # #42 校验问题计数(只读, 可见化): 独立通道汇总。
         # ⚠️ 不写 log.error(审查 N-2): 校验告警不是同步失败, 写入 error 列会让
-        #    成功推送在采集日志"错误"列显示文本。改为 logger.warning + 返回值携带。
-        _val_cnt = len(ext_result.validation) + len(card_result.validation)
-        if _val_cnt:
+        #    成功推送在采集日志"错误"列显示文本。已改为写入专用列
+        #    validation_count / validation_severity (abc-c) + logger.warning。
+        if log.validation_count:
             logger.warning(
-                f"[complaint_sync] 入库前校验告警 {_val_cnt} 条"
+                f"[complaint_sync] 入库前校验告警 {log.validation_count} 条"
                 f"(315={len(ext_result.validation)} 卡商={len(card_result.validation)})"
                 f"; 明细见返回 validation 字段"
             )

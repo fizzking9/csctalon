@@ -170,6 +170,11 @@ def list_sync_logs(
                         "failed": log.card_failed,
                         "matched": log.card_matched,
                     },
+                    # #42 abc-c: 拒收与入库前校验(存量行为 NULL → 兜底为 0/{})
+                    # 语义区分: rejected=未采纳待人工判定; validation=只读告警(非失败)
+                    "rejected": log.rejected or 0,
+                    "validation_count": log.validation_count or 0,
+                    "validation_severity": log.validation_severity or {},
                     "error": log.error,
                     "created_at": log.created_at.isoformat() if log.created_at else None,
                 }

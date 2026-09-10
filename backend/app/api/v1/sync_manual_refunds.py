@@ -146,6 +146,10 @@ def list_sync_logs(
                     "deleted": log.deleted,
                     "failed": log.failed,
                     "warnings": log.warnings,
+                    # #42 abc-c: 拒收与入库前校验(存量行为 NULL → 兜底)
+                    "rejected": log.rejected or 0,
+                    "validation_count": log.validation_count or 0,
+                    "validation_severity": log.validation_severity or {},
                     "error": log.error,
                     "created_at": log.created_at.isoformat() if log.created_at else None,
                     "finished_at": log.finished_at.isoformat() if log.finished_at else None,

@@ -383,6 +383,11 @@ def sync_manual_refunds_from_payload(
         log.warnings = result.warnings
         # #42: 真正落拒收表的条数(与 dropped 不同义; 供统一返回值)
         log_rejected = result.rejected
+        # ── #42 abc-c: 持久化拒收与校验信息(供采集日志展示历史) ──
+        # 不写 error 列: 校验告警不是同步失败(复审 N-2 教训)
+        log.rejected = log_rejected
+        log.validation_count = len(validation)
+        log.validation_severity = summarize_severity(validation)
         all_errors = result.errors[:50]
         if all_errors:
             log.error = str(all_errors)

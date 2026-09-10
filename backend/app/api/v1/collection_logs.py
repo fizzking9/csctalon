@@ -44,6 +44,12 @@ class CollectionLogItem(BaseModel):
     inserted_rows: int | None = Field(None, description="新增行数")
     updated_rows: int | None = Field(None, description="更新行数")
     failed_rows: int | None = Field(None, description="失败行数")
+    # ── #42 abc-c: 拒收行与入库前校验(只读告警) ──
+    # 语义区分: rejected=未采纳待人工判定(落拒收表); validation=校验告警(行保留)
+    rejected_rows: int | None = Field(None, description="拒收行数(未采纳待人工判定)")
+    validation_count: int | None = Field(None, description="入库前校验问题条数(只读告警)")
+    validation_block: int | None = Field(None, description="校验问题中需优先处理(block)的条数")
+    validation_warn: int | None = Field(None, description="校验问题中常规处理(warn)的条数")
     trigger_type: str | None = Field(None, description="触发方式: manual/scheduled/push")
     trigger_label: str | None = Field(None, description="触发方式显示名")
     triggered_by: str | None = Field(None, description="触发者/操作人")
@@ -344,6 +350,10 @@ def list_collection_logs(
                     inserted_rows=inserted,
                     updated_rows=updated,
                     failed_rows=failed,
+                    rejected_rows=r.rejected or 0,
+                    validation_count=r.validation_count or 0,
+                    validation_block=(r.validation_severity or {}).get("block") or 0,
+                    validation_warn=(r.validation_severity or {}).get("warn") or 0,
                     trigger_type="push" if row_source == "push" else "scheduled",
                     trigger_label="推送" if row_source == "push" else "采集",
                     triggered_by=r.sync_source,
@@ -376,6 +386,10 @@ def list_collection_logs(
                     inserted_rows=r.inserted,
                     updated_rows=r.updated,
                     failed_rows=r.failed,
+                    rejected_rows=r.rejected or 0,
+                    validation_count=r.validation_count or 0,
+                    validation_block=(r.validation_severity or {}).get("block") or 0,
+                    validation_warn=(r.validation_severity or {}).get("warn") or 0,
                     trigger_type="push" if row_source == "push" else "scheduled",
                     trigger_label="推送" if row_source == "push" else "采集",
                     triggered_by=r.sync_source,

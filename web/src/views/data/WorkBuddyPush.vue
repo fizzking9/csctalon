@@ -56,6 +56,32 @@
         <el-table-column label="卡商投诉" width="140">
           <template #default="{ row }">{{ stat(row.card) }}</template>
         </el-table-column>
+        <!-- #42 abc-c: 拒收行与入库前校验(校验告警≠失败, 故单独列出) -->
+        <el-table-column label="拒收/校验" width="130">
+          <template #default="{ row }">
+            <div class="reject-cell">
+              <el-tooltip
+                v-if="rejectedTag(row.rejected).show"
+                :content="rejectedTag(row.rejected).tip"
+                placement="top"
+              >
+                <el-tag type="danger" size="small" effect="plain">
+                  {{ rejectedTag(row.rejected).text }}
+                </el-tag>
+              </el-tooltip>
+              <el-tooltip
+                v-if="validationTag(row.validation_count, sevBlock(row), sevWarn(row)).show"
+                :content="validationTag(row.validation_count, sevBlock(row), sevWarn(row)).tip"
+                placement="top"
+              >
+                <el-tag type="warning" size="small" effect="plain">
+                  {{ validationTag(row.validation_count, sevBlock(row), sevWarn(row)).text }}
+                </el-tag>
+              </el-tooltip>
+              <span v-if="showRejectPlaceholder(row.rejected, row.validation_count)" class="dim">—</span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
             <el-tag :type="row.status === 'success' ? 'success' : row.status === 'partial' ? 'warning' : 'danger'" size="small">
@@ -71,10 +97,19 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { getPushConfig, listComplaintSyncLogs } from '@/api/docSync'
+import { rejectedTag, validationTag, showRejectPlaceholder } from '@/utils/collectionStats'
 
 const config = ref({ token_configured: false })
 const logs = ref([])
 const pushUrl = `${window.location.origin}/api/v1/sync/complaints/push`
+
+// #42 abc-c: 该接口的 validation_severity 是 JSON 对象({block,warn})
+function sevBlock(row) {
+  return row?.validation_severity?.block || 0
+}
+function sevWarn(row) {
+  return row?.validation_severity?.warn || 0
+}
 
 function fmtTime(t) {
   if (!t) return ''
@@ -117,6 +152,16 @@ onMounted(async () => {
   align-items: center;
   gap: 10px;
   font-weight: 600;
+}
+/* #42 abc-c: 拒收/校验列 */
+.reject-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.dim {
+  color: var(--el-text-color-secondary);
 }
 .code-text {
   font-family: 'SF Mono', Menlo, Consolas, monospace;
