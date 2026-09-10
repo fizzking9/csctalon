@@ -274,9 +274,20 @@ def _try_compact_date(val: Any) -> datetime | None:
 
     仅当形如 (19|20)YYMMDD 且月/日合法时才认, 避免把 8 位编号误当日 期。
     """
-    if not isinstance(val, str):
+    # numpy 标量归一(与 _try_excel_serial 同口径; 复审 N-1)
+    if hasattr(val, "item") and not isinstance(val, (str, bytes)):
+        try:
+            val = val.item()
+        except (ValueError, AttributeError):
+            pass
+    if isinstance(val, bool):  # bool 是 int 子类, 必须排除(True→1 位数字)
         return None
-    s = val.strip()
+    if isinstance(val, int):
+        s = str(val)
+    elif isinstance(val, str):
+        s = val.strip()
+    else:
+        return None
     if not _COMPACT_DATE_RE.match(s):
         return None
     try:

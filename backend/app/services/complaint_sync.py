@@ -531,10 +531,13 @@ def sync_complaints_from_payload(
         all_errors = (ext_result.errors + card_result.errors)[:50]
         if all_errors:
             log.error = str(all_errors)
-        # 空行过滤信息写入日志(供排查"全空记录"来源)
+        # 空行过滤信息: 仅日志记录(不写 log.error, 同 N-2 —— 空行过滤是正常噪音,
+        # 写 error 列会让成功推送在采集日志"错误"列显示文本)
         if ext_result.filtered or card_result.filtered:
-            _info = f"过滤全空行: 315={ext_result.filtered} 卡商={card_result.filtered}"
-            log.error = (f"{_info} | " + str(all_errors)) if all_errors else _info
+            logger.info(
+                f"[complaint_sync] 过滤全空行: 315={ext_result.filtered} "
+                f"卡商={card_result.filtered}"
+            )
         # #42 校验问题计数(只读, 可见化): 独立通道汇总。
         # ⚠️ 不写 log.error(审查 N-2): 校验告警不是同步失败, 写入 error 列会让
         #    成功推送在采集日志"错误"列显示文本。改为 logger.warning + 返回值携带。

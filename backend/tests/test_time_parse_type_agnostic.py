@@ -92,9 +92,18 @@ class TestBackwardCompatible:
         """8 位紧凑日期串 YYYYMMDD(上游若改格式导出, 不得整列静默丢时间)"""
         assert _to_datetime("20260614") == _SERIAL_46187_UTC
 
+    def test_compact_date_numeric(self):
+        """⚠️ 数字型紧凑日期(复审 N-1 回归锁): int / numpy 标量必须同样可解析"""
+        assert _to_datetime(20260614) == _SERIAL_46187_UTC
+        np = pytest.importorskip("numpy")
+        assert _to_datetime(np.int64(20260614)) == _SERIAL_46187_UTC
+        assert _to_datetime(np.int32(20260614)) == _SERIAL_46187_UTC
+
     def test_compact_date_invalid_md(self):
-        """形如 8 位但月/日非法 → 不认作日期"""
+        """形如 8 位但月/日非法 → 不认作日期(字符串与数字型都不得误认)"""
         assert _to_datetime("20261340") is None
+        assert _to_datetime(20261340) is None
+        assert _to_datetime(20260230) is None
 
     def test_datetime_naive_as_beijing(self):
         assert _to_datetime(datetime(2026, 6, 14, 0, 0)) == _SERIAL_46187_UTC
