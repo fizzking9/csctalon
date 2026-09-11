@@ -95,7 +95,7 @@
           :page-sizes="[20, 50, 100]"
           layout="total, sizes, prev, pager, next, jumper"
           background
-          small
+          size="small"
           @current-change="load"
           @size-change="page = 1; load()"
         />

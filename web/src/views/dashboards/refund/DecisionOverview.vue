@@ -328,7 +328,7 @@
             :page-sizes="[30, 50, 100, 200]"
             layout="total, sizes, prev, pager, next, jumper"
             background
-            small
+            size="small"
             @current-change="loadDetail"
             @size-change="detailPage = 1; loadDetail()"
           />

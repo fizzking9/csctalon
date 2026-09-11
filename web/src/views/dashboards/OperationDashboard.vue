@@ -152,7 +152,7 @@
           </el-table-column>
           <el-table-column v-if="staffFilter.aggregateBy === 'person'" label="人员" width="140">
             <template #default="{ row }">
-              <el-link type="primary" :underline="false" @click="openPersonAudit(row.name, row.person_id)">{{ row.name }}</el-link>
+              <el-link type="primary" underline="never" @click="openPersonAudit(row.name, row.person_id)">{{ row.name }}</el-link>
             </template>
           </el-table-column>
           <el-table-column v-else-if="staffFilter.aggregateBy === 'group'" label="分组" width="140">
@@ -325,7 +325,7 @@
         <el-table :data="recoveryStaffList" size="small" border stripe>
           <el-table-column label="人员" width="140">
             <template #default="{ row }">
-              <el-link type="primary" :underline="false" @click="openPersonAudit(row.name)">{{ row.name }}</el-link>
+              <el-link type="primary" underline="never" @click="openPersonAudit(row.name)">{{ row.name }}</el-link>
             </template>
           </el-table-column>
           <el-table-column prop="group" label="分组" width="120">
@@ -472,7 +472,7 @@
           </el-table-column>
           <el-table-column label="设备SN" width="140" show-overflow-tooltip>
             <template #default="{ row }">
-              <el-link type="primary" :underline="false" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn || '—' }}</el-link>
+              <el-link type="primary" underline="never" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn || '—' }}</el-link>
             </template>
           </el-table-column>
           <el-table-column label="被投诉主体" width="150" show-overflow-tooltip>
@@ -503,7 +503,7 @@
           <el-table-column prop="problem" label="投诉内容" min-width="180" show-overflow-tooltip />
           <el-table-column label="处理/跟进" width="110" show-overflow-tooltip>
             <template #default="{ row }">
-              <el-link type="primary" :underline="false" @click="openPersonAudit(row.handler)">{{ row.handler || '—' }}</el-link>
+              <el-link type="primary" underline="never" @click="openPersonAudit(row.handler)">{{ row.handler || '—' }}</el-link>
             </template>
           </el-table-column>
           <el-table-column prop="status" label="结果/状态" width="110" show-overflow-tooltip :filters="complaintStatusFilters" :filter-method="(v,row)=>row.status===v" filter-placement="bottom-end" />

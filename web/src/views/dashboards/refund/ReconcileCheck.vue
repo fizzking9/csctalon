@@ -192,7 +192,7 @@
         <el-pagination
           v-model:current-page="detailPage"
           :page-size="50" :total="detailTotal"
-          layout="total, prev, pager, next" background small
+          layout="total, prev, pager, next" background size="small"
           @current-change="loadDetail"
         />
       </div>

@@ -75,7 +75,7 @@
           <span v-if="inc.is_recurring" class="impact-recur-mark">周期</span>
           {{ inc.title }}
         </el-tag>
-        <el-link v-if="activeIncidents.length > 4" type="primary" :underline="false" style="margin-left:4px" @click="goToImpactSection">
+        <el-link v-if="activeIncidents.length > 4" type="primary" underline="never" style="margin-left:4px" @click="goToImpactSection">
           +{{ activeIncidents.length - 4 }} 更多
         </el-link>
       </div>
@@ -185,7 +185,7 @@
               <el-icon style="color:#f59e0b; margin-right:4px"><Bell /></el-icon>
               我的待办
             </h3>
-            <el-link type="primary" :underline="false" @click="$router.push('/todos')">全部 →</el-link>
+            <el-link type="primary" underline="never" @click="$router.push('/todos')">全部 →</el-link>
           </div>
           <div v-if="queueData.todos && queueData.todos.length" class="todo-list">
             <div v-for="(t, i) in queueData.todos.slice(0, 3)" :key="i" class="todo-item">
@@ -208,7 +208,7 @@
               <el-icon style="color:#7c3aed; margin-right:4px"><List /></el-icon>
               进行中专项
             </h3>
-            <el-link type="primary" :underline="false" @click="$router.push('/tasks')">全部 →</el-link>
+            <el-link type="primary" underline="never" @click="$router.push('/tasks')">全部 →</el-link>
           </div>
           <div v-if="queueData.tasks && queueData.tasks.length" class="task-list">
             <div v-for="(t, i) in queueData.tasks.slice(0, 3)" :key="i" class="task-item">
@@ -229,7 +229,7 @@
     <section v-if="hasRecovery" class="section-card mb-12">
       <div class="section-header-row">
         <h3 class="section-title">{{ viewMode === 'week' ? '退款挽回本周快照' : '退款挽回今日快照' }}</h3>
-        <el-link type="primary" :underline="false" @click="$router.push('/dashboards/refund')">详细分析 →</el-link>
+        <el-link type="primary" underline="never" @click="$router.push('/dashboards/refund')">详细分析 →</el-link>
       </div>
       <el-row :gutter="10" class="mb-8">
         <!-- 左侧: 4个紧凑数字 -->
@@ -295,7 +295,7 @@
             </el-table-column>
             <el-table-column label="设备SN" min-width="140">
               <template #default="{ row }">
-                <el-link type="primary" :underline="false" @click="openDeviceAudit(row.sn)">{{ row.sn }}</el-link>
+                <el-link type="primary" underline="never" @click="openDeviceAudit(row.sn)">{{ row.sn }}</el-link>
               </template>
             </el-table-column>
             <el-table-column label="结果" width="80" align="center">
@@ -308,7 +308,7 @@
             <el-table-column prop="reason" label="退款原因" min-width="120" show-overflow-tooltip />
             <el-table-column label="处理人" width="90">
               <template #default="{ row }">
-                <el-link type="primary" :underline="false" @click="openPersonAudit(row.staff)">{{ row.staff || '—' }}</el-link>
+                <el-link type="primary" underline="never" @click="openPersonAudit(row.staff)">{{ row.staff || '—' }}</el-link>
               </template>
             </el-table-column>
           </el-table>
@@ -323,7 +323,7 @@
           <el-icon style="color:#7c3aed; margin-right:4px"><Bell /></el-icon>
           投诉专项
         </h3>
-        <el-link type="primary" :underline="false" @click="$router.push('/dashboards/complaint-analysis')">投诉分析 →</el-link>
+        <el-link type="primary" underline="never" @click="$router.push('/dashboards/complaint-analysis')">投诉分析 →</el-link>
       </div>
 
       <!-- 第一行: 今日/本周投诉来源(3个, 每个展示 登记/处理 双值) + 积压水位(独立维度) -->
@@ -482,7 +482,7 @@
             </el-table-column>
             <el-table-column label="设备SN" min-width="130" show-overflow-tooltip>
               <template #default="{ row }">
-                <el-link v-if="row.device_sn" type="primary" :underline="false" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
+                <el-link v-if="row.device_sn" type="primary" underline="never" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
                 <span v-else class="text-muted">—</span>
               </template>
             </el-table-column>
@@ -531,7 +531,7 @@
             </el-table-column>
             <el-table-column label="处理/跟进" width="90" show-overflow-tooltip>
               <template #default="{ row }">
-                <el-link v-if="row.handler && row.handler !== '未分配'" type="primary" :underline="false" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
+                <el-link v-if="row.handler && row.handler !== '未分配'" type="primary" underline="never" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
                 <span v-else class="text-muted">未分配</span>
               </template>
             </el-table-column>
@@ -546,7 +546,7 @@
         <h3 class="section-title">{{ viewMode === 'week' ? '本周工作效率值' : '今日工作效率值' }}</h3>
         <div class="section-header-actions">
           <el-checkbox v-model="showAllStaff" size="small">显示所有人(含非企微)</el-checkbox>
-          <el-link type="primary" :underline="false" @click="$router.push('/dashboards/operation')">运营看板 →</el-link>
+          <el-link type="primary" underline="never" @click="$router.push('/dashboards/operation')">运营看板 →</el-link>
         </div>
       </div>
       <el-table :data="topStaffList" size="small" border stripe max-height="420"
@@ -562,7 +562,7 @@
         </el-table-column>
         <el-table-column label="人员" width="100">
           <template #default="{ row }">
-            <el-link type="primary" :underline="false" @click="openPersonAudit(row.name, row.person_id)">{{ row.name }}</el-link>
+            <el-link type="primary" underline="never" @click="openPersonAudit(row.name, row.person_id)">{{ row.name }}</el-link>
           </template>
         </el-table-column>
         <el-table-column label="专项/小组" width="140" show-overflow-tooltip>

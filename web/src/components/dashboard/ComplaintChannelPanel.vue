@@ -144,13 +144,13 @@
         <el-table-column prop="problem" label="投诉内容" min-width="220" show-overflow-tooltip />
         <el-table-column prop="device_sn" label="设备SN" width="130">
           <template #default="{ row }">
-            <el-link v-if="row.device_sn" type="primary" :underline="false" @click="$emit('device', row.device_sn)">{{ row.device_sn }}</el-link>
+            <el-link v-if="row.device_sn" type="primary" underline="never" @click="$emit('device', row.device_sn)">{{ row.device_sn }}</el-link>
             <span v-else class="dim">—</span>
           </template>
         </el-table-column>
         <el-table-column v-if="!meta.independent" label="处理人" width="100">
           <template #default="{ row }">
-            <el-link v-if="row.handler && row.handler !== '未分配'" type="primary" :underline="false" @click="$emit('person', row.handler)">{{ row.handler }}</el-link>
+            <el-link v-if="row.handler && row.handler !== '未分配'" type="primary" underline="never" @click="$emit('person', row.handler)">{{ row.handler }}</el-link>
             <span v-else class="dim">未分配</span>
           </template>
         </el-table-column>

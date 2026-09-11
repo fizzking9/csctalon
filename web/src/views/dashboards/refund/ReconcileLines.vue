@@ -101,7 +101,7 @@
     </el-table>
     <div class="pager-row">
       <el-pagination v-model:current-page="page" :page-size="pageSize" :total="total"
-                     layout="total, prev, pager, next" small background @current-change="load" />
+                     layout="total, prev, pager, next" size="small" background @current-change="load" />
     </div>
 
     <!-- 备注输入 dialog -->

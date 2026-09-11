@@ -135,7 +135,7 @@
           :page-sizes="[30, 50, 100]"
           layout="total, sizes, prev, pager, next, jumper"
           background
-          small
+          size="small"
           @current-change="loadSleeping"
           @size-change="sleepPage = 1; loadSleeping()"
         />

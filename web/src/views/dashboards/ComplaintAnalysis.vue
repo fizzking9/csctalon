@@ -191,11 +191,117 @@
                   <span class="snapshot-rank">{{ i + 1 }}</span>
                   <el-tag :type="sourceTagType(it.source)" size="small" effect="plain">{{ it.source }}</el-tag>
                   <span class="snapshot-no">{{ it.ticket_no }}</span>
-                  <el-link v-if="it.device_sn" type="primary" :underline="false" class="snapshot-sn" @click="openDeviceAudit(it.device_sn)">{{ it.device_sn }}</el-link>
+                  <el-link v-if="it.device_sn" type="primary" underline="never" class="snapshot-sn" @click="openDeviceAudit(it.device_sn)">{{ it.device_sn }}</el-link>
                   <el-tag v-if="it.aging_days != null" size="small" :type="it.aging_days >= 8 ? 'danger' : it.aging_days >= 4 ? 'warning' : 'info'">{{ it.aging_days }}天</el-tag>
                 </div>
               </div>
               <el-empty v-else description="无积压" :image-size="36" />
+            </div>
+          </el-col>
+        </el-row>
+
+        <!-- ══════════════ A5: 投诉登记时段热力（#72） ══════════════
+             设计说明（Design Rationale）
+             目的：**排班决策** —— 让班组长看清"什么时候来投诉最多"，据此安排人手。
+             逻辑：投诉登记量随时段呈明显节律（实测双峰：09–12 时、19–21 时；
+                   02–05 时谷底）。只看总量会漏掉节律 → 高峰期必然积压。
+                   峰谷由后端按 P75/P25 **分位**判定（非固定阈值，自适应业务量级）。
+             口径：按「登记时间」的北京时间小时×星期聚合（排班关心"何时有人来"，
+                   不是"投诉属于哪天"）；不含 (外)卡商（#53 独立体系）。
+                   详见 docs/standards/数据时间字段使用规范.md
+             取舍：❌ 不做"建议排班人数" —— 需要人均处理产能数据（接待+投诉混合），
+                   数据未齐；当前只给"量级分布"这一事实，由班组长自行判断。
+                   ❌ 不做按周/月切换 —— 时段节律是**日周期**，跨周聚合会把节律抹平。
+             工单：#72 · 设计：docs/arch/_pending/A-20260911-001-投诉分析整体重构.md §四点五 -->
+        <el-row v-if="ovHourOption || ovRepeatRows.length" :gutter="12" class="mb-16">
+          <el-col :xs="24" :md="12">
+            <div class="chart-card">
+              <div class="flex-between">
+                <div class="chart-title">
+                  投诉登记时段热力
+                  <span class="dim-text"> · 小时 × 星期（北京时间）· 服务排班</span>
+                </div>
+                <el-popover placement="bottom-end" :width="400" trigger="click">
+                  <template #reference>
+                    <el-icon style="color:#909399;cursor:help;font-size:14px"><QuestionFilled /></el-icon>
+                  </template>
+                  <div class="dr-body">
+                    <div class="dr-title">时段热力 · 设计说明</div>
+                    <div class="dr-sec"><b>给谁用</b><div>班组长 / 客服主管，用于排班与人力调配。</div></div>
+                    <div class="dr-sec"><b>为什么用「登记时间」</b>
+                      <div>排班关心的是"什么时候有人来投诉"（接待压力），而不是"投诉属于哪一天"。</div></div>
+                    <div class="dr-sec"><b>峰谷怎么判</b>
+                      <div>按 P75 / P25 分位（自适应业务量级，而非固定阈值）。<b>高峰</b>=需确保有人值守；<b>谷底</b>=可减配。</div></div>
+                    <div class="dr-sec"><b>我们不做什么</b>
+                      <div>· 不做"建议排班人数"：需人均处理产能数据，当前未齐 —— 只给量级事实，由班组长判断。<br>
+                      · 不做周/月切换：时段节律是日周期，跨周聚合会抹平节律。</div></div>
+                    <div class="dr-sec"><b>口径</b><div>北京时间（Asia/Shanghai）· 不含 (外)卡商</div></div>
+                  </div>
+                </el-popover>
+              </div>
+              <BaseChart v-if="ovHourOption" :option="ovHourOption" height="230px" />
+              <el-empty v-else description="窗口内无登记数据" :image-size="36" />
+              <div v-if="peakHint" class="peak-hint">{{ peakHint }}</div>
+            </div>
+          </el-col>
+
+          <!-- ══════════════ A2: 反复投诉（#72） ══════════════
+               设计说明（Design Rationale）
+               目的：识别**「第一次没解决好」的设备**，比投诉总量更接近真相。
+               逻辑：总量会被一次性事件稀释，反复投诉不会 ——
+                     同一设备多次投诉 = 处理质量问题的直接证据；
+                     其中"又反复、又已升级到外部"的设备是**最高优先级**跟进对象。
+               口径：★★ 计数单位是「投诉事件（SN + 北京日期去重）」，**不是原始记录数**。
+                     实测差异 3 倍（237 台 vs 78 台）—— 同一天多渠道登记属同一笔投诉，
+                     不算反复（#55 口径）。用记录数会把"一天多渠道"误判为反复，方向性错误。
+                     不含 (外)卡商（#53）。
+               取舍：❌ 不做"自动判定是否同一问题" —— 需问题分类语义，当前 remark 质量不足；
+                     ❌ 不做阈值自定义 UI —— 阈值由后端常量统一（避免每人一套口径）。
+               工单：#72 · 设计：docs/arch/_pending/A-20260911-001-投诉分析整体重构.md §四点五 -->
+          <el-col v-if="ovRepeatRows.length" :xs="24" :md="12">
+            <div class="chart-card">
+              <div class="flex-between">
+                <div class="chart-title">
+                  反复投诉
+                  <span class="dim-text"> · 同一设备 ≥{{ repeatThreshold }} 次投诉事件</span>
+                </div>
+                <el-popover placement="bottom-end" :width="400" trigger="click">
+                  <template #reference>
+                    <el-icon style="color:#909399;cursor:help;font-size:14px"><QuestionFilled /></el-icon>
+                  </template>
+                  <div class="dr-body">
+                    <div class="dr-title">反复投诉 · 设计说明</div>
+                    <div class="dr-sec"><b>给谁用</b><div>客服主管，用于找出"处理没到位"的设备并定向跟进。</div></div>
+                    <div class="dr-sec"><b>为什么要看这个</b>
+                      <div>投诉<b>总量</b>会被一次性事件稀释；<b>反复投诉</b>不会 —— 同一设备多次投诉是"第一次没解决好"的直接证据。</div></div>
+                    <div class="dr-sec"><b>★ 口径（关键）</b>
+                      <div>计数单位是<b>投诉事件</b>（同一设备 + 同一北京日期算 1 次），<b>不是原始记录数</b>。
+                        同一天多渠道登记的同一笔投诉只算 1 次（否则会把"一天多渠道"误判为反复，方向性错误）。</div></div>
+                    <div class="dr-sec"><b>红色「已升级」是什么</b>
+                      <div>该设备既有内部/商户号投诉、又有外部投诉 → 既反复、又已升级，<b>最高优先级</b>。</div></div>
+                    <div class="dr-sec"><b>我们不做什么</b>
+                      <div>· 不自动判定"是否为同一问题"：需问题分类语义，当前 remark 质量不足。<br>
+                      · 不做阈值自定义：阈值由后端统一，避免每人一套口径。</div></div>
+                  </div>
+                </el-popover>
+              </div>
+              <div class="repeat-summary">
+                <span class="repeat-kpi" style="color:#dc2626">{{ formatNum(ovRepeat.repeat_units) }}</span>
+                <span class="dim">台设备反复投诉（占 {{ ovRepeat.rate ?? '—' }}%）· 贡献 {{ formatNum(ovRepeat.repeat_events) }} 次事件</span>
+                <el-tag v-if="ovEscalatedCount" size="small" type="danger" effect="plain" style="margin-left:6px">
+                  {{ ovEscalatedCount }} 台已升级外部
+                </el-tag>
+              </div>
+              <div class="repeat-list">
+                <div v-for="(it, i) in ovRepeatRows" :key="it.device_sn" class="repeat-row">
+                  <span class="snapshot-rank">{{ i + 1 }}</span>
+                  <el-link type="primary" underline="never" class="snapshot-sn"
+                           @click="openDeviceAudit(it.device_sn)">{{ it.device_sn }}</el-link>
+                  <el-tag size="small" :type="it.events >= 5 ? 'danger' : 'warning'" effect="plain">{{ it.events }} 次</el-tag>
+                  <el-tag v-if="it.escalated" size="small" type="danger">已升级</el-tag>
+                  <span class="dim-text repeat-days">{{ it.first_day }} ~ {{ it.last_day }}</span>
+                </div>
+              </div>
             </div>
           </el-col>
         </el-row>
@@ -367,14 +473,14 @@
             </el-table-column>
             <el-table-column label="设备SN" width="130">
               <template #default="{ row }">
-                <el-link v-if="row.device_sn" type="primary" :underline="false" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
+                <el-link v-if="row.device_sn" type="primary" underline="never" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
                 <span v-else class="dim">—</span>
               </template>
             </el-table-column>
             <el-table-column prop="problem" label="投诉内容" min-width="180" show-overflow-tooltip />
             <el-table-column label="处理人" width="100">
               <template #default="{ row }">
-                <el-link v-if="row.handler !== '未分配'" type="primary" :underline="false" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
+                <el-link v-if="row.handler !== '未分配'" type="primary" underline="never" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
                 <span v-else class="dim">未分配</span>
               </template>
             </el-table-column>
@@ -404,7 +510,7 @@
               :page-sizes="[20, 50, 100]"
               layout="total, sizes, prev, pager, next, jumper"
               background
-              small
+              size="small"
               @current-change="loadBacklog"
               @size-change="backlogPage = 1; loadBacklog()"
             />
@@ -618,7 +724,7 @@
             <el-table-column label="排名" width="60" type="index" />
             <el-table-column label="被投诉主体" min-width="180" show-overflow-tooltip>
               <template #default="{ row }">
-                <el-link type="primary" :underline="false" class="subject-link" @click="openSubjectDetail(row.name)">
+                <el-link type="primary" underline="never" class="subject-link" @click="openSubjectDetail(row.name)">
                   <span class="subject-name">{{ row.name }}</span>
                 </el-link>
                 <el-tag v-if="row.escalated" size="small" type="danger" effect="plain" style="margin-left:6px">升级</el-tag>
@@ -707,7 +813,7 @@
             </el-table-column>
             <el-table-column label="设备SN" width="140" show-overflow-tooltip>
               <template #default="{ row }">
-                <el-link v-if="row.device_sn" type="primary" :underline="false" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
+                <el-link v-if="row.device_sn" type="primary" underline="never" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
                 <span v-else class="dim">—</span>
               </template>
             </el-table-column>
@@ -716,7 +822,7 @@
             </el-table-column>
             <el-table-column label="处理人" width="100" show-overflow-tooltip>
               <template #default="{ row }">
-                <el-link v-if="row.handler && row.handler !== '未分配'" type="primary" :underline="false" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
+                <el-link v-if="row.handler && row.handler !== '未分配'" type="primary" underline="never" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
                 <span v-else class="dim">未分配</span>
               </template>
             </el-table-column>
@@ -1421,6 +1527,68 @@ const ovAgingOption = computed(() => {
   }
 })
 
+// ── A5 · 投诉登记时段热力图（#72） ──
+//   x = 小时(0-23)，y = 星期(周一~周日)；色深 = 登记量
+//   ★ 用 heatmap 而非折线：时段节律是"二维"的（小时 × 星期），
+//     折线只能表一维，会丢掉"周末/工作日差异"这一半信息。
+const ovHourOption = computed(() => {
+  const h = overviewData.value?.hour_heatmap
+  if (!h || !h.total) return null
+  const hmap = {}
+  for (const c of h.by_hour || []) hmap[c.hour] = c.count
+  const data = []   // echarts heatmap: [x(小时), y(星期索引), value]
+  let max = 1
+  for (const c of h.cells || []) {
+    if (c.count > max) max = c.count
+  }
+  for (const c of h.cells || []) {
+    data.push([c.hour, c.weekday - 1, c.count])  // weekday 1..7 → 0..6
+  }
+  const WD = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+  return {
+    tooltip: {
+      position: 'top',
+      formatter: (p) => `${WD[p.value[1]]} ${String(p.value[0]).padStart(2, '0')}时<br/>登记 ${p.value[2]} 条`,
+    },
+    grid: { left: 44, right: 16, top: 10, bottom: 46 },
+    xAxis: {
+      type: 'category', data: Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0')),
+      splitArea: { show: true }, axisLabel: { fontSize: 9, interval: 1 },
+      name: '小时', nameLocation: 'middle', nameGap: 26, nameTextStyle: { fontSize: 10 },
+    },
+    yAxis: {
+      type: 'category', data: WD, splitArea: { show: true }, axisLabel: { fontSize: 10 },
+    },
+    visualMap: {
+      min: 0, max, calculable: false, orient: 'horizontal', left: 'center', bottom: 0,
+      itemWidth: 10, itemHeight: 60, textStyle: { fontSize: 9 },
+      inRange: { color: ['#f1f5f9', '#bfdbfe', '#60a5fa', '#2563eb', '#1e3a8a'] },
+    },
+    series: [{
+      type: 'heatmap', data, label: { show: false },
+      emphasis: { itemStyle: { shadowBlur: 6, shadowColor: 'rgba(0,0,0,0.3)' } },
+    }],
+  }
+})
+
+/** 峰谷提示文案（把"热力图"翻译成"结论" —— 否则使用者要自己看色块推断） */
+const peakHint = computed(() => {
+  const h = overviewData.value?.hour_heatmap
+  if (!h || !h.total) return ''
+  const fmt = (xs) => (xs || []).map(x => `${String(x).padStart(2, '0')}时`).join(' ')
+  const parts = []
+  if (h.peak_hours?.length) parts.push(`高峰（需值守）：${fmt(h.peak_hours)}`)
+  if (h.valley_hours?.length) parts.push(`谷底（可减配）：${fmt(h.valley_hours)}`)
+  return parts.join(' · ')
+})
+
+// ── A2 · 反复投诉（#72） ──
+//   ★ 后端已按「事件口径」算好（SN + 北京日期去重），前端只渲染，不做二次计数。
+const ovRepeat = computed(() => overviewData.value?.repeat || {})
+const ovRepeatRows = computed(() => (ovRepeat.value.items || []).slice(0, 6))
+const repeatThreshold = computed(() => ovRepeat.value.threshold ?? 3)
+const ovEscalatedCount = computed(() => (ovRepeat.value.items || []).filter(i => i.escalated).length)
+
 // ── 来源分布饼图(含兜底: source_distribution 为空时用 summary 三源数) ──
 const sourcePieColors = ['#2563eb', '#7c3aed', '#dc2626']
 
@@ -1753,6 +1921,13 @@ watch(analysisTab, () => {
 .snapshot-source-fill { height: 100%; border-radius: 5px; transition: width 0.3s; }
 .snapshot-source-cnt { width: 36px; text-align: right; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .snapshot-list { max-height: 190px; overflow-y: auto; }
+/* ── A5/A2 (#72) 新增区块样式 ── */
+.peak-hint { font-size: 11px; color: #6b7280; margin-top: 6px; line-height: 1.6; }
+.repeat-summary { display: flex; align-items: baseline; gap: 6px; font-size: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+.repeat-kpi { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.repeat-list { max-height: 168px; overflow-y: auto; }
+.repeat-row { display: flex; align-items: center; gap: 6px; padding: 5px 2px; border-bottom: 1px dashed #f1f3f5; }
+.repeat-days { font-size: 10px; }
 .snapshot-row { display: flex; align-items: center; gap: 6px; padding: 5px 2px; border-bottom: 1px dashed #f1f3f5; }
 .snapshot-rank { width: 16px; font-size: 11px; color: #9ca3af; text-align: center; }
 .snapshot-no { flex: 1; font-size: 12px; color: #374151; font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

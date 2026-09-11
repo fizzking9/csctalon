@@ -9,7 +9,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Query
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import Integer, and_, case, func, or_, select
 
 from app.api.deps import CurrentUser, DBSession, ManagerUser
 from app.core.redis_client import cache_ttl_for, cached_json
@@ -2063,6 +2063,9 @@ def complaint_backlog_export(
 
 _AUTO_GRAIN_RULES: tuple[tuple[int, str], ...] = ((31, "day"), (120, "week"))
 _OVERDUE_DAYS = 7  # 超期阈值: 累计未处理 >7 天(与积压页龄期口径一致)
+_REPEAT_THRESHOLD = 3  # ★ #72 A2: 反复投诉阈值 —— 同一设备 ≥3 次投诉**事件**
+#   口径重要提示: 计数单位是「事件(SN + 北京日期去重)」而非原始记录数。
+#   实测差异 3 倍(237 台 vs 78 台) —— 同一天多渠道登记属同一笔投诉，不算反复。
 _MIN_BASE_FOR_PCT = 5  # 结论条最小基数护栏: 对比期基数 <5 条不给百分比结论(防"3→6 报 +100%")
 _MAX_CREDIBLE_PCT = 300.0  # 可信上限: 超过此幅度说明对比期数据覆盖不足(非真实业务信号)
 _MAX_CONCLUSIONS = 5
@@ -2406,6 +2409,12 @@ def complaint_overview(
         "rate": round(sn_escalated / sn_total * 100.0, 1) if sn_total else None,
     }
 
+    # ── 7.5 A5: 投诉登记时段热力(#72) —— 服务排班决策 ──
+    hour_heatmap = _hour_heatmap(db, ts, te, src_expr)
+
+    # ── 7.6 A2: 反复投诉(#72) —— 事件口径(SN+北京日期)，非记录口径 ──
+    repeat_stats = _repeat_complaints(db, ts, te, src_expr, threshold=_REPEAT_THRESHOLD)
+
     # ── 8. 结论条(后端生成: 口径统一 + 可单测; 前端只渲染) ──
     conclusions: list[dict] = []
     src_rh_cur = _sources_reg_handled(db, ts, te)
@@ -2457,6 +2466,18 @@ def complaint_overview(
             "text": f"涉诉退款 ¥{cur['refund_amt']:,.2f}（{cur['refund_cnt']} 笔）{suffix}",
             "drill": {"tab": "external"},
         })
+    # ★ #72 A2: 反复投诉（事件口径）—— 「第一次没解决好」的直接证据
+    if repeat_stats["repeat_units"]:
+        _esc = sum(1 for i in repeat_stats["items"] if i["escalated"])
+        _esc_txt = f"，其中 {_esc} 台已升级到外部" if _esc else ""
+        conclusions.append({
+            "level": "warn",
+            "text": (
+                f"反复投诉 {repeat_stats['repeat_units']} 台设备"
+                f"（同一设备 ≥{repeat_stats['threshold']} 次投诉事件）{_esc_txt}"
+            ),
+            "drill": {"tab": "overview"},
+        })
     conclusions.sort(key=lambda c: _CONCLUSION_ORDER.index(c["level"]))
     conclusions = conclusions[:_MAX_CONCLUSIONS]
 
@@ -2480,6 +2501,10 @@ def complaint_overview(
         "trend_reg_handled": trend_reg_handled,
         "trend_refund": trend_refund,
         "escalation": escalation,
+        # ★ #72 A5: 投诉登记时段热力（服务排班决策）
+        "hour_heatmap": hour_heatmap,
+        # ★ #72 A2: 反复投诉（事件口径，非记录口径）
+        "repeat": repeat_stats,
         "backlog": {
             "total": b_total, "overdue": b_overdue, "unassigned": b_unassigned, "max_aging": b_max_aging,
             "by_source": [{"name": k, "count": v} for k, v in sorted(by_source_cnt.items(), key=lambda x: -x[1])],
@@ -3572,3 +3597,176 @@ def create_audit(payload: dict, db: DBSession, current_user: ManagerUser):
     db.commit()
     db.refresh(a)
     return R(data={"id": a.id, "conclusion": a.conclusion, "attribution": a.attribution})
+
+
+def _hour_heatmap(db, w_ts, w_te, src_expr) -> dict:
+    """A5 · 投诉登记时段热力（小时 × 星期，北京时间）。
+
+    ★ 决策价值：直接服务**排班决策**
+      投诉登记量随时段/星期呈明显节律（实测近 30 天呈双峰：09–12 时、19–21 时，
+      02–05 时为谷底）。排班若只看总量、不看分布，高峰期必然积压。
+
+    ★ 为什么用「登记时间」而非「投诉日期」
+      排班关心的是"什么时候有人来投诉"（接待压力），不是"投诉属于哪一天"。
+      → 用 `register_time` 的小时/星期；时区必须走 `Asia/Shanghai`
+        （见 docs/standards/数据时间字段使用规范.md）。
+
+    ★ 峰谷判定用分位数而非固定阈值
+      不同业务量级差异大（日 10 单 vs 日 1000 单），固定阈值必然失效；
+      P75/P25 分位随数据自适应。
+
+    返回:
+      cells       [{weekday, hour, count}]  weekday: 1=周一 … 7=周日（ISO）
+      by_hour     [{hour, count}]           边际分布(24 项, 含 0)
+      by_weekday  [{weekday, count}]        边际分布(7 项, 含 0)
+      peak_hours  [int]                     登记量 ≥P75 的小时(排班需覆盖)
+      valley_hours[int]                     登记量 ≤P25 的小时(可减配)
+      total       int                       参与统计的投诉登记数
+    """
+    base = [
+        _ticket_category_case() == "投诉",
+        src_expr != CARD_SCOPE,  # ★ #53: 卡商独立，不参与投诉排班统计
+        ServiceTicket.register_time.isnot(None),
+    ]
+    if w_ts:
+        base.append(ServiceTicket.register_time >= w_ts)
+    if w_te:
+        base.append(ServiceTicket.register_time <= w_te)
+
+    # 北京时间小时/星期（ISO: 1=周一 … 7=周日）
+    sh_time = func.timezone("Asia/Shanghai", ServiceTicket.register_time)
+    hour_col = func.extract("hour", sh_time).cast(Integer)
+    wd_col = func.extract("isodow", sh_time).cast(Integer)
+
+    rows = db.execute(
+        select(wd_col, hour_col, func.count()).where(*base)
+        .group_by(wd_col, hour_col)
+    ).all()
+
+    cells = [{"weekday": int(w), "hour": int(h), "count": int(c or 0)} for w, h, c in rows if w and h is not None]
+    total = sum(c["count"] for c in cells)
+
+    # 边际分布（补齐 0，前端热力图需要完整网格）
+    hmap: dict[int, int] = {h: 0 for h in range(24)}
+    wmap: dict[int, int] = {w: 0 for w in range(1, 8)}
+    for c in cells:
+        hmap[c["hour"]] += c["count"]
+        wmap[c["weekday"]] += c["count"]
+
+    # 峰谷判定：只在「有数据的小时」上算分位，避免凌晨空档把 P25 拉成 0
+    nonzero = sorted(v for v in hmap.values() if v > 0)
+
+    def _quantile(vals: list[int], q: float) -> float:
+        """线性插值分位数（与 numpy.percentile 默认口径一致）。"""
+        if not vals:
+            return 0.0
+        if len(vals) == 1:
+            return float(vals[0])
+        pos = (len(vals) - 1) * q
+        lo = int(pos)
+        hi = min(lo + 1, len(vals) - 1)
+        return vals[lo] + (vals[hi] - vals[lo]) * (pos - lo)
+
+    p75 = _quantile(nonzero, 0.75)
+    p25 = _quantile(nonzero, 0.25)
+    peak_hours = sorted(h for h, v in hmap.items() if v > 0 and v >= p75)
+    valley_hours = sorted(h for h, v in hmap.items() if v > 0 and v <= p25)
+
+    return {
+        "cells": cells,
+        "by_hour": [{"hour": h, "count": hmap[h]} for h in range(24)],
+        "by_weekday": [{"weekday": w, "count": wmap[w]} for w in range(1, 8)],
+        "peak_hours": peak_hours,
+        "valley_hours": valley_hours,
+        "total": total,
+    }
+
+
+def _repeat_complaints(db, w_ts, w_te, src_expr, threshold: int = 3, top_n: int = 10) -> dict:
+    """A2 · 反复投诉（同一设备多次投诉**事件**）。
+
+    ★★★ 口径关键（实测差 3 倍，务必理解）：
+      按 SN **直接计数** ≥3 次 → 237 台；
+      按**投诉事件（SN + 北京日期）去重**后 ≥3 次 → **78 台**。
+
+      差异来自 #55 口径：**同一天多渠道呈现 = 同一笔投诉的 1 个事件，不算反复**。
+      故本函数以「(SN, 北京日期)」为**事件键**去重计数 ——
+      否则会把「一天内多渠道登记」误判为该设备在反复投诉，**方向性错误**。
+
+    ★ 决策价值：
+      反复投诉 = 「第一次没解决好」的直接证据，比投诉总量更接近真相
+      （总量会被一次性事件稀释，反复投诉不会）。
+
+    ★ 升级信号：
+      若某设备的 `sources` 同时含「内部/商户号」与「外部」→ 既反复、又已升级，
+      属**最高优先级**跟进对象（前端以红色标识）。
+
+    返回:
+      threshold/events_total/units_total/repeat_units/repeat_events/rate/items
+    """
+    base = [
+        _ticket_category_case() == "投诉",
+        src_expr != CARD_SCOPE,  # ★ #53: 卡商独立
+        ServiceTicket.device_sn.isnot(None),
+        ServiceTicket.device_sn != "",
+        ServiceTicket.register_time.isnot(None),
+    ]
+    if w_ts:
+        base.append(ServiceTicket.register_time >= w_ts)
+    if w_te:
+        base.append(ServiceTicket.register_time <= w_te)
+
+    # 事件键 = (SN, 北京日期)；同时带出来源桶用于「升级信号」判定
+    sh_day = func.date(func.timezone("Asia/Shanghai", ServiceTicket.register_time))
+    rows = db.execute(
+        select(ServiceTicket.device_sn, sh_day, src_expr).where(*base)
+    ).all()
+
+    # 按 (SN, 日) 折叠为「事件」；同一事件内合并来源集合
+    events: dict[tuple[str, object], set[str]] = {}
+    for sn, day, src in rows:
+        key = (sn, day)
+        events.setdefault(key, set()).add(src or "内部投诉")
+
+    per_sn: dict[str, dict] = {}
+    for (sn, day), srcs in events.items():
+        b = per_sn.setdefault(sn, {"events": 0, "sources": set(), "days": []})
+        b["events"] += 1
+        b["sources"].update(srcs)
+        if day:
+            b["days"].append(day)
+
+    units_total = len(per_sn)
+    events_total = len(events)
+    repeats = []
+    for sn, b in per_sn.items():
+        if b["events"] >= threshold:
+            days = sorted(d for d in b["days"] if d)
+            srcs = sorted(b["sources"])
+            repeats.append({
+                "device_sn": sn,
+                "events": b["events"],
+                "first_day": str(days[0]) if days else None,
+                "last_day": str(days[-1]) if days else None,
+                "sources": srcs,
+                # 升级信号：既有内部/商户号、又有外部
+                "escalated": (
+                    any(s in ("内部投诉", "商户号投诉") for s in srcs)
+                    and "外部投诉" in srcs
+                ),
+            })
+
+    # 排序：先按事件数降序，再让升级设备优先（同事件数时更该跟进）
+    repeats.sort(key=lambda x: (-x["events"], not x["escalated"], x["device_sn"]))
+    repeat_units = len(repeats)
+    repeat_events = sum(r["events"] for r in repeats)
+
+    return {
+        "threshold": threshold,
+        "events_total": events_total,
+        "units_total": units_total,
+        "repeat_units": repeat_units,
+        "repeat_events": repeat_events,
+        "rate": round(repeat_units / units_total * 100.0, 1) if units_total else None,
+        "items": repeats[:top_n],
+    }

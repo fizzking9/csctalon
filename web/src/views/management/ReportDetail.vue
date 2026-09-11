@@ -9,7 +9,7 @@
           <span style="margin-left: 8px">{{ formatTime(report.time_start) }} ~ {{ formatTime(report.time_end) }}</span>
           <span v-if="report.assignee_id" style="margin-left: 8px; color: #909399">· 负责人 {{ userNameMap[report.assignee_id] || report.assignee_id }}</span>
           <span v-if="report.due_date" style="margin-left: 8px; color: #909399">· 期限 {{ formatDate(report.due_date) }}</span>
-          <el-link v-if="report.source_weekly_id" type="primary" :underline="false" style="margin-left: 8px" @click="$router.push(`/management/weekly/${report.source_weekly_id}`)">
+          <el-link v-if="report.source_weekly_id" type="primary" underline="never" style="margin-left: 8px" @click="$router.push(`/management/weekly/${report.source_weekly_id}`)">
             · 来源周报看板 #{{ report.source_weekly_id }}
           </el-link>
         </div>
