@@ -60,8 +60,8 @@ import logging
 import re
 from datetime import date
 
+from sqlalchemy import and_, func, literal, or_
 from sqlalchemy import case as sa_case
-from sqlalchemy import func, literal, or_
 from sqlalchemy.sql.elements import ColumnElement
 
 logger = logging.getLogger(__name__)
@@ -84,21 +84,79 @@ _BMS_COMPLAINT_CATEGORY = "投诉"
 def is_complaint_ticket_cond(cat_col, item_col=None) -> ColumnElement:
     """工单是否为"投诉"的 SQL 条件
 
-    参数:
-      cat_col:  service_category 列
-      item_col: service_item 列(可选)。若给出, 则"item 含投诉字样"也视为投诉
-                —— 用于兼容 BMS 修复前的历史数据(如 category 误填了"退款"
-                但 item 是"商品投诉"的异常行)。**默认不给**, 严格按业务口径。
+    ★★ 2026-09-11 (#56) 判据收敛 —— 用户指正「不要乱查」 ★★
+
+      用户原话:
+      > 「服务类别里为空的 默认都回填为 投诉; 你现在每次都去乱查」
+
+      实测全表 `service_category` 分布(265,449 行):
+
+      | category | 条数 |
+      |---|---|
+      | 套餐疑问 | 81,638 |
+      | 退款 | 65,488 |
+      | 其他 | 33,943 |
+      | 网络故障 | 32,701 |
+      | **空白 = 投诉** | **32,058** |
+      | 换货 | 11,320 |
+      | 设备故障 | 8,284 |
+      | 退货 | 12 |
+      | 投诉(显式) | 5 |
+
+      空白 32,058 + 显式 5 = **32,063** —— 与 #53 计算的四类完备数**完全吻合**
+      → 判据只需 `category 空白 OR ='投诉'`, **不需要扫 item**。
+
+    ## 参数
+
+      · `cat_col`  —— `service_category`, **唯一判据**
+      · `item_col` —— ⚠️ **DEPRECATED(#56)**, 传了会被忽略并记 warning。
+
+        为什么废弃: 底层是 BMS **导出漏洞**(客服登记投诉时不选类别 → 导出成空白)。
+        空白本身就是完整判据; 再用 `item ILIKE '%投诉%'` 兜底属于**冗余扫描**,
+        且会引入"item 恰好含投诉字样"的偶然命中, 口径来源不纯。
     """
-    conds = [
+    if item_col is not None:
+        logger.warning(
+            "is_complaint_ticket_cond 的 item_col 参数已废弃(#56), 本次忽略。"
+            "判据只需 service_category 空白或 ='投诉'。"
+        )
+    return or_(
         cat_col.is_(None),
         func.btrim(cat_col) == "",
         cat_col == _BMS_COMPLAINT_CATEGORY,   # 向前兼容 BMS 修复
-    ]
-    if item_col is not None:
-        # 兜底: item 明确是投诉类(兼容 category 误填的历史行)
-        conds.append(item_col.ilike("%投诉%"))
-    return or_(*conds)
+    )
+
+
+def external_ticket_cond(cat_col, item_col, channel_col=None) -> ColumnElement:
+    """「**外部投诉类工单**」判据 —— 外部投诉对账的**唯一口径** (#56)
+
+    ★★ 用户 2026-09-11 澄清的权威语义 ★★
+
+      > 「内部投诉(服务项: 商品投诉、服务投诉), 商户号投诉(服务项: 微信投诉)
+      >   跟这个外部投诉 **不存在对账关系**。
+      >   目前我们外部投诉对账, 主要是对这个**服务类别为空、类型是几个平台的**
+      >   外部投诉与文档同步过来的数据对账, 拉齐。
+      >   俩边的数据都有其意义: bms 中的服务请求里面的投诉(外部投诉)是**经营登记**;
+      >   文档登记的内容是**接待过程 以及人工分析、处理 等等过程数据**。」
+
+    因此外部投诉工单 = **两个条件同时成立**:
+
+      1. 是投诉类工单 (`category` 空白 或 `='投诉'`)
+      2. 来源桶 = 外部投诉 (`item` 命中平台关键词)
+
+    ⚠️ 为什么必须加条件 2(而非仅用 SN 匹配):
+       实测 918 条已匹配的 315 记录中, **586 条(63.8%)** 挂到了
+       `item='未领取体验套餐'/'开发票'/'网慢/网卡/无网络'` 这类
+       **非投诉类工单**(category 是 套餐疑问/退款/其他)。
+       那些是"同一 SN 的处理过程关联", **不是**投诉经营登记,
+       会把「外部投诉 vs 文档」的对账基数污染。
+
+    返回可直接用于 `WHERE` 的条件表达式。
+    """
+    return and_(
+        is_complaint_ticket_cond(cat_col),
+        complaint_bucket_case(item_col, channel_col) == BUCKET_EXTERNAL,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════

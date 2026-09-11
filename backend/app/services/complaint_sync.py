@@ -18,16 +18,13 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import case, or_, select, text
+from sqlalchemy import case, or_, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.card_complaint import CardComplaint
 from app.models.complaint_sync_log import ComplaintSyncLog
 from app.models.external_complaint import ExternalComplaint
-from app.models.ticket import ServiceTicket
-from app.services.analytics import _complaint_source_type_case
-from app.services.complaint_scope import BUCKET_EXTERNAL
 from app.services.data_parser import COLUMN_TEMPLATES
 from app.services.ingest_validator import (
     summarize_severity,
@@ -278,38 +275,25 @@ def _is_empty_card_rec(rec: dict[str, Any]) -> bool:
 
 
 def _sn_to_ticket_map(db: Session, sns: set[str]) -> dict[str, list[tuple[str, datetime]]]:
-    """按 SN 建立 → 外部投诉类工单 (工单号, 登记时间) 列表（按登记时间升序）
+    """按 SN 建立 → **外部投诉类工单** (工单号, 登记时间) 列表（按登记时间升序）
 
-    用 `_complaint_source_type_case() == '外部投诉'` 筛选
-    (工信部/12315/消协/监督局/公共服务平台 等平台投诉)。
+    ★★ 2026-09-11 (#56) 口径收敛 —— 委托 `external_reconcile._sn_candidates` ★★
 
-    ⚠️ 2026-09-10 (#47) 返回结构变更: 由 `list[ticket_no]` 改为
-       `list[(ticket_no, register_time)]` —— 供调用方**按日期就近**选代表工单。
+      原实现用 `_complaint_source_type_case() == '外部投诉'` **单独**筛候选,
+      与对账侧各写一套 → 判据漂移风险。现统一委托 `_sn_candidates`, 保证
+      「同步时挂的工单」与「对账时认的工单」**完全同一集合**。
 
-       原实现直接取 `[0]`(最早登记), 与投诉日期无关; 当同一 SN 有多张工单时
-       会选错(实测 >60 天差异的 112 对里 **93 对**该 SN 有多张工单)。
-       调用方应改用 `_pick_nearest_ticket()` 选择最接近的候选。
+      判据 = `category` 空白/='投诉'  **AND** `item` 命中平台关键词
+        ⚠️ 实测 918 条已匹配中 586 条(63.8%) 曾挂到 `未领取体验套餐/开发票/
+           网慢网卡` 这类**非投诉类工单** —— 它们是"同 SN 的处理过程关联",
+           不是投诉经营登记, 会污染对账基数。
 
-       ⚠️ 为什么**不**加硬时间窗: 实测有一批合法投诉工单是**集中补录**的
-       (如 `消费者协会`/`全国12315平台` 工单登记于 2026-02-03 23:40~23:45,
-       投诉日期却在 2025-12 —— 相差 40~50 天)。硬窗会把这些**真实关联**误杀。
-       "就近选代表"既解决了错配, 又不会丢关联。
+    返回结构保持不变: `{sn: [(ticket_no, register_time), ...]}` 升序,
+    供调用方用 `_pick_nearest_ticket()` 按日期就近选代表(#47 语义)。
     """
-    if not sns:
-        return {}
-    stmt = (
-        select(ServiceTicket.device_sn, ServiceTicket.ticket_no,
-               ServiceTicket.register_time)
-        .where(
-            ServiceTicket.device_sn.in_(sns),
-            _complaint_source_type_case() == BUCKET_EXTERNAL,
-        )
-        .order_by(ServiceTicket.register_time.asc().nullslast())
-    )
-    result: dict[str, list[tuple[str, datetime]]] = {}
-    for sn, tno, rt in db.execute(stmt).all():
-        result.setdefault(sn, []).append((tno, rt))
-    return result
+    from app.services.external_reconcile import _sn_candidates
+
+    return _sn_candidates(db, sns)
 
 
 def _pick_nearest_ticket(
@@ -752,9 +736,25 @@ def sync_complaints_from_payload(
             f"315={ext_result.total}(+{ext_result.inserted}/~{ext_result.updated}/!{ext_result.dropped}/关联{ext_result.matched}) "
             f"卡商={card_result.total}(+{card_result.inserted}/~{card_result.updated}/!{card_result.dropped}/关联{card_result.matched})"
         )
+        # ★★ #56: 同步后**自动重匹配** —— 解决「工单晚到不补挂」★★
+        #   实测外部投诉类工单 created_at - register_time 平均滞后 **71.1 天**
+        #   (>30 天占 53%)。而 `matched_ticket_no` 只在同步瞬间写一次,
+        #   之后从不重算 → 工单晚到时该 315 记录**永久空悬**。
+        #   用户 P0 要求「最新数据持续对应上」, 故每次有写入后重跑一次。
+        #   ⚠️ 主事务此刻已 commit(见上方 db.commit()), 故此处独立提交安全;
+        #      重匹配失败**不得**影响入库主流程(仅告警)。
+        reconcile_stat = None
+        if has_writes:
+            try:
+                from app.services.external_reconcile import remark_matched
+                reconcile_stat = remark_matched(db, window_days=90)
+            except Exception as rc_err:  # noqa: BLE001 重匹配失败不影响入库
+                logger.warning(f"[complaint_sync] 同步后重匹配失败(不影响入库): {rc_err}")
+
         return {
             "log_id": log.id,
             "status": log.status,
+            "reconcile": reconcile_stat,   # #56: 重匹配统计(可观测)
             # #42 校验问题清单(只读 advisory; 与 errors 严格分离)
             "validation": (ext_result.validation + card_result.validation)[:200],
             # abc-a: 按处置级别聚合(block=不可修复优先处理 / warn=常规)

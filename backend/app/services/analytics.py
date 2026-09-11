@@ -1017,18 +1017,20 @@ def _ticket_category_case(
 ):
     """工单「是否属于投诉」判定 → 归一为 '投诉' 或原 category 值
 
-    ⚠️ 口径来源已统一到 `services/complaint_scope.is_complaint_ticket_cond` (#47, 2026-09-10)。
-       业务口径（用户 2026-09-10 澄清）: **`service_category` 空白 = 投诉**
-       —— 客服登记投诉时不选类别; 工单里 `换货/其他/设备故障/套餐疑问/退款/(空白)`,
-       只有"空白"那个才是投诉。
+    ⚠️ 口径来源统一到 `services/complaint_scope.is_complaint_ticket_cond`。
 
-       本函数额外叠加 item 兜底(`item_col` 命中投诉类关键词 → 也算投诉),
-       用于兼容「category 误填成'退款'但 item 是'商品投诉'」的历史异常行
-       (即 `is_complaint_ticket_cond(..., item_col=item_col)` 的宽松模式)。
-       `is_complaint_ticket_cond` 内部已含 BMS 修复后的向前兼容:
-       `service_category == '投诉'` 也判为投诉。
+    ★★ 2026-09-11 (#56) 判据收敛 ★★
+      用户指正: 「服务类别里为空的 默认都回填为 投诉; 你现在每次都去乱查」
+
+      · **移除 item 兜底** —— 原实现叠加 `item ILIKE '%投诉%'`(宽松模式),
+        属于**冗余扫描**。实测 `category` 空白 32,058 + 显式'投诉' 5 = 32,063,
+        与 #53 四类完备数**完全吻合** → 空白本身就是完整判据。
+      · `item_col` 参数**保留但已废弃**(仅为兼容既有调用签名), 内部不再使用。
+
+      业务口径(用户 2026-09-10 澄清): **`service_category` 空白 = 投诉**
+      —— 客服登记投诉时不选类别(底层的 BMS 导出漏洞)。
     """
-    complaint_cond = is_complaint_ticket_cond(col, item_col)
+    complaint_cond = is_complaint_ticket_cond(col)
     return case(
         (complaint_cond, "投诉"),
         else_=col,
