@@ -24,7 +24,6 @@ from app.models.external_complaint import ExternalComplaint
 from app.services.complaint_sync import (
     _identity_dedup_hash,
     _reconcile_sn_backfill,
-    _weak_identity_hash,
 )
 
 
@@ -70,96 +69,92 @@ def _store(db, rec, **kw):
 
 
 # ══════════════════════════════════════════════════════════════════
-# 一、弱指纹（不含 SN）
+# 二、SN 后补 → 标记残影（不新增、不回填）—— #59 语义, #62 修正
 # ══════════════════════════════════════════════════════════════════
-class TestWeakHash:
-    def test_sn_not_in_weak_hash(self, db):
-        """★ 弱指纹不含 SN → 有SN/无SN 的两行弱指纹**相同**"""
-        a = _rec(db, "SNW1", "13800138000", "套餐涨价投诉内容")
-        b = _rec(db, None, "13800138000", "套餐涨价投诉内容")
-        assert _weak_identity_hash(a) == _weak_identity_hash(b)
+class TestSnBackfillMark:
+    """★ 有SN的行**不再认领/回填**残影, 而是把残影**标记为被取代**
 
-    def test_main_hash_differs_by_sn(self, db):
-        """主指纹含 SN → 两行主指纹**不同**（这正是重复的来源）"""
-        a = _rec(db, "SNW2", "13800138000", "套餐涨价投诉内容")
-        b = _rec(db, None, "13800138000", "套餐涨价投诉内容")
-        assert a["dedup_hash"] != b["dedup_hash"]
+    修正原因(实测缺陷): 初版让有SN的行改指纹去 UPDATE 残影, 但 upsert 同时
+    回填了 SN ⇒ 落库成「device_sn 有值 + dedup_hash 按无SN算」的自相矛盾行,
+    与真完整行**永不归并** ⇒ 反而制造重复(生产 26 条被写坏)。
+    """
 
-    def test_weak_hash_sensitive_to_phone(self, db):
-        a = _rec(db, "SNW3", "13800138000", "同样的问题描述")
-        b = _rec(db, "SNW3", "13900139000", "同样的问题描述")
-        assert _weak_identity_hash(a) != _weak_identity_hash(b)
+    def test_marks_existing_ghost(self, db):
+        """★ 有SN的行命中残影 → 把残影标记为 dup_sn_backfill"""
+        from app.services.complaint_scope import QSTATUS_DUP_SN_BACKFILL
 
-    def test_weak_hash_sensitive_to_date(self, db):
-        a = _rec(db, "SNW4", "13800138000", "同样的问题", _utc(2026, 9, 2))
-        b = _rec(db, "SNW4", "13800138000", "同样的问题", _utc(2026, 9, 3))
-        assert _weak_identity_hash(a) != _weak_identity_hash(b)
-
-
-# ══════════════════════════════════════════════════════════════════
-# 二、SN 后补 → UPDATE 残影（不新增）
-# ══════════════════════════════════════════════════════════════════
-class TestSnBackfillClaim:
-    def test_backfill_claims_existing_ghost(self, db):
-        """★ 核心场景: 库内已有「缺SN残影」, 新行带SN → 认领(改指纹为残影的)"""
         ghost = _rec(db, None, "13700137000", "我充值160元要求退款")
-        _store(db, ghost)                      # T1: 残影入库(SN空)
+        g = _store(db, ghost)
 
-        # T2: 同一投诉, SN 补上了
         full = _rec(db, "SNAB1", "13700137000", "我充值160元要求退款")
+        orig_hash = full["dedup_hash"]
         rows = [full]
-        claimed, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
+        marked, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
 
-        assert claimed == 1, "应认领 1 行"
+        assert marked == 1, "应标记 1 条残影"
         assert skipped == 0
-        assert len(rows) == 1, "不应新增行"
-        assert rows[0]["dedup_hash"] == ghost["dedup_hash"], \
-            "指纹应改为残影的 → 后续 upsert 会 UPDATE 残影"
+        assert len(rows) == 1, "本行应正常入库"
+        assert rows[0]["dedup_hash"] == orig_hash, \
+            "★ 指纹**不得**被改成残影的(这是初版的 bug)"
+        db.refresh(g)
+        assert g.quality_status == QSTATUS_DUP_SN_BACKFILL, "残影应被标记"
+
+    def test_ghost_sn_not_backfilled(self, db):
+        """★ 残影的 device_sn **不得**被回填(初版 bug 的直接体现)"""
+        from app.services.complaint_scope import QSTATUS_DUP_SN_BACKFILL
+
+        ghost = _rec(db, None, "13700137001", "回填缺陷验证")
+        g = _store(db, ghost)
+        full = _rec(db, "SNAB2", "13700137001", "回填缺陷验证")
+        _reconcile_sn_backfill(db, ExternalComplaint, [full])
+
+        db.refresh(g)
+        assert g.device_sn is None, "★ 残影的 SN 必须保持为空(不回填)"
+        assert g.quality_status == QSTATUS_DUP_SN_BACKFILL
 
     def test_no_ghost_keeps_own_hash(self, db):
-        """库内无残影 → 指纹不变(正常新增)"""
-        full = _rec(db, "SNAB2", "13700137001", "无残影可认领")
+        """库内无残影 → 不标记, 指纹不变(正常新增)"""
+        full = _rec(db, "SNAB3", "13700137002", "无残影可标记")
         rows = [full]
         orig = full["dedup_hash"]
-        claimed, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
-        assert claimed == 0 and skipped == 0
+        marked, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
+        assert marked == 0 and skipped == 0
         assert rows[0]["dedup_hash"] == orig
 
-    def test_claim_does_not_delete_ghost(self, db):
-        """★ 认领**不删**原残影行（用户: 不能乱删除）"""
-        ghost = _rec(db, None, "13700137002", "不删数据的验证")
+    def test_mark_does_not_delete_ghost(self, db):
+        """★ 标记**不删**原残影行（用户: 不能乱删除）"""
+        ghost = _rec(db, None, "13700137003", "不删数据的验证")
         g = _store(db, ghost)
         gid = g.id
 
-        full = _rec(db, "SNAB3", "13700137002", "不删数据的验证")
+        full = _rec(db, "SNAB4", "13700137003", "不删数据的验证")
         _reconcile_sn_backfill(db, ExternalComplaint, [full])
-
         assert db.get(ExternalComplaint, gid) is not None, "残影行必须保留"
 
 
 # ══════════════════════════════════════════════════════════════════
-# 三、无SN残影 → 跳过（不覆盖完整行）
+# 三、无SN行 → 跳过（不覆盖完整行）
 # ══════════════════════════════════════════════════════════════════
 class TestGhostSkip:
     def test_ghost_skipped_when_full_exists(self, db):
-        """★ 库内已有完整行(有SN), 又来一条无SN的 → 跳过, 不覆盖"""
-        full = _rec(db, "SNSK1", "13700137003", "已有完整行的场景")
-        _store(db, full)                       # 完整行已入库
+        """★ 库内已有完整行(有SN), 又来一条无SN的 → 跳过, 不写入"""
+        full = _rec(db, "SNSK1", "13700137004", "已有完整行的场景")
+        _store(db, full)
 
-        ghost = _rec(db, None, "13700137003", "已有完整行的场景")
+        ghost = _rec(db, None, "13700137004", "已有完整行的场景")
         rows = [ghost]
-        claimed, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
+        marked, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
 
         assert skipped == 1, "应跳过 1 行"
-        assert claimed == 0
-        assert rows == [], "残影不应写入"
+        assert marked == 0
+        assert rows == [], "无SN的重复行不应写入"
 
     def test_ghost_kept_when_no_full_exists(self, db):
         """库内无完整行 → 残影正常入库(首见)"""
-        ghost = _rec(db, None, "13700137004", "首次出现的无SN行")
+        ghost = _rec(db, None, "13700137005", "首次出现的无SN行")
         rows = [ghost]
-        claimed, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
-        assert claimed == 0 and skipped == 0
+        marked, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
+        assert marked == 0 and skipped == 0
         assert len(rows) == 1, "首见残影应保留"
 
 
@@ -167,77 +162,89 @@ class TestGhostSkip:
 # 四、幂等与边界
 # ══════════════════════════════════════════════════════════════════
 class TestIdempotence:
-    def test_repeat_claim_is_stable(self, db):
-        """★ 幂等: 同一残影重复被认领, 结果一致(不产生额外行)"""
-        ghost = _rec(db, None, "13700137005", "重复认领测试")
+    def test_repeat_mark_is_idempotent(self, db):
+        """★ 幂等: 已标记的残影不会被重复处理"""
+        ghost = _rec(db, None, "13700137006", "重复标记测试")
         _store(db, ghost)
 
-        for _ in range(3):
-            full = _rec(db, "SNID1", "13700137005", "重复认领测试")
-            rows = [full]
-            claimed, _ = _reconcile_sn_backfill(db, ExternalComplaint, rows)
-            assert claimed == 1
-            assert rows[0]["dedup_hash"] == ghost["dedup_hash"]
+        full1 = _rec(db, "SNID1", "13700137006", "重复标记测试")
+        m1, _ = _reconcile_sn_backfill(db, ExternalComplaint, [full1])
+        assert m1 == 1
+
+        full2 = _rec(db, "SNID1", "13700137006", "重复标记测试")
+        m2, _ = _reconcile_sn_backfill(db, ExternalComplaint, [full2])
+        assert m2 == 0, "已标记的残影不应重复标记"
 
     def test_empty_rows(self, db):
         assert _reconcile_sn_backfill(db, ExternalComplaint, []) == (0, 0)
 
     def test_missing_phone_no_crash(self, db):
-        """缺电话时不应崩(跳过认领逻辑)"""
+        """缺电话时不应崩(跳过治理逻辑)"""
         r = {"complaint_date": _utc(2026, 9, 2), "complainant_phone": None,
              "device_sn": "SNNP1", "problem": "无电话"}
         r["dedup_hash"] = _identity_dedup_hash(r)
         rows = [r]
-        claimed, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
-        assert claimed == 0 and skipped == 0
+        marked, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
+        assert marked == 0 and skipped == 0
         assert len(rows) == 1
 
     def test_mixed_batch(self, db):
-        """混合批次: 一条可认领 + 一条残影应跳过"""
-        ghost_a = _rec(db, None, "13700137006", "可被认领的残影")
-        _store(db, ghost_a)
-        full_b = _rec(db, "SNMX1", "13700137007", "已有完整行")
+        """混合批次: 一条标记残影 + 一条无SN跳过"""
+        ghost_a = _rec(db, None, "13700137007", "可被标记的残影")
+        ga = _store(db, ghost_a)
+        full_b = _rec(db, "SNMX1", "13700137008", "已有完整行")
         _store(db, full_b)
 
-        claim_rec = _rec(db, "SNMX2", "13700137006", "可被认领的残影")
-        skip_rec = _rec(db, None, "13700137007", "已有完整行")
+        claim_rec = _rec(db, "SNMX2", "13700137007", "可被标记的残影")
+        skip_rec = _rec(db, None, "13700137008", "已有完整行")
         rows = [claim_rec, skip_rec]
 
-        claimed, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
-        assert claimed == 1 and skipped == 1
-        assert len(rows) == 1, "只应保留可认领那条"
-        assert rows[0]["dedup_hash"] == ghost_a["dedup_hash"]
+        marked, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
+        assert marked == 1 and skipped == 1
+        assert len(rows) == 1, "只应保留有SN那条"
+        db.refresh(ga)
+        assert ga.quality_status is not None
 
 
 # ══════════════════════════════════════════════════════════════════
-# 五、真实案例复现
+# 五、真实案例复现（语义修正后）
 # ══════════════════════════════════════════════════════════════════
 class TestRealCases:
-    """复现用户报告的两个生产案例"""
+    """复现用户报告的两个生产案例 —— 现应「标记残影」而非「回填SN」"""
 
     def test_case_67912450006278(self, db):
         """案例1: 309648(16:30, SN空) + 312247(17:00, SN有)"""
-        prob = "26年1月我在深圳这家随身wifi设备上充值160元，之后到8月因为套餐更新问题不再使用，要求客服退钱包充值剩下的余额"
+        from app.services.complaint_scope import QSTATUS_DUP_SN_BACKFILL
+
+        prob = ("26年1月我在深圳这家随身wifi设备上充值160元，之后到8月因为"
+                "套餐更新问题不再使用，要求客服退钱包充值剩下的余额")
         ghost = _rec(db, None, "18338595596", prob, _utc(2026, 9, 2))
-        _store(db, ghost)
+        g = _store(db, ghost)
 
         incoming = _rec(db, "67912450006278", "18338595596", prob, _utc(2026, 9, 2))
         rows = [incoming]
-        claimed, _ = _reconcile_sn_backfill(db, ExternalComplaint, rows)
+        marked, _ = _reconcile_sn_backfill(db, ExternalComplaint, rows)
 
-        assert claimed == 1, "该案例应被认领(不再产生第二条)"
-        assert rows[0]["dedup_hash"] == ghost["dedup_hash"]
+        assert marked == 1, "该案例应标记残影"
+        db.refresh(g)
+        assert g.device_sn is None, "★ 残影SN不得被回填"
+        assert g.quality_status == QSTATUS_DUP_SN_BACKFILL
+        assert rows[0]["device_sn"] == "67912450006278", "完整行正常入库"
 
     def test_case_234603_and_247519(self, db):
         """案例2: 234603(11:30, SN空) + 247519(13:00, SN有, 字段完整)"""
-        prob = "具体违法违规的行为或线索:购买本商品之前，我明确的问过客服推荐的套餐是否为多网通"
+        from app.services.complaint_scope import QSTATUS_DUP_SN_BACKFILL
+
+        prob = ("具体违法违规的行为或线索:购买本商品之前，我明确的问过客服推荐的"
+                "套餐是否为多网通")
         ghost = _rec(db, None, "18224953354", prob, _utc(2026, 9, 1))
-        _store(db, ghost)
+        g = _store(db, ghost)
 
         incoming = _rec(db, "69212633317456", "18224953354", prob, _utc(2026, 9, 1))
-        rows = [incoming]
-        claimed, _ = _reconcile_sn_backfill(db, ExternalComplaint, rows)
-        assert claimed == 1
+        marked, _ = _reconcile_sn_backfill(db, ExternalComplaint, [incoming])
+        assert marked == 1
+        db.refresh(g)
+        assert g.device_sn is None and g.quality_status == QSTATUS_DUP_SN_BACKFILL
 
 
 # ══════════════════════════════════════════════════════════════════
