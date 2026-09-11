@@ -221,6 +221,8 @@
                   投诉登记时段热力
                   <span class="dim-text"> · 小时 × 星期（北京时间）· 服务排班</span>
                 </div>
+                <!-- ★ #73: 显式声明范围 —— 与上方 KPI 总量口径不同，必须写明避免误会 -->
+                <el-tag size="small" type="info" effect="plain">仅工单侧 {{ formatNum(overviewData?.hour_heatmap?.total) }} 条</el-tag>
                 <el-popover placement="bottom-end" :width="400" trigger="click">
                   <template #reference>
                     <el-icon style="color:#909399;cursor:help;font-size:14px"><QuestionFilled /></el-icon>
@@ -235,7 +237,12 @@
                     <div class="dr-sec"><b>我们不做什么</b>
                       <div>· 不做"建议排班人数"：需人均处理产能数据，当前未齐 —— 只给量级事实，由班组长判断。<br>
                       · 不做周/月切换：时段节律是日周期，跨周聚合会抹平节律。</div></div>
-                    <div class="dr-sec"><b>口径</b><div>北京时间（Asia/Shanghai）· 不含 (外)卡商</div></div>
+                    <div class="dr-sec"><b>口径</b>
+                      <div>北京时间（Asia/Shanghai）· <b>仅工单侧登记</b>（不含 315 补充表 —— 该表只有投诉日期、无投诉时刻）</div></div>
+                    <div class="dr-sec"><b>为什么不含 315</b>
+                      <div>315 补充表的日期字段<b>全为 00:00</b>（无小时），其入库时间是<b>采集批次时刻</b>（06 时集中入库）。
+                        若拿来当「客户几点投诉」，会造出假的凌晨高峰 → <b>排班结论方向性错误</b>。
+                        故本图只覆盖工单侧，并在此显式标注范围。</div></div>
                   </div>
                 </el-popover>
               </div>
@@ -265,6 +272,8 @@
                   反复投诉
                   <span class="dim-text"> · 同一设备 ≥{{ repeatThreshold }} 次投诉事件</span>
                 </div>
+                <!-- ★ #73: 范围声明（同 A5） -->
+                <el-tag size="small" type="info" effect="plain">仅工单侧</el-tag>
                 <el-popover placement="bottom-end" :width="400" trigger="click">
                   <template #reference>
                     <el-icon style="color:#909399;cursor:help;font-size:14px"><QuestionFilled /></el-icon>
@@ -282,6 +291,8 @@
                     <div class="dr-sec"><b>我们不做什么</b>
                       <div>· 不自动判定"是否为同一问题"：需问题分类语义，当前 remark 质量不足。<br>
                       · 不做阈值自定义：阈值由后端统一，避免每人一套口径。</div></div>
+                    <div class="dr-sec"><b>范围（与 KPI 不同）</b>
+                      <div><b>仅工单侧</b>（不含 315 补充表）。因此"事件总数"会小于上方 KPI 总量 —— 这是<b>口径差异</b>，非漏统。</div></div>
                   </div>
                 </el-popover>
               </div>

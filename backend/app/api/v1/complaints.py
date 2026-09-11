@@ -3673,6 +3673,13 @@ def _hour_heatmap(db, w_ts, w_te, src_expr) -> dict:
     valley_hours = sorted(h for h, v in hmap.items() if v > 0 and v <= p25)
 
     return {
+        # ★ #73: 显式声明统计范围 —— 本块**仅统计工单侧**
+        #   为何不纳入 315 补充表: 该表 complaint_date 全为 00:00（无小时信息），
+        #   created_at 是**采集入库时刻**（06 时 2456 条 = 批量采集）——
+        #   若拿来当「客户几点投诉」会造出假的凌晨高峰，**排班结论方向性错误**。
+        #   故留空由调用方/前端明确标注，而不是假装口径一致。
+        "scope": "ticket_only",
+        "scope_note": "仅工单登记侧（不含 315 补充表：该表无投诉时刻，只有日期）",
         "cells": cells,
         "by_hour": [{"hour": h, "count": hmap[h]} for h in range(24)],
         "by_weekday": [{"weekday": w, "count": wmap[w]} for w in range(1, 8)],
@@ -3762,6 +3769,9 @@ def _repeat_complaints(db, w_ts, w_te, src_expr, threshold: int = 3, top_n: int 
     repeat_events = sum(r["events"] for r in repeats)
 
     return {
+        # ★ #73: 显式声明统计范围 —— 与 A5 同因，仅工单侧
+        "scope": "ticket_only",
+        "scope_note": "仅工单登记侧（不含 315 补充表）",
         "threshold": threshold,
         "events_total": events_total,
         "units_total": units_total,

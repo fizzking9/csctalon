@@ -303,3 +303,123 @@ class TestOverviewIntegration:
         assert any("反复投诉" in t for t in texts), (
             f"有 {d['repeat']['repeat_units']} 台反复投诉但结论条未提示: {texts}"
         )
+
+
+# ── #73 时间口径一致性（可解释性断言） ──
+
+
+class TestScopeDeclaration:
+    """#73：A5/A2 的统计范围必须**显式声明**，且与 KPI 的差异必须**可解释**。
+
+    ★ 为什么需要这组断言（用户审计提问）：
+      「同一个表单里面是不是尽量时间窗口保持一致更合理一点？不然容易误会。」
+
+      审计发现：A5 热力 total = 5613，KPI 总量 = 5795，**差 182**。
+      根因：A5/A2 **只统计工单侧**，而 KPI 总量 = 工单侧登记 + 315 补充表净额。
+
+      这不是缺陷（315 表无投诉时刻，纳入会造出假的凌晨高峰），
+      但**必须显式声明**，否则使用者必然误会。
+
+      → 断言目标：差异是「A5.total + 315净额 == KPI.total」，即**完全可解释**。
+    """
+
+    def _overview(self, db, **kw):
+        from app.api.v1.complaints import complaint_overview
+        res = complaint_overview(db=db, _=None, **kw)
+        if hasattr(res, "data"):
+            return res.data
+        return res["data"] if isinstance(res, dict) and "data" in res else res
+
+    def test_scope_declared(self, db_with_complaints, window):
+        """① A5/A2 响应含 scope 声明（前端据此渲染"仅工单侧"标签）。"""
+        _clear_cache()
+        d = self._overview(db_with_complaints, start=window[0], end=window[1],
+                           grain=None, compare="none")
+        assert d["hour_heatmap"].get("scope") == "ticket_only", "A5 缺 scope 声明"
+        assert d["hour_heatmap"].get("scope_note"), "A5 缺 scope_note 说明"
+        assert d["repeat"].get("scope") == "ticket_only", "A2 缺 scope 声明"
+        assert d["repeat"].get("scope_note"), "A2 缺 scope_note 说明"
+
+    def test_difference_is_explainable(self, db_with_complaints, window):
+        """② ★ 核心断言：A5.total + 315净额 == KPI.total。
+
+        证明差异来自「315 补充表」这一**已知口径**，而非漏统/重复计。
+        若此断言失败 → 说明还有未解释的口径缺口（必须查明）。
+        """
+        from sqlalchemy import func, select
+
+        from app.api.v1.complaints import (
+            _parse_dt,
+            _parse_dt_end,
+            _suppl_trend_rows,
+        )
+        from app.models.external_complaint import ExternalComplaint
+        from app.models.ticket import ServiceTicket
+        from app.services.analytics import _complaint_source_type_case, _ticket_category_case
+        from app.services.complaint_scope import CARD_SCOPE
+
+        _clear_cache()
+        d = self._overview(db_with_complaints, start=window[0], end=window[1],
+                           grain=None, compare="none")
+        ts, te = _parse_dt(window[0]), _parse_dt_end(window[1])
+        src = _complaint_source_type_case()
+
+        # 工单侧登记数（A5 的口径）
+        tk = db_with_complaints.scalar(
+            select(func.count()).select_from(ServiceTicket).where(
+                _ticket_category_case() == "投诉",
+                src != CARD_SCOPE,
+                ServiceTicket.register_time >= ts,
+                ServiceTicket.register_time <= te,
+            )
+        ) or 0
+        assert d["hour_heatmap"]["total"] == tk, (
+            f"A5 total({d['hour_heatmap']['total']}) 应等于工单侧登记数({tk})"
+        )
+
+        # 315 补充表净新增
+        suppl_net = sum(
+            int(r["total"] or 0) - int(r["overlap"] or 0)
+            for r in _suppl_trend_rows(db_with_complaints, ExternalComplaint, "外部投诉", ts, te)
+        )
+
+        kpi_total = next(k for k in d["kpi"] if k["key"] == "total")["value"]
+        assert tk + suppl_net == kpi_total, (
+            f"差异**不可解释**: A5工单侧({tk}) + 315净额({suppl_net}) = {tk + suppl_net} "
+            f"≠ KPI总量({kpi_total}) —— 存在未查明的口径缺口"
+        )
+
+    def test_heatmap_excludes_315_by_design(self, db_with_complaints, window):
+        """③ A5 确实**未**把 315 纳入（防止后人"顺手补上"造成假凌晨高峰）。
+
+        315 的 complaint_date 全为 00:00，若纳入会让 0 时突变高峰。
+        """
+        _clear_cache()
+        d = self._overview(db_with_complaints, start=window[0], end=window[1],
+                           grain=None, compare="none")
+        h = d["hour_heatmap"]
+        # 0 时占比不应异常（若把 315 的 00:00 纳入，0 时会显著高于相邻小时）
+        hour_map = {x["hour"]: x["count"] for x in h["by_hour"]}
+        if not h["total"]:
+            pytest.skip("窗口内无数据")
+        h0 = hour_map.get(0, 0)
+        neighbors = [hour_map.get(1, 0), hour_map.get(23, 0)]
+        if any(neighbors):
+            # 0 时不应超过相邻小时最大值的 3 倍（含 315 会导致数十倍差异）
+            assert h0 <= max(neighbors) * 3, (
+                f"0 时({h0}) 异常高于相邻小时{neighbors} —— 疑似把 315 的 00:00 纳入了"
+            )
+
+    def test_other_blocks_still_consistent(self, db_with_complaints, window):
+        """④ 其余块（堆叠/水位）仍与 KPI 三者一致（回归保护）。"""
+        _clear_cache()
+        d = self._overview(db_with_complaints, start=window[0], end=window[1],
+                           grain=None, compare="none")
+        kpi_total = next(k for k in d["kpi"] if k["key"] == "total")["value"]
+        stack = sum(
+            b.get("内部投诉", 0) + b.get("商户号投诉", 0) + b.get("外部投诉", 0)
+            for b in d["trend_stacked"]
+        )
+        water = sum(b["registered"] for b in d["trend_reg_handled"])
+        assert stack == kpi_total, f"堆叠之和 {stack} != KPI {kpi_total}"
+        assert water == kpi_total, f"水位登记之和 {water} != KPI {kpi_total}"
