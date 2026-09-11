@@ -408,18 +408,13 @@
             <div v-if="supplExternal.total" class="kpi-mini-suppl">315补充 {{ formatNum(supplExternal.total) }}条(已关联 {{ formatNum(supplExternal.matched) }})</div>
           </div>
         </el-col>
-        <!-- #47 (2026-09-10): (外)卡商 单列 —— 原先并入外部投诉 -->
+        <!-- ★★ 2026-09-11 (#53): (外)卡商 **独立统计**(不纳入上方投诉总量) ★★ -->
         <el-col :xs="8">
-          <div
-            class="kpi-mini-card kpi-clickable"
-            :class="{ 'kpi-active': complaintSourceFilter === '(外)卡商' }"
-            style="background:#ecfdf5"
-            @click="toggleComplaintSourceFilter('(外)卡商')"
-          >
-            <div class="kpi-mini-label" style="color:#059669">(外)卡商</div>
+          <div class="kpi-mini-card" style="background:#ecfdf5;border-left:3px solid #059669">
+            <div class="kpi-mini-label" style="color:#059669">(外)卡商登记</div>
             <div class="kpi-mini-value" style="color:#059669">{{ formatNum(complaintSummaryData.card?.registered ?? complaintSummaryData.card?.total) }}</div>
-            <div class="kpi-mini-sub"><span class="rh-label">登记</span> · 处理 <span style="color:#16a34a;font-weight:600">{{ formatNum(complaintSummaryData.card?.handled) }}</span></div>
-            <div class="kpi-mini-hint">点击筛选明细</div>
+            <div class="kpi-mini-sub"><span class="rh-label">独立统计</span> · 处理 <span style="color:#16a34a;font-weight:600">{{ formatNum(complaintSummaryData.card?.handled) }}</span></div>
+            <div class="kpi-mini-hint">不纳入投诉总量</div>
             <div v-if="supplCard.total" class="kpi-mini-suppl">卡商补充 {{ formatNum(supplCard.total) }}条(已关联 {{ formatNum(supplCard.matched) }})</div>
           </div>
         </el-col>
@@ -988,12 +983,13 @@ const recoveryStaffList = computed(() => {
 // ========== 投诉专项 ==========
 const complaintSourcePie = computed(() => {
   const s = complaintSummaryData.value || {}
-  // #47 (2026-09-10): 新增 (外)卡商 —— 原先卡商并入外部投诉(需修订 LOCKED A-20260902-016)
+  // ★★ 2026-09-11 (#53): (外)卡商 **移出饼图** ★★
+  //   用户: "卡商的投诉 不纳入总量的管理, 整体独立统计分析…全部单算"。
+  //   卡商改为独立区块展示(见模板 card 区块)。
   const data = [
     { name: '内部投诉', value: Number(s.internal?.total || 0), itemStyle: { color: '#2563eb' } },
     { name: '商户号投诉', value: Number(s.merchant?.total || 0), itemStyle: { color: '#7c3aed' } },
     { name: '外部投诉', value: Number(s.external?.total || 0), itemStyle: { color: '#dc2626' } },
-    { name: '(外)卡商', value: Number(s.card?.total || 0), itemStyle: { color: '#059669' } },
   ]
   return {
     tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },

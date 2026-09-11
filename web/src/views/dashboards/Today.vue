@@ -373,22 +373,6 @@
               </div>
               <div v-if="supplExternal.total" class="ck-sub">315补充 {{ formatNum(supplExternal.total) }}条</div>
             </div>
-            <!-- #47 (2026-09-10): 卡商单列 —— 原口径并入外部投诉, 用户要求各统计口单列 -->
-            <div class="ck-cell" style="background:#ecfdf5">
-              <div class="ck-label">(外)卡商</div>
-              <div class="ck-rh">
-                <div class="ck-rh-item">
-                  <span class="ck-rh-num" style="color:#059669">{{ formatNum(complaintSummaryData.card?.registered ?? complaintSummaryData.card?.total) }}</span>
-                  <span class="ck-rh-tag">登记</span>
-                </div>
-                <div class="ck-rh-divider" />
-                <div class="ck-rh-item">
-                  <span class="ck-rh-num" style="color:#16a34a">{{ formatNum(complaintSummaryData.card?.handled) }}</span>
-                  <span class="ck-rh-tag">处理</span>
-                </div>
-              </div>
-              <div v-if="supplCard.total" class="ck-sub">卡商补充 {{ formatNum(supplCard.total) }}条</div>
-            </div>
           </div>
           <div v-if="complaintRegHandledOption" class="compact-pie-wrap">
             <div class="compact-pie-title">投诉来源 · 登记/处理（双柱）</div>
@@ -419,6 +403,45 @@
       <div v-if="supplSummaryText" class="suppl-strip">
         <el-icon style="margin-right:4px"><WarningFilled /></el-icon>
         <span>{{ supplSummaryText }}</span>
+      </div>
+
+      <!-- ★★ 2026-09-11 (#53): (外)卡商 **独立统计区块** ★★
+           用户: "(外部)卡商 的投诉 不纳入总量的管理, 整体独立统计分析;
+                  无论是界面上 还是各项指标的分析 统计 接口 业务逻辑 等等 全部单算"。
+           → 与上方「投诉专项」平行, 不属其总量; 数据来自 card_complaints 补充表。 -->
+      <div class="section-card mb-16" style="border-left:3px solid #059669">
+        <div class="section-header-row">
+          <h3 class="section-title">
+            <el-icon style="color:#059669; margin-right:4px"><Bell /></el-icon>
+            (外)卡商投诉（独立统计 · 不纳入投诉总量）
+          </h3>
+          <el-tooltip content="卡商投诉来自 card_complaints 补充表, 在工单侧无独立分类(实证 item/category 含「卡商」均为 0 行), 故独立统计、不与工单投诉相加" placement="top">
+            <el-icon style="opacity:.6"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </div>
+        <div class="compact-kpi-row">
+          <div class="ck-cell" style="background:#ecfdf5">
+            <div class="ck-label">卡商登记</div>
+            <div class="ck-rh">
+              <div class="ck-rh-item">
+                <span class="ck-rh-num" style="color:#059669">{{ formatNum(cardData.registered ?? cardData.total) }}</span>
+                <span class="ck-rh-tag">登记</span>
+              </div>
+            </div>
+          </div>
+          <div class="ck-cell" style="background:#f0fdf4">
+            <div class="ck-label">卡商处理</div>
+            <div class="ck-rh">
+              <div class="ck-rh-item">
+                <span class="ck-rh-num" style="color:#16a34a">{{ formatNum(cardData.handled) }}</span>
+                <span class="ck-rh-tag">处理</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-if="supplCard.total" class="ck-sub" style="padding:4px 8px;color:#059669">
+          卡商补充数据源 {{ formatNum(supplCard.total) }} 条（已关联工单 {{ formatNum(supplCard.matched) }}）
+        </div>
       </div>
 
       <el-collapse v-model="complaintCollapseActive" class="complaint-collapse">
@@ -713,9 +736,10 @@ const recoveryCollapseActive = ref([])
 const refundFilterResult = ref('')
 const refundFilterHandler = ref('')
 const refundFilterReason = ref('')
-// 投诉筛选: 明细区仅按来源(四类: 内部/商户号/外部/卡商)筛选; 分类/状态等筛选排序移到表格列头
-// #47 (2026-09-10): 新增 (外)卡商 —— 原三源口径会把卡商明细归入外部投诉
-const COMPLAINT_SOURCE_OPTIONS = ['内部投诉', '商户号投诉', '外部投诉', '(外)卡商']
+// 投诉筛选: 明细区仅按来源(**三源**)筛选
+// ★★ 2026-09-11 (#53): 卡商**移出**筛选器 —— 卡商是独立统计体系(不属投诉总量)。
+//    卡商明细请在独立的卡商区块查看。
+const COMPLAINT_SOURCE_OPTIONS = ['内部投诉', '商户号投诉', '外部投诉']
 const complaintFilterSource = ref('')
 
 // 当前政策 (静态配置，后续可从接口获取)
@@ -793,14 +817,14 @@ function complaintStatusType(status) {
 }
 
 // 投诉来源 登记/处理 双柱图 (F-P1-2)
-// #47 (2026-09-10): 卡商单列成第 4 根柱 —— 原先把卡商并入外部投诉(需修订 LOCKED A-20260902-016)
+// ★★ 2026-09-11 (#53): 卡商**移出** —— 用户要求"不纳入总量的管理, 整体独立统计分析"。
+//    双柱图现为**三源**(内部/商户号/外部); 卡商见独立的卡商区块。
 const complaintRegHandledOption = computed(() => {
   const src = complaintSummaryData.value
   const KEYS = [
     { name: '内部投诉', key: 'internal' },
     { name: '商户号投诉', key: 'merchant' },
     { name: '外部投诉', key: 'external' },
-    { name: '(外)卡商', key: 'card' },
   ]
   const data = KEYS.map(({ name, key }) => {
     const s = src[key] || {}
@@ -920,6 +944,11 @@ const supplSummaryText = computed(() => {
 
 // #47: 卡商登记/处理(来源桶新增的第 4 类)
 const supplCard = computed(() => complaintSummaryData.value?.supplementary?.card || { total: 0, matched: 0 })
+
+// ★★ 2026-09-11 (#53): 卡商**独立统计** —— 不属 complaintSummaryData 的总量
+//   用户: "(外)卡商 的投诉 不纳入总量的管理, 整体独立统计分析…全部单算"。
+//   后端返回 `card` 对象(与 reg_handled 平行), 此处独立取值。
+const cardData = computed(() => complaintSummaryData.value?.card || {})
 
 // 补充明细 tooltip 文案(来源/日期/内容/处理明细/完成时间)
 function supplTooltip(row) {

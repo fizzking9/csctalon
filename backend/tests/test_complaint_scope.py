@@ -20,6 +20,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.services.complaint_scope import (
+    ALL_BUCKETS,
     BUCKET_CARD,
     BUCKET_EXTERNAL,
     BUCKET_INTERNAL,
@@ -49,7 +50,11 @@ class TestBucket:
     """分桶覆盖实测的全部 service_item 取值（生产数据）"""
 
     def test_real_values(self):
-        """真实取值逐一核对（来自 2026-09-10 生产数据）"""
+        """真实取值逐一核对（来自 2026-09-10 生产数据）
+
+        ⚠️ 2026-09-11 (#53): 「其他」桶已移除 —— 四类完备
+        （用户: "还有部分 似乎应该归类为 内部投诉"）。
+        """
         cases = {
             "商品投诉": BUCKET_INTERNAL,     # 17,148
             "服务投诉": BUCKET_INTERNAL,     # 9,696
@@ -58,7 +63,7 @@ class TestBucket:
             "全国12315平台": BUCKET_EXTERNAL,  # 278
             "公共服务平台": BUCKET_EXTERNAL,  # 87
             "消费者协会": BUCKET_EXTERNAL,   # 50
-            "套餐扣费申诉": BUCKET_OTHER,    # 14
+            "套餐扣费申诉": BUCKET_INTERNAL,  # 14  ★#53: 归内部(用户要求)
         }
         for item, exp in cases.items():
             assert classify_bucket_from_item(item) == exp, item
@@ -75,18 +80,33 @@ class TestBucket:
         """微信 > 商品/服务（"微信投诉"不含"商品投诉"字样，此处验证不误归）"""
         assert classify_bucket_from_item("微信投诉") == BUCKET_MERCHANT
 
-    def test_empty_and_none_are_other(self):
-        """空/None → 其他（不再兜底为外部投诉）"""
-        for v in (None, "", "   ", "未知类型"):
-            assert classify_bucket_from_item(v) == BUCKET_OTHER, v
+    def test_channel_fallback(self):
+        """★★ #53 新增: channel 回退 —— 救回 81 行空 item
 
-    def test_no_ilike_false_positive(self):
-        """★不应因含"投诉"二字就分到桶里
-
-        如"投诉处理"不是渠道标识；"套餐扣费申诉"含"申诉"但非投诉渠道。
+        实测: item 空共 81 行 → channel=微信投诉 78 行→商户号; channel=H5 3 行→内部。
         """
-        assert classify_bucket_from_item("投诉处理") == BUCKET_OTHER
-        assert classify_bucket_from_item("套餐扣费申诉") == BUCKET_OTHER
+        # item 为空时, channel 提供兜底
+        assert classify_bucket_from_item("", "微信投诉") == BUCKET_MERCHANT
+        assert classify_bucket_from_item(None, "微信投诉") == BUCKET_MERCHANT
+        assert classify_bucket_from_item("", "H5") == BUCKET_INTERNAL
+        assert classify_bucket_from_item(None, "H5") == BUCKET_INTERNAL
+        # item 有值时, channel 不覆盖 item
+        assert classify_bucket_from_item("工信部投诉", "微信投诉") == BUCKET_EXTERNAL
+
+    def test_no_other_bucket(self):
+        """★★ #53: **无「其他」桶** —— else 兜底为内部投诉（四类完备）
+
+        实测空白 category 32,063 行完全可分:
+          内部 26,866 + 商户号 4,462 + 外部 735 = 32,063 ✓
+        故 `ALL_BUCKETS` 只有三类, 且任何输入都必落到三类之一。
+        """
+        assert BUCKET_OTHER not in ALL_BUCKETS
+        assert len(ALL_BUCKETS) == 3
+        # 任何输入都不会产生「其他」
+        for item, ch in (("投诉处理", None), ("未知类型", None), (None, None),
+                         ("", ""), ("abc", "xyz")):
+            got = classify_bucket_from_item(item, ch)
+            assert got in ALL_BUCKETS, f"item={item!r} ch={ch!r} → {got} 不在三类内"
 
 
 # ═══════════════════════════════════════════════════════════════════

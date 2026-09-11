@@ -62,7 +62,7 @@
             <div class="kpi-card kpi-clickable" style="background:#fef2f2" @click="activeTab = 'backlog'">
               <div class="kpi-label" style="color:#dc2626">积压未处理</div>
               <div class="kpi-value">{{ formatNum(b.total) }}</div>
-              <div class="kpi-sub">内{{ bySourceCount('内部投诉') }} · 商{{ bySourceCount('商户号投诉') }} · 外{{ bySourceCount('外部投诉') }} · 卡{{ bySourceCount('(外)卡商') }} · 点击下钻</div>
+              <div class="kpi-sub">内{{ bySourceCount('内部投诉') }} · 商{{ bySourceCount('商户号投诉') }} · 外{{ bySourceCount('外部投诉') }} · 点击下钻</div>
             </div>
           </el-col>
           <el-col :xs="12" :sm="8" :md="4">
@@ -103,17 +103,23 @@
               </div>
             </div>
           </el-col>
-          <!-- #47 (2026-09-10): (外)卡商 单列 —— 原先并入外部投诉 -->
-          <el-col :xs="12" :sm="8" :md="4">
-            <div class="kpi-card" style="background:#ecfdf5">
-              <div class="kpi-label" style="color:#059669">(外)卡商</div>
-              <div class="kpi-value">{{ formatNum(s.card?.total || 0) }}</div>
-              <div class="kpi-sub">卡商群 · 关联{{ formatNum(s.card?.handled || 0) }}</div>
-              <div class="kpi-sub" style="color:#059669">
-                <span style="font-weight:600">新登记</span> {{ formatNum(s.reg_handled['(外)卡商']?.registered || 0) }}
-                <span style="margin:0 4px">·</span>
-                <span style="font-weight:600">处理</span> <span style="color:#16a34a">{{ formatNum(s.reg_handled['(外)卡商']?.handled || 0) }}</span>
-              </div>
+        </el-row>
+
+        <!-- ★★ 2026-09-11 (#53): (外)卡商 **独立统计区块**（不属上方投诉总量）★★
+             用户: "卡商的投诉 不纳入总量的管理, 整体独立统计分析…全部单算"。 -->
+        <el-row :gutter="12" class="mb-16">
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="kpi-card" style="background:#ecfdf5;border-left:3px solid #059669">
+              <div class="kpi-label" style="color:#059669">(外)卡商登记</div>
+              <div class="kpi-value" style="color:#059669">{{ formatNum(cardData.registered ?? cardData.total ?? 0) }}</div>
+              <div class="kpi-sub">独立统计 · 不纳入投诉总量</div>
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="kpi-card" style="background:#f0fdf4;border-left:3px solid #16a34a">
+              <div class="kpi-label" style="color:#16a34a">(外)卡商处理</div>
+              <div class="kpi-value" style="color:#16a34a">{{ formatNum(cardData.handled ?? 0) }}</div>
+              <div class="kpi-sub">前缀锚定口径(已处理/未处理/未标注三态)</div>
             </div>
           </el-col>
         </el-row>
@@ -148,8 +154,8 @@
                 </div>
               </div>
               <div class="snapshot-source-bars">
-                <!-- #47 (2026-09-10): 新增 (外)卡商 -->
-                <div v-for="src in ['内部投诉', '商户号投诉', '外部投诉', '(外)卡商']" :key="src" class="snapshot-source-row">
+                <!-- ★★ 2026-09-11 (#53): 卡商**移出** —— 独立统计体系, 不属投诉总量 -->
+                <div v-for="src in ['内部投诉', '商户号投诉', '外部投诉']" :key="src" class="snapshot-source-row">
                   <span class="snapshot-source-name">{{ src }}</span>
                   <div class="snapshot-source-track">
                     <div class="snapshot-source-fill" :style="{ width: sourceRatioPct(src), background: sourceBarColor(src) }" />
@@ -1006,8 +1012,6 @@ function bySourceCount(src) {
 function sourceBarColor(src) {
   if (src === '内部投诉') return '#2563eb'
   if (src === '外部投诉') return '#dc2626'
-  // #47 (2026-09-10): 卡商单列配色
-  if (src === '(外)卡商') return '#059669'
   return '#7c3aed'
 }
 function sourceRatioPct(src) {
@@ -1256,6 +1260,11 @@ const s = computed(() => data.value || {
   external_platform_trend: [],
   water: [],
 })
+
+// ★★ 2026-09-11 (#53): (外)卡商 **独立统计** ★★
+//   用户: "卡商的投诉 不纳入总量的管理, 整体独立统计分析…全部单算"。
+//   后端 `card` 对象与 `reg_handled` **平行**(非其一部分), 故单独取值。
+const cardData = computed(() => (data.value || {}).card || {})
 
 // ── 投诉水位(进水/出水 并列柱 + 净水位/累计净水位 折线) ──
 const complaintWaterOption = computed(() => {

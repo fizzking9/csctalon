@@ -101,52 +101,111 @@ def is_complaint_ticket_cond(cat_col, item_col=None) -> ColumnElement:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 二、五分类（服务项 → 投诉渠道桶）
+# 二、四类桶（服务项 / 渠道 → 投诉分类）
 # ═══════════════════════════════════════════════════════════════════
-# 优先级: 外部平台关键词 > 微信(商户号) > 商品/服务(内部) > 其他
-#   ⚠️ 外部平台关键词最优先: "12315微信投诉"归外部(监管渠道更重)
+# ⚠️⚠️ 2026-09-11 (#53) 口径二次重构 —— 用户拍板 ⚠️⚠️
+#
+# 变更 1: **(外)卡商 移出「投诉来源」** —— 它是**完全独立的统计体系**
+#   用户原话: "(外部)卡商 的投诉 不纳入总量的管理, 整体独立 统计分析;
+#              无论是界面上 还是各项指标的分析 统计 接口 业务逻辑 等等 全部单算"
+#   → 实证依据: 工单表 `service_item`/`service_category` 含「卡商」均为 **0 行**
+#     → 卡商在工单侧**不存在独立分类**, 是纯补充表体系(`card_complaints`)
+#   → 因此 `ALL_BUCKETS`(投诉来源桶) 只含**三类**: 内部/商户号/外部
+#     卡商见 `CARD_SCOPE`(独立体系, 不参与总量)
+#
+# 变更 2: **四类完备, 移除「其他」桶** —— 用户指出的 BMS 导出漏洞
+#   用户原话: "服务工单 里面的 有空白的, 目前回填或者说算做 投诉, 这个是 bms 的
+#              导出漏洞; 但是数据是很明显的。另外 对于已知的类型 可以明确定义
+#              内部投诉 商户号投诉 和外部投诉; 还有部分 似乎应该归类为 内部投诉"
+#   → 实测空白 category 的 item × channel 交叉, **可完全归类无遗漏**:
+#       item=商品投诉(17148) + 服务投诉(9696)           → 内部
+#       item=消费投诉(空item)+channel=微信投诉(78)      → 商户号  ★channel 救回
+#       item=微信投诉(4384)                             → 商户号
+#       item=工信部(320)+12315(278)+公共服务平台(87)+消费者协会(50) → 外部
+#       item=套餐扣费申诉(14)+空item/渠道H5(3)          → 内部    ★用户所说
+#     合计 32,058 ✓ 自洽, **无需「其他」兜底**
+#
+# 实现优先级(item 优先, channel 回退):
+#   1. item 含外部平台关键词 → 外部投诉
+#   2. item 含「微信」      → 商户号投诉
+#   3. item 含商品/服务投诉 → 内部投诉
+#   4. item = 套餐扣费申诉  → 内部投诉
+#   5. **channel 含「微信」→ 商户号投诉**   ← 救回 78 行空 item
+#   6. else                → 内部投诉      ← 救回 3 行空 item(H5 渠道)
 _EXTERNAL_PLATFORM_KEYWORDS = (
     "工信部", "12315", "公共服务平台", "消费者协会", "消协",
     "监督局", "市场监管", "市监", "315平台", "12345", "政务平台",
 )
 _MERCHANT_KEYWORDS = ("微信",)
 _INTERNAL_KEYWORDS = ("商品投诉", "服务投诉")
+# 用户明确「该归内部」的 item
+_INTERNAL_ITEM_EXACT = ("套餐扣费申诉",)
 
-# 桶名常量（前端颜色/文案按此匹配，勿随意改动）
+# ── 投诉来源桶（**三类**, 卡商不在内）──
 BUCKET_INTERNAL = "内部投诉"
 BUCKET_MERCHANT = "商户号投诉"
 BUCKET_EXTERNAL = "外部投诉"
-BUCKET_CARD = "(外)卡商"
+# ⚠️ 兼容保留: 「其他」桶已在 #53 移除(四类完备)。此常量仅供**历史数据/迁移**识别,
+#    新代码不应再产生该值。
 BUCKET_OTHER = "其他"
 
-ALL_BUCKETS = (BUCKET_INTERNAL, BUCKET_MERCHANT, BUCKET_EXTERNAL, BUCKET_CARD, BUCKET_OTHER)
-# 工单侧可能的桶（不含卡商 —— 卡商来自独立表）
-_TICKET_BUCKETS = (BUCKET_INTERNAL, BUCKET_MERCHANT, BUCKET_EXTERNAL, BUCKET_OTHER)
+# 投诉来源的全部合法桶（**不含卡商** —— 卡商是独立体系）
+ALL_BUCKETS = (BUCKET_INTERNAL, BUCKET_MERCHANT, BUCKET_EXTERNAL)
+
+# ── (外)卡商: 独立统计体系（不参与投诉总量）──
+#   用户: "卡商投诉 可以单独于外部投诉, 可以单列 (外)卡商"; 且 #53 进一步要求
+#   "不纳入总量的管理, 整体独立统计分析"。
+#   ⚠️ 数据来源=`card_complaints` 表(非工单), 口径=表自身行数, **不扣工单重叠**。
+CARD_SCOPE = "(外)卡商"
+CARD_TABLE = "card_complaints"
+
+# ⚠️ 向后兼容别名: #52 曾用 `BUCKET_CARD` 表示来源桶之一; #53 已把它移出来源桶,
+#    但 `resolve_subject` 等函数仍用它区分「卡商主体」语义。保留别名避免大面积改动。
+BUCKET_CARD = CARD_SCOPE
 
 
-def complaint_bucket_case(item_col) -> ColumnElement:
-    """工单 service_item → 四分类（内部/商户号/外部/其他）
+def complaint_bucket_case(item_col, channel_col=None) -> ColumnElement:
+    """工单 → 投诉来源桶（三类：内部/商户号/外部）
 
-    ⚠️ 卡商**不在本 CASE 内** —— 它来自 card_complaints 表，
-       由调用方在 UNION 时直接标注 BUCKET_CARD。
+    参数:
+      item_col:    `service_item`（主判据）
+      channel_col: `channel`（**可选回退**）。给出时, item 无法判定则用渠道兜底
+                   —— 可救回 78 行「item 空 + channel=微信投诉」→ 商户号。
+
+    优先级（见上方 #53 说明）:
+      外部平台关键词 > 微信 > 商品/服务投诉 > 套餐扣费申诉 > channel微信 > else内部
+
+    ⚠️ **不含卡商** —— 卡商是独立体系(见 `CARD_SCOPE`), 由调用方单独统计。
+    ⚠️ **无「其他」兜底** —— #53 实测四类完备, else 兜底为**内部投诉**
+       (用户: "还有部分 似乎应该归类为 内部投诉")。
     """
     si = func.coalesce(item_col, literal(""))
     ext_whens = [si.ilike(f"%{k}%") for k in _EXTERNAL_PLATFORM_KEYWORDS]
     mer_whens = [si.ilike(f"%{k}%") for k in _MERCHANT_KEYWORDS]
     int_whens = [si.ilike(f"%{k}%") for k in _INTERNAL_KEYWORDS]
-    # 注意顺序即优先级: 外部 > 微信 > 商品/服务 > 其他
-    return sa_case(
+    exact_whens = [si == k for k in _INTERNAL_ITEM_EXACT]
+
+    whens = [
         (or_(*ext_whens), BUCKET_EXTERNAL),
         (or_(*mer_whens), BUCKET_MERCHANT),
         (or_(*int_whens), BUCKET_INTERNAL),
-        else_=BUCKET_OTHER,
-    ).label("complaint_bucket")
+        (or_(*exact_whens), BUCKET_INTERNAL),
+    ]
+    # channel 回退（仅当调用方提供）
+    if channel_col is not None:
+        ch = func.coalesce(channel_col, literal(""))
+        whens.append((ch.ilike("%微信%"), BUCKET_MERCHANT))
+    # else: 内部投诉（#53: 四类完备, 不再兜底「其他」/「外部」）
+    return sa_case(*whens, else_=BUCKET_INTERNAL).label("complaint_bucket")
 
 
-def classify_bucket_from_item(item: str | None) -> str:
+def classify_bucket_from_item(item: str | None, channel: str | None = None) -> str:
     """纯 Python 版分桶（供测试与逐行场景；与 SQL 版同口径）
 
-    优先级: 外部平台词 > 微信 > 商品/服务 > 其他
+    优先级: 外部平台词 > 微信 > 商品/服务 > 套餐扣费申诉 > channel微信 > 内部(兜底)
+
+    ⚠️ else 兜底为**内部投诉**（#53）—— 实测空白 category 仅剩
+       「空item + H5 渠道」3 行, 用户明确"还有部分 似乎应该归类为 内部投诉"。
     """
     s = (item or "").strip()
     if any(k in s for k in _EXTERNAL_PLATFORM_KEYWORDS):
@@ -155,7 +214,11 @@ def classify_bucket_from_item(item: str | None) -> str:
         return BUCKET_MERCHANT
     if any(k in s for k in _INTERNAL_KEYWORDS):
         return BUCKET_INTERNAL
-    return BUCKET_OTHER
+    if s in _INTERNAL_ITEM_EXACT:
+        return BUCKET_INTERNAL
+    if channel and "微信" in str(channel):
+        return BUCKET_MERCHANT
+    return BUCKET_INTERNAL
 
 
 # ═══════════════════════════════════════════════════════════════════
