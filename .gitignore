@@ -122,3 +122,6 @@ docs/reports/*投诉去重分析/*.csv
 # #56 外部投诉对账核查导出: 含真实手机号/设备SN(PII), 仅供本地人工核查, 严禁入库
 docs/reports/*外部投诉对账核查/*.csv
 /tmp/csctalon-recon/
+
+# #58 工信部误录核查导出: 含真实SN/手机号(PII), 仅供本地人工核查, 严禁入库
+docs/reports/*工信部误录核查/*.csv
