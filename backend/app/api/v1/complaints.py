@@ -444,24 +444,35 @@ def _suppl_event_metrics(
     if te:
         conds.append(date_col <= te)
 
+    # ★ #60: 排除采集质量残影(dup_sn_backfill) —— 与完整行是同一投诉。
+    #   ⚠️ #61 之后残影已能在 `dedup_events` 里归入对应事件; 此处**先排除**
+    #      可让 `total`/`events` 都干净(残影不参与, 也无需再归并)。
+    #      两者不冲突: 排除是「不计残影」, 归并是「残影若在则并入」——
+    #      保留归并逻辑可兼容"未排除但已标记"的调用场景(如下钻明细)。
+    from app.services.complaint_scope import complaint_quality_include_cond
+
     rows = db.execute(
-        select(model.id, model.device_sn, date_col, model.complainant_phone, channel_col)
-        .where(*conds)
+        select(model.id, model.device_sn, date_col, model.complainant_phone,
+               channel_col, model.quality_status, model.problem)
+        .where(*conds, *complaint_quality_include_cond(model, db))
     ).all()
     payload = [
         {"id": r[0], "device_sn": r[1], "complaint_date": r[2],
-         "complainant_phone": r[3], "channel": r[4]}
+         "complainant_phone": r[3], "channel": r[4],
+         "quality_status": r[5], "problem": r[6]}
         for r in rows
     ]
     events, merged_rows, review = dedup_events(payload)
 
     kinds: dict[str, int] = {}
+    ghost_merged_total = 0
     for e in events:
         k = e.get("kind", "single")
         kinds[k] = kinds.get(k, 0) + 1
+        ghost_merged_total += int(e.get("ghost_merged") or 0)
 
     out = {
-        "total": len(payload),                       # 原始行数(兼容口径)
+        "total": len(payload),                       # 原始行数(**已排除残影**)
         "events": len(events),                       # ★ 归并后事件数(统计应用此值)
         "merged_rows": int(merged_rows),              # 被归并的冗余记录数
         "multi_channel_events": kinds.get("multi_channel", 0),   # 多渠道(非重复)
@@ -470,6 +481,7 @@ def _suppl_event_metrics(
         "unkeyed": kinds.get("unkeyed", 0),                      # 缺 SN/电话
         "needs_review": len(review),                             # 待人工判定组数
         "strict_min_year": EVENT_STRICT_MIN_YEAR,
+        "ghost_merged": ghost_merged_total,          # ★ #61: 归并进来的残影数
     }
     if with_review_rows:
         out["needs_review_rows"] = review

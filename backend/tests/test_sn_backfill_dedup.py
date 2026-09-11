@@ -306,3 +306,104 @@ class TestStatsExclusion:
             .where(ExternalComplaint.complainant_phone == "13700138004")
         ).all()
         assert got == ["SNQC2"]
+
+
+# ══════════════════════════════════════════════════════════════════
+# 七、残影参与事件归并（#61）
+# ══════════════════════════════════════════════════════════════════
+class TestGhostEventMerge:
+    """残影(缺SN)应用**弱指纹**归入对应完整行的事件，而非落 `unkeyed`"""
+
+    def _ev(self, rid, sn, phone, day, problem, ch="航城监所", qs=None):
+        return {
+            "id": rid, "device_sn": sn, "complainant_phone": phone,
+            "complaint_date": _utc(2026, 9, day), "problem": problem,
+            "channel": ch, "quality_status": qs,
+        }
+
+    def test_ghost_merged_into_event(self):
+        """★ 核心: 残影(缺SN)与完整行 → 归并为 **1 个事件**"""
+        from app.services.complaint_scope import (
+            QSTATUS_DUP_SN_BACKFILL,
+            dedup_events,
+        )
+        prob = "26年1月充值160元要求退款"
+        rows = [
+            self._ev(312247, "67912450006278", "18338595596", 2, prob),
+            self._ev(309648, None, "18338595596", 2, prob,
+                     qs=QSTATUS_DUP_SN_BACKFILL),
+        ]
+        events, merged, _ = dedup_events(rows)
+        assert len(events) == 1, "残影应并入完整行的事件"
+        assert set(events[0]["record_ids"]) == {312247, 309648}
+        assert events[0]["ghost_ids"] == [309648]
+        assert events[0]["ghost_merged"] == 1
+
+    def test_real_missing_sn_not_merged(self):
+        """★ 关键: **真实缺SN**(未标残影) 不得被误并 —— 仍独立成事件"""
+        from app.services.complaint_scope import dedup_events
+        prob = "同一天同电话同问题但确实没SN"
+        rows = [
+            self._ev(1, "SNAAA", "13711111111", 3, prob),
+            self._ev(2, None, "13711111111", 3, prob),   # 无 quality_status
+        ]
+        events, _, _ = dedup_events(rows)
+        kinds = sorted(e["kind"] for e in events)
+        assert len(events) == 2, "真实缺SN的不能被并掉(会漏计真实投诉)"
+        assert "unkeyed" in kinds
+
+    def test_ghost_without_match_stays_separate(self):
+        """残影若找不到对应完整行 → 保守独立成事件(不猜)"""
+        from app.services.complaint_scope import (
+            QSTATUS_DUP_SN_BACKFILL,
+            dedup_events,
+        )
+        rows = [
+            self._ev(10, "SNBBB", "13722222222", 4, "另一个人的投诉"),
+            self._ev(11, None, "13722222222", 4, "残影的孤立问题",
+                     qs=QSTATUS_DUP_SN_BACKFILL),
+        ]
+        events, _, _ = dedup_events(rows)
+        # 问题签名不同 → 弱指纹不匹配 → 残影独立
+        assert len(events) == 2
+
+    def test_ghost_ids_empty_for_normal_event(self):
+        """普通事件 ghost_ids 为空"""
+        from app.services.complaint_scope import dedup_events
+        rows = [self._ev(20, "SNCCC", "13733333333", 5, "普通投诉")]
+        events, _, _ = dedup_events(rows)
+        assert events[0]["ghost_ids"] == []
+        assert events[0]["ghost_merged"] == 0
+
+    def test_ghost_merge_is_idempotent(self):
+        """幂等: 重复归并结果一致"""
+        from app.services.complaint_scope import (
+            QSTATUS_DUP_SN_BACKFILL,
+            dedup_events,
+        )
+        prob = "幂等性验证的问题描述"
+        rows = [
+            self._ev(30, "SNDDD", "13744444444", 6, prob),
+            self._ev(31, None, "13744444444", 6, prob,
+                     qs=QSTATUS_DUP_SN_BACKFILL),
+        ]
+        a = dedup_events(rows)[0]
+        b = dedup_events(rows)[0]
+        assert len(a) == len(b) == 1
+        assert a[0]["record_ids"] == b[0]["record_ids"]
+
+    def test_no_mutation_of_input(self):
+        """★ 归并**不修改**输入行(用户: 不能乱删除/乱改)"""
+        from app.services.complaint_scope import (
+            QSTATUS_DUP_SN_BACKFILL,
+            dedup_events,
+        )
+        prob = "不得修改输入"
+        rows = [
+            self._ev(40, "SNEEE", "13755555555", 7, prob),
+            self._ev(41, None, "13755555555", 7, prob,
+                     qs=QSTATUS_DUP_SN_BACKFILL),
+        ]
+        snapshot = [dict(r) for r in rows]
+        dedup_events(rows)
+        assert rows == snapshot, "输入行不得被修改"

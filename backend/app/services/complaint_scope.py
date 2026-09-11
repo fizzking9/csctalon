@@ -640,6 +640,50 @@ def complaint_dedup_key(sn: str | None, phone: str | None) -> tuple[str, str] | 
     return (s, p)
 
 
+def _weak_event_key(r: dict, date_key: str, phone_key: str,
+                    problem_key: str = "problem") -> str | None:
+    """事件归并用的**弱指纹**: md5(日期 | 归一化电话 | 问题签名) —— #61
+
+    ## 为什么需要
+
+      `dedup_events` 的归并键是 `(SN, 归一化电话)`。而 #59 标记的**残影行缺 SN**
+      → 会落入 `unkeyed` 独立成事件 → 同一投诉在**事件口径**下仍被算 2 笔。
+
+      残影与完整行的 **日期 + 电话 + 问题签名** 是一致的（这正是 #59 的标记依据），
+      故用弱指纹即可把它们归到一起。
+
+    ## 与 `complaint_sync._weak_identity_hash` 的关系
+
+      同口径（日期|电话|问题签名），但**本函数用 `problem_key` 可配置**，
+      且不做字符串归一（调用方传入的已是清洗后数据）。
+      ⚠️ 两处必须保持同一"三元组"语义 —— 改动需同步。
+
+    返回 None 表示无法构造（缺日期或电话）→ 调用方应保守处理(不归并)。
+    """
+    d = r.get(date_key)
+    ph = r.get(phone_key)
+    if d is None or not ph:
+        return None
+    try:
+        day = d.date() if hasattr(d, "date") else d
+    except (AttributeError, TypeError):
+        return None
+    if day is None:
+        return None
+    from app.services.upsert import _complaint_problem_signature
+
+    sig = _complaint_problem_signature(r.get(problem_key))
+    return f"{day}|{_norm_phone_for_key(ph)}|{sig}"
+
+
+def _norm_phone_for_key(ph) -> str:
+    """归并键里用的电话归一（取首个合法号）"""
+    try:
+        return normalize_phone(ph) or str(ph).strip()
+    except Exception:  # noqa: BLE001 兜底: 归一失败用原值
+        return str(ph).strip()
+
+
 def dedup_events(
     rows: list[dict],
     *,
@@ -648,6 +692,9 @@ def dedup_events(
     phone_key: str = "complainant_phone",
     channel_key: str = "channel",
     id_key: str = "id",
+    problem_key: str = "problem",
+    quality_status_key: str = "quality_status",
+    qstatus_ghost: str = QSTATUS_DUP_SN_BACKFILL,
     window_days: int = EVENT_WINDOW_DAYS,
     min_year: int = EVENT_STRICT_MIN_YEAR,
 ) -> tuple[list[dict], int, list[dict]]:
@@ -688,16 +735,57 @@ def dedup_events(
     if not rows:
         return [], 0, []
 
-    # ── 1. 按 (SN, 归一化电话) 分组 —— 电话是"实体的人", 用于确认同一人 ──
+    # ── 1. 分组 —— 三级键优先级（#61 扩展） ──
+    #
+    #   ① 有 SN 且有电话 → (SN, 归一化电话)          [原逻辑]
+    #   ② ★ 标记为残影   → 弱指纹(日期|电话|问题签名)  [新增]
+    #        · 弱指纹命中某完整行所在的组 → 并入该组(不重复计)
+    #        · 命中不了 → 保守起见独立成事件(不猜)
+    #   ③ 真实缺 SN/电话 → unkeyed(独立成事件)        [保持现状]
+    #
+    #   ⚠️ **为什么必须区分 ② 和 ③**: `unkeyed` 里不只有残影 —— 还有
+    #      **真实缺 SN 的投诉**(如航城监所部分记录, 渠道表单无设备号列)。
+    #      无差别丢弃/合并会**漏计真实投诉**, 故只对**已标记的残影**做归并。
     buckets: dict[tuple[str, str], list[dict]] = {}
     unkeyed: list[dict] = []
+    ghosts_by_weak: dict[str, list[dict]] = {}   # 弱指纹 → 残影行(#61)
     for r in rows:
         sn = (r.get(sn_key) or "").strip()
         ph = normalize_phone(r.get(phone_key))
+        is_ghost = (r.get(quality_status_key) or "") == qstatus_ghost
+        if is_ghost:
+            wk = _weak_event_key(r, date_key, phone_key, problem_key)
+            if wk:
+                ghosts_by_weak.setdefault(wk, []).append(r)
+                continue
         if not sn or not ph:
             unkeyed.append(r)          # 缺 SN 或电话 → 独立成事件(需人工/不自动归并)
         else:
             buckets.setdefault((sn, ph), []).append(r)
+
+    # ★ #61: 把残影按弱指纹并入对应完整行的桶
+    #   先建「弱指纹 → 桶键」索引(仅对已入桶的完整行)
+    if ghosts_by_weak:
+        weak_to_bucket: dict[str, tuple[str, str]] = {}
+        for bk, items in buckets.items():
+            for x in items:
+                wk = _weak_event_key(x, date_key, phone_key, problem_key)
+                if wk:
+                    weak_to_bucket.setdefault(wk, bk)
+        orphan_ghosts = 0
+        for wk, gitems in ghosts_by_weak.items():
+            bk = weak_to_bucket.get(wk)
+            if bk is None:
+                # 弱指纹在桶里找不到对应完整行 → 保守起见独立成事件
+                unkeyed.extend(gitems)
+                orphan_ghosts += len(gitems)
+            else:
+                buckets[bk].extend(gitems)
+        if orphan_ghosts:
+            logger.info(
+                "dedup_events: %d 条残影未找到对应完整行(弱指纹不匹配) → 独立成事件",
+                orphan_ghosts,
+            )
 
     events: list[dict] = []
     merged_rows = 0
@@ -754,6 +842,12 @@ def dedup_events(
             rep["multi_channel"] = len(chans) > 1
             rep["complaint_day"] = str(_day(rep) or "")
             rep["event_key"] = f"{sn}|{ph}|{rep['complaint_day']}"
+            # ★ #61: 本事件归并了哪些**残影**(采集质量问题) —— 供报表展示
+            rep["ghost_ids"] = [
+                x.get(id_key) for x in cl
+                if (x.get(quality_status_key) or "") == qstatus_ghost
+            ]
+            rep["ghost_merged"] = len(rep["ghost_ids"])
 
             # 严格归并仅对 min_year 及之后生效(用户: 25年前简单统计)
             yr = _day(rep).year if _day(rep) else None
