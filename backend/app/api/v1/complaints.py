@@ -26,10 +26,10 @@ from app.services.analytics import TZ, _complaint_source_type_case, _ticket_cate
 #   卡商不在投诉总量内, 统计体系与投诉平行(用户: "全部单算")
 # #55 (2026-09-11): 新增 `dedup_events` —— 多渠道归并 vs 真重复 判据
 from app.services.complaint_scope import (
+    _CARD_TICKET_KEYWORDS,
     CARD_SCOPE,
     EVENT_STRICT_MIN_YEAR,
     STATUS_DONE,
-    _CARD_TICKET_KEYWORDS,
     card_result_state,
     dedup_events,
 )
@@ -1110,6 +1110,17 @@ def complaint_detail(
         extra_rows: list[dict] = []
 
         def _collect(model, sn_field_name: str, source_name, limit_per_sn=10):
+            # ★★ #65 修复: `source_type` 筛选必须**同时约束补充表的独立行** ★★
+            #   Bug: `source_type=(外)卡商` 时, 315 补充表**全量**被当成卡商独立行返回
+            #        (实测 473 条, 其中 472 条 source=外部投诉) —— 因为原实现
+            #        仅在工单主行 `stmt.where(src_expr == source_type)` 筛选。
+            #
+            #   ⚠️ 但**不能**在函数开头就 return —— 补充记录若 SN 命中工单行,
+            #      它是该行的**附注(supplementary)**, 不改变主行所属桶,
+            #      且 `subject` 过滤依赖它(W2 场景: 商户号行 + 挂载的 315 主体)。
+            #      → 只对**独立行** (`extra_rows`) 施加桶筛选。
+            _bucket = "外部投诉" if source_name == "315外部投诉" else "(外)卡商"
+            _keep_extra = (not source_type) or (_bucket == source_type)
             stmt = select(model)
             if ts:
                 stmt = stmt.where(model.complaint_date >= ts)
@@ -1154,6 +1165,10 @@ def complaint_detail(
                 # 未关联工单(或SN为空) → 独立行, 归入对应桶
                 #   ⚠️ 2026-09-10 (#47): 卡商**独立成桶**「(外)卡商」,
                 #      原先 `main_source = "外部投诉"`(卡商被并入外部) → 已拆开。
+                #   ⚠️ #65: `source_type` 筛选时跳过**非目标桶**的独立行,
+                #      否则会把 315 外部投诉全量当成卡商返回(见函数头说明)。
+                if not _keep_extra:
+                    continue
                 is_315 = source_name == "315外部投诉"
                 main_source = "外部投诉" if is_315 else "(外)卡商"
                 extra_rows.append({
