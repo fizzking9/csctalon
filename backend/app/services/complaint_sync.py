@@ -81,8 +81,14 @@ def _write_rejected(
         return False
 
 # SN 单元格可能包含多个 SN(换行/逗号分隔)或备注(如 "18870605701（移动流量卡）"),统一取首个有效 SN
-_SN_SPLIT_RE = re.compile(r"[\n,;，;、\s]+")
+# ★ #64: 分隔符补 `/` 与 `|` —— 实测源文档有「一格填两个SN」形态
+#   (如 `58812351022558/63272421032891`), 原正则漏了 `/` → 整串不匹配任何工单。
+#   ⚠️ 与电话的 split_phones 同类问题(当时只修了电话, 漏了 SN)。
+_SN_SPLIT_RE = re.compile(r"[\n,;，;、\s/|]+")
 _SN_ANNOTATION_RE = re.compile(r"[（(].*?[)）]")
+# ★ #64: 剥离 Excel 文本格式残留的前导单引号 / 双引号
+#   实测 5 条形如 `'70032611013040` —— 因 `'` 前缀导致与工单 SN 永不匹配。
+_SN_LEADING_QUOTE_RE = re.compile(r"^[\'\"\u2018\u2019\u201c\u201d]+")
 
 
 class SyncRowResult:
@@ -135,8 +141,15 @@ class SyncRowResult:
 def _clean_sn(raw: Any) -> str | None:
     """清理设备 SN:
     - 去括号备注(如 188****5701（移动流量卡） → 188****5701)
-    - 多SN(换行/逗号/分号分隔)取第一个
+    - 多SN(换行/逗号/分号/**斜杠**/竖线分隔)取第一个   ★ #64 补 `/` `|`
+    - **剥离 Excel 文本格式残留的引号前缀**(如 `'70032611013040`)  ★ #64
     - 统一去首尾空白
+
+    ⚠️ #64 修复的两个实际缺陷(生产实测 7 条):
+      · 前导单引号 5 条 —— Excel 把长数字当文本时自动加 `'`, 导出后残留
+      · 一格两SN   2 条 —— 形如 `58812351022558/63272421032891`, 原分隔符漏 `/`
+
+      两者都导致该 SN **永不匹配工单** → 虚假「文档有、工单无」空悬。
     """
     s = _to_str(raw)
     if not s:
@@ -144,7 +157,8 @@ def _clean_sn(raw: Any) -> str | None:
     s = _SN_ANNOTATION_RE.sub("", s)
     parts = _SN_SPLIT_RE.split(s)
     for p in parts:
-        p = p.strip()
+        # ★ 剥引号前缀(在 strip 之前, 因引号可能在空白后)
+        p = _SN_LEADING_QUOTE_RE.sub("", p.strip()).strip()
         # 过滤明显不是SN的片段(纯中文/过短/过长)
         if not p or len(p) < 6 or len(p) > 64:
             continue

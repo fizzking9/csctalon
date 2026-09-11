@@ -414,3 +414,58 @@ class TestGhostEventMerge:
         snapshot = [dict(r) for r in rows]
         dedup_events(rows)
         assert rows == snapshot, "输入行不得被修改"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 八、SN 清洗（#64）
+# ══════════════════════════════════════════════════════════════════
+class TestCleanSn:
+    """源文档脏 SN 形态 → 必须在入库前清洗, 否则**永不匹配工单**
+
+    生产实测 7 条:
+      · 前导单引号 5 条（Excel 长数字文本格式残留）
+      · 一格两SN   2 条（形如 `58812351022558/63272421032891`）
+    """
+
+    def test_strips_leading_single_quote(self):
+        """★ Excel 文本格式残留的 `'` 前缀必须剥离"""
+        from app.services.complaint_sync import _clean_sn
+        assert _clean_sn("'70032611013040") == "70032611013040"
+        assert _clean_sn("'69142529011493") == "69142529011493"
+
+    def test_strips_various_quotes(self):
+        """单/双/中文引号都要剥"""
+        from app.services.complaint_sync import _clean_sn
+        for raw in ('"70032611013040', "\u201870032611013040",
+                    "\u201c70032611013040"):
+            assert _clean_sn(raw) == "70032611013040", raw
+
+    def test_splits_by_slash(self):
+        """★ 一格两SN用 `/` 分隔 → 取第一个"""
+        from app.services.complaint_sync import _clean_sn
+        assert _clean_sn("58812351022558/63272421032891") == "58812351022558"
+        assert _clean_sn("69212545116000/67002453179005") == "69212545116000"
+
+    def test_splits_by_pipe(self):
+        """竖线分隔也支持"""
+        from app.services.complaint_sync import _clean_sn
+        assert _clean_sn("58812351022558|63272421032891") == "58812351022558"
+
+    def test_keeps_existing_behaviour(self):
+        """原行为不回归: 备注剥离 / 多SN(逗号) / 空白"""
+        from app.services.complaint_sync import _clean_sn
+        assert _clean_sn("188****5701（移动流量卡）") == "188****5701"
+        assert _clean_sn("58812351022558, 63272421032891") == "58812351022558"
+        assert _clean_sn("  70032617030194  ") == "70032617030194"
+        assert _clean_sn("") is None
+        assert _clean_sn(None) is None
+
+    def test_pure_quote_returns_none(self):
+        """只有引号 → None(不是合法SN)"""
+        from app.services.complaint_sync import _clean_sn
+        assert _clean_sn("\"'") is None
+
+    def test_combined_dirty(self):
+        """组合脏值: 引号 + 斜杠 + 空白"""
+        from app.services.complaint_sync import _clean_sn
+        assert _clean_sn(" '58812351022558 / 63272421032891 ") == "58812351022558"
