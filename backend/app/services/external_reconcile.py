@@ -56,12 +56,12 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.models.card_complaint import CardComplaint
 from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
 from app.services.complaint_scope import (
-    BUCKET_EXTERNAL,
-    complaint_bucket_case,
-    is_complaint_ticket_cond,
+    effective_card_ticket_cond,
+    effective_external_ticket_cond,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,19 +71,43 @@ _LAG_BUCKETS = (0, 3, 7, 30, 90)
 
 
 def _external_ticket_where():
-    """「外部投诉类工单」的 WHERE 条件（唯一口径, 与 complaint_scope 单一来源）"""
-    return and_(
-        is_complaint_ticket_cond(ServiceTicket.service_category),
-        complaint_bucket_case(ServiceTicket.service_item, ServiceTicket.channel)
-        == BUCKET_EXTERNAL,
+    """「外部投诉类工单」的 WHERE 条件（唯一口径, 与 complaint_scope 单一来源）
+
+    ⚠️ #57: 「工信部投诉」已摘出到卡商渠道 → 本判据**自动排除**它。
+    ★ #58: **含误录纠正** —— 工信部工单若 SN 在 315 是监所/市监局类,
+       则实为外部投诉(用户: "工信部的优先算作登记错误, 与外部投诉表对账")。
+    """
+    return effective_external_ticket_cond(
+        ServiceTicket.device_sn,
+        ServiceTicket.service_category,
+        ServiceTicket.service_item,
+        ServiceTicket.channel,
     )
 
 
-def _sn_candidates(db: Session, sns: set[str]) -> dict[str, list[tuple[str, datetime]]]:
-    """按 SN 建立 → **外部投诉类工单**(工单号, 登记时间) 列表（登记时间升序）
+def _card_ticket_where():
+    """「(外)卡商类工单」的 WHERE 条件 —— `item = 工信部投诉` (#57)
 
-    与 `complaint_sync._sn_to_ticket_map` 同结构, 但**判据限定为外部投诉类**。
+    ★ #58: **排除误录** —— 被误录为工信部但 SN 在 315 是监所类的, 不算卡商。
+    """
+    return effective_card_ticket_cond(
+        ServiceTicket.device_sn,
+        ServiceTicket.service_category,
+        ServiceTicket.service_item,
+        ServiceTicket.channel,
+    )
+
+
+def _sn_candidates(db: Session, sns: set[str], *,
+                   where=None) -> dict[str, list[tuple[str, datetime]]]:
+    """按 SN 建立 → **指定类别工单**(工单号, 登记时间) 列表（登记时间升序）
+
+    与 `complaint_sync._sn_to_ticket_map` 同结构。
     同步侧收敛到本函数可避免两处判据漂移（见 #56）。
+
+    参数:
+      · `where` —— 类别过滤条件。默认 `_external_ticket_where()`(外部投诉类);
+        #57 卡商渠道传 `_card_ticket_where()`(工信部类)。
     """
     if not sns:
         return {}
@@ -91,7 +115,7 @@ def _sn_candidates(db: Session, sns: set[str]) -> dict[str, list[tuple[str, date
         select(ServiceTicket.device_sn, ServiceTicket.ticket_no,
                ServiceTicket.register_time)
         .where(ServiceTicket.device_sn.in_(sns))
-        .where(_external_ticket_where())
+        .where(where if where is not None else _external_ticket_where())
         .order_by(ServiceTicket.register_time.asc().nullslast())
     )
     out: dict[str, list[tuple[str, datetime]]] = {}
@@ -130,62 +154,54 @@ def _pick_nearest(
     return best if best else (cands[0][0], None)
 
 
-def external_reconcile(
+def _reconcile_core(
     db: Session,
-    ts: datetime | None = None,
-    te: datetime | None = None,
     *,
-    detail_limit: int = 500,
-    include_detail: bool = True,
+    doc_model,
+    doc_date_col,
+    doc_label_col,
+    doc_matched_col,
+    ticket_where,
+    ts: datetime | None,
+    te: datetime | None,
+    detail_limit: int,
+    include_detail: bool,
 ) -> dict:
-    """外部投诉双边对账（**只读**, 任意窗口）
+    """双边对账**通用内核** —— 外部投诉与卡商渠道共用 (#57)
 
-    参数:
-      · `ts` / `te` —— 窗口(UTC), 按**投诉日期**过滤文档侧、按**登记时间**
-        过滤工单侧。None 表示不限。
-      · `include_detail` —— 是否返回空悬明细(供人工核查/前端下钻)。
+    参数(全部由调用方决定, 内核不写死渠道):
+      · `doc_model` / `doc_date_col` / `doc_label_col` / `doc_matched_col`
+        —— 文档侧模型/日期列/渠道标签列/匹配回写列
+      · `ticket_where` —— 工单侧类别过滤(外部投诉类 or 卡商类)
 
-    返回:
-      {
-        "doc_total":          # 文档侧(315)总数(窗口内)
-        "doc_matched":        # 已挂外部投诉类工单
-        "doc_orphan":         # ★ 文档有、工单无(漏登记)
-        "doc_orphan_rows":    # 明细(脱敏由调用方处理)
-        "ticket_total":       # 外部投诉类工单总数(窗口内)
-        "ticket_documented":  # 有过程文档
-        "ticket_orphan":      # ★ 工单有、文档无(缺过程记录)
-        "ticket_orphan_rows": # 明细
-        "match_lag":          # 匹配滞后分布(自检: 工单晚到程度)
-        "coverage":           # 双向覆盖率(0~1)
-      }
+    ⚠️ 抽出的原因: #57 新增卡商渠道后, 若复制一份会**判据漂移**
+       (我在 #52/#53 已在类似地方踩过)。故两渠道共用同一内核。
     """
     # ── 文档侧 ──
-    d_conds: list = [ExternalComplaint.complaint_date.isnot(None)]
+    d_conds: list = [doc_date_col.isnot(None)]
     if ts:
-        d_conds.append(ExternalComplaint.complaint_date >= ts)
+        d_conds.append(doc_date_col >= ts)
     if te:
-        d_conds.append(ExternalComplaint.complaint_date <= te)
+        d_conds.append(doc_date_col <= te)
     doc_total = db.scalar(
-        select(func.count()).select_from(ExternalComplaint).where(*d_conds)
+        select(func.count()).select_from(doc_model).where(*d_conds)
     ) or 0
 
-    # 已匹配的「外部投诉类工单」—— 用 JOIN 校验匹配是否**仍合规**
-    #   ⚠️ 不能只看 matched_ticket_no 非空: 历史匹配可能指向非投诉类工单(见模块头)
+    # 已匹配记录 —— 用候选集**实时校验**是否仍合规
+    #   ⚠️ 不能只看 matched 列非空: 历史匹配可能指向非本类工单(见模块头)
     doc_rows = db.execute(
-        select(ExternalComplaint.id, ExternalComplaint.device_sn,
-               ExternalComplaint.complaint_date, ExternalComplaint.matched_ticket_no,
-               ExternalComplaint.platform, ExternalComplaint.complainant_phone)
+        select(doc_model.id, doc_model.device_sn, doc_date_col,
+               doc_matched_col, doc_label_col, doc_model.complainant_phone)
         .where(*d_conds)
     ).all()
 
-    # 候选映射(仅外部投诉类工单)
     sns = {r[1] for r in doc_rows if r[1]}
-    cand_map = _sn_candidates(db, sns)
+    cand_map = _sn_candidates(db, sns, where=ticket_where)
 
     doc_matched = 0
     doc_orphan_rows: list[dict] = []
-    for rid, sn, cdate, mtno, plat, _ph in doc_rows:
-        tno, diff = _pick_nearest(cand_map.get(sn) if sn else None, cdate)
+    for rid, sn, cdate, mtno, label, _ph in doc_rows:
+        tno, _diff = _pick_nearest(cand_map.get(sn) if sn else None, cdate)
         if tno:
             doc_matched += 1
         else:
@@ -193,7 +209,7 @@ def external_reconcile(
                 "id": rid,
                 "device_sn": sn,
                 "complaint_date": cdate.isoformat() if cdate else None,
-                "platform": plat,
+                "label": label,
                 "prev_matched": mtno,   # 旧匹配(可能不合规), 供对比
             })
     doc_orphan = len(doc_orphan_rows)
@@ -204,14 +220,12 @@ def external_reconcile(
         t_conds.append(ServiceTicket.register_time >= ts)
     if te:
         t_conds.append(ServiceTicket.register_time <= te)
-    t_where = and_(_external_ticket_where(), *t_conds)
+    t_where = and_(ticket_where, *t_conds)
 
     ticket_total = db.scalar(
         select(func.count()).select_from(ServiceTicket).where(t_where)
     ) or 0
 
-    # 有过程文档的工单 = 被 315 记录挂上(且该 315 的 SN 与工单一致)
-    #   按 SN + 日期就近在 Python 侧判定, 与文档侧同一套候选逻辑 → 双向自洽
     tk_rows = db.execute(
         select(ServiceTicket.ticket_no, ServiceTicket.device_sn,
                ServiceTicket.register_time)
@@ -219,7 +233,7 @@ def external_reconcile(
     ).all()
 
     doc_by_sn: dict[str, list[datetime]] = {}
-    for _, sn, cdate, _m, _p, _ph in doc_rows:
+    for _, sn, cdate, _m, _lbl, _ph in doc_rows:
         if sn and cdate:
             doc_by_sn.setdefault(sn, []).append(cdate)
 
@@ -245,8 +259,7 @@ def external_reconcile(
             func.extract("epoch",
                          ServiceTicket.created_at - ServiceTicket.register_time
                          ) / 86400
-        ))
-        .where(t_where)
+        )).where(t_where)
     ).scalar()
     avg_lag = round(float(lag_rows), 1) if lag_rows else 0.0
     for b in _LAG_BUCKETS:
@@ -287,6 +300,154 @@ def external_reconcile(
     return out
 
 
+def external_reconcile(
+    db: Session,
+    ts: datetime | None = None,
+    te: datetime | None = None,
+    *,
+    detail_limit: int = 500,
+    include_detail: bool = True,
+) -> dict:
+    """**外部投诉**双边对账（只读, 任意窗口）
+
+    文档侧 = `external_complaints`(315 接待过程)
+    工单侧 = 外部投诉类工单(`item` 命中 12315/公共服务平台/消协会/监督局…)
+
+    ⚠️ #57: 「工信部投诉」已摘出 → 归 `card_reconcile`。本函数**不含**工信部。
+
+    返回值字段见 `_reconcile_core`。
+    """
+    return _reconcile_core(
+        db,
+        doc_model=ExternalComplaint,
+        doc_date_col=ExternalComplaint.complaint_date,
+        doc_label_col=ExternalComplaint.platform,
+        doc_matched_col=ExternalComplaint.matched_ticket_no,
+        ticket_where=_external_ticket_where(),
+        ts=ts, te=te,
+        detail_limit=detail_limit, include_detail=include_detail,
+    )
+
+
+def card_reconcile(
+    db: Session,
+    ts: datetime | None = None,
+    te: datetime | None = None,
+    *,
+    detail_limit: int = 500,
+    include_detail: bool = True,
+) -> dict:
+    """**(外)卡商**双边对账（只读, 任意窗口）—— #57 新增
+
+    文档侧 = `card_complaints`(卡商群投诉/接待过程, 渠道标签 = `complaint_group`)
+    工单侧 = 卡商类工单(`item = 工信部投诉`, 经营登记)
+
+    ★ 用户 2026-09-11 判断(已实测证实):
+      > 「工信部投诉 应该是**卡商投诉匹配**, 可以从外部投诉 摘出来 做单独统计对账去」
+
+    证据: 配对内容全是「物联网卡/转售商/ICCID/卡商群名」, 日期差恒 +1 天
+          (卡商群投诉 → 次日转工信部建单); 315 文档无工信部渠道。
+
+    返回值字段见 `_reconcile_core`(此处 `label` = 卡商群名)。
+    """
+    return _reconcile_core(
+        db,
+        doc_model=CardComplaint,
+        doc_date_col=CardComplaint.complaint_date,
+        doc_label_col=CardComplaint.complaint_group,
+        doc_matched_col=CardComplaint.matched_ticket_no,
+        ticket_where=_card_ticket_where(),
+        ts=ts, te=te,
+        detail_limit=detail_limit, include_detail=include_detail,
+    )
+
+
+def reconcile_all(
+    db: Session,
+    ts: datetime | None = None,
+    te: datetime | None = None,
+    *,
+    detail_limit: int = 500,
+    include_detail: bool = True,
+) -> dict:
+    """**分渠道对账总入口** —— 外部投诉 与 (外)卡商 **分开对账** (#57)
+
+    用户: 「全部摘出吧 然后再分开对账」
+
+    返回: {"external": {...}, "card": {...}}
+    """
+    return {
+        "external": external_reconcile(
+            db, ts, te, detail_limit=detail_limit, include_detail=include_detail
+        ),
+        "card": card_reconcile(
+            db, ts, te, detail_limit=detail_limit, include_detail=include_detail
+        ),
+    }
+
+
+def _remark_one(
+    db: Session,
+    *,
+    doc_model,
+    doc_date_col,
+    doc_matched_col,
+    ticket_where,
+    window_days: int,
+    dry_run: bool,
+    commit: bool,
+    now: datetime,
+) -> dict:
+    """单渠道重匹配内核 —— 外部投诉 / 卡商 共用 (#57)"""
+    cutoff = now - timedelta(days=window_days)
+    rows = db.execute(
+        select(doc_model.id, doc_model.device_sn, doc_date_col, doc_matched_col)
+        .where(or_(doc_matched_col.is_(None), doc_date_col >= cutoff))
+    ).all()
+
+    sns = {r[1] for r in rows if r[1]}
+    cand_map = _sn_candidates(db, sns, where=ticket_where)
+
+    newly = changed = unmatched = 0
+    updates: list[tuple[int, str | None, datetime | None]] = []
+    for rid, sn, cdate, old in rows:
+        tno, _diff = _pick_nearest(cand_map.get(sn) if sn else None, cdate)
+        if tno is None:
+            unmatched += 1
+            if old is not None:
+                # 原匹配已不合规(指向非本类工单) → 清空, 避免统计被污染
+                updates.append((rid, None, None))
+                changed += 1
+            continue
+        if tno == old:
+            continue
+        updates.append((rid, tno, now))
+        if old is None:
+            newly += 1
+        else:
+            changed += 1
+
+    if not dry_run and updates:
+        tbl = doc_model.__table__
+        for rid, tno, at in updates:
+            db.execute(
+                tbl.update().where(tbl.c.id == rid)
+                .values(matched_ticket_no=tno, matched_at=at)
+            )
+        if commit:
+            db.commit()
+        else:
+            db.flush()
+
+    return {
+        "scanned": len(rows),
+        "newly_matched": newly,
+        "changed": changed,
+        "unmatched": unmatched,
+        "dry_run": dry_run,
+    }
+
+
 def remark_matched(db: Session, *, window_days: int = 90,
                    dry_run: bool = False, commit: bool = True) -> dict:
     """重算并回写 `matched_ticket_no` —— 解决「工单晚到不补挂」(#56 缺陷 4)
@@ -310,64 +471,27 @@ def remark_matched(db: Session, *, window_days: int = 90,
       · `commit` —— 是否提交。默认 True(生产用);
         **测试传 False**(避免破坏 conftest 的事务回滚隔离, 改为 flush 使断言可见)。
 
-    返回: {"scanned": n, "newly_matched": n, "changed": n, "unmatched": n}
+    ★★ #57: 同时处理 **外部投诉** 与 **(外)卡商** 两条渠道 ★★
+      返回 `{"external": {...}, "card": {...}}`, 各自统计。
+      卡商渠道用 `item=工信部投诉` 作候选(工信部已从外部投诉摘出)。
+
+    返回: 各渠道 {"scanned", "newly_matched", "changed", "unmatched", "dry_run"}
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-    rows = db.execute(
-        select(ExternalComplaint.id, ExternalComplaint.device_sn,
-               ExternalComplaint.complaint_date, ExternalComplaint.matched_ticket_no)
-        .where(
-            or_(
-                ExternalComplaint.matched_ticket_no.is_(None),
-                ExternalComplaint.complaint_date >= cutoff,
-            )
-        )
-    ).all()
-
-    sns = {r[1] for r in rows if r[1]}
-    cand_map = _sn_candidates(db, sns)
-
     now = datetime.now(timezone.utc)
-    newly = changed = 0
-    unmatched = 0
-    updates: list[tuple[int, str | None, datetime | None]] = []
-    for rid, sn, cdate, old in rows:
-        tno, _diff = _pick_nearest(cand_map.get(sn) if sn else None, cdate)
-        if tno is None:
-            unmatched += 1
-            if old is not None:
-                # 原匹配已不合规(指向非外部投诉类工单) → 清空, 避免统计被污染
-                updates.append((rid, None, None))
-                changed += 1
-            continue
-        if tno == old:
-            continue
-        updates.append((rid, tno, now))
-        if old is None:
-            newly += 1
-        else:
-            changed += 1
-
-    if not dry_run and updates:
-        tbl = ExternalComplaint.__table__
-        for rid, tno, at in updates:
-            db.execute(
-                tbl.update().where(tbl.c.id == rid)
-                .values(matched_ticket_no=tno, matched_at=at)
-            )
-        if commit:
-            db.commit()
-        else:
-            db.flush()
-
-    logger.info(
-        "remark_matched: 扫描 %d, 新挂 %d, 变更 %d, 仍空悬 %d, dry_run=%s",
-        len(rows), newly, changed, unmatched, dry_run,
+    ext = _remark_one(
+        db, doc_model=ExternalComplaint,
+        doc_date_col=ExternalComplaint.complaint_date,
+        doc_matched_col=ExternalComplaint.matched_ticket_no,
+        ticket_where=_external_ticket_where(),
+        window_days=window_days, dry_run=dry_run, commit=commit, now=now,
     )
-    return {
-        "scanned": len(rows),
-        "newly_matched": newly,
-        "changed": changed,
-        "unmatched": unmatched,
-        "dry_run": dry_run,
-    }
+    card = _remark_one(
+        db, doc_model=CardComplaint,
+        doc_date_col=CardComplaint.complaint_date,
+        doc_matched_col=CardComplaint.matched_ticket_no,
+        ticket_where=_card_ticket_where(),
+        window_days=window_days, dry_run=dry_run, commit=commit, now=now,
+    )
+    logger.info("remark_matched(external): %s", ext)
+    logger.info("remark_matched(card): %s", card)
+    return {"external": ext, "card": card}

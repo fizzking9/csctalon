@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from app.services.complaint_scope import (
     ALL_BUCKETS,
     BUCKET_CARD,
+    BUCKET_CARD_TICKET,
     BUCKET_EXTERNAL,
     BUCKET_INTERNAL,
     BUCKET_MERCHANT,
@@ -59,7 +60,9 @@ class TestBucket:
             "商品投诉": BUCKET_INTERNAL,     # 17,148
             "服务投诉": BUCKET_INTERNAL,     # 9,696
             "微信投诉": BUCKET_MERCHANT,     # 4,384
-            "工信部投诉": BUCKET_EXTERNAL,   # 320
+            # ★#57: 工信部已从外部投诉**摘出** → (外)卡商渠道
+            #   用户: "工信部投诉 应该是卡商投诉匹配, 从外部投诉 摘出来 分开对账"
+            "工信部投诉": BUCKET_CARD_TICKET,   # 320
             "全国12315平台": BUCKET_EXTERNAL,  # 278
             "公共服务平台": BUCKET_EXTERNAL,  # 87
             "消费者协会": BUCKET_EXTERNAL,   # 50
@@ -68,13 +71,27 @@ class TestBucket:
         for item, exp in cases.items():
             assert classify_bucket_from_item(item) == exp, item
 
+    def test_industry_gov_is_card_channel(self):
+        """★★ #57: 「工信部投诉」→ `(外)卡商`（不再是外部投诉）
+
+        用户 2026-09-11: "工信部投诉 应该是卡商投诉匹配，可以从外部投诉 摘出来
+        做单独统计对账去" → "全部摘出吧 然后再分开对账"
+
+        证据: 卡商表 ⨝ 工信部工单 的配对内容全是「物联网卡/转售商/ICCID/卡商群名」，
+              日期差恒 +1 天(卡商群投诉 → 次日转工信部建单);
+              315 文档(external_complaints.platform)里**没有工信部**渠道。
+        """
+        assert classify_bucket_from_item("工信部投诉") == BUCKET_CARD_TICKET
+        assert classify_bucket_from_item("工信部投诉") != BUCKET_EXTERNAL
+
     def test_priority_external_over_merchant(self):
         """★优先级: 外部平台关键词 > 微信
 
         "12315微信投诉" 应归**外部**（监管渠道更重，既有口径 2026-08-25 固化）。
         """
         assert classify_bucket_from_item("12315微信投诉") == BUCKET_EXTERNAL
-        assert classify_bucket_from_item("工信部转微信") == BUCKET_EXTERNAL
+        # ★#57: 工信部**先于**其他平台词判定 → 归卡商
+        assert classify_bucket_from_item("工信部转微信") == BUCKET_CARD_TICKET
 
     def test_priority_merchant_over_internal(self):
         """微信 > 商品/服务（"微信投诉"不含"商品投诉"字样，此处验证不误归）"""
@@ -91,7 +108,9 @@ class TestBucket:
         assert classify_bucket_from_item("", "H5") == BUCKET_INTERNAL
         assert classify_bucket_from_item(None, "H5") == BUCKET_INTERNAL
         # item 有值时, channel 不覆盖 item
-        assert classify_bucket_from_item("工信部投诉", "微信投诉") == BUCKET_EXTERNAL
+        # ★#57: 工信部已归卡商渠道(不再是外部)
+        assert classify_bucket_from_item("工信部投诉", "微信投诉") == BUCKET_CARD_TICKET
+        assert classify_bucket_from_item("全国12315平台", "微信投诉") == BUCKET_EXTERNAL
 
     def test_no_other_bucket(self):
         """★★ #53: **无「其他」桶** —— else 兜底为内部投诉（四类完备）

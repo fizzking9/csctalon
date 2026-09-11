@@ -60,7 +60,7 @@ import logging
 import re
 from datetime import date
 
-from sqlalchemy import and_, func, literal, or_
+from sqlalchemy import and_, func, literal, or_, select
 from sqlalchemy import case as sa_case
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -159,6 +159,109 @@ def external_ticket_cond(cat_col, item_col, channel_col=None) -> ColumnElement:
     )
 
 
+def card_ticket_cond(cat_col, item_col, channel_col=None) -> ColumnElement:
+    """「**(外)卡商类工单**」判据 —— 卡商对账的**唯一口径** (#57)
+
+    ★★ 用户 2026-09-11 判断(已实测证实) ★★
+
+      > 「工信部投诉 应该是**卡商投诉匹配**, 可以从外部投诉 **摘出来
+      >   做单独统计对账**去。」→「全部摘出吧 然后再分开对账」
+
+    ## 证据
+
+      1. **配对内容全是卡商业务**: `card_complaints ⨝ service_tickets(item=工信部投诉)`
+         的实际配对里, 投诉内容全是「物联网卡 / 转售商 / ICCID / 卡商群名」,
+         日期差**恒为 +1 天**(卡商群投诉 → 次日转工信部建单)
+      2. **315 文档无工信部渠道**: `external_complaints.platform` 只有
+         航城监所 / 12315 / 公共服务平台 / 消委会 / 宝安市监等, **无工信部**
+      3. **工单侧空悬 22 条里 16 条是工信部**, 其中 **12 条(75%)** 命中卡商表
+
+    ⚠️ 曾经的误判(防复发): 曾统计出「工信部工单 92% 命中 315 表」,
+       误以为归 315 是对的。实际是**同一用户多渠道投诉**(#55 `multi_channel`)
+       —— 同 SN 既向工信部又向 315 投诉, SN 重叠造成**假命中**。
+       **判断渠道归属要看内容, 不能只看 SN 命中率。**
+
+    返回可直接用于 `WHERE` 的条件表达式。
+    """
+    return and_(
+        is_complaint_ticket_cond(cat_col),
+        complaint_bucket_case(item_col, channel_col) == BUCKET_CARD_TICKET,
+    )
+
+
+def supervision_platform_cond(platform_col) -> ColumnElement:
+    """315 文档 `platform` 是否属**监管所/市监局**类渠道 (#58)
+
+    用于识别「实际是监所投诉、却被录入工信部」的情况。
+    """
+    pl = func.coalesce(platform_col, literal(""))
+    return or_(*[pl.ilike(f"%{k}%") for k in _SUPERVISION_PLATFORM_KEYWORDS])
+
+
+def supervision_sn_subquery():
+    """返回「在 315 文档里属监所/市监局类渠道」的 SN 子查询 (#58)
+
+    用于纠正「实际是监所投诉、却录进工信部」的工单。
+    独立成函数便于复用与单测。
+    """
+    from app.models.external_complaint import ExternalComplaint
+
+    return select(ExternalComplaint.device_sn).where(
+        ExternalComplaint.device_sn.isnot(None),
+        supervision_platform_cond(ExternalComplaint.platform),
+    )
+
+
+def effective_external_ticket_cond(
+    sn_col,
+    cat_col,
+    item_col,
+    channel_col=None,
+) -> ColumnElement:
+    """**外部投诉工单（含误录纠正）** —— 对账用口径 (#58)
+
+    ★ 用户口径（2026-09-11 拍板）:
+      > 「工信部的**优先算作登记错误**，与外部投诉表进行对账。」
+
+    定义 = 原外部投诉类 **OR** (工信部类 ∧ SN 在 315 是监所/市监局类)
+
+    参数:
+      · `sn_col` —— 工单的 SN 列(`ServiceTicket.device_sn`), 用于判误录
+
+    ⚠️ **不改 BMS 原数据** —— 只在统计/对账口径纠正;
+       `service_item='工信部投诉'` 保持原样(用户: "不能乱删除 所以还是慎重")。
+    """
+    base_external = and_(
+        is_complaint_ticket_cond(cat_col),
+        complaint_bucket_case(item_col, channel_col) == BUCKET_EXTERNAL,
+    )
+    misclassified = and_(
+        is_complaint_ticket_cond(cat_col),
+        complaint_bucket_case(item_col, channel_col) == BUCKET_CARD_TICKET,
+        sn_col.in_(supervision_sn_subquery()),
+    )
+    return or_(base_external, misclassified)
+
+
+def effective_card_ticket_cond(
+    sn_col,
+    cat_col,
+    item_col,
+    channel_col=None,
+) -> ColumnElement:
+    """**(外)卡商工单（排除误录）** —— 对账用口径 (#58)
+
+    定义 = 工信部类 **AND** SN **不在** 315 监所/市监局 SN 集合
+
+    即: 被误录为工信部、但实为监所投诉的, **不再算卡商**。
+    """
+    return and_(
+        is_complaint_ticket_cond(cat_col),
+        complaint_bucket_case(item_col, channel_col) == BUCKET_CARD_TICKET,
+        sn_col.notin_(supervision_sn_subquery()),
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 二、四类桶（服务项 / 渠道 → 投诉分类）
 # ═══════════════════════════════════════════════════════════════════
@@ -185,15 +288,41 @@ def external_ticket_cond(cat_col, item_col, channel_col=None) -> ColumnElement:
 #     合计 32,058 ✓ 自洽, **无需「其他」兜底**
 #
 # 实现优先级(item 优先, channel 回退):
-#   1. item 含外部平台关键词 → 外部投诉
+#   0. **item = 工信部投诉 → (外)卡商**  ← #57 摘出(先于一切外部平台词)
+#   1. item 含其他外部平台关键词 → 外部投诉
 #   2. item 含「微信」      → 商户号投诉
 #   3. item 含商品/服务投诉 → 内部投诉
 #   4. item = 套餐扣费申诉  → 内部投诉
 #   5. **channel 含「微信」→ 商户号投诉**   ← 救回 78 行空 item
 #   6. else                → 内部投诉      ← 救回 3 行空 item(H5 渠道)
+#
+# ★★ #57 (2026-09-11): 「工信部投诉」从外部投诉**摘出** ★★
+#   用户: "工信部投诉 应该是卡商投诉匹配, 可以从外部投诉 摘出来 做单独统计对账去"。
+#   证据: ① card_complaints ⨝ 工信部工单 的配对内容全是「物联网卡/转售商/ICCID/
+#           卡商群名」, 日期差恒为 +1 天(卡商群投诉 → 次日转工信部建单);
+#        ② 315 文档(external_complaints.platform)里**没有工信部**渠道;
+#        ③ 工单侧空悬 22 条里 16 条是工信部, 其中 12 条(75%)命中卡商表。
+#   ⚠️ 防复发: 不能用「SN 命中率」判渠道归属(同 SN 多渠道投诉会造成假命中)。
+_CARD_TICKET_KEYWORDS = ("工信部",)
 _EXTERNAL_PLATFORM_KEYWORDS = (
-    "工信部", "12315", "公共服务平台", "消费者协会", "消协",
+    "12315", "公共服务平台", "消费者协会", "消协",
     "监督局", "市场监管", "市监", "315平台", "12345", "政务平台",
+    # ⚠️ #57: 已移除「工信部」—— 它是卡商渠道, 见 `_CARD_TICKET_KEYWORDS`
+)
+
+# ── ★★ #58: 监管所/市监局 类关键词（用于识别「误录进工信部」）★★ ──
+#   用户 2026-09-11:
+#     > 「发现一个严重的问题，目前 监督所的 哪些 都录入到了工信部 里面去了」
+#     > 「工信部的**优先算作登记错误**，与外部投诉表进行对账。」
+#
+#   背景: 工单侧**没有**监所/市监局类别(全 11 个字段搜索均为 0),
+#         而文档侧(315)监所类是第一大渠道(航城监所 490 条)。
+#         客服收到监所转来的投诉时只能选别的类别 → 实测多选「工信部投诉」。
+#
+#   判定路径: 走 **315 文档的 platform 字段**, 而非工单文本
+#     (工单 remark/submit_params/order_no 全空; handle_opinion 只含退款金额)
+_SUPERVISION_PLATFORM_KEYWORDS = (
+    "监所", "市监局", "监督局", "市场监管", "市场监督管理局", "监督管理局",
 )
 _MERCHANT_KEYWORDS = ("微信",)
 _INTERNAL_KEYWORDS = ("商品投诉", "服务投诉")
@@ -204,17 +333,27 @@ _INTERNAL_ITEM_EXACT = ("套餐扣费申诉",)
 BUCKET_INTERNAL = "内部投诉"
 BUCKET_MERCHANT = "商户号投诉"
 BUCKET_EXTERNAL = "外部投诉"
+# ★★ #57: 工单侧「(外)卡商」桶 —— 来源为 `item = 工信部投诉` ★★
+#   ⚠️ 与 #53 的关系: #53 把卡商**移出来源桶**, 依据是"工单表含卡商均为 0 行"
+#      (只看了 `service_item` 字面含"卡商")。但 #57 实测发现卡商在工单侧
+#      **以「工信部投诉」的形式存在**(320 行) → 故**回归为可识别的桶**。
+#   ⚠️ 统计上仍**独立**: 不并入 `complaint_total`(与 #53「独立体系」结论一致)。
+BUCKET_CARD_TICKET = "(外)卡商"
 # ⚠️ 兼容保留: 「其他」桶已在 #53 移除(四类完备)。此常量仅供**历史数据/迁移**识别,
 #    新代码不应再产生该值。
 BUCKET_OTHER = "其他"
 
-# 投诉来源的全部合法桶（**不含卡商** —— 卡商是独立体系）
+# 投诉来源的全部合法桶（**工单侧四桶**; 卡商独立统计, 不并入总量）
 ALL_BUCKETS = (BUCKET_INTERNAL, BUCKET_MERCHANT, BUCKET_EXTERNAL)
+# ⚠️ 含卡商的完整枚举(#57) —— 用于"互斥完备性"校验场景
+ALL_BUCKETS_WITH_CARD = (*ALL_BUCKETS, BUCKET_CARD_TICKET)
 
 # ── (外)卡商: 独立统计体系（不参与投诉总量）──
 #   用户: "卡商投诉 可以单独于外部投诉, 可以单列 (外)卡商"; 且 #53 进一步要求
 #   "不纳入总量的管理, 整体独立统计分析"。
-#   ⚠️ 数据来源=`card_complaints` 表(非工单), 口径=表自身行数, **不扣工单重叠**。
+#   数据来源有**两处**(#57 补充):
+#     · `card_complaints` 补充表(workbuddy/文档推送, 873 行) ← 接待过程
+#     · `service_tickets.item='工信部投诉'`(BMS 经营登记, 320 行) ← #57 新增
 CARD_SCOPE = "(外)卡商"
 CARD_TABLE = "card_complaints"
 
@@ -231,20 +370,25 @@ def complaint_bucket_case(item_col, channel_col=None) -> ColumnElement:
       channel_col: `channel`（**可选回退**）。给出时, item 无法判定则用渠道兜底
                    —— 可救回 78 行「item 空 + channel=微信投诉」→ 商户号。
 
-    优先级（见上方 #53 说明）:
-      外部平台关键词 > 微信 > 商品/服务投诉 > 套餐扣费申诉 > channel微信 > else内部
+    优先级（见上方 #53/#57 说明）:
+      工信部 > 其他外部平台词 > 微信 > 商品/服务投诉 > 套餐扣费申诉 > channel微信 > 内部
 
-    ⚠️ **不含卡商** —— 卡商是独立体系(见 `CARD_SCOPE`), 由调用方单独统计。
+    ⚠️ **#57: 「工信部投诉」→ `(外)卡商`**（卡商渠道, 不再算外部投诉）。
+       必须排在**最前** —— 原 `_EXTERNAL_PLATFORM_KEYWORDS` 就把它放在首位,
+       摘出后仍要保持"先判"语义。
     ⚠️ **无「其他」兜底** —— #53 实测四类完备, else 兜底为**内部投诉**
        (用户: "还有部分 似乎应该归类为 内部投诉")。
     """
     si = func.coalesce(item_col, literal(""))
+    card_whens = [si.ilike(f"%{k}%") for k in _CARD_TICKET_KEYWORDS]
     ext_whens = [si.ilike(f"%{k}%") for k in _EXTERNAL_PLATFORM_KEYWORDS]
     mer_whens = [si.ilike(f"%{k}%") for k in _MERCHANT_KEYWORDS]
     int_whens = [si.ilike(f"%{k}%") for k in _INTERNAL_KEYWORDS]
     exact_whens = [si == k for k in _INTERNAL_ITEM_EXACT]
 
     whens = [
+        # ★ #57: 工信部 → (外)卡商, 必须最先判定
+        (or_(*card_whens), BUCKET_CARD_TICKET),
         (or_(*ext_whens), BUCKET_EXTERNAL),
         (or_(*mer_whens), BUCKET_MERCHANT),
         (or_(*int_whens), BUCKET_INTERNAL),
@@ -261,12 +405,17 @@ def complaint_bucket_case(item_col, channel_col=None) -> ColumnElement:
 def classify_bucket_from_item(item: str | None, channel: str | None = None) -> str:
     """纯 Python 版分桶（供测试与逐行场景；与 SQL 版同口径）
 
-    优先级: 外部平台词 > 微信 > 商品/服务 > 套餐扣费申诉 > channel微信 > 内部(兜底)
+    优先级: 工信部 > 其他外部平台词 > 微信 > 商品/服务 > 套餐扣费申诉 >
+            channel微信 > 内部(兜底)
 
+    ⚠️ **#57: 「工信部」→ `(外)卡商`**（卡商渠道）
     ⚠️ else 兜底为**内部投诉**（#53）—— 实测空白 category 仅剩
        「空item + H5 渠道」3 行, 用户明确"还有部分 似乎应该归类为 内部投诉"。
     """
     s = (item or "").strip()
+    # ★ #57: 工信部最先判(卡商渠道)
+    if any(k in s for k in _CARD_TICKET_KEYWORDS):
+        return BUCKET_CARD_TICKET
     if any(k in s for k in _EXTERNAL_PLATFORM_KEYWORDS):
         return BUCKET_EXTERNAL
     if any(k in s for k in _MERCHANT_KEYWORDS):
