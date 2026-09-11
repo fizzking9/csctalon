@@ -1,5 +1,8 @@
 # Alembic Migration 管理规范
 
+**性质**：元需求（META） —— 约束**所有**表结构变更
+
+
 > 版本：v1.1 · 日期：2026-08-26
 > 关联代码：[backend/alembic/](../backend/alembic/)
 > 当前 head：`73a7922ec598`（单一 head）

@@ -20,22 +20,22 @@
   <div class="time-bar">
     <!-- ① 周期(粒度) —— 分析视角 -->
     <el-radio-group :model-value="grain" size="small" @update:model-value="$emit('update:grain', $event)">
-      <el-radio-button label="auto">自动</el-radio-button>
-      <el-radio-button label="day">日</el-radio-button>
-      <el-radio-button label="week">周</el-radio-button>
-      <el-radio-button label="month">月</el-radio-button>
+      <el-radio-button value="auto">自动</el-radio-button>
+      <el-radio-button value="day">日</el-radio-button>
+      <el-radio-button value="week">周</el-radio-button>
+      <el-radio-button value="month">月</el-radio-button>
     </el-radio-group>
 
     <!-- ② 快捷区间 —— 业务自然周期 -->
     <el-radio-group :model-value="preset" size="small" @update:model-value="onPreset">
-      <el-radio-button label="this_week">本周</el-radio-button>
-      <el-radio-button label="last_week">上周</el-radio-button>
-      <el-radio-button label="this_month">本月</el-radio-button>
-      <el-radio-button label="last_month">上月</el-radio-button>
-      <el-radio-button label="last7">近7天</el-radio-button>
-      <el-radio-button label="last30">近30天</el-radio-button>
-      <el-radio-button label="last90">近90天</el-radio-button>
-      <el-radio-button label="custom">自定义</el-radio-button>
+      <el-radio-button value="this_week">本周</el-radio-button>
+      <el-radio-button value="last_week">上周</el-radio-button>
+      <el-radio-button value="this_month">本月</el-radio-button>
+      <el-radio-button value="last_month">上月</el-radio-button>
+      <el-radio-button value="last7">近7天</el-radio-button>
+      <el-radio-button value="last30">近30天</el-radio-button>
+      <el-radio-button value="last90">近90天</el-radio-button>
+      <el-radio-button value="custom">自定义</el-radio-button>
     </el-radio-group>
 
     <!-- ③ 自定义区间 -->

@@ -16,9 +16,9 @@
           @change="loadAll"
         />
         <el-radio-group v-model="grain" size="small" @change="renderTrend">
-          <el-radio-button label="day">按日</el-radio-button>
-          <el-radio-button label="week">按周</el-radio-button>
-          <el-radio-button label="month">按月</el-radio-button>
+          <el-radio-button value="day">按日</el-radio-button>
+          <el-radio-button value="week">按周</el-radio-button>
+          <el-radio-button value="month">按月</el-radio-button>
         </el-radio-group>
         <el-button type="primary" size="small" :icon="Search" :loading="loading" @click="loadAll">分析</el-button>
       </div>

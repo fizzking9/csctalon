@@ -4,14 +4,14 @@
       <div class="page-title" style="margin: 0">运营分析</div>
       <div class="filter-bar">
         <el-radio-group v-model="range" size="small" @change="loadAll">
-          <el-radio-button label="7">近7天</el-radio-button>
-          <el-radio-button label="30">近30天</el-radio-button>
-          <el-radio-button label="90">近90天</el-radio-button>
+          <el-radio-button value="7">近7天</el-radio-button>
+          <el-radio-button value="30">近30天</el-radio-button>
+          <el-radio-button value="90">近90天</el-radio-button>
         </el-radio-group>
         <el-radio-group v-model="grain" size="small" @change="loadAll">
-          <el-radio-button label="day">按日</el-radio-button>
-          <el-radio-button label="week">按周</el-radio-button>
-          <el-radio-button label="month">按月</el-radio-button>
+          <el-radio-button value="day">按日</el-radio-button>
+          <el-radio-button value="week">按周</el-radio-button>
+          <el-radio-button value="month">按月</el-radio-button>
         </el-radio-group>
       </div>
     </div>

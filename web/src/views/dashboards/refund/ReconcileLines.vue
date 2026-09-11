@@ -35,12 +35,12 @@
     <div class="flex-between mb-12">
       <div class="filter-bar">
         <el-radio-group v-model="routeFilter" size="small" @change="load">
-          <el-radio-button label="">全部</el-radio-button>
-          <el-radio-button label="A">A线上</el-radio-button>
-          <el-radio-button label="B">B钱包</el-radio-button>
-          <el-radio-button label="C">C闪猫</el-radio-button>
-          <el-radio-button label="D">D手动</el-radio-button>
-          <el-radio-button label="unmatched">未登记</el-radio-button>
+          <el-radio-button value="">全部</el-radio-button>
+          <el-radio-button value="A">A线上</el-radio-button>
+          <el-radio-button value="B">B钱包</el-radio-button>
+          <el-radio-button value="C">C闪猫</el-radio-button>
+          <el-radio-button value="D">D手动</el-radio-button>
+          <el-radio-button value="unmatched">未登记</el-radio-button>
         </el-radio-group>
         <el-select v-model="statusFilter" size="small" placeholder="确认状态" clearable style="width:130px;margin-left:8px" @change="load">
           <el-option v-for="s in statusOptions" :key="s" :label="s" :value="s" />

@@ -123,8 +123,8 @@
         <el-form-item label="规则名" required><el-input v-model="ruleForm.name" /></el-form-item>
         <el-form-item label="模式">
           <el-radio-group v-model="ruleForm.mode">
-            <el-radio-button label="metric">指标模式(推荐)</el-radio-button>
-            <el-radio-button label="legacy">旧模式(激增类)</el-radio-button>
+            <el-radio-button value="metric">指标模式(推荐)</el-radio-button>
+            <el-radio-button value="legacy">旧模式(激增类)</el-radio-button>
           </el-radio-group>
         </el-form-item>
         <template v-if="ruleForm.mode === 'metric'">

@@ -6,8 +6,8 @@
         <span class="block-title" style="margin: 0">类型 × 趋势</span>
         <span class="trend-hint">粒度:</span>
         <el-radio-group v-model="grain" size="small" @change="loadTrend">
-          <el-radio-button label="day">按日</el-radio-button>
-          <el-radio-button label="week">按周</el-radio-button>
+          <el-radio-button value="day">按日</el-radio-button>
+          <el-radio-button value="week">按周</el-radio-button>
         </el-radio-group>
         <el-button :icon="Refresh" size="small" type="primary" :loading="loading" @click="loadAll">刷新</el-button>
       </div>
@@ -40,9 +40,9 @@
       <div class="chart-header">
         <span class="block-title" style="margin: 0">日期 × 原因 矩阵热力图 (近30天)</span>
         <el-radio-group v-model="matrixMode" size="small">
-          <el-radio-button label="failed">失败数</el-radio-button>
-          <el-radio-button label="total">接待数</el-radio-button>
-          <el-radio-button label="rate">成功率</el-radio-button>
+          <el-radio-button value="failed">失败数</el-radio-button>
+          <el-radio-button value="total">接待数</el-radio-button>
+          <el-radio-button value="rate">成功率</el-radio-button>
         </el-radio-group>
       </div>
       <BaseChart v-if="heatmapHasData" :option="heatmapOption" height="560px" />

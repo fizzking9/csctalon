@@ -53,6 +53,15 @@ export default [
       // Vue 3 合法模式: props.filter 是响应式对象, 子组件改其属性双向绑定分页
       // (父组件 filter 对象传递, 多处使用此惯例)。ESLint 保守报错, 关闭。
       'vue/no-mutating-props': 'off',
+      // ★ 2026-09-11(#67) Vue 2 遗留规则, 显式关闭并说明原因:
+      //   `vue/no-v-model-argument` 只在 `flat/vue2-*` 规则集中启用,
+      //   作用是不允许 Vue 2 使用 `v-model:argument` 具名双向绑定。
+      //   本项目是 **Vue 3.4**(v-model 参数是 3.0+ 的官方特性),
+      //   既有代码亦大量在用(如 el-pagination 的 v-model:current-page)。
+      //   编辑器侧的 Vue 版本探测可能回退到 vue2 规则集 → 误报为 compileError,
+      //   实际 `vite build` 与命令行 `eslint` 均无此错误(实测)。
+      //   显式 off: 统一口径, 避免编辑器与 CI 结论不一致.
+      'vue/no-v-model-argument': 'off',
     },
     // console.log 豁免: AGENTS.md 允许 `[TODO:]` 前缀的显式 TODO 标记
     // (如 RegistryCenter.vue 的 console.log('[TODO:PolicyDetail]', row))

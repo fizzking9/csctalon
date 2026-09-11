@@ -90,9 +90,9 @@
         </el-form-item>
         <el-form-item label="严重程度">
           <el-radio-group v-model="form.severity">
-            <el-radio-button label="高" />
-            <el-radio-button label="中" />
-            <el-radio-button label="低" />
+            <el-radio-button value="高" />
+            <el-radio-button value="中" />
+            <el-radio-button value="低" />
           </el-radio-group>
         </el-form-item>
         <el-form-item label="明细描述">

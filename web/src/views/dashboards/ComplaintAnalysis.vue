@@ -430,9 +430,9 @@
             </el-form-item>
             <el-form-item label="评判">
               <el-radio-group v-model="auditForm.judgment">
-                <el-radio-button label="通过" />
-                <el-radio-button label="有问题" />
-                <el-radio-button label="需改进" />
+                <el-radio-button value="通过" />
+                <el-radio-button value="有问题" />
+                <el-radio-button value="需改进" />
               </el-radio-group>
             </el-form-item>
             <el-form-item label="核查结论">
@@ -492,10 +492,10 @@
         <div class="filter-bar mb-16">
           <span class="filter-label">来源</span>
           <el-radio-group v-model="subjectFilter.source_type" size="small" @change="loadSubjectAnalysis">
-            <el-radio-button label="all">全部</el-radio-button>
-            <el-radio-button label="merchant">仅商户号</el-radio-button>
-            <el-radio-button label="external">仅外部</el-radio-button>
-            <el-radio-button label="both">升级主体</el-radio-button>
+            <el-radio-button value="all">全部</el-radio-button>
+            <el-radio-button value="merchant">仅商户号</el-radio-button>
+            <el-radio-button value="external">仅外部</el-radio-button>
+            <el-radio-button value="both">升级主体</el-radio-button>
           </el-radio-group>
           <span class="filter-label">排序</span>
           <el-select v-model="subjectFilter.sort_by" size="small" style="width:130px" @change="loadSubjectAnalysis">
@@ -581,9 +581,9 @@
               <div class="flex-between">
                 <div class="chart-title">主体投诉趋势<span class="dim-text"> · 商户号+外部投诉汇聚</span></div>
                 <el-radio-group v-model="subjectTrendGrain" size="small">
-                  <el-radio-button label="day">按日</el-radio-button>
-                  <el-radio-button label="week">按周</el-radio-button>
-                  <el-radio-button label="month">按月</el-radio-button>
+                  <el-radio-button value="day">按日</el-radio-button>
+                  <el-radio-button value="week">按周</el-radio-button>
+                  <el-radio-button value="month">按月</el-radio-button>
                 </el-radio-group>
               </div>
               <BaseChart v-if="subjectTrendOption" :option="subjectTrendOption" height="250px" />
@@ -595,9 +595,9 @@
               <div class="flex-between">
                 <div class="chart-title">Top5 被投诉主体趋势<span class="dim-text"> · 汇聚后按主体总量排序</span></div>
                 <el-radio-group v-model="topSubjectTrendGrain" size="small">
-                  <el-radio-button label="day">按日</el-radio-button>
-                  <el-radio-button label="week">按周</el-radio-button>
-                  <el-radio-button label="month">按月</el-radio-button>
+                  <el-radio-button value="day">按日</el-radio-button>
+                  <el-radio-button value="week">按周</el-radio-button>
+                  <el-radio-button value="month">按月</el-radio-button>
                 </el-radio-group>
               </div>
               <BaseChart v-if="topSubjectTrendOption" :option="topSubjectTrendOption" height="250px" />
@@ -739,8 +739,8 @@
            平铺会让决策者在 8 个 tab 里迷路。 -->
     <div v-if="loaded" class="nav-wrap">
       <el-radio-group v-model="topTab" size="default">
-        <el-radio-button label="analysis">分析</el-radio-button>
-        <el-radio-button label="execute">
+        <el-radio-button value="analysis">分析</el-radio-button>
+        <el-radio-button value="execute">
           执行跟踪
           <el-badge v-if="(b.total ?? 0) > 0" :value="b.total" type="danger" style="margin-left:6px" />
         </el-radio-button>
@@ -749,19 +749,19 @@
       <template v-if="topTab === 'analysis'">
         <span class="nav-sep" />
         <el-radio-group v-model="analysisTab" size="small">
-          <el-radio-button label="overview">决策概览</el-radio-button>
-          <el-radio-button label="channel">渠道明细</el-radio-button>
-          <el-radio-button label="subject">主体分析</el-radio-button>
+          <el-radio-button value="overview">决策概览</el-radio-button>
+          <el-radio-button value="channel">渠道明细</el-radio-button>
+          <el-radio-button value="subject">主体分析</el-radio-button>
         </el-radio-group>
       </template>
 
       <template v-if="topTab === 'analysis' && analysisTab === 'channel'">
         <span class="nav-sep" />
         <el-radio-group v-model="channelTab" size="small">
-          <el-radio-button label="internal">内部投诉</el-radio-button>
-          <el-radio-button label="merchant">商户号投诉</el-radio-button>
-          <el-radio-button label="external">外部投诉</el-radio-button>
-          <el-radio-button label="card">(外)卡商</el-radio-button>
+          <el-radio-button value="internal">内部投诉</el-radio-button>
+          <el-radio-button value="merchant">商户号投诉</el-radio-button>
+          <el-radio-button value="external">外部投诉</el-radio-button>
+          <el-radio-button value="card">(外)卡商</el-radio-button>
         </el-radio-group>
       </template>
     </div>

@@ -1,5 +1,8 @@
 # API 接口文档
 
+**性质**：参考（REF） —— 全量接口清单（~374 端点），**以代码为准**
+
+
 > 版本：v1.1 · 日期：2026-08-26
 > Base URL：`http://<服务器IP>:8000/api/v1`
 > 认证：JWT Bearer Token（除 `/auth/login`、`/auth/login-json`、`/wechat/auth/code-login` 外所有接口需 `Authorization: Bearer <token>`）

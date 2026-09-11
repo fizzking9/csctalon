@@ -4,16 +4,16 @@
       <div class="page-title" style="margin: 0">退款分析</div>
       <div class="filter-bar">
         <el-radio-group v-model="tabMode" size="small" @change="onTabChange">
-          <el-radio-button label="overview">决策概览</el-radio-button>
-          <el-radio-button label="withdrawal">提现时效</el-radio-button>
-          <el-radio-button label="reconcile">对账复核</el-radio-button>
+          <el-radio-button value="overview">决策概览</el-radio-button>
+          <el-radio-button value="withdrawal">提现时效</el-radio-button>
+          <el-radio-button value="reconcile">对账复核</el-radio-button>
         </el-radio-group>
         <el-radio-group v-if="tabMode === 'overview'" v-model="rangeMode" size="small">
-          <el-radio-button label="day">单日·{{ dailyLabel }}</el-radio-button>
-          <el-radio-button label="7">近7天</el-radio-button>
-          <el-radio-button label="30">近30天</el-radio-button>
-          <el-radio-button label="90">近90天</el-radio-button>
-          <el-radio-button label="custom">自定义</el-radio-button>
+          <el-radio-button value="day">单日·{{ dailyLabel }}</el-radio-button>
+          <el-radio-button value="7">近7天</el-radio-button>
+          <el-radio-button value="30">近30天</el-radio-button>
+          <el-radio-button value="90">近90天</el-radio-button>
+          <el-radio-button value="custom">自定义</el-radio-button>
         </el-radio-group>
         <el-date-picker
           v-if="tabMode === 'overview' && rangeMode === 'custom'"
@@ -26,8 +26,8 @@
           style="width: 240px"
         />
         <el-radio-group v-if="tabMode === 'overview'" v-model="grainMode" size="small">
-          <el-radio-button label="day">按日</el-radio-button>
-          <el-radio-button label="week">按周</el-radio-button>
+          <el-radio-button value="day">按日</el-radio-button>
+          <el-radio-button value="week">按周</el-radio-button>
         </el-radio-group>
         <el-button v-if="tabMode !== 'reconcile'" type="primary" :icon="Search" :loading="analyzing" @click="runAnalysis">分析</el-button>
         <el-button v-if="tabMode === 'overview' && analyzed" :icon="Download" @click="handleExport">导出</el-button>

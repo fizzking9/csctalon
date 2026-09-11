@@ -3,11 +3,11 @@
     <!-- 类型筛选 + 关键词搜索 -->
     <div class="filter-bar">
       <el-radio-group v-model="activeType" size="small" class="filter-types">
-        <el-radio-button label="">全部 ({{ items.length }})</el-radio-button>
+        <el-radio-button value="">全部 ({{ items.length }})</el-radio-button>
         <el-radio-button
           v-for="t in typeList"
           :key="t.key"
-          :label="t.key"
+          :value="t.key"
         >
           {{ t.label }} ({{ countOf(t.key) }})
         </el-radio-button>

@@ -8,11 +8,11 @@
       </div>
       <div v-if="dashboard" class="filter-bar">
         <el-radio-group v-model="rangeMode" size="small" @change="onRangeChange">
-          <el-radio-button label="7">近7天</el-radio-button>
-          <el-radio-button label="30">近30天</el-radio-button>
-          <el-radio-button label="90">近90天</el-radio-button>
-          <el-radio-button label="default">默认</el-radio-button>
-          <el-radio-button label="custom">自定义</el-radio-button>
+          <el-radio-button value="7">近7天</el-radio-button>
+          <el-radio-button value="30">近30天</el-radio-button>
+          <el-radio-button value="90">近90天</el-radio-button>
+          <el-radio-button value="default">默认</el-radio-button>
+          <el-radio-button value="custom">自定义</el-radio-button>
         </el-radio-group>
         <el-date-picker
           v-if="rangeMode === 'custom'"
@@ -26,9 +26,9 @@
           @change="onRangeChange"
         />
         <el-radio-group v-model="grainMode" size="small" @change="onGrainChange">
-          <el-radio-button label="day">按日</el-radio-button>
-          <el-radio-button label="week">按周</el-radio-button>
-          <el-radio-button label="month">按月</el-radio-button>
+          <el-radio-button value="day">按日</el-radio-button>
+          <el-radio-button value="week">按周</el-radio-button>
+          <el-radio-button value="month">按月</el-radio-button>
         </el-radio-group>
         <el-button :icon="Refresh" :loading="batchLoading" @click="loadAllItems">刷新</el-button>
       </div>

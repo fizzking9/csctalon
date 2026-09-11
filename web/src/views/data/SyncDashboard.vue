@@ -136,11 +136,11 @@
                 </el-form-item>
                 <el-form-item label="时间范围" prop="timeRange">
                   <el-radio-group v-model="form.timeRange" :disabled="busyRunning" @change="onTimeRangeChange">
-                    <el-radio-button label="incremental">增量接续(推荐)</el-radio-button>
-                    <el-radio-button label="today">今天</el-radio-button>
-                    <el-radio-button label="yesterday">昨天</el-radio-button>
-                    <el-radio-button label="week">过去一周</el-radio-button>
-                    <el-radio-button label="custom">自定义</el-radio-button>
+                    <el-radio-button value="incremental">增量接续(推荐)</el-radio-button>
+                    <el-radio-button value="today">今天</el-radio-button>
+                    <el-radio-button value="yesterday">昨天</el-radio-button>
+                    <el-radio-button value="week">过去一周</el-radio-button>
+                    <el-radio-button value="custom">自定义</el-radio-button>
                   </el-radio-group>
                 </el-form-item>
                 <el-form-item v-if="form.timeRange === 'incremental'" label="即将抓取范围">
@@ -233,9 +233,9 @@
           <div class="panel-inner">
             <div class="flex justify-between items-center mb-8">
               <el-radio-group v-model="statusGroupFilter" size="small">
-                <el-radio-button label="all">全部</el-radio-button>
-                <el-radio-button label="bms">仅 BMS</el-radio-button>
-                <el-radio-button label="scrm">仅 SCRM</el-radio-button>
+                <el-radio-button value="all">全部</el-radio-button>
+                <el-radio-button value="bms">仅 BMS</el-radio-button>
+                <el-radio-button value="scrm">仅 SCRM</el-radio-button>
               </el-radio-group>
             </div>
             <el-table :data="mergedStatusRows" border size="small">

@@ -1,0 +1,43 @@
+{
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Vue 语言服务配置（Volar / "Vue - Official" 扩展读取）
+  //
+  //  ★ 为什么需要它（2026-09-11 #67 排查结论）
+  //    现象：ComplaintAnalysis.vue 的 `v-model:preset="..."` 被编辑器标为
+  //         [vue/no-v-model-argument] 'v-model' directives require no argument.
+  //    实测：vite build / docker compose build --no-cache / 命令行 eslint
+  //         全部通过；用 ESLint Node API 复现扩展加载路径，该规则解析为 [0]（关闭）。
+  //    → 结论：报错不在 ESLint 侧，而在 **Vue 语言服务回退到 Vue 2 模板语义**。
+  //
+  //  `vueCompilerOptions` 是 Volar schema 的**唯一顶层键**
+  //  （见扩展 schemas/vue-tsconfig.schema.json），其中 `target` 默认值为 `"auto"`。
+  //  未显式声明 Vue 版本时，语言服务可能按旧版语义解析模板，
+  //  把 Vue 3 的具名 v-model 当成非法语法。
+  //
+  //  ⚠️ 本项目是纯 JavaScript（无 typescript 依赖），故用 jsconfig 而非 tsconfig：
+  //     仅为编辑器提示服务，**不影响 vite build**（构建走 @vitejs/plugin-vue）。
+  // ═══════════════════════════════════════════════════════════════════════
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowJs": true,
+    "checkJs": false,
+    "jsx": "preserve",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  },
+  "include": [
+    "src/**/*.js",
+    "src/**/*.vue",
+    "vite.config.js",
+    "eslint.config.js"
+  ],
+  "exclude": ["node_modules", "dist"],
+  "vueCompilerOptions": {
+    // ★ 明确声明目标 Vue 版本 —— 这是本次误报的修复点（默认 "auto"）
+    "target": 3
+  }
+}

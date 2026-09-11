@@ -28,9 +28,9 @@
             </el-form-item>
             <el-form-item label="评判">
               <el-radio-group v-model="form.judgment">
-                <el-radio-button label="通过" />
-                <el-radio-button label="有问题" />
-                <el-radio-button label="需改进" />
+                <el-radio-button value="通过" />
+                <el-radio-button value="有问题" />
+                <el-radio-button value="需改进" />
               </el-radio-group>
             </el-form-item>
             <el-form-item label="核查结论">

@@ -28,8 +28,8 @@
     <div class="page-container" style="padding-top: 0">
       <div class="filter-bar flex gap-8" style="flex-wrap: wrap; align-items: center">
         <el-radio-group v-model="filter.category" @change="loadData">
-          <el-radio-button label="">全部</el-radio-button>
-          <el-radio-button v-for="c in categories" :key="c" :label="c">{{ c }}</el-radio-button>
+          <el-radio-button value="">全部</el-radio-button>
+          <el-radio-button v-for="c in categories" :key="c" :value="c">{{ c }}</el-radio-button>
         </el-radio-group>
         <el-input
           v-model="filter.keyword"

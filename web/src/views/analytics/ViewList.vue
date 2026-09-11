@@ -4,9 +4,9 @@
       <div class="page-title" style="margin: 0">分析视图</div>
       <div>
         <el-radio-group v-model="filterPreset" size="small" @change="loadData">
-          <el-radio-button :label="null">全部</el-radio-button>
-          <el-radio-button :label="true">预设</el-radio-button>
-          <el-radio-button :label="false">自定义</el-radio-button>
+          <el-radio-button :value="null">全部</el-radio-button>
+          <el-radio-button :value="true">预设</el-radio-button>
+          <el-radio-button :value="false">自定义</el-radio-button>
         </el-radio-group>
         <!-- #46: 写操作入口按角色隐藏, 与后端 AdminUser 配对(避免"按钮在但点了 403") -->
         <el-button v-if="isAdmin" type="primary" :icon="Plus" style="margin-left: 12px" @click="goBuilder">新建视图</el-button>

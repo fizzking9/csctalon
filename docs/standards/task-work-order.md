@@ -1,5 +1,8 @@
 # 任务派工单模板（Prompts）
 
+**性质**：元需求（META） —— 约束**所有**派工单的产出形态
+
+
 **生效日期**：2026-09-01
 **适用范围**：所有交给 AI 的单项开发任务（对应"AI 协作治理规范" 4.4）
 **关联文档**：AGENTS.md（全局约束）、[error-code.md](error-code.md)、[review-checklist.md](review-checklist.md)、[issue-workflow.md](issue-workflow.md)（工单驱动工作流，先建工单再派工）

@@ -10,15 +10,15 @@
       </div>
       <div v-if="view" class="filter-bar">
         <el-radio-group v-model="rangeDays" size="small" @change="loadData">
-          <el-radio-button :label="7">近7天</el-radio-button>
-          <el-radio-button :label="30">近30天</el-radio-button>
-          <el-radio-button :label="90">近90天</el-radio-button>
-          <el-radio-button :label="0">全部</el-radio-button>
+          <el-radio-button :value="7">近7天</el-radio-button>
+          <el-radio-button :value="30">近30天</el-radio-button>
+          <el-radio-button :value="90">近90天</el-radio-button>
+          <el-radio-button :value="0">全部</el-radio-button>
         </el-radio-group>
         <el-radio-group v-if="hasTimeDim" v-model="grainMode" size="small" @change="loadData">
-          <el-radio-button label="day">按日</el-radio-button>
-          <el-radio-button label="week">按周</el-radio-button>
-          <el-radio-button label="month">按月</el-radio-button>
+          <el-radio-button value="day">按日</el-radio-button>
+          <el-radio-button value="week">按周</el-radio-button>
+          <el-radio-button value="month">按月</el-radio-button>
         </el-radio-group>
         <el-button :icon="Promotion" @click="publishDialogVisible = true">发布为看板</el-button>
         <el-button :icon="Refresh" @click="loadData">刷新</el-button>

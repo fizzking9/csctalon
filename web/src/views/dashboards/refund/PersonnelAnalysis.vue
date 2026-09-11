@@ -105,8 +105,8 @@
         <div class="chart-toolbar">
           <span class="trend-hint">默认: 成功率 Top3 + Bottom3</span>
           <el-radio-group v-model="trendGrain" size="small" @change="loadTrend">
-            <el-radio-button label="day">按日</el-radio-button>
-            <el-radio-button label="week">按周</el-radio-button>
+            <el-radio-button value="day">按日</el-radio-button>
+            <el-radio-button value="week">按周</el-radio-button>
           </el-radio-group>
         </div>
       </div>
@@ -154,9 +154,9 @@
         <div class="device-toolbar">
           <span class="block-title" style="margin: 0">设备清单</span>
           <el-radio-group v-model="deviceTab" size="small" @change="loadPersonDevices">
-            <el-radio-button label="all">全部</el-radio-button>
-            <el-radio-button label="success">成功</el-radio-button>
-            <el-radio-button label="failed">失败</el-radio-button>
+            <el-radio-button value="all">全部</el-radio-button>
+            <el-radio-button value="success">成功</el-radio-button>
+            <el-radio-button value="failed">失败</el-radio-button>
           </el-radio-group>
         </div>
         <el-table :data="personDevices.devices || []" border stripe size="small" max-height="520" style="width: 100%">

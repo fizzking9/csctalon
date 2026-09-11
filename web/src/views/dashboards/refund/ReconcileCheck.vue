@@ -17,11 +17,11 @@
         <div>
           <span class="win-label">复核时间窗：</span>
           <el-radio-group v-model="quickRange" size="small" class="mr-12">
-            <el-radio-button label="today">今日</el-radio-button>
-            <el-radio-button label="yesterday">昨日</el-radio-button>
-            <el-radio-button label="7">近7天</el-radio-button>
-            <el-radio-button label="30">近30天</el-radio-button>
-            <el-radio-button label="custom">自定义</el-radio-button>
+            <el-radio-button value="today">今日</el-radio-button>
+            <el-radio-button value="yesterday">昨日</el-radio-button>
+            <el-radio-button value="7">近7天</el-radio-button>
+            <el-radio-button value="30">近30天</el-radio-button>
+            <el-radio-button value="custom">自定义</el-radio-button>
           </el-radio-group>
           <el-date-picker
             v-model="winRange"

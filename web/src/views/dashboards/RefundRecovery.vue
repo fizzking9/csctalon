@@ -4,16 +4,16 @@
       <div class="page-title" style="margin: 0">挽回分析</div>
       <div class="filter-bar" :class="{ 'is-mobile': isMobile }">
         <el-radio-group v-model="tabMode" size="small" class="tab-mode-group" @change="onTabChange">
-          <el-radio-button label="today">今日</el-radio-button>
-          <el-radio-button label="personnel">人员</el-radio-button>
-          <el-radio-button label="device">设备</el-radio-button>
-          <el-radio-button label="type">类型</el-radio-button>
+          <el-radio-button value="today">今日</el-radio-button>
+          <el-radio-button value="personnel">人员</el-radio-button>
+          <el-radio-button value="device">设备</el-radio-button>
+          <el-radio-button value="type">类型</el-radio-button>
         </el-radio-group>
         <el-radio-group v-if="tabMode !== 'today'" v-model="rangeMode" size="small" class="range-mode-group">
-          <el-radio-button label="7">近7天</el-radio-button>
-          <el-radio-button label="30">近30天</el-radio-button>
-          <el-radio-button label="90">近90天</el-radio-button>
-          <el-radio-button label="custom">自定义</el-radio-button>
+          <el-radio-button value="7">近7天</el-radio-button>
+          <el-radio-button value="30">近30天</el-radio-button>
+          <el-radio-button value="90">近90天</el-radio-button>
+          <el-radio-button value="custom">自定义</el-radio-button>
         </el-radio-group>
         <el-date-picker
           v-if="tabMode !== 'today' && rangeMode === 'custom'"

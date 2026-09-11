@@ -1,5 +1,6 @@
 # 工单驱动工作流规范（Issue Workflow）
 
+**性质**：元需求（META）—— 约束"所有任务怎么流转"
 **生效日期**：2026-09-03
 **适用范围**：所有任务（含需求、事故、治理、缺陷、运维动作），不论由人还是 AI 执行
 **关联文档**：[AGENTS.md](../../AGENTS.md)（全局约束）、[task-work-order.md](task-work-order.md)（AI 派工单模板）、[arch/README.md](../arch/README.md)（架构锁定流程）、[review-checklist.md](review-checklist.md)（审查清单）

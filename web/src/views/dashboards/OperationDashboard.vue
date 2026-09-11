@@ -124,9 +124,9 @@
               <el-option v-for="g in groupsList" :key="g.id" :label="g.name" :value="g.name" />
             </el-select>
             <el-radio-group v-model="staffFilter.aggregateBy" size="small">
-              <el-radio-button label="person">按人</el-radio-button>
-              <el-radio-button label="group">按分组</el-radio-button>
-              <el-radio-button label="all">全员</el-radio-button>
+              <el-radio-button value="person">按人</el-radio-button>
+              <el-radio-button value="group">按分组</el-radio-button>
+              <el-radio-button value="all">全员</el-radio-button>
             </el-radio-group>
             <el-checkbox
               v-model="showAllStaff"
