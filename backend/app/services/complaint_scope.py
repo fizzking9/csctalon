@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import date
 
 from sqlalchemy import case as sa_case
 from sqlalchemy import func, literal, or_
@@ -234,33 +235,327 @@ def classify_bucket_from_item(item: str | None, channel: str | None = None) -> s
 #    (实测同一 SN 在不同年份有多次独立投诉, 日期差达 ±356 天; >180 天占 4.7%)。
 DEDUP_WINDOW_DAYS = 30
 
+# ═══════════════════════════════════════════════════════════════════
+# 投诉**事件**归并参数（#55, 用户 2026-09-11 拍板）
+# ═══════════════════════════════════════════════════════════════════
+# 「同一投诉·多渠道」与「真·重复」是两个概念，需分别处理：
+#   · 同SN+同电话+几天内+**渠道不同** → 同一投诉的多渠道呈现 → 归并1笔，**不算重复**
+#   · 同SN+同电话+**渠道也相同**     → 拷贝复制             → 真重复，计1笔
+#
+# "几天内" 的时间窗：用户举例 9.7→9.10（3天），取 7 天留余量。
+EVENT_WINDOW_DAYS = 7
+# 严格归并的起始年：用户「2025年之前的数据 简单统计处理就OK，有一定偏差可接受」。
+#   → `< EVENT_STRICT_MIN_YEAR` 的年份**统计上不归并**（仅标记 legacy_unmerged）。
+EVENT_STRICT_MIN_YEAR = 2026
+
+# 事件类型（供前端/统计区分展示）
+EVENT_KIND_SINGLE = "single"                  # 单一记录
+EVENT_KIND_MULTI_CHANNEL = "multi_channel"    # 同一投诉·多渠道（非重复）
+EVENT_KIND_TRUE_DUP = "true_dup"              # 真·重复（同渠道拷贝复制）
+EVENT_KIND_LEGACY = "legacy_unmerged"         # 旧年份，未归并
+EVENT_KIND_UNKEYED = "unkeyed"                # 缺 SN/电话，待人工
+
 # 手机号归一: 去非数字 / 去 86 前缀
 _PHONE_DIGITS_RE = re.compile(r"\D+")
 
 
 def normalize_phone(phone: str | None) -> str | None:
-    """手机号归一（去空格/括号/横线/国家码），无有效数字则 None"""
+    """手机号归一（去空格/括号/横线/国家码），无有效号码则 None
+
+    ⚠️ **多号码字段**：实测存在一个字段填两个号码的情形（用 `/` 分隔）。
+       这是**同一投诉的两个联系人**，是有效信息。本函数**只取第一个**作为主号码
+       （归并键需单一值），完整号码列表见 `split_phones()`。
+
+    ⚠️ **异常长度**：实测有 10/12/14/19/22 位等脏值（315 15 行、卡商 14 行，占 <1.6%）。
+       本函数按"取前 11 位 + 校验号段"处理；无法识别则返回 None（不参与归并，宁可漏合）。
+    """
     if not phone:
         return None
-    d = _PHONE_DIGITS_RE.sub("", str(phone))
-    if d.startswith("86") and len(d) == 13:
-        d = d[2:]
-    if d.startswith("0086") and len(d) == 15:
-        d = d[4:]
-    return d or None
+    parts = split_phones(phone)
+    return parts[0] if parts else None
+
+
+# 可分号码的分隔符（实测: `/` `,` `、` `或` 空格串）
+_PHONE_SPLIT_RE = re.compile(r"[/,，、;；\s]*(?:或|and)[/,，、;；\s]*|[/,，、;；]+|\s{2,}")
+# 中国大陆手机号: 1[3-9] + 9 位
+_PHONE_11_RE = re.compile(r"1[3-9]\d{9}")
+
+
+def split_phones(phone: str | None) -> list[str]:
+    """从一个字段里拆出**全部合法手机号**（处理"多号码填在一格"的脏数据）
+
+    实测样例:
+      · `'1XXXXXXXXXX   /   1YYYYYYYYYY'`（一格填两个号）→ 两个
+      · `'+8613800138000'`                 → ['13800138000']
+      · `'138-0013-8000'` / `'(138) 0013 8000'` → ['13800138000']  ← 先剥分隔符
+      · `'135603166965'` (12位, 首位多 1)  → ['13560316696']（扫描取 11 位）
+      · `'/'`、`'abc'`                     → []
+
+    ⚠️ 真实用户手机号不入代码库（gitleaks `hardcoded-phone-number`），
+       文档/测试一律用占位或示例号段。
+
+    实现分两步:
+      1) 先**常规分隔符**(横线/空格/括号)剥掉, 再按"非数字序列"切段 —— 这样
+         `138-0013-8000` 能还原成一整段;
+      2) 每段内用 `1[3-9]\\d{9}` **扫描**提取合法号（能容忍粘连/多余位数）。
+    """
+    if not phone:
+        return []
+    s = str(phone)
+    # 归一国家码前缀(避免 8613... 被误切)
+    s = re.sub(r"\+?0{0,2}86(?=1[3-9]\d{9})", "", s)
+    # 步骤1: 先剥"号码内部"的常见分隔符(横线/空格/点/括号), 使 138-0013-8000 连成 13800138000
+    s = re.sub(r"(?<=\d)[\s\-\.\(\)]+(?=\d)", "", s)
+    out: list[str] = []
+    # 步骤2: 按"非数字"切成段, 每段内扫描 11 位手机号
+    for seg in re.split(r"\D+", s):
+        if not seg:
+            continue
+        if len(seg) == 11 and re.fullmatch(r"1[3-9]\d{9}", seg):
+            if seg not in out:
+                out.append(seg)
+            continue
+        # 段过长(如两号粘连)或过短 → 扫描提取全部合法 11 位号
+        for m in _PHONE_11_RE.finditer(seg):
+            v = m.group(0)
+            if v not in out:
+                out.append(v)
+    return out
+
+
+def complaint_event_key(sn: str | None, complaint_date) -> tuple[str, str] | None:
+    """★投诉**事件**去重键 → (sn, 日期) —— 用户 2026-09-11 拍板口径
+
+    用户原话:
+      「把 同天 sn大概率是重复的，比如说 渠道不同的，可以算作重复的，
+        当然要记录渠道。」
+
+    语义: **同一设备、同一天** 出现的多条投诉记录 → 视为**同一笔投诉事件**，
+    即使来自**不同渠道**(如 全国12315平台 / 航城监所) —— 渠道差异只记录不拆分。
+
+    ⚠️ 与旧键 `complaint_dedup_key(SN, 手机, 30天窗)` 的区别:
+       · 旧: 需 SN **和** 手机都命中, 且限 30 天窗 → **漏判**(实测同天同SN的重复被判为 0)
+       · 新: **只要 SN + 日期**(同天) → 符合业务直觉, 实测可识别 315 27 组 / 卡商 13 组
+
+    ⚠️ 不含手机: 同一天同一设备可能有多人投诉(实测 315 6/27 组手机不同) ——
+       这是**已知边界**, 由 `dedup_events()` 用 `suspect_distinct` 标记待人工判定,
+       **不擅自合并**(用户要求"不能乱删…慎重")。
+
+    返回: (sn, 'YYYY-MM-DD')；SN 缺失或日期为空 → None(不参与去重, 避免误合)
+    """
+    s = (sn or "").strip()
+    if not s or complaint_date is None:
+        return None
+    try:
+        d = complaint_date.date() if hasattr(complaint_date, "date") else complaint_date
+        return (s, str(d))
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def complaint_dedup_key(sn: str | None, phone: str | None) -> tuple[str, str] | None:
-    """实体级去重键 → (sn, phone)；**任一缺失返回 None**（不参与去重，避免误合并）
+    """⚠️ DEPRECATED（#54）—— 旧实体级去重键 `(SN, 手机)`
 
-    语义: 同一 (SN, 手机) 在 30 天窗内出现多次 → 视为**同一笔投诉**，
-    无论它来自工单、315 补充表还是卡商补充表（"一个投诉分多渠道"）。
+    已被 `complaint_event_key(SN, 日期)` 取代。保留仅为兼容/参考。
+
+    旧口径问题（实测）: 要求 SN **和** 手机同时命中, 且限 30 天窗 ——
+    导致「同天同 SN 但手机为空/不同」的重复**全部漏判**（测得 L2 = 0 组，
+    据此一度误判"无真重复"）。
     """
     s = (sn or "").strip()
     p = normalize_phone(phone)
     if not s or not p:
         return None
     return (s, p)
+
+
+def dedup_events(
+    rows: list[dict],
+    *,
+    sn_key: str = "device_sn",
+    date_key: str = "complaint_date",
+    phone_key: str = "complainant_phone",
+    channel_key: str = "channel",
+    id_key: str = "id",
+    window_days: int = EVENT_WINDOW_DAYS,
+    min_year: int = EVENT_STRICT_MIN_YEAR,
+) -> tuple[list[dict], int, list[dict]]:
+    """★★ 按用户最终口径（2026-09-11）归并**投诉事件** —— 不删数据, 只做统计侧归并
+
+    ## 用户口径（权威）
+
+    > 「同一个人 设备编号 电话号码 都一致, **几天内** 的投诉,
+    >   渠道（平台）是**肯定不同**, 内容略微不同；
+    >   可以**归结为一个投诉, 但是不能算重复数据**；
+    >   如果 电话 sn 渠道 **都一致** 的话 那就基本上是同一个投诉 **拷贝复制**的,
+    >   譬如说 9.7 号的投诉, 但是当天处理没有完结, 拖到 10 号再处理一次。」
+
+    > 「对于 2025 年之前的数据 简单统计处理就 OK, 有一定的偏差或者多重统计可以接受」
+
+    ## 两类"重复"必须区分（我此前混淆, 已纠正）
+
+    | 形态 | 特征 | 归类 | 处理 |
+    |---|---|---|---|
+    | **同一投诉·多渠道** | 同SN+同电话+**窗外内**+**渠道不同** | `multi_channel` | 归并 1 笔, **不算重复** |
+    | **真·重复** | 同SN+同电话+**渠道也相同** | `true_dup` | 计 1 笔, 标 `dup_of` |
+    | 单一记录 | 簇内仅 1 条 | `single` | 原样 |
+
+    ## 参数
+      · `window_days` —— "几天内" 的时间窗(默认 7 天; 用户举例 9.7→9.10 为 3 天)
+      · `min_year`    —— 严格归并的起始年(默认 2026)。**之前的年份统计上不归并**
+        (用户: "25年的数据 统计有偏差关系也不大")
+
+    ## 返回
+      (events, merged_rows, needs_review)
+      · `events`       —— 事件列表, 每条含 `kind`/`channels`/`record_ids`/`count`
+      · `merged_rows`  —— 被归并(非首条)的记录数
+      · `needs_review` —— 需人工判定的组(电话不同/缺失 → 不自动归并)
+
+    ⚠️ **绝不删除/修改原始行** —— 用户明令"不能乱删除 所以还是慎重"。
+       只产出**统计视图**; 明细下钻用 `events[i]["record_ids"]` 回溯原始记录。
+    """
+    if not rows:
+        return [], 0, []
+
+    # ── 1. 按 (SN, 归一化电话) 分组 —— 电话是"实体的人", 用于确认同一人 ──
+    buckets: dict[tuple[str, str], list[dict]] = {}
+    unkeyed: list[dict] = []
+    for r in rows:
+        sn = (r.get(sn_key) or "").strip()
+        ph = normalize_phone(r.get(phone_key))
+        if not sn or not ph:
+            unkeyed.append(r)          # 缺 SN 或电话 → 独立成事件(需人工/不自动归并)
+        else:
+            buckets.setdefault((sn, ph), []).append(r)
+
+    events: list[dict] = []
+    merged_rows = 0
+    needs_review: list[dict] = []
+
+    def _day(x):
+        d = x.get(date_key)
+        if d is None:
+            return None
+        try:
+            return d.date() if hasattr(d, "date") else d
+        except (AttributeError, TypeError):
+            return None
+
+    for (sn, ph), items in buckets.items():
+        # 按日期排序(无日期排最后), 用 id 兜底保证稳定
+        items = sorted(
+            items,
+            key=lambda x: (_day(x) is None, _day(x) or date.min,
+                           x.get(id_key) is None, x.get(id_key) or 0),
+        )
+
+        # ── 2. 时间窗聚类: 与簇首条相差 <= window_days → 同簇 ──
+        clusters: list[list[dict]] = []
+        for it in items:
+            d = _day(it)
+            placed = False
+            if d is not None:
+                for cl in clusters:
+                    cd = _day(cl[0])
+                    if cd is not None and abs((d - cd).days) <= window_days:
+                        cl.append(it)
+                        placed = True
+                        break
+            if not placed:
+                clusters.append([it])
+
+        # ── 3. 逐簇判定 ──
+        for cl in clusters:
+            rep = dict(cl[0])
+            chans: list[str] = []
+            ch_count: dict[str, int] = {}
+            for x in cl:
+                c = (x.get(channel_key) or "").strip()
+                if c:
+                    if c not in chans:
+                        chans.append(c)
+                    ch_count[c] = ch_count.get(c, 0) + 1
+
+            rep["channels"] = chans
+            rep["channel_count"] = len(chans)
+            rep["record_ids"] = [x.get(id_key) for x in cl]
+            rep["count"] = len(cl)
+            rep["multi_channel"] = len(chans) > 1
+            rep["complaint_day"] = str(_day(rep) or "")
+            rep["event_key"] = f"{sn}|{ph}|{rep['complaint_day']}"
+
+            # 严格归并仅对 min_year 及之后生效(用户: 25年前简单统计)
+            yr = _day(rep).year if _day(rep) else None
+            strict = (yr is None) or (yr >= min_year)
+
+            if len(cl) == 1:
+                rep["kind"] = "single"
+                rep["strict_applied"] = strict
+            elif not strict:
+                # 旧年份: 不归并, 保留原样但标记(供人工查)
+                rep["kind"] = "legacy_unmerged"
+                rep["strict_applied"] = False
+                merged_rows += 0
+            elif len(chans) > 1:
+                # ★同一投诉的多渠道呈现 → 归并 1 笔, 不算重复
+                rep["kind"] = "multi_channel"
+                rep["strict_applied"] = True
+                merged_rows += len(cl) - 1
+            else:
+                # ★同渠道多条 → 拷贝复制(真重复)
+                rep["kind"] = "true_dup"
+                rep["strict_applied"] = True
+                dup_ids = [x.get(id_key) for x in cl[1:]]
+                rep["dup_of_ids"] = dup_ids
+                merged_rows += len(cl) - 1
+
+            events.append(rep)
+
+    # ── 4. 无键行(缺 SN 或电话): 不自动归并, 单独列出待人工 ──
+    for r in unkeyed:
+        e = dict(r)
+        c = (r.get(channel_key) or "").strip()
+        e["channels"] = [c] if c else []
+        e["channel_count"] = len(e["channels"])
+        e["multi_channel"] = False
+        e["record_ids"] = [r.get(id_key)]
+        e["count"] = 1
+        e["event_key"] = None
+        e["kind"] = "unkeyed"
+        e["strict_applied"] = False
+        e["complaint_day"] = str(_day(r) or "")
+        events.append(e)
+
+    # ── 5. 需人工判定: 同一 (SN, 同一时间窗) 但电话不同 → 可能是不同人 ──
+    #   (用户: "手机不同 默认 统计为不同，但是提供一个人工再审核更合适点")
+    by_sn: dict[str, list[dict]] = {}
+    for r in rows:
+        sn = (r.get(sn_key) or "").strip()
+        if sn:
+            by_sn.setdefault(sn, []).append(r)
+    for sn, items in by_sn.items():
+        phones = {normalize_phone(x.get(phone_key)) for x in items}
+        phones.discard(None)
+        if len(phones) > 1:
+            # 按天聚合(同天不同电话 → 更可疑)
+            by_day: dict[str, set] = {}
+            for x in items:
+                p = normalize_phone(x.get(phone_key))
+                d = _day(x)
+                if p and d:
+                    by_day.setdefault(str(d), set()).add(p)
+            for d, ps in by_day.items():
+                if len(ps) > 1:
+                    ids = [x.get(id_key) for x in items if _day(x) and str(_day(x)) == d]
+                    needs_review.append({
+                        "device_sn": sn,
+                        "complaint_day": d,
+                        "phones": sorted(ps),
+                        "record_ids": ids,
+                        "reason": "同设备同日多个电话 → 可能不同人(默认统计为不同)",
+                    })
+
+    return events, merged_rows, needs_review
 
 
 def dedup_rows_by_entity(
@@ -271,12 +566,12 @@ def dedup_rows_by_entity(
     date_key: str = "complaint_date",
     window_days: int = DEDUP_WINDOW_DAYS,
 ) -> tuple[list[dict], int]:
-    """按 (SN, 手机) + 时间窗对行去重（纯 Python，供测试与逐行场景）
+    """⚠️ DEPRECATED（#54）—— 旧 `(SN, 手机) + 30天窗` 去重
 
-    返回 (去重后的行, 被合并的行数)。保留**最早**的一条（与"首次登记"语义一致），
-    其余标注 `dedup_of` = 保留行的标识（供明细回溯）。
+    已被 `dedup_events(SN, 日期)` 取代。**保留原因**: 供历史对比与兼容既有单测。
 
-    ⚠️ 无键的行（缺 SN 或手机）**一律保留** —— 宁可重复不可误合。
+    旧口径缺陷（实测）: 判据过严 → 同天同 SN 的重复被判为 0 组。
+    新代码请用 `dedup_events()` / `complaint_event_key()`。
     """
     if not rows:
         return rows, 0

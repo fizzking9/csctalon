@@ -516,3 +516,153 @@ class TestPickNearestTicket:
             cands, D(2026, 1, 3, tzinfo=timezone(timedelta(hours=8))))
         assert tno == "A"
         assert diff == 2
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 6. ★投诉事件归并 (#55, 用户 2026-09-11 口径)
+# ═══════════════════════════════════════════════════════════════════
+class TestEventMerge:
+    """★核心区分（用户口径）:
+
+      · 同SN+同电话+几天内+**渠道不同** → 同一投诉的多渠道呈现
+        → 归并 1 笔, **不算重复** (kind=multi_channel)
+      · 同SN+同电话+**渠道也相同**     → 拷贝复制
+        → 真重复 (kind=true_dup)
+
+    我此前错把两者混为一谈(按"同天同SN"判重复), 会误判多渠道。
+    """
+
+    @staticmethod
+    def _row(i, sn, ph, day, ch):
+        from datetime import date
+        y, m, d = (int(x) for x in day.split("-"))
+        return {"id": i, "device_sn": sn, "complainant_phone": ph,
+                "complaint_date": date(y, m, d), "channel": ch}
+
+    def test_multi_channel_merged_not_duplicate(self):
+        """★多渠道 → 归并 1 笔, 且**不算重复**"""
+        from app.services.complaint_scope import (
+            EVENT_KIND_MULTI_CHANNEL,
+            dedup_events,
+        )
+        rows = [
+            self._row(1, "SN1", "13800138000", "2026-09-07", "全国12315平台"),
+            self._row(2, "SN1", "13800138000", "2026-09-10", "航城监所"),
+        ]
+        events, merged, _ = dedup_events(rows)
+        ev = [e for e in events if e["count"] > 1]
+        assert len(ev) == 1
+        assert ev[0]["kind"] == EVENT_KIND_MULTI_CHANNEL
+        assert ev[0]["kind"] != "true_dup", "多渠道不应判为重复"
+        assert ev[0]["channels"] == ["全国12315平台", "航城监所"], "渠道必须全记录"
+        assert ev[0]["channel_count"] == 2
+        assert merged == 1
+        assert len(events) == 1, "2 条记录归并为 1 个事件"
+
+    def test_true_dup_same_channel(self):
+        """★同渠道 → 真重复"""
+        from app.services.complaint_scope import EVENT_KIND_TRUE_DUP, dedup_events
+        rows = [
+            self._row(1, "SN1", "13800138000", "2026-09-07", "全国12315平台"),
+            self._row(2, "SN1", "13800138000", "2026-09-10", "全国12315平台"),
+        ]
+        events, merged, _ = dedup_events(rows)
+        ev = [e for e in events if e["count"] > 1]
+        assert len(ev) == 1
+        assert ev[0]["kind"] == EVENT_KIND_TRUE_DUP
+        assert ev[0]["dup_of_ids"] == [2]
+        assert merged == 1
+
+    def test_outside_window_separate(self):
+        """超时间窗 → 两笔独立（不同时期的投诉）"""
+        from app.services.complaint_scope import EVENT_KIND_SINGLE, dedup_events
+        rows = [
+            self._row(1, "SN1", "13800138000", "2026-01-01", "全国12315平台"),
+            self._row(2, "SN1", "13800138000", "2026-06-01", "全国12315平台"),
+        ]
+        events, merged, _ = dedup_events(rows)
+        assert len(events) == 2
+        assert all(e["kind"] == EVENT_KIND_SINGLE for e in events)
+        assert merged == 0
+
+    def test_window_boundary_inclusive(self):
+        """窗边界(7天)应为同簇"""
+        from app.services.complaint_scope import EVENT_WINDOW_DAYS, dedup_events
+        assert EVENT_WINDOW_DAYS == 7
+        rows = [
+            self._row(1, "SN1", "13800138000", "2026-09-01", "A"),
+            self._row(2, "SN1", "13800138000", "2026-09-08", "B"),   # 正好 7 天
+        ]
+        events, _, _ = dedup_events(rows)
+        assert len(events) == 1
+
+    def test_legacy_year_not_merged(self):
+        """★旧年份不归并（用户: 25年前简单统计, 允许偏差）"""
+        from app.services.complaint_scope import (
+            EVENT_KIND_LEGACY,
+            EVENT_STRICT_MIN_YEAR,
+            dedup_events,
+        )
+        assert EVENT_STRICT_MIN_YEAR == 2026
+        rows = [
+            self._row(1, "SN1", "13800138000", "2025-09-01", "A"),
+            self._row(2, "SN1", "13800138000", "2025-09-02", "B"),
+        ]
+        events, merged, _ = dedup_events(rows)
+        assert all(e["kind"] == EVENT_KIND_LEGACY for e in events)
+        assert all(e["strict_applied"] is False for e in events)
+        assert merged == 0, "旧年份不应归并"
+
+    def test_different_phone_not_merged(self):
+        """★电话不同 → 不自动归并, 进 needs_review"""
+        from app.services.complaint_scope import dedup_events
+        rows = [
+            self._row(1, "SN1", "13800138000", "2026-09-01", "A"),
+            self._row(2, "SN1", "13900139000", "2026-09-01", "B"),
+        ]
+        events, _, review = dedup_events(rows)
+        assert len(events) == 2, "电话不同应各自成事件"
+        assert len(review) == 1
+        assert review[0]["device_sn"] == "SN1"
+        assert set(review[0]["phones"]) == {"13800138000", "13900139000"}
+
+    def test_missing_sn_or_phone_unkeyed(self):
+        """缺 SN/电话 → 不自动归并, 标 unkeyed"""
+        from app.services.complaint_scope import EVENT_KIND_UNKEYED, dedup_events
+        rows = [
+            {"id": 1, "device_sn": None, "complainant_phone": "13800138000",
+             "complaint_date": __import__("datetime").date(2026, 9, 1), "channel": "A"},
+            {"id": 2, "device_sn": "SN1", "complainant_phone": None,
+             "complaint_date": __import__("datetime").date(2026, 9, 1), "channel": "A"},
+        ]
+        events, merged, _ = dedup_events(rows)
+        assert len(events) == 2
+        assert all(e["kind"] == EVENT_KIND_UNKEYED for e in events)
+        assert merged == 0
+
+    def test_no_mutation_of_input(self):
+        """★绝不修改原始行（用户: 不能乱删除, 要慎重）"""
+        from app.services.complaint_scope import dedup_events
+        rows = [
+            self._row(1, "SN1", "13800138000", "2026-09-07", "A"),
+            self._row(2, "SN1", "13800138000", "2026-09-08", "B"),
+        ]
+        before = [dict(r) for r in rows]
+        dedup_events(rows)
+        assert rows == before, "输入数据被修改了！"
+
+    def test_empty(self):
+        from app.services.complaint_scope import dedup_events
+        assert dedup_events([]) == ([], 0, [])
+
+    def test_multi_number_field(self):
+        """★一格填两个号码 → 取第一个作主键（实测 315 有 10 行）"""
+        from app.services.complaint_scope import dedup_events, split_phones
+        assert split_phones("13603062258   /   15209894363") == [
+            "13603062258", "15209894363"]
+        rows = [
+            self._row(1, "SN1", "13603062258   /   15209894363", "2026-09-07", "A"),
+            self._row(2, "SN1", "13603062258", "2026-09-08", "B"),
+        ]
+        events, _, _ = dedup_events(rows)
+        assert len(events) == 1, "多号码字段应能归并到第一个号"

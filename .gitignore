@@ -113,3 +113,8 @@ backups/
 # ---------- 本地工具凭证(勿入库,如 Gitea API token) ----------
 .gitea-token
 .gitea_token
+
+# ---------- 含 PII 的去重分析明细(勿入库, 由 scripts/export_dedup_analysis.py 生成) ----------
+# 这些 CSV 含真实用户手机号/设备SN, 仅本地人工核对用
+docs/reports/*投诉去重分析/*.csv
+/tmp/csctalon-dup-analysis/
