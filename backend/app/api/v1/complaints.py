@@ -1276,6 +1276,68 @@ def complaint_detail(
 # ---------- 补充明细(315外部投诉 / 卡商群投诉,workbuddy推送) ----------
 
 
+@router.get("/pure-card", response_model=R,
+            summary="纯工信部投诉·单列视图(工单+文档合并去重) (#63)")
+def complaint_pure_card(
+    db: DBSession,
+    _: CurrentUser,
+    start: str | None = None,
+    end: str | None = None,
+    detail_limit: int = Query(2000, ge=1, le=5000, description="清单返回上限"),
+    include_checked: bool = Query(False, description="连已对账的工信部工单一并返回(带 is_pure 标记)"),
+):
+    """**纯工信部投诉**单列视图（#63）。
+
+    ★ 用户需求（2026-09-11）:
+      > 「纯粹工信部的**优先级不高**，有统计记录就好了。回头**单列一页**展示即可。
+      >   工单+文档 **合并去重** 统计展示。」
+
+    ★★★ 判据必须用「SN **或** 电话」★★★
+
+    ```
+    纯工信部 = 工信部工单 ∧ NOT (卡商表 SN 或 电话 命中)
+                        ∧ NOT (315表  SN 或 电话 命中)
+    ```
+
+    ## 为什么不能用 SN 精确匹配（用户人工核对后发现的盲区）
+
+    | 现实情况 | 实例 |
+    |---|---|
+    | 同一客户**多台设备**：工单管 A 机，卡商单登记 B 机 | ① |
+    | 同客户**换机**，SN 变了 | ② |
+    | **处理意见里提到另一台** SN | ⑥ |
+
+    而 `phone` 三条**全部一致** → **电话才是可靠的关联键**。
+    （印证 #55: SN = 客户身份, 但一个客户可能有多台设备。）
+
+    ## 实测（2026-09-11, 全量 320 条工信部工单）
+
+    | 判据 | 命中 |
+    |---|---|
+    | SN 精确命中 | 314 |
+    | **SN 或 电话命中** | **318** |
+    | **纯工信部** | **2** |
+
+    用户核对的 6 条候选中，①②⑥ 正是「SN 查不到、电话能查到」
+    → 用 SN 精确匹配会**误判为纯工信部**（应归卡商）。
+
+    ## 「合并去重」的含义
+
+    工单侧（经营登记）按 `(SN 或 电话)` 关联文档侧（接待过程）后
+    合并为一份视图，同一投诉只计一次；两边都无 = **纯工信部**。
+
+    ⚠️ 本接口**只读** —— 不删不改任何数据；原 `service_item` 保持原样。
+    """
+    from app.services.pure_card_complaint import pure_card_tickets
+
+    ts = _parse_dt(start)
+    te = _parse_dt_end(end)
+    data = pure_card_tickets(
+        db, ts, te, detail_limit=detail_limit, include_checked=include_checked,
+    )
+    return R(data=data)
+
+
 @router.get("/reconcile", response_model=R,
             summary="外部投诉对账·双边闭环(经营登记 ↔ 接待过程) (#56)")
 def complaint_reconcile(

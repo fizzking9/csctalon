@@ -133,6 +133,13 @@ const routes = [
         component: () => import('@/views/dashboards/ComplaintAudit.vue'),
         meta: { title: '投诉核查', icon: 'Warning', manager: true },
       },
+      // ★ #63: 纯工信部投诉单列页（工单+文档 合并去重；判据 = SN 或 电话）
+      {
+        path: 'dashboards/pure-card-complaint',
+        name: 'PureCardComplaint',
+        component: () => import('@/views/dashboards/PureCardComplaint.vue'),
+        meta: { title: '纯工信部投诉', icon: 'Warning', manager: true },
+      },
       {
         path: 'dashboards/reception',
         name: 'DashboardReception',

@@ -33,6 +33,11 @@ export function complaintBacklog(params) {
   return request.get('/complaints/backlog', { params })
 }
 
+// ★ #63: 纯工信部投诉单列视图(工单+文档 合并去重; 判据 = SN 或 电话)
+export function complaintPureCard(params) {
+  return request.get('/complaints/pure-card', { params })
+}
+
 // 积压未处理投诉明细导出Excel(同口径, 不受分页限制)
 export function complaintBacklogExport(params) {
   return request.get('/complaints/backlog/export', { params, responseType: 'blob', timeout: 120000 })
