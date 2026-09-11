@@ -1074,7 +1074,23 @@
             <el-table-column label="时间" width="120" sortable :sort-method="(a,b)=>sortTimeStr(a.time,b.time)">
               <template #default="{ row }">{{ formatTime(row.time) }}</template>
             </el-table-column>
-            <el-table-column prop="category" label="分类" width="120" show-overflow-tooltip />
+            <el-table-column label="分类" width="165" show-overflow-tooltip>
+              <template #default="{ row }">
+                <!-- ★ #65: 软纠正标注 —— 工单原登记「工信部投诉」,
+                     但 SN 在 315 属监所/市监局类 → 已按「外部投诉」统计。 -->
+                <el-tooltip
+                  v-if="row.soft_corrected"
+                  content="BMS 原登记为「工信部投诉」。因该 SN 在 315 文档属监所/市监局类，已按「外部投诉」统计（原数据未改）。"
+                  placement="top"
+                >
+                  <span>
+                    <el-tag size="small" type="danger" effect="plain">{{ row.category }}</el-tag>
+                    <el-tag size="small" type="success" effect="plain" style="margin-left:4px">已纠正</el-tag>
+                  </span>
+                </el-tooltip>
+                <span v-else>{{ row.category }}</span>
+              </template>
+            </el-table-column>
             <el-table-column label="设备SN" width="140" show-overflow-tooltip>
               <template #default="{ row }">
                 <el-link v-if="row.device_sn" type="primary" :underline="false" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>

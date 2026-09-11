@@ -29,6 +29,7 @@ from app.services.complaint_scope import (
     CARD_SCOPE,
     EVENT_STRICT_MIN_YEAR,
     STATUS_DONE,
+    _CARD_TICKET_KEYWORDS,
     card_result_state,
     dedup_events,
 )
@@ -1063,6 +1064,16 @@ def complaint_detail(
         norm_status = _norm_status(source, raw_status, finish, register, raw_handler)
         if source == "外部投诉" and r[1] in ext_done_sns:
             norm_status = "已完成"  # 积压闭环: 315登记已办结 → 工单视为已完成
+        # ★★ #65: 软纠正标注 ★★
+        #   工单 `service_item='工信部投诉'` 但被 #58 纠正为外部投诉时,
+        #   明细表若只显示 category='工信部投诉' 会与 source='外部投诉' **矛盾**
+        #   → 显式标出原登记值, 让运营知道「分类是错的, 已按监所口径归入外部」。
+        #   ⚠️ 仅标注, **不改 BMS 原数据**(用户: "不能乱删除 所以还是慎重")。
+        _raw_item = r[3] or ""
+        _is_soft_corrected = (
+            source == "外部投诉"
+            and any(k in _raw_item for k in _CARD_TICKET_KEYWORDS)
+        )
         # 展示时间:取最近动作时间(完成优先于登记,但如果完成时间不合理则用登记时间)
         display_dt = register
         if _is_real_finish(finish, register):
@@ -1077,6 +1088,8 @@ def complaint_detail(
             "device_sn": r[1],
             "category": r[3],
             "problem": r[4],
+            # ★ #65: 软纠正标注(前端展示为「原登记: 工信部投诉」小标签)
+            "soft_corrected": _is_soft_corrected,
             # 商户号投诉: handler 若落在被投诉主体名集合 → 该行无真实处理人(上游脏数据)
             "handler": "未分配" if (source == "商户号投诉" and raw_handler in entity_set) else _norm_handler(raw_handler),
             # 被投诉主体: 仅商户号投诉的 registrant 是主体; 内部/外部投诉 registrant 多为处理人或系统值, 由补充表回填

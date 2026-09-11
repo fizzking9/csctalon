@@ -481,7 +481,25 @@
               <span v-else class="text-muted">—</span>
             </template>
           </el-table-column>
-          <el-table-column prop="category" label="分类" width="130" show-overflow-tooltip :filters="complaintCategoryFilters" :filter-method="(v,row)=>row.category===v" filter-placement="bottom-end" />
+          <el-table-column prop="category" label="分类" width="150" show-overflow-tooltip :filters="complaintCategoryFilters" :filter-method="(v,row)=>row.category===v" filter-placement="bottom-end">
+            <template #default="{ row }">
+              <!-- ★ #65: 软纠正标注 —— 工单原登记为「工信部投诉」,
+                   但 SN 在 315 属监所/市监局类 → 统计时已按「外部投诉」归集。
+                   不标出会让人误以为分类错了。
+                   ⚠️ 仅展示层标注, BMS 原数据未改。 -->
+              <el-tooltip
+                v-if="row.soft_corrected"
+                content="BMS 原登记为「工信部投诉」。因该 SN 在 315 文档属监所/市监局类，已按「外部投诉」统计（原数据未改）。BMS 增加「监所/市监局」服务项后可取消此纠正。"
+                placement="top"
+              >
+                <span>
+                  <el-tag size="small" type="danger" effect="plain">{{ row.category }}</el-tag>
+                  <el-tag size="small" type="success" effect="plain" style="margin-left:4px">已纠正</el-tag>
+                </span>
+              </el-tooltip>
+              <span v-else>{{ row.category }}</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="problem" label="投诉内容" min-width="180" show-overflow-tooltip />
           <el-table-column label="处理/跟进" width="110" show-overflow-tooltip>
             <template #default="{ row }">
