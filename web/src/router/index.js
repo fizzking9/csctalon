@@ -378,6 +378,14 @@ const routes = [
         redirect: '/data/ingest?tab=data-quality',
       },
       {
+        // ★ #67 P3: 投诉采集质量(原「投诉分析」的人工审核#55 + 采集质量#60 外迁)。
+        //   path 为**新增**(非搬迁) —— 原页面内的 tab 无独立 url, 故不破坏历史书签。
+        path: 'system/complaint-quality',
+        name: 'SystemComplaintQuality',
+        component: () => import('@/views/management/ComplaintDataQuality.vue'),
+        meta: { title: '投诉采集质量', icon: 'CircleCheck', admin: true },
+      },
+      {
         path: 'system/data-quality',
         name: 'SystemDataQuality',
         component: () => import('@/views/management/DataQuality.vue'),

@@ -156,6 +156,8 @@ export const MENU_GROUPS = [
         icon: 'Coin',
         children: [
           { path: '/data/ingest', title: '数据采集' },
+          // ★ #67 P3: 数据治理类工具统一收敛到「系统管理」(用户 2026-09-11 决策)
+          { path: '/system/complaint-quality', title: '投诉采集质量' },
           { path: '/system/access-center', title: '接入中心' },
           { path: '/system/cache', title: '缓存管理' },
         ],

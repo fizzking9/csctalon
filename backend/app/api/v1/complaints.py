@@ -6,7 +6,7 @@
 
 import re
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Query
 from sqlalchemy import and_, case, func, or_, select
@@ -2048,19 +2048,593 @@ def complaint_backlog_export(
     )
 
 
+# ---------- 决策概览(#67 P1: 单请求出一屏) ----------
+#
+# 设计说明(Design Rationale) —— 详见 docs/standards/界面设计说明规范.md
+#   目的：客服主管在晨会前 5 分钟内判断「投诉是否失控、该先处理谁」，不需要滚屏。
+#   逻辑：总量是后果指标、单看会骗人(客户放弃/渠道堵塞都会让量下降) → 故除总量外
+#         同时给出「登记/处理」对称水位与「涉诉金额」，把量翻译成代价；
+#         结论条(danger→warn→info→ok)按严重度排序，把数字翻译成"该干什么"。
+#   口径：三源 = complaint_scope 分桶(内部/商户号/外部，(外)卡商独立不入总量)；
+#         时间过滤与 /summary 对齐(register OR finish)，修正 /analysis 只看 register 的偏差。
+#   取舍：不做日粒度环比报警(噪声大，用户 2026-09-11 决策 → 结论条带最小基数护栏)；
+#         不做比率指标(数据完整度不足，接口仅预留 ratios=null，见 #68)。
+#   工单：#67 · 设计：docs/arch/_pending/A-20260911-001-投诉分析整体重构.md
+
+_AUTO_GRAIN_RULES: tuple[tuple[int, str], ...] = ((31, "day"), (120, "week"))
+_OVERDUE_DAYS = 7  # 超期阈值: 累计未处理 >7 天(与积压页龄期口径一致)
+_MIN_BASE_FOR_PCT = 5  # 结论条最小基数护栏: 对比期基数 <5 条不给百分比结论(防"3→6 报 +100%")
+_MAX_CREDIBLE_PCT = 300.0  # 可信上限: 超过此幅度说明对比期数据覆盖不足(非真实业务信号)
+_MAX_CONCLUSIONS = 5
+_CONCLUSION_ORDER = ("danger", "warn", "info", "ok")
+
+
+def _auto_grain(days: int) -> str:
+    """按跨度自动推导趋势粒度: ≤31天→日; 32~120天→周; >120天→月。
+
+    理由: 日线超过 31 点即难以阅读; 周线超过 120 天仍可辨认趋势方向。
+    """
+    for limit, g in _AUTO_GRAIN_RULES:
+        if days <= limit:
+            return g
+    return "month"
+
+
+def _agg_by_bucket(day_map: dict, grain: str) -> list[dict]:
+    """把「按日」字典聚合为 日/周/月 桶列表(有序)。
+
+    输入: {day(YYYY-MM-DD, 北京时间): {field: value}}
+    输出: [{bucket, label, **fields}]
+      · 日 → bucket=原日, label=MM-DD
+      · 周 → bucket=ISO 周一(与前端 dayjs isoWeek 一致), label=MM-DD~MM-DD
+      · 月 → bucket=YYYY-MM, label=YYYY-MM
+
+    ⚠️ 聚合在 Python 侧做(而非 SQL date_trunc), 是为了与补充表(315)的逐日去重
+       结果统一口径 —— 补充表净额只有日粒度, 在 SQL 里无法按周/月预聚合。
+    """
+    buckets: dict[str, dict] = {}
+    for day, fields in day_map.items():
+        try:
+            d = datetime.strptime(str(day)[:10], "%Y-%m-%d")
+        except (ValueError, TypeError):
+            continue
+        if grain == "month":
+            key = label = d.strftime("%Y-%m")
+        elif grain == "week":
+            monday = d - timedelta(days=d.weekday())  # weekday(): 周一=0 → ISO 周起点
+            key = monday.strftime("%Y-%m-%d")
+            label = f"{monday.strftime('%m-%d')}~{(monday + timedelta(days=6)).strftime('%m-%d')}"
+        else:
+            key = day[:10]
+            label = d.strftime("%m-%d")
+        b = buckets.setdefault(key, {"bucket": key, "label": label})
+        for k, v in (fields or {}).items():
+            b[k] = b.get(k, 0) + v
+    return [buckets[k] for k in sorted(buckets)]
+
+
+def _pct(cur: float, prev: float) -> float | None:
+    """环比百分比(保留 1 位); 基数为 0 时返回 None —— 不可比值, 前端显示 "—"。"""
+    if not prev:
+        return None
+    return round((float(cur) - float(prev)) / float(prev) * 100.0, 1)
+
+
+@router.get("/overview", response_model=R, summary="投诉决策概览(单请求出一屏: 结论条/KPI/四趋势/积压)")
+@cached_json(
+    lambda *a, **kw: f"complaint:overview:{kw.get('start')}:{kw.get('end')}:{kw.get('grain')}:{kw.get('compare')}",
+    ttl=lambda **kw: cache_ttl_for(kw.get('start'), kw.get('end'), 60),
+)
+def complaint_overview(
+    db: DBSession,
+    _: CurrentUser,
+    start: str | None = None,
+    end: str | None = None,
+    grain: str | None = Query(default=None, description="趋势粒度 day/week/month; 缺省按跨度自动"),
+    compare: str = Query(default="prev", description="对比期 none/prev"),
+):
+    """投诉决策概览 —— 一次请求返回「一屏」所需的全部数据。
+
+    ★ 为什么需要独立接口(#67 P1):
+      原决策概览需要并发 8 个请求(summary/analysis/detail/backlog/subject/…),
+      任一慢都会拖垮首屏, 且各接口**时间过滤口径不一致**(/analysis 只看 register_time,
+      /summary 看 register OR finish) → 同一屏数字互相打架。
+      本接口统一为 register OR finish, 并只返回概览所需的最小集合。
+
+    返回块(与前端「决策概览」一一对应):
+      ① kpi               —— 5 个核心数 + 环比(总量/登记/处理/积压/涉诉金额)
+      ② conclusions       —— 自动归因结论条(后端生成, 口径可单测)
+      ③ trend_stacked     —— 总量(分项堆积): 内/商/外 三源堆叠
+      ④ card_trend        —— (外)卡商 **独立序列**(不并入 ③)
+      ⑤ trend_reg_handled —— 登记 vs 处理(对称水位, 出水⊂进水)
+      ⑥ trend_refund      —— 涉诉金额趋势(投诉 SN → 线上退款)
+      ⑦ backlog           —— 总积压 + 龄期 + Top10 明细
+      ⑧ ratios            —— 比率指标**占位**(恒 null, 见 #68 专项研究)
+
+    ⚠️ 金额单位: 本模块沿用既有 `refund_amount` 口径 = **元**(Numeric(12,2)),
+       与 `/subject-analysis` 一致, 保证概览与主体页金额可直接比对。
+    """
+    # ── 0. 解析时间范围(默认近 30 天), 推导粒度与对比期 ──
+    today = datetime.now(TZ).date()
+
+    def _date_or(s: str | None, fallback):
+        if s:
+            try:
+                return datetime.strptime(s[:10], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                pass
+        return fallback
+
+    sd = _date_or(start, today - timedelta(days=29))
+    ed = _date_or(end, today)
+    if ed < sd:
+        sd, ed = ed, sd
+    span_days = (ed - sd).days + 1
+
+    grain_eff = grain if grain in ("day", "week", "month") else _auto_grain(span_days)
+    use_compare = compare == "prev"
+    # 对比期 = 紧邻的等长前一段窗口
+    ped = sd - timedelta(days=1)
+    psd = ped - timedelta(days=span_days - 1)
+
+    ts, te = _parse_dt(str(sd)), _parse_dt_end(str(ed))
+    pts, pte = (_parse_dt(str(psd)), _parse_dt_end(str(ped))) if use_compare else (None, None)
+
+    src_expr = _complaint_source_type_case()
+    # ★ 堆叠趋势之和必须 ≡ KPI.total —— 提前取出作为对账基准(见下方趋势段的差额归桶)
+    cur_total_for_stack = int(_sources_reg_handled(db, ts, te)["total"]["registered"])
+
+    # ── 1. 区间指标(总量/登记/处理/涉诉金额) —— 当前期与对比期共用 ──
+    def _window_metrics(w_ts, w_te) -> dict:
+        """窗口内的基本量。
+
+        · total     : **投诉总量(登记口径)** = 三源 registered 之和 = **堆叠趋势之和**
+                      ⚠️ 与 `/summary` 的 total(register OR finish 活跃口径)**有意不同** ——
+                        本页「总量」就是分项堆积趋势的合计，两者必须能对上，
+                        否则同一屏里 KPI 与图表达不到自洽(历史上正是这个坑)。
+                        完成但登记在窗口外的历史单，只体现在 handled 而不计入 total。
+        · handled   : 窗口内完成(finish 落窗内 且 真实完成，剔卡商)
+        · completion_rate: 窗口内登记 且 已完成 ÷ 窗口内登记（**对称口径**，≤100%）
+        · refund_amt/refund_cnt: 窗口内**投诉涉及**的线上退款(按退款时间归窗)
+
+        ★★ #53: 卡商**完全独立** —— 上述量**全部不含 `(外)卡商` 桶** ★★
+           用户: "卡商的投诉 不纳入总量的管理, 整体独立统计分析…全部单算"。
+        """
+        src_rh = _sources_reg_handled(db, w_ts, w_te)["total"]
+        registered = int(src_rh["registered"])
+        handled = int(src_rh["handled"])
+        # 对称完成数: 工单侧(窗口内登记 且 真实完成) + 315办结(投诉日期在窗内 且 未被工单计入)
+        tk_conds = [
+            _ticket_category_case() == "投诉",
+            src_expr != CARD_SCOPE,
+            ServiceTicket.register_time.isnot(None),
+            ServiceTicket.finish_time.isnot(None),
+            ServiceTicket.finish_time > ServiceTicket.register_time,
+        ]
+        if w_ts:
+            tk_conds.append(ServiceTicket.register_time >= w_ts)
+        if w_te:
+            tk_conds.append(ServiceTicket.register_time <= w_te)
+        window_done = int(
+            db.scalar(select(func.count()).select_from(ServiceTicket).where(*tk_conds)) or 0
+        )
+        # 315 已办结: 扣除「matched 到窗口内工单」的部分 —— 与 registered 的扣减对称，
+        #   否则分子含、分母不含 → 完成率可能 >100%(长跨度实测 100.2%)。
+        ed_conds = [ExternalComplaint.complaint_date.isnot(None),
+                    ExternalComplaint.result.in_(_EXTERNAL_DONE_RESULTS)]
+        if w_ts:
+            ed_conds.append(ExternalComplaint.complaint_date >= w_ts)
+        if w_te:
+            ed_conds.append(ExternalComplaint.complaint_date <= w_te)
+        ext_done_all = int(
+            db.scalar(select(func.count()).select_from(ExternalComplaint).where(*ed_conds)) or 0
+        )
+        matched_sub = select(ServiceTicket.ticket_no).where(
+            _ticket_category_case() == "投诉",
+            ServiceTicket.register_time.isnot(None),
+            *([ServiceTicket.register_time >= w_ts] if w_ts else []),
+            *([ServiceTicket.register_time <= w_te] if w_te else []),
+        )
+        ext_done_overlap = int(
+            db.scalar(
+                select(func.count()).select_from(ExternalComplaint).where(
+                    *ed_conds,
+                    ExternalComplaint.matched_ticket_no.isnot(None),
+                    ExternalComplaint.matched_ticket_no.in_(matched_sub),
+                )
+            ) or 0
+        )
+        window_done += max(ext_done_all - ext_done_overlap, 0)
+        refund_cnt, refund_amt = _complaint_refund_amount(db, w_ts, w_te, src_expr)
+        return {
+            "total": registered,
+            "registered": registered,
+            "handled": handled,
+            "window_done": window_done,
+            "completion_rate": round(window_done / registered * 100.0, 1) if registered else None,
+            "refund_cnt": int(refund_cnt),
+            "refund_amt": float(refund_amt),
+        }
+
+    cur = _window_metrics(ts, te)
+    prev = _window_metrics(pts, pte) if use_compare else None
+
+    # ── 2. 积压(复用 _query_backlog_rows, 保证与「执行跟踪」页逐条一致) ──
+    #   ★ #53: 概览的总积压**剔除卡商行** —— 卡商独立体系，不计入投诉积压。
+    #     ⚠️ 仅在本接口过滤，**不**改 `_query_backlog_rows`(否则会改到「执行跟踪」页)。
+    backlog_rows = [r for r in _query_backlog_rows(db, ts, te) if r.get("source") != CARD_SCOPE]
+    b_total = len(backlog_rows)
+    b_overdue = sum(1 for r in backlog_rows if (r.get("aging_days") or 0) > _OVERDUE_DAYS)
+    b_unassigned = sum(1 for r in backlog_rows if r.get("handler") == "未分配")
+    b_max_aging = max((r.get("aging_days") or 0) for r in backlog_rows) if backlog_rows else 0
+    by_source_cnt: dict[str, int] = {}
+    by_aging_cnt: dict[str, int] = {}
+    for r in backlog_rows:
+        by_source_cnt[r.get("source") or "未标注"] = by_source_cnt.get(r.get("source") or "未标注", 0) + 1
+        a = r.get("aging_days") or 0
+        bucket = "≤3天" if a <= 3 else ("4-7天" if a <= 7 else ("8-14天" if a <= 14 else ">14天"))
+        by_aging_cnt[bucket] = by_aging_cnt.get(bucket, 0) + 1
+
+    # ── 3. KPI 卡(带环比) ──
+    prev_backlog = None
+    if use_compare:
+        # 对比期积压 = 对比期末仍在积压(同口径重算, 保证可比; 同样剔除卡商)
+        prev_backlog = len([
+            r for r in _query_backlog_rows(db, pts, pte) if r.get("source") != CARD_SCOPE
+        ])
+    kpi = [
+        _kpi_item("total", "投诉总量", cur["total"], prev["total"] if prev else None, "条"),
+        _kpi_item("handled", "已处理", cur["handled"], prev["handled"] if prev else None, "条"),
+        # 完成率是比率 → 环比用**百分点差**(pp)，不是百分比变化
+        {
+            "key": "completion_rate", "label": "完成率", "value": cur["completion_rate"],
+            "prev": prev["completion_rate"] if prev else None,
+            "delta_pp": (
+                round(cur["completion_rate"] - prev["completion_rate"], 1)
+                if prev and cur["completion_rate"] is not None and prev["completion_rate"] is not None
+                else None
+            ),
+            "delta_pct": None, "unit": "%",
+        },
+        _kpi_item("backlog", "总积压", b_total, prev_backlog, "条"),
+        _kpi_item("refund_amount", "涉诉退款金额", round(cur["refund_amt"], 2),
+                  round(prev["refund_amt"], 2) if prev else None, "元"),
+    ]
+
+    # ── 4. 趋势①: 总量(分项堆积) 内/商/外 —— 按登记日 ──
+    day_trunc = _day_trunc(ServiceTicket.register_time)
+    trend_stmt = select(day_trunc, src_expr, func.count()).select_from(ServiceTicket).where(
+        _ticket_category_case() == "投诉"
+    )
+    if ts:
+        trend_stmt = trend_stmt.where(ServiceTicket.register_time >= ts)
+    if te:
+        trend_stmt = trend_stmt.where(ServiceTicket.register_time <= te)
+    day_map: dict[str, dict] = {}
+    for d, src, cnt in db.execute(
+        trend_stmt.group_by(day_trunc, src_expr).order_by(day_trunc)
+    ).all():
+        if not d:
+            continue
+        # ★ #53: 卡商桶**不进**投诉总量堆叠(独立序列见 card_trend)
+        if (src or "") == CARD_SCOPE:
+            continue
+        key = str(d)[:10]
+        b = day_map.setdefault(key, {"内部投诉": 0, "商户号投诉": 0, "外部投诉": 0})
+        b[src or "内部投诉"] = b.get(src or "内部投诉", 0) + int(cnt or 0)
+    # 并入 315 补充表净新增(与 /summary 同口径); ⚠️ 卡商**不并入**(#53)
+    #   ⚠️ 必须用 `+=` 逐日累加(不清零 net 负值) —— 与 `_source_reg_handled` 的
+    #      `max(ext_reg, 0)` 是在**总和**层面截断，若这里对逐日净额逐个 max(0) 会改变总量。
+    for r in _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te):
+        b = day_map.setdefault(r["day"], {"内部投诉": 0, "商户号投诉": 0, "外部投诉": 0})
+        b["外部投诉"] = b.get("外部投诉", 0) + int(r["total"] or 0) - int(r["overlap"] or 0)
+    trend_stacked = []
+    for b in _agg_by_bucket(day_map, grain_eff):
+        # 逐桶与总量口径对齐: 每日净额可能为负(重叠>新增)，按桶 floor(0) 后
+        # 再把"全期累积差额"补到最后一个桶，保证 `堆叠之和 ≡ KPI.total`。
+        trend_stacked.append(dict(b))
+    for b in trend_stacked:
+        for k in ("内部投诉", "商户号投诉", "外部投诉"):
+            b[k] = max(int(b.get(k, 0)), 0)
+    _stack_sum = sum(b["内部投诉"] + b["商户号投诉"] + b["外部投诉"] for b in trend_stacked)
+    _diff = cur_total_for_stack - _stack_sum
+    if _diff and trend_stacked:
+        # 差额归入最后一个桶的外部投诉(占比最小，影响最轻)
+        trend_stacked[-1]["外部投诉"] += _diff
+        if trend_stacked[-1]["外部投诉"] < 0:
+            trend_stacked[-1]["外部投诉"] = 0
+
+    # ── 4.1 (外)卡商独立趋势(不并入总量堆叠, #53) ──
+    card_day: dict[str, dict] = {}
+    for r in _suppl_trend_rows(db, CardComplaint, "外部投诉", ts, te):
+        net = int(r["total"] or 0) - int(r["overlap"] or 0)
+        if net:
+            b = card_day.setdefault(r["day"], {"registered": 0})
+            b["registered"] = b.get("registered", 0) + net
+    card_trend = _agg_by_bucket(card_day, grain_eff)
+
+    # ── 5. 趋势②: 登记 vs 处理(对称水位 v2: 出水⊂进水) ──
+    #   ★ 与「总积压」**同源同口径**(_query_backlog_rows)，保证
+    #      `累计净水位(末桶) ≡ 总积压`。历史上这两处因各自实现完成判定而互相打架。
+    #   进水 = 窗口内按登记日新增(含 315 补充表净额);
+    #   出水 = 进水 − 截至当日仍未完成 —— “仍未完成”直接复用积压判定，无法漂移。
+    in_stmt = select(day_trunc, func.count()).select_from(ServiceTicket).where(
+        _ticket_category_case() == "投诉", src_expr != CARD_SCOPE
+    )
+    if ts:
+        in_stmt = in_stmt.where(ServiceTicket.register_time >= ts)
+    if te:
+        in_stmt = in_stmt.where(ServiceTicket.register_time <= te)
+    in_map = {str(d)[:10]: int(c or 0) for d, c in db.execute(in_stmt.group_by(day_trunc)).all() if d}
+    # 进水并入 315 补充表净新增(与总量口径一致)，否则净水位末端与积压对不上
+    for r in _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te):
+        in_map[r["day"]] = in_map.get(r["day"], 0) + int(r["total"] or 0) - int(r["overlap"] or 0)
+
+    # 按登记日汇总"仍未完成"(与积压页同一条判定链: _query_backlog_rows 的结果)
+    _pending_by_day: dict[str, int] = {}
+    for r in backlog_rows:
+        d = str(r.get("register_time") or "")[:10]
+        if d:
+            _pending_by_day[d] = _pending_by_day.get(d, 0) + 1
+
+    rh_day: dict[str, dict] = {}
+    for d in sorted(set(in_map) | set(_pending_by_day)):
+        inn = in_map.get(d, 0)
+        rh_day[d] = {"registered": inn, "handled": inn - _pending_by_day.get(d, 0)}
+    trend_reg_handled = _agg_by_bucket(rh_day, grain_eff)
+    cum = 0
+    for b in trend_reg_handled:
+        b["net"] = b.get("registered", 0) - b.get("handled", 0)
+        cum += b["net"]
+        b["cum_net"] = cum
+
+    # ── 6. 趋势③: 涉诉金额(投诉 SN → 线上退款, 按退款时间归桶) ──
+    ref_day: dict[str, dict] = {}
+    for d, cnt, amt in _complaint_refund_rows(db, ts, te, src_expr):
+        if not d:
+            continue
+        b = ref_day.setdefault(str(d)[:10], {"count": 0, "amount": 0.0})
+        b["count"] += int(cnt or 0)
+        b["amount"] += float(amt or 0)
+    trend_refund = _agg_by_bucket(ref_day, grain_eff)
+
+    # ── 7. 升级率(内部/商户号 → 外部 的同一设备占比) ──
+    sn_total, sn_escalated = _escalation_stats(db, ts, te, src_expr)
+    escalation = {
+        "sns_total": sn_total,
+        "sns_escalated": sn_escalated,
+        "rate": round(sn_escalated / sn_total * 100.0, 1) if sn_total else None,
+    }
+
+    # ── 8. 结论条(后端生成: 口径统一 + 可单测; 前端只渲染) ──
+    conclusions: list[dict] = []
+    src_rh_cur = _sources_reg_handled(db, ts, te)
+    _baseline_weak = False  # 对比期数据覆盖不足标记(用于给出"为什么没有环比"的说明)
+    if prev:
+        src_rh_prev = _sources_reg_handled(db, pts, pte)
+        for src, tab in (("外部投诉", "external"), ("内部投诉", "internal"), ("商户号投诉", "merchant")):
+            cv = src_rh_cur[src]["registered"]
+            pv = src_rh_prev[src]["registered"]
+            p = _pct(cv, pv)
+            # 最小基数护栏: 对比期基数 <5 条时不给百分比结论(防小基数放大)
+            if p is None or pv < _MIN_BASE_FOR_PCT:
+                continue
+            # ★ 可信上限护栏: |p| 超 300% 说明对比期几乎无数据(如窗口落在系统上线前)，
+            #   这是"基线无效"而非"业务暴增" —— 报出来反而误导决策，故抑制。
+            if abs(p) > _MAX_CREDIBLE_PCT:
+                _baseline_weak = True
+                continue
+            if abs(p) >= 20:
+                conclusions.append({
+                    "level": "danger" if p > 0 else "ok",
+                    "text": f"{src}环比 {'+' if p > 0 else ''}{p}%（{pv}→{cv} 条）",
+                    "drill": {"tab": tab},
+                })
+        # 基线不足时显式说明(优于静默无环比 —— 使用者会追问"为什么没数据")
+        if _baseline_weak and not conclusions:
+            conclusions.append({
+                "level": "info",
+                "text": f"对比期（{psd}~{ped}）数据覆盖不足，本期未输出环比结论",
+                "drill": {"tab": "overview"},
+            })
+    if b_overdue:
+        conclusions.append({
+            "level": "warn",
+            "text": f"积压超期 {b_overdue} 条（>{_OVERDUE_DAYS} 天），最旧 {b_max_aging} 天",
+            "drill": {"tab": "backlog", "overdue": True},
+        })
+    if escalation["rate"] is not None:
+        conclusions.append({
+            "level": "warn" if escalation["rate"] >= 20 else "ok",
+            "text": f"升级率 {escalation['rate']}%（{sn_escalated}/{sn_total} 台设备：内部或商户号投诉后升级到外部）",
+            "drill": {"tab": "subject"},
+        })
+    if cur["refund_amt"] > 0:
+        rp = _pct(cur["refund_amt"], prev["refund_amt"]) if prev else None
+        suffix = f"，环比 {'+' if rp > 0 else ''}{rp}%" if rp is not None else ""
+        conclusions.append({
+            "level": "info",
+            "text": f"涉诉退款 ¥{cur['refund_amt']:,.2f}（{cur['refund_cnt']} 笔）{suffix}",
+            "drill": {"tab": "external"},
+        })
+    conclusions.sort(key=lambda c: _CONCLUSION_ORDER.index(c["level"]))
+    conclusions = conclusions[:_MAX_CONCLUSIONS]
+
+    return R(data={
+        "range": {
+            "start": str(sd), "end": str(ed), "grain": grain_eff, "compare": compare if use_compare else "none",
+            **({"prev_start": str(psd), "prev_end": str(ped)} if use_compare else {}),
+        },
+        "kpi": kpi,
+        "kpi_meta": {
+            # 口径注释(供前端 ⓘ 气泡直接渲染, 避免前端硬编码口径描述)
+            "total": "本期窗口内登记的投诉量(三源合计，不含(外)卡商)，= 总量堆积趋势之和",
+            "handled": "本期窗口内完成的投诉(含登记在窗口外的历史单)",
+            "completion_rate": "窗口内登记的投诉中已办结的占比（对称口径，≤100%）",
+            "backlog": f"截至窗口末仍未完成(超期阈值 >{_OVERDUE_DAYS} 天)，不含(外)卡商",
+            "refund_amount": "本期投诉涉及 SN 关联的线上退款金额(元)",
+        },
+        "conclusions": conclusions,
+        "trend_stacked": trend_stacked,
+        "card_trend": card_trend,
+        "trend_reg_handled": trend_reg_handled,
+        "trend_refund": trend_refund,
+        "escalation": escalation,
+        "backlog": {
+            "total": b_total, "overdue": b_overdue, "unassigned": b_unassigned, "max_aging": b_max_aging,
+            "by_source": [{"name": k, "count": v} for k, v in sorted(by_source_cnt.items(), key=lambda x: -x[1])],
+            "by_aging": [{"name": k, "count": by_aging_cnt.get(k, 0)} for k in ("≤3天", "4-7天", "8-14天", ">14天")],
+            "items": backlog_rows[:10],
+        },
+        # ★ 比率指标占位: 数据完整度不足, 本期恒 null(见 #68 专项研究)
+        "ratios": None,
+    })
+
+
+def _kpi_item(key: str, label: str, value, prev, unit: str) -> dict:
+    """构造一个 KPI 卡数据项(含环比)。
+
+    prev 为 None(未开启对比)时 delta_pct 为 None → 前端不显示环比箭头。
+    """
+    return {
+        "key": key, "label": label, "value": value,
+        "prev": prev, "delta_pct": _pct(value, prev) if prev is not None else None,
+        "unit": unit,
+    }
+
+
+def _complaint_sn_subquery(w_ts, w_te, src_expr):
+    """窗口内「投诉类」设备 SN 子查询(工单三源 ∪ 315 补充表), 供涉诉退款关联。
+
+    ★ #53: **不含 `(外)卡商`** —— 卡商独立体系, 不参与投诉总量的涉诉金额。
+    """
+    tk_conds = [
+        _ticket_category_case() == "投诉",
+        src_expr != CARD_SCOPE,
+        ServiceTicket.device_sn.isnot(None),
+    ]
+    if w_ts:
+        tk_conds.append(ServiceTicket.register_time >= w_ts)
+    if w_te:
+        tk_conds.append(ServiceTicket.register_time <= w_te)
+    tk_sn = select(ServiceTicket.device_sn.label("sn")).where(*tk_conds)
+
+    ext_conds = [ExternalComplaint.device_sn.isnot(None)]
+    if w_ts:
+        ext_conds.append(ExternalComplaint.complaint_date >= w_ts)
+    if w_te:
+        ext_conds.append(ExternalComplaint.complaint_date <= w_te)
+    ext_sn = select(ExternalComplaint.device_sn.label("sn")).where(*ext_conds)
+    return tk_sn.union(ext_sn)
+
+
+def _complaint_refund_rows(db, w_ts, w_te, src_expr):
+    """涉诉退款按日明细: [(day, 笔数, 金额元)] —— 投诉 SN 关联的线上退款。
+
+    退款时间用 `created_at_raw`(运营登记口径), 与 /subject-analysis 的退款关联一致。
+    """
+    sn_sub = _complaint_sn_subquery(w_ts, w_te, src_expr)
+    conds = [
+        Refund.refund_method == "线上",
+        Refund.device_sn.isnot(None),
+        Refund.device_sn.in_(sn_sub),
+    ]
+    if w_ts:
+        conds.append(Refund.created_at_raw >= w_ts)
+    if w_te:
+        conds.append(Refund.created_at_raw <= w_te)
+    day = _day_trunc(Refund.created_at_raw)
+    return db.execute(
+        select(day, func.count(), func.coalesce(func.sum(Refund.refund_amount), 0))
+        .where(*conds).group_by(day).order_by(day)
+    ).all()
+
+
+def _complaint_refund_amount(db, w_ts, w_te, src_expr) -> tuple[int, float]:
+    """涉诉退款合计 (笔数, 金额元) —— 供 KPI 与结论条使用。
+
+    金额单位: 元(Numeric(12,2) 原值), 与 `/subject-analysis` 的 `refund_amount` 一致。
+    """
+    conds = [
+        Refund.refund_method == "线上",
+        Refund.device_sn.isnot(None),
+        Refund.device_sn.in_(_complaint_sn_subquery(w_ts, w_te, src_expr)),
+    ]
+    if w_ts:
+        conds.append(Refund.created_at_raw >= w_ts)
+    if w_te:
+        conds.append(Refund.created_at_raw <= w_te)
+    cnt, amt = db.execute(
+        select(func.count(), func.coalesce(func.sum(Refund.refund_amount), 0)).where(*conds)
+    ).one()
+    return int(cnt or 0), float(amt or 0)
+
+
+def _escalation_stats(db, w_ts, w_te, src_expr) -> tuple[int, int]:
+    """升级率统计: (有 SN 的投诉设备数, 其中"内部或商户号 → 外部"升级的设备数)。
+
+    ★ 为什么这是最重要的可控指标:
+      外部投诉是后果, 而"内部没处理好导致升级"才是原因 —— 升级率下降 =
+      内部处理质量提升的直接证据(其余指标都会被外部因素稀释)。
+    """
+    base = [
+        _ticket_category_case() == "投诉",
+        src_expr != CARD_SCOPE,  # ★ #53: 卡商独立，不参与升级率
+        ServiceTicket.device_sn.isnot(None),
+    ]
+    if w_ts:
+        base.append(ServiceTicket.register_time >= w_ts)
+    if w_te:
+        base.append(ServiceTicket.register_time <= w_te)
+
+    total = db.scalar(
+        select(func.count(func.distinct(ServiceTicket.device_sn))).where(*base)
+    ) or 0
+    if not total:
+        return 0, 0
+    ext_sn = select(ServiceTicket.device_sn).where(*base, src_expr == "外部投诉")
+    inner_sn = select(ServiceTicket.device_sn).where(
+        *base, src_expr.in_(("内部投诉", "商户号投诉"))
+    )
+    escalated = db.scalar(
+        select(func.count()).select_from(ext_sn.intersect(inner_sn).subquery())
+    ) or 0
+    return int(total), int(escalated)
+
+
 # ---------- 被投诉主体维度分析 ----------
 
 
 @router.get("/subject-analysis", response_model=R, summary="被投诉主体维度分析(主体统计/严重性分布/升级链/退款关联)")
-@cached_json(lambda *a, **kw: f"complaint:subject:{kw.get('start')}:{kw.get('end')}",
+@cached_json(lambda *a, **kw: f"complaint:subject:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('sort_by')}:{kw.get('top_n')}:{kw.get('compare')}",
              ttl=lambda **kw: cache_ttl_for(kw.get('start'), kw.get('end'), 120))
 def complaint_subject_analysis(
     db: DBSession,
     _: CurrentUser,
     start: str | None = None,
     end: str | None = None,
+    source_type: str = Query(
+        default="all",
+        description="来源筛选: all=全部 / merchant=仅商户号 / external=仅外部 / both=升级主体(两源都有)",
+    ),
+    sort_by: str = Query(
+        default="total",
+        description="排序: total=总量 / external_ratio=外部占比 / refund_amount=涉诉金额 / delta=环比增幅",
+    ),
+    top_n: int = Query(default=0, ge=0, le=1000, description="取前 N 个主体; 0=全部"),
+    compare: str = Query(default="none", description="对比期: none / prev(环比，紧邻等长前段)"),
 ):
     """被投诉主体维度分析。
+
+    ★ #67 P2 新增筛选(2026-09-11): `source_type` / `sort_by` / `top_n` / `compare`。
+      **全部可选，缺省时行为与改造前逐项一致**（向后兼容契约，有单测守护）。
+
+    ★ 为什么主体页需要筛选(用户需求):
+      主体榜默认按总量排序，但管理动作不同 ——
+        · 治「升级」→ 看 both(两源都有) + 外部占比高
+        · 治「成本」→ 看涉诉退款金额高
+        · 治「新冒头」→ 看环比增幅高
+      一个固定排序无法支持这三种决策。
 
     口径(2026-08-25 用户确认):
     - 主体统计仅覆盖有真实主体字段的两类来源:
@@ -2070,6 +2644,8 @@ def complaint_subject_analysis(
     - 升级链(传递性): 按设备SN汇总三源投诉组合, 呈现 内部→商户号→外部 升级漏斗。
     - 退款关联: 主体投诉SN关联的线上退款(refund_method='线上', created_at_raw 在范围内)笔数/金额,
       体现「投诉处理不好最终导致退款」。
+
+    ⚠️ 金额单位: 元(Numeric(12,2) 原值), 与 `/complaints/overview` 一致。
     """
     ts = _parse_dt(start)
     te = _parse_dt_end(end)
@@ -2237,11 +2813,83 @@ def complaint_subject_analysis(
         s["escalated"] = s["merchant_count"] > 0 and s["external_count"] > 0
         s.pop("sns", None)
 
-    # ── 6. 主体Top榜 (按总量降序) ──
-    subject_ranking = sorted(
-        subjects.values(),
-        key=lambda x: (-x["total"], -x["external_count"], x["name"]),
-    )[:20]
+    # ── 6. 主体Top榜 (默认按总量降序; #67 P2 支持筛选与排序) ──
+    #   ★ source_type: all / merchant / external / both(升级主体)
+    #     用「有效性」过滤而非改聚合 —— 保证 filtered 与 unfiltered 的**主体数口径一致**。
+    _all_subjects = list(subjects.values())
+    if source_type == "merchant":
+        _filtered = [x for x in _all_subjects if x["merchant_count"] > 0]
+    elif source_type == "external":
+        _filtered = [x for x in _all_subjects if x["external_count"] > 0]
+    elif source_type == "both":
+        # 升级主体 = 同一主体既有商户号投诉又有外部投诉(事态升级的强信号)
+        _filtered = [x for x in _all_subjects if x["merchant_count"] > 0 and x["external_count"] > 0]
+    else:  # all: 不缺省过滤, 保持旧行为
+        _filtered = _all_subjects
+
+    # ── 6.1 环比(compare=prev): 对比期主体量 → delta_pct ──
+    #   口径: 等长前段窗口, 与 /overview 的 prev 一致(紧邻、不重叠、等长)。
+    if compare == "prev" and (ts or te):
+        from datetime import timedelta as _td
+        # 对比期 = 紧邻的等长前段窗口(与 /overview 的 prev 完全一致)
+        _span_days = ((te - ts).days + 1) if (ts and te) else 30
+        _pts = (ts - _td(days=_span_days)) if ts else None
+        _pte = (ts - _td(microseconds=1)) if ts else None
+        if _pts and _pte:
+            _prev_map: dict[str, int] = {}
+            # 商户号侧: 对比期登记
+            for registrant, _sn, _rt in db.execute(
+                select(ServiceTicket.registrant, ServiceTicket.device_sn, ServiceTicket.register_time)
+                .where(src_expr == "商户号投诉")
+                .where(ServiceTicket.registrant.isnot(None), ServiceTicket.registrant != "")
+                .where(ServiceTicket.register_time >= _pts, ServiceTicket.register_time <= _pte)
+            ).all():
+                _n = _norm_subject_entity(registrant)
+                if _n:
+                    _prev_map[_n] = _prev_map.get(_n, 0) + 1
+            # 外部侧: 对比期投诉日期
+            for company_entity, complaint_shop, _sn, _cd in db.execute(
+                select(ExternalComplaint.company_entity, ExternalComplaint.complaint_shop,
+                       ExternalComplaint.device_sn, ExternalComplaint.complaint_date)
+                .where(ExternalComplaint.complaint_date >= _pts,
+                       ExternalComplaint.complaint_date <= _pte)
+            ).all():
+                _subj = None
+                if company_entity and str(company_entity).strip():
+                    _subj = _norm_subject_entity(company_entity)
+                elif complaint_shop and str(complaint_shop).strip() not in {"/", "-", ""}:
+                    _subj = _norm_subject_entity(complaint_shop)
+                if _subj:
+                    _prev_map[_subj] = _prev_map.get(_subj, 0) + 1
+            for _s in _filtered:
+                _pv = _prev_map.get(_s["name"], 0)
+                _s["prev_total"] = _pv
+                _s["delta_pct"] = (
+                    round((_s["total"] - _pv) / _pv * 100.0, 1) if _pv > 0 else None
+                )
+
+    # ── 6.2 排序(#67 P2) ──
+    def _ext_ratio(x):
+        return (x["external_count"] / x["total"]) if x["total"] else 0.0
+
+    def _sort_key(x):
+        """排序键 —— 四种口径，全部以「降序」为语义(取负)。"""
+        if sort_by == "external_ratio":
+            return (-_ext_ratio(x), -x["total"], x["name"])
+        if sort_by == "refund_amount":
+            return (-(x.get("refund_amount") or 0), -x["total"], x["name"])
+        if sort_by == "delta":
+            # 环比增幅: 无基数的(delta_pct=None)排最后,
+            # 避免"对比期为 0 的新冒头主体"霸榜(即便有值也不代表恶化规模)
+            _d = x.get("delta_pct")
+            return (-(_d if _d is not None else -1e9), -x["total"], x["name"])
+        # total(默认, 与改造前完全一致)
+        return (-x["total"], -x["external_count"], x["name"])
+
+    _ranked = sorted(_filtered, key=_sort_key)
+    # top_n=0 表示全部; 默认 0 → 保持旧行为(旧实现硬编码 [:20])
+    #   ⚠️ 为向后兼容, 不传 top_n 时仍按 20 截断(旧行为)。
+    subject_ranking = _ranked[:top_n] if top_n > 0 else _ranked[:20]
 
     # ── 7. 严重性数量分布 (商户号投诉 vs 外部投诉, 含主体识别口径) ──
     severity_distribution = [
@@ -2293,6 +2941,12 @@ def complaint_subject_analysis(
             "refund_amount": round(refund_total_amount, 2),
         },
         "subject_ranking": subject_ranking,
+        # ★ #67 P2: 回显生效的筛选条件 —— 让使用者/前端能确认"我看到的是哪一档"
+        "filters": {
+            "source_type": source_type, "sort_by": sort_by,
+            "top_n": top_n, "compare": compare,
+            "ranked_total": len(_ranked),   # 筛选后主体总数(用于前端显示 "Top N / 共 M")
+        },
         "severity_distribution": severity_distribution,
         "escalation_funnel": escalation_funnel,
         "subject_trend": subject_trend,

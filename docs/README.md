@@ -15,8 +15,7 @@
 |---|---|---|---|
 | `docs/arch/` | 已锁定架构设计 | `A-YYYYMMDD-序号-简述.md` | `A-20260903-001-issue-automation-gates.md` |
 | `docs/arch/_pending/` | 待审核设计草案 | 同 arch 编号 | `A-20260903-002-xxx.md`（PENDING） |
-| `docs/standards/` | 规范/清单/模板 | 英文 kebab-case | `error-code.md`、`issue-workflow.md` |
-| `docs/reports/` | 审计/审查/审核报告 | `YYYYMMDD-主题-类型.md` | `20260831-看板缓存优化-审计报告.md` |
+| `docs/standards/` | 规范/清单/模板 | 英文 kebab-case | `error-code.md`、`issue-workflow.md` || `docs/reports/` | 审计/审查/审核报告 | `YYYYMMDD-主题-类型.md` | `20260831-看板缓存优化-审计报告.md` |
 | `docs/debug/` | 调试会话/故障归档 | `debug-<主题>-<YYYYMMDD>.md` | `debug-cs-record-gap-20260902.md` |
 | `docs/security/` | 安全事件/凭证整改 | kebab-case | `credential-incident-remediation.md` |
 | `docs/ops/` | 运维手册/SOP | `<主题>-运维手册.md` | `数据采集-运维手册.md` |
@@ -71,6 +70,7 @@
 | 投诉数据接入说明.md | `docs/standards/` | 保持原名 |
 | 数据库表结构说明.md | `docs/standards/` | 保持原名 |
 | 人均效率算法说明.md | `docs/standards/` | 保持原名 |
+| **界面设计说明规范.md** | `docs/standards/` | **新增 v1.0（2026-09-11）· 强制** |
 | Group-Specialty双体系设计.md | `docs/design/` | 保持原名 |
 | 腾讯云部署迁移方案.md | `docs/design/` | 保持原名 |
 | 共享文档投诉数据接入设计.md | `docs/design/` | 保持原名 |

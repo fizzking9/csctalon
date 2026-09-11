@@ -1,5 +1,12 @@
 import request from '@/api'
 
+// ★ #67 P1: 投诉决策概览(单请求出一屏: 结论条/KPI/四趋势/积压)
+//   替代原先并发 8 个请求(summary/analysis/detail/backlog/subject/…),
+//   且统一了时间口径 —— 各接口原口径不一致会让同屏数字互相打架。
+export function complaintOverview(params) {
+  return request.get('/complaints/overview', { params })
+}
+
 // 投诉决策分析(管理摘要/平台分布/时效/处理人效率)
 export function complaintAnalysis(params) {
   return request.get('/complaints/analysis', { params })
