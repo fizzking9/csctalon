@@ -18,7 +18,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import case, or_, text
+from sqlalchemy import case, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -107,8 +107,11 @@ class SyncRowResult:
         # ⚠️ 必须与 errors 严格分离: errors=硬失败明细(对外契约 failed/errors 语义),
         #    validation=校验告警(不丢弃行); 混入 errors 会让 failed=0 时 errors 非空,
         #    破坏 workbuddy 对外契约与 complaint_sync_logs.error 语义。
-        self.validation: list[dict[str, Any]] = []
-
+        self.validation: list[dict[str, Any]] = []        # ★ #59: SN 后补治理计数
+        #   claimed = 有SN的行命中库内「缺SN残影」→ UPDATE 而非新增(去重成功)
+        #   skipped = 无SN残影遇已有完整行 → 跳过(不覆盖)
+        self.sn_backfill_claimed = 0
+        self.sn_backfill_skipped = 0
     def add_validation(self, row_idx: int, issue: dict) -> None:
         """记录一条入库前校验问题(不影响 errors/failed 计数)"""
         self.validation.append({"row": row_idx, **issue})
@@ -435,6 +438,11 @@ def _upsert_external(db: Session, rows: list[dict], result: SyncRowResult, sn_ti
         else:
             r["matched_ticket_no"] = None
             r["matched_at"] = None
+    # ★ #59: SN 后补认领 —— 有SN的行若命中库内「缺SN残影」, 改为 UPDATE 而非新增;
+    #   无SN的行若库内已有完整行, 跳过(不覆盖)。解决源头"先建行后补SN"造成的重复。
+    claimed, skipped = _reconcile_sn_backfill(db, ExternalComplaint, rows)
+    result.sn_backfill_claimed += claimed
+    result.sn_backfill_skipped += skipped
     _batch_upsert(db, ExternalComplaint, rows, result)
 
 
@@ -455,7 +463,137 @@ def _upsert_card(db: Session, rows: list[dict], result: SyncRowResult, sn_ticket
         else:
             r["matched_ticket_no"] = None
             r["matched_at"] = None
+    # ★ #59: 同 315 —— SN 后补认领, 避免"先建行后补SN"产生重复
+    claimed, skipped = _reconcile_sn_backfill(db, CardComplaint, rows)
+    result.sn_backfill_claimed += claimed
+    result.sn_backfill_skipped += skipped
     _batch_upsert(db, CardComplaint, rows, result)
+
+
+def _weak_identity_hash(rec: dict[str, Any]) -> str:
+    """**弱指纹**（不含 SN）: md5(投诉日期 | 投诉手机号 | 归一化问题) —— #59
+
+    ## 为什么需要第二个指纹
+
+      源文档存在「**先建行、后补 SN**」的采集特性:
+
+      | 时刻 | 源文档 | 主指纹(含SN) | 结果 |
+      |---|---|---|---|
+      | T1 | SN 空 | 指纹 A | INSERT「残影」(字段不全) |
+      | T2 | SN 补上 | 指纹 B | **又 INSERT** → 同一投诉 2 条并列 |
+
+      实测(生产库): 85 条 = 37 组，冗余 **48 条**; 形态高度一致 ——
+      每组都是「缺 SN 残影 + 有 SN 完整行」，且**有 SN 的总在后入库**。
+
+    ## 用途（只在 SN 状态不一致时兜底，不替代主指纹）
+
+      · 待入库行 **有 SN** 且弱指纹命中一条「缺 SN 的行」→ **UPDATE 该行**
+        (回填 SN 与全部字段)，不新增
+      · 待入库行 **无 SN** 且弱指纹命中一条「有 SN 的行」→ **跳过**
+        (避免残影覆盖完整行)
+
+    ⚠️ 为什么主指纹**不能**直接去掉 SN: 同一人可能有多台设备、
+       同一天就同一问题各投一次 → 去掉 SN 会**误合并真实的多条投诉**。
+       故主指纹保持原语义，弱指纹仅作「SN 从无到有」的识别桥。
+    """
+    from app.services.upsert import _complaint_problem_signature
+
+    date = rec.get("complaint_date")
+    date_s = date.strftime("%Y-%m-%d") if date else ""
+    return _dedup_hash([
+        date_s,
+        rec.get("complainant_phone"),
+        _complaint_problem_signature(rec.get("problem")),
+    ])
+
+
+def _reconcile_sn_backfill(db: Session, model, rows: list[dict]) -> tuple[int, int]:
+    """把「SN 后补」的行**认领**到已有残影上（UPDATE 而非 INSERT）—— #59
+
+    返回 (认领数, 跳过数)。
+
+    ## 逻辑
+
+      待入库行 r
+        ├─ r 有 SN → 查弱指纹是否对应一条「缺 SN 的行」
+        │             ├─ 有 → r 的 dedup_hash 改为残影的 dedup_hash
+        │             │       (后续 upsert 会 UPDATE 该残影 → 回填 SN 及全字段) ★
+        │             └─ 无 → 不动(走原主指纹 upsert)
+        └─ r 无 SN → 查弱指纹是否对应一条「有 SN 的行」
+                      ├─ 有 → **移除 r**(不写库, 避免残影覆盖完整行) ★
+                      └─ 无 → 不动
+
+    ⚠️ 本函数**不删任何已有行**，只调整待写入行的去向/取舍。
+       存量冗余由 `mark_sn_backfill_duplicates()` 单独标记(不物删)。
+    """
+    if not rows:
+        return 0, 0
+
+    rows_has_sn = [r for r in rows if r.get("device_sn")]
+    rows_no_sn = [r for r in rows if not r.get("device_sn")]
+    if not rows_has_sn and not rows_no_sn:
+        return 0, 0
+
+    # 预载: 库内同期的 (弱指纹 → 行) 映射（只查SN状态相关的两类）
+    weak_of = {}
+    for r in rows:
+        weak_of[r["dedup_hash"]] = _weak_identity_hash(r)
+    weak_vals = set(weak_of.values())
+    if not weak_vals:
+        return 0, 0
+
+    # 库内候选: 按 (日期, 电话) 粗筛, 再在 Python 侧算弱指纹比对
+    phones = {r.get("complainant_phone") for r in rows if r.get("complainant_phone")}
+    dates = {r.get("complaint_date") for r in rows if r.get("complaint_date")}
+    if not phones or not dates:
+        return 0, 0
+
+    db_rows = db.execute(
+        select(model.id, model.device_sn, model.complaint_date,
+               model.complainant_phone, model.problem, model.dedup_hash)
+        .where(
+            model.complainant_phone.in_(phones),
+            model.complaint_date >= min(dates),
+            model.complaint_date <= max(dates),
+        )
+    ).all()
+
+    weak_no_sn: dict[str, str] = {}      # 弱指纹 → 残影的 dedup_hash（库内缺SN行）
+    weak_with_sn: set[str] = set()       # 弱指纹（库内已有SN行）
+    for rid, sn, cd, ph, pb, dh in db_rows:
+        w = _weak_identity_hash(
+            {"complaint_date": cd, "complainant_phone": ph, "problem": pb}
+        )
+        if sn:
+            weak_with_sn.add(w)
+        else:
+            weak_no_sn.setdefault(w, dh)
+
+    claimed = skipped = 0
+    out: list[dict] = []
+    for r in rows:
+        w = weak_of.get(r["dedup_hash"])
+        if r.get("device_sn"):
+            # 有 SN → 若命中库内残影, 改为 UPDATE 残影
+            target = weak_no_sn.get(w)
+            if target:
+                r["dedup_hash"] = target
+                claimed += 1
+            out.append(r)
+        else:
+            # 无 SN → 若库内已有完整行, 跳过(不覆盖)
+            if w in weak_with_sn:
+                skipped += 1
+                continue
+            out.append(r)
+
+    rows[:] = out
+    if claimed or skipped:
+        logger.info(
+            f"[complaint_sync] {model.__tablename__} SN后补认领: {claimed} 行"
+            f"(UPDATE 残影而非新增), 跳过无SN残影 {skipped} 行"
+        )
+    return claimed, skipped
 
 
 def _batch_upsert(db: Session, model, rows: list[dict], result: SyncRowResult) -> None:
