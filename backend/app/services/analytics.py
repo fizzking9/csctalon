@@ -2990,6 +2990,28 @@ def _resolve_windows(
         )
 
     # ── 退回 date 单日模式 (和原 _today_windows 完全一致) ──
+    # 2026-09-11 (#66): 新增分钟级单日窗口 —— date='YYYY-MM-DDTHH:MM' 时,
+    # 窗口为「该日 00:00 ~ 该分钟」, 同比窗口为「前一天同刻」。下游据此做同刻日比对。
+    minute_end = _parse_minute_end(date)
+    if minute_end is not None:
+        d = minute_end.date()
+        now_sh = _dt.datetime.now(TZ)
+        t_start = _dt.datetime.combine(d, _dt.time(0, 0, 0), tzinfo=TZ)
+        t_end = minute_end.replace(tzinfo=TZ)
+        # 同刻平移一天(与前一日 00:00~同刻 严格对齐, 保证两个周期边界一致)
+        y_start = t_start - timedelta(days=1)
+        y_end = t_end - timedelta(days=1)
+        display = (t_start.isoformat(), t_end.isoformat())
+        return (
+            _sh_to_naive_utc(t_start),
+            _sh_to_naive_utc(t_end),
+            _sh_to_naive_utc(y_start),
+            _sh_to_naive_utc(y_end),
+            # 分钟窗口已终结(护栏保证不晚于当前时刻) → 非实时, 可长缓存
+            False,
+            display,
+        )
+
     d = _parse_date(date)
     now = _dt.datetime.now(TZ)
     is_today = d is None or d == now.date()
@@ -3022,6 +3044,24 @@ def _today_windows(date: _dt.date | None) -> tuple[_dt.datetime, _dt.datetime, _
 
 def _parse_date(s: str | None) -> _dt.date | None:
     return _dt.date.fromisoformat(s) if s else None
+
+
+def _parse_minute_end(s: str | None) -> _dt.datetime | None:
+    """解析分钟级单日窗口 `YYYY-MM-DDTHH:MM` → naive datetime(北京时间); 非该形态返回 None。
+
+    2026-09-11 (#66): 只读 API 单日放开到分钟, 便于下游做同刻日比对。
+    仅认长度 16 且第 11 位为 'T' 的串; `YYYY-MM-DD` / 带秒 / 带时区偏移一律返回 None,
+    由调用方走原有纯日期路径(保持纯日期行为与既有缓存 key 完全不变)。
+    """
+    if not s or not isinstance(s, str):
+        return None
+    raw = s.strip()
+    if len(raw) != 16 or raw[10] != "T":
+        return None
+    try:
+        return _dt.datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        return None
 
 
 def _pct_delta(cur, prev) -> float | None:

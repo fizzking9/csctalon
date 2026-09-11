@@ -119,6 +119,51 @@ def test_build_messages_range_window_label(db):
     assert "period=range(start=2026-07-01, end=2026-07-07)" in user_content
 
 
+# ── #66: 自然语言窗口贯通(端到端到 Prompt) ──────────────────────
+def test_build_messages_injects_nl_window_label(db):
+    """B1: window_label 传入后必须出现在 Prompt 里(让模型知道窗口怎么定的)。"""
+    from app.services import ai_feed
+    msgs = ai_feed.build_messages(
+        db, period="daily", date=None, question="昨天的运营数据",
+        start="2026-07-14", end="2026-07-14",
+        window_label="2026-07-14(昨天)", window_source="nl",
+    )
+    content = msgs[1]["content"]
+    assert "窗口判定=2026-07-14(昨天)" in content
+    assert "自动识别" in content
+
+
+def test_build_messages_window_label_absent_keeps_old_output(db):
+    """回归: 不传 window_label → 输出与改造前一致(不含"窗口判定")。"""
+    from app.services import ai_feed
+    msgs = ai_feed.build_messages(db, period="daily", date="2026-07-15", question="今日退款如何?")
+    assert "窗口判定" not in msgs[1]["content"]
+
+
+def test_system_prompt_requires_window_echo_and_yoy_semantics(db):
+    """D1: System 铁律须要求回显窗口, 并说明 yoy 不是独立明细。"""
+    from app.services import ai_feed
+    msgs = ai_feed.build_messages(db, period="daily", date="2026-07-15", question="今日退款如何?")
+    sys_content = msgs[0]["content"]
+    assert "写明本次统计窗口" in sys_content
+    assert "不是另一天的独立明细" in sys_content
+
+
+def test_glossary_timezone_has_compare_semantics():
+    """D1: timezone 口径卡须含 yoy 对比期语义说明。"""
+    from app.services.ai_glossary import glossary_for_question
+    ctx = glossary_for_question("昨天的运营数据")
+    assert "对比期语义" in ctx
+    assert "yoy_value" in ctx
+
+
+def test_glossary_compare_word_injects_timezone():
+    """D1: 含对比类词(如"对比")的问句即使未命中域, 也必须注入 timezone 卡。"""
+    from app.services.ai_glossary import glossary_for_question
+    ctx = glossary_for_question("这两天数据对比")
+    assert "对比期语义" in ctx
+
+
 # ── llm_client ───────────────────────────────────────────────
 def _mk_response(status: int, content: str | None = None) -> httpx.Response:
     if status == 200:
@@ -210,7 +255,11 @@ async def test_ai_task_manager_success():
 
 @pytest.mark.asyncio
 async def test_ai_task_manager_failed():
-    """runner 抛异常 → failed + error。"""
+    """runner 抛异常 → failed + error(非空)。
+
+    #66 起: 非 LLMError 的异常不再透出原文(防内部细节外泄), 只保留异常类型 +
+    通用提示; 完整堆栈由 logger.exception 记到服务端日志。
+    """
     mgr = ai_task_manager
 
     async def runner(task):
@@ -224,7 +273,130 @@ async def test_ai_task_manager_failed():
         await asyncio.sleep(0.01)
     t = mgr.get(task_id)
     assert t is not None and t.status == "failed"
-    assert "boom" in (t.error or "")
+    assert (t.error or "").strip(), "error 不得为空"
+    assert "ValueError" in t.error
+
+
+@pytest.mark.asyncio
+async def test_ai_task_manager_internal_error_not_leaked():
+    """#66 WARNING 收敛: 内部异常原文(SQL/表名等)不得出现在对外 error 里。"""
+    mgr = ai_task_manager
+
+    async def runner(task):
+        raise RuntimeError('relation "service_tickets" does not exist')
+
+    task_id = mgr.submit("x", "daily", None, runner)
+    for _ in range(50):
+        t = mgr.get(task_id)
+        if t and t.status == "failed":
+            break
+        await asyncio.sleep(0.01)
+    err = mgr.get(task_id).error
+    assert "service_tickets" not in err, "内部表名不得外泄"
+    assert "does not exist" not in err
+
+
+def test_humanize_error_does_not_leak_via_status_code_attribute():
+    """#66 复审: 判定必须用 isinstance(LLMError), 不能用 hasattr(e,'status_code')。
+
+    `fastapi.HTTPException` / `httpx.HTTPStatusError` 同样带 status_code,
+    鸭子类型会把它们误判为"可透传", 从而泄漏内部异常原文。
+    """
+    import httpx
+    from fastapi import HTTPException
+
+    from app.services.ai_task_manager import _humanize_error
+
+    leaked = 'relation "service_tickets" does not exist'
+    for e in (
+        HTTPException(400, leaked),
+        httpx.HTTPStatusError("boom", request=httpx.Request("GET", "http://x"),
+                              response=httpx.Response(500)),
+        RuntimeError(leaked),
+    ):
+        out = _humanize_error(e)
+        assert "service_tickets" not in out, f"{type(e).__name__} 泄漏了内部表名"
+        assert "does not exist" not in out
+
+
+@pytest.mark.asyncio
+async def test_humanize_error_llm_error_passthrough():
+    """LLMError 是业务侧构造的面向用户文案 → 应透传原文(用户需知道额度/鉴权问题)。"""
+    from app.services.ai_task_manager import _humanize_error
+    from app.services.llm_client import LLMError
+
+    assert "402" in _humanize_error(LLMError("LLM 调用失败(status=402)", status_code=402))
+
+
+# ── #66 C1/C2: 失败可读 + 窗口随任务回显 ────────────────────────
+@pytest.mark.asyncio
+async def test_ai_task_manager_failed_never_empty_error():
+    """C1: 空消息异常 → error 仍非空(生产曾出现 error=None → 前端只能显示"未知错误")。"""
+    mgr = ai_task_manager
+
+    async def runner(task):
+        raise RuntimeError()   # str(RuntimeError()) == ""
+
+    task_id = mgr.submit("x", "daily", None, runner)
+    for _ in range(50):
+        t = mgr.get(task_id)
+        if t and t.status == "failed":
+            break
+        await asyncio.sleep(0.01)
+    t = mgr.get(task_id)
+    assert t.status == "failed"
+    assert (t.error or "").strip(), "error 不得为空, 否则前端只能显示'未知错误'"
+    assert "RuntimeError" in t.error
+
+
+@pytest.mark.asyncio
+async def test_ai_task_manager_timeout_error_is_humanized():
+    """C1: TimeoutError → 面向用户的可读提示(而非裸异常名)。"""
+    mgr = ai_task_manager
+
+    async def runner(task):
+        raise TimeoutError()
+
+    task_id = mgr.submit("x", "daily", None, runner)
+    for _ in range(50):
+        t = mgr.get(task_id)
+        if t and t.status == "failed":
+            break
+        await asyncio.sleep(0.01)
+    t = mgr.get(task_id)
+    assert "超时" in (t.error or "")
+
+
+@pytest.mark.asyncio
+async def test_ai_task_to_public_dict_failed_without_error_has_fallback():
+    """C1: failed 且 error 为空时, 对外字典必须兜底非空文案。"""
+    from app.services.ai_task_manager import AiTask
+    t = AiTask(task_id="ai_x", question="q", period="daily", date=None)
+    t.status = "failed"
+    t.error = None
+    assert t.to_public_dict()["error"], "对外输出不得出现空 error"
+
+
+@pytest.mark.asyncio
+async def test_ai_task_window_meta_persisted():
+    """C2: 窗口来源/说明随任务持久化, 供前端回显。"""
+    mgr = ai_task_manager
+
+    async def runner(task):
+        task.result_md = "ok"
+
+    task_id = mgr.submit("昨天的运营数据", "daily", None, runner,
+                         start="2026-09-10", end="2026-09-10",
+                         window_source="nl", window_label="2026-09-10(昨天)")
+    for _ in range(50):
+        t = mgr.get(task_id)
+        if t and t.status == "success":
+            break
+        await asyncio.sleep(0.01)
+    d = mgr.get(task_id).to_public_dict()
+    assert d["window_source"] == "nl"
+    assert d["window_label"] == "2026-09-10(昨天)"
+    assert d["start"] == "2026-09-10"
 
 
 # ── /api/v1/ai ───────────────────────────────────────────────

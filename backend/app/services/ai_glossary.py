@@ -9,6 +9,8 @@
 一期放代码常量(可 git 版本化); 二期有后台需求再 DB 化。
 """
 
+import re
+
 # 每张卡: key -> 中文口径短句(喂给模型)
 GLOSSARY: dict[str, str] = {
     "complaint_sources": (
@@ -37,12 +39,27 @@ GLOSSARY: dict[str, str] = {
     ),
     "timezone": (
         "所有统计按北京时间(Asia/Shanghai)窗口; '今天/当日'=北京 00:00 至当前时刻(实时); "
-        "环比=前移等长窗口; 趋势默认按日。"
+        "环比=前移等长窗口(单日→前一天同时段; 区间→向前平移相同天数), 趋势默认按日。"
+        "【对比期语义, 2026-09-11 #66】数据里的 yoy_value/yoy_pct 只覆盖'上一个等长周期'的"
+        "汇总值, 不含该周期的明细字段; 因此 yoy 可用于说'环比涨跌', 但不能当作'昨天/上周的"
+        "完整数据'来展开陈述。用户要某天或某区间的独立明细时, 必须让系统按该窗口取数"
+        "(窗口由问句中的时间表达自动识别, 如'昨天''这两天''上周'), 不要用 yoy 拼凑。"
     ),
     "money_unit": "金额单位一律=元(小数2位), 不要报成分/或加换算。",
 }
 
 # 问答路由: 关键词 -> 需注入的口径卡子集(未命中任一域则全量注入)
+# 注: timezone 卡含"对比期语义"(#66), 故所有涉及时间对比的域都要带上它。
+_COMPARE_WORDS = ("对比", "环比", "同比", "昨天", "昨日", "前天", "上一天", "前一天",
+                  "上周", "本月", "上月", "这几天", "这两天", "趋势")
+# 出现"具体日期"也算时间对比场景(如 "9月1日到9月5日"), 用正则识别, 否则
+# 「会话数 9月1日到9月5日」会命中"会话"域而漏掉 timezone 卡(对比期语义)。
+_COMPARE_DATE_RE = re.compile(
+    r"(\d{4}\s*[-年]\s*\d{1,2}\s*[-月]\s*\d{1,2})"      # 2026-09-10 / 2026年9月10日
+    r"|(\d{1,2}\s*月\s*\d{1,2}\s*[日号])"                # 9月10日
+    r"|(近|最近|过去|这)\s*\d{1,3}\s*[天日]"              # 近3天
+)
+
 GLOSSARY_ROUTE: dict[str, tuple[str, ...]] = {
     # 投诉域
     "投诉": ("complaint_sources", "complaint_reg_handled", "timezone"),
@@ -79,6 +96,10 @@ def glossary_for_question(question: str) -> str:
                     picked.append(k)
     if not picked:
         picked = list(GLOSSARY.keys())
+    # 对比类问句必须带上 timezone 卡(#66): 否则模型不知道 yoy 不是独立明细,
+    # 会拿同比值当"昨天的数据"陈述, 这正是生产里"答昨日无数据/硬凑对比"的成因之一。
+    if "timezone" not in picked and (any(w in q for w in _COMPARE_WORDS) or _COMPARE_DATE_RE.search(q)):
+        picked.append("timezone")
     lines = [GLOSSARY[k] for k in picked if k in GLOSSARY]
     return "\n".join(f"- {line}" for line in lines)
 

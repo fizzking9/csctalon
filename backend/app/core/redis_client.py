@@ -39,7 +39,11 @@ HISTORY_TTL_SECONDS = 24 * 3600
 # (历史 TTL 已拉到 24h, 同步不涉及历史窗口, 无需清掉)
 SYNC_INVALIDATE_RECENT_DAYS = 7
 # 缓存 key 中的日期片段模式(用于按窗口范围失效)
-_CACHE_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+# ⚠️ 2026-09-11 (#66): 必须容忍「日期 + 分钟」形态(如 `2026-09-10T12:30`), 否则
+#   分钟级窗口 key 提取不到日期 → 被下面的 `if not dates` 当作"无日期静态 key"
+#   全量删除。虽不影响正确性(重算得同值), 但会让分钟窗口的 24h 长 TTL 形同虚设,
+#   下游逐分钟比对时每次同步后都要冷聚合。`[T ]?` 让尾边界在 T/空格后同样成立。
+_CACHE_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?=[T\s:]|$)")
 
 # 全局单例(进程级复用连接池)
 _redis_client: redis.Redis | None = None

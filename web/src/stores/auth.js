@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import request from '@/api'
+import { AI_THREAD_KEY, AI_PENDING_KEY } from '@/constants/aiAssistantStorage'
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref(localStorage.getItem('token') || '')
@@ -32,6 +33,15 @@ export const useAuthStore = defineStore('auth', () => {
     user.value = null
     localStorage.removeItem('token')
     localStorage.removeItem('user')
+    // 清理会话级缓存: AI 助手把「提问 + 分析结果」明文存在 sessionStorage
+    // (用于抽屉关闭/刷新后续查, 见 AssistantDrawer.vue #66)。登出不清会把
+    // 上一个账号的经营数据留给同一标签页的下一位使用者 → 必须一并清掉。
+    try {
+      sessionStorage.removeItem(AI_THREAD_KEY)
+      sessionStorage.removeItem(AI_PENDING_KEY)
+    } catch (_) {
+      // 无痕模式/禁用 storage: 忽略, 不影响登出
+    }
   }
 
   // 主动登出: 先调后端吊销 token(token_version+1 使所有会话失效), 再清本地。

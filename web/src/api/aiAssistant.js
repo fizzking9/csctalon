@@ -7,7 +7,8 @@ export function aiConfig() {
   return request.get('/ai/config')
 }
 
-// 提交分析任务(返回 {task_id})
+// 提交分析任务(返回 {task_id}); status=success 时直接带 result_md
+// payload 支持: { question, period, date?, start?, end? } —— start/end 为纯日期区间
 export function aiAnalyze(payload) {
   return request.post('/ai/analyze', payload)
 }

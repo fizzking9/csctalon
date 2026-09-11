@@ -9,7 +9,10 @@
 """
 
 import asyncio
+import datetime as _dt
 import logging
+import re
+import time
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -22,10 +25,28 @@ from app.schemas.ai_focus import AiFocusCreate, AiFocusUpdate
 from app.schemas.common import R
 from app.services import ai_feed, ai_focus_service, llm_client
 from app.services.ai_task_manager import ai_task_manager
+from app.services.ai_time_parser import parse_time_intent
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai", tags=["AI 分析助手"])
+
+# 严格纯日期: 字面 `YYYY-MM-DD`(4-2-2 数字)。不用 `date.fromisoformat` —— 后者
+# 在 Python ≥3.11 会接受 `20260910` / `2026-W01-1`, 比手写分段校验更松。
+_PLAIN_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _require_plain_date(value: str | None, name: str) -> str:
+    """校验 `value` 为字面 `YYYY-MM-DD` 且是真实日历日; 否则 400。返回规范化串。"""
+    raw = (value or "").strip()
+    if not _PLAIN_DATE_RE.match(raw):
+        raise HTTPException(400, f"{name} 参数非法: {value!r}, 应为 YYYY-MM-DD")
+    try:
+        _dt.date.fromisoformat(raw)
+    except (ValueError, TypeError):
+        # 格式对但日历非法(如 2026-13-01 / 2026-02-30)
+        raise HTTPException(400, f"{name} 参数非法: {value!r}, 不是有效日期")
+    return raw
 
 
 def _require_enabled() -> None:
@@ -45,35 +66,79 @@ class AiAnalyzeRequest(BaseModel):
 
 
 class _AiWindow:
-    """解析并校验 AI 查询窗口: period/date 或 start/end(与 external._window 同规则)。"""
+    """解析并校验 AI 查询窗口: 显式 date/start-end > 问句自然语言识别 > period 兜底。
+
+    优先级(工单 #66, 2026-09-11):
+      1. 显式 `start`+`end`(调用方最明确)
+      2. 显式 `date`(单日)
+      3. **问句自然语言**(如「昨天的运营数据」→ 自动取昨日窗口)
+      4. `period` 默认窗口(原有行为, 向后兼容)
+
+    自然语言识别结果必须通过 `window_label` 回显给用户, 让推断可见、可纠错。
+    """
 
     def __init__(self, payload: AiAnalyzeRequest):
         self.period = payload.period
         self.date = payload.date
         self.start = payload.start
         self.end = payload.end
+        self.window_source = "period"
+        self.window_label = ""
         self._validate()
 
     def _validate(self) -> None:
-        import datetime as _dt
+        # ⚠️ 必须用**精确正则**校验, 不能用 `date.fromisoformat`:
+        #   - 原手写分段校验(长度 4/2/2 且数字)会放过 `2026-13-01`(月份非法), 太松;
+        #   - 但 `date.fromisoformat` 又会**接受** `20260910`、`2026-W01-1` 这类紧凑/周格式
+        #     (实测 Python 3.14), 比原实现更松 —— 属于把校验改退化。
+        # 故锁定字面格式 `YYYY-MM-DD`, 与 `external._valid_date_or_400` 逐字符一致。
         if self.date:
-            parts = self.date.split("-")
-            if len(parts) != 3 or not all(len(p) == (4 if i == 0 else 2) and p.isdigit() for i, p in enumerate(parts)):
-                raise HTTPException(400, f"date 参数非法: {self.date!r}, 应为 YYYY-MM-DD")
+            _require_plain_date(self.date, "date")
         # start/end 成对校验(纯日期)
         if self.start is not None or self.end is not None:
             if self.start is None or self.end is None:
                 raise HTTPException(400, "start/end 必须成对提供(YYYY-MM-DD)")
             for name, val in (("start", self.start), ("end", self.end)):
-                try:
-                    _dt.date.fromisoformat(val.strip())
-                except (ValueError, TypeError):
-                    raise HTTPException(400, f"{name} 参数非法: {val!r}, 应为 YYYY-MM-DD")
+                _require_plain_date(val, name)
+
+    def resolve(self, question: str) -> None:
+        """按优先级定窗口; 自然语言命中时改写 start/end 并记录来源与说明。
+
+        ⚠️ 只在「调用方未显式给窗口」时介入 —— 显式参数永远优先, 避免"智能"覆盖用户意图。
+        识别失败(无时间表达 / 非法日期)一律退回 period, 保持既有行为不变。
+        """
+        if self.start is not None or self.end is not None:
+            self.window_source = "explicit_range"
+            self.window_label = f"{self.start} ~ {self.end}(指定区间)"
+            return
+        if self.date:
+            self.window_source = "explicit_date"
+            self.window_label = f"{self.date}(指定日期)"
+            return
+        intent = parse_time_intent(question)
+        if not intent.is_effective:
+            # 未识别 → 保持 period 默认窗口(与原行为完全一致)
+            self.window_label = f"period={self.period}"
+            return
+        # 识别成功: 统一转成 start/end 纯日期区间(单日也走区间, 语义更明确)
+        self.start, self.end = intent.start, intent.end
+        # date 必须清空, 否则 effective() 会优先透传 date 覆盖推断结果
+        self.date = None
+        self.window_source = "nl"
+        self.window_label = intent.label
 
     def effective(self) -> dict:
-        """返回供 ai_feed 使用的窗口参数(仅当显式给了 start/end 才透传)。"""
+        """返回供 ai_feed 使用的窗口参数(仅当显式给了 start/end 才透传)。
+
+        ⚠️ period 需随窗口形态调整: 落在区间(跨天)时用 `weekly`, 让
+        `refund_decision_overview` 的 grain 走 `week`(与 external brief range 同映射);
+        否则单日窗口会因 grain=day 而统计口径不一致。
+        """
         if self.start is not None or self.end is not None:
-            return {"period": self.period, "date": None, "start": self.start, "end": self.end}
+            period = self.period
+            if self.start != self.end:
+                period = "weekly"
+            return {"period": period, "date": None, "start": self.start, "end": self.end}
         return {"period": self.period, "date": self.date, "start": None, "end": None}
 
 
@@ -90,43 +155,72 @@ def ai_config(_: ManagerUser):
 
 @router.post("/analyze", response_model=R, summary="提交 AI 经营数据分析任务(自由问答)")
 async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
-    """提交分析任务, 立即返回 task_id(生成可能数十秒, 前端轮询 GET /ai/tasks/{id})。"""
+    """提交分析任务, 立即返回 task_id(生成可能数十秒, 前端轮询 GET /ai/tasks/{id})。
+
+    窗口优先级(工单 #66): 显式 start/end > 显式 date > **问句自然语言识别** > period 兜底。
+    识别结果通过 `window` / `window_label` 回显, 让推断可见。
+    """
     _require_enabled()
     q = (payload.question or "").strip()
     if not q:
         raise HTTPException(400, "question 不能为空")
-    # 窗口解析(period/date 或 start/end 成对校验)
+    # 窗口解析(显式参数校验 + 自然语言识别)
     win = _AiWindow(payload)
+    win.resolve(q)
     eff = win.effective()
+    logger.info("ai analyze 窗口: source=%s label=%s period=%s start=%s end=%s",
+                win.window_source, win.window_label, eff["period"], eff["start"], eff["end"])
 
     async def _runner(task):
         """后台执行: 建独立 Session 组装 feed → 调 LLM → 写回 task。"""
+        t0 = time.perf_counter()
         try:
             db = SessionLocal()
             try:
                 messages = ai_feed.build_messages(
                     db, eff["period"], eff["date"], q,
                     start=eff["start"], end=eff["end"],
+                    window_label=win.window_label, window_source=win.window_source,
                 )
             finally:
                 db.close()
+            build_ms = int((time.perf_counter() - t0) * 1000)
             # 记录注入的 data 规模日志(不含明细)
-            logger.info("ai task %s: period=%s date=%s start=%s end=%s question_len=%d",
-                        task.task_id, eff["period"], eff["date"], eff["start"], eff["end"], len(q))
+            logger.info("ai task %s: period=%s date=%s start=%s end=%s question_len=%d build_ms=%d",
+                        task.task_id, eff["period"], eff["date"], eff["start"], eff["end"],
+                        len(q), build_ms)
             result = await llm_client.chat_completion(
                 messages,
                 max_tokens=int(getattr(settings, "AI_MAX_TOKENS", 1500) or 1500),
             )
             task.result_md = result
+            # 埋点(工单 #66 C3): 让生产可统计耗时与窗口来源, 定位"同步等待越线"。
+            logger.info("ai task %s done: build_ms=%d llm_ms=%d total_ms=%d out_chars=%d window_source=%s",
+                        task.task_id, build_ms, int((time.perf_counter() - t0) * 1000) - build_ms,
+                        int((time.perf_counter() - t0) * 1000), len(result or ""), win.window_source)
         except llm_client.LLMError as e:
             task.error = str(e)
+            logger.error("ai task %s LLM 失败: %s (elapsed_ms=%d window_source=%s)",
+                         task.task_id, e, int((time.perf_counter() - t0) * 1000), win.window_source)
             raise
         except Exception as e:  # noqa: BLE001
             task.error = f"分析失败: {e}"
+            logger.exception("ai task %s 异常 (elapsed_ms=%d)", task.task_id,
+                             int((time.perf_counter() - t0) * 1000))
             raise
 
     task_id = ai_task_manager.submit(q, eff["period"], eff["date"], _runner,
-                                     start=eff["start"], end=eff["end"])
+                                     start=eff["start"], end=eff["end"],
+                                     window_source=win.window_source,
+                                     window_label=win.window_label)
+    # 窗口回显(工单 #66): 让用户看见"到底按哪个窗口统计的", 识别错误可立刻发现。
+    window_info = {
+        "window_source": win.window_source,
+        "window_label": win.window_label,
+        "period": eff["period"],
+        "start": eff["start"],
+        "end": eff["end"],
+    }
     # 首查同步等待(2026-09-04 提速): AI 任务通常 3~6s 完成, 前端若走 2s 轮询需等
     # 8~10s 才有输出。这里最多等 AI_SYNC_WAIT_S 秒直接拿结果; 超时才返回 task_id 走轮询兜底。
     wait_s = float(getattr(settings, "AI_SYNC_WAIT_S", 6.0) or 6.0)
@@ -141,11 +235,21 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
     task = ai_task_manager.get(task_id)
     if task is not None and task.status == "success":
         # 一次请求直接返回结果, 前端无需轮询
-        return R(data={"task_id": task_id, "status": "success", "result_md": task.result_md})
+        return R(data={"task_id": task_id, "status": "success",
+                       "result_md": task.result_md, **window_info})
     if task is not None and task.status == "failed":
-        return R(data={"task_id": task_id, "status": "failed", "error": task.error})
-    # 超时未完成 → 回 task_id 走轮询
-    return R(data={"task_id": task_id, "status": "running", "message": "已提交, 请轮询 GET /api/v1/ai/tasks/{task_id}"})
+        return R(data={"task_id": task_id, "status": "failed",
+                       "error": task.error or "分析失败(未捕获到错误详情, 请查服务端日志)",
+                       **window_info})
+    # 超时未完成 → 回 task_id 走轮询。
+    # ⚠️ 2026-09-11 (#66): 生产实测 36% 请求走这条路径, 而前端在此之前只有一次轮询就断链
+    #    → 用户看到"毫无提示"。这里显式带上 remaining_s, 让前端能给出"仍在生成中"的反馈。
+    return R(data={
+        "task_id": task_id, "status": "running",
+        "message": "分析仍在生成中, 请继续查询或稍后在助手面板查看",
+        "waited_s": round(wait_s, 1),
+        **window_info,
+    })
 
 
 @router.get("/tasks/{task_id}", response_model=R, summary="查询 AI 分析任务结果(轮询)")

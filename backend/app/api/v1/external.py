@@ -14,6 +14,7 @@
 import calendar
 import datetime as _dt
 import logging
+import re
 from datetime import datetime
 from typing import Annotated
 
@@ -72,20 +73,68 @@ def _now_cn() -> datetime:
     return datetime.now(TZ_CN)
 
 
-def _valid_date_or_400(date: str | None) -> str | None:
-    """校验 date 参数(YYYY-MM-DD)。非法 → 400(架构 §2.1/§八: 非法格式→400)。
+# 分钟级单日窗口(2026-09-11 #66): 下游需按"同刻"做日比对(如 09-10T12:30 vs 09-09T12:30),
+# 故单日端点放开到分钟精度。仅接受 `YYYY-MM-DD` 或 `YYYY-MM-DDTHH:MM` 两种形态, 其余一律 400
+# (不引入秒/时区偏移, 全部按北京时间解释, 避免下游各自猜测口径)。
+_MINUTE_DATE_LEN = 16  # len("YYYY-MM-DDTHH:MM")
 
-    date 仅接受"纯日期 YYYY-MM-DD"(单日/窗口起点由 _resolve_windows 按北京时区解释);
-    传 None 或非法格式统一抛 400, 避免落入聚合层 ValueError → 500。
+
+def _parse_window_arg_or_400(value: str | None, name: str) -> tuple[str | None, bool]:
+    """解析单日窗口参数 → (规范化字符串, 是否分钟精度)。非法 → 400。
+
+    - `None` → (None, False)
+    - `YYYY-MM-DD` → (同日字符串, False)
+    - `YYYY-MM-DDTHH:MM` → (同字符串, True); 秒/微秒一律拒绝(固定分钟精度)
+    - 未来时刻(晚于当前北京时刻) → 400(防时间穿越/空窗口, 与 range 模式 end 护栏一致)
+    """
+    if value is None:
+        return None, False
+    raw = (value or "").strip()
+    if not raw:
+        raise HTTPException(400, f"{name} 参数非法: {value!r}, 应为 YYYY-MM-DD 或 YYYY-MM-DDTHH:MM")
+    # 分钟级: 长度固定 16 且第 11 位为 'T'
+    if len(raw) == _MINUTE_DATE_LEN and raw[10] == "T":
+        try:
+            dt = _dt.datetime.fromisoformat(raw)
+        except (ValueError, TypeError):
+            raise HTTPException(400, f"{name} 参数非法: {value!r}, 应为 YYYY-MM-DDTHH:MM(分钟精度)")
+        if _dt.datetime.now(TZ_CN).replace(tzinfo=None) < dt:
+            raise HTTPException(400, f"{name}({raw}) 不能晚于当前时刻({_now_cn().isoformat(timespec='minutes')})")
+        return raw, True
+    # 纯日期
+    _require_plain_date_or_400(raw, name)
+    return raw, False
+
+
+# 严格纯日期: 字面 `YYYY-MM-DD`(4-2-2 数字)。
+# ⚠️ 不能只用 `date.fromisoformat`: Python ≥3.11 会**接受** `20260910` / `2026-W01-1`
+#   这类紧凑/ISO 周格式 —— 那是契约外输入, 却会被静默当成合法日期(2026-09-11 #66 复审发现)。
+#    与 `ai._require_plain_date` 保持**同强度**校验, 避免"AI 入口 400 而外部入口 200"的裂缝。
+_PLAIN_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _require_plain_date_or_400(value: str | None, name: str) -> str:
+    """校验 `value` 为字面 `YYYY-MM-DD` 且是真实日历日; 否则 400。返回规范化串。"""
+    raw = (value or "").strip()
+    if not _PLAIN_DATE_RE.match(raw):
+        raise HTTPException(400, f"{name} 参数非法: {value!r}, 应为 YYYY-MM-DD")
+    try:
+        _dt.date.fromisoformat(raw)
+    except (ValueError, TypeError):
+        raise HTTPException(400, f"{name} 参数非法: {value!r}, 不是有效日期")
+    return raw
+
+
+def _valid_date_or_400(date: str | None) -> str | None:
+    """校验**纯日期** date 参数(YYYY-MM-DD)。非法 → 400(架构 §2.1/§八)。
+
+    仅用于 range 模式的 start/end: 区间语义是"整天", 混入分钟会让跨度(span_days)计算失真,
+    故分钟串在此**显式拒绝**(不静默截断, 避免下游拿到与请求不符的窗口)。
+    单日端点请改用 `_parse_window_arg_or_400`(支持分钟精度)。
     """
     if date is None:
         return None
-    d = (date or "").strip()
-    try:
-        _dt.date.fromisoformat(d)
-    except (ValueError, TypeError):
-        raise HTTPException(400, f"date 参数非法: {date!r}, 应为 YYYY-MM-DD")
-    return d
+    return _require_plain_date_or_400(date, "date")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -114,40 +163,92 @@ def _cat_case():
 # ─────────────────────────────────────────────────────────────────────
 # 对外只读: 三核心单日端点
 # ─────────────────────────────────────────────────────────────────────
-def _kpi(db: Session, date: str | None):
-    return cached_call(f"today:kpi:{date}:None:None", 60, A.today_kpi, db, date, None, None)
+# 分钟级窗口(2026-09-11 #66): `date=YYYY-MM-DDTHH:MM` → 该日 00:00 ~ 该分钟, 供下游同刻日比对。
+# 缓存 key 需带上分钟段, 否则 12:30 与 12:31 会互相污染; 分钟窗口已终结(is_realtime=False)
+# 故可走长 TTL(与历史纯日期一致), 无需随数据写入失效。
+_WINDOW_CACHE_TTL = 60
 
 
-@router.get("/reception", response_model=R, summary="外部-当日/指定日接待量")
+def _kpi(db: Session, date: str | None, is_minute: bool = False):
+    """取 KPI 聚合(带缓存)。
+
+    - 纯日期 / 今天实时: 保持既有 60s 短 TTL(**行为完全不变**, 避免影响既有外部调用方)
+    - 分钟窗口: 窗口已终结(护栏保证不晚于当前时刻), 数据定型 → 走日期感知 TTL
+      (历史日 24h / 今天 60s), 避免下游逐分钟比对时反复全量重算
+    """
+    ttl = cache_ttl_for(date, date, _WINDOW_CACHE_TTL) if is_minute else _WINDOW_CACHE_TTL
+    return cached_call(f"today:kpi:{date}:None:None", ttl, A.today_kpi, db, date, None, None)
+
+
+def _window_meta(date: str | None, is_minute: bool) -> dict:
+    """窗口元信息: 让下游明确知道拿到的是"整天"还是"截至某分钟", 并对齐同比窗口。"""
+    if date is None:
+        return {"window_kind": "today_realtime", "window_precision": "realtime"}
+    if is_minute:
+        d = date[:10]
+        return {
+            "window_kind": "minute_to_date",
+            "window_precision": "minute",
+            "window_start": f"{d}T00:00:00+08:00",
+            "window_end": f"{date}:00+08:00",
+            # 同比/环比基准: 前一日的同刻窗口(与 analytics._resolve_windows 完全一致)
+            "compare_start": f"{_prev_day(d)}T00:00:00+08:00",
+            "compare_end": f"{_prev_day(d)}{date[10:]}:00+08:00",
+        }
+    return {
+        "window_kind": "full_day",
+        "window_precision": "day",
+        "window_start": f"{date}T00:00:00+08:00",
+        "window_end": f"{date}T23:59:59+08:00",
+        "compare_start": f"{_prev_day(date)}T00:00:00+08:00",
+        "compare_end": f"{_prev_day(date)}T23:59:59+08:00",
+    }
+
+
+def _prev_day(d: str) -> str:
+    return (_dt.date.fromisoformat(d) - _dt.timedelta(days=1)).isoformat()
+
+
+@router.get("/reception", response_model=R, summary="外部-当日/指定日接待量(支持分钟)")
 def external_reception(
     db: DBSession,
-    date: str | None = Query(None, description="YYYY-MM-DD, 缺省=今天(北京时间)"),
+    date: str | None = Query(
+        None,
+        description="YYYY-MM-DD(整天) 或 YYYY-MM-DDTHH:MM(该日00:00至该分钟, 供同刻日比对); 缺省=今天实时",
+    ),
     authorization: Annotated[str | None, Header()] = None,
 ):
     row = _auth(db, authorization)
     S.require_scope(row, "reception")
     S.record_external_access(db, row, "reception")
-    date = _valid_date_or_400(date)
-    kpi = _kpi(db, date)
+    date, is_minute = _parse_window_arg_or_400(date, "date")
+    kpi = _kpi(db, date, is_minute)
     return R(data={
         "date": kpi.get("date"),
         "generated_at": _now_cn().isoformat(),
         "reception": kpi.get("reception"),
-        "_spec": {"reception": "接待量=客服处理记录数(cs_record.operation_time 落当日); device_count=去重设备SN数"},
+        **_window_meta(date, is_minute),
+        "_spec": {
+            "reception": "接待量=客服处理记录数(cs_record.operation_time 落当日); device_count=去重设备SN数",
+            "window": "date 传 YYYY-MM-DDTHH:MM 时, 窗口=该日00:00~该分钟(分钟精度), 同比基准=前一日同刻窗口",
+        },
     })
 
 
-@router.get("/refund", response_model=R, summary="外部-当日/指定日退款")
+@router.get("/refund", response_model=R, summary="外部-当日/指定日退款(支持分钟)")
 def external_refund(
     db: DBSession,
-    date: str | None = Query(None, description="YYYY-MM-DD, 缺省=今天(北京时间)"),
+    date: str | None = Query(
+        None,
+        description="YYYY-MM-DD(整天) 或 YYYY-MM-DDTHH:MM(该日00:00至该分钟, 供同刻日比对); 缺省=今天实时",
+    ),
     authorization: Annotated[str | None, Header()] = None,
 ):
     row = _auth(db, authorization)
     S.require_scope(row, "refund")
     S.record_external_access(db, row, "refund")
-    date = _valid_date_or_400(date)
-    kpi = _kpi(db, date)
+    date, is_minute = _parse_window_arg_or_400(date, "date")
+    kpi = _kpi(db, date, is_minute)
     return R(data={
         "date": kpi.get("date"),
         "generated_at": _now_cn().isoformat(),
@@ -155,30 +256,38 @@ def external_refund(
         "refund_amount": kpi.get("refund_amount"),
         "refund_done_today": kpi.get("refund_done_today"),
         "actual_cashflow": kpi.get("actual_cashflow"),
+        **_window_meta(date, is_minute),
         "_spec": {
             "refund_count": "退款笔数=四路经营合计 A线上直退+B钱包取现+C闪猫+D手动 (按创建时间)",
             "refund_amount": "退款金额=四路经营合计, 单位=元, 2位小数",
             "refund_done_today": "当日完成退款=路线A status=已退款 且更新时间∈当日",
             "actual_cashflow": "真实现金流E=refund_record_reports 退款成功合计(对账基准, 2026-09-05 v1.1 起替代 merchant_refunds), 元",
+            "window": "date 传 YYYY-MM-DDTHH:MM 时, 窗口=该日00:00~该分钟(分钟精度), 同比基准=前一日同刻窗口",
         },
     })
 
 
-@router.get("/complaint", response_model=R, summary="外部-当日/指定日投诉(登记/处理双口径)")
+@router.get("/complaint", response_model=R, summary="外部-当日/指定日投诉(登记/处理双口径, 支持分钟)")
 def external_complaint(
     db: DBSession,
-    date: str | None = Query(None, description="YYYY-MM-DD, 缺省=今天(北京时间)"),
+    date: str | None = Query(
+        None,
+        description="YYYY-MM-DD(整天) 或 YYYY-MM-DDTHH:MM(该日00:00至该分钟, 供同刻日比对); 缺省=今天实时",
+    ),
     authorization: Annotated[str | None, Header()] = None,
 ):
     row = _auth(db, authorization)
     S.require_scope(row, "complaint")
     S.record_external_access(db, row, "complaint")
-    date = _valid_date_or_400(date)
-    kpi = _kpi(db, date)
+    date, is_minute = _parse_window_arg_or_400(date, "date")
+    kpi = _kpi(db, date, is_minute)
     # 登记/处理双口径(2026-09-08 #33 用户诉求): 外部投诉"登记"与"处理"是两个口径,
     # 单日端点除兼容总量 complaint 外, 补充 registered/handled/backlog(与 brief 同源
     # _complaint_enhanced 单日窗口, 避免外部只看到"总量"而误判未处理)。
-    enhanced = _complaint_enhanced(db, date, date)
+    # ⚠️ 分钟窗口下 start 必须是**当日 00:00**、end 才是该分钟, 否则两端都取该分钟会退化成
+    #   零宽窗口(start=end=12:30 → 什么都查不到)。此处显式把起点压回整天开头。
+    win_start = date[:10] if is_minute else date
+    enhanced = _complaint_enhanced(db, win_start, date)
     return R(data={
         "date": kpi.get("date"),
         "generated_at": _now_cn().isoformat(),
@@ -188,10 +297,12 @@ def external_complaint(
         "registered": enhanced.get("total", {}).get("registered"),
         "handled": enhanced.get("total", {}).get("handled"),
         "backlog": enhanced.get("total", {}).get("backlog"),
+        **_window_meta(date, is_minute),
         "_spec": {"complaint": "投诉量=service_tickets投诉 + external_complaints + card_complaints 三表并集(落当日); "
                                "registered=窗口内新登记(工单按 register_time, 315/卡商补充表按 complaint_date 并入外部); "
                                "handled=窗口内真实完成(工单 finish_time∈窗口≥3min + 315已办结并入, 与内部口径一致); "
-                               "backlog=窗口内登记未闭环"},
+                               "backlog=窗口内登记未闭环",
+                  "window": "date 传 YYYY-MM-DDTHH:MM 时, 窗口=该日00:00~该分钟(分钟精度), 同比基准=前一日同刻窗口"},
     })
 
 

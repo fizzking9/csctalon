@@ -26,7 +26,11 @@ _SYSTEM_PROMPT = (
     "2. 严格按【业务口径】理解指标, 不要自创定义。\n"
     "3. 回答中文, 结构清晰(可用标题/要点/小表格), 结论注明数据窗口(如 今日/本周/本月 截至时间)。\n"
     "4. 只回答与经营数据相关的问题; 无关问题礼貌说明无法回答。\n"
-    "5. 金额一律以元为单位。"
+    "5. 金额一律以元为单位。\n"
+    "6. **回答开头必须写明本次统计窗口**(直接引用【数据窗口说明】里的起止时间), 让用户能核对窗口"
+    "是否符合预期; 若用户问的时间范围与给定窗口不一致, 先指出差异再作答, 不要默默按别的窗口回答。\n"
+    "7. 给定数据里的 yoy_value/yoy_pct 是\"前一个等长周期\"的对比值, **不是另一天的独立明细**; "
+    "不要把它当成完整的一天数据来陈述。若用户要某天的明细而该窗口未提供, 如实说明。"
 )
 
 # 预设快捷触发句(前端展示用; 与 GLOSSARY_ROUTE 关键词对应)
@@ -115,16 +119,26 @@ def _trim_feed(feed: dict) -> str:
 
 
 def build_messages(db: Session, period: str, date: str | None, question: str,
-                   start: str | None = None, end: str | None = None) -> list[dict]:
-    """构造发给模型的 messages(三层 Prompt)。"""
+                   start: str | None = None, end: str | None = None,
+                   window_label: str | None = None, window_source: str | None = None) -> list[dict]:
+    """构造发给模型的 messages(三层 Prompt)。
+
+    window_label/window_source(工单 #66): 上层(ai.py)把"窗口怎么定出来的"传下来,
+    既写进 Prompt 让模型明确当前窗口, 也便于排查 —— 自然语言推断错误时, 从这里就能看出
+    模型被喂的是哪个窗口, 而不是靠猜。
+    """
     feed = _build_feed(db, period, date, start=start, end=end)
     feed_json = _trim_feed(feed)
     # 口径卡: 按问句路由选子集; 未命中全量
     glossary = glossary_for_question(question)
-    # 窗口说明: start/end 区间模式时明确标注(与 external brief range 一致)
+    # 窗口说明: 优先用上层给的 label(含自然语言来源); 否则退回区间/period 描述
     win_label = f"period={period}"
     if start is not None or end is not None:
         win_label = f"period=range(start={start}, end={end})"
+    if window_label:
+        win_label = f"{win_label}; 窗口判定={window_label}"
+        if window_source == "nl":
+            win_label += "(由问句中的时间表达自动识别)"
     business_ctx = (
         "【业务口径(必须遵守)】\n" + (glossary or glossary_all()) +
         "\n\n【数据窗口说明】" +

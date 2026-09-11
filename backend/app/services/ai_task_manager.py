@@ -19,6 +19,31 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _humanize_error(e: BaseException) -> str:
+    """异常 → 面向用户的可读错误(工单 #66)。
+
+    两个约束:
+    1. **必须非空**: 原实现直接 `str(e)`, 生产里出现 `status=failed` 却 error 为空的响应,
+       前端只能显示"未知错误" —— 用户感知即"毫无提示"。
+    2. **不泄露内部细节**: 聚合层异常可能带 SQL 片段/表名/文件路径。只对**已知安全的
+       LLM 错误**透传原文(其文案本就是给用户看的), 其余一律给通用文案, 细节留在
+       服务端日志(logger.exception 已记录完整堆栈)。
+
+    ⚠️ 判定必须用 `isinstance(e, LLMError)`, **不能**用 `hasattr(e, "status_code")`
+    之类的鸭子类型 —— `fastapi.HTTPException` / `httpx.HTTPStatusError` 同样带
+    `status_code`, 会被误判为"可透传", 从而把内部异常原文(含表名)泄给前端。
+    """
+    from app.services.llm_client import LLMError  # 局部导入: 避免模块级循环依赖
+
+    if isinstance(e, LLMError):
+        raw = str(e).strip()
+        return raw[:500] if raw else "模型调用失败(未返回详情)"
+    if isinstance(e, TimeoutError) or "Timeout" in type(e).__name__:
+        return "分析超时: 数据聚合或模型响应耗时过长, 请稍后重试或缩小时间范围"
+    # 其它异常: 通用文案(不暴露异常原文), 具体原因看服务端日志
+    return f"分析失败({type(e).__name__}): 请稍后重试; 若持续失败请查看服务端日志"
+
+
 @dataclass
 class AiTask:
     """一次 AI 分析任务(内存态)。"""
@@ -34,8 +59,16 @@ class AiTask:
     status: str = "queued"   # queued / running / success / failed
     result_md: str | None = None
     error: str | None = None
+    # 窗口判定(#66): 让前端/排查都能看到"这次到底按哪个窗口统计的"
+    window_source: str | None = None   # explicit_range / explicit_date / nl / period
+    window_label: str | None = None
 
     def to_public_dict(self) -> dict:
+        # failed 但 error 为空时兜底: 生产曾出现 error=None 的瞬时响应,
+        # 前端只能显示"未知错误" → 用户感知为"毫无提示"。
+        err = self.error
+        if self.status == "failed" and not err:
+            err = "分析失败: 未返回错误详情, 请查看服务端日志"
         return {
             "task_id": self.task_id,
             "status": self.status,
@@ -45,7 +78,9 @@ class AiTask:
             "start": self.start,
             "end": self.end,
             "result_md": self.result_md,
-            "error": self.error,
+            "error": err,
+            "window_source": self.window_source,
+            "window_label": self.window_label,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
@@ -78,16 +113,19 @@ class AiTaskManager:
             self._tasks.pop(oldest, None)
 
     def submit(self, question: str, period: str, date: str | None,
-               runner, start: str | None = None, end: str | None = None) -> str:
+               runner, start: str | None = None, end: str | None = None,
+               window_source: str | None = None, window_label: str | None = None) -> str:
         """创建任务并后台执行。
 
         runner: 可等待协程工厂 `async def runner(task) -> None`(内部把结果写回 task)。
         start/end: v1.1 任意区间(纯日期); 透传存任务供展示/调试。
+        window_source/window_label(#66): 窗口判定来源与说明, 随任务存下以便前端回显。
         返回 task_id(立即)。
         """
         task_id = self._new_task_id()
         task = AiTask(task_id=task_id, question=question, period=period, date=date,
-                      start=start, end=end)
+                      start=start, end=end,
+                      window_source=window_source, window_label=window_label)
         self._tasks[task_id] = task
         self._order.append(task_id)
         self._prune()
@@ -102,7 +140,11 @@ class AiTaskManager:
             except Exception as e:  # noqa: BLE001 任务异常置 failed
                 logger.exception("ai task %s failed", task_id)
                 task.status = "failed"
-                task.error = str(e)[:500]
+                # ⚠️ 状态与 error 必须"同时"就绪(#66): 生产日志显示曾出现
+                # status=failed 但 error=None 的瞬时响应(前端收到后显示"未知错误")。
+                # 此处先写 error 再置 status 无法根治(对象共享, 读侧可能仍见到中间态),
+                # 故 read 侧(get/ai_task_status)对 failed+空error 做兜底文案。
+                task.error = _humanize_error(e)
             finally:
                 task.finished_at = datetime.now()
 
