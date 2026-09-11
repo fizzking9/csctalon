@@ -19,7 +19,10 @@ export function complaintDetail(params) {
 export function complaintSupplementary(params) {
   return request.get('/complaints/supplementary', { params })
 }
-
+// ★ #55: 投诉事件归并「待人工审核」列表(同设备同日多电话; 只读, 不删数据)
+export function complaintDedupReview(params) {
+  return request.get('/complaints/dedup-review', { params })
+}
 // 积压未处理投诉审核分析(统一口径: 归一化状态非已完成)
 export function complaintBacklog(params) {
   return request.get('/complaints/backlog', { params })

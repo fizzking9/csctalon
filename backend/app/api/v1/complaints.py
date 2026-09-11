@@ -26,6 +26,7 @@ from app.services.analytics import TZ, _complaint_source_type_case, _ticket_cate
 # #55 (2026-09-11): 新增 `dedup_events` —— 多渠道归并 vs 真重复 判据
 from app.services.complaint_scope import (
     CARD_SCOPE,
+    EVENT_STRICT_MIN_YEAR,
     STATUS_DONE,
     card_result_state,
     dedup_events,
@@ -400,6 +401,80 @@ def _card_reg_handled(db, ts, te) -> dict:
     return {"registered": int(reg), "handled": int(hdl)}
 
 
+def _suppl_event_metrics(
+    db,
+    model,
+    date_col,
+    channel_col,
+    ts: datetime | None,
+    te: datetime | None,
+    *,
+    with_review_rows: bool = False,
+) -> dict:
+    """补充表(**事件口径**)归并统计 —— #55 用户口径的**唯一实现**(两处复用)。
+
+    ★ 用户口径（2026-09-11 权威）:
+      「同一个人 设备编号 电话号码 都一致, 几天内 的投诉, 渠道(平台)是肯定不同,
+        内容略微不同; 可以归结为一个投诉, 但**不能算重复数据**;
+        如果 电话 sn 渠道 都一致 的话 那就基本上是同一个投诉 **拷贝复制**的」
+
+    ★ 两类必须分开(此前混淆, 已纠正):
+      · `multi_channel` —— 同一投诉多渠道呈现 → 归并 1 笔, **不算重复**
+      · `true_dup`      —— 同渠道拷贝复制     → 计 1 笔, 标 `dup_of`
+      · `legacy_unmerged` —— ≤2025 年**不归并**(用户: 旧数据允许偏差)
+      · `unkeyed`       —— 缺 SN/电话 → 不自动归并, 独立成事件
+
+    ⚠️ **绝不删数据**: 只产出统计视图; `record_ids` 可回溯原始行。
+       用户: "毕竟不能乱删除 所以还是慎重"。
+
+    参数:
+      · `channel_col` —— 渠道列。315 用 `platform`; 卡商用 `complaint_group`
+        (卡商表无 platform, 群名即渠道)。**渠道不同 = 非重复**, 故该列必传。
+      · `with_review_rows` —— 是否附带 `needs_review_rows`(逐组明细, 供前端
+        人工审核 Tab)。默认 False 以免拖大响应体。
+
+    返回: total / events / merged_rows / multi_channel_events / true_dup_events
+          / legacy_unmerged / unkeyed / needs_review / strict_min_year
+          (+ needs_review_rows)
+    """
+    conds: list = [date_col.isnot(None)]
+    if ts:
+        conds.append(date_col >= ts)
+    if te:
+        conds.append(date_col <= te)
+
+    rows = db.execute(
+        select(model.id, model.device_sn, date_col, model.complainant_phone, channel_col)
+        .where(*conds)
+    ).all()
+    payload = [
+        {"id": r[0], "device_sn": r[1], "complaint_date": r[2],
+         "complainant_phone": r[3], "channel": r[4]}
+        for r in rows
+    ]
+    events, merged_rows, review = dedup_events(payload)
+
+    kinds: dict[str, int] = {}
+    for e in events:
+        k = e.get("kind", "single")
+        kinds[k] = kinds.get(k, 0) + 1
+
+    out = {
+        "total": len(payload),                       # 原始行数(兼容口径)
+        "events": len(events),                       # ★ 归并后事件数(统计应用此值)
+        "merged_rows": int(merged_rows),              # 被归并的冗余记录数
+        "multi_channel_events": kinds.get("multi_channel", 0),   # 多渠道(非重复)
+        "true_dup_events": kinds.get("true_dup", 0),             # 真重复(同渠道)
+        "legacy_unmerged": kinds.get("legacy_unmerged", 0),      # 旧年份未归并
+        "unkeyed": kinds.get("unkeyed", 0),                      # 缺 SN/电话
+        "needs_review": len(review),                             # 待人工判定组数
+        "strict_min_year": EVENT_STRICT_MIN_YEAR,
+    }
+    if with_review_rows:
+        out["needs_review_rows"] = review
+    return out
+
+
 def _norm_status(source: str, status_val: str | None, finish_time, register_time, handler_val: str | None) -> str:
     """投诉状态归一化显示,空值根据 finish_time/handler 推断,避免大量"待处理"误报.
     返回语义: 已完成/处理中/待处理/待跟进 等。
@@ -614,17 +689,11 @@ def complaint_summary(
     # 关联 = 按 device_sn 匹配到对应工单(matched_ticket_no 非空)。
     # 补充表与工单是同一批投诉的两种视角, 先统计以便三源总数合并去重。
     def _suppl_stats(model, date_col, matched_col):
-        """补充表统计: 总数(时间范围内) + 已关联工单数(同一时间范围) + ★事件口径
+        """补充表统计: 原始行数 + 已关联工单数 + ★事件口径(委托 `_suppl_event_metrics`)。
 
-        ★ 2026-09-11 (#55): 新增 `events` —— 按用户口径归并后的**事件数**。
-          用户: 「同一个人 设备编号 电话号码 都一致，几天内 的投诉，渠道（平台）是
-                 肯定不同，内容略微不同；可以归结为一个投诉，但是不能算重复数据；
-                 如果 电话 sn 渠道 都一致的话 那就基本上是同一个投诉 拷贝复制的」
-          → `events` 按 (SN, 电话) + 7天窗聚类:
-             · 多渠道 → 归并1笔(**不算重复**)
-             · 同渠道 → 真重复(计1笔)
-             · ≤2025年 → 不归并(用户: 旧数据允许偏差)
-          ⚠️ `total` 保留为**原始行数**(向后兼容); 新代码应用 `events`。
+        ★ 2026-09-11 (#55): 事件口径已抽出为模块级 `_suppl_event_metrics`
+          (与 `/analysis` 的 `card` 共用**同一实现**, 避免口径漂移)。
+          ⚠️ `total` 保留为**原始行数**(向后兼容); 新代码应使用 `events`。
         """
         conds: list = []
         if ts:
@@ -634,35 +703,13 @@ def complaint_summary(
         total = db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
         matched = db.scalar(select(func.count()).select_from(model).where(matched_col.isnot(None), *conds)) or 0
 
-        # ★ 事件口径归并
+        # ★ 渠道列: 315 用 platform; 卡商无 platform, 群名即渠道
         ch_col = (CardComplaint.complaint_group
                   if model is CardComplaint else ExternalComplaint.platform)
-        _ev_rows = db.execute(
-            select(model.id, model.device_sn, date_col, model.complainant_phone,
-                   ch_col)
-            .where(*conds)
-        ).all()
-        _ev_input = [
-            {"id": r[0], "device_sn": r[1], "complaint_date": r[2],
-             "complainant_phone": r[3], "channel": r[4]}
-            for r in _ev_rows
-        ]
-        _events, _merged, _review = dedup_events(_ev_input)
-        _kinds: dict[str, int] = {}
-        for e in _events:
-            _kinds[e.get("kind", "single")] = _kinds.get(e.get("kind", "single"), 0) + 1
-
-        return {
-            "total": int(total),                 # 原始行数(兼容)
-            "matched": int(matched),
-            "events": len(_events),              # ★ 归并后事件数(应作统计口径)
-            "merged_rows": int(_merged),         # 被归并的冗余记录数
-            "multi_channel_events": _kinds.get("multi_channel", 0),   # 同一投诉多渠道(非重复)
-            "true_dup_events": _kinds.get("true_dup", 0),             # 真重复(同渠道)
-            "legacy_unmerged": _kinds.get("legacy_unmerged", 0),      # 旧年份未归并
-            "unkeyed": _kinds.get("unkeyed", 0),                      # 缺SN/电话待人工
-            "needs_review": len(_review),                             # 待人工判定组数
-        }
+        ev = _suppl_event_metrics(
+            db, model, date_col, ch_col, ts, te, with_review_rows=True
+        )
+        return {"total": int(total), "matched": int(matched), **ev}
 
     supplementary = {
         "external": _suppl_stats(ExternalComplaint, ExternalComplaint.complaint_date, ExternalComplaint.matched_ticket_no),
@@ -828,6 +875,14 @@ def complaint_summary(
                 "total": int(card_total),
                 "registered": _card_reg["registered"],
                 "handled": _card_reg["handled"],
+                # ★★ (#55) 事件口径: 多渠道(非重复) vs 真重复(同渠道) ★★
+                #   由 `supplementary.card` 提供(同一 `_suppl_event_metrics` 实现),
+                #   此处只做**上提**, 便于前端一个对象取全。
+                "events": supplementary["card"]["events"],
+                "multi_channel_events": supplementary["card"]["multi_channel_events"],
+                "true_dup_events": supplementary["card"]["true_dup_events"],
+                "merged_rows": supplementary["card"]["merged_rows"],
+                "needs_review": supplementary["card"]["needs_review"],
                 "by_category": [],   # 卡商无工单侧分类; 分类见 complaint_subs(用 problem_category)
                 "by_handler": [],     # 卡商处理人见 analytics.complaint_card_handlers
                 "trend": card_trend_merged,
@@ -1109,6 +1164,77 @@ def complaint_detail(
 
 
 # ---------- 补充明细(315外部投诉 / 卡商群投诉,workbuddy推送) ----------
+
+
+@router.get("/dedup-review", response_model=R, summary="投诉事件归并·待人工审核列表(#55)")
+def complaint_dedup_review(
+    db: DBSession,
+    _: CurrentUser,
+    start: str | None = None,
+    end: str | None = None,
+    source_type: str | None = Query(
+        None, description="external=315外部投诉 / card=(外)卡商, 缺省全部"
+    ),
+):
+    """★ (#55) **待人工判定**的同设备同日多电话组 —— 供前端「人工审核」Tab。
+
+    ## 为什么需要人工
+
+      用户（2026-09-11）:
+      > 「手机不同 默认 统计为不同, 但是提供一个人工再审核更合适点」
+
+      `dedup_events` 的自动归并只在 **(SN, 归一化电话)** 一致时生效;
+      电话不同 → **默认算不同投诉**(不自动归并), 但可能是:
+        · 同一人换了号码 / 用家人号码登记
+        · 联系人字段被业务填错
+        · 确实就是两起不同的投诉
+      → 无法程序判定, 必须人工。
+
+    ## 归并组 `reason` 取值
+
+      · `same_day_multi_phone` —— 同 SN 同投诉日 但电话 ≥2 个(最需人工)
+      · `phone_missing`         —— 有 SN 但电话缺失
+
+    ⚠️ 本接口**只读**, 不修改任何数据。人工结论目前落 `complaint_audits`
+       (见 `POST /complaints/audits`), **不删原始行**。
+    """
+    ts = _parse_dt(start)
+    te = _parse_dt_end(end)
+
+    def _collect(model, ch_col) -> list[dict]:
+        conds: list = [model.complaint_date.isnot(None)]
+        if ts:
+            conds.append(model.complaint_date >= ts)
+        if te:
+            conds.append(model.complaint_date <= te)
+        rows = db.execute(
+            select(model.id, model.device_sn, model.complaint_date,
+                   model.complainant_phone, ch_col)
+            .where(*conds)
+        ).all()
+        payload = [
+            {"id": r[0], "device_sn": r[1], "complaint_date": r[2],
+             "complainant_phone": r[3], "channel": r[4]}
+            for r in rows
+        ]
+        _, _, review = dedup_events(payload)
+        # 补 `source_type`(前端区分卡商/315) 与 `record_count`(组内条数, 排序用)
+        for g in review:
+            g["source_type"] = "card" if model is CardComplaint else "external"
+            g["record_count"] = len(g.get("record_ids") or [])
+        return review
+
+    out: list[dict] = []
+    if source_type in (None, "", "external"):
+        out += _collect(ExternalComplaint, ExternalComplaint.platform)
+    if source_type in (None, "", "card"):
+        out += _collect(CardComplaint, CardComplaint.complaint_group)
+
+    # 影响面大的优先(组内条数降序), 再按投诉日倒序(近期更值得处理)
+    out.sort(key=lambda g: (-int(g.get("record_count") or 0),
+                            str(g.get("complaint_day") or "")),
+             reverse=False)
+    return R(data={"items": out, "total": len(out)})
 
 
 @router.get("/supplementary", response_model=R, summary="投诉补充明细列表(315/卡商,workbuddy推送)")
@@ -2366,6 +2492,13 @@ def complaint_analysis(
     _reg_handled = _sources_reg_handled(db, ts, te)
     # ★★ (#53) 卡商独立统计(不参与 _reg_handled / 总量) ★★
     _card_reg = _card_reg_handled(db, ts, te)
+    # ★★ (#55) 卡商**事件口径** —— 与 /summary 的 supplementary.card 同实现 ★★
+    #   渠道列用 `complaint_group`(卡商表无 platform, 群名即渠道)。
+    #   前端据此展示「多渠道(非重复) / 真重复」两个指标, 见 ComplaintAnalysis.vue。
+    _card_events = _suppl_event_metrics(
+        db, CardComplaint, CardComplaint.complaint_date,
+        CardComplaint.complaint_group, ts, te,
+    )
 
     return R(
         data={
@@ -2390,6 +2523,13 @@ def complaint_analysis(
                 "registered": _card_reg["registered"],
                 "handled": _card_reg["handled"],
                 "trend": _card_suppl_trend,
+                # ★★ (#55) 事件口径: 多渠道(非重复) vs 真重复(同渠道) ★★
+                #   前端只读展示, 不改变 total/registered(原始行数口径保持兼容)。
+                "events": _card_events["events"],
+                "multi_channel_events": _card_events["multi_channel_events"],
+                "true_dup_events": _card_events["true_dup_events"],
+                "merged_rows": _card_events["merged_rows"],
+                "needs_review": _card_events["needs_review"],
             },
             "source_distribution": source_distribution,
             "water": water,

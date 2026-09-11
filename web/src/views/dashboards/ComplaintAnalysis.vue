@@ -122,6 +122,28 @@
               <div class="kpi-sub">前缀锚定口径(已处理/未处理/未标注三态)</div>
             </div>
           </el-col>
+          <!-- ★★ 2026-09-11 (#55): 事件口径 —— 多渠道(非重复) vs 真重复(同渠道) ★★
+               用户: "同一投诉多渠道呈现 → 归并为1笔, 但不算重复数据;
+                      电话/sn/渠道都一致 → 才是拷贝复制的真重复"。 -->
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="kpi-card" style="background:#eef2ff;border-left:3px solid #4f46e5">
+              <div class="kpi-label" style="color:#4f46e5">多渠道归并(非重复)</div>
+              <div class="kpi-value" style="color:#4f46e5">{{ formatNum(cardData.multi_channel_events ?? 0) }}</div>
+              <div class="kpi-sub">同一投诉在多平台呈现 · 已归并计1笔 · <b>不计为重复</b></div>
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="kpi-card kpi-clickable" style="background:#fff1f2;border-left:3px solid #e11d48" @click="activeTab = 'review'">
+              <div class="kpi-label" style="color:#e11d48">真重复(同渠道)</div>
+              <div class="kpi-value" style="color:#e11d48">{{ formatNum(cardData.true_dup_events ?? 0) }}</div>
+              <div class="kpi-sub">SN+电话+渠道全一致 · 拷贝复制 · 计1笔</div>
+              <div class="kpi-sub" style="color:#4f46e5">
+                <span style="font-weight:600">归并后事件</span> {{ formatNum(cardData.events ?? 0) }}
+                <span style="margin:0 4px">·</span>
+                <span style="font-weight:600">待人工</span> <span :style="{ color: (cardData.needs_review ?? 0) > 0 ? '#e11d48' : '#16a34a' }">{{ formatNum(cardData.needs_review ?? 0) }}</span>
+              </div>
+            </div>
+          </el-col>
         </el-row>
 
         <!-- 积压快照(可下钻: 三源 + 龄期 + 明细) -->
@@ -729,6 +751,81 @@
         </el-dialog>
       </section>
 
+      <!-- ============ TAB: 人工审核(事件归并·待判定) ============ -->
+      <section v-if="activeTab === 'review'" class="block-card">
+        <div class="block-head">
+          <span class="block-title">重复判定 · 人工审核</span>
+          <span class="block-hint">
+            同设备同日出现多个电话 → 程序默认<b>统计为不同投诉</b>, 需人工确认是否同一人 ·
+            <b>只读</b>, 不删除任何原始记录
+          </span>
+        </div>
+
+        <!-- 口径说明 -->
+        <el-alert type="info" :closable="false" show-icon class="mb-12">
+          <template #title>
+            <b>归并口径(#55)</b>: 同一投诉多渠道呈现(渠道不同) → 归并为 1 笔, <b>不算重复</b>;
+            SN + 电话 + 渠道<b>全一致</b>(同渠道) → 才是拷贝复制的<b>真重复</b>。
+          </template>
+          <div style="font-size:12px;line-height:1.7;margin-top:4px">
+            本页列出<b>无法程序判定</b>的情况: 同一 SN 同一天登记了<b>多个不同电话</b>。
+            默认按「不同投诉」统计, 但实际可能是同一人换号/填错号 → 人工确认。
+          </div>
+        </el-alert>
+
+        <div class="filter-bar mb-12">
+          <el-select v-model="reviewSource" size="small" placeholder="来源" clearable style="width:130px" @change="loadDedupReview">
+            <el-option label="315外部投诉" value="external" />
+            <el-option label="(外)卡商" value="card" />
+          </el-select>
+          <el-button size="small" :icon="Refresh" :loading="reviewLoading" @click="loadDedupReview">刷新</el-button>
+        </div>
+
+        <el-row :gutter="12" class="mb-16">
+          <el-col :xs="12" :sm="8" :md="6">
+            <div class="kpi-card" style="background:#fff1f2;border-left:3px solid #e11d48">
+              <div class="kpi-label" style="color:#e11d48">待人工判定组</div>
+              <div class="kpi-value" style="color:#e11d48">{{ formatNum(reviewList.length) }}</div>
+              <div class="kpi-sub">同设备同日多电话</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="6">
+            <div class="kpi-card" style="background:#f8fafc;border-left:3px solid #64748b">
+              <div class="kpi-label" style="color:#475569">涉及记录</div>
+              <div class="kpi-value" style="color:#334155">{{ formatNum(reviewRecordCount) }}</div>
+              <div class="kpi-sub">原始行 · 均保留不删</div>
+            </div>
+          </el-col>
+        </el-row>
+
+        <el-table v-loading="reviewLoading" :data="reviewList" size="small" border stripe max-height="520">
+          <el-table-column label="来源" width="110">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.source_type === 'card' ? 'success' : 'warning'" effect="plain">
+                {{ row.source_type === 'card' ? '(外)卡商' : '315外部' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="complaint_day" label="投诉日" width="110" />
+          <el-table-column prop="device_sn" label="设备SN" min-width="150" show-overflow-tooltip />
+          <el-table-column label="涉及电话" min-width="190">
+            <template #default="{ row }">
+              <el-tag v-for="p in (row.phones || [])" :key="p" size="small" style="margin-right:4px" effect="plain">{{ p }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="记录数" width="90" align="center">
+            <template #default="{ row }">{{ row.record_count ?? (row.record_ids || []).length }}</template>
+          </el-table-column>
+          <el-table-column label="记录ID" min-width="150">
+            <template #default="{ row }">
+              <span style="font-size:11px;color:#64748b">{{ (row.record_ids || []).join(', ') }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="reason" label="触发原因" min-width="200" show-overflow-tooltip />
+        </el-table>
+        <el-empty v-if="!reviewLoading && !reviewList.length" description="暂无待人工判定记录" :image-size="60" />
+      </section>
+
       <!-- ============ TAB: 被投诉主体 ============ -->
       <section v-if="activeTab === 'subject'" class="block-card">
         <div class="block-head">
@@ -927,6 +1024,10 @@
         <el-radio-button label="merchant">商户号投诉</el-radio-button>
         <el-radio-button label="handling">受理分析</el-radio-button>
         <el-radio-button label="backlog">积压审核</el-radio-button>
+        <el-radio-button label="review">
+          人工审核
+          <el-badge v-if="(cardData.needs_review ?? 0) > 0" :value="cardData.needs_review" type="danger" style="margin-left:6px" />
+        </el-radio-button>
         <el-radio-button label="subject">被投诉主体</el-radio-button>
       </el-radio-group>
     </div>
@@ -941,7 +1042,7 @@ import dayjs from 'dayjs'
 import isoWeek from 'dayjs/plugin/isoWeek'
 dayjs.extend(isoWeek)
 import BaseChart from '@/components/BaseChart.vue'
-import { complaintAnalysis, complaintDetail, complaintSupplementary, complaintBacklog, complaintBacklogExport, complaintSubjectAnalysis, createAudit } from '@/api/complaint'
+import { complaintAnalysis, complaintDetail, complaintSupplementary, complaintBacklog, complaintBacklogExport, complaintSubjectAnalysis, complaintDedupReview, createAudit } from '@/api/complaint'
 import { useAudit } from '@/composables/useAudit'
 
 const { openDeviceAudit, openPersonAudit } = useAudit()
@@ -996,6 +1097,15 @@ const auditVisible = ref(false)
 const auditSubmitting = ref(false)
 const auditForm = reactive({ source_type: 'internal', ref_id: '', device_sn: '', attribution: '其他', judgment: '通过', conclusion: '' })
 const attributions = ['网络质量', '套餐争议', '退款协商失败', '降成争议', '其他', '未关联SN']
+
+// ── ★ #55 人工审核(review tab): 同设备同日多电话 → 默认算不同, 待人工确认 ──
+//   只读列表; 归并结论不落库, 不删原始行(用户: "不能乱删除 所以还是慎重")。
+const reviewList = ref([])
+const reviewLoading = ref(false)
+const reviewSource = ref('')
+const reviewRecordCount = computed(() =>
+  reviewList.value.reduce((n, g) => n + (g.record_count ?? (g.record_ids || []).length), 0)
+)
 
 // ── 被投诉主体分析(subject tab) ──
 const subjectData = ref(null)
@@ -1649,8 +1759,24 @@ async function loadData() {
     loadMerchantDetail()
     loadBacklog()
     loadSubjectAnalysis()
+    loadDedupReview()
   } finally {
     loading.value = false
+  }
+}
+
+// ★ #55: 待人工判定列表(同设备同日多电话) —— 只读, 不改数据
+async function loadDedupReview() {
+  reviewLoading.value = true
+  try {
+    const p = { ...params.value }
+    if (reviewSource.value) p.source_type = reviewSource.value
+    const res = await complaintDedupReview(p)
+    reviewList.value = res.data?.items || []
+  } catch {
+    reviewList.value = []
+  } finally {
+    reviewLoading.value = false
   }
 }
 
