@@ -284,18 +284,56 @@ def _source_reg_handled(db, src_val: str, ts, te,
             _cc_conds.append(CardComplaint.complaint_date >= ts)
         if te:
             _cc_conds.append(CardComplaint.complaint_date <= te)
-        # ★★ (#53) 卡商 registered = **表自身行数**, 不扣工单重叠 ★★
-        #   实证: 工单表 service_item/service_category 含「卡商」均 0 行 →
-        #   卡商在工单侧无独立分类, 无"已计工单"可扣。原扣减口径(#52)会把卡商算少。
-        _reg_cc = db.scalar(
+        # ★★ #65: 卡商 registered = **工单侧真卡商 + 补充表 − 重叠** ★★
+        #   ⚠️ #53 曾用「表自身行数」(不扣重), 依据是「工单侧无卡商分类」。
+        #      #57 证明该检测方式有误 —— 卡商在工单侧以 `item='工信部投诉'` 形式存在。
+        #      工单侧现为 `src_expr == CARD_SCOPE`(即软纠正**之后**的真卡商),
+        #      与补充表平行去重, 与 `/summary` 的 `card_total` **同公式**。
+        _reg_tk = db.scalar(
+            select(func.count()).select_from(ServiceTicket).where(
+                _ticket_category_case() == "投诉",
+                src_expr == CARD_SCOPE,
+                ServiceTicket.register_time.isnot(None),
+                *([ServiceTicket.register_time >= ts] if ts else []),
+                *([ServiceTicket.register_time <= te] if te else []),
+            )
+        ) or 0
+        _tot_cc = db.scalar(
             select(func.count()).select_from(CardComplaint).where(*_cc_conds)
         ) or 0
-        # handled: 前缀锚定判定(与 complaint_scope 单一来源, 见上方说明)
+        # 重叠 = 补充表已 matched 到「本范围内卡商工单」的条数
+        _ov_sub = select(ServiceTicket.ticket_no).where(
+            _ticket_category_case() == "投诉",
+            src_expr == CARD_SCOPE,
+            ServiceTicket.register_time.isnot(None),
+            *([ServiceTicket.register_time >= ts] if ts else []),
+            *([ServiceTicket.register_time <= te] if te else []),
+        )
+        _ov_cc = db.scalar(
+            select(func.count()).select_from(CardComplaint)
+            .where(*_cc_conds, CardComplaint.matched_ticket_no.isnot(None),
+                   CardComplaint.matched_ticket_no.in_(_ov_sub))
+        ) or 0
+        _reg_cc = int(_reg_tk) + int(_tot_cc) - int(_ov_cc)
+        # handled: 补充表前缀锚定 + **工单侧真实完成**(#65 新增)
+        #   ⚠️ 卡商 result 是混合语义字段(实测 117 种取值) → 用前缀锚定, 非枚举
         _done_rows = db.execute(
             select(CardComplaint.result).where(*_cc_conds)
         ).scalars().all()
         _hdl_cc = sum(1 for v in _done_rows if card_result_state(v) == STATUS_DONE)
-        return int(_reg_cc), int(_hdl_cc)
+        # ★ 卡商工单侧已办结(与 315 分支同口径: finish 落窗口 且 真实完成)
+        _hdl_tk = db.scalar(
+            select(func.count()).select_from(ServiceTicket).where(
+                _ticket_category_case() == "投诉",
+                src_expr == CARD_SCOPE,
+                ServiceTicket.finish_time.isnot(None),
+                ServiceTicket.register_time.isnot(None),
+                func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) >= _REAL_FINISH_EPOCH_SECS,
+                *([ServiceTicket.finish_time >= ts] if ts else []),
+                *([ServiceTicket.finish_time <= te] if te else []),
+            )
+        ) or 0
+        return int(_reg_cc), int(_hdl_cc) + int(_hdl_tk)
 
     # external 桶: 并入补充表(315)
     if include_suppl_external and src_val == "外部投诉":
@@ -389,12 +427,17 @@ def _sources_reg_handled(db, ts, te) -> dict:
 
 
 def _card_reg_handled(db, ts, te) -> dict:
-    """(外)卡商 **独立** registered/handled（#53 —— 不参与投诉总量）。
+    """(外)卡商 **独立** registered/handled（#53/#65 —— 不参与投诉总量）。
 
-    口径: `card_complaints` 表自身行数(按 `complaint_date` 窗口), **不扣工单重叠**。
-      实证: 工单表 `service_item`/`service_category` 含「卡商」均为 0 行 →
-      卡商在工单侧无独立分类, 无"已计工单"可扣。
-    handled: 前缀锚定判定(`complaint_scope.card_result_state`)。
+    口径(#65): **工单侧真卡商 + `card_complaints` 补充表 − 重叠**。
+      · 工单侧真卡商 = 「投诉类 ∧ 分桶=(外)卡商(已含 #58 软纠正)」
+      · 重叠 = 补充表 `matched_ticket_no` 指向本范围内卡商工单的条数
+
+    ⚠️ #53 原口径是「表自身行数, 不扣工单重叠」, 依据「工单侧无卡商分类(0 行)」。
+       #57 证明该**检测方式有误**: 卡商在工单侧以 `item='工信部投诉'` 形式存在,
+       不以「卡商」字面存在 → 老结论失效, 近 3 月实测重叠 16 条(不去重则双计)。
+
+    handled: 补充表前缀锚定(`card_result_state`) + 工单侧真实完成。
 
     返回: {"registered": int, "handled": int}（与 `_sources_reg_handled` 的 value 同形）
     """
@@ -676,7 +719,10 @@ def complaint_summary(
         .order_by(_day_trunc(ServiceTicket.register_time))
     ).all()
 
-    # ---- 外部投诉 (service_tickets 平台类工单: 工信部/12315/消协等) ----
+    # ---- 外部投诉 (service_tickets 平台类工单: 12315/消协/监所等) ----
+    # ⚠️ #65: 工单侧口径已含 **#58 软纠正** —— `_complaint_source_type_case`
+    #    默认传入 `ServiceTicket.device_sn`, 会把「误录为工信部、实为监所」
+    #    的工单改判为外部投诉。
     external_ticket_total = db.scalar(_tk_where(select(func.count())).where(src_expr == "外部投诉")) or 0
     external_by_cat = db.execute(
         _tk_where(select(ServiceTicket.service_item, func.count()).where(src_expr == "外部投诉"))
@@ -693,6 +739,16 @@ def complaint_summary(
     ).all()
     external_trend = db.execute(
         _tk_where(select(_day_trunc(ServiceTicket.register_time), func.count()).where(src_expr == "外部投诉"), use_action_time=False)
+        .group_by(_day_trunc(ServiceTicket.register_time))
+        .order_by(_day_trunc(ServiceTicket.register_time))
+    ).all()
+
+    # ---- (外)卡商工单侧 (item='工信部投诉' 且 SN 非监所) ----
+    # ★★ #65: 卡商在工单侧**确实存在**(28 条/近3月), 需与补充表并集去重 ★★
+    #   用户: "卡商的投诉 不纳入总量的管理, 整体独立统计分析"。
+    card_ticket_total = db.scalar(_tk_where(select(func.count())).where(src_expr == CARD_SCOPE)) or 0
+    card_ticket_trend = db.execute(
+        _tk_where(select(_day_trunc(ServiceTicket.register_time), func.count()).where(src_expr == CARD_SCOPE), use_action_time=False)
         .group_by(_day_trunc(ServiceTicket.register_time))
         .order_by(_day_trunc(ServiceTicket.register_time))
     ).all()
@@ -767,12 +823,23 @@ def complaint_summary(
     #   原式(2026-09-01 口径): external = 工单 + 315净 + 卡商净  ← 卡商被并进来
     #   现式: external = 工单 + 315净
     external_total = int(external_ticket_total) + supplementary["external"]["total"] - _overlap_suppl(ExternalComplaint, "外部投诉")
-    # ★★ 2026-09-11 (#53) 卡商口径修正 ★★
+    # ★★ 2026-09-11 (#53) 卡商**独立**统计 ★★
     #   用户: "卡商的投诉 不纳入总量的管理, 整体独立统计分析…全部单算"。
-    #   ⚠️ 卡商 **不扣工单重叠** —— 实证: 工单表 service_item/service_category 含「卡商」
-    #      均为 0 行 → 卡商在工单侧无独立分类, 无"重叠"可言, 扣减会把卡商算少。
-    #      (原 `- _overlap_suppl(CardComplaint, "(外)卡商")` 是 #52 的误用, 已撤销)
-    card_total = int(supplementary["card"]["total"])
+    #   ⚠️ 卡商**不进** `complaint_total`（不进三源合计）—— 这句仍成立。
+    #
+    # ★★ #65 口径修正: 卡商 = 工单侧真卡商 + 补充表 − 重叠 ★★
+    #   #53 曾撤销卡商去重, 理由是「工单表 service_item/service_category 含「卡商」
+    #   均为 0 行 → 工单侧无卡商分类」。
+    #   ⚠️ 该断言的**检测方式有误** —— 卡商在工单侧**不以"卡商"字面存在**,
+    #      而是以 `service_item='工信部投诉'` 存在（#57 已证实）。
+    #   → #57 之后工单侧**已有**真卡商（近3月 28 条）, 老结论失效。
+    #   实测: `card_complaints` 78 行 与 工单侧真卡商 SN 重叠 16 条 → 不去重会双计。
+    #   公式与外部侧**完全平行**: 工单 + 补充表 − 重叠(matched 且指向本范围内卡商工单)。
+    card_total = (
+        int(card_ticket_total)
+        + int(supplementary["card"]["total"])
+        - _overlap_suppl(CardComplaint, CARD_SCOPE)
+    )
     merchant_total = int(merchant_ticket_total)
 
     # ---- 四源趋势合并补充表(逐日去重) ----
@@ -786,8 +853,10 @@ def complaint_summary(
     external_suppl_trend = _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te)
     card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "(外)卡商", ts, te)
     external_trend_merged = _merge_trend(external_trend, external_suppl_trend)
-    # 卡商无工单侧来源 → 趋势直接用补充表
-    card_trend_merged = _merge_trend([], card_suppl_trend)
+    # ★★ #65: 卡商趋势 = 工单侧真卡商 + 补充表净（与 card_total 同口径）★★
+    #   修复前: `_merge_trend([], card_suppl_trend)` —— 工单侧完全没进来,
+    #   → 趋势逐日累加 **≠** 总数（违反「趋势和总数同口径」约定）。
+    card_trend_merged = _merge_trend(card_ticket_trend, card_suppl_trend)
     merchant_trend_merged = _merge_trend(merchant_trend, [])
     internal_trend_merged = _merge_trend(internal_trend, [])  # 内部投诉无补充表
 

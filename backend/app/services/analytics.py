@@ -1088,6 +1088,8 @@ def _complaint_subitem_case():
 #      不再并入「外部投诉」(需修订 LOCKED A-20260902-016, 见 #47 设计文档)。
 #   4. **去重**: 按 `(SN, 手机)` + 30 天窗合并同一笔多渠道投诉。
 #   5. **状态合并**: 任一渠道为完成态即视为已处理。
+#   6. **★★ #65 软纠正下沉 (#58)**: 工信部工单若 SN 在 315 文档属监所/市监局类
+#      → 统计时**纠正为外部投诉**。原仅对账侧生效 → 看板少 160 条真实监所投诉。
 #
 # 实现单一来源: `app/services/complaint_scope.py`(常量/判据/CASE 均出自该模块),
 #   本文件的 `_ticket_category_case` / `_complaint_source_type_case` 仅作薄封装,
@@ -1095,15 +1097,21 @@ def _complaint_subitem_case():
 # 全域统一: 所有投诉统计/明细/看板/涉诉 均复用本函数, 不得另写关键词判断
 #   (涉诉 SQL 硬编码处见 analytics.py 6628/7110, 与本法一致, 仅原生SQL场景)。
 # ═══════════════════════════════════════════════════════════════════
-_EXTERNAL_PLATFORM_KEYWORDS = (
+# ⚠️⚠️ #56/#57 已废弃: 以下三个常量**不再被任何逻辑使用** ——
+#    口径已全部下沉到 `complaint_scope.py`(`_EXTERNAL_PLATFORM_KEYWORDS` 等)。
+#    保留仅为**历史存档/人工排查时对照**, 切勿在任何新代码中引用。
+#    尤其注意 `_EXTERNAL_PLATFORM_KEYWORDS` 仍含「工信部」—— 那是 #57 **之前**的旧口径。
+#    使用前请先确认 `complaint_scope` 同名常量的**当前**值。
+_EXTERNAL_PLATFORM_KEYWORDS = (  # ⚠️ DEPRECATED — 含已移出的「工信部」
     "工信部", "12315", "公共服务平台", "消费者协会", "消协",
     "监督局", "市场监管", "市监", "315平台", "12345", "政务平台",
 )
-_MERCHANT_COMPLAINT_KEYWORDS = ("微信",)
-_INTERNAL_COMPLAINT_KEYWORDS = ("商品投诉", "服务投诉")
+_MERCHANT_COMPLAINT_KEYWORDS = ("微信",)   # ⚠️ DEPRECATED
+_INTERNAL_COMPLAINT_KEYWORDS = ("商品投诉", "服务投诉")  # ⚠️ DEPRECATED
 def _complaint_source_type_case(
     col=ServiceTicket.service_item,
     channel_col=ServiceTicket.channel,
+    sn_col=ServiceTicket.device_sn,
 ):
     """工单投诉分桶(CASE WHEN) → 内部投诉 / 商户号投诉 / 外部投诉（**三类**）
 
@@ -1122,8 +1130,14 @@ def _complaint_source_type_case(
 
     优先级: 外部平台词 > 微信 > 商品/服务 > 套餐扣费申诉 > channel微信 > 内部(兜底)
       ⚠️ 外部平台关键词优先: "12315微信投诉"归「外部投诉」(监管渠道更重, 2026-08-25 固化)。
+
+    ★★ 2026-09-11 (#65) 软纠正接入 ★★
+      `sn_col` 默认 `ServiceTicket.device_sn` → **默认启用 #58 软纠正**。
+      实测影响(近3月): 工信部桶 188 条中 **160 条** SN 属监所类 → 改判外部投诉。
+      看板「外部投诉」由 211 → **371**(与对账接口一致)。
+      同时修复了原先 188 条工信部工单在统计层**两边都不算**的黑洞。
     """
-    return complaint_bucket_case(col, channel_col)
+    return complaint_bucket_case(col, channel_col, sn_col)
 
 # ============================================================
 # 模块: 工单有效完工时间推算 (effective_finish_time)
@@ -3699,16 +3713,37 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     #   `complaint_total` **不再含卡商** —— 用户: "卡商的投诉 不纳入总量的管理,
     #   整体独立统计分析; 无论是界面上 还是各项指标的分析 统计 接口 业务逻辑 等等
     #   全部单算"。
-    #   实证依据: 工单表 service_item/service_category 含「卡商」均为 0 行 →
-    #   卡商是**纯补充表体系**, 无工单对应, 故不能与"工单投诉总量"相加。
+    #   ⚠️ 卡商不进 `complaint_total` —— 这个是**用户口径**, 不受 #65 影响。
     _cnt_st = db.execute(select(func.count()).where(tk_between, _ticket_category_case() == "投诉")).scalar() or 0
     _cnt_ec = db.execute(select(func.count()).where(ec_between)).scalar() or 0
     _cnt_cc = db.execute(select(func.count()).where(cc_between)).scalar() or 0
     complaint_total = int(_cnt_st) + int(_cnt_ec)          # ← 不含卡商
-    card_total = int(_cnt_cc)                              # ← 卡商独立总量
+    # ★★ #65: 卡商 = 工单侧真卡商 + 补充表 − 重叠 ★★
+    #   ⚠️ #53 原公式为 `card_total = _cnt_cc`(纯补充表行数)。
+    #      #57 证明「工单侧无卡商分类」的检测方式有误 —— 卡商在工单侧以
+    #      `service_item='工信部投诉'` 形式存在。现有 28 条/近3月, 与补充表
+    #      SN 重叠 16 条 → 不去重会双计。公式与外部侧平行。
+    #   ⚠️ 与 `/summary` 的 `card.total` 保持**同一公式**(避免看板/决策页不一致)。
+    _cnt_card_tk = db.execute(
+        select(func.count()).where(tk_between, _ticket_category_case() == "投诉",
+                                   _complaint_source_type_case() == BUCKET_CARD)
+    ).scalar() or 0
+    _ov_card_cc = db.execute(
+        select(func.count()).select_from(CardComplaint)
+        .where(cc_between, CardComplaint.matched_ticket_no.isnot(None),
+               CardComplaint.matched_ticket_no.in_(
+                   select(ServiceTicket.ticket_no).where(
+                       tk_between, _ticket_category_case() == "投诉",
+                       _complaint_source_type_case() == BUCKET_CARD,
+                   )
+               ))
+    ).scalar() or 0
+    card_total = int(_cnt_card_tk) + int(_cnt_cc) - int(_ov_card_cc)   # ← 卡商独立总量(并集)
     # 投诉来源类型聚合: 内部/商户号/外部 **三类**(卡商不在此列)
     # 2026-09-04 用户确认: 商户号投诉(微信)不得并入外部桶, 单列展示。
     # 原两桶口径 _complaint_source_type_simple_case(微信归外部) 已弃用。
+    # ⚠️ #65: `_complaint_source_type_case` 现已含 **#58 软纠正** → 本聚合
+    #    自动把「误录为工信部、实为监所」的工单归入外部桶。
     comp_src_rows = db.execute(
         select(_complaint_source_type_case(), func.count().label("cnt"))
         .where(tk_between, _ticket_category_case() == "投诉")
@@ -4471,7 +4506,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         "complaint_by_source": complaint_by_source,
         # ── (#53) 卡商独立统计体系（不参与投诉总量）──
         #   用户: "卡商的投诉 不纳入总量的管理, 整体独立统计分析…全部单算"。
-        #   口径: 表自身行数(card_complaints 按 complaint_date 窗口), 不扣工单重叠。
+        #   口径(#65): 工单侧真卡商 + `card_complaints` − 重叠(与 /summary 同公式)。
         "card_total": card_total,                    # 卡商独立总量(非 complaint_total 的一部分)
         "card_scope": CARD_SCOPE,                    # "(外)卡商" —— 前端标注用
         "card_by_category": card_by_category,        # 卡商问题分类分布

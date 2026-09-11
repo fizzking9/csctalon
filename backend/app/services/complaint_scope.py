@@ -294,17 +294,16 @@ def effective_external_ticket_cond(
 
     ⚠️ **不改 BMS 原数据** —— 只在统计/对账口径纠正;
        `service_item='工信部投诉'` 保持原样(用户: "不能乱删除 所以还是慎重")。
+
+    ⚠️ #65 (2026-09-11): 实现已**收敛到 `complaint_bucket_case(..., sn_col=...)`**
+       —— 本函数与统计层现共用同一段 CASE 表达式, **不可能再漂移**。
+       原实现是独立拼装的 `or_(base_external, misclassified)`, 与统计层不同步
+       (即 #65 的根因)。
     """
-    base_external = and_(
+    return and_(
         is_complaint_ticket_cond(cat_col),
-        complaint_bucket_case(item_col, channel_col) == BUCKET_EXTERNAL,
+        complaint_bucket_case(item_col, channel_col, sn_col) == BUCKET_EXTERNAL,
     )
-    misclassified = and_(
-        is_complaint_ticket_cond(cat_col),
-        complaint_bucket_case(item_col, channel_col) == BUCKET_CARD_TICKET,
-        sn_col.in_(supervision_sn_subquery()),
-    )
-    return or_(base_external, misclassified)
 
 
 def effective_card_ticket_cond(
@@ -318,11 +317,12 @@ def effective_card_ticket_cond(
     定义 = 工信部类 **AND** SN **不在** 315 监所/市监局 SN 集合
 
     即: 被误录为工信部、但实为监所投诉的, **不再算卡商**。
+
+    ⚠️ #65: 同 `effective_external_ticket_cond`, 实现收敛到共享 CASE。
     """
     return and_(
         is_complaint_ticket_cond(cat_col),
-        complaint_bucket_case(item_col, channel_col) == BUCKET_CARD_TICKET,
-        sn_col.notin_(supervision_sn_subquery()),
+        complaint_bucket_case(item_col, channel_col, sn_col) == BUCKET_CARD_TICKET,
     )
 
 
@@ -426,13 +426,31 @@ CARD_TABLE = "card_complaints"
 BUCKET_CARD = CARD_SCOPE
 
 
-def complaint_bucket_case(item_col, channel_col=None) -> ColumnElement:
-    """工单 → 投诉来源桶（三类：内部/商户号/外部）
+def complaint_bucket_case(item_col, channel_col=None, sn_col=None) -> ColumnElement:
+    """工单 → 投诉来源桶（三类：内部/商户号/外部）+ **#58 软纠正**
 
     参数:
       item_col:    `service_item`（主判据）
       channel_col: `channel`（**可选回退**）。给出时, item 无法判定则用渠道兜底
                    —— 可救回 78 行「item 空 + channel=微信投诉」→ 商户号。
+      sn_col:      `device_sn`（**可选, ★#65 新增**）。给出时启用 **#58 软纠正**:
+                   原判为 `(外)卡商`(工信部) 且 SN 在 315 文档属监所/市监局类
+                   → **纠正为「外部投诉」**。
+
+    ★★ #65 (2026-09-11): 软纠正**下沉到分桶层** ★★
+
+      问题: #58 的软纠正只被 `external_reconcile.py` 调用 → **对账正确、统计错误**。
+      实测(近3月) 188 条工信部工单在统计层**两边都不算**(外部桶排除它、
+      `card_total` 又直接查 `card_complaints` 表) → 看板少 160 条真实监所投诉。
+
+      修复: 把纠正内置到本函数, 只要调用方传入 `sn_col` 即自动生效。
+      全部统计口(总览/明细/分析/积压/主体) 经 `analytics._complaint_source_type_case`
+      统一走此处 → **一处修复, 全域对齐**。
+
+      数学等价性(已测):
+        effective_external = (raw==外部) ∨ (raw==卡商 ∧ SN∈监所)
+        effective_card     = (raw==卡商 ∧ SN∉监所)
+        两者为 raw 分桶的**完备互斥拆分**(无遗漏、无重叠)。
 
     优先级（见上方 #53/#57 说明）:
       工信部 > 其他外部平台词 > 微信 > 商品/服务投诉 > 套餐扣费申诉 > channel微信 > 内部
@@ -463,7 +481,67 @@ def complaint_bucket_case(item_col, channel_col=None) -> ColumnElement:
         ch = func.coalesce(channel_col, literal(""))
         whens.append((ch.ilike("%微信%"), BUCKET_MERCHANT))
     # else: 内部投诉（#53: 四类完备, 不再兜底「其他」/「外部」）
-    return sa_case(*whens, else_=BUCKET_INTERNAL).label("complaint_bucket")
+    raw = sa_case(*whens, else_=BUCKET_INTERNAL)
+
+    # ★★ #65: #58 软纠正 —— 仅当调用方提供 SN 列时启用 ★★
+    #   工信部(卡商桶) 且 SN 在 315 属监所/市监局类 → 实为监所投诉 → 改判外部投诉。
+    #   ⚠️ 不传 `sn_col` 时**保持历史行为**(纯 item/channel 判据), 保证
+    #      `metric_registry` 等不便取 SN 的调用点行为不变。
+    if sn_col is not None:
+        raw = sa_case(
+            (
+                and_(
+                    raw == BUCKET_CARD_TICKET,
+                    sn_col.in_(supervision_sn_subquery()),
+                ),
+                BUCKET_EXTERNAL,
+            ),
+            else_=raw,
+        )
+    return raw.label("complaint_bucket")
+
+
+def card_ticket_sn_subquery(db, ts, te):
+    """「工单侧真卡商」的 SN 子查询（#65）
+
+    ⚠️ 为什么不能再用「工单侧无卡商分类」的老结论:
+      #53 撤销卡商去重时依据是 *工单表 `service_item`/`service_category` 含
+      「卡商」均为 0 行*。但 **#57 把「工信部投诉」划归卡商渠道**后，
+      工单侧**已存在**可识别的真卡商（近 3 月 28 条）→ 老结论失效。
+
+      实测：`card_complaints` 78 行 与 工单侧真卡商 28 条，
+      **SN 重叠 16 条**（全部已 `matched`）→ 不去重会双计。
+
+    返回窗口内「投诉类 ∧ 真卡商」的 SN 集合。
+
+    ⚠️ `distinct` 而非行子查询：卡商**以 SN 为业务主体**
+      （一条投诉 = 一台设备），多行属「多渠道跟进」而非多条投诉。
+
+    ⚠️ 与 `analytics.card_ticket_sn_list()` 同口径，供不便写 ORM 的场景使用。
+    """
+    from app.models.ticket import ServiceTicket
+
+    conds = [
+        is_complaint_ticket_cond(ServiceTicket.service_category),
+        effective_card_ticket_cond(
+            ServiceTicket.device_sn,
+            ServiceTicket.service_category,
+            ServiceTicket.service_item,
+            ServiceTicket.channel,
+        ),
+        ServiceTicket.device_sn.isnot(None),
+    ]
+    # 与 /summary KPI 同口径: 登记时间 **或** 真实完成时间落在窗口内
+    tw, fw = [], [ServiceTicket.finish_time.isnot(None)]
+    if ts:
+        tw.append(ServiceTicket.register_time >= ts)
+        fw.append(ServiceTicket.finish_time >= ts)
+    if te:
+        tw.append(ServiceTicket.register_time <= te)
+        fw.append(ServiceTicket.finish_time <= te)
+    if tw or fw:
+        conds.append(or_(and_(*tw), and_(*fw)))
+    return select(ServiceTicket.device_sn).where(*conds).distinct()
 
 
 def classify_bucket_from_item(item: str | None, channel: str | None = None) -> str:
