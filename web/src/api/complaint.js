@@ -23,6 +23,11 @@ export function complaintSupplementary(params) {
 export function complaintDedupReview(params) {
   return request.get('/complaints/dedup-review', { params })
 }
+
+// ★ #60: SN 后补残影清单(采集质量问题; 已从统计排除, 原始行保留)
+export function complaintSnBackfill(params) {
+  return request.get('/complaints/sn-backfill', { params })
+}
 // 积压未处理投诉审核分析(统一口径: 归一化状态非已完成)
 export function complaintBacklog(params) {
   return request.get('/complaints/backlog', { params })

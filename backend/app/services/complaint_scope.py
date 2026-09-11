@@ -81,6 +81,70 @@ logger = logging.getLogger(__name__)
 _BMS_COMPLAINT_CATEGORY = "投诉"
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 采集质量标记 → 统计排除（#60）
+# ═══════════════════════════════════════════════════════════════════
+# 沿用**项目既有范式**(退款侧 A-20260909-001 §2.7):
+#   `analytics._EXCL_QSTATUS_SQL` = "COALESCE(quality_status,'') NOT IN
+#                                    ('dup_residual','ignored')"
+#   设计要点: ① 统一入口, 防口径漂移; ② 列不存在时返回 None, 不让报表报错。
+#
+# #59 新增 `dup_sn_backfill`: 源文档「先建行、后补 SN」造成的**残影行**
+#   (缺 SN 的不完整记录, 已被完整行取代)。生产实测标记 31 条
+#   (external 27 + card 4)。
+#
+# ★ 为什么必须排除: 残影与其完整行是**同一投诉**; 不排除会让外部投诉
+#   总数**虚高**(同一条被算两次)。原始行**保留不删**(用户: 不能乱删除)。
+#
+# ⚠️ 与退款侧 `dup_residual` **分开维护**: 两者作用于不同表
+#    (退款=manual_refunds; 本单=external_complaints/card_complaints)。
+QSTATUS_DUP_SN_BACKFILL = "dup_sn_backfill"
+
+# 投诉两张表的统计排除集合
+COMPLAINT_EXCLUDE_QSTATUS = ("dup_sn_backfill",)
+
+
+def has_quality_col(db, table_name: str) -> bool:
+    """表是否存在 `quality_status` 列（旧库/旧表守卫）—— 仿 analytics 同名逻辑
+
+    返回 False 表示当前环境该表无该列 → 调用方**跳过**排除条件, 不让报表报错。
+    """
+    from sqlalchemy import text
+
+    try:
+        with db.begin_nested():
+            row = db.execute(text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name=:t AND column_name='quality_status'"
+            ), {"t": table_name}).first()
+        return bool(row)
+    except Exception:  # noqa: BLE001 旧环境/权限不足 → 保守跳过
+        return False
+
+
+def complaint_quality_include_cond(model, db=None) -> list:
+    """投诉表「排除已治理残影」的 ORM 条件列表（统一入口, #60）
+
+    用法:
+        select(...).where(*complaint_quality_include_cond(ExternalComplaint))
+
+    参数:
+      · `model` —— `ExternalComplaint` / `CardComplaint`（须有 `quality_status`）
+      · `db`    —— 可选。给出时先做**列存在性守卫**（旧库无列 → 返回空列表跳过）。
+
+    ⚠️ 不传 `db` 时不做守卫（调用方已知表结构）—— 避免每次查询都打
+       information_schema 造成额外开销。
+    """
+    if db is not None and not has_quality_col(db, model.__tablename__):
+        return []
+    return [
+        or_(
+            model.quality_status.is_(None),
+            model.quality_status.notin_(COMPLAINT_EXCLUDE_QSTATUS),
+        )
+    ]
+
+
 def is_complaint_ticket_cond(cat_col, item_col=None) -> ColumnElement:
     """工单是否为"投诉"的 SQL 条件
 

@@ -60,6 +60,7 @@ from app.models.card_complaint import CardComplaint
 from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
 from app.services.complaint_scope import (
+    complaint_quality_include_cond,
     effective_card_ticket_cond,
     effective_external_ticket_cond,
 )
@@ -183,6 +184,9 @@ def _reconcile_core(
         d_conds.append(doc_date_col >= ts)
     if te:
         d_conds.append(doc_date_col <= te)
+    # ★ #60: 排除采集质量残影(dup_sn_backfill) —— 与完整行是**同一投诉**,
+    #   不排除会让 doc_total 虚高。原行保留不删, 仅统计口径排除。
+    d_conds += complaint_quality_include_cond(doc_model, db)
     doc_total = db.scalar(
         select(func.count()).select_from(doc_model).where(*d_conds)
     ) or 0

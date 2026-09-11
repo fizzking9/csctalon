@@ -826,6 +826,89 @@
         <el-empty v-if="!reviewLoading && !reviewList.length" description="暂无待人工判定记录" :image-size="60" />
       </section>
 
+      <!-- ============ TAB: 采集质量(SN后补残影) ============ -->
+      <section v-if="activeTab === 'quality'" class="block-card">
+        <div class="block-head">
+          <span class="block-title">采集质量 · SN 后补残影</span>
+          <span class="block-hint">
+            源文档「先建行、后补 SN」→ 同一投诉产生两条 ·
+            <b>已从统计排除</b> · <b>原始行保留可回溯</b>
+          </span>
+        </div>
+
+        <el-alert type="info" :closable="false" show-icon class="mb-12">
+          <template #title>
+            <b>这是什么</b>：源文档存在「先建一行、稍后再补 SN」的采集习惯。
+            补 SN 后去重指纹变化 → 同一投诉产生两条记录。
+          </template>
+          <div style="font-size:12px;line-height:1.7;margin-top:4px">
+            <b>残影</b>= 缺 SN 的不完整行（入库较早）；<b>完整行</b>= 有 SN 的齐全行（入库较晚）。<br>
+            → 残影已打标并从<b>统计口径排除</b>（避免同一条投诉被算两次），
+            <b>但行本身完整保留</b>，把标记清空即可完整回滚。
+          </div>
+        </el-alert>
+
+        <div class="filter-bar mb-12">
+          <el-select v-model="qualitySource" size="small" placeholder="来源" clearable style="width:130px" @change="loadSnBackfill">
+            <el-option label="315外部投诉" value="external" />
+            <el-option label="(外)卡商" value="card" />
+          </el-select>
+          <el-button size="small" :icon="Refresh" :loading="qualityLoading" @click="loadSnBackfill">刷新</el-button>
+        </div>
+
+        <el-row :gutter="12" class="mb-16">
+          <el-col :xs="12" :sm="8" :md="6">
+            <div class="kpi-card" style="background:#f1f5f9;border-left:3px solid #64748b">
+              <div class="kpi-label" style="color:#475569">残影总数</div>
+              <div class="kpi-value" style="color:#334155">{{ formatNum(qualityList.length) }}</div>
+              <div class="kpi-sub">已排除统计 · 原行保留</div>
+            </div>
+          </el-col>
+          <el-col v-for="(n, m) in qualityByMonth" :key="m" :xs="12" :sm="8" :md="6">
+            <div class="kpi-card" style="background:#fff7ed;border-left:3px solid #ea580c">
+              <div class="kpi-label" style="color:#ea580c">{{ m }}</div>
+              <div class="kpi-value" style="color:#ea580c">{{ formatNum(n) }}</div>
+              <div class="kpi-sub">该月残影数</div>
+            </div>
+          </el-col>
+        </el-row>
+
+        <el-table v-loading="qualityLoading" :data="qualityList" size="small" border stripe max-height="480">
+          <el-table-column label="来源" width="100">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.source_type === 'card' ? 'success' : 'warning'" effect="plain">
+                {{ row.source_type === 'card' ? '(外)卡商' : '315外部' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="complaint_date" label="投诉日" width="110" />
+          <el-table-column prop="platform" label="平台" min-width="120" show-overflow-tooltip />
+          <el-table-column label="残影ID" width="90" align="center">
+            <template #default="{ row }"><span style="color:#e11d48">{{ row.ghost_id }}</span></template>
+          </el-table-column>
+          <el-table-column label="完整行ID" width="90" align="center">
+            <template #default="{ row }"><span style="color:#16a34a">{{ row.full_id ?? '—' }}</span></template>
+          </el-table-column>
+          <el-table-column label="补齐的SN" min-width="150">
+            <template #default="{ row }">
+              <span v-if="row.full_device_sn" style="font-size:11px">{{ row.full_device_sn }}</span>
+              <el-tag v-else size="small" type="danger" effect="plain">未找到完整行</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="残影入库" min-width="150">
+            <template #default="{ row }">
+              <span style="font-size:11px;color:#64748b">{{ (row.ghost_created_at || '').slice(0, 19).replace('T', ' ') }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="完整行入库" min-width="150">
+            <template #default="{ row }">
+              <span style="font-size:11px;color:#16a34a">{{ (row.full_created_at || '').slice(0, 19).replace('T', ' ') }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-if="!qualityLoading && !qualityList.length" description="暂无 SN 后补残影(采集质量良好)" :image-size="60" />
+      </section>
+
       <!-- ============ TAB: 被投诉主体 ============ -->
       <section v-if="activeTab === 'subject'" class="block-card">
         <div class="block-head">
@@ -1028,6 +1111,7 @@
           人工审核
           <el-badge v-if="(cardData.needs_review ?? 0) > 0" :value="cardData.needs_review" type="danger" style="margin-left:6px" />
         </el-radio-button>
+        <el-radio-button label="quality">采集质量</el-radio-button>
         <el-radio-button label="subject">被投诉主体</el-radio-button>
       </el-radio-group>
     </div>
@@ -1042,7 +1126,7 @@ import dayjs from 'dayjs'
 import isoWeek from 'dayjs/plugin/isoWeek'
 dayjs.extend(isoWeek)
 import BaseChart from '@/components/BaseChart.vue'
-import { complaintAnalysis, complaintDetail, complaintSupplementary, complaintBacklog, complaintBacklogExport, complaintSubjectAnalysis, complaintDedupReview, createAudit } from '@/api/complaint'
+import { complaintAnalysis, complaintDetail, complaintSupplementary, complaintBacklog, complaintBacklogExport, complaintSubjectAnalysis, complaintDedupReview, complaintSnBackfill, createAudit } from '@/api/complaint'
 import { useAudit } from '@/composables/useAudit'
 
 const { openDeviceAudit, openPersonAudit } = useAudit()
@@ -1106,6 +1190,19 @@ const reviewSource = ref('')
 const reviewRecordCount = computed(() =>
   reviewList.value.reduce((n, g) => n + (g.record_count ?? (g.record_ids || []).length), 0)
 )
+
+// ── ★ #60 采集质量(quality tab): SN 后补残影 —— 已从统计排除, 原行保留 ──
+const qualityList = ref([])
+const qualityLoading = ref(false)
+const qualitySource = ref('')
+const qualityByMonth = computed(() => {
+  const m = {}
+  for (const r of qualityList.value) {
+    const k = (r.complaint_date || '').slice(0, 7)
+    if (k) m[k] = (m[k] || 0) + 1
+  }
+  return m
+})
 
 // ── 被投诉主体分析(subject tab) ──
 const subjectData = ref(null)
@@ -1760,8 +1857,24 @@ async function loadData() {
     loadBacklog()
     loadSubjectAnalysis()
     loadDedupReview()
+    loadSnBackfill()
   } finally {
     loading.value = false
+  }
+}
+
+// ★ #60: SN 后补残影清单(采集质量问题) —— 只读, 不改数据
+async function loadSnBackfill() {
+  qualityLoading.value = true
+  try {
+    const p = { ...params.value }
+    if (qualitySource.value) p.source_type = qualitySource.value
+    const res = await complaintSnBackfill(p)
+    qualityList.value = res.data?.items || []
+  } catch {
+    qualityList.value = []
+  } finally {
+    qualityLoading.value = false
   }
 }
 

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sqlalchemy import select
+
 from app.models.device import Device
 from app.models.external_complaint import ExternalComplaint
 from app.services.complaint_sync import (
@@ -236,3 +238,71 @@ class TestRealCases:
         rows = [incoming]
         claimed, _ = _reconcile_sn_backfill(db, ExternalComplaint, rows)
         assert claimed == 1
+
+
+# ══════════════════════════════════════════════════════════════════
+# 六、统计排除（#60）
+# ══════════════════════════════════════════════════════════════════
+class TestStatsExclusion:
+    """残影标记后必须从统计口径排除，避免同一投诉被算两次"""
+
+    def test_exclude_cond_drops_marked(self, db):
+        """★ 被标记的残影不出现在统计集合里"""
+        from app.models.external_complaint import ExternalComplaint
+        from app.services.complaint_scope import (
+            QSTATUS_DUP_SN_BACKFILL,
+            complaint_quality_include_cond,
+        )
+
+        keep = _rec(db, "SNQC1", "13700138001", "保留的完整行")
+        _store(db, keep)
+        ghost = _rec(db, None, "13700138002", "被排除的残影")
+        g = _store(db, ghost)
+        g.quality_status = QSTATUS_DUP_SN_BACKFILL
+        db.flush()
+
+        got = set(db.scalars(
+            select(ExternalComplaint.device_sn)
+            .where(*complaint_quality_include_cond(ExternalComplaint))
+            .where(ExternalComplaint.complainant_phone.in_(
+                ["13700138001", "13700138002"]))
+        ).all())
+        assert "SNQC1" in got
+        assert None not in got, "被标记的残影应被排除"
+
+    def test_excluded_row_still_exists(self, db):
+        """★ 排除是**统计口径**行为 —— 原始行必须还在（不删数据）"""
+        from app.models.external_complaint import ExternalComplaint
+        from app.services.complaint_scope import QSTATUS_DUP_SN_BACKFILL
+
+        ghost = _rec(db, None, "13700138003", "排除后仍应存在的残影")
+        g = _store(db, ghost)
+        g.quality_status = QSTATUS_DUP_SN_BACKFILL
+        db.flush()
+        gid = g.id
+
+        assert db.get(ExternalComplaint, gid) is not None, "原始行不得被删除"
+
+    def test_guard_skips_when_no_column(self, db):
+        """列存在性守卫: 传入 db 时正常返回条件"""
+        from app.models.external_complaint import ExternalComplaint
+        from app.services.complaint_scope import (
+            complaint_quality_include_cond,
+            has_quality_col,
+        )
+
+        assert has_quality_col(db, "external_complaints") is True
+        assert len(complaint_quality_include_cond(ExternalComplaint, db)) == 1
+
+    def test_normal_rows_unaffected(self, db):
+        """未标记的普通行不受影响"""
+        from app.models.external_complaint import ExternalComplaint
+        from app.services.complaint_scope import complaint_quality_include_cond
+
+        _store(db, _rec(db, "SNQC2", "13700138004", "普通行不该被排除"))
+        got = db.scalars(
+            select(ExternalComplaint.device_sn)
+            .where(*complaint_quality_include_cond(ExternalComplaint))
+            .where(ExternalComplaint.complainant_phone == "13700138004")
+        ).all()
+        assert got == ["SNQC2"]
