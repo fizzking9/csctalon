@@ -11,6 +11,8 @@
       db fixture 全程在事务内, 测试结束自动回滚, 无需手工清理。
 """
 
+import json
+
 import pytest
 
 from app.models.doc_sync_source import DocSyncSource
@@ -523,6 +525,133 @@ def test_pick_manual_refund_merged_keys_dedupable(tmp_path):
     # ORD-B 在两表各出现一次(2 行)但键相同 → 入库层合并为 1 行, 不产生重复
     b_keys = [_key(r) for r in recs if r["订单号"] == "ORD-B"]
     assert len(b_keys) == 2 and len(set(b_keys)) == 1, "同键重复行必须归一到同一键"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 版本探测闸门 (2026-09-13, 性能优化)
+#   动机: 一次同步 67.3s 中导出占 65s(97%), 解析 0.5s / 入库 1.8s —— 瓶颈在整表导出。
+#   实测: 带登录态 GET 文档页 0.6s 即拿到 modify_time/version, 与上次相同可跳过导出。
+#   开关默认 false(需先验证「编辑后版本号会变」), 且跳过必须**可区分于漏采**。
+# ─────────────────────────────────────────────────────────────────────
+def test_probe_returns_none_for_unsupported_platform():
+    """腾讯平台暂无等价信号 → 返回 None(调用方照常导出, 不做跳过)。"""
+    assert sdss.probe_doc_version("tencent", "https://docs.qq.com/sheet/X") is None
+
+
+def test_probe_returns_none_on_state_missing(monkeypatch, tmp_path):
+    """登录态文件缺失 → None(不抛错, 走正常导出路径)。"""
+    monkeypatch.setattr(sdss.settings, "BROWSER_STATE_DIR", str(tmp_path))
+    assert sdss.probe_doc_version("kdocs", "https://www.kdocs.cn/l/X") is None
+
+
+def test_probe_extracts_version_from_page(monkeypatch, tmp_path):
+    """正向: 从文档页响应中提取 modify_time/version 组合版本串。"""
+    (tmp_path / "kdocs.json").write_text(
+        json.dumps({"cookies": [{"name": "wps_sid", "value": "1", "domain": ".kdocs.cn"}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(sdss.settings, "BROWSER_STATE_DIR", str(tmp_path))
+
+    class _Resp:
+        status = 200
+
+        def read(self):
+            return b'<script>var x={"modify_time":1789279190,"version":6808};</script>'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(sdss.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    assert sdss.probe_doc_version("kdocs", "https://www.kdocs.cn/l/X") == "1789279190/6808"
+
+
+def test_probe_returns_none_when_page_lacks_version(monkeypatch, tmp_path):
+    """页面无版本标识(上游改版) → None → 照常导出(不能误判为"未变化")。"""
+    (tmp_path / "kdocs.json").write_text(
+        json.dumps({"cookies": [{"name": "wps_sid", "value": "1", "domain": ".kdocs.cn"}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(sdss.settings, "BROWSER_STATE_DIR", str(tmp_path))
+
+    class _Resp:
+        status = 200
+
+        def read(self):
+            return b"<html>totally different structure</html>"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(sdss.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    assert sdss.probe_doc_version("kdocs", "https://www.kdocs.cn/l/X") is None
+
+
+def test_gate_disabled_by_default_never_skips(monkeypatch, db, seed_source):
+    """🔒 默认开关关闭 → 永不跳过(即使版本一致)。保守: 未验证前不影响采集。"""
+    assert sdss.SKIP_EXPORT_IF_UNCHANGED is False
+    monkeypatch.setattr(sdss, "probe_doc_version", lambda *a, **k: "v1")
+    seed_source.last_sync_summary = {"doc_version": "v1"}  # 与探测结果一致
+
+    out = sdss._sync_with_version_gate(db, seed_source, "/tmp/x.xlsx", "manual")
+    assert out is None, "开关关闭时不得跳过导出"
+
+
+def test_gate_skips_when_version_unchanged_and_enabled(monkeypatch, db, seed_source):
+    """🔒 开关开启 + 版本一致 → 跳过导出, 且状态为 skipped(不是 success/partial)。"""
+    monkeypatch.setattr(sdss, "SKIP_EXPORT_IF_UNCHANGED", True)
+    monkeypatch.setattr(sdss, "probe_doc_version", lambda *a, **k: "v1")
+    seed_source.last_sync_summary = {"doc_version": "v1"}
+
+    out = sdss._sync_with_version_gate(db, seed_source, "/tmp/x.xlsx", "manual")
+    assert out is not None
+    assert out["status"] == "skipped"           # 必须可区分于 success/partial
+    assert out["probe_skipped_export"] is True
+    assert out["doc_version"] == "v1"
+    assert "未变化" in out["skip_reason"]
+
+
+def test_gate_does_not_skip_when_version_changed(monkeypatch, db, seed_source):
+    """开关开启但版本有变化 → 照常导出。"""
+    monkeypatch.setattr(sdss, "SKIP_EXPORT_IF_UNCHANGED", True)
+    monkeypatch.setattr(sdss, "probe_doc_version", lambda *a, **k: "v2")
+    seed_source.last_sync_summary = {"doc_version": "v1"}
+
+    assert sdss._sync_with_version_gate(db, seed_source, "/tmp/x.xlsx", "manual") is None
+
+
+def test_gate_does_not_skip_on_first_run(monkeypatch, db, seed_source):
+    """首次同步(无历史版本) → 必须导出(否则会漏掉全部数据)。"""
+    monkeypatch.setattr(sdss, "SKIP_EXPORT_IF_UNCHANGED", True)
+    monkeypatch.setattr(sdss, "probe_doc_version", lambda *a, **k: "v1")
+    seed_source.last_sync_summary = None
+
+    assert sdss._sync_with_version_gate(db, seed_source, "/tmp/x.xlsx", "manual") is None
+
+
+def test_gate_does_not_skip_when_probe_unavailable(monkeypatch, db, seed_source):
+    """🔒 安全关键: 探测不可用(None) ≠ 未变化 → 必须照常导出, 否则静默漏采。"""
+    monkeypatch.setattr(sdss, "SKIP_EXPORT_IF_UNCHANGED", True)
+    monkeypatch.setattr(sdss, "probe_doc_version", lambda *a, **k: None)
+    seed_source.last_sync_summary = {"doc_version": "v1"}  # 有历史版本也不能跳过
+
+    assert sdss._sync_with_version_gate(db, seed_source, "/tmp/x.xlsx", "manual") is None
+
+
+def test_skip_summary_is_explicit_not_zero_rows(db, seed_source):
+    """🔒 跳过必须写明确原因, 不能只记 0 行(#79 教训: 0 行会被误读为漏采)。"""
+    s = sdss._summary_from_stats(seed_source, {
+        "probe_skipped_export": True, "status": "skipped",
+        "skip_reason": "文档版本未变化(轻量探测一致), 本轮跳过导出与入库",
+        "doc_version": "v1", "total": 0, "inserted": 0, "updated": 0,
+        "failed": 0, "deleted": 0,
+    })
+    assert s["skipped"] is True
+    assert "未变化" in s["skip_reason"]
+    assert s["doc_version"] == "v1"
 
 
 def test_manual_refund_sync_rejected_on_missing_order_no(db):

@@ -200,8 +200,15 @@ const rules = {
 
 const platformName = (p) => ({ tencent: '腾讯', kdocs: '金山' }[p] || p)
 const targetName = (t) => ({ complaint: '投诉(315/卡商)', manual_refund: '商户号退款' }[t] || t)
-const statusName = (s) => ({ success: '成功', partial: '部分', failed: '失败' }[s] || s || '-')
-const statusType = (s) => ({ success: 'success', partial: 'warning', failed: 'danger' }[s] || 'info')
+const statusName = (s) => ({
+  success: '成功', partial: '部分', failed: '失败',
+  // ★ 跳过 ≠ 失败, 也 ≠ 成功入库: 明确标出, 避免与「没采集到」混淆(#79 教训)
+  skipped: '未变化·跳过',
+}[s] || s || '-')
+const statusType = (s) => ({
+  success: 'success', partial: 'warning', failed: 'danger',
+  skipped: 'info',
+}[s] || 'info')
 
 function fmtTime(v) {
   if (!v) return ''
@@ -212,6 +219,10 @@ function fmtTime(v) {
 function fmtSummary(row) {
   const s = row.last_sync_summary
   if (!s || typeof s !== 'object') return ''
+  // 版本闸门跳过: 显式说明「文档未变化」, 不显示为 0 行(否则像漏采)
+  if (s.skipped) {
+    return s.skip_reason || '文档版本未变化，本轮跳过'
+  }
   // complaint: {external:{...}, card:{...}} ; manual_refund: {total, inserted...}
   if (s.external) {
     const e = s.external

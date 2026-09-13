@@ -19,8 +19,12 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 import tempfile
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -53,6 +57,79 @@ _KDOCS_MENU_XY = (95, 15)
 
 # xlsx 读取引擎(与 POC _poc_shared_doc_reader.py 一致: 快 + 免疫 WPS/腾讯导出样式崩溃)
 _EXCEL_ENGINE = "calamine"
+
+# ── 轻量版本探测(可选优化, 2026-09-13) ──────────────────────────────
+# 动机(实测): 一次共享文档同步 67.3s 中, **导出占 65s(97%)** —— playwright 打开文档、
+# 走菜单、下载整本 xlsx(该文档 103.7MB, 其中 113MB 是嵌入图片, 而入库根本不用图片列);
+# 解析仅 0.5s、入库仅 1.8s。即"去重"几乎不耗时, 真正的开销在**每次都盲目整表导出**。
+#
+# 优化思路: 先用登录态做一次轻量 HTTP 请求取文档版本标识, 与上次相同 → 跳过导出。
+# 实测(金山): GET https://www.kdocs.cn/l/<id> 带 kdocs/wps cookie → 0.6s 返回,
+# 响应内含 "modify_time":<ts> 与 "version":<n>, 连续探测稳定; 对比 65s 导出省 99%。
+#
+# ⚠️ 开关默认 **false**(保守): 需先确认「文档被编辑后版本号一定变化」才可开启,
+# 否则会静默漏采(比不做优化更糟)。开启后**必须**把「跳过」明确写进同步状态,
+# 保证「数据没变」与「没采集到」在系统里可区分(工单 #79 的教训: 日志恒 inserted=0
+# 曾被误读为"正常无变化", 实际是漏采)。
+SKIP_EXPORT_IF_UNCHANGED = False
+
+# 版本探测超时(秒): 轻量探测, 不给调度器引入长阻塞
+_VERSION_PROBE_TIMEOUT = 15
+
+
+def _load_state_cookies(platform: str, state_filename: str | None) -> str:
+    """从登录态文件取 Cookie 头(仅取该平台的域名)。"""
+    state_path = Path(settings.BROWSER_STATE_DIR) / (
+        state_filename or _DEFAULT_STATE_FILE.get(platform, "")
+    )
+    if not state_path.exists():
+        raise FileNotFoundError(f"未找到登录态 {state_path}")
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    domains = ("kdocs", "wps") if platform == PLATFORM_KDOCS else ("docs.qq.com", "qq.com")
+    pairs = [
+        f"{c['name']}={c['value']}"
+        for c in (data.get("cookies") or [])
+        if any(d in (c.get("domain") or "") for d in domains)
+    ]
+    return "; ".join(pairs)
+
+
+def probe_doc_version(platform: str, doc_url: str,
+                      state_filename: str | None = None) -> str | None:
+    """轻量探测文档版本标识(不开浏览器、不下载)。
+
+    Returns:
+        版本串(如 `"1789279190/6808"`); 探测失败或平台不支持 → None(调用方**必须**
+        回退为正常导出, 即 None ≠ 未变化)。
+    """
+    if platform != PLATFORM_KDOCS:
+        # 腾讯文档未找到等价信号(待调研), 返回 None → 照常导出(不做跳过)
+        return None
+    try:
+        cookies = _load_state_cookies(platform, state_filename)
+        req = urllib.request.Request(doc_url, headers={
+            "Cookie": cookies,
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+            ),
+        })
+        with urllib.request.urlopen(req, timeout=_VERSION_PROBE_TIMEOUT) as resp:
+            if resp.status != 200:
+                return None
+            body = resp.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
+        logger.info(f"[shared_doc] 版本探测失败(将正常导出): {type(e).__name__}: {e}")
+        return None
+
+    def _grab(key: str) -> str | None:
+        m = re.search(rf'"{key}"\s*:\s*"?([^",}}\s]{{1,32}})', body)
+        return m.group(1) if m else None
+
+    modify_time, version = _grab("modify_time"), _grab("version")
+    if not modify_time and not version:
+        return None  # 页面结构变了 → 不跳过, 照常导出
+    return f"{modify_time or '-'}/{version or '-'}"
 
 
 def _export_tencent_xlsx(doc_url: str, out_path: str, state_filename: str | None = None) -> str:
@@ -578,8 +655,53 @@ def sync_one_source(db: Session, row: DocSyncSource, trigger: str = "manual") ->
     return stats
 
 
+def _sync_with_version_gate(db: Session, row: DocSyncSource, out_path: str,
+                            trigger: str) -> dict[str, Any] | None:
+    """版本探测闸门: 文档未变化且开关开启 → 返回「跳过」统计; 否则 None(照常导出)。
+
+    ⚠️ 「跳过」必须可区分(工单 #79 教训): 状态记为 `skipped`(而非 success/partial),
+    且 summary 明确写 skip_reason + 版本号, 使看板/日志一眼能分清
+    「文档确实没变」与「没采集到」—— 后者才是故障。
+
+    Returns:
+        None → 调用方照常导出(含"开关关闭"与"探测不可用"两种情况);
+        非 None → 跳过统计(且已把版本号记入 summary 供下轮比对)。
+    """
+    # 探测版本(即使开关关闭也探测一次: 用于把当前版本号记入 summary, 供开启后比对)
+    version = probe_doc_version(row.platform, row.doc_url, _state_file_for(row))
+    if version is None:
+        return None  # 探测不可用 → 照常导出(None ≠ 未变化)
+    if not SKIP_EXPORT_IF_UNCHANGED:
+        # 开关关闭: 不跳过, 但把版本号带回去记录(为将来开启做准备)
+        _PENDING_VERSION[row.id] = version
+        return None
+    prev = (row.last_sync_summary or {}).get("doc_version")
+    if not prev or prev != version:
+        _PENDING_VERSION[row.id] = version  # 有变化: 记录新版本供导出后回写
+        return None
+    logger.info(f"[shared_doc] {row.doc_name or row.doc_url} 文档未变化(version={version}), "
+                f"跳过导出(target={row.target_type})")
+    return {
+        "status": "skipped",
+        "doc_version": version,
+        "skip_reason": "文档版本未变化(轻量探测一致), 本轮跳过导出与入库",
+        "probe_skipped_export": True,
+        "total": 0, "inserted": 0, "updated": 0, "failed": 0, "deleted": 0,
+    }
+
+
+# 本轮探测到的版本号暂存(source_id → version), 供导出路径回写到 summary。
+# 用小字典而非改 stats 结构: 探测在 _do_sync 入口、写回在 sync_one_source 出口,
+# 中间隔着 complaint/manual_refund 两条统计形状不同的分支。
+_PENDING_VERSION: dict[int, str] = {}
+
+
 def _do_sync(db: Session, row: DocSyncSource, out_path: str, trigger: str) -> dict[str, Any]:
     """导出 → 解析 → 入库(不负责配置行状态写回, 由 sync_one_source 统一处理)"""
+    # 版本闸门(默认关闭): 未变化则跳过整表导出(实测可省 ~97% 耗时)
+    skipped = _sync_with_version_gate(db, row, out_path, trigger)
+    if skipped is not None:
+        return skipped
     source_file = row.doc_name or row.doc_url
     try:
         # 登录态文件: 配置行 state_file 优先, 否则按平台默认(见 _state_file_for)
@@ -732,6 +854,20 @@ def sync_doc_source_safe(source_id: int, trigger: str = "manual") -> dict[str, A
 
 def _summary_from_stats(row: DocSyncSource, stats: dict[str, Any]) -> dict[str, Any]:
     """把入库统计压缩为配置行 last_sync_summary(JSONB 友好)"""
+    # 版本闸门跳过(2026-09-13): 明确标注「文档未变化」, 与「没采集到」区分开
+    # (工单 #79 教训: 日志恒 inserted=0 曾被误读为正常无变化, 实为漏采)
+    if stats.get("probe_skipped_export"):
+        return {
+            "skipped": True,
+            "skip_reason": stats.get("skip_reason", "文档版本未变化"),
+            "doc_version": stats.get("doc_version"),
+            "total": 0, "inserted": 0, "updated": 0, "failed": 0, "deleted": 0,
+        }
+    # 正常导出后回写版本号: 若本轮探测到版本, 记入 summary 供下轮比对
+    if not stats.get("doc_version"):
+        v = _PENDING_VERSION.pop(row.id, None)
+        if v:
+            stats["doc_version"] = v
     if row.target_type == TARGET_COMPLAINT:
         s = {
             "external": {k: stats["external"][k] for k in ("total", "inserted", "updated", "failed", "matched")},
@@ -741,6 +877,8 @@ def _summary_from_stats(row: DocSyncSource, stats: dict[str, Any]) -> dict[str, 
             s["filtered_empty_rows"] = stats["filtered_empty_rows"]  # 滤空行计数(默认静默仅计数)
         if stats.get("suspect_precision"):
             s["suspect_precision"] = stats["suspect_precision"]  # #42 长数字精度可疑(上游需改文本列)
+        if stats.get("doc_version"):
+            s["doc_version"] = stats["doc_version"]
         return s
     if row.target_type == TARGET_MANUAL_REFUND:
         s = {k: stats[k] for k in ("total", "inserted", "updated", "deleted", "failed", "warnings")}
@@ -749,5 +887,7 @@ def _summary_from_stats(row: DocSyncSource, stats: dict[str, Any]) -> dict[str, 
                 s[k] = stats[k]
         if stats.get("suspect_precision"):
             s["suspect_precision"] = stats["suspect_precision"]
+        if stats.get("doc_version"):
+            s["doc_version"] = stats["doc_version"]
         return s
     return {"total": stats.get("total")}
