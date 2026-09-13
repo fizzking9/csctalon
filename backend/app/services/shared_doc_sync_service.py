@@ -63,18 +63,28 @@ _EXCEL_ENGINE = "calamine"
 # 走菜单、下载整本 xlsx(该文档 103.7MB, 其中 113MB 是嵌入图片, 而入库根本不用图片列);
 # 解析仅 0.5s、入库仅 1.8s。即"去重"几乎不耗时, 真正的开销在**每次都盲目整表导出**。
 #
-# 优化思路: 先用登录态做一次轻量 HTTP 请求取文档版本标识, 与上次相同 → 跳过导出。
-# 实测(金山): GET https://www.kdocs.cn/l/<id> 带 kdocs/wps cookie → 0.6s 返回,
-# 响应内含 "modify_time":<ts> 与 "version":<n>, 连续探测稳定; 对比 65s 导出省 99%。
+# 优化思路: 先用登录态做一次轻量请求取文档版本标识, 与上次相同 → 跳过导出。
+# 实测(金山官方接口): GET api/v3/office/file/<id> 带 cookie → **0.21s** 返回结构化 JSON:
+#   file.modify_time / file.version / file.modifier.name   连续探测稳定
+# (原先解析文档 HTML 页也能取到同样字段, 但那是前端内嵌数据、易随改版失效 →
+#  现以 JSON 接口为主, HTML 解析仅作兜底。两者均失败 → None → 照常导出。)
 #
-# ⚠️ 开关默认 **false**(保守): 需先确认「文档被编辑后版本号一定变化」才可开启,
-# 否则会静默漏采(比不做优化更糟)。开启后**必须**把「跳过」明确写进同步状态,
-# 保证「数据没变」与「没采集到」在系统里可区分(工单 #79 的教训: 日志恒 inserted=0
-# 曾被误读为"正常无变化", 实际是漏采)。
+# ⚠️ 开关默认 **false**(保守): 若「版本号变化」不完全覆盖「内容变化」, 开启后会静默
+# 漏采(比不做优化更糟)。开启后**必须**把「跳过」明确写进同步状态, 保证「数据没变」
+# 与「没采集到」在系统里可区分(工单 #79 的教训: 日志恒 inserted=0 曾被误读为
+# "正常无变化", 实际是漏采)。
 SKIP_EXPORT_IF_UNCHANGED = False
 
 # 版本探测超时(秒): 轻量探测, 不给调度器引入长阻塞
 _VERSION_PROBE_TIMEOUT = 15
+
+# 金山文档 ID 提取(l 链接形如 https://www.kdocs.cn/l/<file_id>)
+_KDOCS_FILE_ID_RE = re.compile(r"kdocs\.cn/l/([A-Za-z0-9_-]+)")
+_KDOCS_FILE_API = "https://www.kdocs.cn/api/v3/office/file/{file_id}"
+_UA_COMMON = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
 
 
 def _load_state_cookies(platform: str, state_filename: str | None) -> str:
@@ -98,33 +108,73 @@ def probe_doc_version(platform: str, doc_url: str,
                       state_filename: str | None = None) -> str | None:
     """轻量探测文档版本标识(不开浏览器、不下载)。
 
+    金山: 优先官方 JSON 接口(0.21s, 结构化); 失败则解析文档 HTML 页(兼容);
+          两者均失败 → None。腾讯: 暂无等价信号 → None(不做跳过)。
+
     Returns:
-        版本串(如 `"1789279190/6808"`); 探测失败或平台不支持 → None(调用方**必须**
-        回退为正常导出, 即 None ≠ 未变化)。
+        版本串(如 `"1789279190/6808"`); 探测失败或平台不支持 → None
+        (调用方**必须**回退为正常导出 —— None ≠ 未变化)。
     """
     if platform != PLATFORM_KDOCS:
-        # 腾讯文档未找到等价信号(待调研), 返回 None → 照常导出(不做跳过)
         return None
     try:
         cookies = _load_state_cookies(platform, state_filename)
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        logger.info(f"[shared_doc] 版本探测不可用(将正常导出): {type(e).__name__}: {e}")
+        return None
+
+    m = _KDOCS_FILE_ID_RE.search(doc_url or "")
+    if m:
+        v = _probe_kdocs_api(m.group(1), cookies)
+        if v:
+            return v
+    # 兜底: 解析文档页内嵌数据(接口改路径时仍可用)
+    return _probe_kdocs_html(doc_url, cookies)
+
+
+def _probe_kdocs_api(file_id: str, cookies: str) -> str | None:
+    """金山官方接口探测: file.modify_time / file.version(结构化, 0.2s)。"""
+    try:
+        req = urllib.request.Request(
+            _KDOCS_FILE_API.format(file_id=file_id),
+            headers={"Cookie": cookies, "User-Agent": _UA_COMMON,
+                     "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=_VERSION_PROBE_TIMEOUT) as resp:
+            if resp.status != 200:
+                return None
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as e:
+        logger.info(f"[shared_doc] 版本接口探测失败(尝试 HTML 兜底): {type(e).__name__}: {e}")
+        return None
+    f = data.get("file") if isinstance(data, dict) else None
+    if not isinstance(f, dict):
+        return None
+    mt, ver = f.get("modify_time"), f.get("version")
+    if mt is None and ver is None:
+        return None
+    modifier = (f.get("modifier") or {}).get("name") if isinstance(f.get("modifier"), dict) else None
+    ver_str = f"{mt or '-'}/{ver or '-'}"
+    logger.info(f"[shared_doc] 版本探测(API): {ver_str} 最后修改人={modifier or '?'}")
+    return ver_str
+
+
+def _probe_kdocs_html(doc_url: str, cookies: str) -> str | None:
+    """兜底: 从文档页内嵌 JSON 取 modify_time/version(上游改接口路径时仍可用)。"""
+    try:
         req = urllib.request.Request(doc_url, headers={
-            "Cookie": cookies,
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-            ),
-        })
+            "Cookie": cookies, "User-Agent": _UA_COMMON})
         with urllib.request.urlopen(req, timeout=_VERSION_PROBE_TIMEOUT) as resp:
             if resp.status != 200:
                 return None
             body = resp.read().decode("utf-8", "replace")
-    except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
+    except (urllib.error.URLError, OSError, ValueError) as e:
         logger.info(f"[shared_doc] 版本探测失败(将正常导出): {type(e).__name__}: {e}")
         return None
 
     def _grab(key: str) -> str | None:
-        m = re.search(rf'"{key}"\s*:\s*"?([^",}}\s]{{1,32}})', body)
-        return m.group(1) if m else None
+        mm = re.search(rf'"{key}"\s*:\s*"?([^",}}\s]{{1,32}})', body)
+        return mm.group(1) if mm else None
 
     modify_time, version = _grab("modify_time"), _grab("version")
     if not modify_time and not version:

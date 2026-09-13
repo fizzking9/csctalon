@@ -12,6 +12,7 @@
 """
 
 import json
+import urllib.error
 
 import pytest
 
@@ -652,6 +653,95 @@ def test_skip_summary_is_explicit_not_zero_rows(db, seed_source):
     assert s["skipped"] is True
     assert "未变化" in s["skip_reason"]
     assert s["doc_version"] == "v1"
+
+
+def test_probe_prefers_official_api(monkeypatch, tmp_path):
+    """🔒 加固: 优先用官方 JSON 接口(0.21s, 结构化), HTML 解析仅作兜底。
+
+    比解析文档 HTML 更可靠: 结构化字段 + 不易随前端改版失效。
+    """
+    (tmp_path / "kdocs.json").write_text(
+        json.dumps({"cookies": [{"name": "wps_sid", "value": "1", "domain": ".kdocs.cn"}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(sdss.settings, "BROWSER_STATE_DIR", str(tmp_path))
+    called = []
+
+    def _fake_urlopen(req, **kw):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        called.append(url)
+        if "api/v3/office/file" in url:
+            class _R:
+                status = 200
+
+                def read(self):
+                    return json.dumps({"file": {
+                        "modify_time": 1789281301, "version": 6811,
+                        "modifier": {"name": "张三"}}}).encode()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+            return _R()
+        raise AssertionError(f"不应回退到 HTML 解析: {url}")
+
+    monkeypatch.setattr(sdss.urllib.request, "urlopen", _fake_urlopen)
+    v = sdss.probe_doc_version("kdocs", "https://www.kdocs.cn/l/cbZIHtt6obyf")
+    assert v == "1789281301/6811"
+    assert any("api/v3/office/file" in u for u in called), "应优先调官方接口"
+
+
+def test_probe_falls_back_to_html_when_api_fails(monkeypatch, tmp_path):
+    """接口 404/改路径 → 回退解析文档 HTML(仍能取到版本, 不因接口变动而失效)。"""
+    (tmp_path / "kdocs.json").write_text(
+        json.dumps({"cookies": [{"name": "wps_sid", "value": "1", "domain": ".kdocs.cn"}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(sdss.settings, "BROWSER_STATE_DIR", str(tmp_path))
+
+    def _fake_urlopen(req, **kw):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "api/v3/office/file" in url:
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+
+        class _R:
+            status = 200
+
+            def read(self):
+                return b'var d={"modify_time":111,"version":222};'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return _R()
+
+    monkeypatch.setattr(sdss.urllib.request, "urlopen", _fake_urlopen)
+    assert sdss.probe_doc_version("kdocs", "https://www.kdocs.cn/l/cbZIHtt6obyf") == "111/222"
+
+
+def test_probe_non_l_link_still_supported(monkeypatch, tmp_path):
+    """链接非 /l/<id> 形态(拿不到 file_id) → 直接走 HTML 兜底, 不报错。"""
+    (tmp_path / "kdocs.json").write_text(
+        json.dumps({"cookies": [{"name": "wps_sid", "value": "1", "domain": ".kdocs.cn"}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(sdss.settings, "BROWSER_STATE_DIR", str(tmp_path))
+
+    class _R:
+        status = 200
+
+        def read(self):
+            return b'{"modify_time":9,"version":8}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(sdss.urllib.request, "urlopen", lambda *a, **k: _R())
+    assert sdss.probe_doc_version("kdocs", "https://www.kdocs.cn/view/xyz") == "9/8"
 
 
 def test_manual_refund_sync_rejected_on_missing_order_no(db):
