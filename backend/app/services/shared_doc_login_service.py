@@ -66,7 +66,7 @@ _SESSION_COOKIE_HINTS = {
 }
 
 # ── 虚拟显示(Xvfb) ──
-# ⚠️ 2026-09-13 生产故障(工单 #49 验收暴露, 详见 docs/ops/数据采集-运维手册.md §八):
+# ⚠️ 2026-09-13 生产故障(工单 #49 验收暴露, 详见 docs/ops/数据采集-运维手册.md §七):
 #   旧判据是 `$DISPLAY 存在 or which(xvfb-run)` —— 探的是**安装状态**。
 #   容器里 Dockerfile 装了 xvfb 包 → xvfb-run 必然在 PATH → 判据返回 True,
 #   但**没有任何进程启动 Xvfb**($DISPLAY 为空) → `launch(headless=False)` 仍炸
@@ -75,7 +75,10 @@ _SESSION_COOKIE_HINTS = {
 #   根因一句话: **「装了没」≠「跑着没」** → 必须探运行态(X socket), 并负责把服务拉起来。
 XVFB_DISPLAY = ":99"          # 按需拉起的虚拟显示号(可用环境变量 XVFB_DISPLAY 覆盖)
 _XVFB_SCREEN = "1280x800x24"  # 与浏览器 viewport 一致, 供二维码截图清晰可扫
-_XVFB_WAIT_MAX = 2.0          # 等待 socket 出现的硬上限(秒); 只在失败路径才会等满
+_XVFB_WAIT_MAX = 5.0          # 等待 socket 出现的硬上限(秒); 只在失败路径才会等满
+# Xavfb 需的 xauth 认证文件: 放在 socket 同目录, 权限 600 由 umask 保证
+_XAUTHORITY = "/tmp/.X11-unix/xvfb-xauth"
+
 
 def _display_number(display: str) -> str:
     """从 ":99" / "host:99.0" 取显示号, 供 socket 路径与 Xvfb 参数使用。"""
@@ -87,36 +90,75 @@ def _display_is_remote(display: str) -> bool:
     return not display.startswith(":")
 
 
+def _x_socket_path(display: str) -> str:
+    """X server 的 unix socket 路径(抽象命名空间/文件系统两种形式都兼容)。"""
+    num = _display_number(display)
+    return f"/tmp/.X11-unix/X{num}"
+
+
 def _socket_alive(display: str) -> bool:
-    """X unix socket 存在 → Xvfb / X server **真的在跑**(而不是只装了包)。"""
+    """探测 X server 是否**真在跑**(而不是只装了包)。
+
+    判据 = socket 可连接。不直接用 os.path.exists 的原因: 陈旧的 socket **文件**会在
+    X server 崩掉/被 kill 后残留(内核不会自动删), 只看存在会把死服务当活的。
+    """
     try:
-        return os.path.exists(f"/tmp/.X11-unix/X{_display_number(display)}")
-    except Exception:  # noqa: BLE001  路径异常一律视为不可用
+        import socket as _socket
+
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        try:
+            sock.settimeout(0.5)
+            sock.connect(_x_socket_path(display))
+            return True
+        finally:
+            sock.close()
+    except Exception:  # noqa: BLE001  连不上(含文件不存在/陈旧 socket) → 不可用
         return False
 
 
 def _start_xvfb_and_wait(display: str) -> bool:
-    """按需拉起 Xvfb(幂等)并等待 socket 就绪。
+    """按需拉起 Xvfb(幂等)并等待可连接。
 
-    用 `xvfb-run -n <n> sleep infinity` 而非直接 `Xvfb <display>`:
-      - 由 xvfb-run 负责 -nolisten tcp / 屏幕参数 等标准启动细节
-      - `sleep infinity` 让 Xvfb 常驻到进程结束(容器退出时随之回收, 无需额外管理)
-    幂等: 若 socket 已在(别人已拉起), 直接复用, 不重复起进程。
+    两个关键细节(首版写错, 生产实测才暴露 —— 见 2026-09-13 验证记录):
+      ① **必须 `-ac`(关闭访问控制)**: `xvfb-run` 默认启用 xauth 保护, 而 chromium 是
+         另一个进程, 拿不到该 cookie → 报 `Authorization required, but no
+         authorization protocol specified` → 浏览器依旧起不来。
+         本容器内的 X 仅本机+同容器使用(未监听 TCP), `-ac` 不扩大对外暴露面。
+      ② **预热 auth 文件**: 手动拉起时 xauth 不会自动创建文件, X 客户端可能报
+         "~/.Xauthority does not exist" → 预先 touch 一个空文件并以 DISPLAY 一起导出。
+
+    注: 不能像首版那样用 `xvfb-run -n <n> sleep infinity` 包裹 —— xvfb-run 是
+    一次性包装器, 它起的 Xvfb 生命周期绑定在 `sleep` 上; 一旦我们 kill 掉 sleep
+    收尾, Xvfb 就会一起死。改用直接拉起 Xvfb 作常驻进程:
+      - 由后端进程 spawn, 容器重建/重启时随之回收(不污染宿主机)
+      - 幂等: socket 已可连接则直接复用, 不重复起进程
     """
     if _socket_alive(display):
         return True
-    if shutil.which("xvfb-run") is None:
+    import shutil as _shutil
+
+    if _shutil.which("Xvfb") is None:
         return False  # 镜像没装 xvfb → 调用方走 501 降级
+
+    # ① 预热 auth 文件(空文件即可; -ac 下不校验内容, 仅除客户端警告)
     try:
+        Path(_XAUTHORITY).touch(exist_ok=True)
+        os.chmod(_XAUTHORITY, 0o600)
+    except Exception:  # noqa: BLE001  仅预警, 不阻断
+        logger.debug("[shared-doc-login] 预热 xauth 文件失败", exc_info=True)
+
+    try:
+        # ② 直接拉起 Xvfb 常驻: -ac 关访问控制; -nolisten tcp 不开 TCP 端口
         subprocess.Popen(
             [
-                "xvfb-run",
-                "-n",
-                _display_number(display),
-                "-s",
-                f"-screen 0 {_XVFB_SCREEN}",
-                "sleep",
-                "infinity",
+                "Xvfb",
+                display,
+                "-screen",
+                "0",
+                _XVFB_SCREEN,
+                "-ac",
+                "-nolisten",
+                "tcp",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -130,7 +172,7 @@ def _start_xvfb_and_wait(display: str) -> bool:
         if _socket_alive(display):
             logger.info("[shared-doc-login] 已按需拉起 Xvfb, DISPLAY=%s", display)
             return True
-    logger.warning("[shared-doc-login] Xvfb 拉起后 %.1fs 内未见 socket: %s",
+    logger.warning("[shared-doc-login] Xvfb 拉起后 %.1fs 内未能连接: %s",
                    _XVFB_WAIT_MAX, display)
     return False
 
@@ -214,17 +256,17 @@ class SharedDocLoginManager:
     def check_display_available() -> bool:
         """**只读**探测「当前是否已有可用显示服务」, 不产生副作用(供 /states 提示用)。
 
-        半开判据(2026-09-13 修正, 见模块顶部注释):
-          - $DISPLAY 指向的 X socket **真存在** → True(X server 确实在跑)
-          - 镜像装了 `xvfb-run` → True(点「扫码登录」时会**按需拉起**, 届时可用)
-          - 两者皆无(如本地 macOS: 无 X11 也无 xvfb-run) → False → 页面显示降级提示
+        判据(2026-09-13 修正, 见模块顶部注释):
+          - $DISPLAY 指向的 X server **可连接** → True(X server 确实在跑)
+          - 镜像装了 `Xvfb` → True(点「扫码登录」时会**按需拉起**, 届时可用)
+          - 两者皆无(如本地 macOS: 无 X11 也无 Xvfb) → False → 页面显示降级提示
 
         注意: 真正启动会话前用 `ensure_display_available()`(会自愈), 不是这个。
         """
         current = (os.environ.get("DISPLAY") or "").strip()
         if current and (_display_is_remote(current) or _socket_alive(current)):
             return True
-        return shutil.which("xvfb-run") is not None
+        return shutil.which("Xvfb") is not None
 
     @staticmethod
     def ensure_display_available() -> bool:
@@ -245,6 +287,9 @@ class SharedDocLoginManager:
         display = (os.environ.get("XVFB_DISPLAY") or XVFB_DISPLAY).strip()
         if _start_xvfb_and_wait(display):
             os.environ["DISPLAY"] = display
+            # 同时导出 XAUTHORITY: 不导出时 X 客户端会尝试 ~/.Xauthority, 缺文件会告警刷日志。
+            # Xvfb 以 -ac 启动(关闭访问控制), 此文件为空仅用于除告警, 不参与鉴权。
+            os.environ.setdefault("XAUTHORITY", _XAUTHORITY)
             return True
         return False
 

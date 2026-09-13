@@ -143,10 +143,10 @@ def test_which_xvfb_run_alone_is_not_enough(monkeypatch, mgr):
     """🔒 生产故障回归: 「装了包但没起进程」不得被判为可用。
 
     这正是 2026-09-13 的线上表现: `which(xvfb-run)` 有值 → 旧判据返回 True →
-    直接 launch(headless=False) 炸。修复后必须继续探到「socket 起不来」→ False。
+    直接 launch(headless=False) 炸。修复后必须继续探到「socket 连不上」→ False。
     """
     monkeypatch.delenv("DISPLAY", raising=False)
-    monkeypatch.setattr(sdls.shutil, "which", lambda _: "/usr/bin/xvfb-run")
+    monkeypatch.setattr(sdls.shutil, "which", lambda _: "/usr/bin/Xvfb")  # 包已装
     # 拉起 Xvfb 失败(模拟容器内无进程/无法启动)
     monkeypatch.setattr(sdls, "_start_xvfb_and_wait", lambda _d: False)
 
@@ -154,10 +154,38 @@ def test_which_xvfb_run_alone_is_not_enough(monkeypatch, mgr):
     assert mgr.ensure_display_available() is False  # 但真正要 launch 时: 自愈失败 → 走 501
 
 
+def test_xvfb_started_with_ac_to_avoid_xauth_error(monkeypatch, tmp_path):
+    """🔒 生产回归: 拉起 Xvfb 必须带 `-ac`(关闭访问控制)。
+
+    首版实现用 `xvfb-run -n 99 sleep infinity` 包裹, xvfb-run 默认启用 xauth 保护,
+    而 chromium 是**另一个进程**拿不到该 cookie → 生产实测报
+    `Authorization required, but no authorization protocol specified` +
+    `Missing X server or $DISPLAY` —— 修复后第一次端到端验证就是死在这里。
+    本用例锁定启动参数, 防止回退。
+    """
+    captured = {}
+
+    def _fake_popen(args, **kwargs):
+        captured["args"] = list(args)
+        return object()
+
+    monkeypatch.setattr(sdls.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(sdls.shutil, "which", lambda _: "/usr/bin/Xvfb")
+    monkeypatch.setattr(sdls, "_socket_alive", lambda _d: False)
+    # 让等待循环立即超时(不真等 5s)
+    monkeypatch.setattr(sdls.time, "sleep", lambda _s: None)
+
+    assert sdls._start_xvfb_and_wait(":99") is False  # socket 永远连不上 → False
+    args = captured.get("args") or []
+    assert args and args[0] == "Xvfb"          # 直接拉 Xvfb, 不再经 xvfb-run 包装
+    assert "-ac" in args                        # ★ 关键: 关闭访问控制
+    assert "-nolisten" in args and "tcp" in args
+
+
 def test_ensure_display_self_heals_when_socket_missing(monkeypatch, tmp_path, mgr):
     """正向: socket 不存在但能拉起 Xvfb → 自愈成功并注入 DISPLAY。"""
     monkeypatch.delenv("DISPLAY", raising=False)
-    monkeypatch.setattr(sdls.shutil, "which", lambda _: "/usr/bin/xvfb-run")
+    monkeypatch.setattr(sdls.shutil, "which", lambda _: "/usr/bin/Xvfb")
     monkeypatch.setattr(sdls, "_start_xvfb_and_wait", lambda _d: True)
     try:
         assert mgr.ensure_display_available() is True
@@ -165,6 +193,7 @@ def test_ensure_display_self_heals_when_socket_missing(monkeypatch, tmp_path, mg
     finally:
         # 服务内部直接写 os.environ, monkeypatch 跟踪不到 → 显式清理, 防污染其它用例
         sdls.os.environ.pop("DISPLAY", None)
+        sdls.os.environ.pop("XAUTHORITY", None)
 
 
 def test_ensure_display_reuses_existing_display(monkeypatch, mgr):
@@ -265,7 +294,7 @@ def test_login_start_returns_501_when_no_display(admin_client, db, monkeypatch):
     「装了 xvfb-run 但 Xvfb 起不来」→ 必须 501, 而不是落到 502。
     """
     monkeypatch.delenv("DISPLAY", raising=False)
-    monkeypatch.setattr(sdls.shutil, "which", lambda _: "/usr/bin/xvfb-run")  # 包已装
+    monkeypatch.setattr(sdls.shutil, "which", lambda _: "/usr/bin/Xvfb")  # 包已装
     monkeypatch.setattr(sdls, "_start_xvfb_and_wait", lambda _d: False)       # 但起不来
 
     from app.services import shared_doc_sync_service as sdss
