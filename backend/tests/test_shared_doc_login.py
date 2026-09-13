@@ -70,13 +70,25 @@ def mgr():
 
 # ── 假 Playwright 对象(打桩, 不真起浏览器) ──
 class _FakePage:
-    def __init__(self, url="https://docs.qq.com/sheet/abc"):
+    def __init__(self, url="https://docs.qq.com/sheet/abc", qrcode=False):
         self.url = url
         self._goto_url = url
+        self._qrcode = qrcode   # 页面是否显示可扫二维码
 
     def goto(self, url, **kwargs):
         self._goto_url = url
         self.url = url  # 模拟：能正常打开文档(即已登录)
+
+    def wait_for_timeout(self, ms):
+        """模拟渲染等待(不真等)。"""
+        return None
+
+    def evaluate(self, js, *args):
+        """模拟二维码存在性探测 —— 供 qrcode_visible() 使用。"""
+        return self._qrcode
+
+    def click(self, sel, **kwargs):
+        return None
 
     def screenshot(self, **kwargs):
         return b"\x89PNG\r\n\x1a\nFAKE"
@@ -323,10 +335,32 @@ def test_login_start_404_for_unknown_source(admin_client, monkeypatch):
 # 会话生命周期
 # ─────────────────────────────────────────────────────────────────────
 def test_status_recognizes_authorized(tmp_path, mgr):
-    """正向: 已脱离登录页 + 有会话 cookie → authorized。"""
+    """正向: 已脱离登录页 + 有会话 cookie + 无二维码 → authorized。"""
     sess = _make_session(tmp_path, url="https://docs.qq.com/sheet/abc",
                          cookies=[{"name": "uid", "value": "1"}])
     assert mgr.refresh_status(sess) == "authorized"
+
+
+def test_status_not_authorized_when_qrcode_still_visible(tmp_path, mgr):
+    """🔒 回归(2026-09-13 线上判态错误): 仍看得到二维码时不得判 authorized。
+
+    实测 kdocs: 登录弹窗还挂着二维码, 却因为「不在登录页关键词 + cookie 命中 csrf」
+    被判成 authorized → 前端显示「已检测到登录」, 用户被误导。
+    修复后: 看得到二维码 == 一定还没登录。
+    """
+    sess = _make_session(tmp_path, url="https://www.kdocs.cn/l/cbZIHtt6obyf",
+                         cookies=[{"name": "csrf", "value": "x"}])
+    sess._page = _FakePage(url="https://www.kdocs.cn/l/cbZIHtt6obyf", qrcode=True)
+    # 页面仍显示二维码 → 只能是 pending/scanned, 绝不能是 authorized
+    assert mgr.refresh_status(sess) in ("pending", "scanned")
+
+
+def test_csrf_cookie_alone_does_not_mean_logged_in(tmp_path, mgr):
+    """🔒 回归: 仅命中 `csrf`(登录前就存在)不得当作登录态。"""
+    sess = _make_session(tmp_path, platform="kdocs", url="https://account.wps.cn/passport/x",
+                         cookies=[{"name": "csrf", "value": "x"}])
+    # 无二维码、但有 csrf —— 不再被当作会话 cookie → 不判 authorized
+    assert mgr.refresh_status(sess) != "authorized"
 
 
 def test_status_pending_when_on_login_page(tmp_path, mgr):
@@ -542,3 +576,69 @@ def test_states_endpoint_lists_both_platforms(admin_client, monkeypatch, tmp_pat
     platforms = {i["platform"] for i in data["items"]}
     assert platforms == {"tencent", "kdocs"}
     assert "display_available" in data
+
+
+# ─────────────────────────────────────────────────────────────────────
+# kdocs 二维码展开(2026-09-13 线上「空框」回归)
+#   实测: 打开 kdocs 共享链接后弹窗**默认没有二维码**, 只有 Sign in 按钮;
+#   不代点 → 前端静态截图永远只显示一个空框。
+# ─────────────────────────────────────────────────────────────────────
+def test_kdocs_clicks_signin_to_reveal_qrcode(monkeypatch):
+    """🔒 回归: kdocs 无二维码时, 必须代为点击登录按钮让二维码出现。"""
+    clicks = []
+
+    class _P:
+        def evaluate(self, js, *a):
+            return False  # 初始没有二维码
+
+        def click(self, sel, **kw):
+            clicks.append(sel)
+
+        def wait_for_function(self, js, **kw):
+            return True
+
+        def wait_for_timeout(self, ms):
+            return None
+
+    monkeypatch.setattr(sdls.SharedDocLoginManager, "qrcode_visible",
+                        staticmethod(lambda page: False))
+    sdls.SharedDocLoginManager._open_qrcode_if_needed(_P(), "kdocs")
+    assert clicks, "kdocs 未点击登录按钮 → 二维码不会出现"
+    assert clicks[0] == sdls._KDOCS_SIGNIN_BUTTONS[0]
+
+
+def test_kdocs_does_not_click_when_qrcode_already_visible(monkeypatch):
+    """边界: 二维码已在(用户已扫码或平台默认展示) → 不重复点击。"""
+    clicks = []
+
+    class _P:
+        def click(self, sel, **kw):
+            clicks.append(sel)
+
+    monkeypatch.setattr(sdls.SharedDocLoginManager, "qrcode_visible",
+                        staticmethod(lambda page: True))
+    sdls.SharedDocLoginManager._open_qrcode_if_needed(_P(), "kdocs")
+    assert clicks == [], "已有二维码时不应再点击(会刷新二维码使已扫的失效)"
+
+
+def test_tencent_never_auto_clicks(monkeypatch):
+    """边界: 腾讯文档默认展示二维码, 不得代点(避免误触其它按钮)。"""
+    clicks = []
+
+    class _P:
+        def click(self, sel, **kw):
+            clicks.append(sel)
+
+    monkeypatch.setattr(sdls.SharedDocLoginManager, "qrcode_visible",
+                        staticmethod(lambda page: False))
+    sdls.SharedDocLoginManager._open_qrcode_if_needed(_P(), "tencent")
+    assert clicks == []
+
+
+def test_verify_rejects_when_qrcode_still_visible(tmp_path, mgr):
+    """🔒 回归: 点「我已扫码完成」时若仍显示二维码 → 校验失败, 不覆盖旧登录态。"""
+    sess = _make_session(tmp_path)
+    sess._page = _FakePage(qrcode=True)  # goto 后仍看得到二维码
+    ok, msg = mgr.verify_logged_in(sess)
+    assert ok is False
+    assert "二维码" in msg

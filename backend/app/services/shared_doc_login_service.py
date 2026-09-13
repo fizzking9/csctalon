@@ -56,14 +56,42 @@ DEFAULT_STATE_FILE = {"tencent": "tencent_doc.json", "kdocs": "kdocs.json"}
 # 平台登录域名关键词(用于判定"是否仍在登录页")
 _LOGIN_URL_HINTS = {
     "tencent": ("docs.qq.com/login", "login", "passport", "oauth"),
-    "kdocs": ("passport", "login", "account.wps", "auth"),
+    "kdocs": ("passport", "singlesso", "login", "account.wps", "auth"),
 }
 
 # 平台会话 cookie 关键词(判定已登录的辅助信号)
+# ⚠️ 2026-09-13 修正: kdocs 原先含 "csrf" —— 实测登录前 cookie 里**就已经有 csrf**
+#   (共 13 个 cookie 即命中) → 页面还停在登录弹窗却判成 authorized。
+#   只保留真正的登录态 cookie 名。
 _SESSION_COOKIE_HINTS = {
     "tencent": ("uid", "uin", "skey", "doc_session", "TOK"),
-    "kdocs": ("wps_sid", "wpsua", "csrf", "sid"),
+    "kdocs": ("wps_sid", "wpsua"),
 }
+
+# 二维码是否已出现(判定"页面渲染完成 + 可扫码")
+# 注意: 不能只找 <img src=*qrcode*>, 因为腾讯/金山都用 canvas 或异步图渲染二维码。
+#
+# ── 登录按钮自动点击(2026-09-13 新增) ──
+# 实测 kdocs: 打开共享链接后弹窗**默认没有二维码**, 只有
+#   `Open the document with WPS` / `Sign in` 两个按钮;
+# 二维码要**点了 Sign in 才出现**(点击后 `qrcode_img_block` 180x180 真实图才加载)。
+# 而前端弹窗只是静态截图, 用户**点不到**那个按钮 → 必须由后端代点, 否则永远扫不到码。
+_KDOCS_SIGNIN_BUTTONS = (
+    ".wlcp-btn:not(.is-highlight)",       # 实测有效: 非高亮那个按钮
+    "button:has-text('Sign in')",
+    "button:has-text('登录')",
+)
+
+# 判定二维码已出现的 JS 表达式(供 wait 与状态探测共用)
+_QRCODE_PRESENT_JS = """() => {
+  for (const s of ['[class*="qrcode"]','[class*="qr-code"]','[class*="qr_code"]','canvas[class*="qr"]']) {
+    for (const el of document.querySelectorAll(s)) {
+      const r = el.getBoundingClientRect();
+      if (r.width >= 80 && r.height >= 80) return true;
+    }
+  }
+  return false;
+}"""
 
 # ── 虚拟显示(Xvfb) ──
 # ⚠️ 2026-09-13 生产故障(工单 #49 验收暴露, 详见 docs/ops/数据采集-运维手册.md §七):
@@ -360,6 +388,12 @@ class SharedDocLoginManager:
             )
             page = ctx.new_page()
             page.goto(doc_url, wait_until="domcontentloaded", timeout=60000)
+            # 关键: 等待登录界面**真正渲染出来**再截图。
+            # ⚠️ 2026-09-13 实测: `domcontentloaded` 在 0.68s 就返回, 而弹窗/SPA 内容要到
+            #   ~3s 才渲染; 旧代码 goto 后立刻截图 → 用户看到的是**纯白空框**(非白像素 0.00%)。
+            page.wait_for_timeout(3500)
+            # kdocs: 弹窗默认只有「Sign in」按钮、没有二维码 → 代为点一次, 让二维码出现
+            self._open_qrcode_if_needed(page, platform)
         except Exception as e:
             try:
                 pw.stop()
@@ -375,6 +409,43 @@ class SharedDocLoginManager:
         logger.info("[shared-doc-login] 会话已启动: %s platform=%s url=%s",
                     sid, platform, doc_url)
         return sess
+
+    @staticmethod
+    def qrcode_visible(page) -> bool:
+        """当前页面是否已出现可扫的二维码(≥80px 的 qrcode 容器)。"""
+        try:
+            return bool(page.evaluate(_QRCODE_PRESENT_JS))
+        except Exception:  # noqa: BLE001  页面已关闭等
+            return False
+
+    @staticmethod
+    def _open_qrcode_if_needed(page, platform: str) -> None:
+        """若无二维码但存在登录入口按钮 → 代为点击, 让二维码出现。
+
+        实测(kdocs, 2026-09-13): 打开共享链接后弹窗只有
+        `Open the document with WPS` / `Sign in`, **没有二维码**;
+        二维码必须点 `Sign in` 才出现。前端弹窗是静态截图, 用户点不到 →
+        不代点的话用户永远只能看到「空框」。
+        只在确实没有二维码时才点(腾讯文档默认就展示二维码, 不会被误触)。
+        """
+        if platform != "kdocs":
+            return  # 当前只有 kdocs 有这一层
+        if SharedDocLoginManager.qrcode_visible(page):
+            return
+        for sel in _KDOCS_SIGNIN_BUTTONS:
+            try:
+                page.click(sel, timeout=2500)
+                # 等二维码就位(点击后异步加载真实二维码图)
+                try:
+                    page.wait_for_function(_QRCODE_PRESENT_JS, timeout=8000)
+                    logger.info("[shared-doc-login] 已自动展开二维码(选择器=%s)", sel)
+                except Exception:  # noqa: BLE001  按钮点了但二维码判定没命中
+                    page.wait_for_timeout(2000)
+                    logger.info("[shared-doc-login] 已点击登录按钮(%s), 二维码判定未命中但继续", sel)
+                return
+            except Exception:  # noqa: BLE001  该选择器不匹配, 试下一个
+                continue
+        logger.info("[shared-doc-login] 未找到登录入口按钮(kdocs 可能改了文案), 保持当前页面")
 
     def get(self, session_id: str) -> LoginSession | None:
         with self._lock:
@@ -412,12 +483,22 @@ class SharedDocLoginManager:
         except Exception:  # noqa: BLE001
             pass
 
-        if not in_login and has_session_cookie:
+        # 辅助信号: 页面是否还显示可扫二维码
+        # ⚠️ 2026-09-13 修正: 旧判据只看「不在登录页 + 有会话 cookie」→ 仍停在登录弹窗时
+        #   也会被判 authorized(实测 kdocs 登录前 cookie 已含 csrf, 且 URL 判定不稳定),
+        #   前端于是显示「已检测到登录」而二维码还挂着, 用户被判态误导。
+        #   现在: **看得到二维码 = 一定还没登录**。
+        qr_visible = self.qrcode_visible(page)
+
+        if qr_visible:
+            # 登录界面仍在 → 等待扫码
+            sess.status = "scanned" if has_session_cookie else "pending"
+        elif not in_login and has_session_cookie:
             sess.status = "authorized"
         elif in_login:
             sess.status = "scanned" if has_session_cookie else "pending"
         else:
-            # 不在登录页但未见会话 cookie —— 不武断判 ready, 交给 confirm 的轻量校验
+            # 不在登录页、也没有二维码、未见会话 cookie —— 不武断判 ready, 交给 confirm 校验
             sess.status = "scanned"
         return sess.status
 
@@ -448,6 +529,8 @@ class SharedDocLoginManager:
         try:
             # 重新导航到文档, 观察最终落点
             page.goto(sess.doc_url, wait_until="domcontentloaded", timeout=45000)
+            # 等渲染完成再判定 URL/二维码, 否则会拿到跳转中的中间态
+            page.wait_for_timeout(3000)
             final_url = (page.url or "").lower()
         except Exception as e:  # noqa: BLE001
             return False, f"校验时打开文档失败: {e}"
@@ -455,6 +538,9 @@ class SharedDocLoginManager:
         hints = _LOGIN_URL_HINTS.get(sess.platform, ())
         if any(h.lower() in final_url for h in hints):
             return False, "未检测到登录态(页面仍停留在登录/授权页), 请完成扫码后重试"
+        # 仍看得见二维码 → 并未登录(用户可能没扫成功就点了确认)
+        if self.qrcode_visible(page):
+            return False, "页面仍显示登录二维码, 未检测到登录态, 请完成扫码后重试"
 
         # cookie 数量作为辅助信号(过少通常意味着未登录)
         try:
