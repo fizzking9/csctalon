@@ -84,7 +84,27 @@
     <!-- 模块1: 核心KPI (紧凑横排)
          ★ #76: 每张卡可点下钻 → 对应分析页(带当前窗口)。
            按规范 §3.5 加 cursor:pointer 与 hover 反馈，并有 title 提示。 -->
+    <!-- ★ #78 接待来源分层（设计说明 Design Rationale）
+         目的: 替运营主管回答「AI 客服接管了多少接待？真人还剩多少工作量？」
+         逻辑: 「接待数/会话数」两张卡下方加一条**堆叠比例条**，按来源配色；
+               卡片副行显示「AI 接管 X%」。AI 卡单独列出，不与真人混排。
+         口径: 来源判据 = operator + description 文本模式（平台无 AI 标志列），
+               详见 app/services/system_accounts.classify_cs_record。
+         取舍: ① 不做「AI 转人工」细分（BMS 与智能客服仍在迭代，字段不稳，做了会返工）；
+               ② 不删 AI 数据 —— 只分层展示，因为「AI 接管率」本身是可控指标；
+               ③ 真人名下的「系统标记」行保留在真人（实测 >50% 与真人操作同行同时刻，
+                  属连带记录；拆出会虚减人工工作量 18%）。
+         工单: #78 / 架构: docs/arch/A-20260913-001-AI接待口径分层.md -->
     <section class="section-card kpi-strip mb-12">
+      <div class="kpi-strip-title">
+        <span>核心指标</span>
+        <!-- ★ #78 数据说明（规范 §二 双强制：① 有 ⓘ 说明 ② 可下钻）
+             必含「取舍」段（界面设计说明规范 §一）。 -->
+        <el-tooltip effect="dark" placement="top" raw-content
+          content="<b>来源</b>：/analytics/today/kpi（接待=cs_records）<br/><b>口径</b>：<br/>· 接待数 = 去重设备 SN（1 台设备多次进线算 1 次）<br/>· 会话数 = 接待记录条数（2026-09-13 起已按业务键去重，见 #77）<br/>· 来源分层 = 按「操作人 + 说明文本」判定：<b>真人</b>（企微/店铺客服，含人工点 AI 助手）· <b>AI 全自动</b>（ai-acc 平台 WeChat 账户，全程无人工）· <b>系统内部</b>（无人工痕迹的标记/执行流水）· <b>客户自助</b>（客户在公众号自行操作）<br/><b>时点</b>：今日视图 60s 自动刷新；历史窗口缓存 24h<br/><b>「空」的含义</b>：分层条不显示 = 该来源本期无记录；四项全空 = 本期无接待数据<br/><b>下钻</b>：点卡片 → 接待分析页（带当前时间窗口）<br/><br/><b>⚠️ 取舍（不做什么及原因）</b><br/>① <b>不做</b>「AI 转人工」细分 —— BMS 与智能客服仍在迭代，字段不稳定，现在做会返工；待平台提供稳定标记列后再加<br/>② <b>不删</b> AI 记录，只分层展示 —— 「AI 接管率」本身是可控指标，删了就看不见<br/>③ 真人客服名下若有「系统标记」行，<b>仍计入真人</b> —— 实测过半与真人操作同秒发生，属连带记录；拆出会虚减人工工作量约 18%<br/>④ <b>不与历史直接比较</b> —— 会话数自 2026-09-13 起才按去重口径，前期数字偏大">
+          <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+        </el-tooltip>
+      </div>
       <div class="kpi-strip-grid">
         <div v-for="c in kpiCards" :key="c.key" class="kpi-strip-item kpi-drillable" :class="c.colorClass"
              :title="`点击查看「${c.label}」的构成明细`"
@@ -96,10 +116,25 @@
               <span class="ksi-value">{{ c.displayValue }}</span>
               <span v-if="c.yoy" class="ksi-yoy" :class="c.yoyClass">{{ c.yoy }}</span>
             </div>
+            <!-- ★ #78 来源堆叠比例条(仅接待数/会话数两张卡) -->
+            <div v-if="c.stack && c.stack.total > 0" class="ksi-stack"
+                 :title="stackTip(c.stack)">
+              <span v-for="seg in c.stack.segs" :key="seg.key"
+                    class="ksi-stack-seg"
+                    :style="{ width: seg.pct + '%', background: seg.color }" />
+            </div>
+            <!-- ★ #78 AI 接管率(可控指标前置) -->
+            <div v-if="c.stack && c.stack.total > 0" class="ksi-sub">
+              <span v-for="seg in c.stack.segs.filter(s => s.value > 0)" :key="seg.key"
+                    class="ksi-sub-item">
+                <i class="ksi-dot" :style="{ background: seg.color }" />{{ seg.short }}{{ seg.pct }}%
+              </span>
+            </div>
           </div>
         </div>
       </div>
     </section>
+
 
     <!-- 模块2: 趋势(日=小时粒度,周=日粒度) -->
     <section class="section-card mb-16">
@@ -728,6 +763,60 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- ★ #78 AI / 系统账户单列
+           设计说明（Design Rationale）:
+             目的: 替运营主管回答「AI 到底干了多少活、顶了几个真人的量」。
+             逻辑: 单独一张小表列出非真人账户（AI 全自动 / 系统内部），
+                   不与真人混排 —— 混排会挤掉真人名次，隐藏则会看不见 AI 规模。
+             口径: 来源判据 = 操作人 + 说明文本（见后端 system_accounts），
+                   这里的「会话数」= 该账户名下的接待记录条数。
+             取舍: ① **不做** AI 转人工细分（平台无稳定标记，做了会返工）；
+                   ② **不给 AI 排名名次** —— 它不是人，排名无意义，
+                      只给绝对量级供「大致评估工作量」；
+                   ③ 空则不渲染本区块（无 AI 数据时不占版面）。
+             工单: #78 / 架构: docs/arch/A-20260913-001-AI接待口径分层.md -->
+      <div v-if="virtualStaffList.length" class="virtual-staff-block">
+        <div class="virtual-staff-title">
+          <span>AI / 系统账户（非真人，不计入人效排名）</span>
+          <el-tooltip effect="dark" placement="top" raw-content
+            content="<b>来源</b>：同上表（/analytics/today/staff）<br/><b>口径</b>：按「操作人 + 说明文本」判定为非真人；会话数 = 该账户名下接待记录条数（已按业务键去重，见 #77）<br/><b>时点</b>：与上方表格同一窗口<br/><b>「空」的含义</b>：本区块不显示 = 本窗口内无非真人账户产生接待<br/><br/><b>⚠️ 取舍</b>：不给名次（AI 不是人，排名无意义）；<b>不做</b>「AI 转人工」细分（平台字段不稳定，待 BMS/智能客服稳定后再精细化）">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </div>
+        <el-table :data="virtualStaffList" size="small" border max-height="200">
+          <el-table-column label="账户" width="130">
+            <template #default="{ row }">
+              <span style="font-weight:500">{{ row.name }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="来源" width="100">
+            <template #default="{ row }">
+              <el-tag size="small" effect="plain"
+                      :style="{ color: sourceKindMeta(row.source_kind).color, borderColor: sourceKindMeta(row.source_kind).color }">
+                {{ sourceKindMeta(row.source_kind).label }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="reception_count" label="会话数(次)" width="100" align="right" sortable>
+            <template #default="{ row }">{{ formatNum(row.reception_count) }}</template>
+          </el-table-column>
+          <el-table-column prop="reception_device_count" label="接待数(个)" width="100" align="right" sortable>
+            <template #default="{ row }">{{ formatNum(row.reception_device_count) }}</template>
+          </el-table-column>
+          <el-table-column label="占全站会话" width="100" align="right">
+            <template #default="{ row }">
+              <!-- 可控指标前置: AI 占比一眼可见 -->
+              <span style="color:#f59e0b;font-weight:600">{{ aiSharePct(row) }}%</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="说明" min-width="180">
+            <template #default>
+              <span class="text-muted" style="font-size:11px">非真人账户，量级供「大致评估 AI 工作量」用</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
     </section>
   </div>
 </template>
@@ -1198,6 +1287,40 @@ const displayDate = computed(() => {
 //   信息不丢且更清楚。
 const pageTitle = '决策分析看板'
 
+// ★ #78 接待来源配色（与后端 SourceKind 枚举 一一对应）
+//   设计说明: 同一套配色贯穿「接待数」「会话数」两张卡与 ⓘ 说明、效率表，
+//   保证「一个来源一个颜色」全站唯一（规范 §五「禁止重复展示」）。
+//   取舍: 不给 AI 用红色 —— AI 不是错误，只是「非人工」，红会误导为异常。
+const SOURCE_KINDS = [
+  { key: 'human',         label: '真人接待',   short: '真人', color: '#2563eb' },
+  { key: 'ai_auto',       label: 'AI全自动',   short: 'AI',   color: '#f59e0b' },
+  { key: 'ai_system',     label: '系统内部',   short: '系统', color: '#94a3b8' },
+  { key: 'customer_self', label: '客户自助',   short: '自助', color: '#10b981' },
+]
+
+/** 由后端 reception.breakdown 构造堆叠段（按 metric 取 sessions 或 devices） */
+function buildStack(breakdown, metric) {
+  if (!breakdown) return null
+  const segs = SOURCE_KINDS.map(k => ({
+    ...k,
+    value: Number(breakdown[k.key]?.[metric] || 0),
+  }))
+  const total = segs.reduce((a, s) => a + s.value, 0)
+  if (!total) return null
+  return {
+    total,
+    metric,
+    segs: segs.map(s => ({ ...s, pct: Math.round(s.value * 1000 / total) / 10 })),
+  }
+}
+
+/** 堆叠条悬浮说明（规范 §二: 每个视觉元素都要说清含义） */
+function stackTip(stack) {
+  if (!stack) return ''
+  const unit = stack.metric === 'sessions' ? '次' : '个'
+  return stack.segs.map(s => `${s.label} ${s.value.toLocaleString()}${unit} (${s.pct}%)`).join('\n')
+}
+
 // 选中的日期/周对应的时间范围 (传给后端 start/end)
 function getRange() {
   if (viewMode.value === 'week') {
@@ -1242,6 +1365,8 @@ const kpiCards = computed(() => {
       displayValue: formatNum(reception.device_count),
       icon: 'Service',
       colorClass: 'kpi-blue',
+      // ★ #78: 按 SN(接待数)口径分层 —— 含 AI 独有的 SN
+      stack: buildStack(reception.breakdown, 'devices'),
       yoy: (reception.device_count_yoy_pct != null && reception.device_count_yoy_pct !== 0)
         ? `${reception.device_count_yoy_pct > 0 ? '↑' : '↓'} ${Math.abs(reception.device_count_yoy_pct).toFixed(1)}%`
         : '',
@@ -1253,6 +1378,8 @@ const kpiCards = computed(() => {
       displayValue: formatNum(reception.value),
       icon: 'ChatDotRound',
       colorClass: 'kpi-green',
+      // ★ #78: 按会话口径分层（含 AI 全自动接待）
+      stack: buildStack(reception.breakdown, 'sessions'),
       yoy: (reception.yoy_pct != null && reception.yoy_pct !== 0)
         ? `${reception.yoy_pct > 0 ? '↑' : '↓'} ${Math.abs(reception.yoy_pct).toFixed(1)}%`
         : '',
@@ -1490,6 +1617,30 @@ const topStaffList = computed(() => {
   items = [...items].sort((a, b) => (Number(b.eff_score) || 0) - (Number(a.eff_score) || 0))
   return items
 })
+
+// ★ #78 AI / 系统账户单列（用户明确：「区分出来，单列也可以」）
+//   设计说明: 此前 `is_virtual` 的账户被 `topStaffList` 直接**过滤丢弃**，
+//   导致 AI 的工作量在生产上完全不可见（只能从「会话数」虚高中间接感知）。
+//   这里改为**单列展示**：AI 仍在参与工作，管理者需要看到它干了多少。
+//   取舍: 不并入真人排名（会挤掉真人），也不隐藏（会看不见 AI 规模），
+//   而是单独一张小表 —— 两者都能看到，互不干扰。
+const virtualStaffList = computed(() => {
+  const items = staffData.value?.data || []
+  return items
+    .filter(s => s.is_virtual)
+    .filter(s => (Number(s.reception_count) || 0) + (Number(s.reception_device_count) || 0) > 0)
+    .sort((a, b) => (Number(b.reception_count) || 0) - (Number(a.reception_count) || 0))
+})
+/** 该账户的来源标签/配色（与 KPI 卡 SOURCE_KINDS 同一套色） */
+function sourceKindMeta(kind) {
+  return SOURCE_KINDS.find(k => k.key === kind) || SOURCE_KINDS[2]
+}
+/** 该 AI/系统账户名下会话数占全站会话数的百分比（可控指标：AI 接管率） */
+function aiSharePct(row) {
+  const total = Number(kpiData.value?.reception?.value || 0)
+  if (!total) return '0.0'
+  return (Number(row.reception_count || 0) * 100 / total).toFixed(1)
+}
 
 // 部门列显示策略:移动端且仅企微时隐藏(表头已筛选); 显示所有人时保留以便区分
 const showDeptColumn = computed(() => !isMobile.value || showAllStaff.value)
@@ -1748,6 +1899,14 @@ onBeforeUnmount(() => {
 
 /* KPI 紧凑横条 */
 .kpi-strip { padding: 8px 12px; }
+.kpi-strip-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #6b7280;
+  margin-bottom: 6px;
+}
 .kpi-strip-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
@@ -1823,6 +1982,50 @@ onBeforeUnmount(() => {
 }
 .yoy-up { color: #16a34a; }
 .yoy-down { color: #dc2626; }
+
+/* ★ #78 接待来源堆叠比例条 + 图例（仅「接待数」「会话数」两张卡）
+   设计说明: 用一条 100% 堆叠细条替代额外图表 —— 卡片高度不增，
+   但一眼可看出「AI 占了多少」。取舍: 不做饼图（8 张卡里塞饼图会挤压信息密度）。 */
+.ksi-stack {
+  display: flex;
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 4px;
+  background: #f0f1f3;
+}
+.ksi-stack-seg { display: block; height: 100%; }
+.ksi-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 10px;
+  color: #6b7280;
+  line-height: 1.3;
+}
+.ksi-sub-item { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.ksi-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+/* ★ #78 AI / 系统账户单列区块 */
+.virtual-staff-block {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed #e5e7eb;
+}
+.virtual-staff-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #6b7280;
+  margin-bottom: 6px;
+}
 
 /* 区块样式 */
 .section-card {

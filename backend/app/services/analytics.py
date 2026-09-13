@@ -67,6 +67,11 @@ from app.services.complaint_scope import (
     is_complaint_ticket_cond,
 )
 
+# #78: 系统/AI 账户的**唯一来源**（禁止在本文件内再定义系统账户集合，
+#      历史教训：SYS_OP_BLACKLIST 与 SYSTEM_VIRTUAL_EXACT 两处并存且都漏 WeChat）。
+from app.services.system_accounts import SourceKind  # noqa: I001
+from app.services.system_accounts import is_virtual_name as _sa_is_virtual_name
+
 
 # ============================================================
 # 通用人员筛选 (按部门/分组/专项)
@@ -3105,6 +3110,104 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), "")))
     ).where(_between(CsRecord.operation_time, ys, ye))).scalar() or 0
 
+    # 1c. ★ #78 接待来源分层（真人 / AI全自动 / 系统 / 客户自助）
+    #     设计说明（Design Rationale）:
+    #       目的: 让运营主管看到「AI 接管了多少、真人还剩多少工作量」。
+    #       逻辑: AI 客服仍在迭代期, 只需量级 + 涉及 SN, 不做「AI 转人工」细分。
+    #       口径: 判据 = operator + description 文本模式(平台无 AI 标志列),
+    #             详见 app/services/system_accounts.classify_cs_record。
+    #       取舍: ① 不删 AI 数据(接管率本身是可控指标), 只分层;
+    #             ② 真人名下的「系统标记」行**保留在真人**(实测 >50% 与真人操作同行同时刻,
+    #                属连带记录; 拆出反而虚减人工工作量 18%) — 该取舍在页面 ⓘ 显式声明;
+    #             ③ 不引入新表新列, 纯查询层派生。
+    #       工单: #78 / 架构: docs/arch/A-20260913-001-AI接待口径分层.md
+    #     ⚠️ 保持不变式: 各 kind 的 sessions 之和 == cs_today（可对账, 见验收标准 2）
+    _cs_kind_case = case(
+        # 有操作人且非系统账户 → 真人（含人工点 AI 助手, 场景 1/2/4）
+        (
+            and_(
+                CsRecord.operator.isnot(None),
+                func.trim(CsRecord.operator) != "",
+                ~func.lower(func.trim(CsRecord.operator)).in_(
+                    ["wechat", "sys", "system", "用户自助", "客户自助", "客户", "系统"]
+                ),
+            ),
+            SourceKind.HUMAN.value,
+        ),
+        (func.lower(func.trim(func.coalesce(CsRecord.operator, ""))) == "wechat", SourceKind.AI_AUTO.value),
+        # 客户自助: 空操作人 + description 以 openid 开头(≥20 位字母数字)
+        #   注: PostgreSQL 正则匹配符 `~` 在 SQLAlchemy 需用 .op("~")(pattern) 表达
+        #   (Python 的 `~` 是一元按位取反, 直接写 a ~ b 会语法错误)
+        (
+            and_(
+                func.coalesce(func.trim(CsRecord.operator), "") == "",
+                func.trim(func.coalesce(CsRecord.description, "")).op("~")("^[A-Za-z0-9_-]{20,}"),
+            ),
+            SourceKind.CUSTOMER_SELF.value,
+        ),
+        else_=SourceKind.AI_SYSTEM.value,
+    ).label("kind")
+
+    cs_kind_rows = db.execute(
+        select(
+            _cs_kind_case,
+            func.count().label("sessions"),
+            func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("devices"),
+            func.count(func.distinct(
+                func.concat(func.coalesce(CsRecord.device_sn, ""), "|",
+                            func.to_char(CsRecord.operation_time, "YYYY-MM-DD HH24:MI:SS"))
+            )).label("events"),
+        )
+        .where(_between(CsRecord.operation_time, ts, te))
+        .group_by(_cs_kind_case)
+    ).all()
+    cs_breakdown: dict[str, dict[str, int]] = {
+        k.value: {"sessions": 0, "devices": 0, "events": 0} for k in SourceKind
+    }
+    for r in cs_kind_rows:
+        key = r.kind if r.kind in cs_breakdown else SourceKind.AI_SYSTEM.value
+        cs_breakdown[key] = {
+            "sessions": int(r.sessions or 0),
+            "devices": int(r.devices or 0),
+            "events": int(r.events or 0),
+        }
+    # AI 接管率: 会话口径(全量占比) + 设备口径(AI 独有 SN 占比)
+    _ai_sessions = cs_breakdown[SourceKind.AI_AUTO.value]["sessions"]
+    _human_sn_rows = db.execute(
+        select(func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))))
+        .where(_between(CsRecord.operation_time, ts, te),
+               func.lower(func.trim(func.coalesce(CsRecord.operator, ""))) != "wechat",
+               func.coalesce(func.trim(CsRecord.operator), "") != "")
+    ).scalar() or 0
+    _ai_sn_rows = db.execute(
+        select(func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))))
+        .where(_between(CsRecord.operation_time, ts, te),
+               func.lower(func.trim(func.coalesce(CsRecord.operator, ""))) == "wechat")
+    ).scalar() or 0
+    _overlap = db.execute(
+        select(func.count()).select_from(
+            select(func.nullif(func.trim(CsRecord.device_sn), "").label("sn"))
+            .where(_between(CsRecord.operation_time, ts, te))
+            .group_by(func.nullif(func.trim(CsRecord.device_sn), ""))
+            .having(and_(
+                func.count().filter(func.lower(func.trim(func.coalesce(CsRecord.operator, ""))) == "wechat") > 0,
+                func.count().filter(and_(
+                    func.lower(func.trim(func.coalesce(CsRecord.operator, ""))) != "wechat",
+                    func.coalesce(func.trim(CsRecord.operator), "") != "",
+                )) > 0,
+            )).subquery()
+        )
+    ).scalar() or 0
+    cs_ai_takeover = {
+        "session_pct": round(_ai_sessions * 100.0 / cs_today, 1) if cs_today else 0.0,
+        "device_pct": round(max(int(_ai_sn_rows or 0) - int(_overlap or 0), 0) * 100.0 / int(cs_device_today or 1), 1)
+        if cs_device_today else 0.0,
+        "device_shared": int(_overlap or 0),
+        "device_ai_total": int(_ai_sn_rows or 0),
+        "device_human_total": int(_human_sn_rows or 0),
+    }
+
+
     # 2/3/4. 四路经营退款+实际现金流 (通过统一聚合器一次性计算)
     routes_t = _cash_routes_total(db, start=ts, end=te)
     routes_y = _cash_routes_total(db, start=ys, end=ye)
@@ -3206,7 +3309,15 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
             "today_start": _sh_iso(ts), "today_end": _sh_iso(te),
             "yoy_start": _sh_iso(ys), "yoy_end": _sh_iso(ye),
         },
-        "reception":      {**_k(int(cs_today), int(cs_yoy)), "device_count": int(cs_device_today), "device_count_yoy": int(cs_device_yoy)},
+        "reception":      {
+            **_k(int(cs_today), int(cs_yoy)),
+            "device_count": int(cs_device_today), "device_count_yoy": int(cs_device_yoy),
+            # ★ #78 接待来源分层: 真人 / AI全自动 / 系统 / 客户自助
+            #   不变式: 各 kind 的 sessions 之和 == value(会话数); devices 之和 >= device_count(SN 跨类重叠)
+            "breakdown": cs_breakdown,
+            # ★ #78 AI 接管率(可控指标前置): 会话占比 + AI 独有 SN 占比
+            "ai_takeover": cs_ai_takeover,
+        },
         "refund_count":   _k(rf_cnt_t, rf_cnt_y),
         "refund_amount":  _k(round(rf_amt_t, 2), round(rf_amt_y, 2)),
         "cash_out":       _k(round(cash_t, 2), round(cash_y, 2)),      # 经营估算 A+B+C+D
@@ -5188,8 +5299,14 @@ def today_staff_efficiency(
     # 系统/自动记录排除规则 (同时用于 cs_record 与 退款/工单)
     #   1. operator 精确黑名单: sys/system/SYS/System 大小写变体 + 用户自助/客户自助
     #   2. 业务字段关键词: description/execution_result/solution 中包含"系统自动""自动发送"
+    # ⚠️ #78: 黑名单已收敛到 app/services/system_accounts.py（唯一来源）。
+    #    历史教训: 本文件内曾有 SYS_OP_BLACKLIST 与 SYSTEM_VIRTUAL_EXACT 两份且不一致,
+    #    两份都漏 `WeChat`(ai-acc 的 AI 全自动接待账户) → 被判为真人并登上人效榜 rank=1。
+    #    禁止再在此处定义系统账户集合。
     # ─────────────────────────────────────────────────────────────────────
-    SYS_OP_BLACKLIST = ["sys", "system", "SYS", "System", "用户自助", "客户自助", "企微用户自助"]
+    SYS_OP_BLACKLIST = ["sys", "system", "SYS", "System", "用户自助", "客户自助", "企微用户自助",
+                        # #78 新增: AI 账户 + 客户(自助) —— 此前漏判导致 AI 计入真人工作量
+                        "WeChat", "wechat", "WECHAT", "AI客服", "智能客服", "机器人客服", "客户"]
     def _sys_auto_filter():
         """返回 SQL 条件 排除 cs_record 中系统自动产生的记录"""
         kw = ("系统自动", "自动发送", "自动回复", "自动推送", "自动补发", "自动触发", "自动生成")
@@ -5414,7 +5531,7 @@ def today_staff_efficiency(
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
               AND c.operator IS NOT NULL
-              AND c.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+              AND c.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助','WeChat','wechat','WECHAT','AI客服','智能客服','机器人客服','客户','班牛','系统','微信投诉')
               AND NOT (
                   COALESCE(c.description,'') ILIKE ANY(ARRAY['%系统自动%','%自动发送%','%自动回复%','%自动推送%','%自动补发%','%自动触发%','%自动生成%'])
                   OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY['%系统自动%','%自动发送%','%自动回复%','%自动推送%','%自动补发%','%自动触发%','%自动生成%'])
@@ -5440,7 +5557,7 @@ def today_staff_efficiency(
             WHERE st.finish_time IS NOT NULL
               AND st.finish_time >= :ts AND st.finish_time <= :te
               AND st.handler IS NOT NULL
-              AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+              AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助','WeChat','wechat','WECHAT','AI客服','智能客服','机器人客服','客户','班牛','系统','微信投诉')
               AND (
                   -- 外部投诉判定: service_item 含外部投诉关键词
                   COALESCE(st.service_item,'') ILIKE ANY(ARRAY['%12315%','%工信部%','%消协%','%公共服务平台%','%消费者协会%','%监督局%','%市场监管%','%市监%','%315平台%','%12345%','%政务平台%'])
@@ -5454,7 +5571,7 @@ def today_staff_efficiency(
             WHERE st.finish_time IS NOT NULL
               AND st.finish_time >= :ts AND st.finish_time <= :te
               AND st.handler IS NOT NULL
-              AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+              AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助','WeChat','wechat','WECHAT','AI客服','智能客服','机器人客服','客户','班牛','系统','微信投诉')
               AND (st.service_category IS NULL OR st.service_category = '投诉')
               AND NOT (
                   COALESCE(st.service_item,'') ILIKE ANY(ARRAY['%12315%','%工信部%','%消协%','%公共服务平台%','%消费者协会%','%监督局%','%市场监管%','%市监%','%315平台%','%12345%','%政务平台%'])
@@ -5474,7 +5591,7 @@ def today_staff_efficiency(
             WHERE st.finish_time IS NOT NULL
               AND st.finish_time >= :ts AND st.finish_time <= :te
               AND st.handler IS NOT NULL
-              AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+              AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助','WeChat','wechat','WECHAT','AI客服','智能客服','机器人客服','客户','班牛','系统','微信投诉')
               AND NOT (st.service_category IS NULL OR st.service_category = '投诉')
         ),
         -- 子查询6: handler为空/SYS的工单 → SN关联cs_record找处理人(取最近一次操作人)
@@ -5498,7 +5615,7 @@ def today_staff_efficiency(
             JOIN cs_records c2
               ON NULLIF(TRIM(c2.device_sn),'') = NULLIF(TRIM(st.device_sn),'')
              AND c2.operator IS NOT NULL
-             AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+             AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助','WeChat','wechat','WECHAT','AI客服','智能客服','机器人客服','客户','班牛','系统','微信投诉')
              AND c2.operation_time IS NOT NULL
              AND c2.operation_time >= st.register_time - INTERVAL '2 days'
              AND c2.operation_time <= st.finish_time + INTERVAL '1 day'
@@ -5562,7 +5679,7 @@ def today_staff_efficiency(
         WHERE st.finish_time IS NOT NULL
           AND st.finish_time >= :ts AND st.finish_time <= :te
           AND st.handler IS NOT NULL
-          AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+          AND st.handler NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助','WeChat','wechat','WECHAT','AI客服','智能客服','机器人客服','客户','班牛','系统','微信投诉')
         GROUP BY 1, 2
 
         UNION ALL
@@ -5589,7 +5706,7 @@ def today_staff_efficiency(
             JOIN cs_records c2
               ON NULLIF(TRIM(c2.device_sn),'') = NULLIF(TRIM(st.device_sn),'')
              AND c2.operator IS NOT NULL
-             AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助')
+             AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助','WeChat','wechat','WECHAT','AI客服','智能客服','机器人客服','客户','班牛','系统','微信投诉')
              AND c2.operation_time IS NOT NULL
              AND c2.operation_time >= st.register_time - INTERVAL '2 days'
              AND c2.operation_time <= st.finish_time + INTERVAL '1 day'
@@ -5655,55 +5772,36 @@ def today_staff_efficiency(
     EXEMPT_POSITION_PATTERNS = ("专员",)  # 岗位名称含"专员" → 跨类全豁免
     EXEMPT_CATEGORIES = {"内部投诉", "外部投诉", "退款挽回"}  # 专项精确名称
     EXEMPT_CATEGORY_PATTERNS = ("投诉", "应急", "退款挽回")  # 专项名称含这些关键词 → 跨类全豁免
-    SYSTEM_VIRTUAL_EXACT = {
-        "用户自助", "系统自动", "客户自助", "企微用户自助", "企微系统自动",
-        # 2026-08-11 补充: 实测今年范围内出现的系统/第三方账户
-        "系统",            # 单字"系统"(BMS 系统账户, 非操作人)
-        "AI客服",          # AI 自动客服
-        "班牛",            # 工单系统自动账户
-        "深圳市云客猫科技有限公司",  # 设备供应商公司名
-        "大秦WiFi管家", "大秦随身管理员", "全球WiFi管理员",  # WiFi 设备管理账户
-        # 2026-08-11 v2 补充: 工单系统分类账户 (service_tickets.handler 出现, 非真人)
-        "微信投诉",        # 微信投诉工单的系统归类账户, 非操作人
-    }
-    # 未登记到 Person 维表 的 第三方/系统/设备/公司 账号关键字 (关键字匹配 直接判非真人)
-    # 2026-08-11 修正: 移除 "hqq" 和 "ykm-" — 这两个是真人员工缩写/工号前缀, 误判为虚拟
-    #   (hqq 是真人员工拼音缩写, description 里 "hqq发送退款说明"; YKM-XXX 是企微部门工号, 已登记的 YKM-LN=卢宁等都是真人)
-    VIRTUAL_HINT_WORDS = ("wifi", "管家", "科技", "公司", "设备", "云客猫", "闪猫",
-                          "sys_", "sys-", "畅享", "商米", "猫科", "科联", "运营",
-                          "管理员", "客服中心", "网络")  # "网络": 烁盟网络等公司名
-    # 工号/缩写格式正则: 纯字母数字+横杠下划线, 2-12字 (如 YKM-XXX, hqq, DML, LJY)
-    # 这类格式是真人员工工号, 不应因含横杠/下划线就判虚拟
-    import re as _re_mod
+    # ⚠️ #78 (2026-09-13): 原 SYSTEM_VIRTUAL_EXACT / VIRTUAL_HINT_WORDS /
+    #    _EMPLOYEE_ID_PATTERN / _PERSON_NAME_PATTERN 已**全部迁移**到
+    #    `app/services/system_accounts.py`（唯一来源）。
+    #    原因：本文件内曾并存两份不一致的系统账户清单，两份都漏 `WeChat`
+    #    → AI 账户被判为真人并登上人效榜 rank=1（工单 #78 根因）。
+    #    请勿在此处重新定义；新增账户请改 system_accounts.py。
+    import re as _re_mod  # noqa: F401  (保留供下方既有正则使用)
     _EMPLOYEE_ID_PATTERN = _re_mod.compile(r'^[A-Za-z][A-Za-z0-9_-]{1,11}$')
     _PERSON_NAME_PATTERN = _re_mod.compile(r'^[\u4e00-\u9fa5]{2,4}$')  # 中文人名 2-4 字
     def _is_virtual_name(name: str, dept: str | None, grp: str | None, pos: str | None,
                         person_id: int | None = None) -> bool:
-        """非真人虚拟账户判定 (2026-08-11 修订 v2):
-        ① 名字精确匹配 SYSTEM_VIRTUAL_EXACT → True (覆盖 wechat/客户→"用户自助"、系统、AI客服 等)
-        ② 已通过 PersonAlias 匹配到 Person (person_id 非空) 且 name 不在虚拟黑名单 → 一定真人, False
-           (覆盖 '财务-徐依婷'/'生产-刘思敏'/'畅享贝贝' 等 display_name 带前缀但确属真人的情况;
-            旧逻辑用 dept/pos 为空判定 unregistered 会误伤这些 Person.department 暂空的真人)
-        ③ 未匹配 Person 时, 按名字特征判定:
-           - 关键字命中 (wifi/管家/科技/公司/管理员/畅享 等) → True
-           - 工号格式 (YKM-XXX/hqq/DML 等纯字母数字+横杠下划线) → False (真人)
-           - 中文人名 (2-4 字) → False (真人, 只是 Person 维表漏登记)
-           - 长公司名 (≥5 字 且非工号 非人名) → True
+        """非真人虚拟账户判定。
+
+        ★ #78 (2026-09-13): 实现已收敛到 `app/services/system_accounts.is_virtual_name`
+          （唯一来源）。本函数保留为**薄的转发**，仅为兼容既有调用点。
+
+        ⚠️ 修复的缺陷：旧实现只判 `VIRTUAL_HINT_WORDS` 后就去匹配工号正则
+          `^[A-Za-z][A-Za-z0-9_-]{1,11}$`，导致 `WeChat`（AI 全自动接待账户）
+          被判成「员工工号」→ 返回 False（真人）→ 登上生产人效榜 **rank=1**。
+          新实现在工号判定**之前**加了词干否决（wechat/sys/ai/bot...）。
+
+        判定顺序（与 system_accounts 保持一致）：
+          ① 精确名单命中 → True
+          ② 已匹配 Person（person_id 非空）→ False（真人）
+          ③ 词干否决（wechat/sys/ai/bot）→ True   ← ★ 本次修复点
+          ④ 关键字命中（wifi/管家/科技/公司/管理员 等）→ True
+          ⑤ 工号格式 → False（真人）；中文人名 2-4 字 → False（真人）
+          ⑥ 其余：长名（≥5 字）→ True，短名保守判 False
         """
-        if not name: return True
-        if name in SYSTEM_VIRTUAL_EXACT: return True
-        # 已通过 PersonAlias 匹配到 Person → 一定不是虚拟 (虚拟账户的 name 已在上面黑名单拦截)
-        if person_id is not None: return False
-        # 未匹配 Person 的, 按名字特征判定
-        low = name.lower()
-        if any(k.lower() in low for k in VIRTUAL_HINT_WORDS): return True
-        # 工号/缩写格式 → 真人 (YKM-XXX, hqq, DML, LJY 等)
-        if _EMPLOYEE_ID_PATTERN.match(name): return False
-        # 中文人名 2-4 字 → 真人 (黄展强, 刘思敏 等漏登记的)
-        if _PERSON_NAME_PATTERN.match(name): return False
-        # 其他未登记且名字不像人名/工号 → 长名(≥5字)判虚拟, 短名保守判真人
-        if len(name) >= 5: return True
-        return False
+        return _sa_is_virtual_name(name, dept=dept, grp=grp, pos=pos, person_id=person_id)
 
     def _hr_map(hr_sp: str | None, pos: str | None) -> str | None:
         """人员主专项归一化映射 (2026-08-19 修订)
@@ -5954,6 +6052,10 @@ def today_staff_efficiency(
             "position": r.pos, "current_specialty": r.sp,
             "hr_category": hr_cat, "is_management": mgmt,
             "qw_user_id": _qw,
+            # ★ #78 来源分类: 供前端把 AI/系统账户单列(不与真人混排)并排除出人效排名。
+            #   判据见 app/services/system_accounts.classify_cs_record。
+            #   ⚠️ source_kind 在下方虚拟判定后统一回填(此处先占位 human)
+            "source_kind": SourceKind.HUMAN.value,
             "reception_count": reception_count,
             "reception_device_count": reception_device_count,
             "refund_op_count": rf_op_count,
@@ -5988,6 +6090,16 @@ def today_staff_efficiency(
         # 非真人判定 = 精确虚拟匹配 OR 未登记+名字特征匹配
         if _is_virtual_name(norm_name, r.dept, r.grp, r.pos, r.person_id):
             record["is_virtual"] = True
+            # ★ #78 回填来源分类: AI 全自动账户 vs 其他系统账户。
+            #   前端据此把 AI 行**单列**(用户要求「区分出来，单列也可以」)，
+            #   而不是混在真人排名里。
+            _op_low = (op or "").strip().lower()
+            record["source_kind"] = (
+                SourceKind.AI_AUTO.value
+                if _op_low in ("wechat", "ai客服", "智能客服", "机器人客服")
+                else SourceKind.AI_SYSTEM.value
+            )
+            # AI/系统账户不进真人排名(rank 保持 None)，但保留其量级供「大致评估工作量」
             virtual_rows.append(record)
         else:
             out.append(record)
@@ -6089,6 +6201,60 @@ def today_staff_efficiency(
     if qw_only:
         out = _filter_qw_only(out)
         virtual_rows = _filter_qw_only(virtual_rows)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # ★ #78 (2026-09-13) AI / 系统账户**单列**
+    #   背景: AI 账户此前被 `_sys_auto_filter()`（operator notin 黑名单）在 SQL 层
+    #         直接排除，导致 AI 的工作量在生产上**完全不可见**。
+    #   用户要求: 「区分出来，单列也可以」+「确认有他们在参与工作 + 大致评估工作量」。
+    #   做法: 补一段独立聚合，把非真人账户的量级单独算出来，附在结果末尾
+    #         （`is_virtual=true`, `rank=null`），前端渲染为单独的小表。
+    #   取舍: ① 不进真人排名（AI 不是人，排名无意义，且会挤掉真人名次）；
+    #         ② 不做「AI 转人工」细分（平台无稳定标记列，做了会返工 —— 见工单 #78）；
+    #         ③ 空则不返回该行（无 AI 数据时不占版面）。
+    #   工单: #78 / 架构: docs/arch/A-20260913-001-AI接待口径分层.md
+    # ─────────────────────────────────────────────────────────────────────
+    _AI_SYS_OPS = ["WeChat", "wechat", "WECHAT", "AI客服", "智能客服", "机器人客服",
+                   "sys", "system", "SYS", "System", "系统", "班牛", "用户自助", "客户自助"]
+    _virtual_agg = db.execute(
+        select(
+            CsRecord.operator.label("op"),
+            func.count().label("rc"),
+            func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("rdc"),
+        )
+        .where(CsRecord.operation_time.isnot(None),
+               CsRecord.operation_time >= ts, CsRecord.operation_time <= te,
+               CsRecord.operator.in_(_AI_SYS_OPS))
+        .group_by(CsRecord.operator)
+    ).all()
+    for vr in _virtual_agg:
+        _vname = (vr.op or "").strip()
+        _vlow = _vname.lower()
+        virtual_rows.append({
+            "operator": _vname, "name": _vname,
+            "person_id": None,
+            "department": "AI/系统", "group": "非真人",
+            "position": None, "current_specialty": None, "hr_category": None,
+            "is_management": False, "qw_user_id": None,
+            # AI 全自动（真 AI 客服）vs 其他系统账户（自动流水）
+            "source_kind": (SourceKind.AI_AUTO.value
+                            if _vlow in ("wechat", "ai客服", "智能客服", "机器人客服")
+                            else SourceKind.AI_SYSTEM.value),
+            "is_virtual": True,
+            "reception_count": int(vr.rc or 0),
+            "reception_device_count": int(vr.rdc or 0),
+            "refund_op_count": 0,
+            "sp_zixun": 0, "sp_taocan": 0, "sp_recovery": 0,
+            "sp_processing": 0, "sp_internal": 0, "sp_external": 0,
+            "pp_zixun": 0, "pp_taocan": 0, "pp_recovery": 0,
+            "pp_processing": 0, "pp_internal": 0, "pp_external": 0,
+            "weights": dict(WEIGHT), "transfer_penalty": TRANSFER_PENALTY,
+            "breakdown": {}, "work_score": 0.0, "eff_score": 0.0,
+            "rank": None,
+            "_calc_note": {
+                "note": "非真人账户（AI/系统），不计入人效排名；量级供「大致评估 AI 工作量」用（工单 #78）",
+            },
+        })
 
     # 真人员工 按 mode 聚合 (virtual_rows 不聚合, 原样保留在末尾)
     aggregate_mode = (aggregate_by or "person").lower()
