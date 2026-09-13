@@ -144,6 +144,25 @@ def shared_doc_states(_: AdminUser):
     })
 
 
+@router.get("/cli-fallback", response_model=R, summary="无显示服务时的降级登录命令(唯一真身)")
+def shared_doc_cli_fallback(_: AdminUser):
+    """返回「本机扫码 + 上传登录态」两段式命令, 供前端「命令行」按钮复制。
+
+    单一事实来源理由(2026-09-13): 该命令原先由前端硬编码(`cd /path/to/backend && ...`),
+    与后端 `cli_fallback_command()` 各写一份 → 后端修了前端还是旧的(且旧文案指向生产容器
+    里根本不存在的 `scripts/` + `.venv`)。改为接口下发, 前端只负责复制。
+    """
+    from app.services import shared_doc_login_service as sdls
+
+    return R(data={
+        "commands": {
+            platform: sdls.login_manager.cli_fallback_command(platform, "<文档地址>")
+            for platform in sdls.DEFAULT_STATE_FILE
+        },
+        "note": "本机(macOS 有 GUI)扫码生成登录态后上传至宿主机; 详见 docs/ops/数据采集-运维手册.md",
+    })
+
+
 @router.post("/{source_id}/login/start", response_model=R, summary="启动页面内登录会话(扫码)")
 def shared_doc_login_start(source_id: int, db: DBSession, _: AdminUser):
     """起有头浏览器打开目标文档 → 截图登录页/二维码 → 返回会话。
@@ -171,11 +190,14 @@ def shared_doc_login_start(source_id: int, db: DBSession, _: AdminUser):
             source_id=source_id,
         )
     except sdls.DisplayUnavailableError:
-        # 降级: 给出可执行的 CLI 命令, 不抛 500
-        cmd = sdls.login_manager.cli_fallback_command(row.platform, row.doc_url)
+        # 降级: 不再把长命令塞进 toast(多行在消息条里没法看/没法复制) → 指向「命令行」按钮,
+        # 由 GET /cli-fallback 下发唯一真身命令。
         raise HTTPException(
             status_code=501,
-            detail=f"服务器未安装虚拟显示服务(Xvfb), 无法在容器内启动浏览器。请用命令行登录: {cmd}",
+            detail=(
+                "服务器无法提供虚拟显示服务(Xvfb 未安装或拉起失败), 无法在容器内启动浏览器。"
+                "请点击「命令行」按钮获取本机扫码 + 上传登录态的步骤。"
+            ),
         ) from None
     except RuntimeError as e:
         # 同平台已有活跃会话 → 409; 浏览器启动失败 → 502

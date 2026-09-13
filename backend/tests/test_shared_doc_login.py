@@ -126,38 +126,147 @@ def _make_session(tmp_path, platform="tencent", cookies=None, url="https://docs.
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 显示环境探测
+# 显示环境探测 —— 2026-09-13 生产故障回归(工单 #49)
+#   旧判据 `$DISPLAY 存在 or which(xvfb-run)` 只探**安装态**:
+#   容器装了 xvfb 包但**没进程启动 Xvfb** → 判 True → 501 降级成了死代码,
+#   用户实际收到 502 + Playwright 原始日志("Missing X server or $DISPLAY")。
 # ─────────────────────────────────────────────────────────────────────
 def test_display_unavailable_raises(monkeypatch, tmp_path, mgr):
-    """边界: 无 DISPLAY 且无 xvfb-run → DisplayUnavailableError(路由层转 501)。"""
+    """边界: 无 X socket 且无法拉起 Xvfb → DisplayUnavailableError(路由层转 501)。"""
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.setattr(sdls.shutil, "which", lambda _: None)
     with pytest.raises(DisplayUnavailableError):
         mgr.start("tencent", "https://docs.qq.com/sheet/x", tmp_path / "s.json")
 
 
-def test_display_available_with_display_env(monkeypatch, tmp_path, mgr):
-    """正向: 有 DISPLAY 时探测通过(不再走 501 分支)。
+def test_which_xvfb_run_alone_is_not_enough(monkeypatch, mgr):
+    """🔒 生产故障回归: 「装了包但没起进程」不得被判为可用。
+
+    这正是 2026-09-13 的线上表现: `which(xvfb-run)` 有值 → 旧判据返回 True →
+    直接 launch(headless=False) 炸。修复后必须继续探到「socket 起不来」→ False。
+    """
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(sdls.shutil, "which", lambda _: "/usr/bin/xvfb-run")
+    # 拉起 Xvfb 失败(模拟容器内无进程/无法启动)
+    monkeypatch.setattr(sdls, "_start_xvfb_and_wait", lambda _d: False)
+
+    assert mgr.check_display_available() is True   # 只读探测: 仍提示「可自愈」
+    assert mgr.ensure_display_available() is False  # 但真正要 launch 时: 自愈失败 → 走 501
+
+
+def test_ensure_display_self_heals_when_socket_missing(monkeypatch, tmp_path, mgr):
+    """正向: socket 不存在但能拉起 Xvfb → 自愈成功并注入 DISPLAY。"""
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(sdls.shutil, "which", lambda _: "/usr/bin/xvfb-run")
+    monkeypatch.setattr(sdls, "_start_xvfb_and_wait", lambda _d: True)
+    try:
+        assert mgr.ensure_display_available() is True
+        assert sdls.os.environ.get("DISPLAY") == sdls.XVFB_DISPLAY
+    finally:
+        # 服务内部直接写 os.environ, monkeypatch 跟踪不到 → 显式清理, 防污染其它用例
+        sdls.os.environ.pop("DISPLAY", None)
+
+
+def test_ensure_display_reuses_existing_display(monkeypatch, mgr):
+    """正向: DISPLAY 已指向活着的 socket → 直接复用, 不重复拉起 Xvfb。"""
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(sdls, "_socket_alive", lambda _d: True)
+
+    def _should_not_start(_d):
+        raise AssertionError("已有可用 socket 时不应再拉起 Xvfb")
+
+    monkeypatch.setattr(sdls, "_start_xvfb_and_wait", _should_not_start)
+    assert mgr.ensure_display_available() is True
+
+
+def test_remote_display_trusted_without_socket(monkeypatch, mgr):
+    """边界: 远程 DISPLAY(带主机名)走 TCP, 本地无 socket 可探 → 信任它(不误判 501)。"""
+    monkeypatch.setenv("DISPLAY", "10.0.0.5:0")
+    monkeypatch.setattr(sdls, "_socket_alive", lambda _d: False)
+    assert mgr.ensure_display_available() is True
+
+
+def test_stale_display_env_without_socket_is_not_available(monkeypatch, mgr):
+    """🔒 回归: DISPLAY 有值但 socket 已死(残留/陈旧环境变量) → 不得判为可用。"""
+    monkeypatch.setenv("DISPLAY", ":77")
+    monkeypatch.setattr(sdls, "_socket_alive", lambda _d: False)
+    monkeypatch.setattr(sdls, "_start_xvfb_and_wait", lambda _d: False)
+    assert mgr.ensure_display_available() is False
+
+
+def test_start_self_heals_before_launch(monkeypatch, tmp_path, mgr):
+    """正向: start() 在 launch 前会走自愈(ensure), 不是只读探测(check)。
+
+    通过记录调用顺序验证: 若只调 check 不调 ensure, 生产会再次落到 502。
+    """
+    monkeypatch.delenv("DISPLAY", raising=False)
+    called = {"ensure": 0}
+
+    def _fake_ensure():
+        called["ensure"] += 1
+        return False  # 直接返回不可用, 避免真起浏览器
+
+    monkeypatch.setattr(mgr, "ensure_display_available", staticmethod(_fake_ensure))
+
+    with pytest.raises(DisplayUnavailableError):
+        mgr.start("tencent", "https://docs.qq.com/sheet/x", tmp_path / "s.json")
+    assert called["ensure"] == 1
+
+
+def test_cli_fallback_command_is_two_stage_and_container_safe(mgr):
+    """🔒 回归: 降级命令不得再指向生产容器里不存在的 scripts/ 与 .venv 直接执行路径。
+
+    旧文案 `cd /path/to/backend && ./.venv/bin/python ../scripts/...` 在生产容器里跑不通
+    (容器无 scripts/ 无 .venv), 属假降级路径。现要求两段式: 本机扫码 → scp 上传。
+    """
+    cmd = mgr.cli_fallback_command("tencent", "https://docs.qq.com/sheet/AAA")
+    assert "tencent_doc_login.py" in cmd
+    assert "https://docs.qq.com/sheet/AAA" in cmd
+    # 必须含上传段(证明是两段式而非旧的一行假命令)
+    assert "scp" in cmd
+    assert "tencent_doc.json" in cmd
+    assert "/opt/csctalon/browser_states/" in cmd
+    # 不得再出现不可执行的空壳路径
+    assert "/path/to/backend" not in cmd
+
+
+def test_cli_fallback_command_kdocs(mgr):
+    """正向: 金山平台降级命令指向 kdocs 脚本与 kdocs.json。"""
+    cmd = mgr.cli_fallback_command("kdocs", "https://www.kdocs.cn/l/BBB")
+    assert "kdocs_login.py" in cmd
+    assert "kdocs.json" in cmd
+
+
+def test_cli_fallback_endpoint_returns_both_platforms(admin_client):
+    """正向: /cli-fallback 下发两平台命令(单一事实来源, 前端不再硬编码)。"""
+    r = admin_client.get("/api/v1/sync/shared-docs/cli-fallback")
+    assert r.status_code == 200
+    cmds = r.json()["data"]["commands"]
+    assert set(cmds) == {"tencent", "kdocs"}
+    assert "scp" in cmds["tencent"]
+
+
+def test_display_available_with_display_env(monkeypatch, mgr):
+    """正向: DISPLAY 指向活着的 socket 时探测通过(不再走 501 分支)。
 
     之后浏览器启动会失败(测试环境无 chromium), 但那属 502 分支 —— 与本节断言无关。
     """
     monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(sdls, "_socket_alive", lambda _d: True)
     assert mgr.check_display_available() is True
 
 
-def test_cli_fallback_command_contains_script_and_url(mgr):
-    """正向: 降级命令含正确脚本名与文档地址。"""
-    cmd = mgr.cli_fallback_command("tencent", "https://docs.qq.com/sheet/AAA")
-    assert "tencent_doc_login.py" in cmd
-    assert "https://docs.qq.com/sheet/AAA" in cmd
-    cmd2 = mgr.cli_fallback_command("kdocs", "https://www.kdocs.cn/l/BBB")
-    assert "kdocs_login.py" in cmd2
-
 
 def test_login_start_returns_501_when_no_display(admin_client, db, monkeypatch):
-    """边界(HTTP): 无显示服务 → 501 且 detail 含可执行命令(不是 500)。"""
+    """边界(HTTP): 无显示服务 → 501 且指向「命令行」按钮(不是 500)。
+
+    ⚠️ 2026-09-13 修正: 旧测试 monkeypatch 掉 `which` 构造了生产**不存在**的状态,
+    导致 501 分支长期是死代码却测试全绿。现在按真实生产形态构造:
+    「装了 xvfb-run 但 Xvfb 起不来」→ 必须 501, 而不是落到 502。
+    """
     monkeypatch.delenv("DISPLAY", raising=False)
-    monkeypatch.setattr(sdls.shutil, "which", lambda _: None)
+    monkeypatch.setattr(sdls.shutil, "which", lambda _: "/usr/bin/xvfb-run")  # 包已装
+    monkeypatch.setattr(sdls, "_start_xvfb_and_wait", lambda _d: False)       # 但起不来
 
     from app.services import shared_doc_sync_service as sdss
     row = sdss.save_doc_source(db, {
@@ -167,7 +276,8 @@ def test_login_start_returns_501_when_no_display(admin_client, db, monkeypatch):
 
     r = admin_client.post(f"/api/v1/sync/shared-docs/{row.id}/login/start")
     assert r.status_code == 501
-    assert "tencent_doc_login.py" in r.json()["detail"]
+    # 不再把长命令塞进 detail(多行在消息条里无法阅读/复制) → 指向「命令行」按钮
+    assert "命令行" in r.json()["detail"]
     db.delete(row)
     db.commit()
 
@@ -175,6 +285,7 @@ def test_login_start_returns_501_when_no_display(admin_client, db, monkeypatch):
 def test_login_start_404_for_unknown_source(admin_client, monkeypatch):
     """边界: 采集源不存在 → 404。"""
     monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(sdls, "_socket_alive", lambda _d: True)
     r = admin_client.post("/api/v1/sync/shared-docs/999999/login/start")
     assert r.status_code == 404
 

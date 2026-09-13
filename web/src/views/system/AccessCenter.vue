@@ -1,3 +1,25 @@
+<!--
+  ┌──────────────────────────── 设计说明（Design Rationale） ────────────────────────────┐
+  │ 范围：本页 Tab1「登录态」区块（2026-09-13 故障修复时补齐说明；其它 Tab 为存量未改造）。 │
+  │ 目的：运维/管理员在**采集取不到数据**时，5 分钟内回答「是登录态失效还是显示服务坏了」。│
+  │       使用频率：登录态过期时（约每周 1 次）或采集报错时。                              │
+  │ 逻辑：① 先给「平台 × 登录态文件年龄」总表 —— 一眼判断要不要重登；                      │
+  │       ② 再给「采集源 × 操作」表 —— 表上直接发起扫码，不跳页（原先是唯一断点：          │
+  │          提示「需重新扫码」却没有扫码入口，只能 SSH 上服务器跑脚本）；                  │
+  │       ③ 显示服务可用性做成**警示条**而非静默开关：它不是登录态问题，是部署问题，       │
+  │          必须让人看见「这条链路现在根本起不来浏览器」。                                │
+  │ 口径：登录态健康度 = BROWSER_STATE_DIR 下 state 文件 mtime，超 7 天仅**提示**不阻断    │
+  │       （各平台 token 实际有效期不同，无法准确判定）。登录态文件路径口径见            │
+  │       docs/arch/A-20260910-001-共享文档页面内登录态管理.md §三；                     │
+  │       显示服务口径：$DISPLAY 的 X socket 是否真在跑 + 能否按需拉起 Xvfb。              │
+  │ 取舍：❌ 不做「一键重登全部平台」—— 同平台并发登录会互相覆盖 state，必须人工逐个扫；    │
+  │         ❌ 不展示登录态文件内容/绝对路径（等同账号凭据，只回 cookie 数量）；            │
+  │         ❌ 不在 GET /states 时就拉起 Xvfb —— 一个查询接口不该有起 daemon 的副作用，     │
+  │            只在真正点「扫码登录」时才自愈拉起（接口返回「可自愈」而非「已就绪」）。      │
+  │ 工单：#49（本区块修复）· 设计：docs/arch/A-20260910-001-共享文档页面内登录态管理.md §四 │
+  │       运维：docs/ops/数据采集-运维手册.md §八                                          │
+  └────────────────────────────────────────────────────────────────────────────────────┘
+-->
 <template>
   <div class="access-center">
     <div class="flex-between mb-16">
@@ -17,10 +39,38 @@
           :closable="false"
           show-icon
           class="mb-16"
-          title="服务器未安装虚拟显示服务(Xvfb)：无法在页面内启动扫码登录，请用命令行登录（下方各源「命令行」按钮可复制命令）。"
-        />
+          title="服务器缺少虚拟显示服务：本容器未安装 Xvfb，无法在页面内启动扫码登录。"
+        >
+          <template #default>
+            请用命令行登录（下方各源「命令行」按钮可复制完整步骤）。
+            数据采集本身不受影响，只是无法在页面内扫码。
+          </template>
+        </el-alert>
         <el-card shadow="never">
-          <template #header><span>采集源登录态健康度</span></template>
+          <template #header>
+            <div class="card-header">
+              <span>采集源登录态健康度</span>
+              <!-- 页面层设计说明(第三层落地): 说明「看什么 + 不做什么」 -->
+              <el-popover placement="bottom-end" :width="420" trigger="click">
+                <template #reference>
+                  <el-icon class="info-icon" title="设计说明"><InfoFilled /></el-icon>
+                </template>
+                <div class="rationale">
+                  <p><b>替谁：</b>运维 / 管理员。判断「采集取不到数是登录态过期，还是服务器显示服务坏了」。</p>
+                  <p><b>怎么判：</b>登录态超 7 天仅提示不阻断（各平台 token 有效期不同，判不准）；关键词是
+                    <b>文件 mtime</b>，不是「已登录/未登录」的断言。</p>
+                  <p><b>取舍（不做）：</b></p>
+                  <ul>
+                    <li>不做「一键重登全部平台」—— 同平台并发登录会互相覆盖登录态文件，必须人工逐个扫。</li>
+                    <li>不回显登录态文件内容或绝对路径（等同账号凭据），只给 cookie 数量与文件年龄。</li>
+                    <li>不在打开本页时就拉起 Xvfb —— 查询接口不该有起后台进程的副作用，
+                      只在点「扫码登录」时才自动准备显示服务。</li>
+                  </ul>
+                  <p class="dim">详见 <code>docs/ops/数据采集-运维手册.md</code> §八</p>
+                </div>
+              </el-popover>
+            </div>
+          </template>
           <el-table :data="states.items" size="small" border>
             <el-table-column label="平台" width="110">
               <template #default="{ row }">
@@ -348,7 +398,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { Refresh, Document, DocumentCopy, Edit, RefreshLeft } from '@element-plus/icons-vue'
+import { Refresh, Document, DocumentCopy, Edit, RefreshLeft, InfoFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
 import ExternalTokenPanel from '@/components/ExternalTokenPanel.vue'
@@ -360,6 +410,7 @@ import {
   getSharedDocLoginStatus,
   confirmSharedDocLogin,
   cancelSharedDocLogin,
+  getSharedDocCliFallback,
 } from '@/api/sharedDoc'
 import {
   listProfiles,
@@ -494,10 +545,38 @@ function onLoginDialogClosed() {
   }
 }
 
+// 命令行降级: 命令文本由后端 GET /cli-fallback 下发(单一事实来源)。
+// 历史坑(2026-09-13): 前端曾硬编码 `cd /path/to/backend && ./.venv/bin/python ../scripts/...`,
+// 该路径在生产容器里根本不存在(容器无 scripts/ 无 .venv) → 复制了也跑不通。
+let _cliCmdCache = null
 async function copyCliCommand(row) {
   const script = row.platform === 'tencent' ? 'tencent_doc_login.py' : 'kdocs_login.py'
-  const cmd = `cd /path/to/backend && ./.venv/bin/python ../scripts/${script} --url "${row.doc_url}"`
-  await copyWithToast(cmd, '命令行登录命令')
+  try {
+    if (!_cliCmdCache) {
+      const res = await getSharedDocCliFallback()
+      _cliCmdCache = res.data?.commands || {}
+    }
+    // 后端模板里的 <文档地址> 占位替换为该源真实地址
+    const tpl = _cliCmdCache[row.platform] || ''
+    const cmd = tpl
+      ? tpl.replace('<文档地址>', row.doc_url)
+      : fallbackCliText(row.platform, row.doc_url)
+    await copyWithToast(cmd, `${script} 登录命令`)
+  } catch (e) {
+    // 接口不可用(如旧版本后端) → 退化为本地文案, 保证按钮仍可用
+    await copyWithToast(fallbackCliText(row.platform, row.doc_url), '命令行登录命令')
+  }
+}
+
+// 兜底文案(仅在 /cli-fallback 不可用时使用)
+function fallbackCliText(platform, docUrl) {
+  const script = platform === 'tencent' ? 'tencent_doc_login.py' : 'kdocs_login.py'
+  const stateFile = platform === 'tencent' ? 'tencent_doc.json' : 'kdocs.json'
+  return (
+    `# ① 本地(macOS)生成登录态: cd backend && ./.venv/bin/python ../scripts/${script} --url "${docUrl}"\n` +
+    `# ② 上传: scp backend/data/browser_states/${stateFile} tanzk@<服务器IP>:/tmp/ && ` +
+    `ssh tanzk@<服务器IP> "sudo mv /tmp/${stateFile} /opt/csctalon/browser_states/"`
+  )
 }
 
 // ── Tab3 配置包 ──
@@ -686,6 +765,20 @@ onBeforeUnmount(() => {
 .ml-8 { margin-left: 8px; }
 .dim { color: var(--el-text-color-secondary); font-size: 12px; }
 .warn-text { color: var(--el-color-warning); font-size: 12px; }
+/* 页面层设计说明气泡(第三层落地): 图标 + 正文排版 */
+.info-icon {
+  color: var(--el-text-color-secondary);
+  cursor: pointer;
+  font-size: 15px;
+}
+.rationale {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--el-text-color-regular);
+}
+.rationale p { margin: 0 0 6px; }
+.rationale ul { margin: 0 0 6px; padding-left: 18px; }
+.rationale li { margin-bottom: 3px; }
 .sub-tip {
   color: #909399;
   font-size: 12px;

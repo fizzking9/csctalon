@@ -20,7 +20,9 @@
   - **同平台单例锁**: 并发登录会互相覆盖 state 文件 → 已有活跃会话时 start 返回冲突
   - **confirm 后轻量校验**: 用户可能未真正登录就点确认 → 校验不通过**不覆盖**旧 state
   - **覆盖前备份**: 旧 state 存为 .json.bak(与 CLI 脚本行为一致)
-  - **无显示服务降级**: 容器未装 Xvfb → 返回 501 + 可执行的一键命令(不抛 500)
+  - **显示服务按需拉起**: 容器装了 xvfb 包但**没人启动进程**时($DISPLAY 为空),
+    首次启动会话前按需拉起 `Xvfb :99` 并注入 DISPLAY → 不再把 502 原始日志吐给用户
+  - **无显示服务降级**: 确实无法提供虚拟显示 → 返回 501 + 可执行的两段式命令(不抛 500)
   - **会话结束必须关浏览器**: chromium 单实例 200~400MB, 泄漏会拖垮单 worker 后端
 """
 
@@ -30,6 +32,7 @@ import base64
 import logging
 import os
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -62,9 +65,78 @@ _SESSION_COOKIE_HINTS = {
     "kdocs": ("wps_sid", "wpsua", "csrf", "sid"),
 }
 
+# ── 虚拟显示(Xvfb) ──
+# ⚠️ 2026-09-13 生产故障(工单 #49 验收暴露, 详见 docs/ops/数据采集-运维手册.md §八):
+#   旧判据是 `$DISPLAY 存在 or which(xvfb-run)` —— 探的是**安装状态**。
+#   容器里 Dockerfile 装了 xvfb 包 → xvfb-run 必然在 PATH → 判据返回 True,
+#   但**没有任何进程启动 Xvfb**($DISPLAY 为空) → `launch(headless=False)` 仍炸
+#   "Missing X server or $DISPLAY", 被兜成 502 并把 Playwright 原始日志吐给用户;
+#   设计 A-20260910-001 §四 的「501 降级(强制)」**从未被触发过**。
+#   根因一句话: **「装了没」≠「跑着没」** → 必须探运行态(X socket), 并负责把服务拉起来。
+XVFB_DISPLAY = ":99"          # 按需拉起的虚拟显示号(可用环境变量 XVFB_DISPLAY 覆盖)
+_XVFB_SCREEN = "1280x800x24"  # 与浏览器 viewport 一致, 供二维码截图清晰可扫
+_XVFB_WAIT_MAX = 2.0          # 等待 socket 出现的硬上限(秒); 只在失败路径才会等满
+
+def _display_number(display: str) -> str:
+    """从 ":99" / "host:99.0" 取显示号, 供 socket 路径与 Xvfb 参数使用。"""
+    return display.rsplit(":", 1)[-1].split(".")[0]
+
+
+def _display_is_remote(display: str) -> bool:
+    """DISPLAY 带主机名(如 "10.0.0.1:0") → 走 TCP, 本地无 socket 可探, 默认信任。"""
+    return not display.startswith(":")
+
+
+def _socket_alive(display: str) -> bool:
+    """X unix socket 存在 → Xvfb / X server **真的在跑**(而不是只装了包)。"""
+    try:
+        return os.path.exists(f"/tmp/.X11-unix/X{_display_number(display)}")
+    except Exception:  # noqa: BLE001  路径异常一律视为不可用
+        return False
+
+
+def _start_xvfb_and_wait(display: str) -> bool:
+    """按需拉起 Xvfb(幂等)并等待 socket 就绪。
+
+    用 `xvfb-run -n <n> sleep infinity` 而非直接 `Xvfb <display>`:
+      - 由 xvfb-run 负责 -nolisten tcp / 屏幕参数 等标准启动细节
+      - `sleep infinity` 让 Xvfb 常驻到进程结束(容器退出时随之回收, 无需额外管理)
+    幂等: 若 socket 已在(别人已拉起), 直接复用, 不重复起进程。
+    """
+    if _socket_alive(display):
+        return True
+    if shutil.which("xvfb-run") is None:
+        return False  # 镜像没装 xvfb → 调用方走 501 降级
+    try:
+        subprocess.Popen(
+            [
+                "xvfb-run",
+                "-n",
+                _display_number(display),
+                "-s",
+                f"-screen 0 {_XVFB_SCREEN}",
+                "sleep",
+                "infinity",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:  # noqa: BLE001  起不来不抛错, 交给 501 降级
+        logger.warning("[shared-doc-login] 拉起 Xvfb 失败", exc_info=True)
+        return False
+    deadline = time.time() + _XVFB_WAIT_MAX
+    while time.time() < deadline:
+        time.sleep(0.1)
+        if _socket_alive(display):
+            logger.info("[shared-doc-login] 已按需拉起 Xvfb, DISPLAY=%s", display)
+            return True
+    logger.warning("[shared-doc-login] Xvfb 拉起后 %.1fs 内未见 socket: %s",
+                   _XVFB_WAIT_MAX, display)
+    return False
+
 
 class DisplayUnavailableError(RuntimeError):
-    """无可用显示服务(容器未装 Xvfb) → 路由层转 501 + 给出 CLI 降级命令。"""
+    """无可用显示服务且无法按需拉起 → 路由层转 501 + 给出两段式降级命令。"""
 
 
 @dataclass
@@ -137,26 +209,62 @@ class SharedDocLoginManager:
                 return s
         return None
 
-    # ── 显示环境探测 ──
+    # ── 显示服务(运行态判定 + 按需拉起) ──
     @staticmethod
     def check_display_available() -> bool:
-        """探测能否起有头浏览器。
+        """**只读**探测「当前是否已有可用显示服务」, 不产生副作用(供 /states 提示用)。
 
-        - 有 DISPLAY 环境变量 → 认为有显示服务(本地开发 macOS / 已配 Xvfb 的容器)
-        - 否则检查 `xvfb-run` 是否在 PATH(容器内可临时包裹启动)
-        - 两者皆无 → False(路由层转 501 + CLI 降级命令)
+        半开判据(2026-09-13 修正, 见模块顶部注释):
+          - $DISPLAY 指向的 X socket **真存在** → True(X server 确实在跑)
+          - 镜像装了 `xvfb-run` → True(点「扫码登录」时会**按需拉起**, 届时可用)
+          - 两者皆无(如本地 macOS: 无 X11 也无 xvfb-run) → False → 页面显示降级提示
+
+        注意: 真正启动会话前用 `ensure_display_available()`(会自愈), 不是这个。
         """
-        if os.environ.get("DISPLAY"):
+        current = (os.environ.get("DISPLAY") or "").strip()
+        if current and (_display_is_remote(current) or _socket_alive(current)):
             return True
         return shutil.which("xvfb-run") is not None
 
     @staticmethod
+    def ensure_display_available() -> bool:
+        """**可自愈**确保有可用显示服务(必要时按需拉起 Xvfb 并注入 DISPLAY)。
+
+        与 check_display_available() 的分工:
+          - check_*: 只读, 用于接口回显状态(不能因为一个 GET 就把 daemon 拉起来)
+          - ensure_*: 写操作(起进程 + 改 DISPLAY), 仅在真正要 launch 浏览器前调用
+
+        Returns:
+            True 表示随后可以 `launch(headless=False)`; False → 路由层转 501。
+        """
+        # ① 已有可用的本地/远程 X server → 直接用
+        current = (os.environ.get("DISPLAY") or "").strip()
+        if current and (_display_is_remote(current) or _socket_alive(current)):
+            return True
+        # ② 无 DISPLAY(生产容器现状: 装了包但没人起进程) → 按需拉起并注入 DISPLAY
+        display = (os.environ.get("XVFB_DISPLAY") or XVFB_DISPLAY).strip()
+        if _start_xvfb_and_wait(display):
+            os.environ["DISPLAY"] = display
+            return True
+        return False
+
+    @staticmethod
     def cli_fallback_command(platform: str, doc_url: str) -> str:
-        """生成 CLI 降级命令(服务器上无 Xvfb 时给运维的可执行路径)。"""
+        """生成降级命令(确实无法提供虚拟显示时, 给运维的可执行路径)。
+
+        ⚠️ 2026-09-13 修正: 旧命令 `cd /path/to/backend && ./.venv/bin/python ../scripts/...`
+        是**假路径** —— 生产容器里既没有 `scripts/` 也没有 `.venv`, 拷了也跑不通。
+        而本机(macOS)有 GUI, 脚本 `headless=False` 可直接扫码。故改为**两段式**:
+          ① 本机生成 storage_state → ② scp 上传到宿主机挂载目录(容器内 /app/data/browser_states)
+        """
         script = "tencent_doc_login.py" if platform == "tencent" else "kdocs_login.py"
+        state_file = DEFAULT_STATE_FILE.get(platform, f"{platform}.json")
         return (
-            f"cd /path/to/backend && ./.venv/bin/python ../scripts/{script} "
-            f'--url "{doc_url}"'
+            f"# ① 本地(macOS 有 GUI)生成登录态; 脚本会弹浏览器, 扫码后回车保存\n"
+            f'cd backend && ./.venv/bin/python ../scripts/{script} --url "{doc_url}"\n'
+            f"# ② 上传到生产宿主机(挂载点 → 容器内 /app/data/browser_states)\n"
+            f"scp backend/data/browser_states/{state_file} tanzk@<服务器IP>:/tmp/ && \\\n"
+            f"  ssh tanzk@<服务器IP> \"sudo mv /tmp/{state_file} /opt/csctalon/browser_states/\""
         )
 
     # ── 会话生命周期 ──
@@ -165,7 +273,7 @@ class SharedDocLoginManager:
         """启动登录会话: 起浏览器 → 打开文档 → 截图。
 
         Raises:
-            DisplayUnavailableError: 无显示服务
+            DisplayUnavailableError: 无显示服务且无法按需拉起
             RuntimeError: 同平台已有活跃会话(路由层转 409)
         """
         with self._lock:
@@ -176,9 +284,10 @@ class SharedDocLoginManager:
                     f"该平台已有正在进行的登录会话({existing.session_id}), 请先完成或取消"
                 )
 
-        if not self.check_display_available():
+        # 显示服务: 运行态判定 + 按需拉起 Xvfb(生产容器装了包但没人起进程 → 此处自愈)
+        if not self.ensure_display_available():
             raise DisplayUnavailableError(
-                "服务器未安装虚拟显示服务(Xvfb), 无法在容器内启动浏览器"
+                "服务器无法提供虚拟显示服务(Xvfb 未安装或拉起失败), 无法在容器内启动浏览器"
             )
 
         sid = uuid.uuid4().hex[:12]

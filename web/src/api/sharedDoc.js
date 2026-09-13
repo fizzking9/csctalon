@@ -45,6 +45,12 @@ export function startSharedDocLogin(sourceId) {
   return request.post(`/sync/shared-docs/${sourceId}/login/start`)
 }
 
+// 无显示服务时的降级登录命令(两段式: 本机扫码 → 上传 state)
+// 单一事实来源在后端 cli_fallback_command(), 前端只负责复制(避免两处硬编码漂移)
+export function getSharedDocCliFallback() {
+  return request.get('/sync/shared-docs/cli-fallback')
+}
+
 // 轮询会话状态: pending / scanned / authorized / expired / closed
 export function getSharedDocLoginStatus(sessionId) {
   return request.get(`/sync/shared-docs/login/${sessionId}/status`)
