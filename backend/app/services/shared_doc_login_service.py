@@ -82,9 +82,25 @@ _KDOCS_SIGNIN_BUTTONS = (
     "button:has-text('登录')",
 )
 
-# 判定二维码已出现的 JS 表达式(供 wait 与状态探测共用)
+# 判定二维码是否已出现(供 wait 与状态探测共用)
+#
+# ⚠️ 2026-09-13 踩坑: 首版判据只看「qrcode 容器尺寸 ≥80px」→ **假阳性**。
+#   实测 kdocs: 点击 Sign in 后容器 `.qrcode_img_block`(180x180) 立刻存在,
+#   但里面的 `<img id="miniprogramImportImg">` **还没有 src / 还没加载完**,
+#   该区域像素 100% 纯白(灰度种类=1)。容器尺寸判据让等待提前通过 → 截图仍是空白。
+#   图片约 1~3s 后加载完成(naturalWidth=430)。
+#   → 判据必须要求**图片真的加载成功**(naturalWidth > 0), 不能只看容器盒子。
 _QRCODE_PRESENT_JS = """() => {
-  for (const s of ['[class*="qrcode"]','[class*="qr-code"]','[class*="qr_code"]','canvas[class*="qr"]']) {
+  // ① img 型二维码: 必须真正加载成功(naturalWidth>0), 否则容器在但图是空的
+  for (const s of ['[class*="qrcode"] img','[class*="Qrcode"] img',
+                   '[id*="qrcode"] img','[id*="Qrcode"] img']) {
+    for (const el of document.querySelectorAll(s)) {
+      const r = el.getBoundingClientRect();
+      if (r.width >= 80 && r.height >= 80 && el.naturalWidth > 0) return true;
+    }
+  }
+  // ② canvas 渲染型(腾讯文档等): 有尺寸即视为已渲染
+  for (const s of ['canvas[class*="qr"]','[class*="qrcode"] canvas','[id*="qrcode"] canvas']) {
     for (const el of document.querySelectorAll(s)) {
       const r = el.getBoundingClientRect();
       if (r.width >= 80 && r.height >= 80) return true;
@@ -388,12 +404,19 @@ class SharedDocLoginManager:
             )
             page = ctx.new_page()
             page.goto(doc_url, wait_until="domcontentloaded", timeout=60000)
-            # 关键: 等待登录界面**真正渲染出来**再截图。
+            # 关键 1: 等待登录界面**真正渲染出来**。
             # ⚠️ 2026-09-13 实测: `domcontentloaded` 在 0.68s 就返回, 而弹窗/SPA 内容要到
             #   ~3s 才渲染; 旧代码 goto 后立刻截图 → 用户看到的是**纯白空框**(非白像素 0.00%)。
             page.wait_for_timeout(3500)
-            # kdocs: 弹窗默认只有「Sign in」按钮、没有二维码 → 代为点一次, 让二维码出现
+            # 关键 2: kdocs 弹窗默认只有「Sign in」按钮、没有二维码 → 代为点一次
             self._open_qrcode_if_needed(page, platform)
+            # 关键 3: 二维码**图片**是异步加载的(容器先出现, 图后到)。
+            #   不等图加载完就截图 → 二维码区域仍是空白(实测 180x180 区域纯白、灰度种类=1)。
+            if self.qrcode_visible(page):
+                try:
+                    page.wait_for_function(_QRCODE_PRESENT_JS, timeout=10000)
+                except Exception:  # noqa: BLE001  超时不阻断, 至少截到当前状态
+                    logger.info("[shared-doc-login] 等二维码图片加载超时, 按当前状态截图")
         except Exception as e:
             try:
                 pw.stop()

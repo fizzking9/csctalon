@@ -642,3 +642,28 @@ def test_verify_rejects_when_qrcode_still_visible(tmp_path, mgr):
     ok, msg = mgr.verify_logged_in(sess)
     assert ok is False
     assert "二维码" in msg
+
+
+def test_qrcode_js_requires_image_actually_loaded():
+    """🔒 回归(2026-09-13 假阳性): 二维码判据必须要求图片真正加载成功。
+
+    踩坑经过: 首版判据只看容器尺寸 → kdocs 点击后容器 `.qrcode_img_block`(180x180)
+    立刻存在, 但内部 `<img id="miniprogramImportImg">` **还没有 src**,
+    该区域像素 100% 纯白(灰度种类=1, 实测)。容器判据让等待提前通过 → 截图仍是空白。
+    """
+    js = sdls._QRCODE_PRESENT_JS
+    # img 型必须校验 naturalWidth(img 真加载成功的标志)
+    assert "naturalWidth" in js
+    # 不能只按容器尺寸判定
+    assert ".qrcode_img_block" not in js or "naturalWidth" in js
+    assert "getBoundingClientRect" in js
+
+
+def test_qrcode_visible_swallows_errors(mgr):
+    """边界: 页面已关闭/求值异常 → 返回 False, 不向上抛。"""
+
+    class _P:
+        def evaluate(self, js, *a):
+            raise RuntimeError("Target closed")
+
+    assert mgr.qrcode_visible(_P()) is False
