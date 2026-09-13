@@ -832,6 +832,8 @@ import { useAudit } from '@/composables/useAudit'
 // ★ #78 接待来源分层：配色/堆叠构造抽到共享模块，与「运营看板」共用
 //   （规范 §五 禁止重复展示 —— 配色各页自写会漂移，使用者产生歧义）
 import { SOURCE_KINDS, buildStack, stackTip, sourceKindMeta } from '@/utils/receptionSource'
+// 周区间计算（周一起始）—— 共享单一来源
+import { getWeekRange as _getWeekRange } from '@/utils/weekRange'
 import dayjs from 'dayjs'
 
 const loading = ref(false)
@@ -1245,16 +1247,14 @@ let _viewCache = null  // { key, data: {...8个响应} } 单条(最近一次加�
 const _forceRefresh = () => viewMode.value === 'day' && isToday.value
 
 // 周视图的起止日期(周一00:00 到 周日23:59;如果周日晚于今天则截止到今天结束)
+// ⚠️ 已抽到 @/utils/weekRange 作为单一来源（运营看板此前各写一份，写法不一致
+//    导致「周日当天本周算成下周」的 bug）。
 function getWeekRange() {
-  const d = dayjs(selectedDate.value)
-  // dayjs.day(): 0=周日,1=周一,...,6=周六;中国习惯周一是周开始
-  const dow = d.day()
-  const diffToMonday = dow === 0 ? -6 : 1 - dow
-  const monday = d.add(diffToMonday, 'day').startOf('day')
-  let sunday = monday.add(6, 'day').endOf('day')
+  const { start, end } = _getWeekRange(selectedDate.value)
+  let sunday = end
   const nowEnd = dayjs().endOf('day')
   if (sunday.isAfter(nowEnd)) sunday = nowEnd
-  return { start: monday, end: sunday }
+  return { start, end: sunday }
 }
 
 // 周视图下,判断是否是"当前周"(即selectedDate所在周包含今天)

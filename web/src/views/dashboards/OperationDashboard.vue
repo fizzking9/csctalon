@@ -590,6 +590,8 @@ import weekOfYear from 'dayjs/plugin/weekOfYear'
 // ★ #78 接待来源分层：配色/堆叠构造与「决策分析看板」共用同一模块
 //   （规范 §五 禁止重复展示 —— 配色各页自写会漂移，使用者产生歧义）
 import { buildStack, sourceKindMeta, RECEPTION_BREAKDOWN_TIP } from '@/utils/receptionSource'
+// 周区间计算（周一起始）—— 共享单一来源，修复「周日当天本周算成下周」的存量 bug
+import { getWeekRange, getWeekRangeStr, weekLabel } from '@/utils/weekRange'
 import { QuestionFilled } from '@element-plus/icons-vue'
 dayjs.extend(isoWeek)
 dayjs.extend(quarterOfYear)
@@ -724,14 +726,14 @@ const filteredComplaintList = computed(() => {
 })
 
 // ========== 选项 ==========
+// ⚠️ 2026-09-13 修复存量 bug: 原用 `startOf('week').add(1,'day')`,
+//    而 dayjs 的周起始是**周日** → 周日当天「本周」会被算成下周（09-14~09-20，未来）
+//    → 指标全为 0。改用共享 getWeekRange（周一起始，单一来源）。
 const weekOptions = computed(() => {
   const opts = []
   for (let i = 0; i < 12; i++) {
-    const d = dayjs().subtract(i, 'week')
-    const ws = d.startOf('week').add(1, 'day')
-    const we = ws.add(6, 'day')
-    const label = i === 0 ? '本周' : i === 1 ? '上周' : `${ws.format('MM-DD')}~${we.format('MM-DD')}`
-    opts.push({ label, value: i })
+    const { start, end } = getWeekRange(undefined, i)
+    opts.push({ label: weekLabel(i), value: i, range: `${start.format('MM-DD')}~${end.format('MM-DD')}` })
   }
   return opts
 })
@@ -833,10 +835,12 @@ function getDateRange() {
   let start, end
   switch (grain.value) {
     case 'week': {
-      const offset = weekOffset.value
-      const weekStart = now.subtract(offset, 'week').startOf('week').add(1, 'day')
-      start = weekStart.format('YYYY-MM-DD')
-      end = weekStart.add(6, 'day').format('YYYY-MM-DD')
+      // ⚠️ 2026-09-13 修复: 原 `now.subtract(offset,'week').startOf('week').add(1,'day')`
+      //   在周日当天会把「本周」算成下一周（未来）→ 全部指标为 0。
+      //   改用共享 getWeekRange（周一起始）+ clamp 到今天，避免拉取未来日期。
+      const r = getWeekRangeStr(undefined, weekOffset.value, true)
+      start = r.start
+      end = r.end
       break
     }
     case 'month': {
