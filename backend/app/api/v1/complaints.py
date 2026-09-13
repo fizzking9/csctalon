@@ -406,7 +406,7 @@ def _source_reg_handled(db, src_val: str, ts, te,
     return int(registered), int(handled)
 
 
-def _sources_reg_handled(db, ts, te) -> dict:
+def _sources_reg_handled(db, ts, te, include_suppl_external: bool = True) -> dict:
     """投诉来源 registered/handled 汇总: {source: {registered, handled}} + total。
 
     ★★ 2026-09-11 (#53): 由四源**收回三源** ★★
@@ -415,11 +415,22 @@ def _sources_reg_handled(db, ts, te) -> dict:
       → 卡商**不再出现在本字典**, 改为独立字段返回(见 `/summary` 与 `/analysis`
         的 `card` 对象)。`total` 也不含卡商。
       → 三源互斥性: 内部 + 商户号 + 外部 = 投诉总量(不含卡商)。
+
+    ★★ #81 (2026-09-13): 本函数升级为**投诉总量的唯一出口** ★★
+      `analytics.today_kpi` 的「核心指标·投诉数」原先**另写一套**（工单 + 315表 +
+      卡商表，不扣重叠）→ 与四卡数字必然对不上（本月差 37 条，且违反 #53）。
+      现改为 today_kpi **直接调用本函数**，从根上消除"两处口径"
+      （#65 的教训就是口径漂移：软纠正只落一侧导致 160 条黑洞）。
+
+    `include_suppl_external=False` 时**不并入** 315 补充表净新增
+      （供 `analytics._INCLUDE_COMPLAINT_FILES=False` 场景对齐开关语义）。
     """
     out = {}
     reg_sum = handled_sum = 0
     for src in ("内部投诉", "商户号投诉", "外部投诉"):
-        reg, hdl = _source_reg_handled(db, src, ts, te)
+        reg, hdl = _source_reg_handled(
+            db, src, ts, te, include_suppl_external=include_suppl_external
+        )
         out[src] = {"registered": reg, "handled": hdl}
         reg_sum += reg
         handled_sum += hdl

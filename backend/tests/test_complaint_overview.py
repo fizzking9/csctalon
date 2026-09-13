@@ -320,6 +320,88 @@ class TestOverviewCoherence:
         d = _overview(db_with_complaints, start=None, end=None, grain=None, compare="none")
         assert d["ratios"] is None
 
+
+class TestComplaintTotalSingleSource:
+    """#81: 投诉总量**唯一出口** —— 核心指标 ≡ 三源合计。
+
+    ★ 为什么必须有这组断言:
+      同一页出现过两个投诉数（核心指标 1127 vs 投诉专项四卡 1111），
+      根因是**两套实现**：
+        · `today_kpi`  = 工单 + 315表全量 + 卡商表全量   ← 不扣重 **且含卡商**
+        · 投诉专项四卡 = `complaint_scope` 分桶 + 表侧扣重 + 卡商剥离
+      使用者无法判断该信哪个 → 直接损伤数据可信度。
+
+      修复 = 让 `today_kpi` **直接调用** `_sources_reg_handled`（同源）。
+      本测试把「相等」固化成回归防线 —— 若将来有人再另写一套，立刻失败。
+    """
+
+    @staticmethod
+    def _range(db):
+        from app.api.v1.complaints import _parse_dt, _parse_dt_end
+        today = datetime.now(TZ).date()
+        start = (today - timedelta(days=29)).isoformat()
+        end = today.isoformat()
+        return start, end, _parse_dt(start), _parse_dt_end(end)
+
+    def test_today_kpi_complaint_equals_three_source_total(self, db_with_complaints):
+        """① `today_kpi.complaint` == `_sources_reg_handled.total`（逐位一致）。
+
+        这是 #81 的核心验收条件；也是 #80 诉求 2「投诉括弧三源」的前提 ——
+        括弧之和必须等于总数，否则不如不做。
+        """
+        from app.api.v1.complaints import _sources_reg_handled
+        from app.services.analytics import today_kpi
+
+        start, end, ts, te = self._range(db_with_complaints)
+        kpi = today_kpi(db_with_complaints, start=start, end=end)
+        rh = _sources_reg_handled(db_with_complaints, ts, te)
+
+        assert kpi["complaint"]["value"] == rh["total"]["registered"], (
+            f"核心指标 {kpi['complaint']['value']} != 三源合计 "
+            f"{rh['total']['registered']}（#81 口径必须同源）"
+        )
+
+    def test_three_sources_sum_equals_total(self, db_with_complaints):
+        """② 三源之和 == total（保证括弧三源可加，无遗漏/无重复）。"""
+        from app.api.v1.complaints import _sources_reg_handled
+
+        _, _, ts, te = self._range(db_with_complaints)
+        rh = _sources_reg_handled(db_with_complaints, ts, te)
+        got = sum(rh[k]["registered"] for k in ("内部投诉", "商户号投诉", "外部投诉"))
+        assert got == rh["total"]["registered"], (
+            f"三源之和 {got} != total {rh['total']['registered']}"
+        )
+
+    def test_card_excluded_from_complaint_total(self, db_with_complaints):
+        """③ 卡商**不得**进入投诉总量（#53 用户口径）。
+
+        反例（修复前）: `comp_t = 工单 + 315表 + **卡商表**` →
+        卡商被并入总量，与「不纳入总量的管理, 全部单算」直接冲突。
+        """
+        from app.api.v1.complaints import _card_reg_handled, _sources_reg_handled
+        from app.services.analytics import today_kpi
+
+        start, end, ts, te = self._range(db_with_complaints)
+        kpi = today_kpi(db_with_complaints, start=start, end=end)
+        rh = _sources_reg_handled(db_with_complaints, ts, te)
+        card = _card_reg_handled(db_with_complaints, ts, te)
+
+        # 卡商独立返回（不在 total 内）
+        assert "card" not in rh
+        # 核心指标也不得包含卡商 —— 但若卡商为 0 则本条恒成立，故显式断言等式
+        assert kpi["complaint"]["value"] == rh["total"]["registered"]
+        assert card["registered"] >= 0  # 卡商自有独立出口
+
+    def test_kpi_spec_documents_three_source_scope(self, db_with_complaints):
+        """④ `_spec.complaint` 必须写明口径（前端 ⓘ 直接引用，不得让前端另编）。"""
+        from app.services.analytics import today_kpi
+
+        start, end, _, _ = self._range(db_with_complaints)
+        kpi = today_kpi(db_with_complaints, start=start, end=end)
+        spec = kpi["_spec"]["complaint"]
+        assert "卡商" in spec, "必须显式声明卡商不含在内(#53)"
+        assert "三源" in spec or "内部投诉" in spec, "必须写明由哪三源构成"
+
     def test_compare_period_is_adjacent_equal_length(self, db_with_complaints):
         """对比期 = 紧邻的等长前段窗口(环比可比性前提)。"""
         _clear_cache()

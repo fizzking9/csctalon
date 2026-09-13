@@ -3265,33 +3265,31 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
                          .where(_between(CsRecord.operation_time, ys, ye),
                                 CsRecord.operator.isnot(None))).scalar() or 0
 
-    # 7. 今日投诉单 (统计口径 = service_tickets 投诉 + external_complaints + card_complaints 三表 UNION)
-    #    - service_tickets: _ticket_category_case() == "投诉" (含 IS NULL / category含投诉 / item含关键词)
-    #    - external_complaints: 315/监督局/消协等外部平台投诉 (complaint_date 落当天)
-    #    - card_complaints: 卡商群投诉 (complaint_date 落当天)
-    comp_t_st = db.execute(select(func.count())
-                        .where(_between(ServiceTicket.register_time, ts, te),
-                               _ticket_category_case() == "投诉")).scalar() or 0
-    comp_t_ec = 0
-    comp_t_cc = 0
-    if _INCLUDE_COMPLAINT_FILES:
-        comp_t_ec = db.execute(select(func.count())
-                            .where(_between(ExternalComplaint.complaint_date, ts, te))).scalar() or 0
-        comp_t_cc = db.execute(select(func.count())
-                            .where(_between(CardComplaint.complaint_date, ts, te))).scalar() or 0
-    comp_t = comp_t_st + comp_t_ec + comp_t_cc
+    # 7. 今日投诉单 —— ★★ #81 (2026-09-13) 口径统一到「唯一出口」★★
+    #
+    #   ⚠️ 变更背景（#81 实测）:
+    #     原实现 = `工单投诉类 + external_complaints 全表 + card_complaints 全表`
+    #     → 两个缺陷:
+    #       ① **违反 #53**: 卡商被并入投诉总量（用户明令"卡商不纳入总量, 全部单算"）
+    #       ② **重复计数**: 315/卡商补充表里已 `matched_ticket_no` 关联到工单的记录,
+    #          工单侧已算过, 表侧又加一次（本月实测 315 重复 22 条）
+    #     → 导致同页「核心指标·投诉数」与「投诉专项四卡」数字必然对不上
+    #       （本月 1127 vs 1111），使用者无法判断该信哪个。
+    #
+    #   现实现 = **直接调用 `complaints._sources_reg_handled`**，与四卡/`/summary`
+    #     共用同一个判据出口（`complaint_scope` 分桶 + 表侧扣重 + 卡商剥离）。
+    #     口径: 内部 + 商户号 + 外部（**不含卡商**；卡商见独立 `card` 区块）。
+    #
+    #   ⚠️ 为什么不在本文件另写一套: #65 的教训就是口径漂移 —— 软纠正只落在对账侧,
+    #      统计侧漏了 160 条真实监所投诉。**同源是唯一可靠做法**。
+    #   ⚠️ 惰性导入原因: `complaints.py` 已 `from app.services.analytics import ...`
+    #      （模块级），此处若顶层 import 会形成循环依赖。
+    from app.api.v1.complaints import _sources_reg_handled as _srh
 
-    comp_y_st = db.execute(select(func.count())
-                        .where(_between(ServiceTicket.register_time, ys, ye),
-                               _ticket_category_case() == "投诉")).scalar() or 0
-    comp_y_ec = 0
-    comp_y_cc = 0
-    if _INCLUDE_COMPLAINT_FILES:
-        comp_y_ec = db.execute(select(func.count())
-                            .where(_between(ExternalComplaint.complaint_date, ys, ye))).scalar() or 0
-        comp_y_cc = db.execute(select(func.count())
-                            .where(_between(CardComplaint.complaint_date, ys, ye))).scalar() or 0
-    comp_y = comp_y_st + comp_y_ec + comp_y_cc
+    _comp_t = _srh(db, ts, te, include_suppl_external=_INCLUDE_COMPLAINT_FILES)["total"]
+    comp_t = int(_comp_t["registered"])
+    _comp_y = _srh(db, ys, ye, include_suppl_external=_INCLUDE_COMPLAINT_FILES)["total"]
+    comp_y = int(_comp_y["registered"])
 
     def _k(v, yv):
         return {"value": v, "yoy_value": yv, "yoy_pct": _pct_delta(v, yv)}
@@ -3348,6 +3346,8 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
             "cash_out":         "真实现金流(对账基准) = refund_record_reports 退款成功合计, 不分ORIGINAL/BALANCE桶 (2026-09-05 v1.1 起替代 merchant_refunds)",
             "actual_cashflow":  "实际现金流(对账基准) = refund_record_reports 退款成功合计, 不分ORIGINAL/BALANCE桶",
             "ticket_done":      "有效完工时间推算: 10.7% 真实完成(白名单:status=已完成且finish在register+12h内且handler非空非SYS) → handle_duration秒 → 该handler近30天真实平均耗时 → 全局真实平均。仅status=已完成视为完工, 避免finish_time被BMS 03:15批量覆盖导致的虚高。",
+            # ★ #81 (2026-09-13): 投诉口径统一后的说明（前端 ⓘ 直接引用，勿另写）
+            "complaint":        "投诉数 = 三源合计(内部投诉 + 商户号投诉 + 外部投诉)，**不含 (外)卡商**（#53: 卡商独立统计, 全部单算）。判据与「投诉专项」四卡同源(complaint_scope 分桶 + #58 软纠正)，并已扣除补充表(315)中已关联到工单的重叠记录, 不重复计数。修正前为『工单 + 315表 + 卡商表』不扣重且含卡商 → 与四卡数字对不上(见 #81)。",
         },
     }
 

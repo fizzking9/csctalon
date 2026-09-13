@@ -33,7 +33,7 @@
   │       ❌ **不隐藏**「有任务但全失败」的人员 —— 那正是最该被看见的。                    │
   │                                                                                      │
   │ 工单：#80（本轮：命名 + 布局硬伤 + 四卡/趋势/挽回改造）                               │
-  │       #81（阻塞项：投诉数口径统一，含 #65 黑洞）                                     │
+  │       #81（★ 已完成：投诉数口径统一为单一出口，核心指标 ≡ 三源合计）                  │
   │       #78（接待来源分层）/ #53（卡商独立）/ #76（下钻与卡片规范）                     │
   └──────────────────────────────────────────────────────────────────────────────────────┘
 -->
@@ -516,11 +516,10 @@
       <!-- 三源 KPI (点击即作为下方明细表的来源筛选; 主值=登记, 副行=处理, F-P1-2)
            ★ #80 修复: 原 `el-col :xs="8"` **缺 :sm/:md** → 桌面端每个 col span=24
              → 用户反馈「四个居然占了 4 个大行」。补断点后桌面端四卡同行。
-           ★ #80 口径声明: 本四卡的判据是 `_complaint_source_type_case()`（含 channel 回退
-             与 #58 软纠正），**与上方「核心指标·投诉数」不同源**（那边用
-             `_ticket_category_case()`）。两者数字对不上是**已知问题**，
-             见工单 #81（统一口径）。修正前**不**在本区加「括弧三源」，
-             否则括弧之和与总数不符会误导使用者。 -->
+           ★ #81 口径统一: 本四卡与上方「核心指标·投诉数」现为**同源**（后端
+             today_kpi 直接调用 complaints._sources_reg_handled）→ **数字逐位一致**。
+             因此 #80 诉求 2「投诉括弧三源」已可安全实现（括弧之和 == 主值）。
+             卡商仍独立（#53），不计入本区合计。 -->
       <el-row :gutter="12" class="mb-16">
         <el-col :xs="12" :sm="6" :md="6">
           <div
@@ -574,17 +573,17 @@
         </el-col>
       </el-row>
 
-      <!-- ★ #80 三源合计提示（防误加卡商）:
-           四卡并排后使用者会本能相加 → 必须显式说明「卡商不算在总量里」。
-           同时给出与「核心指标·投诉数」**不一致**的解释 ——
-           不让使用者以为是自己看错了（根因见工单 #81）。 -->
+      <!-- ★ #81 三源合计校验条（防误加卡商 + 防误以为"两处对不上"）:
+           #81 口径统一后，本区三源合计与「核心指标·投诉数」**逐位一致**。
+           此处显式给出合计并声明一致 —— 使用者不必再怀疑该信哪个。
+           ⚠️ 卡商仍独立（#53），不计入本合计。 -->
       <div v-if="complaintTotalHint" class="complaint-total-hint">
         <span class="cth-sum">三源合计（不含卡商）<b>{{ formatNum(complaintThreeTotal) }}</b></span>
         <span class="cth-sep">·</span>
         <el-tooltip effect="dark" placement="top" raw-content :content="complaintScopeTip">
-          <span class="cth-warn">
-            <el-icon style="vertical-align:-2px"><WarningFilled /></el-icon>
-            与上方「核心指标·投诉数」口径不同，数字不等属已知问题
+          <span class="cth-ok">
+            <el-icon style="vertical-align:-2px"><CircleCheckFilled /></el-icon>
+            与上方「核心指标·投诉数」同源同口径，数字一致
           </span>
         </el-tooltip>
       </div>
@@ -722,7 +721,7 @@ import weekOfYear from 'dayjs/plugin/weekOfYear'
 import { buildStack, sourceKindMeta, RECEPTION_BREAKDOWN_TIP } from '@/utils/receptionSource'
 // 周区间计算（周一起始）—— 共享单一来源，修复「周日当天本周算成下周」的存量 bug
 import { getWeekRange, getWeekRangeStr, weekLabel } from '@/utils/weekRange'
-import { QuestionFilled, WarningFilled } from '@element-plus/icons-vue'
+import { QuestionFilled, CircleCheckFilled } from '@element-plus/icons-vue'
 dayjs.extend(isoWeek)
 dayjs.extend(quarterOfYear)
 dayjs.extend(weekOfYear)
@@ -817,16 +816,19 @@ const complaintThreeTotal = computed(() => {
 /** 只有拿到三源数据才显示合计提示（避免显示 0 误导） */
 const complaintTotalHint = computed(() => complaintThreeTotal.value > 0)
 
-/** ★ #80 口径差异说明（页面 ⓘ）—— 这是使用者最容易困惑的地方，必须给解释 */
+/** ★ #81 口径一致性说明（页面 ⓘ）—— 使用者最容易困惑的地方，必须给解释 */
 const complaintScopeTip = [
-  '<b>为什么两个投诉数不一样？</b>（已知问题，见工单 #81）',
-  '<b>核心指标·投诉数</b>：判据 = 工单服务分类为「投诉」+ 315 补充 + <b>卡商补充</b>',
-  '　→ <b>含卡商</b>，且<b>不含</b> #58 软纠正',
-  '<b>本区四卡</b>：判据 = 投诉来源分桶（含渠道回退 + #58 软纠正）',
-  '　→ <b>不含卡商</b>（卡商按 #53 独立统计）',
-  '<b>结论</b>：两处判据不同，<b>数字必然不等</b>，不是显示错误。',
-  '修正方向（#81）：统一判据出口 + 核心指标剥离卡商 + 修 #65 工单黑洞。',
-  '在此之前，<b>本页所有"合计"一律以四卡为准</b>（判据更完备）。',
+  '<b>本区四卡与上方「核心指标·投诉数」什么关系？</b>',
+  '<b>#81 (2026-09-13) 已统一为同源同口径</b>，两处数字<b>逐位一致</b>：',
+  '· 判据 = 工单按 <b>complaint_scope 分桶</b>（内部/商户号/外部，含渠道回退 + #58 软纠正）',
+  '　　+ 315 补充表<b>净新增</b>（已扣已关联工单的重叠，不重复计数）',
+  '· 后端实现 = `today_kpi` 直接调用 `complaints._sources_reg_handled`（单一出口）',
+  '<b>卡商不计入本合计</b> —— 按 #53「(外)卡商 不纳入总量的管理，全部单算」，',
+  '　卡商在下方**独立区块**呈现（工单侧真卡商 + card_complaints − 重叠）。',
+  '<br/><b>修正前的历史问题（已解决，勿再参照旧说法）</b>：',
+  '· 核心指标曾为『工单 + 315表全量 + 卡商表全量』→ ① 含卡商(违反 #53)',
+  '　② 315 表已关联工单的记录被重复计入 → 与四卡差 37 条(本月实测)',
+  '· 现统一后：<b>括弧三源之和 == 主值</b>，可放心相加核对。',
 ].join('<br/>')
 
 /** ★ #80: 趋势图数据说明（页面层 ⓘ，规范 §二 双强制之①） */
@@ -852,6 +854,56 @@ const TREND_TIP = [
   '③ <b>图例不写"合计"</b> —— 投诉三源与「核心指标·投诉数」不同源（见 #81），',
   '　　写合计会让人误以为两处应相等',
 ].join('<br/>')
+
+// ========== 投诉三源（#81 口径统一后的唯一出口）==========
+// ★ #81 (2026-09-13): 核心指标「投诉数」的口径已与「投诉专项四卡」**统一同源**
+//   —— 后端 `today_kpi` 现直接调用 `complaints._sources_reg_handled`。
+//   故此处可以安全地做「括弧三源」（#80 诉求 2）：
+//   三源之和 == 主值，不会出现括弧与总数对不上的误导。
+//   ⚠️ 三源**不含 (外)卡商**（#53: 卡商独立统计, 全部单算）。
+//   数据源: complaints/summary 的 reg_handled（与四卡同源，保证逐位一致）。
+const COMPLAINT_SOURCE_CHIPS = [
+  { key: '内部投诉', label: '内部', color: '#2563eb' },
+  { key: '商户号投诉', label: '商户', color: '#7c3aed' },
+  { key: '外部投诉', label: '外部', color: '#dc2626' },
+]
+
+/** 投诉数卡的「括弧三源」chips（每源取其 registered，与主值同窗口同判据） */
+const complaintChips = computed(() => {
+  const rh = complaintSummaryData.value?.reg_handled || {}
+  // 无数据时不渲染 chips（避免显示三个 0 误导）
+  if (!COMPLAINT_SOURCE_CHIPS.some((c) => Number(rh[c.key]?.registered) > 0)) return null
+  return COMPLAINT_SOURCE_CHIPS.map((c) => ({
+    label: c.label,
+    value: Number(rh[c.key]?.registered || 0),
+    color: c.color,
+  }))
+})
+
+/** 投诉数卡的数据说明（来源/口径/时点/取舍 —— 看板卡片规范 §二 双强制） */
+const complaintTip = computed(() => {
+  const rh = complaintSummaryData.value?.reg_handled || {}
+  const parts = COMPLAINT_SOURCE_CHIPS
+    .map((c) => `${c.label}投诉 ${formatNum(rh[c.key]?.registered)} 条`)
+    .join(' · ')
+  return [
+    '<b>来源</b>：/analytics/today/kpi 的 complaint（后端直接调用 complaints 的三源出口）',
+    `<b>构成</b>：${parts || '（本窗口暂无数据）'}`,
+    '　→ 三源之和 <b>等于</b>本卡数值（#81 口径统一保证）',
+    '<b>口径</b>：工单按 <b>complaint_scope 分桶</b>（内部/商户号/外部，含渠道回退 + #58 软纠正）',
+    '　+ 315 补充表<b>净新增</b>（已扣除已关联工单的重叠，不重复计数）',
+    '　<b>不含 (外)卡商</b> —— 卡商按 #53 独立统计、全部单算，见下方独立区块',
+    '<b>时点</b>：跟随顶部时间条；本页缓存 24h（复盘场景，非实时）',
+    '<b>「空」的含义</b>：显示 0 = 本窗口确无该来源投诉；下方三个括弧不显示 = 三源全为 0',
+    '<b>下钻</b>：点本卡 → 投诉分析页（带当前时间窗口与三源维度）',
+    '<br/><b>⚠️ 取舍（不做什么及原因）</b>',
+    '① <b>不含卡商</b> —— 卡商是独立体系（#53 用户决策），并入会使总量口径混乱',
+    '② <b>不按来源再拆"登记/处理"</b> —— 本卡是「发生量」，处理情况在下方专项区块承接，',
+    '　　避免一张卡塞两种语义（登记 vs 处理）导致误读',
+    '③ 修正前本卡为『工单 + 315表全量 + 卡商表全量』（不扣重且含卡商），与四卡对不上（差 37 条）；',
+    '　　#81 已统一为同源，此卡与四卡<b>逐位一致</b>。',
+  ].join('<br/>')
+})
 
 // 投诉明细表 筛选/排序状态 (KPI 卡片点击 = 来源筛选)
 const complaintSourceFilter = ref('')
@@ -1125,7 +1177,12 @@ const kpiCards = computed(() => {
       ],
       tip: '退款金额 = 四路经营合计 A+B+C+D（登记侧所有退款出款，含退入钱包等非现金退出）；「实际现金流E」= 退款记录报表退款成功合计（真实现金退出）。两者不等属正常',
     },
-    { key: 'complaint', label: '投诉数', value: complaint.value, unit: '条', icon: 'Bell', bg: '#faf5ff', color: '#7c3aed', yoy_key: 'complaint', yoy_pct: complaint.yoy_pct, yoy_value: complaint.yoy_value, tip: '投诉合计(内部/商户号/外部 + 315/卡商推送)' },
+    // ★ #81: 括弧三源 —— ⚠️ 必须写 `.value`！
+    //   `complaintChips` / `complaintTip` 是 computed ref，在**另一个 computed 内部**
+    //   访问时不会被 Vue 自动解包（自动解包只发生在模板里）→ 直接写 `chips: complaintChips`
+    //   会把 ref 对象塞进 props，`v-if="chips && chips.length"` 恒为 undefined → 静默不渲染。
+    //   ★ 教训: props 传 computed 结果时必须显式 `.value`（实测踩过一次）。
+    { key: 'complaint', label: '投诉数', value: complaint.value, unit: '条', icon: 'Bell', bg: '#faf5ff', color: '#7c3aed', yoy_key: 'complaint', yoy_pct: complaint.yoy_pct, yoy_value: complaint.yoy_value, chips: complaintChips.value, tip: complaintTip.value },
     { key: 'recovery', label: '挽回率', value: Number(recoveryRate || 0), unit: '%', icon: 'SuccessFilled', bg: '#ecfdf5', color: '#059669', yoy_key: 'recovery', yoy_pct: null, yoy_value: null, tip: '退款挽回成功率' },
   ]
 })
@@ -1728,8 +1785,9 @@ watch([grain, weekOffset, monthOffset, quarterOffset, yearOffset, customDateRang
 }
 .cth-sum b { color: #2563eb; font-size: 14px; margin-left: 4px; }
 .cth-sep { color: #d1d5db; }
-.cth-warn {
-  color: #b45309;
+/* ★ #81: 口径统一后改为「一致」阳性提示（原为不一致的告警色） */
+.cth-ok {
+  color: #059669;
   cursor: help;
   text-decoration: underline dotted;
 }
