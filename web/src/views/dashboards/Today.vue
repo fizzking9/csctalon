@@ -81,10 +81,14 @@
       </div>
     </el-alert>
 
-    <!-- 模块1: 核心KPI (紧凑横排) -->
+    <!-- 模块1: 核心KPI (紧凑横排)
+         ★ #76: 每张卡可点下钻 → 对应分析页(带当前窗口)。
+           按规范 §3.5 加 cursor:pointer 与 hover 反馈，并有 title 提示。 -->
     <section class="section-card kpi-strip mb-12">
       <div class="kpi-strip-grid">
-        <div v-for="c in kpiCards" :key="c.key" class="kpi-strip-item" :class="c.colorClass">
+        <div v-for="c in kpiCards" :key="c.key" class="kpi-strip-item kpi-drillable" :class="c.colorClass"
+             :title="`点击查看「${c.label}」的构成明细`"
+             @click="onKpiClick(c.key)">
           <div class="ksi-icon"><el-icon :size="16"><component :is="c.icon" /></el-icon></div>
           <div class="ksi-body">
             <div class="ksi-label">{{ c.label }}</div>
@@ -101,7 +105,14 @@
     <section class="section-card mb-16">
       <div class="section-header-row">
         <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-          <h3 class="section-title">{{ viewMode === 'week' ? '本周趋势' : '实时趋势' }}</h3>
+          <h3 class="section-title">
+            {{ viewMode === 'week' ? '本周趋势' : '实时趋势' }}
+            <!-- ★ #76 数据说明（规范 §二）: 来源 / 口径 / 时点 -->
+            <el-tooltip effect="dark" placement="top" raw-content
+              content="<b>来源</b>：/today/hourly（日）· /today/kpi（周）<br/><b>口径</b>：日=按小时切面，接待/投诉/退款三类分别计数；周=按日切面<br/><b>时点</b>：今日视图 60s 自动刷新，历史窗口缓存 24h<br/><b>下钻</b>：图内暂不支持点击下钻（明细接口按日筛选，无小时级），请用下方各专项卡片下钻">
+              <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </h3>
           <div class="section-desc">{{ viewMode === 'week' ? '本周每日接待/投诉/退款情况' : '今日各时段接待与退款情况' }}</div>
         </div>
         <el-checkbox-group v-model="trendSelectedGroups" size="small" class="trend-group-check">
@@ -110,6 +121,11 @@
           <el-checkbox-button value="refund">退款</el-checkbox-button>
         </el-checkbox-group>
       </div>
+      <!-- ⚠️ 不下钻声明（规范 §3.4）: 趋势图为「小时/日」粒度切面，
+           而各明细接口按【日】筛选，无小时级下钻能力。若强行点击下钻，
+           只能落到「那一天的全部明细」——与用户点击的"某个时段"不一致，属误导。
+           故此处**不做图内点击下钻**，改用下方各专项卡片（按日粒度）承接。
+           若未来明细接口支持小时筛选，再开放（见 #68 指标体系研究）。 -->
       <ChartCard body-style="padding: 12px">
         <BaseChart :option="trendOption" height="220px" />
       </ChartCard>
@@ -225,29 +241,43 @@
       </el-col>
     </el-row>
 
-    <!-- 模块5: 退款挽回快照 -->
+    <!-- 模块5: 退款挽回快照
+         ★ #76: 4 个数字格均可点 → 挽回分析页（带当前窗口）。
+           ⚠️ 原「详细分析 →」指向 /dashboards/refund（退款分析），
+              但本区块数据来自**挽回**（recoveryData），两页不同 —— 已按数据源
+              把新增下钻指向 /dashboards/refund-recovery（挽回分析），避免口径错配。 -->
     <section v-if="hasRecovery" class="section-card mb-12">
       <div class="section-header-row">
-        <h3 class="section-title">{{ viewMode === 'week' ? '退款挽回本周快照' : '退款挽回今日快照' }}</h3>
-        <el-link type="primary" underline="never" @click="$router.push('/dashboards/refund')">详细分析 →</el-link>
+        <h3 class="section-title">
+          {{ viewMode === 'week' ? '退款挽回本周快照' : '退款挽回今日快照' }}
+          <el-tooltip effect="dark" placement="top" raw-content
+            content="<b>来源</b>：退款挽回接口（refund-recovery）<br/><b>口径</b>：按 SN 计挽回成功/失败；成功率 = 成功/申请<br/><b>时点</b>：今日视图 60s 自动刷新<br/><b>下钻</b>：点击任一数字 → 挽回分析页（带当前窗口）">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </h3>
+        <el-link type="primary" underline="never" @click="drillToRefundRecovery()">详细分析 →</el-link>
       </div>
       <el-row :gutter="10" class="mb-8">
         <!-- 左侧: 4个紧凑数字 -->
         <el-col :xs="24" :md="14">
           <div class="compact-kpi-row">
-            <div class="ck-cell" style="background:#eff6ff">
+            <div class="ck-cell ck-drillable" style="background:#eff6ff"
+                 title="点击查看挽回申请明细（带当前时间窗口）" @click="drillToRefundRecovery()">
               <div class="ck-label">{{ viewMode === 'week' ? '本周申请' : '今日申请' }}</div>
               <div class="ck-value" style="color:#1d4ed8">{{ formatNum(recoveryData.kpi.total_sn) }}</div>
             </div>
-            <div class="ck-cell" style="background:#f0fdf4">
+            <div class="ck-cell ck-drillable" style="background:#f0fdf4"
+                 title="点击查看挽回成功明细（带当前时间窗口）" @click="drillToRefundRecovery()">
               <div class="ck-label">挽回成功</div>
               <div class="ck-value" style="color:#16a34a">{{ formatNum(recoveryData.kpi.success_sn) }}</div>
             </div>
-            <div class="ck-cell" style="background:#fef2f2">
+            <div class="ck-cell ck-drillable" style="background:#fef2f2"
+                 title="点击查看挽回失败明细（带当前时间窗口）" @click="drillToRefundRecovery()">
               <div class="ck-label">挽回失败</div>
               <div class="ck-value" style="color:#dc2626">{{ formatNum(recoveryData.kpi.failed_sn) }}</div>
             </div>
-            <div class="ck-cell" :style="successRateColor">
+            <div class="ck-cell ck-drillable" :style="successRateColor"
+                 title="点击查看成功率构成（带当前时间窗口）" @click="drillToRefundRecovery()">
               <div class="ck-label">成功率</div>
               <div class="ck-value">{{ Number(recoveryData.kpi.success_rate || 0).toFixed(1) }}%</div>
             </div>
@@ -326,11 +356,14 @@
         <el-link type="primary" underline="never" @click="$router.push('/dashboards/complaint-analysis')">投诉分析 →</el-link>
       </div>
 
-      <!-- 第一行: 今日/本周投诉来源(3个, 每个展示 登记/处理 双值) + 积压水位(独立维度) -->
+      <!-- 第一行: 今日/本周投诉来源(3个, 每个展示 登记/处理 双值) + 积压水位(独立维度)
+           ★ #76: 每个来源卡可点 → 对应渠道明细（带当前窗口），规范 §3.2① -->
       <el-row :gutter="10" class="mb-8">
         <el-col :xs="24" :md="16">
           <div class="compact-kpi-row">
-            <div class="ck-cell" style="background:#eff6ff">
+            <div class="ck-cell ck-drillable" style="background:#eff6ff"
+                 title="点击查看「内部投诉」明细（带当前时间窗口）"
+                 @click="onComplaintSourceClick('内部投诉')">
               <div class="ck-label">内部投诉</div>
               <div class="ck-rh">
                 <div class="ck-rh-item">
@@ -344,7 +377,9 @@
                 </div>
               </div>
             </div>
-            <div class="ck-cell" style="background:#f5f3ff">
+            <div class="ck-cell ck-drillable" style="background:#f5f3ff"
+                 title="点击查看「商户号投诉」明细（带当前时间窗口）"
+                 @click="onComplaintSourceClick('商户号投诉')">
               <div class="ck-label">商户号投诉</div>
               <div class="ck-rh">
                 <div class="ck-rh-item">
@@ -358,7 +393,9 @@
                 </div>
               </div>
             </div>
-            <div class="ck-cell" style="background:#fef2f2">
+            <div class="ck-cell ck-drillable" style="background:#fef2f2"
+                 title="点击查看「外部投诉」明细（带当前时间窗口）"
+                 @click="onComplaintSourceClick('外部投诉')">
               <div class="ck-label">外部投诉</div>
               <div class="ck-rh">
                 <div class="ck-rh-item">
@@ -383,13 +420,17 @@
             <BaseChart :option="complaintCategoryOption" height="150px" />
           </div>
         </el-col>
-        <!-- 积压待处理(独立水位维度, 近30天窗口内登记的未完成) -->
+        <!-- 积压待处理(独立水位维度, 近30天窗口内登记的未完成)
+             ★ #76: 可点下钻到执行跟踪页（带当前窗口） -->
         <el-col :xs="24" :md="8">
-          <div class="backlog-watermark" :class="{ 'backlog-warn': (backlogTotal || 0) >= 20, 'backlog-danger': (backlogTotal || 0) >= 50 }">
+          <div class="backlog-watermark ck-drillable"
+               :class="{ 'backlog-warn': (backlogTotal || 0) >= 20, 'backlog-danger': (backlogTotal || 0) >= 50 }"
+               title="点击查看积压明细（执行跟踪，带当前时间窗口）"
+               @click="drillToBacklog()">
             <div class="bw-head">
               <el-icon :size="16"><WarningFilled /></el-icon>
               <span class="bw-label">积压待处理</span>
-              <el-tooltip content="近30天登记的未完成投诉工单数(不含更早历史遗留),反映近期投诉消化情况" placement="top">
+              <el-tooltip content="近30天登记的未完成投诉工单数(不含更早历史遗留),反映近期投诉消化情况。点击查看明细。" placement="top">
                 <el-icon style="color:inherit;opacity:.7"><QuestionFilled /></el-icon>
               </el-tooltip>
             </div>
@@ -420,7 +461,9 @@
           </el-tooltip>
         </div>
         <div class="compact-kpi-row">
-          <div class="ck-cell" style="background:#ecfdf5">
+          <div class="ck-cell ck-drillable" style="background:#ecfdf5"
+               title="点击查看卡商渠道明细（带当前时间窗口）"
+               @click="onComplaintSourceClick('(外)卡商')">
             <div class="ck-label">卡商登记</div>
             <div class="ck-rh">
               <div class="ck-rh-item">
@@ -429,7 +472,9 @@
               </div>
             </div>
           </div>
-          <div class="ck-cell" style="background:#f0fdf4">
+          <div class="ck-cell ck-drillable" style="background:#f0fdf4"
+               title="点击查看卡商渠道明细（带当前时间窗口）"
+               @click="onComplaintSourceClick('(外)卡商')">
             <div class="ck-label">卡商处理</div>
             <div class="ck-rh">
               <div class="ck-rh-item">
@@ -689,6 +734,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 import { Timer, Refresh, WarningFilled, Document, Bell, List, CircleCheckFilled, QuestionFilled } from '@element-plus/icons-vue'
 import { today } from '@/api/analytics'
 import { complaintSummary, complaintDetail, complaintBacklog } from '@/api/complaint'
@@ -997,6 +1043,87 @@ function goToImpactSection() {
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
+/* ══════════════ #76 统一卡片下钻 ══════════════
+   设计说明（Design Rationale）
+   目的：**让每个数字都能被追问** —— 使用者看到异常数字时，当场点进去看构成，
+         不必截图找人。这是「决策分析看板」而非「展示看板」的分界线。
+   逻辑：三类去向（规范 §3.2 优先级）：
+         ① 跳明细页 + 带筛选参数（默认，本页全部下钻走这条）
+         ② 弹抽屉（已有：SN/人名 → 审计抽屉，沿用 useAudit，不改）
+         ③ 滚到同页区块（已有：影响事件横幅，沿用 goToImpactSection）
+   口径：★ 下钻必须带**当前时间窗口**（规范 §3.3）—— 本页窗口由 getRange()
+         产出（日视图=当日，周视图=本周），逐字透传给目标页，
+         否则目标页落到默认近30天，数字与刚才所见对不上 = 下钻失效。
+   取舍：❌ 不为每个数字单独开发抽屉 —— 明细页已具备筛选/排序/导出，
+         重复造抽屉是「同指标两处各实现一遍」（违反界面设计规范 §四）。
+         ❌ 不做「趋势图点击下钻到某小时明细」—— 明细接口按日筛选，
+         无小时级筛选能力；强行做会落到「点了一天明细」的误导结果。
+         已在图卡 ⓘ 中声明该限制。
+   工单：#76 · 规范：docs/standards/看板卡片数据说明与下钻规范.md */
+
+const router = useRouter()
+
+/** 当前窗口（日=当日 / 周=本周），与所有卡片所见窗口一致 */
+function drillRange() {
+  return getRange()
+}
+
+/**
+ * 跳到投诉分析页并带完整上下文。
+ * @param {object} opt - { view, source } view=overview|channel|subject, source=internal|merchant|external|card
+ */
+function drillToComplaint({ view = 'overview', source = null } = {}) {
+  const { start, end } = drillRange()
+  const query = { tab: 'analysis', view, start, end }
+  // 卡商/内部等渠道映射到目标页的 channelTab 取值（见 ComplaintAnalysis.vue 的 channelTab）
+  if (source) query.source = source
+  router.push({ path: '/dashboards/complaint-analysis', query })
+}
+
+/** 跳到执行跟踪（积压明细），带窗口 */
+function drillToBacklog() {
+  const { start, end } = drillRange()
+  router.push({ path: '/dashboards/complaint-analysis', query: { tab: 'execute', start, end } })
+}
+
+/** 跳到退款挽回分析，带窗口 */
+function drillToRefundRecovery() {
+  const { start, end } = drillRange()
+  router.push({ path: '/dashboards/refund-recovery', query: { start, end } })
+}
+
+/** 跳到运营看板（人均效率），带窗口 */
+function drillToOperation() {
+  const { start, end } = drillRange()
+  router.push({ path: '/dashboards/operation', query: { start, end } })
+}
+
+/** KPI 卡 → 对应分析页（key 与 kpiCards 的 key 一一对应） */
+function onKpiClick(key) {
+  const map = {
+    reception: () => router.push({ path: '/dashboards/reception', query: drillRange() }),
+    session: () => router.push({ path: '/dashboards/reception', query: drillRange() }),
+    refund_count: () => router.push({ path: '/dashboards/refund', query: drillRange() }),
+    refund_amount: () => router.push({ path: '/dashboards/refund', query: drillRange() }),
+    complaint: () => drillToComplaint({ view: 'overview' }),
+    staff_on_duty: () => drillToOperation(),
+    recovery_rate: () => drillToRefundRecovery(),
+  }
+  map[key]?.()
+}
+
+/** 投诉来源卡 → 渠道明细（source 用目标页 channelTab 的取值） */
+const COMPLAINT_DRILL_SOURCE = {
+  内部投诉: 'internal',
+  商户号投诉: 'merchant',
+  外部投诉: 'external',
+  '(外)卡商': 'card',
+}
+function onComplaintSourceClick(label) {
+  const src = COMPLAINT_DRILL_SOURCE[label]
+  if (src) drillToComplaint({ view: 'channel', source: src })
+}
+
 // 专项任务状态映射 (后端 SpecialTask.status)
 const TASK_STATUS = {
   pending_start: '待启动',
@@ -1065,10 +1192,11 @@ const displayDate = computed(() => {
 })
 
 // 看板标题
-const pageTitle = computed(() => {
-  if (viewMode.value === 'week') return isCurrentWeek.value ? '本周看板' : '周看板'
-  return isToday.value ? '今日看板' : '看板'
-})
+// ★ #76: 统一为「决策分析看板」（原「今日看板/看板」「本周看板/周看板」）
+//   理由: 该页含周视图与多维决策信息，标题随视图在「今日/本周」间跳动会让
+//   使用者以为是两个不同页面。统一主名，日期/周次由标题右侧 `displayDate` 承载，
+//   信息不丢且更清楚。
+const pageTitle = '决策分析看板'
 
 // 选中的日期/周对应的时间范围 (传给后端 start/end)
 function getRange() {
@@ -1641,6 +1769,22 @@ onBeforeUnmount(() => {
 .kpi-strip-item.kpi-purple { border-left-color: #7c3aed; }
 .kpi-strip-item.kpi-teal { border-left-color: #0d9488; }
 .kpi-strip-item.kpi-cyan { border-left-color: #0891b2; }
+
+/* ★ #76 卡片可下钻的统一视觉（规范 §3.5: 可点元素须有 pointer 与 hover 反馈） */
+.kpi-drillable,
+.ck-drillable {
+  cursor: pointer;
+  transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+}
+.kpi-drillable:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .08);
+}
+.ck-drillable:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .08);
+  outline: 1px solid rgba(37, 99, 235, .28);
+}
 .ksi-icon {
   width: 24px; height: 24px;
   border-radius: 5px;

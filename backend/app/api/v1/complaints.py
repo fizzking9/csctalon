@@ -754,6 +754,23 @@ def complaint_summary(
         .order_by(_day_trunc(ServiceTicket.register_time))
     ).all()
 
+    # ---- (外)卡商 · 分类分布 (#75) ----
+    # ★ 修复前此处缺失 → 前端「卡商投诉分类」图**永久空白**（后端返回 by_category=[]）。
+    #   根因: 原注释写 "分类见 complaint_subs"，但该接口**从未存在**（死引用）；
+    #        前端 ComplaintChannelPanel 只认 `by_category`，故恒为空。
+    # 数据源: `card_complaints.problem_category`（生产填充率 552/764 = 72%，15 类）。
+    # ⚠️ 口径: **仅补充表侧**分类 —— 工单侧卡商无 problem_category 字段（其 service_item
+    #   只有「工信部投诉」一项，无区分度），故本图不尝试与 card_total 对齐；
+    #   语义 = 「卡商投诉分类」的来源即该字段，NULL 归「未标注」（与其它三源同规则）。
+    card_by_cat = db.execute(
+        select(CardComplaint.problem_category, func.count())
+        .where(*([CardComplaint.complaint_date >= ts] if ts else []))
+        .where(*([CardComplaint.complaint_date <= te] if te else []))
+        .group_by(CardComplaint.problem_category)
+        .order_by(func.count().desc())
+        .limit(20)
+    ).all()
+
     # ---- 补充明细数据源统计(315外部投诉 / 卡商群投诉,workbuddy推送) ----
     # 口径: 两张补充表按投诉日期统计总数与"已关联服务工单"数。
     # 关联 = 按 device_sn 匹配到对应工单(matched_ticket_no 非空)。
@@ -966,8 +983,16 @@ def complaint_summary(
                 "true_dup_events": supplementary["card"]["true_dup_events"],
                 "merged_rows": supplementary["card"]["merged_rows"],
                 "needs_review": supplementary["card"]["needs_review"],
-                "by_category": [],   # 卡商无工单侧分类; 分类见 complaint_subs(用 problem_category)
-                "by_handler": [],     # 卡商处理人见 analytics.complaint_card_handlers
+                "by_category": [{"name": r[0] or "未标注", "count": int(r[1] or 0)} for r in card_by_cat],
+                # ★★ 有意保持空数组 —— **不是** bug，是设计决策 ★★
+                #   卡商不画「处理人排行」，原因:
+                #     1) `handler` 为人员别名字段, 来源混合(含自由文本), 语义不可靠;
+                #     2) 画了就是**误导** —— 无法区分"客服处理"与"诉求原文"。
+                #   前端 `ComplaintChannelPanel.vue` 已用「卡商渠道说明」占据该列位，
+                #   不留空。若要恢复该图，须先解决 handler 语义可信度（另立工单）。
+                #   ⚠️ 原注释指向 `analytics.complaint_card_handlers`，该函数存在但
+                #     **前端从未调用**（死引用）—— 已就地说明，避免下次被误判为缺陷。
+                "by_handler": [],
                 "trend": card_trend_merged,
             },
         }

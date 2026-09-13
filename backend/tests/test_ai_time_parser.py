@@ -194,15 +194,23 @@ class _Payload:
 
 
 def test_aiwindow_nl_applied_when_no_explicit():
-    """B1: 无显式参数时, 问句自然语言生效并记录来源/回显。"""
+    """B1: 无显式参数时, 问句自然语言生效并记录来源/回显。
+
+    ⚠️ `_AiWindow.resolve` 内部走**真实时钟**（无 today 注入），故这里必须
+    按「相对今天」动态断言 —— 写死日期会让测试在次日**必然过期**
+    （2026-09-13 即因此失败，见 #75 的顺带修复）。
+    """
     from app.api.v1.ai import _AiWindow
+    today = _dt.date.today()
+    yest = (today - _dt.timedelta(days=1)).isoformat()
+
     w = _AiWindow(_Payload("昨天的运营数据"))
     w.resolve("昨天的运营数据")
     assert w.window_source == "nl"
-    assert (w.start, w.end) == ("2026-09-10", "2026-09-10")
-    assert "2026-09-10" in w.window_label
+    assert (w.start, w.end) == (yest, yest)
+    assert yest in w.window_label
     eff = w.effective()
-    assert eff["start"] == "2026-09-10" and eff["date"] is None
+    assert eff["start"] == yest and eff["date"] is None
 
 
 def test_aiwindow_explicit_beats_nl():
@@ -235,13 +243,20 @@ def test_aiwindow_period_fallback_on_no_intent():
 
 
 def test_aiwindow_span_uses_week_grain():
-    """跨天区间 → period 改用 weekly, 让 grain 走 week(与 external brief 同映射)。"""
+    """跨天区间 → period 改用 weekly, 让 grain 走 week(与 external brief 同映射)。
+
+    ⚠️ 同 `test_aiwindow_nl_applied_when_no_explicit`: 走真实时钟, 需动态断言。
+    """
     from app.api.v1.ai import _AiWindow
+    today = _dt.date.today()
+    start = (today - _dt.timedelta(days=2)).isoformat()   # 「近3天」含今天 → 往前2天
+    end = today.isoformat()
+
     w = _AiWindow(_Payload("近3天运营数据"))
     w.resolve("近3天运营数据")
     eff = w.effective()
     assert eff["period"] == "weekly", "跨天区间必须走 week grain, 否则口径与 brief 不一致"
-    assert (eff["start"], eff["end"]) == ("2026-09-09", "2026-09-11")
+    assert (eff["start"], eff["end"]) == (start, end)
 
 
 def test_aiwindow_single_day_keeps_period():

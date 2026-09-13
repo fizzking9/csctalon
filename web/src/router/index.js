@@ -17,7 +17,8 @@ const routes = [
         path: 'dashboards/today',
         name: 'DashboardToday',
         component: () => import('@/views/dashboards/Today.vue'),
-        meta: { title: '今日看板', icon: 'DataLine' },
+        // ★ #76: 显示名「今日看板」→「决策分析看板」(path 不变)
+        meta: { title: '决策分析看板', icon: 'DataLine' },
       },
       {
         path: 'dashboards/operation',

@@ -39,7 +39,13 @@ export const MENU_GROUPS = [
     buildMode: 'always',
     roles: null,
     children: [
-      { path: '/dashboards/today', title: '今日看板', icon: 'DataLine' },
+      // ★ #76: 原「今日看板」→「决策分析看板」
+      //   改名理由: 该页早已不止「今日」——含周视图、影响事件、政策、待办、专项、
+      //   退款挽回、投诉专项，是**面向决策的当日/本周综合视图**。
+      //   叫「今日」会让使用者以为只服务当天，弱化其决策价值。
+      //   ⚠️ 仅改显示名，path 保持 `/dashboards/today` 不动
+      //     （书签/权限配置/菜单测试/menu.spec.js 均按 path 断言）。
+      { path: '/dashboards/today', title: '决策分析看板', icon: 'DataLine' },
       { path: '/dashboards/operation', title: '运营看板', icon: 'TrendCharts' },
     ],
   },

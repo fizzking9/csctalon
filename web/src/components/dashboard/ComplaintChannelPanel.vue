@@ -10,6 +10,10 @@
   │ 口径：category/handler/trend 均来自 `/complaints/summary` 的对应分源对象；             │
   │       明细来自 `/complaints/detail?source_type=`。详见                                   │
   │       docs/standards/投诉渠道口径与对账说明.md §一                                     │
+  │       ⚠️ 卡商 by_category 来源特殊(#75)：取 `card_complaints.problem_category`          │
+  │          （仅补充表侧；工单侧卡商 service_item 只有「工信部投诉」一项，无区分度）。      │
+  │          卡商 by_handler **有意为空**（handler 混合自由文本，画排行即误导），           │
+  │          故卡商列由「卡商渠道说明」占据，不留空 —— 这是设计，不是缺陷。                  │
   │ 取舍：❌ 不做"四渠道叠加对比图" —— 那是概览的职责(总量堆积趋势)，此处避免重复展示；     │
   │       ❌ 卡商不做处理人排行 —— 卡商 result 是混合语义字段，无可靠处理人字段；          │
   │       ❌ 不做导出(放在执行跟踪页，避免每页都有导出按钮导致心智负担)。                   │
@@ -38,6 +42,12 @@
           <div v-if="meta.independent" class="dr-sec"><b>为什么标"独立统计"</b><div>(外)卡商为独立统计体系，<b>不计入投诉总量</b>（用户 2026-09-11 决策）。</div></div>
           <div v-else class="dr-sec"><b>本页不含什么</b><div>不展示其它渠道的对比（概览已做），避免同一指标两处各画一遍。</div></div>
           <div class="dr-sec"><b>数据口径</b><div>{{ meta.scope }}，详见 docs/standards/投诉渠道口径与对账说明.md</div></div>
+          <div v-if="meta.independent" class="dr-sec"><b>分类 / 处理人从哪来</b>
+            <div>· <b>分类</b>：取卡商补充表的「问题分类」字段（工单侧卡商只有「工信部投诉」一项，无区分度）。<br>
+              · <b>不画处理人排行</b>：卡商的结果字段是<b>混合语义</b>（含自由文本诉求），无可靠处理人 —— 画了会误导，故用本说明卡片占该列位。</div></div>
+          <div v-if="meta.independent" class="dr-sec"><b>我们不做什么</b>
+            <div>· 不做「建议处理人数」：卡商处理动作与客服工单口径不同，无法折算。<br>
+              · 不做渠道间横向对比：那是概览的职责，此处避免同指标两处各画一遍。</div></div>
         </div>
       </el-popover>
     </div>

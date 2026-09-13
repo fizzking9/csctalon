@@ -887,6 +887,7 @@
 
 <script setup>
 import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { Search, Refresh, Download, QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
@@ -900,6 +901,9 @@ import { complaintAnalysis, complaintOverview, complaintSummary, complaintDetail
 import { useAudit } from '@/composables/useAudit'
 
 const { openDeviceAudit, openPersonAudit } = useAudit()
+
+// #76 下钻落点: 读取来源页传来的窗口/定位参数
+const route = useRoute()
 
 const loaded = ref(false)
 const loading = ref(false)
@@ -1865,10 +1869,39 @@ onMounted(() => {
   // ★ 初始区间(#67 P1): 默认近 30 天(含今日)。
   //   ⚠️ 必须在此初始化 —— 时间条是受控组件，不自己持有区间；
   //      缺了它 range 恒为空 → 概览/环比/明细全部拿不到窗口(实测踩到)。
+  //
+  // ★★ #76 下钻落点: 先读 query 覆盖默认值 ★★
+  //   规范依据: docs/standards/看板卡片数据说明与下钻规范.md §3.3
+  //   「下钻必须带上下文」—— 因此本页必须能**接收**上下文，否则从看板点过来
+  //   会落到默认近30天，与刚才看到的窗口不一致，数字对不上 = 下钻失效。
+  //   支持参数: start / end / tab(analysis|execute) / view(overview|channel|subject)
+  //             / source(internal|merchant|external|card)
+  const q = route.query || {}
   const today = dayjs()
-  range.value = {
-    start: today.subtract(29, 'day').format('YYYY-MM-DD'),
-    end: today.format('YYYY-MM-DD'),
+  const isDate = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)
+  if (isDate(q.start) && isDate(q.end)) {
+    // ★ 带窗口下钻: 必须把时间条切到「自定义」并回填区间，
+    //   否则 range 虽被覆盖、**控件仍显示「近30天」** → 使用者看到"区间显示 8/15~9/13、
+    //   数据却是 9/13 当天"，比不做下钻更糟（数字与标签对不上 = 误导）。
+    //   这是"受控组件"的必然后果：状态有第二处（rangePreset/customRange）就必须同步。
+    rangePreset.value = 'custom'
+    customRange.value = [q.start, q.end]
+    range.value = { start: q.start, end: q.end }
+  } else {
+    range.value = {
+      start: today.subtract(29, 'day').format('YYYY-MM-DD'),
+      end: today.format('YYYY-MM-DD'),
+    }
+  }
+  // 定位到指定 tab（无参数时保持既有默认：分析 → 决策概览）
+  if (q.tab === 'execute') {
+    topTab.value = 'execute'
+  } else if (['overview', 'channel', 'subject'].includes(q.view)) {
+    topTab.value = 'analysis'
+    analysisTab.value = q.view
+    if (q.view === 'channel' && ['internal', 'merchant', 'external', 'card'].includes(q.source)) {
+      channelTab.value = q.source
+    }
   }
   loadData()
 })

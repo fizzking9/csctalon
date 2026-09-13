@@ -104,7 +104,7 @@ describe('菜单配置 - buildMode 语义', () => {
     const byPath = Object.fromEntries(
       (dash.children || []).map((c) => [c.path, c.title]),
     )
-    expect(byPath['/dashboards/today']).toBe('今日看板')
+    expect(byPath['/dashboards/today']).toBe('决策分析看板')
     expect(byPath['/dashboards/operation']).toBe('运营看板')
   })
 })
