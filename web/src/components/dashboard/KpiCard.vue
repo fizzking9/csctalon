@@ -15,6 +15,24 @@
       <template v-if="money">{{ fmtMoney(value) }}</template>
       <template v-else>{{ fmtNum(value) }}<span v-if="unit" class="kpi-unit">{{ unit }}</span></template>
     </div>
+    <!-- ★ #82 目标达成水位（可控指标前置）
+         目的: 替主管回答「这个数**够不够**」—— 环比只说"变了多少"，
+               目标线才说"是否可接受"。「涨了5%」与「还差得远」是两件完全不同的事。
+         逻辑: 主值下方一条紧凑徽标 + 目标线文字（如「达标 ≥40%」），
+               颜色即水位（绿=达标/黄=预警/红=告警），不点也能看到。
+         口径: 阈值**从后端 `metric_thresholds` 读取**（`target/warning/critical`），
+               不在前端硬编码 —— 防漂移（管理员调阈值，前端自动跟随）。
+         取舍: ① 无法判定时**必须显示原因**（如"多日窗口不做达标判定"），
+                 不能默默当作达标；② 未配阈值则整条不渲染（**不编造目标线**）。
+         工单: #82 -->
+    <div v-if="levelMeta" class="kpi-level" :style="{ color: levelMeta.color, borderColor: levelMeta.color + '55', background: levelMeta.bg }">
+      <span class="kpi-level-badge">{{ levelMeta.label }}</span>
+      <span v-if="targetText" class="kpi-level-target">{{ targetText }}</span>
+    </div>
+    <div v-else-if="levelReason" class="kpi-level kpi-level-na" :title="levelReason">
+      <span class="kpi-level-badge">不判定</span>
+      <span class="kpi-level-target">{{ levelReason }}</span>
+    </div>
     <!-- 接待量专用追加行: 接待数(去重设备近似独立客户人数) -->
     <div v-if="deviceCount != null" class="kpi-device-sub">
       <span class="kpi-device-sub-label">接待数</span>
@@ -110,7 +128,41 @@ const props = defineProps({
   // ★ #80 卡内副行: [{ label, text, color? }]
   //   用于四路金额、口径对比（如「经营口径 vs 实际现金流」）。空则不渲染。
   subRows: { type: Array, default: null },
+  // ★ #82 目标达成水位: { level, target, warning, critical, unit, direction, desc, reason, source }
+  //   null 时不渲染（未配阈值 → **不编造目标线**）
+  metricLevel: { type: Object, default: null },
 })
+
+/** 水位展示元数据（四级 → 中文标签 + 配色）
+ *  与「今日值班看板」既有业务约定一致：达标 / 预警 / 告警。 */
+const LEVEL_META = {
+  excellent: { label: '优秀', color: '#059669', bg: '#ecfdf5' },
+  green: { label: '达标', color: '#16a34a', bg: '#f0fdf4' },
+  warning: { label: '预警', color: '#ca8a04', bg: '#fefce8' },
+  critical: { label: '告警', color: '#dc2626', bg: '#fef2f2' },
+}
+
+/** 有明确级别时才渲染徽标（level=null 走下面的「不判定」分支） */
+const levelMeta = computed(() => {
+  const lv = props.metricLevel?.level
+  return lv ? (LEVEL_META[lv] || null) : null
+})
+
+/** 目标线文字（如「达标 ≥40%」）—— 让使用者知道徽标是按什么判的。
+ *  ⚠️ 数字全部来自后端阈值，不硬编码。 */
+const targetText = computed(() => {
+  const m = props.metricLevel
+  if (!m) return ''
+  const unit = m.unit || ''
+  const higher = m.direction === 'higher_better'
+  // 优先展示"优秀线(目标)"；无优秀线则展示预警线（也能回答"够不够"）
+  if (m.target != null) return `${higher ? '≥' : '≤'}${m.target}${unit}`
+  if (m.warning != null) return `${higher ? '≤' : '≤'}${m.warning}${unit}为预警线`
+  return ''
+})
+
+/** 不判定的原因（后端给，如"多日窗口不做达标判定"）—— 必须显示，不能默默当达标 */
+const levelReason = computed(() => props.metricLevel?.reason || '')
 
 // 只显示有值的段（避免「AI0%」这种无意义图例）
 const positiveSegs = computed(() => (props.stack?.segs || []).filter((s) => s.value > 0))
@@ -162,6 +214,36 @@ function fmtMoney(v) {
 .kpi-device-sub-label { font-size: 11px; color: #909399; }
 .kpi-device-sub-val { font-size: 15px; font-weight: 600; color: #409eff; letter-spacing: -0.3px; }
 .kpi-device-sub-unit { font-size: 11px; font-weight: 400; color: #909399; margin-left: 2px; }
+
+/* ★ #82 目标达成水位徽标
+   设计说明: 4px 高度不增多少，但把「够不够」这一最重要判断从"要自己算"
+   变成"一眼看到"。放在主值下方、环比上方 —— 视觉优先级：值 > 够不够 > 变化。 */
+.kpi-level {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+  padding: 1px 6px;
+  border: 1px solid;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  max-width: 100%;
+}
+.kpi-level-badge { font-weight: 600; flex-shrink: 0; }
+.kpi-level-target {
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 不判定态: 灰色中性，避免被误读为"达标/告警" */
+.kpi-level-na {
+  color: #909399 !important;
+  border-color: #dcdfe6 !important;
+  background: #fafafa !important;
+  cursor: help;
+}
 
 /* ★ #80 括弧分项 chips: 紧跟主值的一行小标签（4 路拆分不再挤压主值） */
 .kpi-chips {

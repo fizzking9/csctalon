@@ -3291,6 +3291,67 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
     _comp_y = _srh(db, ys, ye, include_suppl_external=_INCLUDE_COMPLAINT_FILES)["total"]
     comp_y = int(_comp_y["registered"])
 
+    # 7b. ★ #82: 目标达成率水位（把「够不够」显示到看板上）
+    #   【为什么加】看板原只有「环比」——只能说明"变了多少"，无法说明"是否可接受"。
+    #     「涨了 5%」与「还差得远」是两件完全不同的事，缺目标线就分不清。
+    #   【数据来源】`metric_thresholds` 表 —— **复用既有阈值引擎，不新建机制**。
+    #   【口径锚点】阈值按**日**配置（metric.period='day'），而本接口支持周/月/季/年。
+    #     ⚠️ 故**只在统计窗口正好是单日时**才给出级别，否则 level=None
+    #       —— 拿日目标去判周数据是错的（会持续虚警）。有意的保守取舍。
+    #
+    # ★★★ 只接「口径与阈值都验证过」的指标（2026-09-13 生产实测，极重要）★★★
+    #   实测发现既有阈值**多个严重错配**（详见工单 #82 评论）：
+    #     refund_count            实际 314  阈值 30/50    → 差 10 倍
+    #     ticket_backlog          实际 599  阈值 20/50    → 差 30 倍
+    #     internal_complaint_daily实际 123  阈值 8/15     → 差 15 倍
+    #   且这三条**口径也与看板卡不同**（refund_count=refunds 单表仅A路，
+    #   而看板「退款笔数」= A+B+C+D 四路合计；internal_complaint_daily=内部单源，
+    #   而看板「投诉数」= 三源合计）。
+    #   ⇒ 若强行接上，看板会显示「退款笔数严重告警」（其实 314 是正常量），
+    #     **比不显示更糟** —— 会训练使用者忽略告警。故本函数**只接口径同源且
+    #     阈值经实测合理的指标**，其余明确不接（宁缺勿错，#81 同源原则）。
+    #
+    #   当前唯一通过的：`recovery_rate`
+    #     · 口径同源 ✅ 该函数 docstring 明写「复用今日看板退款挽回专项口径」，
+    #       底层同为 `refund_recovery_analysis`，与看板「挽回率」卡逐位一致
+    #     · 阈值合理 ✅ 40/30/20，与 `Today.vue` 既有的「≥38% 达标 / 30-38% 预警 /
+    #       <30% 告警」业务规则基本吻合（同一业务约定，非拍脑袋数）
+    _metric_levels: dict[str, Any] = {}
+    try:
+        from app.services.metric_registry_service import _eval_recovery_rate as _ev_rr
+        from app.services.metric_registry_service import classify as _mcls
+        from app.services.metric_registry_service import get_threshold as _mthr
+
+        # ⚠️ 单日判定用本函数已有的 `d_iso`/`d_end_iso`（来自 _resolve_windows），
+        #   不要用 `ts_sh`/`te_sh` —— 那是 `today_hourly_trend` 的局部变量，此函数没有。
+        _is_single_day = (d_end_iso is None) or (d_iso == d_end_iso)
+        _thr = _mthr(db, "recovery_rate")
+        if _thr is not None:
+            _rr = _ev_rr(db, ts, te)
+            _val = _rr.get("value") if _rr.get("data_ok") else None
+            _metric_levels["recovery_rate"] = {
+                "value": _val,
+                "unit": "%",
+                "direction": "higher_better",
+                "level": _mcls(_val, _thr, "higher_better") if ( _is_single_day and _val is not None) else None,
+                "target": _thr.excellent_value,
+                "warning": _thr.warning_value,
+                "critical": _thr.critical_value,
+                "desc": "退款挽回成功率（与退款挽回专项同口径）",
+                # ⚠️ 无法判定时必须让前端能解释"为什么不显示"，而非默默当作达标
+                "reason": (
+                    None if _is_single_day
+                    else "目标线按【日】配置，当前窗口为多日，不做达标判定（避免用日目标判周数据）"
+                ),
+                # 阈值来源标注：不写死在前端，让使用者知道可调整
+                "source": "指标注册表 metric_thresholds（可由管理员调整）",
+            }
+    except Exception as _e:  # noqa: BLE001
+        # 阈值异常**不得**影响看板主数据 —— 水位是附加信息，缺失时前端不渲染
+        logger.warning("[#82] 指标水位求值失败(不影响主数据): %s", _e)
+        _metric_levels = {}
+    metric_levels = _metric_levels
+
     def _k(v, yv):
         return {"value": v, "yoy_value": yv, "yoy_pct": _pct_delta(v, yv)}
 
@@ -3326,6 +3387,10 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         "staff_on_duty":  _k(int(staff_t), int(staff_y)),
         "complaint":      _k(int(comp_t), int(comp_y)),
         "merchant_tip":   merchant_tip,
+        # ★ #82: 目标达成率水位（把「够不够」给出来；空 dict = 无阈值或非单日窗口）
+        #   结构: {metric_code: {value, unit, direction, level, target, warning, critical, desc, reason}}
+        #   ⚠️ level=null 且 reason 非空 ⇒ 前端应显示"不判定"并给出原因，而非当作达标
+        "metric_levels":  metric_levels,
         # ── 新增: 今日四路线拆分 + 实际现金流E + 对账偏差 (前端tooltip/明细卡) ──
         "cash_routes_today": {
             "route_a": a_t,  # A.退费单线上直退(按创建时间)

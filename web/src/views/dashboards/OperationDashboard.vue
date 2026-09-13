@@ -123,6 +123,7 @@
             :stack="c.stack || null"
             :chips="c.chips || null"
             :sub-rows="c.subRows || null"
+            :metric-level="c.metricLevel || null"
             :tip="c.tip"
             compact
           />
@@ -594,6 +595,49 @@
         <span>{{ supplSummaryText }}</span>
       </div>
 
+      <!-- ★ #82 积压账龄分档（把「该不该管」显示出来）
+           目的: 替主管回答「积压是在恶化还是在消化？陈年烂账有多少？」
+           逻辑: 总量看不出结构 —— **新单涌入**与**老单在烂**是完全不同的问题，
+                 处理动作也不同（前者要加人，后者要决策清理/关单）。
+                 故按账龄分档并列，一眼看出陈旧部分占比。
+           口径: **全量**未完成投诉工单按 register_time 距今账龄分档；
+                 ⚠️ **不含 (外)卡商**（#53 独立统计）；与上方「近30天积压」口径不同（有意保留）。
+           取舍: ① 不改上方「积压待处理」卡 —— 两者含义确实不同
+                   （近30天=近期消化压力；本卡=历史包袱），改口径会造成数字变动争议；
+                 ② 不做饼图 —— 四档是**递进**关系（越老越糟），横向条更易比较；
+                 ③ 每档不做独立下钻 —— 明细页按【日】筛选，账龄是计算列无法透传，
+                   故整卡下钻到投诉分析页（已在 ⓘ 中声明）。
+           工单: #82 -->
+      <div v-if="backlogAging" class="backlog-aging">
+        <div class="ba-head">
+          <span class="ba-title">积压账龄分档（全量 · 不含卡商）</span>
+          <el-tooltip effect="dark" placement="top" raw-content :content="backlogAgingTip">
+            <el-icon style="color:#b0b4bb;cursor:help;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+          <span class="ba-total">共 <b>{{ formatNum(backlogAging.total) }}</b> 条未结</span>
+          <span v-if="backlogAging.max_age_days" class="ba-oldest">
+            最老 {{ backlogAging.max_age_days }} 天
+          </span>
+        </div>
+        <div class="ba-bars">
+          <div
+            v-for="s in BACKLOG_AGING_SEGMENTS"
+            :key="s.key"
+            class="ba-seg"
+            :style="{ flex: Math.max(Number(backlogAging[s.key]) || 0, 0.6) }"
+            :title="`${s.label}：${formatNum(backlogAging[s.key])} 条（${backlogAgingTotal ? Math.round((backlogAging[s.key] * 100) / backlogAgingTotal) : 0}%）`"
+          >
+            <div class="ba-seg-bar" :style="{ background: s.color, opacity: backlogAging[s.key] ? 1 : 0.25 }" />
+            <div class="ba-seg-label" :style="{ color: s.color }">{{ s.short }}</div>
+            <div class="ba-seg-value">{{ formatNum(backlogAging[s.key]) }}</div>
+          </div>
+        </div>
+        <div class="ba-note">
+          C/D 档（>30 天）共 <b :style="{ color: overdueCount ? '#dc2626' : '#16a34a' }">{{ formatNum(overdueCount) }}</b> 条，
+          {{ overdueCount > 0 ? '需决策：清理 / 关单 / 转专项' : '无需介入' }}
+        </div>
+      </div>
+
       <!-- 来源分布 + 处理人Top + 被投诉主体Top -->
       <el-row :gutter="12" class="mb-16">
         <el-col :xs="24" :md="8">
@@ -905,6 +949,51 @@ const complaintTip = computed(() => {
   ].join('<br/>')
 })
 
+// ========== ★ #82 积压账龄分档 ==========
+/** 后端 `backlog.aging`（全量未完成投诉工单按账龄分档）。空则不渲染。 */
+const backlogAging = computed(() => {
+  const a = complaintSummaryData.value?.backlog?.aging
+  if (!a || !a.total) return null
+  return a
+})
+
+const backlogAgingTotal = computed(() => Number(backlogAging.value?.total || 0))
+
+/** >30 天部分（需决策清理的部分 —— 这才是"该不该管"的答案） */
+const overdueCount = computed(() => {
+  const a = backlogAging.value
+  if (!a) return 0
+  return Number(a.d31_90 || 0) + Number(a.d90_plus || 0)
+})
+
+/** 四档配色：越老越红（绿→黄→橙→红），让"陈旧"在视觉上自然浮出 */
+const BACKLOG_AGING_SEGMENTS = [
+  { key: 'd0_7', short: '0-7天', label: '0-7 天（正常压力）', color: '#16a34a' },
+  { key: 'd8_30', short: '8-30天', label: '8-30 天（需关注）', color: '#ca8a04' },
+  { key: 'd31_90', short: '31-90天', label: '31-90 天（已积压，需介入）', color: '#ea580c' },
+  { key: 'd90_plus', short: '>90天', label: '>90 天（陈年烂账）', color: '#dc2626' },
+]
+
+/** 积压账龄数据说明（页面层 ⓘ，看板卡片规范 §二 双强制） */
+const backlogAgingTip = [
+  '<b>来源</b>：/complaints/summary 的 backlog.aging',
+  '<b>口径</b>：**全量**未完成投诉工单，按 register_time 至今的账龄分档',
+  '　· 未完成 = status ∉（已结案/已完成/完成/已解决/已回复/已反馈/已关闭/终止/已终止）',
+  '　· 315 补充表已办结的关联单视为已完成（不进积压，与上方同规则）',
+  '　· <b>不含 (外)卡商</b> —— 卡商按 #53 独立统计、不纳入投诉总量',
+  '<b>时点</b>：跟随数据最新状态（非窗口筛选）；本页缓存 24h',
+  '<b>「空」的含义</b>：某档显示 0 = 该账龄区间确无未结单（不是数据缺失）；整卡不显示 = 全量积压为 0',
+  '<b>下钻</b>：⚠️ 本卡**不做逐档下钻** —— 账龄是计算列，明细接口按【日】筛选，',
+  '　无法透传账龄条件。请点下方「投诉明细」或跳投诉分析页（那里可按状态筛未完成）。',
+  '<br/><b>⚠️ 取舍（不做什么及原因）</b>',
+  '① <b>不改上方「积压待处理」卡</b> —— 两者含义确实不同：',
+  '　上方=**近30天窗口内**登记的未完成 → 近期消化压力；',
+  '　本卡=**全量**未完成按账龄分档 → 历史包袱。',
+  '　实测差异极大（近30天 46 条 vs 全量 436 条）→ 改口径会造成数字变动争议，故并列保留。',
+  '② <b>不做饼图</b> —— 四档是递进关系（越老越糟），横向条更易比较多少与占比。',
+  '③ <b>不做逐档下钻</b> —— 见上方「下钻」说明（技术能力边界，非偷懒）。',
+].join('<br/>')
+
 // 投诉明细表 筛选/排序状态 (KPI 卡片点击 = 来源筛选)
 const complaintSourceFilter = ref('')
 const complaintCategoryFilter = ref('')
@@ -1183,9 +1272,40 @@ const kpiCards = computed(() => {
     //   会把 ref 对象塞进 props，`v-if="chips && chips.length"` 恒为 undefined → 静默不渲染。
     //   ★ 教训: props 传 computed 结果时必须显式 `.value`（实测踩过一次）。
     { key: 'complaint', label: '投诉数', value: complaint.value, unit: '条', icon: 'Bell', bg: '#faf5ff', color: '#7c3aed', yoy_key: 'complaint', yoy_pct: complaint.yoy_pct, yoy_value: complaint.yoy_value, chips: complaintChips.value, tip: complaintTip.value },
-    { key: 'recovery', label: '挽回率', value: Number(recoveryRate || 0), unit: '%', icon: 'SuccessFilled', bg: '#ecfdf5', color: '#059669', yoy_key: 'recovery', yoy_pct: null, yoy_value: null, tip: '退款挽回成功率' },
+    // ★ #82: 挽回率卡接「目标达成水位」—— 阈值来自后端 metric_thresholds，
+    //   前端只负责显示。这是本页**唯一**接入水位的指标，原因（重要）：
+    //   ⚠️ 2026-09-13 生产实测发现其余指标的阈值**严重错配** + 口径与看板卡不同源：
+    //        refund_count 实际 314 / 阈值 30-50（差10倍，且只算A路单表）
+    //        ticket_backlog 实际 599 / 阈值 20-50（差30倍）
+    //        internal_complaint_daily 实际 123 / 阈值 8-15（差15倍）
+    //     若强行接上会显示「退款笔数严重告警」（其实很正常）→ **比不显示更糟**，
+    //     会训练使用者忽略告警。已开 #83 治理，治理完成后再扩展接入。
+    //   `recovery_rate` 通过双重验证：① 口径同源（底层 refund_recovery_analysis
+    //     与看板挽回卡一致）② 阈值 40/30/20 与 Today.vue 既有业务规则吻合。
+    { key: 'recovery', label: '挽回率', value: Number(recoveryRate || 0), unit: '%', icon: 'SuccessFilled', bg: '#ecfdf5', color: '#059669', yoy_key: 'recovery', yoy_pct: null, yoy_value: null, metricLevel: recoveryMetricLevel.value, tip: recoveryMetricTip },
   ]
 })
+
+// ========== ★ #82 目标达成水位 ==========
+/** 后端 `metric_levels.recovery_rate`（含阈值与级别）；未配阈值时为 null */
+const recoveryMetricLevel = computed(() => kpiData.value?.metric_levels?.recovery_rate || null)
+
+/** 挽回率卡数据说明（含目标线来源 —— 让使用者知道"阈值可调"） */
+const recoveryMetricTip = [
+  '<b>来源</b>：/analytics/today/kpi 的 reception/refund_recovery（与退款挽回专项同源）',
+  '<b>口径</b>：挽回成功率 = 挽回成功SN / 申请SN（按 SN 计，T+7 窗口）',
+  '<b>目标线</b>：来自指标注册表 <b>metric_thresholds</b>（可由管理员调整，前端不硬编码）',
+  '　优秀 ≥40% · 预警 &lt;30% · 告警 &lt;20%',
+  '<b>时点</b>：跟随顶部时间条；本页缓存 24h',
+  '<b>「空」的含义</b>：显示 0 = 本窗口无挽回申请；徽标不显示 = 未配阈值或窗口非单日',
+  '<br/><b>⚠️ 取舍（不做什么及原因）</b>',
+  '① <b>只在【单日】窗口判定达标</b> —— 目标线按日配置，拿日目标判周/月数据会持续虚警，',
+  '　　故多日窗口显示「不判定」并说明原因（而非默默当作达标）',
+  '② <b>未配阈值则不渲染徽标</b> —— 不编造目标线；看到"不判定"比看到假目标好',
+  '③ <b>本页其余指标本期未接水位</b> —— 实测其阈值与真实量级差 10~30 倍且口径不同源，',
+  '　　接上会产生恒告警（比不显示更糟）；见工单 #83',
+].join('<br/>')
+
 
 // ========== 图表配置 ==========
 // 四路经营退款路线配色 (A 线上直退 / B 钱包取现 / C 闪猫退款 / D 手动退款)
@@ -1857,6 +1977,42 @@ watch([grain, weekOffset, monthOffset, quarterOffset, yearOffset, customDateRang
 }
 .rec-stack-seg { display: block; height: 100%; }
 .rec-stack-note { font-size: 11px; color: #9ca3af; }
+
+/* ★ #82 积压账龄分档
+   设计说明: 用横向条 + 数字并列，让「越老越红」自然浮出。
+   宽度按数量 flex 分配（最少 0.6 保证标签不被挤没）。 */
+.backlog-aging {
+  margin-top: 4px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: #fafbfc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+.ba-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.ba-title { font-size: 12px; font-weight: 600; color: #303133; }
+.ba-total { font-size: 12px; color: #6b7280; margin-left: auto; }
+.ba-total b { color: #303133; font-size: 14px; }
+.ba-oldest { font-size: 11px; color: #dc2626; font-weight: 600; }
+.ba-bars { display: flex; gap: 6px; align-items: flex-end; }
+.ba-seg { min-width: 0; text-align: center; }
+.ba-seg-bar { height: 8px; border-radius: 4px; margin-bottom: 4px; }
+.ba-seg-label { font-size: 11px; font-weight: 600; white-space: nowrap; }
+.ba-seg-value { font-size: 13px; font-weight: 700; color: #303133; font-variant-numeric: tabular-nums; }
+.ba-note {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed #e5e7eb;
+  font-size: 12px;
+  color: #6b7280;
+}
+.ba-note b { font-size: 14px; margin: 0 2px; }
 
 /* 窄屏: 精简排版, 避免文字/数字被挤成两行 */
 @media (max-width: 768px) {

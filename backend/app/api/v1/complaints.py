@@ -946,6 +946,56 @@ def complaint_summary(
         for r in db.execute(_backlog_cat_stmt).all()
     ]
 
+    # ---- ★ #82: 积压**账龄分档**（全量，不限窗口）----
+    #   【为什么新增而不是改上面那个 backlog.total】
+    #     两者含义**确实不同**，不是同一指标的两个写法：
+    #       · 上面 backlog.total = **窗口内登记**的未完成 → 衡量「近期消化压力」
+    #       · 本段 aging         = **全量**未完成按账龄分档 → 衡量「历史包袱」
+    #     实测（2026-09-13）差异极大：近30天窗口 46 条，而全量 436 条
+    #     （其中 >90 天 286 条，最老 910 天）→ 只看窗口会**漏掉 89%**，
+    #     让人误判「积压可控」。故**保留前者 + 新增后者**，并互相声明口径，
+    #     避免「改口径」造成数字变动争议。
+    #   ⚠️ 口径声明（#53）：本段**不含 (外)卡商** —— 卡商是独立统计体系，
+    #     不参与投诉总量（用户明示「不纳入总量的管理, 全部单算」）。
+    #     与上方 backlog 同判据（`_ticket_category_case()=="投诉"` + 未完成态）。
+    #   ⚠️ 与 backlog 的「315 已办结视为完成」保持同一闭环规则（_ext_done_sns），
+    #     否则两处会对不上（同源是唯一可靠做法，见 #81 教训）。
+    #   时间基准: register_time 是 timestamptz，`now()` 在 SQL 侧同为 timestamptz
+    #   → 直接用 SQL now() 求差，避免 Python 侧 naive/aware 混算。
+    _age_days = func.extract("day", func.now() - ServiceTicket.register_time)
+    _aging_conds = [
+        _ticket_category_case() == "投诉",
+        _backlog_status_where,
+        ServiceTicket.register_time.isnot(None),
+    ]
+    if _ext_done_sns:
+        _aging_conds.append(
+            or_(src_expr != "外部投诉", ServiceTicket.device_sn.notin_(_ext_done_sns))
+        )
+    _aging_stmt = (
+        select(
+            func.sum(case((_age_days <= 7, 1), else_=0)),
+            func.sum(case((and_(_age_days > 7, _age_days <= 30), 1), else_=0)),
+            func.sum(case((and_(_age_days > 30, _age_days <= 90), 1), else_=0)),
+            func.sum(case((_age_days > 90, 1), else_=0)),
+            func.min(ServiceTicket.register_time),
+            func.max(_age_days),
+        )
+        .where(*_aging_conds)
+    )
+    _ag = db.execute(_aging_stmt).first() or (0, 0, 0, 0, None, None)
+    # 分档计数的 "空" 含义: 0 = 该档确无积压单（不是数据缺失）
+    backlog_aging = {
+        "d0_7": int(_ag[0] or 0),
+        "d8_30": int(_ag[1] or 0),
+        "d31_90": int(_ag[2] or 0),
+        "d90_plus": int(_ag[3] or 0),
+        "oldest_register": _ag[4].isoformat() if _ag[4] else None,
+        # 最老积压单的账龄（天）——「陈年烂账有多老」的直观量
+        "max_age_days": int(_ag[5]) if _ag[5] is not None else 0,
+        "total": int((_ag[0] or 0) + (_ag[1] or 0) + (_ag[2] or 0) + (_ag[3] or 0)),
+    }
+
     # F-P1-2: 三源 registered/handled(首页/运营看板三源 KPI 双值用)
     #   registered=窗口内新登记; handled=窗口内真实完成(finish落窗口, ≥3min, 含历史单今日办结)
     _reg_handled = _sources_reg_handled(db, ts, te)
@@ -959,6 +1009,14 @@ def complaint_summary(
             "backlog": {
                 "total": int(backlog_total),
                 "by_category": backlog_by_cat,
+                # ★ #82: 全量账龄分档（与 total 口径不同 —— 见字段旁 `_spec`）
+                "aging": backlog_aging,
+                "_spec": {
+                    "total": "积压 = 投诉类工单中未完成者，且 register_time 落在**本窗口内**（默认近30天）→ 衡量「近期消化压力」",
+                    "aging": "账龄分档 = **全量**未完成投诉工单按 register_time 距今账龄分档（0-7/8-30/31-90/>90天）→ 衡量「历史包袱」",
+                    "why_two": "两者口径不同、数字必然不等，属**有意设计**：窗口口径看近期压力，全量分档看历史包袱。只看窗口会漏掉陈年单（实测漏 89%）。",
+                    "scope": "**不含 (外)卡商** —— 卡商按 #53 独立统计, 不纳入投诉总量",
+                },
             },
             "internal": {
                 "total": int(internal_total),

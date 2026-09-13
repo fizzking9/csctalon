@@ -402,6 +402,70 @@ class TestComplaintTotalSingleSource:
         assert "卡商" in spec, "必须显式声明卡商不含在内(#53)"
         assert "三源" in spec or "内部投诉" in spec, "必须写明由哪三源构成"
 
+
+class TestBacklogAging:
+    """#82: 积压账龄分档 —— 纠正「只看近30天」的盲区。
+
+    ★ 为什么需要:
+      现「积压待处理」卡只统计**近30天窗口内登记**的未完成单。
+      实测（2026-09-13）近30天仅 46 条，而**全量 436 条**
+      （其中 >90 天 286 条，最老 910 天）→ 只看窗口漏掉 89%，
+      会让管理者误判「积压可控」。故新增全量账龄分档，
+      两者口径不同、**有意并列保留**。
+    """
+
+    def test_aging_buckets_sum_equals_total(self, db_with_complaints):
+        """四档之和 == 全量（保证无遗漏、无重复）。"""
+        from sqlalchemy import and_, case, func, or_, select
+
+        from app.models.ticket import ServiceTicket
+
+        # 直接复算：四档之和必须等于未完成总数
+        done = {"已结案", "已完成", "完成", "已解决", "已回复", "已反馈", "已关闭", "终止", "已终止"}
+        not_done = or_(
+            ServiceTicket.status.is_(None),
+            ServiceTicket.status == "",
+            ~ServiceTicket.status.in_(done),
+        )
+        age = func.extract("day", func.now() - ServiceTicket.register_time)
+        row = db_with_complaints.execute(
+            select(
+                func.sum(case((age <= 7, 1), else_=0)),
+                func.sum(case((and_(age > 7, age <= 30), 1), else_=0)),
+                func.sum(case((and_(age > 30, age <= 90), 1), else_=0)),
+                func.sum(case((age > 90, 1), else_=0)),
+                func.count(),
+            ).where(not_done, ServiceTicket.register_time.isnot(None))
+        ).first()
+        b0, b1, b2, b3, total = (int(x or 0) for x in row)
+        assert b0 + b1 + b2 + b3 == total, (
+            f"四档之和 {b0+b1+b2+b3} != 未完成总数 {total}（分档必须完备）"
+        )
+
+    def test_aging_present_in_summary(self, db_with_complaints):
+        """`/complaints/summary` 必须返回 backlog.aging 与口径声明(_spec)。"""
+        from app.api.v1.complaints import complaint_summary
+        from app.core.redis_client import cache_invalidate_pattern
+
+        # ⚠️ 必须清缓存: complaint_summary 带 @cached_json, key 只含 start/end
+        #   → 测试内多用例同窗口会**串数据**（读到上一用例结果）。
+        #   与 test_issue75_card_by_category._summary 同法。
+        cache_invalidate_pattern("complaint:summary:*")
+        r = complaint_summary(db=db_with_complaints, _=None, start=None, end=None)
+        data = r.get("data", r) if isinstance(r, dict) else r.model_dump()["data"]
+
+        aging = data["backlog"].get("aging")
+        assert aging is not None, "backlog.aging 缺失（前端积压分档卡将不渲染）"
+        for k in ("d0_7", "d8_30", "d31_90", "d90_plus", "total", "max_age_days"):
+            assert k in aging, f"aging 缺字段 {k}"
+        # 四档之和必须等于 total（完备性）
+        s = aging["d0_7"] + aging["d8_30"] + aging["d31_90"] + aging["d90_plus"]
+        assert s == aging["total"], f"四档之和 {s} != total {aging['total']}"
+        # 口径声明必须存在（两套积压口径的差异必须可解释）
+        spec = data["backlog"].get("_spec") or {}
+        assert "aging" in spec and "total" in spec, "必须声明两套积压口径的差异"
+        assert "why_two" in spec, "必须解释「为什么两个数不一样」"
+
     def test_compare_period_is_adjacent_equal_length(self, db_with_complaints):
         """对比期 = 紧邻的等长前段窗口(环比可比性前提)。"""
         _clear_cache()
