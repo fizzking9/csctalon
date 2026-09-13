@@ -309,25 +309,59 @@ def _pick_complaint_sheets(
 
 def _pick_manual_refund_sheet(file_path: str, rules: list[dict] | None,
                               counters: dict[str, int] | None = None) -> list[dict[str, Any]]:
-    """取 manual_refund 目标 sheet 的数据
+    """取 manual_refund 目标 sheet 的数据 —— **合并所有「登记明细」类 sheet**
 
-    优先 sheet_rules 里声明的 sheet(首个), 否则读「登记明细」(或第一张有数据的)。
     业务空行过滤(require_any): 只填登记日期、无 订单号/设备号/登记人/金额 的预留
     空行视为非真实数据, 在读取层过滤(failed 归零, 不污染日志)。
     counters: 可选, 汇聚被过滤空行计数(供 summary 展示)。
+
+    ⚠️ 2026-09-13 修正(D 路最近几天无数据, 工单 #77):
+      原实现是「取第一个名字含『登记明细』的 sheet 就 return」, 而该文档同时存在
+        - `登记明细`      历史全量, 到 2026-09-11
+        - `9月份登记明细` 本月增量, 含 09-12/09-13
+      两张表名字都含「登记明细」→ 只读到前者, 后者**完全采不到** → D 路(manual_refund)
+      最近几天没有数据, 且同步日志每次都是 `inserted=0/updated=0`(总数还是老表的)。
+
+    **为什么是「合并」而不是「改读月度表」**(实测依据):
+      ① 两表**并非子集关系** —— 实测「仅历史表有」9 月行 41 行、「仅月度表有」133 行,
+         二选一必然漏数据, 必须取并集;
+      ② 去重键是规范 §2.2 的复合键 (登记日期|订单号|设备号|登记人), 入库层
+         `manual_refund_sync._dedup_in_batch` 按该键去重(同批次后出现者覆盖先出现者);
+      ③ 实测两表同键行(交集 735 行)**逐字段完全一致** → 合并既不会产生重复,
+         也不会改变任何一行的取值。
+
+    仍保留「按名字命中»而非按位置取: 月度 sheet 名会随月份变(如 `10月份登记明细`),
+    按关键词匹配才能自动跟随上游新增。
     """
     # 退款业务字段: 至少有其一才算真实登记行(登记日期 alone 不算)
     _BUSINESS_COLS = ("订单号", "设备号", "登记人", "订单金额", "退款金额", "商户ID", "退款操作人", "处理结果")
+    _SHEET_KEYWORD = "登记明细"
+
+    def _read_all(names: list[str]) -> list[dict[str, Any]]:
+        """按给定名字顺序读多个 sheet 并拼成一个列表(保序: 靠后的行覆盖靠前的)"""
+        if len(names) == 1:
+            return _read_sheet_records(file_path, names[0],
+                                       require_any=_BUSINESS_COLS, counters=counters)
+        merged: list[dict[str, Any]] = []
+        for name in names:
+            merged.extend(_read_sheet_records(file_path, name,
+                                              require_any=_BUSINESS_COLS, counters=counters))
+        return merged
+
     if rules:
-        for r in rules:
-            if isinstance(r, dict) and str(r.get("sheet") or "").strip():
-                return _read_sheet_records(file_path, r["sheet"].strip(),
-                                           require_any=_BUSINESS_COLS, counters=counters)
+        wanted = [str(r.get("sheet")).strip() for r in rules
+                  if isinstance(r, dict) and str(r.get("sheet") or "").strip()]
+        if wanted:
+            return _read_all(wanted)
 
     sheets = _sheet_names(file_path)
-    for name in sheets:
-        if "登记明细" in name:
-            return _read_sheet_records(file_path, name, require_any=_BUSINESS_COLS, counters=counters)
+    named = [n for n in sheets if _SHEET_KEYWORD in n]
+    if named:
+        rows = _read_all(named)
+        if len(named) > 1:
+            # 合并可见化: 多 sheet 时打印各表命中, 便于排查"只读了一张"类问题
+            logger.info(f"[shared_doc] 退款登记明细: 合并 {len(named)} 张 sheet {named} → {len(rows)} 行")
+        return rows
     # 回退: 第一张有数据的 sheet
     for name in sheets:
         recs = _read_sheet_records(file_path, name, require_any=_BUSINESS_COLS, counters=counters)

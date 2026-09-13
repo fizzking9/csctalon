@@ -419,6 +419,112 @@ def test_read_sheet_records_counters_reports_filtered_empty(tmp_path):
     assert counters.get("business_empty_rows") == 2  # 2 预留模板行被过滤并计数
 
 
+# ─────────────────────────────────────────────────────────────────────
+# 多 Sheet 合并 (#77, 2026-09-13 线上「D 路最近几天没数据」回归)
+#   线上文档有 `登记明细`(历史全量, 到 09-11) + `9月份登记明细`(本月增量, 含 09-12/09-13),
+#   两张表名字都含「登记明细」; 旧实现「取第一个命中就 return」→ 只读历史表,
+#   月度表完全采不到 → D 路最近几天无数据, 且同步日志恒为 inserted=0/updated=0。
+# ─────────────────────────────────────────────────────────────────────
+def _make_two_sheet_doc(xlsx: str) -> None:
+    """造一份与线上同构的文档: 历史表在前、月度表在后, 名字都含「登记明细」。"""
+    import pandas as pd
+
+    hist = [
+        {"登记日期": "2026-09-10", "设备号": "SN001", "订单号": "ORD-A",
+         "商户ID": "M1", "订单金额": "100", "登记人": "客服A",
+         "是否已退款": "是", "退款金额": "100", "退款操作人": "客服B",
+         "操作时间": "2026-09-10 10:00"},
+        {"登记日期": "2026-09-11", "设备号": "SN002", "订单号": "ORD-B",
+         "商户ID": "M1", "订单金额": "200", "登记人": "客服A",
+         "是否已退款": "是", "退款金额": "200", "退款操作人": "客服B",
+         "操作时间": "2026-09-11 10:00"},
+    ]
+    monthly = [
+        # 与历史表同键同值(实测线上交集行逐字段一致)
+        {"登记日期": "2026-09-11", "设备号": "SN002", "订单号": "ORD-B",
+         "商户ID": "M1", "订单金额": "200", "登记人": "客服A",
+         "是否已退款": "是", "退款金额": "200", "退款操作人": "客服B",
+         "操作时间": "2026-09-11 10:00"},
+        # ★ 仅月度表有: 09-12/09-13 —— 修复前完全采不到的部分
+        {"登记日期": "2026-09-12", "设备号": "SN003", "订单号": "ORD-C",
+         "商户ID": "M1", "订单金额": "300", "登记人": "客服C",
+         "是否已退款": "是", "退款金额": "300", "退款操作人": "客服B",
+         "操作时间": "2026-09-12 10:00"},
+        {"登记日期": "2026-09-13", "设备号": "SN004", "订单号": "ORD-D",
+         "商户ID": "M1", "订单金额": "400", "登记人": "客服C",
+         "是否已退款": "否", "退款金额": "", "退款操作人": "",
+         "操作时间": "2026-09-13 10:00"},
+    ]
+    with pd.ExcelWriter(xlsx, engine="openpyxl") as xw:
+        pd.DataFrame(hist).to_excel(xw, sheet_name="登记明细", index=False)
+        pd.DataFrame(monthly).to_excel(xw, sheet_name="9月份登记明细", index=False)
+
+
+def test_pick_manual_refund_merges_all_detail_sheets(tmp_path):
+    """🔒 回归: 必须合并**所有**「登记明细」类 sheet, 不能只取第一个。"""
+    xlsx = str(tmp_path / "doc_multi_sheet.xlsx")
+    _make_two_sheet_doc(xlsx)
+
+    recs = sdss._pick_manual_refund_sheet(xlsx, None)
+    dates = sorted({r["登记日期"][:10] for r in recs})
+    assert dates == ["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-13"], \
+        f"未合并两张 sheet, 实际日期={dates}"
+
+
+def test_pick_manual_refund_single_sheet_unchanged(tmp_path):
+    """回归保护: 单 sheet 文档行为不变(合并逻辑不影响既有场景)。"""
+    import pandas as pd
+
+    xlsx = str(tmp_path / "doc_single.xlsx")
+    with pd.ExcelWriter(xlsx, engine="openpyxl") as xw:
+        pd.DataFrame([{
+            "登记日期": "2026-09-01", "设备号": "SN1", "订单号": "O1",
+            "商户ID": "M1", "订单金额": "10", "登记人": "甲",
+            "是否已退款": "是", "退款金额": "10", "退款操作人": "乙",
+            "操作时间": "2026-09-01",
+        }]).to_excel(xw, sheet_name="登记明细", index=False)
+    recs = sdss._pick_manual_refund_sheet(xlsx, None)
+    assert len(recs) == 1 and recs[0]["订单号"] == "O1"
+
+
+def test_pick_manual_refund_respects_sheet_rules(tmp_path):
+    """显式 sheet_rules 时按其声明的 sheet 读(合并逻辑只作用于未配置的默认路径)。"""
+    xlsx = str(tmp_path / "doc_multi_sheet3.xlsx")
+    _make_two_sheet_doc(xlsx)
+
+    recs = sdss._pick_manual_refund_sheet(xlsx, [{"sheet": "9月份登记明细"}])
+    dates = sorted({r["登记日期"][:10] for r in recs})
+    assert dates == ["2026-09-11", "2026-09-12", "2026-09-13"], f"实际={dates}"
+
+
+def test_pick_manual_refund_merged_keys_dedupable(tmp_path):
+    """合并后每笔业务只剩 1 个去重键(入库层复合键幂等, 同键行不会重复入库)。
+
+    线上实测两表交集 735 行**逐字段一致** → 合并后按规范 §2.2 复合键
+    (登记日期|订单号|设备号|登记人)去重不会产生重复行。
+    """
+    from app.services.upsert import _manual_dedup_key, _to_datetime
+
+    xlsx = str(tmp_path / "doc_multi_sheet4.xlsx")
+    _make_two_sheet_doc(xlsx)
+    recs = sdss._pick_manual_refund_sheet(xlsx, None)
+
+    # 读取层给的是字符串(dtype=str); 用入库层同一个 _to_datetime 转 aware datetime,
+    # 保证测的是真实链路(naive 值直接进 _manual_dedup_key 会因缺 tzinfo 抛错)
+    def _key(r):
+        return _manual_dedup_key({
+            "register_time": _to_datetime(r["登记日期"]), "order_no": r["订单号"],
+            "device_sn": r["设备号"], "registrant": r["登记人"],
+        })
+
+    keys = [_key(r) for r in recs]
+    # ORD-A/B/C/D = 4 笔不同业务 → 4 个唯一键(合并把两表数据都保住了)
+    assert len(set(keys)) == 4, f"应 4 个业务键, 实际 {sorted(set(keys))}"
+    # ORD-B 在两表各出现一次(2 行)但键相同 → 入库层合并为 1 行, 不产生重复
+    b_keys = [_key(r) for r in recs if r["订单号"] == "ORD-B"]
+    assert len(b_keys) == 2 and len(set(b_keys)) == 1, "同键重复行必须归一到同一键"
+
+
 def test_manual_refund_sync_rejected_on_missing_order_no(db):
     """M 项: sync_manual_refunds_from_payload 缺订单号行(有业务值)落拒收表。
 
