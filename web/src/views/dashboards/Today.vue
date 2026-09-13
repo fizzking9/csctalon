@@ -829,6 +829,9 @@ import { today } from '@/api/analytics'
 import { complaintSummary, complaintDetail, complaintBacklog } from '@/api/complaint'
 import BaseChart from '@/components/BaseChart.vue'
 import { useAudit } from '@/composables/useAudit'
+// ★ #78 接待来源分层：配色/堆叠构造抽到共享模块，与「运营看板」共用
+//   （规范 §五 禁止重复展示 —— 配色各页自写会漂移，使用者产生歧义）
+import { SOURCE_KINDS, buildStack, stackTip, sourceKindMeta } from '@/utils/receptionSource'
 import dayjs from 'dayjs'
 
 const loading = ref(false)
@@ -1286,41 +1289,6 @@ const displayDate = computed(() => {
 //   使用者以为是两个不同页面。统一主名，日期/周次由标题右侧 `displayDate` 承载，
 //   信息不丢且更清楚。
 const pageTitle = '决策分析看板'
-
-// ★ #78 接待来源配色（与后端 SourceKind 枚举 一一对应）
-//   设计说明: 同一套配色贯穿「接待数」「会话数」两张卡与 ⓘ 说明、效率表，
-//   保证「一个来源一个颜色」全站唯一（规范 §五「禁止重复展示」）。
-//   取舍: 不给 AI 用红色 —— AI 不是错误，只是「非人工」，红会误导为异常。
-const SOURCE_KINDS = [
-  { key: 'human',         label: '真人接待',   short: '真人', color: '#2563eb' },
-  { key: 'ai_auto',       label: 'AI全自动',   short: 'AI',   color: '#f59e0b' },
-  { key: 'ai_system',     label: '系统内部',   short: '系统', color: '#94a3b8' },
-  { key: 'customer_self', label: '客户自助',   short: '自助', color: '#10b981' },
-]
-
-/** 由后端 reception.breakdown 构造堆叠段（按 metric 取 sessions 或 devices） */
-function buildStack(breakdown, metric) {
-  if (!breakdown) return null
-  const segs = SOURCE_KINDS.map(k => ({
-    ...k,
-    value: Number(breakdown[k.key]?.[metric] || 0),
-  }))
-  const total = segs.reduce((a, s) => a + s.value, 0)
-  if (!total) return null
-  return {
-    total,
-    metric,
-    segs: segs.map(s => ({ ...s, pct: Math.round(s.value * 1000 / total) / 10 })),
-  }
-}
-
-/** 堆叠条悬浮说明（规范 §二: 每个视觉元素都要说清含义） */
-function stackTip(stack) {
-  if (!stack) return ''
-  const unit = stack.metric === 'sessions' ? '次' : '个'
-  return stack.segs.map(s => `${s.label} ${s.value.toLocaleString()}${unit} (${s.pct}%)`).join('\n')
-}
-
 // 选中的日期/周对应的时间范围 (传给后端 start/end)
 function getRange() {
   if (viewMode.value === 'week') {
@@ -1632,9 +1600,6 @@ const virtualStaffList = computed(() => {
     .sort((a, b) => (Number(b.reception_count) || 0) - (Number(a.reception_count) || 0))
 })
 /** 该账户的来源标签/配色（与 KPI 卡 SOURCE_KINDS 同一套色） */
-function sourceKindMeta(kind) {
-  return SOURCE_KINDS.find(k => k.key === kind) || SOURCE_KINDS[2]
-}
 /** 该 AI/系统账户名下会话数占全站会话数的百分比（可控指标：AI 接管率） */
 function aiSharePct(row) {
   const total = Number(kpiData.value?.reception?.value || 0)

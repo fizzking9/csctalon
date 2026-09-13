@@ -46,8 +46,26 @@
     </div>
 
     <!-- 模块1: 核心指标KPI -->
+    <!-- ★ #78 接待来源分层（设计说明 Design Rationale）
+         目的: 替运营主管回答「AI 客服接管了多少接待？真人还剩多少工作量？」
+         逻辑: 「接待数/会话数」两张卡加**堆叠比例条**（按来源配色）；
+               下方工作效率表再加一张「AI / 系统账户」单列表，两者分离不混排。
+         口径: 来源判据 = operator + description 文本模式（平台无 AI 标志列），
+               见后端 app/services/system_accounts.py；配色与「决策分析看板」共用
+               utils/receptionSource.js（规范 §五 禁止重复展示）。
+         取舍: ① 不做「AI 转人工」细分（BMS 与智能客服仍在迭代，做了会返工）；
+               ② 不删 AI 数据 —— 「AI 接管率」本身是可控指标；
+               ③ 真人名下的「系统标记」行仍计入真人（实测过半与真人操作同秒，
+                  属连带记录；拆出会虚减人工工作量约 18%）。
+         工单: #78 / 架构: docs/arch/A-20260913-001-AI接待口径分层.md -->
     <section class="section-card mb-20">
-      <SectionHeader :title="'核心指标'" :sub="'对比' + compareName + '同时段 · ' + periodName" />
+      <SectionHeader :title="'核心指标'" :sub="'对比' + compareName + '同时段 · ' + periodName">
+        <template #extra>
+          <el-tooltip effect="dark" placement="top" raw-content :content="RECEPTION_BREAKDOWN_TIP">
+            <el-icon style="color:#b0b4bb;cursor:help;font-size:14px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </template>
+      </SectionHeader>
       <el-row :gutter="10">
         <el-col v-for="c in kpiCards" :key="c.key" :xs="12" :sm="8" :md="4">
           <KpiCard
@@ -63,6 +81,7 @@
             :yoy-value="c.yoy_value"
             :yoy-label="compareName"
             :device-count="c.key === 'reception' ? c.device_count : null"
+            :stack="c.stack || null"
             :tip="c.tip"
             compact
           />
@@ -273,6 +292,50 @@
             </template>
           </el-table-column>
         </el-table>
+
+        <!-- ★ #78 AI / 系统账户单列（非真人，不计入人效排名）
+             设计说明: 此前 is_virtual 账户被直接过滤丢弃 → AI 工作量完全不可见。
+             这里单列展示：既能看到 AI 规模，也不挤占真人名次。
+             取舍: 不给名次（AI 不是人，排名无意义）；空则不渲染整块。
+             工单: #78 / 架构: docs/arch/A-20260913-001-AI接待口径分层.md -->
+        <div v-if="virtualStaffList.length" class="virtual-staff-block">
+          <div class="virtual-staff-title">
+            <span>AI / 系统账户（非真人，不计入人效排名）</span>
+            <el-tooltip effect="dark" placement="top" raw-content
+              content="<b>来源</b>：同上表（/analytics/today/staff）<br/><b>口径</b>：按「操作人 + 说明文本」判定为非真人；会话数 = 该账户名下接待记录条数（已按业务键去重，见 #77）<br/><b>时点</b>：与上方表格同一窗口<br/><b>「空」的含义</b>：本区块不显示 = 本窗口内无非真人账户产生接待<br/><br/><b>⚠️ 取舍</b>：不给名次（AI 不是人，排名无意义）；<b>不做</b>「AI 转人工」细分（平台字段不稳定，待 BMS/智能客服稳定后再精细化）">
+              <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </div>
+          <el-table :data="virtualStaffList" border size="small" max-height="200">
+            <el-table-column label="账户" width="130">
+              <template #default="{ row }"><span style="font-weight:500">{{ row.name }}</span></template>
+            </el-table-column>
+            <el-table-column label="来源" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" effect="plain"
+                        :style="{ color: sourceKindMeta(row.source_kind).color, borderColor: sourceKindMeta(row.source_kind).color }">
+                  {{ sourceKindMeta(row.source_kind).label }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="reception_count" label="会话数(次)" width="110" align="right" sortable>
+              <template #default="{ row }">{{ formatNum(row.reception_count) }}</template>
+            </el-table-column>
+            <el-table-column prop="reception_device_count" label="接待数(个)" width="110" align="right" sortable>
+              <template #default="{ row }">{{ formatNum(row.reception_device_count) }}</template>
+            </el-table-column>
+            <el-table-column label="占全站会话" width="110" align="right">
+              <template #default="{ row }">
+                <span style="color:#f59e0b;font-weight:600">{{ aiSharePct(row) }}%</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="说明" min-width="180">
+              <template #default>
+                <span class="text-muted" style="font-size:11px">非真人账户，量级供「大致评估 AI 工作量」用</span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
       </el-card>
     </section>
 
@@ -524,6 +587,10 @@ import dayjs from 'dayjs'
 import isoWeek from 'dayjs/plugin/isoWeek'
 import quarterOfYear from 'dayjs/plugin/quarterOfYear'
 import weekOfYear from 'dayjs/plugin/weekOfYear'
+// ★ #78 接待来源分层：配色/堆叠构造与「决策分析看板」共用同一模块
+//   （规范 §五 禁止重复展示 —— 配色各页自写会漂移，使用者产生歧义）
+import { buildStack, sourceKindMeta, RECEPTION_BREAKDOWN_TIP } from '@/utils/receptionSource'
+import { QuestionFilled } from '@element-plus/icons-vue'
 dayjs.extend(isoWeek)
 dayjs.extend(quarterOfYear)
 dayjs.extend(weekOfYear)
@@ -810,8 +877,9 @@ const kpiCards = computed(() => {
   const complaint = d.complaint || {}
   const recoveryRate = recoveryData.value?.kpi?.success_rate
   return [
-    { key: 'reception', label: '接待数', value: reception.device_count, unit: '个', icon: 'Service', bg: '#eff6ff', color: '#2563eb', yoy_key: 'reception', yoy_pct: _pctDelta(reception.device_count, reception.device_count_yoy), yoy_value: reception.device_count_yoy, device_count: null, tip: '接待设备去重数' },
-    { key: 'session', label: '会话数', value: reception.value, unit: '次', icon: 'ChatDotRound', bg: '#f0fdf4', color: '#16a34a', yoy_key: 'session', yoy_pct: reception.yoy_pct, yoy_value: reception.yoy_value, tip: '含客服接待+系统处理' },
+    // ★ #78: stack 由后端 reception.breakdown 构造（null 时不渲染）
+    { key: 'reception', label: '接待数', value: reception.device_count, unit: '个', icon: 'Service', bg: '#eff6ff', color: '#2563eb', yoy_key: 'reception', yoy_pct: _pctDelta(reception.device_count, reception.device_count_yoy), yoy_value: reception.device_count_yoy, device_count: null, stack: buildStack(reception.breakdown, 'devices'), tip: '接待设备去重数' },
+    { key: 'session', label: '会话数', value: reception.value, unit: '次', icon: 'ChatDotRound', bg: '#f0fdf4', color: '#16a34a', yoy_key: 'session', yoy_pct: reception.yoy_pct, yoy_value: reception.yoy_value, stack: buildStack(reception.breakdown, 'sessions'), tip: '含客服接待+系统处理' },
     { key: 'refund_count', label: '退款笔数', value: refundCnt.value, unit: '笔', icon: 'Warning', bg: '#fef2f2', color: '#dc2626', yoy_key: 'refund_count', yoy_pct: refundCnt.yoy_pct, yoy_value: refundCnt.yoy_value, tip: '四路经营合计 A+B+C+D' },
     { key: 'refund_amount', label: '退款金额', value: refundAmt.value, money: true, icon: 'Money', bg: '#fff7ed', color: '#ea580c', yoy_key: 'refund_amount', yoy_pct: refundAmt.yoy_pct, yoy_value: refundAmt.yoy_value, tip: '四路经营合计退款金额' },
     { key: 'complaint', label: '投诉数', value: complaint.value, unit: '条', icon: 'Bell', bg: '#faf5ff', color: '#7c3aed', yoy_key: 'complaint', yoy_pct: complaint.yoy_pct, yoy_value: complaint.yoy_value, tip: '投诉合计(内部/商户号/外部 + 315/卡商推送)' },
@@ -967,6 +1035,8 @@ function isQwStaff(s) {
 
 const staffRows = computed(() => {
   let rows = staffData.value?.data || []
+  // ★ #78: AI/系统账户不进真人表（它们在下方单独一张小表展示）
+  rows = rows.filter(r => !r.is_virtual)
   // 按人视图下默认仅显示企微人员(宽松判定), 勾选后显示所有人
   if (staffFilter.aggregateBy === 'person' && !showAllStaff.value) {
     rows = rows.filter(isQwStaff)
@@ -979,6 +1049,25 @@ const staffRows = computed(() => {
   }
   return rows
 })
+
+// ★ #78 AI / 系统账户单列（用户要求：「区分出来，单列也可以」）
+//   设计说明: 此前 `is_virtual` 账户被各页直接过滤丢弃，AI 工作量完全不可见。
+//   这里单列展示 —— 既能看到 AI 规模，也不挤占真人排名。
+//   取舍: 不给名次（AI 不是人，排名无意义）；空则不渲染整块。
+const virtualStaffList = computed(() => {
+  const rows = staffData.value?.data || []
+  return rows
+    .filter(r => r.is_virtual)
+    .filter(r => (Number(r.reception_count) || 0) + (Number(r.reception_device_count) || 0) > 0)
+    .sort((a, b) => (Number(b.reception_count) || 0) - (Number(a.reception_count) || 0))
+})
+
+/** 该 AI/系统账户名下会话数占全站会话数的百分比（可控指标：AI 接管率） */
+function aiSharePct(row) {
+  const total = Number(kpiData.value?.reception?.value || 0)
+  if (!total) return '0.0'
+  return ((Number(row.reception_count || 0) * 100) / total).toFixed(1)
+}
 
 // 部门列显示策略:移动端 + 按人视图 + 仅企微时隐藏(表头已筛选); 其余保留
 const showDeptColumn = computed(
@@ -1322,5 +1411,20 @@ watch([grain, weekOffset, monthOffset, quarterOffset, yearOffset, customDateRang
 .trend-group-check :deep(.el-checkbox-button__inner) {
   padding: 4px 10px;
   font-size: 12px;
+}
+
+/* ★ #78 AI / 系统账户单列区块（与「决策分析看板」同款视觉） */
+.virtual-staff-block {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed #e5e7eb;
+}
+.virtual-staff-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #6b7280;
+  margin-bottom: 6px;
 }
 </style>
