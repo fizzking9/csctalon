@@ -1297,6 +1297,12 @@ def upsert_cs_records(df: pd.DataFrame, mapping: dict[str, str], db: Session, re
 
     唯一键: (device_sn, operation_time, operator, problem_category, problem_type, solution, consult_time, problem_create_time)
     防止重复同步导致数据膨胀;冲突时 DO NOTHING(接待记录是事件流水,不需要更新)。
+
+    ⚠️ #77 (2026-09-13): 该唯一键在数据库层是 `UNIQUE NULLS NOT DISTINCT`
+       (见迁移 a1c2e3f4d5b6)。原因: problem_create_time 大量为 NULL,而 PG 唯一约束
+       默认 NULLS DISTINCT 会让含 NULL 的行不参与去重 → 重复行无限插入
+       (实测 2026-09 重复率 47%)。下面的 on_conflict_do_nothing(constraint=...) 依赖
+       该约束名生效;若约束被改回默认语义,本函数的去重会**静默失效**。
     """
     rows: list[dict] = []
     for idx, row in enumerate(df.to_dict("records")):

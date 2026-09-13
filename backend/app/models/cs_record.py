@@ -3,6 +3,13 @@
 记录客服接待执行明细:接待量、工作负荷、退款挽回成功率等分析的源头数据。
 采用业务复合唯一键(device_sn, operation_time, operator, problem_category, problem_type, solution, consult_time, problem_create_time)
 防止重复同步导致数据膨胀,冲突时 ON CONFLICT DO NOTHING。
+
+⚠️ #77 (2026-09-13) 唯一约束必须加 NULLS NOT DISTINCT:
+   8 列唯一键中 problem_create_time 大量为 NULL,而 PostgreSQL 唯一约束默认
+   NULLS DISTINCT —— 任一列为 NULL 该行就不参与去重,重复行可无限插入。
+   实测 2026-09 重复率 47%(单秒同一 SN 最多 64 行),见工单 #77。
+   迁移: alembic/versions/a1c2e3f4d5b6_cs_record_unique_nulls_not_distinct.py
+   ⚠️ 修改 __table_args__ 里的唯一键时,必须同步该迁移,否则约束语义会静默退化。
 """
 
 from datetime import datetime
