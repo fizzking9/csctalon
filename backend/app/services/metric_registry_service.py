@@ -21,11 +21,11 @@ from app.models.complaint_sync_log import ComplaintSyncLog
 from app.models.external_complaint import ExternalComplaint
 from app.models.manual_refund_sync_log import ManualRefundSyncLog
 from app.models.metric import MetricDailySnapshot, MetricRegistry, MetricThreshold
-from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.models.upload import UploadRecord
 from app.services.analytics import (
     TZ,
+    _cash_routes_total,
     _complaint_source_type_case,
     _ticket_category_case,
     refund_recovery_analysis,
@@ -85,11 +85,34 @@ def _eval_recovery_rate(db: Session, ts: datetime, te: datetime) -> dict:
 
 
 def _eval_refund_count(db: Session, ts: datetime, te: datetime) -> dict:
-    """当日退款笔数: refund.created_at_raw 落在北京时间当日"""
-    cnt = db.scalar(select(func.count()).select_from(Refund).where(
-        Refund.created_at_raw >= ts, Refund.created_at_raw < te
-    )) or 0
-    return {"value": float(cnt), "data_ok": True, "detail": f"区间 {ts}~{te}"}
+    """当日退款笔数 —— ★ #83 口径修正：改为**四路经营合计**（与看板同源）
+
+    【为什么改】原实现读 `refunds` 单表，与看板「退款笔数」**不同源**：
+      · 原：`refunds` 全表 count（含 无需退款/驳回 等全部状态）
+        → 实测近90天 p50 = **673/日**
+      · 看板：四路经营合计 A线上直退 + B钱包取现 + C闪猫 + D手动（已确认权威口径）
+        → 实测近90天 p50 = **277/日**
+    同名「退款笔数」但含义不同 → 与 #81 同类的「口径漂移」病（预警说告警、
+    看板说正常，使用者无所适从）。
+
+    【修法 = 同源】直接复用 `_cash_routes_total()`（看板 `today_kpi` 与
+    `RefundDashboard` 用同一函数）—— 不另写一套，从根上不可能再漂移。
+
+    【取舍】`refunds` 单表仍有价值（如"退费单登记量"），但**不是**「退款笔数」。
+      若将来需要该口径，应作为**独立指标**注册，而非共用本 code。
+    """
+    try:
+        r = _cash_routes_total(db, start=ts, end=te)
+        op = r.get("operational") or {}
+        cnt = int(op.get("count") or 0)
+        return {
+            "value": float(cnt),
+            "data_ok": True,
+            "detail": f"四路经营合计 A+B+C+D = {cnt} 笔（与看板「退款笔数」同源）",
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[metric] refund_count 求值异常: {e}")
+        return {"value": None, "data_ok": False, "detail": f"求值异常: {e}"}
 
 
 def _eval_ticket_backlog(db: Session, ts: datetime, te: datetime) -> dict:
@@ -103,6 +126,66 @@ def _eval_ticket_backlog(db: Session, ts: datetime, te: datetime) -> dict:
     )
     cnt = db.scalar(stmt) or 0
     return {"value": float(cnt), "data_ok": True, "detail": "全量未完成投诉工单"}
+
+
+# 真实结案判据（与 complaints._REAL_FINISH_EPOCH_SECS 同口径：finish−register ≥ 3min）
+#   ⚠️ 不引 complaints 的私有常量（会形成 services→api 反向依赖）；
+#     该值是**业务约定**（排除"同瞬填充"的伪完成），两处必须一致 —— 见 #83 注释。
+_REAL_FINISH_MIN_SECS = 180
+
+
+def _eval_ticket_backlog_net(db: Session, ts: datetime, te: datetime) -> dict:
+    """投诉积压**净增**（滚动 7 天新增 − 7 天真实结案）—— ★ #83 新增
+
+    【为什么需要】用户 2026-09-14 决策（#83）：
+      > 「存量指标看『是否在恶化』比看『绝对水位』有意义」
+
+    `ticket_backlog`（存量）天然只增不减（90 天内从未低于 286，当前 585），
+    用历史分位数定阈值毫无意义 —— **存量只会持续增长，永远会超线**。
+    本指标改看**增量方向**：为负 = 在消化（好）；为正 = 在累积（坏）。
+
+    【口径】
+      · 滚动 7 天窗口（`[te-7d, te)`），非自然周
+        ⚠️ 不用自然周：周初必然接近 0，日间不可比 → 会误判
+      · 新增 = 投诉类工单 register_time 落窗内
+      · 结案 = finish_time 落窗内 且 finish − register ≥ 3min（排除伪完成）
+        与 `complaints._source_reg_handled` 的 handled 同口径
+
+    【方向】lower_better —— 净增越小越好（负值 = 消化 > 新增）
+
+    【与 `ticket_backlog` 的关系】两者互补，**不替代**：
+      · `ticket_backlog` = 水位（存量规模，反映历史包袱）
+      · 本指标 = 趋势（是否在恶化，反映当前处理能力是否够）
+      存量指标保留（#82 的账龄分档已提供结构视角），本指标补"方向"。
+    """
+    from app.services.complaint_scope import is_complaint_ticket_cond
+
+    w_start = te - timedelta(days=7)
+    base = is_complaint_ticket_cond(ServiceTicket.service_category)
+    new_cnt = db.scalar(
+        select(func.count()).where(
+            base,
+            ServiceTicket.register_time >= w_start,
+            ServiceTicket.register_time < te,
+        )
+    ) or 0
+    done_cnt = db.scalar(
+        select(func.count()).where(
+            base,
+            ServiceTicket.finish_time.isnot(None),
+            ServiceTicket.register_time.isnot(None),
+            func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time)
+            >= _REAL_FINISH_MIN_SECS,
+            ServiceTicket.finish_time >= w_start,
+            ServiceTicket.finish_time < te,
+        )
+    ) or 0
+    net = int(new_cnt) - int(done_cnt)
+    return {
+        "value": float(net),
+        "data_ok": True,
+        "detail": f"滚动7天 新增 {int(new_cnt)} − 真实结案 {int(done_cnt)} = 净增 {net}",
+    }
 
 
 def _eval_external_complaint_7d(db: Session, ts: datetime, te: datetime) -> dict:
@@ -304,13 +387,35 @@ METRIC_DEFS: dict[str, dict[str, Any]] = {
     },
     "refund_count": {
         "name_cn": "当日退款笔数", "direction": LOWER, "period": "day", "unit": "笔",
-        "data_sources": ["refund"], "description": "当日退款操作笔数(创建时间, 北京时间)",
+        "data_sources": ["refund", "wallet", "shanmao_refund", "manual_refund"],
+        "description": (
+            "当日退款笔数 = 四路经营合计 A线上直退 + B钱包取现 + C闪猫退款 + D手动退款"
+            "（按创建时间，与看板「退款笔数」同源）。"
+            "⚠️ #83 修正前为 `refunds` 单表 count（含全部状态），与看板不同源、差 ~2.4 倍。"
+        ),
         "evaluate": _eval_refund_count,
     },
     "ticket_backlog": {
         "name_cn": "投诉工单积压", "direction": LOWER, "period": "day", "unit": "个",
-        "data_sources": ["service_tickets"], "description": "当前未完成投诉工单总数(含历史遗留)",
+        "data_sources": ["service_tickets"],
+        "description": (
+            "**存量**：当前全量未完成投诉工单数（历史包袱规模）。"
+            "⚠️ 存量指标只增不减，看趋势请用 `ticket_backlog_net`（净增）；"
+            "结构（账龄分布）见看板「积压账龄分档」（#82）。"
+        ),
         "evaluate": _eval_ticket_backlog,
+    },
+    # ★ #83 新增（用户 2026-09-14 决策）：存量指标改看「是否在恶化」
+    "ticket_backlog_net": {
+        "name_cn": "投诉积压净增(7天)", "direction": LOWER, "period": "day", "unit": "个",
+        "data_sources": ["service_tickets"],
+        "description": (
+            "滚动 7 天 新增投诉工单 − 真实结案（finish−register≥3min）。"
+            "**为负 = 在消化（好）；为正 = 在累积（坏）**。"
+            "新增于 #83：存量指标（ticket_backlog）只增不减，用历史分位定阈值无意义，"
+            "故改看增量方向。滚动7天而非自然周（周初必然接近0，日间不可比）。"
+        ),
+        "evaluate": _eval_ticket_backlog_net,
     },
     "external_complaint_7d": {
         "name_cn": "近7天外部投诉量", "direction": LOWER, "period": "day", "unit": "条",
