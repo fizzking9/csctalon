@@ -71,6 +71,8 @@
             @click="onSync(row)">同步</el-button>
           <!-- #45: 页面内扫码登录 —— 替代「SSH 上服务器跑脚本」 -->
           <el-button size="small" :icon="Key" @click="startLogin(row)">登录</el-button>
+          <!-- #49: 显示服务不可用时的降级入口(本页必须自己提供, 否则 501 提示是死路) -->
+          <el-button size="small" :icon="DocumentCopy" @click="copyCliCommand(row)">命令行</el-button>
           <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
           <el-button size="small" type="danger" :icon="Delete" @click="onDelete(row)">删除</el-button>
         </template>
@@ -161,11 +163,13 @@
 <script setup>
 import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Edit, Delete, VideoPlay, Key } from '@element-plus/icons-vue'
+import { Plus, Refresh, Edit, Delete, VideoPlay, Key, DocumentCopy } from '@element-plus/icons-vue'
+import { copyText } from '@/utils/clipboard'
 import {
   listSharedDocSources, createSharedDocSource, updateSharedDocSource,
   deleteSharedDocSource, toggleSharedDocSource, syncSharedDocNow,
   startSharedDocLogin, getSharedDocLoginStatus, confirmSharedDocLogin, cancelSharedDocLogin,
+  getSharedDocCliFallback,
 } from '@/api/sharedDoc'
 
 const sources = ref([])
@@ -364,10 +368,46 @@ async function startLogin(row) {
     loginExpiresIn.value = d.expires_in || 0
     startLoginPolling()
   } catch (e) {
-    // 501 = 服务器未装 Xvfb, detail 里带可执行的一键命令, 直接展示给用户
-    ElMessage.error(e?.response?.data?.detail || '启动登录失败')
+    // 501 = 显示服务不可用(Xvfb 未安装或拉起失败)。长命令不内联在消息条里
+    // (读不了也拷不动), 明确指向本页「命令行」按钮 —— 命令由后端统一下发。
+    const is501 = e?.response?.status === 501
+    ElMessage({
+      type: 'error',
+      duration: is501 ? 8000 : 3000,
+      message: is501
+        ? '无法在页面内启动扫码登录，请点本行「命令行」按钮，按提示在本机扫码后上传登录态。'
+        : (e?.response?.data?.detail || '启动登录失败'),
+    })
     loginVisible.value = false
   }
+}
+
+// 命令行降级: 命令文本由后端 GET /cli-fallback 下发(单一事实来源,
+// 避免前后端各写一份再次漂移 —— 旧版前端硬编码的路径在生产容器里根本不存在)
+let _cliCmdCache = null
+async function copyCliCommand(row) {
+  try {
+    if (!_cliCmdCache) {
+      const res = await getSharedDocCliFallback()
+      _cliCmdCache = res.data?.commands || {}
+    }
+    const tpl = _cliCmdCache[row.platform] || ''
+    const cmd = tpl ? tpl.replace('<文档地址>', row.doc_url) : fallbackCliText(row.platform, row.doc_url)
+    await copyText(cmd, `${row.platform === 'tencent' ? '腾讯' : '金山'}文档登录命令`)
+  } catch (e) {
+    await copyText(fallbackCliText(row.platform, row.doc_url), '命令行登录命令')
+  }
+}
+
+// 兜底文案(仅在 /cli-fallback 不可用时使用)
+function fallbackCliText(platform, docUrl) {
+  const script = platform === 'tencent' ? 'tencent_doc_login.py' : 'kdocs_login.py'
+  const stateFile = platform === 'tencent' ? 'tencent_doc.json' : 'kdocs.json'
+  return (
+    `# ① 本地(macOS)生成登录态: cd backend && ./.venv/bin/python ../scripts/${script} --url "${docUrl}"\n` +
+    `# ② 上传: scp backend/data/browser_states/${stateFile} tanzk@<服务器IP>:/tmp/ && ` +
+    `ssh tanzk@<服务器IP> "sudo mv /tmp/${stateFile} /opt/csctalon/browser_states/"`
+  )
 }
 
 function startLoginPolling() {
