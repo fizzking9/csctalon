@@ -3311,11 +3311,35 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
     #     **比不显示更糟** —— 会训练使用者忽略告警。故本函数**只接口径同源且
     #     阈值经实测合理的指标**，其余明确不接（宁缺勿错，#81 同源原则）。
     #
-    #   当前唯一通过的：`recovery_rate`
-    #     · 口径同源 ✅ 该函数 docstring 明写「复用今日看板退款挽回专项口径」，
-    #       底层同为 `refund_recovery_analysis`，与看板「挽回率」卡逐位一致
-    #     · 阈值合理 ✅ 40/30/20，与 `Today.vue` 既有的「≥38% 达标 / 30-38% 预警 /
-    #       <30% 告警」业务规则基本吻合（同一业务约定，非拍脑袋数）
+    # ★★★ 接入指标（2026-09-14 复核，#83 阈值错配治理后扩展）★★★
+    #   【准入条件 — 两条都必须满足】
+    #     ① 口径同源：指标求值必须与看板对应卡走同一实现
+    #     ② 阈值经分布验证：常态日不应恒告警
+    #
+    #   `refund_count` ✅ 两项都满足（#83 已修）:
+    #     · 口径：已改为四路经营合计（`_cash_routes_total`），与看板「退款笔数」同源
+    #     · 阈值：400/460（依据近90天四路分布 p90=403/p95=451）
+    #   `recovery_rate` ✅:
+    #     · 口径：底层同为 `refund_recovery_analysis`，与看板挽回卡逐位一致
+    #     · 阈值：40/30/20（与 Today.vue 既有业务规则吻合）
+    #
+    #   ⚠️ 仍**刻意不接**的指标（原因各不相同）:
+    #     · `ticket_backlog`（存量，585）—— 与看板「积压待处理」的**窗口口径不同**
+    #       （看板是近30天窗口，指标是全量）；且存量指标在水位卡上意义有限
+    #       （看趋势应用 `ticket_backlog_net`）→ 不在核心指标条展示，避免口径混淆
+    #     · `internal_complaint_daily` —— 口径是**内部单源**，而看板「投诉数」是
+    #       **三源合计**；放在同一排会让人误以为应相等（语义不同，不并列）
+    #     · `external_complaint_7d` —— 是**滚动 7 天**窗口，与看板的窗口语义不同
+    _metric_specs = {
+        "recovery_rate": (
+            lambda: _rr_val, "%", "higher_better",
+            "退款挽回成功率（与退款挽回专项同口径）",
+        ),
+        "refund_count": (
+            lambda: float(rf_cnt_t), "笔", "lower_better",
+            "当日退款笔数 = 四路经营合计 A+B+C+D（与看板「退款笔数」同源）",
+        ),
+    }
     _metric_levels: dict[str, Any] = {}
     try:
         from app.services.metric_registry_service import _eval_recovery_rate as _ev_rr
@@ -3325,19 +3349,22 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         # ⚠️ 单日判定用本函数已有的 `d_iso`/`d_end_iso`（来自 _resolve_windows），
         #   不要用 `ts_sh`/`te_sh` —— 那是 `today_hourly_trend` 的局部变量，此函数没有。
         _is_single_day = (d_end_iso is None) or (d_iso == d_end_iso)
-        _thr = _mthr(db, "recovery_rate")
-        if _thr is not None:
-            _rr = _ev_rr(db, ts, te)
-            _val = _rr.get("value") if _rr.get("data_ok") else None
-            _metric_levels["recovery_rate"] = {
+        _rr_res = _ev_rr(db, ts, te)
+        _rr_val = _rr_res.get("value") if _rr_res.get("data_ok") else None
+        for _code, (_getter, _unit, _dir, _desc) in _metric_specs.items():
+            _thr = _mthr(db, _code)
+            if _thr is None:
+                continue  # 未配阈值 → 不给水位（不编造目标线）
+            _val = _getter()
+            _metric_levels[_code] = {
                 "value": _val,
-                "unit": "%",
-                "direction": "higher_better",
-                "level": _mcls(_val, _thr, "higher_better") if ( _is_single_day and _val is not None) else None,
+                "unit": _unit,
+                "direction": _dir,
+                "level": _mcls(_val, _thr, _dir) if (_is_single_day and _val is not None) else None,
                 "target": _thr.excellent_value,
                 "warning": _thr.warning_value,
                 "critical": _thr.critical_value,
-                "desc": "退款挽回成功率（与退款挽回专项同口径）",
+                "desc": _desc,
                 # ⚠️ 无法判定时必须让前端能解释"为什么不显示"，而非默默当作达标
                 "reason": (
                     None if _is_single_day
