@@ -758,17 +758,21 @@ def complaint_summary(
     # ★ 修复前此处缺失 → 前端「卡商投诉分类」图**永久空白**（后端返回 by_category=[]）。
     #   根因: 原注释写 "分类见 complaint_subs"，但该接口**从未存在**（死引用）；
     #        前端 ComplaintChannelPanel 只认 `by_category`，故恒为空。
-    # 数据源: `card_complaints.problem_category`（生产填充率 552/764 = 72%，15 类）。
+    # 数据源: `card_complaints.problem_category`（生产填充率 552/764 = 72%）。
     # ⚠️ 口径: **仅补充表侧**分类 —— 工单侧卡商无 problem_category 字段（其 service_item
     #   只有「工信部投诉」一项，无区分度），故本图不尝试与 card_total 对齐；
     #   语义 = 「卡商投诉分类」的来源即该字段，NULL 归「未标注」（与其它三源同规则）。
+    # ⚠️ limit 与三源不同(三源用 20): 卡商分类实测 **25 种**（长尾自由文本），
+    #   用 20 会**截断类别**，导致"各分类之和 < 总数"的假象（实测 65 vs 70）。
+    #   故放到 50 覆盖全集；图表可读性由前端做 Top-N + 「其他」聚合解决
+    #   （前端聚合优于后端截断：后端截断会**丢数据**且无法察觉）。
     card_by_cat = db.execute(
         select(CardComplaint.problem_category, func.count())
         .where(*([CardComplaint.complaint_date >= ts] if ts else []))
         .where(*([CardComplaint.complaint_date <= te] if te else []))
         .group_by(CardComplaint.problem_category)
         .order_by(func.count().desc())
-        .limit(20)
+        .limit(50)
     ).all()
 
     # ---- 补充明细数据源统计(315外部投诉 / 卡商群投诉,workbuddy推送) ----

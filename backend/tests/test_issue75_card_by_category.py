@@ -86,6 +86,20 @@ class TestCardByCategory:
         assert cats.get("流量虚") == 1
         assert None not in cats, "None 未经归一化直接进入分类名"
 
+    def test_more_than_20_categories_not_truncated(self, db):
+        """★ 长尾不截断: 分类数 > 20 时必须全部返回
+
+        回归: 初版沿用三源的 `limit(20)`，而卡商分类实测 **25 种**（自由文本长尾）
+        → 被截断 5 类，造成「各分类之和 < 总数」的假象（实测 65 vs 70）。
+        ⚠️ 后端截断是**静默丢数据**（无法察觉）；长尾聚合应在**展示层**做。
+        """
+        for i in range(25):
+            _card(db, f"86975000000{i:04d}", f"分类{i:02d}")
+
+        cats = _summary(db)["card"]["by_category"]
+        assert len(cats) == 25, f"分类被截断: 期望 25 类, 实际 {len(cats)} 类"
+        assert sum(x["count"] for x in cats) == 25, "分类合计 != 总数（有类别丢失）"
+
     def test_window_filters_categories(self, db):
         """分类必须跟随 start/end 窗口 —— 不落窗口的分类不得出现"""
         _card(db, "869750000000006", "窗口内",

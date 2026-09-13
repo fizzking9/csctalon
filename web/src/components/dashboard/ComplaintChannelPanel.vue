@@ -91,7 +91,14 @@
     <el-row :gutter="16" class="mb-16">
       <el-col :xs="24" :md="8">
         <div class="chart-card">
-          <div class="chart-title">{{ meta.catLabel }}</div>
+          <div class="chart-title">
+            {{ meta.catLabel }}
+            <!-- ★ #76 规范 §二: 来源 / 口径 / 时点 / "空"的含义 -->
+            <el-tooltip effect="dark" placement="top" raw-content
+              :content="catTooltip">
+              <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </div>
           <BaseChart v-if="catOption" :option="catOption" height="260px" />
           <el-empty v-else description="暂无数据" :image-size="36" />
         </div>
@@ -276,12 +283,49 @@ const completionBg = computed(() => {
   return '#fef2f2'
 })
 
+/** 分类卡的数据说明（★ #76 规范 §二: 来源 / 口径 / 时点 / "空"的含义） */
+const catTooltip = computed(() => {
+  const n = (props.srcData?.by_category || []).length
+  const m = meta.value
+  const src = props.source === 'card'
+    ? 'card_complaints.problem_category（卡商补充表的问题分类）'
+    : `service_tickets.service_item（工单类型），按 ${m.title} 过滤`
+  const scope = props.source === 'card'
+    ? '仅卡商补充表侧（工单侧卡商只有「工信部投诉」一项，无分类区分度）；NULL 归「未标注」'
+    : '按工单登记时间落窗口；NULL/空值归「未标注」'
+  return `<b>来源</b>：${src}<br/>`
+    + `<b>口径</b>：${scope}<br/>`
+    + `<b>时点</b>：跟随顶部时间条（当前 ${n} 个分类）<br/>`
+    + `<b>为空表示</b>：窗口内该渠道<b>无带分类的登记记录</b> —— 若总量 &gt; 0 而此处为空，`
+    + `说明数据源缺分类字段，属数据问题而非「没有投诉」。`
+})
+
 const catOption = computed(() => {
-  const d = props.srcData?.by_category || []
-  if (!d.length) return null
+  const raw = props.srcData?.by_category || []
+  if (!raw.length) return null
+  // ★ #75: 长尾聚合 —— 卡商分类实测 25 种（自由文本），全画会挤爆且不可读。
+  //   策略: 取 Top 12，其余合并为「其他(N 类)」并保留真实合计（不丢数）。
+  //   ⚠️ 后端截断是错的（静默丢类别且无法察觉）；聚合必须在**展示层**做，
+  //      合并后总数仍等于全部类别之和。
+  const MAX_BARS = 12
+  let d = raw
+  if (raw.length > MAX_BARS) {
+    const head = raw.slice(0, MAX_BARS)
+    const restSum = raw.slice(MAX_BARS).reduce((s, x) => s + (x.count || 0), 0)
+    d = restSum > 0 ? [...head, { name: `其他(${raw.length - MAX_BARS} 类)`, count: restSum }] : head
+  }
   const items = [...d].reverse()
+  const total = d.reduce((s, x) => s + (x.count || 0), 0)
   return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      // 显示占比，便于判断结构（仅数量看不出集中度）
+      formatter: (ps) => {
+        const p = ps[0]
+        const pct = total > 0 ? ((p.value / total) * 100).toFixed(1) : '0.0'
+        return `${p.name}<br/>${p.value} 条（${pct}%）`
+      },
+    },
     grid: { left: 96, right: 40, bottom: 20, top: 8 },
     xAxis: { type: 'value' },
     yAxis: { type: 'category', data: items.map(x => x.name), axisLabel: { fontSize: 11 } },
