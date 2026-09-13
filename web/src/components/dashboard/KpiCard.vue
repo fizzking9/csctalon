@@ -155,9 +155,10 @@ const targetText = computed(() => {
   if (!m) return ''
   const unit = m.unit || ''
   const higher = m.direction === 'higher_better'
-  // 优先展示"优秀线(目标)"；无优秀线则展示预警线（也能回答"够不够"）
+  // 优先展示"优秀线(目标)"；无优秀线则展示告警线（也能回答"超没超线"）
   if (m.target != null) return `${higher ? '≥' : '≤'}${m.target}${unit}`
-  if (m.warning != null) return `${higher ? '≤' : '≤'}${m.warning}${unit}为预警线`
+  if (m.critical != null) return `${higher ? '≥' : '≤'}${m.critical}${unit}为告警线`
+  if (m.warning != null) return `${higher ? '≥' : '≤'}${m.warning}${unit}为预警线`
   return ''
 })
 

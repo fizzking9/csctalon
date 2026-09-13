@@ -1244,6 +1244,9 @@ const kpiCards = computed(() => {
       yoy_pct: refundCnt.yoy_pct,
       yoy_value: refundCnt.yoy_value,
       chips: routeChips,
+      // ★ #83: 退款笔数也接目标水位 —— #83 已修正其口径为四路合计（与看板同源）
+      //   且阈值经分布验证（400/460）。修法: 与挽回卡同一个 `metricLevelByCode`。
+      metricLevel: metricLevelByCode('refund_count'),
       tip: '四路经营合计 A线上直退+B钱包取现+C闪猫退款+D手动退款（按创建时间）。下方颜色与趋势图四路堆叠柱一致',
     },
     // ★ #80: 退款金额 —— 副行给四路金额；并补一条「实际现金流E」对照
@@ -1282,9 +1285,22 @@ const kpiCards = computed(() => {
     //     会训练使用者忽略告警。已开 #83 治理，治理完成后再扩展接入。
     //   `recovery_rate` 通过双重验证：① 口径同源（底层 refund_recovery_analysis
     //     与看板挽回卡一致）② 阈值 40/30/20 与 Today.vue 既有业务规则吻合。
-    { key: 'recovery', label: '挽回率', value: Number(recoveryRate || 0), unit: '%', icon: 'SuccessFilled', bg: '#ecfdf5', color: '#059669', yoy_key: 'recovery', yoy_pct: null, yoy_value: null, metricLevel: recoveryMetricLevel.value, tip: recoveryMetricTip },
+    { key: 'recovery', label: '挽回率', value: Number(recoveryRate || 0), unit: '%', icon: 'SuccessFilled', bg: '#ecfdf5', color: '#059669', yoy_key: 'recovery', yoy_pct: null, yoy_value: null, metricLevel: metricLevelByCode('recovery_rate'), tip: recoveryMetricTip },
   ]
 })
+
+/**
+ * ★ #82/#83 通用水位取值：从后端 `metric_levels` 按 code 取。
+ *
+ * ⚠️ 为什么抽成函数而非直接写 `kpiData.value?.metric_levels?.xxx`：
+ *   ① 避免每个卡各写一遍可选链（写错即静默不渲染，实测踩过）；
+ *   ② #83 起接入多个指标，统一入口便于后续扩展。
+ * @param {string} code 指标 code（须与后端 METRIC_DEFS 一致）
+ * @returns {object|null} null 时 KpiCard 不渲染水位（不编造目标线）
+ */
+function metricLevelByCode(code) {
+  return kpiData.value?.metric_levels?.[code] || null
+}
 
 // ========== ★ #82 目标达成水位 ==========
 /** 后端 `metric_levels.recovery_rate`（含阈值与级别）；未配阈值时为 null */
