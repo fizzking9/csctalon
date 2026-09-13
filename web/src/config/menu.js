@@ -31,22 +31,27 @@ export const BUILD_MODES = {
  *  一级按「业务域」，系统管理内部按「功能域 → 权限 → 使用频度」三层分组。
  */
 export const MENU_GROUPS = [
-  // ── 1. 运营看板(全员, 最高频) ──
+  // ── 1. 看板(全员, 最高频) ──
+  // ★ #80 命名修正（用户 2026-09-13 拍板）:
+  //   #76 曾把 `/today` 改名「决策分析看板」+ 本组仍叫「运营看板」，但两页**内容错位**:
+  //     · `/today`  实际是**值班台**（实时KPI + 值班组长 + 影响事件 + 待办 + 政策），
+  //                 是「平时每天看」的那一个，**没有归因/目标/异常分解能力**，
+  //                 称「决策分析」属过度拔高。
+  //     · `/operation` 才是**分析页**（周/月/季/年四粒度 + 全量人效 + 原因Top10），
+  //                 是「复盘时才看」的那一个。
+  //   → 正名: today → 「今日值班看板」; operation → 「运营分析看板」。
+  //   ⚠️ 仅改显示名，path 保持不动（书签/权限/menu.spec.js 均按 path 断言）。
+  //   ⚠️ 改名须 **4 处同步**（漏一处即打架）: 本文件 · router/index.js meta.title ·
+  //      两页的 pageTitle 常量 · Dashboard.vue 快捷入口文案。
   {
     key: 'dashboard',
-    title: '运营看板',
+    title: '看板',
     icon: 'DataLine',
     buildMode: 'always',
     roles: null,
     children: [
-      // ★ #76: 原「今日看板」→「决策分析看板」
-      //   改名理由: 该页早已不止「今日」——含周视图、影响事件、政策、待办、专项、
-      //   退款挽回、投诉专项，是**面向决策的当日/本周综合视图**。
-      //   叫「今日」会让使用者以为只服务当天，弱化其决策价值。
-      //   ⚠️ 仅改显示名，path 保持 `/dashboards/today` 不动
-      //     （书签/权限配置/菜单测试/menu.spec.js 均按 path 断言）。
-      { path: '/dashboards/today', title: '决策分析看板', icon: 'DataLine' },
-      { path: '/dashboards/operation', title: '运营看板', icon: 'TrendCharts' },
+      { path: '/dashboards/today', title: '今日值班看板', icon: 'DataLine' },
+      { path: '/dashboards/operation', title: '运营分析看板', icon: 'TrendCharts' },
     ],
   },
 

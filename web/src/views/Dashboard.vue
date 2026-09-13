@@ -22,8 +22,8 @@
           <div class="shortcut-item shortcut-hero is-primary" @click="$router.push('/dashboards/today')">
             <el-icon :size="40"><DataLine /></el-icon>
             <div class="si-info">
-              <div class="si-title">运营看板</div>
-              <div class="si-desc">日 / 周 / 月 / 季度 · 全员工作一览</div>
+              <div class="si-title">今日值班看板</div>
+              <div class="si-desc">实时数据 · 值班组长 · 影响事件 · 待办</div>
             </div>
             <el-icon class="si-arrow"><ArrowRight /></el-icon>
           </div>
@@ -114,10 +114,10 @@
           <span style="font-weight:600">快捷入口</span>
         </template>
         <div class="shortcut-grid">
-          <div class="shortcut-item shortcut-hero is-primary" @click="$router.push('/dashboards/today')">
-            <el-icon :size="40"><DataLine /></el-icon>
+          <div class="shortcut-item shortcut-hero is-primary" @click="$router.push('/dashboards/operation')">
+            <el-icon :size="40"><TrendCharts /></el-icon>
             <div class="si-info">
-              <div class="si-title">运营看板</div>
+              <div class="si-title">运营分析看板</div>
               <div class="si-desc">日 / 周 / 月 / 季度 · 全员工作一览</div>
             </div>
             <el-icon class="si-arrow"><ArrowRight /></el-icon>
@@ -287,11 +287,11 @@
           <span style="font-weight:600">专项管理快捷入口</span>
         </template>
         <div class="shortcut-grid">
-          <div class="shortcut-item shortcut-hero is-primary" @click="$router.push('/dashboards/today')">
-            <el-icon :size="40"><DataLine /></el-icon>
+          <div class="shortcut-item shortcut-hero is-primary" @click="$router.push('/dashboards/operation')">
+            <el-icon :size="40"><TrendCharts /></el-icon>
             <div class="si-info">
-              <div class="si-title">运营看板</div>
-              <div class="si-desc">本组工作一览 · 组员效率</div>
+              <div class="si-title">运营分析看板</div>
+              <div class="si-desc">日 / 周 / 月 / 季度 · 全员工作一览</div>
             </div>
             <el-icon class="si-arrow"><ArrowRight /></el-icon>
           </div>
@@ -494,7 +494,7 @@
             <div class="agent-shortcuts">
               <div class="shortcut-tile" @click="$router.push('/dashboards/today')">
                 <el-icon :size="32" color="#409eff"><DataLine /></el-icon>
-                <span>运营看板</span>
+                <span>今日值班看板</span>
               </div>
               <div class="shortcut-tile" @click="$router.push('/strategy/publish')">
                 <el-icon :size="32" color="#9b59b6"><Document /></el-icon>
@@ -578,7 +578,7 @@
             <div class="agent-shortcuts">
               <div class="shortcut-tile" @click="$router.push('/dashboards/today')">
                 <el-icon :size="32" color="#409eff"><DataLine /></el-icon>
-                <span>运营看板</span>
+                <span>今日值班看板</span>
               </div>
               <div class="shortcut-tile" @click="$router.push('/strategy/publish')">
                 <el-icon :size="32" color="#9b59b6"><Document /></el-icon>

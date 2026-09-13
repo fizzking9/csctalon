@@ -20,6 +20,27 @@
       <span class="kpi-device-sub-label">接待数</span>
       <span class="kpi-device-sub-val">{{ fmtNum(deviceCount) }}<span class="kpi-device-sub-unit"> 个</span></span>
     </div>
+    <!-- ★ #80 卡内「括弧」分项 chips —— 离散拆分（如退款笔数 = A+B+C+D）
+         设计说明: 原来要把 A/B/C/D 四个笔数塞进主数字后面成为「括弧」，
+         但 4 个数字同行会把主值挤变形 → 改为紧随主值的紧凑 chips 行，
+         保持主值字号不变，且每个分项有色点对应下方趋势图/堆叠条配色。
+         取舍: 不放在 hover tooltip 里 —— 括弧的意义就是「不点也能看到拆分」。 -->
+    <div v-if="chips && chips.length" class="kpi-chips">
+      <span
+        v-for="ch in chips"
+        :key="ch.label"
+        class="kpi-chip"
+        :style="{ color: ch.color, borderColor: ch.color + '55' }"
+      >
+        <i class="kpi-chip-dot" :style="{ background: ch.color }" />{{ ch.label }} {{ fmtNum(ch.value) }}
+      </span>
+    </div>
+    <!-- ★ #80 卡内副行 —— 长文本拆分（如四路金额、口径对比）
+         与 chips 分两行的原因: 金额是「万元」级长数字，与笔数同挤一行会换行错位。 -->
+    <div v-for="(r, i) in subRows || []" :key="i" class="kpi-subrow">
+      <span class="kpi-subrow-label">{{ r.label }}</span>
+      <span class="kpi-subrow-text" :style="r.color ? { color: r.color } : null">{{ r.text }}</span>
+    </div>
     <!-- ★ #78 接待来源堆叠比例条 + 图例（仅接待数/会话数两张卡传 stack）
          设计说明: 用一条 100% 堆叠细条替代额外图表 —— 卡片高度几乎不增，
          但一眼可看出「AI 占了多少」。取舍: 不做饼图（KPI 卡空间小，会挤压信息密度）。 -->
@@ -83,6 +104,12 @@ const props = defineProps({
   // ★ #78 接待来源分层堆叠段（由 utils/receptionSource.buildStack 构造）
   //   为 null / total=0 时不渲染（无数据不占版面）
   stack: { type: Object, default: null },
+  // ★ #80 卡内「括弧」分项: [{ label, value, color }]
+  //   用于「退款笔数 = A直退+B取现+C闪猫+D手动」这类离散拆分。空则不渲染。
+  chips: { type: Array, default: null },
+  // ★ #80 卡内副行: [{ label, text, color? }]
+  //   用于四路金额、口径对比（如「经营口径 vs 实际现金流」）。空则不渲染。
+  subRows: { type: Array, default: null },
 })
 
 // 只显示有值的段（避免「AI0%」这种无意义图例）
@@ -136,9 +163,54 @@ function fmtMoney(v) {
 .kpi-device-sub-val { font-size: 15px; font-weight: 600; color: #409eff; letter-spacing: -0.3px; }
 .kpi-device-sub-unit { font-size: 11px; font-weight: 400; color: #909399; margin-left: 2px; }
 
+/* ★ #80 括弧分项 chips: 紧跟主值的一行小标签（4 路拆分不再挤压主值） */
+.kpi-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+.kpi-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  padding: 0 5px;
+  border: 1px solid;
+  border-radius: 3px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-chip-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+/* ★ #80 副行: 长文本（四路金额 / 口径对比） */
+.kpi-subrow {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.kpi-subrow-label {
+  color: #909399;
+  flex-shrink: 0;
+}
+.kpi-subrow-text {
+  color: #606266;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+
 /* ★ #78 接待来源堆叠比例条 + 图例
    设计说明: 100% 堆叠细条 + 小字图例，一眼看出 AI 占比；抽到组件层让
-   「决策分析看板」与「运营看板」共用同一套配色（规范 §五 禁止重复展示）。 */
+   「今日值班看板」与「运营分析看板」共用同一套配色（规范 §五 禁止重复展示）。 */
 .kpi-stack {
   display: flex;
   height: 4px;

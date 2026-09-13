@@ -17,14 +17,16 @@ const routes = [
         path: 'dashboards/today',
         name: 'DashboardToday',
         component: () => import('@/views/dashboards/Today.vue'),
-        // ★ #76: 显示名「今日看板」→「决策分析看板」(path 不变)
-        meta: { title: '决策分析看板', icon: 'DataLine' },
+        // ★ #80 正名: 「决策分析看板」→「今日值班看板」(path 不变)
+        //   本页是值班台（实时/事件/待办），非能力意义上的决策分析页。
+        meta: { title: '今日值班看板', icon: 'DataLine' },
       },
       {
         path: 'dashboards/operation',
         name: 'DashboardOperation',
         component: () => import('@/views/dashboards/OperationDashboard.vue'),
-        meta: { title: '运营看板', icon: 'TrendCharts' },
+        // ★ #80 正名: 「运营看板」→「运营分析看板」(path 不变)
+        meta: { title: '运营分析看板', icon: 'TrendCharts' },
       },
       {
         path: 'dashboard',

@@ -92,20 +92,21 @@ describe('菜单配置 - buildMode 语义', () => {
     expect(Array.isArray(walk(MENU_GROUPS))).toBe(true)
   })
 
-  it('运营看板与系统管理为 always(核心菜单在所有构建模式可见)', () => {
+  it('看板与系统管理为 always(核心菜单在所有构建模式可见)', () => {
     const dash = MENU_GROUPS.find((g) => g.key === 'dashboard')
     const system = MENU_GROUPS.find((g) => g.key === 'system')
     expect(dash.buildMode).toBe(BUILD_MODES.ALWAYS)
     expect(system.buildMode).toBe(BUILD_MODES.ALWAYS)
   })
 
-  it('今日看板/运营看板命名与路由 meta.title 一致(审计项 U1)', () => {
+  // ★ #80 命名修正: 两页名须与「实际内容」一致（用户 2026-09-13 拍板）
+  it('今日值班看板/运营分析看板命名与路由 meta.title 一致(审计项 U1, #80)', () => {
     const dash = MENU_GROUPS.find((g) => g.key === 'dashboard')
     const byPath = Object.fromEntries(
       (dash.children || []).map((c) => [c.path, c.title]),
     )
-    expect(byPath['/dashboards/today']).toBe('决策分析看板')
-    expect(byPath['/dashboards/operation']).toBe('运营看板')
+    expect(byPath['/dashboards/today']).toBe('今日值班看板')
+    expect(byPath['/dashboards/operation']).toBe('运营分析看板')
   })
 })
 

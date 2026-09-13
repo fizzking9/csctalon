@@ -63,7 +63,9 @@ describe('MenuTree 渲染 - 防"菜单整块不渲染"回归', () => {
   it('顶级分组渲染为 el-sub-menu', () => {
     const wrapper = mountMenu('admin')
     const titles = wrapper.findAll('.el-sub-menu__title').map((t) => t.text())
-    expect(titles.some((t) => t.includes('运营看板'))).toBe(true)
+    // ★ #80: 顶层分组名由「运营看板」改为「看板」(page 改「今日值班看板」，
+    //   若沿用旧名会出现「看板看板」的重复语义)
+    expect(titles.some((t) => t.includes('看板'))).toBe(true)
     expect(titles.some((t) => t.includes('系统管理'))).toBe(true)
   })
 
