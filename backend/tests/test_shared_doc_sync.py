@@ -744,6 +744,62 @@ def test_probe_non_l_link_still_supported(monkeypatch, tmp_path):
     assert sdss.probe_doc_version("kdocs", "https://www.kdocs.cn/view/xyz") == "9/8"
 
 
+def test_probe_prefers_digest_over_version(monkeypatch, tmp_path):
+    """🔒 优先用 digest(内容哈希) 而非 version(计数器)。
+
+    实测依据(2026-09-13): version 会**虚增** —— version 6808→6811→6812 期间,
+    导出内容的指纹完全一致(4202 行, sha256 相同) → 虚警。
+    哈希特性保证「内容变 → digest 必变」, 更贴合「内容是否变化」语义。
+    """
+    (tmp_path / "kdocs.json").write_text(
+        json.dumps({"cookies": [{"name": "wps_sid", "value": "1", "domain": ".kdocs.cn"}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(sdss.settings, "BROWSER_STATE_DIR", str(tmp_path))
+
+    class _R:
+        status = 200
+
+        def read(self):
+            return json.dumps({"file": {
+                "digest": "86552f225b6556e6a281d4240782e0e368351837",
+                "digest_type": "sha1", "version": 6812,
+                "modify_time": 1789282979, "size": 120540267}}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(sdss.urllib.request, "urlopen", lambda *a, **k: _R())
+    v = sdss.probe_doc_version("kdocs", "https://www.kdocs.cn/l/cbZIHtt6obyf")
+    assert v == "sha1:86552f225b6556e6a281d4240782e0e368351837"
+    assert "6812" not in v, "有 digest 时不应回退用 version(会虚警)"
+
+
+def test_probe_falls_back_to_version_without_digest(monkeypatch, tmp_path):
+    """接口未返回 digest → 回退 version(仍可用, 只是可能虚警; 不会漏报)。"""
+    (tmp_path / "kdocs.json").write_text(
+        json.dumps({"cookies": [{"name": "wps_sid", "value": "1", "domain": ".kdocs.cn"}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(sdss.settings, "BROWSER_STATE_DIR", str(tmp_path))
+
+    class _R:
+        status = 200
+
+        def read(self):
+            return json.dumps({"file": {"version": 5, "modify_time": 100}}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(sdss.urllib.request, "urlopen", lambda *a, **k: _R())
+    assert sdss.probe_doc_version("kdocs", "https://www.kdocs.cn/l/cbZIHtt6obyf") == "100/5"
+
+
 def test_manual_refund_sync_rejected_on_missing_order_no(db):
     """M 项: sync_manual_refunds_from_payload 缺订单号行(有业务值)落拒收表。
 

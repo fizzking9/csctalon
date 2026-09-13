@@ -150,12 +150,23 @@ def _probe_kdocs_api(file_id: str, cookies: str) -> str | None:
     f = data.get("file") if isinstance(data, dict) else None
     if not isinstance(f, dict):
         return None
+    # ★ 优先用 digest(服务端内容哈希, digest_type=sha1): 哈希特性保证「内容变 → 必变」,
+    #   最贴合「内容是否变化」这一语义。
+    # 次选 modify_time/version: 实测发现 version 会**虚增**
+    #   (2026-09-13: version 6808→6811→6812 期间, 导出内容的指纹完全一致 → 虚警),
+    #   虚警只导致多导出(浪费时间), 但反过来若 version 漏报就会**漏采** →
+    #   故优先取更可靠的 digest, 仅当接口未返回 digest 时回退 version。
+    digest = f.get("digest")
+    if digest:
+        logger.info(f"[shared_doc] 版本探测(API:digest): {str(digest)[:12]}… "
+                    f"version={f.get('version')} size={f.get('size')}")
+        return f"sha1:{digest}"
     mt, ver = f.get("modify_time"), f.get("version")
     if mt is None and ver is None:
         return None
     modifier = (f.get("modifier") or {}).get("name") if isinstance(f.get("modifier"), dict) else None
     ver_str = f"{mt or '-'}/{ver or '-'}"
-    logger.info(f"[shared_doc] 版本探测(API): {ver_str} 最后修改人={modifier or '?'}")
+    logger.info(f"[shared_doc] 版本探测(API:version): {ver_str} 最后修改人={modifier or '?'}")
     return ver_str
 
 
