@@ -41,6 +41,94 @@ SYNC_DATA_TYPES = list(BMS_DATA_SOURCES.keys())  # refund/ticket/wallet/device_c
 #   sync_source_config_service.list_scheduled_bms_sources)。
 DEFAULT_SYNC_TYPES = [dt for dt, cfg in BMS_DATA_SOURCES.items() if cfg.get("default_sync", True)]
 
+# 退费宽表(refund_wide)的**相关上游源**白名单 (2026-09-14 #88)
+#
+# 判据: 该源的数据变更是否会改变 refund_wide 的任何一列。逐列对照 wide_table_builder:
+#   - refund         → 主表(宽表行本体来自 refunds)
+#   - ticket         → service_item/service_category/ticket_no/ticket_handler
+#   - wallet         → wallet_id/wallet_op_time/wallet_op_amount
+#   - external_complaint → has_external_complaint/external_complaint_count/latest_time
+# 与 post-sync 钩子的 _collect_affected_from_imports() 分支**一一对应**;
+# matcher 的 6 个匹配步骤也全部只依赖这四张表的源表(refunds/tickets/wallet_withdrawals)。
+#
+# ⚠️ 不在白名单内的源(device_combo/cs_record/bms_order/SCRM 系列等)同步后,
+#    refund_wide 的正确动作是**跳过重建**, 而不是降级全量 —— 详见 #88。
+REFUND_WIDE_RELEVANT_SOURCES: tuple[str, ...] = (
+    "refund",
+    "ticket",
+    "ticket_finish",  # ticket 的双维度抓取别名(与 ticket 同源表)
+    "wallet",
+    "external_complaint",
+)
+
+
+def is_refund_wide_relevant(data_type: str | None) -> bool:
+    """单个 data_type 是否属于退费宽表相关源(上传导入通道用, 见 #88)"""
+    return data_type in REFUND_WIDE_RELEVANT_SOURCES
+
+
+def refund_wide_relevant_sources(results: list[dict]) -> list[str]:
+    """返回本次结果里「成功导入了数据 + 属于退费宽表相关源」的 data_type 列表。
+
+    刻意要求 inserted+updated > 0: 源相关但 0 行写入(如查询结果为空)时宽表不可能变,
+    同样应跳过重建。
+
+    Args:
+        results: sync_all 的结果列表, 每项至少含 data_type / success
+
+    Returns:
+        命中的 data_type 列表(去重保序); 空列表 = 本次导入与退费宽表无关
+    """
+    hit: list[str] = []
+    for r in results:
+        if not isinstance(r, dict) or not r.get("success"):
+            continue
+        dt = r.get("data_type")
+        if dt not in REFUND_WIDE_RELEVANT_SOURCES:
+            continue
+        if (r.get("inserted_rows") or 0) + (r.get("updated_rows") or 0) <= 0:
+            continue
+        if dt not in hit:
+            hit.append(dt)
+    return hit
+
+
+# 增量/全量阈值策略: 总量小(<2000)或影响面大(>25%) → 全量更高效; 否则增量
+INCREMENTAL_RATIO_THRESHOLD = 0.25
+INCREMENTAL_MIN_TOTAL = 2000
+
+
+def decide_refund_wide_mode(
+    relevant_sources: list[str],
+    match_affected_count: int,
+    affected_count: int,
+    total_refunds: int,
+) -> str:
+    """决定本次 post-sync 对 refund_wide 的动作: "skipped" | "incremental" | "full"
+
+    抽成纯函数以便单测(2026-09-14 #88), 原逻辑内联在闭包里无法验证。
+
+    判定顺序:
+      1. **跳过**(本单核心修复): 既无「宽表相关源写入」又无「matcher 新增关系」
+         → 宽表不可能有任何一行变化。修复前此情形被 `use_incremental` 的
+         `len(all_affected) > 0` 误判为 **full 全量重建**, 使设备套餐等无关源同步
+         白白重刷 6.6 万行(实测 ~50s)。
+      2. 影响面小且总量足够 → 增量。
+      3. 其余 → 全量。
+
+    保守优先: 只要有相关源写入过数据, 就**不会**跳过(即使 affected 收集为空,
+    也保留全量兜底, 避免"导入了但窗口过滤不到"造成静默漏采)。
+    """
+    if not relevant_sources and match_affected_count == 0:
+        return "skipped"
+    if (
+        affected_count > 0
+        and total_refunds >= INCREMENTAL_MIN_TOTAL
+        and affected_count / total_refunds <= INCREMENTAL_RATIO_THRESHOLD
+    ):
+        return "incremental"
+    return "full"
+
 
 def _get_last_sync_time(db: Session, data_type: str) -> datetime | None:
     """查询某数据源最近一次成功同步的 end_time
@@ -799,38 +887,71 @@ async def sync_all(
                             imported_affected = _collect_affected_from_imports(results, hook_db)
                             all_affected = imported_affected | match_affected
 
+                            # ── 2026-09-14 (#88) 跳过判定: 无关源同步不再全量重建宽表 ──
+                            #
+                            # 修复前的缺陷: use_incremental 要求 len(all_affected) > 0,
+                            #   于是「本次导入与宽表无关 → all_affected 为空」被错误地
+                            #   降级成 full 全量重建(6.6 万行 / ~50s)。实测同步设备套餐
+                            #   (device_combo) 也触发全量, 纯属白跑 —— 空集的正确语义是
+                            #   「宽表没有任何一行需要刷新」= 应跳过, 而非全量。
+                            #
+                            # 跳过需**同时**满足两个条件(保守优先, 宁可多跑不可漏采):
+                            #   ① 本次没有任何「宽表相关源」成功写入数据
+                            #      (refund/ticket/wallet/external_complaint, 见白名单常量)
+                            #   ② matcher 本次未新增任何匹配关系(match_affected 为空)
+                            # 任一不满足 → 维持原有的增量/全量判定逻辑。
+                            relevant_sources = refund_wide_relevant_sources(results)
                             total_refunds = hook_db.scalar(select(_func.count()).select_from(Refund)) or 0
-                            # 阈值策略:总量小(<2000)或影响面大(>25%)→全量更高效;否则增量
-                            INCREMENTAL_RATIO_THRESHOLD = 0.25
-                            INCREMENTAL_MIN_TOTAL = 2000
-                            use_incremental = (
-                                len(all_affected) > 0
-                                and total_refunds >= INCREMENTAL_MIN_TOTAL
-                                and len(all_affected) / total_refunds <= INCREMENTAL_RATIO_THRESHOLD
+                            wide_mode = decide_refund_wide_mode(
+                                relevant_sources,
+                                len(match_affected),
+                                len(all_affected),
+                                total_refunds,
                             )
+                            use_incremental = wide_mode == "incremental"
 
                             def _wide_progress_cb(built: int, total: int):
                                 _report(f"构建退费宽表 {built}/{total}")
 
-                            _report(
-                                ("构建退费宽表" if first_try else "构建退费宽表(重试)")
-                                + ("(增量)" if use_incremental else "(全量)")
-                                + f" affected={len(all_affected)} total={total_refunds}"
-                            )
-
-                            if use_incremental:
-                                wide_stats = build_refund_wide(
-                                    hook_db,
-                                    only_refund_nos=list(all_affected),
-                                    progress_callback=_wide_progress_cb,
+                            if wide_mode == "skipped":
+                                # 本次同步无宽表相关源写入 → 宽表内容不可能变化, 直接跳过
+                                logger.info(
+                                    "[post-sync] 本次同步无退费宽表相关源写入(refund/ticket/wallet/"
+                                    "external_complaint 均未写数据)且匹配无新增, 跳过 refund_wide 重建"
                                 )
-                                wide_stats["mode"] = "incremental"
-                                wide_stats["affected_count"] = len(all_affected)
-                                wide_stats["total_refunds"] = total_refunds
+                                wide_stats = {
+                                    "built": 0,
+                                    "updated": 0,
+                                    "skipped": 0,
+                                    "deleted": 0,
+                                    "mode": "skipped",
+                                    "skip_reason": "no_relevant_source_written",
+                                    "relevant_sources": [],
+                                    "affected_count": len(all_affected),
+                                    "total_refunds": total_refunds,
+                                }
                             else:
-                                wide_stats = build_refund_wide(hook_db, progress_callback=_wide_progress_cb)
-                                wide_stats["mode"] = "full"
-                                wide_stats["total_refunds"] = total_refunds
+                                _report(
+                                    ("构建退费宽表" if first_try else "构建退费宽表(重试)")
+                                    + ("(增量)" if use_incremental else "(全量)")
+                                    + f" affected={len(all_affected)} total={total_refunds}"
+                                    + (f" relevant={','.join(relevant_sources)}" if relevant_sources else "")
+                                )
+
+                                if use_incremental:
+                                    wide_stats = build_refund_wide(
+                                        hook_db,
+                                        only_refund_nos=list(all_affected),
+                                        progress_callback=_wide_progress_cb,
+                                    )
+                                    wide_stats["mode"] = "incremental"
+                                    wide_stats["affected_count"] = len(all_affected)
+                                    wide_stats["total_refunds"] = total_refunds
+                                else:
+                                    wide_stats = build_refund_wide(hook_db, progress_callback=_wide_progress_cb)
+                                    wide_stats["mode"] = "full"
+                                    wide_stats["total_refunds"] = total_refunds
+                                wide_stats["relevant_sources"] = relevant_sources
 
                             # ── 2026-09-08 (#41/A-20260908-004): 现金流水统一宽表重建 ──
                             # ABCD 四路每笔出款物化(对账/快速响应/运营分析)。

@@ -309,30 +309,51 @@ def download_upload_file(
 
 
 def _run_post_import_tasks(data_type: str):
-    """后台任务:关联匹配、人员别名提取、退费宽表物化"""
+    """后台任务:关联匹配、人员别名提取、退费宽表物化
+
+    ⚠️ 2026-09-14 (#88): 退费宽表改为**按相关源白名单触发**(与 bms_sync 的 post-sync
+    钩子对齐)。修复前此处是**无条件全量** `build_refund_wide(db)`,`data_type` 只用于
+    打日志 —— 导致上传一个与宽表毫无关系的设备套餐(device_combo)CSV, 也会全量重建
+    6.6 万行宽表(约 50s)。宽表行本体来自 refunds, 列来自 tickets/wallet_withdrawals/
+    external_complaints, 与 device_combo 完全无关。
+    """
     from app.core.database import SessionLocal
+    from app.services.bms_sync import REFUND_WIDE_RELEVANT_SOURCES, is_refund_wide_relevant
     from app.services.wide_table_builder import build_refund_wide
 
     try:
         db = SessionLocal()
         try:
             # 触发关联匹配(增量)
-            match_all(db, only_unmatched=True)
+            match_stats = match_all(db, only_unmatched=True)
             # 触发人员别名提取(增量,幂等)
             extract_person_aliases(db)
             db.commit()
-            # 重建退费宽表(全量,确保源数据更新后宽表同步刷新;失败不阻塞)
-            try:
-                wide_stats = build_refund_wide(db)
-                import logging
-                logging.getLogger(__name__).info(
-                    f"refund_wide 重建完成(data_type={data_type}): {wide_stats}"
+            # 重建退费宽表 —— 仅当本次导入的源属于宽表相关源,或匹配新增了关系时才做。
+            # 判定直接复用 bms_sync 的白名单(单一事实来源, 避免两处判据漂移)。
+            # 注意: 上传通道能拿到的只有 data_type, 拿不到真实写入行数; 该通道本身
+            # 就是"用户确认导入"语义(调用前已完成 ingest_table), 故不再校验行数。
+            # 失败不阻塞导入。
+            import logging
+            _log = logging.getLogger(__name__)
+            relevant = is_refund_wide_relevant(data_type)
+            match_affected = (match_stats or {}).get("_affected_refund_nos") or set()
+            if not relevant and not match_affected:
+                _log.info(
+                    f"跳过 refund_wide 重建(data_type={data_type} 非宽表相关源, "
+                    f"相关源={list(REFUND_WIDE_RELEVANT_SOURCES)}, 且匹配无新增)"
                 )
-            except Exception as we:
-                import logging
-                logging.getLogger(__name__).warning(
-                    f"refund_wide 重建失败(data_type={data_type},不影响导入): {we}"
-                )
+            else:
+                try:
+                    wide_stats = build_refund_wide(db)
+                    wide_stats["relevant_sources"] = [data_type] if relevant else ["(matcher)"]
+                    _log.info(
+                        f"refund_wide 重建完成(data_type={data_type}): {wide_stats}"
+                    )
+                except Exception as we:
+                    _log.warning(
+                        f"refund_wide 重建失败(data_type={data_type},不影响导入): {we}"
+                    )
             # 2026-09-08 (#41/A-20260908-004): 现金流水统一宽表重建(ABCD 出款源上传后刷新;失败不阻塞)
             if data_type in ("refund", "wallet", "shanmao_refund", "manual_refund", "refund_record_report"):
                 try:
