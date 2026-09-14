@@ -1434,6 +1434,32 @@ def category_by_package(db: Session, limit: int = 20) -> list[dict]:
 # ---------- 看板4:人员操作分析 ----------
 
 
+# ══════════════════════════════════════════════════════════════════════
+# ★ 投诉专项合并（2026-09-14 用户决策）—— **必须在 _PERSON_CAT_NAMES 之前定义**
+# ══════════════════════════════════════════════════════════════════════
+# 背景: 用户将「投诉组」的行政与专项合一 —— 内/外投诉不再分线，
+#   统一为一个「投诉专项」，由洪佳任专项负责人。
+#
+# ★★ 合并策略:「只增不改」(关键设计决策) ★★
+#   · **新建** `投诉专项`(系数 5.0 = 原外部投诉值, 用户拍板)
+#   · **保留** `内部投诉`/`外部投诉` 两条旧专项记录（不删不改名）
+#     → 历史任职仍指向旧专项，**历史绩效可追溯、不重算**
+#   · 代码只**新增**新专项映射，**保留**旧映射作为**历史归因**通道
+#     → 生效日之前的任职仍能被正确映射
+#
+# ⚠️⚠️ 绝不可把旧映射改成指向新专项 —— 那会把**历史区间的内部投诉工作
+#   按 5.0 系数重算**（原为 3.0），= 静默篡改历史绩效。
+#
+# ⚠️ 与「投诉来源桶」的**同名陷阱**: 专项名「内部投诉/外部投诉」与
+#   `complaint_scope.BUCKET_INTERNAL/EXTERNAL`（投诉**来源**分桶）
+#   **字符串相同但语义完全不同**。本常量只约束**人员专项**，
+#   **不得**用于来源分桶，反之亦然。
+LEGACY_COMPLAINT_SPECIALTIES = ("内部投诉", "外部投诉")
+COMPLAINT_SPECIALTY = "投诉专项"
+COMPLAINT_SPECIALTY_WEIGHT = 5.0
+# 全量投诉类专项（新旧合并）—— 用于「是否投诉专员」判定
+COMPLAINT_SPECIALTIES_ALL = (COMPLAINT_SPECIALTY, *LEGACY_COMPLAINT_SPECIALTIES)
+
 # 2026-09-04 F-P1-1: 首页"今日工作效率"同一人多次出现的根因修复。
 # today_staff_efficiency 的 SQL 按源表 operator/handler 字符串 GROUP BY, 同一人在
 # cs_records.operator / refunds.operator / service_tickets.handler 三套文本里写法不一致
@@ -1441,7 +1467,11 @@ def category_by_package(db: Session, limit: int = 20) -> list[dict]:
 # 而 person 聚合模式此前"原样返回"不归并 → 界面同一人出现多行。
 # 本函数: aggregate_by=person 时按人归并 — 归并键 = person_id(非空) 兜底 归一 name。
 # 6 个专项桶名须与 today_staff_efficiency 内 CATS 保持一致。
-_PERSON_CAT_NAMES = ("咨询接待", "套餐专项", "退款挽回", "退款处理", "内部投诉", "外部投诉")
+_PERSON_CAT_NAMES = (
+    "咨询接待", "套餐专项", "退款挽回", "退款处理",
+    "内部投诉", "外部投诉",
+    COMPLAINT_SPECIALTY,  # ★ 合并后的投诉专项
+)
 _PERSON_MERGE_NUM_KEYS = (
     "reception_count", "reception_device_count", "refund_op_count",
     "sp_zixun", "sp_taocan", "sp_recovery", "sp_processing", "sp_internal", "sp_external",
@@ -3035,7 +3065,8 @@ def _person_position_map(db: Session) -> dict[str, dict[str, Any]]:
         .join(Specialty, PersonSpecialtyAssignment.specialty_id == Specialty.id)
         .where(
             PersonSpecialtyAssignment.is_current.is_(True),
-            Specialty.name.in_(_COMPLAINT_SPECIALIST_SPECIALTIES),
+            # 含合并后的新专项 + 历史两条（历史区间仍能正确归因）
+            Specialty.name.in_(COMPLAINT_SPECIALTIES_ALL),
         )
     ).all():
         scd_specialists[int(pid)] = str(sp_name)
@@ -3053,7 +3084,8 @@ def _person_position_map(db: Session) -> dict[str, dict[str, Any]]:
     def _bucket(pos: str | None, spec: str | None, pid: int | None) -> str:
         p = (pos or scd_positions.get(pid or -1, "") or "").strip()
         s = (spec or scd_specialists.get(pid or -1, "") or "").strip()
-        if s in _COMPLAINT_SPECIALIST_SPECIALTIES:
+        # 投诉专员判定改为「全量投诉类专项」（含合并后的新专项 + 历史两条）
+        if s in COMPLAINT_SPECIALTIES_ALL:
             return "投诉专员"
         if p in _COMPLAINT_LEAD_POSITIONS:
             return "组长"
@@ -6257,6 +6289,10 @@ def today_staff_efficiency(
         "退款挽回": 2.2,
         "内部投诉": 3.0,
         "外部投诉": 5.0,
+        # ★ 2026-09-14 合并后的投诉专项（系数取原外部投诉 5.0，用户拍板）
+        # ⚠️ 旧两条**必须保留** —— 它们仍用于**历史区间**归因，
+        #    删掉会使旧任职落到 None → 历史绩效归零/错算。
+        COMPLAINT_SPECIALTY: COMPLAINT_SPECIALTY_WEIGHT,
     }
     # 管理岗/无主项人员使用的默认系数 (每个专项独立默认系数)
     CAT_DEFAULT_WEIGHT = {
@@ -6266,6 +6302,7 @@ def today_staff_efficiency(
         "退款挽回": 2.2,
         "内部投诉": 3.0,
         "外部投诉": 5.0,
+        COMPLAINT_SPECIALTY: COMPLAINT_SPECIALTY_WEIGHT,
     }
     # 6个独立专项桶 (不再合并大类, 每个专项独立一列展示)
     CAT_BUCKETS = [
@@ -6275,6 +6312,8 @@ def today_staff_efficiency(
         ("processing", "退款处理", {"退款处理"}),
         ("internal", "内部投诉", {"内部投诉"}),
         ("external", "外部投诉", {"外部投诉"}),
+        # ★ 合并后的投诉专项（独立一列，不肢解内/外两列）
+        ("complaint", COMPLAINT_SPECIALTY, {COMPLAINT_SPECIALTY}),
     ]
     CATS = [c[1] for c in CAT_BUCKETS]  # ["咨询接待", "套餐专项", "退款挽回", "退款处理", "内部投诉", "外部投诉"]
     TRANSFER_PENALTY = 0.2
@@ -6294,7 +6333,7 @@ def today_staff_efficiency(
     #   ③ 专项精确+模式匹配: 专项为投诉/应急/退款挽回类 → 全豁免 (即使岗位不含"专员")
     EXEMPT_POSITIONS = {"主管", "组长", "副主管"}
     EXEMPT_POSITION_PATTERNS = ("专员",)  # 岗位名称含"专员" → 跨类全豁免
-    EXEMPT_CATEGORIES = {"内部投诉", "外部投诉", "退款挽回"}  # 专项精确名称
+    EXEMPT_CATEGORIES = {"内部投诉", "外部投诉", "退款挽回", COMPLAINT_SPECIALTY}  # 专项精确名称
     EXEMPT_CATEGORY_PATTERNS = ("投诉", "应急", "退款挽回")  # 专项名称含这些关键词 → 跨类全豁免
     # ⚠️ #78 (2026-09-13): 原 SYSTEM_VIRTUAL_EXACT / VIRTUAL_HINT_WORDS /
     #    _EMPLOYEE_ID_PATTERN / _PERSON_NAME_PATTERN 已**全部迁移**到
@@ -6919,7 +6958,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
         if not hr_sp:
             return None
         s = (hr_sp or "").strip()
-        if s in ("咨询接待", "套餐专项", "退款处理", "退款挽回", "内部投诉", "外部投诉"):
+        if s in ("咨询接待", "套餐专项", "退款处理", "退款挽回", "内部投诉", "外部投诉", COMPLAINT_SPECIALTY):
             return s
         if "外部投诉" in s: return "外部投诉"
         if "内部投诉" in s or "投诉" in s: return "内部投诉"
@@ -8939,7 +8978,7 @@ def refund_recovery_analysis(
             return None
         s = (hr_sp or "").strip()
         # 6个标准专项
-        if s in ("咨询接待", "套餐专项", "退款处理", "退款挽回", "内部投诉", "外部投诉"):
+        if s in ("咨询接待", "套餐专项", "退款处理", "退款挽回", "内部投诉", "外部投诉", COMPLAINT_SPECIALTY):
             return s
         # 兼容旧数据模糊匹配
         if "外部投诉" in s: return "外部投诉"
