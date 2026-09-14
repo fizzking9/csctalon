@@ -30,7 +30,36 @@
       </div>
     </div>
 
-    <!-- 值班组长提示条(仅日视图) -->
+    <!-- 值班组长提示条(仅日视图)
+         ★ 2026-09-14 用户要求: 「叶珍凤、董梦玲、吴晓龙、黄亚康、洪佳都是组长；
+           我希望无论是今日值班看板还是运营分析 都能很明显的标识为组长。
+           陈卓、朱海洋 都是主管级别的；可以标识为 管理。」
+
+         设计说明（Design Rationale）
+         ─────────────────────────────────────────────
+         目的（替谁回答什么问题）
+           替**值班主管**回答「现在当班的是谁、他是什么角色」。
+           原实现只显示姓名+组名，读者无法一眼分辨谁是组长、谁是主管 ——
+           而"找谁决策"恰恰取决于角色（组长管本组，主管管跨组）。
+
+         逻辑（为什么这样组织）
+           · 角色徽标**前置**于姓名：视觉扫描顺序是"角色→人"，与找人的心理顺序一致
+           · 三个层级用**不同色系**区分（主管=红/副主管=橙/组长=蓝），
+             不靠读字也能分辨，减少晨会传阅时的误读
+           · 徽标文案用**管理视角**的词（主管→「管理」），而非职级名 ——
+             使用者关心的是"他能拍板什么"，不是"他叫什么级别"
+
+         口径（数据判据）
+           · 取自 `staff` 接口的 `position`（客服/投诉专员/组长/副主管/主管）
+           · ⚠️ 不能直接用 `is_management` —— 它含"专员"类跨类豁免岗（投诉专员等），
+             那些**不是**值班决策人（见下方 DUTY_POSITIONS 注释）
+           · 只显示 `is_virtual=false` 的真人
+
+         取舍（不做什么及原因）
+           · 不显示"客服"徽标 —— 值班条只列管理岗，客服本就不在此处，
+             给全员加徽标会让这条窄横幅信息过载
+           · 不用图标代替文字 —— 职级图标无通用语义，需图例反而增加理解成本
+           · 不做点击筛选 —— 值班条是"看一眼"的组件，交互留给下方人员表 -->
     <div v-if="viewMode === 'day' && dutyLeaders.length" class="duty-leader-bar mb-12">
       <div class="duty-label">
         <el-icon><Timer /></el-icon>
@@ -40,12 +69,16 @@
         <el-tag
           v-for="(l, i) in dutyLeaders"
           :key="i"
-          type="warning"
+          :type="l.tagType"
           effect="dark"
           size="small"
           class="duty-chip"
           @click="openPersonAudit(l.name)"
         >
+          <!-- 角色徽标（前置，先看见角色再看见人） -->
+          <span v-if="l.roleLabel" class="chip-role" :style="{ background: l.roleBg }">
+            {{ l.roleLabel }}
+          </span>
           <span class="chip-name">{{ l.name }}</span>
           <span class="chip-sep">·</span>
           <span class="chip-group">{{ l.group || l.department }}</span>
@@ -1415,16 +1448,37 @@ const kpiCards = computed(() => {
 // 值班组长/主管 (仅显示岗位为主管/组长/副主管的人员; 注意: is_management=true不仅包含管理岗,
 // 还包含投诉/退款挽回等享有跨类豁免的专项岗, 不能直接用is_management判断值班组长)
 const DUTY_POSITIONS = ['主管', '组长', '副主管']
+
+/** ★ 岗位 → 值班徽标（用户 2026-09-14：「组长」/「管理」要一眼可辨）
+ *
+ *  设计要点:
+ *   · 主管级 → 文案「管理」（管理视角的词，而非职级名）
+ *   · 组长/副主管 → 文案「组长」（副主管在值班语境下同属组级管理者）
+ *   · 客服/投诉专员/退款处理专员 → 不进值班条（非决策岗）
+ *   ⚠️ 与 `DUTY_POSITIONS` 必须保持同源 —— 两边不一致会出现
+ *      "徽标为空的芯片"或"该显示却查不到标签"。
+ */
+const DUTY_ROLE_META = {
+  主管: { label: '管理', tagType: 'danger', bg: '#b91c1c' },
+  副主管: { label: '组长', tagType: 'warning', bg: '#b45309' },
+  组长: { label: '组长', tagType: 'primary', bg: '#1d4ed8' },
+}
 const dutyLeaders = computed(() => {
   const staff = staffData.value?.data || []
   return staff
     .filter(s => DUTY_POSITIONS.includes(s.position) && !s.is_virtual)
-    .map(s => ({
-      name: s.name,
-      group: s.group,
-      department: s.department,
-      position: s.position,
-    }))
+    .map(s => {
+      const meta = DUTY_ROLE_META[s.position] || {}
+      return {
+        name: s.name,
+        group: s.group,
+        department: s.department,
+        position: s.position,
+        roleLabel: meta.label || '',
+        tagType: meta.tagType || 'info',
+        roleBg: meta.bg || '#6b7280',
+      }
+    })
 })
 
 // 四路经营退款路线配色 (A 线上直退 / B 钱包取现 / C 闪猫退款 / D 手动退款)
@@ -1879,6 +1933,19 @@ onBeforeUnmount(() => {
 .chip-name { font-weight: 500; }
 .chip-sep { color: #d1d5db; }
 .chip-group { color: #6b7280; font-size: 11px; }
+
+/* ★ 2026-09-14 角色徽标（组长 / 管理）—— 前置在姓名前，让角色先于姓名被看见 */
+.chip-role {
+  display: inline-block;
+  padding: 0 5px;
+  margin-right: 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.5px;
+  vertical-align: 1px;
+}
 
 /* 退款挽回 SN 折叠明细 */
 .recovery-sn-collapse {

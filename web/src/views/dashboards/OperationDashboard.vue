@@ -234,6 +234,42 @@
               <el-tag size="default" effect="dark" type="primary">{{ row.name || '未分组' }}</el-tag>
             </template>
           </el-table-column>
+          <el-table-column v-if="staffFilter.aggregateBy === 'person'" label="岗位" width="96">
+            <!-- ★ 2026-09-14 用户要求：「叶珍凤、董梦玲、吴晓龙、黄亚康、洪佳
+                 都是组长；希望今日值班看板与运营分析都能很明显标识为组长。
+                 陈卓、朱海洋 主管级 → 标识为 管理。」
+
+                 设计说明（Design Rationale）
+                 目的：替**运营主管**回答「这行是谁、他能不能拍板」。
+                       此前表格有"专项"列但**无岗位列** → 组长/主管混在客服里
+                       看不出层级，无法快速定位该找谁。
+
+                 逻辑：岗位列紧邻姓名（第 2 列），管理岗徽标**高亮实底**，
+                       非管理岗用浅色 —— 让管理岗在长表中自然浮出。
+                       文案用管理视角词（主管→「管理」）而非职级名。
+
+                 口径：取自后端 `position`（客服/投诉专员/组长/副主管/主管）。
+                       ⚠️ 与「专项」列**含义不同**：岗位=层级，专项=干什么。
+                       某人可以是"客服+投诉专项"（兼办）或"组长+无专项"。
+
+                 取舍：① 不把管理岗数据"单独成表"—— 岗位只是人的属性之一，
+                          拆表会切断与专项/效率值的对照（那正是本表价值）；
+                       ② 不用 `is_management` 判断 —— 它含专员类跨类豁免岗
+                          （投诉专员等），那些不是管理岗（见 Today.vue 同款注释）；
+                       ③ AI/系统行不给岗位徽标 —— 它们没有职级，
+                          已在"来源"列标注为非真人。 -->
+            <template #default="{ row }">
+              <el-tag v-if="row.is_virtual" size="small" effect="plain" type="info">非真人</el-tag>
+              <el-tag
+                v-else-if="positionMeta(row.position)"
+                size="small"
+                effect="dark"
+                :style="{ background: positionMeta(row.position).bg, borderColor: positionMeta(row.position).bg }"
+              >{{ positionMeta(row.position).label }}</el-tag>
+              <span v-else-if="row.position" class="pos-plain">{{ row.position }}</span>
+              <span v-else class="text-muted">—</span>
+            </template>
+          </el-table-column>
           <el-table-column v-if="staffFilter.aggregateBy === 'person'" label="专项" width="110" show-overflow-tooltip>
             <template #default="{ row }">
               <el-tag v-if="row.current_specialty" size="small" effect="plain" type="warning">{{ row.current_specialty }}</el-tag>
@@ -976,6 +1012,28 @@ const SPECIALTY_COLS = [
   { key: '外部投诉', short: '外诉', color: '#dc2626' },
   { key: '投诉专项', short: '投诉', color: '#be123c' },
 ]
+
+/** ★ 岗位 → 徽标（用户 2026-09-14：「组长」「管理」要一眼可辨）
+ *
+ *  设计要点:
+ *   · **管理岗**（主管）→ 文案「管理」：使用者关心的是"他能拍板什么"，
+ *     而非"他叫什么级别"。
+ *   · **组长/副主管** → 文案「组长」：值班/带组语境下同属组级管理者。
+ *   · 专员类（投诉专员/退款处理专员）→ 显示**原文**（不缩写）：
+ *     "投诉专员"本身信息量足够，缩写反而模糊。
+ *   · 客服 → 浅色文字（数量最多，高亮会淹没管理岗）。
+ *   ⚠️ 不得用 `is_management` 判断 —— 它含专员类跨类豁免岗（投诉专员等），
+ *     那些**不是**管理岗。
+ */
+const POSITION_META = {
+  主管: { label: '管理', bg: '#b91c1c' },
+  副主管: { label: '组长', bg: '#b45309' },
+  组长: { label: '组长', bg: '#1d4ed8' },
+}
+function positionMeta(pos) {
+  if (!pos) return null
+  return POSITION_META[pos] || null
+}
 function getSpecialtyPeople(row, catKey) {
   const bd = row.breakdown || {}
   const info = bd[catKey]
@@ -2233,6 +2291,9 @@ watch([grain, weekOffset, monthOffset, quarterOffset, yearOffset, customDateRang
   margin-left: 4px;
 }
 .text-muted { color: #9ca3af; }
+
+/* ★ 非管理岗的岗位文字（客服/专员）—— 浅色，避免与高亮的管理岗徽标争视觉焦点 */
+.pos-plain { color: #6b7280; font-size: 12px; }
 
 /* ★ #80 退款挽回紧凑条: 3 个大卡 → 1 行内联条（含成功/失败堆叠比例条）
    设计说明: 用户反馈「3 个数字太占空间」。原实现每卡一个 el-col，

@@ -45,7 +45,7 @@ import argparse
 import sys
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
@@ -86,19 +86,38 @@ GROUP_LEADER = {
     "投诉专项组": "洪佳",     # 决策 3/7
 }
 
-# ③ 岗位职级（用户决策 1/4/9 + 2026-09-14 第二批）
+# ③ 岗位职级（用户决策 1/4/9 + 2026-09-14 第二批/三批）
 POSITION = {
     "董梦玲": "副主管",   # 决策 9：组长 + 副主管
     "吴晓龙": "组长",     # 决策 1：原副主管 → 组长
     "黄亚康": "组长",     # 决策 1
     "洪佳": "组长",       # 决策 3
     "朱海洋": "主管",     # 决策 4
-    # ★ 第二批（用户 2026-09-14）：投诉专职岗
-    #   ⚠️ 新增岗位值「投诉专员」（系统原有只有 客服/组长/副主管/主管）
+    # ★ 第二批：新增岗位值「投诉专员」
     #   ⚠️ 叶珍凤 **不改** —— 用户澄清「叶就是组长，不是投诉专员，
     #      只是所有的组长都有可能处理投诉」
     "苏紫依": "投诉专员",
     "邵晨雨": "投诉专员",
+    # ★ 第三批（用户 2026-09-14）
+    "唐彩慧": "退款处理专员",   # 「专职退款处理」（值含"专员"→ 跳类全豁免）
+    "陈卓": "主管",             # 主管级 → 看板标识为「管理」
+}
+
+# ③.5 ★ 专项负责人（用户第三批：退款挽回 + 套餐 两专项组长都是吴晓龙）
+#   ⚠️ 唐彩慧 **不做退款挽回，也不是 lead** → 必须卸掉其 lead
+SPECIALTY_LEAD = {
+    "退款挽回": "吴晓龙",
+    "套餐专项": "吴晓龙",
+}
+# 需卸任专项 lead 的人（用户明确）
+SPECIALTY_LEAD_REMOVE = [
+    ("唐彩慧", "退款挽回"),
+]
+
+# ③.6 部门调整（用户：孙芳粤属研发部，不纳入企微统计）
+#   方式：部门改为「研发部」→ 各看板默认排除非企微部门
+DEPARTMENT = {
+    "孙芳粤": "研发部",
 }
 
 # ④ 专项合并（用户决策 10）：4 人迁入新「投诉专项」
@@ -122,15 +141,13 @@ SPECIALTY_FIX = {
     # 用户 2026-09-14 明确确认：「刘景山 是做退款挽回，9.1 开始」
     "刘景山": "退款挽回",
     # 实测：退款类接待 0%（纯咨询岗特征）→ 实际做咨询接待
-    # （属用户"其他的按你的建议更改"范围内的原有建议，先前被漏执行）
     "杨馄瑶": "咨询接待",
+    # ★ 第三批（用户 2026-09-14）：「廖俊辉 是 退款挽回」
+    "廖俊辉": "退款挽回",
 }
 
 # ⑦ 暂不自动改、需业务复核的项（脚本**只报告不执行**）
-SPECIALTY_HOLD = {
-    "唐彩慧": "专项「退款处理」+ 兼任「退款挽回」负责人；离职/转岗情况未知，待确认",
-    "廖俊辉": "退款类接待占 23%，介于咨询与退款挽回之间，待确认",
-}
+SPECIALTY_HOLD: dict[str, str] = {}
 
 
 def _p(db: Session, name: str) -> Person | None:
@@ -639,6 +656,185 @@ def step_cleanup_departed(db: Session, dry: bool) -> int:
     return n
 
 
+def step_repair_mirrors(db: Session, dry: bool) -> int:
+    """⑨ 修复 `Person` 镜像字段与真身不一致。
+
+    ★ 为什么必须有这一步（本人踩的坑）：
+      改名分组时我直接写了 `Group.name`，**没有回写 `Person.group_name`
+      / `current_group_id` 镜像** → 结果是：
+        · 苏紫依/洪佳：`group_name='张蕾组'`（组已改名，镜像还是旧名）
+        · 叶珍凤：`group_name='叶珍凤组'`（应为「接待1组」）
+        · 多人 `current_group_id=NULL`
+      而**成员表 `person_group_memberships` 是正确的** →
+      「哪张表为准」的困惑又出现了。
+
+      ⚠️ 镜像陈旧不会报错，但会让任何**直读镜像**的报表显示过期组名
+        （`analytics` 里部分路径读镜像以求快）。
+
+    本步骤：以 `person_group_memberships`（真身）为准，回写镜像。
+    """
+    print("\n⑨ 修复 Person 镜像（以成员表真身为准）")
+    # ⚠️ 必须**从库里重读**组名，不能用 ORM 身份映射里的 `Group.name` —
+    #    步骤①改过名后，会话内的对象已是新值，但 join 读到的可能仍是
+    #    快照/旧值（实测 dry-run 会预览成 `→ '张蕾组'`，即旧名）。
+    #    用 `db.expire_all()` 强制失效缓存后重查，保证与库里一致。
+    if not dry:
+        db.expire_all()
+    real_names = {
+        int(gid): name
+        for gid, name in db.execute(select(Group.id, Group.name)).all()
+    }
+
+    rows = db.execute(
+        select(Person.id, Person.display_name, Person.group_name, Person.current_group_id,
+               PersonGroupMembership.group_id)
+        .join(PersonGroupMembership, and_(
+            PersonGroupMembership.person_id == Person.id,
+            PersonGroupMembership.is_current.is_(True),
+        ))
+    ).all()
+
+    n = 0
+    for pid, dname, m_group_name, m_gid, real_gid in rows:
+        real_name = real_names.get(int(real_gid))
+        if real_name is None:
+            continue
+        if m_group_name == real_name and m_gid == real_gid:
+            continue
+        _log(dry, f"{dname}: 镜像 '{m_group_name or 'NULL'}'/gid={m_gid} "
+                    f"→ '{real_name}'/gid={real_gid}")
+        if not dry:
+            p = db.get(Person, pid)
+            p.group_name = real_name
+            p.current_group_id = real_gid
+        n += 1
+
+    # 无当前成员关系却残留镜像的 → 清空（避免显示已不属于自己的组）
+    orphans = db.scalars(
+        select(Person).where(
+            Person.group_name.isnot(None),
+            ~Person.id.in_(
+                select(PersonGroupMembership.person_id).where(
+                    PersonGroupMembership.is_current.is_(True)
+                )
+            ),
+        )
+    ).all()
+    for p in orphans:
+        _log(dry, f"{p.display_name}: 无当前组关系 → 清空镜像 '{p.group_name}'")
+        if not dry:
+            p.group_name = None
+            p.current_group_id = None
+        n += 1
+    return n
+
+
+def step_specialty_leads(db: Session, dry: bool) -> int:
+    """④.6 专项负责人轮岗 + 卸任（用户第三批决策）
+
+    用户原文：「退款挽回 和套餐俩个专项内容，行政和专项 组长都是吴晓龙」
+              「唐彩绘 是专职退款处理，不做退款挽回，他不是lead」
+
+    ⚠️ 专项 lead 与**行政组长**是两套（`specialties.current_lead_id` vs
+       `groups.current_leader_id`），两者都要对 —— 行政侧已由步骤②完成。
+    """
+    print("\n④.6 专项负责人")
+    n = 0
+
+    # 卸任（用户明确「不做」「不是 lead」）
+    for pname, spec_name in SPECIALTY_LEAD_REMOVE:
+        p = _p(db, pname)
+        s = db.scalar(select(Specialty).where(Specialty.name == spec_name))
+        if p is None or s is None:
+            raise RuntimeError(f"卸任失败：找不到人「{pname}」或专项「{spec_name}」")
+        cur = db.scalar(select(SpecialtyLeadershipHistory).where(
+            SpecialtyLeadershipHistory.specialty_id == s.id,
+            SpecialtyLeadershipHistory.person_id == p.id,
+            SpecialtyLeadershipHistory.is_current.is_(True),
+        ))
+        if cur is None:
+            print(f"  [跳过] {pname} 无「{spec_name}」现职")
+            continue
+        _log(dry, f"卸任 {pname} 的「{spec_name}」{cur.role}")
+        if not dry:
+            cur.is_current = False
+            cur.effective_to = EFF
+            cur.change_reason = f"{REASON}·卸任（用户：不做该专项）"
+            if cur.role == "lead":
+                s.current_lead_id = None
+            else:
+                s.current_deputy_lead_id = None
+        n += 1
+
+    # 新任（吴晓龙）
+    for spec_name, pname in SPECIALTY_LEAD.items():
+        p = _p(db, pname)
+        s = db.scalar(select(Specialty).where(Specialty.name == spec_name))
+        if p is None or s is None:
+            raise RuntimeError(f"任命失败：找不到人「{pname}」或专项「{spec_name}」")
+        cur = db.scalar(select(SpecialtyLeadershipHistory).where(
+            SpecialtyLeadershipHistory.specialty_id == s.id,
+            SpecialtyLeadershipHistory.role == "lead",
+            SpecialtyLeadershipHistory.is_current.is_(True),
+        ))
+        if cur and cur.person_id == p.id:
+            print(f"  [跳过] 「{spec_name}」负责人已是 {pname}")
+            continue
+        old = "(无)"
+        if cur:
+            op = db.get(Person, cur.person_id)
+            old = op.display_name if op else str(cur.person_id)
+        _log(dry, f"「{spec_name}」负责人 {old} → {pname}")
+        if not dry:
+            if cur:
+                cur.is_current = False
+                cur.effective_to = EFF
+                cur.change_reason = f"{REASON}·轮岗"
+            db.add(SpecialtyLeadershipHistory(
+                specialty_id=s.id, person_id=p.id, role="lead",
+                effective_from=EFF, is_current=True,
+                change_reason=REASON, source="manual",
+            ))
+            s.current_lead_id = p.id
+        n += 1
+    return n
+
+
+def step_departments(db: Session, dry: bool) -> int:
+    """④.7 部门调整（用户：孙芳粤属研发部，不纳入企微统计）
+
+    实现方式（用户选定）：部门改为「研发部」→ 各看板默认排除非企微部门。
+
+    ⚠️ 本步骤同时**停用重复 Person** —— 实测孙芳粤有 **2 条** 记录
+       （pid 264/377，别名 `cat_月白`/`cat_yuebai`），属导入重复，
+       保留两条会让任何按人名聚合的报表出现重复行。
+       策略：保留 id 最小的，其余 `is_active=False`（**不物理删除**）。
+    """
+    print("\n④.7 部门调整 + 去重")
+    n = 0
+    for pname, dept in DEPARTMENT.items():
+        dups = db.scalars(select(Person).where(
+            Person.display_name == pname
+        ).order_by(Person.id)).all()
+        if not dups:
+            raise RuntimeError(f"找不到人员「{pname}」")
+        keep = dups[0]
+        for p in dups:
+            if p.department != dept:
+                _log(dry, f"{pname}(id={p.id}): 部门 {p.department or '无'} → {dept}")
+                if not dry:
+                    p.department = dept
+                n += 1
+        for p in dups[1:]:
+            if p.is_active:
+                _log(dry, f"{pname}(id={p.id}): 停用重复记录（保留 id={keep.id}）")
+                if not dry:
+                    p.is_active = False
+                    p.remark = ((p.remark or "") + f" | {REASON}：重复记录，已停用").strip(" |")
+                n += 1
+    return n
+
+
 def _mk_payload(**kw):
     from app.schemas.staff_assignment import StaffAssignmentCreate
 
@@ -677,10 +873,13 @@ def main() -> None:
         step_move_members(db, dry)
         step_positions(db, dry)
         step_fix_specialties(db, dry)
+        step_specialty_leads(db, dry)
+        step_departments(db, dry)
         step_end_leadership(db, dry)
         step_merge_complaint_specialty(db, dry)
         step_resign(db, dry)
         step_cleanup_departed(db, dry)
+        step_repair_mirrors(db, dry)
 
         print("\n" + "=" * 74)
         print(" ⚠️ 需业务复核、本脚本**不自动执行**的项：")

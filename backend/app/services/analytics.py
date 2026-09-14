@@ -6646,7 +6646,6 @@ def today_staff_efficiency(
                 "weight": coef, "coef": round(coef, 3), "is_own": own,
                 "work_contrib": round(wp, 1), "eff_contrib": round(ep, 1),
             }
-
         raw_name = r.name or op or "未知"
         norm_name = _strip_qw_prefix(raw_name) or raw_name
         _qw = getattr(r, "qw_user_id", None)
@@ -6834,9 +6833,82 @@ def today_staff_efficiency(
                CsRecord.operator.in_(_AI_SYS_OPS))
         .group_by(CsRecord.operator)
     ).all()
+    # ─────────────────────────────────────────────────────────────────────
+    # ★ 2026-09-14 用户要求: 「AI 接待也纳入效率值核算，算法与专项人员一致」
+    #
+    # 之前只给了 AI 的**量级**（会话数/接待数），`work_score=eff_score=0`
+    # → 无法与真人横向比较，也就答不了「AI 顶几个客服」。
+    #
+    # 本段用**与真人完全相同的权重表**（CAT_BUCKETS / WEIGHT /
+    # CAT_DEFAULT_WEIGHT / TRANSFER_PENALTY）为 AI 行算效率值，
+    # 但 AI 行**不参与真人排名**（`rank=None`）—— AI 不是人。
+    #
+    # ⚠️ AI 的专项构成怎么定？
+    #   AI 账户没有 Person / 无专项任职 → 无法按「本职系数」算。
+    #   故采用**接待实际构成**逐桶计算（= 每个桶按该桶默认系数），
+    #   这与「管理岗跨类全豁免」的算法**同构**（`coef = CAT_DEFAULT_WEIGHT[cat]`）。
+    #   于是 AI 的效率值 = Σ(该桶会话×该桶系数)，语义是
+    #   「AI 承担了相当于多少标准人力工作量」。
+    #
+    # ⚠️ 为什么必须复用同一张权重表: 若给 AI 单独写一套系数，
+    #    AI 与真人的效率值就**不可比** —— 那本次需求（比对 AI 效率）就失去意义。
+    #    单测 `test_ai_uses_same_weight_table` 锁死这一点。
+    # ─────────────────────────────────────────────────────────────────────
+    def _ai_cat_counts(op_name: str) -> dict[str, tuple[int, int]]:
+        """AI 账户按专项桶返回 (sessions, people) —— 与真人同口径。
+
+        数据来源与真人侧一致:
+          · 会话数 = `cs_records` 该 operator 的条数（按 problem_category 分桶）
+          · 接待数 = 该 operator 的去重设备 SN（按 problem_category 分桶）
+        AI 无工单/退款操作（那些动作由真人承接），故不并入 tk_sess/rf_by_op ——
+        这与真人侧的取值路径保持同一语义（有多少接待工作，就算多少）。
+        """
+        b = cs_cat_by_op.get(op_name, {})
+        # 复用真人侧的同一 `merged_pp`（SN 去重结果），保证口径完全一致
+        pp = merged_pp.get(op_name, {})
+        return {
+            "zixun": (
+                sum((b.get(n, (0, 0))[0] for n in BUCK_FZ), 0),
+                pp.get("咨询接待", 0),
+            ),
+            "taocan": (b.get("套餐问题", (0, 0))[0], pp.get("套餐专项", 0)),
+            "recovery": (b.get("退款", (0, 0))[0], pp.get("退款挽回", 0)),
+            "processing": (0, pp.get("退款处理", 0)),   # AI 不执行退款操作
+            "internal": (b.get("投诉", (0, 0))[0], pp.get("内部投诉", 0)),
+            "external": (0, pp.get("外部投诉", 0)),
+            "complaint": (0, pp.get("投诉专项", 0)),
+        }
+
+    def _ai_scores(op_name: str) -> tuple[float, float, dict]:
+        """AI 行效率值（与真人同一权重表；跨类豁免语义）。"""
+        counts = _ai_cat_counts(op_name)
+        w = e = 0.0
+        bd: dict[str, dict[str, Any]] = {}
+        for (bucket_key, cat_name, _sp_set) in CAT_BUCKETS:
+            sv, pv = counts.get(bucket_key, (0, 0))
+            if sv == 0 and pv == 0:
+                bd[cat_name] = {
+                    "sessions": 0, "people": 0, "weight": 0, "coef": 0,
+                    "is_own": True, "work_contrib": 0, "eff_contrib": 0,
+                }
+                continue
+            # ⚠️ 与真人「管理岗」分支同一条路径 —— 有意如此，保证可比
+            coef = CAT_DEFAULT_WEIGHT[cat_name]
+            wp = sv * coef
+            ep = pv * coef
+            w += wp
+            e += ep
+            bd[cat_name] = {
+                "sessions": sv, "people": pv,
+                "weight": coef, "coef": round(coef, 3), "is_own": True,
+                "work_contrib": round(wp, 1), "eff_contrib": round(ep, 1),
+            }
+        return w, e, bd
+
     for vr in _virtual_agg:
         _vname = (vr.op or "").strip()
         _vlow = _vname.lower()
+        _v_ws, _v_es, _v_bd = _ai_scores(_vname)
         virtual_rows.append({
             "operator": _vname, "name": _vname,
             "person_id": None,
@@ -6851,15 +6923,31 @@ def today_staff_efficiency(
             "reception_count": int(vr.rc or 0),
             "reception_device_count": int(vr.rdc or 0),
             "refund_op_count": 0,
-            "sp_zixun": 0, "sp_taocan": 0, "sp_recovery": 0,
-            "sp_processing": 0, "sp_internal": 0, "sp_external": 0,
-            "pp_zixun": 0, "pp_taocan": 0, "pp_recovery": 0,
-            "pp_processing": 0, "pp_internal": 0, "pp_external": 0,
+            # ★ 从 breakdown 取各桶明细（与真人同字段名，前端可同表渲染）
+            "sp_zixun": _v_bd["咨询接待"]["sessions"],
+            "sp_taocan": _v_bd["套餐专项"]["sessions"],
+            "sp_recovery": _v_bd["退款挽回"]["sessions"],
+            "sp_processing": _v_bd["退款处理"]["sessions"],
+            "sp_internal": _v_bd["内部投诉"]["sessions"],
+            "sp_external": _v_bd["外部投诉"]["sessions"],
+            "pp_zixun": _v_bd["咨询接待"]["people"],
+            "pp_taocan": _v_bd["套餐专项"]["people"],
+            "pp_recovery": _v_bd["退款挽回"]["people"],
+            "pp_processing": _v_bd["退款处理"]["people"],
+            "pp_internal": _v_bd["内部投诉"]["people"],
+            "pp_external": _v_bd["外部投诉"]["people"],
             "weights": dict(WEIGHT), "transfer_penalty": TRANSFER_PENALTY,
-            "breakdown": {}, "work_score": 0.0, "eff_score": 0.0,
+            "breakdown": _v_bd,
+            # ★ 效率值（2026-09-14 用户要求：与专项人员算法一致，便于比对）
+            "work_score": round(_v_ws, 2),
+            "eff_score": round(_v_es, 2),
             "rank": None,
             "_calc_note": {
-                "note": "非真人账户（AI/系统），不计入人效排名；量级供「大致评估 AI 工作量」用（工单 #78）",
+                "note": "非真人账户（AI/系统）。效率值采用与专项人员**完全相同的权重表**"
+                        "（按各专项默认系数逐桶累加），故可与真人横向比对；"
+                        "但不参与真人排名（工单 #78 / 2026-09-14 用户要求）",
+                "weight_rule": "AI 无专项任职 → 按接待实际构成逐桶取该桶默认系数，"
+                               "与「管理岗跨类全豁免」同构",
             },
         })
 
