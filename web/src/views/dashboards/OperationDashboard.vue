@@ -341,7 +341,7 @@
                     <span class="score-tip-cat">归类</span>
                     <span>{{ row.hr_category }} ({{ row.is_management ? '管理岗·跨类全豁免' : '本职·按专项系数' }})</span>
                   </div>
-                  <div class="score-tip-note">专项难度系数: 咨询×1.0 套餐×1.8 退款处理×2.0 退款挽回×2.2 内诉×3.0 外诉×5.0 · 转接×0.2</div>
+                  <div class="score-tip-note">专项难度系数: 咨询×1.0 套餐×1.8 退款处理×2.0 退款挽回×2.2 内诉×3.0 外诉×5.0 **投诉专项×5.0** · 转接×0.2</div>
                 </div>
               </el-popover>
             </template>
@@ -591,8 +591,7 @@
                   content="<b>这是升级的代理信号，不是真实升级率</b><br/>同设备(SN)30天内被投诉≥2次 ≈ 第一次没解决好。<br/>真实升级率需升级投诉表（申报/化解字段）到位后才可计算。">
                   <el-icon style="vertical-align:-2px;font-size:11px"><QuestionFilled /></el-icon>
                 </el-tooltip>
-              </div>
-              <div class="hb-value" style="color:#ea580c">{{ fmtRate(healthMetrics.repeat?.repeat_rate) }}</div>
+              </div>              <div class="hb-value" style="color:#ea580c">{{ fmtRate(healthMetrics.repeat?.repeat_rate) }}</div>
               <div class="hb-sub">{{ formatNum(healthMetrics.repeat?.repeat_tickets) }} 条重复</div>
             </div>
           </el-col>
@@ -963,6 +962,11 @@ const receptionPerspective = ref('count')
 const trendSelectedGroups = ref(['reception'])
 
 // 工作效率表: 各专项接待明细列 (按类型分开SN/接待数)
+// ★ 2026-09-14 投诉专项合并：新增「投诉专项」列。
+//   ⚠️ 旧「内部投诉/外部投诉」列**保留** —— 历史区间的工单仍按旧桶归集，
+//      删掉会让历史数据无处显示（且非法重算历史）。
+//   ⚠️ 列 key 必须与后端 `analytics.CAT_BUCKETS` 的 `cat_name` 逐字一致，
+//      否则 `getSpecialtyPeople(row, col.key)` 取不到值 → 恒显示「—」。
 const SPECIALTY_COLS = [
   { key: '咨询接待', short: '咨询', color: '#3b82f6' },
   { key: '套餐专项', short: '套餐', color: '#f97316' },
@@ -970,6 +974,7 @@ const SPECIALTY_COLS = [
   { key: '退款挽回', short: '挽回', color: '#06b6d4' },
   { key: '内部投诉', short: '内诉', color: '#7c3aed' },
   { key: '外部投诉', short: '外诉', color: '#dc2626' },
+  { key: '投诉专项', short: '投诉', color: '#be123c' },
 ]
 function getSpecialtyPeople(row, catKey) {
   const bd = row.breakdown || {}
@@ -1183,7 +1188,8 @@ const healthPositionTip = [
   '　　→ 分子口径<b>故意不同</b>：客服的职责是接待，不是结案（用户 2026-09-14 确认）',
   '<b>岗位归属</b>：取自 <code>person.position</code> / <code>specialty</code>',
   '　（已与 SCD 任职历史源同步；处理人经别名表匹配，实测覆盖 100%）',
-  '· 投诉专员 = 专项 ∈ (内部投诉, 外部投诉)　· 组长含副主管',
+  '· 投诉专员 = 专项 ∈ (投诉专项 / 内部投诉 / 外部投诉)　· 组长含副主管',
+  '　（2026-09-14 起内/外部投诉已合并为「投诉专项」；旧两项保留供历史归因）',
   '<b>「空」的含义</b>：显示 <b>「—」</b> = 该岗位<b>当前无在岗人员</b>（人数为0），',
   '　分母不存在 → 无法计算人均；<b>不是 0 工作量</b>。',
   '· 显示 0 = 该岗位有在岗人员但窗口内无归因工作量（如请假/转岗）',

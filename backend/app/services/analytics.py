@@ -3040,6 +3040,24 @@ def _pct_delta(cur, prev) -> float | None:
 _COMPLAINT_SPECIALIST_SPECIALTIES = ("内部投诉", "外部投诉")
 _COMPLAINT_LEAD_POSITIONS = ("组长", "副主管")
 
+# ══════════════════════════════════════════════════════════════
+# 岗位值「投诉专员」（2026-09-14 用户决策）
+# ══════════════════════════════════════════════════════════════
+# 背景: 原 `position` 枚举只有 客服/组长/副主管/主管，但投诉团队实际存在
+#   专职处理投诉的角色，需要与「客服」区分（否则岗位负荷表把投诉专职
+#   和普通接待混在一起，看不出专职 vs 兼办）。
+#
+# ⚠️ 两个不同概念、勿混（本仓库已因此差点搞错）:
+#   · `position`(岗位)  = 客服 / 组长 / 副主管 / 主管 / **投诉专员** → 驱动岗位负荷分桶
+#   · `role`(角色/权限) = agent / specialist / specialty_lead / supervisor / admin
+#     → 「专员」在 `role` 里早就有(specialist)，与本次 position 新增不是一回事。
+#
+# ⚠️ 副作用（有意为之）: 值中含「专员」→ 命中 `EXEMPT_POSITION_PATTERNS`
+#   → 该人获得**跨类全豁免**（所有专项按各自默认系数计权重，而非转接 0.2）。
+#   这是正确的 —— 投诉专员处理的高难度投诉不应按「转接接待」贬值。
+#   但**会抬高其工作量得分**，属预期内变化。
+COMPLAINT_SPECIALIST_POSITION = "投诉专员"
+
 
 def _person_position_map(db: Session) -> dict[str, dict[str, Any]]:
     """返回 {别名: {person_id, display_name, position, specialty, bucket}}
@@ -3084,7 +3102,11 @@ def _person_position_map(db: Session) -> dict[str, dict[str, Any]]:
     def _bucket(pos: str | None, spec: str | None, pid: int | None) -> str:
         p = (pos or scd_positions.get(pid or -1, "") or "").strip()
         s = (spec or scd_specialists.get(pid or -1, "") or "").strip()
-        # 投诉专员判定改为「全量投诉类专项」（含合并后的新专项 + 历史两条）
+        # ① 岗位直判「投诉专员」优先于专项 ——
+        #    用户明确任命为专职的，不因未指派专项而落入「客服」。
+        if p == COMPLAINT_SPECIALIST_POSITION:
+            return "投诉专员"
+        # ② 否则看专项：所有投诉类专项（含合并后新专项 + 历史两条）
         if s in COMPLAINT_SPECIALTIES_ALL:
             return "投诉专员"
         if p in _COMPLAINT_LEAD_POSITIONS:

@@ -465,7 +465,7 @@
         </el-form-item>
         <el-form-item label="岗位">
           <el-select v-model="assignmentForm.position" clearable style="width: 100%">
-            <el-option label="客服" value="客服" /><el-option label="组长" value="组长" /><el-option label="主管" value="主管" />
+            <el-option label="客服" value="客服" /><el-option label="投诉专员" value="投诉专员" /><el-option label="组长" value="组长" /><el-option label="副主管" value="副主管" /><el-option label="主管" value="主管" />
           </el-select>
         </el-form-item>
         <el-form-item label="专项">
