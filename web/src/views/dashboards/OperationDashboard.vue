@@ -630,9 +630,16 @@
               :class="{ 'hb-pos-card--active': p.numerator > 0 }"
             >
               <div class="hb-pos-name">{{ p.bucket }}</div>
+              <!-- 无在岗人数（兼办投诉行）时：大数字直接显示工作量，不显示「—」，
+                   避免看起来像"数据缺失" -->
               <div class="hb-pos-per">
-                {{ p.per_capita === null ? '—' : formatNum(p.per_capita) }}
-                <span class="hb-pos-unit">{{ p.unit }}/人</span>
+                <template v-if="p.headcount === null">
+                  {{ formatNum(p.numerator) }}<span class="hb-pos-unit">{{ p.unit }}</span>
+                </template>
+                <template v-else>
+                  {{ p.per_capita === null ? '—' : formatNum(p.per_capita) }}
+                  <span class="hb-pos-unit">{{ p.unit }}/人</span>
+                </template>
               </div>
               <div class="hb-pos-detail">
                 <template v-if="p.headcount === null">
@@ -648,6 +655,17 @@
           <div class="hb-pos-foot">
             归因合计 <b>{{ formatNum(healthMetrics.attribution?.total_handled) }}</b> 条
             <span class="hb-dim">（含未登记岗位/主管 {{ formatNum(healthMetrics.attribution?.by_bucket?.其他) }} 条）</span>
+          </div>
+          <!-- ★ 兼办投诉提示：让「非专职人员在办投诉」可见（岗位临时调配信号）。
+               实测约 7% 投诉由非组长/专员完成，工单未按新流程归口 ——
+               这是第一批指标要暴露的问题，不隐藏。 -->
+          <div v-if="healthOtherDuty" class="hb-notice">
+            <el-icon style="vertical-align:-2px"><InfoFilled /></el-icon>
+            <span>
+              有 <b>{{ formatNum(healthOtherDuty) }}</b> 条投诉由<span class="hb-dim">非组长/专员</span>完成
+              （{{ healthOtherDutyPct }}%），提示存在<b>岗位临时调配</b> ——
+              上方岗位负荷只反映岗位本职，不含此类兼办。
+            </span>
           </div>
         </div>
       </div>
