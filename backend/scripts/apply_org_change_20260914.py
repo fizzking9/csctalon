@@ -104,16 +104,20 @@ MOVE_TO_GROUP = {
     "田兴月": "投诉专项组",   # 原董梦玲组
 }
 
-# ⑥ 专项标签校正（基于实测工作画像，用户「按建议更改」）
+# ⑥ 专项标签校正（基于实测工作画像）
+# ⚠️ 本人曾定义本字典但**忘了写对应的 step 去消费它** → 本步骤实际从未执行
+#    （实测：杨馄瑶仍为「退款挽回」）。教训：定义了配置就必须接上执行路径，
+#    "添加了但没人用"比没写更危险 —— 它让人以为已经改了。
 SPECIALTY_FIX = {
-    "杨馄瑶": "咨询接待",     # 实测：退款类接待 0% → 实际做咨询
-    "刘景山": None,           # ⚠️ 保留「内部投诉」但暂停用（见下方 SPECIALTY_HOLD）
+    # 用户 2026-09-14 明确确认：「刘景山 是做退款挽回，9.1 开始」
+    "刘景山": "退款挽回",
+    # 实测：退款类接待 0%（纯咨询岗特征）→ 实际做咨询接待
+    # （属用户"其他的按你的建议更改"范围内的原有建议，先前被漏执行）
+    "杨馄瑶": "咨询接待",
 }
 
 # ⑦ 暂不自动改、需业务复核的项（脚本**只报告不执行**）
 SPECIALTY_HOLD = {
-    "刘景山": "实测零投诉完成、98% 接待是退款类 → 疑实际做退款挽回；"
-              "但其「内部投诉」是历史专项，改动影响绩效，待人工确认",
     "唐彩慧": "专项「退款处理」+ 兼任「退款挽回」负责人；离职/转岗情况未知，待确认",
     "廖俊辉": "退款类接待占 23%，介于咨询与退款挽回之间，待确认",
 }
@@ -389,6 +393,59 @@ def step_merge_complaint_specialty(db: Session, dry: bool) -> int:
 # ══════════════════════════════════════════════════════════════════
 # 步骤 6: 张蕾离职
 # ══════════════════════════════════════════════════════════════════
+def step_fix_specialties(db: Session, dry: bool) -> int:
+    """④.5 专项标签校正（按实测工作画像）
+
+    ★ 为什么单列一步而不是塞进 step_positions：
+      `create_assignment` 的语义是"整套任职"（position+specialty+group_name）
+      一起写。岗位未变但专项变的场景，必须**显式带上现岗位**，
+      否则会把 position 置空（静默丢数据）。
+
+    ⚠️ 旧专项的当前分配会被**结束**（is_current=False），
+       不物理删除 —— 历史区间仍需按当时的专项归因。
+    """
+    print("\n④.5 专项标签校正")
+    n = 0
+    for pname, new_spec in SPECIALTY_FIX.items():
+        p = _p(db, pname)
+        if p is None:
+            raise RuntimeError(f"找不到人员「{pname}」")
+        cur_spec = (p.specialty or p.primary_specialty or "").strip()
+        if cur_spec == new_spec:
+            print(f"  [跳过] {pname} 专项已是 {new_spec}")
+            continue
+
+        # 结束其它当前专项分配
+        olds = db.scalars(select(PersonSpecialtyAssignment).where(
+            PersonSpecialtyAssignment.person_id == p.id,
+            PersonSpecialtyAssignment.is_current.is_(True),
+        )).all()
+        old_names = []
+        for a in olds:
+            o = db.get(Specialty, a.specialty_id)
+            oname = o.name if o else str(a.specialty_id)
+            old_names.append(oname)
+            if oname == new_spec:
+                # 已有同专项的当前分配 → 无需新建
+                continue
+            if not dry:
+                a.is_current = False
+                a.effective_to = EFF
+                a.change_reason = f"{REASON}·专项校正"
+
+        _log(dry, f"{pname}: 专项 {','.join(old_names) or '无'} → {new_spec}"
+                    f"（岗位保持 {(p.position or '无')}）")
+        if not dry:
+            create_assignment(db, p.id, _mk_payload(
+                position=p.position,          # ⚠️ 必须带上，否则被置空
+                specialty=new_spec,
+                group_name=p.group_name,
+                reason=f"{REASON}·专项校正",
+            ))
+        n += 1
+    return n
+
+
 def step_resign(db: Session, dry: bool) -> int:
     print("\n⑦ 张蕾离职（2026-09-01）")
     p = _p(db, "张蕾")
@@ -556,6 +613,7 @@ def main() -> None:
         step_transfer_leaders(db, dry)
         step_move_members(db, dry)
         step_positions(db, dry)
+        step_fix_specialties(db, dry)
         step_end_leadership(db, dry)
         step_merge_complaint_specialty(db, dry)
         step_resign(db, dry)
