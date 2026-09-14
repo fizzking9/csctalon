@@ -183,15 +183,29 @@ def _warm_complaints(
         f"{label}:complaint:health", force=force,
     )
     n += _warm_one(
-        f"complaint:detail:{start}:{end}:None:{detail_limit}:1",
+        # ⚠️ key 形状须与路由 `complaint:detail:{start}:{end}:{source_type}:{subject}:{limit}:{bool}`
+        #    对齐 —— 曾漏 `subject`（None）段 → 预热写进的 key 与路由读的 key
+        #    不一致，**缓存永不命中**（且不报错）。由
+        #    `tests/test_cache_warmer_alignment.py` 守护。
+        f"complaint:detail:{start}:{end}:None:None:{detail_limit}:1",
         complaint_detail.__wrapped__, (db, None),
-        {"start": start, "end": end, "source_type": None, "limit": detail_limit, "include_supplementary": True},
+        {"start": start, "end": end, "source_type": None, "subject": None,
+         "limit": detail_limit, "include_supplementary": True},
         f"{label}:complaint:detail", force=force,
     )
     # 被投诉主体分析 + 投诉决策分析(看板高频, 历史无缓存缺口): 与 summary 同窗口
+    # ⚠️ #67 P2 (2026-09-11) 给 `complaint_subject_analysis` 加了 4 个查询参数
+    #    (`source_type`/`sort_by`/`top_n`/`compare`)，但**本处未同步更新** →
+    #    缺省值变成 `Query(...)` 对象 → 内部比较时报
+    #    `'>' not supported between instances of 'Query' and 'int'` →
+    #    预热**每次都静默失败**（被 `_warm_one` 的 try/except 吞掉）。
+    #    2026-09-14 修复：key 与 kwargs 都补齐默认值，形状与路由 `cached_json` 对齐。
+    #    ⚠️ 后续再给该接口加参数时，**两处必须同步改**。
     n += _warm_one(
-        f"complaint:subject:{start}:{end}",
-        complaint_subject_analysis.__wrapped__, (db, None), {"start": start, "end": end},
+        f"complaint:subject:{start}:{end}:all:total:0:none",
+        complaint_subject_analysis.__wrapped__, (db, None),
+        {"start": start, "end": end,
+         "source_type": "all", "sort_by": "total", "top_n": 0, "compare": "none"},
         f"{label}:complaint:subject", force=force,
     )
     n += _warm_one(
@@ -265,8 +279,10 @@ def _warm_reports(db, *, force: bool = False) -> int:
         # 投诉决策/被投诉主体看板(ComplaintAnalysis.vue 默认近30天: subtract(30)~today)
         ("complaint:analysis", f"complaint:analysis:{s30}:{e}",
          complaint_analysis.__wrapped__, (db, None), {"start": s30, "end": e}),
-        ("complaint:subject",  f"complaint:subject:{s30}:{e}",
-         complaint_subject_analysis.__wrapped__, (db, None), {"start": s30, "end": e}),
+        ("complaint:subject",  f"complaint:subject:{s30}:{e}:all:total:0:none",
+         complaint_subject_analysis.__wrapped__, (db, None),
+         {"start": s30, "end": e,
+          "source_type": "all", "sort_by": "total", "top_n": 0, "compare": "none"}),
     ]
     return sum(
         _warm_one(key, fn, args, kw, f"月报:{name}", force=force)
