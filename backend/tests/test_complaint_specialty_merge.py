@@ -128,6 +128,36 @@ class TestNewSpecialtyWired:
         # SCD 查询同样要用全量
         assert "Specialty.name.in_(COMPLAINT_SPECIALTIES_ALL)" in src
 
+    def test_cat_buckets_keys_match_cat_data_keys(self):
+        """★ CAT_BUCKETS 的 key 必须与 cat_data 的 key **完全一致**。
+
+        ⚠️ 这是本人实际踩过的**生产事故**：
+           给 `CAT_BUCKETS` 加了第 7 项 `("complaint", ...)`，
+           却漏了给 `cat_data` 加 `"complaint"` 键 →
+           人效接口 `cat_data[bucket_key]` 直接 `KeyError: 'complaint'`
+           （表现为缓存预热日志「预热 today:staff 失败: 'complaint'」，
+            接口整体 500，而单测全绿 —— 因为单测没覆盖这个动态取值路径）。
+        """
+        import re
+
+        src = inspect.getsource(A)
+        # 提取 CAT_BUCKETS 的 key（元组第一项）
+        m = re.search(r"CAT_BUCKETS = \[(.*?)\n    \]", src, re.S)
+        assert m, "未找到 CAT_BUCKETS 定义"
+        bucket_keys = re.findall(r'\("(\w+)",', m.group(1))
+        # 提取 cat_data 的 key
+        m2 = re.search(r"cat_data = \{(.*?)\n        \}", src, re.S)
+        assert m2, "未找到 cat_data 定义"
+        data_keys = re.findall(r'"(\w+)": \(', m2.group(1))
+
+        assert len(bucket_keys) == len(data_keys), (
+            f"CAT_BUCKETS 有 {len(bucket_keys)} 个桶，cat_data 只有 {len(data_keys)} 个 → "
+            f"缺失会导致运行期 KeyError。差集: {set(bucket_keys) ^ set(data_keys)}"
+        )
+        assert set(bucket_keys) == set(data_keys), (
+            f"桶 key 不一致: CAT_BUCKETS={bucket_keys} vs cat_data={data_keys}"
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════
 # 4. ★ 语义隔离（人员专项 ⊥ 投诉来源桶）

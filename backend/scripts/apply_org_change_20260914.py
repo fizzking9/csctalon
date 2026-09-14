@@ -419,8 +419,8 @@ def step_resign(db: Session, dry: bool) -> int:
 #   → 他转任专项1组组长后，若不清掉这条 deputy，会残留
 #     「既是组3副主管、又是组5组长，且已不是组3成员」的矛盾状态。
 END_LEADERSHIP = [
-    # (人, 组名[旧名], role)
-    ("吴晓龙", "吴晓龙组", "deputy"),
+    # (人, 组名【用改后的新名，便于改名后重跑】, role)
+    ("吴晓龙", "接待3组", "deputy"),
 ]
 
 
@@ -432,11 +432,13 @@ def step_end_leadership(db: Session, dry: bool) -> int:
         if p is None:
             print(f"  ⚠️ [缺失] 人「{pname}」")
             continue
-        # ⚠️ 此处按**旧组名**查（卸任的是历史归属，不随本次改名走）
-        g = db.scalar(select(Group).where(Group.name == gname)) or _g(db, gname)
+        # 用**新组名**查（_g 已自带"新名→旧名"回退，改名前后都能命中）。
+        # ⚠️ 曾用旧名查 → 步骤①改名后查不到 → **静默跳过**，
+        #    实测残留「吴晓龙 同时为 接待3组副主管 + 专项1组组长」的矛盾状态。
+        #    现改为显式报错，不充许静默跳过。
+        g = _g(db, gname)
         if g is None:
-            print(f"  ⚠️ [缺失] 组「{gname}」")
-            continue
+            raise RuntimeError(f"卸任步骤找不到分组「{gname}」—— 必须修好，不可静默跳过")
         cur = db.scalar(select(GroupLeadershipHistory).where(
             GroupLeadershipHistory.group_id == g.id,
             GroupLeadershipHistory.person_id == p.id,
@@ -456,6 +458,65 @@ def step_end_leadership(db: Session, dry: bool) -> int:
             else:
                 g.current_deputy_leader_id = None
         n += 1
+    return n
+
+
+def step_cleanup_departed(db: Session, dry: bool) -> int:
+    """⑧ 离职人员清理：结束其组关系 + 卸任**旧投诉专项**负责人。
+
+    ★ 为什么必须做：
+      · 实测张蕾离职后仍是 **「内部投诉」专项 lead（is_current=true）**
+        → 报表会把已离职的人算作在岗负责人；
+      · 她仍在「投诉专项组」成员表里（is_current=true）
+        → 组的"当前人数"虚高。
+
+    ⚠️ 只**结束**（is_current=False + effective_to），**不物理删除**
+       —— 历史区间需要这些记录来回溯"当时谁是负责人"。
+    """
+    print("\n⑧ 离职人员清理")
+    n = 0
+    p = _p(db, "张蕾")
+    if p is None:
+        raise RuntimeError("找不到 张蕾")
+
+    # 8.1 卸任「内部投诉」专项负责人（该专项已并入投诉专项，不再需要 lead）
+    stale = db.scalars(select(SpecialtyLeadershipHistory).where(
+        SpecialtyLeadershipHistory.person_id == p.id,
+        SpecialtyLeadershipHistory.is_current.is_(True),
+    )).all()
+    for h in stale:
+        s = db.get(Specialty, h.specialty_id)
+        sname = s.name if s else str(h.specialty_id)
+        _log(dry, f"张蕾 卸任「{sname}」专项 {h.role}")
+        if not dry:
+            h.is_current = False
+            h.effective_to = EFF
+            h.change_reason = f"{REASON}·离职卸任"
+            if s:
+                if h.role == "lead":
+                    s.current_lead_id = None
+                else:
+                    s.current_deputy_lead_id = None
+        n += 1
+
+    # 8.2 结束组成员关系
+    m = db.scalar(select(PersonGroupMembership).where(
+        PersonGroupMembership.person_id == p.id,
+        PersonGroupMembership.is_current.is_(True),
+    ))
+    if m:
+        g = db.get(Group, m.group_id)
+        _log(dry, f"张蕾 退出分组「{g.name if g else m.group_id}」")
+        if not dry:
+            m.is_current = False
+            m.effective_to = EFF
+            m.change_reason = f"{REASON}·离职"
+            p.current_group_id = None
+            p.group_name = None
+        n += 1
+    else:
+        print("  [跳过] 张蕾 无当前组关系")
+
     return n
 
 
@@ -498,6 +559,7 @@ def main() -> None:
         step_end_leadership(db, dry)
         step_merge_complaint_specialty(db, dry)
         step_resign(db, dry)
+        step_cleanup_departed(db, dry)
 
         print("\n" + "=" * 74)
         print(" ⚠️ 需业务复核、本脚本**不自动执行**的项：")

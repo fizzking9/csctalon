@@ -6491,6 +6491,11 @@ def today_staff_efficiency(
         processing_sess = rf_by_op.get(op, (0,0))[0] + tk_sess.get("退款处理", 0)
         # 内部投诉: cs_record 投诉 + 工单 内部投诉
         internal_sess = internal_sess_cs + tk_sess.get("内部投诉", 0)
+        # ★ 2026-09-14 合并后的投诉专项桶
+        #    工单侧仍按旧桶（内部/外部投诉）统计；新专项的人其**归集**
+        #    仍落在 internal/external（因工单来源未变）→
+        #    本桶用于**兼容新专项直接产出的工作**（当前为 0，预留）。
+        complaint_sess = 0
         # 外部投诉: 工单 外部投诉
         external_sess = external_sess_cs + tk_sess.get("外部投诉", 0)
 
@@ -6503,9 +6508,15 @@ def today_staff_efficiency(
         recovery_peop = sn_pp.get("退款挽回", 0)
         processing_peop = sn_pp.get("退款处理", 0)
         internal_peop = sn_pp.get("内部投诉", 0)
+        complaint_peop = 0  # ★ 见上 complaint_sess 说明
         external_peop = sn_pp.get("外部投诉", 0)
 
-        # 6 个专项桶 (key → sessions, people)
+        # 专项桶 (key → sessions, people)
+        # ⚠️ 桶的 key 必须与上方 `CAT_BUCKETS` **逐项对应** ——
+        #    `cat_data[bucket_key]` 是无守卫的直接索引，缺一个就 KeyError。
+        #    曾因只给 CAT_BUCKETS 加了 `complaint` 而漏加此处 →
+        #    生产人效接口报 `KeyError: 'complaint'`（缓存预热日志中的
+        #    “预热 today:staff 失败: 'complaint'”）。
         cat_data = {
             "zixun": (z_sess, z_peop),
             "taocan": (t_sess, t_peop),
@@ -6513,13 +6524,24 @@ def today_staff_efficiency(
             "processing": (processing_sess, processing_peop),
             "internal": (internal_sess, internal_peop),
             "external": (external_sess, external_peop),
+            # ★ 2026-09-14 投诉专项合并：新专项独立成桶
+            #   旧 internal/external 桶**保留**（历史区间的工单仍按旧桶归集）
+            "complaint": (complaint_sess, complaint_peop),
         }
-        # 总接待设备数 = 6 桶 SN 并集个数 (近似用桶求和)
-        total_devices = z_peop + t_peop + recovery_peop + processing_peop + internal_peop + external_peop
+        # 总接待设备数 = 全部桶 SN 之和 (近似用桶求和)
+        # ⚠️ 新桶（complaint）当前恒为 0，故不改变原口径数值。
+        total_devices = (
+            z_peop + t_peop + recovery_peop + processing_peop
+            + internal_peop + external_peop + complaint_peop
+        )
         # 若 total_devices 比 cs_record 侧 rdc 大, 用 total_devices 更真实; 否则保留 rdc 保持旧口径
         reception_device_count = max(rdc, total_devices)
-        # 总会话数 = 工单并入后的 6 桶之和 (反映当天真实工作量条次)
-        reception_count = z_sess + t_sess + recovery_sess + processing_sess + internal_sess + external_sess
+        # 总会话数 = 工单并入后的全部桶之和 (反映当天真实工作量条次)
+        #   ⚠️ 新桶当前为 0，不改变原数值
+        reception_count = (
+            z_sess + t_sess + recovery_sess + processing_sess
+            + internal_sess + external_sess + complaint_sess
+        )
         # rc 是原 cs_record 侧算出来的会话总条数; 并入工单数后可能更大, 取 max 避免回退
         reception_count = max(rc, reception_count)
 
