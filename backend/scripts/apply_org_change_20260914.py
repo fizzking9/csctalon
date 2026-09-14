@@ -382,10 +382,9 @@ def step_merge_complaint_specialty(db: Session, dry: bool) -> int:
                 a.change_reason = f"{REASON}·并入投诉专项"
         _log(dry, f"{pname}: 专项 {','.join(old_names) or '无'} → {COMPLAINT_SPECIALTY}")
         if not dry:
-            create_assignment(db, p.id, _mk_payload(
-                position=p.position, specialty=COMPLAINT_SPECIALTY,
-                group_name=p.group_name, reason=f"{REASON}·并入投诉专项",
-            ))
+            # ⚠️ 必须写 `person_specialty_assignments`（专项真身）——
+            #    见 `_assign_specialty` docstring 记录的"两套 SCD 表"坑。
+            _assign_specialty(db, p, COMPLAINT_SPECIALTY, f"{REASON}·并入投诉专项")
         n += 1
     return n
 
@@ -423,27 +422,80 @@ def step_fix_specialties(db: Session, dry: bool) -> int:
         old_names = []
         for a in olds:
             o = db.get(Specialty, a.specialty_id)
-            oname = o.name if o else str(a.specialty_id)
-            old_names.append(oname)
-            if oname == new_spec:
-                # 已有同专项的当前分配 → 无需新建
-                continue
+            old_names.append(o.name if o else str(a.specialty_id))
             if not dry:
                 a.is_current = False
                 a.effective_to = EFF
                 a.change_reason = f"{REASON}·专项校正"
 
-        _log(dry, f"{pname}: 专项 {','.join(old_names) or '无'} → {new_spec}"
-                    f"（岗位保持 {(p.position or '无')}）")
+        _log(dry, f"{pname}: 专项 {','.join(old_names) or '无'} → {new_spec}")
         if not dry:
-            create_assignment(db, p.id, _mk_payload(
-                position=p.position,          # ⚠️ 必须带上，否则被置空
-                specialty=new_spec,
-                group_name=p.group_name,
-                reason=f"{REASON}·专项校正",
-            ))
+            _assign_specialty(db, p, new_spec, f"{REASON}·专项校正")
         n += 1
     return n
+
+
+def _assign_specialty(db: Session, p: Person, spec_name: str, reason: str) -> None:
+    """把 person 的**当前主专项**设为 spec_name（写 `person_specialty_assignments`）。
+
+    ★★★ 这里踩过一个**大坑，务必读 ★★★
+      最初用 `staff_assignment_service.create_assignment` 来"改专项"，
+      结果：**旧专项被关掉了，新专项根本没写进去** → 人变成「无当前专项」。
+
+      根因：本仓库有**两套并存的 SCD 表**，各自服务不同用途：
+
+      | 表 | 服务谁 | 谁在读 |
+      |---|---|---|
+      | `staff_assignments` | 任职历史（**岗位**/专项/分组的整体快照） | `staff_assignment_service`、HR 导入导出 |
+      | `person_specialty_assignments` + `specialties` | **专项**分配（is_primary） | `analytics._person_position_map`、投诉专员识别、`specialty_analytics` |
+
+      两者**互不同步** —— 写一张表不会自动更新另一张
+      （只有 `Person.specialty` 镜像字段是两侧都写的公约数）。
+
+      → **改专项必须写 `person_specialty_assignments`**（这才是"专项"的真身），
+        与 `specialties.assign_persons` 路由保持同一路径。
+
+    ⚠️ 同时同步 `staff_assignments`（任职快照）与 `Person.specialty` 镜像，
+       避免三处不一致。镜像缺失/滞后会让人效表显示过期专项
+       （`_operator_to_person_cte` 的注释里记录过该问题，2026-08-14）。
+    """
+    sp = db.scalar(select(Specialty).where(Specialty.name == spec_name))
+    if sp is None:
+        raise RuntimeError(f"专项「{spec_name}」不存在于 specialties 表")
+
+    # 幂等：已有同专项的当前主分配 → 直接同步快照与镜像，不重复插行
+    dup = db.scalar(select(PersonSpecialtyAssignment).where(
+        PersonSpecialtyAssignment.person_id == p.id,
+        PersonSpecialtyAssignment.specialty_id == sp.id,
+        PersonSpecialtyAssignment.is_current.is_(True),
+    ))
+    if dup is not None:
+        print(f"  [跳过] {p.display_name} 的 {spec_name} 当前分配已存在")
+        if p.specialty != spec_name:
+            p.primary_specialty = spec_name
+            p.specialty = spec_name
+        return
+
+    # 1) 主表：person_specialty_assignments
+    db.add(PersonSpecialtyAssignment(
+        person_id=p.id, specialty_id=sp.id, is_primary=True,
+        effective_from=EFF, is_current=True,
+        change_reason=reason, source="manual",
+    ))
+
+    # 2) 任职快照：staff_assignments（保持与专项一致）
+    create_assignment(db, p.id, _mk_payload(
+        position=p.position, specialty=spec_name, group_name=p.group_name,
+        reason=reason,
+    ))
+
+    # 3) 镜像：Person.specialty / primary_specialty
+    p.primary_specialty = spec_name
+    p.specialty = spec_name
+    db.flush()
+    print(f"     ├ 写入 person_specialty_assignments: {spec_name}(主)")
+    print("     ├ 同步 staff_assignments 任职快照")
+    print(f"     └ 同步镜像 Person.specialty = {spec_name}")
 
 
 def step_resign(db: Session, dry: bool) -> int:
