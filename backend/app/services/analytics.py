@@ -6889,17 +6889,24 @@ def today_staff_efficiency(
         b: dict[str, tuple[int, int]] = {
             r.bucket: (int(r.scnt or 0), int(r.pcnt or 0)) for r in _ai_rows
         }
+        # ⚠️ 桶名必须用 `_category_case()` 的**输出值**（咨询/退款/套餐问题/…），
+        #    不是最终展示的专项名（咨询接待/退款挽回）。
+        #    实测踩坑：AI 的 problem_category 全是「网络问题」→ 被
+        #    `_CATEGORY_BUCKETS` 归入 **"咨询"** 桶；若这里写 `b.get("咨询接待")`
+        #    就取不到值 → people=0 → `eff_score` 恒 0（不报错，静默归零）。
+        #    真人侧同理由 `BUCK_FZ` 承担（见上方定义）。
         return {
             "zixun": (
                 sum((b.get(n, (0, 0))[0] for n in BUCK_FZ), 0),
-                b.get("咨询接待", (0, 0))[1],
+                sum((b.get(n, (0, 0))[1] for n in BUCK_FZ), 0),
             ),
-            "taocan": (b.get("套餐问题", (0, 0))[0], b.get("套餐专项", (0, 0))[1]),
-            "recovery": (b.get("退款", (0, 0))[0], b.get("退款挽回", (0, 0))[1]),
+            "taocan": (b.get("套餐问题", (0, 0))[0], b.get("套餐问题", (0, 0))[1]),
+            "recovery": (b.get("退款", (0, 0))[0], b.get("退款", (0, 0))[1]),
             "processing": (0, 0),   # AI 不执行退款操作/工单完工
-            "internal": (b.get("投诉", (0, 0))[0], b.get("内部投诉", (0, 0))[1]),
-            "external": (0, b.get("外部投诉", (0, 0))[1]),
-            "complaint": (0, b.get("投诉专项", (0, 0))[1]),
+            "internal": (b.get("投诉", (0, 0))[0], b.get("投诉", (0, 0))[1]),
+            # AI 无外部投诉渠道（那些走人工），恒 0
+            "external": (0, 0),
+            "complaint": (0, 0),
         }
 
     def _ai_scores(op_name: str) -> tuple[float, float, dict]:

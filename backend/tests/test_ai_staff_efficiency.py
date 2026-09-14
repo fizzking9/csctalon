@@ -164,3 +164,31 @@ class TestAiCountsSourceConsistency:
         """AI 不执行退款操作/工单完工 → processing 桶须为 (0, 0)。"""
         body = src.split("def _ai_cat_counts(")[1].split("def ")[0]
         assert '"processing": (0, 0)' in body, "AI 不应计入退款操作量"
+
+    def test_ai_bucket_names_match_category_case_output(self, src):
+        """★ 桶名必须用 `_category_case()` 的**输出值**，不是展示用的专项名。
+
+        ⚠️ 实测踩坑：AI 的 `problem_category` 全是「网络问题」→ 被
+        `_CATEGORY_BUCKETS` 归入 **"咨询"** 桶。
+        若写 `b.get("咨询接待")` 就取不到值 → `people=0` →
+        **`eff_score` 恒 0**（不报错！静默归零）。
+
+        正确做法：与真人侧一样，用 `BUCK_FZ`（= 咨询/其他问题/综合问题）
+        累加咨询桶的 sessions **和 people**。
+        """
+        body = src.split("def _ai_cat_counts(")[1].split("def ")[0]
+        # ⚠️ 只检查**代码行** —— docstring 里会为说明原因而举例 `b.get("咨询接待")`，
+        #    若连注释一起查会误报（本人已踩）。
+        code = "\n".join(
+            ln for ln in body.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        )
+        code_only = code.split('"""')[-1] if '"""' in code else code
+        # 咨询桶必须用 BUCK_FZ 同时累加 sessions 与 people
+        assert 'for n in BUCK_FZ' in code_only, "未用 BUCK_FZ 归集咨询桶"
+        assert 'sum((b.get(n, (0, 0))[1] for n in BUCK_FZ), 0)' in code_only, (
+            "咨询桶的 people 未按 BUCK_FZ 汇总 → eff_score 会恒 0"
+        )
+        # 不得出现展示名当 key
+        for wrong in ('b.get("咨询接待"', 'b.get("退款挽回"', 'b.get("套餐专项"'):
+            assert wrong not in code_only, f"误用展示名 {wrong} 当桶 key"
