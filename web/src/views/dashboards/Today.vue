@@ -144,7 +144,7 @@
             {{ viewMode === 'week' ? '本周趋势' : '实时趋势' }}
             <!-- ★ #76 数据说明（规范 §二）: 来源 / 口径 / 时点 -->
             <el-tooltip effect="dark" placement="top" raw-content
-              content="<b>来源</b>：/today/hourly（日）· /today/kpi（周）<br/><b>口径</b>：日=按小时切面，接待/投诉/退款三类分别计数；周=按日切面<br/><b>时点</b>：今日视图 60s 自动刷新，历史窗口缓存 24h<br/><b>下钻</b>：图内暂不支持点击下钻（明细接口按日筛选，无小时级），请用下方各专项卡片下钻">
+              content="<b>来源</b>：/today/hourly（日）· /today/kpi（周）<br/><b>口径</b>：日=按小时切面，接待/投诉/退款三类分别计数；周=按日切面<br/>· 接待 = 会话数（去重设备SN）<br/>· <b>投诉 = 登记(柱) + 处理(线)</b>：登记=工单登记时间落桶；处理=完成时间落桶且真实完成(≥3min)，<b>含往期单在本时段办结</b><br/>　→ 柱&gt;线=在累积，柱&lt;线=在消化<br/>　→ 口径与「核心指标·投诉数」及下方四卡<b>同源</b>（不含卡商，已扣补充表重叠）<br/><b>时点</b>：今日视图 60s 自动刷新，历史窗口缓存 24h<br/><b>下钻</b>：图内暂不支持点击下钻（明细接口按日筛选，无小时级），请用下方各专项卡片下钻">
               <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
             </el-tooltip>
           </h3>
@@ -1437,6 +1437,10 @@ const REFUND_ROUTES = [
 
 function _rrLabel(r) { return isMobile.value ? (r.short || r.label) : r.label }
 
+// ★ #85 投诉两序列配色（登记=橙柱 / 处理=绿线）
+//   登记用暖色（“进来了”）、处理用冷绿色（“解决了”）—— 直觉上区分"进"与"出"
+const COMPLAINT_COLORS = { registered: '#f59e0b', handled: '#10b981' }
+
 // 将四路退款拆分 + 工作量/投诉 组织成 ECharts series
 function buildTrendSeries(data) {
   const groups = trendSelectedGroups.value
@@ -1446,7 +1450,26 @@ function buildTrendSeries(data) {
     series.push({ name: isMobile.value ? '接待' : '接待数', type: 'bar', data: data.reception_devices || [], itemStyle: { color: '#10b981' }, barMaxWidth: isMobile.value ? 14 : 20 })
   }
   if (groups.includes('complaint')) {
-    series.push({ name: isMobile.value ? '投诉' : '投诉量', type: 'bar', data: data.complaint || [], itemStyle: { color: '#f59e0b' }, barMaxWidth: isMobile.value ? 14 : 20 })
+    // ★ #85: 投诉改为 **柱(登记) + 线(处理)**（用户 2026-09-14 选定）
+    //   为什么拆：原单柱把「登记」与「处理」混为一种含义，主管无法判断
+    //   「今天进的多」还是「今天清的多」—— 两者要采取的动作完全不同。
+    //   口径（与后端同源，勿在前端另算）:
+    //     · complaint      = 登记（工单 register_time 落桶，三源分桶，**不含卡商**）
+    //     · complaint_done = 处理（finish_time 落桶 + 真实完成 ≥3min，**含往期单办结**）
+    //   ★ 不写「投诉量」—— 避免又产生第三种语义（#85 的核心教训）
+    series.push({
+      name: isMobile.value ? '登记' : '投诉登记',
+      type: 'bar', data: data.complaint || [],
+      itemStyle: { color: COMPLAINT_COLORS.registered },
+      barMaxWidth: isMobile.value ? 14 : 20,
+    })
+    series.push({
+      name: isMobile.value ? '处理' : '投诉处理',
+      type: 'line', data: data.complaint_done || [],
+      smooth: true, symbol: 'circle', symbolSize: 5,
+      itemStyle: { color: COMPLAINT_COLORS.handled },
+      lineStyle: { width: 2, color: COMPLAINT_COLORS.handled },
+    })
   }
   if (groups.includes('refund')) {
     REFUND_ROUTES.forEach(r => {
@@ -1469,7 +1492,9 @@ function buildTrendLegend() {
     items.push(isMobile.value ? '接待' : '接待数')
   }
   if (groups.includes('complaint')) {
-    items.push(isMobile.value ? '投诉' : '投诉量')
+    // ★ #85: 图例写「登记」「处理」——**不写"投诉量"**，避免第三种语义
+    items.push(isMobile.value ? '登记' : '投诉登记')
+    items.push(isMobile.value ? '处理' : '投诉处理')
   }
   if (groups.includes('refund')) {
     REFUND_ROUTES.forEach(r => items.push(_rrLabel(r)))
@@ -1491,6 +1516,8 @@ function mergeMobileTrend(data) {
     reception: [sumHead(data.reception), ...tail(data.reception)],
     reception_devices: [sumHead(data.reception_devices), ...tail(data.reception_devices)],
     complaint: [sumHead(data.complaint), ...tail(data.complaint)],
+    // ★ #85: 处理序列同样需合并（否则手机端处理线为空）
+    complaint_done: [sumHead(data.complaint_done), ...tail(data.complaint_done)],
     refund_count_a: [sumHead(data.refund_count_a), ...tail(data.refund_count_a)],
     refund_count_b: [sumHead(data.refund_count_b), ...tail(data.refund_count_b)],
     refund_count_c: [sumHead(data.refund_count_c), ...tail(data.refund_count_c)],

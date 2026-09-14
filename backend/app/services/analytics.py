@@ -1144,6 +1144,19 @@ def _complaint_source_type_case(
     """
     return complaint_bucket_case(col, channel_col, sn_col)
 
+# ★ #85: 315 补充表「已办结」结果枚举 —— 用于趋势图「处理」序列。
+#   ⚠️ 与 `app/api/v1/complaints._EXTERNAL_DONE_RESULTS` **必须逐字一致**。
+#     之所以本地再定义一份而不 import：`complaints.py` 模块级
+#     `from app.services.analytics import ...`，此处反向 import 会形成循环依赖。
+#     （同类处理见本文件对 `_sources_reg_handled` 的惰性导入）
+#   语义: 315 推送的办结结果（和解结案/撤销结案等）应视为已处理；
+#         「未达成一致方案/暂行办理/需跟进/空」不算办结（可能仍需跟进）。
+_EXTERNAL_DONE_RESULTS_LOCAL = {
+    "和解结案", "撤销结案", "暂行办结", "调解结案", "调节结案",
+    "投诉无效", "重复投诉", "终止调节", "退回消委会",
+}
+
+
 # ============================================================
 # 模块: 工单有效完工时间推算 (effective_finish_time)
 # ============================================================
@@ -3675,15 +3688,36 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         e_cnt_map[idx] = int(r.cnt or 0)
         e_amt_map[idx] = float(r.amt or 0)
 
-    # 投诉: 按粒度聚合 按 service_tickets.register_time, 三表 UNION 计数
+    # 投诉: ★★ #85 口径修正 —— 由「工单 + 315全表 + 卡商全表」改为
+    #   **与 #81 核心指标同源**（分桶 + 扣 315 已 matched 重叠 + 剥卡商）
+    #
+    #   【修什么】原实现（2026-09-14 前）：
+    #     `工单投诉类 + ExternalComplaint 全表 + CardComplaint 全表`
+    #     → ① **含卡商**（与 #53「卡商独立、不纳入总量」直接冲突）
+    #       ② **不扣重叠** → 315 里已 matched 到工单的记录被重复计入
+    #       ③ 与同页「核心指标·投诉数」**对不上**（实测 1127 vs 1111，差 16）
+    #     #81 统一了核心指标，但**漏改了趋势层** → 本处补上。
+    #
+    #   【新实现】按三源分桶逐桶统计（与 `_sources_reg_handled` 同源）：
+    #     · 内部/商户号 = 工单按 `register_time` 落桶（无补充表）
+    #     · 外部 = 工单按登记日 + 315 补充表**净新增**（总数 − 已 matched 重叠）
+    #     · **卡商不并入**（#53）→ 保证「柱加总 == 核心指标投诉数」
+    #
+    #   【为什么按分桶而非直接复用 _sources_reg_handled】后者返回**窗口汇总**，
+    #     而趋势需要**按桶（小时/日/周/月）拆分**。故此处按同一判据 `src_expr`
+    #     分组，而非调用汇总函数 —— **判据同源，粒度不同**。
+    src_expr_cp = _complaint_source_type_case()
+    cp_map: dict[int, int] = {}
     cp_rows = db.execute(
-        select(_time_trunc(ServiceTicket.register_time), func.count().label("cnt"))
+        select(_time_trunc(ServiceTicket.register_time), src_expr_cp.label("src"),
+               func.count().label("cnt"))
         .where(ServiceTicket.register_time.isnot(None),
                ServiceTicket.register_time >= ts, ServiceTicket.register_time <= te,
-               _ticket_category_case() == "投诉")
-        .group_by("trunc_t")
+               _ticket_category_case() == "投诉",
+               # ★ #53: 卡商独立，不并入投诉柱
+               src_expr_cp != CARD_SCOPE)
+        .group_by("trunc_t", "src")
     ).all()
-    cp_map: dict[int, int] = {}
     for r in cp_rows:
         tt = r._mapping["trunc_t"]
         if tt is None:
@@ -3691,34 +3725,92 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         idx = _slot_idx(tt)
         if idx is None:
             continue
-        cp_map[idx] = int(r.cnt or 0)
+        cp_map[idx] = cp_map.get(idx, 0) + int(r.cnt or 0)
+    # ★ 处理序列（finish 落桶 + 真实完成）—— 用户 2026-09-14 选定「柱(登记)+叠处理线」
+    #   口径与 `complaints._source_reg_handled` 的 handled **同源**：
+    #     finish_time 落桶 且 finish − register ≥ 3min（排除同瞬填充的伪完成）
+    #     finish_time 落桶 且 finish − register ≥ 3min（排除同瞬填充的伪完成）
+    #
+    #   ⚠️⚠️ 关键：**不限制 register_time 也在窗口内**（2026-09-14 实测踩到）
+    #     若加上该限制，会**丢掉 83 条「窗口外登记、本窗口办结」的历史单**
+    #     （实测 1044 → 961）—— 而"今天实际清掉多少历史积压"**正是主管要看的数**
+    #     （#82 账龄分档显示有 284 条 >90 天陈年单，办结它们才是有价值的信号）。
+    #     → 故**按 finish 落桶**，语义 = 「该时段内完成了多少（含往期单）」。
+    #   ★ 与「登记柱」配合读法：柱高 > 线高 ⇒ 在累积；柱高 < 线高 ⇒ 在消化。
+    cp_done_map: dict[int, int] = {}
+    cp_done_rows = db.execute(
+        select(_time_trunc(ServiceTicket.finish_time), func.count().label("cnt"))
+        .where(ServiceTicket.finish_time.isnot(None),
+               ServiceTicket.register_time.isnot(None),
+               ServiceTicket.finish_time >= ts, ServiceTicket.finish_time <= te,
+               _ticket_category_case() == "投诉",
+               src_expr_cp != CARD_SCOPE,
+               func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) >= 180)
+        .group_by("trunc_t")
+    ).all()
+    for r in cp_done_rows:
+        tt = r._mapping["trunc_t"]
+        if tt is None:
+            continue
+        idx = _slot_idx(tt)
+        if idx is None:
+            continue
+        cp_done_map[idx] = int(r.cnt or 0)
+    # 315 补充表「已办结」并入处理线（与 `_source_reg_handled` 的 external 分支同源）
+    #   去重: 已办结但 matched 工单已在工单侧计入 handled 的排除（避免同一笔双算）
     if _INCLUDE_COMPLAINT_FILES:
-        # 叠加 ExternalComplaint 小时/日节奏
-        ec_rows = db.execute(
-            select(_time_trunc(ExternalComplaint.complaint_date), func.count().label("cnt"))
+        _done_sub = select(ServiceTicket.ticket_no).where(
+            _ticket_category_case() == "投诉",
+            ServiceTicket.finish_time.isnot(None),
+            ServiceTicket.register_time.isnot(None),
+            func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) >= 180,
+            ServiceTicket.finish_time >= ts, ServiceTicket.finish_time <= te)
+        ec_done_rows = db.execute(
+            select(_time_trunc(ExternalComplaint.complaint_date), func.count().label("cnt"),
+                   func.count(ExternalComplaint.matched_ticket_no)
+                   .filter(ExternalComplaint.matched_ticket_no.in_(_done_sub)).label("ov"))
             .where(ExternalComplaint.complaint_date.isnot(None),
-                   ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te)
+                   ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te,
+                   ExternalComplaint.result.in_(_EXTERNAL_DONE_RESULTS_LOCAL))
+            .group_by("trunc_t")
+        ).all()
+        for r in ec_done_rows:
+            tt = r._mapping["trunc_t"]
+            if tt is None:
+                continue
+            idx = _slot_idx(tt)
+            if idx is None:
+                continue
+            net = int(r.cnt or 0) - int(r.ov or 0)
+            if net:
+                cp_done_map[idx] = cp_done_map.get(idx, 0) + net
+    # 315 补充表**净新增**并入「外部投诉」（与 /summary 合并口径一致）
+    #   净新增 = 当日总数 − 已 matched 到本范围内工单的条数（避免与工单双算）
+    if _INCLUDE_COMPLAINT_FILES:
+        _ec_cond = [ExternalComplaint.complaint_date.isnot(None),
+                    ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te]
+        _sub_tk = select(ServiceTicket.ticket_no).where(
+            _ticket_category_case() == "投诉",
+            ServiceTicket.register_time.isnot(None),
+            ServiceTicket.register_time >= ts, ServiceTicket.register_time <= te)
+        ec_rows = db.execute(
+            select(_time_trunc(ExternalComplaint.complaint_date), func.count().label("cnt"),
+                   func.count(ExternalComplaint.matched_ticket_no)
+                   .filter(ExternalComplaint.matched_ticket_no.in_(_sub_tk)).label("ov"))
+            .where(*_ec_cond)
             .group_by("trunc_t")
         ).all()
         for r in ec_rows:
             tt = r._mapping["trunc_t"]
-            if tt is None: continue
+            if tt is None:
+                continue
             idx = _slot_idx(tt)
-            if idx is not None:
-                cp_map[idx] = cp_map.get(idx, 0) + int(r.cnt or 0)
-        # 叠加 CardComplaint 小时/日节奏
-        cc_rows = db.execute(
-            select(_time_trunc(CardComplaint.complaint_date), func.count().label("cnt"))
-            .where(CardComplaint.complaint_date.isnot(None),
-                   CardComplaint.complaint_date >= ts, CardComplaint.complaint_date <= te)
-            .group_by("trunc_t")
-        ).all()
-        for r in cc_rows:
-            tt = r._mapping["trunc_t"]
-            if tt is None: continue
-            idx = _slot_idx(tt)
-            if idx is not None:
-                cp_map[idx] = cp_map.get(idx, 0) + int(r.cnt or 0)
+            if idx is None:
+                continue
+            net = int(r.cnt or 0) - int(r.ov or 0)
+            if net:
+                cp_map[idx] = cp_map.get(idx, 0) + net
+        # ⚠️ CardComplaint **不再并入**（#53 卡商独立，见上方说明）
 
     # ── 填充到槽位: 单日填当前小时之前, 多日填全部(最后一天可能实时) ──
     slots = list(range(n_slots))
@@ -3797,6 +3889,12 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         "cashflow_e_amount":  e_amt_list,        # 实际现金流E 金额
         # === 投诉组 ===
         "complaint":          [cp_map.get(i, 0)         if i <= max_slot else None for i in slots],
+        # ★ #85: 投诉**处理**序列（柱=登记 + 线=处理，用户 2026-09-14 选定）
+        #   口径: finish_time 落桶 且 真实完成(finish−register≥3min)，**不含卡商**，
+        #   与 `complaints._source_reg_handled` 的 handled 同源。
+        #   ⚠️ 「处理」含**历史单今日办结**（登记柱在别的桶、处理线在本桶）——
+        #      这正是主管要知道的"今天实际清掉多少"，故按 finish 落桶而非登记日。
+        "complaint_done":     [cp_done_map.get(i, 0)    if i <= max_slot else None for i in slots],
         "_spec": {
             "refund_count_a":  "路线A: 退费单 refund_method='线上' (线上直退)",
             "refund_count_b":  "路线B: 钱包提现 op_type='用户提现'",
@@ -3810,7 +3908,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
             "refund_amount_e": "路线E: 商户号实际现金流 (refund_record_reports 退款成功)",
             "refund_amount_total": "四路经营合计金额 A+B+C+D",
             "reception":     "会话数(次) = cs_record 计数；接待数(个) = 去重设备SN计数(去NULL/空串)",
-            "groups":        "工作量: 会话/接待 · 款项: 退款笔数(四路堆叠)/退款金额(四路堆叠面积+实际现金流E线) · 投诉: 投诉量",
+            "groups":        "工作量: 会话/接待 · 款项: 退款笔数(四路堆叠)/退款金额(四路堆叠面积+实际现金流E线) · 投诉: 登记(柱) + 处理(线)",
             "grain":         f"时间粒度: {grain} (跨度{span_days}天 → 自动选择粒度)",
         },
     }

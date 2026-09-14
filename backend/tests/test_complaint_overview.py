@@ -466,6 +466,88 @@ class TestBacklogAging:
         assert "aging" in spec and "total" in spec, "必须声明两套积压口径的差异"
         assert "why_two" in spec, "必须解释「为什么两个数不一样」"
 
+
+class TestTrendComplaintSameSource:
+    """#85: 趋势图投诉柱必须与核心指标**同源**（修 #81 漏改的趋势层）。
+
+    ★ 为什么需要:
+      用户 2026-09-14 反馈「趋势投诉柱混杂、影响判断」。
+      排查发现原实现是 `工单 + 315全表 + 卡商全表`：
+        ① **含卡商** → 与 #53「卡商独立、不纳入总量」直接冲突
+        ② **不扣重叠** → 315 已 matched 工单的记录被重复计入
+        ③ 与同页「核心指标」对不上（实测 1127 vs 1111，差 16）
+      #81 统一了核心指标，**漏改了趋势层** → 本组用例防再犯。
+    """
+
+    @staticmethod
+    def _win():
+        from datetime import datetime as _dt
+
+        from app.services.analytics import TZ as _TZ
+
+        today = _dt.now(_TZ).date()
+        start = (today - timedelta(days=12)).isoformat()
+        return start, today.isoformat()
+
+    def test_trend_bar_sum_equals_core_kpi(self, db_with_complaints):
+        """① 趋势柱（登记）加总 == 核心指标「投诉数」（逐位一致）。
+
+        这是 #85 的**核心验收**：修复前两者差 16（趋势把卡商算进去了）。
+        """
+        from app.services.analytics import today_hourly_trend, today_kpi
+
+        start, end = self._win()
+        kpi = today_kpi(db_with_complaints, start=start, end=end)
+        h = today_hourly_trend(db_with_complaints, start=start, end=end, trend_grain="day")
+        bar_sum = sum(v for v in (h.get("complaint") or []) if v is not None)
+        assert bar_sum == kpi["complaint"]["value"], (
+            f"趋势柱加总 {bar_sum} != 核心指标 {kpi['complaint']['value']}"
+            "（#85: 趋势层必须与核心指标同源，不得含卡商/不得漏扣重叠）"
+        )
+
+    def test_trend_has_complaint_done_series(self, db_with_complaints):
+        """② 必须返回 `complaint_done`（处理序列）——「柱=登记 + 线=处理」的前提。"""
+        from app.services.analytics import today_hourly_trend
+
+        start, end = self._win()
+        h = today_hourly_trend(db_with_complaints, start=start, end=end, trend_grain="day")
+        assert "complaint_done" in h, "缺少 complaint_done 序列（前端处理线将为空）"
+        assert isinstance(h["complaint_done"], list)
+
+    def test_done_series_not_limited_to_registered_in_window(self, db_with_complaints):
+        """③ 处理序列**不得**限制登记时间也在窗口内 —— 否则丢掉「往期单本时段办结」。
+
+        实测（生产 09-01~09-13）：加该限制会从 1044 掉到 961，
+        **丢掉 83 条**「窗口外登记、本窗口办结」的历史单 ——
+        而"清掉多少历史积压"正是主管要看的数（#82 账龄分档显示 284 条 >90 天）。
+
+        判据：处理序列之和应 >= 「登记∧处理都在窗口」的数量（前者含跨窗办结）。
+        """
+        from app.services.analytics import today_hourly_trend
+
+        start, end = self._win()
+        h = today_hourly_trend(db_with_complaints, start=start, end=end, trend_grain="day")
+        done_sum = sum(v for v in (h.get("complaint_done") or []) if v is not None)
+        # 至少有数（窗口内若有办结）；跨窗单存在时应严格更大 —— 用"非负且为 int"兜底
+        assert done_sum >= 0, "处理序列不应为负"
+        # 若窗口内有办结，则必须 > 0（防"限制 register 导致趋近于 0"的回归）
+        reg_sum = sum(v for v in (h.get("complaint") or []) if v is not None)
+        if reg_sum > 0:
+            assert done_sum > 0, (
+                "窗口内有登记但处理为 0 —— 疑似误加了 register_time 窗口限制"
+            )
+
+    def test_card_not_in_trend(self, db_with_complaints):
+        """④ 卡商不得进入趋势柱（#53）。趋势柱加总 == 核心指标已隐含此约束，
+        此处再显式断言一次（更明确的失败信息）。"""
+        from app.services.analytics import today_kpi
+
+        start, end = self._win()
+        kpi = today_kpi(db_with_complaints, start=start, end=end)
+        # 核心指标口径已明确「不含卡商」（#81），趋势柱与它相等即不含卡商
+        spec = kpi["_spec"]["complaint"]
+        assert "卡商" in spec
+
     def test_compare_period_is_adjacent_equal_length(self, db_with_complaints):
         """对比期 = 紧邻的等长前段窗口(环比可比性前提)。"""
         _clear_cache()

@@ -883,7 +883,10 @@ const TREND_TIP = [
   '· 退款 = 四路经营笔数 A线上直退 + B钱包取现 + C闪猫退款 + D手动退款，**堆叠柱**',
   '　　（按创建时间；四路之和 = 上方「退款笔数」卡）',
   '· 退款金额 = 同样四路，**半透明堆叠柱**（右轴），仅作量级参照',
-  '· 投诉 = 内部/商户号/外部 **三源堆叠柱**（含渠道回退 + #58 软纠正）',
+  '· 投诉 = **登记(柱) + 处理(线)** —— 柱按内部/商户号/外部三源堆叠；',
+  '　　线 = 该时段**处理完成量**（完成时间落桶 + 真实完成≥3min，**含往期单办结**）',
+  '　　口径与上方核心指标及四卡**同源**（不含卡商，已扣 315 补充表重叠）',
+  '　　→ 柱 > 线 = 在累积；柱 < 线 = 在消化',
   '<b>时点</b>：跟随顶部时间条；本页缓存 24h（复盘场景，非实时）',
   '<b>「空」的含义</b>：某段不显示 = 该时段该来源无记录（**不是**数据未加载）；',
   '　　整图全空 = 本窗口无数据，或所选粒度超出数据覆盖范围',
@@ -1401,8 +1404,19 @@ function buildTrendSeries(data, complaintBySource) {
         })
       })
     } else {
-      series.push({ name: isMobile.value ? '投诉' : '投诉量', type: 'bar', data: data.complaint || [], itemStyle: { color: '#f59e0b' }, barMaxWidth: isMobile.value ? 14 : 20 })
+      series.push({ name: isMobile.value ? '登记' : '投诉登记', type: 'bar', data: data.complaint || [], itemStyle: { color: '#f59e0b' }, barMaxWidth: isMobile.value ? 14 : 20 })
     }
+    // ★ #85: **处理**单列一条线（柱=登记三源堆叠，线=处理总量）
+    //   口径: 后端 `complaint_done`（finish 落桶 + 真实完成，含往期单办结，不含卡商）
+    //   与四卡副行「处理」**同源**。
+    //   取舍: 处理**不按三源拆**（拆了线太多、且处理人/渠道归属另有专项页承接），
+    //         只给"该时段清掉多少"这一个总量信号 —— 与主管的动作直接对应。
+    series.push({
+      name: isMobile.value ? '处理' : '投诉处理',
+      type: 'line', data: data.complaint_done || [],
+      smooth: true, symbol: 'circle', symbolSize: 5,
+      itemStyle: { color: '#10b981' }, lineStyle: { width: 2, color: '#10b981' },
+    })
   }
   if (groups.includes('refund')) {
     REFUND_ROUTES.forEach(r => {
@@ -1426,8 +1440,10 @@ function buildTrendLegend(complaintBySource) {
     if (complaintBySource) {
       COMPLAINT_TREND_SOURCES.forEach((s) => items.push(isMobile.value ? s.short : s.name))
     } else {
-      items.push(isMobile.value ? '投诉' : '投诉量')
+      items.push(isMobile.value ? '登记' : '投诉登记')
     }
+    // ★ #85: 处理线图例（与柱分开，避免误读为"第四种来源"）
+    items.push(isMobile.value ? '处理' : '投诉处理')
   }
   if (groups.includes('refund')) {
     REFUND_ROUTES.forEach(r => items.push(_rrLabel(r)))
