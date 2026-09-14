@@ -1411,11 +1411,13 @@ function buildTrendSeries(data, complaintBySource) {
     //   与四卡副行「处理」**同源**。
     //   取舍: 处理**不按三源拆**（拆了线太多、且处理人/渠道归属另有专项页承接），
     //         只给"该时段清掉多少"这一个总量信号 —— 与主管的动作直接对应。
+    //   ⚠️ 处理线**不能用 #10b981** —— 那是「接待数」柱的颜色，
+    //     同色会让同屏两根“绿色”无法区分（实测像素采样发现）→ 用 teal-700。
     series.push({
       name: isMobile.value ? '处理' : '投诉处理',
       type: 'line', data: data.complaint_done || [],
       smooth: true, symbol: 'circle', symbolSize: 5,
-      itemStyle: { color: '#10b981' }, lineStyle: { width: 2, color: '#10b981' },
+      itemStyle: { color: '#0f766e' }, lineStyle: { width: 2, color: '#0f766e' },
     })
   }
   if (groups.includes('refund')) {

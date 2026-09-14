@@ -1437,9 +1437,12 @@ const REFUND_ROUTES = [
 
 function _rrLabel(r) { return isMobile.value ? (r.short || r.label) : r.label }
 
-// ★ #85 投诉两序列配色（登记=橙柱 / 处理=绿线）
-//   登记用暖色（“进来了”）、处理用冷绿色（“解决了”）—— 直觉上区分"进"与"出"
-const COMPLAINT_COLORS = { registered: '#f59e0b', handled: '#10b981' }
+// ★ #85 投诉两序列配色（登记=橙柱 / 处理=深青线）
+//   登记用暖色（“进来了”）、处理用冷青色（“解决了”）—— 直觉上区分"进"与"出"。
+//   ⚠️ 处理线**不能用 #10b981** —— 那是「接待数」柱的颜色，
+//     同色会导致同屏两根“绿色”无法区分（实测像素采样发现），
+//     故选 teal-700 (#0f766e)，与全图现有色均不撞。
+const COMPLAINT_COLORS = { registered: '#f59e0b', handled: '#0f766e' }
 
 // 将四路退款拆分 + 工作量/投诉 组织成 ECharts series
 function buildTrendSeries(data) {
