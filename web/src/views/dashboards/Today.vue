@@ -798,32 +798,38 @@
       </el-table>
 
       <!-- ★ #78 AI / 系统账户单列
+           ★ 2026-09-14 用户要求：本表**列结构与上方效率值表对齐**，
+             以便「AI 与真人同口径比对」，不再只是"量级参考"。
+
            设计说明（Design Rationale）:
-             目的: 替运营主管回答「AI 到底干了多少活、顶了几个真人的量」。
-             逻辑: 单独一张小表列出非真人账户（AI 全自动 / 系统内部），
-                   不与真人混排 —— 混排会挤掉真人名次，隐藏则会看不见 AI 规模。
-             口径: 来源判据 = 操作人 + 说明文本（见后端 system_accounts），
-                   这里的「会话数」= 该账户名下的接待记录条数。
+             目的: 替运营主管回答「AI 顶几个真人」—— 此前只有会话数/接待数，
+                   缺**专项接待数**与**效率值** → 无法与真人横向比。
+             逻辑: 单独一张小表（不与真人混排，混排会挤掉真人名次），
+                   但**列名与列序刻意与真人表一致**（会话数 → 各专项接待数 →
+                   接待合计 → 会话效率 → 接待效率），以便上下对读。
+             口径: 来源判据 = 操作人 + 说明文本（见后端 system_accounts）；
+                   效率值与真人**同一张权重表**（各专项默认系数逐桶累加），
+                   语义 = "折合多少标准人力工作量" → 故可直接比对。
              取舍: ① **不做** AI 转人工细分（平台无稳定标记，做了会返工）；
-                   ② **不给 AI 排名名次** —— 它不是人，排名无意义，
-                      只给绝对量级供「大致评估工作量」；
-                   ③ 空则不渲染本区块（无 AI 数据时不占版面）。
-             工单: #78 / 架构: docs/arch/A-20260913-001-AI接待口径分层.md -->
-      <div v-if="virtualStaffList.length" class="virtual-staff-block">
+                   ② **不给 AI 名次** —— 它不是人，排名无意义；
+                   ③ **不并入真人表** —— 会挤占名次，且真人表的筛选/聚合对 AI 无意义；
+                   ④ 空则不渲染本区块（无 AI 数据时不占版面）。
+             工单: #78 / 本次调整: 2026-09-14 用户要求 -->
+      <div class="virtual-staff-block">
         <div class="virtual-staff-title">
-          <span>AI / 系统账户（非真人，不计入人效排名）</span>
+          <span>AI / 系统账户（非真人，不计入人效排名 · 列结构与上方一致，可对读）</span>
           <el-tooltip effect="dark" placement="top" raw-content
-            content="<b>来源</b>：同上表（/analytics/today/staff）<br/><b>口径</b>：按「操作人 + 说明文本」判定为非真人；会话数 = 该账户名下接待记录条数（已按业务键去重，见 #77）<br/><b>时点</b>：与上方表格同一窗口<br/><b>「空」的含义</b>：本区块不显示 = 本窗口内无非真人账户产生接待<br/><br/><b>⚠️ 取舍</b>：不给名次（AI 不是人，排名无意义）；<b>不做</b>「AI 转人工」细分（平台字段不稳定，待 BMS/智能客服稳定后再精细化）">
+            content="<b>来源</b>：同上表（/analytics/today/staff）<br/><b>口径</b>：按「操作人 + 说明文本」判定为非真人；<b>会话效率/接待效率采用与真人完全相同的权重表</b>（按各专项默认系数逐桶累加），故可与上方真人表直接比对 —— 语义是「折合多少标准人力工作量」。<br/><b>时点</b>：与上方表格同一窗口<br/><b>「空」的含义</b>：本区块不显示 = 本窗口内无非真人账户产生接待；某列为 0 = 该账户本期无该类工作<br/><br/><b>⚠️ 取舍</b>：① 不并入上方真人表（会挤占名次、且筛选/聚合对 AI 无意义）② 不给名次（AI 不是人，排名无意义）③ <b>不做</b>「AI 转人工」细分（平台字段不稳定，待 BMS/智能客服稳定后再精细化）">
             <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
           </el-tooltip>
         </div>
-        <el-table :data="virtualStaffList" size="small" border max-height="200">
-          <el-table-column label="账户" width="130">
+        <el-table :data="virtualStaffList" size="small" border max-height="260">
+          <el-table-column label="账户" width="120">
             <template #default="{ row }">
-              <span style="font-weight:500">{{ row.name }}</span>
+              <span style="font-weight:600">{{ row.name }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="来源" width="100">
+          <el-table-column label="来源" width="92">
             <template #default="{ row }">
               <el-tag size="small" effect="plain"
                       :style="{ color: sourceKindMeta(row.source_kind).color, borderColor: sourceKindMeta(row.source_kind).color }">
@@ -831,23 +837,90 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="reception_count" label="会话数(次)" width="100" align="right" sortable>
+          <el-table-column prop="reception_count" label="会话数(次)" width="104" align="right" sortable>
             <template #default="{ row }">{{ formatNum(row.reception_count) }}</template>
           </el-table-column>
-          <el-table-column prop="reception_device_count" label="接待数(个)" width="100" align="right" sortable>
-            <template #default="{ row }">{{ formatNum(row.reception_device_count) }}</template>
+          <!-- 各专项接待数(个) —— 与真人表同名同序 -->
+          <el-table-column label="各专项接待数(个)" align="center">
+            <el-table-column
+              v-for="col in SPECIALTY_COLS"
+              :key="col.key"
+              :label="col.short"
+              width="50"
+              align="right"
+            >
+              <template #header>
+                <span :style="{ color: col.color, fontWeight: 600, fontSize: '11px' }" :title="col.key">{{ col.short }}</span>
+              </template>
+              <template #default="{ row }">
+                <span v-if="getSpecialtyPeople(row, col.key) > 0" :style="{ color: col.color, fontWeight: 500 }">
+                  {{ formatNum(getSpecialtyPeople(row, col.key)) }}
+                </span>
+                <span v-else class="text-muted" style="font-size:11px">—</span>
+              </template>
+            </el-table-column>
           </el-table-column>
-          <el-table-column label="占全站会话" width="100" align="right">
+          <el-table-column prop="reception_device_count" label="接待合计" width="80" align="right" sortable>
+            <template #default="{ row }">
+              <span style="color:#409eff;font-weight:600">{{ formatNum(row.reception_device_count ?? 0) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="work_score" label="会话效率" width="90" align="right" sortable>
+            <template #default="{ row }">
+              <el-popover placement="top" :width="280" trigger="hover">
+                <template #reference>
+                  <el-tag size="small" effect="plain" type="warning" class="score-tag-hover">
+                    <span style="font-weight:600">{{ formatNum(row.work_score) }}</span>
+                  </el-tag>
+                </template>
+                <div class="score-tip">
+                  <div class="score-tip-title">会话效率构成（与真人同权重表）</div>
+                  <div v-for="(v, k) in row.breakdown || {}" :key="k" class="score-tip-row">
+                    <span class="score-tip-cat">{{ k }}</span>
+                    <span class="score-tip-val">{{ v.sessions }}次 × {{ v.coef }}</span>
+                    <span class="score-tip-sub">=</span>
+                    <span class="score-tip-contrib">{{ v.work_contrib }}</span>
+                  </div>
+                  <div class="score-tip-total">合计 = {{ row.work_score }}</div>
+                  <div class="score-tip-note">{{ row._calc_note?.weight_rule }}</div>
+                </div>
+              </el-popover>
+            </template>
+          </el-table-column>
+          <el-table-column prop="eff_score" label="接待效率" width="90" align="right" sortable>
+            <template #default="{ row }">
+              <el-popover placement="top" :width="280" trigger="hover">
+                <template #reference>
+                  <el-tag size="small" effect="plain" type="primary" class="score-tag-hover">
+                    <span style="font-weight:600;color:#2563eb">{{ formatNum(row.eff_score) }}</span>
+                  </el-tag>
+                </template>
+                <div class="score-tip">
+                  <div class="score-tip-title">接待效率构成（与真人同权重表）</div>
+                  <div v-for="(v, k) in row.breakdown || {}" :key="k" class="score-tip-row">
+                    <span class="score-tip-cat">{{ k }}</span>
+                    <span class="score-tip-val">{{ v.people }}个 × {{ v.coef }}</span>
+                    <span class="score-tip-sub">=</span>
+                    <span class="score-tip-contrib">{{ v.eff_contrib }}</span>
+                  </div>
+                  <div class="score-tip-total">合计 = {{ row.eff_score }}</div>
+                  <div class="score-tip-note">{{ row._calc_note?.weight_rule }}</div>
+                </div>
+              </el-popover>
+            </template>
+          </el-table-column>
+          <el-table-column label="占全站会话" width="104" align="right">
             <template #default="{ row }">
               <!-- 可控指标前置: AI 占比一眼可见 -->
               <span style="color:#f59e0b;font-weight:600">{{ aiSharePct(row) }}%</span>
             </template>
           </el-table-column>
-          <el-table-column label="说明" min-width="180">
-            <template #default>
-              <span class="text-muted" style="font-size:11px">非真人账户，量级供「大致评估 AI 工作量」用</span>
-            </template>
-          </el-table-column>
+          <!-- 空态：显式说明，不靠隐藏整块来表达 -->
+          <template #empty>
+            <span style="color:#909399;font-size:12px">
+              本窗口内<b>无 AI / 系统账户产生接待</b>（不是功能未启用）
+            </span>
+          </template>
         </el-table>
       </div>
     </section>
