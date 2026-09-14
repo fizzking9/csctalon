@@ -635,7 +635,12 @@
                 <span class="hb-pos-unit">{{ p.unit }}/人</span>
               </div>
               <div class="hb-pos-detail">
-                {{ formatNum(p.numerator) }}{{ p.unit }} ÷ {{ p.headcount }} 人
+                <template v-if="p.headcount === null">
+                  {{ formatNum(p.numerator) }}{{ p.unit }}（不计算人均）
+                </template>
+                <template v-else>
+                  {{ formatNum(p.numerator) }}{{ p.unit }} ÷ {{ p.headcount }} 人
+                </template>
               </div>
               <div class="hb-pos-basis">{{ p.numerator_basis }}</div>
             </div>
@@ -898,7 +903,7 @@ import weekOfYear from 'dayjs/plugin/weekOfYear'
 import { buildStack, sourceKindMeta, RECEPTION_BREAKDOWN_TIP } from '@/utils/receptionSource'
 // 周区间计算（周一起始）—— 共享单一来源，修复「周日当天本周算成下周」的存量 bug
 import { getWeekRange, getWeekRangeStr, weekLabel } from '@/utils/weekRange'
-import { QuestionFilled, CircleCheckFilled } from '@element-plus/icons-vue'
+import { QuestionFilled, CircleCheckFilled, InfoFilled } from '@element-plus/icons-vue'
 dayjs.extend(isoWeek)
 dayjs.extend(quarterOfYear)
 dayjs.extend(weekOfYear)
@@ -1201,6 +1206,19 @@ function drillToRepeatComplaint() {
     query: { tab: 'detail', start, end },
   })
 }
+
+/** ★ #87: 兼办投诉量（非组长/专员完成的投诉结案数）—— 暴露岗位临时调配 */
+const healthOtherDuty = computed(() => {
+  const n = healthMetrics.value?.by_position?.find((p) => p.bucket === '兼办投诉')?.numerator
+  return Number(n || 0)
+})
+
+/** 兼办占比（相对全站投诉结案数） */
+const healthOtherDutyPct = computed(() => {
+  const tot = Number(healthMetrics.value?.attribution?.total_handled || 0)
+  if (!tot) return '0'
+  return ((healthOtherDuty.value * 100) / tot).toFixed(1)
+})
 
 /** 积压账龄数据说明（页面层 ⓘ，看板卡片规范 §二 双强制） */
 const backlogAgingTip = [
@@ -2372,6 +2390,20 @@ watch([grain, weekOffset, monthOffset, quarterOffset, yearOffset, customDateRang
 }
 .hb-pos-foot b { color: #303133; font-size: 13px; }
 .hb-dim { color: #9ca3af; }
+
+/* ★ 兼办投诉提示：让「非专职人员在办投诉」可见（岗位临时调配信号） */
+.hb-notice {
+  margin-top: 6px;
+  padding: 5px 8px;
+  background: #fffbeb;
+  border-left: 3px solid #f59e0b;
+  border-radius: 3px;
+  font-size: 11px;
+  color: #92400e;
+  line-height: 1.45;
+}
+.hb-notice b { color: #b45309; }
+.hb-notice .hb-dim { color: #b45309; opacity: 0.75; }
 
 /* 窄屏: 岗位负荷改单列，比率卡已由 el-col 断点处理 */
 @media (max-width: 768px) {
