@@ -17,6 +17,14 @@ export function complaintSummary(params) {
   return request.get('/complaints/summary', { params })
 }
 
+// ★ #87 投诉健康度指标（活跃SN / 投诉率三维 / 三岗位负荷 / 重复投诉率）
+//   落点: 运营分析看板「投诉专项分析」区
+//   ⚠️ 其中「重复投诉率」是**升级的代理信号**（同SN 30天内重复），
+//      不是真实升级率 —— 真实升级率需升级投诉表（申报/化解字段）到位后才可算。
+export function complaintHealthMetrics(params) {
+  return request.get('/complaints/health-metrics', { params })
+}
+
 // 投诉明细列表(三源合并)
 export function complaintDetail(params) {
   return request.get('/complaints/detail', { params })

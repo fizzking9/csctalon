@@ -19,7 +19,14 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.schemas.common import PageBase, R
-from app.services.analytics import TZ, _complaint_source_type_case, _ticket_category_case
+from app.services.analytics import (
+    REAL_FINISH_EPOCH_SECS,
+    TZ,
+    _complaint_source_type_case,
+    _ticket_category_case,
+    complaint_health_metrics,
+    handler_fallback_expr,
+)
 
 # #47 (2026-09-10): 卡商 result 前缀锚定判定 + 状态常量(与 complaint_scope 单一来源)
 # #47 (2026-09-10) 新增 / #53 (2026-09-11) 强化: (外)卡商 **完全独立** ——
@@ -173,15 +180,12 @@ def _suppl_trend_rows(
 
 
 def _handler_fallback_cols():
-    """工单处理人多级fallback: handler(已指派并填写) → assignee(派单分配) → updated_by_raw(上游最后操作人) → registrant(登记人)
-    场景: 历史工单 handler 字段未规范化填写, 但实际上有最后操作人 updated_by_raw 或 assignee/registrant
-    仅用于统计汇总与展示, 不改变 DB 原始值。"""
-    return case(
-        (ServiceTicket.handler.isnot(None) & (ServiceTicket.handler != ""), ServiceTicket.handler),
-        (ServiceTicket.assignee.isnot(None) & (ServiceTicket.assignee != ""), ServiceTicket.assignee),
-        (ServiceTicket.updated_by_raw.isnot(None) & (ServiceTicket.updated_by_raw != ""), ServiceTicket.updated_by_raw),
-        else_=ServiceTicket.registrant,
-    )
+    """工单处理人多级 fallback: handler → assignee → updated_by_raw → registrant
+
+    ★ #87: 实现已上提到 `analytics.handler_fallback_expr`（单一来源）——
+       本函数保留仅为兼容既有调用点，**内部委派**，勿在此重写逻辑。
+    """
+    return handler_fallback_expr(ServiceTicket)
 
 
 # 系统自动登记人关键词(非真实处理人)
@@ -223,7 +227,9 @@ def _is_real_finish(finish_time, register_time) -> bool:
 #   注意: 本口径与投诉水位 water.out(v2 自洽: 出水⊂进水, 仅窗口内登记且完成)不同,
 #         water 保留 v2(净水位=积压); registered/handled 作为独立"登记/处理"KPI 展示。
 # ═══════════════════════════════════════════════════════════════════
-_REAL_FINISH_EPOCH_SECS = 180
+# 工单「真实完成」阈值（秒）—— ★ #87 单一来源: `analytics.REAL_FINISH_EPOCH_SECS`。
+# 原先本模块自写 180，与 analytics 侧各一份，存在漂移风险（参见 #83 退款笔数教训）。
+_REAL_FINISH_EPOCH_SECS = REAL_FINISH_EPOCH_SECS
 
 
 def _source_reg_handled(db, src_val: str, ts, te,
@@ -630,6 +636,33 @@ def _norm_subject_entity(name: str | None) -> str | None:
     if "云客猫" in v:
         return "云客猫"
     return v
+
+
+@router.get("/health-metrics", response_model=R,
+            summary="投诉健康度指标(活跃SN/投诉率三维/三岗位负荷/重复投诉率) #87")
+@cached_json(lambda *a, **kw: f"complaint:health:{kw.get('date')}:{kw.get('start')}:{kw.get('end')}",
+             ttl=lambda **kw: cache_ttl_for(kw.get('start'), kw.get('end'), 60))
+def complaint_health_metrics_endpoint(
+    db: DBSession,
+    _: CurrentUser,
+    date: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+):
+    """#87 第一批投诉健康度指标（设计文档 A-20260914-001 §4.1）。
+
+    ⚠️ 缓存 key 前缀为 `complaint:` → **自动纳入** `cache_warmer.SCOPE_PATTERNS`
+       的 `complaint:*` 失效 pattern，口径变更后清缓存即生效（无需另加配置）。
+
+    ★ 口径要点（详见 `analytics.complaint_health_metrics._spec`，前端 ⓘ 直接引用）：
+      · 活跃 SN = 窗口内有接待记录的去重设备 SN（所有比率的分母基底）
+      · 投诉率 = 投诉 SN / 活跃 SN（三个维度：全站/对外/对内）
+      · 岗位负荷 = **岗位归因**分子 / 在岗人数；组长与专员分子为投诉结案数，客服为接待数
+      · **重复投诉率** = 30 天内同 SN 投诉 ≥2 次占比 —— 是**升级的代理信号**，
+        不是真实升级率（真实值待升级投诉表到位）
+      · 分母为 0 时比率返回 **null**（前端显示「—」而非 0%，避免误读为"零投诉"）
+    """
+    return R(data=complaint_health_metrics(db, date=date, start=start, end=end))
 
 
 @router.get("/summary", response_model=R, summary="三源投诉统计汇总(工单为主,卡商/外部投诉为前期参考补充)")

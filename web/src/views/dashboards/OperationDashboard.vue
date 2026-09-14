@@ -514,6 +514,139 @@
         </template>
       </SectionHeader>
 
+      <!-- ★★ #87 投诉健康度指标（第一批）★★
+
+           设计说明（Design Rationale）
+           ─────────────────────────────────────────────
+           目的（替谁回答什么问题）
+             替**运营主管**回答三个此前无法回答的问题：
+               ① 投诉的**相对水平**如何？（投诉数 8 的绝对值无法判断好坏）
+               ② 有多少是**反复投诉**（第一次没解决）？
+               ③ 各岗位**负荷**是否失衡（谁在扛、扛多少）？
+
+           逻辑（为什么这样组织）
+             · 绝对数 → 比率的转变：新增「活跃 SN 基数」作分母基底，
+               把「投诉数」变成「投诉率」。**这解决一个经典误判** ——
+               「投诉少了」到底是服务水平提升，还是客户流失？
+               投诉↓ + 活跃↓ = 可能是客户流失（危险）；投诉↓ + 活跃→ = 真改善。
+             · 「重复投诉率」放最前：它是当前**升级的唯一可观测代理**。
+               同一台设备 30 天内被投诉 ≥2 次 ≈ 第一次没解决好。
+             · 岗位负荷按**岗位归因**（组长 / 投诉专员 / 客服），
+               因为分子口径不同：组长与专员=投诉结案数，客服=接待数。
+
+           口径（数据判据 + 文档指针）
+             · 活跃SN = 窗口内 cs_records 有接待记录的去重设备SN
+             · 投诉率 = 投诉SN / 活跃SN（三维：全站 / 对外 / 对内）
+             · 重复投诉率 = 30 天内同SN投诉≥2次占比（代理指标，非升级率）
+             · 岗位归属取 person.position / specialty（与 SCD 任职源同步）；
+               投诉专员 = 专项∈(内部投诉, 外部投诉)；组长含副主管
+             · 完整口径: docs/arch/_pending/A-20260914-001-投诉升级链路指标体系设计.md
+             · ⚠️ 投诉判据 = 服务类别**空白或'投诉'**（不可用 LIKE '%投诉%'）
+
+           取舍（不做什么及原因）
+             · 不叫「升级率」—— 只有「重复投诉率」这个代理口径，
+               真实升级率需升级投诉表（申报/化解字段）到位，**混用即口径漂移**（#81/#83 教训）
+             · 不做「投诉专员人均负荷」的名称替换 —— 专员岗位真实存在（4 人），
+               某轮我误判为"无此岗位"，经用户纠正后修正（见设计文档 §9.1）
+             · 不加趋势图 —— 第一批先把「当期水位」看清；趋势属第二批
+             · 分母为 0 时显示「—」而非 0% —— 避免被读成"零投诉"（规范：空必须可解释）
+
+           工单: #87 -->
+      <div v-if="healthMetrics" class="health-block mb-16">
+        <div class="hb-head">
+          <span class="hb-title">投诉健康度（相对水平 · 重复投诉 · 岗位负荷）</span>
+          <el-tooltip effect="dark" placement="top" raw-content :content="healthTip">
+            <el-icon style="color:#b0b4bb;cursor:help;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </div>
+
+        <!-- ① 投诉率三维 + 重复投诉率（比率组，放最前 —— 相对水平比绝对数重要） -->
+        <el-row :gutter="12" class="mb-8">
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="hb-card hb-clickable" style="background:#eff6ff" @click="drillToComplaintAnalysis()">
+              <div class="hb-label" style="color:#2563eb">投诉率(全站)</div>
+              <div class="hb-value" style="color:#2563eb">{{ fmtRate(healthMetrics.rates?.overall) }}</div>
+              <div class="hb-sub">投诉SN ÷ 活跃SN</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="hb-card hb-clickable" style="background:#fef2f2" @click="drillToComplaintAnalysis('外部投诉')">
+              <div class="hb-label" style="color:#dc2626">投诉率(对外)</div>
+              <div class="hb-value" style="color:#dc2626">{{ fmtRate(healthMetrics.rates?.external) }}</div>
+              <div class="hb-sub">走到外部监管占比</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="hb-card hb-clickable" style="background:#f5f3ff" @click="drillToComplaintAnalysis('内部投诉')">
+              <div class="hb-label" style="color:#7c3aed">投诉率(对内)</div>
+              <div class="hb-value" style="color:#7c3aed">{{ fmtRate(healthMetrics.rates?.internal) }}</div>
+              <div class="hb-sub">内部渠道占比</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="hb-card hb-clickable" style="background:#fff7ed" @click="drillToRepeatComplaint()">
+              <div class="hb-label" style="color:#ea580c">
+                重复投诉率
+                <el-tooltip effect="dark" placement="top" raw-content
+                  content="<b>这是升级的代理信号，不是真实升级率</b><br/>同设备(SN)30天内被投诉≥2次 ≈ 第一次没解决好。<br/>真实升级率需升级投诉表（申报/化解字段）到位后才可计算。">
+                  <el-icon style="vertical-align:-2px;font-size:11px"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </div>
+              <div class="hb-value" style="color:#ea580c">{{ fmtRate(healthMetrics.repeat?.repeat_rate) }}</div>
+              <div class="hb-sub">{{ formatNum(healthMetrics.repeat?.repeat_tickets) }} 条重复</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="hb-card" style="background:#f0fdf4">
+              <div class="hb-label" style="color:#16a34a">活跃 SN 基数</div>
+              <div class="hb-value" style="color:#16a34a">{{ formatNum(healthMetrics.active_sn) }}</div>
+              <div class="hb-sub">所有比率的<b>分母基底</b></div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="4">
+            <div class="hb-card" style="background:#f8fafc">
+              <div class="hb-label" style="color:#475569">投诉 SN / 工单</div>
+              <div class="hb-value" style="color:#475569;font-size:16px">
+                {{ formatNum(healthMetrics.complaint_sn) }} / {{ formatNum(healthMetrics.complaint_tickets) }}
+              </div>
+              <div class="hb-sub">去重SN / 总条数</div>
+            </div>
+          </el-col>
+        </el-row>
+
+        <!-- ② 岗位负荷（按岗位归因；分子口径不同，已在列内声明） -->
+        <div class="hb-pos">
+          <div class="hb-pos-title">
+            岗位负荷
+            <el-tooltip effect="dark" placement="top" raw-content :content="healthPositionTip">
+              <el-icon style="color:#b0b4bb;cursor:help;font-size:12px"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </div>
+          <div class="hb-pos-grid">
+            <div
+              v-for="p in healthMetrics.by_position"
+              :key="p.bucket"
+              class="hb-pos-card"
+              :class="{ 'hb-pos-card--active': p.numerator > 0 }"
+            >
+              <div class="hb-pos-name">{{ p.bucket }}</div>
+              <div class="hb-pos-per">
+                {{ p.per_capita === null ? '—' : formatNum(p.per_capita) }}
+                <span class="hb-pos-unit">{{ p.unit }}/人</span>
+              </div>
+              <div class="hb-pos-detail">
+                {{ formatNum(p.numerator) }}{{ p.unit }} ÷ {{ p.headcount }} 人
+              </div>
+              <div class="hb-pos-basis">{{ p.numerator_basis }}</div>
+            </div>
+          </div>
+          <div class="hb-pos-foot">
+            归因合计 <b>{{ formatNum(healthMetrics.attribution?.total_handled) }}</b> 条
+            <span class="hb-dim">（含未登记岗位/主管 {{ formatNum(healthMetrics.attribution?.by_bucket?.其他) }} 条）</span>
+          </div>
+        </div>
+      </div>
+
       <!-- 三源 KPI (点击即作为下方明细表的来源筛选; 主值=登记, 副行=处理, F-P1-2)
            ★ #80 修复: 原 `el-col :xs="8"` **缺 :sm/:md** → 桌面端每个 col span=24
              → 用户反馈「四个居然占了 4 个大行」。补断点后桌面端四卡同行。
@@ -750,10 +883,10 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, reactive, onMounted, onBeforeUnmount, watch, getCurrentInstance } from 'vue'
 import { today } from '@/api/analytics'
 import { listGroups } from '@/api/group'
-import { complaintSummary, complaintDetail, complaintSubjectAnalysis } from '@/api/complaint'
+import { complaintSummary, complaintDetail, complaintSubjectAnalysis, complaintHealthMetrics } from '@/api/complaint'
 import BaseChart from '@/components/BaseChart.vue'
 import { useAudit } from '@/composables/useAudit'
 import dayjs from 'dayjs'
@@ -833,8 +966,15 @@ const hasRecovery = computed(() => recoveryData.value && recoveryData.value.kpi)
 // 投诉专项数据
 const complaintSummaryData = ref({})
 const complaintList = ref([])
+// ★ #87: 取组件实例代理 —— 用于在 setup 函数内做路由跳转
+//   （本文件未引入 useRouter，模板里用的是 `$router`；此处保持一致写法）
+const proxy = getCurrentInstance()?.proxy
+
 // 被投诉主体维度数据
 const complaintSubjectData = ref({})
+
+// ★ #87 投诉健康度指标（活跃SN / 投诉率三维 / 岗位负荷 / 重复投诉率）
+const healthMetrics = ref(null)
 
 // workbuddy 推送补充数据源(315/卡商, 按SN关联工单)
 const supplExternal = computed(() => complaintSummaryData.value?.supplementary?.external || { total: 0, matched: 0 })
@@ -976,6 +1116,91 @@ const BACKLOG_AGING_SEGMENTS = [
   { key: 'd31_90', short: '31-90天', label: '31-90 天（已积压，需介入）', color: '#ea580c' },
   { key: 'd90_plus', short: '>90天', label: '>90 天（陈年烂账）', color: '#dc2626' },
 ]
+
+/** ★ #87 投诉健康度数据说明（页面层 ⓘ，规范 §二 双强制之①）
+ *
+ *  本卡组与上方「投诉专项四卡」的关系：四卡看**绝对量**，本组看**相对水平**。
+ *  两者不可互相替代 —— 绝对量无法回答"好不好"，相对水平无法回答"有多少要处理"。
+ */
+const healthTip = [
+  '<b>来源</b>：/complaints/health-metrics（#87 第一批指标）',
+  '<b>口径</b>：',
+  '· <b>活跃SN基数</b> = 窗口内 <code>cs_records</code> 有接待记录的去重设备SN',
+  '　　→ 它是<b>所有投诉率的分母基底</b>（为何需要它见下方"取舍"）',
+  '· <b>投诉率</b> = 投诉SN ÷ 活跃SN。投诉判据 = 工单服务类别<b>空白或「投诉」</b>',
+  '　　（客服登记投诉时不选类别 → 导出为空白，故空白即投诉；⚠️ 不可用 LIKE \'%投诉%\'）',
+  '　<b>不含 (外)卡商</b>（#53 卡商独立统计、全部单算）',
+  '· <b>重复投诉率</b> = 30 天内<b>同一设备(SN)</b>被投诉 ≥2 次的条数 ÷ 投诉工单数',
+  '　⚠️ 这是<b>升级的代理信号</b>，<b>不是真实升级率</b> —— 真实升级率需升级投诉表',
+  '　　（客服申报 / 组长化解字段）采集到位后才能严格计算',
+  '<b>时点</b>：跟随顶部时间条；本页缓存 24h（复盘场景，非实时）',
+  '<b>「空」的含义</b>：',
+  '· 比率显示 <b>「—」</b> = 该窗口<b>活跃SN为0</b>（无接待记录）→ 分母不存在，',
+  '　　<b>不是 0%</b>。切勿读成"零投诉"。（规范：空必须可解释）',
+  '· 某维度显示 0.00% = 该窗口确无该来源投诉（分母有效）',
+  '· 整块不渲染 = 接口未返回数据',
+  '<b>下钻</b>：点任一比率卡 → 投诉分析页（带当前时间窗口与来源筛选）',
+  '<br/><b>⚠️ 取舍（不做什么及原因）</b>',
+  '① <b>不叫「升级率」</b> —— 现有数据只能算"同SN重复投诉"，把它叫升级率就是',
+  '　　<b>口径漂移</b>（同一个概念两套实现，正是 #81/#83/#85 的病根）。宁可名字保守。',
+  '② <b>必须给出活跃SN</b>，而不是只给投诉数 —— 否则无法区分这两种截然不同的局面：',
+  '　　投诉↓ + 活跃↓ = 可能是<b>客户流失</b>（危险信号）；',
+  '　　投诉↓ + 活跃→ = <b>真实改善</b>（值得肯定）。只看绝对数会把后者当成绩、把前者当喜报。',
+  '③ <b>不加趋势图</b> —— 第一批先把"当期水位"看清；趋势图属第二批（避免一次铺太大）。',
+  '④ <b>不并入上方四卡</b> —— 四卡是"发生量/处理量"台账，本组是"相对水平"评价，',
+  '　　混在一区会让使用者分不清哪个是"要处理的数"。',
+].join('<br/>')
+
+/** ★ #87 岗位负荷数据说明 */
+const healthPositionTip = [
+  '<b>口径</b>：岗位负荷 = <b>岗位归因分子</b> ÷ 在岗人数',
+  '· <b>组长 / 投诉专员</b> 分子 = 该岗位人员在窗口内<b>完成的投诉结案数</b>',
+  '　　（真实完成 = 完成时间落窗 且 完成−登记 ≥3 分钟；与投诉四卡"处理"同口径）',
+  '· <b>客服</b> 分子 = <b>接待数</b>（接待会话数）',
+  '　　→ 分子口径<b>故意不同</b>：客服的职责是接待，不是结案（用户 2026-09-14 确认）',
+  '<b>岗位归属</b>：取自 <code>person.position</code> / <code>specialty</code>',
+  '　（已与 SCD 任职历史源同步；处理人经别名表匹配，实测覆盖 100%）',
+  '· 投诉专员 = 专项 ∈ (内部投诉, 外部投诉)　· 组长含副主管',
+  '<b>「空」的含义</b>：显示 <b>「—」</b> = 该岗位<b>当前无在岗人员</b>（人数为0），',
+  '　分母不存在 → 无法计算人均；<b>不是 0 工作量</b>。',
+  '· 显示 0 = 该岗位有在岗人员但窗口内无归因工作量（如请假/转岗）',
+  '<b>下钻</b>：⚠️ 本表<b>不做点击下钻</b> —— 明细接口按【日】筛选，',
+  '　而"岗位归因"是处理人维度的计算列，无法透传。',
+  '　需要看某人明细请用下方「处理人 Top10」或「工作效率值排名」。',
+  '<br/><b>⚠️ 取舍（不做什么及原因）</b>',
+  '① <b>分子按岗位归因，而非用"全站结案总数"</b> —— 曾误用总量导致组长与专员人均',
+  '　　完全相同（同一分子÷同一分母），该数字无任何管理意义。',
+  '② <b>保留「归因合计」行</b> —— 让"未登记岗位/主管"的工作量可见，',
+  '　　避免读者以为三类之和应等于全站结案数（差额就是"其他"）。',
+  '③ <b>不与「工作效率值排名」合并</b> —— 那张表已含复杂权重系数（跨类豁免等），',
+  '　　本表用<b>朴素口径</b>（条数÷人数），便于非专业读者核对。（详见工单 #68）',
+].join('<br/>')
+
+/** 比率格式化：null/undefined → 「—」（分母为0，不是 0%） */
+function fmtRate(v) {
+  if (v === null || v === undefined || v === '') return '—'
+  return `${Number(v).toFixed(2)}%`
+}
+
+/** ★ #87 下钻：投诉率 → 投诉分析页（带窗口 + 来源）
+ *  ⚠️ 使用组件实例的 `proxy.$router`（本文件未引入 useRouter，
+ *     与模板中既有的 `$router.push` 写法保持一致）。
+ */
+function drillToComplaintAnalysis(source) {
+  const { start, end } = getDateRange()
+  const q = { tab: 'analysis', view: source ? 'channel' : 'analysis', start, end }
+  if (source) q.source = source === '外部投诉' ? 'external' : 'internal'
+  proxy.$router.push({ path: '/dashboards/complaint-analysis', query: q })
+}
+
+/** ★ #87 下钻：重复投诉 → 明细页（同SN重复无法在明细接口透传，落到窗口内投诉列表） */
+function drillToRepeatComplaint() {
+  const { start, end } = getDateRange()
+  proxy.$router.push({
+    path: '/dashboards/complaint-analysis',
+    query: { tab: 'detail', start, end },
+  })
+}
 
 /** 积压账龄数据说明（页面层 ⓘ，看板卡片规范 §二 双强制） */
 const backlogAgingTip = [
@@ -1770,7 +1995,7 @@ async function loadAll() {
   const params = { start, end, trend_grain: trendGrain.value }
 
   try {
-    const [kpiRes, hourlyRes, receptionRes, refundRes, staffRes, recoveryRes, complaintSummaryRes, complaintDetailRes, subjectRes] = await Promise.all([
+    const [kpiRes, hourlyRes, receptionRes, refundRes, staffRes, recoveryRes, complaintSummaryRes, complaintDetailRes, subjectRes, healthRes] = await Promise.all([
       today.kpi(params),
       today.hourlyTrend(params),
       today.reception(params),
@@ -1780,6 +2005,8 @@ async function loadAll() {
       complaintSummary({ start, end }),
       complaintDetail({ start, end, limit: 500, include_supplementary: true }),
       complaintSubjectAnalysis({ start, end }),
+      // ★ #87: 失败不阻断整页（新指标，后端老版本/异常时降级为不渲染）
+      complaintHealthMetrics({ start, end }).catch(() => ({ data: null })),
     ])
 
     if (kpiRes.data) kpiData.value = kpiRes.data
@@ -1791,6 +2018,8 @@ async function loadAll() {
     if (complaintSummaryRes.data) complaintSummaryData.value = complaintSummaryRes.data
     if (complaintDetailRes.data) complaintList.value = complaintDetailRes.data?.items || []
     if (subjectRes.data) complaintSubjectData.value = subjectRes.data
+    // ★ #87: 仅在拿到有效数据时赋值（避免接口异常时渲染空壳）
+    if (healthRes?.data) healthMetrics.value = healthRes.data
   } catch (e) {
     console.error('加载数据失败', e)
   } finally {
@@ -2047,6 +2276,108 @@ watch([grain, weekOffset, monthOffset, quarterOffset, yearOffset, customDateRang
   color: #6b7280;
 }
 .ba-note b { font-size: 14px; margin: 0 2px; }
+
+/* ★★ #87 投诉健康度指标（比率 / 重复投诉 / 岗位负荷）
+   设计说明: 
+     · 比率卡在前 —— 「相对水平」比绝对数更接近管理判断；
+     · 岗位负荷用独立小格（3 列），因为它有 3 个维度（人均/分子÷人数/口径），
+       塞进比率卡会让信息拥挤；
+     · 高亮仅用于「有工作量」的岗位（numerator>0），让 0 工作量自然淡出而非消失
+       （消失会让读者以为该岗位不存在）。 */
+.health-block {
+  padding: 10px 12px;
+  background: #fafbfc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+.hb-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.hb-title { font-size: 12px; font-weight: 600; color: #303133; }
+
+.hb-card {
+  padding: 8px 10px;
+  border-radius: 6px;
+  height: 100%;
+  box-sizing: border-box;
+}
+.hb-clickable { cursor: pointer; transition: box-shadow 0.15s, transform 0.15s; }
+.hb-clickable:hover { box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1); transform: translateY(-1px); }
+.hb-label {
+  font-size: 11px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-bottom: 2px;
+}
+.hb-value {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+.hb-sub { font-size: 11px; color: #6b7280; margin-top: 1px; }
+.hb-sub b { color: #303133; }
+
+.hb-pos {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed #e5e7eb;
+}
+.hb-pos-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7280;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.hb-pos-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.hb-pos-card {
+  padding: 8px 10px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  opacity: 0.55;
+}
+.hb-pos-card--active {
+  opacity: 1;
+  border-color: #cbd5e1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+.hb-pos-name { font-size: 11px; font-weight: 600; color: #303133; }
+.hb-pos-per {
+  font-size: 17px;
+  font-weight: 700;
+  color: #1f2937;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+}
+.hb-pos-unit { font-size: 11px; font-weight: 500; color: #9ca3af; margin-left: 2px; }
+.hb-pos-detail { font-size: 11px; color: #6b7280; }
+.hb-pos-basis { font-size: 10px; color: #9ca3af; margin-top: 2px; line-height: 1.35; }
+.hb-pos-foot {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #6b7280;
+}
+.hb-pos-foot b { color: #303133; font-size: 13px; }
+.hb-dim { color: #9ca3af; }
+
+/* 窄屏: 岗位负荷改单列，比率卡已由 el-col 断点处理 */
+@media (max-width: 768px) {
+  .hb-pos-grid { grid-template-columns: 1fr; }
+  .hb-value { font-size: 17px; }
+}
 
 /* 窄屏: 精简排版, 避免文字/数字被挤成两行 */
 @media (max-width: 768px) {

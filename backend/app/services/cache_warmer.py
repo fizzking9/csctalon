@@ -162,6 +162,7 @@ def _warm_complaints(
         complaint_analysis,
         complaint_backlog,
         complaint_detail,
+        complaint_health_metrics_endpoint,
         complaint_subject_analysis,
         complaint_summary,
     )
@@ -170,6 +171,16 @@ def _warm_complaints(
         f"complaint:summary:{start}:{end}",
         complaint_summary.__wrapped__, (db, None), {"start": start, "end": end},
         f"{label}:complaint:summary", force=force,
+    )
+    # ★ #87 投诉健康度指标（活跃SN/投诉率三维/三岗位负荷/重复投诉率）
+    #   ⚠️ key 必须与 `complaints.complaint_health_metrics_endpoint` 的
+    #      `f"complaint:health:{date}:{start}:{end}"` **逐字符对齐**
+    #      （本模块注释开头已声明该约定）。
+    n += _warm_one(
+        f"complaint:health:None:{start}:{end}",
+        complaint_health_metrics_endpoint.__wrapped__, (db, None),
+        {"date": None, "start": start, "end": end},
+        f"{label}:complaint:health", force=force,
     )
     n += _warm_one(
         f"complaint:detail:{start}:{end}:None:{detail_limit}:1",

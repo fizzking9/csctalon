@@ -50,6 +50,7 @@ from app.models.person import Person, PersonAlias
 from app.models.refund import Refund
 from app.models.refund_record_report import RefundRecordReport
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
+from app.models.staff_assignment import StaffAssignment
 from app.models.task import SpecialTask
 from app.models.ticket import ServiceTicket
 from app.models.todo import TodoItem
@@ -1155,6 +1156,37 @@ _EXTERNAL_DONE_RESULTS_LOCAL = {
     "和解结案", "撤销结案", "暂行办结", "调解结案", "调节结案",
     "投诉无效", "重复投诉", "终止调节", "退回消委会",
 }
+
+
+# ══════════════════════════════════════════════════════════
+# 工单「处理人」多级 fallback —— **单一来源** (#87)
+# ══════════════════════════════════════════════════════════
+# 原实现在 `api/v1/complaints._handler_fallback_cols`（仅统计汇总用）。
+# #87 的「岗位负荷」也需要同一口径 → 上提到本模块，`complaints.py` 改为委派，
+# **禁止**再写第二份（口径漂移是 #81/#83/#85 的共同病根）。
+#
+# 回归场景: 历史工单 `handler` 未规范化填写，但 `assignee`/`updated_by_raw`/
+#   `registrant` 有值。优先取「已指派并填写」的 handler。
+# ⚠️ 本函数**不改 DB 原始值**，仅用于统计归属。
+
+def handler_fallback_expr(t):
+    """工单处理人多级 fallback: handler → assignee → updated_by_raw → registrant
+
+    参数 `t` = `ServiceTicket` 模型（传模型而非列，便于跨模块复用）。
+    """
+    return case(
+        (t.handler.isnot(None) & (t.handler != ""), t.handler),
+        (t.assignee.isnot(None) & (t.assignee != ""), t.assignee),
+        (t.updated_by_raw.isnot(None) & (t.updated_by_raw != ""), t.updated_by_raw),
+        else_=t.registrant,
+    )
+
+
+# 工单「真实完成」阈值（秒）—— **单一来源** (#87)
+# 系统建单时会把 finish_time 默认填成 register_time（或差几秒），故 finish−register
+# ≥ 180s 才认可是真实完成。`api/v1/complaints._REAL_FINISH_EPOCH_SECS` 从本常量导入，
+# 避免两处各写一个 180 而漂移（#83 的退款笔数就是这么漂的）。
+REAL_FINISH_EPOCH_SECS = 180
 
 
 # ============================================================
@@ -2945,6 +2977,419 @@ def _pct_delta(cur, prev) -> float | None:
     if prev is None or prev == 0:
         return None
     return round((cur - prev) / prev * 100.0, 1)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# #87 第一批投诉健康度指标（设计文档 A-20260914-001 §4.1）
+# ═══════════════════════════════════════════════════════════════════════
+# 交付 9 项指标（全部**新增**，不改既有 work_score/投诉口径）：
+#   1 活跃SN基数 · 2 投诉率(全站) · 3 投诉率(对外) · 4 投诉率(对内)
+#   5 组长负荷 · 6 投诉专员负荷 · 7 客服接待负荷
+#   8 重复投诉率 · 9 重复投诉SN数
+#
+# ★★ 口径铁律（用户 2026-09-14 拍板）★★
+#   · 投诉判据 = `complaint_scope.is_complaint_ticket_cond`（**空白 OR '投诉'**）
+#     ⚠️ 用 `service_category LIKE '%投诉%'` 只能匹配 5 条 → 会得出假结论（本人已踩）
+#   · 活跃 SN = 窗口内 `cs_records.device_sn` 去重（用户确认口径）
+#   · 岗位归属 = `StaffAssignment` + **`is_current=true`**
+#     ⚠️ 不可直读 `Person.position`（仅镜像）；不可用 `total`（131 vs current 38 会重复计历史）
+#   · 处理人归属 = `PersonAlias.alias` 精确匹配（实测覆盖 100%）
+#     ⚠️ `person_aliases` 含 `企微-董梦玲`/`组长-董梦玲`/`董梦玲` 多种写法，
+#        别名表已覆盖 → **不需要** regexp 去前缀（那是另一套做法，勿混用）
+#   · 负荷分子 = 窗口内**真实完成**（finish 落窗 且 finish−register ≥ 180s），与
+#     `complaints._REAL_FINISH_EPOCH_SECS` 同源
+#   · 客服负荷分子 = **接待数**（用户确认：客服分子用接待数，非投诉数）
+#   · 「重复投诉率」**禁止**改叫「升级率」（代理指标 ≠ 真实升级率）
+# ═══════════════════════════════════════════════════════════════════════
+# 位置口径依据（用户 2026-09-14 拍板）:
+#   · 投诉专员 = `specialty ∈ (内部投诉, 外部投诉)`（`specialties` 字典的 2 条，
+#     实测 4 人：刘景山/苏紫依=内部投诉, 洪佳/陈玉红=外部投诉）
+#     ⚠️ 这是**职能**维度，与「投诉来源桶」同名但语义不同，勿混淆
+#   · 组长 = `position ∈ (组长, 副主管)`（实测该层承担 67% 投诉）
+#   · 客服 = `position = 客服`
+_COMPLAINT_SPECIALIST_SPECIALTIES = ("内部投诉", "外部投诉")
+_COMPLAINT_LEAD_POSITIONS = ("组长", "副主管")
+
+
+def _person_position_map(db: Session) -> dict[str, dict[str, Any]]:
+    """返回 {别名: {person_id, display_name, position, specialty, bucket}}
+
+    `bucket` ∈ {投诉专员, 组长, 客服, 其他} —— 用于「岗位负荷」分组。
+    ⚠️ 以 `PersonAlias` 为入口（工单 handler 就是别名原文），
+       岗位/专项取自 **镜像字段**（`Person.position`/`specialty`，已与 SCD 源同步）。
+    """
+    rows = db.execute(
+        select(
+            PersonAlias.alias,
+            Person.id,
+            Person.display_name,
+            Person.position,
+            func.coalesce(Person.specialty, Person.primary_specialty).label("specialty"),
+        ).outerjoin(Person, PersonAlias.person_id == Person.id)
+    ).all()
+
+    # 专项 → 别名集合（SCD 真身，用于交叉校验镜像缺失的人）
+    scd_specialists: dict[int, str] = {}
+    for pid, sp_name in db.execute(
+        select(PersonSpecialtyAssignment.person_id, Specialty.name)
+        .join(Specialty, PersonSpecialtyAssignment.specialty_id == Specialty.id)
+        .where(
+            PersonSpecialtyAssignment.is_current.is_(True),
+            Specialty.name.in_(_COMPLAINT_SPECIALIST_SPECIALTIES),
+        )
+    ).all():
+        scd_specialists[int(pid)] = str(sp_name)
+
+    # SCD 真身岗位（镜像缺失时兜底，且与镜像做交叉；两者 position 实测不一致 = 0）
+    scd_positions: dict[int, str] = {}
+    for pid, pos in db.execute(
+        select(StaffAssignment.person_id, StaffAssignment.position).where(
+            StaffAssignment.is_current.is_(True),
+            StaffAssignment.position.isnot(None),
+        )
+    ).all():
+        scd_positions[int(pid)] = str(pos)
+
+    def _bucket(pos: str | None, spec: str | None, pid: int | None) -> str:
+        p = (pos or scd_positions.get(pid or -1, "") or "").strip()
+        s = (spec or scd_specialists.get(pid or -1, "") or "").strip()
+        if s in _COMPLAINT_SPECIALIST_SPECIALTIES:
+            return "投诉专员"
+        if p in _COMPLAINT_LEAD_POSITIONS:
+            return "组长"
+        if p == "客服":
+            return "客服"
+        return "其他"
+
+    out: dict[str, dict[str, Any]] = {}
+    for alias, pid, dname, pos, spec in rows:
+        if not alias:
+            continue
+        out[str(alias)] = {
+            "person_id": int(pid) if pid else None,
+            "display_name": dname,
+            "position": pos,
+            "specialty": spec,
+            "bucket": _bucket(pos, spec, int(pid) if pid else None),
+        }
+    return out
+
+
+def complaint_health_metrics(
+    db: Session,
+    date: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> dict[str, Any]:
+    """#87 第一批投诉健康度指标（活跃SN / 投诉率三维 / 三岗位负荷 / 重复投诉）
+
+    返回结构:
+      {
+        window: {start, end},
+        active_sn: int,                       # 活跃 SN 基数（所有比率的分母基底）
+        complaint_sn: int,                    # 投诉 SN（去重）
+        rates: {overall, external, internal},  # 投诉率 三维（%）
+        by_position: [{bucket, count, headcount, per_capita, unit}],
+        repeat: {repeat_tickets, repeat_sn, repeat_rate, distribution[]},
+        _spec: {...}                          # 口径说明（前端 ⓘ 直接引用）
+      }
+
+    ⚠️ 空数据的含义（前端 ⓘ 必须写明）:
+      · active_sn = 0 → 该窗口**无接待记录**，所有比率无法计算（返回 None 而非 0）
+      · rates.x = None → 分母为 0，**不是 0%**（前端应显示「—」而非 0%）
+    """
+    ts, te, _, _, _, _ = _resolve_windows(date=date, start=start, end=end)
+
+    # ── 1. 活跃 SN 基数（分母基底）──────────────────────────────
+    # 口径: 窗口内 `cs_records.operation_time` 命中的去重 `device_sn`
+    active_sn = int(
+        db.scalar(
+            select(func.count(func.distinct(CsRecord.device_sn))).where(
+                CsRecord.operation_time >= ts,
+                CsRecord.operation_time <= te,
+                CsRecord.device_sn.isnot(None),
+            )
+        )
+        or 0
+    )
+
+    # ── 2-4. 投诉 SN（按来源桶）→ 投诉率三维 ──────────────────────
+    # 判据统一走 complaint_scope（空白 OR '投诉'）；来源分桶复用 analytics 薄封装。
+    _is_c = is_complaint_ticket_cond(ServiceTicket.service_category)
+    _src = _complaint_source_type_case()
+    _win = (
+        ServiceTicket.register_time >= ts,
+        ServiceTicket.register_time <= te,
+        ServiceTicket.device_sn.isnot(None),
+    )
+    sn_by_src: dict[str, int] = {}
+    for bucket in ALL_BUCKETS:
+        n = db.scalar(
+            select(func.count(func.distinct(ServiceTicket.device_sn))).where(
+                _is_c, _src == bucket, *_win
+            )
+        )
+        sn_by_src[bucket] = int(n or 0)
+
+    complaint_sn = int(
+        db.scalar(
+            select(func.count(func.distinct(ServiceTicket.device_sn))).where(_is_c, *_win)
+        )
+        or 0
+    )
+    complaint_tickets = int(
+        db.scalar(select(func.count()).select_from(ServiceTicket).where(_is_c, *_win))
+        or 0
+    )
+
+    def _rate(num: int) -> float | None:
+        """比率 = 分子/活跃SN。分母 0 → None（不是 0%）。"""
+        if not active_sn:
+            return None
+        return round(num * 100.0 / active_sn, 2)
+
+    rates = {
+        "overall": _rate(complaint_sn),
+        "external": _rate(sn_by_src.get(BUCKET_EXTERNAL, 0)),
+        "internal": _rate(sn_by_src.get(BUCKET_INTERNAL, 0)),
+    }
+
+    # ── 5-7. 三岗位负荷 ────────────────────────────────────────
+    # 分子: 投诉专员/组长 = 窗口内**真实完成**的投诉数（唯一出口 _sources_reg_handled 的
+    #       handled 全量口径 = 三源 handled 之和）；客服 = **接待数**（用户拍板）。
+    # 分母: 在岗人数（按别名的 bucket 归类）。
+    try:
+        _tot = _complaint_reg_handled_total(db, ts, te)
+        complaint_handled = int(_tot.get("handled", 0))
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("[#87] 投诉 handled 汇总失败(降级为0): %s", _e)
+        complaint_handled = 0
+
+    alias_map = _person_position_map(db)
+
+    # 窗口内实际处理人 → 投诉完成数（用于「有效率」辅助列，非主分子）
+    h_expr = handler_fallback_expr(ServiceTicket)
+    handler_rows = db.execute(
+        select(h_expr.label("h"), func.count())
+        .where(
+            _is_c,
+            ServiceTicket.finish_time.isnot(None),
+            ServiceTicket.register_time.isnot(None),
+            func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time)
+            >= REAL_FINISH_EPOCH_SECS,
+            ServiceTicket.finish_time >= ts,
+            ServiceTicket.finish_time <= te,
+        )
+        .group_by("h")
+    ).all()
+
+    # 客服接待数（按操作人，取接待会话数）
+    reception_rows = db.execute(
+        select(CsRecord.operator, func.count())
+        .where(
+            CsRecord.operation_time >= ts,
+            CsRecord.operation_time <= te,
+            CsRecord.operator.isnot(None),
+        )
+        .group_by(CsRecord.operator)
+    ).all()
+
+    # 在岗人数（按 bucket）—— 只统计**有别名**的人，避免重复
+    headcount: dict[str, int] = {}
+    seen_pids: dict[str, set] = {}
+    for _alias, info in alias_map.items():
+        b = info["bucket"]
+        pid = info.get("person_id")
+        key = pid if pid else _alias
+        seen_pids.setdefault(b, set())
+        if key in seen_pids[b]:
+            continue
+        seen_pids[b].add(key)
+        headcount[b] = headcount.get(b, 0) + 1
+
+    def _sum_by_bucket(rows, name_idx=0) -> dict[str, int]:
+        acc: dict[str, int] = {}
+        for r in rows:
+            raw = r[name_idx]
+            if raw is None:
+                continue
+            info = alias_map.get(str(raw).strip())
+            b = info["bucket"] if info else "其他"
+            acc[b] = acc.get(b, 0) + int(r[1] or 0)
+        return acc
+
+    done_by_bucket = _sum_by_bucket(handler_rows)
+    recv_by_bucket = _sum_by_bucket(reception_rows)
+
+    # ★ 负荷分子必须**按岗位归因**（用户 2026-09-14 拍板：分子按岗位取数）
+    #   ⚠️ 曾错误地把「全站投诉结案总数」同时当作组长与专员的分子 →
+    #      两者人均都等于 1307，完全无意义（同一分母比同一分子）。
+    #   正解：组长/专员分子 = 窗口内**由该岗位处理人完成**的投诉数；
+    #        客服分子 = 该岗位的接待数。全站结案总数另行给出作参照。
+    _NUMERATOR_BUCKETS = (
+        # (bucket, 归因分子, 单位, 分子口径说明)
+        ("组长", int(done_by_bucket.get("组长", 0)), "单", "由组长/副主管完成的投诉结案数"),
+        ("投诉专员", int(done_by_bucket.get("投诉专员", 0)), "单", "由投诉专员完成的投诉结案数"),
+        ("客服", int(recv_by_bucket.get("客服", 0)), "次", "客服接待数（接待会话）"),
+    )
+    by_position: list[dict[str, Any]] = []
+    for b, numerator, unit, basis in _NUMERATOR_BUCKETS:
+        hc = int(headcount.get(b, 0))
+        by_position.append(
+            {
+                "bucket": b,
+                "headcount": hc,
+                "numerator": numerator,
+                "numerator_basis": basis,
+                "per_capita": round(numerator / hc, 1) if hc else None,
+                "unit": unit,
+            }
+        )
+
+    # ── 8-9. 重复投诉（30 天内同 SN ≥2 次）────────────────────────
+    # ★ 这是「升级」的**代理信号**，非真实升级率（真实值待升级投诉表到位）
+    # 口径: 对窗口内投诉按 device_sn 排序，LAG 取上一次投诉时间，
+    #       相邻两次间隔 ≤30 天 → 本次计为「重复投诉」。
+    repeat_tickets = int(
+        db.scalar(
+            text(
+                """
+                WITH t AS (
+                  SELECT device_sn, register_time,
+                         LAG(register_time) OVER (
+                           PARTITION BY device_sn ORDER BY register_time
+                         ) AS prev
+                  FROM service_tickets
+                  WHERE register_time BETWEEN :ts AND :te
+                    AND device_sn IS NOT NULL
+                    AND (service_category = '投诉'
+                         OR service_category IS NULL
+                         OR btrim(service_category) = '')
+                )
+                SELECT count(*) FROM t
+                WHERE prev IS NOT NULL
+                  AND register_time - prev <= interval '30 days'
+                """
+            ),
+            {"ts": ts, "te": te},
+        )
+        or 0
+    )
+    repeat_sn = int(
+        db.scalar(
+            text(
+                """
+                WITH t AS (
+                  SELECT device_sn, register_time,
+                         LAG(register_time) OVER (
+                           PARTITION BY device_sn ORDER BY register_time
+                         ) AS prev
+                  FROM service_tickets
+                  WHERE register_time BETWEEN :ts AND :te
+                    AND device_sn IS NOT NULL
+                    AND (service_category = '投诉'
+                         OR service_category IS NULL
+                         OR btrim(service_category) = '')
+                ), m AS (
+                  SELECT device_sn,
+                         count(*) FILTER (
+                           WHERE prev IS NOT NULL
+                             AND register_time - prev <= interval '30 days'
+                         ) AS reps
+                  FROM t GROUP BY device_sn
+                )
+                SELECT count(*) FROM m WHERE reps > 0
+                """
+            ),
+            {"ts": ts, "te": te},
+        )
+        or 0
+    )
+    dist_rows = db.execute(
+        text(
+            """
+            WITH t AS (
+              SELECT device_sn, register_time,
+                     LAG(register_time) OVER (
+                       PARTITION BY device_sn ORDER BY register_time
+                     ) AS prev
+              FROM service_tickets
+              WHERE register_time BETWEEN :ts AND :te
+                AND device_sn IS NOT NULL
+                AND (service_category = '投诉'
+                     OR service_category IS NULL
+                     OR btrim(service_category) = '')
+            ), m AS (
+              SELECT device_sn,
+                     count(*) FILTER (
+                       WHERE prev IS NOT NULL
+                         AND register_time - prev <= interval '30 days'
+                     ) AS reps
+              FROM t GROUP BY device_sn
+            )
+            SELECT reps, count(*) FROM m GROUP BY reps ORDER BY reps LIMIT 8
+            """
+        ),
+        {"ts": ts, "te": te},
+    ).all()
+
+    repeat_rate = (
+        round(repeat_tickets * 100.0 / complaint_tickets, 2) if complaint_tickets else None
+    )
+
+    return {
+        "active_sn": active_sn,
+        "complaint_sn": complaint_sn,
+        "complaint_tickets": complaint_tickets,
+        "complaint_handled": complaint_handled,
+        "attribution": {
+            "total_handled": int(sum(done_by_bucket.values())),
+            "by_bucket": {k: int(v) for k, v in done_by_bucket.items()},
+        },
+        "rates": rates,
+        "sn_by_source": sn_by_src,
+        "by_position": by_position,
+        "repeat": {
+            "repeat_tickets": repeat_tickets,
+            "repeat_sn": repeat_sn,
+            "repeat_rate": repeat_rate,
+            "distribution": [{"reps": int(r[0] or 0), "sn_count": int(r[1] or 0)} for r in dist_rows],
+        },
+        "_spec": {
+            "active_sn": "活跃SN = 窗口内 cs_records 有接待记录的去重设备SN（所有投诉率的分母基底）。"
+            "『0』表示该窗口无接待记录，此时所有比率显示『—』而非 0%。",
+            "rate_overall": "投诉率(全站) = 投诉SN / 活跃SN。投诉判据 = 工单服务类别为空白或『投诉』"
+            "（客服登记投诉时不选类别，故空白即投诉）。**不含 (外)卡商**（#53 卡商独立统计）。",
+            "rate_external": "投诉率(对外) = 外部投诉SN / 活跃SN（来源桶=外部投诉，含 315 补充表净新增，#58 软纠正后口径）",
+            "rate_internal": "投诉率(对内) = 内部投诉SN / 活跃SN（来源桶=内部投诉，工单直接登记未走外部渠道）",
+            "by_position": "岗位负荷 = 岗位归因分子 / 在岗人数。"
+            "组长与投诉专员分子 = 窗口内由该岗位人员完成的投诉结案数（真实完成：finish 落窗且 finish−登记 ≥3 分钟）；"
+            "客服分子 = 接待数。岗位归属取 person.position / specialty（已与 SCD 任职源同步），"
+            "投诉专员 = 专项∈(内部投诉, 外部投诉)；组长含副主管。"
+            "『其他』岗位（未登记岗位/主管）不列入本表，但已计入 attribution.total_handled，"
+            "故 组长+专员+其他 = attribution.total_handled。",
+            "repeat_rate": "★ 重复投诉率 = 『30 天内同一设备(SN)被投诉 ≥2 次』的条数 / 投诉工单数。"
+            "**这是升级的代理信号，不是真实升级率** —— 真实升级率需升级投诉表（申报/化解字段）"
+            "到位后才能严格计算，本指标用于在数据缺口期提供可观测的替代视角。",
+            "repeat_distribution": "重复次数分布：reps=0 表示窗口内该 SN 只投诉 1 次（正常）。",
+        },
+    }
+
+
+def _complaint_reg_handled_total(db: Session, ts, te) -> dict[str, int]:
+    """投诉三源 registered/handled 合计（#87 负荷分子用）。
+
+    ⚠️ 复用 `api/v1/complaints._sources_reg_handled`（**投诉总量的唯一出口**，#81），
+       惰性导入避免循环依赖 —— 与 `today_kpi` 对投诉数的处理方式一致。
+    """
+    from app.api.v1.complaints import _sources_reg_handled
+
+    data = _sources_reg_handled(db, ts, te)
+    total = data.get("total") or {}
+    return {
+        "registered": int(total.get("registered", 0) or 0),
+        "handled": int(total.get("handled", 0) or 0),
+    }
 
 
 def today_kpi(db: Session, date: str | None = None, start: str | None = None, end: str | None = None) -> dict[str, Any]:
