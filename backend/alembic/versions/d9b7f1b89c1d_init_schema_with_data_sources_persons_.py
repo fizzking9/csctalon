@@ -1,14 +1,15 @@
 """init schema with data sources persons and upload archive
 
 Revision ID: d9b7f1b89c1d
-Revises: 
+Revises:
 Create Date: 2026-07-26 17:00:28.338446
 """
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision: str = 'd9b7f1b89c1d'
 down_revision: Union[str, None] = None

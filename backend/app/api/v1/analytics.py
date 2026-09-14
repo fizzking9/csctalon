@@ -32,9 +32,14 @@ def _parse_dt(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
 
 
-@router.get("/summary", response_model=R, summary="首页汇总卡片")
-def summary(db: DBSession, _: CurrentUser):
-    return R(data=cached_call("summary", 60, A.dashboard_summary, db))
+# ⚠️ 2026-09-14 (#86) 已删除 `GET /analytics/summary`（原 `A.dashboard_summary`）：
+#   · 该接口标记「已废弃-见 analysis-views」，前端 `web/src/api/analytics.js` 的
+#     `getSummary()` **全仓零调用点**（只有定义无使用）
+#   · 但其旧公式为「工单投诉类 + 315全表 + 卡商全表」—— **含卡商且不扣重叠**，
+#     与 #53/#81 已确立的口径**直接冲突**
+#   · `cache_warmer._warm_reports` 仍在周期性预热它 → **白白消耗 DB/Redis**
+#   → 属于「废弃但仍在跑」的死代码，且是**错误口径的残留入口**（留着即隐患：
+#     将来若有人误用，会得到与看板不一致的投诉数）。故彻底删除，而非继续标记废弃。
 
 
 # ---------- 看板1:运营分析 ----------

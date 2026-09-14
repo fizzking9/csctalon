@@ -13,10 +13,10 @@ Create Date: 2026-07-29 11:00:00.000000
 审计→措施闭环: AuditNote.output_measure_id FK→measures(可选)。
 """
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
 
 revision = "q6f7a8b9c0d1"
 down_revision = "p5e6f7a8b9c0"

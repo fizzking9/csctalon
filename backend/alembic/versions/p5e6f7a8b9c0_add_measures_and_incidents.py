@@ -11,10 +11,10 @@ Create Date: 2026-07-29 10:00:00.000000
 模块职责三分离: SpecialTask=外部专项执行 / TodoItem=日常待办 / Measure=管理措施(本表)
 """
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
 
 revision = "p5e6f7a8b9c0"
 down_revision = "n4d5e6f7b8c9"

@@ -233,7 +233,8 @@ def _warm_reports(db, *, force: bool = False) -> int:
     sd, ed = _dt(s), _dt(e)
     specs = [
         # 静态(无窗口, 任意查看都命中同一 key)
-        ("summary",        "summary",          A.dashboard_summary,        (db,), {}),
+        # ⚠️ 2026-09-14 (#86): 已移除 `("summary", ...A.dashboard_summary)` ——
+        #   该接口已删除(废弃 + 错误口径 + 前端零调用)，继续预热是纯浪费。
         ("op:status",      "op:status",        A.operation_status_dist,    (db,), {}),
         ("op:method",      "op:method",        A.operation_method_dist,    (db,), {}),
         ("op:reason:10",   "op:reason:10",     A.operation_reason_top,     (db, 10), {}),

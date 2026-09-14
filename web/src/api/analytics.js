@@ -1,9 +1,8 @@
 import request from '@/api'
 
-// 首页汇总
-export function getSummary() {
-  return request.get('/analytics/summary')
-}
+// ⚠️ 2026-09-14 (#86): 已删除 `getSummary()`（GET /analytics/summary）。
+//   该接口已废弃（后端公式含卡商且不扣重叠，与 #53/#81 口径冲突），
+//   且本函数**全仓零调用点**（只有定义无使用）→ 随后端接口一并清理。
 
 // 运营分析
 export const operation = {
