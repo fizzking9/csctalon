@@ -41,18 +41,28 @@ SYNC_DATA_TYPES = list(BMS_DATA_SOURCES.keys())  # refund/ticket/wallet/device_c
 #   sync_source_config_service.list_scheduled_bms_sources)。
 DEFAULT_SYNC_TYPES = [dt for dt, cfg in BMS_DATA_SOURCES.items() if cfg.get("default_sync", True)]
 
-# 退费宽表(refund_wide)的**相关上游源**白名单 (2026-09-14 #88)
+# ── 宽表「相关上游源」白名单 (2026-09-14 #88) ────────────────────────────
 #
-# 判据: 该源的数据变更是否会改变 refund_wide 的任何一列。逐列对照 wide_table_builder:
-#   - refund         → 主表(宽表行本体来自 refunds)
+# 判据: 该源的数据变更**是否会改变宽表的任何一列**。逐列对照各 builder:
+#
+# ① refund_wide (宽表行本体来自 refunds, 但多列物化自其它表):
+#   - refund         → 主表(行本体 + refund_method/status/amount/...)
 #   - ticket         → service_item/service_category/ticket_no/ticket_handler
 #   - wallet         → wallet_id/wallet_op_time/wallet_op_amount
-#   - external_complaint → has_external_complaint/external_complaint_count/latest_time
-# 与 post-sync 钩子的 _collect_affected_from_imports() 分支**一一对应**;
-# matcher 的 6 个匹配步骤也全部只依赖这四张表的源表(refunds/tickets/wallet_withdrawals)。
+#   - external_complaint → has_external_complaint/count/latest_time
+#   与 _collect_affected_from_imports() 的分支**一一对应**;
+#   matcher 的 6 个匹配步骤也只依赖 refunds/tickets/wallet_withdrawals。
+#
+# ② cash_flow_wide (ABCD 四路每笔出款一行 + E 对账标记):
+#   - refund / wallet / shanmao_refund / manual_refund → 产生 A/B/C/D 行
+#   - refund_record_report(E) → **不产生行**, 但决定每行 e_matched 列
+#   - external_complaint      → 决定每行 has_external_complaint 列
+#     ⚠️ external_complaint 系 2026-09-14 (#88) **补漏**: builder 第 111/153/188/
+#        224 行确实读 external_complaints 的 SN 集来填 has_external_complaint,
+#        但旧白名单漏了它 → 外部投诉同步后该列陈旧(该刷不刷)。
 #
 # ⚠️ 不在白名单内的源(device_combo/cs_record/bms_order/SCRM 系列等)同步后,
-#    refund_wide 的正确动作是**跳过重建**, 而不是降级全量 —— 详见 #88。
+#    两张宽表的正确动作都是**跳过重建**, 而不是降级全量 —— 详见 #88。
 REFUND_WIDE_RELEVANT_SOURCES: tuple[str, ...] = (
     "refund",
     "ticket",
@@ -61,36 +71,61 @@ REFUND_WIDE_RELEVANT_SOURCES: tuple[str, ...] = (
     "external_complaint",
 )
 
+CASH_FLOW_WIDE_RELEVANT_SOURCES: tuple[str, ...] = (
+    "refund",
+    "wallet",
+    "shanmao_refund",
+    "manual_refund",
+    "refund_record_report",  # E 路: 只影响 e_matched 列
+    "external_complaint",    # has_external_complaint 列(见上方补漏说明)
+)
 
-def is_refund_wide_relevant(data_type: str | None) -> bool:
-    """单个 data_type 是否属于退费宽表相关源(上传导入通道用, 见 #88)"""
-    return data_type in REFUND_WIDE_RELEVANT_SOURCES
 
+def _filter_relevant_sources(results: list[dict], whitelist: tuple[str, ...]) -> list[str]:
+    """共用筛选: 命中的 data_type 须**同时**满足 ①成功 ②属白名单 ③有实际写入。
 
-def refund_wide_relevant_sources(results: list[dict]) -> list[str]:
-    """返回本次结果里「成功导入了数据 + 属于退费宽表相关源」的 data_type 列表。
-
-    刻意要求 inserted+updated > 0: 源相关但 0 行写入(如查询结果为空)时宽表不可能变,
-    同样应跳过重建。
+    刻意要求 inserted+updated > 0: 源相关但 0 行写入(如 BMS 查询结果为空)时
+    宽表不可能变, 同样应跳过重建。
 
     Args:
         results: sync_all 的结果列表, 每项至少含 data_type / success
+        whitelist: 该宽表的相关源白名单
 
     Returns:
-        命中的 data_type 列表(去重保序); 空列表 = 本次导入与退费宽表无关
+        命中的 data_type 列表(去重保序); 空列表 = 本次导入与该宽表无关
     """
     hit: list[str] = []
     for r in results:
         if not isinstance(r, dict) or not r.get("success"):
             continue
         dt = r.get("data_type")
-        if dt not in REFUND_WIDE_RELEVANT_SOURCES:
+        if dt not in whitelist:
             continue
         if (r.get("inserted_rows") or 0) + (r.get("updated_rows") or 0) <= 0:
             continue
         if dt not in hit:
             hit.append(dt)
     return hit
+
+
+def refund_wide_relevant_sources(results: list[dict]) -> list[str]:
+    """本次同步中触碰 refund_wide 的源(见 REFUND_WIDE_RELEVANT_SOURCES 说明)"""
+    return _filter_relevant_sources(results, REFUND_WIDE_RELEVANT_SOURCES)
+
+
+def cash_flow_wide_relevant_sources(results: list[dict]) -> list[str]:
+    """本次同步中触碰 cash_flow_wide 的源(见 CASH_FLOW_WIDE_RELEVANT_SOURCES 说明)"""
+    return _filter_relevant_sources(results, CASH_FLOW_WIDE_RELEVANT_SOURCES)
+
+
+def is_refund_wide_relevant(data_type: str | None) -> bool:
+    """单个 data_type 是否属于退费宽表相关源(上传导入通道用, 见 #88)"""
+    return data_type in REFUND_WIDE_RELEVANT_SOURCES
+
+
+def is_cash_flow_wide_relevant(data_type: str | None) -> bool:
+    """单个 data_type 是否属于现金流水宽表相关源(上传导入通道用, 见 #88)"""
+    return data_type in CASH_FLOW_WIDE_RELEVANT_SOURCES
 
 
 # 增量/全量阈值策略: 总量小(<2000)或影响面大(>25%) → 全量更高效; 否则增量
@@ -955,28 +990,34 @@ async def sync_all(
 
                             # ── 2026-09-08 (#41/A-20260908-004): 现金流水统一宽表重建 ──
                             # ABCD 四路每笔出款物化(对账/快速响应/运营分析)。
-                            # 仅当本次同步导入了 cash_flow_wide 相关源(refund/wallet/shanmao/manual/E)
-                            # 才全量重建(避免 ticket/cs_record 等无关源同步也触发无谓重建)。
-                            # 全量 76k 行; 失败不阻塞主流程。
-                            _cfw_relevant = any(
-                                isinstance(r, dict)
-                                and r.get("success")
-                                and r.get("data_type") in ("refund", "wallet", "shanmao_refund",
-                                                            "manual_refund", "refund_record_report")
-                                for r in results
-                            )
-                            if _cfw_relevant:
+                            # 2026-09-14 (#88): 判据统一到 CASH_FLOW_WIDE_RELEVANT_SOURCES 白名单,
+                            # 并**补齐 external_complaint**(builder 读它的 SN 集填
+                            # has_external_complaint 列, 旧判据漏了 → 外部投诉同步后该列陈旧),
+                            # 同时要求源真的写了数据(0 行写入则不重建, 与 refund_wide 一致)。
+                            # 全量 ~61k 行; 失败不阻塞主流程。
+                            _cfw_sources = cash_flow_wide_relevant_sources(results)
+                            if _cfw_sources:
                                 try:
                                     from app.services.cash_flow_wide_builder import (
                                         build_cash_flow_wide,
                                     )
                                     _report("构建现金流水宽表...")
                                     _cfw_stats = build_cash_flow_wide(hook_db)
-                                    logger.info(f"[post-sync] cash_flow_wide 重建完成: {_cfw_stats}")
+                                    _cfw_stats["relevant_sources"] = _cfw_sources
+                                    logger.info(
+                                        f"[post-sync] cash_flow_wide 重建完成(relevant="
+                                        f"{','.join(_cfw_sources)}): {_cfw_stats}"
+                                    )
                                 except Exception as _cfw_e:
                                     logger.warning(
                                         f"[post-sync] cash_flow_wide 重建异常(忽略, 不影响同步): {_cfw_e}"
                                     )
+                            else:
+                                logger.info(
+                                    "[post-sync] 本次同步无现金流水宽表相关源写入"
+                                    "(refund/wallet/shanmao/manual/E/external_complaint), "
+                                    "跳过 cash_flow_wide 重建"
+                                )
 
                             _report("刷新数据库统计...")
                             _analyze_key_tables(hook_db)

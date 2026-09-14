@@ -24,8 +24,11 @@ from __future__ import annotations
 import pytest
 
 from app.services.bms_sync import (
+    CASH_FLOW_WIDE_RELEVANT_SOURCES,
     REFUND_WIDE_RELEVANT_SOURCES,
+    cash_flow_wide_relevant_sources,
     decide_refund_wide_mode,
+    is_cash_flow_wide_relevant,
     is_refund_wide_relevant,
     refund_wide_relevant_sources,
 )
@@ -241,3 +244,105 @@ def test_upload_irrelevant_source_with_new_match_still_rebuilds(monkeypatch):
         monkeypatch, "device_combo", match_stats={"_affected_refund_nos": {"RF0000000001"}}
     )
     assert n == 1
+
+
+# ─────────── 5. cash_flow_wide 白名单(2026-09-14 #88 同单扩展) ───────────
+
+
+def test_cash_flow_whitelist_matches_builder_consumers():
+    """cash_flow_wide 白名单必须与 builder 实际读取的表一致。
+
+    对照 cash_flow_wide_builder.build_cash_flow_wide:
+      refunds                → A 路
+      wallet_withdrawals     → B 路
+      shanmao_refunds        → C 路
+      manual_refunds         → D 路
+      refund_record_reports  → E 对账标记 e_matched(不产生行)
+      external_complaints    → has_external_complaint 列  ← 旧判据漏了它
+    """
+    assert set(CASH_FLOW_WIDE_RELEVANT_SOURCES) == {
+        "refund",
+        "wallet",
+        "shanmao_refund",
+        "manual_refund",
+        "refund_record_report",
+        "external_complaint",  # ★ 本次补漏
+    }
+    # 非相关源
+    assert not is_cash_flow_wide_relevant("device_combo")
+    assert not is_cash_flow_wide_relevant("ticket")   # ticket 不进现金流宽表
+    assert not is_cash_flow_wide_relevant("cs_record")
+    assert not is_cash_flow_wide_relevant(None)
+
+
+def test_cash_flow_whitelist_covers_external_complaint_regression():
+    """★回归: external_complaint 曾不在白名单 → 外部投诉同步后
+    has_external_complaint 列陈旧(该刷不刷)。本测试锁死该漏刷不再复发。"""
+    assert "external_complaint" in CASH_FLOW_WIDE_RELEVANT_SOURCES
+    results = [{"data_type": "external_complaint", "success": True,
+                "inserted_rows": 5, "updated_rows": 0}]
+    assert cash_flow_wide_relevant_sources(results) == ["external_complaint"]
+
+
+def test_refund_wide_and_cash_flow_whitelists_differ():
+    """两张宽表白名单**必须不同**(职责不同), 防止有人图省事合并成一个。"""
+    assert set(REFUND_WIDE_RELEVANT_SOURCES) != set(CASH_FLOW_WIDE_RELEVANT_SOURCES)
+    # refund_wide 消费 ticket, cash_flow_wide 不消费
+    assert "ticket" in REFUND_WIDE_RELEVANT_SOURCES
+    assert "ticket" not in CASH_FLOW_WIDE_RELEVANT_SOURCES
+    # cash_flow_wide 消费 shanmao/manual/E, refund_wide 不消费
+    assert "shanmao_refund" not in REFUND_WIDE_RELEVANT_SOURCES
+    assert "manual_refund" not in REFUND_WIDE_RELEVANT_SOURCES
+    assert "refund_record_report" not in REFUND_WIDE_RELEVANT_SOURCES
+
+
+def test_cash_flow_zero_write_source_skipped():
+    """cash_flow_wide 与 refund_wide 判据已统一: 0 行写入 → 不重建。
+
+    修复前 cash_flow_wide **不校验写入行数**, 只要 success 就全量重建(~12s)。
+    """
+    results = [{"data_type": "refund", "success": True, "inserted_rows": 0, "updated_rows": 0}]
+    assert cash_flow_wide_relevant_sources(results) == []
+
+
+def test_upload_device_combo_does_not_rebuild_cash_flow(monkeypatch):
+    """★上传设备套餐不得重建现金流水宽表(与 refund_wide 同判据)"""
+    n = _run_upload_cfw(monkeypatch, "device_combo")
+    assert n == 0
+
+
+@pytest.mark.parametrize("dt", ["refund", "wallet", "shanmao_refund",
+                                "manual_refund", "refund_record_report",
+                                "external_complaint"])
+def test_upload_cash_flow_relevant_sources_rebuild(monkeypatch, dt):
+    """6 个相关源上传 → 现金流水宽表必须重建"""
+    assert _run_upload_cfw(monkeypatch, dt) == 1
+
+
+def _run_upload_cfw(monkeypatch, data_type: str) -> int:
+    """调用上传后置任务, 返回 build_cash_flow_wide 的调用次数"""
+    import app.api.v1.uploads as up
+    from app.services import cash_flow_wide_builder as cfwb
+
+    called = {"n": 0}
+
+    def _fake_build(db, *a, **kw):
+        called["n"] += 1
+        return {"a": 0, "b": 0, "c": 0, "d": 0, "total": 0}
+
+    monkeypatch.setattr(up, "SessionLocal", _FakeSession, raising=False)
+    monkeypatch.setattr(up, "match_all", lambda *a, **kw: {}, raising=False)
+    monkeypatch.setattr(up, "extract_person_aliases", lambda *a, **kw: None, raising=False)
+    monkeypatch.setattr(cfwb, "build_cash_flow_wide", _fake_build, raising=False)
+    monkeypatch.setattr(
+        "app.core.redis_client.cache_invalidate_recent_days", lambda *a, **kw: 0, raising=False
+    )
+    # refund_wide 侧一并挡掉(避免真跑); 本测试只看 cash_flow_wide
+    monkeypatch.setattr(
+        "app.services.wide_table_builder.build_refund_wide",
+        lambda *a, **kw: {"built": 0, "updated": 0, "skipped": 0, "deleted": 0},
+        raising=False,
+    )
+
+    up._run_post_import_tasks(data_type)
+    return called["n"]
