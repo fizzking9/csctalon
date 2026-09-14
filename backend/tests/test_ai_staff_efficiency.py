@@ -119,14 +119,48 @@ class TestAiEfficiencyPresent:
 
 
 class TestAiCountsSourceConsistency:
-    """AI 的接待量口径须与真人侧一致（同一 merged_pp / cs_cat_by_op）。"""
+    """AI 的接待量口径须与真人侧**判据一致**（但查询路径不同 —— 见下）。
 
-    def test_ai_cat_counts_reuses_shared_maps(self, src):
+    ⚠️ 为什么不能复用真人侧的 `cs_cat_by_op` / `merged_pp`:
+       它们来自带 `_sys_auto_filter()` 的 CTE，**明确排除** WeChat 等系统账户
+       （真人统计不该混入 AI —— 这是对的）。若 AI 去查那两个字典，
+       结果**恒为空**，AI 效率值恒 0 —— 需求静默失效（本人实际踩过）。
+
+    ⚠️ 为什么不能改那条 CTE 把 AI 放回来:
+       它是真人榜的公共查询，放开会让 AI 混进真人排名（违反 #78）。
+
+    → 正解：**另查一次**，但判据必须逐项一致。本组用例锁这个"一致性"。
+    """
+
+    def test_ai_uses_same_category_case(self, src):
+        """★ 分类判据必须是**同一个** `_category_case()`（不另写分桶逻辑）。"""
         body = src.split("def _ai_cat_counts(")[1].split("def ")[0]
-        assert "cs_cat_by_op" in body, "AI 会话数未复用真人侧的 cs_cat_by_op"
-        assert "merged_pp" in body, "AI 接待数未复用真人侧的 merged_pp"
+        assert "_category_case()" in body, (
+            "AI 分类未复用 _category_case() → 桶定义可能与真人漂移"
+        )
+
+    def test_ai_uses_same_distinct_device_rule(self, src):
+        """去重判据必须与真人一致（distinct nullif(trim(device_sn),'')）。"""
+        body = src.split("def _ai_cat_counts(")[1].split("def ")[0]
+        assert "func.distinct" in body
+        assert "device_sn" in body
+
+    def test_ai_documents_why_not_reusing_shared_maps(self, src):
+        """必须**显式注释**为何不复用真人查询 —— 否则后人会"顺手优化"改回去，
+        导致 AI 效率值静默归零。"""
+        body = src.split("def _ai_cat_counts(")[1].split("def ")[0]
+        assert "_sys_auto_filter" in body, (
+            "缺少「为何不复用真人 CTE」的说明 → 后人易误改"
+        )
+
+    def test_ai_not_filtered_by_sys_auto(self, src):
+        """AI 查询自己的部分**不得**再套系统账户过滤（否则又查不到自己）。"""
+        body = src.split("def _ai_cat_counts(")[1].split("def ")[0]
+        # 断言过滤条件里只有 operator == op_name，没有 notin_/!=
+        assert "operator == op_name" in body
+        assert "notin_" not in body, "AI 查询不得套系统账户排除（会排除掉自己）"
 
     def test_ai_does_not_count_refund_or_ticket(self, src):
-        """AI 不执行退款操作/工单完工 → processing 桶的 sessions 须为 0。"""
+        """AI 不执行退款操作/工单完工 → processing 桶须为 (0, 0)。"""
         body = src.split("def _ai_cat_counts(")[1].split("def ")[0]
-        assert '"processing": (0,' in body, "AI 不应计入退款操作量"
+        assert '"processing": (0, 0)' in body, "AI 不应计入退款操作量"

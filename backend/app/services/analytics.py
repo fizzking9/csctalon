@@ -6857,26 +6857,49 @@ def today_staff_efficiency(
     def _ai_cat_counts(op_name: str) -> dict[str, tuple[int, int]]:
         """AI 账户按专项桶返回 (sessions, people) —— 与真人同口径。
 
-        数据来源与真人侧一致:
-          · 会话数 = `cs_records` 该 operator 的条数（按 problem_category 分桶）
-          · 接待数 = 该 operator 的去重设备 SN（按 problem_category 分桶）
-        AI 无工单/退款操作（那些动作由真人承接），故不并入 tk_sess/rf_by_op ——
-        这与真人侧的取值路径保持同一语义（有多少接待工作，就算多少）。
+        ⚠️ 为什么不复用 `cs_cat_by_op`:
+           该字典来自 `cs_cat_q` CTE，其 WHERE 带 `_sys_auto_filter()`
+           （**排除** WeChat/AI客服 等系统账户 —— 正当做法：真人统计不该混入 AI）
+           → 用 AI 的 operator 去查恒为空（AI 效率值恒 0，需求失效）。
+
+        ⚠️ 为什么不改 `cs_cat_q` 把 AI 放回来:
+           它是**真人**人效的公共查询，放开会让 AI 混进真人榜（违反 #78）。
+           故此处**另查一次**，但**判据与真人逐项一致**：
+             · 分类判据 = 同一个 `_category_case()`（problem_category → 桶）
+             · 去重判据 = 同 `count(distinct device_sn)`
+             · 时间/非空条件同
+           唯一差别 = **不过滤系统账户**（这正是要保留 AI 的原因）。
         """
-        b = cs_cat_by_op.get(op_name, {})
-        # 复用真人侧的同一 `merged_pp`（SN 去重结果），保证口径完全一致
-        pp = merged_pp.get(op_name, {})
+        _ai_rows = db.execute(
+            select(
+                _category_case().label("bucket"),
+                func.count().label("scnt"),
+                func.count(
+                    func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))
+                ).label("pcnt"),
+            )
+            .where(
+                CsRecord.operation_time.isnot(None),
+                CsRecord.operation_time >= ts,
+                CsRecord.operation_time <= te,
+                CsRecord.operator == op_name,
+            )
+            .group_by("bucket")
+        ).all()
+        b: dict[str, tuple[int, int]] = {
+            r.bucket: (int(r.scnt or 0), int(r.pcnt or 0)) for r in _ai_rows
+        }
         return {
             "zixun": (
                 sum((b.get(n, (0, 0))[0] for n in BUCK_FZ), 0),
-                pp.get("咨询接待", 0),
+                b.get("咨询接待", (0, 0))[1],
             ),
-            "taocan": (b.get("套餐问题", (0, 0))[0], pp.get("套餐专项", 0)),
-            "recovery": (b.get("退款", (0, 0))[0], pp.get("退款挽回", 0)),
-            "processing": (0, pp.get("退款处理", 0)),   # AI 不执行退款操作
-            "internal": (b.get("投诉", (0, 0))[0], pp.get("内部投诉", 0)),
-            "external": (0, pp.get("外部投诉", 0)),
-            "complaint": (0, pp.get("投诉专项", 0)),
+            "taocan": (b.get("套餐问题", (0, 0))[0], b.get("套餐专项", (0, 0))[1]),
+            "recovery": (b.get("退款", (0, 0))[0], b.get("退款挽回", (0, 0))[1]),
+            "processing": (0, 0),   # AI 不执行退款操作/工单完工
+            "internal": (b.get("投诉", (0, 0))[0], b.get("内部投诉", (0, 0))[1]),
+            "external": (0, b.get("外部投诉", (0, 0))[1]),
+            "complaint": (0, b.get("投诉专项", (0, 0))[1]),
         }
 
     def _ai_scores(op_name: str) -> tuple[float, float, dict]:
