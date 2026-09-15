@@ -58,6 +58,17 @@ _RE_N_DAY_AGO = re.compile(r"(\d{1,3})\s*天前")
 _RE_RECENT_N = re.compile(r"(?:最近|近|过去|这)\s*(\d{1,3})\s*(?:天|日)")
 _RE_COUPLE = re.compile(r"这两天|两三天|这几天|近两天|这两天来")
 
+# ── 中文数字近 N 天/周 (2026-09-15 #98): 用户口语常说"最近一周"而非"最近7天",
+#    原正则只认阿拉伯数字, "一" 不匹配 → 退回 daily 默认窗口, AI 提示窗口差异。
+#    支持: 一(1)/二(2)/两(2)/三(3)/四(4)/五(5)/六(6)/七(7)/八(8)/九(9)/十(10)
+#    + "一周/一星期"=7 天
+_CN_NUM_MAP = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+               "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+_CN_NUM_RE = "|".join(_CN_NUM_MAP.keys())
+_RE_RECENT_CN_DAY = re.compile(rf"(?:最近|近|过去|这)\s*({_CN_NUM_RE})\s*(?:天|日)")
+# "近一周/最近一周/过去一周/这一周" → 7 天; "近两周一星期" 也兼容
+_RE_RECENT_WEEK = re.compile(r"(?:最近|近|过去|这)\s*(?:一|二|两|三|四|五)?\s*(?:周|星期)")
+
 _RE_THIS_WEEK = re.compile(r"本周|这周|本星期|这星期|当周")
 # 两周前要排在「上周」之前匹配, 否则「上上周」会被「上周」吃掉留下一个「上」
 _RE_TWO_WEEKS_AGO = re.compile(r"上上个?(?:周|星期)")
@@ -235,6 +246,16 @@ def parse_time_intent(question: str, *, today: _date | None = None) -> TimeInten
     for m in _RE_RECENT_N.finditer(masked):
         n = max(1, int(m.group(1)))
         spans.append((today - timedelta(days=n - 1), today, m.group(0)))
+    # 中文数字近 N 天(2026-09-15 #98): 近三天/最近五天/过去两日 → 7 天
+    for m in _RE_RECENT_CN_DAY.finditer(masked):
+        n = _CN_NUM_MAP[m.group(1)]
+        spans.append((today - timedelta(days=n - 1), today, m.group(0)))
+    # 近 N 周(2026-09-15 #98): 最近一周/近两周/过去三星期 → N*7 天
+    for m in _RE_RECENT_WEEK.finditer(masked):
+        raw = m.group(0)
+        cn_digit_match = re.search(r"([一二两三四五])", raw)
+        n = _CN_NUM_MAP[cn_digit_match.group(1)] if cn_digit_match else 1
+        spans.append((today - timedelta(days=n * 7 - 1), today, m.group(0)))
     if (m := _RE_COUPLE.search(masked)):
         spans.append((today - timedelta(days=1), today, m.group(0)))
     if _RE_THIS_WEEK.search(masked):
