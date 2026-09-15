@@ -1828,12 +1828,21 @@ def _external_done_sns(db) -> set[str]:
 
     用于三处积压统计(backlog/summary/analysis)统一排除: 外部投诉工单的 SN 命中该集合,
     且该工单本身是外部投诉来源时, 视为已处理(工单状态未同步的兜底), 不进入积压。
+
+    #105 (2026-09-15): 加缓存(全表扫描, 每次 _complaint_enhanced 都调)。
+      key=complaint:ext_done_sns, TTL=60s(办结状态可能随同步变更, 不宜过长)。
+      返回值为 set, cache_set_json 会转 list, 调用方转回 set。
     """
-    return set(db.scalars(
-        select(ExternalComplaint.device_sn)
-        .where(ExternalComplaint.result.in_(_EXTERNAL_DONE_RESULTS))
-        .where(ExternalComplaint.device_sn.isnot(None))
-    ).all())
+    from app.core.redis_client import cached_call
+    result = cached_call(
+        "complaint:ext_done_sns", 60,
+        lambda: list(db.scalars(
+            select(ExternalComplaint.device_sn)
+            .where(ExternalComplaint.result.in_(_EXTERNAL_DONE_RESULTS))
+            .where(ExternalComplaint.device_sn.isnot(None))
+        ).all()),
+    )
+    return set(result or [])
 
 
 def _norm_external_result_status(result: str | None) -> str:

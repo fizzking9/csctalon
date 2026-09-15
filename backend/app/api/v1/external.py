@@ -425,7 +425,12 @@ def _build_brief(db: Session, period: str, date: str | None,
     dec = cached_call(_do_key, cache_ttl_for(start_s, end_s, 60), A.refund_decision_overview, db, start_s, end_s, grain=win["grain"])
     summary = dec.get("summary", {}) or {}
     # 投诉增强(三源×registered/handled/backlog)
-    complaint = _complaint_enhanced(db, start_s, end_s)
+    # #105 (2026-09-15): _complaint_enhanced 无缓存致每次 15+ SQL, build_ms ~5.8s → 加缓存
+    complaint = cached_call(
+        f"complaint:enhanced:{start_s}:{end_s}",
+        cache_ttl_for(start_s, end_s, 60),
+        _complaint_enhanced, db, start_s, end_s,
+    )
     # 接待专项增强(名单+会话+设备)
     reception_spec = _reception_specialty(db, start_s, end_s)
     out = {
