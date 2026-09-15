@@ -439,7 +439,14 @@ def _build_brief(db: Session, period: str, date: str | None,
         "date_start": win["date_start"],
         "date_end": win["date_end"],
         "generated_at": _now_cn().isoformat(),
-        "reception": {"total": kpi.get("reception"), "by_specialty": reception_spec},
+        # #106 (2026-09-15): 补 AI 接管率 + 接待来源分层(真人/AI全自动/系统/客户自助)
+        #   today_kpi.reception 已含 breakdown/ai_takeover, 之前只透传 total 导致 AI 无法分析 AI 接待占比
+        "reception": {
+            "total": kpi.get("reception"),
+            "by_specialty": reception_spec,
+            "breakdown": (kpi.get("reception") or {}).get("breakdown"),  # 真人/AI全自动/系统/客户自助 分层
+            "ai_takeover": (kpi.get("reception") or {}).get("ai_takeover"),  # AI 接管率(会话占比+设备占比)
+        },
         "complaint": complaint,
         "refund": {
             "total_amount": kpi.get("refund_amount"),

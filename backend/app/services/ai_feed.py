@@ -187,6 +187,17 @@ def _enrich_with_today_kanban(db: Session, feed: dict, start_s: str, end_s: str)
     except Exception as e:  # noqa: BLE001
         logger.warning("ai_feed enrich today:staff 失败(忽略): %s", e)
 
+    # #106 (2026-09-15): 补时间趋势(接待/退款/投诉按时间粒度), 让 AI 能描述"哪个时段高峰/低谷"
+    try:
+        ht = cached_call(
+            f"today:hourly:None:{start_s}:{end_s}",
+            cache_ttl_for(start_s, end_s, 60),
+            A.today_hourly_trend, db, None, start_s, end_s,
+        )
+        feed["hourly_trend"] = _compact_hourly_trend(ht)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ai_feed enrich today:hourly 失败(忽略): %s", e)
+
 
 def _compact_reception_breakdown(rb: dict) -> dict:
     """压缩 today_reception_breakdown: 仅留 categories + top_staff 前5(去逐条明细)。"""
@@ -233,6 +244,27 @@ def _compact_queue(q: dict) -> dict:
                        "deadline": t.get("deadline")} for t in todos[:3] if isinstance(t, dict)],
         "top_incidents": [{"title": i.get("title"), "severity": i.get("severity"),
                            "is_closed": i.get("is_closed")} for i in incidents[:3] if isinstance(i, dict)],
+    }
+
+
+def _compact_hourly_trend(ht: dict) -> dict:
+    """压缩 today_hourly_trend: 仅留关键指标时间序列(接待/退款/投诉登记+处理), 去四路拆分。
+
+    原始返回含 24 槽 × 10+ 指标数组, 直接传会超 token。压缩为:
+      - labels: 时间标签(如 09:00)
+      - reception / refund_count / complaint / complaint_done 四个数组
+    AI 可据此描述"哪个时段接待高峰/投诉集中"。
+    """
+    if not isinstance(ht, dict):
+        return {}
+    labels = ht.get("slot_labels") or ht.get("hour_labels") or []
+    return {
+        "grain": ht.get("grain"),
+        "labels": labels,
+        "reception": ht.get("reception") or [],
+        "refund_count": ht.get("refund_count_total") or ht.get("refund_count") or [],
+        "complaint": ht.get("complaint") or [],
+        "complaint_done": ht.get("complaint_done") or [],
     }
 
 
@@ -393,7 +425,7 @@ def _trim_feed(feed: dict) -> str:
 # (#98 层2): 这些段体积小但语义关键(period/date_start/end 喂窗口,
 # _spec 喂口径单位), 截掉会让模型答错窗口或金额单位。
 _CONSTANT_FEED_KEYS = ("period", "date", "date_start", "date_end",
-                       "generated_at", "_spec", "range", "daily_trend")
+                       "generated_at", "_spec", "range", "daily_trend", "hourly_trend")
 
 
 def _select_feed_sections(feed: dict, scopes) -> dict:
