@@ -14,8 +14,10 @@ export function aiAnalyze(payload) {
 }
 
 // 轮询任务结果(终态含 result_md)
-export function aiTaskStatus(taskId) {
-  return request.get(`/ai/tasks/${taskId}`)
+// config: 可传 { silentError: true } 关闭拦截器的通用错误弹窗 —— 轮询失败由
+//   助手面板给出更具体的文案(区分"任务已过期"与"网络抖动"), 避免双重提示。
+export function aiTaskStatus(taskId, config) {
+  return request.get(`/ai/tasks/${taskId}`, config)
 }
 
 // 最近一次任务(调试/展示)

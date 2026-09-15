@@ -753,6 +753,24 @@ def step_specialty_leads(db: Session, dry: bool) -> int:
 
     ⚠️ 专项 lead 与**行政组长**是两套（`specialties.current_lead_id` vs
        `groups.current_leader_id`），两者都要对 —— 行政侧已由步骤②完成。
+
+    ── #90 修复 (2026-09-14) ────────────────────────────────────────
+    原实现有两个缺陷，导致本步骤**从未真正生效**（生产实测唐彩慧/朱海洋仍是 lead）：
+
+    **缺陷 1: 卸任查询多带 person_id 维度**
+    ```python
+    # 原：查「唐彩慧 在该专项的 current lead」→ 能查到 → 卸任
+    # 但当新任者需先卸任**其他人**时，按 person_id 查会漏掉
+    ```
+    改为「先卸任该专项**全部** current lead，再进行任命」——
+    卸任是**专项维度**的操作，不该带 person_id 过滤。
+
+    **缺陷 2: 幂等守卫用 scalar() 在多条 current 时行为未定义**
+    ```python
+    cur = db.scalar(select(...).where(specialty_id==, role=='lead', is_current.is_(True)))
+    if cur and cur.person_id == p.id: continue   # ← 命中即跳过，旧记录错失清理
+    ```
+    改为 `.scalars().all()` 显式处理，并保证最终**只有一条** current。
     """
     print("\n④.6 专项负责人")
     n = 0
@@ -763,24 +781,27 @@ def step_specialty_leads(db: Session, dry: bool) -> int:
         s = db.scalar(select(Specialty).where(Specialty.name == spec_name))
         if p is None or s is None:
             raise RuntimeError(f"卸任失败：找不到人「{pname}」或专项「{spec_name}」")
-        cur = db.scalar(select(SpecialtyLeadershipHistory).where(
+        # ⚠️ #90: 用 .scalars().all() —— 多条 current 时 scalar() 会抛
+        #    MultipleResultsFound 或静默取一条，两种都会让清理不完整。
+        curs = db.scalars(select(SpecialtyLeadershipHistory).where(
             SpecialtyLeadershipHistory.specialty_id == s.id,
             SpecialtyLeadershipHistory.person_id == p.id,
             SpecialtyLeadershipHistory.is_current.is_(True),
-        ))
-        if cur is None:
+        )).all()
+        if not curs:
             print(f"  [跳过] {pname} 无「{spec_name}」现职")
             continue
-        _log(dry, f"卸任 {pname} 的「{spec_name}」{cur.role}")
-        if not dry:
-            cur.is_current = False
-            cur.effective_to = EFF
-            cur.change_reason = f"{REASON}·卸任（用户：不做该专项）"
-            if cur.role == "lead":
-                s.current_lead_id = None
-            else:
-                s.current_deputy_lead_id = None
-        n += 1
+        for cur in curs:
+            _log(dry, f"卸任 {pname} 的「{spec_name}」{cur.role}")
+            if not dry:
+                cur.is_current = False
+                cur.effective_to = EFF
+                cur.change_reason = f"{REASON}·卸任（用户：不做该专项）"
+                if cur.role == "lead":
+                    s.current_lead_id = None
+                else:
+                    s.current_deputy_lead_id = None
+            n += 1
 
     # 新任（吴晓龙）
     for spec_name, pname in SPECIALTY_LEAD.items():
@@ -788,29 +809,40 @@ def step_specialty_leads(db: Session, dry: bool) -> int:
         s = db.scalar(select(Specialty).where(Specialty.name == spec_name))
         if p is None or s is None:
             raise RuntimeError(f"任命失败：找不到人「{pname}」或专项「{spec_name}」")
-        cur = db.scalar(select(SpecialtyLeadershipHistory).where(
+        # ⚠️ #90: 取**全部** current lead，而非 scalar() 取一条 —— 否则重复行会
+        #    被永久遗留（生产曾出现同一人 2 条 current，见 #90）。
+        curs = db.scalars(select(SpecialtyLeadershipHistory).where(
             SpecialtyLeadershipHistory.specialty_id == s.id,
             SpecialtyLeadershipHistory.role == "lead",
             SpecialtyLeadershipHistory.is_current.is_(True),
-        ))
-        if cur and cur.person_id == p.id:
+        )).all()
+        # 已是目标人且只有一条 → 真正幂等，跳过
+        if len(curs) == 1 and curs[0].person_id == p.id:
             print(f"  [跳过] 「{spec_name}」负责人已是 {pname}")
             continue
-        old = "(无)"
-        if cur:
+        olds = []
+        for cur in curs:
             op = db.get(Person, cur.person_id)
-            old = op.display_name if op else str(cur.person_id)
+            olds.append(op.display_name if op else str(cur.person_id))
+        old = "、".join(olds) if olds else "(无)"
         _log(dry, f"「{spec_name}」负责人 {old} → {pname}")
         if not dry:
-            if cur:
+            # ① 卸任全部旧 current（专项维度，不按人过滤）
+            for cur in curs:
                 cur.is_current = False
                 cur.effective_to = EFF
                 cur.change_reason = f"{REASON}·轮岗"
-            db.add(SpecialtyLeadershipHistory(
-                specialty_id=s.id, person_id=p.id, role="lead",
-                effective_from=EFF, is_current=True,
-                change_reason=REASON, source="manual",
-            ))
+            # ② 复用该人已存在的 current 记录（若有），避免制造重复行
+            reuse = next((c for c in curs if c.person_id == p.id), None)
+            if reuse is None:
+                db.add(SpecialtyLeadershipHistory(
+                    specialty_id=s.id, person_id=p.id, role="lead",
+                    effective_from=EFF, is_current=True,
+                    change_reason=REASON, source="manual",
+                ))
+            else:
+                reuse.is_current = True
+                reuse.effective_to = None
             s.current_lead_id = p.id
         n += 1
     return n

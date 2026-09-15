@@ -860,6 +860,28 @@ class BmsScheduler:
             bms_known = set(DEFAULT_SYNC_TYPES)
         finally:
             _hk_db.close()
+
+        # ── #94 (2026-09-14): 派生别名必须映射到其宿主源 ──────────────────
+        # `ticket_finish` 是 `ticket` 的**按完成时间补充抓取**别名
+        # （`bms_sync.sync_all` 里由 `data_type == "ticket"` 分支派生出同批任务），
+        # 它**不对应 sync_source_configs 里的独立配置行**，也不会出现在
+        # `list_scheduled_bms_sources()` 的结果里 → 熔断后走 else 分支报
+        # 「未知 data_type=ticket_finish, 无法定向试探」（生产实测 10 次），
+        # 导致该源熔断后**只能等整点槽位**（最长 +1h），半开探测这条恢复路径被堵死。
+        #
+        # 正解：把它映射回宿主源 `ticket` 探测 —— 二者抓的是同一份工单数据
+        # （`bms_sync` 导入时 `ticket_finish` 明确按 `ticket` 记账），
+        # 探测 ticket 可用即等价于 ticket_finish 可用。
+        # 这样既不必往 DB 塞"假配置行"，也不需要特殊分支。
+        _PROBE_ALIAS = {"ticket_finish": "ticket"}
+        _probe_dt = _PROBE_ALIAS.get(dt, dt)
+        if _probe_dt != dt:
+            logger.info(
+                "[调度器] 半开探测: data_type=%s 是派生别名, 按宿主源 %s 定向试探",
+                dt, _probe_dt,
+            )
+        dt = _probe_dt
+
         scrm_known = {
             DATA_TYPE_OPERATOR, DATA_TYPE_SESSION_GROUP,
             DATA_TYPE_SESSION_PRIVATE, DATA_TYPE_SESSION_VIRTUAL,
@@ -890,7 +912,19 @@ class BmsScheduler:
                 except Exception as e:  # noqa: BLE001
                     return [{"data_type": dt, "success": False, "error": str(e)}]
         else:
-            logger.warning(f"[调度器] 半开探测: 未知 data_type={dt}, 无法定向试探")
+            # #94: 告警文案必须可行动 —— 原「未知 data_type=xxx」无法区分
+            #   「代码有 bug」与「只是没登记进 DB 名单」，运维看到只能猜。
+            #   现在显式区分并给出修复指引。
+            _hint = (
+                "该源未登记为 default_sync=true（或已被禁用）→ 请在"
+                "「同步设置」中开启『纳入周期采集』；"
+                "若它是派生别名（如 ticket_finish 之于 ticket），"
+                "应在 bms_scheduler._half_open_probe_once 的 _PROBE_ALIAS 中映射到宿主源"
+            )
+            logger.warning(
+                "[调度器] 半开探测: data_type=%s 不在可调度名单, 无法定向试探。%s",
+                dt, _hint,
+            )
             return False
 
         display = {dt: ("半开探测(近1h)", probe_end.strftime("%m-%d %H:%M:%S"))}

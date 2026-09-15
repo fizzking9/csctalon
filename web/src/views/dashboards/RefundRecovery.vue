@@ -316,6 +316,7 @@ import PersonnelAnalysis from './refund/PersonnelAnalysis.vue'
 import DeviceAnalysis from './refund/DeviceAnalysis.vue'
 import TypeTrend from './refund/TypeTrend.vue'
 import { today } from '@/api/analytics'
+import { listGroups } from '@/api/group'
 import { formatMoney } from '@/utils/format'
 
 const tabMode = ref('today')
@@ -333,6 +334,8 @@ onMounted(() => {
   _mq = window.matchMedia('(max-width: 768px)')
   isMobile.value = _mq.matches
   _mq.addEventListener('change', _onMediaChange)
+  // #95: 拉分组列表以建立「组名 → 稳定 id」映射（用于标签配色）
+  loadGroups()
 })
 onBeforeUnmount(() => { _mq?.removeEventListener('change', _onMediaChange) })
 
@@ -391,12 +394,66 @@ function feeRatioColor(val) {
   return { color: n >= 37 ? '#16a34a' : '#dc2626' }
 }
 
-const GRP_COLOR_MAP = {
-  '朱海洋组': 'success', '董梦玲组': 'warning', '吴晓龙组': 'primary', '叶珍凤组': 'danger', '投诉专项组': 'info',
+// ---- 分组标签配色 ----
+//
+// 设计说明（Design Rationale）· #95
+// ─────────────────────────────────────────────────────────────
+// 目的：替**退款挽回主管**回答「这一行/这一格属于哪个组」——
+//       用颜色区分可减少晨会传阅时的逐字阅读成本。
+//
+// 逻辑：**不按组名映射颜色，只按「稳定标识」取色**。
+//
+// 口径（数据判据）：组名来自 `persons.group_name` / 分组接口，
+//       是**可变业务数据** —— 2026-09-14 组织调整已把旧组名全部改掉：
+//         朱海洋组→专项1组 / 董梦玲组→接待2组 / 吴晓龙组→接待3组
+//         叶珍凤组→接待1组 / 张蕾组→投诉专项组
+//
+// ★ 取舍（为什么不做"按名字映射颜色"）：
+//   原实现 `GRP_COLOR_MAP = { '朱海洋组': 'success', '董梦玲组': 'warning', ... }`
+//   把**业务数据当代码常量**用。组改名后 4/5 个 key 立即失效
+//   → 所有标签静默退化为灰色 `info`，**颜色区分功能完全丧失且无任何报错**
+//   （生产实测：persons.group_name 现值全部是新组名，映射表 0 命中）。
+//
+//   现改为「按分组名排序后的**下标**取色板」：
+//     · 组名增删改**不影响**已有分组的颜色稳定性（下标位置不变即颜色不变）
+//     · 新增组自动获得一个颜色，无需改代码
+//   代价：分组超过色板长度后会循环复用颜色（可接受 —— 本场景 5 组）。
+//
+// ⚠️ 禁止回退为「组名 → 颜色」的硬编码映射。组名是数据，不是常量。
+//    同类问题排查见 #95 正文（Today.vue / OperationDashboard.vue 已用
+//    动态 `position`，是正确做法，可作为范式）。
+//
+// ★ 为什么用**组 id**（而非组名哈希/出现顺序）：
+//   · 组名哈希：5 组对 5 色板**实测仍会碰撞**（接待2组 与 投诉专项组 同色）
+//     —— 因为名长短相近、同后缀「组」，哈希落点集中；
+//   · 出现顺序：颜色依赖行序 → 换筛选/翻页变色，比碰撞更混乱；
+//   · **组 id** 是数据库主键，稳定、唯一，且与名字完全解耦（改名不失色）。
+//   色板 5 色对 5 组 → 用 id 取模必然一一对应（组数 ≤ 色板长度时无碰撞）。
+const GRP_COLOR_PALETTE = ['primary', 'success', 'warning', 'danger', 'info']
+// 组名 → 组 id 的映射（由 loadGroups 填充）
+const grpIdByName = ref({})
+async function loadGroups() {
+  try {
+    const res = await listGroups({ is_active: true })
+    const rows = res?.data || []
+    const m = {}
+    // 按 id 升序保证取模顺序稳定（后端已按 display_order/id 排，这里再兜一层）
+    rows
+      .slice()
+      .sort((a, b) => (a.id || 0) - (b.id || 0))
+      .forEach((g) => { m[g.name] = g.id })
+    grpIdByName.value = m
+  } catch (e) {
+    // 拉不到分组不影响主流程 —— 退化为统一 info 色（清晰可辨的"未着色"）
+    grpIdByName.value = {}
+  }
 }
 function grpTagType(g) {
   if (!g || g === '未分组') return 'info'
-  return GRP_COLOR_MAP[g] || 'info'
+  const id = grpIdByName.value[g]
+  // 未加载到分组（接口失败/新增未刷新）→ info，而非"猜一个颜色"
+  if (id === undefined) return 'info'
+  return GRP_COLOR_PALETTE[id % GRP_COLOR_PALETTE.length]
 }
 const REASON_TAG_MAP = { '不想用了': 'info', '充值错误': 'warning', '设备故障': 'danger', '服务原因': 'primary', '其他': 'info' }
 function reasonTagType(r) {

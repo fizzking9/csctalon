@@ -86,12 +86,24 @@ def _warm_one(key: str, fn, args: tuple, kwargs: dict, name: str, *, force: bool
     - force=True: 无条件重算并写缓存(同步后数据已变, 必须刷新)
     - force=False: 仅当 key 剩余 TTL ≤ FRESH_TTL_THRESHOLD(或不存在)才重算,
       仍新鲜则跳过 → 节流, 避免每分钟都重算
+
+    ── #92 可观测性 (2026-09-14) ──────────────────────────────────────
+    ⚠️ 本函数的 `except` 把预热异常降级为**一条 WARNING** —— 这在运维上是
+       "静默失败"：生产曾连续 5 天 `complaint:subject` 预热全败，而**没有任何
+       指标**暴露它，最终表现为「接口变慢但不报错」（实测那两个投诉接口
+       115 次调用 **0 次缓存命中**、耗时 0.19~0.25s，而对照组的
+       `analytics/today/kpi` 因命中缓存耗时 0.000s）。
+
+    为此增加**结构化结果记录**：每次预热把 (name, outcome) 记入线程局部
+    累加器，由 `_run` 在收尾时汇总上报（见 `_warm_stats_report`）。
+    outcome ∈ {"warmed", "fresh", "failed"}。
     """
     r = get_redis()
     if r is not None and not force:
         try:
             ttl = r.ttl(key)  # -2=不存在, -1=无过期, 否则剩余秒
             if isinstance(ttl, int) and ttl > FRESH_TTL_THRESHOLD:
+                _record_warm_outcome(name, "fresh")
                 return False  # 仍新鲜, 跳过重算
         except Exception:
             pass  # ttl 查询失败 → 兜底重算
@@ -100,11 +112,64 @@ def _warm_one(key: str, fn, args: tuple, kwargs: dict, name: str, *, force: bool
         if result is not None:
             # 返回 cache_set_json 的实际写入结果(True=已写入缓存),
             # Redis 不可用时 cache_set_json 返回 False → warmed 计数准确
-            return cache_set_json(key, result, WARM_TTL)
+            ok = cache_set_json(key, result, WARM_TTL)
+            _record_warm_outcome(name, "warmed" if ok else "failed")
+            return ok
+        _record_warm_outcome(name, "failed")
         return False
     except Exception as e:  # noqa: BLE001  单接口失败不影响其余
         logger.warning("预热 %s 失败(不影响业务): %s", name, e)
+        _record_warm_outcome(name, "failed", err=e)
         return False
+
+
+# ── 预热结果累加器 (#92) ────────────────────────────────────────────
+# 为什么用模块级 dict 而非「函数返回值层层透传」：
+#   `_warm_*` 系列函数已返回「成功条数」且被多处复用（今日/本周/月报视图），
+#   改动签名会波及全部调用方。用**单进程累加器**最小侵入：
+#   `_run()` 在开始前 reset、结束时 report（单 worker 部署，见 AGENTS.md）。
+_WARM_STATS: dict[str, list] = {"warmed": [], "fresh": [], "failed": []}
+
+
+def _record_warm_outcome(name: str, outcome: str, err: Exception | None = None) -> None:
+    """记录单次预热结果（供 `_warm_stats_report` 汇总）。
+
+    仅记录**失败项名称与异常类型**，不记录异常详情 —— 避免日志膨胀
+    （这正是 #92 的另一个教训：6792 条同型告警占了 app.log 的 28.9% 字节）。
+    """
+    if outcome == "failed":
+        label = f"{name}({type(err).__name__})" if err is not None else name
+        _WARM_STATS["failed"].append(label)
+    else:
+        _WARM_STATS[outcome].append(name)
+
+
+def _warm_stats_report(label: str) -> None:
+    """预热收尾汇总上报 (#92)。
+
+    把 N 条孤立 WARNING 聚合成**一条** INFO/WARNING：
+      · 有失败 → WARNING（含失败清单，便于一眼定位是哪个 key 长期不命中）
+      · 全成功 → INFO（含 warmed/fresh 数量，用于确认节流是否生效）
+    这是「预热失败必须可见」的落地 —— 不再依赖人工翻日志发现。
+    """
+    warmed = len(_WARM_STATS["warmed"])
+    fresh = len(_WARM_STATS["fresh"])
+    failed = len(_WARM_STATS["failed"])
+    total = warmed + fresh + failed
+    if total == 0:
+        return
+    if failed:
+        # 失败清单去重并限长，避免日志被撑爆（同型失败只留一个样本）
+        uniq = sorted(set(_WARM_STATS["failed"]))
+        shown = uniq[:10]
+        more = f" 等 {len(uniq)} 项" if len(uniq) > 10 else ""
+        logger.warning(
+            "预热汇总(%s): 共 %d 项 → 写入 %d / 仍新鲜 %d / **失败 %d** ← 失败项: %s%s",
+            label, total, warmed, fresh, failed, ", ".join(shown), more,
+        )
+    else:
+        logger.info("预热汇总(%s): 共 %d 项 → 写入 %d / 仍新鲜 %d / 失败 0",
+                    label, total, warmed, fresh)
 
 
 def _warm_analytics(db, start: str, end: str, grain: str, label: str, *, force: bool = False) -> int:
@@ -295,6 +360,9 @@ def _run(label: str, do_warm) -> None:
 
     do_warm: 接收 db 参数的闭包, 内部自行决定是否强制重算(force)。
     _can_warm() 始终检查(Redis 可用 + 非同步中) —— 不能在同步进行中抢 DB。
+
+    #92: 收尾时输出**汇总**（成功/跳过/失败计数 + 失败清单），
+         让「预热静默失败」不可能再无人知晓。
     """
     if not _can_warm():
         logger.debug("预热跳过(%s): Redis 不可用或同步进行中", label)
@@ -303,9 +371,14 @@ def _run(label: str, do_warm) -> None:
         logger.debug("预热跳过(%s): 已有预热在跑", label)
         return
     started = datetime.now(TZ_CN)
+    # 复位累加器（本次预热的统计口径仅覆盖本轮）
+    _WARM_STATS["warmed"].clear()
+    _WARM_STATS["fresh"].clear()
+    _WARM_STATS["failed"].clear()
     db = SessionLocal()
     try:
         do_warm(db)
+        _warm_stats_report(label)   # #92: 先报明细汇总（有失败时升 WARNING）
         logger.info("预热完成(%s): 耗时 %.1fs", label, (datetime.now(TZ_CN) - started).total_seconds())
     except Exception as e:  # noqa: BLE001  预热本身失败不影响业务
         logger.warning("预热异常(%s, 不影响业务): %s", label, e)

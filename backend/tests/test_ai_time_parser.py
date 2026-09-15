@@ -242,6 +242,42 @@ def test_aiwindow_period_fallback_on_no_intent():
     assert eff == {"period": "daily", "date": None, "start": None, "end": None}
 
 
+def test_aiwindow_period_label_is_human_readable():
+    """#93: period 兜底分支的 label 必须是**人读中文文案**。
+
+    回归: 原实现写 `f"period={self.period}"` —— 把变量名当文案输出，
+    生产日志实测 `label=period=daily`，前端回显给用户后无法判断
+    是「今天/本周/本月」的哪个窗口（该 label 的用途正是「让用户核对
+    按哪个窗口统计」）。
+    """
+    from app.api.v1.ai import _AiWindow
+
+    cases = [("daily", "今日"), ("weekly", "本周"), ("monthly", "本月")]
+    for period, expect in cases:
+        w = _AiWindow(_Payload("四路分布和涉诉怎么样", period=period))
+        w.resolve("四路分布和涉诉怎么样")
+        assert w.window_label == f"{expect}(默认窗口)", (
+            f"period={period} 的 label 应为可读中文，实际 = {w.window_label!r}"
+        )
+        # 不得出现变量名/英文枚举
+        assert "period=" not in w.window_label
+        assert "daily" not in w.window_label
+        assert "weekly" not in w.window_label
+        assert "monthly" not in w.window_label
+
+
+def test_aiwindow_period_label_includes_date_when_given():
+    """#93: period 分支带显式 date 时, label 必须显示**具体日期**。
+
+    只写「今日(默认窗口)」而 effective() 实际按 date 统计 → 属误导。
+    """
+    from app.api.v1.ai import _AiWindow
+    w = _AiWindow(_Payload("四路分布和涉诉怎么样", date="2026-09-01"))
+    w.resolve("四路分布和涉诉怎么样")
+    # date 存在时走的是「指定日期」语义, 必须回显日期
+    assert "2026-09-01" in w.window_label
+
+
 def test_aiwindow_span_uses_week_grain():
     """跨天区间 → period 改用 weekly, 让 grain 走 week(与 external brief 同映射)。
 

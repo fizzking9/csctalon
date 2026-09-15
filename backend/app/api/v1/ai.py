@@ -118,7 +118,25 @@ class _AiWindow:
         intent = parse_time_intent(question)
         if not intent.is_effective:
             # 未识别 → 保持 period 默认窗口(与原行为完全一致)
-            self.window_label = f"period={self.period}"
+            #
+            # ⚠️ #93 (2026-09-14): window_label 是**给用户看的文案**（前端回显
+            #    「按哪个窗口统计」）。原实现写 `f"period={self.period}"` ——
+            #    把**变量名与英文枚举**当文案输出，生产日志实测形如：
+            #        `ai analyze 窗口: source=period label=period=daily`
+            #    用户看到 "period=daily" 无法判断是「今天/本周/本月」。
+            #    现改为中文人读文案（与 nl / explicit 分支风格一致）。
+            _PERIOD_LABELS = {
+                "daily": "今日",
+                "weekly": "本周",
+                "monthly": "本月",
+            }
+            _zh = _PERIOD_LABELS.get(self.period, self.period)
+            # date 存在时 effective() 会把 date 作为窗口 → 文案须带上具体日期，
+            # 否则「今日」与实际统计日（可能是历史某天）不符，属误导。
+            if self.date:
+                self.window_label = f"{self.date}(指定日期)"
+            else:
+                self.window_label = f"{_zh}(默认窗口)"
             return
         # 识别成功: 统一转成 start/end 纯日期区间(单日也走区间, 语义更明确)
         self.start, self.end = intent.start, intent.end

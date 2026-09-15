@@ -98,9 +98,23 @@ def _compact_specialty(by_specialty) -> list[dict]:
         members = s.get("members") or []
         sessions = (s.get("sessions") or {}).get("value")
         devices = (s.get("devices") or {}).get("value")
+        _lead = s.get("lead") or {}
+        lead_name = _lead.get("name") if isinstance(_lead, dict) else None
         out.append({
             "specialty": s.get("specialty"),
-            "lead": (s.get("lead") or {}).get("name") if s.get("lead") else None,
+            "lead": lead_name,
+            # ── #91 (2026-09-14): 必须带**语义标签** ─────────────────────
+            # 为什么不能只给名字：
+            #   「负责人」在本系统是**两套独立体系** ——
+            #     专项负责人（业务，此处的 lead）vs 行政组长（管理）。
+            #   原实现只给 name，模型无从区分，于是把专项 lead 当成
+            #   "这个组的组长"来复述 —— 用户实测反馈
+            #   「明明有清晰的负责人、组长划分，为什么会出现唐彩绘是负责人、
+            #     董梦玲是负责人的说法」，一部分正是模型在复述专项目录里的
+            #   陈旧的 lead 字段而**不知道那是"专项"而非"行政组"**。
+            #   给上 role_label 后，模型在回答时会带上限定语，不再混为一谈。
+            "lead_role": "专项负责人",
+            "lead_note": "专项业务负责人（≠行政组长；行政组长请勿用此字段推断）",
             "member_count": len(members),
             "sessions": sessions,
             "devices": devices,

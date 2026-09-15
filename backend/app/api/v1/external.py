@@ -674,9 +674,30 @@ def _reception_specialty(db: Session, start_s: str, end_s: str) -> list[dict]:
             devices += int(rec.get(pp_field) or 0)
         lead = None
         if s.current_lead:
-            lead = {"name": s.current_lead.display_name, "role": "lead"}
+            # ── #91 (2026-09-14) 口径标签 ─────────────────────────────────
+            # 为什么必须带 role_label：
+            #   本仓存在**两套独立**的负责人体系：
+            #     · 专项负责人（业务）→ `specialties.current_lead_id`
+            #     · 行政组长（管理）  → `groups.current_leader_id`
+            #   二者**互不隶属**：同一人可在 A 专项是 lead、在 B 行政组只是成员，
+            #   反之亦然。而原实现只透出 `{"role": "lead"}`（英文枚举），
+            #   读者无法区分这到底是"专项负责人"还是"行政组长" ——
+            #   用户实测反馈「明明有清晰的负责人、组长划分，为什么说法不一致」
+            #   部分正源于此（同名不同体系，却都叫"负责人"）。
+            #   故显式带**语义标签**，让消费方（外部工具/AI/前端）无需猜测。
+            lead = {
+                "name": s.current_lead.display_name,
+                "role": "lead",
+                "role_label": "专项负责人",
+                "scope_note": "专项业务负责人（非行政组长；行政组长见 groups 体系）",
+            }
         elif s.current_deputy_lead:
-            lead = {"name": s.current_deputy_lead.display_name, "role": "deputy"}
+            lead = {
+                "name": s.current_deputy_lead.display_name,
+                "role": "deputy",
+                "role_label": "专项副负责人",
+                "scope_note": "专项业务副负责人（非行政副主管）",
+            }
         result.append({
             "specialty": s.name,
             "is_temporary": s.is_temporary,
@@ -698,6 +719,17 @@ def _spec_brief() -> dict:
                         "入外部桶, 已 matched 到窗口内工单的去重); handled=窗口内真实完成(finish_time∈窗口 且"
                         "finish 晚于登记 ≥3min, 排除同瞬填充); backlog=窗口内登记且归一化后未闭环(状态非已完成,"
                         "排除有真实完成≥3min 的待处理; 315 已办结 SN 外部投诉视为已处理)"),
+        # ── #91 (2026-09-14): 负责人口径必须显式声明 ────────────────────
+        # 「负责人」在本系统中是**两个独立体系**，不加说明会被读成同一个概念 ——
+        # 用户实测反馈的「负责人说法不一致」部分由此而来。
+        "lead": ("reception.by_specialty[].lead = **专项负责人**（业务口径），来源 "
+                 "`specialties.current_lead_id` + `specialty_leadership_history`；"
+                 "role_label=专项负责人 / 专项副负责人。"
+                 "⚠️ 与**行政组长**（管理口径，来源 `groups.current_leader_id`）是两套独立体系："
+                 "同一人可在某专项任 lead 而在行政组仅为成员，反之亦然；"
+                 "两套体系都变更时须分别调用 "
+                 "`POST /specialties/{id}/transfer-lead` 与 `POST /groups/{id}/transfer-leadership`。"
+                 "缺失语义标签易被误读为同一角色（见工单 #91）。"),
     }
 
 

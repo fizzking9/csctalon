@@ -193,6 +193,48 @@
               <span v-else style="color:#c0c4cc">-</span>
             </template>
           </el-table-column>
+          <!-- 专项负责人（业务口径）· #91
+               设计说明（Design Rationale）
+               ─────────────────────────────────────────────
+               目的（替谁回答什么问题）
+                 替**管理员/主管**回答「这个专项的业务负责人是谁」。
+                 此前页面只有「小组」+「专项」两个维度，**没有专项负责人列** ——
+                 而专项负责人与小组组长是两套独立体系，缺列会导致
+                 "我明明有负责人划分，为什么界面上看不到"（用户实测反馈）。
+
+               逻辑（为什么单列且带限定语）
+                 · **单列**而非并入「小组」：两者是不同体系，同一人可能
+                   在某专项任负责人、在行政组仅为成员（如吴晓龙负责退款挽回
+                   专项，但他不属于该专项成员）；合并会掩盖这一点。
+                 · 列名写「**专项**负责人」并配 ⓘ 说明 —— 只写「负责人」
+                   会被读成行政组长，正是用户困惑的来源。
+
+               口径（数据判据）
+                 · 来源：`specialties.current_lead_id`（+ `specialty_leadership_history`）
+                 · role='lead' → 「专项负责人」；role='deputy' → 「专项副负责人」
+                 · ⚠️ ≠ 行政组长（`groups.current_leader_id`），两套体系独立
+
+               取舍（不做什么及为什么）
+                 · **不在本列做「转负责人」按钮** —— 该操作已有专门接口
+                   （`POST /specialties/{id}/transfer-lead`）且需填写生效日期与
+                   变更原因（SCD 历史留痕）；塞进列表行内会绕过审计要求。
+                 · **不显示历史负责人**（只显示现任）—— 历史属追溯场景，
+                   放在专项详情更合适，列表列应保持"当前状态"单一语义。
+          -->
+          <el-table-column label="专项负责人" width="130" show-overflow-tooltip>
+            <template #default="{ row }">
+              <template v-if="row._nodeType === 'specialty'">
+                <span v-if="row.current_lead" style="color:#16a34a; font-weight:600">
+                  {{ row.current_lead.display_name }}
+                </span>
+                <span v-else-if="row.current_deputy_lead" style="color:#b45309">
+                  {{ row.current_deputy_lead.display_name }}<span class="page-sub">(副)</span>
+                </span>
+                <el-tag v-else size="small" type="warning" effect="plain">待指派</el-tag>
+              </template>
+              <span v-else style="color:#c0c4cc">-</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="employment_status" label="在职" width="75" column-key="employment_status" :filtered-value="empStatusFilter" :filters="[{text:'正式',value:'regular'},{text:'试用期',value:'probation'},{text:'待入职',value:'active'},{text:'调岗',value:'transferred'},{text:'离职',value:'resigned'},{text:'非活跃',value:'inactive'}]">
             <template #default="{ row }">
               <template v-if="row._nodeType === 'person'">

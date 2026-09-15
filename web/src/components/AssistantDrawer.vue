@@ -159,11 +159,14 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { MagicStick, QuestionFilled, Loading, Calendar } from '@element-plus/icons-vue'
 import { useAssistant } from '@/composables/useAssistant'
+import { useAuthStore } from '@/stores/auth'
 import { AI_THREAD_KEY, AI_PENDING_KEY } from '@/constants/aiAssistantStorage'
 import { aiConfig, aiAnalyze, aiTaskStatus } from '@/api/aiAssistant'
 import { renderMarkdown } from '@/utils/sanitize'
 
 const { state, closeAssistant } = useAssistant()
+// #96: 配置加载需判断登录态（未登录不请求 /ai/config，避免 401 噪音）
+const authStore = useAuthStore()
 
 // 在途轮询的中止开关: 抽屉关闭/组件卸载时置 true, 停止后续请求
 let _cancelled = false
@@ -182,7 +185,13 @@ onMounted(() => {
   _mq = window.matchMedia('(max-width: 768px)')
   isMobile.value = _mq.matches
   _mq.addEventListener('change', _onMediaChange)
-  loadConfig()
+  // ⚠️ #96: 这里**不能**调 loadConfig()。
+  //   本组件随主布局**全局挂载**（应用启动即 mount），而用户可能
+  //   ① 尚未登录（未登录页面加载 → `/ai/config` 401），或
+  //   ② 很久之后才打开助手。
+  //   原实现在 onMounted 就请求 → 生产实测 `/ai/config` 被调 **271 次**
+  //   （是 `analyze` 的 3.3 倍），其中 **16 次 401** 纯属噪音。
+  //   改为「首次打开助手时」惰性加载（见下方 watch(visible)）。
 })
 onBeforeUnmount(() => {
   _mq?.removeEventListener('change', _onMediaChange)
@@ -194,9 +203,12 @@ onBeforeUnmount(() => {
 // 只是销毁内部 DOM, 不会重新执行 setup —— 所以必须在每次打开时主动恢复。
 // 关闭时置 _cancelled 停止在途轮询(省流量/省后端), 未完成任务 id 留在
 // sessionStorage 里, 下次打开自动续查, 结果不会丢。
+// ⚠️ #96: 配置也在此**惰性加载**（仅在已登录时）—— 见下方 cfgLoaded 守卫。
 watch(visible, (v) => {
   if (v) {
     _cancelled = false
+    // #96: 首次打开时才拉配置; 未登录不请求(避免 401 噪音, 生产曾达 271 次)
+    if (!cfgLoaded.value && authStore.isLoggedIn) loadConfig()
     restoreThread()
   } else {
     _cancelled = true
@@ -214,9 +226,10 @@ async function loadConfig() {
     const periods = cfg.value?.periods || []
     const qq = (periods.find(p => p.quick_questions)?.quick_questions) || []
     quickQuestions.value = qq
-  } catch (e) { /* 拦截器已提示 */ } finally {
+    // ⚠️ #96: 只在**成功**时置 cfgLoaded —— 若失败也置位，
+    //    一次网络抖动会让本次会话永久不再重试（quick_questions 永远为空）。
     cfgLoaded.value = true
-  }
+  } catch (e) { /* 拦截器已提示；下次打开助手时会重试 */ }
 }
 
 // 会话
@@ -345,8 +358,19 @@ function finishMsg(aiMsg, content) {
  * 原实现 `for(;;){ await ... }` 无错误处理: 任一次请求异常(网络抖动/登录过期)
  * 都会直接抛出, 前端只显示"提交失败"、任务结果永久丢失 —— 生产 20 次轮询
  * 全部停在 running 且用户"毫无提示", 正是这条路径。
- * 现在: 单次失败重试(最多 MAX_POLL_ERRORS 次), 期间持续显示进度,
- * 且 task_id 已落 sessionStorage, 重开抽屉可续查。
+ * 现在: 单次失败重试(最多 MAX_POLL_ERRORS 次), 期间持续显示进度。
+ *
+ * ── #89 补充: 404/410 是**终态**而非瞬时错误 ──────────────────────────
+ * 后端任务存于内存(`AiTaskManager._tasks`), **重启即全丢** → `/ai/tasks/{id}`
+ * 返回 404。原实现把 404 也当瞬时错误重试, 且重试耗尽后 `_savePending(taskId)`
+ * **保留** pending → 下次开抽屉再 404 → **死循环**。
+ *
+ * 生产实证(nginx access.log, 间隔 2.4s = POLL_INTERVAL_MS×2 即 catch 分支):
+ * ```
+ * 14/Sep 02:09:15~02:09:22  GET /ai/tasks/ai_..._3qsrq3 → 404 ×4 (间隔 2.4s)
+ * 14/Sep 09:38:23           GET /ai/tasks/ai_..._3qsrq3 → 401 (次日 pending 未清)
+ * ```
+ * 现改为: 4xx 中 404/410 立即判定"任务已过期" → 清 pending + 引导重新提问, 不重试。
  */
 async function pollTask(taskId, aiMsg, opts = {}) {
   const deadline = Date.now() + (opts.deadlineMs || POLL_DEADLINE_MS)
@@ -355,10 +379,20 @@ async function pollTask(taskId, aiMsg, opts = {}) {
     if (_cancelled) return
     let t = null
     try {
-      const res = await aiTaskStatus(taskId)
+      // silentError: 由本函数给出更具体的文案, 避免拦截器再弹一次通用错误
+      const res = await aiTaskStatus(taskId, { silentError: true })
       t = res.data || {}
       consecutiveErrors = 0
     } catch (e) {
+      const status = e?.response?.status
+      // ① 终态: 任务已不存在(过期/服务重启清空) —— 重试永远不会成功
+      if (status === 404 || status === 410) {
+        _savePending(null)   // ★ 必须清 pending, 否则下次开抽屉再次 404 → 死循环
+        finishMsg(aiMsg, '⌛ 该分析任务已过期, 无法再取回结果。\n\n' +
+          '（服务重启会清空进行中的分析任务）请直接重新提问。')
+        return
+      }
+      // ② 瞬时错误(网络抖动/5xx): 保持既有退避重试行为
       consecutiveErrors += 1
       if (consecutiveErrors >= MAX_POLL_ERRORS) {
         // 明确告知"任务可能已出结果", 并保留 task_id 供续查 —— 不静默吞掉

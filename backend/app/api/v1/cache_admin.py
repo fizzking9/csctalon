@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.deps import AdminUser, DBSession
-from app.core.redis_client import cache_stats, get_redis
+from app.core.redis_client import cache_stats, cache_stats_snapshot, get_redis
 from app.schemas.common import R
 from app.services.cache_warmer import (
     AVAILABLE_SCOPES,
@@ -53,6 +53,17 @@ def cache_info(db: DBSession, user: AdminUser):
 
     groups 按前缀分组(与命名规范对齐), 每组含 count/expiring_count/avg_ttl 等,
     让管理员看清「缓存了哪些 / 各多少 / 哪些即将过期 / 是否纳入预热」。
+
+    ── #92 命中率 (2026-09-14) ─────────────────────────────────────────
+    额外返回 `hit_stats`: 本次进程内各 key 分组(`today`/`complaint`/…)的
+    **命中/未命中/命中率**。
+
+    为什么必须有这个指标：生产曾出现「缓存预热**连续 5 天全败**」而无人察觉 ——
+    因为失败只是一条 WARNING，而「预期命中的缓存 0 命中」这一事实**没有任何
+    指标可见**。当时实测：
+      · `complaints/subject-analysis` 被调 115 次 → **0 次命中**（均 0.19~0.25s）
+      · 对照组 `analytics/today/kpi` 命中率 100%（0.000s）
+    有了 hit_rate，这类「静默退化」在页面上**一眼可见**（命中率 0）。
     """
     sync_busy = False
     try:
@@ -79,6 +90,9 @@ def cache_info(db: DBSession, user: AdminUser):
                 **st,
             })
             cached_keys += st.get("count", 0)
+    # #92: 命中率按 key 分组（第一段），与上面的「按 pattern 数 key」互补：
+    #   前者回答「缓存里有多少」，后者回答「请求真的命中了吗」
+    hit_stats = cache_stats_snapshot()
     return R(data={
         "scopes": [{"value": v, "label": SCOPE_LABELS.get(v, v)} for v in AVAILABLE_SCOPES],
         "redis_available": redis_ok,
@@ -87,6 +101,7 @@ def cache_info(db: DBSession, user: AdminUser):
         "dbsize": dbsize,            # Redis 内全部 key 数(含非缓存 key 如同步标记)
         "cached_keys": cached_keys,  # 已分类缓存 key 数(各组 count 之和)
         "groups": groups,
+        "hit_stats": hit_stats,      # #92: 各分组命中/未命中/命中率 + key 形态样例
     })
 
 

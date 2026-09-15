@@ -117,12 +117,21 @@ def migrate_groups_and_members(db, spec_map):
         else:
             groups_data[gname]["members"].append(p)
     
-    # 张蕾组特殊处理: 张蕾是主管
-    if "张蕾组" in groups_data:
-        zhanglei = db.scalar(select(Person).where(Person.display_name == "张蕾"))
-        if zhanglei:
-            groups_data["张蕾组"]["leader"] = zhanglei
-    
+    # ⚠️ #90 (2026-09-14) 已删除「张蕾组特殊处理」硬编码块：
+    #      ```python
+    #      if "张蕾组" in groups_data:
+    #          zhanglei = db.scalar(select(Person).where(Person.display_name == "张蕾"))
+    #          groups_data["张蕾组"]["leader"] = zhanglei
+    #      ```
+    #    该块**既冗余又危险**：
+    #      - 冗余：上方循环的 `p.position in ["组长", "主管"]` 已覆盖「主管」岗位，
+    #        张蕾(position=主管) 本就会被识别为组长；
+    #      - 危险：它把**组名**与**人名**同时写死。2026-09-14 组织调整已将
+    #        「张蕾组」改名为「投诉专项组」→ 该分支永不命中（死代码），
+    #        而一旦有人再建同名组，就会把张蕾强行设为组长（与组织架构相悖）。
+    #
+    #    正解：组长由 `Person.position` + `group_name` 推导，不出现任何字面量。
+
     group_objs = {}
     for gname, data in groups_data.items():
         g, created = get_or_create_group(db, gname)
@@ -231,34 +240,62 @@ def migrate_specialty_assignments(db, spec_map, group_objs):
     }
     
     # 按组设置专项负责人
-    # 董梦玲组/叶珍凤组/朱海洋组/吴晓龙组 → 各组长负责咨询接待(主)
-    # 张蕾组(张蕾主管) → 洪佳/苏紫依等负责投诉接待,唐彩慧负责退款挽回
-    # 朱海洋组 → 退款+套餐负责人
-    specialty_leaders = {
-        "complaint": "张蕾",  # 张蕾主管投诉
-        "refund_recovery": "唐彩慧",  # 唐彩慧负责退款挽回
-        "package": "朱海洋",  # 朱海洋兼管套餐
-        "consulting": "董梦玲",  # 董梦玲作为咨询接待负责人代表
-    }
-    
-    # 设置专项负责人
-    for code, leader_name in specialty_leaders.items():
-        if code not in spec_map:
+    #
+    # ⚠️ #90 (2026-09-14) 已**删除硬编码人名映射**。
+    #    原实现把负责人写死人名：
+    #      specialty_leaders = {"complaint": "张蕾", "refund_recovery": "唐彩慧",
+    #                           "package": "朱海洋", "consulting": "董梦玲"}
+    #    由此产生两个生产事故：
+    #      ① 用户已明确「唐彩慧是专职退款处理，不做退款挽回，他不是 lead」，
+    #         但该脚本每次执行都会把 `refund_recovery.current_lead_id` 重置回唐彩慧；
+    #      ② 脚本**无幂等守卫** → 与 `apply_org_change_20260914.py` 的正当轮岗
+    #         互相覆盖，最终靠人工排查才定位。
+    #
+    #    正解：**专项负责人是业务数据，不是代码常量**。
+    #      - 初始化场景：只在专项**尚无** current lead 时，按「该专项内唯一的管理岗
+    #        (主管/组长/副主管)」兜底推断；
+    #      - 推断不出来（如吴晓龙负责退款挽回但并非该专项成员）→ **留空**，
+    #        由用户在「组织管理 → 专项」页面显式指派（走
+    #        `POST /specialties/{id}/transfer-lead`，带完整审计轨迹）。
+    #
+    #    ⚠️ 禁止再往本文件添加任何人名字面量 —— 见 tests/test_org_no_hardcoded_names.py
+    MANAGERIAL_POSITIONS = ("主管", "组长", "副主管")
+
+    for code, s in spec_map.items():
+        # 幂等守卫 ①: 已有 current lead → 绝不覆盖（那是业务决策结果）
+        if s.current_lead_id:
+            print(f"  [跳过] 专项「{s.name}」已有负责人(id={s.current_lead_id})，不覆盖")
             continue
-        s = spec_map[code]
-        leader = db.query(Person).filter(Person.display_name == leader_name).first()
-        if leader and s.current_lead_id != leader.id:
-            s.current_lead_id = leader.id
-            hist = SpecialtyLeadershipHistory(
-                specialty_id=s.id,
-                person_id=leader.id,
-                role="lead",
-                effective_from=date(2026, 7, 1),
-                is_current=True,
-                source="migration",
-                change_reason="初始化迁移"
-            )
-            db.add(hist)
+
+        # 候选: 该专项当前成员中岗位为管理岗的人
+        candidates = []
+        for a in s.assignments:
+            if not a.is_current:
+                continue
+            person = db.get(Person, a.person_id)
+            if person and (person.position or "") in MANAGERIAL_POSITIONS:
+                candidates.append(person)
+
+        if len(candidates) != 1:
+            # 0 个(无管理岗) 或多个(有歧义) → 留空，交人工指派。
+            # 不猜 —— 猜错会让「谁是负责人」出现与用户认知相悖的说法（#90 根因）。
+            print(f"  [留空] 专项「{s.name}」管理岗候选={len(candidates)}，"
+                  f"需在组织管理页面人工指派负责人")
+            continue
+
+        leader = candidates[0]
+        s.current_lead_id = leader.id
+        hist = SpecialtyLeadershipHistory(
+            specialty_id=s.id,
+            person_id=leader.id,
+            role="lead",
+            effective_from=date(2026, 7, 1),
+            is_current=True,
+            source="migration",
+            change_reason="初始化迁移·按专项内唯一管理岗推断",
+        )
+        db.add(hist)
+        print(f"  [推断] 专项「{s.name}」负责人 = {leader.display_name}")
     
     db.flush()
     
