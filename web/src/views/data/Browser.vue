@@ -1,17 +1,63 @@
 <template>
   <div class="data-browser">
+    <!--
+      设计说明（Design Rationale）· 工单 #100
+      ────────────────────────────────────────────────────────────
+      目的：运维 / 数据 / 主管在「数据采集 → 数据查看」里，按**业务口径**找到
+            对应的物理表并下钻原始行；判断「这批数据到底长什么样」。
+
+      逻辑：左侧树按「钱从哪出 → 谁在抱怨 → 谁在处理 → 交易售后 → 设备底座」
+            五段切分，直接复用既有口径文档的思维框架：
+              · A~E 经营五路（docs/arch/A-20260908-004，LOCKED）
+              · 投诉三源（docs/standards/投诉渠道口径与对账说明.md）
+            组内顺序由**服务端**决定（接口按 sort_order 返回），本页不重排 ——
+            否则分组顺序会出现两处定义，#46 的菜单漂移问题会重演。
+
+      口径：数据源清单来自 GET /data-sources；分组顺序、组内顺序、投影项
+            均由服务端给出。本页只负责渲染与「真身/投影」的可见化声明。
+
+      取舍：
+        · **不做「全库表目录」**。库中 102 张表，本页只列 21 张可下钻的原始业务表。
+          其余（工作流/配置/日志/维度/中间表）已有各自功能页，全塞进来会稀释
+          "选一张表看数据"这个唯一用途。为消除"表是不是都在这里"的反复疑问，
+          改为在页头 ⓘ 显式说明**边界与去向**，而不是把边界抹掉。
+        · **不为投诉工单另建数据源**。投诉工作流需要从「投诉」组进入工单，但
+          service_tickets 只能注册一次（双注册会让统计口径分裂）。故用**投影**
+          （同表别名，只读）解决入口问题，并强制显示「投影」标签 + 真身位置，
+          避免变成 AGENTS.md 界面纪律第 5 条禁止的"无声明重复展示"。
+        · **不预置投诉筛选**。投影页展示工单全量明细，不自动过滤成"仅投诉类" ——
+          因为投诉口径是 `service_category` 空白或='投诉'（BMS 导出未选类别即空白），
+          预置筛很容易与「投诉分析」页的口径打架。要看投诉口径请去投诉分析页。
+        · **不做树内搜索/拖拽排序**。当前 21 项，五分组可一屏扫完；加搜索是过度设计。
+    -->
     <div class="flex-row">
       <!-- 左侧数据源列表 -->
       <div class="source-sidebar">
         <div class="sidebar-header">
           <span class="sidebar-title">数据源</span>
           <span class="sidebar-count">{{ activeSourceCount }} 个</span>
+          <el-tooltip placement="right" effect="light" :width="380">
+            <template #content>
+              <div class="boundary-tip">
+                <p><b>本页列出的是「可下钻的原始业务表」（当前 {{ activeSourceCount }} 张）。</b></p>
+                <p>其余约 80 张表<u>不在此列</u>，因为它们不是「选一张表看数据」的用途：</p>
+                <ul>
+                  <li><b>工作流</b>（任务/待办/报告/措施/事件）→ 各自有功能页</li>
+                  <li><b>配置与日志</b>（用户/同步配置/采集日志/通知）→ 系统管理与采集日志页</li>
+                  <li><b>维度主数据</b>（人员/分组/专项/设备）→ 人员管理、设备专项标签页</li>
+                  <li><b>中间过程表</b>（勾稽对账/缺口/拒收行）→ 数据质量与对账页</li>
+                </ul>
+                <p class="boundary-tip-foot">全量清单见 <code>docs/standards/数据库表结构说明.md</code></p>
+              </div>
+            </template>
+            <el-icon class="boundary-icon"><InfoFilled /></el-icon>
+          </el-tooltip>
         </div>
         <el-menu
-          :default-active="currentSource?.code"
+          :default-active="activeMenuKey"
           :default-openeds="openedCategories"
           class="source-menu"
-          @select="handleSourceSelect"
+          @select="handleMenuSelect"
         >
           <el-sub-menu
             v-for="grp in groupedSources"
@@ -24,8 +70,8 @@
             </template>
             <el-menu-item
               v-for="src in grp.items"
-              :key="src.code"
-              :index="src.code"
+              :key="menuKey(grp.category, src.code)"
+              :index="menuKey(grp.category, src.code)"
             >
               <span>{{ src.name_cn }}</span>
               <el-tag
@@ -35,6 +81,24 @@
                 effect="plain"
                 class="placeholder-tag"
               >规划中</el-tag>
+              <!-- 投影: 同表别名,必须声明真身位置(否则属违规的重复展示) -->
+              <el-tooltip
+                v-else-if="src.is_projection"
+                placement="right"
+                effect="light"
+                :width="300"
+              >
+                <template #content>
+                  <div>
+                    <b>投影</b>：本项是「{{ src.true_body_category }} → {{ src.true_body_name }}」的别名，
+                    读取同一张表 <code>{{ src.table_name }}</code>，为只读。
+                    <br>
+                    放在此处是因为投诉工作流从这里进入；真身与其它口径统计都在原分组，
+                    避免同一张表被注册两次导致口径分裂。
+                  </div>
+                </template>
+                <el-tag size="small" type="warning" effect="plain" class="proj-tag">投影</el-tag>
+              </el-tooltip>
               <el-badge
                 v-else-if="src.table_name"
                 :value="getTableCount(src.code)"
@@ -107,7 +171,14 @@
             <div class="header-info">
               <el-icon><Database /></el-icon>
               <span class="source-name">{{ currentSource.name_cn }}</span>
-              <el-tag type="info" size="small">{{ currentSource.code }}</el-tag>
+              <!-- 显示物理表名而非 code: 落实「中文名↔表名一一对应」,让人能直接对照库 -->
+              <el-tag type="info" size="small">{{ currentSource.table_name }}</el-tag>
+              <el-tag
+                v-if="currentSource.is_projection"
+                type="warning"
+                size="small"
+                effect="plain"
+              >只读投影 · 真身「{{ currentSource.true_body_name }}」</el-tag>
             </div>
             <div class="header-actions">
               <el-button
@@ -180,6 +251,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import dayjs from 'dayjs'
+import { InfoFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import request from '@/api'
 
@@ -197,26 +269,44 @@ const summary = ref(null)
 const uploadRecords = ref([])
 const exporting = ref(false)
 
-// 数据源业务分组顺序(与后端 DATA_SOURCE_SEEDS 的 category 对应)
-const CATEGORY_ORDER = ['现金流', '工单与客服', '投诉登记', '微信聚合客服', '基础数据']
-
-// 按 category 分组,无 category 的归入"其他"
+// 数据源业务分组顺序 —— ⚠️ 不再本地硬编码！
+//   顺序（分组顺序 + 组内顺序）由服务端 GET /data-sources 返回，本页只做「按后端给的顺序分组」：
+//   后端已按 (分组顺序, sort_order) 排好，这里按首次出现顺序收集分组即可。
+//   历史教训: 前端再定义一份 CATEGORY_ORDER → 两份定义漂移（同 A-20260910-004 菜单漂移）。
 const groupedSources = computed(() => {
-  const groups = {}
-  const others = []
+  const groups = new Map()
   for (const src of sources.value) {
-    if (src.category && CATEGORY_ORDER.includes(src.category)) {
-      ;(groups[src.category] ||= []).push(src)
-    } else {
-      others.push(src)
-    }
+    const cat = src.category || '其他'
+    if (!groups.has(cat)) groups.set(cat, [])
+    groups.get(cat).push(src)
   }
-  const result = CATEGORY_ORDER
-    .map((cat) => ({ category: cat, items: groups[cat] || [] }))
-    .filter((g) => g.items.length)
-  if (others.length) result.push({ category: '其他', items: others })
-  return result
+  return [...groups.entries()].map(([category, items]) => ({ category, items }))
 })
+
+/** 菜单项唯一 key：分组::code
+ *  ⚠️ 必须带分组前缀 —— 因为同一 code 可出现在两个分组（投影机制，如 ticket 同时
+ *  在「投诉」和「工单与客服」）。若 index 只用 code，el-menu 的 default-active
+ *  会同时点亮两项，用户不知道自己在看哪个分组下的同一张表。
+ */
+function menuKey(category, code) {
+  return `${category}::${code}`
+}
+
+/** 当前选中项对应的菜单 key（若无选中则空，el-menu 不高亮） */
+const activeMenuKey = computed(() =>
+  currentSource.value ? menuKey(currentSource.value.category, currentSource.value.code) : ''
+)
+
+/** 菜单选中 → 按 (分组, code) 定位数据源 */
+function handleMenuSelect(key) {
+  const sep = key.lastIndexOf('::')
+  if (sep < 0) return
+  const category = key.slice(0, sep)
+  const code = key.slice(sep + 2)
+  // 同一 code 可能在多个分组，必须用分组+code 双条件定位
+  const src = sources.value.find((s) => s.code === code && (s.category || '其他') === category)
+  if (src) handleSourceSelect(src)
+}
 
 // 默认展开全部分组
 const openedCategories = computed(() => groupedSources.value.map((g) => g.category))
@@ -224,15 +314,18 @@ const openedCategories = computed(() => groupedSources.value.map((g) => g.catego
 // 当前是否为占位数据源(规划中,无实际表)
 const isPlaceholder = computed(() => currentSource.value?.status === 'placeholder')
 
-// 已实现数据源数量(排除占位项)
-const activeSourceCount = computed(() => sources.value.filter((s) => s.status !== 'placeholder').length)
+// 已实现数据源数量(排除占位项与投影项 —— 投影是别名,重复计入会让用户以为表变多了)
+const activeSourceCount = computed(
+  () => sources.value.filter((s) => s.status !== 'placeholder' && !s.is_projection).length
+)
 
 async function loadSources() {
   try {
     const res = await request.get('/data-sources', { params: { include_placeholder: true } })
+    // 保留服务端顺序（后端已按 分组顺序 → 组内 sort_order 排好）
     sources.value = res.data || []
     if (sources.value.length) {
-      handleSourceSelect(sources.value[0].code)
+      handleSourceSelect(sources.value[0])
     }
   } catch (e) {
     console.error('加载数据源失败', e)
@@ -303,8 +396,11 @@ async function loadData() {
   }
 }
 
-function handleSourceSelect(code) {
-  const src = sources.value.find((s) => s.code === code)
+function handleSourceSelect(src) {
+  // 兼容传 code 的旧调用方式（按 code 取第一个匹配项）
+  if (typeof src === 'string') {
+    src = sources.value.find((s) => s.code === src)
+  }
   if (src) {
     currentSource.value = src
     filters.value = {}
@@ -313,9 +409,10 @@ function handleSourceSelect(code) {
     pagination.value.page = 1
     // 占位数据源无实际表,不加载字段/汇总/记录/明细
     if (src.status === 'placeholder') return
-    loadFields(code)
-    loadSummary(code)
-    loadUploadRecords(code)
+    // 投影与真身共用接口（后端把投影 code 解析回真身），故此处无需特殊分支
+    loadFields(src.code)
+    loadSummary(src.code)
+    loadUploadRecords(src.code)
     loadData()
   }
 }
@@ -513,6 +610,20 @@ onMounted(() => {
 }
 .sidebar-title { font-size: 16px; font-weight: 600; }
 .sidebar-count { font-size: 12px; color: #909399; }
+/* 边界说明 ⓘ —— 消除「表是不是都在这里」的反复疑问（见设计说明「取舍」段） */
+.boundary-icon {
+  cursor: help;
+  color: #909399;
+  font-size: 15px;
+}
+.boundary-icon:hover { color: #409eff; }
+.boundary-tip { font-size: 12px; line-height: 1.7; }
+.boundary-tip p { margin: 0 0 6px; }
+.boundary-tip ul { margin: 0 0 6px; padding-left: 16px; }
+.boundary-tip li { margin-bottom: 2px; }
+.boundary-tip-foot { color: #909399; }
+/* 投影标签：必须让使用者看出"这不是第二张表，只是别名" */
+.proj-tag { margin-left: 6px; }
 .source-menu { flex: 1; border-right: none; }
 .count-badge { margin-left: 8px; }
 .group-title { font-size: 13px; font-weight: 600; color: #303133; }
