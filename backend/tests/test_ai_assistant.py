@@ -183,9 +183,11 @@ async def test_llm_client_success(monkeypatch):
 
 
 def test_payload_thinking_disabled_adds_chat_template_kwargs():
-    """#111: thinking=disabled 必须同时传 chat_template_kwargs={enable_thinking:false},
+    """#111/#113: thinking=disabled 必须同时传 chat_template_kwargs + think:false,
     否则 ollama+Qwen3 系列默认 thinking=on 会烧光 max_tokens 致 content 空。
-    DeepSeek/OpenAI 官方端点会忽略该未知字段(无害)。
+    - chat_template_kwargs: ollama OpenAI /v1 端点识别
+    - think:False: ollama 原生 /api/chat 字段, talon-api 透传, 长 prompt 下最稳
+    DeepSeek/OpenAI 官方端点会忽略未知字段(无害)。
     """
     body = llm_client._payload(
         [{"role": "user", "content": "hi"}],
@@ -195,10 +197,11 @@ def test_payload_thinking_disabled_adds_chat_template_kwargs():
     )
     assert body["thinking"] == {"type": "disabled"}
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert body["think"] is False
 
 
 def test_payload_thinking_low_no_chat_template_kwargs():
-    """thinking=low/high 时不加 chat_template_kwargs (保持 reasoning_effort 控制)。"""
+    """thinking=low/high 时不加 chat_template_kwargs/think (保持 reasoning_effort 控制)。"""
     body = llm_client._payload(
         [{"role": "user", "content": "hi"}],
         model="deepseek-v4-flash",
@@ -208,6 +211,7 @@ def test_payload_thinking_low_no_chat_template_kwargs():
     assert body["thinking"] == {"type": "enabled"}
     assert body["reasoning_effort"] == "low"
     assert "chat_template_kwargs" not in body
+    assert "think" not in body
 
 
 @pytest.mark.asyncio

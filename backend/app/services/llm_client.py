@@ -65,7 +65,8 @@ def _payload(messages: list[dict], model: str, *, temperature: float = 0.2,
     去掉 thinking 重试一次(由调用方继续重试逻辑)。
 
     #111 (2026-09-15): ollama+Qwen3 系列默认 thinking=on 会烧光 max_tokens 致 content 空。
-    修复: thinking=disabled 时同时传 chat_template_kwargs={enable_thinking:false} —
+    #113 (2026-09-15): chat_template_kwargs 在长 prompt 下被 talon-api 丢弃; 改用顶层
+    think:False, 由 talon-api 透传到 ollama /api/chat 原生字段。
     DeepSeek/OpenAI 官方端点忽略未知字段(无害), ollama 端点正确禁用 thinking。
     """
     body: dict[str, Any] = {
@@ -81,6 +82,8 @@ def _payload(messages: list[dict], model: str, *, temperature: float = 0.2,
         body["thinking"] = {"type": "disabled"}
         # Qwen3 系列在 ollama 里禁用 thinking 的正确字段; 对 DeepSeek/OpenAI 官方端点无害
         body["chat_template_kwargs"] = {"enable_thinking": False}
+        # #113 ollama /api/chat 原生字段, talon-api openai_compat 透传; 长 prompt 下最稳
+        body["think"] = False
     elif thinking in ("low", "high"):
         body["thinking"] = {"type": "enabled"}
         body["reasoning_effort"] = thinking
