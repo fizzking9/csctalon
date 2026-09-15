@@ -102,23 +102,25 @@
               </template>
               <el-form ref="formRef" :model="form" label-width="110px" :rules="rules">
                 <el-form-item label="BMS 数据源" prop="bmsTypes">
-                  <el-checkbox-group v-model="form.bmsTypes">
-                    <el-checkbox
-                      v-for="ds in bmsSources"
-                      :key="ds.data_type"
-                      :label="ds.data_type"
-                      :disabled="busyRunning"
-                    >
-                      {{ ds.name }}
+                  <!-- #97: 由平铺复选框改为「高频档 / 低频档」分组 + 批量勾选。
+                       档位判据 schedule_tier 来自后端(与定时调度器同源), 不在前端硬编码源名;
+                       详见 web/src/components/BmsTierPicker.vue 头部设计说明。 -->
+                  <BmsTierPicker
+                    v-model="form.bmsTypes"
+                    :sources="bmsSourcesForPicker"
+                    :disabled="busyRunning"
+                    :low-freq-hour="scheduleStatus.low_freq_hour || 0"
+                  >
+                    <template #badge="{ ds }">
                       <span v-if="ds.data_type === 'refund_record_report'" class="src-alias">（商户号现金流 E 路）</span>
                       <el-tag v-if="!ds.has_credentials" type="danger" size="small" class="ml-4">未配凭证</el-tag>
-                      <el-tag v-else-if="ds.requires_captcha && !captchaStates[ds.data_type]?.has_storage_state"
+                      <el-tag v-else-if="ds.requires_captcha && !ds.has_storage_state"
                               type="warning" size="small" class="ml-4">需验证码登录</el-tag>
-                      <el-tag v-else-if="ds.requires_captcha && captchaStates[ds.data_type]?.has_storage_state"
+                      <el-tag v-else-if="ds.requires_captcha && ds.has_storage_state"
                               type="success" size="small" class="ml-4">登录态已保存</el-tag>
                       <el-tag v-else type="success" size="small" class="ml-4">已配凭证</el-tag>
-                    </el-checkbox>
-                  </el-checkbox-group>
+                    </template>
+                  </BmsTierPicker>
                 </el-form-item>
                 <el-form-item label="SCRM 数据源" prop="scrmTypes">
                   <el-checkbox-group v-model="form.scrmTypes">
@@ -708,6 +710,7 @@ import {
   listScrmSyncLogs,
 } from '@/api/fetch'
 import ScheduleConfigPanel from '@/components/ScheduleConfigPanel.vue'
+import BmsTierPicker from '@/components/BmsTierPicker.vue'
 import { listSyncSources, updateSyncSource } from '@/api/system'
 
 const route = useRoute()
@@ -777,6 +780,8 @@ const scheduleStatus = ref({
   enabled: false,
   schedule_hours: [0, 8, 12, 16, 20],
   next_run: null,
+  // #97: 低频档整点(0 = 禁用), 供 BmsTierPicker 在分组标题上动态展示
+  low_freq_hour: 0,
   current_progress: null,
   has_credentials: { bms: false, scrm: false },
 })
@@ -988,6 +993,24 @@ const mergedStatusRows = computed(() => {
   }
   return rows
 })
+
+/**
+ * #97: 供 BmsTierPicker 使用的源清单。
+ *
+ * 把验证码登录态(captchaStates)合并进源对象 —— 因为「只选已配凭证」需要判断
+ * "需验证码的源是否已保存登录态"，而该状态是异步从 captchaLoginCheck 拉取的、
+ * 不在 /fetch/data-sources 的返回里。
+ *
+ * ⚠️ 不改动 bmsSources 本体：它同时被状态表、日志下拉等消费，保持原始接口返回。
+ */
+const bmsSourcesForPicker = computed(() =>
+  bmsSources.value.map(d => ({
+    ...d,
+    has_storage_state: d.requires_captcha
+      ? !!captchaStates[d.data_type]?.has_storage_state
+      : undefined,
+  })),
+)
 
 function runningStatusLabel(s) {
   switch (s) {

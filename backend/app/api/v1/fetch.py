@@ -193,6 +193,9 @@ class DataSourceStatus(BaseModel):
     default_sync: bool = True
     enabled: bool = True
     requires_captcha: bool = False  # True 表示需验证码(如闪猫退款):同步设置页有验证码登录入口
+    # #97: 档位标签, 供前端「手动同步」按 高频档/低频档 分组(不纳入定时的源为 off)。
+    #      判据与调度器同源 —— sync_source_config_service.list_scheduled_bms_sources()
+    schedule_tier: str = "off"
     last_sync: str | None = None
     last_status: str | None = None
     last_query_end: str | None = None  # 上次查询截止时间(数据已同步至此时间点)
@@ -212,6 +215,8 @@ class ScheduleStatus(BaseModel):
     schedule_hours: list[int]
     daytime_hours: list[int] | None = None
     catchup_hour: int | None = None
+    # #97: 低频档整点(0 = 低频档禁用), 供前端分组标题展示"每天几点跑低频源"
+    low_freq_hour: int | None = None
     next_run: str | None = None
     current_progress: dict | None = None
     has_credentials: Any  # bool 或 {"bms":bool, "scrm":bool}(新版)
@@ -247,6 +252,7 @@ def list_sync_data_sources(db: DBSession, _: CurrentUser):
             default_sync=s.get("default_sync", True),
             enabled=s.get("enabled", True),
             requires_captcha=s.get("requires_captcha", False),
+            schedule_tier=s.get("schedule_tier", "off"),
             last_sync=s.get("last_sync"),
             last_status=s.get("last_status"),
             last_query_end=s.get("last_end_time"),

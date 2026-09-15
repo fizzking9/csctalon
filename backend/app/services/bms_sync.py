@@ -27,7 +27,10 @@ from app.models.upload import UploadRecord
 from app.services.bms_fetcher import BMS_DATA_SOURCES, BmsFetcher, FetchResult
 from app.services.data_parser import load_dataframe, parse_file
 from app.services.ingest_service import ingest_table
-from app.services.sync_source_config_service import get_sync_source_config
+from app.services.sync_source_config_service import (
+    get_schedule_tier_map,
+    get_sync_source_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1226,7 +1229,13 @@ def _analyze_key_tables(db) -> None:
 
 
 def get_sync_status(db: Session) -> list[dict]:
-    """获取各数据源的同步状态(遍历全部 SYNC_DATA_TYPES)"""
+    """获取各数据源的同步状态(遍历全部 SYNC_DATA_TYPES)
+
+    #97: 额外返回 schedule_tier("high"/"low"/"off"), 供前端「手动同步」按档分组。
+    判据来自 sync_source_config_service.list_scheduled_bms_sources() —— 与调度器**同源**,
+    避免前端另立一份源名清单后与「实际定时跑哪些源」漂移。
+    """
+    tier_map = get_schedule_tier_map(db)
     statuses = []
     for data_type in SYNC_DATA_TYPES:
         config = get_sync_source_config(db, data_type) or {}
@@ -1244,6 +1253,9 @@ def get_sync_status(db: Session) -> list[dict]:
             "default_sync": config.get("default_sync", True),
             "enabled": config.get("enabled", True),
             "requires_captcha": config.get("requires_captcha", False),
+            # #97: 档位标签(high/low/off)。未进入"应纳入定时"集合的源一律 off
+            #      (default_sync=false / enabled=false / 派生源 device_tag)
+            "schedule_tier": tier_map.get(data_type, "off"),
             "last_sync": last_log.created_at.isoformat() if last_log else None,
             "last_status": last_log.status if last_log else None,
             "last_end_time": last_log.end_time.isoformat() if last_log else None,

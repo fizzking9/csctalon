@@ -362,6 +362,9 @@ class BmsScheduler:
             "schedule_hours": sorted({int(s.split(":")[0]) for s in slots}),
             "daytime_hours": sorted({int(s.split(":")[0]) for s in slots}),
             "catchup_hour": CATCHUP_HOUR,
+            # #97: 低频档整点暴露给前端, 供「手动同步」分组标题动态展示
+            #      (A-20260907-001 LOCKED §四 预留的展示增强)。0 = 低频档已禁用。
+            "low_freq_hour": LOW_FREQ_HOUR,
             "next_run": next_run.isoformat() if next_run else None,
             "next_slot": next_slot,
             "current_progress": current_progress,

@@ -430,6 +430,30 @@ def list_scheduled_bms_sources(db: Session) -> dict[str, list[str]]:
     return {"all": all_types, "high": high, "low": low}
 
 
+def get_schedule_tier_map(db: Session) -> dict[str, str]:
+    """返回 data_type → schedule_tier("high" | "low" | "off") 映射(#97)。
+
+    用途: 供 `GET /fetch/data-sources` 给前端做「高频档 / 低频档」分组展示
+          —— 即 A-20260907-001(LOCKED) §四「接口契约」预留的 `schedule_tier`。
+
+    ⚠️ 判据**唯一真源仍是 list_scheduled_bms_sources()**, 本函数只做"集合 → 标签"的
+       映射, 绝不在此重新判断档位(否则前端展示会与调度器实际跑的源漂移)。
+
+    - "high": 纳入定时且在高频集合(白天节拍 + 5:00 补跑 + 8:00 全量兜底)
+    - "low" : 纳入定时但在低频集合(每天 LOW_FREQ_HOUR 一次, 跑前一天整天)
+    - 未出现在本映射的 key → 调用方按 "off" 兜底
+      (含 default_sync=false / enabled=false, 以及派生源 device_tag ——
+       它不是独立抓取源, 被 list_scheduled_bms_sources 显式剔除, 归入 off 合理)
+    """
+    sched = list_scheduled_bms_sources(db)
+    tier: dict[str, str] = {}
+    for dt in sched.get("high") or []:
+        tier[dt] = "high"
+    for dt in sched.get("low") or []:
+        tier[dt] = "low"
+    return tier
+
+
 def list_sync_source_configs(db: Session) -> list[dict]:
     """列出所有同步源配置(API 用,凭证掩码;带 fetch_mode/captcha_type/options 给前端表单)"""
     rows = db.scalars(select(SyncSourceConfig).order_by(SyncSourceConfig.sort_order, SyncSourceConfig.id)).all()
