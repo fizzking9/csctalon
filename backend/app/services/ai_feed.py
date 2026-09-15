@@ -23,7 +23,7 @@ from app.api.v1.external import _build_brief, _window
 from app.core.config import settings
 from app.core.redis_client import cache_ttl_for, cached_call, get_redis
 from app.services import analytics as A
-from app.services.ai_focus_service import keyword_to_scope
+from app.services.ai_focus_service import keyword_to_scope, keywords_to_scopes
 from app.services.ai_glossary import glossary_all, glossary_for_question
 
 logger = logging.getLogger(__name__)
@@ -396,20 +396,30 @@ _CONSTANT_FEED_KEYS = ("period", "date", "date_start", "date_end",
                        "generated_at", "_spec", "range", "daily_trend")
 
 
-def _select_feed_sections(feed: dict, scope: str | None) -> dict:
-    """按 scope 选取 feed 业务段; 恒量段始终保留; scope=None 回退全量。
+def _select_feed_sections(feed: dict, scopes) -> dict:
+    """按 scope 集合选取 feed 业务段; 恒量段始终保留; scopes 为空回退全量。
 
-    #98 (2026-09-15) 层2: 降输入 token。scope 由 ai_focus_service.
-    keyword_to_scope 从问句关键词推断, 值(reception/refund/complaint)
+    #98 (2026-09-15) 层2: 降输入 token。scopes 由 ai_focus_service.
+    keywords_to_scopes 从问句关键词推断, 值集合(reception/refund/complaint)
     与 feed 顶层段名逐字符对齐, 故可直接做段切片。
     问"今日退款"→ 只喂 refund 段(含 a_route.litigation_*, 不漏涉诉率),
     不喂 reception/complaint 段, 减少 60-70% 输入 token。
+
+    ⚠️ 2026-09-15 修复: 原版只接受单 scope, 问句"今日经营总览：接待、退款、
+    投诉一起说说。"同时命中三域但只取首个 → 另两段被切掉, AI 说"未提供"。
+    现版接受 set/list, 把所有命中业务段都保留。
     """
-    if scope is None or not isinstance(feed, dict):
+    if scopes is None:
+        return feed
+    if isinstance(scopes, str):
+        scopes = {scopes}
+    scopes = set(scopes) - {None, ""}
+    if not scopes or not isinstance(feed, dict):
         return feed
     out = {k: feed[k] for k in _CONSTANT_FEED_KEYS if k in feed}
-    if scope in feed:
-        out[scope] = feed[scope]
+    for s in scopes:
+        if s in feed:
+            out[s] = feed[s]
     return out
 
 
@@ -424,8 +434,11 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
     """
     feed = _build_feed(db, period, date, start=start, end=end)
     # #98 层2: 按问句 scope 切 feed 段(只留命中业务段+恒量段), 降输入 token。
-    # scope=None(问句未命中 refund/complaint/reception 关键词)→ 回退全量, 兼容。
-    feed = _select_feed_sections(feed, keyword_to_scope(question))
+    # scopes 空集(问句未命中 refund/complaint/reception 关键词)→ 回退全量, 兼容。
+    # ⚠️ 2026-09-15 修复: 改用 keywords_to_scopes 取所有命中 scope, 避免多域
+    #   问句(如"今日经营总览：接待、退款、投诉一起说说")只取首个 scope 致
+    #   其它业务段被切掉, AI 答"未提供"。
+    feed = _select_feed_sections(feed, keywords_to_scopes(question))
     feed_json = _trim_feed(feed)
     # 口径卡: 按问句路由选子集; 未命中全量
     glossary = glossary_for_question(question)

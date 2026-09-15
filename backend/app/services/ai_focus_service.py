@@ -72,12 +72,28 @@ def keyword_to_scope(question: str) -> str | None:
     scope 值与 feed 顶层段名逐字符对齐(见 external._build_brief 的
     reception/complaint/refund 段), 故可直接做段选取。
     多 scope 命中时按 _KEYWORD_TO_SCOPE 迭代顺序取首个(确定性, 非随机)。
+
+    ⚠️ 已废弃(单 scope), 见 keywords_to_scopes。保留向后兼容, 新调用方用复数版。
     """
     q = question or ""
     for kw, scope in _KEYWORD_TO_SCOPE.items():
         if kw in q:
             return scope
     return None
+
+
+def keywords_to_scopes(question: str) -> set[str]:
+    """问句关键词 → 所有命中 scope 集合(refund/complaint/reception); 未命中空集。
+
+    #98 (2026-09-15) 修复: 原 keyword_to_scope 只取首个命中 scope, 问句
+    "今日经营总览：接待、退款、投诉一起说说。"会同时命中 reception/refund/
+    complaint 三域, 但只取首个 → 另外两段被 _select_feed_sections 切掉,
+    AI 说"未提供"。
+    本函数返回所有命中 scope 的集合, 让 _select_feed_sections 把所有命中的
+    业务段都保留。
+    """
+    q = question or ""
+    return {scope for kw, scope in _KEYWORD_TO_SCOPE.items() if kw in q}
 
 
 def focus_for_question(db: Session, question: str) -> str:
