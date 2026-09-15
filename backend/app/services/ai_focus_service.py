@@ -39,6 +39,15 @@ _KEYWORD_TO_SCOPE = {
 _CACHE: dict[str, tuple[float, list[dict]]] = {}
 _CACHE_TTL_SECONDS = 60
 
+# #114 (2026-09-15): 这 3 个 seed 的内容已由 _SYSTEM_PROMPT 铁律 8/9/10 强制注入,
+# 在 focus 段重复会浪费 ~800 字符 prompt。DB 行保留(enabled) 让 admin 可见可编辑,
+# 但 focus_for_question 不再注入其 content(详见该函数注释)。
+_SHADOWED_BY_SYSTEM_RULE = frozenset({
+    "inference-discipline",   # 铁律 8 防主观推断
+    "business-benchmark",     # 铁律 9 业务判定方向
+    "work-time-ai-assist",    # 铁律 10 工作时间
+})
+
 
 def _load_all(db: Session) -> list[dict]:
     """查 enabled 配置, 按 sort_order 排序(带 60s 进程缓存)。"""
@@ -118,6 +127,14 @@ def focus_for_question(db: Session, question: str) -> str:
     lines = []
     for r in all_rows:
         if r["scope_key"] in scopes:
+            # #114 (2026-09-15): 这 3 个 seed 的内容已由 _SYSTEM_PROMPT 铁律
+            # 8/9/10 强制注入(防主观推断/业务判定方向/工作时间), 在 focus 段再注入
+            # 一次会造成 ~800 字符(≈320 tokens ≈1.3s prefill) 冗余。
+            # DB 行保留(enabled=true) 让 admin 可见可编辑; 但 focus_for_question
+            # 跳过它们的 content 注入。若 admin 修改了 seed 内容, 须同步修改
+            # _SYSTEM_PROMPT 对应铁律, 否则差异不会传到 AI。
+            if r["code"] in _SHADOWED_BY_SYSTEM_RULE:
+                continue
             lines.append(f"- 【{r['title']}】{r['content']}")
     return "\n".join(lines)
 
