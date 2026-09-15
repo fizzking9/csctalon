@@ -426,3 +426,87 @@ def test_ai_config_structure(manager_client):
     assert data["enabled"] is True
     assert "periods" in data
     assert data["periods"][0]["period"] == "daily"
+
+
+# ── #98 层2: 问题路由 + 精确取数 ──────────────────────────────
+def test_keyword_to_scope_refund():
+    """问句含'退款'→ scope=refund(与 feed 顶层段名对齐)。"""
+    from app.services.ai_focus_service import keyword_to_scope
+    assert keyword_to_scope("今日退款情况如何?") == "refund"
+    assert keyword_to_scope("昨天提现多少笔") == "refund"
+    assert keyword_to_scope("涉诉率高不高") == "refund"
+
+
+def test_keyword_to_scope_complaint():
+    """问句含'投诉'/'积压'→ scope=complaint。"""
+    from app.services.ai_focus_service import keyword_to_scope
+    assert keyword_to_scope("今日投诉积压多少") == "complaint"
+    assert keyword_to_scope("商户号投诉登记数") == "complaint"
+
+
+def test_keyword_to_scope_reception():
+    """问句含'接待'/'会话'→ scope=reception。"""
+    from app.services.ai_focus_service import keyword_to_scope
+    assert keyword_to_scope("今日接待量") == "reception"
+    assert keyword_to_scope("本周会话多少") == "reception"
+
+
+def test_keyword_to_scope_miss_returns_none():
+    """问句未命中任何域关键词 → None(回退全量 feed, 兼容)。"""
+    from app.services.ai_focus_service import keyword_to_scope
+    assert keyword_to_scope("经营情况分析一下") is None
+    assert keyword_to_scope("给点建议") is None
+    assert keyword_to_scope("") is None
+
+
+def test_select_feed_sections_refund_only():
+    """scope=refund → 只保留 refund 业务段 + 恒量段, 丢 reception/complaint。"""
+    from app.services.ai_feed import _select_feed_sections, _CONSTANT_FEED_KEYS
+    feed = {
+        "period": "daily", "date": "2026-09-15",
+        "date_start": "2026-09-15T00:00:00+08:00",
+        "date_end": "2026-09-15T23:59:59+08:00",
+        "generated_at": "2026-09-15T09:00:00+08:00",
+        "_spec": {"金额单位": "元"},
+        "reception": {"total": 100},
+        "refund": {"total_amount": 5000, "total_count": 10, "a_route": {"litigation_ratio": {"value": 0.2}}},
+        "complaint": {"registered": 5},
+    }
+    out = _select_feed_sections(feed, "refund")
+    # refund 段保留(含涉诉率子段, 不漏)
+    assert "refund" in out
+    assert out["refund"]["a_route"]["litigation_ratio"]["value"] == 0.2
+    # 未命中的业务段被切掉
+    assert "reception" not in out
+    assert "complaint" not in out
+    # 恒量段全保留
+    for k in _CONSTANT_FEED_KEYS:
+        if k in feed:
+            assert k in out
+
+
+def test_select_feed_sections_none_returns_full():
+    """scope=None → 原样返回全量(兼容, 改造前行为)。"""
+    from app.services.ai_feed import _select_feed_sections
+    feed = {"period": "daily", "reception": {"x": 1}, "refund": {"y": 2}, "complaint": {"z": 3}}
+    out = _select_feed_sections(feed, None)
+    assert out is feed  # 同一对象, 零拷贝
+
+
+def test_build_messages_scope_refund_drops_complaint(db):
+    """端到端: 问'今日退款如何?' → user content 不含 complaint 顶层段(dict)。
+
+    验证层2 段选取在 build_messages 链路生效。refund 段保留(涉诉率不漏)。
+    断言用 `'"complaint": {'`(冒号空格大括号)区分: 顶层 complaint 段是 dict
+    (`"complaint": {`); _spec 里 complaint 是 str 值(`"complaint": "`).
+    单元测试 test_select_feed_sections_refund_only 已用 dict 级别断言
+    充分覆盖"切掉 complaint 顶层段", 此处只验证链路串通。
+    """
+    from app.services import ai_feed
+    msgs = ai_feed.build_messages(db, period="daily", date="2026-07-15", question="今日退款如何?")
+    user_content = msgs[1]["content"]
+    # 顶层 complaint 段(dict)被切掉; _spec 里的 complaint(str 值)不算
+    assert '"complaint": {' not in user_content
+    assert '"reception": {' not in user_content
+    # refund 顶层段(dict)保留
+    assert '"refund": {' in user_content

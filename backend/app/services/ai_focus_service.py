@@ -65,6 +65,21 @@ def invalidate_cache() -> None:
     _CACHE.pop("all", None)
 
 
+def keyword_to_scope(question: str) -> str | None:
+    """问句关键词 → 首个命中 scope_key(refund/complaint/reception); 未命中 None。
+
+    #98 (2026-09-15) 层2: ai_feed 按此 scope 切 feed 段, 降输入 token。
+    scope 值与 feed 顶层段名逐字符对齐(见 external._build_brief 的
+    reception/complaint/refund 段), 故可直接做段选取。
+    多 scope 命中时按 _KEYWORD_TO_SCOPE 迭代顺序取首个(确定性, 非随机)。
+    """
+    q = question or ""
+    for kw, scope in _KEYWORD_TO_SCOPE.items():
+        if kw in q:
+            return scope
+    return None
+
+
 def focus_for_question(db: Session, question: str) -> str:
     """按问句关键词路由 scope_key, 拼注入文本(global 兜底全带)。
 

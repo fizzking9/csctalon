@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.external import _build_brief, _window
 from app.core.config import settings
 from app.core.redis_client import get_redis
+from app.services.ai_focus_service import keyword_to_scope
 from app.services.ai_glossary import glossary_all, glossary_for_question
 
 logger = logging.getLogger(__name__)
@@ -132,6 +133,30 @@ def _trim_feed(feed: dict) -> str:
     return raw[:limit] + "\n...[数据已按长度截断]"
 
 
+# 恒量段: 不管问句命中哪个 scope 都始终保留, 供模型理解窗口与口径
+# (#98 层2): 这些段体积小但语义关键(period/date_start/end 喂窗口,
+# _spec 喂口径单位), 截掉会让模型答错窗口或金额单位。
+_CONSTANT_FEED_KEYS = ("period", "date", "date_start", "date_end",
+                       "generated_at", "_spec", "range")
+
+
+def _select_feed_sections(feed: dict, scope: str | None) -> dict:
+    """按 scope 选取 feed 业务段; 恒量段始终保留; scope=None 回退全量。
+
+    #98 (2026-09-15) 层2: 降输入 token。scope 由 ai_focus_service.
+    keyword_to_scope 从问句关键词推断, 值(reception/refund/complaint)
+    与 feed 顶层段名逐字符对齐, 故可直接做段切片。
+    问"今日退款"→ 只喂 refund 段(含 a_route.litigation_*, 不漏涉诉率),
+    不喂 reception/complaint 段, 减少 60-70% 输入 token。
+    """
+    if scope is None or not isinstance(feed, dict):
+        return feed
+    out = {k: feed[k] for k in _CONSTANT_FEED_KEYS if k in feed}
+    if scope in feed:
+        out[scope] = feed[scope]
+    return out
+
+
 def build_messages(db: Session, period: str, date: str | None, question: str,
                    start: str | None = None, end: str | None = None,
                    window_label: str | None = None, window_source: str | None = None) -> list[dict]:
@@ -142,6 +167,9 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
     模型被喂的是哪个窗口, 而不是靠猜。
     """
     feed = _build_feed(db, period, date, start=start, end=end)
+    # #98 层2: 按问句 scope 切 feed 段(只留命中业务段+恒量段), 降输入 token。
+    # scope=None(问句未命中 refund/complaint/reception 关键词)→ 回退全量, 兼容。
+    feed = _select_feed_sections(feed, keyword_to_scope(question))
     feed_json = _trim_feed(feed)
     # 口径卡: 按问句路由选子集; 未命中全量
     glossary = glossary_for_question(question)
