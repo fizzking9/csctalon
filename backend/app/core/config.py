@@ -157,7 +157,10 @@ class Settings(BaseSettings):
     # by_specialty 已精简(2026-09-04), 正常 feed <3KB; 此值作兜底防超长。
     # #98 (2026-09-15): 12000→6000。生产实测 llm_ms/total_ms=85~95%(#93 埋点),
     #   输入 token 直接推高首 token 延迟; 层2 上线后按 scope 切段 feed 更小。
-    AI_ANALYZE_MAX_CHARS: int = 6000
+    # #114 (2026-09-15): 6000→4000→3500。配合 max_tokens=500 + system_prompt 长度约束
+    #   (回答≤600字) 让模型自然完成在 ~400 tokens 不截断; 3500 数据 + 920 system +
+    #   926 glossary + 1776 focus ≈ 3000 prompt_tokens, prefill 12s + eval 13s = ~28s。
+    AI_ANALYZE_MAX_CHARS: int = 3500
     # AI 任务结果在内存保留时间(秒)与历史条数(单 worker 内存态)。
     AI_TASK_TTL_S: int = 600
     AI_TASK_HISTORY: int = 20
