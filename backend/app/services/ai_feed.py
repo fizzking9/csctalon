@@ -219,8 +219,9 @@ def _compact_reception_breakdown(rb: dict) -> dict:
     cats_compact = [{"name": c.get("name"), "value": c.get("value")}
                     for c in cats if isinstance(c, dict) and (c.get("value") or 0) > 0]
     top = rb.get("top_staff") or []
+    # #114 (2026-09-15): 5→3 降 feed token; 与其它 _compact_* 对齐
     top_compact = [{"name": t.get("name"), "sessions": t.get("sessions")}
-                   for t in top[:5] if isinstance(t, dict)]
+                   for t in top[:3] if isinstance(t, dict)]
     return {"categories": cats_compact, "top_staff": top_compact}
 
 
@@ -234,7 +235,7 @@ def _compact_refund_breakdown(rfb: dict) -> dict:
         reasons_compact = [{"name": r.get("name") or r.get("reason"),
                             "count": r.get("count") or r.get("value"),
                             "amount": r.get("amount")}
-                           for r in reasons[:5] if isinstance(r, dict)]
+                           for r in reasons[:3] if isinstance(r, dict)]
     else:
         reasons_compact = []
     return {"top_reasons": reasons_compact}
@@ -302,11 +303,12 @@ def _compact_refund_recovery(rr: dict) -> dict:
     }
     staff = rr.get("staff_detail") or []
     if isinstance(staff, list):
-        # 过滤 total_sn=0 的人员(无挽回数据), 按 total_sn 倒序取 top5(与 staff_top5 对齐, 控 token)
+        # 过滤 total_sn=0 的人员(无挽回数据), 按 total_sn 倒序取 top3
+        # #114 (2026-09-15): 5→3 降 feed token
         staff_sorted = sorted(
             [s for s in staff if isinstance(s, dict) and (s.get("total_sn") or 0) > 0],
             key=lambda x: x.get("total_sn") or 0, reverse=True,
-        )[:5]
+        )[:3]
         staff_compact = [
             {"name": s.get("name") or s.get("operator"),
              "total_sn": s.get("total_sn"),
@@ -319,10 +321,11 @@ def _compact_refund_recovery(rr: dict) -> dict:
         staff_compact = []
     reasons = rr.get("reason_dist") or []
     if isinstance(reasons, list):
+        # #114 (2026-09-15): 5→3 降 feed token
         reasons_compact = [
             {"reason": r.get("reason"), "order_cnt": r.get("order_cnt"),
              "success_rate": r.get("success_rate")}
-            for r in reasons[:5] if isinstance(r, dict)
+            for r in reasons[:3] if isinstance(r, dict)
         ]
     else:
         reasons_compact = []
@@ -343,7 +346,7 @@ def _compact_staff_efficiency(eff: dict) -> list[dict]:
             "work_score": r.get("work_score"),
             "reception_count": r.get("reception_count"),
         })
-        if len(out) >= 5:
+        if len(out) >= 3:
             break
     return out
 
