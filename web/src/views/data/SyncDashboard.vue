@@ -750,7 +750,15 @@ const logFilterDataType = ref('')
 const statusGroupFilter = ref('all')
 const mergedSyncLogs = ref([])
 const formRef = ref(null)
-const typesInited = ref(false)
+// 默认勾选的「仅初始化一次」标记 —— BMS 与 SCRM **必须各自独立**(#99)。
+//
+// ⚠️ 事故回顾: 两者曾共用同一个 `typesInited` 标记, 而 onMounted 用 Promise.all
+//    并发加载两者 → 谁先返回谁把标记置真, 后者就跳过自己的默认勾选赋值。
+//    实测 SCRM 恒先返回(响应体远小于 BMS 的 11 源状态聚合) → 手动同步面板
+//    首次打开始终 0 勾选、主按钮灰显「共 0 个」, 使用者被迫手点 11 次。
+//    两个标记在语义上本就无关(各自的接口 + 各自的默认值来源), 合并只因"看起来像同一件事"。
+const bmsInited = ref(false)
+const scrmInited = ref(false)
 const submitLoading = ref(false)
 const logStreamRef = ref(null)
 
@@ -1043,8 +1051,10 @@ async function loadBmsSources() {
   try {
     const res = await listSyncDataSources()
     bmsSources.value = res.data
-    if (!typesInited.value) {
+    // 仅首次填充默认勾选 —— 后续轮询(每 15 轮调一次本函数)不得覆盖用户已改的勾选
+    if (!bmsInited.value) {
       form.bmsTypes = res.data.filter(d => d.default_sync).map(d => d.data_type)
+      bmsInited.value = true
     }
     await loadCaptchaStates()
   } catch (e) {
@@ -1056,12 +1066,13 @@ async function loadScrmStatus() {
   try {
     const res = await getScrmSyncStatus()
     scrmStatusRows.value = (res.data || []).map(r => ({ ...r, name: r.name || dsName(r.data_type) }))
-    if (!typesInited.value) {
+    // 同上: 仅在首次填充默认勾选(#99 独立标记)
+    if (!scrmInited.value) {
       // 使用后端返回的 default_sync 配置（优先），fallback 到前端常量
       form.scrmTypes = scrmStatusRows.value
         .filter(r => r.default_sync !== undefined ? r.default_sync : SCRM_DATA_TYPES.find(d => d.data_type === r.data_type)?.default_sync)
         .map(r => r.data_type)
-      typesInited.value = true
+      scrmInited.value = true
     }
   } catch {
     scrmStatusRows.value = []
