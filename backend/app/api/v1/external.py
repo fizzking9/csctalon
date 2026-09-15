@@ -416,7 +416,8 @@ def _build_brief(db: Session, period: str, date: str | None,
     start_s, end_s = win["start"], win["end"]
     # KPI/退款四路/现金流: 复用 today_kpi(内部 _resolve_windows 已按北京时区解释 start/end;
     #   end==今天→实时截止 now; 否则整天; cash_routes_today 即同窗口四路+E)
-    kpi = cached_call(f"today:kpi:None:{start_s}:{end_s}", 60, A.today_kpi, db, None, start_s, end_s)
+    # #98 (2026-09-15): TTL 由 cache_ttl_for 自动感知(历史日 24h, 今天 60s), 原固定 60s 是 bug
+    kpi = cached_call(f"today:kpi:None:{start_s}:{end_s}", cache_ttl_for(start_s, end_s, 60), A.today_kpi, db, None, start_s, end_s)
     cash = kpi.get("cash_routes_today") or {}
     # 涉诉率/四路涉诉金额: refund_decision_overview 同窗口(start/end 字符串), grain 按架构 §2.2 映射
     #   (daily→day, weekly/monthly→week); 走 cached_call 复用内部 refund:do:* 缓存(架构 §5.4)
@@ -622,28 +623,42 @@ def _complaint_enhanced(db: Session, start_s: str, end_s: str) -> dict:
 # 接待专项增强: 各正式专项 名单 + 会话数 + 设备数
 # ─────────────────────────────────────────────────────────────────────
 def _reception_specialty(db: Session, start_s: str, end_s: str) -> list[dict]:
-    """名单=组织分配(person_specialty_assignments.is_current); 会话/设备=内容分桶(today_staff_efficiency)。"""
+    """名单=组织分配(person_specialty_assignments.is_current); 会话/设备=内容分桶(today_staff_efficiency)。
+
+    #98 重构(2026-09-15): 桶映射改为 DB 字段驱动(`specialty.efficiency_field`),
+      替代原 _BUCKET dict 硬编码; 历史专项(内部投诉/外部投诉)靠 is_active=False 自动排除,
+      不再依赖 LEGACY_COMPLAINT_SPECIALTIES 常量名硬编码过滤。
+      未配置 efficiency_field 的专项(临时/未配置)sessions/devices 显示 0, 不再硬兜底到"咨询接待"桶。
+    """
     specs = list(db.scalars(
         select(Specialty).where(Specialty.is_active.is_(True)).order_by(Specialty.display_order, Specialty.name)
     ))
     if not specs:
         return []
-    eff = A.today_staff_efficiency(db, start=start_s, end=end_s, aggregate_by="person", topn=300)
+    # #98 (2026-09-15): 改用 cached_call + topn=200, 与 cache_warmer._warm_analytics 的
+    # `today:staff:None:{start}:{end}:200:0:person:None:None:None` key 逐字符对齐 → 命中预热缓存,
+    # 避免冷加载(today_staff_efficiency 含 4 大 CTE ILIKE 全表扫, 冷加载 ~1.8s)。
+    # TTL 由 cache_ttl_for 自动感知(历史日 24h, 今天 60s), 与 today:kpi 一致。
+    eff = cached_call(
+        f"today:staff:None:{start_s}:{end_s}:200:0:person:None:None:None",
+        cache_ttl_for(start_s, end_s, 60),
+        A.today_staff_efficiency,
+        db, None, start_s, end_s, 200, False, "person",
+        department=None, group_id=None, specialty_id=None,
+    )
     person_rows = {r.get("name"): r for r in (eff.get("data") or []) if not r.get("is_virtual")}
-    BUCKET = {
-        "咨询接待": ("sp_zixun", "pp_zixun"),
-        "套餐专项": ("sp_taocan", "pp_taocan"),
-        "退款挽回": ("sp_recovery", "pp_recovery"),
-        "退款处理": ("sp_processing", "pp_processing"),
-        "内部投诉": ("sp_internal", "pp_internal"),
-        "外部投诉": ("sp_external", "pp_external"),
-    }
     result = []
     for s in specs:
         # 组织分配名单(person_specialty_assignments.is_current, 含主/辅专项)
-        # ⚠️ 桶映射: BUCKET 键=6 个正式专项名(与 today_staff_efficiency 的 sp_*/pp_* 内容桶同名)。
-        #   临时专项/名称不匹配的专项会兜底到"咨询接待"桶——与架构 §7.4 风险4 的"unassigned 兜底"理想态
-        #   存在偏差; 当前 DB 无临时专项(6 个正式专项名完全匹配), 故维持现状, 若引入临时专项需改为内容桶映射。
+        # 桶映射: 从 specialty.efficiency_field 读 sp_*/pp_* 字段名(格式 'sp_xxx,pp_xxx');
+        #   未配置则该专项不计入会话/设备统计(不再硬兜底到"咨询接待",避免错误归并)
+        sp_field = pp_field = None
+        if s.efficiency_field:
+            parts = [p.strip() for p in s.efficiency_field.split(",") if p.strip()]
+            if len(parts) >= 2:
+                sp_field, pp_field = parts[0], parts[1]
+            elif parts:
+                sp_field = parts[0]
         assignments = list(db.scalars(
             select(PersonSpecialtyAssignment).where(
                 PersonSpecialtyAssignment.specialty_id == s.id,
@@ -668,10 +683,10 @@ def _reception_specialty(db: Session, start_s: str, end_s: str) -> list[dict]:
                 "is_primary": a.is_primary,
                 "workload_ratio": a.workload_ratio,
             })
-            sp_field, pp_field = BUCKET.get(s.name, BUCKET["咨询接待"])
-            rec = person_rows.get(p.display_name) or {}
-            sessions += int(rec.get(sp_field) or 0)
-            devices += int(rec.get(pp_field) or 0)
+            if sp_field and pp_field:
+                rec = person_rows.get(p.display_name) or {}
+                sessions += int(rec.get(sp_field) or 0)
+                devices += int(rec.get(pp_field) or 0)
         lead = None
         if s.current_lead:
             # ── #91 (2026-09-14) 口径标签 ─────────────────────────────────

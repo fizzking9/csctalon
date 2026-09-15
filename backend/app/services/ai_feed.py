@@ -4,8 +4,16 @@
   (external._build_brief 仅纯组装 + cached_call, 无鉴权/限频副作用), 登录用户走 ManagerUser。
 - 口径进上下文: Business Glossary(ai_glossary) 分层注入, 不整篇灌规划文本。
 - Prompt 三层: System 铁律 / Business Context 口径卡 / Data feed + User Query。
+
+#98 (2026-09-15) 重构:
+- 日运营数据: 基于今日值班看板接口(today_kpi / today_reception_breakdown /
+  today_refund_breakdown / today_queue / today_staff_efficiency)整合, 与前端看板
+  共享 Redis 缓存(today:* 命名空间, cache_warmer 预热)。AI 仅做增量分析补充。
+- 其他时间窗口(周/月/任意区间): 以日为颗粒度, 汇总数据 + 关键指标日走势数组
+  (daily_trend), 超限自动降级(前14天逐日 + 后续按周聚合)。
 """
 
+import datetime as _dt
 import json
 import logging
 
@@ -13,13 +21,18 @@ from sqlalchemy.orm import Session
 
 from app.api.v1.external import _build_brief, _window
 from app.core.config import settings
-from app.core.redis_client import get_redis
+from app.core.redis_client import cache_ttl_for, cached_call, get_redis
+from app.services import analytics as A
 from app.services.ai_focus_service import keyword_to_scope
 from app.services.ai_glossary import glossary_all, glossary_for_question
 
 logger = logging.getLogger(__name__)
 
 # System 铁律(固定, 防幻觉/防越权)
+# ── #98 (2026-09-15) 兜底铁律 8/9/10 ──────────────────────────────────────
+#   即使运营把所有 ai_focus_configs 关停(focus 是建议性参考, 可关), 铁律仍强制约束,
+#   构成"防主观推断 / 业务判定方向 / 工作时间"三条底线。与 inference-discipline /
+#   business-benchmark / work-time-ai-assist 三条 seed 一一对应, 但 seed 可关铁律不可关。
 _SYSTEM_PROMPT = (
     "你是本客服/经营系统的数据分析助手。你的职责是基于【给定数据】回答经营/退款/投诉/接待问题。\n"
     "铁律:\n"
@@ -31,7 +44,18 @@ _SYSTEM_PROMPT = (
     "6. **回答开头必须写明本次统计窗口**(直接引用【数据窗口说明】里的起止时间), 让用户能核对窗口"
     "是否符合预期; 若用户问的时间范围与给定窗口不一致, 先指出差异再作答, 不要默默按别的窗口回答。\n"
     "7. 给定数据里的 yoy_value/yoy_pct 是\"前一个等长周期\"的对比值, **不是另一天的独立明细**; "
-    "不要把它当成完整的一天数据来陈述。若用户要某天的明细而该窗口未提供, 如实说明。"
+    "不要把它当成完整的一天数据来陈述。若用户要某天的明细而该窗口未提供, 如实说明。\n"
+    "8. **防主观推断**: 不同口径的数字(如 registered=窗口内新登记 vs handled=窗口内完成含历史单)"
+    "禁止直接相减或比较大小; 必须显式标注口径差异后再下结论。"
+    "禁止做\"处理量 > 登记量 → 消化存量\"这类无证据因果推断; "
+    "数据未提供的归因(如\"退款上升因 XX 活动\")禁止编造, 一律写\"原因需结合运营侧确认\"。\n"
+    "9. **业务判定方向**: 退款(金额/笔数/均单价)越少越好; 接待量与会话数越多越好; "
+    "投诉越少越好, 严重性 外部投诉 > 商户号投诉 > 内部投诉(外部 1 件 > 商户号 10 件); "
+    "退款挽回率越高越好; 积压投诉越低越好。陈述\"环比涨跌\"后必须按此基准标注\"利好/利空\", "
+    "不得只报数字不评判。\n"
+    "10. **工作时间**: 客服工作时间 08:00~23:59; 非工作时间(00:00~07:59)由 AI 协助处理。"
+    "解读\"接待量为 0 / 完工单为 0\"时, 必须先核对窗口是否落在非工作时间, "
+    "不得直接判定\"无人值班\"或\"系统故障\"。AI 接管率上升=利好(可控指标前置)。"
 )
 
 # 预设快捷触发句(前端展示用; 与 GLOSSARY_ROUTE 关键词对应)
@@ -51,6 +75,14 @@ def _build_feed(db: Session, period: str, date: str | None,
     - date:   period=daily 时可指定某整天(缺省=今天实时)
     - start/end: 任意区间(与 external brief v1.2 同源同护栏; 同时给出则优先于 period/date,
       支持"历史标准周/任意区间"问答, 2026-09-07)
+
+    #98 (2026-09-15) 双层结构:
+      - **日运营**: 基于 _build_brief 的 KPI/三源投诉/专项接待 + 增量补今日值班看板的
+        接待分项/退款分项/处理队列/人均效率(top5)→ 让 AI 在"今日经营总览"类开放题里
+        能给出看板级颗粒度的判断, 而非只有 KPI 数字。
+      - **其他时间窗口(周/月/区间)**: 在 brief 基础上额外注入 `daily_trend` 数组
+        (按日颗粒度的关键指标走势), 让 AI 能描述"哪天涨/哪天跌"。
+
     返回 brief 结构(纯只读, 命中 today:kpi/refund:do/complaint:* 既有缓存)。
 
     自愈(2026-09-04 事故): BMS 写入高峰期 today:kpi 缓存 TTL 被放大到 300s+,
@@ -85,7 +117,231 @@ def _build_feed(db: Session, period: str, date: str | None,
     # → 模型答"四路未提供"。AI 只需负责人+规模, 不需要逐人名单, 压缩后 feed 显著变小。
     if isinstance(feed.get("reception"), dict):
         feed["reception"] = {**feed["reception"], "by_specialty": _compact_specialty(feed["reception"].get("by_specialty"))}
+
+    # ── #98 (2026-09-15) 双层注入: 日运营补今日看板, 其他窗口补日走势 ──
+    win = _window(period, date, start=start, end=end)
+    is_daily = (win["period"] == "daily")
+    if is_daily:
+        # 日运营: 整合今日值班看板内容, 让 AI 有看板级颗粒度
+        _enrich_with_today_kanban(db, feed, win["start"], win["end"])
+    else:
+        # 周/月/区间: 按日颗粒度补走势数组, 让 AI 能描述哪天涨跌
+        _enrich_with_daily_trend(db, feed, win["start"], win["end"])
     return feed
+
+
+def _enrich_with_today_kanban(db: Session, feed: dict, start_s: str, end_s: str) -> None:
+    """日运营: 在 brief 基础上增量补今日值班看板的接待分项/退款分项/处理队列/人均效率 top5。
+
+    所有调用走 cached_call + today:* 命名空间, 与前端看板 + cache_warmer 共享缓存;
+    任一接口失败不影响主 feed(brief 已含核心 KPI), 仅记 WARNING。
+
+    只取**brief 未覆盖**的看板数据, 避免重复:
+      - reception_breakdown.categories / top_staff(分项饼图 + Top10 客服)
+      - refund_breakdown   (退款原因分布)
+      - queue              (今日待办 + 进行中专项 + 异常事件计数, 仅取 count + top3)
+      - staff_efficiency   (人均效率 top5, 仅取 name/work_score/reception_count)
+    """
+    try:
+        rb = cached_call(
+            f"today:reception:None:{start_s}:{end_s}",
+            cache_ttl_for(start_s, end_s, 60),
+            A.today_reception_breakdown, db, None, start_s, end_s,
+        )
+        if isinstance(feed.get("reception"), dict):
+            feed["reception"]["breakdown"] = _compact_reception_breakdown(rb)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ai_feed enrich today:reception 失败(忽略): %s", e)
+
+    try:
+        rfb = cached_call(
+            f"today:refund:None:{start_s}:{end_s}",
+            cache_ttl_for(start_s, end_s, 60),
+            A.today_refund_breakdown, db, None, start_s, end_s,
+        )
+        if isinstance(feed.get("refund"), dict):
+            feed["refund"]["breakdown"] = _compact_refund_breakdown(rfb)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ai_feed enrich today:refund 失败(忽略): %s", e)
+
+    try:
+        q = cached_call(
+            f"today:queue:None:{start_s}:{end_s}",
+            cache_ttl_for(start_s, end_s, 60),
+            A.today_queue, db, None, start_s, end_s,
+        )
+        feed["queue"] = _compact_queue(q)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ai_feed enrich today:queue 失败(忽略): %s", e)
+
+    try:
+        # topn=200 与 cache_warmer._warm_analytics key 逐字符对齐 → 命中预热缓存
+        eff = cached_call(
+            f"today:staff:None:{start_s}:{end_s}:200:0:person:None:None:None",
+            cache_ttl_for(start_s, end_s, 60),
+            A.today_staff_efficiency,
+            db, None, start_s, end_s, 200, False, "person",
+            department=None, group_id=None, specialty_id=None,
+        )
+        feed["staff_top5"] = _compact_staff_efficiency(eff)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ai_feed enrich today:staff 失败(忽略): %s", e)
+
+
+def _compact_reception_breakdown(rb: dict) -> dict:
+    """压缩 today_reception_breakdown: 仅留 categories + top_staff 前5(去逐条明细)。"""
+    if not isinstance(rb, dict):
+        return {}
+    cats = rb.get("categories") or []
+    # 只保留非零分类, 避免长尾占用 token
+    cats_compact = [{"name": c.get("name"), "value": c.get("value")}
+                    for c in cats if isinstance(c, dict) and (c.get("value") or 0) > 0]
+    top = rb.get("top_staff") or []
+    top_compact = [{"name": t.get("name"), "sessions": t.get("sessions")}
+                   for t in top[:5] if isinstance(t, dict)]
+    return {"categories": cats_compact, "top_staff": top_compact}
+
+
+def _compact_refund_breakdown(rfb: dict) -> dict:
+    """压缩 today_refund_breakdown: 仅留 top5 退款原因(去逐笔明细)。"""
+    if not isinstance(rfb, dict):
+        return {}
+    # today_refund_breakdown 返回结构含 routes 或 reasons 字段; 取最大前5
+    reasons = rfb.get("reasons") or rfb.get("top_reasons") or []
+    if isinstance(reasons, list):
+        reasons_compact = [{"name": r.get("name") or r.get("reason"),
+                            "count": r.get("count") or r.get("value"),
+                            "amount": r.get("amount")}
+                           for r in reasons[:5] if isinstance(r, dict)]
+    else:
+        reasons_compact = []
+    return {"top_reasons": reasons_compact}
+
+
+def _compact_queue(q: dict) -> dict:
+    """压缩 today_queue: 仅留 todos/tasks/incidents 的计数 + 前3条(去逐项明细)。"""
+    if not isinstance(q, dict):
+        return {}
+    todos = q.get("todos") or []
+    tasks = q.get("tasks") or []
+    incidents = q.get("incidents") or []
+    return {
+        "todo_count": len(todos),
+        "active_task_count": len(tasks),
+        "incident_count": len(incidents),
+        "top_todos": [{"title": t.get("title"), "priority": t.get("priority"),
+                       "deadline": t.get("deadline")} for t in todos[:3] if isinstance(t, dict)],
+        "top_incidents": [{"title": i.get("title"), "severity": i.get("severity"),
+                           "is_closed": i.get("is_closed")} for i in incidents[:3] if isinstance(i, dict)],
+    }
+
+
+def _compact_staff_efficiency(eff: dict) -> list[dict]:
+    """压缩 today_staff_efficiency: 仅留 top5 真人员工(name/work_score/reception_count)。"""
+    if not isinstance(eff, dict):
+        return []
+    data = eff.get("data") or []
+    out = []
+    for r in data:
+        if not isinstance(r, dict) or r.get("is_virtual"):
+            continue
+        out.append({
+            "name": r.get("name"),
+            "work_score": r.get("work_score"),
+            "reception_count": r.get("reception_count"),
+        })
+        if len(out) >= 5:
+            break
+    return out
+
+
+def _enrich_with_daily_trend(db: Session, feed: dict, start_s: str, end_s: str) -> None:
+    """周/月/区间: 按日颗粒度补 daily_trend 数组, 让 AI 能描述哪天涨跌。
+
+    走 cached_call + today:kpi:None:{d}:{d} 按日缓存(历史日 24h, 今日 60s),
+    与今日看板同源同缓存。每条只取关键指标: date / reception / refund_count /
+    refund_amount / complaint / complaint_handled。超 14 天自动降级为前14天逐日 +
+    后续按周聚合(避免月报 token 超限)。
+    """
+    try:
+        trend = _days_range_trend(db, start_s, end_s)
+        if trend:
+            feed["daily_trend"] = trend
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ai_feed enrich daily_trend 失败(忽略): %s", e)
+
+
+def _days_range_trend(db: Session, start_s: str, end_s: str) -> list[dict]:
+    """生成 [start_s, end_s] 区间内每天的 key metrics 走势数组。
+
+    - 单日跨度 → 返回空(日运营模式由 _enrich_with_today_kanban 处理, 无需走势)
+    - ≤14 天 → 按日逐条
+    - >14 天 → 前14天逐日 + 后续按周聚合(降级, 防 token 超限)
+    """
+    try:
+        s_d = _dt.date.fromisoformat(start_s)
+        e_d = _dt.date.fromisoformat(end_s)
+    except (ValueError, TypeError):
+        return []
+    span = (e_d - s_d).days + 1
+    if span <= 1:
+        return []  # 单日由 today_kanban 路径处理
+
+    today = _dt.date.today()
+    days: list[_dt.date] = []
+    if span <= 14:
+        d = s_d
+        while d <= e_d:
+            days.append(d)
+            d += _dt.timedelta(days=1)
+    else:
+        # 前 14 天逐日
+        d = s_d
+        for _ in range(14):
+            if d > e_d:
+                break
+            days.append(d)
+            d += _dt.timedelta(days=1)
+        # 后续按周聚合(周一~周日合并为一个点, 标签=周一日期)
+        while d <= e_d:
+            week_start = d - _dt.timedelta(days=d.weekday())  # 周一
+            week_end = week_start + _dt.timedelta(days=6)
+            if week_end > e_d:
+                week_end = e_d
+            days.append(week_start)  # 用周一起作为聚合点
+            d = week_end + _dt.timedelta(days=1)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for d in days:
+        d_iso = d.isoformat()
+        if d_iso in seen:
+            continue
+        seen.add(d_iso)
+        # ⚠️ 历史日 future guard: 今天还没到的日期跳过(不会有数据)
+        if d > today:
+            continue
+        try:
+            # 复用 today_kpi 缓存(today:kpi:None:{d}:{d}), 与今日看板同源
+            kpi = cached_call(
+                f"today:kpi:None:{d_iso}:{d_iso}",
+                cache_ttl_for(d_iso, d_iso, 60),
+                A.today_kpi, db, None, d_iso, d_iso,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("ai_feed daily_trend 取 %s 失败(跳过): %s", d_iso, e)
+            continue
+        # 取关键指标(去 yoy, 走势只看本期值)
+        reception = kpi.get("reception") or {}
+        out.append({
+            "date": d_iso,
+            "reception": reception.get("value"),
+            "device_count": reception.get("device_count"),
+            "refund_count": (kpi.get("refund_count") or {}).get("value"),
+            "refund_amount": (kpi.get("refund_amount") or {}).get("value"),
+            "complaint": (kpi.get("complaint") or {}).get("value"),
+        })
+    return out
 
 
 def _compact_specialty(by_specialty) -> list[dict]:
@@ -137,7 +393,7 @@ def _trim_feed(feed: dict) -> str:
 # (#98 层2): 这些段体积小但语义关键(period/date_start/end 喂窗口,
 # _spec 喂口径单位), 截掉会让模型答错窗口或金额单位。
 _CONSTANT_FEED_KEYS = ("period", "date", "date_start", "date_end",
-                       "generated_at", "_spec", "range")
+                       "generated_at", "_spec", "range", "daily_trend")
 
 
 def _select_feed_sections(feed: dict, scope: str | None) -> dict:

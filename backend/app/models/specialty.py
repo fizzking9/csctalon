@@ -50,6 +50,13 @@ class Specialty(IDMixin, TimestampMixin, Base):
     valid_from: Mapped[date | None] = mapped_column(Date, nullable=True, comment="专项生效日期(临时专项用)")
     valid_to: Mapped[date | None] = mapped_column(Date, nullable=True, comment="专项结束日期(临时专项用)")
 
+    # 对应 today_staff_efficiency 的字段名(格式 'sp_xxx,pp_xxx');
+    # 替代 external._BUCKET 硬编码, 由 DB 配置驱动(2026-09-15 #98 重构)
+    efficiency_field: Mapped[str | None] = mapped_column(
+        String(64), nullable=True,
+        comment="对应 today_staff_efficiency 的字段名, 格式 'sp_xxx,pp_xxx'; NULL=不参与会话/设备统计",
+    )
+
     # 当前负责人镜像(由历史表同步,便于查询)
     current_lead_id: Mapped[int | None] = mapped_column(ForeignKey("persons.id"), nullable=True, comment="当前专项负责人ID(支持轮岗)")
     current_deputy_lead_id: Mapped[int | None] = mapped_column(ForeignKey("persons.id"), nullable=True, comment="当前副负责人ID")
