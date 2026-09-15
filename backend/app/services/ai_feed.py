@@ -302,10 +302,11 @@ def _compact_refund_recovery(rr: dict) -> dict:
     }
     staff = rr.get("staff_detail") or []
     if isinstance(staff, list):
+        # 过滤 total_sn=0 的人员(无挽回数据), 按 total_sn 倒序取 top5(与 staff_top5 对齐, 控 token)
         staff_sorted = sorted(
-            [s for s in staff if isinstance(s, dict)],
+            [s for s in staff if isinstance(s, dict) and (s.get("total_sn") or 0) > 0],
             key=lambda x: x.get("total_sn") or 0, reverse=True,
-        )[:10]
+        )[:5]
         staff_compact = [
             {"name": s.get("name") or s.get("operator"),
              "total_sn": s.get("total_sn"),
