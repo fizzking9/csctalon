@@ -169,7 +169,7 @@
         <div v-if="!isPlaceholder" class="table-area">
           <div class="table-header">
             <div class="header-info">
-              <el-icon><Database /></el-icon>
+              <el-icon><Coin /></el-icon>
               <span class="source-name">{{ currentSource.name_cn }}</span>
               <!-- 显示物理表名而非 code: 落实「中文名↔表名一一对应」,让人能直接对照库 -->
               <el-tag type="info" size="small">{{ currentSource.table_name }}</el-tag>
@@ -241,7 +241,7 @@
       <!-- 空状态 -->
       <div v-else class="empty-area">
         <el-empty description="请选择一个数据源查看数据" :image-size="120">
-          <template #image><el-icon size="64"><Database /></el-icon></template>
+          <template #image><el-icon size="64"><Coin /></el-icon></template>
         </el-empty>
       </div>
     </div>
