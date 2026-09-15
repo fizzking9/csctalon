@@ -1,4 +1,4 @@
-"""共享文档「版本探测闸门」判据对照实验（工单 #79 验证用）
+"""共享文档「版本探测闸门」判据对照实验（工单 #109 验证用）
 
 **用途**：验证 `probe_doc_version()` 返回的版本串，是否与「入库内容」真实变化一致。
 这是开启 `SKIP_EXPORT_IF_UNCHANGED` 前置条件 —— 若判据会**漏报**（内容变了但
@@ -9,7 +9,7 @@
 
 **用法**（生产容器内，只读，不写业务表）：
     docker exec -e PYTHONPATH=/app csctalon-backend \
-        python /app/uploads/probe_verdict_check.py
+        python /app/scripts/probe_verdict_check.py
 
 **判读**：
 - `✅ 一致`     版本变 且 内容也变  → 判据可信
