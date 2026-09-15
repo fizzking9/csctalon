@@ -198,6 +198,17 @@ def _enrich_with_today_kanban(db: Session, feed: dict, start_s: str, end_s: str)
     except Exception as e:  # noqa: BLE001
         logger.warning("ai_feed enrich today:hourly 失败(忽略): %s", e)
 
+    # #107 (2026-09-15): 补退款挽回(设备成功/失败 + 按人员 + 按类型), 复用今日看板 today:rr 缓存
+    try:
+        rr = cached_call(
+            f"today:rr:None:{start_s}:{end_s}",
+            cache_ttl_for(start_s, end_s, 60),
+            A.refund_recovery_analysis, db, None, start_s, end_s,
+        )
+        feed["refund_recovery"] = _compact_refund_recovery(rr)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ai_feed enrich today:refund-recovery 失败(忽略): %s", e)
+
 
 def _compact_reception_breakdown(rb: dict) -> dict:
     """压缩 today_reception_breakdown: 仅留 categories + top_staff 前5(去逐条明细)。"""
@@ -266,6 +277,55 @@ def _compact_hourly_trend(ht: dict) -> dict:
         "complaint": ht.get("complaint") or [],
         "complaint_done": ht.get("complaint_done") or [],
     }
+
+
+def _compact_refund_recovery(rr: dict) -> dict:
+    """压缩 refund_recovery_analysis: 留总体KPI + 人员top10 + 原因top5(去逐笔明细/周趋势)。
+
+    保留:
+      - kpi: total_sn/success_sn/failed_sn/success_rate + 成功/失败/放弃笔数
+      - staff_detail: top10(按total_sn) 的 name/total_sn/success_sn/failed_sn/success_rate
+      - reason_dist: top5 的 reason/order_cnt/success_rate
+    AI 可据此分析"退款挽回成功率、谁挽回得好、哪类退款难挽回"。
+    """
+    if not isinstance(rr, dict):
+        return {}
+    kpi = rr.get("kpi") or {}
+    kpi_compact = {
+        "total_sn": kpi.get("total_sn"),
+        "success_sn": kpi.get("success_sn"),
+        "failed_sn": kpi.get("failed_sn"),
+        "success_rate": kpi.get("success_rate"),
+        "success_cnt": kpi.get("success_cnt"),
+        "fail_cnt": kpi.get("fail_cnt"),
+        "abandon_cnt": kpi.get("abandon_cnt"),
+    }
+    staff = rr.get("staff_detail") or []
+    if isinstance(staff, list):
+        staff_sorted = sorted(
+            [s for s in staff if isinstance(s, dict)],
+            key=lambda x: x.get("total_sn") or 0, reverse=True,
+        )[:10]
+        staff_compact = [
+            {"name": s.get("name") or s.get("operator"),
+             "total_sn": s.get("total_sn"),
+             "success_sn": s.get("success_sn"),
+             "failed_sn": s.get("failed_sn"),
+             "success_rate": s.get("success_rate")}
+            for s in staff_sorted
+        ]
+    else:
+        staff_compact = []
+    reasons = rr.get("reason_dist") or []
+    if isinstance(reasons, list):
+        reasons_compact = [
+            {"reason": r.get("reason"), "order_cnt": r.get("order_cnt"),
+             "success_rate": r.get("success_rate")}
+            for r in reasons[:5] if isinstance(r, dict)
+        ]
+    else:
+        reasons_compact = []
+    return {"kpi": kpi_compact, "by_staff": staff_compact, "by_reason": reasons_compact}
 
 
 def _compact_staff_efficiency(eff: dict) -> list[dict]:
@@ -425,7 +485,8 @@ def _trim_feed(feed: dict) -> str:
 # (#98 层2): 这些段体积小但语义关键(period/date_start/end 喂窗口,
 # _spec 喂口径单位), 截掉会让模型答错窗口或金额单位。
 _CONSTANT_FEED_KEYS = ("period", "date", "date_start", "date_end",
-                       "generated_at", "_spec", "range", "daily_trend", "hourly_trend")
+                       "generated_at", "_spec", "range", "daily_trend",
+                       "hourly_trend", "refund_recovery")
 
 
 def _select_feed_sections(feed: dict, scopes) -> dict:
