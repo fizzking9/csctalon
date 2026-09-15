@@ -63,6 +63,10 @@ def _payload(messages: list[dict], model: str, *, temperature: float = 0.2,
 
     兼容性: 部分非 DeepSeek 服务对未知 thinking 键会 400, llm_client 在 400 时
     去掉 thinking 重试一次(由调用方继续重试逻辑)。
+
+    #111 (2026-09-15): ollama+Qwen3 系列默认 thinking=on 会烧光 max_tokens 致 content 空。
+    修复: thinking=disabled 时同时传 chat_template_kwargs={enable_thinking:false} —
+    DeepSeek/OpenAI 官方端点忽略未知字段(无害), ollama 端点正确禁用 thinking。
     """
     body: dict[str, Any] = {
         "model": model,
@@ -75,6 +79,8 @@ def _payload(messages: list[dict], model: str, *, temperature: float = 0.2,
     thinking = (thinking or "disabled").strip().lower()
     if thinking == "disabled":
         body["thinking"] = {"type": "disabled"}
+        # Qwen3 系列在 ollama 里禁用 thinking 的正确字段; 对 DeepSeek/OpenAI 官方端点无害
+        body["chat_template_kwargs"] = {"enable_thinking": False}
     elif thinking in ("low", "high"):
         body["thinking"] = {"type": "enabled"}
         body["reasoning_effort"] = thinking

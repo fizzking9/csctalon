@@ -182,6 +182,34 @@ async def test_llm_client_success(monkeypatch):
     assert out == "分析结果"
 
 
+def test_payload_thinking_disabled_adds_chat_template_kwargs():
+    """#111: thinking=disabled 必须同时传 chat_template_kwargs={enable_thinking:false},
+    否则 ollama+Qwen3 系列默认 thinking=on 会烧光 max_tokens 致 content 空。
+    DeepSeek/OpenAI 官方端点会忽略该未知字段(无害)。
+    """
+    body = llm_client._payload(
+        [{"role": "user", "content": "hi"}],
+        model="qwen3.8:27b",
+        max_tokens=200,
+        thinking="disabled",
+    )
+    assert body["thinking"] == {"type": "disabled"}
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_payload_thinking_low_no_chat_template_kwargs():
+    """thinking=low/high 时不加 chat_template_kwargs (保持 reasoning_effort 控制)。"""
+    body = llm_client._payload(
+        [{"role": "user", "content": "hi"}],
+        model="deepseek-v4-flash",
+        max_tokens=200,
+        thinking="low",
+    )
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["reasoning_effort"] == "low"
+    assert "chat_template_kwargs" not in body
+
+
 @pytest.mark.asyncio
 async def test_llm_client_retry_then_success(monkeypatch):
     """429 两次后 200 → 最终成功(transient 重试)。"""
