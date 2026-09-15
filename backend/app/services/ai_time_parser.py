@@ -34,10 +34,13 @@
 而不是被「本月」扩成 1 日~今天。
 """
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import date as _date
 from datetime import datetime, timedelta, timezone
+
+from app.core.config import settings
 
 TZ_CN = timezone(timedelta(hours=8))
 
@@ -300,3 +303,94 @@ def _to_intent(lo: _date, hi: _date, matched: str) -> TimeIntent:
     return TimeIntent(kind="range", start=lo.isoformat(), end=hi.isoformat(),
                       matched=matched,
                       label=f"{lo.isoformat()} ~ {hi.isoformat()}({matched}, 共{(hi - lo).days + 1}天)")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# LLM 兜底语义解析 (2026-09-15 #98, 混合方案: 正则优先 + LLM 兜底)
+# ─────────────────────────────────────────────────────────────────────
+# 触发条件: parse_time_intent 正则未命中任何时间表达(kind="none")。
+# 设计要点:
+#   · 仅在正则完全没识别到时才调 LLM, 95% 常规表达走正则(<1ms, 免费, 确定)
+#   · LLM 输出严格 JSON, 后端校验日期合法性 + 不晚于今天(防幻觉)
+#   · confidence < 0.7 → 退回 period 默认(保守优先, 防错误窗口)
+#   · LLM 调用失败/超时 → 静默退回 period(不影响主链路)
+_LLM_TIME_PROMPT = """你是一个中文时间窗口解析器。用户问句中可能包含时间表达, 请解析为日期区间。
+
+【今天日期】{today} (北京时间)
+
+【任务】从用户问句中识别时间窗口, 输出严格 JSON, 不要有任何解释文字:
+{{
+  "start": "YYYY-MM-DD",      // 窗口开始日期(含), 没有则 null
+  "end": "YYYY-MM-DD",        // 窗口结束日期(含), 没有则 null
+  "confidence": 0.0-1.0,      // 对解析结果的置信度
+  "matched": "命中的时间表达原文"  // 如 "上周三" / "近半个月", 没有则 null
+}}
+
+【规则】
+1. 相对今天计算, 所有日期必须 ≤ 今天日期
+2. "上周"=上一个完整自然周(周一~周日); "本周"=本周一~今天
+3. "近N天/最近N天"=今天往前 N-1 天到今天(含今天)
+4. "上个月"=上个月完整月(1日~月末)
+5. 若问句中完全没有时间表达, 返回 confidence=0, start/end/matched=null
+6. 只输出 JSON, 不要输出 markdown 代码块标记或解释
+
+【用户问句】{question}"""
+
+
+async def llm_parse_time_intent(question: str, *, today: _date | None = None) -> TimeIntent:
+    """LLM 兜底语义解析: 仅在正则未命中时调用。
+
+    返回 TimeIntent; 任一环节失败(LLM 未配置/超时/JSON 解析错/日期非法/
+    confidence<0.7)一律返回 _NONE, 让上层退回 period 默认窗口。
+
+    ⚠️ 本函数是**兜底**而非主路径, 调用方应先跑 parse_time_intent, 仅当其
+       is_effective=False 时才调用本函数。
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+    if not settings.LLM_BASE_URL or not settings.LLM_MODEL:
+        _log.debug("llm_parse_time_intent: LLM 未配置, 跳过")
+        return _NONE
+    today = today or today_cn()
+    try:
+        from app.services.llm_client import chat_completion
+        content = await chat_completion(
+            [{"role": "user", "content": _LLM_TIME_PROMPT.format(today=today.isoformat(), question=question)}],
+            temperature=0.0, max_tokens=300, timeout_s=15,
+        )
+    except Exception as e:  # noqa: BLE001  兜底失败不影响主链路
+        _log.warning("llm_parse_time_intent 调用失败(忽略): %s", e.__class__.__name__)
+        return _NONE
+
+    # 解析 JSON(容错: 去掉可能的 markdown 代码块标记)
+    text = (content or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        _log.warning("llm_parse_time_intent JSON 解析失败: %s", text[:100])
+        return _NONE
+    if not isinstance(obj, dict):
+        return _NONE
+
+    start_s = obj.get("start")
+    end_s = obj.get("end")
+    confidence = float(obj.get("confidence") or 0)
+    matched = obj.get("matched")
+    # 置信度不足 → 退回默认
+    if confidence < 0.7 or not start_s or not end_s:
+        _log.info("llm_parse_time_intent confidence=%.2f 不足, 退回默认", confidence)
+        return _NONE
+    # 日期合法性校验 + 不晚于今天
+    try:
+        s_d = _date.fromisoformat(start_s)
+        e_d = _date.fromisoformat(end_s)
+    except (ValueError, TypeError):
+        _log.warning("llm_parse_time_intent 日期非法: start=%s end=%s", start_s, end_s)
+        return _NONE
+    if s_d > today or e_d > today or s_d > e_d:
+        _log.warning("llm_parse_time_intent 日期越界: start=%s end=%s today=%s", start_s, end_s, today)
+        return _NONE
+    return _to_intent(s_d, e_d, matched or "LLM语义解析")

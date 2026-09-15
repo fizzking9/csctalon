@@ -185,6 +185,17 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
     # 窗口解析(显式参数校验 + 自然语言识别)
     win = _AiWindow(payload)
     win.resolve(q)
+    # #98 (2026-09-15) LLM 兜底: 正则未命中(window_source=="period")时, 调 LLM 语义解析
+    #   仅兜底路径, 95% 常规表达走正则(<1ms); LLM 失败/低置信度静默退回 period。
+    if win.window_source == "period":
+        from app.services.ai_time_parser import llm_parse_time_intent
+        _llm_intent = await llm_parse_time_intent(q)
+        if _llm_intent.is_effective:
+            win.start, win.end = _llm_intent.start, _llm_intent.end
+            win.date = None
+            win.window_source = "nl_llm"
+            win.window_label = _llm_intent.label
+            logger.info("ai analyze LLM 时间兜底命中: %s", _llm_intent.label)
     eff = win.effective()
     logger.info("ai analyze 窗口: source=%s label=%s period=%s start=%s end=%s",
                 win.window_source, win.window_label, eff["period"], eff["start"], eff["end"])
