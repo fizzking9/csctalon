@@ -189,6 +189,30 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
     logger.info("ai analyze 窗口: source=%s label=%s period=%s start=%s end=%s",
                 win.window_source, win.window_label, eff["period"], eff["start"], eff["end"])
 
+    # #98 层3: 规则层秒回(纯取数问句不入队 LLM, 毫秒级)。
+    # 命中 → 直接返回 success(返回结构与 LLM 路径一致, 前端零改);
+    # 未命中/取数空 → 返回 None 继续 LLM 路径(零侵入)。
+    # 窗口回显与 LLM 路径一致(让用户核对窗口, 识别错误可立刻发现)。
+    window_info = {
+        "window_source": win.window_source,
+        "window_label": win.window_label,
+        "period": eff["period"],
+        "start": eff["start"],
+        "end": eff["end"],
+    }
+    from app.core.database import SessionLocal
+    from app.services.ai_rule_engine import try_rule_answer
+    _rule_db = SessionLocal()
+    try:
+        _rule_md = try_rule_answer(_rule_db, q, {**eff, "window_label": win.window_label})
+    finally:
+        _rule_db.close()
+    if _rule_md is not None:
+        logger.info("ai rule short-circuit: question=%r out_chars=%d window_source=%s",
+                    q[:30], len(_rule_md), win.window_source)
+        return R(data={"task_id": None, "status": "success",
+                       "result_md": _rule_md, **window_info})
+
     async def _runner(task):
         """后台执行: 建独立 Session 组装 feed → 调 LLM → 写回 task。"""
         t0 = time.perf_counter()
@@ -231,14 +255,7 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
                                      start=eff["start"], end=eff["end"],
                                      window_source=win.window_source,
                                      window_label=win.window_label)
-    # 窗口回显(工单 #66): 让用户看见"到底按哪个窗口统计的", 识别错误可立刻发现。
-    window_info = {
-        "window_source": win.window_source,
-        "window_label": win.window_label,
-        "period": eff["period"],
-        "start": eff["start"],
-        "end": eff["end"],
-    }
+    # window_info 已在 #98 层3 短路入口前构造(规则层与 LLM 路径共用, 避免重复)
     # 首查同步等待(2026-09-04 提速): AI 任务通常 3~6s 完成, 前端若走 2s 轮询需等
     # 8~10s 才有输出。这里最多等 AI_SYNC_WAIT_S 秒直接拿结果; 超时才返回 task_id 走轮询兜底。
     wait_s = float(getattr(settings, "AI_SYNC_WAIT_S", 6.0) or 6.0)

@@ -510,3 +510,66 @@ def test_build_messages_scope_refund_drops_complaint(db):
     assert '"reception": {' not in user_content
     # refund 顶层段(dict)保留
     assert '"refund": {' in user_content
+
+
+# ── #98 层3: 规则层秒回 ──────────────────────────────────────
+def test_rule_engine_refund_count_hit(db):
+    """问'今日退款多少笔' → 命中 refund 规则, 返回含退款笔数/金额/涉诉率的 Markdown。"""
+    from app.services.ai_rule_engine import try_rule_answer
+    eff = {"period": "daily", "date": "2026-07-15",
+            "start": None, "end": None, "window_label": "2026-07-15(指定日期)"}
+    md = try_rule_answer(db, "今日退款多少笔", eff)
+    assert md is not None
+    assert "退款笔数" in md
+    assert "退款金额" in md
+    assert "涉诉率" in md
+    assert "2026-07-15" in md  # 窗口回显
+
+
+def test_rule_engine_analysis_word_falls_back(db):
+    """问句含推理词'分析' → 返回 None 回退 LLM(规则层不接推理类)。"""
+    from app.services.ai_rule_engine import try_rule_answer
+    eff = {"period": "daily", "date": "2026-07-15",
+            "start": None, "end": None, "window_label": "今日"}
+    assert try_rule_answer(db, "分析下今日退款的策略", eff) is None
+    assert try_rule_answer(db, "今日退款情况如何改善", eff) is None
+
+
+def test_rule_engine_miss_scope_falls_back(db):
+    """问句未命中 scope 关键词 → 返回 None 回退 LLM。"""
+    from app.services.ai_rule_engine import try_rule_answer
+    eff = {"period": "daily", "date": "2026-07-15",
+            "start": None, "end": None, "window_label": "今日"}
+    assert try_rule_answer(db, "今日经营怎么样", eff) is None
+    assert try_rule_answer(db, "给点建议", eff) is None
+
+
+def test_ai_analyze_rule_short_circuits_refund(manager_client):
+    """端到端: POST /ai/analyze 问'今日退款多少笔' → status=success + task_id=None(不入队)。
+
+    规则层秒回, 不走 LLM。返回结构与 LLM 路径一致(前端零改兼容)。
+    """
+    r = manager_client.post("/api/v1/ai/analyze",
+                            json={"question": "今日退款多少笔", "period": "daily"})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["status"] == "success"
+    assert data.get("task_id") is None  # 规则层不入队
+    assert "退款笔数" in data.get("result_md", "")
+    assert "window_label" in data  # 窗口回显
+
+
+def test_ai_analyze_analysis_question_still_uses_llm(manager_client):
+    """端到端: 问'分析下今日经营' → 不命中规则层, 走 LLM 路径(入队 task_id 非空)。
+
+    验证规则层未误伤推理类问句。LLM 路径可能 success(快)/running(慢)/failed(配置缺),
+    都接受; 关键是**入队了**(task_id 非空), 不是规则层秒回(task_id=None)。
+    测试环境常缺 LLM_BASE_URL → failed, 但只要 task_id 非空就证明走了 LLM 路径。
+    """
+    r = manager_client.post("/api/v1/ai/analyze",
+                            json={"question": "分析下今日经营给点建议", "period": "daily"})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    # 走 LLM 路径: 入队 → task_id 非空(规则层秒回时 task_id=None)
+    assert data.get("task_id") is not None, "推理类问句不该命中规则层(应入队 LLM)"
+    assert data["status"] in ("success", "running", "failed")
