@@ -442,6 +442,13 @@ const routes = [
         component: () => import('@/views/system/AiFocusConfigs.vue'),
         meta: { title: 'AI 助手提示词', icon: 'MagicStick', admin: true },
       },
+      {
+        // #108: LLM 多 Provider 管理(本地 Talon / 云端 DeepSeek 等)
+        path: 'system/llm-providers',
+        name: 'SystemLlmProviders',
+        component: () => import('@/views/system/LlmProviders.vue'),
+        meta: { title: 'LLM 模型接入', icon: 'Cpu', admin: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },

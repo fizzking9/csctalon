@@ -136,11 +136,15 @@ class Settings(BaseSettings):
     # OpenAI 兼容完整前缀(是否含 /v1 以服务商为准, llm_client 统一拼 /chat/completions):
     #   DeepSeek 官方 = https://api.deepseek.com (不带 /v1)
     #   本地 Ollama = http://127.0.0.1:11434/v1
+    # ⚠️ 工单 #108: 此项为「.env 单源模式」兜底; DB 多 Provider 模式(llm_providers 表)
+    #   优先, 库为空时才走 .env 单源。建议同时配置(库 provider 全失败时仍可兜底)。
     LLM_BASE_URL: str = ""
     # API key(DeepSeek 等云端必填); 经环境变量注入, 严禁硬编码/入库/进日志。本地无鉴权服务可留空。
     LLM_API_KEY: str = ""
     # 模型名(一期=deepseek-v4-flash; 二期切本地私有化如 qwen2.5:27b, 仅改本配置)。
     LLM_MODEL: str = ""
+    # Talon 网关 admin key(工单 #108: alembic seed 默认 Provider 用; 运维可在管理界面改)
+    TALON_API_KEY: str = ""
     # DeepSeek 思考模式(取数问答建议 disabled 或 low 以省 token/降延迟): disabled/low/high。
     LLM_THINKING: str = "disabled"
     # 生成 read 超时(秒); 云端/本地生成可能数十秒, 单独放宽。

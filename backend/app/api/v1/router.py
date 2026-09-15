@@ -27,6 +27,7 @@ from app.api.v1 import (
     integrations,
     invoices,
     kb_articles,
+    llm_providers,
     match,
     measures,
     metrics,
@@ -109,6 +110,7 @@ api_router.include_router(schedules.router)
 api_router.include_router(source_groups.router)
 api_router.include_router(invoices.router)
 api_router.include_router(kb_articles.router)
+api_router.include_router(llm_providers.router)
 api_router.include_router(alerts.router)
 api_router.include_router(metrics.router)
 api_router.include_router(channels.router)

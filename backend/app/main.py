@@ -280,10 +280,13 @@ def _cleanup_zombie_running_tasks() -> None:
 
 
 def _start_bms_scheduler() -> None:
-    """启动 BMS 定时同步调度器(如果配置了自动启动) + 独立缓存预热
+    """启动 BMS 定时同步调度器(如果配置了自动启动) + 独立缓存预热 + LLM 模型预热
 
     缓存预热(启动预热+空闲期每分钟)与定时同步解耦: 即使 BMS_SCHEDULE_AUTOSTART=False,
     也独立启动预热循环, 避免看板缓存永不预热、过期后冷加载重查询超时。
+
+    工单 #108 (2026-09-15): LLM 模型预热独立挂在这里(不受调度器启停影响),
+    让 Talon/Ollama 模型常驻显存, 用户首次问句走热路径。
     """
     # 独立预热循环: 不依赖调度器是否启动(见 cache_warmer.start_warm_loop)
     try:
@@ -291,6 +294,12 @@ def _start_bms_scheduler() -> None:
         start_warm_loop()
     except Exception as _e:  # noqa: BLE001  预热失败不影响服务启动
         logger.warning(f"独立缓存预热启动失败(不影响服务): {_e}")
+    # LLM 模型预热(启动后延迟 30s 异步触发, 失败不影响业务)
+    try:
+        from app.services.llm_warmup import warmup_on_startup
+        warmup_on_startup()
+    except Exception as _e:  # noqa: BLE001
+        logger.warning(f"LLM 模型预热启动失败(不影响服务): {_e}")
     if not settings.BMS_SCHEDULE_AUTOSTART:
         logger.info("BMS 定时同步未开启自动启动(BMS_SCHEDULE_AUTOSTART=False)")
         return

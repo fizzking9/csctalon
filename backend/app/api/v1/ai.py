@@ -245,6 +245,7 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
             result = await llm_client.chat_completion(
                 messages,
                 max_tokens=int(getattr(settings, "AI_MAX_TOKENS", 1500) or 1500),
+                db=db, source="ai_analyze",
             )
             task.result_md = result
             # 埋点(工单 #66 C3): 让生产可统计耗时与窗口来源, 定位"同步等待越线"。

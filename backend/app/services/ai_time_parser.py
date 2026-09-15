@@ -345,19 +345,43 @@ async def llm_parse_time_intent(question: str, *, today: _date | None = None) ->
 
     ⚠️ 本函数是**兜底**而非主路径, 调用方应先跑 parse_time_intent, 仅当其
        is_effective=False 时才调用本函数。
+
+    工单 #108 (2026-09-15): 切到 DB 多 Provider 模式; 库为空时仍按 .env 兜底。
     """
     import logging
     _log = logging.getLogger(__name__)
-    if not settings.LLM_BASE_URL or not settings.LLM_MODEL:
-        _log.debug("llm_parse_time_intent: LLM 未配置, 跳过")
-        return _NONE
     today = today or today_cn()
+    # DB 模式: 优先查 Provider; 库为空回退 .env 模式(由 chat_completion 内部判断)
     try:
         from app.services.llm_client import chat_completion
-        content = await chat_completion(
-            [{"role": "user", "content": _LLM_TIME_PROMPT.format(today=today.isoformat(), question=question)}],
-            temperature=0.0, max_tokens=300, timeout_s=15,
-        )
+        from app.core.database import SessionLocal
+        from app.services import llm_provider_service
+        _db = SessionLocal()
+        try:
+            _providers = llm_provider_service.get_active_providers(_db)
+            _db.close()
+        except Exception:
+            _db.close()
+            _providers = []
+    except Exception as e:  # noqa: BLE001  兜底失败不影响主链路
+        _log.warning("llm_parse_time_intent: get_active_providers 失败: %s", e)
+        _providers = []
+    # 库为空 + .env 也未配置 → 跳过(原 v1.0 行为)
+    if not _providers and not (settings.LLM_BASE_URL and settings.LLM_MODEL):
+        _log.debug("llm_parse_time_intent: 无可用 Provider + .env 未配置, 跳过")
+        return _NONE
+    try:
+        from app.services.llm_client import chat_completion
+        # 复用一个独立 Session 给本次调用记录审计日志
+        _log_db = SessionLocal()
+        try:
+            content = await chat_completion(
+                [{"role": "user", "content": _LLM_TIME_PROMPT.format(today=today.isoformat(), question=question)}],
+                temperature=0.0, max_tokens=300, timeout_s=15,
+                db=_log_db, source="llm_time_parse",
+            )
+        finally:
+            _log_db.close()
     except Exception as e:  # noqa: BLE001  兜底失败不影响主链路
         _log.warning("llm_parse_time_intent 调用失败(忽略): %s", e.__class__.__name__)
         return _NONE
