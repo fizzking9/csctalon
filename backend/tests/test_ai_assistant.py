@@ -64,14 +64,28 @@ def test_glossary_routes_complaint():
     assert "登记" in ctx and "处理" in ctx
 
 
-def test_glossary_fallback_all():
-    """未命中任何域关键词 → 全量口径卡兜底。"""
+def test_glossary_fallback_minimal():
+    """#115: 未命中任何域关键词 → 极简全域卡兜底, 含四类 _spec 缺失判据且大幅瘦身。"""
+    from app.services.ai_glossary import glossary_all
     ctx = glossary_for_question("随便聊聊这个系统")
-    # 全量 = 所有口径卡都应在
-    assert "投诉三源分类" in ctx
-    assert "退款金额口径" in ctx
-    assert "涉诉率" in ctx
+    # 四类必备口径都在: 三源 / 四路 / 接待 / yoy 对比期语义
+    assert "投诉三源" in ctx
+    assert "四路经营合计" in ctx
     assert "接待量=客服处理记录数" in ctx
+    assert "对比期语义" in ctx and "yoy_value" in ctx
+    # 已被 feed._spec 覆盖的口径(涉诉率定义 / lead 双体系)不在 glossary 重复
+    assert "涉诉率=涉诉金额" not in ctx
+    assert "行政组长" not in ctx
+    # 体积约束: ≤350 字符(实测 327, 含英文术语), 较全量 1287 字符降 70%+
+    assert len(ctx) <= 350
+    assert len(ctx) < len(glossary_all()) * 0.3
+
+
+def test_glossary_hit_route_unchanged():
+    """#115: 命中域关键词仍走原子集(退款卡原文), 不受极简兜底影响。"""
+    ctx = glossary_for_question("今日退款如何")
+    assert "退款金额口径=四路经营合计" in ctx  # 原 refund_routes 卡原文
+    assert "投诉三源: 内部=商品/服务投诉" not in ctx  # 极简兜底卡不应出现
 
 
 # ── ai_feed.build_messages ───────────────────────────────────

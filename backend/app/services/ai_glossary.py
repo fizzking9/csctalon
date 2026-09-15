@@ -104,8 +104,31 @@ GLOSSARY_ROUTE: dict[str, tuple[str, ...]] = {
 }
 
 
+# ── #115 (2026-09-15): 未命中泛问的极简兜底口径(替代原全量 8 卡 1287 字符) ──────
+# 场景: 问句未命中 GLOSSARY_ROUTE 任一域关键词(如「今天整体怎么样」「帮我看看今天」),
+#   此时 feed 是**全量**的(四路退款/三源投诉/接待都在)。但 feed._spec
+#   (external._spec_brief) 已覆盖: 登记/处理/积压定义、涉诉率、金额单位、lead 双体系。
+#   故兜底只补 _spec **缺失**的四类判据, 不重复、不新增口径、语义不漂移;
+#   实测 327 字符(含 yoy_value/SN/12315 等英文术语, 中文正文约 250 字), 较全量
+#   1287 字符降 75%。字数让位于判据完整, 不再强压 300。
+# 第 4 条恒含【对比期语义】+ yoy_value 字样: 泛问常带"昨天/对比"等词, 必须保留
+#   #66 防幻觉约束(不得拿同比汇总值当昨日完整明细), 与原 timezone 卡同义。
+_FALLBACK_MINIMAL: tuple[str, ...] = (
+    "投诉三源: 内部=商品/服务投诉; 商户号=微信投诉(独立单列,不并入内/外部); "
+    "外部=工信部/12315/消协/市监/12345+315/卡商群; "
+    "优先级:外部关键词>微信>商品/服务>其余归外部。",
+    "退款总额=四路经营合计:A线上直退+B钱包提现+C闪猫退款+D手动退款(按创建时间);"
+    "E=真实现金流仅对账、不并入;金额单位=元。",
+    "接待量=客服处理记录数(cs_record落窗口);服务设备数=去重SN;"
+    "会话数=智能助手接待+专项工单完工条数。",
+    "窗口按北京时间。【对比期语义】yoy_value/yoy_pct 仅为「上一等长周期」汇总值、"
+    "非完整明细:可讲环比,不得当昨日/上周明细展开;需独立明细按对应窗口另取,"
+    "禁止用yoy拼凑。",
+)
+
+
 def glossary_for_question(question: str) -> str:
-    """按问句关键词挑选口径卡子集; 未命中任何域则全量注入(自由问答兜底)。
+    """按问句关键词挑选口径卡子集; 未命中任何域则注入极简全域卡(#115)。
 
     返回拼好的口径说明文本(Prompt 的 Business Context 段)。
     """
@@ -118,7 +141,10 @@ def glossary_for_question(question: str) -> str:
                 if k not in picked:
                     picked.append(k)
     if not picked:
-        picked = list(GLOSSARY.keys())
+        # #115: 泛问兜底不再全量灌 8 卡(1287 字符), 改极简全域卡(327 字符),
+        # 补 feed._spec 缺失的三源/四路/接待/yoy 四类判据。第 4 条已含对比期语义,
+        # 故无需再走下方的对比词追加 timezone 逻辑, 直接返回。
+        return "\n".join(f"- {line}" for line in _FALLBACK_MINIMAL)
     # 对比类问句必须带上 timezone 卡(#66): 否则模型不知道 yoy 不是独立明细,
     # 会拿同比值当"昨天的数据"陈述, 这正是生产里"答昨日无数据/硬凑对比"的成因之一。
     if "timezone" not in picked and (any(w in q for w in _COMPARE_WORDS) or _COMPARE_DATE_RE.search(q)):
