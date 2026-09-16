@@ -397,6 +397,15 @@ class SyncTaskManager:
                     wt.add_done_callback(self._warm_bg_tasks.discard)
                 except Exception as we:  # noqa: BLE001  预热调度失败不影响同步
                     logger.debug(f"同步后预热调度失败(不影响): {we}")
+                # #129 高频同步成功后刷新当日日报(warm_on_sync_complete 内部含单飞锁
+                # + daily 20min 节流, weekly/monthly 不触发); 后台线程执行不阻塞同步收尾。
+                try:
+                    from app.services.ai_report_worker import warm_on_sync_complete
+                    at = asyncio.create_task(asyncio.to_thread(warm_on_sync_complete))
+                    self._warm_bg_tasks.add(at)
+                    at.add_done_callback(self._warm_bg_tasks.discard)
+                except Exception as ae:  # noqa: BLE001  AI 刷新失败不影响同步
+                    logger.debug(f"同步后 AI 日报刷新调度失败(不影响): {ae}")
 
     async def _on_progress(self, task_id: str, data_type: str, phase: str, data: Any):
         """进度回调写入 task 状态"""

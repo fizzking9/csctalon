@@ -24,6 +24,7 @@ import json
 import logging
 import threading
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
@@ -40,6 +41,13 @@ _TZ_CN = _dt.timezone(_dt.timedelta(hours=8))
 
 # 白天 8-23 才预热(与 cache_warmer.DAYTIME_HOURS 同步, 夜间无人访问省计算)
 _DAYTIME_HOURS = set(range(8, 24))
+
+# #129 日报随高频同步刷新的最小间隔保护(分钟):
+# 高频同步窗口 8-24 点每 30min 一轮, 设 20min 略短于同步周期 —— 正常每轮同步
+# 都会触发刷新; 仅当手动频繁同步(同步自身有 5min 冷却)或投诉推送恰好同时完成时,
+# 用此间隔挡掉过近的重复 LLM 调用。仅作用于"同步触发 daily"路径; sync-triggered
+# 模板不受限, warm_idle 09:00 定时兜底也走另一条路径不受此约束。
+_DAILY_SYNC_MIN_INTERVAL_MIN = 20
 
 # 进程级单飞锁(防并发: 同步完成 + 启动 + 空闲期可能同时触发)
 _worker_lock = threading.Lock()
@@ -309,11 +317,42 @@ def generate_for_template(db: Session, template: AiReportTemplate,
     }
 
 
-def warm_on_sync_complete() -> None:
-    """同步完成触发入口: 扫描 sync-triggered 模板, 依次生成。
+def _daily_generated_recently(db: Session, template_id: int, *, min_minutes: int) -> bool:
+    """#129 该日报模板「当日最近一条公共报告」是否在 min_minutes 内生成(节流判据)。
 
-    由 sync_task_manager._run_background finally 调用(待 #123 接入)。
-    失败仅 log + 通知中心, 不抛异常(不影响同步流程)。
+    created_at 为 tz-aware UTC(timestamptz), 与当前 UTC 比较; 对 naive 值补 UTC。
+    查询失败 fail-open(返回 False=未节流), 宁可多刷一次也不漏掉同步后的刷新。
+    """
+    today = _now_cn().strftime("%Y-%m-%d")
+    try:
+        latest = db.execute(
+            text("""SELECT MAX(created_at) FROM ai_reports
+                    WHERE template_id = :tid AND snapshot_date = :sdate AND is_public = TRUE"""),
+            {"tid": template_id, "sdate": today},
+        ).scalar()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("日报节流查询失败(template_id=%s), 按未节流处理: %s", template_id, e)
+        return False
+    if latest is None:
+        return False
+    if latest.tzinfo is None:
+        latest = latest.replace(tzinfo=_dt.timezone.utc)
+    elapsed_s = (_dt.datetime.now(_dt.timezone.utc) - latest).total_seconds()
+    return elapsed_s < min_minutes * 60
+
+
+def warm_on_sync_complete() -> None:
+    """同步完成触发入口(#129): sync-triggered 模板 + 当日日报(daily)随同步刷新。
+
+    - sync-triggered: 每次同步都触发, 无节流
+    - daily(#129): 跟随高频同步刷新(8-24 点每 30min 一轮), 加 20min 最小间隔保护,
+      正常每轮同步都能触发, 仅挡手动频繁同步/推送与同步同时完成的过近重复
+    - weekly/monthly: 不在此触发, 维持 warm_idle 按 trigger_at 一天一次
+
+    调用点:
+      - sync_task_manager._run_background finally(BMS 高频同步 success/partial)
+      - complaint_sync 投诉推送入库后(约 20min/次)
+    进程级单飞锁: 重叠触发直接跳过; 失败仅 log + 通知, 不影响同步主流程。
     """
     if not _worker_lock.acquire(blocking=False):
         logger.info("ai_report_worker warm_on_sync_complete: 已有 worker 在跑, 跳过")
@@ -322,17 +361,32 @@ def warm_on_sync_complete() -> None:
     try:
         rows = db.query(AiReportTemplate).filter(
             AiReportTemplate.is_active.is_(True),
-            AiReportTemplate.frequency == "sync-triggered",
+            AiReportTemplate.frequency.in_(["sync-triggered", "daily"]),
         ).order_by(AiReportTemplate.priority).all()
         if not rows:
             return
-        logger.info("ai_report_worker warm_on_sync_complete: %s 个 sync-triggered 模板待生成", len(rows))
-        for t in rows:
+        logger.info("ai_report_worker warm_on_sync_complete: %s 个模板(sync-triggered/daily)待评估",
+                    len(rows))
+        # 先取标量快照: 循环内 generate_for_template 会 commit(expire_on_commit),
+        # 之后再访问 ORM 对象属性会 lazy reload, 提前取出避免 detached/expired 隐患。
+        snapshot = [(t.id, t.code, t.frequency) for t in rows]
+        for tid, tcode, tfreq in snapshot:
             try:
-                # #127: 后台定时预生成(sync-triggered)挂 L0(最高优先, 可抢占 L1/L2)
-                generate_for_template(db, t, level=0)
+                # #129 仅 daily 走最小间隔节流; sync-triggered 每轮必跑
+                if tfreq == "daily" and _daily_generated_recently(
+                        db, tid, min_minutes=_DAILY_SYNC_MIN_INTERVAL_MIN):
+                    logger.info(
+                        "warm_on_sync_complete: 日报 %s 在 %smin 内已生成, 节流跳过",
+                        tcode, _DAILY_SYNC_MIN_INTERVAL_MIN)
+                    continue
+                # 需要完整模板对象构造 messages; id 稳定, 按快照 id 取并生成
+                tmpl = db.query(AiReportTemplate).get(tid)
+                if tmpl is None or not tmpl.is_active:
+                    continue
+                # #127: 同步触发的后台预生成挂 L0(最高优先, 可抢占 L1/L2)
+                generate_for_template(db, tmpl, level=0)
             except Exception as e:  # noqa: BLE001  单个模板失败不影响其他
-                logger.error("ai_report_worker: template=%s 生成失败: %s", t.code, e)
+                logger.error("ai_report_worker: template=%s 生成失败: %s", tcode, e)
     except Exception as e:  # noqa: BLE001  worker 失败不影响业务
         logger.error("ai_report_worker warm_on_sync_complete 异常(不影响业务): %s", e)
     finally:
