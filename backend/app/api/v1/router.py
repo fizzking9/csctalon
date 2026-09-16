@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    admin_ai,
     agenda,
     ai,
     alerts,
@@ -111,6 +112,7 @@ api_router.include_router(source_groups.router)
 api_router.include_router(invoices.router)
 api_router.include_router(kb_articles.router)
 api_router.include_router(llm_providers.router)
+api_router.include_router(admin_ai.router)  # #125 AI 报告与模板管理(admin)
 api_router.include_router(alerts.router)
 api_router.include_router(metrics.router)
 api_router.include_router(channels.router)

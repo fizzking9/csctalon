@@ -449,6 +449,13 @@ const routes = [
         component: () => import('@/views/system/LlmProviders.vue'),
         meta: { title: 'LLM 模型接入', icon: 'Cpu', admin: true },
       },
+      {
+        // #125: AI 报告模板管理(admin)
+        path: 'system/ai-templates',
+        name: 'SystemAiTemplates',
+        component: () => import('@/views/system/AiTemplates.vue'),
+        meta: { title: 'AI 报告模板', icon: 'Document', admin: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
