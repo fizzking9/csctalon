@@ -170,7 +170,11 @@ class Settings(BaseSettings):
     #   降输出 token 上限直接砍 llm_ms 大头。
     # #114 (2026-09-15): 800→500。qwen3.8:27b eval 31 tok/s, 800→500 省 9.7s;
     #   500 token≈1200 字符中文报告, 实测足够(典型业务报告 800-1500 字符)。
-    AI_MAX_TOKENS: int = 500
+    # #117 (2026-09-16): 500→800。#114 的 500 上限导致 LLM 想"长说"时被强制截断
+    #   (生产 ai_reports 表 id=1/3 completion_tokens=500 达顶, md_len 775/706 末尾不自然)。
+    #   实测 800 后 completion_tokens=598, md_len=914, 结尾自然收束; total_ms=46.7s
+    #   (微涨可接受), 不破坏 LLM client 60s timeout 上限。
+    AI_MAX_TOKENS: int = 800
     # ── AI_SYNC_WAIT_S (#98 修订 #93, 2026-09-15) ───────────────────────
     # analyze 首查「同步等待」上限：超过此秒数未出结果则改回 task_id 走前端轮询。
     #
