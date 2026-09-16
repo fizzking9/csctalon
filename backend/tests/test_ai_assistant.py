@@ -355,7 +355,7 @@ def test_llm_client_missing_base_url(monkeypatch):
     """未配置 base_url → LLMError(status=503)。"""
     monkeypatch.setattr(settings, "LLM_BASE_URL", "")
     with pytest.raises(llm_client.LLMError) as e:
-        llm_client._endpoint()
+        llm_client._endpoint("")  # _endpoint(base_url) 需显式传参
     assert e.value.status_code == 503
 
 
