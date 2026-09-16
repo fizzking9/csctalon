@@ -157,7 +157,11 @@ def generate_for_template(db: Session, template: AiReportTemplate) -> dict | Non
         return None
 
     # 调用 LLM(后台预生成: timeout_s=180, max_tokens=template.max_tokens)
+    # #123 注册到调度队列(供 /ai/queue-status 显示活跃数, 含后台预生成)
     llm_model_str = template.llm_provider_code or "auto"
+    from app.services.llm_scheduler import deregister as _dereg
+    from app.services.llm_scheduler import register as _reg
+    _reg()
     try:
         llm_result = llm_client.chat_completion(
             messages,
@@ -177,6 +181,8 @@ def generate_for_template(db: Session, template: AiReportTemplate) -> dict | Non
                               ensure_ascii=False),
         )
         return None
+    finally:
+        _dereg()
 
     # asyncio.run 包装(chat_completion 是 async, worker 同步入口)
     # 注意: 这里假设 worker 在非 asyncio 上下文调用(如 bms_scheduler to_thread);

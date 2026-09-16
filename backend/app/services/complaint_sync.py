@@ -875,6 +875,13 @@ def sync_complaints_from_payload(
                 # 复用同步后预热入口(含单飞锁+can_warm检查), 月报顺带刷新成本可忽略
                 from app.services.cache_warmer import warm_after_sync
                 warm_after_sync()
+                # #123 同步完成后触发 AI 报告预生成(sync-triggered 模板)
+                # 失败仅 log, 不影响同步流程(在 warm_after_sync 之后, 共用单飞锁)
+                try:
+                    from app.services.ai_report_worker import warm_on_sync_complete
+                    warm_on_sync_complete()
+                except Exception as ai_err:  # noqa: BLE001
+                    logger.warning(f"[complaint_sync] AI 报告预生成失败(不影响主流程): {ai_err}")
             except Exception as cache_err:
                 logger.warning(f"[complaint_sync] 缓存失效/预热失败(不影响主流程): {cache_err}")
 

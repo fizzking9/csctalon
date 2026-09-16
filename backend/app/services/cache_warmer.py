@@ -435,6 +435,12 @@ def start_warm_loop():
         try:
             await asyncio.sleep(8)
             await asyncio.to_thread(warm_on_startup)
+            # #123 AI 报告预生成: 启动延迟触发(白天 8-23 才跑, 夜间省计算)
+            try:
+                from app.services.ai_report_worker import warm_on_startup as ai_warm_startup
+                await asyncio.to_thread(ai_warm_startup)
+            except Exception:  # noqa: BLE001
+                pass
         except asyncio.CancelledError:
             return
         except Exception:  # noqa: BLE001  预热失败不影响服务
@@ -443,6 +449,12 @@ def start_warm_loop():
             try:
                 await asyncio.sleep(60)
                 await asyncio.to_thread(warm_idle)
+                # #123 AI 报告预生成: 每分钟扫描当前时刻匹配的 daily/weekly/monthly 模板
+                try:
+                    from app.services.ai_report_worker import warm_idle as ai_warm_idle
+                    await asyncio.to_thread(ai_warm_idle)
+                except Exception:  # noqa: BLE001
+                    pass
             except asyncio.CancelledError:
                 return
             except Exception:  # noqa: BLE001

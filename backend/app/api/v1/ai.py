@@ -318,12 +318,18 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                         len(q), build_ms)
             # #116 llm_result 是 LLMResult(继承 str), .usage 拿 token 统计
             # #120 前台实时路径显式传 timeout_s=60(用户等); 后台预生成走 #121 传 180
-            llm_result = await llm_client.chat_completion(
-                messages,
-                max_tokens=int(getattr(settings, "AI_MAX_TOKENS", 1500) or 1500),
-                timeout_s=60.0,
-                db=db, source="ai_analyze",
-            )
+            # #123 注册到调度队列(供 /ai/queue-status 显示活跃数)
+            from app.services.llm_scheduler import deregister, register
+            register()
+            try:
+                llm_result = await llm_client.chat_completion(
+                    messages,
+                    max_tokens=int(getattr(settings, "AI_MAX_TOKENS", 1500) or 1500),
+                    timeout_s=60.0,
+                    db=db, source="ai_analyze",
+                )
+            finally:
+                deregister()
             task.result_md = str(llm_result)
             total_ms_now = int((time.perf_counter() - t0) * 1000)
             llm_ms_now = total_ms_now - build_ms
@@ -462,6 +468,16 @@ def ai_reports_summary(db: DBSession, current_user: ManagerUser):
     is_admin = current_user.role == "admin"
     from app.services.ai_report_service import summary as _summary
     return R(data=_summary(db, current_user.id, is_admin))
+
+
+@router.get("/queue-status", response_model=R, summary="LLM 调度队列状态")
+def ai_queue_status(_: ManagerUser):
+    """返回当前 LLM 调度队列状态(供前端忙时提示)。
+
+    #123: 用户请求前可调此接口, 若 is_busy=true 前端显示"⏳ 当前 LLM 队列 N 个"。
+    """
+    from app.services.llm_scheduler import queue_status
+    return R(data=queue_status())
 
 
 @router.get("/reports/{report_id}", response_model=R, summary="AI 报告详情(本人或 admin)")
