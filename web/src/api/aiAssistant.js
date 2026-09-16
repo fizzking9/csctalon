@@ -40,3 +40,9 @@ export function aiReportsSummary() {
 export function aiReportDetail(reportId) {
   return request.get(`/ai/reports/${reportId}`)
 }
+
+// #126 P0-2 LLM 调度队列状态(忙时提示)
+// 返回 { active_count, queue_length, est_wait_s, is_busy, timestamp }
+export function aiQueueStatus() {
+  return request.get('/ai/queue-status')
+}

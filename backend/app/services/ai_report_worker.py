@@ -53,11 +53,16 @@ def _now_cn() -> _dt.datetime:
 def schedule_due_templates(db: Session) -> list[AiReportTemplate]:
     """扫描 ai_report_templates, 返回当前时刻应当触发的模板列表。
 
-    判定逻辑:
+    判定逻辑(#126 P0-3 修正 trigger_at 格式):
     - frequency=sync-triggered: 不在此扫描(由 warm_on_sync_complete 主动触发)
     - frequency=daily + trigger_at=HH:MM: 当前北京时间 HH:MM 在 ±1 分钟内
-    - frequency=weekly + trigger_at=wday:H:MM: 当前北京时间 wday:H:MM 在 ±1 分钟内
-    - frequency=monthly + trigger_at=day:H:MM: 当前北京时间 day:H:MM 在 ±1 分钟内
+    - frequency=weekly + trigger_at=wday-HH:MM: 当前北京时间 wday-HH:MM 在 ±1 分钟内
+    - frequency=monthly + trigger_at=day-HH:MM: 当前北京时间 day-HH:MM 在 ±1 分钟内
+
+    格式说明(#126 P0-3):
+    - 新格式(推荐): 用 `-` 分隔前缀与 HH:MM, 如 "1-09:00" (周一9点 / 每月1号9点)
+    - 旧格式(兼容): 用 `:` 三段, 如 "1:09:00", 解析为 wday/day + HH:MM
+    - daily 永远是 "HH:MM" (不含 `-`)
 
     返回按 priority 升序的模板列表(小先执行)。
     """
@@ -77,25 +82,21 @@ def schedule_due_templates(db: Session) -> list[AiReportTemplate]:
             continue
         try:
             if t.frequency == "daily":
-                # trigger_at = "HH:MM"
+                # trigger_at = "HH:MM" (不含 `-`, 与 weekly/monthly 区分)
                 if _hm_match(t.trigger_at, now_hm):
                     due.append(t)
             elif t.frequency == "weekly":
-                # trigger_at = "wday:HH:MM"  (如 "1:09:00" = 周一9点)
-                parts = t.trigger_at.split(":", 2)
-                if len(parts) == 3:
-                    wday = int(parts[0])
-                    hm = f"{parts[1]}:{parts[2]}"
-                    if wday == now_wday and _hm_match(hm, now_hm):
-                        due.append(t)
+                # 新格式: "wday-HH:MM" (如 "1-09:00" = 周一9点)
+                # 旧格式: "wday:HH:MM" (如 "1:09:00", #124 遗留, 兼容)
+                wday, hm = _parse_wday_hhmm(t.trigger_at)
+                if wday is not None and wday == now_wday and _hm_match(hm, now_hm):
+                    due.append(t)
             elif t.frequency == "monthly":
-                # trigger_at = "day:HH:MM"  (如 "1:09:00" = 每月1号9点)
-                parts = t.trigger_at.split(":", 2)
-                if len(parts) == 3:
-                    day = int(parts[0])
-                    hm = f"{parts[1]}:{parts[2]}"
-                    if day == now_day and _hm_match(hm, now_hm):
-                        due.append(t)
+                # 新格式: "day-HH:MM" (如 "1-09:00" = 每月1号9点)
+                # 旧格式: "day:HH:MM" (如 "1:09:00", #124 遗留, 兼容)
+                day, hm = _parse_wday_hhmm(t.trigger_at)
+                if day is not None and day == now_day and _hm_match(hm, now_hm):
+                    due.append(t)
         except (ValueError, IndexError):
             logger.warning("ai_report_template(id=%s code=%s) trigger_at=%s 解析失败, 跳过",
                            t.id, t.code, t.trigger_at)
@@ -104,6 +105,33 @@ def schedule_due_templates(db: Session) -> list[AiReportTemplate]:
     # 按 priority 升序(小先执行)
     due.sort(key=lambda x: x.priority)
     return due
+
+
+def _parse_wday_hhmm(trigger_at: str) -> tuple[int | None, str]:
+    """解析 weekly/monthly 的 trigger_at, 返回 (wday_or_day, HH:MM)。
+
+    支持两种格式(#126 P0-3 兼容):
+    - 新格式 "1-09:00" → (1, "09:00")  (用 `-` 分隔前缀与 HH:MM)
+    - 旧格式 "1:09:00" → (1, "09:00")  (用 `:` 三段, #124 遗留)
+    """
+    if not trigger_at:
+        return None, ""
+    # 新格式: 含 `-` 且 `-` 在 HH:MM 之前
+    if "-" in trigger_at:
+        prefix, _, hm = trigger_at.partition("-")
+        if ":" in hm:
+            try:
+                return int(prefix), hm
+            except ValueError:
+                return None, ""
+    # 旧格式: 三段以 `:` 分隔 (如 "1:09:00")
+    parts = trigger_at.split(":", 2)
+    if len(parts) == 3:
+        try:
+            return int(parts[0]), f"{parts[1]}:{parts[2]}"
+        except ValueError:
+            return None, ""
+    return None, ""
 
 
 def _hm_match(trigger_hm: str, now_hm: str) -> bool:

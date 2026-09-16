@@ -98,7 +98,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="trigger_at">
-          <el-input v-model="form.trigger_at" placeholder="daily=HH:MM(09:00); weekly=wday:HH:MM(1:09:00); monthly=day:HH:MM" />
+          <el-input v-model="form.trigger_at" placeholder="daily=HH:MM(09:00); weekly=wday-HH:MM(1-09:00=周一9点); monthly=day-HH:MM(1-09:00=每月1号9点)" />
         </el-form-item>
         <el-form-item label="max_tokens">
           <el-input-number v-model="form.max_tokens" :min="200" :max="8000" :step="100" />

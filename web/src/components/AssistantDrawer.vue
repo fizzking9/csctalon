@@ -74,6 +74,18 @@
     </el-result>
 
     <template v-else>
+      <!-- #126 P0-2 忙时提示: 仅 is_busy=true 显示, 避免用户在 LLM 拥塞时空等 -->
+      <el-alert
+        v-if="queueInfo.is_busy"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="ai-busy-alert"
+      >
+        <template #title>
+          ⏳ LLM 队列繁忙：当前 {{ queueInfo.active_count }} 个任务进行中，预计等待约 {{ queueInfo.est_wait_s }}s
+        </template>
+      </el-alert>
       <!-- 快捷问 -->
       <div v-if="quickQuestions.length" class="ai-quick">
         <div class="ai-quick-label">快捷询问</div>
@@ -165,7 +177,7 @@ import { MagicStick, QuestionFilled, Loading, Calendar } from '@element-plus/ico
 import { useAssistant } from '@/composables/useAssistant'
 import { useAuthStore } from '@/stores/auth'
 import { AI_THREAD_KEY, AI_PENDING_KEY } from '@/constants/aiAssistantStorage'
-import { aiConfig, aiAnalyze, aiTaskStatus } from '@/api/aiAssistant'
+import { aiConfig, aiAnalyze, aiTaskStatus, aiQueueStatus } from '@/api/aiAssistant'
 import { renderMarkdown } from '@/utils/sanitize'
 
 const { state, closeAssistant } = useAssistant()
@@ -213,6 +225,8 @@ watch(visible, (v) => {
     _cancelled = false
     // #96: 首次打开时才拉配置; 未登录不请求(避免 401 噪音, 生产曾达 271 次)
     if (!cfgLoaded.value && authStore.isLoggedIn) loadConfig()
+    // #126 P0-2: 抽屉打开时拉一次队列状态(已登录才请求, 避免未登录 401)
+    if (authStore.isLoggedIn) refreshQueueStatus()
     restoreThread()
   } else {
     _cancelled = true
@@ -223,6 +237,8 @@ watch(visible, (v) => {
 const cfgLoaded = ref(false)
 const cfg = ref({ enabled: false, periods: [], notice: '' })
 const quickQuestions = ref([])
+// #126 P0-2 LLM 队列状态(忙时提示)
+const queueInfo = ref({ is_busy: false, active_count: 0, est_wait_s: 0 })
 async function loadConfig() {
   try {
     const res = await aiConfig()
@@ -234,6 +250,22 @@ async function loadConfig() {
     //    一次网络抖动会让本次会话永久不再重试（quick_questions 永远为空）。
     cfgLoaded.value = true
   } catch (e) { /* 拦截器已提示；下次打开助手时会重试 */ }
+}
+
+/**
+ * #126 P0-2 拉取 LLM 队列状态, 更新忙时提示。
+ * 静默失败(网络/登录), 不弹拦截器错误。
+ */
+async function refreshQueueStatus() {
+  try {
+    const res = await aiQueueStatus()
+    const d = res.data || {}
+    queueInfo.value = {
+      is_busy: !!d.is_busy,
+      active_count: d.active_count ?? 0,
+      est_wait_s: d.est_wait_s ?? 0,
+    }
+  } catch { /* 静默降级: 不阻塞用户提问 */ }
 }
 
 // 会话
@@ -338,6 +370,8 @@ async function submit() {
   if (!q) return
   if (submitting.value) return
   submitting.value = true
+  // #126 P0-2: 提交前刷新队列状态(不阻塞提交, 仅让忙时提示最新)
+  refreshQueueStatus()
   messages.value.push({ role: 'user', content: q })
   const aiMsg = { role: 'assistant', content: '', loading: true, windowLabel: '', meta: '' }
   messages.value.push(aiMsg)
@@ -496,6 +530,8 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 .ai-rationale code { background: #f5f7fa; padding: 1px 4px; border-radius: 3px; font-size: 11px; }
 .ai-quick { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .ai-quick-label { width: 100%; font-size: 12px; color: #909399; }
+/* #126 P0-2 忙时提示条 */
+.ai-busy-alert { margin-bottom: 10px; }
 .ai-quick-tag { cursor: pointer; max-width: 100%; white-space: normal; height: auto; line-height: 1.5; padding: 2px 8px; }
 .ai-thread {
   height: calc(100vh - 320px);
