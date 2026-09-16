@@ -150,15 +150,17 @@ def _hm_match(trigger_hm: str, now_hm: str) -> bool:
 
 
 async def _pregen_llm(messages: list[dict], db: Session, max_tokens: int, *,
-                      source: str, level: int) -> str:
+                      source: str, level: int, provider_code: str | None = None) -> str:
     """#127 后台/手动预生成经优先门闸发起 LLM 调用。
 
     level 遵循 #127 工单优先级定义: 0=后台定时预生成(最高), 1=admin 手动触发。
+    provider_code(#127 分流): 模板指定的 llm_provider_code, 进入该 provider 独立门闸;
+    None 走 default 门闸。不同 provider 间并行不互斥。
     在**调用方线程自己的事件循环**上执行(保持 db 不跨线程); 被更高优先级抢占时抛
     CancelledError, 由 generate_for_template 捕获置"可重试跳过"。
     """
     from app.services.llm_scheduler import acquire, release
-    handle = await acquire(level, name=source)
+    handle = await acquire(level, name=source, provider_code=provider_code)
     try:
         result = await llm_client.chat_completion(
             messages,
@@ -214,9 +216,11 @@ def generate_for_template(db: Session, template: AiReportTemplate,
     # #127 经优先门闸发起(level=0/1); 被更高优先级抢占时捕获 CancelledError, 本次跳过。
     llm_model_str = template.llm_provider_code or "auto"
     source = f"ai_pregen:{template.code}"
+    # #127 多 provider 分流: 模板指定的 llm_provider_code 进入该 provider 独立门闸
+    provider_code = template.llm_provider_code or None
     try:
         llm_result = _pregen_llm(messages, db, template.max_tokens,
-                                 source=source, level=level)
+                                 source=source, level=level, provider_code=provider_code)
         # asyncio.run 包装(chat_completion 是 async, worker 同步入口)。
         # 单个模板单次调用, 用 asyncio.run 串行跑协程(worker 在非 asyncio 上下文调用)。
         llm_result = asyncio.run(llm_result)
@@ -230,7 +234,8 @@ def generate_for_template(db: Session, template: AiReportTemplate,
         logger.warning("ai_report_worker: already in event loop, create new loop: %s", e)
         try:
             llm_result = asyncio.new_event_loop().run_until_complete(
-                _pregen_llm(messages, db, template.max_tokens, source=source, level=level)
+                _pregen_llm(messages, db, template.max_tokens,
+                            source=source, level=level, provider_code=provider_code)
             )
         except asyncio.CancelledError:
             logger.info("ai_report_worker 预生成被抢占(新 loop), 本次跳过(template=%s)", template.code)

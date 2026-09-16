@@ -68,15 +68,16 @@ _TZ_CN = timezone(timedelta(hours=8))
 class _Job:
     """一个已排队的 LLM 调用任务(进程级快照; 不持 db 引用, 避免跨线程)。"""
 
-    __slots__ = ("level", "name", "loop", "task", "seq", "enqueued_at")
+    __slots__ = ("level", "name", "loop", "task", "seq", "enqueued_at", "provider_code")
 
-    def __init__(self, level: int, name: str, loop, task):
+    def __init__(self, level: int, name: str, loop, task, provider_code: str):
         self.level = level
         self.name = name
         self.loop = loop            # 该任务所在事件循环(用于跨循环投递 cancel)
         self.task = task            # 该任务所在 asyncio.Task(被抢占时 cancel 它)
         self.seq: int = -1          # FIFO 序号(同 level 内先到先服务)
         self.enqueued_at = datetime.now()  # naive wall(与 ai_task_manager 一致, 便于求排队时长)
+        self.provider_code = provider_code  # 归属 provider 独立门闸(#127 多 provider 分流)
 
 
 def _job_token(job: _Job) -> str:
@@ -94,9 +95,9 @@ class _Gate:
         self._seq = itertools.count()
 
     # -- 以下在 threadpool 线程中执行(_grant/_free), 用 threading 互斥, 不占事件循环 --
-    def register(self, level: int, name: str, loop, task) -> _Job:
+    def register(self, level: int, name: str, loop, task, provider_code: str) -> _Job:
         level = level if level in _ALLOWED_LEVELS else 2
-        job = _Job(level, name, loop, task)
+        job = _Job(level, name, loop, task, provider_code)
         with self._cv:
             job.seq = next(self._seq)
             heapq.heappush(self._waiting, (job.level, job.seq, _job_token(job), job))
@@ -161,27 +162,47 @@ class _Gate:
             }
 
 
-_gate = _Gate()
+# 多 provider 独立门闸(#127 分流): 每个 provider_code 一个 _Gate,
+# 同 provider 内排队+抢占, 不同 provider 并行互不阻塞。
+# provider_code=None 或 "default" 走默认门闸(用户实时路径未指定 provider 时)。
+_gates: dict[str, _Gate] = {}
+_gates_lock = threading.Lock()
+_DEFAULT_GATE = "default"
+
+
+def _get_gate(provider_code: str | None) -> _Gate:
+    """按 provider_code 取/建独立门闸(线程安全)。"""
+    key = provider_code or _DEFAULT_GATE
+    with _gates_lock:
+        g = _gates.get(key)
+        if g is None:
+            g = _Gate()
+            _gates[key] = g
+        return g
 
 
 # ─────────────────────────────────────────────────────────────────────
 # 对外 API(调用点均改为 async acquire/release)
 # ─────────────────────────────────────────────────────────────────────
-async def acquire(level: int = 2, *, name: str | None = None) -> _Job:
+async def acquire(level: int = 2, *, name: str | None = None,
+                  provider_code: str | None = None) -> _Job:
     """提交一次 LLM 任务进优先队列, 等到自身上位为运行者后返回 handle。
 
+    provider_code(#127 多 provider 分流): 指定后进入该 provider 的独立门闸,
+    与其它 provider 并行不互斥; None 走 default 门闸(用户实时路径)。
     抢占语义: 若自身上位后被更高优先级任务抢占, 本协程会被 task.cancel() 中断,
     调用方应捕获 asyncio.CancelledError 置"被抢占, 可重试"。
     """
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
     _name = name or LEVEL_NAMES.get(level, f"L{level}")
-    return await asyncio.to_thread(_grant, level, _name, loop, task)
+    return await asyncio.to_thread(_grant, level, _name, loop, task, provider_code)
 
 
-def _grant(level: int, name: str, loop, task) -> _Job:
+def _grant(level: int, name: str, loop, task, provider_code: str | None) -> _Job:
     """线程桥: 在 threadpool 线程中执行 blocking 入队(不占事件循环)。"""
-    return _gate.register(level, name, loop, task)
+    gate = _get_gate(provider_code)
+    return gate.register(level, name, loop, task, provider_code or _DEFAULT_GATE)
 
 
 async def release(job: _Job) -> None:
@@ -190,7 +211,8 @@ async def release(job: _Job) -> None:
 
 
 def _free(job: _Job) -> None:
-    _gate.release(job)
+    gate = _get_gate(job.provider_code)
+    gate.release(job)
 
 
 def queue_status() -> dict:
@@ -198,47 +220,70 @@ def queue_status() -> dict:
 
     兼容 #126 前端键(active_count/queue_length/est_wait_s/is_busy/threshold_*/timestamp),
     新增真队列可见性: running_level/running_name/run_s/queued(逐项 level+waited_s)。
+    #127 多 provider: 汇总所有 provider 门闸; providers 列出每个 provider 的在飞/排队。
 
     est_wait_s: 对"新增一位 L2 用户"的粗估等待秒数 = 前方位置数(在飞+排队)×平均耗时。
     is_busy: 有排队 或 总活跃 >= 2(#126 兼容语义)。
     """
-    snap = _gate.snapshot()
-    holder = snap["holder"]
-    waiting = snap["waiting"]
-    running = 1 if holder is not None else 0
-    queue_length = len(waiting)
-    active_count = running + queue_length
+    with _gates_lock:
+        gate_items = list(_gates.items())
 
     now_naive = datetime.now()
-    positions_ahead = queue_length + (1 if running else 0)
+    total_running = 0
+    total_queue = 0
+    first_holder: _Job | None = None
+    first_holder_since: datetime | None = None
+    queued: list[dict] = []
+    provider_breakdown: dict[str, dict] = {}
+
+    for pcode, gate in gate_items:
+        snap = gate.snapshot()
+        holder = snap["holder"]
+        waiting = snap["waiting"]
+        running = 1 if holder is not None else 0
+        total_running += running
+        total_queue += len(waiting)
+        # 全局 running_level/name 取第一个有 holder 的 provider(展示用)
+        if holder is not None and first_holder is None:
+            first_holder = holder
+            first_holder_since = snap["holder_since"]
+        for level, _seq, _tok, job in sorted(waiting, key=lambda x: (x[0], x[1])):
+            queued.append({
+                "level": level,
+                "name": job.name,
+                "label": LEVEL_NAMES.get(level, f"L{level}"),
+                "waited_s": max(0, int((now_naive - job.enqueued_at).total_seconds())),
+                "provider_code": pcode,
+            })
+        provider_breakdown[pcode] = {
+            "running": running,
+            "queue_length": len(waiting),
+            "running_name": holder.name if holder else None,
+            "running_level": holder.level if holder else None,
+        }
+
+    active_count = total_running + total_queue
+    positions_ahead = total_queue + total_running
     est_wait_s = int(positions_ahead * (_EST_AVG_MS / 1000))
-    is_busy = queue_length >= 1 or active_count >= _BUSY_ACTIVE_THRESHOLD
+    is_busy = total_queue >= 1 or active_count >= _BUSY_ACTIVE_THRESHOLD
 
     run_s = None
-    if holder is not None and snap["holder_since"] is not None:
-        run_s = max(0, int((now_naive - snap["holder_since"]).total_seconds()))
-
-    queued = []
-    for level, _seq, _tok, job in sorted(waiting, key=lambda x: (x[0], x[1])):
-        queued.append({
-            "level": level,
-            "name": job.name,
-            "label": LEVEL_NAMES.get(level, f"L{level}"),
-            "waited_s": max(0, int((now_naive - job.enqueued_at).total_seconds())),
-        })
+    if first_holder is not None and first_holder_since is not None:
+        run_s = max(0, int((now_naive - first_holder_since).total_seconds()))
 
     return {
         "active_count": active_count,
-        "queue_length": queue_length,   # 第三阶段: 真实排队数(不再恒 0)
+        "queue_length": total_queue,   # 第三阶段: 真实排队数(不再恒 0)
         "est_wait_s": est_wait_s,
         "is_busy": is_busy,
         "threshold_active": _BUSY_ACTIVE_THRESHOLD,
         "threshold_wait_s": _BUSY_WAIT_S,
         # 新增真队列可见性(#127)
-        "running_count": running,
-        "running_level": holder.level if holder else None,
-        "running_name": holder.name if holder else None,
+        "running_count": total_running,
+        "running_level": first_holder.level if first_holder else None,
+        "running_name": first_holder.name if first_holder else None,
         "run_s": run_s,
         "queued": queued,
+        "providers": provider_breakdown,   # #127 多 provider 分流明细
         "timestamp": datetime.now(_TZ_CN).isoformat(),
     }
