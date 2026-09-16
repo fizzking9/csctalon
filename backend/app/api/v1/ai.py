@@ -288,9 +288,11 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                         task.task_id, eff["period"], eff["date"], eff["start"], eff["end"],
                         len(q), build_ms)
             # #116 llm_result 是 LLMResult(继承 str), .usage 拿 token 统计
+            # #120 前台实时路径显式传 timeout_s=60(用户等); 后台预生成走 #121 传 180
             llm_result = await llm_client.chat_completion(
                 messages,
                 max_tokens=int(getattr(settings, "AI_MAX_TOKENS", 1500) or 1500),
+                timeout_s=60.0,
                 db=db, source="ai_analyze",
             )
             task.result_md = str(llm_result)

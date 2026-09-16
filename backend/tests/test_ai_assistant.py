@@ -265,6 +265,53 @@ def test_extract_content_no_usage_field():
 
 
 @pytest.mark.asyncio
+async def test_chat_completion_timeout_s_override_short(monkeypatch):
+    """#120: timeout_s=0.05 触发超时(前台调用方可以传短 timeout)。
+
+    用 .env 单源模式 + 真实外网 URL + 短 timeout_s, 期望 LLMError with retryable=True。
+    """
+    monkeypatch.setattr(settings, "LLM_BASE_URL", "https://www.deepseek.com")
+    monkeypatch.setattr(settings, "LLM_API_KEY", "sk-test")
+    monkeypatch.setattr(settings, "LLM_MODEL", "m")
+    monkeypatch.setattr(settings, "LLM_RETRY_MAX", 0)
+    monkeypatch.setattr(settings, "LLM_RETRY_BASE_S", 0.0)
+    with pytest.raises(llm_client.LLMError) as exc_info:
+        await llm_client.chat_completion(
+            [{"role": "user", "content": "hi"}],
+            max_tokens=10, timeout_s=0.05, db=None,
+        )
+    # 超时属于 transient, 标 retryable=True
+    assert exc_info.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_timeout_s_param_accepted(monkeypatch):
+    """#120: chat_completion 接受 timeout_s 参数不报错(签名兼容性回归)。
+
+    用 MockTransport 立即返回 200, 验证 timeout_s=180 也能正常完成。
+    """
+    monkeypatch.setattr(settings, "LLM_BASE_URL", "https://mock.local")
+    monkeypatch.setattr(settings, "LLM_API_KEY", "sk-test")
+    monkeypatch.setattr(settings, "LLM_MODEL", "m")
+    monkeypatch.setattr(settings, "LLM_RETRY_MAX", 0)
+    monkeypatch.setattr(settings, "LLM_RETRY_BASE_S", 0.0)
+
+    def handler(req):  # noqa: ANN001
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+        })
+    transport = httpx.MockTransport(handler)
+    # timeout_s=180(后台场景) 也应正常返回
+    r = await llm_client.chat_completion(
+        [{"role": "user", "content": "hi"}],
+        max_tokens=10, timeout_s=180.0, transport=transport, db=None,
+    )
+    assert r == "ok"
+    assert r.usage == {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+
+
+@pytest.mark.asyncio
 async def test_llm_client_retry_then_success(monkeypatch):
     """429 两次后 200 → 最终成功(transient 重试)。"""
     monkeypatch.setattr(settings, "LLM_BASE_URL", "https://mock.deepseek.com")
