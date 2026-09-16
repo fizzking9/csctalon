@@ -15,7 +15,7 @@
 - 规则层秒回路径(#98 层3)落库时 llm_model="rule-engine", tokens=NULL
 """
 
-from sqlalchemy import BigInteger, Date, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Date, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -23,7 +23,14 @@ from app.models.base import IDMixin, TimestampMixin
 
 
 class AiReport(IDMixin, TimestampMixin, Base):
-    """AI 分析报告历史(仅本人可见; 管理员可查全部)。"""
+    """AI 分析报告历史(仅本人可见; 管理员可查全部)。
+
+    #121 扩字段:
+    - template_id: 来自预生成则为模板 id, 实时生成则 NULL
+    - snapshot_date / snapshot_period: 数据时点(区别于 created_at)
+    - is_public: true=公共报告(所有人可看, 来自预生成), false=私有(仅本人, 来自实时)
+    - matched_count: 被命中复用次数
+    """
 
     __tablename__ = "ai_reports"
 
@@ -33,7 +40,28 @@ class AiReport(IDMixin, TimestampMixin, Base):
     )
     user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True,
-        comment="归属用户 id(仅本人可见, admin 可查全部)",
+        comment="归属用户 id(仅本人可见, admin 可查全部); 公共报告(is_public=True)所有人可看",
+    )
+    template_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("ai_report_templates.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+        comment="#121: 来自预生成则为模板 id, 实时生成则 NULL",
+    )
+    snapshot_date: Mapped[str | None] = mapped_column(
+        Date, nullable=True, index=True,
+        comment="#121: 报告数据时点(窗口起算 date, 区别于 created_at 的入库时点)",
+    )
+    snapshot_period: Mapped[str | None] = mapped_column(
+        String(16), nullable=True,
+        comment="#121: daily/weekly/monthly/range(与模板 period 对应)",
+    )
+    is_public: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False,
+        comment="#121: true=公共报告(所有人可看, 来自预生成); false=私有(仅本人, 来自实时)",
+    )
+    matched_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0,
+        comment="#121: 被命中复用次数(match_template_report 命中时 +1)",
     )
     question: Mapped[str] = mapped_column(Text, nullable=False, comment="原问句")
     period: Mapped[str | None] = mapped_column(

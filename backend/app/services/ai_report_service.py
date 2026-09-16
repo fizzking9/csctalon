@@ -38,11 +38,19 @@ def save_report(
     llm_ms: int,
     total_ms: int,
     tokens: dict | None,
+    # #121 新增预生成报告相关字段(向后兼容, 默认值让既有实时调用零侵入)
+    template_id: int | None = None,
+    snapshot_date: str | None = None,
+    snapshot_period: str | None = None,
+    is_public: bool = False,
 ) -> AiReport | None:
     """落库一条 AI 报告。
 
     tokens: OpenAI usage dict {prompt_tokens, completion_tokens, total_tokens}; None 表示服务端不返
     返回 AiReport 实例; 失败返回 None(调用方决定是否影响主流程, 异步调用时不影响)。
+
+    #121: template_id/snapshot_date/snapshot_period/is_public 来自预生成 worker;
+    实时调用默认 None/None/None/False(私有报告), 零侵入兼容。
     """
     try:
         prompt_t = tokens.get("prompt_tokens") if tokens else None
@@ -65,12 +73,17 @@ def save_report(
             prompt_tokens=prompt_t,
             completion_tokens=completion_t,
             total_tokens=total_t,
+            template_id=template_id,
+            snapshot_date=snapshot_date,
+            snapshot_period=snapshot_period,
+            is_public=is_public,
         )
         db.add(report)
         db.commit()
         db.refresh(report)
-        logger.info("ai_report saved: id=%s task_id=%s user_id=%s llm_model=%s total_ms=%s",
-                    report.id, task_id, user_id, llm_model, total_ms)
+        logger.info("ai_report saved: id=%s task_id=%s user_id=%s llm_model=%s total_ms=%s "
+                    "template_id=%s is_public=%s",
+                    report.id, task_id, user_id, llm_model, total_ms, template_id, is_public)
         return report
     except Exception as e:  # noqa: BLE001  落库失败不阻塞主响应
         db.rollback()
