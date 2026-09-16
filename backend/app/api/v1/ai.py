@@ -318,9 +318,10 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                         len(q), build_ms)
             # #116 llm_result 是 LLMResult(继承 str), .usage 拿 token 统计
             # #120 前台实时路径显式传 timeout_s=60(用户等); 后台预生成走 #121 传 180
-            # #123 注册到调度队列(供 /ai/queue-status 显示活跃数)
-            from app.services.llm_scheduler import deregister, register
-            register()
+            # #127 接入真优先级队列: 用户实时问答挂 L2(最低, 可被 L0/L1 抢占)。
+            #   被抢占时上层(ai_task_manager)捕获 CancelledError 置"可重试"。
+            from app.services.llm_scheduler import acquire, release
+            handle = await acquire(2, name=f"ai_analyze:{task.task_id}")
             try:
                 llm_result = await llm_client.chat_completion(
                     messages,
@@ -329,7 +330,7 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                     db=db, source="ai_analyze",
                 )
             finally:
-                deregister()
+                await release(handle)
             task.result_md = str(llm_result)
             total_ms_now = int((time.perf_counter() - t0) * 1000)
             llm_ms_now = total_ms_now - build_ms

@@ -122,7 +122,8 @@ def trigger_template(template_id: int, db: DBSession, _: AdminUser):
         raise HTTPException(404, "模板不存在")
     from app.services.ai_report_worker import generate_for_template
     try:
-        result = generate_for_template(db, t)
+        # #127: admin 手动触发挂 L1(优先级低于 L0 后台预生成, 高于 L2 用户实时)
+        result = generate_for_template(db, t, level=1)
     except Exception as e:  # noqa: BLE001
         logger.error("admin trigger_template failed: id=%s err=%s", template_id, e)
         raise HTTPException(500, f"预生成失败: {e}") from e

@@ -149,10 +149,36 @@ def _hm_match(trigger_hm: str, now_hm: str) -> bool:
     return abs(now_min - trigger_min) <= 1
 
 
-def generate_for_template(db: Session, template: AiReportTemplate) -> dict | None:
+async def _pregen_llm(messages: list[dict], db: Session, max_tokens: int, *,
+                      source: str, level: int) -> str:
+    """#127 后台/手动预生成经优先门闸发起 LLM 调用。
+
+    level 遵循 #127 工单优先级定义: 0=后台定时预生成(最高), 1=admin 手动触发。
+    在**调用方线程自己的事件循环**上执行(保持 db 不跨线程); 被更高优先级抢占时抛
+    CancelledError, 由 generate_for_template 捕获置"可重试跳过"。
+    """
+    from app.services.llm_scheduler import acquire, release
+    handle = await acquire(level, name=source)
+    try:
+        result = await llm_client.chat_completion(
+            messages,
+            max_tokens=max_tokens,
+            timeout_s=180.0,  # 后台预生成允许长任务
+            db=db,
+            source=source,
+        )
+        return str(result)
+    finally:
+        await release(handle)
+
+
+def generate_for_template(db: Session, template: AiReportTemplate,
+                          *, level: int = 2) -> dict | None:
     """为指定模板生成一份 AI 报告, 落库 is_public=True。
 
-    返回 {report_id, total_ms, llm_ms, total_tokens} 或 None(失败)。
+    level(#127 优先级): 0=后台定时预生成(最高, 可抢占 L1/L2), 1=admin 手动触发,
+                         2=用户实时(默认出于兼容, 调用点显式传 0/1)。
+    返回 {report_id, total_ms, llm_ms, total_tokens} 或 None(失败/被抢占跳过)。
     失败时: 仅 log + 写 system_event(category=ai, status=failed), 不抛异常。
     """
     t0 = _dt.datetime.now()
@@ -185,19 +211,30 @@ def generate_for_template(db: Session, template: AiReportTemplate) -> dict | Non
         return None
 
     # 调用 LLM(后台预生成: timeout_s=180, max_tokens=template.max_tokens)
-    # #123 注册到调度队列(供 /ai/queue-status 显示活跃数, 含后台预生成)
+    # #127 经优先门闸发起(level=0/1); 被更高优先级抢占时捕获 CancelledError, 本次跳过。
     llm_model_str = template.llm_provider_code or "auto"
-    from app.services.llm_scheduler import deregister as _dereg
-    from app.services.llm_scheduler import register as _reg
-    _reg()
+    source = f"ai_pregen:{template.code}"
     try:
-        llm_result = llm_client.chat_completion(
-            messages,
-            max_tokens=template.max_tokens,
-            timeout_s=180.0,  # 后台预生成允许长任务
-            db=db,
-            source=f"ai_pregen:{template.code}",
-        )
+        llm_result = _pregen_llm(messages, db, template.max_tokens,
+                                 source=source, level=level)
+        # asyncio.run 包装(chat_completion 是 async, worker 同步入口)。
+        # 单个模板单次调用, 用 asyncio.run 串行跑协程(worker 在非 asyncio 上下文调用)。
+        llm_result = asyncio.run(llm_result)
+    except asyncio.CancelledError:
+        # #127 被抢占: 后台/手动预生成不写失败事件, 仅 log(属正常抢占, 可重试跳过)
+        logger.info("ai_report_worker 预生成被更高优先级抢占, 本次跳过(template=%s level=%s)",
+                    template.code, level)
+        return None
+    except RuntimeError as e:
+        # 已在事件循环中调用(如 bms_scheduler 直接 async 上下文): 换新 loop 跑
+        logger.warning("ai_report_worker: already in event loop, create new loop: %s", e)
+        try:
+            llm_result = asyncio.new_event_loop().run_until_complete(
+                _pregen_llm(messages, db, template.max_tokens, source=source, level=level)
+            )
+        except asyncio.CancelledError:
+            logger.info("ai_report_worker 预生成被抢占(新 loop), 本次跳过(template=%s)", template.code)
+            return None
     except Exception as e:  # noqa: BLE001  LLM 调用失败不阻塞 worker
         logger.error("ai_report_worker LLM call failed (template=%s): %s", template.code, e)
         record_system_event(
@@ -209,19 +246,6 @@ def generate_for_template(db: Session, template: AiReportTemplate) -> dict | Non
                               ensure_ascii=False),
         )
         return None
-    finally:
-        _dereg()
-
-    # asyncio.run 包装(chat_completion 是 async, worker 同步入口)
-    # 注意: 这里假设 worker 在非 asyncio 上下文调用(如 bms_scheduler to_thread);
-    #       若在 asyncio 上下文, 调用方应直接 await chat_completion。
-    if asyncio.iscoroutine(llm_result):
-        try:
-            llm_result = asyncio.run(llm_result)
-        except RuntimeError as e:
-            # 已在 event loop 中: 创建新 loop 跑(单 worker 串行, 不会有并发问题)
-            logger.warning("ai_report_worker: already in event loop, create new loop: %s", e)
-            llm_result = asyncio.new_event_loop().run_until_complete(llm_result)
 
     total_ms = int((_dt.datetime.now() - t0).total_seconds() * 1000)
     usage = llm_result.usage if hasattr(llm_result, "usage") else None
@@ -300,7 +324,8 @@ def warm_on_sync_complete() -> None:
         logger.info("ai_report_worker warm_on_sync_complete: %s 个 sync-triggered 模板待生成", len(rows))
         for t in rows:
             try:
-                generate_for_template(db, t)
+                # #127: 后台定时预生成(sync-triggered)挂 L0(最高优先, 可抢占 L1/L2)
+                generate_for_template(db, t, level=0)
             except Exception as e:  # noqa: BLE001  单个模板失败不影响其他
                 logger.error("ai_report_worker: template=%s 生成失败: %s", t.code, e)
     except Exception as e:  # noqa: BLE001  worker 失败不影响业务
@@ -331,7 +356,8 @@ def warm_on_startup(force: bool = False) -> None:
                     force, len(rows))
         for t in rows:
             try:
-                generate_for_template(db, t)
+                # #127: 启动预热(active 模板)挂 L0(最高优先)
+                generate_for_template(db, t, level=0)
             except Exception as e:  # noqa: BLE001
                 logger.error("ai_report_worker: template=%s 生成失败: %s", t.code, e)
     except Exception as e:  # noqa: BLE001
@@ -360,7 +386,8 @@ def warm_idle() -> None:
         logger.info("ai_report_worker warm_idle: %s 个模板到期", len(due))
         for t in due:
             try:
-                generate_for_template(db, t)
+                # #127: 空闲期触发的 daily/weekly/monthly 也属后台预生成, 挂 L0
+                generate_for_template(db, t, level=0)
             except Exception as e:  # noqa: BLE001
                 logger.error("ai_report_worker: template=%s 生成失败: %s", t.code, e)
     except Exception as e:  # noqa: BLE001

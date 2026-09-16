@@ -151,6 +151,12 @@ class AiTaskManager:
             try:
                 await runner(task)
                 task.status = "success"
+            except asyncio.CancelledError:
+                # #127 抢占: 更高优先级(L0 后台预生成 / L1 admin)抢占本用户实时任务。
+                #   置 failed + 明确"被抢占可重试", 让前端可见; 不 re-raise(否则任务卡 running)。
+                logger.warning("ai task %s 被更高优先级抢占(可重试)", task_id)
+                task.status = "failed"
+                task.error = "本次分析被更高优先级的后台任务抢占, 请稍后重试"
             except Exception as e:  # noqa: BLE001 任务异常置 failed
                 logger.exception("ai task %s failed", task_id)
                 task.status = "failed"
