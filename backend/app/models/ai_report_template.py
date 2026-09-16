@@ -58,6 +58,14 @@ class AiReportTemplate(IDMixin, TimestampMixin, Base):
         Integer, nullable=False, default=5,
         comment="sync-triggered 频率下, 同步完成后延迟分钟数(避免数据未稳), 默认 5",
     )
+    refresh_on_sync: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false",
+        comment=(
+            "#130 是否随高频数据同步刷新: True=每次同步成功后刷新(时效性强的日报类); "
+            "False=仅按 trigger_at 定时(周报/月报每日一次)。"
+            "新建未显式传值时按 period/frequency 自动识别(daily/sync-triggered→True)"
+        ),
+    )
     priority: Mapped[int] = mapped_column(
         Integer, nullable=False, default=100,
         comment="多模板同时触发时的执行顺序(小先执行), 默认 100",

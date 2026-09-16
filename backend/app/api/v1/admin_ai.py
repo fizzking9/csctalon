@@ -34,19 +34,37 @@ def list_templates(db: DBSession, _: AdminUser):
     return R(data=[_tmpl_dict(t) for t in rows])
 
 
+def _auto_refresh_on_sync(period: str | None, frequency: str | None) -> bool:
+    """#130 自动识别「是否随数据同步刷新」: 日报类 True, 周报/月报 False。
+
+    判据: 数据窗口周期 period=daily, 或调度频率 frequency in (daily, sync-triggered)
+    → 时效性强, 随高频同步刷新; weekly/monthly/range → 仅按 trigger_at 每日定时。
+    admin 未显式传 refresh_on_sync 时用此默认值, 之后可在模板管理页手动覆盖。
+    """
+    return (period == "daily") or (frequency in ("daily", "sync-triggered"))
+
+
 @router.post("/templates", response_model=R, summary="新增 AI 模板(admin)")
 def create_template(payload: dict, db: DBSession, _: AdminUser):
     """新增 AI 报告模板。
 
     payload: {code, name_cn, question_template, question_keywords?, period, frequency,
-              trigger_at?, sync_offset_min?, priority?, llm_provider_code?,
-              fallback_template_id?, max_tokens?, is_active?, visibility_scope?}
+              trigger_at?, sync_offset_min?, refresh_on_sync?, priority?,
+              llm_provider_code?, fallback_template_id?, max_tokens?, is_active?,
+              visibility_scope?}
+
+    #130: refresh_on_sync 不传时按 period/frequency 自动识别(日报类→True)。
     """
     code = payload.get("code")
     if not code:
         raise HTTPException(400, "code 必填")
     if db.query(AiReportTemplate).filter(AiReportTemplate.code == code).first():
         raise HTTPException(400, f"code 已存在: {code}")
+    # refresh_on_sync: 显式传值优先; 缺省按周期自动识别
+    if "refresh_on_sync" in payload and payload["refresh_on_sync"] is not None:
+        refresh_on_sync = bool(payload["refresh_on_sync"])
+    else:
+        refresh_on_sync = _auto_refresh_on_sync(payload.get("period"), payload.get("frequency"))
     t = AiReportTemplate(
         code=code,
         name_cn=payload["name_cn"],
@@ -56,6 +74,7 @@ def create_template(payload: dict, db: DBSession, _: AdminUser):
         frequency=payload["frequency"],
         trigger_at=payload.get("trigger_at"),
         sync_offset_min=payload.get("sync_offset_min", 5),
+        refresh_on_sync=refresh_on_sync,
         priority=payload.get("priority", 100),
         llm_provider_code=payload.get("llm_provider_code"),
         fallback_template_id=payload.get("fallback_template_id"),
@@ -66,7 +85,8 @@ def create_template(payload: dict, db: DBSession, _: AdminUser):
     db.add(t)
     db.commit()
     db.refresh(t)
-    logger.info("admin ai_template created: id=%s code=%s", t.id, t.code)
+    logger.info("admin ai_template created: id=%s code=%s refresh_on_sync=%s",
+                t.id, t.code, t.refresh_on_sync)
     return R(data=_tmpl_dict(t))
 
 
@@ -75,15 +95,19 @@ def update_template(template_id: int, payload: dict, db: DBSession, _: AdminUser
     """编辑 AI 报告模板(部分字段更新)。
 
     payload: 任意字段 subset(code/name_cn/question_template/question_keywords/period/
-              frequency/trigger_at/sync_offset_min/priority/llm_provider_code/
-              fallback_template_id/max_tokens/is_active/visibility_scope)
+              frequency/trigger_at/sync_offset_min/refresh_on_sync/priority/
+              llm_provider_code/fallback_template_id/max_tokens/is_active/visibility_scope)
+
+    注意(#130): 仅当显式传 refresh_on_sync 时才更新; 改 period/frequency 不重算该开关,
+    以免覆盖 admin 的手动选择(自动识别只在新建缺省时生效)。
     """
     t = db.query(AiReportTemplate).get(template_id)
     if not t:
         raise HTTPException(404, "模板不存在")
     for k in ("name_cn", "question_template", "question_keywords", "period", "frequency",
-              "trigger_at", "sync_offset_min", "priority", "llm_provider_code",
-              "fallback_template_id", "max_tokens", "is_active", "visibility_scope"):
+              "trigger_at", "sync_offset_min", "refresh_on_sync", "priority",
+              "llm_provider_code", "fallback_template_id", "max_tokens", "is_active",
+              "visibility_scope"):
         if k in payload:
             setattr(t, k, payload[k])
     # code 不允许修改(避免破坏 FK 与匹配)
@@ -206,6 +230,7 @@ def _tmpl_dict(t: AiReportTemplate) -> dict:
         "frequency": t.frequency,
         "trigger_at": t.trigger_at,
         "sync_offset_min": t.sync_offset_min,
+        "refresh_on_sync": t.refresh_on_sync,
         "priority": t.priority,
         "llm_provider_code": t.llm_provider_code,
         "fallback_template_id": t.fallback_template_id,

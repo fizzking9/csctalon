@@ -342,12 +342,13 @@ def _daily_generated_recently(db: Session, template_id: int, *, min_minutes: int
 
 
 def warm_on_sync_complete() -> None:
-    """同步完成触发入口(#129): sync-triggered 模板 + 当日日报(daily)随同步刷新。
+    """同步完成触发入口(#129/#130): 刷新所有「随数据同步刷新」的 active 模板。
 
-    - sync-triggered: 每次同步都触发, 无节流
-    - daily(#129): 跟随高频同步刷新(8-24 点每 30min 一轮), 加 20min 最小间隔保护,
-      正常每轮同步都能触发, 仅挡手动频繁同步/推送与同步同时完成的过近重复
-    - weekly/monthly: 不在此触发, 维持 warm_idle 按 trigger_at 一天一次
+    #130 起候选不再按 frequency 硬编码, 而是读模板级开关 `refresh_on_sync`:
+      - True(日报类, 时效性强): 每次高频同步成功后刷新, 加 20min 最小间隔保护
+        (同步窗口 8-24 点每 30min 一轮, 正常每轮触发; 挡手动频繁同步/推送撞车)
+      - False(周报/月报): 不在此触发, 维持 warm_idle 按 trigger_at 每日定时一次
+    自动识别/手动选择在 admin 建模板时落库(见 admin_ai._default_refresh_on_sync)。
 
     调用点:
       - sync_task_manager._run_background finally(BMS 高频同步 success/partial)
@@ -361,22 +362,23 @@ def warm_on_sync_complete() -> None:
     try:
         rows = db.query(AiReportTemplate).filter(
             AiReportTemplate.is_active.is_(True),
-            AiReportTemplate.frequency.in_(["sync-triggered", "daily"]),
+            AiReportTemplate.refresh_on_sync.is_(True),
         ).order_by(AiReportTemplate.priority).all()
         if not rows:
             return
-        logger.info("ai_report_worker warm_on_sync_complete: %s 个模板(sync-triggered/daily)待评估",
+        logger.info("ai_report_worker warm_on_sync_complete: %s 个 refresh_on_sync 模板待评估",
                     len(rows))
         # 先取标量快照: 循环内 generate_for_template 会 commit(expire_on_commit),
         # 之后再访问 ORM 对象属性会 lazy reload, 提前取出避免 detached/expired 隐患。
-        snapshot = [(t.id, t.code, t.frequency) for t in rows]
-        for tid, tcode, tfreq in snapshot:
+        snapshot = [(t.id, t.code) for t in rows]
+        for tid, tcode in snapshot:
             try:
-                # #129 仅 daily 走最小间隔节流; sync-triggered 每轮必跑
-                if tfreq == "daily" and _daily_generated_recently(
+                # 统一 20min 节流: 随同步刷新的模板都按同步节奏(30min/轮),
+                # 距上次生成不足阈值则跳过, 避免推送与同步撞车时重复调 LLM。
+                if _daily_generated_recently(
                         db, tid, min_minutes=_DAILY_SYNC_MIN_INTERVAL_MIN):
                     logger.info(
-                        "warm_on_sync_complete: 日报 %s 在 %smin 内已生成, 节流跳过",
+                        "warm_on_sync_complete: 模板 %s 在 %smin 内已生成, 节流跳过",
                         tcode, _DAILY_SYNC_MIN_INTERVAL_MIN)
                     continue
                 # 需要完整模板对象构造 messages; id 稳定, 按快照 id 取并生成

@@ -42,6 +42,9 @@
           <template #default="{ row }">
             <div>{{ row.period }}</div>
             <div class="dim">{{ row.frequency }} @ {{ row.trigger_at || '-' }}</div>
+            <el-tag size="small" :type="row.refresh_on_sync ? 'success' : 'info'" effect="plain" style="margin-top:2px">
+              {{ row.refresh_on_sync ? '随同步刷新' : '每日定时' }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="max_tokens" width="100">
@@ -82,7 +85,7 @@
           <el-input v-model="keywordsInput" placeholder="逗号分隔, 如 今天,今日,整体" />
         </el-form-item>
         <el-form-item label="period">
-          <el-select v-model="form.period" style="width: 100%">
+          <el-select v-model="form.period" style="width: 100%" @change="autoRefreshByCycle">
             <el-option label="daily" value="daily" />
             <el-option label="weekly" value="weekly" />
             <el-option label="monthly" value="monthly" />
@@ -90,7 +93,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="frequency">
-          <el-select v-model="form.frequency" style="width: 100%">
+          <el-select v-model="form.frequency" style="width: 100%" @change="autoRefreshByCycle">
             <el-option label="sync-triggered(同步后触发)" value="sync-triggered" />
             <el-option label="daily" value="daily" />
             <el-option label="weekly" value="weekly" />
@@ -99,6 +102,10 @@
         </el-form-item>
         <el-form-item label="trigger_at">
           <el-input v-model="form.trigger_at" placeholder="daily=HH:MM(09:00); weekly=wday-HH:MM(1-09:00=周一9点); monthly=day-HH:MM(1-09:00=每月1号9点)" />
+        </el-form-item>
+        <el-form-item label="随同步刷新">
+          <el-switch v-model="form.refresh_on_sync" />
+          <span class="field-hint">开启=每次高频数据同步成功后刷新（日报类时效强，建议开）；关闭=仅按 trigger_at 每日定时（周报/月报建议关）。新建时按周期自动识别，可手动改。</span>
         </el-form-item>
         <el-form-item label="max_tokens">
           <el-input-number v-model="form.max_tokens" :min="200" :max="8000" :step="100" />
@@ -139,7 +146,7 @@ const keywordsInput = ref('')
 const form = reactive({
   id: null, code: '', name_cn: '', question_template: '',
   question_keywords: [], period: 'daily', frequency: 'daily',
-  trigger_at: '', max_tokens: 2000, llm_provider_code: '',
+  trigger_at: '', refresh_on_sync: true, max_tokens: 2000, llm_provider_code: '',
   priority: 100, visibility_scope: 'public', is_active: true,
 })
 
@@ -157,11 +164,19 @@ function openCreate() {
   Object.assign(form, {
     id: null, code: '', name_cn: '', question_template: '',
     question_keywords: [], period: 'daily', frequency: 'daily',
-    trigger_at: '', max_tokens: 2000, llm_provider_code: '',
+    trigger_at: '', refresh_on_sync: true, max_tokens: 2000, llm_provider_code: '',
     priority: 100, visibility_scope: 'public', is_active: true,
   })
   keywordsInput.value = ''
   dialogVisible.value = true
+}
+
+// #130 自动识别: 新建(未保存)时切换周期/频率, 联动「随同步刷新」开关;
+// 判据与后端 _auto_refresh_on_sync 一致(日报类→开)。编辑已有模板时不联动, 尊重手动选择。
+function autoRefreshByCycle() {
+  if (form.id != null) return
+  form.refresh_on_sync =
+    form.period === 'daily' || ['daily', 'sync-triggered'].includes(form.frequency)
 }
 
 function openEdit(row) {
@@ -219,3 +234,13 @@ async function remove(row) {
 
 load()
 </script>
+
+<style scoped>
+/* #130 随同步刷新开关旁的口径说明: 帮 admin 判断日报类该开、周报/月报该关 */
+.field-hint {
+  margin-left: 10px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+</style>
