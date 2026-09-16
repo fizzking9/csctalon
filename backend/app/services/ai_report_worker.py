@@ -194,10 +194,11 @@ def generate_for_template(db: Session, template: AiReportTemplate) -> dict | Non
     answer_md = str(llm_result)
 
     # 落库(is_public=True, template_id, snapshot_date)
+    # user_id=1 表示系统生成的"管理员"报告(admin user); is_public=True 让所有人可见
     report = save_report(
         db,
         task_id=None,  # 预生成无 ai_task_manager 任务 id
-        user_id=0,  # 系统生成, user_id=0; 通过 is_public=True 让所有人可见
+        user_id=1,  # 系统生成, 归属 admin user_id=1; 通过 is_public=True 让所有人可见
         question=question,
         period=period,
         date=snapshot_date,

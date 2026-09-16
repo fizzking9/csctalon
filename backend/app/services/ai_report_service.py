@@ -92,13 +92,15 @@ def save_report(
 
 
 def _visibility_clause(current_user_id: int, is_admin: bool) -> str:
-    """本人可见 + admin 全可见的 SQL where 片段。
+    """本人可见 + admin 全可见 + 公共报告所有人可见的 SQL where 片段。
 
+    #122: is_public=True 的报告(预生成)绕过 user_id 隔离, 所有人可见。
     返回带 bind param 的字符串(调用方注入 :uid), 避免拼接 SQL(AGENTS.md 铁律)。
     """
     if is_admin:
         return "1=1"  # admin 无 user_id 过滤, 但分页/排序仍走 user_id+created_at 索引
-    return "user_id = :uid"
+    # 普通用户: 自己的私有报告 OR 任何公共报告
+    return "(user_id = :uid OR is_public = TRUE)"
 
 
 def list_reports(

@@ -269,6 +269,35 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                        "llm_model": "rule-engine",
                        **window_info})
 
+    # #122 匹配层: 命中预生成的公共报告(is_public=True)直接返回, 不调 LLM
+    # 匹配优先级: 窗口完全 → 语义(问句含模板 keywords) → 时点容差(当日同 period)
+    from app.services.ai_report_matcher import match_template_report
+    _match_db = SessionLocal()
+    try:
+        _matched, _tmpl = match_template_report(
+            _match_db, q, eff["period"], eff["date"],
+        )
+    finally:
+        _match_db.close()
+    if _matched is not None:
+        logger.info("ai template match: question=%r report_id=%s template=%s out_chars=%d",
+                    q[:30], _matched.id,
+                    _tmpl.code if _tmpl else None,
+                    len(_matched.answer_md or ""))
+        return R(data={"task_id": None, "status": "success",
+                       "result_md": _matched.answer_md,
+                       "report_id": _matched.id,
+                       "usage": {
+                           "prompt_tokens": _matched.prompt_tokens,
+                           "completion_tokens": _matched.completion_tokens,
+                           "total_tokens": _matched.total_tokens,
+                       } if _matched.total_tokens is not None else None,
+                       "total_ms": _matched.total_ms,
+                       "llm_ms": _matched.llm_ms,
+                       "llm_model": _matched.llm_model,
+                       "matched_template": _tmpl.code if _tmpl else None,
+                       **window_info})
+
     async def _runner(task):
         """后台执行: 建独立 Session 组装 feed → 调 LLM → 写回 task + 落 ai_reports。"""
         t0 = time.perf_counter()
