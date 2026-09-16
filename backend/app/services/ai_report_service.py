@@ -126,9 +126,11 @@ def list_reports(
         binds,
     ).scalar() or 0
     # 分页列表
+    # ⚠️ date/start/end 是 PostgreSQL 保留字, 必须 "" 引号化(否则 SQL 语法错);
+    #    bind params 仍走 :name 形式, 不破坏参数化铁律。
     offset = (page - 1) * page_size
     rows = db.execute(
-        text(f"""SELECT id, task_id, user_id, question, period, date, start, end,
+        text(f"""SELECT id, task_id, user_id, question, period, "date", "start", "end",
                   window_source, window_label, llm_model, llm_ms, total_ms,
                   prompt_tokens, completion_tokens, total_tokens, created_at
                FROM ai_reports
@@ -146,8 +148,9 @@ def get_report(
 ) -> dict | None:
     """单条详情(本人或 admin, 否则返回 None 由路由层抛 403)。"""
     where = _visibility_clause(current_user_id, is_admin)
+    # ⚠️ date/start/end 是 PostgreSQL 保留字, 必须 "" 引号化(见 list_reports 同款注释)
     row = db.execute(
-        text(f"""SELECT id, task_id, user_id, question, period, date, start, end,
+        text(f"""SELECT id, task_id, user_id, question, period, "date", "start", "end",
                   window_source, window_label, answer_md, llm_model, llm_ms, total_ms,
                   prompt_tokens, completion_tokens, total_tokens, created_at
                FROM ai_reports
