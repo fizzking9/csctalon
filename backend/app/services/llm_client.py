@@ -40,6 +40,24 @@ class LLMError(Exception):
         self.retryable = retryable
 
 
+class LLMResult(str):
+    """LLM 响应字符串 + usage 元数据(工单 #116)。
+
+    继承 str 保证旧调用零侵入:
+      - `content = await chat_completion(...)` → content 是 LLMResult 实例
+      - `content == "分析结果"` → True(继承 str 的 == 仍然比对字符串本身)
+      - `content.strip()/replace()/split()` → 返回纯 str(丢失 usage, 旧调用本就只用 str)
+      - `content.usage` → 拿到 {prompt_tokens, completion_tokens, total_tokens} dict(新代码用)
+    """
+
+    usage: dict | None = None  # {prompt_tokens, completion_tokens, total_tokens}
+
+    def __new__(cls, content: str, usage: dict | None = None) -> "LLMResult":
+        s = super().__new__(cls, content or "")
+        s.usage = usage
+        return s
+
+
 # ─────────────────────────────────────────────────────────────────────
 # 公共辅助
 # ─────────────────────────────────────────────────────────────────────
@@ -94,11 +112,19 @@ def _backoff_sleep(attempt: int, *, base_s: float = 1.0, cap_s: float = 30.0) ->
     return min(base_s * (2 ** attempt), cap_s) * (0.8 + 0.4 * random.random())
 
 
-def _extract_content(data: dict) -> str:
+def _extract_content(data: dict) -> tuple[str, dict | None]:
+    """从 OpenAI 兼容响应取 (content, usage)。
+
+    usage 字段(工单 #116): OpenAI/DeepSeek 官方端点 + ollama OpenAI 兼容端点都返回
+    `{"prompt_tokens", "completion_tokens", "total_tokens"}` 字段。若服务端不返回 usage,
+    保持 None(落库时 NULL, 不影响主流程)。
+    """
     try:
-        return data["choices"][0]["message"]["content"] or ""
+        content = data["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError):
         raise LLMError("LLM 响应缺少 choices[0].message.content")
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+    return content, usage
 
 
 def _safe_body(text: str) -> str:
@@ -123,11 +149,11 @@ async def _call_single_provider(
     *, url: str, headers: dict, body: dict,
     timeout_s: float, retry_max: int,
     transport: httpx.AsyncBaseTransport | None = None,
-) -> tuple[str | None, LLMError | None, int | None, str]:
+) -> tuple[LLMResult | None, LLMError | None, int | None, str]:
     """对单个 Provider 发起调用, transient 错误按 retry_max 指数退避重试。
 
     返回 (content, last_err, status_code, err_class)
-      - content 成功(非空), last_err=None
+      - content 成功(非空 LLMResult 含 usage), last_err=None
       - 失败 content=None, last_err 非 None
     status_code: 成功=200; 失败=HTTP code(超时/连接错=None)
     err_class: 异常类名(便于审计日志分类)
@@ -155,7 +181,8 @@ async def _call_single_provider(
                 logger.warning("llm http err attempt=%s err=%s", attempt + 1, last_err_class)
             else:
                 if resp.status_code == 200:
-                    return _extract_content(resp.json()), None, 200, ""
+                    content, usage = _extract_content(resp.json())
+                    return LLMResult(content, usage), None, 200, ""
                 if resp.status_code in _RETRYABLE_STATUS:
                     last_err = LLMError(f"LLM 返回 {resp.status_code}",
                                          status_code=resp.status_code, retryable=True)
@@ -187,7 +214,7 @@ async def chat_completion(
     transport: httpx.AsyncBaseTransport | None = None,
     db: Session | None = None,
     source: str | None = None,
-) -> str:
+) -> LLMResult:
     """调用 chat/completions 返回文本内容。
 
     优先级(工单 #108): DB 多 Provider 模式 → 库为空时回退 .env 单源模式。
@@ -207,6 +234,8 @@ async def chat_completion(
     transport 仅供测试注入(httpx.MockTransport); 生产为 None 走真实网络。
     db 仅供 DB 模式; None 走 .env 模式(向后兼容)。
     source 用于审计日志来源(如 ai_analyze / llm_time_parse)。
+
+    返回 LLMResult(继承 str, 旧调用零侵入): `.usage` 取 token 统计(工单 #116)。
     """
     t0 = time.perf_counter()
     prompt_chars = _prompt_chars(messages)
@@ -243,7 +272,7 @@ async def _call_multi_provider(
     override_timeout_s: float | None,
     transport: httpx.AsyncBaseTransport | None,
     db: Session, source: str | None, t0: float, prompt_chars: int,
-) -> str:
+) -> LLMResult:
     """DB 多 Provider 调用: 按优先级遍历, transient 降级。"""
     from app.services import llm_provider_service
 
@@ -312,7 +341,7 @@ async def _call_env_single(
     override_timeout_s: float | None,
     transport: httpx.AsyncBaseTransport | None,
     db: Session | None, source: str | None, t0: float, prompt_chars: int,
-) -> str:
+) -> LLMResult:
     """.env 单源模式(向后兼容, 同 v1.0)。"""
     url = _endpoint(settings.LLM_BASE_URL or "")
     headers = _headers(settings.LLM_API_KEY or "")

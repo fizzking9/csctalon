@@ -105,6 +105,10 @@
               <el-icon><Calendar /></el-icon>
               <span>{{ m.windowLabel }}</span>
             </div>
+            <!-- #116 token/用时元数据(仅 success 显示) -->
+            <div v-if="m.role === 'assistant' && m.meta" class="ai-meta-hint">
+              <span>{{ m.meta }}</span>
+            </div>
             <!-- eslint-disable-next-line vue/no-v-html -- AI 输出经 renderMarkdown(DOMPurify 白名单) 消毒, 禁裸 v-html -->
             <div v-if="m.role === 'assistant'" class="markdown-body" v-html="renderMarkdown(m.content)"></div>
             <div v-else>{{ m.content }}</div>
@@ -309,13 +313,33 @@ function applyWindow(msg, d) {
   }
 }
 
+/** #116 回填 token/用时元数据, 让报告头部可见(仅 success 时填充) */
+function applyMeta(msg, d) {
+  if (!d || d.status !== 'success') return
+  // 耗时与 token 同时显示; 规则层秒回 llm_model=rule-engine, total_ms=0
+  const parts = []
+  if (typeof d.total_ms === 'number') {
+    parts.push(`⏱ ${(d.total_ms / 1000).toFixed(1)}s`)
+  }
+  if (d.usage && (d.usage.total_tokens || d.usage.prompt_tokens || d.usage.completion_tokens)) {
+    const p = d.usage.prompt_tokens ?? 0
+    const c = d.usage.completion_tokens ?? 0
+    const t = d.usage.total_tokens ?? (p + c)
+    parts.push(`📊 入${p}/出${c}/总${t}`)
+  }
+  if (d.llm_model && d.llm_model !== 'rule-engine') {
+    parts.push(`🤖 ${d.llm_model}`)
+  }
+  if (parts.length) msg.meta = parts.join(' · ')
+}
+
 async function submit() {
   const q = (question.value || '').trim()
   if (!q) return
   if (submitting.value) return
   submitting.value = true
   messages.value.push({ role: 'user', content: q })
-  const aiMsg = { role: 'assistant', content: '', loading: true, windowLabel: '' }
+  const aiMsg = { role: 'assistant', content: '', loading: true, windowLabel: '', meta: '' }
   messages.value.push(aiMsg)
   question.value = ''
   _saveThread()
@@ -324,6 +348,7 @@ async function submit() {
     const res = await aiAnalyze(buildPayload(q))
     const d = res.data || {}
     applyWindow(aiMsg, d)
+    applyMeta(aiMsg, d)
     // 后端 analyze 已同步等待: status=success 直接带 result_md(无需轮询); 否则轮询
     if (d.status === 'success') {
       finishMsg(aiMsg, d.result_md || '(无输出)')
@@ -407,6 +432,7 @@ async function pollTask(taskId, aiMsg, opts = {}) {
     }
 
     applyWindow(aiMsg, t)
+    applyMeta(aiMsg, t)
     if (t.status === 'success') {
       _savePending(null)
       finishMsg(aiMsg, t.result_md || '(无输出)')
@@ -500,6 +526,12 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 .ai-window-hint {
   display: flex; align-items: center; gap: 4px;
   font-size: 12px; color: #2563eb; background: #eff6ff;
+  border-radius: 4px; padding: 2px 6px; margin-bottom: 6px;
+  word-break: break-all;
+}
+/* #116 token/用时元数据条 */
+.ai-meta-hint {
+  font-size: 12px; color: #6b7280; background: #f3f4f6;
   border-radius: 4px; padding: 2px 6px; margin-bottom: 6px;
   word-break: break-all;
 }

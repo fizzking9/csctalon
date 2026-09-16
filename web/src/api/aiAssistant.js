@@ -24,3 +24,19 @@ export function aiTaskStatus(taskId, config) {
 export function aiTaskLatest() {
   return request.get('/ai/tasks')
 }
+
+// #116 AI 报告历史(本人; admin 可查全部)
+// 列表: 支持 start/end/period 筛选, 默认按 created_at DESC 分页
+export function aiReports(params = {}) {
+  return request.get('/ai/reports', { params })
+}
+
+// KPI + 7 日柱状(供"我的待办·AI 报告历史" tab 头部)
+export function aiReportsSummary() {
+  return request.get('/ai/reports/summary')
+}
+
+// 单条详情(含 answer_md 全文)
+export function aiReportDetail(reportId) {
+  return request.get(`/ai/reports/${reportId}`)
+}

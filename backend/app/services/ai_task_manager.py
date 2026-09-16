@@ -62,6 +62,13 @@ class AiTask:
     # 窗口判定(#66): 让前端/排查都能看到"这次到底按哪个窗口统计的"
     window_source: str | None = None   # explicit_range / explicit_date / nl / period
     window_label: str | None = None
+    # #116 持久化回填字段(成功后异步落库写入, 失败/超时为 None)
+    report_id: int | None = None       # ai_reports.id; 主入口/轮询返回给前端做复查入口
+    usage: dict | None = None          # LLM usage {prompt_tokens, completion_tokens, total_tokens}
+    total_ms: int | None = None       # 端到端总耗时(ms)
+    llm_ms: int | None = None         # LLM 推理耗时(ms, 不含 feed build)
+    build_ms: int | None = None        # feed 组装耗时(ms)
+    llm_model: str | None = None      # 命中的 provider+model(规则层=rule-engine)
 
     def to_public_dict(self) -> dict:
         # failed 但 error 为空时兜底: 生产曾出现 error=None 的瞬时响应,
@@ -84,6 +91,13 @@ class AiTask:
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            # #116 持久化与耗时/usage 元数据(success 时填充, 前端报告头部显示 token+用时)
+            "report_id": self.report_id,
+            "usage": self.usage,
+            "total_ms": self.total_ms,
+            "llm_ms": self.llm_ms,
+            "build_ms": self.build_ms,
+            "llm_model": self.llm_model,
         }
 
 

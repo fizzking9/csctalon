@@ -1,6 +1,7 @@
 """模型汇总 - 导入所有模型,供 Alembic 与应用初始化使用"""
 
 from app.models.ai_focus_config import AiFocusConfig  # noqa: F401
+from app.models.ai_report import AiReport  # noqa: F401
 from app.models.alert import Alert, AlertDelivery, AlertRule  # noqa: F401
 from app.models.analysis_view import AnalysisView, ClassificationRule  # noqa: F401
 from app.models.audit_note import AuditJudgment, AuditNote  # noqa: F401
@@ -101,6 +102,7 @@ from app.models.weekly_section_binding import WeeklySectionBinding  # noqa: F401
 
 __all__ = [
     "AiFocusConfig",
+    "AiReport",
     "AnalysisView",
     "Alert",
     "AlertRule",

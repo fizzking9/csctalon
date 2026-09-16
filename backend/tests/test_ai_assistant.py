@@ -228,6 +228,42 @@ def test_payload_thinking_low_no_chat_template_kwargs():
     assert "think" not in body
 
 
+# ── #116: LLMResult + _extract_content 取 usage ───────────────────
+def test_llm_result_str_compat_and_usage():
+    """LLMResult 继承 str, 旧调用零侵入: == 比对字符串; .usage 拿 dict。"""
+    r = llm_client.LLMResult("分析结果", {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150})
+    assert r == "分析结果"  # 继承 str 的 ==
+    assert isinstance(r, str)
+    assert len(r) == 4
+    assert r.usage == {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
+
+
+def test_llm_result_no_usage():
+    """LLMResult 不传 usage → usage=None(规则层秒回/服务端不返 usage)。"""
+    r = llm_client.LLMResult("ok")
+    assert r == "ok"
+    assert r.usage is None
+
+
+def test_extract_content_returns_usage():
+    """#116: _extract_content 从 OpenAI 兼容响应取 (content, usage) 二元组。"""
+    content, usage = llm_client._extract_content({
+        "choices": [{"message": {"content": "hello"}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    })
+    assert content == "hello"
+    assert usage == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+
+def test_extract_content_no_usage_field():
+    """#116: 响应不含 usage → usage=None(ollama 旧版/服务端不返)。"""
+    content, usage = llm_client._extract_content({
+        "choices": [{"message": {"content": "hello"}}],
+    })
+    assert content == "hello"
+    assert usage is None
+
+
 @pytest.mark.asyncio
 async def test_llm_client_retry_then_success(monkeypatch):
     """429 两次后 200 → 最终成功(transient 重试)。"""

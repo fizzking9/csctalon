@@ -36,6 +36,31 @@ router = APIRouter(prefix="/ai", tags=["AI 分析助手"])
 _PLAIN_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def _get_last_llm_model(db) -> str | None:
+    """#116 取最近一条 source=ai_analyze 的成功 LLM 调用命中的 provider_code+model。
+
+    用途: AI 报告落库时记下"用的是哪个模型", 便于按模型分组复盘报告质量差异。
+    失败/未找到 → None(落库 NULL, 不影响主流程)。
+    """
+    from sqlalchemy import text
+    try:
+        row = db.execute(
+            text("""SELECT provider_code, model
+                    FROM llm_call_logs
+                    WHERE source = 'ai_analyze' AND status = 'success'
+                    ORDER BY created_at DESC
+                    LIMIT 1"""),
+        ).mappings().first()
+        if not row:
+            return None
+        code = row.get("provider_code") or ".env"
+        model = row.get("model") or ""
+        return f"{code}/{model}" if model else code
+    except Exception as e:  # noqa: BLE001  失败仅返回 None, 不阻塞主流程
+        logger.warning("ai get_last_llm_model failed: %s", e)
+        return None
+
+
 def _require_plain_date(value: str | None, name: str) -> str:
     """校验 `value` 为字面 `YYYY-MM-DD` 且是真实日历日; 否则 400。返回规范化串。"""
     raw = (value or "").strip()
@@ -172,16 +197,19 @@ def ai_config(_: ManagerUser):
 
 
 @router.post("/analyze", response_model=R, summary="提交 AI 经营数据分析任务(自由问答)")
-async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
+async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
     """提交分析任务, 立即返回 task_id(生成可能数十秒, 前端轮询 GET /ai/tasks/{id})。
 
     窗口优先级(工单 #66): 显式 start/end > 显式 date > **问句自然语言识别** > period 兜底。
     识别结果通过 `window` / `window_label` 回显, 让推断可见。
+
+    #116 持久化: 任务 success 后落 ai_reports 表(归属 current_user), 响应增 report_id/usage/total_ms/llm_ms。
     """
     _require_enabled()
     q = (payload.question or "").strip()
     if not q:
         raise HTTPException(400, "question 不能为空")
+    user_id = current_user.id
     # 窗口解析(显式参数校验 + 自然语言识别)
     win = _AiWindow(payload)
     win.resolve(q)
@@ -211,7 +239,6 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
         "start": eff["start"],
         "end": eff["end"],
     }
-    from app.core.database import SessionLocal
     from app.services.ai_rule_engine import try_rule_answer
     _rule_db = SessionLocal()
     try:
@@ -221,11 +248,29 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
     if _rule_md is not None:
         logger.info("ai rule short-circuit: question=%r out_chars=%d window_source=%s",
                     q[:30], len(_rule_md), win.window_source)
+        # #116 规则层秒回也落库(llm_model=rule-engine, tokens=None, 耗时=0)
+        from app.services.ai_report_service import save_report
+        _rule_db2 = SessionLocal()
+        try:
+            _saved = save_report(
+                _rule_db2,
+                task_id=None, user_id=user_id, question=q,
+                period=eff["period"], date=eff["date"], start=eff["start"], end=eff["end"],
+                window_source=win.window_source, window_label=win.window_label,
+                answer_md=_rule_md, llm_model="rule-engine",
+                llm_ms=0, total_ms=0, tokens=None,
+            )
+        finally:
+            _rule_db2.close()
         return R(data={"task_id": None, "status": "success",
-                       "result_md": _rule_md, **window_info})
+                       "result_md": _rule_md,
+                       "report_id": _saved.id if _saved else None,
+                       "usage": None, "total_ms": 0, "llm_ms": 0,
+                       "llm_model": "rule-engine",
+                       **window_info})
 
     async def _runner(task):
-        """后台执行: 建独立 Session 组装 feed → 调 LLM → 写回 task。"""
+        """后台执行: 建独立 Session 组装 feed → 调 LLM → 写回 task + 落 ai_reports。"""
         t0 = time.perf_counter()
         try:
             db = SessionLocal()
@@ -242,16 +287,43 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
             logger.info("ai task %s: period=%s date=%s start=%s end=%s question_len=%d build_ms=%d",
                         task.task_id, eff["period"], eff["date"], eff["start"], eff["end"],
                         len(q), build_ms)
-            result = await llm_client.chat_completion(
+            # #116 llm_result 是 LLMResult(继承 str), .usage 拿 token 统计
+            llm_result = await llm_client.chat_completion(
                 messages,
                 max_tokens=int(getattr(settings, "AI_MAX_TOKENS", 1500) or 1500),
                 db=db, source="ai_analyze",
             )
-            task.result_md = result
+            task.result_md = str(llm_result)
+            total_ms_now = int((time.perf_counter() - t0) * 1000)
+            llm_ms_now = total_ms_now - build_ms
+            task.usage = llm_result.usage
+            task.total_ms = total_ms_now
+            task.llm_ms = llm_ms_now
+            task.build_ms = build_ms
+            # 命中的 provider+model 字符串(DB 模式从 db 拿; .env 模式用 settings.LLM_MODEL)
+            task.llm_model = _get_last_llm_model(db)
             # 埋点(工单 #66 C3): 让生产可统计耗时与窗口来源, 定位"同步等待越线"。
             logger.info("ai task %s done: build_ms=%d llm_ms=%d total_ms=%d out_chars=%d window_source=%s",
-                        task.task_id, build_ms, int((time.perf_counter() - t0) * 1000) - build_ms,
-                        int((time.perf_counter() - t0) * 1000), len(result or ""), win.window_source)
+                        task.task_id, build_ms, llm_ms_now, total_ms_now,
+                        len(llm_result or ""), win.window_source)
+            # #116 持久化(同步落库, 失败仅 log; report_id 写回 task 供主入口/轮询取)
+            from app.services.ai_report_service import save_report
+            _persist_db = SessionLocal()
+            try:
+                _saved = save_report(
+                    _persist_db,
+                    task_id=task.task_id, user_id=user_id, question=q,
+                    period=eff["period"], date=eff["date"], start=eff["start"], end=eff["end"],
+                    window_source=win.window_source, window_label=win.window_label,
+                    answer_md=task.result_md or "",
+                    llm_model=task.llm_model,
+                    llm_ms=llm_ms_now, total_ms=total_ms_now,
+                    tokens=task.usage,
+                )
+                if _saved:
+                    task.report_id = _saved.id
+            finally:
+                _persist_db.close()
         except llm_client.LLMError as e:
             task.error = str(e)
             logger.error("ai task %s LLM 失败: %s (elapsed_ms=%d window_source=%s)",
@@ -283,7 +355,14 @@ async def ai_analyze(payload: AiAnalyzeRequest, _: ManagerUser):
     if task is not None and task.status == "success":
         # 一次请求直接返回结果, 前端无需轮询
         return R(data={"task_id": task_id, "status": "success",
-                       "result_md": task.result_md, **window_info})
+                       "result_md": task.result_md,
+                       "report_id": task.report_id,
+                       "usage": task.usage,
+                       "total_ms": task.total_ms,
+                       "llm_ms": task.llm_ms,
+                       "build_ms": task.build_ms,
+                       "llm_model": task.llm_model,
+                       **window_info})
     if task is not None and task.status == "failed":
         return R(data={"task_id": task_id, "status": "failed",
                        "error": task.error or "分析失败(未捕获到错误详情, 请查服务端日志)",
@@ -312,6 +391,61 @@ def ai_task_status(task_id: str, _: ManagerUser):
 def ai_task_latest(_: ManagerUser):
     latest = ai_task_manager.get_latest()
     return R(data={"latest": latest.to_public_dict() if latest else None})
+
+
+# ─────────────────────────────────────────────────────────────────────
+# AI 报告历史(工单 #116) - 仅本人可见; admin 可查全部
+# ─────────────────────────────────────────────────────────────────────
+@router.get("/reports", response_model=R, summary="AI 报告历史列表(本人)")
+def ai_reports_list(
+    db: DBSession, current_user: ManagerUser,
+    page: int = 1, page_size: int = 20,
+    start: str | None = None, end: str | None = None,
+    period: str | None = None,
+):
+    """本人 AI 报告历史列表(admin 可查全部, 普通用户仅本人)。
+
+    支持时间范围(start/end 纯日期 YYYY-MM-DD)与 period(daily/weekly/monthly/range) 筛选;
+    默认按 created_at DESC, 分页。响应不返回 answer_md(详情另调 /reports/{id})。
+    """
+    if start:
+        _require_plain_date(start, "start")
+    if end:
+        _require_plain_date(end, "end")
+    is_admin = current_user.role == "admin"
+    from app.services.ai_report_service import list_reports
+    data = list_reports(
+        db, current_user.id, is_admin,
+        start=start, end=end, period=period,
+        page=page, page_size=page_size,
+    )
+    return R(data=data)
+
+
+@router.get("/reports/summary", response_model=R, summary="AI 报告 KPI + 7 日柱状(本人)")
+def ai_reports_summary(db: DBSession, current_user: ManagerUser):
+    """本人 AI 报告 KPI(总条数/30天条数/累计 token) + 7 日柱状。
+
+    admin 范围看全部, 普通用户仅本人。供"我的待办·AI 报告历史" tab KPI 头部展示。
+    """
+    is_admin = current_user.role == "admin"
+    from app.services.ai_report_service import summary as _summary
+    return R(data=_summary(db, current_user.id, is_admin))
+
+
+@router.get("/reports/{report_id}", response_model=R, summary="AI 报告详情(本人或 admin)")
+def ai_report_detail(report_id: int, db: DBSession, current_user: ManagerUser):
+    """单条 AI 报告详情(含 answer_md 全文)。
+
+    权限: 本人或 admin; 非本人且非 admin → 403(不暴露他人报告存在性)。
+    """
+    is_admin = current_user.role == "admin"
+    from app.services.ai_report_service import get_report
+    data = get_report(db, report_id, current_user.id, is_admin)
+    if data is None:
+        # 用 404 而非 403: 不暴露"存在但无权限"(隐私), 与无 id 一视同仁
+        raise HTTPException(404, "AI 报告不存在或无权查看")
+    return R(data=data)
 
 
 # ─────────────────────────────────────────────────────────────────────
