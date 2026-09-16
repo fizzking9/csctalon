@@ -111,9 +111,15 @@ def match_template_report(
     for r in rows:
         tmpl = _get_template(db, r.get("template_id"))
         if tmpl and _question_matches_keywords(question, tmpl.question_keywords):
+            report = _wrap_row(db, dict(r))
+            # #128: _wrap_row 内 _bump_matched_count 调 db.commit() → expire_on_commit
+            #       把 tmpl 属性标 expired; 脱离 session 前 expunge 才能让调用方
+            #       在 _match_db.close() 后安全读 tmpl.code(否则 DetachedInstanceError 500)。
+            _code = tmpl.code  # 显式读一次, 确保属性已加载进实例
+            db.expunge(tmpl)
             logger.info("match_template_report: 语义+窗口命中 report_id=%s template=%s",
-                        r["id"], tmpl.code)
-            return _wrap_row(db, dict(r)), tmpl
+                        r["id"], _code)
+            return report, tmpl
 
     # 未命中: 返回 None, 调用方走 LLM 兜底
     # (不兜底时点容差, 避免"上月对比"等无关问句命中当日 daily 报告)
