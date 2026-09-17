@@ -204,17 +204,19 @@ def list_admin_reports(
     })
 
 
-@router.get("/reports/{report_id}", response_model=R, summary="AI 报告详情(admin, 含完整 content)")
+@router.get("/reports/{report_id}", response_model=R, summary="AI 报告详情(admin, 含完整 answer_md)")
 def get_admin_report(report_id: int, db: DBSession, _: AdminUser):
-    """admin 查看单条 AI 报告完整内容(含 content 字段, 列表接口不返回 content 防列表过大)。
+    """admin 查看单条 AI 报告完整内容(含 answer_md 字段, 列表接口不返回 answer_md 防列表过大)。
 
     #141 (2026-09-17): 报告查看入口拆出独立路由 /system/ai-reports,
-    列表只返摘要, 详情按需拉取 content 避免一次返回 83 条 × 数 KB content。
+    列表只返摘要, 详情按需拉取 answer_md 避免一次返回 N 条 × 数 KB 报告正文。
+    ⚠️ 列名是 answer_md 不是 content(见 ai_report.py ORM 模型), 历史教训:
+    手写 SQL 前必须看 ORM 模型确认列名, 不能凭印象写(#116 #141 重复踩坑)。
     """
     row = db.execute(
         text("""SELECT id, task_id, user_id, template_id, question, period,
                   snapshot_date, snapshot_period, is_public, matched_count,
-                  llm_model, llm_ms, total_ms, total_tokens, content, created_at
+                  llm_model, llm_ms, total_ms, total_tokens, answer_md, created_at
                FROM ai_reports WHERE id = :rid"""),
         {"rid": report_id},
     ).mappings().first()

@@ -179,9 +179,9 @@ const currentReport = ref(null)
 const reportDetail = ref(null)
 const detailLoading = ref(false)
 
-// #141: marked 同步渲染, 简单 markdown → HTML; content 是 LLM 生成文本, 非 user input
+// #141: marked 同步渲染, 简单 markdown → HTML; answer_md 是 LLM 生成文本, 非 user input
 const renderedContent = computed(() => {
-  const raw = reportDetail.value?.content || ''
+  const raw = reportDetail.value?.answer_md || ''
   if (!raw) return '<p class="dim">（无内容）</p>'
   try {
     return marked.parse(raw)
