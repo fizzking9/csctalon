@@ -23,7 +23,7 @@ from app.api.v1.external import _build_brief, _window
 from app.core.config import settings
 from app.core.redis_client import cache_ttl_for, cached_call, get_redis
 from app.services import analytics as A
-from app.services.ai_focus_service import keyword_to_scope, keywords_to_scopes
+from app.services.ai_focus_service import keywords_to_scopes
 from app.services.ai_glossary import glossary_all, glossary_for_question
 
 logger = logging.getLogger(__name__)
@@ -38,8 +38,12 @@ _SYSTEM_PROMPT = (
     "铁律:\n"
     "1. 所有数字必须来自【给定数据】, 严禁编造、外推或臆测; 数据中没有的写\"暂无/未提供\"。\n"
     "2. 严格按【业务口径】理解指标, 不要自创定义。\n"
-    "3. 回答中文, 结构清晰(可用标题/要点/小表格), 结论注明数据窗口(如 今日/本周/本月 截至时间)。\n"
-    "   **回答总长控制在 500 字以内**(突出核心结论与关键异常, 不展开逐项明细; 超长会被截断)。\n"
+    "3. 回答中文, 结论注明数据窗口(如 今日/本周/本月 截至时间)。\n"
+    "   **结构要求**: 周报/月报**必须**按 H2 锚点结构化输出, 锚点固定为 "
+    "`## 接待分析` / `## 退款分析` / `## 投诉分析` / `## 趋势对比` / `## 结论建议`"
+    "(无数据的段写\"暂无\", 不要省略锚点); 日报保持简洁, 不强制 H2。\n"
+    "   **长度约束**: 前台实时问答 ≤500 字(突出核心结论, 不展开逐项明细; 超长会被截断); "
+    "后台预生成草稿(数据窗口说明含\"预生成\"字样时)可详尽展开, 不受此限。\n"
     "4. 只回答与经营数据相关的问题; 无关问题礼貌说明无法回答。\n"
     "5. 金额一律以元为单位。\n"
     "6. **回答开头必须写明本次统计窗口**(直接引用【数据窗口说明】里的起止时间), 让用户能核对窗口"
