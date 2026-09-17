@@ -5,8 +5,8 @@
 - confidence≥0.6 视为命中 → 走摘取层; 否则走 L3 clarify 兜底
 - 候选取前 5 条(避免 LLM 输入过长), 每条 question + answer_md 前 200 字摘要
 
-LLM 调用约束:
-- provider_code=None 走 default 链(#131 配置 = 27b 主力)
+LLM 调用约束(#145 改指轻量模型, 消除大模型冷加载超时):
+- provider_code=_SEMANTIC_PROVIDER_CODE(talon-gmk-qwen2.5:7b, 经 talon 统一管理接入)
 - timeout_s=30(前台实时问答用户在等)
 - max_tokens=200(只输出 JSON 数组, 短)
 - LLM 输出 JSON: [{index, confidence, reason}], confidence∈[0,1]
@@ -25,6 +25,10 @@ from app.models.ai_report import AiReport
 from app.services import llm_client
 
 logger = logging.getLogger(__name__)
+
+# #145 语义匹配走轻量模型(经 talon 统一管理接入): 判定问句↔报告相关性是封闭分类任务,
+#   qwen2.5:7b 足够, 已在内存秒回, 不经 27b 冷加载超时。改动前走 default 链优先命中 27b。
+_SEMANTIC_PROVIDER_CODE = "talon-gmk-qwen2.5-7b"
 
 # confidence 阈值(架构文档 §4.3: 默认 0.6; 可通过 settings.AI_SEMANTIC_MATCH_THRESHOLD 配置)
 _DEFAULT_THRESHOLD = 0.6
@@ -83,8 +87,8 @@ async def semantic_match(db: Session, question: str,
     ]
     try:
         result = await llm_client.chat_completion(
-            messages, max_tokens=200, timeout_s=30.0,
-            db=db, source="ai_semantic", provider_code=None,
+            messages, max_tokens=200, timeout_s=60.0,
+            db=db, source="ai_semantic", provider_code=_SEMANTIC_PROVIDER_CODE,
         )
         text = str(result).strip()
         # 兼容 ```json 包裹的输出
