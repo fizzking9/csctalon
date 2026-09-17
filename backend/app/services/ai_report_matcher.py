@@ -54,6 +54,24 @@ def _question_matches_keywords(question: str, keywords: list | None) -> bool:
     return False
 
 
+def _count_keyword_hits(question: str, keywords: list | None) -> int:
+    """问句命中模板关键词的数量(#143 排序用)。
+
+    多 keyword 命中 = 更精确匹配(模板 3 月报 keywords['本月','这个月','月报','上月','同比']
+    用户问「本月经营情况总览, 含同比环比...」命中 '本月'+'同比' = 2 个, 优先于单 keyword 命中。
+    """
+    if not keywords:
+        return 0
+    q = question.lower()
+    n = 0
+    for kw in keywords:
+        if not kw:
+            continue
+        if str(kw).lower() in q:
+            n += 1
+    return n
+
+
 def match_template_report(
     db: Session,
     question: str,
@@ -106,19 +124,35 @@ def match_template_report(
             {"today": today, "period": win_period or ""},
         ).mappings().all()
 
-    # 在候选中找问句命中模板 keywords 的优先返回(强匹配: 窗口完全 + 语义)
-    # 候选已按 (snapshot_period=win_period) DESC 排序, 第一个命中的即返回
+    # #143: 候选按「keywords 命中数 DESC + period 匹配 DESC + created_at DESC」综合排序
+    #   原 L1 仅按 (snapshot_period=win_period) DESC 排序, 当 eff.period=weekly 误导时
+    #   (用户问「本月」被 effective() 强制 period=weekly), 周报排前面 + 周报 keywords
+    #   含 '环比' 在用户问句里 → 误命中周报而非月报。
+    #   改为多 keyword 命中优先(月报 keywords['本月','这个月','月报','上月','同比']
+    #   命中 '本月'+'同比'=2 个, 优先于周报命中 '环比'=1 个)。
+    sorted_rows = []
     for r in rows:
         tmpl = _get_template(db, r.get("template_id"))
-        if tmpl and _question_matches_keywords(question, tmpl.question_keywords):
+        hits = _count_keyword_hits(question, tmpl.question_keywords if tmpl else None)
+        period_match = (r.get("snapshot_period") == win_period) if win_period else False
+        sorted_rows.append((r, tmpl, hits, period_match))
+    # 排序: 命中数 DESC → period 匹配 DESC → created_at DESC
+    sorted_rows.sort(
+        key=lambda x: (-x[2], 0 if x[3] else 1, -(x[0].get("created_at") or _dt.datetime.min.replace(tzinfo=_dt.timezone.utc)).timestamp()),
+    )
+
+    # 取第一条 keyword 命中数 > 0 的返回
+    for r, tmpl, hits, period_match in sorted_rows:
+        if hits > 0 and tmpl:
             report = _wrap_row(db, dict(r))
             # #128: _wrap_row 内 _bump_matched_count 调 db.commit() → expire_on_commit
             #       把 tmpl 属性标 expired; 脱离 session 前 expunge 才能让调用方
             #       在 _match_db.close() 后安全读 tmpl.code(否则 DetachedInstanceError 500)。
             _code = tmpl.code  # 显式读一次, 确保属性已加载进实例
             db.expunge(tmpl)
-            logger.info("match_template_report: 语义+窗口命中 report_id=%s template=%s",
-                        r["id"], _code)
+            logger.info("match_template_report: 命中 report_id=%s template=%s "
+                        "keyword_hits=%d period_match=%s",
+                        r["id"], _code, hits, period_match)
             return report, tmpl
 
     # 未命中: 返回 None, 调用方走 LLM 兜底
