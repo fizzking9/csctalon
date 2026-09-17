@@ -32,6 +32,7 @@ from app.models.ai_report_template import AiReportTemplate
 from app.services import llm_client
 from app.services.ai_feed import build_messages
 from app.services.ai_report_service import save_report
+from app.services.ai_report_window import compute_pregen_window
 from app.services.system_event_service import record_system_event
 
 logger = logging.getLogger(__name__)
@@ -201,12 +202,36 @@ def generate_for_template(db: Session, template: AiReportTemplate,
     # question 用模板的 question_template(可含变量; 当前实现: 直接作为问句传入 build_messages)
     question = template.question_template
 
+    # #132 批次 A: 周报/月报预生成窗口截止昨天整天(不含当天不完整数据)
+    #   - daily: 保持 date=None 实时数据(refresh_on_sync 仍生效)
+    #   - weekly/monthly: compute_pregen_window 算 start/end(昨日截止), build_messages
+    #     走 period="range" + start/end 模式, _window 在 end<today 时返回整天 T23:59:59
+    #     退化: 今日周一(weekly)/今日1号(monthly)→取上周/上月整天数据
+    pregen_win = compute_pregen_window(period)
+    if pregen_win is not None:
+        # weekly/monthly: 走 start/end 模式(昨日截止)
+        pregen_start = pregen_win["start"]
+        pregen_end = pregen_win["end"]
+        pregen_label = pregen_win["label"]
+        build_period = "range"  # _window 走 start/end 任意区间分支
+        build_date = None
+    else:
+        # daily: 保持现行 date=None 实时数据
+        pregen_start = None
+        pregen_end = None
+        pregen_label = f"{period}(当日实时)"
+        build_period = period
+        build_date = None
+
     # 构造 messages(三层 Prompt: System/口径卡/Data+Question)
     try:
         messages = build_messages(
-            db, period=period, date=None, question=question,
-            start=None, end=None,
-            window_label=f"预生成(template={template.code}, snapshot={snapshot_date})",
+            db, period=build_period, date=build_date, question=question,
+            start=pregen_start, end=pregen_end,
+            window_label=(
+                f"预生成(template={template.code}, snapshot={snapshot_date}, "
+                f"{pregen_label})"
+            ),
             window_source="template",
         )
     except Exception as e:  # noqa: BLE001  build_messages 失败不阻塞 worker
@@ -267,6 +292,7 @@ def generate_for_template(db: Session, template: AiReportTemplate,
 
     # 落库(is_public=True, template_id, snapshot_date)
     # user_id=1 表示系统生成的"管理员"报告(admin user); is_public=True 让所有人可见
+    # #132 批次 A: weekly/monthly 落库 start/end(昨日截止), daily 保持 start/end=None
     report = save_report(
         db,
         task_id=None,  # 预生成无 ai_task_manager 任务 id
@@ -274,9 +300,9 @@ def generate_for_template(db: Session, template: AiReportTemplate,
         question=question,
         period=period,
         date=snapshot_date,
-        start=None, end=None,
+        start=pregen_start, end=pregen_end,
         window_source="template",
-        window_label=f"预生成({template.code})",
+        window_label=f"预生成({template.code}, {pregen_label})",
         answer_md=answer_md,
         llm_model=llm_model_str,
         llm_ms=total_ms,  # 简化: 全程算 llm_ms(后续可细分 build_ms + llm_ms)
