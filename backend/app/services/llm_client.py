@@ -214,13 +214,16 @@ async def chat_completion(
     transport: httpx.AsyncBaseTransport | None = None,
     db: Session | None = None,
     source: str | None = None,
+    provider_code: str | None = None,
 ) -> LLMResult:
     """调用 chat/completions 返回文本内容。
 
     优先级(工单 #108): DB 多 Provider 模式 → 库为空时回退 .env 单源模式。
 
     DB 模式:
-      - 按 priority 升序遍历 enabled+healthy Provider
+      - 默认链: 按 priority 升序遍历 enabled+healthy 且非 pregen_only 的 Provider
+      - #131 provider_code 非空(报告预生成): 指定 provider 置顶, 其后保留常规链
+        作 transient 降级兜底(pregen_only 的慢模型只对显式指定可见)
       - transient 错误(5xx/429/超时/连接错) 降级下一个 Provider
       - permanent 错误(4xx) 立即抛 LLMError
       - 全部 Provider 失败 → 抛 LLMError(聚合所有错误信息)
@@ -234,6 +237,7 @@ async def chat_completion(
     transport 仅供测试注入(httpx.MockTransport); 生产为 None 走真实网络。
     db 仅供 DB 模式; None 走 .env 模式(向后兼容)。
     source 用于审计日志来源(如 ai_analyze / llm_time_parse)。
+    provider_code 用于预生成按模板指定专用慢模型(#131); None 走实时默认链。
 
     返回 LLMResult(继承 str, 旧调用零侵入): `.usage` 取 token 统计(工单 #116)。
     """
@@ -245,9 +249,11 @@ async def chat_completion(
     if db is not None:
         try:
             from app.services import llm_provider_service
-            providers = llm_provider_service.get_active_providers(db)
+            # #131: provider_code 非空(预生成)时指定 provider 置顶 + 常规链兜底;
+            # 为 None(实时问答)时只取非 pregen_only 的默认链
+            providers = llm_provider_service.get_provider_chain(db, provider_code)
         except Exception as e:  # noqa: BLE001  查库失败不阻塞业务, 回退 .env
-            logger.warning("llm get_active_providers failed, fallback to .env: %s", e)
+            logger.warning("llm get_provider_chain failed, fallback to .env: %s", e)
             providers = []
 
     # ── DB 多 Provider 模式 ──
@@ -329,9 +335,11 @@ async def _call_multi_provider(
         logger.warning("llm call transient fail provider=%s(%s) status=%s err=%s; 降级下一个",
                         pid, pcode, status, err_cls)
 
-    # 所有 Provider 都失败 → 抛聚合错误
+    # 所有 Provider 都失败 → 抛最后一个错误(附最后错误类型/状态码, 便于运维定位)
     duration_ms = int((time.perf_counter() - t0) * 1000)
     if last_err is not None:
+        logger.error("llm all providers failed count=%s last=%s status=%s duration_ms=%d",
+                     len(providers), last_err_class, last_status, duration_ms)
         raise last_err
     raise LLMError(f"LLM 调用失败: 无可用 Provider(共 {len(providers)} 个, 全部失败)")
 

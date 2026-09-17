@@ -41,14 +41,10 @@ _PROVIDER_CACHE_TTL_S = 30  # 30s 进程缓存
 # ─────────────────────────────────────────────────────────────────────
 # Provider 选择(供 llm_client 调用)
 # ─────────────────────────────────────────────────────────────────────
-def get_active_providers(db: Session) -> list[dict]:
-    """取启用且健康的 Provider 列表, 按 priority 升序。
+def _load_active_providers(db: Session) -> list[dict]:
+    """取启用且健康的全部 Provider(含 pregen_only), 按 priority 升序, 带 30s 进程缓存。
 
-    返回 dict 列表(已解密 api_key), 含字段:
-      id/code/name/base_url/model/api_key/thinking/timeout_s/retry_max/
-      fail_threshold/fail_count
-
-    库为空或全 disabled → 返回空列表(由 llm_client 回退 .env 单源)。
+    #131: 缓存保留 pregen_only 行, 由 get_active_providers/get_provider_chain 各自过滤。
     """
     now = time.time()
     hit = _PROVIDER_CACHE.get("active")
@@ -67,10 +63,48 @@ def get_active_providers(db: Session) -> list[dict]:
             "api_key": decrypt_secret(r.api_key_cipher) or "",
             "thinking": r.thinking, "timeout_s": float(r.timeout_s),
             "retry_max": int(r.retry_max), "fail_threshold": int(r.fail_threshold),
-            "fail_count": int(r.fail_count),
+            "fail_count": int(r.fail_count), "pregen_only": bool(r.pregen_only),
         })
     _PROVIDER_CACHE["active"] = (now, data)
     return data
+
+
+def get_active_providers(db: Session) -> list[dict]:
+    """实时默认链: 启用+健康且 **非 pregen_only** 的 Provider, 按 priority 升序。
+
+    用于用户实时问答 / 时间解析等同步路径。pregen_only(如 122b 慢模型)
+    对这些调用不可见, 避免实时请求被拖到分钟级(#131)。
+
+    返回 dict 列表(已解密 api_key), 含字段:
+      id/code/name/base_url/model/api_key/thinking/timeout_s/retry_max/
+      fail_threshold/fail_count/pregen_only
+
+    库为空或全 disabled → 返回空列表(由 llm_client 回退 .env 单源)。
+    """
+    return [p for p in _load_active_providers(db) if not p.get("pregen_only")]
+
+
+def get_provider_chain(db: Session, provider_code: str | None = None) -> list[dict]:
+    """构造本次调用的 Provider 链(#131)。
+
+    - provider_code 为空: 返回实时默认链(排除 pregen_only)。
+    - provider_code 非空(报告预生成按模板指定):
+      * 命中 enabled+healthy 的指定 provider → 置顶, 其后接常规链作 transient 降级兜底;
+      * 未命中/已停用/不健康 → 退回常规链(预生成不因慢模型暂时不可用而硬失败)。
+
+    顺序: [指定 provider(若可用)] + [其余非 pregen_only provider, priority 升序]。
+    """
+    full = _load_active_providers(db)
+    normal = [p for p in full if not p.get("pregen_only")]
+    if not provider_code:
+        return normal
+    designated = [p for p in full if p["code"] == provider_code]
+    if not designated:
+        logger.warning(
+            "provider_code=%s 未启用/不存在/不健康, 预生成退回常规 provider 链", provider_code)
+        return normal
+    first = designated[0]
+    return [first] + [p for p in normal if p["id"] != first["id"]]
 
 
 def invalidate_cache() -> None:
@@ -240,7 +274,9 @@ def _to_out(row: LlmProvider) -> dict:
         "base_url": row.base_url, "model": row.model,
         "api_key_prefix": row.api_key_prefix,
         "api_key_configured": bool(row.api_key_cipher),
-        "priority": row.priority, "enabled": row.enabled, "healthy": row.healthy,
+        "priority": row.priority, "enabled": row.enabled,
+        "pregen_only": bool(row.pregen_only),
+        "healthy": row.healthy,
         "thinking": row.thinking, "timeout_s": float(row.timeout_s),
         "retry_max": int(row.retry_max), "fail_threshold": int(row.fail_threshold),
         "fail_count": int(row.fail_count),
@@ -266,6 +302,7 @@ def create_provider(db: Session, payload: LlmProviderCreate, username: str) -> d
         base_url=payload.base_url[:256], model=payload.model[:128],
         api_key_cipher=key_cipher, api_key_prefix=key_prefix,
         priority=payload.priority, enabled=payload.enabled,
+        pregen_only=payload.pregen_only,
         thinking=payload.thinking, timeout_s=payload.timeout_s,
         retry_max=payload.retry_max, fail_threshold=payload.fail_threshold,
         note=payload.note, created_by=(username or "")[:64], updated_by=(username or "")[:64],
@@ -289,8 +326,8 @@ def update_provider(db: Session, provider_id: int, payload: LlmProviderUpdate, u
     if new_key is not None:
         row.api_key_cipher = encrypt_secret(new_key) if new_key else None
         row.api_key_prefix = (new_key or "")[:6] or None
-    for field in ("name", "base_url", "model", "priority", "enabled", "healthy",
-                  "thinking", "timeout_s", "retry_max", "fail_threshold", "note"):
+    for field in ("name", "base_url", "model", "priority", "enabled", "pregen_only",
+                  "healthy", "thinking", "timeout_s", "retry_max", "fail_threshold", "note"):
         if field in upd and upd[field] is not None:
             setattr(row, field, upd[field])
     row.updated_by = (username or "")[:64]

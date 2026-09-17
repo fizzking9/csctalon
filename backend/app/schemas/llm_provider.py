@@ -19,6 +19,7 @@ class LlmProviderOut(BaseModel):
     api_key_configured: bool = False  # 是否已配 key(由 service 层填)
     priority: int
     enabled: bool
+    pregen_only: bool = False  # #131 仅供后台预生成, 不进实时默认链/不参与启动预热
     healthy: bool
     thinking: str
     timeout_s: float
@@ -44,6 +45,7 @@ class LlmProviderCreate(BaseModel):
     api_key: str | None = Field(None, description="API key 明文; 无鉴权服务(本地无 key)可留空")
     priority: int = Field(100, ge=0, le=9999, description="小=高; 调用按 priority 升序遍历")
     enabled: bool = True
+    pregen_only: bool = Field(False, description="#131 仅供后台预生成; 不进实时默认链/不参与启动预热")
     thinking: str = Field("disabled", pattern="^(disabled|low|high)$")
     timeout_s: float = Field(120.0, ge=1.0, le=600.0)
     retry_max: int = Field(2, ge=0, le=10)
@@ -61,6 +63,7 @@ class LlmProviderUpdate(BaseModel):
     api_key: str | None = Field(None, description="传值=重置 key; 留空=不改")
     priority: int | None = Field(None, ge=0, le=9999)
     enabled: bool | None = None
+    pregen_only: bool | None = Field(None, description="#131 仅供后台预生成标记")
     healthy: bool | None = Field(None, description="手动覆盖健康状态(强制恢复/降级)")
     thinking: str | None = Field(None, pattern="^(disabled|low|high)$")
     timeout_s: float | None = Field(None, ge=1.0, le=600.0)

@@ -8,7 +8,7 @@
   ③ 空闲期(bms_scheduler._run_loop 每分钟) 扫描 daily/weekly/monthly + trigger_at 匹配
 - 进程级单飞锁 _worker_lock 防并发(单 worker, 保证互斥锁有效)
 - 失败处理: 仅 log + 通知中心写 system_event(category=ai, status=failed), 不阻塞
-- 参数分级: 后台预生成 timeout_s=180, max_tokens=template.max_tokens(2000)
+- 参数分级: 后台预生成 timeout_s=600(#131 122b 慢模型放宽), max_tokens=template.max_tokens(2000)
 - 落库到 ai_reports + is_public=True + template_id + snapshot_date
 
 #121 不接 sync_task_manager / bms_scheduler(留待 #123 调度仲裁层);
@@ -173,9 +173,10 @@ async def _pregen_llm(messages: list[dict], db: Session, max_tokens: int, *,
         result = await llm_client.chat_completion(
             messages,
             max_tokens=max_tokens,
-            timeout_s=180.0,  # 后台预生成允许长任务
+            timeout_s=600.0,  # #131 后台预生成放宽到 600s(122b MoE 在 APU 上较慢)
             db=db,
             source=source,
+            provider_code=provider_code,  # #131 指定专用慢模型(如 qwen3.5:122b)置顶+常规链兜底
         )
         return str(result)
     finally:
@@ -220,7 +221,7 @@ def generate_for_template(db: Session, template: AiReportTemplate,
         )
         return None
 
-    # 调用 LLM(后台预生成: timeout_s=180, max_tokens=template.max_tokens)
+    # 调用 LLM(后台预生成: timeout_s=600 #131, max_tokens=template.max_tokens)
     # #127 经优先门闸发起(level=0/1); 被更高优先级抢占时捕获 CancelledError, 本次跳过。
     llm_model_str = template.llm_provider_code or "auto"
     source = f"ai_pregen:{template.code}"

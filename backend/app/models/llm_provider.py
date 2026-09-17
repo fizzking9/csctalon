@@ -48,6 +48,14 @@ class LlmProvider(IDMixin, TimestampMixin, Base):
     enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False, index=True, comment="总开关; false=跳过不调用",
     )
+    pregen_only: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False,
+        comment=(
+            "#131 仅供后台预生成: true=不进实时默认调用链(用户问答/时间解析), "
+            "不参与启动 warmup; 仅当调用方显式按 provider_code 指定时置顶使用。"
+            "用于 122b 等慢而重的预生成专用模型"
+        ),
+    )
     healthy: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False, index=True,
         comment="运行时健康状态; 连续失败自动置 false(降级), 健康探测成功后恢复",

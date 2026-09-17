@@ -43,6 +43,9 @@ async def warmup_all_providers() -> dict:
             rows = db.scalars(
                 select(LlmProvider)
                 .where(LlmProvider.enabled.is_(True))
+                # #131 pregen_only(如 122b/81GB)不参与启动预热: ping 会触发整模型冷加载,
+                # 挤掉常驻的实时模型且耗时数分钟; 它们只在预生成实际调用时按需加载
+                .where(LlmProvider.pregen_only.is_(False))
                 .order_by(LlmProvider.priority, LlmProvider.id)
             ).all()
             if not rows:
