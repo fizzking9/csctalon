@@ -25,6 +25,7 @@ from app.models.ai_report import AiReport
 from app.models.ai_report_template import AiReportTemplate
 from app.services import llm_client
 from app.services.ai_focus_service import keywords_to_scopes
+from app.services.ai_report_matcher import _count_keyword_hits  # #144 复用, 全树统一口径
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,25 @@ async def extract_section(db: Session, question: str, report: AiReport,
 
     失败处理: LLM 调用失败(超时/异常) → need_clarify=True, clarify_options=草稿 H2 标题,
     让 ai.py 走 L3 兜底, 不抛异常。
+
+    #144 规则短路(摘取层超时根因修复):
+      若 template 不为 None AND _count_keyword_hits(question,
+      template.question_keywords) >= 2 → 直接返 report.answer_md 全文,
+      不调 LLM。原因: keyword 命中 ≥ 2 说明用户问句就是模板原文意图(如
+      月报模板 keywords=['本月','这个月','月报','上月','同比'], 用户问「本月
+      经营情况...含同比」命中 2 个), 整篇预生成报告都与问句相关, 不必摘取。
+      跳过 27b 冷加载(35s > 30s timeout 必超时), <1s 返回。
     """
+    # #144 规则短路: keyword 命中 ≥ 2 → 直接返全文(不调 LLM, 避免冷加载超时)
+    if template is not None and report.answer_md:
+        hits = _count_keyword_hits(question, template.question_keywords)
+        if hits >= 2:
+            logger.info("extract_section #144 短路: report_id=%s template=%s "
+                        "keyword_hits=%d ≥2 → 直接返全文(不调 LLM)",
+                        report.id, getattr(template, "code", None), hits)
+            return {"result_md": report.answer_md, "confidence": 0.95,
+                    "need_clarify": False, "clarify_options": []}
+
     sections = split_sections(report.answer_md or "")
     if not sections:
         logger.warning("extract_section: report_id=%s answer_md 为空或不可切分", report.id)

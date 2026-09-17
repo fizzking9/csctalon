@@ -94,16 +94,22 @@ def save_report(
 def _visibility_clause(current_user_id: int, is_admin: bool) -> str:
     """「我的待办 · AI 报告历史」可见性 SQL where 片段。
 
-    #142 (2026-09-17) 重组: 改为只看「本人 user_id」(不管 is_public, 不管 admin)。
-      - 含我自己的实时问答(is_public=False) + 我触发的预生成报告(is_public=True)
-      - 不再 admin 1=1 全可见(admin 看他人报告走 /admin/ai/reports, 不走 /ai/reports)
-      - 不再 OR is_public=TRUE(避免他人触发的预生成报告混入"我的"列表,
-        与「我的待办」语义不符; 他人预生成报告查看入口在 /system/ai-reports)
+    #144 (2026-09-17) 修正: 改为 `user_id = :uid AND is_public = FALSE`
+      —— 只看「本人 user_id」+「私有实时问答(is_public=FALSE)」。
+      原因: #142 改成 `user_id = :uid` 后, admin 用户 tanzk(id=3)看不到任何
+      报告(所有预生成报告都是 user_id=1 触发, is_public=TRUE)。但 tanzk 没问过
+      实时问题, 「我的待办」为空是**正确语义**(不是 bug)。预生成报告
+      (is_public=TRUE)走「AI 与分析 → AI 报告历史」入口(/admin/ai/reports)。
+
+    分工:
+      - /ai/reports(我的待办): 本人 user_id + is_public=FALSE(实时问答)
+      - /admin/ai/reports(AI 与分析): is_public=TRUE(预生成报告池, 所有 admin 共享)
+
     返回带 bind param 的字符串(调用方注入 :uid), 避免拼接 SQL(AGENTS.md 铁律)。
     """
-    # is_admin 参数保留兼容现有调用方, 但 #142 后语义统一(本人 user_id)
+    # is_admin 参数保留兼容现有调用方, 但 #144 后语义统一(本人私有)
     _ = is_admin
-    return "user_id = :uid"
+    return "user_id = :uid AND is_public = FALSE"
 
 
 def list_reports(

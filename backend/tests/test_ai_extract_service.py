@@ -180,3 +180,93 @@ async def test_extract_section_multi_scope_concat():
     assert "退款 5000" in captured["input"]
     assert "投诉 3" not in captured["input"]
     assert out["result_md"] == "接待+退款+投诉。"
+
+
+# ── #144 规则短路(keyword 命中 ≥ 2 → 直接返全文, 不调 LLM) ──────
+def _mock_template(keywords, code="monthly_overview"):
+    t = MagicMock()
+    t.code = code
+    t.question_keywords = keywords
+    return t
+
+
+@pytest.mark.asyncio
+async def test_extract_section_short_circuit_keyword_hits_ge2():
+    """#144 规则短路: keyword 命中 ≥2 → 直接返全文, 不调 LLM(避免 27b 冷加载超时)。
+
+    月报模板 keywords=['本月','这个月','月报','上月','同比']
+    用户问「本月经营情况总览, 含同比环比」命中 '本月'+'同比' = 2 个 → 短路。
+    """
+    md = "## 接待分析\n本月接待 100 人。\n\n## 退款分析\n退款 5000 元。"
+    r = _mock_report(md)
+    t = _mock_template(["本月", "这个月", "月报", "上月", "同比"])
+    # LLM 不应被调用, patch 成 side_effect=AssertionError 验证未触发
+    with patch("app.services.ai_extract_service.llm_client.chat_completion",
+               AsyncMock(side_effect=AssertionError("短路场景不应调 LLM"))):
+        out = await extract_section(db=None,
+                                    question="本月经营情况总览, 含同比环比",
+                                    report=r, template=t)
+    assert out["need_clarify"] is False
+    assert out["result_md"] == md  # 直接返全文
+    assert out["confidence"] == 0.95
+    assert out["clarify_options"] == []
+
+
+@pytest.mark.asyncio
+async def test_extract_section_no_short_circuit_when_template_none():
+    """#144 L2 语义匹配命中时 template=None → 不短路, 走 LLM 摘取(泛语义匹配)。
+
+    L2 调用方 ai.py L317 传 template=None, 因为 L2 是泛语义匹配不依赖模板关键词;
+    此时即使问句含 '本月' 也不短路, 走 LLM 摘取 + 排版。
+    """
+    md = "## 接待分析\n接待 100。\n\n## 退款分析\n退款 5000。"
+    r = _mock_report(md)
+    mock_result = _mk_llm_result("本月接待 100, 退款 5000。")
+    with patch("app.services.ai_extract_service.llm_client.chat_completion",
+               AsyncMock(return_value=mock_result)):
+        out = await extract_section(db=None,
+                                    question="本月经营情况",
+                                    report=r, template=None)
+    assert out["need_clarify"] is False
+    assert out["result_md"] == "本月接待 100, 退款 5000。"
+    assert out["confidence"] == 0.7
+
+
+@pytest.mark.asyncio
+async def test_extract_section_no_short_circuit_when_hits_lt2():
+    """#144 keyword 命中 < 2 不短路(单 keyword 命中可能是误命中)。
+
+    月报 keywords=['本月','这个月','月报','上月','同比']
+    用户问「本月接待如何」只命中 '本月' = 1 个 → 不短路, 走 LLM 摘取。
+    """
+    md = "## 接待分析\n接待 100。\n\n## 退款分析\n退款 5000。"
+    r = _mock_report(md)
+    t = _mock_template(["本月", "这个月", "月报", "上月", "同比"])
+    mock_result = _mk_llm_result("接待 100 人。")
+    with patch("app.services.ai_extract_service.llm_client.chat_completion",
+               AsyncMock(return_value=mock_result)):
+        out = await extract_section(db=None,
+                                    question="本月接待如何",
+                                    report=r, template=t)
+    assert out["need_clarify"] is False
+    assert out["result_md"] == "接待 100 人。"
+    assert out["confidence"] == 0.7
+
+
+@pytest.mark.asyncio
+async def test_extract_section_short_circuit_skips_empty_answer():
+    """#144 短路条件含 `report.answer_md` 非空校验, 空草稿不短路走原空草稿分支。
+
+    预生成报告 answer_md 为空(异常情况) → 不短路, 走原 split_sections → 空草稿
+    返回 need_clarify。避免短路把空内容当结果返给用户。
+    """
+    r = _mock_report("")
+    t = _mock_template(["本月", "这个月", "月报", "上月", "同比"])
+    with patch("app.services.ai_extract_service.llm_client.chat_completion",
+               AsyncMock(side_effect=AssertionError("空草稿不应调 LLM"))):
+        out = await extract_section(db=None,
+                                    question="本月经营情况总览, 含同比环比",
+                                    report=r, template=t)
+    assert out["need_clarify"] is True
+    assert out["result_md"] == ""
+    assert out["confidence"] == 0.0
