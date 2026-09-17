@@ -88,6 +88,8 @@ class AiAnalyzeRequest(BaseModel):
     # v1.1(2026-09-07): 任意区间(与 external brief 同源同护栏; 同时给出则优先于 period/date)
     start: str | None = Field(None, description="任意区间起点, 仅纯日期 YYYY-MM-DD(与 end 成对; 历史标准周回看)")
     end: str | None = Field(None, description="任意区间终点, 仅纯日期 YYYY-MM-DD(与 start 成对; end=今天则实时)")
+    # #135 clarify 兜底用: 跳过三级命中链路, 强制走实时 LLM 路径(架构文档 §6.2 "直接生成"按钮)
+    force_llm: bool = Field(False, description="跳过命中链路, 强制走实时 LLM(架构文档 §6.2 clarify 兜底按钮用)")
 
 
 class _AiWindow:
@@ -269,34 +271,82 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                        "llm_model": "rule-engine",
                        **window_info})
 
-    # #122 匹配层: 命中预生成的公共报告(is_public=True)直接返回, 不调 LLM
-    # 匹配优先级: 窗口完全 → 语义(问句含模板 keywords) → 时点容差(当日同 period)
-    from app.services.ai_report_matcher import match_template_report
-    _match_db = SessionLocal()
-    try:
-        _matched, _tmpl = match_template_report(
-            _match_db, q, eff["period"], eff["date"],
-        )
-    finally:
-        _match_db.close()
-    if _matched is not None:
-        logger.info("ai template match: question=%r report_id=%s template=%s out_chars=%d",
-                    q[:30], _matched.id,
-                    _tmpl.code if _tmpl else None,
-                    len(_matched.answer_md or ""))
-        return R(data={"task_id": None, "status": "success",
-                       "result_md": _matched.answer_md,
-                       "report_id": _matched.id,
-                       "usage": {
-                           "prompt_tokens": _matched.prompt_tokens,
-                           "completion_tokens": _matched.completion_tokens,
-                           "total_tokens": _matched.total_tokens,
-                       } if _matched.total_tokens is not None else None,
-                       "total_ms": _matched.total_ms,
-                       "llm_ms": _matched.llm_ms,
-                       "llm_model": _matched.llm_model,
-                       "matched_template": _tmpl.code if _tmpl else None,
-                       **window_info})
+    # #135 三级命中链路: L1 关键词(match_template_report 不变) → 命中走摘取层(不返回全文);
+    #   L1 未命中 → L2 27b 语义匹配 → 命中走摘取层;
+    #   L2 未命中且有候选 → L3 clarify 兜底(返回 H2 标题列表, 让用户选段重发);
+    #   L2 未命中且无候选 → 走原 #116 实时 LLM 路径(保留兼容, 架构文档 §八.3 取舍③)
+    from app.services.ai_extract_service import extract_section, split_sections
+    from app.services.ai_report_matcher import list_candidates, match_template_report
+    from app.services.ai_semantic_matcher import semantic_match
+    # #135 force_llm=True 时跳过三级命中链路, 直接走 _runner 实时 LLM 兜底
+    #   (架构文档 §6.2 "直接生成"按钮: clarify 状态下用户主动选择触发)
+    if not payload.force_llm:
+        _match_db = SessionLocal()
+        try:
+            _matched, _tmpl = match_template_report(
+                _match_db, q, eff["period"], eff["date"],
+            )
+
+            # L1 命中: 走摘取层(不返回全文)
+            if _matched is not None:
+                _ext = await extract_section(_match_db, q, _matched, _tmpl)
+                if _ext["result_md"]:
+                    logger.info("ai extract L1 命中: question=%r report_id=%s template=%s "
+                                "extract_conf=%.2f out_chars=%d",
+                                q[:30], _matched.id,
+                                _tmpl.code if _tmpl else None,
+                                _ext["confidence"], len(_ext["result_md"]))
+                    return R(data={"task_id": None, "status": "success",
+                                   "result_md": _ext["result_md"],
+                                   "report_id": _matched.id,
+                                   "matched_template": _tmpl.code if _tmpl else None,
+                                   "extract_confidence": _ext["confidence"],
+                                   **window_info})
+                # L1 摘取失败/need_clarify → L3 clarify(用摘取层返回的 clarify_options)
+                logger.info("ai extract L1 命中但摘取失败 → clarify: report_id=%s",
+                            _matched.id)
+                return R(data={"task_id": None, "status": "clarify",
+                               "clarify_options": _ext.get("clarify_options", []),
+                               "message": "未命中明确段落, 请选择您关心的部分或换种表述",
+                               **window_info})
+
+            # L1 未命中 → L2 27b 语义匹配
+            _cands = list_candidates(_match_db, eff["period"], eff["date"])
+            _sem = await semantic_match(_match_db, q, _cands)
+            if _sem["hit_report"] is not None:
+                _ext2 = await extract_section(_match_db, q, _sem["hit_report"], None)
+                if _ext2["result_md"]:
+                    logger.info("ai extract L2 命中: question=%r report_id=%s "
+                                "semantic_conf=%.2f out_chars=%d",
+                                q[:30], _sem["hit_report"].id,
+                                _sem["confidence"], len(_ext2["result_md"]))
+                    return R(data={"task_id": None, "status": "success",
+                                   "result_md": _ext2["result_md"],
+                                   "report_id": _sem["hit_report"].id,
+                                   "extract_confidence": _ext2["confidence"],
+                                   "semantic_confidence": _sem["confidence"],
+                                   **window_info})
+                # L2 命中但摘取失败 → L3 clarify
+                logger.info("ai extract L2 命中但摘取失败 → clarify: report_id=%s",
+                            _sem["hit_report"].id)
+                return R(data={"task_id": None, "status": "clarify",
+                               "clarify_options": _ext2.get("clarify_options", []),
+                               "message": "未命中明确段落, 请选择您关心的部分或换种表述",
+                               **window_info})
+
+            # L2 未命中: 有候选报告 → L3 clarify(用第一份报告的 H2 标题列表作为 options);
+            #   无候选 → 走原实时 LLM 路径(_runner 兜底, 保留兼容)
+            if _cands:
+                _clarify = list(split_sections(_cands[0].answer_md or "").keys())
+                logger.info("ai extract L3 clarify(无命中): question=%r options=%d",
+                            q[:30], len(_clarify))
+                return R(data={"task_id": None, "status": "clarify",
+                               "clarify_options": _clarify,
+                               "message": "未命中明确段落, 请选择您关心的部分或换种表述",
+                               **window_info})
+            logger.info("ai extract L0/L1/L2 全部未命中且无候选 → 走实时 LLM 兜底")
+        finally:
+            _match_db.close()
 
     async def _runner(task):
         """后台执行: 建独立 Session 组装 feed → 调 LLM → 写回 task + 落 ai_reports。"""

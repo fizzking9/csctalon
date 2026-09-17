@@ -1,0 +1,170 @@
+"""AI 报告摘取层 (工单 #135 批次 B2)
+
+设计(架构文档 A-20260917-001 LOCKED §三):
+- split_sections(answer_md) -> dict[str, str]: 按 ## H2 锚点切分草稿(与 #134 _SYSTEM_PROMPT
+  第 3 条锚点一致), 兜底按段落分(日报无 H2 时)
+- extract_section(db, question, report, template) -> dict: 关键词路由 scope → 段落
+  → 调 27b(provider_code=None 走 default 链, timeout_s=30, max_tokens=1200)摘取+排版
+
+LLM 调用约束:
+- provider_code=None 走 default 链(#131 配置 = 27b 主力, 不走 122b 慢模型)
+- timeout_s=30(前台实时问答用户在等, 超时返回 clarify 兜底)
+- max_tokens=1200(摘取输出比生成全文短, 1200 足够)
+- LLM 指令铁律: 基于给定段落内容摘取+排版, 禁止编造/外推/添加未在段落中出现的数据
+
+失败兜底: LLM 异常/超时 → 返回 {need_clarify:True, clarify_options:草稿 H2 标题列表},
+让 ai.py 走 L3 兜底(返回 clarify + 保留实时 LLM 路径), 不抛异常。
+"""
+
+import logging
+import re
+
+from sqlalchemy.orm import Session
+
+from app.models.ai_report import AiReport
+from app.models.ai_report_template import AiReportTemplate
+from app.services import llm_client
+from app.services.ai_focus_service import keywords_to_scopes
+
+logger = logging.getLogger(__name__)
+
+# H2 锚点(与 #134 _SYSTEM_PROMPT 第 3 条一致; 周报/月报必须按这 5 个锚点结构化)
+H2_ANCHORS = ["## 接待分析", "## 退款分析", "## 投诉分析", "## 趋势对比", "## 结论建议"]
+
+# scope → H2 段落映射(与 ai_feed._select_feed_sections 同款逻辑, 全树统一)
+#   reception/refund/complaint 三个业务段一一对应;
+#   趋势对比/结论建议 不在 keywords_to_scopes 路由, 由泛问兜底取全部段落覆盖
+_SCOPE_TO_H2 = {
+    "reception": "## 接待分析",
+    "refund":    "## 退款分析",
+    "complaint": "## 投诉分析",
+}
+
+# 27b 摘取指令(铁律: 基于给定段落内容摘取+排版, 禁止编造/外推)
+_EXTRACT_SYSTEM = (
+    "你是经营数据分析摘取助手。基于给定的草稿段落, 按问句摘取相关部分并排版输出。\n"
+    "铁律:\n"
+    "1. 只能从【给定段落】中摘取, 严禁编造、外推或添加未在段落中出现的数据。\n"
+    "2. 严格按问句意图排版: 简要问给简要答, 详细问给详细答(可保留段落内明细与表格)。\n"
+    "3. 回答中文, 开头注明数据窗口(直接引用段落里出现的窗口说明)。\n"
+    "4. 段落里没有的部分如实写\"未提供\", 不要从段落外内容补充。\n"
+    "5. 金额单位保持与段落一致(元/分), 不要转换。"
+)
+
+# 行首 ## 标题正则(2 级标题; MULTILINE 让 ^ 匹配每行开头)
+_H2_TITLE_RE = re.compile(r"^##\s+.+$", re.MULTILINE)
+
+
+def split_sections(answer_md: str) -> dict[str, str]:
+    """按 ## H2 锚点切分草稿。
+
+    返回 {section_title: section_body} 如 {"## 退款分析": "退款总额..."}。
+    兜底: 若 answer_md 不含 ## H2(日报), 按 \\n\\n 段落分, key 用段落首行前 20 字。
+    空草稿返回 {}。
+    """
+    if not answer_md:
+        return {}
+    md = answer_md.strip()
+    if not md:
+        return {}
+    matches = list(_H2_TITLE_RE.finditer(md))
+    sections: dict[str, str] = {}
+    if matches:
+        for i, m in enumerate(matches):
+            title = m.group().strip()
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(md)
+            body = md[start:end].strip()
+            sections[title] = body
+        return sections
+    # 兜底: 按 \n\n 段落分(日报无 H2)
+    paras = [p.strip() for p in md.split("\n\n") if p.strip()]
+    if not paras:
+        return {}
+    for i, p in enumerate(paras):
+        first_line = p.split("\n", 1)[0][:20]
+        key = f"段落{i + 1}: {first_line}" if first_line else f"段落{i + 1}"
+        sections[key] = p
+    return sections
+
+
+async def extract_section(db: Session, question: str, report: AiReport,
+                          template: AiReportTemplate | None = None) -> dict:
+    """从命中预生成报告按问句摘取相关段落 + 按问句排版输出。
+
+    流程(架构文档 §3.2):
+      1. split_sections(report.answer_md) 切分草稿
+      2. 关键词路由: keywords_to_scopes(question) → scope 集合
+         scope 到段落的映射(与 ai_feed._select_feed_sections 同款):
+           reception → ## 接待分析, refund → ## 退款分析, complaint → ## 投诉分析
+         泛问(无 scope 命中)→ 取全部段落(让 27b 自己选相关部分)
+      3. 拼接命中段落 body 成 input_md(多 scope 命中 → 多段拼接, 让 27b 组织结构)
+      4. 调 27b(provider_code=None, timeout_s=30, max_tokens=1200)摘取+排版
+      5. 输出 JSON {result_md, confidence, need_clarify, clarify_options}
+
+    参数:
+      db: Session(供 LLM 调用记日志/落库)
+      question: 用户问句(用于路由 + LLM 摘取指令)
+      report: AiReport ORM 实例(answer_md 是切分源)
+      template: 模板(预留; #135 暂未使用, 后续可用 question_keywords 优化路由)
+
+    返回:
+      {
+        "result_md": str,          # 摘取+排版后的输出(空当 need_clarify=True)
+        "confidence": float,       # 摘取置信度(默认 0.7, 失败=0.0)
+        "need_clarify": bool,      # 是否需要澄清(段落空/LLM 失败)
+        "clarify_options": list[str]  # 草稿 H2 标题列表(need_clarify=True 时填)
+      }
+
+    失败处理: LLM 调用失败(超时/异常) → need_clarify=True, clarify_options=草稿 H2 标题,
+    让 ai.py 走 L3 兜底, 不抛异常。
+    """
+    sections = split_sections(report.answer_md or "")
+    if not sections:
+        logger.warning("extract_section: report_id=%s answer_md 为空或不可切分", report.id)
+        return {"result_md": "", "confidence": 0.0, "need_clarify": True, "clarify_options": []}
+
+    # 关键词路由 scope(复用 ai_focus_service.keywords_to_scopes, 全树统一)
+    scopes = keywords_to_scopes(question)
+    selected_bodies: list[str] = []
+    if scopes:
+        for scope in scopes:
+            h2 = _SCOPE_TO_H2.get(scope)
+            if h2 and h2 in sections:
+                selected_bodies.append(f"{h2}\n{sections[h2]}")
+    if not selected_bodies:
+        # 泛问(无 scope 命中)→ 取全部段落, 让 27b 自己选相关部分
+        for title, body in sections.items():
+            selected_bodies.append(f"{title}\n{body}")
+
+    input_md = "\n\n".join(selected_bodies)
+    if not input_md:
+        return {"result_md": "", "confidence": 0.0, "need_clarify": True,
+                "clarify_options": list(sections.keys())}
+
+    user_prompt = (
+        f"问句: {question}\n\n"
+        f"草稿段落(来自预生成报告, 窗口见段落内说明):\n{input_md}\n\n"
+        "请按问句意图从上面段落摘取相关部分并排版输出, "
+        "保留段落内的数据窗口说明, 禁止编造/外推。"
+    )
+    messages = [
+        {"role": "system", "content": _EXTRACT_SYSTEM},
+        {"role": "user", "content": user_prompt},
+    ]
+    try:
+        result = await llm_client.chat_completion(
+            messages, max_tokens=1200, timeout_s=30.0,
+            db=db, source="ai_extract", provider_code=None,
+        )
+        result_md = str(result).strip()
+        if not result_md:
+            logger.warning("extract_section: LLM 返回空, report_id=%s", report.id)
+            return {"result_md": "", "confidence": 0.0, "need_clarify": True,
+                    "clarify_options": list(sections.keys())}
+        return {"result_md": result_md, "confidence": 0.7,
+                "need_clarify": False, "clarify_options": []}
+    except Exception as e:  # noqa: BLE001  LLM 失败不阻塞, 让 ai.py 走 L3 兜底
+        logger.warning("extract_section LLM 调用失败(report_id=%s): %s", report.id, e)
+        return {"result_md": "", "confidence": 0.0, "need_clarify": True,
+                "clarify_options": list(sections.keys())}

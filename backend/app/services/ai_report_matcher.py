@@ -145,6 +145,40 @@ def _wrap_row(db: Session, row: Any) -> AiReport:
     return row
 
 
+def list_candidates(db: Session, win_period: str | None,
+                    win_date: str | None) -> list[AiReport]:
+    """#135 L2 语义匹配用: 取当日 is_public=True 报告列表(不 bump matched_count)。
+
+    复用 match_template_report 的 SQL 与排序((snapshot_period=win_period) DESC,
+    created_at DESC), 但不调 _bump_matched_count(L2 命中后由调用方决定是否 bump)。
+    返回 list[AiReport](轻量 ORM 包装, 字段与 match_template_report 一致)。
+    """
+    today = _today_cn()
+    sdate = win_date or today
+    rows = db.execute(
+        text("""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
+                  r.snapshot_date, r.snapshot_period, r.is_public,
+                  r.answer_md, r.llm_model, r.llm_ms, r.total_ms,
+                  r.prompt_tokens, r.completion_tokens, r.total_tokens,
+                  r.window_source, r.window_label, r.created_at
+               FROM ai_reports r
+               WHERE r.is_public = TRUE
+                 AND r.snapshot_date = :sdate
+               ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
+        {"sdate": sdate, "period": win_period or ""},
+    ).mappings().all()
+    out: list[AiReport] = []
+    for r in rows:
+        a = AiReport()
+        for k, v in dict(r).items():
+            try:
+                setattr(a, k, v)
+            except Exception:  # noqa: BLE001  跳过 ORM 不接受的字段
+                pass
+        out.append(a)
+    return out
+
+
 def _get_template(db: Session, template_id: int | None) -> AiReportTemplate | None:
     """查询模板(命中匹配时返回, 用于调用方知道是哪个模板生成的)。"""
     if not template_id:

@@ -121,8 +121,23 @@
             <div v-if="m.role === 'assistant' && m.meta" class="ai-meta-hint">
               <span>{{ m.meta }}</span>
             </div>
+            <!-- #135 clarify 兜底: 渲染按钮列表 + "直接生成"按钮(架构文档 §6.2) -->
+            <div v-if="m.role === 'assistant' && m.isClarify" class="ai-clarify">
+              <div class="ai-clarify-message">{{ m.clarifyMessage }}</div>
+              <div v-if="m.clarifyOptions && m.clarifyOptions.length" class="ai-clarify-options">
+                <el-button
+                  v-for="(opt, i) in m.clarifyOptions"
+                  :key="i"
+                  size="small"
+                  @click="askClarify(opt)"
+                >{{ opt.replace(/^##\s*/, '') }}</el-button>
+              </div>
+              <el-button size="small" type="primary" plain @click="askForceLLM()">
+                直接生成(走实时 LLM)
+              </el-button>
+            </div>
             <!-- eslint-disable-next-line vue/no-v-html -- AI 输出经 renderMarkdown(DOMPurify 白名单) 消毒, 禁裸 v-html -->
-            <div v-if="m.role === 'assistant'" class="markdown-body" v-html="renderMarkdown(m.content)"></div>
+            <div v-else-if="m.role === 'assistant'" class="markdown-body" v-html="renderMarkdown(m.content)"></div>
             <div v-else>{{ m.content }}</div>
             <el-icon v-if="m.loading" class="is-loading" style="color:#2563eb"><Loading /></el-icon>
           </div>
@@ -322,16 +337,21 @@ function ask(q) {
   submit()
 }
 
-/** 组装入参: 显式区间 > 指定周期 > 自动(交给后端按问句识别时间) */
-function buildPayload(q) {
-  if (periodMode.value === 'range') {
-    const [s, e] = rangeDates.value || []
-    if (s && e) return { question: q, period: 'daily', start: s, end: e }
-    // 未选满区间 → 退回自动识别, 避免发一个半截参数被后端 400
-    return { question: q, period: 'daily' }
-  }
-  if (periodMode.value === 'auto') return { question: q, period: 'daily' }
-  return { question: q, period: periodMode.value }
+/** 组装入参: 显式区间 > 指定周期 > 自动(交给后端按问句识别时间)
+ *  #135 opts.forceLLM=true 时加 force_llm=true(架构文档 §6.2 clarify 兜底"直接生成"按钮) */
+function buildPayload(q, opts = {}) {
+  const p = (() => {
+    if (periodMode.value === 'range') {
+      const [s, e] = rangeDates.value || []
+      if (s && e) return { question: q, period: 'daily', start: s, end: e }
+      // 未选满区间 → 退回自动识别, 避免发一个半截参数被后端 400
+      return { question: q, period: 'daily' }
+    }
+    if (periodMode.value === 'auto') return { question: q, period: 'daily' }
+    return { question: q, period: periodMode.value }
+  })()
+  if (opts.forceLLM) p.force_llm = true
+  return p
 }
 
 /** 回显窗口来源, 让"按哪个窗口统计"始终可见 */
@@ -365,7 +385,11 @@ function applyMeta(msg, d) {
   if (parts.length) msg.meta = parts.join(' · ')
 }
 
-async function submit() {
+/**
+ * #135 submit 接受 opts.forceLLM=true → buildPayload 加 force_llm=true,
+ * 跳过命中链路直接走实时 LLM(架构文档 §6.2 "直接生成"按钮)。
+ */
+async function submit(opts = {}) {
   const q = (question.value || '').trim()
   if (!q) return
   if (submitting.value) return
@@ -379,13 +403,22 @@ async function submit() {
   _saveThread()
   scrollBottom()
   try {
-    const res = await aiAnalyze(buildPayload(q))
+    const res = await aiAnalyze(buildPayload(q, opts))
     const d = res.data || {}
     applyWindow(aiMsg, d)
     applyMeta(aiMsg, d)
     // 后端 analyze 已同步等待: status=success 直接带 result_md(无需轮询); 否则轮询
     if (d.status === 'success') {
       finishMsg(aiMsg, d.result_md || '(无输出)')
+    } else if (d.status === 'clarify') {
+      // #135 三级命中链路 L3 兜底: 后端返回 clarify_options 让用户选段
+      //   不调 finishMsg(保留 loading=false 但显示按钮, 不进入轮询)
+      aiMsg.loading = false
+      aiMsg.isClarify = true
+      aiMsg.clarifyMessage = d.message || '未明确命中预生成报告的哪一段, 请选择想看的段落:'
+      aiMsg.clarifyOptions = Array.isArray(d.clarify_options) ? d.clarify_options : []
+      _saveThread()
+      scrollBottom()
     } else if (d.status === 'failed') {
       finishMsg(aiMsg, '⚠️ 分析失败: ' + (d.error || '未返回错误详情, 请查看服务端日志'))
     } else if (d.task_id) {
@@ -402,6 +435,35 @@ async function submit() {
     submitting.value = false
     _saveThread()
   }
+}
+
+/**
+ * #135 clarify 兜底: 用户点了某个段落按钮 → 用 H2 标题(去 ## 前缀)作为问句重发,
+ *   命中 L1 关键词路由 → 摘取层 extract_section 取该段。
+ */
+function askClarify(opt) {
+  const q = String(opt || '').replace(/^##\s*/, '').trim()
+  if (!q) return
+  question.value = q
+  submit()
+}
+
+/**
+ * #135 clarify 兜底: 用户点"直接生成(走实时 LLM)" → 跳过命中链路,
+ *   带 force_llm=true 重发原问句(用上一条 user 消息; 当前 question 已被清空)。
+ */
+function askForceLLM() {
+  // 找最近一条 user 消息作为问句
+  let lastUserQ = ''
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    if (messages.value[i].role === 'user') {
+      lastUserQ = messages.value[i].content
+      break
+    }
+  }
+  if (!lastUserQ) return
+  question.value = lastUserQ
+  submit({ forceLLM: true })
 }
 
 function finishMsg(aiMsg, content) {
@@ -571,6 +633,17 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
   border-radius: 4px; padding: 2px 6px; margin-bottom: 6px;
   word-break: break-all;
 }
+/* #135 clarify 兜底: 段落按钮 + 直接生成按钮 */
+.ai-clarify {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 8px 10px; background: #fff7ed; border: 1px solid #fed7aa;
+  border-radius: 6px;
+}
+.ai-clarify-message { font-size: 13px; color: #9a3412; line-height: 1.6; }
+.ai-clarify-options {
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.ai-clarify-options .el-button { margin: 0; }
 .ai-empty { text-align: center; padding: 40px 10px; font-size: 13px; }
 .ai-input-bar { display: flex; flex-direction: column; gap: 6px; }
 .ai-input-actions { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
