@@ -456,6 +456,15 @@ const routes = [
         component: () => import('@/views/system/AiTemplates.vue'),
         meta: { title: 'AI 报告模板', icon: 'Document', admin: true },
       },
+      {
+        // #137: AI 管理页面(5 Tab 整合入口)
+        // 报告列表 / 模板管理 / 模型节点 / 提示词管理 / 事务通知
+        // 旧路由(ai-templates/llm-providers/ai-focus-configs/system-events)保留可达, 不破坏书签
+        path: 'system/ai-admin',
+        name: 'SystemAiAdmin',
+        component: () => import('@/views/system/AiAdmin.vue'),
+        meta: { title: 'AI 管理', icon: 'MagicStick', admin: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
