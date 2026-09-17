@@ -107,12 +107,39 @@ def _mock_kpi(reception_value=100, refund_count=5, refund_amount=500, complaint=
     }
 
 
+def _mock_complaint_enhanced(handled=1, backlog=3):
+    """#139 模拟 _complaint_enhanced 返回结构(仅取 total 用于 daily_trend)。"""
+    return {
+        "total": {"registered": 5, "handled": handled, "backlog": backlog},
+        "by_source": [],
+    }
+
+
+def _make_side_effect(kpi=None, enhanced=None):
+    """#139 根据 cached_call 的 key 前缀路由返回 kpi / enhanced mock。
+
+    - key 含 "today:kpi" → 返回 kpi(缺省 _mock_kpi())
+    - key 含 "complaint:enhanced" → 返回 enhanced(缺省 _mock_complaint_enhanced())
+    """
+    kpi = kpi if kpi is not None else _mock_kpi()
+    enhanced = enhanced if enhanced is not None else _mock_complaint_enhanced()
+
+    def _side(*a, **_kw):
+        key = a[0] if a else ""
+        if "complaint:enhanced" in str(key):
+            return enhanced
+        return kpi
+    return _side
+
+
 def test_days_range_trend_span_gt_14_no_degradation():
-    """#136: span > 14 (月报路径) 不再降级, 30 天全展开, 每条独立日期。"""
+    """#136: span > 14 (月报路径) 不再降级, 30 天全展开, 每条独立日期。
+    #139 B: 每条额外调 complaint:enhanced → 60 次 cached_call, 含 complaint_handled/pending。
+    """
     db = MagicMock()
     fake_today = __import__("datetime").date(2026, 9, 30)
     with patch("app.services.ai_feed._dt") as m_dt, \
-         patch("app.services.ai_feed.cached_call", return_value=_mock_kpi()) as m_call:
+         patch("app.services.ai_feed.cached_call", side_effect=_make_side_effect()) as m_call:
         # 保留 date / timedelta 真实实现, 只 mock today
         m_dt.date.fromisoformat.side_effect = lambda s: __import__("datetime").date.fromisoformat(s)
         m_dt.date.today.return_value = fake_today
@@ -125,31 +152,40 @@ def test_days_range_trend_span_gt_14_no_degradation():
     assert len(set(dates)) == 30
     assert dates[0] == "2026-09-01"
     assert dates[-1] == "2026-09-30"
-    # cached_call 应被调用 30 次(today:kpi), 而非 14 次(降级)
-    assert m_call.call_count == 30
+    # #139 B: 每条新增 complaint_handled/pending 字段(取自 _complaint_enhanced.total)
+    for item in trend:
+        assert item["complaint_handled"] == 1
+        assert item["complaint_pending"] == 3
+    # #139 B: cached_call 应被调用 60 次(30 today:kpi + 30 complaint:enhanced)
+    assert m_call.call_count == 60
 
 
 def test_days_range_trend_span_le_14_weekly_unchanged():
-    """周报路径(span ≤ 14)保持现行: 7 天全展开。"""
+    """周报路径(span ≤ 14)保持现行: 7 天全展开。
+    #139 B: 同样调 complaint:enhanced → 14 次 cached_call。
+    """
     db = MagicMock()
     fake_today = __import__("datetime").date(2026, 9, 15)
     with patch("app.services.ai_feed._dt") as m_dt, \
-         patch("app.services.ai_feed.cached_call", return_value=_mock_kpi()) as m_call:
+         patch("app.services.ai_feed.cached_call", side_effect=_make_side_effect()) as m_call:
         m_dt.date.fromisoformat.side_effect = lambda s: __import__("datetime").date.fromisoformat(s)
         m_dt.date.today.return_value = fake_today
         m_dt.timedelta = __import__("datetime").timedelta
         trend, span = _days_range_trend(db, "2026-09-09", "2026-09-15")
     assert span == 7
     assert len(trend) == 7
-    assert m_call.call_count == 7
+    # #139 B: 7 today:kpi + 7 complaint:enhanced = 14
+    assert m_call.call_count == 14
 
 
 def test_days_range_trend_cap_31():
-    """#136: span > 31 (异常长窗口) 时 cap 31, 防超载。"""
+    """#136: span > 31 (异常长窗口) 时 cap 31, 防超载。
+    #139 B: cap 同样作用于 complaint:enhanced → 62 次 cached_call。
+    """
     db = MagicMock()
     fake_today = __import__("datetime").date(2026, 12, 31)
     with patch("app.services.ai_feed._dt") as m_dt, \
-         patch("app.services.ai_feed.cached_call", return_value=_mock_kpi()) as m_call:
+         patch("app.services.ai_feed.cached_call", side_effect=_make_side_effect()) as m_call:
         m_dt.date.fromisoformat.side_effect = lambda s: __import__("datetime").date.fromisoformat(s)
         m_dt.date.today.return_value = fake_today
         m_dt.timedelta = __import__("datetime").timedelta
@@ -158,16 +194,18 @@ def test_days_range_trend_cap_31():
     assert span == 61
     # cap 31: 不会取 61 天
     assert len(trend) == 31
-    # cached_call 也只被调 31 次
-    assert m_call.call_count == 31
+    # #139 B: 31 today:kpi + 31 complaint:enhanced = 62
+    assert m_call.call_count == 62
 
 
 def test_days_range_trend_future_days_skipped():
-    """历史日 future guard: 今天还没到的日期跳过(不会有数据)。"""
+    """历史日 future guard: 今天还没到的日期跳过(不会有数据)。
+    #139 B: complaint:enhanced 同样只取历史日 → 12 次 cached_call。
+    """
     db = MagicMock()
     fake_today = __import__("datetime").date(2026, 9, 15)
     with patch("app.services.ai_feed._dt") as m_dt, \
-         patch("app.services.ai_feed.cached_call", return_value=_mock_kpi()) as m_call:
+         patch("app.services.ai_feed.cached_call", side_effect=_make_side_effect()) as m_call:
         m_dt.date.fromisoformat.side_effect = lambda s: __import__("datetime").date.fromisoformat(s)
         m_dt.date.today.return_value = fake_today
         m_dt.timedelta = __import__("datetime").timedelta
@@ -177,8 +215,8 @@ def test_days_range_trend_future_days_skipped():
     assert len(trend) == 6  # 9-10~9-15
     assert trend[0]["date"] == "2026-09-10"
     assert trend[-1]["date"] == "2026-09-15"
-    # cached_call 调用 6 次(只取历史日)
-    assert m_call.call_count == 6
+    # #139 B: 6 today:kpi + 6 complaint:enhanced = 12
+    assert m_call.call_count == 12
 
 
 # ── _enrich_with_daily_trend(集成: 月报路径触发 hourly_summary 嵌入) ────
@@ -210,26 +248,48 @@ def test_enrich_with_daily_trend_monthly_triggers_hourly_summary():
         assert item["hourly_summary"]["night_reception"] == 40  # 8 × 5
 
 
-def test_enrich_with_daily_trend_weekly_no_hourly_summary():
-    """#136: 周报路径(span ≤ 14)不补 hourly_summary, 字段不存在。"""
+def test_enrich_with_daily_trend_weekly_now_has_hourly_summary():
+    """#139 A: 周报路径(span ≤ 14)也补 hourly_summary(取消月报限定)。
+    #139 D: 周报路径同时补 staff_top5(整窗一次)。
+    """
     db = MagicMock()
     feed = {}
     fake_today = __import__("datetime").date(2026, 9, 15)
     fake_kpi = _mock_kpi(reception_value=100)
+    fake_hourly = {
+        "slot_labels": [f"{h:02d}:00" for h in range(24)],
+        "reception": [5] * 24,
+        "refund_count_total": [1] * 24,
+    }
+    fake_eff = {"data": [{"name": "张三", "work_score": 88, "reception_count": 50,
+                          "is_virtual": False, "rank": 1}]}
+    # side_effect 按 key 路由: today:kpi / today:hourly / today:staff / complaint:enhanced
+    def _side(*a, **_kw):
+        key = str(a[0]) if a else ""
+        if "today:hourly" in key:
+            return fake_hourly
+        if "today:staff" in key:
+            return fake_eff
+        if "complaint:enhanced" in key:
+            return _mock_complaint_enhanced()
+        return fake_kpi
     with patch("app.services.ai_feed._dt") as m_dt, \
-         patch("app.services.ai_feed.cached_call", return_value=fake_kpi) as m_call:
+         patch("app.services.ai_feed.cached_call", side_effect=_side):
         m_dt.date.fromisoformat.side_effect = lambda s: __import__("datetime").date.fromisoformat(s)
         m_dt.date.today.return_value = fake_today
         m_dt.timedelta = __import__("datetime").timedelta
         _enrich_with_daily_trend(db, feed, "2026-09-09", "2026-09-15")
     assert "daily_trend" in feed
     assert len(feed["daily_trend"]) == 7
-    # 周报路径不补 hourly_summary
+    # #139 A: 周报路径每条也应有 hourly_summary
     for item in feed["daily_trend"]:
-        assert "hourly_summary" not in item
-    # 只调 today:kpi 不调 today:hourly
-    for call in m_call.call_args_list:
-        assert "hourly" not in call[0][0]
+        assert "hourly_summary" in item
+        assert item["hourly_summary"]["peak_reception"] == 5
+        assert item["hourly_summary"]["night_reception"] == 40  # 8 × 5
+    # #139 D: feed.staff_top5 存在(整窗一次调用 today_staff_efficiency)
+    assert "staff_top5" in feed
+    assert len(feed["staff_top5"]) >= 1
+    assert feed["staff_top5"][0]["name"] == "张三"
 
 
 def test_enrich_daily_hourly_summary_failure_isolated():

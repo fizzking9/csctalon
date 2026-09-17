@@ -58,9 +58,10 @@ async def test_connection(payload: LlmTestConnRequest, _: AdminUser):
 @router.post("/{provider_id}/test", response_model=R, summary="用已存的 Provider 配置测连通性")
 async def test_existing(provider_id: int, db: DBSession, _: AdminUser):
     """读 DB 中 Provider 配置测连通性, api_key 解密后传入(不入参不入日志)。"""
+    from fastapi import HTTPException
+
     from app.core.crypto import decrypt_secret
     from app.models.llm_provider import LlmProvider
-    from fastapi import HTTPException
     row = db.get(LlmProvider, provider_id)
     if not row:
         raise HTTPException(404, "Provider 不存在")

@@ -19,7 +19,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from app.api.v1.external import _build_brief, _window
+from app.api.v1.external import _build_brief, _complaint_enhanced, _window
 from app.core.config import settings
 from app.core.redis_client import cache_ttl_for, cached_call, get_redis
 from app.services import analytics as A
@@ -214,6 +214,25 @@ def _enrich_with_today_kanban(db: Session, feed: dict, start_s: str, end_s: str)
     except Exception as e:  # noqa: BLE001
         logger.warning("ai_feed enrich today:refund-recovery 失败(忽略): %s", e)
 
+    # #139 (2026-09-17) C: 日报补投诉三源分布投影
+    #   _build_brief 顶层 complaint.by_source 已含三源(内部/商户号/外部)×
+    #   (registered/handled/backlog), 但 _select_feed_sections 按 scope 切 feed 段,
+    #   问句只命中 refund/reception scope 时 complaint 段会被切走 → AI 答不出三源。
+    #   此处投影 by_source 到顶层 complaint_breakdown, 并加入 _CONSTANT_FEED_KEYS
+    #   (见下方), 让所有 scope 切片都保留三源拆分(轻量投影, 不重复 total)。
+    try:
+        if isinstance(feed.get("complaint"), dict):
+            by_src = feed["complaint"].get("by_source") or []
+            feed["complaint_breakdown"] = [
+                {"source": s.get("source"),
+                 "registered": s.get("registered"),
+                 "handled": s.get("handled"),
+                 "backlog": s.get("backlog")}
+                for s in by_src if isinstance(s, dict)
+            ]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ai_feed 投影 complaint_breakdown 失败(忽略): %s", e)
+
 
 def _compact_reception_breakdown(rb: dict) -> dict:
     """压缩 today_reception_breakdown: 仅留 categories + top_staff 前5(去逐条明细)。"""
@@ -367,21 +386,37 @@ def _enrich_with_daily_trend(db: Session, feed: dict, start_s: str, end_s: str) 
       - span > 14 (月报路径) 时, 不再降级为「前14天逐日 + 后续按周聚合」,
         改为按日全展开(cap 31 天, 防超长月+1)。月报 max_tokens=5000, feed 输入给
         122b 模型, 可容纳 ~12KB(360 标量)。
-      - 在月报路径下, 对每条 daily_trend 额外调 today:hourly 取当日小时粒度数据,
-        用 _compact_daily_hourly_summary 压缩为 6 标量/天嵌入 hourly_summary 子对象,
-        让 AI 能回答「哪天哪个时段是高峰 / 夜间 AI 接管多少」。
-      - 周报路径(span ≤ 14)沿用现行 daily_trend, 不补 hourly_summary(周报天数少,
-        全天小时可由 today_hourly_trend 单日路径覆盖, 且 max_tokens=4000 较紧)。
+
+    #139 (2026-09-17) A+D 扩展:
+      - **A. 周报也补 hourly_summary**: 取消 #136 月报限定, 周/月报均对每条
+        daily_trend 调 _enrich_daily_hourly_summary。周报 max_tokens=4000,
+        7 天 × 6 标量 = ~42 标量(~400 字符), 在 feed 限 6000 字符内可接受。
+      - **D. 周/月报补人均效率 top5**: 复用 today:staff:None:{start_s}:{end_s}:
+        200:0:person:None:None:None 缓存(与今日看板 today:staff 同源同预热),
+        调 today_staff_efficiency 整窗 → _compact_staff_efficiency 取 top3。
+        AI 可答「本周/本月谁接待最多/效率最高」。
     """
     try:
-        trend, span = _days_range_trend(db, start_s, end_s)
+        trend, _span = _days_range_trend(db, start_s, end_s)
         if trend:
             feed["daily_trend"] = trend
-            # #136: 月报路径(span > 14)对每条 daily_trend 补 hourly_summary
-            if span > 14:
-                _enrich_daily_hourly_summary(db, trend)
+            # #139 A: 取消月报限定, 周/月报均补 hourly_summary
+            _enrich_daily_hourly_summary(db, trend)
     except Exception as e:  # noqa: BLE001
         logger.warning("ai_feed enrich daily_trend 失败(忽略): %s", e)
+
+    # #139 D: 周/月报补人均效率 top5(整窗一次性, 不按日重复)
+    try:
+        eff = cached_call(
+            f"today:staff:None:{start_s}:{end_s}:200:0:person:None:None:None",
+            cache_ttl_for(start_s, end_s, 60),
+            A.today_staff_efficiency,
+            db, None, start_s, end_s, 200, False, "person",
+            department=None, group_id=None, specialty_id=None,
+        )
+        feed["staff_top5"] = _compact_staff_efficiency(eff)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ai_feed enrich weekly/monthly staff_top5 失败(忽略): %s", e)
 
 
 def _days_range_trend(db: Session, start_s: str, end_s: str) -> tuple[list[dict], int]:
@@ -392,6 +427,15 @@ def _days_range_trend(db: Session, start_s: str, end_s: str) -> tuple[list[dict]
     - >14 天 → 按日全展开(cap 31 天, 防超长月+1; #136 取消旧「前14天+周聚合」降级)
 
     返回 (trend_list, span_days)。
+
+    #139 (2026-09-17) B 扩展:
+      - 每条新增 complaint_handled / complaint_pending 两字段, 复用
+        `complaint:enhanced:{d}:{d}` 缓存(与 _build_brief 顶层 complaint 段同源同缓存),
+        取 _complaint_enhanced 返回的 total.handled / total.backlog。
+      - complaint_handled = 窗口内真实完成的投诉工单(finish∈窗口 且 finish>=register+3min,
+        与 complaints._is_real_finish / external._complaint_enhanced 同口径)
+      - complaint_pending = 窗口内登记且归一化后未闭环的存量(backlog, 同 _complaint_enhanced)
+      - 与 daily_trend.complaint(registered 总数)三字段成组, AI 可答「哪天投诉登记/处理/积压」。
     """
     try:
         s_d = _dt.date.fromisoformat(start_s)
@@ -431,6 +475,22 @@ def _days_range_trend(db: Session, start_s: str, end_s: str) -> tuple[list[dict]
         except Exception as e:  # noqa: BLE001
             logger.warning("ai_feed daily_trend 取 %s 失败(跳过): %s", d_iso, e)
             continue
+        # #139 B: 取当日投诉处理/积压, 复用 complaint:enhanced:{d}:{d} 缓存
+        #   (与 _build_brief 顶层 complaint 段同源同缓存, 不重复 SQL)
+        #   失败仅置 None, 不影响 daily_trend 主链路
+        comp_handled = None
+        comp_pending = None
+        try:
+            ce = cached_call(
+                f"complaint:enhanced:{d_iso}:{d_iso}",
+                cache_ttl_for(d_iso, d_iso, 60),
+                _complaint_enhanced, db, d_iso, d_iso,
+            )
+            ce_total = (ce.get("total") or {}) if isinstance(ce, dict) else {}
+            comp_handled = ce_total.get("handled")
+            comp_pending = ce_total.get("backlog")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("ai_feed daily_trend 投诉处理/积压取 %s 失败(忽略): %s", d_iso, e)
         # 取关键指标(去 yoy, 走势只看本期值)
         reception = kpi.get("reception") or {}
         out.append({
@@ -440,6 +500,9 @@ def _days_range_trend(db: Session, start_s: str, end_s: str) -> tuple[list[dict]
             "refund_count": (kpi.get("refund_count") or {}).get("value"),
             "refund_amount": (kpi.get("refund_amount") or {}).get("value"),
             "complaint": (kpi.get("complaint") or {}).get("value"),
+            # #139 B: 窗口内真实完成/积压, 口径同 _complaint_enhanced.total
+            "complaint_handled": comp_handled,
+            "complaint_pending": comp_pending,
         })
     return out, span
 
@@ -584,7 +647,11 @@ def _trim_feed(feed: dict) -> str:
 # _spec 喂口径单位), 截掉会让模型答错窗口或金额单位。
 _CONSTANT_FEED_KEYS = ("period", "date", "date_start", "date_end",
                        "generated_at", "_spec", "range", "daily_trend",
-                       "hourly_trend", "refund_recovery")
+                       "hourly_trend", "refund_recovery",
+                       # #139: 投诉三源拆分投影, 让所有 scope 切片都保留(避免被切走)
+                       "complaint_breakdown",
+                       # #139: 周/月报路径补的 staff_top5 也作恒量段保留
+                       "staff_top5")
 
 
 def _select_feed_sections(feed: dict, scopes) -> dict:

@@ -353,9 +353,9 @@ async def llm_parse_time_intent(question: str, *, today: _date | None = None) ->
     today = today or today_cn()
     # DB 模式: 优先查 Provider; 库为空回退 .env 模式(由 chat_completion 内部判断)
     try:
-        from app.services.llm_client import chat_completion
         from app.core.database import SessionLocal
         from app.services import llm_provider_service
+        from app.services.llm_client import chat_completion
         _db = SessionLocal()
         try:
             _providers = llm_provider_service.get_active_providers(_db)

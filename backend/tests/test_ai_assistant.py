@@ -590,7 +590,7 @@ def test_keyword_to_scope_miss_returns_none():
 
 def test_select_feed_sections_refund_only():
     """scope=refund → 只保留 refund 业务段 + 恒量段, 丢 reception/complaint。"""
-    from app.services.ai_feed import _select_feed_sections, _CONSTANT_FEED_KEYS
+    from app.services.ai_feed import _CONSTANT_FEED_KEYS, _select_feed_sections
     feed = {
         "period": "daily", "date": "2026-09-15",
         "date_start": "2026-09-15T00:00:00+08:00",
