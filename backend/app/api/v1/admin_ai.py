@@ -158,14 +158,22 @@ def trigger_template(template_id: int, db: DBSession, _: AdminUser):
 
 # ============== 报告管理 ==============
 
-@router.get("/reports", response_model=R, summary="AI 报告列表(admin)")
+@router.get("/reports", response_model=R, summary="AI 报告列表(admin, 默认仅预生成)")
 def list_admin_reports(
     db: DBSession, _: AdminUser,
     page: int = 1, page_size: int = 20,
     is_public: bool | None = None,
     template_id: int | None = None,
+    include_private: bool = False,
 ):
-    """admin 报告列表(分页, 可按 is_public/template_id 筛选)。
+    """admin 报告列表(分页, 默认仅预生成报告池 is_public=TRUE)。
+
+    #142 (2026-09-17) 重组:
+      - 默认 include_private=False → WHERE is_public=TRUE (仅预生成报告池)
+      - include_private=True → WHERE 1=1 (含他人私有实时问答, admin 排查用)
+      - 「AI 与分析」/system/ai-reports 视角: AI 系统预生成报告池
+      - 「我的待办」/agenda AI 报告历史视角: 我自己用 AI 的轨迹(走 /api/v1/ai/reports)
+      - 两个入口分工清晰, 不再对 admin 重复
 
     按 created_at DESC 排序, 不做 user_id 隔离(admin 全可见)。
     """
@@ -175,6 +183,9 @@ def list_admin_reports(
         page_size = 20
     where = "1=1"
     binds: dict = {}
+    # #142: 默认仅预生成报告池
+    if not include_private:
+        where += " AND is_public = TRUE"
     if is_public is not None:
         where += " AND is_public = :pub"
         binds["pub"] = is_public
