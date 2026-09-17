@@ -131,6 +131,17 @@
               </template>
             </el-table-column>
             <el-table-column prop="question" label="问句" show-overflow-tooltip />
+            <!-- #147 命中粒度: 区分「命中·全量/命中·局部/未命中·实时/规则秒回」,
+                 让历史一眼看出"这条报告是怎么来的"(整篇预生成/摘取段落/实时生成)。
+                 存量 NULL(未标记)降级显示 '-' 。 -->
+            <el-table-column label="命中" width="120">
+              <template #default="{ row }">
+                <el-tag v-if="row.hit_mode" :type="hitModeType(row.hit_mode)" size="small" effect="light">
+                  {{ hitModeLabel(row.hit_mode) }}
+                </el-tag>
+                <span v-else style="color: #c0c4cc">-</span>
+              </template>
+            </el-table-column>
             <el-table-column label="耗时" width="100">
               <template #default="{ row }">{{ row.total_ms ? (row.total_ms / 1000).toFixed(1) + 's' : '-' }}</template>
             </el-table-column>
@@ -239,6 +250,14 @@ function _onMediaChange(e) { isMobile.value = e.matches }
 const aiPeriodLabel = (p) => ({
   daily: '当日', weekly: '本周', monthly: '本月', range: '区间', auto: '自动',
 }[p] || p || '-')
+
+// #147 命中粒度标签文案 + 颜色(full=全量/绿, section=局部/橙, live=实时/灰, rule=规则/蓝)
+const hitModeLabel = (m) => ({
+  full: '命中·全量', section: '命中·局部', live: '未命中·实时', rule: '规则秒回',
+}[m] || m || '-')
+const hitModeType = (m) => ({
+  full: 'success', section: 'warning', live: 'info', rule: 'primary',
+}[m] || 'info')
 
 // 禁选未来日期(数据时间字段使用规范: AI 报告只看历史)
 const disableFuture = (date) => date && date.valueOf() > Date.now()

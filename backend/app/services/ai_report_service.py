@@ -43,6 +43,7 @@ def save_report(
     snapshot_date: str | None = None,
     snapshot_period: str | None = None,
     is_public: bool = False,
+    hit_mode: str | None = None,
 ) -> AiReport | None:
     """落库一条 AI 报告。
 
@@ -51,6 +52,9 @@ def save_report(
 
     #121: template_id/snapshot_date/snapshot_period/is_public 来自预生成 worker;
     实时调用默认 None/None/None/False(私有报告), 零侵入兼容。
+
+    #147: hit_mode 标记命中粒度 full/section/live/rule(见 AiReport 字段注释);
+    实时 LLM 兜底传 live, 命中路径按返回形态传 full/section, 规则层传 rule。
     """
     try:
         prompt_t = tokens.get("prompt_tokens") if tokens else None
@@ -77,6 +81,7 @@ def save_report(
             snapshot_date=snapshot_date,
             snapshot_period=snapshot_period,
             is_public=is_public,
+            hit_mode=hit_mode,
         )
         db.add(report)
         db.commit()
@@ -156,7 +161,7 @@ def list_reports(
     rows = db.execute(
         text(f"""SELECT id, task_id, user_id, question, period, "date", "start", "end",
                   window_source, window_label, llm_model, llm_ms, total_ms,
-                  prompt_tokens, completion_tokens, total_tokens, created_at
+                  prompt_tokens, completion_tokens, total_tokens, hit_mode, created_at
                FROM ai_reports
                WHERE {where}
                ORDER BY created_at DESC
@@ -176,7 +181,7 @@ def get_report(
     row = db.execute(
         text(f"""SELECT id, task_id, user_id, question, period, "date", "start", "end",
                   window_source, window_label, answer_md, llm_model, llm_ms, total_ms,
-                  prompt_tokens, completion_tokens, total_tokens, created_at
+                  prompt_tokens, completion_tokens, total_tokens, hit_mode, created_at
                FROM ai_reports
                WHERE id = :rid AND {where}"""),
         {"rid": report_id, "uid": current_user_id},

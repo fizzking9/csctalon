@@ -261,6 +261,7 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                 window_source=win.window_source, window_label=win.window_label,
                 answer_md=_rule_md, llm_model="rule-engine",
                 llm_ms=0, total_ms=0, tokens=None,
+                hit_mode="rule",
             )
         finally:
             _rule_db2.close()
@@ -278,6 +279,42 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
     from app.services.ai_extract_service import extract_section, split_sections
     from app.services.ai_report_matcher import list_candidates, match_template_report
     from app.services.ai_semantic_matcher import semantic_match
+
+    def _persist_hit(_db, *, _result_md: str, _hit_mode: str,
+                     _src_report, _tmpl) -> int | None:
+        """#147 命中(L1/L2)路径也落库一条本人私有报告, 供「我的待办·AI 报告历史」复查。
+
+        命中路径原本直接 return 不落库 → 历史无从区分粒度。现统一落库:
+        - is_public=False(本人私有), hit_mode 区分 full/section
+        - 复用源报告 template_id/snapshot_date/snapshot_period(便于归因到模板)
+        - 不 bump matched_count(那是源公共报告的复用统计, 与本私有行无关)
+        返回新行 id; 失败返回 None(不影响主响应)。
+        """
+        if not _result_md:
+            return None
+        from app.services.ai_report_service import save_report
+        tmpl_code = getattr(_tmpl, "code", None)
+        saved = save_report(
+            _db,
+            task_id=None, user_id=user_id, question=q,
+            period=eff["period"], date=eff["date"], start=eff["start"], end=eff["end"],
+            window_source=win.window_source, window_label=win.window_label,
+            answer_md=_result_md,
+            llm_model=f"pregen:{tmpl_code}" if tmpl_code else "pregen",
+            llm_ms=0, total_ms=0, tokens=None,
+            template_id=(
+                (getattr(_src_report, "template_id", None))
+                or (getattr(_tmpl, "id", None))
+            ),
+            snapshot_date=(
+                str(getattr(_src_report, "snapshot_date", "") or "") or None
+            ),
+            snapshot_period=getattr(_src_report, "snapshot_period", None),
+            is_public=False,
+            hit_mode=_hit_mode,
+        )
+        return saved.id if saved else None
+
     # #135 force_llm=True 时跳过三级命中链路, 直接走 _runner 实时 LLM 兜底
     #   (架构文档 §6.2 "直接生成"按钮: clarify 状态下用户主动选择触发)
     if not payload.force_llm:
@@ -291,14 +328,22 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
             if _matched is not None:
                 _ext = await extract_section(_match_db, q, _matched, _tmpl)
                 if _ext["result_md"]:
+                    # #147: 命中路径也落库(区分 full 全量/ section 局部), 供历史复查
+                    _hit_mode = "full" if _ext["confidence"] >= 0.9 else "section"
+                    _hit_id = _persist_hit(
+                        _match_db, _result_md=_ext["result_md"],
+                        _hit_mode=_hit_mode, _src_report=_matched, _tmpl=_tmpl,
+                    )
                     logger.info("ai extract L1 命中: question=%r report_id=%s template=%s "
-                                "extract_conf=%.2f out_chars=%d",
+                                "extract_conf=%.2f out_chars=%d hit_mode=%s hit_row=%s",
                                 q[:30], _matched.id,
                                 _tmpl.code if _tmpl else None,
-                                _ext["confidence"], len(_ext["result_md"]))
+                                _ext["confidence"], len(_ext["result_md"]),
+                                _hit_mode, _hit_id)
                     return R(data={"task_id": None, "status": "success",
                                    "result_md": _ext["result_md"],
-                                   "report_id": _matched.id,
+                                   "report_id": _hit_id or _matched.id,
+                                   "hit_mode": _hit_mode,
                                    "matched_template": _tmpl.code if _tmpl else None,
                                    "extract_confidence": _ext["confidence"],
                                    **window_info})
@@ -316,13 +361,19 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
             if _sem["hit_report"] is not None:
                 _ext2 = await extract_section(_match_db, q, _sem["hit_report"], None)
                 if _ext2["result_md"]:
+                    # #147: L2 命中走摘取层, template 未匹配 → 统一 section 局部粒度, 亦落库
+                    _hit_id = _persist_hit(
+                        _match_db, _result_md=_ext2["result_md"],
+                        _hit_mode="section", _src_report=_sem["hit_report"], _tmpl=None,
+                    )
                     logger.info("ai extract L2 命中: question=%r report_id=%s "
-                                "semantic_conf=%.2f out_chars=%d",
+                                "semantic_conf=%.2f out_chars=%d hit_row=%s",
                                 q[:30], _sem["hit_report"].id,
-                                _sem["confidence"], len(_ext2["result_md"]))
+                                _sem["confidence"], len(_ext2["result_md"]), _hit_id)
                     return R(data={"task_id": None, "status": "success",
                                    "result_md": _ext2["result_md"],
-                                   "report_id": _sem["hit_report"].id,
+                                   "report_id": _hit_id or _sem["hit_report"].id,
+                                   "hit_mode": "section",
                                    "extract_confidence": _ext2["confidence"],
                                    "semantic_confidence": _sem["confidence"],
                                    **window_info})
@@ -407,6 +458,7 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                     llm_model=task.llm_model,
                     llm_ms=llm_ms_now, total_ms=total_ms_now,
                     tokens=task.usage,
+                    hit_mode="live",
                 )
                 if _saved:
                     task.report_id = _saved.id

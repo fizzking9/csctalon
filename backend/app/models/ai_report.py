@@ -63,6 +63,15 @@ class AiReport(IDMixin, TimestampMixin, Base):
         Integer, nullable=False, default=0,
         comment="#121: 被命中复用次数(match_template_report 命中时 +1)",
     )
+    hit_mode: Mapped[str | None] = mapped_column(
+        String(16), nullable=True,
+        comment=(
+            "#147 命中粒度: full(命中·全量=整篇采用预生成)/"
+            "section(命中·局部=摘取段落)/"
+            "live(未命中·实时=实时LLM)/"
+            "rule(规则层秒回); 历史存量 NULL=未标记"
+        ),
+    )
     question: Mapped[str] = mapped_column(Text, nullable=False, comment="原问句")
     period: Mapped[str | None] = mapped_column(
         String(16), nullable=True, comment="窗口周期 daily/weekly/monthly/range",
