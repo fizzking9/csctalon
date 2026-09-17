@@ -47,6 +47,13 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="模型" width="150">
+          <template #default="{ row }">
+            <el-tag size="small" :type="providerTagType(row.llm_provider_code)" effect="plain">
+              {{ providerDisplay(row.llm_provider_code) }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="max_tokens" width="100">
           <template #default="{ row }">{{ row.max_tokens }}</template>
         </el-table-column>
@@ -140,6 +147,19 @@ import { aiTemplates, createAiTemplate, updateAiTemplate, deleteAiTemplate, trig
 const loading = ref(false)
 const items = ref([])
 const triggering = reactive({})
+
+// #146 模板绑定模型的可读显式标识(替代裸 provider_code 展示, 便于日常识别用哪个模型):
+//   - 27b(实时问答主力, pregen_only=False) → 绿
+//   - 122b(预生成慢模型, pregen_only=True) → 橙(非日常链)
+//   - 留空 → 灰(走多 provider 优先级, 按 priority 取 first)
+const PROVIDER_LABELS = {
+  'talon-gmk-qwen3.8-27b': { name: '27b·实时问答', type: 'success' },
+  'talon-gmk-qwen3.5-122b': { name: '122b·预生成', type: 'warning' },
+  'talon-gmk-qwen2.5-7b': { name: '7b·语义', type: 'primary' },
+}
+const providerDisplay = (code) => (code ? (PROVIDER_LABELS[code]?.name || code) : '自动(优先级)')
+const providerTagType = (code) => (code ? (PROVIDER_LABELS[code]?.type || 'info') : 'info')
+
 const dialogVisible = ref(false)
 const saving = ref(false)
 const keywordsInput = ref('')
