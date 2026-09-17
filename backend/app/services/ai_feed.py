@@ -361,56 +361,55 @@ def _enrich_with_daily_trend(db: Session, feed: dict, start_s: str, end_s: str) 
 
     走 cached_call + today:kpi:None:{d}:{d} 按日缓存(历史日 24h, 今日 60s),
     与今日看板同源同缓存。每条只取关键指标: date / reception / refund_count /
-    refund_amount / complaint / complaint_handled。超 14 天自动降级为前14天逐日 +
-    后续按周聚合(避免月报 token 超限)。
+    refund_amount / complaint / complaint_handled。
+
+    #136 (2026-09-17) 月报小时粒度补充:
+      - span > 14 (月报路径) 时, 不再降级为「前14天逐日 + 后续按周聚合」,
+        改为按日全展开(cap 31 天, 防超长月+1)。月报 max_tokens=5000, feed 输入给
+        122b 模型, 可容纳 ~12KB(360 标量)。
+      - 在月报路径下, 对每条 daily_trend 额外调 today:hourly 取当日小时粒度数据,
+        用 _compact_daily_hourly_summary 压缩为 6 标量/天嵌入 hourly_summary 子对象,
+        让 AI 能回答「哪天哪个时段是高峰 / 夜间 AI 接管多少」。
+      - 周报路径(span ≤ 14)沿用现行 daily_trend, 不补 hourly_summary(周报天数少,
+        全天小时可由 today_hourly_trend 单日路径覆盖, 且 max_tokens=4000 较紧)。
     """
     try:
-        trend = _days_range_trend(db, start_s, end_s)
+        trend, span = _days_range_trend(db, start_s, end_s)
         if trend:
             feed["daily_trend"] = trend
+            # #136: 月报路径(span > 14)对每条 daily_trend 补 hourly_summary
+            if span > 14:
+                _enrich_daily_hourly_summary(db, trend)
     except Exception as e:  # noqa: BLE001
         logger.warning("ai_feed enrich daily_trend 失败(忽略): %s", e)
 
 
-def _days_range_trend(db: Session, start_s: str, end_s: str) -> list[dict]:
+def _days_range_trend(db: Session, start_s: str, end_s: str) -> tuple[list[dict], int]:
     """生成 [start_s, end_s] 区间内每天的 key metrics 走势数组。
 
     - 单日跨度 → 返回空(日运营模式由 _enrich_with_today_kanban 处理, 无需走势)
     - ≤14 天 → 按日逐条
-    - >14 天 → 前14天逐日 + 后续按周聚合(降级, 防 token 超限)
+    - >14 天 → 按日全展开(cap 31 天, 防超长月+1; #136 取消旧「前14天+周聚合」降级)
+
+    返回 (trend_list, span_days)。
     """
     try:
         s_d = _dt.date.fromisoformat(start_s)
         e_d = _dt.date.fromisoformat(end_s)
     except (ValueError, TypeError):
-        return []
+        return [], 0
     span = (e_d - s_d).days + 1
     if span <= 1:
-        return []  # 单日由 today_kanban 路径处理
+        return [], span  # 单日由 today_kanban 路径处理
 
     today = _dt.date.today()
     days: list[_dt.date] = []
-    if span <= 14:
-        d = s_d
-        while d <= e_d:
-            days.append(d)
-            d += _dt.timedelta(days=1)
-    else:
-        # 前 14 天逐日
-        d = s_d
-        for _ in range(14):
-            if d > e_d:
-                break
-            days.append(d)
-            d += _dt.timedelta(days=1)
-        # 后续按周聚合(周一~周日合并为一个点, 标签=周一日期)
-        while d <= e_d:
-            week_start = d - _dt.timedelta(days=d.weekday())  # 周一
-            week_end = week_start + _dt.timedelta(days=6)
-            if week_end > e_d:
-                week_end = e_d
-            days.append(week_start)  # 用周一起作为聚合点
-            d = week_end + _dt.timedelta(days=1)
+    # #136: 取消 span>14 降级, 按日全展开; 仅做 cap 31 防止异常长窗口
+    cap = 31
+    d = s_d
+    while d <= e_d and len(days) < cap:
+        days.append(d)
+        d += _dt.timedelta(days=1)
 
     out: list[dict] = []
     seen: set[str] = set()
@@ -442,7 +441,97 @@ def _days_range_trend(db: Session, start_s: str, end_s: str) -> list[dict]:
             "refund_amount": (kpi.get("refund_amount") or {}).get("value"),
             "complaint": (kpi.get("complaint") or {}).get("value"),
         })
-    return out
+    return out, span
+
+
+def _enrich_daily_hourly_summary(db: Session, trend: list[dict]) -> None:
+    """#136 月报路径: 对 daily_trend 每条额外取当日 hourly 数据压缩后嵌入。
+
+    - 复用 today:hourly:None:{d}:{d} 缓存(与今日看板同源同预热, today_hourly_trend
+      在单日 span_days=1 时自动按 hour 粒度聚合, slot_labels=["00:00","01:00",...])。
+    - 任一天取数失败仅 log warning, hourly_summary 字段留空(不影响主 daily_trend)。
+    """
+    for item in trend:
+        d_iso = item.get("date")
+        if not d_iso:
+            continue
+        try:
+            ht = cached_call(
+                f"today:hourly:None:{d_iso}:{d_iso}",
+                cache_ttl_for(d_iso, d_iso, 60),
+                A.today_hourly_trend, db, None, d_iso, d_iso,
+            )
+            item["hourly_summary"] = _compact_daily_hourly_summary(ht)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("ai_feed daily hourly_summary 取 %s 失败(忽略): %s", d_iso, e)
+
+
+# 工作时段(08:00~23:59, _SYSTEM_PROMPT 铁律 10), 索引 8~23; 夜间 00:00~07:59 索引 0~7
+_WORK_HOUR_IDX = list(range(8, 24))
+_NIGHT_HOUR_IDX = list(range(0, 8))
+
+
+def _compact_daily_hourly_summary(ht: dict | None) -> dict:
+    """#136 压缩 today_hourly_trend(单日 hour 粒度) 为 6 标量/天。
+
+    输入 today_hourly_trend 返回结构(grain=hour, 24 槽):
+      - slot_labels: ["00:00","01:00",...,"23:00"]
+      - reception: list[24]
+      - refund_count_total: list[24]
+    输出(每天 6 标量, ~12KB/月报):
+      - peak_hour / peak_reception: 接待峰值小时(全天范围)
+      - low_hour / low_reception: 工作时段内谷值小时
+      - night_reception: 夜间(00-07)接待合计 = AI 协助处理量
+      - refund_peak_hour: 退款笔数峰值小时
+
+    说明:
+      - 谷值只取工作时段内, 避免凌晨 0 接待被当「谷值」(本就是预期低谷)
+      - night_reception 让 AI 能算 AI 接管率(night_reception / reception_total)
+      - 不输出 low_hour 的工作时段限制说明在 _SYSTEM_PROMPT 铁律 10 已约束
+    """
+    # 类型断言: cached_call 失败可能返回 None, 此时返回空 dict 让上游字段缺失
+    if ht is None or not isinstance(ht, dict):  # noqa: SIM108
+        return {}
+    labels = ht.get("slot_labels") or ht.get("hour_labels") or []
+    reception = ht.get("reception") or []
+    refund_cnt = ht.get("refund_count_total") or ht.get("refund_count") or []
+
+    def _safe_val(arr, i):
+        """取数组第 i 个值, None/越界返回 0(用于求和/极值, 缺数据视作 0)。"""
+        if not isinstance(arr, list) or i >= len(arr):
+            return 0
+        v = arr[i]
+        return (v if isinstance(v, (int, float)) else 0)
+
+    def _label(i: int) -> str:
+        return labels[i] if (isinstance(labels, list) and i < len(labels)) else f"{i:02d}:00"
+
+    # 峰值小时(全天范围): argmax(reception)
+    peak_idx = max(
+        range(len(reception)) if isinstance(reception, list) and reception else [0],
+        key=lambda i: _safe_val(reception, i),
+        default=0,
+    )
+    # 谷值小时(工作时段内 8~23): argmin(reception[8:24]) — 避免凌晨 0 被当谷值
+    work_vals = [(_safe_val(reception, i), i) for i in _WORK_HOUR_IDX]
+    low_idx = min(work_vals, key=lambda x: x[0], default=(0, 8))[1]
+    # 退款笔数峰值小时(全天范围)
+    refund_peak_idx = max(
+        range(len(refund_cnt)) if isinstance(refund_cnt, list) and refund_cnt else [0],
+        key=lambda i: _safe_val(refund_cnt, i),
+        default=0,
+    )
+    # 夜间(00-07)接待合计 = AI 协助处理量
+    night_reception = sum(_safe_val(reception, i) for i in _NIGHT_HOUR_IDX)
+
+    return {
+        "peak_hour": _label(peak_idx),
+        "peak_reception": _safe_val(reception, peak_idx),
+        "low_hour": _label(low_idx),
+        "low_reception": _safe_val(reception, low_idx),
+        "night_reception": night_reception,
+        "refund_peak_hour": _label(refund_peak_idx),
+    }
 
 
 def _compact_specialty(by_specialty) -> list[dict]:
