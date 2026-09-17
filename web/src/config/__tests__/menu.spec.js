@@ -48,13 +48,14 @@ describe('菜单配置 - 收敛目标', () => {
     expect(MENU_GROUPS.length).toBeLessThanOrEqual(8)
   })
 
-  it('系统管理下含 3 个子分组(组织与权限/数据与接入/审计与配置)', () => {
+  it('系统管理下含 4 个子分组(组织与权限/数据与接入/数据质量/审计与配置)', () => {
+    // #140: 「投诉采集质量」从「数据与接入」移到独立「数据质量」子分组
     const system = MENU_GROUPS.find((g) => g.key === 'system')
     expect(system, '系统管理分组必须存在').toBeTruthy()
     const subGroups = (system.children || []).filter((c) => c.children?.length)
-    expect(subGroups.length).toBe(3)
+    expect(subGroups.length).toBe(4)
     expect(subGroups.map((g) => g.key)).toEqual([
-      'system-org', 'system-data', 'system-audit',
+      'system-org', 'system-data', 'system-quality', 'system-audit',
     ])
   })
 
@@ -63,6 +64,30 @@ describe('菜单配置 - 收敛目标', () => {
     const dataGroup = system.children.find((g) => g.key === 'system-data')
     const paths = (dataGroup.children || []).map((c) => c.path)
     expect(paths).toContain('/system/access-center')
+  })
+
+  // #140: 投诉采集质量从「数据与接入」移出, 单独成「数据质量」分组
+  it('投诉采集质量在「数据质量」分组下, 不在「数据与接入」(#140)', () => {
+    const system = MENU_GROUPS.find((g) => g.key === 'system')
+    const dataGroup = system.children.find((g) => g.key === 'system-data')
+    const dataPaths = (dataGroup.children || []).map((c) => c.path)
+    expect(dataPaths, '数据与接入组不应再含投诉采集质量').not.toContain('/system/complaint-quality')
+
+    const qualityGroup = system.children.find((g) => g.key === 'system-quality')
+    expect(qualityGroup, '数据质量分组必须存在').toBeTruthy()
+    const qualityPaths = (qualityGroup.children || []).map((c) => c.path)
+    expect(qualityPaths).toContain('/system/complaint-quality')
+  })
+
+  // #140: AI 与分析 分组修复 #137 菜单漏改
+  it('AI 与分析 分组存在, 含 AI 管理 + AI 报告模板 (#140)', () => {
+    const group = MENU_GROUPS.find((g) => g.key === 'ai-analysis')
+    expect(group, 'ai-analysis 分组必须存在').toBeTruthy()
+    expect(group.roles).toEqual(['admin'])
+    expect(group.buildMode).toBe(BUILD_MODES.ALWAYS)
+    const paths = (group.children || []).map((c) => c.path)
+    expect(paths).toContain('/system/ai-admin')
+    expect(paths).toContain('/system/ai-templates')
   })
 
   it('数据分析组对 manager 可见(审计项 U3: 原为 admin-only 而错位)', () => {
