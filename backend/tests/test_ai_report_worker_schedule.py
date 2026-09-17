@@ -1,0 +1,170 @@
+# -*- coding: utf-8 -*-
+"""AI 报告调度器凌晨触发测试 (工单 #133 批次 A2)。
+
+覆盖:
+- schedule_due_templates 在凌晨 02:01(周一) + trigger_at=1-02:00 能匹配到 weekly 模板
+- schedule_due_templates 在凌晨 02:01(每月 1 号) + trigger_at=1-02:00 能匹配到 monthly 模板
+- schedule_due_templates 在凌晨 02:01 + daily 模板 trigger_at=09:00 **不**误触发
+- warm_idle 函数源码不再含 _DAYTIME_HOURS 时段限制(凌晨可触发)
+
+固定 datetime 注入, 避免测试随时钟漂移。
+"""
+
+import datetime as _dt
+import inspect
+
+import pytest
+
+from app.models.ai_report_template import AiReportTemplate
+from app.services import ai_report_worker
+from app.services.ai_report_worker import schedule_due_templates, warm_idle
+
+
+# ── fixture: 一个 weekly 模板 trigger_at=1-02:00(每周一凌晨2点) ──────────
+@pytest.fixture()
+def weekly_midnight_template(db):
+    """插入 weekly 模板, trigger_at=1-02:00(每周一凌晨2点)。"""
+    t = AiReportTemplate(
+        code="_test_weekly_midnight",
+        name_cn="测试-周报凌晨",
+        question_template="生成上周接待/退款/投诉对比分析",
+        question_keywords=["周报", "周对比"],
+        period="weekly",
+        frequency="weekly",
+        trigger_at="1-02:00",   # 每周一凌晨2点(#133 调度)
+        priority=100,
+        max_tokens=2000,
+        is_active=True,
+        visibility_scope="public",
+    )
+    db.add(t)
+    db.flush()
+    return t
+
+
+@pytest.fixture()
+def monthly_midnight_template(db):
+    """插入 monthly 模板, trigger_at=1-02:00(每月1号凌晨2点)。"""
+    t = AiReportTemplate(
+        code="_test_monthly_midnight",
+        name_cn="测试-月报凌晨",
+        question_template="生成上月接待/退款/投诉总览",
+        question_keywords=["月报", "月度总览"],
+        period="monthly",
+        frequency="monthly",
+        trigger_at="1-02:00",   # 每月1号凌晨2点(#133 调度)
+        priority=100,
+        max_tokens=2000,
+        is_active=True,
+        visibility_scope="public",
+    )
+    db.add(t)
+    db.flush()
+    return t
+
+
+@pytest.fixture()
+def daily_morning_template(db):
+    """插入 daily 模板, trigger_at=09:00(白天, 不应在凌晨误触发)。"""
+    t = AiReportTemplate(
+        code="_test_daily_morning",
+        name_cn="测试-日报白天",
+        question_template="生成今日经营总览",
+        question_keywords=["日报", "今日"],
+        period="daily",
+        frequency="daily",
+        trigger_at="09:00",
+        priority=100,
+        max_tokens=2000,
+        is_active=True,
+        visibility_scope="public",
+    )
+    db.add(t)
+    db.flush()
+    return t
+
+
+def _patch_now(monkeypatch, dt: _dt.datetime):
+    """把 ai_report_worker._now_cn() 注入到固定时间。"""
+    tz = _dt.timezone(_dt.timedelta(hours=8))
+    fixed = dt.replace(tzinfo=tz)
+    monkeypatch.setattr(ai_report_worker, "_now_cn", lambda: fixed)
+
+
+# ── schedule_due_templates: 凌晨匹配 ───────────────────────────────────────
+def test_weekly_midnight_due_on_monday_0201(
+        db, monkeypatch, weekly_midnight_template):
+    """周一凌晨 02:01, trigger_at=1-02:00 → 应被匹配(±1 分钟容差)。"""
+    # 2026-09-14 是周一
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 14, 2, 1))
+    due = schedule_due_templates(db)
+    codes = [t.code for t in due]
+    assert "_test_weekly_midnight" in codes, (
+        f"周一凌晨 02:01 应匹配到 weekly trigger_at=1-02:00; 实际 due={codes}"
+    )
+
+
+def test_monthly_midnight_due_on_first_day_0201(
+        db, monkeypatch, monthly_midnight_template):
+    """每月 1 号凌晨 02:01, trigger_at=1-02:00 → 应被匹配。"""
+    # 2026-09-01 是 1 号(且是周二, 不与 weekly 冲突)
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 1, 2, 1))
+    due = schedule_due_templates(db)
+    codes = [t.code for t in due]
+    assert "_test_monthly_midnight" in codes, (
+        f"每月1号凌晨 02:01 应匹配到 monthly trigger_at=1-02:00; 实际 due={codes}"
+    )
+
+
+def test_daily_morning_not_triggered_at_midnight(
+        db, monkeypatch, daily_morning_template):
+    """凌晨 02:01, daily trigger_at=09:00 → **不**应被匹配(避免凌晨误触发)。"""
+    # 2026-09-16 是周三, 凌晨 02:01
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 16, 2, 1))
+    due = schedule_due_templates(db)
+    codes = [t.code for t in due]
+    assert "_test_daily_morning" not in codes, (
+        f"凌晨 02:01 不应误触发 daily trigger_at=09:00; 实际 due={codes}"
+    )
+
+
+# ── warm_idle: 凌晨不再被时段限制挡掉 ─────────────────────────────────────
+def test_warm_idle_source_no_daytime_hours_guard():
+    """warm_idle 函数源码不得含 _DAYTIME_HOURS 时段限制(#133 移除)。
+
+    若该限制回流(如未来误改), 此用例先于生产暴露。
+    """
+    src = inspect.getsource(warm_idle)
+    assert "_DAYTIME_HOURS" not in src, (
+        "warm_idle 仍引用 _DAYTIME_HOURS —— #133 应已移除白天时段限制, "
+        "否则凌晨 trigger_at 无法被扫描到。"
+    )
+
+
+def test_warm_idle_runs_at_midnight(monkeypatch):
+    """warm_idle 在凌晨 02:01 不会被提前 return(应进入 schedule_due_templates)。
+
+    通过 monkeypatch _now_cn 到凌晨, mock schedule_due_templates 返回空列表
+    (避免真实 LLM 调用), 断言 schedule_due_templates 被调用——即 warm_idle 没有
+    在时段判断处提前 return。
+    """
+    from unittest.mock import MagicMock
+
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 14, 2, 1))  # 周一凌晨
+
+    called = {"count": 0}
+
+    def _fake_schedule(_db):  # 参数签名匹配 warm_idle 调用, 不需要实际使用
+        called["count"] += 1
+        return []   # 空列表避免触发生成
+
+    monkeypatch.setattr(ai_report_worker, "schedule_due_templates", _fake_schedule)
+    # mock 一个具备 .close() 的假 session, 避免 finally 段抛 AttributeError
+    monkeypatch.setattr(ai_report_worker, "SessionLocal", lambda: MagicMock())
+
+    warm_idle()
+
+    assert called["count"] == 1, (
+        "warm_idle 在凌晨应进入 schedule_due_templates 扫描, "
+        "若被时段限制提前 return 则不会调用 schedule_due_templates"
+    )

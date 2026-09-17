@@ -459,10 +459,12 @@ def warm_idle() -> None:
     """空闲期每分钟扫描: 触发当前时刻匹配的 daily/weekly/monthly 模板。
 
     由 bms_scheduler._run_loop 每分钟调用(待 #123 接入)。
-    白天 8-23 才扫描, 夜间无人访问省计算。
+
+    #133: 移除白天 8-23 时段限制——周报/月报 trigger_at 调到凌晨(如 1-02:00)
+    后, 必须让 warm_idle 在凌晨也能扫描到才能触发。daily 模板虽不调凌晨, 但其
+    trigger_at=09:00 仍走此路径, 时段放开不影响它(只在 9 点匹配)。
+    白天限制仅保留在 warm_on_startup(避免服务凌晨重启时大量并发预生成)。
     """
-    if _now_cn().hour not in _DAYTIME_HOURS:
-        return
     if not _worker_lock.acquire(blocking=False):
         logger.info("ai_report_worker warm_idle: 已有 worker 在跑, 跳过")
         return
