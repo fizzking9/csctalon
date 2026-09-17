@@ -457,13 +457,21 @@ const routes = [
         meta: { title: 'AI 报告模板', icon: 'Document', admin: true },
       },
       {
-        // #137: AI 管理页面(5 Tab 整合入口)
-        // 报告列表 / 模板管理 / 模型节点 / 提示词管理 / 事务通知
-        // 旧路由(ai-templates/llm-providers/ai-focus-configs/system-events)保留可达, 不破坏书签
+        // #137: AI 管理页面(3 Tab 整合入口, #141 重组)
+        // 模板管理 / 模型节点 / 提示词管理 (配置侧)
+        // 报告列表拆出 → /system/ai-reports (查看侧)
+        // 事务通知 → /system/system-events (审计侧)
         path: 'system/ai-admin',
         name: 'SystemAiAdmin',
         component: () => import('@/views/system/AiAdmin.vue'),
         meta: { title: 'AI 管理', icon: 'MagicStick', admin: true },
+      },
+      {
+        // #141: AI 报告历史(查看侧) — 独立成页, 含完整 content 查看抽屉
+        path: 'system/ai-reports',
+        name: 'SystemAiReports',
+        component: () => import('@/views/system/AiReports.vue'),
+        meta: { title: 'AI 报告历史', icon: 'Document', admin: true },
       },
     ],
   },

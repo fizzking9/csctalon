@@ -32,6 +32,11 @@ export function aiAdminReports(params = {}) {
   return request.get('/admin/ai/reports', { params })
 }
 
+// 报告详情(admin, 含完整 content) — #141 新增, 列表接口不返 content 防过大
+export function getAiReport(id) {
+  return request.get(`/admin/ai/reports/${id}`)
+}
+
 // 删除报告
 export function deleteAiReport(id) {
   return request.delete(`/admin/ai/reports/${id}`)

@@ -79,8 +79,8 @@ describe('菜单配置 - 收敛目标', () => {
     expect(qualityPaths).toContain('/system/complaint-quality')
   })
 
-  // #140: AI 与分析 分组修复 #137 菜单漏改
-  it('AI 与分析 分组存在, 含 AI 管理 + AI 报告模板 (#140)', () => {
+  // #140/#141: AI 与分析 分组修复 #137 菜单漏改 + #141 加 AI 报告历史
+  it('AI 与分析 分组存在, 含 AI 管理 + AI 报告模板 + AI 报告历史 (#140/#141)', () => {
     const group = MENU_GROUPS.find((g) => g.key === 'ai-analysis')
     expect(group, 'ai-analysis 分组必须存在').toBeTruthy()
     expect(group.roles).toEqual(['admin'])
@@ -88,6 +88,7 @@ describe('菜单配置 - 收敛目标', () => {
     const paths = (group.children || []).map((c) => c.path)
     expect(paths).toContain('/system/ai-admin')
     expect(paths).toContain('/system/ai-templates')
+    expect(paths).toContain('/system/ai-reports')
   })
 
   it('数据分析组对 manager 可见(审计项 U3: 原为 admin-only 而错位)', () => {

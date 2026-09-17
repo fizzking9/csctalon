@@ -167,10 +167,12 @@ export const MENU_GROUPS = [
     buildMode: 'always',
     roles: ['admin'],
     children: [
-      // #137: 5 Tab 整合入口(报告列表/模板/模型/提示词/事务通知)
+      // #141: 3 Tab 整合入口(模板/模型/提示词, 配置侧)
       { path: '/system/ai-admin', title: 'AI 管理' },
       // #125: 模板管理独立页(老路由保留可达, 不破坏书签)
       { path: '/system/ai-templates', title: 'AI 报告模板' },
+      // #141: AI 报告历史(查看侧) — 含完整 content 查看抽屉
+      { path: '/system/ai-reports', title: 'AI 报告历史' },
     ],
   },
 
