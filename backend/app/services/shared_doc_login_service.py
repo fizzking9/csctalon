@@ -107,7 +107,9 @@ _QRCODE_PRESENT_JS = """() => {
     }
   }
   // ② canvas 渲染型(腾讯文档等): 有尺寸即视为已渲染
-  for (const s of ['canvas[class*="qr"]','[class*="qrcode"] canvas','[id*="qrcode"] canvas']) {
+  //    腾讯微信码是多层 APNG 动画 canvas(class="common-apng-item-in/out"), 不含 qr 字样
+  for (const s of ['canvas[class*="qr"]','[class*="qrcode"] canvas','[id*="qrcode"] canvas',
+                   'canvas[class*="apng"]']) {
     for (const el of document.querySelectorAll(s)) {
       const r = el.getBoundingClientRect();
       if (r.width >= 80 && r.height >= 80) return true;
@@ -132,7 +134,8 @@ _QRCODE_BOX_JS = """() => {
                    '[id*="qrcode"] img','[id*="Qrcode"] img']) {
     for (const el of document.querySelectorAll(s)) if (el.naturalWidth > 0) push(el);
   }
-  for (const s of ['canvas[class*="qr"]','[class*="qrcode"] canvas','[id*="qrcode"] canvas']) {
+  for (const s of ['canvas[class*="qr"]','[class*="qrcode"] canvas','[id*="qrcode"] canvas',
+                   'canvas[class*="apng"]']) {
     for (const el of document.querySelectorAll(s)) push(el);
   }
   if (!cands.length) return null;
