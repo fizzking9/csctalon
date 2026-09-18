@@ -720,7 +720,8 @@ def test_chitchat_gate_passes_business():
     from app.services.ai_rule_engine import try_chitchat_answer
     for q in ("今日退款多少笔", "你好，今日退款如何", "昨天接待情况",
               "分析下今日经营", "本月投诉积压", "今天天气怎么样",
-              "你好，我想了解一下我们公司最近的情况", "谢谢你帮我看看退款"):
+              "你好，我想了解一下我们公司最近的情况", "谢谢你帮我看看退款",
+              "加班了", "下班没", "谁在值班", "服务器挂了吗"):
         assert try_chitchat_answer(q) is None, f"不应误杀经营问句: {q!r}"
 
 
