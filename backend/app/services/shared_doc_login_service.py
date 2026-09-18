@@ -545,18 +545,26 @@ def _browser_verify(w: _SessionWorker, platform: str, doc_url: str) -> tuple[boo
         page.wait_for_timeout(3000)
         final_url = (page.url or "").lower()
     except Exception as e:  # noqa: BLE001
+        logger.warning("[shared-doc-login] verify goto 失败 platform=%s url=%s err=%s", platform, doc_url, e)
         return False, f"校验时打开文档失败: {e}"
 
     hints = _LOGIN_URL_HINTS.get(platform, ())
-    if any(h.lower() in final_url for h in hints):
-        return False, "未检测到登录态(页面仍停留在登录/授权页), 请完成扫码后重试"
-    if SharedDocLoginManager.qrcode_visible(page):
-        return False, "页面仍显示登录二维码, 未检测到登录态, 请完成扫码后重试"
+    in_login = any(h.lower() in final_url for h in hints)
+    # #148 详细日志: 定位 confirm 校验失败的具体原因
     try:
-        cookies = w.ctx.cookies() if w.ctx else []
+        cookie_names = [c.get("name", "") for c in (w.ctx.cookies() if w.ctx else [])]
     except Exception:  # noqa: BLE001
-        cookies = []
-    if not cookies:
+        cookie_names = []
+    qr_visible = SharedDocLoginManager.qrcode_visible(page)
+    logger.info(
+        "[shared-doc-login] verify platform=%s final_url=%s in_login=%s qr_visible=%s cookies=%d %s",
+        platform, final_url[:120], in_login, qr_visible, len(cookie_names), cookie_names[:15],
+    )
+    if in_login:
+        return False, "未检测到登录态(页面仍停留在登录/授权页), 请完成扫码后重试"
+    if qr_visible:
+        return False, "页面仍显示登录二维码, 未检测到登录态, 请完成扫码后重试"
+    if not cookie_names:
         return False, "未检测到登录 Cookie, 请确认已完成扫码登录"
     return True, "ok"
 
