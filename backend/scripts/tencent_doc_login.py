@@ -13,7 +13,7 @@
 
 用法:
   # 本机 GUI 扫码
-  cd backend && ./.venv/bin/python ../scripts/tencent_doc_login.py
+  cd backend && ./.venv/bin/python ./scripts/tencent_doc_login.py
 
   # 生产 Headless 扫码(二维码截图到 /tmp/tencent_qr.png, 运维 scp 到本地扫码)
   docker exec -e PYTHONPATH=/app csctalon-backend \
@@ -35,10 +35,8 @@ import time
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
-# 兼容两种布局: 本机 backend/ 目录(_ROOT/backend) 或 生产容器 /app(_ROOT)
-for _p in (str(_ROOT / "backend"), str(_ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+# 脚本位于 backend/scripts/ 下, _ROOT 即 backend/ 目录, 直接加入 sys.path 即可 import app
+sys.path.insert(0, str(_ROOT))
 
 from app.core.config import settings
 
