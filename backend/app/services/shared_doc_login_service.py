@@ -116,6 +116,31 @@ _QRCODE_PRESENT_JS = """() => {
   return false;
 }"""
 
+# #148 返回二维码元素相对视口的包围盒(CSS 像素), 供截图聚焦放大; 找不到返回 null。
+# 选择器与 _QRCODE_PRESENT_JS 对齐, 多个候选时取面积最大者(避开装饰性小图)。
+_QRCODE_BOX_JS = """() => {
+  const cands = [];
+  const push = (el) => {
+    const r = el.getBoundingClientRect();
+    // 二维码近正方形且边长足够; 0.7~1.4 容差兼容个别站点矩形码
+    if (r.width >= 90 && r.height >= 90 &&
+        r.width / r.height > 0.7 && r.width / r.height < 1.4) {
+      cands.push({x:r.x, y:r.y, width:r.width, height:r.height, area:r.width*r.height});
+    }
+  };
+  for (const s of ['[class*="qrcode"] img','[class*="Qrcode"] img',
+                   '[id*="qrcode"] img','[id*="Qrcode"] img']) {
+    for (const el of document.querySelectorAll(s)) if (el.naturalWidth > 0) push(el);
+  }
+  for (const s of ['canvas[class*="qr"]','[class*="qrcode"] canvas','[id*="qrcode"] canvas']) {
+    for (const el of document.querySelectorAll(s)) push(el);
+  }
+  if (!cands.length) return null;
+  cands.sort((a, b) => b.area - a.area);
+  const best = cands[0];
+  return {x: best.x, y: best.y, width: best.width, height: best.height};
+}"""
+
 # ── 虚拟显示(Xvfb) ──
 # ⚠️ 2026-09-13 生产故障(工单 #49 验收暴露, 详见 docs/ops/数据采集-运维手册.md §七):
 #   旧判据是 `$DISPLAY 存在 or which(xvfb-run)` —— 探的是**安装状态**。
@@ -368,6 +393,9 @@ def _browser_open(w: _SessionWorker, platform: str, doc_url: str) -> str:
             user_agent=_LOGIN_UA,
             # #148 放大 viewport: 金山登录弹窗二维码太小扫不清
             viewport={"width": 1600, "height": 1000},
+            # #148 2x 渲染: Xvfb 仍是 1600x1000 逻辑屏, 但截图/二维码物理像素翻倍,
+            # 前端把整页缩到 ~480px 容器时二维码仍有足够像素可被微信识别
+            device_scale_factor=2,
         )
         w.page = w.ctx.new_page()
         page = w.page
@@ -379,6 +407,8 @@ def _browser_open(w: _SessionWorker, platform: str, doc_url: str) -> str:
             # domcontentloaded 后弹窗/SPA 还要 ~3s 才渲染, 立刻截图会是纯白空框
             page.wait_for_timeout(3500)
             SharedDocLoginManager._open_qrcode_if_needed(page, platform)
+            # #148 金山 account.wps.cn 登录卡协议框默认不勾, 不勾则扫码确认后无法回跳完成登录
+            SharedDocLoginManager._ensure_agreement_checked(page)
         # 二维码图/canvas 异步加载, 等它真就位(超时不阻断, 至少截到当前状态)
         if SharedDocLoginManager.qrcode_visible(page):
             try:
@@ -435,11 +465,40 @@ def _browser_probe(w: _SessionWorker, platform: str) -> tuple[str, str]:
 
 
 def _browser_screenshot(w: _SessionWorker) -> str:
-    """截取当前页面 → data URI; 失败返回空串。在工作线程执行。"""
+    """截取登录二维码 → data URI; 失败返回空串。在工作线程执行。
+
+    #148 不截整页: 整页 1600 宽里二维码仅占 ~11%, 前端缩到 ~480px 弹窗后只剩
+    ~50px, 微信无法识别。改为按二维码包围盒裁剪(含标题/协议留白), 让二维码占画面
+    1/3 左右且在 device_scale_factor=2 下有 ~380 物理像素; 定位失败再回退整页。
+    """
     page = w.page
     if page is None:
         return ""
-    data = page.screenshot(type="png")
+    data = b""
+    try:
+        box = page.evaluate(_QRCODE_BOX_JS)
+        if box and box.get("width") and box.get("height"):
+            vp = page.viewport_size or {"width": 1600, "height": 1000}
+            win_w, win_h = float(vp["width"]), float(vp["height"])
+            side = max(float(box["width"]), float(box["height"]))
+            cx = float(box["x"]) + float(box["width"]) / 2
+            cy = float(box["y"]) + float(box["height"]) / 2
+            # 横向留登录卡宽度; 向上留标题、向下留协议/按钮(协议在二维码下方, 多留)
+            half_w, up, down = side * 1.6, side * 1.5, side * 2.2
+            clip_w, clip_h = min(half_w * 2, win_w), min(up + down, win_h)
+            x0 = min(max(cx - half_w, 0), max(win_w - clip_w, 0))
+            y0 = min(max(cy - up, 0), max(win_h - clip_h, 0))
+            data = page.screenshot(type="png", clip={
+                "x": x0, "y": y0, "width": clip_w, "height": clip_h,
+            })
+    except Exception as e:  # noqa: BLE001  裁剪是增强项, 任何异常都回退整页
+        logger.warning("[shared-doc-login] 二维码区域裁剪失败, 回退整页截图: %s", e)
+    if not data:
+        try:
+            data = page.screenshot(type="png")
+        except Exception as e:  # noqa: BLE001  页面已关闭等
+            logger.warning("[shared-doc-login] 截图失败: %s", e)
+            return ""
     return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
 
 
@@ -747,6 +806,25 @@ class SharedDocLoginManager:
             except Exception:  # noqa: BLE001  该选择器不匹配, 试下一个
                 continue
         logger.info("[shared-doc-login] 未找到登录入口按钮(kdocs 可能改了文案), 保持当前页面")
+
+    @staticmethod
+    def _ensure_agreement_checked(page) -> None:
+        """#148 勾选登录卡上未选中的协议 checkbox(金山默认不勾, 不勾则扫码确认后无法回跳)。
+
+        登录页 checkbox 通常只有「保持登录」「同意协议」; 逐个把**未选中**的勾上,
+        force 跳过自定义控件的可操作性检查(真实 input 常被透明 label 覆盖)。幂等安全。
+        """
+        try:
+            boxes = page.query_selector_all("input[type='checkbox']")
+        except Exception:  # noqa: BLE001
+            return
+        for cb in boxes:
+            try:
+                if not cb.is_checked():
+                    cb.check(force=True)
+                    page.wait_for_timeout(200)
+            except Exception:  # noqa: BLE001  该框不可勾(只读/装饰), 跳过
+                continue
 
     def get(self, session_id: str) -> LoginSession | None:
         with self._lock:
