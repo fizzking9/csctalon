@@ -257,11 +257,12 @@ def _export_tencent_xlsx(doc_url: str, out_path: str, state_filename: str | None
         原右上角 ⋯ 更多菜单可能已下线。本函数暂保留 mouse.click 坐标 + 加守卫,
         等用户重新扫码确认真登录态后再探测新前端的导出入口(届时更新选择器)
     """
-    from playwright.sync_api import sync_playwright
-
     # #148 同 shared_doc_login_service: 给当前线程设非运行事件循环, 绕过
     # Playwright Sync API 对 asyncio 主循环的检测(sync 端点跑在 uvicorn 线程池)
     import asyncio as _asyncio
+
+    from playwright.sync_api import sync_playwright
+
     try:
         _asyncio.set_event_loop(_asyncio.new_event_loop())
     except Exception:
@@ -333,10 +334,11 @@ def _export_kdocs_xlsx(doc_url: str, out_path: str, state_filename: str | None =
         改用 page.locator(".app-header-more-btn").click() 选择器点击, 抗改版能力更强
       - hover/click 失败时截图保存 BROWSER_STATE_DIR/.export_debug_*.png
     """
-    from playwright.sync_api import sync_playwright
-
     # #148 给当前线程设非运行事件循环, 绕过 Playwright Sync API 对 asyncio 主循环的检测
     import asyncio as _asyncio
+
+    from playwright.sync_api import sync_playwright
+
     try:
         _asyncio.set_event_loop(_asyncio.new_event_loop())
     except Exception:
