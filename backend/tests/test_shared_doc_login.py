@@ -120,8 +120,30 @@ class _FakePW:
         pass
 
 
-def _make_session(tmp_path, platform="tencent", cookies=None, url="https://docs.qq.com/sheet/abc"):
-    """构造一个已"启动"的会话(绕过真实浏览器)。"""
+class _FakeWorker:
+    """模拟 _SessionWorker: 不起真实线程, run() 在当前线程同步执行。
+
+    生产代码里浏览器操作(_browser_probe/_browser_verify 等)都在会话专属工作线程跑;
+    单测用此桩让它们在测试线程同步执行, 持有的 page/ctx 为下方 fake Playwright 对象。
+    """
+
+    def __init__(self, page=None, ctx=None, browser=None, pw=None):
+        self.page = page
+        self.ctx = ctx
+        self.browser = browser
+        self.pw = pw
+        self.shutdown_called = False
+
+    def run(self, fn, *args, timeout=None):
+        return fn(self, *args)
+
+    def shutdown(self):
+        self.shutdown_called = True
+
+
+def _make_session(tmp_path, platform="tencent", cookies=None,
+                  url="https://docs.qq.com/sheet/abc", qrcode=False):
+    """构造一个已"启动"的会话(绕过真实浏览器, 注入同步 fake worker)。"""
     sess = LoginSession(
         session_id="sess123",
         platform=platform,
@@ -129,10 +151,12 @@ def _make_session(tmp_path, platform="tencent", cookies=None, url="https://docs.
         doc_url="https://docs.qq.com/sheet/abc",
         state_path=tmp_path / sdls.DEFAULT_STATE_FILE[platform],
     )
-    sess._pw = _FakePW()
-    sess._browser = _FakeBrowser()
-    sess._ctx = _FakeCtx(cookies=cookies)
-    sess._page = _FakePage(url=url)
+    sess._worker = _FakeWorker(
+        page=_FakePage(url=url, qrcode=qrcode),
+        ctx=_FakeCtx(cookies=cookies),
+        browser=_FakeBrowser(),
+        pw=_FakePW(),
+    )
     sess.current_url = url
     return sess
 
@@ -350,7 +374,7 @@ def test_status_not_authorized_when_qrcode_still_visible(tmp_path, mgr):
     """
     sess = _make_session(tmp_path, url="https://www.kdocs.cn/l/cbZIHtt6obyf",
                          cookies=[{"name": "csrf", "value": "x"}])
-    sess._page = _FakePage(url="https://www.kdocs.cn/l/cbZIHtt6obyf", qrcode=True)
+    sess._worker.page = _FakePage(url="https://www.kdocs.cn/l/cbZIHtt6obyf", qrcode=True)
     # 页面仍显示二维码 → 只能是 pending/scanned, 绝不能是 authorized
     assert mgr.refresh_status(sess) in ("pending", "scanned")
 
@@ -384,7 +408,7 @@ def test_screenshot_returns_data_uri(tmp_path, mgr):
 def test_screenshot_empty_when_closed(tmp_path, mgr):
     """边界: 页面已关闭 → 空串(不抛错)。"""
     sess = _make_session(tmp_path)
-    sess._page = None
+    sess._worker.page = None
     assert mgr.screenshot_b64(sess) == ""
 
 
@@ -411,7 +435,7 @@ def test_verify_rejects_when_still_on_login_page(tmp_path, mgr):
         def goto(self, url, **kwargs):
             self.url = "https://docs.qq.com/login?redirect=x"
 
-    sess._page = _StuckPage()
+    sess._worker.page = _StuckPage()
     ok, msg = mgr.verify_logged_in(sess)
     assert ok is False
     assert "登录" in msg
@@ -447,9 +471,12 @@ def test_confirm_http_does_not_overwrite_on_failed_verify(admin_client, db, monk
         session_id="bad1", platform="tencent", source_id=row.id,
         doc_url=doc_url, state_path=state_path,
     )
-    sess._pw, sess._browser = _FakePW(), _FakeBrowser()
-    sess._ctx = _FakeCtx(cookies=[])  # 无 cookie → 校验必失败
-    sess._page = _FakePage()
+    sess._worker = _FakeWorker(
+        page=_FakePage(),
+        ctx=_FakeCtx(cookies=[]),  # 无 cookie → 校验必失败
+        browser=_FakeBrowser(),
+        pw=_FakePW(),
+    )
 
     from app.services.shared_doc_login_service import login_manager
     login_manager._sessions["bad1"] = sess
@@ -520,7 +547,7 @@ def test_expired_session_reaped(mgr, tmp_path):
     mgr._reap()
     assert sess.session_id not in mgr._sessions
     assert sess.status == "expired"
-    assert sess._page is None  # close() 已置空
+    assert sess._worker is None  # close() 已回收专属工作线程
 
 
 def test_get_returns_none_after_expiry(mgr, tmp_path):
@@ -638,7 +665,7 @@ def test_tencent_never_auto_clicks(monkeypatch):
 def test_verify_rejects_when_qrcode_still_visible(tmp_path, mgr):
     """🔒 回归: 点「我已扫码完成」时若仍显示二维码 → 校验失败, 不覆盖旧登录态。"""
     sess = _make_session(tmp_path)
-    sess._page = _FakePage(qrcode=True)  # goto 后仍看得到二维码
+    sess._worker.page = _FakePage(qrcode=True)  # goto 后仍看得到二维码
     ok, msg = mgr.verify_logged_in(sess)
     assert ok is False
     assert "二维码" in msg

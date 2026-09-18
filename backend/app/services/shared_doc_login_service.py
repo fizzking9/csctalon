@@ -29,9 +29,11 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import logging
 import multiprocessing
 import os
+import queue
 import shutil
 import subprocess
 import threading
@@ -282,6 +284,217 @@ def check_single_worker() -> bool:
     return True
 
 
+class _SessionWorker:
+    """每个登录会话独占的 Playwright 工作线程。
+
+    #148 根因: Playwright Sync API 在 sync_playwright().start() 后, 其 dispatcher
+    greenlet 永久挂在 `loop.run_until_complete(run_as_sync())` 里, 把所在 OS 线程的
+    thread-local running event loop 一直置位。FastAPI 的 sync 端点跑在 anyio 共享
+    线程池: ① 线程复用 → 第二个 sync_playwright() 命中 "inside the asyncio loop";
+    ② Playwright 对象绑定创建线程, 跨线程做 screenshot/status/confirm 也会报错。
+    给每个会话一条专属线程 + 任务队列, 所有浏览器操作都在该线程顺序执行, 彻底隔离。
+    """
+
+    def __init__(self) -> None:
+        self._tasks: "queue.Queue" = queue.Queue()
+        # Playwright 对象只在工作线程内创建/访问(外部线程禁止直接触碰)
+        self.pw = None
+        self.browser = None
+        self.ctx = None
+        self.page = None
+        self._thread = threading.Thread(
+            target=self._main,
+            name=f"doc-login-{uuid.uuid4().hex[:6]}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _main(self) -> None:
+        # 专属线程从不 set/run 主 asyncio 循环 → get_running_loop() 恒抛 RuntimeError,
+        # Playwright 自建 own loop, 不会触发 "inside the asyncio loop"。
+        while True:
+            item = self._tasks.get()
+            if item is None:  # 停止信号
+                return
+            fn, args, fut = item
+            try:
+                fut.set_result(fn(self, *args))
+            except BaseException as exc:  # noqa: BLE001  回传给 submit 方
+                fut.set_exception(exc)
+
+    def run(self, fn, *args, timeout: float | None = None):
+        """在专属线程同步执行 fn(worker, *args), 阻塞调用线程并返回结果。"""
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        self._tasks.put((fn, args, fut))
+        return fut.result(timeout=timeout)
+
+    def shutdown(self) -> None:
+        self._tasks.put(None)
+
+
+def _browser_teardown(w: _SessionWorker) -> None:
+    """在工作线程内关闭浏览器上下文(必须调用, 否则 chromium 进程泄漏)。"""
+    for obj, method in ((w.ctx, "close"), (w.browser, "close"), (w.pw, "stop")):
+        if obj is None:
+            continue
+        try:
+            fn = getattr(obj, method, None)
+            if callable(fn):
+                fn()
+        except Exception:  # noqa: BLE001  关闭失败不影响主流程
+            logger.debug("[shared-doc-login] 关闭浏览器对象失败", exc_info=True)
+    w.pw = w.browser = w.ctx = w.page = None
+
+
+# 浏览器 UA(与 CLI 登录脚本/导出服务保持一致)
+_LOGIN_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
+
+
+def _browser_open(w: _SessionWorker, platform: str, doc_url: str) -> str:
+    """在专属工作线程内启动有头浏览器并打开登录二维码页, 返回当前 URL。
+
+    所有 Playwright Sync 调用都必须在此线程执行(page/ctx 绑定创建线程)。
+    """
+    # 工作线程是干净线程(无 running loop), sync API 不会触发 asyncio 报错
+    from playwright.sync_api import sync_playwright
+
+    w.pw = sync_playwright().start()
+    try:
+        w.browser = w.pw.chromium.launch(headless=False)
+        w.ctx = w.browser.new_context(
+            user_agent=_LOGIN_UA,
+            # #148 放大 viewport: 金山登录弹窗二维码太小扫不清
+            viewport={"width": 1600, "height": 1000},
+        )
+        w.page = w.ctx.new_page()
+        page = w.page
+        if platform == "tencent":
+            # #148 腾讯: 不能直接打开 doc_url(进访客只读视图, 无二维码), 走首页登录弹窗
+            SharedDocLoginManager._open_tencent_qrcode(page)
+        else:
+            page.goto(doc_url, wait_until="domcontentloaded", timeout=60000)
+            # domcontentloaded 后弹窗/SPA 还要 ~3s 才渲染, 立刻截图会是纯白空框
+            page.wait_for_timeout(3500)
+            SharedDocLoginManager._open_qrcode_if_needed(page, platform)
+        # 二维码图/canvas 异步加载, 等它真就位(超时不阻断, 至少截到当前状态)
+        if SharedDocLoginManager.qrcode_visible(page):
+            try:
+                page.wait_for_function(_QRCODE_PRESENT_JS, timeout=10000)
+            except Exception:  # noqa: BLE001
+                logger.info("[shared-doc-login] 等二维码图片加载超时, 按当前状态截图")
+        return page.url or ""
+    except Exception:
+        # 启动失败在同一工作线程内停掉 pw, 避免 chromium 泄漏
+        try:
+            if w.pw is not None:
+                w.pw.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        w.pw = w.browser = w.ctx = w.page = None
+        raise
+
+
+def _browser_probe(w: _SessionWorker, platform: str) -> tuple[str, str]:
+    """探测登录状态 → (status, current_url)。在工作线程执行。"""
+    page = w.page
+    if page is None:
+        return "closed", ""
+    try:
+        url = page.url or ""
+    except Exception:  # noqa: BLE001  页面已关闭
+        return "closed", ""
+
+    hints = _LOGIN_URL_HINTS.get(platform, ())
+    in_login = any(h.lower() in url.lower() for h in hints)
+
+    has_session_cookie = False
+    try:
+        names = [c.get("name", "") for c in (w.ctx.cookies() if w.ctx else [])]
+        cookie_hints = _SESSION_COOKIE_HINTS.get(platform, ())
+        has_session_cookie = any(
+            any(h.lower() in n.lower() for h in cookie_hints) for n in names
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 看得到二维码 = 一定还没登录(2026-09-13 修正, 防 cookie 误判 authorized)
+    qr_visible = SharedDocLoginManager.qrcode_visible(page)
+    if qr_visible:
+        status = "scanned" if has_session_cookie else "pending"
+    elif not in_login and has_session_cookie:
+        status = "authorized"
+    elif in_login:
+        status = "scanned" if has_session_cookie else "pending"
+    else:
+        # 不在登录页/无二维码/无会话 cookie —— 不武断判 ready, 交给 confirm 校验
+        status = "scanned"
+    return status, url
+
+
+def _browser_screenshot(w: _SessionWorker) -> str:
+    """截取当前页面 → data URI; 失败返回空串。在工作线程执行。"""
+    page = w.page
+    if page is None:
+        return ""
+    data = page.screenshot(type="png")
+    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+
+def _browser_verify(w: _SessionWorker, platform: str, doc_url: str) -> tuple[bool, str]:
+    """confirm 前轻量校验: 重新打开目标文档, 确认已脱离登录页/二维码。在工作线程执行。"""
+    page = w.page
+    if page is None:
+        return False, "浏览器会话已关闭, 请重新发起登录"
+    try:
+        page.goto(doc_url, wait_until="domcontentloaded", timeout=45000)
+        # 等渲染完成再判定, 否则拿到跳转中间态
+        page.wait_for_timeout(3000)
+        final_url = (page.url or "").lower()
+    except Exception as e:  # noqa: BLE001
+        return False, f"校验时打开文档失败: {e}"
+
+    hints = _LOGIN_URL_HINTS.get(platform, ())
+    if any(h.lower() in final_url for h in hints):
+        return False, "未检测到登录态(页面仍停留在登录/授权页), 请完成扫码后重试"
+    if SharedDocLoginManager.qrcode_visible(page):
+        return False, "页面仍显示登录二维码, 未检测到登录态, 请完成扫码后重试"
+    try:
+        cookies = w.ctx.cookies() if w.ctx else []
+    except Exception:  # noqa: BLE001
+        cookies = []
+    if not cookies:
+        return False, "未检测到登录 Cookie, 请确认已完成扫码登录"
+    return True, "ok"
+
+
+def _browser_save(w: _SessionWorker, state_path: Path) -> dict:
+    """备份旧登录态 + 保存当前 storage_state。在工作线程执行。"""
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_created = False
+    if state_path.exists():
+        bak = state_path.with_suffix(".json.bak")
+        try:
+            shutil.copyfile(state_path, bak)
+            backup_created = True
+        except Exception:  # noqa: BLE001
+            logger.warning("[shared-doc-login] 备份旧登录态失败: %s", bak, exc_info=True)
+    w.ctx.storage_state(path=str(state_path))
+    cookies = []
+    try:
+        cookies = w.ctx.cookies() or []
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "state_path": state_path.name,  # 只回文件名, 不回绝对路径
+        "cookies": len(cookies),
+        "backup_created": backup_created,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @dataclass
 class LoginSession:
     """一次共享文档登录会话(内存态, TTL 600s)。"""
@@ -294,11 +507,8 @@ class LoginSession:
     created_at: float = field(default_factory=time.time)
     status: str = "pending"  # pending / scanned / authorized / closed / expired
     current_url: str = ""
-    # Playwright 对象(不参与序列化)
-    _pw: object = None
-    _browser: object = None
-    _ctx: object = None
-    _page: object = None
+    # 专属 Playwright 工作线程(不参与序列化)
+    _worker: _SessionWorker | None = None
 
     @property
     def expired(self) -> bool:
@@ -309,18 +519,16 @@ class LoginSession:
         return int(time.time() - self.created_at)
 
     def close(self) -> None:
-        """关闭浏览器上下文(必须调用, 否则 chromium 进程泄漏)。"""
-        for attr in ("_ctx", "_browser", "_pw"):
-            obj = getattr(self, attr, None)
-            if obj is None:
-                continue
-            try:
-                stop = getattr(obj, "close" if attr != "_pw" else "stop", None)
-                if callable(stop):
-                    stop()
-            except Exception:  # noqa: BLE001  关闭失败不影响主流程
-                logger.debug("[shared-doc-login] 关闭 %s 失败", attr, exc_info=True)
-        self._ctx = self._browser = self._pw = self._page = None
+        """关闭浏览器 + 回收专属线程(幂等)。"""
+        w = self._worker
+        if w is None:
+            return
+        try:
+            w.run(_browser_teardown, timeout=30)
+        except Exception:  # noqa: BLE001  teardown 超时/异常也继续 shutdown
+            logger.debug("[shared-doc-login] teardown 失败", exc_info=True)
+        w.shutdown()
+        self._worker = None
 
 
 class SharedDocLoginManager:
@@ -445,61 +653,17 @@ class SharedDocLoginManager:
             state_path=state_path,
         )
 
-        # 延迟导入: playwright 在 app 导入链上不顶层加载(见 CI 说明)
-        import asyncio as _asyncio
-
-        from playwright.sync_api import sync_playwright
-
-        # #148 修复: FastAPI(uvicorn worker)的 sync 端点虽跑在线程池, 但 Playwright Sync API
-        # 仍通过 asyncio.get_event_loop() 检测到主事件循环在运行 → 抛
-        # "It looks like you are using Playwright Sync API inside the asyncio loop"。
-        # 解法: 给当前线程设一个全新的、非运行的事件循环, 让 is_running() 返回 False。
+        # 浏览器在会话专属工作线程内启动/操作(见 _SessionWorker 文档: 避开 anyio 线程池
+        # 复用 + Playwright dispatcher greenlet 永久占用线程 running-loop 的问题, #148)。
+        worker = _SessionWorker()
         try:
-            _asyncio.set_event_loop(_asyncio.new_event_loop())
-        except Exception:  # noqa: BLE001  设失败也继续(Playwright 自己会再判)
-            pass
-
-        pw = sync_playwright().start()
-        try:
-            # headless=False: 需要用户扫码, 必须有真实页面渲染
-            browser = pw.chromium.launch(headless=False)
-            ctx = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-                ),
-                # #148 放大 viewport(1280x800 → 1600x1000): 金山登录弹窗二维码太小扫不清
-                viewport={"width": 1600, "height": 1000},
-            )
-            page = ctx.new_page()
-            if platform == "tencent":
-                # #148 腾讯: 不能直接打开 doc_url(会进访客只读视图看到内容, 无二维码)。
-                # 改为打开腾讯首页 → 点登录 → 勾协议 → 点 Log in now 显示扫码二维码。
-                self._open_tencent_qrcode(page)
-            else:
-                page.goto(doc_url, wait_until="domcontentloaded", timeout=60000)
-                # 关键 1: 等待登录界面**真正渲染出来**。
-                # ⚠️ 2026-09-13 实测: `domcontentloaded` 在 0.68s 就返回, 而弹窗/SPA 内容要到
-                #   ~3s 才渲染; 旧代码 goto 后立刻截图 → 用户看到的是**纯白空框**(非白像素 0.00%)。
-                page.wait_for_timeout(3500)
-                # 关键 2: kdocs 弹窗默认只有「Sign in」按钮、没有二维码 → 代为点一次
-                self._open_qrcode_if_needed(page, platform)
-            # 关键 3: 二维码**图片**是异步加载的(容器先出现, 图后到)。
-            #   不等图加载完就截图 → 二维码区域仍是空白(实测 180x180 区域纯白、灰度种类=1)。
-            if self.qrcode_visible(page):
-                try:
-                    page.wait_for_function(_QRCODE_PRESENT_JS, timeout=10000)
-                except Exception:  # noqa: BLE001  超时不阻断, 至少截到当前状态
-                    logger.info("[shared-doc-login] 等二维码图片加载超时, 按当前状态截图")
+            current_url = worker.run(_browser_open, platform, doc_url, timeout=90)
         except Exception as e:
-            try:
-                pw.stop()
-            except Exception:  # noqa: BLE001
-                pass
+            worker.shutdown()
             raise RuntimeError(f"打开登录页失败: {e}") from e
 
-        sess._pw, sess._browser, sess._ctx, sess._page = pw, browser, ctx, page
-        sess.current_url = page.url
+        sess._worker = worker
+        sess.current_url = current_url
 
         with self._lock:
             self._sessions[sid] = sess
@@ -590,127 +754,55 @@ class SharedDocLoginManager:
             return self._sessions.get(session_id)
 
     def refresh_status(self, sess: LoginSession) -> str:
-        """探测当前登录状态(不落盘), 更新 sess.status 并返回。"""
+        """探测当前登录状态(不落盘), 更新 sess.status 并返回。
+
+        判定逻辑在会话专属工作线程执行(见 _browser_probe), 这里只做短路与写回。
+        """
         if sess.expired:
             sess.status = "expired"
             return sess.status
-        page = sess._page
-        if page is None:
+        w = sess._worker
+        if w is None:
             sess.status = "closed"
             return sess.status
         try:
-            url = page.url or ""
+            status, url = w.run(_browser_probe, sess.platform, timeout=30)
+        except Exception:  # noqa: BLE001  页面已关闭/工作线程异常
+            sess.status = "closed"
+            return sess.status
+        sess.status = status
+        if url:
             sess.current_url = url
-        except Exception:  # noqa: BLE001  页面已关闭
-            sess.status = "closed"
-            return sess.status
-
-        # 判定: 是否仍在登录相关域名/路径
-        hints = _LOGIN_URL_HINTS.get(sess.platform, ())
-        in_login = any(h.lower() in url.lower() for h in hints)
-
-        # 辅助信号: cookie 中出现平台会话键
-        has_session_cookie = False
-        try:
-            names = [c.get("name", "") for c in (sess._ctx.cookies() if sess._ctx else [])]
-            cookie_hints = _SESSION_COOKIE_HINTS.get(sess.platform, ())
-            has_session_cookie = any(
-                any(h.lower() in n.lower() for h in cookie_hints) for n in names
-            )
-        except Exception:  # noqa: BLE001
-            pass
-
-        # 辅助信号: 页面是否还显示可扫二维码
-        # ⚠️ 2026-09-13 修正: 旧判据只看「不在登录页 + 有会话 cookie」→ 仍停在登录弹窗时
-        #   也会被判 authorized(实测 kdocs 登录前 cookie 已含 csrf, 且 URL 判定不稳定),
-        #   前端于是显示「已检测到登录」而二维码还挂着, 用户被判态误导。
-        #   现在: **看得到二维码 = 一定还没登录**。
-        qr_visible = self.qrcode_visible(page)
-
-        if qr_visible:
-            # 登录界面仍在 → 等待扫码
-            sess.status = "scanned" if has_session_cookie else "pending"
-        elif not in_login and has_session_cookie:
-            sess.status = "authorized"
-        elif in_login:
-            sess.status = "scanned" if has_session_cookie else "pending"
-        else:
-            # 不在登录页、也没有二维码、未见会话 cookie —— 不武断判 ready, 交给 confirm 校验
-            sess.status = "scanned"
-        return sess.status
+        return status
 
     def screenshot_b64(self, sess: LoginSession) -> str:
-        """截取当前页面(登录二维码/登录页)。"""
-        page = sess._page
-        if page is None:
+        """截取当前页面(登录二维码/登录页), 在专属工作线程执行。"""
+        w = sess._worker
+        if w is None:
             return ""
         try:
-            data = page.screenshot(type="png")
-            return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+            return w.run(_browser_screenshot, timeout=30)
         except Exception:  # noqa: BLE001  截图失败不阻塞流程(前端仍可点确认)
             logger.warning("[shared-doc-login] 截图失败: %s", sess.session_id, exc_info=True)
             return ""
 
     def verify_logged_in(self, sess: LoginSession) -> tuple[bool, str]:
-        """轻量校验: 用当前上下文重新打开目标文档, 判断是否已脱离登录页。
+        """轻量校验(在专属工作线程): 重新打开目标文档, 判断是否已脱离登录页。
 
         用途(A-20260910-001 §五.4): 用户可能在未真正登录时点「我已扫码完成」,
         若不校验会写入无效 state 并**覆盖**原有可用登录态。
-
-        Returns:
-            (ok, message)
         """
-        page = sess._page
-        if page is None:
+        w = sess._worker
+        if w is None:
             return False, "浏览器会话已关闭, 请重新发起登录"
-        try:
-            # 重新导航到文档, 观察最终落点
-            page.goto(sess.doc_url, wait_until="domcontentloaded", timeout=45000)
-            # 等渲染完成再判定 URL/二维码, 否则会拿到跳转中的中间态
-            page.wait_for_timeout(3000)
-            final_url = (page.url or "").lower()
-        except Exception as e:  # noqa: BLE001
-            return False, f"校验时打开文档失败: {e}"
-
-        hints = _LOGIN_URL_HINTS.get(sess.platform, ())
-        if any(h.lower() in final_url for h in hints):
-            return False, "未检测到登录态(页面仍停留在登录/授权页), 请完成扫码后重试"
-        # 仍看得见二维码 → 并未登录(用户可能没扫成功就点了确认)
-        if self.qrcode_visible(page):
-            return False, "页面仍显示登录二维码, 未检测到登录态, 请完成扫码后重试"
-
-        # cookie 数量作为辅助信号(过少通常意味着未登录)
-        try:
-            cookies = sess._ctx.cookies() if sess._ctx else []
-        except Exception:  # noqa: BLE001
-            cookies = []
-        if not cookies:
-            return False, "未检测到登录 Cookie, 请确认已完成扫码登录"
-        return True, "ok"
+        return w.run(_browser_verify, sess.platform, sess.doc_url, timeout=60)
 
     def save_state(self, sess: LoginSession) -> dict:
-        """保存 storage_state(覆盖前备份旧文件)。"""
-        sess.state_path.parent.mkdir(parents=True, exist_ok=True)
-        backup_created = False
-        if sess.state_path.exists():
-            bak = sess.state_path.with_suffix(".json.bak")
-            try:
-                shutil.copyfile(sess.state_path, bak)
-                backup_created = True
-            except Exception:  # noqa: BLE001  备份失败不阻断(但记录)
-                logger.warning("[shared-doc-login] 备份旧登录态失败: %s", bak, exc_info=True)
-        sess._ctx.storage_state(path=str(sess.state_path))
-        cookies = []
-        try:
-            cookies = sess._ctx.cookies() or []
-        except Exception:  # noqa: BLE001
-            pass
-        return {
-            "state_path": sess.state_path.name,  # 只回文件名, 不回绝对路径
-            "cookies": len(cookies),
-            "backup_created": backup_created,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-        }
+        """保存 storage_state(覆盖前备份旧文件), 在专属工作线程执行。"""
+        w = sess._worker
+        if w is None:
+            raise RuntimeError("浏览器会话已关闭, 无法保存登录态")
+        return w.run(_browser_save, sess.state_path, timeout=60)
 
     def finish(self, session_id: str) -> None:
         """结束会话(关浏览器 + 移除)。幂等。"""
