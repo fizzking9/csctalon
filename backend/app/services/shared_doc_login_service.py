@@ -535,13 +535,64 @@ def _browser_screenshot(w: _SessionWorker) -> str:
 
 
 def _browser_verify(w: _SessionWorker, platform: str, doc_url: str) -> tuple[bool, str]:
-    """confirm 前轻量校验: 重新打开目标文档, 确认已脱离登录页/二维码。在工作线程执行。"""
+    """confirm 前轻量校验: 确认已脱离登录页/二维码 + 有真正的会话 cookie。
+
+    #148 实测: 微信扫码确认后微信侧 cookie(access_token/openid) 立即就位, 但腾讯文档的
+    skey/uin、金山的 wps_sid 要等微信回调跳转完成才设上(约 3~8s)。旧逻辑 goto doc_url
+    太快会打断回调 + 只查「有任何 cookie」过于宽松 → 访客态 cookie 被当作登录态保存,
+    同步层再校验时才发现「服务端不认账」。
+
+    修复: 先在当前页等回调完成 → 严格检查会话 cookie → 再 goto doc_url 确认。
+    """
     page = w.page
     if page is None:
         return False, "浏览器会话已关闭, 请重新发起登录"
+
+    # ① 先在当前页等微信回调完成(不 goto, 避免打断回调设置 skey/uin/wps_sid)
+    session_hints = _SESSION_COOKIE_HINTS.get(platform, ())
+    try:
+        page.wait_for_timeout(5000)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        cookie_names = [c.get("name", "") for c in (w.ctx.cookies() if w.ctx else [])]
+    except Exception:  # noqa: BLE001
+        cookie_names = []
+    has_session_cookie = any(
+        any(h.lower() in n.lower() for h in session_hints) for n in cookie_names
+    )
+    logger.info(
+        "[shared-doc-login] verify(等回调) platform=%s cookies=%d %s has_session=%s",
+        platform, len(cookie_names), cookie_names[:15], has_session_cookie,
+    )
+
+    # ② 若仍无会话 cookie, 再等一轮(回调慢网络可至 ~8s)
+    if not has_session_cookie:
+        try:
+            page.wait_for_timeout(5000)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            cookie_names = [c.get("name", "") for c in (w.ctx.cookies() if w.ctx else [])]
+        except Exception:  # noqa: BLE001
+            cookie_names = []
+        has_session_cookie = any(
+            any(h.lower() in n.lower() for h in session_hints) for n in cookie_names
+        )
+        logger.info(
+            "[shared-doc-login] verify(二轮等) platform=%s cookies=%d %s has_session=%s",
+            platform, len(cookie_names), cookie_names[:15], has_session_cookie,
+        )
+
+    if not has_session_cookie:
+        return False, (
+            f"未检测到登录态 Cookie({'/'.join(session_hints)}), "
+            "请在手机上确认微信授权后重试"
+        )
+
+    # ③ 会话 cookie 就位, 再 goto doc_url 确认不在登录页/二维码
     try:
         page.goto(doc_url, wait_until="domcontentloaded", timeout=45000)
-        # 等渲染完成再判定, 否则拿到跳转中间态
         page.wait_for_timeout(3000)
         final_url = (page.url or "").lower()
     except Exception as e:  # noqa: BLE001
@@ -550,22 +601,15 @@ def _browser_verify(w: _SessionWorker, platform: str, doc_url: str) -> tuple[boo
 
     hints = _LOGIN_URL_HINTS.get(platform, ())
     in_login = any(h.lower() in final_url for h in hints)
-    # #148 详细日志: 定位 confirm 校验失败的具体原因
-    try:
-        cookie_names = [c.get("name", "") for c in (w.ctx.cookies() if w.ctx else [])]
-    except Exception:  # noqa: BLE001
-        cookie_names = []
     qr_visible = SharedDocLoginManager.qrcode_visible(page)
     logger.info(
-        "[shared-doc-login] verify platform=%s final_url=%s in_login=%s qr_visible=%s cookies=%d %s",
-        platform, final_url[:120], in_login, qr_visible, len(cookie_names), cookie_names[:15],
+        "[shared-doc-login] verify(goto后) platform=%s final_url=%s in_login=%s qr_visible=%s",
+        platform, final_url[:120], in_login, qr_visible,
     )
     if in_login:
         return False, "未检测到登录态(页面仍停留在登录/授权页), 请完成扫码后重试"
     if qr_visible:
         return False, "页面仍显示登录二维码, 未检测到登录态, 请完成扫码后重试"
-    if not cookie_names:
-        return False, "未检测到登录 Cookie, 请确认已完成扫码登录"
     return True, "ok"
 
 
