@@ -47,7 +47,9 @@ echo "${VERSION}" > "$ROOT_DIR/VERSION.tmp"
 # 注意: 根 data/logs/dist/backups 不在显式清单里, 无需 exclude;
 #       tar --exclude 不能写 data/logs(会匹配任意层级, 误伤 web/src/views/data/
 #       源码目录——曾导致前端 Ingest.vue 缺失构建失败)
-tar czf "$OUT_FILE" \
+# backend/scripts: 先整体排除调试脚本, 再用 tar r 追加仅两个登录脚本(#148)
+TMP_TAR="${OUT_FILE%.gz}"
+tar cf "$TMP_TAR" \
   --exclude='.git' \
   --exclude='.gitignore' \
   --exclude='.gitea' \
@@ -79,6 +81,12 @@ tar czf "$OUT_FILE" \
   web \
   deploy \
   VERSION.tmp 2>/dev/null
+# 追加仅两个登录脚本(运维工具, 生产需 headless 扫码更新登录态)
+mkdir -p backend/scripts
+tar rf "$TMP_TAR" \
+  backend/scripts/tencent_doc_login.py \
+  backend/scripts/kdocs_login.py 2>/dev/null
+gzip -f "$TMP_TAR"
 rm -f "$ROOT_DIR/VERSION.tmp"
 
 # 固定名(供 upload.sh / 快速引用)
