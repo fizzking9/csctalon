@@ -58,6 +58,56 @@ _KDOCS_MENU_XY = (95, 15)
 # xlsx 读取引擎(与 POC _poc_shared_doc_reader.py 一致: 快 + 免疫 WPS/腾讯导出样式崩溃)
 _EXCEL_ENGINE = "calamine"
 
+# ── 防退化守卫(#148) ──────────────────────────────────────────────
+# 背景: #49 凭证评论曾判"登录态已生效", 但实测发现 cookies 落盘 ≠ 登录态生效
+#   —— 用户访客身份也能让 goto 成功, cookies 仍在但服务端不认账(skey/uin 等
+#   真登录凭证缺失), 后续 hover 30s 超时被误读为"选择器失效"。
+# 守卫: goto 后立即检查访客标识, 失败时拒绝继续导出, 报清晰错误;
+#   hover/click 失败时落盘截图 BROWSER_STATE_DIR/.export_debug_*.png 便于排查。
+_GUEST_LOGIN_ERROR = (
+    "登录态已失效(访客身份): cookies 落盘但服务端不认账, "
+    "请在本机重新跑 scripts/{tencent_doc,kdocs}_login.py 扫码登录。"
+    "校验: 腾讯 body 不应含 skeleton-guest-mode + cookies 应含 skey/uin; "
+    "金山 __WPSENV__.user.id 不应以 fake_ 开头。"
+)
+
+
+def _save_debug_screenshot(page, key: str) -> None:
+    """导出失败时落盘截图(防退化守卫 #148)"""
+    try:
+        out = Path(settings.BROWSER_STATE_DIR) / f".export_debug_{key}_{int(datetime.now().timestamp())}.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(out), full_page=False)
+        logger.warning(f"[shared_doc] 调试截图已保存: {out}")
+    except Exception as e:
+        logger.warning(f"[shared_doc] 调试截图保存失败: {type(e).__name__}: {e}")
+
+
+def _check_tencent_guest(page) -> bool:
+    """腾讯访客检测: body 含 skeleton-guest-mode → 访客身份"""
+    try:
+        body_cls = page.evaluate("() => (document.body && document.body.className) || ''")
+        return "skeleton-guest-mode" in body_cls
+    except Exception as e:
+        logger.warning(f"[shared_doc] 腾讯访客检测异常(按访客处理): {type(e).__name__}: {e}")
+        return True
+
+
+def _check_kdocs_guest(page) -> bool:
+    """金山访客检测: __WPSENV__.user.id 以 fake_ 开头或为空 → 访客身份"""
+    try:
+        uid = page.evaluate(
+            """() => {
+                const env = window.__WPSENV__ || {};
+                const u = (env.file_info && env.file_info.user) || env.user || {};
+                return String(u.id || '');
+            }"""
+        )
+        return not uid or uid.startswith("fake_")
+    except Exception as e:
+        logger.warning(f"[shared_doc] 金山访客检测异常(按访客处理): {type(e).__name__}: {e}")
+        return True
+
 # ── 轻量版本探测(可选优化, 2026-09-13) ──────────────────────────────
 # 动机(实测): 一次共享文档同步 67.3s 中, **导出占 65s(97%)** —— playwright 打开文档、
 # 走菜单、下载整本 xlsx(该文档 103.7MB, 其中 113MB 是嵌入图片, 而入库根本不用图片列);
@@ -198,6 +248,14 @@ def _export_tencent_xlsx(doc_url: str, out_path: str, state_filename: str | None
 
     state_filename: 登录态文件名(默认 tencent_doc.json; 支持配置行 state_file 覆盖)。
     返回下载建议文件名。无登录态或导出失败时抛出异常(由调用方记录状态)。
+
+    #148 防退化:
+      - goto 后立即检测访客身份(body.skeleton-guest-mode), 失败时清晰报错
+        "登录态已失效(访客身份)" 而非让 hover 30s 超时(原 #49 误判根因)
+      - hover/click 失败时截图保存 BROWSER_STATE_DIR/.export_debug_*.png
+      - 注: 顶部菜单现已是 ribbon-toolbar(开始/插入/数据/公式/协作/视图),
+        原右上角 ⋯ 更多菜单可能已下线。本函数暂保留 mouse.click 坐标 + 加守卫,
+        等用户重新扫码确认真登录态后再探测新前端的导出入口(届时更新选择器)
     """
     from playwright.sync_api import sync_playwright
 
@@ -222,14 +280,32 @@ def _export_tencent_xlsx(doc_url: str, out_path: str, state_filename: str | None
         try:
             page.goto(doc_url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(8000)  # 等 SPA + 表格渲染
+            # #148 访客身份检测(防 hover 30s 误超时)
+            if _check_tencent_guest(page):
+                _save_debug_screenshot(page, "tencent_guest")
+                raise PermissionError(_GUEST_LOGIN_ERROR)
             # 点击右上角 ⋯(更多)菜单
             page.mouse.click(*_TENCENT_MENU_XY)
             page.wait_for_timeout(1500)
             # hover「导出为」展开子菜单, 再点「本地Excel表格 (.xlsx)」
-            page.hover("text=导出为")
+            try:
+                page.hover("text=导出为", timeout=10000)
+            except Exception as e:
+                _save_debug_screenshot(page, "tencent_hover_export")
+                raise RuntimeError(
+                    "hover「导出为」失败(腾讯前端可能改版, 菜单坐标已失效): "
+                    f"{type(e).__name__}: {e}"
+                ) from e
             page.wait_for_timeout(800)
-            with page.expect_download(timeout=90000) as dl_info:
-                page.click("text=本地Excel表格 (.xlsx)")
+            try:
+                with page.expect_download(timeout=90000) as dl_info:
+                    page.click("text=本地Excel表格 (.xlsx)", timeout=10000)
+            except Exception as e:
+                _save_debug_screenshot(page, "tencent_click_xlsx")
+                raise RuntimeError(
+                    "点击「本地Excel表格 (.xlsx)」失败: "
+                    f"{type(e).__name__}: {e}"
+                ) from e
             dl = dl_info.value
             dl.save_as(out)
             return dl.suggested_filename
@@ -242,6 +318,12 @@ def _export_kdocs_xlsx(doc_url: str, out_path: str, state_filename: str | None =
 
     state_filename: 登录态文件名(默认 kdocs.json; 支持配置行 state_file 覆盖)。
     返回下载建议文件名。无登录态或导出失败时抛出异常。
+
+    #148 防退化:
+      - goto 后立即检测访客身份(__WPSENV__.user.id 以 fake_ 开头), 失败时清晰报错
+      - 老坐标 (95,15) 实测完全错过菜单按钮(实测按钮在 xy=(38,6)~(66,34));
+        改用 page.locator(".app-header-more-btn").click() 选择器点击, 抗改版能力更强
+      - hover/click 失败时截图保存 BROWSER_STATE_DIR/.export_debug_*.png
     """
     from playwright.sync_api import sync_playwright
 
@@ -266,25 +348,52 @@ def _export_kdocs_xlsx(doc_url: str, out_path: str, state_filename: str | None =
         try:
             page.goto(doc_url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(10000)
-            # 1. 点左上角菜单图标
-            page.mouse.click(*_KDOCS_MENU_XY)
+            # #148 访客身份检测
+            if _check_kdocs_guest(page):
+                _save_debug_screenshot(page, "kdocs_guest")
+                raise PermissionError(_GUEST_LOGIN_ERROR)
+            # 1. 点左上角菜单图标(实测 #148: 按钮在 xy=(38,6) wh=(28,28),
+            #    老坐标 (95,15) 完全错过; 用选择器代替坐标抗改版)
+            try:
+                page.locator(".app-header-more-btn").first.click(timeout=10000)
+            except Exception as e:
+                _save_debug_screenshot(page, "kdocs_open_menu")
+                raise RuntimeError(
+                    "点击金山菜单按钮 .app-header-more-btn 失败(前端可能改版): "
+                    f"{type(e).__name__}: {e}"
+                ) from e
             page.wait_for_timeout(1500)
             # 2. 精确定位"导出为"(排除 导出为PDF/图片/多维表格)
-            clicked = page.evaluate(
-                """() => {
-                    const all=[...document.querySelectorAll('*')];
-                    const targets = all.filter(e => (e.innerText||'').trim() === '导出为' && e.children.length===0);
-                    if (!targets.length) return false;
-                    targets[0].click();
-                    return true;
-                }"""
-            )
+            try:
+                clicked = page.evaluate(
+                    """() => {
+                        const all=[...document.querySelectorAll('*')];
+                        const targets = all.filter(e => (e.innerText||'').trim() === '导出为' && e.children.length===0);
+                        if (!targets.length) return false;
+                        targets[0].click();
+                        return true;
+                    }"""
+                )
+            except Exception as e:
+                _save_debug_screenshot(page, "kdocs_find_export")
+                raise RuntimeError(
+                    "查找菜单中「导出为」入口失败(金山前端可能变动): "
+                    f"{type(e).__name__}: {e}"
+                ) from e
             if not clicked:
+                _save_debug_screenshot(page, "kdocs_no_export_entry")
                 raise RuntimeError("菜单中未找到'导出为'入口(金山前端可能变动)")
             page.wait_for_timeout(1500)
             # 3. 点「导出为 Excel(.xlsx)」并捕获下载
-            with page.expect_download(timeout=90000) as dl_info:
-                page.click("text=导出为 Excel(.xlsx)", timeout=8000)
+            try:
+                with page.expect_download(timeout=90000) as dl_info:
+                    page.click("text=导出为 Excel(.xlsx)", timeout=10000)
+            except Exception as e:
+                _save_debug_screenshot(page, "kdocs_click_xlsx")
+                raise RuntimeError(
+                    "点击「导出为 Excel(.xlsx)」失败: "
+                    f"{type(e).__name__}: {e}"
+                ) from e
             dl = dl_info.value
             dl.save_as(out)
             return dl.suggested_filename

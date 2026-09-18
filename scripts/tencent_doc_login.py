@@ -14,6 +14,15 @@
   # 弹出浏览器 → 扫码/登录腾讯文档 → 看到"✅ 登录成功"即自动保存关闭
 
 登录态文件安全: 存于 data/browser_states/(独立于 uploads, 不对外暴露)。
+
+#148 防退化:
+  老版本只看用户按回车就保存, 实测有用户扫码后 PC 端仍停留在扫码引导页,
+  误存了访客 storage_state(body class 含 skeleton-guest-mode, 右上角显示
+  "Login 腾讯文档"按钮, cookies 里无 skey/p_skey/uin 真登录凭证)。
+  现在保存前必须双重校验:
+    ① body 不含 skeleton-guest-mode 类(访客模式标识)
+    ② cookies 含 skey / p_skey / uin / p_uin / pskey 之一(腾讯真登录凭证)
+  校验失败拒绝保存, 强制用户回到浏览器确认登录已生效。
 """
 from __future__ import annotations
 
@@ -69,9 +78,53 @@ def main() -> int:
         # 等待用户在终端按回车(同步 input)
         input()
 
-        # 无论检测结果如何都保存当前登录态(用户已确认登录)
+        # #148 防退化: 保存前双重校验登录态真生效(防误存访客 storage_state)
+        # ① body 不含 skeleton-guest-mode 类(腾讯前端访客模式标识)
+        # ② cookies 含 skey / p_skey / uin / p_uin / pskey 之一(真登录凭证)
+        # 校验失败: 给用户提示 + 二次按回车复校, 仍失败则拒绝保存
+        def _verify_tencent_login(page_, ctx_) -> tuple[bool, str, str]:
+            """返回(是否登录态有效, 失败原因, 当前 body class 摘要)"""
+            try:
+                body_cls = page_.evaluate(
+                    "() => (document.body && document.body.className) || ''"
+                )
+            except Exception:
+                body_cls = ""
+            guest_mode = "skeleton-guest-mode" in body_cls
+            cookies = ctx_.cookies()
+            cookie_names = {c.get("name", "") for c in cookies}
+            # 腾讯真登录凭证至少有一个(检查常用 5 个)
+            login_keys = {"skey", "p_skey", "uin", "p_uin", "pskey", "rk", "rkey"}
+            has_login_cookie = bool(cookie_names & login_keys)
+            ok = (not guest_mode) and has_login_cookie
+            reason = []
+            if guest_mode:
+                reason.append(f"body 含 skeleton-guest-mode(访客模式)")
+            if not has_login_cookie:
+                missing = sorted(login_keys - cookie_names)
+                reason.append(f"缺少真登录凭证 cookie({', '.join(missing)})")
+            return ok, "; ".join(reason) or "ok", body_cls[:100]
+
+        ok, reason, body_cls = _verify_tencent_login(page, ctx)
+        if not ok:
+            print("\n❌ 登录态校验失败: 当前仍是访客身份。")
+            print(f"   失败原因: {reason}")
+            print(f"   body class: {body_cls!r}")
+            print("   请回到浏览器: ① 确认二维码已扫描 ② 完成手机端腾讯授权确认 "
+                  "③ 等待表格内容正常显示(顶部右上角应显示你的头像, 不是 Login 按钮)")
+            print("   然后回到本终端再按一次 <回车> 重新校验。")
+            print("   (拒绝保存访客登录态, 防止后续同步脚本误用)")
+            input()
+            ok, reason, body_cls = _verify_tencent_login(page, ctx)
+            if not ok:
+                print(f"\n❌ 二次校验仍失败: {reason}, 放弃保存。")
+                browser.close()
+                return 2
+
+        # 校验通过, 保存登录态
         ctx.storage_state(path=str(STATE_PATH))
         print(f"\n✅ 登录态已保存: {STATE_PATH}")
+        print(f"   校验通过: body 非 guest-mode, 含真登录凭证 cookie")
         print(f"   cookies={len(ctx.cookies())} 条, 后续共享文档脚本将复用此登录态。")
         browser.close()
         return 0
