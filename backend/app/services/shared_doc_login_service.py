@@ -51,8 +51,12 @@ SESSION_TTL = 600  # 10 分钟
 # 登录态建议有效期(超过则提示重新登录; 仅提示, 不阻断)
 STATE_STALE_DAYS = 7
 
-# 各平台登录态文件名(与 shared_doc_sync_service._DEFAULT_STATE_FILE 一致)
+# 各平台默认登录态文件名(与 shared_doc_sync_service._DEFAULT_STATE_FILE 一致)
 DEFAULT_STATE_FILE = {"tencent": "tencent_doc.json", "kdocs": "kdocs.json"}
+
+# #148 腾讯直接打开共享表(doc_url)会进访客只读视图, 看到表格内容却没有登录二维码。
+# 必须先打开腾讯首页 → 点右上角"登录" → 勾协议 → 点 "Log in now" 才显示扫码二维码。
+TENCENT_HOME_URL = "https://docs.qq.com/"
 
 # 平台登录域名关键词(用于判定"是否仍在登录页")
 _LOGIN_URL_HINTS = {
@@ -119,7 +123,7 @@ _QRCODE_PRESENT_JS = """() => {
 #   设计 A-20260910-001 §四 的「501 降级(强制)」**从未被触发过**。
 #   根因一句话: **「装了没」≠「跑着没」** → 必须探运行态(X socket), 并负责把服务拉起来。
 XVFB_DISPLAY = ":99"          # 按需拉起的虚拟显示号(可用环境变量 XVFB_DISPLAY 覆盖)
-_XVFB_SCREEN = "1280x800x24"  # 与浏览器 viewport 一致, 供二维码截图清晰可扫
+_XVFB_SCREEN = "1600x1000x24"  # 与浏览器 viewport 一致, 供二维码截图清晰可扫(#148 放大)
 _XVFB_WAIT_MAX = 5.0          # 等待 socket 出现的硬上限(秒); 只在失败路径才会等满
 # Xavfb 需的 xauth 认证文件: 放在 socket 同目录, 权限 600 由 umask 保证
 _XAUTHORITY = "/tmp/.X11-unix/xvfb-xauth"
@@ -442,13 +446,14 @@ class SharedDocLoginManager:
         )
 
         # 延迟导入: playwright 在 app 导入链上不顶层加载(见 CI 说明)
+        import asyncio as _asyncio
+
         from playwright.sync_api import sync_playwright
 
         # #148 修复: FastAPI(uvicorn worker)的 sync 端点虽跑在线程池, 但 Playwright Sync API
         # 仍通过 asyncio.get_event_loop() 检测到主事件循环在运行 → 抛
         # "It looks like you are using Playwright Sync API inside the asyncio loop"。
         # 解法: 给当前线程设一个全新的、非运行的事件循环, 让 is_running() 返回 False。
-        import asyncio as _asyncio
         try:
             _asyncio.set_event_loop(_asyncio.new_event_loop())
         except Exception:  # noqa: BLE001  设失败也继续(Playwright 自己会再判)
@@ -463,16 +468,22 @@ class SharedDocLoginManager:
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
                 ),
-                viewport={"width": 1280, "height": 800},
+                # #148 放大 viewport(1280x800 → 1600x1000): 金山登录弹窗二维码太小扫不清
+                viewport={"width": 1600, "height": 1000},
             )
             page = ctx.new_page()
-            page.goto(doc_url, wait_until="domcontentloaded", timeout=60000)
-            # 关键 1: 等待登录界面**真正渲染出来**。
-            # ⚠️ 2026-09-13 实测: `domcontentloaded` 在 0.68s 就返回, 而弹窗/SPA 内容要到
-            #   ~3s 才渲染; 旧代码 goto 后立刻截图 → 用户看到的是**纯白空框**(非白像素 0.00%)。
-            page.wait_for_timeout(3500)
-            # 关键 2: kdocs 弹窗默认只有「Sign in」按钮、没有二维码 → 代为点一次
-            self._open_qrcode_if_needed(page, platform)
+            if platform == "tencent":
+                # #148 腾讯: 不能直接打开 doc_url(会进访客只读视图看到内容, 无二维码)。
+                # 改为打开腾讯首页 → 点登录 → 勾协议 → 点 Log in now 显示扫码二维码。
+                self._open_tencent_qrcode(page)
+            else:
+                page.goto(doc_url, wait_until="domcontentloaded", timeout=60000)
+                # 关键 1: 等待登录界面**真正渲染出来**。
+                # ⚠️ 2026-09-13 实测: `domcontentloaded` 在 0.68s 就返回, 而弹窗/SPA 内容要到
+                #   ~3s 才渲染; 旧代码 goto 后立刻截图 → 用户看到的是**纯白空框**(非白像素 0.00%)。
+                page.wait_for_timeout(3500)
+                # 关键 2: kdocs 弹窗默认只有「Sign in」按钮、没有二维码 → 代为点一次
+                self._open_qrcode_if_needed(page, platform)
             # 关键 3: 二维码**图片**是异步加载的(容器先出现, 图后到)。
             #   不等图加载完就截图 → 二维码区域仍是空白(实测 180x180 区域纯白、灰度种类=1)。
             if self.qrcode_visible(page):
@@ -503,6 +514,46 @@ class SharedDocLoginManager:
             return bool(page.evaluate(_QRCODE_PRESENT_JS))
         except Exception:  # noqa: BLE001  页面已关闭等
             return False
+
+    @staticmethod
+    def _open_tencent_qrcode(page) -> None:
+        """#148 腾讯: 打开首页 → 点登录 → 勾协议 → 点 Log in now → 显示扫码二维码。
+
+        直接打开共享表 doc_url 会进访客只读视图(看到表格内容, 右上角仍是 Login 按钮),
+        不会引导扫码。必须走首页登录弹窗这条路(实测 2026-09-18 验证)。
+        """
+        page.goto(TENCENT_HOME_URL, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(3000)
+        # ① 点右上角"登录"按钮弹出登录方式弹窗
+        for sel in ("text=登录", "button:has-text('登录')", "a:has-text('登录')"):
+            try:
+                btn = page.query_selector(sel)
+                if btn and btn.is_visible():
+                    btn.click()
+                    page.wait_for_timeout(2000)
+                    break
+            except Exception:  # noqa: BLE001  该选择器不匹配, 试下一个
+                continue
+        # ② 勾选服务协议(弹窗底部 checkbox, 不勾则 Log in now 可能禁用)
+        try:
+            cb = page.query_selector("input[type='checkbox']")
+            if cb and not cb.is_checked():
+                cb.click()
+                page.wait_for_timeout(500)
+        except Exception:  # noqa: BLE001
+            pass
+        # ③ 点 "Log in now" 切换到扫码二维码视图
+        for sel in ("text=Log in now", "button:has-text('Log in now')"):
+            try:
+                btn = page.query_selector(sel)
+                if btn and btn.is_visible():
+                    btn.click()
+                    page.wait_for_timeout(3000)
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        # ④ 等二维码渲染(微信 tab 默认选中; 二维码图/canvas 异步加载)
+        page.wait_for_timeout(2000)
 
     @staticmethod
     def _open_qrcode_if_needed(page, platform: str) -> None:
