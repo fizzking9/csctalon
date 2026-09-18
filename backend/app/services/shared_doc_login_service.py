@@ -112,8 +112,18 @@ _QRCODE_PRESENT_JS = """() => {
                    'canvas[class*="apng"]']) {
     for (const el of document.querySelectorAll(s)) {
       const r = el.getBoundingClientRect();
-      if (r.width >= 80 && r.height >= 80) return true;
+      // apng 首页营销动画在视口外(y 很大), 必须限制在视口内才认作登录码
+      if (r.width >= 80 && r.height >= 80 &&
+          r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth) return true;
     }
+  }
+  // ③ 跨域 iframe 型(腾讯微信扫码 open.weixin.qq.com/connect/qrconnect):
+  //    主文档无法穿透 iframe, 只要该微信二维码 iframe 可见即视为登录码展示中
+  for (const el of document.querySelectorAll('iframe')) {
+    const r = el.getBoundingClientRect();
+    const s = el.src || '';
+    if (r.width >= 120 && r.height >= 120 && s.includes('weixin') &&
+        s.toLowerCase().includes('qr') && r.top >= 0 && r.bottom <= innerHeight) return true;
   }
   return false;
 }"""
@@ -121,12 +131,23 @@ _QRCODE_PRESENT_JS = """() => {
 # #148 返回二维码元素相对视口的包围盒(CSS 像素), 供截图聚焦放大; 找不到返回 null。
 # 选择器与 _QRCODE_PRESENT_JS 对齐, 多个候选时取面积最大者(避开装饰性小图)。
 _QRCODE_BOX_JS = """() => {
+  // ① 跨域微信 iframe(腾讯): 整卡即二维码区域, 直接返回 iframe 盒, kind=iframe
+  for (const el of document.querySelectorAll('iframe')) {
+    const r = el.getBoundingClientRect();
+    const s = el.src || '';
+    if (r.width >= 120 && r.height >= 120 && s.includes('weixin') &&
+        s.toLowerCase().includes('qr') && r.top >= 0 && r.bottom <= innerHeight) {
+      return {x:r.x, y:r.y, width:r.width, height:r.height, kind:'iframe'};
+    }
+  }
+  // ② 主文档内的 img / canvas 二维码, 多个候选取面积最大者(避开装饰小图)
   const cands = [];
   const push = (el) => {
     const r = el.getBoundingClientRect();
-    // 二维码近正方形且边长足够; 0.7~1.4 容差兼容个别站点矩形码
+    // 二维码近正方形、边长足够、完整落在视口内(排除视口外的 apng 营销动画)
     if (r.width >= 90 && r.height >= 90 &&
-        r.width / r.height > 0.7 && r.width / r.height < 1.4) {
+        r.width / r.height > 0.7 && r.width / r.height < 1.4 &&
+        r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth) {
       cands.push({x:r.x, y:r.y, width:r.width, height:r.height, area:r.width*r.height});
     }
   };
@@ -141,7 +162,7 @@ _QRCODE_BOX_JS = """() => {
   if (!cands.length) return null;
   cands.sort((a, b) => b.area - a.area);
   const best = cands[0];
-  return {x: best.x, y: best.y, width: best.width, height: best.height};
+  return {x: best.x, y: best.y, width: best.width, height: best.height, kind: 'qrcode'};
 }"""
 
 # ── 虚拟显示(Xvfb) ──
@@ -483,14 +504,22 @@ def _browser_screenshot(w: _SessionWorker) -> str:
         if box and box.get("width") and box.get("height"):
             vp = page.viewport_size or {"width": 1600, "height": 1000}
             win_w, win_h = float(vp["width"]), float(vp["height"])
-            side = max(float(box["width"]), float(box["height"]))
-            cx = float(box["x"]) + float(box["width"]) / 2
-            cy = float(box["y"]) + float(box["height"]) / 2
-            # 横向留登录卡宽度; 向上留标题、向下留协议/按钮(协议在二维码下方, 多留)
-            half_w, up, down = side * 1.6, side * 1.5, side * 2.2
-            clip_w, clip_h = min(half_w * 2, win_w), min(up + down, win_h)
-            x0 = min(max(cx - half_w, 0), max(win_w - clip_w, 0))
-            y0 = min(max(cy - up, 0), max(win_h - clip_h, 0))
+            if box.get("kind") == "iframe":
+                # 微信 iframe 盒本身就是完整登录卡, 四周仅留小边距, 不再外扩
+                pad = 12.0
+                cx0, cy0 = float(box["x"]) - pad, float(box["y"]) - pad
+                clip_w, clip_h = float(box["width"]) + pad * 2, float(box["height"]) + pad * 2
+            else:
+                # img/canvas 小方码: 横向留登录卡宽度; 向上留标题、向下多留协议/按钮
+                side = max(float(box["width"]), float(box["height"]))
+                half_w, up, down = side * 1.6, side * 1.5, side * 2.2
+                clip_w, clip_h = min(half_w * 2, win_w), min(up + down, win_h)
+                cx0 = float(box["x"]) + float(box["width"]) / 2 - half_w
+                cy0 = float(box["y"]) + float(box["height"]) / 2 - up
+            clip_w = min(clip_w, win_w)
+            clip_h = min(clip_h, win_h)
+            x0 = min(max(cx0, 0), max(win_w - clip_w, 0))
+            y0 = min(max(cy0, 0), max(win_h - clip_h, 0))
             data = page.screenshot(type="png", clip={
                 "x": x0, "y": y0, "width": clip_w, "height": clip_h,
             })
