@@ -581,20 +581,44 @@ def _browser_verify(w: _SessionWorker, platform: str, doc_url: str) -> tuple[boo
             return guest, f"uid={uid[:30]}"
 
     # ⓪ 金山: 扫码后可能停在 account.wps.cn 的中间页(chooseaccount/mobilelogin),
-    #    需要自动点"Login/Register Now"完成登录, 否则永远拿不到 __WPSENV__ 真用户 ID
+    #    需要自动点"Login/Register Now"或选账号完成登录, 否则永远拿不到真用户 ID。
+    #    #148 实测: 登录/选账号按钮不是唯一形态 —— 该页是 JS 动态渲染的"选择账号"列表,
+    #    先 dump 可点击元素(便于容器外定位), 再按多个选择器逐一尝试点击。
     if platform == "kdocs":
         try:
             cur_url = (page.url or "").lower()
         except Exception:  # noqa: BLE001
             cur_url = ""
         if "account.wps.cn" in cur_url:
-            # chooseaccount 可能需几秒才跳到 mobilelogin, 先等再找按钮
+            # chooseaccount 可能需几秒才渲染完, 先等
             try:
                 page.wait_for_timeout(3000)
             except Exception:  # noqa: BLE001
                 pass
-            # 选择器按优先级: ID 最精确 > class > 文本
+            # ① 落盘截图 + dump 可点击元素(观察用, 不得删: 用于定位选择器)
+            try:
+                dump = page.evaluate(
+                    """() => {
+                      const out = [];
+                      for (const el of document.querySelectorAll(
+                            'a,button,input[type=submit],div[role=button],[class*=btn],[class*=account],[onclick]')) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width < 30 || r.height < 15) continue;
+                        const txt = (el.innerText || '').trim().slice(0, 50);
+                        if (!txt && !el.className) continue;
+                        out.push({tag: el.tagName, cls: String(el.className).slice(0, 70),
+                                  id: el.id, txt, x: Math.round(r.x), y: Math.round(r.y)});
+                      }
+                      return out;
+                    }"""
+                )
+                logger.warning("[shared-doc-login] 金山中间页DOM dump: url=%s els=%s",
+                               cur_url[:110], str(dump)[:1500])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[shared-doc-login] 金山中间页dump失败: %s", e)
+            # ② 选择器按优先级尝试: ID > 登录按钮 class > 账号选择项 > 文本
             for sel in ("#confirmCode", "a.js_toProtocolDialog",
+                        "[class*='account']", ".account-item", "li.my-account",
                         "a:has-text('Login')", "a:has-text('登录')",
                         "button:has-text('Login')", "button:has-text('登录')"):
                 try:
@@ -602,12 +626,26 @@ def _browser_verify(w: _SessionWorker, platform: str, doc_url: str) -> tuple[boo
                     if btn and btn.is_visible():
                         btn.click()
                         logger.info("[shared-doc-login] 金山中间页自动点击: %s", sel)
-                        page.wait_for_timeout(8000)  # 等跳转回 kdocs + __WPSENV__ 设好
+                        # 点击账号项后可能还要等确认, 多等
+                        page.wait_for_timeout(8000)
                         break
                 except Exception:  # noqa: BLE001
                     continue
             else:
-                logger.warning("[shared-doc-login] 金山中间页未找到登录按钮, url=%s", cur_url[:100])
+                logger.warning("[shared-doc-login] 金山中间页未找到可点元素, url=%s", cur_url[:100])
+                try:
+                    # 兜底: 整页 click 第一个可见的 .account 相关元素再失败也尝试直接 img title
+                    for el in page.query_selector_all("[class*='account'],li"):
+                        try:
+                            if el.is_visible():
+                                el.click()
+                                logger.info("[shared-doc-login] 金山中间页兜底点击: %s", str(el)[:60])
+                                page.wait_for_timeout(8000)
+                                break
+                        except Exception:  # noqa: BLE001
+                            continue
+                except Exception:  # noqa: BLE001
+                    logger.warning("[shared-doc-login] 金山中间页兜底点击失败")
 
     # ① 先在当前页检查(用户扫码后页面已跳回文档, __WPSENV__/skey 已就位)
     is_guest, detail = _check_guest()
