@@ -10,7 +10,12 @@
   │ 取舍：❌ 不在本页展示登录态文件年龄/路径 —— 那是「投影」，真身在接入中心「① 登录态」      │
   │        （避免同一指标两处口径漂移）；                                                  │
   │       ❌ 不做「批量同步全部源」—— 共用同一登录态，并发会互相顶掉且难以定位失败源。         │
-  │ 工单：#45（页面内登录）/ #49（登录链路修复）· 设计：docs/arch/A-20260910-001 §三、§四     │
+  │ #149 补充：登录态文件可「共享（平台默认）或独立（行级 state_file）」二选一。             │
+  │       本页只展示「该源用哪个登录态」，不重复展示账号/时间（真身在接入中心）；           │
+  │       编辑表单元则可指定独立 state_file；扫码登录前明确提示「覆盖共享 or 写入独立」。    │
+  │       取舍：❌ 不做「登录时临时指定文件名」—— 必须先保存配置再登录，避免写错文件覆盖。  │
+  │ 工单：#45（页面内登录）/ #49（登录链路修复）/ #149（登录态可管理）·                      │
+  │       设计：docs/arch/A-20260910-001 §三、§四                                           │
   └────────────────────────────────────────────────────────────────────────────────────┘
 -->
 <template>
@@ -20,6 +25,7 @@
       共享文档在线采集：系统用登录态打开共享链接 → 官方 UI 导出 xlsx → 解析后复用既有业务管线入库
       (315/卡商投诉 → 投诉台账；商户号退款 → manual_refunds)。<b>增量采集不删除历史数据</b>；
       登录态失效时，点各行的<b>「登录」</b>按钮即可在本页扫码完成授权（无需上服务器跑脚本）。
+      一行<b>默认共用</b>同平台登录态；需要独立账号的源可在编辑中<b>指定独立登录态文件</b>。
     </el-alert>
 
     <!-- 操作栏 -->
@@ -43,6 +49,22 @@
       <el-table-column label="目标" width="120">
         <template #default="{ row }">
           <el-tag size="small" effect="plain">{{ targetName(row.target_type) }}</el-tag>
+        </template>
+      </el-table-column>
+      <!-- #149: 该源用「共享(同平台默认) 或 独立(行级 state_file)」登录态 -->
+      <el-table-column label="登录态" width="150">
+        <template #default="{ row }">
+          <el-tooltip
+            :content="row.state_file
+              ? '独立登录态：仅本源使用，登录不会影响同平台其他源'
+              : '共享登录态：与同平台其他未指定独立文件的源共用'"
+            placement="top"
+          >
+            <el-tag :type="row.state_file ? 'primary' : 'info'" size="small" effect="plain">
+              {{ row.state_file ? '独立' : '共享' }}
+            </el-tag>
+          </el-tooltip>
+          <span v-if="row.state_file" class="hint-text">{{ row.state_file }}</span>
         </template>
       </el-table-column>
       <el-table-column label="状态" width="80">
@@ -94,6 +116,21 @@
         </template>
       </el-alert>
 
+      <!-- #149: 覆盖提示 —— 共用登录态会被本次登录覆盖, 独立文件则只写独立登录态 -->
+      <el-alert
+        :type="loginRow?.state_file ? 'info' : 'warning'"
+        :closable="false"
+        show-icon
+        class="mb-12"
+      >
+        <template v-if="loginRow?.state_file">
+          独立登录态：本次登录将写入<b>{{ loginRow.state_file }}</b>，不影响同平台其他源。
+        </template>
+        <template v-else>
+          共享登录态：本次登录将<b>覆盖</b>同平台默认登录态，同平台其他未指定独立文件的源都会跟着换账号。
+        </template>
+      </el-alert>
+
       <div class="login-shot">
         <img v-if="loginScreenshot" :src="loginScreenshot" alt="登录页截图" class="shot-img" />
         <div v-else class="shot-empty">正在启动浏览器并加载登录页…</div>
@@ -135,6 +172,14 @@
         <el-form-item label="同步间隔">
           <el-input-number v-model="form.sync_interval_minutes" :min="5" :step="5" />
           <span class="hint-text"> 分钟</span>
+        </el-form-item>
+        <!-- #149: 行级独立登录态文件(默认留空=共用同平台登录态) -->
+        <el-form-item label="登录态文件">
+          <el-input v-model="form.state_file" placeholder="留空 = 共用平台登录态（如 tencent_doc.json / kdocs.json）" clearable />
+          <div class="hint-text" style="width:100%">
+            留空表示<b>共用</b>同平台默认登录态；填入文件名（如 <code>tencent_副本.json</code>）即<b>独立</b>登录态，
+            仅本源使用。独立文件名需以 <code>.json</code> 结尾，登录相关操作都写这个文件。
+          </div>
         </el-form-item>
         <el-form-item v-if="form.target_type === 'complaint'" label="Sheet 规则">
           <div class="hint-text">
@@ -186,6 +231,7 @@ const emptyForm = () => ({
   doc_name: '',
   target_type: 'complaint',
   sync_interval_minutes: 60,
+  state_file: '',
   sheet_rules: [
     { sheet: '监督局-315投诉', target: 'external_complaint' },
     { sheet: '卡商群投诉', target: 'card_complaint' },
@@ -261,6 +307,7 @@ function openEdit(row) {
     doc_name: row.doc_name || '',
     target_type: row.target_type,
     sync_interval_minutes: row.sync_interval_minutes || 60,
+    state_file: row.state_file || '',
     sheet_rules: (row.sheet_rules && row.sheet_rules.length) ? row.sheet_rules.map((x) => ({ ...x }))
       : [{ sheet: '', target: 'external_complaint' }],
   })
@@ -284,6 +331,7 @@ async function onSave() {
       doc_name: form.doc_name,
       target_type: form.target_type,
       sync_interval_minutes: form.sync_interval_minutes,
+      state_file: (form.state_file || '').trim(),
     }
     if (form.target_type === 'complaint') {
       payload.sheet_rules = form.sheet_rules.filter((r) => r.sheet && r.target)

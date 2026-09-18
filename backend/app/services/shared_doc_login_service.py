@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
+import json
 import logging
 import multiprocessing
 import os
@@ -740,8 +741,13 @@ def _browser_verify(w: _SessionWorker, platform: str, doc_url: str) -> tuple[boo
     return True, "ok"
 
 
-def _browser_save(w: _SessionWorker, state_path: Path) -> dict:
-    """备份旧登录态 + 保存当前 storage_state。在工作线程执行。"""
+def _browser_save(w: _SessionWorker, platform: str, state_path: Path, uid: str = "", source_id: int | None = None) -> dict:
+    """备份旧登录态 + 保存当前 storage_state + 内嵌 _meta 登录信息。在工作线程执行。
+
+    _meta(工单 #149): 记录真实登录时间/账号, 供 AccessCenter「登录态健康度」展示
+    「登录账号/登录时间」, 替代原先仅看文件 mtime 的推断。_meta 是 Playwright
+    storage_state 之外的附加键, 不影响 ctx.storage_state(path=...) 重新加载。
+    """
     state_path.parent.mkdir(parents=True, exist_ok=True)
     backup_created = False
     if state_path.exists():
@@ -757,11 +763,57 @@ def _browser_save(w: _SessionWorker, state_path: Path) -> dict:
         cookies = w.ctx.cookies() or []
     except Exception:  # noqa: BLE001
         pass
+    # #149: 尽力提取登录账号 —— 金山在页面 JS __WPSENV__.user.id(cookie 里没有),
+    # 腾讯在 uin/uid cookie。先试页面 JS, 取不到回退 cookie。
+    if not uid:
+        if w.page is not None:
+            try:
+                uid = str(
+                    w.page.evaluate(
+                        """() => {
+                            const env = window.__WPSENV__ || {};
+                            const u = (env.file_info && env.file_info.user) || env.user || {};
+                            return String(u.id || '');
+                        }"""
+                    ) or ""
+                )[:128]
+            except Exception:  # noqa: BLE001
+                uid = ""
+    if not uid:
+        try:
+            for c in cookies:
+                if c.get("name") in ("uin", "uid"):
+                    uid = str(c.get("value", ""))[:128]
+                    break
+        except Exception:  # noqa: BLE001
+            uid = ""
+    saved_at = datetime.now(timezone.utc)
+    # 内嵌 _meta(不影响 Playwright 重新加载 storage_state)
+    try:
+        with open(state_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:  # noqa: BLE001
+        data = {}
+    if isinstance(data, dict):
+        data["_meta"] = {
+            "last_login_at": saved_at.isoformat(),
+            "platform": platform,
+            "uid": uid or "",
+            "cookies": len(cookies),
+            "source_id": source_id,
+        }
+        try:
+            state_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("[shared-doc-login] 内嵌 _meta 写回失败: %s", state_path.name, exc_info=True)
     return {
         "state_path": state_path.name,  # 只回文件名, 不回绝对路径
         "cookies": len(cookies),
         "backup_created": backup_created,
-        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "saved_at": saved_at.isoformat(),
+        "uid": uid,
     }
 
 
@@ -1087,11 +1139,14 @@ class SharedDocLoginManager:
         return w.run(_browser_verify, sess.platform, sess.doc_url, timeout=60)
 
     def save_state(self, sess: LoginSession) -> dict:
-        """保存 storage_state(覆盖前备份旧文件), 在专属工作线程执行。"""
+        """保存 storage_state(覆盖前备份旧文件) + 内嵌 _meta, 在专属工作线程执行。"""
         w = sess._worker
         if w is None:
             raise RuntimeError("浏览器会话已关闭, 无法保存登录态")
-        return w.run(_browser_save, sess.state_path, timeout=60)
+        return w.run(
+            _browser_save, sess.platform, sess.state_path, "", sess.source_id,
+            timeout=60,
+        )
 
     def finish(self, session_id: str) -> None:
         """结束会话(关浏览器 + 移除)。幂等。"""
@@ -1137,7 +1192,29 @@ def state_health(platform: str, state_file: str | None = None) -> dict:
         }
     st = path.stat()
     mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
-    age_days = round((datetime.now(timezone.utc) - mtime).total_seconds() / 86400, 1)
+    # #149: 优先用登录态文件内嵌 _meta 的真实登录时间/账号; 无 _meta(旧文件)回退 mtime。
+    login_at = mtime
+    uid = ""
+    meta_cookies = None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        meta = data.get("_meta") if isinstance(data, dict) else None
+        if isinstance(meta, dict):
+            raw = meta.get("last_login_at")
+            if raw:
+                try:
+                    login_at = datetime.fromisoformat(raw)
+                    if login_at.tzinfo is None:
+                        login_at = login_at.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    pass
+            uid = str(meta.get("uid") or "")
+            mc = meta.get("cookies")
+            if isinstance(mc, int):
+                meta_cookies = mc
+    except Exception:  # noqa: BLE001  读不了 meta 按旧逻辑走
+        pass
+    age_days = round((datetime.now(timezone.utc) - login_at).total_seconds() / 86400, 1)
     stale = age_days > STATE_STALE_DAYS
     return {
         "platform": platform,
@@ -1145,7 +1222,54 @@ def state_health(platform: str, state_file: str | None = None) -> dict:
         "exists": True,
         "size_bytes": st.st_size,
         "mtime": mtime.isoformat(),
+        "login_at": login_at.isoformat(),
+        "uid": uid,
+        "cookies": meta_cookies,
         "age_days": age_days,
         "stale": stale,
         "advice": f"登录态已 {age_days} 天, 建议重新登录" if stale else "",
     }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 登录历史(工单 #149): 每次登录会话的最终结果写 doc_sync_login_logs
+# ─────────────────────────────────────────────────────────────────────
+_LOGIN_LOG_RETENTION_DAYS = 90
+
+
+def record_login_log(db, platform: str, result: str,
+                     source_id: int | None = None,
+                     uid: str = "", cookies_count: int = 0,
+                     error: str | None = None) -> None:
+    """保存一次登录结果历史(成功/失败均记录)。
+
+    result: success=校验通过+登录态已保存 / failed=校验或保存失败。
+    记录对主流程是「尽力而为」: 任何失败只打日志, 不抛出、不影响扫码/保存。
+    """
+    if db is None:
+        return
+    try:
+        from datetime import timedelta
+
+        from sqlalchemy import delete
+
+        from app.models import DocSyncLoginLog
+
+        db.add(DocSyncLoginLog(
+            platform=platform,
+            source_id=source_id,
+            uid=str(uid or "")[:128],
+            cookies_count=int(cookies_count or 0),
+            result=result,
+            error=(error or "")[:2000] if error else None,
+        ))
+        # 顺带清理 90 天前历史(写入路径触发, 无独立调度面)
+        db.execute(
+            delete(DocSyncLoginLog).where(
+                DocSyncLoginLog.created_at
+                < datetime.now(timezone.utc) - timedelta(days=_LOGIN_LOG_RETENTION_DAYS)
+            )
+        )
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[shared-doc-login] 登录历史写入失败: %s", e, exc_info=True)

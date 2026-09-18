@@ -33,6 +33,7 @@ from app.models.device import (  # noqa: F401
 from app.models.device_combo import DeviceCombo  # noqa: F401
 from app.models.device_flow_usage import DeviceFlowUsage  # noqa: F401
 from app.models.doc_sync_config import DocSyncConfig  # noqa: F401
+from app.models.doc_sync_login_log import DocSyncLoginLog  # noqa: F401
 from app.models.doc_sync_source import DocSyncSource  # noqa: F401
 from app.models.expense import ExpenseInvoice, Reimbursement, ReimbursementItem  # noqa: F401
 from app.models.external_complaint import ExternalComplaint  # noqa: F401

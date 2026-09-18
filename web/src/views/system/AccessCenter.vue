@@ -8,9 +8,9 @@
   │          提示「需重新扫码」却没有扫码入口，只能 SSH 上服务器跑脚本）；                  │
   │       ③ 显示服务可用性做成**警示条**而非静默开关：它不是登录态问题，是部署问题，       │
   │          必须让人看见「这条链路现在根本起不来浏览器」。                                │
-  │ 口径：登录态健康度 = BROWSER_STATE_DIR 下 state 文件 mtime，超 7 天仅**提示**不阻断    │
-  │       （各平台 token 实际有效期不同，无法准确判定）。登录态文件路径口径见            │
-  │       docs/arch/A-20260910-001-共享文档页面内登录态管理.md §三；                     │
+  │ 口径：登录态健康度 = 登录态文件内嵌 _meta 的真实登录时间/login_at(旧文件无 _meta 时回退    │
+  │       mtime)，超 7 天仅**提示**不阻断（各平台 token 实际有效期不同，无法准确判定）。       │
+  │       登录态文件路径口径见 docs/arch/A-20260910-001-共享文档页面内登录态管理.md §三；        │
   │       显示服务口径：$DISPLAY 的 X socket 是否真在跑 + 能否按需拉起 Xvfb。              │
   │ 取舍：❌ 不做「一键重登全部平台」—— 同平台并发登录会互相覆盖 state，必须人工逐个扫；    │
   │         ❌ 不展示登录态文件内容/绝对路径（等同账号凭据，只回 cookie 数量）；            │
@@ -80,6 +80,10 @@
               </template>
             </el-table-column>
             <el-table-column label="登录态文件" prop="state_file" min-width="150" />
+            <el-table-column label="登录账号" width="130">
+              <!-- #149: 真实登录账号(uid 脱敏), 无 _meta 时显示 '—/未知' -->
+              <template #default="{ row }">{{ row.uid && row.uid !== 'undefined' ? row.uid : '—' }}</template>
+            </el-table-column>
             <el-table-column label="状态" width="120">
               <template #default="{ row }">
                 <el-tag v-if="!row.exists" type="danger" size="small" effect="plain">未登录</el-tag>
@@ -87,8 +91,11 @@
                 <el-tag v-else type="success" size="small" effect="plain">正常</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="最后更新" width="150">
-              <template #default="{ row }">{{ row.mtime ? fmtTime(row.mtime) : '—' }}</template>
+            <el-table-column label="登录时间" width="150">
+              <!-- #149: 优先真实登录时间(内嵌 _meta); 旧文件无 _meta 时回退文件 mtime -->
+              <template #default="{ row }">
+                {{ fmtTime(row.login_at || row.mtime) }}
+              </template>
             </el-table-column>
             <el-table-column label="已过天数" width="100">
               <template #default="{ row }">{{ row.age_days ?? '—' }}</template>
@@ -105,6 +112,7 @@
           <template #header>
             <div class="card-header">
               <span>采集源（可对某源发起扫码登录）</span>
+              <el-button link type="primary" size="small" @click="openLoginLogs">登录历史</el-button>
               <el-button link type="primary" size="small" @click="loadSources">刷新</el-button>
             </div>
           </template>
@@ -354,6 +362,47 @@
       </template>
     </el-dialog>
 
+    <!-- ═══ 登录历史弹窗 (#149) ═══ -->
+    <el-dialog v-model="loginLogsVisible" title="登录历史（最近 90 天）" width="760px">
+      <div class="dim mb-12">
+        记录页面内扫码登录的每次结果；「成功」表示登录态已校验通过并保存。
+      </div>
+      <el-table :data="loginLogs" size="small" border max-height="420">
+        <el-table-column label="时间" width="150">
+          <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="平台" width="100">
+          <template #default="{ row }">{{ platformName(row.platform) }}</template>
+        </el-table-column>
+        <el-table-column label="账号" width="130">
+          <template #default="{ row }">{{ row.uid || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="结果" width="90">
+          <template #default="{ row }">
+            <el-tag :type="row.result === 'success' ? 'success' : 'danger'" size="small">
+              {{ row.result === 'success' ? '成功' : '失败' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="cookies_count" label="Cookies" width="80" />
+        <el-table-column label="失败原因" min-width="180">
+          <template #default="{ row }">
+            <span class="dim">{{ row.error || '—' }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div v-if="loginLogsEmpty" class="dim" style="text-align:center;padding:24px 0;">暂无登录历史记录</div>
+      <el-pagination
+        v-if="loginLogsTotal > loginLogsPageSize"
+        small
+        layout="prev, pager, next, total"
+        :total="loginLogsTotal"
+        :page-size="loginLogsPageSize"
+        :current-page="loginLogsPage"
+        @current-change="loadLoginLogs"
+      />
+    </el-dialog>
+
     <!-- 模板编辑弹窗 -->
     <el-dialog v-model="editVisible" title="编辑接入配置包模板" width="860px" :close-on-click-modal="false">
       <el-form label-width="90px" label-position="right">
@@ -438,6 +487,7 @@ import {
   confirmSharedDocLogin,
   cancelSharedDocLogin,
   getSharedDocCliFallback,
+  listSharedDocLoginLogs,
 } from '@/api/sharedDoc'
 import {
   listProfiles,
@@ -572,6 +622,35 @@ function onLoginDialogClosed() {
     cancelSharedDocLogin(loginSessionId.value).catch(() => {})
     loginSessionId.value = ''
   }
+}
+
+// ── 登录历史 (#149) ──
+// 目的: 让运维知道「上次哪个账号何时登录成功」, 判断是否临近需重登。
+// 记录写入点在确认扫码时(成功/失败均留痕, 后端保留 90 天)。
+const loginLogsVisible = ref(false)
+const loginLogs = ref([])
+const loginLogsTotal = ref(0)
+const loginLogsPage = ref(1)
+const loginLogsPageSize = 20
+const loginLogsEmpty = ref(false)
+
+async function openLoginLogs() {
+  loginLogsVisible.value = true
+  await loadLoginLogs(1)
+}
+
+async function loadLoginLogs(page = 1) {
+  loginLogsPage.value = page
+  try {
+    const res = await listSharedDocLoginLogs({
+      page,
+      page_size: loginLogsPageSize,
+    })
+    const d = res.data || {}
+    loginLogs.value = d.items || []
+    loginLogsTotal.value = d.total || 0
+    loginLogsEmpty.value = loginLogs.value.length === 0
+  } catch (e) { /* 拦截器已提示 */ }
 }
 
 // 命令行降级: 命令文本由后端 GET /cli-fallback 下发(单一事实来源)。

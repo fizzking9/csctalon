@@ -688,3 +688,160 @@ def test_qrcode_visible_swallows_errors(mgr):
             raise RuntimeError("Target closed")
 
     assert mgr.qrcode_visible(_P()) is False
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 登录态可管理性(工单 #149):
+#   ① 登录态文件内嵌 _meta(登录时间/账号) → AccessCenter 直接展示;
+#   ③ 登录历史 doc_sync_login_logs: confirm 成功/失败写库 + GET /login/logs 分页。
+# ─────────────────────────────────────────────────────────────────────
+def test_browser_save_embeds_meta(tmp_path):
+    """正向(#149-①): 保存登录态时内嵌 _meta(登录时间/账号/cookies 数)。
+
+    后续 state_health 读 _meta 展示「登录账号/登录时间」, 不再只看文件 mtime。
+    _meta 是 storage_state 外的附加键, 不影响 Playwright 重新加载。
+    """
+    state_path = tmp_path / "tencent_doc.json"
+    state_path.write_text('{"cookies":[]}', encoding="utf-8")  # 旧登录态 → 走备份分支
+    worker = _FakeWorker(
+        page=_FakePage(),                       # evaluate 返回 False → uid 回退 cookie
+        ctx=_FakeCtx(cookies=[{"name": "uid", "value": "u-888"}]),  # 1 条 cookie
+        browser=_FakeBrowser(),
+        pw=_FakePW(),
+    )
+
+    saved = sdls._browser_save(worker, "tencent", state_path, "", source_id=7)
+
+    assert saved["cookies"] == 1
+    assert saved["uid"] == "u-888"
+    assert saved["backup_created"] is True
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    meta = data["_meta"]
+    assert meta["platform"] == "tencent"
+    assert meta["uid"] == "u-888"
+    assert meta["cookies"] == 1
+    assert meta["source_id"] == 7
+    # 登录时间必须是可解析的 ISO 时间 → 后续 state_health 据此算年龄
+    from datetime import datetime
+    datetime.fromisoformat(meta["last_login_at"].replace("Z", "+00:00"))
+
+
+def test_state_health_reads_meta(tmp_path, monkeypatch):
+    """正向(#149-①): 带 _meta 的登录态文件 → 返回真实登录时间/账号/cookies 数。"""
+    monkeypatch.setattr(sdls.settings, "BROWSER_STATE_DIR", str(tmp_path))
+    now = time.time()
+    (tmp_path / "tencent_doc.json").write_text(json.dumps({
+        "cookies": [],
+        "_meta": {
+            "last_login_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+            "platform": "tencent",
+            "uid": "u-888",
+            "cookies": 21,
+            "source_id": 7,
+        },
+    }), encoding="utf-8")
+
+    h = sdls.state_health("tencent")
+    assert h["exists"] is True
+    assert h["uid"] == "u-888"
+    assert h["cookies"] == 21
+    assert h["stale"] is False
+    assert h["advice"] == ""
+    # login_at 来自 _meta(登录时间=刚刚 → 年龄≈0, 而非按文件 mtime 推断)
+    assert h["age_days"] < 0.1
+
+
+def test_state_health_falls_back_mtime_without_meta(tmp_path, monkeypatch):
+    """边界(#149-①): 旧登录态文件(无 _meta) → uid 为空, 年龄按 mtime 算(兼容回退)。"""
+    monkeypatch.setattr(sdls.settings, "BROWSER_STATE_DIR", str(tmp_path))
+    p = tmp_path / "tencent_doc.json"
+    p.write_text('{"cookies":[]}', encoding="utf-8")
+
+    h = sdls.state_health("tencent")
+    assert h["uid"] == ""
+    assert h["cookies"] is None
+    assert h["stale"] is False
+    assert "login_at" in h  # 仍有 login_at, 前端可直接使用
+
+
+def test_record_login_log_and_endpoint(admin_client, db):
+    """正向(#149-③): record_login_log 写库 + GET /login/logs 分页/筛选/倒序。"""
+    from app.services import shared_doc_login_service as sdls
+
+    # 测试库为持久库(跨用例累积), 用增量断言而非绝对总数
+    before = admin_client.get("/api/v1/sync/shared-docs/login/logs").json()["data"]["total"]
+
+    sdls.record_login_log(db, "tencent", "success", source_id=1, uid="u-tx", cookies_count=21)
+    sdls.record_login_log(db, "kdocs", "failed", source_id=2, uid="", error="未检测到登录态, 请完成扫码")
+
+    # 全量查: 最新在前
+    r = admin_client.get("/api/v1/sync/shared-docs/login/logs")
+    assert r.status_code == 200
+    d = r.json()["data"]
+    assert d["total"] == before + 2
+    items = d["items"]
+    assert [i["platform"] for i in items[:2]] == ["kdocs", "tencent"]  # id DESC
+    assert items[0]["result"] == "failed"
+    assert "未检测到登录态" in items[0]["error"]
+    assert items[1]["uid"] == "u-tx"
+    assert items[1]["cookies_count"] == 21
+
+    # 分页
+    r2 = admin_client.get("/api/v1/sync/shared-docs/login/logs", params={"page": 1, "page_size": 1})
+    d2 = r2.json()["data"]
+    assert d2["total"] == before + 2 and len(d2["items"]) == 1
+    assert d2["items"][0]["platform"] == "kdocs"  # 最新一条
+
+    # 平台筛选
+    r3 = admin_client.get("/api/v1/sync/shared-docs/login/logs", params={"platform": "tencent"})
+    d3 = r3.json()["data"]
+    assert d3["items"][0]["platform"] == "tencent"
+    assert d3["items"][0]["result"] == "success"
+    assert d3["total"] >= 1
+
+
+def test_confirm_failure_writes_failed_login_log(admin_client, db):
+    """边界(#149-③): confirm 校验失败也写 failed 历史(不覆盖旧登录态)。"""
+    from app.core.config import settings
+    from app.services import shared_doc_sync_service as sdss
+
+    state_file = "kdocs.json"
+    state_path = Path(settings.BROWSER_STATE_DIR) / state_file
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    original = '{"cookies":[{"name":"wps_sid","value":"ORIG"}]}'
+    state_path.write_text(original, encoding="utf-8")
+
+    doc_url = _uniq_url("logfail")
+    row = sdss.save_doc_source(db, {
+        "platform": "kdocs", "doc_url": doc_url,
+        "doc_name": "t", "target_type": "complaint",
+    }, source_id=None)
+
+    sess = LoginSession(
+        session_id="logfail1", platform="kdocs", source_id=row.id,
+        doc_url=doc_url, state_path=state_path,
+    )
+    sess._worker = _FakeWorker(
+        page=_FakePage(url="https://account.wps.cn/v1/chooseaccount"),  # 停在中间页 → 校验失败
+        ctx=_FakeCtx(cookies=[]),
+        browser=_FakeBrowser(),
+        pw=_FakePW(),
+    )
+
+    from app.services.shared_doc_login_service import login_manager
+    login_manager._sessions["logfail1"] = sess
+    try:
+        r = admin_client.post("/api/v1/sync/shared-docs/login/logfail1/confirm")
+        assert r.status_code == 200
+        assert r.json()["data"]["ok"] is False
+        # 未覆盖旧登录态
+        assert state_path.read_text(encoding="utf-8") == original
+        # 历史里多了一条 failed
+        rl = admin_client.get("/api/v1/sync/shared-docs/login/logs", params={"platform": "kdocs"})
+        items = rl.json()["data"]["items"]
+        assert items and items[0]["result"] == "failed"
+        assert items[0]["source_id"] == row.id
+    finally:
+        login_manager.finish("logfail1")
+        db.delete(row)
+        db.commit()

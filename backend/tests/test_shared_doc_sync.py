@@ -322,6 +322,30 @@ def test_save_doc_source_dup_rejected(db, seed_source):
     assert seed_source.doc_name == "自身更新"
 
 
+def test_save_doc_source_state_file_validation(db):
+    """#149: state_file 合法(纯文件名 .json 结尾)可存; 路径穿越/非 .json 拒绝。"""
+    import pytest
+
+    # 空串 = 共用平台默认 → None
+    row = sdss.save_doc_source(db, {
+        "platform": sdss.PLATFORM_TENCENT,
+        "doc_url": "https://docs.qq.com/sheet/SF0001",
+        "target_type": sdss.TARGET_COMPLAINT,
+        "state_file": "  ",
+    })
+    assert row.state_file is None
+
+    # 合法独立文件
+    sdss.save_doc_source(db, {"state_file": "tencent_副本.json"}, source_id=row.id)
+    db.refresh(row)
+    assert row.state_file == "tencent_副本.json"
+
+    # 非法: 路径穿越 / 非 .json / 特殊目录
+    for bad in ("../etc/passwd", "sub/a.json", "a.json.exe", ".."):
+        with pytest.raises(ValueError, match="state_file"):
+            sdss.save_doc_source(db, {"state_file": bad}, source_id=row.id)
+
+
 def test_delete_doc_source(db, seed_source):
     """删除采集源后不可再读取。"""
     sid = seed_source.id

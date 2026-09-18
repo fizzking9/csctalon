@@ -65,3 +65,8 @@ export function confirmSharedDocLogin(sessionId) {
 export function cancelSharedDocLogin(sessionId) {
   return request.delete(`/sync/shared-docs/login/${sessionId}`)
 }
+
+// 登录历史分页查询(最近 90 天, 倒序; #149)
+export function listSharedDocLoginLogs(params) {
+  return request.get('/sync/shared-docs/login/logs', { params })
+}

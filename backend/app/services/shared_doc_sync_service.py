@@ -777,6 +777,10 @@ def save_doc_source(
         row.sheet_rules = sr if isinstance(sr, list) else None
     if data.get("state_file") is not None:
         sf = str(data.get("state_file") or "").strip()
+        # #149: 独立登录态文件名必须是纯文件名(防路径穿越)且以 .json 结尾; 空 = 共用平台默认
+        if sf:
+            if "/" in sf or "\\" in sf or sf in (".", "..") or not sf.endswith(".json"):
+                raise ValueError("state_file 必须是纯文件名(不含路径)且以 .json 结尾")
         row.state_file = sf or None
     if data.get("enabled") is not None:
         # W2: 仅接受真布尔, 拒绝 JSON 字符串 "false"(bool("false") is True 陷阱)

@@ -164,6 +164,42 @@ def shared_doc_states(_: AdminUser):
     })
 
 
+@router.get("/login/logs", response_model=R, summary="登录历史(分页)")
+def shared_doc_login_logs(db: DBSession, _: ManagerUser,
+                          page: int = 1, page_size: int = 20,
+                          platform: str | None = None):
+    """登录历史: 每次页面内扫码登录的成功/失败记录(工单 #149)。
+
+    - 倒序(最新在前); 可选 platform 过滤(tencent/kdocs)
+    - 历史保留 90 天(后端写入时顺带清理)
+    """
+    page = max(1, int(page))
+    page_size = min(100, max(1, int(page_size)))
+    from app.models import DocSyncLoginLog
+
+    q = db.query(DocSyncLoginLog)
+    if platform:
+        q = q.filter(DocSyncLoginLog.platform == platform)
+    total = q.count()
+    rows = (
+        q.order_by(DocSyncLoginLog.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    LOGIN_LOG_FIELDS = ("id", "platform", "source_id", "uid", "cookies_count",
+                        "result", "error", "created_at")
+    return R(data={
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            {f: getattr(r, f) for f in LOGIN_LOG_FIELDS}
+            for r in rows
+        ],
+    })
+
+
 @router.get("/cli-fallback", response_model=R, summary="无显示服务时的降级登录命令(唯一真身)")
 def shared_doc_cli_fallback(_: AdminUser):
     """返回「本机扫码 + 上传登录态」两段式命令, 供前端「命令行」按钮复制。
@@ -259,11 +295,11 @@ def shared_doc_login_status(session_id: str, _: AdminUser):
 
 
 @router.post("/login/{session_id}/confirm", response_model=R, summary="确认扫码完成并保存登录态")
-def shared_doc_login_confirm(session_id: str, _: AdminUser):
+def shared_doc_login_confirm(session_id: str, db: DBSession, _: AdminUser):
     """用户点「我已扫码完成」→ **轻量校验** → 保存 storage_state(覆盖前备份)。
 
     校验不通过时**不覆盖**旧登录态(A-20260910-001 §五.4): 防止用户误点导致
-    原本可用的登录态被无效 state 顶掉。
+    原本可用的登录态被无效 state 顶掉。结果写登录历史(工单 #149)。
     """
     from app.services import shared_doc_login_service as sdls
 
@@ -276,9 +312,17 @@ def shared_doc_login_confirm(session_id: str, _: AdminUser):
 
     ok, msg = sdls.login_manager.verify_logged_in(sess)
     if not ok:
+        sdls.record_login_log(
+            db, sess.platform, "failed", source_id=sess.source_id,
+            uid="", cookies_count=0, error=msg,
+        )
         return R(data={"ok": False, "message": msg, "state_saved": False})
 
     saved = sdls.login_manager.save_state(sess)
+    sdls.record_login_log(
+        db, sess.platform, "success", source_id=sess.source_id,
+        uid=saved.get("uid", ""), cookies_count=saved.get("cookies", 0),
+    )
     sdls.login_manager.finish(session_id)
     return R(data={"ok": True, "platform": sess.platform, **saved})
 
