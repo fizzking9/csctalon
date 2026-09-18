@@ -127,7 +127,8 @@
           独立登录态：本次登录将写入<b>{{ loginRow.state_file }}</b>，不影响同平台其他源。
         </template>
         <template v-else>
-          共享登录态：本次登录将<b>覆盖</b>同平台默认登录态，同平台其他未指定独立文件的源都会跟着换账号。
+          共享登录态：本次登录将<b>覆盖</b>同平台默认登录态，同平台还有
+          <b>{{ sharedSourcesFor(loginRow?.platform) }}</b> 个未指定独立文件的源会跟着换账号。
         </template>
       </el-alert>
 
@@ -255,6 +256,12 @@ const statusType = (s) => ({
   success: 'success', partial: 'warning', failed: 'danger',
   skipped: 'info',
 }[s] || 'info')
+
+// #149: 同平台未指定独立登录态文件(共用共享登录态)的源数量 —— 覆盖提示需要告知影响面
+function sharedSourcesFor(platform) {
+  if (!platform) return 0
+  return sources.value.filter((s) => s.platform === platform && !s.state_file).length
+}
 
 function fmtTime(v) {
   if (!v) return ''

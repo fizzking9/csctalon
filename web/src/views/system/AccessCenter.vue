@@ -377,6 +377,11 @@
         <el-table-column label="账号" width="130">
           <template #default="{ row }">{{ row.uid || '—' }}</template>
         </el-table-column>
+        <el-table-column label="来源" width="80">
+          <template #default="{ row }">
+            <span>{{ row.source_id ? `源#${row.source_id}` : 'CLI' }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="结果" width="90">
           <template #default="{ row }">
             <el-tag :type="row.result === 'success' ? 'success' : 'danger'" size="small">
