@@ -12,6 +12,9 @@ __pycache__/
 # 调试/一次性脚本(含历史凭证与嗅探器,禁止进入生产镜像,2026-08-20 审计 C-1/TST-02)
 scripts/
 tests/
+# 例外: 共享文档扫码登录脚本(运维工具, 生产环境需 headless 扫码更新登录态, #148)
+!scripts/tencent_doc_login.py
+!scripts/kdocs_login.py
 
 # 上传文件(运行时挂载)
 uploads/*
