@@ -535,78 +535,140 @@ def _browser_screenshot(w: _SessionWorker) -> str:
 
 
 def _browser_verify(w: _SessionWorker, platform: str, doc_url: str) -> tuple[bool, str]:
-    """confirm 前轻量校验: goto doc_url → 用与同步层一致的访客检测判据确认登录态。
+    """confirm 前轻量校验: 用与同步层一致的访客检测判据确认登录态。
 
     #148 实测: 金山的真正登录态校验是 JS `__WPSENV__.user.id` 不以 fake_ 开头, 不是
-    cookie 名(wps_sid 可能根本不是金山实际用的 cookie); 腾讯是 body 不含
-    skeleton-guest-mode + cookies 含 skey/uin。旧 verify 用 cookie 名判金山必败。
+    cookie 名。腾讯是 body 不含 skeleton-guest-mode + cookies 含 skey/uin。
+
+    关键: 不盲目 goto —— 用户扫码后页面已自己跳回文档并设好 __WPSENV__/skey,
+    goto 重新加载会冲掉这些 JS 变量 → 误判访客。先在当前页检查, 通过则直接返回;
+    不通过才 goto + 等 + 复查。
     """
     page = w.page
     if page is None:
         return False, "浏览器会话已关闭, 请重新发起登录"
-
-    # ① goto doc_url 让页面加载文档(金山页面需在 kdocs 域才有 __WPSENV__)
-    try:
-        page.goto(doc_url, wait_until="domcontentloaded", timeout=45000)
-        # 多等几秒: 微信回调 → 设置会话 cookie / __WPSENV__ 需 3~8s
-        page.wait_for_timeout(8000)
-        final_url = (page.url or "").lower()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[shared-doc-login] verify goto 失败 platform=%s url=%s err=%s", platform, doc_url, e)
-        return False, f"校验时打开文档失败: {e}"
 
     try:
         cookie_names = [c.get("name", "") for c in (w.ctx.cookies() if w.ctx else [])]
     except Exception:  # noqa: BLE001
         cookie_names = []
 
-    # ② 用与同步层一致的访客检测(shared_doc_sync_service._check_*_guest)
-    if platform == "tencent":
-        try:
-            body_cls = page.evaluate("() => (document.body && document.body.className) || ''")
-            if not isinstance(body_cls, str):
+    def _check_guest():
+        """在当前 page 执行访客检测, 返回 (is_guest, detail)。"""
+        if platform == "tencent":
+            try:
+                body_cls = page.evaluate("() => (document.body && document.body.className) || ''")
+                if not isinstance(body_cls, str):
+                    body_cls = ""
+            except Exception:  # noqa: BLE001
                 body_cls = ""
-        except Exception:  # noqa: BLE001
-            body_cls = ""
-        is_guest = "skeleton-guest-mode" in body_cls
+            guest = "skeleton-guest-mode" in body_cls
+            return guest, f"body_cls={body_cls[:60]}"
+        else:
+            try:
+                uid = page.evaluate(
+                    """() => {
+                        const env = window.__WPSENV__ || {};
+                        const u = (env.file_info && env.file_info.user) || env.user || {};
+                        return String(u.id || '');
+                    }"""
+                )
+            except Exception:  # noqa: BLE001
+                uid = ""
+            if not isinstance(uid, str):
+                uid = ""
+            guest = not uid or uid.startswith("fake_")
+            return guest, f"uid={uid[:30]}"
+
+    # ① 先在当前页检查(用户扫码后页面已跳回文档, __WPSENV__/skey 已就位)
+    is_guest, detail = _check_guest()
+    final_url = ""
+    try:
+        final_url = (page.url or "").lower()
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info(
+        "[shared-doc-login] verify(当前页) platform=%s url=%s is_guest=%s %s cookies=%d %s",
+        platform, final_url[:100], is_guest, detail, len(cookie_names), cookie_names[:15],
+    )
+
+    # 腾讯: 访客检测 + 会话 cookie 双重校验; 金山: 仅 __WPSENV__.user.id
+    # 通过后仍需检查 URL/二维码(防误判)
+    def _pass_url_qr():
+        hints = _LOGIN_URL_HINTS.get(platform, ())
+        if any(h.lower() in final_url for h in hints):
+            return False, "未检测到登录态(页面仍停留在登录/授权页), 请完成扫码后重试"
+        if SharedDocLoginManager.qrcode_visible(page):
+            return False, "页面仍显示登录二维码, 未检测到登录态, 请完成扫码后重试"
+        return True, "ok"
+
+    if not is_guest:
+        if platform == "tencent":
+            session_hints = _SESSION_COOKIE_HINTS["tencent"]
+            has_session = any(any(h in n for h in session_hints) for n in cookie_names)
+            if has_session:
+                return _pass_url_qr()
+        else:
+            return _pass_url_qr()
+
+    # ② 当前页不通过, 可能扫码回调还在进行中 → 等 8s 再查一次
+    try:
+        page.wait_for_timeout(8000)
+    except Exception:  # noqa: BLE001
+        pass
+    is_guest, detail = _check_guest()
+    try:
+        final_url = (page.url or "").lower()
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info(
+        "[shared-doc-login] verify(等8s后) platform=%s url=%s is_guest=%s %s",
+        platform, final_url[:100], is_guest, detail,
+    )
+
+    if not is_guest:
+        if platform == "tencent":
+            session_hints = _SESSION_COOKIE_HINTS["tencent"]
+            has_session = any(any(h in n for h in session_hints) for n in cookie_names)
+            if has_session:
+                return _pass_url_qr()
+        else:
+            return _pass_url_qr()
+
+    # ③ 仍不通过, 最后试 goto doc_url 重新加载(有时页面 SPA 状态卡住需刷新)
+    try:
+        page.goto(doc_url, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(5000)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[shared-doc-login] verify goto 失败 platform=%s err=%s", platform, e)
+        return False, f"校验时打开文档失败: {e}"
+
+    try:
+        final_url = (page.url or "").lower()
+    except Exception:  # noqa: BLE001
+        final_url = ""
+    is_guest, detail = _check_guest()
+    logger.info(
+        "[shared-doc-login] verify(goto后) platform=%s url=%s is_guest=%s %s",
+        platform, final_url[:100], is_guest, detail,
+    )
+
+    if is_guest:
+        return False, (
+            f"{'腾讯文档仍为访客模式' if platform == 'tencent' else '金山文档仍为访客身份'}"
+            f"({detail}), 请确认已在手机上完成微信授权"
+        )
+    if platform == "tencent":
         session_hints = _SESSION_COOKIE_HINTS["tencent"]
         has_session = any(any(h in n for h in session_hints) for n in cookie_names)
-        logger.info(
-            "[shared-doc-login] verify(腾讯) url=%s is_guest=%s has_session=%s cookies=%s",
-            final_url[:100], is_guest, has_session, cookie_names[:15],
-        )
-        if is_guest:
-            return False, "腾讯文档仍为访客模式(skeleton-guest-mode), 请确认已在手机上完成微信授权"
         if not has_session:
             return False, "未检测到腾讯会话 Cookie(skey/uin), 请确认已在手机上完成微信授权"
-    else:  # kdocs
-        try:
-            uid = page.evaluate(
-                """() => {
-                    const env = window.__WPSENV__ || {};
-                    const u = (env.file_info && env.file_info.user) || env.user || {};
-                    return String(u.id || '');
-                }"""
-            )
-        except Exception:  # noqa: BLE001
-            uid = ""
-        if not isinstance(uid, str):
-            uid = ""
-        is_guest = not uid or uid.startswith("fake_")
-        logger.info(
-            "[shared-doc-login] verify(金山) url=%s uid=%s is_guest=%s cookies=%s",
-            final_url[:100], uid[:30], is_guest, cookie_names[:15],
-        )
-        if is_guest:
-            return False, "金山文档仍为访客身份(__WPSENV__.user.id 为空或 fake_), 请确认已在手机上完成微信授权"
 
-    # ③ 通用: 不在登录页 + 无二维码
+    # 通用: 不在登录页 + 无二维码
     hints = _LOGIN_URL_HINTS.get(platform, ())
-    in_login = any(h.lower() in final_url for h in hints)
-    qr_visible = SharedDocLoginManager.qrcode_visible(page)
-    if in_login:
+    if any(h.lower() in final_url for h in hints):
         return False, "未检测到登录态(页面仍停留在登录/授权页), 请完成扫码后重试"
-    if qr_visible:
+    if SharedDocLoginManager.qrcode_visible(page):
         return False, "页面仍显示登录二维码, 未检测到登录态, 请完成扫码后重试"
     return True, "ok"
 

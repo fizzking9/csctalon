@@ -428,14 +428,8 @@ def test_confirm_saves_state_and_creates_backup(tmp_path, mgr):
 
 def test_verify_rejects_when_still_on_login_page(tmp_path, mgr):
     """🔒 安全回归: 仍停留在登录页 → 校验失败(防止误点确认写入无效 state)。"""
-    sess = _make_session(tmp_path, url="https://docs.qq.com/sheet/abc")
-
-    # 让 goto 后仍落在登录页(模拟未真正登录)
-    class _StuckPage(_FakePage):
-        def goto(self, url, **kwargs):
-            self.url = "https://docs.qq.com/login?redirect=x"
-
-    sess._worker.page = _StuckPage()
+    # 新 verify 先查当前页(不 goto), 模拟「扫码后页面仍停在登录页」
+    sess = _make_session(tmp_path, url="https://docs.qq.com/login?redirect=x")
     ok, msg = mgr.verify_logged_in(sess)
     assert ok is False
     assert "登录" in msg
