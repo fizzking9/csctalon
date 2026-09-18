@@ -702,3 +702,43 @@ def test_ai_analyze_analysis_question_still_uses_llm(manager_client):
     # 走 LLM 路径: 入队 → task_id 非空(规则层秒回时 task_id=None)
     assert data.get("task_id") is not None, "推理类问句不该命中规则层(应入队 LLM)"
     assert data["status"] in ("success", "running", "failed")
+
+
+# ── #150 闲聊闸门(毫秒短路, 不进 LLM; 修复"吃饭了没"误命中日报+慢) ──
+def test_chitchat_gate_hits():
+    """纯寒暄/闲聊问句 → 返回固定引导文案(不进 LLM)。"""
+    from app.services.ai_rule_engine import try_chitchat_answer
+    for q in ("吃饭了没", "吃饭没", "你好", "您好", "谢谢", "辛苦了",
+              "晚安", "在吗", "hi", "你是谁", "666", "哈哈哈", "哦哦"):
+        assert try_chitchat_answer(q) is not None, f"应命中闲聊: {q!r}"
+        md = try_chitchat_answer(q)
+        assert "经营数据" in md  # 文案是引导性质, 不生成经营数据
+
+
+def test_chitchat_gate_passes_business():
+    """含业务词/长问句 → 放行 None, 不误杀经营问句(零误杀铁律)。"""
+    from app.services.ai_rule_engine import try_chitchat_answer
+    for q in ("今日退款多少笔", "你好，今日退款如何", "昨天接待情况",
+              "分析下今日经营", "本月投诉积压", "今天天气怎么样",
+              "你好，我想了解一下我们公司最近的情况", "谢谢你帮我看看退款"):
+        assert try_chitchat_answer(q) is None, f"不应误杀经营问句: {q!r}"
+
+
+def test_ai_analyze_chitchat_short_circuits(manager_client):
+    """端到端: 问'吃饭了没' → success + task_id=None + 引导文案(不进 LLM 不入队)。
+
+    修复前: 走 L2 语义匹配 + 摘取层两次 LLM, 7b 误判"吃饭了没"与日报相关
+    → 返回一屏接待分析 + "未提供关于'吃饭了没'的相关信息"。修复后毫秒短路。
+    """
+    r = manager_client.post("/api/v1/ai/analyze",
+                            json={"question": "吃饭了没", "period": "daily"})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["status"] == "success"
+    assert data.get("task_id") is None  # 不走 LLM 不入队
+    assert data.get("hit_mode") == "chitchat"
+    assert data.get("llm_model") == "chitchat"
+    assert "经营数据" in data.get("result_md", "")
+    # 不得返回经营数据分析结果(闲聊不生成数据, 也不回显"今日接待量"这类数据)
+    assert "接待量" not in data.get("result_md", "")
+    assert "未提供" not in data.get("result_md", "")

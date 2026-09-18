@@ -35,7 +35,13 @@ _DEFAULT_THRESHOLD = 0.6
 
 _SYSTEM = (
     "你是问句与报告相关性判定助手。基于给定的问句和候选报告摘要, "
-    "判定问句与每个候选报告的语义相关性, 输出 JSON 数组。"
+    "判定问句与每个候选报告的语义相关性, 输出 JSON 数组。\n"
+    "铁律:\n"
+    "1. 若问句与经营数据、候选报告内容完全无关(如闲聊、寒暄、问候、"
+    "个人话题等非经营问题), 所有候选的 confidence 必须输出 0, "
+    "严禁给出任何非 0 值。\n"
+    "2. confidence 只表示问句与报告内容的相关程度, 无关即 0; "
+    "不要因为报告本身写得详细就提高置信度。"
 )
 
 
@@ -79,7 +85,10 @@ async def semantic_match(db: Session, question: str,
         f"候选报告(共 {len(cands)} 条):\n{cand_block}\n\n"
         "请判定问句与每个候选报告的语义相关性, 输出 JSON 数组, "
         "元素为 {\"index\": int, \"confidence\": float, \"reason\": str}。"
-        "confidence∈[0,1], 1=完全相关, 0=完全无关。只输出 JSON, 不要其他文字。"
+        "confidence∈[0,1], 1=完全相关, 0=完全无关。"
+        "若问句与所有候选报告均无关(如闲聊、寒暄、问候、个人话题等), "
+        "所有 confidence 必须输出 0。"
+        "只输出 JSON, 不要其他文字。"
     )
     messages = [
         {"role": "system", "content": _SYSTEM},
