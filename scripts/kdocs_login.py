@@ -56,20 +56,34 @@ def main() -> int:
     print("   回到本终端按 <回车> 保存登录态并退出。\n")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        # #148 修复: 原 viewport 1440x900 导致登录弹窗二维码太小看不清;
+        # 启动最大化 + viewport 1600x1000, 让二维码足够大便于扫码。
+        browser = p.chromium.launch(headless=False, args=["--start-maximized"])
         ctx = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
             ),
-            viewport={"width": 1440, "height": 900},
+            viewport={"width": 1600, "height": 1000},
             accept_downloads=True,
         )
         page = ctx.new_page()
-        page.goto(target_url, wait_until="domcontentloaded")
+        page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
         print(f"  已打开: {target_url}")
-        print("  👉 若未登录会自动引导登录, 请扫码; 登录成功后表格可正常显示。")
-        print("  ⏎ 登录完成后, 请回到本终端按 <回车> 保存登录态…")
+        # #148 若登录弹窗未自动弹出, 尝试点击页面上的登录按钮
+        for sel in ["text=登录", "text=立即登录", "button:has-text('登录')"]:
+            try:
+                btn = page.query_selector(sel)
+                if btn and btn.is_visible():
+                    print(f"  检测到登录按钮({sel}), 点击打开登录弹窗…")
+                    btn.click()
+                    page.wait_for_timeout(1500)
+                    break
+            except Exception:
+                continue
+        print("  👉 请用 WPS/微信 扫码登录(二维码应在浏览器中央弹窗显示, 已放大视口)。")
+        print("  ⏎ 登录完成且表格内容正常显示后, 请回到本终端按 <回车> 保存登录态…")
 
         input()  # 等待用户确认登录完成
 

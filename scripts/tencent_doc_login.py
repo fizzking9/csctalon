@@ -37,6 +37,8 @@ from app.core.config import settings
 
 # 默认打开的目标共享表(可用 --url 覆盖; 登录态为账号级, 打开任意共享表均可引导扫码)
 TARGET_SHEET_URL = "https://docs.qq.com/sheet/DWnRPSmpKU29uSk9T"
+# 腾讯文档登录页(直接打开显示扫码, 不会跳访客视图)
+TENCENT_LOGIN_URL = "https://docs.qq.com/login?from=docs"
 STATE_PATH = Path(settings.BROWSER_STATE_DIR) / "tencent_doc.json"
 
 
@@ -57,25 +59,41 @@ def main() -> int:
         bak.write_bytes(STATE_PATH.read_bytes())
         print(f"⚠ 检测到旧登录态, 已备份到 {bak.name}")
 
-    print("🌐 打开有头浏览器(直接打开目标共享表)…")
-    print("   请在浏览器里完成登录(会引导扫码)。看到表格可正常查看后,")
-    print("   回到本终端按 <回车> 保存登录态并退出。\n")
+    print("🌐 打开有头浏览器(腾讯登录页)…")
+    print("   请在浏览器里扫码登录腾讯文档。登录成功后会跳转到目标共享表,")
+    print("   看到表格可正常查看后, 回到本终端按 <回车> 保存登录态并退出。\n")
 
     with sync_playwright() as p:
-        # headless=False 弹出真实浏览器(本机)
-        browser = p.chromium.launch(headless=False)
+        # headless=False 弹出真实浏览器(本机), 启动最大化让二维码清晰
+        browser = p.chromium.launch(headless=False, args=["--start-maximized"])
         ctx = browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800},
+            viewport={"width": 1600, "height": 1000},
         )
         page = ctx.new_page()
-        # 直接打开目标共享表: 未登录会引导扫码, 登录后停留在表格页
-        page.goto(target_url, wait_until="domcontentloaded")
-        print(f"  已打开: {target_url}")
-        print("  👉 若未登录会自动跳登录页, 请扫码登录; 登录成功后表格会正常显示。")
-        print("  ⏎ 登录完成后, 请回到本终端按 <回车> 保存登录态…")
+        # #148 修复: 直接打开共享表会进访客只读视图, 不引导扫码登录。
+        # 改为先打开腾讯登录页(直接显示扫码二维码), 用户扫码成功后再跳转到目标共享表。
+        print(f"  打开登录页: {TENCENT_LOGIN_URL}")
+        page.goto(TENCENT_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
+        # 若登录页没出现, 尝试点击页面上的"登录"按钮兜底
+        try:
+            login_btn = page.query_selector("text=登录")
+            if login_btn and login_btn.is_visible():
+                login_btn.click()
+                page.wait_for_timeout(1500)
+        except Exception:
+            pass
+        print("  👉 请用微信/QQ 扫码登录腾讯文档(二维码应在浏览器中显示)。")
+        print("  ⏎ 扫码并确认登录成功后, 请回到本终端按 <回车> (脚本会自动跳转到目标共享表)…")
+        input()
 
-        # 等待用户在终端按回车(同步 input)
+        # 登录后跳转到目标共享表, 确认登录态在目标域名也生效
+        print(f"  跳转到目标共享表: {target_url}")
+        page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(3000)
+        print(f"  已打开: {target_url}")
+        print("  👉 确认表格内容正常显示后, 请回到本终端按 <回车> 保存登录态…")
         input()
 
         # #148 防退化: 保存前双重校验登录态真生效(防误存访客 storage_state)
