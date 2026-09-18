@@ -444,6 +444,16 @@ class SharedDocLoginManager:
         # 延迟导入: playwright 在 app 导入链上不顶层加载(见 CI 说明)
         from playwright.sync_api import sync_playwright
 
+        # #148 修复: FastAPI(uvicorn worker)的 sync 端点虽跑在线程池, 但 Playwright Sync API
+        # 仍通过 asyncio.get_event_loop() 检测到主事件循环在运行 → 抛
+        # "It looks like you are using Playwright Sync API inside the asyncio loop"。
+        # 解法: 给当前线程设一个全新的、非运行的事件循环, 让 is_running() 返回 False。
+        import asyncio as _asyncio
+        try:
+            _asyncio.set_event_loop(_asyncio.new_event_loop())
+        except Exception:  # noqa: BLE001  设失败也继续(Playwright 自己会再判)
+            pass
+
         pw = sync_playwright().start()
         try:
             # headless=False: 需要用户扫码, 必须有真实页面渲染

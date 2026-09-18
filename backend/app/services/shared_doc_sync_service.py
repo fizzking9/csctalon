@@ -259,6 +259,14 @@ def _export_tencent_xlsx(doc_url: str, out_path: str, state_filename: str | None
     """
     from playwright.sync_api import sync_playwright
 
+    # #148 同 shared_doc_login_service: 给当前线程设非运行事件循环, 绕过
+    # Playwright Sync API 对 asyncio 主循环的检测(sync 端点跑在 uvicorn 线程池)
+    import asyncio as _asyncio
+    try:
+        _asyncio.set_event_loop(_asyncio.new_event_loop())
+    except Exception:
+        pass
+
     state_path = Path(settings.BROWSER_STATE_DIR) / (state_filename or _DEFAULT_STATE_FILE[PLATFORM_TENCENT])
     if not state_path.exists():
         raise FileNotFoundError(
@@ -326,6 +334,13 @@ def _export_kdocs_xlsx(doc_url: str, out_path: str, state_filename: str | None =
       - hover/click 失败时截图保存 BROWSER_STATE_DIR/.export_debug_*.png
     """
     from playwright.sync_api import sync_playwright
+
+    # #148 给当前线程设非运行事件循环, 绕过 Playwright Sync API 对 asyncio 主循环的检测
+    import asyncio as _asyncio
+    try:
+        _asyncio.set_event_loop(_asyncio.new_event_loop())
+    except Exception:
+        pass
 
     state_path = Path(settings.BROWSER_STATE_DIR) / (state_filename or _DEFAULT_STATE_FILE[PLATFORM_KDOCS])
     if not state_path.exists():
