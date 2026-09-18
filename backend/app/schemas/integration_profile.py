@@ -44,12 +44,24 @@ class IntegrationProfileOut(BaseModel):
     name: str
     scene: str
     content_md: str
+    # #47: 历史版本字段(无则 None / False, 前端按 has_previous 显隐「回滚到上一版」按钮)
+    previous_content_md: str | None = None
+    has_previous: bool = False
     variables: list = []
     enabled: bool
     sort_order: int
     created_by: str | None = None
     updated_by: str | None = None
     updated_at: str | None = None
+
+
+class ProfileRollbackRequest(BaseModel):
+    """#47: 回滚请求体(二次确认)。"""
+
+    confirm: bool = Field(
+        False,
+        description="二次确认: 必须显式传 true 才执行回滚, 防误点(空体或 confirm!=true 返回 400)",
+    )
 
 
 class ProfileRenderRequest(BaseModel):

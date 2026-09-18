@@ -368,6 +368,33 @@
             ；其它未列入的占位符会原样保留。
           </div>
         </el-form-item>
+        <!-- #47: 历史版本区段(只在有上一版时显示; 无则提示「从未更新过」让用户知道按钮不是坏了) -->
+        <el-form-item label="历史版本">
+          <div v-if="editForm.has_previous">
+            <el-input
+              v-model="editForm.previous_content_md"
+              type="textarea"
+              :rows="6"
+              readonly
+              class="pkg-textarea"
+            />
+            <div class="sub-tip">
+              上一版 content_md 快照(只读)。点「回滚到上一版」会把当前编辑区内容替换为该版本;
+              <b>当前内容会作为新的「上一版」保留</b>, 可再次点「回滚到上一版」恢复(可逆)。
+            </div>
+            <el-button
+              type="warning"
+              size="small"
+              :icon="RefreshLeft"
+              :loading="rolling"
+              class="mt-8"
+              @click="rollbackTemplate"
+            >
+              回滚到上一版
+            </el-button>
+          </div>
+          <div v-else class="sub-tip">无历史版本(从未更新过 content_md, 或已无可更早的版本可继续回滚)。</div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
@@ -417,7 +444,9 @@ import {
   renderProfile,
   updateProfile,
   resetProfile,
+  rollbackProfile,
 } from '@/api/integrationProfile'
+import { ElMessageBox } from 'element-plus'
 import { getAiModelConfig, getAiPromptLayers, getAiPromptPreview } from '@/api/aiModel'
 
 const router = useRouter()
@@ -657,13 +686,17 @@ async function loadProfiles() {
 // 模板编辑
 const editVisible = ref(false)
 const saving = ref(false)
-const editForm = reactive({ id: null, name: '', content_md: '' })
+const rolling = ref(false)
+// #47: previous_content_md / has_previous 由后端返回, 用于「回滚到上一版」按钮显隐与展示
+const editForm = reactive({ id: null, name: '', content_md: '', previous_content_md: null, has_previous: false })
 
 function openEdit() {
   if (!currentProfile.value) { ElMessage.warning('请先选择场景'); return }
   editForm.id = currentProfile.value.id
   editForm.name = currentProfile.value.name
   editForm.content_md = currentProfile.value.content_md
+  editForm.previous_content_md = currentProfile.value.previous_content_md ?? null
+  editForm.has_previous = currentProfile.value.has_previous === true
   editVisible.value = true
 }
 
@@ -678,6 +711,33 @@ async function saveTemplate() {
     ElMessage.error(e?.response?.data?.detail || '保存失败')
   } finally {
     saving.value = false
+  }
+}
+
+async function rollbackTemplate() {
+  if (!editForm.id || !editForm.has_previous) return
+  // 二次确认: 防误点(回滚本身是写操作, 且会再次刷新 previous —— 不解释清楚会让人以为「丢了版本」)
+  try {
+    await ElMessageBox.confirm(
+      '将把当前编辑区内容替换为上一版快照, 当前内容会作为新的「上一版」保留(可再次回滚恢复)。',
+      '回滚到上一版？',
+      { confirmButtonText: '回滚', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch (e) {
+    return // 用户取消
+  }
+  rolling.value = true
+  try {
+    const res = await rollbackProfile(editForm.id, { confirm: true })
+    const d = res.data || {}
+    editForm.content_md = d.content_md || ''
+    editForm.previous_content_md = d.previous_content_md ?? null
+    editForm.has_previous = d.has_previous === true
+    ElMessage.success('已回滚到上一版(可再次点「回滚到上一版」恢复)')
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || '回滚失败')
+  } finally {
+    rolling.value = false
   }
 }
 

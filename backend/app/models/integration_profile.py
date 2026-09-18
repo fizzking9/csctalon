@@ -36,6 +36,12 @@ class IntegrationProfile(IDMixin, TimestampMixin, Base):
         comment="场景: push=外部推送 / pull=外部拉取 / manual_refund=手动退款推送",
     )
     content_md: Mapped[str] = mapped_column(Text, nullable=False, comment="Markdown 模板(含 {{变量}})")
+    # #47: 上一版 content_md 快照, 每次 update_profile 前由 service 写入, rollback 时读回。
+    # NULL = 无历史版本(从未更新过 content_md, 或刚回滚过且无更早版本可继续回滚)。
+    previous_content_md: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="上一版 content_md 快照(每次 update 前写入; rollback 时读回; NULL=无历史版本)",
+    )
     variables: Mapped[list | None] = mapped_column(
         JSONB, nullable=True,
         comment='变量声明: [{"key":"doc_url","label":"共享文档地址","required":true}]',

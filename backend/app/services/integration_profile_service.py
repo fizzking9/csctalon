@@ -254,6 +254,9 @@ def to_dict(row: IntegrationProfile) -> dict:
         "name": row.name,
         "scene": row.scene,
         "content_md": row.content_md,
+        # #47: 暴露历史版本字段供前端「回滚到上一版」按钮显隐与展示
+        "previous_content_md": row.previous_content_md,
+        "has_previous": row.previous_content_md is not None,
         "variables": row.variables or [],
         "enabled": row.enabled,
         "sort_order": row.sort_order,
@@ -297,6 +300,10 @@ def update_profile(db: Session, profile_id: int, payload, actor: str | None = No
         _validate_scene(payload.scene)
         row.scene = payload.scene
     if payload.content_md is not None:
+        # #47: 改 content_md 前先快照旧值到 previous_content_md(仅当真的变了才快照,
+        # 避免用户提交相同内容时把真实历史覆盖成"当前内容=旧内容"无意义快照)。
+        if row.content_md != payload.content_md:
+            row.previous_content_md = row.content_md
         row.content_md = payload.content_md
     if payload.variables is not None:
         row.variables = [v.model_dump() if hasattr(v, "model_dump") else v for v in payload.variables]
@@ -304,6 +311,33 @@ def update_profile(db: Session, profile_id: int, payload, actor: str | None = No
         row.enabled = payload.enabled
     if payload.sort_order is not None:
         row.sort_order = payload.sort_order
+    row.updated_by = actor
+    db.commit()
+    db.refresh(row)
+    return to_dict(row)
+
+
+def rollback_profile(db: Session, profile_id: int, actor: str | None = None) -> dict | None:
+    """#47: 把 previous_content_md 写回 content_md(回滚到上一版)。
+
+    可逆回滚: 回滚动作本身也是一次「保存当前为 previous」——
+    把当前 content_md 存为新的 previous_content_md, 再用旧 previous 覆盖 content_md。
+    这样用户回滚后若反悔, 再点一次「回滚到上一版」就能回到回滚前的状态。
+
+    返回 to_dict(含新 content_md 与新 previous_content_md);
+    无历史版本(previous_content_md is None)时抛 400, 由路由层转 HTTPException。
+    """
+    row = db.get(IntegrationProfile, profile_id)
+    if row is None:
+        return None
+    if row.previous_content_md is None:
+        # 无历史版本 → 由路由层转 400(便于前端提示「没有可回滚的版本」)
+        return {"_no_previous": True}
+    # 可逆: 当前 content_md 存为新的 previous(回滚后还能再点回去)
+    current = row.content_md
+    prev = row.previous_content_md
+    row.previous_content_md = current
+    row.content_md = prev
     row.updated_by = actor
     db.commit()
     db.refresh(row)

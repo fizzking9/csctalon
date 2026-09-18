@@ -126,6 +126,26 @@ def shared_doc_sync_now(payload: dict, db: DBSession, _: AdminUser):
 # 页面内登录态管理 (#45, A-20260910-001 LOCKED v1.0)
 #   替代「SSH 上服务器跑 scripts/tencent_doc_login.py」的唯一路径。
 # ─────────────────────────────────────────────────────────────────────
+def _multi_worker_guard_501():
+    """#48: 多 worker 部署守卫(仅 4 个 login 端点用)。
+
+    多 worker 时直接 raise HTTPException(501); 单 worker 时返回 None(放行)。
+    501 detail 只指向「命令行」按钮(GET /cli-fallback 下发唯一真身命令),
+    不在错误响应里塞大段命令文本(与既有 DisplayUnavailableError 501 风格一致)。
+    """
+    from app.services import shared_doc_login_service as sdls
+    if not sdls.is_multi_worker():
+        return None
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "页面内扫码登录在多 worker 部署下不可用(SharedDocLoginManager 是进程内单例, "
+            "跨 worker 会话不可达)。请改用 CLI 脚本生成登录态后上传(下方「命令行」按钮可复制完整步骤), "
+            "或改回单 worker 部署。其他业务不受影响。"
+        ),
+    ) from None
+
+
 @router.get("/states", response_model=R, summary="各平台登录态健康度")
 def shared_doc_states(_: AdminUser):
     """列出腾讯/金山登录态文件的 mtime / 大小 / 是否超期。
@@ -168,9 +188,12 @@ def shared_doc_login_start(source_id: int, db: DBSession, _: AdminUser):
     """起有头浏览器打开目标文档 → 截图登录页/二维码 → 返回会话。
 
     错误码:
-      404 采集源不存在 / 409 同平台已有活跃会话 / 501 无显示服务 / 502 浏览器启动失败
+      404 采集源不存在 / 409 同平台已有活跃会话 / 501 无显示服务或**多 worker 部署**(#48) / 502 浏览器启动失败
     """
     from app.services import shared_doc_login_service as sdls
+
+    # #48: 多 worker 部署守卫(单 worker 时 no-op)
+    _multi_worker_guard_501()
 
     source_id = _validate_source_id(source_id)
     row = sdss.get_doc_source(db, source_id)
@@ -220,6 +243,9 @@ def shared_doc_login_status(session_id: str, _: AdminUser):
     """前端 2 秒轮询: pending / scanned / authorized / expired / closed。"""
     from app.services import shared_doc_login_service as sdls
 
+    # #48: 多 worker 部署守卫(单 worker 时 no-op)
+    _multi_worker_guard_501()
+
     sess = sdls.login_manager.get(session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="会话不存在或已过期, 请重新发起登录")
@@ -241,6 +267,9 @@ def shared_doc_login_confirm(session_id: str, _: AdminUser):
     """
     from app.services import shared_doc_login_service as sdls
 
+    # #48: 多 worker 部署守卫(单 worker 时 no-op)
+    _multi_worker_guard_501()
+
     sess = sdls.login_manager.get(session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="会话不存在或已过期, 请重新发起登录")
@@ -258,6 +287,9 @@ def shared_doc_login_confirm(session_id: str, _: AdminUser):
 def shared_doc_login_cancel(session_id: str, _: AdminUser):
     """主动取消(关浏览器 + 移除会话)。幂等。"""
     from app.services import shared_doc_login_service as sdls
+
+    # #48: 多 worker 部署守卫(单 worker 时 no-op)
+    _multi_worker_guard_501()
 
     sdls.login_manager.finish(session_id)
     return R(data={"ok": True})

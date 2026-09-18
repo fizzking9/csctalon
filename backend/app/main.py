@@ -94,7 +94,14 @@ async def lifespan(app: FastAPI):
             try:
                 _cleanup_zombie_running_tasks()
             except Exception as _e:
-                logger.warning(f"[lifespan] 清理僵尸任务失败(非致命): {_e}", exc_info=True)
+                logger.warning(f"[lifespan] 清理僵尸任务失败(非致命): {_e}")
+            try:
+                # #48: 多 worker 部署检测(只 WARNING 不 fail-fast); 多 worker 时
+                # 4 个 login 端点会返回 501 + CLI 降级命令(不阻断其他业务)。
+                from app.services.shared_doc_login_service import check_single_worker
+                check_single_worker()
+            except Exception as _e:
+                logger.warning(f"[lifespan] 共享文档登录 worker 检测失败(非致命): {_e}")
             try:
                 _start_bms_scheduler()
             except Exception as _e:

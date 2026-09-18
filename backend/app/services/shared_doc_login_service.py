@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import multiprocessing
 import os
 import shutil
 import subprocess
@@ -223,6 +224,58 @@ def _start_xvfb_and_wait(display: str) -> bool:
 
 class DisplayUnavailableError(RuntimeError):
     """无可用显示服务且无法按需拉起 → 路由层转 501 + 给出两段式降级命令。"""
+
+
+# ── #48: 多 worker 部署检测 ──
+# 背景: SharedDocLoginManager 是进程内单例(L269 类注释「⚠️ 单 worker 假设」),
+#   会话内存态 + chromium 进程在同一 worker 内存活。若 Gunicorn 多 worker (-w N),
+#   ① start 命中 worker A, 后续 status/confirm 命中 worker B → 会话找不到 → 404;
+#   ② 多 worker 各自起 chromium → 单机内存爆炸。
+# 检测方式: multiprocessing.parent_process() 在 Gunicorn fork 出的 worker 进程里
+#   返回非 None(父进程即 master), 在单进程 run(main.py 直接 run) 或 gunicorn -w 1
+#   (无 fork, 直接 exec)时返回 None。这是最可靠判据, 不依赖环境变量(可被误改)。
+class MultiWorkerDeploymentError(RuntimeError):
+    """部署形态不支持页面内扫码登录(多 worker) → 路由层转 501 + 给出 CLI 降级命令。
+
+    A2 方案: 启动只打 WARNING 不 fail-fast(不阻断其他业务); 仅 4 个 login 端点
+    显式返回 501 让前端立刻知道这条链路不可用。
+    """
+
+
+def is_multi_worker() -> bool:
+    """检测当前进程是否运行在 Gunicorn 多 worker 模式下。
+
+    返回 True → 多 worker(SharedDocLoginManager 不安全);
+    返回 False → 单 worker / 直接 python main.py(SharedDocLoginManager 可用)。
+
+    判据: multiprocessing.parent_process() 在被 fork/spawn 出的 worker 进程里
+    返回非 None; 在主进程(单 worker -w 1 不 fork, 或直接 python main.py)返回 None。
+    函数位置: multiprocessing.process 模块, 顶层 multiprocessing 包 re-export。
+    """
+    try:
+        # multiprocessing.parent_process 仅 3.8+ 有; 走顶层避免 context 模块查不到。
+        parent = multiprocessing.parent_process()
+        return parent is not None
+    except Exception:  # noqa: BLE001  拿不到父进程信息 → 按单 worker 处理(不阻断业务)
+        return False
+
+
+def check_single_worker() -> bool:
+    """启动期检测: 多 worker 时返回 False 并打 WARNING(不 fail-fast)。
+
+    A2 设计(用户拍板 2026-09-18): 启动只打 WARNING 不阻断整个 backend;
+    仅 4 个 login 端点(/login/start|status|confirm|cancel)在多 worker 时
+    显式返回 501 + CLI 降级命令, 其他业务照常服务。
+    """
+    if is_multi_worker():
+        logger.warning(
+            "[shared-doc-login] 检测到多 worker 部署(WEB_CONCURRENCY>1 或 gunicorn -w N): "
+            "页面内扫码登录已禁用(SharedDocLoginManager 是进程内单例, 跨 worker 会话不可达)。"
+            "请改用 CLI 脚本(scripts/tencent_doc_login.py / kdocs_login.py), 或改回单 worker 部署。"
+            "其他业务不受影响。"
+        )
+        return False
+    return True
 
 
 @dataclass

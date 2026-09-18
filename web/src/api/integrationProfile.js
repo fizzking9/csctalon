@@ -25,6 +25,11 @@ export function resetProfile(id) {
   return request.post(`/integrations/profiles/${id}/reset`)
 }
 
+// #47: 回滚到上一版 content_md(请求体必须传 confirm=true 二次确认)
+export function rollbackProfile(id, payload = { confirm: true }) {
+  return request.post(`/integrations/profiles/${id}/rollback`, payload)
+}
+
 // 渲染配置包(纯函数, 不落库)
 export function renderProfile(id, payload) {
   return request.post(`/integrations/profiles/${id}/render`, payload)

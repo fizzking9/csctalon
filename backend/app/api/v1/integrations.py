@@ -6,6 +6,7 @@
 - DELETE /integrations/profiles/{id}          删除模板
 - POST   /integrations/profiles/{id}/reset    恢复默认内容(从内置 seed 读回)
 - POST   /integrations/profiles/{id}/render   渲染配置包(纯函数, 不落库)
+- POST   /integrations/profiles/{id}/rollback 回滚到上一版 content_md (#47)
 
 权限: 全部 AdminUser(改接入提示词 = 高风险, 同 AI Focus 配置)。
 """
@@ -20,6 +21,7 @@ from app.schemas.integration_profile import (
     IntegrationProfileCreate,
     IntegrationProfileUpdate,
     ProfileRenderRequest,
+    ProfileRollbackRequest,
 )
 from app.services import integration_profile_service as svc
 
@@ -60,6 +62,24 @@ def reset_profile(profile_id: int, db: DBSession, me: AdminUser):
     if row is None:
         raise HTTPException(404, "模板不存在")
     return R(data=row)
+
+
+@router.post("/profiles/{profile_id}/rollback", response_model=R, summary="回滚到上一版模板内容")
+def rollback_profile(profile_id: int, payload: ProfileRollbackRequest, db: DBSession, me: AdminUser):
+    """#47: 把 previous_content_md 写回 content_md(可逆回滚)。
+
+    - 二次确认: 请求体必须显式传 `{"confirm": true}`, 否则返回 400(防误点)
+    - 无历史版本(previous_content_md IS NULL) → 400 + 提示「没有可回滚的版本」
+    - 回滚动作本身也是一次「保存当前为 previous」, 再次调用即可回到回滚前状态(可逆)
+    """
+    if not payload.confirm:
+        raise HTTPException(400, "回滚需二次确认: 请传 {\"confirm\": true}")
+    result = svc.rollback_profile(db, profile_id, actor=me.username)
+    if result is None:
+        raise HTTPException(404, "模板不存在")
+    if isinstance(result, dict) and result.get("_no_previous"):
+        raise HTTPException(400, "没有可回滚的历史版本(该模板从未更新过 content_md)")
+    return R(data=result)
 
 
 @router.post("/profiles/{profile_id}/render", response_model=R, summary="渲染配置包")
