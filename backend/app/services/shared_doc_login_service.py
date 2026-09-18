@@ -580,6 +580,25 @@ def _browser_verify(w: _SessionWorker, platform: str, doc_url: str) -> tuple[boo
             guest = not uid or uid.startswith("fake_")
             return guest, f"uid={uid[:30]}"
 
+    # ⓪ 金山: 扫码后可能停在 account.wps.cn 的中间页(chooseaccount/mobilelogin),
+    #    需要自动点"Login/Register Now"完成登录, 否则永远拿不到 __WPSENV__ 真用户 ID
+    if platform == "kdocs":
+        try:
+            cur_url = (page.url or "").lower()
+        except Exception:  # noqa: BLE001
+            cur_url = ""
+        if "account.wps.cn" in cur_url:
+            for sel in ("a.js_toProtocolDialog", "a:has-text('Login')", "a:has-text('登录')"):
+                try:
+                    btn = page.query_selector(sel)
+                    if btn and btn.is_visible():
+                        btn.click()
+                        logger.info("[shared-doc-login] 金山中间页自动点击: %s", sel)
+                        page.wait_for_timeout(5000)  # 等跳转回 kdocs
+                        break
+                except Exception:  # noqa: BLE001
+                    continue
+
     # ① 先在当前页检查(用户扫码后页面已跳回文档, __WPSENV__/skey 已就位)
     is_guest, detail = _check_guest()
     final_url = ""
