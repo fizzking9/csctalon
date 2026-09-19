@@ -47,12 +47,14 @@
               <code>docs/design/AI数据接入助手设计-20260919.md</code> §四。</p>
             <p><b>不做什么（及原因）：</b></p>
             <ul>
-              <li>❌ <b>不自动落地</b>：落地包只是 JSON 建议，建表/写 registry/改代码必须人工按 issue-workflow 执行 —— 这是防 AI 幻觉的底线；</li>
+              <li>❌ <b>不自动落地</b>：落地包只是 JSON 建议 + 可下载的代码草稿，建表/写 registry/改代码必须人工按 issue-workflow 执行 —— 这是防 AI 幻觉的底线；</li>
+              <li>❌ <b>不写服务器文件</b>（#159）：草稿以文本产出供下载，不在服务器生成 .py —— 生产容器代码是只读镜像，写进去会被下次部署覆盖，且绕过 review 直接进镜像；</li>
+              <li>❌ <b>不自动执行迁移</b>：migration_draft 的 revision id 需人工 grep 确认唯一（撞车会导致 alembic Cycle/Multiple heads）；</li>
               <li>❌ <b>不删草稿</b>：起草与确认要留痕可审计；</li>
               <li>❌ <b>不做提示词编辑</b>：提示词属「AI 管理」配置侧，本页只消费其结果；</li>
               <li>❌ <b>不做自动重试按钮</b>：失败后重新提交即可（样例还在输入框里）。</li>
             </ul>
-            <p><b>工单：</b>#157</p>
+            <p><b>工单：</b>#157（P1 闭环）+ #159（可提交代码草稿）</p>
           </div>
         </el-popover>
         <el-button size="small" :icon="Refresh" @click="reloadAll">刷新</el-button>
@@ -281,6 +283,39 @@
             </div>
             <el-alert v-if="current.apply_package" type="warning" :closable="false" show-icon class="mb-8"
               title="落地包只是建议：本页不会建表、不会写 registry、不会改代码。请按 issue-workflow 人工执行。" />
+
+            <!-- #159: 可提交代码草稿（下载到本地仓库, 人工 review 后提交） -->
+            <div v-if="codeDrafts" class="mb-8">
+              <div class="rep-title">可提交代码草稿（下载到本地仓库 → review → 提交）</div>
+              <div class="flex-center gap-8 mb-8" style="flex-wrap: wrap">
+                <el-button size="small" :icon="Download" @click="downloadDraft('migration')">下载迁移草稿 .py</el-button>
+                <el-button size="small" :icon="Download" @click="downloadDraft('model')">下载模型草稿 .py</el-button>
+                <el-tooltip :content="`保存到 ${codeDrafts.migration_file}`" placement="top">
+                  <el-tag size="small" type="info" effect="plain">{{ codeDrafts.migration_file }}</el-tag>
+                </el-tooltip>
+                <el-tag size="small" type="info" effect="plain">down_revision={{ codeDrafts.down_revision || '未读到' }}</el-tag>
+              </div>
+              <el-collapse>
+                <el-collapse-item title="迁移草稿（migration_draft）" name="m">
+                  <pre class="code-block">{{ codeDrafts.migration_draft }}</pre>
+                </el-collapse-item>
+                <el-collapse-item title="模型草稿（model_draft）" name="mo">
+                  <pre class="code-block">{{ codeDrafts.model_draft }}</pre>
+                </el-collapse-item>
+                <el-collapse-item title="registry 种子（seed_draft）" name="s">
+                  <pre class="code-block">{{ codeDrafts.seed_draft }}</pre>
+                </el-collapse-item>
+                <el-collapse-item title="字段覆盖（overrides_draft）" name="o">
+                  <pre class="code-block">{{ codeDrafts.overrides_draft }}</pre>
+                </el-collapse-item>
+                <el-collapse-item title="落地步骤（7 步）" name="st">
+                  <ol class="steps">
+                    <li v-for="(s, i) in codeDrafts.apply_steps" :key="i">{{ s }}</li>
+                  </ol>
+                </el-collapse-item>
+              </el-collapse>
+            </div>
+
             <el-input
               v-if="current.apply_package"
               :model-value="JSON.stringify(current.apply_package, null, 2)"
@@ -326,6 +361,8 @@ const edit = ref({})
 const form = ref({ samplesText: '', tableHint: '', businessNote: '' })
 
 const report = computed(() => current.value?.validator_report || null)
+// #159 可提交代码草稿（apply_package.code_drafts，文本，不落服务器文件）
+const codeDrafts = computed(() => current.value?.apply_package?.code_drafts || null)
 const editable = computed(() => ['draft', 'failed'].includes(current.value?.status))
 const canConfirm = computed(() => current.value?.status === 'draft')
 
@@ -542,6 +579,22 @@ function downloadPackage() {
   URL.revokeObjectURL(a.href)
 }
 
+// #159: 下载代码草稿（.py）—— 由开发者放到本地仓库对应路径，review 后提交
+function downloadDraft(kind) {
+  const d = codeDrafts.value
+  if (!d) return
+  const isMigration = kind === 'migration'
+  const content = isMigration ? d.migration_draft : d.model_draft
+  const name = (isMigration ? d.migration_file : d.model_file).split('/').pop()
+  const blob = new Blob([content], { type: 'text/x-python' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = name
+  a.click()
+  URL.revokeObjectURL(a.href)
+  ElMessage.success(`已下载 ${name}（请放到 ${isMigration ? d.migration_file : d.model_file}）`)
+}
+
 async function reloadAll() {
   await loadDrafts()
   if (current.value) await openDraft(current.value.id)
@@ -570,6 +623,20 @@ onMounted(async () => {
 .rep-title { font-weight: 600; font-size: 12px; margin-bottom: 4px; }
 .rep-line { font-size: 12px; line-height: 1.6; }
 .warn-line { margin-bottom: 6px; }
+/* #159 代码草稿展示 */
+.code-block {
+  margin: 0;
+  padding: 8px;
+  background: #f7f8fa;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.steps { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.7; }
 .rationale p { margin: 4px 0; font-size: 12px; line-height: 1.6; }
 .rationale ul { margin: 4px 0 4px 16px; padding: 0; }
 .rationale li { font-size: 12px; line-height: 1.6; }

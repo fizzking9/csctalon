@@ -619,3 +619,65 @@ def test_apply_generates_package_without_writing_biz(admin_client, db):
         assert _app_code_fingerprint() == code_fp
     finally:
         _cleanup(db, code)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# #159 落地包 → 可提交代码草稿
+# ─────────────────────────────────────────────────────────────────────
+def test_apply_package_contains_parseable_code_drafts(admin_client, db):
+    """落地包含 4 份代码草稿，且 migration_draft 语法可解析、down_revision = 库当前 head。"""
+    import ast
+
+    code = _unique_code()
+    spec = _make_draft_row(db, code=code, table_name="onb_draft_tbl")
+    spec.field_specs = [
+        {"field_name": "order_no", "name_cn": "订单号", "data_type": "string",
+         "semantic_role": "dimension", "is_pk": True, "is_filterable": False, "confidence": 0.98},
+        {"field_name": "amount", "name_cn": "金额", "data_type": "numeric",
+         "semantic_role": "amount", "agg_func": "sum", "unit": "分", "confidence": 0.96},
+        {"field_name": "created_raw", "name_cn": "创建时间", "data_type": "timestamp",
+         "semantic_role": "time", "confidence": 0.95},
+    ]
+    db.commit()
+    try:
+        rc = admin_client.post(
+            f"/api/v1/ai-onboarding/drafts/{spec.id}/confirm",
+            json={"warn_resolutions": _warn_resolutions_all(admin_client, spec.id)},
+        )
+        assert rc.status_code == 200, rc.text
+        ra = admin_client.post(f"/api/v1/ai-onboarding/drafts/{spec.id}/apply")
+        assert ra.status_code == 200, ra.text
+        drafts = ra.json()["data"]["apply_package"]["code_drafts"]
+
+        # ① migration_draft 是可解析的 Python（ast.parse 通过）
+        ast.parse(drafts["migration_draft"])
+        assert f'revision: str = "{drafts["revision_id"]}"' in drafts["migration_draft"]
+        assert "op.create_table(" in drafts["migration_draft"]
+        assert "def downgrade() -> None:" in drafts["migration_draft"]
+        assert "sa.BigInteger()" in drafts["migration_draft"]  # 金额以「分」存整数
+
+        # ② down_revision = 调用时 DB 的 alembic head（真实读库）
+        head = db.execute(text("SELECT version_num FROM alembic_version")).scalar()
+        assert drafts["down_revision"] == head
+        assert drafts["revision_id"] in drafts["migration_file"]
+
+        # ③ model_draft 可解析，含类名与表名
+        ast.parse(drafts["model_draft"])
+        assert '__tablename__ = "onb_draft_tbl"' in drafts["model_draft"]
+        assert "class " in drafts["model_draft"]
+
+        # ④ seed_draft / overrides_draft 结构可解析（去掉注释后 eval 为合法 dict/片段）
+        assert '"code": "%s"' % code in drafts["seed_draft"]
+        assert f'(" {code}", ' not in drafts["overrides_draft"]  # 缩进对齐
+        assert f'("{code}", "amount"): {{"role": "amount", "agg": "sum"' in drafts["overrides_draft"]
+        assert f'("{code}", "order_no")' in drafts["overrides_draft"]  # is_pk/is_filterable 非默认
+        assert f'("{code}", "created_raw")' in drafts["overrides_draft"]
+        # 全默认字段不出现
+        assert f'("{code}", "nonexistent")' not in drafts["overrides_draft"]
+
+        # ⑤ 落地步骤清单存在且含 revision 唯一性核对提示
+        steps = drafts["apply_steps"]
+        assert len(steps) >= 5
+        assert any("grep" in s and drafts["revision_id"] in s for s in steps)
+    finally:
+        _cleanup(db, code)
