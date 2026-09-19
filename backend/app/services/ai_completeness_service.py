@@ -64,9 +64,12 @@ def _line_covered(line: str, kw: str) -> bool:
     tail = line[idx + len(kw):].strip()
     if not tail:
         return False
-    # 数据段 = 关键词后第一个冒号之后的内容(无冒号则整段)
+    # 数据段 = 关键词后第一个冒号(ASCII 或全角)之后的内容(无冒号则整段)
     seg = tail
     ci = tail.find(":")
+    ci2 = tail.find("：")
+    if ci2 != -1 and (ci == -1 or ci2 < ci):
+        ci = ci2
     if ci != -1:
         seg = tail[ci + 1:].strip()
     seg_clean = seg.rstrip("。. ")
