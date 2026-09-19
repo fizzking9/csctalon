@@ -22,6 +22,13 @@ from app.models.data_source import (  # noqa: F401
     SemanticRole,
     SourceType,
 )
+from app.models.data_source_spec import (  # noqa: F401
+    SPEC_STATUS_APPLIED,
+    SPEC_STATUS_CONFIRMED,
+    SPEC_STATUS_DRAFT,
+    SPEC_STATUS_REJECTED,
+    DataSourceSpec,
+)
 from app.models.dept_info_sync import DeptInfoSync  # noqa: F401
 from app.models.device import (  # noqa: F401
     Device,
