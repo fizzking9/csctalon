@@ -282,17 +282,41 @@ sudo bash /opt/csctalon/packages/csctalon-vX.Y.Z-*/deploy/upgrade.sh /opt/csctal
 
 产物：`<output>/csctalon-backup-YYYYmmdd-HHMMSS.tar.gz`
 
-### 5.1 日常自动备份（建议 cron 每日）
+### 5.1 日常自动备份（✅ 生产已配置，2026-09-20 起）
+
+**现状**：生产服务器已落 `/etc/cron.d/csctalon-backup`，**每日 03:30** 自动备份，保留最近 14 份。
 
 ```bash
-# 服务器 crontab -e 加入
-30 3 * * * /opt/csctalon/current/deploy/backup.sh --env-file /opt/csctalon/.env --output /opt/csctalon/backups --keep 14 >> /var/log/csctalon-backup.log 2>&1
+# 查看当前配置
+sudo cat /etc/cron.d/csctalon-backup
+# 查看备份日志（每次执行追加）
+tail -n 50 /var/log/csctalon-backup.log
 ```
 
-**异地保存（强烈建议）**：把 `backups/` 增量 rsync 到另一台机器/对象存储：
+配置内容（`/etc/cron.d/csctalon-backup`，权限 644 root:root）：
+```
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 3 * * * root /opt/csctalon/current/deploy/backup.sh --env-file /opt/csctalon/.env --output /opt/csctalon/backups --keep 14 >> /var/log/csctalon-backup.log 2>&1
+```
+
+要点：
+- 用 `/opt/csctalon/current/` 软链 → **随版本升级自动用最新脚本**，无需改 cron
+- `--keep 14` 只清理 `csctalon-backup-*.tar.gz`；**手工 dump**（如 `pre-org-*.dump`、
+  `wallet_*.sql.gz`、`ai_reports_*.dump`）不匹配该前缀，**不会被自动清理**
+- 日志由 `/etc/logrotate.d/csctalon-backup` 周轮转（保留 4 份、压缩）
+
+> 为什么用 `/etc/cron.d/` 而非 `crontab -e`：文件可审计、可版本化、可 `diff`，
+> 且带 `PATH` 声明不依赖 root 的默认 PATH。旧文档给出的 `crontab -e` 方式仍可用，
+> 但**不要与 `/etc/cron.d/` 重复配置**（会一天跑两次）。
+
+**恢复演练（尚未做，待排期）**：`restore.sh` 在隔离环境走一遍并核对业务表计数，
+确认「备份能真的恢复」而不只是「备份能生成」。
+
+**异地保存（强烈建议，尚未配置）**：把 `backups/` 增量 rsync 到另一台机器/对象存储：
 
 ```bash
-0 4 * * * rsync -avz --delete /opt/csctalon/backups/ root@<备份机>:/backup/csctalon/
+# 需先确认目标机可达与磁盘余量；配好后再加入 /etc/cron.d/
+0 4 * * * root rsync -avz --delete /opt/csctalon/backups/ root@<备份机>:/backup/csctalon/
 ```
 
 ---
