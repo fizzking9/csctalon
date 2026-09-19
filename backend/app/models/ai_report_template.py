@@ -66,6 +66,21 @@ class AiReportTemplate(IDMixin, TimestampMixin, Base):
             "新建未显式传值时按 period/frequency 自动识别(daily/sync-triggered→True)"
         ),
     )
+    detail_level: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="standard", server_default="standard",
+        comment=(
+            "#152 AI 回答模式分级: brief(简报, 快照摘取秒回)/standard(明细, 快照优先+完整性校验"
+            "缺维度补算)/deep(深度, 实时 27b 全量 feed)。模板期望的回答详细级别, 预生成按此组织输出密度"
+        ),
+    )
+    required_dimensions: Mapped[list | None] = mapped_column(
+        JSONB, nullable=True,
+        comment=(
+            "#152 业务维度清单(JSONB 关键词数组, 如 [\"四路\",\"涉诉\",\"挽回\"]): 完整性校验器按此"
+            "检查快照维度覆盖(关键词在 answer_md 中有效出现, 排除\"未提供/暂无\"语境); "
+            "补算/深度实时生成时注入 prompt 要求必须覆盖; NULL=不做完整性校验(简报类)"
+        ),
+    )
     priority: Mapped[int] = mapped_column(
         Integer, nullable=False, default=100,
         comment="多模板同时触发时的执行顺序(小先执行), 默认 100",

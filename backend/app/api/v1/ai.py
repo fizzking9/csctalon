@@ -35,6 +35,62 @@ router = APIRouter(prefix="/ai", tags=["AI 分析助手"])
 # 在 Python ≥3.11 会接受 `20260910` / `2026-W01-1`, 比手写分段校验更松。
 _PLAIN_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# ─────────────────────────────────────────────────────────────────────
+# #152 兜底层 Deep-Req: 用户明确要求深度分析(对答案不满意)的意图词
+# ─────────────────────────────────────────────────────────────────────
+_DEEP_REQ_WORDS = (
+    "太简单", "再详细", "详细点", "详细一点", "详细些", "更详细",
+    "这不对", "说错了", "重新分析", "深度分析", "深挖", "更细",
+)
+
+# 兜底层动作提示(结果前缀, 让用户知道"正在取底层数据按需求重跑", 层层兜底)
+_DEEP_REQ_NOTE = (
+    "【深度分析】我现在去深度分析：取底层数据，按您的需求重新跑一次分析。\n\n"
+)
+
+
+def _has_deep_req_intent(question: str) -> bool:
+    """判定问句是否命中「用户明确要求深度分析」意图(#152 兜底层)。
+
+    命中 → 跳过命中链, 直接实时 27b 按窗口+维度重算, 结果带深度分析提示前缀。
+    仅做字符串包含判定(毫秒级), 不做 LLM 语义识别, 避免误判/延迟。
+    """
+    q = (question or "").strip()
+    if not q:
+        return False
+    ql = q.lower()
+    return any(w in ql for w in _DEEP_REQ_WORDS)
+
+
+def _question_dims(question: str) -> list[str]:
+    """无模板可依时, 按问句 scope 给提示性维度清单(#152 仅提示用)。
+
+    补算/深度实时生成的 required_dimensions 注入: 模板配置优先, 模板缺失时用
+    本函数兜底(退款/投诉/接待三域, 维度词与模板 required_dimensions 同风格)。
+    """
+    dims: list[str] = []
+    if "退款" in question:
+        dims += ["总金额", "笔数", "四路", "涉诉", "挽回"]
+    if "投诉" in question:
+        dims += ["登记", "处理", "积压"]
+    if "接待" in question:
+        dims += ["接待量", "会话数", "专项"]
+    return dims
+
+
+def _template_for(db, report) -> "object | None":
+    """按命中报告查其模板(L2 命中路径取 required_dimensions / #144 短路用)。"""
+    if report is None:
+        return None
+    tid = getattr(report, "template_id", None)
+    if not tid:
+        return None
+    from app.models.ai_report_template import AiReportTemplate
+    try:
+        return db.query(AiReportTemplate).get(tid)
+    except Exception:  # noqa: BLE001  查模板失败仅返回 None, 不阻塞主流程
+        return None
+
 
 def _get_last_llm_model(db) -> str | None:
     """#116 取最近一条 source=ai_analyze 的成功 LLM 调用命中的 provider_code+model。
@@ -351,89 +407,239 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
     _win_date = eff["date"] or (
         eff["start"] if eff["start"] and eff["start"] == eff["end"] else None
     )
+
+    # #152 回答模式分级: 默认 live(实时 LLM, 兼容现行兜底); 命中快照后按问句
+    #   意图重定为 brief/standard/deep; 兜底层 deep_req 跳过命中链直接实时。
+    #   _live_dims: 实时生成时注入的 required_dimensions(模板配置或问句兜底清单)
+    #   _source: 数据来源(snapshot/snapshot_reuse/live_llm), 随响应回给前端标记
+    _mode = "live"
+    _source = "live_llm"
+    _live_dims: list | None = None
+    _deep_req = False
+
     if not payload.force_llm:
-        _match_db = SessionLocal()
-        try:
-            _matched, _tmpl = match_template_report(
-                _match_db, q, eff["period"], _win_date,
-                win_start=eff["start"], win_end=eff["end"],
-            )
+        if _has_deep_req_intent(q):
+            # #152 兜底层 Deep-Req: 用户明确要求深度分析(太简单/再详细/重新分析/深挖...)
+            #   跳过命中链, 直接实时 27b 按窗口+维度重算, 结果带深度分析提示前缀,
+            #   让用户知道"正在取底层数据按需求重跑"(层层兜底最后一层)。
+            _mode = "deep_req"
+            _deep_req = True
+            _live_dims = _question_dims(q) or None
+            logger.info("ai #152 deep_req 兜底: question=%r 跳过命中链直接实时重算", q[:30])
+        else:
+            from app.services.ai_completeness_service import check_dimensions
+            from app.services.ai_mode_service import classify_question
+            from app.services.ai_recompute_service import recompute
 
-            # L1 命中: 走摘取层(不返回全文)
-            if _matched is not None:
-                _ext = await extract_section(_match_db, q, _matched, _tmpl)
-                if _ext["result_md"]:
-                    # #147: 命中路径也落库(区分 full 全量/ section 局部), 供历史复查
-                    _hit_mode = "full" if _ext["confidence"] >= 0.9 else "section"
-                    _hit_id = _persist_hit(
-                        _match_db, _result_md=_ext["result_md"],
-                        _hit_mode=_hit_mode, _src_report=_matched, _tmpl=_tmpl,
-                    )
-                    logger.info("ai extract L1 命中: question=%r report_id=%s template=%s "
-                                "extract_conf=%.2f out_chars=%d hit_mode=%s hit_row=%s",
-                                q[:30], _matched.id,
-                                _tmpl.code if _tmpl else None,
-                                _ext["confidence"], len(_ext["result_md"]),
-                                _hit_mode, _hit_id)
-                    return R(data={"task_id": None, "status": "success",
-                                   "result_md": _ext["result_md"],
-                                   "report_id": _hit_id or _matched.id,
-                                   "hit_mode": _hit_mode,
-                                   "matched_template": _tmpl.code if _tmpl else None,
-                                   "extract_confidence": _ext["confidence"],
-                                   **window_info})
-                # L1 摘取失败/need_clarify → L3 clarify(用摘取层返回的 clarify_options)
-                logger.info("ai extract L1 命中但摘取失败 → clarify: report_id=%s",
-                            _matched.id)
-                return R(data={"task_id": None, "status": "clarify",
-                               "clarify_options": _ext.get("clarify_options", []),
-                               "message": "未命中明确段落, 请选择您关心的部分或换种表述",
-                               **window_info})
+            _match_db = SessionLocal()
+            try:
+                _matched, _tmpl = match_template_report(
+                    _match_db, q, eff["period"], _win_date,
+                    win_start=eff["start"], win_end=eff["end"],
+                )
 
-            # L1 未命中 → L2 27b 语义匹配
-            _cands = list_candidates(_match_db, eff["period"], _win_date,
-                                     eff["start"], eff["end"])
-            _sem = await semantic_match(_match_db, q, _cands)
-            if _sem["hit_report"] is not None:
-                _ext2 = await extract_section(_match_db, q, _sem["hit_report"], None)
-                if _ext2["result_md"]:
-                    # #147: L2 命中走摘取层, template 未匹配 → 统一 section 局部粒度, 亦落库
-                    _hit_id = _persist_hit(
-                        _match_db, _result_md=_ext2["result_md"],
-                        _hit_mode="section", _src_report=_sem["hit_report"], _tmpl=None,
-                    )
-                    logger.info("ai extract L2 命中: question=%r report_id=%s "
-                                "semantic_conf=%.2f out_chars=%d hit_row=%s",
-                                q[:30], _sem["hit_report"].id,
-                                _sem["confidence"], len(_ext2["result_md"]), _hit_id)
-                    return R(data={"task_id": None, "status": "success",
-                                   "result_md": _ext2["result_md"],
-                                   "report_id": _hit_id or _sem["hit_report"].id,
-                                   "hit_mode": "section",
-                                   "extract_confidence": _ext2["confidence"],
-                                   "semantic_confidence": _sem["confidence"],
-                                   **window_info})
-                # L2 命中但摘取失败 → L3 clarify
-                logger.info("ai extract L2 命中但摘取失败 → clarify: report_id=%s",
-                            _sem["hit_report"].id)
-                return R(data={"task_id": None, "status": "clarify",
-                               "clarify_options": _ext2.get("clarify_options", []),
-                               "message": "未命中明确段落, 请选择您关心的部分或换种表述",
-                               **window_info})
+                if _matched is not None:
+                    # L1 命中 → 按问句意图分级
+                    _mode = classify_question(q)["mode"]
+                    if _mode == "brief":
+                        # 简报: 快照摘取秒回(快照即最终, 时点口径)
+                        _ext = await extract_section(_match_db, q, _matched, _tmpl)
+                        if _ext["result_md"]:
+                            _hit_mode = "full" if _ext["confidence"] >= 0.9 else "section"
+                            _hit_id = _persist_hit(
+                                _match_db, _result_md=_ext["result_md"],
+                                _hit_mode=_hit_mode, _src_report=_matched, _tmpl=_tmpl,
+                            )
+                            logger.info("ai #152 L1 brief: question=%r report_id=%s template=%s "
+                                        "extract_conf=%.2f out_chars=%d hit_mode=%s hit_row=%s",
+                                        q[:30], _matched.id,
+                                        _tmpl.code if _tmpl else None,
+                                        _ext["confidence"], len(_ext["result_md"]),
+                                        _hit_mode, _hit_id)
+                            return R(data={"task_id": None, "status": "success",
+                                           "result_md": _ext["result_md"],
+                                           "report_id": _hit_id or _matched.id,
+                                           "hit_mode": _hit_mode,
+                                           "matched_template": _tmpl.code if _tmpl else None,
+                                           "extract_confidence": _ext["confidence"],
+                                           "mode": "brief", "source": "snapshot",
+                                           **window_info})
+                        # 摘取失败/need_clarify → L3 clarify
+                        logger.info("ai #152 L1 brief 摘取失败 → clarify: report_id=%s", _matched.id)
+                        return R(data={"task_id": None, "status": "clarify",
+                                       "clarify_options": _ext.get("clarify_options", []),
+                                       "message": "未命中明确段落, 请选择您关心的部分或换种表述",
+                                       "mode": "brief", "source": "snapshot",
+                                       **window_info})
 
-            # L2 未命中: 有候选报告 → L3 clarify(用第一份报告的 H2 标题列表作为 options);
-            #   无候选 → 走原实时 LLM 路径(_runner 兜底, 保留兼容)
-            if _cands:
-                _clarify = list(split_sections(_cands[0].answer_md or "").keys())
-                logger.info("ai extract L3 clarify(无命中): question=%r options=%d",
-                            q[:30], len(_clarify))
-                return R(data={"task_id": None, "status": "clarify",
-                               "clarify_options": _clarify,
-                               "message": "未命中明确段落, 请选择您关心的部分或换种表述",
-                               **window_info})
-            logger.info("ai extract L0/L1/L2 全部未命中且无候选 → 走实时 LLM 兜底")
-        finally:
-            _match_db.close()
+                    if _mode == "deep":
+                        # 深度: 不走快照, 直接实时 27b 全量 feed(带模板维度注入)
+                        _live_dims = (getattr(_tmpl, "required_dimensions", None) or []) or _question_dims(q)
+                        _live_dims = _live_dims or None
+                        logger.info("ai #152 L1 deep: question=%r report_id=%s template=%s 转实时重算",
+                                    q[:30], _matched.id, _tmpl.code if _tmpl else None)
+                    else:
+                        # 明细: 完整性校验 → 缺维度补算(同窗口快照优先)
+                        _ck = check_dimensions(_match_db, _matched, _tmpl)
+                        if _ck["complete"]:
+                            _ext = await extract_section(_match_db, q, _matched, _tmpl)
+                            if _ext["result_md"]:
+                                _hit_mode = "full" if _ext["confidence"] >= 0.9 else "section"
+                                _hit_id = _persist_hit(
+                                    _match_db, _result_md=_ext["result_md"],
+                                    _hit_mode=_hit_mode, _src_report=_matched, _tmpl=_tmpl,
+                                )
+                                logger.info("ai #152 L1 standard(维度齐全): question=%r report_id=%s "
+                                            "out_chars=%d hit_mode=%s",
+                                            q[:30], _matched.id, len(_ext["result_md"]), _hit_mode)
+                                return R(data={"task_id": None, "status": "success",
+                                               "result_md": _ext["result_md"],
+                                               "report_id": _hit_id or _matched.id,
+                                               "hit_mode": _hit_mode,
+                                               "matched_template": _tmpl.code if _tmpl else None,
+                                               "extract_confidence": _ext["confidence"],
+                                               "mode": "standard", "source": "snapshot",
+                                               **window_info})
+                            logger.info("ai #152 L1 standard 摘取失败 → clarify: report_id=%s", _matched.id)
+                            return R(data={"task_id": None, "status": "clarify",
+                                           "clarify_options": _ext.get("clarify_options", []),
+                                           "message": "未命中明确段落, 请选择您关心的部分或换种表述",
+                                           "mode": "standard", "source": "snapshot",
+                                           **window_info})
+                        # 缺维度 → 补算
+                        _win = {**eff, "window_label": win.window_label,
+                                "window_source": win.window_source}
+                        _re = await recompute(_match_db, q, _win, _tmpl)
+                        if _re["source"] == "snapshot_reuse" and _re.get("result_md"):
+                            _hit_mode = "full" if _re.get("confidence", 0) >= 0.9 else "section"
+                            _hit_id = _persist_hit(
+                                _match_db, _result_md=_re["result_md"],
+                                _hit_mode=_hit_mode, _src_report=_matched, _tmpl=_tmpl,
+                            )
+                            logger.info("ai #152 L1 standard 补算(同窗口快照复用): question=%r "
+                                        "report_id=%s reuse_id=%s out_chars=%d",
+                                        q[:30], _matched.id, _re["report_id"], len(_re["result_md"]))
+                            return R(data={"task_id": None, "status": "success",
+                                           "result_md": _re["result_md"],
+                                           "report_id": _hit_id or _matched.id,
+                                           "hit_mode": _hit_mode,
+                                           "matched_template": _tmpl.code if _tmpl else None,
+                                           "extract_confidence": _re.get("confidence", 0),
+                                           "recomputed_from": _re["report_id"],
+                                           "mode": "standard", "source": "snapshot_reuse",
+                                           **window_info})
+                        # 无同窗口完整快照 → 实时 27b(带 required_dimensions)
+                        _live_dims = (getattr(_tmpl, "required_dimensions", None) or []) or _question_dims(q)
+                        _live_dims = _live_dims or None
+                        logger.info("ai #152 L1 standard 缺维度且无完整快照 → 实时补算: "
+                                    "question=%r report_id=%s missing=%s",
+                                    q[:30], _matched.id, _ck["missing"])
+                else:
+                    # L1 未命中 → L2 27b 语义匹配
+                    _cands = list_candidates(_match_db, eff["period"], _win_date,
+                                             eff["start"], eff["end"])
+                    _sem = await semantic_match(_match_db, q, _cands)
+                    if _sem["hit_report"] is not None:
+                        _hit2 = _sem["hit_report"]
+                        _tmpl2 = _template_for(_match_db, _hit2)
+                        _mode = classify_question(q)["mode"]
+                        if _mode == "brief":
+                            _ext2 = await extract_section(_match_db, q, _hit2, _tmpl2)
+                            if _ext2["result_md"]:
+                                _hit_id = _persist_hit(
+                                    _match_db, _result_md=_ext2["result_md"],
+                                    _hit_mode="section", _src_report=_hit2, _tmpl=_tmpl2,
+                                )
+                                logger.info("ai #152 L2 brief: question=%r report_id=%s "
+                                            "semantic_conf=%.2f out_chars=%d hit_row=%s",
+                                            q[:30], _hit2.id,
+                                            _sem["confidence"], len(_ext2["result_md"]), _hit_id)
+                                return R(data={"task_id": None, "status": "success",
+                                               "result_md": _ext2["result_md"],
+                                               "report_id": _hit_id or _hit2.id,
+                                               "hit_mode": "section",
+                                               "extract_confidence": _ext2["confidence"],
+                                               "semantic_confidence": _sem["confidence"],
+                                               "mode": "brief", "source": "snapshot",
+                                               **window_info})
+                            logger.info("ai #152 L2 brief 摘取失败 → clarify: report_id=%s", _hit2.id)
+                            return R(data={"task_id": None, "status": "clarify",
+                                           "clarify_options": _ext2.get("clarify_options", []),
+                                           "message": "未命中明确段落, 请选择您关心的部分或换种表述",
+                                           "mode": "brief", "source": "snapshot",
+                                           **window_info})
+                        if _mode == "deep":
+                            _live_dims = (getattr(_tmpl2, "required_dimensions", None) or []) or _question_dims(q)
+                            _live_dims = _live_dims or None
+                            logger.info("ai #152 L2 deep: question=%r report_id=%s 转实时重算",
+                                        q[:30], _hit2.id)
+                        else:
+                            _ck2 = check_dimensions(_match_db, _hit2, _tmpl2)
+                            if _ck2["complete"]:
+                                _ext2 = await extract_section(_match_db, q, _hit2, _tmpl2)
+                                if _ext2["result_md"]:
+                                    _hit_id = _persist_hit(
+                                        _match_db, _result_md=_ext2["result_md"],
+                                        _hit_mode="section", _src_report=_hit2, _tmpl=_tmpl2,
+                                    )
+                                    logger.info("ai #152 L2 standard(维度齐全): question=%r "
+                                                "report_id=%s out_chars=%d hit_row=%s",
+                                                q[:30], _hit2.id, len(_ext2["result_md"]), _hit_id)
+                                    return R(data={"task_id": None, "status": "success",
+                                                   "result_md": _ext2["result_md"],
+                                                   "report_id": _hit_id or _hit2.id,
+                                                   "hit_mode": "section",
+                                                   "extract_confidence": _ext2["confidence"],
+                                                   "semantic_confidence": _sem["confidence"],
+                                                   "mode": "standard", "source": "snapshot",
+                                                   **window_info})
+                                logger.info("ai #152 L2 standard 摘取失败 → clarify: report_id=%s", _hit2.id)
+                                return R(data={"task_id": None, "status": "clarify",
+                                               "clarify_options": _ext2.get("clarify_options", []),
+                                               "message": "未命中明确段落, 请选择您关心的部分或换种表述",
+                                               "mode": "standard", "source": "snapshot",
+                                               **window_info})
+                            _win = {**eff, "window_label": win.window_label,
+                                    "window_source": win.window_source}
+                            _re2 = await recompute(_match_db, q, _win, _tmpl2)
+                            if _re2["source"] == "snapshot_reuse" and _re2.get("result_md"):
+                                _hit_id = _persist_hit(
+                                    _match_db, _result_md=_re2["result_md"],
+                                    _hit_mode="section", _src_report=_hit2, _tmpl=_tmpl2,
+                                )
+                                logger.info("ai #152 L2 standard 补算(同窗口快照复用): question=%r "
+                                            "report_id=%s reuse_id=%s out_chars=%d",
+                                            q[:30], _hit2.id, _re2["report_id"], len(_re2["result_md"]))
+                                return R(data={"task_id": None, "status": "success",
+                                               "result_md": _re2["result_md"],
+                                               "report_id": _hit_id or _hit2.id,
+                                               "hit_mode": "section",
+                                               "extract_confidence": _re2.get("confidence", 0),
+                                               "semantic_confidence": _sem["confidence"],
+                                               "recomputed_from": _re2["report_id"],
+                                               "mode": "standard", "source": "snapshot_reuse",
+                                               **window_info})
+                            _live_dims = (getattr(_tmpl2, "required_dimensions", None) or []) or _question_dims(q)
+                            _live_dims = _live_dims or None
+                            logger.info("ai #152 L2 standard 缺维度且无完整快照 → 实时补算: "
+                                        "question=%r report_id=%s missing=%s",
+                                        q[:30], _hit2.id, _ck2["missing"])
+                    elif _cands:
+                        # L2 未命中: 有候选报告 → L3 clarify(用第一份报告的 H2 标题列表作为 options)
+                        _clarify = list(split_sections(_cands[0].answer_md or "").keys())
+                        logger.info("ai extract L3 clarify(无命中): question=%r options=%d",
+                                    q[:30], len(_clarify))
+                        return R(data={"task_id": None, "status": "clarify",
+                                       "clarify_options": _clarify,
+                                       "message": "未命中明确段落, 请选择您关心的部分或换种表述",
+                                       "mode": "live", "source": "live_llm",
+                                       **window_info})
+                    else:
+                        # L2 未命中且无候选 → 走实时 LLM 兜底(现行行为)
+                        _mode = "live"
+                        logger.info("ai extract L0/L1/L2 全部未命中且无候选 → 走实时 LLM 兜底")
+            finally:
+                _match_db.close()
 
     async def _runner(task):
         """后台执行: 建独立 Session 组装 feed → 调 LLM → 写回 task + 落 ai_reports。"""
@@ -441,10 +647,13 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
         try:
             db = SessionLocal()
             try:
+                # #152 实时生成注入 required_dimensions: 模板配置(命中链 deep/standard
+                #   缺快照补算)或问句兜底清单(deep_req), 让 LLM 按维度全覆盖输出。
                 messages = ai_feed.build_messages(
                     db, eff["period"], eff["date"], q,
                     start=eff["start"], end=eff["end"],
                     window_label=win.window_label, window_source=win.window_source,
+                    required_dimensions=_live_dims,
                 )
             finally:
                 db.close()
@@ -469,6 +678,10 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
             finally:
                 await release(handle)
             task.result_md = str(llm_result)
+            # #152 兜底层 Deep-Req: 结果前缀提示"正在取底层数据按需求重跑"(层层兜底最后一层),
+            #   让用户知道这是深度重算而非又一遍快照摘取。
+            if _deep_req:
+                task.result_md = _DEEP_REQ_NOTE + (task.result_md or "")
             total_ms_now = int((time.perf_counter() - t0) * 1000)
             llm_ms_now = total_ms_now - build_ms
             task.usage = llm_result.usage
@@ -538,10 +751,13 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                        "llm_ms": task.llm_ms,
                        "build_ms": task.build_ms,
                        "llm_model": task.llm_model,
+                       # #152 回答模式分级: mode/source 随结果回前端标记(实时路径)
+                       "mode": _mode, "source": _source,
                        **window_info})
     if task is not None and task.status == "failed":
         return R(data={"task_id": task_id, "status": "failed",
                        "error": task.error or "分析失败(未捕获到错误详情, 请查服务端日志)",
+                       "mode": _mode, "source": _source,
                        **window_info})
     # 超时未完成 → 回 task_id 走轮询。
     # ⚠️ 2026-09-11 (#66): 生产实测 36% 请求走这条路径, 而前端在此之前只有一次轮询就断链
@@ -550,6 +766,7 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
         "task_id": task_id, "status": "running",
         "message": "分析仍在生成中, 请继续查询或稍后在助手面板查看",
         "waited_s": round(wait_s, 1),
+        "mode": _mode, "source": _source,
         **window_info,
     })
 

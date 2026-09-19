@@ -683,12 +683,17 @@ def _select_feed_sections(feed: dict, scopes) -> dict:
 
 def build_messages(db: Session, period: str, date: str | None, question: str,
                    start: str | None = None, end: str | None = None,
-                   window_label: str | None = None, window_source: str | None = None) -> list[dict]:
+                   window_label: str | None = None, window_source: str | None = None,
+                   required_dimensions: list | None = None) -> list[dict]:
     """构造发给模型的 messages(三层 Prompt)。
 
     window_label/window_source(工单 #66): 上层(ai.py)把"窗口怎么定出来的"传下来,
     既写进 Prompt 让模型明确当前窗口, 也便于排查 —— 自然语言推断错误时, 从这里就能看出
     模型被喂的是哪个窗口, 而不是靠猜。
+
+    required_dimensions(工单 #152): 模板配置的业务维度清单(关键词数组), 追加到
+    business_ctx 要求本次回答必须覆盖这些维度, 缺失维度写"暂无"不得省略。补算/
+    深度实时生成与预生成共用, _SYSTEM_PROMPT 铁律不动(#134 H2 锚点纪律)。
     """
     feed = _build_feed(db, period, date, start=start, end=end)
     # #98 层2: 按问句 scope 切 feed 段(只留命中业务段+恒量段), 降输入 token。
@@ -714,6 +719,14 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
         f" {win_label}; date_start={feed.get('date_start')}; date_end={feed.get('date_end')}; " +
         f" generated_at={feed.get('generated_at')}"
     )
+    # #152 维度覆盖要求(模板配置的 required_dimensions): 本次回答必须覆盖这些维度,
+    #   缺失的写"暂无", 不得省略维度(与铁律 1/3 配套, 防"未提供"式过简回答)。
+    if required_dimensions:
+        _dims = "、".join(str(d) for d in required_dimensions if d)
+        business_ctx += (
+            "\n\n【本次必须覆盖维度】" +
+            f"{_dims}(每个维度都要给出数据, 缺失的如实写\"暂无/未提供\", 不得省略该维度)"
+        )
     # 关注点/分析视角(#26, A-20260904-003 v1.2): DB 配置的建议性指导, 注入于口径与数据之间。
     # 空库/无命中 → 空串, 保持改造前输出一致(回归安全)。仅作运营侧重参考, 数据仍以 feed 为准。
     focus = ""

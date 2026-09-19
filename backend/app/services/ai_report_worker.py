@@ -233,6 +233,8 @@ def generate_for_template(db: Session, template: AiReportTemplate,
                 f"{pregen_label})"
             ),
             window_source="template",
+            # #152 预生成按模板 required_dimensions 维度全覆盖生成(加维度只改配置)
+            required_dimensions=template.required_dimensions,
         )
     except Exception as e:  # noqa: BLE001  build_messages 失败不阻塞 worker
         logger.error("ai_report_worker build_messages failed (template=%s): %s", template.code, e)
