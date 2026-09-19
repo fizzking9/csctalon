@@ -547,6 +547,21 @@ def test_ai_analyze_disabled_503(manager_client):
         settings.LLM_ENABLED = old
 
 
+def test_ai_analyze_chitchat_ok_when_llm_disabled(manager_client):
+    """#150: LLM_ENABLED=false 时闲聊问句仍应答(闲聊不需要 LLM), 而非 503。"""
+    old = settings.LLM_ENABLED
+    settings.LLM_ENABLED = False
+    try:
+        r = manager_client.post("/api/v1/ai/analyze", json={"question": "吃饭了没"})
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data.get("hit_mode") == "chitchat"
+        assert data.get("llm_model") == "chitchat"
+        assert "经营数据" in data.get("result_md", "")
+    finally:
+        settings.LLM_ENABLED = old
+
+
 def test_ai_config_structure(manager_client):
     """config → enabled/periods/notice。"""
     r = manager_client.get("/api/v1/ai/config")

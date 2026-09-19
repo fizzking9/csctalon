@@ -207,7 +207,6 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
 
     #116 持久化: 任务 success 后落 ai_reports 表(归属 current_user), 响应增 report_id/usage/total_ms/llm_ms。
     """
-    _require_enabled()
     q = (payload.question or "").strip()
     if not q:
         raise HTTPException(400, "question 不能为空")
@@ -216,31 +215,18 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
     win = _AiWindow(payload)
     win.resolve(q)
 
-    # #150 闲聊闸门(毫秒短路): 纯寒暄/闲聊问句(吃饭了没/你好/谢谢...), 不进
-    #   任何 LLM 链路(含 LLM 时间兜底/语义匹配/摘取), 直接返回固定文案。
-    #   位置在窗口解析后、LLM 时间兜底前: 闲聊没有时间意图, 不该触发
-    #   LLM 时间解析(那是"慢"的来源之一); 含业务词的长问句
-    #   ("你好, 今日退款如何")一律放行, 零误杀。
+    # #150 闲聊闸门(毫秒短路, 不依赖 LLM_ENABLED): 纯寒暄/闲聊问句(吃饭了没/
+    #   你好/谢谢...), 不进任何 LLM 链路(含 LLM 时间兜底/语义匹配/摘取), 直接
+    #   返回固定引导文案。位置在窗口解析后、_require_enabled 前:
+    #   ① 闲聊没有时间意图, 不该触发 LLM 时间解析(慢的来源之一);
+    #   ② 闲聊不需要 LLM: LLM_ENABLED=false(助手禁用)时也能应答引导文案而非 503;
+    #   ③ 含业务词的长问句("你好, 今日退款如何")一律放行, 零误杀。
+    #   #150 决策: 闲聊不落库(无经营信息, 落库只污染「我的待办」历史)。
     from app.services.ai_rule_engine import try_chitchat_answer
     _chitchat_md = try_chitchat_answer(q)
     if _chitchat_md is not None:
         _eff = win.effective()
         logger.info("ai chitchat 短路: question=%r out_chars=%d", q[:30], len(_chitchat_md))
-        # 落库(私有、hit_mode=chitchat, 供「我的待办·AI 报告历史」留痕)
-        from app.services.ai_report_service import save_report
-        _chat_db = SessionLocal()
-        try:
-            save_report(
-                _chat_db,
-                task_id=None, user_id=user_id, question=q,
-                period=_eff["period"], date=_eff["date"],
-                start=_eff["start"], end=_eff["end"],
-                window_source="chitchat", window_label="闲聊(未生成数据分析)",
-                answer_md=_chitchat_md, llm_model="chitchat",
-                llm_ms=0, total_ms=0, tokens=None, hit_mode="chitchat",
-            )
-        finally:
-            _chat_db.close()
         return R(data={"task_id": None, "status": "success",
                        "result_md": _chitchat_md,
                        "report_id": None, "hit_mode": "chitchat",
@@ -251,6 +237,9 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                        "period": _eff["period"],
                        "start": _eff["start"],
                        "end": _eff["end"]})
+
+    # 从这里开始才需要 LLM(闲聊闸门以上均无需 LLM 即可应答)
+    _require_enabled()
 
     # #98 (2026-09-15) LLM 兜底: 正则未命中(window_source=="period")时, 调 LLM 语义解析
     #   仅兜底路径, 95% 常规表达走正则(<1ms); LLM 失败/低置信度静默退回 period。
