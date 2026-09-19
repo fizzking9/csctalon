@@ -29,23 +29,37 @@ logger = logging.getLogger(__name__)
 # "缺失" 覆盖"数据缺失"语境(实测 09-18 快照四路行写"数据缺失——未提供 A/B/C/D",
 # 若不在标记表, 同句"四路退款金额及涉诉率数据缺失"会被误判为已覆盖 → 触发补算更诚实)
 _MISSING_MARKERS = ("未提供", "暂无", "未统计", "无数据", "缺失")
+# 宽松形态: "未直接提供"/"未在给定 JSON 中提供"等(实测 LLM 措辞), 行内 未…提供
+_MISSING_RE = re.compile(r"未[^。；\n]{0,10}提供")
+
+
+def _has_missing_mark(text: str) -> bool:
+    """text 是否含缺失标记(精确词表 + 宽松"未…提供"正则)。"""
+    if any(m in text for m in _MISSING_MARKERS):
+        return True
+    return _MISSING_RE.search(text) is not None
 
 # 关键词后跟这些结尾也算空(如 "四路:", "四路：" 后无内容)
 _EMPTY_TAILS = {"", ":", "：", "—", "-", "无", "无。", "无。"}
 
 
 def _line_covered(line: str, kw: str) -> bool:
-    """判定单个 md 行中关键词 kw 是否"有效出现"(未紧跟缺失标记)。
+    """判定单个 md 行中关键词 kw 是否"有效出现"(未落在缺失语境)。
 
-    规则: 取关键词在该行的首次出现位置, 再取其后**第一个冒号之后**的内容作为数据段:
-      - 数据段为空/只剩分隔符/「无」 → 空(未覆盖)
-      - 数据段首个片段(到逗号/顿号为止)含"未提供/暂无"等标记 → 空(未覆盖)
-        (如「四路分布: 未提供」; 但「四路分布: 线上直退 23 笔, 线下未提供」
-        首个片段是数据 → 覆盖)
-      - 否则 → 覆盖(如「四路分布: A 线上直退 23 笔」)
+    规则(实测 09-18 快照修正: LLM 缺数据时写法多样):
+      a. 关键词**前 30 字符**含缺失标记 → 空(如「数据中未直接**提供**四路金额」)
+      b. 关键词后数据段首片段(到逗号/顿号为止)**含数字** → 覆盖
+         (如「四路分布: 线上直退 23 笔, 线下未提供」→ 首片段是数据, 不算空)
+      c. 首片段或数据段整体含缺失标记 → 空
+         (如「四路: 未提供」「退款四路金额…未在给定 JSON 中**提供**」)
+      d. 否则 → 覆盖(如「四路分布: A 线上直退, B 线下」)
     """
     idx = line.lower().find(kw.lower())
     if idx == -1:
+        return False
+    # a. 关键词前的紧邻文本含缺失标记 → 空
+    before = line[max(0, idx - 30):idx]
+    if _has_missing_mark(before):
         return False
     tail = line[idx + len(kw):].strip()
     if not tail:
@@ -60,9 +74,14 @@ def _line_covered(line: str, kw: str) -> bool:
         return False
     if seg_clean in _EMPTY_TAILS:
         return False
-    # 首个片段(到逗号/顿号/分号为止)含缺失标记 → 声明了但内容为空
     first_part = re.split(r"[,，、;；]", seg_clean, 1)[0].strip()
-    if any(m in first_part for m in _MISSING_MARKERS):
+    # b. 首片段含数字(明确数据) → 覆盖(不受 c 中"部分未提供"误伤)
+    if re.search(r"\d", first_part):
+        return True
+    # c. 首片段或数据段整体含缺失标记 → 空
+    if _has_missing_mark(first_part):
+        return False
+    if _has_missing_mark(seg_clean):
         return False
     return True
 

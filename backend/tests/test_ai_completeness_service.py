@@ -89,6 +89,32 @@ def test_missing_data_context_counts_as_empty():
     assert out["missing"] == ["四路"]
 
 
+def test_marker_before_keyword_counts_as_empty():
+    """缺失标记在关键词**前**(实测: "数据中未直接提供四路 (A/B/C/D) 金额")→ 空。"""
+    md = "**退款总量**：数据中未直接提供四路 (A/B/C/D) 金额合计及涉诉率明细，仅有时序笔数。"
+    t = _mk_tmpl(["四路"])
+    out = check_dimensions(db=None, report=_mk_report(md), template=t)
+    assert out["complete"] is False
+    assert out["missing"] == ["四路"]
+
+
+def test_marker_in_seg_after_keyword_counts_as_empty():
+    """缺失标记在关键词后数据段整体(实测: "退款四路金额…未在给定 JSON 中提供")→ 空。"""
+    md = "退款四路金额、涉诉率等详细金额数据未在给定 JSON 中提供，以上分析基于笔数及挽回率数据。"
+    t = _mk_tmpl(["四路"])
+    out = check_dimensions(db=None, report=_mk_report(md), template=t)
+    assert out["complete"] is False
+    assert out["missing"] == ["四路"]
+
+
+def test_number_in_first_segment_shortcircuits_marker():
+    """首片段含数字(有真实数据)时, 行内"未提供"不再误伤 → 覆盖。"""
+    md = "四路分布: 线上直退 23 笔, 线下未提供"
+    t = _mk_tmpl(["四路"])
+    out = check_dimensions(db=None, report=_mk_report(md), template=t)
+    assert out["complete"] is True
+
+
 # ── 同义词数组条目 ───────────────────────────────────────
 def test_synonym_entry_any_hit_covered():
     """条目为同义词数组时, 任一词命中且非空即覆盖。"""
