@@ -936,11 +936,29 @@ def upsert_wallet(df: pd.DataFrame, mapping: dict[str, str], db: Session, result
         existing_count = db.scalar(select(func.count()).select_from(WalletWithdrawal).where(or_(*conditions))) or 0
 
     # 3. 插入,冲突时跳过
-    db.execute(
-        pg_insert(WalletWithdrawal)
-        .values(unique_rows)
-        .on_conflict_do_nothing(constraint="uq_wallet_withdrawals_business")
-    )
+    # ★ #161 治理: device_sn 为 NULL 的行原 6 列约束**对 NULL 不去重**(PG NULL≠NULL),
+    #   故 on_conflict_do_nothing(constraint=...) 匹配不上 → 每次同步都重复插入
+    #   (C-P1-7 / #160 事故: 累积 40603 行重复)。
+    #   现按 device_sn 是否为空**分流到两个冲突目标**:
+    #     - 非空: 原 6 列约束 uq_wallet_withdrawals_business
+    #     - 为空: 部分唯一索引 uq_wallet_withdrawals_null_sn (5 列, WHERE device_sn IS NULL)
+    _null_sn_rows = [r for r in unique_rows if r.get("device_sn") is None]
+    _sn_rows = [r for r in unique_rows if r.get("device_sn") is not None]
+    if _sn_rows:
+        db.execute(
+            pg_insert(WalletWithdrawal)
+            .values(_sn_rows)
+            .on_conflict_do_nothing(constraint="uq_wallet_withdrawals_business")
+        )
+    if _null_sn_rows:
+        db.execute(
+            pg_insert(WalletWithdrawal)
+            .values(_null_sn_rows)
+            .on_conflict_do_nothing(
+                index_elements=["account_id", "op_type", "op_time", "operator", "op_amount"],
+                index_where=text("device_sn IS NULL"),
+            )
+        )
     db.flush()
     # ⚠️ 2026-09-01 审计修复: 原 result.inserted += len(unique_rows) - existing_count
     #   在「BMS 页面时间窗口未设置成功、拉到大量已存在旧流水」时(existing_count > unique_rows),

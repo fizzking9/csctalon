@@ -5,7 +5,16 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -21,6 +30,19 @@ class WalletWithdrawal(QualityMixin, IDMixin, TimestampMixin, Base):
         UniqueConstraint(
             "account_id", "op_type", "op_time", "operator", "op_amount", "device_sn",
             name="uq_wallet_withdrawals_business"
+        ),
+        # ★ #161 治理（C-P1-7 / #160 事故）：上面 6 列约束在 device_sn 为 NULL 时**完全失效**
+        #   （PostgreSQL 唯一约束对 NULL 不去重：NULL ≠ NULL）→ 高频同步对同一笔
+        #   device_sn 为空的提现反复插入，累积 40603 行重复（其中 38458 行为「提现申请-冻结」）。
+        #   故补一个**部分唯一索引**：只覆盖 device_sn IS NULL 的行，用 5 列去重；
+        #   `NULLS NOT DISTINCT`（PG15+）保证其余列即便含 NULL 也按「NULL 相等」去重。
+        #   ⚠️ 与迁移 h3i4j5k6l7m8 镜像，改一处须同步另一处。
+        Index(
+            "uq_wallet_withdrawals_null_sn",
+            "account_id", "op_type", "op_time", "operator", "op_amount",
+            unique=True,
+            postgresql_where=text("device_sn IS NULL"),
+            postgresql_nulls_not_distinct=True,
         ),
     )
 

@@ -101,7 +101,7 @@ def test_build_wide_batch_assembles_row(db):
         service_item="退费", service_category="投诉",
         finish_time=datetime(2026, 6, 1, tzinfo=timezone.utc),
     ))
-    w = WalletWithdrawal(op_amount=100)
+    w = WalletWithdrawal(op_amount=100, device_sn=sn)
     db.add(w)
     db.flush()
     # 关联关系
@@ -200,7 +200,7 @@ def test_in_scope_includes_wallet_and_complaint(db):
     db.flush()
     # 申请中 + 带 wallet 关联 → 应保留(审计辅助)
     db.add(Refund(refund_no=rno_wallet, device_sn=sn_wallet, refund_method="转入提现账户", status="申请中", refund_amount=100))
-    w = WalletWithdrawal(op_amount=100)
+    w = WalletWithdrawal(op_amount=100, device_sn=sn_wallet)
     db.add(w)
     db.flush()
     db.add(DataMatchRelation(
