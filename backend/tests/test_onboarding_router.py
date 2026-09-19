@@ -299,6 +299,80 @@ def test_background_task_marks_failed_on_llm_error(db, _engine, monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# code 占用处理（#157 生产实测发现的缺陷）
+# ─────────────────────────────────────────────────────────────────────
+def test_stale_failed_draft_releases_code(db, monkeypatch):
+    """failed 旧草稿不该永久占住 code —— 同一样例重试时 AI 会给同一个 code，
+    否则重试永远失败（生产实测：IntegrityError duplicate key）。"""
+    import asyncio
+
+    from app.services.onboarding_draft_service import create_draft_placeholder, draft_spec_async
+
+    code = _unique_code()
+    # 1) 造一条 failed 草稿占着该 code
+    stale = _make_draft_row(db, code=code, status="failed")
+    stale.error_message = "上次起草超时"
+    db.commit()
+
+    # 2) 新起草（AI 建议同一个 code）→ 应让旧行让出 code，本次成功落 draft
+    fresh = create_draft_placeholder(db, table_hint=f"{code}_tbl",
+                                     samples=_samples(1), created_by=_ADMIN_ID)
+
+    async def _fake(*_a, **_kw):
+        return json.dumps(_llm_output(code))
+
+    monkeypatch.setattr(llm_client, "chat_completion", _fake)
+    asyncio.run(draft_spec_async(db, spec_id=fresh.id, table_hint=f"{code}_tbl",
+                                 samples=_samples(1), created_by=_ADMIN_ID))
+    db.expire_all()
+    fresh_row = db.get(DataSourceSpec, fresh.id)
+    stale_row = db.get(DataSourceSpec, stale.id)
+    try:
+        assert fresh_row.status == SPEC_STATUS_DRAFT, fresh_row.error_message
+        assert fresh_row.code == code
+        assert stale_row.code is None  # 旧 failed 行已让出
+        assert "已被新草稿接管" in (stale_row.error_message or "")
+    finally:
+        _cleanup_ids(db, fresh.id, stale.id)
+
+
+def test_live_draft_code_clash_rejected(db, monkeypatch):
+    """有效草稿（draft）占用 code → 新起草给出可读的 DraftError，而非 IntegrityError。"""
+    import asyncio
+
+    from app.services.onboarding_draft_service import (
+        DraftError,
+        create_draft_placeholder,
+        draft_spec_async,
+    )
+
+    code = _unique_code()
+    _make_draft_row(db, code=code, status=SPEC_STATUS_DRAFT)  # 有效草稿占着 code
+    fresh = create_draft_placeholder(db, table_hint=f"{code}_tbl",
+                                     samples=_samples(1), created_by=_ADMIN_ID)
+
+    async def _fake(*_a, **_kw):
+        return json.dumps(_llm_output(code))
+
+    monkeypatch.setattr(llm_client, "chat_completion", _fake)
+    raised = None
+    try:
+        asyncio.run(draft_spec_async(db, spec_id=fresh.id, table_hint=f"{code}_tbl",
+                                     samples=_samples(1), created_by=_ADMIN_ID))
+    except DraftError as e:
+        raised = str(e)
+    finally:
+        _cleanup_ids(db, fresh.id)
+        db.expire_all()
+        live = db.execute(
+            select(DataSourceSpec).where(DataSourceSpec.code == code)
+        ).scalars().first()
+        if live is not None:
+            _cleanup_ids(db, live.id)
+    assert raised is not None and "已存在同 code 草稿" in raised, raised
+
+
+# ─────────────────────────────────────────────────────────────────────
 # 列表 / 详情 / 权限
 # ─────────────────────────────────────────────────────────────────────
 def test_list_drafts_admin_sees_all(admin_client, db):

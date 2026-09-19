@@ -45,6 +45,7 @@ from app.models.data_source_spec import (
     SPEC_STATUS_DRAFT,
     SPEC_STATUS_DRAFTING,
     SPEC_STATUS_FAILED,
+    SPEC_STATUS_REJECTED,
     DataSourceSpec,
 )
 from app.models.llm_provider import LlmCallLog
@@ -385,6 +386,34 @@ async def _llm_draft_call(
         return None, str(e)
 
 
+def _release_stale_code(db: Session, code: str, keep_id: int | None) -> int | None:
+    """处理 AI 建议 code 的占用（#157 生产实测发现的缺陷）。
+
+    AI 对同一份样例往往建议同一个 code，于是会出现两种占用：
+    1. **失败/拒绝的旧草稿**（failed/rejected）—— 它没有有效声明，不该占住 code，
+       否则「同一样例重试」会永远卡死（AI 每次都给同一个 code）。→ 让其让出 code（置 NULL）。
+    2. **有效草稿**（draft/confirmed/applied）—— 真冲突，必须人工处置（改名或先处理旧草稿）。
+       → 返回其 id，由调用方抛 DraftError 给出可读提示。
+
+    返回真冲突行 id（None 表示无冲突，可继续落库）。
+    """
+    q = select(DataSourceSpec).where(DataSourceSpec.code == code)
+    if keep_id is not None:
+        q = q.where(DataSourceSpec.id != keep_id)
+    clash = db.execute(q).scalars().first()
+    if clash is None:
+        return None
+    if clash.status in (SPEC_STATUS_FAILED, SPEC_STATUS_REJECTED):
+        logger.info("onboarding_draft: 释放失败草稿 id=%s 占用的 code=%s", clash.id, code)
+        clash.code = None
+        clash.error_message = (
+            (clash.error_message or "") + " [该 code 已被新草稿接管]"
+        )[:2000]
+        db.flush()
+        return None
+    return clash.id
+
+
 async def _draft_core(
     db: Session, *, spec_id: int | None = None, table_hint: str | None,
     business_note: str | None, samples: list[dict], created_by: int | None,
@@ -445,12 +474,18 @@ async def _draft_core(
 
     # ── 4. 落库（status=draft；fail 未清零也落库，人工确认时才必须清零）──
     spec_obj = merged
+    # code 唯一性预检（两条路径共用）: 直接 commit 会撞 uq_data_source_specs_code
+    # 抛 IntegrityError（错误信息对使用者不可读），故先查、先给出可处置的提示。
+    clash_id = _release_stale_code(db, spec_obj["code"], keep_id=spec_id)
+    if clash_id is not None:
+        raise DraftError(
+            f"已存在同 code 草稿: {spec_obj['code']}（id={clash_id}）—— 请先处置旧草稿或调整 code"
+        )
     if spec_id is not None:
         # #157 异步路径: 更新既有占位行（POST 时建的 drafting 行）
         spec = db.get(DataSourceSpec, spec_id)
         if spec is None:
             raise DraftError(f"草稿不存在: id={spec_id}")
-        # 落库只有一次（task 单飞锁挡并发重复补算），此处安全覆盖
         spec.code = spec_obj["code"]
         spec.name_cn = spec_obj["name_cn"]
         spec.category = spec_obj.get("category") or None
@@ -470,14 +505,7 @@ async def _draft_core(
         db.commit()
         db.refresh(spec)
     else:
-        # 同步路径: 新建一行（auth 依赖的 code 冲突校验仅在新建时做）
-        existing_id = db.execute(
-            select(DataSourceSpec.id).where(DataSourceSpec.code == spec_obj["code"])
-        ).scalar()
-        if existing_id is not None:
-            raise DraftError(
-                f"已存在同 code 草稿: {spec_obj['code']}（id={existing_id}）—— 请先处置旧草稿或调整 code"
-            )
+        # 同步路径: 新建一行
         spec = DataSourceSpec(
             code=spec_obj["code"],
             table_name=(table_hint or "").strip(),  # 物理表名来自输入提示（AI 不负责造表名）
