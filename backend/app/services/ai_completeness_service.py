@@ -84,10 +84,13 @@ def _line_covered(line: str, kw: str) -> bool:
     if seg_clean in _EMPTY_TAILS:
         return False
     first_part = re.split(r"[,，、;；]", seg_clean, 1)[0].strip()
-    # 四路类维度: 数据段必须含渠道标识(A/B/C/D 或路由词)才算覆盖,
-    # 否则"对账基准 E：0 笔…与四路合计差异 100%"这类旁路比较句会被误判为四路数据
-    if kw in _ROUTE_KWS and not _ROUTE_MARK_RE.search(seg_clean):
-        return False
+    # 四路类维度: 必须是**行首标签行**(如 "**四路分布**：A 线上直退 23 笔")才算覆盖,
+    # 且数据段含渠道标识。旁路比较句即使含 A/B/C/D 也不算:
+    #   - "与四路合计差异 100%" (对账基准)
+    #   - "下钻至'退款四路明细看板'确认 A 路占比" (建议)
+    if kw in _ROUTE_KWS:
+        if idx > 12 or ci == -1 or not _ROUTE_MARK_RE.search(seg_clean):
+            return False
     # b. 首片段含数字(明确数据) → 覆盖(不受 c 中"部分未提供"误伤)
     if re.search(r"\d", first_part):
         return True
