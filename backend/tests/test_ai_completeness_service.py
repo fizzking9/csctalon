@@ -115,6 +115,28 @@ def test_number_in_first_segment_shortcircuits_marker():
     assert out["complete"] is True
 
 
+def test_route_dimension_needs_channel_marker():
+    """四路维度: 旁路比较句(无 A/B/C/D/渠道词)不算四路数据 → 空。
+
+    实测 09-18 快照: "- **对账基准 E**：0 笔 / 0.00 元，与四路合计差异 100%，
+    原因需结合运营侧确认" —— 数字短路会误判为覆盖, 但这不是四路分布数据。
+    """
+    md = ("- **对账基准 E**：0 笔 / 0.00 元，与四路合计差异 100%，"
+          "**原因需结合运营侧确认**（可能为报表未同步或口径差异）。")
+    t = _mk_tmpl(["四路"])
+    out = check_dimensions(db=None, report=_mk_report(md), template=t)
+    assert out["complete"] is False
+    assert out["missing"] == ["四路"]
+
+
+def test_route_dimension_covered_when_channels_present():
+    """四路维度: 数据段含 A/B/C/D 或渠道词 → 覆盖。"""
+    md = "**四路分布**：A 线上直退 23 笔、B 线下 12 笔、C 平台 5 笔、D 门店 3 笔。"
+    t = _mk_tmpl(["四路"])
+    out = check_dimensions(db=None, report=_mk_report(md), template=t)
+    assert out["complete"] is True
+
+
 # ── 同义词数组条目 ───────────────────────────────────────
 def test_synonym_entry_any_hit_covered():
     """条目为同义词数组时, 任一词命中且非空即覆盖。"""

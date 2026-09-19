@@ -42,6 +42,12 @@ def _has_missing_mark(text: str) -> bool:
 # 关键词后跟这些结尾也算空(如 "四路:", "四路：" 后无内容)
 _EMPTY_TAILS = {"", ":", "：", "—", "-", "无", "无。", "无。"}
 
+# 路由类维度(退款四路)要求数据段含渠道标识才算覆盖:
+# LLM 常在旁路主题里写"与四路合计差异 100%"这类比较句(实测 09-18 快照),
+# 行内无 A/B/C/D 或渠道词 → 不是四路数据, 判空, 触发补算更诚实。
+_ROUTE_KWS = ("四路",)
+_ROUTE_MARK_RE = re.compile(r"[ABCD]|线上|线下|门店|网络|公众号|平台|直播|视频|小程序")
+
 
 def _line_covered(line: str, kw: str) -> bool:
     """判定单个 md 行中关键词 kw 是否"有效出现"(未落在缺失语境)。
@@ -78,6 +84,10 @@ def _line_covered(line: str, kw: str) -> bool:
     if seg_clean in _EMPTY_TAILS:
         return False
     first_part = re.split(r"[,，、;；]", seg_clean, 1)[0].strip()
+    # 四路类维度: 数据段必须含渠道标识(A/B/C/D 或路由词)才算覆盖,
+    # 否则"对账基准 E：0 笔…与四路合计差异 100%"这类旁路比较句会被误判为四路数据
+    if kw in _ROUTE_KWS and not _ROUTE_MARK_RE.search(seg_clean):
+        return False
     # b. 首片段含数字(明确数据) → 覆盖(不受 c 中"部分未提供"误伤)
     if re.search(r"\d", first_part):
         return True
