@@ -75,6 +75,20 @@ def test_dimension_anchor_only_empty():
     assert out["missing"] == ["四路"]
 
 
+def test_missing_data_context_counts_as_empty():
+    """「数据缺失」语境(实测 09-18 快照: "四路退款金额及涉诉率数据缺失")→ 算未覆盖。
+
+    该行若被误判为覆盖, 会掩盖快照四路实际缺失 → 不触发补算 → 用户仍拿到"数据缺失"。
+    """
+    md = ("## 退款分析\n"
+          "**四路分布**：⚠️ **数据缺失**——给定 JSON 中未提供 A/B/C/D 四路具体金额。\n"
+          "4. **数据补全**：四路退款金额及涉诉率数据缺失，需补取后重新评估。\n")
+    t = _mk_tmpl(["四路"])
+    out = check_dimensions(db=None, report=_mk_report(md), template=t)
+    assert out["complete"] is False
+    assert out["missing"] == ["四路"]
+
+
 # ── 同义词数组条目 ───────────────────────────────────────
 def test_synonym_entry_any_hit_covered():
     """条目为同义词数组时, 任一词命中且非空即覆盖。"""

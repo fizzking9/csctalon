@@ -26,7 +26,9 @@ from app.models.ai_report_template import AiReportTemplate
 logger = logging.getLogger(__name__)
 
 # 维度"声明了但内容为空"的标记(LLM 按 _SYSTEM_PROMPT 铁律 1 如实写"暂无/未提供")
-_MISSING_MARKERS = ("未提供", "暂无", "未统计", "无数据")
+# "缺失" 覆盖"数据缺失"语境(实测 09-18 快照四路行写"数据缺失——未提供 A/B/C/D",
+# 若不在标记表, 同句"四路退款金额及涉诉率数据缺失"会被误判为已覆盖 → 触发补算更诚实)
+_MISSING_MARKERS = ("未提供", "暂无", "未统计", "无数据", "缺失")
 
 # 关键词后跟这些结尾也算空(如 "四路:", "四路：" 后无内容)
 _EMPTY_TAILS = {"", ":", "：", "—", "-", "无", "无。", "无。"}
