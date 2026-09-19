@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
-"""AI 报告完整性校验器测试 (工单 #152)。
+"""AI 报告完整性校验器测试 (工单 #152) — 结构检查(提示词约定锚点行)。
 
-覆盖 check_dimensions 的:
-- 维度全部"有效出现" → complete=True
-- 维度缺失(关键词未出现)→ missing 列该维度
-- 维度声明但内容为空(未提供/暂无/无数据语境)→ 算缺失(触发补算)
-- 同义词数组条目(任一词命中即覆盖)
-- required_dimensions 为空/None → complete=True(不阻塞秒回)
-- 关键词出现在行中但后续无内容(如 "四路:")→ 算空
+原则(2026-09-19 用户拍板): 报告结构由提示词确定(生成侧【维度输出格式】约定
+`**<维度>**：<数据>` 锚点行), 校验器只做结构匹配, 不做语义猜测。
+
+覆盖:
+- 锚点行含维度 + 内容非空 → 覆盖
+- 锚点行内容为空/「暂无」/缺失标记 → 缺失(触发补算)
+- 旁述/比较/建议句(无锚点结构)→ 不算覆盖(即使含关键词/数字/渠道字母)
+- 同义词数组条目
+- required_dimensions 为空/None → complete=True
+- 空 answer_md / 大小写不敏感
 """
 
 from unittest.mock import MagicMock
@@ -29,118 +32,87 @@ def _mk_tmpl(dims):
     return t
 
 
-# ── 维度齐全 ────────────────────────────────────────────
-def test_all_dimensions_covered():
-    md = """## 退款分析
-四路分布: 线上直退 23 笔, 未提供线下。
-涉诉 2 笔, 挽回 5 笔。
-
-## 接待分析
-接待量 100, 会话数 120。
-"""
-    t = _mk_tmpl(["四路", "涉诉", "挽回"])
+# ── 锚点行覆盖 ───────────────────────────────────────────
+def test_anchor_with_data_covered():
+    md = "## 退款分析\n**四路分布**：A 线上直退 23 笔、B 线下 12 笔、C 平台 5 笔。"
+    t = _mk_tmpl(["四路"])
     out = check_dimensions(db=None, report=_mk_report(md), template=t)
     assert out["complete"] is True
     assert out["missing"] == []
 
 
-# ── 维度缺失 ────────────────────────────────────────────
-def test_missing_dimension():
-    """关键词未出现 → 该维度入 missing。"""
-    md = "## 退款分析\n金额 5000 元。"
-    t = _mk_tmpl(["四路", "涉诉", "挽回"])
+def test_anchor_label_contains_dimension_kw():
+    """标签含维度关键词即可(如 维度"接待" 命中 "**接待量**：100 人次")。"""
+    md = "**接待量**：100 人次\n**涉诉**：2 笔\n**挽回**：5 笔"
+    t = _mk_tmpl(["接待", "涉诉", "挽回"])
     out = check_dimensions(db=None, report=_mk_report(md), template=t)
-    assert out["complete"] is False
-    assert "四路" in out["missing"]
-    assert "涉诉" in out["missing"]
-    assert "挽回" in out["missing"]
+    assert out["complete"] is True
 
 
-# ── 声明但为空 → 算缺失(核心: 触发补算) ──────────────────
-def test_dimension_declared_but_empty():
-    """维度行写"未提供/暂无" → 算未覆盖(内容为空, 触发补算器)。"""
-    md = "## 退款分析\n四路分布: 未提供\n涉诉: 暂无\n挽回: 无数据"
-    t = _mk_tmpl(["四路", "涉诉", "挽回"])
-    out = check_dimensions(db=None, report=_mk_report(md), template=t)
-    assert out["complete"] is False
-    assert set(out["missing"]) == {"四路", "涉诉", "挽回"}
-
-
-def test_dimension_anchor_only_empty():
-    """关键词行后无内容(如 "四路:")→ 算空。"""
-    md = "## 退款分析\n四路:\n金额 5000 元。"
+# ── 锚点内容为空/缺失 → 缺失 ─────────────────────────────
+def test_anchor_empty_body():
+    md = "## 退款分析\n**四路分布**：\n金额 5000 元。"
     t = _mk_tmpl(["四路"])
     out = check_dimensions(db=None, report=_mk_report(md), template=t)
     assert out["complete"] is False
     assert out["missing"] == ["四路"]
 
 
-def test_missing_data_context_counts_as_empty():
-    """「数据缺失」语境(实测 09-18 快照: "四路退款金额及涉诉率数据缺失")→ 算未覆盖。
-
-    该行若被误判为覆盖, 会掩盖快照四路实际缺失 → 不触发补算 → 用户仍拿到"数据缺失"。
-    """
-    md = ("## 退款分析\n"
-          "**四路分布**：⚠️ **数据缺失**——给定 JSON 中未提供 A/B/C/D 四路具体金额。\n"
-          "4. **数据补全**：四路退款金额及涉诉率数据缺失，需补取后重新评估。\n")
+def test_anchor_missing_marker_body():
+    """锚点内容写"暂无/未提供" → 缺失(声明了但无数据)。"""
+    md = "**四路金额（A/B/C/D）**：**暂无**（给定数据未提供金额字段及四路拆分）。"
     t = _mk_tmpl(["四路"])
     out = check_dimensions(db=None, report=_mk_report(md), template=t)
     assert out["complete"] is False
     assert out["missing"] == ["四路"]
 
 
-def test_marker_before_keyword_counts_as_empty():
-    """缺失标记在关键词**前**(实测: "数据中未直接提供四路 (A/B/C/D) 金额")→ 空。"""
-    md = "**退款总量**：数据中未直接提供四路 (A/B/C/D) 金额合计及涉诉率明细，仅有时序笔数。"
+def test_anchor_missing_data_context():
+    """锚点内容首段含"缺失"语境 → 缺失。"""
+    md = "**四路分布**：⚠️ **数据缺失**——给定 JSON 中未提供 A/B/C/D 四路具体金额。"
     t = _mk_tmpl(["四路"])
     out = check_dimensions(db=None, report=_mk_report(md), template=t)
     assert out["complete"] is False
     assert out["missing"] == ["四路"]
 
 
-def test_marker_in_seg_after_keyword_counts_as_empty():
-    """缺失标记在关键词后数据段整体(实测: "退款四路金额…未在给定 JSON 中提供")→ 空。"""
-    md = "退款四路金额、涉诉率等详细金额数据未在给定 JSON 中提供，以上分析基于笔数及挽回率数据。"
-    t = _mk_tmpl(["四路"])
-    out = check_dimensions(db=None, report=_mk_report(md), template=t)
-    assert out["complete"] is False
-    assert out["missing"] == ["四路"]
-
-
-def test_number_in_first_segment_shortcircuits_marker():
-    """首片段含数字(有真实数据)时, 行内"未提供"不再误伤 → 覆盖。"""
-    md = "四路分布: 线上直退 23 笔, 线下未提供"
+def test_partial_covered_with_data():
+    """锚点内容首段有数据(即使行内后面有"未提供")→ 覆盖。"""
+    md = "**四路分布**：线上直退 23 笔、线下未提供"
     t = _mk_tmpl(["四路"])
     out = check_dimensions(db=None, report=_mk_report(md), template=t)
     assert out["complete"] is True
 
 
-def test_route_dimension_needs_channel_marker():
-    """四路维度: 旁路比较句(无 A/B/C/D/渠道词)不算四路数据 → 空。
+# ── 旁述/比较/建议句 → 不算覆盖 ──────────────────────────
+def test_side_sentence_not_covered():
+    """无锚点结构的旁述句, 即使含关键词+数字+渠道字母 → 不算覆盖。
 
-    实测 09-18 快照: "- **对账基准 E**：0 笔 / 0.00 元，与四路合计差异 100%，
-    原因需结合运营侧确认" —— 数字短路会误判为覆盖, 但这不是四路分布数据。
+    实测 09-18 快照: 对账基准比较句 / 下钻建议句 均不是四路数据。
     """
-    md = ("- **对账基准 E**：0 笔 / 0.00 元，与四路合计差异 100%，"
-          "**原因需结合运营侧确认**（可能为报表未同步或口径差异）。")
+    md = (
+        "- **对账基准 E**：0 笔 / 0.00 元，与四路合计差异 100%，口径原因：B 路钱包提现。\n"
+        "- **异动提醒**：因缺少金额与四路结构数据，建议下钻至\"退款四路明细看板\"确认 A 路占比。"
+    )
     t = _mk_tmpl(["四路"])
     out = check_dimensions(db=None, report=_mk_report(md), template=t)
     assert out["complete"] is False
     assert out["missing"] == ["四路"]
 
 
-def test_route_dimension_covered_when_channels_present():
-    """四路维度: 数据段含 A/B/C/D 或渠道词 → 覆盖。"""
-    md = "**四路分布**：A 线上直退 23 笔、B 线下 12 笔、C 平台 5 笔、D 门店 3 笔。"
+def test_bare_keyword_line_not_covered():
+    """无粗体标签结构的普通句(即使含关键词)→ 不算覆盖(结构由提示词保证)。"""
+    md = "退款四路金额、涉诉率等详细金额数据未在给定 JSON 中提供。"
     t = _mk_tmpl(["四路"])
     out = check_dimensions(db=None, report=_mk_report(md), template=t)
-    assert out["complete"] is True
+    assert out["complete"] is False
+    assert out["missing"] == ["四路"]
 
 
 # ── 同义词数组条目 ───────────────────────────────────────
 def test_synonym_entry_any_hit_covered():
     """条目为同义词数组时, 任一词命中且非空即覆盖。"""
-    md = "## 趋势对比\n环比上周 +5%。"
+    md = "**环比**：上周 +5%。"
     t = _mk_tmpl([["环比", "同比"]])
     out = check_dimensions(db=None, report=_mk_report(md), template=t)
     assert out["complete"] is True
@@ -149,7 +121,7 @@ def test_synonym_entry_any_hit_covered():
 # ── 无维度配置 → 直接完整 ────────────────────────────────
 def test_no_required_dimensions():
     """required_dimensions 为空/None → complete=True(简报类不校验, 不阻塞秒回)。"""
-    md = "## 退款分析\n四路: 未提供"
+    md = "## 退款分析\n**四路**：暂无"
     assert check_dimensions(db=None, report=_mk_report(md),
                             template=_mk_tmpl(None))["complete"] is True
     assert check_dimensions(db=None, report=_mk_report(md),
@@ -167,8 +139,9 @@ def test_empty_answer_md():
     assert set(out["missing"]) == {"四路", "涉诉"}
 
 
-# ── 大小写不敏感 ─────────────────────────────────────────
-def test_case_insensitive():
-    md = "## 趋势对比\nYOY 同比上周 +5%."
-    t = _mk_tmpl(["同比"])
-    assert check_dimensions(db=None, report=_mk_report(md), template=t)["complete"] is True
+# ── 大小写不敏感(英文维度) ───────────────────────────────
+def test_case_insensitive_label():
+    md = "**YOY 同比**：上周 +5%."
+    t = _mk_tmpl(["yoy"])
+    out = check_dimensions(db=None, report=_mk_report(md), template=t)
+    assert out["complete"] is True

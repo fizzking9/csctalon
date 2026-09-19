@@ -59,10 +59,10 @@ def test_find_none_when_no_complete_snapshot():
 
 
 def test_find_skips_incomplete_then_hits_complete():
-    """第一份缺维度 → 跳过; 第二份完整 → 返回(report, template)。"""
+    """第一份缺维度(锚点写暂无) → 跳过; 第二份完整 → 返回(report, template)。"""
     db = _db_returning([
-        _mk_row(1, "## 退款分析\n四路: 未提供", template_id=10),
-        _mk_row(2, "## 退款分析\n四路: A 线上直退 23 笔", template_id=10),
+        _mk_row(1, "## 退款分析\n**四路分布**：**暂无**", template_id=10),
+        _mk_row(2, "## 退款分析\n**四路分布**：A 线上直退 23 笔、B 线下 12 笔", template_id=10),
     ])
     tmpl = _mk_tmpl(["四路"])
     with patch("app.services.ai_recompute_service._get_template",
@@ -106,9 +106,9 @@ def test_recompute_needs_live_when_no_snapshot():
 
 
 def test_recompute_snapshot_reuse():
-    """命中完整快照 → snapshot_reuse + extract_section 结果。"""
+    """命中完整快照(锚点结构) → snapshot_reuse + extract_section 结果。"""
     db = _db_returning([
-        _mk_row(2, "## 退款分析\n四路: A 线上直退 23 笔", template_id=10),
+        _mk_row(2, "## 退款分析\n**四路分布**：A 线上直退 23 笔、B 线下 12 笔", template_id=10),
     ])
     tmpl = _mk_tmpl(["四路"])
     with patch("app.services.ai_recompute_service._get_template",

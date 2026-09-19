@@ -3,13 +3,20 @@
 设计(A-20260919-001 §五): 按模板 required_dimensions(关键词数组)校验快照 answer_md
 的维度覆盖, 判定"这份快照能不能直接回答这个维度细问"。
 
-判定(全树统一, 大小写不敏感):
+**结构检查原则(2026-09-19 用户拍板)**: 报告结构由**提示词**确定(生成侧
+【维度输出格式】约定每个维度必须以二级锚点行 `**<维度>**：<数据>` 输出, 缺失写
+`**<维度>**：暂无`), 校验器只做**结构匹配**, 不做语义猜测(不猜行内措辞/旁述句/
+比较句)。两边提示词对齐(ai_feed 生成侧 + ai_extract 摘取侧) → 简报/摘要/对齐同源。
+
+判定(大小写不敏感):
 - 对每个 required_dimension 条目:
   * 条目可为单个关键词字符串, 或同义词数组(任一同义词命中即覆盖)
-  * 关键词未出现在 answer_md → 缺失
-  * 关键词出现, 但所在行紧跟"未提供/暂无/未统计/无数据"标记 → 缺失
-    (维度声明了但内容为空, 如「四路分布: 未提供」→ 算未覆盖, 触发补算)
-  * 否则 → 覆盖
+  * **锚点行**形如 `**<标签>**：<内容>`(可带 `-`/`*` 列表前缀), 且标签含该维度关键词:
+    - 无锚点行 → 缺失(旁述/建议/比较句不算, 如"与四路合计差异 100%")
+    - 锚点内容为空/只剩分隔符/「无」 → 缺失
+    - 锚点内容首段(到逗号/顿号)含缺失标记(未提供/暂无/未统计/无数据/缺失) → 缺失
+      (如 `**四路金额（A/B/C/D）**：**暂无**…`)
+    - 否则 → 覆盖(如 `**四路分布**：A 线上直退 23 笔、B 线下 12 笔`)
 - 全部覆盖 → complete=True; 任一缺失 → complete=False + missing=list
 
 失败处理: required_dimensions 为空/异常 → complete=True(不阻塞摘取秒回)。
@@ -25,12 +32,19 @@ from app.models.ai_report_template import AiReportTemplate
 
 logger = logging.getLogger(__name__)
 
+# 维度锚点行: 可选列表前缀 + **标签** + 冒号(ASCII/全角) + 内容
+#   生成侧【维度输出格式】约定的结构; 标签限 24 字符(防过度匹配长句)
+_ANCHOR_RE = re.compile(r"^\s*(?:[-*+]\s*)?\*\*(?P<label>[^*]{1,24}?)\*\*[:：](?P<body>.*)$")
+
 # 维度"声明了但内容为空"的标记(LLM 按 _SYSTEM_PROMPT 铁律 1 如实写"暂无/未提供")
 # "缺失" 覆盖"数据缺失"语境(实测 09-18 快照四路行写"数据缺失——未提供 A/B/C/D",
 # 若不在标记表, 同句"四路退款金额及涉诉率数据缺失"会被误判为已覆盖 → 触发补算更诚实)
 _MISSING_MARKERS = ("未提供", "暂无", "未统计", "无数据", "缺失")
 # 宽松形态: "未直接提供"/"未在给定 JSON 中提供"等(实测 LLM 措辞), 行内 未…提供
 _MISSING_RE = re.compile(r"未[^。；\n]{0,10}提供")
+
+# 关键词后跟这些结尾也算空(如 "四路:", "四路：" 后无内容)
+_EMPTY_TAILS = {"", ":", "：", "—", "-", "无", "无。", "无。"}
 
 
 def _has_missing_mark(text: str) -> bool:
@@ -39,65 +53,24 @@ def _has_missing_mark(text: str) -> bool:
         return True
     return _MISSING_RE.search(text) is not None
 
-# 关键词后跟这些结尾也算空(如 "四路:", "四路：" 后无内容)
-_EMPTY_TAILS = {"", ":", "：", "—", "-", "无", "无。", "无。"}
-
-# 路由类维度(退款四路)要求数据段含渠道标识才算覆盖:
-# LLM 常在旁路主题里写"与四路合计差异 100%"这类比较句(实测 09-18 快照),
-# 行内无 A/B/C/D 或渠道词 → 不是四路数据, 判空, 触发补算更诚实。
-_ROUTE_KWS = ("四路",)
-_ROUTE_MARK_RE = re.compile(r"[ABCD]|线上|线下|门店|网络|公众号|平台|直播|视频|小程序")
-
 
 def _line_covered(line: str, kw: str) -> bool:
-    """判定单个 md 行中关键词 kw 是否"有效出现"(未落在缺失语境)。
+    """结构检查: 该行是否是含维度 kw 的锚点行且内容非空非缺失。
 
-    规则(实测 09-18 快照修正: LLM 缺数据时写法多样):
-      a. 关键词**前 30 字符**含缺失标记 → 空(如「数据中未直接**提供**四路金额」)
-      b. 关键词后数据段首片段(到逗号/顿号为止)**含数字** → 覆盖
-         (如「四路分布: 线上直退 23 笔, 线下未提供」→ 首片段是数据, 不算空)
-      c. 首片段或数据段整体含缺失标记 → 空
-         (如「四路: 未提供」「退款四路金额…未在给定 JSON 中**提供**」)
-      d. 否则 → 覆盖(如「四路分布: A 线上直退, B 线下」)
+    仅认 `**<标签>**：<内容>` 结构(标签含 kw)。旁述/比较/建议句一律不算覆盖
+    —— 结构由提示词保证, 代码不做语义猜测。
     """
-    idx = line.lower().find(kw.lower())
-    if idx == -1:
+    m = _ANCHOR_RE.match(line)
+    if not m:
         return False
-    # a. 关键词前的紧邻文本含缺失标记 → 空
-    before = line[max(0, idx - 30):idx]
-    if _has_missing_mark(before):
+    if kw.lower() not in m.group("label").lower():
         return False
-    tail = line[idx + len(kw):].strip()
-    if not tail:
+    body = m.group("body").strip()
+    body_clean = body.rstrip("。. ")
+    if not body_clean or body_clean in _EMPTY_TAILS:
         return False
-    # 数据段 = 关键词后第一个冒号(ASCII 或全角)之后的内容(无冒号则整段)
-    seg = tail
-    ci = tail.find(":")
-    ci2 = tail.find("：")
-    if ci2 != -1 and (ci == -1 or ci2 < ci):
-        ci = ci2
-    if ci != -1:
-        seg = tail[ci + 1:].strip()
-    seg_clean = seg.rstrip("。. ")
-    if not seg_clean:
-        return False
-    if seg_clean in _EMPTY_TAILS:
-        return False
-    first_part = re.split(r"[,，、;；]", seg_clean, 1)[0].strip()
-    # 四路类维度: 必须是**行首标签行**(如 "**四路分布**：A 线上直退 23 笔")才算覆盖,
-    # 且数据段含渠道标识。旁路比较句即使含 A/B/C/D 也不算:
-    #   - "与四路合计差异 100%" (对账基准)
-    #   - "下钻至'退款四路明细看板'确认 A 路占比" (建议)
-    if kw in _ROUTE_KWS:
-        if idx > 12 or ci == -1 or not _ROUTE_MARK_RE.search(seg_clean):
-            return False
-    # b. 首片段含数字(明确数据) → 覆盖(不受 c 中"部分未提供"误伤)
-    if re.search(r"\d", first_part):
-        return True
-    # c. 首片段或数据段整体含缺失标记 → 空
+    first_part = re.split(r"[,，、;；]", body_clean, 1)[0].strip()
     if _has_missing_mark(first_part):
-        return False
-    if _has_missing_mark(seg_clean):
         return False
     return True
 
