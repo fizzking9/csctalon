@@ -344,11 +344,19 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
 
     # #135 force_llm=True 时跳过三级命中链路, 直接走 _runner 实时 LLM 兜底
     #   (架构文档 §6.2 "直接生成"按钮: clarify 状态下用户主动选择触发)
+    # #151 单日窗口回退为 date 语义: effective() 对区间形态(start/end, 单日也是
+    #   区间)返回 date=None → 匹配层 SQL 按"今天"查快照 → 问「昨天」命中今日
+    #   预生成日报(窗口标签 09-18 但内容统计 09-19 实时), 窗口与内容错位。
+    #   单日区间(start==end)即等价于指定日期, 回退为 win_date 传入匹配层。
+    _win_date = eff["date"] or (
+        eff["start"] if eff["start"] and eff["start"] == eff["end"] else None
+    )
     if not payload.force_llm:
         _match_db = SessionLocal()
         try:
             _matched, _tmpl = match_template_report(
-                _match_db, q, eff["period"], eff["date"],
+                _match_db, q, eff["period"], _win_date,
+                win_start=eff["start"], win_end=eff["end"],
             )
 
             # L1 命中: 走摘取层(不返回全文)
@@ -383,7 +391,8 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                                **window_info})
 
             # L1 未命中 → L2 27b 语义匹配
-            _cands = list_candidates(_match_db, eff["period"], eff["date"])
+            _cands = list_candidates(_match_db, eff["period"], _win_date,
+                                     eff["start"], eff["end"])
             _sem = await semantic_match(_match_db, q, _cands)
             if _sem["hit_report"] is not None:
                 _ext2 = await extract_section(_match_db, q, _sem["hit_report"], None)

@@ -77,6 +77,8 @@ def match_template_report(
     question: str,
     win_period: str | None,
     win_date: str | None,
+    win_start: _dt.date | None = None,
+    win_end: _dt.date | None = None,
 ) -> tuple[AiReport | None, AiReportTemplate | None]:
     """匹配预生成的公共报告。
 
@@ -88,15 +90,35 @@ def match_template_report(
     3. 时点容差: 当日同 period 最新公共报告(无关键词命中也返回)
        (兜底, 让用户至少拿到一份当日报告)
 
+    #151 窗口对齐(根因修复):
+    - 单日窗口(start==end 或显式 date)→ 按 snapshot_date 匹配: daily 日报 start/end
+      保持 None(#132), 只能靠 snapshot_date 对齐(问「昨天」= snapshot_date 昨日)。
+    - 区间窗口(start<end, 如周/月)→ 按报告内容窗口[start,end]与问句窗口重叠匹配:
+      weekly/monthly 预生成已落 start/end(#132), 问「上周」不再命中本周周报/今日日报。
+
     返回 (report, template) 或 (None, None); 调用方走 LLM 兜底。
     命中时 matched_count +1。
     """
     today = _today_cn()
 
-    # 1+2 合并: 取当日 is_public=True 报告 + 其模板 keywords 做语义匹配
-    # 先优先窗口完全(period 匹配), 再降级语义匹配(任意 period 当日)
-    if win_date:
-        # 优先 period 匹配的当日报告
+    if win_start and win_end and win_start != win_end:
+        # #151 区间窗口: 报告内容窗口与问句窗口重叠才命中(weekly/monthly 有 start/end;
+        #   daily 日报 start/end=None 被排除, 避免区间问句命中今日实时日报)
+        rows = db.execute(
+            text("""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
+                      r.snapshot_date, r.snapshot_period, r.is_public,
+                      r.answer_md, r.llm_model, r.llm_ms, r.total_ms,
+                      r.prompt_tokens, r.completion_tokens, r.total_tokens,
+                      r.window_source, r.window_label, r.created_at
+               FROM ai_reports r
+               WHERE r.is_public = TRUE
+                 AND r.start IS NOT NULL AND r.end IS NOT NULL
+                 AND r.start <= :q_end AND r.end >= :q_start
+               ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
+            {"q_start": win_start, "q_end": win_end, "period": win_period or ""},
+        ).mappings().all()
+    elif win_date:
+        # 单日(含 start==end 回退): 按 snapshot_date 匹配(日报 start/end=None)
         rows = db.execute(
             text("""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
                       r.snapshot_date, r.snapshot_period, r.is_public,
@@ -180,27 +202,47 @@ def _wrap_row(db: Session, row: Any) -> AiReport:
 
 
 def list_candidates(db: Session, win_period: str | None,
-                    win_date: str | None) -> list[AiReport]:
+                    win_date: str | None,
+                    win_start: _dt.date | None = None,
+                    win_end: _dt.date | None = None) -> list[AiReport]:
     """#135 L2 语义匹配用: 取当日 is_public=True 报告列表(不 bump matched_count)。
 
-    复用 match_template_report 的 SQL 与排序((snapshot_period=win_period) DESC,
-    created_at DESC), 但不调 _bump_matched_count(L2 命中后由调用方决定是否 bump)。
+    复用 match_template_report 的窗口对齐逻辑(#151): 区间窗口按报告内容窗口
+    [start,end] 重叠匹配, 单日按 snapshot_date, 无窗口取当日; 排序((snapshot_period
+    =win_period) DESC, created_at DESC), 但不调 _bump_matched_count。
     返回 list[AiReport](轻量 ORM 包装, 字段与 match_template_report 一致)。
     """
     today = _today_cn()
-    sdate = win_date or today
-    rows = db.execute(
-        text("""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
-                  r.snapshot_date, r.snapshot_period, r.is_public,
-                  r.answer_md, r.llm_model, r.llm_ms, r.total_ms,
-                  r.prompt_tokens, r.completion_tokens, r.total_tokens,
-                  r.window_source, r.window_label, r.created_at
+    if win_start and win_end and win_start != win_end:
+        # #151 区间窗口: 报告内容窗口与问句窗口重叠(weekly/monthly 有 start/end)
+        rows = db.execute(
+            text("""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
+                      r.snapshot_date, r.snapshot_period, r.is_public,
+                      r.answer_md, r.llm_model, r.llm_ms, r.total_ms,
+                      r.prompt_tokens, r.completion_tokens, r.total_tokens,
+                      r.window_source, r.window_label, r.created_at
+               FROM ai_reports r
+               WHERE r.is_public = TRUE
+                 AND r.start IS NOT NULL AND r.end IS NOT NULL
+                 AND r.start <= :q_end AND r.end >= :q_start
+               ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
+            {"q_start": win_start, "q_end": win_end, "period": win_period or ""},
+        ).mappings().all()
+    else:
+        # 单日/无窗口: 按 snapshot_date(日报 start/end=None, 只能按快照日期对齐)
+        sdate = win_date or today
+        rows = db.execute(
+            text("""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
+                      r.snapshot_date, r.snapshot_period, r.is_public,
+                      r.answer_md, r.llm_model, r.llm_ms, r.total_ms,
+                      r.prompt_tokens, r.completion_tokens, r.total_tokens,
+                      r.window_source, r.window_label, r.created_at
                FROM ai_reports r
                WHERE r.is_public = TRUE
                  AND r.snapshot_date = :sdate
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
-        {"sdate": sdate, "period": win_period or ""},
-    ).mappings().all()
+            {"sdate": sdate, "period": win_period or ""},
+        ).mappings().all()
     out: list[AiReport] = []
     for r in rows:
         a = AiReport()

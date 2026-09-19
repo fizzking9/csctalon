@@ -195,3 +195,96 @@ def test_match_returns_none_when_no_keyword_hit():
     matched, tmpl = match_template_report(db, q, "daily", "2026-09-17")
     assert matched is None
     assert tmpl is None
+
+
+def _select_sql_of(db: MagicMock) -> str:
+    """取 match_template_report 内的候选 SELECT SQL(跳过 _bump_matched_count 的 UPDATE)。"""
+    for args, _kwargs in db.execute.call_args_list:
+        sql = str(args[0])
+        if "FROM ai_reports" in sql:
+            return sql
+    raise AssertionError("未找到候选 SELECT SQL")
+
+
+# ── #151 窗口对齐: 单日/区间分流 + 重叠匹配 ──────────────────
+def test_match_single_day_uses_snapshot_date_sql():
+    """单日窗口(win_date 有值)→ SQL 按 snapshot_date 匹配(日报 start/end=None)。"""
+    import datetime as _dt
+
+    q = "昨天的退款明细"
+    rows = [_make_report_row(88, 1, "daily", _dt.datetime(2026, 9, 17, 11, 0, tzinfo=_dt.timezone.utc))]
+    templates = {1: _make_template(1, "daily_general_morning", ["昨天", "昨日", "退款"])}
+
+    db = MagicMock()
+    mappings_mock = MagicMock()
+    mappings_mock.mappings.return_value = mappings_mock
+    mappings_mock.all.return_value = rows
+    db.execute.return_value = mappings_mock
+    query_mock = MagicMock()
+    query_mock.get.side_effect = lambda tid: templates.get(tid)
+    db.query.return_value = query_mock
+
+    matched, _ = match_template_report(
+        db, q, "daily", "2026-09-17",   # 单日: win_date=昨日
+        win_start=None, win_end=None,
+    )
+    sql = _select_sql_of(db)
+    assert "snapshot_date = :sdate" in sql       # 按快照日期
+    assert "r.start <= :q_end" not in sql        # 不走重叠
+    assert matched is not None and matched.id == 88
+
+
+def test_match_interval_window_uses_overlap_sql():
+    """区间窗口(win_start<win_end)→ SQL 用报告内容窗口重叠(上周/上月等)。"""
+    import datetime as _dt
+
+    q = "上周退款对比"
+    rows = [_make_report_row(77, 2, "weekly", _dt.datetime(2026, 9, 13, 10, 0, tzinfo=_dt.timezone.utc))]
+    templates = {2: _make_template(2, "weekly_compare_last", ["本周", "上周", "对比", "环比"])}
+
+    db = MagicMock()
+    mappings_mock = MagicMock()
+    mappings_mock.mappings.return_value = mappings_mock
+    mappings_mock.all.return_value = rows
+    db.execute.return_value = mappings_mock
+    query_mock = MagicMock()
+    query_mock.get.side_effect = lambda tid: templates.get(tid)
+    db.query.return_value = query_mock
+
+    matched, _ = match_template_report(
+        db, q, "weekly", None,                # 区间: win_date=None
+        win_start=_dt.date(2026, 9, 7), win_end=_dt.date(2026, 9, 13),  # 上周
+    )
+    sql = _select_sql_of(db)
+    assert "r.start <= :q_end AND r.end >= :q_start" in sql  # 重叠匹配
+    assert "snapshot_date = :sdate" not in sql
+    assert matched is not None and matched.id == 77
+
+
+def test_match_start_equals_end_falls_back_to_snapshot_date():
+    """#151 单日区间(start==end)→ 匹配层应走 snapshot_date 分支(由 ai.py 回退 win_date)。"""
+    import datetime as _dt
+
+    q = "昨天的退款明细"
+    # 调用方(ai.py)会把 start==end 回退为 win_date; 这里直接验证回退后行为
+    rows = [_make_report_row(88, 1, "daily", _dt.datetime(2026, 9, 18, 11, 0, tzinfo=_dt.timezone.utc))]
+    templates = {1: _make_template(1, "daily_general_morning", ["昨天", "昨日", "退款"])}
+
+    db = MagicMock()
+    mappings_mock = MagicMock()
+    mappings_mock.mappings.return_value = mappings_mock
+    mappings_mock.all.return_value = rows
+    db.execute.return_value = mappings_mock
+    query_mock = MagicMock()
+    query_mock.get.side_effect = lambda tid: templates.get(tid)
+    db.query.return_value = query_mock
+
+    # 模拟 ai.py 的 _win_date 回退: 单日区间 → win_date=start
+    _win_date = _dt.date(2026, 9, 18)   # start==end==09-18 回退
+    matched, _ = match_template_report(
+        db, q, "daily", _win_date,
+        win_start=_dt.date(2026, 9, 18), win_end=_dt.date(2026, 9, 18),
+    )
+    sql = _select_sql_of(db)
+    assert "snapshot_date = :sdate" in sql
+    assert matched is not None and matched.id == 88
