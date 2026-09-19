@@ -28,7 +28,12 @@ from app.services.onboarding_validator import (
 
 
 def _valid_spec(**overrides) -> dict:
-    """全绿基线声明：14 条规则全部通过。"""
+    """全绿基线声明：16 条规则全部通过。
+
+    ⚠️ 基线必须**自洽**：`pk_field` 声明的列必须在 `field_specs` 里（R16），
+    故此处含 `id` 字段。这也是 #158 的由来 —— 原基线 `pk_field="id"` 却无 `id`
+    字段，说明「声明自洽性」此前无人校验。
+    """
     spec = {
         "code": "new_source",
         "table_name": "new_source_tbl",
@@ -42,6 +47,13 @@ def _valid_spec(**overrides) -> dict:
         "sync_source": "bms",
         "description": "新数据源样例，供校验器基线测试",
         "field_specs": [
+            {
+                "field_name": "id",
+                "name_cn": "主键",
+                "semantic_role": "dimension",
+                "data_type": "numeric",
+                "confidence": 0.99,
+            },
             {
                 "field_name": "device_sn",
                 "name_cn": "设备SN",
@@ -222,6 +234,42 @@ class TestFieldRules:
         assert _warns(validate_spec(_valid_spec(field_specs=fields), snap), "R14")
 
 
+class TestDeclarationSelfConsistency:
+    """R15/R16: 声明内部自洽性（#158，生产实测暴露的覆盖缺口）。"""
+
+    def test_r15_single_sn_no_warn(self):
+        """反向：只有一列 sn（基线形态）不告警。"""
+        assert not _warns(validate_spec(_valid_spec(), _empty_snapshot()), "R15")
+
+    def test_r15_multiple_sn_warns_with_field_names(self):
+        """正向：ID 类列被误判为 sn 且与真 SN 并存 → warn 并列出字段名。
+
+        复刻生产实测场景（record_id/stat_id 被判 sn，confidence 高达 0.9+，
+        registry 无同名字段可对照故 R14 不触发）。
+        """
+        fields = [f for f in _valid_spec()["field_specs"]]
+        fields.append({"field_name": "record_id", "name_cn": "记录ID",
+                       "semantic_role": "sn", "data_type": "numeric", "confidence": 0.95})
+        warns = _warns(validate_spec(_valid_spec(field_specs=fields), _empty_snapshot()), "R15")
+        assert warns
+        assert "record_id" in warns[0]["detail"] and "device_sn" in warns[0]["detail"]
+
+    def test_r16_pk_field_present_no_warn(self):
+        """反向：pk_field 在字段清单内（基线形态）不告警。"""
+        assert not _warns(validate_spec(_valid_spec(), _empty_snapshot()), "R16")
+
+    def test_r16_pk_field_missing_warns(self):
+        """正向：pk_field 声明了但字段清单里没有 → 声明不自洽，warn。"""
+        fields = [f for f in _valid_spec()["field_specs"] if f["field_name"] != "id"]
+        warns = _warns(validate_spec(_valid_spec(field_specs=fields), _empty_snapshot()), "R16")
+        assert warns and "id" in warns[0]["detail"]
+
+    def test_r16_no_pk_field_no_warn(self):
+        """反向：未声明 pk_field（pk_strategy=none 场景）不告警。"""
+        report = validate_spec(_valid_spec(pk_field=None, pk_strategy="none"), _empty_snapshot())
+        assert not _warns(report, "R16")
+
+
 class TestFramework:
     """框架级不变量：可确认性 / 规则覆盖完整性。"""
 
@@ -229,14 +277,14 @@ class TestFramework:
         report = validate_spec(_valid_spec(category="未登记分组"), _empty_snapshot())
         assert not is_confirmable(report)
 
-    def test_all_14_rules_covered_by_tests(self):
+    def test_all_rules_covered_by_tests(self):
         """规则覆盖回归：测试中每个 R 编号至少出现一次（防新增规则无测试）。"""
         import re
 
         source = open(__file__, encoding="utf-8").read()
         used = set(re.findall(r"\bR(\d+)\b", source))
-        # 代码里出现过的 R 编号
-        expected = {str(n) for n in range(1, 15)}
+        # 代码里出现过的 R 编号（R1~R16）
+        expected = {str(n) for n in range(1, 17)}
         missing = expected - used
         assert not missing, f"规则 R{','.join(sorted(missing))} 无测试引用"
 

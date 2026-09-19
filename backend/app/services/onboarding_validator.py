@@ -12,7 +12,7 @@ warn 需人工逐条备注处置理由后放行。这是防 LLM 幻觉的确定�
 - `validate_spec` 为纯函数（不查库），`build_registry_snapshot` 负责从 DB 取
   当前 registry 快照，二者解耦，便于单测逐规则构造正反用例。
 
-规则编号与依据（R1~R14，见设计 §4.1）：
+规则编号与依据（R1~R16，见设计 §4.1）：
   R1/R2/R3  code/table_name/name_cn 全树唯一（命名规范 §3.4）
   R4        域前缀白名单（命名规范 §3.2，与 test_data_source_naming.py 镜像）
   R5        name_cn 禁 code 原文（命名规范 §3.2）
@@ -24,6 +24,8 @@ warn 需人工逐条备注处置理由后放行。这是防 LLM 幻觉的确定�
   R12       低置信字段提示人工核（防幻觉）
   R13       amount 必须标注"分"单位（AGENTS.md 金额单位铁律）
   R14       字段语义角色与现有 registry 冲突检测（语义一致性）
+  R15       同一声明多个 sn 角色 → warn（#158：SN 语义唯一，多判多为 LLM 误判）
+  R16       pk_field 须在 field_specs 内 → warn（#158：声明自洽性，与 R9 对称）
 """
 
 from __future__ import annotations
@@ -244,6 +246,42 @@ def _rule_role_conflict(spec, snap, rep):
             })
 
 
+def _rule_multi_sn(spec, _snap, rep):
+    """R15: 同一声明出现多个 `sn` 角色字段 → warn（#158，生产实测暴露）。
+
+    SN（设备序列号）语义唯一，一份表通常只有一列真 SN。多列同判 sn 多为 LLM 误判
+    （实测：把 ID 类列 `record_id`/`stat_id` 判成 sn 且 confidence 高达 0.9+，与真
+    `device_sn` 并存），而这类误判**无法靠 R14 拦截**（registry 里没有同名字段可对照）。
+    故用「声明内部自洽性」兜住：多 sn 一律提示人工确认哪个是真 SN。
+    """
+    sn_fields = [
+        f.get("field_name") for f in (spec.get("field_specs") or [])
+        if f.get("semantic_role") == "sn"
+    ]
+    if len(sn_fields) > 1:
+        rep.warned.append({
+            "rule": "R15",
+            "detail": (
+                f"有 {len(sn_fields)} 个字段被判 sn 角色 {sn_fields} —— "
+                "SN 语义唯一，需人工确认哪一列才是真 SN（其余应改为 dimension）"
+            ),
+        })
+
+
+def _rule_pk_ref(spec, _snap, rep):
+    """R16: `pk_field` 若声明，须出现在 field_specs 中 → warn（与 R9 `sn_field` 对称，#158）。
+
+    声明自相矛盾（主键列不在字段清单）时，引擎既无法据此建去重键，也无法在落地包里
+    给出该列的字段语义 —— 属可规则化的自洽性检查，不该靠人工肉眼发现。
+    """
+    pk = spec.get("pk_field")
+    if pk and pk not in _field_map(spec):
+        rep.warned.append({
+            "rule": "R16",
+            "detail": f"pk_field '{pk}' 未出现在 field_specs 中，声明不自洽（引擎无法据此建去重）",
+        })
+
+
 # 规则函数清单（新规则 = 在此追加一个 _rule_* 函数，不碰 validate_spec 流程）
 _RULES: list[callable] = [
     _rule_code_unique,
@@ -260,6 +298,8 @@ _RULES: list[callable] = [
     _rule_low_confidence,
     _rule_amount_unit,
     _rule_role_conflict,
+    _rule_multi_sn,
+    _rule_pk_ref,
 ]
 
 
