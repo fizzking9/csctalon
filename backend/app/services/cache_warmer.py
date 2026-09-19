@@ -455,6 +455,14 @@ def start_warm_loop():
                     await asyncio.to_thread(ai_warm_idle)
                 except Exception:  # noqa: BLE001
                     pass
+                # #153 AI 提示词健康报告: 每日一次(当日未生成且白天), 落 system_events
+                try:
+                    from app.services.ai_feedback_service import (
+                        check_daily_health_report_idle,
+                    )
+                    await asyncio.to_thread(check_daily_health_report_idle)
+                except Exception:  # noqa: BLE001
+                    pass
             except asyncio.CancelledError:
                 return
             except Exception:  # noqa: BLE001

@@ -21,6 +21,31 @@ from app.models.ai_report import AiReport
 logger = logging.getLogger(__name__)
 
 
+def record_latest_missing(db: Session, report_id: int, missing: list) -> None:
+    """#153 记录某报告最近一次 standard 维度校验的缺失清单(反馈闭环收集层)。
+
+    missing=[] 表示校验通过(维度齐全); 空数组与 NULL 的区分:
+    - []   → 已校验且齐全(聚合口径: 维度覆盖良好)
+    - NULL → 从未被 standard 校验(历史快照, 评审时按模板维度重算兜底)
+
+    ⚠️ 直接提交: 校验发生在命中链 standard 分支, 若缺维度走实时补算路径,
+    命中会话(_match_db)最终不 commit —— 不在此提交则 missing 永不落库。
+    提交后 ORM 对象被 expire, 调用方后续访问属性会 lazy reload(会话仍开),
+    PK(id) 不受 expire 影响, 与 #128 命中 bump 的 commit 行为一致。
+    失败仅 log, 不阻塞主流程。
+    """
+    try:
+        import json
+        db.execute(
+            text("UPDATE ai_reports SET latest_missing = :lm WHERE id = :rid"),
+            {"lm": json.dumps(missing or [], ensure_ascii=False), "rid": report_id},
+        )
+        db.commit()
+    except Exception as e:  # noqa: BLE001  落库失败不阻塞主流程
+        db.rollback()
+        logger.warning("record_latest_missing failed (report_id=%s): %s", report_id, e)
+
+
 def save_report(
     db: Session,
     *,

@@ -430,6 +430,7 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
             from app.services.ai_completeness_service import check_dimensions
             from app.services.ai_mode_service import classify_question
             from app.services.ai_recompute_service import recompute
+            from app.services.ai_report_service import record_latest_missing
 
             _match_db = SessionLocal()
             try:
@@ -480,7 +481,10 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                                     q[:30], _matched.id, _tmpl.code if _tmpl else None)
                     else:
                         # 明细: 完整性校验 → 缺维度补算(同窗口快照优先)
+                        # #153 收集层: 校验结果(missing)写回被校验快照的
+                        #   latest_missing, 供周期「提示词健康报告」聚合缺失维度
                         _ck = check_dimensions(_match_db, _matched, _tmpl)
+                        record_latest_missing(_match_db, _matched.id, _ck["missing"])
                         if _ck["complete"]:
                             _ext = await extract_section(_match_db, q, _matched, _tmpl)
                             if _ext["result_md"]:
@@ -575,6 +579,8 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                                         q[:30], _hit2.id)
                         else:
                             _ck2 = check_dimensions(_match_db, _hit2, _tmpl2)
+                            # #153 收集层: 校验结果(missing)写回被校验快照(与 L1 同规)
+                            record_latest_missing(_match_db, _hit2.id, _ck2["missing"])
                             if _ck2["complete"]:
                                 _ext2 = await extract_section(_match_db, q, _hit2, _tmpl2)
                                 if _ext2["result_md"]:

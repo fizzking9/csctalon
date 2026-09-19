@@ -16,6 +16,7 @@
 """
 
 from sqlalchemy import BigInteger, Boolean, Date, ForeignKey, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -62,6 +63,13 @@ class AiReport(IDMixin, TimestampMixin, Base):
     matched_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0,
         comment="#121: 被命中复用次数(match_template_report 命中时 +1)",
+    )
+    latest_missing: Mapped[list | None] = mapped_column(
+        JSONB, nullable=True,
+        comment=(
+            "#153 最近一次 standard 维度校验的缺失清单(JSONB 数组, 空数组=维度齐全); "
+            "供提示词健康报告聚合缺失维度 TopN; NULL=尚未校验"
+        ),
     )
     hit_mode: Mapped[str | None] = mapped_column(
         String(16), nullable=True,
