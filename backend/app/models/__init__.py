@@ -26,6 +26,8 @@ from app.models.data_source_spec import (  # noqa: F401
     SPEC_STATUS_APPLIED,
     SPEC_STATUS_CONFIRMED,
     SPEC_STATUS_DRAFT,
+    SPEC_STATUS_DRAFTING,
+    SPEC_STATUS_FAILED,
     SPEC_STATUS_REJECTED,
     DataSourceSpec,
 )

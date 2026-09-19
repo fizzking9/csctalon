@@ -206,6 +206,10 @@ export const MENU_GROUPS = [
         children: [
           { path: '/data/ingest', title: '数据采集' },
           { path: '/system/access-center', title: '接入中心' },
+          // ★ #157: 新数据源接入的「起草→校验→确认→落地包」闭环工具。
+          //   归此组而非「AI 与分析」: 它的产物是接入声明与落地包(数据接入域),
+          //   与「AI 报告/模型/提示词」那套报告链路不是同一条流水线。
+          { path: '/system/ai-onboarding', title: '数据源接入助手' },
           { path: '/system/cache', title: '缓存管理' },
         ],
       },

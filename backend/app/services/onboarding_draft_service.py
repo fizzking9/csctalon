@@ -1,4 +1,4 @@
-"""AI 数据接入助手·起草服务（工单 #156）
+"""AI 数据接入助手·起草服务（工单 #156，异步编排 #157）
 
 设计（对应 docs/design/AI数据接入助手设计-20260919.md §五）：
 - 输入：样例（≤50 行，脱敏）+ 可选业务提示（table_hint / business_note）。
@@ -12,6 +12,13 @@
   后返回错误，不降级 122b（#131 语义：122b 仅预生成）。
 - 原则（用户拍板）：AI 只当「建议者与初稿起草者」，产出全是配置（spec 行），
   不产生解析器/分类器代码 —— 这是「机制而非硬编码」的落点。
+
+#157 异步编排（对应设计 §七「异步起草 202 + 轮询」）：
+- `create_draft_placeholder` 预建占位行（status=drafting, code=NULL）→ 路由立即
+  返回 202+id（LLM 未跑完时还不知道 AI 建议的 code，故 code 必须可空）；
+- `start_draft_task` 在事件循环里起后台任务，任务自开 db session（不依赖请求生命周期）；
+- 完成后 `_draft_core` 更新同一行（status=draft + AI 产物）；失败/被抢占
+  `_mark_failed` 置 status=failed + error_message，避免行永久停在 drafting。
 
 脱敏规则（对样例值逐值处理，避免真实业务数据进 LLM）：
 - 手机号 / 邮箱 / 18 位证件号 → 掩码；字符串 > 60 字符截断（保留头部语义特征）；
@@ -34,7 +41,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.data_source_spec import SPEC_STATUS_DRAFT, DataSourceSpec
+from app.models.data_source_spec import (
+    SPEC_STATUS_DRAFT,
+    SPEC_STATUS_DRAFTING,
+    SPEC_STATUS_FAILED,
+    DataSourceSpec,
+)
 from app.models.llm_provider import LlmCallLog
 from app.models.onboarding_prompt import OnboardingPrompt
 from app.services import llm_client
@@ -374,10 +386,14 @@ async def _llm_draft_call(
 
 
 async def _draft_core(
-    db: Session, *, table_hint: str | None, business_note: str | None,
-    samples: list[dict], created_by: int | None,
+    db: Session, *, spec_id: int | None = None, table_hint: str | None,
+    business_note: str | None, samples: list[dict], created_by: int | None,
 ) -> dict:
-    """起草核心流程（无调度层，供 draft_spec_async 经 L1 门闸调用）。"""
+    """起草核心流程（无调度层，供 draft_spec_async 经 L1 门闸调用）。
+
+    spec_id 非空 → 更新既有占位行（#157 异步编排路径）；
+    spec_id 为空 → 新建一行（同步调用 / 测试路径）。
+    """
     t0 = time.perf_counter()
 
     # ── 0. 输入校验（样例非空、每行是对象）──
@@ -429,35 +445,61 @@ async def _draft_core(
 
     # ── 4. 落库（status=draft；fail 未清零也落库，人工确认时才必须清零）──
     spec_obj = merged
-    existing_id = db.execute(
-        select(DataSourceSpec.id).where(DataSourceSpec.code == spec_obj["code"])
-    ).scalar()
-    if existing_id is not None:
-        raise DraftError(
-            f"已存在同 code 草稿: {spec_obj['code']}（id={existing_id}）—— 请先处置旧草稿或调整 code"
+    if spec_id is not None:
+        # #157 异步路径: 更新既有占位行（POST 时建的 drafting 行）
+        spec = db.get(DataSourceSpec, spec_id)
+        if spec is None:
+            raise DraftError(f"草稿不存在: id={spec_id}")
+        # 落库只有一次（task 单飞锁挡并发重复补算），此处安全覆盖
+        spec.code = spec_obj["code"]
+        spec.name_cn = spec_obj["name_cn"]
+        spec.category = spec_obj.get("category") or None
+        spec.sort_order = int(spec_obj.get("sort_order") or 999)
+        spec.time_field = spec_obj.get("time_field") or None
+        spec.sn_field = spec_obj.get("sn_field") or None
+        spec.pk_field = spec_obj.get("pk_field") or None
+        spec.pk_strategy = spec_obj.get("pk_strategy") or "primary_key"
+        spec.sync_source = spec_obj.get("sync_source") or None
+        spec.description = spec_obj.get("description") or None
+        spec.status = SPEC_STATUS_DRAFT
+        spec.error_message = None
+        spec.sample_summary = summary
+        spec.field_specs = obj.get("fields") or []
+        spec.dedup_recommendation = obj.get("dedup_recommendation")
+        spec.validator_report = report
+        db.commit()
+        db.refresh(spec)
+    else:
+        # 同步路径: 新建一行（auth 依赖的 code 冲突校验仅在新建时做）
+        existing_id = db.execute(
+            select(DataSourceSpec.id).where(DataSourceSpec.code == spec_obj["code"])
+        ).scalar()
+        if existing_id is not None:
+            raise DraftError(
+                f"已存在同 code 草稿: {spec_obj['code']}（id={existing_id}）—— 请先处置旧草稿或调整 code"
+            )
+        spec = DataSourceSpec(
+            code=spec_obj["code"],
+            table_name=(table_hint or "").strip(),  # 物理表名来自输入提示（AI 不负责造表名）
+            name_cn=spec_obj["name_cn"],
+            category=spec_obj.get("category") or None,
+            sort_order=int(spec_obj.get("sort_order") or 999),
+            time_field=spec_obj.get("time_field") or None,
+            sn_field=spec_obj.get("sn_field") or None,
+            pk_field=spec_obj.get("pk_field") or None,
+            pk_strategy=spec_obj.get("pk_strategy") or "primary_key",
+            sync_source=spec_obj.get("sync_source") or None,
+            description=spec_obj.get("description") or None,
+            status=SPEC_STATUS_DRAFT,
+            sample_summary=summary,
+            field_specs=obj.get("fields") or [],
+            dedup_recommendation=obj.get("dedup_recommendation"),
+            validator_report=report,
+            created_by=created_by,
         )
-    spec = DataSourceSpec(
-        code=spec_obj["code"],
-        table_name=(table_hint or "").strip(),  # 物理表名来自输入提示（AI 不负责造表名）
-        name_cn=spec_obj["name_cn"],
-        category=spec_obj.get("category") or None,
-        sort_order=int(spec_obj.get("sort_order") or 999),
-        time_field=spec_obj.get("time_field") or None,
-        sn_field=spec_obj.get("sn_field") or None,
-        pk_field=spec_obj.get("pk_field") or None,
-        pk_strategy=spec_obj.get("pk_strategy") or "primary_key",
-        sync_source=spec_obj.get("sync_source") or None,
-        description=spec_obj.get("description") or None,
-        status=SPEC_STATUS_DRAFT,
-        sample_summary=summary,
-        field_specs=obj.get("fields") or [],
-        dedup_recommendation=obj.get("dedup_recommendation"),
-        validator_report=report,
-        created_by=created_by,
-    )
-    db.add(spec)
-    db.commit()
-    db.refresh(spec)
+        db.add(spec)
+        db.commit()
+        db.refresh(spec)
 
     # ── 5. system_event 留痕（provider/耗时/校验 fail 数）──
     duration_ms = int((time.perf_counter() - t0) * 1000)
@@ -510,10 +552,13 @@ async def _draft_core(
 # 对外入口（L1 异步编排 + 同步包装）
 # ─────────────────────────────────────────────────────────────────────
 async def draft_spec_async(
-    db: Session, *, table_hint: str | None = None, business_note: str | None = None,
-    samples: list[dict], created_by: int | None = None,
+    db: Session, *, spec_id: int | None = None, table_hint: str | None = None,
+    business_note: str | None = None, samples: list[dict],
+    created_by: int | None = None,
 ) -> dict:
-    """异步起草入口（#157 路由直接 await）：经 llm_scheduler L1 门闸执行。
+    """异步起草入口：经 llm_scheduler L1 门闸执行。
+
+    spec_id 非空：更新既有占位行（#157 路由后台任务路径）；为空：新建一行。
 
     失败（DraftError / 其它异常）→ 写 failed system_event 后重抛；
     被更高优先级（L0 预生成）抢占 → CancelledError 直接上抛，不写失败事件
@@ -525,7 +570,7 @@ async def draft_spec_async(
     try:
         try:
             return await _draft_core(
-                db, table_hint=table_hint, business_note=business_note,
+                db, spec_id=spec_id, table_hint=table_hint, business_note=business_note,
                 samples=samples, created_by=created_by,
             )
         except asyncio.CancelledError:
@@ -553,9 +598,88 @@ async def draft_spec_async(
         await release(handle)
 
 
+def _mark_failed(db: Session, spec_id: int, message: str) -> None:
+    """把草稿行置为 failed + error_message（防占位行永久停在 drafting）。
+
+    复用调用方 session（后台任务自己的 db）；先 rollback 清掉失败事务残留，
+    再判断 status 是否仍是 drafting —— 已完成的行（status=draft）不覆盖。
+    """
+    try:
+        db.rollback()
+        spec = db.get(DataSourceSpec, spec_id)
+        if spec is not None and spec.status == SPEC_STATUS_DRAFTING:
+            spec.status = SPEC_STATUS_FAILED
+            spec.error_message = message[:2000]
+            db.commit()
+            logger.warning("onboarding_draft 标记失败 spec_id=%s: %s", spec_id, message[:200])
+    except Exception as e:  # noqa: BLE001  失败兜底标记异常不二次影响用户
+        logger.error("onboarding_draft 标记失败异常 spec_id=%s: %s", spec_id, e)
+
+
+def create_draft_placeholder(
+    session: Session, *, table_hint: str | None, samples: list[dict],
+    created_by: int | None,
+) -> DataSourceSpec:
+    """预建起草占位行（status=drafting, code=NULL），路由立即返回 202+id。
+
+    输入校验在此同步做：样例格式非法时立即报错（不必等 LLM 跑一遍才失败）；
+    脱敏/摘要/校验都在后台任务的 _draft_core 里做，此处不重复。
+    """
+    if not isinstance(samples, list) or not samples:
+        raise DraftError("samples 不能为空（至少一行样例数据）")
+    for row in samples:
+        if not isinstance(row, dict):
+            raise DraftError("samples 每行必须是 JSON 对象（列名→值）")
+    spec = DataSourceSpec(
+        code=None,  # AI 尚未给出建议 code（PostgreSQL unique 允许多个 NULL）
+        table_name=(table_hint or "").strip(),
+        name_cn="（AI 起草中）",  # 起草完成后被 AI 建议的 name_cn 覆盖
+        status=SPEC_STATUS_DRAFTING,
+        sort_order=999,
+        pk_strategy="primary_key",
+        created_by=created_by,
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    return spec
+
+
+def start_draft_task(
+    *, session_factory, spec_id: int, table_hint: str | None = None,
+    business_note: str | None = None, samples: list[dict],
+    created_by: int | None = None,
+) -> None:
+    """在事件循环上调度起草后台任务（fire-and-forget）。
+
+    - 任务自开独立 db session（session_factory 生成），不依赖请求生命周期；
+    - 正常完成 → _draft_core 更新占位行为 draft；异常 → _mark_failed 兜底置 failed；
+    - 被 L0 预生成抢占（CancelledError）→ 标记 failed("已被更高优先级抢占")，前端可重试。
+    """
+    async def _run() -> None:
+        db = session_factory()
+        try:
+            await draft_spec_async(
+                db, spec_id=spec_id, table_hint=table_hint,
+                business_note=business_note, samples=samples, created_by=created_by,
+            )
+        except asyncio.CancelledError:
+            _mark_failed(db, spec_id, "起草被更高优先级任务抢占, 请稍后重试")
+        except DraftError as e:
+            _mark_failed(db, spec_id, str(e))
+        except Exception as e:  # noqa: BLE001  未预期异常兜底标记失败
+            logger.exception("onboarding_draft 后台任务异常 spec_id=%s: %s", spec_id, e)
+            _mark_failed(db, spec_id, f"{e.__class__.__name__}: {e}")
+        finally:
+            db.close()
+
+    asyncio.get_running_loop().create_task(_run())
+
+
 def draft_spec(
-    db: Session, *, table_hint: str | None = None, business_note: str | None = None,
-    samples: list[dict], created_by: int | None = None,
+    db: Session, *, spec_id: int | None = None, table_hint: str | None = None,
+    business_note: str | None = None, samples: list[dict],
+    created_by: int | None = None,
 ) -> dict:
     """同步起草入口（worker / 测试 / 非 async 上下文用；同 ai_report_worker 模式）。
 
@@ -563,12 +687,12 @@ def draft_spec(
     """
     try:
         return asyncio.run(draft_spec_async(
-            db, table_hint=table_hint, business_note=business_note,
+            db, spec_id=spec_id, table_hint=table_hint, business_note=business_note,
             samples=samples, created_by=created_by,
         ))
     except RuntimeError as e:
         logger.warning("onboarding_draft 已在事件循环中, 换新 loop: %s", e)
         return asyncio.new_event_loop().run_until_complete(draft_spec_async(
-            db, table_hint=table_hint, business_note=business_note,
+            db, spec_id=spec_id, table_hint=table_hint, business_note=business_note,
             samples=samples, created_by=created_by,
         ))

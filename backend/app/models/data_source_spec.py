@@ -20,7 +20,12 @@ from app.core.database import Base
 from app.models.base import IDMixin, TimestampMixin
 
 # 接入声明流转状态
+# ⚠️ #157 起扩展为六态：drafting/failed 是「AI 起草过程态」（异步 202 + 轮询用），
+#    draft/confirmed/applied/rejected 是「人工流转态」。前端按 status 单字段分支即可，
+#    不引入第二个状态字段（避免两字段组合出无意义状态）。
+SPEC_STATUS_DRAFTING = "drafting"  # AI 起草中（占位行 code=NULL，前端轮询）
 SPEC_STATUS_DRAFT = "draft"  # AI 起草完成，待人工确认
+SPEC_STATUS_FAILED = "failed"  # AI 起草失败（error_message 有值，可重试）
 SPEC_STATUS_CONFIRMED = "confirmed"  # 人工确认通过（fail 清零 + warn 已备注处置）
 SPEC_STATUS_APPLIED = "applied"  # 已按落地包走完现有流程
 SPEC_STATUS_REJECTED = "rejected"  # 人工拒绝
@@ -32,9 +37,9 @@ class DataSourceSpec(IDMixin, TimestampMixin, Base):
     __tablename__ = "data_source_specs"
 
     # ── 声明主体（字段对齐 DataSource，确认后可直接映射）──
-    code: Mapped[str] = mapped_column(
-        String(64), unique=True, index=True, nullable=False,
-        comment="建议 code（须与现有 registry 全树唯一，改名属破坏性变更）",
+    code: Mapped[str | None] = mapped_column(
+        String(64), unique=True, index=True, nullable=True,
+        comment="建议 code（须与现有 registry 全树唯一，改名属破坏性变更）；起草中为 NULL",
     )
     table_name: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="物理表名（须与 model.__tablename__ 一致）",
@@ -59,10 +64,13 @@ class DataSourceSpec(IDMixin, TimestampMixin, Base):
     # ── 流转状态 ──
     status: Mapped[str] = mapped_column(
         String(16), default=SPEC_STATUS_DRAFT, nullable=False, index=True,
-        comment="draft/confirmed/applied/rejected",
+        comment="drafting/draft/failed/confirmed/applied/rejected",
     )
     issue_no: Mapped[str | None] = mapped_column(
         String(16), nullable=True, comment="落地工单号（确认后填写，按 issue-workflow）",
+    )
+    error_message: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="起草失败原因（status=failed 时有值，供前端展示与重试判断）",
     )
 
     # ── AI 与校验产物 ──

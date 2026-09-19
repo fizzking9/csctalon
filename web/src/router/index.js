@@ -473,6 +473,13 @@ const routes = [
         component: () => import('@/views/system/AiReports.vue'),
         meta: { title: 'AI 报告历史', icon: 'Document', admin: true },
       },
+      {
+        // #157: 数据源接入助手(起草→校验→确认→落地包 闭环, 归「数据与接入」组)
+        path: 'system/ai-onboarding',
+        name: 'SystemAiOnboarding',
+        component: () => import('@/views/system/AiOnboarding.vue'),
+        meta: { title: '数据源接入助手', icon: 'Connection', admin: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },

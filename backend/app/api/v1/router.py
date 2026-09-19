@@ -6,6 +6,7 @@ from app.api.v1 import (
     admin_ai,
     agenda,
     ai,
+    ai_onboarding,
     alerts,
     analysis_views,
     analytics,
@@ -106,6 +107,7 @@ api_router.include_router(scrm_chat.router)
 api_router.include_router(notifications.router)
 api_router.include_router(agenda.router)
 api_router.include_router(ai.router)
+api_router.include_router(ai_onboarding.router)  # #157 AI 数据接入助手(起草/确认/落地包)
 api_router.include_router(complaints.router)
 api_router.include_router(schedules.router)
 api_router.include_router(source_groups.router)
