@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""AI 报告调度器凌晨触发测试 (工单 #133 批次 A2)。
+"""AI 报告调度器凌晨触发测试 (工单 #133 批次 A2) + 启动预热分流测试 (工单 #166)。
 
 覆盖:
 - schedule_due_templates 在凌晨 02:01(周一) + trigger_at=1-02:00 能匹配到 weekly 模板
 - schedule_due_templates 在凌晨 02:01(每月 1 号) + trigger_at=1-02:00 能匹配到 monthly 模板
 - schedule_due_templates 在凌晨 02:01 + daily 模板 trigger_at=09:00 **不**误触发
 - warm_idle 函数源码不再含 _DAYTIME_HOURS 时段限制(凌晨可触发)
+- #166 warm_on_startup 分流: 未到点的周报/月报不生成; 已到点才生成;
+  日报(refresh_on_sync=True)行为不变; 同一快照窗口刚生成过则节流跳过
 
 固定 datetime 注入, 避免测试随时钟漂移。
 """
@@ -15,9 +17,14 @@ import inspect
 
 import pytest
 
+from app.models.ai_report import AiReport
 from app.models.ai_report_template import AiReportTemplate
 from app.services import ai_report_worker
-from app.services.ai_report_worker import schedule_due_templates, warm_idle
+from app.services.ai_report_worker import (
+    schedule_due_templates,
+    warm_idle,
+    warm_on_startup,
+)
 
 
 # ── fixture: 一个 weekly 模板 trigger_at=1-02:00(每周一凌晨2点) ──────────
@@ -167,4 +174,176 @@ def test_warm_idle_runs_at_midnight(monkeypatch):
     assert called["count"] == 1, (
         "warm_idle 在凌晨应进入 schedule_due_templates 扫描, "
         "若被时段限制提前 return 则不会调用 schedule_due_templates"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 工单 #166: warm_on_startup 只补「当前该有的报告」
+#
+# 背景: 原实现遍历全部 active 模板无条件生成 → 每次服务重启就把周报/月报重算一遍
+# (生产一天 7~21 次)。修复后: 周报/月报只在 trigger_at 到点时生成 + 快照窗口节流。
+# ══════════════════════════════════════════════════════════════════════════
+
+class _SessionProxy:
+    """转发测试 session 的全部属性, 但 close() 置空。
+
+    warm_on_startup 走自己的 `SessionLocal()`(独立会话, 看不到 db fixture 的
+    未提交数据), 测试需把会话指向 db fixture; 而它的 finally 会 close() —— 不能
+    真关掉测试会话, 故用代理吞掉 close。
+    """
+
+    def __init__(self, session):
+        self._session = session
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+    def close(self):  # noqa: D102  见类 docstring
+        pass
+
+
+@pytest.fixture()
+def startup_calls(monkeypatch, db):
+    """拦截 warm_on_startup 的会话与生成动作, 返回「实际生成的模板 id 列表」。
+
+    - SessionLocal → 测试 session 代理(能看到 fixture 内未提交的模板/报告行)
+    - generate_for_template → 记录调用(避免真实 LLM 与 commit)
+    """
+    calls: list[int] = []
+
+    def _fake_generate(_db, tmpl, *, level=2):
+        calls.append(tmpl.id)
+        return {"report_id": -1}
+
+    monkeypatch.setattr(ai_report_worker, "SessionLocal", lambda: _SessionProxy(db))
+    monkeypatch.setattr(ai_report_worker, "generate_for_template", _fake_generate)
+    return calls
+
+
+def _add_template(db, *, code, period, frequency, trigger_at,
+                  refresh_on_sync=False) -> AiReportTemplate:
+    """插入一个 active 模板(测试事务内, fixture 结束回滚)。"""
+    t = AiReportTemplate(
+        code=code, name_cn=f"测试-{code}", question_template="生成分析",
+        period=period, frequency=frequency, trigger_at=trigger_at,
+        refresh_on_sync=refresh_on_sync, priority=100, max_tokens=2000,
+        is_active=True, visibility_scope="public",
+    )
+    db.add(t)
+    db.flush()
+    return t
+
+
+def test_warm_on_startup_skips_weekly_not_due(db, monkeypatch, startup_calls):
+    """#166 验收 1: trigger_at 未到点的 weekly 模板, 启动预热**不生成**。
+
+    2026-09-16 是周三 10:30, 模板 trigger_at=1-02:00(周一凌晨) → 未到点。
+    """
+    t = _add_template(db, code="_test_166_weekly_nd", period="weekly",
+                      frequency="weekly", trigger_at="1-02:00")
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 16, 10, 30))
+
+    warm_on_startup(force=True)
+
+    assert t.id not in startup_calls, (
+        "未到点的周报不应在服务启动时生成(原 bug: 每次重启全量重算)"
+    )
+
+
+def test_warm_on_startup_skips_monthly_not_due(db, monkeypatch, startup_calls):
+    """#166 验收 1(月报): trigger_at 未到点的 monthly 模板, 启动预热**不生成**。
+
+    2026-09-16 是 16 号, 模板 trigger_at=1-02:00(每月1号) → 未到点。
+    """
+    t = _add_template(db, code="_test_166_monthly_nd", period="monthly",
+                      frequency="monthly", trigger_at="1-02:00")
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 16, 10, 30))
+
+    warm_on_startup(force=True)
+
+    assert t.id not in startup_calls, "未到点的月报不应在服务启动时生成"
+
+
+def test_warm_on_startup_generates_weekly_when_due(db, monkeypatch, startup_calls):
+    """#166 验收 1(正例): trigger_at **到点**时, 启动预热正常生成周报。
+
+    2026-09-14 是周一 02:01, 与 trigger_at=1-02:00 在 ±1 分钟容差内 → 到点。
+    (凌晨不在白天时段, 故 force=True —— 与 cache_warmer 的启动调用一致。)
+    """
+    t = _add_template(db, code="_test_166_weekly_due", period="weekly",
+                      frequency="weekly", trigger_at="1-02:00")
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 14, 2, 1))
+
+    warm_on_startup(force=True)
+
+    assert t.id in startup_calls, "到点的周报应被启动预热生成(否则会漏掉这份报告)"
+
+
+def test_warm_on_startup_generates_daily_regardless_of_trigger(
+        db, monkeypatch, startup_calls):
+    """#166 验收 4: 日报(refresh_on_sync=True)行为不变 —— 启动即生成。
+
+    模板 trigger_at=09:00, 当前 14:00 未到点; 但日报是「随同步刷新」类,
+    启动预热仍应生成(保证重启后当日报告新鲜)。
+    """
+    t = _add_template(db, code="_test_166_daily", period="daily",
+                      frequency="daily", trigger_at="09:00", refresh_on_sync=True)
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 16, 14, 0))
+
+    warm_on_startup(force=True)
+
+    assert t.id in startup_calls, (
+        "日报(refresh_on_sync=True)启动预热行为应保持不变"
+    )
+
+
+def test_warm_on_startup_throttles_same_snapshot_window(
+        db, monkeypatch, startup_calls):
+    """#166 验收 2: 同一快照窗口已生成过 → 节流跳过(不调 LLM)。
+
+    daily 模板(refresh_on_sync=True), 今日已有 (period=daily, snapshot_date=今天)
+    的公共报告 → 启动预热应跳过。
+    """
+    t = _add_template(db, code="_test_166_throttle", period="daily",
+                      frequency="daily", trigger_at="09:00", refresh_on_sync=True)
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 16, 14, 0))
+    # 造一份「同窗口刚生成」的公共报告(created_at 由 server_default=now() 落当前时刻)
+    db.add(AiReport(
+        task_id=None, user_id=1, question="今日数据如何?", answer_md="md",
+        llm_model="test-model", llm_ms=1, total_ms=1,
+        template_id=t.id, snapshot_period="daily", snapshot_date="2026-09-16",
+        is_public=True,
+    ))
+    db.flush()
+
+    warm_on_startup(force=True)
+
+    assert t.id not in startup_calls, (
+        "同一快照窗口 20min 内已生成过, 启动预热应节流跳过(防重启风暴)"
+    )
+
+
+def test_warm_on_startup_throttle_is_period_scoped(
+        db, monkeypatch, startup_calls):
+    """#166 节流按「快照窗口」判, 不跨 period 误伤。
+
+    模板 period=weekly, 库里只有 (period=daily, 今天) 的报告 → 不构成同窗口,
+    启动预热(到点时)仍应生成。
+    """
+    t = _add_template(db, code="_test_166_period_scope", period="weekly",
+                      frequency="weekly", trigger_at="1-02:00")
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 14, 2, 1))
+    db.add(AiReport(
+        task_id=None, user_id=1, question="今日数据如何?", answer_md="md",
+        llm_model="test-model", llm_ms=1, total_ms=1,
+        template_id=t.id, snapshot_period="daily", snapshot_date="2026-09-14",
+        is_public=True,
+    ))
+    db.flush()
+
+    warm_on_startup(force=True)
+
+    assert t.id in startup_calls, (
+        "节流判据是 (template_id, snapshot_period, snapshot_date) 三元组; "
+        "只有 daily 窗口的报告不应挡掉 weekly 报告"
     )

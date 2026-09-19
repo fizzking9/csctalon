@@ -3,8 +3,9 @@
 设计:
 - 复用 cache_warmer 三时机设计, 但 LLM 调用与缓存路由独立
 - 三时机:
-  ① 同步完成后(sync_task_manager._run_background finally) 触发 sync-triggered 模板
-  ② 服务启动后延迟 8s(start_warm_loop) 触发 active 模板
+  ① 同步完成后(sync_task_manager._run_background finally) 触发 refresh_on_sync 模板
+  ② 服务启动后延迟 8s(start_warm_loop) **只补「当前该有的报告」**: refresh_on_sync
+     模板(日报类)直接生成, 其余(周报/月报)仅当 trigger_at 到点才生成(#166 修复)
   ③ 空闲期(bms_scheduler._run_loop 每分钟) 扫描 daily/weekly/monthly + trigger_at 匹配
 - 进程级单飞锁 _worker_lock 防并发(单 worker, 保证互斥锁有效)
 - 失败处理: 仅 log + 通知中心写 system_event(category=ai, status=failed), 不阻塞
@@ -49,6 +50,12 @@ _DAYTIME_HOURS = set(range(8, 24))
 # 用此间隔挡掉过近的重复 LLM 调用。仅作用于"同步触发 daily"路径; sync-triggered
 # 模板不受限, warm_idle 09:00 定时兜底也走另一条路径不受此约束。
 _DAILY_SYNC_MIN_INTERVAL_MIN = 20
+
+# #166 启动预热的最小间隔保护(分钟): 服务重启会触发 warm_on_startup, 若短时间多次
+# 重启(如连续部署/异常恢复)会把「当日日报」重复重算。设 20min 与同步节流同量级:
+# 正常一次部署不受影响(距上次生成通常远超 20min), 但连续部署风暴被挡住。
+# ⚠️ 仅作用于「启动预热」路径; warm_idle 按 trigger_at 到点触发不走此约束。
+_STARTUP_MIN_INTERVAL_MIN = 20
 
 # 进程级单飞锁(防并发: 同步完成 + 启动 + 空闲期可能同时触发)
 _worker_lock = threading.Lock()
@@ -346,21 +353,33 @@ def generate_for_template(db: Session, template: AiReportTemplate,
     }
 
 
-def _daily_generated_recently(db: Session, template_id: int, *, min_minutes: int) -> bool:
-    """#129 该日报模板「当日最近一条公共报告」是否在 min_minutes 内生成(节流判据)。
+def _window_generated_recently(db: Session, template_id: int, *, snapshot_period: str,
+                               snapshot_date: str, min_minutes: int) -> bool:
+    """#166 按「快照窗口」节流的通用判据(daily/weekly/monthly 一致生效)。
+
+    判据 = `(template_id, snapshot_period, snapshot_date)` 三元组 —— 即「同一份报告」。
+    注意 `snapshot_date` 是**快照日**(generate_for_template 落库的当日日期), 不是报告
+    窗口起算日; 报告窗口起止另存 `ai_reports.start/end`。
+
+    调用方必须显式传入「本次即将生成的那份报告」的窗口:
+      - 日报:      snapshot_period="daily",  snapshot_date=今天
+      - 周报/月报: snapshot_period=模板 period, snapshot_date=今天(生成当日)
+
+    #166 起替代原 `_daily_generated_recently`(该函数把判据写死为「snapshot_date=今天」
+    且不看 period, 只服务日报同步刷新路径; 两个近似函数并存必然漂移, 故统一收敛)。
 
     created_at 为 tz-aware UTC(timestamptz), 与当前 UTC 比较; 对 naive 值补 UTC。
-    查询失败 fail-open(返回 False=未节流), 宁可多刷一次也不漏掉同步后的刷新。
+    查询失败 fail-open(返回 False=未节流), 宁可多刷一次也不漏。
     """
-    today = _now_cn().strftime("%Y-%m-%d")
     try:
         latest = db.execute(
             text("""SELECT MAX(created_at) FROM ai_reports
-                    WHERE template_id = :tid AND snapshot_date = :sdate AND is_public = TRUE"""),
-            {"tid": template_id, "sdate": today},
+                    WHERE template_id = :tid AND is_public = TRUE
+                      AND snapshot_period = :sp AND snapshot_date = :sd"""),
+            {"tid": template_id, "sp": snapshot_period, "sd": snapshot_date},
         ).scalar()
     except Exception as e:  # noqa: BLE001
-        logger.warning("日报节流查询失败(template_id=%s), 按未节流处理: %s", template_id, e)
+        logger.warning("快照窗口节流查询失败(template_id=%s), 按未节流处理: %s", template_id, e)
         return False
     if latest is None:
         return False
@@ -368,6 +387,33 @@ def _daily_generated_recently(db: Session, template_id: int, *, min_minutes: int
         latest = latest.replace(tzinfo=_dt.timezone.utc)
     elapsed_s = (_dt.datetime.now(_dt.timezone.utc) - latest).total_seconds()
     return elapsed_s < min_minutes * 60
+
+
+def _template_due_now(t: AiReportTemplate, now: _dt.datetime) -> bool:
+    """#166 单模板「当前时刻是否到点」判定（供启动预热用，与 schedule_due_templates 同口径）。
+
+    与 `schedule_due_templates` 的区别：后者扫描全表返回列表，本函数判单个模板，
+    供 `warm_on_startup` 复用同一套 trigger_at 语义（避免两处判定漂移）。
+
+    - frequency=sync-triggered: 启动预热**不触发**（由 warm_on_sync_complete 负责）
+    - daily + "HH:MM" / weekly + "wday-HH:MM" / monthly + "day-HH:MM": ±1 分钟匹配
+    """
+    if t.frequency == "sync-triggered" or not t.trigger_at:
+        return False
+    now_hm = now.strftime("%H:%M")
+    try:
+        if t.frequency == "daily":
+            return _hm_match(t.trigger_at, now_hm)
+        if t.frequency == "weekly":
+            wday, hm = _parse_wday_hhmm(t.trigger_at)
+            return wday is not None and wday == now.isoweekday() and _hm_match(hm, now_hm)
+        if t.frequency == "monthly":
+            day, hm = _parse_wday_hhmm(t.trigger_at)
+            return day is not None and day == now.day and _hm_match(hm, now_hm)
+    except (ValueError, IndexError):
+        logger.warning("ai_report_template(id=%s code=%s) trigger_at=%s 解析失败",
+                       t.id, t.code, t.trigger_at)
+    return False
 
 
 def warm_on_sync_complete() -> None:
@@ -400,19 +446,22 @@ def warm_on_sync_complete() -> None:
         # 先取标量快照: 循环内 generate_for_template 会 commit(expire_on_commit),
         # 之后再访问 ORM 对象属性会 lazy reload, 提前取出避免 detached/expired 隐患。
         snapshot = [(t.id, t.code) for t in rows]
+        today = _now_cn().strftime("%Y-%m-%d")
         for tid, tcode in snapshot:
             try:
-                # 统一 20min 节流: 随同步刷新的模板都按同步节奏(30min/轮),
-                # 距上次生成不足阈值则跳过, 避免推送与同步撞车时重复调 LLM。
-                if _daily_generated_recently(
-                        db, tid, min_minutes=_DAILY_SYNC_MIN_INTERVAL_MIN):
-                    logger.info(
-                        "warm_on_sync_complete: 模板 %s 在 %smin 内已生成, 节流跳过",
-                        tcode, _DAILY_SYNC_MIN_INTERVAL_MIN)
-                    continue
                 # 需要完整模板对象构造 messages; id 稳定, 按快照 id 取并生成
                 tmpl = db.query(AiReportTemplate).get(tid)
                 if tmpl is None or not tmpl.is_active:
+                    continue
+                # 统一 20min 节流: 随同步刷新的模板都按同步节奏(30min/轮),
+                # 距上次生成不足阈值则跳过, 避免推送与同步撞车时重复调 LLM。
+                # #166: 按快照窗口判(period + 当日), 而非只看当日。
+                if _window_generated_recently(
+                        db, tid, snapshot_period=tmpl.period, snapshot_date=today,
+                        min_minutes=_DAILY_SYNC_MIN_INTERVAL_MIN):
+                    logger.info(
+                        "warm_on_sync_complete: 模板 %s 在 %smin 内已生成, 节流跳过",
+                        tcode, _DAILY_SYNC_MIN_INTERVAL_MIN)
                     continue
                 # #127: 同步触发的后台预生成挂 L0(最高优先, 可抢占 L1/L2)
                 generate_for_template(db, tmpl, level=0)
@@ -426,7 +475,24 @@ def warm_on_sync_complete() -> None:
 
 
 def warm_on_startup(force: bool = False) -> None:
-    """服务启动后预热: 触发 active 模板(无 trigger_at 匹配, 全部 active)。
+    """服务启动后预热: **只补「当前该有的报告」**, 不再无差别重算全部 active 模板。
+
+    #166 修复(用户反馈: 周报/月报每天被生成 7~21 次):
+      原实现遍历**全部** active 模板直接生成 → 每次服务重启就把周报/月报重算一遍,
+      与 trigger_at(如 1-02:00)完全无关。生产实证: 报告生成时刻与 `upgrade.sh`
+      部署重启时刻逐一吻合(当天 5 次部署 → 5 份重复周报/月报)。
+
+    现在的分流规则:
+      - `refresh_on_sync=True`(日报类, 时效性强): **保持原行为**, 启动即生成
+        (保证重启后当日报告仍新鲜), 但加快照窗口节流防重启风暴;
+      - 其余(周报/月报, refresh_on_sync=False): **只在 trigger_at 到点时生成**
+        (复用 `_template_due_now`, 与 schedule_due_templates 同口径),
+        未到点则跳过 —— 到点的那次由 warm_idle 正常触发, 不依赖重启。
+
+    节流(#166 用户指定「按快照窗口判」): 统一走 `_window_generated_recently`,
+    按 `(template_id, snapshot_period, snapshot_date=今日)` 判「同一份报告」,
+    在 `_STARTUP_MIN_INTERVAL_MIN` 分钟内已生成则跳过 —— 连续部署/异常重启风暴被挡住,
+    而正常一次部署(距上次生成远超 20min)不受影响。
 
     force=True 时无视白天限制(启动时强制); 否则只在白天 8-23 触发。
     """
@@ -442,14 +508,35 @@ def warm_on_startup(force: bool = False) -> None:
         ).order_by(AiReportTemplate.priority).all()
         if not rows:
             return
-        logger.info("ai_report_worker warm_on_startup(force=%s): %s 个 active 模板待生成",
+        now = _now_cn()
+        today = now.strftime("%Y-%m-%d")
+        logger.info("ai_report_worker warm_on_startup(force=%s): %s 个 active 模板待评估",
                     force, len(rows))
-        for t in rows:
+        # 先取标量快照: 循环内 generate_for_template 会 commit(expire_on_commit),
+        # 之后再访问 ORM 对象属性会 lazy reload, 提前取出避免 detached/expired 隐患。
+        snapshot = [(t.id, t.code, t.refresh_on_sync) for t in rows]
+        for tid, tcode, refresh_on_sync in snapshot:
             try:
+                # 需要完整模板对象: ① 判 trigger_at 是否到点 ② 取 period 做窗口节流
+                tmpl = db.query(AiReportTemplate).get(tid)
+                if tmpl is None or not tmpl.is_active:
+                    continue
+                # ① 周报/月报(refresh_on_sync=False): 只有到点才生成
+                #    未到点 → 启动不生成(#166 核心修复), 等 warm_idle 按 trigger_at 触发
+                if not refresh_on_sync and not _template_due_now(tmpl, now):
+                    continue
+                # ② 节流: 同一份报告(模板 + 快照窗口)刚生成过则跳过(防重启风暴)
+                if _window_generated_recently(
+                        db, tid, snapshot_period=tmpl.period, snapshot_date=today,
+                        min_minutes=_STARTUP_MIN_INTERVAL_MIN):
+                    logger.info(
+                        "warm_on_startup: 模板 %s 快照窗口 %s/%s 在 %smin 内已生成, 节流跳过",
+                        tcode, tmpl.period, today, _STARTUP_MIN_INTERVAL_MIN)
+                    continue
                 # #127: 启动预热(active 模板)挂 L0(最高优先)
-                generate_for_template(db, t, level=0)
+                generate_for_template(db, tmpl, level=0)
             except Exception as e:  # noqa: BLE001
-                logger.error("ai_report_worker: template=%s 生成失败: %s", t.code, e)
+                logger.error("ai_report_worker: template=%s 生成失败: %s", tcode, e)
     except Exception as e:  # noqa: BLE001
         logger.error("ai_report_worker warm_on_startup 异常(不影响业务): %s", e)
     finally:
