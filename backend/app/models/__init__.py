@@ -61,6 +61,7 @@ from app.models.merchant_refund import MerchantRefund  # noqa: F401
 from app.models.metric import MetricDailySnapshot, MetricRegistry, MetricThreshold  # noqa: F401
 from app.models.notification import Notification  # noqa: F401
 from app.models.notification_channel import NotificationChannel  # noqa: F401
+from app.models.onboarding_prompt import OnboardingPrompt  # noqa: F401
 from app.models.operation_log import OperationLog  # noqa: F401
 from app.models.person import Person, PersonAlias  # noqa: F401
 from app.models.policy import Policy  # noqa: F401
@@ -165,6 +166,7 @@ __all__ = [
     "RefundRecordReport",
     "ReturnTracking",
     "Notification",
+    "OnboardingPrompt",
     "OperationLog",
     "Policy",
     "QualityDispositionRule",
