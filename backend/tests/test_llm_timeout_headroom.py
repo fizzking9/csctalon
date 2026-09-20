@@ -8,10 +8,10 @@
 import pytest
 
 from app.services.llm_client import (
-    _ensure_timeout_fits_tokens,
-    _is_local_endpoint,
     _SLOWEST_DECODE_TPS,
     _TIMEOUT_HEADROOM_S,
+    _ensure_timeout_fits_tokens,
+    _is_local_endpoint,
 )
 
 

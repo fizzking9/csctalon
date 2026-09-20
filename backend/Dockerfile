@@ -27,19 +27,10 @@ RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
     && pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn
 
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir \
-    "fastapi>=0.110.0" "uvicorn[standard]>=0.27.0" "gunicorn>=21.2.0" \
-    "sqlalchemy>=2.0.25" "alembic>=1.13.0" "psycopg2-binary>=2.9.9" \
-    "pydantic>=2.6.0" "pydantic-settings>=2.1.0" \
-    "python-jose[cryptography]>=3.3.0" "bcrypt>=4.0.0" \
-    "python-multipart>=0.0.9" "pandas>=2.2.0" "openpyxl>=3.1.2" "python-calamine>=0.2.0" \
-    "redis>=5.0.0" "python-dotenv>=1.0.0" "orjson>=3.9.0" \
-    "pypinyin>=0.50.0" "httpx>=0.27.0" \
-    "playwright>=1.45.0" \
-    # 验证码自动识别(ddddocr + ONNX Runtime,纯 Python,无外部系统依赖)
-    "ddddocr>=1.4.11" "onnxruntime>=1.17.0" \
-    # 发票二维码图本地解码(规划设计 §4.5 全电发票识别链路)
-    "pyzbar>=0.1.9" "pillow>=10.0.0"
+COPY app ./app
+# 依赖单一来源 = pyproject.toml (#183): 安装本项目即解析全部依赖,
+# 杜绝 Dockerfile 硬编码清单与 pyproject 双定义漂移。
+RUN pip install --no-cache-dir .
 
 # 安装 Chromium 浏览器(浏览器二进制走 npmmirror 镜像,避免 cdn.playwright.dev 国内无法访问)
 ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/
