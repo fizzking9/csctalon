@@ -409,9 +409,16 @@ def scan_unique_index_dups(db: Session, *, tables: list[str] | None = None,
 def persist_findings(db: Session, findings: list[dict]) -> list[GovernanceFinding]:
     """把探测结果落库为 `governance_findings`（status=open，待研判）。
 
-    同一 `(detector, table_name, target)` **已有 open finding 时不重复落库**（更新其证据即可）——
+    同一 `(detector, table_name, target)` **已有未处置 finding 时不重复落库**（更新其证据即可）——
     否则定时体检每轮都会堆一条重复记录（同 #166 的教训：无节流的重复留痕会淹没真实变化）。
-    已 resolved/ignored 的历史 finding 不影响新 finding 落库（问题复现应重新暴露）。
+
+    去重状态与 `close_stale_findings` **同源**（`CLOSABLE_STATUSES` = open/judged）：
+    - `open` → 刷新证据（待研判）✅
+    - `judged` → **同样刷新证据，不新增行**（#172：judged 是正常中间态，可能停留数小时到
+      数天，若排除在外每轮体检都会为同一问题新增一行 → 表堆积、界面重复待处置条目）
+    - 已 resolved/ignored 的历史 finding 不影响新 finding 落库（问题复现应重新暴露）
+    - 刷新只动证据（severity_raw/metrics/samples/repro_sql/detected_at），
+      **不碰 verdict/suggestion** —— AI 产物不得被探测层覆盖。
     """
     saved: list[GovernanceFinding] = []
     now = _dt.datetime.now(_dt.timezone.utc)
@@ -421,7 +428,7 @@ def persist_findings(db: Session, findings: list[dict]) -> list[GovernanceFindin
             GovernanceFinding.detector == f["detector"],
             GovernanceFinding.table_name == f["table_name"],
             GovernanceFinding.target == f["target"],
-            GovernanceFinding.status == FINDING_STATUS_OPEN,
+            GovernanceFinding.status.in_(CLOSABLE_STATUSES),
         ).order_by(GovernanceFinding.detected_at.desc()).first()
 
         if existing is not None:

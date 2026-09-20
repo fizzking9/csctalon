@@ -21,11 +21,17 @@
 """
 
 import datetime as _dt
+import json
 import uuid
 
 from sqlalchemy import text
 
-from app.models.governance_finding import FINDING_STATUS_OPEN
+from app.models.governance_finding import (
+    FINDING_STATUS_JUDGED,
+    FINDING_STATUS_OPEN,
+    FINDING_STATUS_RESOLVED,
+    VERDICT_REAL_ISSUE,
+)
 from app.services.governance_detector import (
     GAP_PROTECTION_GAP,
     run_d1_scan,
@@ -231,6 +237,104 @@ def test_d1_run_scan_persists_and_is_idempotent(_engine):
             assert row["metrics"]["redundant_rows"] == 1
             assert row["samples"], "样本不应为空"
             assert "GROUP BY" in row["repro_sql"]
+        finally:
+            s.execute(text("DELETE FROM governance_findings WHERE table_name = :t"), {"t": tbl})
+            s.execute(text(f"DROP TABLE IF EXISTS {tbl}"))
+            s.commit()
+
+
+# ─────────────────────────────────────────────────────────────
+# persist 去重状态（#172）：judged 也刷新不新增；终态不受影响
+# ─────────────────────────────────────────────────────────────
+def test_persist_refreshes_judged_finding_not_duplicate(_engine):
+    """judged（已研判未处置）finding 重扫 → 刷新证据不新增行（#172 回归）。
+
+    生产实证（#172）：judged 是正常中间态（AI 已给结论、等人工处置），可能停留数小时；
+    若每轮体检都为同一问题新增一行 → 表堆积、界面出现同一目标的多个「待处置」条目。
+    且刷新不得覆盖 verdict/suggestion（AI 产物不被探测层覆盖）。
+    """
+    from sqlalchemy.orm import Session
+
+    tbl = _uniq("gov_d1_judged")
+    with Session(_engine) as s:
+        try:
+            s.execute(text(f"CREATE TABLE {tbl} (id bigserial PRIMARY KEY, acct text, device_sn text)"))
+            s.execute(text(f"CREATE UNIQUE INDEX {tbl}_dedup ON {tbl} (acct, device_sn)"))
+            for _ in range(2):
+                s.execute(text(f"INSERT INTO {tbl} (acct, device_sn) VALUES ('acctY', NULL)"))
+            s.commit()
+
+            first = run_d1_scan(s, tables=[tbl])
+            assert first["persisted"] == 1
+            row = s.execute(text(
+                "SELECT id, status, detected_at FROM governance_findings WHERE table_name = :t"
+            ), {"t": tbl}).mappings().one()
+            fid = row["id"]
+            first_detected_at = row["detected_at"]
+            assert row["status"] == FINDING_STATUS_OPEN
+
+            # 模拟研判：置 judged + verdict + suggestion（等人工处置的中间态）
+            s.execute(text(
+                "UPDATE governance_findings SET status = :st, verdict = :v, "
+                "suggestion = CAST(:sg AS jsonb), judged_at = now() WHERE id = :fid"
+            ), {"st": FINDING_STATUS_JUDGED, "v": VERDICT_REAL_ISSUE,
+                "sg": json.dumps({"action": "mark_pending"}), "fid": fid})
+            s.commit()
+
+            # 重扫：不新增行，只刷新证据
+            second = run_d1_scan(s, tables=[tbl])
+            assert second["persisted"] == 1
+            rows = s.execute(text(
+                "SELECT id, status, verdict, suggestion, detected_at "
+                "FROM governance_findings WHERE table_name = :t"
+            ), {"t": tbl}).all()
+            assert len(rows) == 1, f"judged finding 重扫不应新增行, 实得 {len(rows)}"
+            assert rows[0].status == FINDING_STATUS_JUDGED, "刷新不改状态（中间态保留）"
+            assert rows[0].verdict == VERDICT_REAL_ISSUE, "verdict 不得被探测层覆盖"
+            assert rows[0].suggestion == {"action": "mark_pending"}, "suggestion 不得被探测层覆盖"
+            assert rows[0].detected_at >= first_detected_at, "刷新应更新探测时刻"
+        finally:
+            s.execute(text("DELETE FROM governance_findings WHERE table_name = :t"), {"t": tbl})
+            s.execute(text(f"DROP TABLE IF EXISTS {tbl}"))
+            s.commit()
+
+
+def test_persist_new_row_after_resolved(_engine):
+    """终态（resolved）不影响新 finding 落库：问题复现应重新暴露（设计如此）。
+
+    守护 #172 修复不破坏原行为：去重只针对 CLOSABLE_STATUSES（open/judged），
+    resolved 是历史凭证，不得被误刷，重扫应新落一条 open。
+    """
+    from sqlalchemy.orm import Session
+
+    tbl = _uniq("gov_d1_resolved")
+    with Session(_engine) as s:
+        try:
+            s.execute(text(f"CREATE TABLE {tbl} (id bigserial PRIMARY KEY, acct text, device_sn text)"))
+            s.execute(text(f"CREATE UNIQUE INDEX {tbl}_dedup ON {tbl} (acct, device_sn)"))
+            for _ in range(2):
+                s.execute(text(f"INSERT INTO {tbl} (acct, device_sn) VALUES ('acctZ', NULL)"))
+            s.commit()
+
+            first = run_d1_scan(s, tables=[tbl])
+            assert first["persisted"] == 1
+            fid = s.execute(text(
+                "SELECT id FROM governance_findings WHERE table_name = :t"
+            ), {"t": tbl}).scalar()
+
+            # 模拟已执行处置（终态）
+            s.execute(text(
+                "UPDATE governance_findings SET status = :st, executed_at = now() WHERE id = :fid"
+            ), {"st": FINDING_STATUS_RESOLVED, "fid": fid})
+            s.commit()
+
+            second = run_d1_scan(s, tables=[tbl])
+            assert second["persisted"] == 1
+            rows = s.execute(text(
+                "SELECT status FROM governance_findings WHERE table_name = :t ORDER BY id"
+            ), {"t": tbl}).all()
+            assert [r.status for r in rows] == [FINDING_STATUS_RESOLVED, FINDING_STATUS_OPEN], \
+                "resolved 后重扫应新落一条 open（问题复现重新暴露），且旧行保留"
         finally:
             s.execute(text("DELETE FROM governance_findings WHERE table_name = :t"), {"t": tbl})
             s.execute(text(f"DROP TABLE IF EXISTS {tbl}"))
