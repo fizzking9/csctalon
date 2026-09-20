@@ -1,23 +1,31 @@
 <!--
   ┌──────────────── 设计说明（Design Rationale） ────────────────────────────────┐
-  │ 工单：#173（AI 提示词评估中心: 规则级+提示词段评估 + 半自动迭代）              │
+  │ 工单：#173（AI 提示词评估中心: 规则级+提示词段评估 + 半自动迭代）；             │
+  │       #174（人工意见输入通道: 异常/不合理/业务深化，只记录不自动执行）          │
   │ 性质：REQ（具体功能/集成）— 非元需求，不进 AGENTS.md 引用链                    │
   │ 范围：本页 = 「AI 与分析」分组下的**评估侧**入口                               │
   │ 目的（替谁/答何决策）：admin 回答「AI 报告/提示词的命中链路健不健康？           │
   │       哪里在漏？要不要迭代、迭代成什么？」——把 #153 只落事务通知中心的           │
   │       健康报告升级为决策可见页面，并给出可执行路径。                            │
+  │       人工意见区块（#174）：给 admin 一个留痕入口，记录对评估/分析结果的        │
+  │       异常判断、不合理质疑、业务逻辑理解调整与深化意见——机器评估只认规则，      │
+  │       业务直觉无处落账，会导致「看出来了但没记录、下次还要重新发现」。          │
   │ 逻辑（为何这样组织）：四区块按「先看总览 → 再看模板 → 再查跨链路 →             │
   │       再查规则」的排查顺序；问题优先（命中率最低排最上）；迭代建议走抽屉        │
-  │       与各区块并列，避免淹没在数字里。                                         │
+  │       与各区块并列，避免淹没在数字里；人工意见作为页内区块放在迭代建议          │
+  │       入口之前——它是「人补充评估」的输入口，与机器产出的建议并列而不是混入。   │
   │ 口径：窗口近 N 天北京时间(created_at AT TIME ZONE 'Asia/Shanghai')；            │
   │       命中率=(full+section)/本人私有问答数；模板命中率=窗口内 matched_count     │
-  │       合计/快照数(快照级近似, 页面注明)；fp_ratio=误报/(执行+驳回+误报)。       │
+  │       合计/快照数(快照级近似, 页面注明)；fp_ratio=误报/(执行+驳回+误报)；       │
+  │       人工意见分类(存 reason 字段)：分析异常/不合理/业务深化/其他。            │
   │ 取舍（不做什么及原因）：                                                        │
   │   ❌ 不自动改 _SYSTEM_PROMPT/_EXTRACT_SYSTEM 代码常量（提示词铁律）——           │
   │      锚点漂移只出落地指引(anchor_guide)，不提供写入按钮                         │
   │   ❌ 不做全自动执行——所有写入必须人工点「确认应用」(半自动的「半」字)           │
   │   ❌ 不做治理研判提示词(governance_prompts)迭代入口——那是研判链路, 本期不混入   │
   │   ❌ 新模板(new_template)只记建议不自动建——建模板需人工补 required_dimensions  │
+  │   ❌ 人工意见只记录+采纳/不采纳跟踪，**不自动转执行**——自由文本不可靠，          │
+  │      不自动解析、不改模板/规则；采纳仅打标记(confirmed)，跟进由人工后续落地      │
   │ 设计文档：本文件头部注释块(代码层) + ⓘ 气泡(页面层) +                           │
   │           docs/design/AI提示词评估中心-20260920.md + review-checklist(审查层)   │
   └──────────────────────────────────────────────────────────────────────────────────┘
@@ -50,10 +58,11 @@
             <ul>
               <li>❌ 不自动改 _SYSTEM_PROMPT/_EXTRACT_SYSTEM 代码常量（提示词铁律）——锚点漂移只出落地指引，无写入按钮；</li>
               <li>❌ 不做全自动执行——一切写入须人工点「确认应用」；</li>
-              <li>❌ 不做治理研判提示词迭代入口（本期）；新模板只记建议不自动建。</li>
+              <li>❌ 不做治理研判提示词迭代入口（本期）；新模板只记建议不自动建；</li>
+              <li>❌ 人工意见只记录 + 采纳/不采纳跟踪，不自动转执行（自由文本不可靠，不自动解析、不改模板/规则）。</li>
             </ul>
             <p><b>设计文档：</b>docs/design/AI提示词评估中心-20260920.md</p>
-            <p><b>工单：</b>#173</p>
+            <p><b>工单：</b>#173 / #174</p>
           </div>
         </el-popover>
       </div>
@@ -234,7 +243,48 @@
       </el-table>
     </el-card>
 
-    <!-- ═══ 区块5：迭代建议抽屉 ═══ -->
+    <!-- ═══ 区块5：人工意见（#174，只记录 + 采纳跟踪） ═══ -->
+    <el-card shadow="never" class="mb-16">
+      <template #header>
+        <div class="flex-between">
+          <span>人工意见（对评估/分析结果的异常 · 不合理 · 业务深化）</span>
+          <el-tag size="small" type="info">人补充评估 · 只记录不自动执行</el-tag>
+        </div>
+      </template>
+      <div class="opinion-form">
+        <el-input v-model="opinionForm.content" type="textarea" :rows="2"
+                  maxlength="500" show-word-limit placeholder="例：月报投诉口径疑似与手工台账不一致，建议复核登记来源口径…" />
+        <div class="opinion-form-row">
+          <el-select v-model="opinionForm.category" size="small" style="width: 140px">
+            <el-option v-for="(label, key) in OPINION_CATEGORIES" :key="key" :label="label" :value="key" />
+          </el-select>
+          <el-input v-model="opinionForm.target_name" size="small" style="width: 200px"
+                    placeholder="关联对象（可选，默认全局）" />
+          <el-button size="small" type="primary" :loading="submitting" @click="submitOpinion">提交意见</el-button>
+        </div>
+      </div>
+      <el-divider style="margin: 12px 0" />
+      <div v-if="!opinions.length" class="opinion-empty">暂无人工意见 — 上面输入框记录你的判断/意见。</div>
+      <div v-for="op in opinions" :key="op.id" class="opinion-item">
+        <div class="flex-between">
+          <div class="opinion-tags">
+            <el-tag size="small" type="info">人工意见</el-tag>
+            <el-tag size="small" :type="OPINION_TAG_TYPE[op.reason] || 'info'">
+              {{ OPINION_CATEGORIES[op.reason] || op.reason }}
+            </el-tag>
+            <el-tag size="small" :type="statusType(op.status)">{{ statusLabel(op.status) }}</el-tag>
+          </div>
+          <span class="opinion-meta">{{ op.target_name }} · {{ fmtTime(op.created_at) }}</span>
+        </div>
+        <div class="opinion-content">{{ op.suggestion }}</div>
+        <div v-if="op.status === 'proposed'" class="flex-between mt-8" style="justify-content: flex-end">
+          <el-button size="small" type="primary" @click="onOpinionConfirm(op, true)">采纳</el-button>
+          <el-button size="small" @click="onOpinionConfirm(op, false)">不采纳</el-button>
+        </div>
+      </div>
+    </el-card>
+
+    <!-- ═══ 区块6：迭代建议抽屉 ═══ -->
     <el-drawer v-model="drawer" title="迭代建议（半自动执行）" size="520px">
       <div class="drawer-sub">
         流程：生成建议(proposed) → 人工确认(confirmed) → 一键应用(applied)；不采纳 → rejected。
@@ -270,10 +320,11 @@
 <script setup>
 import { onMounted, ref, computed } from 'vue'
 import { InfoFilled } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import {
   getPromptEvalSummary, getPromptEvalTemplates, getAnchorCheck,
   getPromptEvalRules, createSuggestions, listIterations,
-  confirmIteration, applyIteration,
+  confirmIteration, applyIteration, createOpinion,
 } from '@/api/aiPromptEval'
 
 const days = ref(7)
@@ -282,8 +333,25 @@ const templates = ref([])
 const anchor = ref(null)
 const rules = ref([])
 const iterations = ref([])
+const opinions = ref([])
 const drawer = ref(false)
 const suggesting = ref(false)
+const submitting = ref(false)
+const opinionForm = ref({ content: '', category: 'other', target_name: '' })
+
+// 人工意见分类（与后端 OPINION_CATEGORIES 一一对应，存 reason 字段）
+const OPINION_CATEGORIES = {
+  analysis_abnormal: '分析异常',
+  analysis_unreasonable: '不合理',
+  business_deeper: '业务深化',
+  other: '其他',
+}
+const OPINION_TAG_TYPE = {
+  analysis_abnormal: 'danger',
+  analysis_unreasonable: 'warning',
+  business_deeper: '',
+  other: 'info',
+}
 
 const modeText = computed(() => {
   const m = summary.value?.overall?.by_mode ?? {}
@@ -297,11 +365,11 @@ function pct(v) {
 
 function scopeLabel(s) {
   return { template_keyword: '补关键词', template_question: '改问句', new_template: '新建模板',
-    rule_adjust: '规则调整', anchor_guide: '锚点指引' }[s] || s
+    rule_adjust: '规则调整', anchor_guide: '锚点指引', human_opinion: '人工意见' }[s] || s
 }
 function scopeType(s) {
   return { template_keyword: '', template_question: '', new_template: 'warning',
-    rule_adjust: 'warning', anchor_guide: 'info' }[s] || 'info'
+    rule_adjust: 'warning', anchor_guide: 'info', human_opinion: 'info' }[s] || 'info'
 }
 function statusLabel(s) {
   return { proposed: '待确认', confirmed: '已确认', applied: '已应用', rejected: '不采纳' }[s] || s
@@ -309,10 +377,14 @@ function statusLabel(s) {
 function statusType(s) {
   return { proposed: 'warning', confirmed: 'primary', applied: 'success', rejected: 'info' }[s] || 'info'
 }
-// 只记录类建议（anchor_guide / new_template）不提供应用按钮
-const RECORD_ONLY = ['anchor_guide', 'new_template']
+// 只记录类建议（anchor_guide / new_template / human_opinion）不提供应用按钮
+const RECORD_ONLY = ['anchor_guide', 'new_template', 'human_opinion']
 function applicable(scope) {
   return !RECORD_ONLY.includes(scope)
+}
+function fmtTime(v) {
+  if (!v) return ''
+  return String(v).replace('T', ' ').slice(0, 16)
 }
 
 async function loadAll() {
@@ -328,7 +400,33 @@ async function loadAll() {
   templates.value = t.data
   anchor.value = a.data
   rules.value = r.data
-  iterations.value = its.data
+  // 人工意见(scope=human_opinion)与机器产出的迭代建议分开展示
+  iterations.value = (its.data || []).filter(i => i.scope !== 'human_opinion')
+  opinions.value = (its.data || []).filter(i => i.scope === 'human_opinion')
+}
+
+async function submitOpinion() {
+  if (!opinionForm.value.content?.trim()) {
+    ElMessage.warning('意见内容不能为空')
+    return
+  }
+  submitting.value = true
+  try {
+    const res = await createOpinion({
+      content: opinionForm.value.content.trim(),
+      category: opinionForm.value.category,
+      target_name: opinionForm.value.target_name?.trim() || undefined,
+    })
+    opinions.value.unshift(res.data)
+    opinionForm.value = { content: '', category: 'other', target_name: '' }
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function onOpinionConfirm(op, approved) {
+  await confirmIteration(op.id, approved)
+  await loadAll()
 }
 
 async function genSuggestions() {
@@ -380,4 +478,11 @@ onMounted(loadAll)
 .iter-diff { margin-top: 6px; font-size: 12px; background: #f5f7fa; padding: 6px 8px; border-radius: 4px; }
 .diff-old { color: #dc2626; }
 .diff-new { color: #16a34a; }
+.opinion-form { display: flex; flex-direction: column; gap: 8px; }
+.opinion-form-row { display: flex; gap: 8px; align-items: center; }
+.opinion-empty { color: #909399; text-align: center; padding: 12px 0; }
+.opinion-item { border: 1px solid #ebeef5; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+.opinion-tags { display: flex; gap: 6px; align-items: center; }
+.opinion-meta { font-size: 12px; color: #909399; }
+.opinion-content { font-size: 13px; line-height: 1.5; margin-top: 6px; }
 </style>

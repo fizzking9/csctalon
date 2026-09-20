@@ -49,3 +49,10 @@ export function confirmIteration(id, approved = true) {
 export function applyIteration(id) {
   return request.post(`/admin/ai/prompt-eval/iterations/${id}/apply`)
 }
+
+// ── 三、人工意见（#174，只记录不自动执行）──────────────────
+// 输入对分析结果的异常/不合理判断、业务逻辑理解调整与深化意见
+// payload: {content, category(枚举), target_name?}
+export function createOpinion(payload) {
+  return request.post('/admin/ai/prompt-eval/opinions', payload)
+}

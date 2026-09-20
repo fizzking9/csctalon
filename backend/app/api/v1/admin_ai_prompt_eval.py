@@ -74,6 +74,24 @@ def list_iterations(db: DBSession, _: AdminUser,
     return R(data=svc.list_iterations(db, status=status, scope=scope, limit=limit))
 
 
+@router.post("/opinions", response_model=R, summary="人工意见输入(admin)")
+def create_opinion(db: DBSession, user: AdminUser, payload: dict):
+    """记录一条人工意见（异常/不合理/业务深化），只记录不自动执行。
+
+    payload: {content: 必填文本, category: 分类枚举(默认 other), target_name: 关联对象(可选)}
+    """
+    try:
+        row = svc.propose_opinion(
+            db, user.id,
+            content=(payload or {}).get("content"),
+            category=(payload or {}).get("category", "other"),
+            target_name=(payload or {}).get("target_name"),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return R(data=svc._iter_dict(row), message="意见已记录")
+
+
 @router.post("/iterations/{iteration_id}/confirm", response_model=R, summary="人工拍板(admin)")
 def confirm_iteration(db: DBSession, user: AdminUser, iteration_id: int, approved: bool = True):
     """approved=True → confirmed（可应用）；False → rejected（不采纳）。"""

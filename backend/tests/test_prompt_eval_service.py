@@ -25,6 +25,7 @@ from app.services.prompt_eval_service import (
     build_template_eval,
     confirm_iteration,
     propose_iteration,
+    propose_opinion,
 )
 
 
@@ -244,3 +245,40 @@ def test_iteration_dedup_proposed(db):
     }
     assert propose_iteration(db, user_id=1, item=item) is not None
     assert propose_iteration(db, user_id=1, item=item) is None  # 同 target+new 去重
+
+
+# ── 人工意见（#174，只记录不自动执行）──────────────────────
+def test_opinion_create_and_validate(db):
+    _clean_iterations(db)
+    row = propose_opinion(db, 1, content="  月报投诉口径疑似与手工台账不一致  ",
+                          category="analysis_abnormal", target_name="月报模板")
+    # 落库字段断言：scope=human_opinion / 内容 trim / 分类进 reason / 初始 proposed
+    assert row.scope == "human_opinion"
+    assert row.target_id is None and row.target_name == "月报模板"
+    assert row.suggestion == "月报投诉口径疑似与手工台账不一致"
+    assert row.reason == "analysis_abnormal"
+    assert row.status == "proposed"
+    assert row.created_by == 1
+    # 无关联对象 → 默认「（全局）」
+    row2 = propose_opinion(db, 1, content="补充意见", category="business_deeper")
+    assert row2.target_name == "（全局）"
+    # 空内容 / 非法分类 → ValueError
+    with pytest.raises(ValueError, match="意见内容不能为空"):
+        propose_opinion(db, 1, content="   ")
+    with pytest.raises(ValueError, match="分类仅支持"):
+        propose_opinion(db, 1, content="x", category="not_a_category")
+
+
+def test_opinion_lifecycle_record_only(db):
+    _clean_iterations(db)
+    row = propose_opinion(db, 1, content="分析结果异常，需复核",
+                          category="analysis_unreasonable")
+    # 采纳 → confirmed（可标记，但绝不提供写入路径）
+    confirmed = confirm_iteration(db, 1, row.id, approved=True)
+    assert confirmed["status"] == "confirmed"
+    with pytest.raises(ValueError, match="只记录"):
+        apply_iteration(db, 1, row.id)
+    # 不采纳 → rejected
+    row2 = propose_opinion(db, 1, content="意见待否决")
+    rejected = confirm_iteration(db, 1, row2.id, approved=False)
+    assert rejected["status"] == "rejected"

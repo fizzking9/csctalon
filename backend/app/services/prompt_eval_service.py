@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from app.models.ai_report_template import AiReportTemplate
 from app.models.governance_prompt_iteration import (
     ITER_SCOPE_ANCHOR_GUIDE,
+    ITER_SCOPE_HUMAN_OPINION,
     ITER_SCOPE_NEW_TEMPLATE,
     ITER_SCOPE_RULE_ADJUST,
     ITER_SCOPE_TEMPLATE_KEYWORD,
@@ -35,6 +36,7 @@ from app.models.governance_prompt_iteration import (
     ITER_STATUS_CONFIRMED,
     ITER_STATUS_PROPOSED,
     ITER_STATUS_REJECTED,
+    OPINION_CATEGORIES,
     PromptIteration,
 )
 from app.models.governance_rule import GovernanceRule
@@ -439,6 +441,36 @@ def propose_iteration(db: Session, user_id: int, item: dict) -> PromptIteration 
     return row
 
 
+def propose_opinion(db: Session, user_id: int, *, content: str,
+                    category: str = "other", target_name: str | None = None) -> PromptIteration:
+    """记录一条人工意见（#174 评估中心人工输入通道）。
+
+    - 用途：对评估/分析结果的异常、不合理判断，或业务逻辑理解的调整与深化意见；
+    - 状态机沿用：proposed → confirmed(采纳) / rejected(不采纳)，但**只记录不自动执行**
+      （自由文本不可靠，不自动解析、不改模板/规则），采纳与否由人工后续跟进；
+    - 分类（reason 字段承载，前端映射中文）：analysis_abnormal / analysis_unreasonable /
+      business_deeper / other。
+    """
+    content = (content or "").strip()
+    if not content:
+        raise ValueError("意见内容不能为空")
+    if category not in OPINION_CATEGORIES:
+        raise ValueError(f"分类仅支持: {'/'.join(OPINION_CATEGORIES)}")
+    row = PromptIteration(
+        scope=ITER_SCOPE_HUMAN_OPINION,
+        target_id=None,
+        target_name=target_name or "（全局）",
+        suggestion=content,
+        reason=category,
+        status=ITER_STATUS_PROPOSED,
+        created_by=user_id,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
 def confirm_iteration(db: Session, user_id: int, iteration_id: int, approved: bool) -> dict:
     """人工拍板：approved=True → confirmed（可应用）；False → rejected。"""
     row = db.query(PromptIteration).get(iteration_id)
@@ -463,7 +495,7 @@ def apply_iteration(db: Session, user_id: int, iteration_id: int) -> dict:
     if row.status != ITER_STATUS_CONFIRMED:
         raise ValueError(f"仅已确认的建议可应用（当前 {row.status}）")
     if row.scope not in APPLICABLE_SCOPES:
-        raise ValueError(f"scope={row.scope} 为只记录建议（anchor_guide/new_template），不提供写入路径")
+        raise ValueError(f"scope={row.scope} 为只记录建议（anchor_guide/new_template/human_opinion），不提供写入路径")
 
     if row.scope == ITER_SCOPE_TEMPLATE_KEYWORD:
         _apply_template_keywords(db, row)

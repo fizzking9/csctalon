@@ -27,6 +27,7 @@ ITER_SCOPE_TEMPLATE_QUESTION = "template_question"  # 改模板 question_templat
 ITER_SCOPE_NEW_TEMPLATE = "new_template"  # 建议新建模板（本期只记建议）
 ITER_SCOPE_RULE_ADJUST = "rule_adjust"  # 调整治理规则（启停/动作）
 ITER_SCOPE_ANCHOR_GUIDE = "anchor_guide"  # 锚点漂移落地指引（只记不改）
+ITER_SCOPE_HUMAN_OPINION = "human_opinion"  # 人工意见（#174 评估中心人工输入，只记录）
 
 # ── status 值域（状态机）─────────────────────────────────────────
 ITER_STATUS_PROPOSED = "proposed"  # 评估产出，待人工确认
@@ -34,7 +35,7 @@ ITER_STATUS_CONFIRMED = "confirmed"  # 人工已确认，待应用
 ITER_STATUS_APPLIED = "applied"  # 已应用到模板/规则
 ITER_STATUS_REJECTED = "rejected"  # 人工不采纳
 
-# 可应用（服务端能写入的 scope）与只记录（anchor_guide/new_template）的区分
+# 可应用（服务端能写入的 scope）与只记录（anchor_guide/new_template/human_opinion）的区分
 APPLICABLE_SCOPES = frozenset({
     ITER_SCOPE_TEMPLATE_KEYWORD,
     ITER_SCOPE_TEMPLATE_QUESTION,
@@ -43,7 +44,16 @@ APPLICABLE_SCOPES = frozenset({
 RECORD_ONLY_SCOPES = frozenset({
     ITER_SCOPE_NEW_TEMPLATE,
     ITER_SCOPE_ANCHOR_GUIDE,
+    ITER_SCOPE_HUMAN_OPINION,
 })
+
+# 人工意见分类（reason 字段承载，前端映射中文标签）
+OPINION_CATEGORIES = (
+    "analysis_abnormal",  # 分析结果异常
+    "analysis_unreasonable",  # 分析结果不合理
+    "business_deeper",  # 业务逻辑理解调整/深化
+    "other",  # 其他
+)
 
 
 class PromptIteration(IDMixin, TimestampMixin, Base):
