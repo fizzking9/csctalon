@@ -62,6 +62,15 @@ _EXTRACT_SYSTEM = (
     "6. 金额单位保持与段落一致(元/分), 不要转换。"
 )
 
+
+def _load_extract_system(db) -> str:
+    """#178 提示词版本化: DB 生效版本(extract_system)优先，无/异常回退代码常量（铁律）。"""
+    try:
+        from app.services.prompt_config_service import load_effective_prompt
+        return load_effective_prompt(db, "extract_system") or _EXTRACT_SYSTEM
+    except Exception:  # noqa: BLE001  提示词加载失败不阻塞摘取
+        return _EXTRACT_SYSTEM
+
 # 行首 ## 标题正则(2 级标题; MULTILINE 让 ^ 匹配每行开头)
 _H2_TITLE_RE = re.compile(r"^##\s+.+$", re.MULTILINE)
 
@@ -178,7 +187,8 @@ async def extract_section(db: Session, question: str, report: AiReport,
         "保留段落内的数据窗口说明, 禁止编造/外推。"
     )
     messages = [
-        {"role": "system", "content": _EXTRACT_SYSTEM},
+        # #178 提示词版本化: DB 有生效版本(extract_system) → 用之；无/异常 → 代码常量兜底
+        {"role": "system", "content": _load_extract_system(db)},
         {"role": "user", "content": user_prompt},
     ]
     try:

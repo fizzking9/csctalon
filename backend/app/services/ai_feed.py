@@ -741,7 +741,10 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
     except Exception:  # noqa: BLE001  Focus 故障不影响主链路
         logger.warning("ai_feed 加载 focus 失败(忽略): 保持无 focus 输出")
     data_ctx = "【给定数据(JSON, 金额单位=元)】\n" + feed_json
-    system = _SYSTEM_PROMPT
+    # #178 提示词版本化: DB 有生效版本(gen_system) → 用之；无/异常 → 代码常量兜底（铁律）
+    from app.services.prompt_config_service import load_effective_prompt
+
+    system = load_effective_prompt(db, "gen_system") or _SYSTEM_PROMPT
     if focus:
         body = (
             f"{business_ctx}\n\n"
