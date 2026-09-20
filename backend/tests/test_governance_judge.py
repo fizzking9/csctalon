@@ -324,3 +324,44 @@ class TestSuggestionGuard:
             "risk": "high", "requires_human_confirm": False,
         })
         assert out["requires_human_confirm"] is True
+
+    def test_allowed_by_business_never_mark_ignored(self):
+        """#171 红线兜底：业务允许 + mark_ignored → 降级 report_only（不改经营口径）。"""
+        from app.services.governance_judge_service import _normalize_suggestion
+
+        out = _normalize_suggestion({
+            "action": "mark_ignored", "params": {"x": 1}, "impact": "排除若干行",
+            "risk": "low", "requires_human_confirm": False,
+        }, verdict=VERDICT_ALLOWED_BY_BUSINESS)
+        assert out["action"] == "report_only"
+        assert out["params"] == {}
+        assert "降级" in (out.get("note") or "")
+        # 其它 verdict 不受影响（真问题的 L1 标记仍可用）
+        keep = _normalize_suggestion({
+            "action": "mark_ignored", "params": {}, "impact": "x", "risk": "low",
+            "requires_human_confirm": False,
+        }, verdict=VERDICT_REAL_ISSUE)
+        assert keep["action"] == "mark_ignored"
+
+
+class TestAllowedByBusinessRedline:
+    """#171：LLM 硬给 mark_ignored 也必须被降级（落库前第二道闸）。"""
+
+    def test_llm_mark_ignored_downgraded_on_persist(self, db, fake_llm):
+        f = _mk_finding(db)
+        j = _judgment(f.id, verdict=VERDICT_ALLOWED_BY_BUSINESS, action="mark_ignored")
+        fake_llm["state"]["out"] = {"judgments": [j]}
+        judge_findings(db, commit=False)
+        db.flush()
+        db.expire_all()
+        f2 = db.get(GovernanceFinding, f.id)
+        assert f2.verdict == VERDICT_ALLOWED_BY_BUSINESS
+        assert f2.suggestion["action"] == "report_only", "业务允许不得标 ignored"
+        assert "note" in f2.suggestion
+
+    def test_prompt_contains_redline(self, db):
+        """系统提示词（默认路径）必须含该铁律。"""
+        f = _mk_finding(db)
+        msgs = build_messages(db, [f])
+        assert "allowed_by_business" in msgs[0]["content"]
+        assert "排除出经营统计" in msgs[0]["content"]

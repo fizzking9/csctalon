@@ -53,6 +53,8 @@ from app.models.governance_rule import (
     AUTO_LEVEL_READONLY,
     DISPOSITION_CREATE_INDEX,
     DISPOSITION_DELETE_DUPS,
+    DISPOSITION_MARK_DUP,
+    DISPOSITION_MARK_IGNORED,
     DISPOSITION_REPORT_ONLY,
     GovernanceRule,
 )
@@ -120,7 +122,10 @@ _DEFAULT_SYSTEM_PROMPT = (
     "2. 不可逆动作（删行 / 改值 / 建索引 / 改表结构）必须 requires_human_confirm=true（红线，AI 永不自决）。\n"
     "3. 判据必须引用规范条款或表说明；禁止编造业务结论（如「这是对账基准」）。\n"
     "4. 拿不准给 uncertain 且 confidence<0.7，不要硬判。\n"
-    "5. 每条 finding 必须给出且只给出一条 judgment，finding_id 原样回填，禁止新增、合并或遗漏。"
+    "5. 每条 finding 必须给出且只给出一条 judgment，finding_id 原样回填，禁止新增、合并或遗漏。\n"
+    "6. 判为 `allowed_by_business`（业务允许）时，**禁止**建议 `mark_ignored` / `mark_dup_residual`\n"
+    "   —— 那会把行**排除出经营统计**、改变口径（红线）。业务允许应给 `report_only`，\n"
+    "   由人工走 dismiss（判定业务允许 + 沉淀规则，数据一行不动）。"
 )
 _DEFAULT_USER_PROMPT = (
     "【待研判的结构性可疑（共 {count} 条）】\n{findings}\n"
@@ -404,11 +409,15 @@ def validate_resp(obj: dict, finding_ids: set[int]) -> tuple[bool, list[str]]:
     return (not errors), errors
 
 
-def _normalize_suggestion(suggestion: dict) -> dict:
-    """落库前规范 suggestion（**第二道闸**）：不可逆动作强制 requires_human_confirm=true。
+def _normalize_suggestion(suggestion: dict, verdict: str | None = None) -> dict:
+    """落库前规范 suggestion（**第二道闸**）：
 
-    校验层已要求 LLM 给出 true（否则整批重试/放弃）；这里再兜一次 ——
-    即使提示词被改坏、模型漏填，也绝不会出现「不可逆却无需确认」的建议落库。
+    ① 不可逆动作强制 `requires_human_confirm=true`（L2 红线）；
+    ② `verdict=allowed_by_business` 时**禁止**标 ignored/dup 动作（工单 #171）——
+       那会把行排除出经营统计、改变口径（AGENTS.md 绝对禁止第 10 条）。
+       AI 自己判「业务允许」却建议一个改口径的动作是自相矛盾的；提示词里已写铁律，
+       但**提示词不是保证**，故在此强制降级为 `report_only`（数据一行不动），
+       并留 `note` 说明降级原因（可审计「AI 原本建议了什么」）。
     """
     out = dict(suggestion or {})
     out["params"] = out.get("params") or {}
@@ -421,6 +430,16 @@ def _normalize_suggestion(suggestion: dict) -> dict:
         out["requires_human_confirm"] = True
     else:
         out["requires_human_confirm"] = bool(out.get("requires_human_confirm"))
+
+    # ② 业务允许 + 标排除动作 → 降级为只读报告（#171 红线兜底）
+    if (verdict == VERDICT_ALLOWED_BY_BUSINESS
+            and out.get("action") in (DISPOSITION_MARK_IGNORED, DISPOSITION_MARK_DUP)):
+        logger.warning("governance_judge: 业务允许却建议 %s（会排除出经营统计），"
+                       "已降级为 report_only", out.get("action"))
+        out["note"] = (f"AI 原建议 {out['action']}，因判定为业务允许（不应改变经营口径）"
+                       f"已降级为 report_only；如需停止重复报出，请用「判定业务允许」沉淀规则")
+        out["action"] = DISPOSITION_REPORT_ONLY
+        out["params"] = {}
     return out
 
 
@@ -515,7 +534,7 @@ def _apply_ai(f: GovernanceFinding, judgment: dict, now: _dt.datetime) -> None:
     """AI 结论回填（要点③）：verdict/reason/suggestion/confidence + status→judged。"""
     f.verdict = judgment["verdict"]
     f.verdict_reason = judgment.get("reason")
-    f.suggestion = _normalize_suggestion(judgment.get("suggestion"))
+    f.suggestion = _normalize_suggestion(judgment.get("suggestion"), verdict=f.verdict)
     f.confidence = float(judgment.get("confidence") or 0.0)
     f.rule_id = None  # AI 判定不绑定规则（rule_id 只表示「由规则判定」）
     f.judged_at = now
