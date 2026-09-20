@@ -66,6 +66,17 @@ class AiReportTemplate(IDMixin, TimestampMixin, Base):
             "新建未显式传值时按 period/frequency 自动识别(daily/sync-triggered→True)"
         ),
     )
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="overview", server_default="overview",
+        comment=(
+            "#181 专项域: overview(整体经营)/refund(退款含涉诉)/complaint(投诉三源)/"
+            "reception(接待专项); 生成按此分桶(feed 聚焦不截断), 匹配按问句专项路由"
+        ),
+    )
+    format: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="brief", server_default="brief",
+        comment="#181 体裁: brief(简报, 结论导向)/detail(明细, 逐维度展开); 匹配按问句详略意图",
+    )
     detail_level: Mapped[str] = mapped_column(
         String(16), nullable=False, default="standard", server_default="standard",
         comment=(

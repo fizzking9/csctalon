@@ -14,6 +14,7 @@ from app.services.ai_feed import (
     _days_range_trend,
     _enrich_daily_hourly_summary,
     _enrich_with_daily_trend,
+    build_messages,
 )
 
 # ── _compact_daily_hourly_summary(同步纯函数) ─────────────────────────────
@@ -317,3 +318,73 @@ def test_enrich_daily_hourly_summary_failure_isolated():
     # 第二条失败但其他字段保留(reception=200), hourly_summary 字段不存在
     assert trend[1]["reception"] == 200
     assert "hourly_summary" not in trend[1]
+
+
+# ── build_messages scope 切片 + 体裁注入 (#181 专项分桶) ──────────────────
+
+
+def _make_full_feed():
+    """模拟 _build_feed 返回的完整 feed(三业务段 + 恒量段)。"""
+    return {
+        "period": "daily",
+        "date": "2026-09-21",
+        "date_start": "2026-09-21",
+        "date_end": "2026-09-21",
+        "generated_at": "2026-09-21 08:00:00",
+        "_spec": {"金额单位": "元"},
+        "reception": {"接待量": 123, "会话数": 456},
+        "refund": {"refund_marker": "退款段含涉诉", "routes": {"litigation_ratio": 0.05, "amount": 1234.5}},
+        "complaint": {"complaint_marker": "投诉三源段", "by_source": [{"name": "内部", "count": 1}]},
+    }
+
+
+def _build_messages_body(question, **kw):
+    """mock _build_feed/glossary/prompt/focus 后调 build_messages, 返回 user body。"""
+    db = MagicMock()
+    with patch("app.services.ai_feed._build_feed", return_value=_make_full_feed()), \
+         patch("app.services.ai_feed.glossary_for_question", return_value="测试口径卡"), \
+         patch("app.services.prompt_config_service.load_effective_prompt", return_value="系统提示词v2"), \
+         patch("app.services.ai_focus_service.focus_for_question", return_value=""):
+        msgs = build_messages(db, "daily", "2026-09-21", question, **kw)
+    return msgs[1]["content"]
+
+
+def test_build_messages_scope_refund_slices_feed():
+    """#181 专项桶: scope=refund 强制并入 refund 段(即使问句未命中关键词)。
+
+    泛问句 + refund 桶 → 只喂 refund 段(含涉诉数据)+恒量段, reception/complaint
+    段被切掉 → feed 聚焦不截断, 根治「涉诉答暂无」错配。
+    """
+    body = _build_messages_body("今日整体情况如何", scope="refund", format="brief")
+    assert "refund_marker" in body          # refund 段保留(含涉诉)
+    assert "litigation_ratio" in body
+    assert "接待量" not in body              # reception 段被切掉
+    assert "complaint_marker" not in body   # complaint 段被切掉
+    assert "【体裁要求】" in body and "简报" in body
+
+
+def test_build_messages_scope_complaint_slices_feed():
+    """#181 投诉专项桶: 只喂 complaint 段(三源), 不喂 refund/reception。"""
+    body = _build_messages_body("今日整体情况如何", scope="complaint", format="brief")
+    assert "complaint_marker" in body
+    assert "refund_marker" not in body
+    assert "接待量" not in body
+
+
+def test_build_messages_overview_keeps_full_feed_and_detail_rule():
+    """#181 overview 桶(或 None): 不强制切片(仅按问句命中), 泛问保留全维度;
+    format=detail 注入【明细】体裁要求。"""
+    body = _build_messages_body("今日整体情况如何", scope="overview", format="detail")
+    assert "refund_marker" in body
+    assert "complaint_marker" in body
+    assert "接待量" in body
+    assert "【体裁要求】" in body and "明细" in body
+
+
+def test_build_messages_scope_union_with_question_hits():
+    """#181 取并集: 问句命中 refund+complaint, 桶 scope=refund → 两段都保留。"""
+    body = _build_messages_body("今日退款和投诉怎么样", scope="refund", format="brief")
+    assert "refund_marker" in body
+    assert "complaint_marker" in body
+    assert "接待量" not in body  # 未命中 reception → 仍被切掉
+

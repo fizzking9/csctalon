@@ -86,6 +86,9 @@ def create_template(payload: dict, db: DBSession, _: AdminUser):
         # #152 回答模式分级: detail_level 默认 standard, required_dimensions 可缺省(None)
         detail_level=payload.get("detail_level", "standard"),
         required_dimensions=payload.get("required_dimensions"),
+        # #181 专项分桶: scope/format 默认 overview/brief(整体简报, 与存量行为一致)
+        scope=payload.get("scope", "overview"),
+        format=payload.get("format", "brief"),
     )
     db.add(t)
     db.commit()
@@ -102,7 +105,7 @@ def update_template(template_id: int, payload: dict, db: DBSession, _: AdminUser
     payload: 任意字段 subset(code/name_cn/question_template/question_keywords/period/
               frequency/trigger_at/sync_offset_min/refresh_on_sync/priority/
               llm_provider_code/fallback_template_id/max_tokens/is_active/visibility_scope/
-              detail_level/required_dimensions)
+              detail_level/required_dimensions/scope/format)
 
     注意(#130): 仅当显式传 refresh_on_sync 时才更新; 改 period/frequency 不重算该开关,
     以免覆盖 admin 的手动选择(自动识别只在新建缺省时生效)。
@@ -113,7 +116,8 @@ def update_template(template_id: int, payload: dict, db: DBSession, _: AdminUser
     for k in ("name_cn", "question_template", "question_keywords", "period", "frequency",
               "trigger_at", "sync_offset_min", "refresh_on_sync", "priority",
               "llm_provider_code", "fallback_template_id", "max_tokens", "is_active",
-              "visibility_scope", "detail_level", "required_dimensions"):
+              "visibility_scope", "detail_level", "required_dimensions",
+              "scope", "format"):
         if k in payload:
             setattr(t, k, payload[k])
     # code 不允许修改(避免破坏 FK 与匹配)
@@ -278,6 +282,9 @@ def _tmpl_dict(t: AiReportTemplate) -> dict:
         # #152 回答模式分级(模板配置: 预生成/补算/实时按此分级与维度)
         "detail_level": t.detail_level,
         "required_dimensions": t.required_dimensions,
+        # #181 专项分桶: 专项域 + 体裁(生成按此分桶切片, 匹配按此路由)
+        "scope": t.scope,
+        "format": t.format,
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
     }

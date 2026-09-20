@@ -684,7 +684,8 @@ def _select_feed_sections(feed: dict, scopes) -> dict:
 def build_messages(db: Session, period: str, date: str | None, question: str,
                    start: str | None = None, end: str | None = None,
                    window_label: str | None = None, window_source: str | None = None,
-                   required_dimensions: list | None = None) -> list[dict]:
+                   required_dimensions: list | None = None,
+                   scope: str | None = None, format: str | None = None) -> list[dict]:
     """构造发给模型的 messages(三层 Prompt)。
 
     window_label/window_source(工单 #66): 上层(ai.py)把"窗口怎么定出来的"传下来,
@@ -694,6 +695,12 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
     required_dimensions(工单 #152): 模板配置的业务维度清单(关键词数组), 追加到
     business_ctx 要求本次回答必须覆盖这些维度, 缺失维度写"暂无"不得省略。补算/
     深度实时生成与预生成共用, _SYSTEM_PROMPT 铁律不动(#134 H2 锚点纪律)。
+
+    scope/format(工单 #181 专项分桶): 模板显式声明专项域与体裁, 预生成分桶时传入。
+      - scope != overview: 强制把该专项段并入 feed 切片(与问句命中 scope 取并集),
+        让退款桶只喂 refund 段、投诉桶只喂 complaint 段 —— feed 聚焦不截断,
+        根治"单一日报覆盖全维度→feed 超长截断→涉诉/专项答暂无"的错配。
+      - format: 注入【体裁要求】, 简报(brief)结论导向不展开逐项, 明细(detail)逐维度展开。
     """
     feed = _build_feed(db, period, date, start=start, end=end)
     # #98 层2: 按问句 scope 切 feed 段(只留命中业务段+恒量段), 降输入 token。
@@ -701,7 +708,11 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
     # ⚠️ 2026-09-15 修复: 改用 keywords_to_scopes 取所有命中 scope, 避免多域
     #   问句(如"今日经营总览：接待、退款、投诉一起说说")只取首个 scope 致
     #   其它业务段被切掉, AI 答"未提供"。
-    feed = _select_feed_sections(feed, keywords_to_scopes(question))
+    # #181 专项分桶: 模板 scope 显式声明时并入切片(专项桶 feed 聚焦不截断)。
+    scopes = keywords_to_scopes(question)
+    if scope and scope != "overview":
+        scopes = scopes | {scope}
+    feed = _select_feed_sections(feed, scopes)
     feed_json = _trim_feed(feed)
     # 口径卡: 按问句路由选子集; 未命中全量
     glossary = glossary_for_question(question)
@@ -719,6 +730,15 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
         f" {win_label}; date_start={feed.get('date_start')}; date_end={feed.get('date_end')}; " +
         f" generated_at={feed.get('generated_at')}"
     )
+    # #181 体裁要求: 模板声明 format 时注入(简报结论导向, 明细逐维度展开)。
+    # 与 _SYSTEM_PROMPT 第 3 条「前台 ≤500 字/后台预生成可详尽」互补: 该条按调用方
+    # 区分密度, 本条按模板体裁统一约束(专项桶简报即使后台预生成也保持精简)。
+    if format in ("brief", "detail"):
+        if format == "brief":
+            _fmt_rule = "本次为【简报】(brief): 只输出核心结论与关键数字, 每个维度 ≤2 行, 不展开逐项明细。"
+        else:
+            _fmt_rule = "本次为【明细】(detail): 按维度逐项展开, 关键处可用表格, 不要只给结论。"
+        business_ctx += f"\n\n【体裁要求】{_fmt_rule}"
     # #152 维度覆盖要求(模板配置的 required_dimensions): 本次回答必须覆盖这些维度,
     #   缺失的写"暂无", 不得省略维度(与铁律 1/3 配套, 防"未提供"式过简回答)。
     #   结构约定(源头上保证可校验): 每个维度必须以二级锚点行 **<维度>**：<数据> 输出,

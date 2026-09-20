@@ -164,6 +164,12 @@ async def extract_section(db: Session, question: str, report: AiReport,
 
     # 关键词路由 scope(复用 ai_focus_service.keywords_to_scopes, 全树统一)
     scopes = keywords_to_scopes(question)
+    # #181 专项桶: 命中报告的模板 scope 是权威专项(如退款桶=全篇退款内容),
+    # 问句无专项意图(泛问)时也并入该专项段 —— 整体日报才需要泛问取全部段落,
+    # 专项桶按模板 scope 取对应段, 避免整篇重复输出。
+    tmpl_scope = getattr(template, "scope", "overview") if template is not None else "overview"
+    if tmpl_scope in _SCOPE_TO_H2:
+        scopes = scopes | {tmpl_scope}
     selected_bodies: list[str] = []
     if scopes:
         for scope in scopes:

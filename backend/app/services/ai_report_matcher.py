@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.models.ai_report import AiReport
 from app.models.ai_report_template import AiReportTemplate
+from app.services.ai_focus_service import keywords_to_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,40 @@ def _count_keyword_hits(question: str, keywords: list | None) -> int:
         if str(kw).lower() in q:
             n += 1
     return n
+
+
+def _question_format_intent(question: str) -> str | None:
+    """#181 问句体裁意图: brief/detail/None(中性, 不参与体裁排序)。
+
+    命中「明细」侧关键词(优先) → detail; 命中「简报」侧 → brief;
+    双侧同命中或均未命中 → None(中性, 不约束匹配)。
+    """
+    q = question or ""
+    detail_kws = ("明细", "详细", "具体", "清单", "逐笔", "逐条", "逐项", "完整", "展开", "全部")
+    brief_kws = ("简报", "概况", "简单", "简要", "概述", "大概", "概括", "总结", "说说", "速览")
+    detail_hit = any(k in q for k in detail_kws)
+    brief_hit = any(k in q for k in brief_kws)
+    if detail_hit and not brief_hit:
+        return "detail"
+    if brief_hit and not detail_hit:
+        return "brief"
+    return None  # 双侧同命中或均未命中 → 中性, 不约束匹配
+
+
+def _scope_priority(tmpl_scope: str | None, q_scopes: set[str]) -> int:
+    """#181 模板 scope 相对问句 scope 的匹配优先级。
+
+    - 问句未命中任何专项(空集)→ overview 模板兜底, 专项模板同分(都可命中)
+    - 问句命中专项 → 同专项模板最高(2) > overview 兜底(1) > 其它专项(0)
+    """
+    scope = (tmpl_scope or "overview").lower()
+    if not q_scopes:
+        return 1  # 泛问: 所有模板平等(overview 亦同分, 靠 keywords/时间裁决)
+    if scope in q_scopes:
+        return 2
+    if scope == "overview":
+        return 1
+    return 0
 
 
 def match_template_report(
@@ -152,19 +187,33 @@ def match_template_report(
     #   含 '环比' 在用户问句里 → 误命中周报而非月报。
     #   改为多 keyword 命中优先(月报 keywords['本月','这个月','月报','上月','同比']
     #   命中 '本月'+'同比'=2 个, 优先于周报命中 '环比'=1 个)。
+    # #181 多维: 在 keywords 命中之后追加 scope 匹配(专项模板优先于 overview 兜底,
+    #   根治「今日退款+涉诉」命中整体日报→feed 截断→涉诉答暂无的错配)与 format 体裁匹配。
+    q_scopes = keywords_to_scopes(question)
+    q_fmt = _question_format_intent(question)
     sorted_rows = []
     for r in rows:
         tmpl = _get_template(db, r.get("template_id"))
         hits = _count_keyword_hits(question, tmpl.question_keywords if tmpl else None)
         period_match = (r.get("snapshot_period") == win_period) if win_period else False
-        sorted_rows.append((r, tmpl, hits, period_match))
-    # 排序: 命中数 DESC → period 匹配 DESC → created_at DESC
+        scope_score = _scope_priority(getattr(tmpl, "scope", "overview") if tmpl else None, q_scopes)
+        fmt_score = 1 if (
+            q_fmt and tmpl and getattr(tmpl, "format", "brief") == q_fmt
+        ) else 0
+        sorted_rows.append((r, tmpl, hits, period_match, scope_score, fmt_score))
+    # 排序: 命中数 DESC → period 匹配 DESC → scope 匹配 DESC → format 匹配 DESC → created_at DESC
     sorted_rows.sort(
-        key=lambda x: (-x[2], 0 if x[3] else 1, -(x[0].get("created_at") or _dt.datetime.min.replace(tzinfo=_dt.timezone.utc)).timestamp()),
+        key=lambda x: (
+            -x[2],
+            0 if x[3] else 1,
+            -x[4],
+            -x[5],
+            -(x[0].get("created_at") or _dt.datetime.min.replace(tzinfo=_dt.timezone.utc)).timestamp(),
+        ),
     )
 
     # 取第一条 keyword 命中数 > 0 的返回
-    for r, tmpl, hits, period_match in sorted_rows:
+    for r, tmpl, hits, period_match, scope_score, fmt_score in sorted_rows:
         if hits > 0 and tmpl:
             report = _wrap_row(db, dict(r))
             # #128: _wrap_row 内 _bump_matched_count 调 db.commit() → expire_on_commit
@@ -173,8 +222,8 @@ def match_template_report(
             _code = tmpl.code  # 显式读一次, 确保属性已加载进实例
             db.expunge(tmpl)
             logger.info("match_template_report: 命中 report_id=%s template=%s "
-                        "keyword_hits=%d period_match=%s",
-                        r["id"], _code, hits, period_match)
+                        "keyword_hits=%d period_match=%s scope_score=%s fmt_score=%s",
+                        r["id"], _code, hits, period_match, scope_score, fmt_score)
             return report, tmpl
 
     # 未命中: 返回 None, 调用方走 LLM 兜底

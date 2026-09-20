@@ -12,7 +12,9 @@ from unittest.mock import MagicMock
 
 from app.services.ai_report_matcher import (
     _count_keyword_hits,
+    _question_format_intent,
     _question_matches_keywords,
+    _scope_priority,
     match_template_report,
 )
 
@@ -89,12 +91,14 @@ def _make_report_row(rid, template_id, snapshot_period, created_at):
     }
 
 
-def _make_template(tid, code, keywords):
+def _make_template(tid, code, keywords, scope="overview", format="brief"):
     """构造模板 mock 对象。"""
     tmpl = MagicMock()
     tmpl.id = tid
     tmpl.code = code
     tmpl.question_keywords = keywords
+    tmpl.scope = scope
+    tmpl.format = format
     return tmpl
 
 
@@ -288,3 +292,89 @@ def test_match_start_equals_end_falls_back_to_snapshot_date():
     sql = _select_sql_of(db)
     assert "snapshot_date = :sdate" in sql
     assert matched is not None and matched.id == 88
+
+
+# ── #181 多维匹配: 体裁意图 + 专项路由 ──────────────────────
+def test_question_format_intent():
+    """问句体裁意图: 明细侧优先于简报侧; 双命中/未命中 → 中性 None。"""
+    assert _question_format_intent("今日退款明细") == "detail"
+    assert _question_format_intent("四路分布详细情况") == "detail"
+    assert _question_format_intent("今日退款简报") == "brief"
+    assert _question_format_intent("整体经营概况") == "brief"
+    assert _question_format_intent("本月退款情况如何") is None      # 未命中体裁词
+    assert _question_format_intent("今日简报明细都要") is None      # 双侧同命中 → 中性
+
+
+def test_scope_priority():
+    """专项问句: 同专项模板(2) > overview 兜底(1) > 其它专项(0); 泛问全 1。"""
+    q_scopes = {"refund"}
+    assert _scope_priority("refund", q_scopes) == 2
+    assert _scope_priority("overview", q_scopes) == 1
+    assert _scope_priority("complaint", q_scopes) == 0
+    assert _scope_priority(None, q_scopes) == 1      # 缺省 scope 视为 overview
+    # 泛问(未命中任何专项)→ 所有模板平等
+    assert _scope_priority("refund", set()) == 1
+    assert _scope_priority("complaint", set()) == 1
+
+
+def test_match_prefers_scope_template_on_hits_tie():
+    """#181 核心: 问「今日涉诉情况」时 refund 桶(命中 '涉诉')与 overview 日报(命中 '今日')
+    各 1 个 keyword 命中 → 同分时按 scope 路由: refund 桶(scope=refund) 优先于 overview 日报。
+    根治"退款/涉诉问句命中整体日报 → feed 截断 → 涉诉答暂无"的错配。
+    """
+    import datetime as _dt
+
+    q = "今日涉诉情况如何?"
+    rows = [
+        _make_report_row(500, 10, "daily", _dt.datetime(2026, 9, 17, 11, 0, tzinfo=_dt.timezone.utc)),   # 整体日报
+        _make_report_row(501, 11, "daily", _dt.datetime(2026, 9, 17, 10, 30, tzinfo=_dt.timezone.utc)),  # 退款桶
+    ]
+    templates = {
+        10: _make_template(10, "daily_general_morning", ["今天", "今日", "整体", "总览"]),
+        11: _make_template(11, "daily_refund_brief", ["退款", "涉诉", "四路", "挽回"], scope="refund"),
+    }
+    db = MagicMock()
+    mappings_mock = MagicMock()
+    mappings_mock.mappings.return_value = mappings_mock
+    mappings_mock.all.return_value = rows
+    db.execute.return_value = mappings_mock
+    query_mock = MagicMock()
+    query_mock.get.side_effect = lambda tid: templates.get(tid)
+    db.query.return_value = query_mock
+    db.commit = MagicMock()
+    db.expunge = MagicMock()
+
+    matched, tmpl = match_template_report(db, q, "daily", "2026-09-17")
+    assert matched is not None
+    assert matched.id == 501            # 命中退款桶(scope 路由)
+    assert tmpl.code == "daily_refund_brief"
+
+
+def test_match_format_tiebreak():
+    """#181 体裁: 同 scope 同 hits 时, 问句「明细」→ detail 模板优先。"""
+    import datetime as _dt
+
+    q = "今日退款明细, 逐笔列出"
+    rows = [
+        _make_report_row(600, 11, "daily", _dt.datetime(2026, 9, 17, 10, 30, tzinfo=_dt.timezone.utc)),  # 简报桶
+        _make_report_row(601, 12, "daily", _dt.datetime(2026, 9, 17, 10, 0, tzinfo=_dt.timezone.utc)),   # 明细桶
+    ]
+    templates = {
+        11: _make_template(11, "daily_refund_brief", ["退款", "涉诉"], scope="refund", format="brief"),
+        12: _make_template(12, "daily_refund_detail", ["退款", "涉诉"], scope="refund", format="detail"),
+    }
+    db = MagicMock()
+    mappings_mock = MagicMock()
+    mappings_mock.mappings.return_value = mappings_mock
+    mappings_mock.all.return_value = rows
+    db.execute.return_value = mappings_mock
+    query_mock = MagicMock()
+    query_mock.get.side_effect = lambda tid: templates.get(tid)
+    db.query.return_value = query_mock
+    db.commit = MagicMock()
+    db.expunge = MagicMock()
+
+    matched, tmpl = match_template_report(db, q, "daily", "2026-09-17")
+    assert matched is not None
+    assert matched.id == 601            # detail 体裁命中优先
+    assert tmpl.format == "detail"

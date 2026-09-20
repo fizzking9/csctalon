@@ -47,6 +47,17 @@
             </el-tag>
           </template>
         </el-table-column>
+        <!-- #181 专项分桶: scope(专项域)/format(体裁) 展示 -->
+        <el-table-column label="专项/体裁" width="150">
+          <template #default="{ row }">
+            <el-tag size="small" :type="scopeTagType(row.scope)" effect="plain" style="margin-right:4px">
+              {{ scopeLabel(row.scope) }}
+            </el-tag>
+            <el-tag size="small" :type="row.format === 'detail' ? 'warning' : 'info'" effect="plain">
+              {{ row.format === 'detail' ? '明细' : '简报' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="模型" width="150">
           <template #default="{ row }">
             <el-tag size="small" :type="providerTagType(row.llm_provider_code)" effect="plain">
@@ -107,6 +118,23 @@
             <el-option label="monthly" value="monthly" />
           </el-select>
         </el-form-item>
+        <!-- #181 专项分桶: 生成侧按 scope 切片 feed(退款桶含涉诉/投诉桶三源), 匹配侧按问句专项路由 -->
+        <el-form-item label="专项 scope">
+          <el-select v-model="form.scope" style="width: 100%">
+            <el-option label="overview·整体经营" value="overview" />
+            <el-option label="refund·退款(含涉诉)" value="refund" />
+            <el-option label="complaint·投诉(三源)" value="complaint" />
+            <el-option label="reception·接待专项" value="reception" />
+          </el-select>
+          <span class="field-hint">整体经营=全维度(单桶会因 feed 超长截断致涉诉等答暂无); 专项桶只喂对应数据段, 命中按问句专项路由优先。</span>
+        </el-form-item>
+        <el-form-item label="体裁 format">
+          <el-select v-model="form.format" style="width: 100%">
+            <el-option label="brief·简报(结论导向)" value="brief" />
+            <el-option label="detail·明细(逐维度展开)" value="detail" />
+          </el-select>
+          <span class="field-hint">简报只给核心结论与关键数字(每个维度 ≤2 行); 明细按维度逐项展开可含表格。</span>
+        </el-form-item>
         <el-form-item label="trigger_at">
           <el-input v-model="form.trigger_at" placeholder="daily=HH:MM(09:00); weekly=wday-HH:MM(1-09:00=周一9点); monthly=day-HH:MM(1-09:00=每月1号9点)" />
         </el-form-item>
@@ -160,6 +188,13 @@ const PROVIDER_LABELS = {
 const providerDisplay = (code) => (code ? (PROVIDER_LABELS[code]?.name || code) : '自动(优先级)')
 const providerTagType = (code) => (code ? (PROVIDER_LABELS[code]?.type || 'info') : 'info')
 
+// #181 专项分桶: scope 中文标签 + tag 颜色(overview 中性, 专项按色区分)
+const SCOPE_LABELS = {
+  overview: '整体经营', refund: '退款', complaint: '投诉', reception: '接待',
+}
+const scopeLabel = (s) => (s ? (SCOPE_LABELS[s] || s) : '整体经营')
+const scopeTagType = (s) => (s === 'refund' ? 'danger' : s === 'complaint' ? 'warning' : s === 'reception' ? 'primary' : 'info')
+
 const dialogVisible = ref(false)
 const saving = ref(false)
 const keywordsInput = ref('')
@@ -168,6 +203,7 @@ const form = reactive({
   question_keywords: [], period: 'daily', frequency: 'daily',
   trigger_at: '', refresh_on_sync: true, max_tokens: 2000, llm_provider_code: '',
   priority: 100, visibility_scope: 'public', is_active: true,
+  scope: 'overview', format: 'brief',
 })
 
 async function load() {
@@ -186,6 +222,7 @@ function openCreate() {
     question_keywords: [], period: 'daily', frequency: 'daily',
     trigger_at: '', refresh_on_sync: true, max_tokens: 2000, llm_provider_code: '',
     priority: 100, visibility_scope: 'public', is_active: true,
+    scope: 'overview', format: 'brief',
   })
   keywordsInput.value = ''
   dialogVisible.value = true
