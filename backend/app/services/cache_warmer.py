@@ -463,6 +463,13 @@ def start_warm_loop():
                     await asyncio.to_thread(check_daily_health_report_idle)
                 except Exception:  # noqa: BLE001
                     pass
+                # #163 数据治理体检: 每日低峰(0-5点)自动一次, 落 findings + system_events
+                #   刻意避开 8-24 点同步窗口(设计 §九「不占同步窗口」)
+                try:
+                    from app.services.governance_scan_service import governance_idle
+                    await asyncio.to_thread(governance_idle)
+                except Exception:  # noqa: BLE001
+                    pass
             except asyncio.CancelledError:
                 return
             except Exception:  # noqa: BLE001
