@@ -173,6 +173,8 @@ export const MENU_GROUPS = [
       { path: '/system/ai-templates', title: 'AI 报告模板' },
       // #141: AI 报告历史(查看侧) — 含完整 content 查看抽屉
       { path: '/system/ai-reports', title: 'AI 报告历史' },
+      // #173: 提示词评估中心(评估侧) — 命中/兜底/锚点/规则健康 + 半自动迭代
+      { path: '/system/ai-prompt-eval', title: '提示词评估中心' },
     ],
   },
 

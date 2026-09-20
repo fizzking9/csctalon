@@ -395,6 +395,33 @@ def update_rule(rule_id: int, payload: dict, db: DBSession, user: AdminUser):
     return R(data=_rule_dict(rule), message="规则已更新")
 
 
+@router.post("/rules/{rule_id}/effect", response_model=R, summary="规则效果回填(admin)")
+def record_rule_effect(rule_id: int, payload: dict, db: DBSession, user: AdminUser):
+    """#173 规则级评估的效果回填：记录 执行成功/人工驳回/误报 之一。
+
+    payload: {effect: "executed" | "rejected" | "fp", note?: str}
+    口径: fp_ratio = effect_fp / (executed + rejected + fp)；>50% → 评估中心建议停用/降级。
+    """
+    effect = (payload or {}).get("effect")
+    if effect not in ("executed", "rejected", "fp"):
+        raise HTTPException(400, "effect 仅支持 executed/rejected/fp")
+    rule = db.get(GovernanceRule, rule_id)
+    if rule is None:
+        raise HTTPException(404, "规则不存在")
+    if effect == "executed":
+        rule.effect_executed += 1
+    elif effect == "rejected":
+        rule.effect_rejected += 1
+    else:
+        rule.effect_fp += 1
+    rule.last_effect_at = func.now()
+    logger.info("governance 规则效果回填 id=%s by=%s effect=%s",
+                rule_id, user.username, effect)
+    db.commit()
+    db.refresh(rule)
+    return R(data=_rule_dict(rule), message=f"已记录 {effect}")
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 四、概览
 # ═══════════════════════════════════════════════════════════════════════

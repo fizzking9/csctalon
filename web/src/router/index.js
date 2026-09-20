@@ -487,6 +487,13 @@ const routes = [
         component: () => import('@/views/system/AiDataGovernance.vue'),
         meta: { title: 'AI 数据治理', icon: 'CircleCheck', admin: true },
       },
+      {
+        // #173: AI 提示词评估中心(评估侧: 命中/兜底/锚点/规则健康 + 半自动迭代)
+        path: 'system/ai-prompt-eval',
+        name: 'SystemAiPromptEval',
+        component: () => import('@/views/system/AiPromptEval.vue'),
+        meta: { title: '提示词评估中心', icon: 'DataAnalysis', admin: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },

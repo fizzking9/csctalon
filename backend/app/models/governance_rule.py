@@ -107,6 +107,24 @@ class GovernanceRule(IDMixin, TimestampMixin, Base):
     last_hit_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="最后命中时刻",
     )
+    # ── 效果回填（工单 #173, 设计 §3.1: 规则健康度信号）──────────────
+    # fp_ratio = effect_fp / (effect_executed + effect_rejected + effect_fp)
+    # fp_ratio > 0.5 → 评估中心建议停用/降级
+    effect_executed: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0",
+        comment="按规则执行成功次数（execute 时 +1）",
+    )
+    effect_rejected: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0",
+        comment="人工驳回次数（规则命中但人工否定建议）",
+    )
+    effect_fp: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0",
+        comment="误报次数（规则命中但确认业务允许/无问题）",
+    )
+    last_effect_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="最近一次效果事件时间",
+    )
     source_finding_id: Mapped[int | None] = mapped_column(
         Integer, nullable=True, comment="来自哪次研判（可追溯）",
     )
