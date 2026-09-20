@@ -40,6 +40,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.models.governance_finding import (
+    DETECTOR_FILLABLE_GAP,
     DETECTOR_IMPOSSIBLE_DATE,
     DETECTOR_TEXT_ANOMALY,
     FINDING_STATUS_IGNORED,
@@ -303,6 +304,26 @@ def build_spec_rules(detectors: set[str] | None = None) -> str:
             "禁止编造正确值** —— 写错值比不写更糟。\n"
             "   `mark_pending` 仅当该表在行级质量处置覆盖范围内（refund/ticket/wallet/shanmao/"
             "manual_refund）时可用，用于「确实可疑但拿不准正确值」的行。"
+        )
+    if DETECTOR_FILLABLE_GAP in dets:
+        extra.append(
+            "可推断空缺（D6，判据/来源清单见 backend/app/services/governance_detector.py 的 D6 段）: "
+            "三类 —— A SN→设备属性、B 订单→SN、C 别名→标准人。**这些空缺的共同点是「值在库里"
+            "另有权威来源」，不是「猜」**：`samples[]._source` 给出该建议值取自哪张表哪一行，"
+            "人工可照 repro_sql 核对。\n"
+            "   判「真问题」且来源唯一（`samples[]._alts` 为空或缺席）时：给 `mark_pending`"
+            "（L1，可逆，requires_human_confirm=false）把样本行标「待人工核对」——"
+            "**它仍计入经营统计，不改口径**。但 `mark_pending` 仅当该表在行级质量处置覆盖范围内"
+            "（refund/ticket/wallet/shanmao/manual_refund）时可用；其余表（如 devices / scrm_*）"
+            "只能给 `report_only`。\n"
+            "   ⚠️ **本期一律不写值**（禁止给 `fix_time` 或任何改值动作）：补全的收益（省手工）"
+            "远小于改错的风险；`suggestion.params` 只放补全依据与 confidence，"
+            "不要把建议值写成要执行的 `updates`。\n"
+            "   出现 `_alts`（多来源给出**不同**值）→ 说明建议值不唯一，"
+            "给 `uncertain` + confidence<0.7 并在 reason 里列出各来源的值，交人工定夺。\n"
+            "   判「业务允许」的典型情形：该列本就允许长期为空（如未激活设备无 device_type），"
+            "或空缺量与来源命中量悬殊（绝大多数空缺推不出来 = 无依据，不是错误）→ "
+            "`allowed_by_business` + report_only，由人工 dismiss 沉淀规则。"
         )
     # 编号接在通用段 1~6 之后（多个探测器同时命中时依次 7、8…，不重号）
     numbered = "\n".join(f"{7 + i}) {t}" for i, t in enumerate(extra))

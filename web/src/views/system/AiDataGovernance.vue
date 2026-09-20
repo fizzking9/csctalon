@@ -16,7 +16,11 @@
   │                 D4 文本异常:换行 或 长度贴列宽上限=截断嫌疑，白名单列见              │
   │                 backend/app/services/text_anomaly_rules.py，导入期同源留痕，        │
   │                 D5 不可能日期:年份越界/未来日期/时间倒挂/兜底值聚集，阈值与白名单见  │
-  │                 backend/app/services/date_anomaly_rules.py，导入期同源留痕），       │
+  │                 backend/app/services/date_anomaly_rules.py，导入期同源留痕，        │
+  │                 D6 可推断空缺:只认「值在库里另有权威来源」的三类（SN→设备属性 /       │
+  │                 订单→SN / 别名→标准人），来源清单见 governance_detector.py 的 D6 段；│
+  │                 每条建议必带 samples[]._source（哪张表哪一行推出的值）——            │
+  │                 **本期不自动写值**，只标「待核」或出报告），                        │
   │       判据来源 docs/standards/数据采集合并去重机制说明.md（去重键）、              │
   │       docs/standards/数据时间字段使用规范.md（时区）、                            │
   │       docs/standards/数据源接入与缓存加速规范.md（执行后失效缓存）；              │
@@ -56,7 +60,7 @@
               ⑥ 确认 → 执行（不可逆动作先确认）或「判定业务允许」沉淀规则 → ⑦ 规则区启用/禁用。</p>
             <p><b>数据口径：</b>发现与规则存 <code>governance_findings</code> /
               <code>governance_rules</code>（设计 §3.1/§3.2）；探测器为确定性扫描
-              （唯一索引重复 / 行数突变 / 外键孤儿 / 文本异常 / 不可能日期），判据引用
+              （唯一索引重复 / 行数突变 / 外键孤儿 / 文本异常 / 不可能日期 / 可推断空缺），判据引用
               <code>docs/standards/数据采集合并去重机制说明.md</code>（去重键）、
               <code>docs/standards/数据时间字段使用规范.md</code>（时区）、
               <code>docs/standards/数据源接入与缓存加速规范.md</code>（执行后失效缓存）。
@@ -69,7 +73,15 @@
               <code>date_anomaly_rules.py</code>）：四类 —— 年份越界（&lt;2015 或 &gt; 当前年+1）、
               未来日期、时间倒挂（完成列早于创建列，按**北京日期**比）、兜底值聚集
               （单一日期占该列非空行数 ≥ 30% <b>且</b>形如 01-01/12-31 —— 大促这类真实集中日期不报）。
-              日期一律按 <code>Asia/Shanghai</code> 取；服务有效期类列（end_date/expired_at 等）不判越界。</p>
+              日期一律按 <code>Asia/Shanghai</code> 取；服务有效期类列（end_date/expired_at 等）不判越界。
+              「可推断空缺」只认<b>值在库里另有权威来源</b>的三类（SN→设备属性 / 订单→SN /
+              别名→标准人，来源清单见 <code>governance_detector.py</code> 的 D6 段），
+              <b>源里查不到就不报</b>（不做全字段语义推断，宁可漏报不可编造）；
+              每条建议必带<b>推断来源</b>（<code>samples[]._source</code>：哪张表哪一行推出的值），
+              多来源给出不同值时记 <code>_alts</code> 交人工定夺。<b>本期不自动写值</b> ——
+              写值属 L2 改数据，补全省的这点手工远小于改错的风险；本类只走
+              <code>mark_pending</code>（标待核，<b>仍计入经营统计</b>，仅 QUALITY_TABLES 覆盖的表可用）
+              或 <code>report_only</code>。</p>
             <p><b>不做什么（及原因）：</b></p>
             <ul>
               <li>❌ <b>不做一键治理全部</b>：批量执行不可逆动作 = 把红线交给一次误点，L2 必须逐条确认；</li>
@@ -368,8 +380,38 @@
           </el-table>
         </div>
 
+        <!-- D6 专属：补全建议 + **推断来源**（人工据此核对「这个值从哪来」，拒绝黑盒建议） -->
+        <div v-if="detail.detector === 'fillable_gap' && fillableRows.length" class="mb-12">
+          <div class="dim mb-8">
+            <b>本期不自动写值</b>（只标「待核」或出报告）。每条建议都给<b>推断来源</b> ——
+            该值取自哪张表哪一行，人工可照下方复现 SQL 逐条核对；
+            「其它来源值」非空表示多个来源给出<b>不同</b>值，须人工定夺（不做静默取舍）。
+          </div>
+          <el-table :data="fillableRows" size="small" border max-height="300">
+            <el-table-column prop="pk" label="目标行主键" min-width="130" show-overflow-tooltip />
+            <el-table-column prop="column" label="空缺列" width="110" show-overflow-tooltip />
+            <el-table-column prop="suggested" label="建议值" min-width="130" show-overflow-tooltip />
+            <el-table-column prop="src_table" label="来源表" min-width="140" show-overflow-tooltip />
+            <el-table-column prop="src_key" label="来源键（=本行值）" min-width="160" show-overflow-tooltip />
+            <el-table-column prop="src_pk" label="来源行" min-width="130" show-overflow-tooltip />
+            <el-table-column prop="src_col" label="来源列" width="120" show-overflow-tooltip />
+            <el-table-column label="其它来源值" min-width="150" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span v-if="!row.alts" class="dim">—</span>
+                <span v-else class="txt-warn">{{ row.alts }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+
         <div class="sec-title">③ 脱敏样本 samples（≤10 条，敏感字段已脱敏）</div>
-        <div v-if="detail.detector === 'text_anomaly'" class="dim mb-8">
+        <div v-if="detail.detector === 'fillable_gap'" class="dim mb-8">
+          <code>suggested</code> 是建议补的值，<code>_source</code> 是它的<b>推断来源</b>
+          （哪张表哪一行推出的），<code>_alts</code> 是其它来源给出的<b>不同</b>值，
+          <code>_id</code> 是目标行主键。<b>本类样本不做脱敏</b> —— 证据就是「SN/单号 ↔ 推出的值」
+          这一对，脱敏后人工无法到库里核对（与文本异常/不可能日期同类证据一致）
+        </div>
+        <div v-else-if="detail.detector === 'text_anomaly'" class="dim mb-8">
           样本值中的 <b>⏎</b> 表示换行符（否则看不出问题在哪）；<code>_length</code> 为值长度，
           <code>_kind</code> 为该行命中的判据（newline=含换行 / near_limit=贴列宽上限）
         </div>
@@ -539,6 +581,7 @@ const DETECTOR_TEXT = {
   fk_orphan: '外键孤儿',
   text_anomaly: '文本异常',
   impossible_date: '不可能日期',
+  fillable_gap: '可推断空缺',
 }
 const STATUS_TEXT = {
   open: '待研判',
@@ -643,6 +686,21 @@ const topDates = computed(() => {
 const changes = computed(() => {
   const c = detail.value?.execute_result?.changes
   return Array.isArray(c) ? c : []
+})
+// D6：补全建议 + **推断来源**（samples[]._source 是「这个值从哪来」的唯一凭据）
+const fillableRows = computed(() => {
+  const rows = detail.value?.samples
+  if (detail.value?.detector !== 'fillable_gap' || !Array.isArray(rows)) return []
+  return rows.filter((r) => r && r._source).map((r) => ({
+    pk: r._id,
+    column: r.column,
+    suggested: r.suggested,
+    src_table: r._source.table,
+    src_key: `${r._source.key_column}=${r._source.key}`,
+    src_pk: `${r._source.pk_column}=${r._source.pk}`,
+    src_col: r._source.column,
+    alts: (r._alts || []).map((a) => `${a.table}:${a.value}`).join(' / '),
+  }))
 })
 const sampleColumns = computed(() => {
   const rows = detail.value?.samples

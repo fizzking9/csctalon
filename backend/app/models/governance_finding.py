@@ -30,6 +30,7 @@ DETECTOR_ROW_COUNT_JUMP = "row_count_jump"       # D2: 表级行数突变（工�
 DETECTOR_FK_ORPHAN = "fk_orphan"                 # D3: 外键孤儿（工单 #163）
 DETECTOR_TEXT_ANOMALY = "text_anomaly"           # D4: 文本异常（换行/贴列宽上限，工单 #168）
 DETECTOR_IMPOSSIBLE_DATE = "impossible_date"     # D5: 不可能日期（越界/未来/倒挂/聚集，工单 #169）
+DETECTOR_FILLABLE_GAP = "fillable_gap"           # D6: 可推断空缺（有权威来源可推，工单 #170）
 
 # ── status 值域（finding 生命周期）──────────────────────────
 FINDING_STATUS_OPEN = "open"          # 刚探测出，待研判

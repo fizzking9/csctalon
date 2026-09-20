@@ -33,6 +33,7 @@ from sqlalchemy import func, select
 
 from app.api.deps import AdminUser, DBSession
 from app.models.governance_finding import (
+    DETECTOR_FILLABLE_GAP,
     DETECTOR_FK_ORPHAN,
     DETECTOR_IMPOSSIBLE_DATE,
     DETECTOR_ROW_COUNT_JUMP,
@@ -70,7 +71,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/governance", tags=["AI 数据治理"])
 
 DETECTORS = (DETECTOR_UNIQUE_INDEX_DUP, DETECTOR_ROW_COUNT_JUMP, DETECTOR_FK_ORPHAN,
-             DETECTOR_TEXT_ANOMALY, DETECTOR_IMPOSSIBLE_DATE)
+             DETECTOR_TEXT_ANOMALY, DETECTOR_IMPOSSIBLE_DATE, DETECTOR_FILLABLE_GAP)
 _MAX_PAGE_SIZE = 200
 
 

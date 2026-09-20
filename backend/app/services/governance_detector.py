@@ -1432,3 +1432,343 @@ def _reversed_samples(db: Session, table: str, col: str, finish_expr: str,
                 item["_id"] = r["id"]
             out.append(item)
     return out[:limit]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# D6: 可推断空缺（工单 #170，设计 docs/design/采集语义增强设计-20260920.md §3.3）
+#
+# 「值缺失」本身不稀奇（可空列大量为 NULL 是常态），稀奇的是**缺失的值在库里另有权威来源** ——
+# 那意味着这段空缺**不必人工一个个查**就能补上（省人工），而不是「猜」。
+# 故本探测器只认**有权威来源可推**的三类；源里查不到一律不报（设计 §1.3 非目标：
+# 不做全字段语义推断 —— 宁可漏报，不可让 AI 编造值）。
+#
+#   规则                    目标列（空缺）                    权威来源
+#   A sn_to_device_type     devices.device_type              device_flow_usage / bms_orders
+#                                                           的 device_type_name（同 SN）
+#   B order_to_sn           manual_refunds.device_sn        同订单号在 refund_record_reports /
+#                           shanmao_refunds.device_sn       refunds / device_combos / bms_orders
+#                                                           上的 device_sn
+#   C alias_to_person       scrm_operators.person_id        person_aliases（alias 已归并到 person_id）
+#                           scrm_sessions.person_id
+#
+# ⚠️ 来源清单是**生产实测证据驱动**的（2026-09-20 只读探测），不是照抄设计文档的举例：
+#   · A 类设计写 `device_combo`/`device_profile`，但 `device_combos` **没有设备类型列**；
+#     `device_profile` 是**导入通道**（落库目标就是 `devices` 自身 → 推不出自己）。
+#     实测可用来源是 `bms_orders.device_type_name`（98863 个 SN 可补）与
+#     `device_flow_usage.device_type_name`（57 个）；两者取值域与 `devices.device_type` 一致
+#     （GT-3K皓月 / YKM-TC-EM33G / YKM-YLMFQ-3KD 等在两表中都出现）→ 属**同义权威来源**。
+#   · B 类实测：`refunds` 的 device_sn **无一为空**（无空缺可补，不产 finding）；
+#     `manual_refunds` 空 2918 行、`shanmao_refunds` 空 2066 行。可用来源按命中数排序：
+#     refund_record_reports(2875) > refunds(1136) > device_combos(558) > bms_orders(1) —— 顺序即优先级。
+#   · C 类：`PERSON_FIELD_SOURCES` 的 13 个字段里**只有 scrm_operators / scrm_sessions 两张表
+#     同时有 person_id 列**（其余表的姓名列没有对应的可补列，补了也没地方放）→ 只有这两张产 finding。
+#     生产当前这两张表为 0 行（SCRM 未同步），故 C 类现网**不产 finding** —— 这是正确行为，不是缺陷。
+#
+# 样本必须含**推断来源**（哪张表哪一行推出的值）—— 工单 #170 验收 2：否则人工无法核对，
+# 等于要求人盲信 AI（框架 §3.1「拒绝黑盒结论」的同一纪律）。故样本给
+# `_source={table,key,pk,column}`（该值从哪来）与 `_alts`（其它来源给出**不同**值时的备选）。
+# 样本值**不脱敏**（与 D4/D5 同）：D6 的证据就是「SN/单号 ↔ 推出的值」这一对，
+# 脱敏后人工无法到库里核对，验收 2 直接落空。
+#
+# 执行分级：**L1 `mark_pending`**（标待核，可逆）+ 人工确认；**本期不自动写值** ——
+# 写值属 L2 改数据，补全的收益（省手工）远小于改错的风险（设计 §3.3）。
+# 注：`mark_pending` 仅 `QUALITY_TABLES` 覆盖的表可用 → B 类（manual_refunds / shanmao_refunds）
+#     可用，A/C 类（devices / scrm_*）只能 report_only（由研判层按表判定，见 execute_service）。
+# ═══════════════════════════════════════════════════════════════════════
+DETECTOR_FILLABLE_GAP = "fillable_gap"
+
+RULE_SN_TO_DEVICE_TYPE = "sn_to_device_type"
+RULE_ORDER_TO_SN = "order_to_sn"
+RULE_ALIAS_TO_PERSON = "alias_to_person"
+
+RULE_TEXT: dict[str, str] = {
+    RULE_SN_TO_DEVICE_TYPE: "SN→设备属性",
+    RULE_ORDER_TO_SN: "订单→SN",
+    RULE_ALIAS_TO_PERSON: "别名→标准人",
+}
+
+_FILLABLE_SAMPLE_LIMIT = 8
+# 严重度阈值：D6 是「**可省的人工量**」而非数据错误，按人工量级分档（最终仍以研判 verdict 为准）
+_FILLABLE_HIGH_ROWS = 1000
+_FILLABLE_HIGH_RATIO = 0.30
+# 单条 finding 的语句超时：D6 的计数要扫大表（devices 62 万行），无上限会拖住整个体检
+_FILLABLE_STATEMENT_TIMEOUT = "30s"
+
+# 「订单号 → SN」的权威来源（顺序即优先级：命中多、语义近的在前）
+_ORDER_TO_SN_SOURCES: tuple[dict, ...] = (
+    {"table": "refund_record_reports", "key_col": "platform_order_no",
+     "value_col": "device_sn", "pk_col": "id", "text": True},
+    {"table": "refunds", "key_col": "platform_order_no",
+     "value_col": "device_sn", "pk_col": "refund_no", "text": True},
+    {"table": "device_combos", "key_col": "recharge_order_no",
+     "value_col": "device_sn", "pk_col": "recharge_order_no", "text": True},
+    {"table": "bms_orders", "key_col": "order_no",
+     "value_col": "device_sn", "pk_col": "order_no", "text": True},
+)
+
+# 固定规则清单（A/B）；C 类由 `_alias_rule_specs` 按 PERSON_FIELD_SOURCES 动态生成
+_FILLABLE_RULES: tuple[dict, ...] = (
+    {
+        "rule": RULE_SN_TO_DEVICE_TYPE,
+        "table": "devices",
+        "column": "device_type",
+        "key_col": "sn",
+        "pk_col": "sn",
+        "text": True,
+        "sources": (
+            {"table": "device_flow_usage", "key_col": "device_sn",
+             "value_col": "device_type_name", "pk_col": "id", "text": True},
+            {"table": "bms_orders", "key_col": "device_sn",
+             "value_col": "device_type_name", "pk_col": "order_no", "text": True},
+        ),
+    },
+    {
+        "rule": RULE_ORDER_TO_SN,
+        "table": "manual_refunds",
+        "column": "device_sn",
+        "key_col": "order_no",
+        "pk_col": "id",
+        "text": True,
+        "sources": _ORDER_TO_SN_SOURCES,
+    },
+    {
+        "rule": RULE_ORDER_TO_SN,
+        "table": "shanmao_refunds",
+        "column": "device_sn",
+        "key_col": "order_no",
+        "pk_col": "refund_no",
+        "text": True,
+        "sources": _ORDER_TO_SN_SOURCES,
+    },
+)
+
+
+def _column_exists(db: Session, table: str, column: str) -> bool:
+    return bool(db.execute(text(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema='public' "
+        "AND table_name=:t AND column_name=:c"
+    ), {"t": table, "c": column}).scalar())
+
+
+def _blank_cond(alias: str, col: str, is_text: bool) -> str:
+    """「该列为空」条件：NULL 或（文本列的）空串 —— 空串与 NULL 在业务上同义，须一并算空缺。"""
+    c = f'{alias}."{col}"'
+    return f"({c} IS NULL OR btrim({c}::text) = '')" if is_text else f"({c} IS NULL)"
+
+
+def _src_value_cond(alias: str, col: str, is_text: bool) -> str:
+    """「来源给出的值可用」条件（源侧为空/空串不算权威来源，否则等于拿空值去补空值）。"""
+    c = f'{alias}."{col}"'
+    return f"btrim({c}::text) <> ''" if is_text else f"{c} IS NOT NULL"
+
+
+def _fillable_exists(spec: dict, src: dict, target_alias: str = "t") -> str:
+    """「该目标行至少有一个来源可推」的 EXISTS 子句（与 repro_sql 用**同一份**条件）。"""
+    return (f'EXISTS (SELECT 1 FROM "{src["table"]}" x '
+            f'WHERE x."{src["key_col"]}" = {target_alias}."{spec["key_col"]}" '
+            f'AND {_src_value_cond("x", src["value_col"], src["text"])})')
+
+
+def _alias_rule_specs(db: Session) -> list[dict]:
+    """C 类规则（别名→标准人）：按 `person_extractor.PERSON_FIELD_SOURCES` 生成。
+
+    字段清单的**唯一来源**是该常量 —— 此处不另写一份（两份定义必然漂移，
+    同 A-20260910-004 菜单漂移的教训）。只保留**同时存在 person_id 列**的表：
+    没有可补的列就没有空缺（如 refunds.operator 无 person_id → 补了没地方放，跳过）。
+    """
+    from app.services.person_extractor import PERSON_FIELD_SOURCES
+
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for model, _attr, table, field in PERSON_FIELD_SOURCES:
+        if (table, field) in seen:
+            continue
+        seen.add((table, field))
+        if not _table_exists(db, table) or not _column_exists(db, table, field):
+            continue
+        if not _column_exists(db, table, "person_id"):
+            continue
+        pk_cols = [c.name for c in model.__table__.primary_key.columns]
+        if len(pk_cols) != 1:
+            continue  # 复合主键无法定位单行（样本 _id 与 mark_pending 都要单列主键）
+        out.append({
+            "rule": RULE_ALIAS_TO_PERSON,
+            "table": table,
+            "column": "person_id",
+            "key_col": field,
+            "pk_col": pk_cols[0],
+            "text": False,
+            "sources": ({"table": "person_aliases", "key_col": "alias",
+                         "value_col": "person_id", "pk_col": "id", "text": False},),
+        })
+    return out
+
+
+def _fillable_severity(fillable_rows: int, total_null_rows: int) -> str:
+    """原始严重度（v1 启发式，仅参考，最终以研判 verdict 为准）。
+
+    D6 是「**可省的人工量**」而非数据错误，故按量级分档而非按错误严重度。
+    """
+    ratio = fillable_rows / total_null_rows if total_null_rows else 0.0
+    if fillable_rows >= _FILLABLE_HIGH_ROWS or ratio >= _FILLABLE_HIGH_RATIO:
+        return SEVERITY_HIGH
+    return SEVERITY_WARN
+
+
+def _fillable_repro_sql(spec: dict, srcs: tuple[dict, ...]) -> str:
+    """复现 SQL：空缺总数 / 可补总数 / 逐来源命中数（数字必须与 metrics 逐一对上，同 D1 铁律）。
+
+    条件串与探测器实际计数用的是**同一份**（`_blank_cond` / `_fillable_exists`），
+    不是重写一遍 —— 否则迟早出现「人工跑出来的数 ≠ finding 里的数」。
+    """
+    t = f'"{spec["table"]}"'
+    blank = _blank_cond("t", spec["column"], spec["text"])
+    ors = " OR ".join(_fillable_exists(spec, s) for s in srcs)
+    parts = [f"-- 目标列空缺行数（metrics.total_null_rows）\n"
+             f"SELECT count(*) FROM {t} t WHERE {blank};",
+             f"-- 可补全行数（metrics.fillable_rows）\n"
+             f"SELECT count(*) FROM {t} t WHERE {blank} AND ({ors});"]
+    for s in srcs:
+        parts.append(f"-- 来源 {s['table']}（metrics.sources.{s['table']}）\n"
+                     f"SELECT count(*) FROM {t} t WHERE {blank} AND "
+                     f"{_fillable_exists(spec, s)};")
+    return "\n\n".join(parts)
+
+
+def _fillable_samples(db: Session, spec: dict, srcs: tuple[dict, ...],
+                      limit: int) -> list[dict]:
+    """样本：每条给出目标行 + **推断来源**（哪张表哪一行推出的值）。
+
+    `LEFT JOIN LATERAL` 保证**每来源至多一行**（不会因一来源多行而放大样本行数）；
+    来源多行时按来源主键升序取第一条（可复现，不用随机）。
+    其余来源若给出**不同**值 → 记入 `_alts`（人工可据此判断「该信谁」，不做静默取舍）。
+    """
+    if not srcs or limit <= 0:
+        return []
+    lat, sel, vs = [], [], []
+    for i, s in enumerate(srcs):
+        lat.append(
+            f'LEFT JOIN LATERAL (SELECT x."{s["value_col"]}" AS v, x."{s["pk_col"]}" AS p '
+            f'FROM "{s["table"]}" x WHERE x."{s["key_col"]}" = t."{spec["key_col"]}" '
+            f'AND {_src_value_cond("x", s["value_col"], s["text"])} '
+            f'ORDER BY x."{s["pk_col"]}" LIMIT 1) s{i} ON TRUE')
+        sel.append(f's{i}.v AS v{i}, s{i}.p AS p{i}')
+        vs.append(f"s{i}.v")
+    sql = (f'SELECT t."{spec["pk_col"]}" AS _pk, t."{spec["key_col"]}" AS _key, '
+           f't."{spec["column"]}" AS _cur, '
+           f'{" , ".join(sel)} FROM "{spec["table"]}" t {" ".join(lat)} '
+           f'WHERE {_blank_cond("t", spec["column"], spec["text"])} '
+           f'AND ({" OR ".join(f"{v} IS NOT NULL" for v in vs)}) LIMIT :lim')
+
+    out: list[dict] = []
+    for r in db.execute(text(sql), {"lim": limit}).mappings().all():
+        chosen = None
+        alts: list[dict] = []
+        for i, s in enumerate(srcs):
+            v = r.get(f"v{i}")
+            if v is None:
+                continue
+            if chosen is None:
+                chosen = {"table": s["table"], "key": r.get("_key"),
+                          "key_column": spec["key_col"], "pk": r.get(f"p{i}"),
+                          "pk_column": s["pk_col"], "column": s["value_col"], "value": v}
+            elif v != chosen["value"]:
+                alts.append({"table": s["table"], "pk": r.get(f"p{i}"),
+                             "column": s["value_col"], "value": v})
+        if chosen is None:
+            continue
+        item = {
+            "column": spec["column"],
+            "current": _json_safe(r.get("_cur")),
+            "suggested": chosen["value"],
+            "_id": r.get("_pk"),
+            "_source": {k: _json_safe(v) for k, v in chosen.items()},
+        }
+        if alts:
+            item["_alts"] = [{k: _json_safe(v) for k, v in a.items()} for a in alts]
+        out.append(item)
+    return out
+
+
+def _fillable_finding(db: Session, spec: dict, srcs: tuple[dict, ...],
+                      limit_samples: int) -> dict | None:
+    """单条规则的探测：算 metrics（空缺/可补/逐来源）+ 样本 + 复现 SQL；无可补 → None。"""
+    table, col = spec["table"], spec["column"]
+    blank = _blank_cond("t", col, spec["text"])
+    ors = " OR ".join(_fillable_exists(spec, s) for s in srcs)
+
+    db.execute(text(f"SET LOCAL statement_timeout = '{_FILLABLE_STATEMENT_TIMEOUT}'"))
+    total_null = int(db.execute(text(
+        f'SELECT count(*) FROM "{table}" t WHERE {blank}')).scalar() or 0)
+    fillable = int(db.execute(text(
+        f'SELECT count(*) FROM "{table}" t WHERE {blank} AND ({ors})')).scalar() or 0)
+    if fillable <= 0:
+        return None  # 无权威来源可推 → **不产 finding**（禁止「猜」，工单 #170 验收 1）
+
+    sources: dict[str, int] = {}
+    for s in srcs:
+        n = int(db.execute(text(
+            f'SELECT count(*) FROM "{table}" t WHERE {blank} AND '
+            f'{_fillable_exists(spec, s)}')).scalar() or 0)
+        if n:
+            sources[s["table"]] = n
+
+    samples = _fillable_samples(db, spec, srcs, limit_samples)
+    metrics = {
+        "fillable_rows": fillable,
+        "total_null_rows": total_null,
+        "ratio": round(fillable / total_null, 6) if total_null else 0.0,
+        "rule": spec["rule"],
+        "rule_text": RULE_TEXT.get(spec["rule"], spec["rule"]),
+        "target_column": col,
+        "sources": sources,
+        # 多来源命中会重叠，故 fillable_rows 按**目标行去重**，不是 sources 相加
+        "sources_note": "sources 为各来源**命中的目标行数**（可重叠），fillable_rows 为去重后总数",
+        "writable": False,  # 本期不自动写值（设计 §3.3）
+    }
+    return {
+        "detector": DETECTOR_FILLABLE_GAP,
+        "table_name": table,
+        "target": f"{table}.{col}",
+        "severity_raw": _fillable_severity(fillable, total_null),
+        "metrics": metrics,
+        "samples": samples,
+        "repro_sql": _fillable_repro_sql(spec, srcs),
+    }
+
+
+def scan_fillable_gaps(db: Session, *, tables: list[str] | None = None,
+                       limit_samples: int = _FILLABLE_SAMPLE_LIMIT) -> list[dict]:
+    """D6 扫描：找「有权威来源可推」的空缺（不落库，纯探测）。
+
+    `tables` 非空时只扫这些表（供定向体检/单测用）；None = 全部规则。
+
+    单条规则失败（表/列被改、语句超时）只跳过该规则，不影响其余 —— 且**不产 finding**
+    （探测不到 ≠ 没有空缺，报「0 条」会误导）。
+
+    ⚠️ 只读探测，**不得无条件 rollback** —— 调用方可能在事务中（单测的临时表就在这里），
+    无条件 rollback 会把调用方未提交的 DDL/数据一并回滚。仅出错时才 rollback 清理中止事务。
+    """
+    findings: list[dict] = []
+    for spec in list(_FILLABLE_RULES) + _alias_rule_specs(db):
+        if tables is not None and spec["table"] not in tables:
+            continue
+        if not _table_exists(db, spec["table"]) or not _column_exists(db, spec["table"], spec["column"]):
+            continue
+        srcs = tuple(s for s in spec["sources"]
+                     if _table_exists(db, s["table"])
+                     and _column_exists(db, s["table"], s["value_col"])
+                     and _column_exists(db, s["table"], s["key_col"])
+                     and _column_exists(db, s["table"], s["pk_col"]))
+        if not srcs:
+            continue  # 权威来源表不在 → 推不出，不报（不是「空缺」而是「无依据」）
+        try:
+            finding = _fillable_finding(db, spec, srcs, limit_samples)
+        except Exception as e:  # noqa: BLE001  单条规则失败不影响其余
+            db.rollback()
+            logger.warning("governance D6: %s.%s 探测失败, 跳过: %s",
+                           spec["table"], spec["column"], e)
+            continue
+        if finding:
+            findings.append(finding)
+    return findings

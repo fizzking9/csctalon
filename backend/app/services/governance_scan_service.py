@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.models.governance_finding import (
+    DETECTOR_FILLABLE_GAP,
     DETECTOR_FK_ORPHAN,
     DETECTOR_IMPOSSIBLE_DATE,
     DETECTOR_ROW_COUNT_JUMP,
@@ -41,6 +42,7 @@ from app.models.governance_finding import (
 from app.services.governance_detector import (
     close_stale_findings,
     persist_findings,
+    scan_fillable_gaps,
     scan_fk_orphans,
     scan_impossible_dates,
     scan_row_count_jump,
@@ -65,7 +67,7 @@ def _now_cn() -> _dt.datetime:
 
 
 def gather_findings(db: Session) -> tuple[list[dict], set[str]]:
-    """批量跑 D1/D2/D3/D4/D5，返回 (全部 findings, 本次**跑通**的探测器集合)。
+    """批量跑 D1~D6，返回 (全部 findings, 本次**跑通**的探测器集合)。
 
     各探测器内部已做单表容错（失败跳过该表、不阻塞）。编排层再包一层：
     整体失败不阻塞留痕（能找到多少算多少）。
@@ -81,6 +83,7 @@ def gather_findings(db: Session) -> tuple[list[dict], set[str]]:
         (DETECTOR_FK_ORPHAN, scan_fk_orphans),
         (DETECTOR_TEXT_ANOMALY, scan_text_anomaly),
         (DETECTOR_IMPOSSIBLE_DATE, scan_impossible_dates),
+        (DETECTOR_FILLABLE_GAP, scan_fillable_gaps),
     ):
         try:
             results += fn(db)
