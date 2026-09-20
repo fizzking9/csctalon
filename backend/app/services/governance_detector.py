@@ -1464,6 +1464,15 @@ def _reversed_samples(db: Session, table: str, col: str, finish_expr: str,
 #     同时有 person_id 列**（其余表的姓名列没有对应的可补列，补了也没地方放）→ 只有这两张产 finding。
 #     生产当前这两张表为 0 行（SCRM 未同步），故 C 类现网**不产 finding** —— 这是正确行为，不是缺陷。
 #
+# ⚠️ **「已排除出经营统计」的行不算空缺**（2026-09-20 生产实测暴露，必须排除）：
+#   `manual_refunds` 的 2918 个 device_sn 空缺里 **2049 行已是 `dup_residual`**
+#   （治理 #21 判定的「同单占位残留行」，已排除出经营统计）。这些行补 SN 对经营口径
+#   **没有任何影响**，报出来只会稀释真正可省人工的那部分（实测 71% 是噪音）；
+#   而且 `mark_pending` 有红线**拒绝**把排除态拉回统计（#169 教训）→ 若样本全是这种行，
+#   执行结果恒为 `affected_rows=0`，正是 AGENTS.md 界面纪律第 8 条禁止的「点了没反应」。
+#   故：目标表有 `quality_status` 列时，`dup_residual` / `ignored` 的行不计入空缺与可补
+#   （排除状态清单的唯一来源是 `quality_disposition_service.EXCLUDED_STATES`，不另写一份）。
+#
 # 样本必须含**推断来源**（哪张表哪一行推出的值）—— 工单 #170 验收 2：否则人工无法核对，
 # 等于要求人盲信 AI（框架 §3.1「拒绝黑盒结论」的同一纪律）。故样本给
 # `_source={table,key,pk,column}`（该值从哪来）与 `_alts`（其它来源给出**不同**值时的备选）。
@@ -1556,6 +1565,34 @@ def _blank_cond(alias: str, col: str, is_text: bool) -> str:
     return f"({c} IS NULL OR btrim({c}::text) = '')" if is_text else f"({c} IS NULL)"
 
 
+def _excluded_conds(db: Session, table: str, alias: str = "t") -> tuple[str, str]:
+    """返回 `(未排除条件, 已排除条件)`；目标表无 `quality_status` 列时 `("", "false")`。
+
+    为什么要排除「已被处置排除」的行（生产实测，见段首说明）：
+    那些行**已排除出经营统计**，补值对经营口径毫无影响，报出来只会稀释可省人工的部分；
+    且 `mark_pending` 的红线拒绝把排除态拉回统计 → 样本全是这种行时执行恒为 0 行。
+
+    排除状态清单**不在此另写一份**（唯一来源 = `quality_disposition_service.EXCLUDED_STATES`）：
+    两份定义必然漂移（同 A-20260910-004 菜单漂移的教训）。
+    """
+    if not _column_exists(db, table, "quality_status"):
+        return "", "false"
+    from app.services.quality_disposition_service import EXCLUDED_STATES
+
+    states = tuple(EXCLUDED_STATES)
+    # 值来自代码常量而非外部输入，仍过一道格式白名单后才内联（AGENTS.md 绝对禁止第 2 条）
+    assert all(re.fullmatch(r"[a-z_]+", x) for x in states), states
+    quoted = ", ".join(f"'{x}'" for x in states)
+    q = f'{alias}."quality_status"'
+    return (f" AND ({q} IS NULL OR {q} NOT IN ({quoted}))", f"({q} IN ({quoted}))")
+
+
+def _gap_cond(db: Session, spec: dict, alias: str = "t") -> str:
+    """「算作空缺」的完整条件 = 该列为空 **且** 该行未被排除出经营统计（见段首说明）。"""
+    return _blank_cond(alias, spec["column"], spec["text"]) + _excluded_conds(
+        db, spec["table"], alias)[0]
+
+
 def _src_value_cond(alias: str, col: str, is_text: bool) -> str:
     """「来源给出的值可用」条件（源侧为空/空串不算权威来源，否则等于拿空值去补空值）。"""
     c = f'{alias}."{col}"'
@@ -1615,22 +1652,26 @@ def _fillable_severity(fillable_rows: int, total_null_rows: int) -> str:
     return SEVERITY_WARN
 
 
-def _fillable_repro_sql(spec: dict, srcs: tuple[dict, ...]) -> str:
-    """复现 SQL：空缺总数 / 可补总数 / 逐来源命中数（数字必须与 metrics 逐一对上，同 D1 铁律）。
+def _fillable_repro_sql(db: Session, spec: dict, srcs: tuple[dict, ...]) -> str:
+    """复现 SQL：空缺总数 / 已处置排除数 / 可补总数 / 逐来源命中数（数字必须与 metrics 逐一对上，同 D1 铁律）。
 
-    条件串与探测器实际计数用的是**同一份**（`_blank_cond` / `_fillable_exists`），
+    条件串与探测器实际计数用的是**同一份**（`_gap_cond` / `_fillable_exists`），
     不是重写一遍 —— 否则迟早出现「人工跑出来的数 ≠ finding 里的数」。
     """
     t = f'"{spec["table"]}"'
     blank = _blank_cond("t", spec["column"], spec["text"])
+    gap = _gap_cond(db, spec)
+    excl = _excluded_conds(db, spec["table"])[1]
     ors = " OR ".join(_fillable_exists(spec, s) for s in srcs)
-    parts = [f"-- 目标列空缺行数（metrics.total_null_rows）\n"
-             f"SELECT count(*) FROM {t} t WHERE {blank};",
+    parts = [f"-- 目标列空缺行数（metrics.total_null_rows；已排除「已排除出经营统计」的处置态行）\n"
+             f"SELECT count(*) FROM {t} t WHERE {gap};",
+             f"-- 其中已被处置排除、不纳入统计的空缺（metrics.excluded_null_rows）\n"
+             f"SELECT count(*) FROM {t} t WHERE {blank} AND {excl};",
              f"-- 可补全行数（metrics.fillable_rows）\n"
-             f"SELECT count(*) FROM {t} t WHERE {blank} AND ({ors});"]
+             f"SELECT count(*) FROM {t} t WHERE {gap} AND ({ors});"]
     for s in srcs:
         parts.append(f"-- 来源 {s['table']}（metrics.sources.{s['table']}）\n"
-                     f"SELECT count(*) FROM {t} t WHERE {blank} AND "
+                     f"SELECT count(*) FROM {t} t WHERE {gap} AND "
                      f"{_fillable_exists(spec, s)};")
     return "\n\n".join(parts)
 
@@ -1640,7 +1681,7 @@ def _fillable_samples(db: Session, spec: dict, srcs: tuple[dict, ...],
     """样本：每条给出目标行 + **推断来源**（哪张表哪一行推出的值）。
 
     `LEFT JOIN LATERAL` 保证**每来源至多一行**（不会因一来源多行而放大样本行数）；
-    来源多行时按来源主键升序取第一条（可复现，不用随机）。
+    来源多行时按来源主键升序取第一条、样本行按目标行主键升序取（都可复现，不用随机）。
     其余来源若给出**不同**值 → 记入 `_alts`（人工可据此判断「该信谁」，不做静默取舍）。
     """
     if not srcs or limit <= 0:
@@ -1657,8 +1698,9 @@ def _fillable_samples(db: Session, spec: dict, srcs: tuple[dict, ...],
     sql = (f'SELECT t."{spec["pk_col"]}" AS _pk, t."{spec["key_col"]}" AS _key, '
            f't."{spec["column"]}" AS _cur, '
            f'{" , ".join(sel)} FROM "{spec["table"]}" t {" ".join(lat)} '
-           f'WHERE {_blank_cond("t", spec["column"], spec["text"])} '
-           f'AND ({" OR ".join(f"{v} IS NOT NULL" for v in vs)}) LIMIT :lim')
+           f'WHERE {_gap_cond(db, spec)} '
+           f'AND ({" OR ".join(f"{v} IS NOT NULL" for v in vs)}) '
+           f'ORDER BY t."{spec["pk_col"]}" LIMIT :lim')
 
     out: list[dict] = []
     for r in db.execute(text(sql), {"lim": limit}).mappings().all():
@@ -1695,20 +1737,25 @@ def _fillable_finding(db: Session, spec: dict, srcs: tuple[dict, ...],
     """单条规则的探测：算 metrics（空缺/可补/逐来源）+ 样本 + 复现 SQL；无可补 → None。"""
     table, col = spec["table"], spec["column"]
     blank = _blank_cond("t", col, spec["text"])
+    gap = _gap_cond(db, spec)
+    excl = _excluded_conds(db, table)[1]
     ors = " OR ".join(_fillable_exists(spec, s) for s in srcs)
 
     db.execute(text(f"SET LOCAL statement_timeout = '{_FILLABLE_STATEMENT_TIMEOUT}'"))
     total_null = int(db.execute(text(
-        f'SELECT count(*) FROM "{table}" t WHERE {blank}')).scalar() or 0)
+        f'SELECT count(*) FROM "{table}" t WHERE {gap}')).scalar() or 0)
+    # 已被处置排除的空缺（不计入 total_null_rows，但记下来，数字才解释得通 —— 可审计）
+    excluded_null = int(db.execute(text(
+        f'SELECT count(*) FROM "{table}" t WHERE {blank} AND {excl}')).scalar() or 0)
     fillable = int(db.execute(text(
-        f'SELECT count(*) FROM "{table}" t WHERE {blank} AND ({ors})')).scalar() or 0)
+        f'SELECT count(*) FROM "{table}" t WHERE {gap} AND ({ors})')).scalar() or 0)
     if fillable <= 0:
         return None  # 无权威来源可推 → **不产 finding**（禁止「猜」，工单 #170 验收 1）
 
     sources: dict[str, int] = {}
     for s in srcs:
         n = int(db.execute(text(
-            f'SELECT count(*) FROM "{table}" t WHERE {blank} AND '
+            f'SELECT count(*) FROM "{table}" t WHERE {gap} AND '
             f'{_fillable_exists(spec, s)}')).scalar() or 0)
         if n:
             sources[s["table"]] = n
@@ -1718,6 +1765,8 @@ def _fillable_finding(db: Session, spec: dict, srcs: tuple[dict, ...],
         "fillable_rows": fillable,
         "total_null_rows": total_null,
         "ratio": round(fillable / total_null, 6) if total_null else 0.0,
+        # 已被处置排除（dup_residual/ignored）的空缺：不计入上面两个数，仅留痕说明
+        "excluded_null_rows": excluded_null,
         "rule": spec["rule"],
         "rule_text": RULE_TEXT.get(spec["rule"], spec["rule"]),
         "target_column": col,
@@ -1733,7 +1782,7 @@ def _fillable_finding(db: Session, spec: dict, srcs: tuple[dict, ...],
         "severity_raw": _fillable_severity(fillable, total_null),
         "metrics": metrics,
         "samples": samples,
-        "repro_sql": _fillable_repro_sql(spec, srcs),
+        "repro_sql": _fillable_repro_sql(db, spec, srcs),
     }
 
 

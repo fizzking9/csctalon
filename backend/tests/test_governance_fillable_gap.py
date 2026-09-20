@@ -143,10 +143,12 @@ class TestRuleA:
             "app.services.governance_detector._FILLABLE_RULES", (ctx["spec"],))
 
         f = scan_fillable_gaps(db, tables=[dev])[0]
+        # repro_sql 段落顺序：空缺总数 / 已处置排除 / 可补总数 / 逐来源
         counts = _repro_counts(db, f["repro_sql"])
         assert counts[0] == f["metrics"]["total_null_rows"]
-        assert counts[1] == f["metrics"]["fillable_rows"]
-        assert counts[2:] == list(f["metrics"]["sources"].values())
+        assert counts[1] == f["metrics"]["excluded_null_rows"]
+        assert counts[2] == f["metrics"]["fillable_rows"]
+        assert counts[3:] == list(f["metrics"]["sources"].values())
 
 
 class TestRuleB:
@@ -180,7 +182,7 @@ class TestRuleB:
         assert f["samples"][0]["_source"] == {
             "table": rrr, "key": "OB1", "key_column": "order_no",
             "pk": 11, "pk_column": "id", "column": "device_sn", "value": "SNB1"}
-        assert _repro_counts(db, f["repro_sql"]) == [2, 1, 1]
+        assert _repro_counts(db, f["repro_sql"]) == [2, 0, 1, 1]
 
     def test_no_source_hit_means_no_finding(self, db, monkeypatch):
         """**反例（防「猜」）**：没有任何来源能推出来 → 一条 finding 都不产。"""
@@ -253,7 +255,55 @@ class TestRuleC:
         assert s["suggested"] == 101  # 整数列的值也要能落 JSONB
         assert s["_source"]["table"] == ctx["alias"]
         assert s["_source"]["key"] == "企微-张三C"
-        assert _repro_counts(db, f["repro_sql"]) == [2, 1, 1]
+        assert _repro_counts(db, f["repro_sql"]) == [2, 0, 1, 1]
+
+
+class TestExcludedRows:
+    """已排除出经营统计的行（dup_residual/ignored）**不算空缺**。
+
+    2026-09-20 生产实测暴露：manual_refunds 的 2918 个 device_sn 空缺里 2049 行已是
+    dup_residual（治理 #21 的同单占位残留行）→ 报出来是噪音（71%），且 mark_pending
+    的红线拒绝动它们，样本全是这种行时执行恒为 0 行（「点了没反应」）。
+    """
+
+    def test_excluded_rows_not_counted(self, db, monkeypatch):
+        mr, rrr = _t("mr"), _t("rrr")
+        _mk(db, mr, "id int PRIMARY KEY, order_no varchar(32), device_sn varchar(32), "
+                    "quality_status varchar(16)",
+            "id, order_no, device_sn, quality_status",
+            "(1, 'OB1', NULL, NULL), (2, 'OB2', NULL, 'dup_residual'), "
+            "(3, 'OB3', NULL, 'ignored'), (4, 'OB4', NULL, 'pending')")
+        _mk(db, rrr, "id int PRIMARY KEY, platform_order_no varchar(32), device_sn varchar(32)",
+            "id, platform_order_no, device_sn",
+            "(11, 'OB1', 'SNB1'), (12, 'OB2', 'SNB2'), (13, 'OB3', 'SNB3'), (14, 'OB4', 'SNB4')")
+        spec = {
+            "rule": RULE_ORDER_TO_SN, "table": mr, "column": "device_sn",
+            "key_col": "order_no", "pk_col": "id", "text": True,
+            "sources": ({"table": rrr, "key_col": "platform_order_no",
+                         "value_col": "device_sn", "pk_col": "id", "text": True},),
+        }
+        monkeypatch.setattr(
+            "app.services.governance_detector._FILLABLE_RULES", (spec,))
+
+        f = scan_fillable_gaps(db, tables=[mr])[0]
+        m = f["metrics"]
+        # 空缺只算 OB1/OB4（OB2=dup_residual、OB3=ignored 已排除出经营统计）
+        assert m["total_null_rows"] == 2
+        assert m["fillable_rows"] == 2
+        assert m["excluded_null_rows"] == 2
+        assert m["sources"] == {rrr: 2}
+        assert [s["_id"] for s in f["samples"]] == [1, 4]
+        assert _repro_counts(db, f["repro_sql"]) == [2, 2, 2, 2]
+
+    def test_excluded_states_single_source(self, db):
+        """排除状态清单不另写一份（唯一来源 = quality_disposition_service.EXCLUDED_STATES）。"""
+        from app.services.governance_detector import _excluded_conds
+        from app.services.quality_disposition_service import EXCLUDED_STATES
+
+        not_excl, excl = _excluded_conds(db, "manual_refunds")
+        for st in EXCLUDED_STATES:
+            assert f"'{st}'" in excl
+        assert "quality_status" in not_excl
 
 
 # ─────────────────────────────────────────────────────────────────────

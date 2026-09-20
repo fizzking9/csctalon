@@ -19,8 +19,10 @@
   │                 backend/app/services/date_anomaly_rules.py，导入期同源留痕，        │
   │                 D6 可推断空缺:只认「值在库里另有权威来源」的三类（SN→设备属性 /       │
   │                 订单→SN / 别名→标准人），来源清单见 governance_detector.py 的 D6 段；│
-  │                 每条建议必带 samples[]._source（哪张表哪一行推出的值）——            │
-  │                 **本期不自动写值**，只标「待核」或出报告），                        │
+  │                 每条建议必带 samples[]._source（哪张表哪一行推出的值），            │
+  │                 **已排除出经营统计的行（dup_residual/ignored）不算空缺** ——         │
+  │                 那些行补值不影响口径，且 mark_pending 红线拒绝动它们，              │
+  │                 报出来就是「点了没反应」；**本期不自动写值**，只标「待核」或出报告），│
   │       判据来源 docs/standards/数据采集合并去重机制说明.md（去重键）、              │
   │       docs/standards/数据时间字段使用规范.md（时区）、                            │
   │       docs/standards/数据源接入与缓存加速规范.md（执行后失效缓存）；              │
@@ -78,7 +80,11 @@
               别名→标准人，来源清单见 <code>governance_detector.py</code> 的 D6 段），
               <b>源里查不到就不报</b>（不做全字段语义推断，宁可漏报不可编造）；
               每条建议必带<b>推断来源</b>（<code>samples[]._source</code>：哪张表哪一行推出的值），
-              多来源给出不同值时记 <code>_alts</code> 交人工定夺。<b>本期不自动写值</b> ——
+              多来源给出不同值时记 <code>_alts</code> 交人工定夺。
+              <b>已排除出经营统计的行（<code>dup_residual</code>/<code>ignored</code>）不算空缺</b>：
+              那些行补值不影响经营口径，且 <code>mark_pending</code> 的红线拒绝动它们，
+              报出来只会得到「执行 0 行」；其行数记在 <code>metrics.excluded_null_rows</code> 里留痕。
+              <b>本期不自动写值</b> ——
               写值属 L2 改数据，补全省的这点手工远小于改错的风险；本类只走
               <code>mark_pending</code>（标待核，<b>仍计入经营统计</b>，仅 QUALITY_TABLES 覆盖的表可用）
               或 <code>report_only</code>。</p>
