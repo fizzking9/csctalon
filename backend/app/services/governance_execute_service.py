@@ -321,7 +321,7 @@ def _exec_mark_rows(db: Session, f: GovernanceFinding, action: str, *, operator:
             f"finding #{f.id} 的样本不含行 id（_sample_ids/_id），无法定位要标记的行；"
             f"请改用 report_only 并依 repro_sql 人工处置"
         )
-    marked, failed = [], []
+    marked, skipped, failed = [], [], []
     for pk in ids:
         try:
             if action == DISPOSITION_MARK_IGNORED:
@@ -332,6 +332,15 @@ def _exec_mark_rows(db: Session, f: GovernanceFinding, action: str, *, operator:
                 cfg = QC.get_table_config(code)
                 r = QC._get_by_pk(db, cfg, pk)
                 if action == DISPOSITION_MARK_PENDING:
+                    # ── 红线：mark_pending **不得**把「已排除出经营统计」的行拉回来 ──
+                    # pending 计入统计、dup_residual/ignored 排除出统计 → 覆盖即改口径
+                    # （AGENTS.md 绝对禁止第 10 条）。2026-09-20 生产实测踩到：4 行原
+                    # dup_residual 被标成 pending → D 路会把重复占位行重新计入（已复位）。
+                    if (r.quality_status or "") in QD.EXCLUDED_STATES:
+                        skipped.append({"id": pk, "quality_status": r.quality_status,
+                                        "reason": "已是排除态（dup_residual/ignored），"
+                                                  "mark_pending 不改经营口径"})
+                        continue
                     r.quality_status = "pending"
                     r.quality_note = _append_note(
                         r.quality_note, f"治理 finding #{f.id} 标待核 by {operator}")
@@ -348,9 +357,12 @@ def _exec_mark_rows(db: Session, f: GovernanceFinding, action: str, *, operator:
             f"全量处置请按 repro_sql 批量执行；可用质量页「恢复」回滚")
     if action == DISPOSITION_MARK_PENDING:
         note += "（pending 仍计入经营统计，只是标「待人工核对」——不改口径）"
+        if skipped:
+            note += f"；另有 {len(skipped)} 行已是排除态、按红线未改动"
     return {
         "affected_rows": len(marked),
         "marked_ids": marked,
+        "skipped": skipped,
         "failed": failed,
         "qc_code": code,
         "marked_status": {"mark_ignored": "ignored", "mark_dup_residual": "dup_residual",

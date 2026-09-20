@@ -643,7 +643,11 @@ def _make_mark_pending_finding(s: Session, table_name: str, samples: list[dict],
 
 
 def test_mark_pending_works_on_quality_covered_table(admin_client, _engine, monkeypatch):
-    """验收 4 前半：QC 覆盖表（manual_refunds）可用；写 `quality_status='pending'`（**仍计入统计**）。"""
+    """验收 4 前半：QC 覆盖表（manual_refunds）可用；写 `quality_status='pending'`（**仍计入统计**）。
+
+    ★同时验证红线：样本里若含**已是排除态**（dup_residual/ignored）的行 → **不得**改成 pending
+    （那会把行重新计入经营统计 = 改口径；生产实测踩到过，见 `_exec_mark_rows` 注释）。
+    """
     from app.models import ManualRefund
     from app.services import governance_execute_service as GES
 
@@ -656,12 +660,17 @@ def test_mark_pending_works_on_quality_covered_table(admin_client, _engine, monk
             m = ManualRefund(order_no=f"GOV-MP-{uuid.uuid4().hex[:8]}", merchant_id="1",
                              refund_amount="19.00", is_refunded="是", registrant="测试员",
                              quality_status=None)
-            s.add(m)
+            m2 = ManualRefund(order_no=f"GOV-MP2-{uuid.uuid4().hex[:8]}", merchant_id="1",
+                              refund_amount="19.00", is_refunded="是", registrant="测试员",
+                              quality_status="dup_residual", quality_note="治理#21 占位重复行")
+            s.add_all([m, m2])
             s.commit()
             s.refresh(m)
+            s.refresh(m2)
             fid = _make_mark_pending_finding(
                 s, "manual_refunds",
-                [{"_id": m.id, "_kind": "future", "column": "op_time", "value": "2099-12-31"}],
+                [{"_id": m.id, "_kind": "future", "column": "op_time", "value": "2099-12-31"},
+                 {"_id": m2.id, "_kind": "future", "column": "op_time", "value": "2099-12-31"}],
                 "manual_refunds.op_time")
 
             # L1 可逆 → 无需确认即可执行
@@ -673,11 +682,18 @@ def test_mark_pending_works_on_quality_covered_table(admin_client, _engine, monk
             assert er["affected_rows"] == 1 and er["marked_ids"] == [m.id]
             assert er["marked_status"] == "pending"
             assert "仍计入经营统计" in er["note"]
+            # ★ 红线：已是排除态的行被跳过，口径未被改动
+            assert er["skipped"] == [{"id": m2.id, "quality_status": "dup_residual",
+                                      "reason": "已是排除态（dup_residual/ignored），"
+                                                "mark_pending 不改经营口径"}]
+            assert "按红线未改动" in er["note"]
             s.expire_all()
             got = s.get(ManualRefund, m.id)
             assert got.quality_status == "pending"
             assert f"finding #{fid}" in (got.quality_note or "")
-            s.delete(got)
+            assert s.get(ManualRefund, m2.id).quality_status == "dup_residual", "不得改口径"
+            for x in (s.get(ManualRefund, m.id), s.get(ManualRefund, m2.id)):
+                s.delete(x)
             s.commit()
         finally:
             _cleanup(s, base_find=base_find, base_ev=base_ev, base_rule=base_rule, tables=[])
@@ -722,7 +738,7 @@ def test_mark_pending_is_l1_reversible_and_not_excluding():
     assert DETECTOR_IMPOSSIBLE_DATE in gov_router.DETECTORS
 
 
-def test_rescan_converges_after_date_fixed(admin_client, _engine):
+def test_rescan_converges_after_date_fixed(_engine):
     """验收 3：修正后重扫**不再命中** → 该 finding 走重扫收敛（`auto_closed`）。
 
     `auto_closed` ≠ `resolved`：前者是「不再命中」，后者才是「已执行动作并核销」
