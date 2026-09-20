@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
-"""AI 提示词评估中心服务测试 (工单 #173)。
+"""AI 提示词评估中心服务测试 (工单 #173, #177)。
 
 覆盖:
 - build_summary: 命中分布 / 命中率 / live 占比（基线差值断言防残留污染）
 - build_template_eval: 模板命中率 + 0 命中识别
 - build_anchor_check: 生成侧↔摘取侧静态比对 + 构造报告 H2 漂移检测
 - build_suggestions: 0命中→补关键词 / fp_ratio>0.5→建议停用 / 高频兜底→建议
+- build_llm_suggestions (#177): LLM 辅助建议 schema 校验 / 非法回退纯规则
 - prompt_iterations 状态机: propose→confirm→apply / reject；apply 后模板 keywords 变更
 """
+
+import json
 
 import pytest
 from sqlalchemy import text
@@ -15,11 +18,14 @@ from sqlalchemy import text
 from app.models.ai_report import AiReport
 from app.models.ai_report_template import AiReportTemplate
 from app.models.governance_rule import GovernanceRule
+from app.services import llm_client
 from app.services.prompt_eval_service import (
     _generation_anchors,
+    _validate_llm_suggestions,
     apply_iteration,
     build_anchor_check,
     build_governance_eval,
+    build_llm_suggestions,
     build_suggestions,
     build_summary,
     build_template_eval,
@@ -282,3 +288,80 @@ def test_opinion_lifecycle_record_only(db):
     row2 = propose_opinion(db, 1, content="意见待否决")
     rejected = confirm_iteration(db, 1, row2.id, approved=False)
     assert rejected["status"] == "rejected"
+
+
+# ── #177 LLM 辅助建议 ────────────────────────────────────
+def test_validate_llm_suggestions_keywords_and_question(db):
+    """LLM 输出 schema 校验：补关键词合并去重 / 改问句保留占位符。"""
+    t = _add_tmpl(db, code="llm_v", keywords=["今日"])
+    t.question_template = "今天数据如何? {{date}}"
+    db.flush()
+    tmpls = build_template_eval(db, days=7)
+
+    obj = {"suggestions": [
+        {"scope": "template_keyword", "target_id": t.id, "keywords": ["退款", "今日"],
+         "reason": "问句含退款, 关键词缺退款"},
+        {"scope": "template_question", "target_id": t.id,
+         "question_template": "今天整体经营与退款情况如何? {{date}}",
+         "reason": "问句需补退款维度"},
+    ]}
+    out = _validate_llm_suggestions(obj, tmpls)
+    by_scope = {i["scope"]: i for i in out}
+    assert set(by_scope) == {"template_keyword", "template_question"}
+    # 关键词去重（"今日" 已存在，不再重复）
+    assert "退款" in by_scope["template_keyword"]["new_value"]
+    assert "今日" in by_scope["template_keyword"]["new_value"]
+    assert "{{date}}" in by_scope["template_question"]["new_value"]
+
+
+def test_validate_llm_suggestions_rejects_invalid(db):
+    """非法条目丢弃：scope 越权 / target_id 编造 / 占位符丢失。"""
+    t = _add_tmpl(db, code="llm_inv")
+    t.question_template = "数据? {{date}} {{period}}"
+    db.flush()
+    tmpls = build_template_eval(db, days=7)
+
+    obj = {"suggestions": [
+        {"scope": "new_template", "target_id": None, "reason": "x"},          # 越权 scope
+        {"scope": "template_keyword", "target_id": 99999, "keywords": ["a"],
+         "reason": "x"},                                                       # 编造 target_id
+        {"scope": "template_keyword", "target_id": t.id, "keywords": [],
+         "reason": "x"},                                                       # 空关键词
+        {"scope": "template_question", "target_id": t.id,
+         "question_template": "丢了占位符", "reason": "x"},                     # 占位符丢失
+    ]}
+    assert _validate_llm_suggestions(obj, tmpls) == []
+
+
+def test_build_llm_suggestions_success_and_fallback(db, monkeypatch):
+    """#177 验收：mock LLM 产出合法建议；LLM 异常回退空（路由层再走纯规则）。"""
+    _clean_iterations(db)
+    t = _add_tmpl(db, code="llm_ok", keywords=["今日"])
+    db.flush()
+    _add_report(db, question="退款情况怎么样", hit_mode="live")
+    _add_report(db, question="退款情况怎么样", hit_mode="live")
+    db.flush()
+
+    calls = {"n": 0}
+
+    async def fake_llm(messages, **_kw):
+        calls["n"] += 1
+        assert messages[0]["role"] == "system"
+        # 评估证据注入：模板现状可见
+        assert "llm_ok" in messages[1]["content"]
+        return json.dumps({"suggestions": [
+            {"scope": "template_keyword", "target_id": t.id,
+             "keywords": ["退款", "情况"], "reason": "问句「退款情况怎么样」重复 2 次走 live"},
+        ]}, ensure_ascii=False)
+
+    monkeypatch.setattr(llm_client, "chat_completion", fake_llm)
+    out = build_llm_suggestions(db, days=7)
+    assert len(out) == 1 and out[0]["scope"] == "template_keyword"
+    assert out[0]["target_id"] == t.id and calls["n"] == 1
+
+    # LLM 抛异常 → 返回 []（回退纯规则在路由层）
+    async def boom(**_kw):
+        raise RuntimeError("LLM 不可用")
+
+    monkeypatch.setattr(llm_client, "chat_completion", boom)
+    assert build_llm_suggestions(db, days=7) == []

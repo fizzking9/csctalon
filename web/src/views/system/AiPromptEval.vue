@@ -434,6 +434,13 @@ async function genSuggestions() {
   try {
     const res = await createSuggestions({ days: days.value })
     iterations.value = res.data.items.concat(iterations.value)
+    if (res.data.source === 'llm') {
+      ElMessage.info(`LLM 辅助分析产出 ${res.data.created} 条建议（依命中率/提问历史/已采纳意见）`)
+    } else if (res.data.items.length) {
+      ElMessage.info(`纯规则产出 ${res.data.created} 条建议`)
+    } else {
+      ElMessage.info('本期无新建议（同款建议已存在或有待补充）')
+    }
   } finally {
     suggesting.value = false
   }

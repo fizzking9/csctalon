@@ -17,7 +17,9 @@
      （old_value→new_value + applied_at/applied_by 即一版账本）。
 """
 
+import asyncio
 import datetime as _dt
+import json
 import logging
 import re
 
@@ -155,7 +157,7 @@ def build_template_eval(db: Session, days: int = 7) -> list[dict]:
     since_ts = _since_ts(days)
     rows = db.execute(
         text("""SELECT t.id, t.code, t.name_cn, t.period, t.detail_level,
-                       t.question_keywords, t.is_active,
+                       t.question_keywords, t.question_template, t.is_active,
                        COUNT(r.id) AS snapshots,
                        COALESCE(SUM(r.matched_count), 0) AS matched,
                        COUNT(*) FILTER (WHERE jsonb_typeof(r.latest_missing) = 'array'
@@ -165,7 +167,7 @@ def build_template_eval(db: Session, days: int = 7) -> list[dict]:
                        ON r.template_id = t.id AND r.is_public = TRUE
                       AND r.created_at >= :since_ts
                 GROUP BY t.id, t.code, t.name_cn, t.period, t.detail_level,
-                         t.question_keywords, t.is_active
+                         t.question_keywords, t.question_template, t.is_active
                 ORDER BY t.priority, t.id"""),
         {"since_ts": since_ts},
     ).mappings().all()
@@ -178,6 +180,7 @@ def build_template_eval(db: Session, days: int = 7) -> list[dict]:
             "period": r["period"], "detail_level": r["detail_level"],
             "is_active": bool(r["is_active"]),
             "question_keywords": r["question_keywords"] or [],
+            "question_template": r["question_template"] or "",
             "snapshots": snapshots, "matched": matched,
             "hit_rate": round(matched / snapshots, 4) if snapshots else None,
             "with_missing": int(r["with_missing"]),
@@ -367,6 +370,198 @@ def build_suggestions(db: Session, days: int = 7) -> list[dict]:
             })
 
     return suggestions[:_TOP_N * 3]
+
+
+# ════════════════════════ LLM 辅助建议（工单 #177，规则+LLM 双通道）═════════════════
+
+_LLM_LEVEL = 1                # llm_scheduler L1（admin 手动触发，不占 L2 实时问答）
+_LLM_SOURCE = "prompt_eval_suggest"   # chat_completion 审计 source
+_LLM_TIMEOUT_S = 60.0         # LLM 分析超时（27b 冷加载 35s，留足余量）
+_LLM_MAX_TOKENS = 1200        # 结构化 JSON 输出 token 上限
+_LLM_FALLBACK_OK = True       # LLM 失败/非法 → 回退纯规则路径（工单 #177 验收）
+
+# LLM 输出 schema（与 _validate_llm_suggestions 一一对应）
+_LLM_OUTPUT_SCHEMA = """{
+  "suggestions": [
+    {
+      "scope": "template_keyword | template_question",
+      "target_id": 1,
+      "keywords": ["候选词1", "候选词2"],
+      "question_template": "完整新问句(scope=template_question 时必填)",
+      "reason": "分析理由(引用评估信号与人工意见)"
+    }
+  ]
+}"""
+
+# LLM 系统提示词：只产「补关键词/改问句」两类可写入建议，禁止越权建议
+_LLM_SYSTEM_PROMPT = (
+    "你是提示词优化分析师。系统会给你近 N 天的评估证据：模板命中率、高频未答好问句、"
+    "人工意见、锚点漂移。请判断提示词哪里不贴用户问法，产出结构化建议。\n"
+    "【输出 JSON 结构】\n{output_schema}\n"
+    "【铁律】\n"
+    "1. 只允许 scope=template_keyword（补关键词）或 template_question（改问句），"
+    "   其他类型（新建模板/调规则/改代码常量）一律不产出。\n"
+    "2. target_id 必须来自给定模板列表中的真实 id，禁止编造。\n"
+    "3. keywords 必须来自给定证据中的真实用户问句/人工意见，长度 2~8 字，"
+    "   禁止编造不存在的业务词；不重复已有关键词。\n"
+    "4. template_question 必须保留原问句中的 {{占位符}}（如 {{date}} {{period}}），"
+    "   只在证据明确指向问句缺陷时才给出。\n"
+    "5. reason 必须引用具体证据（命中率/次数/意见原文），禁止泛泛而谈。\n"
+    "6. 没有充分证据时不产出该条建议，宁可少给不可乱给。\n"
+    "只输出 JSON，禁止任何解释文字或 markdown 代码块标记。"
+)
+
+
+def _confirmed_opinions(db: Session, limit: int = 10) -> list[str]:
+    """已采纳(confirmed)人工意见（#177：作为 LLM 分析输入的「业务直觉」信号）。"""
+    rows = db.query(PromptIteration).filter(
+        PromptIteration.scope == ITER_SCOPE_HUMAN_OPINION,
+        PromptIteration.status == ITER_STATUS_CONFIRMED,
+    ).order_by(PromptIteration.confirmed_at.desc()).limit(limit).all()
+    return [r.suggestion for r in rows]
+
+
+def _llm_suggest_context(db: Session, days: int) -> str:
+    """LLM 分析输入：评估聚合 + 人工意见，压缩为一段文本（token 可控）。"""
+    summary = build_summary(db, days)
+    templates = build_template_eval(db, days)
+    anchor = build_anchor_check(db, days)
+    live = _top_live_questions(db, _since_ts(days))
+    opinions = _confirmed_opinions(db)
+
+    lines: list[str] = [f"评估窗口: 近{days}天(北京时间)"]
+    ov = summary["overall"]
+    lines.append(
+        f"问答命中: {ov['questions']} 次, 命中率 {ov['hit_rate']:.0%}, "
+        f"实时兜底占比 {ov['live_ratio']:.0%}"
+    )
+    lines.append("模板现状(命中率升序):")
+    for t in templates[:8]:
+        hit = f"{t['hit_rate']:.0%}" if t["hit_rate"] is not None else "本期未生成"
+        lines.append(
+            f"- id={t['id']} {t['name_cn']}({t['code']}) 快照{t['snapshots']} "
+            f"命中{t['matched']} 命中率{hit} 关键词={t['question_keywords'] or []}"
+        )
+    if live:
+        lines.append("高频未答好问句:")
+        for q in live[:5]:
+            lines.append(f"- 「{q['question'][:40]}」×{q['count']}次")
+    if opinions:
+        lines.append("已采纳人工意见:")
+        for op in opinions[:5]:
+            lines.append(f"- {op[:80]}")
+    if not anchor["static_match"] or anchor["missing_anchors"]:
+        lines.append(f"锚点漂移: 生成侧={anchor['generation_anchors']}")
+        for m in anchor["missing_anchors"][:3]:
+            lines.append(f"- 锚点「{m['anchor']}」缺 {m['missing_count']}/{m['total_reports']} 份")
+    return "\n".join(lines)
+
+
+def _validate_llm_suggestions(obj: dict, templates: list[dict]) -> list[dict]:
+    """LLM 输出 schema 校验 + 规范化为建议条目（与 _LLM_OUTPUT_SCHEMA 对应）。
+
+    任一非法 → 丢弃该条（宁可少给，不可乱给）；整体无合法条目 → 返回 [] → 调用方回退纯规则。
+    """
+    arr = obj.get("suggestions") if isinstance(obj, dict) else None
+    if not isinstance(arr, list) or not arr:
+        return []
+    tmpl_by_id = {t["id"]: t for t in templates}
+    out: list[dict] = []
+    for s in arr:
+        if not isinstance(s, dict):
+            continue
+        scope = s.get("scope")
+        if scope not in (ITER_SCOPE_TEMPLATE_KEYWORD, ITER_SCOPE_TEMPLATE_QUESTION):
+            continue
+        t = tmpl_by_id.get(s.get("target_id"))
+        if t is None:
+            continue
+        reason = str(s.get("reason") or "").strip()
+        if not reason:
+            continue
+        if scope == ITER_SCOPE_TEMPLATE_KEYWORD:
+            keywords = _dedup([str(k).strip() for k in (s.get("keywords") or []) if str(k).strip()])
+            if not keywords:
+                continue
+            new_value = "、".join(_dedup((t["question_keywords"] or []) + keywords))
+            item = {
+                "scope": scope, "target_id": t["id"], "target_name": t["name_cn"],
+                "suggestion": "向 question_keywords 追加候选词: " + "、".join(keywords),
+                "reason": reason,
+                "old_value": "、".join(t["question_keywords"] or []),
+                "new_value": new_value,
+            }
+        else:
+            q = str(s.get("question_template") or "").strip()
+            if not q:
+                continue
+            # 保留占位符校验（铁律 4）：新问句必须含旧问句的全部 {{...}} 占位符
+            old_q = t.get("question_template") or ""
+            old_ph = set(re.findall(r"\{\{.*?\}\}", old_q))
+            new_ph = set(re.findall(r"\{\{.*?\}\}", q))
+            if old_ph and not old_ph.issubset(new_ph):
+                continue
+            item = {
+                "scope": scope, "target_id": t["id"], "target_name": t["name_cn"],
+                "suggestion": "更新 question_template: " + q[:60] + ("…" if len(q) > 60 else ""),
+                "reason": reason,
+                "old_value": old_q, "new_value": q,
+            }
+        out.append(item)
+    return out
+
+
+def _parse_llm_json(raw: str) -> dict | None:
+    """解析 LLM 输出 JSON（容错 markdown 代码块标记）；非 dict 返回 None。"""
+    t = (raw or "").strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```(?:json)?\s*", "", t)
+        t = re.sub(r"\s*```$", "", t)
+    try:
+        obj = json.loads(t)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def build_llm_suggestions(db: Session, days: int = 7) -> list[dict]:
+    """LLM 辅助建议（#177）：依评估信号+人工意见产可写入建议；失败回退空（调用方走纯规则）。
+
+    走 llm_scheduler L1 门闸（admin 触发，不占 L2 实时问答）；transient 降级由 llm_client
+    内部处理；整体异常/非法 → 返回 []（不阻断、不脏写）。
+    """
+    from app.services import llm_client
+    from app.services.llm_scheduler import acquire, release
+
+    templates = build_template_eval(db, days)
+    context = _llm_suggest_context(db, days)
+    system = _LLM_SYSTEM_PROMPT.format(output_schema=_LLM_OUTPUT_SCHEMA)
+    user = (f"【评估证据】\n{context}\n"
+            f"\n请按系统提示词要求，只输出 JSON，禁止解释文字。")
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+    async def _run() -> list[dict]:
+        handle = await acquire(level=_LLM_LEVEL, name="prompt_eval_suggest")
+        try:
+            result = await llm_client.chat_completion(
+                messages, temperature=0.2, max_tokens=_LLM_MAX_TOKENS,
+                timeout_s=_LLM_TIMEOUT_S, db=db, source=_LLM_SOURCE,
+            )
+        finally:
+            await release(handle)
+        obj = _parse_llm_json(str(result))
+        if obj is None:
+            return []
+        return _validate_llm_suggestions(obj, templates)
+
+    try:
+        return asyncio.run(_run())
+    except asyncio.CancelledError:
+        logger.info("prompt_eval_suggest 被更高优先级任务抢占, 回退纯规则")
+        return []
+    except Exception as e:  # noqa: BLE001  LLM 分析失败不阻断建议链路
+        logger.warning("prompt_eval_suggest LLM 分析失败, 回退纯规则: %s", e)
+        return []
 
 
 def _candidate_words(questions: list[str], existing: list | None) -> list[str]:
