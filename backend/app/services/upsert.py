@@ -55,6 +55,9 @@ from app.models.shanmao_refund import ShanmaoRefund
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 
+# 工单 #168: 导入期文本异常留痕的每批上限（同 #40 validate_fail 的 200，防海量噪音）
+_SUSPECT_LIMIT_PER_BATCH = 200
+
 
 class ImportResult:
     """导入结果统计"""
@@ -70,6 +73,8 @@ class ImportResult:
         #   failed=硬失败行数; rejected=其中"带原始行、真正按行可见"的条数
         #   (无 data 的失败行无法按行展示, 不计入 rejected)。
         self.rejected = 0
+        # 工单 #168: 导入期文本异常留痕条数（截断/换行，**已入库但值可疑**，与 rejected 不同义）
+        self.text_suspects = 0
 
     def add_error(self, row_idx: int, msg: str, data: dict | None = None) -> None:
         self.failed += 1
@@ -2455,6 +2460,82 @@ UPSERT_DISPATCH = {    "refund": upsert_refunds,
 }
 
 
+def _persist_text_suspects(db: Session, data_type: str, df, mapping: dict[str, str],
+                           *, limit: int = _SUSPECT_LIMIT_PER_BATCH) -> int:
+    """工单 #168：导入期文本异常留痕（截断 / 换行）——**只看不改**。
+
+    为什么在 `run_upsert` 这一层做：它是上传/BMS 共用的**唯一入口**，且此处 df 里是
+    **截断前的原始值**（比扫描期只能看截断后的值更准）。判据与扫描期同源，见
+    `text_anomaly_rules`（同一常量、同一白名单、同一类型枚举）。
+
+    三条纪律：① 不改入库数据 ② 失败不阻断采集 ③ 每批上限（默认 200，同 #40 的 validate_fail）
+    """
+    import logging as _log
+
+    _lg = _log.getLogger(__name__)
+    try:
+        from app.services.ingest_rejected_service import add_suspect_row
+        from app.services.text_anomaly_rules import CATEGORY_BY_KIND, kinds_of
+
+        col_limits = _column_max_lengths(db, data_type)
+        if not col_limits:
+            return 0
+        # mapping 是 {目标字段: 源列名}（见 _apply_mapping 的遍历方式）
+        written = 0
+        budget = limit
+        for idx, rec in enumerate(df.to_dict("records")):
+            if budget <= 0:
+                break
+            for target_field, source_col in mapping.items():
+                if budget <= 0:
+                    break
+                kinds = kinds_of(rec.get(source_col), col_limits.get(target_field),
+                                 column=target_field)
+                for kind in kinds:
+                    if budget <= 0:
+                        break
+                    row = add_suspect_row(
+                        db, data_type=data_type, source="upload",
+                        reject_category=CATEGORY_BY_KIND[kind],
+                        reject_reason=(f"导入期检测: {target_field} "
+                                       f"{'含换行符' if kind == 'newline' else '长度贴近列宽上限(疑被截断)'}"
+                                       f"（原始值长度 {len(str(rec.get(source_col) or ''))}）"),
+                        raw_row=rec, source_row_no=idx + 2,  # +2: 表头占 1 行, 行号从 1 起
+                    )
+                    if row is not None:
+                        written += 1
+                        budget -= 1
+        return written
+    except Exception as e:  # noqa: BLE001  留痕失败不影响采集主流程
+        _lg.warning(f"[ingest_rejected] 文本异常留痕失败(忽略, 不影响入库): {e}")
+        return 0
+
+
+def _column_max_lengths(db: Session, data_type: str) -> dict[str, int | None]:
+    """取该 data_type 对应表的文本列宽（列宽权威 = DB 的 information_schema）。
+
+    表名从 `data_sources` 反查（与扫描期 D4 用同一张表 → 判据同源的一部分）；
+    未登记/查不到 → 返回空 dict，调用方静默跳过（不猜列宽）。
+    """
+    try:
+        from sqlalchemy import text as _text
+
+        table = db.execute(_text(
+            "SELECT table_name FROM data_sources WHERE code = :c LIMIT 1"
+        ), {"c": data_type}).scalar()
+        if not table:
+            return {}
+        rows = db.execute(_text(
+            "SELECT column_name, character_maximum_length FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = :t "
+            "  AND data_type IN ('text', 'character varying')"
+        ), {"t": table}).mappings().all()
+        return {r["column_name"]: r["character_maximum_length"] for r in rows}
+    except Exception as e:  # noqa: BLE001  取列宽失败 → 不检测（不猜）
+        logger.warning(f"[ingest_rejected] 取列宽失败, 跳过文本异常检测: {e}")
+        return {}
+
+
 def run_upsert(
     df: pd.DataFrame,
     data_type: str,
@@ -2476,7 +2557,11 @@ def run_upsert(
     fn = UPSERT_DISPATCH.get(data_type)
     if not fn:
         raise ValueError(f"不支持的数据类型: {data_type}")
+    # ── 工单 #168: 导入期文本异常留痕(截断/换行) —— 在入库**之前**跑, 拿的是截断前原始值;
+    #    只写留痕、不改 df、不改入库数据(失败仅告警, 见 _persist_text_suspects)
+    suspects = _persist_text_suspects(db, data_type, df, mapping)
     fn(df, mapping, db, result)
+    result.text_suspects = suspects
     # ── A-20260908-003 (#40): 未采纳行落拒收表(上传/BMS 共用 run_upsert 入口) ──
     # result.errors = 硬失败(行被丢弃未入库), 有 raw data 的写 ingest_rejected_rows
     # 供人工判定(open/keep/discard)。savepoint 隔离, 失败不影响主流程。

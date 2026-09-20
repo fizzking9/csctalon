@@ -12,7 +12,9 @@
   │       详情区把**证据（metrics/样本/复现 SQL）放在结论之前**：让人先能自己核对     │
   │       数字，再看 AI 的判断 —— 不接受「黑盒结论」（设计 §3.1）。                 │
   │ 口径：findings/rules 存 `governance_findings` / `governance_rules`（设计 §3.1/§3.2）；│
-  │       探测器 = 确定性扫描（D1 唯一索引重复 / D2 行数突变 / D3 外键孤儿），         │
+  │       探测器 = 确定性扫描（D1 唯一索引重复 / D2 行数突变 / D3 外键孤儿 /             │
+  │                 D4 文本异常:换行 或 长度贴列宽上限=截断嫌疑，白名单列见              │
+  │                 backend/app/services/text_anomaly_rules.py，导入期同源留痕），        │
   │       判据来源 docs/standards/数据采集合并去重机制说明.md（去重键）、              │
   │       docs/standards/数据时间字段使用规范.md（时区）、                            │
   │       docs/standards/数据源接入与缓存加速规范.md（执行后失效缓存）；              │
@@ -52,12 +54,15 @@
               ⑥ 确认 → 执行（不可逆动作先确认）或「判定业务允许」沉淀规则 → ⑦ 规则区启用/禁用。</p>
             <p><b>数据口径：</b>发现与规则存 <code>governance_findings</code> /
               <code>governance_rules</code>（设计 §3.1/§3.2）；探测器为确定性扫描
-              （唯一索引重复 / 行数突变 / 外键孤儿），判据引用
+              （唯一索引重复 / 行数突变 / 外键孤儿 / 文本异常），判据引用
               <code>docs/standards/数据采集合并去重机制说明.md</code>（去重键）、
               <code>docs/standards/数据时间字段使用规范.md</code>（时区）、
               <code>docs/standards/数据源接入与缓存加速规范.md</code>（执行后失效缓存）。
               执行级别 <code>auto_level</code> / <code>requires_confirm</code> <b>一律取服务端返回值</b>，
-              前端不另立级别映射（避免「前端以为可点、后端按红线拦」）。</p>
+              前端不另立级别映射（避免「前端以为可点、后端按红线拦」）。
+              「文本异常」判据与**导入期留痕同源**（同一常量与白名单，见
+              <code>text_anomaly_rules.py</code>）：白名单列（投诉 problem / handle_detail，
+              多行是业务真实形态）不报换行；<code>remark</code> 类列含换行才报，交 AI 研判。</p>
             <p><b>不做什么（及原因）：</b></p>
             <ul>
               <li>❌ <b>不做一键治理全部</b>：批量执行不可逆动作 = 把红线交给一次误点，L2 必须逐条确认；</li>
@@ -341,6 +346,10 @@
         <div v-else class="dim mb-12">无量化证据（探测层未产出 metrics）</div>
 
         <div class="sec-title">③ 脱敏样本 samples（≤10 条，敏感字段已脱敏）</div>
+        <div v-if="detail.detector === 'text_anomaly'" class="dim mb-8">
+          样本值中的 <b>⏎</b> 表示换行符（否则看不出问题在哪）；<code>_length</code> 为值长度，
+          <code>_kind</code> 为该行命中的判据（newline=含换行 / near_limit=贴列宽上限）
+        </div>
         <el-table v-if="sampleColumns.length" :data="detail.samples" size="small" border max-height="260" class="mb-12">
           <el-table-column v-for="c in sampleColumns" :key="c" :prop="c" :label="c" min-width="110" show-overflow-tooltip />
         </el-table>
@@ -486,6 +495,7 @@ const DETECTOR_TEXT = {
   unique_index_dup: '唯一索引重复',
   row_count_jump: '行数突变',
   fk_orphan: '外键孤儿',
+  text_anomaly: '文本异常',
 }
 const STATUS_TEXT = {
   open: '待研判',

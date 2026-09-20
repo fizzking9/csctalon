@@ -52,6 +52,14 @@ from app.models.governance_finding import (
     SEVERITY_WARN,
     GovernanceFinding,
 )
+from app.services.text_anomaly_rules import (
+    KIND_NEAR_LIMIT,
+    KIND_NEWLINE,
+    display_value,
+    is_newline_allowed,
+    near_limit_threshold,
+    sql_predicates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -499,6 +507,134 @@ def run_d1_scan(db: Session, *, tables: list[str] | None = None,
     logger.info("governance D1 扫描完成: 候选 %s 个, 发现 %s 个, 落库 %s 个",
                 summary["scanned"], summary["found"], summary["persisted"])
     return summary
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# D4: 文本异常（工单 #168，设计 §3.1）
+#
+# 判据两类（与导入期**同源**，见 text_anomaly_rules）：
+#   ① 单元格内含换行 `col LIKE '%' || chr(10) || '%'`
+#   ② 长度贴近列宽上限 `length(col) >= character_maximum_length * 0.95`
+# 白名单 `NEWLINE_ALLOW_COLUMNS`（业务确需多行的列）由生产探测证据驱动，见 rules 模块注释。
+# 逐 `(表, 列)` 产 finding（target=列名），便于按列 dismiss 沉淀规则。
+# ═══════════════════════════════════════════════════════════════════════
+DETECTOR_TEXT_ANOMALY = "text_anomaly"
+
+# 列宽下限：只有 varchar(n≥200) 才扫描「贴上限」这一判据 —— 短列贴满上限很可能只是
+# 普通录入（如邮箱刚好 64 字符），没有「截断嫌疑」的语义；Text 列天然跳过。
+_ANOMALY_MIN_VARCHAR_LEN = 200
+
+# 命中行数 / 占比 → 原始严重度（v1 启发式，同 D1：最终以研判 verdict 为准）
+_ANOMALY_HIGH_ROWS = 100
+_ANOMALY_HIGH_RATIO = 0.05
+_ANOMALY_SAMPLE_LIMIT = 8
+
+
+def _anomaly_severity(rows: int, total: int) -> str:
+    ratio = rows / total if total else 0.0
+    return SEVERITY_HIGH if (rows >= _ANOMALY_HIGH_ROWS or ratio >= _ANOMALY_HIGH_RATIO) else SEVERITY_WARN
+
+
+def scan_text_anomaly(db: Session, *, tables: list[str] | None = None) -> list[dict]:
+    """D4 扫描：返回「含换行 或 贴列宽上限」的文本列 finding（不落库，纯探测）。
+
+    覆盖范围 = data_sources 登记的 active 业务表（与 D2 同一套 `_datasource_tables`）的
+    文本列。每个异常列产一条 finding，`metrics` 含命中行数/占比/类型/列宽。
+    """
+    findings: list[dict] = []
+    srcs = tables if tables is not None else _datasource_tables(db)
+
+    for table in srcs:
+        if not _table_exists(db, table):
+            continue
+        cols = db.execute(text(
+            "SELECT column_name, data_type, character_maximum_length "
+            "FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = :t "
+            "  AND data_type IN ('text', 'character varying')"
+        ), {"t": table}).mappings().all()
+        for c in cols:
+            col = c["column_name"]
+            col_max = c["character_maximum_length"]
+            # 判据同源（text_anomaly_rules.sql_predicates 逐条对应 kinds_of）
+            predicates = sql_predicates(f'"{col}"', col_max if col_max and col_max >= _ANOMALY_MIN_VARCHAR_LEN else None)
+            if not predicates:
+                continue
+            try:
+                total = db.execute(text(f'SELECT count(*) FROM "{table}"')).scalar() or 0
+                kinds, rows_union = [], 0
+                evidence: dict[str, int] = {}
+                for kind, cond in predicates:
+                    db.execute(text("SET LOCAL statement_timeout = '8s'"))
+                    n = int(db.execute(text(
+                        f'SELECT count(*) FROM (SELECT 1 FROM "{table}" WHERE {cond} LIMIT 2000) x'
+                    )).scalar() or 0)
+                    if n:
+                        kinds.append(kind)
+                        evidence[kind] = n
+                        rows_union = max(rows_union, n)  # 两种判据行数无交叉，取大者作 finding 规模
+                if not kinds:
+                    continue
+            except Exception as e:  # noqa: BLE001  单表/单列失败不影响其它
+                db.rollback()
+                logger.warning("governance D4: %s.%s 扫描失败, 跳过: %s", table, col, e)
+                continue
+
+            # 样本：含换行的值渲染为 ⏎（否则看不出问题在哪）；贴上限的给值 + 长度
+            sample_rows = []
+            try:
+                has_id = bool(db.execute(text(
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_name = :t AND column_name = 'id'"), {"t": table}).scalar())
+                pick = f'"{col}"' + (", id" if has_id else "")
+                if KIND_NEWLINE in kinds:
+                    cond, kind = f'"{col}" LIKE \'%\' || chr(10) || \'%\'', KIND_NEWLINE
+                else:
+                    cond, kind = f'length("{col}") >= {near_limit_threshold(col_max)}', KIND_NEAR_LIMIT
+                rows2 = db.execute(text(
+                    f'SELECT {pick} FROM "{table}" WHERE {cond} LIMIT :lim'
+                ), {"lim": _ANOMALY_SAMPLE_LIMIT}).mappings().all()
+                for rr in rows2:
+                    sample_rows.append({
+                        "column": col,
+                        "value": display_value(rr[col]),
+                        "_length": len(str(rr[col] or "")),
+                        "_kind": kind,
+                        **({"_id": rr["id"]} if has_id else {}),
+                    })
+            except Exception as e:  # noqa: BLE001  样本失败不阻塞 finding（证据降级而非丢弃）
+                db.rollback()
+                logger.warning("governance D4: %s.%s 样本采集失败: %s", table, col, e)
+
+            metrics = {
+                "hit_rows": rows_union,
+                "total_rows": int(total),
+                "ratio": round(rows_union / total, 6) if total else 0.0,
+                "kinds": kinds,
+                "column": col,
+                "col_max_len": col_max,
+            }
+            findings.append({
+                "detector": DETECTOR_TEXT_ANOMALY,
+                "table_name": table,
+                "target": f"{table}.{col}",
+                "severity_raw": _anomaly_severity(rows_union, total),
+                "metrics": metrics,
+                "samples": sample_rows,
+                "repro_sql": _text_anomaly_repro_sql(table, col, col_max),
+            })
+    return findings
+
+
+def _text_anomaly_repro_sql(table: str, col: str, col_max: int | None) -> str:
+    """复现 SQL：换行 / 贴上限 两类各一段（数字必须与 metrics 一致，同 D1 铁律）。"""
+    parts = []
+    t, c = f'"{table}"', f'"{col}"'
+    if not is_newline_allowed(col):
+        parts.append(f"SELECT count(*) FROM {t} WHERE {c} LIKE '%' || chr(10) || '%';\n")
+    if col_max and col_max >= _ANOMALY_MIN_VARCHAR_LEN:
+        parts.append(f"SELECT count(*) FROM {t} WHERE length({c}) >= {near_limit_threshold(col_max)};")
+    return "".join(parts)
 
 
 # ═══════════════════════════════════════════════════════════════════════

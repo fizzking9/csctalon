@@ -28,6 +28,7 @@ from app.models.base import IDMixin, TimestampMixin
 DETECTOR_UNIQUE_INDEX_DUP = "unique_index_dup"   # D1: 唯一索引重复（工单 #162）
 DETECTOR_ROW_COUNT_JUMP = "row_count_jump"       # D2: 表级行数突变（工单 #163）
 DETECTOR_FK_ORPHAN = "fk_orphan"                 # D3: 外键孤儿（工单 #163）
+DETECTOR_TEXT_ANOMALY = "text_anomaly"           # D4: 文本异常（换行/贴列宽上限，工单 #168）
 
 # ── status 值域（finding 生命周期）──────────────────────────
 FINDING_STATUS_OPEN = "open"          # 刚探测出，待研判

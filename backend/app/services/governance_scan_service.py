@@ -34,6 +34,7 @@ from app.core.database import SessionLocal
 from app.models.governance_finding import (
     DETECTOR_FK_ORPHAN,
     DETECTOR_ROW_COUNT_JUMP,
+    DETECTOR_TEXT_ANOMALY,
     DETECTOR_UNIQUE_INDEX_DUP,
 )
 from app.services.governance_detector import (
@@ -41,6 +42,7 @@ from app.services.governance_detector import (
     persist_findings,
     scan_fk_orphans,
     scan_row_count_jump,
+    scan_text_anomaly,
     scan_unique_index_dups,
 )
 from app.services.governance_judge_service import EVENT_JUDGE, judge_findings
@@ -75,6 +77,7 @@ def gather_findings(db: Session) -> tuple[list[dict], set[str]]:
         (DETECTOR_UNIQUE_INDEX_DUP, scan_unique_index_dups),
         (DETECTOR_ROW_COUNT_JUMP, scan_row_count_jump),
         (DETECTOR_FK_ORPHAN, scan_fk_orphans),
+        (DETECTOR_TEXT_ANOMALY, scan_text_anomaly),
     ):
         try:
             results += fn(db)

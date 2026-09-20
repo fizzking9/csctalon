@@ -24,6 +24,59 @@ ST_DISCARD = "discard"  # 人工明确不纳入
 SILENT_CATEGORIES = frozenset({"empty_template"})
 
 
+def add_suspect_row(
+    db: Session,
+    *,
+    data_type: str,
+    source: str,
+    reject_category: str,
+    reject_reason: str | None = None,
+    raw_row: dict | None = None,
+    business_key: str | None = None,
+    source_ref: str | None = None,
+    source_row_no: int | None = None,
+    limit: int | None = None,
+) -> IngestRejectedRow | None:
+    """导入期「可疑但**已入库**」的统一留痕入口（工单 #168，供 E2/E3 复用）。
+
+    与 `add_rejected_row` 的**分工**（写死，勿混）：
+      · `add_rejected_row`   —— 行**未采纳**（校验失败/重复跳过等），没进业务表
+      · `add_suspect_row`    —— 行**已采纳**，但某个字段值可疑（截断/换行/越界日期），
+                                进业务表的数据**一个字节都不改**，只多写一条留痕供人工判定
+
+    三条纪律（采集主路径上的改动）：
+      1. **不改入库数据**（本函数只写留痕行）
+      2. **不阻断采集**：任何失败只告警（savepoint 隔离，不污染调用方事务）
+      3. **有上限**：`limit` 非空时超出直接跳过（防海量噪音刷爆留痕表）
+
+    `limit` 由调用方按批次持有（如 upsert 的「每批 200 条」），本函数无跨调用状态。
+    """
+    try:
+        if limit is not None and limit <= 0:
+            return None
+        row = IngestRejectedRow(
+            data_type=data_type,
+            source=source,
+            source_ref=source_ref,
+            source_row_no=source_row_no,
+            reject_category=reject_category,
+            reject_reason=(reject_reason or "")[:500] or None,
+            raw_row=raw_row,
+            business_key=business_key,
+            status=ST_OPEN,
+        )
+        db.add(row)
+        db.flush()
+        return row
+    except Exception as e:  # noqa: BLE001  留痕失败不影响采集主流程
+        logger.warning(f"[ingest_rejected] 写可疑行留痕失败(忽略, 不影响入库): {e}")
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+
 def add_rejected_row(
     db: Session,
     *,

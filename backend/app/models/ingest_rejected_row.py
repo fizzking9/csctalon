@@ -34,7 +34,8 @@ class IngestRejectedRow(TimestampMixin, Base):
     source_row_no: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="源文件/批次内行号")
     reject_category: Mapped[str] = mapped_column(
         String(32), index=True, nullable=False,
-        comment="拒因分类: parse_fail/validate_fail/dup_skip/polluted/empty_template/reconcile_away",
+        comment="拒因分类: parse_fail/validate_fail/dup_skip/polluted/empty_template/reconcile_away/"
+                "dup_import/truncate_suspect/newline_suspect(后三类含 #168 导入期文本异常)",
     )
     reject_reason: Mapped[str | None] = mapped_column(Text, nullable=True, comment="人读原因描述")
     raw_row: Mapped[dict | None] = mapped_column(JSONB, nullable=True, comment="原始整行(列名→值)")

@@ -35,6 +35,7 @@ from app.api.deps import AdminUser, DBSession
 from app.models.governance_finding import (
     DETECTOR_FK_ORPHAN,
     DETECTOR_ROW_COUNT_JUMP,
+    DETECTOR_TEXT_ANOMALY,
     DETECTOR_UNIQUE_INDEX_DUP,
     GovernanceFinding,
 )
@@ -67,7 +68,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/governance", tags=["AI 数据治理"])
 
-DETECTORS = (DETECTOR_UNIQUE_INDEX_DUP, DETECTOR_ROW_COUNT_JUMP, DETECTOR_FK_ORPHAN)
+DETECTORS = (DETECTOR_UNIQUE_INDEX_DUP, DETECTOR_ROW_COUNT_JUMP, DETECTOR_FK_ORPHAN,
+             DETECTOR_TEXT_ANOMALY)
 _MAX_PAGE_SIZE = 200
 
 
