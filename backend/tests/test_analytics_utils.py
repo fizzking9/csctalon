@@ -266,19 +266,20 @@ def test_quality_include_cond_is_list():
 def test_quality_exclude_sql_delegates_to_gate():
     """统一入口在"无 quality 列"的旧环境必须返回 None(让调用方跳过条件, 不报错)"""
     import app.services.analytics as A
+    from app.services.analytics import cash as _cash  # 拆分后(issue #184)门控函数在 cash 子模块
 
     class _Dummy:
         pass
 
-    # 打桩: 模拟旧表无 quality_status 列
-    orig = A._manual_refunds_has_quality_col
+    # 打桩: 模拟旧表无 quality_status 列(须打在函数所在子模块全局, facade 只读不够)
+    orig = _cash._manual_refunds_has_quality_col
     try:
-        A._manual_refunds_has_quality_col = lambda db: False
+        _cash._manual_refunds_has_quality_col = lambda db: False
         assert A._quality_exclude_sql(_Dummy()) is None
-        A._manual_refunds_has_quality_col = lambda db: True
+        _cash._manual_refunds_has_quality_col = lambda db: True
         assert A._quality_exclude_sql(_Dummy()) == A._EXCL_QSTATUS_SQL
     finally:
-        A._manual_refunds_has_quality_col = orig
+        _cash._manual_refunds_has_quality_col = orig
 
 
 def test_no_scattered_gate_expressions():
@@ -291,11 +292,13 @@ def test_no_scattered_gate_expressions():
     仅允许出现在 _quality_exclude_sql 函数体内。语言级判定, 不受注释/文档字符串干扰。
     """
     import ast
-    import inspect
+    import pathlib
 
     import app.services.analytics as A
 
-    src = inspect.getsource(A)
+    # 拆分后(issue #184): 源码断言须扫 analytics 包全部子模块, 而非只读 facade __init__
+    pkg = pathlib.Path(A.__file__).parent
+    src = "\n".join(p.read_text(encoding="utf-8") for p in sorted(pkg.glob("*.py")))
     tree = ast.parse(src)
 
     # 记录唯一入口的函数体行号区间

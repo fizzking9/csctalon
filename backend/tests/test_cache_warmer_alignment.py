@@ -93,11 +93,14 @@ def test_staff_buckets_are_internally_consistent():
     回归: 2026-09-14 生产事故 —— 只给 CAT_BUCKETS 加了 `complaint`，
     `cat_data[bucket_key]` 直接 KeyError → 人效接口整体 500。
     """
+    import pathlib
     import re
 
     from app.services import analytics as A
 
-    src = inspect.getsource(A)
+    # 拆分后(issue #184): CAT_BUCKETS/cat_data 位于 today 子模块, 聚合全包源码供断言
+    pkg = pathlib.Path(A.__file__).parent
+    src = "\n".join(p.read_text(encoding="utf-8") for p in sorted(pkg.glob("*.py")))
     m = re.search(r"CAT_BUCKETS = \[(.*?)\n    \]", src, re.S)
     assert m, "未找到 CAT_BUCKETS"
     bucket_keys = re.findall(r'\("(\w+)",', m.group(1))

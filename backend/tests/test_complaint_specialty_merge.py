@@ -36,6 +36,16 @@ from app.services.analytics import (
 )
 
 
+def _pkg_src() -> str:
+    """拆分后(issue #184): 口径定义散落在 analytics 各子模块, 聚合全包源码供文本断言。"""
+    import pathlib
+
+    return "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted(pathlib.Path(A.__file__).parent.glob("*.py"))
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 1. 常量契约
 # ═══════════════════════════════════════════════════════════════════
@@ -68,7 +78,7 @@ class TestHistoricalImmutability:
         ★ 回归场景：若为"合并"把内部投诉的 3.0 改成 5.0，
         则 2026-09-01 之前的内部投诉工作全部按 5.0 重算 → 历史绩效虚高 67%。
         """
-        src = inspect.getsource(A)
+        src = _pkg_src()
         # 精确定位 today_staff_efficiency 内的 WEIGHT 字典
         assert '"内部投诉": 3.0' in src, "内部投诉系数被改动（历史会被重算）"
         assert '"外部投诉": 5.0' in src, "外部投诉系数被改动（历史会被重算）"
@@ -78,7 +88,7 @@ class TestHistoricalImmutability:
 
         若移除，历史区间这些人的得分算法会变。
         """
-        src = inspect.getsource(A)
+        src = _pkg_src()
         assert 'EXEMPT_CATEGORIES = {"内部投诉", "外部投诉", "退款挽回", COMPLAINT_SPECIALTY}' in src
 
 
@@ -88,13 +98,13 @@ class TestHistoricalImmutability:
 class TestNewSpecialtyWired:
     def test_in_weight_and_default_weight(self):
         """新专项必须在 WEIGHT 与 CAT_DEFAULT_WEIGHT（否则系数取不到 → 静默归零）。"""
-        src = inspect.getsource(A)
+        src = _pkg_src()
         assert "WEIGHT = {" in src and "COMPLAINT_SPECIALTY: COMPLAINT_SPECIALTY_WEIGHT" in src
         assert "CAT_DEFAULT_WEIGHT = {" in src
 
     def test_in_cat_buckets(self):
         """新专项必须有独立展示桶（否则人效表不显示该列）。"""
-        src = inspect.getsource(A)
+        src = _pkg_src()
         assert '(("complaint", COMPLAINT_SPECIALTY, {COMPLAINT_SPECIALTY}),' in src or \
                '("complaint", COMPLAINT_SPECIALTY, {COMPLAINT_SPECIALTY})' in src
 
@@ -109,7 +119,7 @@ class TestNewSpecialtyWired:
            其中 2 份是**硬编码元组**而非引用 WEIGHT —— 极易漏改。
            漏改的后果：该聚合路径下新专项的人 → 系数 None → 得分 0。
         """
-        src = inspect.getsource(A)
+        src = _pkg_src()
         # 统计带新专项的精确匹配语句出现次数（应为 3 处 _hr_map 全覆盖）
         n_hardcoded = src.count('"内部投诉", "外部投诉", COMPLAINT_SPECIALTY')
         assert n_hardcoded >= 2, f"硬编码元组仅 {n_hardcoded} 处含新专项（应有 2 处）"
@@ -140,7 +150,7 @@ class TestNewSpecialtyWired:
         """
         import re
 
-        src = inspect.getsource(A)
+        src = _pkg_src()
         # 提取 CAT_BUCKETS 的 key（元组第一项）
         m = re.search(r"CAT_BUCKETS = \[(.*?)\n    \]", src, re.S)
         assert m, "未找到 CAT_BUCKETS 定义"
@@ -190,7 +200,7 @@ class TestSemanticSeparation:
             "_person_position_map": inspect.getsource(A._person_position_map),
         }
         # 三份 _hr_map 均需检查（历史遗留复制，必须一致）
-        src_all = inspect.getsource(A)
+        src_all = _pkg_src()
         for i, chunk in enumerate(src_all.split("def _hr_map(")[1:], start=1):
             targets[f"_hr_map#{i}"] = chunk[:2000]
 
@@ -206,6 +216,6 @@ class TestSemanticSeparation:
         得到不同系数（= 口径漂移）。数量一旦变化（合并/新增），
         必须同步确认全部副本都已接入新专项。
         """
-        src = inspect.getsource(A)
+        src = _pkg_src()
         assert src.count("def _hr_map(") == 3, \
             "_hr_map 副本数量变化 → 请确认所有副本都已接入 COMPLAINT_SPECIALTY"
