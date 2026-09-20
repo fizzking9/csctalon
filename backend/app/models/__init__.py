@@ -49,6 +49,7 @@ from app.models.external_complaint import ExternalComplaint  # noqa: F401
 from app.models.external_token import ExternalAccessToken  # noqa: F401
 from app.models.gap_record import GapRecord  # noqa: F401
 from app.models.governance_finding import GovernanceFinding  # noqa: F401
+from app.models.governance_prompt import GovernancePrompt  # noqa: F401
 from app.models.governance_rule import GovernanceRule  # noqa: F401
 from app.models.group import Group, GroupLeadershipHistory, PersonGroupMembership  # noqa: F401
 from app.models.incident import Incident, IncidentFollowup  # noqa: F401
