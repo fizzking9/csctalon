@@ -55,20 +55,53 @@ def create_version(db: DBSession, user: AdminUser, payload: dict):
     return R(data=svc._dict(row), message=f"已新增版本 v{row.version}（未激活，需人工激活后生效）")
 
 
-@router.post("/{config_id}/activate", response_model=R, summary="激活提示词版本(admin)")
+@router.post("/{config_id}/activate", response_model=R, summary="激活提示词版本(admin, 金丝雀冒烟通过才激活)")
 def activate_version(db: DBSession, user: AdminUser, config_id: int,
-                     baseline: str | None = None):
-    """激活指定版本：同 code 旧生效自动取消，本行置生效。回滚=激活旧版本。"""
+                     smoke: bool = True, baseline: str | None = None):
+    """激活指定版本：金丝雀冒烟（LLM 非空返回）通过才激活，同 code 旧生效自动取消。
+
+    - smoke=True(默认): 先用候选提示词调一次 LLM；ok=False → 400 拒绝激活；
+      LLM 服务不可用(degraded) → 放行（不因基建故障阻塞版本管理）
+    - baseline: 未显式传时自动记「激活时命中率/live 占比(7d)」供防振荡参照
+    """
+    target = svc.get_version(db, config_id)
+    if target is None:
+        raise HTTPException(400, f"提示词版本不存在: {config_id}")
+    if smoke:
+        res = svc.canary_smoke(db, target["code"], target["content"])
+        if res.get("ok") is False:
+            raise HTTPException(400, f"金丝雀冒烟未通过，已拒绝激活: {res.get('error')}")
+        if res.get("ok") is None and res.get("degraded"):
+            logger.warning("金丝雀冒烟降级放行(LLM 服务不可用): code=%s err=%s",
+                           target["code"], res.get("error"))
+    if not baseline:
+        # 防振荡基线：激活时评估命中率/live 占比（近 7 天）
+        try:
+            from app.services.prompt_eval_service import build_summary
+            ov = build_summary(db, 7).get("overall", {})
+            baseline = f"hit_rate={ov.get('hit_rate')} live_ratio={ov.get('live_ratio')} (7d)"
+        except Exception as e:  # noqa: BLE001  基线取不到不阻塞激活
+            logger.warning("激活 %s 自动基线计算失败(忽略): %s", target["code"], e)
     try:
         row = svc.activate_version(db, user.id, config_id, baseline=baseline)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return R(data=row, message=f"版本 v{row['version']} 已生效")
+    msg = f"版本 v{row['version']} 已生效"
+    if smoke and res.get("ok") is None:
+        msg += "（金丝雀冒烟降级放行：LLM 服务未就绪）"
+    return R(data=row, message=msg)
 
 
-@router.post("/{config_id}/rollback", response_model=R, summary="回滚到指定版本(admin)")
-def rollback_version(db: DBSession, user: AdminUser, config_id: int):
-    """回滚 = 激活历史版本（不删当前版本行，账本完整）。"""
+@router.post("/{config_id}/rollback", response_model=R, summary="回滚到指定版本(admin, 金丝雀冒烟通过才回滚)")
+def rollback_version(db: DBSession, user: AdminUser, config_id: int, smoke: bool = True):
+    """回滚 = 激活历史版本（不删当前版本行）；同样先过金丝雀冒烟。"""
+    target = svc.get_version(db, config_id)
+    if target is None:
+        raise HTTPException(400, f"提示词版本不存在: {config_id}")
+    if smoke:
+        res = svc.canary_smoke(db, target["code"], target["content"])
+        if res.get("ok") is False:
+            raise HTTPException(400, f"金丝雀冒烟未通过，已拒绝回滚: {res.get('error')}")
     try:
         row = svc.rollback_to_version(db, user.id, config_id)
     except ValueError as e:

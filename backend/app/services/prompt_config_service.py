@@ -5,16 +5,20 @@
   无/异常/禁用 → 回退代码常量（提示词铁律，零回归）。
 - **版本管理**（admin）：list / create_new / activate / rollback，全部走
   prompt_configs 状态机，激活/回滚留痕（谁/何时/旧→新版本）。
+- **金丝雀冒烟**（#179）：激活/回滚前用新提示词调一次 LLM，非空返回才放行
+  （通过才激活）；LLM 服务不可用降级放行（不因基建故障阻塞版本管理），
+  激活时自动记基线（命中率/live 占比）供防振荡参照。
 
 设计说明（Design Rationale）
 - 目的：给 #176 自动迭代闭环提供「版本化提示词」的安全落点 —— 新增版本不覆盖旧行、
   激活切生效、回滚恢复旧版本，全程可审计。
 - 逻辑：`is_active` 部分唯一索引（每 code 至多一个生效版本）由模型承担；
   加载侧只读生效行；版本递增 = 复制当前生效行 content + version+1。
-- 取舍：激活/回滚不调 LLM、不自动触发金丝雀（金丝雀在 #179 单独做）；
-  本服务只负责「版本账本 + 生效切换」，保持单一职责。
+- 取舍：激活/回滚前的金丝雀冒烟调 LLM（通过才激活），但 LLM 服务不可用降级放行
+  （不因基建故障阻塞版本管理）；本服务不自动触发迭代（#176 由评估中心建议 + 人工拍板）。
 """
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -129,6 +133,55 @@ def activate_version(db: Session, user_id: int, config_id: int,
 def rollback_to_version(db: Session, user_id: int, config_id: int) -> dict:
     """回滚 = 激活历史版本（不删当前版本行，账本完整）。"""
     return activate_version(db, user_id, config_id)
+
+
+def get_version(db: Session, config_id: int) -> dict | None:
+    """按 id 取单版本（金丝雀冒烟/激活前取内容用）；不存在返回 None。"""
+    row = db.get(PromptConfig, config_id)
+    return None if row is None else _dict(row)
+
+
+# ── #179 金丝雀冒烟（激活/回滚前验证新提示词可用）────────────────────────
+async def _smoke_once(db: Session, code: str, content: str) -> str:
+    """用候选提示词调一次 LLM，返回生成文本（空 = 未通过）。
+
+    - gen_system: 最小业务问句（冒烟验证系统铁律能驱动正常作答）
+    - extract_system: 给一段最小草稿段落（冒烟验证摘取约束生效）
+    走实时默认 provider 链；timeout 90s 容忍冷加载。
+    """
+    from app.services import llm_client  # 函数内 import，避免模块环
+    if code == "gen_system":
+        user = "今日退款情况如何? 请按你的规则简要回答, 注明数据窗口。"
+    else:
+        user = ("问句: 今日退款情况如何?\n草稿段落: 今日退款总额 1000 元, 共 5 笔, 四路分布: A 3 笔 B 2 笔。\n"
+                "请按问句从段落摘取并排版输出, 禁止编造。")
+    result = await llm_client.chat_completion(
+        [{"role": "system", "content": content}, {"role": "user", "content": user}],
+        max_tokens=300, timeout_s=90.0, db=db, source="prompt_canary_smoke",
+    )
+    return str(result).strip()
+
+
+def canary_smoke(db: Session, code: str, content: str) -> dict:
+    """金丝雀冒烟（同步入口，内部 asyncio.run）。
+
+    返回:
+      {"ok": True, "sample": 前 120 字}      → 通过
+      {"ok": False, "error": 原因}          → 未通过（调用方必须拒绝激活）
+      {"ok": None, "error": 原因, "degraded": True}  → LLM 服务不可用（降级放行，前端提示）
+    """
+    if not (content or "").strip():
+        return {"ok": False, "error": "提示词内容为空"}
+    try:
+        out = asyncio.run(_smoke_once(db, code, content))
+    except asyncio.CancelledError:
+        return {"ok": False, "error": "冒烟测试被取消"}
+    except Exception as e:  # noqa: BLE001  基建故障降级放行，不阻塞版本管理
+        logger.warning("canary_smoke(%s) LLM 调用失败, 降级放行: %s", code, e)
+        return {"ok": None, "error": str(e), "degraded": True}
+    if not out:
+        return {"ok": False, "error": "LLM 返回空内容"}
+    return {"ok": True, "sample": out[:120]}
 
 
 def _dict(r: PromptConfig) -> dict:

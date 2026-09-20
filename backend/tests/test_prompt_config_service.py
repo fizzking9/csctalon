@@ -7,6 +7,7 @@
 - activate_version: 同 code 旧生效自动取消（部分唯一索引）/ 留痕
 - rollback_to_version: 回滚 = 激活历史版本（账本完整）
 - list_versions: 版本列表含生效标记
+- canary_smoke (#179): LLM 非空返回 → ok=True；空 → ok=False；LLM 异常 → degraded 降级放行
 
 注意: create/activate 会 commit（版本账本需持久留痕），跨用例残留用 _clean 清理，
 与 test_prompt_eval_service._clean_iterations 同款范式。
@@ -17,7 +18,9 @@ from sqlalchemy import text
 
 from app.services.prompt_config_service import (
     activate_version,
+    canary_smoke,
     create_new_version,
+    get_version,
     list_versions,
     load_effective_prompt,
     rollback_to_version,
@@ -147,3 +150,57 @@ def test_extract_and_gen_codes_independent(db):
     activate_version(db, 1, e1.id)
     assert load_effective_prompt(db, "extract_system") == _base_content("extract_system")
     assert load_effective_prompt(db, "gen_system") == _base_content("gen_system")
+
+
+def test_get_version_missing(db):
+    """不存在的版本 id → None（激活路由据此 400）。"""
+    assert get_version(db, 999999) is None
+
+
+# ── #179 金丝雀冒烟 ─────────────────────────────────────────
+def test_canary_smoke_ok(db, monkeypatch):
+    """LLM 正常返回 → ok=True（通过才激活）。"""
+    from app.services import llm_client
+
+    calls = {"n": 0}
+
+    async def fake_llm(messages, **_kw):
+        calls["n"] += 1
+        assert messages[0]["role"] == "system"
+        assert messages[0]["content"] == "新提示词内容"
+        return "今日退款: 共 5 笔, 金额 1000 元(窗口: 今日)"
+
+    monkeypatch.setattr(llm_client, "chat_completion", fake_llm)
+    res = canary_smoke(db, "gen_system", "新提示词内容")
+    assert res["ok"] is True and calls["n"] == 1
+    assert res["sample"]
+
+
+def test_canary_smoke_empty_output(db, monkeypatch):
+    """LLM 返回空 → ok=False（拒绝激活）。"""
+    from app.services import llm_client
+
+    async def fake_llm(*_a, **_kw):
+        return ""
+
+    monkeypatch.setattr(llm_client, "chat_completion", fake_llm)
+    res = canary_smoke(db, "gen_system", "新提示词内容")
+    assert res["ok"] is False and res["error"]
+
+
+def test_canary_smoke_degraded(db, monkeypatch):
+    """LLM 抛异常 → degraded（降级放行，不阻塞版本管理）。"""
+    from app.services import llm_client
+
+    async def boom(*_a, **_kw):
+        raise RuntimeError("LLM 服务不可用")
+
+    monkeypatch.setattr(llm_client, "chat_completion", boom)
+    res = canary_smoke(db, "extract_system", "新提示词内容")
+    assert res["ok"] is None and res["degraded"] is True
+
+
+def test_canary_smoke_empty_content(db):
+    """空内容 → ok=False（内容为空必拒）。"""
+    res = canary_smoke(db, "gen_system", "   ")
+    assert res["ok"] is False

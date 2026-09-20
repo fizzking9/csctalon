@@ -56,3 +56,24 @@ export function applyIteration(id) {
 export function createOpinion(payload) {
   return request.post('/admin/ai/prompt-eval/opinions', payload)
 }
+
+// ── 四、提示词版本管理（#178/#179：DB 化 + 金丝雀激活 + 一键回滚）────
+// 版本列表（按 code：gen_system=生成侧 / extract_system=摘取侧）
+export function listPromptConfigs(params) {
+  return request.get('/admin/ai/prompt-eval/prompt-configs', { params })
+}
+
+// 新增版本（version+1 不激活；content 空=以生效版为底先改后升）
+export function createPromptConfig(payload) {
+  return request.post('/admin/ai/prompt-eval/prompt-configs', payload)
+}
+
+// 激活版本（金丝雀冒烟通过才激活，smoke=false 可跳过；激活自动记基线）
+export function activatePromptConfig(id, params) {
+  return request.post(`/admin/ai/prompt-eval/prompt-configs/${id}/activate`, null, { params })
+}
+
+// 回滚到指定版本（= 激活旧版本，同样先过金丝雀冒烟）
+export function rollbackPromptConfig(id) {
+  return request.post(`/admin/ai/prompt-eval/prompt-configs/${id}/rollback`)
+}

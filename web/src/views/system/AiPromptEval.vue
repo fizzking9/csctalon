@@ -2,18 +2,26 @@
   ┌──────────────── 设计说明（Design Rationale） ────────────────────────────────┐
   │ 工单：#173（AI 提示词评估中心: 规则级+提示词段评估 + 半自动迭代）；             │
   │       #174（人工意见输入通道: 异常/不合理/业务深化，只记录不自动执行）          │
+  │       #178/#179（提示词版本管理: 两级提示词 DB 化 + 金丝雀激活 + 一键回滚）     │
   │ 性质：REQ（具体功能/集成）— 非元需求，不进 AGENTS.md 引用链                    │
   │ 范围：本页 = 「AI 与分析」分组下的**评估侧**入口                               │
+  │       区块7 = #178/#179 版本管理：两级提示词(生成侧/摘取侧)的版本账本 +         │
+  │       新建版本 + 金丝雀激活(LLM 冒烟通过才生效) + 一键回滚                      │
   │ 目的（替谁/答何决策）：admin 回答「AI 报告/提示词的命中链路健不健康？           │
   │       哪里在漏？要不要迭代、迭代成什么？」——把 #153 只落事务通知中心的           │
   │       健康报告升级为决策可见页面，并给出可执行路径。                            │
   │       人工意见区块（#174）：给 admin 一个留痕入口，记录对评估/分析结果的        │
   │       异常判断、不合理质疑、业务逻辑理解调整与深化意见——机器评估只认规则，      │
   │       业务直觉无处落账，会导致「看出来了但没记录、下次还要重新发现」。          │
+  │       版本管理区块（#178/#179）：给「迭代结果」一个安全落点 —— 提示词迭代不     │
+  │       覆盖代码常量（铁律），新版本入 DB 账本，金丝雀冒烟验证可用后才激活，       │
+  │       不满意一键回滚旧版本。                                                    │
   │ 逻辑（为何这样组织）：四区块按「先看总览 → 再看模板 → 再查跨链路 →             │
   │       再查规则」的排查顺序；问题优先（命中率最低排最上）；迭代建议走抽屉        │
   │       与各区块并列，避免淹没在数字里；人工意见作为页内区块放在迭代建议          │
   │       入口之前——它是「人补充评估」的输入口，与机器产出的建议并列而不是混入。   │
+  │       版本管理区块放最后——它是「评估→建议→确认→应用→生效」闭环的终点站，       │
+  │       看完评估结论再决定是否出新版/激活/回滚。                                  │
   │ 口径：窗口近 N 天北京时间(created_at AT TIME ZONE 'Asia/Shanghai')；            │
   │       命中率=(full+section)/本人私有问答数；模板命中率=窗口内 matched_count     │
   │       合计/快照数(快照级近似, 页面注明)；fp_ratio=误报/(执行+驳回+误报)；       │
@@ -26,6 +34,11 @@
   │   ❌ 新模板(new_template)只记建议不自动建——建模板需人工补 required_dimensions  │
   │   ❌ 人工意见只记录+采纳/不采纳跟踪，**不自动转执行**——自由文本不可靠，          │
   │      不自动解析、不改模板/规则；采纳仅打标记(confirmed)，跟进由人工后续落地      │
+  │   ❌ 版本管理**不自动激活新版本**（草稿制）——新建只入账本，金丝雀冒烟通过且      │
+  │      人工点「激活」才生效；激活/回滚自动记基线(命中率)供防振荡参照，但            │
+  │      不做自动回滚（需人工判断，避免提示词振荡）                                  │
+  │   ❌ 版本管理**不展示代码常量内容**——DB 无生效版本时页面注明「代码常量兜底」，    │
+  │      常量正文属代码资产（提示词铁律），不在页面编辑                                              │
   │ 设计文档：本文件头部注释块(代码层) + ⓘ 气泡(页面层) +                           │
   │           docs/design/AI提示词评估中心-20260920.md + review-checklist(审查层)   │
   └──────────────────────────────────────────────────────────────────────────────────┘
@@ -314,6 +327,112 @@
         </div>
       </el-card>
     </el-drawer>
+
+    <!-- ═══ 区块7：提示词版本管理（#178/#179） ═══ -->
+    <el-card shadow="never">
+      <template #header>
+        <div class="flex-between">
+          <span>提示词版本管理（生成侧 / 摘取侧 · 金丝雀激活 · 一键回滚）</span>
+          <div class="head-tools">
+            <el-button size="small" type="primary" :loading="verLoading" @click="loadVersions">刷新版本</el-button>
+            <el-button size="small" @click="openNewVersion">新建版本</el-button>
+            <el-popover placement="bottom-end" :width="440" trigger="click">
+              <template #reference>
+                <el-button size="small" :icon="InfoFilled" circle />
+              </template>
+              <div class="rationale">
+                <p><b>替谁：</b>admin。两级提示词（生成侧 <code>gen_system</code> / 摘取侧 <code>extract_system</code>）的版本账本与生效切换。</p>
+                <p><b>答何决策：</b>① 当前生成/摘取用哪个版本的提示词？② 新版提示词能不能安全上？③ 效果不满意怎么退回？</p>
+                <p><b>口径：</b>「生效版本」= DB <code>prompt_configs.is_active=TRUE</code> 的行（每 code 至多一个）；无生效版本时页面标注「代码常量兜底」（代码常量正文不在页面展示）。激活/回滚前走金丝雀冒烟（用候选提示词调一次 LLM，非空返回才放行）；LLM 服务不可用时降级放行并在结果里提示。激活自动记录基线（激活时近 7 天命中率/live 占比），存于版本行 <code>baseline</code> 字段供防振荡参照。「空」的含义：无任何版本 → 该 code 尚无 DB 行（仅 seed 未激活场景）。</p>
+                <p><b>取舍（不做什么）：</b></p>
+                <ul>
+                  <li>❌ 不自动激活新版本——新建只入账本（草稿），金丝雀冒烟通过且人工点「激活」才生效；</li>
+                  <li>❌ 不自动回滚——激活/回滚都需人工触发（避免提示词振荡，基线仅作参照）；</li>
+                  <li>❌ 不展示/编辑代码常量正文——常量属代码资产（提示词铁律），DB 生效优先、代码兜底；</li>
+                  <li>❌ 不做新老版本并行 A/B——生效指针唯一，切换即全量切换（回滚覆盖该诉求）。</li>
+                </ul>
+                <p><b>设计文档：</b>docs/design/AI提示词评估中心-20260920.md（#178/#179 演进）</p>
+              </div>
+            </el-popover>
+          </div>
+        </div>
+      </template>
+      <el-tabs v-model="verTab" @tab-change="loadVersions">
+        <el-tab-pane v-for="vc in VER_CODES" :key="vc.code" :name="vc.code">
+          <template #label>
+            <span>{{ vc.label }}</span>
+            <el-tag v-if="versionActive(vc.code)" size="small" type="success" style="margin-left: 6px">
+              v{{ activeVersion(vc.code)?.version }} 生效
+            </el-tag>
+            <el-tag v-else size="small" type="info" style="margin-left: 6px">代码常量兜底</el-tag>
+          </template>
+          <el-table :data="versionsByCode(vc.code)" size="small" empty-text="暂无版本">
+            <el-table-column label="版本" width="90">
+              <template #default="{ row }">v{{ row.version }}</template>
+            </el-table-column>
+            <el-table-column prop="name_cn" label="名称" min-width="150" show-overflow-tooltip />
+            <el-table-column label="状态" width="110">
+              <template #default="{ row }">
+                <el-tag :type="row.is_active ? 'success' : 'info'" size="small">
+                  {{ row.is_active ? '生效中' : '草稿/历史' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="baseline" label="激活基线(命中率/live)" min-width="150" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.baseline || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="激活人 / 时间" width="150">
+              <template #default="{ row }">
+                <span v-if="row.activated_at">{{ row.activated_by ?? '-' }} · {{ fmtTime(row.activated_at) }}</span>
+                <span v-else class="muted">未激活</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="200" fixed="right">
+              <template #default="{ row }">
+                <el-button size="small" @click="showVersionContent(row)">内容</el-button>
+                <el-button v-if="!row.is_active" size="small" type="primary"
+                           :loading="verActionId === row.id" @click="onActivate(row)">激活</el-button>
+                <template v-else>
+                  <el-button size="small" type="warning" :disabled="!prevVersion(row.code)"
+                             :loading="verActionId === row.id" @click="onRollback(row)">回滚到上一版</el-button>
+                </template>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+      </el-tabs>
+    </el-card>
+
+    <!-- 新建版本弹窗 -->
+    <el-dialog v-model="newVerDialog" title="新建提示词版本（草稿，不自动激活）" width="640px">
+      <div class="drawer-sub mb-12">
+        先改后升：默认预填当前生效版本内容；「内容」留空则复制生效版本为底。新版本入账本（version+1），
+        金丝雀冒烟通过 + 人工激活后才生效。代码常量兜底时留空将被拒绝（无生效版可复制）。
+      </div>
+      <el-form label-width="90px">
+        <el-form-item label="提示词">
+          <el-select v-model="newVerForm.code" size="small" style="width: 100%">
+            <el-option v-for="vc in VER_CODES" :key="vc.code" :label="vc.label" :value="vc.code" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="显示名">
+          <el-input v-model="newVerForm.name_cn" size="small" placeholder="可选，默认「{现有名} v{n}」" />
+        </el-form-item>
+        <el-form-item label="内容">
+          <el-input v-model="newVerForm.content" type="textarea" :rows="14"
+                    placeholder="提示词正文（可含 {{占位符}}）…" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button size="small" @click="newVerDialog = false">取消</el-button>
+        <el-button size="small" type="primary" :loading="creating" @click="submitNewVersion">保存为草稿</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 版本内容弹窗 -->
+    <el-dialog v-model="contentDialog" :title="contentTitle" width="640px">
+      <pre class="ver-content">{{ contentText }}</pre>
+    </el-dialog>
   </div>
 </template>
 
@@ -325,6 +444,7 @@ import {
   getPromptEvalSummary, getPromptEvalTemplates, getAnchorCheck,
   getPromptEvalRules, createSuggestions, listIterations,
   confirmIteration, applyIteration, createOpinion,
+  listPromptConfigs, createPromptConfig, activatePromptConfig, rollbackPromptConfig,
 } from '@/api/aiPromptEval'
 
 const days = ref(7)
@@ -338,6 +458,22 @@ const drawer = ref(false)
 const suggesting = ref(false)
 const submitting = ref(false)
 const opinionForm = ref({ content: '', category: 'other', target_name: '' })
+
+// ── #178/#179 提示词版本管理状态 ──
+const VER_CODES = [
+  { code: 'gen_system', label: '生成侧（_SYSTEM_PROMPT）' },
+  { code: 'extract_system', label: '摘取侧（_EXTRACT_SYSTEM）' },
+]
+const verTab = ref('gen_system')
+const verLoading = ref(false)
+const verActionId = ref(null)
+const verMap = ref({}) // code -> 版本列表
+const newVerDialog = ref(false)
+const creating = ref(false)
+const newVerForm = ref({ code: 'gen_system', name_cn: '', content: '' })
+const contentDialog = ref(false)
+const contentTitle = ref('')
+const contentText = ref('')
 
 // 人工意见分类（与后端 OPINION_CATEGORIES 一一对应，存 reason 字段）
 const OPINION_CATEGORIES = {
@@ -456,7 +592,108 @@ async function onApply(it) {
   await loadAll()
 }
 
-onMounted(loadAll)
+// ── #178/#179 提示词版本管理 ──
+function versionsByCode(code) {
+  return verMap.value[code] || []
+}
+function activeVersion(code) {
+  return versionsByCode(code).find(v => v.is_active) || null
+}
+function versionActive(code) {
+  return !!activeVersion(code)
+}
+// 生效版本的上一个版本（一键回滚目标）；无历史版本返回 null
+function prevVersion(code) {
+  const active = activeVersion(code)
+  if (!active) return null
+  const older = versionsByCode(code).filter(v => v.version < active.version)
+  if (!older.length) return null
+  return older.sort((a, b) => b.version - a.version)[0]
+}
+
+async function loadVersions() {
+  verLoading.value = true
+  try {
+    const [g, e] = await Promise.all([
+      listPromptConfigs({ code: 'gen_system' }),
+      listPromptConfigs({ code: 'extract_system' }),
+    ])
+    verMap.value = {
+      gen_system: g.data.items || [],
+      extract_system: e.data.items || [],
+    }
+  } finally {
+    verLoading.value = false
+  }
+}
+
+function openNewVersion() {
+  // 先改后升：预填当前生效版本内容作为编辑底稿
+  const active = activeVersion(newVerForm.value.code)
+  newVerForm.value = {
+    code: verTab.value,
+    name_cn: '',
+    content: active?.content ?? '',
+  }
+  newVerDialog.value = true
+}
+
+async function submitNewVersion() {
+  creating.value = true
+  try {
+    const res = await createPromptConfig({
+      code: newVerForm.value.code,
+      content: newVerForm.value.content?.trim() || undefined,
+      name_cn: newVerForm.value.name_cn?.trim() || undefined,
+    })
+    newVerDialog.value = false
+    ElMessage.success(res.message || `已新增版本 v${res.data.version}（草稿）`)
+    await loadVersions()
+  } finally {
+    creating.value = false
+  }
+}
+
+async function onActivate(row) {
+  // 激活前金丝雀冒烟由后端执行（LLM 非空返回才放行）；失败自动弹后端原因
+  verActionId.value = row.id
+  try {
+    const res = await activatePromptConfig(row.id, { smoke: true })
+    ElMessage.success(res.message || `版本 v${row.version} 已生效`)
+    await loadVersions()
+  } catch (e) {
+    // 拦截器已弹后端错误（含金丝雀冒烟未通过原因）
+  } finally {
+    verActionId.value = null
+  }
+}
+
+async function onRollback(row) {
+  // 一键回滚：激活生效版本的上一个版本（同样先过金丝雀冒烟）；当前版本行保留在账本中
+  const target = prevVersion(row.code)
+  if (!target) return
+  verActionId.value = target.id
+  try {
+    const res = await rollbackPromptConfig(target.id)
+    ElMessage.success(res.message || `已回滚到版本 v${target.version}`)
+    await loadVersions()
+  } catch (e) {
+    // 拦截器已弹错误
+  } finally {
+    verActionId.value = null
+  }
+}
+
+function showVersionContent(row) {
+  contentTitle.value = `${row.name_cn} · v${row.version}`
+  contentText.value = row.content || '（空）'
+  contentDialog.value = true
+}
+
+onMounted(() => {
+  loadAll()
+  loadVersions()
+})
 </script>
 
 <style scoped>
@@ -492,4 +729,5 @@ onMounted(loadAll)
 .opinion-tags { display: flex; gap: 6px; align-items: center; }
 .opinion-meta { font-size: 12px; color: #909399; }
 .opinion-content { font-size: 13px; line-height: 1.5; margin-top: 6px; }
+.ver-content { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.6; background: #f5f7fa; padding: 10px; border-radius: 4px; max-height: 60vh; overflow: auto; }
 </style>
