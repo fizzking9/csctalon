@@ -44,7 +44,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.governance_finding import (
+    CLOSABLE_STATUSES,
     DETECTOR_UNIQUE_INDEX_DUP,
+    FINDING_STATUS_AUTO_CLOSED,
     FINDING_STATUS_OPEN,
     SEVERITY_HIGH,
     SEVERITY_WARN,
@@ -440,6 +442,43 @@ def persist_findings(db: Session, findings: list[dict]) -> list[GovernanceFindin
     for row in saved:
         db.refresh(row)
     return saved
+
+
+def close_stale_findings(db: Session, *, detectors: set[str],
+                         seen_keys: set[tuple[str, str, str]]) -> list[GovernanceFinding]:
+    """重扫收敛（工单 #167）：把「本次**未再命中**」的 finding 置 auto_closed。
+
+    为什么需要它（#163 遗留的判据漂移）：`persist_findings` 只刷新不关闭 —— 判据/阈值
+    变更、或问题自行消失后，旧 finding 会永远挂在 `open`（生产实证：同一复发问题被
+    每日体检反复报成新行，旧行无人处置）。本函数让体检具备「收敛」语义。
+
+    三条纪律（缺一即误关）：
+    1. **只收敛本次成功执行的探测器**：`detectors` 只含跑通（未抛错）的探测器。
+       某探测器失败时其历史 finding 一律不动 —— 否则一次探测失败会误关全部历史 finding。
+    2. **只收敛本次未再命中的键**：`seen_keys` = 本次落库的全部 (detector, 表, 目标)，
+       仍在命中者保持原状（由 persist_findings 刷新证据）。
+    3. **只收敛可处置状态**（`CLOSABLE_STATUSES` = open/judged）：终态
+       ignored/resolved/auto_closed 不再动（ignored 是人工裁定、resolved 有执行凭证）。
+
+    语义边界：auto_closed ≠ resolved —— 前者是「不再命中」（可能问题消失，也可能判据变更），
+    **没有执行过任何治理动作**；后者才表示已执行动作并核销。
+    """
+    if not detectors:
+        return []
+    rows = db.query(GovernanceFinding).filter(
+        GovernanceFinding.detector.in_(sorted(detectors)),
+        GovernanceFinding.status.in_(CLOSABLE_STATUSES),
+    ).all()
+    closed = [f for f in rows if (f.detector, f.table_name, f.target) not in seen_keys]
+    for f in closed:
+        f.status = FINDING_STATUS_AUTO_CLOSED
+    if closed:
+        db.commit()
+        for f in closed:
+            db.refresh(f)
+        logger.info("governance 重扫收敛: %s 条 finding 不再命中 → auto_closed: %s",
+                    len(closed), [f.id for f in closed])
+    return closed
 
 
 def run_d1_scan(db: Session, *, tables: list[str] | None = None,

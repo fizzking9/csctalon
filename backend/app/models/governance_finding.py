@@ -34,6 +34,10 @@ FINDING_STATUS_OPEN = "open"          # 刚探测出，待研判
 FINDING_STATUS_JUDGED = "judged"      # 已研判（verdict 已回填），待处置
 FINDING_STATUS_RESOLVED = "resolved"  # 已执行治理动作并核销
 FINDING_STATUS_IGNORED = "ignored"    # 人工裁定「非问题」（并沉淀为规则）
+FINDING_STATUS_AUTO_CLOSED = "auto_closed"  # 重扫不再命中 → 自动收敛（**未执行任何动作**，见 #167）
+
+# 重扫收敛时允许被自动关闭的状态（终态 ignored/resolved/auto_closed 不再动）
+CLOSABLE_STATUSES = (FINDING_STATUS_OPEN, FINDING_STATUS_JUDGED)
 
 # ── verdict 值域（研判结论）────────────────────────────────
 VERDICT_REAL_ISSUE = "real_issue"                  # 真问题
@@ -83,7 +87,8 @@ class GovernanceFinding(IDMixin, TimestampMixin, Base):
     )
     status: Mapped[str] = mapped_column(
         String(16), index=True, nullable=False, default=FINDING_STATUS_OPEN,
-        comment="生命周期: open(待研判)/judged(已研判)/resolved(已治理)/ignored(裁定非问题)",
+        comment="生命周期: open(待研判)/judged(已研判)/resolved(已治理)/ignored(裁定非问题)"
+                "/auto_closed(重扫不再命中, 自动收敛)",
     )
 
     # ── 研判层产物（工单 #164 回填；本工单只建字段）──

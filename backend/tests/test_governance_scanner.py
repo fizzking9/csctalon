@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""治理框架 D2/D3 探测器 + 体检编排测试 (工单 #163)
+"""治理框架 D2/D3 探测器 + 体检编排测试 (工单 #163；重扫收敛/自动研判 = 工单 #167)
 
-覆盖 `governance_detector.scan_row_count_jump` / `scan_fk_orphans` 及
-`governance_scan_service.run_full_scan`（编排 + findings 落库 + system_events 留痕）：
+覆盖 `governance_detector.scan_row_count_jump` / `scan_fk_orphans` / `close_stale_findings`
+及 `governance_scan_service.run_full_scan`（编排 + findings 落库 + 收敛 + system_events 留痕）：
 
 - D2 正/反例：本期 vs 上期窗口行数增幅/跳水超阈值 → 检出；平稳波动 → 不检出。
 - D3 正/反例：引用列非空但父表无对应主键 → 检出孤儿；无孤儿 → 不检出。
-- 编排：run_full_scan 落 findings + system_events(category=ai_governance)。
+- 编排：run_full_scan 落 findings + 重扫收敛 + system_events(category=ai_governance)。
+- 收敛（#167）：本次未再命中 → auto_closed；仍命中/探测器未跑通/终态 → 不动。
+- 低峰自动研判（#167）：judge_idle 当日语义（当日只跑一次）。
 
 临时表 + FK + data_sources 注册均在事务内（db fixture 结束回滚），不污染测试库。
 D2 时间依赖 `_now_cn()`，用 monkeypatch 注入固定北京时间。
@@ -19,9 +21,18 @@ import pytest
 from sqlalchemy import text
 
 from app.models.data_source import DataSource
+from app.models.governance_finding import (
+    FINDING_STATUS_AUTO_CLOSED,
+    FINDING_STATUS_IGNORED,
+    FINDING_STATUS_JUDGED,
+    FINDING_STATUS_OPEN,
+    FINDING_STATUS_RESOLVED,
+    GovernanceFinding,
+)
 from app.services.governance_detector import (
     DETECTOR_FK_ORPHAN,
     DETECTOR_ROW_COUNT_JUMP,
+    close_stale_findings,
     scan_fk_orphans,
     scan_row_count_jump,
 )
@@ -311,3 +322,136 @@ def test_run_full_scan_persists_and_audits(_engine):
             s.execute(text(f"DROP TABLE IF EXISTS {child}"))
             s.execute(text(f"DROP TABLE IF EXISTS {parent}"))
             s.commit()
+
+
+# ─────────────────────────────────────────────────────────────
+# 重扫收敛 + 低峰自动研判（工单 #167）
+# ─────────────────────────────────────────────────────────────
+def _mk_finding(db, *, detector: str, table: str, target: str = "ts",
+                status: str = FINDING_STATUS_OPEN):
+    """直接造一条历史 finding（模拟上一轮体检的产出）。"""
+    f = GovernanceFinding(
+        detector=detector, table_name=table, target=target, severity_raw="warn",
+        metrics={"growth_ratio": 1.66}, samples=[], repro_sql="SELECT 1",
+        detected_at=_dt.datetime.now(_dt.timezone.utc), status=status,
+    )
+    db.add(f)
+    db.flush()
+    return f
+
+
+def test_close_stale_closes_unseen_finding(db):
+    """本次未再命中 → 置 auto_closed（open/judged 均可收敛）。"""
+    t = _uniq("gov_stale")
+    f_open = _mk_finding(db, detector=DETECTOR_ROW_COUNT_JUMP, table=t)
+    f_judged = _mk_finding(db, detector=DETECTOR_ROW_COUNT_JUMP, table=t, target="ts2",
+                           status=FINDING_STATUS_JUDGED)
+
+    closed = close_stale_findings(
+        db, detectors={DETECTOR_ROW_COUNT_JUMP},
+        seen_keys={(DETECTOR_ROW_COUNT_JUMP, "别的表", "ts")},
+    )
+    ids = {f.id for f in closed}
+    assert {f_open.id, f_judged.id} <= ids
+    assert f_open.status == FINDING_STATUS_AUTO_CLOSED
+    assert f_judged.status == FINDING_STATUS_AUTO_CLOSED
+    # 语义边界：auto_closed ≠ resolved（未执行任何治理动作）
+    assert f_open.status != FINDING_STATUS_RESOLVED
+
+
+def test_close_stale_keeps_seen_and_failed_detector(db):
+    """仍在命中者不动；**未跑通**的探测器下的 finding 一律不动（防探测失败误关）。"""
+    t = _uniq("gov_seen")
+    f_seen = _mk_finding(db, detector=DETECTOR_ROW_COUNT_JUMP, table=t)
+    f_failed = _mk_finding(db, detector=DETECTOR_FK_ORPHAN, table=t)
+
+    closed = close_stale_findings(
+        db, detectors={DETECTOR_ROW_COUNT_JUMP},  # fk_orphan 未跑通 → 不参与收敛
+        seen_keys={(DETECTOR_ROW_COUNT_JUMP, t, "ts")},
+    )
+    assert closed == []
+    assert f_seen.status == FINDING_STATUS_OPEN
+    assert f_failed.status == FINDING_STATUS_OPEN
+
+
+def test_close_stale_skips_terminal_statuses(db):
+    """终态（ignored/resolved/auto_closed）不收敛 —— 人工裁定与执行凭证不得被覆盖。"""
+    t = _uniq("gov_term")
+    rows = [
+        _mk_finding(db, detector=DETECTOR_ROW_COUNT_JUMP, table=t, target=f"t{i}",
+                    status=st)
+        for i, st in enumerate((FINDING_STATUS_IGNORED, FINDING_STATUS_RESOLVED,
+                                FINDING_STATUS_AUTO_CLOSED))
+    ]
+    closed = close_stale_findings(db, detectors={DETECTOR_ROW_COUNT_JUMP}, seen_keys=set())
+    assert closed == []
+    assert [r.status for r in rows] == [
+        FINDING_STATUS_IGNORED, FINDING_STATUS_RESOLVED, FINDING_STATUS_AUTO_CLOSED,
+    ]
+
+
+def test_close_stale_no_detector_runs_nothing(db):
+    """三个探测器全失败（detectors 为空）→ 不收敛任何东西。"""
+    f = _mk_finding(db, detector=DETECTOR_ROW_COUNT_JUMP, table=_uniq("gov_nod"))
+    assert close_stale_findings(db, detectors=set(), seen_keys=set()) == []
+    assert f.status == FINDING_STATUS_OPEN
+
+
+def test_run_full_scan_auto_closes_stale_and_audits(_engine):
+    """编排层：体检后收敛不再命中的 finding，且 system_events detail 含 auto_closed 明细。"""
+    from sqlalchemy.orm import Session
+
+    stale_tbl = _uniq("gov_stale_scan")
+    with Session(_engine) as s:
+        base_find = s.execute(text("SELECT coalesce(max(id),0) FROM governance_findings")).scalar()
+        base_ev = s.execute(text("SELECT coalesce(max(id),0) FROM system_events")).scalar()
+        try:
+            # 造一条「上一轮报出、本轮不会再命中」的 finding（表未注册 data_sources，
+            # D2 不会扫到它 → 本轮必然未命中）
+            stale = _mk_finding(s, detector=DETECTOR_ROW_COUNT_JUMP, table=stale_tbl)
+            s.commit()
+            stale_id = stale.id
+
+            result = run_full_scan(s)
+            assert result["status"] == "success"
+            assert stale_id in result["auto_closed"], "不再命中的 finding 应被收敛"
+
+            row = s.execute(text("SELECT status FROM governance_findings WHERE id = :i"),
+                            {"i": stale_id}).scalar()
+            assert row == FINDING_STATUS_AUTO_CLOSED
+
+            detail = s.execute(text(
+                "SELECT detail FROM system_events WHERE id > :b AND action='governance_scan' "
+                "ORDER BY id DESC LIMIT 1"
+            ), {"b": base_ev}).scalar()
+            assert '"auto_closed"' in detail and str(stale_id) in detail
+        finally:
+            s.rollback()
+            s.execute(text("DELETE FROM governance_findings WHERE id > :b"), {"b": base_find})
+            s.execute(text("DELETE FROM system_events WHERE id > :b"), {"b": base_ev})
+            s.commit()
+
+
+def test_judge_idle_runs_once_per_day(db, monkeypatch):
+    """低峰自动研判：当日首次调用真研判，已研判过（有当日事件）则跳过。"""
+    from app.services import governance_scan_service as gss
+    from app.services.system_event_service import record_system_event
+
+    calls: list[dict] = []
+
+    def _fake_judge(*args, **kw):
+        calls.append(kw)
+        return {"status": "success", "judged": 0}
+
+    monkeypatch.setattr(gss, "judge_findings", _fake_judge)
+
+    out = gss.judge_idle(db)
+    assert out["status"] == "success" and len(calls) == 1
+
+    # 当日已有 governance_judge 事件 → 当日语义生效，不再研判
+    record_system_event(db, category="ai_governance", action="governance_judge",
+                        title="t", status="success", commit=False)
+    db.flush()
+    out2 = gss.judge_idle(db)
+    assert out2 == {"skipped": "done_today"}
+    assert len(calls) == 1, "当日已研判过不应再调用"
