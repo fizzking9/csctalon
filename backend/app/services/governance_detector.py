@@ -479,6 +479,15 @@ DETECTOR_ROW_COUNT_JUMP = "row_count_jump"
 _D2_WINDOW_DAYS = 7          # 对比窗口长度（自然日）
 _D2_RATIO_THRESHOLD = 1.5    # 本期/上期 ≥ 1.5 → 增长异常
 _D2_DROP_THRESHOLD = 0.5     # 本期/上期 ≤ 0.5 → 跳水异常（整批缺失）
+# 绝对量下限：两窗口的最大行数低于此值直接跳过。
+# 为什么必须要有（2026-09-20 生产首次体检实证）：只有比值没有绝对量，
+# 「2 → 6」「1 → 15」这类**个位数波动**会被判成 3 倍/15 倍增长 —— 对
+# `card_complaints`(投诉登记)、`device_tags`(标签字典) 这种低频/配置表，
+# 绝对量小、比值天然剧烈，纯比值判据会持续产出噪音（人工核验 3 条里 2 条是噪音）。
+_D2_MIN_ABS_ROWS = 20
+# 报 high 还需**绝对变化量**达标：否则「25 → 50」这种小表 2 倍也会被标 high，
+# 严重度虚高会让真正的量变（数千行级）淹没在告警里。
+_D2_HIGH_ABS_DELTA = 100
 
 
 def _now_cn() -> _dt.datetime:
@@ -600,6 +609,10 @@ def scan_row_count_jump(db: Session, *, window_days: int = _D2_WINDOW_DAYS,
             logger.warning("governance D2: 表 %s 统计失败, 跳过: %s", table, e)
             continue
 
+        # 绝对量下限：低频/配置表（投诉登记、标签字典）个位数波动比值天然剧烈 → 噪音，跳过
+        if max(cur, prev) < _D2_MIN_ABS_ROWS:
+            continue
+
         # 增幅/跳水判定（prev=0 且 cur>0 视为「从无到有」= 增长异常边界）
         if prev > 0:
             ratio = cur / prev
@@ -629,9 +642,11 @@ def scan_row_count_jump(db: Session, *, window_days: int = _D2_WINDOW_DAYS,
             db.rollback()
             metrics["curve"] = []
 
-        # 严重度：从无到有、或增幅翻倍以上 → high；否则 warn（仅参考，最终以研判为准）
+        # 严重度：从无到有 → high；否则需**比值翻倍 且 绝对变化量达标**（仅参考，最终以研判为准）
         is_high = (metrics["gap_kind"] == "growth_from_zero"
-                   or (metrics["growth_ratio"] is not None and metrics["growth_ratio"] >= 2.0))
+                   or (metrics["growth_ratio"] is not None
+                       and metrics["growth_ratio"] >= 2.0
+                       and abs(metrics["cur_rows"] - metrics["prev_rows"]) >= _D2_HIGH_ABS_DELTA))
         findings.append({
             "detector": DETECTOR_ROW_COUNT_JUMP,
             "table_name": table,

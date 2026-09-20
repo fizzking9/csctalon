@@ -80,6 +80,50 @@ def test_d2_detects_growth(db, patch_now):
     assert f["metrics"]["growth_ratio"] >= 10.0
     assert "curve" in f["metrics"]  # 按日曲线
     assert len(f["samples"]) == 2
+    # 严重度：比值 14 倍但绝对变化量 91 < 100 → 仅 warn（严重度需绝对量达标）
+    assert f["severity_raw"] == "warn"
+
+
+def test_d2_low_volume_noise_skipped(db, patch_now):
+    """绝对量过小（个位数波动）不检出 —— 生产首次体检的噪音回归。
+
+    实证：`card_complaints` 2→6（3 倍）、`device_tags` 1→15（15 倍）被纯比值判据报成
+    high，人工核验均为噪音（低频/配置表，绝对量小、比值天然剧烈）。
+    本用例锁定：`max(cur,prev) < _D2_MIN_ABS_ROWS(20)` 一律跳过。
+    """
+    tbl, code = _uniq("gov_d2_noise"), _uniq("ds")
+    db.execute(text(f"CREATE TABLE {tbl} (id bigserial PRIMARY KEY, ts timestamptz)"))
+    _reg_datasource(db, tbl, "ts", code)
+    # 上期 1 行、本期 15 行（15 倍，但绝对量 < 20）
+    db.execute(text(f"INSERT INTO {tbl} (ts) VALUES (:t)"),
+               {"t": _dt.datetime(2026, 9, 10, 12, 0, tzinfo=_dt.timezone.utc)})
+    for _ in range(15):
+        db.execute(text(f"INSERT INTO {tbl} (ts) VALUES (:t)"),
+                   {"t": _dt.datetime(2026, 9, 16, 12, 0, tzinfo=_dt.timezone.utc)})
+    db.flush()
+
+    findings = scan_row_count_jump(db, tables=[tbl], window_days=7)
+    assert findings == [], f"个位数波动(1→15)应被绝对量下限挡掉, 实际 {len(findings)}"
+
+
+def test_d2_high_severity_requires_abs_delta(db, patch_now):
+    """比值翻倍但绝对变化量 < 100 → 只报 warn，不报 high（防严重度虚高）。"""
+    tbl, code = _uniq("gov_d2_sev"), _uniq("ds")
+    db.execute(text(f"CREATE TABLE {tbl} (id bigserial PRIMARY KEY, ts timestamptz)"))
+    _reg_datasource(db, tbl, "ts", code)
+    # 上期 25 行、本期 75 行 → ratio 3.0（>=2），但绝对变化量 50 < 100
+    for _ in range(25):
+        db.execute(text(f"INSERT INTO {tbl} (ts) VALUES (:t)"),
+                   {"t": _dt.datetime(2026, 9, 10, 12, 0, tzinfo=_dt.timezone.utc)})
+    for _ in range(75):
+        db.execute(text(f"INSERT INTO {tbl} (ts) VALUES (:t)"),
+                   {"t": _dt.datetime(2026, 9, 16, 12, 0, tzinfo=_dt.timezone.utc)})
+    db.flush()
+
+    findings = scan_row_count_jump(db, tables=[tbl], window_days=7)
+    assert len(findings) == 1
+    assert findings[0]["metrics"]["growth_ratio"] == 3.0
+    assert findings[0]["severity_raw"] == "warn", "绝对变化量 50 < 100 不应报 high"
 
 
 def test_d2_no_find_on_flat(db, patch_now):
