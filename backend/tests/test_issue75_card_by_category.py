@@ -133,8 +133,10 @@ class TestCardByCategory:
         同时只检查注释里是否还残留**指向性**说法（"见 xxx" 形式）。
         """
         import pathlib
-        src = pathlib.Path(__file__).resolve().parents[1] / "app" / "api" / "v1" / "complaints.py"
-        lines = src.read_text(encoding="utf-8").splitlines()
+        # 拆分后(issue #184): complaints.py → complaints/ 包, 聚合全包源码供断言
+        pkg = pathlib.Path(__file__).resolve().parents[1] / "app" / "api" / "v1" / "complaints"
+        src = "\n".join(p.read_text(encoding="utf-8") for p in sorted(pkg.glob("*.py")))
+        lines = src.splitlines()
         # 只扫注释行, 且排除已显式声明为"死引用"的说明行（那是修复记录, 不是引用）
         bad = []
         for ln in lines:
