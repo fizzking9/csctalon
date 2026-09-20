@@ -1,6 +1,6 @@
 """AI 数据治理 · 体检编排服务 (工单 #163, 设计 §四/§九；重扫收敛 + 自动研判 = 工单 #167)
 
-把 D1/D2/D3 探测器串成一次「数据体检」：
+把 D1~D5 探测器串成一次「数据体检」：
   1. 批量跑探测器（各自产 findings，不落库）
   2. 统一落 `governance_findings`（幂等去重：同 detector+表+目标 未处置时刷新证据）
   3. **重扫收敛**（#167）：本次未再命中的 open/judged finding → `auto_closed`
@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
 from app.models.governance_finding import (
     DETECTOR_FK_ORPHAN,
+    DETECTOR_IMPOSSIBLE_DATE,
     DETECTOR_ROW_COUNT_JUMP,
     DETECTOR_TEXT_ANOMALY,
     DETECTOR_UNIQUE_INDEX_DUP,
@@ -41,6 +42,7 @@ from app.services.governance_detector import (
     close_stale_findings,
     persist_findings,
     scan_fk_orphans,
+    scan_impossible_dates,
     scan_row_count_jump,
     scan_text_anomaly,
     scan_unique_index_dups,
@@ -63,7 +65,7 @@ def _now_cn() -> _dt.datetime:
 
 
 def gather_findings(db: Session) -> tuple[list[dict], set[str]]:
-    """批量跑 D1/D2/D3，返回 (全部 findings, 本次**跑通**的探测器集合)。
+    """批量跑 D1/D2/D3/D4/D5，返回 (全部 findings, 本次**跑通**的探测器集合)。
 
     各探测器内部已做单表容错（失败跳过该表、不阻塞）。编排层再包一层：
     整体失败不阻塞留痕（能找到多少算多少）。
@@ -78,6 +80,7 @@ def gather_findings(db: Session) -> tuple[list[dict], set[str]]:
         (DETECTOR_ROW_COUNT_JUMP, scan_row_count_jump),
         (DETECTOR_FK_ORPHAN, scan_fk_orphans),
         (DETECTOR_TEXT_ANOMALY, scan_text_anomaly),
+        (DETECTOR_IMPOSSIBLE_DATE, scan_impossible_dates),
     ):
         try:
             results += fn(db)

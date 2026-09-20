@@ -34,6 +34,7 @@ from sqlalchemy import func, select
 from app.api.deps import AdminUser, DBSession
 from app.models.governance_finding import (
     DETECTOR_FK_ORPHAN,
+    DETECTOR_IMPOSSIBLE_DATE,
     DETECTOR_ROW_COUNT_JUMP,
     DETECTOR_TEXT_ANOMALY,
     DETECTOR_UNIQUE_INDEX_DUP,
@@ -69,7 +70,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/governance", tags=["AI 数据治理"])
 
 DETECTORS = (DETECTOR_UNIQUE_INDEX_DUP, DETECTOR_ROW_COUNT_JUMP, DETECTOR_FK_ORPHAN,
-             DETECTOR_TEXT_ANOMALY)
+             DETECTOR_TEXT_ANOMALY, DETECTOR_IMPOSSIBLE_DATE)
 _MAX_PAGE_SIZE = 200
 
 
@@ -251,10 +252,16 @@ def get_finding(finding_id: int, db: DBSession, _: AdminUser):
 
 @router.post("/findings/{finding_id}/confirm", response_model=R, summary="人工确认（L2 执行前置）")
 def confirm(finding_id: int, payload: dict | None = None, *, db: DBSession, user: AdminUser):
-    """确认 AI 建议（设计 §六 L2 前置）。payload: {note?}"""
+    """确认 AI 建议（设计 §六 L2 前置）。
+
+    payload: `{note?, params?}`。`params` 允许人工**覆盖 AI 给出的动作参数**
+    （如 `fix_time` 的 `updates` 清单）—— 覆盖内容记入 `execute_result`，
+    **不修改 `suggestion`**（AI 产物与人工决策分离，可追溯「AI 建议了什么、人改成了什么」）。
+    """
+    body = payload or {}
     try:
         data = confirm_finding(db, finding_id, operator=user.username,
-                               note=(payload or {}).get("note"))
+                               note=body.get("note"), params=body.get("params"))
     except ExecuteError as e:
         raise HTTPException(400, str(e))
     return R(data=data, message="已确认")

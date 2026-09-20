@@ -45,6 +45,7 @@ from sqlalchemy.orm import Session
 
 from app.models.governance_finding import (
     CLOSABLE_STATUSES,
+    DETECTOR_IMPOSSIBLE_DATE,
     DETECTOR_UNIQUE_INDEX_DUP,
     FINDING_STATUS_AUTO_CLOSED,
     FINDING_STATUS_OPEN,
@@ -52,6 +53,7 @@ from app.models.governance_finding import (
     SEVERITY_WARN,
     GovernanceFinding,
 )
+from app.services import date_anomaly_rules as _date_rules
 from app.services.text_anomaly_rules import (
     KIND_NEAR_LIMIT,
     KIND_NEWLINE,
@@ -997,3 +999,416 @@ def build_d3_repro_sql(child: str, parent: str, child_cols: list[str],
         f'WHERE {nonnull}\n'
         f'  AND NOT EXISTS (SELECT 1 FROM "{parent}" p WHERE {join_on});'
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# D5: 不可能日期（工单 #169，设计 §3.2）
+#
+# 「解析成功但语义错误」的日期没人管 —— `_to_datetime` 只把**无法解析**的判 None，
+# 而 `1900-01-01` / `2099-12-31` / 未来日期 / 完成早于创建 这些「合法但不可能」的值
+# 会原样入库，污染按日统计与时间窗口。
+#
+# 四类判据（阈值/枚举/白名单的唯一来源 = `date_anomaly_rules`，与导入期同源）：
+#   A 年份越界（`MIN_YEAR ~ 当前年+1`）  B 未来日期（> 今天 + 1 天容差）
+#   C 时间倒挂（完成列 < 创建列，列对按阶段序推断）  D 兜底值聚集（占比 ≥ 0.30 且形如兜底值）
+#
+# 覆盖范围 = `data_sources` 登记的 active 业务表的**日期列**（同 D4 的取表口径），
+# 逐 `(表, 时间列)` 产一条 finding（target=`表.列`，同 D4，便于按列 dismiss 沉淀规则）。
+#
+# ⚠️ 两处排除（都是**处置无效**或**必误报**，不是图省事）：
+#   1. 系统审计列（created_at/updated_at/synced_at/fetched_at/matched_at）——
+#      记的是本系统写入/同步时刻，不是业务事实；错也是本系统时钟问题，不是上游数据错。
+#   2. 物化宽表（refund_wide/cash_flow_wide）—— 派生表，值是从源表拷来的，
+#      报了是重复报（同一坏值报两次），而且**改了会被下次重建覆盖**（处置无效）。
+#
+# ⚠️ 判据 C 用**北京日期**比较（不是原始时间戳）：跨天倒挂才是数据矛盾，
+#    同日内分钟级时差多为上游批量覆盖的噪音（quality_check 已按「> 1 天」口径处理过同类问题）。
+# ═══════════════════════════════════════════════════════════════════════
+_DATE_SAMPLE_LIMIT = 8
+_DATE_HIGH_ROWS = 50       # 倒挂/聚集命中 ≥ 50 行 → high
+_DATE_HIGH_RATIO = 0.02    # 或占比 ≥ 2% → high
+
+_SKIP_DATE_COLUMNS = frozenset({"created_at", "updated_at", "synced_at", "fetched_at",
+                                "matched_at"})
+_SKIP_DATE_TABLES = frozenset({"refund_wide", "cash_flow_wide"})
+
+# repro_sql 内联日期字面量的格式白名单（见 _cluster_literal_clause）
+_DATE_LITERAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _date_columns(db: Session, table: str) -> list[dict]:
+    """该表的日期列（information_schema 权威；系统审计列已排除）。"""
+    rows = db.execute(text(
+        "SELECT column_name, data_type FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = :t "
+        "  AND data_type IN ('timestamp with time zone','timestamp without time zone','date') "
+        "ORDER BY ordinal_position"
+    ), {"t": table}).mappings().all()
+    return [dict(r) for r in rows if r["column_name"] not in _SKIP_DATE_COLUMNS]
+
+
+def _has_id_column(db: Session, table: str) -> bool:
+    return bool(db.execute(text(
+        "SELECT count(*) FROM information_schema.columns "
+        "WHERE table_schema='public' AND table_name=:t AND column_name='id'"
+    ), {"t": table}).scalar())
+
+
+def _cluster_in_clause(date_expr: str, dates: list[str]) -> tuple[str, dict]:
+    """`date_expr::text IN (:cd0, :cd1, ...)` —— 用 `::text` 比较避免日期类型的绑定适配坑。
+
+    与 metrics.top_dates 的日期字符串**逐字同源**（人工跑 repro_sql 能对上）。
+    """
+    params = {f"cd{i}": d for i, d in enumerate(dates)}
+    return f"{date_expr}::text IN ({', '.join(':' + k for k in params)})", params
+
+
+def _cluster_literal_clause(date_expr: str, dates: list[str]) -> str:
+    """`date_expr::text IN ('2020-01-01', ...)` —— **仅用于 repro_sql 文本**（人工直接跑）。
+
+    与 `_cluster_in_clause`（带绑定参数，供探测器自己查询）的区别：repro_sql 是给人在库上
+    执行的**文本证据**，内联字面量才能直接粘贴执行。字面量来自库里的 `date` 列（`str()` 后
+    恒为 `YYYY-MM-DD`），且再过一道格式白名单 —— 不满足格式就不内联（返回恒假条件），
+    避免任何拼接风险（AGENTS.md 绝对禁止第 2 条）。
+    """
+    ok = [d for d in dates if _DATE_LITERAL_RE.match(str(d))]
+    if not ok:
+        return "false"
+    return f"{date_expr}::text IN ({', '.join(repr(d) for d in ok)})"
+
+
+def _date_severity(kinds: list[str], hit_rows: int, total_rows: int) -> str:
+    """原始严重度（v1 启发式，仅参考，最终以研判 verdict 为准）。
+
+    A/B（越界、未来）语义上就是「不可能值」→ 恒 high；C/D 可能是业务事实（大促、批量覆盖）
+    → 按规模分档。
+    """
+    if _date_rules.KIND_YEAR_RANGE in kinds or _date_rules.KIND_FUTURE in kinds:
+        return SEVERITY_HIGH
+    ratio = hit_rows / total_rows if total_rows else 0.0
+    if hit_rows >= _DATE_HIGH_ROWS or ratio >= _DATE_HIGH_RATIO:
+        return SEVERITY_HIGH
+    return SEVERITY_WARN
+
+
+def _column_date_stats(db: Session, table: str, col: str, date_expr: str,
+                       predicates: list[tuple[str, str]]) -> dict:
+    """单列一次扫出 A/B 命中数 + 非空行数 + 该列日期范围（省往返）。"""
+    selects = ["count(*) AS nonnull_rows",
+               f"min({date_expr}) AS min_d", f"max({date_expr}) AS max_d"]
+    for kind, cond in predicates:
+        selects.append(f"count(*) FILTER (WHERE {cond}) AS n_{kind}")
+    row = db.execute(text(
+        f'SELECT {", ".join(selects)} FROM "{table}" WHERE "{col}" IS NOT NULL'
+    )).one()
+    out = {"nonnull_rows": int(row.nonnull_rows or 0),
+           "min_date": str(row.min_d) if row.min_d is not None else None,
+           "max_date": str(row.max_d) if row.max_d is not None else None,
+           "counts": {}}
+    for kind, _ in predicates:
+        n = int(getattr(row, f"n_{kind}") or 0)
+        if n:
+            out["counts"][kind] = n
+    return out
+
+
+def _top_dates(db: Session, table: str, col: str, date_expr: str,
+               nonnull_rows: int, *, top_n: int = _date_rules.CLUSTER_TOP_N) -> list[dict]:
+    """该列出现最多的前 N 个日期（含占比）—— 判据 D 与 metrics.top_dates 共用同一结果。"""
+    rows = db.execute(text(
+        f'SELECT {date_expr} AS d, count(*) AS c FROM "{table}" '
+        f'WHERE "{col}" IS NOT NULL GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT :n'
+    ), {"n": top_n}).mappings().all()
+    return [{"date": str(r["d"]), "count": int(r["c"]),
+             "ratio": round(int(r["c"]) / nonnull_rows, 6) if nonnull_rows else 0.0}
+            for r in rows]
+
+
+def _cluster_kind(top_dates: list[dict]) -> dict | None:
+    """判据 D：占比最高的日期 ≥ `CLUSTER_RATIO` **且**行数 ≥ `CLUSTER_MIN_ROWS`
+    **且**形如兜底值 → 命中。
+
+    三道门缺一不可（工单 #169 验收 1「真实集中日期（大促）不误报」）：
+    只看占比会把大促/月初结算这类真实业务集中日期一并报出（那是事实，不是错误）；
+    加上「形如兜底值」（月日 01-01 / 12-31）后，大促（2025-06-18）不报，
+    Excel 兜底（2020-01-01）报。再加行数下限，避免「1 行占比 100%」这种
+    小表伪聚集（那只是个别坏值，判据 A/B 已能看见）。**已知漏报**见 date_anomaly_rules 模块头。
+    """
+    if not top_dates:
+        return None
+    top = top_dates[0]
+    if top["count"] < _date_rules.CLUSTER_MIN_ROWS:
+        return None
+    if top["ratio"] < _date_rules.CLUSTER_RATIO:
+        return None
+    if not _date_rules.is_default_like_date(top["date"]):
+        return None
+    return top
+
+
+def _date_samples(db: Session, table: str, col: str, date_expr: str,
+                  conditions: list[tuple[str, str, dict]], *, has_id: bool,
+                  limit: int) -> list[dict]:
+    """按类别取样本（脱敏不需要：日期不是敏感值；给 `_id` 便于人工定位与 fix_time 处置）。
+
+    `conditions` = [(kind, where, params), ...]；每类均分额度，避免第一类吃满额度
+    （人工/AI 需要看到**每一类**长什么样）。
+    """
+    if not conditions or limit <= 0:
+        return []
+    per = max(1, limit // len(conditions))
+    id_col = ", id" if has_id else ""
+    out: list[dict] = []
+    for kind, cond, params in conditions:
+        if len(out) >= limit:
+            break
+        try:
+            rows = db.execute(text(
+                f'SELECT "{col}" AS v, {date_expr} AS d{id_col} FROM "{table}" '
+                f'WHERE "{col}" IS NOT NULL AND {cond} LIMIT :lim'
+            ), {**params, "lim": per}).mappings().all()
+        except Exception as e:  # noqa: BLE001  样本失败不阻塞 finding（证据降级而非丢弃）
+            db.rollback()
+            logger.warning("governance D5: %s.%s 样本采集失败(%s): %s", table, col, kind, e)
+            continue
+        for r in rows:
+            item = {"column": col, "value": str(r["d"]), "_kind": kind}
+            if has_id and r.get("id") is not None:
+                item["_id"] = r["id"]
+            out.append(item)
+    return out[:limit]
+
+
+def _date_repro_sql(table: str, col: str, date_expr: str,
+                    predicates: list[tuple[str, str]], reversed_hits: list[dict],
+                    cluster_dates: list[str]) -> str:
+    """复现 SQL：四类各一段（数字必须与 metrics.counts 对得上，沿用 D1 铁律）。
+
+    最后一段是并集（`metrics.hit_rows`）—— 四类之间会重叠（如既是越界又是聚集），
+    故 hit_rows 必须按**并集**数，不能把 counts 相加。
+    各段的 WHERE 条件与探测器实际计数用的条件**同一份字符串**（不是重写一遍）。
+    """
+    t, c = f'"{table}"', f'"{col}"'
+    parts: list[str] = []
+    conds: list[str] = []
+    for kind, cond in predicates:
+        conds.append(cond)
+        parts.append(f"-- {kind}（metrics.counts.{kind}）\n"
+                     f"SELECT count(*) FROM {t} WHERE {c} IS NOT NULL AND {cond};")
+    for h in reversed_hits:
+        conds.append(f"({h['cond']})")
+    if reversed_hits:
+        union_cond = " OR ".join(f"({h['cond']})" for h in reversed_hits)
+        parts.append(f"-- {_date_rules.KIND_REVERSED}（metrics.counts.reversed；"
+                     f"各列对的**并集**）\n"
+                     f"SELECT count(*) FROM {t} WHERE {c} IS NOT NULL AND ({union_cond});")
+        # 逐列对明细（数字对 metrics.reversed_pairs[i].count，不参与并集对账）
+        for i, h in enumerate(reversed_hits):
+            parts.append(f"-- reversed 明细: {h['finish_col']} < {h['create_col']}"
+                         f"（metrics.reversed_pairs[{i}].count）\n"
+                         f"SELECT count(*) FROM {t} WHERE \"{h['finish_col']}\" IS NOT NULL "
+                         f"AND \"{h['create_col']}\" IS NOT NULL AND {h['cond']};")
+    if cluster_dates:
+        conds.append(_cluster_literal_clause(date_expr, cluster_dates))
+        parts.append(f"-- {_date_rules.KIND_CLUSTER}（metrics.counts.cluster；"
+                     f"单日期占非空行数 >= {_date_rules.CLUSTER_RATIO} 且形如兜底值 "
+                     f"{'、'.join(cluster_dates)}）\n"
+                     f"SELECT count(*) FROM {t} WHERE {c} IS NOT NULL AND "
+                     f"{_cluster_literal_clause(date_expr, cluster_dates)};")
+        parts.append(f"-- top_dates（metrics.top_dates，占比最高的 {_date_rules.CLUSTER_TOP_N} 个日期）\n"
+                     f"SELECT {date_expr}::text AS d, count(*) FROM {t} "
+                     f"WHERE {c} IS NOT NULL GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT "
+                     f"{_date_rules.CLUSTER_TOP_N};")
+    if conds:
+        parts.append(f"-- hit_rows = 上面各类的**并集**（去重）\n"
+                     f"SELECT count(*) FROM {t} WHERE {c} IS NOT NULL AND ({' OR '.join(conds)});")
+    return "\n\n".join(parts)
+
+
+def scan_impossible_dates(db: Session, *, tables: list[str] | None = None,
+                          limit_samples: int = _DATE_SAMPLE_LIMIT) -> list[dict]:
+    """D5 扫描：逐 `(表, 日期列)` 找「不可能日期」（不落库，纯探测）。
+
+    `tables` 非空时只扫这些表（供定向体检/单测用）；None = data_sources 登记的全部业务表。
+
+    ⚠️ 只读探测，**不得无条件 rollback** —— 调用方可能在事务中（单测临时表就在这里），
+    无条件 rollback 会把调用方未提交的 DDL/数据一并回滚。仅出错时才 rollback 清理中止事务。
+    """
+    findings: list[dict] = []
+    srcs = tables if tables is not None else _datasource_tables(db)
+
+    for table in srcs:
+        if table in _SKIP_DATE_TABLES or not _table_exists(db, table):
+            continue
+        cols = _date_columns(db, table)
+        if not cols:
+            continue
+        time_field = db.execute(text(
+            "SELECT time_field FROM data_sources WHERE table_name = :t"
+        ), {"t": table}).scalar()
+        total_rows = int(db.execute(
+            text(f'SELECT count(*) FROM "{table}"')).scalar() or 0)
+        has_id = _has_id_column(db, table)
+        col_names = [c["column_name"] for c in cols]
+        # 判据 C 的列对（先算好，供后续把倒挂归到「完成列」那条 finding 上）
+        pairs = _date_rules.reversed_pairs(col_names)
+        pairs_by_finish: dict[str, list[str]] = {}
+        for fin, cre in pairs:
+            pairs_by_finish.setdefault(fin, []).append(cre)
+
+        for cand in cols:
+            col, dtype = cand["column_name"], cand["data_type"]
+            date_expr = _date_expr(col, dtype)
+            # 判据 A/B（计划类列在 sql_predicates 内自动跳过）
+            predicates = _date_rules.sql_predicates(date_expr, column=col)
+            try:
+                stats = _column_date_stats(db, table, col, date_expr, predicates)
+                top_dates = (_top_dates(db, table, col, date_expr, stats["nonnull_rows"])
+                             if stats["nonnull_rows"] else [])
+            except Exception as e:  # noqa: BLE001  单列失败不影响其余
+                db.rollback()
+                logger.warning("governance D5: %s.%s 统计失败, 跳过: %s", table, col, e)
+                continue
+
+            kinds: list[str] = []
+            counts: dict[str, int] = dict(stats["counts"])
+            kinds += [k for k, _ in predicates if k in counts]
+            cluster = _cluster_kind(top_dates)
+            if cluster:
+                kinds.append(_date_rules.KIND_CLUSTER)
+                counts[_date_rules.KIND_CLUSTER] = cluster["count"]
+
+            # 判据 C：本列作为「完成列」时的倒挂（用北京日期比较，见段首说明）
+            reversed_pairs_hit: list[dict] = []
+            for cre in pairs_by_finish.get(col, []):
+                cre_dtype = next((c["data_type"] for c in cols if c["column_name"] == cre), None)
+                if cre_dtype is None:
+                    continue
+                cond = f"{date_expr} < {_date_expr(cre, cre_dtype)}"
+                try:
+                    n = int(db.execute(text(
+                        f'SELECT count(*) FROM "{table}" WHERE "{col}" IS NOT NULL '
+                        f'AND "{cre}" IS NOT NULL AND {cond}'
+                    )).scalar() or 0)
+                except Exception as e:  # noqa: BLE001  单对失败不影响其余
+                    db.rollback()
+                    logger.warning("governance D5: %s.%s<-%s 倒挂统计失败: %s",
+                                   table, col, cre, e)
+                    continue
+                if n:
+                    reversed_pairs_hit.append({"finish_col": col, "create_col": cre,
+                                               "count": n, "cond": cond,
+                                               "ref_expr": _date_expr(cre, cre_dtype)})
+            if reversed_pairs_hit:
+                # counts.reversed = **各列对的并集**：同一行可能同时命中多个列对
+                # （如 finish_time 既早于 register_time 又早于 op_time），相加会虚高，
+                # 且与 repro_sql 的「一段一类」对不上（D1 铁律：数字必须可对账）
+                union_cond = " OR ".join(f"({p['cond']})" for p in reversed_pairs_hit)
+                try:
+                    counts[_date_rules.KIND_REVERSED] = int(db.execute(text(
+                        f'SELECT count(*) FROM "{table}" WHERE "{col}" IS NOT NULL '
+                        f'AND ({union_cond})'
+                    )).scalar() or 0)
+                except Exception as e:  # noqa: BLE001  并集失败退回单对之和（仍报，不丢证据）
+                    db.rollback()
+                    logger.warning("governance D5: %s.%s 倒挂并集统计失败: %s", table, col, e)
+                    counts[_date_rules.KIND_REVERSED] = sum(p["count"]
+                                                            for p in reversed_pairs_hit)
+                kinds.append(_date_rules.KIND_REVERSED)
+
+            if not kinds:
+                continue
+
+            cluster_dates = [cluster["date"]] if cluster else []
+            # hit_rows = 四类并集（去重）：四类会重叠，counts 相加会虚高
+            union_conds = [cond for kind, cond in predicates if counts.get(kind)]
+            in_params: dict = {}
+            if cluster_dates:
+                in_clause, in_params = _cluster_in_clause(date_expr, cluster_dates)
+                union_conds.append(in_clause)
+            union_conds += [p["cond"] for p in reversed_pairs_hit]
+            try:
+                hit_rows = int(db.execute(text(
+                    f'SELECT count(*) FROM "{table}" WHERE "{col}" IS NOT NULL '
+                    f'AND ({" OR ".join(union_conds)})'
+                ), in_params).scalar() or 0) if union_conds else 0
+            except Exception as e:  # noqa: BLE001  并集失败不阻塞 finding
+                db.rollback()
+                logger.warning("governance D5: %s.%s 并集统计失败, 用各类之和: %s", table, col, e)
+                hit_rows = sum(counts.values())
+
+            # 样本（每类均分额度；倒挂样本带「参照列」值，便于人工/AI 判断谁该改）
+            cond_by_kind = [(k, c, {}) for k, c in predicates if counts.get(k)]
+            if cluster_dates:
+                in_clause, in_params = _cluster_in_clause(date_expr, cluster_dates)
+                cond_by_kind.append((_date_rules.KIND_CLUSTER, in_clause, in_params))
+            samples = _date_samples(db, table, col, date_expr, cond_by_kind,
+                                    has_id=has_id, limit=limit_samples)
+            if reversed_pairs_hit:
+                samples = _reversed_samples(db, table, col, date_expr, reversed_pairs_hit,
+                                            has_id=has_id, limit=limit_samples,
+                                            existing=samples)
+
+            metrics = {
+                "hit_rows": hit_rows,
+                "total_rows": total_rows,
+                "ratio": round(hit_rows / total_rows, 6) if total_rows else 0.0,
+                "nonnull_rows": stats["nonnull_rows"],
+                "kinds": kinds,
+                "counts": counts,
+                "col": col,
+                "is_time_field": bool(time_field and time_field == col),
+                "min_date": stats["min_date"],
+                "max_date": stats["max_date"],
+                "top_dates": top_dates,
+                "year_range": [_date_rules.MIN_YEAR, _date_rules.max_year()],
+                "cluster_ratio": cluster["ratio"] if cluster else None,
+                "reversed_pairs": [{"finish_col": p["finish_col"], "create_col": p["create_col"],
+                                    "count": p["count"]} for p in reversed_pairs_hit] or None,
+            }
+            findings.append({
+                "detector": DETECTOR_IMPOSSIBLE_DATE,
+                "table_name": table,
+                "target": f"{table}.{col}",
+                "severity_raw": _date_severity(kinds, hit_rows, total_rows),
+                "metrics": metrics,
+                "samples": samples,
+                "repro_sql": _date_repro_sql(table, col, date_expr, predicates,
+                                             reversed_pairs_hit, cluster_dates),
+            })
+    return findings
+
+
+def _reversed_samples(db: Session, table: str, col: str, finish_expr: str,
+                      hits: list[dict], *, has_id: bool, limit: int,
+                      existing: list[dict]) -> list[dict]:
+    """倒挂样本：同时给「完成列」与「创建列」的值 —— 否则人工看不出谁该改（拒绝黑盒结论）。
+
+    两列都渲染为**北京日期**（与 `_date_samples` 的 `value` 同形态），避免人工/AI 拿到
+    一个是日期、一个是带时区的时间戳而误判。
+    """
+    budget = max(1, limit - len(existing))
+    per = max(1, budget // len(hits))
+    id_col = ", id" if has_id else ""
+    out = list(existing)
+    for h in hits:
+        if len(out) >= limit:
+            break
+        try:
+            rows = db.execute(text(
+                f'SELECT {finish_expr} AS v, {h["ref_expr"]} AS ref_v{id_col} '
+                f'FROM "{table}" WHERE "{col}" IS NOT NULL '
+                f'AND "{h["create_col"]}" IS NOT NULL AND {h["cond"]} LIMIT :lim'
+            ), {"lim": per}).mappings().all()
+        except Exception as e:  # noqa: BLE001  样本失败不阻塞 finding
+            db.rollback()
+            logger.warning("governance D5: %s.%s 倒挂样本失败: %s", table, col, e)
+            continue
+        for r in rows:
+            item = {"column": col, "value": str(r["v"]),
+                    "ref_column": h["create_col"], "ref_value": str(r["ref_v"]),
+                    "_kind": _date_rules.KIND_REVERSED}
+            if has_id and r.get("id") is not None:
+                item["_id"] = r["id"]
+            out.append(item)
+    return out[:limit]

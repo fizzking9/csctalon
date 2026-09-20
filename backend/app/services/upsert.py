@@ -75,6 +75,8 @@ class ImportResult:
         self.rejected = 0
         # 工单 #168: 导入期文本异常留痕条数（截断/换行，**已入库但值可疑**，与 rejected 不同义）
         self.text_suspects = 0
+        # 工单 #169: 导入期日期异常留痕条数（年份越界/未来日期，同义：已入库但值可疑）
+        self.date_suspects = 0
 
     def add_error(self, row_idx: int, msg: str, data: dict | None = None) -> None:
         self.failed += 1
@@ -2536,6 +2538,91 @@ def _column_max_lengths(db: Session, data_type: str) -> dict[str, int | None]:
         return {}
 
 
+def _datetime_columns(db: Session, data_type: str) -> set[str]:
+    """该 data_type 对应表的日期/时间列（列类型权威 = DB 的 information_schema）。
+
+    与 `_column_max_lengths` 同一手法（表名从 `data_sources` 反查，未登记则跳过不猜）。
+    """
+    try:
+        from sqlalchemy import text as _text
+
+        table = db.execute(_text(
+            "SELECT table_name FROM data_sources WHERE code = :c LIMIT 1"
+        ), {"c": data_type}).scalar()
+        if not table:
+            return set()
+        rows = db.execute(_text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = :t "
+            "  AND data_type IN ('timestamp with time zone','timestamp without time zone','date')"
+        ), {"t": table}).scalars().all()
+        return set(rows)
+    except Exception as e:  # noqa: BLE001 取列类型失败 → 不检测（不猜）
+        logger.warning(f"[ingest_rejected] 取日期列失败, 跳过日期异常检测: {e}")
+        return set()
+
+
+def _persist_date_suspects(db: Session, data_type: str, df, mapping: dict[str, str],
+                           *, limit: int = _SUSPECT_LIMIT_PER_BATCH) -> int:
+    """工单 #169：导入期日期异常留痕（年份越界 / 未来日期）——**只看不改**。
+
+    与 D5 探测器**判据同源**（同一模块 `date_anomaly_rules`：同一 MIN_YEAR、同一容差、
+    同一计划类列白名单）；此处拿的是 df 里的**原始值**（比扫描期只能看入库值更准）。
+
+    三条纪律（同 #168）：① 不改入库数据 ② 失败不阻断采集 ③ 每批上限。
+
+    ⚠️ 与**入库结果对齐**：`_sanitize_date` 能自动纠错的年份（如 2225 → 2025、1900 → 2000）
+    不留痕 —— 那些列入库后已是正常值，留痕只会变成噪音。纠正不了的（含未走 `_sanitize_date`
+    的列）才留痕；后者即使这里漏报，扫描期 D5 也会在库上检出（两道网）。
+    """
+    try:
+        from app.services import date_anomaly_rules as _dr
+        from app.services.ingest_rejected_service import add_suspect_row
+
+        dt_cols = _datetime_columns(db, data_type)
+        if not dt_cols:
+            return 0
+        written = 0
+        budget = limit
+        for idx, rec in enumerate(df.to_dict("records")):
+            if budget <= 0:
+                break
+            for target_field, source_col in mapping.items():
+                if budget <= 0 or target_field not in dt_cols:
+                    continue
+                raw = rec.get(source_col)
+                dt = _to_datetime(raw)
+                if dt is None:
+                    continue  # 解析不了的值由既有校验/拒收流程管，不在此重复留痕
+                fixed = _sanitize_date(dt)
+                if fixed is not None and _dr.is_impossible_year(dt) \
+                        and not _dr.is_impossible_year(fixed):
+                    continue  # 入库前已被 _sanitize_date 纠成正常年份 → 不入留痕
+                kinds = _dr.impossible_kinds(dt, column=target_field)
+                if not kinds:
+                    continue
+                reason = "、".join(
+                    f"{_dr.KIND_TEXT[k]}（{dt.astimezone(_TZ_CN).strftime('%Y-%m-%d')}，"
+                    f"允许 {_dr.MIN_YEAR}~{_dr.max_year()}）"
+                    if k == _dr.KIND_YEAR_RANGE else
+                    f"{_dr.KIND_TEXT[k]}（{dt.astimezone(_TZ_CN).strftime('%Y-%m-%d')}）"
+                    for k in kinds
+                )
+                row = add_suspect_row(
+                    db, data_type=data_type, source="upload",
+                    reject_category=_dr.CATEGORY_DATE_IMPOSSIBLE,
+                    reject_reason=f"导入期检测: {target_field} {reason}（原始值 {raw!r}）",
+                    raw_row=rec, source_row_no=idx + 2,  # +2: 表头占 1 行, 行号从 1 起
+                )
+                if row is not None:
+                    written += 1
+                    budget -= 1
+        return written
+    except Exception as e:  # noqa: BLE001  留痕失败不影响采集主流程
+        logger.warning(f"[ingest_rejected] 日期异常留痕失败(忽略, 不影响入库): {e}")
+        return 0
+
+
 def run_upsert(
     df: pd.DataFrame,
     data_type: str,
@@ -2560,8 +2647,12 @@ def run_upsert(
     # ── 工单 #168: 导入期文本异常留痕(截断/换行) —— 在入库**之前**跑, 拿的是截断前原始值;
     #    只写留痕、不改 df、不改入库数据(失败仅告警, 见 _persist_text_suspects)
     suspects = _persist_text_suspects(db, data_type, df, mapping)
+    # ── 工单 #169: 导入期日期异常留痕(年份越界/未来日期) —— 同一位置、同一纪律(判据同源见
+    #    date_anomaly_rules; 扫描期 D5 用同一组常量)
+    date_suspects = _persist_date_suspects(db, data_type, df, mapping)
     fn(df, mapping, db, result)
     result.text_suspects = suspects
+    result.date_suspects = date_suspects
     # ── A-20260908-003 (#40): 未采纳行落拒收表(上传/BMS 共用 run_upsert 入口) ──
     # result.errors = 硬失败(行被丢弃未入库), 有 raw data 的写 ingest_rejected_rows
     # 供人工判定(open/keep/discard)。savepoint 隔离, 失败不影响主流程。

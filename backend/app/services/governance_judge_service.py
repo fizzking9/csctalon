@@ -40,6 +40,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.models.governance_finding import (
+    DETECTOR_IMPOSSIBLE_DATE,
+    DETECTOR_TEXT_ANOMALY,
     FINDING_STATUS_IGNORED,
     FINDING_STATUS_JUDGED,
     FINDING_STATUS_OPEN,
@@ -50,9 +52,9 @@ from app.models.governance_finding import (
 )
 from app.models.governance_prompt import GovernancePrompt
 from app.models.governance_rule import (
+    AUTO_LEVEL_IRREVERSIBLE,
     AUTO_LEVEL_READONLY,
-    DISPOSITION_CREATE_INDEX,
-    DISPOSITION_DELETE_DUPS,
+    DISPOSITION_LEVELS,
     DISPOSITION_MARK_DUP,
     DISPOSITION_MARK_IGNORED,
     DISPOSITION_REPORT_ONLY,
@@ -78,15 +80,17 @@ EVENT_CATEGORY = "ai_governance"
 EVENT_JUDGE = "governance_judge"          # 每次研判
 EVENT_RULE_SINK = "governance_rule_sink"  # 人工 dismiss 沉淀规则
 
-# 合法枚举（schema 校验用；与 governance_rule.DISPOSITION_* 对齐）
+# 合法枚举（schema 校验用；与 governance_rule.DISPOSITION_LEVELS **派生**同一来源）
 _VALID_VERDICTS = frozenset({VERDICT_REAL_ISSUE, VERDICT_ALLOWED_BY_BUSINESS, VERDICT_UNCERTAIN})
-_VALID_ACTIONS = frozenset({
-    "report_only", "mark_ignored", "mark_dup_residual",
-    "delete_dups", "create_index", "fix_time",
-})
+# 动作白名单 = 分级表的键（不另写一份：新增动作时若忘了同步，会静默变成「AI 给的合法动作被拒」）
+_VALID_ACTIONS = frozenset(DISPOSITION_LEVELS.keys())
 _VALID_RISKS = frozenset({"low", "medium", "high"})
-# 不可逆动作（L2 红线：必须人工确认，见设计 §六）
-_IRREVERSIBLE_ACTIONS = frozenset({DISPOSITION_DELETE_DUPS, DISPOSITION_CREATE_INDEX})
+# 不可逆动作（L2 红线：必须人工确认，见设计 §六）——同样从分级表派生
+# （#169 教训：原先手写 {delete_dups, create_index} 漏掉了 fix_time，
+#   会让 AI 的 fix_time 建议绕过「必须 requires_human_confirm」的 schema 闸门）
+_IRREVERSIBLE_ACTIONS = frozenset(
+    a for a, level in DISPOSITION_LEVELS.items() if level == AUTO_LEVEL_IRREVERSIBLE
+)
 
 # 输出 JSON 结构说明（注入系统提示词，与 validate_resp 一一对应）
 _OUTPUT_SCHEMA = """{
@@ -96,7 +100,7 @@ _OUTPUT_SCHEMA = """{
       "verdict": "real_issue | allowed_by_business | uncertain",
       "reason": "判据（须引用规范条款或表说明）",
       "suggestion": {
-        "action": "report_only | mark_ignored | mark_dup_residual | delete_dups | create_index | fix_time",
+        "action": "report_only | mark_ignored | mark_dup_residual | mark_pending | delete_dups | create_index | fix_time",
         "params": {},
         "impact": "影响面（涉及多少行/哪些统计）",
         "risk": "low | medium | high",
@@ -125,7 +129,15 @@ _DEFAULT_SYSTEM_PROMPT = (
     "5. 每条 finding 必须给出且只给出一条 judgment，finding_id 原样回填，禁止新增、合并或遗漏。\n"
     "6. 判为 `allowed_by_business`（业务允许）时，**禁止**建议 `mark_ignored` / `mark_dup_residual`\n"
     "   —— 那会把行**排除出经营统计**、改变口径（红线）。业务允许应给 `report_only`，\n"
-    "   由人工走 dismiss（判定业务允许 + 沉淀规则，数据一行不动）。"
+    "   由人工走 dismiss（判定业务允许 + 沉淀规则，数据一行不动）。\n"
+    "   需要「标出来给人核对、但不改口径」时用 `mark_pending`（行**仍计入**经营统计）。\n"
+    "7. `fix_time`（改日期值）属**不可逆**动作：必须 requires_human_confirm=true，且**只在上下文\n"
+    "   足以推断正确值**时才给，并在 `params.updates` 写明 `[{{pk, col, old, new}}]`（pk 取样本的\n"
+    "   `_id`，old 原样回填库中现值）。依据不足一律 `uncertain` + confidence<0.7，**禁止编造**\n"
+    "   —— 改错值比不改更糟（人工确认时会核对 old 是否与库中一致，不一致直接拒绝执行）。\n"
+    "   ⚠️ 本串会被 `str.format` 渲染：提示词里的**字面花括号必须成对写**（两个左花括号表示一个），\n"
+    "      写成单只会让 format 抛错、`_safe_format` 静默退回**未替换**的模板，\n"
+    "      导致 AI 根本拿不到判据段 —— 2026-09-20 E2 实测踩过。"
 )
 _DEFAULT_USER_PROMPT = (
     "【待研判的结构性可疑（共 {count} 条）】\n{findings}\n"
@@ -233,13 +245,17 @@ def _rule_suggestion(rule: GovernanceRule) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 # 二、提示词与上下文（要点③④）
 # ═══════════════════════════════════════════════════════════════════════
-def build_spec_rules() -> str:
+def build_spec_rules(detectors: set[str] | None = None) -> str:
     """规范原文注入段（**由代码常量生成**，不在提示词里存第二份 META 定义）。
 
     与 A-20260910-004「菜单/口径两份定义必然漂移」同一条纪律：
     规范原文的单源是 docs/standards/ 下文档，此处只给判据要点 + 文档指针。
+
+    `detectors`（工单 #169，设计 §五）：**按本批实际命中的探测器注入专用判据段** ——
+    把 D1~D6 全塞进一条提示词会稀释注意力、撑大上下文；按批注入最省。
+    None/空 = 只注入通用段（向后兼容，供不带 detector 上下文的调用方使用）。
     """
-    return (
+    base = (
         "1) 唯一索引与 NULL（判 D1 的根判据，PostgreSQL 规范行为）: 普通唯一索引按 = 比较，"
         "NULL≠NULL → 含 NULL 的行**不受约束保护**；GROUP BY 把 NULL 归为一组，故"
         "「整组全 NULL」= 设计如此（如 ai_reports.task_id 全空）→ 业务允许；"
@@ -251,8 +267,40 @@ def build_spec_rules() -> str:
         "4) 缓存（docs/standards/数据源接入与缓存加速规范.md）: 任何改数据的处置执行后，"
         "必须重建受影响物化表 + 失效对应缓存 pattern。\n"
         "5) 执行分级（docs/design/AI数据治理框架-20260919.md §六）: L0 只读自动；"
-        "L1 可逆自动（标 quality_status，可 restore）；L2 不可逆（删/改/建索引）必须人工确认。"
+        "L1 可逆自动（标 quality_status，可 restore）；L2 不可逆（删/改/建索引）必须人工确认。\n"
+        "6) 经营口径（AGENTS.md 绝对禁止第 10 条）: `mark_ignored` / `mark_dup_residual` 会把行"
+        "**排除出经营统计**（改口径）；`mark_pending` 只标「待人工核对」，**仍计入统计**。"
+        "判为业务允许时禁止使用前两者。"
     )
+    dets = detectors or set()
+    extra: list[str] = []
+    if DETECTOR_TEXT_ANOMALY in dets:
+        extra.append(
+            "文本异常（D4，判据见 backend/app/services/text_anomaly_rules.py）: "
+            "备注/说明类列出现换行可能业务需要（多行备注）；编号/SN/单号类列出现换行几乎必是坏值"
+            "（截断或串行）。「长度贴列宽上限」只是**截断嫌疑不是证据** —— 看样本是否切在词中"
+            "（中文突然终止、英文字母半截、数字位数不整）；源文件已不在库里，恢复不了原值 → "
+            "默认给 report_only，交人工按 repro_sql 处置。"
+        )
+    if DETECTOR_IMPOSSIBLE_DATE in dets:
+        extra.append(
+            "不可能日期（D5，判据/阈值见 backend/app/services/date_anomaly_rules.py）: 四类 —— "
+            "A 年份越界（<2015 或 > 当前年+1）、B 未来日期、C 时间倒挂（完成列 < 创建列，用"
+            "**北京日期**比较）、D 兜底值聚集（单一日期占非空行数 ≥ 30% 且形如 01-01/12-31）。\n"
+            "   判「业务允许」的典型情形：大促/月初批量结算造成的日期集中（D 只报兜底值形态，"
+            "但**近月内的集中**仍可能是真实业务）、上游已知的批量覆盖（如 service_tickets.finish_time "
+            "被上游批量改写）→ 这类给 report_only 或由人工 dismiss 沉淀规则。\n"
+            "   判「真问题」且**上下文足以推断正确值**时（如 2026/9/19 缺前导零、Excel 序列号被当"
+            "年份、位数异常、与同表其它时间列矛盾），给 `fix_time`（L2，requires_human_confirm=true）"
+            "并在 `params.updates` 给出 `[{pk, col, old, new}]`（pk 取样本里的 `_id`，old 必须原样"
+            "回填库中现值，new 写你推断出的值）。**依据不足一律 uncertain + confidence<0.7，"
+            "禁止编造正确值** —— 写错值比不写更糟。\n"
+            "   `mark_pending` 仅当该表在行级质量处置覆盖范围内（refund/ticket/wallet/shanmao/"
+            "manual_refund）时可用，用于「确实可疑但拿不准正确值」的行。"
+        )
+    # 编号接在通用段 1~6 之后（多个探测器同时命中时依次 7、8…，不重号）
+    numbered = "\n".join(f"{7 + i}) {t}" for i, t in enumerate(extra))
+    return base + ("\n" + numbered if numbered else "")
 
 
 def _load_prompt(db: Session, code: str, default: str) -> str:
@@ -315,12 +363,16 @@ def _table_notes(db: Session, findings: list[GovernanceFinding]) -> str:
 
 
 def build_messages(db: Session, findings: list[GovernanceFinding]) -> list[dict]:
-    """构造 [system(角色+铁律+规范+输出结构), user(证据+表说明)]。"""
+    """构造 [system(角色+铁律+规范+输出结构), user(证据+表说明)]。
+
+    判据段按**本批实际命中的探测器**注入（设计 §五，工单 #169）。
+    """
     payload = json.dumps([_finding_payload(f) for f in findings],
                          ensure_ascii=False, default=str, indent=1)
+    detectors = {f.detector for f in findings}
     system = _safe_format(
         _load_prompt(db, "judge_system", _DEFAULT_SYSTEM_PROMPT),
-        spec_rules=build_spec_rules(),
+        spec_rules=build_spec_rules(detectors),
         output_schema=_OUTPUT_SCHEMA,
     )
     user = _safe_format(

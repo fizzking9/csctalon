@@ -14,7 +14,9 @@
   │ 口径：findings/rules 存 `governance_findings` / `governance_rules`（设计 §3.1/§3.2）；│
   │       探测器 = 确定性扫描（D1 唯一索引重复 / D2 行数突变 / D3 外键孤儿 /             │
   │                 D4 文本异常:换行 或 长度贴列宽上限=截断嫌疑，白名单列见              │
-  │                 backend/app/services/text_anomaly_rules.py，导入期同源留痕），        │
+  │                 backend/app/services/text_anomaly_rules.py，导入期同源留痕，        │
+  │                 D5 不可能日期:年份越界/未来日期/时间倒挂/兜底值聚集，阈值与白名单见  │
+  │                 backend/app/services/date_anomaly_rules.py，导入期同源留痕），       │
   │       判据来源 docs/standards/数据采集合并去重机制说明.md（去重键）、              │
   │       docs/standards/数据时间字段使用规范.md（时区）、                            │
   │       docs/standards/数据源接入与缓存加速规范.md（执行后失效缓存）；              │
@@ -54,7 +56,7 @@
               ⑥ 确认 → 执行（不可逆动作先确认）或「判定业务允许」沉淀规则 → ⑦ 规则区启用/禁用。</p>
             <p><b>数据口径：</b>发现与规则存 <code>governance_findings</code> /
               <code>governance_rules</code>（设计 §3.1/§3.2）；探测器为确定性扫描
-              （唯一索引重复 / 行数突变 / 外键孤儿 / 文本异常），判据引用
+              （唯一索引重复 / 行数突变 / 外键孤儿 / 文本异常 / 不可能日期），判据引用
               <code>docs/standards/数据采集合并去重机制说明.md</code>（去重键）、
               <code>docs/standards/数据时间字段使用规范.md</code>（时区）、
               <code>docs/standards/数据源接入与缓存加速规范.md</code>（执行后失效缓存）。
@@ -62,7 +64,12 @@
               前端不另立级别映射（避免「前端以为可点、后端按红线拦」）。
               「文本异常」判据与**导入期留痕同源**（同一常量与白名单，见
               <code>text_anomaly_rules.py</code>）：白名单列（投诉 problem / handle_detail，
-              多行是业务真实形态）不报换行；<code>remark</code> 类列含换行才报，交 AI 研判。</p>
+              多行是业务真实形态）不报换行；<code>remark</code> 类列含换行才报，交 AI 研判。
+              「不可能日期」判据与**导入期留痕同源**（同一阈值与白名单，见
+              <code>date_anomaly_rules.py</code>）：四类 —— 年份越界（&lt;2015 或 &gt; 当前年+1）、
+              未来日期、时间倒挂（完成列早于创建列，按**北京日期**比）、兜底值聚集
+              （单一日期占该列非空行数 ≥ 30% <b>且</b>形如 01-01/12-31 —— 大促这类真实集中日期不报）。
+              日期一律按 <code>Asia/Shanghai</code> 取；服务有效期类列（end_date/expired_at 等）不判越界。</p>
             <p><b>不做什么（及原因）：</b></p>
             <ul>
               <li>❌ <b>不做一键治理全部</b>：批量执行不可逆动作 = 把红线交给一次误点，L2 必须逐条确认；</li>
@@ -345,10 +352,32 @@
         </el-descriptions>
         <div v-else class="dim mb-12">无量化证据（探测层未产出 metrics）</div>
 
+        <!-- D5 专属：日期分布前 5（判「兜底值聚集」与「真实集中日期」靠它，不从 metrics 里翻 JSON） -->
+        <div v-if="detail.detector === 'impossible_date' && topDates.length" class="mb-12">
+          <div class="dim mb-8">
+            该列出现最多的日期（占比 = 该日期行数 / 该列非空行数 {{ num(detail.metrics.nonnull_rows) }} 行）；
+            <b>兜底值聚集</b>的判据是「占比 ≥ 30% <b>且</b>月日为 01-01/12-31」——
+            大促这类真实集中日期不会命中
+          </div>
+          <el-table :data="topDates" size="small" border>
+            <el-table-column prop="date" label="日期（北京）" min-width="120" />
+            <el-table-column prop="count" label="行数" width="90" />
+            <el-table-column label="占比" width="100">
+              <template #default="{ row }">{{ (row.ratio * 100).toFixed(2) }}%</template>
+            </el-table-column>
+          </el-table>
+        </div>
+
         <div class="sec-title">③ 脱敏样本 samples（≤10 条，敏感字段已脱敏）</div>
         <div v-if="detail.detector === 'text_anomaly'" class="dim mb-8">
           样本值中的 <b>⏎</b> 表示换行符（否则看不出问题在哪）；<code>_length</code> 为值长度，
           <code>_kind</code> 为该行命中的判据（newline=含换行 / near_limit=贴列宽上限）
+        </div>
+        <div v-else-if="detail.detector === 'impossible_date'" class="dim mb-8">
+          <code>value</code> 为该行的北京日期；<code>_kind</code> 为命中判据
+          （year_range=年份越界 / future=未来日期 / reversed=时间倒挂 / cluster=兜底值聚集）；
+          倒挂样本额外给 <code>ref_column</code> / <code>ref_value</code>（与哪一列比、那列的值），
+          <code>_id</code> 是行 id —— <b>fix_time 修正清单里的 pk 就取它</b>
         </div>
         <el-table v-if="sampleColumns.length" :data="detail.samples" size="small" border max-height="260" class="mb-12">
           <el-table-column v-for="c in sampleColumns" :key="c" :prop="c" :label="c" min-width="110" show-overflow-tooltip />
@@ -379,13 +408,19 @@
           <el-descriptions :column="2" border size="small">
             <el-descriptions-item label="action">{{ detail.suggestion.action || '—' }}</el-descriptions-item>
             <el-descriptions-item label="执行级别（服务端）">{{ levelText(detail.auto_level) }}</el-descriptions-item>
+            <el-descriptions-item label="动作性质" :span="2">
+              {{ actionNature(detail) }}
+            </el-descriptions-item>
             <el-descriptions-item label="risk">{{ detail.suggestion.risk || '—' }}</el-descriptions-item>
             <el-descriptions-item label="requires_human_confirm">
               {{ detail.suggestion.requires_human_confirm === true ? '是' : '否' }}
             </el-descriptions-item>
             <el-descriptions-item label="影响面" :span="2">{{ detail.suggestion.impact || '—' }}</el-descriptions-item>
-            <el-descriptions-item label="params" :span="2">
+            <el-descriptions-item label="params（AI 建议）" :span="2">
               {{ detail.suggestion.params && Object.keys(detail.suggestion.params).length ? prettyJson(detail.suggestion.params) : '—' }}
+            </el-descriptions-item>
+            <el-descriptions-item v-if="detail.execute_result && detail.execute_result.confirmed_params" label="params（人工确认时覆盖）" :span="2">
+              {{ prettyJson(detail.execute_result.confirmed_params) }}
             </el-descriptions-item>
           </el-descriptions>
         </div>
@@ -395,6 +430,13 @@
         <div v-if="detail.execute_result" class="mb-12">
           <el-alert type="warning" :closable="false" show-icon class="mb-8"
             :title="`影响 ${num(detail.execute_result.affected_rows)} 行${detail.execute_result.backup_table ? `；备份表 ${detail.execute_result.backup_table}` : '（无备份表，非删行动作）'}`" />
+          <!-- fix_time 的 old/new 对照：人工核对「改成了什么」的唯一凭据（不接受黑盒改值） -->
+          <el-table v-if="changes.length" :data="changes" size="small" border class="mb-8">
+            <el-table-column prop="pk" label="行 id" width="100" />
+            <el-table-column prop="col" label="列" min-width="120" />
+            <el-table-column prop="old" label="改前（库中实际值）" min-width="180" show-overflow-tooltip />
+            <el-table-column prop="new" label="改后" min-width="180" show-overflow-tooltip />
+          </el-table>
           <el-descriptions :column="2" border size="small">
             <el-descriptions-item v-for="kv in execRows" :key="kv.k" :label="kv.k">{{ kv.v }}</el-descriptions-item>
           </el-descriptions>
@@ -496,6 +538,7 @@ const DETECTOR_TEXT = {
   row_count_jump: '行数突变',
   fk_orphan: '外键孤儿',
   text_anomaly: '文本异常',
+  impossible_date: '不可能日期',
 }
 const STATUS_TEXT = {
   open: '待研判',
@@ -591,6 +634,16 @@ const verdictBreakdown = computed(() => {
 })
 const metricRows = computed(() => kvRows(detail.value?.metrics))
 const execRows = computed(() => kvRows(detail.value?.execute_result))
+// D5：日期分布前 5（后端 metrics.top_dates，判「兜底值聚集」的证据）
+const topDates = computed(() => {
+  const t = detail.value?.metrics?.top_dates
+  return Array.isArray(t) ? t : []
+})
+// fix_time：old/new 对照（后端 execute_result.changes）
+const changes = computed(() => {
+  const c = detail.value?.execute_result?.changes
+  return Array.isArray(c) ? c : []
+})
 const sampleColumns = computed(() => {
   const rows = detail.value?.samples
   if (!Array.isArray(rows) || !rows.length) return []
@@ -650,6 +703,22 @@ function verdictType(v) { return VERDICT_TYPE[v] || 'info' }
 function severityText(v) { return SEVERITY_TEXT[v] || v || '—' }
 function severityType(v) { return SEVERITY_TYPE[v] || 'info' }
 function levelText(v) { return LEVEL_TEXT[v] || v || '—' }
+// 动作性质文案（**只描述语义，不定义级别** —— 级别一律取服务端 auto_level / requires_confirm）
+// 为什么要它：`mark_ignored` 与 `mark_pending` 都是 L1 可逆，但一个**排除出经营统计**、
+// 一个仍计入 —— 只显示级别看不出这个差别，而它正是 AGENTS.md 绝对禁止第 10 条的红线。
+const ACTION_NATURE = {
+  report_only: '只读报告（不改任何数据）',
+  mark_ignored: 'L1 可逆标记 → quality_status=ignored，**排除出经营统计**（可用质量页恢复）',
+  mark_dup_residual: 'L1 可逆标记 → quality_status=dup_residual，**排除出经营统计**（可用质量页恢复）',
+  mark_pending: 'L1 可逆标记 → quality_status=pending，**仍计入经营统计**（只是标「待人工核对」）',
+  delete_dups: 'L2 不可逆修正 → 删除重复行（执行前强制备份整行）',
+  create_index: 'L2 不可逆修正 → 建索引/约束（须走 Alembic 迁移，本页不自动执行）',
+  fix_time: 'L2 不可逆修正 → 改日期值（执行前强制备份整行，凭证给 old/new 对照）',
+}
+function actionNature(row) {
+  const a = row?.suggestion?.action
+  return a ? (ACTION_NATURE[a] || `未登记动作 ${a}`) : '—'
+}
 function dispositionText(v) { return v || '—' }
 function taskStatusText(v) { return TASK_STATUS_TEXT[v] || v || '—' }
 function taskStatusType(v) { return TASK_STATUS_TYPE[v] || 'info' }
@@ -827,8 +896,16 @@ async function refreshAfterAction(id) {
 
 async function doConfirm(row) {
   try {
+    // fix_time：确认前把 AI 的修正清单摆出来（改值不可逆，不能只看一句「建议修日期」就点确认）
+    const ups = row?.suggestion?.params?.updates
+    const head = (row?.suggestion?.action === 'fix_time' && Array.isArray(ups) && ups.length)
+      ? `该动作会按下列清单改值（共 ${ups.length} 条，不可逆，执行前强制备份）：\n`
+        + ups.slice(0, 10).map((u) => `  id=${u.pk} ${u.col}: ${u.old} → ${u.new}`).join('\n')
+        + (ups.length > 10 ? `\n  …还有 ${ups.length - 10} 条` : '')
+        + '\n\n确认即承担该动作的后果。可填备注：'
+      : '确认即承担该动作的后果（L2 不可逆动作确认后即可执行，执行前会强制备份）。可填备注：'
     const { value } = await ElMessageBox.prompt(
-      '确认即承担该动作的后果（L2 不可逆动作确认后即可执行，执行前会强制备份）。可填备注：',
+      head,
       '确认治理建议',
       { inputPlaceholder: '备注（可留空，如：已与业务确认该重复确为脏数据）', type: 'warning', inputValue: '' },
     )
@@ -855,9 +932,10 @@ async function doExecute(row) {
   }
   const res = await executeFinding(row.id)
   const r = res.data.execute_result || {}
-  // 让人看见「删了多少行、备份在哪」
+  // 让人看见「改了多少行/处、备份在哪」
   ElMessage.success(
     `已执行（${levelText(res.data.auto_level)}）：影响 ${num(r.affected_rows)} 行`
+    + (Array.isArray(r.changes) && r.changes.length ? `（${r.changes.length} 处改值，凭证含 old/new 对照）` : '')
     + (r.backup_table ? `，备份表 ${r.backup_table}（可回滚）` : '，无备份表（非删行动作）'),
   )
   await refreshAfterAction(row.id)
