@@ -605,6 +605,9 @@ async def draft_spec_async(
             raise
         except DraftError as e:
             logger.warning("onboarding_draft 失败(可重试): %s", e)
+            # DraftError 可能在 commit 后的写事件路径触发，先 rollback 清掉回滚态残留，
+            # 避免 record_system_event 写入时再抛「transaction rolled back」（#175）
+            db.rollback()
             record_system_event(
                 db, category="ai_governance", action="onboarding_draft",
                 title="AI 起草数据源接入声明失败",
@@ -614,6 +617,9 @@ async def draft_spec_async(
             raise
         except Exception as e:  # noqa: BLE001  未预期异常同样留痕后上抛
             logger.exception("onboarding_draft 异常: %s", e)
+            # 未预期异常（多在 commit/flush 时抛）必然使 session 进入需回滚态；
+            # 若不先 rollback，record_system_event 二次写入会再抛同源异常致失败事件丢失（#175）
+            db.rollback()
             record_system_event(
                 db, category="ai_governance", action="onboarding_draft",
                 title="AI 起草数据源接入声明异常",

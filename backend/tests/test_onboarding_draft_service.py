@@ -318,6 +318,45 @@ class TestDraftFlow:
         assert ev.status == "failed"
         _cleanup(db, code)
 
+    def test_commit_failure_still_writes_failed_event(self, db, fake_llm, monkeypatch):
+        """#175: commit 抛未预期异常使 session 进入需回滚态时，failed 事件仍须落库。
+
+        历史缺陷：except Exception 分支写 record_system_event 前未 db.rollback()，
+        SQLAlchemy 在 commit 异常后禁止任何后续 flush，导致 failed 事件二次抛错丢失。
+        修复后：异常分支先 rollback() 再写事件，failed 事件在回滚态下也能真实入库。
+        """
+        code = _unique_code()
+        fake_llm["state"]["output"] = _llm_output(code)
+
+        real_commit = db.commit
+        first_commit = True
+
+        def _flaky_commit():
+            # _draft_core 内落库前会多次 flush/commit（含 _release_stale_code 预检），
+            # 仅在最终落草稿的 commit 抛一次错，模拟 flush/commit 失败后的回滚态。
+            # 注: 用 ValueError 而非 RuntimeError —— draft_spec wrapper 会把 RuntimeError
+            # 当作「已在事件循环」的 fallback 信号而重跑，导致断言不到抛错。
+            nonlocal first_commit
+            if first_commit:
+                first_commit = False
+                db.flush()  # 让 session 建立待写状态后抛错，进入需回滚态
+                raise ValueError("模拟 commit 失败（flush 后回滚态）")
+            return real_commit()
+
+        monkeypatch.setattr(db, "commit", _flaky_commit)
+        with pytest.raises(ValueError):
+            draft_spec(db, samples=_samples())
+        monkeypatch.setattr(db, "commit", real_commit)
+
+        # 修复后：session 回滚态下 record_system_event 仍能把 failed 事件写进去
+        spec_id = db.execute(
+            select(DataSourceSpec.id).where(DataSourceSpec.code == code)
+        ).scalar()
+        assert spec_id is None or db.get(DataSourceSpec, spec_id).status != "draft"
+        ev = _latest_event(db)
+        assert ev is not None and ev.status == "failed"
+        _cleanup(db, code)
+
     def test_llm_call_failure_retries_once(self, db, fake_llm):
         code = _unique_code()
         fake_llm["state"]["output"] = _llm_output(code)
