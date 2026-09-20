@@ -67,12 +67,24 @@ CATEGORY_DATE_IMPOSSIBLE = "date_impossible"
 #    否则白名单会退化成「误报开关」。列名取自 2026-09-20 生产 data_sources 表的日期列清单。
 PLANNED_DATE_COLUMNS: dict[str, str] = {
     "end_date": "服务/保修结束日期（device_combos），本就应在未来",
+    "start_date": "服务开始日期（device_combos，与 end_date 同为一个有效期区间）—— 生产实证"
+                  "39938 行 start_date 在未来且**全部** end_date 也在未来、end>start，"
+                  "属预购/长期服务的正常形态，不是数据错误",
     "end_time": "会话结束时间（scrm_sessions），排期会话可在未来",
     "expired_at": "标签过期时间（device_tag_rel），本就应在未来",
     "service_valid_until": "服务有效期截止，本就应在未来",
     "before_serve_valid_date": "服务前有效期，本就应在未来",
     "after_serve_valid_date": "服务后有效期，本就应在未来",
 }
+
+# ── 判据 C：时间倒挂 ──────────────────────────────────────────
+# 列对比例上限：某列对的倒挂行数占「两列均非空」行数的比例 ≥ 此值 → 判定为
+# **列对语义推断错误**（不是数据矛盾）→ 跳过该列对（原因记入 metrics.skipped_pairs）。
+# 为什么必须有（2026-09-20 生产实证）：`service_tickets.dispatch_time` / `active_time`
+# 与 `register_time` 的倒挂占比 90.7% / 67.5% —— 该表 `register_time` 的语义是
+# 「服务登记时间」（晚于派单/激活），**不是创建时间**；按列名推断出的列对本身是错的。
+# 真正的数据矛盾永远是**少数行**（如 manual_refunds.op_time<register_time 仅 0.25%）。
+REVERSED_MAX_RATIO = 0.30
 
 # ── 判据 C 的阶段序推断 ────────────────────────────────────────
 # 值越小越早发生；同阶段内两列**不配对**（谁先谁后无判据，配了就是误报源）。

@@ -160,11 +160,15 @@ def test_d5_reports_future_date(db):
 
 
 def test_d5_reports_reversed_pair(db):
+    """倒挂占比 1/5 = 20%（< 30% 上限）→ 报出，样本带参照列值。"""
     tbl, code = _uniq("gov_d5_rv"), _uniq("ds_d5r")
     _mk(db, tbl, "id bigserial PRIMARY KEY, register_time timestamptz, finish_time timestamptz",
         _values("register_time, finish_time", [
             (_ts("2026-03-10"), _ts("2026-03-01")),   # 倒挂（完成 < 登记）
             (_ts("2026-03-11"), _ts("2026-03-12")),   # 正常
+            (_ts("2026-03-12"), _ts("2026-03-13")),
+            (_ts("2026-03-13"), _ts("2026-03-14")),
+            (_ts("2026-03-14"), _ts("2026-03-15")),
         ]), code)
 
     f = _one(scan_impossible_dates(db, tables=[tbl]), "finish_time")
@@ -176,6 +180,42 @@ def test_d5_reports_reversed_pair(db):
     s = next(x for x in f["samples"] if x["_kind"] == DR.KIND_REVERSED)
     assert s["ref_column"] == "register_time" and s["ref_value"] == "2026-03-10"
     assert "2026-03-01" in s["value"]
+
+
+def test_d5_high_reversed_ratio_treated_as_wrong_pair(db):
+    """★列对比例上限：倒挂占比 ≥ 30% → 判为**列对语义推断错误**，不报（生产实证防误报）。
+
+    生产 2026-09-20：`service_tickets.dispatch_time`/`active_time` 与 `register_time`
+    的倒挂占比 90.7% / 67.5% —— 该表 `register_time` 语义是「服务登记时间」（晚于派单），
+    按列名推断出的列对本身是错的，报出来只会让使用者天天驳回。
+    """
+    tbl, code = _uniq("gov_d5_hi"), _uniq("ds_d5hi")
+    rows = [(_ts("2026-03-20"), _ts("2026-03-10"))] * 4 + [(_ts("2026-03-10"), _ts("2026-03-20"))]
+    _mk(db, tbl, "id bigserial PRIMARY KEY, register_time timestamptz, op_time timestamptz",
+        _values("register_time, op_time", rows), code)
+
+    assert scan_impossible_dates(db, tables=[tbl]) == [], "倒挂占比 80% 应判为列对错误、不报"
+
+
+def test_d5_skipped_pairs_recorded_when_other_kind_hits(db):
+    """比例上限挡下的列对要记进 `metrics.skipped_pairs`（可审计「为什么这条没按倒挂报」）。
+
+    列对 (完成=op_time, 创建=register_time)：4/5 = 80% 倒挂 → 该列对被跳过；
+    同一列另有 1 行年份越界 → 仍产 finding，跳过原因随 metrics 落库。
+    """
+    tbl, code = _uniq("gov_d5_sk"), _uniq("ds_d5sk")
+    rows = [("2099-12-31", "2026-03-10")] + [("2026-03-10", "2026-03-20")] * 4
+    _mk(db, tbl, "id bigserial PRIMARY KEY, register_time timestamptz, op_time timestamptz",
+        _values("op_time, register_time", [(_ts(a), _ts(b)) for a, b in rows]), code)
+
+    findings = scan_impossible_dates(db, tables=[tbl])
+    f = _one(findings, "op_time")
+    assert DR.KIND_REVERSED not in f["metrics"]["kinds"]
+    assert DR.KIND_YEAR_RANGE in f["metrics"]["kinds"]
+    sk = f["metrics"]["skipped_pairs"]
+    assert sk and sk[0]["finish_col"] == "op_time" and sk[0]["create_col"] == "register_time"
+    assert sk[0]["count"] == 4 and sk[0]["both_rows"] == 5
+    assert sk[0]["ratio"] >= DR.REVERSED_MAX_RATIO and "列对语义推断错误" in sk[0]["reason"]
 
 
 def test_d5_reports_default_like_cluster(db):

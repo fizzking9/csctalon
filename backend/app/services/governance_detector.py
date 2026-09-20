@@ -1280,25 +1280,42 @@ def scan_impossible_dates(db: Session, *, tables: list[str] | None = None,
 
             # 判据 C：本列作为「完成列」时的倒挂（用北京日期比较，见段首说明）
             reversed_pairs_hit: list[dict] = []
+            skipped_pairs: list[dict] = []
             for cre in pairs_by_finish.get(col, []):
                 cre_dtype = next((c["data_type"] for c in cols if c["column_name"] == cre), None)
                 if cre_dtype is None:
                     continue
                 cond = f"{date_expr} < {_date_expr(cre, cre_dtype)}"
                 try:
-                    n = int(db.execute(text(
-                        f'SELECT count(*) FROM "{table}" WHERE "{col}" IS NOT NULL '
-                        f'AND "{cre}" IS NOT NULL AND {cond}'
-                    )).scalar() or 0)
+                    # 一次查询同时拿「两列均非空行数」与「倒挂行数」—— 后者除以前者才是比例
+                    row = db.execute(text(
+                        f'SELECT count(*) FILTER (WHERE "{col}" IS NOT NULL '
+                        f'AND "{cre}" IS NOT NULL) AS both_nn, '
+                        f'count(*) FILTER (WHERE "{col}" IS NOT NULL AND "{cre}" IS NOT NULL '
+                        f'AND {cond}) AS rev FROM "{table}"'
+                    )).one()
+                    both_nn, n = int(row.both_nn or 0), int(row.rev or 0)
                 except Exception as e:  # noqa: BLE001  单对失败不影响其余
                     db.rollback()
                     logger.warning("governance D5: %s.%s<-%s 倒挂统计失败: %s",
                                    table, col, cre, e)
                     continue
-                if n:
-                    reversed_pairs_hit.append({"finish_col": col, "create_col": cre,
-                                               "count": n, "cond": cond,
-                                               "ref_expr": _date_expr(cre, cre_dtype)})
+                if not n:
+                    continue
+                ratio = n / both_nn if both_nn else 1.0
+                # ── 列对比例上限：占比过高 = **列对语义推断错误**，不是数据矛盾 ──
+                # （生产实证见 date_anomaly_rules.REVERSED_MAX_RATIO 注释；跳过原因留痕可审计）
+                if ratio >= _date_rules.REVERSED_MAX_RATIO:
+                    skipped_pairs.append({
+                        "finish_col": col, "create_col": cre, "count": n,
+                        "both_rows": both_nn, "ratio": round(ratio, 4),
+                        "reason": f"倒挂占比 {ratio:.1%} ≥ {_date_rules.REVERSED_MAX_RATIO:.0%}，"
+                                  f"判为列对语义推断错误（非数据矛盾）",
+                    })
+                    continue
+                reversed_pairs_hit.append({"finish_col": col, "create_col": cre,
+                                           "count": n, "cond": cond,
+                                           "ref_expr": _date_expr(cre, cre_dtype)})
             if reversed_pairs_hit:
                 # counts.reversed = **各列对的并集**：同一行可能同时命中多个列对
                 # （如 finish_time 既早于 register_time 又早于 op_time），相加会虚高，
@@ -1365,6 +1382,9 @@ def scan_impossible_dates(db: Session, *, tables: list[str] | None = None,
                 "cluster_ratio": cluster["ratio"] if cluster else None,
                 "reversed_pairs": [{"finish_col": p["finish_col"], "create_col": p["create_col"],
                                     "count": p["count"]} for p in reversed_pairs_hit] or None,
+                # 被比例上限挡下的列对（可审计「为什么这条没报」）；本列若最终无 finding，
+                # 该信息只留在日志里 —— 那是**有意的**：不报的东西不该再产一条 finding
+                "skipped_pairs": skipped_pairs or None,
             }
             findings.append({
                 "detector": DETECTOR_IMPOSSIBLE_DATE,
