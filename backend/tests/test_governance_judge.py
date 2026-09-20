@@ -151,6 +151,27 @@ class TestValidateResp:
         ok, errs = validate_resp({"judgments": [_judgment(1)]}, {1, 2})
         assert not ok and any("遗漏" in e for e in errs)
 
+    def test_batch_split_by_batch_size(self, db, fake_llm):
+        """超过 `_BATCH_SIZE` 的待研判项要**切批**。
+
+        #169 生产实测：10 条批 267s 全部 ReadTimeout → 该批保持 open，下一轮仍是同样 10 条
+        → **研判永不收敛（livelock）**；批降到 3（≈75s）后每批都能在超时内完成。
+        """
+        from app.services.governance_judge_service import _BATCH_SIZE
+
+        n = _BATCH_SIZE + 1
+        ids = [_mk_finding(db, target=f"col_{i}").id for i in range(n)]
+        fake_llm["state"]["seq"] = [
+            {"judgments": [_judgment(i) for i in ids[:_BATCH_SIZE]]},
+            {"judgments": [_judgment(i) for i in ids[_BATCH_SIZE:]]},
+        ]
+        res = judge_findings(db, commit=False)
+        assert res["judged"] == n and res["unjudged_ids"] == []
+        assert len(fake_llm["calls"]) == 2, f"{n} 条应按 {_BATCH_SIZE} 切 2 批"
+        # 第一批的 user 消息里只含 _BATCH_SIZE 条 finding（切批真的生效）
+        first_payload = fake_llm["calls"][0]["messages"][1]["content"]
+        assert first_payload.count('"finding_id"') == _BATCH_SIZE
+
     def test_bad_confidence(self):
         j = _judgment(1, conf=1.5)
         ok, errs = validate_resp({"judgments": [j]}, {1})

@@ -67,12 +67,18 @@ from app.services.system_event_service import record_system_event, update_system
 logger = logging.getLogger(__name__)
 
 # ── 研判参数（设计 §5.3）──────────────────────────────────────────────
-_TIMEOUT_S = 60.0            # 单次 LLM 调用超时
+# ⚠️ 超时与批大小按**生产实测**定（#169，2026-09-20）：
+#   单条 finding 研判 ≈ 22~25s（provider=talon-gmk-qwen3.8-27b）；2 条 ≈ 55s（已贴着 60s 超时）；
+#   10 条批实测 **267s 全部 ReadTimeout** → 该批保持 open，且下一轮仍是同样 10 条 →
+#   **研判永不收敛（livelock）**。故：超时放宽到 120s、批降到 3（≈75s，留足余量）。
+#   副作用：批小了 → LLM 调用次数变多（每条成本不变、单次调用固定开销增加）；
+#   这是「能研判」与「更省调用」之间的取舍，宁可多几次调用，不可永远研判不了。
+_TIMEOUT_S = 120.0           # 单次 LLM 调用超时
 _MAX_TOKENS = 3000           # 结构化 JSON 输出 token 上限
 _LLM_SOURCE = "governance_judge"  # chat_completion 审计 source + 留痕溯源
 _LLM_RETRY = 1               # 非法输出整体重试次数（设计 §5.2）
 _LLM_LEVEL = 1               # llm_scheduler L1（admin 触发，不占 L2 实时问答）
-_BATCH_SIZE = 10             # 单次批量研判的 finding 上限（防超长上下文）
+_BATCH_SIZE = 3              # 单次批量研判的 finding 上限（防超长上下文；见上方实测）
 _REPRO_SQL_CHARS = 400       # 复现 SQL 注入长度上限（够看懂索引语义即可）
 
 # system_events 留痕（category 恒为 ai_governance）
