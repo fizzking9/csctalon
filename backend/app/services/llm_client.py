@@ -18,6 +18,7 @@
 import asyncio
 import logging
 import random
+import re
 import time
 from typing import Any
 
@@ -110,6 +111,65 @@ def _payload(messages: list[dict], model: str, *, temperature: float = 0.2,
 
 def _backoff_sleep(attempt: int, *, base_s: float = 1.0, cap_s: float = 30.0) -> float:
     return min(base_s * (2 ** attempt), cap_s) * (0.8 + 0.4 * random.random())
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 超时自洽性保障 (2026-09-20, 事故: 主力模型 30% 调用超时)
+# ─────────────────────────────────────────────────────────────────────
+# 背景: 生产实测 qwen3.8:27b 的 decode 速度约 20~27 t/s, 而多处调用点配置为
+#   max_tokens=1500/3000 + timeout_s=60/120 —— 60s 内根本产不出 1500 token。
+#   结果: 27b 的 352 次调用中 104 次 ReadTimeout (29.5%), 且这些失败会触发
+#   provider 降级, 污染调用链。
+#
+# 修复: 在发请求前，按 max_tokens 反推最低所需超时, 取 max(调用方 timeout, 所需值)。
+#   这样调用方仍可"放宽"超时, 但不会再出现"按物理上不可能完成的时限去等"。
+#
+# 参数依据（生产实测, 见 talon 仓库 docs/reports/技术与经济性评估-20260920.md）:
+#   qwen3.8:27b  (Dense) : decode ~20 t/s (慢路径保守值)
+#   qwen3-coder:30b (MoE): decode ~77 t/s
+#   本地生效值 ctx=65536 后速度稳定; 云端 DeepSeek 无需此保护(其延迟低且可缓存)。
+#
+# 采用最慢模型的解码速度作为兜底基准, 保证任何 provider 都不会被"过早掐断"。
+_SLOWEST_DECODE_TPS = 15.0   # 保守基准: 低于实测最慢值(27b 长文本约 20 t/s)
+_TIMEOUT_HEADROOM_S = 30.0   # 预留 prefill + 排队 + 网络 的开销
+_MIN_TIMEOUT_S = 30.0        # 绝对下限, 避免过短
+
+
+def _ensure_timeout_fits_tokens(timeout_s: float | None, max_tokens: int | None,
+                                *, base_url: str = "") -> float | None:
+    """按 max_tokens 反推最低合理超时, 返回 max(调用方值, 所需值)。
+
+    例: max_tokens=1500 → 1500/15 + 30 = 130s。若调用方传 60s, 返回 130s。
+    云端 API（api.deepseek.com 等）不适用此保护 —— 其延迟低且无本地慢模型问题。
+    """
+    if not max_tokens:
+        return timeout_s
+    if not _is_local_endpoint(base_url):
+        return timeout_s
+    needed = max(max_tokens / _SLOWEST_DECODE_TPS + _TIMEOUT_HEADROOM_S, _MIN_TIMEOUT_S)
+    if timeout_s is None:
+        return needed
+    return max(float(timeout_s), needed)
+
+
+def _is_local_endpoint(base_url: str) -> bool:
+    """判断是否为本地自托管端点（talon 集群 / ollama / 内网 IP）。
+
+    云端端点（https 公网域名）无需超时放宽 —— 其延迟低且有 prefix cache。
+    """
+    u = (base_url or "").strip().lower()
+    if not u:
+        return False
+    # 本机 / 内网 IP / 已知自托管域名 → 本地
+    if "127.0.0.1" in u or "localhost" in u or "host.docker.internal" in u:
+        return True
+    # 私有网段 10.x / 192.168.x / 172.16-31.x
+    m = re.search(r'//(\d{1,3})\.(\d{1,3})\.', u)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        if a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31):
+            return True
+    return False
 
 
 def _extract_content(data: dict) -> tuple[str, dict | None]:
@@ -294,8 +354,10 @@ async def _call_multi_provider(
                          max_tokens=max_tokens, thinking=p["thinking"])
         # timeout_s 优先用 override, 否则用 Provider 自己的 timeout_s
         t_s = override_timeout_s if override_timeout_s is not None else p["timeout_s"]
-        logger.info("llm call provider=%s(%s) model=%s timeout_s=%.1f",
-                     pid, pcode, model, t_s)
+        # 超时自洽保障: 防止 max_tokens 大到 timeout 根本装不下（27b 30% 超时的根因）
+        t_s = _ensure_timeout_fits_tokens(t_s, max_tokens, base_url=p["base_url"])
+        logger.info("llm call provider=%s(%s) model=%s timeout_s=%.1f max_tokens=%s",
+                     pid, pcode, model, t_s, max_tokens)
         content, err, status, err_cls = await _call_single_provider(
             url=url, headers=headers, body=body,
             timeout_s=t_s, retry_max=p["retry_max"], transport=transport,
@@ -358,6 +420,9 @@ async def _call_env_single(
                      thinking=getattr(settings, "LLM_THINKING", "disabled"))
     timeout_s = override_timeout_s if override_timeout_s is not None else \
         float(getattr(settings, "LLM_TIMEOUT_S", 120.0) or 120.0)
+    # 超时自洽保障（同多 Provider 路径）: 防止 max_tokens 装不下
+    timeout_s = _ensure_timeout_fits_tokens(
+        timeout_s, max_tokens, base_url=settings.LLM_BASE_URL or "")
     retry_max = int(getattr(settings, "LLM_RETRY_MAX", 2) or 2)
     content, err, status, err_cls = await _call_single_provider(
         url=url, headers=headers, body=body,
