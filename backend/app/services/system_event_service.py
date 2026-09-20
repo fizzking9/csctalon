@@ -65,6 +65,48 @@ def record_system_event(
     return ev
 
 
+def update_system_event(
+    db: Session,
+    event_id: int,
+    *,
+    status: str | None = None,
+    title: str | None = None,
+    summary: str | None = None,
+    detail: str | None = None,
+    level: str | None = None,
+    commit: bool = False,
+) -> SystemEvent | None:
+    """回填一条已存在的事件(工单 #165 异步任务用: 占位 running → success/failed)。
+
+    为什么要有「占位 + 回填」: 手动体检/研判是 202 + 轮询模式, 需要**一行**事件贯穿
+    running→终态, 而不是「开始写一行、结束再写一行」(重复留痕会淹没真实变化, 同 #166 教训)。
+    event_id 不存在 → 返回 None(调用方自行决定是否降级为新建)。
+    """
+    ev = db.get(SystemEvent, event_id)
+    if ev is None:
+        return None
+    if status is not None:
+        ev.status = status
+        ev.level = level or {
+            "failed": "error", "partial": "warning", "success": "info",
+            "running": "info", "info": "info",
+        }.get(status, "info")
+    if title is not None:
+        ev.title = title[:255]
+    if summary is not None:
+        ev.summary = summary[:512] or None
+    if detail is not None:
+        ev.detail = detail
+    if commit:
+        try:
+            db.commit()
+            db.refresh(ev)
+        except Exception as e:  # noqa: BLE001  留痕失败不影响业务主流程
+            db.rollback()
+            logger.warning(f"[system_event] 回填失败(已回滚,不影响主流程): {e}")
+    return ev
+
+
 def list_system_events(
     db: Session,
     page: int = 1,

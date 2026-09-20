@@ -37,6 +37,25 @@ DISPOSITION_MARK_IGNORED = "mark_ignored"    # 标 ignored（行级，走 qualit
 DISPOSITION_MARK_DUP = "mark_dup_residual"   # 标 dup_residual（行级）
 DISPOSITION_DELETE_DUPS = "delete_dups"      # 删重复行（L2，必须人工确认 + 备份）
 DISPOSITION_CREATE_INDEX = "create_index"    # 建索引/约束（L2，须走 Alembic 迁移）
+DISPOSITION_FIX_TIME = "fix_time"            # 修时间值（L2，第二期采集语义增强用）
+
+# ── 动作 → 执行级别映射（**唯一来源**，工单 #165）─────────────
+# 为什么必须有这张表：分级是红线（L2 恒需人工确认），若「哪个动作是 L2」散落在
+# 执行服务 / 路由 / 前端三处，迟早漂移成「某处漏判 → 不可逆动作被自动执行」。
+# 执行层据此判级、研判层据此写 suggestion、前端据此决定是否要确认按钮。
+DISPOSITION_LEVELS: dict[str, str] = {
+    DISPOSITION_REPORT_ONLY: AUTO_LEVEL_READONLY,
+    DISPOSITION_MARK_IGNORED: AUTO_LEVEL_REVERSIBLE,
+    DISPOSITION_MARK_DUP: AUTO_LEVEL_REVERSIBLE,
+    DISPOSITION_DELETE_DUPS: AUTO_LEVEL_IRREVERSIBLE,
+    DISPOSITION_CREATE_INDEX: AUTO_LEVEL_IRREVERSIBLE,
+    DISPOSITION_FIX_TIME: AUTO_LEVEL_IRREVERSIBLE,
+}
+
+
+def disposition_level(action: str | None) -> str:
+    """动作 → 执行级别；未登记的动作一律按**最严**处理（L2 需人工确认），不放过未知动作。"""
+    return DISPOSITION_LEVELS.get(action or "", AUTO_LEVEL_IRREVERSIBLE)
 
 
 class GovernanceRule(IDMixin, TimestampMixin, Base):

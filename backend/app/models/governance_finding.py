@@ -113,3 +113,18 @@ class GovernanceFinding(IDMixin, TimestampMixin, Base):
         Integer, nullable=True, index=True,
         comment="命中的治理规则 id（规则直接判定时跳过 AI 调用）",
     )
+
+    # ── 执行层产物（工单 #165 回填；分级执行见设计 §六）──
+    confirmed_by: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="人工确认人（L2 执行前置红线）",
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="人工确认时刻",
+    )
+    executed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="执行时刻",
+    )
+    execute_result: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True,
+        comment="执行凭证: {action, auto_level, affected_rows, before, after, backup_table, backup_rows, sql, cache}",
+    )

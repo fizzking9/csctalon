@@ -480,6 +480,13 @@ const routes = [
         component: () => import('@/views/system/AiOnboarding.vue'),
         meta: { title: '数据源接入助手', icon: 'Connection', admin: true },
       },
+      {
+        // #165: AI 数据治理(体检→研判→确认→分级执行 闭环, 归「数据质量」组)
+        path: 'system/ai-data-governance',
+        name: 'SystemAiDataGovernance',
+        component: () => import('@/views/system/AiDataGovernance.vue'),
+        meta: { title: 'AI 数据治理', icon: 'CircleCheck', admin: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },

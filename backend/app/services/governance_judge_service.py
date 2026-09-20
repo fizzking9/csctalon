@@ -38,6 +38,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.database import SessionLocal
 from app.models.governance_finding import (
     FINDING_STATUS_IGNORED,
     FINDING_STATUS_JUDGED,
@@ -57,7 +58,7 @@ from app.models.governance_rule import (
 )
 from app.models.llm_provider import LlmCallLog
 from app.services import llm_client
-from app.services.system_event_service import record_system_event
+from app.services.system_event_service import record_system_event, update_system_event
 
 logger = logging.getLogger(__name__)
 
@@ -521,8 +522,13 @@ def _apply_ai(f: GovernanceFinding, judgment: dict, now: _dt.datetime) -> None:
     f.status = FINDING_STATUS_JUDGED
 
 
-async def _judge_core(db: Session, finding_ids: list[int] | None, *, commit: bool) -> dict:
-    """研判核心：取 open → 规则短路 → 批量 AI → 回填 → 留痕（无调度层，供门闸/测试调用）。"""
+async def _judge_core(db: Session, finding_ids: list[int] | None, *, commit: bool,
+                      event_id: int | None = None) -> dict:
+    """研判核心：取 open → 规则短路 → 批量 AI → 回填 → 留痕（无调度层，供门闸/测试调用）。
+
+    `event_id` 非空（手动触发路径，工单 #165）：**回填**该占位事件（running → 终态），
+    不再新建一行（202 + 轮询模式一行事件贯穿全程）。
+    """
     t0 = time.perf_counter()
     query = db.query(GovernanceFinding).filter(GovernanceFinding.status == FINDING_STATUS_OPEN)
     if finding_ids:
@@ -530,7 +536,11 @@ async def _judge_core(db: Session, finding_ids: list[int] | None, *, commit: boo
     open_list = query.order_by(GovernanceFinding.detected_at.asc()).all()
     if not open_list:
         # 无待研判项 → 直接返回且**不写 system_events**（#166 教训：无节流的重复留痕
-        # 会淹没真实变化；空跑不该在事务流里刷屏）
+        # 会淹没真实变化；空跑不该在事务流里刷屏）；占位事件仍要收尾，否则前端一直转圈
+        if event_id is not None:
+            update_system_event(db, event_id, status="success", title="治理研判: 无待研判项",
+                                summary="无 open finding", detail=json.dumps(
+                                    {"total_open": 0}, ensure_ascii=False), commit=commit)
         return {"status": "success", "total_open": 0, "judged": 0,
                 "by_rule": 0, "by_ai": 0, "llm_called": False,
                 "unjudged_ids": [], "duration_ms": 0}
@@ -562,26 +572,28 @@ async def _judge_core(db: Session, finding_ids: list[int] | None, *, commit: boo
     llm_called = bool(pending)
     call_log = _last_call_log(db) if llm_called else None
     provider = (call_log or {}).get("provider_code") or ("default(实时链)" if llm_called else "未调用(规则短路)")
-    record_system_event(
-        db,
-        category=EVENT_CATEGORY,
-        action=EVENT_JUDGE,
-        title=f"治理研判: {len(open_list)} 条结构性可疑",
-        summary=(f"规则短路 {by_rule} 条 / AI 研判 {by_ai} 条; "
-                 f"provider={provider}; 耗时 {duration_ms}ms"),
-        status="success",
-        detail=json.dumps({
-            "total_open": len(open_list),
-            "by_rule": by_rule,
-            "by_ai": by_ai,
-            "llm_called": llm_called,
-            "provider": provider,
-            "model": (call_log or {}).get("model"),
-            "duration_ms": duration_ms,
-            "finding_ids": [f.id for f in open_list],
-        }, ensure_ascii=False),
-        commit=False,
-    )
+    title = f"治理研判: {len(open_list)} 条结构性可疑"
+    summary = (f"规则短路 {by_rule} 条 / AI 研判 {by_ai} 条; "
+               f"provider={provider}; 耗时 {duration_ms}ms")
+    detail = json.dumps({
+        "total_open": len(open_list),
+        "by_rule": by_rule,
+        "by_ai": by_ai,
+        "llm_called": llm_called,
+        "provider": provider,
+        "model": (call_log or {}).get("model"),
+        "duration_ms": duration_ms,
+        "finding_ids": [f.id for f in open_list],
+    }, ensure_ascii=False)
+    if event_id is not None:
+        update_system_event(db, event_id, status="success", title=title,
+                            summary=summary, detail=detail, commit=False)
+    else:
+        record_system_event(
+            db, category=EVENT_CATEGORY, action=EVENT_JUDGE,
+            title=title, summary=summary, status="success",
+            detail=detail, commit=False,
+        )
     # 未获判定的（LLM 两次失败）保持 open，下轮重试 —— 先取 id 再 commit（避免过期重载）
     unjudged_ids = [f.id for f in pending if f.status == FINDING_STATUS_OPEN]
     if commit:
@@ -599,7 +611,8 @@ async def _judge_core(db: Session, finding_ids: list[int] | None, *, commit: boo
 
 
 async def judge_findings_async(db: Session, finding_ids: list[int] | None = None, *,
-                               commit: bool = True) -> dict:
+                               commit: bool = True,
+                               event_id: int | None = None) -> dict:
     """异步研判入口：经 llm_scheduler **L1** 门闸执行（不占用户实时问答 L2，设计 §5.3）。
 
     供 #165 管理页接口（后台任务）调用；被更高优先级任务抢占 → CancelledError 上抛，
@@ -609,21 +622,57 @@ async def judge_findings_async(db: Session, finding_ids: list[int] | None = None
 
     handle = await acquire(level=_LLM_LEVEL, name="governance_judge")
     try:
-        return await _judge_core(db, finding_ids, commit=commit)
+        return await _judge_core(db, finding_ids, commit=commit, event_id=event_id)
     finally:
         await release(handle)
 
 
 def judge_findings(db: Session, finding_ids: list[int] | None = None, *,
-                   commit: bool = True) -> dict:
+                   commit: bool = True, event_id: int | None = None) -> dict:
     """同步研判入口（worker / 测试 / 非 async 上下文用；同 onboarding_draft 模式）。"""
     try:
-        return asyncio.run(judge_findings_async(db, finding_ids, commit=commit))
+        return asyncio.run(judge_findings_async(db, finding_ids, commit=commit,
+                                                event_id=event_id))
     except RuntimeError as e:
         logger.warning("governance_judge 已在事件循环中, 换新 loop: %s", e)
         return asyncio.new_event_loop().run_until_complete(
-            judge_findings_async(db, finding_ids, commit=commit)
+            judge_findings_async(db, finding_ids, commit=commit, event_id=event_id)
         )
+
+
+def start_judge_task(event_id: int) -> None:
+    """后台跑一次研判并回填占位事件（202 + 轮询，工单 #165）。
+
+    与体检不同：研判是**异步**的（等 LLM），故直接在事件循环里 create_task，
+    db session 在协程内自建自关（不跨线程）。
+    """
+    async def _run() -> None:
+        db = SessionLocal()
+        try:
+            await judge_findings_async(db, event_id=event_id)
+        except asyncio.CancelledError:
+            # 被更高优先级任务抢占（L0 预生成 / L2 实时问答）—— 属正常，占位事件收尾为可重试
+            logger.info("governance_judge 后台任务被抢占, 占位事件置 partial")
+            try:
+                update_system_event(db, event_id, status="partial",
+                                    summary="研判被更高优先级任务抢占, 可重试",
+                                    commit=True)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+        except Exception as e:  # noqa: BLE001  后台任务失败只留痕
+            logger.error("governance 后台研判异常: %s", e)
+            try:
+                db.rollback()
+                update_system_event(db, event_id, status="failed",
+                                    summary=f"研判失败: {e}"[:512],
+                                    detail=json.dumps({"error": str(e)}, ensure_ascii=False),
+                                    commit=True)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+        finally:
+            db.close()
+
+    asyncio.get_running_loop().create_task(_run())
 
 
 # ═══════════════════════════════════════════════════════════════════════

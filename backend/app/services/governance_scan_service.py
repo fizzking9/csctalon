@@ -44,7 +44,7 @@ from app.services.governance_detector import (
     scan_unique_index_dups,
 )
 from app.services.governance_judge_service import EVENT_JUDGE, judge_findings
-from app.services.system_event_service import record_system_event
+from app.services.system_event_service import record_system_event, update_system_event
 
 logger = logging.getLogger(__name__)
 
@@ -93,11 +93,15 @@ def _scan_summary(findings: list[dict]) -> dict:
     return {"detectors": by, "finding_count": len(findings), "detail": text_}
 
 
-def run_full_scan(db: Session | None = None, *, commit: bool = True) -> dict:
+def run_full_scan(db: Session | None = None, *, commit: bool = True,
+                  event_id: int | None = None) -> dict:
     """完整体检：探测 → 落 findings → **重扫收敛** → system_events 留痕。
 
     返回 {category, action, status, found, persisted, auto_closed, by_detector, findings}。
     失败返回 status='partial'（已探测到的尽力落库 + 留痕），不抛异常。
+
+    `event_id` 非空（手动触发路径，工单 #165）：**回填**该占位事件（running → 终态），
+    不再新建一行 —— 202 + 轮询模式下一行事件贯穿全程，避免重复留痕（同 #166 教训）。
     """
     status = "success"
     own_db = db is None
@@ -109,18 +113,19 @@ def run_full_scan(db: Session | None = None, *, commit: bool = True) -> dict:
         seen = {(f["detector"], f["table_name"], f["target"]) for f in findings}
         closed = close_stale_findings(session, detectors=ok_detectors, seen_keys=seen)
         summary = _scan_summary(findings)
-        record_system_event(
-            session,
-            category=EVENT_CATEGORY,
-            action=EVENT_SCAN,
-            title=f"数据体检: 发现 {len(findings)} 个结构性可疑, 收敛 {len(closed)} 个",
-            summary=summary["detail"],
-            status=status,
-            detail=_json_detail({**summary, "auto_closed": {
-                "count": len(closed), "ids": [f.id for f in closed],
-            }}),
-            commit=False,
-        )
+        detail = _json_detail({**summary, "auto_closed": {
+            "count": len(closed), "ids": [f.id for f in closed],
+        }})
+        title = f"数据体检: 发现 {len(findings)} 个结构性可疑, 收敛 {len(closed)} 个"
+        if event_id is not None:
+            update_system_event(session, event_id, status=status, title=title,
+                                summary=summary["detail"], detail=detail, commit=False)
+        else:
+            record_system_event(
+                session, category=EVENT_CATEGORY, action=EVENT_SCAN,
+                title=title, summary=summary["detail"], status=status,
+                detail=detail, commit=False,
+            )
         if commit:
             session.commit()
         return {
@@ -137,7 +142,12 @@ def run_full_scan(db: Session | None = None, *, commit: bool = True) -> dict:
         logger.error("governance: 体检失败(不影响业务): %s", e)
         try:
             session.rollback()
-        except Exception:  # noqa: BLE001
+            if event_id is not None:
+                update_system_event(session, event_id, status="failed",
+                                    summary=f"体检失败: {e}"[:512],
+                                    detail=json.dumps({"error": str(e)}, ensure_ascii=False),
+                                    commit=True)
+        except Exception:  # noqa: BLE001  失败留痕本身失败不再抛
             pass
         return {"category": EVENT_CATEGORY, "action": EVENT_SCAN,
                 "status": "failed", "found": 0, "persisted": 0, "auto_closed": [],
@@ -147,22 +157,48 @@ def run_full_scan(db: Session | None = None, *, commit: bool = True) -> dict:
             session.close()
 
 
+def start_scan_task(event_id: int) -> None:
+    """后台跑一次完整体检并回填占位事件（202 + 轮询，工单 #165）。
+
+    为什么用 to_thread 而非直接在事件循环里跑：体检要扫全库（D1 全量索引 + D2 逐表
+    按日 count），是**秒级到分钟级**的同步 DB 活；直接在 loop 里跑会卡住整个 API。
+    session 在 worker 线程内创建，不跨线程使用。
+    """
+    def _worker() -> None:
+        db = SessionLocal()
+        try:
+            run_full_scan(db, commit=True, event_id=event_id)
+        except Exception as e:  # noqa: BLE001  后台任务失败只留痕
+            logger.error("governance 后台体检异常: %s", e)
+        finally:
+            db.close()
+
+    async def _run() -> None:
+        await asyncio.to_thread(_worker)
+
+    asyncio.get_running_loop().create_task(_run())
+
+
 def _json_detail(summary: dict) -> str:
     return json.dumps(summary, ensure_ascii=False, default=str)
 
 
-def _event_done_today(db: Session, action: str) -> bool:
-    """当日语义：该 action 的 ai_governance 事件今天（北京时区）是否已写过。
+def _event_done_today(db: Session, action: str,
+                      statuses: tuple[str, ...] = ("success", "partial")) -> bool:
+    """当日语义：该 action 的 ai_governance 事件今天（北京时区）是否已**成功**写过。
+
+    为什么限定 statuses：手动触发的占位事件（status=running）不该让当日自动体检被跳过
+    —— 否则一次手动触发中途失败，当天的自动体检就永远不跑了。
 
     ⚠️ 时区铁律：created_at 是 timestamptz，必须 AT TIME ZONE 换算到北京时区再取日期，
        否则容器 UTC 时区下 08:00 前会把「昨天」当成今天（低峰 0-5 点正好落在这个区间）。
     """
     return bool(db.execute(text(
         "SELECT count(*) FROM system_events "
-        "WHERE category = :c AND action = :a "
+        "WHERE category = :c AND action = :a AND status = ANY(:st) "
         "AND (created_at AT TIME ZONE 'Asia/Shanghai')::date "
         "    = (now() AT TIME ZONE 'Asia/Shanghai')::date"
-    ), {"c": EVENT_CATEGORY, "a": action}).scalar())
+    ), {"c": EVENT_CATEGORY, "a": action, "st": list(statuses)}).scalar())
 
 
 def judge_idle(db: Session) -> dict:

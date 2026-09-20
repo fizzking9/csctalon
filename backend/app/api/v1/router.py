@@ -24,6 +24,7 @@ from app.api.v1 import (
     doc_sync,
     external,
     fetch,
+    governance,
     groups,
     incidents,
     integrations,
@@ -108,6 +109,7 @@ api_router.include_router(notifications.router)
 api_router.include_router(agenda.router)
 api_router.include_router(ai.router)
 api_router.include_router(ai_onboarding.router)  # #157 AI 数据接入助手(起草/确认/落地包)
+api_router.include_router(governance.router)  # #165 AI 数据治理(体检/研判/分级执行/规则)
 api_router.include_router(complaints.router)
 api_router.include_router(schedules.router)
 api_router.include_router(source_groups.router)
