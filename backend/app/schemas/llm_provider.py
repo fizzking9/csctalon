@@ -116,3 +116,11 @@ class LlmRoleMemberOrder(BaseModel):
     """调整成员在本角色内的顺序。"""
 
     sort_order: int = Field(..., ge=0, le=9999)
+
+
+class LlmCloudPolicyUpdate(BaseModel):
+    """更新全局出域策略（数据边界开关）。"""
+
+    policy: str = Field(..., pattern="^(never|explicit_only|auto)$",
+                        description="never=禁止出域 / explicit_only=仅显式允许 / auto=自动降级")
+    require_confirm: bool | None = Field(None, description="explicit_only 下是否需用户确认（预留）")

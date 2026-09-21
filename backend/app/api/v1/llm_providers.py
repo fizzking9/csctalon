@@ -15,6 +15,7 @@ from app.schemas.common import R
 from app.schemas.llm_provider import (
     LlmProviderCreate,
     LlmProviderUpdate,
+    LlmCloudPolicyUpdate,
     LlmRoleMemberAdd,
     LlmRoleMemberOrder,
     LlmRoleUpdate,
@@ -149,8 +150,8 @@ def update_role(role_key: str, payload: LlmRoleUpdate, db: DBSession, me: AdminU
 
 
 @router.get("/cloud-policy", response_model=R, summary="读全局出域策略")
-def get_cloud_policy(_: AdminUser):
-    return R(data=llm_provider_service.get_cloud_policy())
+def get_cloud_policy(db: DBSession, _: AdminUser):
+    return R(data=llm_provider_service.get_cloud_policy(db))
 
 
 # ── 角色成员（关联表，支持一模型多角色）────────────────────────────────
@@ -183,3 +184,13 @@ def set_role_member_order(role_key: str, provider_code: str, payload: LlmRoleMem
         from fastapi import HTTPException
         raise HTTPException(404, "该角色中不存在此成员")
     return R(data={"ok": True})
+
+
+@router.put("/cloud-policy", response_model=R, summary="更新全局出域策略")
+def update_cloud_policy(payload: LlmCloudPolicyUpdate, db: DBSession, me: AdminUser):
+    """⚠️ 数据边界开关。改为 auto 意味着本地失败会自动出网（可能发往公网）。
+
+    保存后立即失效进程缓存（不设 30s 窗口期）。
+    """
+    return R(data=llm_provider_service.update_cloud_policy(
+        db, payload.policy, me.username, payload.require_confirm))

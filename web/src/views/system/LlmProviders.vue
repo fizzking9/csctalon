@@ -48,6 +48,14 @@
         </el-radio>
       </el-radio-group>
       <div class="dim mt-8">
+        策略来源：<el-tag size="small" :type="cloudPolicy.source === 'db' ? 'success' : 'info'">
+          {{ cloudPolicy.source === 'db' ? '数据库（界面可改）' : '环境变量 .env（界面保存后转为数据库）' }}
+        </el-tag>
+        <span v-if="cloudPolicy.updated_by" style="margin-left: 8px">
+          最后修改：{{ cloudPolicy.updated_by }}
+        </span>
+      </div>
+      <div class="dim mt-8">
         受此策略约束的云端 Provider：
         <template v-if="cloudPolicy.cloud_providers && cloudPolicy.cloud_providers.length">
           <el-tag v-for="p in cloudPolicy.cloud_providers" :key="p.code" type="warning" size="small" class="mr-8">
@@ -414,7 +422,7 @@ import { ElMessage } from 'element-plus'
 import {
   listLlmProviders, createLlmProvider, updateLlmProvider, deleteLlmProvider,
   testLlmConnection, testExistingLlm, listLlmCallLogs,
-  listLlmRoles, updateLlmRole, getCloudPolicy,
+  listLlmRoles, updateLlmRole, getCloudPolicy, updateCloudPolicy,
   removeLlmRoleMember, setLlmRoleMemberOrder,
 } from '@/api/llmProviders'
 
@@ -507,13 +515,25 @@ async function loadCloudPolicy() {
 }
 
 async function saveCloudPolicy() {
-  // 出域策略目前由 .env 的 LLM_CLOUD_POLICY 控制（后端只读）。
-  // 界面改动需落库才能生效 —— 本批次仅展示与提示，落库见后续迭代。
-  ElMessage.warning(
-    `出域策略「${cloudPolicy.policy}」需在后端 .env 设置 LLM_CLOUD_POLICY 后重启生效。` +
-    '当前界面仅作展示与说明。'
-  )
-  await loadCloudPolicy()   // 回滚显示为实际生效值
+  // 2026-09-21 已落库（llm_cloud_policy 单行表）—— 界面改动即时生效，无需重启。
+  // ⚠️ 这是数据边界开关：auto 会让本地失败时自动出网。
+  policySaving.value = true
+  try {
+    const res = await updateCloudPolicy({ policy: cloudPolicy.policy })
+    Object.assign(cloudPolicy, res.data || {})
+    if (cloudPolicy.policy === 'auto') {
+      ElMessage.warning('已设为「自动降级」：本地模型失败时会自动把数据发往云端')
+    } else if (cloudPolicy.policy === 'never') {
+      ElMessage.success('已设为「禁止出域」：数据不会离开内网')
+    } else {
+      ElMessage.success('已保存（仅显式允许时才用云端）')
+    }
+  } catch (e) {
+    // 保存失败 → 回滚显示为实际生效值，避免"改了但没生效"的错觉
+    await loadCloudPolicy()
+  } finally {
+    policySaving.value = false
+  }
 }
 
 async function saveRole(role, patch) {

@@ -564,12 +564,14 @@ def update_role(db: Session, role_key: str, payload: dict, username: str) -> dic
     }
 
 
-def get_cloud_policy() -> dict:
+def get_cloud_policy(db: Session | None = None) -> dict:
     """读全局出域策略 + 受约束的云端 provider 清单（供界面展示与警示）。"""
     from app.services import llm_tiers
 
     return {
         "policy": llm_tiers.cloud_policy(),
+        "source": "db" if _policy_row_exists(db) else "env",
+        "updated_by": _policy_updated_by(db),
         "options": [
             {"value": "never", "label": "禁止出域",
              "desc": "云端完全不可用（数据绝对不出内网）"},
@@ -580,6 +582,78 @@ def get_cloud_policy() -> dict:
         ],
         "cloud_providers": _list_cloud_providers(),
     }
+
+
+def _policy_row_exists(db: Session | None) -> bool:
+    """DB 单行表是否已有策略行（决定界面显示"来源: 数据库/环境变量"）。"""
+    from app.core.database import SessionLocal
+    from app.models.llm_cloud_policy import LlmCloudPolicy, SINGLETON_ID
+
+    own = db is None
+    d = db or SessionLocal()
+    try:
+        return d.query(LlmCloudPolicy).filter(LlmCloudPolicy.id == SINGLETON_ID).first() is not None
+    except Exception:  # noqa: BLE001  表未迁移时视为无行
+        return False
+    finally:
+        if own:
+            d.close()
+
+
+def _policy_updated_by(db: Session | None) -> str | None:
+    """读策略行的最后修改人（界面展示审计线索）。"""
+    from app.core.database import SessionLocal
+    from app.models.llm_cloud_policy import LlmCloudPolicy, SINGLETON_ID
+
+    own = db is None
+    d = db or SessionLocal()
+    try:
+        row = d.query(LlmCloudPolicy).filter(LlmCloudPolicy.id == SINGLETON_ID).first()
+        return row.updated_by if row else None
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        if own:
+            d.close()
+
+
+def update_cloud_policy(db: Session, policy: str, username: str = "",
+                        require_confirm: bool | None = None) -> dict:
+    """写入出域策略（单行表 upsert）。
+
+    ⚠️ 这是**数据边界**的开关 —— 改为 auto 意味着本地失败会自动出网。
+       界面需对此明确警示（见 LlmProviders.vue 的说明文案）。
+    """
+    from fastapi import HTTPException
+
+    from app.models.llm_cloud_policy import (
+        SINGLETON_ID,
+        VALID_POLICIES,
+        LlmCloudPolicy,
+    )
+    from app.services import llm_tiers
+
+    v = (policy or "").strip().lower()
+    if v not in VALID_POLICIES:
+        raise HTTPException(400, f"非法策略: {policy}（可选: {', '.join(VALID_POLICIES)}）")
+
+    row = db.query(LlmCloudPolicy).filter(LlmCloudPolicy.id == SINGLETON_ID).first()
+    if row is None:
+        row = LlmCloudPolicy(id=SINGLETON_ID, policy=v, updated_by=(username or "")[:64] or None)
+        db.add(row)
+    else:
+        row.policy = v
+        row.updated_by = (username or "")[:64] or None
+    if require_confirm is not None:
+        row.require_confirm = require_confirm
+    db.commit()
+    db.refresh(row)
+
+    # 立即失效进程缓存 —— 否则最长 30s 内仍用旧策略（数据边界不可有窗口期）
+    llm_tiers.invalidate_policy_cache()
+    invalidate_cache()
+    logger.warning("[出域策略] 已变更(by=%s): %s", username or "-", v)
+    return get_cloud_policy(db)
 
 
 def _list_cloud_providers() -> list[dict]:

@@ -73,3 +73,9 @@ export function setLlmRoleMemberOrder(roleKey, providerCode, sortOrder) {
     sort_order: sortOrder,
   })
 }
+
+// 更新全局出域策略（2026-09-21 落库后可在界面直接切换，无需改 .env 重启）
+// ⚠️ 数据边界开关：auto 意味着本地失败会自动出网。
+export function updateCloudPolicy(payload) {
+  return request.put('/llm-providers/cloud-policy', payload)
+}

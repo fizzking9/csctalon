@@ -77,13 +77,62 @@ CLOUD_POLICY_EXPLICIT = "explicit_only"
 CLOUD_POLICY_AUTO = "auto"
 _ALLOWED_CLOUD_POLICIES = (CLOUD_POLICY_NEVER, CLOUD_POLICY_EXPLICIT, CLOUD_POLICY_AUTO)
 
+# ── 策略读取缓存（2026-09-21）────────────────────────────────────────
+# `cloud_policy()` 在每次 LLM 调用链构造时都会被调用，不宜每次都查库。
+# 用短 TTL 进程缓存；`update_cloud_policy()` 会主动失效。
+_POLICY_CACHE_TTL_S = 30.0
+_policy_cache: dict = {"at": 0.0, "value": None}
+
+
+def _read_policy_from_db() -> str | None:
+    """从 DB 单行表读策略；无行/异常返回 None（调用方回退 .env）。"""
+    import time
+
+    from app.core.database import SessionLocal
+
+    now = time.time()
+    if _policy_cache["value"] is not None and (now - _policy_cache["at"]) < _POLICY_CACHE_TTL_S:
+        return _policy_cache["value"]
+
+    db = None
+    try:
+        from app.models.llm_cloud_policy import LlmCloudPolicy, SINGLETON_ID
+        db = SessionLocal()
+        row = db.query(LlmCloudPolicy).filter(LlmCloudPolicy.id == SINGLETON_ID).first()
+        val = (row.policy or "").strip().lower() if row else None
+        _policy_cache["at"] = now
+        _policy_cache["value"] = val          # None 也缓存，避免每调用都查空表
+        return val
+    except Exception as e:  # noqa: BLE001  查库失败不阻塞业务，回退 .env
+        logger.debug("读 DB 出域策略失败(%s), 回退 .env", e)
+        return None
+    finally:
+        if db is not None:
+            db.close()
+
+
+def invalidate_policy_cache() -> None:
+    """策略变更后调用（管理界面保存时）。"""
+    _policy_cache["at"] = 0.0
+    _policy_cache["value"] = None
+
 
 def cloud_policy() -> str:
-    """读全局出域策略（非法值回退 explicit_only，保守优先）。"""
-    v = (getattr(settings, "LLM_CLOUD_POLICY", "") or "").strip().lower()
+    """读全局出域策略。
+
+    优先级（2026-09-21）:
+      1. DB 单行表 `llm_cloud_policy`（管理员界面可改，无需重启）
+      2. `settings.LLM_CLOUD_POLICY`（.env 兜底；DB 无行时）
+      3. 常量默认 explicit_only（保守）
+
+    非法值一律回退 explicit_only（保守优先：不放行，也不过度禁止）。
+    """
+    v = _read_policy_from_db()
+    if v is None:
+        v = (getattr(settings, "LLM_CLOUD_POLICY", "") or "").strip().lower()
     if v not in _ALLOWED_CLOUD_POLICIES:
         if v:
-            logger.warning("LLM_CLOUD_POLICY=%r 非法, 回退 explicit_only", v)
+            logger.warning("LLM 出域策略=%r 非法, 回退 explicit_only", v)
         return CLOUD_POLICY_EXPLICIT
     return v
 
