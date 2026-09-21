@@ -384,7 +384,9 @@ def update_provider(db: Session, provider_id: int, payload: LlmProviderUpdate, u
         row.api_key_cipher = encrypt_secret(new_key) if new_key else None
         row.api_key_prefix = (new_key or "")[:6] or None
     for field in ("name", "base_url", "model", "priority", "enabled", "pregen_only",
-                  "healthy", "thinking", "timeout_s", "retry_max", "fail_threshold", "note"):
+                  "healthy", "thinking", "timeout_s", "retry_max", "fail_threshold", "note",
+                  # 2026-09-21 出域管控 + 角色归属（界面可改）
+                  "is_cloud", "role_scope", "role_order"):
         if field in upd and upd[field] is not None:
             setattr(row, field, upd[field])
     row.updated_by = (username or "")[:64]
@@ -402,3 +404,98 @@ def delete_provider(db: Session, provider_id: int) -> bool:
     db.commit()
     invalidate_cache()
     return True
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 角色（能力档位）管理（2026-09-21 B2/B3）
+# ─────────────────────────────────────────────────────────────────────
+# 见 docs/design/20260921-模型角色分组与出域管控设计.md
+def list_roles(db: Session) -> list[dict]:
+    """角色列表 + 各角色成员（按 role_order 排序）+ 实际生效的调用链。
+
+    供管理界面按「助理/专员/专家」分区展示。
+    """
+    from app.models.llm_role_config import LlmRoleConfig
+    from app.services import llm_tiers
+
+    roles = db.query(LlmRoleConfig).order_by(LlmRoleConfig.tier_order).all()
+
+    # 成员：role_scope 命中的 provider（含禁用的，界面需看到以便启用）
+    members: dict[str, list] = {}
+    for p in db.query(LlmProvider).order_by(LlmProvider.role_order, LlmProvider.priority).all():
+        if p.role_scope:
+            members.setdefault(p.role_scope, []).append(p)
+
+    out = []
+    for r in roles:
+        rows = members.get(r.role_key, [])
+        out.append({
+            "role_key": r.role_key,
+            "display_name": r.display_name,
+            "description": r.description,
+            "rationale": r.rationale,
+            "enabled": r.enabled,
+            "allow_cloud": r.allow_cloud,
+            "tier_order": r.tier_order,
+            "members": [{
+                "id": p.id, "code": p.code, "name": p.name, "model": p.model,
+                "is_cloud": bool(p.is_cloud), "enabled": p.enabled, "healthy": p.healthy,
+                "role_order": p.role_order, "priority": p.priority,
+            } for p in rows],
+            # 实际生效链（含 DB/常量回退与云端过滤），供界面显示"当前会用谁"
+            "effective_chain": llm_tiers.resolve_tier(r.role_key, db=db),
+        })
+    return out
+
+
+def update_role(db: Session, role_key: str, payload: dict, username: str) -> dict:
+    """更新角色定义（开关/是否允许出域/文案）。成员顺序通过 update_provider 调整。"""
+    from fastapi import HTTPException
+
+    from app.models.llm_role_config import LlmRoleConfig
+
+    row = db.query(LlmRoleConfig).filter(LlmRoleConfig.role_key == role_key).first()
+    if not row:
+        raise HTTPException(404, f"角色不存在: {role_key}")
+
+    for field in ("display_name", "description", "rationale",
+                  "enabled", "allow_cloud", "tier_order"):
+        if field in payload and payload[field] is not None:
+            setattr(row, field, payload[field])
+    row.updated_by = (username or "")[:64]
+    db.commit()
+    db.refresh(row)
+    invalidate_cache()
+    return {
+        "role_key": row.role_key, "display_name": row.display_name,
+        "enabled": row.enabled, "allow_cloud": row.allow_cloud,
+    }
+
+
+def get_cloud_policy() -> dict:
+    """读全局出域策略 + 受约束的云端 provider 清单（供界面展示与警示）。"""
+    from app.services import llm_tiers
+
+    return {
+        "policy": llm_tiers.cloud_policy(),
+        "options": [
+            {"value": "never", "label": "禁止出域",
+             "desc": "云端完全不可用（数据绝对不出内网）"},
+            {"value": "explicit_only", "label": "仅显式允许",
+             "desc": "仅当用户/调用方明确要求时才用云端（推荐）"},
+            {"value": "auto", "label": "自动降级",
+             "desc": "本地失败时自动降级到云端（⚠️ 可能静默出域）"},
+        ],
+        "cloud_providers": _list_cloud_providers(),
+    }
+
+
+def _list_cloud_providers() -> list[dict]:
+    """列出标记为出域的 provider（供界面警示）。"""
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        rows = db.query(LlmProvider).filter(LlmProvider.is_cloud.is_(True)).all()
+        return [{"code": r.code, "model": r.model, "enabled": r.enabled} for r in rows]
+    finally:
+        db.close()

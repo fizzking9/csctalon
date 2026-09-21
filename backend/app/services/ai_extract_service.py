@@ -201,7 +201,9 @@ async def extract_section(db: Session, question: str, report: AiReport,
     try:
         result = await llm_client.chat_completion(
             messages, max_tokens=1200, timeout_s=60.0,
-            db=db, source="ai_extract", provider_code=llm_tiers.resolve_tier(_TIER),
+            db=db, source="ai_extract",
+            # 传 db → 优先用界面配置的角色成员；DB 无配置时回退源码常量
+            provider_code=llm_tiers.resolve_tier(_TIER, db=db),
         )
         result_md = str(result).strip()
         if not result_md:

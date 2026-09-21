@@ -15,6 +15,7 @@ from app.schemas.common import R
 from app.schemas.llm_provider import (
     LlmProviderCreate,
     LlmProviderUpdate,
+    LlmRoleUpdate,
     LlmTestConnRequest,
 )
 from app.services import llm_provider_service
@@ -126,3 +127,25 @@ def list_call_logs(
         ],
         "total": total, "page": page, "page_size": page_size,
     })
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 角色（能力档位）与出域策略（2026-09-21）
+# 见 docs/design/20260921-模型角色分组与出域管控设计.md
+# ─────────────────────────────────────────────────────────────────────
+@router.get("/roles", response_model=R, summary="角色列表（含成员与生效链）")
+def list_roles(db: DBSession, _: AdminUser):
+    """按「助理/专员/专家」分区展示，每区含成员（按 role_order）与实际生效调用链。"""
+    return R(data=llm_provider_service.list_roles(db))
+
+
+@router.put("/roles/{role_key}", response_model=R, summary="更新角色")
+def update_role(role_key: str, payload: LlmRoleUpdate, db: DBSession, me: AdminUser):
+    """更新角色开关/是否允许出域/文案。成员顺序改 provider 的 role_order。"""
+    return R(data=llm_provider_service.update_role(
+        db, role_key, payload.model_dump(exclude_unset=True), me.username))
+
+
+@router.get("/cloud-policy", response_model=R, summary="读全局出域策略")
+def get_cloud_policy(_: AdminUser):
+    return R(data=llm_provider_service.get_cloud_policy())

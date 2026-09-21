@@ -89,3 +89,17 @@ class LlmTestConnResult(BaseModel):
     duration_ms: int
     error: str | None = None
     sample: str | None = Field(None, description="成功时的样例输出(脱敏截断)")
+
+
+# ── 角色（能力档位）与出域策略（2026-09-21）──────────────────────────
+# 见 docs/design/20260921-模型角色分组与出域管控设计.md
+class LlmRoleUpdate(BaseModel):
+    """角色更新（成员顺序通过 provider 的 role_order 调整，不在此处）。"""
+
+    display_name: str | None = Field(None, min_length=1, max_length=32)
+    description: str | None = Field(None, max_length=255)
+    rationale: str | None = Field(None, max_length=512)
+    enabled: bool | None = Field(None, description="角色总开关")
+    allow_cloud: bool | None = Field(
+        None, description="该角色是否允许出域；与全局 LLM_CLOUD_POLICY 双重管控")
+    tier_order: int | None = Field(None, ge=0, le=9999)

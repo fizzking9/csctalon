@@ -158,7 +158,8 @@ def _load_overrides() -> dict[str, str]:
     return out
 
 
-def resolve_tier(tier: str, *, include_cloud: bool = False) -> list[str]:
+def resolve_tier(tier: str, *, include_cloud: bool = False,
+                 db=None) -> list[str]:
     """把档位名解析为 provider_code 链（首选 → 备选 → 云端兜底）。
 
     返回的顺序即尝试顺序；调用方把它交给 `chat_completion(provider_code=[...])`，
@@ -167,12 +168,29 @@ def resolve_tier(tier: str, *, include_cloud: bool = False) -> list[str]:
     参数:
       tier:          "assistant" / "specialist" / "expert"
       include_cloud: 调用方是否**显式要求**可出域。是否真正加入云端仍取决于
-                     `settings.LLM_CLOUD_POLICY`（never 时任何情况下都不加）。
-                     见 `cloud_allowed()`。
+                     `settings.LLM_CLOUD_POLICY`（never 时任何情况下都不加），
+                     以及角色级 `allow_cloud`（2026-09-21 新增，双重管控）。
+      db:            可选 Session。传入时**优先读 DB 的角色配置**（管理员可在界面调整）；
+                     未传或 DB 无配置时回退本文件的常量（保证首次部署即生效）。
 
     返回:
       provider_code 列表；档位名非法时返回 []（调用方将走默认链，不抛异常）。
     """
+    # ── 优先读 DB（2026-09-21 B2）──
+    if db is not None:
+        try:
+            from_db = _resolve_from_db(db, tier)
+            if from_db is not None:
+                chain, role_allow_cloud = from_db
+                if not chain:
+                    logger.warning("DB 中档位 %s 无启用成员, 回退源码常量", tier)
+                else:
+                    return _append_cloud(chain, tier, include_cloud,
+                                         role_allow_cloud=role_allow_cloud)
+        except Exception as e:  # noqa: BLE001  查库失败不阻塞业务, 回退常量
+            logger.warning("读取 DB 档位配置失败(%s), 回退源码常量", e)
+
+    # ── 回退: 源码常量（首次部署即生效）──
     spec = TIERS.get(tier)
     if not spec:
         logger.warning("未知 LLM 档位=%s, 回退默认链（可选: %s）", tier, list(TIERS))
@@ -185,15 +203,60 @@ def resolve_tier(tier: str, *, include_cloud: bool = False) -> list[str]:
     chain = [override or spec["primary"]]
     if spec.get("secondary"):
         chain.append(spec["secondary"])
+    return _append_cloud(chain, tier, include_cloud, role_allow_cloud=None)
 
-    # 云端兜底: 受出域策略管控（不再无条件加入）
-    if CLOUD_FALLBACK and CLOUD_FALLBACK not in chain:
-        if cloud_allowed(explicit=include_cloud):
-            chain.append(CLOUD_FALLBACK)
-        else:
-            logger.info(
-                "档位 %s 未加入云端兜底 %s（策略=%s, 显式请求=%s）",
-                tier, CLOUD_FALLBACK, cloud_policy(), include_cloud)
+
+def _resolve_from_db(db, tier: str) -> tuple[list[str], bool] | None:
+    """从 DB 读角色配置，返回 (provider_code 链, 角色是否允许出域)。
+
+    返回 None 表示 DB 中无该角色配置（调用方回退源码常量）。
+    角色 `enabled=false` 时同样返回 None（视为"未配置"，回退默认链）。
+
+    角色成员 = llm_providers 中 role_scope=<tier> 且 enabled+healthy 者，
+    按 role_order 升序（小=先尝试），再按 priority 兜底排序。
+    """
+    from app.models.llm_provider import LlmProvider
+    from app.models.llm_role_config import LlmRoleConfig
+
+    role = db.query(LlmRoleConfig).filter(
+        LlmRoleConfig.role_key == tier).first()
+    if role is None or not role.enabled:
+        return None
+
+    rows = db.query(LlmProvider).filter(
+        LlmProvider.role_scope == tier,
+        LlmProvider.enabled.is_(True),
+        LlmProvider.healthy.is_(True),
+    ).order_by(LlmProvider.role_order, LlmProvider.priority).all()
+
+    chain = [r.code for r in rows]
+    return chain, bool(role.allow_cloud)
+
+
+def _append_cloud(chain: list[str], tier: str, include_cloud: bool,
+                  *, role_allow_cloud: bool | None) -> list[str]:
+    """按策略决定是否把云端兜底追加到链尾。
+
+    双重管控（2026-09-21）:
+      1. 全局 settings.LLM_CLOUD_POLICY（never 时任何情况都不加）
+      2. 角色级 allow_cloud（DB 显式 false 时不加；None=未配置, 不阻拦）
+
+    任一为"不允许"即不加 —— 数据边界取交集，保守优先。
+    """
+    if not CLOUD_FALLBACK or CLOUD_FALLBACK in chain:
+        return chain
+
+    if not cloud_allowed(explicit=include_cloud):
+        logger.info("档位 %s 未加入云端兜底（全局策略=%s, 显式请求=%s）",
+                    tier, cloud_policy(), include_cloud)
+        return chain
+
+    # 角色级闸门: DB 显式配置 false 时阻拦（None=未配置则不阻拦）
+    if role_allow_cloud is False:
+        logger.info("档位 %s 未加入云端兜底（角色级 allow_cloud=false）", tier)
+        return chain
+
+    chain.append(CLOUD_FALLBACK)
     return chain
 
 
