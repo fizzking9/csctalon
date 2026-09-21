@@ -6,8 +6,9 @@
 - 候选取前 5 条(避免 LLM 输入过长), 每条 question + answer_md 前 200 字摘要
 
 LLM 调用约束:
-- provider_code=_SEMANTIC_PROVIDER_CODE
-  ⚠️ 2026-09-20 由 qwen2.5:7b 改为 qwen3.8:27b（实测 7b 5/5 全错，见下方常量注释）
+- provider_code=llm_tiers.resolve_tier("assistant") —— 能力档位链（首选→备选→云端兜底）
+  ⚠️ 2026-09-20 档位内首选由 qwen2.5:7b 改为 qwen3-coder:30b
+     （实测 7b 在本任务 5/5 全错，见文件末尾常量注释）
 - timeout_s=60(前台实时问答用户在等)
 - max_tokens=200(只输出 JSON 数组, 短)
 - LLM 输出 JSON: [{index, confidence, reason}], confidence∈[0,1]
@@ -24,11 +25,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.ai_report import AiReport
-from app.services import llm_client
+from app.services import llm_client, llm_tiers
 
 logger = logging.getLogger(__name__)
 
-# ⚠️ 2026-09-20 修正（实测推翻 #145 的选型）:
+# ⚠️ 2026-09-20 修正（实测推翻 #145 的选型）——见 llm_tiers 档位声明
 #   #145 原选 7b 的理由是"封闭分类任务, 7b 足够"，但**实测证伪**:
 #   用生产真实 prompt 格式复现 5 轮，qwen2.5:7b **5/5 全部返回 confidence=0.0**
 #   （理由自相矛盾: "候选报告均未涉及退款原因" —— 而摘要里明写「退款原因以网络故障为主」）
@@ -40,10 +41,10 @@ logger = logging.getLogger(__name__)
 #     qwen3-coder:30b  ✅ 6/6 全对（命中 0.8~0.9 / 闲聊 0.0），且快 3x（1.4s vs 6s）
 #     qwen3.8:27b      ✅ 5/5 全对（0.95，最稳）
 #
-#   选型: qwen3-coder:30b —— 实测置信度(0.8~0.9) 远高于阈值 0.6，且速度快 3 倍。
-#   （27b 亦可用，但当前该 provider 在生产中 enabled=false）
-#   完整矩阵见 talon 仓库 docs/reports/模型能力矩阵与任务分流-20260920.md
-_SEMANTIC_PROVIDER_CODE = "talon-gmk-qwen3-coder-30b"
+#   2026-09-21: 不再硬编码 provider_code，改走**能力档位**（llm_tiers）。
+#   语义匹配属「速度优先、非数值」任务 → 档位 = assistant（助理）。
+#   档位内部已声明首选/备选/云端兜底，调整选型只需改 llm_tiers.py。
+_TIER = "assistant"
 
 # confidence 阈值(架构文档 §4.3: 默认 0.6; 可通过 settings.AI_SEMANTIC_MATCH_THRESHOLD 配置)
 _DEFAULT_THRESHOLD = 0.6
@@ -112,7 +113,7 @@ async def semantic_match(db: Session, question: str,
     try:
         result = await llm_client.chat_completion(
             messages, max_tokens=200, timeout_s=60.0,
-            db=db, source="ai_semantic", provider_code=_SEMANTIC_PROVIDER_CODE,
+            db=db, source="ai_semantic", provider_code=llm_tiers.resolve_tier(_TIER),
         )
         text = str(result).strip()
         # 兼容 ```json 包裹的输出

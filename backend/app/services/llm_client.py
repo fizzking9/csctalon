@@ -274,7 +274,7 @@ async def chat_completion(
     transport: httpx.AsyncBaseTransport | None = None,
     db: Session | None = None,
     source: str | None = None,
-    provider_code: str | None = None,
+    provider_code: "str | list[str] | None" = None,
 ) -> LLMResult:
     """调用 chat/completions 返回文本内容。
 
@@ -282,8 +282,10 @@ async def chat_completion(
 
     DB 模式:
       - 默认链: 按 priority 升序遍历 enabled+healthy 且非 pregen_only 的 Provider
-      - #131 provider_code 非空(报告预生成): 指定 provider 置顶, 其后保留常规链
+      - #131 provider_code 为 str(报告预生成): 指定 provider 置顶, 其后保留常规链
         作 transient 降级兜底(pregen_only 的慢模型只对显式指定可见)
+      - 2026-09-21 provider_code 为 list(能力档位): 首选 → 备选 → 云端兜底,
+        按序置顶且逐个跳过不可用者; 由 `llm_tiers.resolve_tier()` 生成
       - transient 错误(5xx/429/超时/连接错) 降级下一个 Provider
       - permanent 错误(4xx) 立即抛 LLMError
       - 全部 Provider 失败 → 抛 LLMError(聚合所有错误信息)
@@ -298,6 +300,7 @@ async def chat_completion(
     db 仅供 DB 模式; None 走 .env 模式(向后兼容)。
     source 用于审计日志来源(如 ai_analyze / llm_time_parse)。
     provider_code 用于预生成按模板指定专用慢模型(#131); None 走实时默认链。
+    2026-09-21: 也接受 list[str] 表达能力档位链(首选/备选/兜底), 见 app/services/llm_tiers.py。
 
     返回 LLMResult(继承 str, 旧调用零侵入): `.usage` 取 token 统计(工单 #116)。
     """

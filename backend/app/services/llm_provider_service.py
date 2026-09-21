@@ -84,27 +84,49 @@ def get_active_providers(db: Session) -> list[dict]:
     return [p for p in _load_active_providers(db) if not p.get("pregen_only")]
 
 
-def get_provider_chain(db: Session, provider_code: str | None = None) -> list[dict]:
-    """构造本次调用的 Provider 链(#131)。
+def get_provider_chain(db: Session, provider_code: "str | list[str] | None" = None) -> list[dict]:
+    """构造本次调用的 Provider 链(#131; 2026-09-21 支持能力档位链)。
 
     - provider_code 为空: 返回实时默认链(排除 pregen_only)。
-    - provider_code 非空(报告预生成按模板指定):
+    - provider_code 为 str(报告预生成按模板指定):
       * 命中 enabled+healthy 的指定 provider → 置顶, 其后接常规链作 transient 降级兜底;
       * 未命中/已停用/不健康 → 退回常规链(预生成不因慢模型暂时不可用而硬失败)。
+    - provider_code 为 list(能力档位: 首选 → 备选 → 云端兜底, 见 llm_tiers):
+      * 按列表顺序取出所有可用者置顶(保持声明顺序), 其后接常规链兜底;
+      * 列表内不可用者逐个跳过并记日志, 不因个别缺失而放弃整条链。
 
-    顺序: [指定 provider(若可用)] + [其余非 pregen_only provider, priority 升序]。
+    顺序: [指定的可用 provider(按给定顺序)] + [其余非 pregen_only provider, priority 升序]。
+
+    向后兼容: 单字符串行为与旧实现完全一致。
     """
     full = _load_active_providers(db)
     normal = [p for p in full if not p.get("pregen_only")]
     if not provider_code:
         return normal
-    designated = [p for p in full if p["code"] == provider_code]
-    if not designated:
-        logger.warning(
-            "provider_code=%s 未启用/不存在/不健康, 预生成退回常规 provider 链", provider_code)
+
+    # 归一为列表（单字符串 → [字符串]），两种调用方式共用后续逻辑
+    codes = [provider_code] if isinstance(provider_code, str) else list(provider_code)
+    codes = [c for c in codes if c]
+    if not codes:
         return normal
-    first = designated[0]
-    return [first] + [p for p in normal if p["id"] != first["id"]]
+
+    by_code = {p["code"]: p for p in full}
+    designated: list[dict] = []
+    for c in codes:
+        p = by_code.get(c)
+        if p is None:
+            logger.warning("provider_code=%s 未启用/不存在/不健康, 跳过", c)
+            continue
+        if all(p["id"] != d["id"] for d in designated):
+            designated.append(p)
+
+    if not designated:
+        # 全部缺失（如档位声明的模型都没启用）→ 退回常规链, 保证不硬失败
+        logger.warning("provider 链 %s 全部不可用, 退回常规链", codes)
+        return normal
+
+    picked_ids = {d["id"] for d in designated}
+    return designated + [p for p in normal if p["id"] not in picked_ids]
 
 
 def invalidate_cache() -> None:

@@ -6,8 +6,8 @@
 - extract_section(db, question, report, template) -> dict: 关键词路由 scope → 段落
   → 调轻量 qwen2.5:7b(经 talon, #145)摘取+排版
 
-LLM 调用约束(#145 改指轻量模型, 消除大模型冷加载超时):
-- provider_code=_EXTRACT_PROVIDER_CODE(talon-gmk-qwen2.5:7b, 经 talon 统一管理接入)
+LLM 调用约束(2026-09-21 改用能力档位):
+- provider_code=llm_tiers.resolve_tier("assistant") —— 首选 coder-30b / 备选 7b / 云端兜底
 - timeout_s=60(前台实时问答用户在等, 超时返回 clarify 兜底)
 - max_tokens=1200(摘取输出比生成全文短, 1200 足够)
 - LLM 指令铁律: 基于给定段落内容摘取+排版, 禁止编造/外推/添加未在段落中出现的数据
@@ -23,16 +23,17 @@ from sqlalchemy.orm import Session
 
 from app.models.ai_report import AiReport
 from app.models.ai_report_template import AiReportTemplate
-from app.services import llm_client
+from app.services import llm_client, llm_tiers
 from app.services.ai_focus_service import keywords_to_scopes
 from app.services.ai_report_matcher import _count_keyword_hits  # #144 复用, 全树统一口径
 
 logger = logging.getLogger(__name__)
 
-# #145 语义摘取走轻量模型(经 talon 统一管理接入): 我们的 tag 归纳聚合后含义封闭不发散,
-#   7B 小模型足够裁切给定段落, 且已在内存(GMK 5.7G/100%GPU)秒回, 不经 27b 冷加载超时。
-#   实时问答仍走 27b(深度分析); 摘取/语义匹配统一指定此 provider_code。
-_EXTRACT_PROVIDER_CODE = "talon-gmk-qwen2.5-7b"
+# 2026-09-21: 不再硬编码 provider_code，改走**能力档位**（llm_tiers）。
+# 摘取排版 = 速度优先、非数值任务（实测 7b / coder-30b 均能正确保留数字）→ assistant。
+# ⚠️ 与 ai_semantic_matcher 属同一档位但需求相反（那边 7b 实测全错）——
+#    档位内「首选 coder-30b / 备选 7b」两者均能胜任本任务，故共用档位无问题。
+_TIER = "assistant"
 
 # H2 锚点(与 #134 _SYSTEM_PROMPT 第 3 条一致; 周报/月报必须按这 5 个锚点结构化)
 H2_ANCHORS = ["## 接待分析", "## 退款分析", "## 投诉分析", "## 趋势对比", "## 结论建议"]
@@ -200,7 +201,7 @@ async def extract_section(db: Session, question: str, report: AiReport,
     try:
         result = await llm_client.chat_completion(
             messages, max_tokens=1200, timeout_s=60.0,
-            db=db, source="ai_extract", provider_code=_EXTRACT_PROVIDER_CODE,
+            db=db, source="ai_extract", provider_code=llm_tiers.resolve_tier(_TIER),
         )
         result_md = str(result).strip()
         if not result_md:
