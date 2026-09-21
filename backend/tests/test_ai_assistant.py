@@ -27,6 +27,32 @@ from app.services.ai_task_manager import ai_task_manager
 _TZ = None
 
 
+@pytest.fixture(autouse=True)
+def _allow_env_egress(monkeypatch):
+    """放行 `.env` 兜底通道的出域检查（仅测试内）
+
+    ## 为什么需要（2026-09-21）
+
+    `llm_client._call_env_single` 增加了一道出域防护：`LLM_BASE_URL` 指向
+    内网之外时，若出域策略不允许则**拒绝调用**（堵住「DB 无 provider 时
+    静默直连公网」这条后门）。
+
+    本文件多个用例**故意**用公网 URL（`https://mock.deepseek.com` /
+    `https://www.deepseek.com`）来测 `.env` 单源通道，
+    于是被防护正确拦下 —— 用例失败的原因是**缺策略前提**，不是逻辑错。
+
+    ⚠️ 这里用 `auto` 而非改 URL：这些用例验的就是「公网端点的调用链」，
+       换成内网 URL 会让测试失去原本的覆盖意义（测不到真实分支）。
+    """
+    from app.services import llm_tiers
+    monkeypatch.setattr(settings, "LLM_CLOUD_POLICY", "auto")
+    monkeypatch.setattr(llm_tiers, "_policy_cache",
+                        {"at": 0.0, "value": None}, raising=False)
+    yield
+    # 恢复缓存，避免影响后续用例读到本 fixture 写入的值
+    llm_tiers.invalidate_policy_cache()
+
+
 @pytest.fixture()
 def manager_client(db, monkeypatch):
     """带 manager 用户的 TestClient(admin ∈ MANAGER_ROLES)。"""
