@@ -15,6 +15,8 @@ from app.schemas.common import R
 from app.schemas.llm_provider import (
     LlmProviderCreate,
     LlmProviderUpdate,
+    LlmRoleMemberAdd,
+    LlmRoleMemberOrder,
     LlmRoleUpdate,
     LlmTestConnRequest,
 )
@@ -149,3 +151,35 @@ def update_role(role_key: str, payload: LlmRoleUpdate, db: DBSession, me: AdminU
 @router.get("/cloud-policy", response_model=R, summary="读全局出域策略")
 def get_cloud_policy(_: AdminUser):
     return R(data=llm_provider_service.get_cloud_policy())
+
+
+# ── 角色成员（关联表，支持一模型多角色）────────────────────────────────
+# 2026-09-21: 原用 llm_providers.role_scope 单值列，实测证伪（coder-30b
+# 需同属 assistant 与 specialist）。改为关联表后，同一 provider 在不同
+# 角色中的顺序互相独立。
+@router.post("/roles/{role_key}/members", response_model=R, summary="把 Provider 加入角色")
+def add_role_member(role_key: str, payload: LlmRoleMemberAdd, db: DBSession, me: AdminUser):
+    return R(data=llm_provider_service.add_role_member(
+        db, role_key, payload.provider_code, payload.sort_order or 100, me.username))
+
+
+@router.delete("/roles/{role_key}/members/{provider_code}", response_model=R,
+               summary="把 Provider 移出角色（不删 Provider）")
+def remove_role_member(role_key: str, provider_code: str, db: DBSession, _: AdminUser):
+    ok = llm_provider_service.remove_role_member(db, role_key, provider_code)
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(404, "该角色中不存在此成员")
+    return R(data={"ok": True})
+
+
+@router.patch("/roles/{role_key}/members/{provider_code}", response_model=R,
+              summary="调整成员在本角色内的顺序")
+def set_role_member_order(role_key: str, provider_code: str, payload: LlmRoleMemberOrder,
+                          db: DBSession, me: AdminUser):
+    ok = llm_provider_service.set_role_member_order(
+        db, role_key, provider_code, payload.sort_order, me.username)
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(404, "该角色中不存在此成员")
+    return R(data={"ok": True})

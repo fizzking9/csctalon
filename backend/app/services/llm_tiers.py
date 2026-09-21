@@ -212,24 +212,51 @@ def _resolve_from_db(db, tier: str) -> tuple[list[str], bool] | None:
     返回 None 表示 DB 中无该角色配置（调用方回退源码常量）。
     角色 `enabled=false` 时同样返回 None（视为"未配置"，回退默认链）。
 
-    角色成员 = llm_providers 中 role_scope=<tier> 且 enabled+healthy 者，
-    按 role_order 升序（小=先尝试），再按 priority 兜底排序。
+    ⚠️ 2026-09-21 改为读**关联表** `llm_role_members`（支持一模型多角色）。
+      原用 `llm_providers.role_scope` 单值列，部署后即被实测证伪 ——
+      `qwen3-coder:30b` 需同时服务 assistant(首选) 与 specialist(备选)，
+      单值列下相互覆盖，导致 assistant 降级为实测已知会错的 `qwen2.5:7b`。
+      旧列保留为**兜底**（新表无该角色记录时才读），一个版本后删除。
     """
     from app.models.llm_provider import LlmProvider
     from app.models.llm_role_config import LlmRoleConfig
+    from app.models.llm_role_member import LlmRoleMember
 
     role = db.query(LlmRoleConfig).filter(
         LlmRoleConfig.role_key == tier).first()
     if role is None or not role.enabled:
         return None
 
-    rows = db.query(LlmProvider).filter(
-        LlmProvider.role_scope == tier,
-        LlmProvider.enabled.is_(True),
-        LlmProvider.healthy.is_(True),
-    ).order_by(LlmProvider.role_order, LlmProvider.priority).all()
+    # ① 优先: 关联表（多对多，正确支持一模型多角色）
+    members = db.query(LlmRoleMember).filter(
+        LlmRoleMember.role_key == tier,
+        LlmRoleMember.enabled.is_(True),
+    ).order_by(LlmRoleMember.sort_order).all()
 
-    chain = [r.code for r in rows]
+    chain: list[str] = []
+    if members:
+        # 只保留 enabled + healthy 的 provider（成员表存的是 code 快照）
+        codes = [m.provider_code for m in members]
+        alive = {
+            p.code for p in db.query(LlmProvider).filter(
+                LlmProvider.code.in_(codes),
+                LlmProvider.enabled.is_(True),
+                LlmProvider.healthy.is_(True),
+            ).all()
+        }
+        chain = [c for c in codes if c in alive]
+        if not chain:
+            logger.warning("档位 %s 关联表成员均不可用(禁用/不健康), 尝试旧列兜底", tier)
+
+    # ② 兜底: 旧单值列（兼容迁移前配置，一个版本后删除）
+    if not chain:
+        rows = db.query(LlmProvider).filter(
+            LlmProvider.role_scope == tier,
+            LlmProvider.enabled.is_(True),
+            LlmProvider.healthy.is_(True),
+        ).order_by(LlmProvider.role_order, LlmProvider.priority).all()
+        chain = [r.code for r in rows]
+
     return chain, bool(role.allow_cloud)
 
 

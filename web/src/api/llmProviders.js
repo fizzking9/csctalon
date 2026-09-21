@@ -56,3 +56,20 @@ export function updateLlmRole(roleKey, payload) {
 export function getCloudPolicy() {
   return request.get('/llm-providers/cloud-policy')
 }
+
+// ── 角色成员（关联表，支持一模型多角色）─────────────────────────────
+// 2026-09-21: 原用 provider.role_scope 单值列，实测证伪（coder-30b 需同属
+// assistant 与 specialist）。改关联表后，同一 provider 在不同角色中的顺序独立。
+export function addLlmRoleMember(roleKey, payload) {
+  return request.post(`/llm-providers/roles/${roleKey}/members`, payload)
+}
+
+export function removeLlmRoleMember(roleKey, providerCode) {
+  return request.delete(`/llm-providers/roles/${roleKey}/members/${providerCode}`)
+}
+
+export function setLlmRoleMemberOrder(roleKey, providerCode, sortOrder) {
+  return request.patch(`/llm-providers/roles/${roleKey}/members/${providerCode}`, {
+    sort_order: sortOrder,
+  })
+}

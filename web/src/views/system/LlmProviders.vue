@@ -415,6 +415,7 @@ import {
   listLlmProviders, createLlmProvider, updateLlmProvider, deleteLlmProvider,
   testLlmConnection, testExistingLlm, listLlmCallLogs,
   listLlmRoles, updateLlmRole, getCloudPolicy,
+  removeLlmRoleMember, setLlmRoleMemberOrder,
 } from '@/api/llmProviders'
 
 const loading = ref(false)
@@ -527,35 +528,39 @@ async function saveRole(role, patch) {
   }
 }
 
-/** 调整角色内成员顺序（改 role_order，小=先尝试）。 */
+/** 调整角色内成员顺序（改关联表 sort_order，小=先尝试）。
+ *
+ * ⚠️ 2026-09-21: 改用关联表接口 —— 同一 provider 可在多个角色中有**独立**顺序
+ *   （如 coder-30b 在 assistant 是首选、在 specialist 是备选）。
+ *   旧实现改的是 provider.role_order 单值列，会互相覆盖（已实测证伪）。
+ */
 async function moveMember(role, member, delta) {
   const list = role.members
   const idx = list.findIndex((m) => m.id === member.id)
   const target = idx + delta
   if (target < 0 || target >= list.length) return
-  // 与相邻成员交换 role_order（用当前值±1 会造成并列，故取相邻者的值再重排）
   const a = list[idx]
   const b = list[target]
-  const newA = b.role_order
+  // 交换两者顺序；若值相同用序号强制拉开
+  let newA = b.role_order
   const newB = a.role_order
-  // 若两者值相同（并列），用序号强制区分
-  const applyA = newA === newB ? (delta < 0 ? newB - 1 : newB + 1) : newA
+  if (newA === newB) newA = delta < 0 ? newB - 1 : newB + 1
   try {
     await Promise.all([
-      updateLlmProvider(a.id, { role_order: applyA }),
-      updateLlmProvider(b.id, { role_order: newB }),
+      setLlmRoleMemberOrder(role.role_key, a.code, newA),
+      setLlmRoleMemberOrder(role.role_key, b.code, newB),
     ])
     ElMessage.success('顺序已调整')
-    await Promise.all([loadRoles(), load()])
+    await loadRoles()
   } catch (e) { /* 拦截器已提示 */ }
 }
 
-/** 把成员移出角色（置 role_scope 为空，不删 Provider）。 */
+/** 把成员移出角色（仅解除关联，**不删 Provider**）。 */
 async function removeMember(role, member) {
   try {
-    await updateLlmProvider(member.id, { role_scope: '' })
+    await removeLlmRoleMember(role.role_key, member.code)
     ElMessage.success('已移出角色（Provider 本身保留）')
-    await Promise.all([loadRoles(), load()])
+    await loadRoles()
   } catch (e) { /* 拦截器已提示 */ }
 }
 

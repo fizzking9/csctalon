@@ -103,3 +103,16 @@ class LlmRoleUpdate(BaseModel):
     allow_cloud: bool | None = Field(
         None, description="该角色是否允许出域；与全局 LLM_CLOUD_POLICY 双重管控")
     tier_order: int | None = Field(None, ge=0, le=9999)
+
+
+class LlmRoleMemberAdd(BaseModel):
+    """把 Provider 加入角色。"""
+
+    provider_code: str = Field(..., min_length=1, max_length=64)
+    sort_order: int | None = Field(None, ge=0, le=9999, description="角色内顺序(小=先)")
+
+
+class LlmRoleMemberOrder(BaseModel):
+    """调整成员在本角色内的顺序。"""
+
+    sort_order: int = Field(..., ge=0, le=9999)

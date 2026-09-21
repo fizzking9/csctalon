@@ -411,24 +411,55 @@ def delete_provider(db: Session, provider_id: int) -> bool:
 # ─────────────────────────────────────────────────────────────────────
 # 见 docs/design/20260921-模型角色分组与出域管控设计.md
 def list_roles(db: Session) -> list[dict]:
-    """角色列表 + 各角色成员（按 role_order 排序）+ 实际生效的调用链。
+    """角色列表 + 各角色成员（按 sort_order）+ 实际生效的调用链。
 
     供管理界面按「助理/专员/专家」分区展示。
+
+    ⚠️ 2026-09-21 改为读**关联表** `llm_role_members`（支持一模型多角色）。
+      旧 `llm_providers.role_scope` 单值列作兜底（新表无记录时）。
     """
     from app.models.llm_role_config import LlmRoleConfig
+    from app.models.llm_role_member import LlmRoleMember
     from app.services import llm_tiers
 
     roles = db.query(LlmRoleConfig).order_by(LlmRoleConfig.tier_order).all()
 
-    # 成员：role_scope 命中的 provider（含禁用的，界面需看到以便启用）
+    # 关联表成员（含禁用的，界面需看到以便启用）
+    member_rows = db.query(LlmRoleMember).order_by(
+        LlmRoleMember.role_key, LlmRoleMember.sort_order).all()
+    by_code = {p.code: p for p in db.query(LlmProvider).all()}
+
     members: dict[str, list] = {}
-    for p in db.query(LlmProvider).order_by(LlmProvider.role_order, LlmProvider.priority).all():
+    for m in member_rows:
+        p = by_code.get(m.provider_code)
+        if p is None:
+            continue          # provider 已删（关联表留孤儿行，界面忽略）
+        members.setdefault(m.role_key, []).append((m, p))
+
+    # 兜底: 旧单值列（迁移前配置；新表有记录则忽略）
+    legacy: dict[str, list] = {}
+    for p in db.query(LlmProvider).order_by(
+            LlmProvider.role_order, LlmProvider.priority).all():
         if p.role_scope:
-            members.setdefault(p.role_scope, []).append(p)
+            legacy.setdefault(p.role_scope, []).append(p)
 
     out = []
     for r in roles:
-        rows = members.get(r.role_key, [])
+        rows = members.get(r.role_key)
+        if rows:
+            member_list = [{
+                "id": p.id, "code": p.code, "name": p.name, "model": p.model,
+                "is_cloud": bool(p.is_cloud), "enabled": p.enabled, "healthy": p.healthy,
+                # 对外仍暴露 role_order 字段名（前端无需感知表结构变更）
+                "role_order": m.sort_order, "priority": p.priority,
+            } for m, p in rows]
+        else:
+            member_list = [{
+                "id": p.id, "code": p.code, "name": p.name, "model": p.model,
+                "is_cloud": bool(p.is_cloud), "enabled": p.enabled, "healthy": p.healthy,
+                "role_order": p.role_order, "priority": p.priority,
+            } for p in legacy.get(r.role_key, [])]
+
         out.append({
             "role_key": r.role_key,
             "display_name": r.display_name,
@@ -437,15 +468,76 @@ def list_roles(db: Session) -> list[dict]:
             "enabled": r.enabled,
             "allow_cloud": r.allow_cloud,
             "tier_order": r.tier_order,
-            "members": [{
-                "id": p.id, "code": p.code, "name": p.name, "model": p.model,
-                "is_cloud": bool(p.is_cloud), "enabled": p.enabled, "healthy": p.healthy,
-                "role_order": p.role_order, "priority": p.priority,
-            } for p in rows],
+            "members": member_list,
             # 实际生效链（含 DB/常量回退与云端过滤），供界面显示"当前会用谁"
             "effective_chain": llm_tiers.resolve_tier(r.role_key, db=db),
         })
     return out
+
+
+def set_role_member_order(db: Session, role_key: str, provider_code: str,
+                          sort_order: int, username: str = "") -> bool:
+    """调整某成员在某角色内的兜底顺序（界面上下箭头调用）。
+
+    仅改关联表；**不影响该 provider 在其他角色中的顺序** —— 这正是关联表
+    相对旧单值列的核心价值（coder-30b 在 assistant 与 specialist 中的位置独立）。
+    """
+    from app.models.llm_role_member import LlmRoleMember
+
+    row = db.query(LlmRoleMember).filter(
+        LlmRoleMember.role_key == role_key,
+        LlmRoleMember.provider_code == provider_code,
+    ).first()
+    if not row:
+        return False
+    row.sort_order = sort_order
+    db.commit()
+    invalidate_cache()
+    return True
+
+
+def add_role_member(db: Session, role_key: str, provider_code: str,
+                    sort_order: int = 100, username: str = "") -> dict:
+    """把 provider 加入角色（多对多，可重复加入不同角色）。"""
+    from fastapi import HTTPException
+
+    from app.models.llm_role_config import LlmRoleConfig
+    from app.models.llm_role_member import LlmRoleMember
+
+    if not db.query(LlmRoleConfig).filter(LlmRoleConfig.role_key == role_key).first():
+        raise HTTPException(404, f"角色不存在: {role_key}")
+    if not db.query(LlmProvider).filter(LlmProvider.code == provider_code).first():
+        raise HTTPException(404, f"Provider 不存在: {provider_code}")
+
+    exists = db.query(LlmRoleMember).filter(
+        LlmRoleMember.role_key == role_key,
+        LlmRoleMember.provider_code == provider_code,
+    ).first()
+    if exists:
+        return {"ok": True, "existed": True}
+
+    db.add(LlmRoleMember(role_key=role_key, provider_code=provider_code,
+                         sort_order=sort_order, enabled=True))
+    db.commit()
+    invalidate_cache()
+    return {"ok": True, "existed": False}
+
+
+def remove_role_member(db: Session, role_key: str, provider_code: str) -> bool:
+    """把 provider 从角色移出（仅解除关联，**不删 provider**）。"""
+    from app.models.llm_role_member import LlmRoleMember
+
+    row = db.query(LlmRoleMember).filter(
+        LlmRoleMember.role_key == role_key,
+        LlmRoleMember.provider_code == provider_code,
+    ).first()
+    if not row:
+        return False
+    db.delete(row)
+    db.commit()
+    invalidate_cache()
+    return True
+
 
 
 def update_role(db: Session, role_key: str, payload: dict, username: str) -> dict:
