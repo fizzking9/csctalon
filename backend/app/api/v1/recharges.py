@@ -2,8 +2,10 @@
 
 两种口径:
 1. /device-combos/local - 基于本库已同步的 device_combos 表查询(离线/报表用途)
-2. /recharges/upstream 和 /traffic/upstream - 上游实时查询占位(需你提供真实 BMS/运营商/支付
-   接口文档或抓包数据后在 _upstream_* 函数内填充)
+2. /traffic/upstream - 上游实时流量查询(已接入真实 BMS 设备流量上游)
+
+#185 清理: 原 /recharges/upstream(充值订单上游查询)为长期未接入的占位接口(返回空列表+_hint),
+   一直无真实接口文档支撑, 已连同前端禁用按钮一并删除。保留已真实接入的 /traffic/upstream。
 
 所有接口支持按设备 SN / 商户 / 时间范围筛选,统一返回 {items, total, summary}。
 """
@@ -195,20 +197,7 @@ def local_combo_by_sn(sn: str, db: DBSession, _: CurrentUser, limit: int = Query
     return R(data={"summary": summary, "items": [_serialize_combo(r) for r in rows]})
 
 
-# ---------- 上游实时接口(占位,等提供真实接口文档/抓包后填充) ----------
-
-def _upstream_query_recharges(params: dict) -> list[dict]:
-    """TODO: 真实充值订单上游查询。
-
-    预期行为:
-      - 根据 sn / 商户 / 时间范围调用 BMS 或运营商 HTTP API
-      - 统一映射为 { recharge_order_no, device_sn, merchant_name, package_name,
-          actual_amount, paid_at, status, source } 结构
-      - 失败时抛出 HTTPException(502, detail=上游错误)
-    """
-    # 占位实现:返回空列表 + 提示,便于前端/调用方联调
-    return []
-
+# ---------- 上游实时接口 ----------
 
 def _upstream_query_traffic(db, params: dict) -> dict | None:
     """真实流量查询: 套餐快照(本地 device_combos) + 月流量使用(本地 device_flow_usage).
@@ -343,40 +332,7 @@ def _upstream_query_traffic(db, params: dict) -> dict | None:
     }
 
 
-@router.get("/upstream", response_model=R, summary="[占位]上游-实时充值订单查询")
-def upstream_recharges(
-    _db: DBSession,
-    _user: AdminOrSupervisor,
-    sn: str | None = Query(None),
-    merchant: str | None = Query(None),
-    start: str | None = Query(None),
-    end: str | None = Query(None),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-):
-    """
-    **占位接口**: 调用上游真实充值查询(例如 BMS/支付侧订单查询)。
-
-    当前未接入真实凭据/文档,返回空 items 并提示接入方式。
-    请提供:
-      - 接口 URL 与鉴权方式(token / sign / mTLS)
-      - 请求参数与签名规则
-      - 响应字段结构(或抓包 HAR)
-    之后填充 app/api/v1/recharges.py 中 `_upstream_query_recharges` 即可。
-    """
-    items = _upstream_query_recharges({
-        "sn": sn, "merchant": merchant,
-        "start": _to_dt(start), "end": _to_dt(end),
-        "page": page, "page_size": page_size,
-    })
-    return R(data={
-        "items": items,
-        "total": len(items),
-        "_hint": "上游接口未接入,请提供真实接口文档/抓包后填充 _upstream_query_recharges。",
-    })
-
-
-@router.get("/traffic/upstream", response_model=R, summary="[占位]上游-实时流量余额/使用量查询")
+@router.get("/traffic/upstream", response_model=R, summary="上游-实时流量余额/使用量查询")
 def upstream_traffic(
     db: DBSession,
     _user: AdminOrSupervisor,

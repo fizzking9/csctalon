@@ -6,7 +6,7 @@
       border
       stripe
       style="cursor: pointer"
-      @row-click="(row) => $emit('view', row)"
+      @row-click="(row) => viewable && $emit('view', row)"
     >
       <el-table-column
         v-for="col in columns"
@@ -28,7 +28,8 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="80" align="center" fixed="right">
+      <!-- #185 清理: viewable=false(如政策/部门同步暂无详情页)时不渲染"查看"按钮, 避免点击无响应 -->
+      <el-table-column v-if="viewable" label="操作" width="80" align="center" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click.stop="$emit('view', row)">查看</el-button>
         </template>
@@ -57,6 +58,7 @@ const props = defineProps({
   mapParams: { type: Function, default: (f) => ({ ...f }) },
   mapRow: { type: Function, default: (r) => r },
   filter: { type: Object, required: true },
+  viewable: { type: Boolean, default: true },
 })
 
 defineEmits(['view'])

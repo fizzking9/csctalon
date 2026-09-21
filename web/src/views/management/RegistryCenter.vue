@@ -77,6 +77,7 @@
         </el-tab-pane>
 
         <el-tab-pane label="管理制度" name="policy">
+          <!-- #185 清理: 政策暂无详情页, viewable=false 隐藏"查看"按钮, 移除占位点击 -->
           <CommonListTable
             :columns="policyColumns"
             :row-key="'id'"
@@ -84,11 +85,12 @@
             :map-params="mapPolicyParams"
             :map-row="mapPolicyRow"
             :filter="filter"
-            @view="openPolicyDetail"
+            :viewable="false"
           />
         </el-tab-pane>
 
         <el-tab-pane label="部门同步" name="deptSync">
+          <!-- #185 清理: 部门同步暂无详情页, viewable=false 隐藏"查看"按钮, 移除占位点击 -->
           <CommonListTable
             :columns="deptSyncColumns"
             :row-key="'id'"
@@ -96,7 +98,7 @@
             :map-params="mapDeptSyncParams"
             :map-row="mapDeptSyncRow"
             :filter="filter"
-            @view="openDeptSyncDetail"
+            :viewable="false"
           />
         </el-tab-pane>
       </el-tabs>
@@ -275,10 +277,6 @@ function mapPolicyParams(f) {
   return { page: f.page, page_size: f.page_size, status: f.status || undefined, category: f.category || undefined, keyword: f.keyword || undefined }
 }
 function mapPolicyRow(r) { return r }
-function openPolicyDetail(row) {
-  // TODO 占位:后续补 PolicyDetail.vue 或抽屉详情
-  console.log('[TODO:PolicyDetail]', row)
-}
 
 const deptSyncColumns = [
   { prop: 'priority', label: '优先级', width: 90, type: 'tag', map: priorityOptions, color: { low: 'info', normal: '', high: 'warning', urgent: 'danger' } },
@@ -298,10 +296,6 @@ function mapDeptSyncParams(f) {
   }
 }
 function mapDeptSyncRow(r) { return r }
-function openDeptSyncDetail(row) {
-  // TODO 占位:后续补 DeptSyncDetail.vue 或抽屉详情(含阅读回执/回复时间线)
-  console.log('[TODO:DeptSyncDetail]', row)
-}
 
 function goIncidentDetail(row) {
   router.push({ path: '/management/incidents', query: { id: row.id } })

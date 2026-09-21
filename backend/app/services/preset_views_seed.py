@@ -669,7 +669,7 @@ PRESET_VIEWS: list[dict] = [
             "limit": 100,
         }],
         "merge_strategy": "add",
-        "classification_rule_names": ["客诉-外部投诉", "客诉-原因", "客诉-审核人"],
+        "classification_rule_names": ["客诉-外部投诉", "客诉-原因"],  # #185: 移除已废弃的占位规则「客诉-审核人」
         "time_range_default": {"days": 7},
     },
     # 视图5:提现SN关联退费单/工单时间分布

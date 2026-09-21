@@ -1,11 +1,11 @@
-"""通知通道抽象 - 预警通知分发(站内信/群机器人/邮件, 可扩充)
+"""通知通道抽象 - 预警通知分发(站内信/群机器人, 可扩充)
 
 Channel 接口:
     send(db, title, content, recipients) -> ChannelResult
 
 - InAppChannel: 站内信(复用 notifier.notify)
 - WebhookChannel: 企业微信/钉钉/飞书 群机器人(通用 webhook, markdown 文本)
-- EmailChannel: 邮件(占位, 后续接入)
+  (#185 清理: 原 EmailChannel 为"未接入(占位)"空壳, 前端却有可选入口, 已删除)
 
 分发: dispatch_alert(db, alert, channels, roles, silence_window)
   - 静默时段内不推送(仅入库, 投递记录=skipped)
@@ -78,17 +78,7 @@ class WebhookChannel:
             return ChannelResult(ok=False, detail=f"发送异常: {e}")
 
 
-class EmailChannel:
-    """邮件通道(占位, 后续接入 SMTP)"""
-
-    code = "email"
-
-    def send(self, db: Session, title: str, content: str | None, recipients: list[str]) -> ChannelResult:
-        return ChannelResult(ok=False, detail="邮件通道未接入(占位)")
-
-
 _CHANNEL_FACTORIES: dict[str, type] = {}
-
 
 def register_channel_type(channel_type: str, factory: type) -> None:
     _CHANNEL_FACTORIES[channel_type] = factory
@@ -103,8 +93,6 @@ def get_channel(db: Session, code: str) -> Channel | None:
         return InAppChannel()
     if row.channel_type == "webhook":
         return WebhookChannel(row.code, row.name_cn, row.config)
-    if row.channel_type == "email":
-        return EmailChannel()
     return None
 
 

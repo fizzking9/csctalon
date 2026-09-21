@@ -101,7 +101,7 @@
           <el-table-column prop="code" label="code" width="140" />
           <el-table-column prop="channel_type" label="类型" width="100">
             <template #default="{ row }">
-              <el-tag size="small">{{ { inapp: '站内信', webhook: '群机器人', email: '邮件' }[row.channel_type] || row.channel_type }}</el-tag>
+              <el-tag size="small">{{ { inapp: '站内信', webhook: '群机器人' }[row.channel_type] || row.channel_type }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="启用" width="70">
@@ -185,7 +185,6 @@
         <el-form-item label="类型">
           <el-select v-model="channelForm.channel_type" style="width: 100%">
             <el-option label="群机器人 webhook" value="webhook" />
-            <el-option label="邮件" value="email" />
           </el-select>
         </el-form-item>
         <el-form-item label="Webhook URL">

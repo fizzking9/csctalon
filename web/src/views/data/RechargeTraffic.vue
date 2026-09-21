@@ -118,16 +118,15 @@
       <el-tab-pane label="上游实时" name="upstream">
         <el-card shadow="never">
           <el-alert type="info" :closable="false" show-icon class="mb-16">
-            <template #title>实时流量已接入 BMS 真实上游(deviceFlow/sn/pageList); 充值订单查询仍占位。</template>
+            <template #title>实时流量已接入 BMS 真实上游(deviceFlow/sn/pageList)。</template>
             <div style="margin-top: 8px; line-height: 1.8">
               <div>实时流量 = 本地套餐快照(device_combos) + 月流量使用(device_flow_usage, 本地无该SN数据时自动拉一次上游)。</div>
-              <div style="margin-top: 4px">充值订单查询待提供真实接口文档/抓包后填充后端 <code>app/api/v1/recharges.py::_upstream_query_recharges</code>。</div>
+              <div style="margin-top: 4px">#185 清理: 充值订单上游查询长期无真实接口文档支撑, 占位接口/按钮已删除。</div>
             </div>
           </el-alert>
           <div class="flex gap-8" style="flex-wrap: wrap">
             <el-input v-model="upstreamFilter.sn" placeholder="设备SN(单台)" clearable style="width: 220px" @keyup.enter="queryUpstreamTrafficClick" />
             <el-button type="success" :loading="trafficLoading" @click="queryUpstreamTrafficClick">查询流量(拉最新)</el-button>
-            <el-button type="primary" disabled @click="queryUpstream">查询充值(未接入)</el-button>
           </div>
           <div class="mt-8" style="color: #909399; font-size: 12px; line-height: 1.7">
             本地已有该 SN 数据也会先展示(秒回), 本工具页「查询流量」会再触发一次 BMS 上游拉取覆盖入库;
@@ -186,7 +185,6 @@ import { ElMessage } from 'element-plus'
 import {
   listLocalCombos,
   getLocalCombosSummary,
-  queryUpstreamRecharges,
   queryUpstreamTraffic,
 } from '@/api/recharge'
 
@@ -239,19 +237,10 @@ function resetFilter() {
 // initial load
 onSearch()
 
-// ---------- 上游(流量已接入真实 BMS; 充值查询仍占位,保留骨架) ----------
+// ---------- 上游(流量已接入真实 BMS; #185 清理: 删除未接入的充值订单占位按钮/函数) ----------
 const upstreamFilter = reactive({ sn: '', merchant: '', range: [] })
 const trafficInfo = ref(null)
 const trafficLoading = ref(false)
-
-async function queryUpstream() {
-  const params = { sn: upstreamFilter.sn, merchant: upstreamFilter.merchant }
-  if ((upstreamFilter.range || []).length === 2) {
-    params.start = upstreamFilter.range[0]
-    params.end = upstreamFilter.range[1]
-  }
-  await queryUpstreamRecharges(params)
-}
 
 async function queryUpstreamTrafficClick() {
   const sn = (upstreamFilter.sn || '').trim()
