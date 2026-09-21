@@ -281,8 +281,8 @@ def _resolve_from_db(db, tier: str) -> tuple[list[str], bool] | None:
 
     ⚠️ 2026-09-21 改为读**关联表** `llm_role_members`（支持一模型多角色）。
       原用 `llm_providers.role_scope` 单值列，部署后即被实测证伪 ——
-      `qwen3-coder:30b` 需同时服务 assistant(首选) 与 specialist(备选)，
-      单值列下相互覆盖，导致 assistant 降级为实测已知会错的 `qwen2.5:7b`。
+      同一模型需同时服务多个角色时（如某模型既是 A 档首选又是 B 档备选），
+      单值列下相互覆盖，导致降级到实测已知会错的模型。
       旧列保留为**兜底**（新表无该角色记录时才读），一个版本后删除。
     """
     from app.models.llm_provider import LlmProvider
