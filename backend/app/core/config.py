@@ -153,6 +153,16 @@ class Settings(BaseSettings):
     LLM_RETRY_MAX: int = 2
     LLM_RETRY_BASE_S: float = 1.0
     LLM_RETRY_CAP_S: float = 30.0
+
+    # ── 数据出域管控（2026-09-21 新增，见 docs/design/20260921-模型角色分组与出域管控设计.md）──
+    # 背景: 云端 provider(deepseek-v4-flash) 原先硬编码为所有档位的兜底项，
+    #   本地模型 transient 失败(实测 27b 曾 30% 超时) 会**静默把 prompt 发往公网**，
+    #   而 prompt 内含真实客服工单数据。这与「数据不出内网」的核心定位冲突。
+    # 策略取值:
+    #   never         = 云端**完全不可用**（从所有调用链中移除）
+    #   explicit_only = 仅当调用方显式指定云端时才用（默认，兼顾体验与合规）
+    #   auto          = 本地失败自动降级云端（改造前的旧行为，需管理员显式选择）
+    LLM_CLOUD_POLICY: str = "explicit_only"
     # 喂给模型的数据底座(feed)长度上限(字符), 防 token 超限与延迟。
     # by_specialty 已精简(2026-09-04), 正常 feed <3KB; 此值作兜底防超长。
     # #98 (2026-09-15): 12000→6000。生产实测 llm_ms/total_ms=85~95%(#93 埋点),

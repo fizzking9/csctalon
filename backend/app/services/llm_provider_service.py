@@ -64,6 +64,11 @@ def _load_active_providers(db: Session) -> list[dict]:
             "thinking": r.thinking, "timeout_s": float(r.timeout_s),
             "retry_max": int(r.retry_max), "fail_threshold": int(r.fail_threshold),
             "fail_count": int(r.fail_count), "pregen_only": bool(r.pregen_only),
+            # 出域标记（2026-09-21）: 供 get_provider_chain 按策略过滤；
+            # 兼容旧库（列可能尚未迁移）用 getattr 兜底
+            "is_cloud": bool(getattr(r, "is_cloud", False)),
+            "role_scope": getattr(r, "role_scope", None),
+            "role_order": int(getattr(r, "role_order", 100) or 100),
         })
     _PROVIDER_CACHE["active"] = (now, data)
     return data
@@ -102,7 +107,8 @@ def get_provider_chain(db: Session, provider_code: "str | list[str] | None" = No
     full = _load_active_providers(db)
     normal = [p for p in full if not p.get("pregen_only")]
     if not provider_code:
-        return normal
+        # 默认链（用户实时问答等未指定档位时）同样受出域策略约束
+        return _apply_cloud_filter(normal, db)
 
     # 归一为列表（单字符串 → [字符串]），两种调用方式共用后续逻辑
     codes = [provider_code] if isinstance(provider_code, str) else list(provider_code)
@@ -123,10 +129,39 @@ def get_provider_chain(db: Session, provider_code: "str | list[str] | None" = No
     if not designated:
         # 全部缺失（如档位声明的模型都没启用）→ 退回常规链, 保证不硬失败
         logger.warning("provider 链 %s 全部不可用, 退回常规链", codes)
-        return normal
+        return _apply_cloud_filter(normal, db)
 
     picked_ids = {d["id"] for d in designated}
-    return designated + [p for p in normal if p["id"] not in picked_ids]
+    tail = [p for p in normal if p["id"] not in picked_ids]
+    return designated + _apply_cloud_filter(tail, db)
+
+
+def _apply_cloud_filter(providers: list[dict], db: Session) -> list[dict]:
+    """按全局出域策略过滤「常规链尾巴」中的云端 provider。
+
+    ⚠️ 为什么需要这道闸门（2026-09-21 补漏）:
+      `llm_tiers.resolve_tier()` 已过滤了**档位自己声明的**云端兜底，
+      但 `get_provider_chain` 还会把「其余 enabled+healthy 的 provider」
+      按 priority 追加到链尾 —— 那里同样可能含云端（如 deepseek priority=30）。
+      若只改前者，本地模型失败时仍会**静默出网**。故在此统一收口。
+
+    策略语义见 `llm_tiers.cloud_policy()` / `cloud_allowed()`。
+    注意: provider 的 `is_cloud` 字段是权威判据（由迁移按 base_url 回填），
+    不再依赖 code 硬编码比对。
+    """
+    from app.services import llm_tiers
+
+    if llm_tiers.cloud_policy() == llm_tiers.CLOUD_POLICY_AUTO:
+        return providers          # auto: 保留云端作为兜底（旧行为）
+    # never / explicit_only 均不把云端放进「自动降级」路径 ——
+    # 区别在于 never 连显式指定也不允许（由 resolve_tier 与调用方保证）
+    kept = [p for p in providers if not p.get("is_cloud")]
+    dropped = len(providers) - len(kept)
+    if dropped:
+        logger.info(
+            "出域策略=%s: 从常规链尾部移除 %d 个云端 provider（数据不出域）",
+            llm_tiers.cloud_policy(), dropped)
+    return kept
 
 
 def invalidate_cache() -> None:

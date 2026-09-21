@@ -52,14 +52,55 @@ csctalon 原先把 talon 的内部 provider_code **硬编码在各业务服务�
 import logging
 import os
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────
-# 云端兜底（出网）—— 本地全挂时使用
+# 云端兜底（出网）—— 受 LLM_CLOUD_POLICY 管控
 # ─────────────────────────────────────────────────────────────────────
-# 不敏感数据可出网时生效；若业务要求数据不出域，应在此档位置空并由
-# 运维在管理界面禁用该 provider。
+# ⚠️ 2026-09-21 重要变更: 本项**不再无条件加入链尾**。
+#
+# 原实现把它硬编码进所有档位链，导致本地模型 transient 失败时（实测 27b 曾 30% 超时）
+# **静默把 prompt 发往 api.deepseek.com**，而 prompt 含真实客服工单数据 ——
+# 与「数据不出内网」的核心定位冲突，且无开关、无审计标记。
+#
+# 现改为受 settings.LLM_CLOUD_POLICY 管控:
+#   never         → 云端从所有链中移除（数据绝对不出域）
+#   explicit_only → 仅当调用方显式 include_cloud=True 时才加入（默认）
+#   auto          → 保留在链尾（改造前的旧行为，需管理员显式选择）
 CLOUD_FALLBACK = "deepseek-v4-flash"
+
+# 出域策略取值（与 settings.LLM_CLOUD_POLICY 对应）
+CLOUD_POLICY_NEVER = "never"
+CLOUD_POLICY_EXPLICIT = "explicit_only"
+CLOUD_POLICY_AUTO = "auto"
+_ALLOWED_CLOUD_POLICIES = (CLOUD_POLICY_NEVER, CLOUD_POLICY_EXPLICIT, CLOUD_POLICY_AUTO)
+
+
+def cloud_policy() -> str:
+    """读全局出域策略（非法值回退 explicit_only，保守优先）。"""
+    v = (getattr(settings, "LLM_CLOUD_POLICY", "") or "").strip().lower()
+    if v not in _ALLOWED_CLOUD_POLICIES:
+        if v:
+            logger.warning("LLM_CLOUD_POLICY=%r 非法, 回退 explicit_only", v)
+        return CLOUD_POLICY_EXPLICIT
+    return v
+
+
+def cloud_allowed(*, explicit: bool = False) -> bool:
+    """当前是否允许把云端 provider 加入调用链。
+
+    参数:
+      explicit: 调用方是否**显式要求**出域（如用户确认"用云端加速"）。
+    """
+    policy = cloud_policy()
+    if policy == CLOUD_POLICY_NEVER:
+        return False
+    if policy == CLOUD_POLICY_AUTO:
+        return True
+    # explicit_only: 只有显式请求才允许
+    return bool(explicit)
 
 # ─────────────────────────────────────────────────────────────────────
 # 档位定义（单一来源）
@@ -117,14 +158,17 @@ def _load_overrides() -> dict[str, str]:
     return out
 
 
-def resolve_tier(tier: str) -> list[str]:
+def resolve_tier(tier: str, *, include_cloud: bool = False) -> list[str]:
     """把档位名解析为 provider_code 链（首选 → 备选 → 云端兜底）。
 
     返回的顺序即尝试顺序；调用方把它交给 `chat_completion(provider_code=[...])`，
     其后会自动接 priority 升序的常规链（见 llm_provider_service.get_provider_chain）。
 
     参数:
-      tier: "assistant" / "specialist" / "expert"
+      tier:          "assistant" / "specialist" / "expert"
+      include_cloud: 调用方是否**显式要求**可出域。是否真正加入云端仍取决于
+                     `settings.LLM_CLOUD_POLICY`（never 时任何情况下都不加）。
+                     见 `cloud_allowed()`。
 
     返回:
       provider_code 列表；档位名非法时返回 []（调用方将走默认链，不抛异常）。
@@ -141,8 +185,15 @@ def resolve_tier(tier: str) -> list[str]:
     chain = [override or spec["primary"]]
     if spec.get("secondary"):
         chain.append(spec["secondary"])
+
+    # 云端兜底: 受出域策略管控（不再无条件加入）
     if CLOUD_FALLBACK and CLOUD_FALLBACK not in chain:
-        chain.append(CLOUD_FALLBACK)
+        if cloud_allowed(explicit=include_cloud):
+            chain.append(CLOUD_FALLBACK)
+        else:
+            logger.info(
+                "档位 %s 未加入云端兜底 %s（策略=%s, 显式请求=%s）",
+                tier, CLOUD_FALLBACK, cloud_policy(), include_cloud)
     return chain
 
 

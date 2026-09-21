@@ -56,6 +56,25 @@ class LlmProvider(IDMixin, TimestampMixin, Base):
             "用于 122b 等慢而重的预生成专用模型"
         ),
     )
+    # ── 数据出域标记（2026-09-21，见 docs/design/20260921-模型角色分组与出域管控设计.md）──
+    # true = 该 provider 会把数据发往公网（如 api.deepseek.com）。
+    # 受全局策略 settings.LLM_CLOUD_POLICY 管控，可被从调用链中整体移除。
+    # 默认 false（保守：本地 provider 占多数，新增的云端需显式标记）。
+    is_cloud: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False, index=True,
+        comment="是否出域(公网/云端); true 时受 LLM_CLOUD_POLICY 管控",
+    )
+    # ── 角色归属（2026-09-21）──
+    # 显式归属某个能力角色（assistant/specialist/expert）；NULL = 不限角色。
+    # role_order: 角色内兜底顺序（小=先尝试）。
+    role_scope: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True,
+        comment="角色归属(assistant/specialist/expert); NULL=不限角色",
+    )
+    role_order: Mapped[int] = mapped_column(
+        Integer, default=100, server_default="100", nullable=False,
+        comment="角色内兜底顺序(小=先尝试); 仅 role_scope 非空时有意义",
+    )
     healthy: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False, index=True,
         comment="运行时健康状态; 连续失败自动置 false(降级), 健康探测成功后恢复",

@@ -40,16 +40,32 @@ class TestTierDefinitions:
 
 
 class TestResolveTier:
-    def test_assistant_chain(self):
+    """⚠️ 2026-09-21 变更: 云端兜底不再无条件加入（受 LLM_CLOUD_POLICY 管控）。
+
+    旧断言 `chain[-1] == CLOUD_FALLBACK` 已失效 —— 它锁定的正是本次要修掉的
+    「静默出网」行为。出域策略的完整测试见 tests/test_llm_cloud_policy.py。
+    """
+
+    def test_assistant_chain_local_primary_secondary(self):
         chain = llm_tiers.resolve_tier("assistant")
         assert chain[0] == "talon-gmk-qwen3-coder-30b"     # 首选
         assert chain[1] == "talon-gmk-qwen2.5-7b"          # 备选
-        assert chain[-1] == llm_tiers.CLOUD_FALLBACK       # 云端兜底
 
-    def test_expert_chain(self):
+    def test_expert_chain_local_primary(self):
         chain = llm_tiers.resolve_tier("expert")
         assert chain[0] == "talon-gmk-qwen3.5-122b"
-        assert chain[-1] == llm_tiers.CLOUD_FALLBACK
+
+    def test_cloud_not_in_chain_by_default(self):
+        """默认策略(explicit_only)下，链中不应含云端。"""
+        for tier in llm_tiers.TIERS:
+            assert llm_tiers.CLOUD_FALLBACK not in llm_tiers.resolve_tier(tier)
+
+    def test_cloud_in_chain_when_policy_allows(self, monkeypatch):
+        """策略为 auto 时，云端回到链尾（旧行为，需管理员显式选择）。"""
+        from app.core.config import settings
+        monkeypatch.setattr(settings, "LLM_CLOUD_POLICY", "auto")
+        for tier in llm_tiers.TIERS:
+            assert llm_tiers.CLOUD_FALLBACK in llm_tiers.resolve_tier(tier)
 
     def test_chain_has_no_duplicates(self):
         for name in llm_tiers.TIERS:
