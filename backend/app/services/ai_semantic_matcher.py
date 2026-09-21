@@ -10,7 +10,7 @@ LLM 调用约束:
   ⚠️ 2026-09-20 档位内首选由 qwen2.5:7b 改为 qwen3-coder:30b
      （实测 7b 在本任务 5/5 全错，见文件末尾常量注释）
 - timeout_s=60(前台实时问答用户在等)
-- max_tokens=200(只输出 JSON 数组, 短)
+- max_tokens=400(输出 JSON 数组; 原 200 实测被截, 见调用点注释)
 - LLM 输出 JSON: [{index, confidence, reason}], confidence∈[0,1]
   ⚠️ index 基准模型间不一致(0-based / 1-based)，解析层已自适应兼容
 
@@ -68,7 +68,7 @@ async def semantic_match(db: Session, question: str,
     流程(架构文档 §4.2):
       1. 候选报告按 created_at DESC(由调用方排序)取前 5 条
       2. 每条候选取 question + answer_md 前 200 字摘要
-      3. 调 27b(provider_code=None, timeout_s=30, max_tokens=200)输出 JSON 数组
+      3. 调 27b(provider_code=None, timeout_s=60, max_tokens=400)输出 JSON 数组
       4. 取 confidence 最大者, 若 ≥ 阈值(默认 0.6)视为命中
 
     参数:
@@ -112,7 +112,13 @@ async def semantic_match(db: Session, question: str,
     ]
     try:
         result = await llm_client.chat_completion(
-            messages, max_tokens=200, timeout_s=60.0,
+            # ⚠️ 2026-09-21 由 200 调到 400。
+            #    原注释假设「只输出 JSON 数组, 短」，但实测被截在**恰好 200**
+            #    （done_reason='length'），说明候选条目多时数组会超。
+            #    被截的后果是**静默的**: 返回的 JSON 可能是数组被砍掉尾巴，
+            #    解析后少几个语义匹配结果, 调用方看不出异常。
+            #    400 是实测输出的 2 倍余量（被截样本 out_chars 400~466）。
+            messages, max_tokens=400, timeout_s=60.0,
             db=db, source="ai_semantic",
             # 传 db → 优先用界面配置的角色成员；DB 无配置时回退源码常量
             provider_code=llm_tiers.resolve_tier(_TIER, db=db),

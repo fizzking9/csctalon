@@ -184,7 +184,14 @@ class Settings(BaseSettings):
     #   (生产 ai_reports 表 id=1/3 completion_tokens=500 达顶, md_len 775/706 末尾不自然)。
     #   实测 800 后 completion_tokens=598, md_len=914, 结尾自然收束; total_ms=46.7s
     #   (微涨可接受), 不破坏 LLM client 60s timeout 上限。
-    AI_MAX_TOKENS: int = 800
+    # ⚠️ 2026-09-21 由 800 调回 1500。
+    #    原 #98 为了控制耗时把 1500→800，但实测 ai_analyze 的输出**恰好被截在 800**
+    #    （done_reason='length'，输出被腰斩），而该任务的典型输出是 1000+ token
+    #    （实测被截样本 prompt 6025 chars / out 1034 chars）。
+    #    即：这个上限比任务的正常输出**还小** → 每次都截断。
+    #    降上限换耗时应通过 max_tokens 之外的手段（如缩短 prompt / 换快模型），
+    #    而不是把上限压到低于正常输出 —— 那会让结果**静默不完整**。
+    AI_MAX_TOKENS: int = 1500
     # ── AI_SYNC_WAIT_S (#98 修订 #93, 2026-09-15) ───────────────────────
     # analyze 首查「同步等待」上限：超过此秒数未出结果则改回 task_id 走前端轮询。
     #
