@@ -417,7 +417,31 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
     _live_dims: list | None = None
     _deep_req = False
 
-    if not payload.force_llm:
+    # #182 统一意图识别: 一次算出「内容域 / 粒度 / 新鲜度 / 是否提时间」四维。
+    #   此前这些散在 5 处各自字面匹配且互不通信（见 ai_intent_service 模块说明）。
+    #   v1 接入方式: **只做观测 + 个人绩效域的定向补强** ——
+    #     · 全链路打日志, 使「识别与实际走的路是否一致」可核对（先拿数据再改行为）
+    #     · 个人绩效无预生成模板, 直接走实时（避免白试一次模板匹配）
+    #   其余分支暂不改 —— 识别层的词表需要真实流量检验, 一次改太多
+    #   会让出问题时无法定位是"识别错"还是"分流逻辑错"。
+    from app.services import ai_intent_service
+    _intent = ai_intent_service.classify(q)
+    logger.info(
+        "ai #182 intent: question=%r domains=%s granularity=%s freshness=%s(%s)",
+        q[:40], sorted(_intent.domains), _intent.granularity,
+        _intent.freshness, _intent.freshness_reason,
+    )
+    if _intent.is_personal and not payload.force_llm:
+        # 个人绩效: 看板有数据（today_staff_efficiency / operator_rank）但**无预生成模板**,
+        #   → 不可能命中快照。直接走实时, 省掉一次必然失败的模板匹配 + 语义匹配。
+        #   ⚠️ 这是"事前判定"取代"事后补救"的第一处落地:
+        #      此前它要等 L1 未命中 + L2 未命中 + 无候选 才落到实时。
+        _mode = "deep_req"
+        _deep_req = True
+        _live_dims = _question_dims(q) or None
+        logger.info("ai #182 个人绩效域: 跳过命中链直接实时 (无预生成模板)")
+
+    if not payload.force_llm and not _deep_req:
         if _has_deep_req_intent(q):
             # #152 兜底层 Deep-Req: 用户明确要求深度分析(太简单/再详细/重新分析/深挖...)
             #   跳过命中链, 直接实时 27b 按窗口+维度重算, 结果带深度分析提示前缀,
