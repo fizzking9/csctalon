@@ -62,6 +62,55 @@ class LLMResult(str):
 # ─────────────────────────────────────────────────────────────────────
 # 公共辅助
 # ─────────────────────────────────────────────────────────────────────
+
+# 出域放行头名 (须与 talon 侧 `scheduler/egress.EGRESS_HEADER` 一致)。
+# 改这里必须同步改 talon —— 值不一致会导致「csctalon 已批准但 talon 仍拦截」,
+# 且现象只是 404 (模型不可用), 完全看不出是头名拼错。
+EGRESS_HEADER = "X-Talon-Allow-Egress"
+
+
+def _is_cloud_endpoint(base_url: str) -> bool:
+    """判断一个 base_url 是否指向**内网之外** (即出域)
+
+    用于 `.env` 兜底通道的出域判定 —— 该通道不经过 provider 表,
+    没有 `is_cloud` 列可用, 只能按地址推断。
+
+    判定顺序 (先具体后笼统):
+      1. 私有地址 / 回环 / `.local` / 无点主机名 → 内网
+      2. 其余 (含公网 IP 与公网域名) → 出域
+
+    ⚠️ **无法判定时按出域处理** (fail-closed)。理由同 talon 侧:
+       判成内网而实际出域 → 数据静默外流 (不可发现);
+       判成出域而实际内网 → 调用被拒 (立即可发现)。
+       两者代价不对称。
+    """
+    import ipaddress
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(base_url).hostname or "").strip().lower()
+    except ValueError:
+        return True                      # 解析失败 → 保守按出域
+    if not host:
+        return True
+
+    # 明确的内网特征
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return False
+    if host.endswith(".local") or host.endswith(".internal"):
+        return False
+    # 无点主机名 (如 `talon` / `gmk-evo`) → 内网 DNS 短名
+    if "." not in host and ":" not in host:
+        return False
+
+    try:
+        ip = ipaddress.ip_address(host)
+        return not (ip.is_private or ip.is_loopback or ip.is_link_local)
+    except ValueError:
+        # 域名: 无法判断解析后地址 → 保守按出域
+        return True
+
+
 def _endpoint(base_url: str) -> str:
     base = (base_url or "").rstrip("/")
     if not base:
@@ -69,10 +118,21 @@ def _endpoint(base_url: str) -> str:
     return base + "/chat/completions"
 
 
-def _headers(api_key: str | None) -> dict:
+def _headers(api_key: str | None, allow_egress: bool = False) -> dict:
     h = {"Content-Type": "application/json"}
     if api_key:
         h["Authorization"] = f"Bearer {api_key}"
+    # 出域放行头 (2026-09-21): talon 作为统一模型网关后, deepseek 等外部
+    # provider 的 base_url 指向 talon, 由 talon 决定是否真的出域。
+    # talon 侧策略 `explicit_only` 要求调用方**显式**声明允许出域 ——
+    # 故此处把 csctalon 自己的出域决策 (`cloud_allowed`) 转发过去。
+    #
+    # 为什么是"转发决策"而不是"自己判断后就直连":
+    #   两层策略若各自独立判断, 迟早出现「csctalon 说可以, talon 说不可以」
+    #   这类分歧, 且分歧只表现为 404, 排查成本高。
+    #   转发后语义是「csctalon 已批准 + talon 复核」= 纵深防御, 而非重复判断。
+    if allow_egress:
+        h[EGRESS_HEADER] = "true"
     return h
 
 
@@ -352,7 +412,13 @@ async def _call_multi_provider(
     for p in providers:
         pid = p["id"]; pcode = p["code"]; model = p["model"]
         url = _endpoint(p["base_url"])
-        headers = _headers(p["api_key"])
+        # 出域放行: **以链条构造结果为权威依据**。
+        # `get_provider_chain` 已按全局策略 + 显式请求决定是否把云端
+        # provider 放进链里 —— 所以「它在链中」本身就等于「本次已批准出域」。
+        # 此处不再重复判断策略: 重复判断会与链条构造产生分歧
+        # (例如 explicit_only 下用户显式确认的请求), 而分歧只表现为 404。
+        allow_egress = bool(p.get("is_cloud"))
+        headers = _headers(p["api_key"], allow_egress=allow_egress)
         body = _payload(messages, model, temperature=temperature,
                          max_tokens=max_tokens, thinking=p["thinking"])
         # timeout_s 优先用 override, 否则用 Provider 自己的 timeout_s
@@ -415,8 +481,32 @@ async def _call_env_single(
     transport: httpx.AsyncBaseTransport | None,
     db: Session | None, source: str | None, t0: float, prompt_chars: int,
 ) -> LLMResult:
-    """.env 单源模式(向后兼容, 同 v1.0)。"""
-    url = _endpoint(settings.LLM_BASE_URL or "")
+    """.env 单源模式(向后兼容, 同 v1.0)。
+
+    ⚠️ 出域管控缺口 (2026-09-21 发现): 本路径**不经过 get_provider_chain**,
+        因此 `_apply_cloud_filter` 与链条构造的出域判断对它**全都不生效**。
+        而 `LLM_BASE_URL` 现状正是 `https://api.deepseek.com` ——
+        即: 一旦 DB 中无可用 provider, 这里会**静默直连出域**,
+        绕过全部出域策略。
+
+        属于「兜底路径绕过安全闸口」这一类缺陷 —— 平时不触发,
+        恰好在「DB 故障/空链」这种最不该出事的时刻生效。
+
+        处理: 判定 `LLM_BASE_URL` 是否出域; 若出域且策略不允许, **拒绝调用**
+        (宁可失败也不静默外流)。判定与 `_apply_cloud_filter` 用同一套策略。
+    """
+    from app.services import llm_tiers
+
+    base_url = settings.LLM_BASE_URL or ""
+    if not llm_tiers.cloud_allowed(explicit=False) and _is_cloud_endpoint(base_url):
+        raise LLMError(
+            f".env 兜底通道指向出域地址({base_url}), 但当前出域策略="
+            f"{llm_tiers.cloud_policy()} 不允许。"
+            f"请改用 DB provider 链(经 talon 网关), 或显式调整出域策略。",
+            status_code=503,
+        )
+
+    url = _endpoint(base_url)
     headers = _headers(settings.LLM_API_KEY or "")
     body = _payload(messages, settings.LLM_MODEL or "",
                      temperature=temperature, max_tokens=max_tokens,

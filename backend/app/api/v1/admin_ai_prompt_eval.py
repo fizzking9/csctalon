@@ -56,21 +56,15 @@ def eval_rules(db: DBSession, _: AdminUser):
 
 @router.post("/suggest", response_model=R, summary="生成半自动迭代建议并落库(admin)")
 def gen_suggestions(db: DBSession, user: AdminUser, days: int = 7):
-    """按执行结果产建议，落库为 proposed 行（同 target+新值去重），返回本次新增。
-
-    #177: 建议 = 规则通道（现有纯规则）+ **LLM 辅助通道**（依命中率/提问历史/已采纳
-    人工意见分析，产出更贴合的关键词/问句建议）。LLM 失败自动回退纯规则，不阻断。
-    """
-    days = _validate_days(days)
-    llm_items = svc.build_llm_suggestions(db, days)
-    suggested_items = llm_items or svc.build_suggestions(db, days)
+    """按执行结果产建议，落库为 proposed 行（同 target+新值去重），返回本次新增。"""
+    suggestions = svc.build_suggestions(db, _validate_days(days))
     created = []
-    for item in suggested_items:
+    for item in suggestions:
         row = svc.propose_iteration(db, user.id, item)
         if row is not None:
             created.append(svc._iter_dict(row))
-    return R(data={"suggested": len(suggested_items), "created": len(created),
-                   "source": "llm" if llm_items else "rule", "items": created})
+    return R(data={"suggested": len(suggestions), "created": len(created),
+                   "items": created})
 
 
 @router.get("/iterations", response_model=R, summary="迭代建议列表(admin)")
