@@ -658,7 +658,7 @@ def update_cloud_policy(db: Session, policy: str, username: str = "",
 
 def _list_cloud_providers() -> list[dict]:
     """列出标记为出域的 provider（供界面警示）。"""
-    from app.database import SessionLocal
+    from app.core.database import SessionLocal
     db = SessionLocal()
     try:
         rows = db.query(LlmProvider).filter(LlmProvider.is_cloud.is_(True)).all()
