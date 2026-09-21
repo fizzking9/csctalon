@@ -1,15 +1,17 @@
 """AI 报告语义匹配层 (工单 #135 批次 B2)
 
 设计(架构文档 A-20260917-001 LOCKED §四):
-- semantic_match(db, question, candidates) -> dict: 27b 判定问句与候选报告整体相关性
+- semantic_match(db, question, candidates) -> dict: 判定问句与候选报告整体相关性
 - confidence≥0.6 视为命中 → 走摘取层; 否则走 L3 clarify 兜底
 - 候选取前 5 条(避免 LLM 输入过长), 每条 question + answer_md 前 200 字摘要
 
-LLM 调用约束(#145 改指轻量模型, 消除大模型冷加载超时):
-- provider_code=_SEMANTIC_PROVIDER_CODE(talon-gmk-qwen2.5:7b, 经 talon 统一管理接入)
-- timeout_s=30(前台实时问答用户在等)
+LLM 调用约束:
+- provider_code=_SEMANTIC_PROVIDER_CODE
+  ⚠️ 2026-09-20 由 qwen2.5:7b 改为 qwen3.8:27b（实测 7b 5/5 全错，见下方常量注释）
+- timeout_s=60(前台实时问答用户在等)
 - max_tokens=200(只输出 JSON 数组, 短)
 - LLM 输出 JSON: [{index, confidence, reason}], confidence∈[0,1]
+  ⚠️ index 基准模型间不一致(0-based / 1-based)，解析层已自适应兼容
 
 失败兜底: LLM 异常/JSON 解析失败 → 返回 {hit_report:None, confidence:0.0},
 让 ai.py 走 L3 clarify 兜底, 不抛异常。
@@ -26,9 +28,22 @@ from app.services import llm_client
 
 logger = logging.getLogger(__name__)
 
-# #145 语义匹配走轻量模型(经 talon 统一管理接入): 判定问句↔报告相关性是封闭分类任务,
-#   qwen2.5:7b 足够, 已在内存秒回, 不经 27b 冷加载超时。改动前走 default 链优先命中 27b。
-_SEMANTIC_PROVIDER_CODE = "talon-gmk-qwen2.5-7b"
+# ⚠️ 2026-09-20 修正（实测推翻 #145 的选型）:
+#   #145 原选 7b 的理由是"封闭分类任务, 7b 足够"，但**实测证伪**:
+#   用生产真实 prompt 格式复现 5 轮，qwen2.5:7b **5/5 全部返回 confidence=0.0**
+#   （理由自相矛盾: "候选报告均未涉及退款原因" —— 而摘要里明写「退款原因以网络故障为主」）
+#   → 生产逻辑取 max(confidence) >= 0.6 判定命中，故 **语义匹配从未命中过**，
+#     用户每次都走 clarify 兜底，看不到报告。
+#
+#   实测对比（生产真实 prompt, 多轮）:
+#     qwen2.5:7b       ❌ 5/5 全错（恒 0.00）
+#     qwen3-coder:30b  ✅ 6/6 全对（命中 0.8~0.9 / 闲聊 0.0），且快 3x（1.4s vs 6s）
+#     qwen3.8:27b      ✅ 5/5 全对（0.95，最稳）
+#
+#   选型: qwen3-coder:30b —— 实测置信度(0.8~0.9) 远高于阈值 0.6，且速度快 3 倍。
+#   （27b 亦可用，但当前该 provider 在生产中 enabled=false）
+#   完整矩阵见 talon 仓库 docs/reports/模型能力矩阵与任务分流-20260920.md
+_SEMANTIC_PROVIDER_CODE = "talon-gmk-qwen3-coder-30b"
 
 # confidence 阈值(架构文档 §4.3: 默认 0.6; 可通过 settings.AI_SEMANTIC_MATCH_THRESHOLD 配置)
 _DEFAULT_THRESHOLD = 0.6
@@ -110,13 +125,28 @@ async def semantic_match(db: Session, question: str,
             raise ValueError("LLM 输出不是 JSON 数组")
         threshold = float(getattr(settings, "AI_SEMANTIC_MATCH_THRESHOLD",
                                   _DEFAULT_THRESHOLD) or _DEFAULT_THRESHOLD)
+        # ── index 基准兼容（2026-09-20 修复 off-by-one）──
+        # prompt 用 "[1]" 起编号，但实测模型返回基准不一致：
+        #   qwen2.5:7b    → 0-based（index 从 0 开始）
+        #   qwen3-coder:30b / qwen3.8:27b → 1-based（index 从 1 开始）
+        # 原实现固定 "-1"，导致 0-based 输出的 index=0 变成 -1 被静默丢弃
+        # （all_confidences 为空、永不命中）。此处按数组内实际基准自适应。
+        _has_zero_idx = any(
+            isinstance(it, dict) and int(it.get("index", -1)) == 0 for it in arr
+        )
+
+        def _to_zero_based(raw) -> int:
+            """把模型输出的 index 归一到 0-based。"""
+            i = int(raw)
+            return i if _has_zero_idx else i - 1
+
         all_confidences = []
         best_idx = -1
         best_conf = 0.0
         for item in arr:
             if not isinstance(item, dict):
                 continue
-            idx = int(item.get("index", 0)) - 1
+            idx = _to_zero_based(item.get("index", 0))
             conf = float(item.get("confidence", 0.0))
             if 0 <= idx < len(cands):
                 all_confidences.append({
