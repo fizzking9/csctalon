@@ -163,39 +163,128 @@ def _overview(db, **kw):
 
 
 @pytest.fixture
-def db_session():
-    """真实库会话(只读用法)。
+def overview_seeded(db):
+    """在**回滚事务**内造投诉数据 —— 让 23 个口径自洽性断言真正执行。
 
-    ⚠️ 本测试**只读**，不写任何数据；库不可用时整体跳过(不阻塞 CI)。
+    ★ 为什么是合成数据而不是"等真实库有数据":
+      测试库 `csctalon_test` 永远是空的（`db` fixture 走显式事务 + rollback,
+      测试写的行一律不落库; 而真实会话又绝不该在测试里写数据）。
+      结果: 依赖 `db_session` 真实库 + "无数据就跳过" 的这 23 个断言
+      **从未执行过一次** —— 这正是 #67 最核心的防口径漂移断言。
+
+      ⚠️ 更隐蔽的一层: 修复测试数据泄漏**之前**, 泄漏到测试库的 193 行垃圾
+      （`register_time` 全为 NULL）一度让本文件"看起来有数据"、跳过了 23 条;
+      清理残留后跳过数反而**上升**到 23 —— 真相是这些断言一直没跑。
+
+    ★ 数据设计要点（每一条都为了某条断言**有辨别力**）:
+      · **三源齐全**（内部/商户号/外部）→ 堆叠分项之和与 KPI 对账才有内容。
+      · **刻意放入卡商数据**（`service_item` 含「工信部」→ 卡商桶）
+        → 若不放, "卡商不得进入总量堆叠" 恒真、形同虚设。
+        放了之后, 一旦有人把卡商并回总量, 断言立刻失败。
+      · **既有已完成也有未完成** → 完成率、积压、累计净水位三处都非退化值;
+        全是完成单则积压恒 0、净水位恒 0, 又是假绿。
+      · 登记时间落在**近 20 天内** → 三个测试窗口（29/40/400 天）全部覆盖。
+
+    判据来源:
+      · `_ticket_category_case() == "投诉"` ← `service_category='投诉'`
+      · 分桶 `complaint_bucket_case`: 含「微信」→商户号 / 含「商品|服务投诉」→内部
+        / 含「工信部」→卡商(独立) / 315 表 `company_entity` →外部
+      · 积压 `_query_backlog_rows`: 投诉类 ∧ status 不在完成集合
+      · `devices` 表须先有对应 SN（三张业务表都有外键）
     """
-    try:
-        from app.core.database import SessionLocal
-        db = SessionLocal()
-    except Exception as e:  # pragma: no cover
-        pytest.skip(f"数据库不可用: {e}")
-    try:
-        yield db
-    finally:
-        db.close()
+    from datetime import datetime
+
+    from app.models.device import Device
+    from app.models.external_complaint import ExternalComplaint
+    from app.models.ticket import ServiceTicket
+
+    now = datetime.now(TZ)
+
+    def _day(offset: int, hour: int = 10):
+        return (now - timedelta(days=offset)).replace(
+            hour=hour, minute=0, second=0, microsecond=0
+        )
+
+    # 三源各一台设备 + 一台卡商设备
+    sn_internal, sn_merchant, sn_external, sn_card = (
+        "SN-OVW-IN", "SN-OVW-MER", "SN-OVW-EXT", "SN-OVW-CARD"
+    )
+    for sn in (sn_internal, sn_merchant, sn_external, sn_card):
+        db.add(Device(sn=sn))
+    db.flush()
+
+    tk = 0
+    tickets: list[ServiceTicket] = []
+
+    def _add_ticket(sn, item, reg, *, done: bool, registrant=None):
+        nonlocal tk
+        tk += 1
+        t = ServiceTicket(
+            ticket_no=f"GDC-OVW-{tk}",
+            device_sn=sn,
+            service_item=item,
+            registrant=registrant,
+            service_category="投诉",
+            register_time=reg,
+            # 真实完成判据: finish − register >= 3min(见 _REAL_FINISH_EPOCH_SECS)
+            finish_time=(reg + timedelta(hours=5)) if done else None,
+            status="已完成" if done else "处理中",
+        )
+        tickets.append(t)
+        db.add(t)
+        return t
+
+    # 内部投诉: 2 完成 + 3 未完成（未完成 → 构成积压）
+    for i, off in enumerate((2, 4, 6, 9, 12)):
+        _add_ticket(sn_internal, "服务投诉", _day(off, 9 + i), done=(i < 2))
+    # 商户号投诉: registrant 非空 + item 含「微信」
+    for i, off in enumerate((1, 5, 8)):
+        _add_ticket(sn_merchant, "微信投诉", _day(off, 11 + i),
+                    done=(i < 1), registrant="测试商户号主体")
+    # (外)卡商: 「工信部」→ 卡商桶。**必须存在**才能验证"不入总量"（#53）
+    for i, off in enumerate((3, 7)):
+        _add_ticket(sn_card, "工信部投诉", _day(off, 13 + i), done=(i < 1))
+
+    # 外部投诉: 315 补充表（自带走 complaint_date, 不经工单分桶）
+    for i, off in enumerate((2, 4, 6, 10)):
+        db.add(ExternalComplaint(
+            complaint_no=f"EXT-OVW-{i}",
+            device_sn=sn_external,
+            company_entity="测试外部投诉主体",
+            complaint_date=_day(off, 15),
+            dedup_hash=f"ovw-seed-{i}",     # unique 约束
+        ))
+
+    db.flush()          # 不 commit —— 随 db fixture 事务回滚
+    _clear_cache()
+    return db
 
 
 @pytest.fixture
-def db_with_complaints(db_session):
-    """要求库中**有投诉数据**才运行的自洽性测试。
+def db_with_complaints(overview_seeded):
+    """具备投诉数据的会话（数据由 `overview_seeded` 合成, 随事务回滚）。
 
-    ★ 为什么需要这道闸门:
-      测试库 `csctalon_test` 是独立空库(见 conftest.py 的库名强制隔离)，
-      口径自洽性断言在**空数据上恒成立但无意义**(如"堆叠之和 0 == 总量 0")。
-      若不加闸门会得到"绿灯假象" —— 看似通过，实则没验证任何东西。
-      故: 空库 → **显式跳过**并说明原因；有数据(本地/预发验证) → 真正校验。
+    ★ 原实现为何必须改:
+      原判据 = 真实库 `db_session` 里 `count(service_tickets) == 0` 就跳过。
+      但测试库恒为空 → **永远跳过**。这 23 条恰恰是 #67 最核心的
+      防口径漂移断言（同屏数字必须能对上）, 长期零执行意味着防线是空的。
+
+    ★ 顺带守住「区分真假绿灯」的初衷:
+      原注释担心的"空数据上 `0 == 0` 恒真"是**真问题**, 合成数据正是
+      消除它的手段（而非取消它）—— 数据由 fixture 保证, 故改为
+      `assert` 而非 `skip`: 数据没了要**失败**, 不能悄悄退回假绿。
     """
     from sqlalchemy import func, select
 
     from app.models.ticket import ServiceTicket
-    n = db_session.scalar(select(func.count()).select_from(ServiceTicket)) or 0
-    if not n:
-        pytest.skip("库中无 service_tickets 数据 —— 口径自洽性断言需真实数据才有意义")
-    return db_session
+
+    n = overview_seeded.scalar(select(func.count()).select_from(ServiceTicket)) or 0
+    assert n > 0, (
+        "合成数据未落库 —— overview_seeded 失效。"
+        "此处**不得**退回 skip: 空数据上「堆叠之和 0 == KPI 0」会恒真通过, "
+        "看似验证口径、实则什么都没验证（正是本条要防的假绿）。"
+    )
+    return overview_seeded
 
 
 def _clear_cache():

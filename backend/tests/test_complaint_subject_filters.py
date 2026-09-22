@@ -57,26 +57,114 @@ def _clear_cache():
 
 
 @pytest.fixture
-def db_session():
-    try:
-        from app.core.database import SessionLocal
-        db = SessionLocal()
-    except Exception as e:  # pragma: no cover
-        pytest.skip(f"数据库不可用: {e}")
-    try:
-        yield db
-    finally:
-        db.close()
+def subjects_seeded(db):
+    """在**回滚事务**内造主体投诉数据 —— 让 15 个从不执行的断言真正跑起来。
+
+    ★ 每一组数字都对应一个断言, 不是"随便造点数据凑非空":
+
+      | 主体 | 商户号 | 外部 | total | ext_ratio | 退款额 |
+      |------|-------|------|-------|-----------|--------|
+      | 甲   | 4     | 0    | 4     | 0.00      | 0      |
+      | 乙   | 1     | 3    | 4     | 0.75      | 0      |
+      | 丙   | 0     | 2    | 2     | 1.00      | 500    |
+
+      · **三类主体齐全** → source_type=merchant/external/both 三档都有非空结果。
+      · **乙 两源都有** → `both`(升级主体) 既非空集也非全集, 筛选逻辑错误才看得出。
+      · **total 序 = 乙,甲,丙; ext_ratio 序 = 丙,乙,甲; refund 序 = 丙,甲,乙**
+        —— 三个排序键产出**三种不同顺序**。这是刻意设计:
+        若 ext_ratio/refund 的排序键误写成 `total`, 顺序会退化成 乙,甲,丙,
+        断言立刻失败。若数据只有一种顺序, 那几个断言**恒真**、形同虚设。
+        （甲/乙 总量同为 4, 默认键 `(-total,-external_count,name)` 下乙在前。）
+
+    判据来源（`app/services/complaint_scope.complaint_bucket_case`, 优先级从高到低）:
+      · `service_item` 含「微信」        → 商户号投诉（主体名取 `registrant`）
+      · `ExternalComplaint.company_entity` → 外部投诉主体（自带, 不经工单分桶）
+      · `Refund.refund_method == "线上"`  → 才计入主体-退款关联
+        ⚠️ 必须避开 `_CARD_TICKET_KEYWORDS`(工信部) 与 `_EXTERNAL_PLATFORM_KEYWORDS`
+           (市监/监督局/消协/12315…) —— 撞上会被分到别的桶, 主体榜直接空掉。
+    """
+    from datetime import datetime, timedelta
+
+    from app.models.device import Device
+    from app.models.external_complaint import ExternalComplaint
+    from app.models.refund import Refund
+    from app.models.ticket import ServiceTicket
+
+    now = datetime.now(TZ)
+    day1 = now - timedelta(days=5)
+
+    # (主体名, 商户号投诉条数, 外部投诉条数)  —— 退款额见下方单独构造
+    plan = (
+        ("测试主体甲", 4, 0),
+        ("测试主体乙", 1, 3),
+        ("测试主体丙", 0, 2),
+    )
+
+    sn_of = {name: f"SN-SUBJ-{i}" for i, (name, _mc, _ec) in enumerate(plan)}
+    for sn in sn_of.values():
+        # FK: service_tickets / external_complaints / refunds 三张表都引用 devices.sn
+        db.add(Device(sn=sn))
+    db.flush()
+
+    n = 0
+    for name, merchant_cnt, external_cnt in plan:
+        sn = sn_of[name]
+        for k in range(merchant_cnt):
+            n += 1
+            db.add(ServiceTicket(
+                ticket_no=f"GDC-SUBJ-{n}",
+                device_sn=sn,
+                service_item="微信投诉",   # 含「微信」→ 商户号投诉桶
+                registrant=name,          # ★ 商户号侧主体名的唯一来源
+                service_category="投诉",
+                register_time=day1 + timedelta(hours=k),
+            ))
+        for k in range(external_cnt):
+            n += 1
+            db.add(ExternalComplaint(
+                complaint_no=f"EXT-SUBJ-{n}",
+                device_sn=sn,
+                company_entity=name,      # ★ 外部侧主体名的唯一来源
+                complaint_date=day1 + timedelta(days=k),
+                dedup_hash=f"subject-seed-{n}",   # unique 约束, 每条需不同
+            ))
+
+    # 退款只给丙 → refund_amount 排序结果与 total 排序不同（断言才有辨别力）
+    db.add(Refund(
+        refund_no="RF-SUBJ-1",
+        device_sn=sn_of["测试主体丙"],
+        refund_amount=500,
+        refund_method="线上",             # 非"线上"不计入主体退款关联
+        created_at_raw=day1,
+    ))
+    db.flush()          # 不 commit —— 随 db fixture 事务回滚
+    _clear_cache()
+    return db
 
 
 @pytest.fixture
-def db_with_subjects(db_session):
-    """要求库中**有主体数据的投诉**才运行（否则断言恒真无意义）。"""
+def db_with_subjects(subjects_seeded):
+    """具备主体数据的会话（数据由 `subjects_seeded` 合成, 随事务回滚）。
+
+    ★ 为什么不再 skip（原实现）:
+      原判据是"库中无主体投诉数据就跳过"。但测试库**永远是空的** ——
+      `db` fixture 走显式事务 + rollback, 测试写的数据一律不落库
+      （而且 `db_session` 那种真实会话又绝不该在测试里写数据）。
+      两者叠加 → 这 15 个断言**从未执行过一次**。
+      代价已经显现: 本文件至今藏着一处调用签名错误（`source_type` 误传给
+      `complaint_overview`, 而该函数签名里并没有这个参数）, 正是靠跳过掩盖的。
+
+      合成数据替代后, 断言才真正具备"能不能抓到回归"的能力 ——
+      不能再拿"库里没数据"当绿灯。
+    """
     _clear_cache()
-    d = _call(db_session, start=None, end=None)
-    if not d.get("subject_ranking"):
-        pytest.skip("库中无主体投诉数据 —— 主体筛选断言需真实数据才有意义")
-    return db_session
+    d = _call(subjects_seeded, start=None, end=None)
+    assert d.get("subject_ranking"), (
+        "合成数据未产出主体榜 —— 检查 subjects_seeded: "
+        "需 registrant(商户号侧) 或 company_entity(外部侧) 非空, "
+        "且 device_sn 必须先在 devices 表存在(外键)"
+    )
+    return subjects_seeded
 
 
 class TestSubjectFilters:
@@ -145,8 +233,18 @@ class TestSubjectFilters:
         assert len(d_all["subject_ranking"]) >= len(d_20["subject_ranking"])
 
     def test_top_n_limits_result(self, db_with_subjects):
-        d = _call(db_with_subjects, start=None, end=None, top_n=3)
+        d = _call(db_with_subjects, start=None, end=None, top_n=3, sort_by="total")
         assert len(d["subject_ranking"]) <= 3
+        # ★ 必须真截到 3 条: 若种子主体数 <=3, "<= 3" 恒真, 断言形同虚设
+        assert len(d["subject_ranking"]) == 3, (
+            "种子主体不足 3 个 → 本断言恒真。subjects_seeded 已造 甲/乙/丙 三个, "
+            "若此处失败说明数据没造出来"
+        )
+        # 顺序按默认键 (-total, -external_count, name):
+        #   乙 = (-4, -3) < 甲 = (-4, 0) → 乙在前（总量同为 4, 外部多者优先）
+        assert [x["name"] for x in d["subject_ranking"]] == [
+            "测试主体乙", "测试主体甲", "测试主体丙"
+        ]
 
     def test_compare_prev_adds_delta_fields(self, db_with_subjects):
         """⑦ compare=prev → 输出 prev_total 与 delta_pct。"""
@@ -165,6 +263,35 @@ class TestSubjectFilters:
         d = _call(db_with_subjects, start=None, end=None, compare="none")
         for x in d["subject_ranking"]:
             assert "delta_pct" not in x, "未开环比不应出现 delta_pct"
+
+    def test_seed_gives_sort_keys_discriminating_power(self, db_with_subjects):
+        """⑩ 元断言：合成数据的三种排序键必须产出**不同顺序**。
+
+        ★ 为什么需要这条:
+          下面 ④⑤ 两条断言是"结果是否降序"。若种子数据让
+          total / external_ratio / refund_amount 三种排序**恰好同序**,
+          那么即使把排序键全部错写成 `total`, ④⑤ 也照样通过 —— 断言恒真。
+
+          本文件此前的困境正是一路"跳过", 从没机会发现这类问题
+          （甚至藏着一处签名错误）。故显式守住这条前提:
+          谁改种子数据改到三序重合, 这里先失败, 而不是让 ④⑤ 悄悄失效。
+        """
+        def order(sort_by):
+            d = _call(db_with_subjects, start=None, end=None,
+                      sort_by=sort_by, top_n=0, source_type="all")
+            return [x["name"] for x in d["subject_ranking"]]
+
+        o_total = order("total")
+        o_ratio = order("external_ratio")
+        o_amount = order("refund_amount")
+        assert o_total != o_ratio, (
+            f"total 与 external_ratio 同序({o_total}) → ④ 无辨别力, "
+            "请调整 subjects_seeded 的 商户号/外部 条数配比"
+        )
+        assert o_total != o_amount, (
+            f"total 与 refund_amount 同序({o_total}) → ⑤ 无辨别力, "
+            "请确认退款只给其中一个主体"
+        )
 
     def test_other_sections_unaffected(self, db_with_subjects):
         """⑨ 筛选只影响主体榜 —— 其它区块(严重性/升级链/趋势)不受影响。

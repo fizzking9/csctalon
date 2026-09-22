@@ -14,8 +14,19 @@
   差异来自 #55 口径：**同一天多渠道呈现 = 同一笔投诉的 1 个事件，不算反复**。
   若用记录数，会把「一天内多渠道登记」误判为该设备在反复投诉 —— 方向性错误。
 
-⚠️ 数据依赖：测试库为空时自动跳过（避免"0 == 0 恒真"的**假绿**），
-   与 `tests/test_complaint_overview.py` 的 `_require_window_data` 同策略。
+⚠️ 数据依赖 (2026-09-22 改)：**不再依赖库里的真实数据**。
+   原先 fixture 在"库中无投诉数据"时 `pytest.skip` —— 但测试库永远不会有
+   真实业务数据, 于是这些断言**从未被执行过**, 显示为"跳过"(黄色) 极易被
+   当成"环境不具备, 正常"。
+
+   实测背景: 测试库曾有 193 行 `SN-WIDE-*` 合成残留（由
+   `test_wide_table_builder` 的 `_build_wide_batch` 内部 commit 泄漏）, 它们
+   `service_category='投诉'` 但 `register_time` 为 NULL → 筛选恒为 0 条 →
+   35 个断言继续跳过。清理泄漏后库为空, 问题暴露得更彻底。
+
+   现改为 `_seed_complaints` fixture **自己造数据**, 使断言真正执行:
+     · 数据在 `db` fixture 的事务内 → 测试结束自动回滚, 零泄漏
+     · 形态对齐 `_repeat_complaints` 的判据(见该 fixture 注释)
 """
 
 from datetime import datetime, timedelta
@@ -39,7 +50,67 @@ def _clear_cache():
 
 
 @pytest.fixture
+def complaints_seeded(db, window):
+    """在**回滚事务**内造「反复投诉」数据, 让 A2/A5 断言真正执行
+
+    ## 数据形态依据（逐条对齐生产判据, 不可随意简化）
+
+    1. **`service_category='投诉'`** —— `is_complaint_ticket_cond()` 的判据是
+       「空白 OR ='投诉'」; 此处显式写 '投诉' 更醒目（空白也行, 但会被误读为漏填）。
+    2. **`register_time` 非空且在窗口内** —— `_repeat_complaints` 的硬性过滤条件
+       （`register_time IS NOT NULL` + 窗口比较）。
+       ⚠️ 这正是 193 行残留数据失败的原因: 它们 register_time 为 NULL。
+    3. **`device_sn` 非空** —— 事件键 `(SN, 北京日期)`, 无 SN 无法聚合。
+    4. **同一 SN 至少 3 个不同日期的事件** —— `threshold=3` 才算"反复投诉"。
+       ⚠️ 必须**跨日期**（同一 SN 同一天的多条会折叠成 1 个事件, 见 #55 口径）;
+       只造同一天的多条**测不出反复投诉** —— 那正是本测试要守护的方向性错误。
+    5. **`devices` 表须先有对应 SN** —— `service_tickets.device_sn` 有外键约束
+       （`service_tickets_device_sn_fkey`）, 否则插入直接 IntegrityError。
+    """
+    from app.models.device import Device
+    from app.models.ticket import ServiceTicket
+
+    sn = "SN-A2A5-SEED"
+    sn_b = "SN-A2A5-SEED-B"
+    # 判据 5: 先满足外键
+    db.add(Device(sn=sn))
+    db.add(Device(sn=sn_b))
+    db.flush()
+
+    base = datetime.fromisoformat(window[0]).replace(tzinfo=TZ)
+    # 同一 SN, 3 个**不同日期** → 3 个投诉事件 → 命中反复投诉阈值
+    for day_offset in (0, 2, 4):
+        reg = base + timedelta(days=day_offset, hours=10)
+        db.add(ServiceTicket(
+            ticket_no=f"GDC-A2A5-{day_offset}",
+            device_sn=sn,
+            service_category="投诉",     # 判据 1
+            service_item="服务投诉",
+            register_time=reg,           # 判据 2（193 行残留缺的就是这个）
+            finish_time=reg + timedelta(hours=2),
+        ))
+    # 再补一台不同 SN, 使主体/单位计数不依赖单一设备
+    db.add(ServiceTicket(
+        ticket_no="GDC-A2A5-B",
+        device_sn=sn_b,
+        service_category="投诉",
+        service_item="商品投诉",
+        register_time=base + timedelta(days=1, hours=14),
+        finish_time=base + timedelta(days=1, hours=16),
+    ))
+    db.flush()          # 不 commit —— 随 db fixture 事务回滚
+    _clear_cache()
+    return db
+
+
+@pytest.fixture
 def db_session():
+    """只读用途的会话（不造数据, 不回滚）
+
+    ⚠️ **不要**用它加数据 —— 它直接 `SessionLocal()`, 没有事务包裹,
+       写入会永久留在库里（这正是原先数据泄漏的成因之一）。
+       需要造数据的用例请用 `complaints_seeded`（内部走 `db` fixture, 会回滚）。
+    """
     try:
         from app.core.database import SessionLocal
         db = SessionLocal()
@@ -59,16 +130,28 @@ def window():
 
 
 @pytest.fixture
-def db_with_complaints(db_session, window):
-    """要求窗口内有投诉数据才运行（否则断言恒真无意义）。"""
+def db_with_complaints(db, complaints_seeded, window):
+    """带合成投诉数据的会话（**回滚事务**, 零泄漏）
+
+    ⚠️ 2026-09-22 重写：原实现在「窗口内无投诉数据」时 `pytest.skip`,
+       而测试库永远没有真实数据 → 18 个断言**从未执行**。
+       现改为由 `complaints_seeded` 造数据, 断言真正跑起来。
+
+       保留本 fixture 名是为兼容 18 处既有调用点（避免大范围改动引入风险）,
+       语义已从「要求库里有数据」变为「提供一个有数据的环境」。
+    """
     from app.api.v1.complaints import _parse_dt, _parse_dt_end, _repeat_complaints
     from app.services.analytics import _complaint_source_type_case
 
     ts, te = _parse_dt(window[0]), _parse_dt_end(window[1])
-    r = _repeat_complaints(db_session, ts, te, _complaint_source_type_case())
-    if not r["events_total"]:
-        pytest.skip("窗口内无投诉数据 —— A2/A5 断言需真实数据才有意义")
-    return db_session
+    r = _repeat_complaints(db, ts, te, _complaint_source_type_case())
+    # 造的数据必须真的满足判据 —— 否则是 fixture 写错, 应当**报错而非跳过**。
+    # （原实现 skip 会把"fixture 造错数据"伪装成"环境不具备", 掩盖问题）
+    assert r["events_total"] > 0, (
+        "合成数据未满足 _repeat_complaints 的判据 —— 检查 complaints_seeded: "
+        "需 service_category='投诉' + register_time 非空且在窗口内 + device_sn 非空"
+    )
+    return db
 
 
 # ── A5 时段热力 ──
@@ -262,7 +345,9 @@ class TestOverviewIntegration:
 
     def _overview(self, db, **kw):
         from app.api.v1.complaints import complaint_overview
-        kw.setdefault("source_type", None)
+        # ⚠️ 不要传 source_type: complaint_overview() 的签名里没有该参数
+        #    （重构 ce778a5 前后都没有）。此前多传导致 TypeError,
+        #    而因测试被 skip 从未执行, 该错误潜伏至今 —— 见本文件 fixture 注释。
         res = complaint_overview(db=db, _=None, **kw)
         if hasattr(res, "data"):
             return res.data
