@@ -188,8 +188,24 @@ def build_refund_wide(db: Session, only_refund_nos: list[str] | None = None, pro
     return {"built": total_built, "updated": total_built, "skipped": total_skipped, "deleted": deleted}
 
 
-def _build_wide_batch(db: Session, target_refund_nos: list[str]) -> dict:
-    """为一批退费单构建宽表行并 upsert"""
+def _build_wide_batch(db: Session, target_refund_nos: list[str],
+                      *, commit: bool = True) -> dict:
+    """为一批退费单构建宽表行并 upsert
+
+    ## `commit` 参数 (2026-09-22)
+
+    生产调用方需要本函数**自己提交**（否则要求调用方管事务, 增加耦合）;
+    但**测试**里若内部 `db.commit()`, 会绕过 pytest fixture 的**事务回滚** ——
+    造的数据永久留在测试库, 污染后续依赖真实数据的用例。
+
+    实测影响: `tests/test_wide_table_builder.py` 每跑一次就往
+    `service_tickets` 留下几行 `SN-WIDE-*` / `GDC-WIDE-*` 合成数据
+    （累计 193 行）。它们 `service_category='投诉'` 但 `register_time` 为 NULL,
+    导致 A2/A5 相关测试的筛选条件恒为 0 条 → **35 个断言被跳过、从未真正执行**。
+
+    故加 `commit` 开关: 测试传 `commit=False`, 数据随 fixture 事务一起回滚。
+    ⚠️ 默认 `True` 保持生产行为不变（生产只有一个调用方, 见下方 `build_wide_table`）。
+    """
     # 1. 拉取本批退费单主表记录
     refunds: dict[str, Refund] = {
         r.refund_no: r
@@ -298,7 +314,12 @@ def _build_wide_batch(db: Session, target_refund_nos: list[str]) -> dict:
         update_set = {f: getattr(stmt.excluded, f) for f in _WIDE_UPDATE_FIELDS}
         stmt = stmt.on_conflict_do_update(index_elements=["refund_no"], set_=update_set)
         db.execute(stmt)
-        db.commit()
+        # `commit=False` 时只 flush —— 数据进入当前事务, 由调用方（测试 fixture）
+        # 决定提交或回滚。用 flush 而非不动作: 需保证同事务内后续读取能看到这些行。
+        if commit:
+            db.commit()
+        else:
+            db.flush()
 
     return {"built": len(wide_rows), "skipped": skipped}
 

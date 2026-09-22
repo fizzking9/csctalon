@@ -32,7 +32,11 @@ from app.services.wide_table_builder import (
 
 
 def _uniq(prefix: str) -> str:
-    """生成唯一 SN(因 _build_wide_batch 内部 commit, 需避免跨运行残留冲突)。"""
+    """生成唯一 SN
+
+    ⚠️ 2026-09-22 起: `_build_wide_batch` 已支持 `commit=False`, 测试不再往库里
+    泄漏数据(见下方调用点)。本函数保留唯一性仅为**同一事务内**避免重复键冲突。
+    """
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
@@ -117,7 +121,9 @@ def test_build_wide_batch_assembles_row(db):
     ))
     db.flush()
 
-    result = _build_wide_batch(db, [rno])
+    # ⚠️ 必须传 commit=False —— 否则内部 db.commit() 会绕过 fixture 事务回滚,
+    #    造的数据永久留在测试库(实测累计泄漏 193 行), 污染后续依赖真实数据的用例。
+    result = _build_wide_batch(db, [rno], commit=False)
     assert result["built"] == 1
     assert result["skipped"] == 0
 
@@ -138,7 +144,7 @@ def test_build_wide_batch_assembles_row(db):
 
 def test_build_wide_batch_skips_missing_refund(db):
     """边界: 目标退费单不存在 → skipped+1, 不建行。"""
-    result = _build_wide_batch(db, ["RFW-NOT-EXIST"])
+    result = _build_wide_batch(db, ["RFW-NOT-EXIST"], commit=False)
     assert result["built"] == 0
     assert result["skipped"] == 1
     assert db.get(RefundWide, "RFW-NOT-EXIST") is None
@@ -157,7 +163,7 @@ def test_build_wide_batch_external_complaint_agg(db):
     ))
     db.flush()
 
-    result = _build_wide_batch(db, [rno])
+    result = _build_wide_batch(db, [rno], commit=False)
     assert result["built"] == 1
 
     wide = db.get(RefundWide, rno)

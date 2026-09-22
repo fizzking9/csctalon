@@ -33,7 +33,11 @@ def _test_session(_engine):
     for cls in (RefundRecordReport, ManualRefund, Refund):
         safe_wipe(session, cls)
     # 清理本文件可能残留的测试设备(_ensure_device commit 落库)
-    safe_wipe(session, Device, where=Device.sn.like("SN-D-%"))
+    #   ⚠️ 本文件还会用 `SN-DUP` / `SN-NONE`（见 test_dup_sn_* / test_missing_op_time_*），
+    #      它们**不匹配** `SN-D-%` → 旧模式下每次跑都残留。
+    #      故按"本文件可能造出的全部前缀"清理, 而不是只清其中一个。
+    for _pat in ("SN-D-%", "SN-DUP", "SN-NONE"):
+        safe_wipe(session, Device, where=Device.sn.like(_pat))
     session.commit()
     try:
         yield session
@@ -42,7 +46,8 @@ def _test_session(_engine):
         try:
             for cls in (RefundRecordReport, ManualRefund, Refund):
                 safe_wipe(session, cls)
-            safe_wipe(session, Device, where=Device.sn.like("SN-D-%"))
+            for _pat in ("SN-D-%", "SN-DUP", "SN-NONE"):
+                safe_wipe(session, Device, where=Device.sn.like(_pat))
             session.commit()
         except Exception:
             session.rollback()

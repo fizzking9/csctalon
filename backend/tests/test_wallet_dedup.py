@@ -21,6 +21,7 @@ from __future__ import annotations
 import uuid
 
 import pandas as pd
+import pytest
 from sqlalchemy import select
 
 from app.models.wallet import WalletWithdrawal
@@ -66,6 +67,36 @@ def _cleanup(db, *account_ids: str) -> None:
         ).scalars().all():
             db.delete(row)
     db.commit()
+
+
+# 本文件测试用的设备 SN。
+#   ⚠️ `upsert_wallet` 内部会调 `_sync_devices` —— SN 不存在时**自动创建** `devices` 行,
+#      且本文件用例里有 `db.commit()`, 会把该行连同 fixture 事务一起提交落库。
+#      原实现只 `_cleanup` 提现行、不清理 device → 每跑一次残留一行 `SNTEST0001`。
+#      （同类缺陷: test_reconcile.py 的 SN-DUP/SN-NONE, 已一并修复）
+_TEST_SNS = ("SNTEST0001",)
+
+
+def _cleanup_devices(db) -> None:
+    """清理 `_sync_devices` 自动创建、并已被 commit 落库的设备行。"""
+    from app.models.device import Device
+
+    for sn in _TEST_SNS:
+        for row in db.execute(
+            select(Device).where(Device.sn == sn)
+        ).scalars().all():
+            db.delete(row)
+    db.commit()
+
+
+@pytest.fixture(autouse=True)
+def _no_device_residue(db):
+    """每个用例后清掉本文件自动创建设备, 防止测试库积累残留（见 `_TEST_SNS` 注释）。"""
+    yield
+    try:
+        _cleanup_devices(db)
+    except Exception:
+        db.rollback()
 
 
 def test_null_device_sn_not_duplicated_across_rounds(db):
