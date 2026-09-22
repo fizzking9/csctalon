@@ -217,6 +217,77 @@ class TestProfilesAreWellFormed:
         assert resolve_profile("prod").sql_echo is False
 
 
+class TestProfileFieldsAreWired:
+    """⑥ profile 的每个字段都必须**真的被读取**（防止"文档式空承诺"）。
+
+    ★ 为什么需要：`docs_enabled` 最初只是声明在 Profile 里，**没人读它** ——
+      使用者以为"prod 关闭了 /docs"，实际一直开着。这类"声明了但没接线"的字段
+      比没有更糟：它让人误信一个不成立的保证。
+
+      本组用**源码扫描**保证接线（比运行时更重要：运行时有默认值兜底，看不出漏接线）。
+    """
+
+    def test_docs_enabled_is_read_by_main(self):
+        """`docs_enabled` 必须被 main.py 读取（接线到 FastAPI 的 docs_url）。"""
+        src = (_BACKEND_DIR / "app/main.py").read_text(encoding="utf-8")
+        assert "docs_url" in src, (
+            "main.py 未设置 docs_url —— profile.docs_enabled 是空声明（声明了没人读）"
+        )
+        assert "docs_enabled" in src, "main.py 未读取 profile.docs_enabled"
+
+    def test_prod_keeps_docs_open_by_default(self):
+        """prod 的 /docs **保持改造前现状**（开放）。
+
+        ★ 为什么断言"开放"而不是"关闭"：
+          改造前 FastAPI 用默认值 → /docs 一直开放。若本次框架改造顺带把它关了，
+          那是**非预期的行为变更**（可能有对接方依赖 OpenAPI）。
+          要关闭必须走显式开关 OPENAPI_ENABLED=false（独立决策）。
+        """
+        prod = resolve_profile("prod")
+        # 未显式设 OPENAPI_ENABLED 时，prod 应视为开放（保持现状）
+        assert prod.docs_enabled is False, "profile 里 prod.docs_enabled 应为 False"
+        # 但 main.py 必须把 prod 视为"开放"（见 main.create_app 的 _openapi_on 逻辑）
+        src = (_BACKEND_DIR / "app/main.py").read_text(encoding="utf-8")
+        assert 'mode == "prod"' in src or "OPENAPI_ENABLED" in src, (
+            "main.py 需保留 prod 的 /docs 现状（或提供显式开关）"
+        )
+
+    def test_openapi_env_switch_exists(self):
+        """必须提供显式开关，否则"想关也关不掉"。"""
+        src = (_BACKEND_DIR / "app/main.py").read_text(encoding="utf-8")
+        assert "OPENAPI_ENABLED" in src, "缺少显式开关 OPENAPI_ENABLED"
+
+    def test_no_profile_field_is_obviously_unused(self):
+        """粗筛：Profile 的字段名应在**别处**出现过（被读取或测试引用）。
+
+        这是一个**启发式**检查（不是完备证明），用于抓住
+        "加了个字段却忘了接线"这类低级错误。字段若只在本文件出现 → 高度可疑。
+        """
+        import dataclasses
+
+        # 收集仓库内的其它源码（app/ 与 tests/），排除 profiles.py 自身
+        other_src = ""
+        for sub in ("app", "tests", "scripts"):
+            for p in (_BACKEND_DIR / sub).rglob("*.py"):
+                if p.name == "profiles.py":
+                    continue
+                try:
+                    other_src += p.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+
+        unused = []
+        for f in dataclasses.fields(resolve_profile("dev")):
+            name = f.name
+            if name not in other_src:
+                unused.append(name)
+        assert not unused, (
+            f"Profile 字段 {unused} 未在 app/ tests/ scripts/ 中出现 —— "
+            "疑似声明了但没人读（空承诺）。若确实有意保留作元数据，"
+            "请在本测试中显式列为例外并说明原因。"
+        )
+
+
 class TestEnvFileNotCwdDependent:
     """④ `.env` 加载不得依赖 CWD —— 原实现按 CWD 解析，从仓库根跑会加载生产配置。"""
 

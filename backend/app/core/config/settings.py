@@ -23,7 +23,7 @@ from typing import Literal
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .guard import assert_db_matches_profile, check_db_matches_profile
+from .guard import check_db_matches_profile
 from .profiles import Profile, resolve_profile
 
 # 生产环境禁止使用的弱默认值(fail-fast: 漏配 .env 即裸奔)
@@ -152,10 +152,14 @@ class Settings(BaseSettings):
     CONFIG_ENCRYPTION_KEY: str = ""
 
     # 上传
-    UPLOAD_DIR: str = "./uploads"
+    # ★ 2026-09-22: 默认值由 profile 决定（dev=./uploads / test=/tmp/... / prod=/app/uploads）
+    #   使"数据写到哪"也受模式驱动，而非散落的字面量。
+    UPLOAD_DIR: str = _PROFILE.upload_dir
     MAX_UPLOAD_SIZE_MB: int = 200
     # Playwright 登录态保存目录(独立于 UPLOAD_DIR, 不被 /uploads 静态挂载暴露)
-    BROWSER_STATE_DIR: str = "./data/browser_states"
+    # ★ 由 profile 的 data_dir 派生 —— 这正是 `data_dir` 字段的**接线点**
+    #   （原先该字段声明了但没人读，属"空承诺"）。
+    BROWSER_STATE_DIR: str = f"{_PROFILE.data_dir}/browser_states"
 
     # BMS 平台(定时同步用,手动同步时前端传入)
     BMS_USERNAME: str = ""

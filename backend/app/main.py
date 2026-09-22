@@ -1,6 +1,7 @@
 """FastAPI 应用入口"""
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -312,11 +313,31 @@ def _start_bms_scheduler() -> None:
 
 
 def create_app() -> FastAPI:
+    # ★ 2026-09-22: 接线 profile 的 docs_enabled / openapi 开关。
+    #   为什么必须接线：`Profile.docs_enabled` 若只是"声明了但没人读"，
+    #   它就退化成**文档式的空承诺** —— 使用者以为关掉了、实际还开着。
+    #   （本机制的第一原则就是"模式必须驱动行为，不能只是标签"。）
+    #
+    #   ⚠️ prod 保持**现状**（文档仍开放）：改造前 FastAPI 用默认值 → /docs 一直是开的，
+    #      贸然关闭会改变既有可用行为（可能有对接方依赖 OpenAPI）。
+    #      故：prod 的开关**不**由 profile 单独决定，而由显式环境变量控制，
+    #      避免"框架升级顺带关掉了文档"这种非预期行为变更。
+    #      要关闭请显式设 `OPENAPI_ENABLED=false`（独立决策，走变更流程）。
+    _openapi_env = os.environ.get("OPENAPI_ENABLED", "").strip().lower()
+    if _openapi_env in ("true", "false"):
+        _openapi_on = _openapi_env == "true"
+    else:
+        # 未显式设置：dev/test 按 profile；prod 保持现状（开启）
+        _openapi_on = _profile.docs_enabled or _profile.mode == "prod"
     app = FastAPI(
         title=settings.APP_NAME,
         version=settings.APP_VERSION,
         description="数据分析工具应用 - 数据分析与内部工作流辅助平台",
         lifespan=lifespan,
+        # 非开放时置 None（FastAPI 语义：None = 不注册该路由）
+        docs_url="/docs" if _openapi_on else None,
+        redoc_url="/redoc" if _openapi_on else None,
+        openapi_url="/openapi.json" if _openapi_on else None,
     )
 
     app.add_middleware(

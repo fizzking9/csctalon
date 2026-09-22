@@ -82,15 +82,27 @@ def bootstrap(
     # ── 决定库名 ──
     target_db = db_name or os.environ.get("POSTGRES_DB") or _DEFAULT_DB_FOR_MODE[resolved_mode]
 
-    # ★ 真实库护栏：非 prod 模式**不得**连真实库（除非显式授权）。
+    # ★ 读取 profile 的 allow_destructive_on_real_db，作为"是否默认允许真实库"的依据。
+    #   为什么必须读它（而不是在脚本里硬编码 `mode != "prod"`）：
+    #     若脚本自己判断，就等于**第二份定义** —— 改了 profile 这里不会跟着变
+    #     （同 A-20260910-004 双份定义漂移教训）。
+    #   ⚠️ 这只是**默认值来源**：真实库上的破坏性操作仍需调用方显式传 allow_real_db=True。
+    from app.core.config.profiles import resolve_profile as _resolve_profile
+
+    _prof = _resolve_profile(resolved_mode)
+
+    # ★ 真实库护栏：非本模式许可时**不得**连真实库（除非显式授权）。
     is_real_db = not target_db.endswith(("_dev", "_test")) and "_test" not in target_db
-    if is_real_db and resolved_mode != "prod" and not allow_real_db:
+    mode_permits_real_db = _prof.allow_destructive_on_real_db
+    if is_real_db and not mode_permits_real_db and not allow_real_db:
         raise SystemExit(
             f"⛔ 模式 {resolved_mode!r} 不允许连接真实库 {target_db!r}。\n"
             f"   若确需（生产运维脚本），请显式传 allow_real_db=True"
             f"（脚本参数通常为 --allow-real-db）。\n"
             f"   ★ 为什么拦：2026-09-10 曾有脚本/测试误连开发库执行整表 DELETE，\n"
-            f"     导致 refunds 170960→2；2026-09-22 同因复发（未遂）。"
+            f"     导致 refunds 170960→2；2026-09-22 同因复发（未遂）。\n"
+            f"   ★ 本判断依据 profile.allow_destructive_on_real_db={mode_permits_real_db}"
+            f"（见 app/core/config/profiles.py），非脚本自建规则。"
         )
 
     # ── 设环境变量（必须在 import app 之前）──

@@ -80,7 +80,12 @@ class Profile:
     sql_echo: bool
 
     # ── 数据目录（相对 backend/）──
+    # data_dir: 数据根目录。**已被 settings.py 读取**，用于派生 BROWSER_STATE_DIR
+    #   （Playwright 登录态存放处：`{data_dir}/browser_states`）。
+    #   为什么不给每个子目录都建字段：profile 的价值是"环境差异的单一真值来源"，
+    #   不是"把每个路径都列一遍"。只保留真正随环境变化的根目录。
     data_dir: str
+    # upload_dir: 上传目录（随环境变化：dev=./uploads / test=/tmp/... / prod=/app/uploads）
     upload_dir: str
     # log_dir: 持久化日志目录；None = 只输出到 stdout（不写文件）。
     #   ★ dev/test 为 None：避免按 CWD 创建 ./logs（原实现只在容器写 /app/logs，
@@ -89,22 +94,26 @@ class Profile:
     log_dir: str | None
 
     # ── 行为开关 ──
-    # 是否暴露 /docs /redoc（生产按需关闭）
+    # docs_enabled: 是否暴露 /docs /redoc /openapi.json。
+    #   ★ 2026-09-22 修正：该字段原先**声明了但没人读**（空承诺）。
+    #     现已接线到 main.create_app()。
+    #   ⚠️ prod 取 False 是**保持改造前现状**的反直觉点 —— 详见 main.create_app()
+    #      的说明：prod 仍开放 /docs，要关请用独立开关 OPENAPI_ENABLED=false。
     docs_enabled: bool
-    # 是否允许「连到的库不是本模式期望的库」继续运行。
-    # 生产恒 False（prod 必须连 prod 库）；dev/test 也恒 False（见 guard 设计），
-    # 保留该字段是为了让「豁免」成为**显式**行为而非散落的 if。
-    allow_db_mismatch: bool
-    # 是否允许对**真实库**执行破坏性操作（scripts/ 的 --allow-real-db 会读它）。
-    # prod 为 True（生产运维脚本本就该操作生产库）；
-    # dev/test 为 False —— 即使目标是真实库也拒绝，除非 profile 被显式覆盖。
+    # 是否允许对**真实库**执行破坏性操作。
+    #   ★ 接线位置：`scripts/_bootstrap.py` 的 bootstrap()（决定是否拦下真实库）。
+    #   语义：prod=True（生产运维脚本本就操作生产库）；dev/test=False（拒绝）。
+    #   ⚠️ 这只是**默认值来源**，不是"自动放行" —— 真实库上的破坏性操作
+    #      仍需调用方显式声明（`--allow-real-db`），见 app/core/db_guard.py。
     allow_destructive_on_real_db: bool
 
     # ── 前端 ──
-    # 传给前端的环境标识（VITE_APP_MODE）。与 VITE_BUILD_MODE（菜单开关）**语义分离**：
-    #   前者 = 环境（决定 API 地址、日志上报等）
-    #   后者 = 构建档位（决定显示哪些菜单）
-    vite_app_mode: str
+    # ★ 2026-09-22：**已移除** `vite_app_mode` 字段。
+    #   原先设计为"传给前端的环境标识"，但实际传递链是
+    #      docker-compose（APP_MODE）→ web/Dockerfile（VITE_APP_MODE）→ 前端
+    #   —— 全程走环境变量，后端 profile 不参与。保留该字段会造成
+    #   "两个地方都声明前端环境"（同 A-20260910-004 双份定义漂移）。
+    #   前端的环境真值来源 = docker-compose 的 APP_MODE。
 
     def describe(self) -> str:
         """单行摘要 —— 供启动日志输出，让"当前跑在哪个环境"一目了然。"""
@@ -129,9 +138,7 @@ _DEV = Profile(
     upload_dir="./uploads",
     log_dir=None,              # 本地只输出到 stdout（见字段注释）
     docs_enabled=True,         # 本地开发需要 /docs
-    allow_db_mismatch=False,
     allow_destructive_on_real_db=False,   # ★ dev 不得动真实库
-    vite_app_mode="development",
 )
 
 _TEST = Profile(
@@ -147,9 +154,7 @@ _TEST = Profile(
     upload_dir="/tmp/csctalon-test/uploads",
     log_dir=None,              # 测试期不写文件，压噪音
     docs_enabled=False,
-    allow_db_mismatch=False,
-    allow_destructive_on_real_db=False,   # ★ test 绝不得动真实库（#42 事故根因）
-    vite_app_mode="test",
+    allow_destructive_on_real_db=False,   # ★ dev 不得动真实库
 )
 
 _PROD = Profile(
@@ -161,13 +166,17 @@ _PROD = Profile(
     log_level="INFO",
     log_format="json",         # 结构化：便于采集与告警
     sql_echo=False,            # 强制关
-    data_dir="/data",
-    upload_dir="/app/uploads",
-    log_dir="/app/logs",
+    # ⚠️ 路径默认值**必须与改造前一致**（改造前 settings 的默认是
+    #    UPLOAD_DIR="./uploads" / BROWSER_STATE_DIR="./data/browser_states"）。
+    #    容器部署时由 docker-compose 显式覆盖为 /app/uploads 等绝对路径
+    #    （见 docker-compose.yml 注释），故这里的默认值只在"未覆盖"时生效。
+    #    ★ 教训：接线 profile 时若顺手改了默认路径，就是**非预期的行为变更** ——
+    #      本次差点把 ./data 改成 /data。故此处刻意保持原值。
+    data_dir="./data",
+    upload_dir="./uploads",
+    log_dir="/app/logs",       # 容器内持久化日志（挂载 ./logs/backend → /app/logs）
     docs_enabled=False,
-    allow_db_mismatch=False,
     allow_destructive_on_real_db=True,    # 生产运维脚本本就操作生产库
-    vite_app_mode="production",
 )
 
 _PROFILES: dict[str, Profile] = {
