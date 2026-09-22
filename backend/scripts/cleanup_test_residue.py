@@ -24,6 +24,12 @@ import os
 import sys
 
 # ── 库名守卫（必须在 import app 之前设置，且必须在删除前校验）──
+# ★ 2026-09-22: 必须**同时**设 APP_MODE —— 模式体系的唯一入口
+#   （见 app/core/config/profiles.py）。只设库名不设模式会被启动守卫拦下：
+#   "模式 dev 要求库名以 '_dev' 结尾，实际库名 'csctalon_test'"。
+#   这正是守卫的价值：**库名与模式必须自洽**，不允许"库名像测试库但模式是 dev"这种
+#   含糊状态（那正是导致"以为连 A 实际连 B"的土壤）。
+os.environ["APP_MODE"] = "test"
 os.environ["POSTGRES_DB"] = os.environ.get("TEST_POSTGRES_DB", "csctalon_test")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -31,6 +37,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sqlalchemy import text  # noqa: E402
 
 from app.core.database import SessionLocal  # noqa: E402
+
+# ★ 通用守卫：破坏性操作前二次校验（与 tests/_db_guard.py 同一实现，避免两份定义）
+from app.core.db_guard import assert_safe_to_destroy  # noqa: E402
 
 # 合成数据的可识别标记。
 #
@@ -48,10 +57,15 @@ def main(apply: bool = False) -> int:
     db = SessionLocal()
     try:
         # ── 守卫 1: 库名必须是测试库 ──
+        # ★ 改用 `app/core/db_guard.py` 的**统一实现**（与 tests/_db_guard.py 同一份）。
+        #   原实现此处自己写了一遍 `if "test" not in dbname` —— 那是**第二份守卫**
+        #   （同 A-20260910-004 双份定义漂移教训：改一处必漏一处）。
+        #   统一后：判定口径（含 CI 自定义库名如 csctalon_test_ci）只有一处定义。
         dbname = db.execute(text("SELECT current_database()")).scalar()
-        if "test" not in (dbname or "").lower():
-            print(f"✘ 拒绝执行: 当前库 {dbname!r} 不含 'test' —— "
-                  f"本脚本只允许在测试库上运行")
+        try:
+            assert_safe_to_destroy(db, reason="清理测试库合成残留")
+        except RuntimeError as e:
+            print(f"✘ 拒绝执行: {e}")
             return 2
         print(f"目标库: {dbname}")
 

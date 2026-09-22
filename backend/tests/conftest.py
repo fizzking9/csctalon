@@ -41,6 +41,11 @@ import pytest
 #     B. **库名守卫** —— engine 建立后硬断言实际连到的库 = 期望测试库,
 #        否则立即抛错中止(宁可测试全红, 也不能写错库)。
 os.environ["ENV"] = "test"   # 强制(不用 setdefault): 防上游残留值遮蔽
+# ★ 2026-09-22: 同步设置 APP_MODE —— 模式体系的**唯一入口**（见 app/core/config/profiles.py）。
+#   两个变量都设是为了兼容：settings 优先读 APP_MODE，回退读 ENV。
+#   设为 test 后，启动期的「模式↔库名」守卫会要求库名以 _test 结尾 ——
+#   与下方 _EXPECTED_TEST_DB 的断言形成**双层**保护（一处来自通用框架，一处来自测试专项）。
+os.environ["APP_MODE"] = "test"
 _EXPECTED_TEST_DB = os.environ.get("TEST_POSTGRES_DB", "csctalon_test")
 os.environ["POSTGRES_DB"] = _EXPECTED_TEST_DB   # 强制覆盖, 见上 A
 

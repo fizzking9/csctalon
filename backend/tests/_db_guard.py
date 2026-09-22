@@ -26,16 +26,34 @@
 ## 为什么保留"全表清空"能力
 部分用例需要表处于"空"状态才能断言(如"导入前该表无数据")。硬性禁止全表删除会
 让这些用例无法编写。故策略是"**限定库** + **强制显式**", 而非"禁止"。
+
+## ★ 2026-09-22 重构: 实现下沉到 `app/core/db_guard.py`
+原实现只对 pytest 生效 —— `scripts/*.py` 与 `python -c` 完全绕过它,
+而 2026-09-22 的未遂事故**正是发生在 `python -c` 场景**（同因复发）。
+现将通用逻辑下沉到 `app/core/db_guard.py`, 本模块**委托**给它
+（保留原 API 不变, 已有测试锁定）——避免出现"第二份守卫实现"
+（同 A-20260910-004 双份定义漂移教训）。
 """
 from __future__ import annotations
 
 import os
 
+from app.core.db_guard import (
+    assert_safe_to_destroy,
+    current_db_name,
+    is_test_db,
+)
+
 _EXPECTED_TEST_DB = os.environ.get("TEST_POSTGRES_DB", "csctalon_test")
 
 
 def assert_test_database(url: str) -> None:
-    """断言 URL 指向测试库, 否则抛错(与 conftest 同口径)。"""
+    """断言 URL 指向测试库, 否则抛错(与 conftest 同口径)。
+
+    ⚠️ 保持"全等 `_EXPECTED_TEST_DB`"的严格语义（与 `app/core/db_guard` 的
+    "后缀匹配"有意不同）：测试环境应**精确**连期望的库，而非"任意 _test 结尾的库"。
+    两者是不同层次的要求：前者是"测试环境的硬约束"，后者是"破坏性操作的兜底"。
+    """
     db_name = str(url).rsplit("/", 1)[-1].split("?", 1)[0]
     if db_name != _EXPECTED_TEST_DB:
         raise RuntimeError(
@@ -78,3 +96,14 @@ def safe_wipe_many(session, models, *, reason: str = "") -> None:
     assert_test_database(_current_db_url(session))
     for m in models:
         session.execute(m.__table__.delete())
+
+
+__all__ = [
+    "assert_test_database",
+    "safe_wipe",
+    "safe_wipe_many",
+    # 通用实现（供 scripts/ 等复用）
+    "assert_safe_to_destroy",
+    "current_db_name",
+    "is_test_db",
+]

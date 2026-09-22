@@ -3,7 +3,6 @@
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # ⚠️ 日志时间戳统一为北京时间(容器默认 TZ=UTC, 否则 asctime 落后 8h, 与前端/调度标签混淆)。
@@ -21,25 +20,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
-from app.core.config import settings
+
+# ★ 2026-09-22: 日志由运行模式 Profile 决定（级别/格式）。
+#   改造前此处硬编码 `level=logging.INFO` + 人类可读格式 —— 所有环境同一套：
+#     · dev 看不到 DEBUG（排障最需要的信息被过滤）
+#     · prod 用人类可读格式（不利于采集/告警系统解析）
+#   现: dev=DEBUG+detailed / test=WARNING+plain / prod=INFO+json（见 profiles.py）。
+#   ⚠️ setup_logging 内部会清空既有 handler 再重装，故此处覆盖 uvicorn 的默认配置。
+from app.core.config import Profile, resolve_profile, settings, setup_logging
 from app.core.database import SessionLocal
 from app.middleware.cache_control import NoCacheMiddleware
 from app.middleware.operation_log import OperationLogMiddleware
 from app.models import *  # noqa: F401,F403  # 注册所有模型
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+_profile: Profile = resolve_profile(settings.ENV)
+setup_logging(_profile, log_dir=_profile.log_dir)
 logger = logging.getLogger(__name__)
-
-# 持久化日志到文件(挂载 ./logs/backend → /app/logs),避免容器重建丢失 500 堆栈
-try:
-    Path("/app/logs").mkdir(parents=True, exist_ok=True)
-    _file_handler = RotatingFileHandler(
-        "/app/logs/app.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
-    )
-    _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-    logging.getLogger().addHandler(_file_handler)
-except Exception:
-    pass  # 目录不可写时不影响启动
 
 # backend/ 目录（alembic.ini 与 alembic/ 所在位置）
 _BACKEND_DIR = Path(__file__).resolve().parent.parent

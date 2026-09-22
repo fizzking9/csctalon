@@ -1,10 +1,30 @@
-"""应用配置 - 基于环境变量,支持 .env 文件"""
+"""应用配置 - 由运行模式 Profile 驱动, 按模式加载 .env
 
+## 2026-09-22 改造要点（详见 docs/arch/A-20260922-001-运行模式框架与配置分离.md）
+
+原实现的问题**不是"没有配置文件"，而是"模式不驱动任何行为"**：
+  · `settings.ENV` 全仓仅 2 处引用（微信 mock、错误措辞），不决定库名/日志/目录
+  · `env_file=".env"` 按 **CWD** 解析 —— 从仓库根跑会加载根目录那份 `ENV=prod` 的
+    `.env`，于是同一条命令在不同目录连**不同的库**
+  · `POSTGRES_DB` 默认值就是真实库名 `csctalon` → "忘记配置" = "连真实库"
+
+后果是**错误不可见**：本地与生产的库名都是 `csctalon`，
+连错库时配置/日志/界面没有任何异常信号（2026-09-10 造成 `refunds 170960→2`，
+2026-09-22 同因复发）。
+
+本模块现由 `profiles.resolve_profile()` 驱动，并把三类错配变为**启动期硬失败**。
+"""
+
+import os
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .guard import assert_db_matches_profile, check_db_matches_profile
+from .profiles import Profile, resolve_profile
 
 # 生产环境禁止使用的弱默认值(fail-fast: 漏配 .env 即裸奔)
 _PROD_FORBIDDEN_DEFAULTS = {
@@ -14,10 +34,66 @@ _PROD_FORBIDDEN_DEFAULTS = {
     "REDIS_PASSWORD": "",
 }
 
+# ★ 库名的"不可用占位符"（2026-09-22）。
+#   为什么不沿用 "csctalon"：那会使"忘记配置"等价于"连真实库"。
+#   改为占位符后，忘记配置 → 启动期报错（可见、无破坏性）。
+#   这不是"多加一道校验"，而是把默认值从**危险**改为**安全侧**。
+_PLACEHOLDER_DB = "__MUST_SET_POSTGRES_DB__"
+
+# backend/ 目录（本文件位于 backend/app/core/config/settings.py）
+_BACKEND_DIR = Path(__file__).resolve().parents[3]
+
+
+def _resolve_mode() -> str:
+    """解析运行模式：`APP_MODE` > `ENV`（兼容旧变量）> 默认 `dev`。
+
+    ★ 命名演进：旧名 `ENV` 易与"环境变量"混淆，且与 shell 的 `$ENV` 重名。
+      新名 `APP_MODE` 语义明确。`ENV` 保留为兼容别名 ——
+      生产 `.env` 里仍是 `ENV=prod`，直接废弃会让升级瞬间失配。
+    """
+    return os.environ.get("APP_MODE") or os.environ.get("ENV") or "dev"
+
+
+def _resolve_env_files(profile: Profile) -> tuple[str, ...]:
+    """按 profile 解析要加载的 .env（绝对路径元组）。
+
+    ★ 为什么用绝对路径：原 `env_file=".env"` 是 CWD 相对的，从仓库根跑会加载
+      根目录那份 `ENV=prod` 的 .env → **加载到生产配置**。改后行为不随 CWD 漂移。
+
+    加载顺序（pydantic-settings 语义：**后者优先级更高**）：
+      1) 通用 `.env`   —— 共享默认值（可选）
+      2) 模式专属文件   —— profile.env_file（`.env.dev` / `.env.prod`）
+      3) 环境变量       —— 最高优先级（部署注入，覆盖文件）
+
+    ⚠️ 兼容性兜底：模式专属文件**不存在**时回退用通用 `.env` ——
+      让存量部署（只有 `.env`）平滑升级，否则生产会因"找不到 .env.prod"失去全部配置。
+        · 生产：compose 通过 `env_file:` 把配置注入**环境变量**，容器内本无
+          `/app/.env`（实测确认）→ 回退分支不影响生产。
+        · 本地：`backend/.env` 继续生效，无需立刻改名。
+    """
+    files: list[str] = []
+    generic = _BACKEND_DIR / ".env"
+    if generic.exists():
+        files.append(str(generic))
+
+    if profile.env_file:
+        specific = _BACKEND_DIR / profile.env_file
+        if specific.exists():
+            files.append(str(specific))
+        elif not files:
+            files.append(str(generic))
+    return tuple(files)
+
+
+# 模式在**模块导入期**解析一次。
+#   为什么不在函数里动态取：model_config 需要静态值；且"进程启动时模式固定"
+#   是合理约束（不允许运行期切库）。
+_PROFILE: Profile = resolve_profile(_resolve_mode())
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_resolve_env_files(_PROFILE),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -26,11 +102,13 @@ class Settings(BaseSettings):
     # 应用
     APP_NAME: str = "数据分析工具应用"
     APP_VERSION: str = "0.1.0"
-    ENV: Literal["dev", "prod", "test"] = "dev"
+    # 运行模式: dev / test / prod —— 由 profile 驱动(不再各自为政)。
+    ENV: Literal["dev", "prod", "test"] = _PROFILE.mode
     DEBUG: bool = True
     # SQLAlchemy SQL 语句打印(engine echo)。默认关闭——即使 DEBUG=true 也不全量打 SQL,
     # 避免 SQL 噪音淹没真正错误、撑大日志。需要排障时显式设 SQL_ECHO=true。
-    SQL_ECHO: bool = False
+    # ⚠️ profile 为 prod 时下方 validator 强制置 False（SQL 日志含真实数据且量极大）。
+    SQL_ECHO: bool = _PROFILE.sql_echo
 
     # 网站备案信息(网站备案要求展示, 空则前端显示占位)
     # ICP 备案号, 如 "京ICP备12345678号-1"
@@ -46,8 +124,16 @@ class Settings(BaseSettings):
 
     # 数据库
     POSTGRES_USER: str = "csctalon"
+    # ★★ 2026-09-22 关键变更 ★★
+    #   原默认值 `"csctalon"` **就是真实库名** → "忘记配置" 等价于 "连真实库"。
+    #   配合"从仓库根跑会加载根目录 ENV=prod 的 .env"，`python -c` 误连真实库
+    #   几乎是必然(2026-09-22 未遂事故)。
+    #   现改为占位符：忘记配置 → 启动期报错（可见、无破坏性）。
+    #   显式配置途径（优先级低→高）：
+    #     · `.env` / `.env.dev` / `.env.prod` 文件
+    #     · 环境变量 POSTGRES_DB（生产 compose 走这条，实测容器内有该变量）
+    POSTGRES_DB: str = _PLACEHOLDER_DB
     POSTGRES_PASSWORD: str = "csctalon123"
-    POSTGRES_DB: str = "csctalon"
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: str = "5432"
 
@@ -221,18 +307,36 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _enforce_prod_secrets(self) -> "Settings":
-        """生产环境 fail-fast: 拒绝弱默认密钥/口令与占位符。
+        """★ 统一启动期校验：占位符 + 模式↔库名一致性 + 生产弱口令。
 
-        2026-08-20 审计 H-4/OPS-04 升级:
-        - 原实现只精确比对 4 个字面默认值, .env.example 的占位符(如 <请修改为随机长字符串>)
-          非空且不等于默认串即可绕过 → 弱密钥静默上线。
-        - 现增加占位词/长度校验(尤其 JWT_SECRET_KEY, 它同时派生 Fernet 凭证加密密钥)。
-        注意: 轮换 JWT_SECRET_KEY 前必须先设置独立 CONFIG_ENCRYPTION_KEY 并重加密
-        sync_source_configs 存量凭证(见 .env.example 注释与审计报告 C-P0-4)。
+        2026-09-22 追加（本机制的核心）：把三类**静默错配**变为启动期硬失败。
+        原实现只校验了 ENV=prod 时的弱口令，**完全不校验库名** ——
+        于是"prod 连到 dev 库"与"dev 连到生产库"都能静默运行到出事为止。
         """
+        problems: list[str] = []
+
+        # ── A. 库名占位符检查（所有模式）──
+        #    忘记配置不能等价于"连真实库"，必须显式声明。
+        if self.POSTGRES_DB == _PLACEHOLDER_DB:
+            problems.append(
+                f"POSTGRES_DB 未配置（当前为占位符 {_PLACEHOLDER_DB!r}）。\n"
+                f"    必须在 .env 或环境变量中显式声明要连接的库名。\n"
+                f"    ★ 为什么不再提供默认值：原默认值就是真实库名 `csctalon`，\n"
+                f"      使「忘记配置」= 「连真实库」—— 2026-09-10 事故即由此而来。"
+            )
+
+        # ── B. 模式 ↔ 库名一致性（所有模式，见 guard.py）──
+        #    这是让"连错库"从「靠运气」变为「启动即失败」的关键。
+        if self.POSTGRES_DB != _PLACEHOLDER_DB:
+            problems.extend(check_db_matches_profile(_PROFILE, self.database_url))
+
+        # ── C. 生产模式弱口令检查（保留原有逻辑）──
         if self.ENV != "prod":
+            if problems:
+                raise ValueError(
+                    "配置校验失败，拒绝启动：\n  - " + "\n  - ".join(problems)
+                )
             return self
-        problems = []
 
         def _has_placeholder(value: str) -> bool:
             low = value.lower()

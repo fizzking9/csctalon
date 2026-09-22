@@ -82,9 +82,23 @@ services:
     command: ["gunicorn", "app.main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "900", "--log-level", "info"]
     env_file:
       - ${ENV_FILE:-.env}
-    # ENV 是 dsh 保留变量, 不能在 .env 中声明; 此处显式注入以维持生产 fail-fast 校验
+    # ★ 2026-09-22: 运行模式改由 APP_MODE 驱动（见 docs/arch/A-20260922-001）。
+    #
+    #   为什么不再硬编码 `ENV=prod`：
+    #     ① `ENV` 是 docker-compose 的**保留变量**，无法从 .env 传入，
+    #        只能在 compose 里写死 → 导致"本地也想跑 dev 却做不到"
+    #        （本地 colima 栈被迫长期以 prod 模式运行）。
+    #     ② `APP_MODE` 不冲突，可走 env_file → 本地可用
+    #        docker-compose.override.yml 覆盖为 dev（该文件 gitignore 且生产没有）。
+    #
+    #   兼容性：settings 优先读 APP_MODE，回退读 ENV（见 app/core/config/settings.py）。
+    #   生产 .env 里已有 `APP_MODE=prod`（见 deploy/env.production.example），
+    #   故此处不再硬编码也不影响生产。
+    #
+    #   ⚠️ 若 .env 里既无 APP_MODE 也无 ENV，settings 默认 dev → 会因
+    #      "dev 模式要求库名以 _dev 结尾"而拒绝启动（默认值安全侧设计）。
+    #      生产必须在 .env 显式声明 APP_MODE=prod —— 这是**有意**的 fail-fast。
     environment:
-      - ENV=prod
       # ⚠️ 2026-09-06 修复(UPLOAD_DIR 容器内外路径错位):
       #    .env 的 UPLOAD_DIR/BROWSER_STATE_DIR 是**宿主机挂载源路径**(如 /opt/csctalon/uploads),
       #    经 env_file 注入容器后, 后端 settings 会把它当成**容器内写入路径** → 采集文件/登录态
@@ -127,6 +141,9 @@ services:
       # 生产部署: 不设置则默认 release, 只显示核心菜单(运营看板/工作台/我的待办/专项分析3项/系统管理)
       args:
         BUILD_MODE: ${WEB_BUILD_MODE:-release}
+        # ★ 2026-09-22: 环境模式传给前端（VITE_APP_MODE），与 BUILD_MODE 正交。
+        #   缺省 prod（安全侧）；本地可在 override 里设为 dev。
+        APP_MODE: ${APP_MODE:-prod}
     container_name: csctalon-web
     volumes:
       - ${NGINX_LOGS_DIR:-./logs/nginx}:/var/log/nginx

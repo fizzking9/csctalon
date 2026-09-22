@@ -28,6 +28,15 @@
 - [ ] SQL 注入风险（是否全部参数化 / `text()` 绑定参数，无字符串拼接）
 - [ ] XSS 风险（前端输出是否转义；后端返回的富文本 / HTML 是否安全）
 - [ ] 硬编码敏感信息（密码 / 密钥 / Token / 内网 IP / 数据库账号）
+- [ ] **库名与运行模式是否自洽**（`APP_MODE=dev`→库名 `*_dev` / `test`→`*_test` /
+      `prod`→不含 `_dev`/`_test`）；**新增的库名默认值是否指向真实库**
+      （这是"硬编码连接信息"的等价风险，见 `docs/arch/A-20260922-001`）
+- [ ] **破坏性 DB 操作是否过守卫**：`DELETE`/`TRUNCATE`/`DROP`/批量 `UPDATE`
+      是否先调 `app.core.db_guard.assert_safe_to_destroy()`；
+      操作真实库是否**显式**授权（`allow_real_db=True` / `--allow-real-db`），
+      而非用环境变量隐式放行
+- [ ] **新增 `scripts/**` 是否经 `scripts/_bootstrap.py`** 进入
+      （禁止自己拼 `POSTGRES_DB` 环境变量 —— 两份定义必漏，见 A-20260910-004 漂移教训）
 - [ ] 静态文件 / 上传路径是否有路径穿越与 dotfile 暴露风险
 
 ### 正确性

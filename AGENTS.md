@@ -24,6 +24,19 @@
    - 唯一例外：`console.log('[TODO:...]')` 形式的显式 TODO 标记，可保留但必须带 `[TODO:` 前缀。
 2. 禁止无参数化地拼接 SQL。允许 `text()` + 绑定参数（如 `db.execute(text(...), {...})`），禁止字符串 `f"...{var}..."` 直接拼进 SQL。
 3. 禁止在代码中硬编码密码、密钥、内网 IP、数据库账号，必须走环境变量（`.env` / `settings`）。
+   **连带：禁止让"库名"的默认值指向真实库，也禁止让模式与库名可以不一致。**
+   - 库名必须与运行模式自洽（`APP_MODE=dev` → 库名以 `_dev` 结尾；`test` → `_test`；
+     `prod` → 不含 `_dev`/`_test`）。启动期会**硬校验**，不一致即拒绝启动。
+   - 破坏性操作（`DELETE`/`TRUNCATE`/`DROP`/批量 `UPDATE`）**必须**先过
+     `app.core.db_guard.assert_safe_to_destroy()`；操作真实库须**显式**传
+     `allow_real_db=True`（脚本参数为 `--allow-real-db`），**禁止**用环境变量绕过。
+   - 新写 `scripts/**` 必须经 `scripts/_bootstrap.py` 的 `bootstrap()` 进入，
+     不得自己拼 `POSTGRES_DB` 环境变量（那是两份定义，必漏）。
+   - 全文见 `docs/arch/A-20260922-001-运行模式框架与配置分离.md`。
+   > 为什么不单列一条：本条与"禁止硬编码 DB 账号"是**同一个风险面**——
+   > 把库名默认成生产库名，等价于把连接信息硬编码到代码里。
+   > 现有 13 条已足够长，另开一条会稀释权威性（参见 `docs/standards/跨项目经验迁移指南.md`
+   > "铁律只列最重要的，避免冗长失效"）。
 4. 禁止擅自修改已锁定的架构文档（`docs/arch/` 下标记为 `LOCKED` 的文件），修改必须先走人工审核流程。
 5. 禁止删除或绕过 `docs/standards/数据时间字段使用规范.md` 中规定的时区换算（`AT TIME ZONE 'Asia/Shanghai'`）与 `SYS/system` 系统操作人排除标准。
 6. 禁止绕过 Alembic 直接改表结构；表结构变更必须新增 migration 版本。
