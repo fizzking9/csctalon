@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     admin_ai,
+    admin_ai_prompt_config,
     admin_ai_prompt_eval,
     agenda,
     ai,
@@ -119,6 +120,7 @@ api_router.include_router(kb_articles.router)
 api_router.include_router(llm_providers.router)
 api_router.include_router(admin_ai.router)  # #125 AI 报告与模板管理(admin)
 api_router.include_router(admin_ai_prompt_eval.router)  # #173 AI 提示词评估中心(admin)
+api_router.include_router(admin_ai_prompt_config.router)  # #178 提示词版本管理(admin)
 api_router.include_router(alerts.router)
 api_router.include_router(metrics.router)
 api_router.include_router(channels.router)
