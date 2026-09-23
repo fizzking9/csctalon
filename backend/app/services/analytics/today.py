@@ -424,6 +424,19 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
             "financial":       routes_t["financial"],       # 向后兼容: 财务实际 = E
             "diff":            routes_t["diff"],            # 对账偏差 = 经营 − 实际
         },
+        # 前一等长周期四路(滑动周/月对比与日同刻对比用): routes_y 本就算好, 原先未透出,
+        # 导致 LLM 写「四路环比」无数据。结构与 cash_routes_today 对齐(无 diff/done 派生)。
+        "cash_routes_prev": {
+            "route_a": routes_y["route_a"],
+            "route_a_done": a_done_y,
+            "route_b": routes_y["route_b"],
+            "route_c": routes_y["route_c"],
+            "route_d": routes_y["route_d"],
+            "operational":     routes_y["operational"],
+            "actual_cashflow": routes_y["actual_cashflow"],
+            "financial":       routes_y["financial"],
+            "window": {"start": _sh_iso(ys), "end": _sh_iso(ye)},
+        },
         # ── 口径注释 (前端标题tooltip) ──
         "_spec": {
             "refund_count":     "退款笔数 = 四路经营合计 A线上直退 + B用户取现 + C闪猫退款 + D手动退款 (按创建时间)",

@@ -40,7 +40,12 @@ def _auto_refresh_on_sync(period: str | None, frequency: str | None) -> bool:
     判据: 数据窗口周期 period=daily, 或调度频率 frequency in (daily, sync-triggered)
     → 时效性强, 随高频同步刷新; weekly/monthly/range → 仅按 trigger_at 每日定时。
     admin 未显式传 refresh_on_sync 时用此默认值, 之后可在模板管理页手动覆盖。
+
+    例外(滑动周/月 2026-09-23): period=rolling_7d/rolling_30d 的模板 frequency 取
+    'daily' 仅表示「每天凌晨到点生成一份」, 不是随 30 分钟同步刷新, 必须返回 False。
     """
+    if (period or "").startswith("rolling_"):
+        return False
     return (period == "daily") or (frequency in ("daily", "sync-triggered"))
 
 

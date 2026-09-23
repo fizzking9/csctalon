@@ -46,6 +46,7 @@ from app.schemas.external_token import (
 from app.services import analytics as A
 from app.services import external_service as S
 from app.services import setup_package
+from app.services.ai_report_window import compute_compare_window
 
 logger = logging.getLogger(__name__)
 
@@ -414,6 +415,21 @@ def _build_brief(db: Session, period: str, date: str | None,
     """
     win = _window(period, date, start=start, end=end)
     start_s, end_s = win["start"], win["end"]
+    # 前一等长对比窗口(供四路/三源/涉诉环比):
+    #   range/历史整天/周/月 = 紧贴等长平移; 今日实时 = 昨日00:00~此刻同刻; 分钟 = 前一天同刻
+    if start is not None or end is not None:
+        prev_s, prev_e = compute_compare_window(start_s, end_s)
+    elif win.get("period") == "daily" and date is None:
+        _now = _now_cn()
+        _y = (_now.date() - _dt.timedelta(days=1)).isoformat()
+        prev_s = f"{_y}T00:00:00+08:00"
+        prev_e = f"{_y}T{_now.strftime('%H:%M')}:00+08:00"
+    elif win.get("period") == "daily" and date and len(date) > 10:
+        _d, _y = date[:10], _prev_day(date[:10])
+        prev_s = f"{_y}T00:00:00+08:00"
+        prev_e = f"{_y}{date[10:]}:00+08:00"
+    else:
+        prev_s, prev_e = compute_compare_window(start_s, end_s)
     # KPI/退款四路/现金流: 复用 today_kpi(内部 _resolve_windows 已按北京时区解释 start/end;
     #   end==今天→实时截止 now; 否则整天; cash_routes_today 即同窗口四路+E)
     # #98 (2026-09-15): TTL 由 cache_ttl_for 自动感知(历史日 24h, 今天 60s), 原固定 60s 是 bug
@@ -427,12 +443,20 @@ def _build_brief(db: Session, period: str, date: str | None,
     # 投诉增强(三源×registered/handled/backlog)
     # #105 (2026-09-15): _complaint_enhanced 无缓存致每次 15+ SQL, build_ms ~5.8s → 加缓存
     complaint = cached_call(
-        f"complaint:enhanced:{start_s}:{end_s}",
+        f"complaint:enhanced:{start_s}:{end_s}:{prev_s}:{prev_e}",
         cache_ttl_for(start_s, end_s, 60),
-        _complaint_enhanced, db, start_s, end_s,
+        _complaint_enhanced, db, start_s, end_s, prev_s, prev_e,
     )
     # 接待专项增强(名单+会话+设备)
     reception_spec = _reception_specialty(db, start_s, end_s)
+    # 涉诉率环比(沿用 yoy_value/yoy_pct 契约; 比率另附百分点差 delta_pct_points)
+    _crv, _prv = summary.get("complaint_ratio"), summary.get("complaint_ratio_yoy")
+    litigation_ratio = {
+        "value": _crv,
+        "yoy_value": _prv,
+        "yoy_pct": round((_crv - _prv) / _prv * 100, 1) if (_crv is not None and _prv) else None,
+        "delta_pct_points": summary.get("complaint_ratio_delta"),
+    }
     out = {
         "period": win["period"],
         "date": win.get("date"),
@@ -457,11 +481,14 @@ def _build_brief(db: Session, period: str, date: str | None,
                 "route_c": cash.get("route_c"),
                 "route_d": cash.get("route_d"),
             },
+            # 前一等长周期四路(滑动/同刻环比; today_kpi.cash_routes_prev)
+            "routes_prev": kpi.get("cash_routes_prev"),
             "actual_cashflow_e": cash.get("actual_cashflow") or kpi.get("actual_cashflow"),
             "a_route": {
-                "litigation_ratio": {"value": summary.get("complaint_ratio"),
-                                     "yoy_value": None, "yoy_pct": None},
+                "litigation_ratio": litigation_ratio,
                 "litigation_amount": summary.get("complaint_amount"),
+                "litigation_amount_yoy": summary.get("complaint_amount_yoy"),
+                "litigation_count_yoy": summary.get("complaint_count_yoy"),
             },
         },
         "_spec": _spec_brief(),
@@ -475,7 +502,21 @@ def _build_brief(db: Session, period: str, date: str | None,
 # ─────────────────────────────────────────────────────────────────────
 # 投诉增强: 三源(内部/商户号/外部) × registered/handled/backlog
 # ─────────────────────────────────────────────────────────────────────
-def _complaint_enhanced(db: Session, start_s: str, end_s: str) -> dict:
+def _complaint_enhanced(db: Session, start_s: str, end_s: str,
+                        prev_start: str | None = None, prev_end: str | None = None) -> dict:
+    """三源投诉本期 + (可选)前一等长周期, 供滑动周/月与日同刻对比。
+
+    口径同源: 本期与前周期都走 _complaint_enhanced_window 同一实现, 杜绝双源漂移。
+    其中 registered/handled 是流量口径, 适合直接环比; backlog 为「窗口内登记且未闭环」
+    的时点存量, 前周期块仅作量级对比参考(前周期登记单可能随后已闭环)。
+    """
+    cur = _complaint_enhanced_window(db, start_s, end_s)
+    if prev_start and prev_end:
+        cur["prev"] = _complaint_enhanced_window(db, prev_start, prev_end)
+    return cur
+
+
+def _complaint_enhanced_window(db: Session, start_s: str, end_s: str) -> dict:
     """三源 × 登记/完成/积压(口径与 complaints.complaint_summary/backlog 严格一致)。
 
       registered = 窗口内登记的投诉工单(register_time∈窗口)

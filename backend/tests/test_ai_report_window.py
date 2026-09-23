@@ -123,3 +123,46 @@ def test_compare_window_monthly_september():
     prev_start, prev_end = compute_compare_window("2026-09-01", "2026-09-30")
     assert prev_start == "2026-08-02"
     assert prev_end == "2026-08-31"
+
+
+# ── compute_pregen_window: rolling_7d / rolling_30d (滑动窗口) ────
+ROLL_REF = _dt.date(2026, 9, 23)  # 周三(固定注入, 避免时钟漂移)
+
+
+def test_rolling_7d_window_ends_yesterday_fixed_length():
+    """rolling_7d: 截止昨天(09-22)的近7天 = 09-16~09-22, 长度恒定7, snapshot=今日。"""
+    win = compute_pregen_window("rolling_7d", ref_date=ROLL_REF)
+    assert win is not None
+    assert win["start"] == "2026-09-16"
+    assert win["end"] == "2026-09-22"
+    assert win["window_days"] == 7
+    assert win["snapshot_date"] == ROLL_REF.isoformat()
+    assert "近7天" in win["label"] and "截止昨天" in win["label"]
+
+
+def test_rolling_30d_window_ends_yesterday_fixed_length():
+    """rolling_30d: 截止昨天(09-22)的近30天 = 08-24~09-22, 长度30。"""
+    win = compute_pregen_window("rolling_30d", ref_date=ROLL_REF)
+    assert win is not None
+    assert win["start"] == "2026-08-24"
+    assert win["end"] == "2026-09-22"
+    assert win["window_days"] == 30
+
+
+def test_rolling_7d_compare_window_is_preceding_equal_length():
+    """rolling_7d 窗口(09-16~09-22)的前一等长周期 = 09-09~09-15(worker 据此取对比段)。"""
+    win = compute_pregen_window("rolling_7d", ref_date=ROLL_REF)
+    prev_start, prev_end = compute_compare_window(win["start"], win["end"])
+    assert (prev_start, prev_end) == ("2026-09-09", "2026-09-15")
+
+
+def test_rolling_window_length_invariant_across_weekdays():
+    """滑动窗口长度不随星期/月初跳动: 周一与周末生成都恒为 N 天(对比自然周的退化差异)。"""
+    for ref in (_dt.date(2026, 9, 21),  # 周一
+                _dt.date(2026, 9, 23),  # 周三
+                _dt.date(2026, 10, 1)):  # 月初
+        win = compute_pregen_window("rolling_7d", ref_date=ref)
+        s = _dt.date.fromisoformat(win["start"])
+        e = _dt.date.fromisoformat(win["end"])
+        assert (e - s).days + 1 == 7
+        assert e == ref - _dt.timedelta(days=1)  # 永远截止昨天

@@ -107,6 +107,27 @@ def _scope_priority(tmpl_scope: str | None, q_scopes: set[str]) -> int:
     return 0
 
 
+def _window_jaccard(rs, re, qs, qe) -> float:
+    """报告内容窗口[rs,re] 与问句窗口[qs,qe] 的天数 Jaccard(交/并), 区间贴合度。
+
+    用途(滑动周/月, 2026-09-23): 当多份区间报告关键词打平时(如问「近7天环比」,
+    rolling_7d 命中「近7天」、自然 weekly 命中「环比」各 1 个), 用窗口贴合度裁决。
+    - 长度相等且边界对齐 → 1(自然周问自然周报、近7天问 rolling_7d 各自最高);
+    - 大窗口套小问句(rolling_30d 去答「近7天」)会因并集被拉大而天然得低分,
+      无需为窗口长度写硬规则。
+    任一缺边界 → 0.0(单日/实时日报无 start/end, 不参与此维, 回退 period/created 排序)。
+    """
+    if not (rs and re and qs and qe):
+        return 0.0
+    try:
+        lo, hi = max(rs, qs), min(re, qe)
+        inter = (hi - lo).days + 1 if hi >= lo else 0
+        union = (max(re, qe) - min(rs, qs)).days + 1
+        return inter / union if union > 0 else 0.0
+    except TypeError:
+        return 0.0
+
+
 def match_template_report(
     db: Session,
     question: str,
@@ -144,7 +165,8 @@ def match_template_report(
                       r.snapshot_date, r.snapshot_period, r.is_public,
                       r.answer_md, r.llm_model, r.llm_ms, r.total_ms,
                       r.prompt_tokens, r.completion_tokens, r.total_tokens,
-                      r.window_source, r.window_label, r.created_at
+                      r.window_source, r.window_label, r.created_at,
+                      r.start AS r_start, r.end AS r_end
                FROM ai_reports r
                WHERE r.is_public = TRUE
                  AND r.start IS NOT NULL AND r.end IS NOT NULL
@@ -195,25 +217,32 @@ def match_template_report(
     for r in rows:
         tmpl = _get_template(db, r.get("template_id"))
         hits = _count_keyword_hits(question, tmpl.question_keywords if tmpl else None)
+        # 区间窗口贴合度(滑动周/月裁决): 单日/实时日报无 start/end → 0, 不影响原排序
+        win_fit = _window_jaccard(r.get("r_start"), r.get("r_end"), win_start, win_end)
         period_match = (r.get("snapshot_period") == win_period) if win_period else False
         scope_score = _scope_priority(getattr(tmpl, "scope", "overview") if tmpl else None, q_scopes)
         fmt_score = 1 if (
             q_fmt and tmpl and getattr(tmpl, "format", "brief") == q_fmt
         ) else 0
-        sorted_rows.append((r, tmpl, hits, period_match, scope_score, fmt_score))
-    # 排序: 命中数 DESC → period 匹配 DESC → scope 匹配 DESC → format 匹配 DESC → created_at DESC
+        sorted_rows.append((r, tmpl, hits, win_fit, period_match, scope_score, fmt_score))
+    # 排序: 关键词命中数 DESC → 窗口贴合度 DESC → period 匹配 DESC → scope DESC →
+    #       format DESC → created_at DESC
+    # 窗口贴合度置于 period 匹配前: 时间解析把跨天「近7天」强制成 win_period='weekly' 时,
+    # 仍由 Jaccard 让 rolling_7d(0.75) 胜过自然 weekly 短窗; 自然周/月报与其报告完全对齐
+    # Jaccard=1, 不受影响。
     sorted_rows.sort(
         key=lambda x: (
             -x[2],
-            0 if x[3] else 1,
-            -x[4],
+            -x[3],
+            0 if x[4] else 1,
             -x[5],
+            -x[6],
             -(x[0].get("created_at") or _dt.datetime.min.replace(tzinfo=_dt.timezone.utc)).timestamp(),
         ),
     )
 
     # 取第一条 keyword 命中数 > 0 的返回
-    for r, tmpl, hits, period_match, scope_score, fmt_score in sorted_rows:
+    for r, tmpl, hits, win_fit, period_match, scope_score, fmt_score in sorted_rows:
         if hits > 0 and tmpl:
             report = _wrap_row(db, dict(r))
             # #128: _wrap_row 内 _bump_matched_count 调 db.commit() → expire_on_commit
@@ -222,8 +251,8 @@ def match_template_report(
             _code = tmpl.code  # 显式读一次, 确保属性已加载进实例
             db.expunge(tmpl)
             logger.info("match_template_report: 命中 report_id=%s template=%s "
-                        "keyword_hits=%d period_match=%s scope_score=%s fmt_score=%s",
-                        r["id"], _code, hits, period_match, scope_score, fmt_score)
+                        "keyword_hits=%d win_fit=%.3f period_match=%s scope_score=%s fmt_score=%s",
+                        r["id"], _code, hits, win_fit, period_match, scope_score, fmt_score)
             return report, tmpl
 
     # 未命中: 返回 None, 调用方走 LLM 兜底
@@ -269,7 +298,8 @@ def list_candidates(db: Session, win_period: str | None,
                       r.snapshot_date, r.snapshot_period, r.is_public,
                       r.answer_md, r.llm_model, r.llm_ms, r.total_ms,
                       r.prompt_tokens, r.completion_tokens, r.total_tokens,
-                      r.window_source, r.window_label, r.created_at
+                      r.window_source, r.window_label, r.created_at,
+                      r.start AS r_start, r.end AS r_end
                FROM ai_reports r
                WHERE r.is_public = TRUE
                  AND r.start IS NOT NULL AND r.end IS NOT NULL

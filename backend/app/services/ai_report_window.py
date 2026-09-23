@@ -20,6 +20,11 @@ import datetime as _dt
 # 时区(AGENTS.md 铁律: 时区换算走 Asia/Shanghai)
 _TZ_CN = _dt.timezone(_dt.timedelta(hours=8))
 
+# 滑动窗口频率 → 近 N 天(截止昨天整天)。每天凌晨生成一份「近N天 vs 前一等长N天」对比快照;
+# 与自然周/月(weekly/monthly, 周一/1号才出整周期)并存为不同模板, 互不替代。
+# 前一对比窗口不在这里返: worker 拿 start/end 调 compute_compare_window 即得等长前N天。
+ROLLING_DAYS = {"rolling_7d": 7, "rolling_30d": 30}
+
 
 def _now_cn_date() -> _dt.date:
     """当前北京时间日期(AGENTS.md 铁律: 时区换算)。"""
@@ -36,6 +41,9 @@ def compute_pregen_window(period: str, ref_date: _dt.date | None = None) -> dict
     - period="monthly":
         * 正常: 本月1日 ~ 昨天(若今日不是1号)
         * 退化: 上月1日 ~ 上月末整月(若今日是1号, "本月1日~昨天"跨到上月不存在)
+    - period="rolling_7d" / "rolling_30d":
+        * 截止昨天的近 N 天恒定滑动窗口(每天一份, 长度 N 不跳动), 无退化;
+          前一等长 N 天对比窗口由调用方对返回的 start/end 调 compute_compare_window 得到。
 
     Args:
         period: "daily" / "weekly" / "monthly"
@@ -55,6 +63,20 @@ def compute_pregen_window(period: str, ref_date: _dt.date | None = None) -> dict
         return None
 
     yesterday = today - _dt.timedelta(days=1)
+
+    if period in ROLLING_DAYS:
+        # 滑动窗口: 截止昨天的近 N 天(含昨天), 每天一份, 长度恒定 N, 不随星期/月初跳动。
+        #   例 rolling_7d 在 2026-09-23 生成 → 09-16~09-22; 前一等长周期(由
+        #   compute_compare_window 推导) = 09-09~09-15。无退化情形(N 固定, 永远成立)。
+        n = ROLLING_DAYS[period]
+        start = yesterday - _dt.timedelta(days=n - 1)
+        return {
+            "start": start.isoformat(),
+            "end": yesterday.isoformat(),
+            "snapshot_date": snapshot_date,
+            "window_days": n,
+            "label": f"{period}(近{n}天·截止昨天 {start.isoformat()}~{yesterday.isoformat()})",
+        }
 
     if period == "weekly":
         # 本周一(ISO 周一为一周起点, weekday()=0 表示周一)

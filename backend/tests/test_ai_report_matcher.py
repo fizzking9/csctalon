@@ -15,6 +15,7 @@ from app.services.ai_report_matcher import (
     _question_format_intent,
     _question_matches_keywords,
     _scope_priority,
+    _window_jaccard,
     match_template_report,
 )
 
@@ -65,8 +66,11 @@ def test_question_matches_keywords_any():
 
 
 # ── match_template_report 排序逻辑(mock db) ────────────────
-def _make_report_row(rid, template_id, snapshot_period, created_at):
-    """构造 SQL row dict (模拟 db.execute().mappings().all() 返回)。"""
+def _make_report_row(rid, template_id, snapshot_period, created_at, start=None, end=None):
+    """构造 SQL row dict (模拟 db.execute().mappings().all() 返回)。
+
+    start/end: 报告内容窗口(纯日期), 区间候选 SQL 以 r.start AS r_start / r.end AS r_end 取出。
+    """
     import datetime as _dt
     return {
         "id": rid,
@@ -88,6 +92,8 @@ def _make_report_row(rid, template_id, snapshot_period, created_at):
         "window_source": "test",
         "window_label": "test",
         "created_at": created_at,
+        "r_start": start,
+        "r_end": end,
     }
 
 
@@ -378,3 +384,85 @@ def test_match_format_tiebreak():
     assert matched is not None
     assert matched.id == 601            # detail 体裁命中优先
     assert tmpl.format == "detail"
+
+
+# ── 滑动周/月: 窗口贴合度 Jaccard + 滚动命中裁决 (2026-09-23) ────
+def test_window_jaccard_exact_overlap_is_one():
+    import datetime as _dt
+    d = _dt.date
+    assert _window_jaccard(d(2026, 9, 16), d(2026, 9, 22),
+                           d(2026, 9, 16), d(2026, 9, 22)) == 1.0
+
+
+def test_window_jaccard_penalizes_large_window():
+    """近7天问句: rolling_7d 贴合度 >> rolling_30d(大窗口并集被拉大, 天然低分)。"""
+    import datetime as _dt
+    d = _dt.date
+    qs, qe = d(2026, 9, 17), d(2026, 9, 23)   # 时间解析的「近7天」(含今天)
+    fit_7 = _window_jaccard(d(2026, 9, 16), d(2026, 9, 22), qs, qe)   # 交6/并8
+    fit_30 = _window_jaccard(d(2026, 8, 24), d(2026, 9, 22), qs, qe)  # 交6/并31
+    assert round(fit_7, 3) == 0.75
+    assert round(fit_30, 3) == round(6 / 31, 3)
+    assert fit_7 > fit_30
+
+
+def test_window_jaccard_no_boundary_or_disjoint():
+    import datetime as _dt
+    d = _dt.date
+    assert _window_jaccard(None, None, d(2026, 9, 17), d(2026, 9, 23)) == 0.0  # 单日日报无窗口
+    assert _window_jaccard(d(2026, 9, 1), d(2026, 9, 5),
+                           d(2026, 9, 10), d(2026, 9, 12)) == 0.0              # 不相交
+
+
+def test_match_rolling_7d_beats_natural_weekly_on_keyword_tie():
+    """问「近7天…环比」: rolling_7d 命中'近7天'、自然 weekly 命中'环比' 各 1 个打平,
+    且 win_period 被 effective() 强制成 'weekly'(自然周报 period_match 占优)。
+
+    修复前仅按 keyword→period 排序会误选自然周报(本周短窗); 加入窗口贴合度后
+    rolling_7d(Jaccard 0.75) 胜过自然 weekly(本周一~昨天, Jaccard 2/7)。
+    rolling_30d 虽重叠但关键词 0 命中, 不参与最终选择。
+    """
+    import datetime as _dt
+    d = _dt.date
+
+    q = "近7天退款环比情况"
+    rows = [
+        # 自然周报: 本周一(09-21)~昨天(09-22), 与近7天问句仅重叠 2 天
+        _make_report_row(71, 2, "weekly",
+                         _dt.datetime(2026, 9, 23, 2, 0, tzinfo=_dt.timezone.utc),
+                         start=d(2026, 9, 21), end=d(2026, 9, 22)),
+        # rolling_7d: 09-16~09-22 截止昨天, 与近7天(含今天 09-17~23)重叠 6 天
+        _make_report_row(72, 20, "rolling_7d",
+                         _dt.datetime(2026, 9, 23, 2, 5, tzinfo=_dt.timezone.utc),
+                         start=d(2026, 9, 16), end=d(2026, 9, 22)),
+        # rolling_30d: 大窗口完全包住问句但关键词不命中
+        _make_report_row(73, 30, "rolling_30d",
+                         _dt.datetime(2026, 9, 23, 2, 10, tzinfo=_dt.timezone.utc),
+                         start=d(2026, 8, 24), end=d(2026, 9, 22)),
+    ]
+    templates = {
+        2: _make_template(2, "weekly_compare_last",
+                          ["本周", "这周", "周报", "对比", "上周", "环比"]),
+        20: _make_template(20, "rolling_7d_compare",
+                           ["近7天", "近七天", "最近一周", "近一周", "7天环比"]),
+        30: _make_template(30, "rolling_30d_compare",
+                           ["近30天", "近一个月", "最近一个月", "30天环比"]),
+    }
+    db = MagicMock()
+    mappings_mock = MagicMock()
+    mappings_mock.mappings.return_value = mappings_mock
+    mappings_mock.all.return_value = rows
+    db.execute.return_value = mappings_mock
+    query_mock = MagicMock()
+    query_mock.get.side_effect = lambda tid: templates.get(tid)
+    db.query.return_value = query_mock
+    db.commit = MagicMock()
+    db.expunge = MagicMock()
+
+    matched, tmpl = match_template_report(
+        db, q, "weekly", None,                 # win_period 被强制 weekly
+        win_start=d(2026, 9, 17), win_end=d(2026, 9, 23),
+    )
+    assert matched is not None
+    assert matched.id == 72                    # 窗口贴合的 rolling_7d 胜出
+    assert tmpl.code == "rolling_7d_compare"

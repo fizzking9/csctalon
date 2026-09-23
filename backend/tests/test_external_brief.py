@@ -229,12 +229,17 @@ def test_brief_endpoint_structure(brief_client, db):
     assert "total_amount" in data["refund"]
     assert set(data["refund"]["routes"].keys()) == {"route_a", "route_b", "route_c", "route_d"}
     assert "a_route" in data["refund"] and "litigation_ratio" in data["refund"]["a_route"]
-    # complaint: total + by_source 三源
-    assert set(data["complaint"].keys()) == {"total", "by_source"}
+    # complaint: total + by_source 三源 + prev 前一周期对比块(昨日同刻/等长平移)
+    assert set(data["complaint"].keys()) == {"total", "by_source", "prev"}
     sources = {x["source"] for x in data["complaint"]["by_source"]}
     assert sources == {"内部投诉", "商户号投诉", "外部投诉"}
     for item in data["complaint"]["by_source"]:
         assert set(item.keys()) >= {"source", "registered", "handled", "backlog"}
+    # 前周期对比块结构与本期同源(三源 + total)
+    assert set(data["complaint"]["prev"].keys()) == {"total", "by_source"}
+    # 退款四路/涉诉环比块已透出
+    assert "routes_prev" in data["refund"]
+    assert "yoy_value" in data["refund"]["a_route"]["litigation_ratio"]
     # _spec
     assert "_spec" in data
 
@@ -270,7 +275,9 @@ def test_brief_range_endpoint_historical_week(brief_client, db):
     # 结构与 period 模式一致(核心段齐全)
     assert "total" in data["reception"] and "by_specialty" in data["reception"]
     assert set(data["refund"]["routes"].keys()) == {"route_a", "route_b", "route_c", "route_d"}
-    assert set(data["complaint"].keys()) == {"total", "by_source"}
+    # 区间同样带前一等长周期对比块(滑动周/月环比依赖)
+    assert set(data["complaint"].keys()) == {"total", "by_source", "prev"}
+    assert "routes_prev" in data["refund"]
     assert "_spec" in data
 
 

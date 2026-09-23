@@ -107,6 +107,8 @@
             <el-option label="daily" value="daily" />
             <el-option label="weekly" value="weekly" />
             <el-option label="monthly" value="monthly" />
+            <el-option label="rolling_7d(近7天滚动, 截止昨天)" value="rolling_7d" />
+            <el-option label="rolling_30d(近30天滚动, 截止昨天)" value="rolling_30d" />
             <el-option label="range" value="range" />
           </el-select>
         </el-form-item>
@@ -232,6 +234,11 @@ function openCreate() {
 // 判据与后端 _auto_refresh_on_sync 一致(日报类→开)。编辑已有模板时不联动, 尊重手动选择。
 function autoRefreshByCycle() {
   if (form.id != null) return
+  // 滑动周/月(rolling_*)虽用 frequency=daily, 但只每天凌晨到点一份, 不随同步刷新
+  if (String(form.period).startsWith('rolling_')) {
+    form.refresh_on_sync = false
+    return
+  }
   form.refresh_on_sync =
     form.period === 'daily' || ['daily', 'sync-triggered'].includes(form.frequency)
 }

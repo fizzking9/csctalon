@@ -1179,6 +1179,49 @@ def refund_decision_overview(
         complaint_split["normal_cnt"].append(nor[0]); complaint_split["normal_amt"].append(round(nor[1], 2))
         complaint_split["ratio"].append(round(comp_amt / total_amt * 100, 1) if total_amt else 0.0)
 
+    def _comp_window_totals(s, e) -> dict:
+        """前一周期涉诉汇总(滑动/同刻环比用)。
+
+        分类标记(SN 关联三源工单 bool_or + 审核备注/备注标识)与上面本期 comp_rows
+        逐字同口径, 仅去掉按日分组、只汇总线上已退款单的涉诉笔数/金额, 避免双源漂移。
+        s/e 为空(无前周期)时回零。
+        """
+        if not s or not e:
+            return {"comp_cnt": 0, "comp_amt": 0.0, "online_cnt": 0, "online_amt": 0.0}
+        rows = db.execute(text("""
+            SELECT r.refund_amount,
+                   bool_or(st.service_item ILIKE '%工信部%' OR st.service_item ILIKE '%12315%'
+                       OR st.service_item ILIKE '%公共服务平台%' OR st.service_item ILIKE '%消费者协会%'
+                       OR st.service_item ILIKE '%消协%' OR st.service_item ILIKE '%监督局%'
+                       OR st.service_item ILIKE '%市场监管%' OR st.service_item ILIKE '%市监%'
+                       OR st.service_item ILIKE '%315平台%' OR st.service_item ILIKE '%12345%'
+                       OR st.service_item ILIKE '%政务平台%') AS has_ext,
+                   bool_or(st.service_item ILIKE '%微信%') AS has_merchant,
+                   bool_or(st.service_item ILIKE '%商品投诉%' OR st.service_item ILIKE '%服务投诉%') AS has_int,
+                   MAX(r.audit_remark) AS ar, MAX(r.remark) AS rm
+            FROM refunds r
+            LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
+            WHERE r.refund_method = '线上' AND r.status = '已退款'
+              AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+            GROUP BY r.refund_no, r.refund_amount
+        """), {"ts": s, "te": e}).fetchall()
+        comp_cnt = 0
+        comp_amt = 0.0
+        online_cnt = 0
+        online_amt = 0.0
+        for r in rows:
+            online_cnt += 1
+            amt = float(r.refund_amount or 0)
+            online_amt += amt
+            is_comp = bool(r.has_ext or r.has_merchant or r.has_int) or any(
+                m in ((r.ar or "") + (r.rm or "")) for m in _REMARK_COMPLAINT_MARKERS
+            )
+            if is_comp:
+                comp_cnt += 1
+                comp_amt += amt
+        return {"comp_cnt": comp_cnt, "comp_amt": round(comp_amt, 2),
+                "online_cnt": online_cnt, "online_amt": round(online_amt, 2)}
+
     # ── 5. 退款原因Top + 操作人员Top: 每单取最新完工工单的服务项作为原因 ──
     reason_rows = db.execute(text("""
         WITH rel AS (
@@ -1386,6 +1429,12 @@ def refund_decision_overview(
     online_amt = cur_tot["online_amt"]
     comp_amt = sum(complaint_split["complaint_amt"])
     comp_ratio = round(comp_amt / online_amt * 100, 1) if online_amt else 0.0
+    # 前一周期涉诉(环比): 分子=前周期涉诉金额(_comp_window_totals 同口径),
+    #   分母=前周期线上直退金额(prev_tot, 与本期 comp_ratio 分母 cur_tot['online_amt'] 同源)
+    prev_comp = _comp_window_totals(prev_s, prev_e)
+    prev_comp_amt = prev_comp["comp_amt"]
+    prev_online_amt = prev_tot.get("online_amt") or 0
+    prev_comp_ratio = round(prev_comp_amt / prev_online_amt * 100, 1) if prev_online_amt else None
     actual_cash = cur_tot["e_amt"]                        # E 实际现金流(对账基准)
     reconcile_diff = round(cur_cash - actual_cash, 2)     # 对账偏差 = 经营四路 − E
 
@@ -1510,7 +1559,11 @@ def refund_decision_overview(
         "withdraw_amount": round(cur_tot["withdraw_amt"], 2),
         "wallet_net": wallet_net,
         "complaint_ratio": comp_ratio,
+        "complaint_ratio_yoy": prev_comp_ratio,
+        "complaint_ratio_delta": (round(comp_ratio - prev_comp_ratio, 1) if prev_comp_ratio is not None else None),
         "complaint_amount": round(comp_amt, 2),
+        "complaint_amount_yoy": round(prev_comp_amt, 2),
+        "complaint_count_yoy": prev_comp["comp_cnt"],
         "actual_cashflow": round(actual_cash, 2),        # E 实际现金流(对账基准)
         "actual_cashflow_count": cur_tot["e_cnt"],
         "reconcile_diff": reconcile_diff,                # 对账偏差 = 经营四路 − E
