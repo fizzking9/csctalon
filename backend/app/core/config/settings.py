@@ -151,6 +151,21 @@ class Settings(BaseSettings):
     # 敏感配置加密 key(用于 sync_source_configs 凭证加密);留空则从 JWT_SECRET_KEY 派生
     CONFIG_ENCRYPTION_KEY: str = ""
 
+    # ── 跨站免密入口：csctalon 管理员 → netmgr 网络管理面板（工单 #187）────────
+    # 本系统是**签发方**：管理员点入口 → 用共享密钥签 60 秒一次性 HMAC 票据 →
+    # 浏览器跳 netmgr `/sso/land#ticket=…`，由 netmgr 验签并建立自己的会话。
+    # 票据放 URL fragment（不发给服务端），故不进 access log、不随 Referer 外泄。
+    # 留空 = 免密入口关闭（不影响本系统自身登录）。
+    # ⚠️ 与 netmgr 侧 `SSO_SHARED_SECRET` 必须逐字符一致。
+    SSO_SHARED_SECRET: str = ""
+    # netmgr 面板对外地址（HTTPS）。本地/ZT 调试可临时改 http://10.147.17.34:6080。
+    SSO_NETMGR_URL: str = "https://panel.kimirock.top"
+    # 票据有效期（秒）。须与 netmgr 侧 TTL_SECONDS 一致，勿随意调大。
+    SSO_TICKET_TTL_SECONDS: int = 60
+    # talon 算力通道管理台直链（仅前端放链接，走 talon 自身可信网段免密，不签票）。
+    # 留空 = 前端不显示该入口。
+    SSO_TALON_URL: str = ""
+
     # 上传
     # ★ 2026-09-22: 默认值由 profile 决定（dev=./uploads / test=/tmp/... / prod=/app/uploads）
     #   使"数据写到哪"也受模式驱动，而非散落的字面量。

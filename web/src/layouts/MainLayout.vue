@@ -80,6 +80,62 @@
                 <el-dropdown-item command="agenda">
                   <el-icon style="margin-right:6px"><Bell /></el-icon>我的待办
                 </el-dropdown-item>
+                <!--
+                  ───────────────────────── 设计说明（Design Rationale）─────────────────────────
+                  目的：替系统管理员在 csctalon 与两个独立管理台（云上网络管理面板 / 算力通道
+                        管理台）之间切换时省掉一次重复登录（低频，只在需要管网络或算力时用）。
+                  逻辑：免密方向是「csctalon 签发 → 目标系统消费」——本系统有真实用户与角色体系，
+                        而网络管理面板持有 docker.sock（等价宿主 root），不适合当业务系统的身份
+                        权威，故由本系统签 60 秒一次性票据、目标侧验签后建自己的会话。
+                        入口放「用户下拉」而非左侧菜单树：菜单树由 config/menu.js 唯一驱动且只承载
+                        站内路由（有「菜单项必须存在于 router」的防悬空测试），外部系统链接塞进去
+                        会破坏该契约。
+                  口径：SSO_SHARED_SECRET 未配置则不显示网络管理面板入口；talon 地址来自
+                        SSO_TALON_URL（走 talon 自身可信网段免密，不签票）。票据放 URL fragment，
+                        不发给服务端，故不进两侧 access log、不随 Referer 外泄。
+                  取舍：不做「统一门户 / 单点登出」——两个目标系统仍保留各自独立登录（可用性冗余：
+                        面板自身登录入口在票据链路故障时仍可用，本系统登录亦不依赖它们）；
+                        不把 talon 纳入票据体系（它已有可信网段免密，签票属重复建设）；
+                        不做用户映射（本入口只服务系统管理员单人，不面向多角色）。
+                  工单：#187
+                  ─────────────────────────────────────────────────────────────────────────────
+                -->
+                <el-dropdown-item v-if="authStore.isAdmin && ssoEntries.netmgr_enabled" command="netmgr" divided>
+                  <el-icon style="margin-right:6px"><Monitor /></el-icon>网络管理面板
+                  <el-tooltip placement="left" effect="light" :show-after="200">
+                    <template #content>
+                      <div style="max-width:270px;line-height:1.6">
+                        <b>为什么有这个入口</b><br />
+                        替系统管理员省掉一次重复登录：点一下即用 csctalon 身份免密进入云上的
+                        网络管理面板（ZeroTier / 代理组网管理）。<br /><br />
+                        <b>怎么做到的</b><br />
+                        本系统签发 60 秒一次性票据，面板验签后建立自己的会话；票据只走浏览器
+                        地址片段，两端服务器都不记录。<br /><br />
+                        <b>我们不做什么</b><br />
+                        不向非管理员开放；面板自身登录入口保留 —— 本入口不可用时可直接登录面板。
+                      </div>
+                    </template>
+                    <el-icon style="margin-left:6px;color:#c0c4cc;font-size:13px"><InfoFilled /></el-icon>
+                  </el-tooltip>
+                </el-dropdown-item>
+                <el-dropdown-item v-if="authStore.isAdmin && ssoEntries.talon_url" command="talon">
+                  <el-icon style="margin-right:6px"><Cpu /></el-icon>算力通道管理台
+                  <el-tooltip placement="left" effect="light" :show-after="200">
+                    <template #content>
+                      <div style="max-width:270px;line-height:1.6">
+                        <b>为什么有这个入口</b><br />
+                        算力通道管理台与网络管理面板一样是独立系统，这里只放一个直链，方便管理员
+                        从本系统跳过去。<br /><br />
+                        <b>怎么做到的</b><br />
+                        该管理台按来源网段放行，办公网 / ZeroTier 内访问本就无需登录，因此这里
+                        不签发免密票据。<br /><br />
+                        <b>我们不做什么</b><br />
+                        不做统一登出 —— 两个系统的会话互不影响。
+                      </div>
+                    </template>
+                    <el-icon style="margin-left:6px;color:#c0c4cc;font-size:13px"><InfoFilled /></el-icon>
+                  </el-tooltip>
+                </el-dropdown-item>
                 <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -169,11 +225,12 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Bell, User, Monitor, Upload, MagicStick } from '@element-plus/icons-vue'
+import { Bell, User, Monitor, Upload, MagicStick, Cpu, InfoFilled } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { taskStatus, taskSubmit } from '@/api/fetch'
 import { systemEventSummary } from '@/api/systemEvent'
 import { getSiteInfo } from '@/api/siteInfo'
+import { getSsoEntries, issueNetmgrTicket } from '@/api/sso'
 import AuditDialog from '@/components/AuditDialog.vue'
 import AssistantDrawer from '@/components/AssistantDrawer.vue'
 import MenuTree from '@/components/MenuTree.vue'
@@ -215,6 +272,38 @@ const roleLabel = computed(() => {
   const map = { admin: '系统管理员', supervisor: '主管', specialty_lead: '专项组长', specialist: '专员', agent: '普通客服' }
   return map[authStore.role] || ''
 })
+
+// ---------- 外部管理台入口（仅管理员，工单 #187）----------
+// 只拉「有没有配、地址是什么」；票据在点击时才签发（60 秒有效，不做预取/缓存）
+const ssoEntries = reactive({ netmgr_enabled: false, talon_url: '' })
+const ssoJumping = ref(false)
+
+async function loadSsoEntries() {
+  if (!authStore.isAdmin) return
+  try {
+    const res = await getSsoEntries()
+    ssoEntries.netmgr_enabled = !!res.data?.netmgr_enabled
+    ssoEntries.talon_url = res.data?.talon_url || ''
+  } catch (e) {
+    // 静默：入口不可用不影响布局其它功能
+  }
+}
+
+// 免密进入网络管理面板：取一次性票据后整页跳转（票据即凭证，不落本地存储、不写日志）
+async function openNetmgr() {
+  if (ssoJumping.value) return
+  ssoJumping.value = true
+  try {
+    const res = await issueNetmgrTicket()
+    const url = res.data?.url
+    if (!url) throw new Error('未获取到跳转地址')
+    window.location.href = url
+  } catch (e) {
+    // 请求拦截器已提示错误详情（未配置 / 权限不足 / 网络异常），此处不重复提示
+  } finally {
+    ssoJumping.value = false
+  }
+}
 
 // ---------- 全局同步状态轮询 & 黄条提示 ----------
 // 全局轻量轮询:15秒一次,仅用于UI提示,不阻塞任何操作
@@ -301,6 +390,7 @@ onMounted(() => {
   _pollEventUnread()
   // 事务通知角标与同步状态同节奏轮询
   _pollTimer2 = setInterval(_pollEventUnread, SYNC_POLL_MS)
+  loadSsoEntries()
 })
 
 onBeforeUnmount(() => {
@@ -330,6 +420,11 @@ async function handleCommand(cmd) {
     router.push('/dashboard')
   } else if (cmd === 'agenda') {
     router.push('/agenda')
+  } else if (cmd === 'netmgr') {
+    await openNetmgr()
+  } else if (cmd === 'talon') {
+    // 直链：新标签打开，保留本页状态（地址由后端配置下发，不在前端硬编码）
+    window.open(ssoEntries.talon_url, '_blank', 'noopener')
   }
 }
 
