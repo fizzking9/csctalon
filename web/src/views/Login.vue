@@ -6,6 +6,14 @@
         <h2>{{ siteInfo.site_name || '数据分析工具应用' }}</h2>
         <p class="sub">{{ siteInfo.site_subtitle || '专注数据分析与内部工具' }}</p>
       </div>
+      <el-alert
+        v-if="route.query.expired"
+        title="登录已过期，请重新登录"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 16px"
+      />
       <el-form ref="formRef" :model="form" :rules="rules" @submit.prevent="handleLogin">
         <el-form-item prop="username">
           <el-input

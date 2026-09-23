@@ -189,3 +189,45 @@ def test_entries_forbidden_for_non_admin(_sso_secret, db):
         app.dependency_overrides.clear()
 
     assert resp.status_code == 403
+
+
+# ── 反向 SSO(面板→本系统)止血, 2026-09-23 ─────────────────────────
+# 事故: 面板侧 /sso/csctalon 签发端从未实现, 本侧密钥也未配置, 但前端 JWT 过期
+# 无条件外跳 → 用户落到面板 Express 404。门禁: 未配置密钥 = 链路未启用, 不外跳。
+def test_sso_config_public_unconfigured(client, monkeypatch):
+    """公开端点(无需登录): 未配 NETMGR_SSO_SECRET → netmgr_sso_enabled=False。"""
+    monkeypatch.setattr(settings, "NETMGR_SSO_SECRET", "")
+    resp = client.get("/api/v1/auth/sso-config")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"] == {"netmgr_sso_enabled": False}
+
+
+def test_sso_config_public_enabled(client, monkeypatch):
+    monkeypatch.setattr(settings, "NETMGR_SSO_SECRET", SECRET)
+    resp = client.get("/api/v1/auth/sso-config")
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {"netmgr_sso_enabled": True}
+
+
+def test_sso_enter_no_ticket_unconfigured_redirects_to_login(client, monkeypatch):
+    """无票 + 未配置密钥: 302 回本站 /login, 绝不外跳面板(止血核心)。"""
+    monkeypatch.setattr(settings, "NETMGR_SSO_SECRET", "")
+    resp = client.get("/api/v1/auth/sso?next=/dashboards/today", follow_redirects=False)
+    assert resp.status_code == 307
+    location = resp.headers["location"]
+    assert location.startswith("/login"), location
+    assert "panel.kimirock.top" not in location
+    assert "expired=1" in location
+
+
+def test_sso_enter_no_ticket_configured_redirects_to_panel(client, monkeypatch):
+    """无票 + 已配置密钥: 维持原设计, 302 到面板签发端换票。"""
+    monkeypatch.setattr(settings, "NETMGR_SSO_SECRET", SECRET)
+    monkeypatch.setattr(
+        settings, "NETMGR_SSO_PANEL_URL", "https://panel.example.test/sso/csctalon"
+    )
+    resp = client.get("/api/v1/auth/sso?next=/dashboards/today", follow_redirects=False)
+    assert resp.status_code == 307
+    assert resp.headers["location"] == (
+        "https://panel.example.test/sso/csctalon?next=%2Fdashboards%2Ftoday"
+    )

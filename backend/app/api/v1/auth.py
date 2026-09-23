@@ -162,7 +162,12 @@ def sso_enter(
             return JSONResponse(
                 {"detail": "invalid or expired SSO ticket"}, status_code=403
             )
-        # 无票：回面板签票
+        # 无票：回面板签票。
+        # 2026-09-23 止血: 反向 SSO(netmgr 面板→本系统)需两侧同时就绪 —— 面板侧
+        # GET /sso/csctalon 签发端 + 本侧 NETMGR_SSO_SECRET。未配置密钥说明该链路从未
+        # 启用(此前无条件外跳, 把登录过期用户甩到面板 404 页)。未启用 → 回本站登录页。
+        if not settings.NETMGR_SSO_SECRET:
+            return RedirectResponse("/login?expired=1")
         panel_url = settings.NETMGR_SSO_PANEL_URL
         return RedirectResponse(
             f"{panel_url}?{urlencode({'next': safe_next})}"
@@ -211,6 +216,17 @@ def sso_enter(
         "</script>"
     )
     return HTMLResponse(bootstrap, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/sso-config", summary="登录页公开配置(无需登录)")
+def sso_config():
+    """告诉未登录前端「netmgr 面板跨子域 SSO(面板→本系统方向)是否启用」。
+
+    无需鉴权: 登录页/401 拦截器在没有 JWT 时据此决定「JWT 过期跳面板无感续期」
+    还是「直接回登录页」。开关 = NETMGR_SSO_SECRET 已配置(面板侧 /sso/csctalon
+    签发端也须同步就绪, 否则外跳必 404)。
+    """
+    return R(data={"netmgr_sso_enabled": bool(settings.NETMGR_SSO_SECRET)})
 
 
 @router.get(

@@ -7,7 +7,11 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 
 import App from './App.vue'
 import router from './router'
+import { fetchSsoConfig } from './api'
 import './assets/main.css'
+
+// 启动即预取反向 SSO 开关(无需登录); 不阻塞 mount —— 未取到时默认 false(安全侧: 不外跳)
+fetchSsoConfig()
 
 const app = createApp(App)
 
