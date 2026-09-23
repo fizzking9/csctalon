@@ -175,6 +175,9 @@ export const MENU_GROUPS = [
       { path: '/system/ai-reports', title: 'AI 报告历史' },
       // #173: 提示词评估中心(评估侧) — 命中/兜底/锚点/规则健康 + 半自动迭代
       { path: '/system/ai-prompt-eval', title: '提示词评估中心' },
+      // 2026-09-23: 提示词全量版本化 —— 治理研判/接入起草提示词版本账本
+      // （gen/extract 两类含金丝雀冒烟, 仍在评估中心区块⑤管理, 不重复展示）
+      { path: '/system/prompt-versions', title: '提示词版本管理' },
     ],
   },
 

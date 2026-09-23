@@ -494,6 +494,13 @@ const routes = [
         component: () => import('@/views/system/AiPromptEval.vue'),
         meta: { title: '提示词评估中心', icon: 'DataAnalysis', admin: true },
       },
+      {
+        // 2026-09-23: 提示词全量版本化 —— 治理研判 / 接入起草提示词版本账本
+        path: 'system/prompt-versions',
+        name: 'SystemPromptVersions',
+        component: () => import('@/views/system/PromptVersions.vue'),
+        meta: { title: '提示词版本管理', icon: 'Tickets', admin: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
