@@ -13,7 +13,9 @@
   DB 配置是增强不是必需：研判服务对「取不到/被禁用」有模块级默认提示词兜底。
 """
 
-from sqlalchemy import Boolean, Integer, String, Text
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -21,13 +23,26 @@ from app.models.base import IDMixin, TimestampMixin
 
 
 class GovernancePrompt(IDMixin, TimestampMixin, Base):
-    """治理研判提示词配置（DB 可迭代，版本留痕）。"""
+    """治理研判提示词配置（DB 可迭代，多版本可回滚）。
+
+    升级(2026-09-23)：从「单行 UPDATE 覆盖」改为「多版本行 + is_active 部分唯一索引」
+    （与 prompt_configs #178 同模式）。一个 code 多行=多个历史版本，load 取 is_active=true
+    那行（逻辑不变）；激活新版本=旧行置 false、新行置 true，旧版本保留可回滚。
+    change_reason/references 记录每版迭代依据（解决什么问题/影响什么）。
+    """
 
     __tablename__ = "governance_prompts"
+    __table_args__ = (
+        # 同一 code 至多一个生效版本（部分唯一索引：FALSE 不参与唯一约束）
+        Index(
+            "uq_governance_prompts_active_code", "code",
+            unique=True, postgresql_where=text("is_active"),
+        ),
+    )
 
     code: Mapped[str] = mapped_column(
-        String(64), unique=True, index=True, nullable=False,
-        comment="提示词标识（judge_system / judge_user），全表唯一",
+        String(64), index=True, nullable=False,
+        comment="提示词标识（judge_system / judge_user）；同 code 可有多版本行",
     )
     name_cn: Mapped[str] = mapped_column(
         String(128), nullable=False, comment="显示名（如「研判·系统提示」）",
@@ -42,8 +57,22 @@ class GovernancePrompt(IDMixin, TimestampMixin, Base):
     )
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true",
-        comment="启用开关；False 时研判服务回退模块级默认提示词",
+        comment="生效标记；TRUE=当前生效版本（每 code 至多一个），FALSE=历史/草稿版本",
+    )
+    change_reason: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="本版迭代依据：解决什么问题/为何改（新建版本时人工填写，供版本账本可溯）",
+    )
+    references: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="本版参考依据：评估中心建议/用户评价/意见工单/文档链接等来源",
     )
     created_by: Mapped[int | None] = mapped_column(
         Integer, nullable=True, comment="创建人 user_id（提示词编辑走 admin 界面，工单 #165）",
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="激活时刻",
+    )
+    activated_by: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="激活人 user_id",
     )

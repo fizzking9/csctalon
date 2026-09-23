@@ -92,8 +92,18 @@ def _engine():
     # settings 已在导入时按测试环境变量加载
     engine = create_engine(settings.database_url, pool_pre_ping=True)
     try:
+        from sqlalchemy import text
+
         import app.models  # noqa: F401  确保所有模型已注册到 Base.metadata
         from app.core.database import Base
+
+        # 2026-09-23: create_all 不 ALTER 已有表; 旧测试库的 governance_prompts /
+        # onboarding_prompts 缺新列(change_reason/references/activated_at/by)且 code
+        # 仍带旧 unique 约束(多版本行 INSERT 会冲突)。先 DROP 让 create_all 按新模型重建。
+        with engine.connect() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS governance_prompts CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS onboarding_prompts CASCADE"))
+            conn.commit()
 
         Base.metadata.create_all(bind=engine)
         # ⚠️ 2026-09-07 修复: create_all 建表后 stamp alembic 到 head。

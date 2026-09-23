@@ -223,8 +223,9 @@ def test_days_range_trend_future_days_skipped():
 # ── _enrich_with_daily_trend(集成: 月报路径触发 hourly_summary 嵌入) ────
 
 
-def test_enrich_with_daily_trend_monthly_triggers_hourly_summary():
-    """#136: 月报路径(span > 14)调 _enrich_daily_hourly_summary 给每条补 hourly_summary。"""
+def test_enrich_with_daily_trend_monthly_no_hourly_summary():
+    """2026-09-23: 月报路径(span > 14)按日全展开 daily_trend, 但不再嵌 hourly_summary
+    (用户「不关注按小时的数据」; 小时粒度对月报是噪音且占 token)。"""
     db = MagicMock()
     feed = {}
     fake_today = __import__("datetime").date(2026, 9, 30)
@@ -242,16 +243,14 @@ def test_enrich_with_daily_trend_monthly_triggers_hourly_summary():
         _enrich_with_daily_trend(db, feed, "2026-09-01", "2026-09-30")
     assert "daily_trend" in feed
     assert len(feed["daily_trend"]) == 30
-    # 月报路径每条应有 hourly_summary
+    # 不再嵌 hourly_summary(按天走势足够, 小时粒度移除)
     for item in feed["daily_trend"]:
-        assert "hourly_summary" in item
-        assert item["hourly_summary"]["peak_reception"] == 5
-        assert item["hourly_summary"]["night_reception"] == 40  # 8 × 5
+        assert "hourly_summary" not in item
 
 
-def test_enrich_with_daily_trend_weekly_now_has_hourly_summary():
-    """#139 A: 周报路径(span ≤ 14)也补 hourly_summary(取消月报限定)。
-    #139 D: 周报路径同时补 staff_top5(整窗一次)。
+def test_enrich_with_daily_trend_weekly_no_hourly_but_staff():
+    """2026-09-23: 周报路径(span ≤ 14)不再补 hourly_summary(同月报移除);
+    #139 D: staff_top5 仍补(整窗一次)。
     """
     db = MagicMock()
     feed = {}
@@ -282,12 +281,10 @@ def test_enrich_with_daily_trend_weekly_now_has_hourly_summary():
         _enrich_with_daily_trend(db, feed, "2026-09-09", "2026-09-15")
     assert "daily_trend" in feed
     assert len(feed["daily_trend"]) == 7
-    # #139 A: 周报路径每条也应有 hourly_summary
+    # 不再嵌 hourly_summary
     for item in feed["daily_trend"]:
-        assert "hourly_summary" in item
-        assert item["hourly_summary"]["peak_reception"] == 5
-        assert item["hourly_summary"]["night_reception"] == 40  # 8 × 5
-    # #139 D: feed.staff_top5 存在(整窗一次调用 today_staff_efficiency)
+        assert "hourly_summary" not in item
+    # #139 D: feed.staff_top5 仍存在(整窗一次调用 today_staff_efficiency)
     assert "staff_top5" in feed
     assert len(feed["staff_top5"]) >= 1
     assert feed["staff_top5"][0]["name"] == "张三"

@@ -391,10 +391,10 @@ def _enrich_with_daily_trend(db: Session, feed: dict, start_s: str, end_s: str) 
         改为按日全展开(cap 31 天, 防超长月+1)。月报 max_tokens=5000, feed 输入给
         122b 模型, 可容纳 ~12KB(360 标量)。
 
-    #139 (2026-09-17) A+D 扩展:
-      - **A. 周报也补 hourly_summary**: 取消 #136 月报限定, 周/月报均对每条
-        daily_trend 调 _enrich_daily_hourly_summary。周报 max_tokens=4000,
-        7 天 × 6 标量 = ~42 标量(~400 字符), 在 feed 限 6000 字符内可接受。
+    #139 (2026-09-17) A+D 扩展(2026-09-23 修订):
+      - **A. ~~周报也补 hourly_summary~~(已移除)**: 用户明确「周月报不关注按小时的数据」,
+        小时粒度对周月报是噪音且占 token(月报约 12KB); 现仅保留按天 daily_trend 走势。
+        函数 _enrich_daily_hourly_summary 保留但不再调用, 以备区间问句按需启用。
       - **D. 周/月报补人均效率 top5**: 复用 today:staff:None:{start_s}:{end_s}:
         200:0:person:None:None:None 缓存(与今日看板 today:staff 同源同预热),
         调 today_staff_efficiency 整窗 → _compact_staff_efficiency 取 top3。
@@ -404,8 +404,9 @@ def _enrich_with_daily_trend(db: Session, feed: dict, start_s: str, end_s: str) 
         trend, _span = _days_range_trend(db, start_s, end_s)
         if trend:
             feed["daily_trend"] = trend
-            # #139 A: 取消月报限定, 周/月报均补 hourly_summary
-            _enrich_daily_hourly_summary(db, trend)
+            # 不再补 hourly_summary(2026-09-23): 周/月报数据量大且按天走势已足够,
+            # 小时粒度对周月报是噪音且占 token(月报约 12KB); 用户明确「不关注按小时的数据」。
+            # 函数 _enrich_daily_hourly_summary 保留但不再在此调用。
     except Exception as e:  # noqa: BLE001
         logger.warning("ai_feed enrich daily_trend 失败(忽略): %s", e)
 
