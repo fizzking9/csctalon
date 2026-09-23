@@ -128,14 +128,18 @@ def me(current_user: CurrentUser):
     summary="外部管理台入口可用性(仅管理员)",
 )
 def sso_entries(_current_user: AdminUser):
-    """工单 #187：告诉管理端「有哪些外部管理台入口可用」。
+    """工单 #187/#188：告诉管理端「有哪些外部管理台入口可用」。
 
     只回可用性与地址，**不回票据** —— 票据在用户点击时经 POST /auth/sso/ticket 单独签发，
     避免页面加载即产生一次性凭证。地址由配置提供，不在代码中硬编码内网 IP。
+
+    talon 回两个候选地址（办公网 / ZeroTier）：它没有公网入口，由前端按当前访问来源
+    选一个，避免「点开一片空白、也不知道为什么」。
     """
     return R(data=SsoEntriesOut(
         netmgr_enabled=bool(settings.SSO_SHARED_SECRET),
-        talon_url=settings.SSO_TALON_URL,
+        talon_url_lan=settings.SSO_TALON_URL_LAN,
+        talon_url_zt=settings.SSO_TALON_URL_ZT,
     ))
 
 

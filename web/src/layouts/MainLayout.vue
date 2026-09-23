@@ -91,13 +91,18 @@
                         站内路由（有「菜单项必须存在于 router」的防悬空测试），外部系统链接塞进去
                         会破坏该契约。
                   口径：SSO_SHARED_SECRET 未配置则不显示网络管理面板入口；talon 地址来自
-                        SSO_TALON_URL（走 talon 自身可信网段免密，不签票）。票据放 URL fragment，
-                        不发给服务端，故不进两侧 access log、不随 Referer 外泄。
+                        SSO_TALON_URL_LAN / SSO_TALON_URL_ZT（它没有公网入口，前端按当前访问
+                        来源择一：从办公网打开用办公网地址，否则用 ZeroTier 地址；走 talon 自身
+                        可信网段免密，不签票）。票据放 URL fragment，不发给服务端，故不进两侧
+                        access log、不随 Referer 外泄。
                   取舍：不做「统一门户 / 单点登出」——两个目标系统仍保留各自独立登录（可用性冗余：
                         面板自身登录入口在票据链路故障时仍可用，本系统登录亦不依赖它们）；
                         不把 talon 纳入票据体系（它已有可信网段免密，签票属重复建设）；
+                        不给 talon 配公网域名或反代（它按来源网段放行，任何反代都会让来源变成
+                        代理机、等于对全网开放 —— 实测反代机源 IP 落入可信网段即可免密拿到全部
+                        API Key，工单 #188）；
                         不做用户映射（本入口只服务系统管理员单人，不面向多角色）。
-                  工单：#187
+                  工单：#187 / #188
                   ─────────────────────────────────────────────────────────────────────────────
                 -->
                 <el-dropdown-item v-if="authStore.isAdmin && ssoEntries.netmgr_enabled" command="netmgr" divided>
@@ -118,19 +123,22 @@
                     <el-icon style="margin-left:6px;color:#c0c4cc;font-size:13px"><InfoFilled /></el-icon>
                   </el-tooltip>
                 </el-dropdown-item>
-                <el-dropdown-item v-if="authStore.isAdmin && ssoEntries.talon_url" command="talon">
+                <el-dropdown-item v-if="authStore.isAdmin && talonTarget" command="talon">
                   <el-icon style="margin-right:6px"><Cpu /></el-icon>算力通道管理台
                   <el-tooltip placement="left" effect="light" :show-after="200">
                     <template #content>
-                      <div style="max-width:270px;line-height:1.6">
+                      <div style="max-width:280px;line-height:1.6">
                         <b>为什么有这个入口</b><br />
                         算力通道管理台与网络管理面板一样是独立系统，这里只放一个直链，方便管理员
                         从本系统跳过去。<br /><br />
-                        <b>怎么做到的</b><br />
-                        该管理台按来源网段放行，办公网 / ZeroTier 内访问本就无需登录，因此这里
-                        不签发免密票据。<br /><br />
+                        <b>它只在办公网 / ZeroTier 内可达</b><br />
+                        该管理台部署在内网，没有公网入口，因此这里按你的访问来源自动选地址：
+                        从办公网打开本页用办公网地址，否则用 ZeroTier 地址。
+                        <b>如果点开打不开，说明当前设备既不在办公网、也没接入 ZeroTier ——
+                        先连上 ZeroTier 再点即可。</b><br /><br />
                         <b>我们不做什么</b><br />
-                        不做统一登出 —— 两个系统的会话互不影响。
+                        不给它配公网域名或反代：该管理台按来源网段放行，任何反代都会让来源变成
+                        代理机、等于对全网开放；也不做统一登出（两个系统会话互不影响）。
                       </div>
                     </template>
                     <el-icon style="margin-left:6px;color:#c0c4cc;font-size:13px"><InfoFilled /></el-icon>
@@ -273,9 +281,9 @@ const roleLabel = computed(() => {
   return map[authStore.role] || ''
 })
 
-// ---------- 外部管理台入口（仅管理员，工单 #187）----------
+// ---------- 外部管理台入口（仅管理员，工单 #187/#188）----------
 // 只拉「有没有配、地址是什么」；票据在点击时才签发（60 秒有效，不做预取/缓存）
-const ssoEntries = reactive({ netmgr_enabled: false, talon_url: '' })
+const ssoEntries = reactive({ netmgr_enabled: false, talon_url_lan: '', talon_url_zt: '' })
 const ssoJumping = ref(false)
 
 async function loadSsoEntries() {
@@ -283,11 +291,29 @@ async function loadSsoEntries() {
   try {
     const res = await getSsoEntries()
     ssoEntries.netmgr_enabled = !!res.data?.netmgr_enabled
-    ssoEntries.talon_url = res.data?.talon_url || ''
+    ssoEntries.talon_url_lan = res.data?.talon_url_lan || ''
+    ssoEntries.talon_url_zt = res.data?.talon_url_zt || ''
   } catch (e) {
     // 静默：入口不可用不影响布局其它功能
   }
 }
+
+// talon 没有公网入口，只有办公网与 ZeroTier 两条路径，按当前访问来源选：
+// 本页若就是从办公网地址打开的（hostname 与办公网地址一致）→ 办公网必然可达，用它；
+// 其余情况（公网域名 / ZT 地址）→ 用 ZeroTier 地址，打不开时由 ⓘ 提示先连 ZT。
+// 无法在前端探测可达性：https 页面 fetch http:// 目标会被浏览器按混合内容拦截。
+const talonTarget = computed(() => {
+  const lan = ssoEntries.talon_url_lan
+  const zt = ssoEntries.talon_url_zt
+  if (!lan) return zt
+  if (!zt) return lan
+  try {
+    if (window.location.hostname === new URL(lan).hostname) return lan
+  } catch (e) {
+    // 配置不是合法 URL 时退化为用 ZeroTier 地址
+  }
+  return zt
+})
 
 // 免密进入网络管理面板：取一次性票据后整页跳转（票据即凭证，不落本地存储、不写日志）
 async function openNetmgr() {
@@ -423,8 +449,8 @@ async function handleCommand(cmd) {
   } else if (cmd === 'netmgr') {
     await openNetmgr()
   } else if (cmd === 'talon') {
-    // 直链：新标签打开，保留本页状态（地址由后端配置下发，不在前端硬编码）
-    window.open(ssoEntries.talon_url, '_blank', 'noopener')
+    // 直链：新标签打开，保留本页状态（地址由后端配置下发并按访问来源择一，不在前端硬编码）
+    window.open(talonTarget.value, '_blank', 'noopener')
   }
 }
 

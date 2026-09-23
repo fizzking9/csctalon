@@ -163,8 +163,14 @@ class Settings(BaseSettings):
     # 票据有效期（秒）。须与 netmgr 侧 TTL_SECONDS 一致，勿随意调大。
     SSO_TICKET_TTL_SECONDS: int = 60
     # talon 算力通道管理台直链（仅前端放链接，走 talon 自身可信网段免密，不签票）。
-    # 留空 = 前端不显示该入口。
-    SSO_TALON_URL: str = ""
+    # talon 没有公网入口，故给两个候选地址，由前端按当前访问来源选一个：
+    #   _LAN：办公局域网地址（如 http://192.168.10.21:4080）
+    #   _ZT ：ZeroTier 地址（如 http://10.147.17.22:4080）
+    # 两者都留空 = 前端不显示该入口。
+    # ⚠️ 刻意不把它暴露到公网：talon 鉴权按**对端 IP** 判可信网段，任何反代/隧道都会让源 IP
+    #    变成代理机，一旦代理机落在 TALON_TRUSTED_ADMIN_NETWORKS 内即等于对全网免密（工单 #188）。
+    SSO_TALON_URL_LAN: str = ""
+    SSO_TALON_URL_ZT: str = ""
 
     # 上传
     # ★ 2026-09-22: 默认值由 profile 决定（dev=./uploads / test=/tmp/... / prod=/app/uploads）

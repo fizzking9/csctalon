@@ -148,8 +148,9 @@ def test_endpoint_disabled_without_secret(monkeypatch, db):
 
 
 def test_entries_reports_availability(_sso_secret, monkeypatch, db):
-    """入口可用性：已配密钥 → netmgr_enabled=True；talon 地址来自配置。"""
-    monkeypatch.setattr(settings, "SSO_TALON_URL", "http://talon.example.test:4080")
+    """入口可用性：已配密钥 → netmgr_enabled=True；talon 回办公网与 ZT 两个候选地址。"""
+    monkeypatch.setattr(settings, "SSO_TALON_URL_LAN", "http://talon-lan.example.test:4080")
+    monkeypatch.setattr(settings, "SSO_TALON_URL_ZT", "http://talon-zt.example.test:4080")
     client, _ = _client_with_role(RoleEnum.ADMIN, db)
     try:
         resp = client.get("/api/v1/auth/sso/entries")
@@ -158,7 +159,26 @@ def test_entries_reports_availability(_sso_secret, monkeypatch, db):
 
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
-    assert data == {"netmgr_enabled": True, "talon_url": "http://talon.example.test:4080"}
+    assert data == {
+        "netmgr_enabled": True,
+        "talon_url_lan": "http://talon-lan.example.test:4080",
+        "talon_url_zt": "http://talon-zt.example.test:4080",
+    }
+
+
+def test_entries_empty_when_talon_unconfigured(_sso_secret, monkeypatch, db):
+    """talon 两个地址都未配置 → 均回空串（前端据此不显示该入口）。"""
+    monkeypatch.setattr(settings, "SSO_TALON_URL_LAN", "")
+    monkeypatch.setattr(settings, "SSO_TALON_URL_ZT", "")
+    client, _ = _client_with_role(RoleEnum.ADMIN, db)
+    try:
+        resp = client.get("/api/v1/auth/sso/entries")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["talon_url_lan"] == "" and data["talon_url_zt"] == ""
 
 
 def test_entries_forbidden_for_non_admin(_sso_secret, db):

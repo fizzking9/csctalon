@@ -68,11 +68,15 @@ class SsoTicketOut(BaseModel):
 
 
 class SsoEntriesOut(BaseModel):
-    """外部管理台入口的可用性（工单 #187，仅管理员可见）。
+    """外部管理台入口的可用性（工单 #187/#188，仅管理员可见）。
 
     只回「有没有配、地址是什么」，不回票据 —— 票据在点击时单独签发，
     避免页面加载即产生一次性凭证。
+
+    talon 给两个候选地址（办公网 / ZeroTier），由前端按当前访问来源选一个：
+    它没有公网入口，两个地址对应「在办公室」与「在外网但已连 ZT」两种场景。
     """
 
     netmgr_enabled: bool
-    talon_url: str
+    talon_url_lan: str
+    talon_url_zt: str
