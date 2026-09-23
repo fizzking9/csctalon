@@ -138,6 +138,10 @@ def build_summary(db: Session, days: int = 7) -> dict:
     # ④ 高频 live 兜底问句（未答好问题）
     top_live = _top_live_questions(db, since_ts)
 
+    # ⑤ 用户评价汇总（周期聚合，非实时；#174 演进）
+    from app.services.ai_report_feedback_service import _feedback_aggregate
+    feedback = _feedback_aggregate(db, since_ts)
+
     return {
         "window": {"days": days, "start": since_ts[:10], "generated_at": _now_cn().strftime("%Y-%m-%d %H:%M:%S")},
         "overall": {"questions": questions, "by_mode": by_mode,
@@ -147,6 +151,7 @@ def build_summary(db: Session, days: int = 7) -> dict:
                           "zero_hit_count": len(zero_hit)},
         "rule_health": {"total": len(rules), "warn_count": len(rule_warns)},
         "top_live_qs": top_live,
+        "feedback": feedback,
     }
 
 

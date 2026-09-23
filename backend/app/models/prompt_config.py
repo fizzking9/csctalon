@@ -64,6 +64,14 @@ class PromptConfig(IDMixin, TimestampMixin, Base):
         String(255), nullable=True,
         comment="激活时基线指标（命中率/live 占比，金丝雀验证 #179 回填）",
     )
+    change_reason: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="本版迭代依据：解决什么问题/为何改（新建版本时人工填写，供版本账本可溯）",
+    )
+    references: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="本版参考依据：评估中心建议/用户评价/意见工单/文档链接等来源（JSONB 数组或自由文本）",
+    )
     created_by: Mapped[int | None] = mapped_column(
         Integer, nullable=True, comment="创建人 user_id（版本管理走 admin）",
     )

@@ -41,3 +41,13 @@ export function getAiReport(id) {
 export function deleteAiReport(id) {
   return request.delete(`/admin/ai/reports/${id}`)
 }
+
+// 对报告评分/留意见(采集, 权同详情: 本人或 admin)
+export function postReportFeedback(id, payload) {
+  return request.post(`/ai/reports/${id}/feedback`, payload)
+}
+
+// 某报告评价列表 + 当前用户是否已评
+export function getReportFeedbacks(id) {
+  return request.get(`/ai/reports/${id}/feedbacks`)
+}

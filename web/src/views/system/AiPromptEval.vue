@@ -81,6 +81,15 @@
       </div>
     </div>
 
+    <!-- ═══ 工作流导引（区块按 采集→汇总→分析→迭代→生效 分组）═══ -->
+    <el-alert type="info" :closable="false" show-icon class="mb-16">
+      <template #title>
+        工作流：<b>①采集</b>（报告详情页打分评价 / 本页人工意见）→ <b>②周期汇总</b>（非实时，评价/意见攒够后并入）→
+        <b>③分析</b>（总览 · 模板 · 锚点 · 规则 · 用户评价归因）→ <b>④迭代</b>（生成建议 → 人工确认 → 应用，意见可转版本草稿）→
+        <b>⑤生效</b>（版本管理：新建 → 金丝雀激活 → 可回滚，版本存「解决什么/参考」可溯）
+      </template>
+    </el-alert>
+
     <!-- ═══ 区块1：总览（4 卡 + 高频兜底问句） ═══ -->
     <el-row :gutter="12" class="mb-12">
       <el-col :span="6">
@@ -117,6 +126,15 @@
           <div class="stat-sub">误报率 &gt; 50% 的规则数</div>
         </el-card>
       </el-col>
+      <el-col :span="6">
+        <el-card shadow="never" class="stat-card">
+          <div class="stat-label">用户评价平均分</div>
+          <div class="stat-value" :class="{ warn: (summary?.feedback?.avg ?? 0) < 3 }">
+            {{ summary?.feedback?.avg ?? '-' }}
+          </div>
+          <div class="stat-sub">{{ summary?.feedback?.count ?? 0 }} 条评价 · 低分 {{ summary?.feedback?.low_count ?? 0 }}</div>
+        </el-card>
+      </el-col>
     </el-row>
 
     <el-card shadow="never" class="mb-16">
@@ -135,6 +153,41 @@
         </el-table-column>
         <el-table-column prop="count" label="次数" width="80" />
       </el-table>
+    </el-card>
+
+    <!-- ═══ 区块1.5：用户评价归因（周期采集汇总，非实时） ═══ -->
+    <el-card shadow="never" class="mb-16">
+      <template #header>
+        <div class="flex-between">
+          <span>用户评价归因（周期汇总 · 低分报告 &amp; 高频意见）</span>
+          <el-tag size="small" type="info">采集→周期汇总</el-tag>
+        </div>
+      </template>
+      <el-empty v-if="!summary?.feedback?.count" description="暂无评价 — 在报告详情页对 AI 报告/对话结果打分，评估中心按周期汇总归因" :image-size="40">
+        <span class="drawer-sub">评价只采集不实时分析，下次「生成迭代建议」或每日汇总时并入评估。</span>
+      </el-empty>
+      <template v-else>
+        <div class="drawer-sub mb-12">
+          平均 {{ summary.feedback.avg }} · 低分(≤2) {{ summary.feedback.low_count }} 条（{{ pct(summary.feedback.low_ratio) }}）
+        </div>
+        <template v-if="(summary.feedback.low_reports || []).length">
+          <div class="fb-title">低分报告（未解决/不准归因）</div>
+          <el-table :data="summary.feedback.low_reports" size="small" empty-text="本期无低分评价">
+            <el-table-column prop="id" label="报告" width="70" />
+            <el-table-column label="评分" width="70">
+              <template #default="{ row }">{{ row.rating }} 分</template>
+            </el-table-column>
+            <el-table-column prop="question" label="问句" min-width="180" show-overflow-tooltip />
+            <el-table-column prop="opinion" label="用户意见" min-width="200" show-overflow-tooltip />
+          </el-table>
+        </template>
+        <template v-if="(summary.feedback.top_opinions || []).length">
+          <div class="fb-title">高频意见关键词（供人工确认，非自动改）</div>
+          <div class="fb-tags">
+            <el-tag v-for="(w, i) in summary.feedback.top_opinions" :key="i" size="small" round class="mr-8">{{ w }}</el-tag>
+          </div>
+        </template>
+      </template>
     </el-card>
 
     <!-- ═══ 区块2：模板评估（命中率升序，问题在前） ═══ -->
@@ -291,6 +344,7 @@
         </div>
         <div class="opinion-content">{{ op.suggestion }}</div>
         <div v-if="op.status === 'proposed'" class="flex-between mt-8" style="justify-content: flex-end">
+          <el-button size="small" @click="onOpinionToVersion(op)">转为版本草稿</el-button>
           <el-button size="small" type="primary" @click="onOpinionConfirm(op, true)">采纳</el-button>
           <el-button size="small" @click="onOpinionConfirm(op, false)">不采纳</el-button>
         </div>
@@ -387,6 +441,13 @@
                 <span v-else class="muted">未激活</span>
               </template>
             </el-table-column>
+            <el-table-column label="解决什么 / 参考" min-width="200" show-overflow-tooltip>
+              <template #default="{ row }">
+                <div v-if="row.change_reason" class="ver-reason">🗒 {{ row.change_reason }}</div>
+                <div v-if="row.references" class="ver-reason muted">📎 {{ row.references }}</div>
+                <span v-if="!row.change_reason && !row.references" class="muted">无</span>
+              </template>
+            </el-table-column>
             <el-table-column label="操作" width="200" fixed="right">
               <template #default="{ row }">
                 <el-button size="small" @click="showVersionContent(row)">内容</el-button>
@@ -418,8 +479,18 @@
         <el-form-item label="显示名">
           <el-input v-model="newVerForm.name_cn" size="small" placeholder="可选，默认「{现有名} v{n}」" />
         </el-form-item>
+        <el-form-item label="解决什么" required>
+          <el-input v-model="newVerForm.change_reason" type="textarea" :rows="2"
+                    maxlength="300" show-word-limit
+                    placeholder="必填：本版解决什么问题/为什么改（版本账本备案）" />
+        </el-form-item>
+        <el-form-item label="参考依据">
+          <el-input v-model="newVerForm.references" type="textarea" :rows="2"
+                    maxlength="500" show-word-limit
+                    placeholder="可选：评估中心建议 / 用户评价 / 意见工单 / 文档链接等来源" />
+        </el-form-item>
         <el-form-item label="内容">
-          <el-input v-model="newVerForm.content" type="textarea" :rows="14"
+          <el-input v-model="newVerForm.content" type="textarea" :rows="8"
                     placeholder="提示词正文（可含 {{占位符}}）…" />
         </el-form-item>
       </el-form>
@@ -470,7 +541,7 @@ const verActionId = ref(null)
 const verMap = ref({}) // code -> 版本列表
 const newVerDialog = ref(false)
 const creating = ref(false)
-const newVerForm = ref({ code: 'gen_system', name_cn: '', content: '' })
+const newVerForm = ref({ code: 'gen_system', name_cn: '', change_reason: '', references: '', content: '' })
 const contentDialog = ref(false)
 const contentTitle = ref('')
 const contentText = ref('')
@@ -565,6 +636,14 @@ async function onOpinionConfirm(op, approved) {
   await loadAll()
 }
 
+// #174 演进: 意见→版本闭环——把人工意见作为「解决什么(change_reason)+参考依据(references)」
+// 带入新建版本草稿，落点可溯（版本表「解决什么/参考」列即闭环另一端）。
+function onOpinionToVersion(op) {
+  openNewVersion()
+  newVerForm.value.change_reason = op.suggestion || ''
+  newVerForm.value.references = `人工意见#${op.id}（${OPINION_CATEGORIES[op.reason] || op.reason}）· ${op.target_name || '全局'}`
+}
+
 async function genSuggestions() {
   suggesting.value = true
   try {
@@ -633,18 +712,26 @@ function openNewVersion() {
   newVerForm.value = {
     code: verTab.value,
     name_cn: '',
+    change_reason: '',
+    references: '',
     content: active?.content ?? '',
   }
   newVerDialog.value = true
 }
 
 async function submitNewVersion() {
+  if (!newVerForm.value.change_reason?.trim()) {
+    ElMessage.warning('请填写「解决什么」（为何改，版本账本备案）')
+    return
+  }
   creating.value = true
   try {
     const res = await createPromptConfig({
       code: newVerForm.value.code,
       content: newVerForm.value.content?.trim() || undefined,
       name_cn: newVerForm.value.name_cn?.trim() || undefined,
+      change_reason: newVerForm.value.change_reason?.trim() || undefined,
+      references: newVerForm.value.references?.trim() || undefined,
     })
     newVerDialog.value = false
     ElMessage.success(res.message || `已新增版本 v${res.data.version}（草稿）`)
@@ -730,4 +817,8 @@ onMounted(() => {
 .opinion-meta { font-size: 12px; color: #909399; }
 .opinion-content { font-size: 13px; line-height: 1.5; margin-top: 6px; }
 .ver-content { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.6; background: #f5f7fa; padding: 10px; border-radius: 4px; max-height: 60vh; overflow: auto; }
+.ver-reason { font-size: 12px; line-height: 1.5; margin-bottom: 2px; }
+.fb-title { font-size: 13px; font-weight: 600; margin: 8px 0 6px; }
+.fb-tags { display: flex; flex-wrap: wrap; gap: 8px; }
+.mr-8 { margin-right: 8px; }
 </style>

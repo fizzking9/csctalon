@@ -165,6 +165,28 @@
             <div class="ellipsis-3">{{ reportDetail.question || '—' }}</div>
           </el-descriptions-item>
         </el-descriptions>
+        <!-- ═══ 报告评价（采集, 周期汇入评估中心）═══ -->
+        <el-divider content-position="left">评价这份报告（用于周期评估归因）</el-divider>
+        <div v-if="reportDetail" class="feedback-box">
+          <el-rate v-model="feedback.rating" :max="5" allow-half show-score
+                   :texts="['未解决/没用','不满意','一般','满意','很满意/很准']" score-template="{value}" />
+          <el-input v-model="feedback.opinion" type="textarea" :rows="2" maxlength="200" show-word-limit
+                    placeholder="可选：哪里不对/缺什么/建议怎么改（只采集，不实时分析）" class="mt-8" />
+          <div class="flex-between mt-8">
+            <span class="dim">已收录 {{ feedbackList.length }} 条评价</span>
+            <el-button size="small" type="primary" :disabled="!feedback.rating"
+                       :loading="feedbackSubmitting" @click="submitFeedback">提交评价</el-button>
+          </div>
+        </div>
+        <div v-if="feedbackList.length" class="feedback-history">
+          <div v-for="f in feedbackList" :key="f.id" class="feedback-item">
+            <div class="feedback-item-head">
+              <el-rate :model-value="f.rating" disabled :max="5" show-score score-template="{value}" />
+              <span class="dim">{{ fmt(f.created_at) }}</span>
+            </div>
+            <div v-if="f.opinion" class="feedback-item-text">{{ f.opinion }}</div>
+          </div>
+        </div>
         <div class="report-content">
           <div class="dim mb-8">▼ 报告内容 (markdown 渲染)</div>
           <!-- answer_md 是 LLM 生成文本, 非 user-generated, v-html 渲染 markdown 安全 -->
@@ -181,7 +203,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, InfoFilled } from '@element-plus/icons-vue'
 import { marked } from 'marked'
-import { aiTemplates, aiAdminReports, getAiReport, deleteAiReport } from '@/api/adminAi'
+import { aiTemplates, aiAdminReports, getAiReport, deleteAiReport, postReportFeedback, getReportFeedbacks } from '@/api/adminAi'
 
 const reportLoading = ref(false)
 const reports = ref({ items: [], total: 0 })
@@ -196,6 +218,11 @@ const drawerVisible = ref(false)
 const currentReport = ref(null)
 const reportDetail = ref(null)
 const detailLoading = ref(false)
+
+// 报告评价（采集）
+const feedback = ref({ rating: 0, opinion: '' })
+const feedbackList = ref([])
+const feedbackSubmitting = ref(false)
 
 const renderedContent = computed(() => {
   const raw = reportDetail.value?.answer_md || ''
@@ -281,11 +308,34 @@ async function viewReport(row) {
   drawerVisible.value = true
   reportDetail.value = null
   detailLoading.value = true
+  feedback.value = { rating: 0, opinion: '' }
+  feedbackList.value = []
   try {
     const d = await getAiReport(row.id)
     reportDetail.value = d.data
   } catch { /* 拦截器已提示 */ } finally {
     detailLoading.value = false
+  }
+  try {
+    const f = await getReportFeedbacks(row.id)
+    feedbackList.value = f.data?.items || []
+  } catch { /* 拦截器已提示 */ }
+}
+
+async function submitFeedback() {
+  if (!feedback.value.rating) return
+  feedbackSubmitting.value = true
+  try {
+    await postReportFeedback(currentReport.value.id, {
+      rating: feedback.value.rating,
+      opinion: feedback.value.opinion?.trim() || undefined,
+    })
+    feedback.value = { rating: 0, opinion: '' }
+    const f = await getReportFeedbacks(currentReport.value.id)
+    feedbackList.value = f.data?.items || []
+    ElMessage.success('评价已记录，将纳入下次周期评估汇总')
+  } catch { /* 拦截器已提示 */ } finally {
+    feedbackSubmitting.value = false
   }
 }
 
@@ -317,6 +367,11 @@ onMounted(() => {
   padding: 16px;
 }
 .dim { color: #909399; font-size: 12px; }
+.feedback-box { border: 1px solid #ebeef5; border-radius: 6px; padding: 12px; background: #fafafa; }
+.feedback-history { margin-top: 12px; }
+.feedback-item { border: 1px solid #ebeef5; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+.feedback-item-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.feedback-item-text { font-size: 13px; line-height: 1.5; margin-top: 6px; }
 .ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ellipsis-3 {
   display: -webkit-box;

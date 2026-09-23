@@ -881,6 +881,48 @@ def ai_report_detail(report_id: int, db: DBSession, current_user: ManagerUser):
     return R(data=data)
 
 
+@router.post("/reports/{report_id}/feedback", response_model=R, summary="对 AI 报告评分/留意见(采集)")
+def ai_report_feedback(report_id: int, db: DBSession, current_user: ManagerUser, payload: dict):
+    """对报告/对话结果打分 1~5 + 可选意见（**只采集，不实时逐条分析**）。
+
+    权限同报告详情(本人或 admin)。评价落 ai_report_feedbacks，评估中心按周期
+    汇总归因低分报告/高频意见，驱动提示词迭代（#174 演进）。
+    payload: {rating: 1~5 必填, opinion: 可选文本}
+    """
+    is_admin = current_user.role == "admin"
+    from app.services.ai_report_service import get_report
+    data = get_report(db, report_id, current_user.id, is_admin)
+    if data is None:
+        raise HTTPException(404, "AI 报告不存在或无权查看")
+    payload = payload or {}
+    try:
+        from app.services.ai_report_feedback_service import create_feedback
+        row = create_feedback(
+            db, report_id, current_user.id,
+            rating=int(payload.get("rating", 0)),
+            opinion=payload.get("opinion"),
+        )
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+    return R(data=row, message="评价已记录，将纳入下次周期评估汇总")
+
+
+@router.get("/reports/{report_id}/feedbacks", response_model=R, summary="某报告的评价列表(本人或 admin)")
+def ai_report_feedbacks_list(report_id: int, db: DBSession, current_user: ManagerUser):
+    """返回某报告全部评价（时间正序）。权限同详情。"""
+    is_admin = current_user.role == "admin"
+    from app.services.ai_report_service import get_report
+    data = get_report(db, report_id, current_user.id, is_admin)
+    if data is None:
+        raise HTTPException(404, "AI 报告不存在或无权查看")
+    from app.services.ai_report_feedback_service import (
+        has_feedback_for,
+        list_feedbacks,
+    )
+    return R(data={"items": list_feedbacks(db, report_id),
+                   "mine": bool(has_feedback_for(db, report_id, current_user.id))})
+
+
 # ─────────────────────────────────────────────────────────────────────
 # AI 助手关注点/分析视角配置管理(#26, A-20260904-003 v1.2)
 #   AdminUser(改提示词=高风险); 不依赖 LLM_ENABLED(可先配置后启用)。

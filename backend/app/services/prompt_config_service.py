@@ -68,6 +68,7 @@ def list_versions(db: Session, code: str) -> list[dict]:
             "id": r.id, "code": r.code, "name_cn": r.name_cn,
             "version": r.version, "content": r.content,
             "is_active": bool(r.is_active), "baseline": r.baseline,
+            "change_reason": r.change_reason, "references": r.references,
             "created_by": r.created_by, "activated_by": r.activated_by,
             "activated_at": r.activated_at, "created_at": r.created_at,
         }
@@ -76,11 +77,14 @@ def list_versions(db: Session, code: str) -> list[dict]:
 
 
 def create_new_version(db: Session, code: str, content: str, user_id: int,
-                       name_cn: str | None = None) -> PromptConfig:
+                       name_cn: str | None = None,
+                       change_reason: str | None = None,
+                       references: str | None = None) -> PromptConfig:
     """新增版本：复制当前生效行 content 语义，version+1，不激活。
 
     `content` 为空时以当前生效版本为底（先改后升的典型流程）；
     新版本 is_active=FALSE（草稿），人工激活后才生效。
+    change_reason/references 由人工在版本管理界面填写，供版本账本可溯。
     """
     if code not in PROMPT_CODES:
         raise ValueError(f"code 仅支持: {'/'.join(PROMPT_CODES)}")
@@ -102,6 +106,8 @@ def create_new_version(db: Session, code: str, content: str, user_id: int,
         content=content,
         version=next_ver,
         is_active=False,
+        change_reason=(change_reason or "").strip() or None,
+        references=(references or "").strip() or None,
         created_by=user_id,
     )
     db.add(row)
@@ -189,6 +195,7 @@ def _dict(r: PromptConfig) -> dict:
         "id": r.id, "code": r.code, "name_cn": r.name_cn,
         "version": r.version, "content": r.content,
         "is_active": bool(r.is_active), "baseline": r.baseline,
+        "change_reason": r.change_reason, "references": r.references,
         "created_by": r.created_by, "activated_by": r.activated_by,
         "activated_at": r.activated_at, "created_at": r.created_at,
     }

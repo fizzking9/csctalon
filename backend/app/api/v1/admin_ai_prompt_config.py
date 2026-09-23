@@ -40,7 +40,8 @@ def list_versions(db: DBSession, _: AdminUser, code: str = "gen_system"):
 def create_version(db: DBSession, user: AdminUser, payload: dict):
     """新增版本（version+1，不激活）；content 为空时复制当前生效版本为底。
 
-    payload: {code: 必填, content: 可空(空=以生效版为底先改后升), name_cn: 可选}
+    payload: {code: 必填, content: 可空(空=以生效版为底先改后升), name_cn: 可选,
+              change_reason: 可选(解决什么问题/为何改), references: 可选(参考依据来源)}
     """
     code = _validate_code((payload or {}).get("code", ""))
     try:
@@ -49,6 +50,8 @@ def create_version(db: DBSession, user: AdminUser, payload: dict):
             content=(payload or {}).get("content"),
             user_id=user.id,
             name_cn=(payload or {}).get("name_cn"),
+            change_reason=(payload or {}).get("change_reason"),
+            references=(payload or {}).get("references"),
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
