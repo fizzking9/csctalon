@@ -172,6 +172,18 @@ class Settings(BaseSettings):
     SSO_TALON_URL_LAN: str = ""
     SSO_TALON_URL_ZT: str = ""
 
+    # ── 跨子域 SSO（反向：netmgr 面板 → 本系统）─────────────────────────
+    # 方向：**本系统是消费方**，netmgr 面板（panel.kimirock.top）是身份源。
+    #   面板管理员已登录 → 面板签 60 秒 HMAC 一次性票据 → 302 到本系统 /api/v1/auth/sso
+    #   → 本系统验票 → 复用自身登录链路签 JWT → 引导页写 localStorage 跳转。
+    # 与上方 SSO_SHARED_SECRET（本系统→面板方向）是**两个独立密钥**，不可混用。
+    # ⚠️ NETMGR_SSO_SECRET 必须与 netmgr 侧 /opt/netmgr/.env 的 SSO_CSCTALON_SECRET 逐字符一致。
+    NETMGR_SSO_SECRET: str = ""
+    # 面板 SSO 签票入口（无票/票据过期时回跳此地址重新签票）
+    NETMGR_SSO_PANEL_URL: str = "https://panel.kimirock.top/sso/csctalon"
+    # 票据 sub 映射的本系统账号（面板固定签此用户名，须与本系统已存在且 active 的账号一致）
+    NETMGR_SSO_DEFAULT_USER: str = "admin"
+
     # 上传
     # ★ 2026-09-22: 默认值由 profile 决定（dev=./uploads / test=/tmp/... / prod=/app/uploads）
     #   使"数据写到哪"也受模式驱动，而非散落的字面量。

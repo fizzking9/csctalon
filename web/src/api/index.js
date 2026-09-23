@@ -46,11 +46,17 @@ request.interceptors.response.use(
         detail = detail?.msg || JSON.stringify(detail)
       }
       if (status === 401) {
-        const authStore = useAuthStore()
-        // 用 localLogout 而非 logout: 此时 token 已失效, 调 /auth/logout 会再 401 形成递归
-        authStore.localLogout()
-        router.push('/login')
-        ElMessage.error('登录已过期,请重新登录')
+        // 跨子域 SSO：JWT 过期自动跳 /api/v1/auth/sso 续期。
+        // 面板有会话 → 签新票 302 回来验票发新 JWT → 引导页写 localStorage 跳回原路径（无感续期）；
+        // 面板无会话 → 面板登录后同样走通。在 /login 页不跳 SSO（避免死循环），仅清本地态。
+        const currentPath = window.location.pathname + window.location.search + window.location.hash
+        if (currentPath.startsWith('/login')) {
+          const authStore = useAuthStore()
+          authStore.localLogout()
+          if (!silent) ElMessage.error('登录已过期,请重新登录')
+        } else {
+          window.location.href = `/api/v1/auth/sso?next=${encodeURIComponent(currentPath)}`
+        }
       } else if (!silent) {
         ElMessage.error(String(detail))
       }

@@ -1,7 +1,12 @@
 """认证路由:登录、当前用户信息"""
 
 
+import json
+import re
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -14,6 +19,7 @@ from app.core.security import create_access_token, verify_password
 from app.models.user import User
 from app.schemas.common import R
 from app.schemas.user import LoginRequest, SsoEntriesOut, SsoTicketOut, Token, UserOut
+from app.services.netmgr_sso import verify_ticket as verify_netmgr_ticket
 from app.services.operation_logger import log_operation
 from app.services.sso_ticket import build_netmgr_entry_url
 
@@ -120,6 +126,91 @@ def login_json(payload: LoginRequest, request: Request, db: Session = Depends(ge
 @router.get("/me", response_model=R[UserOut], summary="当前登录用户")
 def me(current_user: CurrentUser):
     return R(data=UserOut.model_validate(current_user))
+
+
+# 安全的 next 路径正则：仅允许站内 / 开头路径，防开放重定向
+_SSO_SAFE_NEXT = re.compile(r"^/[A-Za-z0-9\-._~!$&'()*+,;=:@/?%]{0,511}$")
+
+
+@router.get("/sso", response_class=HTMLResponse, summary="面板跨子域 SSO 入口(验票发 JWT)")
+def sso_enter(
+    request: Request,
+    ticket: str | None = None,
+    next: str = "/",
+    db: Session = Depends(get_db),
+):
+    """netmgr 面板 HMAC 票据验票 → 发本系统 JWT → 引导页写 localStorage 跳转。
+
+    方向：**本系统是消费方**，netmgr 面板(panel.kimirock.top)是身份源。
+      - 无票：302 回面板签票(面板有会话会立刻签新票，无感知)
+      - 坏票/过期：403(不回面板，避免坏票循环)
+      - 好票：验 sub 对应账号存在且 active → 签 JWT → 返回引导 HTML 写 localStorage 后跳转
+
+    与 /auth/sso/ticket(本系统→面板方向)是独立链路，不共享密钥。
+    """
+    safe_next = next if _SSO_SAFE_NEXT.match(next) else "/"
+    sub = verify_netmgr_ticket(ticket) if ticket else None
+
+    if sub is None:
+        if ticket:
+            # 有票但验票失败：直接 403，不回面板(避免坏票循环)
+            log_operation(
+                db, method="GET", path="/api/v1/auth/sso",
+                action="认证.SSO验票失败", target_type="auth", status_code=403,
+                detail={"reason": "invalid_ticket"}, ip=_client_ip(request),
+            )
+            return JSONResponse(
+                {"detail": "invalid or expired SSO ticket"}, status_code=403
+            )
+        # 无票：回面板签票
+        panel_url = settings.NETMGR_SSO_PANEL_URL
+        return RedirectResponse(
+            f"{panel_url}?{urlencode({'next': safe_next})}"
+        )
+
+    # 验票成功：按 sub 查账号(sub = 面板固定映射的用户名)
+    user = db.scalar(select(User).where(User.username == sub))
+    if not user:
+        log_operation(
+            db, username=sub, method="GET", path="/api/v1/auth/sso",
+            action="认证.SSO拒绝", target_type="auth", status_code=403,
+            detail={"reason": "user_not_found", "sub": sub}, ip=_client_ip(request),
+        )
+        return JSONResponse(
+            {"detail": f"SSO 用户不存在: {sub}"}, status_code=403
+        )
+    if not user.is_active:
+        log_operation(
+            db, user_id=user.id, username=user.username, method="GET", path="/api/v1/auth/sso",
+            action="认证.SSO拒绝", target_type="auth", status_code=403,
+            detail={"reason": "账号已停用"}, ip=_client_ip(request),
+        )
+        return JSONResponse({"detail": "账号已停用"}, status_code=403)
+
+    # 复用 login-json 的签发逻辑(带 tkv=token_version)
+    token = create_access_token(
+        user.id,
+        extra={"username": user.username, "role": user.role, "name": user.display_name},
+        token_version=user.token_version,
+    )
+    user_out = UserOut.model_validate(user)
+    log_operation(
+        db, user_id=user.id, username=user.username, method="GET", path="/api/v1/auth/sso",
+        action="认证.SSO登录", target_type="auth", status_code=200, ip=_client_ip(request),
+    )
+
+    # 引导页：写 localStorage(与前端 stores/auth.js login 约定一致)，然后跳转。
+    # user 存为 JSON 字符串(前端 JSON.parse(localStorage.getItem('user')))。
+    user_json = json.dumps(user_out.model_dump(mode="json"), ensure_ascii=False)
+    bootstrap = (
+        "<!doctype html><meta charset=utf-8>\n"
+        "<script>\n"
+        f"localStorage.setItem('token', {json.dumps(token)});\n"
+        f"localStorage.setItem('user', {json.dumps(user_json)});\n"
+        f"location.replace({json.dumps(safe_next)});\n"
+        "</script>"
+    )
+    return HTMLResponse(bootstrap, headers={"Cache-Control": "no-store"})
 
 
 @router.get(
