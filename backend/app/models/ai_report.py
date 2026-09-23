@@ -92,7 +92,8 @@ class AiReport(IDMixin, TimestampMixin, Base):
         comment="窗口判定来源: explicit_range/explicit_date/nl/nl_llm/period/rule",
     )
     window_label: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, comment="窗口说明(如 2026-09-15(今天))",
+        String(255), nullable=True,
+        comment="窗口说明; 滚动预生成含模板码+中文区间+两日期, 故 255(原 64 会超长)",
     )
     answer_md: Mapped[str] = mapped_column(Text, nullable=False, comment="LLM 返回的 markdown 报告")
     llm_model: Mapped[str | None] = mapped_column(
