@@ -1,7 +1,7 @@
 # A-20260901-001-complaint-trend-merge-regression-test
 
-**状态**：LOCKED（v1.0）
-**日期**：2026-09-01
+**状态**：LOCKED（v1.1）
+**日期**：2026-09-01（v1.1 于 2026-09-24 增补）
 **架构师阶段产出**：Architect 架构师 Agent
 **审查结论**：<待人工终审>
 

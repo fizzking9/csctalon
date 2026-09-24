@@ -63,3 +63,34 @@ def test_merge_trend_suppl_only_new_day():
     suppl_rows = [_build_suppl("2026-09-03", 7, 0)]
     result = _merge_trend(trend_rows, suppl_rows)
     assert result == [{"day": "2026-09-03", "count": 7}]
+
+
+# ── 2026-09-24 加固: 首参形状容错(消除"输入输出不对称"复发面) ──────────────
+
+
+def test_merge_trend_accepts_dict_rows():
+    """加固: 首参同时接受 {day,count} 字典列表(本函数自身 / _trend() 的输出形状)。
+
+    加固前: 传入字典列表会被 `for d, c in ...` 解包成键名 → int('count') 崩溃。
+    """
+    trend_rows = [{"day": "2026-09-01", "count": 8}]  # 字典形态(非元组)
+    suppl_rows = [_build_suppl("2026-09-01", 10, 3)]
+    assert _merge_trend(trend_rows, suppl_rows) == [{"day": "2026-09-01", "count": 15}]
+
+
+def test_merge_trend_tolerates_nested_call():
+    """加固: 旧的事故写法(嵌套调用)现在不再崩溃, 且结果与拆分写法完全一致。
+
+    2026-09-01 事故形态 `_merge_trend(_merge_trend(a, b), c)`: 内层返回的
+    {day,count} 字典列表被外层当元组解包 → c='count' → ValueError → 生产 500。
+    双重保险: ① 生产调用已改为「补充表相加后一次合并」; ② 即便再次写成嵌套也不崩。
+    """
+    external_trend = [("2026-09-01", 8)]
+    external_suppl_trend = [_build_suppl("2026-09-01", 10, 3)]
+    card_suppl_trend = [_build_suppl("2026-09-01", 4, 2)]
+    nested = _merge_trend(
+        _merge_trend(external_trend, external_suppl_trend), card_suppl_trend
+    )
+    split = _merge_trend(external_trend, external_suppl_trend + card_suppl_trend)
+    # 8 + (10-3) + (4-2) = 17, 两种写法必须等价
+    assert nested == split == [{"day": "2026-09-01", "count": 17}]

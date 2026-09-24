@@ -1,5 +1,6 @@
 """投诉域共享辅助函数与常量: 时间窗口/三源登记处理口径/主体归一/积压完成集/趋势聚合(零路由依赖)。"""
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import Integer, and_, func, or_, select
@@ -69,14 +70,31 @@ def _trend(rows, key="day"):
 def _merge_trend(trend_rows, suppl_rows):
     """把补充表(workbuddy推送)趋势并入工单趋势, 逐日去重.
 
-    - trend_rows : 工单按日计数 [(day, count)], 与 _trend 输入一致
+    - trend_rows : 工单按日计数。**同时接受两种形状**(2026-09-24 加固):
+        · [(day, count)]         —— DB Row / 元组列表(原契约, 各调用点现用)
+        · [{"day":d,"count":c}]  —— 本函数自身返回值 / `_trend()` 的输出
     - suppl_rows : _suppl_trend_rows 输出 [{day, total, overlap}]
     合并口径: 工单计数 + 补充表当日( total - overlap )
     (overlap = 已关联到本范围内工单的补充记录, 工单侧已计入, 去重不计)。
     返回 [{day, count}], 与 _trend 输出结构一致, 保证 逐日累加 == 总数口径。
+
+    ⚠️ 为何容错字典: 本函数「吃元组、吐字典」形状不对称, 旧代码曾写成嵌套调用
+      `_merge_trend(_merge_trend(a, b), c)` —— 内层返回的 {day,count} 字典被外层
+      当元组解包, `for d, c in ...` 拿到的是字典的**键名** ('day'/'count'),
+      随后 int('count') 抛 ValueError → 2026-09-01 生产 500。
+      容错后即便再次误嵌套也不会崩溃, 且结果仍正确(双重保险: 单测锁定旧嵌套形态)。
+      回溯: docs/arch/A-20260901-001-complaint-trend-merge-regression-test.md
     """
     merged: dict[str, int] = {}
-    for d, c in trend_rows:
+
+    def _day_count(row):
+        """归一化一行 → (day, count); 兼容元组/Row 与 {day,count} 映射。"""
+        if isinstance(row, Mapping):
+            return row.get("day"), row.get("count")
+        return row[0], row[1]
+
+    for row in trend_rows:
+        d, c = _day_count(row)
         if d:
             merged[str(d)[:10]] = merged.get(str(d)[:10], 0) + int(c or 0)
     for r in suppl_rows:
