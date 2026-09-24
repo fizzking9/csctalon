@@ -60,29 +60,77 @@ class _FakeDB:
 
 
 def test_check_freshness_marks_stale_when_lag_exceeds_threshold():
-    """最新业务日落后 2 天(>阈值 1) → stale=True, 且 lag_days 准确。"""
+    """已过当天采集小时, 且最新业务日落后 2 天(>阈值 1) → stale=True, lag_days 准确。"""
     tz = _dt.timezone(_dt.timedelta(hours=8))
-    latest = _dt.datetime.now(tz) - _dt.timedelta(days=2)
-    rows = {r["source"]: r for r in check_freshness(_FakeDB(latest))}
+    now = _dt.datetime.now(tz).replace(hour=16, minute=5, second=0, microsecond=0)
+    latest = (now - _dt.timedelta(days=2)).replace(hour=23, minute=0)
+    rows = {r["source"]: r for r in check_freshness(_FakeDB(latest), now=now)}
     e = rows["refund_record_report"]
     assert e["lag_days"] == 2
     assert e["stale"] is True
 
 
 def test_check_freshness_fresh_when_lag_within_threshold():
-    """最新业务日=昨天 23:00(阈值 1 天) → 未超期(stale=False)。"""
+    """已过采集小时, 最新业务日=昨天 → 未超期(stale=False)。"""
     tz = _dt.timezone(_dt.timedelta(hours=8))
-    yesterday = (_dt.datetime.now(tz) - _dt.timedelta(days=1)).replace(hour=23, minute=0)
-    rows = {r["source"]: r for r in check_freshness(_FakeDB(yesterday))}
-    assert rows["refund_record_report"]["lag_days"] == 1
-    assert rows["refund_record_report"]["stale"] is False
+    now = _dt.datetime.now(tz).replace(hour=16, minute=5, second=0, microsecond=0)
+    latest = (now - _dt.timedelta(days=1)).replace(hour=23, minute=0)
+    rows = {r["source"]: r for r in check_freshness(_FakeDB(latest), now=now)}
+    e = rows["refund_record_report"]
+    assert e["lag_days"] == 1 and e["stale"] is False
+
+
+def test_check_freshness_no_morning_false_positive():
+    """#191 修正核心: 当天采集小时(E 路 15:00)未到 → 基准日=昨天, 不因 T+1 上游误报。
+
+    真实时间线: D 日 15:05 采集到 D-1(上游 T+1) → D+1 06:05 时最新仍是 D-1,
+    而今天的 15:00 档还没到。用"今天(D+1)"为基准会算成落后 2 天 → 每个上午误报一次;
+    改用基准日(D)后为 1 天 → 不报。
+    """
+    tz = _dt.timezone(_dt.timedelta(hours=8))
+    now = _dt.datetime.now(tz).replace(hour=6, minute=5, second=0, microsecond=0)
+    latest = (now - _dt.timedelta(days=2)).replace(hour=23, minute=0)   # = D-1
+    rows = {r["source"]: r for r in check_freshness(_FakeDB(latest), now=now)}
+    e = rows["refund_record_report"]
+    assert e["pending_today"] is True
+    assert e["baseline"] == (now.date() - _dt.timedelta(days=1)).isoformat()
+    assert e["lag_days"] == 1 and e["stale"] is False
+
+
+def test_check_freshness_after_hour_catches_missed_run():
+    """当天采集小时已过且没采到 → 报超期(修完误报后仍能抓住真漏采)。"""
+    tz = _dt.timezone(_dt.timedelta(hours=8))
+    now = _dt.datetime.now(tz).replace(hour=16, minute=5, second=0, microsecond=0)
+    latest = (now - _dt.timedelta(days=2)).replace(hour=23, minute=0)   # 今日档失败 → 仍停在 D-2
+    rows = {r["source"]: r for r in check_freshness(_FakeDB(latest), now=now)}
+    e = rows["refund_record_report"]
+    assert e["pending_today"] is False
+    assert e["lag_days"] == 2 and e["stale"] is True
 
 
 def test_check_freshness_no_data_is_stale_but_not_misreported():
     """完全无数据(max=None) → stale=True(确属断更)且 lag_days=None(不臆造天数)。"""
-    rows = {r["source"]: r for r in check_freshness(_FakeDB(None))}
+    tz = _dt.timezone(_dt.timedelta(hours=8))
+    now = _dt.datetime.now(tz).replace(hour=16, minute=5, second=0, microsecond=0)
+    rows = {r["source"]: r for r in check_freshness(_FakeDB(None), now=now)}
     assert rows["refund_record_report"]["lag_days"] is None
     assert rows["refund_record_report"]["stale"] is True
+
+
+def test_freshness_expected_hour_matches_seed_config():
+    """漂移守卫: 巡检目标的 expected_by_hour 必须与该源种子配置的 low_freq_hour 一致。
+
+    两者分处两个模块(监控口径 vs 采集档位), 不一致会导致"采集窗口"与"判定基准"错位
+    ——要么漏采不报, 要么照旧误报。
+    """
+    from app.services.bms_fetcher._fetch import BMS_DATA_SOURCES
+
+    for t in FRESHNESS_TARGETS:
+        seed_hour = (BMS_DATA_SOURCES.get(t["source"], {}).get("options") or {}).get("low_freq_hour")
+        assert seed_hour == t["expected_by_hour"], (
+            f"{t['source']}: 巡检 expected_by_hour={t['expected_by_hour']} "
+            f"≠ 采集种子 low_freq_hour={seed_hour}"
+        )
 
 
 # ── list_low_freq_schedules(源级档位参数) ───────────────────────────────

@@ -27,16 +27,21 @@ logger = logging.getLogger(__name__)
 
 _TZ_CN = _dt.timezone(_dt.timedelta(hours=8))
 
-# ── 巡检目标: (source, 显示名, 业务时间列(ORM 属性), 允许落后天数, 说明) ──
-#   max_lag_days 判据 = 今天(北京) - 最新业务日 的天数; 超过即告警。
-#   E 路上游为 T+1(次日白天才发布), 故阈值取 1: 落后 >1 天即说明采集断了。
+# ── 巡检目标: (source, 显示名, 业务时间列(ORM 属性), 允许落后天数, 采集应完成小时, 说明) ──
+#   max_lag_days 判据 = 基准日 - 最新业务日 的天数; 超过即告警。
+#   expected_by_hour(#191 修正): 该源**当天应完成采集的小时**(与 options.low_freq_hour 一致)。
+#     判定基准日随它变化: 当天尚未到该小时 → 基准日=昨天(今天的采集还没到, 不该判超期);
+#     已过该小时 → 基准日=今天(该跑的没跑 → 超期)。0 = 随时可判。
+#     ⚠️ 不加这条会**每天早晨误报**: E 路上游 T+1, 正常在 D 日 15:00 采到 D-1; 若在 D+1 06:05
+#     用"今天"为基准, 最新 D-1 会被算成落后 2 天 → 每个上午都告警一次(stale 噪音)。
 FRESHNESS_TARGETS: tuple[dict, ...] = (
     {
         "source": "refund_record_report",
         "name": "退款记录报表(E 路对账基准)",
         "time_attr": RefundRecordReport.refund_time,
         "max_lag_days": 1,
-        "note": "上游 T+1(次日白天发布); 落后>1天=采集链路失效",
+        "expected_by_hour": 15,   # 与 bms_fetcher.BMS_DATA_SOURCES[...]["options"]["low_freq_hour"] 一致
+        "note": "上游 T+1(次日白天发布); 当天 15:00 档后仍落后>1天=采集链路失效",
     },
 )
 
@@ -93,17 +98,25 @@ def notify_empty_result(*, data_type: str, name: str, trigger_type: str) -> bool
     )
 
 
-def check_freshness(db: Session | None = None) -> list[dict]:
-    """数据时效巡检: 返回每个目标的 {source, latest, lag_days, max_lag_days, stale}。
+def check_freshness(db: Session | None = None, *, now: _dt.datetime | None = None) -> list[dict]:
+    """数据时效巡检: 返回每个目标的 {source, latest, baseline, lag_days, max_lag_days, stale}。
 
-    只做"最新业务时间 vs 今天(北京)"的距离计算; 取数失败的目标记 stale=None(不误报)。
+    判定用"基准日"(#191 修正): 当天尚未到该源的 `expected_by_hour` → 基准日=昨天
+    (今天的采集窗口还没到, 不能判超期); 已到/未配置小时 → 基准日=今天。
+    只做"基准日 vs 最新业务日"的距离计算; 取数失败的目标记 stale=None(不误报)。
+    now 参数供单测注入固定时刻。
     """
     own = db is None
     db = db or SessionLocal()
     out: list[dict] = []
     try:
-        today = _today_cn()
+        now_cn = now.astimezone(_TZ_CN) if now is not None else _dt.datetime.now(_TZ_CN)
+        today = now_cn.date()
         for t in FRESHNESS_TARGETS:
+            # 基准日: 未到"当天应采集小时"→ 用昨天(否则上游 T+1 会每天上午误报)
+            by_hour = int(t.get("expected_by_hour") or 0)
+            pending_today = by_hour > 0 and now_cn.hour < by_hour
+            baseline = today - _dt.timedelta(days=1) if pending_today else today
             try:
                 latest = db.execute(select(func.max(t["time_attr"]))).scalar()
             except Exception as e:  # noqa: BLE001  查询失败不误报
@@ -117,10 +130,13 @@ def check_freshness(db: Session | None = None) -> list[dict]:
                 if latest.tzinfo is None:
                     latest = latest.replace(tzinfo=_dt.timezone.utc)
                 latest_day = latest.astimezone(_TZ_CN).date()
-                lag = (today - latest_day).days
+                lag = (baseline - latest_day).days
             out.append({
                 "source": t["source"], "name": t["name"],
                 "latest": latest_day.isoformat() if latest_day else None,
+                "baseline": baseline.isoformat(),
+                "pending_today": pending_today,
+                "expected_by_hour": by_hour,
                 "lag_days": lag, "max_lag_days": t["max_lag_days"],
                 "note": t.get("note"),
                 "stale": (lag is None) or (lag > t["max_lag_days"]),
