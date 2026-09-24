@@ -17,8 +17,15 @@ tests/
 !scripts/tencent_doc_login.py
 !scripts/kdocs_login.py
 # 例外: 工单到期核验脚本 + 其运行守卫(#193 交付)。
-#   核验必须在**生产容器内**跑(要连生产库、要 import app), 故随镜像发布;
-#   脚本只读(SELECT), 不含任何凭证, 仍走 scripts/_bootstrap 的模式↔库名校验。
+#   ⚠️ 仅对**直接 docker build** 生效。生产走 upgrade.sh/package.sh 时, 它们有各自的
+#      发布白名单(只放行两个登录脚本, 见 upgrade.sh L121-123), 会把 backend/scripts/* 全删,
+#      故生产需按下方配方先把两个文件 docker cp 进容器:
+#         scp backend/scripts/{check_ai_issue_gates,_bootstrap}.py <host>:/tmp/
+#         ssh <host> "docker cp /tmp/check_ai_issue_gates.py csctalon-backend:/app/scripts/ &&
+#                     docker cp /tmp/_bootstrap.py  csctalon-backend:/app/scripts/"
+#         ssh <host> "docker exec -w /app -e PYTHONPATH=/app csctalon-backend \
+#                     python /app/scripts/check_ai_issue_gates.py --issue 191 --allow-real-db"
+#       (两处白名单若口径不一致会漂移 —— 如需常态化, 应把配方收敛到只留一处)
 !scripts/check_ai_issue_gates.py
 !scripts/_bootstrap.py
 
