@@ -119,6 +119,39 @@ def test_partial_missing_below_ratio_is_usable():
     assert unusable is False
 
 
+def test_asked_dim_missing_is_unusable_even_below_ratio():
+    """问到的维度缺失就必须拦(问什么就必须有什么), 即使缺失占比不足 50%。
+
+    复刻生产实况: ai_reports#609 只把「四路」写成"暂无"(缺失 1/4 = 25% < 50%),
+    但用户问的正是"四路分布和涉诉怎么样" → 该快照不可用来回答, 必须拦下。
+    """
+    md = ("**四路分布**：A/B/C/D 四路金额与笔数暂无（给定数据未提供四路明细）\n"
+          "**涉诉情况**：A 路涉诉率 73.2%（涉诉金额 7140.60 元），环比 -10.7pct\n"
+          "**退款原因**：充值错误 35 笔 / 3442.00 元\n"
+          "**挽回**：挽回成功率 40.08%（成功 103 / 总 257 SN）\n")
+    dims = ["四路", "涉诉", "退款原因", "挽回"]
+    q = "今日退款情况如何？四路分布和涉诉怎么样？"
+    unusable, missing = _snapshot_unusable(None, _report(md), _tmpl(dims), question=q)
+    assert missing == ["四路"]
+    assert len(missing) / len(dims) < _BLOCK_MISSING_RATIO   # 占比不足 50%
+    assert unusable is True                                  # 但被问到了 → 仍拦
+
+
+def test_asked_dims_empty_when_question_generic():
+    """泛问(未问到任何维度) → 不触发"问到缺失"规则, 只按占比/字数判(防周月报塌方)。"""
+    md = ("**接待**：本月接待 98,944 次, 服务设备 41,203 台, 环比 +12.2%\n"
+          "**退款**：四路合计 630,737.15 元 / 5,336 笔, 环比 -8.2%\n"
+          "**四路**：A 线上直退 2,741 笔 / 329,211.77 元；B 钱包提现 1,297 笔 / 177,402.50 元\n"
+          "**涉诉**：A 路涉诉率 84.6%(涉诉金额 284,518.27 元), 环比 +2.1pct\n"
+          "**挽回**：挽回成功率 40.08%(成功 103 / 总 257 SN), 环比 +0.4pct\n")
+    dims = ["接待", "退款", "四路", "涉诉", "挽回", "投诉", "趋势", "环比", "结论"]
+    assert len(md) > _EMPTY_SHELL_CHARS
+    unusable, missing = _snapshot_unusable(None, _report(md), _tmpl(dims, code="monthly_overview"),
+                                           question="本月情况")
+    assert len(missing) / len(dims) < _BLOCK_MISSING_RATIO
+    assert unusable is False
+
+
 # ── 端到端: 命中链路不再返回空壳 ─────────────────────────────────────────
 
 _CODE_PREFIX = "t192_"

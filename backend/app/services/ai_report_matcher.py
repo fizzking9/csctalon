@@ -38,20 +38,42 @@ _TZ_CN = _dt.timezone(_dt.timedelta(hours=8))
 # (`hit_mode='section'`, 74~88 字) 全文只有"**四路分布**：暂无/未提供 / **涉诉**：暂无",
 # 用户问"今日退款情况如何？四路分布和涉诉怎么样？"却拿到无信息回答, 且该"命中"还照常
 # 计入 matched_count, 掩盖真实命中质量。
-# 判据(两项任一命中即判"不可用"): ① 缺失维度占比 >= _BLOCK_MISSING_RATIO;
-#   ② 正文短于 _EMPTY_SHELL_CHARS 且有 required_dimensions(整体即空壳)。
-# ⚠️ 用"占比 + 字数"而非"全维度齐全": detail 体裁(周/月报)的 9 维度锚点结构本就不完全
-#    对齐校验器, 要求全齐全会把周/月报快照全部拦下 → 命中率塌方、每次问答走 30~50s 实时
-#    LLM, 体感更差(见 #192 关联里的依赖说明)。
+# 判据(三项任一命中即判"不可用"):
+#   ① 问句问到的维度缺失 —— "问什么就必须有什么"(如问"四路分布和涉诉怎么样",
+#      快照却把四路写成"暂无", 这份就不能用来回答该问句);
+#   ② 缺失维度占比 >= _BLOCK_MISSING_RATIO(整体性空壳);
+#   ③ 正文短于 _EMPTY_SHELL_CHARS 且有 required_dimensions(整体即空壳)。
+# ⚠️ 为何不直接要求"全维度齐全": detail 体裁(周/月报 9 维度)的锚点结构本就不完全对齐
+#    校验器, 要求全齐全会把周/月报快照全部拦下 → 命中率塌方、每次问答走 30~50s 实时
+#    LLM, 体感更差(见 #192 关联里的依赖说明)。故改用"问到的维度 + 占比"双判据。
 _BLOCK_MISSING_RATIO = 0.5
 _EMPTY_SHELL_CHARS = 150
 
 
+def _asked_dims(question: str, template: AiReportTemplate | None) -> list:
+    """问句明确问到的维度(该模板 required_dimensions 中关键词出现在问句里的条目)。
+
+    例: 问"今日退款情况如何？四路分布和涉诉怎么样？" + 维度[四路,涉诉,退款原因,挽回]
+        → [四路, 涉诉](只有这两个关键词在问句里)。
+    """
+    if template is None:
+        return []
+    q = (question or "").lower()
+    out: list = []
+    for entry in template.required_dimensions or []:
+        kws = entry if isinstance(entry, list) else [entry]
+        if any(str(k).lower() in q for k in kws if k):
+            out.append(entry)
+    return out
+
+
 def _snapshot_unusable(db: Session, report: AiReport,
-                       template: AiReportTemplate | None) -> tuple[bool, list]:
+                       template: AiReportTemplate | None,
+                       question: str | None = None) -> tuple[bool, list]:
     """快照是否"不可用"(空壳): 返回 (unusable, missing)。
 
     - 模板无 required_dimensions / 校验异常 → 可用(不拦, 保持改造前行为)
+    - 问句问到的维度有缺失 → 不可用(问什么就必须有什么)
     - 缺失占比 >= _BLOCK_MISSING_RATIO 或 正文 < _EMPTY_SHELL_CHARS → 不可用
     """
     if template is None:
@@ -65,9 +87,11 @@ def _snapshot_unusable(db: Session, report: AiReport,
     missing = ck.get("missing") or []
     if ck.get("complete"):
         return False, []
-    ratio = len(missing) / len(required)
     body = report.answer_md or ""
-    unusable = ratio >= _BLOCK_MISSING_RATIO or len(body) < _EMPTY_SHELL_CHARS
+    asked = _asked_dims(question, template) if question else []
+    asked_missing = [d for d in asked if d in missing]
+    ratio = len(missing) / len(required)
+    unusable = bool(asked_missing) or ratio >= _BLOCK_MISSING_RATIO or len(body) < _EMPTY_SHELL_CHARS
     return unusable, missing
 
 
@@ -303,7 +327,7 @@ def match_template_report(
             #   避免返回"**四路分布**：暂无/未提供"这类无信息回答; 全部不可用 → (None,None)
             #   交调用方走实时/深度重算(保留原有兜底, 不出现"无答案")。
             light = _light_report(row)
-            unusable, missing = _snapshot_unusable(db, light, tmpl)
+            unusable, missing = _snapshot_unusable(db, light, tmpl, question)
             if unusable:
                 _record_blocked(db, light.id, getattr(tmpl, "code", None), missing)
                 continue
@@ -356,7 +380,8 @@ def _wrap_row(db: Session, row: Any) -> AiReport:
 def list_candidates(db: Session, win_period: str | None,
                     win_date: str | None,
                     win_start: _dt.date | None = None,
-                    win_end: _dt.date | None = None) -> list[AiReport]:
+                    win_end: _dt.date | None = None,
+                    question: str | None = None) -> list[AiReport]:
     """#135 L2 语义匹配用: 取当日 is_public=True 报告列表(不 bump matched_count)。
 
     复用 match_template_report 的窗口对齐逻辑(#151): 区间窗口按报告内容窗口
@@ -402,7 +427,7 @@ def list_candidates(db: Session, win_period: str | None,
         # #192 候选也过同一道门槛: L2 语义匹配从候选里挑, 若把空壳快照留在候选里,
         #   语义最像的那份(往往正是缺数据的那份)会被选中 → 同样是"命中但无信息"。
         _tmpl = _get_template(db, light.template_id)
-        unusable, missing = _snapshot_unusable(db, light, _tmpl)
+        unusable, missing = _snapshot_unusable(db, light, _tmpl, question)
         if unusable:
             _record_blocked(db, light.id, getattr(_tmpl, "code", None), missing)
             continue

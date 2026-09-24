@@ -565,7 +565,7 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                 else:
                     # L1 未命中 → L2 27b 语义匹配
                     _cands = list_candidates(_match_db, eff["period"], _win_date,
-                                             eff["start"], eff["end"])
+                                             eff["start"], eff["end"], question=q)
                     _sem = await semantic_match(_match_db, q, _cands)
                     if _sem["hit_report"] is not None:
                         _hit2 = _sem["hit_report"]
