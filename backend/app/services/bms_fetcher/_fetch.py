@@ -115,6 +115,13 @@ BMS_DATA_SOURCES: dict[str, dict] = {
         "page_path": "/index.html#/settle/refund-record-report",
         "default_sync": False,
         "time_labels": ["退款开始时间", "退款结束时间"],
+        # ── #191 (2026-09-24): 低频档小时与窗口按源可配 ──────────────────────
+        # 实测(生产 bms_sync_logs + 数据入库日): 上游报表 T+1 且**次日白天才发布**,
+        # 而低频档固定 06:00 → 每天都能"成功但取 0 行"(数据靠人工手动触发才有,
+        # 09-23 的昨日数据在 09-23 13:50 才可采)。故本源:
+        #   low_freq_hour=15  → 挪到 15:00(上游发布后), 每天 1 次不变
+        #   window_days=3     → 窗口 近 3 天(而非"昨天整天"), 吸收 T+1/T+2 抖动与失败重试
+        "options": {"low_freq_hour": 15, "window_days": 3},
     },
     # 订单管理(支付管理>订单管理): 订单台账
     #   API item 确认: orderNo/sn/comboName/payablePrice/actualPayPrice/wxOrderNo/

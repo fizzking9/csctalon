@@ -530,6 +530,15 @@ async def sync_all(
                         }
                         _update_sync_log(inner_db, log.id, "success", None, None, import_stats)
                         logger.info(f"[{fr.data_type}] 查询结果为空(0 行), 按成功记录")
+                        # #191: "成功但 0 行"不再是静默成功 —— scheduled 档且属"应有数据"的源
+                        #   要写 system_events 告警, 否则像 E 路那样断更两天无人知晓(事故 #190)。
+                        try:
+                            from app.services.source_freshness_service import notify_empty_result
+
+                            notify_empty_result(data_type=fr.data_type, name=name,
+                                                trigger_type=trigger_type)
+                        except Exception as _ne:  # noqa: BLE001 告警失败不影响同步
+                            logger.warning(f"[{fr.data_type}] 空结果告警写入失败(忽略): {_ne}")
                         return {
                             "data_type": fr.data_type,
                             "name": name,

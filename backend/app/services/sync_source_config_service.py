@@ -430,6 +430,43 @@ def list_scheduled_bms_sources(db: Session) -> dict[str, list[str]]:
     return {"all": all_types, "high": high, "low": low}
 
 
+def list_low_freq_schedules(db: Session) -> dict[str, dict]:
+    """低频源的自定义档位参数(#191): {data_type: {"hour": int, "window_days": int}}。
+
+    背景(生产实测 #190/#191): 低频档固定 06:00 + 窗口"昨天整天", 对**上游 T+1 且次日
+    白天才发布**的源(退款记录报表 E 路)每天都会"成功但取 0 行" —— 表内数据全靠人工
+    手动触发。故把「档位小时」与「窗口天数」下沉为按源可配(options), 默认值保持原语义
+    (hour=settings.LOW_FREQ_HOUR, window_days=0=沿用档位窗口), 只有显式配置的源才改变行为。
+
+    options 键: `low_freq_hour`(0~23) / `window_days`(>0 时该源走「近 N 天 0 点~now」)。
+    无配置的源不返回(调用方按默认档位处理), 避免为未配置源臆造参数。
+    """
+    rows = db.scalars(
+        select(SyncSourceConfig).where(
+            SyncSourceConfig.default_sync.is_(True),
+            SyncSourceConfig.enabled.is_(True),
+            ~SyncSourceConfig.data_type.like("scrm_%"),
+        )
+    ).all()
+    from app.services.bms_sync import DEFAULT_SYNC_TYPES
+
+    out: dict[str, dict] = {}
+    for r in rows:
+        if r.data_type in set(DEFAULT_SYNC_TYPES):
+            continue  # 高频源不走低频档
+        opts = _resolve_effective_options(r.options, _seed_of(r.data_type) or {})
+        hour = opts.get("low_freq_hour")
+        days = opts.get("window_days")
+        item: dict = {}
+        if isinstance(hour, (int, float)) and 0 <= int(hour) <= 23:
+            item["hour"] = int(hour)
+        if isinstance(days, (int, float)) and int(days) > 0:
+            item["window_days"] = int(days)
+        if item:
+            out[r.data_type] = item
+    return out
+
+
 def get_schedule_tier_map(db: Session) -> dict[str, str]:
     """返回 data_type → schedule_tier("high" | "low" | "off") 映射(#97)。
 
