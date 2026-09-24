@@ -127,6 +127,19 @@ def _build_feed(db: Session, period: str, date: str | None,
     if isinstance(feed.get("reception"), dict):
         feed["reception"] = {**feed["reception"], "by_specialty": _compact_specialty(feed["reception"].get("by_specialty"))}
 
+    # #189 (2026-09-24): refund 段字段重排 —— 涉诉(a_route)与 E 对账基准(actual_cashflow_e)
+    #   原本在内层 dict 最末(_build_brief 的字典顺序), 一旦发生段内裁剪必被切掉;
+    #   生产实测日报"涉诉/E 对账基准"100% 写"暂无"即由此而来。提到段内前部,
+    #   使段内截断时也优先保住。仅调整 AI 侧投影顺序, 不改 external.py 对外契约。
+    if isinstance(feed.get("refund"), dict):
+        _rf = feed["refund"]
+        _ordered = {k: _rf[k] for k in ("total_amount", "total_count", "routes",
+                                        "actual_cashflow_e", "a_route", "routes_prev", "breakdown")
+                    if k in _rf}
+        for _k, _v in _rf.items():          # 未登记键按原顺序补在其后
+            _ordered.setdefault(_k, _v)
+        feed["refund"] = _ordered
+
     # ── #98 (2026-09-15) 双层注入: 日运营补今日看板, 其他窗口补日走势 ──
     win = _window(period, date, start=start, end=end)
     is_daily = (win["period"] == "daily")
@@ -637,14 +650,76 @@ def _compact_specialty(by_specialty) -> list[dict]:
     return out
 
 
-def _trim_feed(feed: dict) -> str:
-    """feed → JSON 文本, 并按 AI_ANALYZE_MAX_CHARS 裁剪(防 token 超限)。"""
-    raw = json.dumps(feed, ensure_ascii=False, default=str)
-    limit = max(1000, int(getattr(settings, "AI_ANALYZE_MAX_CHARS", 6000) or 6000))
-    if len(raw) <= limit:
-        return raw
-    # 截断并尽量保留 _spec(口径) — 截断到限长, 尾部标注省略
-    return raw[:limit] + "\n...[数据已按长度截断]"
+# ── #189 (2026-09-24) 段裁剪优先级 ────────────────────────────────────────
+# 原 _trim_feed 是"字符前缀截断"(`raw[:limit]`): ① 产出被腰斩的**非法 JSON**;
+# ② 业务段被排在恒量段之后 → 必被切掉。生产实测(3500 上限): 模板 1 完整 feed 6522
+#    字符, `refund` 段内 `a_route`(涉诉)/`actual_cashflow_e`(E 对账) 恒被切 → 日报
+#    "涉诉/E 对账基准"100% 写"暂无"; reception/complaint 整段随机丢失。
+# 现改为**按段取舍**: 整段保留或整段省略, 保证产出始终是合法 JSON; 省略的段名登记到
+# `_trimmed_out_sections`, 让模型区分"超预算未下发"与"系统无此数据"。
+# 数值越小越先保留; 0 = 必保(业务段 + 窗口元信息), 未登记段默认最低优先级。
+_SECTION_PRIORITY: dict[str, int] = {
+    # 业务段(必保): 四路/涉诉/E 在 refund 段内, 三源在 complaint 段内, AI 接管率/专项在 reception 段内
+    "refund": 0, "complaint": 0, "reception": 0,
+    # 窗口元信息(必保): 模型必须知道统计窗口(铁律 6 要求回答开头写明窗口)
+    "period": 0, "date": 0, "date_start": 0, "date_end": 0, "generated_at": 0, "range": 0,
+    # 次优先: 轻量投影/排行/待办(体积小, 语义独立)
+    "complaint_breakdown": 1, "staff_top5": 1, "queue": 1,
+    # 口径卡: 体积大(939 字符)且与 glossary 部分重复, 紧张时让位给业务段
+    "_spec": 2,
+    # 时间序列与挽回明细: 对简报类最不关键
+    "hourly_trend": 3, "refund_recovery": 3,
+    # 跨日走势(月报/滚动窗口约 4~5k 字符): 体积最大, 最可让位
+    "daily_trend": 4,
+}
+# 未登记段优先级(如后续新增段): 最低, 预算允许时才下发
+_UNLISTED_PRIORITY = 5
+# 被省略段登记键(随 feed 一起下发, 供模型区分"省略"与"无数据")
+_TRIM_MARKER_KEY = "_trimmed_out_sections"
+# 登记键自身占用的预算预留(字符): 约 80(键名 + 若干个段名)
+_TRIM_MARKER_RESERVE = 120
+
+
+def _feed_char_limit(limit: int | None = None) -> int:
+    """feed 字符预算: 显式入参优先, 否则取 settings.AI_ANALYZE_MAX_CHARS。"""
+    if limit is not None:
+        return max(1000, int(limit))
+    return max(1000, int(getattr(settings, "AI_ANALYZE_MAX_CHARS", 6000) or 6000))
+
+
+def _plan_feed_sections(feed: dict, limit: int) -> tuple[dict, list[str]]:
+    """按段优先级 + 预算决定保留哪些顶层段, 返回 (保留段, 被省略段名列表)。
+
+    - 优先级 0(业务段/窗口元信息)**无条件保留**(数据完整性优先于字符上限);
+    - 其余段按优先级顺序尝试加入, 装不下则整段省略并登记(不做段内切字符)。
+    - 同优先级内保持 feed 的原始插入顺序(sorted 稳定排序)。
+    """
+    if not isinstance(feed, dict):
+        return {}, []
+    kept: dict = {}
+    dropped: list[str] = []
+    for k, v in sorted(feed.items(), key=lambda kv: _SECTION_PRIORITY.get(kv[0], _UNLISTED_PRIORITY)):
+        if _SECTION_PRIORITY.get(k, _UNLISTED_PRIORITY) == 0:
+            kept[k] = v  # 必保段: 不参与预算裁减
+            continue
+        cand = {**kept, k: v}
+        if len(json.dumps(cand, ensure_ascii=False, default=str)) + _TRIM_MARKER_RESERVE <= limit:
+            kept[k] = v
+        else:
+            dropped.append(k)
+    return kept, dropped
+
+
+def _dump_feed(kept: dict, dropped: list[str], limit: int) -> str:
+    """保留段 + 省略登记 → JSON 文本(登记键仅在确有省略时加入)。"""
+    out = dict(kept)
+    if dropped:
+        out[_TRIM_MARKER_KEY] = dropped
+    text = json.dumps(out, ensure_ascii=False, default=str)
+    if len(text) > limit:
+        # 必保段自身已超预算(业务段完整性优先, 不裁数据) —— 记日志便于观察预算是否需上调
+        logger.warning("ai_feed feed 超出预算 %s 字符(必保业务段优先, 未裁剪): 实际 %s", limit, len(text))
+    return text
 
 
 # 恒量段: 不管问句命中哪个 scope 都始终保留, 供模型理解窗口与口径
@@ -656,7 +731,16 @@ _CONSTANT_FEED_KEYS = ("period", "date", "date_start", "date_end",
                        # #139: 投诉三源拆分投影, 让所有 scope 切片都保留(避免被切走)
                        "complaint_breakdown",
                        # #139: 周/月报路径补的 staff_top5 也作恒量段保留
-                       "staff_top5")
+                       "staff_top5",
+                       # #189: 今日待办/进行中专项/异常事件计数 —— 原先未登记在此, 也不是 scope 名,
+                       #   被 _select_feed_sections 永久丢弃(_enrich_with_today_kanban 白算一次 today_queue)
+                       "queue")
+
+# 业务段固定输出顺序(#189): 原实现用 `for s in scopes` 遍历 set, 段顺序随
+# PYTHONHASHSEED 变化 → 在"字符前缀截断"下同一问句在不同容器启动时被裁的段不同
+# (实测 seed=1/7/42 保 refund, seed=3/11 保 reception, seed=2 保 complaint)。
+# 改为固定顺序, 保证同输入同输出(可复现)。
+_BUSINESS_SECTION_ORDER = ("refund", "complaint", "reception")
 
 
 def _select_feed_sections(feed: dict, scopes) -> dict:
@@ -671,6 +755,10 @@ def _select_feed_sections(feed: dict, scopes) -> dict:
     ⚠️ 2026-09-15 修复: 原版只接受单 scope, 问句"今日经营总览：接待、退款、
     投诉一起说说。"同时命中三域但只取首个 → 另两段被切掉, AI 说"未提供"。
     现版接受 set/list, 把所有命中业务段都保留。
+
+    #189 (2026-09-24) 两项修正:
+      ① 业务段**前置**(恒量段后置): 原先恒量段在前, 一旦按长度裁剪, 业务段必先被切;
+      ② 段顺序**确定化**(固定 _BUSINESS_SECTION_ORDER), 不再依赖 set 迭代顺序。
     """
     if scopes is None:
         return feed
@@ -679,10 +767,16 @@ def _select_feed_sections(feed: dict, scopes) -> dict:
     scopes = set(scopes) - {None, ""}
     if not scopes or not isinstance(feed, dict):
         return feed
-    out = {k: feed[k] for k in _CONSTANT_FEED_KEYS if k in feed}
-    for s in scopes:
-        if s in feed:
+    # ① 业务段在前, 固定顺序(确定性)
+    out = {s: feed[s] for s in _BUSINESS_SECTION_ORDER if s in scopes and s in feed}
+    # 未登记的业务段(如后续新增 scope): 按字典序补在其后, 同样保证确定性
+    for s in sorted(x for x in scopes if x not in _BUSINESS_SECTION_ORDER):
+        if s in feed and s not in out:
             out[s] = feed[s]
+    # ② 恒量段(窗口/口径/投影)在后
+    for k in _CONSTANT_FEED_KEYS:
+        if k in feed and k not in out:
+            out[k] = feed[k]
     return out
 
 
@@ -690,7 +784,8 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
                    start: str | None = None, end: str | None = None,
                    window_label: str | None = None, window_source: str | None = None,
                    required_dimensions: list | None = None,
-                   scope: str | None = None, format: str | None = None) -> list[dict]:
+                   scope: str | None = None, format: str | None = None,
+                   feed_limit: int | None = None) -> list[dict]:
     """构造发给模型的 messages(三层 Prompt)。
 
     window_label/window_source(工单 #66): 上层(ai.py)把"窗口怎么定出来的"传下来,
@@ -706,6 +801,11 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
         让退款桶只喂 refund 段、投诉桶只喂 complaint 段 —— feed 聚焦不截断,
         根治"单一日报覆盖全维度→feed 超长截断→涉诉/专项答暂无"的错配。
       - format: 注入【体裁要求】, 简报(brief)结论导向不展开逐项, 明细(detail)逐维度展开。
+
+    feed_limit(工单 #189): feed 字符预算覆盖值(缺省走 settings.AI_ANALYZE_MAX_CHARS)。
+      预生成按窗口粒度放宽(见 ai_report_worker._FEED_LIMIT_BY_PERIOD: daily 7000 /
+      monthly 9500 等), 让业务段与月报 4.2k 的 daily_trend 能同时下发;
+      实时问答不传(保持 3500, 用户等 60s)。
     """
     feed = _build_feed(db, period, date, start=start, end=end)
     # #98 层2: 按问句 scope 切 feed 段(只留命中业务段+恒量段), 降输入 token。
@@ -718,7 +818,17 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
     if scope and scope != "overview":
         scopes = scopes | {scope}
     feed = _select_feed_sections(feed, scopes)
-    feed_json = _trim_feed(feed)
+    # #189: 口径卡按 scope 过滤 —— `lead`(专项负责人 vs 行政组长, ~380 字符)只在接待域
+    #   需要(glossary 仍会按问句路由注入); 未命中接待域时从 _spec 去掉, 把预算让给业务段。
+    #   scopes 为空集 = 回退全量 feed(含接待段) → 保留 lead。
+    if isinstance(feed.get("_spec"), dict) and scopes and "reception" not in scopes:
+        feed["_spec"] = {k: v for k, v in feed["_spec"].items() if k != "lead"}
+    # #189: 按段预算裁剪(整段取舍, 合法 JSON), 并取回被省略段名用于提示模型
+    _limit = _feed_char_limit(feed_limit)
+    _kept_feed, _dropped_sections = _plan_feed_sections(feed, _limit)
+    feed_json = _dump_feed(_kept_feed, _dropped_sections, _limit)
+    # 窗口字段(必保段, 一定在 _kept_feed 内)
+    feed = _kept_feed
     # 口径卡: 按问句路由选子集; 未命中全量
     glossary = glossary_for_question(question)
     # 窗口说明: 优先用上层给的 label(含自然语言来源); 否则退回区间/period 描述
@@ -735,6 +845,17 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
         f" {win_label}; date_start={feed.get('date_start')}; date_end={feed.get('date_end')}; " +
         f" generated_at={feed.get('generated_at')}"
     )
+    # #189 超预算省略说明: 让模型区分"本次未随数据下发"与"系统无此数据"。
+    #   旧实现是字符前缀截断且无任何说明, 模型只能按铁律 1 写"暂无/未提供" →
+    #   报告通篇"数据未提供", 用户误判为系统取不到数(实际是被裁掉)。
+    if _dropped_sections:
+        business_ctx += (
+            "\n\n【数据省略说明】本次给定数据中, 段 "
+            + "、".join(_dropped_sections)
+            + " 因长度预算被省略(数据在系统中存在, 只是未随本次下发); "
+            "涉及这些段的内容必须写明\"本次未随数据下发(超预算)\", "
+            "禁止写成\"系统无此数据/数据未提供\"; 未列出的段均已完整提供, 不得称其缺失。"
+        )
     # #181 体裁要求: 模板声明 format 时注入(简报结论导向, 明细逐维度展开)。
     # 与 _SYSTEM_PROMPT 第 3 条「前台 ≤500 字/后台预生成可详尽」互补: 该条按调用方
     # 区分密度, 本条按模板体裁统一约束(专项桶简报即使后台预生成也保持精简)。

@@ -60,6 +60,27 @@ _STARTUP_MIN_INTERVAL_MIN = 20
 # 进程级单飞锁(防并发: 同步完成 + 启动 + 空闲期可能同时触发)
 _worker_lock = threading.Lock()
 
+# ── #189 (2026-09-24) feed 字符预算分级 ────────────────────────────────────
+# 原实现所有路径共用 settings.AI_ANALYZE_MAX_CHARS(=3500), 导致预生成 feed 被按字符
+# 前缀截断, 业务段(四路/涉诉/三源/E 对账)必被切掉(生产实测: 模板 1 完整 6522 字符,
+# 模板 10 完整 10344 字符, 都只下发 3514)。
+# 现按「实测全量 + 余量」设定, 使当前数据量下**无任何段被省略**(数据增长后由
+# ai_feed._plan_feed_sections 的优先级裁剪兜底, 业务段恒必保):
+#   daily      : 实测 6.6k(接待+退款+投诉+口径+时间序列) → 7000
+#   weekly     : 实测 5.4k                                → 6500
+#   rolling_7d : 实测 6.1k                                → 6500
+#   monthly    : 实测 9.1k(其中 daily_trend 4.2k)         → 9500
+#   rolling_30d: 实测 10.3k(其中 daily_trend 5.4k)        → 10500
+# 实时问答不传该值(保持 AI_ANALYZE_MAX_CHARS=3500: 用户在前端等 60s, 输入越长 prefill 越慢)。
+# 推理侧上下文已确认充足: ollama OLLAMA_CONTEXT_LENGTH=65536, 10k 字符 prompt 无压力。
+_FEED_LIMIT_BY_PERIOD = {
+    "daily": 7000,
+    "weekly": 6500,
+    "monthly": 9500,
+    "rolling_7d": 6500,
+    "rolling_30d": 10500,
+}
+
 
 def _now_cn() -> _dt.datetime:
     """当前北京时间(AGENTS.md 铁律: 时区换算)。"""
@@ -245,6 +266,8 @@ def generate_for_template(db: Session, template: AiReportTemplate,
             # #181 专项分桶: 模板 scope/format 显式传入 → feed 按专项切片 + 体裁要求
             scope=template.scope,
             format=template.format,
+            # #189 feed 预算按窗口粒度放宽(模板 period; 月/周报需容下 daily_trend 与业务段)
+            feed_limit=_FEED_LIMIT_BY_PERIOD.get(template.period),
         )
     except Exception as e:  # noqa: BLE001  build_messages 失败不阻塞 worker
         logger.error("ai_report_worker build_messages failed (template=%s): %s", template.code, e)
