@@ -16,6 +16,11 @@ tests/
 # 例外: 共享文档扫码登录脚本(运维工具, 生产环境需 headless 扫码更新登录态, #148)
 !scripts/tencent_doc_login.py
 !scripts/kdocs_login.py
+# 例外: 工单到期核验脚本 + 其运行守卫(#193 交付)。
+#   核验必须在**生产容器内**跑(要连生产库、要 import app), 故随镜像发布;
+#   脚本只读(SELECT), 不含任何凭证, 仍走 scripts/_bootstrap 的模式↔库名校验。
+!scripts/check_ai_issue_gates.py
+!scripts/_bootstrap.py
 
 # 上传文件(运行时挂载)
 uploads/*
