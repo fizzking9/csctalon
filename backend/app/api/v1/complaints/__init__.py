@@ -59,7 +59,6 @@ from app.api.v1.complaints._helpers import (
     _suppl_event_metrics,
     _suppl_trend_rows,
     _to_sh_iso,
-    _trend,
 )
 from app.api.v1.complaints._misc import complaint_dedup_review, complaint_sn_backfill
 from app.api.v1.complaints._overview import complaint_overview
@@ -115,7 +114,6 @@ __all__ = [
     '_suppl_event_metrics',
     '_suppl_trend_rows',
     '_to_sh_iso',
-    '_trend',
     'complaint_analysis',
     'complaint_backlog',
     'complaint_backlog_export',

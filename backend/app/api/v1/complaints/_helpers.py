@@ -64,19 +64,16 @@ def _parse_dt_end(s: str | None) -> datetime | None:
             return None
     return _parse_dt(s)
 
-def _trend(rows, key="day"):
-    return [{"day": str(r[0]), "count": int(r[1] or 0)} for r in rows]
-
 def _merge_trend(trend_rows, suppl_rows):
     """把补充表(workbuddy推送)趋势并入工单趋势, 逐日去重.
 
     - trend_rows : 工单按日计数。**同时接受两种形状**(2026-09-24 加固):
         · [(day, count)]         —— DB Row / 元组列表(原契约, 各调用点现用)
-        · [{"day":d,"count":c}]  —— 本函数自身返回值 / `_trend()` 的输出
+        · [{"day":d,"count":c}]  —— 本函数自身返回值(与 /summary 各 source 的 trend 同形)
     - suppl_rows : _suppl_trend_rows 输出 [{day, total, overlap}]
     合并口径: 工单计数 + 补充表当日( total - overlap )
     (overlap = 已关联到本范围内工单的补充记录, 工单侧已计入, 去重不计)。
-    返回 [{day, count}], 与 _trend 输出结构一致, 保证 逐日累加 == 总数口径。
+    返回 [{day, count}], 与 /summary 各 source 的 trend 同形, 保证 逐日累加 == 总数口径。
 
     ⚠️ 为何容错字典: 本函数「吃元组、吐字典」形状不对称, 旧代码曾写成嵌套调用
       `_merge_trend(_merge_trend(a, b), c)` —— 内层返回的 {day,count} 字典被外层

@@ -11,6 +11,7 @@ from app.api.v1.complaints._helpers import (
     _card_reg_handled,
     _external_done_sns,
     _handler_fallback_cols,
+    _merge_trend,
     _norm_handler,
     _parse_dt,
     _parse_dt_end,
@@ -193,7 +194,8 @@ def complaint_analysis(
     # ★★ (#53) 卡商**不再并入外部趋势** ★★
     #   用户: "卡商的投诉 不纳入总量的管理, 整体独立统计分析…全部单算"。
     #   原 `for r in _card_suppl_trend: b["外部投诉"] += net` 会把卡商并回外部 —— 已撤销。
-    #   卡商趋势独立返回, 见 `card.trend`(= `_card_suppl_trend`)。
+    #   卡商趋势独立返回, 见 `card.trend`(2026-09-24 起为 {day,count} 净增序列,
+    #   由 `_merge_trend([], _card_suppl_trend)` 生成; 不再透出原始 {day,total,overlap})。
     for r in _ext_suppl_trend:
         net = int(r["total"] or 0) - int(r["overlap"] or 0)
         if net:
@@ -556,7 +558,13 @@ def complaint_analysis(
                 "total": int(card_total),
                 "registered": _card_reg["registered"],
                 "handled": _card_reg["handled"],
-                "trend": _card_suppl_trend,
+                # 2026-09-24: 元素形状统一为 {day, count}(与 /summary 的 card.trend 同形)。
+                #   原直接透出 `_suppl_trend_rows` 的 {day, total, overlap} —— 同名字段
+                #   两处元素键不同, 消费端按 count 取会静默拿到 None。
+                #   ⚠️ 语义差异(非 bug, 已核实): 本接口的 count = **补充表净增**(total-overlap,
+                #     不含工单侧); /summary 的 card.trend = **工单侧卡商 + 补充表净增**(#65)。
+                #     两者口径不同源于各页自身定位, 若需统一口径须另立工单(涉及产品决策)。
+                "trend": _merge_trend([], _card_suppl_trend),
                 # ★★ (#55) 事件口径: 多渠道(非重复) vs 真重复(同渠道) ★★
                 #   前端只读展示, 不改变 total/registered(原始行数口径保持兼容)。
                 "events": _card_events["events"],
