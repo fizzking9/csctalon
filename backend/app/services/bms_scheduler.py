@@ -135,6 +135,32 @@ def current_slot(now_hour: int, now_minute: int, interval_minutes: int,
     return None
 
 
+def low_freq_done_from_logs(rows, sched_map: dict, *, today_key: str, today_cn,
+                            default_hour: int, tz_cn) -> dict[str, bool]:
+    """#191 纯函数: 由"低频源自身的 scheduled 成功记录"推导已完成的小时档。
+
+    ⚠️ 为什么不用高频槽位(slots_done)回填: 低频小时可按源配置, 若落在高频时段内
+    (如 E 路 15:00 ∈ 8:00~24:00), 15:00 的高频槽位会让回填误判"低频档已跑"→ 当天漏采。
+    判据改为: (data_type ∈ 低频源集合) ∧ trigger_type='scheduled' ∧ status='success'
+             ∧ finished_at 落在今天 ∧ finished 小时 == 该源配置小时。
+
+    入参 rows: [(data_type, finished_at)]; sched_map: {data_type: {"hour": h, ...}}。
+    返回 {"<today_key>:<hour>": True}。
+    """
+    out: dict[str, bool] = {}
+    for dt_name, fin_at in rows:
+        if fin_at is None or dt_name is None:
+            continue
+        fin_cn = fin_at if fin_at.tzinfo else fin_at.replace(tzinfo=timezone.utc)
+        fin_cn = fin_cn.astimezone(tz_cn)
+        if fin_cn.date() != today_cn:
+            continue
+        hour = (sched_map.get(dt_name) or {}).get("hour", default_hour)
+        if fin_cn.hour == hour:
+            out[f"{today_key}:{hour}"] = True
+    return out
+
+
 def should_run_low_freq(
     now_hour: int,
     *,
@@ -438,8 +464,8 @@ class BmsScheduler:
             # 避免重启后重复跑低频档。
             self._low_freq_done = {}
             if LOW_FREQ_HOUR > 0:
-                # #191: 低频档小时按源可配(options.low_freq_hour) → 回填要逐源覆盖各自小时,
-                #   否则"06:00 已跑"会把当天 15:00 的档也误判为已执行(重启后不触发)。
+                # #191: 回填改看"低频源自身的 scheduled 成功记录"(见 low_freq_done_from_logs),
+                #   不再用高频槽位推断 —— 低频小时若落在高频时段内(E 路 15:00)会误判已跑导致漏采。
                 _bf_db = SessionLocal()
                 try:
                     from app.services.sync_source_config_service import (
@@ -449,15 +475,32 @@ class BmsScheduler:
 
                     _bf_low = list_scheduled_bms_sources(_bf_db).get("low") or []
                     _bf_sched = list_low_freq_schedules(_bf_db)
+                    _bf_rows = []
+                    if _bf_low:
+                        _bf_rows = _bf_db.execute(
+                            select(BmsSyncLog.data_type, BmsSyncLog.finished_at)
+                            .where(
+                                BmsSyncLog.trigger_type == "scheduled",
+                                BmsSyncLog.status == "success",
+                                BmsSyncLog.data_type.in_(_bf_low),
+                                BmsSyncLog.finished_at.isnot(None),
+                            )
+                            .order_by(desc(BmsSyncLog.finished_at))
+                            .limit(200)
+                        ).all()
+                    self._low_freq_done = low_freq_done_from_logs(
+                        _bf_rows, _bf_sched, today_key=today_key, today_cn=today_cn,
+                        default_hour=LOW_FREQ_HOUR, tz_cn=TZ_CN,
+                    )
+                    if self._low_freq_done:
+                        logger.info(
+                            f"[调度器] 低频档回填: 今日已执行的小时档={sorted(self._low_freq_done)},"
+                            f" 重启不重复触发"
+                        )
                 except Exception as _bfe:  # noqa: BLE001  回填失败不阻塞调度
                     logger.warning(f"[调度器] 低频档回填读库失败(忽略): {_bfe}")
-                    _bf_low, _bf_sched = [], {}
                 finally:
                     _bf_db.close()
-                for _h in sorted({_bf_sched.get(dt, {}).get("hour", LOW_FREQ_HOUR) for dt in _bf_low}):
-                    if any(s.startswith(f"{_h:02d}:") for s in slots_done):
-                        self._low_freq_done[f"{today_key}:{_h}"] = True
-                        logger.info(f"[调度器] 低频档回填: 今日 {_h}:00 已执行过, 重启不重复触发")
 
             # ── 回填专项熔断(最佳努力): 逐个 data_type 扫描失败记录 ──
             halted_dt: set[str] = set()

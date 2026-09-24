@@ -127,6 +127,46 @@ def test_list_low_freq_schedules_rejects_invalid_values(db):
     assert "return_tracking" not in list_low_freq_schedules(db)
 
 
+def test_low_freq_done_backfill_uses_low_source_logs_not_high_slots():
+    """#191 回填判据: 只看低频源自身的 scheduled 成功记录(高频槽位不算)。
+
+    反例(本用例要防的回归): E 路配 15:00, 而 15:00 也是高频槽位 —— 若按槽位回填,
+    重启后会把"当天 15:00 低频档"误判为已跑 → E 路整天漏采。
+    """
+    import datetime as _dt
+
+    from app.services.bms_scheduler import low_freq_done_from_logs
+
+    tz = _dt.timezone(_dt.timedelta(hours=8))
+    today = _dt.datetime.now(tz).date()
+    # 低频源在 15:00 成功过 → 记 done; 高频源(refund)不算; 昨天的记录不算
+    rows = [
+        ("refund_record_report", _dt.datetime.combine(today, _dt.time(15, 3, tzinfo=tz))),
+        ("refund", _dt.datetime.combine(today, _dt.time(15, 1, tzinfo=tz))),        # 高频源, 忽略
+        ("device_combo", _dt.datetime.combine(today, _dt.time(6, 5, tzinfo=tz))),   # 默认 6:00 档
+        ("refund_record_report", _dt.datetime.combine(
+            today - _dt.timedelta(days=1), _dt.time(15, 3, tzinfo=tz))),            # 昨天, 忽略
+    ]
+    sched = {"refund_record_report": {"hour": 15, "window_days": 3}}
+    got = low_freq_done_from_logs(rows, sched, today_key=today.isoformat(), today_cn=today,
+                                  default_hour=6, tz_cn=tz)
+    assert got == {f"{today.isoformat()}:15": True, f"{today.isoformat()}:6": True}
+
+
+def test_low_freq_done_backfill_ignores_failed_and_missing_time():
+    """失败记录 / finished_at 为空 → 不记 done(避免把没跑的档当已跑)。"""
+    import datetime as _dt
+
+    from app.services.bms_scheduler import low_freq_done_from_logs
+
+    tz = _dt.timezone(_dt.timedelta(hours=8))
+    today = _dt.datetime.now(tz).date()
+    got = low_freq_done_from_logs([("refund_record_report", None)], {"refund_record_report": {"hour": 15}},
+                                  today_key=today.isoformat(), today_cn=today,
+                                  default_hour=6, tz_cn=tz)
+    assert got == {}
+
+
 # ── AI 侧 E 时效口径(直击"E 对账基准：暂无"误报) ────────────────────────
 
 
