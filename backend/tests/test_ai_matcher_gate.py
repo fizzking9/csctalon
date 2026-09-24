@@ -226,6 +226,26 @@ def test_match_skips_shell_but_falls_through_to_complete_one(db, mk_snapshot):
     assert hit is not None and hit.id != shell.id
 
 
+def test_bump_hit_accounting_counts_l1_and_l2_same_way(db, mk_snapshot):
+    """#193 命中记账: L1/L2 走同一入口, 每次 +1(原先 L2 不记账 → matched_count 偏低 32%)。"""
+    from app.services.ai_report_matcher import bump_hit_accounting
+
+    _t, r = mk_snapshot(GOOD_MD)
+    assert (r.matched_count or 0) == 0
+    bump_hit_accounting(db, r.id)      # 模拟 L2 命中补记
+    bump_hit_accounting(db, r.id)
+    db.refresh(r)
+    assert (r.matched_count or 0) == 2
+
+
+def test_blocked_snapshot_not_counted(db, mk_snapshot):
+    """被 #192 门槛拦下的空壳不计入 matched_count(未交付给用户, 不该算命中)。"""
+    _t, r = mk_snapshot(EMPTY_SHELL)
+    match_template_report(db, "今日退款情况如何？四路分布和涉诉怎么样？", "daily", SNAP_DATE)
+    db.refresh(r)
+    assert (r.matched_count or 0) == 0
+
+
 def test_list_candidates_excludes_empty_shell(db, mk_snapshot):
     """L2 候选列表同样剔除空壳快照(否则语义最像的空壳会被选中)。"""
     from app.services.ai_report_matcher import list_candidates

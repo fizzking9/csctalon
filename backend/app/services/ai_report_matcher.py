@@ -371,8 +371,8 @@ def _wrap_row(db: Session, row: Any) -> AiReport:
                 setattr(r, k, v)
             except Exception:  # noqa: BLE001  跳过 ORM 不接受的字段
                 pass
-        # 命中后 matched_count +1
-        _bump_matched_count(db, r.id)
+        # 命中后 matched_count +1(统一走记账入口, 与 L2 一致, 见 bump_hit_accounting)
+        bump_hit_accounting(db, r.id)
         return r
     return row
 
@@ -440,6 +440,17 @@ def _get_template(db: Session, template_id: int | None) -> AiReportTemplate | No
     if not template_id:
         return None
     return db.query(AiReportTemplate).get(template_id)
+
+
+def bump_hit_accounting(db: Session, report_id: int) -> None:
+    """命中记账唯一入口(#193): matched_count +1。
+
+    ⚠️ 为什么单独提出这一层: 原先只有 L1 命中(`_wrap_row`)会 bump, **L2 语义命中不 bump**
+    → `matched_count` 系统性偏低(生产实测 7 天: L1 口径 61 份 vs 用户实际拿到命中 90 次,
+    差 32%), 会让"刷新频率 vs 命中量"的决策建立在偏小的命中率上。
+    现在 L1/L2 都走这里; 被 #192 门槛拦下的空壳**不计入**(未交付给用户)。
+    """
+    _bump_matched_count(db, report_id)
 
 
 def _bump_matched_count(db: Session, report_id: int) -> None:

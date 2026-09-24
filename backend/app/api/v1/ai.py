@@ -360,7 +360,11 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
     #   L2 未命中且有候选 → L3 clarify 兜底(返回 H2 标题列表, 让用户选段重发);
     #   L2 未命中且无候选 → 走原 #116 实时 LLM 路径(保留兼容, 架构文档 §八.3 取舍③)
     from app.services.ai_extract_service import extract_section, split_sections
-    from app.services.ai_report_matcher import list_candidates, match_template_report
+    from app.services.ai_report_matcher import (
+        bump_hit_accounting,
+        list_candidates,
+        match_template_report,
+    )
     from app.services.ai_semantic_matcher import semantic_match
 
     def _persist_hit(_db, *, _result_md: str, _hit_mode: str,
@@ -569,6 +573,10 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                     _sem = await semantic_match(_match_db, q, _cands)
                     if _sem["hit_report"] is not None:
                         _hit2 = _sem["hit_report"]
+                        # #193 命中记账补齐: L1 由 _wrap_row → bump_hit_accounting 记账,
+                        #   原先 L2 语义命中不记账 → matched_count 系统性偏低(实测 7 天差 32%),
+                        #   会让"刷新频率 vs 命中量"的决策建立在偏小的命中率上。此处补记一次。
+                        bump_hit_accounting(_match_db, _hit2.id)
                         _tmpl2 = _template_for(_match_db, _hit2)
                         _mode = classify_question(q)["mode"]
                         if _mode == "brief":
