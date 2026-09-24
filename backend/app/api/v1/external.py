@@ -484,6 +484,10 @@ def _build_brief(db: Session, period: str, date: str | None,
             # 前一等长周期四路(滑动/同刻环比; today_kpi.cash_routes_prev)
             "routes_prev": kpi.get("cash_routes_prev"),
             "actual_cashflow_e": cash.get("actual_cashflow") or kpi.get("actual_cashflow"),
+            # #191 (2026-09-24): E 路数据截止日(BMS 退款记录报表, 上游 T+1)。
+            #   当日窗口 E=0 是上游 T+1 的必然结果(水单次日才发布), 不是"无退款/未提供"。
+            #   带上截止日, 让 AI 能说"E 最新到 X 日, 当日尚未采集", 而不是报"暂无"。
+            "actual_cashflow_e_until": dec.get("e_data_until"),
             "a_route": {
                 "litigation_ratio": litigation_ratio,
                 "litigation_amount": summary.get("complaint_amount"),
@@ -783,6 +787,12 @@ def _spec_brief() -> dict:
         "period": "daily=当日0点起; weekly=整周(周一起); monthly=整月(未满月则1日到当前); 传 start/end 则优先(任意连续区间/历史标准周回看, end=今天实时截止)",
         "range": "start/end 同时给出 → 该闭区间(YYYY-MM-DD, 北京时间整天; end=今天则实时截止 now); 单日区间等价 period=daily&date",
         "litigation_ratio": "A路直退涉诉率=涉诉金额/A路(线上直退)金额×100; 涉诉=SN关联投诉工单(外部>商户号>内部) OR 备注含投诉标识; 清退不算",
+        # #191 (2026-09-24): E 路时效口径必须显式声明 —— 上游水单 T+1, 当日恒为 0。
+        #   未声明时 AI 会把"E=0"读成"无退款/数据未提供"(实测日报多次如此), 属口径缺失。
+        "actual_cashflow_e": ("E 真实现金流=refund_record_reports 退款成功合计(BMS 退款记录报表, "
+                              "上游 T+1: 当日水单次日白天才发布) → 当日窗口 E 常为 0, 这是采集时序不是缺数; "
+                              "判读必须看 refund.actual_cashflow_e_until(数据截止日), "
+                              "并写\"E 数据截止 X 日\"而非\"E 未提供\""),
         "complaint": ("registered=窗口内新登记(工单按 register_time; 315/卡商补充表按 complaint_date 并"
                         "入外部桶, 已 matched 到窗口内工单的去重); handled=窗口内真实完成(finish_time∈窗口 且"
                         "finish 晚于登记 ≥3min, 排除同瞬填充); backlog=窗口内登记且归一化后未闭环(状态非已完成,"
