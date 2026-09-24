@@ -29,15 +29,17 @@ router = APIRouter(prefix="/auth", tags=["认证"])
 def _client_ip(request: Request) -> str | None:
     """取真实客户端 IP。
 
-    取 X-Forwarded-For 末段(由可信反代 nginx 追加的真实 client IP),
-    而非首段(首段可被客户端伪造, 会导致按 IP 限速被绕过)。
-    无 XFF 时回退到直连 client.host。
+    不变量(2026-09-24 审计 IP 修复): 到达本服务的 X-Forwarded-For 已被本系统的
+    nginx(csctalon-web)用 map 净化并**覆写为单值** —— 隧道流量取云端边缘注入的
+    真实 IP, 局域网/ZT 直连取对端地址; 客户端自带的 XFF 一律被丢弃(不可伪造)。
+    故此处"末段"即该净化值; 仍兼容多值(取末段 = 最靠近本服务的一跳)。
+    无 XFF(如容器内自调用)时回退到直连 client.host。
     """
     xff = request.headers.get("x-forwarded-for")
     if xff:
         parts = [p.strip() for p in xff.split(",") if p.strip()]
         if parts:
-            return parts[-1]  # 末段 = 反代追加的真实 IP
+            return parts[-1]
     return request.client.host if request.client else None
 
 

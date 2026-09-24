@@ -76,8 +76,10 @@ class OperationLogMiddleware(BaseHTTPMiddleware):
         # 客户端 IP(支持反向代理)
         xff = request.headers.get("x-forwarded-for")
         if xff:
-            # 2026-08-20 审计 SEC-06 修复: 取末段 = 反代追加的真实 IP;
-            # 首段是客户端自己传的 X-Forwarded-For, 可被伪造(与 auth.py 口径对齐)
+            # 2026-09-24 审计 IP 修复: nginx(csctalon-web)已用 map 把 XFF **覆写为单值**
+            # 净化值(隧道取云端边缘注入的真实 IP / 直连取对端地址, 客户端伪造的 XFF 被丢弃)。
+            # 取末段 = 该净化值; 仍兼容多值(末段 = 最靠近本服务的一跳)。口径与 auth.py 对齐。
+            # 旧实现见 2026-08-20 SEC-06: 当时 nginx 追加式透传, 末段=网关(172.21.0.1)导致审计失真。
             ip = xff.split(",")[-1].strip()
         else:
             ip = request.client.host if request.client else None
