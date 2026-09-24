@@ -33,6 +33,60 @@ logger = logging.getLogger(__name__)
 # 时区(AGENTS.md 铁律: 时区换算走 Asia/Shanghai)
 _TZ_CN = _dt.timezone(_dt.timedelta(hours=8))
 
+# ── #192 (2026-09-24) 命中门槛参数 ─────────────────────────────────────────
+# 背景: 命中链路会把"内容为空壳"的快照当有效命中返回 —— 实测生产 ai_reports#731/#678/#632
+# (`hit_mode='section'`, 74~88 字) 全文只有"**四路分布**：暂无/未提供 / **涉诉**：暂无",
+# 用户问"今日退款情况如何？四路分布和涉诉怎么样？"却拿到无信息回答, 且该"命中"还照常
+# 计入 matched_count, 掩盖真实命中质量。
+# 判据(两项任一命中即判"不可用"): ① 缺失维度占比 >= _BLOCK_MISSING_RATIO;
+#   ② 正文短于 _EMPTY_SHELL_CHARS 且有 required_dimensions(整体即空壳)。
+# ⚠️ 用"占比 + 字数"而非"全维度齐全": detail 体裁(周/月报)的 9 维度锚点结构本就不完全
+#    对齐校验器, 要求全齐全会把周/月报快照全部拦下 → 命中率塌方、每次问答走 30~50s 实时
+#    LLM, 体感更差(见 #192 关联里的依赖说明)。
+_BLOCK_MISSING_RATIO = 0.5
+_EMPTY_SHELL_CHARS = 150
+
+
+def _snapshot_unusable(db: Session, report: AiReport,
+                       template: AiReportTemplate | None) -> tuple[bool, list]:
+    """快照是否"不可用"(空壳): 返回 (unusable, missing)。
+
+    - 模板无 required_dimensions / 校验异常 → 可用(不拦, 保持改造前行为)
+    - 缺失占比 >= _BLOCK_MISSING_RATIO 或 正文 < _EMPTY_SHELL_CHARS → 不可用
+    """
+    if template is None:
+        return False, []
+    required = template.required_dimensions or []
+    if not required:
+        return False, []
+    from app.services.ai_completeness_service import check_dimensions
+
+    ck = check_dimensions(db, report, template)
+    missing = ck.get("missing") or []
+    if ck.get("complete"):
+        return False, []
+    ratio = len(missing) / len(required)
+    body = report.answer_md or ""
+    unusable = ratio >= _BLOCK_MISSING_RATIO or len(body) < _EMPTY_SHELL_CHARS
+    return unusable, missing
+
+
+def _record_blocked(db: Session, report_id: int, template_code: str | None,
+                    missing: list) -> None:
+    """被门槛拦下的快照: 记缺失清单(可统计被拦次数) + 打日志。
+
+    `ai_reports.latest_missing` 非空即代表"最近一次校验发现缺失", 被拦次数可直接
+    `SELECT count(*) FROM ai_reports WHERE latest_missing IS NOT NULL` 统计。
+    """
+    try:
+        from app.services.ai_report_service import record_latest_missing
+
+        record_latest_missing(db, report_id, missing)
+    except Exception as e:  # noqa: BLE001 记录失败不影响判定
+        logger.warning("记录被拦快照缺失维度失败(report_id=%s): %s", report_id, e)
+    logger.info("match 门槛拦下空壳快照: report_id=%s template=%s missing=%s",
+                report_id, template_code, missing)
+
 
 def _today_cn() -> _dt.date:
     """当前北京时间日期。"""
@@ -244,7 +298,16 @@ def match_template_report(
     # 取第一条 keyword 命中数 > 0 的返回
     for r, tmpl, hits, win_fit, period_match, scope_score, fmt_score in sorted_rows:
         if hits > 0 and tmpl:
-            report = _wrap_row(db, dict(r))
+            row = dict(r)
+            # #192 命中门槛: 先判快照是否为空壳(缺维度占比过高/正文过短) —— 是则跳过继续找,
+            #   避免返回"**四路分布**：暂无/未提供"这类无信息回答; 全部不可用 → (None,None)
+            #   交调用方走实时/深度重算(保留原有兜底, 不出现"无答案")。
+            light = _light_report(row)
+            unusable, missing = _snapshot_unusable(db, light, tmpl)
+            if unusable:
+                _record_blocked(db, light.id, getattr(tmpl, "code", None), missing)
+                continue
+            report = _wrap_row(db, row)
             # #128: _wrap_row 内 _bump_matched_count 调 db.commit() → expire_on_commit
             #       把 tmpl 属性标 expired; 脱离 session 前 expunge 才能让调用方
             #       在 _match_db.close() 后安全读 tmpl.code(否则 DetachedInstanceError 500)。
@@ -258,6 +321,17 @@ def match_template_report(
     # 未命中: 返回 None, 调用方走 LLM 兜底
     # (不兜底时点容差, 避免"上月对比"等无关问句命中当日 daily 报告)
     return None, None
+
+
+def _light_report(row: dict) -> AiReport:
+    """SQL row dict → 轻量 AiReport(不 bump matched_count; 命中门槛/候选列表共用)。"""
+    r = AiReport()
+    for k, v in row.items():
+        try:
+            setattr(r, k, v)
+        except Exception:  # noqa: BLE001  跳过 ORM 不接受的字段
+            pass
+    return r
 
 
 def _wrap_row(db: Session, row: Any) -> AiReport:
@@ -324,13 +398,15 @@ def list_candidates(db: Session, win_period: str | None,
         ).mappings().all()
     out: list[AiReport] = []
     for r in rows:
-        a = AiReport()
-        for k, v in dict(r).items():
-            try:
-                setattr(a, k, v)
-            except Exception:  # noqa: BLE001  跳过 ORM 不接受的字段
-                pass
-        out.append(a)
+        light = _light_report(dict(r))
+        # #192 候选也过同一道门槛: L2 语义匹配从候选里挑, 若把空壳快照留在候选里,
+        #   语义最像的那份(往往正是缺数据的那份)会被选中 → 同样是"命中但无信息"。
+        _tmpl = _get_template(db, light.template_id)
+        unusable, missing = _snapshot_unusable(db, light, _tmpl)
+        if unusable:
+            _record_blocked(db, light.id, getattr(_tmpl, "code", None), missing)
+            continue
+        out.append(light)
     return out
 
 
