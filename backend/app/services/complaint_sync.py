@@ -227,6 +227,10 @@ def _clean_external_row(row: dict[str, Any], idx: int, result: SyncRowResult) ->
             complaint_no = None
         rec["complaint_no"] = complaint_no
         rec["complaint_date"] = _sanitize_date(_to_datetime(data.get("complaint_date")))
+        # #195 日期恢复：日期列为空时从文本字段补救
+        if not rec["complaint_date"]:
+            from app.services.complaint_date_pipeline import recover_complaint_date_for_row
+            rec["complaint_date"] = recover_complaint_date_for_row(data, "external")
         rec["platform"] = _truncate_str(data.get("platform"), 64)
         rec["complaint_account"] = _truncate_str(data.get("complaint_account"), 128)
         rec["company_entity"] = _truncate_str(data.get("company_entity"), 128)
@@ -256,6 +260,10 @@ def _clean_card_row(row: dict[str, Any], idx: int, result: SyncRowResult) -> dic
     rec: dict[str, Any] = {}
     try:
         rec["complaint_date"] = _sanitize_date(_to_datetime(data.get("complaint_date")))
+        # #195 日期恢复：日期列为空时从文本字段补救
+        if not rec["complaint_date"]:
+            from app.services.complaint_date_pipeline import recover_complaint_date_for_row
+            rec["complaint_date"] = recover_complaint_date_for_row(data, "card")
         rec["complaint_group"] = _truncate_str(data.get("complaint_group"), 64)
         rec["complainant"] = _sanitize_name_field(data.get("complainant"), idx, result, "卡商-投诉人")
         rec["complainant_phone"] = _truncate_str(data.get("complainant_phone"), 32)
@@ -768,6 +776,8 @@ def sync_complaints_from_payload(
             if _is_empty_card_rec(rec):
                 card_result.filtered += 1
                 continue
+            # #195 批次年份传播：收集行号供后续恢复
+            rec["_row_index"] = idx
             # #42 入库前校验(只读)
             _issues = validate_card_complaint_row(rec, idx)
             for _iss in _issues:
@@ -775,6 +785,17 @@ def sync_complaints_from_payload(
             _tag_quality(rec, _issues, card_result)
             card_rows.append(rec)
         card_result.total = len(card_rows_raw)
+
+        # #195 批次年份传播恢复
+        from app.services.complaint_date_pipeline import batch_recover_with_year_propagation
+        recovery_results = batch_recover_with_year_propagation(
+            [{**r, "_row_index": r["_row_index"]} for r in card_rows],
+            "card",
+        )
+        for rec in card_rows:
+            if not rec.get("complaint_date"):
+                rec["complaint_date"] = recovery_results.get(rec["_row_index"])
+            rec.pop("_row_index", None)
 
         # 收集需要关联工单的 SN(两张表共用,避免重复查)
         all_sns: set[str] = set()
