@@ -245,11 +245,16 @@ _PURE_NUM_RE = re.compile(r"^[+-]?\d+(\.\d+)?$")
 # 它既不在 Excel 序列号区间(会被判 None), 也不是 pd.to_datetime 默认认识的格式。
 # 不处理会导致整列时间静默丢失(2026-09-10 审查 WARNING)。
 _COMPACT_DATE_RE = re.compile(r"^(19|20)\d{6}$")
+# ★ #196: YY/MMDD 斜杠紧凑形态(如 '26/0920' → 2026-09-20)
+#   实测来源: kdocs 退款表「9月份登记明细」28 行登记人批量补登简写,
+#   原解析落到 pd.to_datetime('26/0920') → NaT → 每轮同步固定 failed=29。
+_COMPACT_YY_SLASH_RE = re.compile(r"^(\d{2})/(\d{2})(\d{2})$")
 
 def _try_compact_date(val: Any) -> datetime | None:
     """尝试把 8 位纯数字按 YYYYMMDD 解析(如 '20260614' → 2026-06-14); 不是则 None。
 
     仅当形如 (19|20)YYMMDD 且月/日合法时才认, 避免把 8 位编号误当日 期。
+    另支持 YY/MMDD 斜杠紧凑形态('26/0920' → 2026-09-20, #196)。
     """
     # numpy 标量归一(与 _try_excel_serial 同口径; 复审 N-1)
     if hasattr(val, "item") and not isinstance(val, (str, bytes)):
@@ -265,13 +270,21 @@ def _try_compact_date(val: Any) -> datetime | None:
         s = val.strip()
     else:
         return None
-    if not _COMPACT_DATE_RE.match(s):
-        return None
-    try:
-        dt = datetime(int(s[0:4]), int(s[4:6]), int(s[6:8]))
-    except ValueError:
-        return None  # 月/日非法(如 20261340) → 不是日期
-    return dt.replace(tzinfo=_TZ_CN).astimezone(timezone.utc)
+    if _COMPACT_DATE_RE.match(s):
+        try:
+            dt = datetime(int(s[0:4]), int(s[4:6]), int(s[6:8]))
+        except ValueError:
+            return None  # 月/日非法(如 20261340) → 不是日期
+        return dt.replace(tzinfo=_TZ_CN).astimezone(timezone.utc)
+    # ★ #196: YY/MMDD 斜杠紧凑形态(月/日合法性由 datetime 构造器把关, 非法 → None)
+    m = _COMPACT_YY_SLASH_RE.match(s)
+    if m:
+        try:
+            dt = datetime(2000 + int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+        return dt.replace(tzinfo=_TZ_CN).astimezone(timezone.utc)
+    return None
 
 def _try_excel_serial(val: Any) -> datetime | None:
     """尝试把值按「Excel 序列日期」解析; 不是序列号则返回 None(绝不误判普通数字/字符串)。

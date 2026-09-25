@@ -64,6 +64,14 @@ def parse_doc_datetime(s: Any) -> datetime | None:
             return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         except ValueError:
             return None
+    # ★ #196: YY/MMDD 斜杠紧凑形态(如 '26/0920' → 2026-09-20)
+    m2 = re.match(r'^(\d{2})/(\d{2})(\d{2})$', s)
+    if m2:
+        try:
+            dt = datetime(2000 + int(m2.group(1)), int(m2.group(2)), int(m2.group(3)))
+        except ValueError:
+            return None
+        return dt
     return None
 
 

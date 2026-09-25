@@ -8,6 +8,7 @@
 """
 import csv
 import pickle
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -61,7 +62,7 @@ def test_parse_doc_datetime():
     assert parse_doc_datetime("2026-09-25") is not None
     assert parse_doc_datetime("2026年9月25日") is not None
     assert parse_doc_datetime("") is None
-    assert parse_doc_datetime("26/0920") is None  # 不支持形态 → None
+    assert parse_doc_datetime("26/0920") == datetime(2026, 9, 20)  # #196 YY/MMDD 已支持
 
 
 # ── 冻结语料验收（与 refund_evidence.json 锁死值一致）──────────────────────
@@ -70,7 +71,7 @@ def test_doc_side_counts(report):
     doc = report["doc"]
     assert doc["total_rows"] == 5031
     assert doc["empty_rows"] == 18
-    assert doc["date_unparseable"] == 29
+    assert doc["date_unparseable"] == 1
     assert doc["negative_amount_rows"] == 0
     assert doc["date_jumps_gt7d"] == 5
     # 4 处成对 = 行序颠倒；剩 1 处为表头首行 07-01→07-17 真跳变（留给人工看样例）

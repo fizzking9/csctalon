@@ -12,7 +12,7 @@ workbuddy 每 20 分钟检查文件(商户号手机退款处理登记.xlsx),文�
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import delete, or_, select, text
@@ -148,6 +148,72 @@ def _has_any_business_value(data: dict[str, Any]) -> bool:
         if v is not None and not (isinstance(v, str) and v.strip() == ""):
             return True
     return False
+
+
+# ★ #196: 空登记日期邻近填充(行内打此标记, 便于审计追溯)
+_FILL_MARK_KEY = "_register_time_filled_from_neighbor"
+_TZ_CN = timezone(timedelta(hours=8))
+
+
+def _fill_empty_register_time(rows_raw: list) -> int:
+    """登记日期为空的行, 仅当上下邻近行登记日期为**同一北京时间自然日**时,
+    用上一行原始值填充; 否则保持空(走既有 dropped+拒收流程)。
+
+    背景(#196): kdocs 退款表「登记明细」row 2413 登记日期整格空白(真实退款 37.8 元),
+    原逻辑在 _clean_row 直接 dropped → 每轮同步固定 failed。
+    规则(30b 设计裁决, 保守: 证据不足不猜):
+      ① 行需有业务字段值(纯模板空行不填);
+      ② 向上/向下找最近的可解析登记日期, 两者都存在且同一天才填;
+      ③ 填充值取上一行原始字符串(与邻近行完全同形态), 并打标记键。
+    """
+    candidates = COLUMN_TEMPLATES.get("manual_refund", {}).get("register_time") or ["登记日期"]
+
+    def _key(row: dict) -> str | None:
+        for k in candidates:
+            if k in row:
+                return k
+        return "register_time" if "register_time" in row else None
+
+    def _beijing_date(row: dict):
+        k = _key(row)
+        if k is None:
+            return None
+        v = row.get(k)
+        if v is None or (isinstance(v, str) and v.strip() in ("", "/", "0", "None", "nan")):
+            return None
+        dt = _to_datetime(v)
+        return dt.astimezone(_TZ_CN).date() if dt is not None else None
+
+    def _nearest(start: int, step: int):
+        j = start
+        while 0 <= j < len(rows_raw):
+            rj = rows_raw[j]
+            if isinstance(rj, dict):
+                d = _beijing_date(rj)
+                if d is not None:
+                    return j, d
+            j += step
+        return None, None
+
+    filled = 0
+    for i, row in enumerate(rows_raw):
+        if not isinstance(row, dict):
+            continue
+        k = _key(row)
+        if k is None or _beijing_date(row) is not None:
+            continue  # 无日期列或已有合法日期
+        if not _has_any_business_value(_map_row(row)):
+            continue  # 模板噪音行不填
+        pj, prev_d = _nearest(i - 1, -1)
+        _, next_d = _nearest(i + 1, 1)
+        if prev_d is not None and prev_d == next_d:
+            pk = _key(rows_raw[pj])
+            row[k] = rows_raw[pj][pk]
+            row[_FILL_MARK_KEY] = True
+            filled += 1
+    if filled:
+        logger.info(f"[manual_refund_sync] 空登记日期邻近填充 {filled} 行(#196)")
+    return filled
 
 
 def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult,
@@ -337,6 +403,8 @@ def sync_manual_refunds_from_payload(
         full_sync = bool(payload.get("full_sync"))
         if not isinstance(rows_raw, list):
             raise ValueError("manual_refunds 必须是数组")
+        # ★ #196: 空登记日期邻近填充(保守规则见函数 docstring)
+        _fill_empty_register_time(rows_raw)
 
         rows: list[dict] = []
         for idx, row in enumerate(rows_raw):
