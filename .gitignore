@@ -143,3 +143,13 @@ docs/reports/*工信部误录核查/*.csv
 
 # #64 SN 清洗验证导出: 含真实SN/手机号(PII)
 docs/reports/*外部投诉缺口核查/*.csv
+
+# ---------- 仓库入库规范(见 docs/standards/仓库入库规范.md) ----------
+# C4 任务现场: 一次性脚本/冻结语料/模型raw输出/状态日志, 本机工作台不入库
+workdata/
+work-data/
+# C5 密钥凭证: 证书私钥泄露即事故
+certs/
+# C7 工具私有状态: AI 工具记忆/会话状态, 写给工具自己用的不入库
+.workbuddy/
+
