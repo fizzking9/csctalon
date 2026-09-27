@@ -15,14 +15,14 @@ _BACKEND = Path(__file__).resolve().parents[1]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
+from app.services.complaint_date_pipeline import (
+    batch_recover_with_year_propagation,
+    recover_complaint_date_for_row,
+)
 from app.services.complaint_date_recovery import (
     extract_leading_handle_date,
     recover_complaint_date,
     recover_from_fields,
-)
-from app.services.complaint_date_pipeline import (
-    batch_recover_with_year_propagation,
-    recover_complaint_date_for_row,
 )
 
 

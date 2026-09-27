@@ -18,7 +18,7 @@ import pytest
 
 from app.core.config import settings
 from app.services import llm_tiers
-from app.services.llm_provider_service import get_provider_chain, _apply_cloud_filter
+from app.services.llm_provider_service import _apply_cloud_filter, get_provider_chain
 
 
 @pytest.fixture
