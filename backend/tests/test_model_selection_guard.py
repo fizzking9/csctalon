@@ -93,7 +93,15 @@ def test_no_numeric_sensitive_tier_references_coder_in_source():
     import re
     from pathlib import Path
 
-    root = Path(__file__).resolve().parents[3]  # → 仓库根 (dev/)
+    # 向上找仓库根(含 csctalon/backend 或 talon 兄弟目录);
+    # CI 容器把 backend 挂为 /app, 路径深度不足且无兄弟仓库 → skip 而非 IndexError
+    root = None
+    for p in Path(__file__).resolve().parents:
+        if (p / "csctalon/backend").exists() or (p / "talon").exists():
+            root = p
+            break
+    if root is None:
+        pytest.skip("CI 容器布局(/app)无 csctalon/talon 兄弟目录, 跨仓源码扫描不适用")
     offenders = []
 
     patterns = [

@@ -61,7 +61,9 @@ class AiReport(IDMixin, TimestampMixin, Base):
         comment="#121: true=公共报告(所有人可看, 来自预生成); false=私有(仅本人, 来自实时)",
     )
     matched_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0,
+        # server_default 与迁移 a0b1c2d3e4f5 建表口径对齐: 裸 SQL INSERT(测试)
+        # 在 create_all 建的表上也有默认值, 不依赖 ORM 的 Python default (#197 CI)
+        Integer, nullable=False, default=0, server_default="0",
         comment="#121: 被命中复用次数(match_template_report 命中时 +1)",
     )
     latest_missing: Mapped[list | None] = mapped_column(
