@@ -457,6 +457,32 @@ def _build_brief(db: Session, period: str, date: str | None,
         "yoy_pct": round((_crv - _prv) / _prv * 100, 1) if (_crv is not None and _prv) else None,
         "delta_pct_points": summary.get("complaint_ratio_delta"),
     }
+    # #prompt-v2.1 (2026-09-27): 系统侧补派生字段——凡工具能算的, 不写成对模型的要求。
+    #   1) E 对账差 recon_gap_amount/pct(口径对账差异, 非环比; 提示词铁律 12d 明确禁止当环比表述)
+    #   2) 四路 amount_pct/count_pct(占退款总额/总笔数; 提示词铁律 12a 仅允许引用下发占比)
+    _ace = cash.get("actual_cashflow") or kpi.get("actual_cashflow")
+    if isinstance(_ace, dict):
+        _amt = _ace.get("amount")
+        _tot = (kpi.get("refund_amount") or {}).get("value")
+        if _tot is not None and _amt is not None:
+            _ace["recon_gap_amount"] = round(_tot - _amt, 2)
+            _ace["recon_gap_pct"] = round(_ace["recon_gap_amount"] / _amt * 100, 1) if _amt != 0 else None
+        else:
+            _ace["recon_gap_amount"] = None
+            _ace["recon_gap_pct"] = None
+    _routes = {
+        "route_a": cash.get("route_a"),
+        "route_b": cash.get("route_b"),
+        "route_c": cash.get("route_c"),
+        "route_d": cash.get("route_d"),
+    }
+    _rt_amt = (kpi.get("refund_amount") or {}).get("value")
+    _rt_cnt = (kpi.get("refund_count") or {}).get("value")
+    for _r in _routes.values():
+        if isinstance(_r, dict):
+            _ra, _rc = _r.get("amount"), _r.get("count")
+            _r["amount_pct"] = round(_ra / _rt_amt * 100, 1) if _rt_amt and _ra is not None else None
+            _r["count_pct"] = round(_rc / _rt_cnt * 100, 1) if _rt_cnt and _rc is not None else None
     out = {
         "period": win["period"],
         "date": win.get("date"),
@@ -475,15 +501,10 @@ def _build_brief(db: Session, period: str, date: str | None,
         "refund": {
             "total_amount": kpi.get("refund_amount"),
             "total_count": kpi.get("refund_count"),
-            "routes": {
-                "route_a": cash.get("route_a"),
-                "route_b": cash.get("route_b"),
-                "route_c": cash.get("route_c"),
-                "route_d": cash.get("route_d"),
-            },
+            "routes": _routes,
             # 前一等长周期四路(滑动/同刻环比; today_kpi.cash_routes_prev)
             "routes_prev": kpi.get("cash_routes_prev"),
-            "actual_cashflow_e": cash.get("actual_cashflow") or kpi.get("actual_cashflow"),
+            "actual_cashflow_e": _ace,
             # #191 (2026-09-24): E 路数据截止日(BMS 退款记录报表, 上游 T+1)。
             #   当日窗口 E=0 是上游 T+1 的必然结果(水单次日才发布), 不是"无退款/未提供"。
             #   带上截止日, 让 AI 能说"E 最新到 X 日, 当日尚未采集", 而不是报"暂无"。
@@ -516,7 +537,24 @@ def _complaint_enhanced(db: Session, start_s: str, end_s: str,
     """
     cur = _complaint_enhanced_window(db, start_s, end_s)
     if prev_start and prev_end:
-        cur["prev"] = _complaint_enhanced_window(db, prev_start, prev_end)
+        prv = _complaint_enhanced_window(db, prev_start, prev_end)
+        cur["prev"] = prv
+
+        # #prompt-v2.1 (2026-09-27): 积压环比系统侧下发(backlog_prev_pct)。
+        #   backlog 是时点存量, 模型自算/挪用投诉量环比已实测出错(mini-14b 挪用 -28.5%);
+        #   按「凡工具能算的不写成对模型的要求」原则在此计算, 提示词铁律 12c 仅允许原样引用。
+        #   基期为 0 时为 None(提示词写「基期为零, 无法计算变化率」)。
+        def _bp(bl, pbl):
+            if bl is None or pbl in (None, 0):
+                return None
+            return round((bl - pbl) / pbl * 100, 1)
+
+        _ct, _pt = cur.get("total") or {}, prv.get("total") or {}
+        _ct["backlog_prev_pct"] = _bp(_ct.get("backlog"), _pt.get("backlog"))
+        _pmap = {x.get("source"): x for x in (prv.get("by_source") or []) if isinstance(x, dict)}
+        for _item in cur.get("by_source") or []:
+            _pi = _pmap.get(_item.get("source")) or {}
+            _item["backlog_prev_pct"] = _bp(_item.get("backlog"), _pi.get("backlog"))
     return cur
 
 
