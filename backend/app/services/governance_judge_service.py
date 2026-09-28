@@ -62,7 +62,7 @@ from app.models.governance_rule import (
     GovernanceRule,
 )
 from app.models.llm_provider import LlmCallLog
-from app.services import llm_client
+from app.services import llm_client, llm_tiers
 from app.services.system_event_service import record_system_event, update_system_event
 
 logger = logging.getLogger(__name__)
@@ -556,7 +556,7 @@ async def _llm_judge_call(db: Session, messages: list[dict], *,
             timeout_s=_TIMEOUT_S,
             db=db,
             source=_LLM_SOURCE,
-            provider_code=None,  # 默认实时链（27b），不降级 122b（#131 语义）
+            provider_code=llm_tiers.resolve_tier("governance", db=db),
         )
         return str(result), None
     except asyncio.CancelledError:

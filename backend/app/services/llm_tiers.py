@@ -209,6 +209,16 @@ TIERS: dict[str, dict] = {
             "指向 122b，建议换 mini-14b（慢但稳，适合夜间批）或配套服务端数字白名单校验兜底。"
         ),
     },
+    "governance": {
+        "primary": "talon-gmk-qwen3.8-27b",
+        "secondary": "talon-gmk-qwen2.5-7b",
+        "desc": "治理 —— 数据质检 / 语义探测 / 采集后分类（不出域）",
+        "rationale": (
+            "治理任务需要语义理解（矛盾检测、误分类识别），27b 实测语义 0.95 最稳。"
+            "备选 7b 仅作降级兜底。"
+            "角色级 allow_cloud=false：治理数据含真实客服退款记录，绝对不出域。"
+        ),
+    },
 }
 
 # 允许的环境变量覆盖（格式: 档位=provider_code，逗号分隔）

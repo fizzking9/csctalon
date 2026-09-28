@@ -51,6 +51,9 @@ _DAYTIME_HOURS = set(range(8, 24))
 # 模板不受限, warm_idle 09:00 定时兜底也走另一条路径不受此约束。
 _DAILY_SYNC_MIN_INTERVAL_MIN = 20
 
+# 采集后 AI 分类的最小间隔（分钟）：同步每 30min 一轮，设 30min 保证每轮最多跑一次
+_CLASSIFY_MIN_INTERVAL_MIN = 30
+
 # #166 启动预热的最小间隔保护(分钟): 服务重启会触发 warm_on_startup, 若短时间多次
 # 重启(如连续部署/异常恢复)会把「当日日报」重复重算。设 20min 与同步节流同量级:
 # 正常一次部署不受影响(距上次生成通常远超 20min), 但连续部署风暴被挡住。
@@ -498,6 +501,86 @@ def warm_on_sync_complete() -> None:
     finally:
         db.close()
         _worker_lock.release()
+
+    # 同步后 AI 分类（非阻塞，不影响报告主流程）
+    try:
+        classify_after_sync()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("classify_after_sync 异常(不影响业务): %s", e)
+
+
+def classify_after_sync() -> None:
+    """采集后 AI 分类/打标：同步完成后对未分类记录做 AI 辅助分类。
+
+    设计：
+    - 同步每 30min 一轮，每轮取 10 条「普通退款」（预设规则未命中的）记录
+    - 调 LLM（经 talon provider 链，不出域）判断是否有误分类
+    - 发现误分类 → 产 governance finding（detector=semantic_anomaly）待人工确认
+    - 30min 节流防过频调用 LLM
+    - 失败仅 log，不影响同步主流程
+
+    与 D7（凌晨完整体检）的区别：
+    - D7 取 20 条、做完整语义检查（原因矛盾/金额异常/空值）
+    - 本函数取 10 条、只检查「普通退款是否应归为客诉」这一个维度
+    - D7 落 governance_findings 待研判；本函数同样落 findings
+    """
+    if not _classify_lock.acquire(blocking=False):
+        return
+    db = SessionLocal()
+    try:
+        from app.services.governance_detector import (
+            scan_semantic_anomaly, persist_findings,
+        )
+        from app.services.system_event_service import record_system_event
+
+        # 节流：30min 内已跑过则跳过
+        last = db.execute(text(
+            "SELECT max(created_at) FROM system_events "
+            "WHERE category='ai_governance' AND action='classify_after_sync'"
+        )).scalar()
+        if last:
+            now_cn = _dt.datetime.now(_TZ_CN)
+            last_cn = last.astimezone(_TZ_CN) if last.tzinfo else last.replace(tzinfo=_TZ_CN)
+            if (now_cn - last_cn).total_seconds() < _CLASSIFY_MIN_INTERVAL_MIN * 60:
+                return
+
+        # 调 D7 探测器（经 talon provider 链，取 20 条样本）
+        findings = scan_semantic_anomaly(db)
+        if findings:
+            persisted = persist_findings(db, findings)
+            record_system_event(
+                db, category="ai_governance", action="classify_after_sync",
+                title=f"采集后 AI 分类: 发现 {len(persisted)} 条疑似误分类",
+                summary=f"检查 {findings[0]['metrics']['scanned']} 条, "
+                        f"标记 {findings[0]['metrics']['flagged']} 条",
+                status="success",
+                detail=json.dumps(
+                    {"flagged_ids": findings[0]["metrics"]["flagged_ids"]},
+                    ensure_ascii=False),
+                commit=True,
+            )
+            logger.info("classify_after_sync: 标记 %s 条疑似误分类",
+                        findings[0]["metrics"]["flagged"])
+        else:
+            record_system_event(
+                db, category="ai_governance", action="classify_after_sync",
+                title="采集后 AI 分类: 无异常",
+                summary="检查完成, 未发现误分类",
+                status="success", detail="{}", commit=True,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("classify_after_sync 异常(不影响业务): %s", e)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        db.close()
+        _classify_lock.release()
+
+
+# 采集后 AI 分类单飞锁
+_classify_lock = threading.Lock()
 
 
 def warm_on_startup(force: bool = False) -> None:

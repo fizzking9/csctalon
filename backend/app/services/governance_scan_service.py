@@ -36,6 +36,7 @@ from app.models.governance_finding import (
     DETECTOR_FK_ORPHAN,
     DETECTOR_IMPOSSIBLE_DATE,
     DETECTOR_ROW_COUNT_JUMP,
+    DETECTOR_SEMANTIC_ANOMALY,
     DETECTOR_TEXT_ANOMALY,
     DETECTOR_UNIQUE_INDEX_DUP,
 )
@@ -46,6 +47,7 @@ from app.services.governance_detector import (
     scan_fk_orphans,
     scan_impossible_dates,
     scan_row_count_jump,
+    scan_semantic_anomaly,
     scan_text_anomaly,
     scan_unique_index_dups,
 )
@@ -60,6 +62,7 @@ _scan_lock = threading.Lock()
 # system_events 留痕分类/动作（设计 §3.3）
 EVENT_CATEGORY = "ai_governance"
 EVENT_SCAN = "governance_scan"
+EVENT_SCAN_LIGHT = "governance_scan_light"  # 午间轻量体检（D1+D2 only）
 
 
 def _now_cn() -> _dt.datetime:
@@ -84,6 +87,7 @@ def gather_findings(db: Session) -> tuple[list[dict], set[str]]:
         (DETECTOR_TEXT_ANOMALY, scan_text_anomaly),
         (DETECTOR_IMPOSSIBLE_DATE, scan_impossible_dates),
         (DETECTOR_FILLABLE_GAP, scan_fillable_gaps),
+        (DETECTOR_SEMANTIC_ANOMALY, scan_semantic_anomaly),
     ):
         try:
             results += fn(db)
@@ -224,34 +228,119 @@ def judge_idle(db: Session) -> dict:
     return judge_findings(db, commit=True)
 
 
-def governance_idle() -> None:
-    """每日低峰自动体检 + 自动研判入口（挂 cache_warmer 空闲循环）。
+def run_light_scan(db: Session | None = None, *, commit: bool = True,
+                   event_id: int | None = None) -> dict:
+    """午间轻量体检：只跑 D1(唯一索引重复) + D2(行数突变)。
 
-    设计与 ai_feedback.check_daily_health_report_idle 同款「当日语义」：
-    以 system_events(category=ai_governance) 当日是否已有对应 action 为准，
-    当日已跑则跳过 → 定时 loop 每分钟调本函数也只会触发一次。
-    低峰时段（凌晨 0-5 点）执行，避开同步高峰；白日不自动跑（省计算、防干扰用户）。
+    为什么只跑这两个：D1/D2 是秒级快扫，且是最高频复发的结构性问题；
+    D3~D6 耗时更长或更偏静态，留给凌晨完整体检即可。
+
+    留痕 action=governance_scan_light，与完整体检分开计数。
+    """
+    own_db = db is None
+    session = db if not own_db else SessionLocal()
+    try:
+        findings: list[dict] = []
+        ok: set[str] = set()
+        for detector, fn in (
+            (DETECTOR_UNIQUE_INDEX_DUP, scan_unique_index_dups),
+            (DETECTOR_ROW_COUNT_JUMP, scan_row_count_jump),
+        ):
+            try:
+                findings += fn(session)
+                ok.add(detector)
+            except Exception as e:  # noqa: BLE001
+                logger.error("governance light: %s 探测失败: %s", detector, e)
+
+        persisted = persist_findings(session, findings)
+        seen_keys = {(f.detector, f.table_name, f.target) for f in persisted}
+        closed = close_stale_findings(session, detectors=ok, seen_keys=seen_keys)
+        summary = _scan_summary(findings)
+        result = {
+            "category": EVENT_CATEGORY,
+            "action": EVENT_SCAN_LIGHT,
+            "status": "success",
+            "found": len(findings),
+            "persisted": len(persisted),
+            "auto_closed": [f.id for f in closed],
+            "by_detector": summary["detectors"],
+            "findings": findings,
+        }
+        record_system_event(
+            session, category=EVENT_CATEGORY, action=EVENT_SCAN_LIGHT,
+            title=f"午间轻量体检: {summary['detail']}",
+            summary=f"发现 {len(findings)} 项, 落库 {len(persisted)} 项, 收敛 {len(closed)} 项",
+            status="success",
+            detail=_json_detail(result), commit=commit,
+        )
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.error("governance light: 体检失败(不影响业务): %s", e)
+        try:
+            session.rollback()
+            if event_id is not None:
+                update_system_event(session, event_id, status="failed",
+                                    summary=f"轻量体检失败: {e}"[:512],
+                                    detail=json.dumps({"error": str(e)}, ensure_ascii=False),
+                                    commit=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"category": EVENT_CATEGORY, "action": EVENT_SCAN_LIGHT,
+                "status": "failed", "found": 0, "persisted": 0, "auto_closed": [],
+                "by_detector": {}, "findings": [], "error": str(e)}
+    finally:
+        if own_db:
+            session.close()
+
+
+def governance_idle() -> None:
+    """每日自动体检 + 自动研判入口（挂 cache_warmer 空闲循环）。
+
+    两个执行窗口：
+    1. 凌晨 0-5 点：完整体检（D1~D6）+ 自动研判
+       —— 避开同步高峰，省计算、防干扰用户
+    2. 午间 12-13 点：轻量体检（D1+D2 only）
+       —— 同步窗口间隙快速扫高频复发问题，秒级完成不干扰业务
+
+    两个窗口都用「当日语义」防重复：system_events 当日已有对应 action 则跳过。
     失败不阻塞主循环。
     """
-    # 只在低峰(0-5点)自动跑
-    if _now_cn().hour not in range(0, 6):
-        return
-    if not _scan_lock.acquire(blocking=False):
-        logger.info("governance_idle: 已有体检在跑, 跳过")
-        return
-    db = SessionLocal()
-    try:
-        if not _event_done_today(db, EVENT_SCAN):
-            run_full_scan(db, commit=True)
-            db.expire_all()
-        # 体检后自动研判（规则命中零成本；被抢占不阻塞主循环）
+    hour = _now_cn().hour
+
+    # ── 窗口 1: 凌晨完整体检 ──
+    if hour in range(0, 6):
+        if not _scan_lock.acquire(blocking=False):
+            logger.info("governance_idle: 已有体检在跑, 跳过")
+            return
+        db = SessionLocal()
         try:
-            judge_idle(db)
-        except asyncio.CancelledError:
-            # llm_scheduler 抢占（更高优先级任务上位）—— 属正常，下次低峰再跑
-            logger.info("governance_idle: 自动研判被抢占, 下次低峰重试")
-    except Exception as e:  # noqa: BLE001  体检/研判失败不影响主循环
-        logger.warning("governance_idle 异常(不影响业务): %s", e)
-    finally:
-        db.close()
-        _scan_lock.release()
+            if not _event_done_today(db, EVENT_SCAN):
+                run_full_scan(db, commit=True)
+                db.expire_all()
+            # 体检后自动研判（规则命中零成本；被抢占不阻塞主循环）
+            try:
+                judge_idle(db)
+            except asyncio.CancelledError:
+                logger.info("governance_idle: 自动研判被抢占, 下次低峰重试")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("governance_idle 异常(不影响业务): %s", e)
+        finally:
+            db.close()
+            _scan_lock.release()
+        return
+
+    # ── 窗口 2: 午间轻量体检 ──
+    if hour == 12:
+        if not _scan_lock.acquire(blocking=False):
+            logger.info("governance_idle: 已有体检在跑, 跳过午间轻量")
+            return
+        db = SessionLocal()
+        try:
+            if not _event_done_today(db, EVENT_SCAN_LIGHT):
+                run_light_scan(db, commit=True)
+                logger.info("governance_idle: 午间轻量体检完成")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("governance_idle 午间轻量异常(不影响业务): %s", e)
+        finally:
+            db.close()
+            _scan_lock.release()

@@ -1828,3 +1828,159 @@ def scan_fillable_gaps(db: Session, *, tables: list[str] | None = None,
         if finding:
             findings.append(finding)
     return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# D7: AI 语义异常（退款原因与内容矛盾等）
+#
+# 与 D1~D6 的区别：D1~D6 是**确定性 SQL 探测**（不含 AI），D7 是**AI 辅助探测**：
+#   1. SQL 取样：从 refund_wide 取近期未分类或分类存疑的记录（limit 20）
+#   2. LLM 分析：调 talon（经 llm_client.chat_completion + db 走 provider 链）
+#      判断退款原因与问题描述是否存在语义矛盾
+#   3. 只产 finding 不下结论（研判层负责 verdict）
+#
+# 设计取舍：
+#   - 放在探测层而非研判层：因为它发现的是「单条记录级」的语义可疑（如金额与原因矛盾），
+#     而研判层处理的是「结构性」finding 的判据。两者粒度不同。
+#   - LLM 调用有 db 参数 → 走 talon provider 链（本地 qwen3.8:27b），不出域。
+#   - 采样 ≤20 条：控制 LLM 成本和延迟（秒级，不拖整体体检）。
+# ═══════════════════════════════════════════════════════════════════════
+DETECTOR_SEMANTIC_ANOMALY = "semantic_anomaly"
+
+_D7_SAMPLE_LIMIT = 20
+_D7_TIMEOUT_S = 60.0
+_D7_MAX_TOKENS = 800
+
+_D7_SYSTEM_PROMPT = (
+    "你是退款数据语义质检员。给你一批退款记录（JSON 数组），"
+    "请逐条检查是否存在语义矛盾，如：\n"
+    "1. 退款原因与 service_item 内容矛盾（如原因写'客诉'但 service_item 是常规咨询）\n"
+    "2. 退款金额与 service_category 明显不匹配（如大额退款却分类为普通咨询）\n"
+    "3. 退款原因为空或过于笼统但 service_item 有明确分类线索\n"
+    "4. has_external_complaint=true 但退款原因未标记为客诉\n"
+    "只返回有问题的记录，格式 JSON 数组："
+    '[{"id": "<退款单号>", "issue": "<问题描述>", "severity": "warn|high"}]\n'
+    "无问题则返回空数组 []。不要编造，只基于给定的字段判断。"
+)
+
+
+def scan_semantic_anomaly(db: Session) -> list[dict]:
+    """D7 扫描：AI 语义异常探测。
+
+    从 refund_wide 取近期记录样本，调 LLM 检查语义矛盾。
+    返回 finding 列表（同 D1~D6 结构）。
+
+    ⚠️ 本探测器调 LLM（经 talon），耗时秒级。只在完整体检（凌晨 0-5 点）时跑，
+    不在午间轻量扫描中跑（run_light_scan 只含 D1+D2）。
+    """
+    # 检查 refund_wide 表是否存在
+    if not _table_exists(db, "refund_wide"):
+        return []
+
+    # 取样：近期退款记录，优先取未分类的（分类存疑概率更高）
+    try:
+        rows = db.execute(text("""
+            SELECT refund_no, refund_reason, refund_amount,
+                   service_item, service_category,
+                   has_external_complaint
+            FROM refund_wide
+            ORDER BY (refund_reason IS NULL OR refund_reason = '') DESC,
+                     created_at DESC
+            LIMIT :limit
+        """), {"limit": _D7_SAMPLE_LIMIT}).mappings().all()
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        logger.warning("governance D7: 取样失败, 跳过: %s", e)
+        return []
+
+    if not rows:
+        return []
+
+    # 构造 LLM 输入（脱敏：service_item 截断 200 字）
+    import json as _json
+    records = []
+    for r in rows:
+        desc = str(r.get("service_item") or "")[:200]
+        records.append({
+            "id": r["refund_no"],
+            "refund_reason": str(r.get("refund_reason") or "")[:100],
+            "refund_amount": float(r["refund_amount"]) if r.get("refund_amount") else None,
+            "has_external_complaint": bool(r.get("has_external_complaint")),
+            "service_item": desc,
+            "service_category": str(r.get("service_category") or "")[:50],
+        })
+
+    # 调 LLM（经 talon provider 链，走 governance 角色配置，不出域）
+    try:
+        import asyncio
+        from app.services import llm_client, llm_tiers
+
+        user_msg = "请检查以下退款记录是否存在语义矛盾：\n" + _json.dumps(records, ensure_ascii=False)
+
+        async def _call():
+            return await llm_client.chat_completion(
+                [{"role": "system", "content": _D7_SYSTEM_PROMPT},
+                 {"role": "user", "content": user_msg}],
+                temperature=0.1,
+                max_tokens=_D7_MAX_TOKENS,
+                timeout_s=_D7_TIMEOUT_S,
+                source="governance_d7",
+                provider_code=llm_tiers.resolve_tier("governance", db=db),
+                db=db,
+            )
+
+        # governance_idle 和 classify_after_sync 都在 to_thread 中运行（无 event loop），
+        # 安全使用 asyncio.run
+        result_str = asyncio.run(_call())
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        logger.warning("governance D7: LLM 调用失败, 跳过: %s", e)
+        return []
+
+    # 解析 LLM 返回（兼容 markdown 包装的 JSON）
+    try:
+        raw = result_str if isinstance(result_str, str) else str(result_str)
+        # 去掉 markdown ```json ... ``` 包装
+        raw = raw.strip()
+        if raw.startswith("```"):
+            # 去掉首行 ```json 和末尾 ```
+            lines = raw.split("\n")
+            raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        anomalies = _json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning("governance D7: LLM 返回非 JSON, 跳过 (len=%d)", len(result_str or ""))
+        return []
+
+    if not anomalies:
+        return []
+
+    # 构造 finding（每个异常记录一条）
+    findings: list[dict] = []
+    anomaly_ids = {a.get("id") for a in anomalies if a.get("id")}
+    # 复现 SQL
+    repro = (
+        "SELECT refund_no, refund_reason, refund_amount, service_item "
+        "FROM refund_wide WHERE refund_no IN ("
+        f"{', '.join(repr(str(a['id'])) for a in anomalies if a.get('id'))});"
+    )
+    # 样本（脱敏）
+    samples = [
+        {"id": a.get("id"), "issue": a.get("issue", ""),
+         "severity": a.get("severity", "warn")}
+        for a in anomalies[:10]  # 最多 10 条样本
+    ]
+    findings.append({
+        "detector": DETECTOR_SEMANTIC_ANOMALY,
+        "table_name": "refund_wide",
+        "target": "refund_reason_semantic",
+        "severity_raw": SEVERITY_HIGH if any(a.get("severity") == "high" for a in anomalies) else SEVERITY_WARN,
+        "metrics": {
+            "scanned": len(records),
+            "flagged": len(anomalies),
+            "ratio": round(len(anomalies) / len(records), 4) if records else 0.0,
+            "flagged_ids": list(anomaly_ids),
+        },
+        "samples": samples,
+        "repro_sql": repro,
+    })
+    return findings
