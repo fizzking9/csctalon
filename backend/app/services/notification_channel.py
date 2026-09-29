@@ -68,14 +68,31 @@ class WebhookChannel:
         url = self.config.get("webhook_url") or self.config.get("url")
         if not url:
             return ChannelResult(ok=False, detail="未配置 webhook_url")
-        text = f"**{prefix}** {title}"
+        text = f"{prefix} {title}"
         if content:
             text += f"\n{content}"
         try:
             import httpx
-            payload = {"msgtype": "text", "text": {"content": text[:1800]}}
+            # 三家机器人文本消息 payload 不同(2026-09-29 补飞书):
+            #   企微/钉钉: {"msgtype":"text","text":{"content":...}}
+            #   飞书:      {"msg_type":"text","content":{"text":...}}
+            # config.provider: wecom(默认)/dingtalk/feishu
+            provider = (self.config.get("provider") or "wecom").lower()
+            if provider == "feishu":
+                payload = {"msg_type": "text", "content": {"text": text[:1800]}}
+            else:
+                payload = {"msgtype": "text", "text": {"content": text[:1800]}}
             resp = httpx.post(url, json=payload, timeout=10)
             ok = 200 <= resp.status_code < 300
+            # 飞书业务错误也在 200 响应体里(code/StatusCode 任一非 0 即失败)
+            if ok and provider == "feishu":
+                try:
+                    body = resp.json()
+                    biz_codes = [body[k] for k in ("code", "StatusCode") if k in body]
+                    if any(c not in (0, None) for c in biz_codes):
+                        ok = False
+                except Exception:  # noqa: BLE001 非 JSON 响应按 HTTP 状态处理
+                    pass
             return ChannelResult(ok=ok, detail=f"HTTP {resp.status_code}")
         except Exception as e:  # noqa: BLE001
             return ChannelResult(ok=False, detail=f"发送异常: {e}")
