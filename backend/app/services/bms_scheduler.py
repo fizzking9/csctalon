@@ -237,6 +237,8 @@ class BmsScheduler:
         self._shared_doc_done: dict[str, set[str]] = {}
         # 启动后延迟预热任务句柄(防 GC 中断)
         self._warm_task: asyncio.Task | None = None
+        # 日志保留期清理当日已执行标记(YYYY-MM-DD 北京日; 2026-09-29)
+        self._retention_done_key: str | None = None
 
     # ── #51: 配置读取与变更回调 ──
     def _load_schedule(self):
@@ -878,6 +880,29 @@ class BmsScheduler:
                         )
                     except Exception as fe:  # noqa: BLE001 巡检失败不影响调度
                         logger.warning(f"[调度器] 数据源时效巡检失败(忽略): {fe}")
+
+                # ── 日志保留期清理(每天 03:15 北京时间; 在 5:00 补跑/6:00 低频档前,
+                #    纯 DELETE 不碰业务表; 按北京日去重, 进程重启当天不重复) ──
+                if now_cn.hour == 3 and now_cn.minute == 15 \
+                        and self._retention_done_key != now_cn.strftime("%Y-%m-%d"):
+                    self._retention_done_key = now_cn.strftime("%Y-%m-%d")
+                    try:
+                        from app.services.log_retention_service import run_retention_purge
+
+                        def _do_purge():
+                            _db = SessionLocal()
+                            try:
+                                return run_retention_purge(_db)
+                            finally:
+                                _db.close()
+
+                        _pr = await asyncio.to_thread(_do_purge)
+                        logger.info(
+                            f"[调度器] 日志保留期清理完成: 共删 {_pr['total']} 行"
+                            f"{', 错误表=' + str(list(_pr['errors'])) if _pr['errors'] else ''}"
+                        )
+                    except Exception as re_:  # noqa: BLE001 清理失败不影响调度
+                        logger.warning(f"[调度器] 日志保留期清理失败(忽略): {re_}")
 
             except asyncio.CancelledError:
                 break

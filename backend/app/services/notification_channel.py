@@ -39,7 +39,8 @@ class ChannelResult:
 class Channel(Protocol):
     code: str
 
-    def send(self, db: Session, title: str, content: str | None, recipients: list[str]) -> ChannelResult: ...  # noqa: E704
+    def send(self, db: Session, title: str, content: str | None, recipients: list[str],
+             prefix: str = "【预警】") -> ChannelResult: ...  # noqa: E704
 
 
 class InAppChannel:
@@ -47,7 +48,8 @@ class InAppChannel:
 
     code = "inapp"
 
-    def send(self, db: Session, title: str, content: str | None, recipients: list[str]) -> ChannelResult:
+    def send(self, db: Session, title: str, content: str | None, recipients: list[str],
+             prefix: str = "【预警】") -> ChannelResult:
         count = _notify(db, None, roles=recipients, type="alert", title=title, content=content,
                         ref_type="alert")
         return ChannelResult(ok=count > 0, detail=f"站内信 {count} 条")
@@ -61,11 +63,12 @@ class WebhookChannel:
         self.name_cn = name_cn
         self.config = config or {}
 
-    def send(self, db: Session, title: str, content: str | None, recipients: list[str]) -> ChannelResult:
+    def send(self, db: Session, title: str, content: str | None, recipients: list[str],
+             prefix: str = "【预警】") -> ChannelResult:
         url = self.config.get("webhook_url") or self.config.get("url")
         if not url:
             return ChannelResult(ok=False, detail="未配置 webhook_url")
-        text = f"**【预警】** {title}"
+        text = f"**{prefix}** {title}"
         if content:
             text += f"\n{content}"
         try:
@@ -156,3 +159,55 @@ def dispatch_alert(
             results.append({"channel": code, "status": "failed"})
     db.flush()
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 系统级 error 事件外发(2026-09-29)
+# ─────────────────────────────────────────────────────────────────────
+# 与业务预警 dispatch_alert 的区别:
+#   - 系统事件(LLM 鉴权挂/Redis 挂等)是"系统自身故障", 无 alert 规则/静默时段概念,
+#     夜间也必须送达(事故常在非工作时间发生), 故不做静默时段判断;
+#   - 频率已在 record_system_event 的 dedup_minutes 处收敛, 这里只负责送达;
+#   - fire-and-forget 后台线程: webhook 同步 httpx 最长 10s, 绝不能阻塞业务提交;
+#   - 通道选择: 优先 code='system_alert' 的启用 webhook(可与业务预警分群);
+#     未配置则回退任意启用的 webhook 通道; 一个都没有 → 静默跳过。
+def dispatch_system_alert_async(
+    *, title: str, summary: str | None, category: str, action: str
+) -> None:
+    """在后台 daemon 线程把一条系统告警推送到群机器人。任何异常都不外抛。"""
+    import threading
+    from datetime import timedelta
+
+    def _run() -> None:
+        # 延迟导入避免循环依赖(SessionLocal 在大部分运行期已可用)
+        from app.core.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            row = db.scalar(select(NotificationChannel).where(
+                NotificationChannel.code == "system_alert",
+                NotificationChannel.channel_type == "webhook",
+                NotificationChannel.enabled.is_(True),
+            ))
+            if row is None:
+                row = db.scalar(select(NotificationChannel).where(
+                    NotificationChannel.channel_type == "webhook",
+                    NotificationChannel.enabled.is_(True),
+                ).order_by(NotificationChannel.id))
+            if row is None:
+                return  # 未配置任何 webhook 通道 → 不外发(站内角标仍可见)
+            ch = WebhookChannel(row.code, row.name_cn, row.config)
+            now_cn = datetime.now(timezone.utc).astimezone(
+                timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
+            body = f"时间: {now_cn}\n来源: {category}/{action}"
+            if summary:
+                body += f"\n{summary}"
+            r = ch.send(db, title, body, [], prefix="【系统告警】")
+            if not r.ok:
+                logger.warning("系统告警 webhook 投递失败(channel=%s): %s", row.code, r.detail)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("系统告警外发异常(不影响主流程): %s", e)
+        finally:
+            db.close()
+
+    threading.Thread(target=_run, name="sys-alert-webhook", daemon=True).start()

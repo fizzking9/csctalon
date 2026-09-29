@@ -9,8 +9,10 @@
 import { reactive, readonly } from 'vue'
 
 const state = reactive({
-  /** 事务通知未读数(侧边栏/顶部角标) */
+  /** 事务通知未读数(侧边栏/顶部角标; 2026-09-29 起仅含 warning/error) */
   eventUnread: 0,
+  /** 其中 error 级数(铃铛红色特权, 系统故障一眼可见) */
+  eventUnreadError: 0,
   /** 布局是否处于移动端断点 */
   isMobile: false,
 })
@@ -24,6 +26,9 @@ export function useLayoutStateWriter() {
   return {
     setEventUnread(v) {
       state.eventUnread = Number(v) || 0
+    },
+    setEventUnreadError(v) {
+      state.eventUnreadError = Number(v) || 0
     },
     setIsMobile(v) {
       state.isMobile = !!v

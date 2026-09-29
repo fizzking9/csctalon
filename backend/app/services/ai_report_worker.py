@@ -281,6 +281,7 @@ def generate_for_template(db: Session, template: AiReportTemplate,
             status="failed", level="error",
             detail=json.dumps({"template_id": template.id, "code": template.code, "error": str(e)},
                               ensure_ascii=False),
+            dedup_minutes=30,
         )
         return None
 
@@ -321,6 +322,7 @@ def generate_for_template(db: Session, template: AiReportTemplate,
             status="failed", level="error",
             detail=json.dumps({"template_id": template.id, "code": template.code, "error": str(e)},
                               ensure_ascii=False),
+            dedup_minutes=30,
         )
         return None
 
@@ -361,6 +363,7 @@ def generate_for_template(db: Session, template: AiReportTemplate,
             status="failed", level="error",
             detail=json.dumps({"template_id": template.id, "code": template.code},
                               ensure_ascii=False),
+            dedup_minutes=30,
         )
         return None
 

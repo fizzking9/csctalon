@@ -58,9 +58,17 @@
                 @click="handleManualSync"
               />
             </el-tooltip>
-            <el-tooltip v-if="authStore.isAdmin" content="事务通知" placement="bottom">
-              <el-badge :value="eventUnread" :max="99" :hidden="eventUnread === 0" class="event-bell">
-                <el-button :icon="Bell" circle size="small" text @click="router.push('/system/system-events')" />
+            <el-tooltip v-if="authStore.isAdmin" :content="eventUnreadError > 0 ? `事务通知: ${eventUnreadError} 条严重故障待处理` : '事务通知'" placement="bottom">
+              <el-badge
+                :value="eventUnreadError > 0 ? eventUnreadError : eventUnread"
+                :max="99"
+                :type="eventUnreadError > 0 ? 'danger' : 'warning'"
+                :hidden="eventUnread === 0"
+                class="event-bell"
+              >
+                <el-button :icon="Bell" circle size="small" text
+                  :class="{ 'bell-danger': eventUnreadError > 0 }"
+                  @click="router.push('/system/system-events')" />
               </el-badge>
             </el-tooltip>
           </div>
@@ -250,7 +258,7 @@ import { useLayoutState, useLayoutStateWriter } from '@/composables/useLayoutSta
 const { openQuickAnalysis } = useAudit()
 const { openAssistant } = useAssistant()
 // 布局层共享状态: 未读数写到这里, MenuTree(递归组件)只读消费, 避免 N 倍轮询
-const { setEventUnread } = useLayoutStateWriter()
+const { setEventUnread, setEventUnreadError } = useLayoutStateWriter()
 const layoutState = useLayoutState()
 
 const route = useRoute()
@@ -351,11 +359,14 @@ let _mq = null
 // 系统事务通知未读数(侧边栏/顶部角标, 15s 轮询)
 // 存于 useLayoutState 共享单例(菜单树递归组件共用, 避免各自轮询)
 const eventUnread = computed(() => layoutState.eventUnread)
+// error 级未读数: 铃铛红色特权(2026-09-29 事故治理)
+const eventUnreadError = computed(() => layoutState.eventUnreadError)
 
 async function _pollEventUnread() {
   try {
     const res = await systemEventSummary()
     setEventUnread(res.data?.unread || 0)
+    setEventUnreadError(res.data?.unread_error || 0)
   } catch (e) {
     // 静默: 接口异常不影响主布局
   }
@@ -544,6 +555,14 @@ async function handleManualSync() {
 }
 .event-bell .el-badge__content {
   font-size: 10px;
+}
+/* error 级未读: 铃铛图标本身变红, 与普通 warning 角标区分(事故特权) */
+.event-bell .bell-danger .el-icon,
+.event-bell .bell-danger svg {
+  color: var(--el-color-danger);
+}
+.event-bell .bell-danger:hover .el-icon {
+  color: var(--el-color-danger);
 }
 .menu-badge .el-badge__content {
   font-size: 10px;

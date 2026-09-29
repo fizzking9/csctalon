@@ -1,28 +1,28 @@
-"""LLM 故障治理测试(2026-09-29 事故修复)
+"""LLM 故障治理 + 系统事件降噪/去重/保留期测试(2026-09-29)
 
 事故: talon 库重建后 csctalon 的 key 失配, 401/403 被当作 permanent 立即抛出,
 旧逻辑既不计数也不发事件 —— 14 小时 100 次失败, 管理面零感知。
+治理二期: info 事件不进未读(降噪)、通用 dedup_minutes 去重、error 外发 webhook、
+日志保留期每日清理。
 
 本测试锁定:
-  1. 403 → 计入连续失败 + 发 error 级系统事件(action=auth_failed)
-  2. 全链 transient 失败 → 发 chain_unavailable 事件
-  3. 同类事件 30 分钟去重(持续故障不刷屏)
-  4. 400(非鉴权 permanent)→ 不发鉴权事件
+  LLM 链: 403 → 计入连续失败 + error 事件; 全链失败 → chain_unavailable; 400 不误报
+  事件服务: info 默认已读不亮角标 / error 进未读 / 去重窗口内只写一条 / 去重仍外发一次
+  保留期: system_events 超 90 天被清、近期保留
 """
 import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 
 from app.services import llm_provider_service, system_event_service
-from app.services.llm_client import LLMError, _call_multi_provider, _record_llm_outage
+from app.services.llm_client import LLMError, _call_multi_provider
 
 
 # ── 轻量 fake, 不依赖真实 DB ─────────────────────────────────────────
 
 class _FakeQuery:
-    """模拟 SystemEvent 去重查询的链式 filter().first()。"""
-
     def __init__(self, existing):
         self._existing = existing
 
@@ -56,13 +56,12 @@ def _provider(**overrides):
 
 
 async def _run_chain(monkeypatch, status_codes, *, db=None, providers=None):
-    """跑一遍多 provider 链; status_codes 按 provider 顺序返回。"""
     events = []
 
     def fake_record(db, category, action, title, summary=None,
                     status="info", level=None, **kw):
         events.append({"category": category, "action": action,
-                       "title": title, "level": level})
+                       "title": title, "level": level, "status": status})
 
     monkeypatch.setattr(system_event_service, "record_system_event", fake_record)
     monkeypatch.setattr(llm_provider_service, "record_call_log",
@@ -129,40 +128,111 @@ class TestAuthFailureGovernance:
         assert [e["action"] for e in events] == ["auth_failed"]
 
 
-class TestOutageEventDedupe:
-    """30 分钟去重(直接测 _record_llm_outage)。"""
+class TestEventNoiseAndDedup:
+    """事件服务降噪/去重/外发(commit=False 走事务内可见, 不污染测试库)。"""
 
-    def test_first_event_written(self, monkeypatch):
-        written = []
+    def test_info_default_read_no_badge(self, db, monkeypatch):
+        """info 级默认 is_read=True —— 入库留痕但不亮角标。"""
         monkeypatch.setattr(
-            system_event_service, "record_system_event",
-            lambda db, **kw: written.append(kw))
-        _record_llm_outage(_FakeDB(existing_event=None),
-                           action="auth_failed", title="t", summary="s")
-        assert len(written) == 1
+            "app.services.notification_channel.dispatch_system_alert_async",
+            lambda **kw: pytest.fail("info 不应触发外发"))
+        ev = system_event_service.record_system_event(
+            db, category="sync", action="unit_noise_info",
+            title="单测-成功事件不进未读", status="success", commit=False)
+        assert ev.is_read is True and ev.read_at is not None
 
-    def test_duplicate_within_window_skipped(self, monkeypatch):
-        written = []
+    def test_error_default_unread_and_dispatches(self, db, monkeypatch):
+        """error 级进未读 + 触发一次外发调度。"""
+        sent = []
         monkeypatch.setattr(
-            system_event_service, "record_system_event",
-            lambda db, **kw: written.append(kw))
-        # 去重查询命中 30 分钟内的同类 failed 事件 → 跳过
-        _record_llm_outage(_FakeDB(existing_event=object()),
-                           action="auth_failed", title="t", summary="s")
-        assert written == []
+            "app.services.notification_channel.dispatch_system_alert_async",
+            lambda **kw: sent.append(kw))
+        ev = system_event_service.record_system_event(
+            db, category="llm", action="unit_noise_err",
+            title="单测-error进未读", status="failed", commit=False)
+        assert ev.is_read is False and ev.read_at is None
+        assert len(sent) == 1 and sent[0]["category"] == "llm"
 
-    def test_db_none_is_noop(self, monkeypatch):
-        called = []
+    def test_dedup_second_call_skipped_and_no_dispatch(self, db, monkeypatch):
+        """去重窗口内同 category+action+level+title 只写一条, 且只外发一次。"""
+        sent = []
         monkeypatch.setattr(
-            system_event_service, "record_system_event",
-            lambda *a, **k: called.append(1))
-        _record_llm_outage(None, action="auth_failed", title="t", summary="s")
-        assert called == []
+            "app.services.notification_channel.dispatch_system_alert_async",
+            lambda **kw: sent.append(kw))
+        kw = dict(category="ai", action="unit_dedup",
+                  title="单测-去重持续性故障", status="failed", commit=False)
+        first = system_event_service.record_system_event(db, dedup_minutes=30, **kw)
+        db.flush()  # fixture 为 autoflush=False; 真实运行 commit=True 首次调用即落库可见
+        second = system_event_service.record_system_event(db, dedup_minutes=30, **kw)
+        assert first is not None and second is None
+        assert len(sent) == 1, "去重命中后不得再次外发"
 
-    def test_record_failure_never_raises(self, monkeypatch):
-        """事件写入自身报错也不能影响调用主流程。"""
-        def boom(*a, **k):
-            raise RuntimeError("event store down")
-        monkeypatch.setattr(system_event_service, "record_system_event", boom)
-        _record_llm_outage(_FakeDB(existing_event=None),
-                           action="auth_failed", title="t", summary="s")
+    def test_dedup_different_title_both_kept(self, db, monkeypatch):
+        """不同 title(如不同模板/不同源)不去重, 各留各的。"""
+        monkeypatch.setattr(
+            "app.services.notification_channel.dispatch_system_alert_async",
+            lambda **kw: None)
+        a = system_event_service.record_system_event(
+            db, category="ai", action="unit_dedup2",
+            title="单测-去重A", status="failed", commit=False, dedup_minutes=30)
+        b = system_event_service.record_system_event(
+            db, category="ai", action="unit_dedup2",
+            title="单测-去重B", status="failed", commit=False, dedup_minutes=30)
+        assert a is not None and b is not None
+
+    def test_badge_override_forces_unread_info(self, db, monkeypatch):
+        monkeypatch.setattr(
+            "app.services.notification_channel.dispatch_system_alert_async",
+            lambda **kw: None)
+        ev = system_event_service.record_system_event(
+            db, category="auth", action="unit_badge",
+            title="单测-info强制角标", status="info", commit=False, badge=True)
+        assert ev.is_read is False
+
+
+class TestLogRetention:
+    """保留期清理(真实 pg 测试库, 带唯一标记, 用后清理)。"""
+
+    def test_system_events_90d_purge(self, _engine):
+        from sqlalchemy.orm import Session
+
+        from app.models.system_event import SystemEvent
+
+        marker = f"单测-retention-{datetime.now(timezone.utc).timestamp()}"
+        old_title = marker + "-old"
+        new_title = marker + "-new"
+        session = Session(_engine)
+        try:
+            now = datetime.now(timezone.utc)
+            session.add_all([
+                SystemEvent(category="schedule", action="unit_retention_old",
+                            title=old_title, status="info", level="info",
+                            is_read=True,
+                            created_at=now - timedelta(days=100)),
+                SystemEvent(category="schedule", action="unit_retention_new",
+                            title=new_title, status="info", level="info",
+                            is_read=True, created_at=now),
+            ])
+            session.commit()
+
+            from app.services.log_retention_service import run_retention_purge
+
+            out = run_retention_purge(session, retention_days={"system_events": 90})
+            assert out["total"] >= 1
+            # 清理自身可能产生的"日志保留期清理"事件会污染断言, 用精确标记查
+            old_left = session.query(SystemEvent).filter(
+                SystemEvent.title == old_title).count()
+            new_left = session.query(SystemEvent).filter(
+                SystemEvent.title == new_title).count()
+            assert old_left == 0, "100 天前的事件应被清掉"
+            assert new_left == 1, "近期事件必须保留"
+        finally:
+            # 用后清理(标记行 + 本用例产生的清理事件, 精确条件精删)
+            session.query(SystemEvent).filter(
+                SystemEvent.title.like(marker + "%")).delete(synchronize_session=False)
+            session.query(SystemEvent).filter(
+                SystemEvent.action == "log_retention_purge",
+                SystemEvent.title == "日志保留期清理").delete(
+                synchronize_session=False)
+            session.commit()
+            session.close()

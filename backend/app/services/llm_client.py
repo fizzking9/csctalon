@@ -268,9 +268,9 @@ def _prompt_chars(messages: list[dict]) -> int:
 # 教训: 9-28 talon 库重建后 csctalon 的 key 失配, 全部调用 403。
 #   旧逻辑把 401/403 当 permanent 立即抛出 —— 不计数、不摘链路、不发事件,
 #   14 小时累计 100 次失败, 管理面/事务通知零感知。
-# 处理: 鉴权失败/全链不可用时写 error 级系统事件(「事务通知」角标可见),
-#   同 category+action 30 分钟去重, 避免持续性故障刷屏。
-_OUTAGE_DEDUP_S = 1800
+# 处理: 鉴权失败/全链不可用时写 error 级系统事件(「事务通知」角标可见 +
+#   群机器人外发), 去重复用 record_system_event 的 dedup_minutes(走 DB, 跨进程)。
+_OUTAGE_DEDUP_MIN = 30
 
 
 def _record_llm_outage(db: Session | None, *, action: str,
@@ -279,23 +279,12 @@ def _record_llm_outage(db: Session | None, *, action: str,
     if db is None:
         return
     try:
-        from datetime import datetime, timedelta, timezone
-
-        from app.models.system_event import SystemEvent
         from app.services import system_event_service
 
-        since = datetime.now(timezone.utc) - timedelta(seconds=_OUTAGE_DEDUP_S)
-        exists = db.query(SystemEvent.id).filter(
-            SystemEvent.category == "llm",
-            SystemEvent.action == action,
-            SystemEvent.status == "failed",
-            SystemEvent.created_at >= since,
-        ).first()
-        if exists:
-            return
         system_event_service.record_system_event(
             db, category="llm", action=action, title=title,
             summary=summary, status="failed", level="error",
+            dedup_minutes=_OUTAGE_DEDUP_MIN,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("llm outage event skipped: %s", e)

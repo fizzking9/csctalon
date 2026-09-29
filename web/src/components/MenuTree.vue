@@ -21,11 +21,12 @@
     <el-menu-item v-else-if="node.path" :index="node.path">
       <el-icon v-if="node.icon"><component :is="iconOf(node.icon)" /></el-icon>
       <span>{{ node.title }}</span>
-      <!-- 角标(如事务通知未读数) -->
+      <!-- 角标(如事务通知未读数; error 时红色显示严重故障数) -->
       <el-badge
         v-if="node.badge === 'eventUnread' && layoutState.eventUnread > 0"
-        :value="layoutState.eventUnread"
+        :value="layoutState.eventUnreadError > 0 ? layoutState.eventUnreadError : layoutState.eventUnread"
         :max="99"
+        :type="layoutState.eventUnreadError > 0 ? 'danger' : 'warning'"
         class="menu-badge"
       >
         <span />
