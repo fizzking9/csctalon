@@ -169,6 +169,10 @@ export const MENU_GROUPS = [
     children: [
       // #141: 3 Tab 整合入口(模板/模型/提示词, 配置侧)
       { path: '/system/ai-admin', title: 'AI 管理' },
+      // 2026-09-29: LLM 网关接入独立入口( Talon URL/Key/模型/SN 授权治理 )
+      //   教训: 9-28 talon 库重建后 key 失配致 csctalon 全量 403, admin 找不到
+      //   配置入口( 此前仅能经「AI 管理→②模型节点」Tab 进入, 侧栏无直达 )。
+      { path: '/system/llm-providers', title: 'LLM 模型接入' },
       // #125: 模板管理独立页(老路由保留可达, 不破坏书签)
       { path: '/system/ai-templates', title: 'AI 报告模板' },
       // #141: AI 报告历史(查看侧) — 含完整 content 查看抽屉

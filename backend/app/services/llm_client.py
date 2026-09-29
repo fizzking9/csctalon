@@ -263,6 +263,49 @@ def _prompt_chars(messages: list[dict]) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# 故障治理: LLM 链路级故障 → 系统事务事件(2026-09-29 事故)
+# ─────────────────────────────────────────────────────────────────────
+# 教训: 9-28 talon 库重建后 csctalon 的 key 失配, 全部调用 403。
+#   旧逻辑把 401/403 当 permanent 立即抛出 —— 不计数、不摘链路、不发事件,
+#   14 小时累计 100 次失败, 管理面/事务通知零感知。
+# 处理: 鉴权失败/全链不可用时写 error 级系统事件(「事务通知」角标可见),
+#   同 category+action 30 分钟去重, 避免持续性故障刷屏。
+_OUTAGE_DEDUP_S = 1800
+
+
+def _record_llm_outage(db: Session | None, *, action: str,
+                       title: str, summary: str) -> None:
+    """写 LLM 故障事件; 任何异常都不得影响调用主流程。"""
+    if db is None:
+        return
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        from app.models.system_event import SystemEvent
+        from app.services import system_event_service
+
+        since = datetime.now(timezone.utc) - timedelta(seconds=_OUTAGE_DEDUP_S)
+        exists = db.query(SystemEvent.id).filter(
+            SystemEvent.category == "llm",
+            SystemEvent.action == action,
+            SystemEvent.status == "failed",
+            SystemEvent.created_at >= since,
+        ).first()
+        if exists:
+            return
+        system_event_service.record_system_event(
+            db, category="llm", action=action, title=title,
+            summary=summary, status="failed", level="error",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("llm outage event skipped: %s", e)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────────
 # 单 Provider 单次调用(含指数退避重试)
 # ─────────────────────────────────────────────────────────────────────
 async def _call_single_provider(
@@ -460,6 +503,22 @@ async def _call_multi_provider(
         )
         if is_permanent:
             # permanent(4xx) 立即抛, 不降级(继续下个 Provider 也是同样的鉴权/参数错)
+            # 2026-09-29 治理: 401/403(网关鉴权失败)额外做两件事 ——
+            #   ① 计入连续失败, 达阈值标 unhealthy(接入页可见, 成功自动恢复);
+            #   ② 发 error 级系统事件(30min 去重) → 「事务通知」角标告警。
+            if status in (401, 403):
+                llm_provider_service.mark_provider_failed(
+                    db, pid, fail_threshold=p["fail_threshold"])
+                _record_llm_outage(
+                    db,
+                    action="auth_failed",
+                    title="LLM 网关鉴权失败(API Key 无效或未授权)",
+                    summary=(
+                        f"provider={pcode} model={model} 返回 {status};"
+                        f"来源={source or '-'}。请在「LLM 模型接入」检查网关地址与 Key"
+                        f"(talon 侧该 Key/SN 是否仍有效, 例如 talon 重建库后需重新授权)。"
+                    ),
+                )
             raise err
         # transient: 失败计数 +1, 降级下一个 Provider
         llm_provider_service.mark_provider_failed(db, pid, fail_threshold=p["fail_threshold"])
@@ -471,6 +530,16 @@ async def _call_multi_provider(
     if last_err is not None:
         logger.error("llm all providers failed count=%s last=%s status=%s duration_ms=%d",
                      len(providers), last_err_class, last_status, duration_ms)
+        _record_llm_outage(
+            db,
+            action="chain_unavailable",
+            title="LLM 调用链全部 Provider 不可用",
+            summary=(
+                f"链上 {len(providers)} 个 Provider 均失败, "
+                f"最后错误={last_err_class}/{last_status}; 来源={source or '-'}。"
+                f"请在「LLM 模型接入」查看健康状态与调用审计。"
+            ),
+        )
         raise last_err
     raise LLMError(f"LLM 调用失败: 无可用 Provider(共 {len(providers)} 个, 全部失败)")
 
@@ -544,5 +613,16 @@ async def _call_env_single(
                      settings.LLM_MODEL, duration_ms, len(content))
         return content
     if err is not None:
+        # 2026-09-29: 兜底通道鉴权失败同样发系统事件(此前同样静默)
+        if status in (401, 403):
+            _record_llm_outage(
+                db,
+                action="auth_failed",
+                title="LLM 网关鉴权失败(.env 兜底通道)",
+                summary=(
+                    f"LLM_BASE_URL={settings.LLM_BASE_URL} model={settings.LLM_MODEL} "
+                    f"返回 {status}; 来源={source or '-'}。请检查 .env 的 LLM_API_KEY。"
+                ),
+            )
         raise err
     raise LLMError("LLM 调用失败(未知)")

@@ -4,6 +4,12 @@
       <div>
         <div class="page-title" style="margin: 0">LLM 多 Provider</div>
         <div class="page-sub">AI 助手 · 模型接入管理（本地 Talon 网关 / 云端 DeepSeek 等，按优先级降级，连续失败自动摘除）</div>
+        <el-alert type="warning" :closable="false" show-icon style="max-width: 860px; margin-top: 8px">
+          <template #title>
+            网关地址与 Key 在此配置；SN 不在本系统设置 —— SN 是在 <b>Talon 管理面板</b>创建 Key 时指定的身份名（如 SN-CSCTALON），Key 与 SN 一一绑定。
+            Talon 重建/重装后 Key 会失配（调用报 401/403），需在 Talon 侧重新签发并把新 Key 填回本页；鉴权故障会在「事务通知」告警。
+          </template>
+        </el-alert>
       </div>
       <div>
         <el-button size="small" :icon="Refresh" @click="loadAll">刷新</el-button>
