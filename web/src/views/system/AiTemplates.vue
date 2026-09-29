@@ -2,7 +2,7 @@
   <div class="page-container">
     <div class="flex-between mb-16">
       <div>
-        <div class="page-title" style="margin: 0">AI 报告模板</div>
+        <div class="page-title" style="margin: 0">报告模板</div>
         <div class="page-sub">预生成报告的 prompt 模板, 关键词路由, 调度时点, 多模型分工</div>
       </div>
       <div>

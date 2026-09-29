@@ -141,15 +141,20 @@ export const MENU_GROUPS = [
     ],
   },
 
-  // ── 5.5. AI 与分析(admin) ──
+  // ── 5. AI 与分析(admin) ──
   // ── 设计说明 ──────────────────────────────────────────────────────
-  // 按 AI 链路依赖层次组织: 接入层 → 提示词层 → 查看侧
-  //   ① LLM 模型接入: Provider CRUD(URL/Key/模型/SN), 角色降级链, 健康状态, 云端策略
-  //   ② AI 报告模板 → 提示词关注点 → 评估中心 → 版本管理: 提示词全生命周期
-  //   ③ AI 报告历史: 查看侧
-  // 历史: 原 #137/#141 做 Tab 整合入口(AI 管理 3-Tab), 后各 Tab 陆续补独立菜单,
-  //        导致同一组件既在 Tab 内又在侧栏(重复展示)。2026-09-29 取消 Tab 容器,
-  //        各页独立直达; /system/ai-admin 路由保留可达(不破坏书签)。
+  // 按 AI 链路依赖层次组织(扁平 6 项, 不套子组):
+  //   ① 模型接入与调度: Provider CRUD + 角色降级链 + 健康状态 + 云端出域策略 + 调用审计
+  //                     (含 .env 单 Provider 兜底配置只读区块, 2026-09-29 自接入中心 Tab4 迁入)
+  //   ② 报告模板 → 关注点: 提示词内容侧(生成/分析视角)
+  //   ③ 提示词评估 → 版本: 提示词治理侧(评估/版本账本)
+  //   ④ 报告历史: 产物查看侧
+  // 命名口径: 模型页统称「模型接入与调度」; 关注点页与页面标题一致「AI 助手关注点」;
+  //           前缀统一(报告模板以「报告」为纲, 关注点/评估/版本以「提示词」为纲)。
+  // 历史: 原 #137/#141 做 3-Tab 整合入口(AI 管理), 后各 Tab 陆续补独立菜单 → 重复展示;
+  //       2026-09-29 取消 Tab 容器, 各页独立直达(/system/ai-admin 路由保留可达不破坏书签);
+  //       2026-09-30 接入中心 Tab4「AI 与模型」整体迁入本组(模型配置并入模型页底部,
+  //       提示词四层总览并入关注点页顶部), 接入中心回归纯数据对接。
   {
     key: 'ai-analysis',
     title: 'AI 与分析',
@@ -157,24 +162,26 @@ export const MENU_GROUPS = [
     buildMode: 'always',
     roles: ['admin'],
     children: [
-      // ── 接入层 + 模型层 ──
-      // Provider CRUD (URL/Key/模型/SN), 角色→模型降级链, 健康状态, 云端出域策略
+      // ── ① 模型层: 算力底座(接入 + 调度 + 审计) ──
+      // Provider CRUD (URL/Key/模型/SN), 角色→模型降级链, 健康状态, 云端出域策略, 调用审计
       // 教训: 9-28 talon 库重建后 key 失配致全量 403, 需独立直达入口
-      { path: '/system/llm-providers', title: 'LLM 模型接入' },
+      { path: '/system/llm-providers', title: '模型接入与调度' },
 
-      // ── 提示词层 ──
+      // ── ② 提示词内容层 ──
       // 报告模板: 预生成 prompt 模板, 关键词路由, 调度时点, 多模型分工
-      { path: '/system/ai-templates', title: 'AI 报告模板' },
-      // 关注点/分析视角: 注入 Prompt 的建议性指导(原 AI 管理 Tab③, 补独立入口)
-      { path: '/system/ai-focus-configs', title: '提示词关注点' },
-      // 提示词评估: 命中/兜底/锚点/规则健康 + 半自动迭代
-      { path: '/system/ai-prompt-eval', title: '提示词评估中心' },
-      // 提示词版本: 治理研判/接入起草提示词版本账本(含金丝雀冒烟)
-      { path: '/system/prompt-versions', title: '提示词版本管理' },
+      { path: '/system/ai-templates', title: '报告模板' },
+      // 关注点/分析视角: 注入 Prompt 的建议性指导 + 提示词四层总览(自接入中心 Tab4 迁入)
+      { path: '/system/ai-focus-configs', title: 'AI 助手关注点' },
 
-      // ── 查看侧 ──
+      // ── ③ 提示词治理层 ──
+      // 提示词评估: 命中/兜底/锚点/规则健康 + 半自动迭代
+      { path: '/system/ai-prompt-eval', title: '提示词评估' },
+      // 提示词版本: 治理研判/接入起草提示词版本账本(含金丝雀冒烟)
+      { path: '/system/prompt-versions', title: '提示词版本' },
+
+      // ── ④ 产物查看层 ──
       // AI 报告历史: 含完整 content 查看抽屉
-      { path: '/system/ai-reports', title: 'AI 报告历史' },
+      { path: '/system/ai-reports', title: '报告历史' },
     ],
   },
 

@@ -34,7 +34,7 @@
   <div class="ai-reports">
     <div class="flex-between mb-16">
       <div>
-        <div class="page-title" style="margin: 0">AI 报告历史</div>
+        <div class="page-title" style="margin: 0">报告历史</div>
         <div class="page-sub">AI 系统预生成报告池 — 按模板折叠展示</div>
       </div>
       <el-popover placement="bottom-end" :width="500" trigger="click">

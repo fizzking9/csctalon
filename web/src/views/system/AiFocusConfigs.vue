@@ -2,7 +2,7 @@
   <div class="page-container">
     <div class="flex-between mb-16">
       <div>
-        <div class="page-title" style="margin: 0">AI 助手提示词</div>
+        <div class="page-title" style="margin: 0">AI 助手关注点</div>
         <div class="page-sub">经营数据 AI 助手 · 关注点/分析视角配置（注入 Prompt 的建议性指导，不覆盖口径卡/铁律）</div>
       </div>
       <div>
@@ -10,6 +10,53 @@
         <el-button size="small" type="primary" :icon="Plus" @click="openCreate">新建关注点</el-button>
       </div>
     </div>
+
+    <!-- 提示词四层总览 — 2026-09-29 自接入中心 Tab4「AI 与模型」迁入(架构导览: 关注点嵌在铁律/口径卡/模型之间) -->
+    <el-card shadow="never" class="mb-16">
+      <template #header>
+        <div class="flex-between">
+          <span>提示词分层（四层）</span>
+          <span class="sub-tip">关注点位于「铁律/口径卡」之下、「模型原生」之上 —— 是唯一可配置层</span>
+        </div>
+      </template>
+      <el-table :data="layers" size="small" border>
+        <el-table-column label="层级" min-width="150">
+          <template #default="{ row }"><b>{{ row.name }}</b></template>
+        </el-table-column>
+        <el-table-column label="来源" width="110">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain" type="info">{{ sourceLabel(row.source) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="可编辑" width="100">
+          <template #default="{ row }">
+            <el-tag :type="row.editable ? 'success' : 'info'" size="small" effect="plain">
+              {{ row.editable ? '可编辑' : '只读' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="规模" width="110">
+          <template #default="{ row }">
+            <span v-if="row.char_count">{{ row.char_count }} 字</span>
+            <span v-else class="sub-tip">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="说明" min-width="220" show-overflow-tooltip prop="reason" />
+        <el-table-column label="操作" width="150" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              v-if="row.key !== 'model'"
+              link
+              type="primary"
+              size="small"
+              @click="previewLayer(row)"
+            >
+              查看全文
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
 
     <el-alert type="info" :closable="false" show-icon class="mb-16">
       <template #title>
@@ -79,6 +126,13 @@
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </template>
     </el-dialog>
+  <!-- 提示词层全文(只读) — 2026-09-29 自接入中心 Tab4 迁入 -->
+    <el-dialog v-model="previewVisible" :title="previewTitle" width="760px">
+      <el-alert v-if="previewReadonly" type="info" :closable="false" show-icon class="mb-16">
+        <template #title>该层为防幻觉底线（代码常量/.env），仅供查看，不可在此修改。</template>
+      </el-alert>
+      <el-input v-model="previewContent" type="textarea" :rows="22" readonly />
+    </el-dialog>
   </div>
 </template>
 
@@ -87,6 +141,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { Refresh, Plus } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { listAiFocus, createAiFocus, updateAiFocus, deleteAiFocus } from '@/api/aiFocus'
+import { getAiPromptLayers, getAiPromptPreview } from '@/api/aiModel'
 
 const loading = ref(false)
 const items = ref([])
@@ -94,6 +149,33 @@ const dialogVisible = ref(false)
 const saving = ref(false)
 const editingId = ref(null)
 const form = reactive({ code: '', scope_key: 'global', title: '', content: '', sort_order: 0 })
+
+// 提示词四层总览 + 只读预览(2026-09-29 自接入中心 Tab4 迁入)
+const layers = ref([])
+const previewVisible = ref(false)
+const previewTitle = ref('')
+const previewContent = ref('')
+const previewReadonly = ref(true)
+const sourceLabel = (s) => ({ env: '.env', code: '代码常量', db: '数据库' }[s] || s)
+
+async function loadLayers() {
+  try {
+    const res = await getAiPromptLayers()
+    layers.value = res.data?.layers || []
+  } catch (e) { /* 拦截器已提示 */ }
+}
+
+async function previewLayer(row) {
+  try {
+    const res = await getAiPromptPreview(row.key)
+    previewTitle.value = res.data?.name || row.name
+    previewContent.value = res.data?.content || '（暂无内容）'
+    previewReadonly.value = res.data?.readonly !== false
+    previewVisible.value = true
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || '加载失败')
+  }
+}
 
 function scopeTagType(s) {
   return { global: 'success', refund: 'warning', complaint: 'danger', reception: 'primary' }[s] || 'info'
@@ -162,7 +244,10 @@ async function remove(row) {
   } catch (e) { /* 已提示 */ }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadLayers()
+})
 </script>
 
 <style scoped>

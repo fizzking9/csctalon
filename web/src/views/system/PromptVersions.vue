@@ -4,7 +4,7 @@
   统一管理除 AI 报告 gen/extract 之外的两类服务提示词：
   - 治理研判：AI 数据治理分析师的 judge_system（角色铁律+输出结构）/ judge_user（研判任务）
   - 接入助手：投诉接入起草的 draft_system / draft_user
-  AI 报告生成/摘取侧（gen_system/extract_system）带金丝雀冒烟，在「提示词评估中心」区块⑤管理。
+  AI 报告生成/摘取侧（gen_system/extract_system）带金丝雀冒烟，在「提示词评估」区块⑤管理。
 
   三类提示词统一纪律：任何改动（开发分析 / 手动 / 系统迭代）都入版本账本，
   每版附「解决什么问题 / 影响什么内容」，可激活、可回滚。
@@ -14,14 +14,14 @@
     <el-card shadow="never">
       <template #header>
         <div class="header">
-          <span class="title">提示词版本管理</span>
+          <span class="title">提示词版本</span>
           <el-tag size="small" type="info" effect="plain">admin</el-tag>
         </div>
         <div class="sub">
           所有提示词改动（开发分析 / 手动 / 系统迭代）均版本化留痕：每版记录「解决什么问题、影响什么内容」，
           新版本为草稿不自动生效，人工激活后即时切换，任意历史版本可一键回滚。
           AI 报告生成/摘取侧（含金丝雀冒烟）在
-          <router-link to="/system/ai-prompt-eval">提示词评估中心</router-link>
+          <router-link to="/system/ai-prompt-eval">提示词评估</router-link>
           管理。
         </div>
       </template>

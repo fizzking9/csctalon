@@ -2,8 +2,8 @@
   <div class="page-container">
     <div class="flex-between mb-16">
       <div>
-        <div class="page-title" style="margin: 0">LLM 多 Provider</div>
-        <div class="page-sub">AI 助手 · 模型接入管理（本地 Talon 网关 / 云端 DeepSeek 等，按优先级降级，连续失败自动摘除）</div>
+        <div class="page-title" style="margin: 0">模型接入与调度</div>
+        <div class="page-sub">AI 助手 · 模型接入与调度（本地 Talon 网关 / 云端 DeepSeek 等，按优先级降级，连续失败自动摘除）</div>
         <el-alert type="warning" :closable="false" show-icon style="max-width: 860px; margin-top: 8px">
           <template #title>
             网关地址与 Key 在此配置；SN 不在本系统设置 —— SN 是在 <b>Talon 管理面板</b>创建 Key 时指定的身份名（如 SN-CSCTALON），Key 与 SN 一一绑定。
@@ -415,6 +415,40 @@
       </template>
     </el-dialog>
 
+    <!-- 兜底配置（.env 只读）— 2026-09-29 自接入中心 Tab4「AI 与模型」迁入 -->
+    <el-card v-loading="envLoading" class="mb-16">
+      <template #header>
+        <div class="flex-between">
+          <span>兜底配置（.env 只读）</span>
+          <div style="display: flex; align-items: center; gap: 6px">
+            <el-tag size="small" effect="plain" type="info">只读</el-tag>
+            <el-tag v-if="aiCfg.enabled" type="success" size="small">已启用</el-tag>
+            <el-tag v-else type="danger" size="small">未启用</el-tag>
+          </div>
+        </div>
+      </template>
+      <el-descriptions :column="2" size="small" border>
+        <el-descriptions-item label="服务地址">{{ aiCfg.base_url || '—' }}</el-descriptions-item>
+        <el-descriptions-item label="模型名">{{ aiCfg.model || '—' }}</el-descriptions-item>
+        <el-descriptions-item label="思考模式">{{ aiCfg.thinking || '—' }}</el-descriptions-item>
+        <el-descriptions-item label="最大输出 token">{{ aiCfg.max_tokens ?? '—' }}</el-descriptions-item>
+        <el-descriptions-item label="API Key">
+          <el-tag v-if="aiCfg.api_key_configured" type="success" size="small" effect="plain">
+            已配置（长度 {{ aiCfg.api_key_length }}）
+          </el-tag>
+          <el-tag v-else type="danger" size="small" effect="plain">未配置</el-tag>
+          <span class="dim" style="margin-left: 8px">出于安全，密钥明文不在任何界面展示</span>
+        </el-descriptions-item>
+      </el-descriptions>
+      <el-alert type="warning" :closable="false" show-icon class="mt-16">
+        <template #title>
+          服务端 <code>.env</code> 提供的单 Provider 兜底通道（上方 Provider 全部不可用时使用）。
+          修改需运维在服务器更新 <code>.env</code>（<code>LLM_ENABLED / LLM_BASE_URL /
+          LLM_MODEL / LLM_API_KEY</code>）并重启后端。API Key 严禁入库、严禁在界面展示明文。
+        </template>
+      </el-alert>
+    </el-card>
+
     <div style="margin-top: 16px">
       <el-button size="small" :icon="Connection" @click="testDialogVisible = true">独立测试任意配置</el-button>
     </div>
@@ -431,6 +465,11 @@ import {
   listLlmRoles, updateLlmRole, getCloudPolicy, updateCloudPolicy,
   removeLlmRoleMember, setLlmRoleMemberOrder,
 } from '@/api/llmProviders'
+import { getAiModelConfig } from '@/api/aiModel'
+
+// 兜底配置(.env 单 Provider, 只读脱敏) — 2026-09-29 自接入中心 Tab4 迁入
+const envLoading = ref(false)
+const aiCfg = reactive({})
 
 const loading = ref(false)
 const items = ref([])
@@ -497,7 +536,18 @@ async function load() {
 
 /** 刷新全部：Provider 列表 + 角色 + 出域策略（三者互相影响，需一起刷新）。 */
 async function loadAll() {
-  await Promise.all([load(), loadRoles(), loadCloudPolicy()])
+  await Promise.all([load(), loadRoles(), loadCloudPolicy(), loadEnvConfig()])
+}
+
+/** 兜底配置(.env 单 Provider, 只读脱敏)。 */
+async function loadEnvConfig() {
+  envLoading.value = true
+  try {
+    const res = await getAiModelConfig()
+    Object.assign(aiCfg, res.data || {})
+  } catch (e) { /* 拦截器已提示 */ } finally {
+    envLoading.value = false
+  }
 }
 
 async function loadRoles() {

@@ -25,7 +25,7 @@
     <div class="flex-between mb-16">
       <div>
         <div class="page-title" style="margin: 0">接入中心</div>
-        <div class="page-sub">对外接入与 AI 配置的统一入口 · 登录态 / 外部 Token / 推送配置包 / AI 与模型</div>
+        <div class="page-sub">对外数据接入的统一入口 · 登录态 / 外部 Token / 推送配置包</div>
       </div>
       <el-button size="small" :icon="Refresh" @click="refreshAll">刷新</el-button>
     </div>
@@ -235,99 +235,9 @@
         </el-row>
       </el-tab-pane>
 
-      <!-- ═══ Tab4 AI 与模型 ═══ -->
-      <el-tab-pane label="④ AI 与模型" name="ai">
-        <el-alert type="info" :closable="false" show-icon class="mb-16">
-          <template #title>
-            AI 相关设置集中在此。其中<b>模型接入</b>由服务端 <code>.env</code> 提供，
-            <b>铁律</b>与<b>口径卡</b>是防幻觉底线（只读），只有<b>关注点</b>可配置。
-          </template>
-        </el-alert>
-
-        <!-- 模型接入(脱敏只读) -->
-        <el-card shadow="never" class="mb-16">
-          <template #header>
-            <div class="card-header">
-              <span>模型接入</span>
-              <el-tag size="small" effect="plain" type="info">只读（.env 提供）</el-tag>
-              <el-tag v-if="aiCfg.enabled" type="success" size="small">已启用</el-tag>
-              <el-tag v-else type="danger" size="small">未启用</el-tag>
-            </div>
-          </template>
-          <el-descriptions :column="2" size="small" border>
-            <el-descriptions-item label="服务地址">{{ aiCfg.base_url || '—' }}</el-descriptions-item>
-            <el-descriptions-item label="模型名">{{ aiCfg.model || '—' }}</el-descriptions-item>
-            <el-descriptions-item label="思考模式">{{ aiCfg.thinking || '—' }}</el-descriptions-item>
-            <el-descriptions-item label="最大输出 token">{{ aiCfg.max_tokens ?? '—' }}</el-descriptions-item>
-            <el-descriptions-item label="API Key">
-              <el-tag v-if="aiCfg.api_key_configured" type="success" size="small" effect="plain">
-                已配置（长度 {{ aiCfg.api_key_length }}）
-              </el-tag>
-              <el-tag v-else type="danger" size="small" effect="plain">未配置</el-tag>
-              <span class="dim ml-8">出于安全，密钥明文不在任何界面展示</span>
-            </el-descriptions-item>
-          </el-descriptions>
-          <el-alert type="warning" :closable="false" show-icon class="mt-12">
-            <template #title>
-              修改模型配置需运维在服务器更新 <code>.env</code>（<code>LLM_ENABLED / LLM_BASE_URL /
-              LLM_MODEL / LLM_API_KEY</code>）并重启后端。API Key 严禁入库、严禁在界面展示明文。
-            </template>
-          </el-alert>
-        </el-card>
-
-        <!-- 提示词四层 -->
-        <el-card shadow="never">
-          <template #header><span>提示词分层（四层）</span></template>
-          <el-table :data="layers" size="small" border>
-            <el-table-column label="层级" min-width="150">
-              <template #default="{ row }">
-                <b>{{ row.name }}</b>
-              </template>
-            </el-table-column>
-            <el-table-column label="来源" width="110">
-              <template #default="{ row }">
-                <el-tag size="small" effect="plain" type="info">{{ sourceLabel(row.source) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="可编辑" width="100">
-              <template #default="{ row }">
-                <el-tag :type="row.editable ? 'success' : 'info'" size="small" effect="plain">
-                  {{ row.editable ? '可编辑' : '只读' }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="规模" width="110">
-              <template #default="{ row }">
-                <span v-if="row.char_count">{{ row.char_count }} 字</span>
-                <span v-else class="dim">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="说明" min-width="220" show-overflow-tooltip prop="reason" />
-            <el-table-column label="操作" width="150" fixed="right">
-              <template #default="{ row }">
-                <el-button
-                  v-if="row.key !== 'model'"
-                  link
-                  type="primary"
-                  size="small"
-                  @click="previewLayer(row)"
-                >
-                  查看全文
-                </el-button>
-                <el-button
-                  v-if="row.editable && row.manage_path"
-                  link
-                  type="success"
-                  size="small"
-                  @click="router.push(row.manage_path)"
-                >
-                  去配置
-                </el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-tab-pane>
+      <!-- Tab4「AI 与模型」已于 2026-09-29 迁出至「AI 与分析」组:
+           模型接入(.env 只读)→ LlmProviders.vue 底部「兜底配置」区块;
+           提示词四层总览 → AiFocusConfigs.vue 顶部。接入中心回归纯数据对接。 -->
     </el-tabs>
 
     <!-- ═══ 扫码登录弹窗 (#45) ═══ -->
@@ -456,14 +366,6 @@
       </template>
     </el-dialog>
 
-    <!-- 提示词全文(只读) -->
-    <el-dialog v-model="previewVisible" :title="previewTitle" width="760px">
-      <el-alert v-if="previewReadonly" type="info" :closable="false" show-icon class="mb-12">
-        <template #title>该层为防幻觉底线（代码常量），仅供查看，不可在此修改。</template>
-      </el-alert>
-      <el-input v-model="previewContent" type="textarea" :rows="22" readonly class="pkg-textarea" />
-    </el-dialog>
-
     <!-- 配置包大图预览 -->
     <el-dialog v-model="pkgPreviewVisible" title="配置包全文" width="820px">
       <el-input v-model="pkgMarkdown" type="textarea" :rows="26" readonly class="pkg-textarea" />
@@ -478,7 +380,6 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
-import { useRouter } from 'vue-router'
 import { Refresh, Document, DocumentCopy, Edit, RefreshLeft, InfoFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
@@ -502,9 +403,6 @@ import {
   rollbackProfile,
 } from '@/api/integrationProfile'
 import { ElMessageBox } from 'element-plus'
-import { getAiModelConfig, getAiPromptLayers, getAiPromptPreview } from '@/api/aiModel'
-
-const router = useRouter()
 
 // ── Tab ──
 const tab = ref('states')
@@ -836,37 +734,6 @@ async function resetCurrent() {
   }
 }
 
-// ── Tab4 AI ──
-const aiCfg = reactive({})
-const layers = ref([])
-
-const sourceLabel = (s) => ({ env: '.env', code: '代码常量', db: '数据库' }[s] || s)
-
-const previewVisible = ref(false)
-const previewTitle = ref('')
-const previewContent = ref('')
-const previewReadonly = ref(true)
-
-async function loadAi() {
-  try {
-    const [cfgRes, layerRes] = await Promise.all([getAiModelConfig(), getAiPromptLayers()])
-    Object.assign(aiCfg, cfgRes.data || {})
-    layers.value = layerRes.data?.layers || []
-  } catch (e) { /* 拦截器已提示 */ }
-}
-
-async function previewLayer(row) {
-  try {
-    const res = await getAiPromptPreview(row.key)
-    previewTitle.value = res.data?.name || row.name
-    previewContent.value = res.data?.content || '（暂无内容）'
-    previewReadonly.value = res.data?.readonly !== false
-    previewVisible.value = true
-  } catch (e) {
-    ElMessage.error(e?.response?.data?.detail || '加载失败')
-  }
-}
-
 // ── 全局 ──
 async function refreshAll() {
   await Promise.all([loadStates(), loadSources()])
@@ -877,7 +744,6 @@ onMounted(() => {
   loadStates()
   loadSources()
   loadProfiles()
-  loadAi()
 })
 
 onBeforeUnmount(() => {

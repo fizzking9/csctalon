@@ -428,7 +428,8 @@ const routes = [
         component: () => import('@/views/system/ExternalAccess.vue'),
         meta: { title: '外部接入', icon: 'Key', admin: true },
       },
-      // #44 接入中心: 登录态 / 外部 Token / 推送配置包 / AI 与模型 统一入口
+      // #44 接入中心: 登录态 / 外部 Token / 推送配置包 统一入口
+      //   (2026-09-29 Tab4「AI 与模型」迁出至「AI 与分析」组, 本页回归纯数据对接)
       // 旧路径(/system/external-access, /system/ai-focus-configs)保留可直达, 不破坏书签
       {
         path: 'system/access-center',
@@ -440,21 +441,21 @@ const routes = [
         path: 'system/ai-focus-configs',
         name: 'SystemAiFocusConfigs',
         component: () => import('@/views/system/AiFocusConfigs.vue'),
-        meta: { title: 'AI 助手提示词', icon: 'MagicStick', admin: true },
+        meta: { title: 'AI 助手关注点', icon: 'MagicStick', admin: true },
       },
       {
         // #108: LLM 多 Provider 管理(本地 Talon / 云端 DeepSeek 等)
         path: 'system/llm-providers',
         name: 'SystemLlmProviders',
         component: () => import('@/views/system/LlmProviders.vue'),
-        meta: { title: 'LLM 模型接入', icon: 'Cpu', admin: true },
+        meta: { title: '模型接入与调度', icon: 'Cpu', admin: true },
       },
       {
         // #125: AI 报告模板管理(admin)
         path: 'system/ai-templates',
         name: 'SystemAiTemplates',
         component: () => import('@/views/system/AiTemplates.vue'),
-        meta: { title: 'AI 报告模板', icon: 'Document', admin: true },
+        meta: { title: '报告模板', icon: 'Document', admin: true },
       },
       {
         // #137: AI 管理页面(3 Tab 整合入口, #141 重组)
@@ -471,7 +472,7 @@ const routes = [
         path: 'system/ai-reports',
         name: 'SystemAiReports',
         component: () => import('@/views/system/AiReports.vue'),
-        meta: { title: 'AI 报告历史', icon: 'Document', admin: true },
+        meta: { title: '报告历史', icon: 'Document', admin: true },
       },
       {
         // #157: 数据源接入助手(起草→校验→确认→落地包 闭环, 归「数据与接入」组)
@@ -492,14 +493,14 @@ const routes = [
         path: 'system/ai-prompt-eval',
         name: 'SystemAiPromptEval',
         component: () => import('@/views/system/AiPromptEval.vue'),
-        meta: { title: '提示词评估中心', icon: 'DataAnalysis', admin: true },
+        meta: { title: '提示词评估', icon: 'DataAnalysis', admin: true },
       },
       {
         // 2026-09-23: 提示词全量版本化 —— 治理研判 / 接入起草提示词版本账本
         path: 'system/prompt-versions',
         name: 'SystemPromptVersions',
         component: () => import('@/views/system/PromptVersions.vue'),
-        meta: { title: '提示词版本管理', icon: 'Tickets', admin: true },
+        meta: { title: '提示词版本', icon: 'Tickets', admin: true },
       },
     ],
   },

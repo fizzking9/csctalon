@@ -79,16 +79,29 @@ describe('菜单配置 - 收敛目标', () => {
     expect(qualityPaths).toContain('/system/complaint-quality')
   })
 
-  // #140/#141: AI 与分析 分组修复 #137 菜单漏改 + #141 加 AI 报告历史
-  it('AI 与分析 分组存在, 含 AI 管理 + AI 报告模板 + AI 报告历史 (#140/#141)', () => {
+  // 2026-09-29/30 重组: AI 与分析 扁平 6 项(模型→模板→关注点→评估→版本→历史),
+  //   取消 AI 管理 Tab 容器; /system/ai-admin 路由保留可达但不再挂菜单。
+  it('AI 与分析 分组为扁平 6 项且按依赖层次排序 (2026-09-29 重组)', () => {
     const group = MENU_GROUPS.find((g) => g.key === 'ai-analysis')
     expect(group, 'ai-analysis 分组必须存在').toBeTruthy()
     expect(group.roles).toEqual(['admin'])
     expect(group.buildMode).toBe(BUILD_MODES.ALWAYS)
-    const paths = (group.children || []).map((c) => c.path)
-    expect(paths).toContain('/system/ai-admin')
-    expect(paths).toContain('/system/ai-templates')
-    expect(paths).toContain('/system/ai-reports')
+    const children = group.children || []
+    // 扁平结构: 不含嵌套子组
+    expect(children.every((c) => c.path)).toBe(true)
+    // 顺序即依赖层次: 模型 → 提示词内容 → 提示词治理 → 产物
+    expect(children.map((c) => c.path)).toEqual([
+      '/system/llm-providers',
+      '/system/ai-templates',
+      '/system/ai-focus-configs',
+      '/system/ai-prompt-eval',
+      '/system/prompt-versions',
+      '/system/ai-reports',
+    ])
+    // 命名口径: 模型页统称「模型接入与调度」, 关注点页与页面标题一致
+    const byPath = Object.fromEntries(children.map((c) => [c.path, c.title]))
+    expect(byPath['/system/llm-providers']).toBe('模型接入与调度')
+    expect(byPath['/system/ai-focus-configs']).toBe('AI 助手关注点')
   })
 
   it('数据分析组对 manager 可见(审计项 U3: 原为 admin-only 而错位)', () => {

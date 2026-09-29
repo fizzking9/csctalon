@@ -48,7 +48,7 @@
     <!-- ═══ 头部：标题 + 窗口 + 刷新 + 生成建议 ═══ -->
     <div class="flex-between mb-16">
       <div>
-        <div class="page-title" style="margin: 0">提示词评估中心</div>
+        <div class="page-title" style="margin: 0">提示词评估</div>
         <div class="page-sub">执行结果 → 评估分析 → 半自动迭代（规则级 + 提示词段 + 跨链路关联）</div>
       </div>
       <div class="head-tools">
