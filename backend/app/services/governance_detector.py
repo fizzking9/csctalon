@@ -1913,21 +1913,33 @@ def scan_semantic_anomaly(db: Session) -> list[dict]:
     # 调 LLM（经 talon provider 链，走 governance 角色配置，不出域）
     try:
         import asyncio
+
         from app.services import llm_client, llm_tiers
+
+        # #202 收口: D7 凌晨完整体检属后台批处理 → 经 llm_scheduler L0 队列
+        # (最高优先, 可抢占实时问答; 门闸 key 取 governance 档位链首)。
+        from app.services.llm_scheduler import acquire, release
 
         user_msg = "请检查以下退款记录是否存在语义矛盾：\n" + _json.dumps(records, ensure_ascii=False)
 
+        _chain = llm_tiers.resolve_tier("governance", db=db)
+
         async def _call():
-            return await llm_client.chat_completion(
-                [{"role": "system", "content": _D7_SYSTEM_PROMPT},
-                 {"role": "user", "content": user_msg}],
-                temperature=0.1,
-                max_tokens=_D7_MAX_TOKENS,
-                timeout_s=_D7_TIMEOUT_S,
-                source="governance_d7",
-                provider_code=llm_tiers.resolve_tier("governance", db=db),
-                db=db,
-            )
+            handle = await acquire(0, name="governance_d7",
+                                   provider_code=_chain[0] if _chain else None)
+            try:
+                return await llm_client.chat_completion(
+                    [{"role": "system", "content": _D7_SYSTEM_PROMPT},
+                     {"role": "user", "content": user_msg}],
+                    temperature=0.1,
+                    max_tokens=_D7_MAX_TOKENS,
+                    timeout_s=_D7_TIMEOUT_S,
+                    source="governance_d7",
+                    provider_code=_chain,
+                    db=db,
+                )
+            finally:
+                await release(handle)
 
         # governance_idle 和 classify_after_sync 都在 to_thread 中运行（无 event loop），
         # 安全使用 asyncio.run

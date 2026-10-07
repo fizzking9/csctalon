@@ -16,7 +16,6 @@ B. conftest 必须提供 `_assert_test_database` 库名守卫, 且 engine fixtur
 """
 from __future__ import annotations
 
-import inspect
 import os
 
 
@@ -89,11 +88,24 @@ def test_guard_allows_test_database():
 
 
 def test_engine_fixture_invokes_guard():
-    """★B 接线锁: 守卫必须真的挂在 engine fixture 上, 否则形同虚设"""
-    import tests.conftest as C
+    """★B 接线锁: 守卫必须真的挂在 engine fixture 上, 否则形同虚设
 
-    src = inspect.getsource(C._engine.__wrapped__ if hasattr(C._engine, "__wrapped__") else C._engine)
-    assert "_assert_test_database" in src, "engine fixture 未调用库名守卫"
+    2026-10-07: 改用 AST 静态检查。pytest 9 + Python 3.14 下 fixture 包装对象
+    已不可 inspect.getsource(OSError: could not get source code), 静态检查
+    同样锁定"engine fixture 必须调用库名守卫"且跨版本稳定。
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path(__file__).with_name("conftest.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_engine":
+            assert "_assert_test_database" in ast.unparse(node), \
+                "engine fixture 未调用库名守卫"
+            break
+    else:
+        raise AssertionError("conftest 中找不到 _engine fixture")
 
 
 # ---- 第二轮防御: 禁止裸整表删除 (事故善后加固) ----

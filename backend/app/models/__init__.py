@@ -60,6 +60,8 @@ from app.models.ingest_rejected_row import IngestRejectedRow  # noqa: F401
 from app.models.integration_profile import IntegrationProfile  # noqa: F401
 from app.models.kb_article import KbArticle  # noqa: F401
 from app.models.llm_provider import LlmCallLog, LlmProvider  # noqa: F401
+from app.models.llm_role_config import LlmRoleConfig  # noqa: F401
+from app.models.llm_role_member import LlmRoleMember  # noqa: F401
 from app.models.manual_refund import ManualRefund  # noqa: F401
 from app.models.manual_refund_sync_log import ManualRefundSyncLog  # noqa: F401
 from app.models.measure import Measure  # noqa: F401

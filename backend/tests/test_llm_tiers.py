@@ -20,7 +20,8 @@ from app.services.llm_provider_service import get_provider_chain
 # ─────────────────────────────────────────────────────────────────────
 class TestTierDefinitions:
     def test_three_tiers_exist(self):
-        assert set(llm_tiers.TIERS) == {"assistant", "specialist", "expert"}
+        # c721c8e 新增 governance 档(数据质检/语义探测/采集后分类) → 四档
+        assert set(llm_tiers.TIERS) == {"assistant", "specialist", "expert", "governance"}
 
     def test_each_tier_has_primary_and_desc(self):
         for name, spec in llm_tiers.TIERS.items():
@@ -93,7 +94,8 @@ class TestResolveTier:
 
     def test_describe_shape(self):
         d = llm_tiers.describe()
-        assert set(d) == {"assistant", "specialist", "expert"}
+        # c721c8e 新增 governance 档 → 四档
+        assert set(d) == {"assistant", "specialist", "expert", "governance"}
         for v in d.values():
             assert isinstance(v["chain"], list) and v["chain"]
 

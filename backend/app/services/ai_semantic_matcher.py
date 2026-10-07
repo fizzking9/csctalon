@@ -111,18 +111,29 @@ async def semantic_match(db: Session, question: str,
         {"role": "user", "content": user_prompt},
     ]
     try:
-        result = await llm_client.chat_completion(
-            # ⚠️ 2026-09-21 由 200 调到 400。
-            #    原注释假设「只输出 JSON 数组, 短」，但实测被截在**恰好 200**
-            #    （done_reason='length'），说明候选条目多时数组会超。
-            #    被截的后果是**静默的**: 返回的 JSON 可能是数组被砍掉尾巴，
-            #    解析后少几个语义匹配结果, 调用方看不出异常。
-            #    400 是实测输出的 2 倍余量（被截样本 out_chars 400~466）。
-            messages, max_tokens=400, timeout_s=60.0,
-            db=db, source="ai_semantic",
-            # 传 db → 优先用界面配置的角色成员；DB 无配置时回退源码常量
-            provider_code=llm_tiers.resolve_tier(_TIER, db=db),
-        )
+        # #202 收口: 语义匹配属实时问答链路 → 经 llm_scheduler L2 队列。门闸 key
+        # 取档位链首(与 chat_completion 的 provider 链首选一致); 被抢占抛
+        # CancelledError 由上层 ai.py 置"可重试"。
+        from app.services.llm_scheduler import acquire, release
+
+        _chain = llm_tiers.resolve_tier(_TIER, db=db)
+        handle = await acquire(2, name="ai_semantic",
+                               provider_code=_chain[0] if _chain else None)
+        try:
+            result = await llm_client.chat_completion(
+                # ⚠️ 2026-09-21 由 200 调到 400。
+                #    原注释假设「只输出 JSON 数组, 短」，但实测被截在**恰好 200**
+                #    （done_reason='length'），说明候选条目多时数组会超。
+                #    被截的后果是**静默的**: 返回的 JSON 可能是数组被砍掉尾巴，
+                #    解析后少几个语义匹配结果, 调用方看不出异常。
+                #    400 是实测输出的 2 倍余量（被截样本 out_chars 400~466）。
+                messages, max_tokens=400, timeout_s=60.0,
+                db=db, source="ai_semantic",
+                # 传 db → 优先用界面配置的角色成员；DB 无配置时回退源码常量
+                provider_code=_chain,
+            )
+        finally:
+            await release(handle)
         text = str(result).strip()
         # 兼容 ```json 包裹的输出
         if text.startswith("```"):

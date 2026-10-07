@@ -156,15 +156,24 @@ async def _smoke_once(db: Session, code: str, content: str) -> str:
     走实时默认 provider 链；timeout 90s 容忍冷加载。
     """
     from app.services import llm_client  # 函数内 import，避免模块环
+
+    # #202 收口: 金丝雀冒烟是 admin 手动触发(激活/回滚验证) → 经 llm_scheduler
+    # L1 队列(可被后台预生成 L0 抢占, 优先于用户实时问答); chat_completion 未指定
+    # provider → default 门闸, 与主问答一致。
+    from app.services.llm_scheduler import acquire, release
     if code == "gen_system":
         user = "今日退款情况如何? 请按你的规则简要回答, 注明数据窗口。"
     else:
         user = ("问句: 今日退款情况如何?\n草稿段落: 今日退款总额 1000 元, 共 5 笔, 四路分布: A 3 笔 B 2 笔。\n"
                 "请按问句从段落摘取并排版输出, 禁止编造。")
-    result = await llm_client.chat_completion(
-        [{"role": "system", "content": content}, {"role": "user", "content": user}],
-        max_tokens=300, timeout_s=90.0, db=db, source="prompt_canary_smoke",
-    )
+    handle = await acquire(1, name="prompt_canary_smoke")
+    try:
+        result = await llm_client.chat_completion(
+            [{"role": "system", "content": content}, {"role": "user", "content": user}],
+            max_tokens=300, timeout_s=90.0, db=db, source="prompt_canary_smoke",
+        )
+    finally:
+        await release(handle)
     return str(result).strip()
 
 

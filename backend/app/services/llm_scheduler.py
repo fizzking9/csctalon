@@ -33,9 +33,16 @@ db session 不跨线程(单 worker + 各调用点自建 SessionLocal), 与既有
   - await release(handle)                      结束占用(幂等)
   - queue_status() -> dict                     /ai/queue-status 数据源
 
-调用点(均已改):
-  - ai.py::_runner        用户实时问答      → acquire(2)
-  - ai_report_worker.generate_for_template  后台预生成 → acquire(0); admin 触发 → acquire(1)
+调用点(#202 起全链路收口, 不再存在绕过本层的直调):
+  - ai.py::_runner                        用户实时问答(主答)  → acquire(2)
+  - ai_extract_service.extract_section    实时问答·报告摘取   → acquire(2)
+  - ai_semantic_matcher.semantic_match    实时问答·语义匹配   → acquire(2)
+  - ai_time_parser.llm_parse_time_intent  实时问答·时间兜底   → acquire(2)
+  - prompt_config_service._smoke_once     admin 金丝雀冒烟    → acquire(1)
+  - governance_detector.scan_semantic_anomaly  凌晨完整体检 D7 → acquire(0)
+  - ai_report_worker.generate_for_template     后台预生成      → acquire(0); admin 触发 → acquire(1)
+门闸 key 约定: 调用方给 chat_completion 指定了 provider 链的, acquire 传链首
+(同一首选 provider 互斥); 未指定 provider 的(内部全链遍历)传 None 走 default 门闸。
 """
 
 import asyncio

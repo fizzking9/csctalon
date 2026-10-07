@@ -372,14 +372,23 @@ async def llm_parse_time_intent(question: str, *, today: _date | None = None) ->
         return _NONE
     try:
         from app.services.llm_client import chat_completion
+
+        # #202 收口: 时间解析兜底属实时问答链路 → 经 llm_scheduler L2 队列。
+        # chat_completion 未指定 provider(内部走全链遍历) → 门闸用 default,
+        # 与 ai.py 主问答门闸语义一致(未指定 provider 的调用互斥)。
+        from app.services.llm_scheduler import acquire, release
         # 复用一个独立 Session 给本次调用记录审计日志
         _log_db = SessionLocal()
         try:
-            content = await chat_completion(
-                [{"role": "user", "content": _LLM_TIME_PROMPT.format(today=today.isoformat(), question=question)}],
-                temperature=0.0, max_tokens=300, timeout_s=15,
-                db=_log_db, source="llm_time_parse",
-            )
+            handle = await acquire(2, name="llm_time_parse")
+            try:
+                content = await chat_completion(
+                    [{"role": "user", "content": _LLM_TIME_PROMPT.format(today=today.isoformat(), question=question)}],
+                    temperature=0.0, max_tokens=300, timeout_s=15,
+                    db=_log_db, source="llm_time_parse",
+                )
+            finally:
+                await release(handle)
         finally:
             _log_db.close()
     except Exception as e:  # noqa: BLE001  兜底失败不影响主链路

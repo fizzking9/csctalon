@@ -199,12 +199,24 @@ async def extract_section(db: Session, question: str, report: AiReport,
         {"role": "user", "content": user_prompt},
     ]
     try:
-        result = await llm_client.chat_completion(
-            messages, max_tokens=1200, timeout_s=60.0,
-            db=db, source="ai_extract",
-            # 传 db → 优先用界面配置的角色成员；DB 无配置时回退源码常量
-            provider_code=llm_tiers.resolve_tier(_TIER, db=db),
-        )
+        # #202 收口: 摘取属实时问答链路 → 经 llm_scheduler L2 队列(此前直调绕过
+        # 调度器, 单次提问多路并发时互斥失效)。门闸 key 取档位链首(与
+        # chat_completion 的 provider_code 链首选一致); 被抢占抛 CancelledError
+        # 由上层 ai.py 置"可重试"。
+        from app.services.llm_scheduler import acquire, release
+
+        _chain = llm_tiers.resolve_tier(_TIER, db=db)
+        handle = await acquire(2, name="ai_extract",
+                               provider_code=_chain[0] if _chain else None)
+        try:
+            result = await llm_client.chat_completion(
+                messages, max_tokens=1200, timeout_s=60.0,
+                db=db, source="ai_extract",
+                # 传 db → 优先用界面配置的角色成员；DB 无配置时回退源码常量
+                provider_code=_chain,
+            )
+        finally:
+            await release(handle)
         result_md = str(result).strip()
         if not result_md:
             logger.warning("extract_section: LLM 返回空, report_id=%s", report.id)

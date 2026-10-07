@@ -80,11 +80,12 @@ def _seed_refund(session, rno, sn, amount, method="线上", status="已退款", 
 # ---- 口径函数测试 ----
 
 def test_route_a_refund_filter_now_includes_refunded():
-    """经营口径 _route_a_online_refund_filter 含 method=线上 + status=已退款。"""
+    """经营口径 _route_a_online_refund_filter 含 method=线上 + status=已退款 + quality 排除。"""
     from app.services.analytics import _route_a_online_refund_filter
 
     conds = _route_a_online_refund_filter()
-    assert len(conds) == 2  # method + status
+    # #201 S-P0-1: 新增第 3 条 stats_quality_include(排除 dup_residual/ignored)
+    assert len(conds) == 3  # method + status + quality
 
 
 def test_route_a_any_status_filter_only_method():
