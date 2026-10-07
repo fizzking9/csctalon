@@ -1,9 +1,32 @@
+<!--
+  ┌─────────────────────────── 设计说明（Design Rationale） ───────────────────────────┐
+  │ 目的：替**退款挽回主管**回答「哪类原因/哪类人在拖低挽回成功率、异常出现在哪几天」， │
+  │       支撑「往哪个方向加人/改话术」的排班与拦截话术决策。                          │
+  │ 逻辑：先原因维度定位问题类型 → 再人员类型定位是谁 → 热力图定位到具体日期×原因的    │
+  │       异常点 → problem_type 保留原始文本防归一化掩盖新话术 → 组间对比做横向绩效。  │
+  │ 口径：与「今日挽回」页签同源 —— 后端复用 _refund_recovery_core：                   │
+  │       cs_records 退款类接待SN去重 + T+7 失败判定；窗口 = 父页筛选区间              │
+  │       （近7/30/90天或自定义）；时间落桶 AT TIME ZONE 'Asia/Shanghai'。             │
+  │       各卡口径详见卡片 ⓘ。                                                        │
+  │ 取舍：① 不做按原因/按人员类型的SN级下钻 —— 后端无对应明细接口，强做只会给空明细页；│
+  │       ② problem_type 不做归一化展示 —— 保留原始文本以便发现新退款话术；            │
+  │       ③ 热力图只取近30天 —— 更早区间用趋势图看，避免图高过大不可读。               │
+  │ 工单：#205                                                                        │
+  └──────────────────────────────────────────────────────────────────────────────────┘
+-->
 <template>
   <div class="type-trend">
     <!-- ============ 筛选栏 ============ -->
     <section class="section-card">
       <div class="filter-bar">
-        <span class="block-title" style="margin: 0">类型 × 趋势</span>
+        <span class="block-title" style="margin: 0">
+          类型 × 趋势
+          <!-- ★ #205 页面层可见设计说明（界面设计说明规范 §二.2.2：含「取舍」段） -->
+          <el-tooltip raw-content effect="dark" placement="bottom"
+            content="<b>目的</b>：回答「哪类原因/哪类人在拖低挽回成功率、异常出现在哪几天」<br/><b>逻辑</b>：原因维度定位问题 → 人员类型定位人 → 热力图定位日期×原因异常点 → problem_type 看原始细分 → 组间对比横向绩效<br/><b>口径</b>：与「今日挽回」同源（后端复用 _refund_recovery_core：退款类接待SN去重 + T+7 失败判定）；窗口=父页筛选区间（近7/30/90天或自定义）<br/><b>⚠️ 取舍（不做什么及原因）</b><br/>① 不做按原因/类型的SN级下钻 —— 后端无对应明细接口<br/>② problem_type 不归一化 —— 保留原始文本以便发现新退款话术<br/>③ 热力图只取近30天 —— 更早区间用趋势图看<br/><b>工单</b>：#205">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:14px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </span>
         <span class="trend-hint">粒度:</span>
         <el-radio-group v-model="grain" size="small" @change="loadTrend">
           <el-radio-button value="day">按日</el-radio-button>
@@ -18,7 +41,14 @@
     <!-- ============ 1. 各原因类型 接待量&成功率 (双Y轴堆叠柱+多线) ============ -->
     <section v-loading="loading" class="section-card">
       <div class="chart-header">
-        <span class="block-title" style="margin: 0">各原因类型 接待量 & 成功率</span>
+        <span class="block-title" style="margin: 0">
+          各原因类型 接待量 & 成功率
+          <!-- ★ #205 数据说明 -->
+          <el-tooltip raw-content effect="dark" placement="top"
+            content="<b>来源</b>：GET /analytics/refund/type-trend?dimension=reason<br/><b>口径</b>：分母=退款类接待SN去重（同「今日挽回」口径），失败=T+7 判定；原因=cs_records.problem_type 归一化 7 大类，SN按接待日(Asia/Shanghai)落桶；堆叠柱=各原因接待SN，线=各原因成功率；粒度按日/按周（周以周一为始）<br/><b>时点</b>：窗口=父页筛选区间；接口缓存 120s<br/><b>「空」的含义</b>：该日该原因无接待SN则为 0；区间内无接待显示「暂无原因类型趋势数据」<br/><b>下钻</b>：不下钻 —— 原因聚合已是归因终点，后端无按原因的SN明细接口（规范 §3.4）">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </span>
         <span class="trend-hint">左Y=SN数(7大原因堆叠) · 右Y=成功率%(每原因一条线)</span>
       </div>
       <BaseChart v-if="reasonHasData" :option="reasonOption" height="360px" />
@@ -28,8 +58,17 @@
     <!-- ============ 2. 各人员类型 接待量&成功率 (双Y轴分组柱+多线) ============ -->
     <section v-loading="loading" class="section-card">
       <div class="chart-header">
-        <span class="block-title" style="margin: 0">各人员类型 接待量 & 成功率</span>
+        <span class="block-title" style="margin: 0">
+          各人员类型 接待量 & 成功率
+          <!-- ★ #205 数据说明 -->
+          <el-tooltip raw-content effect="dark" placement="top"
+            content="<b>来源</b>：GET /analytics/refund/type-trend?dimension=staff_type<br/><b>口径</b>：人员三类 —— 专职挽回(Person.specialty=退款挽回) / 其他人员挽回(非专职接待且未产生退款) / 退款操作(仅执行退款操作无接待)；分组柱=接待SN，虚线=各类型成功率；失败=T+7 判定<br/><b>时点</b>：窗口=父页筛选区间；接口缓存 120s<br/><b>「空」的含义</b>：该日该类型无接待SN则为 0<br/><b>下钻</b>：点右上「人员明细」→ 切到「人员」页签（带当前窗口）">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </span>
         <span class="trend-hint">左Y=SN数(分组柱) · 右Y=成功率%(每类型一条线)</span>
+        <!-- ★ #205 下钻（规范 §3.2①）：人员类型 → 人，切父页「人员」页签；窗口经 props 透传不丢 -->
+        <el-link type="primary" :underline="false" size="small" @click="goPersonnel">人员明细 →</el-link>
       </div>
       <BaseChart v-if="staffTypeHasData" :option="staffTypeOption" height="360px" />
       <el-empty v-else description="暂无人员类型趋势数据" />
@@ -38,7 +77,14 @@
     <!-- ============ 3. 日期×原因 矩阵热力图 ============ -->
     <section class="section-card">
       <div class="chart-header">
-        <span class="block-title" style="margin: 0">日期 × 原因 矩阵热力图 (近30天)</span>
+        <span class="block-title" style="margin: 0">
+          日期 × 原因 矩阵热力图 (近30天)
+          <!-- ★ #205 数据说明 -->
+          <el-tooltip raw-content effect="dark" placement="top"
+            content="<b>来源</b>：复用「各原因类型」接口数据（/analytics/refund/type-trend?dimension=reason）<br/><b>口径</b>：行=日期（近30天，最新在上）、列=7大归一化原因；单元格=失败数/接待数/成功率（右侧切换）；色阶：失败/接待=绿→红（越大越差），成功率=红→绿（越高越好）<br/><b>时点</b>：窗口=父页筛选区间（前端截取近30天）<br/><b>「空」的含义</b>：该格无接待SN，tooltip 显示「无数据」<br/><b>下钻</b>：不下钻 —— 单元格 tooltip 已含接待/成功/失败/成功率全量指标，无更深明细（规范 §3.4）">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </span>
         <el-radio-group v-model="matrixMode" size="small">
           <el-radio-button value="failed">失败数</el-radio-button>
           <el-radio-button value="total">接待数</el-radio-button>
@@ -52,7 +98,14 @@
     <!-- ============ 4. problem_type 细分 Top10 (横向堆叠柱) ============ -->
     <section v-loading="loading" class="section-card">
       <div class="chart-header">
-        <span class="block-title" style="margin: 0">problem_type 细分 Top10</span>
+        <span class="block-title" style="margin: 0">
+          problem_type 细分 Top10
+          <!-- ★ #205 数据说明 -->
+          <el-tooltip raw-content effect="dark" placement="top"
+            content="<b>来源</b>：GET /analytics/refund/problem-type-detail?top=10<br/><b>口径</b>：按原始 problem_type 文本分组（<b>不做</b>7大类归一化）、退款类接待SN去重；成功/失败=与 T+7 失败SN集求交；金额=该类失败SN的失败金额合计；横向堆叠柱=成功/失败SN，旁注成功率<br/><b>时点</b>：窗口=父页筛选区间；接口缓存 120s<br/><b>「空」的含义</b>：区间内无退款接待或记录缺 problem_type 文本时为空<br/><b>下钻</b>：不下钻 —— problem_type 已是最细原始文本维度（规范 §3.4）">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </span>
         <span class="trend-hint">横向堆叠柱(成功/失败) · 旁注成功率%</span>
       </div>
       <BaseChart v-if="problemTypeHasData" :option="problemTypeOption" height="420px" />
@@ -61,7 +114,18 @@
 
     <!-- ============ 5. 组间对比 (el-table + BaseChart横向柱) ============ -->
     <section v-loading="loading" class="section-card">
-      <div class="block-title">组间对比</div>
+      <div class="block-title" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span>
+          组间对比
+          <!-- ★ #205 数据说明 -->
+          <el-tooltip raw-content effect="dark" placement="top"
+            content="<b>来源</b>：GET /analytics/refund/group-comparison<br/><b>口径</b>：按人员表组名(Person.group_name)聚合人员明细；组成功率=组接待SN口径（成功 ÷ 接待）；人均成功率=组内人员成功率的算术平均；退款操作金额=组内成员执行退款合计；<b>挽回估算金额 = 组内成功SN × 同归一化原因的失败SN平均金额</b>（无同原因均值时用整体失败均值），是估算值非实收<br/><b>时点</b>：窗口=父页筛选区间；接口缓存 120s<br/><b>「空」的含义</b>：区间内无退款接待时显示「暂无组对比数据」<br/><b>下钻</b>：组 → 人，点右侧「人员明细」切到「人员」页签（带当前窗口）">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </span>
+        <!-- ★ #205 下钻（规范 §3.2①）：组 → 人，切父页「人员」页签；窗口经 props 透传不丢 -->
+        <el-link type="primary" :underline="false" size="small" @click="goPersonnel">人员明细 →</el-link>
+      </div>
       <el-row :gutter="16">
         <el-col :xs="24" :md="14">
           <el-table :data="groupData" border stripe size="small" max-height="360" style="width: 100%">
@@ -119,7 +183,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, QuestionFilled } from '@element-plus/icons-vue'
 import BaseChart from '@/components/BaseChart.vue'
 import { refundDeep } from '@/api/analytics'
 import { formatMoney } from '@/utils/format'
@@ -128,6 +192,12 @@ const props = defineProps({
   start: { type: String, default: '' },
   end: { type: String, default: '' },
 })
+
+// ★ #205 下钻：切到父页「人员」页签看按人明细（emit 给 RefundRecovery 处理）
+const emit = defineEmits(['switch-tab'])
+function goPersonnel() {
+  emit('switch-tab', 'personnel')
+}
 
 // ---- 状态 ----
 const loading = ref(false)

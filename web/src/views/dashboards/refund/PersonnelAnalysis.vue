@@ -1,9 +1,32 @@
+<!--
+  ┌──────────────────────── 设计说明（Design Rationale） ─────────────────────────┐
+  │ 目的：退款挽回主管按人评估挽回绩效，回答「谁的成功率异常、谁在大量操作退款、      │
+  │       挽回金额估算多少」，据此决定奖惩/培训/话术复盘与排班调整。                 │
+  │ 逻辑：人员对比表为「真身」（每人一行，可逐人下钻）；成功率趋势与人员×原因热力图    │
+  │       是投影（帮助横向对比，不重复承载明细）。                                   │
+  │ 口径：成功率 = 成功SN/接待SN；分母 = 该人员周期内 cs_records problem_category=   │
+  │       '退款' 的去重 SN（排除系统操作人）；挽留失败 = 该 SN 同期出现 refunds 线上  │
+  │       退款单(状态非驳回/无需退款) 或 service_tickets service_category=退款 工单   │
+  │       (非终止)；人员类型: 专职挽回=Person.specialty='退款挽回' · 退款操作=周期内   │
+  │       无退款类接待但有退款操作 · 其他人员挽回=有接待的非专职人员。               │
+  │       详见 backend/app/services/analytics/refund.py refund_personnel_analysis /  │
+  │       _refund_recovery_core。                                                    │
+  │ 取舍：① 趋势图/热力图不做图内点击下钻——单点构成已在 tooltip 中给出（接待/成功/    │
+  │          失败数），设备级明细由对比表「详情」抽屉承载，跳页只会重复；             │
+  │       ② 不做人均负荷类派生指标——同一 SN 多人接待会重复计数，人均值会失真；       │
+  │       ③ 挽回估算金额只做估算展示（成功SN×同类失败平均金额），不冒充实收。         │
+  │ 工单：#205（看板卡片双强制补齐：ⓘ 数据说明 + 可下钻）                           │
+  └───────────────────────────────────────────────────────────────────────────────┘
+-->
 <template>
   <div class="personnel-analysis">
     <!-- ============ 筛选栏 ============ -->
     <section class="section-card">
       <div class="filter-bar">
-        <span class="block-title" style="margin: 0">人员分析</span>
+        <span class="block-title" style="margin: 0">人员分析<el-tooltip effect="dark" placement="bottom-start" raw-content
+          content="<b>这个页面为什么这样设计</b><br/><b>给谁</b>：退款挽回主管，按人评估挽回绩效、安排奖惩与培训时使用。<br/><b>回答什么</b>：谁的挽回成功率异常？谁在大量操作退款？挽回金额估算多少？<br/><b>组织逻辑</b>：人员对比表为真身（每人一行、可下钻个案），成功率趋势与人员×原因热力图为投影（横向对比用）。<br/><b>口径</b>：成功率=成功SN/接待SN；失败=SN同期产生退款行为（refunds 线上退款单非驳回/无需退款，或退款类工单非终止）；详见 backend/app/services/analytics/refund.py refund_personnel_analysis。<br/><br/><b>⚠️ 我们不做什么（及原因）</b><br/>① 趋势图/热力图<b>不做</b>图内点击下钻 —— 单点构成已在 tooltip 给出，设备级明细由对比表「详情」抽屉承载；<br/>② <b>不做</b>人均负荷类派生指标 —— 同一 SN 多人接待重复计数，人均值失真；<br/>③ 挽回估算金额仅为<b>估算</b>（成功SN×同类失败平均金额），不冒充实收。<br/><b>关联</b>：工单 #205">
+          <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+        </el-tooltip></span>
         <el-select v-model="department" placeholder="部门" size="small" style="width: 140px" @change="loadPersonnel">
           <el-option label="全部部门" value="" />
           <el-option label="企微" value="企微" />
@@ -20,9 +43,12 @@
       </div>
     </section>
 
-    <!-- ============ 1. 人员对比表 ============ -->
+    <!-- ============ 1. 人员对比表 (#205: 本表为真身; 行内「详情」抽屉/「时序」审计页已承载逐人下钻) ============ -->
     <section class="section-card">
-      <div class="block-title">人员对比表</div>
+      <div class="block-title">人员对比表<el-tooltip effect="dark" placement="top" raw-content
+        content="<b>来源</b>：/analytics/refund/personnel-analysis（含顶部汇总行）<br/><b>口径</b>：成功率 = 成功SN/接待SN；分母 = 该人员周期内退款类接待(cs_records problem_category='退款')去重 SN（排除系统操作人）；挽留失败 = 该 SN 同期出现 refunds 线上退款单(状态非驳回/无需退款)或退款类工单(非终止)；人员类型: <b>专职挽回</b>=Person.specialty='退款挽回' · <b>退款操作</b>=周期内无退款类接待但有退款操作 · <b>其他人员挽回</b>=有接待的非专职人员；挽回估算金额 = 成功SN×同类失败平均金额（估算非实收）；部门=企微/店铺/研发（按 Person.department）<br/><b>时点</b>：跟随父页时间条与部门/类型筛选，后端缓存 60s<br/><b>「空」的含义</b>：某人接待SN=0 = 本期无退款类接待（若为「退款操作」类型则仅有退款操作记录）；表为空 = 当前筛选组合无人员<br/><b>下钻</b>：行内「详情」→ 人员抽屉（含成功/失败设备清单）；「时序」→ 人员审计页（新窗口，带当前窗口）">
+        <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+      </el-tooltip></div>
       <div v-if="summary" class="summary-line">
         共 {{ formatNum(summary.total_sn) }} 个接待SN ·
         成功 <span class="ok">{{ formatNum(summary.success_sn) }}</span> ·
@@ -98,10 +124,15 @@
       </el-table>
     </section>
 
-    <!-- ============ 2. 人员成功率趋势 ============ -->
+    <!-- ============ 2. 人员成功率趋势
+         #205 ⚠️ 不做图内点击下钻（规范 §3.4）: 单点构成（该日接待/成功/失败 SN 数）已在
+              tooltip 中直接给出，无更细粒度数据可跳；设备级明细由对比表「详情」抽屉承载。 ============ -->
     <section class="section-card">
       <div class="chart-header">
-        <span class="block-title" style="margin: 0">人员成功率趋势</span>
+        <span class="block-title" style="margin: 0">人员成功率趋势<el-tooltip effect="dark" placement="top" raw-content
+          content="<b>来源</b>：/analytics/refund/personnel-trend<br/><b>口径</b>：默认取对比表中成功率 Top3 + Bottom3（仅接待SN&gt;0 者），按日/周聚合各人成功率%；成功率判据与对比表一致<br/><b>时点</b>：跟随父页时间条与部门/类型筛选；后端缓存 120s<br/><b>「空」的含义</b>：为空 = 窗口内选中人员均无退款类接待（某天无接待则该天该线断点）<br/><b>⚠️ 不下钻</b>：单点构成（接待 X/成功 Y）已在 tooltip 给出，无更细粒度可跳；个案明细用对比表「详情」抽屉">
+          <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+        </el-tooltip></span>
         <div class="chart-toolbar">
           <span class="trend-hint">默认: 成功率 Top3 + Bottom3</span>
           <el-radio-group v-model="trendGrain" size="small" @change="loadTrend">
@@ -114,10 +145,15 @@
       <el-empty v-else description="暂无趋势数据" />
     </section>
 
-    <!-- ============ 3. 人员 × 原因 热力图 ============ -->
+    <!-- ============ 3. 人员 × 原因 热力图
+         #205 ⚠️ 不做图内点击下钻（规范 §3.4）: 单格构成（接待/成功/失败/成功率）已在
+              tooltip 中给出；明细去向=对比表「详情」抽屉，跳页只会重复展示。 ============ -->
     <section class="section-card">
       <div class="chart-header">
-        <span class="block-title" style="margin: 0">人员 × 原因 热力图</span>
+        <span class="block-title" style="margin: 0">人员 × 原因 热力图<el-tooltip effect="dark" placement="top" raw-content
+          content="<b>来源</b>：/analytics/refund/person-reason-matrix（top=15）<br/><b>口径</b>：行=人员（对比表全员），列=失败原因（归一化后 Top15），格值=该人该原因下的成功率%（绿高红低）；原因判据=接待记录 problem_type 归一化<br/><b>时点</b>：跟随父页时间条；后端缓存 120s<br/><b>「空」的含义</b>：格为「-」= 该人该原因下无接待记录（非失败率 100%）<br/><b>⚠️ 不下钻</b>：单格构成（接待/成功/失败/成功率）已在 tooltip 给出；明细用对比表「详情」抽屉">
+          <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+        </el-tooltip></span>
         <span class="trend-hint">值=成功率(%) · 绿高红低</span>
       </div>
       <BaseChart v-if="heatmapHasData" :option="heatmapOption" height="420px" />
@@ -196,7 +232,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, QuestionFilled } from '@element-plus/icons-vue'
 import BaseChart from '@/components/BaseChart.vue'
 import { refundDeep } from '@/api/analytics'
 import { formatMoney } from '@/utils/format'

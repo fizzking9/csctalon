@@ -1,8 +1,30 @@
+<!--
+  ┌──────────────────────── 设计说明（Design Rationale） ─────────────────────────┐
+  │ 目的：退款挽回主管定位「反复出问题的设备」，决定催回优先级/设备回收/客户回访，  │
+  │       并借 Top20 个案判断是设备问题还是服务问题。                              │
+  │ 逻辑：4 张风险计数卡（异常信号前置）→ Top20 个案明细 → 2 张分布图（时差/次数）， │
+  │       由异常计数到个案再到分布规律，顶部筛选条统一控制口径。                    │
+  │ 口径：全部基于「挽留失败 SN」= 周期内 cs_records problem_category='退款' 去重 SN │
+  │       中，同期出现 refunds 线上退款单(状态非驳回/无需退款) 或 service_tickets   │
+  │       service_category=退款 工单(非终止) 者；复退款=接待≥2次且失败；            │
+  │       跨人员=失败且≥2名客服接待；高金额=失败且退款>1000元。                     │
+  │       详见 backend/app/services/analytics/refund.py _refund_recovery_core /     │
+  │       refund_device_analysis。                                                  │
+  │ 取舍：① 不做「跨人员」精确筛选下钻——接口无该筛选参数，仅可按「接待人员数」列     │
+  │          排序近似查看，强给会误导；                                             │
+  │       ② 两张分布图不做图内点击下钻——分布为统计切面，无单桶明细接口；            │
+  │       ③ 不新建设备明细页——Top20 行内「详情」抽屉+「时序」审计页已承载个案下钻。  │
+  │ 工单：#205（看板卡片双强制补齐：ⓘ 数据说明 + 可下钻）                           │
+  └───────────────────────────────────────────────────────────────────────────────┘
+-->
 <template>
   <div class="device-analysis">
     <!-- 1. 筛选栏 -->
     <section class="section-card">
-      <div class="block-title">设备风险分析 · 筛选</div>
+      <div class="block-title">设备风险分析 · 筛选<el-tooltip effect="dark" placement="bottom-start" raw-content
+        content="<b>这个页面为什么这样设计</b><br/><b>给谁</b>：退款挽回主管，定位高风险设备、安排催回/回收时使用。<br/><b>回答什么</b>：哪些设备反复出现退款失败？金额集中在哪里？接待到流失隔多久？<br/><b>组织逻辑</b>：4 张风险计数卡（异常信号）→ Top20 个案 → 2 张分布图（时差/次数），由计数到个案再到规律。<br/><b>口径</b>：全部基于「挽留失败 SN」判据（接待退款类 + 最终产生退款行为），详见 backend/app/services/analytics/refund.py _refund_recovery_core。<br/><br/><b>⚠️ 我们不做什么（及原因）</b><br/>① <b>不做</b>「跨人员」精确筛选下钻 —— 接口无该筛选参数，仅可按 Top20「接待人员数」列排序近似查看；<br/>② 两张分布图<b>不做</b>图内点击下钻 —— 分布为统计切面，无单桶明细接口；<br/>③ <b>不新建</b>设备明细页 —— Top20「详情」抽屉 +「时序」审计页已承载个案下钻。<br/><b>关联</b>：工单 #205">
+        <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+      </el-tooltip></div>
       <div class="filter-row">
         <el-select v-model="filters.reason" placeholder="失败原因" size="small" style="width: 220px" @change="onFilterChange">
           <el-option label="全部原因" value="" />
@@ -24,34 +46,55 @@
       </div>
     </section>
 
-    <!-- 2. 设备风险分布 KPI -->
+    <!-- 2. 设备风险分布 KPI
+         #205: 4 张卡均有ⓘ说明; 复退款/高金额/总失败 3 张可点下钻到 Top20 表(带筛选), 跨人员卡不下钻(见ⓘ)。 -->
     <section v-loading="loading" class="section-card">
-      <div class="block-title">设备风险分布</div>
+      <div class="block-title">设备风险分布<el-tooltip effect="dark" placement="top" raw-content
+        content="<b>来源</b>：/analytics/refund/device-analysis → risk_summary<br/><b>口径</b>：4 张卡均基于「挽留失败 SN」= 周期内退款类接待(cs_records problem_category='退款')去重 SN 中，最终产生退款行为(refunds 线上退款单非驳回/无需退款，或 service_tickets 退款类工单非终止)者；复退款=接待≥2次且失败 · 跨人员=失败且≥2名客服接待 · 高金额=失败且退款&gt;1000元 · 总失败=失败 SN 总数<br/><b>时点</b>：跟随父页时间条与筛选条，查询后端缓存 120s<br/><b>「空」的含义</b>：0 = 当前窗口/筛选条件下无满足判据的设备（先确认窗口内是否有退款类接待）<br/><b>下钻</b>：复退款/高金额/总失败 3 张卡可点 → Top20 表（带对应筛选）；跨人员卡不下钻（接口无该参数，见其ⓘ）">
+        <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+      </el-tooltip></div>
       <el-row :gutter="12">
         <el-col :xs="12" :sm="12" :md="6">
-          <div class="risk-card risk-red">
-            <div class="risk-label">复退款设备数</div>
+          <!-- #205 卡片说明+下钻: 判据=失败SN且退款类接待≥2次; 用「接待次数≥2」筛选近似承载(Top20 仅金额前20, 代码注释已声明降级) -->
+          <div class="risk-card risk-red drillable" title="点击查看接待≥2次的失败设备" @click="drillRepeat">
+            <div class="risk-label">复退款设备数<el-tooltip effect="dark" placement="top" raw-content
+              content="<b>来源</b>：/analytics/refund/device-analysis → risk_summary.repeat_refund_devices<br/><b>口径</b>：周期内该 SN 退款类接待(cs_records problem_category='退款')≥2 次 <b>且</b> 属于「挽留失败 SN」（最终产生退款行为）<br/><b>时点</b>：跟随父页时间条与筛选条；后端缓存 120s<br/><b>「空」的含义</b>：0 = 窗口内无接待≥2次且失败的设备<br/><b>下钻</b>：点卡片 → Top20 表（自动选中「接待次数≥2」，按金额倒序；仅显示前 20 台）">
+              <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+            </el-tooltip></div>
             <div class="risk-sub">周期内接待≥2次</div>
             <div class="risk-value">{{ riskSummary.repeat_refund_devices || 0 }}<span class="unit">个</span></div>
           </div>
         </el-col>
         <el-col :xs="12" :sm="12" :md="6">
+          <!-- #205 ⚠️ 不做下钻(规范 §3.4): 接口无「跨人员」筛选参数; 「接待次数≥2」是总接待次数、
+               ≠去重接待人数≥2, 判据不同, 强行复用会误导。替代路径= Top20 表按「接待人员数」列倒序近似查看。 -->
           <div class="risk-card risk-orange">
-            <div class="risk-label">跨人员接待设备数</div>
+            <div class="risk-label">跨人员接待设备数<el-tooltip effect="dark" placement="top" raw-content
+              content="<b>来源</b>：/analytics/refund/device-analysis → risk_summary.cross_person_devices<br/><b>口径</b>：挽留失败 SN 中，周期内接待过该 SN 的<b>去重客服人数≥2</b>（同一人多条接待只算 1 人）<br/><b>时点</b>：跟随父页时间条与筛选条；后端缓存 120s<br/><b>「空」的含义</b>：0 = 窗口内失败设备均为单人接待<br/><b>⚠️ 不下钻</b>：接口无「跨人员」筛选参数；「接待次数≥2」是接待记录数、≠去重人数，判据不同不能复用。近似查看：Top20 表按「接待人员数」列倒序">
+              <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+            </el-tooltip></div>
             <div class="risk-sub">≥2名客服接待</div>
             <div class="risk-value">{{ riskSummary.cross_person_devices || 0 }}<span class="unit">个</span></div>
           </div>
         </el-col>
         <el-col :xs="12" :sm="12" :md="6">
-          <div class="risk-card risk-purple">
-            <div class="risk-label">高金额设备数</div>
+          <!-- #205 卡片说明+下钻: 判据=失败SN且退款金额>1000元; 用「金额区间>1000」筛选精确承载 -->
+          <div class="risk-card risk-purple drillable" title="点击查看退款>1000元的失败设备" @click="drillHighAmount">
+            <div class="risk-label">高金额设备数<el-tooltip effect="dark" placement="top" raw-content
+              content="<b>来源</b>：/analytics/refund/device-analysis → risk_summary.high_amount_devices<br/><b>口径</b>：挽留失败 SN 中，失败退款金额 &gt; 1000 元者<br/><b>时点</b>：跟随父页时间条与筛选条；后端缓存 120s<br/><b>「空」的含义</b>：0 = 窗口内失败设备均不超过 1000 元<br/><b>下钻</b>：点卡片 → Top20 表（自动选中「金额区间&gt;1000元」）">
+              <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+            </el-tooltip></div>
             <div class="risk-sub">退款 &gt; 1000元</div>
             <div class="risk-value">{{ riskSummary.high_amount_devices || 0 }}<span class="unit">个</span></div>
           </div>
         </el-col>
         <el-col :xs="12" :sm="12" :md="6">
-          <div class="risk-card risk-gray">
-            <div class="risk-label">总失败设备数</div>
+          <!-- #205 卡片说明+下钻: 判据=挽留失败SN全集; Top20 表即其金额倒序列表(前20), 点击时重置筛选 -->
+          <div class="risk-card risk-gray drillable" title="点击查看失败设备列表" @click="drillAllFailed">
+            <div class="risk-label">总失败设备数<el-tooltip effect="dark" placement="top" raw-content
+              content="<b>来源</b>：/analytics/refund/device-analysis → risk_summary.total_failed_devices<br/><b>口径</b>：挽留失败 SN 总数 = 周期内退款类接待去重 SN 中，同期出现 refunds 线上退款单(状态非驳回/无需退款)或 service_tickets 退款类工单(非终止)者<br/><b>时点</b>：跟随父页时间条与筛选条；后端缓存 120s<br/><b>「空」的含义</b>：0 = 窗口内所有退款类接待均挽留成功（或无接待数据）<br/><b>下钻</b>：点卡片 → Top20 表（重置筛选；表为金额倒序前 20，全量可用「时序」逐台查看）">
+              <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+            </el-tooltip></div>
             <div class="risk-sub">T+7 窗口内失败</div>
             <div class="risk-value">{{ riskSummary.total_failed_devices || 0 }}<span class="unit">个</span></div>
           </div>
@@ -59,10 +102,13 @@
       </el-row>
     </section>
 
-    <!-- 3. Top20 高风险设备表 -->
-    <section v-loading="loading" class="section-card">
+    <!-- 3. Top20 高风险设备表 (#205: 本表即风险 KPI 卡的下钻承载; 行内「详情」抽屉/「时序」审计页已可逐台下钻) -->
+    <section id="sec-top20" v-loading="loading" class="section-card">
       <div class="flex-between mb-12">
-        <div class="block-title">Top20 高风险设备</div>
+        <div class="block-title">Top20 高风险设备<el-tooltip effect="dark" placement="top" raw-content
+          content="<b>来源</b>：/analytics/refund/device-analysis → top_devices<br/><b>口径</b>：挽留失败 SN 按退款金额倒序前 20（受顶部 失败原因/金额区间/接待次数 筛选影响）；接待次数=周期内退款类接待记录数，接待人员数=去重客服人数；退款时间取该 SN 最近一笔线上退款（状态非驳回/无需退款）<br/><b>时点</b>：跟随父页时间条与筛选条；后端缓存 120s<br/><b>「空」的含义</b>：为空 = 当前窗口/筛选条件下无挽留失败设备<br/><b>下钻</b>：行内「详情」→ 设备画像抽屉（接待时间线/退款/工单/钱包）；「时序」→ 设备审计页（新窗口，带当前窗口）">
+          <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+        </el-tooltip></div>
         <el-tag size="small" type="info" effect="plain">默认按退款金额倒序</el-tag>
       </div>
       <el-table
@@ -116,9 +162,14 @@
       <el-empty v-if="!loading && !topDevices.length" description="暂无高风险设备数据" />
     </section>
 
-    <!-- 4. 接待→流失时差分布 -->
+    <!-- 4. 接待→流失时差分布
+         #205 ⚠️ 不做图内点击下钻（规范 §3.4）: 分布为统计切面，后端无单桶明细接口；
+              单桶定位可用顶部「失败原因/金额区间」筛选近似，个案构成看 Top20「详情」抽屉。 -->
     <section class="section-card">
-      <div class="block-title">接待 → 流失时差分布</div>
+      <div class="block-title">接待 → 流失时差分布<el-tooltip effect="dark" placement="top" raw-content
+        content="<b>来源</b>：/analytics/refund/device-analysis → loss_time_dist<br/><b>口径</b>：挽留失败设备按「首次退款类接待 → 退款时间(最近一笔线上退款)」差值分桶（当天/1-3天/3-7天/7-15天/15天+）；柱=桶内失败 SN 数，悬停可见涉及金额<br/><b>时点</b>：跟随父页时间条与筛选条；后端缓存 120s<br/><b>「空」的含义</b>：为空 = 窗口内无「接待与退款时间都齐全」的失败设备（缺退款时间的 SN 不入桶）<br/><b>⚠️ 不下钻</b>：分布为统计切面，无单桶明细接口；定位可用顶部筛选近似，个案看 Top20「详情」">
+        <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+      </el-tooltip></div>
       <BaseChart
         v-if="lossTimeOption && lossTimeOption.series && lossTimeOption.series.length"
         :option="lossTimeOption"
@@ -127,9 +178,14 @@
       <el-empty v-else description="暂无时差分布数据" />
     </section>
 
-    <!-- 5. 设备接待次数分布 -->
+    <!-- 5. 设备接待次数分布
+         #205 ⚠️ 不做图内点击下钻（规范 §3.4）: 分布为统计切面，后端无单桶明细接口；
+              桶内计数与「复退款」判据(接待记录条数)可能存在去重口径差异，数值以接口返回为准。 -->
     <section class="section-card">
-      <div class="block-title">设备接待次数分布</div>
+      <div class="block-title">设备接待次数分布<el-tooltip effect="dark" placement="top" raw-content
+        content="<b>来源</b>：/analytics/refund/device-analysis → reception_count_dist<br/><b>口径</b>：全部退款类接待 SN 按「接待次数」分桶（1/2/3/4/5+次），线=桶内挽留失败率%；分桶计数与「复退款」判据（接待记录条数≥2）可能存在去重口径差异，<b>数值以接口返回为准</b><br/><b>时点</b>：跟随父页时间条与筛选条；后端缓存 120s<br/><b>「空」的含义</b>：为空 = 窗口内无退款类接待 SN<br/><b>⚠️ 不下钻</b>：分布为统计切面，无单桶明细接口；单设备构成看 Top20「详情」抽屉">
+        <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+      </el-tooltip></div>
       <BaseChart
         v-if="receptionCountOption && receptionCountOption.series && receptionCountOption.series.length"
         :option="receptionCountOption"
@@ -289,7 +345,7 @@
 
 <script setup>
 import { ref, reactive, computed, watch, onMounted } from 'vue'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, QuestionFilled } from '@element-plus/icons-vue'
 import BaseChart from '@/components/BaseChart.vue'
 import { refundDeep } from '@/api/analytics'
 import { formatMoney } from '@/utils/format'
@@ -393,6 +449,36 @@ async function loadData() {
 function onFilterChange() {
   loadData()
 }
+
+// ---- #205 KPI 卡下钻（规范 §3.2 优先级③: 同页区块；时间窗口随父页 props 共用，无需透传）----
+function scrollToTop20() {
+  document.getElementById('sec-top20')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+// 复退款设备数 → 接待次数≥2 筛选。
+// ⚠️ 降级说明: 后端 repeat_refund_devices = 失败SN 且 退款类接待记录条数≥2；
+//    Top20 的 reception_count_min 筛选同为退款类接待记录条数 → 判据一致，但 Top20 仅展示金额前 20 台，
+//    超出部分不展示（接口 limit=20），故为「近似承载」，已在卡片ⓘ中声明。
+function drillRepeat() {
+  filters.receptionMin = 2
+  loadData()
+  scrollToTop20()
+}
+// 高金额设备数 → 金额区间>1000 筛选（与后端 high_amount 判据一致，精确承载）
+function drillHighAmount() {
+  filters.amountRange = 'gt1000'
+  loadData()
+  scrollToTop20()
+}
+// 总失败设备数 → 重置筛选后展示全部失败设备列表（Top20 金额倒序前 20）
+function drillAllFailed() {
+  filters.reason = ''
+  filters.amountRange = ''
+  filters.receptionMin = ''
+  loadData()
+  scrollToTop20()
+}
+// ⚠️ 「跨人员接待设备数」卡不做下钻: 接口无该筛选参数（见该卡模板注释与ⓘ）。
+// ⚠️ 两张分布图不做图内点击下钻: 分布为统计切面，无单桶明细接口（见各图模板注释与ⓘ）。
 
 // 监听 props.start / props.end 变化
 watch(() => [props.start, props.end], () => {
@@ -605,6 +691,8 @@ const receptionCountOption = computed(() => {
   transform: translateY(-1px);
   box-shadow: 0 6px 16px -8px rgba(15, 23, 42, 0.18);
 }
+/* #205 可下钻卡片: cursor:pointer(规范 §3.5); hover 反馈复用 .risk-card:hover */
+.drillable { cursor: pointer; }
 .risk-label {
   font-size: 13px;
   font-weight: 600;
