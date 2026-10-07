@@ -1,3 +1,23 @@
+<!--
+  ┌─────────────────────────── 设计说明（Design Rationale） ────────────────────────────┐
+  │ 目的：替退款条线主管/财务对账人回答「运营登记的退款与商户号真实流水(E)能否一一对上、            │
+  │       差异出在哪一路、该怎么治理」——支撑"补采集 / 修登记 / 标质量"三类动作。                    │
+  │ 逻辑：E(商户号真实退款流水)=财务基准，用 E 调校 ABCD 四路登记；每路给「共N笔 / 对齐E /         │
+  │       差异」三段式，差异有单即可下钻；另列空悬E(漏记)与 A∩D 歧义(两记)两类横切问题。           │
+  │ 口径：对齐汇总=GET /reconcile/alignment（per_route_alignment），复用统一核算口径               │
+  │       _cash_routes_total 与 E 勾稽分类(_classify_report)；匹配 E 不限窗口(键匹配即真实水单，   │
+  │       E 覆盖起点前历史单由 e_data_until 警示)；D 路按 #201 canonical 片段排除 dup_residual 等   │
+  │       质量标记；时点=本页复核时间窗(自包含, 跟随父级区间)；"空/0"=窗口内该路无登记或差异已清零。 │
+  │       详见 docs/arch/A-20260906-002-退款五路手动对账复核功能.md、backend/app/services/          │
+  │       reconcile_check.py。                                                                    │
+  │ 取舍：① 总笔数/已对齐数不提供下钻 —— 后端仅有差异类明细接口(alignmentDetail 仅收差异/断链/      │
+  │          空悬路由)，对齐单无独立明细视图，强行跳转会落在全量列表让使用者自己重筛(违反规范§3.3)； │
+  │       ② 不在本页直接改登记/写质量标记 —— 治理动作统一走「数据质量→手动退款」页，本页只定位+指路，│
+  │          避免两处写同一数据；                                                                │
+  │       ③ 差异≠错误：近2天差异多为 E 采集延迟(页面已警示)，不做自动判错。                        │
+  │ 工单：#205 · 依据 docs/standards/看板卡片数据说明与下钻规范.md、界面设计说明规范.md             │
+  └────────────────────────────────────────────────────────────────────────────────────┘
+-->
 <template>
   <div v-loading="loading" class="reconcile-check">
     <div v-if="errorMsg" class="error-msg">{{ errorMsg }}</div>
@@ -5,9 +25,16 @@
     <!-- ===== 顶部说明 ===== -->
     <el-alert type="info" :closable="false" show-icon class="mb-16">
       <template #title>
-        <b>E（商户号真实退款流水）= 财务基准</b>，用 E 调校 ABCD（运营登记台账）：
-        每路"已对齐"= 登记与 E 一致（可信）；"差异/空悬/歧义"单列，可下钻定位到具体单。
-        ABC 运营登记较准（剔除不相干后应高度对齐 E）；D 手动登记会有误操作（差异最需治理）。
+        <span>
+          <b>E（商户号真实退款流水）= 财务基准</b>，用 E 调校 ABCD（运营登记台账）：
+          每路"已对齐"= 登记与 E 一致（可信）；"差异/空悬/歧义"单列，可下钻定位到具体单。
+          ABC 运营登记较准（剔除不相干后应高度对齐 E）；D 手动登记会有误操作（差异最需治理）。
+          <!-- ★ #205 页面层可见设计说明（含「取舍」段）：卡片级 ⓘ 见各对齐卡头部 -->
+          <el-tooltip effect="dark" placement="bottom-start" raw-content
+            content="<b>这个页面为什么这样设计</b><br/><b>给谁</b>：退款条线主管/财务对账人<br/><b>回答什么</b>：运营登记与商户号真实流水(E)能否一一对上、差异出在哪路、怎么治理<br/><b>组织逻辑</b>：E=财务基准调校 ABCD；每路「共N笔/对齐E/差异」三段式，差异可下钻到单<br/><b>口径</b>：/reconcile/alignment 复用统一核算口径与 E 勾稽分类；匹配 E 不限窗口；D 路排除质量标记(#201)；时点=本页复核时间窗<br/><b>⚠️ 取舍（不做什么及原因）</b><br/>① 总笔数/已对齐不下钻——后端仅差异有明细接口，对齐单无独立视图，裸跳全量列表=让使用者自己重筛<br/>② 不在本页改登记/写质量标记——治理统一走数据质量页，本页只定位+指路，避免两处写同一数据<br/>③ 差异≠错误——近2天差异多为 E 采集延迟(见下方警示)，不做自动判错">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-2px;font-size:13px;margin-left:2px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </span>
       </template>
     </el-alert>
 
@@ -54,7 +81,13 @@
       <div class="grid-cards">
         <div class="align-card">
           <div class="card-head">
-            <b>A 线上直退</b>
+            <b>A 线上直退
+              <!-- ★ #205 卡级ⓘ：口径见文件头设计说明；仅差异可下钻(带当前窗口)，总笔数/已对齐不下钻理由见页面ⓘ取舍① -->
+              <el-tooltip effect="dark" placement="top" raw-content
+                content="<b>数据说明</b><br/><b>来源</b>：/reconcile/alignment → routes.A（reconcile_check.per_route_alignment）<br/><b>口径</b>：共N笔=窗口内 A 路线上直退登记数；已对齐=登记与 E 流水逐笔匹配成功；差异=登记在 E 中无对应水单<br/><b>时点</b>：本页复核时间窗<br/><b>空</b>：0 笔=窗口内无 A 路登记（或无差异）<br/><b>下钻</b>：仅差异可下钻到单（带当前窗口）；总笔数/已对齐无独立明细视图，不下钻（理由见页面ⓘ取舍①）">
+                <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-2px;font-size:12px"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </b>
             <div class="head-ops">
               <el-button v-if="rA.unmatched > 0" size="small" text type="warning" :loading="resyncing==='A'" @click="reSyncRoute('A')">🔄 重采</el-button>
               <span class="tag-ok">线上直退</span>
@@ -73,7 +106,13 @@
 
         <div class="align-card">
           <div class="card-head">
-            <b>B 用户提现</b>
+            <b>B 用户提现
+              <!-- ★ #205 卡级ⓘ：链路三段判据来自后端 _classify_report；仅链路断可下钻 -->
+              <el-tooltip effect="dark" placement="top" raw-content
+                content="<b>数据说明</b><br/><b>来源</b>：/reconcile/alignment → routes.B<br/><b>口径</b>：共N笔=窗口内提现登记数；链路到 E = 提现(remark RF)→A转入钱包单→E 水单 三段全通；链路断=提现在 E 中无对应退款（B转入/系统扣费不比对）<br/><b>时点</b>：本页复核时间窗<br/><b>空</b>：0 笔=窗口内无提现登记（或无断链）<br/><b>下钻</b>：仅链路断可下钻到单（带当前窗口）">
+                <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-2px;font-size:12px"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </b>
             <div class="head-ops">
               <el-button v-if="rB.chain_break > 0" size="small" text type="warning" :loading="resyncing==='B'" @click="reSyncRoute('B')">🔄 重采</el-button>
               <span class="tag-info">链路对账</span>
@@ -92,7 +131,13 @@
 
         <div class="align-card">
           <div class="card-head">
-            <b>C 闪猫退款</b>
+            <b>C 闪猫退款
+              <!-- ★ #205 卡级ⓘ：C 源需手动采集，差异多为采集缺→引导重采而非判错 -->
+              <el-tooltip effect="dark" placement="top" raw-content
+                content="<b>数据说明</b><br/><b>来源</b>：/reconcile/alignment → routes.C<br/><b>口径</b>：共N笔=窗口内闪猫已退款(WXALR order_no)数；已对齐=WXALR 单号在 E 中匹配到真实水单；差异=E 中无对应<br/><b>时点</b>：本页复核时间窗<br/><b>空</b>：0 笔=窗口内无闪猫退款（或无差异）<br/><b>注意</b>：闪猫源需手动采集(未纳入定时)，差异多为采集缺 → 点🔄重采后复查，勿直接判错<br/><b>下钻</b>：仅差异可下钻到单（带当前窗口）">
+                <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-2px;font-size:12px"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </b>
             <div class="head-ops">
               <el-button v-if="rC.unmatched > 0 || rC.total > 0" size="small" text type="warning" :loading="resyncing==='C'" @click="reSyncRoute('C')">🔄 重采</el-button>
               <span class="tag-ok">WXALR</span>
@@ -110,7 +155,16 @@
         </div>
 
         <div class="align-card">
-          <div class="card-head"><b>D 手动退款</b><span class="tag-warn">人工台账</span></div>
+          <div class="card-head">
+            <b>D 手动退款
+              <!-- ★ #205 卡级ⓘ：D 路 #201 后按 canonical 片段排除 dup_residual/ignored 等质量标记 -->
+              <el-tooltip effect="dark" placement="top" raw-content
+                content="<b>数据说明</b><br/><b>来源</b>：/reconcile/alignment → routes.D（#201 起按 canonical 排除片段剔除 dup_residual/ignored 等质量标记）<br/><b>口径</b>：共N笔=窗口内手动退款登记数（已排除质量标记行）；已对齐=登记与 E 匹配成功；差异=登记在 E 无对应；与A重叠=同一订单 A/D 两路都登记<br/><b>时点</b>：本页复核时间窗<br/><b>空</b>：0 笔=窗口内无手动登记（或无差异）<br/><b>下钻</b>：差异与重叠可下钻/定位（带当前窗口）；治理动作在数据质量页（见页面ⓘ取舍②）">
+                <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-2px;font-size:12px"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </b>
+            <span class="tag-warn">人工台账</span>
+          </div>
           <div class="card-nums">
             <div class="num-main">共 {{ fmt(rD.total) }} 笔</div>
             <div class="num-ok" :style="{color:'#16a34a'}">✅ 已对齐 E {{ fmt(rD.matched_in_e) }}（{{ pctOf(rD.matched_in_e, rD.total) }}%）</div>
@@ -128,7 +182,13 @@
       <div class="grid-cards mt-12">
         <div class="align-card issue">
           <div class="card-head">
-            <b>空悬 E（E 有、ABCD 无登记）</b>
+            <b>空悬 E（E 有、ABCD 无登记）
+              <!-- ★ #205 卡级ⓘ：归属建议三分判据来自后端 _orphan_where 查询注释 -->
+              <el-tooltip effect="dark" placement="top" raw-content
+                content="<b>数据说明</b><br/><b>来源</b>：/reconcile/alignment → issues（e_orphan 系列，E=refund_record_report）<br/><b>口径</b>：窗口内 E 已退款水单、但 A/B/C/D 四路均无登记承接；WXALR 前缀=疑闪猫(C)漏记/缺源；近2天=E 采集延迟待复查；历史非WXALR=大概率手动(D)少登记<br/><b>时点</b>：本页复核时间窗<br/><b>空</b>：0 笔=E 水单全部被四路承接<br/><b>下钻</b>：可下钻到逐笔（带当前窗口，含归属建议列）">
+                <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-2px;font-size:12px"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </b>
             <div class="head-ops">
               <el-button size="small" text type="warning" :loading="resyncing==='E'" @click="reSyncRoute('E')">🔄 重采E</el-button>
               <span class="tag-danger">漏记</span>
@@ -147,7 +207,16 @@
           <div class="card-foot">E 已退款但 A/C/D 均无记录 = 漏记/待承接（窗口 E 共 {{ fmt(iss.e_total_in_window) }} 笔）</div>
         </div>
         <div class="align-card issue">
-          <div class="card-head"><b>A∩D 归属歧义</b><span class="tag-warn">同单两记</span></div>
+          <div class="card-head">
+            <b>A∩D 归属歧义
+              <!-- ★ #205 卡级ⓘ：处置去向=数据质量页（本页不改数据，见页面ⓘ取舍②） -->
+              <el-tooltip effect="dark" placement="top" raw-content
+                content="<b>数据说明</b><br/><b>来源</b>：/reconcile/alignment → routes.D.overlap_a<br/><b>口径</b>：D 手动登记中与 A 线上直退同单号的行（同一订单两路都登记），非误差、属归属二选一<br/><b>时点</b>：本页复核时间窗<br/><b>空</b>：0=窗口内无 A/D 重叠<br/><b>下钻</b>：不下钻——处置是逐条改质量标记（保留D 或 标 dup_residual），写操作统一在「系统管理→数据质量→手动退款」页进行（见页面ⓘ取舍②），本页只提示条数与去向">
+                <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-2px;font-size:12px"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </b>
+            <span class="tag-warn">同单两记</span>
+          </div>
           <div class="card-nums">
             <div v-if="rD.overlap_a > 0" class="num-dup">
               D 路中与 A 线上重叠 {{ fmt(rD.overlap_a) }} 笔（同一订单两路都登记）
@@ -208,7 +277,13 @@
     <!-- ===== 历史复核批次(留痕) ===== -->
     <section class="block-card">
       <div class="block-head">
-        <span class="block-title">历史复核批次（留痕存档）</span>
+        <span class="block-title">历史复核批次（留痕存档）
+          <!-- ★ #205 区块ⓘ：留痕表非 KPI 数字，说明来源与"空"含义即可 -->
+          <el-tooltip effect="dark" placement="top" raw-content
+            content="<b>数据说明</b><br/><b>来源</b>：/reconcile/check/list（reconcile_matches 复核快照，只写快照不改源表）<br/><b>口径</b>：每次「生成预览→存档」落一条复核批次（复核单号/窗口/结论/复核人）<br/><b>时点</b>：复核存档时刻<br/><b>空</b>：—=该批次未填结论或复核人；列表为空=从未存档过复核结论">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-2px;font-size:12px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </span>
         <el-button size="small" text type="primary" @click="loadHistory">刷新</el-button>
       </div>
       <el-table v-loading="histLoading" :data="history" border stripe size="small" class="mt-12" max-height="300">
@@ -234,7 +309,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search } from '@element-plus/icons-vue'
+import { Search, QuestionFilled } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { reconcile } from '@/api/reconcile'
 import { taskSubmit } from '@/api/fetch'
