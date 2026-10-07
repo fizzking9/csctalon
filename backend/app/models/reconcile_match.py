@@ -11,6 +11,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
@@ -39,7 +40,7 @@ class ReconcileMatch(IDMixin, TimestampMixin, Base):
     )
     # ── E 笔快照冗余(便于直接查/列表, 不依赖 join report 表) ──
     platform_order_no: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="E 笔平台订单号快照")
-    refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="E 笔退款金额快照(元)")
+    refund_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="E 笔退款金额快照(元)")
     refund_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="E 笔退款时间快照")
     # ── 勾稽信息 ──
     auto_route: Mapped[str | None] = mapped_column(

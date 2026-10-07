@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import func, or_, select
@@ -138,13 +139,22 @@ def _enum_note(value: str | None, allowed: set[str], label: str) -> str | None:
     return None
 
 
+def _D(val) -> Decimal:
+    """金额定点化（#222；与 analytics._core.D 同语义，本文件因循环依赖内联）。"""
+    if val is None:
+        return Decimal("0")
+    if isinstance(val, Decimal):
+        return val
+    return Decimal(str(val))
+
+
 def _amount_note(value: Any, label: str, allow_zero: bool = False) -> str | None:
     """R-金额: 缺失或 <=0(allow_zero=True 时允许 0)"""
     if value is None:
         return f"{label}缺失"
     try:
-        v = float(value)
-    except (TypeError, ValueError):
+        v = _D(value)
+    except (TypeError, ValueError, InvalidOperation):
         return f"{label}非数值({value})"
     if v < 0 or (v == 0 and not allow_zero):
         return f"{label}异常({v})"
@@ -227,7 +237,7 @@ def check_wallet_row(r: WalletWithdrawal) -> tuple[str | None, str | None]:
     ]
     if r.op_amount is not None:
         try:
-            if float(r.op_amount) < 0:
+            if _D(r.op_amount) < 0:
                 notes.append(f"操作金额为负({r.op_amount})")
         except (TypeError, ValueError):
             notes.append(f"操作金额非数值({r.op_amount})")
@@ -246,7 +256,7 @@ def check_shanmao_row(r: ShanmaoRefund) -> tuple[str | None, str | None]:
     ]
     if r.actual_amount is not None:
         try:
-            if float(r.actual_amount) < 0:
+            if _D(r.actual_amount) < 0:
                 notes.append(f"实际退款金额为负({r.actual_amount})")
         except (TypeError, ValueError):
             notes.append(f"实际退款金额非数值({r.actual_amount})")
@@ -389,8 +399,8 @@ def quality_fix(db: Session, table: str, pk: str | int, payload: dict[str, Any])
             changes.append(k)
         elif k in ("refund_amount", "actual_amount", "op_amount", "order_amount"):
             try:
-                setattr(r, k, float(v))
-            except (TypeError, ValueError):
+                setattr(r, k, _D(v))
+            except (TypeError, ValueError, InvalidOperation):
                 continue
             changes.append(k)
         else:

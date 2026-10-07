@@ -12,6 +12,7 @@
 import datetime as _dt
 import re as _re
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import and_, case, func, literal, or_, select, text
@@ -61,6 +62,23 @@ from app.services.quality_check import stats_quality_include
 #   如需回退(不建议): 改回 False 即可, 但卡商单列将失效。
 # ═══════════════════════════════════════════════════════════════════
 _INCLUDE_COMPLAINT_FILES = True
+
+
+# ============================================================
+# 金额定点化（#222 方案 C′：元单位 + Decimal，禁止 float 进入金额计算）
+# ============================================================
+def D(val) -> Decimal:
+    """金额读取定点化：DB(Numeric)→Decimal 原样；None→Decimal('0')；
+    万一混入 float/str 经 str() 取最短十进制表示，不带二进制尾数。
+
+    用法边界：计算路径（累加/比较/聚合）一律用 D()；
+    纯出参边界（JSON/Excel dict）允许 float(...) 一次性表示层转换。
+    """
+    if val is None:
+        return Decimal("0")
+    if isinstance(val, Decimal):
+        return val
+    return Decimal(str(val))
 
 
 

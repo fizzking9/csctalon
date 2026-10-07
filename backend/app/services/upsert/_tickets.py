@@ -24,7 +24,7 @@ from app.services.upsert._core import (
     _sanitize_name_field,
     _sync_devices,
     _to_datetime,
-    _to_float,
+    _to_decimal,
     _to_int,
     _to_str,
     _truncate_str,
@@ -70,8 +70,8 @@ def upsert_tickets(df: pd.DataFrame, mapping: dict[str, str], db: Session, resul
                 "is_appeal": _truncate_str(data.get("is_appeal"), 64),  # 迁移后列宽 64,与 DB 对齐
                 "order_no": _truncate_str(data.get("order_no"), 64),
                 "submit_params": data.get("submit_params"),
-                "refund_amount": _to_float(data.get("refund_amount")),
-                "estimated_amount": _to_float(data.get("estimated_amount")),
+                "refund_amount": _to_decimal(data.get("refund_amount")),
+                "estimated_amount": _to_decimal(data.get("estimated_amount")),
                 # ── 催单 & 派单 8 个新列 (2026-08-03) ──
                 "urge_count": _to_int(data.get("urge_count")),
                 "urge_status": _truncate_str(data.get("urge_status"), 64),

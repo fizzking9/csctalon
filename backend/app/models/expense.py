@@ -5,6 +5,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -24,9 +25,9 @@ class ExpenseInvoice(IDMixin, TimestampMixin, Base):
     invoice_type: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="全电/纸质/普票/专票")
     seller_name: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="销方")
     buyer_name: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="购方")
-    amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="金额")
-    tax_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="税额")
-    total_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="价税合计")
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="金额")
+    tax_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="税额")
+    total_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="价税合计")
     invoice_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="开票日期")
     file_url: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="附件路径")
     file_type: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="qr/pdf/image")
@@ -47,7 +48,7 @@ class Reimbursement(IDMixin, TimestampMixin, Base):
     batch_no: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False, comment="报销单号")
     title: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="标题")
     submitter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, comment="提交人")
-    total_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="总金额")
+    total_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="总金额")
     invoice_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False, comment="发票张数")
     status: Mapped[str] = mapped_column(
         String(32), default="草稿", nullable=False, index=True, comment="草稿/待审核/已通过/已驳回/已报销"
@@ -70,4 +71,4 @@ class ReimbursementItem(IDMixin, TimestampMixin, Base):
     invoice_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("expense_invoices.id"), unique=True, nullable=False, comment="发票(唯一, 防重复报销)"
     )
-    amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="金额")
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="金额")

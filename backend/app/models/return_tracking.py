@@ -8,6 +8,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -29,9 +30,9 @@ class ReturnTracking(TimestampMixin, Base):
     device_type: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="设备类型")
     shop: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True, comment="店铺")
     merchant: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True, comment="商户")
-    paid_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="实付金额(元)")
+    paid_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="实付金额(元)")
     return_type: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True, comment="退货类型(已激活退货/未签收退货/换货等)")
-    refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退款金额(元)")
+    refund_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退款金额(元)")
     return_sign_status: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="退货签收状态(未收到等)")
     return_express_no: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="退货快递单号")
     return_reason: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="退货原因")

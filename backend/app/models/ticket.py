@@ -4,6 +4,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -43,8 +44,8 @@ class ServiceTicket(QualityMixin, TimestampMixin, Base):
     is_appeal: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="是否申诉")
     order_no: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="订单编号")
     submit_params: Mapped[str | None] = mapped_column(Text, nullable=True, comment="提交参数(JSON)")
-    refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退款金额")
-    estimated_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="预估可退金额")
+    refund_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退款金额")
+    estimated_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="预估可退金额")
     # ── 催单 & 人员分派新字段(2026-08-03 加, nullable, 不影响历史数据) ──
     urge_count: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="催单次数")
     urge_status: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="催单状态")

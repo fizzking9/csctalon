@@ -8,6 +8,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -34,7 +35,7 @@ class ManualRefund(IDMixin, TimestampMixin, Base):
     merchant_id: Mapped[str | None] = mapped_column(
         String(64), index=True, nullable=True, comment="商户ID(微信商户号)"
     )
-    order_amount: Mapped[float | None] = mapped_column(
+    order_amount: Mapped[Decimal | None] = mapped_column(
         Numeric(12, 2), nullable=True, comment="订单金额"
     )
     registrant: Mapped[str | None] = mapped_column(
@@ -45,7 +46,7 @@ class ManualRefund(IDMixin, TimestampMixin, Base):
     is_refunded: Mapped[str | None] = mapped_column(
         String(8), index=True, nullable=True, comment="是否已退款(是/否)"
     )
-    refund_amount: Mapped[float | None] = mapped_column(
+    refund_amount: Mapped[Decimal | None] = mapped_column(
         Numeric(12, 2), nullable=True, comment="退款金额"
     )
     refund_operator: Mapped[str | None] = mapped_column(

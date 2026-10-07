@@ -2,6 +2,7 @@
 
 import datetime as _dt
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import and_, func, select, text
@@ -14,6 +15,7 @@ from app.models.wallet import WalletWithdrawal
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
 from app.services.analytics._core import (
+    D,
     _date_range,
     _route_a_online_any_status_filter,
     _route_a_online_refund_filter,
@@ -133,7 +135,7 @@ def _route_c_shanmao_agg(db: Session, start, end) -> tuple[int, float]:
     必须用 savepoint (begin_nested) 隔离，失败只回滚子事务。
     """
     if not _table_exists(db, _C_SHANMAO_TABLE):
-        return 0, 0.0
+        return 0, Decimal("0")
     # #201 S-P0-1：C 路排除 dup_residual/ignored（shanmao_refunds 在 QUALITY_TABLES 内可打标，
     # 原仅 D 路排除，造成治理标记后 C 路与 cash_flow_wide 口径不一致）
     sql_tpl = f"""
@@ -156,9 +158,9 @@ def _route_c_shanmao_agg(db: Session, start, end) -> tuple[int, float]:
     try:
         with db.begin_nested():
             r = db.execute(text(sql_tpl), params).first() or (0, 0)
-        return int(r[0] or 0), float(r[1] or 0)
+        return int(r[0] or 0), D(r[1])
     except Exception:
-        return 0, 0.0
+        return 0, Decimal("0")
 
 
 # ---------- 路线D 手动退款 (独立业务表) ----------
@@ -235,7 +237,7 @@ def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
     排除 quality_status='dup_residual'(已治理重复, 见常量注释)。
     """
     if not _table_exists(db, _D_OTHER_TABLE):
-        return 0, 0.0
+        return 0, Decimal("0")
     exclude_q = _quality_exclude_sql(db)
     sql_tpl = f"""
     SELECT COUNT(*) AS cnt,
@@ -257,9 +259,9 @@ def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
     try:
         with db.begin_nested():
             r = db.execute(text(sql_tpl), params).first() or (0, 0)
-        return int(r[0] or 0), float(r[1] or 0)
+        return int(r[0] or 0), D(r[1])
     except Exception:
-        return 0, 0.0
+        return 0, Decimal("0")
 
 
 # ---------- 路线C/D 按时间粒度分组聚合 (小时/日) ----------
@@ -289,7 +291,7 @@ def _route_c_shanmao_trend(db: Session, start, end, grain: str, slot_idx_fn) -> 
     if end is not None:
         params["e"] = end
     cnt_map: dict[int, int] = {}
-    amt_map: dict[int, float] = {}
+    amt_map: dict[int, Decimal] = {}
     try:
         with db.begin_nested():
             rows = db.execute(text(sql_tpl), params).all()
@@ -301,7 +303,7 @@ def _route_c_shanmao_trend(db: Session, start, end, grain: str, slot_idx_fn) -> 
             if idx is None:
                 continue
             cnt_map[idx] = int(r[1] or 0)
-            amt_map[idx] = float(r[2] or 0)
+            amt_map[idx] = D(r[2])
     except Exception:
         pass
     return cnt_map, amt_map
@@ -332,7 +334,7 @@ def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tu
     if end is not None:
         params["e"] = end
     cnt_map: dict[int, int] = {}
-    amt_map: dict[int, float] = {}
+    amt_map: dict[int, Decimal] = {}
     try:
         with db.begin_nested():
             rows = db.execute(text(sql_tpl), params).all()
@@ -344,7 +346,7 @@ def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tu
             if idx is None:
                 continue
             cnt_map[idx] = int(r[1] or 0)
-            amt_map[idx] = float(r[2] or 0)
+            amt_map[idx] = D(r[2])
     except Exception:
         pass
     return cnt_map, amt_map
@@ -388,7 +390,7 @@ def _cash_routes_total(db: Session,
         *_route_a_online_refund_filter(),
         _between(col_a, start, end),
     )).first() or (0, 0)
-    a_cnt, a_amt = int(a_row[0] or 0), float(a_row[1] or 0)
+    a_cnt, a_amt = int(a_row[0] or 0), D(a_row[1])
 
     # ── B 钱包用户取现 ──
     b_row = db.execute(select(
@@ -398,7 +400,7 @@ def _cash_routes_total(db: Session,
         *_route_b_withdraw_filter(),
         _between(col_b, start, end),
     )).first() or (0, 0)
-    b_cnt, b_amt = int(b_row[0] or 0), float(b_row[1] or 0)
+    b_cnt, b_amt = int(b_row[0] or 0), D(b_row[1])
 
     # ── C 闪猫退款独立表 (shanmao_refunds, status=已退款) ──
     c_cnt, c_amt = _route_c_shanmao_agg(db, start, end)
@@ -413,7 +415,7 @@ def _cash_routes_total(db: Session,
         *_route_e_cashflow_filter(),
         _between(col_e, start, end),
     )).first() or (0, 0)
-    e_cnt, e_amt = int(e_row[0] or 0), float(e_row[1] or 0)
+    e_cnt, e_amt = int(e_row[0] or 0), D(e_row[1])
 
     # ── 合计: 经营估算 A+B+C+D / 实际 E / 对账偏差 经营−实际 ──
     op_cnt = a_cnt + b_cnt + c_cnt + d_cnt
@@ -421,23 +423,28 @@ def _cash_routes_total(db: Session,
     fc_cnt = e_cnt
     fc_amt = e_amt
 
+    # #222 出参边界: 金额在出参点统一 quantize(2) 后转 float(JSON number),
+    # 下游(API/JSONB 落库/既有测试断言)语义与改造前完全一致; 计算层已是 Decimal。
+    def _out(x: Decimal) -> float:
+        return float(round(x, 2))
+
     return {
-        "route_a": {"count": a_cnt, "amount": round(a_amt, 2)},   # A.退费单线上直退
-        "route_b": {"count": b_cnt, "amount": round(b_amt, 2)},   # B.钱包-用户取现
-        "route_c": {"count": c_cnt, "amount": round(c_amt, 2)},   # C.闪猫退款(独立表,暂0)
-        "route_d": {"count": d_cnt, "amount": round(d_amt, 2)},   # D.手动退款(manual_refunds)
+        "route_a": {"count": a_cnt, "amount": _out(a_amt)},   # A.退费单线上直退
+        "route_b": {"count": b_cnt, "amount": _out(b_amt)},   # B.钱包-用户取现
+        "route_c": {"count": c_cnt, "amount": _out(c_amt)},   # C.闪猫退款(独立表,暂0)
+        "route_d": {"count": d_cnt, "amount": _out(d_amt)},   # D.手动退款(manual_refunds)
         "actual_cashflow":  # E.商户号实际现金流 退款记录报表退款成功合计 (对账基准,不分C/D桶)
-            {"count": e_cnt, "amount": round(e_amt, 2)},
+            {"count": e_cnt, "amount": _out(e_amt)},
         "operational":     # 经营侧四路总登记出款估算 = A+B+C+D
-            {"count": op_cnt, "amount": round(op_amt, 2)},
+            {"count": op_cnt, "amount": _out(op_amt)},
         "financial":       # 向后兼容键: 财务实际 = actual_cashflow = E
-            {"count": fc_cnt, "amount": round(fc_amt, 2)},
+            {"count": fc_cnt, "amount": _out(fc_amt)},
         "diff":            # 对账偏差 = 经营估算 − 实际现金流
-            {"count": op_cnt - fc_cnt, "amount": round(op_amt - fc_amt, 2)},
+            {"count": op_cnt - fc_cnt, "amount": _out(op_amt - fc_amt)},
     }
 
 def _real_cash_out_total(db: Session) -> tuple[float, float]:
-    """兼容旧名: 真实现金流(A+B) = 直接退款A + 用户提现B,返回 (A, B)"""
+    """兼容旧名: 真实现金流(A+B) = 直接退款A + 用户提现B,返回 (A, B)（出参边界 float, 见 _cash_routes_total 注释）"""
     r = _cash_routes_total(db)
     return r["route_a"]["amount"], r["route_b"]["amount"]
 
@@ -464,7 +471,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
         .where(*_route_a_online_refund_filter(), Refund.created_at_raw.between(s, e))
         .group_by("date")
     ).all()
-    direct_map = {r.date: {"amount": float(r.amount or 0), "count": r.count} for r in direct_rows}
+    direct_map = {r.date: {"amount": D(r.amount), "count": r.count} for r in direct_rows}
     # ── B 用户提现按日 (路线B wallet) ──
     withdraw_rows = db.execute(
         select(
@@ -475,7 +482,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
         .where(WalletWithdrawal.op_time.between(s, e), *_route_b_withdraw_filter())
         .group_by("date")
     ).all()
-    withdraw_map = {r.date: {"amount": float(r.amount or 0), "count": r.count} for r in withdraw_rows}
+    withdraw_map = {r.date: {"amount": D(r.amount), "count": r.count} for r in withdraw_rows}
     # ── C 闪猫退款按日 (独立表 shenmao_refund 占位, 表不存在→空map) ──
     shanmao_map: dict[str, dict] = {}
     if _table_exists(db, _C_SHANMAO_TABLE):
@@ -494,7 +501,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
                     **({"st": _C_SHANMAO_STATUS_OK} if _C_SHANMAO_STATUS_COL else {}),
                     "s": s, "e": e,
                 }).all()
-            shanmao_map = {r[0]: {"amount": float(r[2] or 0), "count": int(r[1] or 0)} for r in sm_rows}
+            shanmao_map = {r[0]: {"amount": D(r[2]), "count": int(r[1] or 0)} for r in sm_rows}
         except Exception:
             pass   # 表未建 → 空 (savepoint 已隔离 PG 事务失败状态)
     # ── D 手动退款按日 (manual_refunds, is_refunded='是'; 排除 dup_residual/ignored) ──
@@ -517,7 +524,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
                     **({"st": _D_OTHER_STATUS_OK} if _D_OTHER_STATUS_COL else {}),
                     "s": s, "e": e,
                 }).all()
-            other_map = {r[0]: {"amount": float(r[2] or 0), "count": int(r[1] or 0)} for r in ot_rows}
+            other_map = {r[0]: {"amount": D(r[2]), "count": int(r[1] or 0)} for r in ot_rows}
         except Exception:
             pass
     # ── E 实际现金流按日 (refund_record_reports 退款成功合计, 对账基准) ──
@@ -531,7 +538,7 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
         .where(RefundRecordReport.refund_time.between(s, e), *_route_e_cashflow_filter())
         .group_by("date")
     ).all()
-    actual_map = {r.date: {"amount": float(r.amount or 0), "count": r.count} for r in actual_rows}
+    actual_map = {r.date: {"amount": D(r.amount), "count": r.count} for r in actual_rows}
 
     # 合并日期 (A/B/C/D/E 五路去重并集)
     dates = sorted(
@@ -591,7 +598,7 @@ def wallet_vs_withdraw(db: Session, start: datetime | None = None, end: datetime
         .where(WalletWithdrawal.op_time.between(start, end), WalletWithdrawal.op_type == "订单退费转入")
         .group_by("date")
     ).all()
-    wallet_in_map = {r.date: float(r.amount or 0) for r in wallet_in}
+    wallet_in_map = {r.date: D(r.amount) for r in wallet_in}
     # 实际提现: op_type='用户提现' 且 备注非失败/冻结 (2026-08-28 排除冻结记录)
     withdraw = db.execute(
         select(
@@ -601,7 +608,7 @@ def wallet_vs_withdraw(db: Session, start: datetime | None = None, end: datetime
         .where(WalletWithdrawal.op_time.between(start, end), *_route_b_withdraw_filter())
         .group_by("date")
     ).all()
-    withdraw_map = {r.date: float(r.amount or 0) for r in withdraw}
+    withdraw_map = {r.date: D(r.amount) for r in withdraw}
     dates = sorted(set(wallet_in_map) | set(withdraw_map))
     return [
         {"date": d, "wallet_in": wallet_in_map.get(d, 0), "withdraw": withdraw_map.get(d, 0)}

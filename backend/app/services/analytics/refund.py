@@ -3,6 +3,7 @@
 import datetime as _dt
 import logging
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import and_, func, select, text
@@ -19,6 +20,7 @@ from app.services.analytics._core import (
     REFUND_RECOVERY_HR_CATS,
     SYS_OP_BLACKLIST_RR,
     TZ,
+    D,
     _is_refund_staff,
     _normalize_refund_reason,
     _resolve_windows,
@@ -287,15 +289,15 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
         if not (first_op <= r.event_time <= window_end):
             continue
         global_fail_sns.add(sn)
-        amt = float(r.amount or 0)
+        amt = D(r.amount)
         prev = sn_failed_meta.get(sn)
-        if prev is None or amt > float(prev.get("amount") or 0):
+        if prev is None or amt > D(prev.get("amount")):
             sn_failed_meta[sn] = {"src": r.src, "reason": r.reason, "amount": amt,
                                    "status": r.status, "method": r.method}
 
     # ---- 4.6 退款操作执行人 ----
     refund_op_sns: dict[str, set[str]] = {}
-    refund_op_amt: dict[str, float] = {}
+    refund_op_amt: dict[str, Decimal] = {}
     for r in db.execute(text(
         """
         SELECT NULLIF(TRIM(r.device_sn),'') AS sn, r.operator AS op,
@@ -311,7 +313,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
         if not r.sn or not r.op:
             continue
         refund_op_sns.setdefault(r.op, set()).add(r.sn)
-        refund_op_amt[r.op] = refund_op_amt.get(r.op, 0.0) + float(r.amt or 0)
+        refund_op_amt[r.op] = refund_op_amt.get(r.op, Decimal("0")) + D(r.amt)
     for r in db.execute(text(
         """
         SELECT NULLIF(TRIM(st.device_sn),'') AS sn, st.handler AS op,
@@ -328,7 +330,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
         if not r.sn or not r.op:
             continue
         refund_op_sns.setdefault(r.op, set()).add(r.sn)
-        refund_op_amt[r.op] = refund_op_amt.get(r.op, 0.0) + float(r.amt or 0)
+        refund_op_amt[r.op] = refund_op_amt.get(r.op, Decimal("0")) + D(r.amt)
 
     # ---- 5. staff_detail ----
     staff_operators: dict[str, dict] = dict(all_ops_meta)
@@ -357,7 +359,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
         succ_cs = len(cs_success)
         ro_sns = refund_op_sns.get(op, set())
         ro_cnt = len(ro_sns)
-        ro_amt = refund_op_amt.get(op, 0.0)
+        ro_amt = refund_op_amt.get(op, Decimal("0"))
         if total_cs == 0 and ro_cnt == 0:
             continue
         total_for_rate = total_cs
@@ -422,8 +424,8 @@ def refund_personnel_analysis(
     for sn in global_fail_sns:
         meta = sn_failed_meta.get(sn, {})
         reason = _normalize_refund_reason(meta.get("reason"))
-        amt = float(meta.get("amount") or 0)
-        reason_fail_sum[reason] = reason_fail_sum.get(reason, 0.0) + amt
+        amt = D(meta.get("amount"))
+        reason_fail_sum[reason] = reason_fail_sum.get(reason, Decimal("0")) + amt
         reason_fail_cnt[reason] = reason_fail_cnt.get(reason, 0) + 1
     for r, s in reason_fail_sum.items():
         c = reason_fail_cnt.get(r, 0)
@@ -720,7 +722,7 @@ def refund_device_analysis(
         fail_reason = _normalize_refund_reason(meta.get("reason"))
         if reason and fail_reason != reason:
             continue
-        amt = float(meta.get("amount") or 0)
+        amt = D(meta.get("amount"))
         if amount_min is not None and amt < amount_min:
             continue
         if amount_max is not None and amt > amount_max:
@@ -779,7 +781,7 @@ def refund_device_analysis(
             repeat_refund.add(r.sn)
 
     cross_person = {sn for sn in global_fail_sns if len(set(sn_host_ops.get(sn, []))) >= 2}
-    high_amount = {sn for sn in global_fail_sns if float(sn_failed_meta.get(sn, {}).get("amount") or 0) > 1000}
+    high_amount = {sn for sn in global_fail_sns if D(sn_failed_meta.get(sn, {}).get("amount")) > 1000}
 
     # 接待→流失时差分布
     loss_buckets = {"当天": [], "1-3天": [], "3-7天": [], "7-15天": [], "15天+": []}
@@ -1102,23 +1104,24 @@ def refund_decision_overview(
                     "net": [], "cum_net": []}
     wmap: dict[str, dict[str, list]] = {}
     for r in wallet_rows:
-        wmap.setdefault(str(r.d), {})[r.op_type] = (int(r.cnt or 0), float(r.amt or 0))
-    cum = 0.0
+        wmap.setdefault(str(r.d), {})[r.op_type] = (int(r.cnt or 0), D(r.amt))
+    cum = Decimal("0")
     for d in sorted(wmap):
-        tin = wmap[d].get("订单退费转入", (0, 0.0))
-        wd = wmap[d].get("用户提现", (0, 0.0))
-        fee = wmap[d].get("系统扣费", (0, 0.0))
+        tin = wmap[d].get("订单退费转入", (0, Decimal("0")))
+        wd = wmap[d].get("用户提现", (0, Decimal("0")))
+        fee = wmap[d].get("系统扣费", (0, Decimal("0")))
         net = tin[1] - wd[1] - fee[1]
         cum += net
         wallet_water["dates"].append(d)
         wallet_water["transfer_in_cnt"].append(tin[0])
-        wallet_water["transfer_in_amt"].append(round(tin[1], 2))
+        # 出参边界(#222): 序列给前端图表, 统一 float(JSON number)
+        wallet_water["transfer_in_amt"].append(float(round(tin[1], 2)))
         wallet_water["withdraw_cnt"].append(wd[0])
-        wallet_water["withdraw_amt"].append(round(wd[1], 2))
+        wallet_water["withdraw_amt"].append(float(round(wd[1], 2)))
         wallet_water["fee_cnt"].append(fee[0])
-        wallet_water["fee_amt"].append(round(fee[1], 2))
-        wallet_water["net"].append(round(net, 2))
-        wallet_water["cum_net"].append(round(cum, 2))
+        wallet_water["fee_amt"].append(float(round(fee[1], 2)))
+        wallet_water["net"].append(float(round(net, 2)))
+        wallet_water["cum_net"].append(float(round(cum, 2)))
 
     # ── 3. 涉诉 vs 普通: 每单按 SN 关联工单 bool_or 判定, 优先级 外部>商户号>内部 ──
     #     (2026-08-24 口径升级: 涉诉 = SN 关联投诉工单 OR 退款记录审核备注/备注含投诉类标识。
@@ -1158,9 +1161,9 @@ def refund_decision_overview(
             ctype = "普通退款"
         b = cs_map.setdefault(day, {})
         for k in ("内部投诉", "商户号投诉", "外部投诉", "备注涉诉", "普通退款"):
-            b.setdefault(k, [0, 0.0])
+            b.setdefault(k, [0, Decimal("0")])
         b[ctype][0] += 1
-        b[ctype][1] += float(r.refund_amount or 0)
+        b[ctype][1] += D(r.refund_amount)
     complaint_split = {"dates": [], "internal_cnt": [], "internal_amt": [],
                        "merchant_cnt": [], "merchant_amt": [], "external_cnt": [], "external_amt": [],
                        "remark_cnt": [], "remark_amt": [],
@@ -1214,7 +1217,7 @@ def refund_decision_overview(
         online_amt = 0.0
         for r in rows:
             online_cnt += 1
-            amt = float(r.refund_amount or 0)
+            amt = D(r.refund_amount)
             online_amt += amt
             is_comp = bool(r.has_ext or r.has_merchant or r.has_int) or any(
                 m in ((r.ar or "") + (r.rm or "")) for m in _REMARK_COMPLAINT_MARKERS
@@ -1265,13 +1268,13 @@ def refund_decision_overview(
         return stripped or raw
 
     for r in reason_rows:
-        reason_map.setdefault(r.reason, [0, 0.0])
+        reason_map.setdefault(r.reason, [0, Decimal("0")])
         reason_map[r.reason][0] += int(r.cnt or 0)
-        reason_map[r.reason][1] += float(r.amt or 0)
+        reason_map[r.reason][1] += D(r.amt)
         op = _norm_op(r.operator)
-        op_map.setdefault(op, [0, 0.0])
+        op_map.setdefault(op, [0, Decimal("0")])
         op_map[op][0] += int(r.cnt or 0)
-        op_map[op][1] += float(r.amt or 0)
+        op_map[op][1] += D(r.amt)
     reasons = sorted(reason_map.items(), key=lambda x: (-x[1][0], -x[1][1]))[:12]
     operators = sorted(op_map.items(), key=lambda x: -x[1][1])[:10]
     total_reason_amt = sum(v[1] for v in reason_map.values())
@@ -1350,21 +1353,21 @@ def refund_decision_overview(
         for r in rows:
             d = str(r.d)
             b = route_map.setdefault(d, {})
-            b.setdefault(k, [0, 0.0])
+            b.setdefault(k, [0, Decimal("0")])
             b[k][0] += int(r.cnt or 0)
-            b[k][1] += float(r.amt or 0)
+            b[k][1] += D(r.amt)
     e_map: dict[str, list] = {}
     for r in e_rows:
-        e_map.setdefault(str(r.d), [0, 0.0])
+        e_map.setdefault(str(r.d), [0, Decimal("0")])
         e_map[str(r.d)][0] += int(r.cnt or 0)
-        e_map[str(r.d)][1] += float(r.amt or 0)
+        e_map[str(r.d)][1] += D(r.amt)
     routes_daily = {"dates": [], "series": {k: {"counts": [], "amounts": []} for k in route_keys}, "table": []}
     for d in sorted(route_map):
         b = route_map[d]
         row = {"date": d}
         total_cnt = total_amt = 0
         for k in route_keys:
-            v = b.get(k, [0, 0.0])
+            v = b.get(k, [0, Decimal("0")])
             row[f"{k}_cnt"] = v[0]
             row[f"{k}_amt"] = round(v[1], 2)
             routes_daily["series"][k]["counts"].append(v[0])
@@ -1373,16 +1376,16 @@ def refund_decision_overview(
             total_amt += v[1]
         row["total_cnt"] = total_cnt
         row["total_amt"] = round(total_amt, 2)
-        row["actual_cnt"] = e_map.get(d, [0, 0.0])[0]   # E 实际现金流(对账基准)
-        row["actual_amt"] = round(e_map.get(d, [0, 0.0])[1], 2)
+        row["actual_cnt"] = e_map.get(d, [0, Decimal("0")])[0]   # E 实际现金流(对账基准)
+        row["actual_amt"] = round(e_map.get(d, [0, Decimal("0")])[1], 2)
         row["diff_amt"] = round(total_amt - row["actual_amt"], 2)  # 对账偏差 = 经营四路 − E
         routes_daily["table"].append(row)
         routes_daily["dates"].append(d)
 
     # ── summary: KPI + 环比 + 结论 (四路口径 A+B+C+D) ──
     def _window_totals(s: _dt.datetime, e: _dt.datetime) -> dict:
-        tot = {"online_cnt": 0, "online_amt": 0.0, "withdraw_cnt": 0, "withdraw_amt": 0.0,
-               "sm_cnt": 0, "sm_amt": 0.0, "d_cnt": 0, "d_amt": 0.0, "e_cnt": 0, "e_amt": 0.0}
+        tot = {"online_cnt": 0, "online_amt": Decimal("0"), "withdraw_cnt": 0, "withdraw_amt": Decimal("0"),
+               "sm_cnt": 0, "sm_amt": Decimal("0"), "d_cnt": 0, "d_amt": Decimal("0"), "e_cnt": 0, "e_amt": Decimal("0")}
         # #201 S-P0-1：A 路窗口汇总补 dup_residual/ignored 排除（与 routes_daily/cash_flow_wide 对齐）
         for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
@@ -1391,7 +1394,7 @@ def refund_decision_overview(
               AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
               AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) <= :te
         """), {"ts": s, "te": e}).fetchall():
-            tot["online_cnt"] += int(r.cnt or 0); tot["online_amt"] += float(r.amt or 0)
+            tot["online_cnt"] += int(r.cnt or 0); tot["online_amt"] += D(r.amt)
         # #201 S-P0-1：B 路窗口汇总补 dup_residual/ignored 排除
         for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(op_amount), 0) AS amt
@@ -1400,7 +1403,7 @@ def refund_decision_overview(
               AND {_withdraw_fail_remark_sql_cond()}
               AND {stats_quality_excluded_sql('w.quality_status')}
         """), {"ts": s, "te": e}).fetchall():
-            tot["withdraw_cnt"] += int(r.cnt or 0); tot["withdraw_amt"] += float(r.amt or 0)
+            tot["withdraw_cnt"] += int(r.cnt or 0); tot["withdraw_amt"] += D(r.amt)
         # #201 S-P0-1：C 路窗口汇总补 dup_residual/ignored 排除
         for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(COALESCE(actual_amount, refund_amount, 0)), 0) AS amt
@@ -1410,7 +1413,7 @@ def refund_decision_overview(
               AND s.status = '已退款'
               AND {stats_quality_excluded_sql('s.quality_status')}
         """), {"ts": s, "te": e}).fetchall():
-            tot["sm_cnt"] += int(r.cnt or 0); tot["sm_amt"] += float(r.amt or 0)
+            tot["sm_cnt"] += int(r.cnt or 0); tot["sm_amt"] += D(r.amt)
         # D 手动退款 (is_refunded='是'; 归日=actual_refund_time 优先(实际扣款); 排除 dup_residual/ignored 已治理行)
         for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
@@ -1420,7 +1423,7 @@ def refund_decision_overview(
               AND m.is_refunded = '是'
               {"AND " + _EXCL_QSTATUS_SQL if _d_excl_q else ''}
         """), {"ts": s, "te": e}).fetchall():
-            tot["d_cnt"] += int(r.cnt or 0); tot["d_amt"] += float(r.amt or 0)
+            tot["d_cnt"] += int(r.cnt or 0); tot["d_amt"] += D(r.amt)
         # E 实际现金流 (refund_record_reports 退款成功, 对账基准)
         for r in db.execute(text("""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
@@ -1428,7 +1431,7 @@ def refund_decision_overview(
             WHERE e.refund_time >= :ts AND e.refund_time <= :te
               AND e.refund_status IN ('退款成功', '成功', 'SUCCESS')
         """), {"ts": s, "te": e}).fetchall():
-            tot["e_cnt"] += int(r.cnt or 0); tot["e_amt"] += float(r.amt or 0)
+            tot["e_cnt"] += int(r.cnt or 0); tot["e_amt"] += D(r.amt)
         return tot
 
     cur_tot = _window_totals(cur_s, cur_e)
@@ -1469,19 +1472,20 @@ def refund_decision_overview(
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     manual_water = {"dates": [], "reg_cnt": [], "reg_amt": [], "done_cnt": [], "done_amt": [],
                     "net": [], "cum_net": []}
-    mreg_map = {str(r.d): (int(r.cnt or 0), float(r.amt or 0)) for r in mreg_rows}
-    mdone_map = {str(r.d): (int(r.cnt or 0), float(r.amt or 0)) for r in mdone_rows}
-    m_cum = 0.0
+    mreg_map = {str(r.d): (int(r.cnt or 0), D(r.amt)) for r in mreg_rows}
+    mdone_map = {str(r.d): (int(r.cnt or 0), D(r.amt)) for r in mdone_rows}
+    m_cum = Decimal("0")
     for d in sorted(set(mreg_map) | set(mdone_map)):
-        reg = mreg_map.get(d, (0, 0.0))
-        done = mdone_map.get(d, (0, 0.0))
+        reg = mreg_map.get(d, (0, Decimal("0")))
+        done = mdone_map.get(d, (0, Decimal("0")))
         net = reg[1] - done[1]
         m_cum += net
         manual_water["dates"].append(d)
-        manual_water["reg_cnt"].append(reg[0]); manual_water["reg_amt"].append(round(reg[1], 2))
-        manual_water["done_cnt"].append(done[0]); manual_water["done_amt"].append(round(done[1], 2))
-        manual_water["net"].append(round(net, 2))
-        manual_water["cum_net"].append(round(m_cum, 2))
+        # 出参边界(#222): 统一 float(JSON number)
+        manual_water["reg_cnt"].append(reg[0]); manual_water["reg_amt"].append(float(round(reg[1], 2)))
+        manual_water["done_cnt"].append(done[0]); manual_water["done_amt"].append(float(round(done[1], 2)))
+        manual_water["net"].append(float(round(net, 2)))
+        manual_water["cum_net"].append(float(round(m_cum, 2)))
 
     # E 数据最新日(refund_record_reports 持续采集, 显示其最新退款日作参考)
     e_data_until = None
@@ -1513,7 +1517,7 @@ def refund_decision_overview(
             reason_line += f"，其次 {top2[0]} {top2[1][0]}笔"
         # 原因覆盖率警示: <未关联工单> 占比高 → 原因分析失真, 需先补工单关联再做原因治理
         reason_total_cnt = sum(v[0] for v in reason_map.values())
-        no_ticket_cnt = reason_map.get("<未关联工单>", [0, 0.0])[0]
+        no_ticket_cnt = reason_map.get("<未关联工单>", [0, Decimal("0")])[0]
         no_ticket_ratio = round(no_ticket_cnt / reason_total_cnt * 100, 1) if reason_total_cnt else 0.0
         if no_ticket_ratio >= 20:
             reason_line += f"。注意: 未关联工单 {no_ticket_cnt}笔({no_ticket_ratio:.0f}%)，原因覆盖不足，建议先核查工单关联再做原因治理。"
@@ -1669,7 +1673,7 @@ def manual_refund_quality_fix(db: Session, rid: int, payload: dict[str, Any]) ->
                     else _dt.datetime.strptime(str(v), "%Y-%m-%d"))
             changes.append(k)
         elif k in ("refund_amount", "order_amount"):
-            setattr(r, k, float(v))
+            setattr(r, k, D(v))
             changes.append(k)
         else:
             setattr(r, k, str(v))
@@ -1973,9 +1977,9 @@ def refund_export_all(
     for name, sql in agg_queries:
         for r in db.execute(text(sql), {"ts": cur_s, "te": cur_e}).fetchall():
             b = route_map.setdefault(str(r.d), {})
-            b.setdefault(name, [0, 0.0])
+            b.setdefault(name, [0, Decimal("0")])
             b[name][0] += int(r.cnt or 0)
-            b[name][1] += float(r.amt or 0)
+            b[name][1] += D(r.amt)
     # E 是基准不参与合计, 单独列供对比 (见下方 summary)
     summary = []
     for d in sorted(route_map):
@@ -1983,7 +1987,7 @@ def refund_export_all(
         row = {"日期": d}
         total_cnt = total_amt = 0
         for name, _ in agg_queries:
-            v = b.get(name, [0, 0.0])
+            v = b.get(name, [0, Decimal("0")])
             row[f"{name}笔数"] = v[0]
             row[f"{name}金额"] = round(v[1], 2)
             if name != "E退款记录报表":
@@ -1992,7 +1996,7 @@ def refund_export_all(
         row["经营合计(A+B+C+D)笔数"] = total_cnt
         row["经营合计(A+B+C+D)金额"] = round(total_amt, 2)
         # 对账偏差: 经营合计 - E (正=经营多/负=E多)
-        e = b.get("E退款记录报表", [0, 0.0])
+        e = b.get("E退款记录报表", [0, Decimal("0")])
         row["偏差(经营-E)笔数"] = total_cnt - e[0]
         row["偏差(经营-E)金额"] = round(total_amt - e[1], 2)
         summary.append(row)
@@ -2076,8 +2080,8 @@ def refund_group_comparison(
     for sn in global_fail_sns:
         meta = sn_failed_meta.get(sn, {})
         reason = _normalize_refund_reason(meta.get("reason"))
-        amt = float(meta.get("amount") or 0)
-        reason_fail_sum[reason] = reason_fail_sum.get(reason, 0.0) + amt
+        amt = D(meta.get("amount"))
+        reason_fail_sum[reason] = reason_fail_sum.get(reason, Decimal("0")) + amt
         reason_fail_cnt[reason] = reason_fail_cnt.get(reason, 0) + 1
     for r, s in reason_fail_sum.items():
         c = reason_fail_cnt.get(r, 0)
@@ -2433,9 +2437,9 @@ def refund_recovery_analysis(
         if not (first_op <= event_time <= window_end):
             continue  # 接待前已发生 或 超过T+7才发生, 不算失败
         global_fail_sns.add(sn)
-        amt = float(r.amount or 0)
+        amt = D(r.amount)
         prev = sn_failed_meta.get(sn)
-        if prev is None or amt > float(prev.get("amount") or 0):
+        if prev is None or amt > D(prev.get("amount")):
             sn_failed_meta[sn] = {
                 "src": r.src, "reason": r.reason, "amount": amt,
                 "status": r.status, "method": r.method,
@@ -2445,7 +2449,7 @@ def refund_recovery_analysis(
     #   统计每个 operator 作为 refunds.operator / service_tickets.handler 处理的失败SN数
     #   注意: 这只是 "退款操作工作量" 独立字段, 不影响成功率计算的分子分母
     refund_op_sns: dict[str, set[str]] = {}   # operator alias -> set of 退款操作 SN
-    refund_op_amt: dict[str, float] = {}     # operator alias -> 操作金额合计
+    refund_op_amt: dict[str, Decimal] = {}     # operator alias -> 操作金额合计
     # 从 refunds 拉 operator (统计真人操作的所有退款方式:线上/线下/转入提现账户)
     for r in db.execute(text(
         """
@@ -2463,7 +2467,7 @@ def refund_recovery_analysis(
         if not r.sn or not r.op:
             continue
         refund_op_sns.setdefault(r.op, set()).add(r.sn)
-        refund_op_amt[r.op] = refund_op_amt.get(r.op, 0.0) + float(r.amt or 0)
+        refund_op_amt[r.op] = refund_op_amt.get(r.op, Decimal("0")) + D(r.amt)
     # 从 service_tickets 拉 handler (统计真人处理的已完成退款工单)
     for r in db.execute(text(
         """
@@ -2482,7 +2486,7 @@ def refund_recovery_analysis(
         if not r.sn or not r.op:
             continue
         refund_op_sns.setdefault(r.op, set()).add(r.sn)
-        refund_op_amt[r.op] = refund_op_amt.get(r.op, 0.0) + float(r.amt or 0)
+        refund_op_amt[r.op] = refund_op_amt.get(r.op, Decimal("0")) + D(r.amt)
 
     # ---- 5. 按 op 拆分 成功/失败 + 退款操作工作量 (多人同SN各算各的) ----
     #   范围: refund_ops(退款专项组成员) + 所有 refund_op_sns 中出现的执行人
@@ -2574,7 +2578,7 @@ def refund_recovery_analysis(
         # 退款操作工作量: 独立字段, 单独统计 (不重复计入 success/failed)
         ro_sns = refund_op_sns.get(op, set())
         ro_cnt = len(ro_sns)
-        ro_amt = refund_op_amt.get(op, 0.0)
+        ro_amt = refund_op_amt.get(op, Decimal("0"))
 
         # 跳过既没有接待也没有退款操作的人员 (避免无关人员出现在列表中)
         if total_cs == 0 and ro_cnt == 0:
@@ -2673,7 +2677,7 @@ def refund_recovery_analysis(
     for sn, meta in sn_failed_meta.items():
         status = (meta.get("status") or "").strip()
         reason = (meta.get("reason") or "").lower()
-        amt = float(meta.get("amount") or 0)
+        amt = D(meta.get("amount"))
         is_recharge = ("退充" in (meta.get("reason") or "")) or ("recharge" in reason)
         is_abandon = (meta.get("src") == "ticket" and status in ("待处理",)) or (status in ("无需退款", "申请中")) or (meta.get("method") == "线下")
         if is_recharge:
@@ -2847,9 +2851,9 @@ def refund_recovery_analysis(
                 continue
             if not (first_op <= r.event_time <= first_op + _dt.timedelta(days=7)):
                 continue
-            amt = float(r.amount or 0)
+            amt = D(r.amount)
             prev = wk_fail_map.get(sn)
-            if prev is None or amt > float(prev.get("amount") or 0):
+            if prev is None or amt > D(prev.get("amount")):
                 wk_fail_map[sn] = {"reason": r.reason, "amount": amt, "status": r.status, "method": r.method, "src": r.src}
         wk_fail_sns = set(wk_fail_map.keys())
 
@@ -3121,7 +3125,7 @@ def refund_recovery_analysis(
     _risk_devices = []
     for sn in global_fail_sns:
         meta = sn_failed_meta.get(sn, {})
-        amt = float(meta.get("amount") or 0)
+        amt = D(meta.get("amount"))
         ops = sn_host_ops.get(sn, [])
         op_name = all_ops_meta.get(ops[0], {}).get("name", ops[0] if ops else "") if ops else ""
         _risk_devices.append({"device_sn": sn, "reason": _normalize_refund_reason(meta.get("reason")),

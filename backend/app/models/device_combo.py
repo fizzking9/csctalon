@@ -4,6 +4,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -25,7 +26,7 @@ class DeviceCombo(TimestampMixin, Base):
     package_type: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="套餐类型:续费套餐")
     traffic_type: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="流量类型:无限/固定流量")
     merchant_name: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True, comment="商户名称")
-    actual_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="实际支付金额")
+    actual_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="实际支付金额")
     start_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="开始日期")
     end_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="结束日期")
     updated_at_raw: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="原始更新时间")

@@ -23,6 +23,7 @@ from app.services.upsert._core import (
     _sanitize_name_field,
     _sync_devices,
     _to_datetime,
+    _to_decimal,
     _to_float,
     _to_int,
     _to_str,
@@ -84,7 +85,7 @@ def upsert_device_combos(df: pd.DataFrame, mapping: dict[str, str], db: Session,
                 "package_type": data.get("package_type"),
                 "traffic_type": data.get("traffic_type"),
                 "merchant_name": data.get("merchant_name"),
-                "actual_amount": _to_float(data.get("actual_amount")),
+                "actual_amount": _to_decimal(data.get("actual_amount")),
                 "start_date": start_date,
                 "end_date": _to_datetime(data.get("end_date")),
                 "updated_at_raw": _to_datetime(data.get("updated_at_raw")),
@@ -388,7 +389,7 @@ def upsert_refund_record_reports(df: pd.DataFrame, mapping: dict[str, str], db: 
             if refund_time is None:
                 result.add_error(idx, "退款时间为空(跳过)")
                 continue
-            refund_amount = _to_float(data.get("refund_amount"))
+            refund_amount = _to_decimal(data.get("refund_amount"))
             if refund_amount is None:
                 result.add_error(idx, "退款金额为空(跳过)")
                 continue
@@ -401,7 +402,7 @@ def upsert_refund_record_reports(df: pd.DataFrame, mapping: dict[str, str], db: 
                 "device_sn": device_sn,
                 "product_name": _truncate_str((_to_str(data.get("product_name")) or "").strip(), 128) or None,
                 "refund_time": refund_time,
-                "apply_refund_amount": _to_float(data.get("apply_refund_amount")),
+                "apply_refund_amount": _to_decimal(data.get("apply_refund_amount")),
                 "refund_amount": refund_amount,
                 "refund_status": _truncate_str((_to_str(data.get("refund_status")) or "").strip(), 32) or None,
                 "synced_at": _now,
@@ -457,10 +458,10 @@ def upsert_bms_orders(df: pd.DataFrame, mapping: dict[str, str], db: Session, re
                 "order_type": _truncate_str((_to_str(data.get("order_type")) or "").strip(), 32) or None,
                 "device_sn": (_to_str(data.get("device_sn")) or (_to_str(data.get("sn")) or "")).strip() or None,
                 "combo_name": _truncate_str((_to_str(data.get("combo_name")) or "").strip(), 128) or None,
-                "combo_price": _to_float(data.get("combo_price")),
-                "payable_price": _to_float(data.get("payable_price")),
-                "actual_pay_price": _to_float(data.get("actual_pay_price")),
-                "balance_pay_price": _to_float(data.get("balance_pay_price")),
+                "combo_price": _to_decimal(data.get("combo_price")),
+                "payable_price": _to_decimal(data.get("payable_price")),
+                "actual_pay_price": _to_decimal(data.get("actual_pay_price")),
+                "balance_pay_price": _to_decimal(data.get("balance_pay_price")),
                 "wx_order_no": _truncate_str((_to_str(data.get("wx_order_no")) or "").strip(), 128) or None,
                 "pay_date": _to_datetime(data.get("pay_date")),
                 "pay_type": _truncate_str((_to_str(data.get("pay_type")) or "").strip(), 32) or None,
@@ -517,9 +518,9 @@ def upsert_return_trackings(df: pd.DataFrame, mapping: dict[str, str], db: Sessi
                 "device_type": _truncate_str((_to_str(data.get("device_type")) or "").strip(), 64) or None,
                 "shop": _truncate_str((_to_str(data.get("shop")) or "").strip(), 128) or None,
                 "merchant": _truncate_str((_to_str(data.get("merchant")) or "").strip(), 128) or None,
-                "paid_amount": _to_float(data.get("paid_amount")),
+                "paid_amount": _to_decimal(data.get("paid_amount")),
                 "return_type": _truncate_str((_to_str(data.get("return_type")) or "").strip(), 32) or None,
-                "refund_amount": _to_float(data.get("refund_amount")),
+                "refund_amount": _to_decimal(data.get("refund_amount")),
                 "return_sign_status": _truncate_str((_to_str(data.get("return_sign_status")) or "").strip(), 32) or None,
                 "return_express_no": _truncate_str((_to_str(data.get("return_express_no")) or "").strip(), 64) or None,
                 "return_reason": _truncate_str((_to_str(data.get("return_reason")) or "").strip(), 128) or None,

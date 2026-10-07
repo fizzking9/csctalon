@@ -9,6 +9,7 @@ E(refund_record_reports) 不进本表(独立对账基准); e_matched 仅作经�
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import Boolean, DateTime, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -37,7 +38,7 @@ class CashFlowWide(TimestampMixin, Base):
         DateTime(timezone=True), index=True, nullable=True,
         comment="出款时间(A=created_at_raw/B=op_time/C=audit_time回退created_at/D=op_time回退register_time)",
     )
-    pay_amount: Mapped[float | None] = mapped_column(
+    pay_amount: Mapped[Decimal | None] = mapped_column(
         Numeric(12, 2), nullable=True,
         comment="出款金额(A=refund_amount/B=op_amount/C=actual_amount/D=refund_amount)",
     )

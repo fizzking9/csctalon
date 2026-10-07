@@ -9,6 +9,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import DateTime, ForeignKey, Numeric, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
@@ -43,8 +44,8 @@ class RefundRecordReport(TimestampMixin, Base):
     refund_time: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True, nullable=True, comment="退款时间(精确到秒)"
     )
-    apply_refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="申请退款金额(元)")
-    refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退款金额(元)")
+    apply_refund_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="申请退款金额(元)")
+    refund_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退款金额(元)")
     refund_status: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True, comment="退款状态(退款成功等)")
     raw_extra: Mapped[dict | None] = mapped_column(JSONB, nullable=True, comment="原始数据冗余")
     synced_at: Mapped[datetime | None] = mapped_column(

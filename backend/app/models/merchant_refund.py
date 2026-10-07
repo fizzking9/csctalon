@@ -6,6 +6,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import DateTime, ForeignKey, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -41,14 +42,14 @@ class MerchantRefund(IDMixin, TimestampMixin, Base):
     trade_status: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="交易状态:SUCCESS")
     pay_bank: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="付款银行")
     currency: Mapped[str | None] = mapped_column(String(8), nullable=True, comment="货币种类:CNY")
-    settle_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="应结订单金额")
-    voucher_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="代金券金额")
-    refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退款金额")
-    recharge_voucher_refund: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="充值券退款金额")
+    settle_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="应结订单金额")
+    voucher_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="代金券金额")
+    refund_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退款金额")
+    recharge_voucher_refund: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="充值券退款金额")
     refund_type: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="退款类型")
     refund_status: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True, comment="退款状态:SUCCESS")
     product_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="商品名称")
-    fee: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True, comment="手续费")
+    fee: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True, comment="手续费")
     rate: Mapped[float | None] = mapped_column(Numeric(8, 4), nullable=True, comment="费率")
-    order_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="订单金额")
-    apply_refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="申请退款金额")
+    order_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="订单金额")
+    apply_refund_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="申请退款金额")

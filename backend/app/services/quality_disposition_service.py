@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from app.models.quality_disposition_rule import QualityDispositionRule
 from app.services import quality_check as QC
+from app.services.analytics._core import D
 
 logger = logging.getLogger(__name__)
 
@@ -532,10 +533,10 @@ def backfill_e_orphan_to_d(db, start=None, end=None, limit: int = 2000) -> dict:
         key = str(r.ono)
         if key in groups:
             g = groups[key]
-            g["amt"] += float(r.amt or 0)
+            g["amt"] += D(r.amt)
             g["e_ids"].append(r.id)
         else:
-            groups[key] = {"r": r, "amt": float(r.amt or 0), "e_ids": [r.id]}
+            groups[key] = {"r": r, "amt": D(r.amt), "e_ids": [r.id]}
     for _key, g in groups.items():
         r = g["r"]
         total_amt = g["amt"]
@@ -558,7 +559,7 @@ def backfill_e_orphan_to_d(db, start=None, end=None, limit: int = 2000) -> dict:
             device_sn=r.esn,
             order_no=r.ono,
             merchant_id=r.mid,
-            order_amount=float(r.order_amt) if r.order_amt is not None else total_amt,
+            order_amount=D(r.order_amt) if r.order_amt is not None else total_amt,
             registrant="系统-对账回填",
             is_refunded="是",
             refund_amount=total_amt,
@@ -634,7 +635,7 @@ def auto_dispose_d_dup_same_amount(db, limit: int = 2000) -> dict:
     # 按 (order_no, amount) 分组
     groups: dict[tuple, list] = {}
     for r in rows:
-        groups.setdefault((r.ono, float(r.amt or 0)), []).append(r)
+        groups.setdefault((r.ono, D(r.amt)), []).append(r)
 
     disposed = 0
     kept = 0
@@ -851,7 +852,7 @@ def backfill_c_d_actual_refund_time(db, limit: int = 5000) -> dict:
                 SELECT id, refund_time, refund_amount FROM refund_record_reports
                 WHERE device_sn = :s AND refund_status IN ('退款成功','成功','SUCCESS')
                   AND abs(refund_amount - :a) < 0.01
-            """), {"s": device_sn, "a": float(amount)}).all()
+            """), {"s": device_sn, "a": D(amount)}).all()
             if len(cands) == 1:
                 return cands
         # L3: device + 登记±7天唯一
@@ -949,7 +950,7 @@ def backfill_b_actual_refund_time(db, limit: int = 5000) -> dict:
             WHERE device_sn = :s AND refund_status IN ('退款成功','成功','SUCCESS')
               AND abs(refund_amount - :a) < 0.01
               AND refund_time BETWEEN :lo AND :hi
-        """), {"s": r.device_sn, "a": float(r.op_amount),
+        """), {"s": r.device_sn, "a": D(r.op_amount),
                "lo": r.op_time - timedelta(days=7), "hi": r.op_time + timedelta(days=7)}).all()
         if len(cands) == 1:
             db.execute(text("UPDATE wallet_withdrawals SET actual_refund_time=:t WHERE id=:i"),
@@ -1004,7 +1005,7 @@ def backfill_a_actual_refund_time(db, limit: int = 20000) -> dict:
         else:
             # 多候选: 金额最接近优先(±0.01), 再按 refund_time 最接近 created_at_raw
             def _score(c):
-                amt_gap = abs(float(c.refund_amount or 0) - float(r.refund_amount or 0))
+                amt_gap = abs(D(c.refund_amount) - D(r.refund_amount))
                 if amt_gap < 0.01:
                     amt_gap = 0.0
                 t_gap = abs((c.refund_time - r.created_at_raw).total_seconds()) if c.refund_time and r.created_at_raw else 1e18

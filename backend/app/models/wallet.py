@@ -4,6 +4,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     DateTime,
@@ -47,12 +48,12 @@ class WalletWithdrawal(QualityMixin, IDMixin, TimestampMixin, Base):
     )
 
     account_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True, comment="账户ID")
-    wallet_balance: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="钱包余额")
+    wallet_balance: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="钱包余额")
     device_sn: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("devices.sn"), index=True, nullable=True, comment="SN"
     )
     op_type: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True, comment="操作类型:用户提现/订单退费转入")
-    op_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="操作金额")
+    op_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="操作金额")
     remark: Mapped[str | None] = mapped_column(Text, nullable=True, comment="备注(含退费单号 RF...)")
     op_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True, comment="操作时间")
     operator: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="操作人员:SYS/用户提现")

@@ -1,6 +1,7 @@
 """退费单模型 - 经营数据,主键:退费单号"""
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -28,8 +29,8 @@ class Refund(QualityMixin, TimestampMixin, Base):
     refund_reason: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="退费原因")
     package_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="套餐名称")
     merchant_name: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True, comment="商户名称")
-    refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退费金额")
-    actual_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="实退金额")
+    refund_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退费金额")
+    actual_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="实退金额")
     remark: Mapped[str | None] = mapped_column(Text, nullable=True, comment="备注")
     status: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="状态:申请中/已退款/无需退款")
     refund_method: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="退款方式:线上/线下(导出数据可能含描述性文本)")
@@ -45,7 +46,7 @@ class Refund(QualityMixin, TimestampMixin, Base):
     actual_refund_time: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True, nullable=True, comment="实际扣款时间(E路refund_time回填, 对账用)"
     )
-    package_price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="套餐价格")
+    package_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="套餐价格")
     raw_extra: Mapped[dict | None] = mapped_column(JSONB, nullable=True, comment="原始冗余字段")
 
     # ── 同步溯源 & 更新人拆分 (2026-08-06 P1-T4) ──

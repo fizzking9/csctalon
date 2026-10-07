@@ -8,6 +8,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -28,10 +29,10 @@ class BmsOrder(TimestampMixin, Base):
         String(64), ForeignKey("devices.sn"), index=True, nullable=True, comment="设备SN"
     )
     combo_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="套餐名称")
-    combo_price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="套餐价格(元)")
-    payable_price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="应付价格(元)")
-    actual_pay_price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="实际支付价格(元)")
-    balance_pay_price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="余额支付(元)")
+    combo_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="套餐价格(元)")
+    payable_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="应付价格(元)")
+    actual_pay_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="实际支付价格(元)")
+    balance_pay_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="余额支付(元)")
     wx_order_no: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True, comment="微信订单号")
     pay_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True, comment="支付时间")
     pay_type: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="支付类型(1微信支付等)")

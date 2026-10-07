@@ -15,6 +15,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -42,7 +43,7 @@ class RefundWide(TimestampMixin, Base):
     device_sn: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("devices.sn"), index=True, nullable=True, comment="设备SN(冗余自 refunds)"
     )
-    refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退费金额(冗余自 refunds)")
+    refund_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退费金额(冗余自 refunds)")
     created_at_raw: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True, nullable=True, comment="退费单原始创建时间(冗余自 refunds)"
     )
@@ -57,7 +58,7 @@ class RefundWide(TimestampMixin, Base):
     # ---------- wallet 关联(同 SN 多笔时取最新 op_time) ----------
     wallet_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="关联钱包提现记录ID(wallet_withdrawals.id)")
     wallet_op_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="钱包操作时间(提现时点)")
-    wallet_op_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="钱包操作金额(提现金额)")
+    wallet_op_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="钱包操作金额(提现金额)")
 
     # ---------- external_complaint 关联(按 device_sn 聚合,供分类规则1判定) ----------
     has_external_complaint: Mapped[bool] = mapped_column(

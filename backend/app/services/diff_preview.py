@@ -24,6 +24,7 @@ from app.services.data_source_registry import DATA_SOURCE_SEEDS
 from app.services.upsert import (
     _clean_value,
     _to_datetime,
+    _to_decimal,
     _to_float,
     _to_int,
     _to_str,
@@ -51,7 +52,10 @@ def _column_converters(model: type) -> dict[str, Any]:
     """根据模型列类型返回 字段名 → 转换函数 的映射
 
     与 upsert 中各 upsert_* 函数的字段转换口径一致：
-    DateTime→_to_datetime, Numeric/Float→_to_float, Integer→_to_int, 其余→_to_str
+    DateTime→_to_datetime, Numeric(定点)→_to_decimal, Float→_to_float,
+    Integer→_to_int, 其余→_to_str
+    （#222：Numeric 列在 DB 侧读出为 Decimal，intended 侧必须同型，
+      否则 Decimal('1.005') == 1.005(float) 精确比较为 False 会误报 diff）
     """
     converters: dict[str, Any] = {}
     mapper = inspect(model)
@@ -60,7 +64,9 @@ def _column_converters(model: type) -> dict[str, Any]:
             continue
         if isinstance(col.type, DateTime):
             converters[col.name] = _to_datetime
-        elif isinstance(col.type, (Numeric, Float)):
+        elif isinstance(col.type, Numeric):
+            converters[col.name] = _to_decimal
+        elif isinstance(col.type, Float):
             converters[col.name] = _to_float
         elif isinstance(col.type, Integer):
             converters[col.name] = _to_int

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from sqlalchemy import func, select
 
@@ -27,6 +28,7 @@ from app.models.refund import Refund
 from app.models.refund_record_report import RefundRecordReport
 from app.models.shanmao_refund import ShanmaoRefund
 from app.models.wallet import WalletWithdrawal
+from app.services.analytics._core import D
 
 # #201 S-P0-1：对账复核 D 路排除口径与经营四路同源（禁止第二份字面量）
 from app.services.quality_check import stats_quality_excluded_sql
@@ -86,19 +88,20 @@ def _e_by_route(db, start: datetime, end: datetime) -> dict:
     ).all()
     maps = _build_route_maps(db, start, end)
     by_route: dict[str, dict] = {
-        "A": {"count": 0, "amount": 0.0},
-        "B": {"count": 0, "amount": 0.0},
-        "C": {"count": 0, "amount": 0.0},
-        "D": {"count": 0, "amount": 0.0},
-        "unmatched": {"count": 0, "amount": 0.0},
+        "A": {"count": 0, "amount": Decimal("0")},
+        "B": {"count": 0, "amount": Decimal("0")},
+        "C": {"count": 0, "amount": Decimal("0")},
+        "D": {"count": 0, "amount": Decimal("0")},
+        "unmatched": {"count": 0, "amount": Decimal("0")},
     }
     for r in base_rows:
         route = _classify_report(r, maps)
-        bucket = by_route.setdefault(route, {"count": 0, "amount": 0.0})
+        bucket = by_route.setdefault(route, {"count": 0, "amount": Decimal("0")})
         bucket["count"] += 1
-        bucket["amount"] += float(r.refund_amount or 0)
+        bucket["amount"] += D(r.refund_amount)
     # 归一(仅保留 5 桶; unmatched 命名给前端)
-    return {k: {"count": v["count"], "amount": round(v["amount"], 2)} for k, v in by_route.items()}
+    # 出参边界(#222): 结果入 JSONB 落库, Decimal 必须转 float(JSON number)
+    return {k: {"count": v["count"], "amount": float(round(v["amount"], 2))} for k, v in by_route.items()}
 
 
 def _dupe_detect(db, start: datetime, end: datetime) -> dict:
@@ -123,14 +126,14 @@ def _dupe_detect(db, start: datetime, end: datetime) -> dict:
         .group_by(ManualRefund.order_no)
         .having(func.count() > 1)
     ).all()
-    dup_amt = 0.0
+    dup_amt = Decimal("0")
     dup_groups = 0
     for _o, n, _ws, amt in rows:
         dup_groups += 1
-        dup_amt += float(amt or 0) * (n - 1) / n  # 超额占比估算(每单多出 n-1/n)
+        dup_amt += D(amt) * Decimal(n - 1) / Decimal(n)  # 超额占比估算(每单多出 n-1/n)
     # 无SN+年份异常残留行(窗口内, 与治理脚本同口径; 行数可控, 逐行判年份可接受)
     residual_rows = 0
-    residual_amt = 0.0
+    residual_amt = Decimal("0")
     for m in db.scalars(
         select(ManualRefund).where(
             ManualRefund.is_refunded == "是",
@@ -149,13 +152,14 @@ def _dupe_detect(db, start: datetime, end: datetime) -> dict:
         if yr not in _CURRENT_YEARS:
             # 该行 COALESCE(op_time,register_time) 已落在窗口(上面 SQL 已过滤), 直接计
             residual_rows += 1
-            residual_amt += float(m.refund_amount or 0)
+            residual_amt += D(m.refund_amount)
 
+    # 出参边界(#222): Decimal → float(JSON number), 供 JSONB/JSON 序列化
     return {
         "dup_order_groups": dup_groups,
-        "dup_amount_est": round(dup_amt, 2),
+        "dup_amount_est": float(round(dup_amt, 2)),
         "no_sn_weird_rows_in_win": residual_rows,
-        "no_sn_weird_amt_in_win": round(residual_amt, 2),
+        "no_sn_weird_amt_in_win": float(round(residual_amt, 2)),
         "note": "仅辅助提示(限所选窗口): dup_amount_est 为同单多行超额占比估算, no_sn_weird 为无SN+乱年份残留行(治理#21 目标)",
     }
 
@@ -581,7 +585,7 @@ def _route_candidates(db, report: RefundRecordReport) -> dict:
 
     order_no = (report.platform_order_no or "").strip()
     sn = (report.device_sn or "").strip()
-    amt = float(report.refund_amount) if report.refund_amount is not None else None
+    amt = D(report.refund_amount) if report.refund_amount is not None else None
 
     maps = _build_route_maps(db, None, None)
     auto_route = _classify_report(report, maps)
@@ -621,7 +625,7 @@ def _route_candidates(db, report: RefundRecordReport) -> dict:
             .limit(10)
         ).all()
         for wid, wamt, wremark in b_rows:
-            if wamt is not None and abs(float(wamt) - amt) <= 0.01:
+            if wamt is not None and abs(D(wamt) - amt) <= Decimal("0.01"):
                 candidates.append({
                     "route": "B", "source": "wallet_withdrawals", "source_id": wid,
                     "amount": float(wamt), "sn": sn, "extra": (wremark or "")[:40],

@@ -18,6 +18,7 @@ D 路回填匹配优先级(LOCKED A-20260905-002 §3.3):
 
 import logging
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from sqlalchemy import and_, func, or_, select
 
@@ -26,6 +27,7 @@ from app.models.refund import Refund
 from app.models.refund_record_report import RefundRecordReport
 from app.models.shanmao_refund import ShanmaoRefund
 from app.models.wallet import WalletWithdrawal
+from app.services.analytics._core import D
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +46,7 @@ def _amount_eq(a, b, tol=0.01) -> bool:
     if a is None or b is None:
         return False
     try:
-        return abs(float(a) - float(b)) <= tol
+        return abs(D(a) - D(b)) <= tol
     except (TypeError, ValueError):
         return False
 
@@ -337,7 +339,7 @@ def _build_route_maps(db, start, end):
             c_sns.add(str(sn).strip())
 
     # B: wallet 用户提现 设备+金额集合
-    b_keys: set[tuple[str, float]] = set()
+    b_keys: set[tuple[str, Decimal]] = set()
     for sn, amt in db.execute(
         select(WalletWithdrawal.device_sn, WalletWithdrawal.op_amount)
         .where(
@@ -347,10 +349,10 @@ def _build_route_maps(db, start, end):
         )
     ).all():
         if sn and amt is not None:
-            b_keys.add((str(sn).strip(), float(amt)))
+            b_keys.add((str(sn).strip(), D(amt)))
 
     # D: manual 已退款 设备+金额 + order_no 集合
-    d_keys: set[tuple[str, float]] = set()
+    d_keys: set[tuple[str, Decimal]] = set()
     d_order_nos: set[str] = set()
     for sn, amt, ono in db.execute(
         select(ManualRefund.device_sn, ManualRefund.refund_amount, ManualRefund.order_no)
@@ -360,7 +362,7 @@ def _build_route_maps(db, start, end):
         )
     ).all():
         if sn and amt is not None:
-            d_keys.add((str(sn).strip(), float(amt)))
+            d_keys.add((str(sn).strip(), D(amt)))
         if ono:
             d_order_nos.add(str(ono).strip())
 
@@ -379,7 +381,7 @@ def _classify_report(report: RefundRecordReport, maps: dict) -> str:
     """单笔 report → 命中路由(A/B/C/D)/未登记。"""
     order_no = (report.platform_order_no or "").strip()
     sn = (report.device_sn or "").strip()
-    amt = float(report.refund_amount) if report.refund_amount is not None else None
+    amt = D(report.refund_amount) if report.refund_amount is not None else None
 
     # A 路: 平台订单号命中退费单 或 直接是退费单号
     if order_no:
@@ -452,10 +454,11 @@ def water_statement(
 
     matched_count = total - by_route["unmatched"]
     matched_amt = sum(
-        float(r.refund_amount or 0) for rc in classified if rc["route"] != "unmatched"
-        for r in [rc["report"]]
+        (D(r.refund_amount) for rc in classified if rc["route"] != "unmatched"
+         for r in [rc["report"]]),
+        Decimal("0"),
     )
-    unmatched_amt = float(total_amt) - matched_amt
+    unmatched_amt = D(total_amt) - matched_amt
 
     # 分页输出(按 route 过滤)
     if status != "all":

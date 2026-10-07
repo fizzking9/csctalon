@@ -3,6 +3,7 @@
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
@@ -115,15 +116,16 @@ def _normalize_numeric_string(s: str) -> str:
         tmp = f"{tmp}||SCALE={scale}"
     return tmp
 
-def _apply_modifiers(raw: float, cleaned: str) -> float:
-    """应用 _normalize_numeric_string 写在尾部的 % / 万 / 亿 修饰符"""
+def _apply_modifiers(raw: float | Decimal, cleaned: str) -> float | Decimal:
+    """应用 _normalize_numeric_string 写在尾部的 % / 万 / 亿 修饰符（#222 兼容 float/Decimal）"""
+    is_dec = isinstance(raw, Decimal)
     if "||PERCENT" in cleaned:
-        raw = raw * 0.01
+        raw = raw * (Decimal("0.01") if is_dec else 0.01)
     m = re.search(r"\|\|SCALE=([0-9.]+)", cleaned)
     if m:
         try:
-            raw = raw * float(m.group(1))
-        except (TypeError, ValueError):
+            raw = raw * (Decimal(m.group(1)) if is_dec else float(m.group(1)))
+        except (TypeError, ValueError, InvalidOperation):
             pass
     return raw
 
@@ -151,7 +153,15 @@ def _to_str(val: Any) -> str | None:
         return None
     return s
 
-def _to_float(val: Any) -> float | None:
+def _to_decimal(val: Any) -> Decimal | None:
+    """金额/数值入库转换（#222 方案 C′：定点 Decimal，禁止二进制浮点中间态）。
+
+    与旧 _to_float 的差异：
+      - float 入参经 str() 取最短十进制表示再进 Decimal（0.1 不带二进制尾数）；
+      - 字符串路径同样走 _normalize_numeric_string（¥1,234.56 / 50% / 1.2万 等），
+        但解析与修饰符乘法全部定点完成；
+      - 返回值 Decimal，写入 Numeric 列时由 DB 定点量化，全程无 float 误差。
+    """
     if val is None:
         return None
     try:
@@ -159,48 +169,52 @@ def _to_float(val: Any) -> float | None:
             return None
     except (TypeError, ValueError):
         pass
-    if isinstance(val, (int, float)):
-        try:
-            f = float(val)
-        except (TypeError, ValueError):
-            return None
-        if pd.isna(f):
-            return None
-        return f
+    if isinstance(val, Decimal):
+        return val
+    if isinstance(val, int):
+        return Decimal(val)
+    if isinstance(val, float):
+        # str(float) 是最短十进制回环表示, 等价于人看到的值
+        return Decimal(str(val))
     # 字符串路径
     s = str(val).strip()
     if s == "" or s.lower() == "nan":
         return None
     # 先试直接转(最快,且不含单位的字符串 99% 会走这条)
     try:
-        f = float(s)
-        if pd.isna(f):
-            return None
-        return f
-    except (TypeError, ValueError):
+        return Decimal(s)
+    except InvalidOperation:
         pass
     # P1-3: 走归一化流程 (¥1,234.56 / 50% / 1.2万 / 0.5小时 / 12(备注) 等)
     cleaned = _normalize_numeric_string(s)
     if not cleaned:
         return None
-    # 剥掉修饰符后缀后,再拿纯数字部分去 float
+    # 剥掉修饰符后缀后,再拿纯数字部分去 Decimal
     num_part = cleaned.split("||", 1)[0]
     if not num_part:
         return None
     try:
-        f = float(num_part)
-    except (TypeError, ValueError):
+        d = Decimal(num_part)
+    except InvalidOperation:
         # 最后一招: 所有非数字/小数点/- 的字符全删掉,再试一次
         last_resort = re.sub(r"[^0-9.\-]", "", num_part)
         if not last_resort or last_resort in (".", "-", "-."):
             return None
         try:
-            f = float(last_resort)
-        except (TypeError, ValueError):
+            d = Decimal(last_resort)
+        except InvalidOperation:
             return None
-    if pd.isna(f):
-        return None
-    return _apply_modifiers(f, cleaned)
+    return _apply_modifiers(d, cleaned)
+
+
+def _to_float(val: Any) -> float | None:
+    """非金额浮点列（如 flow_gb 流量）的入库转换。
+
+    ⚠️ #222：金额列一律用 _to_decimal（定点）；本函数仅保留给 Float 列/预览等
+    非金额场景。float→str→Decimal→float 为最短回环，数值语义与旧实现一致。
+    """
+    d = _to_decimal(val)
+    return float(d) if d is not None else None
 
 def _to_int(val: Any) -> int | None:
     f = _to_float(val)
