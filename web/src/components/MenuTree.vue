@@ -62,10 +62,22 @@ function roleVisible(roles) {
   return roles.includes(authStore.role)
 }
 
-/** 构建模式可见性: always 恒显 / debug_only 仅 debug / hidden 不显示。 */
+/**
+ * 构建模式可见性: always 恒显 / hidden 任何构建都不显示 / debug_only 见下。
+ *
+ * debug_only 可见判据 (#221, 用户 2026-10-07 拍板的临时发布策略):
+ *   - debug 构建: 全量(再按角色过滤), 与历史行为一致;
+ *   - release 构建: 默认隐藏, 但**系统管理员(admin)可见全部菜单** ——
+ *     发布期仅让管理员看全量; 其他角色(supervisor/specialty_lead/agent)
+ *     的可见菜单与此前逐字节一致, 不新增任何入口。
+ *   本函数只控制「菜单入口」显隐; 页面/数据访问仍由路由守卫与后端 API 权限决定,
+ *   深链可达性维持原状, 不在此处收紧。
+ */
 function buildVisible(mode) {
   if (mode === BUILD_MODES.HIDDEN) return false
-  if (mode === BUILD_MODES.DEBUG_ONLY) return showByVisibility('debug_only')
+  if (mode === BUILD_MODES.DEBUG_ONLY) {
+    return showByVisibility('debug_only') || authStore.isAdmin
+  }
   return true
 }
 
