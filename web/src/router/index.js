@@ -381,12 +381,19 @@ const routes = [
         redirect: '/data/ingest?tab=data-quality',
       },
       {
-        // ★ #67 P3: 投诉采集质量(原「投诉分析」的人工审核#55 + 采集质量#60 外迁)。
-        //   path 为**新增**(非搬迁) —— 原页面内的 tab 无独立 url, 故不破坏历史书签。
         path: 'system/complaint-quality',
         name: 'SystemComplaintQuality',
         component: () => import('@/views/management/ComplaintDataQuality.vue'),
         meta: { title: '投诉采集质量', icon: 'CircleCheck', admin: true },
+      },
+      {
+        // ★ #208: 外部投诉同源判重 v5 人工复核闭环（机判成组 + 人工确认/驳回留痕）。
+        //   归「数据质量」组：它判定"这些投诉是否同一事由反复投诉"，属数据治理域，
+        //   只读原行、不删不合并不改口径，与「投诉采集质量」同属治理工具而非决策看板。
+        path: 'system/complaint-same-source',
+        name: 'SystemComplaintSameSource',
+        component: () => import('@/views/system/ComplaintSameSource.vue'),
+        meta: { title: '同源案件复核', icon: 'Connection', admin: true },
       },
       {
         path: 'system/data-quality',

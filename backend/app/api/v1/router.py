@@ -6,6 +6,7 @@ from app.api.v1 import (
     admin_ai,
     admin_ai_prompt_config,
     admin_ai_prompt_eval,
+    admin_complaint_same_source,
     admin_governance_prompt,
     admin_onboarding_prompt,
     agenda,
@@ -121,6 +122,7 @@ api_router.include_router(invoices.router)
 api_router.include_router(kb_articles.router)
 api_router.include_router(llm_providers.router)
 api_router.include_router(admin_ai.router)  # #125 AI 报告与模板管理(admin)
+api_router.include_router(admin_complaint_same_source.router)  # #208 外部投诉同源案件(admin)
 api_router.include_router(admin_ai_prompt_eval.router)  # #173 AI 提示词评估中心(admin)
 api_router.include_router(admin_ai_prompt_config.router)  # #178 提示词版本管理(admin)
 api_router.include_router(admin_governance_prompt.router)  # 研判提示词版本管理(admin)
