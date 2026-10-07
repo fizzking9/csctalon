@@ -313,6 +313,13 @@ def _start_bms_scheduler() -> None:
 
 
 def create_app() -> FastAPI:
+    # #210: 注册表引用完整性自检（fail-fast，禁止静默失配）。
+    #   纯内存校验（不依赖 DB），在 FastAPI 实例化前执行——缺映射/无登记失配
+    #   直接抛 RegistryIntegrityError 拒绝启动，避免带病运行后数字悄悄错位。
+    from app.services.registry_index import validate_registry_integrity
+
+    validate_registry_integrity()
+
     # ★ 2026-09-22: 接线 profile 的 docs_enabled / openapi 开关。
     #   为什么必须接线：`Profile.docs_enabled` 若只是"声明了但没人读"，
     #   它就退化成**文档式的空承诺** —— 使用者以为关掉了、实际还开着。
