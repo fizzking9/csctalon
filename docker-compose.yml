@@ -76,8 +76,11 @@ services:
   backend:
     build: ./backend
     container_name: csctalon-backend
-    # 覆盖镜像 CMD:
-    # -w 1: 单worker模式,保证内存互斥锁有效(防止多worker重复提交同步任务导致数据重复)
+    # 覆盖镜像 CMD（与 backend/Dockerfile、Dockerfile.patch 三处一致，#212 已消除 -w 4 矛盾）:
+    # -w 1: 单 worker。下列进程内状态依赖单进程——llm_scheduler 的 threading.Condition 门闸
+    #   （任一时刻仅 1 个 LLM 调用，多 worker 会并发打爆单个 ollama 端点）、SyncTaskManager
+    #   同步互斥（多 worker 重复提交→数据重复）、登录限速进程内计数（限速失效）。
+    #   多机/多 worker 扩容须先把这些状态迁至 Redis（v0.7 明确「立此存照、不做」）。
     # --timeout 900s: sync-all多源抓取含65s间隔,全程5-8分钟,默认120s会被gunicorn判超时SIGABRT→前端502
     command: ["gunicorn", "app.main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "900", "--log-level", "info"]
     env_file:

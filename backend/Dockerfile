@@ -44,9 +44,13 @@ RUN mkdir -p /app/uploads
 EXPOSE 8000
 
 # gunicorn + uvicorn worker
-# -w 1: 单 worker, 与 docker-compose 一致。
-#   原因: 同步任务管理器/登录限速用进程内内存互斥锁(asyncio.Lock/字典), 多 worker 下各自计数
-#   会导致重复同步与限速失效。如需多 worker 并发, 须先将这些状态迁至 Redis(M5)。
+# -w 1: 单 worker, 与 docker-compose.yml、Dockerfile.patch 三处保持一致（#212 已消除 -w 4 矛盾）。
+#   原因（下列状态均为进程内状态，多 worker 各持一份即失效）:
+#     · llm_scheduler 的进程级 threading.Condition 门闸(_gates): 保证任一时刻仅 1 个 LLM
+#       调用在飞，多 worker 会把单个 ollama 端点并发打爆；
+#     · 同步任务管理器(SyncTaskManager) / 登录限速(core.rate_limit) 的内存锁与计数:
+#       多 worker 各自计数会导致重复同步(数据重复)与限速失效。
+#   多 worker 水平扩容是 v0.7「立此存照、不做」项；如需，须先将这些状态迁至 Redis。
 # --timeout 900s: sync-all 多源抓取含 65s 间隔, 全程 5-8 分钟, 默认 120s 会被 gunicorn
 #   判超时 SIGABRT → 前端 502。
 # 日志: gunicorn/uvicorn/app 日志统一走 stdout/stderr, 由 docker json-file 轮转(10m×3)捕获,
