@@ -576,6 +576,9 @@ def update_schedule_config(payload: ScheduleConfigIn, db: DBSession, me: AdminUs
 
 
 @router.post("/schedule/start", response_model=R[ScheduleStatus], summary="启动定时同步")
+# #213: 必须保留 async def —— 体内无 await，但 bms_scheduler.start() 内部用
+# asyncio.create_task 挂载到「当前运行的事件循环」；改成同步 def 会在 anyio 线程池线程执行，
+# 那里没有运行中的 loop（get_running_loop 抛 RuntimeError）。本端点只做内存态判断 + 调度，无阻塞 IO。
 async def start_schedule(current_user: CurrentUser):
     """启动 BMS + SCRM 定时同步(8-23/0 每小时 + 5:00 补跑 + 8:00 全量兜底)
 

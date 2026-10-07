@@ -146,7 +146,9 @@ def import_snapshot_preview(
 
 
 @router.post("/import-snapshot", response_model=R[ImportResponse], summary="HR 人力快照 xlsx 导入")
-async def import_snapshot(
+# #213: 改同步 def —— 体内 load_dataframe(pandas xlsx) 为阻塞重活且无 await；普通 def 由
+# FastAPI 自动线程池调度，避免 HR 快照导入卡住事件循环。
+def import_snapshot(
     payload: dict,
     db: DBSession,
     current_user: AdminUser,

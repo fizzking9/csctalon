@@ -15,6 +15,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import select
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import CurrentUser, DBSession
 from app.core.config import settings
@@ -73,7 +74,10 @@ async def parse_upload(
             raise HTTPException(status_code=413, detail=f"文件超过 {settings.MAX_UPLOAD_SIZE_MB}MB 限制")
         try:
             # P0-3: save_upload_file 落盘前校验扩展名白名单 + magic bytes
-            path, actual_stored_path = save_upload_file(content, file.filename or "upload")
+            # #213: 同步落盘/校验放入线程池，避免阻塞事件循环（本函数因需 await file.read 保留 async）。
+            path, actual_stored_path = await run_in_threadpool(
+                save_upload_file, content, file.filename or "upload"
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         filename = file.filename
@@ -81,7 +85,8 @@ async def parse_upload(
         raise HTTPException(status_code=400, detail="必须提供 file 或 stored_path 参数")
 
     try:
-        preview = parse_file(path, data_type, sheet_name=sheet_name)
+        # #213: pandas 解析是 CPU/IO 重活，放入线程池，避免大文件解析阻塞事件循环。
+        preview = await run_in_threadpool(parse_file, path, data_type, sheet_name=sheet_name)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"文件解析失败: {e}") from e
     preview["stored_path"] = actual_stored_path
@@ -90,7 +95,9 @@ async def parse_upload(
 
 
 @router.post("/preview-diff", response_model=R, summary="diff 预览(导入前查看 existing/new/abnormal)")
-async def preview_diff(
+# #213: 改同步 def —— 体内 load_dataframe(pandas) / compute_diff(同步 DB) 全是阻塞调用且无
+# await；声明 async 反而让重活跑在事件循环线程。普通 def 由 FastAPI 自动放入线程池执行。
+def preview_diff(
     payload: DiffPreviewRequest,
     db: DBSession,
     current_user: CurrentUser,
@@ -121,7 +128,9 @@ async def preview_diff(
 
 
 @router.post("/import", response_model=R[ImportResponse], summary="确认导入(upsert+关联匹配)")
-async def confirm_import(
+# #213: 改同步 def —— load_dataframe + ingest_table(批量 upsert) 是最重的同步调用且无 await，
+# 必须跑在线程池而非事件循环线程；关联匹配等后处理已在 BackgroundTasks 中异步执行。
+def confirm_import(
     payload: dict,
     db: DBSession,
     current_user: CurrentUser,

@@ -30,6 +30,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import AdminUser, DBSession
 from app.models.governance_finding import (
@@ -170,12 +171,15 @@ def _start_placeholder_event(db, action: str, title: str) -> SystemEvent:
 # ═══════════════════════════════════════════════════════════════════════
 @router.post("/scans", response_model=R, status_code=status.HTTP_202_ACCEPTED,
              summary="手动触发一次数据体检（202 + scan_id，异步）")
+# #213: 保留 async def —— start_scan_task() 内部 asyncio.get_running_loop().create_task，
+# 必须在事件循环线程调度；仅把同步 DB 占位行插入放入线程池（commit=True，await 完成后再入队，
+# 保证后台任务可见该占位事件）。
 async def create_scan(db: DBSession, user: AdminUser):
     """提交体检 → 立即返回 scan_id；后台扫 D1/D2/D3 并落 findings。
 
     轮询 GET /governance/scans/{scan_id} 直到 finished=true。
     """
-    ev = _start_placeholder_event(db, EVENT_SCAN, "数据体检: 已提交")
+    ev = await run_in_threadpool(_start_placeholder_event, db, EVENT_SCAN, "数据体检: 已提交")
     start_scan_task(ev.id)
     logger.info("governance 手动体检已提交 scan_id=%s user=%s", ev.id, user.username)
     return R(data={"scan_id": ev.id})
@@ -191,12 +195,14 @@ def get_scan(scan_id: int, db: DBSession, _: AdminUser):
 
 @router.post("/judge", response_model=R, status_code=status.HTTP_202_ACCEPTED,
              summary="手动触发一次研判（202 + judge_id，异步，经 L1 门闸）")
+# #213: 保留 async def —— start_judge_task() 同样在事件循环上 create_task（研判等 LLM）；
+# 仅把同步 DB 占位行插入放入线程池（await 提交完成后再入队，保证可见性）。
 async def create_judge(db: DBSession, user: AdminUser):
     """提交研判 → 返回 judge_id；后台对全部 open finding 走「规则短路 → 批量 AI」。
 
     规则命中的 finding **不调 LLM**（零成本），故可放心对全量 open 提交。
     """
-    ev = _start_placeholder_event(db, EVENT_JUDGE, "治理研判: 已提交")
+    ev = await run_in_threadpool(_start_placeholder_event, db, EVENT_JUDGE, "治理研判: 已提交")
     start_judge_task(ev.id)
     logger.info("governance 手动研判已提交 judge_id=%s user=%s", ev.id, user.username)
     return R(data={"judge_id": ev.id})

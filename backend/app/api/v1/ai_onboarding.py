@@ -19,6 +19,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import AdminUser, CurrentUser, DBSession
 from app.core.database import SessionLocal
@@ -109,6 +110,9 @@ def _load_visible(db, draft_id: int, user) -> DataSourceSpec:
 
 @router.post("/drafts", response_model=R, status_code=status.HTTP_202_ACCEPTED,
              summary="提交样例，异步起草（202 + draft_id，轮询 GET /drafts/{id}）")
+# #213: 保留 async def —— 本端点末尾 start_draft_task() 依赖 asyncio.get_running_loop()
+# 在线程上 create_task（fire-and-forget LLM 起草），故不能改成纯同步 def；
+# 仅把其中唯一的阻塞同步 DB 调用 create_draft_placeholder 放入线程池，避免阻塞事件循环。
 async def create_draft(payload: dict, db: DBSession, user: CurrentUser):
     """上传样例 → 预建占位行（drafting）→ 立即返回 draft_id；后台经 L1 门闸跑 LLM。
 
@@ -126,7 +130,9 @@ async def create_draft(payload: dict, db: DBSession, user: CurrentUser):
             raise HTTPException(400, "samples 每行必须是 JSON 对象（列名→值）")
 
     try:
-        draft = create_draft_placeholder(
+        # #213: 同步 DB 插入放入线程池；start_draft_task 必须留在事件循环线程 create_task。
+        draft = await run_in_threadpool(
+            create_draft_placeholder,
             db, table_hint=payload.get("table_hint"), samples=samples, created_by=user.id,
         )
     except DraftError as e:
