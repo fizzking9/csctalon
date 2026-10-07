@@ -19,7 +19,6 @@ import pytest
 from app.services import llm_provider_service, system_event_service
 from app.services.llm_client import LLMError, _call_multi_provider
 
-
 # ── 轻量 fake, 不依赖真实 DB ─────────────────────────────────────────
 
 class _FakeQuery:

@@ -161,7 +161,7 @@ csctalon/
 | 规范 | `docs/standards/` | 错误码 / 审查清单 / 任务派工单模板 / 工单驱动工作流 |
 | 文档组织 | `docs/README.md` | docs 目录职责 / 文件命名规范 / 运维手册分发 |
 | 测试 | `backend/tests/` | pytest 基建, 独立 `csctalon_test` 库, 隔离开发/生产 |
-| CI | `.gitea/workflows/` | gitleaks 凭证扫描 + backend-test(ruff + pytest 强制) |
+| CI | `.gitea/workflows/` | gitleaks 凭证扫描 + backend-test(ruff `app/`+`tests/` · **空库 alembic upgrade head** · pytest，强制) |
 
 **协作流程**: 需求/事件 → **建 Gitea 工单**（见 [docs/standards/issue-workflow.md](docs/standards/issue-workflow.md)，事故拆单：incident + governance）→ 架构师出设计 → 人工锁定(`docs/arch/` + git tag) → 开发者实现（提交/PR 关联 `#issue号`）→ 审查员审查 → 人工终审合并。测试与 lint 由 CI 机器验证, 不依赖 AI 口头声称。
 
@@ -175,6 +175,10 @@ pip install -e ".[dev]"
 pytest
 # 静态检查
 ruff check app/ tests/
+# 空库迁移链自检(CI 门禁 #211; 需先建一个空库, 完整命令见
+# docs/standards/alembic-migration管理规范.md §二/§八)
+APP_MODE=dev POSTGRES_DB=<空库名_dev> python -m alembic upgrade head
+python -m alembic heads   # 必须只输出一个 (head)
 ```
 
 ## 核心功能模块

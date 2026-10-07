@@ -18,7 +18,7 @@
     auto          = 本地失败自动降级云端（⚠️ 可能静默出域）
 """
 
-from sqlalchemy import Boolean, CheckConstraint, Integer, String
+from sqlalchemy import Boolean, CheckConstraint, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base

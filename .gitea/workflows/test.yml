@@ -4,7 +4,8 @@
 #    原 `uses:` 的 GitHub action(actions/checkout/setup-python/setup-node/cache)
 #    无法下载, job 卡死在 "Set up job"。改为纯本地 docker 执行:
 #    - checkout: runner(:host) 已自动 clone 代码到工作目录
-#    - 后端: docker run postgres:15(测试库) + docker run python:3.11-slim(pytest)
+#    - 后端: postgres:15 ×2(pytest 测试库 + 空库迁移门禁库) + python:3.11-slim
+#      (ruff app/+tests/ → 空库 alembic upgrade head → pytest)
 #    - 前端: docker run node:20(npm ci + lint + vitest)
 #    前提: 群晖可访问 docker hub(已验证 python:3.11-slim/gitleaks 可拉取)
 
@@ -27,19 +28,32 @@ jobs:
           git clone --quiet http://127.0.0.1:3000/tanzk/csctalon.git /workspace/ci-repo
           cd /workspace/ci-repo && git log --oneline -1
 
-      - name: 启动 postgres 测试库容器
+      - name: 启动 postgres 容器 (测试库 + 空库迁移门禁库)
         run: |
           # 清理残留(失败时)
-          docker rm -f ci-pg 2>/dev/null || true
+          docker rm -f ci-pg ci-pg-mig 2>/dev/null || true
           docker network create ci-net 2>/dev/null || true
           docker run -d --name ci-pg --network ci-net \
             -e POSTGRES_USER=csctalon \
             -e POSTGRES_PASSWORD=csctalon123 \
             -e POSTGRES_DB=csctalon_test \
             postgres:15
+          # 空库迁移门禁专用库(#211): POSTGRES_DB 在容器首次初始化时建成一个不含任何
+          # 表的**空库**, 专供 `alembic upgrade head` 从基线重放整条迁移链。它与 pytest 的
+          # create_all + stamp head 路径相互独立 —— 后者会掩盖"某迁移 DROP 了链上从未
+          # CREATE 的对象/迁移链断裂/多 head"。库名 _dev 后缀以通过启动期模式守卫。
+          docker run -d --name ci-pg-mig --network ci-net \
+            -e POSTGRES_USER=csctalon \
+            -e POSTGRES_PASSWORD=csctalon123 \
+            -e POSTGRES_DB=csctalon_dev \
+            postgres:15
           # 等待 PG 就绪(最多 30s)
           for i in $(seq 1 30); do
             docker exec ci-pg pg_isready -U csctalon && break
+            sleep 1
+          done
+          for i in $(seq 1 30); do
+            docker exec ci-pg-mig pg_isready -U csctalon && break
             sleep 1
           done
 
@@ -59,8 +73,20 @@ jobs:
               apt-get update -qq && apt-get install -y -qq libzbar0 libpq-dev gcc >/dev/null 2>&1
               pip install -q --upgrade pip >/dev/null 2>&1
               pip install -q -e '.[dev]' >/dev/null 2>&1
-              echo '== ruff (tests/) =='
-              ruff check tests/
+              echo '== ruff (app/ + tests/) =='
+              ruff check app/ tests/
+              echo '== alembic upgrade head (空库迁移链门禁, #211) =='
+              # 命令级 env 仅作用于本条 alembic 进程(切勿 export 到全局): tests/conftest.py
+              # 用 setdefault 从 TEST_POSTGRES_* 回填 POSTGRES_*, 若全局已存在 POSTGRES_HOST
+              # 会遮蔽回填, 反令 pytest 连到空库主机上不存在的 csctalon_test。
+              # 多 head / 链断裂时 upgrade head 直接非零退出(set -e 即门禁失败)。
+              APP_MODE=dev POSTGRES_HOST=ci-pg-mig POSTGRES_PORT=5432 \
+              POSTGRES_USER=csctalon POSTGRES_PASSWORD=csctalon123 \
+              POSTGRES_DB=csctalon_dev python -m alembic upgrade head
+              echo '== alembic heads (应为单一 head) =='
+              APP_MODE=dev POSTGRES_HOST=ci-pg-mig POSTGRES_PORT=5432 \
+              POSTGRES_USER=csctalon POSTGRES_PASSWORD=csctalon123 \
+              POSTGRES_DB=csctalon_dev python -m alembic heads
               echo '== pytest =='
               pytest
             "
@@ -96,7 +122,7 @@ jobs:
 
       - name: 清理 postgres 容器
         run: |
-          docker rm -f ci-pg 2>/dev/null || true
+          docker rm -f ci-pg ci-pg-mig 2>/dev/null || true
           docker network rm ci-net 2>/dev/null || true
           echo "已清理测试容器"
 

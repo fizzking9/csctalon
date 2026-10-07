@@ -587,7 +587,7 @@ def get_cloud_policy(db: Session | None = None) -> dict:
 def _policy_row_exists(db: Session | None) -> bool:
     """DB 单行表是否已有策略行（决定界面显示"来源: 数据库/环境变量"）。"""
     from app.core.database import SessionLocal
-    from app.models.llm_cloud_policy import LlmCloudPolicy, SINGLETON_ID
+    from app.models.llm_cloud_policy import SINGLETON_ID, LlmCloudPolicy
 
     own = db is None
     d = db or SessionLocal()
@@ -603,7 +603,7 @@ def _policy_row_exists(db: Session | None) -> bool:
 def _policy_updated_by(db: Session | None) -> str | None:
     """读策略行的最后修改人（界面展示审计线索）。"""
     from app.core.database import SessionLocal
-    from app.models.llm_cloud_policy import LlmCloudPolicy, SINGLETON_ID
+    from app.models.llm_cloud_policy import SINGLETON_ID, LlmCloudPolicy
 
     own = db is None
     d = db or SessionLocal()

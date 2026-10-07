@@ -3,9 +3,10 @@
 **性质**：元需求（META） —— 约束**所有**表结构变更
 
 
-> 版本：v1.1 · 日期：2026-08-26
+> 版本：v1.2 · 日期：2026-10-07（#211 增补：空库可重放 CI 门禁 +「修改已提交 migration」的例外，见 §二 / §八 第 6、7 条）
 > 关联代码：[backend/alembic/](../backend/alembic/)
-> 当前 head：`73a7922ec598`（单一 head）
+> 当前 head：以 `alembic heads` 实测为准 —— 2026-10-07 实测为 `t0u1v2w3x4y5`（单一 head）。
+> 下方 §一 版本链图为 v1.1（2026-08-26）时点快照，版本号可能落后，**请勿据该图判断 head**。
 
 ## 一、版本链现状
 
@@ -70,6 +71,14 @@ alembic stamp <revision>
 
 # 自动生成 migration（需连接数据库）
 alembic revision --autogenerate -m "description"
+
+# ★空库可重放自检（CI 强制门禁，#211；规范依据见 §八 第 6、7 条）
+#   在一个全新空库上从基线重放整条迁移链 —— create_all + stamp 覆盖不到的
+#   「链断裂 / 多 head / DROP 了链上从未 CREATE 的对象」只有它能暴露。
+createdb csctalon_migchk_dev            # 库名须 _dev 后缀，通过启动期模式守卫
+APP_MODE=dev POSTGRES_DB=csctalon_migchk_dev python -m alembic upgrade head
+python -m alembic heads                 # 必须只输出一行 (head)
+dropdb csctalon_migchk_dev              # 校验后删除临时库
 ```
 
 > **注意**：在 Docker 环境中，需在 backend 容器内执行：`docker exec csctalon-backend alembic <command>`
@@ -209,7 +218,9 @@ docker exec csctalon-backend alembic stamp <revision>
 ## 八、注意事项
 
 1. **不要删除已提交的 migration 文件**：会导致版本链断裂
-2. **不要修改已提交的 migration 文件**：已应用的环境不会重新执行
+2. **原则上不要修改已提交的 migration 文件**：已应用的环境不会重新执行，改动对存量库无效、还会造成认知不一致。**唯一例外见第 7 条**（修复空库可重放性缺陷）。
 3. **downgrade 必须可实现**：以便回滚
 4. **单 worker 模式**：docker-compose.yml 中 `gunicorn -w 1` 保证互斥锁有效
 5. **alembic_version 表应只有 1 行**：正常状态为当前 head 版本号；多行表示异常（可用 `alembic stamp` 修复）
+6. **★迁移必须能在全新空库顺序 `upgrade head`（空库可重放，CI 强制门禁，#211）**：CI（`.gitea/workflows/test.yml`）在一个独立空库上执行 `alembic upgrade head` 并校验单一 head。测试库走 `create_all + stamp head`（见 [tests/conftest.py](../../backend/tests/conftest.py)），会**跳过全部迁移**——因此凡是"假设某约束/索引/列已被 create_all 带出"就直接 `DROP`/`ALTER` 的迁移，在存量库正常、在全新环境却会中断（典型报错 `UndefinedObject: constraint "xxx" does not exist`）。编写要求：对"可能不存在"的对象做 `DROP`/`ALTER` 前，先用 `pg_constraint` / `information_schema` 做存在性判断（或用 `IF EXISTS`），保证「全新空库」与「存量库」两条路径最终 schema 一致；提交前必须按 §二 的空库自检命令本地实测一遍。
+7. **第 2 条的唯一例外——为修复空库可重放性缺陷可改已提交迁移**，但须同时满足：(a) **不改变**已应用环境的最终 schema 与数据（只加存在性判断/分支，让两条路径殊途同归）；(b) 不增删版本、不改 `revision` / `down_revision`；(c) 本地全新空库 `upgrade head` 实测通过。已应用该迁移的库不会重跑，故对生产无影响。首例：`a1c2e3f4d5b6`（#211）——其无条件 `DROP CONSTRAINT uq_cs_record_business` 在空库断裂（该约束链上从未 CREATE，历史上仅由 create_all 依模型带出），已改为先查 `pg_constraint`、存在才 DROP。

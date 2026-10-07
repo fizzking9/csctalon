@@ -57,7 +57,26 @@ def upgrade() -> None:
     )
 
     # 1) 删除旧约束（NULLS DISTINCT 语义，对含 NULL 的记录不起去重作用）
-    op.drop_constraint(_CONSTRAINT_NAME, "cs_records", type_="unique")
+    #    ⚠️ 空库可重放（#211）：建表迁移 b4c9d1f02e5a 从未创建过该唯一约束
+    #    （旧约束历史上仅由 create_all 依模型带出，链上无独立建约束迁移）。
+    #    全新环境顺序迁移到此处时约束并不存在，无条件 drop_constraint 会以
+    #    UndefinedObject 中断整条迁移链（create_all + stamp head 的盲区）。
+    #    故先查 pg_constraint：存在（存量库）才 DROP；不存在（全新空库）跳过，
+    #    由下一步直接建立 NULLS NOT DISTINCT 约束。两种路径最终 schema 一致。
+    op.execute(
+        f"""
+        DO $do$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conrelid = 'cs_records'::regclass
+                  AND conname = '{_CONSTRAINT_NAME}'
+            ) THEN
+                ALTER TABLE cs_records DROP CONSTRAINT {_CONSTRAINT_NAME};
+            END IF;
+        END $do$;
+        """
+    )
 
     # 2) 重建为 NULLS NOT DISTINCT：NULL 视为相等值，参与去重
     #    这样即使 problem_create_time 为 NULL，重复行也会被数据库拒绝。

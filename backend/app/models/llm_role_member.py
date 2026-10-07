@@ -18,7 +18,7 @@
     - 本表 role_key      = 任务**能力需求**（该找哪个模型）
 """
 
-from sqlalchemy import Boolean, Integer, String, UniqueConstraint
+from sqlalchemy import Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base

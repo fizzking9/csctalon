@@ -96,7 +96,7 @@ def _read_policy_from_db() -> str | None:
 
     db = None
     try:
-        from app.models.llm_cloud_policy import LlmCloudPolicy, SINGLETON_ID
+        from app.models.llm_cloud_policy import SINGLETON_ID, LlmCloudPolicy
         db = SessionLocal()
         row = db.query(LlmCloudPolicy).filter(LlmCloudPolicy.id == SINGLETON_ID).first()
         val = (row.policy or "").strip().lower() if row else None
