@@ -397,3 +397,43 @@ class TestDbGuardCoversNonPytest:
             "tests/_db_guard.py 应委托给 app/core/db_guard.py，"
             "否则会出现第二份守卫实现（改一处漏一处）"
         )
+
+
+class TestBootstrapSwitchesDbBeforeAppImport:
+    """⑦ bootstrap() 必须在首次 import app 前设好环境变量（#220 回归）。
+
+    根因：`import app.core.config.profiles` 会触发 config/__init__ 在导入期实例化
+    settings（lru_cache 固化）。若 bootstrap 先 import profiles、后设 APP_MODE/POSTGRES_DB，
+    settings 会按默认 dev + backend/.env 固化 → bootstrap(mode="test"/"prod") 实际连 dev，
+    生产治理脚本可能打错库。
+
+    ★ 必须用**全新子进程**：settings 在进程内是单例，同进程无法重现"首次导入"。
+    """
+
+    def _bootstrap_db_in_subprocess(self, mode: str) -> str:
+        # 剔除调用方（pytest/conftest）注入的模式变量，真实模拟"脚本仅靠 --mode 切库"，
+        # 否则子进程继承 APP_MODE=test 会掩盖 bootstrap 自身的设置是否生效。
+        clean_env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("APP_MODE", "ENV", "POSTGRES_DB")
+        }
+        code = (
+            "import sys; sys.path.insert(0, '.')\n"
+            "from scripts._bootstrap import bootstrap\n"
+            "from app.core.db_guard import current_db_name\n"
+            f"db = bootstrap(mode={mode!r})\n"
+            "print(current_db_name(db))\n"
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, cwd=_BACKEND_DIR, env=clean_env, timeout=60,
+        )
+        assert r.returncode == 0, f"bootstrap({mode}) 失败: {r.stderr[-500:]}"
+        return r.stdout.strip()
+
+    def test_bootstrap_test_connects_test_db(self):
+        # backend/.env(dev) 存在也不得污染：test 模式必须连 _test 库
+        assert self._bootstrap_db_in_subprocess("test") == "csctalon_test"
+
+    def test_bootstrap_dev_connects_dev_db(self):
+        assert self._bootstrap_db_in_subprocess("dev") == "csctalon_dev"

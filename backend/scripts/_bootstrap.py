@@ -82,11 +82,21 @@ def bootstrap(
     # ── 决定库名 ──
     target_db = db_name or os.environ.get("POSTGRES_DB") or _DEFAULT_DB_FOR_MODE[resolved_mode]
 
-    # ★ 读取 profile 的 allow_destructive_on_real_db，作为"是否默认允许真实库"的依据。
-    #   为什么必须读它（而不是在脚本里硬编码 `mode != "prod"`）：
-    #     若脚本自己判断，就等于**第二份定义** —— 改了 profile 这里不会跟着变
-    #     （同 A-20260910-004 双份定义漂移教训）。
-    #   ⚠️ 这只是**默认值来源**：真实库上的破坏性操作仍需调用方显式传 allow_real_db=True。
+    # ── 先设环境变量 + sys.path，且必须早于任何 `import app.*`（#220 修复）──────────
+    #   导入 app.core.config 的任一子模块都会先执行 app/core/config/__init__.py，
+    #   它在导入期即实例化 settings（settings.py 的 `_PROFILE = resolve_profile(...)`
+    #   与模块级 `settings = get_settings()`），并被 lru_cache 固化。
+    #   若在设置环境变量之前就 import profiles（旧顺序），settings 会按默认 dev 加载
+    #   backend/.env 并固化 → bootstrap(mode="test"/"prod") 返回的 Session 实际连 dev，
+    #   使生产治理脚本可能打错库。故必须把环境变量设置放在第一次 import app 之前；
+    #   pydantic-settings 中环境变量优先级高于 .env 文件，之后实例化即读到正确库。
+    os.environ["APP_MODE"] = resolved_mode
+    os.environ["POSTGRES_DB"] = target_db
+    if str(_BACKEND_DIR) not in sys.path:
+        sys.path.insert(0, str(_BACKEND_DIR))
+
+    # ★ 此时环境已就绪，读取 profile 的 allow_destructive_on_real_db，作为"是否默认允许
+    #   真实库"的依据（该导入现在触发的 settings 实例化会读到上面已设好的模式）。
     from app.core.config.profiles import resolve_profile as _resolve_profile
 
     _prof = _resolve_profile(resolved_mode)
@@ -101,16 +111,9 @@ def bootstrap(
             f"（脚本参数通常为 --allow-real-db）。\n"
             f"   ★ 为什么拦：2026-09-10 曾有脚本/测试误连开发库执行整表 DELETE，\n"
             f"     导致 refunds 170960→2；2026-09-22 同因复发（未遂）。\n"
-            f"   ★ 本判断依据 profile.allow_destructive_on_real_db={mode_permits_real_db}"
+            f"   本判断依据 profile.allow_destructive_on_real_db={mode_permits_real_db}"
             f"（见 app/core/config/profiles.py），非脚本自建规则。"
         )
-
-    # ── 设环境变量（必须在 import app 之前）──
-    os.environ["APP_MODE"] = resolved_mode
-    os.environ["POSTGRES_DB"] = target_db
-    # 让 `import app.*` 能在脚本直跑时找到包
-    if str(_BACKEND_DIR) not in sys.path:
-        sys.path.insert(0, str(_BACKEND_DIR))
 
     if not require_db:
         return None
