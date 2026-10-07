@@ -9,6 +9,7 @@
 复用 #118 LLM Provider 管理界面风格(admin CRUD + test 路由)
 """
 
+import json
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -27,11 +28,70 @@ router = APIRouter(prefix="/admin/ai", tags=["admin-ai"])
 
 @router.get("/templates", response_model=R, summary="AI 模板列表(admin)")
 def list_templates(db: DBSession, _: AdminUser):
-    """列出所有 AI 报告模板(按 priority 升序)。"""
+    """列出所有 AI 报告模板(按 priority 升序)。
+
+    #193/#204: 附带「刷新健康度」4 字段(只读聚合, 无副作用):
+    last_generated_at / hit_count_7d / skip_count_7d / last_skip_verdict,
+    聚合口径见 _refresh_stats()。前端列语义见 AiTemplates.vue 头部设计说明。
+    """
     rows = db.query(AiReportTemplate).order_by(
         AiReportTemplate.priority, AiReportTemplate.id
     ).all()
-    return R(data=[_tmpl_dict(t) for t in rows])
+    stats = _refresh_stats(db)
+    return R(data=[_tmpl_dict(t, stats.get(t.id)) for t in rows])
+
+
+def _refresh_stats(db) -> dict[int, dict]:
+    """#193/#204 模板刷新健康度聚合(纯只读, 供管理端 4 列)。
+
+    口径(与设计文档 §4.4(b) 一致):
+    - last_generated_at: max(ai_reports.created_at), 仅 is_public=TRUE(成功快照)
+    - hit_count_7d : 近7天命中交付次数 —— ai_reports(is_public=FALSE,
+      hit_mode IN ('full','section')) 按模板计数(#193 审计修正: 以 hit_mode 为准)
+    - skip_count_7d: 近7天 system_events(action=pregen_skipped) 按模板计数
+      (含 no_new_events 与 throttled_20min 两类, 由 detail.reason 区分)
+    - last_skip_verdict: 该模板最近一次跳过判定的证据(has_new/counts/reason/
+      enforced/at), 是"采集水位证据", 不是业务结论。
+    detail 为 JSON 文本, 在 Python 侧解析而非 SQL ::jsonb —— 避免个别脏
+    detail 使整条聚合查询报错(逐行容错)。
+    """
+    stats: dict[int, dict] = {}
+    for tid, mx in db.execute(text(
+            "SELECT template_id, MAX(created_at) FROM ai_reports "
+            "WHERE is_public = TRUE AND template_id IS NOT NULL GROUP BY template_id"
+    )).all():
+        stats[int(tid)] = {"last_generated_at": mx.isoformat() if mx else None}
+    for tid, n in db.execute(text(
+            "SELECT template_id, count(*) FROM ai_reports "
+            "WHERE is_public = FALSE AND hit_mode IN ('full','section') "
+            "AND template_id IS NOT NULL "
+            "AND created_at > now() - interval '7 days' GROUP BY template_id"
+    )).all():
+        stats.setdefault(int(tid), {})["hit_count_7d"] = int(n)
+    # 跳过事件量级 ≈ 每天几十条, 7 天全量取回 Python 解析(按 id 倒序, 首见即最新)
+    for detail, created_at in db.execute(text(
+            "SELECT detail, created_at FROM system_events "
+            "WHERE category = 'ai' AND action = 'pregen_skipped' "
+            "AND created_at > now() - interval '7 days' ORDER BY id DESC"
+    )).all():
+        try:
+            d = json.loads(detail) if detail else {}
+        except (TypeError, ValueError):
+            continue
+        tid = d.get("template_id")
+        if tid is None:
+            continue
+        s = stats.setdefault(int(tid), {})
+        s["skip_count_7d"] = s.get("skip_count_7d", 0) + 1
+        if "last_skip_verdict" not in s:
+            s["last_skip_verdict"] = {
+                "has_new": d.get("has_new"),
+                "counts": d.get("counts") or {},
+                "reason": d.get("reason"),
+                "enforced": d.get("enforced"),
+                "at": created_at.isoformat() if created_at else None,
+            }
+    return stats
 
 
 def _auto_refresh_on_sync(period: str | None, frequency: str | None) -> bool:
@@ -265,8 +325,9 @@ def delete_admin_report(report_id: int, db: DBSession, _: AdminUser):
     return R(data={"id": report_id})
 
 
-def _tmpl_dict(t: AiReportTemplate) -> dict:
-    """模板 ORM 转 dict(供 API 响应)。"""
+def _tmpl_dict(t: AiReportTemplate, stat: dict | None = None) -> dict:
+    """模板 ORM 转 dict(供 API 响应)。stat=#193/#204 刷新健康度聚合(见 _refresh_stats)。"""
+    s = stat or {}
     return {
         "id": t.id,
         "code": t.code,
@@ -290,6 +351,11 @@ def _tmpl_dict(t: AiReportTemplate) -> dict:
         # #181 专项分桶: 专项域 + 体裁(生成按此分桶切片, 匹配按此路由)
         "scope": t.scope,
         "format": t.format,
+        # #193/#204 刷新健康度 4 列(只读; "空"=暂无对应记录)
+        "last_generated_at": s.get("last_generated_at"),
+        "hit_count_7d": s.get("hit_count_7d", 0),
+        "skip_count_7d": s.get("skip_count_7d", 0),
+        "last_skip_verdict": s.get("last_skip_verdict"),
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
     }

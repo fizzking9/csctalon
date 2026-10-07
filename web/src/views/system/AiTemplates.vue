@@ -1,3 +1,17 @@
+<!--
+  设计说明（Design Rationale）— #193/#204 「刷新健康度」4 列（2026-10-07）
+  ① 目的：替运营/管理员回答「这份报告为什么此刻是这版内容、值不值得继续按这个频率刷」，
+     支撑"调参 / 关停某模板刷新"的决定。
+  ② 逻辑：4 列按「时间(最近生成) → 价值(7天命中) → 成本(7天跳过) → 证据(最近判定)」排列，
+     一眼看出"刷了没人看 / 该刷被跳过"两类异常。
+  ③ 口径：命中次数以 hit_mode 为准(#193 审计修正)；跳过次数来自 system_events.pregen_skipped
+     (reason 区分 零新增/节流 两类)；"最近判定"是采集水位证据，不是业务结论。
+     聚合口径单源在后端 admin_ai._refresh_stats，前端不做二次计算。
+  ④ 取舍：不做独立的"刷新成本看板"(与本页重复展示，违反"同一指标唯一真身")；
+     不做逐模板频率编辑器(v1 全局开关 AI_PREGEN_SKIP_MODE=off/dry_run/enforce，
+     避免过早暴露调参面)；enforce 定参需影子期数据，当前默认 dry_run(只留痕不改行为)。
+  ⑤ 工单：#193/#204；设计文档 docs/design/20260924-#193-AI报告刷新策略-无新事件跳过-实现方案.md
+-->
 <template>
   <div class="page-container">
     <div class="flex-between mb-16">
@@ -67,6 +81,45 @@
         </el-table-column>
         <el-table-column label="max_tokens" width="100">
           <template #default="{ row }">{{ row.max_tokens }}</template>
+        </el-table-column>
+        <!-- #193/#204 刷新健康度 4 列: 口径见文件头设计说明; "空"=暂无对应记录(新模板/未触发判定) -->
+        <el-table-column label="最近生成" width="110">
+          <template #default="{ row }">
+            <span :class="{ dim: !row.last_generated_at }">{{ fmtTime(row.last_generated_at) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="7天命中" width="80" align="center">
+          <template #default="{ row }">{{ row.hit_count_7d || 0 }}</template>
+        </el-table-column>
+        <el-table-column label="7天跳过" width="80" align="center">
+          <template #default="{ row }">
+            <span :class="{ dim: !row.skip_count_7d }">{{ row.skip_count_7d || 0 }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column width="140">
+          <template #header>
+            <span>最近判定</span>
+            <el-tooltip placement="top">
+              <template #content>
+                最近一次预生成跳过判定的采集水位证据(非业务结论)。<br />
+                零新增/有新事件/节流, 悬停值行可见各源新增行数与判定时间。<br />
+                「已跳过」= enforce 模式真跳过;「影子」= dry_run 照常生成仅留痕。<br />
+                取舍: 不做独立刷新成本看板(本页即唯一真身); 不做逐模板频率编辑器(v1 全局开关)。
+              </template>
+              <el-icon style="vertical-align: -2px; margin-left: 2px"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <span v-if="!row.last_skip_verdict" class="dim">—</span>
+            <el-tooltip v-else placement="top">
+              <template #content>
+                <div>时间: {{ fmtTime(row.last_skip_verdict.at) }}</div>
+                <div>原因: {{ row.last_skip_verdict.reason }} / enforced={{ row.last_skip_verdict.enforced }}</div>
+                <div>各源新增: {{ JSON.stringify(row.last_skip_verdict.counts) }}</div>
+              </template>
+              <span>{{ verdictText(row.last_skip_verdict) }}</span>
+            </el-tooltip>
+          </template>
         </el-table-column>
         <el-table-column label="启用" width="80">
           <template #default="{ row }">
@@ -171,7 +224,7 @@
 <script setup>
 import { ref, reactive } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Plus } from '@element-plus/icons-vue'
+import { Refresh, Plus, QuestionFilled } from '@element-plus/icons-vue'
 import { aiTemplates, createAiTemplate, updateAiTemplate, deleteAiTemplate, triggerAiTemplate } from '@/api/adminAi'
 
 const loading = ref(false)
@@ -196,6 +249,21 @@ const SCOPE_LABELS = {
 }
 const scopeLabel = (s) => (s ? (SCOPE_LABELS[s] || s) : '整体经营')
 const scopeTagType = (s) => (s === 'refund' ? 'danger' : s === 'complaint' ? 'warning' : s === 'reception' ? 'primary' : 'info')
+
+// #193/#204 刷新健康度: 时间列浏览器本地时区渲染(后端返回带偏移量的 ISO 串,
+// 直接截取会错时区); verdictText 摘要 + 悬停看完整证据(各源新增行数/时间)。
+const fmtTime = (iso) => {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+const verdictText = (v) => {
+  if (!v) return '—'
+  const what = v.reason === 'throttled_20min' ? '节流' : (v.has_new ? '有新事件' : '零新增')
+  return v.enforced ? `${what}·已跳过` : `${what}·影子`
+}
 
 const dialogVisible = ref(false)
 const saving = ref(false)

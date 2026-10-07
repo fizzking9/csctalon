@@ -335,6 +335,17 @@ class Settings(BaseSettings):
     # 保留可调：改 .env 的 AI_SYNC_WAIT_S 即可回退，无需改代码。
     AI_SYNC_WAIT_S: float = 8.0
 
+    # ── AI 预生成「无新事件跳过」三档开关 (#193/#204, 2026-10-07) ─────────
+    # 设计: docs/design/20260924-#193-AI报告刷新策略-无新事件跳过-实现方案.md §4.3
+    # off      = 不判定, 行为与改造前完全一致(回滚位)
+    # dry_run  = 判定但照常生成, "本可跳过"写 system_events 留痕(影子期验证, 默认)
+    # enforce  = 判定为无新事件则跳过(不调 LLM), 写留痕
+    AI_PREGEN_SKIP_MODE: str = "dry_run"
+    # 距上次快照超过该分钟数 → 必生成(保窗口时刻不大幅落后, 见方案 §4.2)
+    AI_PREGEN_MAX_STALE_MINUTES: int = 120
+    # 灰度: 仅对这些模板 scope 生效(逗号分隔), 其余 scope 不判定照常生成
+    AI_PREGEN_FRESHNESS_ENABLED_SCOPES: str = "refund,complaint,overview"
+
     # 跨域(局域网部署,允许内网访问)
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
 

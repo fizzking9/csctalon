@@ -32,6 +32,10 @@ from app.core.database import SessionLocal
 from app.models.ai_report_template import AiReportTemplate
 from app.services import llm_client
 from app.services.ai_feed import build_messages
+from app.services.ai_pregen_freshness import (
+    evaluate_pregen_skip,
+    record_pregen_skipped_event,
+)
 from app.services.ai_report_service import save_report
 from app.services.ai_report_window import compute_pregen_window
 from app.services.system_event_service import record_system_event
@@ -494,7 +498,39 @@ def warm_on_sync_complete() -> None:
                     logger.info(
                         "warm_on_sync_complete: 模板 %s 在 %smin 内已生成, 节流跳过",
                         tcode, _DAILY_SYNC_MIN_INTERVAL_MIN)
+                    # #193/#204: 节流跳过同样留痕(reason=throttled_20min), 供管理端
+                    # 「跳过次数」列区分两类跳过(设计文档 §4.5)。info 级不进角标。
+                    record_system_event(
+                        db, category="ai", action="pregen_skipped",
+                        title=f"AI 预生成节流跳过: {tcode}",
+                        summary=f"距上次生成不足 {_DAILY_SYNC_MIN_INTERVAL_MIN}min",
+                        status="info",
+                        detail=json.dumps({
+                            "template": tcode, "template_id": tid,
+                            "reason": "throttled_20min",
+                        }, ensure_ascii=False),
+                    )
                     continue
+                # ── #193/#204 新鲜度判定(三档: off/dry_run/enforce) ──────────
+                # 保底③(手动触发必生成)由构造保证: 本路径恒 level=0, admin 手动
+                # 触发走 admin 接口直接 generate_for_template(level=1), 不经本判定。
+                decision = evaluate_pregen_skip(
+                    db, template_id=tid, template_code=tcode, scope=tmpl.scope,
+                    snapshot_period=tmpl.period, snapshot_date=today, trigger_level=0)
+                if decision["skip"]:
+                    # dry_run 与 enforce 都留痕, 由 detail.enforced 区分
+                    record_pregen_skipped_event(
+                        db, template_id=tid, template_code=tcode, scope=tmpl.scope,
+                        decision=decision, enforced=decision["mode"] == "enforce")
+                    if decision["mode"] == "enforce":
+                        logger.info(
+                            "warm_on_sync_complete: 模板 %s 自上次快照零新增, enforce 跳过",
+                            tcode)
+                        continue
+                    # dry_run(影子期): 留痕后照常生成, 行为与改造前一致
+                    logger.info(
+                        "warm_on_sync_complete: 模板 %s 影子判定可跳过(dry_run 照常生成)",
+                        tcode)
                 # #127: 同步触发的后台预生成挂 L0(最高优先, 可抢占 L1/L2)
                 generate_for_template(db, tmpl, level=0)
             except Exception as e:  # noqa: BLE001  单个模板失败不影响其他
@@ -532,7 +568,8 @@ def classify_after_sync() -> None:
     db = SessionLocal()
     try:
         from app.services.governance_detector import (
-            scan_semantic_anomaly, persist_findings,
+            persist_findings,
+            scan_semantic_anomaly,
         )
         from app.services.system_event_service import record_system_event
 
