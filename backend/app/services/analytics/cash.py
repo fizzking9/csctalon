@@ -4,7 +4,7 @@ import datetime as _dt
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.orm import Session
 
 from app.models.manual_refund import ManualRefund
@@ -19,6 +19,13 @@ from app.services.analytics._core import (
     _route_a_online_refund_filter,
     _route_b_withdraw_filter,
     _route_e_cashflow_filter,
+)
+
+# #201 S-P0-1：质量排除口径唯一来源在 quality_check，本模块只做引用/薄封装
+from app.services.quality_check import (
+    STATS_EXCLUDED_QUALITY_STATUSES,
+    stats_quality_excluded_sql,
+    stats_quality_include,
 )
 
 
@@ -127,12 +134,15 @@ def _route_c_shanmao_agg(db: Session, start, end) -> tuple[int, float]:
     """
     if not _table_exists(db, _C_SHANMAO_TABLE):
         return 0, 0.0
+    # #201 S-P0-1：C 路排除 dup_residual/ignored（shanmao_refunds 在 QUALITY_TABLES 内可打标，
+    # 原仅 D 路排除，造成治理标记后 C 路与 cash_flow_wide 口径不一致）
     sql_tpl = f"""
     SELECT COUNT(*) AS cnt,
            COALESCE(SUM({_C_SHANMAO_AMOUNT_COL})::numeric,0) AS amt
     FROM {_C_SHANMAO_TABLE}
     WHERE {_C_SHANMAO_TIME_COL} IS NOT NULL
       {"AND " + _C_SHANMAO_STATUS_COL + " = :st" if _C_SHANMAO_STATUS_COL else ""}
+      AND {_EXCL_QSTATUS_SQL}
       {"AND " + _C_SHANMAO_TIME_COL + " >= :s" if start else ""}
       {"AND " + _C_SHANMAO_TIME_COL + " <= :e" if end else ""}
     """
@@ -148,7 +158,6 @@ def _route_c_shanmao_agg(db: Session, start, end) -> tuple[int, float]:
             r = db.execute(text(sql_tpl), params).first() or (0, 0)
         return int(r[0] or 0), float(r[1] or 0)
     except Exception:
-        # 表未建或列未匹配: 静默返回 0, 等建表/改常量后自动生效
         return 0, 0.0
 
 
@@ -173,13 +182,16 @@ _D_OTHER_STATUS_OK = "是"
 #    这些重复仍被算进 D 路 → D 路重复统计依旧虚高(生产 9月窗口曾差 ¥4.8万)。
 # ⚠️ 2026-09-09 (A-20260909-001 §2.7): 扩展为排除集合, 新增 ignored(人工彻底忽略)
 #    由质量页 ignore 动作置位; dup_residual(重复治理)与 ignored(人工忽略)在统计上等价,
-#    统一从经营四路排除。仅程序常量, 内联进 SQL 模板无注入风险。
-_D_OTHER_EXCLUDE_QSTATUS = "dup_residual"
+#    统一从经营四路排除。
+# ⚠️ 2026-10-07 (#201 S-P0-1): 排除集合/SQL 片段的字面量定义全部收敛到
+#    quality_check.STATS_EXCLUDED_QUALITY_STATUSES，此处仅保留兼容性别名字段，
+#    禁止再出现第二份 ('dup_residual','ignored') 字面量。
+_D_OTHER_EXCLUDE_QSTATUS = STATS_EXCLUDED_QUALITY_STATUSES[0]  # 旧名单值兼容别名
 
-_D_OTHER_EXCLUDE_QSTATUS_SET = ("dup_residual", "ignored")
+_D_OTHER_EXCLUDE_QSTATUS_SET = STATS_EXCLUDED_QUALITY_STATUSES
 
-# SQL 排除片段(表需含 quality_status 列): 常量集合内联安全
-_EXCL_QSTATUS_SQL = "COALESCE(quality_status,'') NOT IN ('dup_residual','ignored')"
+# SQL 排除片段(表需含 quality_status 列): 常量集合内联安全；真身见 quality_check
+_EXCL_QSTATUS_SQL = stats_quality_excluded_sql("quality_status")
 
 def _manual_refunds_has_quality_col(db: Session) -> bool:
     """manual_refunds 是否有 quality_status 列(旧环境/旧表无该列时跳过排除, 不报错)。"""
@@ -203,7 +215,7 @@ def _quality_exclude_sql(db: Session) -> str | None:
 
     为什么要收敛: 原先 8 处各自写 `_D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None`,
     其中一处误用字符串常量本身当布尔标记(可读性差, 且新增排除状态时容易漏改某处)。
-    现在口径只有一个来源, 新增"排除状态"只需改 `_D_OTHER_EXCLUDE_QSTATUS_SET`。
+    现在口径只有一个来源, 新增"排除状态"只需改 `quality_check.STATS_EXCLUDED_QUALITY_STATUSES`。
     """
     return _EXCL_QSTATUS_SQL if _manual_refunds_has_quality_col(db) else None
 
@@ -212,13 +224,9 @@ def _quality_include_cond() -> list:
 
     供 ORM 查询(而非 raw SQL)使用 —— 避免 ORM 路径与 raw SQL 路径的排除口径漂移
     (同一份报表里两条路径混用时, 曾出现一条排除 dup_residual、另一条没排除)。
+    #201 S-P0-1：真身收敛到 quality_check.stats_quality_include。
     """
-    return [
-        or_(
-            ManualRefund.quality_status.is_(None),
-            ManualRefund.quality_status.notin_(_D_OTHER_EXCLUDE_QSTATUS_SET),
-        )
-    ]
+    return [stats_quality_include(ManualRefund.quality_status)]
 
 def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
     """【路线D】手动退款(manual_refunds)独立表聚合 (表不存在则返回 0,0,不报错).
@@ -260,6 +268,7 @@ def _route_c_shanmao_trend(db: Session, start, end, grain: str, slot_idx_fn) -> 
     if not _table_exists(db, _C_SHANMAO_TABLE):
         return {}, {}
     trunc_expr = "date_trunc(:grain, timezone('Asia/Shanghai', " + _C_SHANMAO_TIME_COL + "))" if grain == "hour" else "date_trunc(:grain, timezone('Asia/Shanghai', " + _C_SHANMAO_TIME_COL + "))"
+    # #201 S-P0-1：C 路趋势同步排除 dup_residual/ignored（与 _route_c_shanmao_agg 同口径）
     sql_tpl = f"""
     SELECT {trunc_expr} AS trunc_t,
            COUNT(*) AS cnt,
@@ -267,6 +276,7 @@ def _route_c_shanmao_trend(db: Session, start, end, grain: str, slot_idx_fn) -> 
     FROM {_C_SHANMAO_TABLE}
     WHERE {_C_SHANMAO_TIME_COL} IS NOT NULL
       {"AND " + _C_SHANMAO_STATUS_COL + " = :st" if _C_SHANMAO_STATUS_COL else ""}
+      AND {_EXCL_QSTATUS_SQL}
       {"AND " + _C_SHANMAO_TIME_COL + " >= :s" if start else ""}
       {"AND " + _C_SHANMAO_TIME_COL + " <= :e" if end else ""}
     GROUP BY trunc_t

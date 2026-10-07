@@ -28,6 +28,9 @@ from app.models.refund_record_report import RefundRecordReport
 from app.models.shanmao_refund import ShanmaoRefund
 from app.models.wallet import WalletWithdrawal
 
+# #201 S-P0-1：对账复核 D 路排除口径与经营四路同源（禁止第二份字面量）
+from app.services.quality_check import stats_quality_excluded_sql
+
 logger = logging.getLogger(__name__)
 
 _TZ_CN = timezone(timedelta(hours=8))
@@ -242,10 +245,11 @@ def per_route_alignment(db, start: datetime, end: datetime) -> dict:
              WHERE r.platform_order_no = c.order_no AND {e_ok})""")
 
     # ── D 手动已退款(剔 dup/ignored; order_no → E) ──
-    d_base = """
+    # #201 S-P0-1：d_base 被 d_total/d_in_e/d_overlap_a 复用，排除片段走 canonical
+    d_base = f"""
         SELECT count(*) FROM manual_refunds m
         WHERE m.is_refunded='是'
-          AND (m.quality_status IS NULL OR m.quality_status NOT IN ('dup_residual','ignored'))
+          AND {stats_quality_excluded_sql('m.quality_status')}
           AND COALESCE(m.op_time, m.register_time) >= :s AND COALESCE(m.op_time, m.register_time) <= :e
     """
     d_total = _count(d_base)
@@ -369,7 +373,7 @@ def alignment_detail(db, route: str, start: datetime, end: datetime,
                    COALESCE(m.refund_operator, m.registrant) AS who, m.quality_status AS q
             FROM manual_refunds m
             WHERE m.is_refunded='是'
-              AND (m.quality_status IS NULL OR m.quality_status NOT IN ('dup_residual','ignored'))
+              AND {stats_quality_excluded_sql('m.quality_status')}
               AND COALESCE(m.op_time, m.register_time) >= :s AND COALESCE(m.op_time, m.register_time) <= :e
               AND NOT EXISTS (SELECT 1 FROM refund_record_reports r WHERE r.platform_order_no=m.order_no AND {e_ok})
             ORDER BY COALESCE(m.op_time, m.register_time) DESC LIMIT :lim OFFSET :off"""

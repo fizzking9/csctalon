@@ -33,14 +33,16 @@ from app.models.refund_record_report import RefundRecordReport
 from app.models.shanmao_refund import ShanmaoRefund
 from app.models.wallet import WalletWithdrawal
 
+# #201 S-P0-1：排除集合唯一字面量来源（原本文件 _EXCLUDED_QUALITY 双实现已删）
+from app.services.quality_check import STATS_EXCLUDED_QUALITY_STATUSES as _EXCLUDED_QUALITY
+
 logger = logging.getLogger(__name__)
 
 # B 路失败/冻结备注关键词(与 analytics._WITHDRAW_FAIL_REMARK_KEYWORDS 一致)
 _WITHDRAW_FAIL_KEYWORDS = ("冻结", "退款失败", "提现失败", "超期订单不允许退款", "驳回", "拒绝", "未到账")
 
-# ⚠️ A-20260909-001 §2.7: 经营宽表排除的源头质量状态集合(与 analytics._EXCL_QSTATUS_SQL 一致)
-# dup_residual=已治理重复; ignored=人工彻底忽略(A-20260909-001 新增, 由质量页 ignore 动作置位)
-_EXCLUDED_QUALITY = ("dup_residual", "ignored")
+# ⚠️ A-20260909-001 §2.7: 经营宽表排除的源头质量状态集合
+# 真身：quality_check.STATS_EXCLUDED_QUALITY_STATUSES（#201 S-P0-1 起全仓单源，别名仅为本地可读）
 
 _BATCH_SIZE = 5000
 

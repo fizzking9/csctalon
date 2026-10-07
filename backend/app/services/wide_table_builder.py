@@ -34,6 +34,12 @@ from app.models.ticket import ServiceTicket
 from app.models.upload import DataMatchRelation
 from app.models.wallet import WalletWithdrawal
 
+# #201 S-P0-1：refund_wide 行范围与经营四路同口径，排除 dup_residual/ignored
+from app.services.quality_check import (
+    STATS_EXCLUDED_QUALITY_STATUSES,
+    stats_quality_include,
+)
+
 logger = logging.getLogger(__name__)
 
 # tz-aware 最小时间,用作排序兜底(None 排到最后)
@@ -65,18 +71,23 @@ def _in_scope_refund_nos(db: Session) -> set[str]:
     - 外部投诉: refunds.device_sn ∈ external_complaints.device_sn (分类规则1 客诉覆盖)
     """
     # 1. 线上+已退款(主体)
+    # #201 S-P0-1：三路退费单来源统一排除 dup_residual/ignored（与 cash_flow_wide/analytics 对齐）
     main = set(db.scalars(
         select(Refund.refund_no).where(
             Refund.refund_method == "线上",
             Refund.status == "已退款",
+            stats_quality_include(Refund.quality_status),
         )
     ))
-    # 2. 带 wallet 关联
+    # 2. 带 wallet 关联（DMR 的 src_id 需仍指向未被治理排除的退费单）
     wallet_nos = set(db.scalars(
         select(DataMatchRelation.src_id).where(
             DataMatchRelation.src_table == "refund",
             DataMatchRelation.dst_table == "wallet",
             DataMatchRelation.status == "matched",
+            DataMatchRelation.src_id.in_(
+                select(Refund.refund_no).where(stats_quality_include(Refund.quality_status))
+            ),
         )
     ))
     # 3. 设备SN有外部投诉
@@ -86,7 +97,10 @@ def _in_scope_refund_nos(db: Session) -> set[str]:
     ec_nos: set[str] = set()
     if ec_sns:
         ec_nos = set(db.scalars(
-            select(Refund.refund_no).where(Refund.device_sn.in_(list(ec_sns)))
+            select(Refund.refund_no).where(
+                Refund.device_sn.in_(list(ec_sns)),
+                stats_quality_include(Refund.quality_status),
+            )
         ))
     return main | wallet_nos | ec_nos
 
@@ -97,19 +111,25 @@ def _scope_refund_no_subquery():
     与 _in_scope_refund_nos 等价, 但以子查询形式表达(避免把数万参数塞进
     NOT IN 参数列表, 触发 PG 65,535 绑定参数上限 — 见 A-20260908-001 §4.2)。
     """
+    # #201 S-P0-1：与 _in_scope_refund_nos 同口径，三路均排除 dup_residual/ignored
     main = select(Refund.refund_no).where(
         Refund.refund_method == "线上",
         Refund.status == "已退款",
+        stats_quality_include(Refund.quality_status),
     )
     wallet = select(DataMatchRelation.src_id).where(
         DataMatchRelation.src_table == "refund",
         DataMatchRelation.dst_table == "wallet",
         DataMatchRelation.status == "matched",
+        DataMatchRelation.src_id.in_(
+            select(Refund.refund_no).where(stats_quality_include(Refund.quality_status))
+        ),
     )
     ec_refund = select(Refund.refund_no).where(
         Refund.device_sn.in_(
             select(ExternalComplaint.device_sn).where(ExternalComplaint.device_sn.isnot(None))
-        )
+        ),
+        stats_quality_include(Refund.quality_status),
     )
     return main.union(wallet, ec_refund).subquery()
 
@@ -269,6 +289,11 @@ def _build_wide_batch(db: Session, target_refund_nos: list[str],
     for refund_no in target_refund_nos:
         refund = refunds.get(refund_no)
         if not refund:
+            skipped += 1
+            continue
+        # #201 S-P0-1：防御性跳过治理行（增量直调可能绕过 scope 计算；
+        # 已物化的旧行由全量构建的残留清理 / 治理动作后的重建移除）
+        if (refund.quality_status or "") in STATS_EXCLUDED_QUALITY_STATUSES:
             skipped += 1
             continue
 

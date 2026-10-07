@@ -27,6 +27,9 @@ from app.services.analytics._core import (
 )
 from app.services.analytics.cash import _EXCL_QSTATUS_SQL, _quality_exclude_sql
 
+# #201 S-P0-1：别名限定的质量排除片段（决策概览裸 SQL 用 r./w./s. 限定）
+from app.services.quality_check import stats_quality_excluded_sql
+
 # ==============================================================
 # 退款看板深度分析 - 公共核心计算 (2026-08-12 新增)
 # 提取 refund_recovery_analysis 的第1-5步核心逻辑, 供 9 个新接口复用
@@ -1284,11 +1287,13 @@ def refund_decision_overview(
     #     线下退款、转入提现账户(钱包内部流转)不属于四路, 不计入现金流全景
     #     对账归日: A 用 actual_refund_time(E路回填实际扣款), E滞后缺失退化 updated_at_raw
     #     (最新更新=真实退款完成时刻, 2026-09-09; 避免登记日 created 早于实际扣款造成错位)
+    # #201 S-P0-1：A/B/C 三路日趋势补 dup_residual/ignored 排除（原仅 D 路排除）
     route_rows = db.execute(text(f"""
         SELECT {_day("COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw)")} AS d,
                count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
         FROM refunds r
         WHERE r.refund_method = '线上' AND r.status = '已退款'
+          AND {stats_quality_excluded_sql('r.quality_status')}
           AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
           AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) <= :te
         GROUP BY 1
@@ -1301,6 +1306,7 @@ def refund_decision_overview(
         FROM wallet_withdrawals w
         WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts AND COALESCE(w.actual_refund_time, w.op_time) <= :te AND w.op_type = '用户提现'
           AND {_withdraw_fail_remark_sql_cond()}
+          AND {stats_quality_excluded_sql('w.quality_status')}
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     # C 闪猫退款 (独立业务表; 对账归日用实际扣款时间 refund_time(2026-09-09 E回填), 缺失回退 audit_time/created_at)
@@ -1312,6 +1318,7 @@ def refund_decision_overview(
         WHERE COALESCE(s.refund_time, s.audit_time, s.created_at) >= :ts
           AND COALESCE(s.refund_time, s.audit_time, s.created_at) <= :te
           AND s.status = '已退款'
+          AND {stats_quality_excluded_sql('s.quality_status')}
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     # D 手动退款 (manual_refunds, is_refunded='是'; 对账归日用实际扣款时间 actual_refund_time(2026-09-09 E回填),
@@ -1376,26 +1383,32 @@ def refund_decision_overview(
     def _window_totals(s: _dt.datetime, e: _dt.datetime) -> dict:
         tot = {"online_cnt": 0, "online_amt": 0.0, "withdraw_cnt": 0, "withdraw_amt": 0.0,
                "sm_cnt": 0, "sm_amt": 0.0, "d_cnt": 0, "d_amt": 0.0, "e_cnt": 0, "e_amt": 0.0}
-        for r in db.execute(text("""
+        # #201 S-P0-1：A 路窗口汇总补 dup_residual/ignored 排除（与 routes_daily/cash_flow_wide 对齐）
+        for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
             FROM refunds r WHERE r.refund_method = '线上' AND r.status = '已退款'
+              AND {stats_quality_excluded_sql('r.quality_status')}
               AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
               AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) <= :te
         """), {"ts": s, "te": e}).fetchall():
             tot["online_cnt"] += int(r.cnt or 0); tot["online_amt"] += float(r.amt or 0)
+        # #201 S-P0-1：B 路窗口汇总补 dup_residual/ignored 排除
         for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(op_amount), 0) AS amt
             FROM wallet_withdrawals w WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts
               AND COALESCE(w.actual_refund_time, w.op_time) <= :te AND w.op_type = '用户提现'
               AND {_withdraw_fail_remark_sql_cond()}
+              AND {stats_quality_excluded_sql('w.quality_status')}
         """), {"ts": s, "te": e}).fetchall():
             tot["withdraw_cnt"] += int(r.cnt or 0); tot["withdraw_amt"] += float(r.amt or 0)
-        for r in db.execute(text("""
+        # #201 S-P0-1：C 路窗口汇总补 dup_residual/ignored 排除
+        for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(COALESCE(actual_amount, refund_amount, 0)), 0) AS amt
             FROM shanmao_refunds s
             WHERE COALESCE(s.refund_time, s.audit_time, s.created_at) >= :ts
               AND COALESCE(s.refund_time, s.audit_time, s.created_at) <= :te
               AND s.status = '已退款'
+              AND {stats_quality_excluded_sql('s.quality_status')}
         """), {"ts": s, "te": e}).fetchall():
             tot["sm_cnt"] += int(r.cnt or 0); tot["sm_amt"] += float(r.amt or 0)
         # D 手动退款 (is_refunded='是'; 归日=actual_refund_time 优先(实际扣款); 排除 dup_residual/ignored 已治理行)
@@ -1915,9 +1928,11 @@ def refund_export_all(
         return f"DATE({col} AT TIME ZONE 'Asia/Shanghai')"
 
     agg_queries = [
+        # #201 S-P0-1：导出汇总 A/B/C 与决策概览同口径补 dup_residual/ignored 排除
         ("A 线上直退", f"""
             SELECT {_day("COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw)")} AS d, count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
             FROM refunds r WHERE r.refund_method = '线上' AND r.status = '已退款'
+              AND {stats_quality_excluded_sql('r.quality_status')}
               AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
               AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) <= :te
             GROUP BY 1"""),
@@ -1926,6 +1941,7 @@ def refund_export_all(
             FROM wallet_withdrawals w WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts
               AND COALESCE(w.actual_refund_time, w.op_time) <= :te AND w.op_type = '用户提现'
               AND {_withdraw_fail_remark_sql_cond()}
+              AND {stats_quality_excluded_sql('w.quality_status')}
             GROUP BY 1"""),
         ("C 闪猫退款", f"""
             SELECT {_day("COALESCE(s.refund_time, s.audit_time, s.created_at)")} AS d, count(*) AS cnt,
@@ -1934,6 +1950,7 @@ def refund_export_all(
             WHERE COALESCE(s.refund_time, s.audit_time, s.created_at) >= :ts
               AND COALESCE(s.refund_time, s.audit_time, s.created_at) <= :te
               AND s.status = '已退款'
+              AND {stats_quality_excluded_sql('s.quality_status')}
             GROUP BY 1"""),
         ("D 手动退款", f"""
             SELECT {_day("COALESCE(m.actual_refund_time, m.op_time, m.register_time)")} AS d, count(*) AS cnt,

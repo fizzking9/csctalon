@@ -26,7 +26,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.manual_refund import ManualRefund
@@ -39,6 +39,34 @@ logger = logging.getLogger(__name__)
 
 _UTC = timezone.utc
 _TZ_CN = timezone(timedelta(hours=8))
+
+# ── 经营统计质量排除口径（#201 S-P0-1：全仓唯一字面量定义） ────────
+# 凡「经营四路 A/B/C/D / 经营宽表 / 物化 refund_wide」统计，统一排除以下 quality_status：
+#   dup_residual = 已治理重复(不物理删除, 可恢复); ignored = 人工裁定彻底忽略
+# 唯一允许的新增/修改位置就在本元组；其它任何模块必须 import 本常量或下面两个
+# 同口径助手，禁止再写第二份 ('dup_residual','ignored') 字面量（双实现必然漂移）。
+STATS_EXCLUDED_QUALITY_STATUSES: tuple[str, ...] = ("dup_residual", "ignored")
+
+
+def stats_quality_excluded_sql(col: str = "quality_status") -> str:
+    """raw SQL(text()) 排除片段：`COALESCE(<col>,'') NOT IN ('dup_residual','ignored')`。
+
+    - 状态值来自程序常量（非用户输入），内联进 SQL 无注入风险；
+    - `col` 仅限内部调用方传入的**列标识符**（可用 'r.quality_status' 这类别名限定），
+      绝不接受外部输入；
+    - 与 `stats_quality_include`（ORM 侧）必须保持同口径，改动任一处须同步另一处。
+    """
+    in_list = ",".join(f"'{s}'" for s in STATS_EXCLUDED_QUALITY_STATUSES)
+    return f"COALESCE({col},'') NOT IN ({in_list})"
+
+
+def stats_quality_include(column):
+    """ORM 侧同口径条件：column IS NULL OR column NOT IN (排除集合)。
+
+    用于 SQLAlchemy 查询；NULL(未打标=正常行)计入统计，与 SQL 片段的 COALESCE 语义一致。
+    """
+    return or_(column.is_(None), column.notin_(STATS_EXCLUDED_QUALITY_STATUSES))
+
 
 # ── 枚举预期集合(脏值检测) ──────────────────────────────────────
 REFUND_METHOD_SET = {"线上", "线下", "转入提现账户"}

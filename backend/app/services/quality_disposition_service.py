@@ -26,8 +26,32 @@ DISPOSITION_BACKFILL = "backfill_from_e"  # 按 E 表回填
 DISPOSITION_FIX = "fix_field"            # 修正字段
 DISPOSITION_CONFIRM = "confirm_ok"       # 确认通过
 
-# 排除状态(经营统计不纳入) —— 与 analytics._D_OTHER_EXCLUDE_QSTATUS 语义对齐并扩展
-EXCLUDED_STATES = ("dup_residual", "ignored")
+# 排除状态(经营统计不纳入)
+# #201 S-P0-1：字面量真身收敛到 quality_check，此处仅别名，禁止再独立写一份
+EXCLUDED_STATES = QC.STATS_EXCLUDED_QUALITY_STATUSES
+
+# SQL IN 列表片段（值为程序常量，内联安全；新增排除状态只改 quality_check 一处）
+_EXCL_SQL_LIST = ",".join(f"'{s}'" for s in QC.STATS_EXCLUDED_QUALITY_STATUSES)
+
+
+def _post_quality_change(db, table_code: str) -> None:
+    """质量打标/恢复后的下游一致性维护（#201 S-P0-1）。
+
+    质量页直接处置（不经 governance finding 执行链）此前不重建宽表/不失效缓存，
+    会造成打标后 cash_flow_wide/refund_wide 与统计短时不一致。
+    复用 governance_execute_service._post_execute（内含宽表重建映射 + 缓存失效）；
+    惰性导入避免循环依赖（governance_execute_service 也反向惰性导入本模块）。
+    失败不影响打标事实，仅记录日志（与 _post_execute 自身语义一致）。
+    """
+    try:
+        cfg = QC.get_table_config(table_code)
+        physical = getattr(cfg["model"], "__tablename__", None)
+        if not physical:
+            return
+        from app.services.governance_execute_service import _post_execute
+        _post_execute(db, physical)
+    except Exception as e:  # noqa: BLE001 下游失败只记录，不回滚打标
+        logger.error("[quality_disposition] 打标后宽表/缓存维护失败 table=%s: %s", table_code, e)
 
 # 各表时间字段(D 侧对账时间用)
 _TABLE_TIME_FIELD = {
@@ -59,6 +83,8 @@ def quality_ignore(db, table: str, pk: str | int, operator: str | None = None,
     r.quality_note = " | ".join(note_bits)[:500]
     db.commit()
     logger.info(f"[quality_disposition] ignore table={table} pk={pk} by={operator}")
+    # #201 S-P0-1：打标后重建宽表 + 失效经营缓存（失败只记日志，不回滚打标）
+    _post_quality_change(db, table)
     return {"id": pk, "quality_status": "ignored", "message": "已彻底忽略(经营统计将排除)"}
 
 
@@ -82,6 +108,8 @@ def quality_restore(db, table: str, pk: str | int, operator: str | None = None) 
     r.quality_note = " | ".join(note_bits)[:500]
     db.commit()
     logger.info(f"[quality_disposition] restore table={table} pk={pk} {old}→{r.quality_status}")
+    # #201 S-P0-1：恢复后重建宽表 + 失效经营缓存（行重新进经营口径）
+    _post_quality_change(db, table)
     return {"id": pk, "quality_status": r.quality_status, "message": "已恢复"}
 
 
@@ -392,7 +420,7 @@ def auto_dispose_d_no_sn_bad_dup(db, limit: int = 2000, include_auto_fixed: bool
         WHERE (m.device_sn IS NULL OR m.device_sn = '')
           AND m.is_refunded = '是'
           AND (m.quality_status IS NULL OR m.quality_status IN {auto_statuses})
-          AND NOT (COALESCE(m.quality_status,'') IN ('dup_residual','ignored'))
+          AND NOT (COALESCE(m.quality_status,'') IN ({_EXCL_SQL_LIST}))
         ORDER BY m.id
         LIMIT :limit
     """)
@@ -582,22 +610,22 @@ def auto_dispose_d_dup_same_amount(db, limit: int = 2000) -> dict:
     from app.models.manual_refund import ManualRefund
 
     # 候选: 同单同金额出现 >=2 次的行(已退款非排除)
-    sql = text("""
+    sql = text(f"""
         SELECT m.id, m.order_no AS ono, m.refund_amount AS amt,
                COALESCE(m.device_sn, '') AS sn, COALESCE(m.quality_status, 'null') AS q,
                COALESCE(m.op_time, m.register_time) AS dt,
                (SELECT count(*) FROM manual_refunds m2
                  WHERE m2.order_no = m.order_no AND m2.refund_amount = m.refund_amount
                    AND m2.is_refunded = '是'
-                   AND (m2.quality_status IS NULL OR m2.quality_status NOT IN ('dup_residual','ignored'))) AS grp_n
+                   AND (m2.quality_status IS NULL OR m2.quality_status NOT IN ({_EXCL_SQL_LIST}))) AS grp_n
         FROM manual_refunds m
         WHERE m.is_refunded = '是' AND m.order_no IS NOT NULL AND m.refund_amount IS NOT NULL
-          AND (m.quality_status IS NULL OR m.quality_status NOT IN ('dup_residual','ignored'))
+          AND (m.quality_status IS NULL OR m.quality_status NOT IN ({_EXCL_SQL_LIST}))
           AND EXISTS (
             SELECT 1 FROM manual_refunds m2
             WHERE m2.order_no = m.order_no AND m2.refund_amount = m.refund_amount
               AND m2.is_refunded = '是' AND m2.id <> m.id
-              AND (m2.quality_status IS NULL OR m2.quality_status NOT IN ('dup_residual','ignored'))
+              AND (m2.quality_status IS NULL OR m2.quality_status NOT IN ({_EXCL_SQL_LIST}))
           )
         ORDER BY m.order_no, m.refund_amount, m.id
         LIMIT :limit
@@ -693,7 +721,7 @@ def auto_dispose_d_no_e_match(db, limit: int = 2000) -> dict:
     )).scalar()
     e_data_until = e_max.isoformat() if e_max else None
 
-    sql = text("""
+    sql = text(f"""
         SELECT m.id, m.order_no AS ono, m.refund_amount AS amt,
                COALESCE(m.device_sn, '') AS sn, COALESCE(m.quality_status, 'null') AS q,
                COALESCE(m.remark, '') AS rm, COALESCE(m.op_time, m.register_time) AS dt,
@@ -704,7 +732,7 @@ def auto_dispose_d_no_e_match(db, limit: int = 2000) -> dict:
                  WHERE r.platform_order_no = m.order_no AND r.refund_status IN ('退款成功','成功','SUCCESS')) AS e_any_n
         FROM manual_refunds m
         WHERE m.is_refunded = '是' AND m.order_no IS NOT NULL AND m.refund_amount IS NOT NULL
-          AND (m.quality_status IS NULL OR m.quality_status NOT IN ('dup_residual','ignored'))
+          AND (m.quality_status IS NULL OR m.quality_status NOT IN ({_EXCL_SQL_LIST}))
           AND EXISTS (SELECT 1 FROM refund_record_reports r
             WHERE r.platform_order_no = m.order_no AND r.refund_status IN ('退款成功','成功','SUCCESS'))
         ORDER BY m.order_no, m.id
@@ -860,11 +888,11 @@ def backfill_c_d_actual_refund_time(db, limit: int = 5000) -> dict:
             stats["c_skipped"] += 1
 
     # ── D 路: 填 manual_refunds.actual_refund_time ──
-    d_rows = db.execute(text("""
+    d_rows = db.execute(text(f"""
         SELECT id, order_no, device_sn, refund_amount, register_time
         FROM manual_refunds
         WHERE is_refunded='是' AND actual_refund_time IS NULL
-          AND (quality_status IS NULL OR quality_status NOT IN ('dup_residual','ignored'))
+          AND (quality_status IS NULL OR quality_status NOT IN ({_EXCL_SQL_LIST}))
         ORDER BY id LIMIT :lim
     """), {"lim": limit}).all()
     for r in d_rows:
@@ -900,14 +928,14 @@ def backfill_b_actual_refund_time(db, limit: int = 5000) -> dict:
     from sqlalchemy import text
 
     stats = {"matched": 0, "no_candidate": 0, "multi": 0, "scanned": 0}
-    rows = db.execute(text("""
+    rows = db.execute(text(f"""
         SELECT w.id, w.device_sn, w.op_amount, w.op_time
         FROM wallet_withdrawals w
         WHERE w.op_type='用户提现' AND w.actual_refund_time IS NULL
           AND (w.remark IS NULL OR NOT (w.remark LIKE '%冻结%' OR w.remark LIKE '%提现失败%'
                OR w.remark LIKE '%退款失败%' OR w.remark LIKE '%驳回%' OR w.remark LIKE '%拒绝%'
                OR w.remark LIKE '%未到账%' OR w.remark LIKE '%超期订单不允许退款%'))
-          AND (w.quality_status IS NULL OR w.quality_status NOT IN ('dup_residual','ignored'))
+          AND (w.quality_status IS NULL OR w.quality_status NOT IN ({_EXCL_SQL_LIST}))
         ORDER BY w.id LIMIT :lim
     """), {"lim": limit}).all()
     stats["scanned"] = len(rows)

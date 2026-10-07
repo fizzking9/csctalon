@@ -31,6 +31,9 @@ from app.services.complaint_scope import (
     is_complaint_ticket_cond,
 )
 
+# #201 S-P0-1：经营统计质量排除口径唯一来源（dup_residual/ignored 全仓只准这一份定义）
+from app.services.quality_check import stats_quality_include
+
 # ═══════════════════════════════════════════════════════════════════
 # 2026-08-14: 投诉登记节点下的外部投诉/卡商群投诉两个文件曾"暂不纳入"
 #   系统汇总分析。设置为 False 后, 部分 analytics 聚合将跳过
@@ -242,8 +245,14 @@ def _route_a_online_refund_filter():
     """【路线A经营口径】线上直退且已退款: refund_method='线上' AND status='已退款'。
 
     用于经营出款/对账/趋势/排名等(钱真正退出去的场景)。
+    #201 S-P0-1：同时排除 dup_residual/ignored（refunds 在 QUALITY_TABLES 内可被打标，
+    不排除则治理后的线上退单行仍虚增经营数字；与 cash_flow_wide A 路口径一致）。
     """
-    return (Refund.refund_method == "线上", Refund.status == "已退款")
+    return (
+        Refund.refund_method == "线上",
+        Refund.status == "已退款",
+        stats_quality_include(Refund.quality_status),
+    )
 
 def _route_a_online_any_status_filter():
     """【路线A全状态口径】仅 refund_method='线上'(不看 status)。
@@ -299,6 +308,9 @@ def _route_b_withdraw_filter():
     conds = [WalletWithdrawal.op_type == "用户提现"]
     for _k in _WITHDRAW_FAIL_REMARK_KEYWORDS:
         conds.append(func.coalesce(WalletWithdrawal.remark, "").notlike(f"%{_k}%"))
+    # #201 S-P0-1：排除 dup_residual/ignored（wallet 在 QUALITY_TABLES 内可被打标，
+    # 与 cash_flow_wide B 路口径一致）
+    conds.append(stats_quality_include(WalletWithdrawal.quality_status))
     return tuple(conds)
 
 
