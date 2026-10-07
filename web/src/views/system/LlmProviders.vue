@@ -390,7 +390,8 @@
     <el-dialog v-model="testDialogVisible" title="测试任意配置的连通性" width="540px">
       <el-form label-width="100px">
         <el-form-item label="base_url" required>
-          <el-input v-model="testForm.base_url" placeholder="http://192.168.10.21:4080/v1" />
+          <!-- #200 R-P0-2：placeholder 用中性示例，禁止内网地址进代码（铁律 #3） -->
+          <el-input v-model="testForm.base_url" placeholder="http://主机:端口/v1" />
         </el-form-item>
         <el-form-item label="模型" required>
           <el-input v-model="testForm.model" placeholder="qwen3-coder:30b" />
@@ -500,8 +501,9 @@ function roleName(key) {
 
 const testDialogVisible = ref(false)
 const testingAny = ref(false)
+// #200 R-P0-2：base_url 不预填内网默认值，由使用者按实际节点填写（模型名不含内网信息，保留为便捷默认）
 const testForm = reactive({
-  base_url: 'http://192.168.10.21:4080/v1', model: 'qwen3-coder:30b',
+  base_url: '', model: 'qwen3-coder:30b',
   api_key: '', timeout_s: 30,
 })
 const testResult = ref(null)
@@ -657,8 +659,9 @@ async function loadLogs() {
 
 function openCreate() {
   editingId.value = null
+  // #200 R-P0-2：新建 provider 的 base_url 默认置空，禁止内网地址进代码（铁律 #3）
   Object.assign(form, {
-    code: '', name: '', base_url: 'http://192.168.10.21:4080/v1', model: '',
+    code: '', name: '', base_url: '', model: '',
     api_key: '', priority: 100, enabled: true, thinking: 'disabled',
     timeout_s: 120, retry_max: 2, fail_threshold: 3, note: '',
     is_cloud: false, role_scope: null, role_order: 100,
