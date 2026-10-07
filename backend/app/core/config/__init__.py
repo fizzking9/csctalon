@@ -29,7 +29,6 @@
 from __future__ import annotations
 
 from .guard import (
-    assert_db_matches_profile,
     check_db_matches_profile,
     extract_db_name,
 )
@@ -48,7 +47,6 @@ __all__ = [
     "all_profiles",
     "VALID_MODES",
     # 守卫（供 scripts/ 与启动期调用）
-    "assert_db_matches_profile",
     "check_db_matches_profile",
     "extract_db_name",
     # 日志（按 profile 初始化）

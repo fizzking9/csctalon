@@ -67,28 +67,3 @@ def check_db_matches_profile(profile: Profile, database_url: str) -> list[str]:
         )
 
     return problems
-
-
-def assert_db_matches_profile(profile: Profile, database_url: str) -> None:
-    """校验失败即抛错（供启动期调用）。
-
-    ⚠️ 抛 RuntimeError 而非自动修正库名：
-      自动改写会造成「以为连 A 实际连 B」的隐性错配 —— 正是要消灭的失败模式。
-      宁可让进程拒绝启动（可见、可修），也不静默改成另一个库。
-    """
-    problems = check_db_matches_profile(profile, database_url)
-    if not problems:
-        return
-    raise RuntimeError(
-        "⛔ 运行模式与数据库不一致，拒绝启动：\n  - "
-        + "\n  - ".join(problems)
-        + f"\n\n  当前连接: {database_url}\n"
-        f"  当前模式: {profile.mode}（期望库名 {profile.db_name!r}）\n\n"
-        "  ★ 为什么直接拒绝而不是自动改用正确的库：\n"
-        "    自动改写会让你「以为连 A 实际连 B」，那正是本机制要消除的隐患。\n\n"
-        "  排查方向：\n"
-        "    1. 是否从错误目录启动？（.env 加载曾依赖 CWD，已修为按 profile 定路径）\n"
-        "    2. shell 里是否残留 POSTGRES_DB / APP_MODE / ENV？\n"
-        "       (常见于执行过 `set -a && . ./.env`)\n"
-        "    3. 有意连接其他库？请在 .env 显式声明 APP_MODE 与 POSTGRES_DB。"
-    )

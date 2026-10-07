@@ -266,8 +266,6 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     # 模型名(一期=deepseek-v4-flash; 二期切本地私有化如 qwen2.5:27b, 仅改本配置)。
     LLM_MODEL: str = ""
-    # Talon 网关 admin key(工单 #108: alembic seed 默认 Provider 用; 运维可在管理界面改)
-    TALON_API_KEY: str = ""
     # DeepSeek 思考模式(取数问答建议 disabled 或 low 以省 token/降延迟): disabled/low/high。
     LLM_THINKING: str = "disabled"
     # 生成 read 超时(秒); 云端/本地生成可能数十秒, 单独放宽。
