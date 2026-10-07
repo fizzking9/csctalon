@@ -6,7 +6,6 @@ services/metric_registry_service.py 求值, 走四级分级/恢复自愈/通知�
 """
 
 import logging
-from datetime import timezone as _dt_timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
@@ -15,6 +14,7 @@ from sqlalchemy import func, select
 from app.api.deps import AdminUser, CurrentUser, DBSession, ManagerUser
 from app.models.alert import Alert, AlertRule
 from app.schemas.common import PageBase, R
+from app.services import ingest_incident_service
 from app.services.metric_registry_service import (
     _resolve_metric_meta,
     evaluate_metric,
@@ -34,12 +34,9 @@ def _period_biz_day(dt) -> str | None:
     """把 naive/aware UTC 的 period_start 转成上海业务日 YYYY-MM-DD。
 
     与 analytics/metric_registry 的看板口径一致(北京日), 供 Incident 登记/平息匹配。
+    #203: 实现下沉 service 层(alerts 与 bms_scheduler 熔断链路共用同一口径)。
     """
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=_dt_timezone.utc)
-    return dt.astimezone(_TZ_CN).strftime("%Y-%m-%d")
+    return ingest_incident_service.biz_day(dt)
 
 
 router = APIRouter(prefix="/alerts", tags=["预警中心"])
@@ -157,58 +154,26 @@ def _auto_register_ingest_incident(db, rule: AlertRule, alert, now) -> None:
     幂等: 同一 (来源=数据采集, 标题含指标 code + 告警 period 日期) 只登记一次。
     目的: 根治 09-02 事故"补跑了但 Incident/工单无留痕"的断层——
           采集故障自动进 incidents 台账, 有状态流转(登记→处理→复盘), 可追踪。
+    #203: 实现下沉 ingest_incident_service.register_ingest_incident,
+          与 bms_scheduler 熔断登记共用同一幂等键; 本函数保持原签名。
     """
-    from app.models.incident import Incident as IncidentModel
-
     try:
-        # 幂等检查: 同规则同 period 已登记则不重复(按标题前缀 + period_start 近似匹配)
-        period_key = _period_biz_day(alert.period_start)
-        if period_key:
-            dup = db.scalar(
-                select(func.count())
-                .select_from(IncidentModel)
-                .where(
-                    IncidentModel.category == "数据采集",
-                    IncidentModel.created_by == "system-alert",
-                    IncidentModel.detail.ilike(f"%{period_key}%"),
-                    IncidentModel.title.ilike(f"%{rule.metric_code}%"),
-                )
-            )
-            if dup:
-                return  # 已登记, 幂等跳过
-        i = IncidentModel(
-            title=f"数据采集异常: {rule.metric_code} {period_key or ''}",
+        ingest_incident_service.register_ingest_incident(
+            db,
+            metric_code=rule.metric_code,
+            period_key=_period_biz_day(alert.period_start),
             subject=f"{rule.metric_code} 入表量异常",
             detail=(
                 f"采集健康告警自动登记(工单 #5)。\n指标: {rule.metric_code}\n"
-                f"周期: {period_key or alert.period_start}\n告警: {alert.title}\n{alert.detail or ''}\n"
+                f"周期: {_period_biz_day(alert.period_start) or alert.period_start}\n"
+                f"告警: {alert.title}\n{alert.detail or ''}\n"
                 f"处置指引: docs/ops/数据采集-运维手册.md §4.1 单日补跑"
             ),
-            impact="cs_record 接待数据可能缺口(影响接待量/退款挽回等分析口径)",
             occurred_at=alert.occurred_at or now,
-            status="registered",
-            category="数据采集",
-            department="数据采集",
-            severity="高" if (alert.metric_value is None or (alert.metric_value or 0) < 40) else "中",
-            is_recurring=False,
-            created_by="system-alert",
+            metric_value=alert.metric_value,
+            impact="cs_record 接待数据可能缺口(影响接待量/退款挽回等分析口径)",
+            now=now,
         )
-        db.add(i)
-        db.flush()
-        # 通知管理员/主管(事故登记知情)
-        try:
-            from app.services.notifier import notify_all_admins_and_supervisors
-            notify_all_admins_and_supervisors(
-                db,
-                type="incident",
-                title=f"数据采集异常已登记: {rule.metric_code}",
-                content=i.detail or "",
-                ref_type="incident",
-                ref_id=str(i.id),
-            )
-        except Exception:  # noqa: BLE001 通知失败不影响主流程
-            pass
-        db.flush()
     except Exception as _e:  # noqa: BLE001 Incident 登记失败不影响告警主流程
         logger.warning(f"[alerts] Incident 自动登记失败(忽略): {_e}")
 
@@ -338,35 +303,15 @@ def _close_ingest_incident(db, rule: AlertRule, alert, now) -> None:
 
     目的: 若告警是因瞬时误报/快速恢复产生, Incident 不永久滞留台账;
           也覆盖 C2 场景(no_sync 误报恢复后 Incident 自动关闭)。
+    #203: 实现下沉 ingest_incident_service.close_ingest_incidents(签名保持)。
     """
-    from app.models.incident import Incident as IncidentModel
-
-    try:
-        period_key = _period_biz_day(alert.period_start)
-        if not period_key:
-            return
-        rows = db.scalars(
-            select(IncidentModel)
-            .where(
-                IncidentModel.category == "数据采集",
-                IncidentModel.created_by == "system-alert",
-                IncidentModel.is_closed.is_(False),
-                IncidentModel.detail.ilike(f"%{period_key}%"),
-                IncidentModel.title.ilike(f"%{rule.metric_code}%"),
-            )
-        ).all()
-        for i in rows:
-            i.status = "calmed"      # 已平息
-            i.is_closed = True
-            i.closed_at = now
-            if i.review_note:
-                i.review_note += f" | 告警恢复自动平息 {now.isoformat()}"
-            else:
-                i.review_note = f"告警恢复自动平息 {now.isoformat()}"
-        if rows:
-            db.flush()
-    except Exception as _e:  # noqa: BLE001 Incident 关闭失败不影响告警主流程
-        logger.warning(f"[alerts] Incident 自动平息失败(忽略): {_e}")
+    ingest_incident_service.close_ingest_incidents(
+        db,
+        metric_code=rule.metric_code,
+        period_key=_period_biz_day(alert.period_start),
+        now=now,
+        note="告警恢复自动平息",
+    )
 
 
 @router.post("/scan", response_model=R, summary="手动触发预警扫描(多规则)")

@@ -334,6 +334,8 @@ class BmsScheduler:
             # 3.2: 一并清除这些源的滑动窗口失败计数(避免手动恢复后残留计数导致快速再熔断)
             for dt in halted_set:
                 reset_circuit(biz_key, dt)
+                # #203: 手动恢复 → 平息熔断登记的 Incident(同源同业务日, 幂等)
+                self._close_circuit_incident(biz_key, dt, note="手动恢复熔断自动平息")
             self._halted_types[biz_key] = set()
             logger.info(f"[调度器] 已清除 {biz_key} 的 {n} 个专项熔断标记({sorted(halted_set)}),自动同步恢复")
 
@@ -958,6 +960,8 @@ class BmsScheduler:
                 self._halted_types.setdefault(biz_key, set()).discard(dt)
                 clear_halt_recovery(biz_key, dt)
                 logger.info(f"[调度器] 半开探测成功: {biz_key}/{dt} 上游已恢复, 摘除熔断, 恢复自动采集")
+                # #203: 恢复 → 平息熔断登记的 Incident(同源同业务日, 幂等)
+                self._close_circuit_incident(biz_key, dt, note="半开探测恢复自动平息")
             else:
                 logger.warning(f"[调度器] 半开探测失败: {biz_key}/{dt} 仍不可用, 保持熔断(下一窗口再试)")
             return  # 每分钟最多探测一个源(避免多个源同时探测互相干扰)
@@ -1534,13 +1538,16 @@ class BmsScheduler:
                 logger.warning(f"[调度器] 缺口记账失败(忽略): {gap_err}")
 
     def _register_circuit_alert(self, biz_key: str, data_type: str) -> None:
-        """熔断触发 → 写一条事务通知(站内信), 事件留痕(3.2)。
+        """熔断触发 → 站内信通知 + Incident 自动登记(A-20260904-002 §五#5 / #203)。
 
-        复用 notifier 通知管理员/主管; 不做 Incident 自动登记(熔断本身会
-        被次日 5:00 补跑/8:00 兜底/半开探测自动恢复, 属"已知告警"而非事故)。
-        若需要正式 Incident 台账, 可后续接 _auto_register_ingest_incident。
+        复用 notifier 通知管理员/主管; Incident 登记走 ingest_incident_service
+        (与 data_arrival 告警同一幂等键: 同源同业务日只登记一次), 半开恢复/
+        手动清除熔断时自动平息(见 _close_circuit_incident)。
+        #203 修复: 原实现 notify 后未 commit 即 close → 站内信实际未落库;
+        现与 Incident 登记同事务显式提交。
         """
         try:
+            from app.services.ingest_incident_service import register_ingest_incident
             from app.services.notifier import notify_all_admins_and_supervisors
             db = SessionLocal()
             try:
@@ -1556,10 +1563,50 @@ class BmsScheduler:
                     ref_type="alert",
                     ref_id=data_type,
                 )
+                # #203: 熔断 → Incident 自动登记(幂等; 恢复时自动平息)
+                register_ingest_incident(
+                    db,
+                    metric_code=data_type,
+                    period_key=biz_key,
+                    subject=f"{data_type} 采集熔断",
+                    detail=(
+                        f"采集熔断自动登记(工单 #203, A-20260904-002 §五#5)。\n"
+                        f"数据源: {data_type}\n业务日: {biz_key}\n"
+                        f"处置: 每 {settings.CIRCUIT_HALF_OPEN_INTERVAL_SECONDS // 3600}h "
+                        f"自动半开探测, 上游恢复即自动续采; 也可手动触发同步恢复。\n"
+                        f"处置指引: docs/ops/数据采集-运维手册.md §4.1 单日补跑"
+                    ),
+                    impact=f"{data_type} 当日数据缺口(影响该源相关分析口径)",
+                )
+                db.commit()  # 站内信 + Incident 同事务落库(close 不丢变更)
+            except Exception:  # noqa: BLE001 登记失败不影响熔断主流程
+                db.rollback()
+                raise
             finally:
                 db.close()
-        except Exception as e:  # noqa: BLE001 通知失败不影响熔断主流程
-            logger.warning(f"[调度器] 熔断通知失败(忽略): {e}")
+        except Exception as e:  # noqa: BLE001 通知/登记失败不影响熔断主流程
+            logger.warning(f"[调度器] 熔断告警/Incident 登记失败(忽略): {e}")
+
+    def _close_circuit_incident(self, biz_key: str, data_type: str, *, note: str) -> None:
+        """熔断恢复(半开探测成功/手动清除) → 平息同源同业务日 Incident(#203)。
+
+        独立 session 显式 commit(恢复路径不在请求事务内); 失败仅 log 不影响恢复。
+        """
+        try:
+            from app.services.ingest_incident_service import close_ingest_incidents
+            db = SessionLocal()
+            try:
+                n = close_ingest_incidents(
+                    db, metric_code=data_type, period_key=biz_key,
+                    now=datetime.now(timezone.utc), note=note,
+                )
+                db.commit()
+                if n:
+                    logger.info(f"[调度器] 熔断恢复平息: {biz_key}/{data_type} 平息 {n} 条 Incident")
+            finally:
+                db.close()
+        except Exception as e:  # noqa: BLE001 平息失败不影响恢复主流程
+            logger.warning(f"[调度器] Incident 平息失败(忽略): {biz_key}/{data_type}: {e}")
 
 
     async def _retry_failed_types_once(
