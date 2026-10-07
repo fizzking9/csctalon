@@ -17,6 +17,11 @@
 3. **一单一目标**。事故类必须拆成「止损工单」与「治理工单」两条，禁止混单。
 4. **工单必须写「关闭条件」**。没有关闭条件的工单视为无效工单。
 5. **代码变更必须关联工单**。提交信息、PR 描述须携带 `#issue号`，否则审查不通过。
+   本地 `commit-msg` 钩子与 CI（`commit-message-lint`）双重校验（#216）：安装钩子执行
+   `bash scripts/install-commit-msg-hook.sh`（与 gitleaks 的 pre-commit 相互独立）；
+   判据脚本 `scripts/check-commit-issue.sh` 两处同源。merge 提交自动放行；确无工单的纯维护/
+   版本号提交须在信息中显式写 `[skip-issue]`；紧急可用 `git commit --no-verify`（会同时绕过
+   gitleaks，慎用）。CI 只校验**本次新增**提交，不追溯历史。
 6. **禁止无凭证关闭**。关闭工单前必须先追加 `## 关闭凭证核验` 评论，逐条对应关闭
    条件并给出可复现的核验方式（测试名 / commit sha / 实测命令）；批量关闭时每张
    工单各写一条。详见 §四点一。

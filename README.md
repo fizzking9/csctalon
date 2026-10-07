@@ -161,7 +161,10 @@ csctalon/
 | 规范 | `docs/standards/` | 错误码 / 审查清单 / 任务派工单模板 / 工单驱动工作流 |
 | 文档组织 | `docs/README.md` | docs 目录职责 / 文件命名规范 / 运维手册分发 |
 | 测试 | `backend/tests/` | pytest 基建, 独立 `csctalon_test` 库, 隔离开发/生产 |
-| CI | `.gitea/workflows/` | gitleaks 凭证扫描 + backend-test(ruff `app/`+`tests/` · **空库 alembic upgrade head** · pytest，强制) |
+| CI | `.gitea/workflows/` | gitleaks 凭证扫描 + backend-test(**提交信息工单号校验** · ruff `app/`+`tests/` · **空库 alembic upgrade head** · pytest，强制) |
+
+> **提交钩子（建议安装）**：`bash scripts/install-gitleaks-hook.sh`（pre-commit 扫凭证）+
+> `bash scripts/install-commit-msg-hook.sh`（commit-msg 强制提交信息带 `#工单号`，#216）。
 
 **协作流程**: 需求/事件 → **建 Gitea 工单**（见 [docs/standards/issue-workflow.md](docs/standards/issue-workflow.md)，事故拆单：incident + governance）→ 架构师出设计 → 人工锁定(`docs/arch/` + git tag) → 开发者实现（提交/PR 关联 `#issue号`）→ 审查员审查 → 人工终审合并。测试与 lint 由 CI 机器验证, 不依赖 AI 口头声称。
 

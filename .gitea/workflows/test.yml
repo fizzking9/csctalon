@@ -18,6 +18,49 @@ on:
     branches: [main, master]
 
 jobs:
+  # #216/R-P2-9: 提交信息必须携带 #工单号（与本地 commit-msg 钩子共用 scripts/check-commit-issue.sh）。
+  # 纯 git 轻量门禁, 不依赖 docker; 只校验「本次新增」提交, 不追溯历史。
+  commit-message-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码 (显式 clone)
+        run: |
+          rm -rf /workspace/ci-repo
+          git clone --quiet http://127.0.0.1:3000/tanzk/csctalon.git /workspace/ci-repo
+          cd /workspace/ci-repo && git log --oneline -1
+
+      - name: 校验新增提交信息携带工单号 (#216)
+        run: |
+          set -euo pipefail
+          cd /workspace/ci-repo
+          zero=0000000000000000000000000000000000000000
+          event="${{ github.event_name }}"
+          # 默认按 push 的 before..after；PR 改用 base..head。
+          before="${{ github.event.before }}"
+          after="${{ github.event.after }}"
+          [ -z "$after" ] && after="${{ github.sha }}"
+          if [ "$event" = "pull_request" ]; then
+            before="${{ github.event.pull_request.base.sha }}"
+            after="${{ github.event.pull_request.head.sha }}"
+          fi
+          echo "event=$event before=${before:-<empty>} after=$after"
+
+          # 两端提交都本地可达且 before 非全零（非新分支首推）→ 精确校验新增区间；
+          # 新分支首推 / force-push 旧基不可达 / fork PR 等无法确定可靠区间时，
+          # 回退为仅校验 HEAD（保守: 不追溯、不误阻断; 主干最新提交本就要求带号）。
+          if [ -n "${before:-}" ] && [ "$before" != "$zero" ] \
+             && git cat-file -e "${before}^{commit}" 2>/dev/null \
+             && git cat-file -e "${after}^{commit}" 2>/dev/null; then
+            range="$before..$after"
+            echo "== 校验新增提交区间 $range =="
+            git log --oneline "$range" || true
+            bash scripts/check-commit-issue.sh --range "$range"
+          else
+            echo "== 无法确定可靠区间（新分支/force-push/fork），回退仅校验 HEAD =="
+            git log --oneline -1
+            bash scripts/check-commit-issue.sh --head-only
+          fi
+
   backend-lint-test:
     runs-on: ubuntu-latest
     steps:
