@@ -1,12 +1,18 @@
 # API 接口文档
 
-**性质**：参考（REF） —— 全量接口清单（~374 端点），**以代码为准**
+**性质**：参考（REF） —— 全量接口清单（OpenAPI 实盘：449 路径 / 547 操作），**以代码为准**
 
 
-> 版本：v1.1 · 日期：2026-08-26
+> 版本：v1.2 · 日期：2026-10-07（#215 按 `app.openapi()` 校正总数；明细仍以代码为准）
 > Base URL：`http://<服务器IP>:8000/api/v1`
 > 认证：JWT Bearer Token（除 `/auth/login`、`/auth/login-json`、`/wechat/auth/code-login` 外所有接口需 `Authorization: Bearer <token>`）
 > 说明：本版以代码为准重写，补齐缺失模块，修正已失效路径（如 `/auth/refresh`、`/analytics/today`、`/fetch/bms/*`、`/dashboards/{id}/render` 等）。
+>
+> **接口总数（2026-10-07 实盘，#215）**：**449 个路径 / 547 个 method 操作**（其中 448 个 `/api/v1` 业务路径 + `/health`）。
+> 两个口径不同：同一**路径**下的 GET / POST 各算一个**操作**。数量随迭代增减，以下列命令实测为准（在 `backend/` 目录执行）：
+> ```
+> ENV=test APP_MODE=test POSTGRES_DB=csctalon_test .venv/bin/python -c "from app.main import app; s=app.openapi()['paths']; m=('get','post','put','delete','patch'); print('paths',len(s),'operations',sum(1 for p in s.values() for x in p if x in m))"
+> ```
 
 ## 一、接口总览
 
