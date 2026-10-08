@@ -15,6 +15,7 @@ from app.models.ticket import ServiceTicket
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
 from app.services.analytics._core import (
     COMPLAINT_SPECIALTY,
+    SYS_OP_BLACKLIST_RR,
     _date_range,
     _route_a_online_refund_filter,
     _strip_qw_prefix,
@@ -173,9 +174,11 @@ def operator_audit_stats(db: Session, start: datetime | None = None, end: dateti
     ]
 
 def operator_refund_stats(db: Session, start: datetime | None = None, end: datetime | None = None) -> list[dict]:
-    """人员退费操作统计(操作人,排除 sys/system) 【统一口径: 路线A 退费单-线上直退】
+    """人员退费操作统计(操作人,排除 7 系统变体) 【统一口径: 路线A 退费单-线上直退】
     姓名归一: PersonAlias.alias = operator → Person.display_name;
-    sys/system/SYS 等系统变体由于已在 alias 里链接到"系统自动", 所以额外再过滤掉 display_name='系统自动' 确保一致
+    sys/system/SYS/System/用户自助/客户自助/企微用户自助 等 7 系统变体
+    已在 alias 里链接到"系统自动", 额外再过滤掉 display_name='系统自动' 确保一致。
+    #229: 原仅 2 变体(sys/system), 大小写变体(SYS/System)与自助账户会漏入人员统计。
     """
     start, end = _date_range(start, end)
     op_prs = _operator_to_person_cte()
@@ -189,7 +192,7 @@ def operator_refund_stats(db: Session, start: datetime | None = None, end: datet
         .outerjoin(op_prs, op_prs.c.operator == Refund.operator)
         .where(
             Refund.operator.isnot(None),
-            Refund.operator.notin_(["sys", "system"]),
+            Refund.operator.notin_(SYS_OP_BLACKLIST_RR),
             Refund.created_at_raw.between(start, end),
             *_route_a_online_refund_filter(),
         )
