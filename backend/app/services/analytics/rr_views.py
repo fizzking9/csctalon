@@ -493,6 +493,7 @@ def _view_complaint_root_heatmap(db: Session, params: _PARAMS_T) -> _RET_T:
     """
     ts, te = _sh_parse_params(params)
     # 三表 UNION ALL: sn, phone, complaint_sub, register_time
+    # SQLAlchemy 2.0: union() 的元素必须是 SELECT, 不能是 CTE（此前误加 .cte() 导致 ArgumentError）
     union_subq = union(
         select(
             ServiceTicket.device_sn.label("sn"),
@@ -503,7 +504,7 @@ def _view_complaint_root_heatmap(db: Session, params: _PARAMS_T) -> _RET_T:
             ServiceTicket.register_time >= ts - timedelta(days=1),
             ServiceTicket.register_time <= te + timedelta(days=1),
             _ticket_category_case() == "投诉",
-        ).cte("_tp", recursive=False),
+        ),
         select(
             ExternalComplaint.device_sn.label("sn"),
             ExternalComplaint.complainant_phone.label("phone"),
@@ -512,7 +513,7 @@ def _view_complaint_root_heatmap(db: Session, params: _PARAMS_T) -> _RET_T:
         ).where(
             ExternalComplaint.complaint_date >= ts - timedelta(days=1),
             ExternalComplaint.complaint_date <= te + timedelta(days=1),
-        ).cte("_ep", recursive=False),
+        ),
         select(
             CardComplaint.device_sn.label("sn"),
             CardComplaint.complainant_phone.label("phone"),
@@ -521,7 +522,7 @@ def _view_complaint_root_heatmap(db: Session, params: _PARAMS_T) -> _RET_T:
         ).where(
             CardComplaint.complaint_date >= ts - timedelta(days=1),
             CardComplaint.complaint_date <= te + timedelta(days=1),
-        ).cte("_cp", recursive=False),
+        ),
     )
     # 再建一级 CTE 便于 JOIN
     u = select(union_subq.c.sn, union_subq.c.phone, union_subq.c.sub, union_subq.c.rt).cte("u")

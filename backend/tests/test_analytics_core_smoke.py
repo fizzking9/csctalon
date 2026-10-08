@@ -46,7 +46,9 @@ class TestRefundChainSignatures:
         "refund_withdrawal_dimensions": ["db", "start", "end", "topn"],
         "refund_withdrawal_facets": ["db", "start", "end"],
         "refund_withdrawal_detail": ["db", "start", "end", "sort", "page", "page_size",
-                                      "slow_only", "path", "comp", "operator", "reason"],
+                                      "slow_only", "path", "comp", "operator", "reason",
+                                      "device_type", "combo", "merchant",  # #273 设备维度
+                                      "active_start", "active_end"],
         "refund_withdrawal_daily_split": ["db", "start", "end"],
         "refund_withdrawal_sleeping": ["db", "start", "end", "page", "page_size"],
     }
@@ -242,7 +244,9 @@ class TestRefundChainDbSmoke:
 
     def test_detail_empty_db_returns_list(self, db):
         result = refund_withdrawal_detail(db, start="2026-10-01", end="2026-10-08")
-        assert isinstance(result, list), f"detail 应返回 list, 实际 {type(result)}"
+        # detail 返回分页 dict: {total, page, page_size, risk_summary, list}
+        assert isinstance(result, dict), f"detail 应返回 dict, 实际 {type(result)}"
+        assert result["list"] == [] and result["total"] == 0
 
     def test_daily_split_empty_db_returns_list(self, db):
         result = refund_withdrawal_daily_split(db, start="2026-10-01", end="2026-10-08")
