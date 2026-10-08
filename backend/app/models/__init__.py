@@ -18,6 +18,7 @@ from app.models.complaint_same_source import (  # noqa: F401
     ComplaintSameSourceMember,
 )
 from app.models.complaint_sync_log import ComplaintSyncLog  # noqa: F401
+from app.models.combo_dict import ComboDict, ComboNameAlias  # noqa: F401
 from app.models.cs_record import CsRecord  # noqa: F401
 from app.models.dashboard import Dashboard  # noqa: F401
 from app.models.data_quality import DataQualityRule  # noqa: F401

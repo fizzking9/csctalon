@@ -116,6 +116,7 @@ from app.services.analytics.complaint import (
     category_by_service_item,
     complaint_health_metrics,
     handler_fallback_expr,
+    package_alias_coverage,
 )
 from app.services.analytics.reception import (
     _CATEGORY_BUCKETS,
@@ -330,6 +331,7 @@ __all__ = [
     'cash_out_trend',
     'category_by_merchant',
     'category_by_package',
+    'package_alias_coverage',
     'category_by_service_item',
     'complaint_health_metrics',
     'handler_fallback_expr',

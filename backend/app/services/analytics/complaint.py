@@ -4,10 +4,12 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, func, select, text
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.orm import Session
 
+from app.models.combo_dict import ComboDict, ComboNameAlias
 from app.models.cs_record import CsRecord
+from app.models.merchant import Merchant
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.services.complaint_scope import (
@@ -229,16 +231,75 @@ def category_by_merchant(db: Session, limit: int = 20) -> list[dict]:
     ).all()
     return [{"name": r[0], "value": float(r[1] or 0), "count": r[2]} for r in rows]
 
+def _package_canonical_sq():
+    """套餐归一标量子查询 (#247 B3-2, A-20261007-002 §3.5)
+
+    SCD 时点关联: 取"退款事件发生时生效"的别名快照, 不回改历史数字。
+    事件时点 = COALESCE(created_at_raw, created_at) 的日期部分。
+    匹配优先级: 商户级别名(merchant_pk 命中) > 全局别名(merchant_pk IS NULL)。
+    未命中返回 NULL, 由调用方回落原始名。
+    """
+    event_date = func.date(func.coalesce(Refund.created_at_raw, Refund.created_at))
+    merchant_sq = (
+        select(Merchant.id)
+        .where(Merchant.sub_name == Refund.merchant_name)
+        .limit(1)
+        .scalar_subquery()
+    )
+    return (
+        select(ComboDict.canonical_name)
+        .select_from(ComboNameAlias)
+        .join(ComboDict, ComboDict.combo_code == ComboNameAlias.combo_code)
+        .where(
+            ComboNameAlias.raw_package_name == Refund.package_name,
+            ComboNameAlias.effective_from <= event_date,
+            or_(ComboNameAlias.effective_to.is_(None), ComboNameAlias.effective_to > event_date),
+            or_(
+                ComboNameAlias.merchant_pk.is_(None),
+                ComboNameAlias.merchant_pk == merchant_sq,
+            ),
+        )
+        # 商户级别名优先于全局别名
+        .order_by(case((ComboNameAlias.merchant_pk.isnot(None), 0), else_=1))
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
 def category_by_package(db: Session, limit: int = 20) -> list[dict]:
-    """按套餐汇总退款 【统一口径: 路线A 退费单-线上直退】"""
+    """按套餐汇总退款 【统一口径: 路线A 退费单-线上直退】
+
+    #247 B3-2: group by 由原始名切换为归一码(SCD 时点关联), 未命中回落原始名;
+    历史报表用事件发生时生效的别名快照, 不回改历史数字。
+    """
+    canonical = _package_canonical_sq()
+    name_expr = func.coalesce(canonical, Refund.package_name)
     rows = db.execute(
-        select(Refund.package_name, func.coalesce(func.sum(Refund.refund_amount), 0), func.count())
+        select(name_expr, func.coalesce(func.sum(Refund.refund_amount), 0), func.count())
         .where(Refund.package_name.isnot(None), *_route_a_online_refund_filter())
-        .group_by(Refund.package_name)
+        .group_by(name_expr)
         .order_by(func.sum(Refund.refund_amount).desc())
         .limit(limit)
     ).all()
     return [{"name": r[0], "value": float(r[1] or 0), "count": r[2]} for r in rows]
+
+
+def package_alias_coverage(db: Session) -> dict:
+    """套餐归一覆盖率 (#247): 供看板卡片 ⓘ 说明"未命中原始名占比" """
+    canonical = _package_canonical_sq()
+    total, matched = db.execute(
+        select(
+            func.count(),
+            func.count().filter(canonical.isnot(None)),
+        ).where(Refund.package_name.isnot(None), *_route_a_online_refund_filter())
+    ).one()
+    unmatched = (total or 0) - (matched or 0)
+    return {
+        "total": total or 0,
+        "matched": matched or 0,
+        "unmatched": unmatched,
+        "unmatched_ratio": float(unmatched / total) if total else 0.0,
+    }
 
 
 

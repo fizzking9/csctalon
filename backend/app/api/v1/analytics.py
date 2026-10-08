@@ -111,6 +111,12 @@ def cat_package(db: DBSession, _: CurrentUser, limit: int = Query(20, ge=1, le=1
     return R(data=cached_call(f"cat:package:{limit}", 60, A.category_by_package, db, limit))
 
 
+@router.get("/category/package-coverage", response_model=R, summary="套餐归一覆盖率")
+def cat_package_coverage(db: DBSession, _: CurrentUser):
+    """#247 B3-2: 套餐别名归一命中率, 供看板卡片 ⓘ 数据说明"""
+    return R(data=cached_call("cat:package-coverage", 300, A.package_alias_coverage, db))
+
+
 # ---------- 看板4:人员操作分析 ----------
 
 
