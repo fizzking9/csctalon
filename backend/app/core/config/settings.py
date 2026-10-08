@@ -198,6 +198,11 @@ class Settings(BaseSettings):
     BMS_USERNAME: str = ""
     BMS_PASSWORD: str = ""
     BMS_SCHEDULE_AUTOSTART: bool = True  # 启动时是否自动开启定时同步(默认开启,否则跨日/重启后整小时窗口都漏)
+    # ── 日志/审计保留期(#261 B4-5, 夜批 purge_expired_logs 用) ──
+    # operation_logs(HTTP 层操作日志)保留天数, 超期由夜批批删
+    OPERATION_LOG_RETENTION_DAYS: int = 180
+    # audit_changes(统一变更审计)保留天数 —— 审计价值更高, 保留更久
+    AUDIT_CHANGE_RETENTION_DAYS: int = 730
     # 低频源每日定时档(时)(A-20260907-001 LOCKED / 工单#31): 每天该整点对
     # 「DB default_sync=true 且非高频 4 源」的大表/报表源跑"前一天整天"。
     # 默认 6:00(避开 5:00 缺口清点与 8:00 全量); 置空/负值可禁用低频档。

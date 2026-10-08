@@ -23,6 +23,7 @@ from app.schemas.person import (
     PersonUpdate,
     SplitRequest,
 )
+from app.services.audit_change import diff_model_changes, record_change  # #261 统一变更审计
 from app.services.audit_timeline import build_person_timeline
 from app.services.person_extractor import (
     count_alias_occurrences,
@@ -571,7 +572,7 @@ def person_timeline(
 
 
 @router.put("/{person_id}", response_model=R, summary="更新人员信息")
-def update_person(person_id: int, payload: PersonUpdate, db: DBSession, _: AdminUser):
+def update_person(person_id: int, payload: PersonUpdate, db: DBSession, admin: AdminUser):
     p = db.get(Person, person_id)
     if not p:
         raise HTTPException(status_code=404, detail="人员不存在")
@@ -579,6 +580,8 @@ def update_person(person_id: int, payload: PersonUpdate, db: DBSession, _: Admin
     lifecycle_fields = {"hire_date", "probation_end_date", "regularization_date", "resignation_date"}
     data = payload.model_dump(exclude_unset=True)
     has_lifecycle_change = any(k in lifecycle_fields for k in data)
+    # ★ #261 统一变更审计: setattr 前先算字段级 before/after(commit 后与业务各自提交落 audit_changes)
+    diffs = diff_model_changes(p, data)
     for k, v in data.items():
         # employment_status 允许直接改(也可由 recalculate 自动推导)
         setattr(p, k, v)
@@ -588,6 +591,11 @@ def update_person(person_id: int, payload: PersonUpdate, db: DBSession, _: Admin
         recalculate_employment_status(p)
     db.commit()
     db.refresh(p)
+    if diffs:
+        record_change(
+            db, entity_type="persons", entity_id=person_id,
+            action="update", changes=diffs, actor=admin, source="api",
+        )
     return R(data=_with_alias_count(db, p))
 
 

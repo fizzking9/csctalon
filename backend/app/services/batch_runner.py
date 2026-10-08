@@ -57,7 +57,63 @@ def _rebuild_refund_wide(db: Session) -> dict:
     return build_refund_wide(db)
 
 
+def _purge_expired_logs(db: Session) -> dict:
+    """按保留期批删超期日志/审计(#261 B4-5)。
+
+    保留期: settings.OPERATION_LOG_RETENTION_DAYS / AUDIT_CHANGE_RETENTION_DAYS。
+    破坏性操作纪律: 走 db_guard.assert_safe_to_destroy 并显式 allow_real_db=True ——
+    该删除是设计内的常态运维(非脚本误触), reason 写明保留期依据以便审计。
+    批删用 id 分批(LIMIT 5000)避免长事务锁表。
+    """
+    from app.core.config import settings
+    from app.core.db_guard import assert_safe_to_destroy
+    from app.models.audit_change import AuditChange
+    from app.models.operation_log import OperationLog
+    from app.services.analytics import TZ
+
+    now_bj = datetime.now(TZ)
+    out: dict = {}
+    assert_safe_to_destroy(
+        db,
+        reason="夜批 purge_expired_logs: 按保留期清理超期日志(设计内运维, #261)",
+        allow_real_db=True,
+    )
+    # operation_logs: HTTP 层操作日志, 保留 OPERATION_LOG_RETENTION_DAYS 天
+    op_cutoff = (now_bj - timedelta(days=settings.OPERATION_LOG_RETENTION_DAYS))
+    deleted_ops = 0
+    while True:
+        ids = db.scalars(
+            select(OperationLog.id).where(OperationLog.created_at < op_cutoff).limit(5000)
+        ).all()
+        if not ids:
+            break
+        db.execute(OperationLog.__table__.delete().where(OperationLog.id.in_(ids)))
+        db.commit()
+        deleted_ops += len(ids)
+    out["operation_logs"] = {"cutoff": op_cutoff.isoformat(), "deleted": deleted_ops}
+    # audit_changes: 统一变更审计, 保留更久
+    ac_cutoff = (now_bj - timedelta(days=settings.AUDIT_CHANGE_RETENTION_DAYS))
+    deleted_ac = 0
+    while True:
+        ids = db.scalars(
+            select(AuditChange.id).where(AuditChange.created_at < ac_cutoff).limit(5000)
+        ).all()
+        if not ids:
+            break
+        db.execute(AuditChange.__table__.delete().where(AuditChange.id.in_(ids)))
+        db.commit()
+        deleted_ac += len(ids)
+    out["audit_changes"] = {"cutoff": ac_cutoff.isoformat(), "deleted": deleted_ac}
+    return out
+
+
 BATCH_JOBS: dict[str, dict] = {
+    # #261: 日志保留期清理先跑(02:00), 在重建类任务前释放磁盘/降低表膨胀
+    "purge_expired_logs": {
+        "fn": _purge_expired_logs,
+        "schedule_daily_at": "02:00",
+        "timeout_minutes": 60,
+    },
     "rebuild_cash_flow_wide": {
         "fn": _rebuild_cash_flow_wide,
         "schedule_daily_at": "02:30",

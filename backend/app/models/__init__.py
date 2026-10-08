@@ -7,6 +7,7 @@ from app.models.ai_report_template import AiReportTemplate  # noqa: F401
 from app.models.alert import Alert, AlertDelivery, AlertRule  # noqa: F401
 from app.models.analysis_view import AnalysisView, ClassificationRule  # noqa: F401
 from app.models.audit_note import AuditJudgment, AuditNote  # noqa: F401
+from app.models.audit_change import AuditChange  # noqa: F401  # #261 统一变更审计
 from app.models.base import IDMixin, TimestampMixin  # noqa: F401
 from app.models.bms_order import BmsOrder  # noqa: F401
 from app.models.bms_sync_log import BmsSyncLog  # noqa: F401
@@ -156,6 +157,7 @@ __all__ = [
     "NotificationChannel",
     "AuditJudgment",
     "AuditNote",
+    "AuditChange",
     "ClassificationRule",
     "Dashboard",
     "CardComplaint",
