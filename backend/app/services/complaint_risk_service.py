@@ -11,8 +11,9 @@
   外部投诉 = external_complaints 近 180 天; 同源组 = complaint_same_source_groups
   status in (auto/confirmed); 流量取最近完整月(month_complete=True)。
 - 取舍(不做什么及原因): v1 不接 LLM(规则先行, 后续评估增强); 不做自动推送
-  (只出清单, 专员主动看); 不做配置表(权重/阈值走函数参数常量, 配置化属 O-5 择机项);
-  不做前端独立页面(本单只交后端 API + 测试, 前端接入另开工单)。
+  (只出清单, 专员主动看); 不做前端独立页面(本单只交后端 API + 测试, 前端接入另开工单)。
+  #276(O-5) 已把权重/窗口/阈值/等级线迁入 risk_alert_settings 配置表(改库即生效,
+  60s 缓存); 评分阶梯(40/70/100 等曲线形状)保持代码常量——改阶梯=改算法, 属发版行为。
 - 工单: #250 · 排期: docs/reports/20261009-下一步开发计划-排期规划.md §六 B3-4
 """
 
@@ -31,25 +32,18 @@ from app.models.device import Device
 from app.models.device_combo import DeviceCombo
 from app.models.device_flow_usage import DeviceFlowUsage
 from app.models.external_complaint import ExternalComplaint
+
+# ── 默认权重/窗口/阈值/等级线: 单一事实来源在 app.models.risk_alert_settings ──
+# (#276 配置表化; compute_* 参数为 None 时读 risk_alert_settings 配置表, 60s 缓存)
+from app.models.risk_alert_settings import (
+    DEFAULT_LEVEL_CRITICAL,
+    DEFAULT_LEVEL_HIGH,
+    DEFAULT_LEVEL_MEDIUM,
+)
 from app.models.ticket import ServiceTicket
-from app.services import complaint_scope
+from app.services import complaint_scope, risk_alert_settings_service
 
-# ── 默认权重与阈值(v1 拍板值, 可调参数覆盖; 配置表化属 O-5 择机项) ──
-DEFAULT_WEIGHTS: dict[str, int] = {
-    "recharge": 25,   # 充值多: 高价值用户升级损失大
-    "low_flow": 25,   # 流量少: 疑似限速/信号差
-    "contact": 20,    # 愿沟通: 有沟通意愿, 不处理易升级
-    "repeat": 30,     # 同题重复: 历史未根治是升级最强信号, 权重最高
-}
-
-DEFAULT_RECHARGE_DAYS = 90        # 充值回看窗口(天)
-DEFAULT_CONTACT_DAYS = 30         # 接待回看窗口(天)
-DEFAULT_COMPLAINT_DAYS = 90       # 投诉工单回看窗口(天)
-DEFAULT_EXTERNAL_DAYS = 180       # 外部投诉回看窗口(天)
-DEFAULT_LOW_FLOW_GB = 5.0         # 流量少阈值(GB, 最近完整月)
-DEFAULT_RECHARGE_HIGH_AMOUNT = Decimal("500")  # 高价值充值金额阈值(元)
-
-LEVEL_BY_SCORE = ((70, "critical"), (45, "high"), (25, "medium"))
+DEFAULT_LEVEL_CUTOFFS = (DEFAULT_LEVEL_CRITICAL, DEFAULT_LEVEL_HIGH, DEFAULT_LEVEL_MEDIUM)
 
 
 def _recharge_score(cnt: int, amount: Decimal, high_amount: Decimal) -> int:
@@ -94,8 +88,10 @@ def _repeat_score(ticket_cnt: int, in_same_source: bool, external_cnt: int) -> i
     return min(score, 100)
 
 
-def _level(total: float) -> str:
-    for threshold, name in LEVEL_BY_SCORE:
+def _level(total: float, cutoffs: tuple[int, int, int] | None = None) -> str:
+    """总分 → 等级。cutoffs=(critical, high, medium); None 时用默认等级线。"""
+    c, h, m = cutoffs if cutoffs is not None else DEFAULT_LEVEL_CUTOFFS
+    for threshold, name in ((c, "critical"), (h, "high"), (m, "medium")):
         if total >= threshold:
             return name
     return "low"
@@ -203,19 +199,35 @@ def compute_complaint_risk_priority_list(
     limit: int = 100,
     min_score: float = 0.0,
     weights: dict[str, int] | None = None,
-    recharge_days: int = DEFAULT_RECHARGE_DAYS,
-    contact_days: int = DEFAULT_CONTACT_DAYS,
-    complaint_days: int = DEFAULT_COMPLAINT_DAYS,
-    external_days: int = DEFAULT_EXTERNAL_DAYS,
-    low_flow_gb: float = DEFAULT_LOW_FLOW_GB,
-    recharge_high_amount: Decimal = DEFAULT_RECHARGE_HIGH_AMOUNT,
+    recharge_days: int | None = None,
+    contact_days: int | None = None,
+    complaint_days: int | None = None,
+    external_days: int | None = None,
+    low_flow_gb: float | None = None,
+    recharge_high_amount: Decimal | None = None,
+    level_cutoffs: tuple[int, int, int] | None = None,
 ) -> dict[str, Any]:
     """投诉专员优先清单: 全量设备四维评分, 按总分降序取 top N。
 
     返回 {total_scored, items: [{device_sn, total, level, scores{...}, facts{...}}]}。
     只输出至少有任一风险信号(总分>0)的设备——无信号设备不构成专员动作对象。
+
+    参数为 None 时读 risk_alert_settings 配置表(60s 缓存, 改库即生效, #276);
+    显式传参(如测试/查询参数覆盖)优先于配置表。
     """
-    w = dict(DEFAULT_WEIGHTS if weights is None else weights)
+    # 任一参数缺省 → 读一次配置表兜底(60s 缓存, 不增加每请求查库)
+    cfg = risk_alert_settings_service.get_cached_config(db)
+    w = dict(weights if weights is not None else cfg["weights"])
+    recharge_days = recharge_days if recharge_days is not None else cfg["recharge_days"]
+    contact_days = contact_days if contact_days is not None else cfg["contact_days"]
+    complaint_days = complaint_days if complaint_days is not None else cfg["complaint_days"]
+    external_days = external_days if external_days is not None else cfg["external_days"]
+    low_flow_gb = low_flow_gb if low_flow_gb is not None else cfg["low_flow_gb"]
+    recharge_high_amount = (
+        recharge_high_amount if recharge_high_amount is not None
+        else cfg["recharge_high_amount"]
+    )
+    level_cutoffs = level_cutoffs if level_cutoffs is not None else cfg["level_cutoffs"]
     now = datetime.now(UTC)
 
     recharges = _fetch_recharge_facts(db, now - timedelta(days=recharge_days))
@@ -258,7 +270,7 @@ def compute_complaint_risk_priority_list(
         items.append({
             "device_sn": sn,
             "total": round(total, 1),
-            "level": _level(total),
+            "level": _level(total, level_cutoffs),
             "scores": {
                 "recharge": s_recharge,
                 "low_flow": s_flow,

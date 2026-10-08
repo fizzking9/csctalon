@@ -6,12 +6,12 @@ from app.models.ai_report_feedback import AiReportFeedback  # noqa: F401
 from app.models.ai_report_template import AiReportTemplate  # noqa: F401
 from app.models.alert import Alert, AlertDelivery, AlertRule  # noqa: F401
 from app.models.analysis_view import AnalysisView, ClassificationRule  # noqa: F401
-from app.models.audit_note import AuditJudgment, AuditNote  # noqa: F401
 from app.models.audit_change import AuditChange  # noqa: F401  # #261 统一变更审计
+from app.models.audit_note import AuditJudgment, AuditNote  # noqa: F401
 from app.models.base import IDMixin, TimestampMixin  # noqa: F401
+from app.models.batch_job import BatchJob, BatchJobRun  # noqa: F401
 from app.models.bms_order import BmsOrder  # noqa: F401
 from app.models.bms_sync_log import BmsSyncLog  # noqa: F401
-from app.models.batch_job import BatchJob, BatchJobRun  # noqa: F401
 from app.models.card_complaint import CardComplaint  # noqa: F401
 from app.models.cash_flow_wide import CashFlowWide  # noqa: F401
 from app.models.combo_dict import ComboDict, ComboNameAlias  # noqa: F401
@@ -98,6 +98,7 @@ from app.models.report import Report, ReportStatus, ReportType  # noqa: F401
 from app.models.report_comment import CommentTarget, ReportComment  # noqa: F401
 from app.models.report_template import ReportTemplate  # noqa: F401
 from app.models.return_tracking import ReturnTracking  # noqa: F401
+from app.models.risk_alert_settings import RiskAlertSettings  # noqa: F401
 from app.models.schedule import Attendance, Schedule, ShiftTemplate  # noqa: F401
 from app.models.scheduler_settings import SchedulerSettings  # noqa: F401
 from app.models.scrm_operator import ScrmOperator  # noqa: F401
