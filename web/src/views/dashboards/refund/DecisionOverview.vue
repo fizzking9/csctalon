@@ -7,6 +7,7 @@
   │ 口径：四路经营 A线上直退/B钱包提现/C闪猫退款/D手动退款（成功口径+质量治理排除， │
   │       按实际扣款时间优先归日）+ 对账基准E商户号实际现金流（不与四路累加）；      │
   │       涉诉判据沿用投诉渠道口径（外部>商户号>内部 + 备注标识）。                 │
+  │       明细筛选含设备维度（设备类型/套餐/商户号/激活时间段，走 devices 表，#273）。│
   │       详见 docs/standards/投诉渠道口径与对账说明.md ·                          │
   │       backend/app/services/analytics/refund.py refund_decision_overview。      │
   │ 取舍：① 不做 C 闪猫单笔明细下钻——明细台账接口未覆盖闪猫路，强行给会缺一路误导； │
@@ -356,6 +357,17 @@
           <el-select v-model="filter.reason" placeholder="退款原因" size="small" clearable filterable style="min-width: 180px">
             <el-option v-for="rs in facetReasons" :key="rs" :label="rs" :value="rs" />
           </el-select>
+          <!-- #273: 设备维度筛选(口径=devices 表, 与投诉积压同套参数) -->
+          <el-select v-model="filter.device_type" placeholder="设备类型" size="small" clearable filterable style="width: 150px">
+            <el-option v-for="t in facetDeviceTypes" :key="t.value" :label="t.label" :value="t.value" />
+          </el-select>
+          <el-select v-model="filter.combo" placeholder="套餐" size="small" clearable filterable style="width: 160px">
+            <el-option v-for="c in facetCombos" :key="c" :label="c" :value="c" />
+          </el-select>
+          <el-select v-model="filter.merchant" placeholder="商户号" size="small" clearable filterable style="width: 160px">
+            <el-option v-for="m in facetMerchants" :key="m" :label="m" :value="m" />
+          </el-select>
+          <el-date-picker v-model="filter.activeRange" type="daterange" size="small" range-separator="~" start-placeholder="激活起" end-placeholder="激活止" value-format="YYYY-MM-DD" style="width: 210px" />
           <el-button size="small" :icon="RefreshLeft" @click="resetFilters">重置</el-button>
         </div>
         <el-table :data="detailList" border stripe size="small" max-height="420">
@@ -435,9 +447,13 @@ const detailTotal = ref(0)
 const detailLoaded = ref(false)
 const detailRisk = ref({ high: 0, medium: 0, low: 0 })
 // 明细筛选 & 筛选候选项
-const filter = ref({ comp: '', path: '', operator: '', reason: '' })
+// #273: 设备维度(device_type/combo/merchant/activeRange) 与投诉积压同一套后端参数
+const filter = ref({ comp: '', path: '', operator: '', reason: '', device_type: '', combo: '', merchant: '', activeRange: null })
 const facetOperators = ref([])
 const facetReasons = ref([])
+const facetDeviceTypes = ref([])
+const facetCombos = ref([])
+const facetMerchants = ref([])
 
 // 移动端响应式: 简化描述文字/控件
 const isMobile = ref(false)
@@ -479,7 +495,7 @@ function drillOnlineDetail() {
 // ⚠️ C 闪猫路不做单笔明细下钻: 明细台账接口未覆盖闪猫路, 强行给会缺一路误导(见文件头取舍①)。
 
 function resetFilters() {
-  filter.value = { comp: '', path: '', operator: '', reason: '' }
+  filter.value = { comp: '', path: '', operator: '', reason: '', device_type: '', combo: '', merchant: '', activeRange: null }
   detailPage.value = 1
   loadDetail()
 }
@@ -690,6 +706,14 @@ async function loadDetail() {
   if (filter.value.path) params.path = filter.value.path
   if (filter.value.operator) params.operator = filter.value.operator
   if (filter.value.reason) params.reason = filter.value.reason
+  // #273: 设备维度筛选
+  if (filter.value.device_type) params.device_type = filter.value.device_type
+  if (filter.value.combo) params.combo = filter.value.combo
+  if (filter.value.merchant) params.merchant = filter.value.merchant
+  if (Array.isArray(filter.value.activeRange) && filter.value.activeRange[0]) {
+    params.active_start = filter.value.activeRange[0]
+    params.active_end = filter.value.activeRange[1]
+  }
   try {
     const res = await refundWithdrawal.detail(params)
     detailTotal.value = res?.data?.total || 0
@@ -710,6 +734,10 @@ async function loadFacets() {
     const res = await refundWithdrawal.facets(params)
     facetOperators.value = res?.data?.operators || []
     facetReasons.value = res?.data?.reasons || []
+    // #273: 设备维度候选项(设备类型/套餐/商户号)
+    facetDeviceTypes.value = res?.data?.device_types || []
+    facetCombos.value = res?.data?.combos || []
+    facetMerchants.value = res?.data?.merchants || []
   } catch (e) {
     /* 筛选候选项加载失败不阻塞明细列表 */
   }

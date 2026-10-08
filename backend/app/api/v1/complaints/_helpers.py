@@ -15,6 +15,7 @@ from app.services.analytics import (
     REAL_FINISH_EPOCH_SECS,
     TZ,
     _complaint_source_type_case,
+    _device_dim_matched_sns,
     _ticket_category_case,
     handler_fallback_expr,
 )
@@ -724,11 +725,17 @@ def _query_backlog_rows(
     category: str | None = None,
     has_handler: bool | None = None,
     sort: str = "aging_asc",
+    device_type: str | None = None,
+    combo: str | None = None,
+    merchant: str | None = None,
+    active_start: str | None = None,
+    active_end: str | None = None,
 ) -> list[dict]:
     """查询积压工单全量行(统一归一化口径, 与 /backlog 完全一致).
 
     供 /backlog(分页+统计) 与 /backlog/export(导出Excel) 共用, 保证两处口径 100% 一致。
     返回列表已按 sort 排序, 每行含 audited 字段(已核查标识)。
+    #273: 设备维度筛选(设备类型/套餐/商户号/激活时间段), 口径走 devices 表(同 #271)。
     """
     src_expr = _complaint_source_type_case()
 
@@ -828,6 +835,11 @@ def _query_backlog_rows(
         backlog = [r for r in backlog if r["handler"] != "未分配"]
     elif has_handler is False:
         backlog = [r for r in backlog if r["handler"] == "未分配"]
+
+    # #273: 设备维度筛选(命中 SN 集合为 None 表示未启用, 跳过)
+    dim_sns = _device_dim_matched_sns(db, device_type, combo, merchant, active_start, active_end)
+    if dim_sns is not None:
+        backlog = [r for r in backlog if r.get("device_sn") in dim_sns]
 
     # 排序
     if sort == "register_desc":

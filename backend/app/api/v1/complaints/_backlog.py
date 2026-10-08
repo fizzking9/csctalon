@@ -16,10 +16,11 @@ from app.api.v1.complaints._helpers import (
 from app.api.v1.complaints._router import router
 from app.core.redis_client import cache_ttl_for, cached_json
 from app.schemas.common import R
+from app.services.analytics import _device_dim_options
 
 
 @router.get("/backlog", response_model=R, summary="积压未处理投诉审核分析(统一口径: 归一化状态非已完成)")
-@cached_json(lambda *a, **kw: f"complaint:backlog:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('status')}:{kw.get('category')}:{kw.get('has_handler')}:{kw.get('page')}:{kw.get('page_size')}:{kw.get('sort')}",
+@cached_json(lambda *a, **kw: f"complaint:backlog:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('status')}:{kw.get('category')}:{kw.get('has_handler')}:{kw.get('page')}:{kw.get('page_size')}:{kw.get('sort')}:{kw.get('device_type')}:{kw.get('combo')}:{kw.get('merchant')}:{kw.get('active_start')}:{kw.get('active_end')}",
              ttl=lambda **kw: cache_ttl_for(kw.get('start'), kw.get('end'), 60))
 def complaint_backlog(
     db: DBSession,
@@ -33,6 +34,11 @@ def complaint_backlog(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
     sort: str = Query("aging_asc", description="aging_asc=最旧积压优先(默认) / register_desc / register_asc"),
+    device_type: str | None = Query(None, max_length=64, description="#273 设备类型(devices.device_type_code)"),
+    combo: str | None = Query(None, max_length=128, description="#273 套餐(devices.current_combo_name)"),
+    merchant: str | None = Query(None, max_length=128, description="#273 商户号(devices.merchant_name)"),
+    active_start: str | None = Query(None, max_length=10, description="#273 激活时间起(YYYY-MM-DD)"),
+    active_end: str | None = Query(None, max_length=10, description="#273 激活时间止(YYYY-MM-DD)"),
 ):
     """积压未处理投诉的查询/统计/审核分析。
 
@@ -43,9 +49,8 @@ def complaint_backlog(
     """
     ts = _parse_dt(start)
     te = _parse_dt_end(end)
-    backlog = _query_backlog_rows(db, ts, te, source_type, status, category, has_handler, sort)
-
-    # 统计维度
+    backlog = _query_backlog_rows(db, ts, te, source_type, status, category, has_handler, sort,
+                                  device_type, combo, merchant, active_start, active_end)
     by_source = [{"name": k, "count": v} for k, v in sorted(Counter(r["source"] for r in backlog).items(), key=lambda x: -x[1])]
     by_category = [
         {"name": k, "count": v}
@@ -120,6 +125,13 @@ def complaint_backlog(
         "items": items,
     })
 
+@router.get("/backlog/device-dim-options", response_model=R, summary="积压筛选-设备维度候选项(设备类型/套餐/商户号, #273)")
+@cached_json(lambda *a, **kw: "complaint:backlog:device_dim_options", ttl=120)
+def complaint_backlog_device_dim_options(db: DBSession, _: CurrentUser):
+    """设备维度筛选候选项, 与退款明细 facets 同一口径(devices 表, #271/#273)。"""
+    return R(data=_device_dim_options(db))
+
+
 @router.get("/backlog/export", summary="积压未处理投诉明细导出Excel")
 def complaint_backlog_export(
     db: DBSession,
@@ -131,6 +143,11 @@ def complaint_backlog_export(
     category: str | None = Query(None, description="按工单服务项(分类)过滤"),
     has_handler: bool | None = Query(None, description="true=已分派 / false=待分派"),
     sort: str = Query("aging_asc", description="aging_asc=最旧积压优先(默认) / register_desc / register_asc"),
+    device_type: str | None = Query(None, max_length=64, description="#273 设备类型"),
+    combo: str | None = Query(None, max_length=128, description="#273 套餐"),
+    merchant: str | None = Query(None, max_length=128, description="#273 商户号"),
+    active_start: str | None = Query(None, max_length=10, description="#273 激活时间起"),
+    active_end: str | None = Query(None, max_length=10, description="#273 激活时间止"),
 ):
     """导出积压未处理投诉明细 Excel。
 
@@ -146,7 +163,8 @@ def complaint_backlog_export(
 
     ts = _parse_dt(start)
     te = _parse_dt_end(end)
-    rows = _query_backlog_rows(db, ts, te, source_type, status, category, has_handler, sort)
+    rows = _query_backlog_rows(db, ts, te, source_type, status, category, has_handler, sort,
+                               device_type, combo, merchant, active_start, active_end)
 
     df = pd.DataFrame([{
         "工单号": r["ticket_no"],

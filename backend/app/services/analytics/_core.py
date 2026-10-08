@@ -1124,3 +1124,74 @@ def _is_refund_staff(grp: str | None, hr_cat: str | None) -> bool:
     if hr_cat and hr_cat in REFUND_RECOVERY_HR_CATS:
         return True
     return False
+
+
+# ============================================================
+# 通用设备维度筛选 (#273): 退款/投诉明细共用同一口径
+#   · 设备类型 = devices.device_type_code
+#   · 套餐     = devices.current_combo_name
+#   · 商户号   = devices.merchant_name (#271: links/merchants 表全空)
+#   · 激活时间 = devices.active_time 落在 [active_start, active_end] 北京日期闭区间
+# ============================================================
+def _device_dim_matched_sns(
+    db: Session,
+    device_type: str | None = None,
+    combo: str | None = None,
+    merchant: str | None = None,
+    active_start: str | None = None,
+    active_end: str | None = None,
+) -> set[str] | None:
+    """返回命中设备维度条件的 SN 集合; 全部条件为空时返回 None(表示不筛选, 避免全表扫描)。"""
+    from app.models.device import (
+        Device,  # 局部导入: _core 保持零 models.device 依赖的惯例被 #273 打破, 用局部导入限制耦合面
+    )
+
+    conds = []
+    if device_type:
+        conds.append(Device.device_type_code == device_type)
+    if combo:
+        conds.append(Device.current_combo_name == combo)
+    if merchant:
+        conds.append(Device.merchant_name == merchant)
+    # active_time 为 timestamptz: 北京日期 → UTC 边界, naive 化以与列比较(同 _parse_dt 口径)
+    # 非法日期串静默忽略该条件(与 _parse_dt 失败→None 的容错风格一致)
+    if active_start:
+        try:
+            d0 = _parse_date(active_start)
+        except (ValueError, TypeError):
+            d0 = None
+        if d0:
+            conds.append(Device.active_time >= datetime.combine(d0, _dt.time.min, tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None))
+    if active_end:
+        try:
+            d1 = _parse_date(active_end)
+        except (ValueError, TypeError):
+            d1 = None
+        if d1:
+            conds.append(Device.active_time <= datetime.combine(d1, _dt.time.max, tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None))
+    if not conds:
+        return None
+    return set(db.scalars(select(Device.sn).where(*conds)).all())
+
+
+def _device_dim_options(db: Session) -> dict[str, list[str]]:
+    """设备维度筛选候选项: 设备类型(码表带显示名)/套餐/商户号 各自 distinct 值。"""
+    from app.models.device import Device, DimDeviceType
+
+    type_rows = db.execute(
+        select(Device.device_type_code, DimDeviceType.type_name)
+        .outerjoin(DimDeviceType, DimDeviceType.type_code == Device.device_type_code)
+        .where(Device.device_type_code.isnot(None))
+        .distinct()
+    ).all()
+    device_types = [
+        {"value": code, "label": f"{name}({code})" if name and name != code else code}
+        for code, name in sorted(type_rows, key=lambda r: r[0])
+    ]
+    combos = sorted(db.scalars(
+        select(Device.current_combo_name).where(Device.current_combo_name.isnot(None)).distinct()
+    ).all())
+    merchants = sorted(db.scalars(
+        select(Device.merchant_name).where(Device.merchant_name.isnot(None)).distinct()
+    ).all())
+    return {"device_types": device_types, "combos": combos, "merchants": merchants}

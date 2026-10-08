@@ -10,6 +10,7 @@
   │       ④ 时间控件全页唯一（改造前 5 个图表各有粒度开关 → 同屏可能 3 种粒度）。            │
   │ 口径：三源 = complaint_scope 分桶（内部/商户号/外部）；**(外)卡商完全独立，不入总量**   │
   │       （用户 2026-09-11 #53 决策）。时间过滤「登记 OR 完成」与 /summary 对齐。          │
+  │       积压明细筛选含设备维度（设备类型/套餐/商户号/激活时间段，走 devices 表，#273）。   │
   │       详见 docs/standards/投诉渠道口径与对账说明.md ·                                     │
   │       docs/standards/数据时间字段使用规范.md                                                │
   │ 取舍：❌ 不堆图 —— 概览的旧 12+ 图表已下移到渠道页；每个图表必须**指向一个动作**。        │
@@ -372,6 +373,17 @@
             <el-option label="待分派" :value="false" />
             <el-option label="已分派" :value="true" />
           </el-select>
+          <!-- #273: 设备维度筛选(口径=devices 表, 与退款明细同套参数) -->
+          <el-select v-model="backlogFilters.device_type" size="small" placeholder="设备类型" clearable filterable style="width:150px" @change="backlogPage = 1; loadBacklog()">
+            <el-option v-for="t in backlogDimOptions.device_types || []" :key="t.value" :label="t.label" :value="t.value" />
+          </el-select>
+          <el-select v-model="backlogFilters.combo" size="small" placeholder="套餐" clearable filterable style="width:160px" @change="backlogPage = 1; loadBacklog()">
+            <el-option v-for="c in backlogDimOptions.combos || []" :key="c" :label="c" :value="c" />
+          </el-select>
+          <el-select v-model="backlogFilters.merchant" size="small" placeholder="商户号" clearable filterable style="width:160px" @change="backlogPage = 1; loadBacklog()">
+            <el-option v-for="m in backlogDimOptions.merchants || []" :key="m" :label="m" :value="m" />
+          </el-select>
+          <el-date-picker v-model="backlogFilters.activeRange" type="daterange" size="small" range-separator="~" start-placeholder="激活起" end-placeholder="激活止" value-format="YYYY-MM-DD" style="width:210px" @change="backlogPage = 1; loadBacklog()" />
           <el-button size="small" :icon="Refresh" @click="loadBacklog">刷新</el-button>
         </div>
 

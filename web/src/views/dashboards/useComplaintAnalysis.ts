@@ -113,7 +113,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
 import isoWeek from 'dayjs/plugin/isoWeek'
-import { complaintAnalysis, complaintOverview, complaintSummary, complaintDetail, complaintSupplementary, complaintBacklog, complaintBacklogExport, complaintSubjectAnalysis, createAudit } from '@/api/complaint'
+import { complaintAnalysis, complaintOverview, complaintSummary, complaintDetail, complaintSupplementary, complaintBacklog, complaintBacklogExport, complaintBacklogDimOptions, complaintSubjectAnalysis, createAudit } from '@/api/complaint'
 import { useAudit } from '@/composables/useAudit'
 
 export function useComplaintAnalysis() {
@@ -215,7 +215,34 @@ export function useComplaintAnalysis() {
 
   const backlogTotal = ref(0)
 
-  const backlogFilters = reactive({ source_type: '', status: '', has_handler: null })
+  const backlogFilters = reactive({
+    source_type: '', status: '', has_handler: null,
+    // #273: 设备维度筛选(口径=devices 表, 与退款明细同一套后端参数)
+    device_type: '', combo: '', merchant: '', activeRange: null,
+  })
+
+// #273: 设备维度筛选候选项(设备类型/套餐/商户号, 与窗口无关, 一次加载)
+  const backlogDimOptions = ref({ device_types: [], combos: [], merchants: [] })
+
+  async function loadBacklogDimOptions() {
+    try {
+      const res = await complaintBacklogDimOptions()
+      backlogDimOptions.value = res.data || {}
+    } catch { /* 候选项加载失败不阻断页面, 下拉为空仍可手输 */ }
+  }
+
+// #273: 设备维度筛选 → 请求参数(activeRange 为 [起,止] 日期数组)
+  function backlogDimParams() {
+    const p = {}
+    if (backlogFilters.device_type) p.device_type = backlogFilters.device_type
+    if (backlogFilters.combo) p.combo = backlogFilters.combo
+    if (backlogFilters.merchant) p.merchant = backlogFilters.merchant
+    if (Array.isArray(backlogFilters.activeRange) && backlogFilters.activeRange[0]) {
+      p.active_start = backlogFilters.activeRange[0]
+      p.active_end = backlogFilters.activeRange[1]
+    }
+    return p
+  }
 
   const auditVisible = ref(false)
 
@@ -1060,6 +1087,7 @@ export function useComplaintAnalysis() {
       if (backlogFilters.source_type) p.source_type = backlogFilters.source_type
       if (backlogFilters.status) p.status = backlogFilters.status
       if (backlogFilters.has_handler != null) p.has_handler = backlogFilters.has_handler
+      Object.assign(p, backlogDimParams()) // #273 设备维度筛选
       const res = await complaintBacklog(p)
       backlogData.value = res.data || {}
       backlogTotal.value = res.data?.total || 0
@@ -1076,6 +1104,7 @@ export function useComplaintAnalysis() {
       if (backlogFilters.source_type) p.source_type = backlogFilters.source_type
       if (backlogFilters.status) p.status = backlogFilters.status
       if (backlogFilters.has_handler != null) p.has_handler = backlogFilters.has_handler
+      Object.assign(p, backlogDimParams()) // #273 设备维度筛选(导出与列表同口径)
       const res = await complaintBacklogExport(p)
       const blobData = res instanceof Blob ? res : res?.data
       const blob = new Blob([blobData], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
@@ -1166,6 +1195,7 @@ export function useComplaintAnalysis() {
       }
     }
     loadData()
+    loadBacklogDimOptions() // #273: 设备维度候选项(与窗口无关)
   })
 
 // ★ 切换渠道 → 只重新拉该渠道明细(概览/summary 已按区间一次性加载，不必重取)。
@@ -1214,6 +1244,7 @@ export function useComplaintAnalysis() {
     backlogPageSize,
     backlogTotal,
     backlogFilters,
+    backlogDimOptions,
     auditVisible,
     auditSubmitting,
     auditForm,

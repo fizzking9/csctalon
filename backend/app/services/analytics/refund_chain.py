@@ -20,6 +20,8 @@ from app.services.analytics._core import (
     _chain_alias_map,
     _chain_complaint_filter,
     _classify_method,
+    _device_dim_matched_sns,
+    _device_dim_options,
     _is_meta_junk_operator,
     _naive,
     _norm_chain_operator,
@@ -436,16 +438,24 @@ def refund_withdrawal_facets(db: Session, start: str | None = None, end: str | N
         rsn = (r.get("refund_reason") or "").strip() or ""
         if rsn:
             reasons.add(rsn)
+    # #273: 追加设备维度候选项(设备类型/套餐/商户号), 与投诉 backlog 同一口径
     return {
         "operators": sorted(ops, key=str.lower),
         "reasons": sorted(reasons, key=str.lower),
+        **_device_dim_options(db),
     }
 
 def refund_withdrawal_detail(db: Session, start: str | None = None, end: str | None = None,
                               sort: str = "days_desc", page: int = 1, page_size: int = 50,
                               slow_only: bool = False, path: str = "ALL",
-                              comp: str = "all", operator: str = "", reason: str = "") -> dict[str, Any]:
-    """明细列表: 支持分页、排序、路径筛选(ALL/ABD/AB/A/B/D)、慢单筛选、涉诉/操作人/退款原因筛选。"""
+                              comp: str = "all", operator: str = "", reason: str = "",
+                              device_type: str = "", combo: str = "", merchant: str = "",
+                              active_start: str = "", active_end: str = "") -> dict[str, Any]:
+    """明细列表: 支持分页、排序、路径筛选(ALL/ABD/AB/A/B/D)、慢单筛选、涉诉/操作人/退款原因筛选。
+
+    #273: 追加设备维度筛选(设备类型/套餐/商户号/激活时间段), 口径走 devices 表
+    (与分品类运营看板 #271 同源), SN 未建档的行在任一设备维度条件生效时被排除。
+    """
     s = datetime.fromisoformat(start) if start else None
     e = datetime.fromisoformat(end) if end else None
     rows = _build_chain_rows(db, s, e)
@@ -469,6 +479,11 @@ def refund_withdrawal_detail(db: Session, start: str | None = None, end: str | N
             if _chain_complaint_filter(r["complaint_type"], comp)
             and (not operator or (r.get("operator") or "").lower() == operator.lower())
             and (not reason or (reason in (r.get("refund_reason") or "")))]
+    # #273: 设备维度筛选(命中 SN 集合为 None 表示未启用, 跳过)
+    dim_sns = _device_dim_matched_sns(db, device_type or None, combo or None, merchant or None,
+                                      active_start or None, active_end or None)
+    if dim_sns is not None:
+        rows = [r for r in rows if r.get("device_sn") in dim_sns]
     # 排序
     sort = sort or "days_desc"
     key_fn_map = {

@@ -180,16 +180,21 @@ def rw_dims(db: DBSession, _: CurrentUser, start: str | None = None, end: str | 
     return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_dimensions, db, start, end, topn))
 
 
-@router.get("/refund-withdrawal/detail", response_model=R, summary="提现全链路看板-明细列表(支持排序/慢单筛选/涉诉/操作人/退款原因筛选/分页)")
+@router.get("/refund-withdrawal/detail", response_model=R, summary="提现全链路看板-明细列表(支持排序/慢单筛选/涉诉/操作人/退款原因/设备维度筛选/分页)")
 def rw_detail(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None,
               sort: str = Query("days_desc", pattern=r"^(days_(desc|asc)|amount_desc|d1_desc)$"),
               page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500),
               slow_only: bool = False, path: str = Query("ALL", pattern=r"^(ALL|ABD|AB|A|B|D)$"),
               comp: str = Query("all", pattern=r"^(all|any|internal|merchant|external|remark|normal)$"),
               operator: str = Query("", max_length=50),
-              reason: str = Query("", max_length=200)):
-    key = f"rw:detail:{start}:{end}:{sort}:{page}:{page_size}:{int(slow_only)}:{path}:{comp}:{operator}:{reason}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_detail, db, start, end, sort, page, page_size, slow_only, path, comp, operator, reason))
+              reason: str = Query("", max_length=200),
+              device_type: str = Query("", max_length=64, description="#273 设备类型(devices.device_type_code)"),
+              combo: str = Query("", max_length=128, description="#273 套餐(devices.current_combo_name)"),
+              merchant: str = Query("", max_length=128, description="#273 商户号(devices.merchant_name)"),
+              active_start: str = Query("", max_length=10, description="#273 激活时间起(YYYY-MM-DD)"),
+              active_end: str = Query("", max_length=10, description="#273 激活时间止(YYYY-MM-DD)")):
+    key = f"rw:detail:{start}:{end}:{sort}:{page}:{page_size}:{int(slow_only)}:{path}:{comp}:{operator}:{reason}:{device_type}:{combo}:{merchant}:{active_start}:{active_end}"
+    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_detail, db, start, end, sort, page, page_size, slow_only, path, comp, operator, reason, device_type, combo, merchant, active_start, active_end))
 
 
 @router.get("/refund-withdrawal/facets", response_model=R, summary="提现全链路看板-明细筛选候选项(操作人/退款原因)")

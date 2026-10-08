@@ -58,6 +58,11 @@ export function complaintBacklogExport(params) {
   return request.get('/complaints/backlog/export', { params, responseType: 'blob', timeout: 120000 })
 }
 
+// ★ #273: 积压筛选-设备维度候选项(设备类型/套餐/商户号, 与退款明细 facets 同口径)
+export function complaintBacklogDimOptions() {
+  return request.get('/complaints/backlog/device-dim-options')
+}
+
 // 被投诉主体维度分析(主体统计/严重性分布/升级链/退款关联)
 export function complaintSubjectAnalysis(params) {
   return request.get('/complaints/subject-analysis', { params })
