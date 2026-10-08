@@ -73,7 +73,12 @@ from app.models.manual_refund_sync_log import ManualRefundSyncLog  # noqa: F401
 from app.models.measure import Measure  # noqa: F401
 from app.models.merchant import DeviceMerchantLink, Merchant  # noqa: F401
 from app.models.merchant_refund import MerchantRefund  # noqa: F401
-from app.models.metric import MetricDailySnapshot, MetricRegistry, MetricThreshold  # noqa: F401
+from app.models.metric import (
+    MetricDailySnapshot,
+    MetricDictionary,
+    MetricRegistry,
+    MetricThreshold,
+)  # noqa: F401
 from app.models.notification import Notification  # noqa: F401
 from app.models.notification_channel import NotificationChannel  # noqa: F401
 from app.models.onboarding_prompt import OnboardingPrompt  # noqa: F401
@@ -144,6 +149,7 @@ __all__ = [
     "MetricRegistry",
     "MetricThreshold",
     "MetricDailySnapshot",
+    "MetricDictionary",
     "NotificationChannel",
     "AuditJudgment",
     "AuditNote",
