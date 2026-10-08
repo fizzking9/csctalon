@@ -2,6 +2,7 @@
 
 import datetime as _dt
 import logging
+from decimal import Decimal
 from datetime import timedelta
 from typing import Any
 
@@ -43,6 +44,7 @@ from app.services.analytics._core import (
     _INCLUDE_COMPLAINT_FILES,
     COMPLAINT_SPECIALTY,
     COMPLAINT_SPECIALTY_WEIGHT,
+    D,
     TZ,
     _complaint_source_type_case,
     _complaint_subitem_case,
@@ -620,7 +622,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         .group_by("trunc_t")
     ).all()
     a_cnt_map: dict[int, int] = {}
-    a_amt_map: dict[int, float] = {}
+    a_amt_map: dict[int, Decimal] = {}
     for r in rf_rows:
         tt = r._mapping["trunc_t"]
         if tt is None:
@@ -629,7 +631,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         if idx is None:
             continue
         a_cnt_map[idx] = int(r.cnt or 0)
-        a_amt_map[idx] = float(r.amt or 0)
+        a_amt_map[idx] = D(r.amt)
 
     # --- 路线B: 钱包提现(按粒度 笔数+金额) ---
     wb_rows = db.execute(
@@ -642,7 +644,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         .group_by("trunc_t")
     ).all()
     b_cnt_map: dict[int, int] = {}
-    b_amt_map: dict[int, float] = {}
+    b_amt_map: dict[int, Decimal] = {}
     for r in wb_rows:
         tt = r._mapping["trunc_t"]
         if tt is None:
@@ -651,7 +653,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         if idx is None:
             continue
         b_cnt_map[idx] = int(r.cnt or 0)
-        b_amt_map[idx] = float(r.amt or 0)
+        b_amt_map[idx] = D(r.amt)
 
     # --- 路线C: 闪猫退款(按粒度 笔数+金额) ---
     c_cnt_map, c_amt_map = _route_c_shanmao_trend(db, ts, te, grain, _slot_idx)
@@ -670,7 +672,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         .group_by("trunc_t")
     ).all()
     e_cnt_map: dict[int, int] = {}
-    e_amt_map: dict[int, float] = {}
+    e_amt_map: dict[int, Decimal] = {}
     for r in e_rows:
         tt = r._mapping["trunc_t"]
         if tt is None:
@@ -679,7 +681,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         if idx is None:
             continue
         e_cnt_map[idx] = int(r.cnt or 0)
-        e_amt_map[idx] = float(r.amt or 0)
+        e_amt_map[idx] = D(r.amt)
 
     # 投诉: ★★ #85 口径修正 —— 由「工单 + 315全表 + 卡商全表」改为
     #   **与 #81 核心指标同源**（分桶 + 扣 315 已 matched 重叠 + 剥卡商）
@@ -808,7 +810,9 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
     # ── 填充到槽位: 单日填当前小时之前, 多日填全部(最后一天可能实时) ──
     slots = list(range(n_slots))
     def _fill_list(*maps, kind='count'):
-        """将多个map按slot合并成list, 返回各路线list + 合计list"""
+        """将多个map按slot合并成list, 返回各路线list + 合计list。
+        #222: 金额路径统一用 Decimal 累加（C/D 路线已返回 Decimal，A/B/E 也改为 D()），
+              出参边界 float(round(...)) 转 JSON number。"""
         n_maps = len(maps)
         lists = [[] for _ in range(n_maps)]
         total_list = []
@@ -817,12 +821,12 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
                 for L in lists: L.append(None)
                 total_list.append(None)
             else:
-                total = 0
+                total = 0 if kind == 'count' else D(0)
                 for j, m in enumerate(maps):
-                    v = m.get(i, 0)
-                    lists[j].append(v if kind == 'count' else v)
+                    v = m.get(i, 0 if kind == 'count' else D(0))
+                    lists[j].append(v if kind == 'count' else float(round(v, 2)))
                     total += v
-                total_list.append(total if kind == 'count' else round(total, 2))
+                total_list.append(total if kind == 'count' else float(round(total, 2)))
         return lists + [total_list]
 
     # 退款笔数: A/B/C/D 四路 + 合计
@@ -833,7 +837,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
     r_amt_a, r_amt_b, r_amt_c, r_amt_d, r_amt_total = amt_lists
     # 实际现金流E (笔数+金额)
     e_cnt_list = [e_cnt_map.get(i, 0) if i <= max_slot else None for i in slots]
-    e_amt_list = [round(e_amt_map.get(i, 0), 2) if i <= max_slot else None for i in slots]
+    e_amt_list = [float(round(e_amt_map.get(i, D(0)), 2)) if i <= max_slot else None for i in slots]
 
     # 旧兼容字段 = 四路合计
     refund_count = r_cnt_total

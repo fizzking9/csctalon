@@ -429,7 +429,7 @@ def refund_personnel_analysis(
         reason_fail_cnt[reason] = reason_fail_cnt.get(reason, 0) + 1
     for r, s in reason_fail_sum.items():
         c = reason_fail_cnt.get(r, 0)
-        reason_fail_avg[r] = (s / c) if c else 0.0
+        reason_fail_avg[r] = (s / c) if c else D(0)
     overall_fail_avg = sum(reason_fail_sum.values()) / max(sum(reason_fail_cnt.values()), 1)
 
     # 查询每个人员的首末接待时间
@@ -472,7 +472,7 @@ def refund_personnel_analysis(
         host_sns = op_host_sns.get(op, set())
         success_sns = host_sns - global_fail_sns
         # 估算挽回金额 = 成功SN数 × 同类失败平均金额
-        est_amt = 0.0
+        est_amt = D(0)
         for sn in success_sns:
             sn_reason = core["sn_host_reason"].get(sn, "其他(填写备注)")
             avg = reason_fail_avg.get(sn_reason, overall_fail_avg)
@@ -1193,7 +1193,7 @@ def refund_decision_overview(
         s/e 为空(无前周期)时回零。
         """
         if not s or not e:
-            return {"comp_cnt": 0, "comp_amt": 0.0, "online_cnt": 0, "online_amt": 0.0}
+            return {"comp_cnt": 0, "comp_amt": D(0), "online_cnt": 0, "online_amt": D(0)}
         rows = db.execute(text("""
             SELECT r.refund_amount,
                    bool_or(st.service_item ILIKE '%工信部%' OR st.service_item ILIKE '%12315%'
@@ -1212,9 +1212,9 @@ def refund_decision_overview(
             GROUP BY r.refund_no, r.refund_amount
         """), {"ts": s, "te": e}).fetchall()
         comp_cnt = 0
-        comp_amt = 0.0
+        comp_amt = D(0)
         online_cnt = 0
-        online_amt = 0.0
+        online_amt = D(0)
         for r in rows:
             online_cnt += 1
             amt = D(r.refund_amount)
@@ -1365,7 +1365,7 @@ def refund_decision_overview(
     for d in sorted(route_map):
         b = route_map[d]
         row = {"date": d}
-        total_cnt = total_amt = 0
+        total_cnt = 0; total_amt = D(0)
         for k in route_keys:
             v = b.get(k, [0, Decimal("0")])
             row[f"{k}_cnt"] = v[0]
@@ -1985,7 +1985,7 @@ def refund_export_all(
     for d in sorted(route_map):
         b = route_map[d]
         row = {"日期": d}
-        total_cnt = total_amt = 0
+        total_cnt = 0; total_amt = D(0)
         for name, _ in agg_queries:
             v = b.get(name, [0, Decimal("0")])
             row[f"{name}笔数"] = v[0]
@@ -2085,7 +2085,7 @@ def refund_group_comparison(
         reason_fail_cnt[reason] = reason_fail_cnt.get(reason, 0) + 1
     for r, s in reason_fail_sum.items():
         c = reason_fail_cnt.get(r, 0)
-        reason_fail_avg[r] = (s / c) if c else 0.0
+        reason_fail_avg[r] = (s / c) if c else D(0)
     overall_fail_avg = sum(reason_fail_sum.values()) / max(sum(reason_fail_cnt.values()), 1)
 
     groups = []
@@ -2671,9 +2671,9 @@ def refund_recovery_analysis(
     #   放弃(系统清退): status 申请中 / 无需退款 / sys操作 → abandon_amount
     #   退充(正常退充): remark/原因含"退充" → recharge_amount
     #   成功(拦截成功): 成功SN对应的估算金额 = 对应失败SN的平均金额 * 成功数 (粗略估算)
-    abandon_cnt = 0; abandon_amount = 0.0
-    fail_cnt = 0; fail_amount = 0.0
-    recharge_cnt = 0; recharge_amount = 0.0
+    abandon_cnt = 0; abandon_amount = D(0)
+    fail_cnt = 0; fail_amount = D(0)
+    recharge_cnt = 0; recharge_amount = D(0)
     for sn, meta in sn_failed_meta.items():
         status = (meta.get("status") or "").strip()
         reason = (meta.get("reason") or "").lower()
@@ -2689,7 +2689,7 @@ def refund_recovery_analysis(
 
     success_cnt = max(0, total_success)  # 拦截成功单数 = 成功SN数
     # 成功金额 = 0 (业务口径: 挽回成功的设备没有进入退款流程, 无实际退款工单可对应金额, 暂不做估算)
-    success_amount = 0.0
+    success_amount = D(0)
 
     actual_refund = fail_amount + recharge_amount  # 实际退款 = 失败金额 + 退充金额
     # 费占比改为单量口径: 成功单量 / (成功单量 + 实际退款单量(fail+recharge))
@@ -3117,10 +3117,10 @@ def refund_recovery_analysis(
     # ---- 2026-08-12 追加: Top5 高风险设备 + 金额分桶 (Tab1 强化) ----
     top_risk_devices = []
     amount_buckets = [
-        {"bucket": "小额(<100)", "sn_cnt": 0, "amount": 0.0, "ratio": 0.0},
-        {"bucket": "中额(100-500)", "sn_cnt": 0, "amount": 0.0, "ratio": 0.0},
-        {"bucket": "大额(500-2000)", "sn_cnt": 0, "amount": 0.0, "ratio": 0.0},
-        {"bucket": "超大额(>2000)", "sn_cnt": 0, "amount": 0.0, "ratio": 0.0},
+        {"bucket": "小额(<100)", "sn_cnt": 0, "amount": D(0), "ratio": 0.0},
+        {"bucket": "中额(100-500)", "sn_cnt": 0, "amount": D(0), "ratio": 0.0},
+        {"bucket": "大额(500-2000)", "sn_cnt": 0, "amount": D(0), "ratio": 0.0},
+        {"bucket": "超大额(>2000)", "sn_cnt": 0, "amount": D(0), "ratio": 0.0},
     ]
     _risk_devices = []
     for sn in global_fail_sns:
