@@ -381,9 +381,10 @@ class SyncTaskManager:
                 # _current_task 保留到下一个任务开始前,方便查询
             # 缓存失效兜底: 同步完成后统一失效看板缓存 (含 BMS/SCRM 并发合并任务),
             # 避免同步后仍读到旧聚合结果。complaint:* 一并失效(BMS 投诉工单同步后会变)。
+            # reception:* (#228): SCRM 同步后接待看板缓存失效, 否则接待分析页读到旧聚合。
             try:
                 from app.core.redis_client import cache_invalidate_recent_days
-                for pat in ("today:*", "refund:*", "complaint:*"):
+                for pat in ("today:*", "refund:*", "complaint:*", "reception:*"):
                     cache_invalidate_recent_days(pat)
             except Exception as ce:  # noqa: BLE001
                 logger.debug(f"缓存失效兜底失败(不影响同步): {ce}")
