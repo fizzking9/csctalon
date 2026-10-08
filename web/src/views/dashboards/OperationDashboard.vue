@@ -156,7 +156,7 @@
         </template>
       </SectionHeader>
       <ChartCard body-style="padding: 8px 10px">
-        <BaseChart :option="hourlyOption" height="360px" />
+        <BaseChart :option="hourlyOption" height="360px" @chartClick="onChartClick" />
       </ChartCard>
     </section>
 
@@ -1044,6 +1044,37 @@
         </el-table>
       </el-card>
     </section>
+
+    <!-- #233 B1.5-2 事件标记详情(点击趋势图 markPoint/markLine 弹出) -->
+    <el-dialog v-model="incidentDetailVisible" title="事件详情" width="520px">
+      <el-descriptions v-if="activeIncidentDetail" :column="1" border>
+        <el-descriptions-item label="事件类型">
+          <el-tag :type="activeIncidentDetail.event_type === '经营事件' ? 'success' : 'danger'" size="small" effect="dark">
+            {{ activeIncidentDetail.event_type }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="事项名">{{ activeIncidentDetail.title }}</el-descriptions-item>
+        <el-descriptions-item label="主体">{{ activeIncidentDetail.subject || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="发生时间">{{ formatTime(activeIncidentDetail.occurred_at) }}</el-descriptions-item>
+        <el-descriptions-item v-if="activeIncidentDetail.event_type === '经营事件' && activeIncidentDetail.start_at" label="生效起止">
+          {{ formatTime(activeIncidentDetail.start_at) }}
+          <span v-if="activeIncidentDetail.end_at"> ~ {{ formatTime(activeIncidentDetail.end_at) }}</span>
+          <span v-else> ~ (点事件)</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="严重程度">{{ activeIncidentDetail.severity || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="影响">{{ activeIncidentDetail.impact || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="明细">{{ activeIncidentDetail.detail || '-' }}</el-descriptions-item>
+        <el-descriptions-item v-if="activeIncidentDetail.event_type === '经营事件' && activeIncidentDetail.target_audience" label="目标群体">
+          {{ activeIncidentDetail.target_audience }}
+        </el-descriptions-item>
+        <el-descriptions-item v-if="activeIncidentDetail.event_type === '经营事件' && activeIncidentDetail.impact_metrics" label="影响指标">
+          <div v-for="(v, k) in activeIncidentDetail.impact_metrics" :key="k" style="font-size:13px;line-height:1.6">· {{ k }}: {{ v }}</div>
+        </el-descriptions-item>
+      </el-descriptions>
+      <template #footer>
+        <el-button @click="incidentDetailVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1061,6 +1092,9 @@ import weekOfYear from 'dayjs/plugin/weekOfYear'
 import { buildStack, sourceKindMeta, RECEPTION_BREAKDOWN_TIP } from '@/utils/receptionSource'
 import { getWeekRange, getWeekRangeStr, weekLabel } from '@/utils/weekRange'
 import { QuestionFilled, CircleCheckFilled, InfoFilled } from '@element-plus/icons-vue'
+
+// #233 B1.5-2 事件详情对话框时间格式化(轻量, 不污染 useOperationDashboard)
+const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-')
 
 import { useOperationDashboard } from './useOperationDashboard'
 
@@ -1159,6 +1193,12 @@ const {
   buildTrendSeries,
   buildTrendLegend,
   hourlyOption,
+  // #233 B1.5-2 时间轴标注
+  incidentMarkers,
+  incidentMarkerMap,
+  activeIncidentDetail,
+  incidentDetailVisible,
+  onChartClick,
   receptionPieOption,
   refundReasonOption,
   departmentOptions,

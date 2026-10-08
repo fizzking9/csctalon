@@ -10,6 +10,13 @@ export function getIncident(id) {
   return request.get(`/incidents/${id}`)
 }
 
+// #233 B1.5-2 时间轴事件标记(供 ECharts markPoint/markLine 消费)
+// 入参: { start: 'YYYY-MM-DD', end: 'YYYY-MM-DD', event_type?: '经营事件'/'异常事故' }
+// 返回: 数组 [{id, title, event_type, occurred_at, start_at, end_at, severity, ...}]
+export function listIncidentMarkers(params) {
+  return request.get('/incidents/markers/timeline', { params })
+}
+
 // 登记影响事件
 export function createIncident(payload) {
   return request.post('/incidents', payload)

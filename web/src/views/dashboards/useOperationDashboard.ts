@@ -207,6 +207,7 @@ import quarterOfYear from 'dayjs/plugin/quarterOfYear'
 import weekOfYear from 'dayjs/plugin/weekOfYear'
 import { buildStack, sourceKindMeta, RECEPTION_BREAKDOWN_TIP } from '@/utils/receptionSource'
 import { getWeekRange, getWeekRangeStr, weekLabel } from '@/utils/weekRange'
+import { useIncidentMarkers } from '@/composables/useIncidentMarkers'
 
 export function useOperationDashboard() {
   dayjs.extend(isoWeek)
@@ -220,6 +221,25 @@ export function useOperationDashboard() {
   const isMobile = ref(false)
 
   let _mq = null
+
+  // #233 B1.5-2 时间轴标注层: 趋势图事件标记(markPoint/markLine)
+  const {
+    markers: incidentMarkers,
+    markerDetailMap: incidentMarkerMap,
+    loading: incidentMarkersLoading,
+    loadMarkers: loadIncidentMarkers,
+    buildChartMarks: buildIncidentMarks,
+    resolveClick: resolveIncidentClick,
+  } = useIncidentMarkers()
+  const activeIncidentDetail = ref(null)
+  const incidentDetailVisible = ref(false)
+  function onChartClick(params) {
+    if (!params || !['markPoint', 'markLine'].includes(params.componentType)) return
+    const m = resolveIncidentClick(params)
+    if (!m) return
+    activeIncidentDetail.value = m
+    incidentDetailVisible.value = true
+  }
 
 // ========== 时间选择 ==========
   const grain = ref('week')
@@ -1077,6 +1097,12 @@ export function useOperationDashboard() {
     const complaintBySource = trendSelectedGroups.value.includes('complaint')
       ? buildComplaintBySource(labels)
       : null
+    // #233 B1.5-2 时间轴标注: trendGrain='day' 时是小时轴; 否则是日/周/月轴
+    const seriesList = buildTrendSeries(data, complaintBySource)
+    if (seriesList.length) {
+      const marks = buildIncidentMarks(labels, { kind: trendGrain.value === 'day' ? 'hourly' : 'daily' })
+      seriesList[0] = { ...seriesList[0], markPoint: marks.markPoint, markLine: marks.markLine }
+    }
     return {
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
       legend: {
@@ -1117,7 +1143,7 @@ export function useOperationDashboard() {
           splitLine: { show: false },
         },
       ],
-      series: buildTrendSeries(data, complaintBySource),
+      series: seriesList,
     }
   })
 
@@ -1385,7 +1411,7 @@ export function useOperationDashboard() {
     loading.value = true
     const { start, end } = getDateRange()
     const params = { start, end, trend_grain: trendGrain.value }
-  
+
     try {
       const [kpiRes, hourlyRes, receptionRes, refundRes, staffRes, recoveryRes, complaintSummaryRes, complaintDetailRes, subjectRes, healthRes] = await Promise.all([
         today.kpi(params),
@@ -1400,6 +1426,9 @@ export function useOperationDashboard() {
         // ★ #87: 失败不阻断整页（新指标，后端老版本/异常时降级为不渲染）
         complaintHealthMetrics({ start, end }).catch(() => ({ data: null })),
       ])
+
+      // #233 B1.5-2 时间轴事件标记: 与数据并行加载, 失败不影响主流程
+      loadIncidentMarkers({ start, end }).catch(() => {})
   
       if (kpiRes.data) kpiData.value = kpiRes.data
       if (hourlyRes.data) hourlyData.value = hourlyRes.data
@@ -1459,6 +1488,12 @@ export function useOperationDashboard() {
     yearOffset,
     customDateRange,
     trendGrain,
+    // #233 B1.5-2 时间轴标注
+    incidentMarkers,
+    incidentMarkerMap,
+    activeIncidentDetail,
+    incidentDetailVisible,
+    onChartClick,
     quickGrainOpt,
     grainQuickOptions,
     filterDepartment,

@@ -102,6 +102,86 @@ def list_incidents(
     return R(data=PageBase(items=[_serialize(i) for i in items], total=total or 0, page=page, page_size=page_size))
 
 
+@router.get("/markers/timeline", response_model=R, summary="时间轴事件标记 (#233)")
+def list_timeline_markers(
+    db: DBSession,
+    current_user: CurrentUser,
+    start: str = Query(..., description="查询起始 yyyy-mm-dd(含)"),
+    end: str = Query(..., description="查询结束 yyyy-mm-dd(含)"),
+    event_type: str | None = Query(None, description="可选过滤: 经营事件/异常事故"),
+):
+    """返回时间窗口内的事件标记数据 (供 ECharts markPoint/markLine 消费)。
+
+    #233 B1.5-2 看板时间轴标注层:
+    - 点事件(异常事故 / start_at 空的经营事件) → 前端 markPoint
+    - 区间事件(start_at + end_at 都有的经营事件) → 前端 markLine
+    - 推送给前端: id/title/event_type/occurred_at/start_at/end_at/severity 等
+    - 周期性事件 (is_recurring=True) 也包含, 由前端按 valid_from~valid_to 展开
+
+    时间窗口以 occurred_at 或 start_at 落在 [start, end] 为准; 若都没填则
+    用 created_at 兜底(避免漏登记后未补时间的事件)。
+
+    路由顺序: 必须放在 `/{incident_id}` 之前, 否则会被参数路由抢先匹配
+    (FastAPI 按声明顺序匹配, "markers" 会被识别为 incident_id 字符串导致 422)。
+    """
+    try:
+        s_dt = datetime.fromisoformat(start)
+        e_dt = datetime.fromisoformat(end)
+        # end 含当天 → 加 1 天 - 1 秒, 覆盖到当天 23:59:59
+        from datetime import timedelta
+        e_dt = e_dt + timedelta(days=1) - timedelta(seconds=1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start/end 需为 yyyy-mm-dd 格式")
+
+    # 取窗口内所有事件; 不用 occurred_at 单列过滤 (经营事件可能 occurred_at
+    # 为空, 改用 OR 兜底 start_at/created_at 防漏)
+    from sqlalchemy import or_
+    stmt = select(Incident).where(
+        or_(
+            Incident.occurred_at.between(s_dt, e_dt),
+            Incident.start_at.between(s_dt, e_dt),
+            Incident.end_at.between(s_dt, e_dt),
+            # 兜底: 没填时间的事件用 created_at 看是否在窗口内
+            Incident.occurred_at.is_(None) & Incident.start_at.is_(None)
+            & Incident.created_at.between(s_dt, e_dt),
+        )
+    )
+    if event_type:
+        try:
+            stmt = stmt.where(Incident.event_type == IncidentEventType(event_type).value)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的事件类型: {event_type}")
+
+    rows = list(db.scalars(stmt.order_by(Incident.occurred_at.asc().nulls_last(),
+                                         Incident.start_at.asc().nulls_last(),
+                                         Incident.id.asc())))
+    # 返回精简字段集(前端构造 markPoint/markLine 用), 详情字段一并给便于直接弹窗
+    return R(data=[
+        {
+            "id": i.id,
+            "title": i.title,
+            "event_type": i.event_type,
+            "occurred_at": i.occurred_at.isoformat() if i.occurred_at else None,
+            "start_at": i.start_at.isoformat() if i.start_at else None,
+            "end_at": i.end_at.isoformat() if i.end_at else None,
+            "severity": i.severity,
+            "category": i.category,
+            "subject": i.subject,
+            "detail": i.detail,
+            "impact": i.impact,
+            "target_audience": i.target_audience,
+            "impact_metrics": i.impact_metrics,
+            "is_recurring": i.is_recurring,
+            "recurrence_pattern": i.recurrence_pattern,
+            "valid_from": i.valid_from.isoformat() if i.valid_from else None,
+            "valid_to": i.valid_to.isoformat() if i.valid_to else None,
+            "status": i.status,
+            "is_closed": i.is_closed,
+        }
+        for i in rows
+    ])
+
+
 @router.get("/{incident_id}", response_model=R, summary="异常事件详情")
 def get_incident(incident_id: int, db: DBSession, current_user: CurrentUser):
     i = db.get(Incident, incident_id)

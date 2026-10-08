@@ -165,6 +165,7 @@ import { complaintSummary, complaintDetail, complaintBacklog } from '@/api/compl
 import { useAudit } from '@/composables/useAudit'
 import { SOURCE_KINDS, buildStack, stackTip, sourceKindMeta } from '@/utils/receptionSource'
 import { getWeekRange as _getWeekRange } from '@/utils/weekRange'
+import { useIncidentMarkers } from '@/composables/useIncidentMarkers'
 import dayjs from 'dayjs'
 
 export function useToday() {
@@ -175,6 +176,27 @@ export function useToday() {
   const isMobile = ref(false)
 
   let _mq = null
+
+  // #233 B1.5-2 看板时间轴标注层: 趋势图事件标记(markPoint/markLine)
+  const {
+    markers: incidentMarkers,
+    markerDetailMap: incidentMarkerMap,
+    loading: incidentMarkersLoading,
+    loadMarkers: loadIncidentMarkers,
+    buildChartMarks: buildIncidentMarks,
+    resolveClick: resolveIncidentClick,
+  } = useIncidentMarkers()
+  // 当前激活的事件详情(点击 markPoint/markLine 后填充, 用于弹窗展示)
+  const activeIncidentDetail = ref(null)
+  const incidentDetailVisible = ref(false)
+  function onChartClick(params) {
+    // 只处理 markPoint/markLine 点击, 不响应 series 数据点点击(避免误触)
+    if (!params || !['markPoint', 'markLine'].includes(params.componentType)) return
+    const m = resolveIncidentClick(params)
+    if (!m) return
+    activeIncidentDetail.value = m
+    incidentDetailVisible.value = true
+  }
 
 // 视图模式: day=日(默认), week=周(完整自然周 周一~周日)
   const viewMode = ref('day')
@@ -927,6 +949,14 @@ export function useToday() {
     const labels = data?.hour_labels || data?.labels || data?.slot_labels || data?.hours || []
     const mob = isMobile.value
     const showRefund = trendSelectedGroups.value.includes('refund')
+    // #233 B1.5-2 注入事件标记: 点事件 → markPoint; 区间事件 → markLine
+    // kind: 日视图=hourly (labels 形如 'HH:mm'); 周视图=daily (labels 形如 'MM-DD')
+    const seriesList = buildTrendSeries(data)
+    if (seriesList.length) {
+      const marks = buildIncidentMarks(labels, { kind: viewMode.value === 'week' ? 'daily' : 'hourly' })
+      // 注入到第一个 series(它是主接待量, 与事件影响最直接相关)
+      seriesList[0] = { ...seriesList[0], markPoint: marks.markPoint, markLine: marks.markLine }
+    }
     return {
       tooltip: { trigger: 'axis' },
       legend: {
@@ -965,7 +995,7 @@ export function useToday() {
           splitLine: { show: false },
         },
       ],
-      series: buildTrendSeries(data),
+      series: seriesList,
     }
   })
 
@@ -1158,7 +1188,7 @@ export function useToday() {
       const { start, end } = getRange()
       const params = { start, end }
       const grain = viewMode.value === 'week' ? 'day' : 'hour'
-      
+
       const [kpiRes, hourlyRes, staffRes, queueRes, recoveryRes, complaintSummaryRes, complaintDetailRes, backlogRes] = await Promise.all([
         today.kpi(params),
         today.hourlyTrend({ ...params, trend_grain: grain }),
@@ -1170,7 +1200,10 @@ export function useToday() {
         // 积压水位: 固定近30天窗口(登记日期落在窗口内的未完成), 避免历史遗留无限堆叠
         complaintBacklog({ start: dayjs().subtract(30, 'day').format('YYYY-MM-DD'), end: dayjs().format('YYYY-MM-DD') }),
       ])
-      
+
+      // #233 B1.5-2 时间轴事件标记: 与数据并行加载(不阻塞主数据, 失败也不影响主流程)
+      loadIncidentMarkers({ start, end }).catch(() => {})
+
       const data = { kpiRes, hourlyRes, staffRes, queueRes, recoveryRes, complaintSummaryRes, complaintDetailRes, backlogRes }
       _viewCache = { key: _viewCacheKey(), data }
       applyViewData(data)
@@ -1236,6 +1269,12 @@ export function useToday() {
     isMobile,
     _mq,
     viewMode,
+    // #233 B1.5-2 时间轴标注
+    incidentMarkers,
+    incidentMarkerMap,
+    activeIncidentDetail,
+    incidentDetailVisible,
+    onChartClick,
     kpiData,
     hourlyData,
     staffData,
