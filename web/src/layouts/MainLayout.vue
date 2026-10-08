@@ -678,13 +678,44 @@ async function handleManualSync() {
   margin: auto 16px 16px;
 }
 
-/* 移动端响应式(<768px) */
+/* 移动端响应式(<768px) —— 全局移动端框架主入口（#225）
+   设计说明（Design Rationale）
+   目的：替不在工位的值班者保住「找菜单 → 看页面」这条最短路径 ——
+         侧边栏在窄屏整体让位给内容区，需要时从左侧抽屉唤出。
+   逻辑：抽屉复用与桌面端同一份 config/menu.js（#46 已修"两端菜单漂移"），
+         断点 768px 与 main.css / useToday 同源；桌面端 DOM 结构零改动，
+         所有差异仅由本 media 查询承载。
+   口径：仅约束 ≤768px 视口；汉堡按钮触控目标加大到 44px（iOS HIG），
+         其余 header 按钮维持 small 但补 6px padding 保底 32px。
+   取舍：❌ 不做手势滑动开关抽屉（el-drawer 自带遮罩点击关闭已够用，
+         自研手势会与路由过渡动画冲突）；❌ 不为窄屏改路由结构。
+   工单：#225 */
 @media (max-width: 768px) {
   .header {
     padding: 0 8px;
   }
   .header-left {
     gap: 8px;
+  }
+  /* 汉堡按钮：窄屏唯一菜单入口，触控目标 44px（iOS HIG），
+     比其它 small 按钮更大的热区，避免"点不到菜单"这一最高频阻塞 */
+  .collapse-btn {
+    font-size: 22px;
+    padding: 10px;
+    margin-left: -6px; /* 抵消 padding 造成的视觉偏移，保持左对齐 */
+    min-width: 44px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  /* 面包屑在窄屏可能很长（页面标题如「投诉分析·渠道明细」），
+     限制最大宽度并省略号截断，不挤压右侧用户区 */
+  .header-left :deep(.el-breadcrumb) {
+    max-width: 40vw;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
   .user-name,
   .role-tag {
@@ -693,6 +724,9 @@ async function handleManualSync() {
   .quick-tools {
     margin-right: 4px;
     padding-right: 4px;
+    /* 快捷工具在窄屏允许收缩，避免挤爆 header */
+    flex-shrink: 1;
+    overflow: hidden;
   }
   .quick-tools .el-button {
     padding: 6px;
@@ -702,6 +736,16 @@ async function handleManualSync() {
   }
   .sync-banner {
     margin: 0 8px;
+  }
+  /* 页脚备案信息在窄屏允许换行（桌面是单行） */
+  .global-footer {
+    line-height: 1.6;
+    padding: 12px 8px 4px;
+  }
+  .global-footer .copyright {
+    display: block;
+    margin-left: 0;
+    margin-top: 4px;
   }
 }
 </style>

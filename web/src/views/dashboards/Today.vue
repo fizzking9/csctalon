@@ -1635,8 +1635,28 @@ const {
   margin-left: 2px;
 }
 
-/* 窄屏自适应 */
+/* 窄屏自适应（#225 移动端试点）
+   设计说明（Design Rationale）
+   目的：替**不在工位的值班主管**保住 Today 页这条最高频看板路径 ——
+         手机上能看清核心 KPI、知道此刻有无影响事件、能点开下钻明细，
+         不追求与桌面端信息密度一致。
+   逻辑：全部用 media query 覆盖桌面样式，DOM 结构零改动；
+         断点 768px 与 main.css / MainLayout 同源。
+         布局主线 = 「标题区换行 → KPI 2 列网格 → 图表区竖排 →
+         双列卡片堆叠为单列 → 表格横向滚动」。
+   口径：仅约束 ≤768px 视口；桌面端（≥769px）下列规则全部不生效。
+   取舍（不做什么及原因）：
+     · ❌ 不为窄屏删减 KPI 卡数量 —— 5 张卡每张都对应一个下钻动作，
+       删了等于砍功能；改为 2 列网格压缩高度；
+     · ❌ 不在窄屏隐藏趋势图 —— 趋势是值班判断"现在忙不忙"的核心依据，
+       改为压缩高度与字号；
+     · ❌ 不为效率表做"卡片式重排" —— 15+ 列的核算表卡片化会丢列间对比能力，
+       保留表格横向滚动（Element 自带），department 列已由 useToday 在窄屏
+       默认隐藏（isMobile 联动）；
+     · ❌ 不为抽屉/弹窗在本页单独适配 —— 已上移到 main.css 全局覆盖。
+   工单：#225 */
 @media (max-width: 768px) {
+  /* ── 标题区：日期/切换/刷新挤不下，允许换行并把操作区推到第二行 ── */
   .td-header {
     flex-wrap: wrap;
     gap: 8px;
@@ -1644,15 +1664,44 @@ const {
   .header-actions {
     width: 100%;
     justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  /* 日期选择器在窄屏压缩，避免独占一行 */
+  .header-actions :deep(.el-date-editor) {
+    width: 128px !important;
   }
   .page-title {
     font-size: 16px;
   }
+  /* 标题右侧"实时数据/更新于"标签在窄屏换行显示 */
+  .title-date-sep,
+  .title-date {
+    display: inline;
+  }
+
+  /* ── 值班组长条：多 chip 换行不挤压 ── */
   .duty-leader-bar {
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
   }
+  .duty-chips {
+    width: 100%;
+  }
+  .duty-chip {
+    /* chip 触控目标保底 32px（原 small 约 24px 偏小） */
+    min-height: 28px;
+    padding: 4px 8px;
+  }
+
+  /* ── 影响事件横幅：chip 换行 ── */
+  .impact-banner-body {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  /* ── 卡片通用：收窄内边距换可见行数 ── */
   .section-card {
     padding: 10px;
   }
@@ -1660,25 +1709,139 @@ const {
     flex-wrap: wrap;
     gap: 6px;
   }
+  .section-title {
+    font-size: 14px;
+  }
+  .section-desc {
+    /* 描述文字在窄屏隐藏 —— 与标题语义重复，占位换可见行数 */
+    display: none;
+  }
+  .section-header-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* ── 核心 KPI：5 列 → 2 列网格，值字号压缩防溢出 ── */
   .kpi-strip-grid {
     grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+  }
+  .kpi-strip-item {
+    padding: 6px 8px;
+    gap: 6px;
+  }
+  .ksi-icon {
+    width: 20px;
+    height: 20px;
+    font-size: 11px;
   }
   .ksi-value {
     font-size: 15px;
   }
+  .ksi-yoy {
+    font-size: 10px;
+  }
+  .ksi-label {
+    font-size: 10px;
+  }
+  /* 堆叠比例条下的图例在窄屏允许换行（原 flex-wrap:wrap 已有，此处仅压字号） */
+  .ksi-sub {
+    font-size: 9px;
+    gap: 4px;
+  }
+
+  /* ── 趋势图区：勾选组在窄屏独占一行（原与标题同行会挤压） ── */
+  .trend-group-check {
+    width: 100%;
+  }
+  .trend-group-check :deep(.el-checkbox-button__inner) {
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+
+  /* ── 影响事件/政策/待办/专项（el-col :xs="24" 已自动堆叠为单列），
+        此处仅压缩内部行距 ── */
+  .incident-item,
+  .policy-item,
+  .todo-item,
+  .task-item {
+    font-size: 12px;
+    padding: 4px 0;
+  }
+  .incident-title,
+  .todo-title,
+  .task-title {
+    /* 长标题省略号，避免挤压 tag */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* ── 退款挽回 / 投诉三源 / 卡商：紧凑 KPI 行 2 列网格 ── */
+  .compact-kpi-row {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+  }
   .ck-value {
     font-size: 16px;
   }
-  .bw-value {
-    font-size: 26px;
+  .ck-rh-num {
+    font-size: 15px;
   }
+  /* 退款原因分布图与"成功率解读"在窄屏上下堆叠（el-col :xs="24" 已处理），
+     解读区不再垂直居中（内容少时上方留白过大） */
   .recovery-side {
     margin-top: 8px;
+    justify-content: flex-start;
   }
+  .compact-pie-wrap {
+    margin-top: 6px;
+  }
+
+  /* ── 积压水位卡：在窄屏独占一行（el-col :xs="24"），高度压缩 ── */
   .backlog-watermark {
     margin-top: 8px;
     min-height: 80px;
     padding: 10px 12px;
+  }
+  .bw-value {
+    font-size: 26px;
+  }
+
+  /* ── 表格：窄屏下列宽总和远超屏宽，Element 自带横向滚动接管。
+        此处仅保证表格外层 section-card 不裁剪（padding 已收窄），
+        表格字号下探一档以在横滚时仍保持可读密度 ── */
+  .section-card :deep(.el-table) {
+    font-size: 12px;
+  }
+  .section-card :deep(.el-table .cell) {
+    padding: 0 6px;
+    line-height: 1.4;
+  }
+  /* 筛选栏在窄屏允许换行，select 不挤压 */
+  .sn-filter-bar {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .sn-filter-bar :deep(.el-select) {
+    flex: 1 1 30%;
+    min-width: 100px;
+  }
+  .sn-filter-hint {
+    width: 100%;
+  }
+
+  /* ── AI/系统账户单列区块：标题文字在窄屏允许换行 ── */
+  .virtual-staff-title {
+    flex-wrap: wrap;
+    line-height: 1.4;
+  }
+
+  /* ── 页内折叠面板：头部文字在窄屏字号下探，防止登记/处理计数溢出 ── */
+  .collapse-title {
+    font-size: 12px;
   }
 }
 </style>

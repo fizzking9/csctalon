@@ -163,4 +163,16 @@ async function handleLogin() {
 .login-footer a:hover {
   color: #409eff;
 }
+
+/* 窄屏自适应（#225）：登录页是移动端第一入口，400px 固定宽在 375px 屏会溢出。
+   仅收窄卡片宽度与内边距，表单控件保持 size="large" 天然满足触控目标。 */
+@media (max-width: 768px) {
+  .login-card {
+    width: min(400px, 92vw);
+    padding: 12px 4px;
+  }
+  .login-header h2 {
+    font-size: 18px;
+  }
+}
 </style>
