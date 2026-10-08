@@ -71,6 +71,21 @@ jobs:
             exit 0
           fi
 
+          # ── O-11 (R-P2-15): A-20260903-001 §2.3 子工单判定 ──
+          # 父子工单在本仓库以「父单正文引用 #N」关联（见 docs/design/20260905-BMS工单草稿.md）。
+          # 规则: 父单正文引用的工单中仍有 open 者 → 仅评论不关闭; 全部 closed → 正常关闭。
+          # 实现: 独立脚本(避免 YAML block 内嵌多行 Python 的缩进陷阱), 输出逗号分隔的 open 引用号。
+          open_children=$(curl -s -H "Authorization: token ${GITEA_TOKEN}" "$api/issues/${issue_no}" \
+            | python3 scripts/ci_open_referenced_issues.py --api "$api" --exclude "${issue_no}" 2>/dev/null || true)
+          if [ -n "$open_children" ]; then
+            echo "⏸ 存在未关闭子工单/关联工单(#${open_children}), 仅评论不关闭"
+            curl -s -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 -c "import json,sys; print(json.dumps({'body': sys.argv[1]}))" "${comment}（仍有未关闭关联工单：$(echo $open_children | sed 's/,/, #/g; s/^/#/')，暂不自动关闭）")" \
+              "$api/issues/${issue_no}/comments" > /dev/null
+            exit 0
+          fi
+
           # 关闭工单 + 评论
           echo "✅ 关闭工单 #${issue_no}"
           curl -s -X POST -H "Authorization: token ${GITEA_TOKEN}" \
