@@ -37,12 +37,13 @@ from app.services.analytics import (
 
 
 def _pkg_src() -> str:
-    """拆分后(issue #184): 口径定义散落在 analytics 各子模块, 聚合全包源码供文本断言。"""
+    """拆分后(issue #184/#226): 口径定义散落在 analytics 各子模块(含 today/ 子包),
+    聚合全包源码供文本断言。"""
     import pathlib
 
     return "\n".join(
         p.read_text(encoding="utf-8")
-        for p in sorted(pathlib.Path(A.__file__).parent.glob("*.py"))
+        for p in sorted(pathlib.Path(A.__file__).parent.rglob("*.py"))
     )
 
 
