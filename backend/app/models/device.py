@@ -2,11 +2,28 @@
 
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Table, Text
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, Table, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.models.base import IDMixin, TimestampMixin
+
+
+class DimDeviceType(Base):
+    """设备类型维度表 (#246 B3-1, A-20261007-002 §3.2)
+
+    把 devices.device_type 自由文本归一为稳定维度码; 原始文本保留在
+    devices.device_type, 本表 normalized_from 记录归并来源(快照可回溯)。
+    """
+
+    __tablename__ = "dim_device_type"
+
+    type_code: Mapped[str] = mapped_column(String(32), primary_key=True, comment="归一类型码(如 4G_CPE)")
+    type_name: Mapped[str] = mapped_column(String(64), nullable=False, comment="类型中文名")
+    normalized_from: Mapped[list | None] = mapped_column(
+        JSON, nullable=True, comment="归并来源原始文本列表(快照)"
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", comment="active/disabled")
 
 # 设备-标签 多对多关联表
 device_tag_rel = Table(
@@ -30,6 +47,13 @@ class Device(TimestampMixin, Base):
 
     sn: Mapped[str] = mapped_column(String(64), primary_key=True, comment="设备SN")
     device_type: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="设备类型")
+    device_type_code: Mapped[str | None] = mapped_column(
+        String(32),
+        ForeignKey("dim_device_type.type_code"),
+        nullable=True,
+        index=True,
+        comment="归一设备类型码(#246 B3-1, 原始 device_type 文本保留)",
+    )
     device_type_remark: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="设备类型备注")
     active_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="激活时间")
     merchant_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="所属商户名称")

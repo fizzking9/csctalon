@@ -42,6 +42,7 @@ from app.models.device import (  # noqa: F401
     DeviceTag,
     DeviceTagBatch,
     DeviceTagBinding,
+    DimDeviceType,
     device_tag_rel,
 )
 from app.models.device_combo import DeviceCombo  # noqa: F401
@@ -69,7 +70,7 @@ from app.models.llm_role_member import LlmRoleMember  # noqa: F401
 from app.models.manual_refund import ManualRefund  # noqa: F401
 from app.models.manual_refund_sync_log import ManualRefundSyncLog  # noqa: F401
 from app.models.measure import Measure  # noqa: F401
-from app.models.merchant import Merchant  # noqa: F401
+from app.models.merchant import DeviceMerchantLink, Merchant  # noqa: F401
 from app.models.merchant_refund import MerchantRefund  # noqa: F401
 from app.models.metric import MetricDailySnapshot, MetricRegistry, MetricThreshold  # noqa: F401
 from app.models.notification import Notification  # noqa: F401
@@ -96,6 +97,12 @@ from app.models.scrm_session import ScrmSession  # noqa: F401
 from app.models.scrm_session_transfer import ScrmSessionTransfer  # noqa: F401
 from app.models.scrm_staff_profile import ScrmStaffProfile  # noqa: F401
 from app.models.scrm_sync_log import ScrmSyncLog  # noqa: F401
+from app.models.shop import (  # noqa: F401
+    DeviceShopLink,
+    Enterprise,
+    Shop,
+    ShopEnterpriseHistory,
+)
 from app.models.source_group import SourceGroup  # noqa: F401
 from app.models.specialty import (  # noqa: F401
     STANDARD_SPECIALTIES,
