@@ -19,6 +19,7 @@ import pytest
 
 from app.models.ai_report import AiReport
 from app.models.ai_report_template import AiReportTemplate
+from app.models.user import User
 from app.services.ai_report_matcher import (
     _BLOCK_MISSING_RATIO,
     _EMPTY_SHELL_CHARS,
@@ -41,22 +42,24 @@ GOOD_MD = ("**四路分布**：A 线上直退 80 笔 / 7975.10 元；B 钱包提
            "**挽回**：总 SN 257, 成功 103, 成功率 40.08%\n")
 
 
-def _tmpl(dims, keywords=None, code="daily_refund_brief"):
-    return AiReportTemplate(code=code, name_cn=code, period="daily", frequency="daily",
+def _tmpl(dims, keywords=None, code="weekly_refund_brief"):
+    # #236 B2-1: 端到端命中测试改用 period=weekly —— daily 快照已不参与 matcher
+    # (daily 改实时 L2)。门槛判据 _snapshot_unusable 与 period 无关, 单元用例不受影响。
+    return AiReportTemplate(code=code, name_cn=code, period="weekly", frequency="weekly",
                             scope="refund", format="brief", required_dimensions=dims,
-                            question_template="今日退款专项简报",
+                            question_template="本周退款专项简报",
                             question_keywords=keywords or ["退款", "四路", "涉诉"])
 
 
-def _report(md, template_id=7, snapshot_date=None):
+def _report(md, template_id=7, snapshot_date=None, user_id=1):
     r = AiReport()
-    r.user_id = 1                      # ai_reports.user_id NOT NULL
+    r.user_id = user_id                 # ai_reports.user_id NOT NULL(FK→users)
     r.template_id = template_id
     r.answer_md = md
-    r.question = "今日退款专项简报"
-    r.period = "daily"
+    r.question = "本周退款专项简报"
+    r.period = "weekly"
     r.snapshot_date = snapshot_date or _dt.date.today()
-    r.snapshot_period = "daily"
+    r.snapshot_period = "weekly"
     r.is_public = True
     r.matched_count = 0
     r.llm_ms = 0            # NOT NULL
@@ -178,12 +181,20 @@ def _purge_before_each(db):
 def mk_snapshot(db):
     """建一份(模板 + 快照), 用唯一 code 与固定历史快照日做隔离, 用例后清理。"""
     created = {"t": [], "r": []}
+    # B2-1: ai_reports.user_id FK→users, 建专用 user(固定 username, 存在则复用)
+    user = db.query(User).filter(User.username == "_t192_user").first()
+    if user is None:
+        user = User(username="_t192_user", display_name="t192",
+                    hashed_password="_dummy", role="admin")
+        db.add(user)
+        db.commit()
 
     def _mk(md, dims=("四路", "涉诉", "退款原因", "挽回")):
         t = _tmpl(list(dims), code=f"{_CODE_PREFIX}{uuid.uuid4().hex[:10]}")
         db.add(t)
         db.commit()
-        r = _report(md, template_id=t.id, snapshot_date=_dt.date.fromisoformat(SNAP_DATE))
+        r = _report(md, template_id=t.id,
+                    snapshot_date=_dt.date.fromisoformat(SNAP_DATE), user_id=user.id)
         db.add(r)
         db.commit()
         created["t"].append(t.id)
@@ -197,8 +208,8 @@ def mk_snapshot(db):
 def test_match_skips_empty_shell_and_returns_none(db, mk_snapshot):
     """命中链路: 唯一候选是空壳 → 不返回命中(交调用方走实时), 且 matched_count 不涨。"""
     _t, r = mk_snapshot(EMPTY_SHELL)
-    hit, tmpl = match_template_report(db, "今日退款情况如何？四路分布和涉诉怎么样？",
-                                      "daily", SNAP_DATE)
+    hit, tmpl = match_template_report(db, "本周退款情况如何？四路分布和涉诉怎么样？",
+                                      "weekly", SNAP_DATE)
     assert hit is None and tmpl is None
     db.refresh(r)
     assert (r.matched_count or 0) == 0                    # 空壳不计入命中统计
@@ -208,8 +219,8 @@ def test_match_skips_empty_shell_and_returns_none(db, mk_snapshot):
 def test_match_returns_complete_snapshot(db, mk_snapshot):
     """命中链路: 完整快照正常命中(门槛不误伤), 并 bump matched_count。"""
     _t, r = mk_snapshot(GOOD_MD)
-    hit, tmpl = match_template_report(db, "今日退款情况如何？四路分布和涉诉怎么样？",
-                                      "daily", SNAP_DATE)
+    hit, tmpl = match_template_report(db, "本周退款情况如何？四路分布和涉诉怎么样？",
+                                      "weekly", SNAP_DATE)
     assert hit is not None and tmpl is not None
     assert hit.id == r.id
     db.refresh(r)
@@ -221,8 +232,8 @@ def test_match_skips_shell_but_falls_through_to_complete_one(db, mk_snapshot):
     _t0, shell = mk_snapshot(EMPTY_SHELL, dims=("四路", "涉诉", "退款原因", "挽回"))
     # 完整那份用不同模板 code(避免唯一键冲突), 维度同构
     mk_snapshot(GOOD_MD, dims=("四路", "涉诉", "退款原因", "挽回"))
-    hit, _ = match_template_report(db, "今日退款情况如何？四路分布和涉诉怎么样？",
-                                   "daily", SNAP_DATE)
+    hit, _ = match_template_report(db, "本周退款情况如何？四路分布和涉诉怎么样？",
+                                   "weekly", SNAP_DATE)
     assert hit is not None and hit.id != shell.id
 
 
@@ -241,7 +252,7 @@ def test_bump_hit_accounting_counts_l1_and_l2_same_way(db, mk_snapshot):
 def test_blocked_snapshot_not_counted(db, mk_snapshot):
     """被 #192 门槛拦下的空壳不计入 matched_count(未交付给用户, 不该算命中)。"""
     _t, r = mk_snapshot(EMPTY_SHELL)
-    match_template_report(db, "今日退款情况如何？四路分布和涉诉怎么样？", "daily", SNAP_DATE)
+    match_template_report(db, "本周退款情况如何？四路分布和涉诉怎么样？", "weekly", SNAP_DATE)
     db.refresh(r)
     assert (r.matched_count or 0) == 0
 
@@ -252,6 +263,6 @@ def test_list_candidates_excludes_empty_shell(db, mk_snapshot):
 
     _t, shell = mk_snapshot(EMPTY_SHELL)
     _t2, good = mk_snapshot(GOOD_MD)
-    cands = list_candidates(db, "daily", SNAP_DATE)
+    cands = list_candidates(db, "weekly", SNAP_DATE)
     ids = {c.id for c in cands}
     assert good.id in ids and shell.id not in ids

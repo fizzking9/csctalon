@@ -42,10 +42,14 @@ def _mk_user(db) -> User:
     return u
 
 
-def _mk_template(db, user, *, scope="refund", suffix="a") -> AiReportTemplate:
+def _mk_template(db, user, *, scope="refund", suffix="a",
+                 period="daily") -> AiReportTemplate:
     t = AiReportTemplate(
         code=f"{_RUN}_{suffix}", name_cn="t204 测试模板", question_template="q",
-        period="daily", frequency="sync-triggered", refresh_on_sync=True,
+        # #236 B2-1: period 默认 daily 供纯判定类测试(不经过 worker);
+        # 经 warm_on_sync_complete 的端到端测试须传非 daily(如 rolling_7d),
+        # 否则 B2-1 会先于新鲜度判定跳过。
+        period=period, frequency="sync-triggered", refresh_on_sync=True,
         scope=scope, is_active=True, created_by=user.id if user else None,
     )
     db.add(t)
@@ -322,7 +326,9 @@ def test_worker_three_modes(db, monkeypatch, mode, expect_generate):
     - 快照 30min 前: > 20min 不节流, < 120min 不触发 stale 保底
     """
     user = _mk_user(db)
-    t = _mk_template(db, user)
+    # #236 B2-1: 端到端走 warm_on_sync_complete, 模板须非 daily(否则 B2-1 先跳过,
+    # 测不到三档新鲜度判定)。用 rolling_7d + refresh_on_sync=True 模拟随同步刷新。
+    t = _mk_template(db, user, period="rolling_7d")
     now = _dt.datetime.now(_UTC)
     _mk_snapshot(db, user, t, now - _dt.timedelta(minutes=30))
     # commit 会使 ORM 实例过期, worker 内部还会 close() 会话 → 先取标量

@@ -109,6 +109,10 @@ def schedule_due_templates(db: Session) -> list[AiReportTemplate]:
     - daily 永远是 "HH:MM" (不含 `-`)
 
     返回按 priority 升序的模板列表(小先执行)。
+
+    #236 (B2-1, 2026-10-09): 跳过 `period=daily` 模板 —— daily 报告改实时生成
+    (走 L2 优先级, 用户等几秒), 不再走 warm_idle 定时预生成。weekly/monthly/rolling_*
+    模板即使 frequency=daily(如每日生成 rolling_7d)仍正常触发, 不受影响。
     """
     now = _now_cn()
     now_wday = now.isoweekday()  # 1=周一, 7=周日
@@ -123,6 +127,9 @@ def schedule_due_templates(db: Session) -> list[AiReportTemplate]:
     due: list[AiReportTemplate] = []
     for t in rows:
         if not t.trigger_at:
+            continue
+        # #236 B2-1: daily 报告改实时, 跳过 period=daily 的预生成触发
+        if (t.period or "") == "daily":
             continue
         try:
             if t.frequency == "daily":
@@ -489,6 +496,14 @@ def warm_on_sync_complete() -> None:
                 tmpl = db.query(AiReportTemplate).get(tid)
                 if tmpl is None or not tmpl.is_active:
                     continue
+                # #236 B2-1: daily 报告改实时生成, 跳过 period=daily 模板。
+                # 20min 节流逻辑保留(供未来非 daily 的 refresh_on_sync 模板使用),
+                # 但当前所有 refresh_on_sync=True 模板均为 daily → 此路径实质不再预生成。
+                if (tmpl.period or "") == "daily":
+                    logger.info(
+                        "warm_on_sync_complete: 模板 %s period=daily, B2-1 跳过(改实时生成)",
+                        tcode)
+                    continue
                 # 统一 20min 节流: 随同步刷新的模板都按同步节奏(30min/轮),
                 # 距上次生成不足阈值则跳过, 避免推送与同步撞车时重复调 LLM。
                 # #166: 按快照窗口判(period + 当日), 而非只看当日。
@@ -669,6 +684,9 @@ def warm_on_startup(force: bool = False) -> None:
                 # 需要完整模板对象: ① 判 trigger_at 是否到点 ② 取 period 做窗口节流
                 tmpl = db.query(AiReportTemplate).get(tid)
                 if tmpl is None or not tmpl.is_active:
+                    continue
+                # #236 B2-1: daily 报告改实时生成, 启动预热也跳过 period=daily 模板
+                if (tmpl.period or "") == "daily":
                     continue
                 # ① 周报/月报(refresh_on_sync=False): 只有到点才生成
                 #    未到点 → 启动不生成(#166 核心修复), 等 warm_idle 按 trigger_at 触发

@@ -10,6 +10,10 @@
 - 未命中: 返回 None, 调用方走原 #116 实时 LLM 路径
 - 命中复用统计: matched_count +1 (用 UPDATE ... RETURNING 保证并发安全)
 
+#236 (B2-1, 2026-10-09): daily 报告改实时生成 —— 所有 SQL 增加
+`snapshot_period != 'daily'` 过滤, 跳过历史 daily 预生成报告, 强制 daily 问句
+走实时 LLM(L2 优先级)。weekly/monthly/rolling_* 预生成报告仍可命中, 不受影响。
+
 SQL 全部走参数化 text() + bind params(AGENTS.md 铁律)。
 """
 
@@ -247,6 +251,7 @@ def match_template_report(
                       r.start AS r_start, r.end AS r_end
                FROM ai_reports r
                WHERE r.is_public = TRUE
+                 AND r.snapshot_period != 'daily'
                  AND r.start IS NOT NULL AND r.end IS NOT NULL
                  AND r.start <= :q_end AND r.end >= :q_start
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
@@ -262,6 +267,7 @@ def match_template_report(
                       r.window_source, r.window_label, r.created_at
                FROM ai_reports r
                WHERE r.is_public = TRUE
+                 AND r.snapshot_period != 'daily'
                  AND r.snapshot_date = :sdate
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
             {"sdate": win_date, "period": win_period or ""},
@@ -276,6 +282,7 @@ def match_template_report(
                       r.window_source, r.window_label, r.created_at
                FROM ai_reports r
                WHERE r.is_public = TRUE
+                 AND r.snapshot_period != 'daily'
                  AND r.snapshot_date = :today
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
             {"today": today, "period": win_period or ""},
@@ -401,6 +408,7 @@ def list_candidates(db: Session, win_period: str | None,
                       r.start AS r_start, r.end AS r_end
                FROM ai_reports r
                WHERE r.is_public = TRUE
+                 AND r.snapshot_period != 'daily'
                  AND r.start IS NOT NULL AND r.end IS NOT NULL
                  AND r.start <= :q_end AND r.end >= :q_start
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
@@ -417,6 +425,7 @@ def list_candidates(db: Session, win_period: str | None,
                       r.window_source, r.window_label, r.created_at
                FROM ai_reports r
                WHERE r.is_public = TRUE
+                 AND r.snapshot_period != 'daily'
                  AND r.snapshot_date = :sdate
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
             {"sdate": sdate, "period": win_period or ""},
