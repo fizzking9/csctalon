@@ -1935,7 +1935,7 @@ class BmsFetcher:
                     new_p = dest_path.with_suffix(".xlsx")
                     if new_p != dest_path:
                         try: dest_path.unlink()
-                        except: pass
+                        except FileNotFoundError: pass  # 旧文件不存在属正常流程
                         dest_path = new_p
                         dest_filename = dest_path.name
                     with pd.ExcelWriter(str(dest_path), engine="openpyxl") as w:
@@ -2155,7 +2155,7 @@ class BmsFetcher:
                     new_p = dest_path.with_suffix(".xlsx")
                     if new_p != dest_path:
                         try: dest_path.unlink()
-                        except: pass
+                        except FileNotFoundError: pass  # 旧文件不存在属正常流程
                         dest_path = new_p
                         dest_filename = dest_path.name
                     with pd.ExcelWriter(str(dest_path), engine="openpyxl") as w:
