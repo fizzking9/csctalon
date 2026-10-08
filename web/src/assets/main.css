@@ -161,4 +161,18 @@ body,
   .el-button--small {
     min-height: 28px;
   }
+
+  /* 「标题 + 操作按钮」行（.flex-between）在窄屏自动换行：
+     桌面端 space-between 一行摆开，375px 上标题与按钮会互相挤压，
+     换行后标题独占一行、按钮落到下一行，触控目标也更舒展。
+     卡片内「共 N 条 + 分页」同理，分页器在窄屏需要完整宽度。 */
+  .flex-between {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* 筛选器容器统一允许换行（部分页面内联 style 未写 flex-wrap） */
+  .page-container .el-card .flex {
+    flex-wrap: wrap;
+  }
 }
