@@ -9,8 +9,10 @@ from sqlalchemy.orm import Session
 
 from app.models.combo_dict import ComboDict, ComboNameAlias
 from app.models.cs_record import CsRecord
-from app.models.merchant import Merchant
+from app.models.device import Device, DimDeviceType
+from app.models.merchant import DeviceMerchantLink, Merchant
 from app.models.refund import Refund
+from app.models.shop import DeviceShopLink, Shop
 from app.models.ticket import ServiceTicket
 from app.services.complaint_scope import (
     ALL_BUCKETS,
@@ -766,3 +768,152 @@ def complaint_by_device_tag(
             }
         )
     return data
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# #252 B3-11 投诉分析扩展维度（店铺/商户号/设备型号/套餐/激活后时长）
+# ═══════════════════════════════════════════════════════════════════════
+
+_ACTIVE_DAYS_BUCKETS = ("0-30天", "31-90天", "91-180天", "181-365天", ">365天", "(无激活记录)")
+
+
+def _topn_with_other(rows: list, name_idx: int, cnt_idx: int, limit: int) -> list[dict]:
+    """TopN + 其余归 (其他)；rows 已按计数降序。"""
+    top = rows[:limit]
+    rest = rows[limit:]
+    out = [{"name": r[name_idx], "count": int(r[cnt_idx])} for r in top]
+    if rest:
+        out.append({"name": "(其他)", "count": sum(int(r[cnt_idx]) for r in rest)})
+    return out
+
+
+def complaint_extended_dims(
+    db: Session,
+    date: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 10,
+) -> dict[str, list[dict]]:
+    """#252 B3-11 (用户#5): 投诉工单按五维扩展分布。
+
+    口径:
+      · 投诉判据 = complaint_scope.is_complaint_ticket_cond（空白 OR '投诉'），与 #87 一致
+      · 店铺/商户号: SN → device_shop_links / device_merchant_links 的 **is_current** 建链
+        （回答「现在哪些店铺/商户在投诉」，运营动作面向当前归属；非投诉发生时点 SCD 快照）
+      · 设备型号: devices.device_type_code → dim_device_type.type_name，未命中回落原始
+        device_type 文本，再空归 (未知类型)
+      · 套餐: devices.current_combo_name → combo_name_alias(is_current) → combo_dict
+        归一名，未命中回落原始名，空归 (无套餐)
+      · 激活后时长: register_time − devices.active_time 天数分桶（上海时区日期差）
+      · 每维 TopN + 其余归 (其他)；未建链显式分桶暴露覆盖缺口
+    """
+    ts, te, _, _, _, _ = _resolve_windows(date=date, start=start, end=end)
+    _is_c = is_complaint_ticket_cond(ServiceTicket.service_category)
+    _win = (
+        ServiceTicket.register_time >= ts,
+        ServiceTicket.register_time <= te,
+        ServiceTicket.device_sn.isnot(None),
+    )
+    cnt = func.count()
+
+    # ── 1. 店铺（通路② 归属建链, 未建链暴露缺口）──
+    shop_rows = db.execute(
+        select(func.coalesce(Shop.shop_name, "(未建链店铺)"), cnt)
+        .select_from(ServiceTicket)
+        .outerjoin(
+            DeviceShopLink,
+            and_(
+                DeviceShopLink.device_sn == ServiceTicket.device_sn,
+                DeviceShopLink.is_current.is_(True),
+            ),
+        )
+        .outerjoin(Shop, Shop.id == DeviceShopLink.shop_pk)
+        .where(_is_c, *_win)
+        .group_by(func.coalesce(Shop.shop_name, "(未建链店铺)"))
+        .order_by(cnt.desc())
+    ).all()
+
+    # ── 2. 商户号（通路① 交易建链, 未建链暴露缺口）──
+    merchant_rows = db.execute(
+        select(func.coalesce(Merchant.sub_name, "(未建链商户号)"), cnt)
+        .select_from(ServiceTicket)
+        .outerjoin(
+            DeviceMerchantLink,
+            and_(
+                DeviceMerchantLink.device_sn == ServiceTicket.device_sn,
+                DeviceMerchantLink.is_current.is_(True),
+            ),
+        )
+        .outerjoin(Merchant, Merchant.id == DeviceMerchantLink.merchant_pk)
+        .where(_is_c, *_win)
+        .group_by(func.coalesce(Merchant.sub_name, "(未建链商户号)"))
+        .order_by(cnt.desc())
+    ).all()
+
+    # ── 3. 设备型号（归一码 → 中文名, 回落原始文本）──
+    type_name = func.coalesce(DimDeviceType.type_name, Device.device_type, "(未知类型)")
+    dtype_rows = db.execute(
+        select(type_name, cnt)
+        .select_from(ServiceTicket)
+        .outerjoin(Device, Device.sn == ServiceTicket.device_sn)
+        .outerjoin(DimDeviceType, DimDeviceType.type_code == Device.device_type_code)
+        .where(_is_c, *_win)
+        .group_by(type_name)
+        .order_by(cnt.desc())
+    ).all()
+
+    # ── 4. 套餐（当前别名归一, 未命中回落原始名）──
+    canonical = (
+        select(ComboDict.canonical_name)
+        .select_from(ComboNameAlias)
+        .join(ComboDict, ComboDict.combo_code == ComboNameAlias.combo_code)
+        .where(
+            ComboNameAlias.raw_package_name == Device.current_combo_name,
+            ComboNameAlias.is_current.is_(True),
+        )
+        .order_by(case((ComboNameAlias.merchant_pk.isnot(None), 0), else_=1))
+        .limit(1)
+        .scalar_subquery()
+    )
+    pkg_name = func.coalesce(canonical, Device.current_combo_name, "(无套餐)")
+    pkg_rows = db.execute(
+        select(pkg_name, cnt)
+        .select_from(ServiceTicket)
+        .outerjoin(Device, Device.sn == ServiceTicket.device_sn)
+        .where(_is_c, *_win)
+        .group_by(pkg_name)
+        .order_by(cnt.desc())
+    ).all()
+
+    # ── 5. 激活后时长（上海时区日期差分桶）──
+    days_expr = (
+        func.date(ServiceTicket.register_time.op("AT TIME ZONE")("Asia/Shanghai"))
+        - func.date(Device.active_time.op("AT TIME ZONE")("Asia/Shanghai"))
+    )
+    bucket_expr = case(
+        (Device.active_time.is_(None), "(无激活记录)"),
+        (days_expr <= 30, "0-30天"),
+        (days_expr <= 90, "31-90天"),
+        (days_expr <= 180, "91-180天"),
+        (days_expr <= 365, "181-365天"),
+        else_=">365天",
+    )
+    active_rows = db.execute(
+        select(bucket_expr, cnt)
+        .select_from(ServiceTicket)
+        .outerjoin(Device, Device.sn == ServiceTicket.device_sn)
+        .where(_is_c, *_win)
+        .group_by(bucket_expr)
+    ).all()
+    active_map = {r[0]: int(r[1]) for r in active_rows}
+    by_active_days = [
+        {"name": b, "count": active_map.get(b, 0)} for b in _ACTIVE_DAYS_BUCKETS
+    ]
+
+    return {
+        "by_shop": _topn_with_other(shop_rows, 0, 1, limit),
+        "by_merchant": _topn_with_other(merchant_rows, 0, 1, limit),
+        "by_device_type": _topn_with_other(dtype_rows, 0, 1, limit),
+        "by_package": _topn_with_other(pkg_rows, 0, 1, limit),
+        "by_active_days": by_active_days,
+    }
