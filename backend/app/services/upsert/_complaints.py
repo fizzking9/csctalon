@@ -9,6 +9,7 @@ from app.models.card_complaint import CardComplaint
 from app.models.external_complaint import ExternalComplaint
 
 # 跨子模块引用(拆分自 upsert.py, 原同文件内直接调用)
+from app.services.fingerprint import complaint_dedup_hash
 from app.services.upsert._core import (
     ImportResult,
     _execute_upsert,
@@ -24,11 +25,9 @@ def _complaint_dedup_hash(parts: list[str]) -> str:
     """投诉身份指纹(md5前32位): 拼接规范化身份字段, 供 dedup_hash 列去重.
 
     与 workbuddy 同步服务(complaint_sync.py)保持同一口径, 保证手动导入与推送共用去重.
+    O-6: 实现已单源化到 app.services.fingerprint.complaint_dedup_hash, 本函数仅作兼容委托。
     """
-    import hashlib
-
-    key = "|".join((p or "").strip() for p in parts)
-    return hashlib.md5(key.encode("utf-8")).hexdigest()[:32]
+    return complaint_dedup_hash(parts)
 
 def _complaint_problem_signature(problem: str | None, max_len: int = 2000) -> str:
     """投诉问题内容签名: 归一化(去空白/标点/小写)后取前 max_len 字.

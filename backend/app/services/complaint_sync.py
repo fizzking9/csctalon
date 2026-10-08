@@ -12,7 +12,6 @@ workbuddy 每 20 分钟检查文件(315投诉处理登记表.xlsx 等),文件变
 4. 同步日志: 每次推送写入 complaint_sync_logs,记录清洗/去重/匹配/报错统计
 """
 
-import hashlib
 import logging
 import re
 from datetime import datetime, timezone
@@ -27,6 +26,7 @@ from app.models.complaint_sync_log import ComplaintSyncLog
 from app.models.external_complaint import ExternalComplaint
 from app.services.complaint_scope import QSTATUS_DUP_SN_BACKFILL
 from app.services.data_parser import COLUMN_TEMPLATES
+from app.services.fingerprint import complaint_dedup_hash
 from app.services.ingest_validator import (
     summarize_severity,
     validate_card_complaint_row,
@@ -183,9 +183,10 @@ def _norm_text(val: Any) -> str | None:
 
 
 def _dedup_hash(parts: list[str]) -> str:
-    """身份指纹: 拼接规范化的身份字段, md5 前 32 位"""
-    key = "|".join((p or "").strip() for p in parts)
-    return hashlib.md5(key.encode("utf-8")).hexdigest()[:32]
+    """身份指纹: 拼接规范化的身份字段, md5 前 32 位
+
+    O-6: 实现已单源化到 app.services.fingerprint.complaint_dedup_hash, 本函数仅作兼容委托。"""
+    return complaint_dedup_hash(parts)
 
 
 def _map_row(row: dict[str, Any], data_type: str) -> dict[str, Any]:
