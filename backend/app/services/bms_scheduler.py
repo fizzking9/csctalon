@@ -792,9 +792,33 @@ class BmsScheduler:
                         elif now_cn.minute >= 59:
                             # 整小时内持续忙 → 当日放弃该小时档(忙顺延到小时的最后一分钟)
                             self._low_freq_done[_lf_hour_key] = True
+                            # R-P1-17: 放弃 = 没有同步尝试 → 没有失败结果可记账;
+                            # 必须直接记 open, 否则次日 5:00 缺口清点漏掉这些源(永久漏采)。
+                            # 业务日: 默认昨天; 自定义 window_days 的源 → [今天-wd .. 昨天]。
+                            try:
+                                from app.services.gap_queue_service import record_abandoned_slots
+
+                                _rows: list[tuple[str, str]] = []
+                                for _dt in _low_types:
+                                    _wd = int(_lf_sched.get(_dt, {}).get("window_days") or 1)
+                                    for _k in range(1, max(_wd, 1) + 1):
+                                        _d = (now_cn.date() - timedelta(days=_k)).strftime("%Y-%m-%d")
+                                        _rows.append((_d, _dt))
+                                _gap_db = SessionLocal()
+                                try:
+                                    _n = record_abandoned_slots(
+                                        _gap_db, _rows,
+                                        reason=f"低频档{now_cn.hour:02d}:00持续忙碌当日放弃",
+                                    )
+                                    if _n:
+                                        logger.info(f"[调度器] 低频放弃档缺口记账: {_n} 条(open)")
+                                finally:
+                                    _gap_db.close()
+                            except Exception as _ge:  # noqa: BLE001 记账失败不影响调度主流程
+                                logger.warning(f"[调度器] 低频放弃档记账失败(忽略): {_ge}")
                             logger.warning(
                                 f"[调度器] 低频档 {now_cn.hour:02d}:00 源={_low_types} 因持续忙碌错过,"
-                                f" 当日放弃该档; 依赖失败进 gap → 次日 5:00 缺口清点兜底"
+                                f" 当日放弃该档; 已记 gap → 次日 5:00 缺口清点兜底"
                             )
                         else:
                             logger.info(

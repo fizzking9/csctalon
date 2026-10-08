@@ -2,6 +2,7 @@
 
 import csv
 import io
+import logging
 from datetime import datetime, timezone
 
 from fastapi import (
@@ -29,6 +30,8 @@ from app.services.diff_preview import compute_diff
 from app.services.ingest_service import ingest_table
 from app.services.matcher import match_all
 from app.services.person_extractor import extract_person_aliases
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/uploads", tags=["数据中心-上传"])
 
@@ -191,6 +194,14 @@ def confirm_import(
         db.commit()
         db.refresh(record)
 
+        # R-P1-17: 手动补导已落库 → 回写缺口台账(open/partial → filled),
+        # 否则已齐数据仍被次日 5:00 当缺口反复强制补跑。仅在有实际写入时处理。
+        if result.inserted + result.updated > 0:
+            try:
+                _close_gaps_from_import(db, data_type, df, mapping, record.id)
+            except Exception as ge:  # noqa: BLE001 台账回写失败不影响导入结果
+                logger.warning(f"手动导入回写缺口台账失败(忽略): {ge}")
+
         # 后台异步执行关联匹配和人员别名提取（避免阻塞导入响应）
         background_tasks.add_task(_run_post_import_tasks, data_type)
 
@@ -315,6 +326,47 @@ def download_upload_file(
         filename=record.filename or path.name,
         media_type="application/octet-stream",
     )
+
+
+def _close_gaps_from_import(db, data_type: str, df, mapping: dict, upload_id: int) -> None:
+    """手动导入成功后按业务日回写 gap_records(R-P1-17)。
+
+    口径:
+      - 业务日字段 = DataSource.time_field(注册表单一来源); 未登记 → 跳过。
+      - 源列 = column_mapping[time_field]({目标:源} 映射); 映射缺失但 df 有同名列也兼容。
+      - 文件内时间为**北京墙钟**(naive 直接取日期, 不按 UTC 换算);
+        aware 时间先转 Asia/Shanghai 再取日。
+    """
+    import pandas as pd
+
+    ds = db.scalar(select(DataSource).where(DataSource.code == data_type))
+    time_field = ds.time_field if ds else None
+    if not time_field:
+        return
+    col = (mapping or {}).get(time_field)
+    if col not in df.columns:
+        # 兼容无映射/同名列直通
+        col = time_field if time_field in df.columns else None
+    if col is None:
+        return
+
+    # errors=coerce 过滤无法解析的单元格; naive 保留(文件即北京墙钟)
+    s = pd.to_datetime(df[col], errors="coerce").dropna()
+    dates = {
+        (ts.tz_convert("Asia/Shanghai") if ts.tzinfo is not None else ts).strftime("%Y-%m-%d")
+        for ts in s
+    }
+    if not dates:
+        return
+
+    from app.services.gap_queue_service import mark_filled_for_dates
+
+    n = mark_filled_for_dates(db, data_type, dates, source=f"upload:{upload_id}")
+    if n:
+        logger.info(
+            f"手动导入回写缺口台账: {n} 条 filled"
+            f"(data_type={data_type}, upload_id={upload_id}, 业务日={sorted(dates)})"
+        )
 
 
 def _run_post_import_tasks(data_type: str):

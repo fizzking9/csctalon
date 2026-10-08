@@ -3,7 +3,10 @@
 
 一源一日一行的缺口记账(gap_records 表), 提供:
   - record_from_sync_results: 同步结果聚合后记账(失败→open/partial, 全天覆盖→filled)
+  - record_abandoned_slots: 调度档未尝试即放弃(低频档持续忙碌) → 直接记 open,
+    否则无失败结果可记、次日 5:00 清点不知道要补(R-P1-17)
   - list_gaps: 查看缺口(可按业务日/状态过滤)
+  - mark_filled / mark_filled_for_dates: 外部覆盖确认(手动补导逐日落 filled)
   - settle_and_backfill_yesterday: 次日清点昨天缺口, 逐源强制补跑(5:00 调用)
 
 状态语义:
@@ -236,6 +239,48 @@ def _mark_range_filled(db, data_type: str, start_date: str, end_date: str) -> in
     return n
 
 
+def record_abandoned_slots(db, rows: list[tuple[str, str]], reason: str) -> int:
+    """调度档**未尝试即放弃** → 逐 (biz_date, data_type) 记 open(R-P1-17)。
+
+    场景: 低频小时窗口内因持续忙碌当日放弃 —— 没有同步尝试就没有失败结果,
+    record_from_sync_results 无东西可记; 不补记则次日 5:00 缺口清点漏掉该源该日。
+
+    守卫: 已存在 filled/ignored 的记录**不降级**(数据已齐/人工已决策, 不动);
+          open/partial 只刷新错误说明, 不重复建行(一源一日一行)。
+
+    rows: [(biz_date, data_type), ...]
+    Returns: 新建或刷新的缺口行数。
+    """
+    changed = 0
+    msg = f"调度档放弃: {reason}"[:2000]
+    for biz_date, data_type in rows:
+        row = db.scalar(
+            select(GapRecord).where(
+                GapRecord.biz_date == biz_date,
+                GapRecord.data_type == data_type,
+            )
+        )
+        if row is None:
+            db.add(
+                GapRecord(
+                    biz_date=biz_date,
+                    data_type=data_type,
+                    status="open",
+                    first_gap_at=datetime.now(TZ_CN),
+                    try_count=0,
+                    error=msg,
+                )
+            )
+            changed += 1
+        elif row.status in ("open", "partial"):
+            # 已有缺口: 补记放弃原因, 保持 open/partial 等次日清点
+            row.error = msg
+            changed += 1
+        # filled/ignored: 跳过, 不降级
+    db.commit()
+    return changed
+
+
 # ───────────────────────── 查询 ─────────────────────────
 
 
@@ -300,6 +345,30 @@ def mark_filled(db, biz_date: str, data_type: str, source: str = "manual") -> bo
     row.remark = (row.remark or "") + f" | 已补齐({source})"
     db.commit()
     return True
+
+
+def mark_filled_for_dates(db, data_type: str, biz_dates, source: str) -> int:
+    """外部覆盖多个业务日(手动补导一份文件含多日数据) → 逐日落 filled。
+
+    与 mark_filled 的区别: 批量 + 只统计**实际发生状态转换**的行数;
+    无缺口记录的日期不新增(没有缺口就不需要记账)。
+    Returns: open/partial → filled 的缺口行数。
+    """
+    n = 0
+    for biz_date in {d for d in biz_dates if d}:
+        row = db.scalar(
+            select(GapRecord).where(
+                GapRecord.biz_date == biz_date,
+                GapRecord.data_type == data_type,
+            )
+        )
+        if row is None or row.status == "filled":
+            continue
+        row.status = "filled"
+        row.remark = (row.remark or "") + f" | 已补齐({source})"
+        n += 1
+    db.commit()
+    return n
 
 
 # ───────────────────────── 次日清点 + 强制补跑 ─────────────────────────

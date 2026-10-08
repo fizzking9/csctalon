@@ -3,7 +3,8 @@
 一源一日一行(UNIQUE biz_date+data_type), 记录某业务日某数据源的采集缺口:
   - 同步失败 / 部分成功(有片失败) → 记 open / partial
   - 成功同步覆盖该日 → 标 filled
-  - 手动补导覆盖 → 标 filled(由 gap_queue_service.mark_filled_from_manual 处理)
+  - 调度档未尝试即放弃(低频档持续忙碌) → 记 open(record_abandoned_slots)
+  - 手动补导覆盖 → 标 filled(uploads 导入路径调 gap_queue_service.mark_filled_for_dates)
   - 次日 5:00 清点只补真缺口(open/partial), 补成功 → filled
 
 status 语义:

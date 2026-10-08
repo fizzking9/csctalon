@@ -165,6 +165,88 @@ def test_mark_filled(db):
     assert gq.mark_filled(db, "2026-09-04", "cs_record") is False
 
 
+# ──────────── 3.5 R-P1-17: record_abandoned_slots ────────────
+
+
+def test_record_abandoned_slots_creates_open(db):
+    """放弃档(未尝试) → 逐行新建 open, 保证次日清点会补。"""
+    rows = [("2026-09-03", "wallet"), ("2026-09-03", "refund_record_report")]
+    n = gq.record_abandoned_slots(db, rows, reason="低频档15:00持续忙碌当日放弃")
+    assert n == 2
+    g1 = db.query(GapRecord).filter_by(biz_date="2026-09-03", data_type="wallet").one()
+    assert g1.status == "open"
+    assert "放弃" in (g1.error or "")
+
+
+def test_record_abandoned_slots_no_downgrade(db):
+    """已 filled/ignored 的记录不被放弃档重新打开。"""
+    # 先有一条 filled + 一条 ignored
+    gq.record_from_sync_results(db, [_res("cs_record", True, full_day=True)])
+    gq.record_from_sync_results(db, [_res("wallet", False, error="x")])
+    wallet_gap = db.query(GapRecord).filter_by(biz_date="2026-09-03", data_type="wallet").one()
+    gq.mark_ignored(db, wallet_gap.id)
+
+    rows = [("2026-09-03", "cs_record"), ("2026-09-03", "wallet"), ("2026-09-03", "ticket")]
+    n = gq.record_abandoned_slots(db, rows, reason="busy")
+    # 只新建 ticket 一行; filled/ignored 不动
+    assert n == 1
+    assert db.query(GapRecord).filter_by(biz_date="2026-09-03", data_type="cs_record").one().status == "filled"
+    assert db.query(GapRecord).filter_by(biz_date="2026-09-03", data_type="wallet").one().status == "ignored"
+    assert db.query(GapRecord).filter_by(biz_date="2026-09-03", data_type="ticket").one().status == "open"
+
+
+# ──────────── 3.6 R-P1-17: mark_filled_for_dates ────────────
+
+
+def test_mark_filled_for_dates(db):
+    """多日缺口批量回填; 无记录日期不新增; 只统计实际转换数。"""
+    gq.record_from_sync_results(db, [_res("cs_record", False, error="x")])  # 09-03 open
+    n = gq.mark_filled_for_dates(
+        db, "cs_record", ["2026-09-03", "2026-09-04"], source="upload:99",
+    )
+    # 09-03 转换计 1; 09-04 无缺口记录, 不新增
+    assert n == 1
+    gap = db.query(GapRecord).filter_by(biz_date="2026-09-03", data_type="cs_record").one()
+    assert gap.status == "filled"
+    assert "upload:99" in (gap.remark or "")
+    assert db.query(GapRecord).filter_by(biz_date="2026-09-04").count() == 0
+    # 已 filled 再调 → 转换数为 0
+    assert gq.mark_filled_for_dates(db, "cs_record", ["2026-09-03"], source="upload:100") == 0
+
+
+# ──────────── 3.7 R-P1-17: 手动导入回写(_close_gaps_from_import) ────────────
+
+
+def test_close_gaps_from_import(db):
+    """导入数据按 DataSource.time_field + 列映射提取业务日并回填。
+
+    关键: 文件内 naive 时间按北京墙钟取日 —— 凌晨 03:00 不得因 UTC 换算落到前一天。
+    """
+    import pandas as pd
+
+    from app.api.v1.uploads import _close_gaps_from_import
+    from app.models.data_source import DataSource
+
+    db.add(DataSource(
+        code="cs_record", table_name="cs_records", name_cn="测试·接待",
+        time_field="created_at_raw",
+    ))
+    # 09-03 的 open 缺口(凌晨行) + 09-02 的 open 缺口
+    gq.record_from_sync_results(db, [_res("cs_record", False, error="x")])
+    d2 = datetime(2026, 9, 2, 10, 0, tzinfo=TZ_CN).isoformat()
+    gq.record_from_sync_results(db, [{"data_type": "cs_record", "success": False, "error": "x",
+                                      "start_time": d2, "end_time": d2}])
+
+    df = pd.DataFrame({"创建时间": ["2026-09-03 03:00:00", "2026-09-02 18:00:00", "bad"]})
+    _close_gaps_from_import(db, "cs_record", df, {"created_at_raw": "创建时间"}, upload_id=7)
+
+    g3 = db.query(GapRecord).filter_by(biz_date="2026-09-03", data_type="cs_record").one()
+    g2 = db.query(GapRecord).filter_by(biz_date="2026-09-02", data_type="cs_record").one()
+    assert g3.status == "filled"  # 凌晨 3 点仍归属 09-03
+    assert g2.status == "filled"
+    assert "upload:7" in (g3.remark or "")
+
+
 # ──────────── 4. settle_and_backfill_yesterday ────────────
 
 
@@ -184,6 +266,11 @@ async def test_settle_backfill_success(db, monkeypatch):
         return [{"data_type": "cs_record", "success": True, "inserted_rows": 5}]
 
     monkeypatch.setattr("app.services.bms_sync.sync_all", fake_sync_all)
+    # 测试库无 sync_source_configs 行(空表 = 无源纳入定时), mock 已知 BMS 源集合
+    monkeypatch.setattr(
+        "app.services.sync_source_config_service.list_scheduled_bms_sources",
+        lambda _db: {"all": ["cs_record"], "high": ["cs_record"], "low": []},
+    )
     r = await gq.settle_and_backfill_yesterday(db, yesterday="2026-09-03")
     assert r["total"] == 1
     assert r["backfilled"] == ["cs_record"]
@@ -201,6 +288,11 @@ async def test_settle_backfill_fail(db, monkeypatch):
         return [{"data_type": "cs_record", "success": False, "error": "still down"}]
 
     monkeypatch.setattr("app.services.bms_sync.sync_all", fake_sync_all)
+    # 同 success 用例: mock 已知 BMS 源集合(测试库空配置)
+    monkeypatch.setattr(
+        "app.services.sync_source_config_service.list_scheduled_bms_sources",
+        lambda _db: {"all": ["cs_record"], "high": ["cs_record"], "low": []},
+    )
     r = await gq.settle_and_backfill_yesterday(db, yesterday="2026-09-03")
     assert r["total"] == 1
     assert r["backfilled"] == []
