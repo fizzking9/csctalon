@@ -37,6 +37,10 @@ device_tag_rel = Table(
     Column("batch_id", Integer, nullable=True, comment="来源批次(device_tag_batches.id)"),
     Column("status", String(16), server_default="active", nullable=False, comment="active/inactive"),
     Column("expired_at", DateTime(timezone=True), nullable=True, comment="失效时间"),
+    # #249 B3-3 (A-20261007-002 §3.6): 业务事实来源(哪个投诉/质检行触发的打标)
+    Column("source_table", String(32), nullable=True, comment="来源表名(可空, 老批次数据为 NULL)"),
+    Column("source_id", String(64), nullable=True, comment="来源行主键值(可空)"),
+    Column("reason", Text, nullable=True, comment="打标原因(可空)"),
 )
 
 
@@ -120,6 +124,10 @@ class DeviceTagBinding(Base):
     expired_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="失效时间"
     )
+    # #249 B3-3 (A-20261007-002 §3.6): 业务事实来源
+    source_table: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="来源表名")
+    source_id: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="来源行主键值")
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True, comment="打标原因")
 
 
 class DeviceTagBatch(IDMixin, TimestampMixin, Base):

@@ -6,6 +6,7 @@ logger = logging.getLogger(__name__)
 from app.api.v1.complaints._analysis import complaint_analysis
 from app.api.v1.complaints._audit import create_audit, list_audits
 from app.api.v1.complaints._backlog import complaint_backlog, complaint_backlog_export
+from app.api.v1.complaints._by_tag import complaint_by_device_tag_endpoint
 from app.api.v1.complaints._detail import (
     complaint_detail,
     complaint_pure_card,
@@ -117,6 +118,7 @@ __all__ = [
     'complaint_analysis',
     'complaint_backlog',
     'complaint_backlog_export',
+    'complaint_by_device_tag_endpoint',
     'complaint_dedup_review',
     'complaint_detail',
     'complaint_health_metrics_endpoint',

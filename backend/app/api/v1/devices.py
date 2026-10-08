@@ -331,3 +331,74 @@ def tag_stats(db: DBSession, _: CurrentUser):
     ]
     data.sort(key=lambda x: -x["sn_count"])
     return R(data=data)
+
+
+@router.get("/tags/{tag_id}/devices", response_model=R[PageBase], summary="标签下钻:设备明细")
+def tag_devices_drilldown(
+    tag_id: int,
+    db: DBSession,
+    _: CurrentUser,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    days: int | None = Query(None, ge=0, description="时间窗口(按打标时间),0/空=不限"),
+    source_table: str | None = Query(None, description="按来源表筛选(如 refunds/service_tickets)"),
+    status: str | None = Query("active", description="绑定状态筛选,空=全部"),
+    keyword: str | None = Query(None, description="SN/类型模糊"),
+):
+    """#249 B3-3 (A-20261007-002 §3.6 标签事实化)
+
+    标签卡下钻: 返回该标签绑定的设备明细, 含来源信息(source_table/source_id/reason)
+    供使用者从「某标签 SN 数」一钻到「具体哪些设备、因哪条业务事实打的标」。
+    每条设备行带 sn 供前端跳转设备 360 (/devices/{sn}/timeline)。
+    """
+    tag = db.get(DeviceTag, tag_id)
+    if not tag:
+        raise HTTPException(status_code=404, detail="标签不存在")
+
+    stmt = (
+        select(DeviceTagBinding, Device)
+        .join(Device, Device.sn == DeviceTagBinding.device_sn)
+        .where(DeviceTagBinding.tag_id == tag_id)
+    )
+    if status:
+        stmt = stmt.where(DeviceTagBinding.status == status)
+    if source_table:
+        stmt = stmt.where(DeviceTagBinding.source_table == source_table)
+    if days:
+        from datetime import datetime, timedelta, timezone
+
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        stmt = stmt.where(DeviceTagBinding.created_at >= since)
+    if keyword:
+        kw = f"%{keyword}%"
+        stmt = stmt.where(or_(Device.sn.like(kw), Device.device_type.like(kw)))
+
+    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
+    rows = db.execute(
+        stmt.order_by(DeviceTagBinding.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return R(
+        data=PageBase(
+            items=[
+                {
+                    "sn": binding.device_sn,
+                    "device_type": dev.device_type,
+                    "merchant_name": dev.merchant_name,
+                    "device_status": dev.status,
+                    "tag_status": binding.status,
+                    "tagged_at": binding.created_at.isoformat() if binding.created_at else None,
+                    "tagged_by": binding.created_by,
+                    "batch_id": binding.batch_id,
+                    "source_table": binding.source_table,
+                    "source_id": binding.source_id,
+                    "reason": binding.reason,
+                }
+                for binding, dev in rows
+            ],
+            total=total or 0,
+            page=page,
+            page_size=page_size,
+        )
+    )

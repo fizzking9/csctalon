@@ -678,3 +678,91 @@ def _complaint_reg_handled_total(db: Session, ts, te) -> dict[str, int]:
         "registered": int(total.get("registered", 0) or 0),
         "handled": int(total.get("handled", 0) or 0),
     }
+
+
+def complaint_by_device_tag(
+    db: Session,
+    date: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """#249 B3-3: 投诉按设备标签组合维度聚合 (A-20261007-002 §3.6 标签事实化)
+
+    口径:
+      · 投诉判据 = complaint_scope.is_complaint_ticket_cond（空白 OR '投诉'），与 #87 完全一致
+      · 关联: service_tickets.device_sn → device_tag_rel(status='active') → device_tags
+      · 一台设备可有多个 active 标签 → 该 SN 的投诉单在**每个**所属标签各计一次
+        （「组合维度」语义: 回答"哪些人群/批次的投诉最集中", 不是互斥分桶, 总和≠投诉总量）
+      · 未打标 SN 单独归入 "(未打标)" 桶 —— 暴露标签覆盖率缺口
+
+    返回: [{tag_id, tag_name, ticket_count, sn_count, refund_amount}] 按单量倒序。
+    """
+    from app.models.device import DeviceTag, device_tag_rel
+
+    ts, te, _, _, _, _ = _resolve_windows(date=date, start=start, end=end)
+    _is_c = is_complaint_ticket_cond(ServiceTicket.service_category)
+    _win = (
+        ServiceTicket.register_time >= ts,
+        ServiceTicket.register_time <= te,
+        ServiceTicket.device_sn.isnot(None),
+    )
+
+    # ── 已打标部分: 按标签分组 ──
+    rows = db.execute(
+        select(
+            device_tag_rel.c.tag_id,
+            func.count().label("ticket_count"),
+            func.count(func.distinct(ServiceTicket.device_sn)).label("sn_count"),
+            func.coalesce(func.sum(ServiceTicket.refund_amount), 0).label("amt"),
+        )
+        .join(
+            device_tag_rel,
+            and_(
+                device_tag_rel.c.device_sn == ServiceTicket.device_sn,
+                device_tag_rel.c.status == "active",
+            ),
+        )
+        .where(_is_c, *_win)
+        .group_by(device_tag_rel.c.tag_id)
+        .order_by(func.count().desc())
+        .limit(limit)
+    ).all()
+    tag_names = {t.id: t.tag_name for t in db.scalars(select(DeviceTag))}
+    data = [
+        {
+            "tag_id": r.tag_id,
+            "tag_name": tag_names.get(r.tag_id),
+            "ticket_count": int(r.ticket_count),
+            "sn_count": int(r.sn_count),
+            "refund_amount": float(r.amt or 0),
+        }
+        for r in rows
+    ]
+
+    # ── 未打标部分: 投诉 SN 中无任何 active 标签的 ──
+    untagged = db.execute(
+        select(
+            func.count().label("ticket_count"),
+            func.count(func.distinct(ServiceTicket.device_sn)).label("sn_count"),
+            func.coalesce(func.sum(ServiceTicket.refund_amount), 0).label("amt"),
+        )
+        .where(
+            _is_c,
+            *_win,
+            ~ServiceTicket.device_sn.in_(
+                select(device_tag_rel.c.device_sn).where(device_tag_rel.c.status == "active")
+            ),
+        )
+    ).one()
+    if int(untagged.ticket_count or 0):
+        data.append(
+            {
+                "tag_id": None,
+                "tag_name": "(未打标)",
+                "ticket_count": int(untagged.ticket_count),
+                "sn_count": int(untagged.sn_count),
+                "refund_amount": float(untagged.amt or 0),
+            }
+        )
+    return data
