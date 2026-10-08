@@ -18,7 +18,10 @@ name: csctalon
 # 配置: 所有密钥/环境变量从同目录 .env 读取（已 gitignore），勿提交真实 .env。
 # 数据: PG / Redis 数据 bind mount 到 ./data，宿主机可直接备份。
 # 日志: ① 所有容器 stdout 走 json-file 轮转（单文件 10m，保留 3 份），防止撑爆磁盘；
-#       ② 后端 gunicorn access/error 日志 + nginx 日志额外写文件到 ./logs，便于直接查看。
+#       ② 后端 gunicorn access/error 日志 + nginx 日志额外写文件到 ./logs，便于直接查看;
+#          nginx 文件日志由宿主 logrotate 轮转(#279, 配置见 deploy/logrotate.d/csctalon-nginx)。
+# 资源: 四服务 deploy.resources.limits 为 cgroup 上限(#279)——非预留, 仅超限时约束;
+#       需 docker compose v2(本文件 name: 字段本已要求 v2)。
 #
 # 挂载路径变量化(生产部署用): 服务器上通过 .env 把数据/日志/附件指到固定绝对目录
 # (如 /opt/csctalon/data), 这样代码目录可随版本切换(releases/current), 数据不随代码变动。
@@ -51,6 +54,13 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    # 资源上限(#279): 上限而非预留, 仅超限时由 cgroup 约束, 空闲时不抢占。
+    # db 给 2G: 单 backend 低并发 workload, postgres 默认 shared_buffers 远低于此。
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 2G
     restart: unless-stopped
     logging:
       driver: json-file
@@ -70,6 +80,13 @@ services:
       - ${REDIS_DATA_DIR:-./data/redis}:/data
     ports:
       - "127.0.0.1:6379:6379"   # 仅本机可连
+    # 上限(#279): 容器 512M 与 redis maxmemory 256mb 之间留一倍余量
+    # (fork 持久化/复制缓冲), redis 自身 allkeys-lru 先行兜底。
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
     restart: unless-stopped
     logging:
       driver: json-file
@@ -128,6 +145,13 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s   # 预留迁移/种子/调度器启动时间
+    # 上限(#279): 4G 给 Playwright chromium + ddddocr onnx 留余量(采集期单容器峰值
+    # 观测约 1.5-2.5G); 2 CPU 防止采集/导出任务饿死健康检查响应。
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
     depends_on:
       db:
         condition: service_healthy
@@ -159,6 +183,20 @@ services:
     ports:
       - "80:80"
       - "443:443"                                             # HTTPS
+    # 健康检查(#279): 打 /healthz(nginx.conf 内 access_log off 的轻量端点),
+    # 只验 nginx 自身监听; busybox wget 为 nginx:alpine 内置, 无需改镜像。
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # 上限(#279): 纯静态托管, 256M 已远超实际(常态 <30M)。
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
     depends_on:
       backend:
         condition: service_healthy   # 等后端就绪再启动 nginx,消除 host not found in upstream emerg

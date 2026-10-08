@@ -305,6 +305,18 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   `wallet_*.sql.gz`、`ai_reports_*.dump`）不匹配该前缀，**不会被自动清理**
 - 日志由 `/etc/logrotate.d/csctalon-backup` 周轮转（保留 4 份、压缩）
 
+**nginx 文件日志轮转（#279）**：容器 stdout 已由 docker json-file 轮转兜底；
+`logs/nginx/*.log` 文件日志由宿主 logrotate 日轮转（保留 14 份、压缩）。
+安装（一次性，root）：
+
+```bash
+sudo cp /opt/csctalon/current/deploy/logrotate.d/csctalon-nginx /etc/logrotate.d/csctalon-nginx
+sudo logrotate -d /etc/logrotate.d/csctalon-nginx   # 干跑验证
+```
+
+> 配置在仓库版本化（`deploy/logrotate.d/csctalon-nginx`），与 `/etc/cron.d/` 同理可审计；
+> 若 `.env` 改了 `NGINX_LOGS_DIR`，配置中的路径必须同步修改。
+
 > 为什么用 `/etc/cron.d/` 而非 `crontab -e`：文件可审计、可版本化、可 `diff`，
 > 且带 `PATH` 声明不依赖 root 的默认 PATH。旧文档给出的 `crontab -e` 方式仍可用，
 > 但**不要与 `/etc/cron.d/` 重复配置**（会一天跑两次）。

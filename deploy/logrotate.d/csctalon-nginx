@@ -1,0 +1,20 @@
+# csctalon nginx 文件日志轮转(#279)
+# 安装(生产服务器, 一次性):
+#   sudo cp /opt/csctalon/current/deploy/logrotate.d/csctalon-nginx /etc/logrotate.d/csctalon-nginx
+#   sudo logrotate -d /etc/logrotate.d/csctalon-nginx   # 干跑验证
+#
+# 为什么用 copytruncate 而不是 postrotate + `docker kill -s USR1 csctalon-web`:
+#   logrotate 在宿主 cron 上下文执行, 不保证 docker CLI 可用/PATH 齐全;
+#   内网低流量下 copytruncate 的毫秒级丢失窗口可接受, 换来零依赖。
+#
+# 路径与 env.production.example 的 NGINX_LOGS_DIR=/opt/csctalon/logs/nginx 对齐;
+# 若生产 .env 改了挂载目录, 这里必须同步改(两处定义, 以 .env 为准)。
+/opt/csctalon/logs/nginx/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
