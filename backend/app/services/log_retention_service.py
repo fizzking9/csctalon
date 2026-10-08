@@ -21,6 +21,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.db_guard import assert_safe_to_destroy  # B1-2(#227): 破坏性 DELETE 守卫
+
 logger = logging.getLogger(__name__)
 
 # 表名 → 保留天数。表名是代码内置白名单(不接受外部传入), 杜绝 SQL 注入。
@@ -48,6 +50,8 @@ def purge_table(db: Session, table: str, days: int,
 
     用 ctid 子查询限定每批行集(PostgreSQL), 每批独立提交, 不持有长事务。
     """
+    # B1-2(#227): 批量 DELETE 属破坏性操作, 必须先过 db_guard 守卫
+    assert_safe_to_destroy(db, reason=f"log_retention purge_table DELETE {table}")
     if table not in RETENTION_DAYS:
         raise ValueError(f"不在保留期白名单内的表: {table}")
     threshold = datetime.now(timezone.utc) - timedelta(days=days)

@@ -38,6 +38,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.db_guard import assert_safe_to_destroy  # B1-2(#227): L2 破坏性操作守卫
 from app.models.governance_finding import (
     FINDING_STATUS_AUTO_CLOSED,
     FINDING_STATUS_JUDGED,
@@ -438,6 +439,8 @@ def _backup_rows(db: Session, table: str, finding_id: int, pick_sql: str,
     _assert_ident(table, "表名")
     bak = f"{_BACKUP_PREFIX}_{table}_{finding_id}"
     _assert_ident(bak, "备份表名")
+    # B1-2(#227): DROP 属破坏性操作, 必须先过 db_guard 守卫
+    assert_safe_to_destroy(db, reason=f"governance _backup_rows DROP gov_bak_{table}_{finding_id}")
     db.execute(text(f'DROP TABLE IF EXISTS {_quote(bak)}'))
     db.execute(text(f'CREATE TABLE {_quote(bak)} AS SELECT * FROM {_quote(table)} '
                     f'WHERE ctid IN (\n{pick_sql}\n)'), params or {})
@@ -449,6 +452,8 @@ def _backup_rows(db: Session, table: str, finding_id: int, pick_sql: str,
 
 def _exec_delete_dups(db: Session, f: GovernanceFinding) -> dict:
     """L2 删重复行：判据同源 → dry-run 对数 → 备份 → 删除 → 前后对比。"""
+    # B1-2(#227): DELETE 属破坏性操作, 必须先过 db_guard 守卫
+    assert_safe_to_destroy(db, reason=f"governance _exec_delete_dups DELETE FROM {f.table_name}")
     if f.detector != "unique_index_dup":
         raise ExecuteError(
             f"delete_dups 仅适用于 unique_index_dup 探测器（当前 {f.detector}）；"
@@ -599,6 +604,8 @@ def _exec_fix_time(db: Session, f: GovernanceFinding, *, params: dict | None) ->
       ③ **备份先行且行数必须相等**：备份行数 != 待改行数 → 中止（备份不完整不得改）。
     表名/列名走 `_assert_ident` 白名单，值一律绑定参数（AGENTS.md 绝对禁止第 2 条）。
     """
+    # B1-2(#227): 批量 UPDATE 属破坏性操作, 必须先过 db_guard 守卫
+    assert_safe_to_destroy(db, reason=f"governance _exec_fix_time UPDATE {f.table_name}")
     if f.detector != "impossible_date":
         raise ExecuteError(
             f"fix_time 仅适用于 impossible_date 探测器（当前 {f.detector}）；"
