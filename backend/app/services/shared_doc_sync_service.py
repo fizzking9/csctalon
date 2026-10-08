@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.doc_sync_source import DocSyncSource
+from app.models.upload import UploadRecord
 from app.services.data_parser import count_suspect_precision
 from app.services.ingest_service import ingest_complaints, ingest_manual_refunds
 from app.services.sync_watermark import is_due, stamp_attempt
@@ -895,6 +896,33 @@ def _sync_with_version_gate(db: Session, row: DocSyncSource, out_path: str,
 _PENDING_VERSION: dict[int, str] = {}
 
 
+def _record_shared_doc_batch(
+    db: Session, *, data_type: str, source_file: str,
+    total: int, inserted: int, updated: int, failed: int,
+    status: str, errors: list[str] | None,
+) -> UploadRecord:
+    """#248 S-P1-14: 共享文档同步批次落 upload_records, 与手工通道可观测性对等"""
+    record = UploadRecord(
+        data_type=data_type,
+        filename=source_file,
+        stored_path=None,  # 共享文档无本地归档路径, 导出临时文件不入库存
+        status="imported" if status == "success" else "failed",
+        total_rows=total,
+        inserted_rows=inserted,
+        updated_rows=updated,
+        failed_rows=failed,
+        uploaded_by="system",
+        source="shared_doc",
+        finished_at=datetime.now(timezone.utc),
+    )
+    if errors:
+        record.error_detail = {"errors": errors[:50]}
+    db.add(record)
+    db.flush()
+    logger.info(f"[shared_doc] 批次台账 upload_record id={record.id} {data_type} {source_file} total={total}")
+    return record
+
+
 def _do_sync(db: Session, row: DocSyncSource, out_path: str, trigger: str) -> dict[str, Any]:
     """导出 → 解析 → 入库(不负责配置行状态写回, 由 sync_one_source 统一处理)"""
     # 版本闸门(默认关闭): 未变化则跳过整表导出(实测可省 ~97% 耗时)
@@ -942,6 +970,12 @@ def _sync_complaint_from_file(
         db, payload=payload, source="shared_doc", source_file=source_file,
         source_ref=f"doc_source:{row.id}",
     )
+    # #248 S-P1-14: 批次台账落 upload_records, 共享表格与手工通道可观测性对等
+    _record_shared_doc_batch(
+        db, data_type="complaint", source_file=source_file,
+        total=res.total, inserted=res.inserted, updated=res.updated,
+        failed=res.failed, status=res.status, errors=res.errors,
+    )
     # 转回既有统计形状(调用方/summary 期望 external/card 子结构), 不改变对外语义
     stats: dict[str, Any] = {
         "log_id": res.extra.get("log_id"),
@@ -986,6 +1020,12 @@ def _sync_manual_refund_from_file(
     res = ingest_manual_refunds(
         db, payload=payload, source="shared_doc", source_file=source_file,
         source_ref=f"doc_source:{row.id}",
+    )
+    # #248 S-P1-14: 批次台账落 upload_records
+    _record_shared_doc_batch(
+        db, data_type="manual_refund", source_file=source_file,
+        total=res.total, inserted=res.inserted, updated=res.updated,
+        failed=res.failed, status=res.status, errors=res.errors,
     )
     stats: dict[str, Any] = {
         "log_id": res.extra.get("log_id"),
