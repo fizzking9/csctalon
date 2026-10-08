@@ -43,6 +43,7 @@ from app.schemas.external_token import (
     ExternalTokenOut,
     ExternalTokenUpdate,
 )
+from app.services import ai_data_supply as ADS
 from app.services import analytics as A
 from app.services import external_service as S
 from app.services import setup_package
@@ -324,6 +325,84 @@ def external_brief(
     tag = f"brief:{period}" if (start is None and end is None) else f"brief:range:{start}:{end}"
     S.record_external_access(db, row, tag)
     return R(data=_build_brief(db, period, date, start=start, end=end))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 对外只读: 实体维度端点(#237 / B2-2, 复用 ai_data_supply 统一聚合层)
+#   设备行为 / 充值流量 / 设备标签 / 排班考勤。与内部 AI 问答条件注入同源同口径。
+# ─────────────────────────────────────────────────────────────────────
+def _range_or_400(start: str | None, end: str | None, *, required: bool = False):
+    """复用供给层区间护栏; ValueError → 400。required=True 时 start/end 必填(排班)。"""
+    if required and not (start and end):
+        raise HTTPException(400, "start/end 必填(YYYY-MM-DD)")
+    try:
+        return ADS._validate_range(start, end)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/recharge", response_model=R, summary="外部-充值套餐&流量聚合(可按SN/区间)")
+def external_recharge(
+    db: DBSession,
+    sn: str | None = Query(None, description="设备 SN(精确; 缺省=全部设备)"),
+    start: str | None = Query(None, description="充值时间起 YYYY-MM-DD(与 end 成对, 整天)"),
+    end: str | None = Query(None, description="充值时间止 YYYY-MM-DD(与 end 成对, ≤今天, 跨度≤93天)"),
+    authorization: Annotated[str | None, Header()] = None,
+):
+    row = _auth(db, authorization)
+    S.require_scope(row, "recharge")
+    _range_or_400(start, end)
+    S.record_external_access(db, row, f"recharge:{sn or 'all'}:{start or ''}:{end or ''}")
+    try:
+        return R(data=ADS.supply_recharge(db, sn=sn, start=start, end=end))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/device-tags", response_model=R, summary="外部-设备标签(SN 标签或全标签统计)")
+def external_device_tags(
+    db: DBSession,
+    sn: str | None = Query(None, description="设备 SN; 给定时返回该设备标签, 缺省=各标签绑定 SN 数"),
+    authorization: Annotated[str | None, Header()] = None,
+):
+    row = _auth(db, authorization)
+    S.require_scope(row, "device_tag")
+    S.record_external_access(db, row, f"device_tag:{sn or 'all'}")
+    return R(data=ADS.supply_device_tags(db, sn=sn))
+
+
+@router.get("/device/{sn}", response_model=R, summary="外部-单设备档案/生命周期KPI/事件时间线")
+def external_device(
+    sn: str,
+    db: DBSession,
+    timeline_days: int = Query(90, ge=1, le=365, description="时间线回溯天数"),
+    timeline_limit: int = Query(50, ge=1, le=200, description="时间线事件封顶条数"),
+    authorization: Annotated[str | None, Header()] = None,
+):
+    row = _auth(db, authorization)
+    S.require_scope(row, "device")
+    S.record_external_access(db, row, f"device:{sn}")
+    data = ADS.supply_device_behavior(db, sn, timeline_limit=timeline_limit, timeline_days=timeline_days)
+    if data is None:
+        raise HTTPException(404, f"设备不存在: {sn}")
+    return R(data=data)
+
+
+@router.get("/schedule", response_model=R, summary="外部-排班×考勤区间汇总(人天/班次/出勤)")
+def external_schedule(
+    db: DBSession,
+    start: str = Query(..., description="区间起 YYYY-MM-DD(整天)"),
+    end: str = Query(..., description="区间止 YYYY-MM-DD(≤今天, 跨度≤93天)"),
+    authorization: Annotated[str | None, Header()] = None,
+):
+    row = _auth(db, authorization)
+    S.require_scope(row, "schedule")
+    _range_or_400(start, end, required=True)
+    S.record_external_access(db, row, f"schedule:{start}:{end}")
+    try:
+        return R(data=ADS.supply_schedule(db, start, end))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def _window(period: str, date: str | None, start: str | None = None, end: str | None = None) -> dict:

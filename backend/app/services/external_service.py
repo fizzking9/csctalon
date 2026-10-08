@@ -32,7 +32,10 @@ from app.models.external_token import ExternalAccessToken
 logger = logging.getLogger(__name__)
 
 # 可用 scope 集合(一期, 与架构一致; 后续绩效/人员等在此扩展)
-SCOPES = ("reception", "refund", "complaint", "brief")
+# #237(B2-2): 新增实体维度四类 — device 单设备行为/ recharge 充值流量/
+# device_tag 设备标签/ schedule 排班考勤区间。
+SCOPES = ("reception", "refund", "complaint", "brief",
+          "device", "recharge", "device_tag", "schedule")
 
 # 北京时区
 TZ_CN = _dt.timezone(_dt.timedelta(hours=8))

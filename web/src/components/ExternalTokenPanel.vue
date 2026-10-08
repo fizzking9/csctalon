@@ -106,7 +106,7 @@
           <el-checkbox-group v-model="form.scopes">
             <el-checkbox v-for="s in (cfg?.scopes || [])" :key="s" :label="s" :value="s">{{ s }}</el-checkbox>
           </el-checkbox-group>
-          <div class="sub-tip">reception=接待 / refund=退款 / complaint=投诉 / brief=经营简报</div>
+          <div class="sub-tip">reception=接待 / refund=退款 / complaint=投诉 / brief=经营简报 / device=设备行为 / recharge=充值流量 / device_tag=设备标签 / schedule=排班考勤(#237)</div>
         </el-form-item>
         <el-form-item label="限频(次/分)">
           <el-input-number v-model="form.rate_limit_per_min" :min="0" :max="100000" />

@@ -4,89 +4,16 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, or_, select
 
 from app.api.deps import AdminUser, CurrentUser, DBSession, ManagerUser
-from app.models.bms_order import BmsOrder
-from app.models.card_complaint import CardComplaint
-from app.models.cs_record import CsRecord
 from app.models.device import Device, DeviceTag, DeviceTagBatch, DeviceTagBinding, device_tag_rel
-from app.models.device_combo import DeviceCombo
-from app.models.device_flow_usage import DeviceFlowUsage
-from app.models.external_complaint import ExternalComplaint
-from app.models.manual_refund import ManualRefund
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
-from app.models.refund_record_report import RefundRecordReport
-from app.models.return_tracking import ReturnTracking
-from app.models.shanmao_refund import ShanmaoRefund
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 from app.schemas.common import PageBase, R
 from app.services.audit_timeline import build_device_timeline
+from app.services.device_profile import build_device_profile
 
 router = APIRouter(prefix="/devices", tags=["设备管理"])
-
-
-def _device_subject(db, device: Device) -> dict:
-    """设备 subject: 基础档案 + P4 扩展档案(BMS 设备管理采集) + 生命周期 KPI 概览。
-
-    集中一处序列化, 供 /devices/{sn} 详情与 /devices/{sn}/timeline 复用, 避免两处口径漂移。
-    """
-    sn = device.sn
-
-    def _cnt(model, col, extra=None):
-        stmt = select(func.count()).select_from(model).where(col == sn)
-        if extra is not None:
-            stmt = stmt.where(extra)
-        return db.scalar(stmt) or 0
-
-    def _sum(model, col, extra=None):
-        stmt = select(func.coalesce(func.sum(col), 0)).select_from(model).where(col == sn)
-        if extra is not None:
-            stmt = stmt.where(extra)
-        return float(db.scalar(stmt) or 0)
-
-    # ---- 设备档案(P4 扩展, 来自 BMS 设备管理采集, 已入库零展示) ----
-    profile = {
-        "kind": "device",
-        "sn": device.sn,
-        "device_type": device.device_type,
-        "device_type_remark": device.device_type_remark,
-        "merchant_name": device.merchant_name,
-        "main_merchant_name": device.main_merchant_name,
-        "active_flag": device.active_flag,
-        "status": device.status,
-        "active_time": device.active_time.isoformat() if device.active_time else None,
-        "service_valid_until": device.service_valid_until.isoformat() if device.service_valid_until else None,
-        "current_combo_name": device.current_combo_name,
-        "start_iccid": device.start_iccid,
-        "virtual_iccid": device.virtual_iccid,
-        "app_version": device.app_version,
-        "region": device.region,
-        "batch_no": device.batch_no,
-        "tags": [{"id": t.id, "name": t.tag_name, "color": t.color} for t in (device.tags or [])],
-    }
-
-    # ---- 生命周期 KPI 概览(各业务表 count + 关键 sum, 口径与 timeline/本地查询一致) ----
-    remaining = _sum(DeviceCombo, DeviceCombo.remaining_traffic, DeviceCombo.remaining_traffic != -1)
-    total_flow = _sum(DeviceFlowUsage, DeviceFlowUsage.flow_gb)
-    profile["kpi"] = {
-        "refund_count": _cnt(Refund, Refund.device_sn),
-        "ticket_count": _cnt(ServiceTicket, ServiceTicket.device_sn),
-        "wallet_count": _cnt(WalletWithdrawal, WalletWithdrawal.device_sn),
-        "cs_count": _cnt(CsRecord, CsRecord.device_sn),
-        "external_complaint_count": _cnt(ExternalComplaint, ExternalComplaint.device_sn),
-        "card_complaint_count": _cnt(CardComplaint, CardComplaint.device_sn),
-        "combo_count": _cnt(DeviceCombo, DeviceCombo.device_sn),
-        "combo_total_amount": round(_sum(DeviceCombo, DeviceCombo.actual_amount), 2),
-        "combo_remaining_bytes": int(remaining),
-        "manual_refund_count": _cnt(ManualRefund, ManualRefund.device_sn),
-        "shanmao_refund_count": _cnt(ShanmaoRefund, ShanmaoRefund.device_sn),
-        "order_count": _cnt(BmsOrder, BmsOrder.device_sn),
-        "return_tracking_count": _cnt(ReturnTracking, ReturnTracking.device_sn),
-        "refund_record_report_count": _cnt(RefundRecordReport, RefundRecordReport.device_sn),
-        "flow_month_count": _cnt(DeviceFlowUsage, DeviceFlowUsage.device_sn),
-        "flow_total_gb": round(total_flow, 4),
-    }
-    return profile
 
 
 @router.get("", response_model=R[PageBase], summary="设备列表")
@@ -144,7 +71,7 @@ def get_device(sn: str, db: DBSession, _: CurrentUser):
     list(db.scalars(select(MerchantRefund).where(MerchantRefund.device_no == sn).order_by(MerchantRefund.trade_time.desc()).limit(20)))
     return R(
         data={
-            "device": _device_subject(db, device),
+            "device": build_device_profile(db, device),
             "refund_count": db.scalar(select(func.count()).select_from(Refund).where(Refund.device_sn == sn)) or 0,
             "refund_total": float(db.scalar(select(func.coalesce(func.sum(Refund.refund_amount), 0)).where(Refund.device_sn == sn)) or 0),
             "cash_out_total": float(
@@ -199,7 +126,7 @@ def device_timeline(
         include_device_sn=include_device_sn,
     )
     # 设备 subject: 基础档案 + P4 扩展 + 生命周期 KPI 概览(集中序列化)
-    result["subject"] = _device_subject(db, device)
+    result["subject"] = build_device_profile(db, device)
     return R(data=result)
 
 

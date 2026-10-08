@@ -887,6 +887,19 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
     except Exception:  # noqa: BLE001  Focus 故障不影响主链路
         logger.warning("ai_feed 加载 focus 失败(忽略): 保持无 focus 输出")
     data_ctx = "【给定数据(JSON, 金额单位=元)】\n" + feed_json
+    # #237(B2-2) 实体维度条件注入: 问句点名设备 SN / 排班关键词时, 追加设备行为·充值流量·
+    #   设备标签·排班考勤段; 普通经营问答返回空串(零影响)。独立于 feed 预算裁剪, 保证点名信息下发。
+    #   窗口取本次 feed 的 date_start/date_end(ISO, 切前 10 位 = 北京日历日)。
+    try:
+        from app.services.ai_data_supply import build_entity_context
+        _win_s = (feed.get("date_start") or "")[:10] or None
+        _win_e = (feed.get("date_end") or "")[:10] or None
+        entity_ctx = build_entity_context(db, question, start=_win_s, end=_win_e)
+    except Exception:  # noqa: BLE001  实体注入是增强项, 失败不阻断主问答
+        logger.warning("ai_feed 实体段注入失败(忽略)")
+        entity_ctx = ""
+    if entity_ctx:
+        data_ctx = f"{data_ctx}\n\n{entity_ctx}"
     # #178 提示词版本化: DB 有生效版本(gen_system) → 用之；无/异常 → 代码常量兜底（铁律）
     from app.services.prompt_config_service import load_effective_prompt
 
