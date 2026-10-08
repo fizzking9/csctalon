@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts" / "archive"
 
 # 已知的组长/主管/专员姓名（用于检测硬编码）。
 # ⚠️ 本测试自身的名字列表只用于「探测」，不参与业务逻辑 —— 这是允许的；

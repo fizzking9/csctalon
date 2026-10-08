@@ -29,7 +29,34 @@ AGENTS.md 绝对禁止第 14 条 / R-P1-12 要求：顶层 `scripts/` 仅保留*
 2. 复制到 `workdata/`（gitignore）按需改造，加 `bootstrap()` 调用
 3. 不要在顶层 `scripts/` 直接放回
 
-## 归档清单（31 个脚本，2026-10-08）
+## 归档清单（52 个脚本，2026-10-08）
+
+### 一次性治理脚本（已执行完毕）（9）
+- `apply_org_change_20260914.py` — 组织架构变更一次性脚本
+- `import_july_staff.py` — 7月人员岗位信息导入
+- `init_groups_specialties.py` — Group/Specialty 双体系初始化
+- `fix64_dirty_sn.py` — #64 历史脏 SN 清洗
+- `mark_grey_placeholder_residual.py` — D 路灰色占位残留行治理
+- `cleanup_manual_duplicate_residual.py` — D 路手动退款重复治理
+- `_rebuild_complaint_dedup.py` — 存量投诉指纹重算去重
+- `mark_sn_backfill_duplicates.py` — #59 SN 后补重复标记
+- `clean_polluted_operators.py` — 时间戳污染值清理
+
+### SCRM 配置修复（一次性）（4）
+- `fix_scrm_config_baiyinqifu.py`
+- `fix_scrm_config_captcha_type.py`
+- `fix_scrm_configs_baiyin_final.py`
+- `fix_scrm_selectors.py`
+
+### 验证/调试脚本（6）
+- `verify_scrm_baiyin_fetch.py`
+- `verify_scrm_baiyin_fetch_v2.py`
+- `show_scrm_configs.py`
+- `run_shanmao_refund_debug.py`
+- `export_complaint_gap.py`
+- `probe_verdict_check.py`
+- `verdict_vs_ingest.py`
+- `eval_csv_repair.py`
 
 ### `_debug_*` 调试脚本（6）
 - `_debug_aggressive.py`
