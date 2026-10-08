@@ -52,6 +52,8 @@ def _serialize(i: Incident) -> dict:
         "start_at": i.start_at.isoformat() if i.start_at else None,
         "end_at": i.end_at.isoformat() if i.end_at else None,
         "impact_metrics": i.impact_metrics,
+        # #235 B1.5-4 排班调整建议(经营事件用, 可空)
+        "scheduling_suggestion": i.scheduling_suggestion,
         "created_by": i.created_by,
         "created_at": i.created_at.isoformat() if i.created_at else None,
         "updated_at": i.updated_at.isoformat() if i.updated_at else None,
@@ -171,6 +173,7 @@ def list_timeline_markers(
             "impact": i.impact,
             "target_audience": i.target_audience,
             "impact_metrics": i.impact_metrics,
+            "scheduling_suggestion": i.scheduling_suggestion,
             "is_recurring": i.is_recurring,
             "recurrence_pattern": i.recurrence_pattern,
             "valid_from": i.valid_from.isoformat() if i.valid_from else None,
@@ -341,6 +344,8 @@ def create_incident(payload: dict, db: DBSession, current_user: AdminOrSuperviso
         start_at=datetime.fromisoformat(payload["start_at"]) if payload.get("start_at") else None,
         end_at=datetime.fromisoformat(payload["end_at"]) if payload.get("end_at") else None,
         impact_metrics=payload.get("impact_metrics"),
+        # #235 B1.5-4 排班调整建议(经营事件用, 可空)
+        scheduling_suggestion=payload.get("scheduling_suggestion"),
         created_by=current_user.username,
     )
     db.add(i)
@@ -370,7 +375,7 @@ def update_incident(incident_id: int, payload: dict, db: DBSession, current_user
         raise HTTPException(status_code=404, detail="异常事件不存在")
     for k in ("title", "subject", "detail", "impact", "duration_minutes", "related_tickets", "review_note",
               "category", "department", "severity", "recurrence_pattern",
-              "target_audience", "impact_metrics"):
+              "target_audience", "impact_metrics", "scheduling_suggestion"):
         if k in payload:
             setattr(i, k, payload[k])
     # #232 B1.5-1 event_type 校验后赋值(避免传入非法字符串)

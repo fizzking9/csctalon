@@ -158,6 +158,15 @@
               <el-button link type="primary" :icon="Plus" @click="form.impactMetricsRows.push({ key: '', value: '' })">添加指标</el-button>
             </div>
           </el-form-item>
+          <!-- #235 B1.5-4 排班调整建议(经营事件用) -->
+          <el-form-item label="排班调整建议">
+            <el-input
+              v-model="form.scheduling_suggestion"
+              type="textarea"
+              :rows="2"
+              placeholder="如: 推文后加早班1人 / 活动期间增开2号位 / 19-22点增配1名客服"
+            />
+          </el-form-item>
         </template>
 
         <!-- 异常事故: 点时间 + 持续时长 -->
@@ -254,6 +263,10 @@
         <el-descriptions-item label="明细">{{ current.detail || '-' }}</el-descriptions-item>
         <el-descriptions-item v-if="current.event_type === '经营事件' && current.impact_metrics" label="影响指标">
           <div v-for="(v, k) in current.impact_metrics" :key="k" class="metric-line">· {{ k }}: {{ v }}</div>
+        </el-descriptions-item>
+        <!-- #235 B1.5-4 排班调整建议(经营事件用) -->
+        <el-descriptions-item v-if="current.event_type === '经营事件' && current.scheduling_suggestion" label="排班调整建议">
+          {{ current.scheduling_suggestion }}
         </el-descriptions-item>
         <el-descriptions-item label="关联工单">{{ (current.related_tickets || []).join('、') || '-' }}</el-descriptions-item>
         <el-descriptions-item label="周期性">
@@ -356,6 +369,8 @@ function emptyForm() {
     start_at: null,
     end_at: null,
     impactMetricsRows: [],
+    // #235 B1.5-4 排班调整建议(经营事件用)
+    scheduling_suggestion: '',
   }
 }
 
@@ -428,6 +443,8 @@ async function handleCreate() {
       start_at: isBusiness && form.start_at ? dayjs(form.start_at).toISOString() : null,
       end_at: isBusiness && form.end_at ? dayjs(form.end_at).toISOString() : null,
       impact_metrics: isBusiness ? buildImpactMetrics() : null,
+      // #235 B1.5-4 排班调整建议(经营事件用)
+      scheduling_suggestion: isBusiness ? (form.scheduling_suggestion || null) : null,
     })
     ElMessage.success('登记成功')
     dialogVisible.value = false

@@ -1070,6 +1070,10 @@
         <el-descriptions-item v-if="activeIncidentDetail.event_type === '经营事件' && activeIncidentDetail.impact_metrics" label="影响指标">
           <div v-for="(v, k) in activeIncidentDetail.impact_metrics" :key="k" style="font-size:13px;line-height:1.6">· {{ k }}: {{ v }}</div>
         </el-descriptions-item>
+        <!-- #235 B1.5-4 排班调整建议(经营事件用) -->
+        <el-descriptions-item v-if="activeIncidentDetail.event_type === '经营事件' && activeIncidentDetail.scheduling_suggestion" label="排班调整建议">
+          {{ activeIncidentDetail.scheduling_suggestion }}
+        </el-descriptions-item>
       </el-descriptions>
 
       <!-- #234 B1.5-3 事件影响对照: 前后窗口的接待/投诉/退款量变化 -->

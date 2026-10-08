@@ -128,6 +128,12 @@ class Incident(IDMixin, TimestampMixin, Base):
         nullable=True,
         comment="量化影响指标 {key: value} (用于事件与数据对照)",
     )
+    # #235 B1.5-4 排班调整建议(仅经营事件用, 可空; 排班页关联展示后置于 B3-8)
+    scheduling_suggestion: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment='排班调整建议(经营事件用, 如"推文后加早班1人")',
+    )
 
 
 class IncidentFollowup(IDMixin, TimestampMixin, Base):
