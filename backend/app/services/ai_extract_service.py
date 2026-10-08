@@ -210,7 +210,12 @@ async def extract_section(db: Session, question: str, report: AiReport,
                                provider_code=_chain[0] if _chain else None)
         try:
             result = await llm_client.chat_completion(
-                messages, max_tokens=1200, timeout_s=60.0,
+                messages, max_tokens=1200,
+                # R-P1-3 超时口径: 60s 是云端端点/单次 attempt 下限; 本地慢端点会被
+                # _ensure_timeout_fits_tokens 按 1200 token 物理自洽上调到约 110s
+                # (长报告摘取确需输出上限, 非"60 声明/110 实际"的两张皮)。端到端 wall-clock
+                # 预算本次不设(摘取走档位链首选快模型; 是否加硬墙与 B2-5 max_tokens 同评估)。
+                timeout_s=60.0,
                 db=db, source="ai_extract",
                 # 传 db → 优先用界面配置的角色成员；DB 无配置时回退源码常量
                 provider_code=_chain,

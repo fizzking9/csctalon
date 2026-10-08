@@ -702,6 +702,9 @@ async def ai_analyze(payload: AiAnalyzeRequest, current_user: ManagerUser):
                         len(q), build_ms)
             # #116 llm_result 是 LLMResult(继承 str), .usage 拿 token 统计
             # #120 前台实时路径显式传 timeout_s=60(用户等); 后台预生成走 #121 传 180
+            # R-P1-3: 60s 是云端/单次 attempt 下限; 本地慢端点按 1500 token 自洽上调到
+            #   约 130s(物理上产得完)。是否加端到端 deadline 硬墙属实时 SLO, 与 B2-5
+            #   max_tokens 一并评估, 本次仅统一口径不擅缩用户等待。
             # #127 接入真优先级队列: 用户实时问答挂 L2(最低, 可被 L0/L1 抢占)。
             #   被抢占时上层(ai_task_manager)捕获 CancelledError 置"可重试"。
             from app.services.llm_scheduler import acquire, release

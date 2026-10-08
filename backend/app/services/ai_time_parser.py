@@ -385,6 +385,12 @@ async def llm_parse_time_intent(question: str, *, today: _date | None = None) ->
                 content = await chat_completion(
                     [{"role": "user", "content": _LLM_TIME_PROMPT.format(today=today.isoformat(), question=question)}],
                     temperature=0.0, max_tokens=300, timeout_s=15,
+                    # R-P1-3: timeout_s=15 是「单次 attempt 下限」, 本地慢端点会被
+                    # _ensure_timeout_fits_tokens 按 max_tokens 自洽上调到约 50s; 但时间
+                    # 解析只是实时问答的**前置兜底**(失败安全 return _NONE, 不阻断主链路),
+                    # 不应让用户为此等 50s。deadline_s=20 是端到端 wall-clock 硬墙,
+                    # 跨重试/降级在约 20s 内必返回(优先于单次自洽上调)。
+                    deadline_s=20,
                     db=_log_db, source="llm_time_parse",
                 )
             finally:

@@ -301,6 +301,7 @@ async def _call_single_provider(
     *, url: str, headers: dict, body: dict,
     timeout_s: float, retry_max: int,
     transport: httpx.AsyncBaseTransport | None = None,
+    wall_deadline: float | None = None,
 ) -> tuple[LLMResult | None, LLMError | None, int | None, str]:
     """对单个 Provider 发起调用, transient 错误按 retry_max 指数退避重试。
 
@@ -309,11 +310,18 @@ async def _call_single_provider(
       - 失败 content=None, last_err 非 None
     status_code: 成功=200; 失败=HTTP code(超时/连接错=None)
     err_class: 异常类名(便于审计日志分类)
+
+    两类超时口径(R-P1-3):
+      - timeout_s 是**单次 HTTP attempt 的 read timeout**(score), 已按 max_tokens 物理
+        自洽(_ensure_timeout_fits_tokens), 只管一次请求。
+      - wall_deadline 是 perf_counter() 绝对时刻, 表达**端到端 wall-clock 预算**
+        (跨本 provider 内全部 attempt + 退避; 跨 provider 由 _call_multi_provider 串联)。
+        每次 attempt 前用剩余预算裁剪本次 read timeout, 预算耗尽立即终止, 退避也不超过
+        剩余预算。None=不设端到端硬墙(维持仅受 timeout_s 约束的旧行为)。
     """
-    timeout = httpx.Timeout(
-        connect=10.0, read=timeout_s, write=30.0, pool=10.0,
-    )
-    client_kwargs: dict = {"timeout": timeout}
+    # client 级 timeout 作 connect/write/pool 与 read 兜底; 每次 post 再按 deadline 覆盖。
+    base_timeout = httpx.Timeout(connect=10.0, read=timeout_s, write=30.0, pool=10.0)
+    client_kwargs: dict[str, Any] = {"timeout": base_timeout}
     if transport is not None:
         client_kwargs["transport"] = transport
     last_err: LLMError | None = None
@@ -321,8 +329,24 @@ async def _call_single_provider(
     last_err_class: str = ""
     async with httpx.AsyncClient(**client_kwargs) as client:
         for attempt in range(retry_max + 1):
+            # 端到端硬墙: 预算耗尽则不再发起新的 attempt(也不再退避)。
+            if wall_deadline is not None:
+                remaining = wall_deadline - time.perf_counter()
+                if remaining <= 0:
+                    if last_err is None:
+                        last_err = LLMError(
+                            "LLM 端到端超时预算耗尽(deadline_s)", retryable=True)
+                        last_err_class = "DeadlineExceeded"
+                    break
+                # 本次 read timeout 不得突破剩余 wall-clock 预算。
+                read_s = min(timeout_s, remaining)
+                attempt_timeout = httpx.Timeout(
+                    connect=10.0, read=read_s, write=30.0, pool=10.0)
+            else:
+                attempt_timeout = base_timeout
             try:
-                resp = await client.post(url, headers=headers, json=body)
+                resp = await client.post(url, headers=headers, json=body,
+                                         timeout=attempt_timeout)
             except httpx.TimeoutException as e:
                 last_err = LLMError(f"LLM 请求超时: {e.__class__.__name__}", retryable=True)
                 last_err_class = e.__class__.__name__
@@ -351,7 +375,14 @@ async def _call_single_provider(
                                       status_code=resp.status_code),
                             resp.status_code, f"http_{resp.status_code}")
             if attempt < retry_max:
-                await asyncio.sleep(_backoff_sleep(attempt))
+                backoff = _backoff_sleep(attempt)
+                if wall_deadline is not None:
+                    # 退避同样受端到端预算约束: 剩余时间不够睡满就提前结束。
+                    remaining = wall_deadline - time.perf_counter()
+                    if remaining <= 0:
+                        break
+                    backoff = min(backoff, remaining)
+                await asyncio.sleep(backoff)
     return None, last_err, last_status, last_err_class or "unknown"
 
 
@@ -363,6 +394,7 @@ async def chat_completion(
     temperature: float = 0.2,
     max_tokens: int | None = None,
     timeout_s: float | None = None,
+    deadline_s: float | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     db: Session | None = None,
     source: str | None = None,
@@ -395,8 +427,17 @@ async def chat_completion(
     2026-09-21: 也接受 list[str] 表达能力档位链(首选/备选/兜底), 见 app/services/llm_tiers.py。
 
     返回 LLMResult(继承 str, 旧调用零侵入): `.usage` 取 token 统计(工单 #116)。
+
+    超时口径(R-P1-3):
+      - timeout_s: **单次 HTTP attempt 的 read timeout 下限/云端值**(score)。本地慢端点
+        会被 _ensure_timeout_fits_tokens 按 max_tokens 物理自洽上调(只放大不收窄)。
+      - deadline_s: **端到端 wall-clock 预算(秒)**, 跨全部 provider 降级/重试/退避的硬墙。
+        预算耗尽立即终止并以最后错误抛出。None(默认)= 不设端到端硬墙, 维持旧行为。
+        实时链路用它对「用户最多等多久」给出可承诺上限(如时间解析兜底 deadline_s=20)。
     """
     t0 = time.perf_counter()
+    # 端到端绝对截止时刻(perf_counter 基准); None=不设硬墙。
+    wall_deadline = (t0 + deadline_s) if (deadline_s and deadline_s > 0) else None
     prompt_chars = _prompt_chars(messages)
 
     # 取 Provider 列表(DB 模式)
@@ -417,6 +458,7 @@ async def chat_completion(
             providers, messages, temperature=temperature, max_tokens=max_tokens,
             override_timeout_s=timeout_s, transport=transport,
             db=db, source=source, t0=t0, prompt_chars=prompt_chars,
+            wall_deadline=wall_deadline,
         )
 
     # ── .env 单源模式(向后兼容, 同 v1.0) ──
@@ -424,6 +466,7 @@ async def chat_completion(
         messages, temperature=temperature, max_tokens=max_tokens,
         override_timeout_s=timeout_s, transport=transport,
         db=db, source=source, t0=t0, prompt_chars=prompt_chars,
+        wall_deadline=wall_deadline,
     )
 
 
@@ -433,15 +476,29 @@ async def _call_multi_provider(
     override_timeout_s: float | None,
     transport: httpx.AsyncBaseTransport | None,
     db: Session, source: str | None, t0: float, prompt_chars: int,
+    wall_deadline: float | None = None,
 ) -> LLMResult:
-    """DB 多 Provider 调用: 按优先级遍历, transient 降级。"""
+    """DB 多 Provider 调用: 按优先级遍历, transient 降级。
+
+    wall_deadline(R-P1-3): 端到端绝对截止时刻; 进入每个 provider 前若预算已耗尽则
+    停止降级。各 provider 的审计 duration_ms 计其**自身 wall-clock**(p_t0 起算),
+    不再复用全局 t0 把前序失败耗时累计进来; 全局 t0 仅用于最终失败日志的端到端耗时。
+    """
     from app.services import llm_provider_service
 
     last_err: LLMError | None = None
     last_err_class: str = ""
     last_status: int | None = None
 
-    for p in providers:
+    for idx, p in enumerate(providers):
+        # 端到端硬墙: 预算耗尽即停止继续降级(不再尝试后续 provider)。
+        if wall_deadline is not None and wall_deadline - time.perf_counter() <= 0:
+            logger.warning(
+                "llm wall deadline 耗尽, 停止继续降级(剩余 %d 个 provider 不再尝试)",
+                len(providers) - idx)
+            break
+        # 该 provider 自身 wall-clock 起点(计账真身, 与端到端 t0 区分)。
+        p_t0 = time.perf_counter()
         pid = p["id"]; pcode = p["code"]; model = p["model"]
         url = _endpoint(p["base_url"])
         # 出域放行: **以链条构造结果为权威依据**。
@@ -462,8 +519,10 @@ async def _call_multi_provider(
         content, err, status, err_cls = await _call_single_provider(
             url=url, headers=headers, body=body,
             timeout_s=t_s, retry_max=p["retry_max"], transport=transport,
+            wall_deadline=wall_deadline,
         )
-        duration_ms = int((time.perf_counter() - t0) * 1000)
+        # R-P1-3 计账真身: 该 provider 自身 wall-clock(不含前序 provider 的降级耗时)。
+        duration_ms = int((time.perf_counter() - p_t0) * 1000)
         if content is not None:
             # 成功: 清零失败计数 + 自愈 healthy + 写审计日志
             llm_provider_service.mark_provider_succeeded(db, pid)
@@ -538,6 +597,7 @@ async def _call_env_single(
     override_timeout_s: float | None,
     transport: httpx.AsyncBaseTransport | None,
     db: Session | None, source: str | None, t0: float, prompt_chars: int,
+    wall_deadline: float | None = None,
 ) -> LLMResult:
     """.env 单源模式(向后兼容, 同 v1.0)。
 
@@ -578,6 +638,7 @@ async def _call_env_single(
     content, err, status, err_cls = await _call_single_provider(
         url=url, headers=headers, body=body,
         timeout_s=timeout_s, retry_max=retry_max, transport=transport,
+        wall_deadline=wall_deadline,
     )
     duration_ms = int((time.perf_counter() - t0) * 1000)
     # 写审计日志(.env 模式 provider_id=None)
