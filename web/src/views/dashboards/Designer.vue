@@ -5,6 +5,21 @@
       <el-button type="primary" :icon="Plus" @click="openCreate">新建看板</el-button>
     </div>
 
+    <!-- ★ #259 看板技术路线主序 (页面层可见说明)
+         给「要新增看板的人」的选型提示: 本页即配置驱动入口。
+         完整判据(主序/例外/封装底线): docs/standards/看板卡片数据说明与下钻规范.md §八 -->
+    <el-alert
+      type="info"
+      :closable="false"
+      class="mb-16"
+      show-icon
+    >
+      <template #title>
+        新增看板<b>默认用本页配置</b>(配置驱动): 录入即发布, 无需改代码, 自动获得时间窗/粒度筛选与卡片批量刷新。
+        仅复杂交互场景(实时轮询/个性化布局等)才手写页面, 且必须复用 <b>components/dashboard/</b> 标准封装(KpiCard/ChartCard 等)。
+      </template>
+    </el-alert>
+
     <el-card>
       <el-table v-loading="loading" :data="list" border stripe>
         <el-table-column prop="id" label="ID" width="60" />
