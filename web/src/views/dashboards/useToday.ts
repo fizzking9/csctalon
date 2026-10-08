@@ -178,11 +178,16 @@ export function useToday() {
   let _mq = null
 
   // #233 B1.5-2 看板时间轴标注层: 趋势图事件标记(markPoint/markLine)
+  // #234 B1.5-3 事件与数据对照: 详情对话框展示事件前后窗口的接待/投诉/退款量变化
   const {
     markers: incidentMarkers,
     markerDetailMap: incidentMarkerMap,
     loading: incidentMarkersLoading,
+    impactComparison: incidentImpactComparison,
+    impactComparisonRows: incidentImpactComparisonRows,
+    impactLoading: incidentImpactLoading,
     loadMarkers: loadIncidentMarkers,
+    loadImpactComparison: loadIncidentImpactComparison,
     buildChartMarks: buildIncidentMarks,
     resolveClick: resolveIncidentClick,
   } = useIncidentMarkers()
@@ -190,12 +195,14 @@ export function useToday() {
   const activeIncidentDetail = ref(null)
   const incidentDetailVisible = ref(false)
   function onChartClick(params) {
-    // 只处理 markPoint/markLine 点击, 不响应 series 数据点点击(避免误触)
-    if (!params || !['markPoint', 'markLine'].includes(params.componentType)) return
+    // 只处理 markPoint/markLine/markArea 点击, 不响应 series 数据点点击(避免误触)
+    if (!params || !['markPoint', 'markLine', 'markArea'].includes(params.componentType)) return
     const m = resolveIncidentClick(params)
     if (!m) return
     activeIncidentDetail.value = m
     incidentDetailVisible.value = true
+    // #234 B1.5-3 触发事件影响对照加载(失败静默, 不阻塞弹窗)
+    loadIncidentImpactComparison(m.id, { window_minutes: 60 }).catch(() => {})
   }
 
 // 视图模式: day=日(默认), week=周(完整自然周 周一~周日)
@@ -949,13 +956,19 @@ export function useToday() {
     const labels = data?.hour_labels || data?.labels || data?.slot_labels || data?.hours || []
     const mob = isMobile.value
     const showRefund = trendSelectedGroups.value.includes('refund')
-    // #233 B1.5-2 注入事件标记: 点事件 → markPoint; 区间事件 → markLine
+    // #233 B1.5-2 + #234 B1.5-3 注入事件标记:
+    //   点事件 → markPoint; 区间事件 → markLine + markArea(背景高亮, 视觉对照)
     // kind: 日视图=hourly (labels 形如 'HH:mm'); 周视图=daily (labels 形如 'MM-DD')
     const seriesList = buildTrendSeries(data)
     if (seriesList.length) {
       const marks = buildIncidentMarks(labels, { kind: viewMode.value === 'week' ? 'daily' : 'hourly' })
       // 注入到第一个 series(它是主接待量, 与事件影响最直接相关)
-      seriesList[0] = { ...seriesList[0], markPoint: marks.markPoint, markLine: marks.markLine }
+      seriesList[0] = {
+        ...seriesList[0],
+        markPoint: marks.markPoint,
+        markLine: marks.markLine,
+        markArea: marks.markArea,
+      }
     }
     return {
       tooltip: { trigger: 'axis' },
@@ -1269,11 +1282,14 @@ export function useToday() {
     isMobile,
     _mq,
     viewMode,
-    // #233 B1.5-2 时间轴标注
+    // #233 B1.5-2 + #234 B1.5-3 时间轴标注 + 事件影响对照
     incidentMarkers,
     incidentMarkerMap,
     activeIncidentDetail,
     incidentDetailVisible,
+    incidentImpactComparison,
+    incidentImpactComparisonRows,
+    incidentImpactLoading,
     onChartClick,
     kpiData,
     hourlyData,

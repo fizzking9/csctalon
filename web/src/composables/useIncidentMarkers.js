@@ -24,14 +24,17 @@
 //     echarts 自带的 markPoint 自动避让已足够。
 //   - 颜色按 event_type 区分: 经营事件=success(绿), 异常事故=danger(红)。
 
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import dayjs from 'dayjs'
-import { listIncidentMarkers } from '@/api/incident'
+import { listIncidentMarkers, getIncidentImpactComparison } from '@/api/incident'
 
 export function useIncidentMarkers() {
   const markers = ref([])
   const markerDetailMap = ref({}) // { id: markerObj }
   const loading = ref(false)
+  // #234 B1.5-3 事件影响对照数据(按 activeIncident 异步加载)
+  const impactComparison = ref(null)
+  const impactLoading = ref(false)
 
   async function loadMarkers({ start, end, event_type } = {}) {
     if (!start || !end) return
@@ -48,6 +51,24 @@ export function useIncidentMarkers() {
       markerDetailMap.value = {}
     } finally {
       loading.value = false
+    }
+  }
+
+  // #234 B1.5-3 加载事件影响对照(在弹详情对话框时按需触发)
+  // 失败静默(impactComparison 留 null, 前端用 v-if 隐藏对照区块)
+  async function loadImpactComparison(id, { window_minutes = 60 } = {}) {
+    if (!id) {
+      impactComparison.value = null
+      return
+    }
+    impactLoading.value = true
+    try {
+      const res = await getIncidentImpactComparison(id, { window_minutes })
+      impactComparison.value = res.data || null
+    } catch (e) {
+      impactComparison.value = null
+    } finally {
+      impactLoading.value = false
     }
   }
 
@@ -101,19 +122,22 @@ export function useIncidentMarkers() {
     return null
   }
 
-  // 构造 ECharts markPoint/markLine 数据
-  // 返回: { markPoint: {...}, markLine: {...} }
+  // 构造 ECharts markPoint/markLine/markArea 数据
+  // 返回: { markPoint: {...}, markLine: {...}, markArea: {...} }
+  // #234 B1.5-3 新增 markArea: 区间事件用半透明绿色背景高亮, 让趋势曲线穿过
+  // 事件期间时视觉对照更明显(推文后接待量是否升、事故后投诉量是否升)。
   function buildChartMarks(labels, { kind = 'hourly' } = {}) {
     if (!markers.value.length) {
-      return { markPoint: { data: [] }, markLine: { data: [] } }
+      return { markPoint: { data: [] }, markLine: { data: [] }, markArea: { data: [] } }
     }
     const pointData = []  // markPoint.data
     const lineData = []   // markLine.data (每条是 [{coord}, {coord}])
+    const areaData = []   // markArea.data (每条是 [{coord}, {coord}] 表示一个高亮矩形)
 
     for (const m of markers.value) {
       const isRange = m.event_type === '经营事件' && m.start_at && m.end_at
       if (isRange) {
-        // 区间事件 → markLine
+        // 区间事件 → markLine + markArea
         const sIdx = _timeToIdx(m.start_at, labels, kind)
         const eIdx = _timeToIdx(m.end_at, labels, kind)
         if (sIdx == null && eIdx == null) continue
@@ -122,6 +146,11 @@ export function useIncidentMarkers() {
         lineData.push([
           { coord: [Math.min(s, e)], name: m.title, id: m.id, value: m.title },
           { coord: [Math.max(s, e)], id: m.id },
+        ])
+        // #234 B1.5-3 markArea 高亮区间背景(让"事件期间"区域一眼可辨)
+        areaData.push([
+          { coord: [Math.min(s, e)], itemStyle: { color: 'rgba(103, 194, 58, 0.15)' }, name: m.title, id: m.id },
+          { coord: [Math.max(s, e)] },
         ])
       } else {
         // 点事件 → markPoint (occurred_at 优先, 经营事件降级用 start_at)
@@ -168,6 +197,14 @@ export function useIncidentMarkers() {
         data: lineData,
         z: 3,
       },
+      // #234 B1.5-3 markArea: 区间事件背景高亮(让趋势曲线穿过事件期间时视觉对照明显)
+      markArea: {
+        silent: false,  // 允许 click 事件透出(用于触发详情弹窗)
+        itemStyle: { color: 'rgba(103, 194, 58, 0.12)' },
+        label: { show: false },
+        data: areaData,
+        z: 1,  // 在 series 下方, 不挡数据线
+      },
     }
   }
 
@@ -181,10 +218,35 @@ export function useIncidentMarkers() {
     return markerDetailMap.value[id] || null
   }
 
+  // #234 B1.5-3 将 impactComparison(pre/during/post_window + delta_pre_to_post)
+  // 转成表格行: [{metric, pre, during, post, delta}, ...]
+  // during 字段: 区间事件(start_at+end_at)才有 during_window; 点事件为 undefined,
+  //             前端用 v-if="incidentImpactComparison.during_window" 控制列显隐。
+  // delta = post - pre (后端已算好, 直接取 delta_pre_to_post)
+  const impactComparisonRows = computed(() => {
+    const d = impactComparison.value
+    if (!d) return []
+    const pre = d.pre_window || {}
+    const during = d.during_window
+    const post = d.post_window || {}
+    const delta = d.delta_pre_to_post || {}
+    return [
+      { metric: '接待量', pre: pre.reception ?? 0, during: during?.reception, post: post.reception ?? 0, delta: delta.reception ?? 0 },
+      { metric: '投诉量', pre: pre.complaint ?? 0, during: during?.complaint, post: post.complaint ?? 0, delta: delta.complaint ?? 0 },
+      { metric: '退款笔数', pre: pre.refund_count ?? 0, during: during?.refund_count, post: post.refund_count ?? 0, delta: delta.refund_count ?? 0 },
+      { metric: '退款金额(元)', pre: pre.refund_amount ?? 0, during: during?.refund_amount, post: post.refund_amount ?? 0, delta: delta.refund_amount ?? 0 },
+    ]
+  })
+
   return {
     markers,
     markerDetailMap,
     loading,
+    // #234 B1.5-3
+    impactComparison,
+    impactComparisonRows,
+    impactLoading,
+    loadImpactComparison,
     loadMarkers,
     buildChartMarks,
     resolveClick,

@@ -17,6 +17,13 @@ export function listIncidentMarkers(params) {
   return request.get('/incidents/markers/timeline', { params })
 }
 
+// #234 B1.5-3 事件影响对照: 事件前后窗口的接待/投诉/退款量变化
+// 入参: { id, window_minutes?: 60 }
+// 返回: { incident_id, anchor_at, pre_window, during_window, post_window, delta_pre_to_post }
+export function getIncidentImpactComparison(id, params) {
+  return request.get(`/incidents/${id}/impact-comparison`, { params })
+}
+
 // 登记影响事件
 export function createIncident(payload) {
   return request.post('/incidents', payload)

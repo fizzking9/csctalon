@@ -190,6 +190,130 @@ def get_incident(incident_id: int, db: DBSession, current_user: CurrentUser):
     return R(data=_serialize(i))
 
 
+@router.get("/{incident_id}/impact-comparison", response_model=R,
+            summary="事件影响对照 (#234 B1.5-3)")
+def get_incident_impact_comparison(
+    incident_id: int,
+    db: DBSession,
+    current_user: CurrentUser,
+    window_minutes: int = Query(60, ge=5, le=720,
+        description="事件前/后窗口分钟数(默认 60 分钟)"),
+):
+    """事件影响对照: 比较事件前后时间窗口的接待/投诉/退款量变化。
+
+    #234 B1.5-3 视觉对照 "推文后接待量是否升、事故后投诉量是否升":
+    - 点事件(异常事故 / 经营事件无 start_at): 锚点=occurred_at
+        pre_window = [anchor - window_minutes, anchor]
+        post_window = [anchor, anchor + window_minutes]
+    - 区间事件(经营事件有 start_at+end_at): 锚点=start_at, 终点=end_at
+        pre_window = [start_at - window_minutes, start_at]
+        during_window = [start_at, end_at]
+        post_window = [end_at, end_at + window_minutes]
+    - 退化为同窗口无锚点(occurred_at/start_at 都空): 返回 400 提示
+
+    统计字段:
+      reception  = cs_records.operation_time 落在窗口内的行数
+      complaint  = service_tickets.created_at 落在窗口内的行数
+      refund_count = refunds.actual_refund_time (回退 created_at_raw) 落在窗口内的行数
+      refund_amount = 上述 refunds 的 refund_amount 合计 (元, Decimal→float 出参边界)
+
+    时区: 全部按 AT TIME ZONE 'Asia/Shanghai' 落库时间已带 tz; 比较时
+    datetime 对象需 tz-aware, 故统一用 timezone.utc 做 anchor 转换。
+    """
+    from datetime import timedelta, timezone
+    from sqlalchemy import and_, func as _func
+    from app.models.cs_record import CsRecord
+    from app.models.refund import Refund
+    from app.models.ticket import ServiceTicket
+
+    i = db.get(Incident, incident_id)
+    if not i:
+        raise HTTPException(status_code=404, detail="异常事件不存在")
+
+    # 确定锚点 + 终点(区间事件)
+    anchor = i.occurred_at or i.start_at
+    end_anchor = i.end_at if (i.event_type == "经营事件" and i.start_at and i.end_at) else None
+    if anchor is None:
+        raise HTTPException(
+            status_code=400,
+            detail="事件缺少 occurred_at / start_at, 无法做前后对照",
+        )
+
+    # 统一转 tz-aware (避免 naive 与 aware 比较报错)
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+    if end_anchor and end_anchor.tzinfo is None:
+        end_anchor = end_anchor.replace(tzinfo=timezone.utc)
+
+    pre_start = anchor - timedelta(minutes=window_minutes)
+    pre_end = anchor
+    if end_anchor:
+        during_start = anchor
+        during_end = end_anchor
+        post_start = end_anchor
+        post_end = end_anchor + timedelta(minutes=window_minutes)
+    else:
+        during_start = during_end = None
+        post_start = anchor
+        post_end = anchor + timedelta(minutes=window_minutes)
+
+    def _stats(s, e):
+        # 接待量(cs_records.operation_time)
+        reception = db.scalar(
+            select(_func.count()).select_from(CsRecord)
+            .where(and_(CsRecord.operation_time.isnot(None),
+                        CsRecord.operation_time >= s, CsRecord.operation_time <= e))
+        ) or 0
+        # 投诉量(service_tickets.created_at, 来自 TimestampMixin)
+        complaint = db.scalar(
+            select(_func.count()).select_from(ServiceTicket)
+            .where(and_(ServiceTicket.created_at.isnot(None),
+                        ServiceTicket.created_at >= s, ServiceTicket.created_at <= e))
+        ) or 0
+        # 退款笔数/金额(refunds.actual_refund_time, COALESCE 退化 created_at_raw)
+        # 业务口径: actual_refund_time 是"实际扣款时间"(对账基准), E 滞后未回填时
+        # 退化用 created_at_raw; 在 SQL 用 COALESCE 实现, 单次扫描即可。
+        refund_time_col = _func.coalesce(Refund.actual_refund_time, Refund.created_at_raw)
+        refund_row = db.execute(
+            select(_func.count(), _func.coalesce(_func.sum(Refund.refund_amount), 0))
+            .where(and_(refund_time_col.isnot(None),
+                        refund_time_col >= s, refund_time_col <= e))
+        ).first()
+        refund_count = int(refund_row[0] or 0) if refund_row else 0
+        # 金额出参边界按 #217 C′ 方案: Decimal → float 一次性表示层转换
+        refund_amount = float(refund_row[1] or 0) if refund_row else 0.0
+        return {
+            "start": s.isoformat(),
+            "end": e.isoformat(),
+            "reception": int(reception),
+            "complaint": int(complaint),
+            "refund_count": refund_count,
+            "refund_amount": round(refund_amount, 2),
+        }
+
+    pre = _stats(pre_start, pre_end)
+    post = _stats(post_start, post_end)
+    during = _stats(during_start, during_end) if during_start else None
+
+    def _delta(a, b):
+        # a → b 的增量(允许负)
+        return {k: (b.get(k, 0) - a.get(k, 0)) for k in ("reception", "complaint", "refund_count", "refund_amount")}
+
+    return R(data={
+        "incident_id": i.id,
+        "title": i.title,
+        "event_type": i.event_type,
+        "anchor_at": anchor.isoformat(),
+        "end_at": (end_anchor.isoformat() if end_anchor else None),
+        "window_minutes": window_minutes,
+        "pre_window": pre,
+        "during_window": during,
+        "post_window": post,
+        # pre → post 增量(区间事件时, pre→during 或 during→post 可由前端二次算)
+        "delta_pre_to_post": _delta(pre, post),
+    })
+
+
 @router.post("", response_model=R, summary="登记异常事件")
 def create_incident(payload: dict, db: DBSession, current_user: AdminOrSupervisor):
     # #232 B1.5-1: event_type 默认「异常事故」(向后兼容); 经营事件需显式传入

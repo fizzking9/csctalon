@@ -1071,6 +1071,30 @@
           <div v-for="(v, k) in activeIncidentDetail.impact_metrics" :key="k" style="font-size:13px;line-height:1.6">· {{ k }}: {{ v }}</div>
         </el-descriptions-item>
       </el-descriptions>
+
+      <!-- #234 B1.5-3 事件影响对照: 前后窗口的接待/投诉/退款量变化 -->
+      <el-divider content-position="left">事件影响对照</el-divider>
+      <div v-loading="incidentImpactLoading" style="min-height: 60px">
+        <el-table v-if="incidentImpactComparison" :data="incidentImpactComparisonRows" border size="small" style="width: 100%">
+          <el-table-column prop="metric" label="指标" width="120" />
+          <el-table-column prop="pre" label="事件前" align="center" />
+          <el-table-column v-if="incidentImpactComparison.during_window" prop="during" label="事件期间" align="center" />
+          <el-table-column prop="post" label="事件后" align="center" />
+          <el-table-column label="变化(前→后)" align="center">
+            <template #default="{ row }">
+              <span :style="{ color: row.delta > 0 ? '#f56c6c' : (row.delta < 0 ? '#67c23a' : '#909399'), fontWeight: 600 }">
+                {{ row.delta > 0 ? '↑' : (row.delta < 0 ? '↓' : '→') }} {{ Math.abs(row.delta) }}
+              </span>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-else-if="!incidentImpactLoading" description="暂无对照数据(可能事件无时间锚点)" :image-size="40" />
+      </div>
+      <div v-if="incidentImpactComparison" class="impact-hint">
+        窗口: 事件{{ incidentImpactComparison.window_minutes }}分钟前/后 ·
+        锚点: {{ formatTime(incidentImpactComparison.anchor_at) }}
+      </div>
+
       <template #footer>
         <el-button @click="incidentDetailVisible = false">关闭</el-button>
       </template>
@@ -1193,11 +1217,14 @@ const {
   buildTrendSeries,
   buildTrendLegend,
   hourlyOption,
-  // #233 B1.5-2 时间轴标注
+  // #233 B1.5-2 + #234 B1.5-3 时间轴标注 + 事件影响对照
   incidentMarkers,
   incidentMarkerMap,
   activeIncidentDetail,
   incidentDetailVisible,
+  incidentImpactComparison,
+  incidentImpactComparisonRows,
+  incidentImpactLoading,
   onChartClick,
   receptionPieOption,
   refundReasonOption,
@@ -1635,5 +1662,15 @@ const {
   font-size: 12px;
   color: #6b7280;
   margin-bottom: 6px;
+}
+
+/* #234 B1.5-3 事件影响对照提示文本 */
+.impact-hint {
+  margin-top: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #909399;
+  background: #f4f4f5;
+  border-radius: 4px;
 }
 </style>

@@ -223,22 +223,29 @@ export function useOperationDashboard() {
   let _mq = null
 
   // #233 B1.5-2 时间轴标注层: 趋势图事件标记(markPoint/markLine)
+  // #234 B1.5-3 事件影响对照: 详情对话框展示前后窗口的接待/投诉/退款量变化
   const {
     markers: incidentMarkers,
     markerDetailMap: incidentMarkerMap,
     loading: incidentMarkersLoading,
+    impactComparison: incidentImpactComparison,
+    impactComparisonRows: incidentImpactComparisonRows,
+    impactLoading: incidentImpactLoading,
     loadMarkers: loadIncidentMarkers,
+    loadImpactComparison: loadIncidentImpactComparison,
     buildChartMarks: buildIncidentMarks,
     resolveClick: resolveIncidentClick,
   } = useIncidentMarkers()
   const activeIncidentDetail = ref(null)
   const incidentDetailVisible = ref(false)
   function onChartClick(params) {
-    if (!params || !['markPoint', 'markLine'].includes(params.componentType)) return
+    if (!params || !['markPoint', 'markLine', 'markArea'].includes(params.componentType)) return
     const m = resolveIncidentClick(params)
     if (!m) return
     activeIncidentDetail.value = m
     incidentDetailVisible.value = true
+    // #234 B1.5-3 触发事件影响对照加载(失败静默)
+    loadIncidentImpactComparison(m.id, { window_minutes: 60 }).catch(() => {})
   }
 
 // ========== 时间选择 ==========
@@ -1097,11 +1104,17 @@ export function useOperationDashboard() {
     const complaintBySource = trendSelectedGroups.value.includes('complaint')
       ? buildComplaintBySource(labels)
       : null
-    // #233 B1.5-2 时间轴标注: trendGrain='day' 时是小时轴; 否则是日/周/月轴
+    // #233 B1.5-2 + #234 B1.5-3 时间轴标注: trendGrain='day' 时是小时轴; 否则是日/周/月轴
+    // markPoint(点事件) + markLine/markArea(区间事件高亮, 视觉对照)
     const seriesList = buildTrendSeries(data, complaintBySource)
     if (seriesList.length) {
       const marks = buildIncidentMarks(labels, { kind: trendGrain.value === 'day' ? 'hourly' : 'daily' })
-      seriesList[0] = { ...seriesList[0], markPoint: marks.markPoint, markLine: marks.markLine }
+      seriesList[0] = {
+        ...seriesList[0],
+        markPoint: marks.markPoint,
+        markLine: marks.markLine,
+        markArea: marks.markArea,
+      }
     }
     return {
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
@@ -1488,11 +1501,14 @@ export function useOperationDashboard() {
     yearOffset,
     customDateRange,
     trendGrain,
-    // #233 B1.5-2 时间轴标注
+    // #233 B1.5-2 + #234 B1.5-3 时间轴标注 + 事件影响对照
     incidentMarkers,
     incidentMarkerMap,
     activeIncidentDetail,
     incidentDetailVisible,
+    incidentImpactComparison,
+    incidentImpactComparisonRows,
+    incidentImpactLoading,
     onChartClick,
     quickGrainOpt,
     grainQuickOptions,
