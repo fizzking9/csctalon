@@ -7,11 +7,12 @@
       </div>
       <div class="flex gap-8">
         <el-button type="primary" :icon="Plus" @click="openBulk">批量排班</el-button>
+        <el-button :icon="Upload" @click="importVisible = true">导入企微排班</el-button>
         <el-button :icon="Refresh" @click="loadAll">刷新</el-button>
       </div>
     </div>
 
-    <el-tabs v-model="tab">
+    <el-tabs v-model="tab" @tab-change="onTabChange">
       <!-- ============ 排班列表 ============ -->
       <el-tab-pane label="排班列表" name="list">
         <el-card class="mb-16">
@@ -41,6 +42,26 @@
             <el-table-column label="状态" width="90">
               <template #default="{ row }">
                 <el-tag :type="statusType(row.status)" size="small">{{ row.status }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="来源" width="100">
+              <template #header>
+                <span>
+                  来源
+                  <el-tooltip placement="top">
+                    <template #content>
+                      设计说明(#256):替主管回答"这份班表数据从哪来"。<br/>
+                      口径:schedules.source——企微导入(镜像单向,以企微为准)/<br/>
+                      系统编排(本页手工)/企微API(对接后启用)。<br/>
+                      取舍:不做双向回写,避免双源冲突;企微列为准时<br/>
+                      用"导入"覆盖即可。
+                    </template>
+                    <el-icon style="vertical-align:-2px"><InfoFilled /></el-icon>
+                  </el-tooltip>
+                </span>
+              </template>
+              <template #default="{ row }">
+                <el-tag :type="sourceType(row.source)" size="small" effect="plain">{{ sourceLabel(row.source) }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column prop="note" label="备注" show-overflow-tooltip />
@@ -139,6 +160,36 @@
                 </div>
               </div>
             </div>
+          </div>
+        </el-card>
+
+        <!-- B1.5-4/B3-8 事件联动(只读投影,真身在事件管理): 日历区间内的经营事件 + 排班调整建议 -->
+        <el-card>
+          <div class="flex-between mb-8">
+            <span style="font-weight:600; font-size:13px">
+              关联经营事件
+              <el-tooltip placement="top">
+                <template #content>
+                  设计说明(#256/B1.5-4):替主管回答"这周有什么安排要考虑排班调整"。<br/>
+                  口径:incidents 中 event_type=经营事件、时间区间与日历视图<br/>
+                  当前区间相交的事件,附排班调整建议(登记事件时填写)。<br/>
+                  取舍:只读展示不在此页登记/编辑事件——事件管理页才是真身;<br/>
+                  不做事件→排班自动生成,v1 由人工判断。
+                </template>
+                <el-icon style="vertical-align:-2px"><InfoFilled /></el-icon>
+              </el-tooltip>
+            </span>
+            <el-tag size="small" type="info">{{ linkedEvents.length }} 条</el-tag>
+          </div>
+          <div v-if="!linkedEvents.length" style="color:#c0c4cc; font-size:12px; padding:4px 0">
+            当前日历区间内无经营事件
+          </div>
+          <div v-for="ev in linkedEvents" :key="ev.id" class="linked-event-row">
+            <el-tag size="small" type="warning" effect="plain">{{ evDateLabel(ev) }}</el-tag>
+            <span style="font-weight:600; margin:0 8px">{{ ev.title }}</span>
+            <span v-if="ev.scheduling_suggestion" style="color:#e6a23c; font-size:12px">
+              建议: {{ ev.scheduling_suggestion }}
+            </span>
           </div>
         </el-card>
       </el-tab-pane>
@@ -245,17 +296,76 @@
         <el-button type="primary" :loading="submitting" @click="handleEdit">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 导入企微排班(#256 B3-8 镜像): parseUpload 存档 → /schedules/import -->
+    <el-dialog v-model="importVisible" title="导入企微排班" width="520px">
+      <el-alert type="info" :closable="false" style="margin-bottom: 12px">
+        <template #title>
+          列约定: 姓名 + 日期 必填;班次(匹配班次模板名)或 时间(HH:MM-HH:MM) 二选一。
+          同人同日已有排班时按下述策略处理。导入数据来源标记为「企微」。
+        </template>
+      </el-alert>
+      <el-form label-width="92px">
+        <el-form-item label="排班文件">
+          <input type="file" accept=".xlsx,.xls,.csv" @change="onImportFileChange" />
+        </el-form-item>
+        <el-form-item label="冲突策略">
+          <el-radio-group v-model="importForm.conflict_mode">
+            <el-radio value="skip">跳过已有</el-radio>
+            <el-radio value="overwrite">覆盖为导入值</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <div v-if="importResult" class="import-result-box">
+        <div>共 {{ importResult.total }} 行:新增 {{ importResult.inserted }} · 覆盖 {{ importResult.updated }} · 跳过 {{ importResult.skipped }} · 失败 {{ importResult.failed }}</div>
+        <div v-for="(e, i) in (importResult.errors || []).slice(0, 5)" :key="i" style="color:#f56c6c; font-size:12px">{{ e }}</div>
+      </div>
+      <template #footer>
+        <el-button @click="importVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="importing" :disabled="!importForm.file" @click="handleImport">开始导入</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
+/**
+ * 设计说明（Design Rationale）· B3-8 排班目标形态落地（方案A 镜像起步）#256
+ * ─────────────────────────────────────────────────────────────────
+ * 目的（替谁回答什么问题）
+ *   替主管回答三个问题：
+ *   ① "这份班表数据从哪来"——列表来源列（企微导入/系统编排/企微API）；
+ *   ② "企微排好的班怎么进系统"——导入企微排班 xlsx（镜像单向流入）；
+ *   ③ "这周有什么事要考虑排班调整"——日历视图下的关联经营事件+建议。
+ *
+ * 逻辑（为什么这样组织）
+ *   决策为镜像起步：企微侧是主排班源，schedules 表为系统内唯一真身，
+ *   source 字段标注数据来源（wecom_export=企微导入/manual=系统编排）；
+ *   事件联动挂在日历视图（按日期看班次时顺势看事件），只读投影，
+ *   事件登记/编辑在事件管理页（真身）。
+ *
+ * 口径
+ *   导入列约定：姓名+日期必填，班次（匹配班次模板名）或时间(HH:MM-HH:MM)；
+ *   冲突判定=uq_schedules_person_date（同人同日唯一），skip 跳过 / overwrite
+ *   覆盖且 source 置 wecom_export；导入批次落 upload_records 留痕（对齐 B3-9）。
+ *
+ * 取舍（不做什么及原因）
+ *   ① 不做企微 API 实时同步——企微对接未启动（qw_user_id 待填），先满足数据进系统；
+ *   ② 不做双向回写——镜像单向，回写会造成双源冲突；
+ *   ③ 不做事件→排班自动生成——v1 由人工判断建议；
+ *   ④ 不改既有批量排班/微调逻辑——系统编排保留为补充能力。
+ *
+ * 工单: #256（B3-8 排班目标形态落地，决策记录见工单正文）
+ */
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, ArrowLeft, ArrowRight } from '@element-plus/icons-vue'
-import { listShifts, listSchedules, bulkSchedule, updateSchedule, deleteSchedule, scheduleComparison } from '@/api/schedule'
+import { Plus, Refresh, ArrowLeft, ArrowRight, Upload, InfoFilled } from '@element-plus/icons-vue'
+import { listShifts, listSchedules, bulkSchedule, updateSchedule, deleteSchedule, scheduleComparison, importSchedule } from '@/api/schedule'
 import { listPersons } from '@/api/person'
 import { listGroups } from '@/api/group'
+import { listIncidentMarkers } from '@/api/incident'
+import { parseUpload } from '@/api/upload'
 import dayjs from 'dayjs'
 import isoWeek from 'dayjs/plugin/isoWeek'
 
@@ -292,6 +402,67 @@ const calSchedules = ref([])
 const showEmpty = ref(true)
 
 const statusType = (s) => ({ 正常: 'success', 顶班: 'warning', 请假: 'info', 调班: 'primary' }[s] || 'info')
+
+// ---------- B3-8 镜像(#256): 来源标注 / 企微导入 / 事件联动 ----------
+const SOURCE_META = {
+  wecom_export: { label: '企微', type: 'warning' },
+  wecom_api: { label: '企微API', type: 'warning' },
+  manual: { label: '系统', type: 'primary' },
+}
+const sourceLabel = (s) => SOURCE_META[s]?.label || s || '系统'
+const sourceType = (s) => SOURCE_META[s]?.type || 'info'
+
+const importVisible = ref(false)
+const importing = ref(false)
+const importForm = reactive({ file: null, conflict_mode: 'skip' })
+const importResult = ref(null)
+const linkedEvents = ref([])
+
+function onImportFileChange(e) {
+  importForm.file = e.target.files[0] || null
+  importResult.value = null
+}
+
+async function handleImport() {
+  if (!importForm.file) return
+  importing.value = true
+  try {
+    // 先走通用上传通道存档拿 stored_path, 再调领域导入接口
+    const fd = new FormData()
+    fd.append('data_type', 'schedule')
+    fd.append('file', importForm.file)
+    const up = await parseUpload(fd)
+    const stored = up.data?.stored_path
+    if (!stored) throw new Error('上传存档失败')
+    const res = await importSchedule({
+      stored_path: stored,
+      filename: importForm.file.name,
+      conflict_mode: importForm.conflict_mode,
+    })
+    importResult.value = res.data
+    ElMessage.success(`导入完成: 新增 ${res.data.inserted}, 覆盖 ${res.data.updated}, 跳过 ${res.data.skipped}, 失败 ${res.data.failed}`)
+    loadSchedules()
+    if (tab.value === 'calendar') renderCalendar()
+  } catch (e) {
+    // request 层已弹错误提示
+  } finally {
+    importing.value = false
+  }
+}
+
+async function loadLinkedEvents(start, end) {
+  try {
+    const res = await listIncidentMarkers({ start, end, event_type: '经营事件' })
+    linkedEvents.value = res.data || []
+  } catch (e) {
+    linkedEvents.value = []
+  }
+}
+const evDateLabel = (ev) => {
+  const s = (ev.start_at || ev.occurred_at || '').slice(0, 10)
+  const e = (ev.end_at || '').slice(0, 10)
+  return e && e !== s ? `${s.slice(5)}~${e.slice(5)}` : (s || '待定').slice(5) || s
+}
 
 // 按分组筛选后的可见人员
 const filteredPersons = computed(() => {
@@ -374,6 +545,8 @@ async function renderCalendar() {
     calDates.value = dates
     const start = dates[0].iso
     const end = dates[dates.length - 1].iso
+    // B3-8 事件联动: 日历区间内的经营事件+排班建议(只读投影)
+    loadLinkedEvents(start, end)
     // 取排班
     const params = { start, end }
     if (groupFilter.value) params.group_id = groupFilter.value
@@ -598,6 +771,11 @@ function loadAll() {
   if (tab.value === 'comparison') loadComparison()
 }
 
+function onTabChange(name) {
+  if (name === 'calendar') renderCalendar()
+  if (name === 'comparison') loadComparison()
+}
+
 onMounted(loadAll)
 </script>
 
@@ -662,6 +840,9 @@ onMounted(loadAll)
 }
 .month-chip:hover { background: #ecf5ff; }
 .month-chip-name { flex: 1; color: #303133; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.month-chip-status { color: #d35400; }
-.month-chip-more { font-size: 11px; color: #909399; text-align: center; padding: 2px; }
+.month-chip-status { color: #d35400; padding: 2px; }
+.month-chip-more { font-size: 11px; color: #909399; text-align: center; }
+/* B3-8 镜像(#256) */
+.linked-event-row { display: flex; align-items: baseline; gap: 4px; padding: 4px 0; font-size: 13px; border-top: 1px dashed #ebeef5; flex-wrap: wrap; }
+.import-result-box { background: #f5f7fa; border-radius: 4px; padding: 8px 10px; font-size: 13px; margin-bottom: 8px; }
 </style>
