@@ -37,6 +37,7 @@ from app.services.ai_pregen_freshness import (
     record_pregen_skipped_event,
 )
 from app.services.ai_report_service import save_report
+from app.services.ai_report_validator import validate_pregen_report
 from app.services.ai_report_window import compute_pregen_window
 from app.services.system_event_service import record_system_event
 
@@ -226,6 +227,48 @@ async def _pregen_llm(messages: list[dict], db: Session, max_tokens: int, *,
         await release(handle)
 
 
+def _invoke_pregen_once(messages: list[dict], *, db: Session, template: AiReportTemplate,
+                        source: str, level: int, provider_code: str | None) -> str | None:
+    """单次预生成 LLM 调用的同步包装(R-P1-1 抽出, 供写库前校验失败时重试)。
+
+    - 成功: 返回 answer 字符串。
+    - 被更高优先级抢占: 抛 asyncio.CancelledError(调用方据此"本次跳过", **不重试**)。
+    - 已在事件循环中(RuntimeError): 换新 loop 执行(原 generate_for_template 的兼容分支)。
+    - 其余 LLM 异常: log + 写 pregen_llm_failed 事件, 返回 None(调用方放弃本次)。
+    """
+    async def _run() -> str:
+        return await _pregen_llm(
+            messages, db, template.max_tokens,
+            source=source, level=level, provider_code=provider_code,
+        )
+
+    try:
+        try:
+            # asyncio.run 包装(chat_completion 是 async, worker 同步入口)。
+            return asyncio.run(_run())
+        except RuntimeError as e:
+            # 已在事件循环中调用(如 bms_scheduler 直接 async 上下文): 换新 loop 跑。
+            logger.warning("ai_report_worker: already in event loop, create new loop: %s", e)
+            return asyncio.new_event_loop().run_until_complete(_run())
+    except asyncio.CancelledError:
+        # 后台/手动预生成被抢占不写失败事件, 仅 log(属正常抢占, 可重试跳过); 向上抛交调用方。
+        logger.info("ai_report_worker 预生成被更高优先级抢占, 本次跳过(template=%s level=%s)",
+                    template.code, level)
+        raise
+    except Exception as e:  # noqa: BLE001  LLM 调用失败不阻塞 worker
+        logger.error("ai_report_worker LLM call failed (template=%s): %s", template.code, e)
+        record_system_event(
+            db, category="ai", action="pregen_llm_failed",
+            title=f"AI 报告预生成 LLM 失败: {template.name_cn}",
+            summary=f"template={template.code} err={e!s}",
+            status="failed", level="error",
+            detail=json.dumps({"template_id": template.id, "code": template.code, "error": str(e)},
+                              ensure_ascii=False),
+            dedup_minutes=30,
+        )
+        return None
+
+
 def generate_for_template(db: Session, template: AiReportTemplate,
                           *, level: int = 2) -> dict | None:
     """为指定模板生成一份 AI 报告, 落库 is_public=True。
@@ -297,49 +340,65 @@ def generate_for_template(db: Session, template: AiReportTemplate,
         return None
 
     # 调用 LLM(后台预生成: timeout_s=600 #131, max_tokens=template.max_tokens)
-    # #127 经优先门闸发起(level=0/1); 被更高优先级抢占时捕获 CancelledError, 本次跳过。
+    # #127 经优先门闸发起(level=0/1); 抢占(CancelledError)由 _invoke_pregen_once 向上抛。
     llm_model_str = template.llm_provider_code or "auto"
     source = f"ai_pregen:{template.code}"
     # #127 多 provider 分流: 模板指定的 llm_provider_code 进入该 provider 独立门闸
     provider_code = template.llm_provider_code or None
-    try:
-        llm_result = _pregen_llm(messages, db, template.max_tokens,
-                                 source=source, level=level, provider_code=provider_code)
-        # asyncio.run 包装(chat_completion 是 async, worker 同步入口)。
-        # 单个模板单次调用, 用 asyncio.run 串行跑协程(worker 在非 asyncio 上下文调用)。
-        llm_result = asyncio.run(llm_result)
-    except asyncio.CancelledError:
-        # #127 被抢占: 后台/手动预生成不写失败事件, 仅 log(属正常抢占, 可重试跳过)
-        logger.info("ai_report_worker 预生成被更高优先级抢占, 本次跳过(template=%s level=%s)",
-                    template.code, level)
-        return None
-    except RuntimeError as e:
-        # 已在事件循环中调用(如 bms_scheduler 直接 async 上下文): 换新 loop 跑
-        logger.warning("ai_report_worker: already in event loop, create new loop: %s", e)
+
+    # R-P1-1 (#238) 写库前 schema/数值校验闸门: 首发 + 校验失败最多重试 1 次,
+    # 对齐 governance_judge / onboarding_draft 的「validate→重试→仍失败不落库」。
+    answer_md: str | None = None
+    last_errors: list[str] = []
+    for _attempt in (1, 2):
         try:
-            llm_result = asyncio.new_event_loop().run_until_complete(
-                _pregen_llm(messages, db, template.max_tokens,
-                            source=source, level=level, provider_code=provider_code)
+            _md = _invoke_pregen_once(
+                messages, db=db, template=template, source=source,
+                level=level, provider_code=provider_code,
             )
         except asyncio.CancelledError:
-            logger.info("ai_report_worker 预生成被抢占(新 loop), 本次跳过(template=%s)", template.code)
+            # 被更高优先级抢占: 本次跳过, 不重试(抢占语义优先于校验重试)。
             return None
-    except Exception as e:  # noqa: BLE001  LLM 调用失败不阻塞 worker
-        logger.error("ai_report_worker LLM call failed (template=%s): %s", template.code, e)
+        if _md is None:
+            # LLM 调用失败; pregen_llm_failed 事件已在 helper 内记录。
+            return None
+        _ok, _errs = validate_pregen_report(_md, template)
+        if _ok:
+            answer_md = _md
+            break
+        last_errors = _errs
+        logger.warning("ai_report_worker 预生成校验未过(attempt=%s/2, template=%s): %s",
+                       _attempt, template.code, _errs)
+        if _attempt == 1:
+            record_system_event(
+                db, category="ai", action="pregen_validation_retry",
+                title=f"AI 报告预生成校验未过, 重试一次: {template.name_cn}",
+                summary=(f"template={template.code} errors={_errs!s}")[:500],
+                status="failed", level="warning",
+                detail=json.dumps({"template_id": template.id, "code": template.code,
+                                   "attempt": 1, "errors": _errs}, ensure_ascii=False),
+                dedup_minutes=30,
+            )
+
+    if answer_md is None:
+        # 首发 + 重试均未过校验: 宁可缺这一份, 也不把残缺/缺维度/占位符报告公开落库。
+        logger.error("ai_report_worker 预生成两次校验均失败, 放弃落库(template=%s): %s",
+                     template.code, last_errors)
         record_system_event(
-            db, category="ai", action="pregen_llm_failed",
-            title=f"AI 报告预生成 LLM 失败: {template.name_cn}",
-            summary=f"template={template.code} err={e!s}",
+            db, category="ai", action="pregen_validation_failed",
+            title=f"AI 报告预生成两次校验失败, 未落库: {template.name_cn}",
+            summary=(f"template={template.code} errors={last_errors!s}")[:500],
             status="failed", level="error",
-            detail=json.dumps({"template_id": template.id, "code": template.code, "error": str(e)},
-                              ensure_ascii=False),
+            detail=json.dumps({"template_id": template.id, "code": template.code,
+                               "errors": last_errors}, ensure_ascii=False),
             dedup_minutes=30,
         )
         return None
 
     total_ms = int((_dt.datetime.now() - t0).total_seconds() * 1000)
-    usage = llm_result.usage if hasattr(llm_result, "usage") else None
-    answer_md = str(llm_result)
+    # _pregen_llm 返回 str(不含 usage 对象); 沿用现状 tokens 计账为 None
+    # (超时/token 口径统一另见 B2-4/B2-5)。
+    usage = None
 
     # 落库(is_public=True, template_id, snapshot_date)
     # user_id=1 表示系统生成的"管理员"报告(admin user); is_public=True 让所有人可见
