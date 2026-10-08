@@ -64,6 +64,7 @@ from app.api.v1.complaints._helpers import (
 from app.api.v1.complaints._misc import complaint_dedup_review, complaint_sn_backfill
 from app.api.v1.complaints._overview import complaint_overview
 from app.api.v1.complaints._reconcile import complaint_reconcile, complaint_reconcile_remark
+from app.api.v1.complaints._risk import risk_priority_list_endpoint
 from app.api.v1.complaints._router import router
 from app.api.v1.complaints._subject import complaint_subject_analysis
 from app.api.v1.complaints._summary import complaint_summary
@@ -132,5 +133,6 @@ __all__ = [
     'complaint_supplementary',
     'create_audit',
     'list_audits',
+    'risk_priority_list_endpoint',
     'router'
 ]
