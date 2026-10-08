@@ -458,7 +458,18 @@ def _resolve_person_name(raw_col):
     - 待归并/person_id IS NULL 别名 → NULL(图表显示"(空)",提示去归并)
     - 未提取的新别名(不在 person_aliases) → NULL
     - sys/system 系统别名(person_id=NULL) → NULL(配合视图 raw 层 notin 过滤更佳)
+    - #266: bigint person_id 列(如 scrm_sessions.person_id)直接 join persons.id
     """
+    from sqlalchemy import BigInteger
+    # person_id 是 bigint 外键时,直接 join persons.id,跳过别名解析
+    if isinstance(raw_col.type, BigInteger):
+        subq = (
+            select(Person.display_name)
+            .where(Person.id == raw_col)
+            .limit(1)
+        )
+        return subq.scalar_subquery()
+    # 字符串别名列:走 person_aliases.alias 解析
     subq = (
         select(Person.display_name)
         .join(PersonAlias, PersonAlias.person_id == Person.id)
