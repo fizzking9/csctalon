@@ -1589,6 +1589,49 @@ def refund_decision_overview(
         "conclusions": conclusions,
     }
 
+    # ── 7. 售出后 N 天分桶 (#251 B3-5, 用户#6) ──
+    #     退款关联 bms_orders.active_date(每设备 MIN = 首购激活日),
+    #     回答「退款集中在售后期哪个阶段」: 早期=产品/激活引导, 晚期=套餐/服务。
+    #     ⚠️ 口径纪律: 本块**单独核算, 不纳入售后客服指标**(用户拍板)——仅经营分析视角。
+    #     基准口径与 A 路线上直退一致(refund_method=线上 AND status=已退款)。
+    _SALE_BUCKETS = ("0-7天", "8-30天", "31-90天", "91-180天", "181-365天", ">365天", "无激活记录")
+    sale_rows = db.execute(text("""
+        WITH first_active AS (
+            SELECT device_sn, MIN(active_date) AS fa
+            FROM bms_orders
+            WHERE device_sn IS NOT NULL AND active_date IS NOT NULL
+            GROUP BY device_sn
+        )
+        SELECT CASE
+                 WHEN fa.fa IS NULL THEN '无激活记录'
+                 WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
+                    - DATE(fa.fa AT TIME ZONE 'Asia/Shanghai') <= 7 THEN '0-7天'
+                 WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
+                    - DATE(fa.fa AT TIME ZONE 'Asia/Shanghai') <= 30 THEN '8-30天'
+                 WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
+                    - DATE(fa.fa AT TIME ZONE 'Asia/Shanghai') <= 90 THEN '31-90天'
+                 WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
+                    - DATE(fa.fa AT TIME ZONE 'Asia/Shanghai') <= 180 THEN '91-180天'
+                 WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
+                    - DATE(fa.fa AT TIME ZONE 'Asia/Shanghai') <= 365 THEN '181-365天'
+                 ELSE '>365天'
+               END AS bucket,
+               count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
+        FROM refunds r
+        LEFT JOIN first_active fa ON fa.device_sn = r.device_sn
+        WHERE r.refund_method = '线上' AND r.status = '已退款'
+          AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+        GROUP BY 1
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    _sale_map = {r.bucket: (int(r.cnt), D(r.amt)) for r in sale_rows}
+    # 出参边界(#222): amt 经 float(...) 一次性表示层转换, 对外契约保持 JSON number(元)
+    sale_days_split = [
+        {"bucket": b,
+         "cnt": _sale_map.get(b, (0, D(0)))[0],
+         "amount": float(round(_sale_map.get(b, (0, D(0)))[1], 2))}
+        for b in _SALE_BUCKETS
+    ]
+
     return {
         "summary": summary,
         "routes_daily": routes_daily,
@@ -1596,6 +1639,7 @@ def refund_decision_overview(
         "manual_water": manual_water,
         "complaint_split": complaint_split,
         "reason_operator": reason_operator,
+        "sale_days_split": sale_days_split,
     }
 
 
