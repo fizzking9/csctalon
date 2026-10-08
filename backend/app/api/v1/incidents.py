@@ -11,7 +11,12 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
 from app.api.deps import AdminOrSupervisor, CurrentUser, DBSession
-from app.models.incident import Incident, IncidentFollowup, IncidentStatus
+from app.models.incident import (
+    Incident,
+    IncidentEventType,
+    IncidentFollowup,
+    IncidentStatus,
+)
 from app.schemas.common import PageBase, R
 
 router = APIRouter(prefix="/incidents", tags=["异常事件登记"])
@@ -41,6 +46,12 @@ def _serialize(i: Incident) -> dict:
         "recurrence_pattern": i.recurrence_pattern,
         "valid_from": i.valid_from.isoformat() if i.valid_from else None,
         "valid_to": i.valid_to.isoformat() if i.valid_to else None,
+        # #232 B1.5-1 经营事件扩展字段
+        "event_type": i.event_type,
+        "target_audience": i.target_audience,
+        "start_at": i.start_at.isoformat() if i.start_at else None,
+        "end_at": i.end_at.isoformat() if i.end_at else None,
+        "impact_metrics": i.impact_metrics,
         "created_by": i.created_by,
         "created_at": i.created_at.isoformat() if i.created_at else None,
         "updated_at": i.updated_at.isoformat() if i.updated_at else None,
@@ -54,6 +65,7 @@ def list_incidents(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     status: str | None = Query(None, description="状态: registered/processing/calmed/reviewed"),
+    event_type: str | None = Query(None, description="事件类型: 经营事件/异常事故"),
     category: str | None = Query(None, description="来源/类型:生产/运营/商务部/店铺/系统平台开发/其他服务商"),
     department: str | None = Query(None, description="涉及部门"),
     start: str | None = Query(None, description="发生时间起 yyyy-mm-dd"),
@@ -65,6 +77,12 @@ def list_incidents(
             stmt = stmt.where(Incident.status == IncidentStatus(status).value)
         except ValueError:
             raise HTTPException(status_code=400, detail=f"无效的状态值: {status}")
+    if event_type:
+        # 校验 event_type 取值合法(经营事件/异常事故), 避免传入非法字符串
+        try:
+            stmt = stmt.where(Incident.event_type == IncidentEventType(event_type).value)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的事件类型: {event_type}")
     if category:
         stmt = stmt.where(Incident.category == category)
     if department:
@@ -94,6 +112,8 @@ def get_incident(incident_id: int, db: DBSession, current_user: CurrentUser):
 
 @router.post("", response_model=R, summary="登记异常事件")
 def create_incident(payload: dict, db: DBSession, current_user: AdminOrSupervisor):
+    # #232 B1.5-1: event_type 默认「异常事故」(向后兼容); 经营事件需显式传入
+    event_type = IncidentEventType(payload.get("event_type", "异常事故")).value
     i = Incident(
         title=payload["title"],
         subject=payload.get("subject"),
@@ -111,6 +131,12 @@ def create_incident(payload: dict, db: DBSession, current_user: AdminOrSuperviso
         recurrence_pattern=payload.get("recurrence_pattern"),
         valid_from=datetime.fromisoformat(payload["valid_from"]) if payload.get("valid_from") else None,
         valid_to=datetime.fromisoformat(payload["valid_to"]) if payload.get("valid_to") else None,
+        # #232 B1.5-1 经营事件扩展字段
+        event_type=event_type,
+        target_audience=payload.get("target_audience"),
+        start_at=datetime.fromisoformat(payload["start_at"]) if payload.get("start_at") else None,
+        end_at=datetime.fromisoformat(payload["end_at"]) if payload.get("end_at") else None,
+        impact_metrics=payload.get("impact_metrics"),
         created_by=current_user.username,
     )
     db.add(i)
@@ -139,9 +165,13 @@ def update_incident(incident_id: int, payload: dict, db: DBSession, current_user
     if not i:
         raise HTTPException(status_code=404, detail="异常事件不存在")
     for k in ("title", "subject", "detail", "impact", "duration_minutes", "related_tickets", "review_note",
-              "category", "department", "severity", "recurrence_pattern"):
+              "category", "department", "severity", "recurrence_pattern",
+              "target_audience", "impact_metrics"):
         if k in payload:
             setattr(i, k, payload[k])
+    # #232 B1.5-1 event_type 校验后赋值(避免传入非法字符串)
+    if "event_type" in payload:
+        i.event_type = IncidentEventType(payload["event_type"]).value
     if "occurred_at" in payload:
         i.occurred_at = datetime.fromisoformat(payload["occurred_at"]) if payload["occurred_at"] else None
     if "resolved_at" in payload:
@@ -152,6 +182,11 @@ def update_incident(incident_id: int, payload: dict, db: DBSession, current_user
         i.valid_from = datetime.fromisoformat(payload["valid_from"]) if payload["valid_from"] else None
     if "valid_to" in payload:
         i.valid_to = datetime.fromisoformat(payload["valid_to"]) if payload["valid_to"] else None
+    # #232 B1.5-1 经营事件起止时间
+    if "start_at" in payload:
+        i.start_at = datetime.fromisoformat(payload["start_at"]) if payload["start_at"] else None
+    if "end_at" in payload:
+        i.end_at = datetime.fromisoformat(payload["end_at"]) if payload["end_at"] else None
     if "is_recurring" in payload:
         i.is_recurring = bool(payload["is_recurring"])
     if "is_closed" in payload:
