@@ -8,8 +8,8 @@
   ① 规模: 设备数; ② 活跃: 近90天有充值或流量的设备数;
   ③ 营收: 近90天充值金额(Decimal); ④ 风险: 近30天退款笔数/投诉数/投诉率。
 - 口径: 设备类型走 devices.device_type_code(B3-1 归一); 套餐走 combo_dict
-  归一码(B3-2, 未命中回落原始名); 商户号走 DeviceMerchantLink is_current
-  建链(B3-1); 投诉走 complaint_scope 唯一出口; 充值金额走 device_combos
+  归一码(B3-2, 未命中回落原始名); 商户号走 devices.merchant_name(#271);
+  投诉走 complaint_scope 唯一出口; 充值金额走 device_combos
   actual_amount(Numeric(12,2)元, Decimal 计算, 出参 float)。
 - 取舍(不做什么及原因): ① 不做转化漏斗(需埋点/订单状态机, 当前数据面无);
   ② 不做留存分析(需设备生命周期快照, 属 B4 架构演进);
@@ -31,7 +31,8 @@ from app.models.combo_dict import ComboDict, ComboNameAlias
 from app.models.device import Device, DimDeviceType
 from app.models.device_combo import DeviceCombo
 from app.models.device_flow_usage import DeviceFlowUsage
-from app.models.merchant import DeviceMerchantLink, Merchant
+
+# from app.models.merchant import DeviceMerchantLink, Merchant  # #271: 暂用 devices.merchant_name，links/merchants 表全空
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.services import complaint_scope
@@ -62,16 +63,14 @@ def _fetch_dim_devices(db: Session, dim: str) -> dict[str, dict[str, Any]]:
             .group_by(Device.current_combo_name)
         )
     elif dim == "merchant":
-        # 商户: 设备→商户号 is_current 建链
+        # #271: links/merchants 表生产全空，商户号信息实际在 devices.merchant_name
         stmt = (
             select(
-                Merchant.sub_name.label("key"),
+                Device.merchant_name.label("key"),
                 func.count(Device.sn).label("device_cnt"),
             )
-            .select_from(Device)
-            .join(DeviceMerchantLink, (DeviceMerchantLink.device_sn == Device.sn) & DeviceMerchantLink.is_current)
-            .join(Merchant, Merchant.id == DeviceMerchantLink.merchant_pk)
-            .group_by(Merchant.sub_name)
+            .where(Device.merchant_name.isnot(None))
+            .group_by(Device.merchant_name)
         )
     else:
         raise ValueError(f"unknown dim: {dim}")
@@ -128,18 +127,18 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime) -> dict[str, 
             .group_by(DeviceCombo.package_name)
         )
     elif dim == "merchant":
+        # #271: 走 devices.merchant_name（links/merchants 表全空）
         stmt = (
             select(
-                Merchant.sub_name.label("key"),
+                Device.merchant_name.label("key"),
                 func.count().label("cnt"),
                 func.coalesce(func.sum(DeviceCombo.actual_amount), 0).label("amount"),
             )
             .select_from(DeviceCombo)
             .join(Device, Device.sn == DeviceCombo.device_sn)
-            .join(DeviceMerchantLink, (DeviceMerchantLink.device_sn == Device.sn) & DeviceMerchantLink.is_current)
-            .join(Merchant, Merchant.id == DeviceMerchantLink.merchant_pk)
             .where(DeviceCombo.created_at_raw >= since)
-            .group_by(Merchant.sub_name)
+            .where(Device.merchant_name.isnot(None))
+            .group_by(Device.merchant_name)
         )
     else:
         raise ValueError(f"unknown dim: {dim}")
@@ -171,14 +170,14 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime) -> dict[str, in
             .group_by(Device.current_combo_name)
         )
     elif dim == "merchant":
+        # #271: 走 devices.merchant_name（links/merchants 表全空）
         stmt = (
-            select(Merchant.sub_name.label("key"), func.count().label("cnt"))
+            select(Device.merchant_name.label("key"), func.count().label("cnt"))
             .select_from(Refund)
             .join(Device, Device.sn == Refund.device_sn)
-            .join(DeviceMerchantLink, (DeviceMerchantLink.device_sn == Device.sn) & DeviceMerchantLink.is_current)
-            .join(Merchant, Merchant.id == DeviceMerchantLink.merchant_pk)
             .where(Refund.created_at_raw >= since)
-            .group_by(Merchant.sub_name)
+            .where(Device.merchant_name.isnot(None))
+            .group_by(Device.merchant_name)
         )
     else:
         raise ValueError(f"unknown dim: {dim}")
@@ -209,15 +208,15 @@ def _fetch_complaint_by_dim(db: Session, dim: str, since: datetime) -> dict[str,
             .group_by(Device.current_combo_name)
         )
     elif dim == "merchant":
+        # #271: 走 devices.merchant_name（links/merchants 表全空）
         stmt = (
-            select(Merchant.sub_name.label("key"), func.count().label("cnt"))
+            select(Device.merchant_name.label("key"), func.count().label("cnt"))
             .select_from(ServiceTicket)
             .join(Device, Device.sn == ServiceTicket.device_sn)
-            .join(DeviceMerchantLink, (DeviceMerchantLink.device_sn == Device.sn) & DeviceMerchantLink.is_current)
-            .join(Merchant, Merchant.id == DeviceMerchantLink.merchant_pk)
             .where(base_cond)
             .where(ServiceTicket.register_time >= since)
-            .group_by(Merchant.sub_name)
+            .where(Device.merchant_name.isnot(None))
+            .group_by(Device.merchant_name)
         )
     else:
         raise ValueError(f"unknown dim: {dim}")
@@ -293,14 +292,10 @@ def category_ops_overview(
             for r in db.execute(select(Device.sn, Device.current_combo_name.label("key")))
         }
     else:  # merchant
+        # #271: 走 devices.merchant_name（links/merchants 表全空）
         sn_to_key = {
             r.sn: r.key or "未归一"
-            for r in db.execute(
-                select(Device.sn, Merchant.sub_name.label("key"))
-                .select_from(Device)
-                .join(DeviceMerchantLink, (DeviceMerchantLink.device_sn == Device.sn) & DeviceMerchantLink.is_current)
-                .join(Merchant, Merchant.id == DeviceMerchantLink.merchant_pk)
-            )
+            for r in db.execute(select(Device.sn, Device.merchant_name.label("key")))
         }
 
     active_by_dim: dict[str, int] = {}

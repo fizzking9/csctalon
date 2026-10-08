@@ -15,7 +15,8 @@ from app.models.combo_dict import ComboDict, ComboNameAlias
 from app.models.device import Device, DimDeviceType
 from app.models.device_combo import DeviceCombo
 from app.models.device_flow_usage import DeviceFlowUsage
-from app.models.merchant import DeviceMerchantLink, Merchant
+
+# from app.models.merchant import DeviceMerchantLink, Merchant  # #271: 不再使用
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.models.user import RoleEnum, User
@@ -149,28 +150,23 @@ def test_ops_overview_combo_canonical_name(db):
     assert raw_miss in names             # 未命中回落原始名
 
 
-def test_ops_overview_merchant_linked(db):
-    """商户维: is_current 建链聚合, 未建链设备落 (未建链商户号)。"""
-    m = Merchant(sub_name=_uniq("商户"), merchant_id=_uniq("MCH"))
-    db.add(m)
-    db.flush()
-    sn_link, sn_free = _uniq("SN-M1"), _uniq("SN-M2")
-    _mk_device(db, sn_link)
-    _mk_device(db, sn_free)
-    db.add(DeviceMerchantLink(
-        device_sn=sn_link, merchant_pk=m.id,
-        effective_from=date.today(), is_current=True, match_source="manual",
-    ))
-    _mk_recharge(db, sn_link, Decimal("300.00"))
-    _mk_complaint(db, sn_link)
+def test_ops_overview_merchant_from_devices(db):
+    """#271: 商户维改走 devices.merchant_name（links/merchants 表生产全空）。"""
+    m_name = _uniq("商户")
+    sn_a, sn_b = _uniq("SN-M1"), _uniq("SN-M2")
+    _mk_device(db, sn_a, merchant_name=m_name)
+    _mk_device(db, sn_b, merchant_name=m_name)
+    _mk_device(db, _uniq("SN-M3"), merchant_name=None)   # 未归一
+    _mk_recharge(db, sn_a, Decimal("300.00"))
+    _mk_complaint(db, sn_a)
     db.flush()
 
     res = category_ops_overview(db, dim="merchant", limit=10)
     items = {r["key"]: r for r in res["items"]}
-    assert m.sub_name in items
-    assert items[m.sub_name]["device_cnt"] == 1
-    assert items[m.sub_name]["recharge_amount"] == 300.0
-    assert items[m.sub_name]["complaint_cnt"] == 1
+    assert m_name in items
+    assert items[m_name]["device_cnt"] == 2
+    assert items[m_name]["recharge_amount"] == 300.0
+    assert items[m_name]["complaint_cnt"] == 1
 
 
 def test_ops_overview_limit_and_order(db):
