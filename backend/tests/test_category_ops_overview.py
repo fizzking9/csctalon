@@ -56,10 +56,10 @@ def _mk_device(db, sn: str, **kw) -> Device:
     return dev
 
 
-def _mk_recharge(db, sn: str, amount: Decimal, days_ago: int = 0) -> DeviceCombo:
+def _mk_recharge(db, sn: str, amount: Decimal, days_ago: int = 0, **kw) -> DeviceCombo:
     c = DeviceCombo(
         recharge_order_no=_uniq("RO"), device_sn=sn,
-        package_name=_uniq("套餐"), actual_amount=amount,
+        package_name=kw.pop("package_name", _uniq("套餐")), actual_amount=amount,
         created_at_raw=datetime.now(UTC) - timedelta(days=days_ago),
     )
     db.add(c)
@@ -188,6 +188,30 @@ def test_ops_overview_limit_and_order(db):
     assert len(res["items"]) <= 2
     amounts = [r["recharge_amount"] for r in res["items"]]
     assert amounts == sorted(amounts, reverse=True)
+
+
+def test_ops_overview_combo_no_amplification(db):
+    """#270: 设备多笔充值时退款/投诉不重复计数（回归保护）。"""
+    raw = _uniq("防放大套餐")
+    sn = _uniq("SN-AMP")
+    _mk_device(db, sn, current_combo_name=raw)
+    # 同一设备 3 笔充值（一对多流水），package_name 与 current_combo_name 对齐
+    for _ in range(3):
+        _mk_recharge(db, sn, Decimal("10.00"), package_name=raw)
+    # 各 1 笔退款/投诉
+    _mk_refund(db, sn)
+    _mk_complaint(db, sn)
+    db.flush()
+
+    res = category_ops_overview(db, dim="combo", limit=50)
+    items = {r["key"]: r for r in res["items"]}
+    assert raw in items
+    it = items[raw]
+    # 放大前: refund_cnt/complaint_cnt 会是 3（按充值流水行数）
+    assert it["refund_cnt"] == 1
+    assert it["complaint_cnt"] == 1
+    # 充值金额不受影响（仍按流水求和）
+    assert it["recharge_amount"] == 30.0
 
 
 def test_ops_overview_endpoint(authed_client, db):

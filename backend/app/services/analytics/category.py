@@ -161,13 +161,14 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime) -> dict[str, in
             .group_by(Device.device_type_code)
         )
     elif dim == "combo":
+        # #270: 去掉 JOIN device_combos（充值流水一对多导致退款重复计数 2.5x），
+        # 改按 Device.current_combo_name 分组（与设备数/活跃同口径）
         stmt = (
-            select(DeviceCombo.package_name.label("key"), func.count().label("cnt"))
+            select(Device.current_combo_name.label("key"), func.count().label("cnt"))
             .select_from(Refund)
             .join(Device, Device.sn == Refund.device_sn)
-            .join(DeviceCombo, DeviceCombo.device_sn == Device.sn)
             .where(Refund.created_at_raw >= since)
-            .group_by(DeviceCombo.package_name)
+            .group_by(Device.current_combo_name)
         )
     elif dim == "merchant":
         stmt = (
@@ -198,14 +199,14 @@ def _fetch_complaint_by_dim(db: Session, dim: str, since: datetime) -> dict[str,
             .group_by(Device.device_type_code)
         )
     elif dim == "combo":
+        # #270: 同退款修复，去掉 JOIN device_combos 放大，按 current_combo_name 分组
         stmt = (
-            select(DeviceCombo.package_name.label("key"), func.count().label("cnt"))
+            select(Device.current_combo_name.label("key"), func.count().label("cnt"))
             .select_from(ServiceTicket)
             .join(Device, Device.sn == ServiceTicket.device_sn)
-            .join(DeviceCombo, DeviceCombo.device_sn == Device.sn)
             .where(base_cond)
             .where(ServiceTicket.register_time >= since)
-            .group_by(DeviceCombo.package_name)
+            .group_by(Device.current_combo_name)
         )
     elif dim == "merchant":
         stmt = (
