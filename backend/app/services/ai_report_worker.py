@@ -9,7 +9,9 @@
   ③ 空闲期(bms_scheduler._run_loop 每分钟) 扫描 daily/weekly/monthly + trigger_at 匹配
 - 进程级单飞锁 _worker_lock 防并发(单 worker, 保证互斥锁有效)
 - 失败处理: 仅 log + 通知中心写 system_event(category=ai, status=failed), 不阻塞
-- 参数分级: 后台预生成 timeout_s=600(#131 122b 慢模型放宽), max_tokens=template.max_tokens(2000)
+- 参数分级: 后台预生成 timeout_s=600(#131 122b 慢模型放宽; 容得下 5000 token 自洽
+  ~363s), max_tokens=template.max_tokens 按 period 分档(日报 2500/周 4000/月 5000,
+  R-P1-4 / R3 长报告 ≥4000; 见 default_max_tokens_for_period)
 - 落库到 ai_reports + is_public=True + template_id + snapshot_date
 
 #121 不接 sync_task_manager / bms_scheduler(留待 #123 调度仲裁层);

@@ -16,7 +16,10 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import text
 
 from app.api.deps import AdminUser, DBSession
-from app.models.ai_report_template import AiReportTemplate
+from app.models.ai_report_template import (
+    AiReportTemplate,
+    resolve_max_tokens,
+)
 from app.schemas.common import R
 
 logger = logging.getLogger(__name__)
@@ -145,7 +148,11 @@ def create_template(payload: dict, db: DBSession, _: AdminUser):
         priority=payload.get("priority", 100),
         llm_provider_code=payload.get("llm_provider_code"),
         fallback_template_id=payload.get("fallback_template_id"),
-        max_tokens=payload.get("max_tokens", 2000),
+        # R-P1-4: 未显式指定时按 period 给长报告分档默认(日报 2500/周·滚动周 4000/
+        # 月·滚动月 5000); 显式传正整数仍优先。旧逻辑统一落 2000 会让新建的周/月
+        # 详尽模板复发 R3 已修复的「长报告被 max_tokens 截断」。
+        max_tokens=resolve_max_tokens(payload.get("period"),
+                                      payload.get("max_tokens")),
         is_active=payload.get("is_active", True),
         visibility_scope=payload.get("visibility_scope", "public"),
         # #152 回答模式分级: detail_level 默认 standard, required_dimensions 可缺省(None)

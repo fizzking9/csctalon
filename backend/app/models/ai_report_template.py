@@ -6,7 +6,9 @@
 - 关键词路由: question_keywords 用于匹配用户问句到对应模板(类似 ai_glossary 关键词路由)
 - 多模型分工: llm_provider_code 可指定特定 provider 跑此模板, 默认 None 走多 provider 优先级
 - 失败兜底: fallback_template_id 指向简版模板, 详尽模板失败时降级到简版预生成结果
-- 参数分级: max_tokens 后台默认 2000(详尽), 前台实时由调用方覆盖为 800(简洁防截断)
+- 参数分级: 预生成 max_tokens 按 period 分档(见 DEFAULT_MAX_TOKENS_BY_PERIOD, R-P1-4):
+  详尽周/月/滚动长报告 4000/5000(R3 实测长报告不低于 4000), 日报 2500;
+  前台**实时问答**不读此值, 由 settings.AI_MAX_TOKENS=1500(简洁档)单独控制
 - 调度: frequency(sync-triggered/daily/weekly/monthly) + trigger_at(HH:MM 或 weekday:H)
 - 权限: visibility_scope(public/admin_only); 模板管理仅 admin, 报告查看全员(public) + 私有(user_id)
 - 关联 users(id) ON DELETE SET NULL: 创建者被删时模板保留(created_by 置 NULL)
@@ -19,6 +21,41 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 from app.models.base import IDMixin, TimestampMixin
+
+# ── 预生成 max_tokens 按 period 分档(R-P1-4 / #240, 单一来源) ──────────────
+# 取值与存量逐一对齐: #134 迁移(daily 2500 / weekly 4000 / monthly 5000) 与
+# rolling seed(rolling_7d 4000 / rolling_30d 5000)。
+# 依据 R3《20260927 算力深度评估》: 详尽长报告经 1200→2400→4000 三轮迭代才不截断,
+# 生产长报告 max_tokens 不应低于 4000。**仅用于后台预生成模板**; 前台实时问答走
+# settings.AI_MAX_TOKENS(简洁档), 与此无关。
+DEFAULT_MAX_TOKENS_BY_PERIOD: dict[str, int] = {
+    "daily": 2500,       # 日报相对短(#134)
+    "weekly": 4000,      # 周报覆盖 7 天多维度
+    "monthly": 5000,     # 月报 30 天逐日走势 + 多维度, 空间最大
+    "rolling_7d": 4000,  # 滚动周报(与 weekly 同档)
+    "rolling_30d": 5000, # 滚动月报(与 monthly 同档)
+}
+# 未知/自定义 period 的兜底: 按 R3 长报告下限 4000(宁可宽裕, 不可截断)。
+DEFAULT_MAX_TOKENS_LONG_REPORT = 4000
+
+
+def default_max_tokens_for_period(period: str | None) -> int:
+    """按 period 返回预生成模板的业务默认 max_tokens(创建模板时未显式指定则用此)。
+
+    未知 period 按长报告下限 4000 兜底(模板的用途定位就是"详尽完整草稿")。
+    """
+    return DEFAULT_MAX_TOKENS_BY_PERIOD.get((period or "").strip(),
+                                            DEFAULT_MAX_TOKENS_LONG_REPORT)
+
+
+def resolve_max_tokens(period: str | None, explicit: int | None) -> int:
+    """创建模板时决定 max_tokens: 显式正整数优先, 否则按 period 取分档默认。
+
+    explicit 为 None/0 等假值时视为"未指定"(0 不是合法输出上限), 回退 period 默认。
+    """
+    if explicit:
+        return int(explicit)
+    return default_max_tokens_for_period(period)
 
 
 class AiReportTemplate(IDMixin, TimestampMixin, Base):
@@ -106,8 +143,11 @@ class AiReportTemplate(IDMixin, TimestampMixin, Base):
         comment="LLM 调用失败时降级到的简版模板 id; None=不降级",
     )
     max_tokens: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=2000,
-        comment="后台预生成 token 上限(详尽), 默认 2000; 前台实时由调用方覆盖为 800",
+        Integer, nullable=False, default=DEFAULT_MAX_TOKENS_LONG_REPORT,
+        comment=("后台预生成 token 上限(详尽); 业务默认按 period 分档(创建入口用 "
+                 "default_max_tokens_for_period: daily 2500/weekly 4000/monthly 5000), "
+                 "本列 default 仅 ORM 兜底=4000(R3 长报告下限); 前台实时问答由 "
+                 "settings.AI_MAX_TOKENS 单独控制, 不读此值"),
     )
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True,
