@@ -54,6 +54,7 @@
 - [ ] 响应格式符合 `docs/standards/error-code.md`（成功 `{code:0,data,message}`，错误走 HTTPException）
 - [ ] 接口路径是否在 `docs/API接口文档.md` 中登记或同步更新
 - [ ] 表结构变更是否走 Alembic migration
+- [ ] **前端 TS 渐进约定（#282 / O-12，2026-10-09 起）**：`web/src/` 下**新增**文件一律 `.ts`（既有 `.js` 不追溯、不强制改写）；新增 `.js` 须在 PR 描述中说明理由（如第三方脚手架产物）
 
 ### 性能
 
