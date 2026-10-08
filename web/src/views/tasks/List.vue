@@ -98,7 +98,7 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { listTasks, createTask } from '@/api/task'
@@ -106,6 +106,7 @@ import { useAuthStore } from '@/stores/auth'
 import dayjs from 'dayjs'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
 const list = ref([])
 const total = ref(0)
@@ -149,6 +150,22 @@ function openCreate() {
   dialogVisible.value = true
 }
 
+// #253 B3-6 接待分析闭环入口: /tasks?create=1&title=...&context=...
+// 若 url 带 create=1 → 自动打开新建对话框,并把 title/context 预填进表单。
+// context 是跳转页塞来的业务上下文(时间窗/指标值等),落到 description 里便于追溯。
+function openCreateFromQuery() {
+  const q = route.query
+  if (q.create !== '1') return
+  Object.assign(form, {
+    title: q.title || '',
+    task_type: '',
+    deadline: null,
+    sn_text: '',
+    description: q.context || '',
+  })
+  dialogVisible.value = true
+}
+
 async function handleCreate() {
   if (!form.title.trim()) {
     ElMessage.warning('请输入专项名称')
@@ -171,7 +188,10 @@ async function handleCreate() {
   }
 }
 
-onMounted(loadData)
+onMounted(() => {
+  loadData()
+  openCreateFromQuery()
+})
 </script>
 
 <style scoped>

@@ -69,9 +69,10 @@ export const MENU_GROUPS = [
       { path: '/dashboards/complaint-audit', title: '投诉核查', buildMode: 'debug_only' },
       // ★ #63: 纯工信部投诉单列页 —— 核查类工具, 与「投诉核查」同档(debug_only)
       { path: '/dashboards/pure-card-complaint', title: '纯工信部投诉', buildMode: 'debug_only' },
-      { path: '/dashboards/reception', title: '接待分析', buildMode: 'debug_only' },
-      { path: '/dashboards/performance', title: '绩效分析', buildMode: 'debug_only' },
-      { path: '/dashboards/special', title: '专项跟进', buildMode: 'debug_only' },
+      // ★ #253 B3-6: 接待/绩效/专项三页产品化 —— 出 debug_only, release 构建对 manager 可见
+      { path: '/dashboards/reception', title: '接待分析' },
+      { path: '/dashboards/performance', title: '绩效分析' },
+      { path: '/dashboards/special', title: '专项跟进' },
     ],
   },
 

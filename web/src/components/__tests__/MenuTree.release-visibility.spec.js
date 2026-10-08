@@ -90,6 +90,14 @@ describe('release 构建 · 非 admin 维持历史可见集(逐字节不新增, 
     expect(titles.some((t) => t.includes('系统管理'))).toBe(false)
   })
 
+  // ★ #253 B3-6: 接待/绩效/专项三页出 debug_only → supervisor 在 release 下也能看到这三个叶子
+  it('supervisor: release 下也能看到「接待分析 / 绩效分析 / 专项跟进」(#253 产品化)', () => {
+    const items = itemTexts(mountMenu('supervisor'))
+    expect(items.some((t) => t.includes('接待分析'))).toBe(true)
+    expect(items.some((t) => t.includes('绩效分析'))).toBe(true)
+    expect(items.some((t) => t.includes('专项跟进'))).toBe(true)
+  })
+
   it('specialty_lead: 与 supervisor 同档, debug_only 整组不新增', () => {
     const titles = groupTitles(mountMenu('specialty_lead'))
     expect(titles.some((t) => t.includes('专项分析'))).toBe(true)

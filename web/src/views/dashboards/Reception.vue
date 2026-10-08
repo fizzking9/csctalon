@@ -25,22 +25,32 @@
       <div class="page-title" style="margin: 0">接待分析 <el-tag size="small" type="warning" effect="plain" style="margin-left: 8px">对齐周报</el-tag>
         <!-- ★ #245 页面层可见设计说明（界面设计说明规范 §二·方案A）：含「取舍」段 -->
         <el-tooltip effect="dark" placement="bottom-start" raw-content
-          content="<b>这个页面为什么这样设计</b><br/><b>给谁</b>：需要对周报负责的运营主管/周报编写人<br/><b>回答什么</b>：① 最近一周接待量及环比 ② 投诉/退款/套餐等分项数量与趋势 ③ 各组人均负担 ④ 每人近一周每天接待量<br/><b>组织逻辑</b>：按周报阅读顺序 总量→分项→人均→到人；模块1~3 按自然周聚合，模块4 为人员日明细<br/><b>口径</b>：接待 = 客服助手沟通事项次数（1 条记录 = 1 次会话），周 = 自然周；模块4 固定近 7 天<br/><br/><b>⚠️ 取舍（不做什么及原因）</b><br/>① 不提供日粒度 —— 日波动大，本页对齐周报<br/>② 模块4 不随顶部时间窗 —— 对齐周报人员日接待视图，避免大范围重查询<br/>③ 进页自动加载 —— 仅四个只读聚合查询<br/>④ 不展示金额 —— 金额口径在退款分析">
+          content="<b>这个页面为什么这样设计</b><br/><b>给谁</b>：需要对周报负责的运营主管/周报编写人<br/><b>回答什么</b>：① 最近一周接待量及环比 ② 投诉/退款/套餐等分项数量与趋势 ③ 各组人均负担 ④ 每人近一周每天接待量<br/><b>组织逻辑</b>：按周报阅读顺序 总量→分项→人均→到人；模块1~3 按自然周聚合，模块4 为人员日明细<br/><b>口径</b>：接待 = 客服助手沟通事项次数（1 条记录 = 1 次会话），周 = 自然周；模块4 固定近 7 天<br/><br/><b>⚠️ 取舍（不做什么及原因）</b><br/>① 不提供日粒度 —— 日波动大，本页对齐周报<br/>② 模块4 不随顶部时间窗 —— 对齐周报人员日接待视图，避免大范围重查询<br/>③ 进页自动加载 —— 仅四个只读聚合查询<br/>④ 不展示金额 —— 金额口径在退款分析<br/><br/><b>管理动作（#253 B3-6）</b><br/>① 「人均接待(天)」卡片旁的 📅 按钮 → 跳「排班管理·排班对照」，看当日排班人数是否匹配接待负荷<br/>② 顶部「创建专项任务」按钮 → 跳「专项任务」新建页并预填本页上下文（时间窗/当前接待量），把「看数→派任务」串成闭环">
           <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-2px;font-size:14px;margin-left:4px"><QuestionFilled /></el-icon>
         </el-tooltip>
       </div>
-      <FilterBar
-        v-model:model-value="rangeMode"
-        v-model:range="customRange"
-        :quick-options="receptionQuickOptions"
-        date-picker-type="daterange"
-        :show-custom="true"
-        show-grain="false"
-        :loading="loading"
-        @change="onRangeChange"
-        @range-change="onRangeChange"
-        @refresh="loadAll"
-      />
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <!-- ★ #253 B3-6 排班联动: 人均接待 → 当日排班对照 -->
+        <el-tooltip content="看今日排班人数是否匹配接待负荷(跳排班对照)" placement="top">
+          <el-button size="small" :icon="Calendar" @click="goScheduleCompare">排班对照</el-button>
+        </el-tooltip>
+        <!-- ★ #253 B3-6 管理动作闭环: 看数→派任务 -->
+        <el-tooltip content="基于本页当前时间窗创建专项任务,把看数转化为管理动作" placement="top">
+          <el-button size="small" type="primary" :icon="Plus" @click="goCreateTask">创建专项任务</el-button>
+        </el-tooltip>
+        <FilterBar
+          v-model:model-value="rangeMode"
+          v-model:range="customRange"
+          :quick-options="receptionQuickOptions"
+          date-picker-type="daterange"
+          :show-custom="true"
+          show-grain="false"
+          :loading="loading"
+          @change="onRangeChange"
+          @range-change="onRangeChange"
+          @refresh="loadAll"
+        />
+      </div>
     </div>
 
     <!-- 模块1:总体接待量 -->
@@ -327,7 +337,8 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { Refresh, Calendar, QuestionFilled } from '@element-plus/icons-vue'
+import { useRouter } from 'vue-router'
+import { Refresh, Calendar, QuestionFilled, Plus } from '@element-plus/icons-vue'
 import BaseChart from '@/components/BaseChart.vue'
 import FilterBar from '@/components/dashboard/FilterBar.vue'
 import SectionHeader from '@/components/dashboard/SectionHeader.vue'
@@ -335,6 +346,27 @@ import KpiCard from '@/components/dashboard/KpiCard.vue'
 import ChartCard from '@/components/dashboard/ChartCard.vue'
 import { reception } from '@/api/analytics'
 import dayjs from 'dayjs'
+
+const router = useRouter()
+
+// ===== #253 B3-6 管理动作闭环 =====
+// 排班联动: 跳排班对照页看当日排班人数 vs 实际接待负荷
+function goScheduleCompare() {
+  const today = dayjs().format('YYYY-MM-DD')
+  router.push({ path: '/management/schedule', query: { tab: 'comparison', date: today } })
+}
+
+// 管理动作闭环: 基于本页当前时间窗创建专项任务(跳 tasks 新建页,预填上下文)
+function goCreateTask() {
+  router.push({
+    path: '/tasks',
+    query: {
+      create: '1',
+      title: `接待分析跟进(${effectiveStart.value}~${effectiveEnd.value})`,
+      context: `来源:接待分析; 时间窗:${effectiveStart.value}~${effectiveEnd.value}; 本周接待量:${latestWeek.value.reception_total || 0}次`,
+    },
+  })
+}
 
 // ===== 筛选状态 =====
 const rangeMode = ref('90')

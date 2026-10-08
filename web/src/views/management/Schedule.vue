@@ -250,6 +250,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, ArrowLeft, ArrowRight } from '@element-plus/icons-vue'
 import { listShifts, listSchedules, bulkSchedule, updateSchedule, deleteSchedule, scheduleComparison } from '@/api/schedule'
@@ -260,7 +261,9 @@ import isoWeek from 'dayjs/plugin/isoWeek'
 
 dayjs.extend(isoWeek)
 
-const tab = ref('list')
+const route = useRoute()
+// #253 B3-6 接待分析排班联动: /management/schedule?tab=comparison&date=YYYY-MM-DD
+const tab = ref(route.query.tab === 'comparison' ? 'comparison' : 'list')
 const shifts = ref([])
 const persons = ref([])
 const groups = ref([])
@@ -272,7 +275,9 @@ const groupFilter = ref(null)
 const personFilter = ref(null)
 const bulkVisible = ref(false)
 const editVisible = ref(false)
-const cmpDate = ref(dayjs().format('YYYY-MM-DD'))
+// #253 B3-6 接待分析排班联动: /management/schedule?tab=comparison&date=YYYY-MM-DD
+const _qDate = route.query.date
+const cmpDate = ref(dayjs(_qDate && dayjs(_qDate).isValid() ? _qDate : undefined).format('YYYY-MM-DD'))
 const cmp = ref({})
 const bulkForm = reactive({ group_id: null, person_ids: [], range: [], shift_template_id: null, status: '正常', note: '' })
 const editForm = reactive({ id: null, person_id: null, person_name: '', schedule_date: '', shift_template_id: null, status: '正常', note: '' })
@@ -589,6 +594,8 @@ function loadAll() {
   loadGroups()
   loadSchedules()
   if (tab.value === 'calendar') renderCalendar()
+  // #253 B3-6: 接待分析跳来时,直接落在排班对照 tab,需要主动拉数据
+  if (tab.value === 'comparison') loadComparison()
 }
 
 onMounted(loadAll)

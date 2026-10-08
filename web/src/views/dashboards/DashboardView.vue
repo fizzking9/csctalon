@@ -5,6 +5,10 @@
         <div class="page-title" style="margin: 0">{{ dashboard?.name || '加载中...' }}</div>
         <el-tag v-if="dashboard" size="small">{{ dashboard.category }}</el-tag>
         <el-tag v-if="dashboard?.is_preset" type="warning" size="small">预设</el-tag>
+        <!-- ★ #253 B3-6 绩效分析产品化: 预设看板补页面层数据说明(配置化描述往往缺口径,用 code 级硬说明) -->
+        <el-tooltip v-if="presetRationale" effect="dark" placement="bottom-start" raw-content :content="presetRationale">
+          <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-2px;font-size:14px;margin-left:4px"><QuestionFilled /></el-icon>
+        </el-tooltip>
       </div>
       <div v-if="dashboard" class="filter-bar">
         <el-radio-group v-model="rangeMode" size="small" @change="onRangeChange">
@@ -68,7 +72,7 @@
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, QuestionFilled } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import ViewItemCard from '@/components/ViewItemCard.vue'
 import { getDashboard, listDashboards, executeDashboard } from '@/api/dashboard'
@@ -79,6 +83,18 @@ const route = useRoute()
 const CODE_BY_NAME = {
   DashboardRefund: 'preset_dashboard_refund',
   DashboardPerformance: 'preset_dashboard_performance',
+}
+
+// #253 B3-6 绩效分析产品化: 预设看板页面层数据说明(替代"配置化描述缺口径"的短板)
+const PRESET_RATIONALES = {
+  preset_dashboard_performance: `<b>这个看板为什么这样设计</b><br/>
+<b>给谁</b>：主管/组长,做周/月绩效复盘<br/>
+<b>回答什么</b>：各组/各人的接待量、工单处理量、投诉/退款分布是否均衡,谁是瓶颈<br/>
+<b>口径</b>：接待=cs_records,工单=service_tickets,退款/投诉走唯一口径出口;人员归属按 is_current 现行建链<br/><br/>
+<b>⚠️ 取舍(不做什么及原因)</b><br/>
+① 不做绩效打分/排名 —— 评分属 HR 域,本系统只出"事实口径"供主管参考<br/>
+② 不做实时刷新 —— 绩效复盘是日/周粒度,分钟级刷新无决策价值<br/>
+③ 不做个人对比雷达图 —— 避免主观权重;需要对比时主管自行从明细行读数`,
 }
 
 const props = defineProps({
@@ -94,6 +110,8 @@ const batchResults = ref({}) // { view_id: { result, error, view_name, ratios, i
 const errorMsg = ref('')
 
 const visibleItems = computed(() => (dashboard.value?.items || []).filter((i) => i.visible !== false))
+// #253 B3-6: 当前看板若是已登记的预设,取 code 级数据说明
+const presetRationale = computed(() => (dashboard.value?.code ? PRESET_RATIONALES[dashboard.value.code] : null))
 
 const effectiveStart = computed(() => {
   if (rangeMode.value === 'custom') return customRange.value?.[0] || ''
