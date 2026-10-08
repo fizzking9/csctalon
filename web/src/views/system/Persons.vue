@@ -12,6 +12,7 @@
         <el-button :icon="Connection" :loading="importingQw" @click="handleBatchImportQw">纳入企微客服</el-button>
         <el-button :icon="Connection" :loading="importingRnd" @click="handleBatchImportRnd">纳入研发</el-button>
         <el-button :icon="Connection" @click="loadSuggestions">归并建议</el-button>
+        <el-button :icon="Grid" @click="openSkillMatrix">技能矩阵</el-button>
       </div>
     </div>
 
@@ -103,6 +104,9 @@
               <el-option label="离职" value="resigned" />
               <el-option label="非活跃" value="inactive" />
             </el-select>
+            <el-select v-model="filter.skill_tag" placeholder="技能" size="small" clearable filterable style="width: 120px" @change="loadData">
+              <el-option v-for="t in skillTagsList" :key="t.skill_tag" :label="`${t.skill_tag}(${t.person_count})`" :value="t.skill_tag" />
+            </el-select>
           </div>
           <el-button size="small" type="warning" :icon="Edit" :disabled="!selectedPersonIds.length" @click="openBatchEdit">
             批量编辑<span v-if="selectedPersonIds.length">({{ selectedPersonIds.length }})</span>
@@ -183,6 +187,37 @@
                 </template>
                 <span v-else-if="row.specialty" style="color:#606266">{{ row.specialty }}</span>
                 <span v-else style="color:#c0c4cc">-</span>
+              </template>
+              <span v-else style="color:#c0c4cc">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="技能" min-width="140" show-overflow-tooltip>
+            <template #header>
+              <span>
+                技能
+                <el-tooltip placement="top">
+                  <template #content>
+                    设计说明:替主管回答"谁能处理什么、熟练度如何"。<br/>
+                    口径:技能矩阵 person_skill_tags,标签+熟练度1-5,人工维护。<br/>
+                    取舍:只做人工标签,不从接待记录自动推断——自动推断误判<br/>
+                    会污染排班决策,等积累足够再评估。
+                  </template>
+                  <el-icon style="vertical-align:-2px"><InfoFilled /></el-icon>
+                </el-tooltip>
+              </span>
+            </template>
+            <template #default="{ row }">
+              <template v-if="row._nodeType === 'person' && row.skill_tags && row.skill_tags.length">
+                <el-tag
+                  v-for="st in row.skill_tags"
+                  :key="st.skill_tag"
+                  size="small"
+                  type="success"
+                  effect="plain"
+                  style="margin-right:4px; margin-bottom:2px"
+                >
+                  {{ st.skill_tag }}·L{{ st.level }}
+                </el-tag>
               </template>
               <span v-else style="color:#c0c4cc">-</span>
             </template>
@@ -353,6 +388,90 @@
           </el-form>
           <div style="color:#909399; font-size:11px; margin-bottom:8px">
             * 岗位/专项/分组是任职镜像,需下方任职历史变更
+          </div>
+
+          <!-- 技能标签(B3-7): 副本编辑,保存时 PUT 全量替换 -->
+          <div class="flex-between mb-8 mt-12">
+            <span class="section-title">
+              技能标签
+              <el-tooltip placement="top">
+                <template #content>
+                  设计说明:替主管回答"这个人能顶什么岗"。<br/>
+                  操作:添加标签(默认 L3)→调熟练度→保存;<br/>
+                  保存为全量替换(以保存时列表为准)。<br/>
+                  取舍:标签不自动生成,纯人工维护,宁缺勿错。
+                </template>
+                <el-icon style="vertical-align:-2px; color:#909399"><InfoFilled /></el-icon>
+              </el-tooltip>
+            </span>
+            <el-button size="small" type="primary" :loading="skillSaving" :disabled="!detailSkills.length && !(currentDetail.skill_tags||[]).length" @click="saveDetailSkills">
+              保存技能
+            </el-button>
+          </div>
+          <div class="skill-edit-box">
+            <el-tag
+              v-for="(st, idx) in detailSkills"
+              :key="st.skill_tag"
+              closable
+              type="success"
+              effect="plain"
+              style="margin: 0 6px 6px 0"
+              @close="removeDetailSkill(idx)"
+            >
+              {{ st.skill_tag }}
+              <el-rate
+                :model-value="st.level"
+                :max="5"
+                size="small"
+                style="display:inline-flex; vertical-align:middle; margin-left:4px"
+                @update:model-value="(v) => (st.level = v || 1)"
+              />
+            </el-tag>
+            <el-select
+              size="small"
+              filterable
+              allow-create
+              default-first-option
+              placeholder="+ 添加技能"
+              style="width: 140px"
+              @change="addDetailSkill"
+            >
+              <el-option v-for="t in skillTagsList" :key="t.skill_tag" :label="t.skill_tag" :value="t.skill_tag" />
+            </el-select>
+          </div>
+
+          <!-- 绩效·排班联动(B3-7): 摘要 + 跳转,不做页内深分析 -->
+          <div class="flex-between mb-8 mt-12">
+            <span class="section-title">绩效·排班联动</span>
+            <span class="flex gap-8">
+              <el-button size="small" text type="primary" @click="goReceptionAnalysis">接待分析</el-button>
+              <el-button size="small" text type="primary" @click="goSchedulePage">排班管理</el-button>
+            </span>
+          </div>
+          <div v-loading="linksLoading" class="link-summary-box">
+            <div class="link-row">
+              <span class="link-label">近7天接待</span>
+              <template v-if="personLinks.perf">
+                <span style="font-weight:600">{{ personLinks.perf.total }}</span> 条
+                <span style="color:#909399; margin-left:8px">日均 {{ personLinks.perf.avg }} · 主类 {{ personLinks.perf.category }} · {{ personLinks.perf.group_name }}</span>
+              </template>
+              <span v-else style="color:#c0c4cc">近7天无接待记录</span>
+            </div>
+            <div class="link-row">
+              <span class="link-label">本周排班</span>
+              <template v-if="personLinks.schedules.length">
+                <el-tag
+                  v-for="s in personLinks.schedules.slice(0, 7)"
+                  :key="s.id"
+                  size="small"
+                  effect="plain"
+                  style="margin-right:4px"
+                >
+                  {{ s.schedule_date.slice(5) }} {{ s.shift_name || (s.start_time || '') }}
+                </el-tag>
+              </template>
+              <span v-else style="color:#c0c4cc">本周未排班</span>
+            </div>
           </div>
 
           <!-- 任职历史 -->
@@ -578,10 +697,71 @@
             <el-option v-for="s in specialtiesList" :key="s.id" :label="s.name" :value="s.name" />
           </el-select>
         </el-form-item>
+        <el-divider content-position="left">技能打标(独立接口,不影响任职)</el-divider>
+        <el-form-item label="技能">
+          <el-checkbox v-model="batchApply.skill" style="width:90px">修改</el-checkbox>
+          <div style="width: calc(100% - 100px); display:flex; gap:6px; flex-wrap:wrap">
+            <el-select v-model="batchForm.skill_mode" style="width: 110px">
+              <el-option label="打上标签" value="add" /><el-option label="移除标签" value="remove" />
+            </el-select>
+            <el-select v-model="batchForm.skill_tag" filterable allow-create default-first-option placeholder="技能标签" style="flex:1; min-width:110px">
+              <el-option v-for="t in skillTagsList" :key="t.skill_tag" :label="t.skill_tag" :value="t.skill_tag" />
+            </el-select>
+            <el-select v-if="batchForm.skill_mode === 'add'" v-model="batchForm.skill_level" style="width: 90px">
+              <el-option v-for="lv in [1,2,3,4,5]" :key="lv" :label="`L${lv}`" :value="lv" />
+            </el-select>
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="batchEditVisible = false">取消</el-button>
         <el-button type="primary" :loading="submitting" @click="handleBatchUpdate">确认批量更新</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 技能矩阵 对话框(B3-7): 行=在职人员, 列=技能标签, 格子点击轮换 1→3→5→删 -->
+    <el-dialog v-model="skillMatrixVisible" title="技能矩阵" width="90%" top="6vh">
+      <div class="flex-between mb-8">
+        <span style="color:#909399; font-size:12px">
+          替主管回答"谁会什么、熟练度如何"——点击格子循环 空白→L1→L3→L5→移除。
+          <el-tooltip placement="top">
+            <template #content>
+              设计说明:矩阵是全司技能的一屏总览,服务排班/顶岗决策。<br/>
+              口径:仅在职人员;标签人工维护(person_skill_tags)。<br/>
+              取舍:① 不做自动推断(误判污染决策);② 单元格只做<br/>
+              三档轮换(1/3/5),不做逐格 1-5 微调,保证批量操作效率;③<br/>
+              不做导出——需要分发时截图即可,不值得加代码。
+            </template>
+            <el-icon style="vertical-align:-2px"><InfoFilled /></el-icon>
+          </el-tooltip>
+        </span>
+        <el-tag size="small" type="info">{{ skillMatrix.persons.length }} 人 × {{ skillMatrix.tags.length }} 技能</el-tag>
+      </div>
+      <el-table v-loading="skillMatrixLoading" :data="skillMatrix.persons" size="small" border max-height="65vh">
+        <el-table-column prop="display_name" label="人员" width="120" fixed="left" show-overflow-tooltip />
+        <el-table-column prop="department" label="部门" width="70" show-overflow-tooltip />
+        <el-table-column
+          v-for="tag in skillMatrix.tags"
+          :key="tag"
+          :label="tag"
+          min-width="72"
+          align="center"
+        >
+          <template #default="{ row }">
+            <el-button
+              link
+              size="small"
+              :type="row.skills.some(s => s.skill_tag === tag) ? 'success' : 'info'"
+              style="width:100%; font-weight:600"
+              @click="toggleMatrixCell(row, tag)"
+            >
+              {{ row.skills.find(s => s.skill_tag === tag)?.level || '·' }}
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button type="primary" @click="skillMatrixVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -661,10 +841,37 @@
 </template>
 
 <script setup>
+/**
+ * 设计说明（Design Rationale）· B3-7 人员技能矩阵与绩效/排班联动 (#255)
+ * ─────────────────────────────────────────────────────────────────
+ * 目的（替谁回答什么问题）
+ *   替主管/管理员回答三个问题：
+ *   ① "谁会什么、熟练度如何"——技能列+技能矩阵弹窗（排班/顶岗依据）；
+ *   ② "这个人最近状态如何"——详情面板近7天接待摘要（判断是否适合顶岗）；
+ *   ③ "这周他排了什么班"——详情面板本周排班摘要（结合①②做调配）。
+ *
+ * 逻辑（为什么这样组织）
+ *   技能是人员的稳定属性 → 放列表列（扫一眼可比）+ 矩阵弹窗（全司一屏总览）+
+ *   详情面板（单人精修）；绩效/排班是易变事实 → 只做"摘要+跳转"两行，
+ *   不在人员页内复制分析页职责（分析看板才是真身，此处为投影并已声明）。
+ *
+ * 口径
+ *   技能: person_skill_tags 表，人工维护，熟练度 1-5，仅在职人员入矩阵；
+ *   接待摘要: /analytics/reception/group-detail 近7天，按 display_name 匹配；
+ *   排班摘要: /schedules 本周一至周日，按 person_id 精确匹配。
+ *
+ * 取舍（不做什么及原因）
+ *   ① 不从接待记录自动推断技能——误判会污染排班决策，宁缺勿错；
+ *   ② 矩阵单元格只做 空白→L1→L3→L5→移除 三档轮换，不做逐格 1-5 微调；
+ *   ③ 不做技能导出——需要分发时截图即可；
+ *   ④ 绩效只给 7 天摘要不给趋势图——趋势在接待分析页（真身），重复展示违反投影纪律。
+ *
+ * 工单: #255（B3-7 人员管理重设计）
+ */
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Connection, Plus, Edit, Upload, Download, Check, Timer } from '@element-plus/icons-vue'
+import { Refresh, Connection, Plus, Edit, Upload, Download, Check, Timer, Grid, InfoFilled } from '@element-plus/icons-vue'
 import {
   listPersons,
   getPerson,
@@ -681,6 +888,10 @@ import {
   batchImportByPrefix,
   batchUpdatePersons,
   exportPersons,
+  listSkillTags,
+  getSkillMatrix,
+  putPersonSkills,
+  batchSkills,
 } from '@/api/person'
 import { listGroups } from '@/api/group'
 import { listSpecialties } from '@/api/specialty'
@@ -692,6 +903,8 @@ import {
   importSnapshot,
   previewSnapshot,
 } from '@/api/staffAssignment'
+import { listSchedules } from '@/api/schedule'
+import { reception } from '@/api/analytics'
 import { parseUpload } from '@/api/upload'
 
 const list = ref([])
@@ -702,7 +915,7 @@ const groupCount = ref(0)
 const loading = ref(false)
 const page = ref(1)
 const router = useRouter()
-const filter = reactive({ status: 'confirmed', department: '', group_id: null, specialty_id: null, role: '', employment_status: '' })
+const filter = reactive({ status: 'confirmed', department: '', group_id: null, specialty_id: null, role: '', employment_status: '', skill_tag: '' })
 const sort = reactive({ sort_by: 'id', sort_order: 'desc' })
 const groupsList = ref([])
 const specialtiesList = ref([])
@@ -758,8 +971,121 @@ const assignmentForm = reactive({ id: null, effective_from: '', effective_to: ''
 
 // 批量编辑
 const batchEditVisible = ref(false)
-const batchApply = reactive({ department: false, role: false, employment_status: false, is_active: false, is_confirmed: false, hire_date: false, group_name: false, specialty: false })
-const batchForm = reactive({ department: '', role: '', employment_status: '', is_active: true, is_confirmed: true, hire_date: '', group_name: '', specialty: '' })
+const batchApply = reactive({ department: false, role: false, employment_status: false, is_active: false, is_confirmed: false, hire_date: false, group_name: false, specialty: false, skill: false })
+const batchForm = reactive({ department: '', role: '', employment_status: '', is_active: true, is_confirmed: true, hire_date: '', group_name: '', specialty: '', skill_tag: '', skill_level: 3, skill_mode: 'add' })
+
+// ---------- B3-7 技能矩阵 (#255) ----------
+// 设计说明（Design Rationale）见文件头部注释块 + 页面两处 ⓘ 气泡（技能列头/矩阵弹窗）
+const skillTagsList = ref([])          // 技能标签字典(标签+使用人数)
+const skillMatrixVisible = ref(false)
+const skillMatrixLoading = ref(false)
+const skillMatrix = ref({ tags: [], persons: [] })
+const detailSkills = ref([])           // 详情面板技能编辑副本 [{skill_tag, level}]
+const skillSaving = ref(false)
+const personLinks = ref({ perf: null, schedules: [] })   // 绩效/排班联动摘要
+const linksLoading = ref(false)
+
+async function loadSkillTags() {
+  try {
+    const res = await listSkillTags()
+    skillTagsList.value = res.data
+  } catch (e) {
+    console.error('加载技能标签失败', e)
+  }
+}
+
+async function openSkillMatrix() {
+  skillMatrixVisible.value = true
+  skillMatrixLoading.value = true
+  try {
+    const res = await getSkillMatrix()
+    skillMatrix.value = res.data
+  } finally {
+    skillMatrixLoading.value = false
+  }
+}
+
+// 矩阵单元格: 无标签点击=新增(level 1), 有标签点击=轮换 1→3→5→删除
+async function toggleMatrixCell(person, tag) {
+  const cur = person.skills.find(s => s.skill_tag === tag)
+  const nextLevel = !cur ? 1 : cur.level >= 5 ? null : cur.level >= 3 ? 5 : 3
+  try {
+    if (nextLevel === null) {
+      await batchSkills({ person_ids: [person.person_id], skill_tag: tag, mode: 'remove' })
+      person.skills = person.skills.filter(s => s.skill_tag !== tag)
+    } else {
+      await batchSkills({ person_ids: [person.person_id], skill_tag: tag, level: nextLevel, mode: 'add' })
+      if (cur) cur.level = nextLevel
+      else person.skills.push({ skill_tag: tag, level: nextLevel })
+    }
+    loadSkillTags()
+  } catch (e) {
+    ElMessage.error('保存失败')
+  }
+}
+
+// 详情面板: 技能编辑(副本改完一次 PUT 全量替换)
+function addDetailSkill(tag) {
+  if (!tag || detailSkills.value.some(s => s.skill_tag === tag)) return
+  detailSkills.value.push({ skill_tag: tag, level: 3 })
+}
+function removeDetailSkill(idx) {
+  detailSkills.value.splice(idx, 1)
+}
+async function saveDetailSkills() {
+  if (!currentDetail.value) return
+  skillSaving.value = true
+  try {
+    await putPersonSkills(currentDetail.value.id, detailSkills.value)
+    currentDetail.value.skill_tags = detailSkills.value.map(s => ({ ...s }))
+    // 同步左侧列表行
+    const row = list.value.find(p => p.id === currentDetail.value.id)
+    if (row) row.skill_tags = currentDetail.value.skill_tags
+    ElMessage.success('技能已保存')
+    loadSkillTags()
+  } finally {
+    skillSaving.value = false
+  }
+}
+
+// ---------- 绩效·排班联动 ----------
+async function loadPersonLinks(p) {
+  linksLoading.value = true
+  personLinks.value = { perf: null, schedules: [] }
+  try {
+    // 近 7 天接待: 从 group-detail 的 people 里按名字匹配(接口无 person_id 维度)
+    const end = new Date(); const start = new Date(Date.now() - 6 * 86400000)
+    const fmt = d => d.toISOString().slice(0, 10)
+    // 本周一到周日排班
+    const now = new Date()
+    const mon = new Date(now); mon.setDate(now.getDate() - ((now.getDay() + 6) % 7))
+    const sun = new Date(mon); sun.setDate(mon.getDate() + 6)
+    const [perfRes, schRes] = await Promise.all([
+      reception.groupDetail({ start: `${fmt(start)} 00:00:00`, end: `${fmt(end)} 23:59:59` }),
+      listSchedules({ start: fmt(mon), end: fmt(sun), person_id: p.id }),
+    ])
+    let perf = null
+    for (const g of (perfRes.data?.groups || [])) {
+      const hit = (g.people || []).find(x => x.name === p.display_name)
+      if (hit) { perf = { total: hit.total, avg: hit.avg, group_name: g.group_name, category: hit.category_type }; break }
+    }
+    if (!perf) {
+      const hit = (perfRes.data?.ungrouped || []).find(x => x.name === p.display_name)
+      if (hit) perf = { total: hit.total, avg: hit.avg, group_name: '未分组', category: hit.category_type }
+    }
+    personLinks.value = { perf, schedules: schRes.data || [] }
+  } catch (e) {
+    console.error('加载绩效/排班联动失败', e)
+  } finally {
+    linksLoading.value = false
+  }
+}
+function goReceptionAnalysis() {
+  router.push('/dashboards/reception')
+}
+function goSchedulePage() {
+  router.push('/management/schedule')
+}
 
 // 导入快照
 const importDialogVisible = ref(false)
@@ -801,6 +1127,7 @@ async function loadData() {
       ...(filter.specialty_id ? { specialty_id: filter.specialty_id } : {}),
       ...(filter.role ? { role: filter.role } : {}),
       ...(filter.employment_status ? { employment_status: filter.employment_status } : {}),
+      ...(filter.skill_tag ? { skill_tag: filter.skill_tag } : {}),
     })
     const flat = res.data.items
     list.value = flat
@@ -945,10 +1272,13 @@ async function selectPerson(row) {
   currentPerson.value = row
   currentDetail.value = null
   assignments.value = []
+  personLinks.value = { perf: null, schedules: [] }
   const res = await getPerson(row.id)
   currentDetail.value = res.data
+  detailSkills.value = (res.data.skill_tags || []).map(s => ({ ...s }))
   fillEditForm(res.data)
   loadAssignments(row.id)
+  if (row._nodeType === 'person' || !row._nodeType) loadPersonLinks(res.data)
 }
 
 function fillEditForm(d) {
@@ -1245,6 +1575,9 @@ function openBatchEdit() {
   batchForm.hire_date = ''
   batchForm.group_name = ''
   batchForm.specialty = ''
+  batchForm.skill_tag = ''
+  batchForm.skill_level = 3
+  batchForm.skill_mode = 'add'
   batchEditVisible.value = true
 }
 
@@ -1259,19 +1592,33 @@ async function handleBatchUpdate() {
   if (batchApply.group_name) payload.group_name = batchForm.group_name
   if (batchApply.specialty) payload.specialty = batchForm.specialty
   const hasField = Object.keys(payload).some(k => k !== 'ids')
-  if (!hasField) { ElMessage.warning('请勾选至少一个要修改的字段'); return }
+  const hasSkill = batchApply.skill && batchForm.skill_tag
+  if (!hasField && !hasSkill) { ElMessage.warning('请勾选至少一个要修改的字段'); return }
   submitting.value = true
   try {
-    const res = await batchUpdatePersons(payload)
-    const d = res.data
-    ElMessage.success(`已更新 ${d.updated} 人,建任职 ${d.assignments_created} 条`)
+    if (hasField) {
+      const res = await batchUpdatePersons(payload)
+      const d = res.data
+      ElMessage.success(`已更新 ${d.updated} 人,建任职 ${d.assignments_created} 条`)
+    }
+    if (hasSkill) {
+      const res2 = await batchSkills({
+        person_ids: selectedPersonIds.value,
+        skill_tag: batchForm.skill_tag,
+        level: batchForm.skill_level,
+        mode: batchForm.skill_mode,
+      })
+      ElMessage.success(`技能打标:影响 ${res2.data.affected} 人(${batchForm.skill_mode === 'add' ? '添加/覆盖' : '移除'} ${batchForm.skill_tag})`)
+    }
     batchEditVisible.value = false
     selectedPersonIds.value = []
     await loadData()
+    loadSkillTags()
     if (currentPerson.value) {
-      const res2 = await getPerson(currentPerson.value.id)
-      currentDetail.value = res2.data
-      fillEditForm(res2.data)
+      const res3 = await getPerson(currentPerson.value.id)
+      currentDetail.value = res3.data
+      detailSkills.value = (res3.data.skill_tags || []).map(s => ({ ...s }))
+      fillEditForm(res3.data)
       loadAssignments(currentPerson.value.id)
     }
   } finally { submitting.value = false }
@@ -1458,6 +1805,7 @@ onMounted(() => {
   loadSpecialties()
   loadData()
   loadUnmerged()
+  loadSkillTags()
 })
 </script>
 
@@ -1479,4 +1827,11 @@ onMounted(() => {
 .edit-grid .full-row { grid-column: 1 / -1; }
 .alias-collapse :deep(.el-collapse-item__header) { padding: 0 12px; }
 .alias-collapse :deep(.el-collapse-item__content) { padding-bottom: 8px; }
+/* B3-7 技能/联动区 */
+.skill-edit-box { padding: 6px 8px; border: 1px dashed #dcdfe6; border-radius: 4px; margin-bottom: 8px; }
+.skill-edit-box :deep(.el-rate) { height: 14px; }
+.skill-edit-box :deep(.el-rate__icon) { font-size: 12px; margin-right: 0; }
+.link-summary-box { padding: 6px 8px; background: #f5f7fa; border-radius: 4px; min-height: 52px; }
+.link-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: 13px; flex-wrap: wrap; }
+.link-label { color: #909399; font-size: 12px; flex-shrink: 0; width: 64px; }
 </style>

@@ -12,7 +12,7 @@
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, Text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -82,6 +82,14 @@ class Person(IDMixin, TimestampMixin, Base):
         order_by="SpecialtyLeadershipHistory.effective_from.desc()"
     )
 
+    # 技能矩阵
+    skill_tags: Mapped[list["PersonSkillTag"]] = relationship(
+        "PersonSkillTag",
+        back_populates="person",
+        order_by="PersonSkillTag.skill_tag",
+        cascade="all, delete-orphan"
+    )
+
 
 class PersonAlias(IDMixin, TimestampMixin, Base):
     """人员别名 - 各业务表中的人名字段值
@@ -100,3 +108,39 @@ class PersonAlias(IDMixin, TimestampMixin, Base):
     source_field: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="首次出现来源字段")
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, comment="sys/system 系统自动操作")
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="最后出现时间")
+
+
+class PersonSkillTag(IDMixin, TimestampMixin, Base):
+    """技能矩阵 - 人员 × 技能标签 × 熟练度(1-5)"""
+
+    __tablename__ = "person_skill_tags"
+
+    person_id: Mapped[int] = mapped_column(
+        ForeignKey("persons.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        comment="人员ID"
+    )
+    skill_tag: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+        comment="技能标签(如:投诉处理/套餐咨询/外呼)"
+    )
+    level: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        comment="熟练度 1-5"
+    )
+    updated_by: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="最近操作人"
+    )
+
+    person: Mapped["Person"] = relationship("Person", back_populates="skill_tags")
+
+    __table_args__ = (
+        UniqueConstraint("person_id", "skill_tag", name="uq_person_skill_tag"),
+    )

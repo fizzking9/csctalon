@@ -12,13 +12,13 @@ from app.models.bms_order import BmsOrder  # noqa: F401
 from app.models.bms_sync_log import BmsSyncLog  # noqa: F401
 from app.models.card_complaint import CardComplaint  # noqa: F401
 from app.models.cash_flow_wide import CashFlowWide  # noqa: F401
+from app.models.combo_dict import ComboDict, ComboNameAlias  # noqa: F401
 from app.models.complaint_audit import ComplaintAudit  # noqa: F401
 from app.models.complaint_same_source import (  # noqa: F401
     ComplaintSameSourceGroup,
     ComplaintSameSourceMember,
 )
 from app.models.complaint_sync_log import ComplaintSyncLog  # noqa: F401
-from app.models.combo_dict import ComboDict, ComboNameAlias  # noqa: F401
 from app.models.cs_record import CsRecord  # noqa: F401
 from app.models.dashboard import Dashboard  # noqa: F401
 from app.models.data_quality import DataQualityRule  # noqa: F401
@@ -78,7 +78,7 @@ from app.models.notification import Notification  # noqa: F401
 from app.models.notification_channel import NotificationChannel  # noqa: F401
 from app.models.onboarding_prompt import OnboardingPrompt  # noqa: F401
 from app.models.operation_log import OperationLog  # noqa: F401
-from app.models.person import Person, PersonAlias  # noqa: F401
+from app.models.person import Person, PersonAlias, PersonSkillTag  # noqa: F401
 from app.models.policy import Policy  # noqa: F401
 from app.models.prompt_config import PromptConfig  # noqa: F401
 from app.models.quality_disposition_rule import QualityDispositionRule  # noqa: F401
@@ -196,6 +196,7 @@ __all__ = [
     "QualityDispositionRule",
     "Person",
     "PersonAlias",
+    "PersonSkillTag",
     "ReconcileCheck",
     "ReconcileMatch",
     "Refund",
