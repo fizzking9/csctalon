@@ -16,6 +16,7 @@ from app.api.v1 import (
     analysis_views,
     analytics,
     auth,
+    batch_jobs,
     cache_admin,
     channels,
     collection_logs,
@@ -129,6 +130,7 @@ api_router.include_router(admin_governance_prompt.router)  # 研判提示词版�
 api_router.include_router(admin_onboarding_prompt.router)  # 起草提示词版本管理(admin)
 api_router.include_router(alerts.router)
 api_router.include_router(metrics.router)
+api_router.include_router(batch_jobs.router)  # #258 夜批任务管理
 api_router.include_router(channels.router)
 api_router.include_router(upstream_tickets.router)
 api_router.include_router(data_quality.router)

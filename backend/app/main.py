@@ -121,6 +121,12 @@ async def lifespan(app: FastAPI):
             bms_scheduler.stop()
         except Exception:
             pass
+        # 夜批轮询停止(#258, stop 幂等)
+        try:
+            from app.services.batch_runner import batch_runner
+            batch_runner.stop()
+        except Exception:
+            pass
         # #45: 清理共享文档登录会话(防进程退出残留 chromium 进程占内存)
         try:
             from app.services.shared_doc_login_service import login_manager
@@ -304,6 +310,13 @@ def _start_bms_scheduler() -> None:
         warmup_on_startup()
     except Exception as _e:  # noqa: BLE001
         logger.warning(f"LLM 模型预热启动失败(不影响服务): {_e}")
+    # 夜间批处理轮询(#258 B4-2): 独立于 BMS 调度器开关 —— 夜批任务(宽表重建/
+    # 未来夜间预警)有自己的 enabled 开关, 采集自动启动与否不影响夜批
+    try:
+        from app.services.batch_runner import batch_runner
+        batch_runner.start()
+    except Exception as _e:  # noqa: BLE001
+        logger.warning(f"夜批轮询启动失败(不影响服务): {_e}")
     if not settings.BMS_SCHEDULE_AUTOSTART:
         logger.info("BMS 定时同步未开启自动启动(BMS_SCHEDULE_AUTOSTART=False)")
         return
