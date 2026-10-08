@@ -38,6 +38,7 @@ from app.core.database import SessionLocal
 from app.models.doc_sync_source import DocSyncSource
 from app.services.data_parser import count_suspect_precision
 from app.services.ingest_service import ingest_complaints, ingest_manual_refunds
+from app.services.sync_watermark import is_due, stamp_attempt
 
 logger = logging.getLogger(__name__)
 
@@ -654,6 +655,7 @@ def row_to_dict(row: DocSyncSource) -> dict[str, Any]:
         "state_file": row.state_file,
         "enabled": row.enabled,
         "sync_interval_minutes": row.sync_interval_minutes,
+        "last_attempt_at": row.last_attempt_at,
         "last_sync_at": row.last_sync_at,
         "last_sync_status": row.last_sync_status,
         "last_sync_summary": row.last_sync_summary,
@@ -677,12 +679,13 @@ def get_doc_source(db: Session, source_id: int) -> DocSyncSource | None:
 def due_doc_sources(db: Session) -> list[DocSyncSource]:
     """返回「到点需同步」的采集源(调度器轮询用)
 
-    条件: enabled + 有 doc_url + 距上次同步 >= sync_interval_minutes(首次恒到点)。
+    条件: enabled + 有 doc_url + 距上次**尝试**(last_attempt_at, 无则回退成功水位
+    last_sync_at)达到等待(首次恒到点)。上一轮 failed 的源走失败重试上限
+    min(interval, settings.DOC_FAILED_RETRY_CAP_MINUTES=30min), 使 60min 档源失败后
+    约在下一高频槽位即重试(R-P1-16 #241); 成功源仍按 sync_interval_minutes 节流。
     采集方式总开关(monitor)关闭时不轮询 —— 与 doc_sync_service.should_sync_tencent_doc
     共用 monitor 开关, 避免"投诉接入"关闭后共享文档仍在自动采集。
     """
-    from datetime import timedelta
-
     from app.services.ingest_mode_service import is_ingest_mode_enabled
 
     if not is_ingest_mode_enabled(db, "monitor"):
@@ -695,11 +698,14 @@ def due_doc_sources(db: Session) -> list[DocSyncSource]:
     for r in rows:
         if not r.doc_url:
             continue
-        if r.last_sync_at is None:
-            due.append(r)  # 首次
-            continue
-        interval = max(r.sync_interval_minutes or 60, 5)
-        if now >= r.last_sync_at + timedelta(minutes=interval):
+        if is_due(
+            last_attempt_at=r.last_attempt_at,
+            last_sync_at=r.last_sync_at,
+            last_status=r.last_sync_status,
+            interval_minutes=r.sync_interval_minutes,
+            now=now,
+            failed_retry_cap_minutes=settings.DOC_FAILED_RETRY_CAP_MINUTES,
+        ):
             due.append(r)
     return due
 
@@ -818,8 +824,10 @@ def sync_one_source(db: Session, row: DocSyncSource, trigger: str = "manual") ->
                     sync_complaints_from_payload(指纹去重 upsert)
          manual_refund: 读「登记明细」/首个有数据 sheet → payload full_sync:false →
                     sync_manual_refunds_from_payload(增量 upsert, 严禁全量对账)
-      4. 更新 row.last_sync_at/status/summary/error(成功记 success/partial + 行数统计;
-         失败记 failed + error)并返回统计
+      4. 更新配置行(R-P1-16 #241): 恒刷 last_attempt_at(尝试心跳); 成功(success/partial)
+         额外刷 last_sync_at(成功水位)+行数统计; 失败只刷 attempt + status=failed + error,
+         last_sync_at 保留上一次成功值
+         并返回统计
 
     失败时: 状态记录后仍向上抛出(供路由层展示具体错误)。
     """
@@ -1008,8 +1016,12 @@ def _sync_manual_refund_from_file(
 
 
 def _record_status(db: Session, row: DocSyncSource, status: str, summary: dict | None, error: str | None) -> None:
-    """把同步结果写回配置行(时间统一 UTC 存储)"""
-    row.last_sync_at = datetime.now(timezone.utc)
+    """把同步结果写回配置行(时间统一 UTC 存储; R-P1-16 #241 拆水位/心跳)。
+
+    last_attempt_at 恒刷(尝试心跳=调度节流基准); last_sync_at 仅非 failed 刷(成功水位,
+    失败保留上一次成功值, 不被污染)。
+    """
+    stamp_attempt(row, status, datetime.now(timezone.utc))
     row.last_sync_status = status
     row.last_sync_summary = summary
     row.last_error = error

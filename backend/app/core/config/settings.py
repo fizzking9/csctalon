@@ -223,6 +223,13 @@ class Settings(BaseSettings):
     # 半开探测间隔(秒): 熔断后每 X 秒放一次单片探测, 成功即摘除熔断自动续采
     CIRCUIT_HALF_OPEN_INTERVAL_SECONDS: int = 2 * 3600
 
+    # ── 文档采集失败快速重试(R-P1-16 #241, 2026-10-09) ──────────────────
+    # doc_sync_sources / doc_sync_configs 上一轮失败时, 下一轮调度等待的**上限**(分钟):
+    # 实际失败等待 = min(源 interval, 本上限)。默认 30 = 对齐 BMS 高频槽距, 使 60min
+    # 档源失败后约在下一个高频槽位即重试(旧实现失败也刷 last_sync_at, 要静默等满
+    # 整个 interval)。20min 档源不会被拖慢(min(20,30)=20)。
+    DOC_FAILED_RETRY_CAP_MINUTES: int = 30
+
     # SCRM 微信聚合平台(对接客服接待评估报表)
     # 说明:默认种子值仅用于首次启动灌入 SyncSourceConfig(加密),实际以 DB 配置为准
     SCRM_BASE_URL: str = "https://gateway.bilinl.com"  # 平台 OpenAPI 基础地址

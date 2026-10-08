@@ -5,7 +5,8 @@
 - doc_sync_sources 模型可建/可查(测试库由 conftest 的 create_all 建表)
 - list_doc_sources / get_doc_source service 读写 / 默认 state_file 解析
 - sync_one_source 异常路径: monkeypatch 导出抛错 → 抛异常且配置行记录
-  last_sync_status=failed + last_error(不写真实导出/网络测试——需要登录态)。
+  last_sync_status=failed + last_error, 只刷 last_attempt_at 不刷成功水位 last_sync_at
+  (R-P1-16 #241; 不写真实导出/网络测试——需要登录态)。
 
 说明: 测试库走 conftest create_all(不执行 migration seed), 故用例自建配置行;
       db fixture 全程在事务内, 测试结束自动回滚, 无需手工清理。
@@ -79,7 +80,8 @@ def test_list_doc_sources_service(db, seed_source):
     for k in (
         "id", "platform", "doc_url", "doc_name", "target_type", "sheet_rules",
         "state_file", "enabled", "sync_interval_minutes",
-        "last_sync_at", "last_sync_status", "last_sync_summary", "last_error",
+        "last_attempt_at", "last_sync_at", "last_sync_status",
+        "last_sync_summary", "last_error",
     ):
         assert k in src
     assert src["target_type"] == sdss.TARGET_COMPLAINT
@@ -126,11 +128,13 @@ def test_sync_one_source_failure_records_status(db, seed_source, monkeypatch):
     with pytest.raises(RuntimeError, match="模拟导出失败"):
         sdss.sync_one_source(db, seed_source, trigger="manual")
 
-    # 配置行已记录失败状态(时间 UTC)
+    # 配置行已记录失败状态(时间 UTC)。R-P1-16 #241: 失败只刷尝试心跳 last_attempt_at,
+    # 成功水位 last_sync_at 必须保持 None(不被失败污染)。
     db.refresh(seed_source)
     assert seed_source.last_sync_status == "failed"
     assert seed_source.last_sync_summary is None
-    assert seed_source.last_sync_at is not None
+    assert seed_source.last_attempt_at is not None
+    assert seed_source.last_sync_at is None
     assert seed_source.last_error is not None
     assert "模拟导出失败" in seed_source.last_error
 

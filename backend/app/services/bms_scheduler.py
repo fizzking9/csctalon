@@ -1162,7 +1162,10 @@ class BmsScheduler:
                 await asyncio.to_thread(sync_doc_source_safe, row.id, "scheduled")
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[调度器] 共享文档源 #{row.id} 采集异常: {e}", exc_info=True)
-        # 无论成败, 该槽位已处理过(失败源 last_sync_at 未更新 → 下槽位因 interval 到期会重试)
+        # 无论成败, 该槽位已处理过。失败源 last_attempt_at 已刷但 last_sync_status=failed
+        # (last_sync_at 成功水位不被污染, R-P1-16 #241): due_doc_sources 对 failed 源按
+        # min(interval, DOC_FAILED_RETRY_CAP_MINUTES=30min) 判定 → 60min 档源约在下一个
+        # 高频槽位(30min)即到期重试, 不再静默等满整个 interval。
         done_set.add(cur_slot)
 
     async def _do_scheduled_sync(

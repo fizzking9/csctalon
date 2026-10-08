@@ -10,17 +10,19 @@
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.database import SessionLocal
 from app.models.doc_sync_config import DocSyncConfig
 from app.services import tencent_doc_client as tdc
 from app.services.ingest_service import ingest_complaints
+from app.services.sync_watermark import is_due, stamp_attempt
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,7 @@ def get_doc_config(db: Session, platform: str = PLATFORM_TENCENT) -> dict:
         "card_sheet_name": row.card_sheet_name,
         "enabled": row.enabled,
         "sync_interval_minutes": row.sync_interval_minutes,
+        "last_attempt_at": row.last_attempt_at,
         "last_sync_at": row.last_sync_at,
         "last_sync_status": row.last_sync_status,
         "last_sync_summary": row.last_sync_summary,
@@ -181,6 +184,7 @@ def get_doc_status(db: Session, platform: str = PLATFORM_TENCENT) -> dict:
         "card_sheet_name": cfg["card_sheet_name"],
         "enabled": cfg["enabled"],
         "sync_interval_minutes": cfg["sync_interval_minutes"],
+        "last_attempt_at": cfg["last_attempt_at"],
         "last_sync_at": cfg["last_sync_at"],
         "last_sync_status": cfg["last_sync_status"],
         "last_sync_summary": cfg["last_sync_summary"],
@@ -215,6 +219,28 @@ def _pick_sheets(sheets: list[tdc.TencentSheetInfo], wanted: str | None):
             if s.title.strip() == wanted.strip():
                 return s
     return sheets[0] if sheets else None
+
+
+def _persist_status(
+    db: Session,
+    row: DocSyncConfig,
+    *,
+    status: str,
+    summary: dict | None = None,
+    error: str | None = None,
+) -> None:
+    """统一写回同步状态(R-P1-16 #241: 拆分尝试心跳与成功水位)。
+
+    - last_attempt_at 恒刷(尝试心跳=调度节流基准);
+    - last_sync_at 仅非 failed 刷(success/partial/skipped 的成功水位; failed 保留旧值);
+    - summary 仅在传入时覆盖(失败保留上轮成功统计), error 显式传入(成功传 None 清空)。
+    """
+    stamp_attempt(row, status, datetime.now(timezone.utc))
+    row.last_sync_status = status
+    if summary is not None:
+        row.last_sync_summary = summary
+    row.last_error = error
+    db.commit()
 
 
 def sync_tencent_doc(db: Session, trigger: str = "manual", platform: str = PLATFORM_TENCENT) -> dict:
@@ -283,16 +309,16 @@ def sync_tencent_doc(db: Session, trigger: str = "manual", platform: str = PLATF
             "card": _res.extra.get("card", {}),
         }
 
-        # 更新平台同步状态
-        row = _get_row(db, platform)
-        row.last_sync_at = datetime.now(timezone.utc)
-        row.last_sync_status = stats["status"]
-        row.last_sync_summary = {
-            "external": {k: stats["external"][k] for k in ("total", "inserted", "updated", "failed", "matched")},
-            "card": {k: stats["card"][k] for k in ("total", "inserted", "updated", "failed", "matched")},
-        }
-        row.last_error = None
-        db.commit()
+        # 更新平台同步状态(成功: attempt+sync 水位都刷)
+        _persist_status(
+            db, _get_row(db, platform),
+            status=stats["status"],
+            summary={
+                "external": {k: stats["external"][k] for k in ("total", "inserted", "updated", "failed", "matched")},
+                "card": {k: stats["card"][k] for k in ("total", "inserted", "updated", "failed", "matched")},
+            },
+            error=None,
+        )
         logger.info(
             f"[doc_sync] {trigger} 同步完成: 315={stats['external']['total']}(+{stats['external']['inserted']}/"
             f"~{stats['external']['updated']}) 卡商={stats['card']['total']}(+{stats['card']['inserted']}/"
@@ -300,12 +326,9 @@ def sync_tencent_doc(db: Session, trigger: str = "manual", platform: str = PLATF
         )
         return stats
     except Exception as e:
+        # 失败: 只刷 attempt 心跳 + failed/error, last_sync_at 保留上次成功水位
         try:
-            row = _get_row(db, platform)
-            row.last_sync_status = "failed"
-            row.last_error = str(e)[:2000]
-            row.last_sync_at = datetime.now(timezone.utc)
-            db.commit()
+            _persist_status(db, _get_row(db, platform), status="failed", error=str(e)[:2000])
         except Exception:  # noqa: BLE001
             db.rollback()
         raise
@@ -318,12 +341,9 @@ def sync_tencent_doc_safe(trigger: str = "scheduled", platform: str = PLATFORM_T
         return sync_tencent_doc(db, trigger=trigger, platform=platform)
     except Exception as e:
         logger.exception(f"[doc_sync] {trigger} 同步失败: {e}")
+        # 兜底再记一次失败(sync_tencent_doc 内部通常已记; 此处覆盖连状态写回都异常的场景)
         try:
-            row = _get_row(db, platform)
-            row.last_sync_status = "failed"
-            row.last_error = str(e)[:2000]
-            row.last_sync_at = datetime.now(timezone.utc)
-            db.commit()
+            _persist_status(db, _get_row(db, platform), status="failed", error=str(e)[:2000])
         except Exception:  # noqa: BLE001
             db.rollback()
         return None
@@ -334,7 +354,9 @@ def sync_tencent_doc_safe(trigger: str = "scheduled", platform: str = PLATFORM_T
 def should_sync_tencent_doc(db: Session | None = None, platform: str = PLATFORM_TENCENT) -> bool:
     """判断是否到点需要同步(调度器轮询用)
 
-    条件: enabled + app凭证 + 已授权 + doc_url 已配 + 距上次同步 >= interval
+    条件: enabled + app凭证 + 已授权 + doc_url 已配 + 距上次**尝试**达到等待
+    (首次恒到点)。上一轮 failed 走失败重试上限 min(interval, 30min) 快速重试,
+    成功按 sync_interval_minutes 节流(R-P1-16 #241)。
     出错视为不需要同步(避免频繁刷错误日志)。
     """
     close = False
@@ -352,10 +374,14 @@ def should_sync_tencent_doc(db: Session | None = None, platform: str = PLATFORM_
 
         if not is_ingest_mode_enabled(db, "monitor"):
             return False
-        if row.last_sync_at is None:
-            return True  # 首次
-        due_at = row.last_sync_at + timedelta(minutes=max(row.sync_interval_minutes, 5))
-        return datetime.now(timezone.utc) >= due_at
+        return is_due(
+            last_attempt_at=row.last_attempt_at,
+            last_sync_at=row.last_sync_at,
+            last_status=row.last_sync_status,
+            interval_minutes=row.sync_interval_minutes,
+            now=datetime.now(timezone.utc),
+            failed_retry_cap_minutes=settings.DOC_FAILED_RETRY_CAP_MINUTES,
+        )
     except Exception:  # noqa: BLE001
         return False
     finally:

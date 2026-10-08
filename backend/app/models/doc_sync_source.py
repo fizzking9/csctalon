@@ -8,7 +8,8 @@ doc_sync_sources 描述"具体某一份共享文档如何采集", 一行一个 d
   - sheet_rules:      sheet→目标表映射(JSONB), 如
                       [{sheet:'监督局-315投诉',target:'external_complaint'},...]
   - state_file:       登录态文件名(默认按平台取 tencent_doc.json/kdocs.json)
-  - enabled/interval + 最近同步状态(last_sync_at/status/summary/error)
+  - enabled/interval + 最近同步状态(成功水位 last_sync_at / 尝试心跳 last_attempt_at /
+    status/summary/error; R-P1-16 #241 起两者分离: 失败只刷 attempt 不刷 sync)
 
 采集方式: 读 settings.BROWSER_STATE_DIR 下登录态 + Playwright headless 打开链接,
 触发官方 UI 导出 xlsx → pandas(calamine) 读 Sheet → 中文表头 dict 行,
@@ -57,9 +58,14 @@ class DocSyncSource(IDMixin, TimestampMixin, Base):
     sync_interval_minutes: Mapped[int] = mapped_column(
         Integer, default=60, nullable=False, comment="轮询间隔(分钟)"
     )
-    # ── 最近同步状态(模式参考 doc_sync_configs) ──
+    # ── 最近同步状态(模式参考 doc_sync_configs; R-P1-16 #241 拆水位/心跳) ──
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="最近一次尝试时间(UTC, 无论成败=调度节流心跳)",
+    )
     last_sync_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, comment="最近同步时间(UTC)"
+        DateTime(timezone=True), nullable=True,
+        comment="最近一次成功同步时间(UTC, success/partial/skipped 才刷; failed 保留旧值)",
     )
     last_sync_status: Mapped[str | None] = mapped_column(
         String(32), nullable=True, comment="最近同步状态 success/partial/failed"
