@@ -41,6 +41,8 @@ import * as ElIcons from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { showByVisibility } from '@/utils/env'
 import { BUILD_MODES } from '@/config/menu'
+// ★ #260 菜单显隐判据走权限单源(config/access.js), 与路由守卫同一份 roleAllowed
+import { roleAllowed } from '@/config/access'
 import { useLayoutState } from '@/composables/useLayoutState'
 
 defineOptions({ name: 'MenuTree' })
@@ -56,10 +58,9 @@ const layoutState = useLayoutState()
 
 const iconOf = (name) => ElIcons[name] || ElIcons.Menu
 
-/** 角色可见性: roles 为空数组/null 表示全员。 */
+/** 角色可见性: roles 声明走权限单源(#260), null/[] 表示全员。 */
 function roleVisible(roles) {
-  if (!roles || !roles.length) return true
-  return roles.includes(authStore.role)
+  return roleAllowed(roles, authStore.role)
 }
 
 /**

@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { roleAllowed } from '@/config/access'
 
 const routes = [
   {
@@ -48,23 +49,11 @@ const routes = [
         component: () => import('@/views/data/Ingest.vue'),
         meta: { title: '数据采集', icon: 'Upload', admin: true },
       },
-      // 兼容旧路径
+      // 兼容旧路径(#260: 组件版死路由已删 —— 旧页收编为 Ingest tab, redirect 保留深链)
       { path: 'data/upload', redirect: '/data/ingest?tab=upload' },
       { path: 'data/fetch', redirect: '/data/ingest?tab=fetch' },
       { path: 'data/records', redirect: '/data/ingest?tab=records' },
       { path: 'data/browser', redirect: '/data/ingest?tab=browser' },
-      {
-        path: 'data/records',
-        name: 'DataRecords',
-        component: () => import('@/views/data/Records.vue'),
-        meta: { title: '采集记录', icon: 'Document', hidden: true },
-      },
-      {
-        path: 'data/browser',
-        name: 'DataBrowser',
-        component: () => import('@/views/data/Browser.vue'),
-        meta: { title: '数据查看', icon: 'DataAnalysis', hidden: true },
-      },
       {
         path: 'data/recharge-traffic',
         name: 'DataRechargeTraffic',
@@ -354,15 +343,10 @@ const routes = [
         component: () => import('@/views/system/Users.vue'),
         meta: { title: '用户管理', icon: 'UserFilled', admin: true },
       },
+      // #260: system/data-sources 组件版死路由已删(页面收编为 Ingest tab), redirect 保留
       {
         path: 'system/data-sources',
         redirect: '/data/ingest?tab=data-sources',
-      },
-      {
-        path: 'system/data-sources',
-        name: 'SystemDataSources',
-        component: () => import('@/views/system/DataSources.vue'),
-        meta: { title: '数据源管理', icon: 'Coin', admin: true, hidden: true },
       },
       {
         path: 'system/persons',
@@ -395,12 +379,7 @@ const routes = [
         component: () => import('@/views/system/ComplaintSameSource.vue'),
         meta: { title: '同源案件复核', icon: 'Connection', admin: true },
       },
-      {
-        path: 'system/data-quality',
-        name: 'SystemDataQuality',
-        component: () => import('@/views/management/DataQuality.vue'),
-        meta: { title: '数据质量', icon: 'CircleCheck', admin: true, hidden: true },
-      },
+      // #260: system/data-quality 组件版死路由已删(DataQuality 作为 Ingest tab 存活), redirect 保留
       {
         path: 'system/operation-logs',
         name: 'SystemOperationLogs',
@@ -419,15 +398,10 @@ const routes = [
         component: () => import('@/views/system/CacheAdmin.vue'),
         meta: { title: '缓存管理', icon: 'Cpu', admin: true },
       },
+      // #260: system/sync-settings 组件版死路由已删(SyncSettings 作为 SyncDashboard 子组件存活), redirect 保留
       {
         path: 'system/sync-settings',
         redirect: '/data/ingest?tab=sync-settings',
-      },
-      {
-        path: 'system/sync-settings',
-        name: 'SystemSyncSettings',
-        component: () => import('@/views/system/SyncSettings.vue'),
-        meta: { title: '同步设置', icon: 'Setting', admin: true, hidden: true },
       },
       {
         path: 'system/external-access',
@@ -520,24 +494,21 @@ const router = createRouter({
 })
 
 // 路由守卫:登录校验 + 角色分流(五角色: admin/supervisor/specialty_lead/specialist/agent)
+// ★ #260 访问控制单源化: 档位名单唯一来源 config/access.js(ROLE_LADDER),
+//   三级判断(roles > admin > manager)统一收敛为一份 roles 声明后走 roleAllowed。
+//   行为等价说明: StrategyManage/ReportCenter 同时带 manager+roles, roles 优先级最高
+//   与原三级逐条判断结果一致(缺省跳转均为工作台)。
 router.beforeEach((to) => {
   const authStore = useAuthStore()
   document.title = to.meta.title ? `${to.meta.title} - 数据分析工具应用` : '数据分析工具应用'
   if (!to.meta.public && !authStore.isLoggedIn) {
     return { name: 'Login', query: { redirect: to.fullPath } }
   }
-  // 1. admin 专属(系统管理): 仅 admin
-  if (to.meta.admin && !authStore.isAdmin) {
-    return { name: 'Dashboard' }
-  }
-  // 2. manager 专属(决策看板/管理闭环): admin + supervisor + specialty_lead
-  if (to.meta.manager && !authStore.isManager) {
-    return { name: 'Dashboard' }
-  }
-  // 3. 精确角色白名单(meta.roles 数组): 优先级最高, 命中即校验
-  //    例: meta.roles: ['admin', 'supervisor'] → 仅主管+管理员可见
-  //    例: meta.roles: ['specialty_lead', 'supervisor'] → 主管+组长可见
-  if (Array.isArray(to.meta.roles) && to.meta.roles.length && !to.meta.roles.includes(authStore.role)) {
+  // 合并路由 meta 的权限声明: 精确 roles 白名单 > admin 档 > manager 档 > 无限制
+  const decl = Array.isArray(to.meta.roles) && to.meta.roles.length
+    ? to.meta.roles
+    : to.meta.admin ? 'admin' : to.meta.manager ? 'manager' : null
+  if (decl && !roleAllowed(decl, authStore.role)) {
     return { name: 'Dashboard' }
   }
 })

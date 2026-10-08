@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import request from '@/api'
 import { AI_THREAD_KEY, AI_PENDING_KEY } from '@/constants/aiAssistantStorage'
+// ★ #260 档位名单唯一来源是 config/access.js(ROLE_LADDER), 此处只派生, 禁止手写角色数组
+import { roleAllowed } from '@/config/access'
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref(localStorage.getItem('token') || '')
@@ -9,13 +11,13 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isLoggedIn = computed(() => !!token.value)
   const role = computed(() => user.value?.role || '')
-  const isAdmin = computed(() => role.value === 'admin')
+  const isAdmin = computed(() => roleAllowed('admin', role.value))
   const isSupervisor = computed(() => role.value === 'supervisor')
   const isSpecialtyLead = computed(() => role.value === 'specialty_lead')
   const isSpecialist = computed(() => role.value === 'specialist')
   const isAgent = computed(() => role.value === 'agent')
-  // 管理层:admin + supervisor + specialty_lead(可看决策看板/管理闭环, 见规划设计 v0.5 §二)
-  const isManager = computed(() => ['admin', 'supervisor', 'specialty_lead'].includes(role.value))
+  // 管理层(可看决策看板/管理闭环): 档位定义见 config/access.js ROLE_LADDER.manager
+  const isManager = computed(() => roleAllowed('manager', role.value))
   const displayName = computed(() => user.value?.display_name || '用户')
 
   async function login(username, password) {
