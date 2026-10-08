@@ -1,8 +1,34 @@
+<!--
+  ┌─────────────────────────── 设计说明（Design Rationale） ────────────────────────────┐
+  │ 目的：替需要对周报负责的运营管理者（主管/周报编写人）回答四个问题：                    │
+  │       ① 最近一周接待量多少、比上周涨还是跌（模块1 总体接待量）；                      │
+  │       ② 投诉/退款/套餐/咨询等分项各有多少、趋势如何（模块2 分项汇总）；              │
+  │       ③ 折算到各组人头，人均负担重不重（模块3 分项人均工作）；                       │
+  │       ④ 每个人最近一周每天接待多少（模块4 各组接待）。                               │
+  │ 逻辑：按人工周报的阅读顺序组织——总量 → 分项 → 人均 → 到人；                          │
+  │       模块1~3 按自然周聚合，模块4 给人员日明细，与周报一一对位、方便核对。           │
+  │ 口径：接待 = 客服助手沟通事项次数（1 条接待记录 = 1 次会话）；周 = 自然周；          │
+  │       分项/人均由 reception 接口聚合；模块4 固定最近 7 天，不随顶部时间范围。        │
+  │ 取舍：① 默认按周聚合、不提供日粒度 —— 接待量日波动大，本页对齐周报；                │
+  │       ② 模块4 固定近 7 天 —— 对齐周报「各组人员日接待」视图，                        │
+  │          且避免对大范围拉人员明细重查询；                                            │
+  │       ③ 进页自动加载 —— 只有四个只读聚合查询，来此即看数                            │
+  │          （与退款分析「点分析才加载」不同）；                                        │
+  │       ④ 只展示次数/人数、不展示金额 —— 金额口径在退款分析，避免跨口径混展。          │
+  │ 工单：#245（R-P1-5 / B2-10，纯说明性补齐，功能零改动）                              │
+  └────────────────────────────────────────────────────────────────────────────────────┘
+-->
 <template>
   <div class="page-container reception-dashboard">
     <!-- 顶部标题 + 时间筛选 -->
     <div class="flex-between mb-16">
-      <div class="page-title" style="margin: 0">接待分析 <el-tag size="small" type="warning" effect="plain" style="margin-left: 8px">对齐周报</el-tag></div>
+      <div class="page-title" style="margin: 0">接待分析 <el-tag size="small" type="warning" effect="plain" style="margin-left: 8px">对齐周报</el-tag>
+        <!-- ★ #245 页面层可见设计说明（界面设计说明规范 §二·方案A）：含「取舍」段 -->
+        <el-tooltip effect="dark" placement="bottom-start" raw-content
+          content="<b>这个页面为什么这样设计</b><br/><b>给谁</b>：需要对周报负责的运营主管/周报编写人<br/><b>回答什么</b>：① 最近一周接待量及环比 ② 投诉/退款/套餐等分项数量与趋势 ③ 各组人均负担 ④ 每人近一周每天接待量<br/><b>组织逻辑</b>：按周报阅读顺序 总量→分项→人均→到人；模块1~3 按自然周聚合，模块4 为人员日明细<br/><b>口径</b>：接待 = 客服助手沟通事项次数（1 条记录 = 1 次会话），周 = 自然周；模块4 固定近 7 天<br/><br/><b>⚠️ 取舍（不做什么及原因）</b><br/>① 不提供日粒度 —— 日波动大，本页对齐周报<br/>② 模块4 不随顶部时间窗 —— 对齐周报人员日接待视图，避免大范围重查询<br/>③ 进页自动加载 —— 仅四个只读聚合查询<br/>④ 不展示金额 —— 金额口径在退款分析">
+          <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-2px;font-size:14px;margin-left:4px"><QuestionFilled /></el-icon>
+        </el-tooltip>
+      </div>
       <FilterBar
         v-model:model-value="rangeMode"
         v-model:range="customRange"
@@ -301,7 +327,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { Refresh, Calendar } from '@element-plus/icons-vue'
+import { Refresh, Calendar, QuestionFilled } from '@element-plus/icons-vue'
 import BaseChart from '@/components/BaseChart.vue'
 import FilterBar from '@/components/dashboard/FilterBar.vue'
 import SectionHeader from '@/components/dashboard/SectionHeader.vue'

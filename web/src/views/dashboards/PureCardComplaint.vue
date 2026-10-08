@@ -1,7 +1,32 @@
+<!--
+  ┌─────────────────────────── 设计说明（Design Rationale） ────────────────────────────┐
+  │ 目的：替卡商统计体系的负责人回答：工信部来的工单里，哪些在「卡商表/315 表」两边都   │
+  │       查无记录（= 纯工信部投诉）、需人工核查；这类工单有多少、趋势如何。            │
+  │ 逻辑：顶部 KPI（总数 / 已对账 / 纯工信部 / SN-only 对照）→ 命中路径与月度趋势       │
+  │       → 纯工信部清单（状态筛选 / CSV 导出）；判据 alert 常驻页面顶部，口径随页可见。│
+  │ 口径：纯工信部 = 工信部工单 ∧ NOT(卡商表 SN或电话命中)                              │
+  │       ∧ NOT(315表 SN或电话命中)；只读视图，不改任何数据。                           │
+  │ 取舍：① 清单默认只列纯工信部 —— 用户明确「优先级不高，有统计记录就好」(#63)，       │
+  │          不做处理流程与在线编辑；                                                    │
+  │       ② 判据用 SN「或」电话、不只 SN —— 多设备/换机场景电话才是可靠关联键，         │
+  │          详细推演见页面顶部 alert（不重复抄写）；                                    │
+  │       ③ 不做单独工单详情页 —— 清单 + 处理意见列 + CSV 导出已够核查；                │
+  │          达返回上限时提示缩小时间范围，不做服务端分页；                              │
+  │       ④ 「命中原因」列仅在返回数据含非纯条目时出现，避免无意义空列。                 │
+  │ 工单：#245（R-P1-5 / B2-10），源自 #63；纯说明性补齐，功能零改动                    │
+  └────────────────────────────────────────────────────────────────────────────────────┘
+-->
 <template>
   <div class="page-container">
     <div class="flex-between mb-16">
-      <div class="page-title" style="margin: 0">纯工信部投诉</div>
+      <div class="page-title" style="margin: 0">纯工信部投诉
+        <!-- ★ #245 页面层可见设计说明（界面设计说明规范 §二·方案A）：含「取舍」段;
+             判据长文本真身是下方 alert, 此处只做摘要+指引(投影不双真身) -->
+        <el-tooltip effect="dark" placement="bottom-start" raw-content
+          content="<b>这个页面为什么这样设计</b><br/><b>给谁</b>：卡商统计体系负责人<br/><b>回答什么</b>：工信部工单中哪些两边（卡商表/315表）查无记录、需人工核查，以及数量与趋势<br/><b>组织逻辑</b>：KPI → 命中路径/月度趋势 → 纯工信部清单（筛选/导出）<br/><b>口径</b>：纯工信部 = 工信部工单 ∧ SN或电话在卡商表、315表均无命中；完整推演见页面顶部 alert；只读不改数据<br/><br/><b>⚠️ 取舍（不做什么及原因）</b><br/>① 只列纯工信部、不做处理流程 —— 用户明确「优先级不高，有统计记录就好」(#63)<br/>② 判据用 SN 或电话 —— 多设备/换机时电话才可靠（详见 alert）<br/>③ 不做单独详情页 —— 清单+处理意见+CSV 导出已够核查，达上限提示缩范围<br/>④ 命中原因列仅在含非纯条目时出现">
+          <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-2px;font-size:14px;margin-left:4px"><QuestionFilled /></el-icon>
+        </el-tooltip>
+      </div>
       <div class="filter-bar">
         <el-date-picker
           v-model="range"
@@ -182,7 +207,7 @@
  * ⚠️ 只读视图：不改任何数据（原 service_item 保持原样）。
  */
 import { ref, computed, onMounted } from 'vue'
-import { Search, Refresh, Download } from '@element-plus/icons-vue'
+import { Search, Refresh, Download, QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import ChartCard from '@/components/dashboard/ChartCard.vue'
 import BaseChart from '@/components/BaseChart.vue'
