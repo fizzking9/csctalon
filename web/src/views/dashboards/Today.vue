@@ -1115,7 +1115,6 @@ const {
   successRateColor,
   loadAll,
   applyViewData,
-  autoRefreshTimer,
   _onMediaChange,
 } = useToday()
 </script>

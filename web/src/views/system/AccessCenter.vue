@@ -403,6 +403,7 @@ import {
   rollbackProfile,
 } from '@/api/integrationProfile'
 import { ElMessageBox } from 'element-plus'
+import { usePolling, POLL_INTERVALS } from '@/composables/usePolling'
 
 // ── Tab ──
 const tab = ref('states')
@@ -437,7 +438,9 @@ const loginStatus = ref('pending')
 const loginCurrentUrl = ref('')
 const loginExpiresIn = ref(0)
 const confirming = ref(false)
-let _loginPoll = null
+// 统一轮询层: 登录会话状态(页面隐藏自动暂停, key 全局单例)
+const LOGIN_POLL_KEY = 'access-center:login'
+const { startPolling: startGlobalPoll, stopPolling: stopGlobalPoll } = usePolling()
 
 const statusText = (s) => ({
   pending: '等待扫码', scanned: '已扫码，待确认', authorized: '已检测到登录',
@@ -469,9 +472,8 @@ async function startLogin(row) {
 }
 
 function startPolling() {
-  stopPolling()
   // 2 秒轮询会话状态; 截图不重复拉取(避免带宽浪费), 仅状态与 URL
-  _loginPoll = setInterval(async () => {
+  startGlobalPoll(LOGIN_POLL_KEY, async () => {
     if (!loginSessionId.value) return
     try {
       const res = await getSharedDocLoginStatus(loginSessionId.value)
@@ -483,11 +485,11 @@ function startPolling() {
     } catch (e) {
       stopPolling()
     }
-  }, 2000)
+  }, POLL_INTERVALS.LOGIN)
 }
 
 function stopPolling() {
-  if (_loginPoll) { clearInterval(_loginPoll); _loginPoll = null }
+  stopGlobalPoll(LOGIN_POLL_KEY)
 }
 
 async function confirmLogin() {

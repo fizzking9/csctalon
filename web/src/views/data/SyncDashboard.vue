@@ -685,7 +685,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -712,6 +712,7 @@ import {
 import ScheduleConfigPanel from '@/components/ScheduleConfigPanel.vue'
 import BmsTierPicker from '@/components/BmsTierPicker.vue'
 import { listSyncSources, updateSyncSource } from '@/api/system'
+import { usePolling, POLL_INTERVALS } from '@/composables/usePolling'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -923,8 +924,10 @@ const hasAnyCaptchaSources = computed(() =>
   bmsSources.value.some(d => d.requires_captcha)
 )
 
-let pollTimer = null
-let preflightTimer = null
+// 统一轮询层(S-P1-2): key 全局单例 + 页面隐藏自动暂停 + 卸载自动停止
+const PROGRESS_POLL_KEY = 'sync-dashboard:progress'
+const PREFLIGHT_POLL_KEY = 'sync-dashboard:preflight'
+const { startPolling, stopPolling } = usePolling()
 let _pollErrorStreak = 0
 const POLL_ERROR_MAX = 5
 let _preflightErrorStreak = 0
@@ -946,13 +949,8 @@ onMounted(async () => {
   if (isAdmin.value) jobs.push(loadSources())
   await Promise.all(jobs)
 
-  pollTimer = setInterval(pollProgress, 2000)
-  preflightTimer = setInterval(() => runPreflight({ silentError: true }), 30000)
-})
-
-onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
-  if (preflightTimer) clearInterval(preflightTimer)
+  startPolling(PROGRESS_POLL_KEY, pollProgress, POLL_INTERVALS.PROGRESS)
+  startPolling(PREFLIGHT_POLL_KEY, () => runPreflight({ silentError: true }), POLL_INTERVALS.PREFLIGHT)
 })
 
 watch(() => [...form.bmsTypes, ...form.scrmTypes].sort().join(','), () => runPreflight())
@@ -1149,9 +1147,9 @@ async function runPreflight(opts = {}) {
   } catch (e) {
     if (opts.silentError) {
       _preflightErrorStreak += 1
-      if (_preflightErrorStreak >= PREFLIGHT_ERROR_MAX && preflightTimer) {
-        clearInterval(preflightTimer)
-        preflightTimer = null
+      if (_preflightErrorStreak >= PREFLIGHT_ERROR_MAX) {
+        // 预检熔断: 停止后台预检轮询
+        stopPolling(PREFLIGHT_POLL_KEY)
         ElMessage.warning(`预检连续 ${PREFLIGHT_ERROR_MAX} 次失败,已停止后台刷新`)
       }
     }
@@ -1291,9 +1289,9 @@ async function pollProgress() {
     }
   } catch (e) {
     _pollErrorStreak += 1
-    if (_pollErrorStreak >= POLL_ERROR_MAX && pollTimer) {
-      clearInterval(pollTimer)
-      pollTimer = null
+    if (_pollErrorStreak >= POLL_ERROR_MAX) {
+      // 状态轮询熔断: 停止进度轮询
+      stopPolling(PROGRESS_POLL_KEY)
       ElMessage.warning(`状态查询连续 ${POLL_ERROR_MAX} 次失败,已停止自动刷新`)
     }
   }
@@ -1368,19 +1366,21 @@ async function handleSyncAll(force = false) {
       res = await taskSubmit({ ...commonPayload, data_types: form.bmsTypes })
       ElMessage.info(`已提交 BMS 任务(${res.data.task_id}),BMS 结束后自动启动 SCRM…`)
       const bmsTaskId = res.data.task_id
-      const autoStartScrm = setInterval(async () => {
+      // 统一轮询层: 每 3s 观察 BMS 任务终态, 成功/失败/partial 后停止并衔接 SCRM
+      const _autoScrmKey = `sync-dashboard:auto-scrm:${bmsTaskId}`
+      startPolling(_autoScrmKey, async () => {
         try {
           const s = await taskStatus(bmsTaskId)
           const t = s.data.task
           if (t && ['success', 'failed', 'partial'].includes(t.status)) {
-            clearInterval(autoStartScrm)
+            stopPolling(_autoScrmKey)
             const sRes = await submitScrmSync({ ...commonPayload, sync_types: form.scrmTypes })
             currentTaskId.value = sRes.data.task_id
             _logViewOffset.value = 0
             ElMessage.success(`BMS 任务结束,已自动提交 SCRM 任务(${sRes.data.task_id})`)
           }
         } catch { /* ignore */ }
-      }, 3000)
+      }, POLL_INTERVALS.TASK_WATCH)
     }
     if (res) {
       currentTaskId.value = res.data.task_id

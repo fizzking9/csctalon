@@ -560,7 +560,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, InfoFilled, QuestionFilled, Refresh } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
@@ -579,6 +579,7 @@ import {
   listRules,
   updateRule,
 } from '@/api/aiDataGovernance'
+import { usePolling, POLL_INTERVALS } from '@/composables/usePolling'
 
 // ── 枚举中文标签（仅文案；可用性一律以服务端 auto_level / requires_confirm 为准）──
 const DETECTOR_TEXT = {
@@ -651,7 +652,9 @@ const drawerOpen = ref(false)
 const task = ref(null)
 const lastTask = ref(null)
 const submitting = ref(false)
-let pollTimer = null
+// 统一轮询层(S-P1-2): scan/judge 共用一个 key(后触发覆盖)
+const TASK_POLL_KEY = 'ai-gov:task'
+const { startPolling, stopPolling } = usePolling()
 
 const ruleDialogOpen = ref(false)
 const ruleSubmitting = ref(false)
@@ -904,7 +907,7 @@ async function doJudge() {
 function pollTask(kind, id) {
   const isScan = kind === 'scan'
   let n = 0
-  pollTimer = setInterval(async () => {
+  startPolling(TASK_POLL_KEY, async () => {
     n += 1
     let data
     try {
@@ -914,15 +917,13 @@ function pollTask(kind, id) {
       data = res.data
     } catch {
       // 任务被清理 / 网络抖动：停止轮询并提示，避免无限刷屏
-      clearInterval(pollTimer)
-      pollTimer = null
+      stopPolling(TASK_POLL_KEY)
       task.value = null
       ElMessage.error('轮询任务状态失败，请点「刷新」查看结果')
       return
     }
     if (!data.finished && n <= 90) return
-    clearInterval(pollTimer)
-    pollTimer = null
+    stopPolling(TASK_POLL_KEY)
     task.value = null
     if (!data.finished) {
       // 达到轮询上限仍未结束：任务可能仍在后台跑，别误报「完成」
@@ -1087,10 +1088,7 @@ async function toggleRule(row, enabled) {
 onMounted(async () => {
   await reloadAll()
 })
-
-onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
-})
+// 轮询任务由 usePolling 卸载时自动停止
 </script>
 
 <style scoped>

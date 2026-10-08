@@ -217,6 +217,7 @@ import {
   startSharedDocLogin, getSharedDocLoginStatus, confirmSharedDocLogin, cancelSharedDocLogin,
   getSharedDocCliFallback,
 } from '@/api/sharedDoc'
+import { usePolling, POLL_INTERVALS } from '@/composables/usePolling'
 
 const sources = ref([])
 const loading = ref(false)
@@ -408,7 +409,9 @@ const loginStatus = ref('pending')
 const loginCurrentUrl = ref('')
 const loginExpiresIn = ref(0)
 const confirming = ref(false)
-let _loginPoll = null
+// 统一轮询层: 登录会话状态(页面隐藏自动暂停)
+const LOGIN_POLL_KEY = 'shared-doc-sources:login'
+const { startPolling: startGlobalPoll, stopPolling: stopGlobalPoll } = usePolling()
 
 const loginStatusText = (v) => ({
   pending: '等待扫码', scanned: '已扫码，待确认', authorized: '已检测到登录',
@@ -477,8 +480,7 @@ function fallbackCliText(platform, docUrl) {
 }
 
 function startLoginPolling() {
-  stopLoginPolling()
-  _loginPoll = setInterval(async () => {
+  startGlobalPoll(LOGIN_POLL_KEY, async () => {
     if (!loginSessionId.value) return
     try {
       const res = await getSharedDocLoginStatus(loginSessionId.value)
@@ -490,11 +492,11 @@ function startLoginPolling() {
     } catch (e) {
       stopLoginPolling()
     }
-  }, 2000)
+  }, POLL_INTERVALS.LOGIN)
 }
 
 function stopLoginPolling() {
-  if (_loginPoll) { clearInterval(_loginPoll); _loginPoll = null }
+  stopGlobalPoll(LOGIN_POLL_KEY)
 }
 
 async function confirmLogin() {

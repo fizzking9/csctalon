@@ -166,6 +166,7 @@ import { useAudit } from '@/composables/useAudit'
 import { SOURCE_KINDS, buildStack, stackTip, sourceKindMeta } from '@/utils/receptionSource'
 import { getWeekRange as _getWeekRange } from '@/utils/weekRange'
 import { useIncidentMarkers } from '@/composables/useIncidentMarkers'
+import { usePolling, POLL_INTERVALS } from '@/composables/usePolling'
 import dayjs from 'dayjs'
 
 export function useToday() {
@@ -1250,7 +1251,8 @@ export function useToday() {
     if (backlogRes.data) backlogTotal.value = backlogRes.data?.total || 0
   }
 
-  let autoRefreshTimer = null
+  // 统一轮询层(S-P1-2): 今日自动刷新, 页面隐藏暂停 + 卸载自动停止
+  const { startPolling } = usePolling()
 
   function _onMediaChange(e) {
     isMobile.value = e.matches
@@ -1263,13 +1265,13 @@ export function useToday() {
     loadAll()
     // 仅「日视图·今天」时每60秒自动刷新; 周视图/历史日期数据不需要轮询。
     // force=true: 今天是实时窗口, 自动刷新必须真正重拉(不走内存缓存)。
-    autoRefreshTimer = setInterval(() => {
+    startPolling('today:auto-refresh', () => {
       if (viewMode.value === 'day' && isToday.value) loadAll({ force: true })
-    }, 60000)
+    }, POLL_INTERVALS.TODAY_AUTO)
   })
 
   onBeforeUnmount(() => {
-    if (autoRefreshTimer) clearInterval(autoRefreshTimer)
+    // 轮询任务由 usePolling 同生命周期钩子停止
     if (_mq) {
       _mq.removeEventListener('change', _onMediaChange)
       _mq = null
@@ -1389,7 +1391,6 @@ export function useToday() {
     successRateColor,
     loadAll,
     applyViewData,
-    autoRefreshTimer,
     _onMediaChange,
   }
 }

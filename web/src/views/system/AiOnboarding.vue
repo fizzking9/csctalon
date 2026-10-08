@@ -343,6 +343,7 @@ import {
   listDrafts,
   updateDraft,
 } from '@/api/aiOnboarding'
+import { usePolling, POLL_INTERVALS } from '@/composables/usePolling'
 
 const composerOpen = ref(true)
 const submitting = ref(false)
@@ -454,21 +455,24 @@ async function submitDraft() {
   }
 }
 
+// 统一轮询层(S-P1-2): 起草状态轮询, key 带 draft id(多 draft 不互相覆盖)
+const { startPolling, stopPolling } = usePolling()
 // 轮询起草状态（drafting → draft/failed），最多 90 次 × 2s
 function pollDraft(id) {
   let n = 0
-  const timer = setInterval(async () => {
+  const key = `ai-onboarding:draft:${id}`
+  startPolling(key, async () => {
     n += 1
     const res = await getDraft(id)
     const data = res.data
     if (data.status !== 'drafting' || n > 90) {
-      clearInterval(timer)
+      stopPolling(key)
       await loadDrafts()
       if (current.value?.id === id) applyDetail(data)
-      if (data.status === 'draft') ElMessage.success('起草完成，请核对校验报告')
+      if (data.status === 'draft') ElMessage.success('起草完成，请核对校验')
       if (data.status === 'failed') ElMessage.error(`起草失败：${data.error_message || '未知原因'}`)
     }
-  }, 2000)
+  }, POLL_INTERVALS.LOGIN)
 }
 
 async function loadDrafts() {

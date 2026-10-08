@@ -254,6 +254,7 @@ import { MENU_GROUPS } from '@/config/menu'
 import { useAudit } from '@/composables/useAudit'
 import { useAssistant } from '@/composables/useAssistant'
 import { useLayoutState, useLayoutStateWriter } from '@/composables/useLayoutState'
+import { usePolling, POLL_INTERVALS } from '@/composables/usePolling'
 
 const { openQuickAnalysis } = useAudit()
 const { openAssistant } = useAssistant()
@@ -340,8 +341,7 @@ async function openNetmgr() {
 }
 
 // ---------- 全局同步状态轮询 & 黄条提示 ----------
-// 全局轻量轮询:15秒一次,仅用于UI提示,不阻塞任何操作
-const SYNC_POLL_MS = 15 * 1000
+// 统一轮询层管理(S-P1-2): 间隔 15s 见 POLL_INTERVALS.SYNC_STATUS, 页面隐藏自动暂停
 const rawSync = reactive({
   is_syncing: false,
   is_writing_heavy: false,
@@ -352,8 +352,8 @@ const rawSync = reactive({
   last_success_at: null,
 })
 
-let _pollTimer = null
-let _pollTimer2 = null
+// 统一轮询: 同步状态 + 通知角标
+const { startPolling } = usePolling()
 let _mq = null
 
 // 系统事务通知未读数(侧边栏/顶部角标, 15s 轮询)
@@ -423,10 +423,10 @@ onMounted(() => {
   isMobile.value = _mq.matches
   _mq.addEventListener('change', _onMediaChange)
   _pollSyncOnce()
-  _pollTimer = setInterval(_pollSyncOnce, SYNC_POLL_MS)
+  startPolling('layout:sync-status', _pollSyncOnce, POLL_INTERVALS.SYNC_STATUS)
   _pollEventUnread()
   // 事务通知角标与同步状态同节奏轮询
-  _pollTimer2 = setInterval(_pollEventUnread, SYNC_POLL_MS)
+  startPolling('layout:event-unread', _pollEventUnread, POLL_INTERVALS.SYNC_STATUS)
   loadSsoEntries()
 })
 
@@ -435,14 +435,7 @@ onBeforeUnmount(() => {
     _mq.removeEventListener('change', _onMediaChange)
     _mq = null
   }
-  if (_pollTimer) {
-    clearInterval(_pollTimer)
-    _pollTimer = null
-  }
-  if (_pollTimer2) {
-    clearInterval(_pollTimer2)
-    _pollTimer2 = null
-  }
+  // 轮询任务由 usePolling 的 onBeforeUnmount 自动停止
 })
 
 async function logout() {

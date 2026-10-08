@@ -371,7 +371,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Setting, Clock } from '@element-plus/icons-vue'
 import {
@@ -384,6 +384,7 @@ import {
   submitScrmSync,
   listScrmSyncLogs,
 } from '@/api/fetch'
+import { usePolling, POLL_INTERVALS } from '@/composables/usePolling'
 
 const OVERLAP_LABEL = '(重叠2小时)'
 const SCRM_DATA_TYPES = [
@@ -438,8 +439,10 @@ const scheduleEnabled = computed({
   set: (v) => { scheduleStatus.value.enabled = !!v },
 })
 
-let pollTimer = null
-let preflightTimer = null
+// 统一轮询层(S-P1-2): key 全局单例 + 页面隐藏自动暂停
+const PROGRESS_POLL_KEY = 'fetch-scrm:progress'
+const PREFLIGHT_POLL_KEY = 'fetch-scrm:preflight'
+const { startPolling, stopPolling } = usePolling()
 // 轮询错误计数:连续 N 次失败 → 熔断(停止轮询并提示一次,避免不断报错)
 let _pollErrorStreak = 0
 const POLL_ERROR_MAX = 5
@@ -449,15 +452,12 @@ const PREFLIGHT_ERROR_MAX = 3
 onMounted(async () => {
   await Promise.all([loadScrmStatus(), loadScrmLogs(), loadScheduleStatus(), runPreflight()])
   logPanelOpen.value = ['logs']
-  pollTimer = setInterval(() => pollProgress(), 2000)
+  startPolling(PROGRESS_POLL_KEY, () => pollProgress(), POLL_INTERVALS.PROGRESS)
   // 定时预检(后台静默刷新,失败不弹 toast)
-  preflightTimer = setInterval(() => runPreflight({ silentError: true }), 30000)
+  startPolling(PREFLIGHT_POLL_KEY, () => runPreflight({ silentError: true }), POLL_INTERVALS.PREFLIGHT)
 })
 
-onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
-  if (preflightTimer) clearInterval(preflightTimer)
-})
+// 轮询任务由 usePolling 卸载时自动停止
 
 watch(() => form.syncTypes.slice().sort().join(','), () => runPreflight())
 watch(() => form.timeRange, () => runPreflight())
@@ -551,9 +551,9 @@ async function runPreflight(opts = {}) {
   } catch (e) {
     if (opts.silentError) {
       _preflightErrorStreak += 1
-      if (_preflightErrorStreak >= PREFLIGHT_ERROR_MAX && preflightTimer) {
-        clearInterval(preflightTimer)
-        preflightTimer = null
+      if (_preflightErrorStreak >= PREFLIGHT_ERROR_MAX) {
+        // 预检熔断: 停止后台预检轮询(停止后不再产生 catch, 提示不重复)
+        stopPolling(PREFLIGHT_POLL_KEY)
         ElMessage.warning(`SCRM 预检连续 ${PREFLIGHT_ERROR_MAX} 次失败,已停止后台刷新,请检查后端后刷新页面恢复`)
       }
     }
@@ -621,9 +621,9 @@ async function pollProgress() {
     }
   } catch (e) {
     _pollErrorStreak += 1
-    if (_pollErrorStreak >= POLL_ERROR_MAX && pollTimer) {
-      clearInterval(pollTimer)
-      pollTimer = null
+    if (_pollErrorStreak >= POLL_ERROR_MAX) {
+      // 状态轮询熔断: 停止进度轮询(停止后不再产生 catch, 提示不重复)
+      stopPolling(PROGRESS_POLL_KEY)
       ElMessage.warning(`SCRM 状态查询连续 ${POLL_ERROR_MAX} 次失败,已停止自动刷新,请检查后端后刷新页面或重新提交`)
     }
   }

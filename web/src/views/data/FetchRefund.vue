@@ -356,7 +356,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Setting, Clock } from '@element-plus/icons-vue'
 import {
@@ -372,6 +372,7 @@ import {
   taskStatus,
   captchaLoginCheck,
 } from '@/api/fetch'
+import { usePolling, POLL_INTERVALS } from '@/composables/usePolling'
 
 const testing = ref(false)
 const scheduleToggling = ref(false)
@@ -414,22 +415,18 @@ const scheduleStatus = ref({
   has_credentials: false,
 })
 
-// 轮询定时器(进入页面时启动)
-let pollTimer = null
-let preflightTimer = null
+// 统一轮询层(S-P1-2): key 全局单例 + 页面隐藏自动暂停 + 卸载自动停止
+const PROGRESS_POLL_KEY = 'fetch-refund:progress'
+const PREFLIGHT_POLL_KEY = 'fetch-refund:preflight'
+const { startPolling } = usePolling()
 
 onMounted(async () => {
   await Promise.all([loadDataSources(), loadLogs(), loadScheduleStatus(), runPreflight()])
   logPanelOpen.value = ['logs']
   // 进度轮询: 2 秒一次
-  pollTimer = setInterval(pollProgress, 2000)
+  startPolling(PROGRESS_POLL_KEY, pollProgress, POLL_INTERVALS.PROGRESS)
   // 预检轮询(冷却/增量时间): 30 秒一次(主要是每次进入页面和勾选变化时触发即可)
-  preflightTimer = setInterval(runPreflight, 30000)
-})
-
-onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
-  if (preflightTimer) clearInterval(preflightTimer)
+  startPolling(PREFLIGHT_POLL_KEY, runPreflight, POLL_INTERVALS.PREFLIGHT)
 })
 
 watch(
