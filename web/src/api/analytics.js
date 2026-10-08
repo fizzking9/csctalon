@@ -28,6 +28,12 @@ export const category = {
   package: (params) => request.get('/analytics/category/package', { params }),
 }
 
+// 分品类运营看板 (#254 B3-10): 设备类型/套餐(归一)/商户号 三维聚合运营 KPI
+// 窗口由后端固定(活跃/充值 90 天, 退款/投诉 30 天), 前端只传 dim + limit
+export const categoryOps = {
+  opsOverview: (params) => request.get('/analytics/category/ops-overview', { params }),
+}
+
 // 人员操作分析
 export const operator = {
   ticket: (params) => request.get('/analytics/operator/ticket', { params }),

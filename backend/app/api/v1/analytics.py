@@ -436,6 +436,25 @@ def refund_export_endpoint(
     )
 
 
+# ---------- 看板8: 分品类运营看板 (#254 B3-10) ----------
+
+
+@router.get("/category/ops-overview", response_model=R, summary="分品类运营看板-设备类型/套餐/商户号聚合运营KPI")
+def category_ops_overview(
+    db: DBSession,
+    _: CurrentUser,
+    dim: str = Query("device_type", pattern="^(device_type|combo|merchant)$"),
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = Query(10, ge=1, le=50),
+):
+    from app.services.analytics.category import category_ops_overview as svc
+
+    return R(data=svc(
+        db, dim=dim, start=_parse_dt(start), end=_parse_dt(end), limit=limit,
+    ))
+
+
 # ---------- 手动退款登记 数据质量审核 (L3) ----------
 @router.get("/manual-refund/quality", response_model=R, summary="手动退款登记-数据质量审核列表(自动纠错记录+待人工确认)")
 def manual_refund_quality_endpoint(

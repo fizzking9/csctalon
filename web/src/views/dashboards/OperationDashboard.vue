@@ -39,8 +39,8 @@
 -->
 <template>
   <div class="page-container operation-dashboard">
-    <!-- 顶部标题 + 时间粒度切换 -->
-    <div class="flex-between mb-16 td-header" style="position: relative; z-index: 2">
+    <!-- 顶部标题 + 时间粒度切换（仅「运营总览」tab 显示；分品类 tab 用后端固定窗口，无粒度概念 #254） -->
+    <div v-if="activeTab === 'overview'" class="flex-between mb-16 td-header" style="position: relative; z-index: 2">
       <div class="page-title" style="margin: 0; white-space: nowrap">
         运营分析看板
         <span class="title-date-sep">·</span>
@@ -83,6 +83,12 @@
         </template>
       </FilterBar>
     </div>
+
+    <!-- #254 B3-10: 「运营总览 / 分品类运营」双 tab。
+         总览保持原 section 流式布局不动（避免 1680 行模板重排）；
+         分品类为独立组件 CategoryBoard，lazy 延迟渲染（切到才请求接口）。 -->
+    <el-tabs v-model="activeTab" class="op-tabs">
+      <el-tab-pane label="运营总览" name="overview">
 
     <!-- 模块1: 核心指标KPI -->
     <!-- ★ #78 接待来源分层（设计说明 Design Rationale）
@@ -1045,6 +1051,12 @@
       </el-card>
     </section>
 
+      </el-tab-pane>
+      <el-tab-pane label="分品类运营" name="category" lazy>
+        <CategoryBoard />
+      </el-tab-pane>
+    </el-tabs>
+
     <!-- #233 B1.5-2 事件标记详情(点击趋势图 markPoint/markLine 弹出) -->
     <el-dialog v-model="incidentDetailVisible" title="事件详情" width="520px">
       <el-descriptions v-if="activeIncidentDetail" :column="1" border>
@@ -1125,6 +1137,10 @@ import { QuestionFilled, CircleCheckFilled, InfoFilled } from '@element-plus/ico
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-')
 
 import { useOperationDashboard } from './useOperationDashboard'
+import CategoryBoard from './CategoryBoard.vue'
+
+// #254 B3-10: 运营总览 / 分品类运营 tab 切换
+const activeTab = ref('overview')
 
 const {
   loading,
@@ -1262,6 +1278,13 @@ const {
 <style scoped>
 .operation-dashboard {
   padding-bottom: 24px;
+}
+/* #254 B3-10: 双 tab 头部贴齐 section 卡片间距 */
+.op-tabs :deep(.el-tabs__header) {
+  margin-bottom: 12px;
+}
+.op-tabs :deep(.el-tabs__nav-wrap::after) {
+  height: 1px;
 }
 .section-card {
   background: #fff;

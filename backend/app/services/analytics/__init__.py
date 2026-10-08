@@ -107,6 +107,9 @@ from app.services.analytics.cash import (
     wallet_balance_top,
     wallet_vs_withdraw,
 )
+from app.services.analytics.category import (
+    category_ops_overview,
+)
 from app.services.analytics.complaint import (
     _COMPLAINT_SPECIALIST_SPECIALTIES,
     _complaint_reg_handled_total,
@@ -333,6 +336,7 @@ __all__ = [
     'cash_out_trend',
     'category_by_merchant',
     'category_by_package',
+    'category_ops_overview',
     'package_alias_coverage',
     'category_by_service_item',
     'complaint_by_device_tag',
