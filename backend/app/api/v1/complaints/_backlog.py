@@ -2,6 +2,7 @@
 
 from collections import Counter
 from datetime import datetime
+from typing import Annotated
 
 from fastapi import Query
 
@@ -74,20 +75,23 @@ def complaint_backlog(
     _: CurrentUser,
     start: str | None = None,
     end: str | None = None,
-    source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉/(外)卡商"),
-    status: str | None = Query(None, description="归一化状态: 处理中/待处理/待跟进"),
-    category: str | None = Query(None, description="按工单服务项(分类)过滤"),
-    has_handler: bool | None = Query(None, description="true=已分派(有真实处理人) / false=待分派(无处理人)"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=500),
-    sort: str = Query("aging_asc", description="aging_asc=最旧积压优先(默认) / register_desc / register_asc"),
-    device_type: str | None = Query(None, max_length=64, description="#273 设备类型(devices.device_type_code)"),
-    combo: str | None = Query(None, max_length=128, description="#273 套餐(devices.current_combo_name)"),
-    merchant: str | None = Query(None, max_length=128, description="#273 商户号(devices.merchant_name)"),
-    active_start: str | None = Query(None, max_length=10, description="#273 激活时间起(YYYY-MM-DD)"),
-    active_end: str | None = Query(None, max_length=10, description="#273 激活时间止(YYYY-MM-DD)"),
-    active_age: str | None = Query(None, max_length=10, pattern=r"^(le7|8-30|31-180|gt180|none)$",
-                                   description="#291 激活后天数桶下钻(登记日−bms_orders最早激活日)"),
+    # ⚠️ 全参数用 Annotated 声明(默认值=真 None/int) —— 不能写 `x = Query(None)`:
+    #    cache_warmer 会直调本函数 __wrapped__(不带 Query 声明对象), `Query(None)` 是
+    #    truthy 的声明对象, 会被当筛选值进 SQL → can't adapt type 'Query'(#293 实录)。
+    source_type: Annotated[str | None, Query(description="内部投诉/商户号投诉/外部投诉/(外)卡商")] = None,
+    status: Annotated[str | None, Query(description="归一化状态: 处理中/待处理/待跟进")] = None,
+    category: Annotated[str | None, Query(description="按工单服务项(分类)过滤")] = None,
+    has_handler: Annotated[bool | None, Query(description="true=已分派(有真实处理人) / false=待分派(无处理人)")] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=500)] = 50,
+    sort: Annotated[str, Query(description="aging_asc=最旧积压优先(默认) / register_desc / register_asc")] = "aging_asc",
+    device_type: Annotated[str | None, Query(max_length=64, description="#273 设备类型(devices.device_type_code)")] = None,
+    combo: Annotated[str | None, Query(max_length=128, description="#273 套餐(devices.current_combo_name)")] = None,
+    merchant: Annotated[str | None, Query(max_length=128, description="#273 商户号(devices.merchant_name)")] = None,
+    active_start: Annotated[str | None, Query(max_length=10, description="#273 激活时间起(YYYY-MM-DD)")] = None,
+    active_end: Annotated[str | None, Query(max_length=10, description="#273 激活时间止(YYYY-MM-DD)")] = None,
+    active_age: Annotated[str | None, Query(max_length=10, pattern=r"^(le7|8-30|31-180|gt180|none)$",
+                                            description="#291 激活后天数桶下钻(登记日−bms_orders最早激活日)")] = None,
 ):
     """积压未处理投诉的查询/统计/审核分析。
 
@@ -189,18 +193,19 @@ def complaint_backlog_export(
     _: CurrentUser,
     start: str | None = None,
     end: str | None = None,
-    source_type: str | None = Query(None, description="内部投诉/商户号投诉/外部投诉"),
-    status: str | None = Query(None, description="归一化状态: 处理中/待处理/待跟进"),
-    category: str | None = Query(None, description="按工单服务项(分类)过滤"),
-    has_handler: bool | None = Query(None, description="true=已分派 / false=待分派"),
-    sort: str = Query("aging_asc", description="aging_asc=最旧积压优先(默认) / register_desc / register_asc"),
-    device_type: str | None = Query(None, max_length=64, description="#273 设备类型"),
-    combo: str | None = Query(None, max_length=128, description="#273 套餐"),
-    merchant: str | None = Query(None, max_length=128, description="#273 商户号"),
-    active_start: str | None = Query(None, max_length=10, description="#273 激活时间起"),
-    active_end: str | None = Query(None, max_length=10, description="#273 激活时间止"),
-    active_age: str | None = Query(None, max_length=10, pattern=r"^(le7|8-30|31-180|gt180|none)$",
-                                   description="#291 激活后天数桶下钻(登记日−bms_orders最早激活日)"),
+    # 同上: Annotated 根治直调 Query 默认值坑(#293)
+    source_type: Annotated[str | None, Query(description="内部投诉/商户号投诉/外部投诉")] = None,
+    status: Annotated[str | None, Query(description="归一化状态: 处理中/待处理/待跟进")] = None,
+    category: Annotated[str | None, Query(description="按工单服务项(分类)过滤")] = None,
+    has_handler: Annotated[bool | None, Query(description="true=已分派 / false=待分派")] = None,
+    sort: Annotated[str, Query(description="aging_asc=最旧积压优先(默认) / register_desc / register_asc")] = "aging_asc",
+    device_type: Annotated[str | None, Query(max_length=64, description="#273 设备类型")] = None,
+    combo: Annotated[str | None, Query(max_length=128, description="#273 套餐")] = None,
+    merchant: Annotated[str | None, Query(max_length=128, description="#273 商户号")] = None,
+    active_start: Annotated[str | None, Query(max_length=10, description="#273 激活时间起")] = None,
+    active_end: Annotated[str | None, Query(max_length=10, description="#273 激活时间止")] = None,
+    active_age: Annotated[str | None, Query(max_length=10, pattern=r"^(le7|8-30|31-180|gt180|none)$",
+                                            description="#291 激活后天数桶下钻(登记日−bms_orders最早激活日)")] = None,
 ):
     """导出积压未处理投诉明细 Excel。
 
