@@ -539,8 +539,8 @@ def _view_complaint_root_heatmap(db: Session, params: _PARAMS_T) -> _RET_T:
         .outerjoin(
             _CsR,
             and_(
-                func.nullif(func.trim(_CsR.device_sn), "").isnot(None),
-                u.c.sn == func.nullif(func.trim(_CsR.device_sn), ""),
+                _CsR.device_sn.isnot(None),
+                u.c.sn == _CsR.device_sn,
                 _CsR.operation_time >= u.c.rt - text("INTERVAL '24 hours'"),
                 _CsR.operation_time <= u.c.rt + text("INTERVAL '24 hours'"),
             ),

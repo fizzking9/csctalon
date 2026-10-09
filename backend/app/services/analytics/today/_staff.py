@@ -360,7 +360,7 @@ def today_staff_efficiency(
                       OR COALESCE(c.problem_category,'') = '' THEN '咨询接待'
                     ELSE '咨询接待'
                 END AS spec,
-                NULLIF(TRIM(c.device_sn),'') AS sn
+                c.device_sn AS sn
             FROM cs_records c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
@@ -375,7 +375,7 @@ def today_staff_efficiency(
         -- 子查询2: refund SN → "退款处理" 专项 (实际退款操作)
         rf_sns AS (
             SELECT r.operator AS op, '退款处理' AS spec,
-                   NULLIF(TRIM(r.device_sn),'') AS sn
+                   r.device_sn AS sn
             FROM refunds r
             WHERE r.created_at_raw IS NOT NULL
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
@@ -386,7 +386,7 @@ def today_staff_efficiency(
         -- 子查询3: 外部投诉工单 SN → "外部投诉" 专项
         cm_ext_sns AS (
             SELECT st.handler AS op, '外部投诉' AS spec,
-                   NULLIF(TRIM(st.device_sn),'') AS sn
+                   st.device_sn AS sn
             FROM service_tickets st
             WHERE st.finish_time IS NOT NULL
               AND st.finish_time >= :ts AND st.finish_time <= :te
@@ -400,7 +400,7 @@ def today_staff_efficiency(
         -- 子查询4: 内部投诉工单 SN → "内部投诉" 专项 (非外部的投诉)
         cm_int_sns AS (
             SELECT st.handler AS op, '内部投诉' AS spec,
-                   NULLIF(TRIM(st.device_sn),'') AS sn
+                   st.device_sn AS sn
             FROM service_tickets st
             WHERE st.finish_time IS NOT NULL
               AND st.finish_time >= :ts AND st.finish_time <= :te
@@ -420,7 +420,7 @@ def today_staff_efficiency(
                        WHEN COALESCE(st.service_category,'') IN ('换货','设备故障','网络故障') THEN '咨询接待'
                        ELSE '咨询接待'
                    END AS spec,
-                   NULLIF(TRIM(st.device_sn),'') AS sn
+                   st.device_sn AS sn
             FROM service_tickets st
             WHERE st.finish_time IS NOT NULL
               AND st.finish_time >= :ts AND st.finish_time <= :te
@@ -444,10 +444,10 @@ def today_staff_efficiency(
                        WHEN COALESCE(st.service_category,'') IN ('换货','设备故障','网络故障') THEN '咨询接待'
                        ELSE '咨询接待'
                    END AS spec,
-                   NULLIF(TRIM(st.device_sn),'') AS sn
+                   st.device_sn AS sn
             FROM service_tickets st
             JOIN cs_records c2
-              ON NULLIF(TRIM(c2.device_sn),'') = NULLIF(TRIM(st.device_sn),'')
+              ON c2.device_sn = st.device_sn
              AND c2.operator IS NOT NULL
              AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助','WeChat','wechat','WECHAT','AI客服','智能客服','机器人客服','客户','班牛','系统','微信投诉')
              AND c2.operation_time IS NOT NULL
@@ -456,7 +456,7 @@ def today_staff_efficiency(
             WHERE st.finish_time IS NOT NULL
               AND st.finish_time >= :ts AND st.finish_time <= :te
               AND (st.handler IS NULL OR st.handler = '' OR st.handler = 'SYS')
-              AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+              AND st.device_sn IS NOT NULL
             -- DISTINCT ON (ticket_no) + ORDER BY ticket_no, operation_time DESC
             -- = 每个工单取最近一次 cs_record 操作人, 等价于 LATERAL ... LIMIT 1
             ORDER BY st.ticket_no, c2.operation_time DESC
@@ -538,7 +538,7 @@ def today_staff_efficiency(
                    st.service_category AS service_category
             FROM service_tickets st
             JOIN cs_records c2
-              ON NULLIF(TRIM(c2.device_sn),'') = NULLIF(TRIM(st.device_sn),'')
+              ON c2.device_sn = st.device_sn
              AND c2.operator IS NOT NULL
              AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助','WeChat','wechat','WECHAT','AI客服','智能客服','机器人客服','客户','班牛','系统','微信投诉')
              AND c2.operation_time IS NOT NULL
@@ -547,7 +547,7 @@ def today_staff_efficiency(
             WHERE st.finish_time IS NOT NULL
               AND st.finish_time >= :ts AND st.finish_time <= :te
               AND (st.handler IS NULL OR st.handler = '' OR st.handler = 'SYS')
-              AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+              AND st.device_sn IS NOT NULL
             ORDER BY st.ticket_no, c2.operation_time DESC
         ) linked
         GROUP BY 1, 2

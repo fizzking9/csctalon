@@ -143,7 +143,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
     # ---- 3. 分母SN (cs_records problem_category='退款') ----
     cs_refund_sn_sql = text(
         """
-        SELECT c.operator AS op, NULLIF(TRIM(c.device_sn),'') AS sn,
+        SELECT c.operator AS op, c.device_sn AS sn,
                c.operation_time AS op_time,
                c.problem_type AS problem_type
         FROM cs_records c
@@ -217,41 +217,41 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
         """
         WITH host_sns AS (SELECT unnest(CAST(:sn_arr AS text[])) AS sn),
         refund_sn AS (
-            SELECT DISTINCT NULLIF(TRIM(r.device_sn),'') AS sn,
+            SELECT DISTINCT r.device_sn AS sn,
                    'refund' AS src, r.refund_reason AS reason,
                    COALESCE(r.actual_amount, r.refund_amount, 0) AS amount,
                    r.status AS status, r.refund_method AS method,
                    r.created_at_raw AS event_time
             FROM refunds r
-            JOIN host_sns hs ON NULLIF(TRIM(r.device_sn),'') = hs.sn
+            JOIN host_sns hs ON r.device_sn = hs.sn
             WHERE r.created_at_raw IS NOT NULL
-              AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
+              AND r.device_sn IS NOT NULL
               AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
         ),
         ticket_sn AS (
-            SELECT DISTINCT NULLIF(TRIM(st.device_sn),'') AS sn,
+            SELECT DISTINCT st.device_sn AS sn,
                    'ticket' AS src, st.service_item AS reason,
                    COALESCE(st.refund_amount, st.estimated_amount, 0) AS amount,
                    st.status AS status, st.service_category AS method,
                    st.register_time AS event_time
             FROM service_tickets st
-            JOIN host_sns hs ON NULLIF(TRIM(st.device_sn),'') = hs.sn
+            JOIN host_sns hs ON st.device_sn = hs.sn
             WHERE st.register_time IS NOT NULL
-              AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+              AND st.device_sn IS NOT NULL
               AND COALESCE(st.service_category,'') = '退款'
               AND COALESCE(st.status, '') != '终止'
               AND st.register_time >= :ts AND st.register_time <= :te7
         ),
         cs_kw_sn AS (
-            SELECT DISTINCT NULLIF(TRIM(c.device_sn),'') AS sn,
+            SELECT DISTINCT c.device_sn AS sn,
                    'cs_kw' AS src, LEFT(COALESCE(c.description,''),100) AS reason,
                    0 AS amount, '退款流程' AS status, 'cs_record关键词' AS method,
                    c.operation_time AS event_time
             FROM cs_records c
-            JOIN host_sns hs ON NULLIF(TRIM(c.device_sn),'') = hs.sn
+            JOIN host_sns hs ON c.device_sn = hs.sn
             WHERE c.operation_time IS NOT NULL
-              AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+              AND c.device_sn IS NOT NULL
               AND c.problem_category = '退款'
               AND NOT (c.operator = ANY(:sys_bl))
               AND (
@@ -300,12 +300,12 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
     refund_op_amt: dict[str, Decimal] = {}
     for r in db.execute(text(
         """
-        SELECT NULLIF(TRIM(r.device_sn),'') AS sn, r.operator AS op,
+        SELECT r.device_sn AS sn, r.operator AS op,
                COALESCE(r.actual_amount, r.refund_amount, 0) AS amt
         FROM refunds r
         WHERE r.created_at_raw IS NOT NULL
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
-          AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
+          AND r.device_sn IS NOT NULL
           AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
           AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
         """
@@ -316,12 +316,12 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
         refund_op_amt[r.op] = refund_op_amt.get(r.op, Decimal("0")) + D(r.amt)
     for r in db.execute(text(
         """
-        SELECT NULLIF(TRIM(st.device_sn),'') AS sn, st.handler AS op,
+        SELECT st.device_sn AS sn, st.handler AS op,
                COALESCE(st.refund_amount, st.estimated_amount, 0) AS amt
         FROM service_tickets st
         WHERE st.finish_time IS NOT NULL
           AND st.finish_time >= :ts AND st.finish_time <= :te7
-          AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+          AND st.device_sn IS NOT NULL
           AND st.handler IS NOT NULL AND NOT (st.handler = ANY(:sys_bl))
           AND COALESCE(st.service_category,'') = '退款'
           AND COALESCE(st.status, '') = '已完成'
@@ -516,7 +516,7 @@ def refund_person_devices(
     sn_reception_stats: dict[str, dict] = {}
     for r in db.execute(text(
         """
-        SELECT NULLIF(TRIM(c.device_sn),'') AS sn,
+        SELECT c.device_sn AS sn,
                MIN(c.operation_time) AS first_t, MAX(c.operation_time) AS last_t,
                COUNT(*) AS cnt
         FROM cs_records c
@@ -524,8 +524,8 @@ def refund_person_devices(
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND c.operator = :op
           AND c.problem_category = '退款'
-          AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
-        GROUP BY NULLIF(TRIM(c.device_sn),'')
+          AND c.device_sn IS NOT NULL
+        GROUP BY c.device_sn
         """
     ), {"ts": cur_s, "te": cur_e, "op": operator}).fetchall():
         if r.sn:
@@ -556,12 +556,12 @@ def refund_person_devices(
     if host_sns:
         for r in db.execute(text(
             """
-            SELECT NULLIF(TRIM(r.device_sn),'') AS sn, r.refund_no, r.created_at_raw, r.status,
+            SELECT r.device_sn AS sn, r.refund_no, r.created_at_raw, r.status,
                    COALESCE(r.actual_amount, r.refund_amount, 0) AS amt
             FROM refunds r
             WHERE r.created_at_raw IS NOT NULL
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
-              AND NULLIF(TRIM(r.device_sn),'') = ANY(:sn_arr)
+              AND r.device_sn = ANY(:sn_arr)
               AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
             """
         ), {"ts": cur_s, "te7": cur_e, "sn_arr": list(host_sns)}).fetchall():
@@ -618,14 +618,14 @@ def refund_personnel_trend(
         week_op_host: dict[str, dict[str, set[str]]] = {}
         for r in db.execute(text(
             """
-            SELECT c.operator AS op, NULLIF(TRIM(c.device_sn),'') AS sn,
+            SELECT c.operator AS op, c.device_sn AS sn,
                    DATE_TRUNC('week', c.operation_time AT TIME ZONE 'Asia/Shanghai')::date AS wk
             FROM cs_records c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
               AND NOT (c.operator = ANY(:sys_bl))
               AND c.problem_category = '退款'
-              AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+              AND c.device_sn IS NOT NULL
             """
         ), {"ts": cur_s, "te": cur_e, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall():
             if r.op and r.sn and r.wk:
@@ -636,14 +636,14 @@ def refund_personnel_trend(
     else:
         for r in db.execute(text(
             """
-            SELECT c.operator AS op, NULLIF(TRIM(c.device_sn),'') AS sn,
+            SELECT c.operator AS op, c.device_sn AS sn,
                    DATE(c.operation_time AT TIME ZONE 'Asia/Shanghai') AS d
             FROM cs_records c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
               AND NOT (c.operator = ANY(:sys_bl))
               AND c.problem_category = '退款'
-              AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+              AND c.device_sn IS NOT NULL
             """
         ), {"ts": cur_s, "te": cur_e, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall():
             if r.op and r.sn and r.d:
@@ -767,13 +767,13 @@ def refund_device_analysis(
     # 查复退款设备(SN在周期内出现>=2次退款诉求,即cs_record接待>=2次)
     for r in db.execute(text(
         """
-        SELECT NULLIF(TRIM(c.device_sn),'') AS sn, COUNT(*) AS cnt
+        SELECT c.device_sn AS sn, COUNT(*) AS cnt
         FROM cs_records c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND c.problem_category = '退款'
-          AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
-        GROUP BY NULLIF(TRIM(c.device_sn),'')
+          AND c.device_sn IS NOT NULL
+        GROUP BY c.device_sn
         HAVING COUNT(*) >= 2
         """
     ), {"ts": cur_s, "te": cur_e}).fetchall():
@@ -816,13 +816,13 @@ def refund_device_analysis(
     sn_rc_cnt: dict[str, int] = {}
     for r in db.execute(text(
         """
-        SELECT NULLIF(TRIM(c.device_sn),'') AS sn, COUNT(DISTINCT c.operator) AS op_cnt
+        SELECT c.device_sn AS sn, COUNT(DISTINCT c.operator) AS op_cnt
         FROM cs_records c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND c.problem_category = '退款'
-          AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
-        GROUP BY NULLIF(TRIM(c.device_sn),'')
+          AND c.device_sn IS NOT NULL
+        GROUP BY c.device_sn
         """
     ), {"ts": cur_s, "te": cur_e}).fetchall():
         if r.sn:
@@ -1014,14 +1014,14 @@ def refund_type_trend(
 
     for r in db.execute(text(
         f"""
-        SELECT {date_col} AS d, NULLIF(TRIM(c.device_sn),'') AS sn,
+        SELECT {date_col} AS d, c.device_sn AS sn,
                c.problem_type, c.operator
         FROM cs_records c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND NOT (c.operator = ANY(:sys_bl))
           AND c.problem_category = '退款'
-          AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+          AND c.device_sn IS NOT NULL
         """
     ), {"ts": cur_s, "te": cur_e, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall():
         if r.sn and r.d:
@@ -2060,13 +2060,13 @@ def refund_problem_type_detail(
     pt_sn: dict[str, set[str]] = {}
     for r in db.execute(text(
         """
-        SELECT NULLIF(TRIM(c.device_sn),'') AS sn, c.problem_type
+        SELECT c.device_sn AS sn, c.problem_type
         FROM cs_records c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND NOT (c.operator = ANY(:sys_bl))
           AND c.problem_category = '退款'
-          AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+          AND c.device_sn IS NOT NULL
         """
     ), {"ts": cur_s, "te": cur_e, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall():
         if r.sn and r.problem_type:
@@ -2286,7 +2286,7 @@ def refund_recovery_analysis(
     #      - 移除 problem_type 过度过滤: 网络问题/其他问题等所有退款理由均计入
     cs_refund_sn_sql = text(
         """
-        SELECT c.operator AS op, NULLIF(TRIM(c.device_sn),'') AS sn,
+        SELECT c.operator AS op, c.device_sn AS sn,
                c.operation_time AS op_time,
                c.problem_type AS problem_type
         FROM cs_records c
@@ -2389,7 +2389,7 @@ def refund_recovery_analysis(
         """
         WITH host_sns AS (SELECT unnest(CAST(:sn_arr AS text[])) AS sn),
         refund_sn AS (
-            SELECT DISTINCT NULLIF(TRIM(r.device_sn),'') AS sn,
+            SELECT DISTINCT r.device_sn AS sn,
                    'refund' AS src,
                    r.refund_reason AS reason,
                    COALESCE(r.actual_amount, r.refund_amount, 0) AS amount,
@@ -2397,15 +2397,15 @@ def refund_recovery_analysis(
                    r.refund_method AS method,
                    r.created_at_raw AS event_time
             FROM refunds r
-            JOIN host_sns hs ON NULLIF(TRIM(r.device_sn),'') = hs.sn
+            JOIN host_sns hs ON r.device_sn = hs.sn
             WHERE r.created_at_raw IS NOT NULL
-              AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
+              AND r.device_sn IS NOT NULL
               AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')  -- 无需退款/驳回不算失败
               -- 不限制operator和refund_method：任何方式的退款、任何人操作都算失败
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
         ),
         ticket_sn AS (
-            SELECT DISTINCT NULLIF(TRIM(st.device_sn),'') AS sn,
+            SELECT DISTINCT st.device_sn AS sn,
                    'ticket' AS src,
                    st.service_item AS reason,
                    COALESCE(st.refund_amount, st.estimated_amount, 0) AS amount,
@@ -2413,9 +2413,9 @@ def refund_recovery_analysis(
                    st.service_category AS method,
                    st.register_time AS event_time  -- 用工单提交时间而非结案时间，客户提交即表示坚持退款
             FROM service_tickets st
-            JOIN host_sns hs ON NULLIF(TRIM(st.device_sn),'') = hs.sn
+            JOIN host_sns hs ON st.device_sn = hs.sn
             WHERE st.register_time IS NOT NULL
-              AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+              AND st.device_sn IS NOT NULL
               AND COALESCE(st.service_category,'') = '退款'
               AND COALESCE(st.status, '') != '终止'  -- 终止=客户撤单，不算失败
               -- 不限制handler：任何人处理的退款工单都算失败
@@ -2423,7 +2423,7 @@ def refund_recovery_analysis(
         ),
         cs_kw_sn AS (
             -- 2026-08-11新增: cs_record描述含"退款说明"等关键词 = 已进入退款流程 = 挽回失败
-            SELECT DISTINCT NULLIF(TRIM(c.device_sn),'') AS sn,
+            SELECT DISTINCT c.device_sn AS sn,
                    'cs_kw' AS src,
                    LEFT(COALESCE(c.description,''),100) AS reason,
                    0 AS amount,
@@ -2431,9 +2431,9 @@ def refund_recovery_analysis(
                    'cs_record关键词' AS method,
                    c.operation_time AS event_time
             FROM cs_records c
-            JOIN host_sns hs ON NULLIF(TRIM(c.device_sn),'') = hs.sn
+            JOIN host_sns hs ON c.device_sn = hs.sn
             WHERE c.operation_time IS NOT NULL
-              AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+              AND c.device_sn IS NOT NULL
               AND c.problem_category = '退款'
               AND NOT (c.operator = ANY(:sys_bl))
               AND (
@@ -2497,13 +2497,13 @@ def refund_recovery_analysis(
     # 从 refunds 拉 operator (统计真人操作的所有退款方式:线上/线下/转入提现账户)
     for r in db.execute(text(
         """
-        SELECT NULLIF(TRIM(r.device_sn),'') AS sn,
+        SELECT r.device_sn AS sn,
                r.operator AS op,
                COALESCE(r.actual_amount, r.refund_amount, 0) AS amt
         FROM refunds r
         WHERE r.created_at_raw IS NOT NULL
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
-          AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
+          AND r.device_sn IS NOT NULL
           AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
           AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
         """
@@ -2515,13 +2515,13 @@ def refund_recovery_analysis(
     # 从 service_tickets 拉 handler (统计真人处理的已完成退款工单)
     for r in db.execute(text(
         """
-        SELECT NULLIF(TRIM(st.device_sn),'') AS sn,
+        SELECT st.device_sn AS sn,
                st.handler AS op,
                COALESCE(st.refund_amount, st.estimated_amount, 0) AS amt
         FROM service_tickets st
         WHERE st.finish_time IS NOT NULL
           AND st.finish_time >= :ts AND st.finish_time <= :te7
-          AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+          AND st.device_sn IS NOT NULL
           AND st.handler IS NOT NULL AND NOT (st.handler = ANY(:sys_bl))
           AND COALESCE(st.service_category,'') = '退款'
           AND COALESCE(st.status, '') = '已完成'
@@ -2839,7 +2839,7 @@ def refund_recovery_analysis(
         # 当周 所有人员 cs_record 接待【真退款类】 SN (2026-08-11: 包含所有人员,不只专职挽回)
         wk_cs = db.execute(text(
             """
-            SELECT DISTINCT NULLIF(TRIM(c.device_sn),'') AS sn,
+            SELECT DISTINCT c.device_sn AS sn,
                    MIN(c.operation_time) AS first_op_time
             FROM cs_records c
             WHERE c.operation_time IS NOT NULL
@@ -2860,7 +2860,7 @@ def refund_recovery_analysis(
         # 当周 失败SN (T+7 窗口: 不限制operator/refund_method, 工单用register_time)
         wk_fail_rows = db.execute(text(
             """
-            SELECT NULLIF(TRIM(r.device_sn),'') AS sn,
+            SELECT r.device_sn AS sn,
                    'refund' AS src, r.refund_reason AS reason,
                    COALESCE(r.actual_amount, r.refund_amount, 0) AS amount,
                    r.status AS status, r.refund_method AS method,
@@ -2868,10 +2868,10 @@ def refund_recovery_analysis(
             FROM refunds r
             WHERE r.created_at_raw IS NOT NULL
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
-              AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
+              AND r.device_sn IS NOT NULL
               AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
             UNION ALL
-            SELECT NULLIF(TRIM(st.device_sn),'') AS sn,
+            SELECT st.device_sn AS sn,
                    'ticket' AS src, st.service_item AS reason,
                    COALESCE(st.refund_amount, st.estimated_amount, 0) AS amount,
                    st.status AS status, st.service_category AS method,
@@ -2879,7 +2879,7 @@ def refund_recovery_analysis(
             FROM service_tickets st
             WHERE st.register_time IS NOT NULL
               AND st.register_time >= :ts AND st.register_time <= :te7
-              AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+              AND st.device_sn IS NOT NULL
               AND COALESCE(st.service_category,'') = '退款'
               AND COALESCE(st.status, '') != '终止'
             """
@@ -2933,20 +2933,20 @@ def refund_recovery_analysis(
             """
             SELECT sn, MIN(day) AS first_day
             FROM (
-                SELECT NULLIF(TRIM(r.device_sn),'') AS sn,
+                SELECT r.device_sn AS sn,
                        DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai') AS day
                 FROM refunds r
                 WHERE r.created_at_raw IS NOT NULL
                   AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
-                  AND NULLIF(TRIM(r.device_sn),'') = ANY(:sn_arr)
+                  AND r.device_sn = ANY(:sn_arr)
                   AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
                 UNION ALL
-                SELECT NULLIF(TRIM(st.device_sn),'') AS sn,
+                SELECT st.device_sn AS sn,
                        DATE(st.register_time AT TIME ZONE 'Asia/Shanghai') AS day
                 FROM service_tickets st
                 WHERE st.register_time IS NOT NULL
                   AND st.register_time >= :ts AND st.register_time <= :te7
-                  AND NULLIF(TRIM(st.device_sn),'') = ANY(:sn_arr)
+                  AND st.device_sn = ANY(:sn_arr)
                   AND COALESCE(st.service_category,'') = '退款'
                   AND COALESCE(st.status, '') != '终止'
             ) x
@@ -3011,13 +3011,13 @@ def refund_recovery_analysis(
             day_host_rows = db.execute(text(
                 """
                 SELECT DATE(c.operation_time AT TIME ZONE 'Asia/Shanghai') AS d,
-                       NULLIF(TRIM(c.device_sn),'') AS sn
+                       c.device_sn AS sn
                 FROM cs_records c
                 WHERE c.operation_time IS NOT NULL
                   AND c.operation_time >= :ts AND c.operation_time <= :te
                   AND NOT (c.operator = ANY(:sys_bl))
                   AND c.problem_category = '退款'
-                  AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+                  AND c.device_sn IS NOT NULL
                   AND NOT (
                       COALESCE(c.description,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
                    OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
@@ -3035,28 +3035,28 @@ def refund_recovery_analysis(
             ck = _RR_CS_FAIL_KW
             day_fail_rows = db.execute(text(
                 """
-                SELECT NULLIF(TRIM(r.device_sn),'') AS sn
+                SELECT r.device_sn AS sn
                 FROM refunds r
                 WHERE r.created_at_raw IS NOT NULL
                   AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
                   AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
-                  AND NULLIF(TRIM(r.device_sn),'') IS NOT NULL
+                  AND r.device_sn IS NOT NULL
                 UNION
-                SELECT NULLIF(TRIM(st.device_sn),'') AS sn
+                SELECT st.device_sn AS sn
                 FROM service_tickets st
                 WHERE st.register_time IS NOT NULL
                   AND st.register_time >= :ts AND st.register_time <= :te7
                   AND COALESCE(st.service_category,'') = '退款'
                   AND COALESCE(st.status, '') != '终止'
-                  AND NULLIF(TRIM(st.device_sn),'') IS NOT NULL
+                  AND st.device_sn IS NOT NULL
                 UNION
-                SELECT NULLIF(TRIM(c.device_sn),'') AS sn
+                SELECT c.device_sn AS sn
                 FROM cs_records c
                 WHERE c.operation_time IS NOT NULL
                   AND c.operation_time >= :ts AND c.operation_time <= :te7
                   AND c.problem_category = '退款'
                   AND NOT (c.operator = ANY(:sys_bl))
-                  AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+                  AND c.device_sn IS NOT NULL
                   AND (COALESCE(c.description,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4])
                     OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4])
                     OR COALESCE(c.solution,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4]))
@@ -3094,13 +3094,13 @@ def refund_recovery_analysis(
         hr_rows = db.execute(text(
             """
             SELECT EXTRACT(HOUR FROM c.operation_time AT TIME ZONE 'Asia/Shanghai') AS hh,
-                   NULLIF(TRIM(c.device_sn),'') AS sn
+                   c.device_sn AS sn
             FROM cs_records c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
               AND NOT (c.operator = ANY(:sys_bl))
               AND c.problem_category = '退款'
-              AND NULLIF(TRIM(c.device_sn),'') IS NOT NULL
+              AND c.device_sn IS NOT NULL
               AND NOT (
                   COALESCE(c.description,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
                OR COALESCE(c.execution_result,'') ILIKE ANY(ARRAY[:k1,:k2,:k3,:k4,:k5,:k6,:k7])
@@ -3124,14 +3124,14 @@ def refund_recovery_analysis(
             tfr = db.execute(text(
                 """
                 WITH arr AS (SELECT unnest(CAST(:sn_arr AS text[])) AS sn)
-                SELECT DISTINCT NULLIF(TRIM(r.device_sn),'') AS sn FROM refunds r JOIN arr a ON NULLIF(TRIM(r.device_sn),'') = a.sn
+                SELECT DISTINCT r.device_sn AS sn FROM refunds r JOIN arr a ON r.device_sn = a.sn
                  WHERE COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
                 UNION
-                SELECT DISTINCT NULLIF(TRIM(st.device_sn),'') AS sn FROM service_tickets st JOIN arr a ON NULLIF(TRIM(st.device_sn),'') = a.sn
+                SELECT DISTINCT st.device_sn AS sn FROM service_tickets st JOIN arr a ON st.device_sn = a.sn
                  WHERE COALESCE(st.service_category,'') = '退款' AND COALESCE(st.status, '') != '终止'
                 UNION
-                SELECT DISTINCT NULLIF(TRIM(c.device_sn),'') AS sn
-                FROM cs_records c JOIN arr a ON NULLIF(TRIM(c.device_sn),'') = a.sn
+                SELECT DISTINCT c.device_sn AS sn
+                FROM cs_records c JOIN arr a ON c.device_sn = a.sn
                  WHERE c.problem_category = '退款'
                    AND NOT (c.operator = ANY(:sys_bl))
                    AND (COALESCE(c.description,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4])
