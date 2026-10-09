@@ -60,14 +60,29 @@ def scan_missing_sns(db: Session, limit: int) -> list[str]:
     hit 但无套餐等设备永远无法出队, 不打探针会在每批堆积白查(2026-10-10 实测:
     批1 hit 11018 仅 1073 台退出缺失集, 45% 为永久 miss); 30 天复探窗口给
     后续新买套餐设备留刷新口。
+
+    #293 倒排: 按「最近活跃」倒序(活跃=充值 device_combos.created_at_raw 或
+    完整月流量 device_flow_usage.stat_month, 与分品类看板活跃口径一致)——
+    最近活跃的 SN 先探, 管理分析尽早可用; 无活动记录的老设备 NULLS LAST 殿后。
+    子查询聚合实测 ~1.5s/批(生产 70 万设备), 每批只跑一次可忽略。
     """
     q = text("""
         SELECT d.sn FROM devices d
+        LEFT JOIN (
+          SELECT device_sn, MAX(ts) AS last_active FROM (
+            SELECT device_sn, MAX(created_at_raw) AS ts FROM device_combos
+            WHERE device_sn IS NOT NULL GROUP BY device_sn
+            UNION ALL
+            SELECT device_sn, MAX(TO_DATE(stat_month, 'YYYY-MM')) AS ts FROM device_flow_usage
+            WHERE device_sn IS NOT NULL AND month_complete GROUP BY device_sn
+          ) a GROUP BY device_sn
+        ) act ON act.device_sn = d.sn
         WHERE ((d.device_type IS NULL OR d.device_type = '')
            OR (d.current_combo_name IS NULL OR d.current_combo_name = '')
            OR (d.merchant_name IS NULL OR d.merchant_name = '')
            OR d.active_time IS NULL)
           AND (d.profile_probe_at IS NULL OR d.profile_probe_at < now() - interval '30 days')
+        ORDER BY act.last_active DESC NULLS LAST
         LIMIT :lim
     """)
     return [r[0] for r in db.execute(q, {"lim": limit}).fetchall()]
