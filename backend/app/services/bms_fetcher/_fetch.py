@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from app.core.config import settings
 
@@ -325,6 +325,8 @@ class FetchResult:
         #   置 success=True + empty_result=True + file_path=None, 导入阶段按 0 行成功处理
         #   (而非误报抓取失败)。见 EmptyQueryResult / bms_sync._sync_import_work。
         self.empty_result: bool = False
+        # #293 session_hook 通道的返回载荷(非导出型任务把结果放这里, 不走 file_path)
+        self.payload: Any = None
 
 class BmsFetcher:
     """BMS 平台数据抓取器 - 支持多数据源"""
@@ -383,6 +385,7 @@ class BmsFetcher:
         end_date: datetime,
         config: dict,
         timeout: int | None = None,
+        session_hook: Optional[Callable[[Any], Awaitable[Any]]] = None,
     ) -> FetchResult:
         """抓取单个数据源
 
@@ -392,6 +395,9 @@ class BmsFetcher:
             end_date: 结束时间
             config: 该源的运行配置(base_url/page_path/time_labels/username/password/name,来自 sync_source_configs)
             timeout: 超时时间(秒); None=按该源下载最坏总耗时自动计算(_fetch_total_budget_sec)
+            session_hook: #293 非导出型任务(如设备档案 SN 补全)——登录完成后不走
+                时间筛选/导出流程, 直接把已登录 page 交给 hook 执行, 返回值放入
+                result.payload 并置 success=True。None 时行为与原来完全一致。
         """
         result = FetchResult()
         result.data_type = data_type
@@ -411,7 +417,7 @@ class BmsFetcher:
 
         try:
             await asyncio.wait_for(
-                self._do_fetch_one(data_type, start_date, end_date, config, result),
+                self._do_fetch_one(data_type, start_date, end_date, config, result, session_hook=session_hook),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -1562,6 +1568,7 @@ class BmsFetcher:
         end_date: datetime,
         config: dict,
         result: FetchResult,
+        session_hook: Optional[Callable[[Any], Awaitable[Any]]] = None,
     ):
         """执行单个数据源的抓取流程(配置来自 sync_source_configs)"""
         await self._init_browser()
@@ -1692,6 +1699,14 @@ class BmsFetcher:
 
             # ⚠️ 2026-08-12: 标记登录已完成(无论 storage_state 有效还是刚登录成功)
             result.logged_in = True
+
+            # ── #293: 非导出型任务的分叉点 ──
+            # 登录完成后, 若调用方给了 session_hook(如设备档案 SN 补全), 把已登录 page
+            # 直接交给它, 不再走时间筛选/查询/导出流程。传 hook 时 start/end 仅占位。
+            if session_hook is not None:
+                result.payload = await session_hook(page)
+                result.success = True
+                return result
 
             # 3. 设置时间范围
             time_format = config.get("time_format", "%Y-%m-%d %H:%M:%S")
