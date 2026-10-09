@@ -118,6 +118,60 @@ def test_future_op_time_leap_day_safe(_test_session=None):
     assert reg_out == reg
 
 
+# ── #290: 金额防爆护栏(列错位 SN 串入金额列 → 置空+pending, 行保留) ──
+
+def test_absurd_amount_sn_in_amount_column_pending():
+    """#290: 订单金额=14位SN(实测「9月份登记明细」row 2344) → 置空+pending,
+    行保留不丢真实退款金额 155 元; 若直接入库 numeric(12,2) 溢出整批崩溃"""
+    from decimal import Decimal
+
+    from app.services.manual_refund_sync import ManualRefundSyncResult, _clean_row
+
+    r = ManualRefundSyncResult()
+    row = {
+        "登记日期": "2026-10-08 00:00:00",
+        "设备号": "68772604275785",
+        "订单号": "WXGV2026031210221773946",
+        "商户ID": "1611876437",
+        "订单金额": "70182638026145",   # SN 串列(实测值)
+        "登记人": "田兴月",
+        "是否已退款": "是",
+        "退款金额": "155",
+        "退款操作人": "田兴月",
+        "操作时间": "2026-10-08 00:00:00",
+        "备注": "不接受按59扣除",
+    }
+    out = _clean_row(row, 0, r)
+    assert out is not None                            # 行保留(真实退款不丢)
+    assert out["order_amount"] is None                # 污染字段置空
+    assert out["refund_amount"] == Decimal("155")     # 真实退款金额保留
+    assert out["quality_status"] == "pending"
+    assert "金额异常" in (out["quality_note"] or "")
+    assert "70182638026145" in (out["quality_note"] or "")  # 原值留痕待人工核对
+
+
+def test_normal_amount_not_flagged():
+    """#290: 正常金额(数百元)不触发护栏"""
+    from decimal import Decimal
+
+    from app.services.manual_refund_sync import ManualRefundSyncResult, _clean_row
+
+    r = ManualRefundSyncResult()
+    row = {
+        "登记日期": "2026-10-08 00:00:00",
+        "订单号": "WX2026092115512974210",
+        "订单金额": "59.9",
+        "退款金额": "20",
+        "登记人": "苏紫依",
+    }
+    out = _clean_row(row, 0, r)
+    assert out is not None
+    assert out["order_amount"] == Decimal("59.9")
+    assert out["refund_amount"] == Decimal("20")
+    assert out["quality_status"] is None
+    assert out["quality_note"] is None
+
+
 def test_future_register_leap_day_safe(_test_session=None):
     """R2 闰年兜底(2026-09-06 审查修复): register_time=2028-02-29 + op 2026-02-27 佐证 → 修正 2026-02-28 不抛错"""
     from app.services.upsert import _manual_refund_quality_check

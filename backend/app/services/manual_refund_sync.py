@@ -154,6 +154,10 @@ def _has_any_business_value(data: dict[str, Any]) -> bool:
 _FILL_MARK_KEY = "_register_time_filled_from_neighbor"
 _TZ_CN = timezone(timedelta(hours=8))
 
+# #290: 金额防爆阈值(元) —— Numeric(12,2) 硬限 10^10; 业务最大单 ~1.1k 元,
+# 10^8 留 5 个数量级余量, 超此必为列错位串列(如 SN 误填入金额列)
+_ABSURD_AMOUNT = 100_000_000
+
 
 def _fill_empty_register_time(rows_raw: list) -> int:
     """登记日期为空的行, 仅当上下邻近行登记日期为**同一北京时间自然日**时,
@@ -256,6 +260,26 @@ def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult,
             quality_status, quality_note = "pending", "[人员污染] 登记人/退款操作人疑似列错位被置空, 待人工核对"
         raw_refunded = _to_str(data.get("is_refunded"))
         device_sn = _to_str(data.get("device_sn"))
+        # ★ #290(2026-10-09): 金额防爆护栏 —— 列错位会把 14 位 SN 串进金额列
+        #   (实测「9月份登记明细」row 2344 订单金额=70182638026145), Numeric(12,2)
+        #   硬限 10^10 直接溢出导致**整批 INSERT 崩溃**。阈值 10^8 元: 业务最大单
+        #   ~1.1k 元, 留 5 个数量级余量。命中即置空+pending(与人员污染同模式),
+        #   行保留 —— 该污染行的真实退款金额仍是有效数据。
+        order_amount = _to_decimal(data.get("order_amount"))
+        refund_amount = _to_decimal(data.get("refund_amount"))
+        absurd = []
+        if order_amount is not None and abs(order_amount) >= _ABSURD_AMOUNT:
+            absurd.append(f"订单金额={order_amount}")
+            order_amount = None
+        if refund_amount is not None and abs(refund_amount) >= _ABSURD_AMOUNT:
+            absurd.append(f"退款金额={refund_amount}")
+            refund_amount = None
+        if absurd:
+            note = f"[金额异常] {';'.join(absurd)} 超合理范围(疑似列错位串列),已置空待人工核对"
+            if quality_status is None:
+                quality_status, quality_note = "pending", note
+            else:
+                quality_note = f"{quality_note}; {note}" if quality_note else note
         return {
             "register_time": register_time,
             # ⚠️ 2026-09-05 (#20): 纠错(auto_fixed)发生时保留原始值到 register_time_raw
@@ -263,10 +287,10 @@ def _clean_row(row: dict[str, Any], idx: int, result: ManualRefundSyncResult,
             "device_sn": device_sn[:64] if device_sn else None,
             "order_no": order_no,
             "merchant_id": _truncate_str(data.get("merchant_id"), 64),
-            "order_amount": _to_decimal(data.get("order_amount")),
+            "order_amount": order_amount,
             "registrant": _sanitize_name_field(data.get("registrant"), idx, result, "手动退款-登记人"),
             "is_refunded": "是" if raw_refunded == "是" else "否",
-            "refund_amount": _to_decimal(data.get("refund_amount")),
+            "refund_amount": refund_amount,
             "refund_operator": _sanitize_name_field(data.get("refund_operator"), idx, result, "手动退款-退款操作人"),
             "op_time": op_time,
             "remark": remark or None,
