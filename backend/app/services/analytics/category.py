@@ -85,8 +85,12 @@ def _fetch_dim_devices(db: Session, dim: str) -> dict[str, dict[str, Any]]:
     return {r.key or "未归一": {"device_cnt": int(r.device_cnt)} for r in db.execute(stmt)}
 
 
-def _fetch_active_devices(db: Session, since: datetime) -> set[str]:
-    """近 N 天有充值或流量的设备 SN 集合。"""
+def _fetch_active_devices(db: Session, since: datetime, end: datetime) -> set[str]:
+    """窗口内(since~end, 含端点)有充值或流量的设备 SN 集合。
+
+    #293: 补 end 上界——修复前只过滤 >=since, 「上月窗口」实际查到全量至今,
+    环比全线假降 60-85%。
+    """
     # 质检套餐排除(#293): 出厂质检流水非真实充值, 不应计入充值活跃
     not_qc = DeviceCombo.package_name.notilike("%质检%")
     # 充值活跃
@@ -96,10 +100,11 @@ def _fetch_active_devices(db: Session, since: datetime) -> set[str]:
             select(distinct(DeviceCombo.device_sn))
             .where(DeviceCombo.device_sn.isnot(None))
             .where(DeviceCombo.created_at_raw >= since)
+            .where(DeviceCombo.created_at_raw <= end)
             .where(not_qc)
         )
     }
-    # 流量活跃(最近完整月有流量记录)
+    # 流量活跃(窗口覆盖的完整月有流量记录)
     fl = {
         r[0]
         for r in db.execute(
@@ -107,12 +112,13 @@ def _fetch_active_devices(db: Session, since: datetime) -> set[str]:
             .where(DeviceFlowUsage.device_sn.isnot(None))
             .where(DeviceFlowUsage.month_complete.is_(True))
             .where(DeviceFlowUsage.stat_month >= since.strftime("%Y-%m"))
+            .where(DeviceFlowUsage.stat_month <= end.strftime("%Y-%m"))
         )
     }
     return rc | fl
 
 
-def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime) -> dict[str, dict[str, Any]]:
+def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime, end: datetime) -> dict[str, dict[str, Any]]:
     """窗口内充值笔数/金额, 按维度聚合。
 
     #293: 排除「质检」套餐(package_name LIKE '%质检%') —— 设备出厂质检流程记录
@@ -131,6 +137,7 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime) -> dict[str, 
             .select_from(DeviceCombo)
             .join(Device, Device.sn == DeviceCombo.device_sn)
             .where(DeviceCombo.created_at_raw >= since)
+            .where(DeviceCombo.created_at_raw <= end)
             .where(not_qc)
             .group_by(Device.device_type)
         )
@@ -142,6 +149,7 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime) -> dict[str, 
                 func.coalesce(func.sum(DeviceCombo.actual_amount), 0).label("amount"),
             )
             .where(DeviceCombo.created_at_raw >= since)
+            .where(DeviceCombo.created_at_raw <= end)
             .where(not_qc)
             .group_by(DeviceCombo.package_name)
         )
@@ -156,6 +164,7 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime) -> dict[str, 
             .select_from(DeviceCombo)
             .join(Device, Device.sn == DeviceCombo.device_sn)
             .where(DeviceCombo.created_at_raw >= since)
+            .where(DeviceCombo.created_at_raw <= end)
             .where(not_qc)
             .where(Device.merchant_name.isnot(None))
             .group_by(Device.merchant_name)
@@ -169,11 +178,12 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime) -> dict[str, 
     }
 
 
-def _fetch_refund_by_dim(db: Session, dim: str, since: datetime) -> dict[str, int]:
+def _fetch_refund_by_dim(db: Session, dim: str, since: datetime, end: datetime) -> dict[str, int]:
     """窗口内实际退款笔数(口径A), 按维度聚合。
 
     #293: 加 status 口径A过滤(NOT IN 无需退款/驳回/申请中), 与退款分析 4442e89 对齐;
     修复前把申请中/登记类全算进「退款笔数」, 近30天夸 ~40%。
+    #293: 补 end 上界(与充值/活跃同窗)。
     """
     # 口径A: 排除非实际退款状态(与 refund.py 10 处 NOT IN 同模式)
     actual_refund_cond = (
@@ -185,6 +195,7 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime) -> dict[str, in
             .select_from(Refund)
             .join(Device, Device.sn == Refund.device_sn)
             .where(Refund.created_at_raw >= since)
+            .where(Refund.created_at_raw <= end)
             .where(actual_refund_cond)
             .group_by(Device.device_type)
         )
@@ -196,6 +207,7 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime) -> dict[str, in
             .select_from(Refund)
             .join(Device, Device.sn == Refund.device_sn)
             .where(Refund.created_at_raw >= since)
+            .where(Refund.created_at_raw <= end)
             .where(actual_refund_cond)
             .group_by(Device.current_combo_name)
         )
@@ -206,6 +218,7 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime) -> dict[str, in
             .select_from(Refund)
             .join(Device, Device.sn == Refund.device_sn)
             .where(Refund.created_at_raw >= since)
+            .where(Refund.created_at_raw <= end)
             .where(actual_refund_cond)
             .where(Device.merchant_name.isnot(None))
             .group_by(Device.merchant_name)
@@ -216,8 +229,8 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime) -> dict[str, in
     return {r.key or "未归一": int(r.cnt) for r in db.execute(stmt)}
 
 
-def _fetch_complaint_by_dim(db: Session, dim: str, since: datetime) -> dict[str, int]:
-    """近 N 天投诉数, 按维度聚合(complaint_scope 唯一出口)。"""
+def _fetch_complaint_by_dim(db: Session, dim: str, since: datetime, end: datetime) -> dict[str, int]:
+    """窗口内投诉数, 按维度聚合(complaint_scope 唯一出口)。#293: 补 end 上界。"""
     base_cond = complaint_scope.is_complaint_ticket_cond(ServiceTicket.service_category)
     if dim == "device_type":
         stmt = (
@@ -226,6 +239,7 @@ def _fetch_complaint_by_dim(db: Session, dim: str, since: datetime) -> dict[str,
             .join(Device, Device.sn == ServiceTicket.device_sn)
             .where(base_cond)
             .where(ServiceTicket.register_time >= since)
+            .where(ServiceTicket.register_time <= end)
             .group_by(Device.device_type)
         )
     elif dim == "combo":
@@ -236,6 +250,7 @@ def _fetch_complaint_by_dim(db: Session, dim: str, since: datetime) -> dict[str,
             .join(Device, Device.sn == ServiceTicket.device_sn)
             .where(base_cond)
             .where(ServiceTicket.register_time >= since)
+            .where(ServiceTicket.register_time <= end)
             .group_by(Device.current_combo_name)
         )
     elif dim == "merchant":
@@ -246,6 +261,7 @@ def _fetch_complaint_by_dim(db: Session, dim: str, since: datetime) -> dict[str,
             .join(Device, Device.sn == ServiceTicket.device_sn)
             .where(base_cond)
             .where(ServiceTicket.register_time >= since)
+            .where(ServiceTicket.register_time <= end)
             .where(Device.merchant_name.isnot(None))
             .group_by(Device.merchant_name)
         )
@@ -306,10 +322,10 @@ def category_ops_overview(
     start = start or (end - timedelta(days=90))
 
     devices = _fetch_dim_devices(db, dim)
-    active_sns = _fetch_active_devices(db, start)
-    recharges = _fetch_recharge_by_dim(db, dim, start)
-    refunds = _fetch_refund_by_dim(db, dim, start)
-    complaints = _fetch_complaint_by_dim(db, dim, start)
+    active_sns = _fetch_active_devices(db, start, end)
+    recharges = _fetch_recharge_by_dim(db, dim, start, end)
+    refunds = _fetch_refund_by_dim(db, dim, start, end)
+    complaints = _fetch_complaint_by_dim(db, dim, start, end)
 
     # 活跃设备按维度归属(需要设备→维度映射, 用 Python 侧聚合)
     # 先取设备→维度 key 映射
