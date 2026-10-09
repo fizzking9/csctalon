@@ -1,4 +1,17 @@
-"""退款挽回/人员/设备/决策 + 手动退款质检 + 导出 + 退款挽回主分析。"""
+"""退款挽回/人员/设备/决策 + 手动退款质检 + 导出 + 退款挽回主分析。
+
+## 退款状态口径（#293 拍板 2026-10-09，用户口径）
+
+**退款分析 = 只管实际退款（钱已退）**：
+- 纳入: status='已退款' + status 为空但记录真实存在（源数据状态列未填, 5,576 条有金额, 排除式可保住）
+- 排除: '无需退款'(登记类, 零额为主) / '驳回' / '申请中'(钱未退, 件均稀释 17%)
+- 落地: 全文 10 处 `NOT IN ('无需退款','驳回','申请中')` 排除式过滤
+- **不改**的例外: L2764/L2951 is_abandon 放弃分析（申请中=放弃, 语义正确）;
+  cash.py 状态分布（全状态口径）; A 路导出明细（全量供人工分析）;
+  refund_chain 对账函数（自带 online_refunded_only 开关）
+- 对账关系: 本口径 ⊃ 宽表 main（线上+已退款）—— 差集=线下已退款+状态未填, 与 refund_wide
+  对账时按 refund_method='线上' 收窄即可对齐
+"""
 
 import datetime as _dt
 import logging
@@ -227,7 +240,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
             JOIN host_sns hs ON r.device_sn = hs.sn
             WHERE r.created_at_raw IS NOT NULL
               AND r.device_sn IS NOT NULL
-              AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
+              AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
         ),
         ticket_sn AS (
@@ -308,7 +321,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
           AND r.device_sn IS NOT NULL
           AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
-          AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
+          AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
         """
     ), {"ts": ts, "te7": te7, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall():
         if not r.sn or not r.op:
@@ -563,7 +576,7 @@ def refund_person_devices(
             WHERE r.created_at_raw IS NOT NULL
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
               AND r.device_sn = ANY(:sn_arr)
-              AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
+              AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
             """
         ), {"ts": cur_s, "te7": cur_e, "sn_arr": list(host_sns)}).fetchall():
             if not r.sn:
@@ -738,7 +751,7 @@ def refund_device_analysis(
             SELECT r.refund_no, r.created_at_raw, r.status
             FROM refunds r
             WHERE r.device_sn = :sn AND r.created_at_raw IS NOT NULL
-              AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
+              AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
             ORDER BY r.created_at_raw DESC LIMIT 1
             """
         ), {"sn": sn}).fetchone()
@@ -2438,7 +2451,7 @@ def refund_recovery_analysis(
             JOIN host_sns hs ON r.device_sn = hs.sn
             WHERE r.created_at_raw IS NOT NULL
               AND r.device_sn IS NOT NULL
-              AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')  -- 无需退款/驳回不算失败
+              AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')  -- 非实际退款(无需退款/驳回/申请中)不算失败(#293 口径: 只管实际退款)
               -- 不限制operator和refund_method：任何方式的退款、任何人操作都算失败
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
         ),
@@ -2543,7 +2556,7 @@ def refund_recovery_analysis(
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
           AND r.device_sn IS NOT NULL
           AND r.operator IS NOT NULL AND NOT (r.operator = ANY(:sys_bl))
-          AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
+          AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
         """
     ), {"ts": ts, "te7": te7, "sys_bl": list(SYS_OP_BLACKLIST_RR)}).fetchall():
         if not r.sn or not r.op:
@@ -2806,7 +2819,7 @@ def refund_recovery_analysis(
         "fee_ratio": round(fee_ratio, 2),  # 单量口径拦截比例, 非金额口径
         "_calc_note": {
             "denominator": "所有人员(含专职退款挽回专员、组长/主管、其他人员)接待的 problem_category='退款' 的SN去重总数 (不限制problem_type: 网络问题/不想用了/设备故障/其他等所有退款理由均计入)",
-            "failed_rule": "分母SN 中, 在 [该SN最早接待时间, 最早接待时间+7天] T+7窗口内满足任一即判失败: 1)refunds表且status≠无需退款/驳回; 2)service_tickets退款类工单且status≠终止; 3)cs_record描述含退款流程关键词(退款说明/退款后重新充值/要求退回微信/非挽回用户)——大量企微退款操作未同步到refunds表,通过cs_record描述关键词补充判定",
+            "failed_rule": "分母SN 中, 在 [该SN最早接待时间, 最早接待时间+7天] T+7窗口内满足任一即判失败: 1)refunds表且status≠无需退款/驳回/申请中(#293 口径: 只算实际退款); 2)service_tickets退款类工单且status≠终止; 3)cs_record描述含退款流程关键词(退款说明/退款后重新充值/要求退回微信/非挽回用户)——大量企微退款操作未同步到refunds表,通过cs_record描述关键词补充判定",
             "success_rule": "「分母SN」 − 「失败SN」 → 挽留成功 (即接待过但最终没走到退款流程, 被沟通拦截下来; 专职挽回和组长/主管/其他人员的挽回均计入)",
             "t_window_note": "T+7窗口已关闭的历史数据(≥7天前接待)成功率才准确; 最近7天接待的数据因部分退款还在流程中,成功率会偏高属于正常",
             "staff_type_def": "专职挽回: Person.specialty=退款挽回的人员; 其他人员挽回: 非专职人员(组长/主管/咨询/套餐/投诉等)接待退款类SN且未产生退款; 退款操作: 仅执行退款操作(refunds.operator)无接待的人员",
@@ -2907,7 +2920,7 @@ def refund_recovery_analysis(
             WHERE r.created_at_raw IS NOT NULL
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
               AND r.device_sn IS NOT NULL
-              AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
+              AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
             UNION ALL
             SELECT st.device_sn AS sn,
                    'ticket' AS src, st.service_item AS reason,
@@ -2977,7 +2990,7 @@ def refund_recovery_analysis(
                 WHERE r.created_at_raw IS NOT NULL
                   AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
                   AND r.device_sn = ANY(:sn_arr)
-                  AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
+                  AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
                 UNION ALL
                 SELECT st.device_sn AS sn,
                        DATE(st.register_time AT TIME ZONE 'Asia/Shanghai') AS day
@@ -3077,7 +3090,7 @@ def refund_recovery_analysis(
                 FROM refunds r
                 WHERE r.created_at_raw IS NOT NULL
                   AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
-                  AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
+                  AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
                   AND r.device_sn IS NOT NULL
                 UNION
                 SELECT st.device_sn AS sn
@@ -3163,7 +3176,7 @@ def refund_recovery_analysis(
                 """
                 WITH arr AS (SELECT unnest(CAST(:sn_arr AS text[])) AS sn)
                 SELECT DISTINCT r.device_sn AS sn FROM refunds r JOIN arr a ON r.device_sn = a.sn
-                 WHERE COALESCE(r.status, '') NOT IN ('无需退款', '驳回')
+                 WHERE COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
                 UNION
                 SELECT DISTINCT st.device_sn AS sn FROM service_tickets st JOIN arr a ON st.device_sn = a.sn
                  WHERE COALESCE(st.service_category,'') = '退款' AND COALESCE(st.status, '') != '终止'
