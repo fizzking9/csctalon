@@ -37,19 +37,16 @@ class TicketActionLog(IDMixin, TimestampMixin, Base):
     )
     action_type: Mapped[str] = mapped_column(
         String(32),
-        index=True,
         nullable=False,
         comment="动作类型:登记/派发/转派/催单/结单/取消/重开/改状态/改处理人/改服务项/上游更新/备注更新",
     )
     operator: Mapped[str | None] = mapped_column(
         String(64),
-        index=True,
         nullable=True,
         comment="操作人(中文姓名/企微名/系统/system)",
     )
     action_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        index=True,
         nullable=False,
         comment="动作发生时间 (登记/派发/催单那一刻,不是落库时间)",
     )

@@ -35,7 +35,7 @@ class MerchantRefund(IDMixin, TimestampMixin, Base):
     )
     wx_order_no: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="微信订单号")
     merchant_order_no: Mapped[str | None] = mapped_column(
-        String(128), index=True, nullable=True, comment="商户订单号(关联退费单.平台订单号)"
+        String(128), nullable=True, comment="商户订单号(关联退费单.平台订单号)"
     )
     user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="用户标识")
     trade_type: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="交易类型:JSAPI")

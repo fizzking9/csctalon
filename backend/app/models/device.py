@@ -74,7 +74,7 @@ class Device(TimestampMixin, Base):
     current_combo_name: Mapped[str | None] = mapped_column(
         String(128), nullable=True, comment="当前套餐"
     )
-    start_iccid: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="启动卡ICCID")
+    start_iccid: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="启动卡ICCID")
     virtual_iccid: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="虚拟卡ICCID")
     app_version: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="应用版本")
     region: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="区域")

@@ -42,7 +42,7 @@ class DataMatchRelation(IDMixin, TimestampMixin, Base):
 
     __tablename__ = "data_match_relations"
 
-    src_table: Mapped[str] = mapped_column(String(32), index=True, nullable=False, comment="源表:refund/ticket/wallet/merchant_refund")
+    src_table: Mapped[str] = mapped_column(String(32), nullable=False, comment="源表:refund/ticket/wallet/merchant_refund")
     src_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False, comment="源表主键值")
     dst_table: Mapped[str] = mapped_column(String(32), index=True, nullable=False, comment="目标表")
     dst_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False, comment="目标表主键值")

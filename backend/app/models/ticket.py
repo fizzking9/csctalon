@@ -64,7 +64,7 @@ class ServiceTicket(QualityMixin, TimestampMixin, Base):
     #   用于区分「上游 BMS/SCRM 真的改了这张单」还是「我们的同步任务每天扫表覆盖」,
     #   区别于 TimestampMixin.updated_at (所有 ORM save 都会改) 和 finish_time (89% 被批量覆盖不可靠)。
     synced_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True,
+        DateTime(timezone=True), nullable=True,
         comment="最后一次被导入/同步任务写入时间(每次 upsert 强制 now())",
     )
     # updated_by_raw: 上游 BMS/SCRM 导出的「更新人/最后操作人」原样保留,

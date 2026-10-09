@@ -29,7 +29,7 @@ class CashFlowWide(TimestampMixin, Base):
     # ── 路别 & 业务标识 ─────────────────────────────────────────
     route: Mapped[str] = mapped_column(String(1), index=True, comment="路线: A=线上直退/B=钱包提现/C=闪猫退款/D=手动退款")
     # 来源表业务单号(A=refund_no / C=shanmao.refund_no / D=manual.order_no / B=wallet.remark解析RF或空)
-    biz_no: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True, comment="业务单号(各表最强键,尽力而为)")
+    biz_no: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="业务单号(各表最强键,尽力而为)")
     # 来源表主键(精确定位回源): A=refund_no / B=wallet.id / C=shanmao.refund_no / D=manual.id
     src_id: Mapped[str] = mapped_column(String(128), index=True, comment="来源表主键(精确定位回源)")
 
