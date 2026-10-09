@@ -89,21 +89,50 @@ def status(db: DBSession, _: AdminUser):
 
 
 class MonthRequest(BaseModel):
-    month: str  # YYYY-MM, 单次仅一个自然月(BMS 页面窗口限制)
+    """窗口参数: month(自然月) 或 start_date/end_date(任意窗口, 跨度≤31天) 二选一。
+
+    实测(2026-10-09): 31 天整月导出 BMS 后台生成 CSV 超 300s 下载超时 →
+    建议 slice 用 **≤10 天**窗口(调用方逐窗调用, 窗间冷却 ≥90s)。
+    """
+    month: str | None = None
+    start_date: str | None = None  # YYYY-MM-DD
+    end_date: str | None = None  # YYYY-MM-DD(含当日, 闭区间)
     apply: bool = False  # false=仅返回窗口计划, 不访问 BMS
 
 
-@router.post("/month", response_model=R, summary="回填单个自然月的 bms_order(admin, 窗口≤1月)")
-async def backfill_month(req: MonthRequest, db: DBSession, _: AdminUser):
-    """执行**单月**窗口回填(复用 sync_all manual 链路)。
+def _resolve_window(req: MonthRequest) -> tuple[datetime, datetime, str]:
+    """解析请求 → (窗口起, 窗口止, 窗口标签), 校验跨度 ≤31 天。"""
+    if req.start_date or req.end_date:
+        if not (req.start_date and req.end_date):
+            raise HTTPException(422, "start_date 与 end_date 必须成对给出")
+        try:
+            w_start = datetime.strptime(req.start_date, "%Y-%m-%d").replace(tzinfo=TZ)
+            w_end = datetime.strptime(req.end_date, "%Y-%m-%d").replace(
+                hour=23, minute=59, second=59, tzinfo=TZ)
+        except ValueError as e:
+            raise HTTPException(422, f"日期格式应为 YYYY-MM-DD: {e}") from e
+        label = f"{req.start_date}~{req.end_date}"
+    elif req.month:
+        w_start, w_end = _month_window(req.month)
+        label = req.month
+    else:
+        raise HTTPException(422, "需提供 month 或 start_date/end_date")
+    if (w_end - w_start).total_seconds() > 31 * 86400:
+        raise HTTPException(422, "窗口跨度超过 31 天(BMS 页面时间窗口限制), 请切细窗口")
+    return w_start, w_end, label
 
-    ⚠️ 多月回填请逐月调用, 每次间隔 ≥90s(BMS 同系统 1 分钟频控);
+
+@router.post("/month", response_model=R, summary="回填 bms_order 指定窗口(admin, ≤31天, 建议≤10天)")
+async def backfill_month(req: MonthRequest, db: DBSession, _: AdminUser):
+    """执行**单窗口**回填(复用 sync_all manual 链路)。
+
+    ⚠️ 整月(31天)导出实测超时 → 建议按 ≤10 天切窗逐窗调用, 窗间冷却 ≥90s;
     ⚠️ 避开每日凌晨批次(约 00:00-01:00 北京)防止与定时同步撞频控。
     """
-    w_start, w_end = _month_window(req.month)
+    w_start, w_end, label = _resolve_window(req)
     if not req.apply:
         return R(data={
-            "month": req.month,
+            "window_label": label,
             "apply": False,
             "window": {"start": w_start.isoformat(), "end": w_end.isoformat()},
             "baseline": _baseline(db),
@@ -116,9 +145,9 @@ async def backfill_month(req: MonthRequest, db: DBSession, _: AdminUser):
     )
     r = results[0] if results else {"success": False, "error": "sync_all 无返回"}
     return R(data={
-        "month": req.month,
+        "window_label": label,
         "apply": True,
         "window": {"start": w_start.isoformat(), "end": w_end.isoformat()},
         "result": r,
         "baseline_after": _baseline(db),
-    }, message=f"{req.month} 回填{'成功' if r.get('success') else '失败'}")
+    }, message=f"{label} 回填{'成功' if r.get('success') else '失败'}")
