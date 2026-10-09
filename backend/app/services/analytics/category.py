@@ -7,8 +7,14 @@
   指标统一为「规模→活跃→营收→风险」四级, 对标正规商业运营:
   ① 规模: 设备数; ② 活跃: 近90天有充值或流量的设备数;
   ③ 营收: 近90天充值金额(Decimal); ④ 风险: 近30天退款笔数/投诉数/投诉率。
-- 口径: 设备类型走 devices.device_type_code(B3-1 归一); 套餐走 combo_dict
-  归一码(B3-2, 未命中回落原始名); 商户号走 devices.merchant_name(#271);
+- 口径(#293 改): ① 全部活动量列(活跃/充值/退款/投诉)由 start/end **单一窗口**驱动,
+  不再硬编码 90/30 天拼盘(与运营分析看板 grain 标准对齐);
+  ② 退款 = 实际退款口径A: NOT IN (无需退款/驳回/申请中)(与退款分析 4442e89 对齐,
+  修复前含申请中夸 ~40%);
+  ③ 设备类型 key 改 devices.device_type(中文名) —— device_type_code 全表 0 非空,
+  旧口径 704,139 台全部落「未归一」一桶, 分类功能失效(#293 实测);
+  设备数=存量语义(devices 全量按维度分组); 投诉率分母=窗口内活跃设备(同窗可比)。
+- 商户号走 devices.merchant_name(#271);
   投诉走 complaint_scope 唯一出口; 充值金额走 device_combos
   actual_amount(Numeric(12,2)元, Decimal 计算, 出参 float)。
 - 取舍(不做什么及原因): ① 不做转化漏斗(需埋点/订单状态机, 当前数据面无);
@@ -28,7 +34,7 @@ from sqlalchemy import distinct, func, select
 from sqlalchemy.orm import Session
 
 from app.models.combo_dict import ComboDict, ComboNameAlias
-from app.models.device import Device, DimDeviceType
+from app.models.device import Device
 from app.models.device_combo import DeviceCombo
 from app.models.device_flow_usage import DeviceFlowUsage
 
@@ -44,14 +50,15 @@ def _date_str(dt: datetime) -> str:
 
 
 def _fetch_dim_devices(db: Session, dim: str) -> dict[str, dict[str, Any]]:
-    """按维度聚合设备数。"""
+    """按维度聚合设备数(存量语义: devices 全量)。"""
     if dim == "device_type":
+        # #293: key 改 device_type(中文名) —— device_type_code 全表 0 非空, 旧 key 分类失效
         stmt = (
             select(
-                Device.device_type_code.label("key"),
+                Device.device_type.label("key"),
                 func.count(Device.sn).label("device_cnt"),
             )
-            .group_by(Device.device_type_code)
+            .group_by(Device.device_type)
         )
     elif dim == "combo":
         # 套餐: 设备当前套餐名 → 归一码
@@ -107,14 +114,14 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime) -> dict[str, 
     if dim == "device_type":
         stmt = (
             select(
-                Device.device_type_code.label("key"),
+                Device.device_type.label("key"),
                 func.count().label("cnt"),
                 func.coalesce(func.sum(DeviceCombo.actual_amount), 0).label("amount"),
             )
             .select_from(DeviceCombo)
             .join(Device, Device.sn == DeviceCombo.device_sn)
             .where(DeviceCombo.created_at_raw >= since)
-            .group_by(Device.device_type_code)
+            .group_by(Device.device_type)
         )
     elif dim == "combo":
         stmt = (
@@ -150,14 +157,23 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime) -> dict[str, 
 
 
 def _fetch_refund_by_dim(db: Session, dim: str, since: datetime) -> dict[str, int]:
-    """近 N 天退款笔数, 按维度聚合。"""
+    """窗口内实际退款笔数(口径A), 按维度聚合。
+
+    #293: 加 status 口径A过滤(NOT IN 无需退款/驳回/申请中), 与退款分析 4442e89 对齐;
+    修复前把申请中/登记类全算进「退款笔数」, 近30天夸 ~40%。
+    """
+    # 口径A: 排除非实际退款状态(与 refund.py 10 处 NOT IN 同模式)
+    actual_refund_cond = (
+        func.coalesce(Refund.status, "").notin_(("无需退款", "驳回", "申请中"))
+    )
     if dim == "device_type":
         stmt = (
-            select(Device.device_type_code.label("key"), func.count().label("cnt"))
+            select(Device.device_type.label("key"), func.count().label("cnt"))
             .select_from(Refund)
             .join(Device, Device.sn == Refund.device_sn)
             .where(Refund.created_at_raw >= since)
-            .group_by(Device.device_type_code)
+            .where(actual_refund_cond)
+            .group_by(Device.device_type)
         )
     elif dim == "combo":
         # #270: 去掉 JOIN device_combos（充值流水一对多导致退款重复计数 2.5x），
@@ -167,6 +183,7 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime) -> dict[str, in
             .select_from(Refund)
             .join(Device, Device.sn == Refund.device_sn)
             .where(Refund.created_at_raw >= since)
+            .where(actual_refund_cond)
             .group_by(Device.current_combo_name)
         )
     elif dim == "merchant":
@@ -176,6 +193,7 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime) -> dict[str, in
             .select_from(Refund)
             .join(Device, Device.sn == Refund.device_sn)
             .where(Refund.created_at_raw >= since)
+            .where(actual_refund_cond)
             .where(Device.merchant_name.isnot(None))
             .group_by(Device.merchant_name)
         )
@@ -190,12 +208,12 @@ def _fetch_complaint_by_dim(db: Session, dim: str, since: datetime) -> dict[str,
     base_cond = complaint_scope.is_complaint_ticket_cond(ServiceTicket.service_category)
     if dim == "device_type":
         stmt = (
-            select(Device.device_type_code.label("key"), func.count().label("cnt"))
+            select(Device.device_type.label("key"), func.count().label("cnt"))
             .select_from(ServiceTicket)
             .join(Device, Device.sn == ServiceTicket.device_sn)
             .where(base_cond)
             .where(ServiceTicket.register_time >= since)
-            .group_by(Device.device_type_code)
+            .group_by(Device.device_type)
         )
     elif dim == "combo":
         # #270: 同退款修复，去掉 JOIN device_combos 放大，按 current_combo_name 分组
@@ -225,12 +243,12 @@ def _fetch_complaint_by_dim(db: Session, dim: str, since: datetime) -> dict[str,
 
 
 def _resolve_dim_name(db: Session, dim: str, key: str) -> str:
-    """维度 key → 显示名(归一码查字典, 未命中回落原始名)。"""
+    """维度 key → 显示名。
+
+    #293: device_type key 已改中文名(device_type), 无需再查归一码字典, 直接回落 key。
+    """
     if dim == "device_type":
-        r = db.execute(
-            select(DimDeviceType.type_name).where(DimDeviceType.type_code == key)
-        ).scalar_one_or_none()
-        return r or key
+        return key
     if dim == "combo":
         # 原始名 → 归一码 → 标准名
         alias = db.execute(
@@ -261,7 +279,11 @@ def category_ops_overview(
 
     返回 {dim, start, end, items: [{key, name, device_cnt, active_cnt,
     recharge_cnt, recharge_amount, refund_cnt, complaint_cnt, complaint_rate}]}。
-    投诉率 = complaint_cnt / device_cnt * 100 (每百台)。
+
+    #293 口径: 活跃/充值/退款/投诉 **全部由 start/end 单一窗口驱动**(不再 90/30 拼盘,
+    与运营分析看板 grain 标准对齐); 退款=口径A(实际退款); 设备数=存量语义;
+    投诉率 = complaint_cnt / active_cnt * 100 (分母=窗口内活跃设备, 同窗可比;
+    旧口径分母=全量存量含50万台历史设备, 投诉率被稀释失真)。
     """
     if dim not in ("device_type", "combo", "merchant"):
         raise ValueError(f"dim must be device_type/combo/merchant, got {dim}")
@@ -269,22 +291,20 @@ def category_ops_overview(
     now = datetime.now(UTC)
     end = end or now
     start = start or (end - timedelta(days=90))
-    # 活跃/充值/退款/投诉回看窗口
-    active_since = end - timedelta(days=90)
-    risk_since = end - timedelta(days=30)
 
     devices = _fetch_dim_devices(db, dim)
-    active_sns = _fetch_active_devices(db, active_since)
-    recharges = _fetch_recharge_by_dim(db, dim, active_since)
-    refunds = _fetch_refund_by_dim(db, dim, risk_since)
-    complaints = _fetch_complaint_by_dim(db, dim, risk_since)
+    active_sns = _fetch_active_devices(db, start)
+    recharges = _fetch_recharge_by_dim(db, dim, start)
+    refunds = _fetch_refund_by_dim(db, dim, start)
+    complaints = _fetch_complaint_by_dim(db, dim, start)
 
     # 活跃设备按维度归属(需要设备→维度映射, 用 Python 侧聚合)
     # 先取设备→维度 key 映射
     if dim == "device_type":
+        # #293: key 改 device_type(中文名), 与 _fetch_dim_devices 同源
         sn_to_key = {
             r.sn: r.key or "未归一"
-            for r in db.execute(select(Device.sn, Device.device_type_code.label("key")))
+            for r in db.execute(select(Device.sn, Device.device_type.label("key")))
         }
     elif dim == "combo":
         sn_to_key = {
@@ -312,12 +332,14 @@ def category_ops_overview(
         rf = refunds.get(key, 0)
         cp = complaints.get(key, 0)
         device_cnt = d["device_cnt"]
-        complaint_rate = round(cp / device_cnt * 100, 2) if device_cnt else 0.0
+        # #293: 投诉率分母改窗口内活跃设备(同窗可比), 旧口径分母=全量存量被稀释失真
+        active_cnt = active_by_dim.get(key, 0)
+        complaint_rate = round(cp / active_cnt * 100, 2) if active_cnt else 0.0
         items.append({
             "key": key,
             "name": _resolve_dim_name(db, dim, key),
             "device_cnt": device_cnt,
-            "active_cnt": active_by_dim.get(key, 0),
+            "active_cnt": active_cnt,
             "recharge_cnt": rc["recharge_cnt"],
             "recharge_amount": float(rc["recharge_amount"]),
             "refund_cnt": rf,

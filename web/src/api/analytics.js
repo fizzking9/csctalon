@@ -28,8 +28,8 @@ export const category = {
   package: (params) => request.get('/analytics/category/package', { params }),
 }
 
-// 分品类运营看板 (#254 B3-10): 设备类型/套餐(归一)/商户号 三维聚合运营 KPI
-// 窗口由后端固定(活跃/充值 90 天, 退款/投诉 30 天), 前端只传 dim + limit
+// 分品类运营看板 (#254 B3-10 / #293 改): 设备类型/套餐(归一)/商户号 三维聚合运营 KPI
+// #293: 全部活动量列由 start/end 单一窗口驱动(前端传 grain 对应窗口), 退款=口径A实际退款
 export const categoryOps = {
   opsOverview: (params) => request.get('/analytics/category/ops-overview', { params }),
 }
