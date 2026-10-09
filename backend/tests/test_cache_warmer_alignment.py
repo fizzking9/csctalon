@@ -98,9 +98,10 @@ def test_staff_buckets_are_internally_consistent():
 
     from app.services import analytics as A
 
-    # 拆分后(issue #184): CAT_BUCKETS/cat_data 位于 today 子模块, 聚合全包源码供断言
+    # 拆分后(issue #184): CAT_BUCKETS/cat_data 位于 today 子模块, 递归聚合全包源码供断言
+    # (#284: glob → rglob, 否则 today/_staff.py 不被纳入, 报「未找到 CAT_BUCKETS」)
     pkg = pathlib.Path(A.__file__).parent
-    src = "\n".join(p.read_text(encoding="utf-8") for p in sorted(pkg.glob("*.py")))
+    src = "\n".join(p.read_text(encoding="utf-8") for p in sorted(pkg.rglob("*.py")))
     m = re.search(r"CAT_BUCKETS = \[(.*?)\n    \]", src, re.S)
     assert m, "未找到 CAT_BUCKETS"
     bucket_keys = re.findall(r'\("(\w+)",', m.group(1))

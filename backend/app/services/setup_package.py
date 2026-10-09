@@ -69,6 +69,38 @@ SCOPE_ENDPOINTS: dict[str, list[dict[str, str]]] = {
             "summary": "任意区间回看(历史标准周/指定整天; 单次跨度上限 93 天)",
         },
     ],
+    "recharge": [
+        {
+            "method": "GET",
+            "path": "/recharge",
+            "query": "sn=<设备SN>&start=YYYY-MM-DD&end=YYYY-MM-DD",
+            "summary": "充值套餐&流量聚合(可按 SN 或区间; 跨度≤93 天)",
+        }
+    ],
+    "device_tag": [
+        {
+            "method": "GET",
+            "path": "/device-tags",
+            "query": "sn=<设备SN>(缺省=各标签绑定 SN 数)",
+            "summary": "设备标签(单设备标签 或 全标签统计)",
+        }
+    ],
+    "device": [
+        {
+            "method": "GET",
+            "path": "/device/{sn}",
+            "query": "timeline_days=90&timeline_limit=50",
+            "summary": "单设备档案/生命周期 KPI/事件时间线",
+        }
+    ],
+    "schedule": [
+        {
+            "method": "GET",
+            "path": "/schedule",
+            "query": "start=YYYY-MM-DD&end=YYYY-MM-DD",
+            "summary": "排班×考勤区间汇总(人天/班次/出勤)",
+        }
+    ],
 }
 
 # ── scope → 提示词段(给调用方的大模型用) ──
@@ -89,6 +121,23 @@ SCOPE_PROMPTS: dict[str, str] = {
     "brief": (
         "简报口径: 一次返回接待专项 + 退款四路(含 A 路涉诉率) + 投诉三源(登记/处理/积压); "
         "优先用 brief 端点取数, 避免多次拼装导致口径漂移。"
+    ),
+    "recharge": (
+        "充值口径: recharge_count = 充值笔数; total_amount = 充值总额(元); "
+        "available_traffic/used_traffic/remaining_traffic = 可用/已用/剩余流量(字节); "
+        "unlimited_count = 无限流量包笔数(-1 不参与 GB 折算)。"
+    ),
+    "device_tag": (
+        "标签口径: 指定 SN 时返回该设备的标签绑定列表(标签名/值/绑定时间); "
+        "缺省 SN 时返回各标签的绑定设备数统计。"
+    ),
+    "device": (
+        "设备口径: 单设备生命周期档案 —— 激活时间/归属商户号/店铺/当前套餐/充值累计/ "
+        "流量使用/近 N 天事件时间线。"
+    ),
+    "schedule": (
+        "排班口径: 区间内按日期聚合人天、班次、出勤状态; "
+        "支持跨日班次和请假/调休等考勤异常标记。"
     ),
 }
 

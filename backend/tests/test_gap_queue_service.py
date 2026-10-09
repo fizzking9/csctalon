@@ -223,14 +223,22 @@ def test_close_gaps_from_import(db):
     关键: 文件内 naive 时间按北京墙钟取日 —— 凌晨 03:00 不得因 UTC 换算落到前一天。
     """
     import pandas as pd
+    from sqlalchemy import select as _sel
 
+    # 共享测试库可能已有其他用例提交的 cs_record 行(code 唯一), 直接复用并覆盖 time_field;
+    # 若再 db.add 同 code 行, autoflush=False 下服务层 scalar() 会先查到残留行(time_field 不符
+    # 导致静默跳过), 断言 NoResultFound —— 2026-10-09 #284 归因。
     from app.api.v1.uploads import _close_gaps_from_import
     from app.models.data_source import DataSource
 
-    db.add(DataSource(
-        code="cs_record", table_name="cs_records", name_cn="测试·接待",
-        time_field="created_at_raw",
-    ))
+    ds = db.scalar(_sel(DataSource).where(DataSource.code == "cs_record"))
+    if ds is None:
+        db.add(DataSource(
+            code="cs_record", table_name="cs_records", name_cn="测试·接待",
+            time_field="created_at_raw",
+        ))
+    else:
+        ds.time_field = "created_at_raw"
     # 09-03 的 open 缺口(凌晨行) + 09-02 的 open 缺口
     gq.record_from_sync_results(db, [_res("cs_record", False, error="x")])
     d2 = datetime(2026, 9, 2, 10, 0, tzinfo=TZ_CN).isoformat()
