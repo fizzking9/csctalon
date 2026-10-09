@@ -22,10 +22,10 @@
 ## 数据流
 
     调度器每日档(4:00) / scripts CLI(manual)
-      → scan_missing_sns(): SQL 扫 devices 缺字段 SN（上限 limit）
+      → scan_missing_sns(): SQL 扫 devices 缺字段 SN（上限 limit, 仅未探针或探针超30天）
       → BmsFetcher.fetch_one(session_hook=...) 登录 BMS（复用 storage_state/OCR）
       → hook: 捕获 x-token/cookies → httpx 并发 findPageList?sn=xxx
-      → apply_item(): UPDATE devices 只填空值（每 200 个 commit 短事务）
+      → apply_item(): UPDATE devices 只填空值 + profile_probe_at 打标; miss 也打标(#293)
       → 记 bms_sync_logs(data_type='device_profile_enrich') 可观测
       → 更新数>0 时失效看板缓存 pattern（缓存铁律）
 """
@@ -54,13 +54,20 @@ _run_lock = asyncio.Lock()
 
 
 def scan_missing_sns(db: Session, limit: int) -> list[str]:
-    """扫描 devices 表缺任一档案字段的 SN（幂等核心：缺什么补什么，已完整自动出队）。"""
+    """扫描 devices 表缺任一档案字段的 SN（幂等核心：缺什么补什么，已完整自动出队）。
+
+    #293 探针口径: 只看「未探针 OR 探针超 30 天」——永久 miss(BMS 查无此 SN)与
+    hit 但无套餐等设备永远无法出队, 不打探针会在每批堆积白查(2026-10-10 实测:
+    批1 hit 11018 仅 1073 台退出缺失集, 45% 为永久 miss); 30 天复探窗口给
+    后续新买套餐设备留刷新口。
+    """
     q = text("""
         SELECT d.sn FROM devices d
-        WHERE (d.device_type IS NULL OR d.device_type = '')
+        WHERE ((d.device_type IS NULL OR d.device_type = '')
            OR (d.current_combo_name IS NULL OR d.current_combo_name = '')
            OR (d.merchant_name IS NULL OR d.merchant_name = '')
-           OR d.active_time IS NULL
+           OR d.active_time IS NULL)
+          AND (d.profile_probe_at IS NULL OR d.profile_probe_at < now() - interval '30 days')
         LIMIT :lim
     """)
     return [r[0] for r in db.execute(q, {"lim": limit}).fetchall()]
@@ -89,7 +96,8 @@ def apply_item(db: Session, item: dict) -> None:
             start_iccid         = COALESCE(NULLIF(start_iccid,''), :s_iccid),
             virtual_iccid       = COALESCE(NULLIF(virtual_iccid,''), :v_iccid),
             app_version         = COALESCE(NULLIF(app_version,''), :app_ver),
-            region              = COALESCE(NULLIF(region,''), :region)
+            region              = COALESCE(NULLIF(region,''), :region),
+            profile_probe_at    = now()
         WHERE sn = :sn
     """), {
         "sn": (item.get("sn") or "").strip(),
@@ -113,6 +121,11 @@ _EMPTY_PARAMS = {
     "virtualCardIccid": "", "speedLimitSwitch": "", "versionName": "",
     "importBatchId": "", "bindStartTime": "", "bindEndTime": "",
 }
+
+
+def mark_probe_miss(db: Session, sn: str) -> None:
+    """miss(BMS 查无此 SN)也打探针(#293)——否则永久 miss 在每批堆积白查直至停滞。"""
+    db.execute(text("UPDATE devices SET profile_probe_at = now() WHERE sn = :sn"), {"sn": sn})
 
 
 def _make_session_hook(sns: list[str], concurrency: int, stats: dict):
@@ -181,6 +194,7 @@ def _make_session_hook(sns: list[str], concurrency: int, stats: dict):
                         stats["updated"] += 1
                     else:
                         stats["miss"] += 1
+                        mark_probe_miss(db, sn)
                     # 每 200 个提交一批(短事务, 避免长事务锁表)
                     if stats["queried"] % 200 == 0:
                         db.commit()

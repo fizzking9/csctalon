@@ -79,6 +79,10 @@ class Device(TimestampMixin, Base):
     app_version: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="应用版本")
     region: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="区域")
     batch_no: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="批次号")
+    # #293: 档案探针时间(SN 补全探过的时刻, 含 miss); 扫描只看未探针或超 30 天
+    profile_probe_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="档案探针时间(#293, 含 miss)"
+    )
 
     tags: Mapped[list["DeviceTag"]] = relationship(secondary=device_tag_rel, lazy="selectin")
 
