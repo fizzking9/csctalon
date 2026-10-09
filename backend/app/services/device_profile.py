@@ -87,8 +87,10 @@ def build_device_profile(db: Session, device: Device) -> dict:
         "external_complaint_count": _cnt(ExternalComplaint, ExternalComplaint.device_sn),
         "card_complaint_count": _cnt(CardComplaint, CardComplaint.device_sn),
         "combo_count": _cnt(DeviceCombo, DeviceCombo.device_sn),
+        # 累计充值金额排除质检套餐(#293): 出厂质检流水(999/9999元)非真实付费
         "combo_total_amount": round(
-            _sum(DeviceCombo, DeviceCombo.actual_amount, DeviceCombo.device_sn), 2),
+            _sum(DeviceCombo, DeviceCombo.actual_amount, DeviceCombo.device_sn,
+                 DeviceCombo.package_name.notilike("%质检%")), 2),
         "combo_remaining_bytes": int(remaining),
         "manual_refund_count": _cnt(ManualRefund, ManualRefund.device_sn),
         "shanmao_refund_count": _cnt(ShanmaoRefund, ShanmaoRefund.device_sn),

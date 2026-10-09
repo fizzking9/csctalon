@@ -87,6 +87,8 @@ def _fetch_dim_devices(db: Session, dim: str) -> dict[str, dict[str, Any]]:
 
 def _fetch_active_devices(db: Session, since: datetime) -> set[str]:
     """近 N 天有充值或流量的设备 SN 集合。"""
+    # 质检套餐排除(#293): 出厂质检流水非真实充值, 不应计入充值活跃
+    not_qc = DeviceCombo.package_name.notilike("%质检%")
     # 充值活跃
     rc = {
         r[0]
@@ -94,6 +96,7 @@ def _fetch_active_devices(db: Session, since: datetime) -> set[str]:
             select(distinct(DeviceCombo.device_sn))
             .where(DeviceCombo.device_sn.isnot(None))
             .where(DeviceCombo.created_at_raw >= since)
+            .where(not_qc)
         )
     }
     # 流量活跃(最近完整月有流量记录)
@@ -110,7 +113,14 @@ def _fetch_active_devices(db: Session, since: datetime) -> set[str]:
 
 
 def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime) -> dict[str, dict[str, Any]]:
-    """近 N 天充值金额/笔数, 按维度聚合。"""
+    """窗口内充值笔数/金额, 按维度聚合。
+
+    #293: 排除「质检」套餐(package_name LIKE '%质检%') —— 设备出厂质检流程记录
+    (单笔 999/9999 元, 2026-10 达 7,948 笔/881 万, 占当期流水 57.5%), 非真实营收;
+    修复前 CategoryBoard 充值金额虚高 ~2.4 倍。
+    """
+    # 质检套餐排除条件(出厂质检, 非用户付费)
+    not_qc = DeviceCombo.package_name.notilike("%质检%")
     if dim == "device_type":
         stmt = (
             select(
@@ -121,6 +131,7 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime) -> dict[str, 
             .select_from(DeviceCombo)
             .join(Device, Device.sn == DeviceCombo.device_sn)
             .where(DeviceCombo.created_at_raw >= since)
+            .where(not_qc)
             .group_by(Device.device_type)
         )
     elif dim == "combo":
@@ -131,6 +142,7 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime) -> dict[str, 
                 func.coalesce(func.sum(DeviceCombo.actual_amount), 0).label("amount"),
             )
             .where(DeviceCombo.created_at_raw >= since)
+            .where(not_qc)
             .group_by(DeviceCombo.package_name)
         )
     elif dim == "merchant":
@@ -144,6 +156,7 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime) -> dict[str, 
             .select_from(DeviceCombo)
             .join(Device, Device.sn == DeviceCombo.device_sn)
             .where(DeviceCombo.created_at_raw >= since)
+            .where(not_qc)
             .where(Device.merchant_name.isnot(None))
             .group_by(Device.merchant_name)
         )
