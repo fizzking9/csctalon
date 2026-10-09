@@ -1154,17 +1154,23 @@ def _device_dim_matched_sns(
     sn_sets: list[set[str]] = []
 
     # ── 设备类型 / 套餐: bms_orders 最新订单(create_date DESC 取首条)字段 ──
+    # 修复(#293): ① distinct_on() 不是 Select 的方法(PG DISTINCT ON 应写 .distinct(expr)),
+    #   自 #292 引入以来投诉积压/退款链条页选「设备类型/套餐」筛选即 500;
+    # ② 类型/套餐筛选必须作用在「每台设备最新订单」**之后**(外层 where)——若放在同一
+    #   select 里, WHERE 先于 DISTINCT ON 执行, 语义变成"曾有该类型订单即命中",
+    #   与 #292 口径「最新订单的类型」不符(命中集偏大)。
     if device_type or combo:
-        latest_sq = (
+        latest_sub = (
             select(BmsOrder.device_sn, BmsOrder.device_type_name, BmsOrder.combo_name)
             .where(BmsOrder.device_sn.isnot(None))
-            .distinct_on(BmsOrder.device_sn)
+            .distinct(BmsOrder.device_sn)
             .order_by(BmsOrder.device_sn, BmsOrder.create_date.desc().nullslast())
-        )
+        ).subquery()
+        latest_sq = select(latest_sub.c.device_sn)
         if device_type:
-            latest_sq = latest_sq.where(BmsOrder.device_type_name == device_type)
+            latest_sq = latest_sq.where(latest_sub.c.device_type_name == device_type)
         if combo:
-            latest_sq = latest_sq.where(BmsOrder.combo_name == combo)
+            latest_sq = latest_sq.where(latest_sub.c.combo_name == combo)
         sn_sets.append({s for s in db.scalars(latest_sq).all() if s})
 
     # ── 商户号: devices.merchant_name(设备归属) ──
