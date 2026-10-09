@@ -404,8 +404,12 @@ def _export_kdocs_xlsx(doc_url: str, out_path: str, state_filename: str | None =
                 raise RuntimeError("菜单中未找到'导出为'入口(金山前端可能变动)")
             page.wait_for_timeout(1500)
             # 3. 点「导出为 Excel(.xlsx)」并捕获下载
+            #    ⚠️ #289(2026-10-09): 金山新 UI(kd-new-ui)导出改为**服务端异步生成**,
+            #    点击后先弹「文件导出中,请稍候...」浮层, 生成完才触发浏览器下载;
+            #    实测 5700 行/161MB 文档生成耗时 >90s, 旧 90s 超时必然失败
+            #    (2026-10-08 20:32 起 manual_refund 采集中断 22h)。放宽到 180s(1.5× 余量)。
             try:
-                with page.expect_download(timeout=90000) as dl_info:
+                with page.expect_download(timeout=180000) as dl_info:
                     page.click("text=导出为 Excel(.xlsx)", timeout=10000)
             except Exception as e:
                 _save_debug_screenshot(page, "kdocs_click_xlsx")
