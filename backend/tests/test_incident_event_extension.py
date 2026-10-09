@@ -16,7 +16,8 @@ from __future__ import annotations
 import pytest
 
 from app.api.v1.incidents import IncidentEventType, _serialize
-from app.models.incident import Incident, IncidentEventType as ModelEventType
+from app.models.incident import Incident
+from app.models.incident import IncidentEventType as ModelEventType
 
 
 class TestIncidentEventExtension:
