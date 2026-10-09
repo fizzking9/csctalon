@@ -362,10 +362,21 @@ def category_ops_overview(
 
     # 按充值金额降序取 top N
     items.sort(key=lambda x: x["recharge_amount"], reverse=True)
+    # #293: totals=全桶聚合(不受 limit 截断), KPI 求和必须用它——
+    # 回填后 device_type 桶数已 >50, 前端 sum(items) 会因截断少算长尾(实测少算 ~75%)
+    totals = {
+        "device_cnt": sum(i["device_cnt"] for i in items),
+        "active_cnt": sum(i["active_cnt"] for i in items),
+        "recharge_cnt": sum(i["recharge_cnt"] for i in items),
+        "recharge_amount": round(sum(i["recharge_amount"] for i in items), 2),
+        "refund_cnt": sum(i["refund_cnt"] for i in items),
+        "complaint_cnt": sum(i["complaint_cnt"] for i in items),
+    }
     return {
         "dim": dim,
         "start": _date_str(start),
         "end": _date_str(end),
         "items": items[:limit],
+        "totals": totals,
         "total_dim_count": len(all_keys),
     }

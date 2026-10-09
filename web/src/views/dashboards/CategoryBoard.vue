@@ -152,19 +152,19 @@ const kpiCards = ref(
 )
 
 async function fetchSum(win) {
-  // device_type 桶数少(<20)，limit=50 覆盖全部桶；各桶互斥，求和=总量
+  // #293: KPI 求和必须走后端 totals(全桶聚合)——回填后 device_type 桶数 >50,
+  // 前端 sum(items) 会被 limit 截断少算长尾(实测少算 ~75%, 环比显示异常 -60%+)
   const res = await categoryOps.opsOverview({
     dim: 'device_type', limit: 50,
     start: win.start, end: win.end + ' 23:59:59',
   })
-  const items = res.data?.items || []
-  const sum = (k) => items.reduce((a, b) => a + (Number(b[k]) || 0), 0)
+  const t = res.data?.totals || {}
   return {
-    device: sum('device_cnt'),
-    active: sum('active_cnt'),
-    recharge: sum('recharge_amount'),
-    refund: sum('refund_cnt'),
-    complaint: sum('complaint_cnt'),
+    device: Number(t.device_cnt) || 0,
+    active: Number(t.active_cnt) || 0,
+    recharge: Number(t.recharge_amount) || 0,
+    refund: Number(t.refund_cnt) || 0,
+    complaint: Number(t.complaint_cnt) || 0,
   }
 }
 
