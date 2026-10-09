@@ -1127,11 +1127,12 @@ def _is_refund_staff(grp: str | None, hr_cat: str | None) -> bool:
 
 
 # ============================================================
-# 通用设备维度筛选 (#273): 退款/投诉明细共用同一口径
-#   · 设备类型 = devices.device_type_code
-#   · 套餐     = devices.current_combo_name
-#   · 商户号   = devices.merchant_name (#271: links/merchants 表全空)
-#   · 激活时间 = devices.active_time 落在 [active_start, active_end] 北京日期闭区间
+# 通用设备维度筛选 (#273/#292 口径修正): 退款/投诉明细共用同一口径
+#   · 设备类型 = bms_orders 最新订单(create_date DESC) 的 device_type_name
+#   · 套餐     = bms_orders 最新订单的 combo_name; 工厂质检测试套餐(3 变体)不计入
+#   · 商户号   = devices.merchant_name(设备归属商户, #271 links/merchants 表全空)
+#   · 激活时间 = bms_orders MIN(active_date) 最早激活日, 无则 devices.active_time 兜底
+#               落在 [active_start, active_end] 北京日期闭区间(并集口径)
 # ============================================================
 def _device_dim_matched_sns(
     db: Session,
@@ -1141,59 +1142,113 @@ def _device_dim_matched_sns(
     active_start: str | None = None,
     active_end: str | None = None,
 ) -> set[str] | None:
-    """返回命中设备维度条件的 SN 集合; 全部条件为空时返回 None(表示不筛选, 避免全表扫描)。"""
-    from app.models.device import (
-        Device,  # 局部导入: _core 保持零 models.device 依赖的惯例被 #273 打破, 用局部导入限制耦合面
-    )
+    """返回命中设备维度条件的 SN 集合; 全部条件为空时返回 None(不筛选, 避免全表扫描)。
 
-    conds = []
-    if device_type:
-        conds.append(Device.device_type_code == device_type)
-    if combo:
-        conds.append(Device.current_combo_name == combo)
+    #292 口径修正(2026-10-09): 设备类型/套餐改查 bms_orders 最新订单字段,
+    激活时间改查 bms_orders MIN(active_date) 或 devices.active_time 兜底(并集)。
+    不同条件查不同源, 各自取 SN 集合后取交集(AND 语义)。
+    """
+    from app.models.bms_order import BmsOrder
+    from app.models.device import Device
+
+    sn_sets: list[set[str]] = []
+
+    # ── 设备类型 / 套餐: bms_orders 最新订单(create_date DESC 取首条)字段 ──
+    if device_type or combo:
+        latest_sq = (
+            select(BmsOrder.device_sn, BmsOrder.device_type_name, BmsOrder.combo_name)
+            .where(BmsOrder.device_sn.isnot(None))
+            .distinct_on(BmsOrder.device_sn)
+            .order_by(BmsOrder.device_sn, BmsOrder.create_date.desc().nullslast())
+        )
+        if device_type:
+            latest_sq = latest_sq.where(BmsOrder.device_type_name == device_type)
+        if combo:
+            latest_sq = latest_sq.where(BmsOrder.combo_name == combo)
+        sn_sets.append({s for s in db.scalars(latest_sq).all() if s})
+
+    # ── 商户号: devices.merchant_name(设备归属) ──
     if merchant:
-        conds.append(Device.merchant_name == merchant)
-    # active_time 为 timestamptz: 北京日期 → UTC 边界, naive 化以与列比较(同 _parse_dt 口径)
-    # 非法日期串静默忽略该条件(与 _parse_dt 失败→None 的容错风格一致)
-    if active_start:
+        sn_sets.append({s for s in db.scalars(
+            select(Device.sn).where(Device.merchant_name == merchant)
+        ).all() if s})
+
+    # ── 激活时间: bms_orders MIN(active_date) 或 devices.active_time 兜底(并集) ──
+    #   naive=北京时间 → UTC naive(与库 timestamptz 列 replace(tzinfo=None) 比较, 同 _parse_dt 口径)
+    #   非法日期串静默忽略该条件(与 _parse_dt 失败→None 的容错风格一致)
+    if active_start or active_end:
         try:
-            d0 = _parse_date(active_start)
+            d0 = _parse_date(active_start) if active_start else None
         except (ValueError, TypeError):
             d0 = None
-        if d0:
-            conds.append(Device.active_time >= datetime.combine(d0, _dt.time.min, tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None))
-    if active_end:
         try:
-            d1 = _parse_date(active_end)
+            d1 = _parse_date(active_end) if active_end else None
         except (ValueError, TypeError):
             d1 = None
-        if d1:
-            conds.append(Device.active_time <= datetime.combine(d1, _dt.time.max, tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None))
-    if not conds:
+        # 北京日期 → UTC 边界 naive(与库 timestamptz 列 replace(tzinfo=None) 比较)
+        lo = datetime.combine(d0, _dt.time.min, tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None) if d0 else None
+        hi = datetime.combine(d1, _dt.time.max, tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None) if d1 else None
+        active_matched: set[str] = set()
+        # 1) bms_orders 有 MIN(active_date) 落在区间
+        bms_sq = select(BmsOrder.device_sn).where(BmsOrder.active_date.isnot(None)).group_by(BmsOrder.device_sn)
+        if lo:
+            bms_sq = bms_sq.having(func.min(BmsOrder.active_date) >= lo)
+        if hi:
+            bms_sq = bms_sq.having(func.min(BmsOrder.active_date) <= hi)
+        active_matched.update(s for s in db.scalars(bms_sq).all() if s)
+        # 2) devices.active_time 落在区间 且 该 SN 无 bms_orders 激活记录(兜底, 不重复)
+        has_bms_active = select(BmsOrder.device_sn).where(BmsOrder.active_date.isnot(None))
+        dev_conds = [Device.active_time.isnot(None), ~Device.sn.in_(has_bms_active)]
+        if lo:
+            dev_conds.append(Device.active_time >= lo)
+        if hi:
+            dev_conds.append(Device.active_time <= hi)
+        active_matched.update(s for s in db.scalars(select(Device.sn).where(*dev_conds)).all() if s)
+        sn_sets.append(active_matched)
+
+    if not sn_sets:
         return None
-    return set(db.scalars(select(Device.sn).where(*conds)).all())
+    result = sn_sets[0]
+    for s in sn_sets[1:]:
+        result &= s
+    return result
 
 
 def _device_dim_options(db: Session) -> dict[str, list[str]]:
-    """设备维度筛选候选项: 设备类型(码表带显示名)/套餐/商户号 各自 distinct 值。"""
-    from app.models.device import Device, DimDeviceType
+    """设备维度筛选候选项(#292 口径修正): 型号/套餐改取 bms_orders。
 
-    type_rows = db.execute(
-        select(Device.device_type_code, DimDeviceType.type_name)
-        .outerjoin(DimDeviceType, DimDeviceType.type_code == Device.device_type_code)
-        .where(Device.device_type_code.isnot(None))
-        .distinct()
-    ).all()
-    device_types = [
-        {"value": code, "label": f"{name}({code})" if name and name != code else code}
-        for code, name in sorted(type_rows, key=lambda r: r[0])
-    ]
-    combos = sorted(db.scalars(
-        select(Device.current_combo_name).where(Device.current_combo_name.isnot(None)).distinct()
-    ).all())
-    merchants = sorted(db.scalars(
-        select(Device.merchant_name).where(Device.merchant_name.isnot(None)).distinct()
-    ).all())
+    · 设备类型 = bms_orders.device_type_name distinct(原文, 非归一码)
+    · 套餐     = bms_orders.combo_name distinct(排除工厂质检 3 变体)
+    · 商户号   = devices.merchant_name(设备归属)
+    """
+    from app.models.bms_order import BmsOrder
+    from app.models.device import Device
+
+    # 设备类型: bms_orders.device_type_name(原文), distinct 取后排序
+    type_names = sorted({
+        t for t in db.scalars(
+            select(BmsOrder.device_type_name)
+            .where(BmsOrder.device_type_name.isnot(None))
+            .distinct()
+        ).all() if t
+    })
+    device_types = [{"value": t, "label": t} for t in type_names]
+    # 套餐: bms_orders.combo_name, 排除工厂质检测试套餐(3 变体不计入分析)
+    combos = sorted({
+        c for c in db.scalars(
+            select(BmsOrder.combo_name)
+            .where(BmsOrder.combo_name.isnot(None))
+            .distinct()
+        ).all() if c and "工厂质检" not in c
+    })
+    # 商户号: devices.merchant_name(设备归属, 维持)
+    merchants = sorted({
+        m for m in db.scalars(
+            select(Device.merchant_name)
+            .where(Device.merchant_name.isnot(None))
+            .distinct()
+        ).all() if m
+    })
     return {"device_types": device_types, "combos": combos, "merchants": merchants}
 
 
@@ -1229,29 +1284,43 @@ def _active_age_bucket(days: int | None) -> str:
 
 
 def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
-    """SN → 设备属性映射(#291 维度汇总/激活时长分桶共用, 一次批量查询)。
+    """SN → 设备属性映射(#292 口径修正: 型号/套餐改取 bms_orders 最新订单, 激活并集兜底)。
 
-    口径(与 #273 筛选 / #251 / #271 同源):
-      · type_name  = dim_device_type.type_name(未命中回落原始码; 无码 → None)
-      · combo      = combo_name_alias(is_current) 归一名, 商户专属别名优先于全局
-                     (同 #252 canonical 子查询语义), 未命中回落 current_combo_name
-      · merchant   = devices.merchant_name
-      · active_date = bms_orders 最早激活日 MIN(active_date)(#251「按销售天数核算」
-                     同一基准 —— 全站激活口径单源; 无订单 → None = 无激活记录)
+    口径(用户拍板 2026-10-09 #292):
+      · type_name  = bms_orders 最新订单(create_date DESC) 的 device_type_name
+                     （原 devices.device_type_code 归一码全空, 改取订单台账真实型号）
+      · combo      = bms_orders 最新订单的 combo_name; 工厂质检测试套餐(3 变体) → None
+                     （原 devices.current_combo_name 覆盖率仅 35%, 改取订单台账）
+      · merchant   = devices.merchant_name(设备归属商户, 退款/投诉分析更准)
+      · active_date = bms_orders MIN(active_date) 最早激活日; 无则 devices.active_time 兜底
+                     （并集, 覆盖率 78.8% → 83.3%）
     不在 devices 表的 SN 不出现在结果中(调用方归「(未建档)」桶, 暴露覆盖缺口)。
     """
     if not sns:
         return {}
     from app.models.bms_order import BmsOrder
-    from app.models.combo_dict import ComboDict, ComboNameAlias
-    from app.models.device import Device, DimDeviceType
+    from app.models.device import Device
 
-    rows = db.execute(
-        select(Device.sn, Device.device_type_code, Device.current_combo_name,
-               Device.merchant_name)
+    # 1) devices 表: merchant_name + active_time(激活兜底)
+    dev_rows = db.execute(
+        select(Device.sn, Device.merchant_name, Device.active_time)
         .where(Device.sn.in_(sns))
     ).all()
-    # 激活日(#251 同源): bms_orders 最早 active_date
+
+    # 2) bms_orders: 最新订单(create_date DESC 取首条)的 device_type_name/combo_name
+    order_rows = db.execute(
+        select(BmsOrder.device_sn, BmsOrder.device_type_name,
+               BmsOrder.combo_name, BmsOrder.create_date)
+        .where(BmsOrder.device_sn.in_(sns))
+        .order_by(BmsOrder.device_sn, BmsOrder.create_date.desc().nullslast())
+    ).all()
+    latest: dict[str, tuple[str | None, str | None]] = {}
+    for sn, type_name, combo_name, _c in order_rows:
+        sn_s = str(sn)
+        if sn_s not in latest:
+            latest[sn_s] = (type_name, combo_name)
+
+    # 3) 最早激活日: bms_orders MIN(active_date)(#251 同源)
     first_active: dict[str, Any] = {
         sn: fa for sn, fa in db.execute(
             select(BmsOrder.device_sn, func.min(BmsOrder.active_date))
@@ -1259,35 +1328,23 @@ def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
             .group_by(BmsOrder.device_sn)
         ).all()
     }
-    type_names: dict[str, str] = {
-        code: name for code, name in db.execute(
-            select(DimDeviceType.type_code, DimDeviceType.type_name)
-            .where(DimDeviceType.type_code.isnot(None))
-        ).all() if name
-    }
-    # 套餐归一: 同 raw 名多别名时商户专属(merchant_pk 非空)优先(同 #252 order_by 语义)
-    best: dict[str, tuple[str, bool]] = {}
-    for raw, canon, mpk in db.execute(
-        select(ComboNameAlias.raw_package_name, ComboDict.canonical_name, ComboNameAlias.merchant_pk)
-        .join(ComboDict, ComboDict.combo_code == ComboNameAlias.combo_code)
-        .where(ComboNameAlias.is_current.is_(True))
-    ).all():
-        if not raw or not canon:
-            continue
-        mpk_flag = mpk is not None
-        if raw not in best or (mpk_flag and not best[raw][1]):
-            best[raw] = (canon, mpk_flag)
-    alias_map = {raw: canon for raw, (canon, _) in best.items()}
 
     out: dict[str, dict[str, Any]] = {}
-    for sn, type_code, combo_raw, merchant in rows:
-        fa = first_active.get(sn)
+    for sn, merchant, dev_active in dev_rows:
+        sn_s = str(sn)
+        type_name, combo_name = latest.get(sn_s, (None, None))
+        # 工厂质检测试套餐(3 变体: 工厂质检专用套餐/全球设备工厂质检套餐/(国内))不计入分析
+        if combo_name and "工厂质检" in combo_name:
+            combo_name = None
+        fa = first_active.get(sn_s)
+        if fa is None and dev_active is not None:
+            fa = dev_active  # devices.active_time 兜底(无 bms_orders 激活记录时)
         if fa is not None:
             fa = fa if fa.tzinfo else fa.replace(tzinfo=_dt.timezone.utc)
             fa = fa.astimezone(TZ).date()
-        out[str(sn)] = {
-            "type_name": (type_names.get(type_code) or type_code) if type_code else None,
-            "combo": alias_map.get(combo_raw or "", combo_raw) if combo_raw else None,
+        out[sn_s] = {
+            "type_name": type_name,
+            "combo": combo_name,
             "merchant": merchant,
             "active_date": fa,
         }

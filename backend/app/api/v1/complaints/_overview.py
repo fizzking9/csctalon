@@ -7,6 +7,9 @@ from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, DBSession
 
+# #292: 复用积压页的设备四维分组函数(设备类型/套餐/商户号/激活时间段), 保证概览↔明细同源
+from app.api.v1.complaints._backlog import _device_dim_groups
+
 # 跨子模块引用(拆分自 complaints_src.py, 原同文件内直接调用)
 from app.api.v1.complaints._helpers import (
     _CONCLUSION_ORDER,
@@ -406,6 +409,21 @@ def complaint_overview(
     conclusions.sort(key=lambda c: _CONCLUSION_ORDER.index(c["level"]))
     conclusions = conclusions[:_MAX_CONCLUSIONS]
 
+    # ── 9. 设备维度四维统计(#292): 窗口内全量投诉工单(剔卡商) SN 按设备类型/套餐/商户号/激活时间段 ──
+    #   复用积压页 _device_dim_groups, 保证概览四维 ↔ 明细下钻同源自洽(点击桶 → 筛选行数 = 桶计数)。
+    #   与积压页差异: 概览用窗口内**全量**工单(不限积压), 回答「本期投诉落在什么设备上」。
+    _all_ticket_rows = db.execute(
+        select(ServiceTicket.device_sn, ServiceTicket.register_time).where(
+            _ticket_category_case() == "投诉",
+            src_expr != CARD_SCOPE,
+            ServiceTicket.register_time.isnot(None),
+            *([ServiceTicket.register_time >= ts] if ts else []),
+            *([ServiceTicket.register_time <= te] if te else []),
+        )
+    ).all()
+    _device_dim_rows = [{"device_sn": r[0], "register_time": r[1]} for r in _all_ticket_rows]
+    device_dims = _device_dim_groups(db, _device_dim_rows)
+
     return R(data={
         "range": {
             "start": str(sd), "end": str(ed), "grain": grain_eff, "compare": compare if use_compare else "none",
@@ -436,6 +454,9 @@ def complaint_overview(
             "by_aging": [{"name": k, "count": by_aging_cnt.get(k, 0)} for k in ("≤3天", "4-7天", "8-14天", ">14天")],
             "items": backlog_rows[:10],
         },
+        # ★ #292: 设备维度四维统计(窗口内全量投诉工单, 剔卡商)
+        #   设备类型/套餐/商户号/激活时间段; 每桶可下钻到明细(带时间窗口与筛选条件)
+        "device_dims": device_dims,
         # ★ 比率指标占位: 数据完整度不足, 本期恒 null(见 #68 专项研究)
         "ratios": None,
     })

@@ -318,6 +318,56 @@
           </el-col>
         </el-row>
 
+        <!-- ══════════════ A6: 设备维度汇总（#292 投诉决策概览四维） ══════════════
+             设计说明（Design Rationale）
+             目的：让班组长看清"窗口内投诉集中在哪类设备/套餐/商户/激活阶段"，
+                   据此定向跟进（如某型号集中报障 → 排查批次质量问题）。
+             逻辑：与积压页四维**同源同函数**(_device_dim_groups)，但口径=窗口内全量投诉工单(含已完成)，
+                   而积压页只看未完成 → 两图数字不同是口径差异，非 bug。
+             口径：设备类型/套餐取 bms_orders 最新订单(create_date DESC)的 device_type_name/combo_name；
+                   商户号取 devices.merchant_name；激活时间=bms_orders MIN(active_date) ∪ devices.active_time 兜底。
+                   测试套餐(含"工厂质检")已排除。详见 _core.py #292。
+             取舍：❌ 不在概览做分组统计图表(柱/饼) —— 概览只给分布事实，分组交叉在积压页；
+                   ❌ 不重复积压页已有图表，仅概览多一层数据面。
+             工单：#292 · 设计：本文件头部设计说明 -->
+        <div v-if="overviewData?.device_dims" class="chart-title" style="margin: 8px 0">
+          设备维度汇总（窗口内全量投诉 · 点击桶 → 跳积压页带筛选）
+          <el-tooltip effect="dark" placement="top" raw-content
+            content="<b>来源</b>：/complaints/overview 同一响应 device_dims<br/><b>口径</b>：窗口内全量投诉工单(含已完成, 剔卡商)；设备型号/套餐=bms_orders最新订单; 商户号=devices表; 激活=bms最早∪devices兜底<br/><b>时点</b>：跟随页面时间范围（默认近30天）<br/><b>「空」的含义</b>：(未填SN)=工单无设备号; (未建档)=SN不在设备库; (未填)=设备库无该字段值<br/><b>下钻</b>：点击桶 → 跳转积压页并带对应筛选<br/><b>取舍</b>：概览看全量(含已完成)，积压页只看未完成 → 两图数字不同是口径差异">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </div>
+        <el-row v-if="overviewData?.device_dims" :gutter="16" class="mb-16">
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">设备类型 Top</div>
+              <BaseChart v-if="ovDeviceTypeOption" :option="ovDeviceTypeOption" height="200px" @chartClick="(p) => drillOvDeviceDim('type', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">套餐 Top</div>
+              <BaseChart v-if="ovComboOption" :option="ovComboOption" height="200px" @chartClick="(p) => drillOvDeviceDim('combo', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">商户号 Top</div>
+              <BaseChart v-if="ovMerchantOption" :option="ovMerchantOption" height="200px" @chartClick="(p) => drillOvDeviceDim('merchant', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">激活时间段</div>
+              <BaseChart v-if="ovActiveAgeOption" :option="ovActiveAgeOption" height="200px" @chartClick="(p) => drillOvDeviceDim('age', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+        </el-row>
+
         <!-- ★ 比率指标占位: 数据完整度不足, 本期不渲染(见 #68 专项研究)
              此处保留注释而非代码 —— 数据成熟后由 #68 决定是否加回 -->
       </section>

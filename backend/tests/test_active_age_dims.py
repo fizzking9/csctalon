@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
-"""#291 退款/投诉维度汇总分析: 设备类型/套餐/商户号/激活时间段(四桶) + active_age 桶下钻。
+"""#291/#292 退款/投诉维度汇总分析: 设备类型/套餐/商户号/激活时间段(四桶) + active_age 桶下钻。
 
-口径(用户拍板 2026-10-09):
+口径(用户拍板 2026-10-09 #291 + #292 修正):
   · 激活时间段四桶 ≤7 / 8-30 / 31-180 / >180 + (无激活记录),
     桶名唯一来源 = _core.ACTIVE_AGE_BUCKETS(退款/投诉两侧同源)
   · 激活基准 = bms_orders 最早激活日 MIN(active_date)（与 #251 sale_days_split 同源）
   · 退款锚点 = D1 退款创建日; 投诉锚点 = 工单登记日
   · 未填SN / SN未建档 显式分桶, 不丢数据
   · 下钻自洽: 汇总桶计数 == 明细同条件筛选行数(active_age 参数)
+  · #292: 型号/套餐改取 bms_orders 最新订单(create_date DESC)的 device_type_name/combo_name;
+    工厂质检测试套餐(含"工厂质检" 3 变体)不计入分析(combo → None, 候选列表排除);
+    激活改并集(bms_orders MIN(active_date) 优先, devices.active_time 兜底);
+    商户号维持 devices.merchant_name
 """
 
 import uuid as _uuid
@@ -22,7 +26,7 @@ from app.models.bms_order import BmsOrder
 from app.models.device import Device, DimDeviceType
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
-from app.services.analytics import ACTIVE_AGE_BUCKETS, refund_decision_overview
+from app.services.analytics import ACTIVE_AGE_BUCKETS, _device_dim_options, refund_decision_overview
 from app.services.analytics.refund_chain import refund_withdrawal_detail
 
 
@@ -47,11 +51,16 @@ def _mk_device(db, sn: str, **kw) -> Device:
     return dev
 
 
-def _mk_order(db, sn: str, active_days_ago: int) -> BmsOrder:
-    """激活基准 = bms_orders 最早 active_date（aware UTC, 与 #251 造数同款）。"""
+def _mk_order(db, sn: str, active_days_ago: int, *,
+              device_type_name: str | None = None,
+              combo_name: str | None = None,
+              create_days_ago: int = 0) -> BmsOrder:
+    """bms_orders 行: 激活基准=MIN(active_date); 最新订单=create_date DESC 取首条(#292)。"""
     o = BmsOrder(
         order_no=_uniq("BO"), device_sn=sn,
+        device_type_name=device_type_name, combo_name=combo_name,
         active_date=datetime.now(UTC) - timedelta(days=active_days_ago),
+        create_date=datetime.now(UTC) - timedelta(days=create_days_ago),
     )
     db.add(o)
     db.flush()
@@ -115,16 +124,16 @@ def test_rw_detail_active_age_filter(db):
 
 
 def test_decision_overview_device_dims(db):
-    """退款决策概览 device_dims 三维: 类型/套餐/商户号分组; 未填SN 显式分桶。
+    """退款决策概览 device_dims 三维: 型号/套餐/商户号分组; 未填SN 显式分桶。
 
+    #292 口径: 型号/套餐取 bms_orders 最新订单(create_date DESC)的 device_type_name/combo_name,
+    商户号取 devices.merchant_name。
     注: refunds.device_sn 有 FK → devices, 「(未建档)」桶在 FK 库无法造数,
     改由 test_backlog_groups_unregistered 用手工 rows 覆盖该分支。
     """
     sn = _uniq("SN-DD")
-    _mk_device(db, sn, device_type_code=_uniq("CPE"),
-               current_combo_name="套餐Q", merchant_name="商户Q")
-    # _mk_device 会先建 type_name=code 的字典行, 直接用 code 查询名
-    code = db.get(Device, sn).device_type_code
+    _mk_device(db, sn, merchant_name="商户Q")
+    _mk_order(db, sn, 10, device_type_name="CPE-DD", combo_name="套餐Q")
     # 线上+已退款: 设备齐全 1 笔 + 无SN 1 笔
     for s, amt in [(sn, "30")]:
         db.add(Refund(
@@ -146,24 +155,25 @@ def test_decision_overview_device_dims(db):
     types = {r["name"]: r["count"] for r in dd["by_device_type"]}
     combos = {r["name"]: r["count"] for r in dd["by_combo"]}
     merch = {r["name"]: r["count"] for r in dd["by_merchant"]}
-    # 有建档设备 → 类型/套餐/商户号三桶命中
-    assert types.get(code, 0) >= 1
+    # 有建档设备 → 型号(取自 bms_orders)/套餐(取自 bms_orders)/商户号(取自 devices)三桶命中
+    assert types.get("CPE-DD", 0) >= 1
     assert combos.get("套餐Q", 0) >= 1
     assert merch.get("商户Q", 0) >= 1
     # 未填SN 显式暴露, 不丢数据
     assert types.get("(未填SN)", 0) >= 1
     # 金额出参 float(JSON number 元)
-    row = next(r for r in dd["by_device_type"] if r["name"] == code)
+    row = next(r for r in dd["by_device_type"] if r["name"] == "CPE-DD")
     assert isinstance(row["amount"], float)
 
 
 def test_backlog_active_age_and_dims(db):
-    """投诉积压四维统计与明细同源: 桶计数 == active_age 同条件筛选行数。"""
+    """投诉积压四维统计与明细同源: 桶计数 == active_age 同条件筛选行数。
+
+    #292 口径: 型号/套餐取 bms_orders 最新订单字段, 商户号取 devices.merchant_name。
+    """
     sn_a = _uniq("SN-BA")
-    _mk_device(db, sn_a, device_type_code=_uniq("CPE"),
-               current_combo_name="套餐W", merchant_name="商户W")
-    code = db.get(Device, sn_a).device_type_code
-    _mk_order(db, sn_a, 300)          # 登记日−激活日 ≈ 298天 → >180天桶
+    _mk_device(db, sn_a, merchant_name="商户W")
+    _mk_order(db, sn_a, 300, device_type_name="CPE-BA", combo_name="套餐W")  # >180天桶
     tk_a = _mk_backlog_ticket(db, sn_a)
     sn_none = _uniq("SN-BNONE")
     _mk_device(db, sn_none)                              # 有建档, 无激活记录
@@ -176,7 +186,7 @@ def test_backlog_active_age_and_dims(db):
 
     # 分类三桶: 命中 + 未填SN 显式
     types = {r["name"]: r["count"] for r in g["by_device_type"]}
-    assert types.get(code, 0) >= 1
+    assert types.get("CPE-BA", 0) >= 1
     assert types.get("(未填SN)", 0) >= 1
     combos = {r["name"]: r["count"] for r in g["by_combo"]}
     assert combos.get("套餐W", 0) >= 1
@@ -215,3 +225,30 @@ def test_backlog_groups_unregistered(db):
     assert types.get("(未建档)", 0) == 1
     assert types.get("(未填SN)", 0) == 1
     assert types.get("(未填)", 0) == 1  # 有建档但 merchant_name 为空 → (未填)
+
+
+def test_factory_combo_excluded(db):
+    """#292: 工厂质检测试套餐(3 变体)不计入分析 → combo 显式 (未填); 型号不受影响。
+
+    工厂质检套餐(combo_name 含"工厂质检")在 _device_dim_attrs 中被置 None,
+    在 _device_dim_options 候选列表中被排除, 避免测试套餐污染分析口径。
+    """
+    sn = _uniq("SN-FC")
+    _mk_device(db, sn, merchant_name="商户FC")
+    _mk_order(db, sn, 10, device_type_name="CPE-FC", combo_name="工厂质检专用套餐")
+    _mk_backlog_ticket(db, sn)
+    db.flush()
+
+    # 1) 积压四维: combo 被置 None → (未填); type_name 不受影响
+    rows = _query_backlog_rows(db, None, None)
+    g = _device_dim_groups(db, rows)
+    combos = {r["name"]: r["count"] for r in g["by_combo"]}
+    assert combos.get("(未填)", 0) >= 1  # combo 被排除 → None → (未填)
+    assert "工厂质检专用套餐" not in combos  # 不出现在分桶中
+    types = {r["name"]: r["count"] for r in g["by_device_type"]}
+    assert types.get("CPE-FC", 0) >= 1  # type_name 不受 combo 排除影响
+
+    # 2) 候选项: 工厂质检套餐不在 combo 候选列表中
+    opts = _device_dim_options(db)
+    assert "工厂质检专用套餐" not in opts["combos"]
+    assert any(t["value"] == "CPE-FC" for t in opts["device_types"])

@@ -439,6 +439,37 @@ export function useComplaintAnalysis() {
     loadBacklog()
   }
 
+  // ── #292 概览设备维度汇总(窗口内全量投诉口径, 含已完成) ──
+  //   数据面 = /complaints/overview 响应 device_dims(by_device_type/by_combo/by_merchant/by_active_age),
+  //   与积压页四维同函数(_device_dim_groups)但口径不同(概览=全量, 积压=未完成)。
+  //   点击桶 → 切积压页 + 带筛选下钻(复用 drillBacklogDim)。
+  const ovDims = computed(() => overviewData.value?.device_dims || {})
+  const ovDeviceTypeOption = computed(() => _dimBarOption(ovDims.value.by_device_type, '#6366f1'))
+  const ovComboOption = computed(() => _dimBarOption(ovDims.value.by_combo, '#0ea5e9'))
+  const ovMerchantOption = computed(() => _dimBarOption(ovDims.value.by_merchant, '#f59e0b'))
+  const ovActiveAgeOption = computed(() => {
+    const d = ovDims.value.by_active_age || []
+    if (!d.length || d.every(x => !x.count)) return null
+    return {
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      grid: { left: 8, right: 44, top: 8, bottom: 8, containLabel: true },
+      xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
+      yAxis: { type: 'category', data: d.map(x => x.name), inverse: true, axisLabel: { fontSize: 10 } },
+      series: [{
+        type: 'bar', data: d.map(x => x.count), barMaxWidth: 16,
+        itemStyle: { color: '#10b981', borderRadius: [0, 4, 4, 0] },
+        label: { show: true, position: 'right', fontSize: 10 },
+      }],
+    }
+  })
+
+  // 概览四维桶点击 → 切积压页 + 带筛选(复用 drillBacklogDim 的反查逻辑)
+  function drillOvDeviceDim(kind, name) {
+    if (!name) return
+    topTab.value = 'execute' // 切到积压页(activeTab → 'backlog')
+    drillBacklogDim(kind, name)
+  }
+
   const subj = computed(() => subjectData.value || {
     summary: { subject_total: 0, merchant_total: 0, external_total: 0, external_attributed: 0, external_unattributed: 0, refund_count: 0, refund_amount: 0 },
     subject_ranking: [],
@@ -1337,6 +1368,12 @@ export function useComplaintAnalysis() {
     backlogMerchantOption,
     backlogActiveAgeOption,
     drillBacklogDim,
+    // #292 概览设备维度汇总(窗口内全量投诉, 点击桶跳积压页带筛选)
+    ovDeviceTypeOption,
+    ovComboOption,
+    ovMerchantOption,
+    ovActiveAgeOption,
+    drillOvDeviceDim,
     subj,
     subjectRanking,
     extRatioColor,
