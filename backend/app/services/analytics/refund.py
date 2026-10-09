@@ -21,6 +21,7 @@ from app.services.analytics._core import (
     SYS_OP_BLACKLIST_RR,
     TZ,
     D,
+    _device_dim_attrs,
     _is_refund_staff,
     _normalize_refund_reason,
     _resolve_windows,
@@ -1632,6 +1633,42 @@ def refund_decision_overview(
         for b in _SALE_BUCKETS
     ]
 
+    # ── 8. 设备维度汇总(#291): 设备类型/套餐/商户号 分桶 (线上已退款, 与区块5/激活天数同数据面) ──
+    #     激活时间段维度**复用上方 sale_days_split**(#251 真身, 六桶), 此处不重复输出 ——
+    #     同一事实禁止两处汇总(AGENTS 界面纪律#5 投影规则)。
+    #     未填SN/未建档分别显式分桶, 暴露数据覆盖缺口。
+    dd_rows = db.execute(text("""
+        SELECT r.device_sn, count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
+        FROM refunds r
+        WHERE r.refund_method = '线上' AND r.status = '已退款'
+          AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
+        GROUP BY r.device_sn
+    """), {"ts": cur_s, "te": cur_e}).fetchall()
+    dd_attrs = _device_dim_attrs(db, {r.device_sn for r in dd_rows if r.device_sn})
+
+    def _dd_group(pick) -> list[dict[str, Any]]:
+        g: dict[str, list] = {}
+        for r in dd_rows:
+            sn = r.device_sn
+            a = dd_attrs.get(sn) if sn else None
+            if a is not None:
+                key = pick(a) or "(未填)"
+            else:
+                key = "(未建档)" if sn else "(未填SN)"
+            g.setdefault(key, [0, Decimal("0")])
+            g[key][0] += int(r.cnt or 0)
+            g[key][1] += D(r.amt)
+        tot = sum(v[1] for v in g.values())
+        return [{"name": k, "count": v[0], "amount": float(round(v[1], 2)),
+                 "ratio": round(float(v[1] / tot * 100), 1) if tot else 0.0}
+                for k, v in sorted(g.items(), key=lambda x: -x[1][0])][:12]
+
+    device_dims = {
+        "by_device_type": _dd_group(lambda a: a["type_name"]),
+        "by_combo": _dd_group(lambda a: a["combo"]),
+        "by_merchant": _dd_group(lambda a: a["merchant"]),
+    }
+
     return {
         "summary": summary,
         "routes_daily": routes_daily,
@@ -1640,6 +1677,7 @@ def refund_decision_overview(
         "complaint_split": complaint_split,
         "reason_operator": reason_operator,
         "sale_days_split": sale_days_split,
+        "device_dims": device_dims,
     }
 
 

@@ -13,13 +13,17 @@ from app.models.wallet import WalletWithdrawal
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
 from app.services.analytics._core import (
+    _AGE_PARAM_TO_BUCKET,
     _TIME_BINS,
     TZ,
+    _active_age_bucket,
+    _age_days_between,
     _annotate_chain_litigation,
     _bin_label,
     _chain_alias_map,
     _chain_complaint_filter,
     _classify_method,
+    _device_dim_attrs,
     _device_dim_matched_sns,
     _device_dim_options,
     _is_meta_junk_operator,
@@ -450,11 +454,16 @@ def refund_withdrawal_detail(db: Session, start: str | None = None, end: str | N
                               slow_only: bool = False, path: str = "ALL",
                               comp: str = "all", operator: str = "", reason: str = "",
                               device_type: str = "", combo: str = "", merchant: str = "",
-                              active_start: str = "", active_end: str = "") -> dict[str, Any]:
+                              active_start: str = "", active_end: str = "",
+                              active_age: str = "") -> dict[str, Any]:
     """明细列表: 支持分页、排序、路径筛选(ALL/ABD/AB/A/B/D)、慢单筛选、涉诉/操作人/退款原因筛选。
 
     #273: 追加设备维度筛选(设备类型/套餐/商户号/激活时间段), 口径走 devices 表
     (与分品类运营看板 #271 同源), SN 未建档的行在任一设备维度条件生效时被排除。
+    #291: 追加 active_age 激活后天数桶筛选(le7/8-30/31-180/gt180/none) —— 汇总图
+    「激活时间段」桶的下钻落点(相对天数无法用 active_start/end 绝对日期表达);
+    锚点 = D1 退款创建日 − bms_orders 最早激活日(#251 同源); 无激活记录的行仅在
+    active_age='none' 时保留。
     """
     s = datetime.fromisoformat(start) if start else None
     e = datetime.fromisoformat(end) if end else None
@@ -484,6 +493,29 @@ def refund_withdrawal_detail(db: Session, start: str | None = None, end: str | N
                                       active_start or None, active_end or None)
     if dim_sns is not None:
         rows = [r for r in rows if r.get("device_sn") in dim_sns]
+    # #291: 激活后天数桶筛选(汇总图「激活时间段」桶下钻)
+    if active_age:
+        want = _AGE_PARAM_TO_BUCKET.get(active_age)
+        if want:
+            attrs = _device_dim_attrs(db, {r.get("device_sn") for r in rows if r.get("device_sn")})
+            def _age_ok(r: dict) -> bool:
+                a = attrs.get(r.get("device_sn"))
+                d1 = r.get("d1_refund_created")
+                if not d1:
+                    return want == "(无激活记录)" and a is None
+                if a is None or a.get("active_date") is None:
+                    return want == "(无激活记录)"
+                try:
+                    ev_dt = datetime.fromisoformat(d1)
+                    if ev_dt.tzinfo is None:
+                        # 库里 naive 时间 = 北京时间(项目统一口径, 同 _core._to_utc 注释),
+                        # 不能裸 astimezone —— 那会按系统本地时区解释, UTC 容器下桶判定偏移
+                        ev_dt = ev_dt.replace(tzinfo=TZ)
+                    ev = ev_dt.astimezone(TZ).date()
+                except (ValueError, TypeError):
+                    return False
+                return _active_age_bucket(_age_days_between(ev, a["active_date"])) == want
+            rows = [r for r in rows if _age_ok(r)]
     # 排序
     sort = sort or "days_desc"
     key_fn_map = {

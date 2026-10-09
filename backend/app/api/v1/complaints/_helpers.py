@@ -730,12 +730,15 @@ def _query_backlog_rows(
     merchant: str | None = None,
     active_start: str | None = None,
     active_end: str | None = None,
+    active_age: str | None = None,
 ) -> list[dict]:
     """查询积压工单全量行(统一归一化口径, 与 /backlog 完全一致).
 
     供 /backlog(分页+统计) 与 /backlog/export(导出Excel) 共用, 保证两处口径 100% 一致。
     返回列表已按 sort 排序, 每行含 audited 字段(已核查标识)。
     #273: 设备维度筛选(设备类型/套餐/商户号/激活时间段), 口径走 devices 表(同 #271)。
+    #291: active_age 激活后天数桶筛选(le7/8-30/31-180/gt180/none), 锚点=工单登记日 −
+    bms_orders 最早激活日(#251 同源); 供投诉维度汇总图「激活时间段」桶下钻。
     """
     src_expr = _complaint_source_type_case()
 
@@ -840,6 +843,31 @@ def _query_backlog_rows(
     dim_sns = _device_dim_matched_sns(db, device_type, combo, merchant, active_start, active_end)
     if dim_sns is not None:
         backlog = [r for r in backlog if r.get("device_sn") in dim_sns]
+
+    # #291: 激活后天数桶筛选(汇总图「激活时间段」桶下钻); 锚点=登记日 − bms_orders 最早激活日
+    if active_age:
+        from app.services.analytics import (
+            _AGE_PARAM_TO_BUCKET,
+            _active_age_bucket,
+            _device_dim_attrs,
+        )
+        want = _AGE_PARAM_TO_BUCKET.get(active_age)
+        if want:
+            _sns = {r.get("device_sn") for r in backlog if r.get("device_sn")}
+            _attrs = _device_dim_attrs(db, _sns)
+            def _age_ok(r: dict) -> bool:
+                a = _attrs.get(r.get("device_sn"))
+                reg = r.get("register_time")
+                if not reg:
+                    return want == "(无激活记录)" and a is None
+                if a is None or a.get("active_date") is None:
+                    return want == "(无激活记录)"
+                try:
+                    ev = datetime.strptime(str(reg)[:10], "%Y-%m-%d").date()
+                except ValueError:
+                    return False
+                return _active_age_bucket((ev - a["active_date"]).days) == want
+            backlog = [r for r in backlog if _age_ok(r)]
 
     # 排序
     if sort == "register_desc":

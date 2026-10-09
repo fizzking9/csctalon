@@ -384,6 +384,14 @@
             <el-option v-for="m in backlogDimOptions.merchants || []" :key="m" :label="m" :value="m" />
           </el-select>
           <el-date-picker v-model="backlogFilters.activeRange" type="daterange" size="small" range-separator="~" start-placeholder="激活起" end-placeholder="激活止" value-format="YYYY-MM-DD" style="width:210px" @change="backlogPage = 1; loadBacklog()" />
+          <!-- #291: 激活后天数桶(设备维度汇总 激活桶下钻入口; 锚点=登记日−bms_orders最早激活日) -->
+          <el-select v-model="backlogFilters.activeAge" size="small" placeholder="激活时段" clearable style="width:130px" @change="backlogPage = 1; loadBacklog()">
+            <el-option label="≤7天" value="le7" />
+            <el-option label="8-30天" value="8-30" />
+            <el-option label="31-180天" value="31-180" />
+            <el-option label=">180天" value="gt180" />
+            <el-option label="无激活记录" value="none" />
+          </el-select>
           <el-button size="small" :icon="Refresh" @click="loadBacklog">刷新</el-button>
         </div>
 
@@ -453,6 +461,48 @@
             <div class="chart-card">
               <div class="chart-title">积压投诉原因分布<span class="dim-text"> · 按内容关键词归类</span></div>
               <BaseChart v-if="backlogReasonOption" :option="backlogReasonOption" height="240px" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+        </el-row>
+
+        <!-- #291 设备维度汇总(积压口径): 与明细表同源, 点击桶带筛选下钻
+             设计说明: 目的=回答「积压集中在哪类设备/套餐/商户/激活阶段」;
+             口径=积压未完成工单(与明细同源自洽), 激活四桶=登记日−bms_orders最早激活日;
+             取舍=不重复展示 #252 extended-dims(全量含已完成, 另一数据面)。工单 #291。 -->
+        <div class="chart-title" style="margin-bottom: 8px">
+          设备维度汇总（点击桶 → 明细表带筛选）
+          <el-tooltip effect="dark" placement="top" raw-content
+            content="<b>来源</b>：/complaints/backlog 同一响应（by_device_type/by_combo/by_merchant/by_active_age）<br/><b>口径</b>：积压未完成工单（与下方明细表完全同源）；设备属性 = devices 表（#271/#273 同源）；激活时间段 = 登记日 − bms_orders 最早激活日 四桶（≤7 / 8-30 / 31-180 / &gt;180天 / 无激活记录，#291 口径）<br/><b>时点</b>：跟随页面时间范围（默认近30天），刷新即更新<br/><b>「空」的含义</b>：图为空 = 窗口内无积压工单；(未填SN)/(未建档) 桶 = 工单/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击桶 → 明细表自动带对应筛选，行数 = 桶计数<br/><b>取舍</b>：不重复展示 #252 extended-dims 全量口径（含已完成工单，属另一数据面）">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </div>
+        <el-row :gutter="16" class="mb-16">
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">设备类型 Top</div>
+              <BaseChart v-if="backlogDeviceTypeOption" :option="backlogDeviceTypeOption" height="200px" @chartClick="(p) => drillBacklogDim('type', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">套餐 Top</div>
+              <BaseChart v-if="backlogComboOption" :option="backlogComboOption" height="200px" @chartClick="(p) => drillBacklogDim('combo', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">商户号 Top</div>
+              <BaseChart v-if="backlogMerchantOption" :option="backlogMerchantOption" height="200px" @chartClick="(p) => drillBacklogDim('merchant', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">激活时间段</div>
+              <BaseChart v-if="backlogActiveAgeOption" :option="backlogActiveAgeOption" height="200px" @chartClick="(p) => drillBacklogDim('age', p.name)" />
               <el-empty v-else description="暂无数据" :image-size="40" />
             </div>
           </el-col>
@@ -968,6 +1018,12 @@ const {
   reasonColors,
   reasonTagType,
   backlogReasonOption,
+  // #291 设备维度汇总(积压口径, 四维桶点击下钻)
+  backlogDeviceTypeOption,
+  backlogComboOption,
+  backlogMerchantOption,
+  backlogActiveAgeOption,
+  drillBacklogDim,
   subj,
   subjectRanking,
   extRatioColor,

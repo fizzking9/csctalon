@@ -60,7 +60,7 @@
             <!-- #205 卡片说明+下钻: 点卡 → 区块六「退款明细」并自动选中涉诉筛选 -->
             <div class="kpi-card kpi-drill" style="background:#fef2f2" title="点击查看涉诉退款明细" @click="drillComplaintDetail">
               <div class="kpi-label" style="color:#dc2626">涉诉退款占比<el-tooltip effect="dark" placement="top" raw-content
-                content="<b>来源</b>：/analytics/refund/decision-overview → summary.complaint_ratio<br/><b>口径</b>：涉诉金额 / 线上直退金额 × 100%（仅线上已退款单）；涉诉判据 = SN 关联工单服务项关键词（<b>外部</b>: 工信部/12315/315平台/12345/政务平台等 &gt; <b>商户号</b>: 微信 &gt; <b>内部</b>: 商品投诉/服务投诉）或 审核备注/备注含「涉投诉/客诉/投诉/315/争议/催退」→ 备注涉诉<br/>详见 docs/standards/投诉渠道口径与对账说明.md<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：0% = 窗口内无涉诉退款，或无线上直退单（分母为 0）<br/><b>下钻</b>：点卡片 → 「六、退款明细」并自动选中涉诉筛选">
+                content="<b>来源</b>：/analytics/refund/decision-overview → summary.complaint_ratio<br/><b>口径</b>：涉诉金额 / 线上直退金额 × 100%（仅线上已退款单）；涉诉判据 = SN 关联工单服务项关键词（<b>外部</b>: 工信部/12315/315平台/12345/政务平台等 &gt; <b>商户号</b>: 微信 &gt; <b>内部</b>: 商品投诉/服务投诉）或 审核备注/备注含「涉投诉/客诉/投诉/315/争议/催退」→ 备注涉诉<br/>详见 docs/standards/投诉渠道口径与对账说明.md<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：0% = 窗口内无涉诉退款，或无线上直退单（分母为 0）<br/><b>下钻</b>：点卡片 → 「七、退款明细」并自动选中涉诉筛选">
                 <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
               </el-tooltip></div>
               <div class="kpi-value">{{ summary.complaint_ratio }}<span class="unit">%</span></div>
@@ -82,7 +82,7 @@
             <!-- #205 卡片说明+下钻: 点卡 → 区块六「退款明细」并自动选中路径=线上直退 -->
             <div class="kpi-card kpi-drill" style="background:#f5f3ff" title="点击查看线上直退明细" @click="drillOnlineDetail">
               <div class="kpi-label" style="color:#7c3aed">线上直退<el-tooltip effect="dark" placement="top" raw-content
-                content="<b>来源</b>：/analytics/refund/decision-overview → summary.online_count / online_amount<br/><b>口径</b>：refunds refund_method=线上 且 status=已退款（排除重复/忽略质量行），按实际扣款时间优先归日；为四路经营中的 A 路<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：0 笔 = 窗口内无线上已退款单<br/><b>下钻</b>：点卡片 → 「六、退款明细」并自动选中路径=线上直退">
+                content="<b>来源</b>：/analytics/refund/decision-overview → summary.online_count / online_amount<br/><b>口径</b>：refunds refund_method=线上 且 status=已退款（排除重复/忽略质量行），按实际扣款时间优先归日；为四路经营中的 A 路<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：0 笔 = 窗口内无线上已退款单<br/><b>下钻</b>：点卡片 → 「七、退款明细」并自动选中路径=线上直退">
                 <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
               </el-tooltip></div>
               <div class="kpi-value">{{ summary.online_count }}<span class="unit">笔</span></div>
@@ -124,7 +124,7 @@
       <section id="sec-routes" class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">一、资金流出全景<el-tooltip effect="dark" placement="top" raw-content
-            content="<b>来源</b>：/analytics/refund/decision-overview → routes_daily<br/><b>口径</b>：堆叠柱 = A/B/C/D 四路按日金额（实际扣款时间优先归日，已排除重复/忽略与冻结类流水）；曲线 = 商户号实际 E（对账基准，独立右轴，<b>不与四路累加</b>）<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：某日无成功退款则该日不出现；整图为空 = 窗口内四路与 E 均无流水<br/><b>下钻</b>：下方日表即按日构成；单笔明细 → 「六、退款明细」，全量比对用「导出」Excel">
+            content="<b>来源</b>：/analytics/refund/decision-overview → routes_daily<br/><b>口径</b>：堆叠柱 = A/B/C/D 四路按日金额（实际扣款时间优先归日，已排除重复/忽略与冻结类流水）；曲线 = 商户号实际 E（对账基准，独立右轴，<b>不与四路累加</b>）<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：某日无成功退款则该日不出现；整图为空 = 窗口内四路与 E 均无流水<br/><b>下钻</b>：下方日表即按日构成；单笔明细 → 「七、退款明细」，全量比对用「导出」Excel">
             <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
           </el-tooltip></span>
           <span class="block-hint">四路经营 A/B/C/D（堆叠）= 经营估算 · E 商户号实际现金流（曲线，对账基准，不与四路累加）</span>
@@ -219,7 +219,7 @@
       <section class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">三、手动退款登记水位<el-tooltip effect="dark" placement="top" raw-content
-            content="<b>来源</b>：/analytics/refund/decision-overview → manual_water<br/><b>口径</b>：登记 = manual_refunds 全部登记按 register_time 归日；已退 = is_refunded「是」按 op_time（缺失回退 register_time）归日；蓄水 = 登记 − 已退，累计 = 窗口内逐日累加<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：某日既无登记也无退款完成则不出现；整块为空 = 窗口内无手动退款登记流水<br/><b>下钻</b>：下方日表即按日构成；「六、退款明细」路径筛选=手动退款可看单笔（仅已退部分）">
+            content="<b>来源</b>：/analytics/refund/decision-overview → manual_water<br/><b>口径</b>：登记 = manual_refunds 全部登记按 register_time 归日；已退 = is_refunded「是」按 op_time（缺失回退 register_time）归日；蓄水 = 登记 − 已退，累计 = 窗口内逐日累加<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：某日既无登记也无退款完成则不出现；整块为空 = 窗口内无手动退款登记流水<br/><b>下钻</b>：下方日表即按日构成；「七、退款明细」路径筛选=手动退款可看单笔（仅已退部分）">
             <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
           </el-tooltip></span>
           <span class="block-hint">登记(商户号手机退款处理登记) − 已退款完成 = 蓄水 · 手动操作为主,存在登记后未退的积压</span>
@@ -255,7 +255,7 @@
       <section class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">四、涉诉 vs 普通退款<el-tooltip effect="dark" placement="top" raw-content
-            content="<b>来源</b>：/analytics/refund/decision-overview → complaint_split<br/><b>口径</b>：仅<b>线上已退款</b>单；每单按 SN 关联工单服务项判涉诉，优先级 <b>外部&gt;商户号&gt;内部</b>（外部: 工信部/12315/315平台/12345/政务平台等 · 商户号: 微信 · 内部: 商品投诉/服务投诉）；无工单标识但审核备注/备注含「涉投诉/客诉/投诉/315/争议/催退」归「备注涉诉」；占比 = 当日涉诉金额/(涉诉+普通)×100<br/>详见 docs/standards/投诉渠道口径与对账说明.md<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：某日无线上已退款单则不出现；整块为空 = 窗口内无线上已退款<br/><b>下钻</b>：下方日表即按日构成；单笔构成 → 点「涉诉退款占比」KPI 卡或用「六、退款明细」涉诉筛选">
+            content="<b>来源</b>：/analytics/refund/decision-overview → complaint_split<br/><b>口径</b>：仅<b>线上已退款</b>单；每单按 SN 关联工单服务项判涉诉，优先级 <b>外部&gt;商户号&gt;内部</b>（外部: 工信部/12315/315平台/12345/政务平台等 · 商户号: 微信 · 内部: 商品投诉/服务投诉）；无工单标识但审核备注/备注含「涉投诉/客诉/投诉/315/争议/催退」归「备注涉诉」；占比 = 当日涉诉金额/(涉诉+普通)×100<br/>详见 docs/standards/投诉渠道口径与对账说明.md<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：某日无线上已退款单则不出现；整块为空 = 窗口内无线上已退款<br/><b>下钻</b>：下方日表即按日构成；单笔构成 → 点「涉诉退款占比」KPI 卡或用「七、退款明细」涉诉筛选">
             <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
           </el-tooltip></span>
           <span class="block-hint">线上直退 · 涉诉=SN关联工单(外部&gt;商户号&gt;内部) 或 审核备注投诉标识(涉投诉/客诉/315/争议等) · 判断: 占比高=该退才退(控制到位,同时盯投诉绝对量) / 占比低=警惕宽松退款 → 行动: 转投诉/商品质量专项</span>
@@ -292,7 +292,7 @@
       <section class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">五、退款原因 & 操作人员<el-tooltip effect="dark" placement="top" raw-content
-            content="<b>来源</b>：/analytics/refund/decision-overview → reason_operator<br/><b>口径</b>：仅<b>线上已退款</b>单；原因 = 该退款单设备<b>最新完工工单</b>的服务项（未关联工单 →「&lt;未关联工单&gt;」）；人员 = refunds.operator（别名归一为显示名，系统/空 →「&lt;系统&gt;」）；Top 原因按笔数、Top 人员按金额<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：图为空 = 窗口内无线上已退款；「&lt;未关联工单&gt;」占比高 = 工单关联缺失（结论条会提示），此时原因分布失真<br/><b>⚠️ 下钻说明</b>：图内点击未实现——明细可在「六、退款明细」用「退款原因」「退款人」筛选查看单笔（与图同源字段），故不另做图内跳转">
+            content="<b>来源</b>：/analytics/refund/decision-overview → reason_operator<br/><b>口径</b>：仅<b>线上已退款</b>单；原因 = 该退款单设备<b>最新完工工单</b>的服务项（未关联工单 →「&lt;未关联工单&gt;」）；人员 = refunds.operator（别名归一为显示名，系统/空 →「&lt;系统&gt;」）；Top 原因按笔数、Top 人员按金额<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：图为空 = 窗口内无线上已退款；「&lt;未关联工单&gt;」占比高 = 工单关联缺失（结论条会提示），此时原因分布失真<br/><b>⚠️ 下钻说明</b>：图内点击未实现——明细可在「七、退款明细」用「退款原因」「退款人」筛选查看单笔（与图同源字段），故不另做图内跳转">
             <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
           </el-tooltip></span>
           <span class="block-hint">线上直退 · 判断: 主因类别与主力人员 → 行动: 针对主因解决上游问题(网络质量/商品问题/话术)以减少退款 · 未关联工单占比高时原因覆盖不足</span>
@@ -319,11 +319,60 @@
         </el-row>
       </section>
 
-      <!-- ===== 区块6: 明细下钻(可查可追) ===== -->
+      <!-- ===== 区块6: 设备维度汇总(#291: 从「表格筛选」升级为「维度汇总分析」) =====
+        设计说明(Design Rationale):
+        · 目的: 替运营/客服主管回答「退款集中在哪类设备/套餐/商户/激活阶段」——
+          激活时长直接区分新机质量问题(≤7天) vs 长尾老化(>180天); 设备类型/套餐/
+          商户号指向具体供应与销售环节。
+        · 口径: 与区块五同数据面(仅线上已退款单, 窗口按发起时间 D1); 设备属性 =
+          devices 表(#271/#273 同源); 激活基准 = bms_orders 最早激活日(#251 同源)。
+          激活时间段图复用 sale_days_split(#251 真身六桶, 同一事实不两处汇总);
+          点击下钻按 7/30/180 天界合并映射到明细 active_age 参数(数字=各桶之和)。
+        · 取舍: ① 不做设备类型×套餐交叉图(组合爆炸, 明细筛选可自由组合);
+          ② 激活段不另做四桶图(六桶为唯一真身, 防口径漂移); ③ 未填/(未填SN)/
+          (未建档) 桶显式保留(不美化覆盖缺口); ④ 类型桶反查不到类型码时不设筛选
+          (避免假下钻), 其余桶点击直接带筛选跳明细。
+        · 工单: #291 (用户 2026-10-09 拍板, #273 方案乙范围)。
+      -->
+      <section class="block-card mb-16">
+        <div class="block-head">
+          <span class="block-title">六、设备维度汇总<el-tooltip effect="dark" placement="top" raw-content
+            content="<b>来源</b>：/analytics/refund/decision-overview → device_dims / sale_days_split<br/><b>口径</b>：与「五、退款原因」同数据面（仅线上已退款单，窗口按发起时间）；设备类型/套餐/商户号 = devices 表属性（#271/#273 同源）；激活时间段 = 发起日 − bms_orders 最早激活日（#251 同源六桶：0-7/8-30/31-90/91-180/181-365/&gt;365/无激活记录）<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：图为空 = 窗口内无线上已退款单；(未填)/(未填SN)/(未建档) 桶 = 台账/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击任一桶 → 「七、退款明细」自动带对应筛选（激活桶按 7/30/180 天界合并映射）；设备类型桶需反查到类型码才可下钻<br/><b>取舍</b>：不做类型×套餐交叉图（明细筛选可组合）；激活段不另做四桶图（#251 六桶为唯一真身）">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip></span>
+          <span class="block-hint">线上直退 · 判断: 退款集中在哪类设备/套餐/商户/激活阶段 → 行动: 新机高退查质量与预期差, 老机高退查老化与续费话术 · 点击桶带筛选下钻明细</span>
+        </div>
+        <el-row :gutter="16">
+          <el-col :xs="24" :md="8" class="mb-12">
+            <div class="sub-title">设备类型 Top（按笔数）</div>
+            <BaseChart v-if="deviceTypeOption.series" :option="deviceTypeOption" height="240px" @chartClick="(p) => drillDeviceDim('type', p.name)" />
+            <el-empty v-else description="暂无数据" :image-size="60" />
+          </el-col>
+          <el-col :xs="24" :md="8" class="mb-12">
+            <div class="sub-title">套餐 Top（按笔数）</div>
+            <BaseChart v-if="comboOption.series" :option="comboOption" height="240px" @chartClick="(p) => drillDeviceDim('combo', p.name)" />
+            <el-empty v-else description="暂无数据" :image-size="60" />
+          </el-col>
+          <el-col :xs="24" :md="8" class="mb-12">
+            <div class="sub-title">商户号 Top（按笔数）</div>
+            <BaseChart v-if="merchantOption.series" :option="merchantOption" height="240px" @chartClick="(p) => drillDeviceDim('merchant', p.name)" />
+            <el-empty v-else description="暂无数据" :image-size="60" />
+          </el-col>
+        </el-row>
+        <el-row>
+          <el-col :xs="24" :md="12">
+            <div class="sub-title">激活时间段（按笔数, #251 六桶口径）</div>
+            <BaseChart v-if="activeAgeOption.series" :option="activeAgeOption" height="220px" @chartClick="(p) => drillDeviceDim('age', p.name)" />
+            <el-empty v-else description="暂无数据" :image-size="60" />
+          </el-col>
+        </el-row>
+      </section>
+
+      <!-- ===== 区块7: 明细下钻(可查可追) ===== -->
       <section id="sec-detail" class="block-card">
         <div class="block-head">
-          <span class="block-title">六、退款明细<el-tooltip effect="dark" placement="top" raw-content
-            content="<b>来源</b>：/analytics/refund-withdrawal/detail（退款明细台账）<br/><b>口径</b>：支持 涉诉/退款路径/退款人/退款原因 四维筛选（选项见下方筛选器）；风险分级 = 接口 risk_summary（高/中/低）；各项口径以接口返回为准<br/><b>时点</b>：随当前筛选实时查询（无缓存）<br/><b>「空」的含义</b>：列表为空 = 当前筛选组合无匹配行；清空筛选可验证是否为口径/筛选问题<br/><b>下钻</b>：SN 点击 → 设备审计页（新窗口，带当前窗口）；全量数据用右上角「导出」下载 Excel">
+          <span class="block-title">七、退款明细<el-tooltip effect="dark" placement="top" raw-content
+            content="<b>来源</b>：/analytics/refund-withdrawal/detail（退款明细台账）<br/><b>口径</b>：支持 涉诉/退款路径/退款人/退款原因/设备维度(类型·套餐·商户号·激活时间)/激活时段(#291桶) 筛选（选项见下方筛选器）；风险分级 = 接口 risk_summary（高/中/低）；各项口径以接口返回为准<br/><b>时点</b>：随当前筛选实时查询（无缓存）<br/><b>「空」的含义</b>：列表为空 = 当前筛选组合无匹配行；清空筛选可验证是否为口径/筛选问题<br/><b>下钻</b>：SN 点击 → 设备审计页（新窗口，带当前窗口）；全量数据用右上角「导出」下载 Excel">
             <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
           </el-tooltip></span>
           <span class="block-hint">共 {{ detailTotal }} 条 · 点击 SN 可查看设备审计 · 全量数据可点右上角「导出」下载 Excel</span>
@@ -368,6 +417,14 @@
             <el-option v-for="m in facetMerchants" :key="m" :label="m" :value="m" />
           </el-select>
           <el-date-picker v-model="filter.activeRange" type="daterange" size="small" range-separator="~" start-placeholder="激活起" end-placeholder="激活止" value-format="YYYY-MM-DD" style="width: 210px" />
+          <!-- #291: 激活后天数桶(六、设备维度汇总 激活桶下钻入口) -->
+          <el-select v-model="filter.activeAge" placeholder="激活时段" size="small" clearable style="width: 130px">
+            <el-option label="≤7天" value="le7" />
+            <el-option label="8-30天" value="8-30" />
+            <el-option label="31-180天" value="31-180" />
+            <el-option label=">180天" value="gt180" />
+            <el-option label="无激活记录" value="none" />
+          </el-select>
           <el-button size="small" :icon="RefreshLeft" @click="resetFilters">重置</el-button>
         </div>
         <el-table :data="detailList" border stripe size="small" max-height="420">
@@ -448,7 +505,7 @@ const detailLoaded = ref(false)
 const detailRisk = ref({ high: 0, medium: 0, low: 0 })
 // 明细筛选 & 筛选候选项
 // #273: 设备维度(device_type/combo/merchant/activeRange) 与投诉积压同一套后端参数
-const filter = ref({ comp: '', path: '', operator: '', reason: '', device_type: '', combo: '', merchant: '', activeRange: null })
+const filter = ref({ comp: '', path: '', operator: '', reason: '', device_type: '', combo: '', merchant: '', activeRange: null, activeAge: '' })
 const facetOperators = ref([])
 const facetReasons = ref([])
 const facetDeviceTypes = ref([])
@@ -481,12 +538,12 @@ function scrollToSection(id) {
 function drillRoutes() { scrollToSection('sec-routes') }
 // 钱包净水位 → 区块二「钱包水位监控」按日转入/转出/扣费构成表
 function drillWallet() { scrollToSection('sec-wallet') }
-// 涉诉退款占比 → 区块六明细并自动选中「涉诉」筛选(filter 变更由 watch 触发 loadDetail)
+// 涉诉退款占比 → 区块七明细并自动选中「涉诉」筛选(filter 变更由 watch 触发 loadDetail)
 function drillComplaintDetail() {
   filter.value = { ...filter.value, comp: 'any' }
   scrollToSection('sec-detail')
 }
-// 线上直退 → 区块六明细并自动选中「路径=线上直退」筛选
+// 线上直退 → 区块七明细并自动选中「路径=线上直退」筛选
 function drillOnlineDetail() {
   filter.value = { ...filter.value, path: 'B' }
   scrollToSection('sec-detail')
@@ -495,7 +552,7 @@ function drillOnlineDetail() {
 // ⚠️ C 闪猫路不做单笔明细下钻: 明细台账接口未覆盖闪猫路, 强行给会缺一路误导(见文件头取舍①)。
 
 function resetFilters() {
-  filter.value = { comp: '', path: '', operator: '', reason: '', device_type: '', combo: '', merchant: '', activeRange: null }
+  filter.value = { comp: '', path: '', operator: '', reason: '', device_type: '', combo: '', merchant: '', activeRange: null, activeAge: '' }
   detailPage.value = 1
   loadDetail()
 }
@@ -695,6 +752,78 @@ const reasonOption = computed(() => {
   }
 })
 
+// ---- #291 设备维度汇总(区块六): 设备类型/套餐/商户号 Top + 激活时间段(#251 六桶) ----
+const deviceDims = computed(() => data.value?.device_dims || {})
+
+// 设备类型/套餐/商户号 通用横向条形(按笔数 Top8, 点击桶 → 明细筛选下钻)
+function _dimBarOption(list, color) {
+  if (!list?.length) return {}
+  const sorted = [...list].sort((a, b) => b.count - a.count).slice(0, 8)
+  return {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
+      formatter: (params) => {
+        const it = sorted[params[0].dataIndex] || {}
+        return `<b>${it.name}</b><br/>笔数: <b>${it.count}</b><br/>金额: ¥${formatMoney(it.amount)}<br/>占比: ${it.ratio}%`
+      } },
+    grid: { left: 8, right: 56, top: 8, bottom: 8, containLabel: true },
+    xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
+    yAxis: { type: 'category', data: sorted.map(r => r.name), inverse: true,
+      axisLabel: { fontSize: 10, width: 92, overflow: 'truncate' } },
+    series: [{ name: '笔数', type: 'bar', data: sorted.map(r => r.count), barMaxWidth: 14,
+      itemStyle: { color, borderRadius: [0, 4, 4, 0] },
+      label: { show: true, position: 'right', fontSize: 10, formatter: '{c}' } }],
+  }
+}
+const deviceTypeOption = computed(() => _dimBarOption(deviceDims.value.by_device_type, '#6366f1'))
+const comboOption = computed(() => _dimBarOption(deviceDims.value.by_combo, '#0ea5e9'))
+const merchantOption = computed(() => _dimBarOption(deviceDims.value.by_merchant, '#f59e0b'))
+
+// 激活时间段: 复用 #251 sale_days_split 六桶真身(不另做四桶图, 防同事实两处口径漂移)
+// 点击桶按 7/30/180 天界合并映射到明细 active_age 参数(下钻数字 = 各桶之和)
+const SALE_AGE_PARAM = {
+  '0-7天': 'le7', '8-30天': '8-30', '31-90天': '31-180', '91-180天': '31-180',
+  '181-365天': 'gt180', '>365天': 'gt180', '无激活记录': 'none',
+}
+const activeAgeOption = computed(() => {
+  const list = data.value?.sale_days_split || []
+  if (!list.length) return {}
+  return {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
+      formatter: (params) => {
+        const it = list[params[0].dataIndex] || {}
+        return `<b>${it.bucket}</b><br/>笔数: <b>${it.cnt}</b><br/>金额: ¥${formatMoney(it.amount)}`
+      } },
+    grid: { left: 8, right: 56, top: 8, bottom: 8, containLabel: true },
+    xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
+    yAxis: { type: 'category', data: list.map(r => r.bucket), inverse: true, axisLabel: { fontSize: 10 } },
+    series: [{ name: '笔数', type: 'bar', data: list.map(r => r.cnt), barMaxWidth: 16,
+      itemStyle: { color: '#10b981', borderRadius: [0, 4, 4, 0] },
+      label: { show: true, position: 'right', fontSize: 10, formatter: '{c}' } }],
+  }
+})
+
+// #291 桶点击 → 带筛选跳「七、退款明细」
+// 设备类型桶名是显示名(type_name), 需从 facets 反查类型码(code); 反查不到 → 不设筛选(避免假下钻)
+function drillDeviceDim(kind, name) {
+  if (!name) return
+  const patch = {}
+  if (kind === 'type') {
+    const hit = facetDeviceTypes.value.find(t => t.label === name || (name && t.label && t.label.startsWith(name + '(')))
+    if (!hit) return
+    patch.device_type = hit.value
+  } else if (kind === 'combo') {
+    patch.combo = name
+  } else if (kind === 'merchant') {
+    patch.merchant = name
+  } else if (kind === 'age') {
+    const v = SALE_AGE_PARAM[name]
+    if (!v) return
+    patch.activeAge = v
+  }
+  filter.value = { ...filter.value, ...patch }
+  scrollToSection('sec-detail')
+}
+
 async function loadDetail() {
   const params = {}
   if (props.start) params.start = props.start + 'T00:00:00'
@@ -714,6 +843,8 @@ async function loadDetail() {
     params.active_start = filter.value.activeRange[0]
     params.active_end = filter.value.activeRange[1]
   }
+  // #291: 激活后天数桶下钻(le7/8-30/31-180/gt180/none), 由「六、设备维度汇总」桶点击带入
+  if (filter.value.activeAge) params.active_age = filter.value.activeAge
   try {
     const res = await refundWithdrawal.detail(params)
     detailTotal.value = res?.data?.total || 0

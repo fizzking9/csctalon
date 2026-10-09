@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.orm import Session
 
+from app.models.bms_order import BmsOrder
 from app.models.combo_dict import ComboDict, ComboNameAlias
 from app.models.cs_record import CsRecord
 from app.models.device import Device, DimDeviceType
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
 from app.services.analytics._core import (
+    ACTIVE_AGE_BUCKETS,
     REAL_FINISH_EPOCH_SECS,
     _complaint_source_type_case,
     _person_position_map,
@@ -774,7 +776,9 @@ def complaint_by_device_tag(
 # #252 B3-11 投诉分析扩展维度（店铺/商户号/设备型号/套餐/激活后时长）
 # ═══════════════════════════════════════════════════════════════════════
 
-_ACTIVE_DAYS_BUCKETS = ("0-30天", "31-90天", "91-180天", "181-365天", ">365天", "(无激活记录)")
+# #252 建五桶 → #291 改**四桶**(用户拍板 2026-10-09): ≤7 / 8-30 / 31-180(6个月内) / >180(6个月以上)
+# 桶名唯一来源 = _core.ACTIVE_AGE_BUCKETS(与退款侧明细下钻 active_age 参数同源)
+_ACTIVE_DAYS_BUCKETS = ACTIVE_AGE_BUCKETS
 
 
 def _topn_with_other(rows: list, name_idx: int, cnt_idx: int, limit: int) -> list[dict]:
@@ -804,7 +808,8 @@ def complaint_extended_dims(
         device_type 文本，再空归 (未知类型)
       · 套餐: devices.current_combo_name → combo_name_alias(is_current) → combo_dict
         归一名，未命中回落原始名，空归 (无套餐)
-      · 激活后时长: register_time − devices.active_time 天数分桶（上海时区日期差）
+      · 激活后时长: register_time − bms_orders 最早激活日(#291 四桶口径, 与 #251 同源;
+        原 #252 用 devices.active_time, 已统一收敛到 bms_orders 单一基准)
       · 每维 TopN + 其余归 (其他)；未建链显式分桶暴露覆盖缺口
     """
     ts, te, _, _, _, _ = _resolve_windows(date=date, start=start, end=end)
@@ -885,23 +890,32 @@ def complaint_extended_dims(
         .order_by(cnt.desc())
     ).all()
 
-    # ── 5. 激活后时长（上海时区日期差分桶）──
+    # ── 5. 激活后时长(#291 四桶口径; 基准=bms_orders 最早激活日, 与 #251「销售天数」同源单口径,
+    #        原 #252 用 devices.active_time → 统一收敛到 bms_orders) ──
+    fa_cte = (
+        select(
+            BmsOrder.device_sn.label("dsn"),
+            func.min(BmsOrder.active_date).label("fa"),
+        )
+        .where(BmsOrder.device_sn.isnot(None), BmsOrder.active_date.isnot(None))
+        .group_by(BmsOrder.device_sn)
+    ).cte("first_active")
     days_expr = (
         func.date(ServiceTicket.register_time.op("AT TIME ZONE")("Asia/Shanghai"))
-        - func.date(Device.active_time.op("AT TIME ZONE")("Asia/Shanghai"))
+        - func.date(fa_cte.c.fa.op("AT TIME ZONE")("Asia/Shanghai"))
     )
     bucket_expr = case(
-        (Device.active_time.is_(None), "(无激活记录)"),
-        (days_expr <= 30, "0-30天"),
-        (days_expr <= 90, "31-90天"),
-        (days_expr <= 180, "91-180天"),
-        (days_expr <= 365, "181-365天"),
-        else_=">365天",
+        (fa_cte.c.fa.is_(None), "(无激活记录)"),
+        (days_expr <= 7, "≤7天"),
+        (days_expr <= 30, "8-30天"),
+        (days_expr <= 180, "31-180天"),
+        else_=">180天",
     )
     active_rows = db.execute(
         select(bucket_expr, cnt)
         .select_from(ServiceTicket)
         .outerjoin(Device, Device.sn == ServiceTicket.device_sn)
+        .outerjoin(fa_cte, fa_cte.c.dsn == ServiceTicket.device_sn)
         .where(_is_c, *_win)
         .group_by(bucket_expr)
     ).all()

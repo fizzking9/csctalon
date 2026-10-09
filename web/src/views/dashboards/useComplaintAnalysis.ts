@@ -218,7 +218,8 @@ export function useComplaintAnalysis() {
   const backlogFilters = reactive({
     source_type: '', status: '', has_handler: null,
     // #273: 设备维度筛选(口径=devices 表, 与退款明细同一套后端参数)
-    device_type: '', combo: '', merchant: '', activeRange: null,
+    // #291: activeAge=激活后天数桶(le7/8-30/31-180/gt180/none), 由四维汇总图桶点击带入
+    device_type: '', combo: '', merchant: '', activeRange: null, activeAge: '',
   })
 
 // #273: 设备维度筛选候选项(设备类型/套餐/商户号, 与窗口无关, 一次加载)
@@ -241,6 +242,8 @@ export function useComplaintAnalysis() {
       p.active_start = backlogFilters.activeRange[0]
       p.active_end = backlogFilters.activeRange[1]
     }
+    // #291: 激活后天数桶下钻(锚点=工单登记日 − bms_orders最早激活日)
+    if (backlogFilters.activeAge) p.active_age = backlogFilters.activeAge
     return p
   }
 
@@ -372,6 +375,69 @@ export function useComplaintAnalysis() {
       }],
     }
   })
+
+  // ── #291 设备维度汇总(积压口径): 设备类型/套餐/商户号 + 激活时间段四桶 ──
+  // 数据面 = /backlog 同一响应(by_device_type/by_combo/by_merchant/by_active_age),
+  // 与明细表同源 → 点击桶设置筛选后明细行数 = 桶计数, 数字自洽可对账。
+  function _dimBarOption(list, color) {
+    if (!list?.length || list.every(x => !x.count)) return null
+    const sorted = [...list].sort((a, b2) => b2.count - a.count).slice(0, 8)
+    return {
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      grid: { left: 8, right: 44, top: 8, bottom: 8, containLabel: true },
+      xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
+      yAxis: { type: 'category', data: sorted.map(x => x.name), inverse: true,
+        axisLabel: { fontSize: 10, width: 92, overflow: 'truncate' } },
+      series: [{
+        type: 'bar', data: sorted.map(x => x.count), barMaxWidth: 14,
+        itemStyle: { color, borderRadius: [0, 4, 4, 0] },
+        label: { show: true, position: 'right', fontSize: 10 },
+      }],
+    }
+  }
+
+  const backlogDeviceTypeOption = computed(() => _dimBarOption(b.value.by_device_type, '#6366f1'))
+  const backlogComboOption = computed(() => _dimBarOption(b.value.by_combo, '#0ea5e9'))
+  const backlogMerchantOption = computed(() => _dimBarOption(b.value.by_merchant, '#f59e0b'))
+
+  const backlogActiveAgeOption = computed(() => {
+    const d = b.value.by_active_age || []
+    if (!d.length || d.every(x => !x.count)) return null
+    return {
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      grid: { left: 8, right: 44, top: 8, bottom: 8, containLabel: true },
+      xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
+      yAxis: { type: 'category', data: d.map(x => x.name), inverse: true, axisLabel: { fontSize: 10 } },
+      series: [{
+        type: 'bar', data: d.map(x => x.count), barMaxWidth: 16,
+        itemStyle: { color: '#10b981', borderRadius: [0, 4, 4, 0] },
+        label: { show: true, position: 'right', fontSize: 10 },
+      }],
+    }
+  })
+
+  // 四维桶点击 → 带筛选下钻积压明细(类型桶名=显示名, 需反查类型码; 反查不到不设筛选防假下钻)
+  const AGE_PARAM_BY_NAME = { '≤7天': 'le7', '8-30天': '8-30', '31-180天': '31-180', '>180天': 'gt180', '(无激活记录)': 'none' }
+  function drillBacklogDim(kind, name) {
+    if (!name) return
+    if (kind === 'type') {
+      const hit = backlogDimOptions.value.device_types.find(t => t.label === name || (name && t.label && t.label.startsWith(name + '(')))
+      if (!hit) return
+      backlogFilters.device_type = hit.value
+    } else if (kind === 'combo') {
+      backlogFilters.combo = name
+    } else if (kind === 'merchant') {
+      backlogFilters.merchant = name
+    } else if (kind === 'age') {
+      const v = AGE_PARAM_BY_NAME[name]
+      if (!v) return
+      backlogFilters.activeAge = v
+    } else {
+      return
+    }
+    backlogPage.value = 1
+    loadBacklog()
+  }
 
   const subj = computed(() => subjectData.value || {
     summary: { subject_total: 0, merchant_total: 0, external_total: 0, external_attributed: 0, external_unattributed: 0, refund_count: 0, refund_amount: 0 },
@@ -1265,6 +1331,12 @@ export function useComplaintAnalysis() {
     reasonColors,
     reasonTagType,
     backlogReasonOption,
+    // #291 设备维度汇总(积压口径, 四维桶点击下钻)
+    backlogDeviceTypeOption,
+    backlogComboOption,
+    backlogMerchantOption,
+    backlogActiveAgeOption,
+    drillBacklogDim,
     subj,
     subjectRanking,
     extRatioColor,

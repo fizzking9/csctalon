@@ -1,6 +1,7 @@
 """积压未处理投诉: complaint_backlog / complaint_backlog_export。"""
 
 from collections import Counter
+from datetime import datetime
 
 from fastapi import Query
 
@@ -16,11 +17,57 @@ from app.api.v1.complaints._helpers import (
 from app.api.v1.complaints._router import router
 from app.core.redis_client import cache_ttl_for, cached_json
 from app.schemas.common import R
-from app.services.analytics import _device_dim_options
+from app.services.analytics import (
+    ACTIVE_AGE_BUCKETS,
+    _active_age_bucket,
+    _age_days_between,
+    _device_dim_attrs,
+    _device_dim_options,
+)
+
+
+def _device_dim_groups(db, rows: list[dict]) -> dict[str, list[dict]]:
+    """#291 设备维度汇总(积压口径): 设备类型/套餐/商户号 + 激活时间段四桶。
+
+    与明细筛选(#273/#291 active_age)同用 _device_dim_attrs(SN→设备属性,
+    激活基准=bms_orders 最早激活日), 保证「汇总数字 ↔ 明细表」同源自洽:
+    点击任一桶 → 前端设置对应筛选 → /backlog 明细行数 = 桶计数。
+    未填SN/未建档 显式分桶暴露覆盖缺口, 不丢数据。
+    """
+    attrs = _device_dim_attrs(db, {r["device_sn"] for r in rows if r["device_sn"]})
+
+    def _cat_group(pick) -> list[dict]:
+        g: dict[str, int] = {}
+        for r in rows:
+            sn = r["device_sn"]
+            a = attrs.get(sn) if sn else None
+            if a is not None:
+                key = pick(a) or "(未填)"
+            else:
+                key = "(未建档)" if sn else "(未填SN)"
+            g[key] = g.get(key, 0) + 1
+        return [{"name": k, "count": v} for k, v in sorted(g.items(), key=lambda x: -x[1])][:12]
+
+    # 激活时间段: 锚点=工单登记日(与 #291 active_age 筛选同锚), 固定桶顺序返回
+    age_g: dict[str, int] = {b: 0 for b in ACTIVE_AGE_BUCKETS}
+    for r in rows:
+        a = attrs.get(r["device_sn"]) if r["device_sn"] else None
+        reg = r["register_time"]
+        try:
+            ev = datetime.strptime(str(reg)[:10], "%Y-%m-%d").date() if reg else None
+        except ValueError:
+            ev = None
+        age_g[_active_age_bucket(_age_days_between(ev, a["active_date"]) if a else None)] += 1
+    return {
+        "by_device_type": _cat_group(lambda a: a["type_name"]),
+        "by_combo": _cat_group(lambda a: a["combo"]),
+        "by_merchant": _cat_group(lambda a: a["merchant"]),
+        "by_active_age": [{"name": b, "count": age_g[b]} for b in ACTIVE_AGE_BUCKETS],
+    }
 
 
 @router.get("/backlog", response_model=R, summary="积压未处理投诉审核分析(统一口径: 归一化状态非已完成)")
-@cached_json(lambda *a, **kw: f"complaint:backlog:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('status')}:{kw.get('category')}:{kw.get('has_handler')}:{kw.get('page')}:{kw.get('page_size')}:{kw.get('sort')}:{kw.get('device_type')}:{kw.get('combo')}:{kw.get('merchant')}:{kw.get('active_start')}:{kw.get('active_end')}",
+@cached_json(lambda *a, **kw: f"complaint:backlog:{kw.get('start')}:{kw.get('end')}:{kw.get('source_type')}:{kw.get('status')}:{kw.get('category')}:{kw.get('has_handler')}:{kw.get('page')}:{kw.get('page_size')}:{kw.get('sort')}:{kw.get('device_type')}:{kw.get('combo')}:{kw.get('merchant')}:{kw.get('active_start')}:{kw.get('active_end')}:{kw.get('active_age')}",
              ttl=lambda **kw: cache_ttl_for(kw.get('start'), kw.get('end'), 60))
 def complaint_backlog(
     db: DBSession,
@@ -39,6 +86,8 @@ def complaint_backlog(
     merchant: str | None = Query(None, max_length=128, description="#273 商户号(devices.merchant_name)"),
     active_start: str | None = Query(None, max_length=10, description="#273 激活时间起(YYYY-MM-DD)"),
     active_end: str | None = Query(None, max_length=10, description="#273 激活时间止(YYYY-MM-DD)"),
+    active_age: str | None = Query(None, max_length=10, pattern=r"^(le7|8-30|31-180|gt180|none)$",
+                                   description="#291 激活后天数桶下钻(登记日−bms_orders最早激活日)"),
 ):
     """积压未处理投诉的查询/统计/审核分析。
 
@@ -50,7 +99,7 @@ def complaint_backlog(
     ts = _parse_dt(start)
     te = _parse_dt_end(end)
     backlog = _query_backlog_rows(db, ts, te, source_type, status, category, has_handler, sort,
-                                  device_type, combo, merchant, active_start, active_end)
+                                  device_type, combo, merchant, active_start, active_end, active_age)
     by_source = [{"name": k, "count": v} for k, v in sorted(Counter(r["source"] for r in backlog).items(), key=lambda x: -x[1])]
     by_category = [
         {"name": k, "count": v}
@@ -122,6 +171,8 @@ def complaint_backlog(
         "unassigned": unassigned,
         "overdue": overdue,
         "audited": audited_total,
+        # #291 设备维度汇总(积压口径, 与明细同源可下钻)
+        **_device_dim_groups(db, backlog),
         "items": items,
     })
 
@@ -148,6 +199,8 @@ def complaint_backlog_export(
     merchant: str | None = Query(None, max_length=128, description="#273 商户号"),
     active_start: str | None = Query(None, max_length=10, description="#273 激活时间起"),
     active_end: str | None = Query(None, max_length=10, description="#273 激活时间止"),
+    active_age: str | None = Query(None, max_length=10, pattern=r"^(le7|8-30|31-180|gt180|none)$",
+                                   description="#291 激活后天数桶下钻(登记日−bms_orders最早激活日)"),
 ):
     """导出积压未处理投诉明细 Excel。
 
@@ -164,7 +217,7 @@ def complaint_backlog_export(
     ts = _parse_dt(start)
     te = _parse_dt_end(end)
     rows = _query_backlog_rows(db, ts, te, source_type, status, category, has_handler, sort,
-                               device_type, combo, merchant, active_start, active_end)
+                               device_type, combo, merchant, active_start, active_end, active_age)
 
     df = pd.DataFrame([{
         "工单号": r["ticket_no"],

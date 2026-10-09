@@ -1195,3 +1195,107 @@ def _device_dim_options(db: Session) -> dict[str, list[str]]:
         select(Device.merchant_name).where(Device.merchant_name.isnot(None)).distinct()
     ).all())
     return {"device_types": device_types, "combos": combos, "merchants": merchants}
+
+
+# ============================================================
+# 设备维度汇总(#291): 退款/投诉按 设备类型/套餐/商户号/激活时间段 分桶共用
+#   · 激活时间段(用户拍板口径): 事件日 − bms_orders 最早激活日 MIN(active_date)
+#     （#251「按销售天数核算」同源单一基准; 原 #252 用 devices.active_time 已收敛）
+#     分桶 ≤7天 / 8-30天 / 31-180天(6个月内) / >180天(6个月以上) / (无激活记录)
+#   · 与 #252 激活分桶的差异: #252 为 0-30/31-90/91-180/181-365/>365(五桶),
+#     #291 统一改用本四桶口径(两侧一致); 负数(激活晚于事件, 补录/时点差)自然落首桶,
+#     与 #252 SQL case 行为一致。
+# ============================================================
+ACTIVE_AGE_BUCKETS = ("≤7天", "8-30天", "31-180天", ">180天", "(无激活记录)")
+
+# active_age 筛选参数(URL 安全) → 桶名(明细下钻用, #291)
+_AGE_PARAM_TO_BUCKET = {
+    "le7": "≤7天", "8-30": "8-30天", "31-180": "31-180天",
+    "gt180": ">180天", "none": "(无激活记录)",
+}
+
+
+def _active_age_bucket(days: int | None) -> str:
+    """激活后天数 → 分桶名(见 ACTIVE_AGE_BUCKETS)。days=None 表示无激活记录。"""
+    if days is None:
+        return "(无激活记录)"
+    if days <= 7:
+        return "≤7天"
+    if days <= 30:
+        return "8-30天"
+    if days <= 180:
+        return "31-180天"
+    return ">180天"
+
+
+def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
+    """SN → 设备属性映射(#291 维度汇总/激活时长分桶共用, 一次批量查询)。
+
+    口径(与 #273 筛选 / #251 / #271 同源):
+      · type_name  = dim_device_type.type_name(未命中回落原始码; 无码 → None)
+      · combo      = combo_name_alias(is_current) 归一名, 商户专属别名优先于全局
+                     (同 #252 canonical 子查询语义), 未命中回落 current_combo_name
+      · merchant   = devices.merchant_name
+      · active_date = bms_orders 最早激活日 MIN(active_date)(#251「按销售天数核算」
+                     同一基准 —— 全站激活口径单源; 无订单 → None = 无激活记录)
+    不在 devices 表的 SN 不出现在结果中(调用方归「(未建档)」桶, 暴露覆盖缺口)。
+    """
+    if not sns:
+        return {}
+    from app.models.bms_order import BmsOrder
+    from app.models.combo_dict import ComboDict, ComboNameAlias
+    from app.models.device import Device, DimDeviceType
+
+    rows = db.execute(
+        select(Device.sn, Device.device_type_code, Device.current_combo_name,
+               Device.merchant_name)
+        .where(Device.sn.in_(sns))
+    ).all()
+    # 激活日(#251 同源): bms_orders 最早 active_date
+    first_active: dict[str, Any] = {
+        sn: fa for sn, fa in db.execute(
+            select(BmsOrder.device_sn, func.min(BmsOrder.active_date))
+            .where(BmsOrder.device_sn.in_(sns), BmsOrder.active_date.isnot(None))
+            .group_by(BmsOrder.device_sn)
+        ).all()
+    }
+    type_names: dict[str, str] = {
+        code: name for code, name in db.execute(
+            select(DimDeviceType.type_code, DimDeviceType.type_name)
+            .where(DimDeviceType.type_code.isnot(None))
+        ).all() if name
+    }
+    # 套餐归一: 同 raw 名多别名时商户专属(merchant_pk 非空)优先(同 #252 order_by 语义)
+    best: dict[str, tuple[str, bool]] = {}
+    for raw, canon, mpk in db.execute(
+        select(ComboNameAlias.raw_package_name, ComboDict.canonical_name, ComboNameAlias.merchant_pk)
+        .join(ComboDict, ComboDict.combo_code == ComboNameAlias.combo_code)
+        .where(ComboNameAlias.is_current.is_(True))
+    ).all():
+        if not raw or not canon:
+            continue
+        mpk_flag = mpk is not None
+        if raw not in best or (mpk_flag and not best[raw][1]):
+            best[raw] = (canon, mpk_flag)
+    alias_map = {raw: canon for raw, (canon, _) in best.items()}
+
+    out: dict[str, dict[str, Any]] = {}
+    for sn, type_code, combo_raw, merchant in rows:
+        fa = first_active.get(sn)
+        if fa is not None:
+            fa = fa if fa.tzinfo else fa.replace(tzinfo=_dt.timezone.utc)
+            fa = fa.astimezone(TZ).date()
+        out[str(sn)] = {
+            "type_name": (type_names.get(type_code) or type_code) if type_code else None,
+            "combo": alias_map.get(combo_raw or "", combo_raw) if combo_raw else None,
+            "merchant": merchant,
+            "active_date": fa,
+        }
+    return out
+
+
+def _age_days_between(event_date, active_date) -> int | None:
+    """事件日 − 激活日 天数; active_date 为空 → None(无激活记录)。"""
+    if event_date is None or active_date is None:
+        return None
+    return (event_date - active_date).days

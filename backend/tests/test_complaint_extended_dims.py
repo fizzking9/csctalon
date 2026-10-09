@@ -163,23 +163,29 @@ def test_dims_package_canonical_and_fallback(db):
 
 
 def test_dims_active_days_buckets(db):
-    """激活后时长维: 20/100/400 天激活各落对应桶; 无激活记录落 (无激活记录)。"""
-    for days, bucket in [(20, "0-30天"), (100, "91-180天"), (400, ">365天")]:
+    """激活后时长维(#291 四桶): 20/100/400 天激活各落对应桶; 无激活记录落 (无激活记录)。
+
+    #291 基准收敛为 bms_orders 最早激活日 MIN(active_date)（原 #252 用 devices.active_time）。
+    """
+    from app.models.bms_order import BmsOrder
+    for days, bucket in [(20, "8-30天"), (100, "31-180天"), (400, ">180天")]:
         sn = _uniq(f"SN-A{days}")
-        _mk_device(db, sn, active_time=datetime.now(UTC) - timedelta(days=days))
+        _mk_device(db, sn)
+        db.add(BmsOrder(order_no=_uniq("OD"), device_sn=sn,
+                        active_date=datetime.now(UTC) - timedelta(days=days)))
         _mk_complaint(db, sn)
     sn_no = _uniq("SN-ANONE")
-    _mk_device(db, sn_no)  # active_time=None
+    _mk_device(db, sn_no)  # 无 bms_orders 激活记录 → (无激活记录)
     _mk_complaint(db, sn_no)
     db.flush()
 
     rows = _dim(db)["by_active_days"]
-    # 6 桶齐全
-    assert _names(rows) == ["0-30天", "31-90天", "91-180天", "181-365天", ">365天", "(无激活记录)"]
+    # #291 四桶 + 无激活记录, 桶名与 _core.ACTIVE_AGE_BUCKETS 单一来源一致
+    assert _names(rows) == ["≤7天", "8-30天", "31-180天", ">180天", "(无激活记录)"]
     amap = {r["name"]: r["count"] for r in rows}
-    assert amap["0-30天"] >= 1
-    assert amap["91-180天"] >= 1
-    assert amap[">365天"] >= 1
+    assert amap["8-30天"] >= 1
+    assert amap["31-180天"] >= 1
+    assert amap[">180天"] >= 1
     assert amap["(无激活记录)"] >= 1
 
 

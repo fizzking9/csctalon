@@ -224,7 +224,10 @@ def get_incident_impact_comparison(
     datetime 对象需 tz-aware, 故统一用 timezone.utc 做 anchor 转换。
     """
     from datetime import timedelta, timezone
-    from sqlalchemy import and_, func as _func
+
+    from sqlalchemy import and_
+    from sqlalchemy import func as _func
+
     from app.models.cs_record import CsRecord
     from app.models.refund import Refund
     from app.models.ticket import ServiceTicket
