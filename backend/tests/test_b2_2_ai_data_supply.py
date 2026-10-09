@@ -210,7 +210,10 @@ def test_entity_context_swallows_errors(db, monkeypatch):
     "/api/v1/external/device/SNABC12345",
     "/api/v1/external/schedule?start=2026-10-01&end=2026-10-02",
 ])
-def test_external_entity_endpoints_require_auth(client, path):
-    # 无 Bearer token → _auth 拒绝(401/403), 证明新路由已挂鉴权而非裸奔
+def test_external_entity_endpoints_require_auth(client, path, monkeypatch):
+    # 默认 EXTERNAL_API_ENABLED=false → 503; 开启后无 Bearer token → _auth 拒绝(401/403),
+    # 证明新路由已挂鉴权而非裸奔
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "EXTERNAL_API_ENABLED", True)
     resp = client.get(path)
     assert resp.status_code in (401, 403)
