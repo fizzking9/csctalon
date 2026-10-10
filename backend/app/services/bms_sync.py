@@ -802,6 +802,23 @@ async def sync_all(
                                     except Exception:
                                         pass
 
+                            # ── #293: device_combo 同步后自动反填 devices 档案缺字段 ──
+                            #    BMS 设备列表接口查不到的 SN(约45%)在 device_combos 里有
+                            #    完整的商户名/套餐名/激活时间, 反填到 devices 主表(幂等, 只填空值)
+                            _has_combo = any(
+                                r.get("success") and r.get("data_type") == "device_combo"
+                                and ((r.get("inserted_rows") or 0) + (r.get("updated_rows") or 0)) > 0
+                                for r in results
+                            )
+                            if _has_combo:
+                                try:
+                                    from app.services.device_profile_enrich import backfill_from_business
+                                    _report("反填设备档案(从充值/流量数据)...")
+                                    _bk = backfill_from_business(hook_db)
+                                    logger.info(f"[post-sync] 设备档案反填: {_bk}")
+                                except Exception as _bk_e:
+                                    logger.warning(f"[post-sync] 设备档案反填异常(忽略, 不影响同步): {_bk_e}")
+
                             _report("关联匹配中..." if first_try else "关联匹配中(重试)...")
                             def _match_progress_cb(step_name: str, current: int, total: int):
                                 _report(f"关联匹配 {current+1}/{total}: {step_name}")
