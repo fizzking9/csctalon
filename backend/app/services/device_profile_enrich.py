@@ -150,22 +150,31 @@ def mark_probe_miss(db: Session, sn: str) -> None:
 # ── #293 续费记录套餐兜底(renew 模式) ──
 
 def scan_renew_combo_sns(db: Session, limit: int) -> list[str]:
-    """扫描「已探针但套餐仍空」的 SN（设备列表源已穷尽, 续费记录兜底）。
+    """扫描缺套餐且「未被续费探过」的 SN（设备列表源已穷尽, 续费记录兜底）。
 
-    倒排优先级: 近180天有退款的设备最先（退款分析是 #293 的直接受益方）,
-    其余按设备列表探针时间正序（最早被探的先补）。
+    探针口径: 只看 renew_probe_at IS NULL OR 超30天——miss 打 renew 标记后
+    不再挡道（旧实现与设备列表共用 profile_probe_at, miss墙导致 9.4 万漏扫）。
+    倒排优先级: 近180天有退款的设备最先（退款分析是 #293 直接受益方）。
     """
     q = text("""
         SELECT d.sn FROM devices d
-        WHERE (d.current_combo_name IS NULL OR d.current_combo_name = '')
-          AND d.profile_probe_at IS NOT NULL
+        WHERE NULLIF(d.current_combo_name,'') IS NULL
+          AND (d.renew_probe_at IS NULL OR d.renew_probe_at < now() - interval '30 days')
         ORDER BY EXISTS (
             SELECT 1 FROM refunds r
             WHERE r.device_sn = d.sn AND r.updated_at >= now() - interval '180 days'
-        ) DESC, d.profile_probe_at ASC
+        ) DESC
         LIMIT :lim
     """)
     return [r[0] for r in db.execute(q, {"lim": limit}).fetchall()]
+
+
+def mark_renew_probe_miss(db: Session, sn: str) -> None:
+    """续费记录 miss 只打 renew_probe_at（与设备列表探针 profile_probe_at 分离）。"""
+    db.execute(
+        text("UPDATE devices SET renew_probe_at = now() WHERE sn = :sn"),
+        {"sn": sn},
+    )
 
 
 def apply_renew_items(db: Session, sn: str, items: list[dict]) -> bool:
@@ -177,8 +186,8 @@ def apply_renew_items(db: Session, sn: str, items: list[dict]) -> bool:
       在非质检记录中优先「非套餐已作废」的最新一条, 否则取最新非质检一条。
       「服务过期」的真实套餐照取（分析需要设备最后用的真实套餐, 空着反而造「未填」假象）;
     - merchant_name ← businessName(店铺名); active_time 兜底 ← 最早 startDate;
-    - hit 也写 profile_probe_at=now(): 双语义(设备列表 30 天复探窗口顺延;
-      续费记录查过即标记, 避免重复白查)。
+    - hit 写 renew_probe_at=now()（续费探针专用标记; 不碰 profile_probe_at——
+      两个探针独立, renew 不改变设备列表 30 天复探窗口）。
     """
     if not items:
         return False
@@ -195,7 +204,7 @@ def apply_renew_items(db: Session, sn: str, items: list[dict]) -> bool:
             current_combo_name = COALESCE(NULLIF(current_combo_name,''), :combo),
             merchant_name      = COALESCE(NULLIF(merchant_name,''), :merchant),
             active_time        = COALESCE(active_time, CAST(:first_start AS timestamp)),
-            profile_probe_at   = now()
+            renew_probe_at     = now()
         WHERE sn = :sn
     """), {
         "sn": sn, "combo": combo, "merchant": merchant, "first_start": first_start,
@@ -276,7 +285,7 @@ def _make_renew_session_hook(sns: list[str], concurrency: int, stats: dict):
                             stats["updated"] += 1
                     else:
                         stats["miss"] += 1
-                        mark_probe_miss(db, sn)
+                        mark_renew_probe_miss(db, sn)
                     # 每 200 个提交一批(短事务, 避免长事务锁表)
                     if stats["queried"] % 200 == 0:
                         db.commit()

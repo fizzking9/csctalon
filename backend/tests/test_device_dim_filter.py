@@ -149,7 +149,11 @@ def test_backlog_rows_device_dim_filter(db):
 
 
 def test_apply_renew_items_skips_qc_latest(db):
-    """#293: 最新续费记录为质检套餐时, 应跳过取后面的真实套餐(否则11.9万台落空)。"""
+    """#293: 最新续费记录为质检套餐时, 应跳过取后面的真实套餐(否则11.9万台落空)。
+
+    注意: 不调用 db.commit()——db fixture 靠事务回滚隔离, commit 会持久化
+    污染用例间数据; UPDATE 在同事务内即时可见, expire 后重读即可。
+    """
     sn = _uniq("SN-QC")
     _mk_device(db, sn)
     # createDate DESC 顺序: 最新=质检, 其后=真实套餐(服务过期也照取)
@@ -160,17 +164,20 @@ def test_apply_renew_items_skips_qc_latest(db):
          "businessName": "店铺甲", "startDate": "2026-07-01"},
     ]
     assert apply_renew_items(db, sn, items) is True
-    db.commit()
+    db.expire_all()  # 让绕过ORM的UPDATE在重读时生效(不commit, 保持事务隔离)
     dev = db.get(Device, sn)
     assert dev.current_combo_name == "300G/月【双通道】"
     assert dev.merchant_name == "店铺甲"
+    # renew 探针只写 renew_probe_at, 不碰 profile_probe_at（两探针独立）
+    assert dev.renew_probe_at is not None
+    assert dev.profile_probe_at is None
     # 只有质检记录 → combo 落空但商户/日期仍可填
     sn2 = _uniq("SN-QC2")
     _mk_device(db, sn2)
     only_qc = [{"comboName": "工厂质检专用套餐*30天", "currentStatus": "服务过期",
                 "businessName": "店铺乙", "startDate": "2026-08-01"}]
     assert apply_renew_items(db, sn2, only_qc) is True
-    db.commit()
+    db.expire_all()
     assert db.get(Device, sn2).current_combo_name is None
     # 空记录
     assert apply_renew_items(db, _uniq("SN-E"), []) is False

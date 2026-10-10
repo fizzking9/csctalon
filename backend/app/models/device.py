@@ -83,6 +83,10 @@ class Device(TimestampMixin, Base):
     profile_probe_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="档案探针时间(#293, 含 miss)"
     )
+    # #293: 续费记录探针时间(套餐兜底 renew 模式专用, 与 profile_probe_at 分离)
+    renew_probe_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="续费记录探针时间(#293, 含 miss)"
+    )
 
     tags: Mapped[list["DeviceTag"]] = relationship(secondary=device_tag_rel, lazy="selectin")
 
