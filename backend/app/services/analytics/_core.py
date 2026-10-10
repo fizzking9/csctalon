@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import and_, case, func, literal, or_, select, text
+from sqlalchemy import and_, case, exists, func, literal, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.models.group import PersonGroupMembership
@@ -1158,7 +1158,10 @@ def _device_dim_matched_sns(
     #   自 #292 引入以来投诉积压/退款链条页选「设备类型/套餐」筛选即 500;
     # ② 类型/套餐筛选必须作用在「每台设备最新订单」**之后**(外层 where)——若放在同一
     #   select 里, WHERE 先于 DISTINCT ON 执行, 语义变成"曾有该类型订单即命中",
-    #   与 #292 口径「最新订单的类型」不符(命中集偏大)。
+    #   与 #292 口径「最新订单的类型」不符(命中集偏大);
+    # ③ #293: 与 _device_dim_attrs 回落口径对齐 —— bms_orders 无订单的 SN(14位SN 68%)
+    #   回落 devices.device_type/current_combo_name, 筛选命中集 = 两源并集,
+    #   否则图表桶(回落值)点击下钻查不到。
     if device_type or combo:
         latest_sub = (
             select(BmsOrder.device_sn, BmsOrder.device_type_name, BmsOrder.combo_name)
@@ -1171,7 +1174,23 @@ def _device_dim_matched_sns(
             latest_sq = latest_sq.where(latest_sub.c.device_type_name == device_type)
         if combo:
             latest_sq = latest_sq.where(latest_sub.c.combo_name == combo)
-        sn_sets.append({s for s in db.scalars(latest_sq).all() if s})
+        matched = {s for s in db.scalars(latest_sq).all() if s}
+        # devices 回落并集(仅当 bms_orders 无该 SN 订单时生效, 权威序与 _device_dim_attrs 一致;
+        # NOT EXISTS 反连接下推 SQL, 避免把几十万 bms_orders SN 拉进 Python)
+        dev_conds = []
+        if device_type:
+            dev_conds.append(Device.device_type == device_type)
+        if combo:
+            dev_conds.append(Device.current_combo_name == combo)
+        dev_sq = (
+            select(Device.sn)
+            .where(Device.sn.isnot(None), or_(*dev_conds))
+            .where(~exists(select(1).where(BmsOrder.device_sn == Device.sn)))
+        )
+        for s in db.scalars(dev_sq).all():
+            if s:
+                matched.add(s)
+        sn_sets.append(matched)
 
     # ── 商户号: devices.merchant_name(设备归属) ──
     if merchant:
@@ -1181,7 +1200,8 @@ def _device_dim_matched_sns(
 
     # ── 激活时间: bms_orders MIN(active_date) 或 devices.active_time 兜底(并集) ──
     #   naive=北京时间 → UTC naive(与库 timestamptz 列 replace(tzinfo=None) 比较, 同 _parse_dt 口径)
-    #   非法日期串静默忽略该条件(与 _parse_dt 失败→None 的容错风格一致)
+    #   非法日期串静默忽略该条件(与 _parse_dt 失败→None 的容错风格一致);
+    #   两端都解析失败 → 整个条件视为未传, 不追加 SN 集(否则退化为"有激活记录即命中")
     if active_start or active_end:
         try:
             d0 = _parse_date(active_start) if active_start else None
@@ -1191,26 +1211,27 @@ def _device_dim_matched_sns(
             d1 = _parse_date(active_end) if active_end else None
         except (ValueError, TypeError):
             d1 = None
-        # 北京日期 → UTC 边界 naive(与库 timestamptz 列 replace(tzinfo=None) 比较)
-        lo = datetime.combine(d0, _dt.time.min, tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None) if d0 else None
-        hi = datetime.combine(d1, _dt.time.max, tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None) if d1 else None
-        active_matched: set[str] = set()
-        # 1) bms_orders 有 MIN(active_date) 落在区间
-        bms_sq = select(BmsOrder.device_sn).where(BmsOrder.active_date.isnot(None)).group_by(BmsOrder.device_sn)
-        if lo:
-            bms_sq = bms_sq.having(func.min(BmsOrder.active_date) >= lo)
-        if hi:
-            bms_sq = bms_sq.having(func.min(BmsOrder.active_date) <= hi)
-        active_matched.update(s for s in db.scalars(bms_sq).all() if s)
-        # 2) devices.active_time 落在区间 且 该 SN 无 bms_orders 激活记录(兜底, 不重复)
-        has_bms_active = select(BmsOrder.device_sn).where(BmsOrder.active_date.isnot(None))
-        dev_conds = [Device.active_time.isnot(None), ~Device.sn.in_(has_bms_active)]
-        if lo:
-            dev_conds.append(Device.active_time >= lo)
-        if hi:
-            dev_conds.append(Device.active_time <= hi)
-        active_matched.update(s for s in db.scalars(select(Device.sn).where(*dev_conds)).all() if s)
-        sn_sets.append(active_matched)
+        if d0 or d1:
+            # 北京日期 → UTC 边界 naive(与库 timestamptz 列 replace(tzinfo=None) 比较)
+            lo = datetime.combine(d0, _dt.time.min, tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None) if d0 else None
+            hi = datetime.combine(d1, _dt.time.max, tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None) if d1 else None
+            active_matched: set[str] = set()
+            # 1) bms_orders 有 MIN(active_date) 落在区间
+            bms_sq = select(BmsOrder.device_sn).where(BmsOrder.active_date.isnot(None)).group_by(BmsOrder.device_sn)
+            if lo:
+                bms_sq = bms_sq.having(func.min(BmsOrder.active_date) >= lo)
+            if hi:
+                bms_sq = bms_sq.having(func.min(BmsOrder.active_date) <= hi)
+            active_matched.update(s for s in db.scalars(bms_sq).all() if s)
+            # 2) devices.active_time 落在区间 且 该 SN 无 bms_orders 激活记录(兜底, 不重复)
+            has_bms_active = select(BmsOrder.device_sn).where(BmsOrder.active_date.isnot(None))
+            dev_conds = [Device.active_time.isnot(None), ~Device.sn.in_(has_bms_active)]
+            if lo:
+                dev_conds.append(Device.active_time >= lo)
+            if hi:
+                dev_conds.append(Device.active_time <= hi)
+            active_matched.update(s for s in db.scalars(select(Device.sn).where(*dev_conds)).all() if s)
+            sn_sets.append(active_matched)
 
     if not sn_sets:
         return None
@@ -1292,14 +1313,15 @@ def _active_age_bucket(days: int | None) -> str:
 def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
     """SN → 设备属性映射(#292 口径修正: 型号/套餐改取 bms_orders 最新订单, 激活并集兜底)。
 
-    口径(用户拍板 2026-10-09 #292):
-      · type_name  = bms_orders 最新订单(create_date DESC) 的 device_type_name
-                     （原 devices.device_type_code 归一码全空, 改取订单台账真实型号）
-      · combo      = bms_orders 最新订单的 combo_name; 工厂质检测试套餐(3 变体) → None
-                     （原 devices.current_combo_name 覆盖率仅 35%, 改取订单台账）
+    口径(用户拍板 2026-10-09 #292; #293 回落扩展 2026-10-10):
+      · type_name  = bms_orders 最新订单(create_date DESC) 的 device_type_name;
+                     无订单时回落 devices.device_type(#293 反填后覆盖 93%+,
+                     90天退款 SN 68% 在 bms_orders 无订单 → 原全落「(未填)」)
+      · combo      = bms_orders 最新订单的 combo_name; 回落 devices.current_combo_name;
+                     工厂质检测试套餐(3 变体) → None(两源统一过滤)
       · merchant   = devices.merchant_name(设备归属商户, 退款/投诉分析更准)
       · active_date = bms_orders MIN(active_date) 最早激活日; 无则 devices.active_time 兜底
-                     （并集, 覆盖率 78.8% → 83.3%）
+                     （并集, 覆盖率 78.8% → 83.3%; #293 反填后 90%+）
     不在 devices 表的 SN 不出现在结果中(调用方归「(未建档)」桶, 暴露覆盖缺口)。
     """
     if not sns:
@@ -1307,9 +1329,10 @@ def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
     from app.models.bms_order import BmsOrder
     from app.models.device import Device
 
-    # 1) devices 表: merchant_name + active_time(激活兜底)
+    # 1) devices 表: merchant_name + active_time(激活兜底) + device_type/current_combo_name(#293 回落)
     dev_rows = db.execute(
-        select(Device.sn, Device.merchant_name, Device.active_time)
+        select(Device.sn, Device.merchant_name, Device.active_time,
+               Device.device_type, Device.current_combo_name)
         .where(Device.sn.in_(sns))
     ).all()
 
@@ -1336,10 +1359,16 @@ def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
     }
 
     out: dict[str, dict[str, Any]] = {}
-    for sn, merchant, dev_active in dev_rows:
+    for sn, merchant, dev_active, dev_type, dev_combo in dev_rows:
         sn_s = str(sn)
+        # bms_orders 权威优先; 无订单/字段空的 SN 回落 devices(#293 反填数据)
         type_name, combo_name = latest.get(sn_s, (None, None))
+        if not type_name and dev_type:
+            type_name = dev_type
+        if not combo_name and dev_combo:
+            combo_name = dev_combo
         # 工厂质检测试套餐(3 变体: 工厂质检专用套餐/全球设备工厂质检套餐/(国内))不计入分析
+        # 两源统一过滤(bms_orders 与 devices 回落值都可能来自质检流水)
         if combo_name and "工厂质检" in combo_name:
             combo_name = None
         fa = first_active.get(sn_s)

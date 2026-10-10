@@ -1609,6 +1609,9 @@ def refund_decision_overview(
     #     ⚠️ 口径纪律: 本块**单独核算, 不纳入售后客服指标**(用户拍板)——仅经营分析视角。
     #     基准口径与 A 路线上直退一致(refund_method=线上 AND status=已退款)。
     _SALE_BUCKETS = ("0-7天", "8-30天", "31-90天", "91-180天", "181-365天", ">365天", "无激活记录")
+    # #293: 激活锚点并集兜底 —— bms_orders.MIN(active_date) 优先, 无则 devices.active_time。
+    # 90天退款 SN 68% 在 bms_orders 无订单(14位SN), 原口径全落「无激活记录」(实测 9728 笔/68%);
+    # devices.active_time 已由 #293 反填(bms_orders/工单/首充多源), 覆盖 90%+。
     sale_rows = db.execute(text("""
         WITH first_active AS (
             SELECT device_sn, MIN(active_date) AS fa
@@ -1617,22 +1620,23 @@ def refund_decision_overview(
             GROUP BY device_sn
         )
         SELECT CASE
-                 WHEN fa.fa IS NULL THEN '无激活记录'
+                 WHEN COALESCE(fa.fa, d.active_time) IS NULL THEN '无激活记录'
                  WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
-                    - DATE(fa.fa AT TIME ZONE 'Asia/Shanghai') <= 7 THEN '0-7天'
+                    - DATE(COALESCE(fa.fa, d.active_time) AT TIME ZONE 'Asia/Shanghai') <= 7 THEN '0-7天'
                  WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
-                    - DATE(fa.fa AT TIME ZONE 'Asia/Shanghai') <= 30 THEN '8-30天'
+                    - DATE(COALESCE(fa.fa, d.active_time) AT TIME ZONE 'Asia/Shanghai') <= 30 THEN '8-30天'
                  WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
-                    - DATE(fa.fa AT TIME ZONE 'Asia/Shanghai') <= 90 THEN '31-90天'
+                    - DATE(COALESCE(fa.fa, d.active_time) AT TIME ZONE 'Asia/Shanghai') <= 90 THEN '31-90天'
                  WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
-                    - DATE(fa.fa AT TIME ZONE 'Asia/Shanghai') <= 180 THEN '91-180天'
+                    - DATE(COALESCE(fa.fa, d.active_time) AT TIME ZONE 'Asia/Shanghai') <= 180 THEN '91-180天'
                  WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
-                    - DATE(fa.fa AT TIME ZONE 'Asia/Shanghai') <= 365 THEN '181-365天'
+                    - DATE(COALESCE(fa.fa, d.active_time) AT TIME ZONE 'Asia/Shanghai') <= 365 THEN '181-365天'
                  ELSE '>365天'
                END AS bucket,
                count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
         FROM refunds r
         LEFT JOIN first_active fa ON fa.device_sn = r.device_sn
+        LEFT JOIN devices d ON d.sn = r.device_sn
         WHERE r.refund_method = '线上' AND r.status = '已退款'
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
         GROUP BY 1

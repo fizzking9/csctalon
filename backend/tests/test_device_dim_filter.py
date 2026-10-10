@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """#273 退款/投诉明细「设备维度筛选」(设备类型/套餐/商户号/激活时间段) 回归测试。
 
-口径锚点（与分品类运营看板 #271 同源，全走 devices 表）:
-  · 设备类型 = devices.device_type_code
-  · 套餐     = devices.current_combo_name
+口径锚点(#292 拍板 2026-10-09; #293 回落扩展 2026-10-10):
+  · 设备类型 = bms_orders 最新订单 device_type_name; 该 SN 无 bms_orders 订单时
+    回落 devices.device_type(权威序与 _device_dim_attrs 一致)
+  · 套餐     = bms_orders 最新订单 combo_name; 回落 devices.current_combo_name
   · 商户号   = devices.merchant_name
-  · 激活时间 = devices.active_time 落在 [active_start, active_end] 北京日期闭区间
+  · 激活时间 = bms_orders MIN(active_date) 或 devices.active_time 兜底(并集)
+    落在 [active_start, active_end] 北京日期闭区间
 """
 
 import uuid as _uuid
@@ -15,7 +17,8 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from app.api.v1.complaints._helpers import _query_backlog_rows
-from app.models.device import Device, DimDeviceType
+from app.models.bms_order import BmsOrder
+from app.models.device import Device
 from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.services.analytics._core import _device_dim_matched_sns
@@ -27,15 +30,19 @@ def _uniq(prefix: str) -> str:
 
 
 def _mk_device(db, sn: str, **kw) -> Device:
-    # device_type_code 有 FK → dim_device_type, 用到的码先建行
-    code = kw.get("device_type_code")
-    if code and not db.scalar(select(DimDeviceType).where(DimDeviceType.type_code == code)):
-        db.add(DimDeviceType(type_code=code, type_name=code))
-        db.flush()
     dev = Device(sn=sn, **kw)
     db.add(dev)
     db.flush()
     return dev
+
+
+def _mk_bms_order(db, sn: str, *, type_name: str | None = None, combo: str | None = None,
+                  create_date: datetime | None = None) -> BmsOrder:
+    o = BmsOrder(order_no=_uniq("BO"), device_sn=sn, device_type_name=type_name,
+                 combo_name=combo, create_date=create_date or datetime.now(UTC))
+    db.add(o)
+    db.flush()
+    return o
 
 
 def _mk_b_refund(db, sn: str) -> Refund:
@@ -72,29 +79,47 @@ def test_matched_sns_none_when_no_filter(db):
 
 
 def test_matched_sns_by_each_dim(db):
-    """设备类型/套餐/商户号/激活时间窗 各自命中与排除。"""
-    dt = DimDeviceType(type_code=_uniq("CPE"), type_name=_uniq("4G路由器"))
-    db.add(dt)
-    db.flush()
+    """设备类型/套餐/商户号/激活时间窗 各自命中与排除(#292/#293 口径)。"""
+    type_hit, type_miss = _uniq("4G路由器"), _uniq("MIFI")
     sn_hit = _uniq("SN-HIT")
-    _mk_device(db, sn_hit, device_type_code=dt.type_code,
+    _mk_device(db, sn_hit, device_type=type_hit,
                current_combo_name="套餐X", merchant_name="商户甲",
                active_time=datetime(2026, 1, 15, tzinfo=UTC))
     sn_miss = _uniq("SN-MISS")
-    _mk_device(db, sn_miss, device_type_code=_uniq("MIFI"),
+    _mk_device(db, sn_miss, device_type=type_miss,
                current_combo_name="套餐Y", merchant_name="商户乙",
                active_time=datetime(2026, 3, 1, tzinfo=UTC))
 
-    assert _device_dim_matched_sns(db, device_type=dt.type_code) == {sn_hit}
+    assert _device_dim_matched_sns(db, device_type=type_hit) == {sn_hit}
     assert _device_dim_matched_sns(db, combo="套餐X") == {sn_hit}
     assert _device_dim_matched_sns(db, merchant="商户乙") == {sn_miss}
     # 激活时间窗(北京日期闭区间): 1月窗只命中 1/15 激活的设备
     assert _device_dim_matched_sns(db, active_start="2026-01-01", active_end="2026-01-31") == {sn_hit}
     assert _device_dim_matched_sns(db, active_start="2026-02-01") == {sn_miss}
     # 条件组合(AND)
-    assert _device_dim_matched_sns(db, device_type=dt.type_code, merchant="商户乙") == set()
+    assert _device_dim_matched_sns(db, device_type=type_hit, merchant="商户乙") == set()
     # 非法日期不致命, 视为未传
     assert _device_dim_matched_sns(db, active_start="not-a-date") is None
+
+
+def test_matched_sns_bms_orders_priority(db):
+    """#292/#293 权威序: 有 bms_orders 订单的 SN 按「最新订单类型」匹配,
+    devices.device_type 不参与(回落只对无订单 SN 生效)。"""
+    type_bms, type_dev = _uniq("TYPE-BMS"), _uniq("TYPE-DEV")
+    sn_bo = _uniq("SN-BO")
+    _mk_device(db, sn_bo, device_type=type_dev)
+    # 两条订单: 较早=type_dev, 最新=create_date 更大=type_bms → 最新订单的类型生效
+    _mk_bms_order(db, sn_bo, type_name=type_dev,
+                  create_date=datetime.now(UTC) - timedelta(days=2))
+    _mk_bms_order(db, sn_bo, type_name=type_bms,
+                  create_date=datetime.now(UTC) - timedelta(days=1))
+    # 无订单 SN: devices.device_type 回落生效
+    sn_fallback = _uniq("SN-FB")
+    _mk_device(db, sn_fallback, device_type=type_dev)
+
+    assert _device_dim_matched_sns(db, device_type=type_bms) == {sn_bo}
+    # type_dev 只命中回落 SN(有订单的 sn_bo 不吃 devices 回落)
+    assert _device_dim_matched_sns(db, device_type=type_dev) == {sn_fallback}
 
 
 def test_backlog_rows_device_dim_filter(db):
@@ -124,12 +149,10 @@ def test_backlog_rows_device_dim_filter(db):
 
 def test_rw_detail_device_dim_filter(db):
     """退款明细(B 路径): 设备类型筛选只保留命中设备的退款, total 同步收敛。"""
-    dt = DimDeviceType(type_code=_uniq("CPE2"), type_name=_uniq("随身WiFi"))
-    db.add(dt)
-    db.flush()
+    type_hit, type_other = _uniq("随身WiFi"), _uniq("OTHER")
     sn_hit, sn_other = _uniq("SN-RH"), _uniq("SN-RO")
-    _mk_device(db, sn_hit, device_type_code=dt.type_code)
-    _mk_device(db, sn_other, device_type_code=_uniq("OTHER"))
+    _mk_device(db, sn_hit, device_type=type_hit)
+    _mk_device(db, sn_other, device_type=type_other)
     rf_hit = _mk_b_refund(db, sn_hit)
     rf_other = _mk_b_refund(db, sn_other)
 
@@ -137,7 +160,7 @@ def test_rw_detail_device_dim_filter(db):
     nos_all = {r["refund_no"] for r in res_all["list"]}
     assert {rf_hit.refund_no, rf_other.refund_no} <= nos_all
 
-    res = refund_withdrawal_detail(db, path="B", device_type=dt.type_code)
+    res = refund_withdrawal_detail(db, path="B", device_type=type_hit)
     nos = {r["refund_no"] for r in res["list"]}
     assert rf_hit.refund_no in nos
     assert rf_other.refund_no not in nos
