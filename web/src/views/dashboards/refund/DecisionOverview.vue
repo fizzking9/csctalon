@@ -130,12 +130,15 @@
           占比构成语义清晰, 长尾聚合避免>8扇区不可读; 激活时长保条形按时长排序——
           保留"新→老"顺序语义(饼图会丢失这一关键洞察, 新机高退=质量/预期差, 老机
           高退=老化/续费话术)。
-        · 口径: 与「五、退款原因」同数据面(仅线上已退款单, 窗口按发起日 D1);
+        · 口径: 经营四路 A+B+C+D 全量(#291 2026-10-10 用户拍板, 原仅 A 路线上直退——
+          只算 A 会漏掉钱包提现/闪猫/手动退款的钱, 结构集中度失真), 与「一、资金流出
+          全景」同口径同窗口(各路按实际出款归日, 已排除重复/忽略与冻结类流水), 各桶
+          合计可与资金流出全景四路合计对账; 每桶附 routes 分路明细(tooltip 展示);
           设备属性 = devices 表(#271/#273 同源, #293 探针补全驱动覆盖);
-          激活时长 = 发起日 − bms_orders 最早激活日(#251 同源六桶: 0-7/8-30/31-90/
+          激活时长 = 出款日 − bms_orders 最早激活日(#251 同源六桶: 0-7/8-30/31-90/
           91-180/181-365/>365/无激活记录); 激活时长图复用 sale_days_split(#251
           真身六桶, 同一事实不两处汇总); 点击下钻按 7/30/180 天界合并映射到明细
-          active_age 参数(数字=各桶之和)。
+          active_age 参数(明细按发起日锚定且不含 C 路 → 下钻为近似映射)。
         · tooltip 统一: {分项名} · 占比% · 金额¥ · 单数笔 · 笔单价¥(金额/单数);
           笔单价识别"单笔损失大"维度(笔数少但金额大=高单价设备出问题)。
         · 排序: 前三饼图按金额倒序(钱集中度), 扇区 value=金额; 激活时长按桶固定
@@ -150,10 +153,10 @@
       <section class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">六、设备维度汇总<el-tooltip effect="dark" placement="top" raw-content
-            content="<b>来源</b>：/analytics/refund/decision-overview → device_dims / sale_days_split<br/><b>口径</b>：与「五、退款原因」同数据面（仅线上已退款单，窗口按发起日）；设备型号/套餐/店铺 = devices 表属性（#271/#273 同源，#293 探针补全驱动覆盖）；激活时长 = 发起日 − bms_orders 最早激活日（#251 同源六桶：0-7/8-30/31-90/91-180/181-365/&gt;365/无激活记录）<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：图为空 = 窗口内无线上已退款单；(未填)/(未填SN)/(未建档) 桶 = 台账/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击任一桶 → 「七、退款明细」自动带对应筛选（激活桶按 7/30/180 天界合并映射）；设备型号桶需反查到类型码才可下钻<br/><b>取舍</b>：前三饼图 Top5+其他聚合（占比构成 vs 长尾取舍）；激活时长保条形（有序分桶，饼图丢顺序）；不做型号×套餐交叉图（明细可组合）">
+            content="<b>来源</b>：/analytics/refund/decision-overview → device_dims / sale_days_split<br/><b>口径</b>：经营四路 A+B+C+D 全量（#291 2026-10-10 拍板，与「一、资金流出全景」同口径同窗口，各路按实际出款归日，已排除重复/忽略与冻结类流水，各桶合计可与四路合计对账；tooltip 展示每桶分路构成）；设备型号/套餐/店铺 = devices 表属性（#271/#273 同源，#293 探针补全驱动覆盖）；激活时长 = 出款日 − bms_orders 最早激活日（#251 同源六桶：0-7/8-30/31-90/91-180/181-365/&gt;365/无激活记录）<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：图为空 = 窗口内四路均无成功退款；(未填)/(未填SN)/(未建档) 桶 = 台账/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击任一桶 → 「七、退款明细」自动带对应筛选（激活桶按 7/30/180 天界合并映射；明细按发起日锚定且不含 C 路，下钻为近似映射）；设备型号桶需反查到类型码才可下钻<br/><b>取舍</b>：前三饼图 Top5+其他聚合（占比构成 vs 长尾取舍）；激活时长保条形（有序分桶，饼图丢顺序）；不做型号×套餐交叉图（明细可组合）">
             <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
           </el-tooltip></span>
-          <span class="block-hint">线上直退 · 判断: 退款集中在哪类设备型号/套餐/店铺/激活时长 → 行动: 新机高退查质量与预期差, 老机高退查老化与续费话术 · 点击桶带筛选下钻明细</span>
+          <span class="block-hint">四路 A/B/C/D · 判断: 退款集中在哪类设备型号/套餐/店铺/激活时长 → 行动: 新机高退查质量与预期差, 老机高退查老化与续费话术 · 点击桶带筛选下钻明细</span>
         </div>
         <el-row :gutter="16">
           <el-col :xs="24" :md="8" class="mb-12">
@@ -767,9 +770,19 @@ const reasonOption = computed(() => {
 // ---- #291 设备维度汇总(区块六): 设备型号/套餐/店铺 饼图Top5+其他 + 激活时长条形(#251 六桶) ----
 // 2026-10-10 改造(方案B): 前三饼图(占比构成语义+Top5聚合防碎片) + 激活时长保条形(有序分桶,
 // 保留新→老顺序语义); tooltip 全维度统一{分项名/占比/金额/单数/笔单价}; 位置上移到摘要下方。
+// 2026-10-10 口径升级: 后端由 A 单路改为四路 A+B+C+D 全量, 每桶附 routes 分路明细 → tooltip 展示。
 const deviceDims = computed(() => data.value?.device_dims || {})
 
-// 设备型号/套餐/店铺 通用饼图(按金额倒序 Top5+其他聚合; 扇区 value=金额; tooltip 含笔单价)
+// 四路分路明细行(A/B/C/D, 固定顺序), 供 tooltip 展示每桶的路构成
+const ROUTE_ORDER = ['A 线上直退', 'B 钱包提现', 'C 闪猫退款', 'D 手动退款']
+function _fmtRouteLines(routes) {
+  if (!routes) return ''
+  const lines = ROUTE_ORDER.filter(k => routes[k])
+    .map(k => `${k}: ¥${formatMoney(routes[k].amount || 0)} · ${routes[k].count || 0}笔`)
+  return lines.length ? `<br/>${lines.join('<br/>')}` : ''
+}
+
+// 设备型号/套餐/店铺 通用饼图(按金额倒序 Top5+其他聚合; 扇区 value=金额; tooltip 含笔单价+分路)
 function _dimPieOption(list) {
   if (!list?.length) return {}
   // 按金额倒序 → Top5 + 其他聚合(占比构成 vs 长尾取舍, 避免>8扇区不可读)
@@ -781,7 +794,14 @@ function _dimPieOption(list) {
   const totalAmt = sorted.reduce((s, r) => s + (r.amount || 0), 0)
   const data = top5.map(r => ({ name: r.name, value: r.amount || 0, _raw: r }))
   if (rest.length) {
-    data.push({ name: '其他', value: restAmt, _raw: { name: '其他', count: restCount, amount: restAmt } })
+    // 「其他」桶的分路明细 = 长尾各行 routes 累加
+    const restRoutes = {}
+    rest.forEach(r => Object.entries(r.routes || {}).forEach(([k, v]) => {
+      const b = restRoutes[k] || (restRoutes[k] = { count: 0, amount: 0 })
+      b.count += v.count || 0
+      b.amount += v.amount || 0
+    }))
+    data.push({ name: '其他', value: restAmt, _raw: { name: '其他', count: restCount, amount: restAmt, routes: restRoutes } })
   }
   return {
     tooltip: { trigger: 'item',
@@ -790,7 +810,7 @@ function _dimPieOption(list) {
         const ratio = totalAmt ? (p.value / totalAmt * 100).toFixed(1) : 0
         const cnt = it.count || 0
         const unit = cnt ? (p.value / cnt) : 0
-        return `<b>${p.name}</b><br/>占比: ${ratio}%<br/>金额: ¥${formatMoney(p.value)}<br/>单数: ${cnt}笔<br/>笔单价: ¥${formatMoney(unit)}`
+        return `<b>${p.name}</b><br/>占比: ${ratio}%<br/>金额: ¥${formatMoney(p.value)}<br/>单数: ${cnt}笔<br/>笔单价: ¥${formatMoney(unit)}${_fmtRouteLines(it.routes)}`
       } },
     legend: { type: 'scroll', orient: 'vertical', right: 4, top: 'middle', align: 'left',
       itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 11 } },
@@ -824,7 +844,7 @@ const activeAgeOption = computed(() => {
         const ratio = totalCount ? (cnt / totalCount * 100).toFixed(1) : 0
         const amt = it.amount || 0
         const unit = cnt ? (amt / cnt) : 0
-        return `<b>${it.bucket}</b><br/>占比: ${ratio}%<br/>金额: ¥${formatMoney(amt)}<br/>单数: ${cnt}笔<br/>笔单价: ¥${formatMoney(unit)}`
+        return `<b>${it.bucket}</b><br/>占比: ${ratio}%<br/>金额: ¥${formatMoney(amt)}<br/>单数: ${cnt}笔<br/>笔单价: ¥${formatMoney(unit)}${_fmtRouteLines(it.routes)}`
       } },
     grid: { left: 8, right: 56, top: 8, bottom: 8, containLabel: true },
     xAxis: { type: 'value', axisLabel: { fontSize: 10 } },

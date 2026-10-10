@@ -1603,81 +1603,153 @@ def refund_decision_overview(
         "conclusions": conclusions,
     }
 
-    # ── 7. 售出后 N 天分桶 (#251 B3-5, 用户#6) ──
-    #     退款关联 bms_orders.active_date(每设备 MIN = 首购激活日),
-    #     回答「退款集中在售后期哪个阶段」: 早期=产品/激活引导, 晚期=套餐/服务。
-    #     ⚠️ 口径纪律: 本块**单独核算, 不纳入售后客服指标**(用户拍板)——仅经营分析视角。
-    #     基准口径与 A 路线上直退一致(refund_method=线上 AND status=已退款)。
-    _SALE_BUCKETS = ("0-7天", "8-30天", "31-90天", "91-180天", "181-365天", ">365天", "无激活记录")
-    # #293: 激活锚点并集兜底 —— bms_orders.MIN(active_date) 优先, 无则 devices.active_time。
-    # 90天退款 SN 68% 在 bms_orders 无订单(14位SN), 原口径全落「无激活记录」(实测 9728 笔/68%);
-    # devices.active_time 已由 #293 反填(bms_orders/工单/首充多源), 覆盖 90%+。
-    sale_rows = db.execute(text("""
-        WITH first_active AS (
-            SELECT device_sn, MIN(active_date) AS fa
-            FROM bms_orders
-            WHERE device_sn IS NOT NULL AND active_date IS NOT NULL
-            GROUP BY device_sn
-        )
-        SELECT CASE
-                 WHEN COALESCE(fa.fa, d.active_time) IS NULL THEN '无激活记录'
-                 WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
-                    - DATE(COALESCE(fa.fa, d.active_time) AT TIME ZONE 'Asia/Shanghai') <= 7 THEN '0-7天'
-                 WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
-                    - DATE(COALESCE(fa.fa, d.active_time) AT TIME ZONE 'Asia/Shanghai') <= 30 THEN '8-30天'
-                 WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
-                    - DATE(COALESCE(fa.fa, d.active_time) AT TIME ZONE 'Asia/Shanghai') <= 90 THEN '31-90天'
-                 WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
-                    - DATE(COALESCE(fa.fa, d.active_time) AT TIME ZONE 'Asia/Shanghai') <= 180 THEN '91-180天'
-                 WHEN DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai')
-                    - DATE(COALESCE(fa.fa, d.active_time) AT TIME ZONE 'Asia/Shanghai') <= 365 THEN '181-365天'
-                 ELSE '>365天'
-               END AS bucket,
-               count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
+    # ── 7+8. 经营四路明细行收集(设备维度汇总/售出后N天分桶共用数据面) ──
+    #     #291 口径升级(2026-10-10 用户拍板): 设备维度汇总由「仅 A 路线上直退」改为
+    #     **四路 A+B+C+D 全量** —— 只算 A 路会漏掉钱包提现/闪猫/手动退款的钱,
+    #     结构集中度失真。每路沿用 routes_daily 逐字同款的筛选条件与归日锚点(COALESCE 链),
+    #     保证各桶合计 == 「一、资金流出全景」四路合计(可对账); 每桶出参附 routes 分路明细。
+    def _ev_sh_date(ev):
+        # 归日锚点 → 上海本地日(等价 SQL 的 col AT TIME ZONE 'Asia/Shanghai' 截断);
+        # 库内 naive 时间 = 北京时间(项目统一口径, 同 refund_chain._age_ok 约定)
+        if ev is None:
+            return None
+        if ev.tzinfo is None:
+            ev = ev.replace(tzinfo=TZ)
+        return ev.astimezone(TZ).date()
+
+    route_item_rows: list[tuple[str, str | None, Decimal, Any]] = []  # (路名, SN, 金额元, 归日锚点)
+    # A 线上直退: 线上+已退款+排除已治理行; 归日=实际扣款→最新更新→创建(2026-09-09 对账口径)
+    for r in db.execute(text(f"""
+        SELECT r.device_sn AS sn, r.refund_amount AS amt,
+               COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) AS ev
         FROM refunds r
-        LEFT JOIN first_active fa ON fa.device_sn = r.device_sn
-        LEFT JOIN devices d ON d.sn = r.device_sn
         WHERE r.refund_method = '线上' AND r.status = '已退款'
-          AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
-        GROUP BY 1
-    """), {"ts": cur_s, "te": cur_e}).fetchall()
-    _sale_map = {r.bucket: (int(r.cnt), D(r.amt)) for r in sale_rows}
-    # 出参边界(#222): amt 经 float(...) 一次性表示层转换, 对外契约保持 JSON number(元)
+          AND {stats_quality_excluded_sql('r.quality_status')}
+          AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
+          AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) <= :te
+    """), {"ts": cur_s, "te": cur_e}).fetchall():
+        route_item_rows.append(("A 线上直退", r.sn, D(r.amt), r.ev))
+    # B 钱包提现: 用户提现+排除失败/冻结备注+排除已治理行; 归日=实际扣款→操作
+    for r in db.execute(text(f"""
+        SELECT w.device_sn AS sn, w.op_amount AS amt,
+               COALESCE(w.actual_refund_time, w.op_time) AS ev
+        FROM wallet_withdrawals w
+        WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts
+          AND COALESCE(w.actual_refund_time, w.op_time) <= :te
+          AND w.op_type = '用户提现'
+          AND {_withdraw_fail_remark_sql_cond()}
+          AND {stats_quality_excluded_sql('w.quality_status')}
+    """), {"ts": cur_s, "te": cur_e}).fetchall():
+        route_item_rows.append(("B 钱包提现", r.sn, D(r.amt), r.ev))
+    # C 闪猫退款: 已退款+排除已治理行; 金额=实际→申请; 归日=退款→审核→创建
+    for r in db.execute(text(f"""
+        SELECT s.device_sn AS sn, COALESCE(s.actual_amount, s.refund_amount, 0) AS amt,
+               COALESCE(s.refund_time, s.audit_time, s.created_at) AS ev
+        FROM shanmao_refunds s
+        WHERE COALESCE(s.refund_time, s.audit_time, s.created_at) >= :ts
+          AND COALESCE(s.refund_time, s.audit_time, s.created_at) <= :te
+          AND s.status = '已退款'
+          AND {stats_quality_excluded_sql('s.quality_status')}
+    """), {"ts": cur_s, "te": cur_e}).fetchall():
+        route_item_rows.append(("C 闪猫退款", r.sn, D(r.amt), r.ev))
+    # D 手动退款: is_refunded='是'+排除已治理行(_d_excl_q 见区块1); 归日=实际扣款→操作→登记
+    for r in db.execute(text(f"""
+        SELECT m.device_sn AS sn, m.refund_amount AS amt,
+               COALESCE(m.actual_refund_time, m.op_time, m.register_time) AS ev
+        FROM manual_refunds m
+        WHERE COALESCE(m.actual_refund_time, m.op_time, m.register_time) >= :ts
+          AND COALESCE(m.actual_refund_time, m.op_time, m.register_time) <= :te
+          AND m.is_refunded = '是'
+          {"AND " + _EXCL_QSTATUS_SQL if _d_excl_q else ''}
+    """), {"ts": cur_s, "te": cur_e}).fetchall():
+        route_item_rows.append(("D 手动退款", r.sn, D(r.amt), r.ev))
+
+    dd_attrs = _device_dim_attrs(db, {sn for (_rk, sn, _a, _e) in route_item_rows if sn})
+
+    # ── 7. 售出后 N 天分桶(#251 B3-5, 用户#6): 出款日 − 最早激活日 六桶 ──
+    #     口径随四路升级: 事件日 = 各路归日锚点(原为 A 路发起日 created_at_raw)。
+    #     激活锚点并集兜底(#293): bms_orders MIN(active_date) 优先, devices.active_time 兜底
+    #     (90天退款 SN 68% 在 bms_orders 无订单 → devices.active_time 反填覆盖 90%+)。
+    #     ⚠️ 本块**单独核算, 不纳入售后客服指标**(用户拍板)——仅经营分析视角。
+    _SALE_BUCKETS = ("0-7天", "8-30天", "31-90天", "91-180天", "181-365天", ">365天", "无激活记录")
+
+    def _sale_bucket(days: int) -> str:
+        if days <= 7:
+            return "0-7天"
+        if days <= 30:
+            return "8-30天"
+        if days <= 90:
+            return "31-90天"
+        if days <= 180:
+            return "91-180天"
+        if days <= 365:
+            return "181-365天"
+        return ">365天"
+
+    # 激活锚点: _device_dim_attrs.active_date(bms MIN→devices.active_time, 质检套餐已过滤)
+    sale_active: dict[str, Any] = {sn: a["active_date"] for sn, a in dd_attrs.items() if a.get("active_date")}
+    # devices 表外的少量 SN(dd_attrs 无行): 仍按 bms MIN(active_date) 并集兜底, 不误归「无激活记录」
+    _no_dev = {sn for (_rk, sn, _a, _e) in route_item_rows if sn and sn not in dd_attrs}
+    if _no_dev:
+        from app.models.bms_order import BmsOrder  # 局部导入(与 _core 同法, 防循环依赖)
+
+        for sn, fa in db.execute(
+            select(BmsOrder.device_sn, func.min(BmsOrder.active_date))
+            .where(BmsOrder.device_sn.in_(_no_dev), BmsOrder.active_date.isnot(None))
+            .group_by(BmsOrder.device_sn)
+        ).all():
+            if fa is not None:
+                # active_date 为 timestamptz: naive 按 UTC 读入转上海; 与 _device_dim_attrs 同法
+                fa = fa if fa.tzinfo else fa.replace(tzinfo=_dt.timezone.utc)
+                sale_active[str(sn)] = fa.astimezone(TZ).date()
+
+    sale_map: dict[str, list] = {b: [0, Decimal("0"), {}] for b in _SALE_BUCKETS}
+    for rk, sn, amt, ev in route_item_rows:
+        act = sale_active.get(sn)
+        ev_d = _ev_sh_date(ev)
+        # 无激活记录 = 无任何激活锚点; 事件日缺失(理论不发生)同归该桶防崩溃
+        bk = "无激活记录" if (act is None or ev_d is None) else _sale_bucket((ev_d - act).days)
+        b = sale_map[bk]
+        b[0] += 1
+        b[1] += amt
+        rb = b[2].setdefault(rk, [0, Decimal("0")])
+        rb[0] += 1
+        rb[1] += amt
+    # 出参边界(#222): amount 经 float(...) 一次性表示层转换, 对外契约保持 JSON number(元)
     sale_days_split = [
         {"bucket": b,
-         "cnt": _sale_map.get(b, (0, D(0)))[0],
-         "amount": float(round(_sale_map.get(b, (0, D(0)))[1], 2))}
+         "cnt": sale_map[b][0],
+         "amount": float(round(sale_map[b][1], 2)),
+         "routes": {rk: {"count": c, "amount": float(round(a2, 2))}
+                    for rk, (c, a2) in sorted(sale_map[b][2].items())}}
         for b in _SALE_BUCKETS
     ]
 
-    # ── 8. 设备维度汇总(#291): 设备类型/套餐/商户号 分桶 (线上已退款, 与区块5/激活天数同数据面) ──
+    # ── 8. 设备维度汇总(#291, 四路口径): 设备类型/套餐/商户号 分桶 ──
     #     激活时间段维度**复用上方 sale_days_split**(#251 真身, 六桶), 此处不重复输出 ——
     #     同一事实禁止两处汇总(AGENTS 界面纪律#5 投影规则)。
-    #     未填SN/未建档分别显式分桶, 暴露数据覆盖缺口。
-    dd_rows = db.execute(text("""
-        SELECT r.device_sn, count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
-        FROM refunds r
-        WHERE r.refund_method = '线上' AND r.status = '已退款'
-          AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
-        GROUP BY r.device_sn
-    """), {"ts": cur_s, "te": cur_e}).fetchall()
-    dd_attrs = _device_dim_attrs(db, {r.device_sn for r in dd_rows if r.device_sn})
-
+    #     未填SN/未建档分别显式分桶, 暴露数据覆盖缺口; routes=各路笔数/金额分解(前端 tooltip)。
     def _dd_group(pick) -> list[dict[str, Any]]:
         g: dict[str, list] = {}
-        for r in dd_rows:
-            sn = r.device_sn
+        for rk, sn, amt, _ev in route_item_rows:
             a = dd_attrs.get(sn) if sn else None
             if a is not None:
                 key = pick(a) or "(未填)"
             else:
                 key = "(未建档)" if sn else "(未填SN)"
-            g.setdefault(key, [0, Decimal("0")])
-            g[key][0] += int(r.cnt or 0)
-            g[key][1] += D(r.amt)
+            b = g.setdefault(key, [0, Decimal("0"), {}])
+            b[0] += 1
+            b[1] += amt
+            rb = b[2].setdefault(rk, [0, Decimal("0")])
+            rb[0] += 1
+            rb[1] += amt
         tot = sum(v[1] for v in g.values())
-        return [{"name": k, "count": v[0], "amount": float(round(v[1], 2)),
-                 "ratio": round(float(v[1] / tot * 100), 1) if tot else 0.0}
+        return [{"name": k,
+                 "count": v[0],
+                 "amount": float(round(v[1], 2)),
+                 "ratio": round(float(v[1] / tot * 100), 1) if tot else 0.0,
+                 "routes": {rk: {"count": c, "amount": float(round(a2, 2))}
+                            for rk, (c, a2) in sorted(v[2].items())}}
                 for k, v in sorted(g.items(), key=lambda x: -x[1][0])][:12]
 
     device_dims = {
