@@ -1519,10 +1519,11 @@ def refund_decision_overview(
         f"钱包提现 {cur_tot['withdraw_cnt']}笔/¥{cur_tot['withdraw_amt']:,.0f}{extra}）。"
         + (f"较上一周期 {chain_pct:+.1f}%" if chain_pct is not None else "")
     )
+    # 结论行2: 只给业务读数(实际现金流/对账偏差);
+    # ❌ 「E 数据截止 X, 截止日后仅供参考」属运维提示(2026-10-10 用户拍板:
+    #    业务看板不承载运维逻辑) → 移除。偏差解读看 KPI 卡ⓘ与数据截止标注。
     conclusions.append(
-        f"商户号实际现金流 ¥{actual_cash:,.0f}，对账偏差(经营−实际) ¥{reconcile_diff:+,.0f}"
-        + (f"（E 数据截止 {e_data_until}，截止日后对账仅供参考）" if e_data_until else "")
-        + "。"
+        f"商户号实际现金流 ¥{actual_cash:,.0f}，对账偏差(经营−实际) ¥{reconcile_diff:+,.0f}。"
     )
     if reasons:
         top1, top2 = reasons[0], reasons[1] if len(reasons) > 1 else None

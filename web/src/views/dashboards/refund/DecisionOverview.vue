@@ -193,9 +193,9 @@
           </el-tooltip></span>
           <span class="block-hint">四路经营 A/B/C/D（堆叠）= 经营估算 · E 商户号实际现金流（曲线，对账基准，不与四路累加）</span>
         </div>
-        <el-alert v-if="summary.e_data_until" type="info" :closable="false" show-icon class="mb-12">
-          <template #title>商户号现金流(E)以「退款记录报表」为对账基准，当前数据更新至 {{ summary.e_data_until }}。若窗口晚于该日，对账偏差仅供参考，请先补充当日采集/导入的退款流水。</template>
-        </el-alert>
+        <!-- ❌ E 同步滞后 Alert 已移除(2026-10-10): "请补充采集/导入"是运维指引,
+             业务看板不承载运维逻辑; 数据截止日仍在「商户号实际现金流」KPI 卡副行作为解读标注。
+             同步问题请去「数据采集」页或「对账核查」tab(那本就是核查页)。 -->
         <BaseChart v-if="routeOption.series?.length" :option="routeOption" height="300px" />
         <el-empty v-else description="暂无资金流出数据" :image-size="60" />
         <el-table :data="routes.table" border stripe size="small" class="mt-12" max-height="260">
