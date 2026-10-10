@@ -4,6 +4,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -43,8 +44,8 @@ class ServiceTicket(QualityMixin, TimestampMixin, Base):
     is_appeal: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="是否申诉")
     order_no: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="订单编号")
     submit_params: Mapped[str | None] = mapped_column(Text, nullable=True, comment="提交参数(JSON)")
-    refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退款金额")
-    estimated_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="预估可退金额")
+    refund_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退款金额")
+    estimated_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="预估可退金额")
     # ── 催单 & 人员分派新字段(2026-08-03 加, nullable, 不影响历史数据) ──
     urge_count: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="催单次数")
     urge_status: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="催单状态")
@@ -63,7 +64,7 @@ class ServiceTicket(QualityMixin, TimestampMixin, Base):
     #   用于区分「上游 BMS/SCRM 真的改了这张单」还是「我们的同步任务每天扫表覆盖」,
     #   区别于 TimestampMixin.updated_at (所有 ORM save 都会改) 和 finish_time (89% 被批量覆盖不可靠)。
     synced_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True,
+        DateTime(timezone=True), nullable=True,
         comment="最后一次被导入/同步任务写入时间(每次 upsert 强制 now())",
     )
     # updated_by_raw: 上游 BMS/SCRM 导出的「更新人/最后操作人」原样保留,

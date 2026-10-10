@@ -1,18 +1,21 @@
 """退费宽表(物化) - 跨表关联预计算结果
 
 由 matcher.match_all 产出的 DataMatchRelation 关联关系,把 refund 主表
-与 ticket/merchant_refund/wallet/external_complaint 四表的关键字段
-物化到一张宽表,供分析引擎直接查询(引擎禁止 JOIN)。
+与 ticket/wallet/external_complaint 的关键字段物化到一张宽表,
+供分析引擎直接查询(引擎禁止 JOIN)。
 
 构建逻辑见 wide_table_builder.build_refund_wide。
-- PK=refund_no(与 refunds.refund_no 一一对应)
+- 行范围(A-20260908-001 LOCKED): 线上+已退款 ∪ 带wallet关联 ∪ 设备SN有外部投诉
+- PK=refund_no(与 refunds.refund_no 对应)
 - 一条退费单可能关联多条 ticket(同 SN),取 order_no 命中优先,否则最新 finish_time
-- 一条退费单至多一条 merchant_refund(按 order_no 精确命中)
 - 一条退费单可能关联多条 wallet(同 SN),取最新 op_time
 - 外部投诉按 device_sn 聚合为 has_external_complaint/count/latest_time 三个统计字段
+- 注: merchant_refund(mr_*) 关联字段已在 A-20260908-001 删除(零消费死字段),
+  merchant_refunds 表/matcher 关联保留但不再物化进宽表
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -40,7 +43,7 @@ class RefundWide(TimestampMixin, Base):
     device_sn: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("devices.sn"), index=True, nullable=True, comment="设备SN(冗余自 refunds)"
     )
-    refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退费金额(冗余自 refunds)")
+    refund_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="退费金额(冗余自 refunds)")
     created_at_raw: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True, nullable=True, comment="退费单原始创建时间(冗余自 refunds)"
     )
@@ -49,22 +52,13 @@ class RefundWide(TimestampMixin, Base):
     ticket_no: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="关联工单号")
     service_item: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="服务项(退款原因来源,冗余自 service_tickets)")
     service_category: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="服务类别(冗余自 service_tickets)")
-    ticket_finish_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="工单完成时间")
     ticket_handle_duration: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="工单处理时长(分钟)")
     ticket_handler: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="工单处理人(冗余别名)")
-
-    # ---------- merchant_refund 关联(按 order_no 精确命中,至多一条) ----------
-    wx_refund_no: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="微信退款单号")
-    mr_trade_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="商户退款交易时间")
-    mr_refund_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="商户退款金额(微信侧真实退款)")
-    mr_refund_status: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="商户退款状态")
-    mr_fee: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True, comment="商户退款手续费")
-    merchant_id: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="商户号")
 
     # ---------- wallet 关联(同 SN 多笔时取最新 op_time) ----------
     wallet_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="关联钱包提现记录ID(wallet_withdrawals.id)")
     wallet_op_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="钱包操作时间(提现时点)")
-    wallet_op_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True, comment="钱包操作金额(提现金额)")
+    wallet_op_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="钱包操作金额(提现金额)")
 
     # ---------- external_complaint 关联(按 device_sn 聚合,供分类规则1判定) ----------
     has_external_complaint: Mapped[bool] = mapped_column(

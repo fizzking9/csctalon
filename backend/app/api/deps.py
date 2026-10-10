@@ -4,7 +4,6 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -15,11 +14,14 @@ from app.models.user import MANAGER_ROLES, RoleEnum, User
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_PREFIX if hasattr(settings, 'API_PREFIX') else '/api/v1'}/auth/login", auto_error=False)
 
 
-async def get_current_user(
+# 注意：这里刻意用同步 def 而非 async —— 本依赖是全站最高频依赖（每个鉴权请求都执行），
+# 体内 db.get() 是同步 SQLAlchemy 调用；若声明成 async，它会在事件循环线程里阻塞，
+# 拖垮同进程所有并发请求。FastAPI 对普通 def 依赖自动放入线程池（run_in_threadpool）执行（#213 R-P1-10）。
+def get_current_user(
     token: Annotated[str | None, Depends(oauth2_scheme)],
     db: Annotated[Session, Depends(get_db)],
 ) -> User:
-    """从 JWT 解析当前用户"""
+    """从 JWT 解析当前用户（同步 def：FastAPI 自动线程池调度，避免阻塞事件循环）"""
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -62,7 +64,8 @@ def require_role(*roles: RoleEnum):
 
     allowed = [r.value for r in roles]
 
-    async def _check(current_user: Annotated[User, Depends(get_current_user)]) -> User:
+    def _check(current_user: Annotated[User, Depends(get_current_user)]) -> User:
+        # 同步 def：仅做内存角色比对、无 IO；与 get_current_user 一致由线程池调度（#213）。
         if current_user.role not in allowed:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
         return current_user

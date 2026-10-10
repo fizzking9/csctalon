@@ -1,0 +1,196 @@
+# Gitea Actions: 后端 lint + 测试(纯 Docker 方案)
+#
+# ⚠️ 2026-09-02 改造: runner 运行在群晖内网(无法访问 github.com),
+#    原 `uses:` 的 GitHub action(actions/checkout/setup-python/setup-node/cache)
+#    无法下载, job 卡死在 "Set up job"。改为纯本地 docker 执行:
+#    - checkout: runner(:host) 已自动 clone 代码到工作目录
+#    - 后端: postgres:15 ×2(pytest 测试库 + 空库迁移门禁库) + python:3.11-slim
+#      (ruff app/+tests/ → 空库 alembic upgrade head → pytest)
+#    - 前端: docker run node:20(npm ci + lint + vitest)
+#    前提: 群晖可访问 docker hub(已验证 python:3.11-slim/gitleaks 可拉取)
+
+name: backend-test
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  # #216/R-P2-9: 提交信息必须携带 #工单号（与本地 commit-msg 钩子共用 scripts/check-commit-issue.sh）。
+  # 纯 git 轻量门禁, 不依赖 docker; 只校验「本次新增」提交, 不追溯历史。
+  commit-message-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码 (显式 clone)
+        run: |
+          rm -rf /workspace/ci-repo
+          git clone --quiet http://127.0.0.1:3000/tanzk/csctalon.git /workspace/ci-repo
+          cd /workspace/ci-repo && git log --oneline -1
+
+      - name: 校验新增提交信息携带工单号 (#216)
+        run: |
+          set -euo pipefail
+          cd /workspace/ci-repo
+          zero=0000000000000000000000000000000000000000
+          event="${{ github.event_name }}"
+          # 默认按 push 的 before..after；PR 改用 base..head。
+          before="${{ github.event.before }}"
+          after="${{ github.event.after }}"
+          [ -z "$after" ] && after="${{ github.sha }}"
+          if [ "$event" = "pull_request" ]; then
+            before="${{ github.event.pull_request.base.sha }}"
+            after="${{ github.event.pull_request.head.sha }}"
+          fi
+          echo "event=$event before=${before:-<empty>} after=$after"
+
+          # 两端提交都本地可达且 before 非全零（非新分支首推）→ 精确校验新增区间；
+          # 新分支首推 / force-push 旧基不可达 / fork PR 等无法确定可靠区间时，
+          # 回退为仅校验 HEAD（保守: 不追溯、不误阻断; 主干最新提交本就要求带号）。
+          if [ -n "${before:-}" ] && [ "$before" != "$zero" ] \
+             && git cat-file -e "${before}^{commit}" 2>/dev/null \
+             && git cat-file -e "${after}^{commit}" 2>/dev/null; then
+            range="$before..$after"
+            echo "== 校验新增提交区间 $range =="
+            git log --oneline "$range" || true
+            bash scripts/check-commit-issue.sh --range "$range"
+          else
+            echo "== 无法确定可靠区间（新分支/force-push/fork），回退仅校验 HEAD =="
+            git log --oneline -1
+            bash scripts/check-commit-issue.sh --head-only
+          fi
+
+  backend-lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码 (显式 clone)
+        # clone 到 /workspace(宿主机共享目录), docker run 挂宿主机绝对路径
+        run: |
+          rm -rf /workspace/ci-repo
+          git clone --quiet http://127.0.0.1:3000/tanzk/csctalon.git /workspace/ci-repo
+          cd /workspace/ci-repo && git log --oneline -1
+
+      - name: 启动 postgres 容器 (测试库 + 空库迁移门禁库)
+        run: |
+          # 清理残留(失败时)
+          docker rm -f ci-pg ci-pg-mig 2>/dev/null || true
+          docker network create ci-net 2>/dev/null || true
+          docker run -d --name ci-pg --network ci-net \
+            -e POSTGRES_USER=csctalon \
+            -e POSTGRES_PASSWORD=csctalon123 \
+            -e POSTGRES_DB=csctalon_test \
+            postgres:15
+          # 空库迁移门禁专用库(#211): POSTGRES_DB 在容器首次初始化时建成一个不含任何
+          # 表的**空库**, 专供 `alembic upgrade head` 从基线重放整条迁移链。它与 pytest 的
+          # create_all + stamp head 路径相互独立 —— 后者会掩盖"某迁移 DROP 了链上从未
+          # CREATE 的对象/迁移链断裂/多 head"。库名 _dev 后缀以通过启动期模式守卫。
+          docker run -d --name ci-pg-mig --network ci-net \
+            -e POSTGRES_USER=csctalon \
+            -e POSTGRES_PASSWORD=csctalon123 \
+            -e POSTGRES_DB=csctalon_dev \
+            postgres:15
+          # 等待 PG 就绪(最多 30s)
+          for i in $(seq 1 30); do
+            docker exec ci-pg pg_isready -U csctalon && break
+            sleep 1
+          done
+          for i in $(seq 1 30); do
+            docker exec ci-pg-mig pg_isready -U csctalon && break
+            sleep 1
+          done
+
+      - name: 后端测试 (docker python:3.11-slim)
+        id: backend-test
+        run: |
+          # 挂宿主机绝对路径 /vol2/@appcenter/gitea-runner/workspace/ci-repo/backend
+          docker run --rm --network ci-net \
+            -v /vol2/@appcenter/gitea-runner/workspace/ci-repo/backend:/app -w /app \
+            -e TEST_POSTGRES_HOST=ci-pg \
+            -e TEST_POSTGRES_PORT=5432 \
+            -e TEST_POSTGRES_USER=csctalon \
+            -e TEST_POSTGRES_PASSWORD=csctalon123 \
+            -e TEST_POSTGRES_DB=csctalon_test \
+            python:3.11-slim bash -c "
+              set -e
+              apt-get update -qq && apt-get install -y -qq libzbar0 libpq-dev gcc >/dev/null 2>&1
+              pip install -q --upgrade pip >/dev/null 2>&1
+              pip install -q -e '.[dev]' >/dev/null 2>&1
+              echo '== ruff (app/ + tests/) =='
+              ruff check app/ tests/
+              echo '== alembic upgrade head (空库迁移链门禁, #211) =='
+              # 命令级 env 仅作用于本条 alembic 进程(切勿 export 到全局): tests/conftest.py
+              # 用 setdefault 从 TEST_POSTGRES_* 回填 POSTGRES_*, 若全局已存在 POSTGRES_HOST
+              # 会遮蔽回填, 反令 pytest 连到空库主机上不存在的 csctalon_test。
+              # 多 head / 链断裂时 upgrade head 直接非零退出(set -e 即门禁失败)。
+              APP_MODE=dev POSTGRES_HOST=ci-pg-mig POSTGRES_PORT=5432 \
+              POSTGRES_USER=csctalon POSTGRES_PASSWORD=csctalon123 \
+              POSTGRES_DB=csctalon_dev python -m alembic upgrade head
+              echo '== alembic heads (应为单一 head) =='
+              APP_MODE=dev POSTGRES_HOST=ci-pg-mig POSTGRES_PORT=5432 \
+              POSTGRES_USER=csctalon POSTGRES_PASSWORD=csctalon123 \
+              POSTGRES_DB=csctalon_dev python -m alembic heads
+              echo '== pytest =='
+              pytest
+            "
+
+      - name: 回写 CI 结果到工单 (G2)
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEATOKEN }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          SHA: ${{ github.sha }}
+          TEST_OUTCOME: ${{ steps.backend-test.outcome }}
+        run: |
+          # 对应锁定设计 A-20260903-001 §2.2: pytest/ruff 结果回写工单评论, 幂等去重
+          issue_no=$(printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | grep -Eo '#[0-9]+' | head -1 | tr -d '#')
+          [ -n "$issue_no" ] || { echo "未解析到工单号, 跳过回写"; exit 0; }
+          api="http://127.0.0.1:3000/api/v1/repos/tanzk/csctalon"
+
+          # 幂等: 该工单已有同 commit 的 CI 评论则跳过
+          existing=$(curl -s -H "Authorization: token ${GITEA_TOKEN}" "$api/issues/${issue_no}/comments")
+          if echo "$existing" | grep -q "${SHA}"; then
+            echo "已存在同 commit CI 评论, 跳过(幂等)"
+            exit 0
+          fi
+
+          outcome="${TEST_OUTCOME:-unknown}"
+          body="🤖 CI 自动回写: commit \`${SHA}\` 后端测试(ruff+pytest) = **${outcome}**"
+          curl -s -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(python3 -c "import json,sys; print(json.dumps({'body': sys.argv[1]}))" "$body")" \
+            "$api/issues/${issue_no}/comments" > /dev/null
+          echo "已回写 CI 结果到工单 #${issue_no}"
+
+      - name: 清理 postgres 容器
+        run: |
+          docker rm -f ci-pg ci-pg-mig 2>/dev/null || true
+          docker network rm ci-net 2>/dev/null || true
+          echo "已清理测试容器"
+
+  frontend-lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码 (显式 clone)
+        run: |
+          rm -rf /workspace/ci-repo
+          git clone --quiet http://127.0.0.1:3000/tanzk/csctalon.git /workspace/ci-repo
+          cd /workspace/ci-repo && git log --oneline -1
+
+      - name: 前端 lint + test (docker node:24)
+        run: |
+          # node:24: jsdom 30/undici 8 需要 Node 22+ 的 webidl API(node:20 会报
+          # webidl.util.markAsUncloneable is not a function)
+          docker run --rm \
+            -v /vol2/@appcenter/gitea-runner/workspace/ci-repo/web:/app -w /app \
+            node:24 bash -c "
+              set -e
+              echo '== npm ci =='
+              npm ci
+              echo '== eslint =='
+              npm run lint
+              echo '== vitest =='
+              npm test
+            "
+

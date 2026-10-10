@@ -1,0 +1,2788 @@
+"""抓取编排与数据源配置: BmsFetcher 主类 / FetchResult / group_fetch_tasks / 时间窗口裁剪。"""
+
+import asyncio
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Optional
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+# 跨子模块引用(拆分自 bms_fetcher.py, 原同文件内直接调用)
+from app.services.bms_fetcher._browser import (
+    _DOWNLOAD_DEFAULT_RETRIES,
+    _DOWNLOAD_DEFAULT_TIMEOUT_MS,
+    _DOWNLOAD_MAX_RETRIES,
+    _DOWNLOAD_TIMEOUT_MS,
+    BmsSessionExpired,
+    EmptyQueryResult,
+    _dismiss_modal_dialogs,
+    _download_with_retry,
+)
+from app.services.bms_fetcher._login import (
+    _try_auto_login_via_ocr,
+    is_login_class_error,
+    should_circuit_break_group_on_login_error,
+)
+
+# BMS 数据源默认配置(种子,首次启动写入 sync_source_configs;default_sync 控制是否纳入定时/默认勾选)
+BMS_DATA_SOURCES: dict[str, dict] = {
+    "refund": {
+        "name": "退费单管理",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/pay/refund-manage",
+        "default_sync": True,
+        # 退费单默认按创建时间筛选,无需选时间字段
+    },
+    "ticket": {
+        "name": "服务请求管理",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/service-request/service-request-manage",
+        "default_sync": True,
+        # ⚠️  2026-08-06 修复: 原默认 time_labels=["起始完成时间","结束完成时间"] 会导致两类严重错误:
+        #     (1) 今天登记但尚未完成 / status != 已完成 / finish_time IS NULL 的工单 100% 漏同步(含当日新增投诉工单)
+        #     (2) 老工单(上周/上月登记) 因 BMS 凌晨 03:15 批量覆盖 finish_time 被算进今日, 导致同步数据"看起来完成很多但其实是旧记录被重算"
+        #  改按 "起始登记时间 / 结束登记时间" 拉取:
+        #     - 好处 1: 登记时间 只要工单进入系统就一定会写, 不会漏掉"今天新登记的任何工单"
+        #     - 好处 2: 对已经导入的历史老工单, 后续的状态/备注更新 依靠 upsert(ticket_no 唯一) 自动覆盖, 不会因时间窗口而丢字段
+        #  兼容说明: BMS 服务请求管理页面"登记时间"筛选框的中文标签在不同版本存在两种写法("起始登记时间"或直接"登记时间"),
+        #  _set_time_by_labels 内部用 has_text() 包含匹配(不是完全相等), 所以 ["起始登记时间","结束登记时间"] 两种写法都能命中.
+        #  若以后 BMS 升级改标签名, 只需更新 sync_source_configs 对应行 time_labels 字段 (无需再改代码默认种子).
+        "time_labels": ["起始登记时间", "结束登记时间"],
+    },
+    "wallet": {
+        "name": "提现操作记录",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/settle/customerWalletOperationRecord",
+        "default_sync": True,
+    },
+    "device_combo": {
+        "name": "设备套餐",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/device/device-combo",
+        "default_sync": False,  # 默认不同步,可在手动同步时勾选
+    },
+    # ai-acc 平台(智能助手处理记录)— Naive UI,走 HTTP API 非 Playwright
+    # fetch_mode="http" 标记 bms_sync.sync_all 分流到 ai_acc_fetcher
+    "cs_record": {
+        "name": "智能助手处理记录",
+        "base_url": "http://ai-acc.cloud-cat.cn",
+        "page_path": "/ai-acc/cs/v1/assistant/handleRecord/export",  # 导出 API 路径
+        "default_sync": True,
+        "fetch_mode": "http",
+    },
+    # 闪猫加速平台(已退款申请) - 独立域名 fast.cloud-cat.cn,登录需验证码
+    # requires_captcha=True 标记: 抓取时优先复用 storage_state,缺失时走交互验证码登录流程
+    "shanmao_refund": {
+        "name": "闪猫退款管理",
+        "base_url": "https://fast.cloud-cat.cn/sc_brm",
+        "page_path": "/index.html#/order-alrrefundapply-alrrefundapply",
+        "default_sync": False,  # 首次上线默认不同步,验证通过后管理员手动开启
+        "requires_captcha": True,
+        # ⚠️  闪猫平台日期筛选组件 class=el-date-editor--datetimerange
+        #     (Element UI 日期+时间范围选择器,两个 .el-range-input 输入框左右排列),
+        #     必须填完整「YYYY-MM-DD HH:mm:ss」(否则 Vue 组件不接受,清空为 '',导出会拿到历史全量 1976 行)。
+        #     同时要防止 Vue 渲染稍慢导致 query_selector('.el-date-editor--datetimerange') 首轮失败,
+        #     策略1已加最多 6s 轮询;策略4也加了「优先命中 el-range-input 所在行」。
+        "time_format": "%Y-%m-%d %H:%M:%S",
+    },
+    # BMS 设备标签管理页面(https://support.cloud-cat.cn/bms/index.html#/device/device-tags)
+    # ⚠️  注意: 该页面点击「导出」导出的并不是「标签定义字典」(device_tag),
+    # 而是每台设备被打标签的明细行(设备SN × 标签名 × 打标人 × 更新时间),
+    # 对应数据源 code=device_tag_binding。标签定义(device_tag)从明细里按 tag_name 自动去重补插
+    # (见 upsert_device_tag_bindings 里 resolve_tag_id 临时插 DeviceTag 行的逻辑),
+    # 且可在本系统侧手动维护,不再做 BMS 自动同步。
+    # ⚠️  2026-08-11 修复: base_url 从 wifi.cloud-cat.cn 统一到 support.cloud-cat.cn
+    #   (两域名指向同一套 BMS 系统,统一后可与 refund/ticket/wallet 共享登录态,避免单独登录)
+    "device_tag_binding": {
+        "name": "设备标签(打标明细)",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/device/device-tags",
+        "default_sync": False,  # 标签绑定明细变动少,按需手动同步
+    },
+    # ===== BMS 五源扩容(2026-09-05, A-20260905-001) =====
+    # 退款记录报表(财务>退款记录报表): 线上退款水单(E 路对账补充)
+    #   实测 CSV 列: 平台订单号,微信订单号,商户号,商户名,设备号,商品名称,
+    #               退款时间,申请退款金额,退款金额,退款状态
+    #   时间筛选标签= "退款开始时间/退款结束时间"(按退款时间), 附加筛选: 设备SN/退款状态
+    #   default_sync=False(D3: 先手动跑通, 验证后评估纳入定时)
+    "refund_record_report": {
+        "name": "退款记录报表",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/settle/refund-record-report",
+        "default_sync": False,
+        "time_labels": ["退款开始时间", "退款结束时间"],
+        # ── #191 (2026-09-24): 低频档小时与窗口按源可配 ──────────────────────
+        # 实测(生产 bms_sync_logs + 数据入库日): 上游报表 T+1 且**次日白天才发布**,
+        # 而低频档固定 06:00 → 每天都能"成功但取 0 行"(数据靠人工手动触发才有,
+        # 09-23 的昨日数据在 09-23 13:50 才可采)。故本源:
+        #   low_freq_hour=15  → 挪到 15:00(上游发布后), 每天 1 次不变
+        #   window_days=3     → 窗口 近 3 天(而非"昨天整天"), 吸收 T+1/T+2 抖动与失败重试
+        "options": {"low_freq_hour": 15, "window_days": 3},
+    },
+    # 订单管理(支付管理>订单管理): 订单台账
+    #   API item 确认: orderNo/sn/comboName/payablePrice/actualPayPrice/wxOrderNo/
+    #   payDate/payType/orderStatus/orderType/createUser/createDate/businessName/
+    #   deviceTypeName/refundStatus/activeDate/lastStoredTime/mchId/merchantName
+    #   时间锚点=创建时间(页面"开始时间/结束时间"即 createDate 窗, 实测)
+    "bms_order": {
+        "name": "订单管理",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/pay/pay-manage",
+        "default_sync": False,
+        "time_labels": ["开始时间", "结束时间"],
+    },
+    # 退货跟踪(售后>退货跟踪): 退货/换货全流程
+    #   DOM 列: 设备类型/店铺/商户/实付金额/退货类型/退款金额/退货签收状态/退货快递单号/
+    #           退货原因/下单时间/退货时间/签收时间/创建人/更新人/创建时间/更新时间/备注
+    #   时间锚点=创建时间(推断; 实现时以真实导出样本校准)
+    "return_tracking": {
+        "name": "退货跟踪",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/user/returnTracking",
+        "default_sync": False,
+        "time_labels": ["开始时间", "结束时间"],
+    },
+    # 设备管理(设备管理>设备管理): 设备档案(P4, 回填 devices 主表)
+    #   实测导出列(14): 设备号,设备类型,所属商户,主商户,是否激活,激活时间,服务有效期,
+    #                  当前套餐,启动卡ICCID,虚拟卡ICCID,应用版本,区域,创建时间,批次号
+    #   时间范围=激活时间(页面筛选即 激活开始/结束时间)
+    "device_profile": {
+        "name": "设备管理",
+        "base_url": "https://wifi.cloud-cat.cn/bms",
+        "page_path": "/index.html#/device/device-manage",
+        "default_sync": False,  # 低频,手动/定期刷新设备档案
+        "time_labels": ["激活开始时间", "激活结束时间"],
+    },
+}
+
+
+# 每次操作之间的最小间隔(秒),BMS 系统限制1分钟
+OPERATION_INTERVAL = 65
+
+
+# 浏览器登录态保存目录(复用 storage_state 跳过验证码登录)
+# ⚠️ 独立于 UPLOAD_DIR: 不在 /uploads 静态挂载下, 避免登录 cookie 被任意下载(会话劫持)
+# 目录结构: settings.BROWSER_STATE_DIR/{data_type}.json
+def _storage_state_path(data_type: str) -> Path:
+    """获取某数据源的 storage_state 文件路径(登录态单独存于 BROWSER_STATE_DIR)"""
+    base = Path(settings.BROWSER_STATE_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"{data_type}.json"
+
+def group_fetch_tasks(
+    tasks: list[dict],
+) -> list[tuple[str, str | None, list[dict]]]:
+    """把待抓取任务按 (base_url, username) 分组(纯函数, 供单测)。
+
+    返回 [(base_url, username, [task,...]), ...], 保持各组首次出现的顺序;
+    组内保持任务原顺序。
+
+    #29(2026-09-07): 登录态共享粒度 = 同域名 + 同账号。
+      - 同 base_url 且同账号的源共享一个 browser context(登录态), 省重复登录;
+      - 同 base_url 但账号不同的源拆到不同组(独立 context/独立登录),
+        防止串号——否则组内首源(own 独立账号)登录成功后, 后续用组账号的源
+        复用其登录态, 实际抓取 own 账号权限下的数据(见 #28 WARNING-3)。
+      - username 取 config["username"](_row_to_config 已 resolve 为最终登录明文;
+        未配置凭证为 None, 会归入 (base_url, None) 独立组, 不乱入有凭证组)。
+      - ticket / ticket_finish 同账号 → 自然同组, 不拆散双维度任务。
+    """
+    groups: list[tuple[str, str | None, list[dict]]] = []
+    for t in tasks:
+        cfg = t.get("config") or {}
+        base = cfg.get("base_url", "")
+        # 归一化: 空串/None 一律按 None(未配置凭证)处理, 避免同账号被 "" 与 None 拆成两组
+        user = cfg.get("username") or None
+        key = (base, user)
+        found = False
+        for i, (g_base, g_user, g_list) in enumerate(groups):
+            if (g_base, g_user) == key:
+                g_list.append(t)
+                found = True
+                break
+        if not found:
+            groups.append((base, user, [t]))
+    return groups
+
+def should_wait_between_groups(prev_base: str, next_base: str) -> bool:
+    """两组之间是否需要 65s 冷却(纯函数, 供单测)。
+
+    同域(base_url 相同, 即使换账号) = 同一物理 BMS Web 系统 → 需等 65s(1 分钟限制);
+    跨域(base_url 不同, 如 wifi → fast/闪猫) = 不同 Web 系统 → 不需等待。
+
+    #29(2026-09-07): 拆组为 (base_url, username) 后, 同 base_url 不同账号会形成
+    多个相邻组, 它们仍是同一 BMS 系统, 换账号重登后紧接查询/导出仍受 1 分钟限制,
+    故必须返回 True(原"跨组=跨域名"假设不再成立)。
+    """
+    return prev_base == next_base
+
+
+
+# BMS 网页版时间填入的时区开关。
+# 背景(2026-09-01 三次排查后定案): 稳定 8h 滞后的**真正根因是容器 Playwright 浏览器时区 = UTC**。
+#   BMS 前端 Vue DatePicker 用浏览器本地时间作为"当前时刻"并据此截断查询窗口:
+#   - 容器浏览器 UTC → BMS 认为当前是 UTC(北京-8h) → 即使填入正确北京时间 end,
+#     也会被截断到 8h 前 → 数据只到「执行时刻 UTC」=「北京当前-8h」
+#   - 用户手动在 BMS 页面导出(浏览器=北京) → 当前时刻正确 → 数据完整
+# 修复: 在 new_context 设置 timezone_id='Asia/Shanghai'(两处), 让 BMS 前端当前时刻=北京。
+# 在此前提下, 填入 BMS 的时间字符串**应保持北京时间**(BMS 按字面值解析), 即 fill_utc=False。
+# ⚠️ 曾误判: 之前以为 BMS 按浏览器时区解析输入字符串 → 把北京时间转 UTC 填入(fill_utc=True),
+#   反而让生产同步窗口变成 8h 前(只拿到凌晨 51 行)。方向反了, 已改回 False。
+# 每源仍可经 config time_fill_utc 覆盖。
+_BMS_FILL_TZ_UTC_DEFAULT = False
+
+def _bms_time_str(dt: datetime, time_format: str = "%Y-%m-%d %H:%M:%S", fill_utc: bool = True) -> str:
+    """生成填入 BMS 日期输入框的时间字符串。
+
+    - fill_utc=True: 把北京 aware 时间转成 UTC 再格式化(已废弃, 曾误判为修复)。
+    - fill_utc=False(默认): 按 dt 自身时区格式化(北京时间)。配合浏览器时区=Asia/Shanghai,
+      BMS 按字面北京时间解析 + 当前时刻=北京 → 窗口正确。
+    """
+    if fill_utc and dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).strftime(time_format)
+    return dt.strftime(time_format)
+
+def _crop_bounds_naive(start_date: datetime, end_date: datetime):
+    """把裁剪边界统一转成 naive 北京时间 pandas Timestamp, 用于与文件内时间列比较。
+
+    背景(2026-09-01): BMS/闪猫导出文件里的时间列(创建时间/审核时间/申请时间等)
+    是 naive 北京时间字符串(如 "2026-08-30 21:44:00"), 而传入的 start_date/end_date
+    是 aware UTC+8 datetime。原实现 `pd.to_datetime(start_date)` 得到 aware Timestamp,
+    与 naive 的列值比较会抛 `TypeError: Cannot compare tz-naive and tz-aware` →
+    被 except 吞 → mask=None → **裁剪从未真正生效(全量保留)**。
+
+    修复: 把边界按北京时区转成 naive 字面值(与列值同语义), 比较才有效。
+    返回值: (start_naive, end_naive) 均为 naive pd.Timestamp。
+    """
+    import pandas as pd
+    TZ_CN = timezone(timedelta(hours=8))
+
+    def _to_naive(dt: datetime):
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(TZ_CN).replace(tzinfo=None)
+        return pd.Timestamp(dt)
+
+    return _to_naive(start_date), _to_naive(end_date)
+
+
+# 单源抓取外层 wait_for 的前置环节裕量(秒): 覆盖登录态复用/跳页/设置时间/查询/渲染等待。
+# 真正下载由 _download_with_retry 内部控制(单次超时 + 重试),外层只兜底防「非下载环节」无限挂起。
+_FETCH_LEAD_SECONDS = 90
+
+def _fetch_total_budget_sec(data_type: str) -> int:
+    """该源一次抓取的外层总预算(秒) = 内层下载最坏总耗时(含全部重试) + 前置环节裕量。
+
+    ⚠️ 2026-09-05 修复: 之前 fetch_all/fetch_one 外层 `asyncio.wait_for` 超时 =
+    `_DOWNLOAD_TIMEOUT_MS.get(data_type)`(单次下载超时), 与内层 _download_with_retry
+    的单次超时**同值** → 内层第 1 次下载卡到单次超时时, 外层同时到点取消整个协程,
+    内层「重试」根本没有机会执行 → 表现为点导出后干等 N 秒直接"抓取超时", 无任何重试日志。
+
+    修复: 外层预算 = 单次下载超时 × (重试次数+1) + 前置裕量, 保证内层完整重试窗口不被外层掐断。
+    内层限流等待(60s×重试)额外计 60s×retries 裕量(限流是内层主动 sleep, 不算在下载超时内)。
+    """
+    timeout_ms = _DOWNLOAD_TIMEOUT_MS.get(data_type, _DOWNLOAD_DEFAULT_TIMEOUT_MS)
+    retries = _DOWNLOAD_MAX_RETRIES.get(data_type, _DOWNLOAD_DEFAULT_RETRIES)
+    download_sec = (timeout_ms // 1000) * (retries + 1)
+    rate_limit_wait = 60 * retries  # 被限流时每次重试前多等 60s
+    return download_sec + rate_limit_wait + _FETCH_LEAD_SECONDS
+
+class FetchResult:
+    """单次抓取结果"""
+
+    def __init__(
+        self,
+        data_type: str = "",
+        success: bool = False,
+        file_path: Optional[str] = None,
+        filename: Optional[str] = None,
+        total_rows: Optional[int] = None,
+        error: Optional[str] = None,
+        # 工单#2/A-20260904-002 3.1: 错误分级
+        #   transient = 瞬时错误(5xx/JSON500/超时/限流),可重试
+        #   permanent = 凭证/参数/业务错误(401/403/4xx),重试无意义
+        error_class: str = "permanent",
+        # 工单#2/A-20260904-002 3.1: 分片级抓取的部分失败清单
+        #   success=True 且 partial_failures 非空 = 部分成功(部分片失败,范围已记录)
+        #   每项 dict: {start, end, error, error_class}
+        partial_failures: Optional[list] = None,
+    ):
+        self.data_type = data_type
+        self.success = success
+        self.file_path = file_path
+        self.filename = filename
+        self.total_rows = total_rows
+        self.error = error
+        self.error_class = error_class
+        self.partial_failures = partial_failures
+        # ⚠️ 2026-08-12: 标记本源是否已完成登录(即使后续下载超时/失败,登录态仍可复用)
+        #   解决: refund 登录成功但下载超时 → logged_in_ok 未传递 → ticket 在残留的
+        #   refund 页面上"重新登录" → 命中 readonly el-select → 全组连锁失败
+        self.logged_in: bool = False
+        # ⚠️ 2026-09-06: 查询结果为空(BMS 页面"暂无数据") → 无导出文件, 但属正常业务态。
+        #   置 success=True + empty_result=True + file_path=None, 导入阶段按 0 行成功处理
+        #   (而非误报抓取失败)。见 EmptyQueryResult / bms_sync._sync_import_work。
+        self.empty_result: bool = False
+        # #293 session_hook 通道的返回载荷(非导出型任务把结果放这里, 不走 file_path)
+        self.payload: Any = None
+
+class BmsFetcher:
+    """BMS 平台数据抓取器 - 支持多数据源"""
+
+    def __init__(self):
+        self._browser = None
+        self._playwright = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self._cleanup()
+
+    async def _cleanup(self):
+        if self._browser:
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        if self._playwright:
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
+
+    async def _init_browser(self):
+        """初始化 Playwright 浏览器(整个抓取过程复用一个浏览器实例)"""
+        if self._browser:
+            return
+        try:
+            from playwright.async_api import async_playwright
+
+            self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--window-size=1920,1080",
+                ],
+            )
+            logger.info("Playwright Chromium 启动成功")
+        except Exception as e:
+            raise RuntimeError(f"浏览器启动失败: {e}") from e
+
+    async def fetch_one(
+        self,
+        data_type: str,
+        start_date: datetime,
+        end_date: datetime,
+        config: dict,
+        timeout: int | None = None,
+        session_hook: Optional[Callable[[Any], Awaitable[Any]]] = None,
+    ) -> FetchResult:
+        """抓取单个数据源
+
+        Args:
+            data_type: refund/ticket/wallet/device_combo
+            start_date: 开始时间
+            end_date: 结束时间
+            config: 该源的运行配置(base_url/page_path/time_labels/username/password/name,来自 sync_source_configs)
+            timeout: 超时时间(秒); None=按该源下载最坏总耗时自动计算(_fetch_total_budget_sec)
+            session_hook: #293 非导出型任务(如设备档案 SN 补全)——登录完成后不走
+                时间筛选/导出流程, 直接把已登录 page 交给 hook 执行, 返回值放入
+                result.payload 并置 success=True。None 时行为与原来完全一致。
+        """
+        result = FetchResult()
+        result.data_type = data_type
+
+        if not config or not config.get("base_url"):
+            result.error = f"数据源未配置或缺少 base_url: {data_type}"
+            return result
+        if not config.get("username") or not config.get("password"):
+            result.error = f"数据源未配置账号密码: {data_type}(请在系统管理-同步设置中配置)"
+            return result
+
+        # ⚠️ 2026-09-05: timeout 未显式传时, 按该源下载最坏总耗时(含重试)自动计算,
+        #   避免默认 180s 对 wallet(600s 下载)等大源过早掐断(吞掉内层下载重试)。
+        if timeout is None:
+            timeout = _fetch_total_budget_sec(data_type)
+            logger.info(f"[{data_type}] 单源抓取外层预算 = {timeout}s(按下载最坏总耗时自动计算)")
+
+        try:
+            await asyncio.wait_for(
+                self._do_fetch_one(data_type, start_date, end_date, config, result, session_hook=session_hook),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            result.error = f"抓取超时({timeout}秒): {config.get('name', data_type)}"
+            logger.error(result.error)
+        except Exception as e:
+            result.error = f"抓取失败: {e}"
+            logger.error(result.error, exc_info=True)
+
+        return result
+
+    async def _fill_daterange_inputs(self, page, start_inp, end_inp, start_str, end_str):
+        """填 Element UI datetimerange 的两个 input 并确保 Vue v-model 更新。
+
+        背景(2026-09-01): 时间框需先展开高级筛选(.show-more)才可见。
+        - Element UI DatePicker 的 input 需**先 click 聚焦**才可 fill, 否则 fill 会
+          超时(8s)退化为 evaluate setter; 而 setter 有时不触发 Vue v-model 更新 →
+          查询用默认近一周 → 窗口不精确, 甚至导出按钮状态异常。
+        - 这里对每个 input: click 聚焦 → fill(缩短超时) → evaluate 兜底 setter+事件,
+          确保 Vue 更新。
+        - ⚠️ 不要用 page.mouse.click(5,5) 关闭面板: 会改变页面滚动/点击位置导致不稳定;
+          改用 ESC + blur 关闭 picker。
+        """
+        for i_el, val in [(start_inp, start_str), (end_inp, end_str)]:
+            try:
+                # 先 click 聚焦, 让 Element UI 进入可编辑状态(避免 fill 超时)
+                await i_el.click(timeout=5000)
+                await asyncio.sleep(0.15)
+            except Exception as _ce:
+                logger.warning(f"  [填值] click 聚焦失败(继续): {_ce}")
+            try:
+                await i_el.fill(val, timeout=4000)
+            except Exception as _fe:
+                logger.warning(f"  [填值] fill 超时/失败,退化为 evaluate setter: {_fe}")
+                try:
+                    await i_el.evaluate(
+                        """(el, v) => {
+                            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                            if (setter) setter.call(el, v); else el.value = v;
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        }""",
+                        val,
+                    )
+                except Exception as _e2:
+                    logger.warning(f"  [填值] evaluate setter 失败(忽略): {_e2}")
+            await asyncio.sleep(0.2)
+        # 触发 blur + ESC, 让 DatePicker 面板收起并同步 v-model
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        try:
+            s_ph = await start_inp.get_attribute("placeholder") or ""
+            e_ph = await end_inp.get_attribute("placeholder") or ""
+            await page.evaluate(
+                """([sSel, eSel]) => {
+                    const s = document.querySelector(sSel);
+                    const e = document.querySelector(eSel);
+                    for (const el of [s, e]) {
+                        if (el) {
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                            el.blur && el.blur();
+                        }
+                    }
+                }""",
+                [f'input[placeholder="{s_ph}"]', f'input[placeholder="{e_ph}"]'],
+            )
+        except Exception as _fe:
+            logger.warning(f"  [填值] 触发 blur 异常(忽略): {_fe}")
+        await asyncio.sleep(0.5)
+
+    async def _set_time_by_labels(self, page, start_label: str, end_label: str, start_str: str, end_str: str):
+        """按表单标签精确查找日期输入框并设置时间
+
+        适用于页面上有多个时间筛选框的情况(如服务请求管理):
+          起始完成时间 [输入框]
+          结束完成时间 [输入框]
+          登记时间   [输入框]
+          催单时间   [输入框]
+
+        策略: 找包含目标标签文本的最近表单项(.el-form-item),操作其中的可见 input
+        """
+        logger.info(f"按标签查找时间输入框: '{start_label}' / '{end_label}'")
+
+        # ⚠️ 策略0(2026-09-01): BMS 服务请求管理页的"起始登记时间/完成时间/催单时间"
+        #   在**高级筛选**里, 默认折叠不可见(visible=False, 本地实测), 需先点 `.show-more` 展开。
+        #   不展开则 placeholder 匹配命中但 is_visible=False → click/fill 全超时。
+        try:
+            sm = page.locator(".show-more, a.show-more").first
+            if await sm.count() > 0 and not await sm.get_attribute("disabled"):
+                # 先检查登记/完成时间框是否已可见, 不可见才展开(避免每次重复点击切换收起)
+                need_expand = not await page.locator(f'input[placeholder="{start_label}"]').first.is_visible()
+                if need_expand:
+                    logger.info("  [展开高级筛选] 点击 .show-more 展开时间筛选区")
+                    try:
+                        await sm.click(timeout=5000)
+                    except Exception:
+                        await page.evaluate("document.querySelector('.show-more') && document.querySelector('.show-more').click()")
+                    await asyncio.sleep(1.2)
+        except Exception as _se:
+            logger.warning(f"  [展开高级筛选] 异常(忽略): {_se}")
+
+        # ⚠️ 策略0(新增 2026-09-01): BMS 页面"起始登记时间/结束登记时间"等是 **placeholder**,
+        #   不是 `.el-form-item__label` 元素(本地 DOM 实测 label 列表为空)。原 _fill_input_by_label
+        #   找 label 永远失败 → 回退通用策略 → 通用策略选"第一个 datetimerange 容器"(登记时间,碰巧对)
+        #   但 fill 超时 + evaluate 不触发 Vue v-model → 查询仍用默认近一周 → 窗口不精确。
+        #   这里按 placeholder 精确匹配, 直接定位到正确的登记/完成时间框, 用键盘输入确保生效。
+        start_inp = page.locator(f'input[placeholder="{start_label}"]').first
+        end_inp = page.locator(f'input[placeholder="{end_label}"]').first
+        if await start_inp.count() > 0 and await end_inp.count() > 0:
+            logger.info(
+                f"  [策略0-按placeholder] 命中 '{start_label}' / '{end_label}' → "
+                f"键盘输入 start={start_str!r} end={end_str!r}"
+            )
+            await self._fill_daterange_inputs(page, start_inp, end_inp, start_str, end_str)
+            return
+
+        # 查找起始时间输入框
+        start_filled = await self._fill_input_by_label(page, start_label, start_str)
+        # 查找结束时间输入框
+        end_filled = await self._fill_input_by_label(page, end_label, end_str)
+
+        if not start_filled or not end_filled:
+            # 标签查找失败,回退到通用策略
+            logger.warning("按标签查找失败,回退到通用时间范围策略")
+            await self._set_time_range(page, start_str, end_str)
+
+    async def _fill_input_by_label(self, page, label: str, value: str) -> bool:
+        """在包含指定标签文本的表单项中找到可见 input 并填值
+
+        Returns: True 表示成功
+        """
+        # 策略1: 找 .el-form-item 中包含该 label 文本的,取里面的可见 input
+        # 用 has_text 过滤,取最内层匹配的(用 .first 避免父元素干扰)
+        form_item = page.locator(f".el-form-item:has-text('{label}')").first
+        try:
+            if await form_item.count() > 0:
+                # 找 form-item 内的可见 input(排除纯展示用的)
+                inputs = form_item.locator("input:visible")
+                count = await inputs.count()
+                if count > 0:
+                    logger.info(f"在 '{label}' 表单项中找到 {count} 个可见 input")
+                    await self._fill_el_input(page, inputs.first, value)
+                    return True
+        except Exception as e:
+            logger.warning(f"在表单项中查找 '{label}' 失败: {e}")
+
+        # 策略2: 找 label 元素文本匹配,然后找紧邻的 input
+        # Element UI 的 label 可能是 .el-form-item__label 或普通 label
+        try:
+            # 找文本完全匹配的 label 元素,然后找同一 form-item 内的 input
+            label_el = page.locator(f".el-form-item__label:has-text('{label}'), label:has-text('{label}')").first
+            if await label_el.count() > 0:
+                # 向上找 form-item,再找 input
+                input_el = label_el.locator("xpath=ancestor::div[contains(@class,'el-form-item')]//input").first
+                if await input_el.count() > 0 and await input_el.is_visible():
+                    logger.info(f"通过 label '{label}' 找到 input")
+                    await self._fill_el_input(page, input_el, value)
+                    return True
+        except Exception as e:
+            logger.warning(f"通过 label 元素查找 '{label}' 失败: {e}")
+
+        # 策略3: 用 JS 精确查找(遍历所有 label 文本,找匹配的,定位到同 form-item 的 input)
+        try:
+            found = await page.evaluate("""
+                (labelText) => {
+                    const labels = document.querySelectorAll('.el-form-item__label, label, .form-label');
+                    for (const lab of labels) {
+                        if (lab.textContent.trim() === labelText || lab.textContent.trim().includes(labelText)) {
+                            // 找最近的 form-item 祖先
+                            let formItem = lab.closest('.el-form-item') || lab.parentElement;
+                            if (!formItem) continue;
+                            // 找里面的可见 input
+                            const inputs = formItem.querySelectorAll('input');
+                            for (const inp of inputs) {
+                                const rect = inp.getBoundingClientRect();
+                                const style = window.getComputedStyle(inp);
+                                if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                }
+            """, label)
+            if found:
+                # 用 JS 找到了,重新用 locator 定位填充
+                logger.info(f"JS 确认 '{label}' 的 input 存在,用 locator 填充")
+                # 重新用更精确的 xpath 定位
+                input_locator = page.locator(f"xpath=//div[contains(@class,'el-form-item')][.//text()[contains(.,'{label}')]]//input").first
+                if await input_locator.count() > 0:
+                    await self._fill_el_input(page, input_locator, value)
+                    return True
+        except Exception as e:
+            logger.warning(f"JS 查找 '{label}' 失败: {e}")
+
+        logger.warning(f"未找到 '{label}' 对应的输入框")
+        return False
+
+    async def _set_time_range(self, page, start_str: str, end_str: str):
+        """设置时间范围 - 适配 Element UI 日期选择器
+
+        策略(优先级从高到低,高优先级命中即 return):
+          0) [快速轮询] 最多等 6s 找 Element UI datetimerange/daterange 容器
+               class=el-date-editor--datetimerange 或 el-date-editor--daterange
+               → 内部两个 .el-range-input 填 start/end(填完再读 value 确认,避免 Vue 清空)
+          1) 可见 input 里找 className 含 el-range-input / 父节点含 el-date-editor 的前 2 个
+          2) 可见 placeholder 含「日期/时间/开始/结束」的 input
+          3) [策略4兜底] y 行分组:优先命中含 el-range-input 的 y 行;否则取最上一行 ≥2 个非 readonly text input
+
+        Element UI datetimerange 结构:
+          .el-date-editor.el-date-editor--datetimerange
+            input.el-range-input (开始)
+            input.el-range-input (结束)
+        """
+        # ── 策略0(推荐):快速轮询 datetimerange/daterange 容器(最多 6s,每 0.75s 一次) ──
+        #   解决:闪猫/Vue 渲染稍慢时,首轮 query_selector 找不到即退到策略4选错 input。
+        logger.info(
+            "[策略0] 轮询找 datetimerange 容器(最多 6s):期望找到 .el-date-editor--datetimerange > 2x .el-range-input"
+        )
+        range_pat_selectors = [
+            ".el-date-editor--datetimerange",
+            ".el-date-editor--daterange",
+            ".el-range-editor",
+        ]
+        range_container = None
+        range_inputs = None
+        for try_i in range(8):
+            for sel in range_pat_selectors:
+                try:
+                    rc = await page.query_selector(f"{sel}:visible")
+                    if rc:
+                        inps = await rc.query_selector_all("input.el-range-input:visible, input:visible")
+                        # 只取非 readonly/非 disabled 的前 2 个
+                        good = []
+                        for ip in inps:
+                            try:
+                                if not await ip.is_visible(): continue
+                                if await ip.get_attribute("readonly") or await ip.get_attribute("disabled"):
+                                    continue
+                                good.append(ip)
+                            except Exception:
+                                continue
+                        if len(good) >= 2:
+                            range_container = rc
+                            range_inputs = [good[0], good[1]]
+                            break
+                except Exception:
+                    pass
+            if range_inputs is not None:
+                break
+            await asyncio.sleep(0.75)
+        if range_container and range_inputs:
+            logger.info(
+                f"  [策略0] 命中(轮询第 {try_i+1}/8):尝试填 start={start_str!r} end={end_str!r}"
+            )
+            # ── 填值:模拟真实用户 click→ctrl+a→backspace→type 键盘输入,确保 Vue v-model 内部 state 更新 ──
+            #   原因:Element UI DatePicker/DateTimeRange 组件内部维护 v-model,
+            #   直接 fill / eval 修改 DOM input.value 不会同步到 Vue 实例的 this.value,
+            #   导致查询/导出时 Vue 仍按空值处理,筛选无效。
+            for i_el, val in [(range_inputs[0], start_str), (range_inputs[1], end_str)]:
+                try:
+                    await i_el.scroll_into_view_if_needed()
+                    await asyncio.sleep(0.18)
+                    await i_el.click()
+                    await asyncio.sleep(0.28)
+                    await page.keyboard.press("Control+A")
+                    await asyncio.sleep(0.10)
+                    await page.keyboard.press("Backspace")
+                    await asyncio.sleep(0.15)
+                    await i_el.type(val, delay=35)
+                    await asyncio.sleep(0.30)
+                except Exception as e:
+                    logger.warning(f"  [策略0] 模拟键盘 type 失败,回退到 _fill_el_input: {e}")
+                    await self._fill_el_input(page, i_el, val)
+            # 触发两个 input blur → 点击页面右上角空白区域,让 DateTimeRange picker 失焦并同步内部值
+            try:
+                viewport = page.viewport_size or {"width":1920,"height":1080}
+                await page.mouse.click(max(int(viewport.get("width",1920)) - 40, 1850), 20)
+            except Exception:
+                pass
+            await asyncio.sleep(0.9)
+
+            # 回填 value 确认(DOM value + Vue2 实例 value 都要检查)
+            verify = await page.evaluate(
+                """([sEl, eEl]) => {
+                    const sDom = sEl.value || '';
+                    const eDom = eEl.value || '';
+                    // 向上找最近父节点带 __vue__ 的(DateRange 组件本身)
+                    function upVue(el) {
+                        let n = el;
+                        for (let i=0; i<8 && n; i++) {
+                            if (n.__vue__) return n.__vue__;
+                            n = n.parentElement;
+                        }
+                        return null;
+                    }
+                    const v = upVue(sEl) || upVue(eEl);
+                    let vueVal = null;
+                    try { if (v && v.value !== undefined) vueVal = JSON.parse(JSON.stringify(v.value)); }
+                    catch(_) { vueVal = String(v && v.value).slice(0,200); }
+                    return {
+                        s: sDom, e: eDom,
+                        sCls: (sEl.className || '').slice(0,80),
+                        eCls: (eEl.className || '').slice(0,80),
+                        vueValue: vueVal,
+                        vueFound: !!v,
+                        vueName: v ? (v.$options && v.$options.name) : null,
+                    };
+                }""",
+                [range_inputs[0], range_inputs[1]],
+            )
+            s_ok = start_str in (verify.get('s') or '')
+            e_ok = end_str in (verify.get('e') or '')
+            vv = verify.get("vueValue")
+            # vue value 正确格式:长度=2 的数组, 2 个元素分别等于 start_str/end_str (或者 start_str 在其字符串里)
+            vue_ok = False
+            if isinstance(vv, (list, tuple)) and len(vv) >= 2:
+                vs0 = str(vv[0] or '')
+                vs1 = str(vv[1] or '')
+                vue_ok = (start_str in vs0) and (end_str in vs1)
+            if (not s_ok or not e_ok) and not vue_ok:
+                logger.warning(
+                    "  [策略0] 回填验证失败 s=%r(%s) e=%r(%s)  vue=%r(%s) → fallback _fill_el_input+setter",
+                    verify.get('s'), "OK" if s_ok else "MISS",
+                    verify.get('e'), "OK" if e_ok else "MISS",
+                    vv, "OK" if vue_ok else "MISS",
+                )
+                # fallback: 再次调用 _fill_el_input + setter dispatchEvent (双保险)
+                await self._fill_el_input(page, range_inputs[0], start_str)
+                await self._fill_el_input(page, range_inputs[1], end_str)
+                await page.evaluate(
+                    """([sEl, sVal, eEl, eVal]) => {
+                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        for (const [el, val] of [[sEl,sVal],[eEl,eVal]]) {
+                            if (setter) setter.call(el, val); else el.value = val;
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                            el.blur && el.blur();
+                        }
+                    }""",
+                    [range_inputs[0], start_str, range_inputs[1], end_str],
+                )
+                await asyncio.sleep(0.5)
+                # ── 二次校验:fallback 后必须再读一次 DOM/Vue 值,确认填入成功 ──
+                #   原因:之前 fallback 后直接 return,调用方会继续点搜索,
+                #   导致带着错误时间范围(默认近30天)查询,下回错月份数据。
+                verify2 = await page.evaluate(
+                    """([sEl, eEl]) => {
+                        function upVue(el) {
+                            let n = el;
+                            for (let i=0; i<8 && n; i++) {
+                                if (n.__vue__) return n.__vue__;
+                                n = n.parentElement;
+                            }
+                            return null;
+                        }
+                        const v = upVue(sEl) || upVue(eEl);
+                        let vueVal = null;
+                        try { if (v && v.value !== undefined) vueVal = JSON.parse(JSON.stringify(v.value)); }
+                        catch(_) { vueVal = String(v && v.value).slice(0,200); }
+                        return { s: sEl.value || '', e: eEl.value || '', vueValue: vueVal };
+                    }""",
+                    [range_inputs[0], range_inputs[1]],
+                )
+                s_ok2 = start_str in (verify2.get('s') or '')
+                e_ok2 = end_str in (verify2.get('e') or '')
+                vv2 = verify2.get("vueValue")
+                vue_ok2 = False
+                if isinstance(vv2, (list, tuple)) and len(vv2) >= 2:
+                    vue_ok2 = (start_str in str(vv2[0] or '')) and (end_str in str(vv2[1] or ''))
+                if (not s_ok2 or not e_ok2) and not vue_ok2:
+                    # fallback 仍失败 → 必须中止,避免用错误时间范围查询导出脏数据
+                    logger.error(
+                        "  [策略0] fallback 后二次校验仍失败 s=%r(%s) e=%r(%s) vue=%r(%s) → 抛错中止,避免按错误时间范围查询",
+                        verify2.get('s'), "OK" if s_ok2 else "MISS",
+                        verify2.get('e'), "OK" if e_ok2 else "MISS",
+                        vv2, "OK" if vue_ok2 else "MISS",
+                    )
+                    raise RuntimeError(
+                        f"时间范围填入失败: 目标 start={start_str!r} end={end_str!r}, "
+                        f"实际 DOM s={verify2.get('s')!r} e={verify2.get('e')!r}, "
+                        f"vue={vv2!r}; 已中止查询以避免按错误时间范围导出脏数据"
+                    )
+                logger.info(
+                    "  [策略0] fallback 后二次校验通过 s=%r/%r  e=%r/%r  vueValue=%r ✅",
+                    verify2.get('s'), start_str, verify2.get('e'), end_str, vv2,
+                )
+            else:
+                logger.info(
+                    "  [策略0] 回填验证通过 s=%r/%r  e=%r/%r  vueValue=%r ✅",
+                    verify.get('s'), start_str, verify.get('e'), end_str, vv,
+                )
+            # 关闭可能遮挡搜索按钮的日期选择器弹窗 (el-picker-panel / el-date-picker__time-header)
+            try:
+                await page.evaluate(
+                    """() => {
+                        // 点击页面空白处关闭 Element UI 日期弹窗
+                        const popups = document.querySelectorAll('.el-picker-panel, .el-picker-panel__body, .el-date-picker__time-header');
+                        if (popups.length) {
+                            // 触发 ESC 关闭
+                            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                        }
+                        return true;
+                    }"""
+                )
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
+            return
+
+        # 策略1: Element UI datetimerange 范围选择器(只取第一个,避免多时间字段干扰)
+        range_editor = await page.query_selector(".el-date-editor--datetimerange")
+        if range_editor:
+            inputs = await range_editor.query_selector_all(".el-range-input")
+            if len(inputs) >= 2:
+                logger.info(f"使用 datetimerange 选择器,找到 {len(inputs)} 个 input")
+                await self._fill_el_input(page, inputs[0], start_str)
+                await self._fill_el_input(page, inputs[1], end_str)
+                return
+            # 兜底:任意后代 input(前两个非 readonly)
+            any_ins = await range_editor.query_selector_all("input")
+            good = []
+            for i in any_ins:
+                try:
+                    ro = (await i.get_attribute("readonly")) is not None
+                    dis = (await i.get_attribute("disabled")) is not None
+                    if not ro and not dis: good.append(i)
+                except Exception:
+                    pass
+            if len(good) >= 2:
+                logger.info(f"使用 datetimerange 容器(兜底后代 input),找到 {len(good)} 个可用 input")
+                await self._fill_el_input(page, good[0], start_str)
+                await self._fill_el_input(page, good[1], end_str)
+                return
+
+        # 策略2: 找所有可见的日期相关 input,取前两个
+        visible_time_inputs = await page.evaluate("""
+            () => {
+                const inputs = document.querySelectorAll(
+                    '.el-date-editor input, input.el-range-input, input[placeholder*="时间"], input[placeholder*="日期"]'
+                );
+                return Array.from(inputs).filter(el => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                }).slice(0, 4).map(el => ({
+                    placeholder: el.placeholder || '',
+                    className: el.className || '',
+                    value: el.value || ''
+                }));
+            }
+        """)
+        logger.info(f"可见的日期 input: {visible_time_inputs}")
+
+        # 找到可见的 range-input 或日期 input
+        visible_inputs = await page.evaluate("""
+            () => {
+                const inputs = document.querySelectorAll(
+                    '.el-date-editor input, input.el-range-input, input[placeholder*="时间"], input[placeholder*="日期"]'
+                );
+                const result = [];
+                for (const el of inputs) {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {
+                        result.push(el);
+                    }
+                }
+                return result;
+            }
+        """)
+
+        if len(visible_inputs) >= 2:
+            # 用 locator 确保操作可见元素
+            locators = page.locator('.el-date-editor input:visible, input.el-range-input:visible').all()
+            locators = await locators
+            if len(locators) >= 2:
+                logger.info(f"使用可见 input 选择器,找到 {len(locators)} 个")
+                await self._fill_el_input(page, locators[0], start_str)
+                await self._fill_el_input(page, locators[1], end_str)
+                return
+
+        # 策略3: 兜底 - 用 placeholder 匹配
+        logger.info("使用 placeholder 兜底匹配")
+        try:
+            await page.fill('input[placeholder*="开始"]', start_str, timeout=5000)
+            await page.fill('input[placeholder*="结束"]', end_str, timeout=5000)
+            return
+        except Exception:
+            pass
+
+        # 策略4(终极兜底,专门适配「无 label/placeholder 全空」的页面):
+        #   把所有可见 input 按 y 坐标分组(差 ≤30px 视为同一行),
+        #   优先选择「含 el-range-input / 父节点含 el-date-editor」的组;
+        #   否则取最上面一组(筛选条所在行)里「非 readonly、类型是 text」的前两个,
+        #   依次填 开始/结束时间。
+        logger.info(
+            "[兜底策略4] 未匹配到日期类选择器,尝试按可见 input 的 y 行分组(优先命中 el-range-input 组)"
+        )
+        info = await page.evaluate("""
+            () => {
+                const all = document.querySelectorAll('input');
+                const rows = new Map();  // key=roundedY(10)  value=[{x,y,readonly,type,el}]
+                for (const el of all) {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    if (rect.width <= 0 || rect.height <= 0) continue;
+                    if (style.visibility === 'hidden' || style.display === 'none') continue;
+                    const y = rect.top + rect.height / 2;
+                    const key = Math.round(y / 10) * 10;
+                    // 命中 el-range-input:说明它属于 Element UI 日期范围选择器
+                    const cls = (el.className || '').toString();
+                    const pcls = (el.parentElement && el.parentElement.className || '').toString();
+                    const is_datey = /el-range-input|el-date-editor|date-picker|daterange|datetimerange/i.test(cls + ' ' + pcls);
+                    const info = {
+                        x: rect.left + rect.width / 2,
+                        y,
+                        readonly: !!el.readOnly || el.hasAttribute('readonly'),
+                        disabled: !!el.disabled || el.hasAttribute('disabled'),
+                        type: (el.getAttribute('type') || 'text').toLowerCase(),
+                        placeholder: el.placeholder || '',
+                        is_datey,
+                    };
+                    if (!rows.has(key)) rows.set(key, []);
+                    rows.get(key).push({ info, el });
+                }
+                const sortedKeys = Array.from(rows.keys()).sort((a,b)=>a-b);
+                // 第一优先级:y 行里存在 is_datey=true,且 ≥2 个非 readonly 非 disabled input
+                for (const k of sortedKeys) {
+                    const row = rows.get(k);
+                    const has_datey = row.some(r => r.info.is_datey);
+                    if (!has_datey) continue;
+                    const candidates = row
+                        .filter(r => !r.info.readonly && !r.info.disabled && (r.info.type === 'text' || r.info.type === ''))
+                        .sort((a,b) => a.info.x - b.info.x);
+                    if (candidates.length >= 2) {
+                        window.__START_INP__ = candidates[0].el;
+                        window.__END_INP__   = candidates[1].el;
+                        return {
+                            ok: true,
+                            why: 'datey-row',
+                            row_y: k,
+                            start_x: candidates[0].info.x,
+                            end_x:   candidates[1].info.x,
+                            start_ph: candidates[0].info.placeholder,
+                            end_ph:   candidates[1].info.placeholder,
+                        };
+                    }
+                }
+                // 第二优先级:取最上一行(最小 y)里有 ≥2 个非 readonly 非 disabled text input
+                for (const k of sortedKeys) {
+                    const row = rows.get(k);
+                    const candidates = row
+                        .filter(r => !r.info.readonly && !r.info.disabled && (r.info.type === 'text' || r.info.type === ''))
+                        .sort((a,b) => a.info.x - b.info.x);
+                    if (candidates.length >= 2) {
+                        window.__START_INP__ = candidates[0].el;
+                        window.__END_INP__   = candidates[1].el;
+                        return {
+                            ok: true,
+                            why: 'top-row-fallback',
+                            row_y: k,
+                            start_x: candidates[0].info.x,
+                            end_x:   candidates[1].info.x,
+                            start_ph: candidates[0].info.placeholder,
+                            end_ph:   candidates[1].info.placeholder,
+                        };
+                    }
+                }
+                return { ok: false };
+            }
+        """)
+        if info and info.get("ok"):
+            logger.info(
+                "  命中: why=%s 第 y=%s 行,起止 x=(%s,%s) placeholder=(%r,%r) → 开始填值并触发事件",
+                info.get("why"), info.get("row_y"), info.get("start_x"), info.get("end_x"),
+                info.get("start_ph"), info.get("end_ph"),
+            )
+            filled = await page.evaluate(
+                """([sVal, eVal]) => {
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                    const s = window.__START_INP__; const e = window.__END_INP__;
+                    if (!s || !e) return false;
+                    for (const [el, val] of [[s, sVal], [e, eVal]]) {
+                        if (setter) setter.call(el, val); else el.value = val;
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    try { delete window.__START_INP__; delete window.__END_INP__; } catch (_) {}
+                    return true;
+                }""",
+                [start_str, end_str],
+            )
+            if filled:
+                return
+        # 最后兜底: evaluate 直接找 range
+        # ⚠️ 2026-09-01 审计修复: 原 querySelectorAll('input.el-range-input:visible, ...')
+        #   ':visible' 是 jQuery 伪类, 原生 querySelectorAll 不识别 → 直接抛 SyntaxError,
+        #   导致 wallet 12:05/15:05 轮次抓取中断、窗口回退默认范围 → 负数新增。
+        #   改为: 先按类名选中, 再用 JS 过滤可见性(rect + computedStyle)。
+        await page.evaluate(f"""
+            () => {{
+                const isVisible = (el) => {{
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0
+                        && style.visibility !== 'hidden' && style.display !== 'none';
+                }};
+                const inputs = Array.from(
+                    document.querySelectorAll('input.el-range-input, .el-date-editor input')
+                ).filter(isVisible);
+                if (inputs.length >= 2) {{
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                    setter.call(inputs[0], '{start_str}');
+                    inputs[0].dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    setter.call(inputs[1], '{end_str}');
+                    inputs[1].dispatchEvent(new Event('input', {{ bubbles: true }}));
+                }}
+            }}
+        """)
+
+    async def _wait_until_page_has_any_clickable(
+        self, page, max_wait_sec: int = 20, interval_sec: float = 1.0
+    ) -> int:
+        """进入目标页(SPA hash 路由)后的「渲染就绪」守卫: 轮询 ANY_CLICKABLE 直到出现 ≥1 个可见元素。
+
+        2026-08-14 新增(修复 bms_sync_logs#806 偶发「找不到任何查询/搜索按钮」):
+          - 旧代码只有 goto + 固定 `asyncio.sleep(3)`,但 SPA 拉完资源后,
+            Vue 还需要请求菜单权限/页面初始接口才能把「查询」按钮渲染到 DOM;
+          - 当 BMS 接口慢(>3 秒)时,Playwright 已开始执行 `_click_query_button`,
+            但 DOM 里根本还没有按钮 → 造成"同样的页面 一会儿成功 一会儿失败"。
+          - 用户截图也证明:退费单管理「查询」一直是标准绿色 <button>, 没有改版过,
+            之前「伪按钮改版」假设推翻, 真实根因 = 固定 sleep 3s 不稳定。
+        """
+        ANY_CLICKABLE = (
+            "button:visible,"
+            "div[role='button']:visible,"
+            "span[role='button']:visible,"
+            "a[class*='btn']:visible,"
+            "a[class*='button']:visible,"
+            "div[class*='btn']:visible,"
+            "div[class*='button']:visible,"
+            "span[class*='el-button']:visible,"
+            "div[class*='el-button']:visible"
+        )
+        start = asyncio.get_event_loop().time()
+        deadline = start + max_wait_sec
+        tries = 0
+        while True:
+            tries += 1
+            try:
+                n = len(await page.query_selector_all(ANY_CLICKABLE))
+            except Exception as q_e:
+                logger.warning(f"  [渲染就绪守卫] query_selector_all 异常: {q_e}")
+                n = 0
+            if n > 0:
+                cost = asyncio.get_event_loop().time() - start
+                extra = (
+                    f" (比固定 sleep 多等了 {max(0.0, cost - 3.0):.1f}s)"
+                    if cost > 3 else ""
+                )
+                logger.info(
+                    f"  [渲染就绪守卫] OK 已就绪 cost={cost:.1f}s tries={tries}"
+                    f" ANY_CLICKABLE可见={n}{extra}"
+                )
+                return n
+            now = asyncio.get_event_loop().time()
+            if now >= deadline:
+                logger.warning(
+                    f"  [渲染就绪守卫] 已等满 {max_wait_sec}s 仍未出现 ANY_CLICKABLE 可见元素"
+                    f" (tries={tries}) → 交给 _click_query_button 继续兜底判错"
+                )
+                return 0
+            await asyncio.sleep(interval_sec)
+
+    async def _fill_el_input(self, page, element, value: str):
+        """填充 Element UI 日期输入框(通用 input 也能用)。
+
+        注意: Playwright 的 ElementHandle/Locator 是 Python 代理对象,
+        不要调用 Python 对象上的 element.dispatchEvent(不存在!),所有 DOM 事件必须
+        在浏览器上下文里(evaluate/JS 回调)触发。
+        """
+        ok = False
+        try:
+            await element.fill(value, timeout=8000)
+            ok = True
+        except Exception as e:
+            logger.warning(f"fill 失败,退化为 evaluate 直接设值: {e}")
+        try:
+            await element.evaluate(
+                """(el, val) => {
+                    if (el.value !== val) {
+                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        if (setter) setter.call(el, val); else el.value = val;
+                    }
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }""",
+                value,
+            )
+            ok = True
+        except Exception as e2:
+            logger.warning(f"evaluate 触发 input/change 失败({e2}),但 fill 可能已经成功;不抛")
+        if not ok:
+            raise RuntimeError(f"_fill_el_input: fill + evaluate 都失败 value={value!r}")
+
+    async def _click_query_button(self, page) -> None:
+        """点击「查询/搜索/筛选」按钮(兼容各站点的按钮文案 & DOM,避免写死 has-text("搜索"))。
+
+        2026-08-14 诊断结论: refund/wallet 等 BMS 页面的查询按钮就是标准绿色 <button>,
+        不是伪按钮。之前失败的真因是遮挡层预处理(ESC+JS移除弹层+空白点击)无条件前置 →
+        Playwright 真实 click 被干扰超时 → 降级为 JS el.click() → Vue 事件未正确触发 →
+        查询后页面状态异常、导出按钮文本变空。
+
+        修复: 新增「策略0-快速直击」——先用简单 button:has-text 直接 click(不做遮挡层清理),
+        诊断脚本已证明此路径 100% 可用。只有策略0失败时才执行遮挡层清理+后续策略级联。
+
+        优先级:
+          0) [新增] 快速直击: button:has-text("搜索"/"查询") 直接 Playwright click
+          1) 文本精确匹配「查询/搜索/筛选...」→ 候选集合扩大到 button/div(role=button)/span(role=button)/a(btn类)
+          2) 找不到 → y 坐标最靠上的筛选条区域里第一个非「重置/导出」按钮 (DOM 集合同扩大)
+          3) 再找不到 → 用 JS 在整个文档扩大范围内搜 (querySelectorAll 同扩大)
+          4) 仍失败 → 按 Enter 兜底 (聚焦日期框/最后一个 input 然后 Enter)
+          5) [新增] 仍失败 → 表单 submit / [aria-label="搜索"] / [class*=submit]-btn 点击
+        """
+        keywords = ["查询", "查 询", "搜索", "搜 索", "筛选", "开始查询", "查询统计", "确认查询", "查 询 统 计"]
+        exclude_keywords = ["重置", "导出", "下载", "清空", "取消", "关闭", "重置查询"]
+        # 扩大候选 DOM 选择器: 真按钮 + 常见伪按钮实现 (div 挂 role / a 挂 btn-class / span 挂 el-button)
+        ANY_CLICKABLE = (
+            "button:visible,"
+            "div[role='button']:visible,"
+            "span[role='button']:visible,"
+            "a[class*='btn']:visible,"
+            "a[class*='button']:visible,"
+            "div[class*='btn']:visible,"
+            "div[class*='button']:visible,"
+            "span[class*='el-button']:visible,"
+            "div[class*='el-button']:visible"
+        )
+
+        # ═══════════════════════════════════════════════════════════
+        # 2026-08-14 新增: 收集当前页 ALL 候选按钮的结构化"快照"函数
+        #   - 正常路径: 仅打数量 + 前 N 个摘要 (info 级别, 不吵)
+        #   - 即将抛错前: 全量打到 error 级别, 包含 tag/text/aria-label/class/x/y
+        # ═══════════════════════════════════════════════════════════
+        async def _build_buttons_snapshot(max_items: int | None = None):
+            try:
+                all_el = await page.query_selector_all(ANY_CLICKABLE)
+            except Exception:
+                return []
+            snap = []
+            for idx, b in enumerate(all_el):
+                try:
+                    tag = (await b.evaluate("e=>e.tagName") or "?").upper()
+                except Exception:
+                    tag = "?"
+                try:
+                    txt = (await b.inner_text() or "").strip().replace("\n", " ")
+                except Exception:
+                    txt = ""
+                try:
+                    al = (await b.get_attribute("aria-label") or "").strip()
+                except Exception:
+                    al = ""
+                try:
+                    cls = (await b.get_attribute("class") or "").strip()
+                except Exception:
+                    cls = ""
+                try:
+                    box = await b.bounding_box()
+                    if box:
+                        pos = f"({int(box['x'])},{int(box['y'])},{int(box['width'])}x{int(box['height'])})"
+                    else:
+                        pos = "(?)"
+                except Exception:
+                    pos = "(?)"
+                if len(txt) > 40:
+                    txt = txt[:40] + "…"
+                if len(cls) > 60:
+                    cls = cls[:60] + "…"
+                snap.append(f"  [#{idx}] {tag}{pos} text={txt!r} aria={al!r} class={cls!r}")
+                if max_items and idx + 1 >= max_items:
+                    snap.append(f"  ... 仅展示前 {max_items} 个, 剩余 {len(all_el) - max_items} 个省略")
+                    break
+            return snap
+
+        page_url_for_log = page.url or "<unknown>"
+        logger.info(f"  [策略总览] 开始查找查询按钮 当前页面URL={page_url_for_log} 选择器={ANY_CLICKABLE!r}")
+
+        # ═══════════════════════════════════════════════════════════
+        # 2026-08-14 策略0-快速直击: 先用简单 button:has-text 直接 click,
+        #   不做任何遮挡层清理。诊断脚本(diag_refund_export.py)证明:
+        #   refund/wallet 页面的查询按钮就是标准绿色 <button>,
+        #   Playwright 原生 click 可以 100% 成功,不需要 ESC/JS清理/空白点击。
+        #   之前遮挡层预处理无条件前置 → Playwright click 被干扰超时 →
+        #   降级 JS el.click() → Vue 事件未正确触发 → 查询后导出按钮消失。
+        # ═══════════════════════════════════════════════════════════
+        for _kw in ["搜索", "查询", "搜 索", "查 询"]:
+            try:
+                _btn = await page.query_selector(f'button:has-text("{_kw}"):visible')
+                if _btn:
+                    # force=True: 即使按钮被 user-dropdown 遮挡也直接点击
+                    await _btn.click(timeout=5000, force=True)
+                    logger.info(f"  [策略0-快速直击] button:has-text({_kw!r}) force-click 成功 ✅")
+                    return
+            except Exception:
+                continue
+
+        # ═══════════════════════════════════════════════════════════
+        # 2026-08-14 遮挡层预处理（仅当策略0-快速直击失败后才执行）
+        #   生产日志(12h refund) 出现:
+        #     `<ul id="dropdown-menu-3551" class="el-dropdown-menu el-popper user-dropdown">`
+        #     intercepts pointer events 导致 Playwright 真实 click 被拦截 5s,
+        #     只能 fallback 到 `evaluate(el.click())` 才能成功。
+        #   做 3 招清场:
+        #     1) 发送 ESC(Element UI 的弹层/下拉几乎都会响应 ESC 关闭);
+        #     2) 对所有打开的 el-popper / el-dropdown-menu 调 JS remove() /
+        #        设置 display:none (避免 user-dropdown 这类 hover 残留的下拉);
+        #     3) 最后点击页面 body 左上角绝对空白 (x=8,y=8,一般是无元素的背景),
+        #        触发 Element UI 的"点击空白关闭"机制。
+        # ═══════════════════════════════════════════════════════════
+        try:
+            # (1) ESC 按 2 次,间隔 50ms
+            for _esc_i in range(2):
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.05)
+            # (2) JS 移除/隐藏所有弹层: el-popper / el-dialog__wrapper / el-drawer__wrapper / el-picker-panel
+            _popper_cleaned = await page.evaluate("""() => {
+                // 2026-08-14 修复: 只移除 user-dropdown / el-dropdown-menu 这两类明确遮挡
+                // 点击的弹层。之前对所有 .el-popper 设 display:none 太暴力,
+                // BMS 某些页面把筛选栏也包在 .el-popper 里 → 整个查询/导出按钮
+                // 全部被隐藏 → ANY_CLICKABLE 从 26 暴跌到 3 → 后续策略只能乱点。
+                const sel = '.el-dropdown-menu, .user-dropdown';
+                const list = document.querySelectorAll(sel);
+                let n = 0, rm = 0;
+                for (let i = 0; i < list.length; i++) {
+                    const el = list[i];
+                    try {
+                        el.parentNode && el.parentNode.removeChild(el);
+                        rm++;
+                    } catch(_) {
+                        el.style.display = 'none';
+                    }
+                    n++;
+                }
+                return {matched: n, removed: rm};
+            }""")
+            logger.info(f"  [遮挡层预处理-清理弹层] {_popper_cleaned!r}")
+            # (3) 点击左上角空白(x=8,y=8),触发 Element UI "click-outside" 关闭规则
+            try:
+                await page.mouse.click(8, 8)
+                await asyncio.sleep(0.05)
+                # 再点一次(有的弹层需要两下空白才能清掉)
+                await page.mouse.click(8, 8)
+                logger.info("  [遮挡层预处理] 左上角空白点击 2 次 OK")
+            except Exception as mc_e:
+                logger.warning(f"  [遮挡层预处理] 鼠标点空白失败(跳过): {mc_e}")
+        except Exception as pre_err:
+            logger.warning(f"  [遮挡层预处理] 整体异常(不影响后续策略): {pre_err}")
+
+        # ═══════════════════════════════════════════════════════════
+        # 策略0-retry: 遮挡层清理后,重新查询按钮再试一次 Playwright 原生 click
+        #   关键: 遮挡层清理可能通过 removeChild 把按钮的父元素也删了,
+        #   导致旧 element handle 变成 detached DOM → Playwright click 报
+        #   "Element is not attached to the DOM" → 降级 JS click → Vue 不触发。
+        #   所以这里用全新的 query_selector 重新获取按钮引用。
+        # ═══════════════════════════════════════════════════════════
+        for _kw in ["搜索", "查询", "搜 索", "查 询"]:
+            try:
+                _btn = await page.query_selector(f'button:has-text("{_kw}"):visible')
+                if _btn:
+                    await _btn.click(timeout=5000, force=True)
+                    logger.info(f"  [策略0-重试] 遮挡层清理后 button:has-text({_kw!r}) force-click 成功 ✅")
+                    return
+            except Exception:
+                continue
+
+        try:
+            # ── 1) 文本关键词匹配 (扩大候选 DOM) ──
+            btns = await page.query_selector_all(ANY_CLICKABLE)
+            logger.info(f"  [策略1-关键词] ANY_CLICKABLE 命中 {len(btns)} 个可见元素")
+            scanned_preview = await _build_buttons_snapshot(max_items=15)
+            if scanned_preview:
+                # 成功/失败路径都打印前 15 个的摘要, 成功路径日志也能让用户知道当前页有哪些按钮
+                logger.info("  [策略1-关键词] 候选摘要(前15个):\n" + "\n".join(scanned_preview))
+            s1_miss_reason_counts: dict[str, int] = {"no_text": 0, "excluded": 0, "kw_not_match": 0}
+            for idx, b in enumerate(btns):
+                try:
+                    txt = (await b.inner_text()).strip()
+                except Exception:
+                    txt = ""
+                al_source = ""
+                if not txt:
+                    # 再尝试 aria-label (伪按钮常把文案放 aria-label 而不是 innerText)
+                    try:
+                        al = await b.get_attribute("aria-label") or ""
+                        txt = al.strip()
+                        if txt:
+                            al_source = " [aria]"
+                    except Exception:
+                        txt = ""
+                if not txt:
+                    s1_miss_reason_counts["no_text"] += 1
+                    continue
+                matched_kw = next((kw for kw in keywords if kw in txt), None)
+                excluded = next((kw for kw in exclude_keywords if kw in txt), None)
+                if matched_kw and not excluded:
+                    tag = (await b.evaluate("e=>e.tagName") or "?").upper()
+                    logger.info(
+                        f"  [策略1-关键词#{idx}] 命中! keyword={matched_kw!r} text={txt!r}{al_source} tag={tag} → 执行点击"
+                    )
+                    try:
+                        await b.click(timeout=5000)
+                        logger.info(f"  [策略1-关键词#{idx}] click() 正常返回 OK")
+                        return
+                    except Exception as click_err:
+                        logger.warning(f"  [策略1-关键词#{idx}] Playwright click 异常: {click_err}, 改用 JS 点击")
+                        await b.evaluate("(el) => el.click()")
+                        logger.info(f"  [策略1-关键词#{idx}] JS evaluate click 已返回 OK")
+                        return
+                elif excluded:
+                    s1_miss_reason_counts["excluded"] += 1
+                else:
+                    s1_miss_reason_counts["kw_not_match"] += 1
+            logger.info(
+                f"  [策略1-关键词] 全部未命中 原因统计: {s1_miss_reason_counts!r}"
+                f" (无文案={s1_miss_reason_counts['no_text']} 个/被排除词命中={s1_miss_reason_counts['excluded']}"
+                f" 个/关键词不匹配={s1_miss_reason_counts['kw_not_match']} 个)"
+            )
+
+            # ── 2) 找筛选条(y 坐标合理范围) 里第一个非「重置/导出」可点击元素 ──
+            y_sorted = []
+            for idx, b in enumerate(btns):
+                try:
+                    box = await b.bounding_box()
+                    if not box:
+                        continue
+                    # 放宽 y 上限到 800 (1080p 屏幕下筛选条不会在 800+ 位置; 之前 600 可能会漏掉高分辨率页面)
+                    if box["y"] < 60 or box["y"] > 800:
+                        continue
+                    txt = ""
+                    try:
+                        txt = (await b.inner_text()).strip()
+                    except Exception:
+                        pass
+                    if not txt:
+                        try:
+                            al = await b.get_attribute("aria-label") or ""
+                            txt = al.strip()
+                        except Exception:
+                            pass
+                    if any(kw in txt for kw in exclude_keywords):
+                        continue
+                    y_sorted.append((box["y"], box["x"], idx, b, txt))
+                except Exception:
+                    continue
+            y_sorted.sort(key=lambda r: (r[0], r[1]))
+            logger.info(
+                f"  [策略2-y坐标] y∈[60,800] 且非重置/导出 候选共 {len(y_sorted)} 个"
+                + (
+                    " → Top5: "
+                    + " / ".join(
+                        f"#{idx}[{y},{x}]{txt!r}" for (y, x, idx, _b, txt) in y_sorted[:5]
+                    )
+                    if y_sorted
+                    else " (空, 进入策略3)"
+                )
+            )
+            if y_sorted:
+                y, x, idx, b, txt = y_sorted[0]
+                tag = (await b.evaluate("e=>e.tagName") or "?").upper()
+                logger.info(
+                    f"  [策略2-y坐标] 选中第1个 候选序号=#{idx} pos=({x},{y}) tag={tag} text={txt!r} → 执行点击"
+                )
+                try:
+                    await b.click(timeout=5000)
+                    logger.info("  [策略2-y坐标] click() 正常返回 OK")
+                    return
+                except Exception as ce:
+                    logger.warning(f"  [策略2-y坐标] Playwright click 异常: {ce}, 改用 JS 点击")
+                    await b.evaluate("(el) => el.click()")
+                    logger.info("  [策略2-y坐标] JS evaluate click 已返回 OK")
+                    return
+        except Exception as e:
+            logger.warning(f"  查询按钮点击策略(1-2)异常: {e}", exc_info=True)
+        # ── 3) JS 全局查找扩大范围内可点击并点击 (兜底) ──
+        logger.info("  [策略3-JS全局] 进入 evaluate 全文档搜索(ANY_CLICKABLE 去掉 :visible)...")
+        try:
+            js_sel = ANY_CLICKABLE.replace(":visible", "")
+            clicked_and_stats = await page.evaluate(
+                """(kw_list, excl_list, any_sel) => {
+                    const btns = document.querySelectorAll(any_sel);
+                    const stats = {total: btns.length, noText: 0, excluded: 0, kwNotMatch: 0, considered: []};
+                    for (let i = 0; i < btns.length; i++) {
+                        const b = btns[i];
+                        const it = (b.innerText || '').replace(/\\s+/g,' ').trim();
+                        const al = (b.getAttribute && b.getAttribute('aria-label')) || '';
+                        const txt = (it + ' ' + al).trim();
+                        const cls = (b.className && typeof b.className === 'string') ? b.className : '';
+                        if (!txt) { stats.noText++; continue; }
+                        const matched = kw_list.find(k => txt.includes(k));
+                        const excluded = excl_list.find(k => txt.includes(k));
+                        if (matched && !excluded) {
+                            b.click();
+                            stats.hit = {idx: i, tag: b.tagName, text: txt, cls: cls, matchedKw: matched};
+                            return stats;
+                        }
+                        if (excluded) stats.excluded++; else stats.kwNotMatch++;
+                        if (stats.considered.length < 20) {
+                            stats.considered.push({idx:i, tag:b.tagName, text:txt.slice(0,40), cls:cls.slice(0,60)});
+                        }
+                    }
+                    return stats;
+                }""",
+                keywords, exclude_keywords, js_sel,
+            )
+            total = clicked_and_stats.get("total", -1)
+            if isinstance(clicked_and_stats, dict) and clicked_and_stats.get("hit"):
+                hit = clicked_and_stats["hit"]
+                logger.info(
+                    f"  [策略3-JS全局] 成功! 候选总数={total},"
+                    f" 命中 idx={hit.get('idx')} tag={hit.get('tag')} keyword={hit.get('matchedKw')!r} text={hit.get('text')!r}"
+                )
+                return
+            # 没命中, 打印候选概况 (这里打到 warning 因为已经到策略3了, 意味着前面都失败, 需要多一点上下文)
+            logger.warning(
+                f"  [策略3-JS全局] evaluate 没有命中 候选={total} 个"
+                f" noText={clicked_and_stats.get('noText')} excluded={clicked_and_stats.get('excluded')}"
+                f" kwNotMatch={clicked_and_stats.get('kwNotMatch')}"
+            )
+            cons = clicked_and_stats.get("considered") or []
+            if cons:
+                logger.warning(
+                    "  [策略3-JS全局] 评估过的前" + str(len(cons)) + "个元素:\n"
+                    + "\n".join(
+                        f"    [#{c.get('idx')}] {c.get('tag')} txt={c.get('text')!r} cls={c.get('cls')!r}"
+                        for c in cons
+                    )
+                )
+        except Exception as e:
+            logger.warning(f"  [策略3-JS全局] evaluate 抛异常: {e}", exc_info=True)
+        # ── 4) Enter 兜底 - 聚焦第一个筛选框后按 Enter ──
+        logger.info("  [策略4-Enter] 进入键盘 Enter 兜底...")
+        try:
+            date_inp = await page.query_selector('input.el-range-input:visible')
+            if date_inp:
+                logger.info("  [策略4-Enter] 找到 el-range-input, 聚焦后 Enter")
+                await date_inp.focus()
+                await asyncio.sleep(0.1)
+                await page.keyboard.press("Enter")
+                logger.info("  Enter 兜底触发查询(日期框) OK")
+                return
+            last_inp = page.locator('input:visible').last
+            if await last_inp.count() > 0:
+                try:
+                    li_place = await last_inp.get_attribute("placeholder")
+                except Exception:
+                    li_place = None
+                logger.info(f"  [策略4-Enter] 回退到最后一个可见 input (placeholder={li_place!r}) 聚焦后 Enter")
+                await last_inp.focus(timeout=1000)
+                await asyncio.sleep(0.1)
+                await page.keyboard.press("Enter")
+                logger.info("  Enter 兜底触发查询(最后一个输入框) OK")
+                return
+            logger.warning("  [策略4-Enter] 页面上没有任何可见 input, 跳过")
+        except Exception as e:
+            logger.warning(f"  [策略4-Enter] 异常: {e}", exc_info=True)
+        # ── 5) 2026-08-14 新增: 最后两层终极兜底 ──
+        #    5a. 找 form 包着的输入并 submit()
+        #    5b. 找 [aria-label ~= 搜索/查询] 或 class*="submit"/"search-submit"/"query-submit" 的元素
+        logger.info("  [策略5-终极兜底] 进入 form.submit + aria-label/submit-class 兜底...")
+        try:
+            submit_ok = await page.evaluate("""() => {
+                const out = {};
+                // 5a. 找包含至少 1 个日期输入的 form, 提交它
+                const forms = document.querySelectorAll('form');
+                out.formCount = forms.length;
+                for (let i = 0; i < forms.length; i++) {
+                    const f = forms[i];
+                    const hasDate = f.querySelector('input[placeholder*="日期"],.el-date-editor,input[type="date"]');
+                    if (hasDate) {
+                        out.hitForm = {idx: i, hasDate: true, formClass: (f.className||'').slice(0,80)};
+                        if (typeof f.requestSubmit === 'function') f.requestSubmit();
+                        else f.submit();
+                        out.hitForm.by = 'requestSubmit';
+                        return out;
+                    }
+                }
+                // 5b. aria-label 搜 搜索/查询
+                const byAria = document.querySelector(
+                    '[aria-label*="搜索" i],[aria-label*="查询" i],' +
+                    '[class*="submit-btn" i],[class*="search-submit" i],[class*="query-submit" i]'
+                );
+                if (byAria && byAria.click) {
+                    out.hitAria = {
+                        tag: byAria.tagName,
+                        ariaLabel: (byAria.getAttribute && byAria.getAttribute('aria-label')) || '',
+                        className: (byAria.className && typeof byAria.className === 'string') ? byAria.className.slice(0,80) : ''
+                    };
+                    byAria.click();
+                    return out;
+                }
+                return out;
+            }""")
+            logger.info(f"  [策略5-终极兜底] evaluate 返回结果: {submit_ok!r}")
+            if submit_ok and (submit_ok.get("hitForm") or submit_ok.get("hitAria")):
+                what = submit_ok.get("hitForm") and "form.requestSubmit" or "aria-label/submit-class"
+                detail = submit_ok.get("hitForm") or submit_ok.get("hitAria")
+                logger.info(f"  [策略5-终极兜底] 命中 {what} 分支: detail={detail!r}")
+                return
+            logger.warning(
+                f"  [策略5-终极兜底] 没有命中任何分支 formCount={submit_ok.get('formCount')} 没有含日期form / aria/submit-class 也没找到"
+            )
+        except Exception as e:
+            logger.warning(f"  [策略5-终极兜底] 异常: {e}", exc_info=True)
+
+        # ═══════════════════════════════════════════════════════════
+        # 全部 5 层兜底都没命中 → 在抛错前以 ERROR 级别输出全量候选 DOM 快照
+        # ═══════════════════════════════════════════════════════════
+        try:
+            full_snap = await _build_buttons_snapshot(max_items=None)
+            if full_snap:
+                logger.error(
+                    "  [兜底全部失败] ANY_CLICKABLE 全量按钮快照("
+                    + f"URL={page_url_for_log} 共 {len(full_snap)} 个元素):\n"
+                    + "\n".join(full_snap)
+                )
+            else:
+                logger.error(
+                    f"  [兜底全部失败] 页面上 ANY_CLICKABLE 一个都没命中! URL={page_url_for_log}"
+                    " 请人工检查: 是不是按钮选择器需要再扩展?"
+                )
+        except Exception as snap_err:
+            logger.error(f"  [兜底全部失败] 打印快照失败: {snap_err}", exc_info=True)
+
+        raise RuntimeError(
+            "找不到任何查询/搜索按钮,所有兜底均失败 (候选已扩大到 div/span/a 伪按钮;"
+            " 详细排查请搜日志「[策略1-关键词] 候选摘要」与「[兜底全部失败] 全量按钮快照」)"
+        )
+
+    async def _do_fetch_one(
+        self,
+        data_type: str,
+        start_date: datetime,
+        end_date: datetime,
+        config: dict,
+        result: FetchResult,
+        session_hook: Optional[Callable[[Any], Awaitable[Any]]] = None,
+    ):
+        """执行单个数据源的抓取流程(配置来自 sync_source_configs)"""
+        await self._init_browser()
+
+        base_url = config["base_url"]
+        username = config["username"]
+        password = config["password"]
+        login_url = f"{base_url}/index.html#/login"
+        page_url = f"{base_url}{config['page_path']}"
+
+        # ── storage_state 复用(优先加载已保存登录态,跳过验证码) ──
+        state_path = _storage_state_path(data_type)
+        storage_state = None
+        if config.get("requires_captcha") and state_path.exists():
+            try:
+                storage_state = str(state_path)
+                logger.info(f"[{data_type}] 加载已保存登录态: {state_path.name}")
+            except Exception as e:
+                logger.warning(f"[{data_type}] 读取 storage_state 失败,回退到常规登录: {e}")
+                storage_state = None
+
+        # 每个数据源使用独立的 context(不同子域名需要分别登录)
+        context_kwargs = {
+            "accept_downloads": True,
+            "viewport": {"width": 1920, "height": 1080},
+            # ⚠️ 2026-09-01 真根因修复: BMS 前端 Vue DatePicker 用浏览器本地时间作为
+            #   "当前时刻"并据此截断查询窗口。容器默认时区=UTC, 导致 BMS 认为当前是 UTC
+            #   (北京-8h), 即使填入正确的北京时间 end, 也会被截断到 8h 前 → 稳定 8h 滞后。
+            #   这里强制浏览器时区=Asia/Shanghai, 让 BMS 前端的"当前时刻"= 北京时间。
+            "timezone_id": "Asia/Shanghai",
+        }
+        if storage_state:
+            context_kwargs["storage_state"] = storage_state
+        context = await self._browser.new_context(**context_kwargs)
+        page = await context.new_page()
+
+        try:
+            logged_in_via_state = False
+            if storage_state:
+                # 有 storage_state: 直接进目标页,验证是否仍登录
+                logger.info(f"[{data_type}] 验证登录态是否有效...")
+                await page.goto(page_url, wait_until="networkidle")
+                await asyncio.sleep(2)
+                if "login" not in page.url.lower():
+                    logged_in_via_state = True
+                    logger.info(f"[{data_type}] 登录态有效,跳过登录步骤")
+
+            if not logged_in_via_state:
+                # storage_state 不存在或已过期,走登录流程
+                # 1. 登录
+                logger.info(f"[{data_type}] 正在登录 {base_url}...")
+                # ⚠️ 2026-08-12: SPA hash 路由跳转时 networkidle 立即 resolve,改用
+                #   domcontentloaded + 显式等待登录表单渲染(同 _do_fetch_one_shared 修复)
+                await page.goto(login_url, wait_until="domcontentloaded")
+                try:
+                    await page.wait_for_selector(
+                        'input[name="username"], input[placeholder*="账号" i], input[placeholder*="用户名" i]',
+                        state="visible", timeout=10000,
+                    )
+                except Exception:
+                    await asyncio.sleep(2)
+
+                # ⚠️ 必须用 locator(...).first.fill(), 不能直接 page.fill(选择器字符串列表).
+                #    当页面有多个匹配元素时(比如顶部导航搜索框 + 登录表单账号框),page.fill() 会在
+                #    "ambiguous match" 分支下一直等到 30 秒超时,表现为 Page.fill Timeout 而没有
+                #    报错根因,用户侧只看到"登录死/抓取死".用 .first 可以稳扎稳打取第一个表单里的元素.
+                # ⚠️ 2026-08-12: 排除 readonly el-select 内部 input,避免命中"请选择"下拉框
+                user_sel = (
+                    'input[name="username"]:not([readonly]):not([disabled]),'
+                    'input[placeholder*="账号" i]:not([readonly]):not([disabled]),'
+                    'input[placeholder*="用户名" i]:not([readonly]):not([disabled]),'
+                    'input[type="text"]:not([readonly]):not([disabled])'
+                )
+                try:
+                    await page.locator(user_sel).first.fill(username, timeout=15000)
+                except Exception:
+                    await page.locator("input:visible:not([readonly]):not([disabled])").first.fill(username, timeout=15000)
+                pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
+                await page.locator(pwd_sel).first.fill(password, timeout=15000)
+
+                # ── 闪猫:验证码处理(自动识别优先,最多 3 次重试,失败再提示手动登录) ──
+                ocr_logged_in = False
+                if config.get("requires_captcha"):
+                    captcha_input = await page.query_selector(
+                        'input[placeholder*="验证码"], input[aria-label*="验证码"]'
+                    )
+                    if captcha_input and await captcha_input.is_visible():
+                        ok, msg = await _try_auto_login_via_ocr(
+                            page, context, data_type, login_url, username, password, state_path
+                        )
+                        if not ok:
+                            raise RuntimeError(
+                                "验证码自动识别登录失败(" + msg + ");"
+                                "请前往「数据中心-数据采集-同步设置」点击「登录闪猫」按钮完成手动登录"
+                            )
+                        # OCR 登录成功:内部已经做完填单/点登录/保存 storage_state,跳过下面的 click 登录
+                        ocr_logged_in = True
+                        logger.info(f"[{data_type}] OCR 自动登录完成,跳过后续点击登录步骤")
+
+                if not ocr_logged_in:
+                    await asyncio.sleep(1)
+                    await page.click('button:has-text("登录"), button[type="submit"]')
+                    await page.wait_for_load_state("networkidle", timeout=15_000)
+                    await asyncio.sleep(3)
+
+                    if "login" in page.url.lower():
+                        error_elem = await page.query_selector(".el-message__content, .el-form-item__error")
+                        if error_elem:
+                            error_text = await error_elem.inner_text()
+                            raise RuntimeError(f"登录失败: {error_text}")
+                        raise RuntimeError("登录失败: 账号或密码错误")
+                    logger.info(f"[{data_type}] 登录成功")
+
+                    # ── 登录成功:保存 storage_state(下次自动复用) ──
+                    if config.get("requires_captcha"):
+                        try:
+                            await context.storage_state(path=str(state_path))
+                            logger.info(f"[{data_type}] 登录态已保存至 {state_path.name}")
+                        except Exception as e:
+                            logger.warning(f"[{data_type}] 保存 storage_state 失败(不影响本次抓取): {e}")
+
+                # 2. 进入目标页面
+                logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")
+                await page.goto(page_url, wait_until="networkidle")
+                await asyncio.sleep(3)
+
+                await self._wait_until_page_has_any_clickable(page)
+
+            # ⚠️ 2026-08-12: 标记登录已完成(无论 storage_state 有效还是刚登录成功)
+            result.logged_in = True
+
+            # ── #293: 非导出型任务的分叉点 ──
+            # 登录完成后, 若调用方给了 session_hook(如设备档案 SN 补全), 把已登录 page
+            # 直接交给它, 不再走时间筛选/查询/导出流程。传 hook 时 start/end 仅占位。
+            if session_hook is not None:
+                result.payload = await session_hook(page)
+                result.success = True
+                return result
+
+            # 3. 设置时间范围
+            time_format = config.get("time_format", "%Y-%m-%d %H:%M:%S")
+            # ⚠️ 2026-09-01 修复: 真根因是浏览器时区=UTC导致 BMS 前端"当前时刻"错位,
+            #   已在 new_context 设 timezone_id='Asia/Shanghai'。因此这里填**北京时间**(fill_utc=False), 与用户手动导出一致。
+            fill_utc = bool(config.get("time_fill_utc", _BMS_FILL_TZ_UTC_DEFAULT))
+            start_str = _bms_time_str(start_date, time_format, fill_utc=fill_utc)
+            end_str = _bms_time_str(end_date, time_format, fill_utc=fill_utc)
+            logger.info(
+                f"[{data_type}] 设置时间范围: {start_str} ~ {end_str} (fill_utc={fill_utc}, format={time_format})"
+            )
+
+            # 3.1 如果配置了 time_labels(页面有多个时间筛选框),按标签精确查找
+            time_labels = config.get("time_labels")
+            if time_labels and len(time_labels) >= 2:
+                await self._set_time_by_labels(page, time_labels[0], time_labels[1], start_str, end_str)
+            else:
+                # 3.2 通用策略:找页面上的日期范围选择器
+                await self._set_time_range(page, start_str, end_str)
+            await asyncio.sleep(1)
+
+            # 4. 搜索
+            logger.info(f"[{data_type}] 点击查询/搜索...")
+            await self._click_query_button(page)
+
+            # 4.1 【shanmao_refund/需要日期筛选的数据源】轮询分页器「共 x 条」,确认筛选真的生效
+            #     原问题:闪猫退款前端组件 v-model 可能更新不及时,或用户筛选条件未同步到查询接口,
+            #           导致查询结果仍为全量(1976 条),后续导出也必为全量。
+            initial_total = None
+            try:
+                for poll_i in range(20):
+                    await asyncio.sleep(1.0 if poll_i < 8 else 0.75)
+                    try:
+                        total_text = await page.evaluate("""() => {
+                            const p = document.querySelector('.el-pagination__total');
+                            if (!p) {
+                                // fallback:整个 body 里搜 "共 xxx 条"
+                                const m = (document.body.innerText || '').match(/共\\s*(\\d+(?:,\\d+)?)\\s*条/);
+                                return m ? m[1].replace(/,/g,'') : null;
+                            }
+                            const m = (p.innerText || '').match(/共\\s*(\\d+(?:,\\d+)?)\\s*条/);
+                            return m ? m[1].replace(/,/g,'') : null;
+                        }""")
+                        if total_text:
+                            try:
+                                tn = int(total_text)
+                                if initial_total is None:
+                                    initial_total = tn
+                                else:
+                                    # 若明显减少 (>100 条差距) 或 <100,认为筛选生效
+                                    if (initial_total - tn > 100) or (tn < 100):
+                                        logger.info(
+                                            f"[{data_type}] 筛选生效(轮询 {poll_i+1}s): 初始 {initial_total} 条 → 现在 {tn} 条"
+                                        )
+                                        break
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"[{data_type}] 轮询筛选结果总数异常(不影响流程): {e}")
+
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15_000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+            # 5. 导出
+            #    ⚠️  闪猫退款平台 exportRefundApply 接口不接受任何请求参数!
+            #       传任何非空 body(包括 JSON 字符串数组/毫秒时间戳数组)都会返回 HTTP 500 错误,
+            #       只有空 body 才能 200 返回全量历史 xlsx(约 1976 行 172KB),
+            #       因此这里不做任何 monkey patch / route 拦截,避免 500。
+            #       筛选逻辑改到第 6.1 步:用 pandas 按「退费单号前缀 TFYYYYMMDD 或时间列」
+            #       精确裁剪,只保留目标日期范围内的行再覆盖写回同一个 dest_path。
+            # P1-1: 调用统一的 _download_with_retry (自动按 data_type 配置超时 + 重试)
+            try:
+                download = await _download_with_retry(page, data_type, logger, expect_end_dt=end_date)
+            except EmptyQueryResult as eqe:
+                # ⚠️ 2026-09-06: 查询结果为空 → 正常业务态, 按 0 行成功(与 _do_fetch_one_shared 一致)
+                logger.info(f"[{data_type}] {eqe}")
+                result.success = True
+                result.empty_result = True
+                result.total_rows = 0
+                result.file_path = None
+                result.filename = None
+                return
+
+            # 6. 保存
+            original_filename = download.suggested_filename or f"{data_type}_export.csv"
+            month_dir = datetime.now().strftime("%Y-%m")
+            upload_dir = Path(settings.UPLOAD_DIR) / month_dir
+            upload_dir.mkdir(parents=True, exist_ok=True)
+
+            stem = Path(original_filename).stem
+            suffix = Path(original_filename).suffix
+            ts = datetime.now().strftime("%Y%m%d%H%M%S")
+            dest_filename = f"{stem}_{ts}{suffix}"
+            dest_path = upload_dir / dest_filename
+
+            await download.save_as(str(dest_path))
+            logger.info(f"[{data_type}] 文件已保存: {dest_path}")
+
+            # 5.2 【极速校验】若文件 <16KB 且开头是 { → 极可能是接口 500/401 返回 JSON 伪 Excel!直接抛异常(否则 success=True 但文件根本打不开)!
+            try:
+                if dest_path.exists():
+                    _sz = dest_path.stat().st_size
+                    if _sz < 16384 and _sz > 0:
+                        _head = dest_path.read_bytes()[:256]
+                        _body = _head[3:] if _head[:3] == b'\xef\xbb\xbf' else _head
+                        if _body[:1] == b'{':
+                            _txt = _body.decode("utf-8", errors="replace")
+                            _emsg = ""
+                            try:
+                                _info = json.loads(_txt)
+                                _emsg = str(_info.get("msg") or _info.get("message") or _info)[:400]
+                            except Exception:
+                                _emsg = _txt[:400]
+                            raise RuntimeError(
+                                f"[{data_type}] 导出接口返回 JSON 错误(不是 Excel! size={_sz}B): {_emsg}"
+                            )
+            except RuntimeError:
+                raise
+            except Exception as _ck:
+                logger.warning(f"[{data_type}] 文件头检查跳过: {_ck}")
+
+            # 6.1 【shanmao_refund 核心:全量导出后按日期范围裁剪写回】
+            #    闪猫导出接口不支持筛选参数(传参=500),只能拿到全量,
+            #    因此用 pandas 精确保留 start_date~end_date 范围内的行再覆盖写回。
+            #    裁剪逻辑提取为独立方法,_do_fetch_one 和 _do_fetch_one_shared 共用。
+            if data_type == "shanmao_refund":
+                dest_path, dest_filename = await self._crop_shanmao_refund_by_date_range(
+                    dest_path, dest_filename, start_date, end_date, data_type
+                )
+
+            # 6.2 【refund:BMS 退费单全量导出后按日期范围裁剪写回】
+            if data_type == "refund":
+                dest_path, dest_filename = await self._crop_refund_by_date_range(
+                    dest_path, dest_filename, start_date, end_date, data_type
+                )
+
+            result.success = True
+            result.file_path = f"{month_dir}/{dest_filename}"
+            result.filename = dest_filename
+        finally:
+            await context.close()
+
+    async def _crop_shanmao_refund_by_date_range(
+        self, dest_path, dest_filename, start_date, end_date, data_type
+    ):
+        """闪猫退款单导出后按日期范围裁剪写回(全量导出 → 仅保留目标日期范围行)
+
+        闪猫导出接口不支持时间筛选参数(传参=500),只能拿到全量,
+        因此用 pandas 精确保留 start_date~end_date 范围内的行再覆盖写回:
+        - 策略1: 退费单号前缀 TFYYYYMMDD(100% 精确,因为单号里包含真实申请日期)
+        - 策略2: 审核时间 / 申请时间 / 退款时间 / 创建时间 / 打款时间 等 between 判断
+
+        裁剪后仍为空也不抛错(可能该日期确实无退款申请),只是写 0 行出去。
+        .xls 老格式会转换为 .xlsx 写回,此时 dest_path/dest_filename 会变,需要返回更新后的值。
+        """
+        try:
+            import pandas as pd
+            suffix_l = str(dest_path).lower()
+            if suffix_l.endswith(".xlsx"):
+                df = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
+            elif suffix_l.endswith(".xls"):
+                try:
+                    df = pd.read_excel(dest_path, dtype=str)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"[{data_type}] .xls 老格式缺少解析引擎(需 xlrd==1.2.0/pyxlsb): {exc}"
+                    )
+            else:
+                df = pd.read_csv(dest_path, dtype=str)
+
+            orig_rows = len(df)
+            mask = None
+            chosen_col = None
+            # 策略1: 退费单号前缀 TFYYYYMMDD → 100% 精准(闪猫单号里嵌入了申请日期)
+            if "退费单号" in df.columns:
+                _pref = df["退费单号"].astype(str).str[:10]
+                expected_prefix = start_date.strftime("TF%Y%m%d")
+                mask = _pref == expected_prefix
+                chosen_col = "退费单号 prefix=" + expected_prefix
+                # 防御: 若 start_date != end_date(跨天范围),改用逐行 datetime 解析 退单号里的日期
+                if (end_date - start_date).days != 0:
+                    try:
+                        _ymd = _pref.str[2:10]  # "TF" 后面的 YYYYMMDD
+                        _dates = pd.to_datetime(_ymd, format="%Y%m%d", errors="coerce")
+                        sd = pd.to_datetime(start_date.date())
+                        ed = pd.to_datetime(end_date.date())
+                        mask = (_dates >= sd) & (_dates <= ed)
+                        chosen_col = "退费单号 YYYYMMDD in range"
+                    except Exception:
+                        pass
+            # 策略2: 审核时间 / 申请时间 / 打款时间 等 between
+            if mask is None:
+                # ⚠️ 2026-09-01: 边界统一转 naive 北京时间, 与文件内 naive 时间列比较,
+                #   否则 aware vs naive 抛 TypeError → 裁剪静默失效(全量保留)。
+                try:
+                    sd_naive, ed_naive = _crop_bounds_naive(start_date, end_date)
+                except Exception:
+                    sd_naive = ed_naive = None
+                for col in ("审核时间", "申请时间", "退款时间", "创建时间", "打款时间"):
+                    if col in df.columns:
+                        try:
+                            vs = pd.to_datetime(df[col].dropna(), errors="coerce")
+                            if sd_naive is not None:
+                                mask = (vs >= sd_naive) & (vs <= ed_naive)
+                            else:
+                                mask = pd.Series(False, index=vs.index)
+                            chosen_col = f"{col} between [{sd_naive},{ed_naive}]"
+                            # 把空行(NaT)视为 False
+                            mask = mask.fillna(False)
+                            if len(mask) != len(df):
+                                # 索引对齐, 缺失行 False
+                                _tmp = pd.Series(False, index=df.index)
+                                _tmp.loc[mask.index[mask.values]] = True
+                                mask = _tmp
+                            break
+                        except Exception:
+                            continue
+            if mask is None:
+                logger.warning(
+                    f"[{data_type}] ⚠️  找不到任何可用于日期范围裁剪的列(退费单号/审核时间/申请时间...)"
+                    f", 保留原 xlsx 的 {orig_rows} 行(未裁剪)。请检查导出列命名是否变更?"
+                )
+            else:
+                df_filtered = df.loc[mask].copy()
+                kept = len(df_filtered)
+                logger.info(
+                    f"[{data_type}] 日期范围裁剪完成: 依据列={chosen_col}, 原 {orig_rows} 行 → 保留 {kept} 行"
+                    f" (范围 {start_date.strftime('%Y-%m-%d %H:%M:%S')} ~ {end_date.strftime('%Y-%m-%d %H:%M:%S')})"
+                )
+                # ★ 覆盖写回同一个 dest_path → 下游任务看到的就是裁剪后的 xlsx
+                if suffix_l.endswith(".xlsx"):
+                    with pd.ExcelWriter(dest_path, engine="openpyxl") as w:
+                        df_filtered.to_excel(w, index=False)
+                elif suffix_l.endswith(".xls"):
+                    # 老格式尽量写 xlsx(覆盖扩展),避免缺少 xlwt 写失败
+                    new_p = dest_path.with_suffix(".xlsx")
+                    if new_p != dest_path:
+                        try: dest_path.unlink()
+                        except FileNotFoundError: pass  # 旧文件不存在属正常流程
+                        dest_path = new_p
+                        dest_filename = dest_path.name
+                    with pd.ExcelWriter(str(dest_path), engine="openpyxl") as w:
+                        df_filtered.to_excel(w, index=False)
+                else:
+                    df_filtered.to_csv(dest_path, index=False)
+                logger.info(
+                    f"[{data_type}] ✅ 裁剪后文件已覆盖写回 {dest_path} (最终 {kept} 行)"
+                )
+                # 读回来再做一次校验(避免写回失败)
+                try:
+                    if str(dest_path).lower().endswith(".xlsx"):
+                        df_check = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
+                    else:
+                        df_check = pd.read_csv(dest_path, dtype=str)
+                    logger.info(
+                        f"[{data_type}] 二次校验 OK:写回后实际 rows={len(df_check)}"
+                    )
+                except Exception as wb:
+                    logger.warning(f"[{data_type}] ⚠️  裁剪后二次读取失败(不影响主流程): {wb}")
+        except Exception as e:
+            logger.warning(f"[{data_type}] 日期范围裁剪/写回失败(保留原文件,不影响主流程): {type(e).__name__}: {e}")
+        return dest_path, dest_filename
+
+    async def _crop_refund_by_date_range(
+        self, dest_path, dest_filename, start_date, end_date, data_type
+    ):
+        """BMS 退费单导出后按日期范围裁剪写回(全量导出 → 仅保留目标日期范围行)
+
+        BMS exportRefundApply 导出接口不接受筛选参数,只能拿到全量,
+        因此用 pandas 精确保留 start_date~end_date 范围内的行再覆盖写回:
+        - 主策略: 创建时间 between start_date ~ end_date
+        - 辅策略: 退费单号中嵌入的 YYYYMMDD 日期(BMS 单号如 BR2026022502165999775)
+
+        裁剪后仍为空也不抛错(可能该日期确实无退款申请),只是写 0 行出去。
+        """
+        try:
+            import pandas as pd
+            suffix_l = str(dest_path).lower()
+            if suffix_l.endswith(".xlsx"):
+                df = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
+            elif suffix_l.endswith(".xls"):
+                try:
+                    df = pd.read_excel(dest_path, dtype=str)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"[{data_type}] .xls 老格式缺少解析引擎(需 xlrd==1.2.0/pyxlsb): {exc}"
+                    )
+            else:
+                # BMS 导出 CSV 问题: (1) 每行末尾多一个 \t 导致字段数+1(末尾空字段)
+                #   (2) 部分行内部含换行/\t 导致字段严重错位(如 18→10 字段)
+                #   (3) pandas on_bad_lines="skip" 在"字段数+1"场景下会硬塞,
+                #       导致"实退金额"列被塞入【退微信】等文本→数值溢出
+                # 修复: 用 data_parser 的修复+校验方案 (2026-08-26)
+                #   贪婪拼接截断行(含跨行换行), 合并多余字段, 后校验退费单号
+                import csv as _csv
+                import io as _io
+                raw_text = Path(dest_path).read_text(encoding="utf-8-sig", errors="replace")
+                raw_lines = raw_text.splitlines()
+                if not raw_lines:
+                    raise RuntimeError(f"[{data_type}] CSV 文件为空")
+
+                # 解析表头
+                header_fields = next(_csv.reader(_io.StringIO(raw_lines[0])))
+                header_fields = [h.rstrip("\t") for h in header_fields]
+                expected_n = len(header_fields)
+
+                # 修复+校验: 贪婪拼接截断行, 多于字段合并到末列, 后校验退费单号
+                from app.services.data_parser import repair_csv_blocks
+                clean_rows, skipped = repair_csv_blocks(
+                    raw_lines=raw_lines[1:],
+                    header_len=expected_n,
+                    bms_clean=True,
+                    log_prefix=f"[{data_type}]",
+                    logger=logger,
+                )
+
+                # 重新拼成 CSV 文本交给 pandas
+                buf = _io.StringIO()
+                w = _csv.writer(buf)
+                w.writerow(header_fields)
+                for r in clean_rows:
+                    w.writerow(r)
+                df = pd.read_csv(_io.StringIO(buf.getvalue()), dtype=str)
+                if skipped > 0:
+                    logger.info(
+                        f"[{data_type}] 修复+校验: 跳过 {skipped} 行校验失败的截断行"
+                        f"(期望 {expected_n} 字段), 保留 {len(df)} 行"
+                    )
+
+            if df.empty:
+                logger.warning(f"[{data_type}] CSV 解析为空,跳过裁剪")
+                return dest_path, dest_filename
+
+            orig_rows = len(df)
+            mask = None
+            chosen_col = None
+            # ⚠️ 2026-09-01: 边界统一转 naive 北京时间, 与文件内 naive 时间列比较,
+            #   否则 aware vs naive 抛 TypeError → 裁剪静默失效(全量保留)。
+            try:
+                sd_naive, ed_naive = _crop_bounds_naive(start_date, end_date)
+            except Exception:
+                sd_naive = ed_naive = None
+
+            # ⚠️ 2026-09-01 口径修复: BMS 页面"实际退款时间"筛选 = 更新时间(退款完成时刻),
+            #   而"几天前创建、今天完成退款(已退款)"的单创建时间不在当天, 原实现按"创建时间"
+            #   裁剪会把这批单全踢掉 → 看板"今日退款(已退款)"看不到当天实际完成的单。
+            #   修复: 保留「创建时间 ∈ 窗口」∪「更新时间 ∈ 窗口 且 status=已退款」并集。
+            #   注意: 更新时间含少量 03:15 SYS 批量覆盖(文档已注明), 因此只对 status='已退款'
+            #   的单用更新时间补充, 避免把"系统批量触碰"的未退款单误拉入。
+            mask_created = None
+            mask_updated_refunded = None
+
+            # 子集1(主): 创建时间 between —— 当天创建的退费单(含未完成)
+            if "创建时间" in df.columns:
+                try:
+                    vs = pd.to_datetime(df["创建时间"], errors="coerce")
+                    if sd_naive is not None:
+                        mask_created = (vs >= sd_naive) & (vs <= ed_naive)
+                    else:
+                        mask_created = pd.Series(False, index=vs.index)
+                    mask_created = mask_created.fillna(False)
+                    logger.info(
+                        f"[{data_type}] 裁剪-创建时间: 命中 {mask_created.sum()}/{orig_rows} 行"
+                    )
+                except Exception:
+                    mask_created = None
+
+            # 子集2(补): 更新时间 ∈ 窗口 且 status=已退款 —— 当天实际完成退款的单
+            #   (可能创建于几天前, 按 BMS"实际退款时间"口径应计入当天)
+            if "更新时间" in df.columns and "状态" in df.columns:
+                try:
+                    vu = pd.to_datetime(df["更新时间"], errors="coerce")
+                    if sd_naive is not None:
+                        mask_updated_refunded = (vu >= sd_naive) & (vu <= ed_naive) & (df["状态"].astype(str).str.strip() == "已退款")
+                    else:
+                        mask_updated_refunded = pd.Series(False, index=df.index)
+                    mask_updated_refunded = mask_updated_refunded.fillna(False)
+                    logger.info(
+                        f"[{data_type}] 裁剪-更新时间(已退款): 命中 {mask_updated_refunded.sum()}/{orig_rows} 行"
+                    )
+                except Exception:
+                    mask_updated_refunded = None
+
+            # 合并: 并集(创建时间 或 更新时间已退款); 兜底退费单号/更新时间
+            if mask_created is not None or mask_updated_refunded is not None:
+                if mask_created is not None and mask_updated_refunded is not None:
+                    mask = mask_created | mask_updated_refunded
+                    chosen_col = "创建时间∈窗口 ∪ 更新时间∈窗口且已退款"
+                    logger.info(
+                        f"[{data_type}] 裁剪-并集: 保留 {mask.sum()}/{orig_rows} 行"
+                    )
+                elif mask_created is not None:
+                    mask = mask_created
+                    chosen_col = "创建时间 between"
+                else:
+                    mask = mask_updated_refunded
+                    chosen_col = "更新时间∈窗口且已退款"
+
+            # 兜底: 若上面都失效(如列缺失), 退费单号中嵌入日期 / 更新时间
+            if mask is None or (isinstance(mask, pd.Series) and mask.sum() == 0):
+                # 退费单号中嵌入日期 —— BMS 单号如 BR2026022502165999775(创建日期)
+                if "退费单号" in df.columns:
+                    try:
+                        _nos = df["退费单号"].astype(str).str.strip()
+                        _ymd = _nos.str.extract(r'^[A-Z]{2,3}(\d{4})(\d{2})(\d{2})', expand=False)
+                        if _ymd is not None and len(_ymd) > 0:
+                            _dates = pd.to_datetime(
+                                _ymd[0].fillna('') + _ymd[1].fillna('') + _ymd[2].fillna(''),
+                                format="%Y%m%d", errors="coerce"
+                            )
+                            sd_d = pd.Timestamp(start_date.date()) if start_date.tzinfo is None else pd.Timestamp(start_date.astimezone(timezone(timedelta(hours=8))).date())
+                            ed_d = pd.Timestamp(end_date.date()) if end_date.tzinfo is None else pd.Timestamp(end_date.astimezone(timezone(timedelta(hours=8))).date())
+                            mask = (_dates >= sd_d) & (_dates <= ed_d)
+                            mask = mask.fillna(False)
+                            chosen_col = "退费单号嵌入日期 in range"
+                            logger.info(
+                                f"[{data_type}] 裁剪-退费单号: 命中 {mask.sum()}/{orig_rows} 行"
+                            )
+                    except Exception:
+                        mask = None
+
+            # 最后兜底: 更新时间 between(仅当前面全失效时)
+            if mask is None or (isinstance(mask, pd.Series) and mask.sum() == 0):
+                if "更新时间" in df.columns:
+                    try:
+                        vs = pd.to_datetime(df["更新时间"], errors="coerce")
+                        if sd_naive is not None:
+                            mask = (vs >= sd_naive) & (vs <= ed_naive)
+                        else:
+                            mask = pd.Series(False, index=vs.index)
+                        mask = mask.fillna(False)
+                        chosen_col = f"更新时间 between [{sd_naive},{ed_naive}]"
+                        logger.info(
+                            f"[{data_type}] 裁剪-更新时间兜底: 命中 {mask.sum()}/{orig_rows} 行"
+                        )
+                    except Exception:
+                        mask = None
+
+            if mask is None:
+                logger.warning(
+                    f"[{data_type}] ⚠️  找不到任何可用于日期范围裁剪的列(创建时间/退费单号/更新时间)"
+                    f", 保留原文件的 {orig_rows} 行(未裁剪)。请检查导出列命名是否变更?"
+                )
+            else:
+                df_filtered = df.loc[mask].copy()
+                kept = len(df_filtered)
+                logger.info(
+                    f"[{data_type}] 日期范围裁剪完成: 依据列={chosen_col}, 原 {orig_rows} 行 → 保留 {kept} 行"
+                    f" (范围 {start_date.strftime('%Y-%m-%d %H:%M:%S')} ~ {end_date.strftime('%Y-%m-%d %H:%M:%S')})"
+                )
+                # ★ 覆盖写回同一个 dest_path → 下游任务看到的就是裁剪后的文件
+                if suffix_l.endswith(".xlsx"):
+                    with pd.ExcelWriter(dest_path, engine="openpyxl") as w:
+                        df_filtered.to_excel(w, index=False)
+                elif suffix_l.endswith(".xls"):
+                    new_p = dest_path.with_suffix(".xlsx")
+                    if new_p != dest_path:
+                        try: dest_path.unlink()
+                        except FileNotFoundError: pass  # 旧文件不存在属正常流程
+                        dest_path = new_p
+                        dest_filename = dest_path.name
+                    with pd.ExcelWriter(str(dest_path), engine="openpyxl") as w:
+                        df_filtered.to_excel(w, index=False)
+                else:
+                    df_filtered.to_csv(dest_path, index=False)
+                logger.info(
+                    f"[{data_type}] ✅ 裁剪后文件已覆盖写回 {dest_path} (最终 {kept} 行)"
+                )
+                # 读回来再做一次校验(避免写回失败)
+                try:
+                    if str(dest_path).lower().endswith(".xlsx"):
+                        df_check = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
+                    else:
+                        df_check = pd.read_csv(dest_path, dtype=str)
+                    logger.info(
+                        f"[{data_type}] 二次校验 OK:写回后实际 rows={len(df_check)}"
+                    )
+                except Exception as wb:
+                    logger.warning(f"[{data_type}] ⚠️  裁剪后二次读取失败(不影响主流程): {wb}")
+        except Exception as e:
+            logger.warning(f"[{data_type}] 日期范围裁剪/写回失败(保留原文件,不影响主流程): {type(e).__name__}: {e}")
+        return dest_path, dest_filename
+
+    async def fetch_all(
+        self,
+        tasks: list[dict],
+        on_progress: callable = None,
+    ) -> list[FetchResult]:
+        """批量抓取多个数据源 - 优化:按 (base_url, username) 分组复用登录 context
+
+        原有行为兼容: 保持 BMS 1 分钟限制(两个源之间间隔 OPERATION_INTERVAL 秒)。
+        #29(2026-09-07): 分组 key = base_url + 账号。
+          - 同 base_url 同账号的任务一组(组内共享同一 browser context),组内第 1 个源
+            登录后其余源直接跳转,省去重复登录耗时。
+          - 同 base_url 不同账号拆到不同组(独立 context/独立登录), 防止串号。
+          - 不同 base_url 的组仍是独立 context(跨域不共享登录态)。
+          - 相邻组同 base_url(同域换账号)仍守 65s 冷却; 跨域组之间不等待。
+        """
+        results_map: dict[str, FetchResult] = {}
+        # 保留原始顺序(避免按 base_url 重排导致前端 Steps 错乱)
+        original_order = [t["data_type"] for t in tasks]
+
+        # 1. 按 (base_url, username) 分组(并保持每组分内的出现顺序)
+        #    #29(2026-09-07): 登录态共享粒度 = 同域名 + 同账号。
+        #    同 base_url 但账号不同的源拆到不同组(各自独立 context/独立登录),
+        #    防止串号。分组纯函数见 group_fetch_tasks(可单测)。
+        groups: list[tuple[str, str | None, list[dict]]] = group_fetch_tasks(tasks)
+
+        logger.info(
+            f"fetch_all 分组: 共 {len(tasks)} 个源, 拆为 {len(groups)} 个(域名+账号)组: "
+            + ", ".join(
+                f"{(b.split('//')[-1] if '//' in b else b)}|{(u or '无凭证')}({len(ts)}个)"
+                for b, u, ts in groups
+            )
+        )
+
+        # 2. 依次处理每个组(复用 context)
+        for group_idx, (base_url, group_username, group_tasks) in enumerate(groups):
+            if not group_tasks:
+                continue
+            await self._init_browser()
+
+            # ── storage_state 复用:组内首个源 requires_captcha 时优先加载已保存登录态 ──
+            first_cfg = group_tasks[0].get("config", {})
+            first_type = group_tasks[0].get("data_type", "")
+            group_state_path = _storage_state_path(first_type)
+            group_storage_state = None
+            if first_cfg.get("requires_captcha") and group_state_path.exists():
+                try:
+                    group_storage_state = str(group_state_path)
+                    logger.info(f"[组{group_idx+1}] 加载已保存登录态({first_type}): {group_state_path.name}")
+                except Exception as e:
+                    logger.warning(f"[组{group_idx+1}] 读取 storage_state 失败: {e}")
+                    group_storage_state = None
+
+            # 同组共享一个 context + 共享页面登录态
+            context_kwargs = {
+                "accept_downloads": True,
+                "viewport": {"width": 1920, "height": 1080},
+                # ⚠️ 2026-09-01 真根因修复: 同 _do_fetch_one, 强制浏览器时区=Asia/Shanghai,
+                #   让 BMS 前端 DatePicker 的"当前时刻"= 北京时间, 避免查询窗口被截断到 8h 前。
+                "timezone_id": "Asia/Shanghai",
+            }
+            if group_storage_state:
+                context_kwargs["storage_state"] = group_storage_state
+            context = await self._browser.new_context(**context_kwargs)
+            page = await context.new_page()
+
+            # storage_state 登录态预校验(有 state 时先验证是否仍有效,避免后续每个源都试一次)
+            state_logged_in = False
+            if group_storage_state:
+                try:
+                    first_page_url = f"{first_cfg['base_url']}{first_cfg['page_path']}"
+                    await page.goto(first_page_url, wait_until="networkidle")
+                    await asyncio.sleep(2)
+                    if "login" not in page.url.lower():
+                        state_logged_in = True
+                        logger.info(f"[组{group_idx+1}] 登录态有效(通过 storage_state)")
+                    else:
+                        logger.info(f"[组{group_idx+1}] 登录态已过期,需要重新登录")
+                except Exception as e:
+                    logger.warning(f"[组{group_idx+1}] 校验 storage_state 失败: {e}")
+
+            logged_in_ok = state_logged_in  # 组内首个成功登录后为 True,后续跳过
+            # ── 组级登录失败熔断记忆 ──
+            # 同组 (base_url + username 相同) 下的多个源共用一套账号密码;
+            # 组内第一个源如果因"登录类错误"失败(账号/密码/验证码/页面跳转仍在/login),
+            # 后续同组源直接跳过登录和抓取,复用同一个登录失败错误,避免 2/3 次相同登录错误反复弹日志。
+            # #29(2026-09-07): 拆组后每组单账号, 熔断只影响该 (域名,账号) 组, 天然隔离。
+            group_login_failed_err: str | None = None
+
+            # ── 2026-09-07 #29: 组标识日志(替代原"同组账号不一致"告警) ──
+            # 原告警因"按 base_url 分组、组内可能混入独立账号"而生; 现分组已按
+            # (base_url, username) 拆组, 每组单账号, 该场景已由拆组根治, 故改为
+            # 打印组账号标识便于日志排查(某组登录失败可定位到具体账号)。
+            _src_kind = "独立凭证" if first_cfg.get("credential_is_own") else "组/共享凭证"
+            logger.info(
+                "[组%s] 处理域名 %s, 账号=%r(%s), 共 %d 个源",
+                group_idx + 1, base_url, group_username, _src_kind, len(group_tasks),
+            )
+
+            try:
+                for i, task in enumerate(group_tasks):
+                    # ═══════════════════════════════════════════════════════════
+                    # 2026-08-13 关键修复: 同组(同 base_url) 的每个源用全新 page,
+                    #   而不是共用同一个 page! 登录态保存在 context(cookies/
+                    #   localStorage),page 只是渲染容器,重建 page 不会丢失登录。
+                    #   此前:ticket 导出 8500+ 行后,页面 JS heap / Blob 内存膨胀,
+                    #       ticket_finish/wallet 复用同一个 page,page.goto 直接
+                    #       "Page crashed",整组 3 个源连锁失败。
+                    #   现在:每处理一个源前 close 旧 page + new_page,
+                    #       彻底隔离每轮 DOM/内存开销,同时登录态 context 共享省 3 次登录。
+                    # ═══════════════════════════════════════════════════════════
+                    try:
+                        # 先尝试关闭当前 page(非首个,第 1 个源之前已 new_page 过)
+                        if i > 0 and page is not None:
+                            try:
+                                await page.close()
+                            except Exception:
+                                pass
+                        # 无论关闭是否成功,都从 context 新建干净的 page
+                        page = await context.new_page()
+                    except Exception as _e:
+                        # 如果连 new_page 都失败,通常是 context 本身崩了,
+                        # 这时只能标记组内后续源失败并 break 出组
+                        logger.error(
+                            f"[组{group_idx+1}] 创建新页面失败(context 可能已崩溃), "
+                            f"源 {task.get('data_type')} 及后续同组源将失败: {_e}"
+                        )
+                        # 把当前 task 记失败 + 剩余 group_tasks 也标记失败
+                        _cur_type = task.get("data_type")
+                        _cur_cfg = task.get("config") or {}
+                        _fr_cur = FetchResult(data_type=_cur_type or "", error=f"创建新页面失败: {_e}")
+                        results_map[_cur_type] = _fr_cur
+                        if on_progress:
+                            await on_progress(_cur_type, "failed", _fr_cur)
+                        for _j in range(i + 1, len(group_tasks)):
+                            _t = group_tasks[_j]
+                            _dt = _t["data_type"]
+                            _fr2 = FetchResult(data_type=_dt, error=f"[同组页面创建失败连锁] {_e}")
+                            results_map[_dt] = _fr2
+                            if on_progress:
+                                await on_progress(_dt, "failed", _fr2)
+                        break  # 直接跳出组循环
+                    data_type = task["data_type"]
+                    start, end = task["start"], task["end"]
+                    config = task["config"]
+                    if on_progress:
+                        await on_progress(data_type, "fetching", None)
+
+                    fr = FetchResult()
+                    fr.data_type = data_type
+                    try:
+                        # ⚠️ 同组已记过登录类失败 → 直接跳过,不再反复启登录表单 / OCR / 验证码重试
+                        if group_login_failed_err is not None:
+                            logger.warning(
+                                "[组%s] %s 同组已记录登录类失败:%r, 直接跳过本次抓取(避免反复弹相同登录错误)",
+                                group_idx + 1, data_type, group_login_failed_err,
+                            )
+                            fr.error = f"[同域登录熔断复用] {group_login_failed_err}"
+                            results_map[data_type] = fr
+                            if on_progress:
+                                await on_progress(data_type, "done", fr)
+                            # 即使跳过也要假装走了等待逻辑:组内非末位仍要等 65s,否则后续源在错误的时刻启动
+                            # (末位跳过 → 循环自然结束 → 组级 finally 统一做跨组等待, 见 #29)
+                            if i < len(group_tasks) - 1:
+                                next_type = group_tasks[i + 1]["data_type"]
+                                next_name = group_tasks[i + 1]["config"].get("name", next_type)
+                                logger.info(
+                                    f"[同域名内·熔断跳过后] 还需等待 {OPERATION_INTERVAL} 秒, 准备下一个源 {next_name}"
+                                )
+                                if on_progress:
+                                    await on_progress(next_type, "waiting", None)
+                                await asyncio.sleep(OPERATION_INTERVAL)
+                            continue
+
+                        # 单源抓取 + 复用登录态(组内首个源登录)
+                        # ⚠️ 外层超时 = _fetch_total_budget_sec(下载最坏总耗时含重试 + 前置裕量),
+                        #   而非单次下载超时。见 helper 注释(2026-09-05: 内外同值会吞掉内层下载重试)。
+                        _fetch_timeout = _fetch_total_budget_sec(data_type)
+                        await asyncio.wait_for(
+                            self._do_fetch_one_shared(
+                                data_type=data_type,
+                                start_date=start,
+                                end_date=end,
+                                config=config,
+                                result=fr,
+                                context=context,
+                                page=page,
+                                already_logged_in=logged_in_ok,
+                            ),
+                            timeout=_fetch_timeout,
+                        )
+                        if fr.success:
+                            logged_in_ok = True
+                    except BmsSessionExpired as e:
+                        # ── 2026-09-05: 复用登录态中途失效(被踢回登录页) ──
+                        # 本源快速失败(error_class=transient 可重试), 但**不熔断**同组后续源:
+                        # 把 logged_in_ok 置 False → 同组下一个源以 already_logged_in=False
+                        # 真正重新登录 → 后续源恢复正常(避免整批 180~600s 盲目重试后全挂)。
+                        fr.error = str(e)
+                        fr.error_class = "transient"
+                        logger.error(fr.error)
+                        logged_in_ok = False
+                        logger.info(
+                            f"[组{group_idx+1}] {data_type} 会话过期,已重置登录态;"
+                            "同组后续源将重新登录"
+                        )
+                    except asyncio.TimeoutError:
+                        fr.error = f"抓取超时({_fetch_timeout}秒): {config.get('name', data_type)}"
+                        logger.error(fr.error)
+                        # ⚠️ 2026-08-12: 即使下载超时,登录可能已成功 → 标记登录态供后续源复用
+                        #   此前: refund 登录成功但下载超时 → logged_in_ok 未传递 → ticket
+                        #   在 refund 残留页面上"重新登录" → 命中 readonly 下拉框 → 全组连锁失败
+                        if fr.logged_in:
+                            logged_in_ok = True
+                            logger.info(f"[组{group_idx+1}] {data_type} 虽超时但登录已完成,后续源复用登录态")
+                    except Exception as e:
+                        # ── 2026-08-13 新增: Page crashed 自动重建干净 page ──
+                        err_txt_full = str(e)
+                        err_txt_lower = err_txt_full.lower()
+                        page_crashed = any(k in err_txt_lower for k in (
+                            "page crashed", "target page", "has been closed", "target closed",
+                        ))
+                        if page_crashed and fr.logged_in:
+                            logger.warning(
+                                f"[组{group_idx+1}] {data_type} 因 Page crashed 失败,但登录已成功;"
+                                " 已在下次循环新建 page,登录态不丢失"
+                            )
+                            logged_in_ok = True
+                        fr.error = f"抓取失败: {err_txt_full}"
+                        logger.error(fr.error, exc_info=True)
+                        # ⚠️ 登录类错误熔断记忆(2026-09-07 细化, 逻辑见 should_circuit_break_group_on_login_error):
+                        #   a) 本源使用**组/共享凭证**登录失败 → 共享账号坏 → 熔断整组(既有行为)。
+                        #   b) 本源使用**单源独立凭证**登录失败 → 只是该源自己的账号坏,
+                        #      不连累同组用组凭证的源 → 不写熔断记忆, 仅 logged_in_ok=False
+                        #      让同组下一源以 already_logged_in=False 重新登录(用组凭证)。
+                        #      修复 2026-09-07 device_combo 误填 tanzk 连坐 5 源事故。
+                        if should_circuit_break_group_on_login_error(
+                            err_txt_full,
+                            credential_is_own=bool(config.get("credential_is_own")),
+                            page_crashed=page_crashed,
+                        ):
+                            group_login_failed_err = err_txt_full
+                            logger.warning(
+                                "[组%s] 源 %s 登录类失败(组/共享凭证):%r; 组内剩余 %d 个同源将直接跳过登录抓取",
+                                group_idx + 1, data_type, group_login_failed_err,
+                                max(0, len(group_tasks) - i - 1),
+                            )
+                        elif is_login_class_error(err_txt_full, page_crashed=page_crashed):
+                            if fr.logged_in:
+                                # 登录已成功, 只是下载/后续阶段错误文本恰含"登录/密码"等宽松词
+                                # → 登录态仍有效可复用, 不重置(避免误让下一源重复登录)
+                                logger.info(
+                                    "[组%s] 源 %s 错误文本含登录类词但登录已成功(%r), 登录态保留",
+                                    group_idx + 1, data_type, err_txt_full,
+                                )
+                            else:
+                                # 单源独立凭证登录失败 → 不熔断同组, 让后续源重新登录(组凭证)
+                                logged_in_ok = False
+                                logger.warning(
+                                    "[组%s] 源 %s 登录类失败(本源独立凭证):%r; "
+                                    "不熔断同组, 后续源将用组/共享凭证重新登录",
+                                    group_idx + 1, data_type, err_txt_full,
+                                )
+                        # ⚠️ 2026-08-12: 非登录类错误(如下载/设置时间失败)发生在登录之后,
+                        #   登录态仍可复用,避免后续源在残留页面上"重新登录"
+                        if fr.logged_in and not group_login_failed_err:
+                            logged_in_ok = True
+
+                    results_map[data_type] = fr
+                    if on_progress:
+                        # 回调 phase=done 表示抓取阶段完成(之后是等待或导入)
+                        await on_progress(data_type, "done", fr)
+
+                    # 是否需要等待:
+                    #  - 组内(同 base_url 同账号)两个源之间: 必须等 65 秒(同一个 BMS Web 系统 1 分钟查询限制)
+                    #  - 跨组等待统一收敛到组级收尾(finally 前), 覆盖"末位源正常/熔断/异常"全部路径,
+                    #    避免散落各处漏判(见 #29 熔断跳过分支曾漏跨组冷却)。
+                    is_last_in_group = (i == len(group_tasks) - 1)
+                    if not is_last_in_group:
+                        # 组内后续源: 等待 65s (同域名 BMS 限制)
+                        next_type = group_tasks[i + 1]["data_type"]
+                        next_name = group_tasks[i + 1]["config"].get("name", next_type)
+                        logger.info(
+                            f"[同域名内] 还需等待 {OPERATION_INTERVAL} 秒后抓取 {next_name} "
+                            f"(同一 BMS 系统查询/导出间隔 >= 1 分钟)"
+                        )
+                        if on_progress:
+                            await on_progress(next_type, "waiting", None)
+                        await asyncio.sleep(OPERATION_INTERVAL)
+            finally:
+                # ── #29 组收尾: 跨组等待统一在此执行 ──
+                # 无论本组如何结束(末位源正常走完 / 熔断 continue 后循环自然结束 /
+                # 中间源异常冒泡), 只要后面还有组, 就在关 context 前统一判断:
+                #   相邻组 base_url 相同(同域换账号) → 同一物理 BMS Web 系统, 等 65s;
+                #   base_url 不同(如 wifi → fast/闪猫) → 不同 Web 系统, 不等。
+                # 修复: 原"跨组等待"散落在每个源循环尾部, 熔断跳过分支(continue)漏掉了
+                # "末位源熔断 → 下一同域组"的冷却(见 #29 Review CRITICAL)。
+                if group_idx < len(groups) - 1:
+                    next_base, next_user, next_tasks = groups[group_idx + 1]
+                    next_first = next_tasks[0]
+                    next_type = next_first["data_type"]
+                    next_name = next_first["config"].get("name", next_type)
+                    if should_wait_between_groups(base_url, next_base):
+                        logger.info(
+                            f"[同域换账号等待] 本组结束, 下一组 {next_name} 仍属 {base_url} 同域"
+                            f"(账号 {group_username!r} → {next_user!r}), 等待 {OPERATION_INTERVAL} 秒"
+                            f"(同一 BMS 系统 1 分钟限制, 覆盖熔断/正常/异常路径)"
+                        )
+                        if on_progress:
+                            await on_progress(next_type, "waiting", None)
+                        await asyncio.sleep(OPERATION_INTERVAL)
+                    else:
+                        # 不同域名: 两个不同 Web,无需等 65s
+                        logger.info(
+                            f"[跨域名跳过等待] 本组结束, 下一个源 {next_name} 是不同 BMS 域名,直接切换不等待"
+                        )
+                # 关闭当前 page,再关闭 context(Playwright 官方推荐顺序,避免上下文泄露)
+                try:
+                    if page is not None:
+                        await page.close()
+                except Exception:
+                    pass
+                await context.close()
+
+        # 3. 按 original_order 组装 results
+        return [results_map[dt] for dt in original_order if dt in results_map]
+
+    async def _do_fetch_one_shared(
+        self,
+        *,
+        data_type: str,
+        start_date: datetime,
+        end_date: datetime,
+        config: dict,
+        result: FetchResult,
+        context,  # 同组共享
+        page,     # 同组共享
+        already_logged_in: bool,
+    ):
+        """复用 context/page 版的单源抓取流程(同域名共享登录态)
+
+        - already_logged_in=True: 跳过登录,直接 goto 目标页
+        - already_logged_in=False: 执行登录并验证成功后才进入页面
+        """
+        if not config or not config.get("base_url"):
+            result.error = f"数据源未配置或缺少 base_url: {data_type}"
+            return
+        if not config.get("username") or not config.get("password"):
+            result.error = f"数据源未配置账号密码: {data_type}(请在系统管理-同步设置中配置)"
+            return
+
+        base_url = config["base_url"]
+        username = config["username"]
+        password = config["password"]
+        login_url = f"{base_url}/index.html#/login"
+        page_url = f"{base_url}{config['page_path']}"
+
+        if not already_logged_in:
+            # ── storage_state 预登录验证(在 fetch_all 已做,但作为兜底再检查) ──
+            via_state = False
+            state_path = _storage_state_path(data_type)
+            if config.get("requires_captcha") and state_path.exists():
+                # context 创建时已注入 storage_state,检查是否已处于登录页之外
+                try:
+                    await page.goto(page_url, wait_until="networkidle")
+                    await asyncio.sleep(2)
+                    if "login" not in page.url.lower():
+                        via_state = True
+                        logger.info(f"[{data_type}] 登录态验证通过,跳过登录")
+                except Exception:
+                    pass
+
+            if not via_state:
+                # 组内首个源: 登录
+                logger.info(f"[{data_type}] (首次,登录) 正在登录 {base_url}...")
+                # ⚠️ 2026-08-12: SPA hash 路由(如 #/pay/refund-manage → #/login)变化时,
+                #   wait_until="networkidle" 会立即 resolve(无新网络请求),但 SPA 视图
+                #   可能尚未切换 → 登录表单未渲染 → input:visible.first 命中上一页的
+                #   readonly el-select 筛选下拉框(placeholder="请选择") → fill 超时。
+                #   修复: 用 domcontentloaded + 显式等待登录表单的 username 输入框出现。
+                await page.goto(login_url, wait_until="domcontentloaded")
+                # 显式等待登录表单的账号输入框出现(确认 SPA 已切换到 login 视图)
+                try:
+                    await page.wait_for_selector(
+                        'input[name="username"], input[placeholder*="账号" i], input[placeholder*="用户名" i]',
+                        state="visible", timeout=10000,
+                    )
+                except Exception:
+                    # 兜底: 如果选择器没命中,等 2s 让 SPA 完成渲染
+                    await asyncio.sleep(2)
+
+                # ⚠️ 选择器排除 readonly: el-select 下拉框内部 input 是 type="text" + readonly,
+                #   此前 input[type="text"] 会优先命中它 → fill "element is not editable" 超时
+                user_sel = (
+                    'input[name="username"]:not([readonly]):not([disabled]),'
+                    'input[placeholder*="账号" i]:not([readonly]):not([disabled]),'
+                    'input[placeholder*="用户名" i]:not([readonly]):not([disabled]),'
+                    'input[type="text"]:not([readonly]):not([disabled])'
+                )
+                try:
+                    await page.locator(user_sel).first.fill(username, timeout=15000)
+                except Exception:
+                    await page.locator("input:visible:not([readonly]):not([disabled])").first.fill(username, timeout=15000)
+                pwd_sel = 'input[type="password"], input[placeholder*="密码" i]'
+                await page.locator(pwd_sel).first.fill(password, timeout=15000)
+
+                # ── 闪猫:验证码自动识别登录(失败才提示需手动) ──
+                ocr_logged_in = False
+                if config.get("requires_captcha"):
+                    captcha_input = await page.query_selector(
+                        'input[placeholder*="验证码"], input[aria-label*="验证码"]'
+                    )
+                    if captcha_input and await captcha_input.is_visible():
+                        ok, msg = await _try_auto_login_via_ocr(
+                            page, context, data_type, login_url, username, password, state_path
+                        )
+                        if not ok:
+                            raise RuntimeError(
+                                "验证码自动识别登录失败(" + msg + ");"
+                                "请前往「数据中心-数据采集-同步设置」点击「登录闪猫」按钮完成手动登录"
+                            )
+                        ocr_logged_in = True
+                        logger.info(f"[{data_type}] OCR 自动登录完成(组内首个源),跳过后续点击登录步骤")
+
+                if not ocr_logged_in:
+                    await asyncio.sleep(1)
+                    await page.click('button:has-text("登录"), button[type="submit"]')
+                    await page.wait_for_load_state("networkidle", timeout=15_000)
+                    await asyncio.sleep(3)
+                    if "login" in page.url.lower():
+                        error_elem = await page.query_selector(".el-message__content, .el-form-item__error")
+                        if error_elem:
+                            error_text = await error_elem.inner_text()
+                            raise RuntimeError(f"登录失败: {error_text}")
+                        raise RuntimeError("登录失败: 账号或密码错误")
+
+                    # ── 登录成功:保存 storage_state(下次自动复用) ──
+                    if config.get("requires_captcha"):
+                        try:
+                            await context.storage_state(path=str(state_path))
+                            logger.info(f"[{data_type}] 登录态已保存至 {state_path.name}")
+                        except Exception as e:
+                            logger.warning(f"[{data_type}] 保存 storage_state 失败(不影响本次抓取): {e}")
+
+                    logger.info(f"[{data_type}] 登录成功(后续同组源复用登录态)")
+        else:
+            # ⚠️ 复用登录态: 不直接信任 already_logged_in, 先跳目标页校验是否仍有效。
+            #    2026-09-05 生产事故: refund 登录成功后, 组内下一源(ticket)隔 65s 冷却再跳页时
+            #    BMS 会话已被踢下线(同账号并发/僵尸会话冲突) → 页面落回 #/login?redirect=...
+            #    旧代码不校验 → 把"登录"按钮当查询按钮点 → 各源盲目重试 180~600s 后才报
+            #    "未找到导出按钮"(误导), 整批 2/4 失败。
+            #    修复: 复用登录态跳页后立即校验, 若落回登录页 → 抛 BmsSessionExpired,
+            #    上层捕获后让同组下一源重新登录(而非熔断跳过/盲目重试)。
+            logger.info(f"[{data_type}] 复用登录态,跳转目标页校验是否仍有效...")
+            await page.goto(page_url, wait_until="networkidle")
+            await asyncio.sleep(2)
+            if "login" in (page.url or "").lower():
+                logger.warning(
+                    f"[{data_type}] 复用登录态已失效: 跳转 {page_url} 后落回登录页({page.url}), "
+                    "下一源将重新登录"
+                )
+                # 不设置 result.logged_in → 上层不会把失效登录态传给后续同组源
+                raise BmsSessionExpired(
+                    f"{data_type} BMS 会话已过期(页面落回登录页), 同组下一源将重新登录"
+                )
+            logger.info(f"[{data_type}] 复用登录态校验通过,当前页面已就绪")
+
+        # ⚠️ 2026-08-12: 标记登录已完成 — 即使后续下载超时被 asyncio.wait_for 取消,
+        #   此标记已写入 result,调用方可据此让同组后续源复用登录态,避免在残留页面上"重新登录"
+        result.logged_in = True
+
+        # 2. 进入目标页面
+        #    - 首次登录/无登录态: 这里统一 goto 目标页
+        #    - 复用登录态: 上面 else 分支已 goto 校验过(成功则停在目标页), 这里不再重复 goto
+        if not already_logged_in:
+            logger.info(f"[{data_type}] 进入 {config.get('name', data_type)}...")
+            await page.goto(page_url, wait_until="networkidle")
+            await asyncio.sleep(3)
+
+        # 渲染就绪守卫(两种路径都执行; 复用成功路径已停在目标页, 直接轮询其按钮渲染)
+        await self._wait_until_page_has_any_clickable(page)
+
+        # ⚠️ 2026-09-06: 页面就绪后先关闭可能的模态「提示」框(el-message-box),
+        #   否则它 intercepts pointer events 挡住后续填时间/查询的点击
+        #   (9/1 wallet 填时间被挡 30s、9/5 refund_record_report 点导出被挡误报, 同根因)。
+        try:
+            await _dismiss_modal_dialogs(page)
+        except Exception as _md_e:
+            logger.warning(f"[{data_type}] 页面就绪后关闭模态框异常(忽略): {_md_e}")
+
+        # 3. 设置时间范围
+        # ⚠️ 2026-09-01 修复: 同 _do_fetch_one, 真根因是浏览器时区=UTC(已设 timezone_id=Asia/Shanghai),
+        #   这里填**北京时间**(fill_utc=False), 与用户手动导出一致。
+        _time_format = config.get("time_format", "%Y-%m-%d %H:%M:%S")
+        _fill_utc = bool(config.get("time_fill_utc", _BMS_FILL_TZ_UTC_DEFAULT))
+        start_str = _bms_time_str(start_date, _time_format, fill_utc=_fill_utc)
+        end_str = _bms_time_str(end_date, _time_format, fill_utc=_fill_utc)
+        logger.info(f"[{data_type}] 设置时间范围: {start_str} ~ {end_str} (fill_utc={_fill_utc})")
+
+        time_labels = config.get("time_labels")
+        if time_labels and len(time_labels) >= 2:
+            await self._set_time_by_labels(page, time_labels[0], time_labels[1], start_str, end_str)
+        else:
+            await self._set_time_range(page, start_str, end_str)
+        await asyncio.sleep(1)
+
+        # 4. 搜索 — 带页面卡死检测 + 刷新重试
+        # ⚠️ 2026-08-11 修复: BMS 导出有"1分钟内请勿重复操作"限流
+        #   历史问题: 之前 _download_with_retry 重试时连续点导出按钮,触发限流,
+        #   返回 JSON {"success":false,"message":"1分钟内请勿重复操作"},
+        #   不会触发 download 事件,导致 wait_for_event("download") 等到 600s 超时
+        #   修复: 在导出响应返回 JSON(限流)时,等待 60s 后重试,而不是立即重试点按钮
+        #   (注意: networkidle < 1s 是正常的,因为页面早就加载完了,点搜索只是局部 ajax)
+        logger.info(f"[{data_type}] 点击查询/搜索...")
+        await self._click_query_button(page)
+        logger.info(f"[{data_type}] 查询按钮已点击,开始等待页面加载(最多15s)...")
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15_000)
+            logger.info(f"[{data_type}] 页面已达到 networkidle 状态")
+        except Exception as e:
+            logger.info(f"[{data_type}] networkidle 等待结束(超时或异常,忽略): {type(e).__name__}: {e}")
+        await asyncio.sleep(2)
+        # ⚠️ 2026-09-06: 查询后/导出前再关一次模态框(BMS 大窗口查询可能刚弹出「提示」框,
+        #   9/5 22:44 铁证: 点查询后 22:44:39 点导出被 el-message-box 拦截 30s 误报)。
+        try:
+            await _dismiss_modal_dialogs(page)
+        except Exception as _md_e2:
+            logger.warning(f"[{data_type}] 查询后关闭模态框异常(忽略): {_md_e2}")
+        logger.info(f"[{data_type}] 准备点击导出按钮并等待下载...")
+
+        # 5. 导出
+        # P1-1: 调用统一的 _download_with_retry (自动按 data_type 配置超时 + 重试)
+        #       - wallet: 600s + 2次重试 (数据量大,经常超时)
+        #       - refund/ticket: 180s + 1次重试
+        try:
+            download = await _download_with_retry(page, data_type, logger, expect_end_dt=end_date)
+        except EmptyQueryResult as eqe:
+            # ⚠️ 2026-09-06: 查询结果为空(页面"暂无数据") → BMS 不触发导出下载。
+            #   这是正常业务态(窗口内无记录), 不是抓取失败。按 0 行成功处理:
+            #   置 empty_result=True, 导入阶段跳过文件直接记成功(见 bms_sync._sync_import_work)。
+            logger.info(f"[{data_type}] {eqe}")
+            result.success = True
+            result.empty_result = True
+            result.total_rows = 0
+            result.file_path = None
+            result.filename = None
+            return
+
+        # 6. 保存
+        original_filename = download.suggested_filename or f"{data_type}_export.csv"
+        month_dir = datetime.now().strftime("%Y-%m")
+        upload_dir = Path(settings.UPLOAD_DIR) / month_dir
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        stem = Path(original_filename).stem
+        suffix = Path(original_filename).suffix
+        ts = datetime.now().strftime("%Y%m%d%H%M%S")
+        dest_filename = f"{stem}_{ts}{suffix}"
+        dest_path = upload_dir / dest_filename
+
+        await download.save_as(str(dest_path))
+        logger.info(f"[{data_type}] 文件已保存: {dest_path}")
+
+        # 【shanmao_refund 核心:全量导出后按日期范围裁剪写回】
+        # 闪猫导出接口不支持时间筛选参数(传参=500),只能拿到全量,
+        # 因此用 pandas 精确保留 start_date~end_date 范围内的行再覆盖写回。
+        # (与 _do_fetch_one 共用 _crop_shanmao_refund_by_date_range 方法)
+        if data_type == "shanmao_refund":
+            dest_path, dest_filename = await self._crop_shanmao_refund_by_date_range(
+                dest_path, dest_filename, start_date, end_date, data_type
+            )
+
+        # 【refund:BMS 退费单全量导出后按日期范围裁剪写回】
+        if data_type == "refund":
+            dest_path, dest_filename = await self._crop_refund_by_date_range(
+                dest_path, dest_filename, start_date, end_date, data_type
+            )
+
+        result.success = True
+        result.file_path = f"{month_dir}/{dest_filename}"
+        result.filename = dest_filename
+
+    async def test_connection(self) -> bool:
+        """测试浏览器是否可用"""
+        try:
+            await self._init_browser()
+            page = await self._browser.new_page()
+            await page.goto("about:blank")
+            await page.close()
+            return True
+        except Exception:
+            return False

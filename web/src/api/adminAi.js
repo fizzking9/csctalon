@@ -1,0 +1,53 @@
+import request from '@/api'
+
+// #125 AI 模板与报告管理(admin)
+
+// 模板列表(按 priority 升序)
+export function aiTemplates() {
+  return request.get('/admin/ai/templates')
+}
+
+// 新增模板
+export function createAiTemplate(payload) {
+  return request.post('/admin/ai/templates', payload)
+}
+
+// 编辑模板(部分字段)
+export function updateAiTemplate(id, payload) {
+  return request.patch(`/admin/ai/templates/${id}`, payload)
+}
+
+// 删除模板
+export function deleteAiTemplate(id) {
+  return request.delete(`/admin/ai/templates/${id}`)
+}
+
+// 手动触发预生成
+export function triggerAiTemplate(id) {
+  return request.post(`/admin/ai/templates/${id}/trigger`)
+}
+
+// 报告列表(admin, 分页)
+export function aiAdminReports(params = {}) {
+  return request.get('/admin/ai/reports', { params })
+}
+
+// 报告详情(admin, 含完整 content) — #141 新增, 列表接口不返 content 防过大
+export function getAiReport(id) {
+  return request.get(`/admin/ai/reports/${id}`)
+}
+
+// 删除报告
+export function deleteAiReport(id) {
+  return request.delete(`/admin/ai/reports/${id}`)
+}
+
+// 对报告评分/留意见(采集, 权同详情: 本人或 admin)
+export function postReportFeedback(id, payload) {
+  return request.post(`/ai/reports/${id}/feedback`, payload)
+}
+
+// 某报告评价列表 + 当前用户是否已评
+export function getReportFeedbacks(id) {
+  return request.get(`/ai/reports/${id}/feedbacks`)
+}

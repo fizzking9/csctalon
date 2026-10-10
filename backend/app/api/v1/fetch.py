@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 
-from app.api.deps import CurrentUser, DBSession
+from app.api.deps import AdminUser, CurrentUser, DBSession, ManagerUser
 from app.models.bms_sync_log import BmsSyncLog
 from app.models.scrm_sync_log import ScrmSyncLog
 from app.schemas.common import R
@@ -40,6 +40,7 @@ from app.services.captcha_session import (
     try_ocr_captcha,
     try_ocr_math_captcha,
 )
+from app.services.scrm_client import SCRM_DATA_SOURCES
 from app.services.scrm_sync_service import (
     DATA_TYPE_OPERATOR,
     DATA_TYPE_SESSION_GROUP,
@@ -48,7 +49,7 @@ from app.services.scrm_sync_service import (
     get_scrm_sync_status,
     sync_scrm_all,
 )
-from app.services.sync_source_config_service import get_all_configs, get_sync_source_config
+from app.services.sync_source_config_service import get_sync_source_config
 from app.services.sync_task_manager import sync_task_manager
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,14 @@ router = APIRouter(prefix="/fetch", tags=["数据中心-BMS同步"])
 
 # 东八区
 TZ_CN = timezone(timedelta(hours=8))
+
+# BMS 可同步数据类型(手动触发/定时校验用)
+# 含五源扩容新增的 3 个 Playwright 源(BMS_DATA_SOURCES 里有但非 default_sync 也可手动勾选)
+BMS_VALID_TYPES = {
+    "refund", "shanmao_refund", "ticket", "wallet", "device_combo",
+    "cs_record", "device_tag", "device_tag_binding",
+    "refund_record_report", "bms_order", "return_tracking", "device_profile",
+}
 
 
 def _compute_time_range(
@@ -184,6 +193,9 @@ class DataSourceStatus(BaseModel):
     default_sync: bool = True
     enabled: bool = True
     requires_captcha: bool = False  # True 表示需验证码(如闪猫退款):同步设置页有验证码登录入口
+    # #97: 档位标签, 供前端「手动同步」按 高频档/低频档 分组(不纳入定时的源为 off)。
+    #      判据与调度器同源 —— sync_source_config_service.list_scheduled_bms_sources()
+    schedule_tier: str = "off"
     last_sync: str | None = None
     last_status: str | None = None
     last_query_end: str | None = None  # 上次查询截止时间(数据已同步至此时间点)
@@ -192,9 +204,19 @@ class DataSourceStatus(BaseModel):
 
 class ScheduleStatus(BaseModel):
     enabled: bool
+    # #51: 槽位体系(新). schedule_hours/daytime_hours 保留为兼容字段
+    #   —— 旧前端按 "h:00" 渲染, 不宜直接删除(否则前后端必须同时发布)
+    slots: list[str] | None = None
+    slot_count: int | None = None
+    start_hour: int | None = None
+    end_hour: int | None = None
+    interval_minutes: int | None = None
+    next_slot: str | None = None
     schedule_hours: list[int]
     daytime_hours: list[int] | None = None
     catchup_hour: int | None = None
+    # #97: 低频档整点(0 = 低频档禁用), 供前端分组标题展示"每天几点跑低频源"
+    low_freq_hour: int | None = None
     next_run: str | None = None
     current_progress: dict | None = None
     has_credentials: Any  # bool 或 {"bms":bool, "scrm":bool}(新版)
@@ -202,6 +224,16 @@ class ScheduleStatus(BaseModel):
     cooldown_remaining: int | None = None
     is_halted: bool | None = None
     halted_biz_date: str | None = None
+    halted_types: list[str] | None = None
+    halted_count: int | None = None
+
+
+class ScheduleConfigIn(BaseModel):
+    """高频节拍配置入参(#51)"""
+
+    start_hour: int = Field(..., description="高频时段起(含), 0~23")
+    end_hour: int = Field(..., description="高频时段止(不含), 1~24; 24 = 至当日 24:00")
+    interval_minutes: int = Field(..., description="采集间隔(分钟), 5~180")
 
 
 # ---------- API 端点 ----------
@@ -220,6 +252,7 @@ def list_sync_data_sources(db: DBSession, _: CurrentUser):
             default_sync=s.get("default_sync", True),
             enabled=s.get("enabled", True),
             requires_captcha=s.get("requires_captcha", False),
+            schedule_tier=s.get("schedule_tier", "off"),
             last_sync=s.get("last_sync"),
             last_status=s.get("last_status"),
             last_query_end=s.get("last_end_time"),
@@ -239,7 +272,7 @@ async def sync_all_data(payload: SyncAllRequest, current_user: CurrentUser):
     若前端未升级,这里为了兼容仍返回 task 执行完成后的 SyncAllResponse,
     通过在后端侧等待最长 8 分钟实现)。
     """
-    valid_types = {"refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record", "device_tag", "device_tag_binding"}
+    valid_types = BMS_VALID_TYPES
     data_types = payload.data_types if payload.data_types else None
     if data_types:
         for dt in data_types:
@@ -279,9 +312,7 @@ def task_preflight(db: DBSession, _: CurrentUser, data_types: str = ""):
      - 若现在执行(增量模式),每个源会抓从什么时间~什么时间
      - 各源凭证状态
     """
-    dts = [s for s in data_types.split(",") if s] if data_types else [
-        "refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record",
-    ]
+    dts = [s for s in data_types.split(",") if s] if data_types else sorted(BMS_VALID_TYPES - {"device_tag", "device_tag_binding"})
     statuses = get_sync_status(db)
     has_credentials: dict[str, bool] = {}
     names: dict[str, str] = {}
@@ -323,7 +354,7 @@ def task_preflight(db: DBSession, _: CurrentUser, data_types: str = ""):
 
 async def _do_submit(payload: SyncAllRequest, current_user) -> SubmitResponse:
     """内部: 提交同步任务到 SyncTaskManager"""
-    valid_types = {"refund", "shanmao_refund", "ticket", "wallet", "device_combo", "cs_record", "device_tag", "device_tag_binding"}
+    valid_types = BMS_VALID_TYPES
     data_types = payload.data_types if payload.data_types else [
         dt for dt in valid_types
     ]  # None 时默认全量包含,但在 sync_all 内部会再按 default_sync 过滤?不,这里按默认勾选源
@@ -504,7 +535,50 @@ def get_schedule_status(_: CurrentUser):
     return R(data=ScheduleStatus(**status))
 
 
+# ─────────────────────────────────────────────────────────────────────
+# 高频节拍配置 (#51, A-20260910-006 LOCKED v1.0)
+#   用户诉求: "在配置界面我看没法调整" → 本组端点把「时段 + 间隔」开放为可配。
+#   低频档(6:00)/5:00 补跑/8:00 全量 **不受本配置影响**。
+# ─────────────────────────────────────────────────────────────────────
+@router.get("/schedule/config", response_model=R, summary="读取高频节拍配置")
+def get_schedule_config(db: DBSession, _: ManagerUser):
+    """读当前高频节拍配置(含派生槽位清单, 供前端直接展示)。"""
+    from app.services import scheduler_settings_service as sss
+
+    data = sss.to_dict(sss.get_settings(db))
+    data["notice"] = (
+        "修改后自下一个槽位生效, 无需重启; "
+        "低频档(每日 1 次)/凌晨补跑/首槽全量兜底 不受本配置影响。"
+    )
+    return R(data=data)
+
+
+@router.put("/schedule/config", response_model=R, summary="更新高频节拍配置(管理员)")
+def update_schedule_config(payload: ScheduleConfigIn, db: DBSession, me: AdminUser):
+    """更新高频节拍配置。
+
+    校验(非法 → 400, 不静默取默认):
+      - 间隔 5~180 分钟(下限依据: 每轮实测约 4.2 分钟, 低于此值必然重叠)
+      - 0 ≤ 起始 < 结束 ≤ 24
+      - 时段与间隔组合必须产生 ≥1 个采集点
+    """
+    from app.services import scheduler_settings_service as sss
+
+    data = sss.update_settings(
+        db,
+        start_hour=payload.start_hour,
+        end_hour=payload.end_hour,
+        interval_minutes=payload.interval_minutes,
+        actor=me.username,
+    )
+    data["notice"] = "配置已生效(下一槽位起), 无需重启后端。"
+    return R(data=data)
+
+
 @router.post("/schedule/start", response_model=R[ScheduleStatus], summary="启动定时同步")
+# #213: 必须保留 async def —— 体内无 await，但 bms_scheduler.start() 内部用
+# asyncio.create_task 挂载到「当前运行的事件循环」；改成同步 def 会在 anyio 线程池线程执行，
+# 那里没有运行中的 loop（get_running_loop 抛 RuntimeError）。本端点只做内存态判断 + 调度，无阻塞 IO。
 async def start_schedule(current_user: CurrentUser):
     """启动 BMS + SCRM 定时同步(8-23/0 每小时 + 5:00 补跑 + 8:00 全量兜底)
 
@@ -949,7 +1023,8 @@ async def captcha_login_start(payload: CaptchaLoginStartRequest, _: CurrentUser,
     sess = await captcha_session_manager.create(
         data_type=data_type,
         base_url=base_url,
-        page_path=page_path,
+        # page_path 从种子配置读取(BMS/SCRM 的 DATA_SOURCES 均有该字段)
+        page_path=seed.get("page_path") or "",
         username=cfg["username"],
         password=cfg["password"],
         state_path=state_path,

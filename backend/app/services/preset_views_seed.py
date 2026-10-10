@@ -177,18 +177,17 @@ PRESET_VIEWS: list[dict] = [
     {
         "code": "preset_merchant_cash",
         "name": "商户号现金流对账(按商户号)",
-        "description": "按商户号汇总实际退款金额、笔数、手续费(仅 refund_status='SUCCESS' 的微信侧真实扣款,对账基准,不分ORIGINAL/BALANCE桶)",
+        "description": "按商户号汇总实际退款金额、笔数(仅退款成功:退款记录报表 refund_record_reports, 微信侧真实扣款,对账基准;2026-09-05 起替代 merchant_refunds 快照,新表无手续费字段)",
         "chart_type": "table",
         "segments": [{
-            "source_code": "merchant_refund",
+            "source_code": "refund_record_report",
             "label": "商户号现金流",
             "dimensions": [{"field": "merchant_id", "alias": "商户号", "role": "category"}],
             "measures": [
                 {"field": "refund_amount", "agg": "sum", "alias": "退款金额"},
                 {"field": "*", "agg": "count", "alias": "笔数"},
-                {"field": "fee", "agg": "sum", "alias": "手续费"},
             ],
-            "filters": [{"field": "refund_status", "op": "eq", "value": "SUCCESS"}],
+            "filters": [{"field": "refund_status", "op": "in", "value": ["退款成功", "成功", "SUCCESS"]}],
             "limit": 50,
         }],
         "merge_strategy": "add",
@@ -535,16 +534,16 @@ PRESET_VIEWS: list[dict] = [
     # 视图1:整体趋势(四路经营A/B/C/D柱状堆积 vs 实际现金流E曲线)
     # 业务关系 v4: A(退费单线上直退)/B(钱包用户取现)/C(闪猫退款 shanmao_refunds 已建表)
     #              D(手动退款 manual_refunds 已建表, is_refunded=是 计入)
-    #              E(商户号现金流)是微信侧实际真扣款(第五张独立表,对账基准,商户号流水同步)
+    #              E(商户号现金流)是微信侧实际真扣款(对账基准,退款记录报表 refund_record_reports 每天采集)
     #   经营估算 = A+B+C+D
-    #   实际现金流 = E (merchant_refunds.refund_status='SUCCESS' 合计,不分ORIGINAL/BALANCE桶)
+    #   实际现金流 = E (refund_record_reports.refund_status IN ('退款成功','成功','SUCCESS') 合计,不分桶)
     #   对账偏差 = 经营估算 − 实际现金流 (正值表示有未登记的商户侧退款)
     # 因此商户号现金流E不与经营四路堆叠相加(否则重复计算),而是独立曲线 overlay
     # 呈现:四路经营A/B/C/D柱状堆积(经营估算) + 实际现金流E曲线overlay,柱顶与曲线高度差=对账偏差
     {
         "code": "preset_cash_trend_v2",
         "name": "现金流趋势(四路经营 vs 实际对账)",
-        "description": "【v4统一核算】四路经营出款(A.退费单线上直退+B.钱包用户取现+C.闪猫退款+D.手动退款,柱状堆积=经营估算) vs 实际现金流E(merchant_refunds.refund_status='SUCCESS'合计,曲线overlay,对账基准)。对账偏差=柱顶(A+B+C+D) − 曲线高度(E),正值=商户侧已扣款但未登记四路的退款。E为商户号流水快照(截止日见数据提示),对账偏差仅供参考",
+        "description": "【v4统一核算】四路经营出款(A.退费单线上直退+B.钱包用户取现+C.闪猫退款+D.手动退款,柱状堆积=经营估算) vs 实际现金流E(退款记录报表 refund_record_reports 退款成功合计,曲线overlay,对账基准)。对账偏差=柱顶(A+B+C+D) − 曲线高度(E),正值=商户侧已扣款但未登记四路的退款。E 为退款记录报表(每天采集,2026-09-05 起替代 merchant_refunds 快照)",
         "chart_type": "bar",
         "segments": [
             {
@@ -575,11 +574,11 @@ PRESET_VIEWS: list[dict] = [
                 "stack_group": "估算",
             },
             {
-                "source_code": "merchant_refund",
+                "source_code": "refund_record_report",
                 "label": "商户号现金流(实际)",
-                "dimensions": [{"field": "trade_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "dimensions": [{"field": "refund_time", "alias": "日期", "role": "time", "time_grain": "day"}],
                 "measures": [{"field": "refund_amount", "agg": "sum", "alias": "商户号现金流(实际)"}],
-                "filters": [{"field": "refund_status", "op": "eq", "value": "SUCCESS"}],
+                "filters": [{"field": "refund_status", "op": "in", "value": ["退款成功", "成功", "SUCCESS"]}],
                 "series_type": "line",
             },
         ],
@@ -670,7 +669,7 @@ PRESET_VIEWS: list[dict] = [
             "limit": 100,
         }],
         "merge_strategy": "add",
-        "classification_rule_names": ["客诉-外部投诉", "客诉-原因", "客诉-审核人"],
+        "classification_rule_names": ["客诉-外部投诉", "客诉-原因"],  # #185: 移除已废弃的占位规则「客诉-审核人」
         "time_range_default": {"days": 7},
     },
     # 视图5:提现SN关联退费单/工单时间分布
@@ -1155,6 +1154,75 @@ PRESET_VIEWS: list[dict] = [
         "merge_strategy": "add",
         "classification_rule_ids": [],
         "time_range_default": None,
+    },
+    # ============================================================
+    # 现金流水统一宽表 (A-20260908-004, #41) —— 经营四路 ABCD 运营分析
+    # 数据源 cash_flow_wide: 一行=一笔出款(A线上/B钱包提现/C闪猫/D手动), route 区分
+    # ============================================================
+    {
+        "code": "preset_cash_flow_route_trend",
+        "name": "现金流水(ABCD 按日趋势)",
+        "description": "ABCD 经营四路出款按日趋势(来自 cash_flow_wide 统一宽表). 每路独立曲线, 快速看四路资金节奏. 口径=A+B+C+D 经营估算, 不含 E(独立对账基准).",
+        "chart_type": "line",
+        "segments": [
+            {
+                "source_code": "cash_flow_wide",
+                "label": "A线上直退",
+                "dimensions": [{"field": "pay_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "pay_amount", "agg": "sum", "alias": "A线上直退"}],
+                "filters": [{"field": "route", "op": "eq", "value": "A"}],
+            },
+            {
+                "source_code": "cash_flow_wide",
+                "label": "B钱包提现",
+                "dimensions": [{"field": "pay_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "pay_amount", "agg": "sum", "alias": "B钱包提现"}],
+                "filters": [{"field": "route", "op": "eq", "value": "B"}],
+            },
+            {
+                "source_code": "cash_flow_wide",
+                "label": "C闪猫退款",
+                "dimensions": [{"field": "pay_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "pay_amount", "agg": "sum", "alias": "C闪猫退款"}],
+                "filters": [{"field": "route", "op": "eq", "value": "C"}],
+            },
+            {
+                "source_code": "cash_flow_wide",
+                "label": "D手动退款",
+                "dimensions": [{"field": "pay_time", "alias": "日期", "role": "time", "time_grain": "day"}],
+                "measures": [{"field": "pay_amount", "agg": "sum", "alias": "D手动退款"}],
+                "filters": [{"field": "route", "op": "eq", "value": "D"}],
+            },
+        ],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
+    },
+    {
+        "code": "preset_cash_flow_operator_rank",
+        "name": "出款经手人排行(ABCD)",
+        "description": "cash_flow_wide 按 operator×route 汇总出款金额+笔数, 看谁经手最多出款. 排除系统操作(sys/system). 运营分析: 退款/提现/手动退款经手人全景.",
+        "chart_type": "table",
+        "segments": [{
+            "source_code": "cash_flow_wide",
+            "label": "出款经手人",
+            "dimensions": [
+                {"field": "operator", "alias": "经手人", "role": "person"},
+                {"field": "route", "alias": "路线", "role": "category"},
+            ],
+            "measures": [
+                {"field": "pay_amount", "agg": "sum", "alias": "出款金额"},
+                {"field": "*", "agg": "count", "alias": "笔数"},
+            ],
+            "filters": [
+                {"field": "operator", "op": "is_not_null", "value": None},
+                {"field": "operator", "op": "notin", "value": ["sys", "system", "SYS", "System"]},
+            ],
+            "limit": 30,
+        }],
+        "merge_strategy": "add",
+        "classification_rule_ids": [],
+        "time_range_default": {"days": 30},
     },
 ]
 

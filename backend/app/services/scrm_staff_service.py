@@ -2,7 +2,6 @@
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -18,6 +17,7 @@ from app.schemas.scrm_staff import (
     ScrmStaffMatchCandidate,
     ScrmStaffProfileUpdate,
 )
+from app.services.fingerprint import staff_unique_key as _staff_unique_key
 
 log = logging.getLogger(__name__)
 
@@ -25,9 +25,10 @@ log = logging.getLogger(__name__)
 #  业务唯一键
 # ============================================================
 def build_staff_unique_key(source_config_id: int | None, wecom_nick: str, enterprise_suffix: str | None) -> str:
-    """构造人设信息的业务唯一键 md5"""
-    raw = f"{source_config_id or 0}|{wecom_nick}|{enterprise_suffix or ''}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+    """构造人设信息的业务唯一键 md5
+
+    O-6: 实现已单源化到 app.services.fingerprint.staff_unique_key, 本函数仅作兼容委托。"""
+    return _staff_unique_key(source_config_id, wecom_nick, enterprise_suffix)
 
 
 # ============================================================

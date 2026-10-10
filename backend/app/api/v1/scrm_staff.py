@@ -4,11 +4,9 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException, Query
 
 from app.api.deps import CurrentUser, DBSession
-from app.models.scrm_staff_profile import ScrmStaffProfile
 from app.schemas.common import PageBase as PagedOut
 from app.schemas.scrm_staff import (
     ScrmStaffMatchCandidate,

@@ -11,12 +11,12 @@
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.api.deps import AdminOrSupervisor, CurrentUser, DBSession
 from app.models.measure import Measure, MeasureSource, MeasureStatus
 from app.models.report_comment import CommentTarget, ReportComment
-from app.schemas.common import PageBase, R
+from app.schemas.common import R
 
 router = APIRouter(prefix="/report-comments", tags=["跟进注释"])
 

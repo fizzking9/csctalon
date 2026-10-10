@@ -179,7 +179,14 @@ def _match_refund_ticket_by_sn(db: Session, only_unmatched: bool) -> tuple[int, 
             continue
         if r.refund_no in existing:
             continue
-        for tn in ticket_sn_map.get(r.device_sn, []):
+        matched_tns = ticket_sn_map.get(r.device_sn, [])
+        if not matched_tns:
+            # ⚠️ 2026-09-05: 该退费单的 SN 在本批工单里没有匹配目标,
+            #   宽表关联状态没有变化 → 不应计入 affected,否则(仅此一处)
+            #   全表有 SN 的退费单都会被算进 affected → 宽表每次都全量重建(~2分钟)。
+            #   参考其它 4 个 step: 只有真正新增关系才进 affected。
+            continue
+        for tn in matched_tns:
             new_rels.append(DataMatchRelation(
                 src_table="refund", src_id=r.refund_no,
                 dst_table="ticket", dst_id=tn,
@@ -239,7 +246,12 @@ def _match_refund_wallet_by_sn(db: Session, only_unmatched: bool) -> tuple[int, 
             continue
         if r.refund_no in existing:
             continue
-        for wid in wallet_sn_map.get(r.device_sn, []):
+        matched_wids = wallet_sn_map.get(r.device_sn, [])
+        if not matched_wids:
+            # ⚠️ 2026-09-05: 同 _match_refund_ticket_by_sn —— SN 无匹配钱包时
+            #   不计入 affected,避免全表退费单进 affected → 宽表每次全量重建。
+            continue
+        for wid in matched_wids:
             new_rels.append(DataMatchRelation(
                 src_table="refund", src_id=r.refund_no,
                 dst_table="wallet", dst_id=str(wid),

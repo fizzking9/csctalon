@@ -10,13 +10,13 @@
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.analysis_view import AnalysisView, ClassificationRule
 from app.models.card_complaint import CardComplaint
+from app.models.cash_flow_wide import CashFlowWide
 from app.models.cs_record import CsRecord
 from app.models.data_source import DataSource
 from app.models.device_combo import DeviceCombo
@@ -24,18 +24,25 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.merchant_refund import MerchantRefund
 from app.models.person import Person, PersonAlias
 from app.models.refund import Refund
+from app.models.refund_record_report import RefundRecordReport
 from app.models.refund_wide import RefundWide
+from app.models.scrm_session import ScrmSession
+from app.models.scrm_session_transfer import ScrmSessionTransfer
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 
 # 模型注册表:table_name → model class(用于根据 DataSource.table_name 反射获取列)
 _MODEL_REGISTRY: dict[str, type] = {
     Refund.__tablename__: Refund,
+    CashFlowWide.__tablename__: CashFlowWide,
     RefundWide.__tablename__: RefundWide,
     WalletWithdrawal.__tablename__: WalletWithdrawal,
     ServiceTicket.__tablename__: ServiceTicket,
     DeviceCombo.__tablename__: DeviceCombo,
     MerchantRefund.__tablename__: MerchantRefund,
+    RefundRecordReport.__tablename__: RefundRecordReport,
+    ScrmSession.__tablename__: ScrmSession,
+    ScrmSessionTransfer.__tablename__: ScrmSessionTransfer,
     CsRecord.__tablename__: CsRecord,
     ExternalComplaint.__tablename__: ExternalComplaint,
     CardComplaint.__tablename__: CardComplaint,
@@ -64,8 +71,8 @@ def execute_view(db: Session, view: AnalysisView | dict, params: dict | None = N
     # ── 手动视图分派 (2026-08-03 加): 若 view.code 在 urge_analysis.HANDLERS / analytics.HANDLERS 中注册,直接调用专用实现
     # 用于 engine 无法表达的复杂派生逻辑:如催单分桶/待处理时长/投诉转化率/退款挽回等
     try:
-        from app.services.urge_analysis import HANDLERS as _URGE_HANDLERS
         from app.services.analytics import HANDLERS as _ANALYTICS_HANDLERS
+        from app.services.urge_analysis import HANDLERS as _URGE_HANDLERS
         _HANDLER_POOL: dict = {}
         _HANDLER_POOL.update(_URGE_HANDLERS or {})
         _HANDLER_POOL.update(_ANALYTICS_HANDLERS or {})
@@ -451,7 +458,18 @@ def _resolve_person_name(raw_col):
     - 待归并/person_id IS NULL 别名 → NULL(图表显示"(空)",提示去归并)
     - 未提取的新别名(不在 person_aliases) → NULL
     - sys/system 系统别名(person_id=NULL) → NULL(配合视图 raw 层 notin 过滤更佳)
+    - #266: bigint person_id 列(如 scrm_sessions.person_id)直接 join persons.id
     """
+    from sqlalchemy import BigInteger
+    # person_id 是 bigint 外键时,直接 join persons.id,跳过别名解析
+    if isinstance(raw_col.type, BigInteger):
+        subq = (
+            select(Person.display_name)
+            .where(Person.id == raw_col)
+            .limit(1)
+        )
+        return subq.scalar_subquery()
+    # 字符串别名列:走 person_aliases.alias 解析
     subq = (
         select(Person.display_name)
         .join(PersonAlias, PersonAlias.person_id == Person.id)

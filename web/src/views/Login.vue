@@ -6,6 +6,14 @@
         <h2>{{ siteInfo.site_name || '数据分析工具应用' }}</h2>
         <p class="sub">{{ siteInfo.site_subtitle || '专注数据分析与内部工具' }}</p>
       </div>
+      <el-alert
+        v-if="route.query.expired"
+        title="登录已过期，请重新登录"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 16px"
+      />
       <el-form ref="formRef" :model="form" :rules="rules" @submit.prevent="handleLogin">
         <el-form-item prop="username">
           <el-input
@@ -154,5 +162,17 @@ async function handleLogin() {
 }
 .login-footer a:hover {
   color: #409eff;
+}
+
+/* 窄屏自适应（#225）：登录页是移动端第一入口，400px 固定宽在 375px 屏会溢出。
+   仅收窄卡片宽度与内边距，表单控件保持 size="large" 天然满足触控目标。 */
+@media (max-width: 768px) {
+  .login-card {
+    width: min(400px, 92vw);
+    padding: 12px 4px;
+  }
+  .login-header h2 {
+    font-size: 18px;
+  }
 }
 </style>

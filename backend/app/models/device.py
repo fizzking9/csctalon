@@ -2,11 +2,28 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Table, Column, Text
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, Table, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.models.base import IDMixin, TimestampMixin
+
+
+class DimDeviceType(Base):
+    """设备类型维度表 (#246 B3-1, A-20261007-002 §3.2)
+
+    把 devices.device_type 自由文本归一为稳定维度码; 原始文本保留在
+    devices.device_type, 本表 normalized_from 记录归并来源(快照可回溯)。
+    """
+
+    __tablename__ = "dim_device_type"
+
+    type_code: Mapped[str] = mapped_column(String(32), primary_key=True, comment="归一类型码(如 4G_CPE)")
+    type_name: Mapped[str] = mapped_column(String(64), nullable=False, comment="类型中文名")
+    normalized_from: Mapped[list | None] = mapped_column(
+        JSON, nullable=True, comment="归并来源原始文本列表(快照)"
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", comment="active/disabled")
 
 # 设备-标签 多对多关联表
 device_tag_rel = Table(
@@ -20,6 +37,10 @@ device_tag_rel = Table(
     Column("batch_id", Integer, nullable=True, comment="来源批次(device_tag_batches.id)"),
     Column("status", String(16), server_default="active", nullable=False, comment="active/inactive"),
     Column("expired_at", DateTime(timezone=True), nullable=True, comment="失效时间"),
+    # #249 B3-3 (A-20261007-002 §3.6): 业务事实来源(哪个投诉/质检行触发的打标)
+    Column("source_table", String(32), nullable=True, comment="来源表名(可空, 老批次数据为 NULL)"),
+    Column("source_id", String(64), nullable=True, comment="来源行主键值(可空)"),
+    Column("reason", Text, nullable=True, comment="打标原因(可空)"),
 )
 
 
@@ -30,10 +51,42 @@ class Device(TimestampMixin, Base):
 
     sn: Mapped[str] = mapped_column(String(64), primary_key=True, comment="设备SN")
     device_type: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="设备类型")
+    device_type_code: Mapped[str | None] = mapped_column(
+        String(32),
+        ForeignKey("dim_device_type.type_code"),
+        nullable=True,
+        index=True,
+        comment="归一设备类型码(#246 B3-1, 原始 device_type 文本保留)",
+    )
     device_type_remark: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="设备类型备注")
     active_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="激活时间")
     merchant_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="所属商户名称")
     status: Mapped[str | None] = mapped_column(String(32), nullable=True, default="正常", comment="设备状态")
+
+    # ── BMS 设备管理档案扩展(P4, A-20260905-001 / #18, 2026-09-05) ──
+    main_merchant_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="主商户名称(设备管理CSV: 主商户)"
+    )
+    active_flag: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="是否激活(已激活/未激活)")
+    service_valid_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="服务有效期至"
+    )
+    current_combo_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="当前套餐"
+    )
+    start_iccid: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="启动卡ICCID")
+    virtual_iccid: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="虚拟卡ICCID")
+    app_version: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="应用版本")
+    region: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="区域")
+    batch_no: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, comment="批次号")
+    # #293: 档案探针时间(SN 补全探过的时刻, 含 miss); 扫描只看未探针或超 30 天
+    profile_probe_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="档案探针时间(#293, 含 miss)"
+    )
+    # #293: 续费记录探针时间(套餐兜底 renew 模式专用, 与 profile_probe_at 分离)
+    renew_probe_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="续费记录探针时间(#293, 含 miss)"
+    )
 
     tags: Mapped[list["DeviceTag"]] = relationship(secondary=device_tag_rel, lazy="selectin")
 
@@ -79,6 +132,10 @@ class DeviceTagBinding(Base):
     expired_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="失效时间"
     )
+    # #249 B3-3 (A-20261007-002 §3.6): 业务事实来源
+    source_table: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="来源表名")
+    source_id: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="来源行主键值")
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True, comment="打标原因")
 
 
 class DeviceTagBatch(IDMixin, TimestampMixin, Base):

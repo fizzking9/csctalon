@@ -45,3 +45,95 @@ export function qualityFix(table, pk, payload) {
 export function qualityScan(table) {
   return request.post(`/data-quality/${table}/scan`)
 }
+
+// ── 拒收行(未采纳数据) A-20260908-003 ─────────────────────────
+/** 拒收行列表 */
+export function listRejectedRows(params) {
+  return request.get('/data-quality/rejected', { params })
+}
+
+/** 拒收行统计 */
+export function rejectedStats() {
+  return request.get('/data-quality/rejected/stats')
+}
+
+/** 人工判定单行 keep/discard */
+export function reviewRejectedRow(id, action) {
+  return request.post(`/data-quality/rejected/${id}/review`, { action })
+}
+
+/** 批量判定 */
+export function batchReviewRejected(ids, action) {
+  return request.post('/data-quality/rejected/batch-review', { row_ids: ids, action })
+}
+
+// ── 质量处置 + 治理规则 A-20260909-001 ─────────────────────────
+/** 彻底忽略(quality_status→ignored, 从经营排除) */
+export function dispositionIgnore(table, pk, reason) {
+  return request.post(`/data-quality/disposition/${table}/${pk}/ignore`, { reason })
+}
+
+/** 恢复(清除 ignored/dup_residual) */
+export function dispositionRestore(table, pk) {
+  return request.post(`/data-quality/disposition/${table}/${pk}/restore`)
+}
+
+/** 单行治理建议(规则命中 + E匹配提示) */
+export function dispositionSuggestion(table, pk) {
+  return request.get(`/data-quality/disposition/${table}/${pk}/suggestion`)
+}
+
+/** 治理规则列表 */
+export function listDispositionRules(params) {
+  return request.get('/data-quality/disposition/rules', { params })
+}
+
+/** 新建治理规则 */
+export function createDispositionRule(payload) {
+  return request.post('/data-quality/disposition/rules', payload)
+}
+
+/** 更新治理规则 */
+export function updateDispositionRule(id, payload) {
+  return request.put(`/data-quality/disposition/rules/${id}`, payload)
+}
+
+/** 删除治理规则 */
+export function deleteDispositionRule(id) {
+  return request.delete(`/data-quality/disposition/rules/${id}`)
+}
+
+/** 规则试匹配(预览命中行) */
+export function dispositionRuleApplyTest(id, limit) {
+  return request.post(`/data-quality/disposition/rules/${id}/apply-test`, null, { params: { limit } })
+}
+
+/** 扫描 A/D 真重复候选 */
+export function scanAdOverlapDup(limit) {
+  return request.get('/data-quality/disposition/scan/ad-overlap-dup', { params: { limit } })
+}
+
+/** D 路缺SN坏副本自动排除(标 dup_residual, 同单已由带SN行/E表计) */
+export function autoDisposeDNoSnBadDup(limit, includeAutoFixed = false) {
+  return request.post('/data-quality/disposition/auto/d-no-sn-bad-dup', null, { params: { limit, include_auto_fixed: includeAutoFixed } })
+}
+
+/** E空悬单回填D路台账(INSERT manual_refunds, 备注溯源) */
+export function backfillEOrphanToD(start, end, limit = 2000) {
+  return request.post('/data-quality/disposition/auto/backfill-e-orphan-to-d', null, { params: { start, end, limit } })
+}
+
+/** D路同单同金额重复自动排除(标 dup_residual, 保留带SN/正常行) */
+export function autoDisposeDDupSameAmount(limit = 2000) {
+  return request.post('/data-quality/disposition/auto/d-dup-same-amount', null, { params: { limit } })
+}
+
+/** D路冗余剔除(金额E无对应笔, 仅已对账日期; E滞后窗跳过) */
+export function autoDisposeDNoEMatch(limit = 2000) {
+  return request.post('/data-quality/disposition/auto/d-no-e-match', null, { params: { limit } })
+}
+
+/** D路一键治理流水线(坏副本+同单重复+E无对应+空悬落D, 幂等) */
+export function runDGovernance(start, end, limit = 10000) {
+  return request.post('/data-quality/disposition/auto/d-governance', null, { params: { start, end, limit } })
+}

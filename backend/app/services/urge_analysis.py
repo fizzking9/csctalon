@@ -11,12 +11,24 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+from datetime import datetime as _dt
+from datetime import timedelta as _td
+from datetime import timezone as _tz
 from typing import Callable
-
-from sqlalchemy import and_, case, cast, Date, desc, extract, func, Integer, Numeric, or_, select, text
-from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
+
+from sqlalchemy import (
+    Date,
+    Numeric,
+    and_,
+    case,
+    cast,
+    desc,
+    func,
+    select,
+    text,
+)
+from sqlalchemy.orm import Session
 
 from app.models.card_complaint import CardComplaint
 from app.models.external_complaint import ExternalComplaint
@@ -98,7 +110,7 @@ def refund_urge_kpi(db: Session, params: dict | None) -> dict:
     - 催单≥3次占比(%)
     """
     T = ServiceTicket
-    now_utc = _dt.now(_tz.utc)
+    _dt.now(_tz.utc)
 
     # total_cnt / avg_wait_h / avg_urge_cnt / urge_ge3_cnt
     # ⚠️ wait_h 直接使用 hours 数值表达式 (epoch_diff / 3600) → 不能再套一层 extract("epoch", ...)

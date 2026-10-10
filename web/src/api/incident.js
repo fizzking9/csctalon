@@ -10,6 +10,20 @@ export function getIncident(id) {
   return request.get(`/incidents/${id}`)
 }
 
+// #233 B1.5-2 时间轴事件标记(供 ECharts markPoint/markLine 消费)
+// 入参: { start: 'YYYY-MM-DD', end: 'YYYY-MM-DD', event_type?: '经营事件'/'异常事故' }
+// 返回: 数组 [{id, title, event_type, occurred_at, start_at, end_at, severity, ...}]
+export function listIncidentMarkers(params) {
+  return request.get('/incidents/markers/timeline', { params })
+}
+
+// #234 B1.5-3 事件影响对照: 事件前后窗口的接待/投诉/退款量变化
+// 入参: { id, window_minutes?: 60 }
+// 返回: { incident_id, anchor_at, pre_window, during_window, post_window, delta_pre_to_post }
+export function getIncidentImpactComparison(id, params) {
+  return request.get(`/incidents/${id}/impact-comparison`, { params })
+}
+
 // 登记影响事件
 export function createIncident(payload) {
   return request.post('/incidents', payload)

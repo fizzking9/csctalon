@@ -23,8 +23,15 @@ from app.schemas.data_source import (
     DataSourceOut,
     DataSourceUpdate,
 )
-from app.services.data_source_registry import DATA_SOURCE_SEEDS, ensure_data_sources_registered
-from app.utils.excel import clean_df_for_excel, sanitize_cell_value
+from app.services.data_source_registry import (
+    DATA_SOURCE_SEEDS,
+    build_source_projections,
+    category_order_index,
+    ensure_data_sources_registered,
+    resolve_projection_code,
+    seed_sort_order,
+)
+from app.utils.excel import clean_df_for_excel
 
 # 导出 Excel 单次最大行数(防止 OOM;超出提示加筛选条件)
 EXPORT_MAX_ROWS = 200_000
@@ -41,17 +48,71 @@ def _with_field_count(db, ds: DataSource) -> DataSourceOut:
 
 @router.get("", response_model=R, summary="数据源列表")
 def list_sources(db: DBSession, _: CurrentUser, include_placeholder: bool = Query(False)):
+    """数据源列表（含投影项），按「分组顺序 → 组内 sort_order」返回。
+
+    ⭐ 排序在**服务端**完成，前端不得自行重排 —— 否则分组顺序与组内业务顺序
+    会出现两处定义（历史上正是这种双份定义导致菜单漂移，见 A-20260910-004）。
+    """
     stmt = select(DataSource).order_by(DataSource.id)
     # 默认排除占位数据源(规划中,无实际表);数据查看页传 include_placeholder=true 显示占位项
     if not include_placeholder:
         stmt = stmt.where(DataSource.status != "placeholder")
     items = list(db.scalars(stmt))
-    return R(data=[_with_field_count(db, ds) for ds in items])
+
+    payload = [_with_field_count(db, ds) for ds in items]
+
+    # 投影项：不落库，从种子合成后与真实数据源合并（同表别名，避免重复注册）
+    if include_placeholder:
+        seed_by_code = {s["code"]: s for s in DATA_SOURCE_SEEDS}
+        for proj in build_source_projections():
+            true_seed = seed_by_code.get(proj["projection_of"], {})
+            payload.append(DataSourceOut(
+                id=0,  # 投影无数据库行，id=0 显式区分「非实体」
+                code=proj["code"],
+                table_name=proj["table_name"],
+                name_cn=proj["name_cn"],
+                source_type=true_seed.get("source_type", "business"),
+                time_field=proj.get("time_field"),
+                sn_field=proj.get("sn_field"),
+                pk_field=true_seed.get("pk_field"),
+                pk_strategy=true_seed.get("pk_strategy", "none"),
+                status="active",
+                sync_source=proj.get("sync_source"),
+                category=proj["category"],
+                description=proj.get("description"),
+                field_count=len(true_seed.get("model", DataSource).__table__.columns) if true_seed else 0,
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+                sort_order=seed_sort_order(proj),
+                is_projection=True,
+                projection_of=proj["projection_of"],
+                readonly=proj["readonly"],
+                true_body_category=proj.get("true_body_category"),
+                true_body_name=proj.get("true_body_name"),
+            ))
+
+    # 统一排序：先分组顺序，再组内 sort_order，最后按 code 稳定兜底。
+    # 注意：真实数据源的 sort_order 不落库（表无该列），由 _seed_order 回查种子；
+    #       投影项的 sort_order 在合成时已填入，直接使用。
+    payload.sort(key=lambda d: (
+        category_order_index(d.category),
+        d.sort_order if d.sort_order is not None else _seed_order(d.code),
+        d.code,
+    ))
+    return R(data=payload)
+
+
+def _seed_order(code: str) -> int:
+    """从种子取组内顺序（数据源表未存 sort_order，故回查种子）"""
+    for s in DATA_SOURCE_SEEDS:
+        if s["code"] == code:
+            return seed_sort_order(s)
+    return 999
 
 
 @router.get("/{code}", response_model=R, summary="数据源详情(含字段)")
 def get_source(code: str, db: DBSession, _: CurrentUser):
-    ds = db.scalar(select(DataSource).where(DataSource.code == code))
+    ds = db.scalar(select(DataSource).where(DataSource.code == resolve_projection_code(code)))
     if not ds:
         raise HTTPException(status_code=404, detail="数据源不存在")
     detail = DataSourceDetail.model_validate(ds)
@@ -61,7 +122,8 @@ def get_source(code: str, db: DBSession, _: CurrentUser):
 
 @router.get("/{code}/fields", response_model=R, summary="数据源字段列表")
 def list_fields(code: str, db: DBSession, _: CurrentUser):
-    ds = db.scalar(select(DataSource).where(DataSource.code == code))
+    # 投影项未落库 → 解析回真身 code 再取字段(投影与真身共用同一份字段元数据)
+    ds = db.scalar(select(DataSource).where(DataSource.code == resolve_projection_code(code)))
     if not ds:
         raise HTTPException(status_code=404, detail="数据源不存在")
     fields = list(
@@ -108,7 +170,11 @@ def refresh_sources(db: DBSession, _: AdminUser):
 
 
 def _get_source_model(code: str):
-    """根据数据源 code 获取对应的 SQLAlchemy 模型类(占位数据源无 model,返回 None)"""
+    """根据数据源 code 获取对应的 SQLAlchemy 模型类(占位数据源无 model,返回 None)
+
+    投影 code(如 complaint_ticket) 先解析回真身 code,保证投影与真身读同一张表。
+    """
+    code = resolve_projection_code(code)
     for seed in DATA_SOURCE_SEEDS:
         if seed["code"] == code:
             return seed.get("model"), seed.get("time_field")
@@ -178,6 +244,9 @@ def _build_browse_query(
     model, default_sort_field = _get_source_model(code)
     if not model:
         raise HTTPException(status_code=404, detail=f"数据源不存在: {code}")
+
+    # 投影项未落库，字段/元数据一律按真身 code 取，避免「投影查不到字段」
+    code = resolve_projection_code(code)
 
     # 解析 filters JSON
     filters_dict: dict = {}
@@ -328,7 +397,7 @@ def export_records(
     buf.seek(0)
 
     # 文件名:数据源中文名_导出_yyyymmdd_hhmmss.xlsx(UTF-8 编码,兼容中文)
-    ds = db.scalar(select(DataSource).where(DataSource.code == code))
+    ds = db.scalar(select(DataSource).where(DataSource.code == resolve_projection_code(code)))
     name_cn = ds.name_cn if ds else code
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fname = quote(f"{name_cn}_导出_{ts}.xlsx")
@@ -347,7 +416,7 @@ def get_source_summary(code: str, db: DBSession, _: CurrentUser):
     if not model:
         raise HTTPException(status_code=404, detail=f"数据源不存在: {code}")
 
-    ds = db.scalar(select(DataSource).where(DataSource.code == code))
+    ds = db.scalar(select(DataSource).where(DataSource.code == resolve_projection_code(code)))
     if not ds:
         raise HTTPException(status_code=404, detail=f"数据源未注册: {code}")
 

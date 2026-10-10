@@ -8,10 +8,10 @@ Create Date: 2026-07-27 16:00:00.000000
 - device_combos: 设备套餐导出表(对齐 BMS 设备套餐页导出列)
 """
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
 
 revision = "k2b3c4d5e6f7"
 down_revision = "h1a2b3c4d5e6"

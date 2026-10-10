@@ -5,26 +5,31 @@ from pypinyin import Style, lazy_pinyin
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
-from app.api.deps import AdminUser, AdminOrSupervisor, CurrentUser, DBSession
+from app.api.deps import AdminOrSupervisor, AdminUser, CurrentUser, DBSession
 from app.models.data_source import DataSource
 from app.models.group import Group, PersonGroupMembership
-from app.models.person import Person, PersonAlias
+from app.models.person import Person, PersonAlias, PersonSkillTag
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.schemas.common import PageBase, R
 from app.schemas.person import (
     BatchImportByPrefixRequest,
     BatchMergeRequest,
+    BatchSkillsUpdate,
     BatchUpdateRequest,
     MergeNewRequest,
     MergeRequest,
     PersonAliasOut,
-    PersonDetail,
-    PersonOut,
+    PersonSkillsUpdate,
     PersonUpdate,
     SplitRequest,
 )
+from app.services.audit_change import diff_model_changes, record_change  # #261 统一变更审计
 from app.services.audit_timeline import build_person_timeline
-from app.services.person_extractor import count_alias_occurrences, extract_person_aliases, rebuild_unclaimed_aliases
+from app.services.person_extractor import (
+    count_alias_occurrences,
+    extract_person_aliases,
+    rebuild_unclaimed_aliases,
+)
 
 router = APIRouter(prefix="/persons", tags=["系统-人员"])
 
@@ -166,21 +171,21 @@ def _with_alias_count(db: Session, p: Person) -> dict:
     cnt = db.scalar(
         select(func.count()).select_from(PersonAlias).where(PersonAlias.person_id == p.id, PersonAlias.is_system.is_(False))
     ) or 0
-    
+
     # 获取当前分组信息
     current_group = None
     if p.current_group_id:
         g = db.get(Group, p.current_group_id)
         if g:
             current_group = {"id": g.id, "name": g.name}
-    
+
     # 获取当前所有专项(主+辅)
     current_specialties = []
     assigns = list(db.scalars(
         select(PersonSpecialtyAssignment)
         .where(
             PersonSpecialtyAssignment.person_id == p.id,
-            PersonSpecialtyAssignment.is_current == True,
+            PersonSpecialtyAssignment.is_current.is_(True),
         )
         .order_by(PersonSpecialtyAssignment.is_primary.desc(), PersonSpecialtyAssignment.effective_from.desc())
     ))
@@ -197,7 +202,7 @@ def _with_alias_count(db: Session, p: Person) -> dict:
                     "difficulty_weight": specs[a.specialty_id].difficulty_weight,
                     "workload_ratio": a.workload_ratio,
                 })
-    
+
     out = {
         "id": p.id,
         "display_name": p.display_name,
@@ -208,6 +213,7 @@ def _with_alias_count(db: Session, p: Person) -> dict:
         "group_name": p.group_name,
         "position": p.position,
         "specialty": p.specialty,
+        "skill_tags": [{"skill_tag": st.skill_tag, "level": st.level} for st in p.skill_tags],
         "hire_date": p.hire_date,
         "probation_end_date": p.probation_end_date,
         "regularization_date": p.regularization_date,
@@ -240,6 +246,7 @@ def list_persons(
     role: str | None = Query(None, description="按角色过滤:agent/supervisor/admin"),
     employment_status: str | None = Query(None, description="按在职状态过滤:active(待入职)/probation(试用期)/regular(正式)/transferred(调岗)/resigned(离职)/inactive(非活跃)"),
     is_confirmed: bool | None = Query(None, description="是否已确认归并"),
+    skill_tag: str | None = Query(None, description="按技能标签过滤(B3-7)"),
     sort_by: str | None = Query(None, description="排序字段:id/display_name/department/role/employment_status/created_at/hire_date"),
     sort_order: str = Query("desc", description="asc/desc"),
 ):
@@ -259,9 +266,9 @@ def list_persons(
         # 通过 PersonGroupMembership 关联筛选
         stmt = stmt.join(
             PersonGroupMembership,
-            (PersonGroupMembership.person_id == Person.id) & 
+            (PersonGroupMembership.person_id == Person.id) &
             (PersonGroupMembership.group_id == group_id) &
-            (PersonGroupMembership.is_current == True)
+            (PersonGroupMembership.is_current.is_(True))
         )
     if specialty_id:
         # 通过 PersonSpecialtyAssignment 关联筛选
@@ -269,7 +276,7 @@ def list_persons(
             PersonSpecialtyAssignment,
             (PersonSpecialtyAssignment.person_id == Person.id) &
             (PersonSpecialtyAssignment.specialty_id == specialty_id) &
-            (PersonSpecialtyAssignment.is_current == True)
+            (PersonSpecialtyAssignment.is_current.is_(True))
         )
     if role:
         stmt = stmt.where(Person.role == role)
@@ -277,6 +284,11 @@ def list_persons(
         stmt = stmt.where(Person.employment_status == employment_status)
     if is_confirmed is not None:
         stmt = stmt.where(Person.is_confirmed.is_(is_confirmed))
+    if skill_tag:
+        stmt = stmt.join(
+            PersonSkillTag,
+            (PersonSkillTag.person_id == Person.id) & (PersonSkillTag.skill_tag == skill_tag)
+        )
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     sort_map = {
         "id": Person.id,
@@ -329,26 +341,141 @@ def merge_suggestions(db: DBSession, _: AdminOrSupervisor):
     return R(data=groups)
 
 
+# ---------- B3-7: 技能矩阵 (#255) ----------
+# 注意: 以下静态路由必须位于 GET /{person_id} 之前, 否则会被路径参数吞掉
+
+@router.get("/skill-tags", response_model=R, summary="技能标签字典(distinct 标签+使用人数)")
+def list_skill_tags(db: DBSession, _: CurrentUser):
+    rows = db.execute(
+        select(PersonSkillTag.skill_tag, func.count().label("cnt"))
+        .group_by(PersonSkillTag.skill_tag)
+        .order_by(func.count().desc(), PersonSkillTag.skill_tag)
+    ).all()
+    return R(data=[{"skill_tag": t, "person_count": c} for t, c in rows])
+
+
+@router.get("/skills/matrix", response_model=R, summary="技能矩阵(在职人员×标签)")
+def skill_matrix(db: DBSession, _: CurrentUser):
+    tags = [
+        r[0]
+        for r in db.execute(
+            select(PersonSkillTag.skill_tag).distinct().order_by(PersonSkillTag.skill_tag)
+        ).all()
+    ]
+    persons = list(
+        db.scalars(
+            select(Person)
+            .where(Person.is_active.is_(True))
+            .order_by(Person.department, Person.display_name)
+        )
+    )
+    rows = db.execute(
+        select(PersonSkillTag.person_id, PersonSkillTag.skill_tag, PersonSkillTag.level)
+    ).all()
+    cell = {(pid, tag): lv for pid, tag, lv in rows}
+    data = []
+    for p in persons:
+        skills = [
+            {"skill_tag": t, "level": cell[(p.id, t)]}
+            for t in tags
+            if (p.id, t) in cell
+        ]
+        data.append({
+            "person_id": p.id,
+            "display_name": p.display_name,
+            "department": p.department,
+            "group_name": p.group_name,
+            "skills": skills,
+        })
+    return R(data={"tags": tags, "persons": data})
+
+
+@router.put("/{person_id}/skills", response_model=R, summary="全量替换人员技能标签")
+def put_person_skills(person_id: int, payload: PersonSkillsUpdate, db: DBSession, current_user: AdminUser):
+    """以 payload.skills 为准: 多的删、缺的加、已有的改熟练度。"""
+    p = db.get(Person, person_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="人员不存在")
+    seen: set[str] = set()
+    for s in payload.skills:
+        tag = s.skill_tag.strip()
+        if not tag:
+            raise HTTPException(status_code=400, detail="技能标签不能为空")
+        if not (1 <= s.level <= 5):
+            raise HTTPException(status_code=400, detail="熟练度须在 1-5")
+        if tag in seen:
+            raise HTTPException(status_code=400, detail=f"技能标签重复: {tag}")
+        seen.add(tag)
+    existing = {
+        st.skill_tag: st
+        for st in db.scalars(select(PersonSkillTag).where(PersonSkillTag.person_id == person_id))
+    }
+    for tag, st in existing.items():
+        if tag not in seen:
+            db.delete(st)
+    for s in payload.skills:
+        tag = s.skill_tag.strip()
+        if tag in existing:
+            existing[tag].level = s.level
+            existing[tag].updated_by = current_user.username
+        else:
+            db.add(PersonSkillTag(person_id=person_id, skill_tag=tag, level=s.level, updated_by=current_user.username))
+    db.commit()
+    return R(data={"person_id": person_id, "skills": [s.model_dump() for s in payload.skills]})
+
+
+@router.post("/batch-skills", response_model=R, summary="批量打标(add 追加/覆盖 | remove 删除)")
+def batch_skills(payload: BatchSkillsUpdate, db: DBSession, current_user: AdminUser):
+    tag = payload.skill_tag.strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="技能标签不能为空")
+    if payload.mode not in ("add", "remove"):
+        raise HTTPException(status_code=400, detail="mode 仅支持 add/remove")
+    if payload.mode == "add" and not (1 <= payload.level <= 5):
+        raise HTTPException(status_code=400, detail="熟练度须在 1-5")
+    affected = 0
+    for pid in payload.person_ids:
+        st = db.scalar(
+            select(PersonSkillTag).where(
+                PersonSkillTag.person_id == pid,
+                PersonSkillTag.skill_tag == tag,
+            )
+        )
+        if payload.mode == "remove":
+            if st:
+                db.delete(st)
+                affected += 1
+        else:
+            if st:
+                st.level = payload.level
+                st.updated_by = current_user.username
+            else:
+                db.add(PersonSkillTag(person_id=pid, skill_tag=tag, level=payload.level, updated_by=current_user.username))
+            affected += 1
+    db.commit()
+    return R(data={"affected": affected, "mode": payload.mode, "skill_tag": tag})
+
+
 @router.get("/{person_id}", response_model=R, summary="人员详情(含别名)")
 def get_person(person_id: int, db: DBSession, _: CurrentUser):
     p = db.get(Person, person_id)
     if not p:
         raise HTTPException(status_code=404, detail="人员不存在")
-    
+
     # 获取当前分组信息
     current_group = None
     if p.current_group_id:
         g = db.get(Group, p.current_group_id)
         if g:
             current_group = {"id": g.id, "name": g.name}
-    
+
     # 获取当前所有专项
     current_specialties = []
     assigns = list(db.scalars(
         select(PersonSpecialtyAssignment)
         .where(
             PersonSpecialtyAssignment.person_id == p.id,
-            PersonSpecialtyAssignment.is_current == True,
+            PersonSpecialtyAssignment.is_current.is_(True),
         )
         .order_by(PersonSpecialtyAssignment.is_primary.desc())
     ))
@@ -366,7 +493,7 @@ def get_person(person_id: int, db: DBSession, _: CurrentUser):
                     "workload_ratio": a.workload_ratio,
                     "effective_from": a.effective_from,
                 })
-    
+
     # 基础信息
     detail = {
         "id": p.id,
@@ -391,8 +518,9 @@ def get_person(person_id: int, db: DBSession, _: CurrentUser):
         "updated_at": p.updated_at,
         "current_group": current_group,
         "current_specialties": current_specialties,
+        "skill_tags": [{"skill_tag": st.skill_tag, "level": st.level} for st in p.skill_tags],
     }
-    
+
     aliases = list(db.scalars(select(PersonAlias).where(PersonAlias.person_id == person_id).order_by(PersonAlias.id)))
     _attach_alias_labels(db, aliases)
     # 注入每个别名在各业务表的出现位置(回答"别名在哪些地方出现")
@@ -444,7 +572,7 @@ def person_timeline(
 
 
 @router.put("/{person_id}", response_model=R, summary="更新人员信息")
-def update_person(person_id: int, payload: PersonUpdate, db: DBSession, _: AdminUser):
+def update_person(person_id: int, payload: PersonUpdate, db: DBSession, admin: AdminUser):
     p = db.get(Person, person_id)
     if not p:
         raise HTTPException(status_code=404, detail="人员不存在")
@@ -452,6 +580,8 @@ def update_person(person_id: int, payload: PersonUpdate, db: DBSession, _: Admin
     lifecycle_fields = {"hire_date", "probation_end_date", "regularization_date", "resignation_date"}
     data = payload.model_dump(exclude_unset=True)
     has_lifecycle_change = any(k in lifecycle_fields for k in data)
+    # ★ #261 统一变更审计: setattr 前先算字段级 before/after(commit 后与业务各自提交落 audit_changes)
+    diffs = diff_model_changes(p, data)
     for k, v in data.items():
         # employment_status 允许直接改(也可由 recalculate 自动推导)
         setattr(p, k, v)
@@ -461,6 +591,11 @@ def update_person(person_id: int, payload: PersonUpdate, db: DBSession, _: Admin
         recalculate_employment_status(p)
     db.commit()
     db.refresh(p)
+    if diffs:
+        record_change(
+            db, entity_type="persons", entity_id=person_id,
+            action="update", changes=diffs, actor=admin, source="api",
+        )
     return R(data=_with_alias_count(db, p))
 
 

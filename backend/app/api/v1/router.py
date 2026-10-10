@@ -2,7 +2,78 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import agenda, alerts, analysis_views, analytics, auth, cache_admin, channels, collection_logs, complaints, dashboards, data_quality, data_sources, dept_info_syncs, devices, doc_sync, fetch, groups, incidents, invoices, kb_articles, match, measures, metrics, miniapp, notifications, operation_logs, persons, policies, recharges, report_comments, report_templates, reports, schedules, scrm_chat, scrm_staff, site_info, source_groups, specialties, staff_assignments, strategy, sync_complaints, sync_manual_refunds, system, system_events, tasks, todos, upstream_tickets, uploads, users, wechat, weekly_reports, wide_tables
+from app.api.v1 import (
+    admin_ai,
+    admin_ai_prompt_config,
+    admin_ai_prompt_eval,
+    admin_bms_backfill,
+    admin_combo_dict,
+    admin_complaint_same_source,
+    admin_governance_prompt,
+    admin_onboarding_prompt,
+    agenda,
+    ai,
+    ai_onboarding,
+    alerts,
+    analysis_views,
+    analytics,
+    auth,
+    batch_jobs,
+    cache_admin,
+    channels,
+    collection_logs,
+    complaints,
+    dashboards,
+    data_quality,
+    data_sources,
+    dept_info_syncs,
+    device_flow,
+    devices,
+    doc_sync,
+    external,
+    fetch,
+    governance,
+    groups,
+    incidents,
+    integrations,
+    invoices,
+    kb_articles,
+    llm_providers,
+    match,
+    measures,
+    metrics,
+    miniapp,
+    notifications,
+    operation_logs,
+    persons,
+    policies,
+    recharges,
+    reconcile,
+    report_comments,
+    report_templates,
+    reports,
+    schedules,
+    scrm_chat,
+    scrm_staff,
+    shared_doc_sync,
+    site_info,
+    source_groups,
+    specialties,
+    staff_assignments,
+    strategy,
+    sync_complaints,
+    sync_manual_refunds,
+    system,
+    system_events,
+    tasks,
+    todos,
+    uploads,
+    upstream_tickets,
+    users,
+    wechat,
+    weekly_reports,
+    wide_tables,
+)
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
@@ -13,6 +84,7 @@ api_router.include_router(collection_logs.router)
 api_router.include_router(match.router)
 api_router.include_router(analytics.router)
 api_router.include_router(devices.router)
+api_router.include_router(device_flow.router)
 api_router.include_router(todos.router)
 api_router.include_router(tasks.router)
 api_router.include_router(measures.router)
@@ -20,6 +92,7 @@ api_router.include_router(incidents.router)
 api_router.include_router(policies.router)
 api_router.include_router(dept_info_syncs.router)
 api_router.include_router(recharges.router)
+api_router.include_router(reconcile.router)
 api_router.include_router(reports.router)
 api_router.include_router(weekly_reports.router)
 api_router.include_router(report_templates.router)
@@ -42,19 +115,37 @@ api_router.include_router(scrm_staff.router)
 api_router.include_router(scrm_chat.router)
 api_router.include_router(notifications.router)
 api_router.include_router(agenda.router)
+api_router.include_router(ai.router)
+api_router.include_router(ai_onboarding.router)  # #157 AI 数据接入助手(起草/确认/落地包)
+api_router.include_router(governance.router)  # #165 AI 数据治理(体检/研判/分级执行/规则)
 api_router.include_router(complaints.router)
 api_router.include_router(schedules.router)
 api_router.include_router(source_groups.router)
 api_router.include_router(invoices.router)
 api_router.include_router(kb_articles.router)
+api_router.include_router(llm_providers.router)
+api_router.include_router(admin_ai.router)  # #125 AI 报告与模板管理(admin)
+api_router.include_router(admin_combo_dict.router)  # #288 套餐归一字典(admin)
+api_router.include_router(admin_bms_backfill.router)  # #293 bms_order 历史订单回填(admin)
+api_router.include_router(admin_complaint_same_source.router)  # #208 外部投诉同源案件(admin)
+api_router.include_router(admin_ai_prompt_eval.router)  # #173 AI 提示词评估中心(admin)
+api_router.include_router(admin_ai_prompt_config.router)  # #178 提示词版本管理(admin)
+api_router.include_router(admin_governance_prompt.router)  # 研判提示词版本管理(admin)
+api_router.include_router(admin_onboarding_prompt.router)  # 起草提示词版本管理(admin)
 api_router.include_router(alerts.router)
 api_router.include_router(metrics.router)
+api_router.include_router(batch_jobs.router)  # #258 夜批任务管理
 api_router.include_router(channels.router)
 api_router.include_router(upstream_tickets.router)
 api_router.include_router(data_quality.router)
+api_router.include_router(data_quality.rejected_router)
+api_router.include_router(data_quality.disposition_router)
 api_router.include_router(wechat.router)
 api_router.include_router(miniapp.router)
 api_router.include_router(sync_complaints.router)
 api_router.include_router(sync_manual_refunds.router)
 api_router.include_router(doc_sync.router)
+api_router.include_router(shared_doc_sync.router)
+api_router.include_router(external.router)
+api_router.include_router(integrations.router)
 api_router.include_router(site_info.router)

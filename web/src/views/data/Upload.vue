@@ -15,14 +15,22 @@
               <el-option label="退费单管理" value="refund" />
               <el-option label="提现操作记录" value="wallet" />
               <el-option label="服务请求管理" value="ticket" />
-              <el-option label="商户号现金流" value="merchant_refund" />
+              <el-option label="商户号现金流(旧,作废)" value="merchant_refund" />
               <el-option label="商户主数据" value="merchant" />
               <el-option label="智能助手处理记录" value="cs_record" />
               <el-option label="外部投诉(315/监督局)" value="external_complaint" />
               <el-option label="卡商群投诉" value="card_complaint" />
+              <el-option label="设备套餐" value="device_combo" />
+              <el-option label="手动退款登记" value="manual_refund" />
+              <el-option label="商户号现金(退)/退款记录报表" value="refund_record_report" />
+              <el-option label="订单管理" value="bms_order" />
+              <el-option label="退货跟踪" value="return_tracking" />
+              <el-option label="设备月流量" value="device_flow_usage" />
+              <el-option label="设备管理档案" value="device_profile" />
+              <el-option label="设备标签(打标明细)" value="device_tag_binding" />
             </el-select>
           </el-form-item>
-          <el-form-item v-if="form.data_type" label="Sheet" >
+          <el-form-item v-if="form.data_type" label="Sheet">
             <el-select v-model="form.sheet_name" placeholder="留空自动取第一个" clearable style="width: 100%">
               <el-option v-for="s in sheetNames" :key="s" :label="s" :value="s" />
             </el-select>
@@ -49,6 +57,10 @@
             <el-button type="primary" :loading="parsing" :disabled="!form.data_type || !currentFile" @click="handleParse">
               解析文件
             </el-button>
+            <el-button :disabled="!form.data_type" :loading="templateLoading" @click="handleDownloadTemplate">
+              下载模板({{ typeLabel }})
+            </el-button>
+            <el-text type="info" size="small" style="margin-left: 8px">新表历史补录:可先下载模板填数,再上传导入</el-text>
           </el-form-item>
         </el-form>
       </div>
@@ -220,7 +232,7 @@
 
           <div class="mt-16 flex gap-8">
             <el-button @click="step = 1">上一步</el-button>
-            <el-button @click="runDiff" :loading="diffing">重新计算</el-button>
+            <el-button :loading="diffing" @click="runDiff">重新计算</el-button>
             <el-button type="primary" @click="goImport">下一步:确认导入</el-button>
           </div>
         </template>
@@ -268,13 +280,14 @@
 import { ref, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Loading } from '@element-plus/icons-vue'
-import { parseUpload, previewDiff, confirmImport } from '@/api/upload'
-import { COLUMN_TEMPLATES } from './templates'
+import { parseUpload, previewDiff, confirmImport, downloadUploadTemplate } from '@/api/upload'
+import { COLUMN_TEMPLATES, TYPE_LABELS } from './templates'
 
 const step = ref(0)
 const parsing = ref(false)
 const diffing = ref(false)
 const importing = ref(false)
+const templateLoading = ref(false)
 const currentFile = ref(null)
 const sheetNames = ref([])
 const preview = ref({})
@@ -283,7 +296,7 @@ const importResult = ref(null)
 
 const form = reactive({ data_type: '', sheet_name: null })
 
-const typeLabel = computed(() => ({ refund: '退费单', wallet: '钱包提现操作', ticket: '服务退款工单', merchant_refund: '商户号现金流', merchant: '商户主数据' }[form.data_type] || ''))
+const typeLabel = computed(() => TYPE_LABELS[form.data_type] || form.data_type || '')
 const targetFields = computed(() => Object.keys(COLUMN_TEMPLATES[form.data_type] || {}))
 const mappingRows = computed(() => (preview.value.columns || []).map((c) => ({ source: c, target: suggestedMapping()[c] || '' })))
 const mappingFieldCount = computed(() => mappingRows.value.filter((r) => r.target).length)
@@ -327,6 +340,36 @@ function getSample(col) {
 function handleFileChange(file) {
   currentFile.value = file.raw
   sheetNames.value = []
+}
+
+// 下载当前数据类型的导入模板(CSV, 表头=建议列中文名)
+async function handleDownloadTemplate() {
+  templateLoading.value = true
+  try {
+    const res = await downloadUploadTemplate(form.data_type)
+    const blobData = res instanceof Blob ? res : res?.data
+    const blob = new Blob([blobData], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `template_${form.data_type}_${new Date().toISOString().slice(0, 10)}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    ElMessage.success('模板已下载,按列填数后拖回本页上传即可')
+  } catch (e) {
+    if (e?.response?.data instanceof Blob) {
+      try {
+        const txt = await e.response.data.text()
+        ElMessage.error(txt || '模板下载失败')
+        return
+      } catch (_) { /* ignore */ }
+    }
+    ElMessage.error(e?.message || '模板下载失败')
+  } finally {
+    templateLoading.value = false
+  }
 }
 
 async function handleParse() {

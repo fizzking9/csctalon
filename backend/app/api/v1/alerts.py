@@ -5,14 +5,39 @@
 services/metric_registry_service.py 求值, 走四级分级/恢复自愈/通知分发。
 """
 
+import logging
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
 from app.api.deps import AdminUser, CurrentUser, DBSession, ManagerUser
 from app.models.alert import Alert, AlertRule
 from app.schemas.common import PageBase, R
-from app.services.metric_registry_service import METRIC_DEFS, evaluate_metric, snapshot_metric
+from app.services import ingest_incident_service
+from app.services.metric_registry_service import (
+    _resolve_metric_meta,
+    evaluate_metric,
+    snapshot_metric,
+)
 from app.services.notification_channel import dispatch_alert
+
+logger = logging.getLogger(__name__)
+
+# 业务日口径: 统计窗口 period_start/period_end 存 naive UTC(上海 00:00 = UTC 前一日
+# 16:00), 转"业务日 YYYY-MM-DD"必须按 Asia/Shanghai 换算, 不能直接 strftime
+# (否则 UTC 日期比上海业务日早一天 → Incident 标题/匹配错位, 2026-09-06 缺陷)。
+_TZ_CN = ZoneInfo("Asia/Shanghai")
+
+
+def _period_biz_day(dt) -> str | None:
+    """把 naive/aware UTC 的 period_start 转成上海业务日 YYYY-MM-DD。
+
+    与 analytics/metric_registry 的看板口径一致(北京日), 供 Incident 登记/平息匹配。
+    #203: 实现下沉 service 层(alerts 与 bms_scheduler 熔断链路共用同一口径)。
+    """
+    return ingest_incident_service.biz_day(dt)
+
 
 router = APIRouter(prefix="/alerts", tags=["预警中心"])
 
@@ -123,6 +148,36 @@ def set_alert_status(alert_id: int, payload: dict, db: DBSession, _: ManagerUser
     return R(message="已更新")
 
 
+def _auto_register_ingest_incident(db, rule: AlertRule, alert, now) -> None:
+    """采集健康 critical 告警 → 自动登记 Incident(事件进入系统化闭环)。
+
+    幂等: 同一 (来源=数据采集, 标题含指标 code + 告警 period 日期) 只登记一次。
+    目的: 根治 09-02 事故"补跑了但 Incident/工单无留痕"的断层——
+          采集故障自动进 incidents 台账, 有状态流转(登记→处理→复盘), 可追踪。
+    #203: 实现下沉 ingest_incident_service.register_ingest_incident,
+          与 bms_scheduler 熔断登记共用同一幂等键; 本函数保持原签名。
+    """
+    try:
+        ingest_incident_service.register_ingest_incident(
+            db,
+            metric_code=rule.metric_code,
+            period_key=_period_biz_day(alert.period_start),
+            subject=f"{rule.metric_code} 入表量异常",
+            detail=(
+                f"采集健康告警自动登记(工单 #5)。\n指标: {rule.metric_code}\n"
+                f"周期: {_period_biz_day(alert.period_start) or alert.period_start}\n"
+                f"告警: {alert.title}\n{alert.detail or ''}\n"
+                f"处置指引: docs/ops/数据采集-运维手册.md §4.1 单日补跑"
+            ),
+            occurred_at=alert.occurred_at or now,
+            metric_value=alert.metric_value,
+            impact="cs_record 接待数据可能缺口(影响接待量/退款挽回等分析口径)",
+            now=now,
+        )
+    except Exception as _e:  # noqa: BLE001 Incident 登记失败不影响告警主流程
+        logger.warning(f"[alerts] Incident 自动登记失败(忽略): {_e}")
+
+
 def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[str]]:
     """指标注册表模式扫描: 求值 → 四级分级 → 幂等/升级/恢复自愈 → 通知分发
 
@@ -134,7 +189,7 @@ def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[st
     """
     from app.models.alert import Alert as AlertModel
 
-    meta = METRIC_DEFS.get(rule.metric_code or "")
+    meta, _dt = _resolve_metric_meta(rule.metric_code or "")
     if not meta:
         return 0, [f"metric:{rule.metric_code}: 未注册"]
     r = evaluate_metric(db, rule.metric_code)
@@ -157,17 +212,48 @@ def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[st
         )
 
     logs: list[str] = []
-    if not data_ok or value is None:
-        return 0, [f"metric:{rule.metric_code}: 数据不完整(值={value}), 跳过告警(防假告警)"]
+    # ── 采集健康指标(kind=ingest_health): data_ok 为字符串标记时的语义 ──
+    #    no_arrival/sync_failed/push_failed = 数据未到达/采集推送故障 → 必须告警
+    #    cold_start = 冷启动 → 只记录不告警
+    ingest_fault = None
+    if meta.get("kind") == "ingest_health" and isinstance(data_ok, str):
+        if data_ok in ("no_arrival", "no_sync"):  # no_sync 兼容历史
+            ingest_fault = "该源当日无数据到达(采集/推送/手动导入均无, 疑似断流)"
+        elif data_ok == "sync_failed":
+            ingest_fault = "该源当日存在抓取失败记录(疑似上游故障/熔断)"
+        elif data_ok == "push_failed":
+            ingest_fault = "该源当日被动推送失败(疑似 workbuddy/上游异常)"
+        elif data_ok == "cold_start":
+            # 冷启动: 只记录快照不告警(样本不足, LOCKED §六)
+            return 0, [f"metric:{rule.metric_code}: 冷启动(样本不足), 只记录不告警"]
+    # 数据完整性守卫:
+    # - 业务指标: data_ok=False 或值缺失 → 跳过(防假告警)
+    # - 采集健康(data_arrival_*, kind=ingest_health): data_ok 是故障标记字符串或 True,
+    #   值(value)恒为 None(该指标只表达"到达/未到达", 没有业务数值)——
+    #   因此不能因 value is None 提前跳过, 否则「推送恢复后 value=None」会误走"跳过",
+    #   永远到不了下方"恢复自愈"分支 → 告警滞留 pending 无法自动恢复(2026-09-06 缺陷)。
+    #   正确语义: 无故障标记(ingest_fault is None)即视为"已回稳", 放行到恢复自愈。
+    is_ingest_health = meta.get("kind") == "ingest_health"
+    if (not data_ok or value is None) and not is_ingest_health:
+        # 业务指标: data_ok=False 跳过(防假告警); 采集健康带故障标记时继续走告警
+        if ingest_fault is None:
+            return 0, [f"metric:{rule.metric_code}: 数据不完整(值={value}), 跳过告警(防假告警)"]
 
-    if level in ("warning", "critical"):
-        is_critical = level == "critical"
+    if ingest_fault or level in ("warning", "critical"):
+        is_critical = bool(ingest_fault) or level == "critical"
         # 阈值以指标层配置为准(metric_thresholds, evaluate_metric 分级已按它判断)
         thr_map = r.get("threshold") or {}
         thr_val = thr_map.get("critical_value") if is_critical else thr_map.get("warning_value")
         lv_name = "告警" if is_critical else "预警"
-        title = f"{name}{lv_name}: {value}{unit}(阈值 {thr_val}{unit})"
-        content = f"指标「{name}」当前值 {value}{unit}, 触发{lv_name}线 {thr_val}{unit}。口径: {meta['description']}"
+        if ingest_fault:
+            # 采集故障: 用故障描述做标题/内容(值可能为 None)
+            title = f"{name}异常: {ingest_fault}"
+            content = (f"指标「{name}」{ingest_fault}。详情: {r.get('detail','')}。"
+                       f"\n处置: 参考运维手册单日补跑 SOP -> docs/ops/数据采集-运维手册.md §4.1"
+                       f"(curl 指定日期补跑 cs_record)")
+        else:
+            title = f"{name}{lv_name}: {value}{unit}(阈值 {thr_val}{unit})"
+            content = f"指标「{name}」当前值 {value}{unit}, 触发{lv_name}线 {thr_val}{unit}。口径: {meta['description']}"
         if existing:
             if is_critical and existing.level != "critical":
                 # 预警 → 告警 升级
@@ -179,15 +265,23 @@ def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[st
                 db.flush()
                 dispatch_alert(db, existing.id, title, content, rule.channels, rule.recipient_roles, rule.silence_window)
                 logs.append(f"metric:{rule.metric_code}: 升级为critical({value})")
+                # 采集健康升级到 critical → 补登记 Incident(C1 修复: 首次 critical 必须闭环)
+                if meta.get("kind") == "ingest_health" and is_critical:
+                    _auto_register_ingest_incident(db, rule, existing, now)
                 return 0, logs
             return 0, [f"metric:{rule.metric_code}: 同级别已有pending, 幂等跳过({value})"]
-        a = AlertModel(rule_id=rule.id, title=title, level=level, detail=content, occurred_at=now,
-                       status="pending", metric_code=rule.metric_code, metric_value=value,
-                       threshold_value=thr_val, period_start=period_start, period_end=period_end, data_ok=data_ok)
+        a = AlertModel(rule_id=rule.id, title=title, level="critical" if is_critical else level,
+                       detail=content, occurred_at=now, status="pending",
+                       metric_code=rule.metric_code, metric_value=value,
+                       threshold_value=thr_val, period_start=period_start, period_end=period_end,
+                       data_ok=bool(data_ok) if not isinstance(data_ok, str) else True)
         db.add(a)
         db.flush()
         dispatch_alert(db, a.id, title, content, rule.channels, rule.recipient_roles, rule.silence_window)
-        return 1, [f"metric:{rule.metric_code}: 创建{lv_name}({value})"]
+        # 采集健康首次 critical → 自动登记 Incident(事件进入系统化闭环, 幂等: 同 period 不重复)
+        if meta.get("kind") == "ingest_health" and is_critical:
+            _auto_register_ingest_incident(db, rule, a, now)
+        return 1, [f"metric:{rule.metric_code}: 创建{lv_name}({value or ingest_fault})"]
 
     # 恢复自愈: 回稳且有未恢复告警
     if existing and existing.status in ("pending", "confirmed"):
@@ -197,8 +291,27 @@ def _scan_metric_rule(db: DBSession, rule: AlertRule, now) -> tuple[int, list[st
         dispatch_alert(db, existing.id, f"{name}已恢复",
                        f"指标「{name}」当前值 {value}{unit}, 已回到正常区间。",
                        rule.channels, rule.recipient_roles, rule.silence_window)
+        # 采集健康恢复 → 自动把对应 Incident 标记为已平息(避免误登记 Incident 永久滞留台账)
+        if meta.get("kind") == "ingest_health":
+            _close_ingest_incident(db, rule, existing, now)
         return 0, [f"metric:{rule.metric_code}: 恢复({value})"]
     return 0, [f"metric:{rule.metric_code}: 达标({value})"]
+
+
+def _close_ingest_incident(db, rule: AlertRule, alert, now) -> None:
+    """采集健康告警恢复 → 把对应 Incident(同源同周期)标记为已平息/闭环。
+
+    目的: 若告警是因瞬时误报/快速恢复产生, Incident 不永久滞留台账;
+          也覆盖 C2 场景(no_sync 误报恢复后 Incident 自动关闭)。
+    #203: 实现下沉 ingest_incident_service.close_ingest_incidents(签名保持)。
+    """
+    ingest_incident_service.close_ingest_incidents(
+        db,
+        metric_code=rule.metric_code,
+        period_key=_period_biz_day(alert.period_start),
+        now=now,
+        note="告警恢复自动平息",
+    )
 
 
 @router.post("/scan", response_model=R, summary="手动触发预警扫描(多规则)")
@@ -210,7 +323,6 @@ def scan_alerts(db: DBSession, _: ManagerUser):
     """
     from datetime import datetime, timedelta, timezone
 
-    from app.models.cs_record import CsRecord
     from app.models.external_complaint import ExternalComplaint
     from app.models.incident import Incident
     from app.models.refund import Refund

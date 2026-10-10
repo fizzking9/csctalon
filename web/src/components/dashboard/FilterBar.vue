@@ -2,7 +2,7 @@
   <div class="filter-bar-wrap">
     <slot name="left" />
     <el-radio-group v-if="quickOptions && quickOptions.length" v-model="innerQuick" size="small" @change="onQuickChange">
-      <el-radio-button v-for="opt in quickOptions" :key="opt.value" :label="opt.value">
+      <el-radio-button v-for="opt in quickOptions" :key="opt.value" :value="opt.value">
         {{ opt.label }}
       </el-radio-button>
     </el-radio-group>
@@ -22,12 +22,12 @@
     />
 
     <el-radio-group v-if="showGrain && grainOptions && grainOptions.length" v-model="innerGrain" size="small" style="margin-left: 8px" @change="onGrainChange">
-      <el-radio-button v-for="g in grainOptions" :key="g.value" :label="g.value">{{ g.label }}</el-radio-button>
+      <el-radio-button v-for="g in grainOptions" :key="g.value" :value="g.value">{{ g.label }}</el-radio-button>
     </el-radio-group>
 
     <slot name="middle" />
 
-    <el-button v-if="showRefresh" :icon="Refresh" :loading="loading" @click="onRefresh" style="margin-left:8px">刷新</el-button>
+    <el-button v-if="showRefresh" :icon="Refresh" :loading="loading" style="margin-left:8px" @click="onRefresh">刷新</el-button>
 
     <slot name="right" />
   </div>

@@ -4,16 +4,17 @@
       <div class="page-title" style="margin: 0">分析视图</div>
       <div>
         <el-radio-group v-model="filterPreset" size="small" @change="loadData">
-          <el-radio-button :label="null">全部</el-radio-button>
-          <el-radio-button :label="true">预设</el-radio-button>
-          <el-radio-button :label="false">自定义</el-radio-button>
+          <el-radio-button :value="null">全部</el-radio-button>
+          <el-radio-button :value="true">预设</el-radio-button>
+          <el-radio-button :value="false">自定义</el-radio-button>
         </el-radio-group>
-        <el-button type="primary" :icon="Plus" style="margin-left: 12px" @click="goBuilder">新建视图</el-button>
+        <!-- #46: 写操作入口按角色隐藏, 与后端 AdminUser 配对(避免"按钮在但点了 403") -->
+        <el-button v-if="isAdmin" type="primary" :icon="Plus" style="margin-left: 12px" @click="goBuilder">新建视图</el-button>
       </div>
     </div>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe>
+      <el-table v-loading="loading" :data="list" border stripe>
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column prop="name" label="名称" min-width="180" show-overflow-tooltip />
         <el-table-column label="类型" width="100">
@@ -44,9 +45,12 @@
         <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
             <el-button text type="primary" size="small" @click="goRender(row)">查看</el-button>
-            <el-button text type="primary" size="small" @click="goEdit(row)">编辑</el-button>
-            <el-button text type="success" size="small" @click="openPublish(row)">发布为看板</el-button>
-            <el-button v-if="!row.is_preset" text type="danger" size="small" @click="handleDelete(row)">删除</el-button>
+            <!-- 写操作入口仅 admin(#46 与后端 AdminUser 配对) -->
+            <template v-if="isAdmin">
+              <el-button text type="primary" size="small" @click="goEdit(row)">编辑</el-button>
+              <el-button text type="success" size="small" @click="openPublish(row)">发布为看板</el-button>
+              <el-button v-if="!row.is_preset" text type="danger" size="small" @click="handleDelete(row)">删除</el-button>
+            </template>
           </template>
         </el-table-column>
       </el-table>
@@ -67,14 +71,18 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { listAnalysisViews, deleteAnalysisView } from '@/api/analysis-view'
 import PublishDashboardDialog from '@/components/PublishDashboardDialog.vue'
+import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
+const authStore = useAuthStore()
+// #46: 与后端 analysis_views 写接口的 AdminUser 配对
+const isAdmin = computed(() => authStore.isAdmin)
 const list = ref([])
 const total = ref(0)
 const loading = ref(false)

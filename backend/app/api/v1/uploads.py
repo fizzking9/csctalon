@@ -1,29 +1,49 @@
 """数据上传与导入路由"""
 
+import csv
+import io
+import logging
 from datetime import datetime, timezone
 
-import pandas as pd
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import CurrentUser, DBSession
 from app.core.config import settings
-from app.core.database import get_db
 from app.core.storage import resolve_upload_path
 from app.models.data_source import DataSource
 from app.models.upload import UploadRecord
 from app.schemas.common import PageBase, R
 from app.schemas.upload import DiffPreviewRequest, ImportResponse, UploadRecordOut
-from app.services.data_parser import load_dataframe, parse_file, save_upload_file
+from app.services.data_parser import COLUMN_TEMPLATES, load_dataframe, parse_file, save_upload_file
 from app.services.diff_preview import compute_diff
+from app.services.ingest_service import ingest_table
 from app.services.matcher import match_all
 from app.services.person_extractor import extract_person_aliases
-from app.services.upsert import run_upsert
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/uploads", tags=["数据中心-上传"])
 
-DATA_TYPES = {"refund", "shanmao_refund", "wallet", "ticket", "merchant_refund", "merchant", "cs_record", "external_complaint", "card_complaint", "staff"}
+DATA_TYPES = {
+    "refund", "shanmao_refund", "wallet", "ticket", "merchant_refund", "merchant",
+    "cs_record", "external_complaint", "card_complaint", "staff",
+    # BMS 五源扩容新增(2026-09-05, A-20260905-001): 支持文件导入回补/补录
+    "refund_record_report", "bms_order", "return_tracking",
+    "device_flow_usage", "device_profile",
+    # 其它既有可导入类型(补齐 Upload 未暴露/历史遗漏)
+    "manual_refund", "device_combo", "device_tag", "device_tag_binding",
+}
 
 
 @router.post("/parse", response_model=R, summary="上传并解析文件(返回预览)")
@@ -57,7 +77,10 @@ async def parse_upload(
             raise HTTPException(status_code=413, detail=f"文件超过 {settings.MAX_UPLOAD_SIZE_MB}MB 限制")
         try:
             # P0-3: save_upload_file 落盘前校验扩展名白名单 + magic bytes
-            path, actual_stored_path = save_upload_file(content, file.filename or "upload")
+            # #213: 同步落盘/校验放入线程池，避免阻塞事件循环（本函数因需 await file.read 保留 async）。
+            path, actual_stored_path = await run_in_threadpool(
+                save_upload_file, content, file.filename or "upload"
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         filename = file.filename
@@ -65,7 +88,8 @@ async def parse_upload(
         raise HTTPException(status_code=400, detail="必须提供 file 或 stored_path 参数")
 
     try:
-        preview = parse_file(path, data_type, sheet_name=sheet_name)
+        # #213: pandas 解析是 CPU/IO 重活，放入线程池，避免大文件解析阻塞事件循环。
+        preview = await run_in_threadpool(parse_file, path, data_type, sheet_name=sheet_name)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"文件解析失败: {e}") from e
     preview["stored_path"] = actual_stored_path
@@ -74,7 +98,9 @@ async def parse_upload(
 
 
 @router.post("/preview-diff", response_model=R, summary="diff 预览(导入前查看 existing/new/abnormal)")
-async def preview_diff(
+# #213: 改同步 def —— 体内 load_dataframe(pandas) / compute_diff(同步 DB) 全是阻塞调用且无
+# await；声明 async 反而让重活跑在事件循环线程。普通 def 由 FastAPI 自动放入线程池执行。
+def preview_diff(
     payload: DiffPreviewRequest,
     db: DBSession,
     current_user: CurrentUser,
@@ -105,7 +131,9 @@ async def preview_diff(
 
 
 @router.post("/import", response_model=R[ImportResponse], summary="确认导入(upsert+关联匹配)")
-async def confirm_import(
+# #213: 改同步 def —— load_dataframe + ingest_table(批量 upsert) 是最重的同步调用且无 await，
+# 必须跑在线程池而非事件循环线程；关联匹配等后处理已在 BackgroundTasks 中异步执行。
+def confirm_import(
     payload: dict,
     db: DBSession,
     current_user: CurrentUser,
@@ -148,8 +176,12 @@ async def confirm_import(
     try:
         # 重新加载完整 DataFrame
         df = load_dataframe(path, sheet_name=sheet_name, encoding=encoding)
-        # 执行 upsert
-        result = run_upsert(df, data_type, mapping, db)
+        # 统一入库接口(#42): 所有采集入口走同一通道, 返回值统一 IngestResult
+        result = ingest_table(
+            db, data_type,
+            df=df, mapping=mapping,
+            source="upload", source_ref=f"upload_record:{record.id}",
+        )
         # 更新记录状态
         record.total_rows = result.total
         record.inserted_rows = result.inserted
@@ -161,6 +193,14 @@ async def confirm_import(
             record.error_detail = {"errors": result.errors[:50], "warnings": result.warnings[:50]}  # 仅存前50条
         db.commit()
         db.refresh(record)
+
+        # R-P1-17: 手动补导已落库 → 回写缺口台账(open/partial → filled),
+        # 否则已齐数据仍被次日 5:00 当缺口反复强制补跑。仅在有实际写入时处理。
+        if result.inserted + result.updated > 0:
+            try:
+                _close_gaps_from_import(db, data_type, df, mapping, record.id)
+            except Exception as ge:  # noqa: BLE001 台账回写失败不影响导入结果
+                logger.warning(f"手动导入回写缺口台账失败(忽略): {ge}")
 
         # 后台异步执行关联匹配和人员别名提取（避免阻塞导入响应）
         background_tasks.add_task(_run_post_import_tasks, data_type)
@@ -231,11 +271,120 @@ def get_record(record_id: int, db: DBSession, _: CurrentUser):
     return R(data=UploadRecordOut.model_validate(record))
 
 
+@router.get("/template", summary="下载导入模板(CSV, 按类型)")
+def download_template(
+    _: CurrentUser,
+    data_type: str = Query(..., description="数据类型(与上传下拉一致)"),
+):
+    """生成 CSV 导入模板: 表头 = 该类型建议映射列(COLUMN_TEMPLATES 首个候选中文列名)。
+
+    用户下载后按列填数, 再走 上传→解析→映射→导入; 用于 BMS 五源新表的历史补录。
+    输出 UTF-8 BOM, Excel 打开不乱码。
+    """
+    if data_type not in DATA_TYPES:
+        raise HTTPException(status_code=400, detail=f"不支持的数据类型,可选: {sorted(DATA_TYPES)}")
+    tpl = COLUMN_TEMPLATES.get(data_type)
+    if not tpl:
+        raise HTTPException(status_code=404, detail=f"{data_type} 暂无列模板,无法生成")
+    # 每个目标字段取第一个候选中文列名作为模板表头(与 suggest_mapping 一致)
+    headers: list[str] = []
+    for target, candidates in tpl.items():
+        cand = candidates[0] if candidates else target
+        headers.append(cand)
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(headers)
+    csv_bytes = ("\ufeff" + buf.getvalue()).encode("utf-8")
+    fname = f"template_{data_type}_{datetime.now().strftime('%Y%m%d')}.csv"
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@router.get("/file", summary="下载已上传/采集的原始文件")
+def download_upload_file(
+    db: DBSession,
+    _: CurrentUser,
+    record_id: int = Query(..., description="上传记录 ID(upload_records)"),
+):
+    """下载 upload_records 中某条记录对应的原始 CSV/XLSX(含 BMS 采集落盘的)。
+
+    安全: 经 resolve_upload_path 校验路径在 UPLOAD_DIR 内; 仅登录用户可访问。
+    用于回看采集到的原始文件 / 校验导入依据 / 导出发给他人参考。
+    """
+    record = db.get(UploadRecord, record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    path = resolve_upload_path(record.stored_path, record.filename)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="原始文件不存在,可能已被清理")
+    return FileResponse(
+        path=str(path),
+        filename=record.filename or path.name,
+        media_type="application/octet-stream",
+    )
+
+
+def _close_gaps_from_import(db, data_type: str, df, mapping: dict, upload_id: int) -> None:
+    """手动导入成功后按业务日回写 gap_records(R-P1-17)。
+
+    口径:
+      - 业务日字段 = DataSource.time_field(注册表单一来源); 未登记 → 跳过。
+      - 源列 = column_mapping[time_field]({目标:源} 映射); 映射缺失但 df 有同名列也兼容。
+      - 文件内时间为**北京墙钟**(naive 直接取日期, 不按 UTC 换算);
+        aware 时间先转 Asia/Shanghai 再取日。
+    """
+    import pandas as pd
+
+    ds = db.scalar(select(DataSource).where(DataSource.code == data_type))
+    time_field = ds.time_field if ds else None
+    if not time_field:
+        return
+    col = (mapping or {}).get(time_field)
+    if col not in df.columns:
+        # 兼容无映射/同名列直通
+        col = time_field if time_field in df.columns else None
+    if col is None:
+        return
+
+    # errors=coerce 过滤无法解析的单元格; naive 保留(文件即北京墙钟)
+    s = pd.to_datetime(df[col], errors="coerce").dropna()
+    dates = {
+        (ts.tz_convert("Asia/Shanghai") if ts.tzinfo is not None else ts).strftime("%Y-%m-%d")
+        for ts in s
+    }
+    if not dates:
+        return
+
+    from app.services.gap_queue_service import mark_filled_for_dates
+
+    n = mark_filled_for_dates(db, data_type, dates, source=f"upload:{upload_id}")
+    if n:
+        logger.info(
+            f"手动导入回写缺口台账: {n} 条 filled"
+            f"(data_type={data_type}, upload_id={upload_id}, 业务日={sorted(dates)})"
+        )
+
+
 def _run_post_import_tasks(data_type: str):
-    """后台任务:关联匹配、人员别名提取、退费宽表物化"""
+    """后台任务:关联匹配、人员别名提取、退费宽表物化
+
+    ⚠️ 2026-09-14 (#88): 退费宽表改为**按相关源白名单触发**(与 bms_sync 的 post-sync
+    钩子对齐)。修复前此处是**无条件全量** `build_refund_wide(db)`,`data_type` 只用于
+    打日志 —— 导致上传一个与宽表毫无关系的设备套餐(device_combo)CSV, 也会全量重建
+    6.6 万行宽表(约 50s)。宽表行本体来自 refunds, 列来自 tickets/wallet_withdrawals/
+    external_complaints, 与 device_combo 完全无关。
+    """
     from app.core.database import SessionLocal
-    from app.services.matcher import match_all
-    from app.services.person_extractor import extract_person_aliases
+    from app.services.bms_sync import (
+        CASH_FLOW_WIDE_RELEVANT_SOURCES,
+        REFUND_WIDE_RELEVANT_SOURCES,
+        is_cash_flow_wide_relevant,
+        is_refund_wide_relevant,
+    )
     from app.services.wide_table_builder import build_refund_wide
 
     try:
@@ -244,19 +393,51 @@ def _run_post_import_tasks(data_type: str):
             # 触发关联匹配(增量)
             match_stats = match_all(db, only_unmatched=True)
             # 触发人员别名提取(增量,幂等)
-            person_stats = extract_person_aliases(db)
+            extract_person_aliases(db)
             db.commit()
-            # 重建退费宽表(全量,确保源数据更新后宽表同步刷新;失败不阻塞)
-            try:
-                wide_stats = build_refund_wide(db)
-                import logging
-                logging.getLogger(__name__).info(
-                    f"refund_wide 重建完成(data_type={data_type}): {wide_stats}"
+            # 重建退费宽表 —— 仅当本次导入的源属于宽表相关源,或匹配新增了关系时才做。
+            # 判定直接复用 bms_sync 的白名单(单一事实来源, 避免两处判据漂移)。
+            # 注意: 上传通道能拿到的只有 data_type, 拿不到真实写入行数; 该通道本身
+            # 就是"用户确认导入"语义(调用前已完成 ingest_table), 故不再校验行数。
+            # 失败不阻塞导入。
+            import logging
+            _log = logging.getLogger(__name__)
+            relevant = is_refund_wide_relevant(data_type)
+            match_affected = (match_stats or {}).get("_affected_refund_nos") or set()
+            if not relevant and not match_affected:
+                _log.info(
+                    f"跳过 refund_wide 重建(data_type={data_type} 非宽表相关源, "
+                    f"相关源={list(REFUND_WIDE_RELEVANT_SOURCES)}, 且匹配无新增)"
                 )
-            except Exception as we:
-                import logging
-                logging.getLogger(__name__).warning(
-                    f"refund_wide 重建失败(data_type={data_type},不影响导入): {we}"
+            else:
+                try:
+                    wide_stats = build_refund_wide(db)
+                    wide_stats["relevant_sources"] = [data_type] if relevant else ["(matcher)"]
+                    _log.info(
+                        f"refund_wide 重建完成(data_type={data_type}): {wide_stats}"
+                    )
+                except Exception as we:
+                    _log.warning(
+                        f"refund_wide 重建失败(data_type={data_type},不影响导入): {we}"
+                    )
+            # 2026-09-08 (#41/A-20260908-004): 现金流水统一宽表重建(ABCD 出款源上传后刷新;失败不阻塞)
+            # 2026-09-14 (#88): 判据统一到 CASH_FLOW_WIDE_RELEVANT_SOURCES 白名单(与
+            # bms_sync post-sync 同源), 并补齐 external_complaint(has_external_complaint 列依赖它)。
+            if is_cash_flow_wide_relevant(data_type):
+                try:
+                    from app.services.cash_flow_wide_builder import build_cash_flow_wide
+                    _cfw_stats = build_cash_flow_wide(db)
+                    _log.info(
+                        f"cash_flow_wide 重建完成(data_type={data_type}): {_cfw_stats}"
+                    )
+                except Exception as cfe:
+                    _log.warning(
+                        f"cash_flow_wide 重建失败(data_type={data_type},不影响导入): {cfe}"
+                    )
+            else:
+                _log.info(
+                    f"跳过 cash_flow_wide 重建(data_type={data_type} 非相关源, "
+                    f"相关源={list(CASH_FLOW_WIDE_RELEVANT_SOURCES)})"
                 )
             # 导入会更新工单/退款等主台账 → 失效看板缓存(含投诉), 避免旧聚合
             # (见 数据源接入与缓存加速规范.md §九: 每个写入入口必须失效缓存)

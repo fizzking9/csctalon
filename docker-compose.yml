@@ -18,7 +18,10 @@ name: csctalon
 # 配置: 所有密钥/环境变量从同目录 .env 读取（已 gitignore），勿提交真实 .env。
 # 数据: PG / Redis 数据 bind mount 到 ./data，宿主机可直接备份。
 # 日志: ① 所有容器 stdout 走 json-file 轮转（单文件 10m，保留 3 份），防止撑爆磁盘；
-#       ② 后端 gunicorn access/error 日志 + nginx 日志额外写文件到 ./logs，便于直接查看。
+#       ② 后端 gunicorn access/error 日志 + nginx 日志额外写文件到 ./logs，便于直接查看;
+#          nginx 文件日志由宿主 logrotate 轮转(#279, 配置见 deploy/logrotate.d/csctalon-nginx)。
+# 资源: 四服务 deploy.resources.limits 为 cgroup 上限(#279)——非预留, 仅超限时约束;
+#       需 docker compose v2(本文件 name: 字段本已要求 v2)。
 #
 # 挂载路径变量化(生产部署用): 服务器上通过 .env 把数据/日志/附件指到固定绝对目录
 # (如 /opt/csctalon/data), 这样代码目录可随版本切换(releases/current), 数据不随代码变动。
@@ -33,7 +36,11 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-csctalon}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB:-csctalon}
+      # ★ 默认值走安全侧（#214 / AGENTS 铁律：库名默认不得指向真实库）：未显式注入时
+      #   兜底 csctalon_dev，绝不默认真实库名 csctalon。db 容器仅在 data volume 首次初始化时
+      #   据此建库；生产按 deploy/env.production.example 显式 POSTGRES_DB=csctalon + APP_MODE=prod
+      #   （backend 启动期硬校验「模式↔库名」一致），故生产不受此默认影响。
+      POSTGRES_DB: ${POSTGRES_DB:-csctalon_dev}
     # 固定容器用户为 postgres(uid 999): 官方镜像默认即 999, 显式声明使 bind mount 数据目录
     # 属主清晰可辨(宿主侧显示 999 而非错位的 dnsmasq), 便于 backup.sh/巡检直接遍历。
     # install-server.sh 已把 ${DB_DATA_DIR:-./data/postgres} 建好并 chown 999:999。
@@ -47,6 +54,13 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    # 资源上限(#279): 上限而非预留, 仅超限时由 cgroup 约束, 空闲时不抢占。
+    # db 给 2G: 单 backend 低并发 workload, postgres 默认 shared_buffers 远低于此。
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 2G
     restart: unless-stopped
     logging:
       driver: json-file
@@ -66,6 +80,13 @@ services:
       - ${REDIS_DATA_DIR:-./data/redis}:/data
     ports:
       - "127.0.0.1:6379:6379"   # 仅本机可连
+    # 上限(#279): 容器 512M 与 redis maxmemory 256mb 之间留一倍余量
+    # (fork 持久化/复制缓冲), redis 自身 allkeys-lru 先行兜底。
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
     restart: unless-stopped
     logging:
       driver: json-file
@@ -76,15 +97,40 @@ services:
   backend:
     build: ./backend
     container_name: csctalon-backend
-    # 覆盖镜像 CMD:
-    # -w 1: 单worker模式,保证内存互斥锁有效(防止多worker重复提交同步任务导致数据重复)
+    # 覆盖镜像 CMD（与 backend/Dockerfile、Dockerfile.patch 三处一致，#212 已消除 -w 4 矛盾）:
+    # -w 1: 单 worker。下列进程内状态依赖单进程——llm_scheduler 的 threading.Condition 门闸
+    #   （任一时刻仅 1 个 LLM 调用，多 worker 会并发打爆单个 ollama 端点）、SyncTaskManager
+    #   同步互斥（多 worker 重复提交→数据重复）、登录限速进程内计数（限速失效）。
+    #   多机/多 worker 扩容须先把这些状态迁至 Redis（v0.7 明确「立此存照、不做」）。
     # --timeout 900s: sync-all多源抓取含65s间隔,全程5-8分钟,默认120s会被gunicorn判超时SIGABRT→前端502
     command: ["gunicorn", "app.main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "900", "--log-level", "info"]
     env_file:
       - ${ENV_FILE:-.env}
-    # ENV 是 dsh 保留变量, 不能在 .env 中声明; 此处显式注入以维持生产 fail-fast 校验
+    # ★ 2026-09-22: 运行模式改由 APP_MODE 驱动（见 docs/arch/A-20260922-001）。
+    #
+    #   为什么不再硬编码 `ENV=prod`：
+    #     ① `ENV` 是 docker-compose 的**保留变量**，无法从 .env 传入，
+    #        只能在 compose 里写死 → 导致"本地也想跑 dev 却做不到"
+    #        （本地 colima 栈被迫长期以 prod 模式运行）。
+    #     ② `APP_MODE` 不冲突，可走 env_file → 本地可用
+    #        docker-compose.override.yml 覆盖为 dev（该文件 gitignore 且生产没有）。
+    #
+    #   兼容性：settings 优先读 APP_MODE，回退读 ENV（见 app/core/config/settings.py）。
+    #   生产 .env 里已有 `APP_MODE=prod`（见 deploy/env.production.example），
+    #   故此处不再硬编码也不影响生产。
+    #
+    #   ⚠️ 若 .env 里既无 APP_MODE 也无 ENV，settings 默认 dev → 会因
+    #      "dev 模式要求库名以 _dev 结尾"而拒绝启动（默认值安全侧设计）。
+    #      生产必须在 .env 显式声明 APP_MODE=prod —— 这是**有意**的 fail-fast。
     environment:
-      - ENV=prod
+      # ⚠️ 2026-09-06 修复(UPLOAD_DIR 容器内外路径错位):
+      #    .env 的 UPLOAD_DIR/BROWSER_STATE_DIR 是**宿主机挂载源路径**(如 /opt/csctalon/uploads),
+      #    经 env_file 注入容器后, 后端 settings 会把它当成**容器内写入路径** → 采集文件/登录态
+      #    写进容器内非挂载目录(/opt/csctalon/uploads), 宿主看不到、容器重建即丢。
+      #    这里用 environment 显式覆盖为**容器内挂载点路径**(/app/uploads 等), 保证进程内读写落
+      #    在 bind mount 上(对应宿主机固定目录), 与上方 volumes 挂载一一对应。
+      - UPLOAD_DIR=/app/uploads
+      - BROWSER_STATE_DIR=/app/data/browser_states
     volumes:
       # 挂载变量与后端代码读取的 settings.UPLOAD_DIR / BROWSER_STATE_DIR 保持同名(单数),
       # 避免 UPLOADS_DIR/BROWSER_STATES_DIR 复数写法与代码不一致、.env 配串导致路径错配(2026-08-30 部署审计)
@@ -99,6 +145,13 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s   # 预留迁移/种子/调度器启动时间
+    # 上限(#279): 4G 给 Playwright chromium + ddddocr onnx 留余量(采集期单容器峰值
+    # 观测约 1.5-2.5G); 2 CPU 防止采集/导出任务饿死健康检查响应。
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
     depends_on:
       db:
         condition: service_healthy
@@ -119,6 +172,9 @@ services:
       # 生产部署: 不设置则默认 release, 只显示核心菜单(运营看板/工作台/我的待办/专项分析3项/系统管理)
       args:
         BUILD_MODE: ${WEB_BUILD_MODE:-release}
+        # ★ 2026-09-22: 环境模式传给前端（VITE_APP_MODE），与 BUILD_MODE 正交。
+        #   缺省 prod（安全侧）；本地可在 override 里设为 dev。
+        APP_MODE: ${APP_MODE:-prod}
     container_name: csctalon-web
     volumes:
       - ${NGINX_LOGS_DIR:-./logs/nginx}:/var/log/nginx
@@ -127,6 +183,20 @@ services:
     ports:
       - "80:80"
       - "443:443"                                             # HTTPS
+    # 健康检查(#279): 打 /healthz(nginx.conf 内 access_log off 的轻量端点),
+    # 只验 nginx 自身监听; busybox wget 为 nginx:alpine 内置, 无需改镜像。
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # 上限(#279): 纯静态托管, 256M 已远超实际(常态 <30M)。
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
     depends_on:
       backend:
         condition: service_healthy   # 等后端就绪再启动 nginx,消除 host not found in upstream emerg

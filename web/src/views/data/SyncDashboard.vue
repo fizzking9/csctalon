@@ -17,17 +17,22 @@
                     <el-tag v-else type="info">已停止</el-tag>
                     <el-switch
                       v-model="scheduleEnabled"
-                      @change="toggleSchedule"
                       :loading="scheduleToggling"
                       active-text="启用"
                       inactive-text="停止"
+                      @change="toggleSchedule"
                     />
                   </div>
                 </div>
               </template>
               <el-descriptions :column="3" border size="small">
                 <el-descriptions-item label="定时计划">
-                  <el-tag v-for="h in scheduleStatus.schedule_hours" :key="h" size="small" class="mr-4">{{ h }}:00</el-tag>
+                  <!-- #51: 展示槽位节拍(时段+间隔), 替代"整点 tag"列表 -->
+                  <el-tag size="small" type="primary" effect="plain">
+                    {{ scheduleStatus.start_hour }}:00 ~ {{ scheduleStatus.end_hour }}:00
+                  </el-tag>
+                  <span class="ml-8">每 {{ scheduleStatus.interval_minutes }} 分钟</span>
+                  <span class="ml-8 dim">({{ scheduleStatus.slot_count }} 次/天)</span>
                 </el-descriptions-item>
                 <el-descriptions-item label="下次执行">{{ formatTime(scheduleStatus.next_run) || '-' }}</el-descriptions-item>
                 <el-descriptions-item label="凭证状态">
@@ -50,6 +55,11 @@
                   </span>
                 </el-descriptions-item>
               </el-descriptions>
+
+              <!-- #51: 高频节拍配置(时段+间隔, 管理员可改, 改后即时生效) -->
+              <el-divider content-position="left">高频采集节拍</el-divider>
+              <ScheduleConfigPanel ref="scheduleCfgRef" class="mb-12" />
+
               <el-alert
                 v-if="(!hasBmsCredentials || !hasScrmCredentials) && !isAdmin"
                 type="warning"
@@ -90,24 +100,27 @@
                   </el-button>
                 </div>
               </template>
-              <el-form :model="form" label-width="110px" :rules="rules" ref="formRef">
+              <el-form ref="formRef" :model="form" label-width="110px" :rules="rules">
                 <el-form-item label="BMS 数据源" prop="bmsTypes">
-                  <el-checkbox-group v-model="form.bmsTypes">
-                    <el-checkbox
-                      v-for="ds in bmsSources"
-                      :key="ds.data_type"
-                      :label="ds.data_type"
-                      :disabled="busyRunning"
-                    >
-                      {{ ds.name }}
+                  <!-- #97: 由平铺复选框改为「高频档 / 低频档」分组 + 批量勾选。
+                       档位判据 schedule_tier 来自后端(与定时调度器同源), 不在前端硬编码源名;
+                       详见 web/src/components/BmsTierPicker.vue 头部设计说明。 -->
+                  <BmsTierPicker
+                    v-model="form.bmsTypes"
+                    :sources="bmsSourcesForPicker"
+                    :disabled="busyRunning"
+                    :low-freq-hour="scheduleStatus.low_freq_hour || 0"
+                  >
+                    <template #badge="{ ds }">
+                      <span v-if="ds.data_type === 'refund_record_report'" class="src-alias">（商户号现金流 E 路）</span>
                       <el-tag v-if="!ds.has_credentials" type="danger" size="small" class="ml-4">未配凭证</el-tag>
-                      <el-tag v-else-if="ds.requires_captcha && !captchaStates[ds.data_type]?.has_storage_state"
+                      <el-tag v-else-if="ds.requires_captcha && !ds.has_storage_state"
                               type="warning" size="small" class="ml-4">需验证码登录</el-tag>
-                      <el-tag v-else-if="ds.requires_captcha && captchaStates[ds.data_type]?.has_storage_state"
+                      <el-tag v-else-if="ds.requires_captcha && ds.has_storage_state"
                               type="success" size="small" class="ml-4">登录态已保存</el-tag>
                       <el-tag v-else type="success" size="small" class="ml-4">已配凭证</el-tag>
-                    </el-checkbox>
-                  </el-checkbox-group>
+                    </template>
+                  </BmsTierPicker>
                 </el-form-item>
                 <el-form-item label="SCRM 数据源" prop="scrmTypes">
                   <el-checkbox-group v-model="form.scrmTypes">
@@ -124,12 +137,12 @@
                   </el-checkbox-group>
                 </el-form-item>
                 <el-form-item label="时间范围" prop="timeRange">
-                  <el-radio-group v-model="form.timeRange" @change="onTimeRangeChange" :disabled="busyRunning">
-                    <el-radio-button label="incremental">增量接续(推荐)</el-radio-button>
-                    <el-radio-button label="today">今天</el-radio-button>
-                    <el-radio-button label="yesterday">昨天</el-radio-button>
-                    <el-radio-button label="week">过去一周</el-radio-button>
-                    <el-radio-button label="custom">自定义</el-radio-button>
+                  <el-radio-group v-model="form.timeRange" :disabled="busyRunning" @change="onTimeRangeChange">
+                    <el-radio-button value="incremental">增量接续(推荐)</el-radio-button>
+                    <el-radio-button value="today">今天</el-radio-button>
+                    <el-radio-button value="yesterday">昨天</el-radio-button>
+                    <el-radio-button value="week">过去一周</el-radio-button>
+                    <el-radio-button value="custom">自定义</el-radio-button>
                   </el-radio-group>
                 </el-form-item>
                 <el-form-item v-if="form.timeRange === 'incremental'" label="即将抓取范围">
@@ -145,8 +158,8 @@
                       <div v-if="form.scrmTypes.includes(r.data_type)" class="range-item">
                         <span class="range-chip range-chip-scrm">SCRM</span>
                         <span class="range-ds">{{ dsName(r.data_type) }}</span>
-                        <span class="range-desc" v-if="r.status === 'never'">（首次）30 天前 → 现在</span>
-                        <span class="range-desc" v-else>上次 {{ formatTime(r.last_start) }} 后 (重叠2h) → 现在</span>
+                        <span v-if="r.status === 'never'" class="range-desc">（首次）30 天前 → 现在</span>
+                        <span v-else class="range-desc">上次 {{ formatTime(r.last_start) }} 后 (重叠2h) → 现在</span>
                       </div>
                     </template>
                   </div>
@@ -182,8 +195,8 @@
                   <el-button
                     type="primary"
                     :loading="submitLoading"
-                    @click="handleSyncAll"
                     :disabled="busyRunning || totalSelectedCount === 0 || submitDisabledByCool"
+                    @click="handleSyncAll"
                   >
                     <el-icon><Refresh /></el-icon>
                     <span v-if="busyRunning">任务执行中…(实时状态看右侧)</span>
@@ -194,12 +207,12 @@
                     v-if="form.timeRange === 'incremental' && cooldownRemaining > 0 && !busyRunning"
                     type="warning"
                     plain
-                    @click="handleSyncAll(true)"
                     :loading="submitLoading"
+                    @click="handleSyncAll(true)"
                   >
                     强制同步(跳过冷却)
                   </el-button>
-                  <el-button @click="handleTest" :loading="testing" v-if="hasAnyCaptchaSources">测试浏览器</el-button>
+                  <el-button v-if="hasAnyCaptchaSources" :loading="testing" @click="handleTest">测试浏览器</el-button>
                 </el-form-item>
               </el-form>
             </el-card>
@@ -222,9 +235,9 @@
           <div class="panel-inner">
             <div class="flex justify-between items-center mb-8">
               <el-radio-group v-model="statusGroupFilter" size="small">
-                <el-radio-button label="all">全部</el-radio-button>
-                <el-radio-button label="bms">仅 BMS</el-radio-button>
-                <el-radio-button label="scrm">仅 SCRM</el-radio-button>
+                <el-radio-button value="all">全部</el-radio-button>
+                <el-radio-button value="bms">仅 BMS</el-radio-button>
+                <el-radio-button value="scrm">仅 SCRM</el-radio-button>
               </el-radio-group>
             </div>
             <el-table :data="mergedStatusRows" border size="small">
@@ -339,9 +352,9 @@
                   placeholder="数据源"
                   size="small"
                   style="width: 180px"
-                  @change="loadMergedLogs"
                   filterable
                   clearable
+                  @change="loadMergedLogs"
                 >
                   <el-option
                     v-for="opt in mergedDataTypeOptions"
@@ -470,8 +483,8 @@
               size="small"
               plain
               text
-              @click="clearLogView"
               :disabled="!runningTask || !runningTask.recent_logs || !runningTask.recent_logs.length"
+              @click="clearLogView"
             >
               清空视图
             </el-button>
@@ -480,8 +493,8 @@
               size="small"
               type="primary"
               plain
-              @click="scrollToBottom(true)"
               class="ml-auto"
+              @click="scrollToBottom(true)"
             >
               ⬇ 回到底部
             </el-button>
@@ -489,8 +502,8 @@
 
           <!-- ② 彩色日志流(永久展开,按顺序一直输出,不折叠) -->
           <div
-            class="right-log-stream"
             ref="logStreamRef"
+            class="right-log-stream"
             @scroll="onLogScroll"
           >
             <div
@@ -613,7 +626,7 @@
       <el-alert :type="isMathCaptcha ? 'warning' : 'info'" :closable="false" show-icon class="mb-16" size="small">
         <template v-if="isMathCaptcha">
           SCRM 登录使用<strong>数学计算式</strong>验证码。下方图片显示的是如「7*0=?」的算式,
-          请在输入框中填入<strong>计算结果数字</strong>(如 0、63)。<br/>
+          请在输入框中填入<strong>计算结果数字</strong>(如 0、63)。<br />
           若 OCR 自动识别出了答案,已经帮你填好了,请核对后直接点「提交并登录」。
         </template>
         <template v-else>
@@ -632,8 +645,8 @@
             :src="captchaImage"
             alt="验证码"
             class="captcha-img"
-            @click="refreshCaptcha"
             title="点击图片重试(注意:后端会话会重新生成)"
+            @click="refreshCaptcha"
           />
           <div v-else class="captcha-empty">验证码加载失败</div>
         </div>
@@ -672,7 +685,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -696,7 +709,10 @@ import {
   submitScrmSync,
   listScrmSyncLogs,
 } from '@/api/fetch'
+import ScheduleConfigPanel from '@/components/ScheduleConfigPanel.vue'
+import BmsTierPicker from '@/components/BmsTierPicker.vue'
 import { listSyncSources, updateSyncSource } from '@/api/system'
+import { usePolling, POLL_INTERVALS } from '@/composables/usePolling'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -735,7 +751,15 @@ const logFilterDataType = ref('')
 const statusGroupFilter = ref('all')
 const mergedSyncLogs = ref([])
 const formRef = ref(null)
-const typesInited = ref(false)
+// 默认勾选的「仅初始化一次」标记 —— BMS 与 SCRM **必须各自独立**(#99)。
+//
+// ⚠️ 事故回顾: 两者曾共用同一个 `typesInited` 标记, 而 onMounted 用 Promise.all
+//    并发加载两者 → 谁先返回谁把标记置真, 后者就跳过自己的默认勾选赋值。
+//    实测 SCRM 恒先返回(响应体远小于 BMS 的 11 源状态聚合) → 手动同步面板
+//    首次打开始终 0 勾选、主按钮灰显「共 0 个」, 使用者被迫手点 11 次。
+//    两个标记在语义上本就无关(各自的接口 + 各自的默认值来源), 合并只因"看起来像同一件事"。
+const bmsInited = ref(false)
+const scrmInited = ref(false)
 const submitLoading = ref(false)
 const logStreamRef = ref(null)
 
@@ -765,6 +789,8 @@ const scheduleStatus = ref({
   enabled: false,
   schedule_hours: [0, 8, 12, 16, 20],
   next_run: null,
+  // #97: 低频档整点(0 = 禁用), 供 BmsTierPicker 在分组标题上动态展示
+  low_freq_hour: 0,
   current_progress: null,
   has_credentials: { bms: false, scrm: false },
 })
@@ -898,8 +924,10 @@ const hasAnyCaptchaSources = computed(() =>
   bmsSources.value.some(d => d.requires_captcha)
 )
 
-let pollTimer = null
-let preflightTimer = null
+// 统一轮询层(S-P1-2): key 全局单例 + 页面隐藏自动暂停 + 卸载自动停止
+const PROGRESS_POLL_KEY = 'sync-dashboard:progress'
+const PREFLIGHT_POLL_KEY = 'sync-dashboard:preflight'
+const { startPolling, stopPolling } = usePolling()
 let _pollErrorStreak = 0
 const POLL_ERROR_MAX = 5
 let _preflightErrorStreak = 0
@@ -921,13 +949,8 @@ onMounted(async () => {
   if (isAdmin.value) jobs.push(loadSources())
   await Promise.all(jobs)
 
-  pollTimer = setInterval(pollProgress, 2000)
-  preflightTimer = setInterval(() => runPreflight({ silentError: true }), 30000)
-})
-
-onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
-  if (preflightTimer) clearInterval(preflightTimer)
+  startPolling(PROGRESS_POLL_KEY, pollProgress, POLL_INTERVALS.PROGRESS)
+  startPolling(PREFLIGHT_POLL_KEY, () => runPreflight({ silentError: true }), POLL_INTERVALS.PREFLIGHT)
 })
 
 watch(() => [...form.bmsTypes, ...form.scrmTypes].sort().join(','), () => runPreflight())
@@ -977,6 +1000,24 @@ const mergedStatusRows = computed(() => {
   return rows
 })
 
+/**
+ * #97: 供 BmsTierPicker 使用的源清单。
+ *
+ * 把验证码登录态(captchaStates)合并进源对象 —— 因为「只选已配凭证」需要判断
+ * "需验证码的源是否已保存登录态"，而该状态是异步从 captchaLoginCheck 拉取的、
+ * 不在 /fetch/data-sources 的返回里。
+ *
+ * ⚠️ 不改动 bmsSources 本体：它同时被状态表、日志下拉等消费，保持原始接口返回。
+ */
+const bmsSourcesForPicker = computed(() =>
+  bmsSources.value.map(d => ({
+    ...d,
+    has_storage_state: d.requires_captcha
+      ? !!captchaStates[d.data_type]?.has_storage_state
+      : undefined,
+  })),
+)
+
 function runningStatusLabel(s) {
   switch (s) {
     case 'success': return '已完成'
@@ -1008,8 +1049,10 @@ async function loadBmsSources() {
   try {
     const res = await listSyncDataSources()
     bmsSources.value = res.data
-    if (!typesInited.value) {
+    // 仅首次填充默认勾选 —— 后续轮询(每 15 轮调一次本函数)不得覆盖用户已改的勾选
+    if (!bmsInited.value) {
       form.bmsTypes = res.data.filter(d => d.default_sync).map(d => d.data_type)
+      bmsInited.value = true
     }
     await loadCaptchaStates()
   } catch (e) {
@@ -1021,12 +1064,13 @@ async function loadScrmStatus() {
   try {
     const res = await getScrmSyncStatus()
     scrmStatusRows.value = (res.data || []).map(r => ({ ...r, name: r.name || dsName(r.data_type) }))
-    if (!typesInited.value) {
+    // 同上: 仅在首次填充默认勾选(#99 独立标记)
+    if (!scrmInited.value) {
       // 使用后端返回的 default_sync 配置（优先），fallback 到前端常量
       form.scrmTypes = scrmStatusRows.value
         .filter(r => r.default_sync !== undefined ? r.default_sync : SCRM_DATA_TYPES.find(d => d.data_type === r.data_type)?.default_sync)
         .map(r => r.data_type)
-      typesInited.value = true
+      scrmInited.value = true
     }
   } catch {
     scrmStatusRows.value = []
@@ -1103,9 +1147,9 @@ async function runPreflight(opts = {}) {
   } catch (e) {
     if (opts.silentError) {
       _preflightErrorStreak += 1
-      if (_preflightErrorStreak >= PREFLIGHT_ERROR_MAX && preflightTimer) {
-        clearInterval(preflightTimer)
-        preflightTimer = null
+      if (_preflightErrorStreak >= PREFLIGHT_ERROR_MAX) {
+        // 预检熔断: 停止后台预检轮询
+        stopPolling(PREFLIGHT_POLL_KEY)
         ElMessage.warning(`预检连续 ${PREFLIGHT_ERROR_MAX} 次失败,已停止后台刷新`)
       }
     }
@@ -1245,9 +1289,9 @@ async function pollProgress() {
     }
   } catch (e) {
     _pollErrorStreak += 1
-    if (_pollErrorStreak >= POLL_ERROR_MAX && pollTimer) {
-      clearInterval(pollTimer)
-      pollTimer = null
+    if (_pollErrorStreak >= POLL_ERROR_MAX) {
+      // 状态轮询熔断: 停止进度轮询
+      stopPolling(PROGRESS_POLL_KEY)
       ElMessage.warning(`状态查询连续 ${POLL_ERROR_MAX} 次失败,已停止自动刷新`)
     }
   }
@@ -1322,19 +1366,21 @@ async function handleSyncAll(force = false) {
       res = await taskSubmit({ ...commonPayload, data_types: form.bmsTypes })
       ElMessage.info(`已提交 BMS 任务(${res.data.task_id}),BMS 结束后自动启动 SCRM…`)
       const bmsTaskId = res.data.task_id
-      const autoStartScrm = setInterval(async () => {
+      // 统一轮询层: 每 3s 观察 BMS 任务终态, 成功/失败/partial 后停止并衔接 SCRM
+      const _autoScrmKey = `sync-dashboard:auto-scrm:${bmsTaskId}`
+      startPolling(_autoScrmKey, async () => {
         try {
           const s = await taskStatus(bmsTaskId)
           const t = s.data.task
           if (t && ['success', 'failed', 'partial'].includes(t.status)) {
-            clearInterval(autoStartScrm)
+            stopPolling(_autoScrmKey)
             const sRes = await submitScrmSync({ ...commonPayload, sync_types: form.scrmTypes })
             currentTaskId.value = sRes.data.task_id
             _logViewOffset.value = 0
             ElMessage.success(`BMS 任务结束,已自动提交 SCRM 任务(${sRes.data.task_id})`)
           }
         } catch { /* ignore */ }
-      }, 3000)
+      }, POLL_INTERVALS.TASK_WATCH)
     }
     if (res) {
       currentTaskId.value = res.data.task_id
@@ -1793,6 +1839,7 @@ function formatTime(iso) {
 /* 通用 utility */
 .alert-text { margin: 0; font-size: 13px; line-height: 1.5; }
 .form-hint { color: #909399; font-size: 12px; line-height: 1.5; }
+.src-alias { color: #909399; font-size: 12px; margin-left: 4px; font-weight: 400; }
 .mr-4 { margin-right: 4px; }
 .ml-4 { margin-left: 4px; }
 .mt-8 { margin-top: 8px; }

@@ -41,6 +41,24 @@ export function getUploadRecord(id) {
   return request.get(`/uploads/records/${id}`)
 }
 
+// 下载导入模板(CSV, 按 data_type)
+export function downloadUploadTemplate(dataType) {
+  return request.get('/uploads/template', {
+    params: { data_type: dataType },
+    responseType: 'blob',
+    timeout: 60000,
+  })
+}
+
+// 下载已上传/采集的原始文件(按上传记录 ID)
+export function downloadUploadFile(recordId) {
+  return request.get('/uploads/file', {
+    params: { record_id: recordId },
+    responseType: 'blob',
+    timeout: 120000,
+  })
+}
+
 // 关联匹配 - 统计
 export function matchSummary() {
   return request.get('/match/summary')

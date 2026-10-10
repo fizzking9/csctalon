@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { roleAllowed } from '@/config/access'
 
 const routes = [
   {
@@ -17,13 +18,16 @@ const routes = [
         path: 'dashboards/today',
         name: 'DashboardToday',
         component: () => import('@/views/dashboards/Today.vue'),
-        meta: { title: '今日看板', icon: 'DataLine' },
+        // ★ #80 正名: 「决策分析看板」→「今日值班看板」(path 不变)
+        //   本页是值班台（实时/事件/待办），非能力意义上的决策分析页。
+        meta: { title: '今日值班看板', icon: 'DataLine' },
       },
       {
         path: 'dashboards/operation',
         name: 'DashboardOperation',
         component: () => import('@/views/dashboards/OperationDashboard.vue'),
-        meta: { title: '运营看板', icon: 'TrendCharts' },
+        // ★ #80 正名: 「运营看板」→「运营分析看板」(path 不变)
+        meta: { title: '运营分析看板', icon: 'TrendCharts' },
       },
       {
         path: 'dashboard',
@@ -45,28 +49,22 @@ const routes = [
         component: () => import('@/views/data/Ingest.vue'),
         meta: { title: '数据采集', icon: 'Upload', admin: true },
       },
-      // 兼容旧路径
+      // 兼容旧路径(#260: 组件版死路由已删 —— 旧页收编为 Ingest tab, redirect 保留深链)
       { path: 'data/upload', redirect: '/data/ingest?tab=upload' },
       { path: 'data/fetch', redirect: '/data/ingest?tab=fetch' },
       { path: 'data/records', redirect: '/data/ingest?tab=records' },
       { path: 'data/browser', redirect: '/data/ingest?tab=browser' },
       {
-        path: 'data/records',
-        name: 'DataRecords',
-        component: () => import('@/views/data/Records.vue'),
-        meta: { title: '采集记录', icon: 'Document', hidden: true },
-      },
-      {
-        path: 'data/browser',
-        name: 'DataBrowser',
-        component: () => import('@/views/data/Browser.vue'),
-        meta: { title: '数据查看', icon: 'DataAnalysis', hidden: true },
-      },
-      {
         path: 'data/recharge-traffic',
         name: 'DataRechargeTraffic',
         component: () => import('@/views/data/RechargeTraffic.vue'),
         meta: { title: '流量与充值查询', icon: 'Coin' },
+      },
+      {
+        path: 'data/device-flow-audit',
+        name: 'DataDeviceFlowAudit',
+        component: () => import('@/views/data/DeviceFlowAudit.vue'),
+        meta: { title: '设备流量审计', icon: 'Odometer' },
       },
       // 分析看板
       {
@@ -126,6 +124,13 @@ const routes = [
         name: 'ComplaintAudit',
         component: () => import('@/views/dashboards/ComplaintAudit.vue'),
         meta: { title: '投诉核查', icon: 'Warning', manager: true },
+      },
+      // ★ #63: 纯工信部投诉单列页（工单+文档 合并去重；判据 = SN 或 电话）
+      {
+        path: 'dashboards/pure-card-complaint',
+        name: 'PureCardComplaint',
+        component: () => import('@/views/dashboards/PureCardComplaint.vue'),
+        meta: { title: '纯工信部投诉', icon: 'Warning', manager: true },
       },
       {
         path: 'dashboards/reception',
@@ -338,15 +343,10 @@ const routes = [
         component: () => import('@/views/system/Users.vue'),
         meta: { title: '用户管理', icon: 'UserFilled', admin: true },
       },
+      // #260: system/data-sources 组件版死路由已删(页面收编为 Ingest tab), redirect 保留
       {
         path: 'system/data-sources',
         redirect: '/data/ingest?tab=data-sources',
-      },
-      {
-        path: 'system/data-sources',
-        name: 'SystemDataSources',
-        component: () => import('@/views/system/DataSources.vue'),
-        meta: { title: '数据源管理', icon: 'Coin', admin: true, hidden: true },
       },
       {
         path: 'system/persons',
@@ -365,11 +365,21 @@ const routes = [
         redirect: '/data/ingest?tab=data-quality',
       },
       {
-        path: 'system/data-quality',
-        name: 'SystemDataQuality',
-        component: () => import('@/views/management/DataQuality.vue'),
-        meta: { title: '数据质量', icon: 'CircleCheck', admin: true, hidden: true },
+        path: 'system/complaint-quality',
+        name: 'SystemComplaintQuality',
+        component: () => import('@/views/management/ComplaintDataQuality.vue'),
+        meta: { title: '投诉采集质量', icon: 'CircleCheck', admin: true },
       },
+      {
+        // ★ #208: 外部投诉同源判重 v5 人工复核闭环（机判成组 + 人工确认/驳回留痕）。
+        //   归「数据质量」组：它判定"这些投诉是否同一事由反复投诉"，属数据治理域，
+        //   只读原行、不删不合并不改口径，与「投诉采集质量」同属治理工具而非决策看板。
+        path: 'system/complaint-same-source',
+        name: 'SystemComplaintSameSource',
+        component: () => import('@/views/system/ComplaintSameSource.vue'),
+        meta: { title: '同源案件复核', icon: 'Connection', admin: true },
+      },
+      // #260: system/data-quality 组件版死路由已删(DataQuality 作为 Ingest tab 存活), redirect 保留
       {
         path: 'system/operation-logs',
         name: 'SystemOperationLogs',
@@ -388,15 +398,90 @@ const routes = [
         component: () => import('@/views/system/CacheAdmin.vue'),
         meta: { title: '缓存管理', icon: 'Cpu', admin: true },
       },
+      // #260: system/sync-settings 组件版死路由已删(SyncSettings 作为 SyncDashboard 子组件存活), redirect 保留
       {
         path: 'system/sync-settings',
         redirect: '/data/ingest?tab=sync-settings',
       },
       {
-        path: 'system/sync-settings',
-        name: 'SystemSyncSettings',
-        component: () => import('@/views/system/SyncSettings.vue'),
-        meta: { title: '同步设置', icon: 'Setting', admin: true, hidden: true },
+        path: 'system/external-access',
+        name: 'SystemExternalAccess',
+        component: () => import('@/views/system/ExternalAccess.vue'),
+        meta: { title: '外部接入', icon: 'Key', admin: true },
+      },
+      // #44 接入中心: 登录态 / 外部 Token / 推送配置包 统一入口
+      //   (2026-09-29 Tab4「AI 与模型」迁出至「AI 与分析」组, 本页回归纯数据对接)
+      // 旧路径(/system/external-access, /system/ai-focus-configs)保留可直达, 不破坏书签
+      {
+        path: 'system/access-center',
+        name: 'SystemAccessCenter',
+        component: () => import('@/views/system/AccessCenter.vue'),
+        meta: { title: '接入中心', icon: 'Connection', admin: true },
+      },
+      {
+        path: 'system/ai-focus-configs',
+        name: 'SystemAiFocusConfigs',
+        component: () => import('@/views/system/AiFocusConfigs.vue'),
+        meta: { title: 'AI 助手关注点', icon: 'MagicStick', admin: true },
+      },
+      {
+        // #108: LLM 多 Provider 管理(本地 Talon / 云端 DeepSeek 等)
+        path: 'system/llm-providers',
+        name: 'SystemLlmProviders',
+        component: () => import('@/views/system/LlmProviders.vue'),
+        meta: { title: '模型接入与调度', icon: 'Cpu', admin: true },
+      },
+      {
+        // #125: AI 报告模板管理(admin)
+        path: 'system/ai-templates',
+        name: 'SystemAiTemplates',
+        component: () => import('@/views/system/AiTemplates.vue'),
+        meta: { title: '报告模板', icon: 'Document', admin: true },
+      },
+      {
+        // #137: AI 管理页面(3 Tab 整合入口, #141 重组)
+        // 模板管理 / 模型节点 / 提示词管理 (配置侧)
+        // 报告列表拆出 → /system/ai-reports (查看侧)
+        // 事务通知 → /system/system-events (审计侧)
+        path: 'system/ai-admin',
+        name: 'SystemAiAdmin',
+        component: () => import('@/views/system/AiAdmin.vue'),
+        meta: { title: 'AI 管理', icon: 'MagicStick', admin: true },
+      },
+      {
+        // #141: AI 报告历史(查看侧) — 独立成页, 含完整 content 查看抽屉
+        path: 'system/ai-reports',
+        name: 'SystemAiReports',
+        component: () => import('@/views/system/AiReports.vue'),
+        meta: { title: '报告历史', icon: 'Document', admin: true },
+      },
+      {
+        // #157: 数据源接入助手(起草→校验→确认→落地包 闭环, 归「数据与接入」组)
+        path: 'system/ai-onboarding',
+        name: 'SystemAiOnboarding',
+        component: () => import('@/views/system/AiOnboarding.vue'),
+        meta: { title: '数据源接入助手', icon: 'Connection', admin: true },
+      },
+      {
+        // #165: AI 数据治理(体检→研判→确认→分级执行 闭环, 归「数据质量」组)
+        path: 'system/ai-data-governance',
+        name: 'SystemAiDataGovernance',
+        component: () => import('@/views/system/AiDataGovernance.vue'),
+        meta: { title: 'AI 数据治理', icon: 'CircleCheck', admin: true },
+      },
+      {
+        // #173: AI 提示词评估中心(评估侧: 命中/兜底/锚点/规则健康 + 半自动迭代)
+        path: 'system/ai-prompt-eval',
+        name: 'SystemAiPromptEval',
+        component: () => import('@/views/system/AiPromptEval.vue'),
+        meta: { title: '提示词评估', icon: 'DataAnalysis', admin: true },
+      },
+      {
+        // 2026-09-23: 提示词全量版本化 —— 治理研判 / 接入起草提示词版本账本
+        path: 'system/prompt-versions',
+        name: 'SystemPromptVersions',
+        component: () => import('@/views/system/PromptVersions.vue'),
+        meta: { title: '提示词版本', icon: 'Tickets', admin: true },
       },
     ],
   },
@@ -409,24 +494,21 @@ const router = createRouter({
 })
 
 // 路由守卫:登录校验 + 角色分流(五角色: admin/supervisor/specialty_lead/specialist/agent)
+// ★ #260 访问控制单源化: 档位名单唯一来源 config/access.js(ROLE_LADDER),
+//   三级判断(roles > admin > manager)统一收敛为一份 roles 声明后走 roleAllowed。
+//   行为等价说明: StrategyManage/ReportCenter 同时带 manager+roles, roles 优先级最高
+//   与原三级逐条判断结果一致(缺省跳转均为工作台)。
 router.beforeEach((to) => {
   const authStore = useAuthStore()
   document.title = to.meta.title ? `${to.meta.title} - 数据分析工具应用` : '数据分析工具应用'
   if (!to.meta.public && !authStore.isLoggedIn) {
     return { name: 'Login', query: { redirect: to.fullPath } }
   }
-  // 1. admin 专属(系统管理): 仅 admin
-  if (to.meta.admin && !authStore.isAdmin) {
-    return { name: 'Dashboard' }
-  }
-  // 2. manager 专属(决策看板/管理闭环): admin + supervisor + specialty_lead
-  if (to.meta.manager && !authStore.isManager) {
-    return { name: 'Dashboard' }
-  }
-  // 3. 精确角色白名单(meta.roles 数组): 优先级最高, 命中即校验
-  //    例: meta.roles: ['admin', 'supervisor'] → 仅主管+管理员可见
-  //    例: meta.roles: ['specialty_lead', 'supervisor'] → 主管+组长可见
-  if (Array.isArray(to.meta.roles) && to.meta.roles.length && !to.meta.roles.includes(authStore.role)) {
+  // 合并路由 meta 的权限声明: 精确 roles 白名单 > admin 档 > manager 档 > 无限制
+  const decl = Array.isArray(to.meta.roles) && to.meta.roles.length
+    ? to.meta.roles
+    : to.meta.admin ? 'admin' : to.meta.manager ? 'manager' : null
+  if (decl && !roleAllowed(decl, authStore.role)) {
     return { name: 'Dashboard' }
   }
 })

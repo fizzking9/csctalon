@@ -4,7 +4,6 @@
 按角色过滤: admin/supervisor/specialty_lead 看全部; specialist/agent 看本人。
 """
 
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query
 from sqlalchemy import func, select

@@ -5,6 +5,7 @@
 
 from datetime import date, datetime, time, timedelta, timezone
 
+import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
@@ -13,7 +14,7 @@ from app.models.cs_record import CsRecord
 from app.models.person import Person, PersonAlias
 from app.models.schedule import Attendance, Schedule, ShiftTemplate
 from app.models.ticket import ServiceTicket
-from app.schemas.common import PageBase, R
+from app.schemas.common import R
 
 router = APIRouter(prefix="/schedules", tags=["排班管理"])
 
@@ -407,3 +408,159 @@ def comparison(db: DBSession, _: CurrentUser, day: str = Query(..., description=
             "detail": detail,
         }
     )
+
+
+@router.post("/import", response_model=R, summary="导入企微排班表(#256 B3-8 镜像)")
+def import_wecom_schedule(payload: dict, db: DBSession, current_user: ManagerUser):
+    """导入企微排班导出表: 镜像形态(企微源 → 系统展示), source='wecom_export'。
+
+    前置: 文件先经通用上传通道(parseUpload)存档拿 stored_path。
+    列约定(表头宽容): 姓名(姓名/人员/名字) + 日期(日期/排班日期) +
+    班次(班次/班, 匹配班次模板名); 可选 时间列(HH:MM-HH:MM, 无班次时写入起止时间)。
+
+    冲突判定: schedules 有 uq_schedules_person_date(同人同日唯一)——
+    已存在时按 conflict_mode 处理: skip 跳过 / overwrite 覆盖为本导入值。
+    覆盖时 source 置为 wecom_export(以企微为准)。
+
+    留痕: upload_records(data_type='schedule', source='manual'), 对齐 B3-9 质量留痕。
+    """
+    from app.core.storage import resolve_upload_path
+    from app.models.upload import UploadRecord
+    from app.services.data_parser import load_dataframe
+
+    stored_path = payload.get("stored_path")
+    if not stored_path:
+        raise HTTPException(status_code=400, detail="stored_path 缺失")
+    filename = payload.get("filename") or "schedule.xlsx"
+    conflict_mode = payload.get("conflict_mode") or "skip"
+    if conflict_mode not in ("skip", "overwrite"):
+        raise HTTPException(status_code=400, detail="conflict_mode 仅支持 skip/overwrite")
+
+    path = resolve_upload_path(stored_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="上传文件不存在,请重新上传")
+
+    record = UploadRecord(
+        data_type="schedule",
+        filename=filename,
+        stored_path=stored_path,
+        file_size=path.stat().st_size,
+        sheet_name=payload.get("sheet_name"),
+        status="parsing",
+        uploaded_by=current_user.username,
+        source="manual",
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    try:
+        df = load_dataframe(path, sheet_name=payload.get("sheet_name"), encoding=payload.get("encoding"))
+    except Exception as e:
+        record.status = "failed"
+        record.error_detail = {"errors": [f"文件解析失败: {e}"]}
+        record.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status_code=400, detail=f"文件解析失败: {e}") from e
+
+    # 表头宽容匹配: 取第一个命中的列名
+    def _col(cands: list[str]) -> str | None:
+        for c in cands:
+            if c in df.columns:
+                return c
+        return None
+
+    col_name = _col(["姓名", "人员", "名字", "客服名"])
+    col_date = _col(["日期", "排班日期", "排班时间"])
+    col_shift = _col(["班次", "班"])
+    col_time = _col(["时间", "班段时间", "起止时间"])
+    if col_name is None or col_date is None:
+        record.status = "failed"
+        record.error_detail = {"errors": [f"缺少必填列: 姓名/日期, 实际表头={list(df.columns)[:20]}"]}
+        record.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status_code=400, detail="缺少必填列: 姓名/日期")
+
+    # 姓名→Person: display_name 精确 + 别名表(alias 唯一), 一次载入建索引
+    persons = {p.display_name.strip(): p for p in db.scalars(select(Person))}
+    alias_to_pid: dict[str, int] = {}
+    for a in db.scalars(select(PersonAlias).where(PersonAlias.person_id.isnot(None))):
+        alias_to_pid[a.alias.strip()] = a.person_id
+    shifts_by_name = {s.name.strip(): s for s in db.scalars(select(ShiftTemplate))}
+
+    total = inserted = updated = skipped = failed = 0
+    errors: list[str] = []
+    # 日期宽容解析(字符串/Excel datetime/Timestamp 统一转 date)
+    parsed_dates = pd.to_datetime(df[col_date], errors="coerce")
+
+    for idx, row in df.iterrows():
+        total += 1
+        line_no = idx + 2  # xlsx 行号(表头占第1行)
+        name = str(row[col_name]).strip() if pd.notna(row[col_name]) else ""
+        dt = parsed_dates.iloc[idx]
+        if not name or pd.isna(dt):
+            failed += 1
+            errors.append(f"第{line_no}行: 姓名或日期为空")
+            continue
+        d = dt.date()
+        p = persons.get(name)
+        pid = p.id if p else alias_to_pid.get(name)
+        if pid is None:
+            failed += 1
+            errors.append(f"第{line_no}行: 人员未匹配 [{name}]")
+            continue
+        # 班次: 模板名匹配; 无班次列或未匹配时回退可选时间列
+        st_id, st_start, st_end = None, None, None
+        shift_raw = str(row[col_shift]).strip() if col_shift is not None and pd.notna(row[col_shift]) else ""
+        if shift_raw:
+            sh = shifts_by_name.get(shift_raw)
+            if sh:
+                st_id, st_start, st_end = sh.id, sh.start_time, sh.end_time
+            else:
+                failed += 1
+                errors.append(f"第{line_no}行: 班次未匹配 [{shift_raw}]")
+                continue
+        elif col_time is not None and pd.notna(row[col_time]):
+            m = str(row[col_time]).strip()
+            parts = m.replace("—", "-").replace("～", "-").split("-")
+            if len(parts) == 2 and len(parts[0]) == 5 and len(parts[1]) == 5:
+                st_start, st_end = parts[0], parts[1]
+            else:
+                failed += 1
+                errors.append(f"第{line_no}行: 时间格式无法解析 [{m}]")
+                continue
+        status_raw = "正常"
+        existing = db.scalar(
+            select(Schedule).where(Schedule.person_id == pid, Schedule.schedule_date == d)
+        )
+        if existing:
+            if conflict_mode == "skip":
+                skipped += 1
+                continue
+            existing.shift_template_id = st_id
+            existing.start_time = st_start
+            existing.end_time = st_end
+            existing.status = status_raw
+            existing.source = "wecom_export"
+            updated += 1
+        else:
+            db.add(Schedule(
+                person_id=pid, schedule_date=d,
+                shift_template_id=st_id, start_time=st_start, end_time=st_end,
+                status=status_raw, source="wecom_export", created_by=current_user.username,
+            ))
+            inserted += 1
+
+    record.total_rows = total
+    record.inserted_rows = inserted
+    record.updated_rows = updated
+    record.failed_rows = failed
+    record.status = "imported" if failed == 0 else ("imported" if inserted + updated > 0 else "failed")
+    record.error_detail = {"errors": errors[:50]} if errors else None
+    record.finished_at = datetime.now(timezone.utc)
+    db.commit()
+    return R(data={
+        "record_id": record.id, "total": total, "inserted": inserted,
+        "updated": updated, "skipped": skipped, "failed": failed,
+        "errors": errors[:20],
+    })

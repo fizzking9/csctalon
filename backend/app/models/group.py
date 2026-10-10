@@ -10,7 +10,15 @@
 from datetime import date
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, ForeignKey, String, Boolean, Text, Float, Integer, UniqueConstraint, Index
+from sqlalchemy import (
+    Boolean,
+    Date,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -22,7 +30,7 @@ if TYPE_CHECKING:
 
 class Group(IDMixin, TimestampMixin, Base):
     """行政分组 (如: 董梦玲组、叶珍凤组、张蕾组等)
-    
+
     分组是行政管理单位,每个分组有固定的组长,调整频率较低。
     当前组长/副主管为镜像字段,通过历史表维护变更记录。
     """
@@ -47,7 +55,7 @@ class Group(IDMixin, TimestampMixin, Base):
 
 class GroupLeadershipHistory(IDMixin, TimestampMixin, Base):
     """分组组长/副主管变更历史 (SCD Type 2)
-    
+
     记录组长和副主管的任免历史,支持轮岗追溯。
     组长相对固定,副主管支持轮岗。
     """
@@ -72,7 +80,7 @@ class GroupLeadershipHistory(IDMixin, TimestampMixin, Base):
 
 class PersonGroupMembership(IDMixin, TimestampMixin, Base):
     """人员分组归属历史 (SCD Type 2)
-    
+
     记录人员在哪个分组(行政归属),支持入组/调组/离组历史。
     一个人同一时间只能属于一个行政分组。
     """

@@ -16,7 +16,12 @@ from fastapi import APIRouter, HTTPException, Query, UploadFile
 from sqlalchemy import func, select, update
 
 from app.api.deps import AdminOrSupervisor, CurrentUser, DBSession
-from app.core.storage import ALLOWED_IMAGE_EXT, MAX_IMAGE_SIZE, save_audit_attachment, validate_image_content
+from app.core.storage import (
+    ALLOWED_IMAGE_EXT,
+    MAX_IMAGE_SIZE,
+    save_audit_attachment,
+    validate_image_content,
+)
 from app.models.audit_note import AuditJudgment, AuditNote
 from app.models.measure import Measure, MeasureSource, MeasureStatus
 from app.models.report import Report, ReportStatus, ReportType

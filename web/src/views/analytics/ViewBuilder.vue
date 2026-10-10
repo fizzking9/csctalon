@@ -40,10 +40,10 @@
             <div class="flex-between">
               <span>视图配置</span>
               <el-radio-group v-model="viewConfig.chart_type" size="small" @change="triggerPreview">
-                <el-radio-button label="line">折线</el-radio-button>
-                <el-radio-button label="bar">柱状</el-radio-button>
-                <el-radio-button label="pie">饼图</el-radio-button>
-                <el-radio-button label="table">表格</el-radio-button>
+                <el-radio-button value="line">折线</el-radio-button>
+                <el-radio-button value="bar">柱状</el-radio-button>
+                <el-radio-button value="pie">饼图</el-radio-button>
+                <el-radio-button value="table">表格</el-radio-button>
               </el-radio-group>
             </div>
           </template>
@@ -236,10 +236,10 @@
           <div class="time-range-bar">
             <span class="label">预览时间范围:</span>
             <el-radio-group v-model="previewDays" size="small" @change="triggerPreview">
-              <el-radio-button :label="7">近7天</el-radio-button>
-              <el-radio-button :label="30">近30天</el-radio-button>
-              <el-radio-button :label="90">近90天</el-radio-button>
-              <el-radio-button :label="0">全部</el-radio-button>
+              <el-radio-button :value="7">近7天</el-radio-button>
+              <el-radio-button :value="30">近30天</el-radio-button>
+              <el-radio-button :value="90">近90天</el-radio-button>
+              <el-radio-button :value="0">全部</el-radio-button>
             </el-radio-group>
             <el-button type="primary" size="small" :loading="previewing" @click="triggerPreview">刷新预览</el-button>
           </div>

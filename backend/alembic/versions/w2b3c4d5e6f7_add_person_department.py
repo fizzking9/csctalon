@@ -8,8 +8,9 @@ Create Date: 2026-07-30
 并回填现有 HR 人员 = '企微客服部'(店铺客服后续批量纳入时设店铺客服部)。
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "w2b3c4d5e6f7"
 down_revision = "v1a2b3c4d5e6"

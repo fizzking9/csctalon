@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""金山文档(kdocs.cn / WPS)扫码登录 → 生成 storage_state
+
+背景:
+  金山共享表格(如 https://www.kdocs.cn/l/...) 未登录只能看 canvas, 无法导出;
+  登录后可"导出为 Excel", 走标准 xlsx 解析。
+  登录态存到 BROWSER_STATE_DIR/kdocs.json, 后续脚本复用。
+
+两种模式:
+  ① GUI 模式(默认, 本机用): 弹出真实浏览器, 用户扫码后按回车保存。
+  ② Headless 模式(--headless, 生产/无 GUI 环境用): 用 headless 浏览器打开文档,
+     截图二维码到 --qr-out, 轮询 __WPSENV__.user.id 非 fake_ 后自动保存。
+
+用法:
+  # 本机 GUI 扫码
+  cd backend && ./.venv/bin/python ./scripts/kdocs_login.py
+
+  # 生产 Headless 扫码
+  docker exec -e PYTHONPATH=/app csctalon-backend \
+      python /app/scripts/kdocs_login.py --headless \
+      --qr-out /tmp/kdocs_qr.png --timeout 300
+
+#148 防退化:
+  保存前校验 __WPSENV__.user.id 不以 "fake_" 开头(真用户 id 为数字串),
+  访客身份拒绝保存。
+"""
+from __future__ import annotations
+
+import sys
+import time
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[1]
+# 脚本位于 backend/scripts/ 下, _ROOT 即 backend/ 目录, 直接加入 sys.path 即可 import app
+sys.path.insert(0, str(_ROOT))
+
+from app.core.config import settings
+
+TARGET_URL = "https://www.kdocs.cn/l/cbZIHtt6obyf"
+STATE_PATH = Path(settings.BROWSER_STATE_DIR) / "kdocs.json"
+
+
+def _get_kdocs_user_id(page) -> str:
+    """读取金山文档当前用户 id(访客形如 fake_xxx, 真用户为数字串)"""
+    try:
+        return page.evaluate(
+            """() => {
+                const env = window.__WPSENV__ || {};
+                const u = (env.file_info && env.file_info.user) || env.user || {};
+                return String(u.id || '');
+            }"""
+        )
+    except Exception:
+        return ""
+
+
+def _open_doc_and_show_login(page) -> None:
+    """打开共享文档 → 若登录弹窗未自动弹出则点登录按钮"""
+    page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(3000)
+    for sel in ["text=登录", "text=立即登录", "button:has-text('登录')"]:
+        try:
+            btn = page.query_selector(sel)
+            if btn and btn.is_visible():
+                btn.click()
+                page.wait_for_timeout(2000)
+                break
+        except Exception:
+            continue
+
+
+def main() -> int:
+    import argparse
+    from playwright.sync_api import sync_playwright
+
+    ap = argparse.ArgumentParser(description="金山文档扫码登录, 生成 kdocs.json")
+    ap.add_argument("--url", default=TARGET_URL, help="登录后打开的共享文档链接")
+    ap.add_argument("--headless", action="store_true",
+                    help="无头模式(生产环境用): 截图二维码 + 轮询登录态自动保存")
+    ap.add_argument("--qr-out", default="/tmp/kdocs_qr.png",
+                    help="headless 模式下二维码截图输出路径")
+    ap.add_argument("--timeout", type=int, default=300,
+                    help="headless 模式下等待扫码的超时秒数")
+    args = ap.parse_args()
+
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if STATE_PATH.exists():
+        bak = STATE_PATH.with_suffix(".json.bak")
+        bak.write_bytes(STATE_PATH.read_bytes())
+        print(f"⚠ 旧登录态已备份到 {bak.name}")
+
+    headless = args.headless
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=headless,
+            args=[] if headless else ["--start-maximized"],
+        )
+        ctx = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+            ),
+            viewport={"width": 1600, "height": 1000},
+            accept_downloads=True,
+        )
+        page = ctx.new_page()
+        _open_doc_and_show_login(page)
+
+        if headless:
+            qr_path = Path(args.qr_out)
+            page.screenshot(path=str(qr_path), full_page=False)
+            print(f"📸 二维码截图: {qr_path} ({qr_path.stat().st_size} 字节)")
+            print(f"   👉 请把该文件传到本地, 用 WPS/微信扫码登录")
+            print(f"   👉 扫码后脚本自动检测 __WPSENV__.user.id (超时 {args.timeout}s)…")
+
+            deadline = time.time() + args.timeout
+            uid = ""
+            while time.time() < deadline:
+                uid = _get_kdocs_user_id(page)
+                if uid and not uid.startswith("fake_"):
+                    print(f"✅ 检测到真用户: user.id={uid}")
+                    break
+                time.sleep(3)
+            else:
+                print(f"❌ {args.timeout}s 内未检测到登录态(最后 uid={uid or '<空>'}), 超时。")
+                browser.close()
+                return 1
+        else:
+            print("🌐 打开有头浏览器(金山共享文档)…")
+            print("  👉 请用 WPS/微信扫码登录。")
+            print("  ⏎ 登录成功且表格显示正常后, 按 <回车> 保存登录态…")
+            input()
+
+        # 校验: 非访客身份
+        uid = _get_kdocs_user_id(page)
+        if not uid or uid.startswith("fake_"):
+            print(f"\n❌ 登录态校验失败: 当前仍是访客身份(user.id={uid or '<空>'!r})。")
+            if not headless:
+                print("   请回到浏览器确认登录生效后按 <回车> 重新校验…")
+                input()
+                uid = _get_kdocs_user_id(page)
+            if not uid or uid.startswith("fake_"):
+                print(f"❌ 二次校验仍为访客(user.id={uid!r}), 放弃保存。")
+                browser.close()
+                return 2
+
+        ctx.storage_state(path=str(STATE_PATH))
+        cookies = ctx.cookies()
+        print(f"\n✅ 登录态已保存: {STATE_PATH}")
+        print(f"   校验通过: user.id={uid}, cookies={len(cookies)} 条")
+        browser.close()
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

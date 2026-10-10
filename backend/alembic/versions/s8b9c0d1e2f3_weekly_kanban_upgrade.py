@@ -12,10 +12,10 @@ Create Date: 2026-07-29 18:00:00.000000
 - 数据迁移: framework 旧格式 view_id(单值)→view_ids(列表), related_report_id→related_report_ids
 """
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
 
 revision = "s8b9c0d1e2f3"
 down_revision = "r7a8b9c0d1e2"

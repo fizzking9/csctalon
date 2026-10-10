@@ -1,9 +1,9 @@
 """行政分组 API - 分组列表/详情/负责人变更等"""
 
 from datetime import date
+
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, CurrentUser, DBSession
 from app.models.group import Group, GroupLeadershipHistory, PersonGroupMembership
@@ -27,7 +27,7 @@ def list_groups(
         stmt = stmt.where(Group.is_active == is_active)
     stmt = stmt.order_by(Group.display_order, Group.name)
     groups = list(db.scalars(stmt))
-    
+
     result = []
     for g in groups:
         # 统计当前成员数
@@ -36,11 +36,11 @@ def list_groups(
             .join(PersonGroupMembership, PersonGroupMembership.person_id == Person.id)
             .where(
                 PersonGroupMembership.group_id == g.id,
-                PersonGroupMembership.is_current == True,
-                Person.is_active == True,
+                PersonGroupMembership.is_current.is_(True),
+                Person.is_active.is_(True),
             )
         ) or 0
-        
+
         result.append({
             "id": g.id,
             "name": g.name,
@@ -71,25 +71,25 @@ def get_group(
     g = db.get(Group, group_id)
     if not g:
         raise HTTPException(status_code=404, detail="分组不存在")
-    
+
     # 查询当前成员
     members = list(db.scalars(
         select(Person)
         .join(PersonGroupMembership, PersonGroupMembership.person_id == Person.id)
         .where(
             PersonGroupMembership.group_id == g.id,
-            PersonGroupMembership.is_current == True,
+            PersonGroupMembership.is_current.is_(True),
         )
         .order_by(Person.display_name)
     ))
-    
+
     # 查询组长历史
     leadership_history = list(db.scalars(
         select(GroupLeadershipHistory)
         .where(GroupLeadershipHistory.group_id == g.id)
         .order_by(GroupLeadershipHistory.effective_from.desc())
     ))
-    
+
     return R(data={
         "id": g.id,
         "name": g.name,
@@ -140,19 +140,19 @@ def transfer_leadership(
     p = db.get(Person, person_id)
     if not p:
         raise HTTPException(status_code=404, detail="人员不存在")
-    
+
     if role not in ("leader", "deputy"):
         raise HTTPException(status_code=400, detail="role必须是leader或deputy")
-    
+
     effective_date = effective_from or date.today()
-    
+
     # 结束当前任职
     if role == "leader" and g.current_leader_id:
         current_hist = db.scalar(
             select(GroupLeadershipHistory).where(
                 GroupLeadershipHistory.group_id == g.id,
                 GroupLeadershipHistory.role == "leader",
-                GroupLeadershipHistory.is_current == True,
+                GroupLeadershipHistory.is_current.is_(True),
             )
         )
         if current_hist:
@@ -163,13 +163,13 @@ def transfer_leadership(
             select(GroupLeadershipHistory).where(
                 GroupLeadershipHistory.group_id == g.id,
                 GroupLeadershipHistory.role == "deputy",
-                GroupLeadershipHistory.is_current == True,
+                GroupLeadershipHistory.is_current.is_(True),
             )
         )
         if current_hist:
             current_hist.is_current = False
             current_hist.effective_to = effective_date
-    
+
     # 创建新任职历史
     new_hist = GroupLeadershipHistory(
         group_id=g.id,
@@ -181,18 +181,18 @@ def transfer_leadership(
         source="manual",
     )
     db.add(new_hist)
-    
+
     # 更新镜像字段
     if role == "leader":
         g.current_leader_id = p.id
     else:
         g.current_deputy_leader_id = p.id
-    
+
     # 同步到人员分组归属(新组长自动入组)
     existing_membership = db.scalar(
         select(PersonGroupMembership).where(
             PersonGroupMembership.person_id == p.id,
-            PersonGroupMembership.is_current == True,
+            PersonGroupMembership.is_current.is_(True),
         )
     )
     if existing_membership and existing_membership.group_id != g.id:
@@ -212,6 +212,6 @@ def transfer_leadership(
         db.add(new_membership)
         p.current_group_id = g.id
         p.group_name = g.name
-    
+
     db.commit()
     return R(data={"ok": True, "group": g.name, "new_leader": p.display_name, "role": role})

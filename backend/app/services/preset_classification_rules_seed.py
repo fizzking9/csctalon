@@ -1,15 +1,18 @@
 """预设分类规则 seed - 退款分类(互斥优先级)
 
-3 条 ClassificationRule,按 classification_rule_ids 数组顺序决定优先级(引擎转 CASE WHEN,第一个命中生效):
+2 条 ClassificationRule,按 classification_rule_ids 数组顺序决定优先级(引擎转 CASE WHEN,第一个命中生效):
 1. 客诉-外部投诉(最高优先级):refund_wide.has_external_complaint = true
-2. 客诉-原因:refund_wide.refund_reason 含"客诉"关键词(占位,待用户细化)
-3. 客诉-审核人:refund_wide.auditor 在客诉组名单内(名单占位,待用户提供)
+2. 客诉-原因:refund_wide.refund_reason 含"客诉"关键词
+
+(#185 清理: 原规则3「客诉-审核人」依赖 _AUDITOR_COMPLAINT_LIST 名单, 该名单长期为空
+  → 条件 IN [] 永不命中, 属占位规则。已删除定义; DB 中已注册的该规则由
+  ensure_preset_classification_rules_registered 置 is_active=False)
 
 不匹配任何规则 → default_label="普通退款"
 
-注意:3 条规则都基于 refund_wide 物化宽表字段,因此仅适用于 source_code=refund_wide 的视图 segment。
+注意:2 条规则都基于 refund_wide 物化宽表字段,因此仅适用于 source_code=refund_wide 的视图 segment。
 规则1 必须走 refund_wide,因为 has_external_complaint 是物化字段(refund 表无此列)。
-规则2/3 的 refund_reason/auditor 已冗余到 refund_wide,所以也能在 refund_wide 视图上一起用。
+规则2 的 refund_reason 已冗余到 refund_wide,所以也能在 refund_wide 视图上一起用。
 
 幂等注册:按 name upsert,返回 {name: rule_id} 供预设视图引用。
 """
@@ -19,9 +22,8 @@ from sqlalchemy.orm import Session
 
 from app.models.analysis_view import ClassificationRule
 
-# 客诉组审核人名单(占位,待用户提供完整名单后更新)
-# 当前为空列表:规则3 条件 IN [] 永远不命中,等价于"暂不启用规则3"
-_AUDITOR_COMPLAINT_LIST: list[str] = []
+# #185: 已废弃的预设规则名(定义已从 PRESET_RULES 移除)。ensure 时发现 DB 中仍存在 → 置 is_active=False。
+_DEPRECATED_PRESET_NAMES: list[str] = ["客诉-审核人"]
 
 PRESET_RULES: list[dict] = [
     {
@@ -40,27 +42,13 @@ PRESET_RULES: list[dict] = [
     },
     {
         "name": "客诉-原因",
-        "description": "次优先级:退费原因含'客诉'关键词 → 归为客诉-原因。关键词占位,待用户细化。",
+        "description": "次优先级:退费原因含'客诉'关键词 → 归为客诉-原因。",
         "rules": [
             {
                 "label": "客诉-原因",
                 "match": "any",
                 "conditions": [
                     {"field": "refund_reason", "op": "contains", "value": "客诉"},
-                ],
-            }
-        ],
-        "default_label": "普通退款",
-    },
-    {
-        "name": "客诉-审核人",
-        "description": "最低优先级:审核人在客诉组名单内 → 归为客诉-审核人。名单占位,待用户提供。",
-        "rules": [
-            {
-                "label": "客诉-审核人",
-                "match": "any",
-                "conditions": [
-                    {"field": "auditor", "op": "in", "value": _AUDITOR_COMPLAINT_LIST},
                 ],
             }
         ],
@@ -96,5 +84,15 @@ def ensure_preset_classification_rules_registered(db: Session) -> dict[str, int]
             db.add(rule)
             db.flush()  # 获取 id
             name_to_id[cfg["name"]] = rule.id
+    # #185 清理: 废弃预设规则(定义已移除)在 DB 中仍有行 → 置 inactive, 避免残留规则影响分类
+    if _DEPRECATED_PRESET_NAMES:
+        rows = list(
+            db.scalars(
+                select(ClassificationRule).where(ClassificationRule.name.in_(_DEPRECATED_PRESET_NAMES))
+            ).all()
+        )
+        for r in rows:
+            if r.is_active:
+                r.is_active = False
     db.commit()
     return name_to_id

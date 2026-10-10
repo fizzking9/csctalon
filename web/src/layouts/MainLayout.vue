@@ -14,111 +14,9 @@
         text-color="#b7c0cd"
         active-text-color="#fff"
       >
-        <!-- 1. 运营看板(日/周/月/季切换, 全员可见, 第一位) -->
-        <el-menu-item index="/dashboards/today">
-          <el-icon><DataLine /></el-icon>
-          <span>运营看板</span>
-        </el-menu-item>
-
-        <!-- 3. 专项分析:管理层可见, 专项深入分析透视(退款/投诉/接待/提现全链路/绩效/专项跟进) -->
-        <el-sub-menu v-if="authStore.isManager" index="dashboards">
-          <template #title>
-            <el-icon><DataAnalysis /></el-icon>
-            <span>专项分析</span>
-          </template>
-          <el-menu-item index="/dashboards/refund">退款分析</el-menu-item>
-          <el-menu-item index="/dashboards/refund-recovery">挽回分析</el-menu-item>
-          <el-menu-item index="/dashboards/complaint-analysis">投诉分析</el-menu-item>
-          <el-menu-item v-if="showByVisibility('debug_only')" index="/dashboards/complaint-audit">投诉核查</el-menu-item>
-          <el-menu-item v-if="showByVisibility('debug_only')" index="/dashboards/reception">接待分析</el-menu-item>
-          <el-menu-item v-if="showByVisibility('debug_only')" index="/dashboards/performance">绩效分析</el-menu-item>
-          <el-menu-item v-if="showByVisibility('debug_only')" index="/dashboards/special">专项跟进</el-menu-item>
-        </el-sub-menu>
-
-        <!-- 设备/人员时序审计:业务功能(从退款看板-人员/设备分析「时序」跳转),不进入主菜单 -->
-        <el-menu-item v-if="showByVisibility('debug_only')" index="/todos">
-          <el-icon><Bell /></el-icon>
-          <span>事项跟进</span>
-        </el-menu-item>
-
-        <el-menu-item v-if="showByVisibility('debug_only')" index="/tasks">
-          <el-icon><List /></el-icon>
-          <span>专项任务</span>
-        </el-menu-item>
-
-        <el-menu-item v-if="showByVisibility('debug_only')" index="/management/device-tags">
-          <el-icon><CollectionTag /></el-icon>
-          <span>设备专项标签</span>
-        </el-menu-item>
-
-        <el-menu-item v-if="showByVisibility('debug_only')" index="/management/invoices">
-          <el-icon><Tickets /></el-icon>
-          <span>发票登记</span>
-        </el-menu-item>
-
-        <el-menu-item v-if="showByVisibility('debug_only')" index="/management/kb-articles">
-          <el-icon><Reading /></el-icon>
-          <span>知识库</span>
-        </el-menu-item>
-
-        <!-- 策略发布:管理层看子菜单(管理+查阅),客服只看发布页 -->
-        <el-sub-menu v-if="authStore.isManager && showByVisibility('debug_only')" index="strategy">
-          <template #title>
-            <el-icon><Document /></el-icon>
-            <span>策略发布</span>
-          </template>
-          <el-menu-item v-if="authStore.isAdmin || authStore.isSupervisor" index="/strategy/manage">策略管理</el-menu-item>
-          <el-menu-item index="/strategy/publish">文档查阅</el-menu-item>
-        </el-sub-menu>
-        <el-menu-item v-else-if="showByVisibility('debug_only')" index="/strategy/publish">
-          <el-icon><Document /></el-icon>
-          <span>策略发布</span>
-        </el-menu-item>
-
-        <!-- 报表中心(管理层,规划占位): 仅 admin + supervisor 可见全量报表 -->
-        <el-menu-item v-if="(authStore.isAdmin || authStore.isSupervisor) && showByVisibility('debug_only')" index="/report/center">
-          <el-icon><Printer /></el-icon>
-          <span>报表中心</span>
-        </el-menu-item>
-
-        <!-- 管理闭环:报告→审计→措施→跟进→回看(管理层可见) -->
-        <el-sub-menu v-if="authStore.isManager && showByVisibility('debug_only')" index="management">
-          <template #title>
-            <el-icon><Flag /></el-icon>
-            <span>管理闭环</span>
-          </template>
-          <el-menu-item index="/management/reports">报告索引</el-menu-item>
-          <el-menu-item index="/management/weekly">周报看板</el-menu-item>
-          <el-menu-item index="/management/measures">管理措施</el-menu-item>
-          <el-menu-item index="/management/policies">政策措施</el-menu-item>
-          <el-menu-item index="/management/incidents">影响事件</el-menu-item>
-          <el-menu-item index="/management/schedule">排班管理</el-menu-item>
-          <el-menu-item index="/management/alerts">预警中心</el-menu-item>
-          <el-menu-item index="/management/upstream-tickets">跨部门协作</el-menu-item>
-          <el-menu-item v-if="authStore.isAdmin || authStore.isSupervisor" index="/management/templates">看板模板</el-menu-item>
-        </el-sub-menu>
-
-        <el-sub-menu v-if="authStore.isAdmin" index="system">
-          <template #title>
-            <el-icon><Setting /></el-icon>
-            <span>系统管理</span>
-          </template>
-          <el-menu-item index="/system/users">用户管理</el-menu-item>
-          <el-menu-item index="/system/persons">人员管理</el-menu-item>
-          <el-menu-item index="/data/ingest">数据采集</el-menu-item>
-          <el-menu-item index="/analytics/builder">视图构建器</el-menu-item>
-          <el-menu-item index="/analytics/views">视图清单</el-menu-item>
-          <el-menu-item index="/dashboards/designer">看板配置</el-menu-item>
-          <el-menu-item index="/system/classification-rules">分类规则</el-menu-item>
-          <el-menu-item index="/system/operation-logs">操作日志</el-menu-item>
-          <el-menu-item index="/system/system-events">
-            <el-badge v-if="eventUnread > 0" :value="eventUnread" :max="99" class="menu-badge">
-              <span>事务通知</span>
-            </el-badge>
-            <span v-else>事务通知</span>
-          </el-menu-item>
-          <el-menu-item index="/system/cache">缓存管理</el-menu-item>
-        </el-sub-menu>
+        <!-- 菜单由 config/menu.js 唯一驱动(见该文件顶部注释):
+             桌面端与移动端共用同一配置, 杜绝两份硬编码漂移 (#46, A-20260910-004) -->
+        <MenuTree :nodes="MENU_GROUPS" />
       </el-menu>
     </el-aside>
 
@@ -146,6 +44,9 @@
             <el-tooltip content="设备分析" placement="bottom">
               <el-button :icon="Monitor" circle size="small" text @click="openDeviceAnalysis" />
             </el-tooltip>
+            <el-tooltip v-if="authStore.isManager" content="AI 分析助手" placement="bottom">
+              <el-button :icon="MagicStick" circle size="small" text @click="openAssistant" />
+            </el-tooltip>
             <el-tooltip v-if="authStore.isAdmin" content="手动同步(增量)" placement="bottom">
               <el-button
                 :icon="Upload"
@@ -157,9 +58,17 @@
                 @click="handleManualSync"
               />
             </el-tooltip>
-            <el-tooltip v-if="authStore.isAdmin" content="事务通知" placement="bottom">
-              <el-badge :value="eventUnread" :max="99" :hidden="eventUnread === 0" class="event-bell">
-                <el-button :icon="Bell" circle size="small" text @click="router.push('/system/system-events')" />
+            <el-tooltip v-if="authStore.isAdmin" :content="eventUnreadError > 0 ? `事务通知: ${eventUnreadError} 条严重故障待处理` : '事务通知'" placement="bottom">
+              <el-badge
+                :value="eventUnreadError > 0 ? eventUnreadError : eventUnread"
+                :max="99"
+                :type="eventUnreadError > 0 ? 'danger' : 'warning'"
+                :hidden="eventUnread === 0"
+                class="event-bell"
+              >
+                <el-button :icon="Bell" circle size="small" text
+                  :class="{ 'bell-danger': eventUnreadError > 0 }"
+                  @click="router.push('/system/system-events')" />
               </el-badge>
             </el-tooltip>
           </div>
@@ -178,6 +87,70 @@
                 </el-dropdown-item>
                 <el-dropdown-item command="agenda">
                   <el-icon style="margin-right:6px"><Bell /></el-icon>我的待办
+                </el-dropdown-item>
+                <!--
+                  ───────────────────────── 设计说明（Design Rationale）─────────────────────────
+                  目的：替系统管理员在 csctalon 与两个独立管理台（云上网络管理面板 / 算力通道
+                        管理台）之间切换时省掉一次重复登录（低频，只在需要管网络或算力时用）。
+                  逻辑：免密方向是「csctalon 签发 → 目标系统消费」——本系统有真实用户与角色体系，
+                        而网络管理面板持有 docker.sock（等价宿主 root），不适合当业务系统的身份
+                        权威，故由本系统签 60 秒一次性票据、目标侧验签后建自己的会话。
+                        入口放「用户下拉」而非左侧菜单树：菜单树由 config/menu.js 唯一驱动且只承载
+                        站内路由（有「菜单项必须存在于 router」的防悬空测试），外部系统链接塞进去
+                        会破坏该契约。
+                  口径：SSO_SHARED_SECRET 未配置则不显示网络管理面板入口；talon 地址来自
+                        SSO_TALON_URL_LAN / SSO_TALON_URL_ZT（它没有公网入口，前端按当前访问
+                        来源择一：从办公网打开用办公网地址，否则用 ZeroTier 地址；走 talon 自身
+                        可信网段免密，不签票）。票据放 URL fragment，不发给服务端，故不进两侧
+                        access log、不随 Referer 外泄。
+                  取舍：不做「统一门户 / 单点登出」——两个目标系统仍保留各自独立登录（可用性冗余：
+                        面板自身登录入口在票据链路故障时仍可用，本系统登录亦不依赖它们）；
+                        不把 talon 纳入票据体系（它已有可信网段免密，签票属重复建设）；
+                        不给 talon 配公网域名或反代（它按来源网段放行，任何反代都会让来源变成
+                        代理机、等于对全网开放 —— 实测反代机源 IP 落入可信网段即可免密拿到全部
+                        API Key，工单 #188）；
+                        不做用户映射（本入口只服务系统管理员单人，不面向多角色）。
+                  工单：#187 / #188
+                  ─────────────────────────────────────────────────────────────────────────────
+                -->
+                <el-dropdown-item v-if="authStore.isAdmin && ssoEntries.netmgr_enabled" command="netmgr" divided>
+                  <el-icon style="margin-right:6px"><Monitor /></el-icon>网络管理面板
+                  <el-tooltip placement="left" effect="light" :show-after="200">
+                    <template #content>
+                      <div style="max-width:270px;line-height:1.6">
+                        <b>为什么有这个入口</b><br />
+                        替系统管理员省掉一次重复登录：点一下即用 csctalon 身份免密进入云上的
+                        网络管理面板（ZeroTier / 代理组网管理）。<br /><br />
+                        <b>怎么做到的</b><br />
+                        本系统签发 60 秒一次性票据，面板验签后建立自己的会话；票据只走浏览器
+                        地址片段，两端服务器都不记录。<br /><br />
+                        <b>我们不做什么</b><br />
+                        不向非管理员开放；面板自身登录入口保留 —— 本入口不可用时可直接登录面板。
+                      </div>
+                    </template>
+                    <el-icon style="margin-left:6px;color:#c0c4cc;font-size:13px"><InfoFilled /></el-icon>
+                  </el-tooltip>
+                </el-dropdown-item>
+                <el-dropdown-item v-if="authStore.isAdmin && talonTarget" command="talon">
+                  <el-icon style="margin-right:6px"><Cpu /></el-icon>算力通道管理台
+                  <el-tooltip placement="left" effect="light" :show-after="200">
+                    <template #content>
+                      <div style="max-width:280px;line-height:1.6">
+                        <b>为什么有这个入口</b><br />
+                        算力通道管理台与网络管理面板一样是独立系统，这里只放一个直链，方便管理员
+                        从本系统跳过去。<br /><br />
+                        <b>它只在办公网 / ZeroTier 内可达</b><br />
+                        该管理台部署在内网，没有公网入口，因此这里按你的访问来源自动选地址：
+                        从办公网打开本页用办公网地址，否则用 ZeroTier 地址。
+                        <b>如果点开打不开，说明当前设备既不在办公网、也没接入 ZeroTier ——
+                        先连上 ZeroTier 再点即可。</b><br /><br />
+                        <b>我们不做什么</b><br />
+                        不给它配公网域名或反代：该管理台按来源网段放行，任何反代都会让来源变成
+                        代理机、等于对全网开放；也不做统一登出（两个系统会话互不影响）。
+                      </div>
+                    </template>
+                    <el-icon style="margin-left:6px;color:#c0c4cc;font-size:13px"><InfoFilled /></el-icon>
+                  </el-tooltip>
                 </el-dropdown-item>
                 <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
               </el-dropdown-menu>
@@ -230,7 +203,7 @@
     </el-container>
   </el-container>
 
-  <!-- 移动端抽屉菜单(仅开放: 今日看板 / 运营看板 / 数据采集[管理员]) -->
+  <!-- 移动端抽屉菜单(与桌面端同源, 由 config/menu.js 驱动) -->
   <el-drawer
     v-model="mobileMenuOpen"
     direction="ltr"
@@ -244,29 +217,14 @@
         <span class="mobile-menu-name">{{ authStore.displayName }}</span>
         <el-tag size="small" type="info" effect="plain">{{ roleLabel }}</el-tag>
       </div>
-      <el-menu :default-active="activeMenu" router @select="mobileMenuOpen = false">
-        <el-menu-item index="/dashboards/today">
-          <el-icon><DataLine /></el-icon>
-          <span>今日看板</span>
-        </el-menu-item>
-        <el-menu-item index="/dashboards/operation">
-          <el-icon><TrendCharts /></el-icon>
-          <span>运营看板</span>
-        </el-menu-item>
-        <!-- 专项分析: 管理层可见(与桌面端一致, 含退款/挽回/投诉) -->
-        <el-sub-menu v-if="authStore.isManager" index="mobile-dashboards">
-          <template #title>
-            <el-icon><DataAnalysis /></el-icon>
-            <span>专项分析</span>
-          </template>
-          <el-menu-item index="/dashboards/refund">退款分析</el-menu-item>
-          <el-menu-item index="/dashboards/refund-recovery">挽回分析</el-menu-item>
-          <el-menu-item index="/dashboards/complaint-analysis">投诉分析</el-menu-item>
-        </el-sub-menu>
-        <el-menu-item v-if="authStore.isAdmin" index="/data/ingest">
-          <el-icon><Upload /></el-icon>
-          <span>数据采集</span>
-        </el-menu-item>
+      <!-- 移动端与桌面端共用同一份菜单配置(config/menu.js) ——
+           历史问题: 两端各自硬编码, 移动端只有 2 项, 与桌面严重不一致 (#46) -->
+      <el-menu
+        :default-active="activeMenu"
+        router
+        @select="mobileMenuOpen = false"
+      >
+        <MenuTree :nodes="MENU_GROUPS" />
       </el-menu>
       <el-button type="danger" plain class="mobile-logout" @click="logout">退出登录</el-button>
     </div>
@@ -274,22 +232,35 @@
 
     <!-- 全局审计弹窗(点击任意 SN / 人员 唤起) -->
     <AuditDialog />
+
+    <!-- 全局 AI 分析助手(右上角按钮唤起, 管理层可见) -->
+    <AssistantDrawer />
   </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Bell, User, Monitor, Upload } from '@element-plus/icons-vue'
+import { Bell, User, Monitor, Upload, MagicStick, Cpu, InfoFilled } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { taskStatus, taskSubmit } from '@/api/fetch'
 import { systemEventSummary } from '@/api/systemEvent'
 import { getSiteInfo } from '@/api/siteInfo'
+import { getSsoEntries, issueNetmgrTicket } from '@/api/sso'
 import AuditDialog from '@/components/AuditDialog.vue'
+import AssistantDrawer from '@/components/AssistantDrawer.vue'
+import MenuTree from '@/components/MenuTree.vue'
+import { MENU_GROUPS } from '@/config/menu'
 import { useAudit } from '@/composables/useAudit'
-import { showByVisibility } from '@/utils/env'
+import { useAssistant } from '@/composables/useAssistant'
+import { useLayoutState, useLayoutStateWriter } from '@/composables/useLayoutState'
+import { usePolling, POLL_INTERVALS } from '@/composables/usePolling'
 
 const { openQuickAnalysis } = useAudit()
+const { openAssistant } = useAssistant()
+// 布局层共享状态: 未读数写到这里, MenuTree(递归组件)只读消费, 避免 N 倍轮询
+const { setEventUnread, setEventUnreadError } = useLayoutStateWriter()
+const layoutState = useLayoutState()
 
 const route = useRoute()
 const router = useRouter()
@@ -319,9 +290,58 @@ const roleLabel = computed(() => {
   return map[authStore.role] || ''
 })
 
+// ---------- 外部管理台入口（仅管理员，工单 #187/#188）----------
+// 只拉「有没有配、地址是什么」；票据在点击时才签发（60 秒有效，不做预取/缓存）
+const ssoEntries = reactive({ netmgr_enabled: false, talon_url_lan: '', talon_url_zt: '' })
+const ssoJumping = ref(false)
+
+async function loadSsoEntries() {
+  if (!authStore.isAdmin) return
+  try {
+    const res = await getSsoEntries()
+    ssoEntries.netmgr_enabled = !!res.data?.netmgr_enabled
+    ssoEntries.talon_url_lan = res.data?.talon_url_lan || ''
+    ssoEntries.talon_url_zt = res.data?.talon_url_zt || ''
+  } catch (e) {
+    // 静默：入口不可用不影响布局其它功能
+  }
+}
+
+// talon 没有公网入口，只有办公网与 ZeroTier 两条路径，按当前访问来源选：
+// 本页若就是从办公网地址打开的（hostname 与办公网地址一致）→ 办公网必然可达，用它；
+// 其余情况（公网域名 / ZT 地址）→ 用 ZeroTier 地址，打不开时由 ⓘ 提示先连 ZT。
+// 无法在前端探测可达性：https 页面 fetch http:// 目标会被浏览器按混合内容拦截。
+const talonTarget = computed(() => {
+  const lan = ssoEntries.talon_url_lan
+  const zt = ssoEntries.talon_url_zt
+  if (!lan) return zt
+  if (!zt) return lan
+  try {
+    if (window.location.hostname === new URL(lan).hostname) return lan
+  } catch (e) {
+    // 配置不是合法 URL 时退化为用 ZeroTier 地址
+  }
+  return zt
+})
+
+// 免密进入网络管理面板：取一次性票据后整页跳转（票据即凭证，不落本地存储、不写日志）
+async function openNetmgr() {
+  if (ssoJumping.value) return
+  ssoJumping.value = true
+  try {
+    const res = await issueNetmgrTicket()
+    const url = res.data?.url
+    if (!url) throw new Error('未获取到跳转地址')
+    window.location.href = url
+  } catch (e) {
+    // 请求拦截器已提示错误详情（未配置 / 权限不足 / 网络异常），此处不重复提示
+  } finally {
+    ssoJumping.value = false
+  }
+}
+
 // ---------- 全局同步状态轮询 & 黄条提示 ----------
-// 全局轻量轮询:15秒一次,仅用于UI提示,不阻塞任何操作
-const SYNC_POLL_MS = 15 * 1000
+// 统一轮询层管理(S-P1-2): 间隔 15s 见 POLL_INTERVALS.SYNC_STATUS, 页面隐藏自动暂停
 const rawSync = reactive({
   is_syncing: false,
   is_writing_heavy: false,
@@ -332,16 +352,21 @@ const rawSync = reactive({
   last_success_at: null,
 })
 
-let _pollTimer = null
-let _pollTimer2 = null
+// 统一轮询: 同步状态 + 通知角标
+const { startPolling } = usePolling()
 let _mq = null
+
 // 系统事务通知未读数(侧边栏/顶部角标, 15s 轮询)
-const eventUnread = ref(0)
+// 存于 useLayoutState 共享单例(菜单树递归组件共用, 避免各自轮询)
+const eventUnread = computed(() => layoutState.eventUnread)
+// error 级未读数: 铃铛红色特权(2026-09-29 事故治理)
+const eventUnreadError = computed(() => layoutState.eventUnreadError)
 
 async function _pollEventUnread() {
   try {
     const res = await systemEventSummary()
-    eventUnread.value = res.data?.unread || 0
+    setEventUnread(res.data?.unread || 0)
+    setEventUnreadError(res.data?.unread_error || 0)
   } catch (e) {
     // 静默: 接口异常不影响主布局
   }
@@ -398,10 +423,11 @@ onMounted(() => {
   isMobile.value = _mq.matches
   _mq.addEventListener('change', _onMediaChange)
   _pollSyncOnce()
-  _pollTimer = setInterval(_pollSyncOnce, SYNC_POLL_MS)
+  startPolling('layout:sync-status', _pollSyncOnce, POLL_INTERVALS.SYNC_STATUS)
   _pollEventUnread()
   // 事务通知角标与同步状态同节奏轮询
-  _pollTimer2 = setInterval(_pollEventUnread, SYNC_POLL_MS)
+  startPolling('layout:event-unread', _pollEventUnread, POLL_INTERVALS.SYNC_STATUS)
+  loadSsoEntries()
 })
 
 onBeforeUnmount(() => {
@@ -409,14 +435,7 @@ onBeforeUnmount(() => {
     _mq.removeEventListener('change', _onMediaChange)
     _mq = null
   }
-  if (_pollTimer) {
-    clearInterval(_pollTimer)
-    _pollTimer = null
-  }
-  if (_pollTimer2) {
-    clearInterval(_pollTimer2)
-    _pollTimer2 = null
-  }
+  // 轮询任务由 usePolling 的 onBeforeUnmount 自动停止
 })
 
 async function logout() {
@@ -431,6 +450,11 @@ async function handleCommand(cmd) {
     router.push('/dashboard')
   } else if (cmd === 'agenda') {
     router.push('/agenda')
+  } else if (cmd === 'netmgr') {
+    await openNetmgr()
+  } else if (cmd === 'talon') {
+    // 直链：新标签打开，保留本页状态（地址由后端配置下发并按访问来源择一，不在前端硬编码）
+    window.open(talonTarget.value, '_blank', 'noopener')
   }
 }
 
@@ -524,6 +548,14 @@ async function handleManualSync() {
 }
 .event-bell .el-badge__content {
   font-size: 10px;
+}
+/* error 级未读: 铃铛图标本身变红, 与普通 warning 角标区分(事故特权) */
+.event-bell .bell-danger .el-icon,
+.event-bell .bell-danger svg {
+  color: var(--el-color-danger);
+}
+.event-bell .bell-danger:hover .el-icon {
+  color: var(--el-color-danger);
 }
 .menu-badge .el-badge__content {
   font-size: 10px;
@@ -639,13 +671,44 @@ async function handleManualSync() {
   margin: auto 16px 16px;
 }
 
-/* 移动端响应式(<768px) */
+/* 移动端响应式(<768px) —— 全局移动端框架主入口（#225）
+   设计说明（Design Rationale）
+   目的：替不在工位的值班者保住「找菜单 → 看页面」这条最短路径 ——
+         侧边栏在窄屏整体让位给内容区，需要时从左侧抽屉唤出。
+   逻辑：抽屉复用与桌面端同一份 config/menu.js（#46 已修"两端菜单漂移"），
+         断点 768px 与 main.css / useToday 同源；桌面端 DOM 结构零改动，
+         所有差异仅由本 media 查询承载。
+   口径：仅约束 ≤768px 视口；汉堡按钮触控目标加大到 44px（iOS HIG），
+         其余 header 按钮维持 small 但补 6px padding 保底 32px。
+   取舍：❌ 不做手势滑动开关抽屉（el-drawer 自带遮罩点击关闭已够用，
+         自研手势会与路由过渡动画冲突）；❌ 不为窄屏改路由结构。
+   工单：#225 */
 @media (max-width: 768px) {
   .header {
     padding: 0 8px;
   }
   .header-left {
     gap: 8px;
+  }
+  /* 汉堡按钮：窄屏唯一菜单入口，触控目标 44px（iOS HIG），
+     比其它 small 按钮更大的热区，避免"点不到菜单"这一最高频阻塞 */
+  .collapse-btn {
+    font-size: 22px;
+    padding: 10px;
+    margin-left: -6px; /* 抵消 padding 造成的视觉偏移，保持左对齐 */
+    min-width: 44px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  /* 面包屑在窄屏可能很长（页面标题如「投诉分析·渠道明细」），
+     限制最大宽度并省略号截断，不挤压右侧用户区 */
+  .header-left :deep(.el-breadcrumb) {
+    max-width: 40vw;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
   .user-name,
   .role-tag {
@@ -654,6 +717,9 @@ async function handleManualSync() {
   .quick-tools {
     margin-right: 4px;
     padding-right: 4px;
+    /* 快捷工具在窄屏允许收缩，避免挤爆 header */
+    flex-shrink: 1;
+    overflow: hidden;
   }
   .quick-tools .el-button {
     padding: 6px;
@@ -663,6 +729,16 @@ async function handleManualSync() {
   }
   .sync-banner {
     margin: 0 8px;
+  }
+  /* 页脚备案信息在窄屏允许换行（桌面是单行） */
+  .global-footer {
+    line-height: 1.6;
+    padding: 12px 8px 4px;
+  }
+  .global-footer .copyright {
+    display: block;
+    margin-left: 0;
+    margin-top: 4px;
   }
 }
 </style>

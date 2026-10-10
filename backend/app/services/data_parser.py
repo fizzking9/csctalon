@@ -3,6 +3,7 @@
 复用现有分析逻辑,从'退费汇总.xlsx'的列结构提取列模板
 """
 
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ from typing import Any
 import pandas as pd
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 # 各数据类型的列模板(目标字段名 -> 样本源列名候选)
 # 源列名可能含尾部 \t,解析时会清洗
@@ -173,6 +176,114 @@ COLUMN_TEMPLATES: dict[str, dict[str, list[str]]] = {
         "legal_person": ["法人"],
         "super_admin": ["超级管理员"],
     },
+    # ── BMS 五源扩容(2026-09-05, A-20260905-001) ──────────────────────
+    # 设备管理档案(设备管理页导出, P4 回填 devices 主表)
+    # 实测导出列(14): 设备号,设备类型,所属商户,主商户,是否激活,激活时间,服务有效期,
+    #                当前套餐,启动卡ICCID,虚拟卡ICCID,应用版本,区域,创建时间,批次号
+    "device_profile": {
+        "device_sn": ["设备号", "设备SN", "SN", "sn"],
+        "device_type": ["设备类型"],
+        "merchant_name": ["所属商户", "商户名称", "商户"],
+        "main_merchant_name": ["主商户", "根商户名称", "主商户名称"],
+        "active_flag": ["是否激活", "激活状态"],
+        "active_time": ["激活时间"],
+        "service_valid_until": ["服务有效期", "服务到期时间", "服务有效期至"],
+        "current_combo_name": ["当前套餐", "套餐名称"],
+        "start_iccid": ["启动卡ICCID", "启动卡ID"],
+        "virtual_iccid": ["虚拟卡ICCID", "虚卡ICCID", "虚拟卡ID"],
+        "app_version": ["应用版本", "APP版本", "设备版本"],
+        "region": ["区域", "所有区域"],
+        "created_at_raw": ["创建时间"],
+        "batch_no": ["批次号", "分发批次号"],
+    },
+    # 设备月流量(HTTP API items → df; sn 与 device_sn 同列映射)
+    "device_flow_usage": {
+        "device_sn": ["sn", "设备SN", "设备号"],
+        "sn": ["sn", "设备SN", "设备号"],
+        "merchant_id": ["businessId", "商户ID", "商户号"],
+        "merchant_name": ["businessName", "商户名称", "商户名"],
+        "device_type_name": ["deviceTypeName", "设备类型"],
+        "device_group_name": ["deviceGroupName", "设备组"],
+        "device_combo_name": ["deviceComboName", "当前套餐", "套餐名称"],
+        "stat_month": ["flowDate", "月份", "统计月份"],
+        "flow_date": ["flowDate", "月份", "统计月份"],
+        "flow_gb": ["flowValue", "流量(GB)", "流量GB"],
+        "flow_value": ["flowValue", "流量(GB)", "流量GB"],
+    },
+    # 退款记录报表(实测 CSV 10 列:平台订单号,微信订单号,商户号,商户名,设备号,
+    #             商品名称,退款时间,申请退款金额,退款金额,退款状态)
+    "refund_record_report": {
+        "platform_order_no": ["平台订单号", "订单号"],
+        "wx_order_no": ["微信订单号"],
+        "merchant_id": ["商户号", "商户号ID", "商户ID"],
+        "merchant_name": ["商户名", "商户名称"],
+        "device_sn": ["设备号", "设备SN", "SN"],
+        "product_name": ["商品名称", "商品"],
+        "refund_time": ["退款时间", "退款完成时间"],
+        "apply_refund_amount": ["申请退款金额", "申请金额"],
+        "refund_amount": ["退款金额", "实退金额"],
+        "refund_status": ["退款状态", "状态"],
+    },
+    # 订单管理(BMS 订单台账; 时间锚点=创建时间)
+    # 实测导出列(24): 订单号,设备号,所属商户,设备类型,套餐id,套餐名称,套餐价格,应付价格,
+    #               实际支付价格,折扣金额,支付时间,对账单号,订单状态,订单类型,退款状态,
+    #               创建人,创建时间,客服人员,支付类型,激活时间,最后储值卡时间,微信商户Id,备注
+    "bms_order": {
+        "order_no": ["订单号", "订单编号"],
+        "order_type": ["订单类型", "类型"],
+        "device_sn": ["设备SN", "设备号", "sn", "SN"],
+        "combo_name": ["套餐名称", "套餐"],
+        "combo_price": ["套餐价格", "套餐价"],
+        "payable_price": ["应付价格", "应付金额", "应付"],
+        "actual_pay_price": ["实际支付价格", "实付价格", "实付金额", "实付"],
+        "balance_pay_price": ["余额支付", "余额支付价格"],
+        "wx_order_no": ["微信订单号", "微信支付单号", "对账单号"],
+        "pay_date": ["支付时间"],
+        "pay_type": ["支付类型"],
+        "order_status": ["订单状态", "状态"],
+        "order_result": ["订单结果", "下单结果"],
+        "order_status_raw": ["订单状态码", "状态码"],
+        "create_user": ["创建人", "运营客服", "客服人员"],
+        "create_date": ["创建时间"],
+        "business_name": ["商户名称", "商户", "所属商户"],
+        "business_id": ["商户ID", "商户Id", "业务ID"],
+        "device_type_name": ["设备类型"],
+        "refund_status": ["退款状态"],
+        "active_date": ["激活时间"],
+        "last_stored_time": ["最后储值时间", "最后储值卡时间", "储值时间"],
+        "mch_id": ["微信商户Id", "微信商户ID", "商户号"],
+        "merchant_name": ["微信商户名称", "微信商户名"],
+        "before_serve_valid_date": ["续费前的服务有效期", "原服务有效期"],
+        "after_serve_valid_date": ["续费后的服务有效期", "新服务有效期"],
+        "days": ["天数", "有效期天数"],
+    },
+    # 退货跟踪(页面列:设备类型,店铺,商户,实付金额,退货类型,退款金额,退货签收状态,
+    #          退货快递单号,退货原因,下单时间,退货时间,签收时间,创建人,更新人,
+    #          创建时间,更新时间,退货备注; 时间锚点=创建时间)
+    # 实测导出列(19): 销售订单号,SN,设备类型,店铺,实付金额,退货类型,退款金额,退货签收,
+    #               退货快递单号,退货原因,退货备注,客户编号,ERP订单号,下单时间,退货时间,
+    #               创建人,更新人,创建时间,更新时间
+    "return_tracking": {
+        "device_sn": ["设备SN", "设备号", "SN", "sn"],
+        "device_type": ["设备类型"],
+        "shop": ["店铺", "店铺名称"],
+        "merchant": ["商户", "商户名称"],
+        "paid_amount": ["实付金额", "实付"],
+        "return_type": ["退货类型"],
+        "refund_amount": ["退款金额", "退费金额"],
+        "return_sign_status": ["退货签收状态", "签收状态", "退货签收"],
+        "return_express_no": ["退货快递单号", "快递单号", "退货单号"],
+        "return_reason": ["退货原因", "退货理由"],
+        "order_no": ["销售订单号", "订单号", "销售单号", "ERP订单号"],
+        "order_time": ["下单时间"],
+        "return_time": ["退货时间"],
+        "sign_time": ["签收时间"],
+        "creator": ["创建人"],
+        "updater": ["更新人"],
+        "created_at_raw": ["创建时间"],
+        "updated_at_raw": ["更新时间"],
+        "remark": ["退货备注", "备注"],
+    },
     "cs_record": {
         "problem_category": ["问题大类"],
         "problem_type": ["问题类型"],
@@ -304,20 +415,20 @@ def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tup
         try:
             with open(path, encoding=enc, newline="") as f:
                 content = f.read()
-            
+
             # 统一换行符
             content = content.replace("\r\n", "\n").replace("\r", "\n")
             physical_lines = content.split("\n")
-            
+
             if physical_lines and physical_lines[-1] == "":
                 physical_lines.pop()
             if not physical_lines:
                 return pd.DataFrame(), enc
-            
+
             # 解析表头
             header = [str(c).replace("\t", "").strip() for c in physical_lines[0].split(',')]
             header_len = len(header)
-            
+
             # 逐行解析数据
             data_rows = []
             i = 1
@@ -326,7 +437,7 @@ def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tup
                 if not line:
                     i += 1
                     continue
-                
+
                 # 场景1: 先修复未闭合的引号问题
                 line = _fix_unclosed_quote(line)
 
@@ -356,7 +467,7 @@ def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tup
                             line = _fix_unclosed_quote(line)
                             fields = _split_fields(line)
                             i += 1  # 跳过已合并的行
-                
+
                 # 场景3: 字段数多于表头,合并多余的字段到最后一个字段
                 # (通常是提交参数等包含JSON的字段,内部有逗号但未加引号)
                 if len(fields) > header_len:
@@ -364,14 +475,14 @@ def read_csv_auto_encoding(path: Path | str, encoding: str | None = None) -> tup
                     extra_fields = fields[header_len - 1:]
                     merged_field = ','.join(extra_fields)
                     fields = fields[:header_len - 1] + [merged_field]
-                
+
                 # 补齐到表头长度
                 if len(fields) < header_len:
                     fields = fields + [""] * (header_len - len(fields))
-                
+
                 data_rows.append(fields)
                 i += 1
-            
+
             df = pd.DataFrame(data_rows, columns=header, dtype=str)
             return df, enc
         except (UnicodeDecodeError, UnicodeError) as e:
@@ -567,7 +678,33 @@ def load_dataframe(path: Path | str, sheet_name: str | None = None, encoding: st
     """加载完整 DataFrame(供 upsert 使用),单元格已清洗"""
     df, _, _ = read_table(path, sheet_name=sheet_name, encoding=encoding)
     df = df.map(clean_cell)  # noqa: PD003
+    # 长数字精度可疑检测(#42): 源 Excel 数字单元格 >15 位被浮点截断(尾部多 0),
+    # 读取层无法修复(源已损坏), 但必须可见 → 计数 + 告警, 提示上游把编号列设为文本格式。
+    for col, n in count_suspect_precision(df).items():
+        logger.warning(
+            f"[data_parser] {path} 列「{col}」有 {n} 个疑似浮点精度截断的长数字"
+            f"(>=15位且尾部多0); 上游应将该列设为文本格式"
+        )
     return df
+
+
+# 长数字精度可疑判据(与 shared_doc_sync_service 同口径): 纯数字 + >=15 位 + 尾部 >=4 个 0。
+# 正常业务编号极少以多个 0 结尾, 该形态高度指向「Excel 数字单元格 >15 位被截断」。
+_SUSPECT_PRECISION_RE = re.compile(r"^\d{15,}0{4,}$")
+
+
+def count_suspect_precision(df: pd.DataFrame) -> dict[str, int]:
+    """统计疑似受浮点精度影响的长数字单元格: {列名: 数量}(仅计数, 不改数据)"""
+    hits: dict[str, int] = {}
+    for col in df.columns:
+        try:
+            s = df[col].astype(str)
+        except (TypeError, ValueError):
+            continue
+        n = int(s.str.match(_SUSPECT_PRECISION_RE).sum())
+        if n:
+            hits[str(col)] = n
+    return hits
 
 
 def _fix_unclosed_quote(line: str) -> str:

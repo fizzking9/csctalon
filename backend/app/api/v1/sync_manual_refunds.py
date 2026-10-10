@@ -17,7 +17,7 @@ from app.api.deps import CurrentUser, DBSession
 from app.core.config import settings
 from app.models.manual_refund_sync_log import ManualRefundSyncLog
 from app.schemas.common import PageBase, R
-from app.services.manual_refund_sync import sync_manual_refunds_from_payload
+from app.services.ingest_service import ingest_manual_refunds
 
 logger = logging.getLogger(__name__)
 
@@ -83,10 +83,31 @@ def push_manual_refunds(
         raise HTTPException(status_code=400, detail="manual_refunds 必填且必须为数组")
     source_file = (payload.get("source_file") or "").strip() or None
     try:
-        stats = sync_manual_refunds_from_payload(db, payload, source_file=source_file, sync_source="workbuddy")
+        # 统一入库接口(#42): 内部转发现有 manual_refund_sync 管线, 口径不变
+        res = ingest_manual_refunds(
+            db, payload=payload, source="workbuddy", source_file=source_file,
+            source_ref="workbuddy_push",
+        )
     except Exception as e:
         logger.exception(f"手动退款推送失败: {e}")
         raise HTTPException(status_code=500, detail=f"同步失败: {e}") from e
+    # 响应保持既有外部契约, 追加统一字段 run_id/rejected/validation
+    stats = {
+        "log_id": res.extra.get("log_id"),
+        "status": res.status,
+        "total": res.total,
+        "inserted": res.inserted,
+        "updated": res.updated,
+        "deleted": res.deleted,
+        "failed": res.failed,
+        "filtered": res.skipped,
+        "warnings": res.extra.get("warnings_count", 0),
+        "errors": res.errors[:50],
+        # #42: 统一入库结果字段(加法式扩展)
+        "run_id": res.run_id,
+        "rejected": res.rejected,
+        "validation": res.extra.get("validation", []),
+    }
     return R(data=stats)
 
 
@@ -125,6 +146,10 @@ def list_sync_logs(
                     "deleted": log.deleted,
                     "failed": log.failed,
                     "warnings": log.warnings,
+                    # #42 abc-c: 拒收与入库前校验(存量行为 NULL → 兜底)
+                    "rejected": log.rejected or 0,
+                    "validation_count": log.validation_count or 0,
+                    "validation_severity": log.validation_severity or {},
                     "error": log.error,
                     "created_at": log.created_at.isoformat() if log.created_at else None,
                     "finished_at": log.finished_at.isoformat() if log.finished_at else None,

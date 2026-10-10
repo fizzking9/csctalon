@@ -32,9 +32,14 @@ def _parse_dt(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
 
 
-@router.get("/summary", response_model=R, summary="首页汇总卡片")
-def summary(db: DBSession, _: CurrentUser):
-    return R(data=cached_call("summary", 60, A.dashboard_summary, db))
+# ⚠️ 2026-09-14 (#86) 已删除 `GET /analytics/summary`（原 `A.dashboard_summary`）：
+#   · 该接口标记「已废弃-见 analysis-views」，前端 `web/src/api/analytics.js` 的
+#     `getSummary()` **全仓零调用点**（只有定义无使用）
+#   · 但其旧公式为「工单投诉类 + 315全表 + 卡商全表」—— **含卡商且不扣重叠**，
+#     与 #53/#81 已确立的口径**直接冲突**
+#   · `cache_warmer._warm_reports` 仍在周期性预热它 → **白白消耗 DB/Redis**
+#   → 属于「废弃但仍在跑」的死代码，且是**错误口径的残留入口**（留着即隐患：
+#     将来若有人误用，会得到与看板不一致的投诉数）。故彻底删除，而非继续标记废弃。
 
 
 # ---------- 看板1:运营分析 ----------
@@ -106,6 +111,12 @@ def cat_package(db: DBSession, _: CurrentUser, limit: int = Query(20, ge=1, le=1
     return R(data=cached_call(f"cat:package:{limit}", 60, A.category_by_package, db, limit))
 
 
+@router.get("/category/package-coverage", response_model=R, summary="套餐归一覆盖率")
+def cat_package_coverage(db: DBSession, _: CurrentUser):
+    """#247 B3-2: 套餐别名归一命中率, 供看板卡片 ⓘ 数据说明"""
+    return R(data=cached_call("cat:package-coverage", 300, A.package_alias_coverage, db))
+
+
 # ---------- 看板4:人员操作分析 ----------
 
 
@@ -169,16 +180,25 @@ def rw_dims(db: DBSession, _: CurrentUser, start: str | None = None, end: str | 
     return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_dimensions, db, start, end, topn))
 
 
-@router.get("/refund-withdrawal/detail", response_model=R, summary="提现全链路看板-明细列表(支持排序/慢单筛选/涉诉/操作人/退款原因筛选/分页)")
+@router.get("/refund-withdrawal/detail", response_model=R, summary="提现全链路看板-明细列表(支持排序/慢单筛选/涉诉/操作人/退款原因/设备维度筛选/分页)")
 def rw_detail(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None,
               sort: str = Query("days_desc", pattern=r"^(days_(desc|asc)|amount_desc|d1_desc)$"),
               page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500),
               slow_only: bool = False, path: str = Query("ALL", pattern=r"^(ALL|ABD|AB|A|B|D)$"),
               comp: str = Query("all", pattern=r"^(all|any|internal|merchant|external|remark|normal)$"),
               operator: str = Query("", max_length=50),
-              reason: str = Query("", max_length=200)):
-    key = f"rw:detail:{start}:{end}:{sort}:{page}:{page_size}:{int(slow_only)}:{path}:{comp}:{operator}:{reason}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_detail, db, start, end, sort, page, page_size, slow_only, path, comp, operator, reason))
+              reason: str = Query("", max_length=200),
+              device_type: str = Query("", max_length=64, description="#273 设备类型(devices.device_type_code)"),
+              combo: str = Query("", max_length=128, description="#273 套餐(devices.current_combo_name)"),
+              merchant: str = Query("", max_length=128, description="#273 商户号(devices.merchant_name)"),
+              active_start: str = Query("", max_length=10, description="#273 激活时间起(YYYY-MM-DD)"),
+              active_end: str = Query("", max_length=10, description="#273 激活时间止(YYYY-MM-DD)"),
+              # ⚠️ pattern 尾部 ? 必须保留: 默认值是空串, pydantic v2 对空串也做 pattern 校验
+              #    （实测 `^(...)$` 时「不传参数」也 422 —— #293 回归实录）
+              active_age: str = Query("", max_length=10, pattern=r"^(le7|8-30|31-180|gt180|none)?$",
+                                      description="#291 激活后天数桶下钻(事件日−bms_orders最早激活日)")):
+    key = f"rw:detail:{start}:{end}:{sort}:{page}:{page_size}:{int(slow_only)}:{path}:{comp}:{operator}:{reason}:{device_type}:{combo}:{merchant}:{active_start}:{active_end}:{active_age}"
+    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_detail, db, start, end, sort, page, page_size, slow_only, path, comp, operator, reason, device_type, combo, merchant, active_start, active_end, active_age))
 
 
 @router.get("/refund-withdrawal/facets", response_model=R, summary="提现全链路看板-明细筛选候选项(操作人/退款原因)")
@@ -395,18 +415,20 @@ def refund_decision_overview_endpoint(
     return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_decision_overview, db, start, end, grain=grain))
 
 
-@router.get("/refund/export", summary="退款明细导出Excel(四路经营:线上直退/钱包提现/闪猫退款/手动退款+按日汇总)")
+@router.get("/refund/export", summary="退款明细导出Excel(明细台账全量 + 五路成功口径汇总)")
 def refund_export_endpoint(
     db: DBSession, _: CurrentUser,
     start: str | None = Query(None), end: str | None = Query(None),
 ):
-    """导出当前筛选区间内四路经营退款明细 Excel(多 sheet):
-    A线上直退(含涉诉分类/归一操作人) / B钱包提现 / C闪猫退款 / D手动退款 + 四路按日汇总.
-    口径与决策概览 routes_daily 一致.
+    """导出当前筛选区间内退款分析 Excel(多 sheet):
+    明细(台账原始全量, 供人工分析): A退费单明细(全量) / B钱包流水明细(全量) / C闪猫退款明细(全量)
+    / D手动退款明细(全量) / E退款记录报表明细(全量), 各带状态/类型列可自筛;
+    汇总(五路汇总(A-E)): 成功口径(与决策概览 routes_daily 一致), A/B/C/D + E(基准) + 偏差.
     """
     import io
-    import pandas as pd
     from urllib.parse import quote
+
+    import pandas as pd
     from fastapi.responses import StreamingResponse
 
     sheets = A.refund_export_all(db, start, end)
@@ -421,6 +443,25 @@ def refund_export_endpoint(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{fname}"},
     )
+
+
+# ---------- 看板8: 分品类运营看板 (#254 B3-10) ----------
+
+
+@router.get("/category/ops-overview", response_model=R, summary="分品类运营看板-设备类型/套餐/商户号聚合运营KPI")
+def category_ops_overview(
+    db: DBSession,
+    _: CurrentUser,
+    dim: str = Query("device_type", pattern="^(device_type|combo|merchant)$"),
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = Query(10, ge=1, le=50),
+):
+    from app.services.analytics.category import category_ops_overview as svc
+
+    return R(data=svc(
+        db, dim=dim, start=_parse_dt(start), end=_parse_dt(end), limit=limit,
+    ))
 
 
 # ---------- 手动退款登记 数据质量审核 (L3) ----------

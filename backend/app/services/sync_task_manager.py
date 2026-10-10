@@ -221,7 +221,6 @@ class SyncTaskManager:
         result: dict[str, tuple[datetime, datetime, str, str]] = {}
         for dt in data_types:
             last = _get_last_sync_time(db_session, dt)  # naive or aware
-            last_cn: datetime
             if last is None:
                 start = today_start
                 note = "首次同步/今日无记录,从00:00开始"
@@ -382,9 +381,10 @@ class SyncTaskManager:
                 # _current_task 保留到下一个任务开始前,方便查询
             # 缓存失效兜底: 同步完成后统一失效看板缓存 (含 BMS/SCRM 并发合并任务),
             # 避免同步后仍读到旧聚合结果。complaint:* 一并失效(BMS 投诉工单同步后会变)。
+            # reception:* (#228): SCRM 同步后接待看板缓存失效, 否则接待分析页读到旧聚合。
             try:
                 from app.core.redis_client import cache_invalidate_recent_days
-                for pat in ("today:*", "refund:*", "complaint:*"):
+                for pat in ("today:*", "refund:*", "complaint:*", "reception:*"):
                     cache_invalidate_recent_days(pat)
             except Exception as ce:  # noqa: BLE001
                 logger.debug(f"缓存失效兜底失败(不影响同步): {ce}")
@@ -398,6 +398,15 @@ class SyncTaskManager:
                     wt.add_done_callback(self._warm_bg_tasks.discard)
                 except Exception as we:  # noqa: BLE001  预热调度失败不影响同步
                     logger.debug(f"同步后预热调度失败(不影响): {we}")
+                # #129 高频同步成功后刷新当日日报(warm_on_sync_complete 内部含单飞锁
+                # + daily 20min 节流, weekly/monthly 不触发); 后台线程执行不阻塞同步收尾。
+                try:
+                    from app.services.ai_report_worker import warm_on_sync_complete
+                    at = asyncio.create_task(asyncio.to_thread(warm_on_sync_complete))
+                    self._warm_bg_tasks.add(at)
+                    at.add_done_callback(self._warm_bg_tasks.discard)
+                except Exception as ae:  # noqa: BLE001  AI 刷新失败不影响同步
+                    logger.debug(f"同步后 AI 日报刷新调度失败(不影响): {ae}")
 
     async def _on_progress(self, task_id: str, data_type: str, phase: str, data: Any):
         """进度回调写入 task 状态"""

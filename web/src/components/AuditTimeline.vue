@@ -3,11 +3,11 @@
     <!-- 类型筛选 + 关键词搜索 -->
     <div class="filter-bar">
       <el-radio-group v-model="activeType" size="small" class="filter-types">
-        <el-radio-button label="">全部 ({{ items.length }})</el-radio-button>
+        <el-radio-button value="">全部 ({{ items.length }})</el-radio-button>
         <el-radio-button
           v-for="t in typeList"
           :key="t.key"
-          :label="t.key"
+          :value="t.key"
         >
           {{ t.label }} ({{ countOf(t.key) }})
         </el-radio-button>
@@ -25,7 +25,7 @@
     <!-- 双视图切换 -->
     <el-tabs v-model="view" class="view-tabs">
       <el-tab-pane label="时序流" name="timeline">
-        <div class="timeline-wrap" v-loading="loading">
+        <div v-loading="loading" class="timeline-wrap">
           <el-empty v-if="!filtered.length" description="无记录" :image-size="compact ? 60 : 80" />
           <el-timeline v-else class="event-timeline">
             <el-timeline-item
@@ -52,7 +52,7 @@
                   </span>
                 </div>
                 <div class="event-summary">{{ it.summary }}</div>
-                <div class="event-fields" v-if="it.fields">
+                <div v-if="it.fields" class="event-fields">
                   <span v-for="(v, k) in visibleFields(it.fields)" :key="k" class="field-chip">
                     <span class="field-label">{{ k }}:</span>
                     <span class="field-value">{{ fmtVal(v) }}</span>
@@ -66,11 +66,11 @@
 
       <el-tab-pane :label="`明细表 (${filtered.length})`" name="table">
         <el-table
+          v-loading="loading"
           :data="filtered"
           border
           stripe
           size="small"
-          v-loading="loading"
           :max-height="compact ? 600 : 560"
           class="detail-table"
         >

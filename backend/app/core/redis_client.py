@@ -39,7 +39,11 @@ HISTORY_TTL_SECONDS = 24 * 3600
 # (历史 TTL 已拉到 24h, 同步不涉及历史窗口, 无需清掉)
 SYNC_INVALIDATE_RECENT_DAYS = 7
 # 缓存 key 中的日期片段模式(用于按窗口范围失效)
-_CACHE_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+# ⚠️ 2026-09-11 (#66): 必须容忍「日期 + 分钟」形态(如 `2026-09-10T12:30`), 否则
+#   分钟级窗口 key 提取不到日期 → 被下面的 `if not dates` 当作"无日期静态 key"
+#   全量删除。虽不影响正确性(重算得同值), 但会让分钟窗口的 24h 长 TTL 形同虚设,
+#   下游逐分钟比对时每次同步后都要冷聚合。`[T ]?` 让尾边界在 T/空格后同样成立。
+_CACHE_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?=[T\s:]|$)")
 
 # 全局单例(进程级复用连接池)
 _redis_client: redis.Redis | None = None
@@ -429,14 +433,114 @@ def cached_call(key: str, ttl: int, fn: Callable, *args, **kwargs) -> Any:
     - 命中缓存: 直接返回反序列化结果, 跳过 fn 调用(写入高峰期会顺带续期短TTL)
     - 未命中: 调用 fn, 结果非 None 则写缓存, 返回结果(写入高峰期 TTL 自动放大)
     - Redis 不可用: 静默降级为直接调用 fn (不影响业务)
+
+    ── #92 命中率统计 (2026-09-14) ────────────────────────────────────
+    记录每个 key **前缀**（`pattern:xxx` 的 `xxx` 之前的段）的 hit/miss，
+    供 `GET /api/v1/system/cache/info` 的 `hit_stats` 字段暴露。
+    （原注释写作 `/system/cache-stats`，实际落在缓存管理页的 info 接口内，#92）
+    动机：生产曾出现「缓存预热连续 5 天全败」却无人知晓 —— 因为失败只是
+    一条 WARNING，而**「预期命中的缓存 0 命中」这一事实没有任何指标可见**。
+    例：`complaints/subject-analysis` 被调 115 次、命中 0 次（均耗时 0.19~0.25s），
+    而对照组的 `analytics/today/kpi` 全部命中（0.000s）—— 有了命中率即可一眼发现。
     """
     hit = cache_get_json(key)
     if hit is not None:
+        _record_cache_stat(_key_group(key), hit=True, key=key)
         return hit
+    _record_cache_stat(_key_group(key), hit=False, key=key)
     result = fn(*args, **kwargs)
     if result is not None:
         cache_set_json(key, result, ttl)
     return result
+
+
+# ── 缓存命中率统计 (#92) ────────────────────────────────────────────
+# 结构: { key_group: {"hit": n, "miss": m} }
+# key_group = key 的第一段（如 `today` / `complaint` / `refund` / `analytics`）
+_CACHE_STATS: dict[str, dict[str, int]] = {}
+# 明细 key 只留前 N 个样本，避免高基数 key（含日期/分页）撑爆内存
+_CACHE_KEY_SAMPLES: dict[str, set[str]] = {}
+_MAX_KEY_SAMPLES = 5
+
+
+def _key_group(key: str) -> str:
+    """取 key 的分组名（第一段冒号前的部分）。
+
+    `today:kpi:None:2026-09-14:2026-09-14` → `today`
+    `complaint:subject:...`                → `complaint`
+    无冒号 → 原样返回。
+    """
+    return key.split(":", 1)[0] if key else "unknown"
+
+
+def _record_cache_stat(group: str, *, hit: bool, key: str | None = None) -> None:
+    """累加命中/未命中计数（线程安全足够：单 worker + GIL，仅做整数自增）
+
+    key 传入时顺带留一个**形态样例**（保留分页/日期占位以便识别 key 家族，
+    但脱敏掉具体值），帮助定位"哪一类 key 从不命中"。
+    """
+    st = _CACHE_STATS.get(group)
+    if st is None:
+        st = {"hit": 0, "miss": 0}
+        _CACHE_STATS[group] = st
+    st["hit" if hit else "miss"] += 1
+
+    if key:
+        samples = _CACHE_KEY_SAMPLES.get(group)
+        if samples is None:
+            samples = set()
+            _CACHE_KEY_SAMPLES[group] = samples
+        # 只在未满时收集，且**归一化**：把纯数字段替换为 <n>，日期替换为 <date>
+        # → 同一家族的 key 形态只占一个样本位（否则分页/日期会撑爆样本集）
+        if len(samples) < _MAX_KEY_SAMPLES:
+            samples.add(_normalize_key_shape(key))
+
+
+_DATE_SEG = re.compile(r"^\d{4}-\d{2}-\d{2}([T ].*)?$")
+_NUM_SEG = re.compile(r"^-?\d+$")
+
+
+def _normalize_key_shape(key: str) -> str:
+    """把 key 归一化成**形态**（值→占位符），便于聚合同族 key。
+
+    `today:kpi:None:2026-09-14:2026-09-14` → `today:kpi:None:<date>:<date>`
+    `complaint:detail:...:500:1`           → `complaint:detail:...:<n>:<n>`
+    """
+    parts = []
+    for seg in key.split(":"):
+        if _DATE_SEG.match(seg):
+            parts.append("<date>")
+        elif _NUM_SEG.match(seg):
+            parts.append("<n>")
+        else:
+            parts.append(seg)
+    return ":".join(parts)
+
+
+def cache_stats_snapshot() -> dict:
+    """导出缓存命中率快照（供 API 暴露）。
+
+    返回每个分组的 hit/miss/命中率，以及分组内的**样例 key 形态**
+    （帮助定位"哪一类 key 从不命中"，而不只是"某组命中率低"）。
+    """
+    out = {}
+    for g, st in sorted(_CACHE_STATS.items()):
+        total = st["hit"] + st["miss"]
+        out[g] = {
+            "hit": st["hit"],
+            "miss": st["miss"],
+            "total": total,
+            # 命中率保留 1 位小数（0 表示从未命中 —— 这正是要暴露的信号）
+            "hit_rate": round(st["hit"] / total, 3) if total else None,
+            "key_samples": sorted(_CACHE_KEY_SAMPLES.get(g, set()))[:_MAX_KEY_SAMPLES],
+        }
+    return out
+
+
+def cache_stats_reset() -> None:
+    """清零统计（供运维在观察窗口开始时重置）"""
+    _CACHE_STATS.clear()
+    _CACHE_KEY_SAMPLES.clear()
 
 
 def cached_json(key_fn: Callable[..., str], ttl: int | Callable[..., int] = 60) -> Callable:

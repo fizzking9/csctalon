@@ -1,8 +1,8 @@
 """登录限速: 防暴力破解(M3)
 
-简单内存滑动窗口, 按 IP 限流。适用单 worker 部署(compose -w 1);
-多 worker(Dockerfile -w 4)下每 worker 各自计数, 仍能抬高爆破成本,
-完全跨 worker 防护需改 Redis(后续 M5 一并处理)。
+简单内存滑动窗口, 按 IP 限流。部署统一为单 worker(compose / Dockerfile /
+Dockerfile.patch 均 -w 1, 见 #212), 本进程内计数即全局限流; 若将来改为多 worker,
+每进程各持一份计数会使限流变松, 届时须改用 Redis 做跨进程防护(v0.7 不做多 worker)。
 """
 import time
 from collections import defaultdict

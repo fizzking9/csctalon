@@ -1,11 +1,10 @@
 """FastAPI 应用入口"""
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
-
 
 # ⚠️ 日志时间戳统一为北京时间(容器默认 TZ=UTC, 否则 asctime 落后 8h, 与前端/调度标签混淆)。
 #    仅调整日志 Formatter 渲染, 不影响进程/业务用 datetime.now(timezone.utc) 的 UTC 存储语义。
@@ -22,24 +21,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
-from app.core.config import settings
+
+# ★ 2026-09-22: 日志由运行模式 Profile 决定（级别/格式）。
+#   改造前此处硬编码 `level=logging.INFO` + 人类可读格式 —— 所有环境同一套：
+#     · dev 看不到 DEBUG（排障最需要的信息被过滤）
+#     · prod 用人类可读格式（不利于采集/告警系统解析）
+#   现: dev=DEBUG+detailed / test=WARNING+plain / prod=INFO+json（见 profiles.py）。
+#   ⚠️ setup_logging 内部会清空既有 handler 再重装，故此处覆盖 uvicorn 的默认配置。
+from app.core.config import Profile, resolve_profile, settings, setup_logging
 from app.core.database import SessionLocal
+from app.middleware.cache_control import NoCacheMiddleware
 from app.middleware.operation_log import OperationLogMiddleware
 from app.models import *  # noqa: F401,F403  # 注册所有模型
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+_profile: Profile = resolve_profile(settings.ENV)
+setup_logging(_profile, log_dir=_profile.log_dir)
 logger = logging.getLogger(__name__)
-
-# 持久化日志到文件(挂载 ./logs/backend → /app/logs),避免容器重建丢失 500 堆栈
-try:
-    Path("/app/logs").mkdir(parents=True, exist_ok=True)
-    _file_handler = RotatingFileHandler(
-        "/app/logs/app.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
-    )
-    _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-    logging.getLogger().addHandler(_file_handler)
-except Exception:
-    pass  # 目录不可写时不影响启动
 
 # backend/ 目录（alembic.ini 与 alembic/ 所在位置）
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -58,6 +55,7 @@ async def lifespan(app: FastAPI):
     其他 worker 等待数秒 (保证第一个 worker 完成 DDL/种子 UPSERT 提交) 后跳过即可。
     """
     import asyncio as _aio
+
     from sqlalchemy import text as _tx
 
     STARTUP_LOCK_KEY = 99887766
@@ -75,7 +73,7 @@ async def lifespan(app: FastAPI):
 
     try:
         if got_lock:
-            logger.info(f"[lifespan] worker 持有启动锁(99887766),开始执行迁移/种子/调度器")
+            logger.info("[lifespan] worker 持有启动锁(99887766),开始执行迁移/种子/调度器")
             # 单独包一层 try-except: 迁移/种子/调度器 任一失败都不要让 worker 崩掉 (gunicorn exit code 3 → master kill 全集群)
             # 只记录错误日志, 之后仍让 HTTP 服务正常启动。
             try:
@@ -93,7 +91,14 @@ async def lifespan(app: FastAPI):
             try:
                 _cleanup_zombie_running_tasks()
             except Exception as _e:
-                logger.warning(f"[lifespan] 清理僵尸任务失败(非致命): {_e}", exc_info=True)
+                logger.warning(f"[lifespan] 清理僵尸任务失败(非致命): {_e}")
+            try:
+                # #48: 多 worker 部署检测(只 WARNING 不 fail-fast); 多 worker 时
+                # 4 个 login 端点会返回 501 + CLI 降级命令(不阻断其他业务)。
+                from app.services.shared_doc_login_service import check_single_worker
+                check_single_worker()
+            except Exception as _e:
+                logger.warning(f"[lifespan] 共享文档登录 worker 检测失败(非致命): {_e}")
             try:
                 _start_bms_scheduler()
             except Exception as _e:
@@ -114,6 +119,18 @@ async def lifespan(app: FastAPI):
         try:
             from app.services.bms_scheduler import bms_scheduler
             bms_scheduler.stop()
+        except Exception:
+            pass
+        # 夜批轮询停止(#258, stop 幂等)
+        try:
+            from app.services.batch_runner import batch_runner
+            batch_runner.stop()
+        except Exception:
+            pass
+        # #45: 清理共享文档登录会话(防进程退出残留 chromium 进程占内存)
+        try:
+            from app.services.shared_doc_login_service import login_manager
+            login_manager.close_all()
         except Exception:
             pass
         # 释放咨询锁 (若持有)
@@ -139,8 +156,9 @@ def _run_migrations_on_startup() -> None:
           拿到空库导致 UndefinedTable/UndefinedColumn 500 的问题。
           仅由持有启动咨询锁(99887766)的 worker 执行, 避免多 worker 重复迁移。
     """
-    from alembic import command
     from alembic.config import Config
+
+    from alembic import command
 
     cfg = Config(str(_BACKEND_DIR / "alembic.ini"))
     cfg.set_main_option("script_location", str(_BACKEND_DIR / "alembic"))
@@ -238,7 +256,6 @@ def _cleanup_zombie_running_tasks() -> None:
 
     解决:服务启动时将所有 running 状态的同步日志标记为 failed。
     """
-    from datetime import datetime, timezone
 
     from sqlalchemy import text as _tx
 
@@ -273,10 +290,13 @@ def _cleanup_zombie_running_tasks() -> None:
 
 
 def _start_bms_scheduler() -> None:
-    """启动 BMS 定时同步调度器(如果配置了自动启动) + 独立缓存预热
+    """启动 BMS 定时同步调度器(如果配置了自动启动) + 独立缓存预热 + LLM 模型预热
 
     缓存预热(启动预热+空闲期每分钟)与定时同步解耦: 即使 BMS_SCHEDULE_AUTOSTART=False,
     也独立启动预热循环, 避免看板缓存永不预热、过期后冷加载重查询超时。
+
+    工单 #108 (2026-09-15): LLM 模型预热独立挂在这里(不受调度器启停影响),
+    让 Talon/Ollama 模型常驻显存, 用户首次问句走热路径。
     """
     # 独立预热循环: 不依赖调度器是否启动(见 cache_warmer.start_warm_loop)
     try:
@@ -284,6 +304,19 @@ def _start_bms_scheduler() -> None:
         start_warm_loop()
     except Exception as _e:  # noqa: BLE001  预热失败不影响服务启动
         logger.warning(f"独立缓存预热启动失败(不影响服务): {_e}")
+    # LLM 模型预热(启动后延迟 30s 异步触发, 失败不影响业务)
+    try:
+        from app.services.llm_warmup import warmup_on_startup
+        warmup_on_startup()
+    except Exception as _e:  # noqa: BLE001
+        logger.warning(f"LLM 模型预热启动失败(不影响服务): {_e}")
+    # 夜间批处理轮询(#258 B4-2): 独立于 BMS 调度器开关 —— 夜批任务(宽表重建/
+    # 未来夜间预警)有自己的 enabled 开关, 采集自动启动与否不影响夜批
+    try:
+        from app.services.batch_runner import batch_runner
+        batch_runner.start()
+    except Exception as _e:  # noqa: BLE001
+        logger.warning(f"夜批轮询启动失败(不影响服务): {_e}")
     if not settings.BMS_SCHEDULE_AUTOSTART:
         logger.info("BMS 定时同步未开启自动启动(BMS_SCHEDULE_AUTOSTART=False)")
         return
@@ -293,11 +326,38 @@ def _start_bms_scheduler() -> None:
 
 
 def create_app() -> FastAPI:
+    # #210: 注册表引用完整性自检（fail-fast，禁止静默失配）。
+    #   纯内存校验（不依赖 DB），在 FastAPI 实例化前执行——缺映射/无登记失配
+    #   直接抛 RegistryIntegrityError 拒绝启动，避免带病运行后数字悄悄错位。
+    from app.services.registry_index import validate_registry_integrity
+
+    validate_registry_integrity()
+
+    # ★ 2026-09-22: 接线 profile 的 docs_enabled / openapi 开关。
+    #   为什么必须接线：`Profile.docs_enabled` 若只是"声明了但没人读"，
+    #   它就退化成**文档式的空承诺** —— 使用者以为关掉了、实际还开着。
+    #   （本机制的第一原则就是"模式必须驱动行为，不能只是标签"。）
+    #
+    #   ⚠️ prod 保持**现状**（文档仍开放）：改造前 FastAPI 用默认值 → /docs 一直是开的，
+    #      贸然关闭会改变既有可用行为（可能有对接方依赖 OpenAPI）。
+    #      故：prod 的开关**不**由 profile 单独决定，而由显式环境变量控制，
+    #      避免"框架升级顺带关掉了文档"这种非预期行为变更。
+    #      要关闭请显式设 `OPENAPI_ENABLED=false`（独立决策，走变更流程）。
+    _openapi_env = os.environ.get("OPENAPI_ENABLED", "").strip().lower()
+    if _openapi_env in ("true", "false"):
+        _openapi_on = _openapi_env == "true"
+    else:
+        # 未显式设置：dev/test 按 profile；prod 保持现状（开启）
+        _openapi_on = _profile.docs_enabled or _profile.mode == "prod"
     app = FastAPI(
         title=settings.APP_NAME,
         version=settings.APP_VERSION,
         description="数据分析工具应用 - 数据分析与内部工作流辅助平台",
         lifespan=lifespan,
+        # 非开放时置 None（FastAPI 语义：None = 不注册该路由）
+        docs_url="/docs" if _openapi_on else None,
+        redoc_url="/redoc" if _openapi_on else None,
+        openapi_url="/openapi.json" if _openapi_on else None,
     )
 
     app.add_middleware(
@@ -308,13 +368,16 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.add_middleware(OperationLogMiddleware)
+    # #36: 动态 API 防缓存(网关 proxy_cache 会缓存 GET 导致实时数据陈旧), 见 middleware/cache_control.py
+    app.add_middleware(NoCacheMiddleware)
 
     # P2-4: 全局 500 异常 traceback 记录器 (FastAPI 异常处理器)
     #       生产环境用户侧只能看到「服务器内部错误」，但服务端必须把完整 traceback 打到日志里，
     #       避免出现「前端 500 后端日志里啥都没有」的排查惨案。
+    import traceback as _tb
+
     from fastapi import Request as _Request
     from fastapi.responses import JSONResponse as _JSONResponse
-    import traceback as _tb
 
     @app.exception_handler(Exception)
     async def _global_unhandled_exception_handler(request: _Request, exc: Exception):
@@ -327,7 +390,7 @@ def create_app() -> FastAPI:
             user_agent = request.headers.get("user-agent", "-")[:200]
             req_summary = f"{method} {url}{('?' + qs) if qs else ''} (from {client}) UA={user_agent}"
         except Exception:
-            req_summary = f"<unable to extract request info>"
+            req_summary = "<unable to extract request info>"
         # 打完整 traceback 到 error 日志
         logger.error(
             f"[HTTP 500] 未处理异常: {type(exc).__name__}: {exc!r}\n"

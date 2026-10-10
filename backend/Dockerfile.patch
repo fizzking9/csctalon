@@ -14,4 +14,14 @@ RUN mkdir -p /app/uploads
 
 EXPOSE 8000
 
-CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "900", "--log-level", "info"]
+# ★ worker 数必须与主 Dockerfile、docker-compose.yml 三处完全一致：-w 1（#212 / R-P1-9）。
+#   本补丁镜像可能被直接 `docker run`（不经 compose 的 command 覆盖），故 CMD 不能写成 -w 4：
+#   下列进程内状态在多 worker 下会各持一份而失效——
+#     · llm_scheduler 的进程级 threading.Condition 门闸(_gates)：任一时刻仅 1 个 LLM 调用在飞，
+#       多 worker 会把单个 ollama 端点并发打爆；
+#     · SyncTaskManager 同步互斥 / core.rate_limit 登录限速的进程内锁与计数：
+#       多 worker 各自计数 → 重复提交同步任务(数据重复)、限速失效。
+#   多 worker 水平扩容是 v0.7 明确「立此存照、不做」项，须先把上述状态迁至 Redis。
+# --timeout 900s: sync-all 多源抓取含 65s 间隔，全程 5-8 分钟，默认 120s 会被 gunicorn
+#   判超时 SIGABRT → 前端 502。
+CMD ["gunicorn", "app.main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "900", "--log-level", "info"]

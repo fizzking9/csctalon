@@ -13,9 +13,9 @@
       <el-alert type="info" :closable="false" show-icon class="mb-16">
         <p class="alert-text">
           按<strong>平台/域名分组</strong>管理：同一 Web 源下的多个数据源共用登录凭证，可在<strong>组级统一配置账号密码</strong>，
-          也可对<strong>单个数据源单独配置</strong>（单源优先）。保存后可用「测试登录」验证账号密码是否有效。<br/>
-          • <strong>BMS</strong>: 不同子域名(wifi/support.cloud-cat.cn)可能用不同账号。Playwright 页面抓取模式。<br/>
-          • <strong>SCRM</strong>: 支持 OpenAPI(默认,稳定) / Playwright 网页(数学验证码兜底) / 双模式。<br/>
+          也可对<strong>单个数据源单独配置</strong>（单源优先）。保存后可用「测试登录」验证账号密码是否有效。<br />
+          • <strong>BMS</strong>: 不同子域名(wifi/support.cloud-cat.cn)可能用不同账号。Playwright 页面抓取模式。<br />
+          • <strong>SCRM</strong>: 支持 OpenAPI(默认,稳定) / Playwright 网页(数学验证码兜底) / 双模式。<br />
           「默认同步」控制是否纳入定时同步与手动同步的默认勾选。账号/密码留空表示不修改原值。
         </p>
       </el-alert>
@@ -48,10 +48,20 @@
                 <el-tag v-else size="small" effect="light">Playwright</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="凭证" width="120">
+            <el-table-column label="凭证" width="150">
               <template #default="{ row }">
-                <el-tag v-if="row.has_credentials" type="success" size="small">单源已配置</el-tag>
-                <el-tag v-else-if="g.has_credentials" type="primary" size="small" effect="plain">继承组</el-tag>
+                <!-- 2026-09-07: 区分"单源独立凭证(与组不同)" / "单源(同组)" / "继承组" / "单源失效(脏)" -->
+                <el-tag v-if="row.credential_source === 'own' && row.own_cred_differs_group"
+                        type="warning" size="small" effect="dark"
+                        title="该源配置了与组凭证不同的独立账号。独立凭证失效只影响本源登录,不会连坐同组其它源;如需统一请留空本源账号密码以继承组凭证">
+                  单源·独立
+                </el-tag>
+                <el-tag v-else-if="row.credential_source === 'own'" type="success" size="small">单源已配置</el-tag>
+                <el-tag v-else-if="row.has_credentials && row.credential_source === 'group'" type="info" size="small"
+                        title="该源存有单源凭证但解密失败/已回退到组凭证(可能是密钥轮换后的脏数据)。建议在编辑弹窗清空后重新保存">
+                  单源失效·用组
+                </el-tag>
+                <el-tag v-else-if="row.credential_source === 'group'" type="primary" size="small" effect="plain">继承组</el-tag>
                 <el-tag v-else type="danger" size="small">未配置</el-tag>
               </template>
             </el-table-column>
@@ -69,7 +79,7 @@
             </el-table-column>
             <el-table-column label="操作" width="190" fixed="right">
               <template #default="{ row }">
-                <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+                <el-button link type="primary" size="small" @click="openEdit(row, g.group_key, g.has_credentials)">编辑</el-button>
                 <el-button link size="small" :loading="singleTesting[row.data_type]" @click="testSingleLogin(row)">测试</el-button>
                 <template v-if="row.requires_captcha">
                   <el-button link type="warning" size="small" :loading="loginStates[row.data_type]?.busy" @click="openCaptchaLogin(row)">
@@ -155,6 +165,50 @@
         <el-form-item :label="scrmLabel[1]">
           <el-input v-model="editForm.password" type="password" show-password :placeholder="scrmPasswordPlaceholder" />
         </el-form-item>
+        <!-- D6(2026-09-05, #19): 分组凭证复用提示 + 单源凭证同步到组 -->
+        <!-- 2026-09-07: 增加"单源独立凭证与组不同"警示, 防误填连坐同组 -->
+        <el-form-item v-if="!isScrmSource(editForm) && editForm.group_key" label="分组凭证">
+          <div style="width: 100%">
+            <el-alert
+              :type="ownCredWarnVisible ? 'warning' : (editForm.group_has_credentials ? 'success' : 'info')"
+              :closable="false"
+              show-icon
+              class="mb-8"
+              size="small"
+            >
+              <template #title>
+                <span v-if="ownCredWarnVisible">
+                  本源当前使用<strong>独立单源凭证</strong>(与组 {{ editForm.group_key }} 的组凭证账号<strong>不同</strong>)
+                </span>
+                <span v-else-if="editForm.group_has_credentials">
+                  已归组 <strong>{{ editForm.group_key }}</strong>(组凭证已配置,本源可留空自动复用)
+                </span>
+                <span v-else>
+                  已归组 <strong>{{ editForm.group_key }}</strong>(组凭证未配置)
+                </span>
+              </template>
+              <div v-if="ownCredWarnVisible" class="mt-4" style="line-height:1.6">
+                独立凭证失效将只导致<strong>本源</strong>登录失败(不会连坐同组其它源),但请确认该账号在平台有效。
+                如需改用组账号, 可勾选下方「清空独立凭证」保存后自动继承组凭证。
+              </div>
+            </el-alert>
+            <!-- #28: 清空独立凭证(回退继承组凭证) — 修复"UI 无法清除误填单源凭证"缺口 -->
+            <el-checkbox
+              v-if="canClearOwnCred"
+              v-model="editForm.clear_credentials"
+              class="mb-4"
+              @change="onClearCredChange"
+            >
+              清空本源的独立凭证(改为继承组 {{ editForm.group_key }} 的组凭证)
+            </el-checkbox>
+            <el-checkbox
+              v-model="editForm.sync_to_group"
+              :disabled="editForm.clear_credentials"
+            >
+              同时设为组凭证(作用于同组所有源, 免逐源配置)
+            </el-checkbox>
+          </div>
+        </el-form-item>
         <template v-if="isScrmSource(editForm) && editForm.fetch_mode === 'dual'">
           <el-divider content-position="left">Playwright 网页登录凭证(双模式下独立配置)</el-divider>
           <el-alert type="warning" :closable="false" show-icon class="mb-8" size="small">
@@ -187,7 +241,7 @@
       <el-alert :type="isMathCaptcha ? 'warning' : 'info'" :closable="false" show-icon class="mb-16" size="small">
         <template v-if="isMathCaptcha">
           SCRM 登录使用<strong>数学计算式</strong>验证码。下方图片显示的是如「7*0=?」的算式,
-          请在输入框中填入<strong>计算结果数字</strong>(如 0、63)。<br/>
+          请在输入框中填入<strong>计算结果数字</strong>(如 0、63)。<br />
           若 OCR 自动识别出了答案,已经帮你填好了,请核对后直接点「提交并登录」。
         </template>
         <template v-else>
@@ -206,8 +260,8 @@
             :src="captchaImage"
             alt="验证码"
             class="captcha-img"
-            @click="refreshCaptcha"
             title="点击图片重试(注意:后端会话会重新生成)"
+            @click="refreshCaptcha"
           />
           <div v-else class="captcha-empty">验证码加载失败</div>
         </div>
@@ -284,6 +338,14 @@ const editForm = reactive({
   password: '',
   web_username: '',
   web_password: '',
+  // D6(2026-09-05, #19): 分组凭证增强
+  group_key: '',
+  group_has_credentials: false,
+  sync_to_group: false,
+  // #28(2026-09-07): 防复发标记(单源独立凭证与组账号不同) + 清空独立凭证
+  credential_source: 'group',
+  own_cred_differs_group: false,
+  clear_credentials: false,
 })
 const groupEdit = reactive({
   group_key: '',
@@ -333,6 +395,32 @@ const webUsernamePlaceholder = computed(() =>
   _credPlaceholder('SCRM 网页登录账号(手机号/邮箱)', credentialsState.web_username_configured, 'SCRM 后台管理页面实际登录用的账号,不要填 ClientID;留空=不改'))
 const webPasswordPlaceholder = computed(() =>
   _credPlaceholder('SCRM 网页登录密码', credentialsState.web_password_configured, 'SCRM 后台管理页面实际登录用的密码;留空=不改'))
+
+// ============== 2026-09-07 防复发: 单源独立凭证警示 ==============
+// 触发条件(任一):
+//  1) 该源当前已是"单源独立凭证且与组账号不同"(own_cred_differs_group, 列表接口返回)
+//  2) 本次编辑填了新账号/新密码, 且未勾选"同步到组" → 保存后将变成单源独立凭证
+const ownCredWarnVisible = computed(() => {
+  if (isScrmSource(editForm) || !editForm.group_key) return false
+  if (editForm.own_cred_differs_group) return true
+  // 本次填写了新凭证(且不同步到组)→ 提示将作为独立凭证
+  if ((editForm.username || editForm.password) && !editForm.sync_to_group) return true
+  return false
+})
+// #28: 是否允许"清空独立凭证"(回退继承组凭证)——当前是单源独立凭证 且 组凭证已配置
+const canClearOwnCred = computed(() => {
+  if (isScrmSource(editForm) || !editForm.group_key) return false
+  if (editForm.credential_source !== 'own') return false
+  return !!editForm.group_has_credentials
+})
+// 勾选"清空独立凭证"时, 清空账号密码输入(避免同时提交新凭证 + 清空冲突)
+function onClearCredChange(val) {
+  if (val) {
+    editForm.username = ''
+    editForm.password = ''
+    editForm.sync_to_group = false
+  }
+}
 function onFetchModeChange() {}
 
 // ============== 验证码登录态 ==============
@@ -466,7 +554,7 @@ async function runTest(dataType, stateMap, key) {
 }
 
 // ============== 单源编辑 ==============
-function openEdit(row) {
+function openEdit(row, groupKey = '', groupHasCreds = false) {
   editForm.data_type = row.data_type
   editForm.name = row.name
   editForm.base_url = row.base_url
@@ -477,6 +565,15 @@ function openEdit(row) {
   editForm.fetch_mode = isScrmSource(row) ? (row.fetch_mode || 'openapi') : 'playwright'
   credentialsState.username_configured = !!(row.username || row.has_credentials)
   credentialsState.password_configured = !!(row.password || row.has_credentials)
+  // 2026-09-07: 凭证来源 + 是否"单源独立(异于组)" 供编辑弹窗警示
+  editForm.credential_source = row.credential_source || (row.has_credentials ? 'own' : (groupHasCreds ? 'group' : 'none'))
+  editForm.own_cred_differs_group = !!(row.own_cred_differs_group)
+  // D6: 记录归属组 + 组凭证状态(从组卡片上下文传入)
+  editForm.group_key = groupKey || row.group_key || ''
+  editForm.group_has_credentials = !!(groupHasCreds || row.group_has_credentials)
+  editForm.sync_to_group = false
+  // #28: 打开编辑时默认不勾选清空独立凭证
+  editForm.clear_credentials = false
   const opts = (typeof row.options === 'object' && row.options) ? row.options : {}
   credentialsState.web_username_configured = !!(opts.web_username_configured || opts.web_username)
   credentialsState.web_password_configured = !!(opts.web_password_configured || opts.web_password)
@@ -500,17 +597,33 @@ async function handleSave(andTest = false) {
       default_sync: editForm.default_sync,
       enabled: editForm.enabled,
     }
+    // D6: 填了凭证且勾选"同步到组" → 后端把凭证写入该源所属组(作用于同组所有源)
+    if (editForm.username && editForm.sync_to_group) payload.sync_to_group = true
     if (isScrmSource(editForm) && editForm.fetch_mode) payload.fetch_mode = editForm.fetch_mode
-    if (editForm.username) payload.username = editForm.username
-    if (editForm.password) payload.password = editForm.password
+    // #28: 勾选"清空独立凭证" → 显式清空(回退继承组凭证); 与填新凭证互斥(onClearCredChange 已清输入)
+    if (editForm.clear_credentials) {
+      payload.clear_credentials = true
+    } else {
+      if (editForm.username) payload.username = editForm.username
+      if (editForm.password) payload.password = editForm.password
+    }
     if (isScrmSource(editForm) && editForm.fetch_mode === 'dual') {
       const optsPatch = {}
       if (editForm.web_username) optsPatch.web_username = editForm.web_username
       if (editForm.web_password) optsPatch.web_password = editForm.web_password
       if (Object.keys(optsPatch).length > 0) payload.options = optsPatch
     }
-    await updateSyncSource(editForm.data_type, payload)
-    ElMessage.success('保存成功')
+    const res = await updateSyncSource(editForm.data_type, payload)
+    // 2026-09-07: 后端返回非默认 message(=ok) → 携带一致性/合理性警告, 弹框让用户确认
+    if (res && res.message && res.message !== 'ok') {
+      await ElMessageBox.alert(res.message, '提示', {
+        type: 'warning',
+        confirmButtonText: '我知道了',
+      })
+    }
+    ElMessage.success(editForm.clear_credentials
+      ? '已清空独立凭证, 该源将继承组凭证'
+      : (editForm.sync_to_group ? '保存成功,并已同步到同组凭证' : '保存成功'))
     dialogVisible.value = false
     await loadSources()
     if (andTest) await runTest(editForm.data_type, singleTesting)

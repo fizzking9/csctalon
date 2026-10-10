@@ -1,12 +1,11 @@
 """Alembic 环境配置"""
 
 import logging
-
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from alembic import context
 from app.core.config import settings
 from app.core.database import Base
 from app.models import *  # noqa: F401,F403  # 注册所有模型

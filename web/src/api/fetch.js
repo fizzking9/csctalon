@@ -44,6 +44,16 @@ export function getScheduleStatus(opts = {}) {
   return request.get('/fetch/schedule/status', { silentError: true, ...opts })
 }
 
+// 高频采集节拍配置 (#51) — 时段 + 间隔
+export function getScheduleConfig() {
+  return request.get('/fetch/schedule/config')
+}
+
+// 更新高频节拍配置(管理员) — 改后自下一槽位生效, 无需重启
+export function updateScheduleConfig(payload) {
+  return request.put('/fetch/schedule/config', payload)
+}
+
 // 启动定时同步
 export function startSchedule() {
   return request.post('/fetch/schedule/start')

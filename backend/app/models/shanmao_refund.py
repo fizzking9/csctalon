@@ -1,6 +1,7 @@
 """闪猫退款模型 - 闪猫加速系统已退款申请数据,主键:退款单号"""
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -34,13 +35,13 @@ class ShanmaoRefund(QualityMixin, TimestampMixin, Base):
     )
 
     # ── 金额 ────────────────────────────────────────────────────
-    paid_amount: Mapped[float | None] = mapped_column(
+    paid_amount: Mapped[Decimal | None] = mapped_column(
         Numeric(12, 2), nullable=True, comment="实际支付金额(原始订单支付金额)"
     )
-    refund_amount: Mapped[float | None] = mapped_column(
+    refund_amount: Mapped[Decimal | None] = mapped_column(
         Numeric(12, 2), nullable=True, comment="申请退款金额"
     )
-    actual_amount: Mapped[float | None] = mapped_column(
+    actual_amount: Mapped[Decimal | None] = mapped_column(
         Numeric(12, 2), nullable=True, comment="实际退款金额"
     )
 

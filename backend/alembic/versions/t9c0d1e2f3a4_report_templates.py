@@ -10,10 +10,10 @@ Create Date: 2026-07-29 19:00:00.000000
 - 数据迁移: 10项标准框架 + weekly_section_bindings 合并写入"周报默认模板"种子
 """
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
 
 revision = "t9c0d1e2f3a4"
 down_revision = "s8b9c0d1e2f3"

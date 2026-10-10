@@ -128,6 +128,10 @@ if [[ -n "$SRC_DIR" ]]; then
     --exclude='.trae' --exclude='.dsh' --exclude='.gitea' --exclude='.workbuddy' \
     --exclude='docs' --exclude='scripts' --exclude='backend/scripts' --exclude='backend/tests' \
     . 2>/dev/null | tar xzf - -C "$RELEASE_DIR"
+  # backend/scripts/ 仅保留两个登录脚本(运维工具, #148), 调试脚本不进生产
+  mkdir -p "$RELEASE_DIR/backend/scripts"
+  cp "$SRC_DIR/backend/scripts/tencent_doc_login.py" "$RELEASE_DIR/backend/scripts/" 2>/dev/null || true
+  cp "$SRC_DIR/backend/scripts/kdocs_login.py" "$RELEASE_DIR/backend/scripts/" 2>/dev/null || true
 else
   VER="$(tar xzf "$PKG" -O VERSION.tmp 2>/dev/null || basename "$PKG" .tar.gz | sed 's/^csctalon-//')"
   RELEASE_DIR="$APP_DIR/releases/$VER"

@@ -7,14 +7,15 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text
+from sqlalchemy import DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 from app.models.base import IDMixin, TimestampMixin
+from app.models.quality_mixin import QualityMixin
 
 
-class ExternalComplaint(IDMixin, TimestampMixin, Base):
+class ExternalComplaint(QualityMixin, IDMixin, TimestampMixin, Base):
     """外部投诉(监督局/315)"""
 
     __tablename__ = "external_complaints"

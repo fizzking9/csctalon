@@ -13,6 +13,9 @@
       <el-tab-pane v-if="isAdmin" label="投诉接入" name="doc-sync">
         <ComplaintIngest />
       </el-tab-pane>
+      <el-tab-pane v-if="isAdmin" label="共享文档采集" name="shared-doc">
+        <SharedDocSources />
+      </el-tab-pane>
       <el-tab-pane label="采集日志" name="logs">
         <CollectionLogs :embedded="true" />
       </el-tab-pane>
@@ -36,6 +39,7 @@ import Browser from './Browser.vue'
 import CollectionLogs from './CollectionLogs.vue'
 import DataQuality from '@/views/management/DataQuality.vue'
 import ComplaintIngest from './ComplaintIngest.vue'
+import SharedDocSources from './SharedDocSources.vue'
 import DataSources from '@/views/system/DataSources.vue'
 
 const route = useRoute()
@@ -43,7 +47,7 @@ const router = useRouter()
 const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.isAdmin)
 
-const ALL_TABS = ['browser', 'sync', 'upload', 'doc-sync', 'logs', 'data-quality', 'data-sources']
+const ALL_TABS = ['browser', 'sync', 'upload', 'doc-sync', 'shared-doc', 'logs', 'data-quality', 'data-sources']
 const PUBLIC_TABS = ['browser', 'sync', 'upload', 'logs']
 
 function resolveInitialTab() {
@@ -60,7 +64,7 @@ function resolveInitialTab() {
     return 'sync'
   }
   if (want && ALL_TABS.includes(want)) {
-    if (!isAdmin.value && (want === 'data-sources' || want === 'doc-sync')) return 'sync'
+    if (!isAdmin.value && (want === 'data-sources' || want === 'doc-sync' || want === 'shared-doc')) return 'sync'
     return want
   }
   // ?ingest=fetch 旧兼容 → 新统一入口

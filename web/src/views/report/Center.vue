@@ -13,12 +13,12 @@
       <div class="alert-body">
         导出质量取决于上游数据视图的成熟度。当前分析视图体系、组合条件与报告内容编排尚未完善,
         待沉淀面向领导的标准预设视图后,将按设计文档依次落地三种导出能力。
-        详见 <el-link type="primary" :underline="false" @click="showDesign = true">导出功能设计文档</el-link>。
+        详见 <el-link type="primary" underline="never" @click="showDesign = true">导出功能设计文档</el-link>。
       </div>
     </el-alert>
 
     <el-row :gutter="16">
-      <el-col :xs="24" :md="8" v-for="cap in capabilities" :key="cap.key">
+      <el-col v-for="cap in capabilities" :key="cap.key" :xs="24" :md="8">
         <el-card class="cap-card" shadow="hover">
           <div class="cap-header">
             <el-icon :size="28" :color="cap.color"><component :is="cap.icon" /></el-icon>

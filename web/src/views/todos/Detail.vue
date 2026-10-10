@@ -5,7 +5,7 @@
       <el-button :icon="ArrowLeft" @click="$router.back()">返回</el-button>
     </div>
 
-    <el-card class="mb-16" v-loading="loading">
+    <el-card v-loading="loading" class="mb-16">
       <el-descriptions :column="2" border>
         <el-descriptions-item label="状态">
           <el-tag :type="statusType(todo.status)">{{ statusLabel(todo.status) }}</el-tag>

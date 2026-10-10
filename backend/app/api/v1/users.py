@@ -1,12 +1,11 @@
 """用户管理路由"""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, CurrentUser, DBSession
-from app.core.database import get_db
 from app.core.security import hash_password
 from app.models.operation_log import OperationLog
 from app.models.user import RoleEnum, User
@@ -133,7 +132,7 @@ def delete_user(user_id: int, db: DBSession, current: AdminUser):
 
 
 def _purge_user_references(db: Session, user_id: int) -> None:
-    """删除用户前清理其全部外键引用, 避免删除时外键约束 500。
+    r"""删除用户前清理其全部外键引用, 避免删除时外键约束 500。
 
     覆盖范围与 users 表全部外键引用对齐(见数据库 \d users 的 Referenced by)。
     每一步都在独立 SAVEPOINT 中执行: 单个语句失败(如某环境列不存在)只回滚该步,

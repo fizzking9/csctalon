@@ -1,6 +1,7 @@
 """通知通道路由 - 通道配置 CRUD + 测试发送(预警推送分发用)
 
-通道类型: inapp(站内信, 内置) / webhook(企业微信/钉钉/飞书群机器人) / email(占位)。
+通道类型: inapp(站内信, 内置) / webhook(企业微信/钉钉/飞书群机器人)。
+(#185 清理: 原 email 通道为未接入占位, 已删除)
 """
 
 from fastapi import APIRouter, HTTPException

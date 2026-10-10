@@ -5,6 +5,13 @@
   None         正常(无问题)
   pending      检测出问题, 需人工确认(不自动改数据)
   auto_fixed   高置信问题已自动修复(当前仅手动退款时间年份错位场景, 由 upsert_manual_refunds 内部处理)
+  auto_filled  op_time 由 E 表(refund_record_reports)回填(D 路, reconcile.backfill_d_op_time)
+  ok           人工确认通过(quality_confirm/quality_fix 置位)
+  dup_residual 已治理重复(从经营统计排除, 不物理删除, 可恢复)
+  ignored      人工裁定彻底忽略(从经营统计排除, 通用"该笔不纳入", A-20260909-001 §2.2)
+
+统计排除约定(analytics/_quality_exclude): COALESCE(quality_status,'') NOT IN
+('dup_residual','ignored')  → 这两个状态的行不纳入经营四路 A/B/C/D 统计。
 
 校验规则(按表配置, 全部 4 类):
   R-时间  时间字段异常: 缺失/未来日期/年份错位(远古)/时间倒挂/跨度异常
@@ -17,9 +24,10 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.manual_refund import ManualRefund
@@ -32,6 +40,34 @@ logger = logging.getLogger(__name__)
 
 _UTC = timezone.utc
 _TZ_CN = timezone(timedelta(hours=8))
+
+# ── 经营统计质量排除口径（#201 S-P0-1：全仓唯一字面量定义） ────────
+# 凡「经营四路 A/B/C/D / 经营宽表 / 物化 refund_wide」统计，统一排除以下 quality_status：
+#   dup_residual = 已治理重复(不物理删除, 可恢复); ignored = 人工裁定彻底忽略
+# 唯一允许的新增/修改位置就在本元组；其它任何模块必须 import 本常量或下面两个
+# 同口径助手，禁止再写第二份 ('dup_residual','ignored') 字面量（双实现必然漂移）。
+STATS_EXCLUDED_QUALITY_STATUSES: tuple[str, ...] = ("dup_residual", "ignored")
+
+
+def stats_quality_excluded_sql(col: str = "quality_status") -> str:
+    """raw SQL(text()) 排除片段：`COALESCE(<col>,'') NOT IN ('dup_residual','ignored')`。
+
+    - 状态值来自程序常量（非用户输入），内联进 SQL 无注入风险；
+    - `col` 仅限内部调用方传入的**列标识符**（可用 'r.quality_status' 这类别名限定），
+      绝不接受外部输入；
+    - 与 `stats_quality_include`（ORM 侧）必须保持同口径，改动任一处须同步另一处。
+    """
+    in_list = ",".join(f"'{s}'" for s in STATS_EXCLUDED_QUALITY_STATUSES)
+    return f"COALESCE({col},'') NOT IN ({in_list})"
+
+
+def stats_quality_include(column):
+    """ORM 侧同口径条件：column IS NULL OR column NOT IN (排除集合)。
+
+    用于 SQLAlchemy 查询；NULL(未打标=正常行)计入统计，与 SQL 片段的 COALESCE 语义一致。
+    """
+    return or_(column.is_(None), column.notin_(STATS_EXCLUDED_QUALITY_STATUSES))
+
 
 # ── 枚举预期集合(脏值检测) ──────────────────────────────────────
 REFUND_METHOD_SET = {"线上", "线下", "转入提现账户"}
@@ -103,13 +139,22 @@ def _enum_note(value: str | None, allowed: set[str], label: str) -> str | None:
     return None
 
 
+def _D(val) -> Decimal:
+    """金额定点化（#222；与 analytics._core.D 同语义，本文件因循环依赖内联）。"""
+    if val is None:
+        return Decimal("0")
+    if isinstance(val, Decimal):
+        return val
+    return Decimal(str(val))
+
+
 def _amount_note(value: Any, label: str, allow_zero: bool = False) -> str | None:
     """R-金额: 缺失或 <=0(allow_zero=True 时允许 0)"""
     if value is None:
         return f"{label}缺失"
     try:
-        v = float(value)
-    except (TypeError, ValueError):
+        v = _D(value)
+    except (TypeError, ValueError, InvalidOperation):
         return f"{label}非数值({value})"
     if v < 0 or (v == 0 and not allow_zero):
         return f"{label}异常({v})"
@@ -192,7 +237,7 @@ def check_wallet_row(r: WalletWithdrawal) -> tuple[str | None, str | None]:
     ]
     if r.op_amount is not None:
         try:
-            if float(r.op_amount) < 0:
+            if _D(r.op_amount) < 0:
                 notes.append(f"操作金额为负({r.op_amount})")
         except (TypeError, ValueError):
             notes.append(f"操作金额非数值({r.op_amount})")
@@ -211,7 +256,7 @@ def check_shanmao_row(r: ShanmaoRefund) -> tuple[str | None, str | None]:
     ]
     if r.actual_amount is not None:
         try:
-            if float(r.actual_amount) < 0:
+            if _D(r.actual_amount) < 0:
                 notes.append(f"实际退款金额为负({r.actual_amount})")
         except (TypeError, ValueError):
             notes.append(f"实际退款金额非数值({r.actual_amount})")
@@ -295,11 +340,15 @@ def get_table_config(code: str) -> dict[str, Any]:
 
 
 def quality_summary(db: Session, table: str) -> dict[str, int]:
-    """各状态计数: {pending, auto_fixed, ok, total}"""
+    """各状态计数: {pending, auto_fixed, ok, ignored, dup_residual, total}
+
+    A-20260909-001: 新增 ignored(人工彻底忽略)/dup_residual(已治理重复) 计数,
+    供质量页"已忽略"筛选与看板展示。
+    """
     cfg = get_table_config(table)
     model = cfg["model"]
-    summary = {"pending": 0, "auto_fixed": 0, "ok": 0, "total": 0}
-    for st in ("pending", "auto_fixed", "ok"):
+    summary = {"pending": 0, "auto_fixed": 0, "ok": 0, "ignored": 0, "dup_residual": 0, "total": 0}
+    for st in ("pending", "auto_fixed", "ok", "ignored", "dup_residual"):
         summary[st] = db.scalar(select(func.count()).select_from(model).where(model.quality_status == st)) or 0
     summary["total"] = db.scalar(select(func.count()).select_from(model)) or 0
     return summary
@@ -307,11 +356,11 @@ def quality_summary(db: Session, table: str) -> dict[str, int]:
 
 def quality_list(db: Session, table: str, status: str = "all",
                  page: int = 1, page_size: int = 50) -> dict[str, Any]:
-    """质量记录列表: status = all/pending/auto_fixed/ok, 按时间字段倒序。"""
+    """质量记录列表: status = all/pending/auto_fixed/ok/ignored/dup_residual, 按时间字段倒序。"""
     cfg = get_table_config(table)
     model = cfg["model"]
     q = select(model)
-    if status in ("pending", "auto_fixed", "ok"):
+    if status in ("pending", "auto_fixed", "ok", "ignored", "dup_residual"):
         q = q.where(model.quality_status == status)
     total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     time_col = getattr(model, cfg["time_field"], None)
@@ -324,7 +373,7 @@ def quality_list(db: Session, table: str, status: str = "all",
 def quality_confirm(db: Session, table: str, pk: str | int) -> dict[str, Any]:
     """人工确认通过: quality_status → ok"""
     cfg = get_table_config(table)
-    model = cfg["model"]
+    cfg["model"]
     r = _get_by_pk(db, cfg, pk)
     r.quality_status = "ok"
     r.quality_note = ((r.quality_note or "") + " | 人工确认通过") if r.quality_note else "人工确认通过"
@@ -350,8 +399,8 @@ def quality_fix(db: Session, table: str, pk: str | int, payload: dict[str, Any])
             changes.append(k)
         elif k in ("refund_amount", "actual_amount", "op_amount", "order_amount"):
             try:
-                setattr(r, k, float(v))
-            except (TypeError, ValueError):
+                setattr(r, k, _D(v))
+            except (TypeError, ValueError, InvalidOperation):
                 continue
             changes.append(k)
         else:

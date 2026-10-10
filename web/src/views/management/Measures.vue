@@ -28,7 +28,7 @@
     </el-card>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe>
+      <el-table v-loading="loading" :data="list" border stripe>
         <el-table-column prop="title" label="措施标题" show-overflow-tooltip min-width="180" />
         <el-table-column label="类型" width="100">
           <template #default="{ row }">{{ typeMap[row.measure_type] || row.measure_type }}</template>

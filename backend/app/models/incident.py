@@ -25,6 +25,17 @@ class IncidentStatus(str, enum.Enum):
     REVIEWED = "reviewed"  # 已复盘
 
 
+class IncidentEventType(str, enum.Enum):
+    """事件类型(#232 B1.5-1):
+    - ABNORMAL: 异常事故(默认, 原语义) - 未通知的非预期事项导致客服负荷激增
+    - BUSINESS: 经营事件 - 推文/广告/活动/定期维护等可预期事件, 用于时间轴
+      标注与数据对照(在 B1.5-3 趋势曲线叠加中消费)
+    """
+
+    ABNORMAL = "异常事故"
+    BUSINESS = "经营事件"
+
+
 class Incident(IDMixin, TimestampMixin, Base):
     """异常事件登记"""
 
@@ -85,6 +96,43 @@ class Incident(IDMixin, TimestampMixin, Base):
     )
     valid_to: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="周期生效结束(含, NULL=无限期)"
+    )
+    # ---- 经营事件扩展字段(#232 B1.5-1, 2026-10-08) ----
+    # event_type 与 occurred_at/duration_minutes 解耦: 「经营事件」可用 start_at/end_at
+    # 表达持续区间; 「异常事故」保留原 occurred_at+duration_minutes 语义。
+    # 用 String 而非 PG ENUM, 与 status/severity/category 保持一致(避免 ENUM 修改成本)。
+    event_type: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=IncidentEventType.ABNORMAL.value,
+        server_default=IncidentEventType.ABNORMAL.value,
+        index=True,
+        comment="事件类型: 经营事件/异常事故(默认)",
+    )
+    target_audience: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="目标群体(经营事件用: 推文/活动受众描述)"
+    )
+    start_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+        comment="经营事件生效起始(含, 与 end_at 共同表达持续时间区间)",
+    )
+    end_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="经营事件生效结束(含, NULL=点事件或无限期)",
+    )
+    impact_metrics: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="量化影响指标 {key: value} (用于事件与数据对照)",
+    )
+    # #235 B1.5-4 排班调整建议(仅经营事件用, 可空; 排班页关联展示后置于 B3-8)
+    scheduling_suggestion: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment='排班调整建议(经营事件用, 如"推文后加早班1人")',
     )
 
 

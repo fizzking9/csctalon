@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import JSON, DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -30,7 +30,7 @@ class UploadRecord(IDMixin, TimestampMixin, Base):
     matched_rows: Mapped[int] = mapped_column(Integer, default=0, nullable=False, comment="已关联行数")
     error_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True, comment="错误明细")
     uploaded_by: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="上传人")
-    source: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True, comment="导入来源:manual=手动上传, bms=BMS同步;历史记录为null")
+    source: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True, comment="导入来源:manual=手动上传, bms=BMS同步, shared_doc=共享文档同步(#248);历史记录为null")
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="完成时间")
 
 
@@ -42,7 +42,7 @@ class DataMatchRelation(IDMixin, TimestampMixin, Base):
 
     __tablename__ = "data_match_relations"
 
-    src_table: Mapped[str] = mapped_column(String(32), index=True, nullable=False, comment="源表:refund/ticket/wallet/merchant_refund")
+    src_table: Mapped[str] = mapped_column(String(32), nullable=False, comment="源表:refund/ticket/wallet/merchant_refund")
     src_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False, comment="源表主键值")
     dst_table: Mapped[str] = mapped_column(String(32), index=True, nullable=False, comment="目标表")
     dst_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False, comment="目标表主键值")

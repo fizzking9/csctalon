@@ -1,9 +1,18 @@
 # API 接口文档
 
-> 版本：v1.1 · 日期：2026-08-26
+**性质**：参考（REF） —— 全量接口清单（OpenAPI 实盘：449 路径 / 547 操作），**以代码为准**
+
+
+> 版本：v1.2 · 日期：2026-10-07（#215 按 `app.openapi()` 校正总数；明细仍以代码为准）
 > Base URL：`http://<服务器IP>:8000/api/v1`
 > 认证：JWT Bearer Token（除 `/auth/login`、`/auth/login-json`、`/wechat/auth/code-login` 外所有接口需 `Authorization: Bearer <token>`）
 > 说明：本版以代码为准重写，补齐缺失模块，修正已失效路径（如 `/auth/refresh`、`/analytics/today`、`/fetch/bms/*`、`/dashboards/{id}/render` 等）。
+>
+> **接口总数（2026-10-07 实盘，#215）**：**449 个路径 / 547 个 method 操作**（其中 448 个 `/api/v1` 业务路径 + `/health`）。
+> 两个口径不同：同一**路径**下的 GET / POST 各算一个**操作**。数量随迭代增减，以下列命令实测为准（在 `backend/` 目录执行）：
+> ```
+> ENV=test APP_MODE=test POSTGRES_DB=csctalon_test .venv/bin/python -c "from app.main import app; s=app.openapi()['paths']; m=('get','post','put','delete','patch'); print('paths',len(s),'operations',sum(1 for p in s.values() for x in p if x in m))"
+> ```
 
 ## 一、接口总览
 
@@ -61,6 +70,8 @@
 | 缓存管理 | `/system/cache` | cache_admin.py | 缓存信息/重建 |
 | 微信 | `/wechat` | wechat.py | 扫码注册/登录/审批 |
 | 小程序 | `/miniapp` | miniapp.py | 精简看板/采集触发 |
+| 外部只读 | `/external` | external.py | 对外只读开放平台(token+scope, 三核心+简报; 单日支持分钟精度) |
+| AI 分析助手 | `/ai` | ai.py | 经营数据自由问答(自然语言时间识别 + 区间分析) |
 
 ## 二、核心接口详情
 
@@ -267,6 +278,65 @@
 | GET | `/miniapp/sync/status` | 查询当前采集任务进度，仅管理员 |
 | POST | `/miniapp/sync/trigger` | 超级管理员启动数据采集（BMS+SCRM 并发，`time_range`：`incremental`/`today`），仅管理员 |
 
+### 2.12 AI 分析助手 `/ai`
+
+经营数据自由问答。数据与「对外简报 `/external/brief`」**同底层同缓存**
+（`ai_feed._build_feed` = `external._build_brief`），金额单位=元。
+需 `ManagerUser`（admin/supervisor/specialty_lead）；`LLM_ENABLED=false` 时返回 503。
+
+**窗口判定优先级（2026-09-11 #66）**：`start/end` > `date` > **问句自然语言识别** > `period` 默认。
+自然语言识别支持「昨天/**前天**/大前天/N天前/近N天/这两天/本周/上周/上上周/本月/上月/
+`2026-09-10`/`9月10日`/`本月1日到5日`」等表达；识别结果通过响应的
+`window_source`（`nl`/`explicit_range`/`explicit_date`/`period`）与 `window_label`
+**回显**，便于用户核对。无法识别或日期非法/未来 → 退回 `period` 默认窗口（不猜测）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/ai/config` | 启用状态 + 可用 period + 快捷问 |
+| POST | `/ai/analyze` | 提交分析任务；body：`{question, period?, date?, start?, end?}`。**同步等待** `AI_SYNC_WAIT_S`（默认 6s）：`status=success` 直接带 `result_md`；超时返回 `status=running` + `task_id`（前端轮询）；失败返回 `status=failed` + `error`（保证非空） |
+| GET | `/ai/tasks/{task_id}` | 轮询任务结果；终态含 `result_md` / `error`，并含 `window_source`/`window_label`；不存在或过 TTL（`AI_TASK_TTL_S`，默认 600s）→ 404 |
+| GET | `/ai/focus-configs` 等 | 关注点/分析视角配置（AdminUser）；`/ai/prompt-layers`、`/ai/prompt-preview`、`/ai/model-config` 为只读脱敏视图（`LLM_API_KEY` 绝不出现在响应中） |
+
+> **同步等待与轮询的关系**：`AI_SYNC_WAIT_S` 只决定「这一次请求是否直接带回结果」，
+> **不影响分析正确性** —— 超时后任务仍在后台执行，凭 `task_id` 轮询即可取回。
+> 生产实测（2026-09-10）约 36% 请求会走 `running` 路径，故前端必须轮询到终态。
+
+### 2.13 外部只读开放平台 `/external`
+
+供 workbuddy 等外部工具用 **token + scope** 拉取经营数据/简报（详见 `外部只读数据接入规范.md`）。
+鉴权：`Authorization: Bearer <token>`（token 由系统管理员在「系统管理 → 外部接入」生成并分发；库中仅存 hash）。
+默认 `EXTERNAL_API_ENABLED=false` 时外部端点返回 503；需在 `.env` 开启。
+
+**对外只读端点（外部 token，非内部 JWT）：**
+
+> **单日端点的 `date` 精度（2026-09-11 #66）**：三个单日端点的 `date` 支持两种形态 ——
+> 纯日期 `YYYY-MM-DD`（该**整天**）或 `YYYY-MM-DDTHH:MM`（该日 `00:00` 至**该分钟**，
+> 供下游做「同刻日比对」，如 `09-10T12:30` vs `09-09T12:30`）。
+> 分钟串不得晚于当前北京时刻（未来 → 400）；只支持**分钟**精度（带秒/带时区偏移 → 400）。
+> 响应新增窗口元信息以明确口径：`window_kind`（`full_day`/`minute_to_date`/`today_realtime`）、
+> `window_precision`、`window_start`、`window_end`、`compare_start`、`compare_end`
+> （后两者为**同比基准窗口**：整天 → 前一日整天；分钟 → 前一日同刻）。
+> `brief` 的 `start/end` 仍是**整天区间**语义，不接受分钟串（避免跨度计算失真）。
+
+| 方法 | 路径 | 所需 scope | 说明 |
+|---|---|---|---|
+| GET | `/external/reception` | `reception` | 当日/指定日接待量 + 服务设备数 + 环比（`date` 缺省今天，北京时间；支持分钟精度见上） |
+| GET | `/external/refund` | `refund` | 退款笔数/金额（四路经营合计）+ 当日完成退款 + 实际现金流 E；金额单位=元（支持分钟精度见上） |
+| GET | `/external/complaint` | `complaint` | 投诉量（三表并集，落当日）+ 三源 `registered/handled/backlog`（支持分钟精度见上） |
+| GET | `/external/brief` | `brief` | 一键经营简报，`period=daily/weekly/monthly`；含接待专项/退款(四路+涉诉率)/投诉(三源×登记/处理/积压)。v1.1 支持 `start/end` 任意区间（历史标准周回看=传周一~周日，`period` 模式向后兼容；`end` 不能晚于今天；单次跨度上限 93 天可配 `EXTERNAL_BRIEF_MAX_RANGE_DAYS`；`start/end` 仅收纯日期 `YYYY-MM-DD`，跨天默认整天 `00:00:00~23:59:59`，`end=今天` 实时截止 now） |
+
+**管理端点（内部 JWT，仅 admin）：**
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/external/tokens` | token 列表（不含明文，仅 prefix） |
+| POST | `/external/tokens` | 生成 token（明文仅此一次返回）；body：`{name, scopes[], rate_limit_per_min?, expires_at?}`（`rate_limit_per_min`: 0=不限制 / 空=全局默认 / >0=个性化） |
+| PATCH | `/external/tokens/{id}` | 更新 name/scopes/rate_limit_per_min(0=不限/null=全局默认/>0=个性化)/enabled |
+| POST | `/external/tokens/{id}/revoke` | 吊销（软删，即时生效） |
+| GET | `/external/config` | 启用状态 + 默认限频 + 可用 scope |
+
+**错误**：`503`（未启用）/ `401`（token 无效/吊销/过期）/ `403`（scope 不足）/ `429`（限频）。
+
 ## 三、通用约定
 
 ### 3.1 分页
@@ -298,4 +368,4 @@ GET /xxx?page=1&page_size=20
 }
 ```
 
-常见状态码：200 成功 / 201 创建 / 400 参数错误 / 401 未认证 / 403 无权限 / 404 不存在 / 500 服务器错误
+常见状态码：200 成功 / 201 创建 / 400 参数错误 / 401 未认证 / 403 无权限 / 404 不存在 / 429 请求过多(限频) / 500 服务器错误

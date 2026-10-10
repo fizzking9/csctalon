@@ -4,11 +4,13 @@
 - MetricRegistry: 指标定义(口径/方向/周期/依赖数据源), 计算函数在代码层注册(metric_registry_service)
 - MetricThreshold: 多级阈值参数(优秀/预警/告警线), 支持生效区间留痕
 - MetricDailySnapshot: 指标每日求值快照(回溯"为什么触发/持续多久")
+- MetricDictionary: 指标字典(#257 B4-1) —— 口径单点登记(语义/公式/来源表),
+  与 MetricRegistry 职责不同: registry 管预警水位, dictionary 管"这个数字怎么算的"。
 """
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -57,3 +59,32 @@ class MetricDailySnapshot(IDMixin, TimestampMixin, Base):
     level: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="级别:excellent/green/warning/critical/data_missing")
     data_ok: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, comment="数据是否完整(防假告警)")
     detail: Mapped[str | None] = mapped_column(Text, nullable=True, comment="求值明细")
+
+
+class MetricDictionary(TimestampMixin, Base):
+    """指标字典(#257 B4-1): 口径单点登记 —— 回答"这个数字怎么算的"
+
+    与 MetricRegistry 的分工:
+    - MetricRegistry: 预警水位引擎的元数据(方向/周期/阈值), 计算函数代码层注册
+    - MetricDictionary: 指标语义的**单点登记处**(含什么/排什么/时点/公式/来源表),
+      看板卡片 ⓘ 说明与新人交接以此为唯一口径来源(渐进迁移: 谁改动、谁挂接)
+
+    code 为自然主键(如 reception.session_count); name_cn 全站唯一(同 AGENTS 数据源命名纪律)。
+    """
+
+    __tablename__ = "metric_dictionary"
+    __table_args__ = {"comment": "指标字典: 口径单点登记(#257 B4-1)"}
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True, comment="指标code(域.名, 如 reception.session_count)")
+    name_cn: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, comment="显示名(全站唯一)")
+    definition: Mapped[str] = mapped_column(Text, nullable=False, comment="口径语义: 含什么/排什么/时点")
+    formula: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True,
+        comment="结构化公式: {source, aggregation, filter, window}",
+    )
+    unit: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="单位: 个/次/人/笔/元/%/值")
+    category: Mapped[str] = mapped_column(String(16), nullable=False, index=True, comment="分类: reception/refund/complaint/cash/performance")
+    source_tables: Mapped[list | None] = mapped_column(JSONB, nullable=True, comment="来源表清单(供下钻/健康检查)")
+    owner: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="口径负责人")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, comment="是否现行口径(停用不删, 留历史引用可查)")
+    remark: Mapped[str | None] = mapped_column(Text, nullable=True, comment="备注(变更背景/工单号)")

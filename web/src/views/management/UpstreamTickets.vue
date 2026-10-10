@@ -25,7 +25,7 @@
     </el-card>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe>
+      <el-table v-loading="loading" :data="list" border stripe>
         <el-table-column prop="upstream_dept" label="上游部门" width="130" />
         <el-table-column prop="issue" label="问题描述" show-overflow-tooltip />
         <el-table-column label="状态" width="100">

@@ -5,10 +5,10 @@
 """
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 from app.core.config import settings
 from app.schemas.common import R
-from pydantic import BaseModel
 
 
 class SiteInfoOut(BaseModel):

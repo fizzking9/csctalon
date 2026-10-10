@@ -79,3 +79,25 @@ export function exportPersons() {
 export function deletePerson(id) {
   return request.delete(`/persons/${id}`)
 }
+
+// ---------- B3-7 技能矩阵 (#255) ----------
+
+// 技能标签字典(distinct 标签+使用人数)
+export function listSkillTags() {
+  return request.get('/persons/skill-tags')
+}
+
+// 技能矩阵(在职人员×标签)
+export function getSkillMatrix() {
+  return request.get('/persons/skills/matrix')
+}
+
+// 全量替换某人员技能标签
+export function putPersonSkills(personId, skills) {
+  return request.put(`/persons/${personId}/skills`, { skills })
+}
+
+// 批量打标(add 追加/覆盖 | remove 删除)
+export function batchSkills(payload) {
+  return request.post('/persons/batch-skills', payload)
+}

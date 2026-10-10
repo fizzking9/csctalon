@@ -129,3 +129,25 @@ class BatchMergeRequest(BaseModel):
     """批量按建议归并别名到对应 HR 人员 - alias_ids 为空=全部待归并"""
 
     alias_ids: list[int] = []
+
+
+class SkillTagItem(BaseModel):
+    """单条技能标签(人员技能矩阵的一格)"""
+
+    skill_tag: str
+    level: int = 1  # 熟练度 1-5
+
+
+class PersonSkillsUpdate(BaseModel):
+    """全量替换某人员的技能标签集(以本 payload 为准,多余删除)"""
+
+    skills: list[SkillTagItem]
+
+
+class BatchSkillsUpdate(BaseModel):
+    """批量打标: mode=add(追加/覆盖熟练度) | remove(删除该标签)"""
+
+    person_ids: list[int]
+    skill_tag: str
+    level: int = 1
+    mode: str = "add"  # add / remove

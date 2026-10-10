@@ -20,21 +20,152 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.database import SessionLocal, engine as _db_engine
+from app.core.database import SessionLocal
+from app.core.database import engine as _db_engine
 from app.models.bms_sync_log import BmsSyncLog
 from app.models.upload import UploadRecord
 from app.services.bms_fetcher import BMS_DATA_SOURCES, BmsFetcher, FetchResult
 from app.services.data_parser import load_dataframe, parse_file
-from app.services.sync_source_config_service import get_sync_source_config
-from app.services.upsert import run_upsert
+from app.services.ingest_service import ingest_table
+from app.services.sync_source_config_service import (
+    get_schedule_tier_map,
+    get_sync_source_config,
+)
 
 logger = logging.getLogger(__name__)
 
 # 全部可同步的数据类型(状态展示/UI 复选框遍历用)
 SYNC_DATA_TYPES = list(BMS_DATA_SOURCES.keys())  # refund/ticket/wallet/device_combo
 
-# 默认同步的数据类型(default_sync=True):定时同步 + 手动同步默认勾选用
+# 内置核心高频源(A-20260907-001 LOCKED / #31 语义重定义):
+#   种子 default_sync=True 的源 = ①高频定时档(白天每小时/5点/8点, 与 DB true 求交)
+#   ②手动同步默认勾选 ③每日必达监控名单。不再代表"全部定时源"——
+#   调度器实际跑哪些已改为读 DB sync_source_configs.default_sync(见
+#   sync_source_config_service.list_scheduled_bms_sources)。
 DEFAULT_SYNC_TYPES = [dt for dt, cfg in BMS_DATA_SOURCES.items() if cfg.get("default_sync", True)]
+
+# ── 宽表「相关上游源」白名单 (2026-09-14 #88) ────────────────────────────
+#
+# 判据: 该源的数据变更**是否会改变宽表的任何一列**。逐列对照各 builder:
+#
+# ① refund_wide (宽表行本体来自 refunds, 但多列物化自其它表):
+#   - refund         → 主表(行本体 + refund_method/status/amount/...)
+#   - ticket         → service_item/service_category/ticket_no/ticket_handler
+#   - wallet         → wallet_id/wallet_op_time/wallet_op_amount
+#   - external_complaint → has_external_complaint/count/latest_time
+#   与 _collect_affected_from_imports() 的分支**一一对应**;
+#   matcher 的 6 个匹配步骤也只依赖 refunds/tickets/wallet_withdrawals。
+#
+# ② cash_flow_wide (ABCD 四路每笔出款一行 + E 对账标记):
+#   - refund / wallet / shanmao_refund / manual_refund → 产生 A/B/C/D 行
+#   - refund_record_report(E) → **不产生行**, 但决定每行 e_matched 列
+#   - external_complaint      → 决定每行 has_external_complaint 列
+#     ⚠️ external_complaint 系 2026-09-14 (#88) **补漏**: builder 第 111/153/188/
+#        224 行确实读 external_complaints 的 SN 集来填 has_external_complaint,
+#        但旧白名单漏了它 → 外部投诉同步后该列陈旧(该刷不刷)。
+#
+# ⚠️ 不在白名单内的源(device_combo/cs_record/bms_order/SCRM 系列等)同步后,
+#    两张宽表的正确动作都是**跳过重建**, 而不是降级全量 —— 详见 #88。
+REFUND_WIDE_RELEVANT_SOURCES: tuple[str, ...] = (
+    "refund",
+    "ticket",
+    "ticket_finish",  # ticket 的双维度抓取别名(与 ticket 同源表)
+    "wallet",
+    "external_complaint",
+)
+
+CASH_FLOW_WIDE_RELEVANT_SOURCES: tuple[str, ...] = (
+    "refund",
+    "wallet",
+    "shanmao_refund",
+    "manual_refund",
+    "refund_record_report",  # E 路: 只影响 e_matched 列
+    "external_complaint",    # has_external_complaint 列(见上方补漏说明)
+)
+
+
+def _filter_relevant_sources(results: list[dict], whitelist: tuple[str, ...]) -> list[str]:
+    """共用筛选: 命中的 data_type 须**同时**满足 ①成功 ②属白名单 ③有实际写入。
+
+    刻意要求 inserted+updated > 0: 源相关但 0 行写入(如 BMS 查询结果为空)时
+    宽表不可能变, 同样应跳过重建。
+
+    Args:
+        results: sync_all 的结果列表, 每项至少含 data_type / success
+        whitelist: 该宽表的相关源白名单
+
+    Returns:
+        命中的 data_type 列表(去重保序); 空列表 = 本次导入与该宽表无关
+    """
+    hit: list[str] = []
+    for r in results:
+        if not isinstance(r, dict) or not r.get("success"):
+            continue
+        dt = r.get("data_type")
+        if dt not in whitelist:
+            continue
+        if (r.get("inserted_rows") or 0) + (r.get("updated_rows") or 0) <= 0:
+            continue
+        if dt not in hit:
+            hit.append(dt)
+    return hit
+
+
+def refund_wide_relevant_sources(results: list[dict]) -> list[str]:
+    """本次同步中触碰 refund_wide 的源(见 REFUND_WIDE_RELEVANT_SOURCES 说明)"""
+    return _filter_relevant_sources(results, REFUND_WIDE_RELEVANT_SOURCES)
+
+
+def cash_flow_wide_relevant_sources(results: list[dict]) -> list[str]:
+    """本次同步中触碰 cash_flow_wide 的源(见 CASH_FLOW_WIDE_RELEVANT_SOURCES 说明)"""
+    return _filter_relevant_sources(results, CASH_FLOW_WIDE_RELEVANT_SOURCES)
+
+
+def is_refund_wide_relevant(data_type: str | None) -> bool:
+    """单个 data_type 是否属于退费宽表相关源(上传导入通道用, 见 #88)"""
+    return data_type in REFUND_WIDE_RELEVANT_SOURCES
+
+
+def is_cash_flow_wide_relevant(data_type: str | None) -> bool:
+    """单个 data_type 是否属于现金流水宽表相关源(上传导入通道用, 见 #88)"""
+    return data_type in CASH_FLOW_WIDE_RELEVANT_SOURCES
+
+
+# 增量/全量阈值策略: 总量小(<2000)或影响面大(>25%) → 全量更高效; 否则增量
+INCREMENTAL_RATIO_THRESHOLD = 0.25
+INCREMENTAL_MIN_TOTAL = 2000
+
+
+def decide_refund_wide_mode(
+    relevant_sources: list[str],
+    match_affected_count: int,
+    affected_count: int,
+    total_refunds: int,
+) -> str:
+    """决定本次 post-sync 对 refund_wide 的动作: "skipped" | "incremental" | "full"
+
+    抽成纯函数以便单测(2026-09-14 #88), 原逻辑内联在闭包里无法验证。
+
+    判定顺序:
+      1. **跳过**(本单核心修复): 既无「宽表相关源写入」又无「matcher 新增关系」
+         → 宽表不可能有任何一行变化。修复前此情形被 `use_incremental` 的
+         `len(all_affected) > 0` 误判为 **full 全量重建**, 使设备套餐等无关源同步
+         白白重刷 6.6 万行(实测 ~50s)。
+      2. 影响面小且总量足够 → 增量。
+      3. 其余 → 全量。
+
+    保守优先: 只要有相关源写入过数据, 就**不会**跳过(即使 affected 收集为空,
+    也保留全量兜底, 避免"导入了但窗口过滤不到"造成静默漏采)。
+    """
+    if not relevant_sources and match_affected_count == 0:
+        return "skipped"
+    if (
+        affected_count > 0
+        and total_refunds >= INCREMENTAL_MIN_TOTAL
+        and affected_count / total_refunds <= INCREMENTAL_RATIO_THRESHOLD
+    ):
+        return "incremental"
+    return "full"
 
 
 def _get_last_sync_time(db: Session, data_type: str) -> datetime | None:
@@ -99,7 +230,7 @@ def _auto_import(db: Session, data_type: str, file_path: str, filename: str, tri
     """
     # 2026-08-11 双维度同步: ticket_finish 是 ticket 的按完成时间补充抓取,按 ticket 导入
     if data_type == "ticket_finish":
-        logger.info(f"[ticket_finish] 映射为 ticket 进行导入(按完成时间补充抓取)")
+        logger.info("[ticket_finish] 映射为 ticket 进行导入(按完成时间补充抓取)")
         data_type = "ticket"
     base = Path(settings.UPLOAD_DIR)
     full_path = base / file_path
@@ -130,9 +261,13 @@ def _auto_import(db: Session, data_type: str, file_path: str, filename: str, tri
     db.refresh(record)
 
     try:
-        # 3. 加载 DataFrame 并执行 upsert
+        # 3. 加载 DataFrame 并执行 upsert(统一入库接口 #42)
         df = load_dataframe(full_path, encoding=encoding)
-        result = run_upsert(df, data_type, mapping, db)
+        result = ingest_table(
+            db, data_type,
+            df=df, mapping=mapping,
+            source="bms", source_ref=f"upload_record:{record.id}",
+        )
 
         record.total_rows = result.total
         record.inserted_rows = result.inserted
@@ -171,7 +306,36 @@ def _create_sync_log(
     trigger_type: str,
     triggered_by: str,
 ) -> BmsSyncLog:
-    """创建同步日志记录(初始状态 running)"""
+    """创建同步日志记录(初始状态 running)。
+
+    ⚠️ 2026-09-06 实时化: 采集过程中表格应实时显示"进行中", 而非抓取完成才突然出现。
+      改为幂等 —— 若已存在该 data_type + trigger_type 的 running 记录(尚未结束的,
+      如同一轮同步里抓取阶段预建的), 直接复用更新窗口, 不重复建。
+      这保证: ①抓取开始时表格即出现 running; ②导入完成 update 到同一条记录。
+    """
+    # 复用同任务里已预建的 running 日志(避免同一轮同步出现两条)
+    try:
+        existing = db.scalar(
+            select(BmsSyncLog)
+            .where(
+                BmsSyncLog.data_type == data_type,
+                BmsSyncLog.trigger_type == trigger_type,
+                BmsSyncLog.status == "running",
+                BmsSyncLog.finished_at.is_(None),
+            )
+            .order_by(BmsSyncLog.id.desc())
+        )
+        if existing is not None:
+            existing.start_time = start_time
+            existing.end_time = end_time
+            if triggered_by:
+                existing.triggered_by = triggered_by
+            db.commit()
+            db.refresh(existing)
+            return existing
+    except Exception:  # noqa: BLE001
+        db.rollback()  # 查询失败不阻塞, 走新建
+
     log = BmsSyncLog(
         data_type=data_type,
         start_time=start_time,
@@ -300,7 +464,7 @@ async def sync_all(
                     "end": end,
                     "config": finish_config,
                 })
-                logger.info(f"[ticket] 双维度同步: 已添加按完成时间抓取任务(覆盖老工单完工handler回填)")
+                logger.info("[ticket] 双维度同步: 已添加按完成时间抓取任务(覆盖老工单完工handler回填)")
     finally:
         db.close()
 
@@ -311,6 +475,30 @@ async def sync_all(
     # 分流:fetch_mode="http" 的源走 ai_acc_fetcher(HTTP API),其余走 BmsFetcher(Playwright)
     http_tasks = [t for t in tasks if t["config"].get("fetch_mode") == "http"]
     pw_tasks = [t for t in tasks if t["config"].get("fetch_mode") != "http"]
+
+    # ── 2026-09-06 实时化: 抓取前为每个源预建 running 日志 ──
+    #    让「采集日志」表格在抓取一开始就看到"进行中", 而不是等该源抓完(可能 180~600s)
+    #    才突然出现一条。幂等(_create_sync_log 复用同轮 running), 导入完成 update 到同一条。
+    #    失败源也会在导入阶段(或下方兜底)把这条 running 更新为 failed, 不会残留 running。
+    try:
+        _pre_db = SessionLocal()
+        try:
+            for _t in tasks:
+                try:
+                    _create_sync_log(
+                        _pre_db,
+                        _t["data_type"],
+                        _t["start"],
+                        _t["end"],
+                        trigger_type,
+                        triggered_by,
+                    )
+                except Exception as _ple:  # noqa: BLE001
+                    logger.warning(f"[{_t['data_type']}] 预建 running 日志失败(忽略): {_ple}")
+        finally:
+            _pre_db.close()
+    except Exception as _pe:  # noqa: BLE001
+        logger.warning(f"预建同步日志整体失败(忽略, 不影响抓取): {_pe}")
 
     # 每个源完成抓取后,立刻在此处挂一个 asyncio.Task 做后台导入(用 to_thread 避免阻塞 event_loop)
     pending_imports: dict[str, asyncio.Task] = {}
@@ -330,6 +518,39 @@ async def sync_all(
             def _sync_import_work(attempt: int) -> dict:
                 inner_db = SessionLocal()
                 try:
+                    if getattr(fr, "empty_result", False):
+                        # ⚠️ 2026-09-06: 查询结果为空(BMS 页面"暂无数据"), 无导出文件。
+                        #   属正常业务态(窗口内无记录), 直接记 0 行成功, 不调 _auto_import(无文件可导)。
+                        log = _create_sync_log(inner_db, fr.data_type, start, end, trigger_type, triggered_by)
+                        import_stats = {
+                            "total_rows": 0,
+                            "inserted_rows": 0,
+                            "updated_rows": 0,
+                            "failed_rows": 0,
+                        }
+                        _update_sync_log(inner_db, log.id, "success", None, None, import_stats)
+                        logger.info(f"[{fr.data_type}] 查询结果为空(0 行), 按成功记录")
+                        # #191: "成功但 0 行"不再是静默成功 —— scheduled 档且属"应有数据"的源
+                        #   要写 system_events 告警, 否则像 E 路那样断更两天无人知晓(事故 #190)。
+                        try:
+                            from app.services.source_freshness_service import notify_empty_result
+
+                            notify_empty_result(data_type=fr.data_type, name=name,
+                                                trigger_type=trigger_type)
+                        except Exception as _ne:  # noqa: BLE001 告警失败不影响同步
+                            logger.warning(f"[{fr.data_type}] 空结果告警写入失败(忽略): {_ne}")
+                        return {
+                            "data_type": fr.data_type,
+                            "name": name,
+                            "success": True,
+                            "file_path": None,
+                            "filename": None,
+                            **import_stats,
+                            "start_time": start.isoformat(),
+                            "end_time": end.isoformat(),
+                            "attempt": attempt,
+                            "empty_result": True,
+                        }
                     if fr.success:
                         # ⚠️ 注意: _create_sync_log 是当前事务里的第一条 DB 操作;
                         #   如果恰好 PG 刚因 OOM/recovery/重启断开,就会抛 OperationalError.
@@ -339,6 +560,8 @@ async def sync_all(
                         try:
                             import_stats = _auto_import(inner_db, fr.data_type, fr.file_path, fr.filename, triggered_by)
                             _update_sync_log(inner_db, log.id, "success", fr.file_path, fr.filename, import_stats)
+                            # 工单#2/A-20260904-002 3.1: 部分成功时传播失败片(gap 队列记账用)
+                            partial = getattr(fr, "partial_failures", None)
                             return {
                                 "data_type": fr.data_type,
                                 "name": name,
@@ -349,6 +572,7 @@ async def sync_all(
                                 "start_time": start.isoformat(),
                                 "end_time": end.isoformat(),
                                 "attempt": attempt,
+                                "partial_failures": partial,
                             }
                         except Exception as e:
                             _update_sync_log(inner_db, log.id, "failed", fr.file_path, fr.filename, error=str(e))
@@ -366,6 +590,7 @@ async def sync_all(
                     else:
                         log = _create_sync_log(inner_db, fr.data_type, start, end, trigger_type, triggered_by)
                         _update_sync_log(inner_db, log.id, "failed", error=fr.error)
+                        # 工单#2/A-20260904-002 3.1: 传播错误分级给调度器(熔断/重试决策用)
                         return {
                             "data_type": fr.data_type,
                             "name": name,
@@ -374,6 +599,8 @@ async def sync_all(
                             "start_time": start.isoformat(),
                             "end_time": end.isoformat(),
                             "attempt": attempt,
+                            "error_class": getattr(fr, "error_class", "permanent"),
+                            "partial_failures": getattr(fr, "partial_failures", None),
                         }
                 finally:
                     try:
@@ -395,8 +622,10 @@ async def sync_all(
             #         再新建 Session 完整重试一次 upsert 工作流。
             #         upsert 全程 on_conflict_do_update / do_nothing → 天然幂等。
             # ═══════════════════════════════════════════════════════════
-            from sqlalchemy.exc import OperationalError as _SyncOpErr, InterfaceError as _SyncIfErr
             import time as _tm
+
+            from sqlalchemy.exc import InterfaceError as _SyncIfErr
+            from sqlalchemy.exc import OperationalError as _SyncOpErr
             first_res = None
             try:
                 first_res = await asyncio.to_thread(_sync_import_work, 1)
@@ -551,13 +780,15 @@ async def sync_all(
                 loop = asyncio.get_running_loop()
 
                 def _sync_post_sync_hook() -> tuple[dict, dict]:
-                    from sqlalchemy.exc import OperationalError as _OpErr
                     import time as _time
+
+                    from sqlalchemy.exc import OperationalError as _OpErr
 
                     def _run_hook_once(first_try: bool) -> tuple[dict, dict]:
                         hook_db = SessionLocal()
                         try:
                             from sqlalchemy import func as _func
+
                             from app.models.refund import Refund
 
                             def _report(name: str, phase: str = "importing"):
@@ -582,12 +813,13 @@ async def sync_all(
                             def _collect_affected_from_imports(imp_results: list[dict], db: Session) -> set[str]:
                                 """从成功导入记录中,收集需要刷新宽表的 refund_no 集合"""
                                 from datetime import datetime as _dt
+
+                                from app.models.external_complaint import ExternalComplaint
+                                from app.models.merchant_refund import MerchantRefund
                                 from app.models.refund import Refund
                                 from app.models.ticket import ServiceTicket
-                                from app.models.wallet import WalletWithdrawal
-                                from app.models.merchant_refund import MerchantRefund
-                                from app.models.external_complaint import ExternalComplaint
                                 from app.models.upload import DataMatchRelation
+                                from app.models.wallet import WalletWithdrawal
 
                                 affected: set[str] = set()
                                 for r in imp_results:
@@ -702,43 +934,160 @@ async def sync_all(
                             imported_affected = _collect_affected_from_imports(results, hook_db)
                             all_affected = imported_affected | match_affected
 
+                            # ── 2026-09-14 (#88) 跳过判定: 无关源同步不再全量重建宽表 ──
+                            #
+                            # 修复前的缺陷: use_incremental 要求 len(all_affected) > 0,
+                            #   于是「本次导入与宽表无关 → all_affected 为空」被错误地
+                            #   降级成 full 全量重建(6.6 万行 / ~50s)。实测同步设备套餐
+                            #   (device_combo) 也触发全量, 纯属白跑 —— 空集的正确语义是
+                            #   「宽表没有任何一行需要刷新」= 应跳过, 而非全量。
+                            #
+                            # 跳过需**同时**满足两个条件(保守优先, 宁可多跑不可漏采):
+                            #   ① 本次没有任何「宽表相关源」成功写入数据
+                            #      (refund/ticket/wallet/external_complaint, 见白名单常量)
+                            #   ② matcher 本次未新增任何匹配关系(match_affected 为空)
+                            # 任一不满足 → 维持原有的增量/全量判定逻辑。
+                            relevant_sources = refund_wide_relevant_sources(results)
                             total_refunds = hook_db.scalar(select(_func.count()).select_from(Refund)) or 0
-                            # 阈值策略:总量小(<2000)或影响面大(>25%)→全量更高效;否则增量
-                            INCREMENTAL_RATIO_THRESHOLD = 0.25
-                            INCREMENTAL_MIN_TOTAL = 2000
-                            use_incremental = (
-                                len(all_affected) > 0
-                                and total_refunds >= INCREMENTAL_MIN_TOTAL
-                                and len(all_affected) / total_refunds <= INCREMENTAL_RATIO_THRESHOLD
+                            wide_mode = decide_refund_wide_mode(
+                                relevant_sources,
+                                len(match_affected),
+                                len(all_affected),
+                                total_refunds,
                             )
+                            use_incremental = wide_mode == "incremental"
 
                             def _wide_progress_cb(built: int, total: int):
                                 _report(f"构建退费宽表 {built}/{total}")
 
-                            _report(
-                                ("构建退费宽表" if first_try else "构建退费宽表(重试)")
-                                + ("(增量)" if use_incremental else "(全量)")
-                                + f" affected={len(all_affected)} total={total_refunds}"
-                            )
-
-                            if use_incremental:
-                                wide_stats = build_refund_wide(
-                                    hook_db,
-                                    only_refund_nos=list(all_affected),
-                                    progress_callback=_wide_progress_cb,
+                            if wide_mode == "skipped":
+                                # 本次同步无宽表相关源写入 → 宽表内容不可能变化, 直接跳过
+                                logger.info(
+                                    "[post-sync] 本次同步无退费宽表相关源写入(refund/ticket/wallet/"
+                                    "external_complaint 均未写数据)且匹配无新增, 跳过 refund_wide 重建"
                                 )
-                                wide_stats["mode"] = "incremental"
-                                wide_stats["affected_count"] = len(all_affected)
-                                wide_stats["total_refunds"] = total_refunds
+                                wide_stats = {
+                                    "built": 0,
+                                    "updated": 0,
+                                    "skipped": 0,
+                                    "deleted": 0,
+                                    "mode": "skipped",
+                                    "skip_reason": "no_relevant_source_written",
+                                    "relevant_sources": [],
+                                    "affected_count": len(all_affected),
+                                    "total_refunds": total_refunds,
+                                }
                             else:
-                                wide_stats = build_refund_wide(hook_db, progress_callback=_wide_progress_cb)
-                                wide_stats["mode"] = "full"
-                                wide_stats["total_refunds"] = total_refunds
+                                _report(
+                                    ("构建退费宽表" if first_try else "构建退费宽表(重试)")
+                                    + ("(增量)" if use_incremental else "(全量)")
+                                    + f" affected={len(all_affected)} total={total_refunds}"
+                                    + (f" relevant={','.join(relevant_sources)}" if relevant_sources else "")
+                                )
+
+                                if use_incremental:
+                                    wide_stats = build_refund_wide(
+                                        hook_db,
+                                        only_refund_nos=list(all_affected),
+                                        progress_callback=_wide_progress_cb,
+                                    )
+                                    wide_stats["mode"] = "incremental"
+                                    wide_stats["affected_count"] = len(all_affected)
+                                    wide_stats["total_refunds"] = total_refunds
+                                else:
+                                    wide_stats = build_refund_wide(hook_db, progress_callback=_wide_progress_cb)
+                                    wide_stats["mode"] = "full"
+                                    wide_stats["total_refunds"] = total_refunds
+                                wide_stats["relevant_sources"] = relevant_sources
+
+                            # ── 2026-09-08 (#41/A-20260908-004): 现金流水统一宽表重建 ──
+                            # ABCD 四路每笔出款物化(对账/快速响应/运营分析)。
+                            # 2026-09-14 (#88): 判据统一到 CASH_FLOW_WIDE_RELEVANT_SOURCES 白名单,
+                            # 并**补齐 external_complaint**(builder 读它的 SN 集填
+                            # has_external_complaint 列, 旧判据漏了 → 外部投诉同步后该列陈旧),
+                            # 同时要求源真的写了数据(0 行写入则不重建, 与 refund_wide 一致)。
+                            # 全量 ~61k 行; 失败不阻塞主流程。
+                            _cfw_sources = cash_flow_wide_relevant_sources(results)
+                            if _cfw_sources:
+                                try:
+                                    from app.services.cash_flow_wide_builder import (
+                                        build_cash_flow_wide,
+                                    )
+                                    _report("构建现金流水宽表...")
+                                    _cfw_stats = build_cash_flow_wide(hook_db)
+                                    _cfw_stats["relevant_sources"] = _cfw_sources
+                                    logger.info(
+                                        f"[post-sync] cash_flow_wide 重建完成(relevant="
+                                        f"{','.join(_cfw_sources)}): {_cfw_stats}"
+                                    )
+                                except Exception as _cfw_e:
+                                    logger.warning(
+                                        f"[post-sync] cash_flow_wide 重建异常(忽略, 不影响同步): {_cfw_e}"
+                                    )
+                            else:
+                                logger.info(
+                                    "[post-sync] 本次同步无现金流水宽表相关源写入"
+                                    "(refund/wallet/shanmao/manual/E/external_complaint), "
+                                    "跳过 cash_flow_wide 重建"
+                                )
 
                             _report("刷新数据库统计...")
                             _analyze_key_tables(hook_db)
+
+                            # ── 2026-09-05 (#20): 现金流(退款记录报表)采集后自动回填 ──
+                            # 本次同步若导入了 refund_record_report(E 路线上退款水单),
+                            # 用其(SN+金额+精准退款时间)尝试回填 manual_refunds(D 路手动登记)
+                            # 缺失/倒挂的 op_time(架构 A-20260905-002 LOCKED, 幂等 + auto_filled 标记)。
+                            # 仅当该源有成功导入时触发(5:00/8:00 现金流采集), 常规 refund/ticket 同步不触发。
+                            # 失败不阻塞主流程(回填是增值, 非关键路径)。
+                            _imported_rrr = any(
+                                isinstance(r, dict)
+                                and r.get("data_type") == "refund_record_report"
+                                and r.get("success")
+                                and ((r.get("inserted_rows") or 0) + (r.get("updated_rows") or 0)) > 0
+                                for r in results
+                            )
+                            _backfill_stats = None
+                            _art_stats = None
+                            if _imported_rrr:
+                                try:
+                                    from app.services.reconcile import backfill_d_op_time
+                                    _report("回填手动登记退款时间(现金流水单匹配)...")
+                                    _backfill_stats = backfill_d_op_time(hook_db, limit=50000)
+                                    logger.info(
+                                        f"[post-sync] 退款记录报表导入后自动回填 D 路 op_time: "
+                                        f"{_backfill_stats}"
+                                    )
+                                except Exception as _bf_e:
+                                    # 回填失败不影响同步主流程(仅记日志)
+                                    logger.warning(
+                                        f"[post-sync] 自动回填 D 路 op_time 异常(忽略, 不影响同步): {_bf_e}",
+                                        exc_info=True,
+                                    )
+                                # 2026-09-09: E 导入后同步回填 A/B/C/D 的 actual_refund_time
+                                # (实际扣款时间, 对账/现金流按此归日; 幂等, 失败不阻塞)
+                                try:
+                                    from app.services.quality_disposition_service import (
+                                        backfill_a_actual_refund_time,
+                                        backfill_b_actual_refund_time,
+                                        backfill_c_d_actual_refund_time,
+                                    )
+                                    _report("回填 ABCD 实际扣款时间(E路refund_time)...")
+                                    _art_stats = {
+                                        "a": backfill_a_actual_refund_time(hook_db, limit=100000),
+                                        "b": backfill_b_actual_refund_time(hook_db, limit=50000),
+                                        "cd": backfill_c_d_actual_refund_time(hook_db, limit=50000),
+                                    }
+                                    logger.info(f"[post-sync] ABCD 实际扣款时间回填: {_art_stats}")
+                                except Exception as _art_e:
+                                    logger.warning(
+                                        f"[post-sync] ABCD 实际扣款时间回填异常(忽略): {_art_e}",
+                                        exc_info=True,
+                                    )
+
                             logger.info(
                                 f"post-sync 钩子完成: match={match_stats}, wide={wide_stats}"
+                                + (f", backfill={_backfill_stats}" if _backfill_stats else "")
                             )
                             _report("post-sync 完成", phase="imported")
                             return match_stats, wide_stats
@@ -793,6 +1142,37 @@ async def sync_all(
                 mark_sync_writing(False)
             except Exception:
                 pass
+
+        # ── 2026-09-06 残留 running 清理 ──
+        #    抓取前预建的 running 日志, 若因异常路径(源没走到导入更新)残留为 running,
+        #    会永久显示"进行中"。这里把本轮涉及的、仍 running 的日志统一置 failed,
+        #    避免前端表格卡在 running。幂等: 已结束(success/failed)的不动。
+        try:
+            _clean_db = SessionLocal()
+            try:
+                _now = datetime.now(timezone.utc)
+                _cutoff = _now - timedelta(minutes=30)
+                for _t in tasks:
+                    _dt = _t["data_type"]
+                    rows = _clean_db.scalars(
+                        select(BmsSyncLog)
+                        .where(
+                            BmsSyncLog.data_type == _dt,
+                            BmsSyncLog.status == "running",
+                            BmsSyncLog.created_at >= _cutoff,
+                        )
+                    ).all()
+                    for _log in rows:
+                        # 若抓取/导入真实成功会更新成终态; 走到这里仍 running = 异常残留
+                        _log.status = "failed"
+                        _log.error = (_log.error or "") + " [sync_all 收尾: 本轮未完成, 标记失败]"
+                        _log.finished_at = datetime.now(timezone.utc)
+                    if rows:
+                        _clean_db.commit()
+            finally:
+                _clean_db.close()
+        except Exception as _cle:  # noqa: BLE001
+            logger.warning(f"[sync_all] 残留 running 日志清理失败(忽略): {_cle}")
 
     # 系统事务通知: 每个数据源的同步结果写入概要事件(独立于详细日志, 供「事务通知」页查看)
     try:
@@ -858,7 +1238,13 @@ def _analyze_key_tables(db) -> None:
 
 
 def get_sync_status(db: Session) -> list[dict]:
-    """获取各数据源的同步状态(遍历全部 SYNC_DATA_TYPES)"""
+    """获取各数据源的同步状态(遍历全部 SYNC_DATA_TYPES)
+
+    #97: 额外返回 schedule_tier("high"/"low"/"off"), 供前端「手动同步」按档分组。
+    判据来自 sync_source_config_service.list_scheduled_bms_sources() —— 与调度器**同源**,
+    避免前端另立一份源名清单后与「实际定时跑哪些源」漂移。
+    """
+    tier_map = get_schedule_tier_map(db)
     statuses = []
     for data_type in SYNC_DATA_TYPES:
         config = get_sync_source_config(db, data_type) or {}
@@ -876,6 +1262,9 @@ def get_sync_status(db: Session) -> list[dict]:
             "default_sync": config.get("default_sync", True),
             "enabled": config.get("enabled", True),
             "requires_captcha": config.get("requires_captcha", False),
+            # #97: 档位标签(high/low/off)。未进入"应纳入定时"集合的源一律 off
+            #      (default_sync=false / enabled=false / 派生源 device_tag)
+            "schedule_tier": tier_map.get(data_type, "off"),
             "last_sync": last_log.created_at.isoformat() if last_log else None,
             "last_status": last_log.status if last_log else None,
             "last_end_time": last_log.end_time.isoformat() if last_log else None,

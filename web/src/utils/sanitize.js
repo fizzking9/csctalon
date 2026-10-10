@@ -1,7 +1,19 @@
 import { marked } from 'marked'
-import DOMPurify from 'dompurify'
+import createDOMPurify from 'dompurify'
 
 marked.setOptions({ breaks: true, gfm: true })
+
+/**
+ * DOMPurify 实例: 浏览器下默认绑定全局 window;
+ * node(测试/SSR)下用 createDOMPurify + 最小 window stub 初始化, 保证 renderMarkdown 可用。
+ */
+let DOMPurify
+try {
+  DOMPurify = createDOMPurify(globalThis.window)
+} catch {
+  // 无 window 环境兜底: 不初始化(renderMarkdown 会走 escapeHtml 安全分支)
+  DOMPurify = null
+}
 
 /**
  * HTML 转义: 用于把后端返回的任意文本安全嵌入 HTML(P0-5 tooltip 注入防护)。
@@ -27,6 +39,10 @@ export function renderMarkdown(md) {
   if (!md) return ''
   try {
     const raw = marked.parse(md)
+    // DOMPurify 不可用时(无 window 环境)退化为纯转义, 保证永不注入可执行 HTML
+    if (!DOMPurify) {
+      return `<pre>${escapeHtml(md)}</pre>`
+    }
     return DOMPurify.sanitize(raw, {
       // 允许常见 Markdown 渲染所需标签; 禁 script/iframe/on* 事件/ style 等
       ALLOWED_TAGS: [

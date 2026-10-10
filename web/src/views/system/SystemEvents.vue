@@ -54,7 +54,7 @@
     </el-row>
 
     <el-card shadow="never">
-      <el-table :data="events" v-loading="loading" border stripe size="small" max-height="560">
+      <el-table v-loading="loading" :data="events" border stripe size="small" max-height="560">
         <el-table-column label="时间" width="150" sortable>
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
@@ -95,7 +95,7 @@
           :page-sizes="[20, 50, 100]"
           layout="total, sizes, prev, pager, next, jumper"
           background
-          small
+          size="small"
           @current-change="load"
           @size-change="page = 1; load()"
         />
@@ -145,6 +145,7 @@ const categoryOptions = [
   { value: 'schedule', label: '定时调度' },
   { value: 'match', label: '关联匹配' },
   { value: 'auth', label: '登录验证' },
+  { value: 'llm', label: 'LLM 模型' },
 ]
 const unreadCount = computed(() => summaryData.value.unread || 0)
 const recent24h = computed(() => summaryData.value.recent_24h || {})
@@ -153,7 +154,7 @@ function categoryLabel(c) {
   return categoryOptions.find(x => x.value === c)?.label || c || '—'
 }
 function categoryTagType(c) {
-  const map = { sync: 'primary', push: 'success', import: 'warning', alert: 'danger', schedule: 'info', match: 'info', auth: 'warning' }
+  const map = { sync: 'primary', push: 'success', import: 'warning', alert: 'danger', schedule: 'info', match: 'info', auth: 'warning', llm: 'danger' }
   return map[c] || 'info'
 }
 function statusLabel(s) {

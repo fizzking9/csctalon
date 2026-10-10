@@ -10,8 +10,24 @@ __pycache__/
 .env
 
 # 调试/一次性脚本(含历史凭证与嗅探器,禁止进入生产镜像,2026-08-20 审计 C-1/TST-02)
-scripts/
+# 用 scripts/* 排除内容(保留目录), 再用 ! 例外放行登录脚本(scripts/ 会整目录排除无法例外)
+scripts/*
 tests/
+# 例外: 共享文档扫码登录脚本(运维工具, 生产环境需 headless 扫码更新登录态, #148)
+!scripts/tencent_doc_login.py
+!scripts/kdocs_login.py
+# 例外: 工单到期核验脚本 + 其运行守卫(#193 交付)。
+#   ⚠️ 仅对**直接 docker build** 生效。生产走 upgrade.sh/package.sh 时, 它们有各自的
+#      发布白名单(只放行两个登录脚本, 见 upgrade.sh L121-123), 会把 backend/scripts/* 全删,
+#      故生产需按下方配方先把两个文件 docker cp 进容器:
+#         scp backend/scripts/{check_ai_issue_gates,_bootstrap}.py <host>:/tmp/
+#         ssh <host> "docker cp /tmp/check_ai_issue_gates.py csctalon-backend:/app/scripts/ &&
+#                     docker cp /tmp/_bootstrap.py  csctalon-backend:/app/scripts/"
+#         ssh <host> "docker exec -w /app -e PYTHONPATH=/app csctalon-backend \
+#                     python /app/scripts/check_ai_issue_gates.py --issue 191 --allow-real-db"
+#       (两处白名单若口径不一致会漂移 —— 如需常态化, 应把配方收敛到只留一处)
+!scripts/check_ai_issue_gates.py
+!scripts/_bootstrap.py
 
 # 上传文件(运行时挂载)
 uploads/*

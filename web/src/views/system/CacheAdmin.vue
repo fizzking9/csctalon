@@ -53,13 +53,83 @@
       show-icon
     />
 
+    <!-- ★ 命中率 (#92)
+         设计说明（Design Rationale）
+         ─────────────────────────────────────────────
+         目的（替谁回答什么问题）
+           替**运维/管理员**回答「缓存到底有没有在起作用」。
+           上面的「键数量」只说明"缓存里有多少", 不能说明"请求是否命中" ——
+           两者可以完全背离：生产曾出现缓存里**有** key（预热写入）但请求
+           仍**全部未命中**（预热写的 key 形状与路由读的不一致），
+           此时键数量正常、接口却持续慢查询。
+
+         逻辑（为什么这样组织）
+           · 命中率**按 key 分组**（today / complaint / refund …）一行一组,
+             让"哪个业务域的缓存失效了"直接可读;
+           · 命中率 0 的行**标红加粗** —— 0 命中是「静默退化」的确定信号
+             （正是 #92 要暴露的形态）;
+           · 附带 **key 形态样例**（值已归一化为 <date>/<n>）, 便于对比
+             "预热写的形状"与"路由读的形状"是否一致。
+
+         口径（数据判据）
+           · 数据源：`GET /system/cache/info` 的 `hit_stats`（进程内累加）
+           · 计数起点：**后端进程启动**（重启即清零）, 非自然日
+           · hit_rate = hit / (hit + miss), 保留 3 位小数
+           · ⚠️ 未做跨进程聚合（单 worker 部署, 见 AGENTS.md）
+
+         取舍（不做什么及为什么）
+           · **不做时间序列趋势图** —— 需求是"现在有没有坏", 不是"历史怎么变";
+             加趋势需要持久化指标存储, 与本次"低侵入可观测"目标不匹配（记入 #68）。
+           · **不按具体 key 展示** —— 高基数（日期/分页）, 表格会爆炸;
+             只给分组 + 形态样例, 足以定位问题。
+           · 计数**不自动定时刷新** —— 避免干扰正在观察的数值; 由「刷新状态」手动触发。
+    -->
+    <el-card v-if="hitStats.length" shadow="never" class="mb-16">
+      <div class="flex-between" style="margin-bottom: 8px">
+        <div class="page-title" style="margin: 0">缓存命中率 · 按业务域</div>
+        <span class="page-sub">
+          自后端启动累计 · <b style="color:#dc2626">命中率 0 表示缓存完全没生效</b>（键存在但请求全部未命中）
+        </span>
+      </div>
+      <el-table :data="hitStats" border stripe size="small" max-height="320">
+        <el-table-column label="业务域" min-width="110">
+          <template #default="{ row }"><code class="mono">{{ row.group }}</code></template>
+        </el-table-column>
+        <el-table-column label="命中率" width="110" align="right">
+          <template #default="{ row }">
+            <span v-if="row.hit_rate === null" class="page-sub">—</span>
+            <span v-else-if="row.hit_rate === 0" style="color:#dc2626; font-weight:700">
+              0.0% <el-tag size="small" type="danger" effect="dark">未生效</el-tag>
+            </span>
+            <span v-else :style="row.hit_rate < 0.5 ? 'color:#d97706;font-weight:600' : 'color:#16a34a'">
+              {{ (row.hit_rate * 100).toFixed(1) }}%
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="命中" width="80" align="right">
+          <template #default="{ row }">{{ row.hit }}</template>
+        </el-table-column>
+        <el-table-column label="未命中" width="90" align="right">
+          <template #default="{ row }">
+            <span :style="row.miss > 0 ? 'color:#d97706' : ''">{{ row.miss }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="key 形态样例" min-width="260">
+          <template #default="{ row }">
+            <span v-if="!row.key_samples?.length" class="page-sub">—</span>
+            <div v-for="(s, i) in row.key_samples" :key="i" class="page-sub mono" style="font-size:11px">{{ s }}</div>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
     <!-- 缓存清单: 各前缀的键数量/TTL/即将过期/是否预热 -->
     <el-card shadow="never" class="mb-16">
       <div class="flex-between" style="margin-bottom: 8px">
         <div class="page-title" style="margin: 0">缓存清单 · 按业务前缀</div>
         <span class="page-sub">键数量越多覆盖越广 · 即将过期(TTL≤60s)会被预热/访问重算 · 未预热前缀靠路由层 60s 自然过期</span>
       </div>
-      <el-table :data="groups" v-loading="loading" border stripe size="small" max-height="420">
+      <el-table v-loading="loading" :data="groups" border stripe size="small" max-height="420">
         <el-table-column label="业务域" min-width="120">
           <template #default="{ row }">{{ row.label }}</template>
         </el-table-column>
@@ -169,6 +239,9 @@ const loading = ref(false)
 const lastResult = ref(null)
 const info = ref({ redis_available: true, is_warming: false, sync_busy: false, dbsize: 0, cached_keys: 0 })
 const groups = ref([])
+// #92: 命中率（按 key 分组）—— 键数量说明"缓存里有多少"，
+//      命中率说明"请求是否真的命中"，两者必须分开看。
+const hitStats = ref([])
 
 const redisOk = computed(() => info.value.redis_available)
 const syncBusy = computed(() => info.value.sync_busy)
@@ -201,6 +274,17 @@ async function loadInfo() {
       cached_keys: d?.cached_keys ?? 0,
     }
     groups.value = d?.groups || []
+    // #92: 命中率快照 → 转成表格行；按命中率升序，
+    //      让「0 命中」的行自然浮到顶部（最需要关注的先看到）
+    const hs = d?.hit_stats || {}
+    hitStats.value = Object.entries(hs)
+      .map(([group, v]) => ({ group, ...v }))
+      .sort((a, b) => {
+        // hit_rate 为 null（无请求）排最后
+        const av = a.hit_rate === null ? 2 : a.hit_rate
+        const bv = b.hit_rate === null ? 2 : b.hit_rate
+        return av - bv
+      })
   } catch (e) {
     // 拦截器已弹错误
   } finally {

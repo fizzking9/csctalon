@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -56,6 +56,7 @@ SCRM_SYNC_PER_SOURCE_TIMEOUT_SEC = 300  # 5 分钟
 _PW_LOGIN_FAIL_CACHE_GLOBAL: dict[tuple[str, str], tuple[float, str]] = {}
 _PW_LOGIN_FAIL_CACHE_TTL_SEC = 600  # 10 分钟
 import asyncio as _asyncio_global
+
 _PW_LOGIN_FAIL_CACHE_LOCK = _asyncio_global.Lock()
 
 
@@ -881,7 +882,6 @@ async def _sync_one_session_type(
         # ── 第 1 轮: OpenAPI ──
         try_openapi = fetch_mode in ("openapi", "dual")
         records: list[dict] | None = None
-        transfers_records: list[dict] | None = None  # 仅 web 模式下 scrm_session_transfers 会用到
         if try_openapi:
             try:
                 async with client:

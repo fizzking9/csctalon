@@ -23,11 +23,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.crypto import decrypt_secret, encrypt_secret
+from app.core.crypto import decrypt_secret, encrypt_secret, is_fernet_ciphertext
 from app.models.sync_source_config import SyncSourceConfig
 from app.services.bms_fetcher import BMS_DATA_SOURCES
 from app.services.scrm_client import SCRM_DATA_SOURCES
-from app.services.source_group_service import ensure_source_groups_registered, resolve_credentials
+from app.services.source_group_service import (
+    ensure_source_groups_registered,
+    get_group_credentials,
+    resolve_credentials_with_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +250,45 @@ def _decrypt_options_secrets(raw_opts: dict | None) -> dict:
     return opts
 
 
+def _row_effective_source(db: Session | None, row: SyncSourceConfig) -> str:
+    """DB 行 → 凭证生效来源标记(own/group/none)
+
+    - own  : 单源凭证解密有效, 运行时实际用该源独立凭证
+    - group: 单源为空/脏密文不可用 → 实际继承组凭证(或 .env/种子)
+    - none : 无任何可用凭证
+    """
+    if db is not None:
+        _u, _p, src = resolve_credentials_with_source(db, row)
+        return src
+    # 无 db 退化: 仅凭密文原文推断(与 _row_to_config 无 db 分支一致)
+    u = decrypt_secret(row.username) if row.username else None
+    p = decrypt_secret(row.password) if row.password else None
+    if u and p and not is_fernet_ciphertext(u) and not is_fernet_ciphertext(p):
+        return "own"
+    if row.group_key:
+        return "group"
+    return "none"
+
+
+def _own_cred_differs_group(db: Session | None, row: SyncSourceConfig) -> bool:
+    """本源是否配置了与组账号不同的单源凭证(仅用于前端提示, 不泄露明文)
+
+    判定条件: 单源凭证解密有效(source=own) 且 单源账号 != 组账号。
+    - 若本源未配单源(继承组) → False
+    - 若本源单源账号与组账号相同(冗余但等价) → False
+    - 若本源单源账号与组账号不同(本次事故场景) → True → 前端标黄提示
+    """
+    if not row.username or not row.password:
+        return False
+    own_u = decrypt_secret(row.username) if row.username else None
+    if not own_u or is_fernet_ciphertext(own_u):
+        return False
+    gu, _gp = get_group_credentials(db, row.group_key) if db is not None else (None, None)
+    if not gu:
+        return False  # 无组凭证可比, 不误报
+    return own_u != gu
+
+
 def _row_to_config(db: Session | None, row: SyncSourceConfig) -> dict:
     """DB 行 → 运行配置 dict(解密凭证 + 合并 options,并抛出顶层关键字段)
 
@@ -265,11 +308,24 @@ def _row_to_config(db: Session | None, row: SyncSourceConfig) -> dict:
     captcha_type = effective_options.get("captcha_type", "none")
     requires_captcha = _requires_captcha_from_options(effective_options)
     # 凭证: 单源优先, 空则继承组级凭证(同域共享登录态)
+    # ⚠️ 2026-09-07: 增加 credential_source(own/group/none) 与 credential_is_own,
+    #   供 bms_fetcher.fetch_all 熔断细化(单源凭证失败不连累同组)与前端提示使用。
     if db is not None:
-        username, password = resolve_credentials(db, row)
+        username, password, credential_source = resolve_credentials_with_source(db, row)
     else:
+        # 无 db 退化分支: 直接解密 + 兜底识别"解密失败仍为密文"的脏数据(密钥轮换后)
         username = decrypt_secret(row.username) if row.username else None
         password = decrypt_secret(row.password) if row.password else None
+        if is_fernet_ciphertext(username):
+            username = None
+        if is_fernet_ciphertext(password):
+            password = None
+        credential_source = "own" if (username and password) else "none"
+    # 组级账号明文(供前端/熔断提示"本源与组账号是否一致"), 无组返回 None
+    group_username = None
+    if db is not None:
+        gu, _gp = get_group_credentials(db, row.group_key)
+        group_username = gu
     return {
         "data_type": row.data_type,
         "name": row.name,
@@ -279,6 +335,9 @@ def _row_to_config(db: Session | None, row: SyncSourceConfig) -> dict:
         "group_key": row.group_key,
         "username": username,
         "password": password,
+        "credential_source": credential_source,
+        "credential_is_own": credential_source == "own",
+        "group_username": group_username,
         "options": effective_options,
         # ── 顶层关键字段(便于下游直接使用) ──
         "fetch_mode": fetch_mode,
@@ -307,14 +366,20 @@ def get_sync_source_config(db: Session, data_type: str) -> dict | None:
         env_user = getattr(settings, "BMS_USERNAME", "") or ""
         env_pwd = getattr(settings, "BMS_PASSWORD", "") or ""
     effective_options = _resolve_effective_options(None, {**cfg, "data_type": data_type})
+    user = env_user or None
+    pwd = env_pwd or None
     return {
         "data_type": data_type,
         "name": cfg["name"],
         "base_url": cfg.get("base_url", getattr(settings, "SCRM_BASE_URL", "") if is_scrm else cfg.get("base_url", "")),
         "page_path": cfg.get("page_path", ""),
         "time_labels": cfg.get("time_labels"),
-        "username": env_user or None,
-        "password": env_pwd or None,
+        "username": user,
+        "password": pwd,
+        # 种子/.env 回退场景统一视为组/共享级来源(登录失败应熔断整组)
+        "credential_source": "own" if user else "none",
+        "credential_is_own": bool(user),
+        "group_username": None,
         "options": effective_options,
         "fetch_mode": effective_options.get("fetch_mode", "playwright" if is_scrm else "playwright"),
         "captcha_type": effective_options.get("captcha_type", "none"),
@@ -322,6 +387,108 @@ def get_sync_source_config(db: Session, data_type: str) -> dict | None:
         "default_sync": cfg.get("default_sync", True),
         "enabled": True,
     }
+
+
+def list_scheduled_bms_sources(db: Session) -> dict[str, list[str]]:
+    """读取"应纳入定时采集"的 BMS 源集合, 按高频/低频分档(A-20260907-001 LOCKED / #31)。
+
+    返回 {"all": [...], "high": [...], "low": [...]}:
+      - all  = sync_source_configs 中 default_sync=true AND enabled=true 且非 SCRM 的源
+              (data_type 不以 scrm_ 开头), 按 sort_order 排序 —— UI「纳入周期采集」开关的真源。
+      - high = all ∩ 代码种子 DEFAULT_SYNC_TYPES(内置核心高频源: refund/ticket/wallet/cs_record)
+               —— 白天每小时 + 5:00/8:00 兜底档跑这些。
+      - low  = all − high —— 大表/报表/档案型低频源, 每天 1 次(低频档 6:00)跑。
+
+    设计背景: 原调度器用代码常量 DEFAULT_SYNC_TYPES 决定定时源, 从不读 DB default_sync,
+    导致 UI「纳入周期采集」开关(改 DB)不生效(生产 12 源 true 但定时只跑 4 个)。
+    本函数把"调度源集合"收敛到 DB(default_sync=true), 高频/低频用"是否种子核心源"区分。
+
+    注意: 内部延迟 import bms_sync.DEFAULT_SYNC_TYPES, 避免与 bms_sync 的循环依赖。
+    """
+    rows = db.scalars(
+        select(SyncSourceConfig)
+        .where(
+            SyncSourceConfig.default_sync.is_(True),
+            SyncSourceConfig.enabled.is_(True),
+            ~SyncSourceConfig.data_type.like("scrm_%"),
+        )
+        .order_by(SyncSourceConfig.sort_order, SyncSourceConfig.data_type)
+    ).all()
+    # 派生源不纳入周期采集(#38 / #31):
+    #   - device_tag(标签定义)不是独立 BMS 抓取源 —— 与 device_tag_binding 抓同一份打标明细 CSV,
+    #     标签定义由 device_tag_binding 导入时按 tag_name 自动补插(bms_fetcher L121-126 注释)。
+    #     device_tag 若被 UI 打开 default_sync, 调度会抓明细并按 tag_name upsert → 同批重复必炸
+    #     (CardinalityViolation, 见 upsert.py upsert_device_tags)。此处显式剔除防复发。
+    _DERIVED_NON_SCHEDULABLE = frozenset({"device_tag"})
+    all_types = [r.data_type for r in rows if r.data_type not in _DERIVED_NON_SCHEDULABLE]
+    # 延迟 import 规避循环依赖(bms_sync → sync_source_config_service)
+    from app.services.bms_sync import DEFAULT_SYNC_TYPES
+
+    high_set = set(DEFAULT_SYNC_TYPES)
+    high = [dt for dt in all_types if dt in high_set]
+    low = [dt for dt in all_types if dt not in high_set]
+    return {"all": all_types, "high": high, "low": low}
+
+
+def list_low_freq_schedules(db: Session) -> dict[str, dict]:
+    """低频源的自定义档位参数(#191): {data_type: {"hour": int, "window_days": int}}。
+
+    背景(生产实测 #190/#191): 低频档固定 06:00 + 窗口"昨天整天", 对**上游 T+1 且次日
+    白天才发布**的源(退款记录报表 E 路)每天都会"成功但取 0 行" —— 表内数据全靠人工
+    手动触发。故把「档位小时」与「窗口天数」下沉为按源可配(options), 默认值保持原语义
+    (hour=settings.LOW_FREQ_HOUR, window_days=0=沿用档位窗口), 只有显式配置的源才改变行为。
+
+    options 键: `low_freq_hour`(0~23) / `window_days`(>0 时该源走「近 N 天 0 点~now」)。
+    无配置的源不返回(调用方按默认档位处理), 避免为未配置源臆造参数。
+    """
+    rows = db.scalars(
+        select(SyncSourceConfig).where(
+            SyncSourceConfig.default_sync.is_(True),
+            SyncSourceConfig.enabled.is_(True),
+            ~SyncSourceConfig.data_type.like("scrm_%"),
+        )
+    ).all()
+    from app.services.bms_sync import DEFAULT_SYNC_TYPES
+
+    out: dict[str, dict] = {}
+    for r in rows:
+        if r.data_type in set(DEFAULT_SYNC_TYPES):
+            continue  # 高频源不走低频档
+        opts = _resolve_effective_options(r.options, _seed_of(r.data_type) or {})
+        hour = opts.get("low_freq_hour")
+        days = opts.get("window_days")
+        item: dict = {}
+        if isinstance(hour, (int, float)) and 0 <= int(hour) <= 23:
+            item["hour"] = int(hour)
+        if isinstance(days, (int, float)) and int(days) > 0:
+            item["window_days"] = int(days)
+        if item:
+            out[r.data_type] = item
+    return out
+
+
+def get_schedule_tier_map(db: Session) -> dict[str, str]:
+    """返回 data_type → schedule_tier("high" | "low" | "off") 映射(#97)。
+
+    用途: 供 `GET /fetch/data-sources` 给前端做「高频档 / 低频档」分组展示
+          —— 即 A-20260907-001(LOCKED) §四「接口契约」预留的 `schedule_tier`。
+
+    ⚠️ 判据**唯一真源仍是 list_scheduled_bms_sources()**, 本函数只做"集合 → 标签"的
+       映射, 绝不在此重新判断档位(否则前端展示会与调度器实际跑的源漂移)。
+
+    - "high": 纳入定时且在高频集合(白天节拍 + 5:00 补跑 + 8:00 全量兜底)
+    - "low" : 纳入定时但在低频集合(每天 LOW_FREQ_HOUR 一次, 跑前一天整天)
+    - 未出现在本映射的 key → 调用方按 "off" 兜底
+      (含 default_sync=false / enabled=false, 以及派生源 device_tag ——
+       它不是独立抓取源, 被 list_scheduled_bms_sources 显式剔除, 归入 off 合理)
+    """
+    sched = list_scheduled_bms_sources(db)
+    tier: dict[str, str] = {}
+    for dt in sched.get("high") or []:
+        tier[dt] = "high"
+    for dt in sched.get("low") or []:
+        tier[dt] = "low"
+    return tier
 
 
 def list_sync_source_configs(db: Session) -> list[dict]:
@@ -366,6 +533,12 @@ def list_sync_source_configs(db: Session) -> list[dict]:
                 "username": row.username,  # 加密原文,前端判断是否已配置(空=未改过)
                 "password": row.password,  # 同上
                 "has_credentials": bool(row.username and row.password),
+                # ── 2026-09-07: 凭证来源标记(供前端提示"单源独立 vs 继承组") ──
+                # 注意: has_credentials 是"密文原文是否非空"; credential_source 才是
+                # "解密后实际生效来源"。脏密文(row.username 非空但解密失败)时 has_credentials=True
+                # 但 credential_source 可能是 group(回退组凭证)——前端应以此为准提示用户清理。
+                "credential_source": _row_effective_source(db, row),
+                "own_cred_differs_group": _own_cred_differs_group(db, row),
                 "default_sync": row.default_sync,
                 "enabled": row.enabled,
                 "sort_order": row.sort_order,
@@ -420,11 +593,23 @@ def update_sync_source_config(db: Session, data_type: str, payload: dict) -> dic
         row.default_sync = bool(payload["default_sync"])
     if "enabled" in payload:
         row.enabled = bool(payload["enabled"])
-    # 凭证:仅当显式传非空字符串时更新(前端清空表示不改)
-    if payload.get("username"):
-        row.username = encrypt_secret(payload["username"])
-    if payload.get("password"):
-        row.password = encrypt_secret(payload["password"])
+    # ── 凭证字段 ──
+    # 语义(2026-09-07 修订, 修复"UI 清空凭证无效"治理缺口 #28):
+    #   - payload 中**不含** username/password key  → 不改(兼容旧调用: 只改其它字段)
+    #   - key 存在且值为**非空字符串**            → 覆盖为新凭证(加密入库)
+    #   - key 存在且值为 None/空串                 → **显式清空**(置 NULL, 回退继承组凭证)
+    # 背景: 此前"空串=不改"导致前端提示「清空账号密码以继承组凭证」实际无效——
+    #       用户无法通过 UI 清除误填的单源凭证(device_combo 误填 tanzk 无法回退组)。
+    if "username" in payload:
+        if payload["username"]:
+            row.username = encrypt_secret(payload["username"])
+        else:
+            row.username = None  # 显式清空 → 运行时继承组凭证
+    if "password" in payload:
+        if payload["password"]:
+            row.password = encrypt_secret(payload["password"])
+        else:
+            row.password = None  # 显式清空 → 运行时继承组凭证
 
     # ── options 合并:顶层特殊 key (fetch_mode/captcha_type) + options.patch + 其他未知顶层 key ──
     _VALID_FETCH_MODES = {"openapi", "playwright", "dual", "http"}
@@ -514,7 +699,9 @@ def update_sync_source_config(db: Session, data_type: str, payload: dict) -> dic
 
     db.commit()
     db.refresh(row)
-    return _row_to_config(row)
+    # ⚠️ 2026-09-05 修复: _row_to_config 需 db(用于 resolve_credentials 组凭证回退),
+    #   原漏传 db 导致 update_sync_source_config 一调用即 TypeError
+    return _row_to_config(db, row)
 
 
 # ---------- 兼容别名 (旧代码引用) ----------

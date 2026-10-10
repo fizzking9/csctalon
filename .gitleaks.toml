@@ -20,6 +20,16 @@ paths = [
     '''^\.gitleaks\.toml$''',
     '''package-lock\.json$''',
     '''yarn\.lock$''',
+    # CI 工作流: 仅 test.yml 含 postgres service 测试口令(非业务凭证, 与 config.py
+    # 默认一致), 只用于 CI 隔离库, 生产走 .env 注入; 属测试基础设施豁免, 不违反 OPS-11。
+    # #211 收窄: 不再用 .*\.yml 整体放行整个 workflows 目录 —— 其余 workflow 及未来
+    # 新增工作流一律纳入扫描, 防凭证借 CI 文件绕过。
+    '''^\.gitea/workflows/test\.yml$''',
+    # #211 收窄: 不再整体放行 backend/tests(原放行会让真实密钥借测试文件绕过**所有**规则)。
+    # 测试夹具天然高发的「假手机号 / 假强密码串」改在对应**规则级** allowlist 精确豁免
+    # (见文末 hardcoded-phone-number / hardcoded-strong-password 两条规则);
+    # 而 scrm-* / shanmao-* 业务凭证规则与 gitleaks 内置密钥规则(AKIA/openai/jwt/
+    # generic-api-key/private-key 等)对 backend/tests 仍全量生效。
 ]
 # 占位符/示例值不报警
 # 注意: admin123/csctalon123 已从全局 allowlist 移除(2026-08-20 审计 OPS-11):
@@ -71,6 +81,12 @@ regexes = [
     '''REPLACE_''',
     '''\$\{2:?''',
 ]
+# #211: 测试夹具的默认假密码/密文样例(如 pwd="P@ssw0rd123"、
+# "unit-test-...-secret"、"sk-...-never-leak")是本条启发式规则的高假阳性来源,
+# 故仅此一条规则对 tests 豁免; 真实密钥形态仍由 gitleaks 内置规则在 tests 中扫描。
+paths = [
+    '''^backend/tests/.*\.py$''',
+]
 tags = ["password", "hardcoded"]
 
 # 规则3: 硬编码管理员手机号(11位连续数字,出现在赋值/字典字面量中)
@@ -79,6 +95,13 @@ id = "hardcoded-phone-number"
 description = "疑似硬编码手机号(11位 1开头)"
 regex = '''["']?(1[3-9]\d{9})["']?\s*[,\)#]'''
 tags = ["phone", "pii"]
+# #211: 测试夹具大量构造 11 位手机号(连续假号 13700137xxx、号码分割逻辑样例等),
+# 是本条 PII 启发式规则的高假阳性来源, 仅此规则对 tests 豁免; 带账号登录语义的
+# SCRM 手机号仍由 scrm-baiyin-credentials 规则(对 tests 生效)兜底, 不会漏。
+[rules.allowlist]
+paths = [
+    '''^backend/tests/.*\.py$''',
+]
 
 # 规则4: 杉猫(BMS)平台凭证(2026-08-20 审计 C-1 新增)
 # 覆盖两种形态: SHANMAO_PASS = "值" 直接赋值, 与 os.environ.get("SHANMAO_PASS", "值") 回退默认值

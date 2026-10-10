@@ -23,7 +23,7 @@
             </div>
           </div>
 
-          <el-table :data="items" v-loading="loading" border stripe>
+          <el-table v-loading="loading" :data="items" border stripe>
             <el-table-column label="类别" width="110">
               <template #default="{ row }">
                 <el-tag :type="catType(row.category)" size="small" effect="plain">{{ row.category }}</el-tag>
@@ -58,7 +58,7 @@
             <span class="page-sub">站内通知与提醒</span>
             <el-button v-if="unread" link type="primary" @click="handleMarkAll">全部已读</el-button>
           </div>
-          <el-table :data="notifications" v-loading="notifLoading" border stripe>
+          <el-table v-loading="notifLoading" :data="notifications" border stripe>
             <el-table-column label="" width="60" align="center">
               <template #default="{ row }">
                 <el-badge is-dot :hidden="row.is_read" />
@@ -78,16 +78,140 @@
           <el-empty v-if="!notifLoading && !notifications.length" description="暂无通知" />
         </el-card>
       </el-tab-pane>
+
+      <!-- #116 AI 报告历史: 仅本人可见, 永久保留, 列表+详情抽屉 -->
+      <el-tab-pane label="AI 报告历史" name="ai_reports">
+        <el-card>
+          <div v-if="aiSummary" class="summary-row mb-16">
+            <div class="summary-chip">
+              <span class="summary-label">总报告</span>
+              <span class="summary-value">{{ aiSummary.total }}</span>
+            </div>
+            <div class="summary-chip">
+              <span class="summary-label">近 30 天</span>
+              <span class="summary-value">{{ aiSummary.last_30d }}</span>
+            </div>
+            <div class="summary-chip">
+              <span class="summary-label">累计 tokens</span>
+              <span class="summary-value">{{ aiSummary.total_tokens_sum }}</span>
+            </div>
+          </div>
+
+          <div class="flex-between mb-16" style="flex-wrap: wrap; gap: 8px">
+            <div class="flex" style="gap: 8px; flex-wrap: wrap">
+              <el-date-picker
+                v-model="aiFilter.dateRange"
+                type="daterange"
+                size="small"
+                value-format="YYYY-MM-DD"
+                start-placeholder="起"
+                end-placeholder="止"
+                :disabled-date="disableFuture"
+                style="width: 230px"
+                @change="loadAiReports"
+              />
+              <el-select v-model="aiFilter.period" size="small" placeholder="周期" clearable style="width: 110px" @change="loadAiReports">
+                <el-option label="当日" value="daily" />
+                <el-option label="本周" value="weekly" />
+                <el-option label="本月" value="monthly" />
+                <el-option label="区间" value="range" />
+              </el-select>
+            </div>
+            <el-button :icon="Refresh" size="small" @click="loadAiReports">刷新</el-button>
+          </div>
+
+          <el-table v-loading="aiLoading" :data="aiReports" border stripe>
+            <el-table-column label="时间" width="160">
+              <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+            </el-table-column>
+            <el-table-column label="窗口" width="160">
+              <template #default="{ row }">
+                <el-tag size="small" effect="plain">{{ aiPeriodLabel(row.period) }}</el-tag>
+                <span v-if="row.window_label" style="margin-left: 4px; color: #6b7280">{{ row.window_label }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="question" label="问句" show-overflow-tooltip />
+            <!-- #147 命中粒度: 区分「命中·全量/命中·局部/未命中·实时/规则秒回」,
+                 让历史一眼看出"这条报告是怎么来的"(整篇预生成/摘取段落/实时生成)。
+                 存量 NULL(未标记)降级显示 '-' 。 -->
+            <el-table-column label="命中" width="120">
+              <template #default="{ row }">
+                <el-tag v-if="row.hit_mode" :type="hitModeType(row.hit_mode)" size="small" effect="light">
+                  {{ hitModeLabel(row.hit_mode) }}
+                </el-tag>
+                <span v-else style="color: #c0c4cc">-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="耗时" width="100">
+              <template #default="{ row }">{{ row.total_ms ? (row.total_ms / 1000).toFixed(1) + 's' : '-' }}</template>
+            </el-table-column>
+            <el-table-column label="tokens" width="100">
+              <template #default="{ row }">
+                <span v-if="row.total_tokens">入{{ row.prompt_tokens }} / 出{{ row.completion_tokens }} / 总{{ row.total_tokens }}</span>
+                <span v-else style="color: #c0c4cc">-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="模型" width="180">
+              <template #default="{ row }">
+                <span style="font-size: 12px; color: #6b7280">{{ row.llm_model || '-' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="90" align="center">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openAiReport(row)">查看</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!aiLoading && !aiReports.length" description="暂无 AI 报告(在 AI 助手页发问后, 报告会自动保留到此)" />
+
+          <div v-if="aiPagination.total > aiPagination.page_size" class="flex" style="justify-content: end; margin-top: 12px">
+            <el-pagination
+              v-model:current-page="aiPagination.page"
+              :page-size="aiPagination.page_size"
+              :total="aiPagination.total"
+              layout="prev, pager, next, total"
+              @current-change="loadAiReports"
+            />
+          </div>
+        </el-card>
+      </el-tab-pane>
     </el-tabs>
+
+    <!-- #116 AI 报告详情抽屉 -->
+    <el-drawer
+      v-model="aiDetail.visible"
+      direction="rtl"
+      :size="isMobile ? '92%' : '720px'"
+      class="ai-report-detail-drawer"
+      destroy-on-close
+    >
+      <template #header>
+        <div>
+          <div class="page-title" style="margin: 0; font-size: 16px">{{ aiDetail.question || 'AI 报告详情' }}</div>
+          <div class="page-sub" style="margin-top: 4px" v-if="aiDetail.created_at">
+            {{ formatTime(aiDetail.created_at) }}
+            <span v-if="aiDetail.window_label" style="margin-left: 8px">· {{ aiDetail.window_label }}</span>
+            <span v-if="aiDetail.total_ms" style="margin-left: 8px">· ⏱ {{ (aiDetail.total_ms / 1000).toFixed(1) }}s</span>
+            <span v-if="aiDetail.total_tokens" style="margin-left: 8px">· 📊 总{{ aiDetail.total_tokens }} tokens</span>
+          </div>
+        </div>
+      </template>
+      <div v-loading="aiDetail.loading">
+        <div v-if="aiDetail.answer_md" class="markdown-body" v-html="renderMarkdown(aiDetail.answer_md)"></div>
+        <el-empty v-else-if="!aiDetail.loading" description="报告内容为空" />
+      </div>
+    </el-drawer>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Bell, Refresh } from '@element-plus/icons-vue'
 import { getAgenda, listNotifications, unreadCount, markRead, markAllRead } from '@/api/agenda'
+import { aiReports as aiReportsApi, aiReportsSummary, aiReportDetail } from '@/api/aiAssistant'
+import { renderMarkdown } from '@/utils/sanitize'
 import dayjs from 'dayjs'
 
 const router = useRouter()
@@ -97,6 +221,110 @@ const notifications = ref([])
 const unread = ref(0)
 const loading = ref(false)
 const notifLoading = ref(false)
+
+// ───────────────────────────────────────────────────────────────
+// #116 AI 报告历史: 仅本人可见, 永久保留, 列表+详情抽屉
+//   AI 助手页保持现状(即时问答); 我的待办页加完整历史复查入口。
+// ───────────────────────────────────────────────────────────────
+const aiSummary = ref(null)
+const aiFilter = ref({ dateRange: null, period: null })
+const aiReports = ref([])
+const aiLoading = ref(false)
+const aiPagination = ref({ page: 1, page_size: 20, total: 0 })
+const aiDetail = ref({
+  visible: false,
+  loading: false,
+  question: '',
+  created_at: null,
+  window_label: '',
+  total_ms: null,
+  total_tokens: null,
+  answer_md: '',
+})
+
+// 移动端响应式(抽屉尺寸)
+const isMobile = ref(false)
+let _mq = null
+function _onMediaChange(e) { isMobile.value = e.matches }
+
+const aiPeriodLabel = (p) => ({
+  daily: '当日', weekly: '本周', monthly: '本月', range: '区间', auto: '自动',
+}[p] || p || '-')
+
+// #147 命中粒度标签文案 + 颜色(full=全量/绿, section=局部/橙, live=实时/灰, rule=规则/蓝)
+const hitModeLabel = (m) => ({
+  full: '命中·全量', section: '命中·局部', live: '未命中·实时', rule: '规则秒回',
+}[m] || m || '-')
+const hitModeType = (m) => ({
+  full: 'success', section: 'warning', live: 'info', rule: 'primary',
+}[m] || 'info')
+
+// 禁选未来日期(数据时间字段使用规范: AI 报告只看历史)
+const disableFuture = (date) => date && date.valueOf() > Date.now()
+
+async function loadAiReports() {
+  aiLoading.value = true
+  try {
+    const params = {
+      page: aiPagination.value.page,
+      page_size: aiPagination.value.page_size,
+    }
+    if (aiFilter.value.dateRange?.length === 2) {
+      params.start = aiFilter.value.dateRange[0]
+      params.end = aiFilter.value.dateRange[1]
+    }
+    if (aiFilter.value.period) params.period = aiFilter.value.period
+    const [listRes, sumRes] = await Promise.all([
+      aiReportsApi(params),
+      aiReportsSummary(),
+    ])
+    aiReports.value = listRes.data.items || []
+    aiPagination.value.total = listRes.data.total || 0
+    aiSummary.value = sumRes.data || null
+  } catch (e) {
+    ElMessage.error('加载 AI 报告历史失败')
+  } finally {
+    aiLoading.value = false
+  }
+}
+
+async function openAiReport(row) {
+  aiDetail.value = {
+    visible: true,
+    loading: true,
+    question: row.question || '',
+    created_at: row.created_at || null,
+    window_label: row.window_label || '',
+    total_ms: row.total_ms ?? null,
+    total_tokens: row.total_tokens ?? null,
+    answer_md: '',
+  }
+  try {
+    const res = await aiReportDetail(row.id)
+    const d = res.data
+    if (d) {
+      aiDetail.value.question = d.question ?? aiDetail.value.question
+      aiDetail.value.created_at = d.created_at ?? aiDetail.value.created_at
+      aiDetail.value.window_label = d.window_label ?? aiDetail.value.window_label
+      aiDetail.value.total_ms = d.total_ms ?? aiDetail.value.total_ms
+      aiDetail.value.total_tokens = d.total_tokens ?? aiDetail.value.total_tokens
+      aiDetail.value.answer_md = d.answer_md || ''
+    } else {
+      ElMessage.error('报告内容为空')
+    }
+  } catch (e) {
+    ElMessage.error('加载报告详情失败')
+  } finally {
+    aiDetail.value.loading = false
+  }
+}
+
+// 切换到 AI 报告历史 tab 时懒加载(避免无谓请求)
+watch(tab, (v) => {
+  if (v === 'ai_reports' && !aiReports.value.length && !aiLoading.value) {
+    loadAiReports()
+  }
+})
 
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-')
 const catType = (c) => ({ 待办事项: 'warning', 异常事故: 'danger', 管理措施: 'primary', 待读政策: 'info', 待处理工单: 'success' }[c] || 'info')
@@ -172,9 +400,16 @@ async function handleMarkAll() {
 function loadAll() {
   loadAgenda()
   loadNotifications()
+  if (tab.value === 'ai_reports') loadAiReports()
 }
 
-onMounted(loadAll)
+onMounted(() => {
+  // 移动端媒体监听(抽屉尺寸自适应)
+  _mq = window.matchMedia('(max-width: 768px)')
+  isMobile.value = _mq.matches
+  _mq.addEventListener('change', _onMediaChange)
+  loadAll()
+})
 </script>
 
 <style scoped>
@@ -221,5 +456,60 @@ onMounted(loadAll)
   font-size: 22px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+}
+/* #116 AI 报告详情抽屉: Markdown 渲染样式(与 AI 助手页一致) */
+.markdown-body {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #303133;
+  word-break: break-word;
+}
+.markdown-body :deep(h1),
+.markdown-body :deep(h2),
+.markdown-body :deep(h3),
+.markdown-body :deep(h4) {
+  margin: 16px 0 8px;
+  font-weight: 700;
+}
+.markdown-body :deep(h1) { font-size: 18px; }
+.markdown-body :deep(h2) { font-size: 16px; }
+.markdown-body :deep(h3) { font-size: 15px; }
+.markdown-body :deep(h4) { font-size: 14px; }
+.markdown-body :deep(p) { margin: 8px 0; }
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) { padding-left: 24px; margin: 8px 0; }
+.markdown-body :deep(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+}
+.markdown-body :deep(th),
+.markdown-body :deep(td) {
+  border: 1px solid #dcdfe6;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.markdown-body :deep(th) {
+  background: #f5f7fa;
+  font-weight: 600;
+}
+.markdown-body :deep(code) {
+  background: #f5f7fa;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-family: 'SF Mono', Consolas, monospace;
+  font-size: 13px;
+}
+.markdown-body :deep(pre) {
+  background: #f5f7fa;
+  padding: 10px;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.markdown-body :deep(blockquote) {
+  border-left: 4px solid #dcdfe6;
+  padding-left: 12px;
+  color: #606266;
+  margin: 8px 0;
 }
 </style>

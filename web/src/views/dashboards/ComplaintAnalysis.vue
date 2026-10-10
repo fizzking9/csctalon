@@ -1,29 +1,40 @@
+<!--
+  ┌──────────────────────────── 设计说明（Design Rationale） ────────────────────────────┐
+  │ 目的：客服主管 / 运营经理在**晨会前 5 分钟**判断「投诉是否失控、该先处理谁」。         │
+  │       使用频率：日看概览、周看趋势、月做复盘。                                        │
+  │ 逻辑：① 总量是**后果**指标，单看会骗人（客户放弃/渠道堵塞都会让量下降）→ 故概览        │
+  │         除总量外同时给「登记 vs 处理」对称水位与「涉诉金额」，把量翻译成代价；          │
+  │       ② 可控指标前置：升级率（内部/商户号投诉后升级到外部）是唯一 100% 可控的指标，     │
+  │         「内部没处理好」的直接证据；                                                   │
+  │       ③ 结论条先行：先告诉使用者"该干什么"，再看图验证；                               │
+  │       ④ 时间控件全页唯一（改造前 5 个图表各有粒度开关 → 同屏可能 3 种粒度）。            │
+  │ 口径：三源 = complaint_scope 分桶（内部/商户号/外部）；**(外)卡商完全独立，不入总量**   │
+  │       （用户 2026-09-11 #53 决策）。时间过滤「登记 OR 完成」与 /summary 对齐。          │
+  │       积压明细筛选含设备维度（设备类型/套餐/商户号/激活时间段，走 devices 表，#273）。   │
+  │       详见 docs/standards/投诉渠道口径与对账说明.md ·                                     │
+  │       docs/standards/数据时间字段使用规范.md                                                │
+  │ 取舍：❌ 不堆图 —— 概览的旧 12+ 图表已下移到渠道页；每个图表必须**指向一个动作**。        │
+  │       ❌ 不做日粒度报警（日波动噪声大，按周/月对齐）。                                  │
+  │       ❌ 不做比率指标（数据完整度不足，接口预留 ratios=null，见 #68）。                  │
+  │       ❌ 不做措施时间轴（measures 数据未采集完整，见 #69）。                            │
+  │ 工单：#67 · 设计：docs/arch/_pending/A-20260911-001-投诉分析整体重构.md                │
+  └────────────────────────────────────────────────────────────────────────────────────┘
+-->
 <template>
   <div class="page-container">
     <div class="flex-between mb-16">
       <div>
         <div class="page-title" style="margin: 0">投诉分析</div>
-        <div class="page-sub">三源统一统计 · 管理摘要 · 外部投诉重点 · 商户号投诉 · 受理分析</div>
+        <div class="page-sub">三源统一口径 · 决策概览 · 渠道明细 · 执行跟踪</div>
       </div>
-      <div class="filter-bar">
-        <el-radio-group v-model="rangeMode" size="small">
-          <el-radio-button label="7">近7天</el-radio-button>
-          <el-radio-button label="30">近30天</el-radio-button>
-          <el-radio-button label="90">近90天</el-radio-button>
-          <el-radio-button label="custom">自定义</el-radio-button>
-        </el-radio-group>
-        <el-date-picker
-          v-if="rangeMode === 'custom'"
-          v-model="customRange"
-          type="daterange"
-          size="small"
-          value-format="YYYY-MM-DD"
-          start-placeholder="开始"
-          end-placeholder="结束"
-          style="width: 240px"
-        />
-        <el-button type="primary" :icon="Search" :loading="loading" @click="loadData">分析</el-button>
-      </div>
+      <!-- 统一时间条(#67 P1): 全页唯一时间控件，替换原 4 按钮 + 5 个图表粒度开关 -->
+      <ComplaintTimeBar
+        v-model:preset="rangePreset"
+        v-model:grain="timeGrain"
+        v-model:compare="compareMode"
+        v-model:custom-range="customRange"
+        @update:range="onRangeChange"
+      />
     </div>
 
     <!-- 未加载时的提示 -->
@@ -31,121 +42,157 @@
       <el-empty :image-size="80" description="">
         <template #description>
           <div class="empty-tip">
-            <div class="empty-main">选择时间范围后点击 <el-button size="small" type="primary" :icon="Search">分析</el-button> 加载数据</div>
-            <div class="empty-sub">按需加载 · 避免进入页面即产生大量请求</div>
+            <div class="empty-main">正在加载数据…</div>
+            <div class="empty-sub">按需加载 · 概览由单一接口一次性返回</div>
           </div>
         </template>
       </el-empty>
     </section>
 
     <template v-if="loaded && data">
-      <!-- ============ TAB: 决策概览 ============ -->
-      <section v-if="activeTab === 'overview'" class="block-card">
-        <div class="block-head">
-          <span class="block-title">管理摘要</span>
-          <span class="block-hint">自动结论 · 随筛选区间更新</span>
-        </div>
-        <el-row :gutter="12" class="mb-12">
-          <el-col :xs="12" :sm="8" :md="4">
-            <div class="kpi-card" style="background:#eff6ff">
-              <div class="kpi-label" style="color:#2563eb">投诉总量</div>
-              <div class="kpi-value">{{ formatNum(s.summary.total) }}</div>
-              <div class="kpi-sub">内{{ s.summary.internal_total }} · 商{{ s.summary.merchant_total }} · 外{{ s.summary.external_total }}</div>
-            </div>
-          </el-col>
-          <el-col :xs="12" :sm="8" :md="4">
-            <div class="kpi-card kpi-clickable" style="background:#fef2f2" @click="activeTab = 'backlog'">
-              <div class="kpi-label" style="color:#dc2626">积压未处理</div>
-              <div class="kpi-value">{{ formatNum(b.total) }}</div>
-              <div class="kpi-sub">内{{ bySourceCount('内部投诉') }} · 商{{ bySourceCount('商户号投诉') }} · 外{{ bySourceCount('外部投诉') }} · 点击下钻</div>
-            </div>
-          </el-col>
-          <el-col :xs="12" :sm="8" :md="4">
-            <div class="kpi-card" style="background:#f0fdf4">
-              <div class="kpi-label" style="color:#16a34a">完成率</div>
-              <div class="kpi-value">{{ (s.summary.completion_rate * 100).toFixed(1) }}<span class="unit">%</span></div>
-              <div class="kpi-sub">已完成 {{ formatNum(s.summary.done_total) }} 条</div>
-            </div>
-          </el-col>
-          <el-col :xs="12" :sm="8" :md="4">
-            <div class="kpi-card" style="background:#fff7ed">
-              <div class="kpi-label" style="color:#ea580c">平均处理时长</div>
-              <div class="kpi-value">{{ s.summary.avg_handle_hours > 24 ? (s.summary.avg_handle_hours / 24).toFixed(1) + '天' : s.summary.avg_handle_hours + 'h' }}</div>
-              <div class="kpi-sub">有真实完成时间的工单</div>
-            </div>
-          </el-col>
-          <el-col :xs="12" :sm="8" :md="4">
-            <div class="kpi-card" style="background:#f5f3ff">
-              <div class="kpi-label" style="color:#7c3aed">外部投诉</div>
-              <div class="kpi-value">{{ formatNum(s.external_total) }}</div>
-              <div class="kpi-sub">315平台 · 关联{{ formatNum(s.external_matched) }} · 未关联{{ formatNum(s.external_unmatched) }}</div>
-            </div>
-          </el-col>
-          <el-col :xs="12" :sm="8" :md="4">
-            <div class="kpi-card" style="background:#fefce8">
-              <div class="kpi-label" style="color:#ca8a04">商户号投诉</div>
-              <div class="kpi-value">{{ formatNum(s.summary.merchant_total) }}</div>
-              <div class="kpi-sub">{{ merchantEntitySummary }}</div>
+      <!-- ============ TAB: 决策概览(2026-09-11 #67 P1 瘦身重排) ============
+           ★ 决策概览只回答三件事: ①失控了吗 ②为什么 ③该先处理谁
+             旧版在此塞了 12+ 个图表(需下拉四屏)，分析图表已下移到渠道页。
+             每个区块都必须指向一个动作，否则不应出现在概览。
+           ★ 命中卡商独立口径(#53): 总量堆积只含内/商/外，(外)卡商单列一块。 -->
+      <section v-if="activeTab === 'overview'" v-loading="overviewLoading" class="block-card">
+        <!-- ① 结论条: 先告诉使用者"该干什么"，再看图验证 -->
+        <ComplaintConclusionBar :items="conclusions" @drill="onConclusionDrill" />
+
+        <!-- ② KPI 5 卡(带环比) —— 概览不堆卡；每张的口径由后端 kpi_meta 提供 -->
+        <el-row :gutter="12" class="mb-16" style="margin-top:12px">
+          <el-col v-for="k in (overviewData?.kpi || [])" :key="k.key" :xs="12" :sm="8" :md="4.8" style="flex:1 0 18%">
+            <div class="kpi-card" :class="{ 'kpi-clickable': k.key === 'backlog' }"
+                 @click="k.key === 'backlog' ? (topTab = 'execute') : null">
+              <div class="kpi-label" style="color:#374151">
+                {{ k.label }}
+                <el-tooltip v-if="overviewData?.kpi_meta?.[k.key]" effect="dark" placement="top"
+                            :content="overviewData.kpi_meta[k.key]">
+                  <el-icon style="margin-left:3px;color:#b0b4bb;font-size:12px;vertical-align:-1px"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </div>
+              <div class="kpi-value">{{ fmtKpi(k) }}<span v-if="k.unit === '条'" class="unit">条</span><span v-else-if="k.unit === '%'" class="unit">%</span></div>
+              <div class="kpi-sub">
+                <el-tag v-if="k.delta_pct != null || k.delta_pp != null" size="small" effect="plain" :type="kpiDeltaType(k)">
+                  {{ kpiDeltaText(k) }}
+                </el-tag>
+                <span v-else class="dim">—</span>
+                <span style="margin-left:6px" class="dim">环比</span>
+                <span v-if="k.value != null && k.key === 'total'" style="margin-left:6px">
+                  · 内/商/外 三源
+                </span>
+              </div>
             </div>
           </el-col>
         </el-row>
 
-        <!-- 积压快照(可下钻: 三源 + 龄期 + 明细) -->
+        <!-- ③ 四个趋势块 + 积压明细(概览的全部图表，一屏看完) -->
+        <el-row :gutter="12" class="mb-16">
+          <!-- ① 总量(分项堆积)趋势 -->
+          <el-col :xs="24" :md="12">
+            <div class="chart-card">
+              <div class="chart-title">
+                总量趋势（分项堆积）
+                <span class="dim-text"> · 内/商/外 三源堆叠；(外)卡商独立，不计入</span>
+              </div>
+              <BaseChart v-if="ovStackOption" :option="ovStackOption" height="240px" />
+              <el-empty v-else description="暂无数据" :image-size="36" />
+            </div>
+          </el-col>
+          <!-- ② 登记 vs 处理(对称水位) -->
+          <el-col :xs="24" :md="12">
+            <div class="chart-card">
+              <div class="chart-title">
+                登记 vs 处理
+                <span class="dim-text"> · 出水⊂进水，累计净水位 = 当前积压</span>
+              </div>
+              <BaseChart v-if="ovWaterOption" :option="ovWaterOption" height="240px" />
+              <el-empty v-else description="暂无数据" :image-size="36" />
+            </div>
+          </el-col>
+        </el-row>
+
+        <el-row :gutter="12" class="mb-16">
+          <!-- ③ 涉诉金额趋势 -->
+          <el-col :xs="24" :md="12">
+            <div class="chart-card">
+              <div class="chart-title">
+                涉诉金额趋势
+                <span class="dim-text"> · 投诉涉及 SN 关联的线上退款（把量翻译成代价）</span>
+              </div>
+              <BaseChart v-if="ovRefundOption" :option="ovRefundOption" height="230px" />
+              <el-empty v-else description="窗口内无涉诉退款" :image-size="36" />
+            </div>
+          </el-col>
+          <!-- (外)卡商独立趋势 —— #53 不并入总量 -->
+          <el-col :xs="24" :md="12">
+            <div class="chart-card">
+              <div class="chart-title">
+                (外)卡商登记趋势
+                <span class="dim-text"> · 独立统计体系，不纳入投诉总量</span>
+              </div>
+              <BaseChart v-if="ovCardTrendOption" :option="ovCardTrendOption" height="230px" />
+              <el-empty v-else description="窗口内无卡商投诉" :image-size="36" />
+            </div>
+          </el-col>
+        </el-row>
+
+        <!-- ④ 总积压 + 明细 -->
         <div class="block-head" style="margin-top:4px">
-          <span class="block-title" style="font-size:14px">积压快照</span>
-          <span class="block-hint">窗口内登记的未完成(默认近30天, 跟随时间筛选) · 三源拆分 · 各来源积压龄期 · 最近积压明细</span>
+          <span class="block-title" style="font-size:14px">总积压</span>
+          <span class="block-hint">截至窗口末仍未完成 · 超期阈值 &gt;7 天 · 不含(外)卡商</span>
           <div style="flex:1" />
-          <el-button size="small" type="primary" plain @click="activeTab = 'backlog'">查看全部积压 →</el-button>
+          <el-button size="small" type="primary" plain @click="topTab = 'execute'">去处理 →</el-button>
         </div>
         <el-row :gutter="12" class="mb-16">
           <el-col :xs="24" :md="7">
             <div class="chart-card">
-              <div class="chart-title">积压三源 + 关键指标</div>
               <div class="snapshot-kpi-row">
                 <div class="snapshot-kpi" style="color:#dc2626">
-                  <div class="snapshot-kpi-v">{{ formatNum(b.total) }}</div>
+                  <div class="snapshot-kpi-v">{{ formatNum(overviewData?.backlog?.total) }}</div>
                   <div class="snapshot-kpi-l">积压总量</div>
                 </div>
                 <div class="snapshot-kpi" style="color:#ea580c">
-                  <div class="snapshot-kpi-v">{{ formatNum(b.overdue) }}</div>
+                  <div class="snapshot-kpi-v">{{ formatNum(overviewData?.backlog?.overdue) }}</div>
                   <div class="snapshot-kpi-l">超期(&gt;7天)</div>
                 </div>
                 <div class="snapshot-kpi" style="color:#7c3aed">
-                  <div class="snapshot-kpi-v">{{ formatNum(b.unassigned) }}</div>
+                  <div class="snapshot-kpi-v">{{ formatNum(overviewData?.backlog?.unassigned) }}</div>
                   <div class="snapshot-kpi-l">待分派</div>
                 </div>
                 <div class="snapshot-kpi" style="color:#2563eb">
-                  <div class="snapshot-kpi-v">{{ b.max_aging != null ? b.max_aging : '—' }}</div>
+                  <div class="snapshot-kpi-v">{{ overviewData?.backlog?.max_aging ?? '—' }}</div>
                   <div class="snapshot-kpi-l">最旧(天)</div>
                 </div>
               </div>
               <div class="snapshot-source-bars">
-                <div v-for="src in ['内部投诉', '商户号投诉', '外部投诉']" :key="src" class="snapshot-source-row">
-                  <span class="snapshot-source-name">{{ src }}</span>
+                <div v-for="src in (overviewData?.backlog?.by_source || [])" :key="src.name" class="snapshot-source-row">
+                  <span class="snapshot-source-name">{{ src.name }}</span>
                   <div class="snapshot-source-track">
-                    <div class="snapshot-source-fill" :style="{ width: sourceRatioPct(src), background: sourceBarColor(src) }" />
+                    <div class="snapshot-source-fill"
+                         :style="{ width: (overviewData.backlog.total ? Math.round(src.count / overviewData.backlog.total * 100) : 0) + '%', background: sourceBarColor(src.name) }" />
                   </div>
-                  <span class="snapshot-source-cnt">{{ formatNum(bySourceCount(src)) }}</span>
+                  <span class="snapshot-source-cnt">{{ formatNum(src.count) }}</span>
                 </div>
               </div>
             </div>
           </el-col>
-          <el-col :xs="24" :md="9">
-            <div class="chart-card">
-              <div class="chart-title">来源×龄期（各来源积压多久）</div>
-              <BaseChart v-if="backlogSourceAgingOption" :option="backlogSourceAgingOption" height="190px" />
-              <el-empty v-else description="暂无数据" :image-size="36" />
-            </div>
-          </el-col>
           <el-col :xs="24" :md="8">
             <div class="chart-card">
-              <div class="chart-title">最近积压 Top5（最旧优先）</div>
+              <div class="chart-title">积压龄期分布（积压多久了）</div>
+              <BaseChart v-if="ovAgingOption" :option="ovAgingOption" height="180px" />
+              <el-empty v-else description="无积压" :image-size="36" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :md="9">
+            <div class="chart-card">
+              <div class="chart-title">最旧积压 Top10（最旧优先）</div>
               <div v-if="backlogSnapshotItems.length" class="snapshot-list">
                 <div v-for="(it, i) in backlogSnapshotItems" :key="i" class="snapshot-row">
                   <span class="snapshot-rank">{{ i + 1 }}</span>
                   <el-tag :type="sourceTagType(it.source)" size="small" effect="plain">{{ it.source }}</el-tag>
                   <span class="snapshot-no">{{ it.ticket_no }}</span>
-                  <el-link v-if="it.device_sn" type="primary" :underline="false" class="snapshot-sn" @click="openDeviceAudit(it.device_sn)">{{ it.device_sn }}</el-link>
+                  <el-link v-if="it.device_sn" type="primary" underline="never" class="snapshot-sn" @click="openDeviceAudit(it.device_sn)">{{ it.device_sn }}</el-link>
                   <el-tag v-if="it.aging_days != null" size="small" :type="it.aging_days >= 8 ? 'danger' : it.aging_days >= 4 ? 'warning' : 'info'">{{ it.aging_days }}天</el-tag>
                 </div>
               </div>
@@ -154,323 +201,204 @@
           </el-col>
         </el-row>
 
-        <!-- 投诉水位(新增投诉/处理投诉/净水位 = 积压增减的流量视角) -->
-        <div class="block-head" style="margin-top:4px">
-          <span class="block-title" style="font-size:14px">投诉水位</span>
-          <span class="block-hint">新增投诉=窗口内按日新增登记 · 处理投诉=窗口内登记且已完成(与新增对称) · 净水位=新增-处理 · 累计净水位最终值=当前积压量(应与上方积压快照一致)</span>
-        </div>
-        <div class="chart-card mb-16">
-          <BaseChart v-if="complaintWaterOption" :option="complaintWaterOption" height="260px" />
-          <el-empty v-else description="暂无水位数据" :image-size="40" />
-        </div>
-
-        <!-- 来源分布饼图 + 趋势堆叠图 -->
-        <el-row :gutter="16" class="mb-16">
-          <el-col :xs="24" :md="8">
-            <div class="chart-card">
-              <div class="chart-title">投诉来源分布</div>
-              <BaseChart v-if="sourcePieOption" :option="sourcePieOption" height="260px" />
-              <el-empty v-else description="暂无数据" :image-size="40" />
-            </div>
-          </el-col>
-          <el-col :xs="24" :md="16">
+        <!-- ══════════════ A5: 投诉登记时段热力（#72） ══════════════
+             设计说明（Design Rationale）
+             目的：**排班决策** —— 让班组长看清"什么时候来投诉最多"，据此安排人手。
+             逻辑：投诉登记量随时段呈明显节律（实测双峰：09–12 时、19–21 时；
+                   02–05 时谷底）。只看总量会漏掉节律 → 高峰期必然积压。
+                   峰谷由后端按 P75/P25 **分位**判定（非固定阈值，自适应业务量级）。
+             口径：按「登记时间」的北京时间小时×星期聚合（排班关心"何时有人来"，
+                   不是"投诉属于哪天"）；不含 (外)卡商（#53 独立体系）。
+                   详见 docs/standards/数据时间字段使用规范.md
+             取舍：❌ 不做"建议排班人数" —— 需要人均处理产能数据（接待+投诉混合），
+                   数据未齐；当前只给"量级分布"这一事实，由班组长自行判断。
+                   ❌ 不做按周/月切换 —— 时段节律是**日周期**，跨周聚合会把节律抹平。
+             工单：#72 · 设计：docs/arch/_pending/A-20260911-001-投诉分析整体重构.md §四点五 -->
+        <el-row v-if="ovHourOption || ovRepeatRows.length" :gutter="12" class="mb-16">
+          <el-col :xs="24" :md="12">
             <div class="chart-card">
               <div class="flex-between">
-                <div class="chart-title">三源趋势<span class="dim-text"> · 内/商/外堆叠</span></div>
-                <el-radio-group v-model="trendStackGrain" size="small">
-                  <el-radio-button label="day">按日</el-radio-button>
-                  <el-radio-button label="week">按周</el-radio-button>
-                  <el-radio-button label="month">按月</el-radio-button>
-                </el-radio-group>
+                <div class="chart-title">
+                  投诉登记时段热力
+                  <span class="dim-text"> · 小时 × 星期（北京时间）· 服务排班</span>
+                </div>
+                <!-- ★ #73: 显式声明范围 —— 与上方 KPI 总量口径不同，必须写明避免误会 -->
+                <el-tag size="small" type="info" effect="plain">仅工单侧 {{ formatNum(overviewData?.hour_heatmap?.total) }} 条</el-tag>
+                <el-popover placement="bottom-end" :width="400" trigger="click">
+                  <template #reference>
+                    <el-icon style="color:#909399;cursor:help;font-size:14px"><QuestionFilled /></el-icon>
+                  </template>
+                  <div class="dr-body">
+                    <div class="dr-title">时段热力 · 设计说明</div>
+                    <div class="dr-sec"><b>给谁用</b><div>班组长 / 客服主管，用于排班与人力调配。</div></div>
+                    <div class="dr-sec"><b>为什么用「登记时间」</b>
+                      <div>排班关心的是"什么时候有人来投诉"（接待压力），而不是"投诉属于哪一天"。</div></div>
+                    <div class="dr-sec"><b>峰谷怎么判</b>
+                      <div>按 P75 / P25 分位（自适应业务量级，而非固定阈值）。<b>高峰</b>=需确保有人值守；<b>谷底</b>=可减配。</div></div>
+                    <div class="dr-sec"><b>我们不做什么</b>
+                      <div>· 不做"建议排班人数"：需人均处理产能数据，当前未齐 —— 只给量级事实，由班组长判断。<br>
+                      · 不做周/月切换：时段节律是日周期，跨周聚合会抹平节律。</div></div>
+                    <div class="dr-sec"><b>口径</b>
+                      <div>北京时间（Asia/Shanghai）· <b>仅工单侧登记</b>（不含 315 补充表 —— 该表只有投诉日期、无投诉时刻）</div></div>
+                    <div class="dr-sec"><b>为什么不含 315</b>
+                      <div>315 补充表的日期字段<b>全为 00:00</b>（无小时），其入库时间是<b>采集批次时刻</b>（06 时集中入库）。
+                        若拿来当「客户几点投诉」，会造出假的凌晨高峰 → <b>排班结论方向性错误</b>。
+                        故本图只覆盖工单侧，并在此显式标注范围。</div></div>
+                  </div>
+                </el-popover>
               </div>
-              <BaseChart v-if="trendStackOption" :option="trendStackOption" height="260px" />
-              <el-empty v-else description="暂无趋势数据" :image-size="40" />
+              <BaseChart v-if="ovHourOption" :option="ovHourOption" height="230px" />
+              <el-empty v-else description="窗口内无登记数据" :image-size="36" />
+              <div v-if="peakHint" class="peak-hint">{{ peakHint }}</div>
             </div>
           </el-col>
-        </el-row>
 
-        <!-- 处理人 Top10 + 时效分布 -->
-        <el-row :gutter="16" class="mb-16">
-          <el-col :xs="24" :md="12">
-            <div class="chart-card">
-              <div class="chart-title">处理人 Top10</div>
-              <BaseChart v-if="handlerBarOption" :option="handlerBarOption" height="260px" />
-              <el-empty v-else description="暂无数据" :image-size="40" />
-            </div>
-          </el-col>
-          <el-col :xs="24" :md="12">
-            <div class="chart-card">
-              <div class="chart-title">处理时效分布</div>
-              <BaseChart v-if="timelinessOption" :option="timelinessOption" height="260px" />
-              <el-empty v-else description="暂无数据" :image-size="40" />
-            </div>
-          </el-col>
-        </el-row>
-      </section>
-
-      <!-- ============ TAB: 外部投诉重点 ============ -->
-      <section v-if="activeTab === 'external'" class="block-card">
-        <div class="block-head">
-          <span class="block-title">外部投诉专项分析</span>
-          <span class="block-hint">按投诉日期统计 · 今日登记见卡片 · 明细表可看登记时间</span>
-        </div>
-
-        <!-- 外部投诉 KPI -->
-        <el-row :gutter="12" class="mb-16">
-          <el-col :xs="12" :sm="6">
-            <div class="kpi-card" style="background:#fef2f2">
-              <div class="kpi-label" style="color:#dc2626">外部投诉总量</div>
-              <div class="kpi-value">{{ formatNum(s.external_total) }}</div>
-              <div class="kpi-sub">按投诉日期 · 覆盖全部平台</div>
-            </div>
-          </el-col>
-          <el-col :xs="12" :sm="6">
-            <div class="kpi-card" style="background:#fefce8">
-              <div class="kpi-label" style="color:#ca8a04">今日登记</div>
-              <div class="kpi-value">{{ formatNum(s.external_today_registered) }}</div>
-              <div class="kpi-sub">今天同步/登记进来的</div>
-            </div>
-          </el-col>
-          <el-col :xs="12" :sm="6">
-            <div class="kpi-card" style="background:#f0fdf4">
-              <div class="kpi-label" style="color:#16a34a">已关联工单</div>
-              <div class="kpi-value">{{ formatNum(s.external_matched) }}</div>
-              <div class="kpi-sub">已落工单跟踪</div>
-            </div>
-          </el-col>
-          <el-col :xs="12" :sm="6">
-            <div class="kpi-card" style="background:#fffbeb">
-              <div class="kpi-label" style="color:#b45309">未关联工单</div>
-              <div class="kpi-value">{{ formatNum(s.external_unmatched) }}</div>
-              <div class="kpi-sub">尚未落工单 · 需跟进 · {{ platformSummary }}</div>
-            </div>
-          </el-col>
-        </el-row>
-
-        <!-- 平台分布 + 问题分类 + 平台趋势 -->
-        <el-row :gutter="16" class="mb-16">
-          <el-col :xs="24" :md="8">
-            <div class="chart-card">
-              <div class="chart-title">外部投诉平台分布</div>
-              <BaseChart v-if="platformPieOption" :option="platformPieOption" height="260px" />
-              <el-empty v-else description="暂无数据" :image-size="40" />
-            </div>
-          </el-col>
-          <el-col :xs="24" :md="8">
-            <div class="chart-card">
-              <div class="chart-title">投诉问题分类</div>
-              <BaseChart v-if="externalCategoryOption" :option="externalCategoryOption" height="260px" />
-              <el-empty v-else description="暂无数据" :image-size="40" />
-            </div>
-          </el-col>
-          <el-col :xs="24" :md="8">
+          <!-- ══════════════ A2: 反复投诉（#72） ══════════════
+               设计说明（Design Rationale）
+               目的：识别**「第一次没解决好」的设备**，比投诉总量更接近真相。
+               逻辑：总量会被一次性事件稀释，反复投诉不会 ——
+                     同一设备多次投诉 = 处理质量问题的直接证据；
+                     其中"又反复、又已升级到外部"的设备是**最高优先级**跟进对象。
+               口径：★★ 计数单位是「投诉事件（SN + 北京日期去重）」，**不是原始记录数**。
+                     实测差异 3 倍（237 台 vs 78 台）—— 同一天多渠道登记属同一笔投诉，
+                     不算反复（#55 口径）。用记录数会把"一天多渠道"误判为反复，方向性错误。
+                     不含 (外)卡商（#53）。
+               取舍：❌ 不做"自动判定是否同一问题" —— 需问题分类语义，当前 remark 质量不足；
+                     ❌ 不做阈值自定义 UI —— 阈值由后端常量统一（避免每人一套口径）。
+               工单：#72 · 设计：docs/arch/_pending/A-20260911-001-投诉分析整体重构.md §四点五 -->
+          <el-col v-if="ovRepeatRows.length" :xs="24" :md="12">
             <div class="chart-card">
               <div class="flex-between">
-                <div class="chart-title">外部投诉趋势<span class="dim-text"> · 按投诉日期</span></div>
-                <el-radio-group v-model="externalTrendGrain" size="small">
-                  <el-radio-button label="day">按日</el-radio-button>
-                  <el-radio-button label="week">按周</el-radio-button>
-                  <el-radio-button label="month">按月</el-radio-button>
-                </el-radio-group>
+                <div class="chart-title">
+                  反复投诉
+                  <span class="dim-text"> · 同一设备 ≥{{ repeatThreshold }} 次投诉事件</span>
+                </div>
+                <!-- ★ #73: 范围声明（同 A5） -->
+                <el-tag size="small" type="info" effect="plain">仅工单侧</el-tag>
+                <el-popover placement="bottom-end" :width="400" trigger="click">
+                  <template #reference>
+                    <el-icon style="color:#909399;cursor:help;font-size:14px"><QuestionFilled /></el-icon>
+                  </template>
+                  <div class="dr-body">
+                    <div class="dr-title">反复投诉 · 设计说明</div>
+                    <div class="dr-sec"><b>给谁用</b><div>客服主管，用于找出"处理没到位"的设备并定向跟进。</div></div>
+                    <div class="dr-sec"><b>为什么要看这个</b>
+                      <div>投诉<b>总量</b>会被一次性事件稀释；<b>反复投诉</b>不会 —— 同一设备多次投诉是"第一次没解决好"的直接证据。</div></div>
+                    <div class="dr-sec"><b>★ 口径（关键）</b>
+                      <div>计数单位是<b>投诉事件</b>（同一设备 + 同一北京日期算 1 次），<b>不是原始记录数</b>。
+                        同一天多渠道登记的同一笔投诉只算 1 次（否则会把"一天多渠道"误判为反复，方向性错误）。</div></div>
+                    <div class="dr-sec"><b>红色「已升级」是什么</b>
+                      <div>该设备既有内部/商户号投诉、又有外部投诉 → 既反复、又已升级，<b>最高优先级</b>。</div></div>
+                    <div class="dr-sec"><b>我们不做什么</b>
+                      <div>· 不自动判定"是否为同一问题"：需问题分类语义，当前 remark 质量不足。<br>
+                      · 不做阈值自定义：阈值由后端统一，避免每人一套口径。</div></div>
+                    <div class="dr-sec"><b>范围（与 KPI 不同）</b>
+                      <div><b>仅工单侧</b>（不含 315 补充表）。因此"事件总数"会小于上方 KPI 总量 —— 这是<b>口径差异</b>，非漏统。</div></div>
+                  </div>
+                </el-popover>
               </div>
-              <BaseChart v-if="externalTrendOption" :option="externalTrendOption" height="260px" />
-              <el-empty v-else description="暂无趋势数据" :image-size="40" />
+              <div class="repeat-summary">
+                <span class="repeat-kpi" style="color:#dc2626">{{ formatNum(ovRepeat.repeat_units) }}</span>
+                <span class="dim">台设备反复投诉（占 {{ ovRepeat.rate ?? '—' }}%）· 贡献 {{ formatNum(ovRepeat.repeat_events) }} 次事件</span>
+                <el-tag v-if="ovEscalatedCount" size="small" type="danger" effect="plain" style="margin-left:6px">
+                  {{ ovEscalatedCount }} 台已升级外部
+                </el-tag>
+              </div>
+              <div class="repeat-list">
+                <div v-for="(it, i) in ovRepeatRows" :key="it.device_sn" class="repeat-row">
+                  <span class="snapshot-rank">{{ i + 1 }}</span>
+                  <el-link type="primary" underline="never" class="snapshot-sn"
+                           @click="openDeviceAudit(it.device_sn)">{{ it.device_sn }}</el-link>
+                  <el-tag size="small" :type="it.events >= 5 ? 'danger' : 'warning'" effect="plain">{{ it.events }} 次</el-tag>
+                  <el-tag v-if="it.escalated" size="small" type="danger">已升级</el-tag>
+                  <span class="dim-text repeat-days">{{ it.first_day }} ~ {{ it.last_day }}</span>
+                </div>
+              </div>
             </div>
           </el-col>
         </el-row>
 
-        <!-- 外部投诉明细表(315表, 完整内容) -->
-        <el-card shadow="never">
-          <template #header>
-            <div class="flex-between">
-              <span style="font-weight:600">外部投诉明细（{{ externalDetail.length }} 条）</span>
-              <el-button size="small" @click="loadExternalDetail">刷新</el-button>
-            </div>
-          </template>
-          <el-table :data="externalDetail" v-loading="extDetailLoading" border stripe size="small" max-height="400">
-            <el-table-column label="投诉日期" width="100" sortable>
-              <template #default="{ row }">{{ formatTime(row.complaint_date) }}</template>
-            </el-table-column>
-            <el-table-column label="登记时间" width="100">
-              <template #default="{ row }">
-                <span v-if="row.created_at" class="dim-text">{{ formatTime(row.created_at) }}</span>
-                <span v-else class="dim">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column prop="platform" label="平台" width="120" show-overflow-tooltip>
-              <template #default="{ row }">
-                <el-tag size="small" effect="plain" type="danger">{{ row.platform || '未标注' }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="complaint_no" label="投诉编号" width="150" show-overflow-tooltip />
-            <el-table-column label="投诉内容" min-width="260" show-overflow-tooltip>
-              <template #default="{ row }">
-                <span class="problem-text">{{ row.problem || '—' }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column prop="complaint_category" label="问题分类" width="110" show-overflow-tooltip />
-            <el-table-column prop="entity" label="被投诉主体" width="140" show-overflow-tooltip>
-              <template #default="{ row }">{{ row.entity || row.company_entity || '—' }}</template>
-            </el-table-column>
-            <el-table-column prop="device_sn" label="设备SN" width="130">
-              <template #default="{ row }">
-                <el-link v-if="row.device_sn" type="primary" :underline="false" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
-                <span v-else class="dim">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="处理/跟进" width="100" show-overflow-tooltip>
-              <template #default="{ row }">
-                <el-link v-if="row.handler" type="primary" :underline="false" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
-                <span v-else class="dim">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="结果" width="100" show-overflow-tooltip>
-              <template #default="{ row }">
-                <el-tag v-if="row.result" size="small" :type="row.result.includes('结案') ? 'success' : 'info'" effect="plain">{{ row.result }}</el-tag>
-                <span v-else class="dim">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="关联工单" width="130">
-              <template #default="{ row }">
-                <el-link v-if="row.matched_ticket_no" type="primary" :underline="false" @click="openDeviceAudit(row.device_sn)">{{ row.matched_ticket_no }}</el-link>
-                <el-tag v-else size="small" type="warning" effect="plain">未关联</el-tag>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </section>
-
-      <!-- ============ TAB: 商户号投诉 ============ -->
-      <section v-if="activeTab === 'merchant'" class="block-card">
-        <div class="block-head">
-          <span class="block-title">商户号投诉分析</span>
-          <span class="block-hint">微信投诉 · 被投诉主体(商户号)与处理人(客服)分开统计</span>
+        <!-- ══════════════ A6: 设备维度汇总（#292 投诉决策概览四维） ══════════════
+             设计说明（Design Rationale）
+             目的：让班组长看清"窗口内投诉集中在哪类设备/套餐/商户/激活阶段"，
+                   据此定向跟进（如某型号集中报障 → 排查批次质量问题）。
+             逻辑：与积压页四维**同源同函数**(_device_dim_groups)，但口径=窗口内全量投诉工单(含已完成)，
+                   而积压页只看未完成 → 两图数字不同是口径差异，非 bug。
+             口径：设备类型/套餐取 bms_orders 最新订单(create_date DESC)的 device_type_name/combo_name；
+                   商户号取 devices.merchant_name；激活时间=bms_orders MIN(active_date) ∪ devices.active_time 兜底。
+                   测试套餐(含"工厂质检")已排除。详见 _core.py #292。
+             取舍：❌ 不在概览做分组统计图表(柱/饼) —— 概览只给分布事实，分组交叉在积压页；
+                   ❌ 不重复积压页已有图表，仅概览多一层数据面。
+             工单：#292 · 设计：本文件头部设计说明 -->
+        <div v-if="overviewData?.device_dims" class="chart-title" style="margin: 8px 0">
+          设备维度汇总（窗口内全量投诉 · 点击桶 → 跳积压页带筛选）
+          <el-tooltip effect="dark" placement="top" raw-content
+            content="<b>来源</b>：/complaints/overview 同一响应 device_dims<br/><b>口径</b>：窗口内全量投诉工单(含已完成, 剔卡商)；设备型号/套餐=bms_orders最新订单; 商户号=devices表; 激活=bms最早∪devices兜底<br/><b>时点</b>：跟随页面时间范围（默认近30天）<br/><b>「空」的含义</b>：(未填SN)=工单无设备号; (未建档)=SN不在设备库; (未填)=设备库无该字段值<br/><b>下钻</b>：点击桶 → 跳转积压页并带对应筛选<br/><b>取舍</b>：概览看全量(含已完成)，积压页只看未完成 → 两图数字不同是口径差异">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
         </div>
-
-        <el-row :gutter="16" class="mb-16">
-          <el-col :xs="24" :md="12">
+        <el-row v-if="overviewData?.device_dims" :gutter="16" class="mb-16">
+          <el-col :xs="24" :sm="12" :md="6">
             <div class="chart-card">
-              <div class="chart-title">被投诉主体分布（商户号）</div>
-              <BaseChart v-if="merchantEntityOption" :option="merchantEntityOption" height="300px" />
+              <div class="chart-title">设备类型 Top</div>
+              <BaseChart v-if="ovDeviceTypeOption" :option="ovDeviceTypeOption" height="200px" @chartClick="(p) => drillOvDeviceDim('type', p.name)" />
               <el-empty v-else description="暂无数据" :image-size="40" />
             </div>
           </el-col>
-          <el-col :xs="24" :md="12">
+          <el-col :xs="24" :sm="12" :md="6">
             <div class="chart-card">
-              <div class="chart-title">处理人 Top（客服）</div>
-              <BaseChart v-if="merchantHandlerOption" :option="merchantHandlerOption" height="300px" />
+              <div class="chart-title">套餐 Top</div>
+              <BaseChart v-if="ovComboOption" :option="ovComboOption" height="200px" @chartClick="(p) => drillOvDeviceDim('combo', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">商户号 Top</div>
+              <BaseChart v-if="ovMerchantOption" :option="ovMerchantOption" height="200px" @chartClick="(p) => drillOvDeviceDim('merchant', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">激活时间段</div>
+              <BaseChart v-if="ovActiveAgeOption" :option="ovActiveAgeOption" height="200px" @chartClick="(p) => drillOvDeviceDim('age', p.name)" />
               <el-empty v-else description="暂无数据" :image-size="40" />
             </div>
           </el-col>
         </el-row>
 
-        <!-- 被投诉主体趋势(堆叠面积, 商户号内细分到具体商户号; 支持按日/周/月) -->
-        <div class="chart-card mb-16">
-          <div class="flex-between">
-            <div class="chart-title">被投诉主体趋势（堆叠面积）<span class="dim-text"> · 商户号内细分, 云客猫/大秦WiFi管家等按商户号分开</span></div>
-            <el-radio-group v-model="merchantEntityTrendGrain" size="small">
-              <el-radio-button label="day">按日</el-radio-button>
-              <el-radio-button label="week">按周</el-radio-button>
-              <el-radio-button label="month">按月</el-radio-button>
-            </el-radio-group>
-          </div>
-          <BaseChart v-if="merchantEntityTrendOption" :option="merchantEntityTrendOption" height="280px" />
-          <el-empty v-else description="暂无趋势数据" :image-size="40" />
-        </div>
-
-        <!-- 商户号投诉明细表 -->
-        <el-card shadow="never">
-          <template #header>
-            <div class="flex-between">
-              <span style="font-weight:600">商户号投诉明细（{{ merchantDetail.length }} 条）</span>
-              <el-button size="small" @click="loadMerchantDetail">刷新</el-button>
-            </div>
-          </template>
-          <el-table :data="merchantDetail" v-loading="merDetailLoading" border stripe size="small" max-height="400">
-            <el-table-column label="时间" width="120" sortable>
-              <template #default="{ row }">{{ formatTime(row.time) }}</template>
-            </el-table-column>
-            <el-table-column label="被投诉主体" width="180" show-overflow-tooltip>
-              <template #default="{ row }">
-                <el-tag v-if="row.entity" size="small" effect="plain" type="warning">{{ row.entity }}</el-tag>
-                <span v-else class="dim">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column prop="category" label="分类" width="110" show-overflow-tooltip />
-            <el-table-column prop="problem" label="投诉内容" min-width="220" show-overflow-tooltip />
-            <el-table-column prop="device_sn" label="设备SN" width="130">
-              <template #default="{ row }">
-                <el-link v-if="row.device_sn" type="primary" :underline="false" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
-                <span v-else class="dim">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="处理人" width="100">
-              <template #default="{ row }">
-                <el-link v-if="row.handler && row.handler !== '未分配'" type="primary" :underline="false" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
-                <span v-else class="dim">—</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="80">
-              <template #default="{ row }">
-                <el-tag :type="row.status === '已完成' ? 'success' : row.status === '处理中' ? 'warning' : 'danger'" size="small">{{ row.status }}</el-tag>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
+        <!-- ★ 比率指标占位: 数据完整度不足, 本期不渲染(见 #68 专项研究)
+             此处保留注释而非代码 —— 数据成熟后由 #68 决定是否加回 -->
       </section>
 
-      <!-- ============ TAB: 受理分析 ============ -->
-      <section v-if="activeTab === 'handling'" class="block-card">
-        <div class="block-head">
-          <span class="block-title">受理分析</span>
-          <span class="block-hint">内/商/外 三源为不同维度任务 · 处理人效率分组展示</span>
-        </div>
-
-        <!-- 三源切换 -->
-        <el-radio-group v-model="effSource" size="small" class="mb-12">
-          <el-radio-button label="internal">内部投诉</el-radio-button>
-          <el-radio-button label="merchant">商户号投诉</el-radio-button>
-          <el-radio-button label="external">外部投诉</el-radio-button>
-        </el-radio-group>
-
-        <el-row :gutter="16" class="mb-16">
-          <el-col :xs="24" :md="16">
-            <div class="chart-card">
-              <div class="chart-title">处理人效率排行（{{ effSourceLabel }}）</div>
-              <BaseChart v-if="handlerEffOption" :option="handlerEffOption" height="260px" />
-              <el-empty v-else description="暂无数据" :image-size="40" />
-            </div>
-          </el-col>
-          <el-col :xs="24" :md="8">
-            <div class="chart-card">
-              <div class="chart-title">处理时效分布</div>
-              <BaseChart v-if="timelinessOption" :option="timelinessOption" height="260px" />
-              <el-empty v-else description="暂无数据" :image-size="40" />
-            </div>
-          </el-col>
-        </el-row>
-
-        <!-- 处理人效率明细表(按三源) -->
-        <el-card shadow="never" class="mb-16">
-          <template #header><span style="font-weight:600">处理人效率明细（{{ effSourceLabel }}）</span></template>
-          <el-table :data="currentEff" border stripe size="small" max-height="300">
-            <el-table-column label="排名" width="60" type="index" />
-            <el-table-column prop="name" label="处理人" width="120" />
-            <el-table-column label="受理总数" width="110" align="right">
-              <template #default="{ row }">{{ formatNum(row.total) }}</template>
-            </el-table-column>
-            <el-table-column label="已完成" width="110" align="right">
-              <template #default="{ row }">{{ formatNum(row.done) }}</template>
-            </el-table-column>
-            <el-table-column label="完成率" width="110" align="right">
-              <template #default="{ row }">{{ row.total > 0 ? (row.done / row.total * 100).toFixed(1) + '%' : '—' }}</template>
-            </el-table-column>
-            <el-table-column label="平均处理时长" width="140" align="right">
-              <template #default="{ row }">{{ row.avg_hours > 0 ? (row.avg_hours > 24 ? (row.avg_hours / 24).toFixed(1) + '天' : row.avg_hours.toFixed(1) + 'h') : '—' }}</template>
-            </el-table-column>
-          </el-table>
-        </el-card>
+      <!-- ============ 渠道明细(2026-09-11 #67 P2 同构化) ============
+           ★ 四个渠道由**同一组件**渲染(ComplaintChannelPanel)：
+             改造前 外部/商户号 各写一套、内部与卡商缺失 →
+             口径与配色不一致、新增渠道要复制整页、修 bug 要改四处。
+           ★ 数据源: `/complaints/summary` 的 internal/merchant/external/card 四个分源对象
+             (含 total/registered/handled/by_category/by_handler/trend)。
+           ★ 明细: `/complaints/detail?source_type=`
+           ★ 卡商渠道带「独立统计」标记 —— 不纳入投诉总量(#53)。 -->
+      <section v-if="analysisTab === 'channel'" class="block-card">
+        <ComplaintChannelPanel
+          :key="channelTab"
+          :source="channelTab"
+          :src-data="channelSrcData"
+          :rows="channelRows"
+          :loading="channelLoading"
+          :grain="effectiveGrain"
+          @refresh="loadChannelDetail"
+          @device="openDeviceAudit"
+          @person="openPersonAudit"
+        />
       </section>
+
+      <!-- ★ 2026-09-11 (#67 P2) 已删除三个历史区块：
+             「外部投诉重点」「商户号投诉」「受理分析」
+             原因：三者与新的「渠道明细」同构面板**功能重复**（同指标两处各画一遍）。
+             按界面设计规范「禁止重复展示」原则，保留渠道面板作为唯一真身。
+             详见 docs/standards/界面设计说明规范.md §四 -->
 
       <!-- ============ TAB: 积压审核 ============ -->
       <section v-if="activeTab === 'backlog'" class="block-card">
@@ -494,6 +422,25 @@
           <el-select v-model="backlogFilters.has_handler" size="small" placeholder="分派" clearable style="width:110px" @change="backlogPage = 1; loadBacklog()">
             <el-option label="待分派" :value="false" />
             <el-option label="已分派" :value="true" />
+          </el-select>
+          <!-- #273: 设备维度筛选(口径=devices 表, 与退款明细同套参数) -->
+          <el-select v-model="backlogFilters.device_type" size="small" placeholder="设备类型" clearable filterable style="width:150px" @change="backlogPage = 1; loadBacklog()">
+            <el-option v-for="t in backlogDimOptions.device_types || []" :key="t.value" :label="t.label" :value="t.value" />
+          </el-select>
+          <el-select v-model="backlogFilters.combo" size="small" placeholder="套餐" clearable filterable style="width:160px" @change="backlogPage = 1; loadBacklog()">
+            <el-option v-for="c in backlogDimOptions.combos || []" :key="c" :label="c" :value="c" />
+          </el-select>
+          <el-select v-model="backlogFilters.merchant" size="small" placeholder="商户号" clearable filterable style="width:160px" @change="backlogPage = 1; loadBacklog()">
+            <el-option v-for="m in backlogDimOptions.merchants || []" :key="m" :label="m" :value="m" />
+          </el-select>
+          <el-date-picker v-model="backlogFilters.activeRange" type="daterange" size="small" range-separator="~" start-placeholder="激活起" end-placeholder="激活止" value-format="YYYY-MM-DD" style="width:210px" @change="backlogPage = 1; loadBacklog()" />
+          <!-- #291: 激活后天数桶(设备维度汇总 激活桶下钻入口; 锚点=登记日−bms_orders最早激活日) -->
+          <el-select v-model="backlogFilters.activeAge" size="small" placeholder="激活时段" clearable style="width:130px" @change="backlogPage = 1; loadBacklog()">
+            <el-option label="≤7天" value="le7" />
+            <el-option label="8-30天" value="8-30" />
+            <el-option label="31-180天" value="31-180" />
+            <el-option label=">180天" value="gt180" />
+            <el-option label="无激活记录" value="none" />
           </el-select>
           <el-button size="small" :icon="Refresh" @click="loadBacklog">刷新</el-button>
         </div>
@@ -569,6 +516,48 @@
           </el-col>
         </el-row>
 
+        <!-- #291 设备维度汇总(积压口径): 与明细表同源, 点击桶带筛选下钻
+             设计说明: 目的=回答「积压集中在哪类设备/套餐/商户/激活阶段」;
+             口径=积压未完成工单(与明细同源自洽), 激活四桶=登记日−bms_orders最早激活日;
+             取舍=不重复展示 #252 extended-dims(全量含已完成, 另一数据面)。工单 #291。 -->
+        <div class="chart-title" style="margin-bottom: 8px">
+          设备维度汇总（点击桶 → 明细表带筛选）
+          <el-tooltip effect="dark" placement="top" raw-content
+            content="<b>来源</b>：/complaints/backlog 同一响应（by_device_type/by_combo/by_merchant/by_active_age）<br/><b>口径</b>：积压未完成工单（与下方明细表完全同源）；设备属性 = devices 表（#271/#273 同源）；激活时间段 = 登记日 − bms_orders 最早激活日 四桶（≤7 / 8-30 / 31-180 / &gt;180天 / 无激活记录，#291 口径）<br/><b>时点</b>：跟随页面时间范围（默认近30天），刷新即更新<br/><b>「空」的含义</b>：图为空 = 窗口内无积压工单；(未填SN)/(未建档) 桶 = 工单/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击桶 → 明细表自动带对应筛选，行数 = 桶计数<br/><b>取舍</b>：不重复展示 #252 extended-dims 全量口径（含已完成工单，属另一数据面）">
+            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </div>
+        <el-row :gutter="16" class="mb-16">
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">设备类型 Top</div>
+              <BaseChart v-if="backlogDeviceTypeOption" :option="backlogDeviceTypeOption" height="200px" @chartClick="(p) => drillBacklogDim('type', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">套餐 Top</div>
+              <BaseChart v-if="backlogComboOption" :option="backlogComboOption" height="200px" @chartClick="(p) => drillBacklogDim('combo', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">商户号 Top</div>
+              <BaseChart v-if="backlogMerchantOption" :option="backlogMerchantOption" height="200px" @chartClick="(p) => drillBacklogDim('merchant', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+          <el-col :xs="24" :sm="12" :md="6">
+            <div class="chart-card">
+              <div class="chart-title">激活时间段</div>
+              <BaseChart v-if="backlogActiveAgeOption" :option="backlogActiveAgeOption" height="200px" @chartClick="(p) => drillBacklogDim('age', p.name)" />
+              <el-empty v-else description="暂无数据" :image-size="40" />
+            </div>
+          </el-col>
+        </el-row>
+
         <!-- 积压明细表 -->
         <el-card shadow="never">
           <template #header>
@@ -582,7 +571,7 @@
               </div>
             </div>
           </template>
-          <el-table :data="backlogItems" v-loading="backlogLoading" border stripe size="small" max-height="420">
+          <el-table v-loading="backlogLoading" :data="backlogItems" border stripe size="small" max-height="420">
             <el-table-column prop="ticket_no" label="工单号" width="150" show-overflow-tooltip />
             <el-table-column label="来源" width="90">
               <template #default="{ row }">
@@ -607,14 +596,14 @@
             </el-table-column>
             <el-table-column label="设备SN" width="130">
               <template #default="{ row }">
-                <el-link v-if="row.device_sn" type="primary" :underline="false" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
+                <el-link v-if="row.device_sn" type="primary" underline="never" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
                 <span v-else class="dim">—</span>
               </template>
             </el-table-column>
             <el-table-column prop="problem" label="投诉内容" min-width="180" show-overflow-tooltip />
             <el-table-column label="处理人" width="100">
               <template #default="{ row }">
-                <el-link v-if="row.handler !== '未分配'" type="primary" :underline="false" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
+                <el-link v-if="row.handler !== '未分配'" type="primary" underline="never" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
                 <span v-else class="dim">未分配</span>
               </template>
             </el-table-column>
@@ -644,7 +633,7 @@
               :page-sizes="[20, 50, 100]"
               layout="total, sizes, prev, pager, next, jumper"
               background
-              small
+              size="small"
               @current-change="loadBacklog"
               @size-change="backlogPage = 1; loadBacklog()"
             />
@@ -670,9 +659,9 @@
             </el-form-item>
             <el-form-item label="评判">
               <el-radio-group v-model="auditForm.judgment">
-                <el-radio-button label="通过" />
-                <el-radio-button label="有问题" />
-                <el-radio-button label="需改进" />
+                <el-radio-button value="通过" />
+                <el-radio-button value="有问题" />
+                <el-radio-button value="需改进" />
               </el-radio-group>
             </el-form-item>
             <el-form-item label="核查结论">
@@ -686,11 +675,75 @@
         </el-dialog>
       </section>
 
-      <!-- ============ TAB: 被投诉主体 ============ -->
+
+      <!-- ============================================================
+           ★ 2026-09-11 (#67 P3) 数据治理区块已外迁:
+             「人工审核(#55)」与「采集质量(#60)」→ 系统管理 → 投诉采集质量
+             原因: 治理工具的使用者是数据治理/运维，不是决策者；
+                   混在分析页会让决策者在 8 个 tab 里找不到主线。
+             新入口: /system/complaint-quality
+           ============================================================ -->
+
+      <!-- ============ TAB: 被投诉主体(2026-09-11 #67 P2 加筛选) ============
+           ★ 用户需求: "主体 也是能提供不同的分项 筛选着来"
+             理由: 主体榜若只有一种排序，无法支持不同管理动作 ——
+               治「升级」→ 看 both(两源都有)
+               治「成本」→ 看涉诉金额
+               治「新冒头」→ 看环比增幅
+           ★ 口径: 主体仅覆盖有主体字段的两源(商户号 registrant / 外部 315 主体)；
+             内部投诉无主体字段不纳入主体统计。详见
+             docs/standards/投诉渠道口径与对账说明.md -->
       <section v-if="activeTab === 'subject'" class="block-card">
         <div class="block-head">
           <span class="block-title">被投诉主体分析</span>
           <span class="block-hint">商户号投诉=工单被投诉商户主体 · 外部投诉=315公司主体/投诉店铺 · 内部投诉无主体字段不纳入 · 升级链反映「内部处理不好→商户号→外部」</span>
+          <div style="flex:1" />
+          <el-popover placement="bottom-end" :width="420" trigger="click">
+            <template #reference>
+              <el-icon style="color:#909399;cursor:help;font-size:15px"><QuestionFilled /></el-icon>
+            </template>
+            <div style="font-size:12px;line-height:1.6;color:#4b5563">
+              <div style="font-weight:700;font-size:13px;color:#1f2937;margin-bottom:8px">主体分析 · 设计说明</div>
+              <div style="margin-bottom:8px"><b>给谁用</b><div>客服主管 / 运营经理，用于定位「哪个被投诉主体需要干预」。</div></div>
+              <div style="margin-bottom:8px"><b>为什么可筛选</b>
+                <div>固定排序只能回答一个问题；不同管理动作需要不同视角 —— 治升级看「两源都有」，治成本看「涉诉金额」，治新冒头看「环比增幅」。</div></div>
+              <div style="margin-bottom:8px"><b>为什么不包含内部投诉</b>
+                <div>内部投诉工单无主体字段（registrant 是内部登记人），无法归属到被投诉主体。</div></div>
+              <div style="margin-bottom:8px"><b>为什么不做什么</b>
+                <div>· 不做主体合并（如把「云客猫」与「云客猫科技」归并为一家）—— 会掩盖真实差异，需业务先给归属规则。<br>
+                · 不做主体级时间軸（措施回看）—— 依赖 measures 数据，见工单 #69。</div></div>
+              <div><b>口径</b><div>主体归一规则见后端 <code>_norm_subject_entity</code>；渠道口径见 docs/standards/投诉渠道口径与对账说明.md</div></div>
+            </div>
+          </el-popover>
+        </div>
+
+        <!-- ★ 筛选条(#67 P2): 来源 × 排序 × TopN × 对比 -->
+        <div class="filter-bar mb-16">
+          <span class="filter-label">来源</span>
+          <el-radio-group v-model="subjectFilter.source_type" size="small" @change="loadSubjectAnalysis">
+            <el-radio-button value="all">全部</el-radio-button>
+            <el-radio-button value="merchant">仅商户号</el-radio-button>
+            <el-radio-button value="external">仅外部</el-radio-button>
+            <el-radio-button value="both">升级主体</el-radio-button>
+          </el-radio-group>
+          <span class="filter-label">排序</span>
+          <el-select v-model="subjectFilter.sort_by" size="small" style="width:130px" @change="loadSubjectAnalysis">
+            <el-option label="投诉总量" value="total" />
+            <el-option label="外部占比" value="external_ratio" />
+            <el-option label="涉诉金额" value="refund_amount" />
+            <el-option label="环比增幅" value="delta" />
+          </el-select>
+          <span class="filter-label">显示</span>
+          <el-select v-model="subjectFilter.top_n" size="small" style="width:100px" @change="loadSubjectAnalysis">
+            <el-option label="Top 10" :value="10" />
+            <el-option label="Top 20" :value="20" />
+            <el-option label="Top 50" :value="50" />
+            <el-option label="全部" :value="0" />
+          </el-select>
+          <el-checkbox v-model="subjectFilter.comparePrev" size="small" @change="onSubjectCompareChange">环比</el-checkbox>
+          <el-tag v-if="subjRankCount" size="small" effect="plain" type="info">
+            命中 {{ formatNum(subjRankCount) }} 个主体
+          </el-tag>
         </div>
 
         <!-- KPI -->
@@ -757,9 +810,9 @@
               <div class="flex-between">
                 <div class="chart-title">主体投诉趋势<span class="dim-text"> · 商户号+外部投诉汇聚</span></div>
                 <el-radio-group v-model="subjectTrendGrain" size="small">
-                  <el-radio-button label="day">按日</el-radio-button>
-                  <el-radio-button label="week">按周</el-radio-button>
-                  <el-radio-button label="month">按月</el-radio-button>
+                  <el-radio-button value="day">按日</el-radio-button>
+                  <el-radio-button value="week">按周</el-radio-button>
+                  <el-radio-button value="month">按月</el-radio-button>
                 </el-radio-group>
               </div>
               <BaseChart v-if="subjectTrendOption" :option="subjectTrendOption" height="250px" />
@@ -771,9 +824,9 @@
               <div class="flex-between">
                 <div class="chart-title">Top5 被投诉主体趋势<span class="dim-text"> · 汇聚后按主体总量排序</span></div>
                 <el-radio-group v-model="topSubjectTrendGrain" size="small">
-                  <el-radio-button label="day">按日</el-radio-button>
-                  <el-radio-button label="week">按周</el-radio-button>
-                  <el-radio-button label="month">按月</el-radio-button>
+                  <el-radio-button value="day">按日</el-radio-button>
+                  <el-radio-button value="week">按周</el-radio-button>
+                  <el-radio-button value="month">按月</el-radio-button>
                 </el-radio-group>
               </div>
               <BaseChart v-if="topSubjectTrendOption" :option="topSubjectTrendOption" height="250px" />
@@ -794,7 +847,9 @@
             <el-table-column label="排名" width="60" type="index" />
             <el-table-column label="被投诉主体" min-width="180" show-overflow-tooltip>
               <template #default="{ row }">
-                <span class="subject-name">{{ row.name }}</span>
+                <el-link type="primary" underline="never" class="subject-link" @click="openSubjectDetail(row.name)">
+                  <span class="subject-name">{{ row.name }}</span>
+                </el-link>
                 <el-tag v-if="row.escalated" size="small" type="danger" effect="plain" style="margin-left:6px">升级</el-tag>
               </template>
             </el-table-column>
@@ -832,839 +887,254 @@
                 <span v-else class="dim">—</span>
               </template>
             </el-table-column>
+            <!-- ★ #67 P2: 环比列(勾选「环比」时才有值) -->
+            <el-table-column v-if="subjectFilter.comparePrev" label="环比" width="110" align="right" sortable
+                             :sort-method="(a, b) => (a.delta_pct ?? -1e9) - (b.delta_pct ?? -1e9)">
+              <template #default="{ row }">
+                <template v-if="row.delta_pct != null">
+                  <span :style="{ color: row.delta_pct > 0 ? '#dc2626' : '#16a34a', fontWeight: 600 }">
+                    {{ row.delta_pct > 0 ? '↑' : '↓' }} {{ Math.abs(row.delta_pct) }}%
+                  </span>
+                  <div class="dim-text" style="font-size:10px">对比期 {{ row.prev_total }}</div>
+                </template>
+                <span v-else class="dim" title="对比期无数据，不可比">—</span>
+              </template>
+            </el-table-column>
           </el-table>
         </el-card>
+
+        <!-- F-P2-4: 主体下钻抽屉(点 Top 榜主体行 → 看该主体投诉明细) -->
+        <el-drawer v-model="subjectDrawerVisible" :title="`被投诉主体明细 · ${currentSubject || ''}`" size="60%">
+          <div class="sub-tip mb-16" style="color:#909399;font-size:12px">
+            窗口内该主体的商户号 + 外部(315)投诉明细 · 点 SN/处理人可进一步审计
+          </div>
+          <el-table v-loading="subjectDetailLoading" :data="subjectDetailList" border stripe size="small" max-height="520">
+            <el-table-column label="来源" width="92" align="center">
+              <template #default="{ row }">
+                <el-tag :type="sourceTagType(row.source)" size="small" effect="plain">{{ row.source }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="时间" width="120" sortable :sort-method="(a,b)=>sortTimeStr(a.time,b.time)">
+              <template #default="{ row }">{{ formatTime(row.time) }}</template>
+            </el-table-column>
+            <el-table-column label="分类" width="165" show-overflow-tooltip>
+              <template #default="{ row }">
+                <!-- ★ #65: 软纠正标注 —— 工单原登记「工信部投诉」,
+                     但 SN 在 315 属监所/市监局类 → 已按「外部投诉」统计。 -->
+                <el-tooltip
+                  v-if="row.soft_corrected"
+                  content="BMS 原登记为「工信部投诉」。因该 SN 在 315 文档属监所/市监局类，已按「外部投诉」统计（原数据未改）。"
+                  placement="top"
+                >
+                  <span>
+                    <el-tag size="small" type="danger" effect="plain">{{ row.category }}</el-tag>
+                    <el-tag size="small" type="success" effect="plain" style="margin-left:4px">已纠正</el-tag>
+                  </span>
+                </el-tooltip>
+                <span v-else>{{ row.category }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="设备SN" width="140" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-link v-if="row.device_sn" type="primary" underline="never" @click="openDeviceAudit(row.device_sn)">{{ row.device_sn }}</el-link>
+                <span v-else class="dim">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="投诉内容" min-width="200" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.problem || row.suppl_problem || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="处理人" width="100" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-link v-if="row.handler && row.handler !== '未分配'" type="primary" underline="never" @click="openPersonAudit(row.handler)">{{ row.handler }}</el-link>
+                <span v-else class="dim">未分配</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90" align="center">
+              <template #default="{ row }">
+                <el-tag :type="row.status === '已完成' ? 'success' : row.status === '处理中' ? 'warning' : row.status === '待跟进' ? 'info' : 'danger'" size="small">{{ row.status || '—' }}</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!subjectDetailLoading && !subjectDetailList.length" description="该主体暂无明细(内部投诉无主体字段不纳入)" :image-size="50" />
+        </el-drawer>
       </section>
     </template>
-    <div v-if="loaded" class="block-tabs">
-      <el-radio-group v-model="activeTab" size="small">
-        <el-radio-button label="overview">决策概览</el-radio-button>
-        <el-radio-button label="external">外部投诉重点</el-radio-button>
-        <el-radio-button label="merchant">商户号投诉</el-radio-button>
-        <el-radio-button label="handling">受理分析</el-radio-button>
-        <el-radio-button label="backlog">积压审核</el-radio-button>
-        <el-radio-button label="subject">被投诉主体</el-radio-button>
+    <!-- 两级导航(#67 P1)
+         一级 = 任务域(分析 / 执行跟踪)
+         二级 = 分析内的视角(决策概览 / 渠道明细 / 主体分析)
+         三级 = 渠道明细的子页(内部/商户号/外部/卡商 同构面板)
+         ★ 为什么分两级而不是 8 个平铺 tab：
+           "看趋势做判断"(分析) 与 "盯人干活"(执行跟踪) 是两种不同任务，
+           平铺会让决策者在 8 个 tab 里迷路。 -->
+    <div v-if="loaded" class="nav-wrap">
+      <el-radio-group v-model="topTab" size="default">
+        <el-radio-button value="analysis">分析</el-radio-button>
+        <el-radio-button value="execute">
+          执行跟踪
+          <el-badge v-if="(b.total ?? 0) > 0" :value="b.total" type="danger" style="margin-left:6px" />
+        </el-radio-button>
       </el-radio-group>
+
+      <template v-if="topTab === 'analysis'">
+        <span class="nav-sep" />
+        <el-radio-group v-model="analysisTab" size="small">
+          <el-radio-button value="overview">决策概览</el-radio-button>
+          <el-radio-button value="channel">渠道明细</el-radio-button>
+          <el-radio-button value="subject">主体分析</el-radio-button>
+        </el-radio-group>
+      </template>
+
+      <template v-if="topTab === 'analysis' && analysisTab === 'channel'">
+        <span class="nav-sep" />
+        <el-radio-group v-model="channelTab" size="small">
+          <el-radio-button value="internal">内部投诉</el-radio-button>
+          <el-radio-button value="merchant">商户号投诉</el-radio-button>
+          <el-radio-button value="external">外部投诉</el-radio-button>
+          <el-radio-button value="card">(外)卡商</el-radio-button>
+        </el-radio-group>
+      </template>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted, onBeforeUnmount } from 'vue'
-import { Search, Refresh, Download } from '@element-plus/icons-vue'
+import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { Search, Refresh, Download, QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
 import isoWeek from 'dayjs/plugin/isoWeek'
-dayjs.extend(isoWeek)
 import BaseChart from '@/components/BaseChart.vue'
-import { complaintAnalysis, complaintDetail, complaintSupplementary, complaintBacklog, complaintBacklogExport, complaintSubjectAnalysis, createAudit } from '@/api/complaint'
+import ComplaintTimeBar from '@/components/dashboard/ComplaintTimeBar.vue'
+import ComplaintConclusionBar from '@/components/dashboard/ComplaintConclusionBar.vue'
+import ComplaintChannelPanel from '@/components/dashboard/ComplaintChannelPanel.vue'
+import { complaintAnalysis, complaintOverview, complaintSummary, complaintDetail, complaintSupplementary, complaintBacklog, complaintBacklogExport, complaintSubjectAnalysis, createAudit } from '@/api/complaint'
 import { useAudit } from '@/composables/useAudit'
 
-const { openDeviceAudit, openPersonAudit } = useAudit()
+import { useComplaintAnalysis } from './useComplaintAnalysis'
 
-const loaded = ref(false)
-const loading = ref(false)
-const extDetailLoading = ref(false)
-const merDetailLoading = ref(false)
-const activeTab = ref('overview')
-const rangeMode = ref('30')
-const customRange = ref([])
-const data = ref(null)
-
-// 移动端响应式: 简化描述文字/控件
-const isMobile = ref(false)
-let _mq = null
-function _onMediaChange(e) { isMobile.value = e.matches }
-onMounted(() => {
-  _mq = window.matchMedia('(max-width: 768px)')
-  isMobile.value = _mq.matches
-  _mq.addEventListener('change', _onMediaChange)
-})
-onBeforeUnmount(() => { _mq?.removeEventListener('change', _onMediaChange) })
-// 趋势图粒度(按日/周/月): 周=ISO自然周, 月=自然月; 前端对后端按日数据做汇聚
-const merchantEntityTrendGrain = ref('day')
-const subjectTrendGrain = ref('day')
-const topSubjectTrendGrain = ref('day')
-const externalTrendGrain = ref('day')
-const trendStackGrain = ref('day')
-const externalDetail = ref([])
-const merchantDetail = ref([])
-const effSource = ref('internal')
-
-// ── 积压审核(backlog tab) ──
-const backlogData = ref(null)
-const backlogLoading = ref(false)
-const backlogExporting = ref(false)
-const backlogPage = ref(1)
-const backlogPageSize = ref(50)
-const backlogTotal = ref(0)
-const backlogFilters = reactive({ source_type: '', status: '', has_handler: null })
-const auditVisible = ref(false)
-const auditSubmitting = ref(false)
-const auditForm = reactive({ source_type: 'internal', ref_id: '', device_sn: '', attribution: '其他', judgment: '通过', conclusion: '' })
-const attributions = ['网络质量', '套餐争议', '退款协商失败', '降成争议', '其他', '未关联SN']
-
-// ── 被投诉主体分析(subject tab) ──
-const subjectData = ref(null)
-const subjectLoading = ref(false)
-
-const b = computed(() => backlogData.value || {})
-const backlogItems = computed(() => b.value.items || [])
-const oldestAging = computed(() => (b.value.max_aging != null ? b.value.max_aging : '—'))
-
-// ── 积压快照(决策概览) helpers ──
-function bySourceCount(src) {
-  return (b.value.by_source || []).find(x => x.name === src)?.count ?? 0
-}
-function sourceBarColor(src) {
-  if (src === '内部投诉') return '#2563eb'
-  if (src === '外部投诉') return '#dc2626'
-  return '#7c3aed'
-}
-function sourceRatioPct(src) {
-  const t = b.value.total || 0
-  if (!t) return '0%'
-  return Math.round(bySourceCount(src) / t * 100) + '%'
-}
-const backlogSnapshotItems = computed(() => backlogItems.value.slice(0, 5))
-// 来源×龄期堆叠柱: x=来源, y=数量, 5个龄期桶堆叠
-const backlogSourceAgingOption = computed(() => {
-  const d = b.value.by_source_aging || []
-  if (!d.length || d.every(x => (x.buckets || []).every(bk => !bk.count))) return null
-  const buckets = d[0].buckets.map(bk => bk.name)
-  const agingColors = ['#2563eb', '#3b82f6', '#f59e0b', '#ea580c', '#dc2626']
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    legend: { bottom: 0, left: 'center', itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 10 } },
-    grid: { left: 44, right: 16, bottom: 30, top: 8 },
-    xAxis: { type: 'category', data: d.map(x => x.source), axisLabel: { fontSize: 10 } },
-    yAxis: { type: 'value' },
-    series: buckets.map((bk, i) => ({
-      name: bk, type: 'bar', stack: 'total',
-      data: d.map(x => x.buckets.find(y => y.name === bk)?.count || 0),
-      itemStyle: { color: agingColors[i] }, barMaxWidth: 22,
-    })),
-  }
-})
-const doingPct = computed(() => {
-  const t = b.value.total || 0
-  if (!t) return 0
-  return ((t - (b.value.unassigned || 0)) / t * 100).toFixed(1)
-})
-const backlogAgingOption = computed(() => {
-  const d = b.value.by_aging || []
-  if (!d.length) return null
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: 48, right: 24, bottom: 32, top: 8 },
-    xAxis: { type: 'category', data: d.map(x => x.name), axisLabel: { fontSize: 11 } },
-    yAxis: { type: 'value', name: '工单数' },
-    series: [{
-      type: 'bar', data: d.map(x => x.count), barMaxWidth: 28,
-      itemStyle: { color: '#eab308', borderRadius: [4, 4, 0, 0] },
-      label: { show: true, position: 'top', fontSize: 11 },
-    }],
-  }
-})
-// 投诉原因分布(按内容关键词归类, 替代区分度低的来源子类分类)
-const reasonColors = {
-  '退款/售后': '#dc2626',
-  '网络/技术': '#2563eb',
-  '套餐/计费': '#ea580c',
-  '充值/规则': '#ca8a04',
-  '其他': '#6b7280',
-  '未填写': '#9ca3af',
-}
-function reasonTagType(reason) {
-  if (reason === '退款/售后') return 'danger'
-  if (reason === '网络/技术') return 'primary'
-  if (reason === '套餐/计费') return 'warning'
-  if (reason === '充值/规则') return 'warning'
-  return 'info'
-}
-const backlogReasonOption = computed(() => {
-  const d = b.value.by_reason || []
-  if (!d.length || d.every(x => !x.count)) return null
-  const items = [...d].reverse()
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: 90, right: 44, bottom: 24, top: 8 },
-    xAxis: { type: 'value' },
-    yAxis: { type: 'category', data: items.map(x => x.name), axisLabel: { fontSize: 11 } },
-    series: [{
-      type: 'bar', data: items.map(x => ({
-        value: x.count,
-        itemStyle: { color: reasonColors[x.name] || '#6b7280', borderRadius: [0, 4, 4, 0] },
-      })), barMaxWidth: 18,
-      label: { show: true, position: 'right', fontSize: 11 },
-    }],
-  }
-})
-
-const subj = computed(() => subjectData.value || {
-  summary: { subject_total: 0, merchant_total: 0, external_total: 0, external_attributed: 0, external_unattributed: 0, refund_count: 0, refund_amount: 0 },
-  subject_ranking: [],
-  severity_distribution: [],
-  escalation_funnel: [],
-  subject_trend: [],
-  top_subject_trend: [],
-})
-const subjectRanking = computed(() => subj.value.subject_ranking || [])
-function extRatioColor(ratio) {
-  if (ratio == null) return '#909399'
-  if (ratio >= 0.5) return '#dc2626'
-  if (ratio >= 0.25) return '#ea580c'
-  return '#16a34a'
-}
-
-// 严重性数量分布(堆叠柱状图, 显示商户号vs外部投诉占比)
-const subjectSeverityOption = computed(() => {
-  const d = subj.value.severity_distribution || []
-  if (!d.length || d.every(x => !x.count)) return null
-  const total = d.reduce((sum, x) => sum + x.count, 0)
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
-      formatter: (params) => {
-        const p = params[0]
-        const item = d.find(x => x.name === p.seriesName)
-        if (!item) return ''
-        const pct = total > 0 ? (item.count / total * 100).toFixed(1) : 0
-        return `${item.name}<br/>数量: ${item.count}<br/>占比: ${pct}%`
-      }
-    },
-    legend: { bottom: 0, left: 'center', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 11 } },
-    grid: { left: 48, right: 24, bottom: 36, top: 8 },
-    xAxis: { type: 'value', name: '投诉数' },
-    yAxis: { type: 'category', data: [''], axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false } },
-    series: [
-      { name: '商户号投诉', type: 'bar', stack: 'total',
-        data: d.find(x => x.name === '商户号投诉') ? [d.find(x => x.name === '商户号投诉').count] : [0],
-        itemStyle: { color: '#7c3aed', borderRadius: [4, 0, 0, 4] },
-        barMaxWidth: 28,
-        label: { show: true, position: 'inside', fontSize: 12, fontWeight: 600,
-          formatter: (p) => p.value > 0 ? `${p.value}` : '' },
-      },
-      { name: '外部投诉', type: 'bar', stack: 'total',
-        data: d.find(x => x.name === '外部投诉') ? [d.find(x => x.name === '外部投诉').count] : [0],
-        itemStyle: { color: '#dc2626', borderRadius: [0, 4, 4, 0] },
-        barMaxWidth: 28,
-        label: { show: true, position: 'inside', fontSize: 12, fontWeight: 600,
-          formatter: (p) => p.value > 0 ? `${p.value}` : '' },
-      },
-    ],
-  }
-})
-
-// 投诉升级链(按SN, 内部→商户号→外部 传递性)
-const escalationChainOption = computed(() => {
-  const f = subj.value.escalation_funnel || []
-  if (!f.length || f.every(x => !x.count)) return null
-  // 按升级路径排序: 先展示"从内部起步"的链, 再是直发/组合
-  const order = ['internal_only', 'internal_merchant', 'internal_external', 'full_chain', 'merchant_only', 'merchant_external', 'external_only']
-  const items = order.map(k => f.find(x => x.key === k)).filter(Boolean)
-  const colors = ['#2563eb', '#f59e0b', '#ea580c', '#dc2626', '#7c3aed', '#a855f7', '#dc2626']
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: 110, right: 48, bottom: 24, top: 8 },
-    xAxis: { type: 'value' },
-    yAxis: { type: 'category', data: items.map(x => x.name), axisLabel: { fontSize: 11 } },
-    series: [{
-      type: 'bar', data: items.map((x, i) => ({
-        value: x.count,
-        itemStyle: { color: colors[i], borderRadius: [0, 4, 4, 0] },
-      })), barMaxWidth: 18,
-      label: { show: true, position: 'right', fontSize: 11 },
-    }],
-  }
-})
-
-// 主体投诉趋势(商户号+外部 堆叠面积; 支持按日/周/月汇聚)
-const subjectTrendOption = computed(() => {
-  const t = subj.value.subject_trend || []
-  if (!t.length) return null
-  const srcs = ['商户号投诉', '外部投诉']
-  const bySource = { '商户号投诉': {}, '外部投诉': {} }
-  t.forEach(r => {
-    srcs.forEach(s => { if (r[s]) bySource[s][r.day] = (bySource[s][r.day] || 0) + r[s] })
-  })
-  const agg = aggregateMultiSeries(bySource, subjectTrendGrain.value)
-  return {
-    tooltip: { trigger: 'axis' },
-    legend: { bottom: 0, left: 'center', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 11 } },
-    grid: { left: 48, right: 24, bottom: 44, top: 16 },
-    xAxis: { type: 'category', data: agg.buckets.map(b => b.label), axisLabel: { fontSize: 10, rotate: agg.buckets.length > 12 ? 30 : 0 } },
-    yAxis: { type: 'value', name: '投诉数' },
-    series: [
-      { name: '商户号投诉', type: 'line', stack: 'total', smooth: true,
-        areaStyle: { opacity: 0.6 },
-        data: agg.byName['商户号投诉'].values, itemStyle: { color: '#7c3aed' }, lineStyle: { width: 2 }, symbol: 'circle', symbolSize: 4 },
-      { name: '外部投诉', type: 'line', stack: 'total', smooth: true,
-        areaStyle: { opacity: 0.6 },
-        data: agg.byName['外部投诉'].values, itemStyle: { color: '#dc2626' }, lineStyle: { width: 2 }, symbol: 'circle', symbolSize: 4 },
-    ],
-  }
-})
-
-// Top5 被投诉主体趋势(堆叠面积, 支持按日/周/月汇聚; Top5按汇聚总量重新排序)
-const topSubjectColors = ['#dc2626', '#ea580c', '#ca8a04', '#0891b2', '#7c3aed']
-const topSubjectTrendOption = computed(() => {
-  const t = subj.value.top_subject_trend || []
-  if (!t.length) return null
-  // 各主体 {day: count}
-  const bySubject = {}
-  t.forEach(s => {
-    const m = {}
-    ;(s.trend || []).forEach(p => { m[p.day] = (m[p.day] || 0) + p.count })
-    bySubject[s.name] = m
-  })
-  const agg = aggregateMultiSeries(bySubject, topSubjectTrendGrain.value)
-  // Top5: 按当前粒度下的汇聚总量降序取前5
-  const ranked = agg.names
-    .map(n => ({ name: n, total: agg.byName[n].values.reduce((s, v) => s + v, 0) }))
-    .sort((a, b) => b.total - a.total)
-    .slice(0, 5)
-  return {
-    tooltip: { trigger: 'axis' },
-    legend: { bottom: 0, left: 'center', type: 'scroll', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 10 } },
-    grid: { left: 48, right: 24, bottom: 44, top: 16 },
-    xAxis: { type: 'category', data: agg.buckets.map(b => b.label), axisLabel: { fontSize: 10, rotate: agg.buckets.length > 12 ? 30 : 0 } },
-    yAxis: { type: 'value' },
-    series: ranked.map((s, i) => ({
-      name: s.name, type: 'line', stack: 'total', smooth: true,
-      data: agg.byName[s.name].values,
-      itemStyle: { color: topSubjectColors[i % topSubjectColors.length] },
-      lineStyle: { color: topSubjectColors[i % topSubjectColors.length], width: 2 },
-      areaStyle: { opacity: 0.55 },
-      symbolSize: 4,
-    })),
-  }
-})
-
-const s = computed(() => data.value || {
-  summary: { total: 0, internal_total: 0, merchant_total: 0, external_total: 0, backlog_total: 0, done_total: 0, completion_rate: 0, avg_handle_hours: 0 },
-  source_distribution: [],
-  trend: [],
-  handler_top: [],
-  platform_distribution: [],
-  external_category_distribution: [],
-  external_trend: [],
-  external_total: 0,
-  external_matched: 0,
-  external_unmatched: 0,
-  external_today_registered: 0,
-  merchant_category: [],
-  merchant_entity_distribution: [],
-  merchant_entity_trend: [],
-  merchant_handler_distribution: [],
-  timeliness: [],
-  handler_efficiency: { internal: [], merchant: [], external: [] },
-  external_platform_trend: [],
-  water: [],
-})
-
-// ── 投诉水位(进水/出水 并列柱 + 净水位/累计净水位 折线) ──
-const complaintWaterOption = computed(() => {
-  const w = s.value.water || []
-  if (!w.length) return null
-  const dates = w.map(x => (x.day || '').slice(5))
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    legend: { data: ['新增投诉', '处理投诉', '净水位', '累计净水位'], top: 0, textStyle: { fontSize: 11 } },
-    grid: { left: 48, right: 56, bottom: 44, top: 36 },
-    xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 10, rotate: 45 } },
-    yAxis: [
-      { type: 'value', name: '条数', axisLabel: { fontSize: 11 }, splitLine: { lineStyle: { type: 'dashed' } } },
-      { type: 'value', name: '净水位', axisLabel: { fontSize: 11 }, splitLine: { show: false } },
-    ],
-    series: [
-      // 新增投诉 vs 处理投诉 = 此消彼长的比较关系: 并列柱(不同颜色, 不堆叠)
-      { name: '新增投诉', type: 'bar', data: w.map(x => x.in), itemStyle: { color: '#f87171' }, barMaxWidth: 24 },
-      { name: '处理投诉', type: 'bar', data: w.map(x => x.out), itemStyle: { color: '#10b981' }, barMaxWidth: 24 },
-      { name: '净水位', type: 'line', yAxisIndex: 1, data: w.map(x => x.net), smooth: true, symbol: 'circle', symbolSize: 6,
-        itemStyle: { color: '#2563eb' }, lineStyle: { width: 2.5, color: '#2563eb' },
-        markLine: { silent: true, symbol: 'none', lineStyle: { color: '#9ca3af', type: 'dashed' }, data: [{ yAxis: 0 }] } },
-      { name: '累计净水位', type: 'line', yAxisIndex: 1, data: w.map(x => x.cum_net), smooth: true, symbol: 'circle', symbolSize: 5,
-        itemStyle: { color: '#7c3aed' }, lineStyle: { width: 2, color: '#7c3aed', type: 'dashed' } },
-    ],
-  }
-})
-
-const effSourceLabel = computed(() => ({
-  internal: '内部投诉',
-  merchant: '商户号投诉',
-  external: '外部投诉',
-}[effSource.value] || '内部投诉'))
-
-const currentEff = computed(() => s.value.handler_efficiency?.[effSource.value] || [])
-
-const platformSummary = computed(() => {
-  const p = s.value.platform_distribution || []
-  return p.slice(0, 3).map(x => x.name).join(' / ') || '暂无'
-})
-
-const merchantEntitySummary = computed(() => {
-  const p = s.value.merchant_entity_distribution || []
-  return p.slice(0, 2).map(x => x.name).join(' / ') || '暂无'
-})
-
-const effectiveStart = computed(() => {
-  if (rangeMode.value === 'custom') return customRange.value?.[0] || ''
-  if (rangeMode.value === 'default' || !rangeMode.value) return ''
-  return dayjs().subtract(Number(rangeMode.value), 'day').format('YYYY-MM-DD')
-})
-const effectiveEnd = computed(() => {
-  if (rangeMode.value === 'custom') return customRange.value?.[1] || ''
-  return dayjs().format('YYYY-MM-DD')
-})
-
-const params = computed(() => {
-  const p = {}
-  if (effectiveStart.value) p.start = effectiveStart.value
-  if (effectiveEnd.value) p.end = effectiveEnd.value
-  return p
-})
-
-// ── 来源分布饼图(含兜底: source_distribution 为空时用 summary 三源数) ──
-const sourcePieColors = ['#2563eb', '#7c3aed', '#dc2626']
-const sourcePieOption = computed(() => {
-  let d = s.value.source_distribution || []
-  if (!d.length) {
-    const sm = s.value.summary || {}
-    const internal = sm.internal_total || 0
-    const merchant = sm.merchant_total || 0
-    const external = sm.external_total || 0
-    if (internal + merchant + external === 0) return null
-    d = [
-      { name: '内部投诉', count: internal },
-      { name: '商户号投诉', count: merchant },
-      { name: '外部投诉', count: external },
-    ]
-  }
-  return {
-    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-    legend: { bottom: 0, left: 'center', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 11 } },
-    series: [{
-      type: 'pie', radius: ['40%', '65%'], center: ['50%', '45%'],
-      label: { show: false }, labelLine: { show: false },
-      data: d.map((x, i) => ({ name: x.name, value: x.count, itemStyle: { color: sourcePieColors[i] } })),
-    }],
-  }
-})
-
-// ── 三源趋势堆叠图(支持按日/周/月汇聚) ──
-const trendStackOption = computed(() => {
-  const t = s.value.trend || []
-  if (!t.length) return null
-  const srcs = ['内部投诉', '商户号投诉', '外部投诉']
-  const bySource = { '内部投诉': {}, '商户号投诉': {}, '外部投诉': {} }
-  t.forEach(r => {
-    srcs.forEach(s => { if (r.day != null && r[s] != null) bySource[s][r.day] = (bySource[s][r.day] || 0) + r[s] })
-  })
-  const agg = aggregateMultiSeries(bySource, trendStackGrain.value)
-  return {
-    tooltip: { trigger: 'axis' },
-    legend: { bottom: 0, left: 'center', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 11 } },
-    grid: { left: 48, right: 24, bottom: 44, top: 16 },
-    xAxis: { type: 'category', data: agg.buckets.map(b => b.label), axisLabel: { fontSize: 10, rotate: agg.buckets.length > 12 ? 45 : 0 } },
-    yAxis: { type: 'value' },
-    series: [
-      { name: '内部投诉', type: 'bar', stack: 'total', data: agg.byName['内部投诉'].values, itemStyle: { color: '#2563eb' } },
-      { name: '商户号投诉', type: 'bar', stack: 'total', data: agg.byName['商户号投诉'].values, itemStyle: { color: '#7c3aed' } },
-      { name: '外部投诉', type: 'bar', stack: 'total', data: agg.byName['外部投诉'].values, itemStyle: { color: '#dc2626' } },
-    ],
-  }
-})
-
-// ── 处理人 Top10 横向柱状图 ──
-const handlerBarOption = computed(() => {
-  const h = s.value.handler_top || []
-  if (!h.length) return null
-  const items = [...h].reverse()
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: 80, right: 40, bottom: 24, top: 8 },
-    xAxis: { type: 'value' },
-    yAxis: { type: 'category', data: items.map(x => x.name) },
-    series: [{
-      type: 'bar', data: items.map(x => x.count),
-      itemStyle: { color: '#7c3aed', borderRadius: [0, 4, 4, 0] },
-      barMaxWidth: 18,
-    }],
-  }
-})
-
-// ── 时效分布柱状图 ──
-const timelinessOption = computed(() => {
-  const t = s.value.timeliness || []
-  if (!t.length || t.every(x => x.count === 0)) return null
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: 48, right: 24, bottom: 32, top: 8 },
-    xAxis: { type: 'category', data: t.map(x => x.name), axisLabel: { fontSize: 11 } },
-    yAxis: { type: 'value', name: '工单数' },
-    series: [{
-      type: 'bar', data: t.map(x => x.count),
-      itemStyle: { color: '#409eff', borderRadius: [4, 4, 0, 0] },
-      barMaxWidth: 24,
-    }],
-  }
-})
-
-// ── 外部投诉平台分布饼图 ──
-const platformColors = ['#dc2626', '#ea580c', '#ca8a04', '#65a30d', '#0891b2', '#7c3aed', '#db2777', '#4f46e5']
-const platformPieOption = computed(() => {
-  const p = s.value.platform_distribution || []
-  if (!p.length) return null
-  return {
-    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-    legend: { bottom: 0, left: 'center', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 11 } },
-    series: [{
-      type: 'pie', radius: ['40%', '65%'], center: ['50%', '45%'],
-      label: { show: false }, labelLine: { show: false },
-      data: p.map((x, i) => ({ name: x.name, value: x.count, itemStyle: { color: platformColors[i % platformColors.length] } })),
-    }],
-  }
-})
-
-// ── 外部投诉问题分类柱状图 ──
-const externalCategoryOption = computed(() => {
-  const c = s.value.external_category_distribution || []
-  if (!c.length) return null
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: 90, right: 40, bottom: 24, top: 8 },
-    xAxis: { type: 'value' },
-    yAxis: { type: 'category', data: c.map(x => x.name).reverse() },
-    series: [{
-      type: 'bar', data: c.map(x => x.count).reverse(),
-      itemStyle: { color: '#dc2626', borderRadius: [0, 4, 4, 0] },
-      barMaxWidth: 16,
-    }],
-  }
-})
-
-// ── 外部投诉趋势(支持按日/周/月汇聚) ──
-const externalTrendOption = computed(() => {
-  const t = s.value.external_trend || []
-  if (!t.length) return null
-  const dayMap = {}
-  t.forEach(r => { if (r.day != null) dayMap[r.day] = (dayMap[r.day] || 0) + (r.count || 0) })
-  const agg = aggregateSeries(dayMap, externalTrendGrain.value)
-  return {
-    tooltip: { trigger: 'axis' },
-    grid: { left: 48, right: 24, bottom: 40, top: 16 },
-    xAxis: { type: 'category', data: agg.labels, axisLabel: { fontSize: 10, rotate: agg.labels.length > 12 ? 45 : 0 } },
-    yAxis: { type: 'value', name: '投诉数' },
-    series: [{
-      type: 'line', data: agg.values, smooth: true,
-      areaStyle: { opacity: 0.15 }, itemStyle: { color: '#dc2626' }, lineStyle: { color: '#dc2626' },
-    }],
-  }
-})
-
-// ── 商户号被投诉主体分布 ──
-const merchantEntityOption = computed(() => {
-  const c = s.value.merchant_entity_distribution || []
-  if (!c.length) return null
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: 150, right: 40, bottom: 24, top: 8 },
-    xAxis: { type: 'value' },
-    yAxis: { type: 'category', data: c.map(x => x.name).reverse() },
-    series: [{
-      type: 'bar', data: c.map(x => x.count).reverse(),
-      itemStyle: { color: '#ca8a04', borderRadius: [0, 4, 4, 0] },
-      barMaxWidth: 16,
-    }],
-  }
-})
-
-// ── 商户号被投诉主体趋势(堆叠面积, 商户号内细分; 支持按日/周/月汇聚) ──
-const merchantEntityColors = ['#7c3aed', '#ea580c', '#0891b2', '#ca8a04', '#dc2626', '#2563eb', '#16a34a', '#db2777', '#4f46e5']
-const merchantEntityTrendOption = computed(() => {
-  const t = s.value.merchant_entity_trend || []
-  if (!t.length) return null
-  const entities = Object.keys(t[0]).filter(k => k !== 'day')
-  const byEntity = {}
-  entities.forEach(e => { byEntity[e] = {} })
-  t.forEach(r => {
-    entities.forEach(e => { if (r[e]) byEntity[e][r.day] = (byEntity[e][r.day] || 0) + r[e] })
-  })
-  const agg = aggregateMultiSeries(byEntity, merchantEntityTrendGrain.value)
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    legend: { bottom: 0, left: 'center', type: 'scroll', itemWidth: 12, itemHeight: 12, textStyle: { fontSize: 10 } },
-    grid: { left: 48, right: 24, bottom: 44, top: 16 },
-    xAxis: { type: 'category', data: agg.buckets.map(b => b.label), axisLabel: { fontSize: 10, rotate: agg.buckets.length > 12 ? 30 : 0 } },
-    yAxis: { type: 'value', name: '投诉数' },
-    series: entities.map((e, i) => ({
-      name: e, type: 'line', stack: 'total', smooth: true,
-      data: agg.byName[e].values,
-      itemStyle: { color: merchantEntityColors[i % merchantEntityColors.length] },
-      lineStyle: { color: merchantEntityColors[i % merchantEntityColors.length], width: 2 },
-      areaStyle: { opacity: 0.55 },
-      symbolSize: 4,
-    })),
-  }
-})
-
-// ── 商户号处理人 ──
-const merchantHandlerOption = computed(() => {
-  const h = s.value.merchant_handler_distribution || []
-  if (!h.length) return null
-  const items = [...h].reverse()
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: 80, right: 40, bottom: 24, top: 8 },
-    xAxis: { type: 'value' },
-    yAxis: { type: 'category', data: items.map(x => x.name) },
-    series: [{
-      type: 'bar', data: items.map(x => x.count),
-      itemStyle: { color: '#7c3aed', borderRadius: [0, 4, 4, 0] },
-      barMaxWidth: 16,
-    }],
-  }
-})
-
-// ── 处理人效率排行(当前三源) ──
-const handlerEffOption = computed(() => {
-  const e = currentEff.value
-  if (!e.length) return null
-  const items = [...e].sort((a, b) => b.total - a.total).slice(0, 10).reverse()
-  return {
-    tooltip: {
-      trigger: 'axis', axisPointer: { type: 'shadow' },
-      formatter: (ps) => {
-        const p = ps[0]
-        const row = e.find(x => x.name === p?.name)
-        if (!row) return ''
-        return `${row.name}<br/>受理: ${row.total}<br/>完成: ${row.done}<br/>完成率: ${row.total > 0 ? (row.done / row.total * 100).toFixed(1) : 0}%<br/>平均时长: ${row.avg_hours > 24 ? (row.avg_hours / 24).toFixed(1) + '天' : row.avg_hours.toFixed(1) + 'h'}`
-      }
-    },
-    grid: { left: 80, right: 40, bottom: 24, top: 8 },
-    xAxis: { type: 'value' },
-    yAxis: { type: 'category', data: items.map(x => x.name) },
-    series: [{
-      type: 'bar', data: items.map(x => x.total),
-      itemStyle: { color: '#409eff', borderRadius: [0, 4, 4, 0] },
-      barMaxWidth: 18,
-    }],
-  }
-})
-
-function sourceTagType(source) {
-  if (source === '内部投诉') return 'warning'
-  if (source === '外部投诉') return 'danger'
-  if (source === '商户号投诉') return 'primary'
-  return 'info'
-}
-
-function formatNum(v) {
-  if (v == null || v === '') return '0'
-  const n = Number(v)
-  if (Number.isNaN(n)) return '0'
-  return n.toLocaleString('zh-CN')
-}
-
-function formatTime(t) {
-  if (!t) return '—'
-  const d = dayjs(t)
-  return d.isValid() ? d.format('MM-DD HH:mm') : '—'
-}
-
-// ── 趋势粒度汇聚工具: 把按日序列(day→count)按周/月聚合成带标签的序列 ──
-function aggregateSeries(dayMap, grain) {
-  if (grain === 'day') {
-    const sorted = Object.keys(dayMap).sort()
-    return {
-      labels: sorted.map(d => d.slice(5)),
-      keys: sorted,
-      values: sorted.map(d => dayMap[d]),
-    }
-  }
-  const groups = new Map()
-  Object.entries(dayMap).forEach(([d, v]) => {
-    const dt = dayjs(d)
-    if (!dt.isValid()) return
-    let key, label
-    if (grain === 'week') {
-      const ws = dt.startOf('isoWeek')
-      const we = ws.add(6, 'day')
-      key = ws.format('YYYY-MM-DD')
-      label = `${ws.format('MM-DD')}~${we.format('MM-DD')}`
-    } else {
-      key = dt.format('YYYY-MM')
-      label = dt.format('YYYY-MM')
-    }
-    const g = groups.get(key) || { label, value: 0 }
-    g.value += v
-    groups.set(key, g)
-  })
-  const sorted = [...groups.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
-  return {
-    labels: sorted.map(([, g]) => g.label),
-    keys: sorted.map(([k]) => k),
-    values: sorted.map(([, g]) => g.value),
-  }
-}
-// 多序列汇聚: series 形如 { name: {day: count} }, 返回 { names, buckets, byName(values 对齐 buckets) }
-function aggregateMultiSeries(series, grain) {
-  const names = Object.keys(series)
-  if (!names.length) return { names: [], buckets: [], byName: {} }
-  const byName = {}
-  names.forEach(n => { byName[n] = aggregateSeries(series[n], grain) })
-  // 统一 key 集合(并集, 升序)
-  const keys = new Set()
-  names.forEach(n => byName[n].keys.forEach(k => keys.add(k)))
-  const sortedKeys = [...keys].sort()
-  // key → label 映射(取任一存在的 label)
-  const labelOf = {}
-  names.forEach(n => {
-    byName[n].keys.forEach((k, i) => { if (!labelOf[k]) labelOf[k] = byName[n].labels[i] })
-  })
-  const buckets = sortedKeys.map(k => ({ key: k, label: labelOf[k] || k }))
-  // 每个序列对齐到统一 buckets(缺失补0)
-  names.forEach(n => {
-    const m = {}
-    byName[n].keys.forEach((k, i) => { m[k] = byName[n].values[i] })
-    byName[n].values = buckets.map(b => m[b.key] || 0)
-  })
-  return { names, buckets, byName }
-}
-
-// ── 加载数据 ──
-async function loadData() {
-  loading.value = true
-  try {
-    backlogPage.value = 1 // 时间范围变化 → 积压分页重置
-    const res = await complaintAnalysis(params.value)
-    data.value = res.data || {}
-    loaded.value = true
-    // 同时加载明细
-    loadExternalDetail()
-    loadMerchantDetail()
-    loadBacklog()
-    loadSubjectAnalysis()
-  } finally {
-    loading.value = false
-  }
-}
-
-async function loadSubjectAnalysis() {
-  subjectLoading.value = true
-  try {
-    const res = await complaintSubjectAnalysis(params.value)
-    subjectData.value = res.data || {}
-  } finally {
-    subjectLoading.value = false
-  }
-}
-
-async function loadExternalDetail() {
-  extDetailLoading.value = true
-  try {
-    const p = { ...params.value, limit: 300, source_type: 'external' }
-    const res = await complaintSupplementary(p)
-    // 补充 entity 字段 (315表无 entity 字段, 用 company_entity 兼容)
-    externalDetail.value = (res.data?.items || []).map(it => ({ ...it, entity: it.entity || it.company_entity }))
-  } finally {
-    extDetailLoading.value = false
-  }
-}
-
-async function loadMerchantDetail() {
-  merDetailLoading.value = true
-  try {
-    const p = { ...params.value, limit: 200, include_supplementary: false, source_type: '商户号投诉' }
-    const res = await complaintDetail(p)
-    merchantDetail.value = res.data?.items || []
-  } finally {
-    merDetailLoading.value = false
-  }
-}
-
-async function loadBacklog() {
-  backlogLoading.value = true
-  try {
-    const p = {
-      page: backlogPage.value,
-      page_size: backlogPageSize.value,
-      sort: 'aging_asc',
-      ...params.value, // 时间窗口: 默认近30天, 7/90/自定义跟随页面筛选(仅统计窗口内登记的未完成)
-    }
-    if (backlogFilters.source_type) p.source_type = backlogFilters.source_type
-    if (backlogFilters.status) p.status = backlogFilters.status
-    if (backlogFilters.has_handler != null) p.has_handler = backlogFilters.has_handler
-    const res = await complaintBacklog(p)
-    backlogData.value = res.data || {}
-    backlogTotal.value = res.data?.total || 0
-  } finally {
-    backlogLoading.value = false
-  }
-}
-
-// 导出积压明细 Excel(与 /backlog 同口径, 含当前筛选, 不受分页限制)
-async function handleBacklogExport() {
-  backlogExporting.value = true
-  try {
-    const p = { sort: 'aging_asc', ...params.value }
-    if (backlogFilters.source_type) p.source_type = backlogFilters.source_type
-    if (backlogFilters.status) p.status = backlogFilters.status
-    if (backlogFilters.has_handler != null) p.has_handler = backlogFilters.has_handler
-    const res = await complaintBacklogExport(p)
-    const blobData = res instanceof Blob ? res : res?.data
-    const blob = new Blob([blobData], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
-    let fname = `积压投诉明细_${effectiveStart.value || '全量'}_${effectiveEnd.value || '至今'}.xlsx`
-    const cd = res.headers?.['content-disposition'] || ''
-    const m = /filename\*=UTF-8''([^;]+)/i.exec(cd)
-    if (m) fname = decodeURIComponent(m[1])
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = fname
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-    ElMessage.success('已导出 ' + (backlogTotal.value || 0) + ' 条')
-  } catch (e) {
-    ElMessage.error('导出失败: ' + (e?.message || e))
-  } finally {
-    backlogExporting.value = false
-  }
-}
-
-const SOURCE_TO_AUDIT = { '内部投诉': 'internal', '商户号投诉': 'merchant', '外部投诉': 'external' }
-
-function openAudit(row) {
-  auditForm.source_type = SOURCE_TO_AUDIT[row.source] || 'internal'
-  auditForm.ref_id = row.ticket_no || ''
-  auditForm.device_sn = row.device_sn || ''
-  auditForm.attribution = '其他'
-  auditForm.judgment = '通过'
-  auditForm.conclusion = ''
-  auditVisible.value = true
-}
-
-async function submitAudit() {
-  if (!auditForm.device_sn.trim() && !auditForm.ref_id.trim()) {
-    ElMessage.warning('该工单无SN且无工单号，无法关联核查')
-    return
-  }
-  auditSubmitting.value = true
-  try {
-    await createAudit({ ...auditForm })
-    ElMessage.success('核查已保存')
-    auditVisible.value = false
-    loadBacklog()
-  } finally {
-    auditSubmitting.value = false
-  }
-}
-
-onMounted(() => {
-  loadData()
-})
+const {
+  openDeviceAudit,
+  openPersonAudit,
+  route,
+  loaded,
+  loading,
+  topTab,
+  analysisTab,
+  channelTab,
+  activeTab,
+  rangePreset,
+  timeGrain,
+  compareMode,
+  customRange,
+  range,
+  onRangeChange,
+  overviewData,
+  overviewLoading,
+  data,
+  subjectDrawerVisible,
+  subjectDetailLoading,
+  currentSubject,
+  subjectDetailList,
+  isMobile,
+  _mq,
+  _onMediaChange,
+  subjectTrendGrain,
+  topSubjectTrendGrain,
+  backlogData,
+  backlogLoading,
+  backlogExporting,
+  backlogPage,
+  backlogPageSize,
+  backlogTotal,
+  backlogFilters,
+  auditVisible,
+  auditSubmitting,
+  auditForm,
+  attributions,
+  subjectData,
+  subjectLoading,
+  subjectFilter,
+  b,
+  backlogItems,
+  oldestAging,
+  bySourceCount,
+  sourceBarColor,
+  sourceRatioPct,
+  backlogSnapshotItems,
+  backlogSourceAgingOption,
+  doingPct,
+  backlogAgingOption,
+  reasonColors,
+  reasonTagType,
+  backlogReasonOption,
+  // #291 设备维度汇总(积压口径, 四维桶点击下钻)
+  backlogDeviceTypeOption,
+  backlogComboOption,
+  backlogMerchantOption,
+  backlogActiveAgeOption,
+  drillBacklogDim,
+  subj,
+  subjectRanking,
+  extRatioColor,
+  subjectSeverityOption,
+  escalationChainOption,
+  subjectTrendOption,
+  topSubjectColors,
+  topSubjectTrendOption,
+  s,
+  complaintWaterOption,
+  platformSummary,
+  merchantEntitySummary,
+  params,
+  overviewParams,
+  loadOverview,
+  summaryData,
+  summarySrc,
+  channelLoading,
+  channelRows,
+  loadSummary,
+  channelSrcData,
+  effectiveGrain,
+  CHANNEL_DETAIL_SOURCE,
+  loadChannelDetail,
+  conclusions,
+  onConclusionDrill,
+  ovKpi,
+  kpiDeltaText,
+  kpiDeltaType,
+  fmtKpi,
+  ovStackOption,
+  ovCardTrendOption,
+  ovWaterOption,
+  ovRefundOption,
+  ovAgingOption,
+  ovHourOption,
+  peakHint,
+  ovRepeat,
+  ovRepeatRows,
+  repeatThreshold,
+  ovEscalatedCount,
+  sourcePieColors,
+  platformColors,
+  merchantEntityColors,
+  sourceTagType,
+  formatNum,
+  formatTime,
+  aggregateSeries,
+  aggregateMultiSeries,
+  loadData,
+  loadSubjectAnalysis,
+  onSubjectCompareChange,
+  subjRankCount,
+  openSubjectDetail,
+  sortTimeStr,
+  loadBacklog,
+  handleBacklogExport,
+  SOURCE_TO_AUDIT,
+  openAudit,
+  submitAudit,
+} = useComplaintAnalysis()
 </script>
 
 <style scoped>
@@ -1679,6 +1149,7 @@ onMounted(() => {
 .dim-text { color: #a0a4ab; font-size: 12px; }
 
 .filter-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.filter-label { font-size: 12px; color: #6b7280; }
 
 .kpi-card { border-radius: 10px; padding: 12px 14px; min-height: 68px; display: flex; flex-direction: column; gap: 4px; border: 1px solid rgba(148,163,184,0.15); }
 .kpi-label { font-size: 12px; font-weight: 600; }
@@ -1689,6 +1160,11 @@ onMounted(() => {
 .block-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
 .block-title { font-size: 16px; font-weight: 600; color: #1f2937; }
 .block-hint { font-size: 12px; color: #9ca3af; }
+.nav-wrap { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; padding: 8px 12px; background: #fafbfc; border: 1px solid #ebeef5; border-radius: 8px; }
+.nav-sep { width: 1px; height: 18px; background: #dcdfe6; }
+.nav-wrap :deep(.el-radio-button__inner) { border-radius: 0; }
+.nav-wrap :deep(.el-radio-group:first-child .el-radio-button:first-child .el-radio-button__inner) { border-radius: 4px 0 0 4px; }
+.nav-wrap :deep(.el-radio-group:first-child .el-radio-button:last-child .el-radio-button__inner) { border-radius: 0 4px 4px 0; }
 .block-tabs { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 100; background: #fff; padding: 8px 16px; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); }
 
 .chart-card { background: #fff; border-radius: 8px; padding: 12px; border: 1px solid #ebeef5; }
@@ -1709,6 +1185,13 @@ onMounted(() => {
 .snapshot-source-fill { height: 100%; border-radius: 5px; transition: width 0.3s; }
 .snapshot-source-cnt { width: 36px; text-align: right; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .snapshot-list { max-height: 190px; overflow-y: auto; }
+/* ── A5/A2 (#72) 新增区块样式 ── */
+.peak-hint { font-size: 11px; color: #6b7280; margin-top: 6px; line-height: 1.6; }
+.repeat-summary { display: flex; align-items: baseline; gap: 6px; font-size: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+.repeat-kpi { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.repeat-list { max-height: 168px; overflow-y: auto; }
+.repeat-row { display: flex; align-items: center; gap: 6px; padding: 5px 2px; border-bottom: 1px dashed #f1f3f5; }
+.repeat-days { font-size: 10px; }
 .snapshot-row { display: flex; align-items: center; gap: 6px; padding: 5px 2px; border-bottom: 1px dashed #f1f3f5; }
 .snapshot-rank { width: 16px; font-size: 11px; color: #9ca3af; text-align: center; }
 .snapshot-no { flex: 1; font-size: 12px; color: #374151; font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1737,5 +1220,7 @@ onMounted(() => {
   :deep(.el-table__body-wrapper) { overflow-x: auto; }
   :deep(.el-card) { overflow: hidden; }
   .block-tabs { padding: 6px 10px; }
+  .nav-wrap { padding: 6px 8px; gap: 6px; }
+  .nav-sep { display: none; }
 }
 </style>

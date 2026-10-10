@@ -9,7 +9,7 @@
           <span style="margin-left: 8px">{{ formatTime(report.time_start) }} ~ {{ formatTime(report.time_end) }}</span>
           <span v-if="report.assignee_id" style="margin-left: 8px; color: #909399">· 负责人 {{ userNameMap[report.assignee_id] || report.assignee_id }}</span>
           <span v-if="report.due_date" style="margin-left: 8px; color: #909399">· 期限 {{ formatDate(report.due_date) }}</span>
-          <el-link v-if="report.source_weekly_id" type="primary" :underline="false" style="margin-left: 8px" @click="$router.push(`/management/weekly/${report.source_weekly_id}`)">
+          <el-link v-if="report.source_weekly_id" type="primary" underline="never" style="margin-left: 8px" @click="$router.push(`/management/weekly/${report.source_weekly_id}`)">
             · 来源周报看板 #{{ report.source_weekly_id }}
           </el-link>
         </div>
@@ -103,7 +103,7 @@
         <el-alert type="info" :closable="false" class="mb-16" show-icon>
           草稿阶段(纯快照模式):请填入关键结果快照(视图配置+执行结果JSON),确认后固化,不再随源数据变。或上方"套用模板"启用看板模式。
         </el-alert>
-        <el-input v-model="snapshotText" type="textarea" :rows="10" placeholder='快照JSON,如 {"views":[...],"results":[...]}' />
+        <el-input v-model="snapshotText" type="textarea" :rows="10" placeholder="快照JSON,如 {&quot;views&quot;:[...],&quot;results&quot;:[...]}" />
       </div>
       <div v-else>
         <pre v-if="report.snapshot" class="snapshot-pre">{{ formatJson(report.snapshot) }}</pre>

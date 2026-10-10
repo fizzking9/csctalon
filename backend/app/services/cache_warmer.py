@@ -86,12 +86,24 @@ def _warm_one(key: str, fn, args: tuple, kwargs: dict, name: str, *, force: bool
     - force=True: 无条件重算并写缓存(同步后数据已变, 必须刷新)
     - force=False: 仅当 key 剩余 TTL ≤ FRESH_TTL_THRESHOLD(或不存在)才重算,
       仍新鲜则跳过 → 节流, 避免每分钟都重算
+
+    ── #92 可观测性 (2026-09-14) ──────────────────────────────────────
+    ⚠️ 本函数的 `except` 把预热异常降级为**一条 WARNING** —— 这在运维上是
+       "静默失败"：生产曾连续 5 天 `complaint:subject` 预热全败，而**没有任何
+       指标**暴露它，最终表现为「接口变慢但不报错」（实测那两个投诉接口
+       115 次调用 **0 次缓存命中**、耗时 0.19~0.25s，而对照组的
+       `analytics/today/kpi` 因命中缓存耗时 0.000s）。
+
+    为此增加**结构化结果记录**：每次预热把 (name, outcome) 记入线程局部
+    累加器，由 `_run` 在收尾时汇总上报（见 `_warm_stats_report`）。
+    outcome ∈ {"warmed", "fresh", "failed"}。
     """
     r = get_redis()
     if r is not None and not force:
         try:
             ttl = r.ttl(key)  # -2=不存在, -1=无过期, 否则剩余秒
             if isinstance(ttl, int) and ttl > FRESH_TTL_THRESHOLD:
+                _record_warm_outcome(name, "fresh")
                 return False  # 仍新鲜, 跳过重算
         except Exception:
             pass  # ttl 查询失败 → 兜底重算
@@ -100,11 +112,64 @@ def _warm_one(key: str, fn, args: tuple, kwargs: dict, name: str, *, force: bool
         if result is not None:
             # 返回 cache_set_json 的实际写入结果(True=已写入缓存),
             # Redis 不可用时 cache_set_json 返回 False → warmed 计数准确
-            return cache_set_json(key, result, WARM_TTL)
+            ok = cache_set_json(key, result, WARM_TTL)
+            _record_warm_outcome(name, "warmed" if ok else "failed")
+            return ok
+        _record_warm_outcome(name, "failed")
         return False
     except Exception as e:  # noqa: BLE001  单接口失败不影响其余
         logger.warning("预热 %s 失败(不影响业务): %s", name, e)
+        _record_warm_outcome(name, "failed", err=e)
         return False
+
+
+# ── 预热结果累加器 (#92) ────────────────────────────────────────────
+# 为什么用模块级 dict 而非「函数返回值层层透传」：
+#   `_warm_*` 系列函数已返回「成功条数」且被多处复用（今日/本周/月报视图），
+#   改动签名会波及全部调用方。用**单进程累加器**最小侵入：
+#   `_run()` 在开始前 reset、结束时 report（单 worker 部署，见 AGENTS.md）。
+_WARM_STATS: dict[str, list] = {"warmed": [], "fresh": [], "failed": []}
+
+
+def _record_warm_outcome(name: str, outcome: str, err: Exception | None = None) -> None:
+    """记录单次预热结果（供 `_warm_stats_report` 汇总）。
+
+    仅记录**失败项名称与异常类型**，不记录异常详情 —— 避免日志膨胀
+    （这正是 #92 的另一个教训：6792 条同型告警占了 app.log 的 28.9% 字节）。
+    """
+    if outcome == "failed":
+        label = f"{name}({type(err).__name__})" if err is not None else name
+        _WARM_STATS["failed"].append(label)
+    else:
+        _WARM_STATS[outcome].append(name)
+
+
+def _warm_stats_report(label: str) -> None:
+    """预热收尾汇总上报 (#92)。
+
+    把 N 条孤立 WARNING 聚合成**一条** INFO/WARNING：
+      · 有失败 → WARNING（含失败清单，便于一眼定位是哪个 key 长期不命中）
+      · 全成功 → INFO（含 warmed/fresh 数量，用于确认节流是否生效）
+    这是「预热失败必须可见」的落地 —— 不再依赖人工翻日志发现。
+    """
+    warmed = len(_WARM_STATS["warmed"])
+    fresh = len(_WARM_STATS["fresh"])
+    failed = len(_WARM_STATS["failed"])
+    total = warmed + fresh + failed
+    if total == 0:
+        return
+    if failed:
+        # 失败清单去重并限长，避免日志被撑爆（同型失败只留一个样本）
+        uniq = sorted(set(_WARM_STATS["failed"]))
+        shown = uniq[:10]
+        more = f" 等 {len(uniq)} 项" if len(uniq) > 10 else ""
+        logger.warning(
+            "预热汇总(%s): 共 %d 项 → 写入 %d / 仍新鲜 %d / **失败 %d** ← 失败项: %s%s",
+            label, total, warmed, fresh, failed, ", ".join(shown), more,
+        )
+    else:
+        logger.info("预热汇总(%s): 共 %d 项 → 写入 %d / 仍新鲜 %d / 失败 0",
+                    label, total, warmed, fresh)
 
 
 def _warm_analytics(db, start: str, end: str, grain: str, label: str, *, force: bool = False) -> int:
@@ -162,6 +227,7 @@ def _warm_complaints(
         complaint_analysis,
         complaint_backlog,
         complaint_detail,
+        complaint_health_metrics_endpoint,
         complaint_subject_analysis,
         complaint_summary,
     )
@@ -171,16 +237,40 @@ def _warm_complaints(
         complaint_summary.__wrapped__, (db, None), {"start": start, "end": end},
         f"{label}:complaint:summary", force=force,
     )
+    # ★ #87 投诉健康度指标（活跃SN/投诉率三维/三岗位负荷/重复投诉率）
+    #   ⚠️ key 必须与 `complaints.complaint_health_metrics_endpoint` 的
+    #      `f"complaint:health:{date}:{start}:{end}"` **逐字符对齐**
+    #      （本模块注释开头已声明该约定）。
     n += _warm_one(
-        f"complaint:detail:{start}:{end}:None:{detail_limit}:1",
+        f"complaint:health:None:{start}:{end}",
+        complaint_health_metrics_endpoint.__wrapped__, (db, None),
+        {"date": None, "start": start, "end": end},
+        f"{label}:complaint:health", force=force,
+    )
+    n += _warm_one(
+        # ⚠️ key 形状须与路由 `complaint:detail:{start}:{end}:{source_type}:{subject}:{limit}:{bool}`
+        #    对齐 —— 曾漏 `subject`（None）段 → 预热写进的 key 与路由读的 key
+        #    不一致，**缓存永不命中**（且不报错）。由
+        #    `tests/test_cache_warmer_alignment.py` 守护。
+        f"complaint:detail:{start}:{end}:None:None:{detail_limit}:1",
         complaint_detail.__wrapped__, (db, None),
-        {"start": start, "end": end, "source_type": None, "limit": detail_limit, "include_supplementary": True},
+        {"start": start, "end": end, "source_type": None, "subject": None,
+         "limit": detail_limit, "include_supplementary": True},
         f"{label}:complaint:detail", force=force,
     )
     # 被投诉主体分析 + 投诉决策分析(看板高频, 历史无缓存缺口): 与 summary 同窗口
+    # ⚠️ #67 P2 (2026-09-11) 给 `complaint_subject_analysis` 加了 4 个查询参数
+    #    (`source_type`/`sort_by`/`top_n`/`compare`)，但**本处未同步更新** →
+    #    缺省值变成 `Query(...)` 对象 → 内部比较时报
+    #    `'>' not supported between instances of 'Query' and 'int'` →
+    #    预热**每次都静默失败**（被 `_warm_one` 的 try/except 吞掉）。
+    #    2026-09-14 修复：key 与 kwargs 都补齐默认值，形状与路由 `cached_json` 对齐。
+    #    ⚠️ 后续再给该接口加参数时，**两处必须同步改**。
     n += _warm_one(
-        f"complaint:subject:{start}:{end}",
-        complaint_subject_analysis.__wrapped__, (db, None), {"start": start, "end": end},
+        f"complaint:subject:{start}:{end}:all:total:0:none",
+        complaint_subject_analysis.__wrapped__, (db, None),
+        {"start": start, "end": end,
+         "source_type": "all", "sort_by": "total", "top_n": 0, "compare": "none"},
         f"{label}:complaint:subject", force=force,
     )
     n += _warm_one(
@@ -224,8 +314,8 @@ def _warm_reports(db, *, force: bool = False) -> int:
     由 warm_after_sync 调用(每小时刷新一次, 数据同步后保持月报新鲜)。
     key 与 analytics.py / complaints.py 路由层逐字符对齐; 窗口端点 service 取 datetime(_dt)。
     """
-    from app.services import analytics as A
     from app.api.v1.complaints import complaint_analysis, complaint_subject_analysis
+    from app.services import analytics as A
 
     s = _days_ago_str(29)   # 近30天 = 月报窗口
     e = _today_str()
@@ -233,7 +323,8 @@ def _warm_reports(db, *, force: bool = False) -> int:
     sd, ed = _dt(s), _dt(e)
     specs = [
         # 静态(无窗口, 任意查看都命中同一 key)
-        ("summary",        "summary",          A.dashboard_summary,        (db,), {}),
+        # ⚠️ 2026-09-14 (#86): 已移除 `("summary", ...A.dashboard_summary)` ——
+        #   该接口已删除(废弃 + 错误口径 + 前端零调用)，继续预热是纯浪费。
         ("op:status",      "op:status",        A.operation_status_dist,    (db,), {}),
         ("op:method",      "op:method",        A.operation_method_dist,    (db,), {}),
         ("op:reason:10",   "op:reason:10",     A.operation_reason_top,     (db, 10), {}),
@@ -253,8 +344,10 @@ def _warm_reports(db, *, force: bool = False) -> int:
         # 投诉决策/被投诉主体看板(ComplaintAnalysis.vue 默认近30天: subtract(30)~today)
         ("complaint:analysis", f"complaint:analysis:{s30}:{e}",
          complaint_analysis.__wrapped__, (db, None), {"start": s30, "end": e}),
-        ("complaint:subject",  f"complaint:subject:{s30}:{e}",
-         complaint_subject_analysis.__wrapped__, (db, None), {"start": s30, "end": e}),
+        ("complaint:subject",  f"complaint:subject:{s30}:{e}:all:total:0:none",
+         complaint_subject_analysis.__wrapped__, (db, None),
+         {"start": s30, "end": e,
+          "source_type": "all", "sort_by": "total", "top_n": 0, "compare": "none"}),
     ]
     return sum(
         _warm_one(key, fn, args, kw, f"月报:{name}", force=force)
@@ -267,6 +360,9 @@ def _run(label: str, do_warm) -> None:
 
     do_warm: 接收 db 参数的闭包, 内部自行决定是否强制重算(force)。
     _can_warm() 始终检查(Redis 可用 + 非同步中) —— 不能在同步进行中抢 DB。
+
+    #92: 收尾时输出**汇总**（成功/跳过/失败计数 + 失败清单），
+         让「预热静默失败」不可能再无人知晓。
     """
     if not _can_warm():
         logger.debug("预热跳过(%s): Redis 不可用或同步进行中", label)
@@ -275,9 +371,14 @@ def _run(label: str, do_warm) -> None:
         logger.debug("预热跳过(%s): 已有预热在跑", label)
         return
     started = datetime.now(TZ_CN)
+    # 复位累加器（本次预热的统计口径仅覆盖本轮）
+    _WARM_STATS["warmed"].clear()
+    _WARM_STATS["fresh"].clear()
+    _WARM_STATS["failed"].clear()
     db = SessionLocal()
     try:
         do_warm(db)
+        _warm_stats_report(label)   # #92: 先报明细汇总（有失败时升 WARNING）
         logger.info("预热完成(%s): 耗时 %.1fs", label, (datetime.now(TZ_CN) - started).total_seconds())
     except Exception as e:  # noqa: BLE001  预热本身失败不影响业务
         logger.warning("预热异常(%s, 不影响业务): %s", label, e)
@@ -334,6 +435,12 @@ def start_warm_loop():
         try:
             await asyncio.sleep(8)
             await asyncio.to_thread(warm_on_startup)
+            # #123 AI 报告预生成: 启动延迟触发(白天 8-23 才跑, 夜间省计算)
+            try:
+                from app.services.ai_report_worker import warm_on_startup as ai_warm_startup
+                await asyncio.to_thread(ai_warm_startup)
+            except Exception:  # noqa: BLE001
+                pass
         except asyncio.CancelledError:
             return
         except Exception:  # noqa: BLE001  预热失败不影响服务
@@ -342,6 +449,27 @@ def start_warm_loop():
             try:
                 await asyncio.sleep(60)
                 await asyncio.to_thread(warm_idle)
+                # #123 AI 报告预生成: 每分钟扫描当前时刻匹配的 daily/weekly/monthly 模板
+                try:
+                    from app.services.ai_report_worker import warm_idle as ai_warm_idle
+                    await asyncio.to_thread(ai_warm_idle)
+                except Exception:  # noqa: BLE001
+                    pass
+                # #153 AI 提示词健康报告: 每日一次(当日未生成且白天), 落 system_events
+                try:
+                    from app.services.ai_feedback_service import (
+                        check_daily_health_report_idle,
+                    )
+                    await asyncio.to_thread(check_daily_health_report_idle)
+                except Exception:  # noqa: BLE001
+                    pass
+                # #163 数据治理体检: 每日低峰(0-5点)自动一次, 落 findings + system_events
+                #   刻意避开 8-24 点同步窗口(设计 §九「不占同步窗口」)
+                try:
+                    from app.services.governance_scan_service import governance_idle
+                    await asyncio.to_thread(governance_idle)
+                except Exception:  # noqa: BLE001
+                    pass
             except asyncio.CancelledError:
                 return
             except Exception:  # noqa: BLE001

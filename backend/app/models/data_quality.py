@@ -3,7 +3,7 @@
 异常数据模式识别规则, 先留字段后扩充。
 """
 
-from sqlalchemy import Boolean, Integer, String, Text
+from sqlalchemy import Boolean, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 

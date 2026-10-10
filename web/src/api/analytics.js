@@ -1,9 +1,8 @@
 import request from '@/api'
 
-// 首页汇总
-export function getSummary() {
-  return request.get('/analytics/summary')
-}
+// ⚠️ 2026-09-14 (#86): 已删除 `getSummary()`（GET /analytics/summary）。
+//   该接口已废弃（后端公式含卡商且不扣重叠，与 #53/#81 口径冲突），
+//   且本函数**全仓零调用点**（只有定义无使用）→ 随后端接口一并清理。
 
 // 运营分析
 export const operation = {
@@ -27,6 +26,12 @@ export const category = {
   serviceItem: () => request.get('/analytics/category/service-item'),
   merchant: (params) => request.get('/analytics/category/merchant', { params }),
   package: (params) => request.get('/analytics/category/package', { params }),
+}
+
+// 分品类运营看板 (#254 B3-10 / #293 改): 设备类型/套餐(归一)/商户号 三维聚合运营 KPI
+// #293: 全部活动量列由 start/end 单一窗口驱动(前端传 grain 对应窗口), 退款=口径A实际退款
+export const categoryOps = {
+  opsOverview: (params) => request.get('/analytics/category/ops-overview', { params }),
 }
 
 // 人员操作分析

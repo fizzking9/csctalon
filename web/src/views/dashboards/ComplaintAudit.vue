@@ -28,9 +28,9 @@
             </el-form-item>
             <el-form-item label="评判">
               <el-radio-group v-model="form.judgment">
-                <el-radio-button label="通过" />
-                <el-radio-button label="有问题" />
-                <el-radio-button label="需改进" />
+                <el-radio-button value="通过" />
+                <el-radio-button value="有问题" />
+                <el-radio-button value="需改进" />
               </el-radio-group>
             </el-form-item>
             <el-form-item label="核查结论">
@@ -44,7 +44,7 @@
 
         <el-card>
           <template #header><span style="font-weight: 600">核查记录</span></template>
-          <el-table :data="audits" v-loading="loading" border stripe size="small" max-height="360">
+          <el-table v-loading="loading" :data="audits" border stripe size="small" max-height="360">
             <el-table-column label="来源" width="90">
               <template #default="{ row }">{{ sourceLabel(row.source_type) }}</template>
             </el-table-column>

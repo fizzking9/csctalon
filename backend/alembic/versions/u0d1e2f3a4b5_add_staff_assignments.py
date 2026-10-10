@@ -14,9 +14,9 @@ Create Date: 2026-07-30 10:00:00.000000
 - 生命周期为离散单点事件,挂 persons 标量列,不进 SCD2 表
 """
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "u0d1e2f3a4b5"
 down_revision = "t9c0d1e2f3a4"

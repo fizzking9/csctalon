@@ -3,9 +3,9 @@
     <div class="flex-between mb-16">
       <div class="page-title" style="margin: 0">人员操作分析</div>
       <el-radio-group v-model="range" size="small" @change="loadAll">
-        <el-radio-button label="7">近7天</el-radio-button>
-        <el-radio-button label="30">近30天</el-radio-button>
-        <el-radio-button label="90">近90天</el-radio-button>
+        <el-radio-button value="7">近7天</el-radio-button>
+        <el-radio-button value="30">近30天</el-radio-button>
+        <el-radio-button value="90">近90天</el-radio-button>
       </el-radio-group>
     </div>
 

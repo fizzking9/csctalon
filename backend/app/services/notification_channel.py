@@ -1,11 +1,11 @@
-"""通知通道抽象 - 预警通知分发(站内信/群机器人/邮件, 可扩充)
+"""通知通道抽象 - 预警通知分发(站内信/群机器人, 可扩充)
 
 Channel 接口:
     send(db, title, content, recipients) -> ChannelResult
 
 - InAppChannel: 站内信(复用 notifier.notify)
 - WebhookChannel: 企业微信/钉钉/飞书 群机器人(通用 webhook, markdown 文本)
-- EmailChannel: 邮件(占位, 后续接入)
+  (#185 清理: 原 EmailChannel 为"未接入(占位)"空壳, 前端却有可选入口, 已删除)
 
 分发: dispatch_alert(db, alert, channels, roles, silence_window)
   - 静默时段内不推送(仅入库, 投递记录=skipped)
@@ -16,7 +16,7 @@ Channel 接口:
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -39,7 +39,8 @@ class ChannelResult:
 class Channel(Protocol):
     code: str
 
-    def send(self, db: Session, title: str, content: str | None, recipients: list[str]) -> ChannelResult: ...  # noqa: E704
+    def send(self, db: Session, title: str, content: str | None, recipients: list[str],
+             prefix: str = "【预警】") -> ChannelResult: ...  # noqa: E704
 
 
 class InAppChannel:
@@ -47,7 +48,8 @@ class InAppChannel:
 
     code = "inapp"
 
-    def send(self, db: Session, title: str, content: str | None, recipients: list[str]) -> ChannelResult:
+    def send(self, db: Session, title: str, content: str | None, recipients: list[str],
+             prefix: str = "【预警】") -> ChannelResult:
         count = _notify(db, None, roles=recipients, type="alert", title=title, content=content,
                         ref_type="alert")
         return ChannelResult(ok=count > 0, detail=f"站内信 {count} 条")
@@ -61,34 +63,42 @@ class WebhookChannel:
         self.name_cn = name_cn
         self.config = config or {}
 
-    def send(self, db: Session, title: str, content: str | None, recipients: list[str]) -> ChannelResult:
+    def send(self, db: Session, title: str, content: str | None, recipients: list[str],
+             prefix: str = "【预警】") -> ChannelResult:
         url = self.config.get("webhook_url") or self.config.get("url")
         if not url:
             return ChannelResult(ok=False, detail="未配置 webhook_url")
-        text = f"**【预警】** {title}"
+        text = f"{prefix} {title}"
         if content:
             text += f"\n{content}"
         try:
             import httpx
-            payload = {"msgtype": "text", "text": {"content": text[:1800]}}
+            # 三家机器人文本消息 payload 不同(2026-09-29 补飞书):
+            #   企微/钉钉: {"msgtype":"text","text":{"content":...}}
+            #   飞书:      {"msg_type":"text","content":{"text":...}}
+            # config.provider: wecom(默认)/dingtalk/feishu
+            provider = (self.config.get("provider") or "wecom").lower()
+            if provider == "feishu":
+                payload = {"msg_type": "text", "content": {"text": text[:1800]}}
+            else:
+                payload = {"msgtype": "text", "text": {"content": text[:1800]}}
             resp = httpx.post(url, json=payload, timeout=10)
             ok = 200 <= resp.status_code < 300
+            # 飞书业务错误也在 200 响应体里(code/StatusCode 任一非 0 即失败)
+            if ok and provider == "feishu":
+                try:
+                    body = resp.json()
+                    biz_codes = [body[k] for k in ("code", "StatusCode") if k in body]
+                    if any(c not in (0, None) for c in biz_codes):
+                        ok = False
+                except Exception:  # noqa: BLE001 非 JSON 响应按 HTTP 状态处理
+                    pass
             return ChannelResult(ok=ok, detail=f"HTTP {resp.status_code}")
         except Exception as e:  # noqa: BLE001
             return ChannelResult(ok=False, detail=f"发送异常: {e}")
 
 
-class EmailChannel:
-    """邮件通道(占位, 后续接入 SMTP)"""
-
-    code = "email"
-
-    def send(self, db: Session, title: str, content: str | None, recipients: list[str]) -> ChannelResult:
-        return ChannelResult(ok=False, detail="邮件通道未接入(占位)")
-
-
 _CHANNEL_FACTORIES: dict[str, type] = {}
-
 
 def register_channel_type(channel_type: str, factory: type) -> None:
     _CHANNEL_FACTORIES[channel_type] = factory
@@ -103,8 +113,6 @@ def get_channel(db: Session, code: str) -> Channel | None:
         return InAppChannel()
     if row.channel_type == "webhook":
         return WebhookChannel(row.code, row.name_cn, row.config)
-    if row.channel_type == "email":
-        return EmailChannel()
     return None
 
 
@@ -168,3 +176,55 @@ def dispatch_alert(
             results.append({"channel": code, "status": "failed"})
     db.flush()
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 系统级 error 事件外发(2026-09-29)
+# ─────────────────────────────────────────────────────────────────────
+# 与业务预警 dispatch_alert 的区别:
+#   - 系统事件(LLM 鉴权挂/Redis 挂等)是"系统自身故障", 无 alert 规则/静默时段概念,
+#     夜间也必须送达(事故常在非工作时间发生), 故不做静默时段判断;
+#   - 频率已在 record_system_event 的 dedup_minutes 处收敛, 这里只负责送达;
+#   - fire-and-forget 后台线程: webhook 同步 httpx 最长 10s, 绝不能阻塞业务提交;
+#   - 通道选择: 优先 code='system_alert' 的启用 webhook(可与业务预警分群);
+#     未配置则回退任意启用的 webhook 通道; 一个都没有 → 静默跳过。
+def dispatch_system_alert_async(
+    *, title: str, summary: str | None, category: str, action: str
+) -> None:
+    """在后台 daemon 线程把一条系统告警推送到群机器人。任何异常都不外抛。"""
+    import threading
+    from datetime import timedelta
+
+    def _run() -> None:
+        # 延迟导入避免循环依赖(SessionLocal 在大部分运行期已可用)
+        from app.core.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            row = db.scalar(select(NotificationChannel).where(
+                NotificationChannel.code == "system_alert",
+                NotificationChannel.channel_type == "webhook",
+                NotificationChannel.enabled.is_(True),
+            ))
+            if row is None:
+                row = db.scalar(select(NotificationChannel).where(
+                    NotificationChannel.channel_type == "webhook",
+                    NotificationChannel.enabled.is_(True),
+                ).order_by(NotificationChannel.id))
+            if row is None:
+                return  # 未配置任何 webhook 通道 → 不外发(站内角标仍可见)
+            ch = WebhookChannel(row.code, row.name_cn, row.config)
+            now_cn = datetime.now(timezone.utc).astimezone(
+                timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
+            body = f"时间: {now_cn}\n来源: {category}/{action}"
+            if summary:
+                body += f"\n{summary}"
+            r = ch.send(db, title, body, [], prefix="【系统告警】")
+            if not r.ok:
+                logger.warning("系统告警 webhook 投递失败(channel=%s): %s", row.code, r.detail)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("系统告警外发异常(不影响主流程): %s", e)
+        finally:
+            db.close()
+
+    threading.Thread(target=_run, name="sys-alert-webhook", daemon=True).start()

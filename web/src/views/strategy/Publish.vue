@@ -28,8 +28,8 @@
     <div class="page-container" style="padding-top: 0">
       <div class="filter-bar flex gap-8" style="flex-wrap: wrap; align-items: center">
         <el-radio-group v-model="filter.category" @change="loadData">
-          <el-radio-button label="">全部</el-radio-button>
-          <el-radio-button v-for="c in categories" :key="c" :label="c">{{ c }}</el-radio-button>
+          <el-radio-button value="">全部</el-radio-button>
+          <el-radio-button v-for="c in categories" :key="c" :value="c">{{ c }}</el-radio-button>
         </el-radio-group>
         <el-input
           v-model="filter.keyword"
@@ -45,7 +45,7 @@
     </div>
 
     <!-- 主体:左列表 + 右详情 -->
-    <div class="page-container publish-body" v-loading="loading">
+    <div v-loading="loading" class="page-container publish-body">
       <div class="doc-list">
         <div v-if="!filteredList.length && !loading" class="empty-tip">
           <el-empty description="暂无已发布文档" />
@@ -58,7 +58,7 @@
           @click="selectDoc(d)"
         >
           <div class="doc-item-title">
-            <span class="unread-dot" v-if="!d.has_read" />
+            <span v-if="!d.has_read" class="unread-dot" />
             {{ d.title }}
           </div>
           <div class="doc-item-meta">

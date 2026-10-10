@@ -20,7 +20,7 @@
     </el-card>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe @row-click="openDetail" style="cursor: pointer">
+      <el-table v-loading="loading" :data="list" border stripe style="cursor: pointer" @row-click="openDetail">
         <el-table-column prop="title" label="标题" show-overflow-tooltip />
         <el-table-column prop="category" label="分类" width="100" />
         <el-table-column prop="question" label="问题/场景" show-overflow-tooltip />

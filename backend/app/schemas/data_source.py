@@ -42,6 +42,17 @@ class DataSourceOut(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # ── 数据查看树排序与投影（工单 #100） ──
+    # sort_order: 组内业务顺序（服务端排序用；数据源表不存该列，由种子/接口填充）
+    sort_order: int | None = None
+    # is_projection=True 表示这是**同表别名**（如投诉组下的 service_tickets 投影），
+    # 不落 data_sources 表，只读，且必须展示真身位置以防"重复展示"误判
+    is_projection: bool = False
+    projection_of: str | None = None
+    readonly: bool = False
+    true_body_category: str | None = None
+    true_body_name: str | None = None
+
 
 class DataSourceDetail(DataSourceOut):
     fields: list[DataSourceFieldOut] = []

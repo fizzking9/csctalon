@@ -80,3 +80,99 @@ body,
 .text-warning {
   color: #e6a23c;
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+   设计说明（Design Rationale）—— 全局移动端框架（#225 第一层）
+   ────────────────────────────────────────────────────────────────────────
+   目的（替谁回答什么问题）
+     替**外出/不在工位的值班主管与管理员**回答：手机上能否完成
+     「登录 → 切菜单 → 看核心数字 → 点开下钻明细」这条最短闭环。
+     不为移动端重写一套 UI，只保证现有桌面信息架构在窄屏下**可用、可读、可点**。
+   逻辑（为什么这样组织）
+     · 断点单一来源 = 768px（与 Element Plus xs、MainLayout 既有 media 查询、
+       useToday 的 isMobile 完全对齐），避免多处断点漂移；
+     · 桌面 DOM 结构**零改动**：全部用 media query 覆盖，杜绝桌面端回归；
+     · 本文件只承载**跨页面通用**的窄屏规则（el-table 横向滚动、el-dialog 宽度、
+       触控目标），页面级适配仍写在各 .vue 的 scoped 样式里 —— 谁的问题归谁。
+   口径（约束范围）
+     · 仅约束 768px 以下视口；≥769px 时下列规则全部不生效（实测验证）；
+     · el-table 的横向滚动依赖 Element 自带 `.el-table__body-wrapper`，
+       此处仅保证**父容器不截断**（页面容器在窄屏改为 overflow-x:hidden），
+       并对表体启用 -webkit-overflow-scrolling 提升惯性滚动体验。
+   取舍（不做什么及原因）
+     · ❌ 不新建 useViewport composable —— 项目内仅 MainLayout/useToday 两处
+       需要 JS 判断断点，各自 matchMedia 语义不同（一个管布局一个管图表），
+       强行抽象反而引入耦合；CSS 覆盖不到的地方才用 JS。
+     · ❌ 不做全量 75+ 页响应式重写 —— #225 只交付「全局框架 + Today 试点」，
+       其余页面沿用桌面布局横向滚动即可用，按使用频率后续逐个推进。
+     · ❌ 不做独立 App / 小程序 —— 移动端仅做"能看能点"，不做原生体验。
+     · ❌ 不为移动端单独隐藏列 —— 列裁剪规则由各页面根据自身业务决定
+       （如 Today 的部门列），全局一刀切会误伤。
+   工单：#225
+   ──────────────────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* 页面容器收窄（原 16px 在 375px 屏上占比过大），并禁止页面级横向滚动 —
+     横向滚动只发生在 el-table 等**组件内部**，不让整页左右晃 */
+  .page-container {
+    padding: 10px 8px;
+    overflow-x: hidden;
+  }
+  .page-title {
+    font-size: 16px;
+    margin-bottom: 10px;
+  }
+
+  /* el-table 窄屏横向滚动：父容器不截断 + 表体惯性滚动。
+     关键列固定（fixed）规则由各页面按需在列上声明，全局不预设。 */
+  .el-table__body-wrapper,
+  .el-table__header-wrapper {
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* el-dialog / el-message-box 在窄屏全宽化（默认 50% 在 375px 上只剩 187px） */
+  .el-dialog {
+    width: 92vw !important;
+    max-width: 92vw;
+    margin-top: 6vh !important;
+  }
+  .el-message-box {
+    width: 92vw;
+    max-width: 92vw;
+  }
+
+  /* el-popover（筛选/核算说明）限宽，避免溢出右侧 */
+  .el-popover.el-popper {
+    max-width: 92vw;
+  }
+
+  /* el-drawer 在窄屏默认已 100%/设定百分比，无需覆盖；此处仅保证 body 不横向溢出 */
+  .el-drawer__body {
+    overflow-x: hidden;
+  }
+
+  /* el-select 下拉面板限宽（筛选器在窄屏容易被撑出屏） */
+  .el-select-dropdown {
+    max-width: 92vw;
+  }
+
+  /* 触控目标：移动端可点击元素最小 32px（44px 是 iOS HIG 理想值，
+     但对 Element small 尺寸组件一刀切 44px 会破坏布局密度，故取 32px 底线，
+     真正需要 44px 的关键入口（如汉堡按钮）在 MainLayout 单独加大） */
+  .el-button--small {
+    min-height: 28px;
+  }
+
+  /* 「标题 + 操作按钮」行（.flex-between）在窄屏自动换行：
+     桌面端 space-between 一行摆开，375px 上标题与按钮会互相挤压，
+     换行后标题独占一行、按钮落到下一行，触控目标也更舒展。
+     卡片内「共 N 条 + 分页」同理，分页器在窄屏需要完整宽度。 */
+  .flex-between {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* 筛选器容器统一允许换行（部分页面内联 style 未写 flex-wrap） */
+  .page-container .el-card .flex {
+    flex-wrap: wrap;
+  }
+}

@@ -30,7 +30,7 @@
 
     <!-- 列表 -->
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe @row-click="openDetail" style="cursor: pointer">
+      <el-table v-loading="loading" :data="list" border stripe style="cursor: pointer" @row-click="openDetail">
         <el-table-column prop="title" label="标题" show-overflow-tooltip min-width="220">
           <template #default="{ row }">
             <el-icon v-if="row.replaces_policy_id || row.replaced_by_policy_id" color="#9b59b6" style="margin-right: 4px"><Connection /></el-icon>

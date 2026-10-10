@@ -68,7 +68,7 @@
 
       <!-- ========== 预警记录 ========== -->
       <el-tab-pane label="预警记录" name="alerts">
-        <el-table :data="alerts" v-loading="loading" border stripe size="small">
+        <el-table v-loading="loading" :data="alerts" border stripe size="small">
           <el-table-column label="级别" width="80">
             <template #default="{ row }"><el-tag :type="levelType(row.level)" size="small">{{ levelLabel(row.level) }}</el-tag></template>
           </el-table-column>
@@ -101,7 +101,7 @@
           <el-table-column prop="code" label="code" width="140" />
           <el-table-column prop="channel_type" label="类型" width="100">
             <template #default="{ row }">
-              <el-tag size="small">{{ { inapp: '站内信', webhook: '群机器人', email: '邮件' }[row.channel_type] || row.channel_type }}</el-tag>
+              <el-tag size="small">{{ { inapp: '站内信', webhook: '群机器人' }[row.channel_type] || row.channel_type }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="启用" width="70">
@@ -123,8 +123,8 @@
         <el-form-item label="规则名" required><el-input v-model="ruleForm.name" /></el-form-item>
         <el-form-item label="模式">
           <el-radio-group v-model="ruleForm.mode">
-            <el-radio-button label="metric">指标模式(推荐)</el-radio-button>
-            <el-radio-button label="legacy">旧模式(激增类)</el-radio-button>
+            <el-radio-button value="metric">指标模式(推荐)</el-radio-button>
+            <el-radio-button value="legacy">旧模式(激增类)</el-radio-button>
           </el-radio-group>
         </el-form-item>
         <template v-if="ruleForm.mode === 'metric'">
@@ -180,16 +180,24 @@
     <!-- 新建通道 -->
     <el-dialog v-model="channelVisible" title="新建通知通道" width="480px">
       <el-form :model="channelForm" label-width="90px">
-        <el-form-item label="code" required><el-input v-model="channelForm.code" placeholder="如 wecom_robot / dingtalk_robot / feishu_robot" /></el-form-item>
+        <el-form-item label="code" required>
+          <el-input v-model="channelForm.code" placeholder="如 system_alert(系统告警) / feishu_robot(业务预警)" />
+        </el-form-item>
         <el-form-item label="通道名" required><el-input v-model="channelForm.name_cn" /></el-form-item>
         <el-form-item label="类型">
           <el-select v-model="channelForm.channel_type" style="width: 100%">
             <el-option label="群机器人 webhook" value="webhook" />
-            <el-option label="邮件" value="email" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="机器人">
+          <el-select v-model="channelForm.provider" style="width: 100%">
+            <el-option label="飞书" value="feishu" />
+            <el-option label="企业微信" value="wecom" />
+            <el-option label="钉钉" value="dingtalk" />
           </el-select>
         </el-form-item>
         <el-form-item label="Webhook URL">
-          <el-input v-model="channelForm.webhook_url" placeholder="企业微信/钉钉/飞书群机器人 webhook 地址" />
+          <el-input v-model="channelForm.webhook_url" placeholder="群机器人 webhook 地址; code=system_alert 时接收系统故障告警" />
         </el-form-item>
         <el-form-item label="说明"><el-input v-model="channelForm.description" /></el-form-item>
       </el-form>
@@ -227,7 +235,7 @@ const thresholdVisible = ref(false)
 const thresholdForm = reactive({ code: '', name: '', excellent_value: undefined, warning_value: undefined, critical_value: undefined })
 
 const channelVisible = ref(false)
-const channelForm = reactive({ code: '', name_cn: '', channel_type: 'webhook', webhook_url: '', description: '' })
+const channelForm = reactive({ code: '', name_cn: '', channel_type: 'webhook', webhook_url: '', provider: 'feishu', description: '' })
 
 const formatTime = (t) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-')
 const formatNum = (v) => (v == null ? '-' : Number(v).toLocaleString('zh-CN'))
@@ -331,7 +339,7 @@ async function handleSaveThreshold() {
 }
 
 function openChannel() {
-  Object.assign(channelForm, { code: '', name_cn: '', channel_type: 'webhook', webhook_url: '', description: '' })
+  Object.assign(channelForm, { code: '', name_cn: '', channel_type: 'webhook', webhook_url: '', provider: 'feishu', description: '' })
   channelVisible.value = true
 }
 
@@ -346,7 +354,7 @@ async function handleCreateChannel() {
       code: channelForm.code,
       name_cn: channelForm.name_cn,
       channel_type: channelForm.channel_type,
-      config: { webhook_url: channelForm.webhook_url },
+      config: { webhook_url: channelForm.webhook_url, provider: channelForm.provider },
       description: channelForm.description,
     })
     ElMessage.success('已创建')

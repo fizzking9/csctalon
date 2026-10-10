@@ -55,7 +55,7 @@
               <el-tag v-else type="info" size="small">待配置</el-tag>
             </el-descriptions-item>
           </el-descriptions>
-          <el-button type="primary" plain @click="authorize" :disabled="!status.app_configured">
+          <el-button type="primary" plain :disabled="!status.app_configured" @click="authorize">
             重新授权
           </el-button>
           <el-button type="danger" plain @click="revoke">解除授权</el-button>
@@ -166,6 +166,7 @@ import {
   revokeTencentDoc,
   listComplaintSyncLogs,
 } from '@/api/docSync'
+import { usePolling, POLL_INTERVALS } from '@/composables/usePolling'
 
 const status = ref({})
 const credForm = reactive({ app_id: '', app_secret: '', redirect_uri: '' })
@@ -231,20 +232,21 @@ async function authorize() {
   }
 }
 
-let pollTimer = null
+// 统一轮询层(S-P1-2): 授权结果轮询, key 单例(重复授权自动替换旧任务)
+const AUTHORIZE_POLL_KEY = 'tencent-doc:authorize'
+const { startPolling, stopPolling } = usePolling()
 function pollStatusUntilAuthorized() {
-  clearInterval(pollTimer)
-  pollTimer = setInterval(async () => {
+  startPolling(AUTHORIZE_POLL_KEY, async () => {
     try {
       await loadStatus()
       if (status.value.authorized) {
-        clearInterval(pollTimer)
+        stopPolling(AUTHORIZE_POLL_KEY)
         ElMessage.success('授权成功, 已开始持续监测')
       }
     } catch (e) {
-      clearInterval(pollTimer)
+      stopPolling(AUTHORIZE_POLL_KEY)
     }
-  }, 3000)
+  }, POLL_INTERVALS.TASK_WATCH)
 }
 
 async function revoke() {

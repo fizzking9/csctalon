@@ -10,9 +10,9 @@ Create Date: 2026-07-28 10:00:00.000000
   启动时 ensure_data_sources_registered 也会按种子刷新,此处回填保证迁移后立即可用
 """
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "m3c4d5e6f7a8"
 down_revision = "k2b3c4d5e6f7"

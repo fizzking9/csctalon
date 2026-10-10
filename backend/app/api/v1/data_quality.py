@@ -95,7 +95,7 @@ def quality_tables(db: DBSession, _: CurrentUser):
 @router.get("/{table}/list", response_model=R, summary="数据质量-表单质量记录列表")
 def quality_list_endpoint(
     table: str, db: DBSession, _: CurrentUser,
-    status: str = Query("pending", pattern="^(all|pending|auto_fixed|ok)$"),
+    status: str = Query("pending", pattern="^(all|pending|auto_fixed|ok|ignored|dup_residual)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ):
@@ -123,3 +123,255 @@ def quality_scan_endpoint(table: str, db: DBSession, _: AdminUser,
                           limit: int = Query(0, ge=0, le=1_000_000)):
     _get_table(table)
     return R(data=QC.quality_scan(db, table, limit=limit))
+
+
+# ─────────────────────────────────────────────────────────────
+# 拒收行(未采纳数据)管理 —— A-20260908-003 数据治理框架
+# 独立 sub-router(prefix=/data-quality/rejected), 避免与上方 /{table} 通配冲突
+# 语义: 外部数据未入库行按行显示; open(未判定)/discard 不纳入统计; keep 采纳
+# ─────────────────────────────────────────────────────────────
+rejected_router = APIRouter(prefix="/data-quality/rejected", tags=["数据质量-拒收行"])
+
+
+@rejected_router.get("", response_model=R, summary="拒收行列表(未采纳数据按行查看)")
+def rejected_list_endpoint(
+    db: DBSession, _: CurrentUser,
+    data_type: str | None = Query(None),
+    source: str | None = Query(None),
+    status: str | None = Query(None, pattern="^(open|keep|discard)$"),
+    category: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+):
+    from app.services.ingest_rejected_service import list_rejected_rows
+
+    return R(data=list_rejected_rows(
+        db, data_type=data_type, source=source, status=status,
+        category=category, page=page, page_size=page_size,
+    ))
+
+
+@rejected_router.get("/stats", response_model=R, summary="拒收行统计(各源/拒因/状态)")
+def rejected_stats_endpoint(db: DBSession, _: CurrentUser):
+    from app.services.ingest_rejected_service import rejected_stats
+
+    return R(data=rejected_stats(db))
+
+
+@rejected_router.post("/{row_id}/review", response_model=R, summary="人工判定拒收行(keep/discard)")
+def rejected_review_endpoint(
+    row_id: int, db: DBSession, current_user: CurrentUser, payload: dict = Body(...),
+):
+    from app.services.ingest_rejected_service import review_rejected_row
+
+    action = payload.get("action")
+    try:
+        row = review_rejected_row(db, row_id, action, reviewer=str(current_user.username or current_user.id))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not row:
+        raise HTTPException(status_code=404, detail="拒收行不存在")
+    return R(data=row, message=f"已标记为 {action}")
+
+
+@rejected_router.post("/batch-review", response_model=R, summary="批量判定拒收行(keep/discard)")
+def rejected_batch_review_endpoint(
+    db: DBSession, current_user: CurrentUser, payload: dict = Body(...),
+):
+    from app.services.ingest_rejected_service import batch_review_rejected_rows
+
+    row_ids = payload.get("row_ids") or []
+    action = payload.get("action")
+    if not row_ids:
+        raise HTTPException(status_code=400, detail="row_ids 不能为空")
+    try:
+        n = batch_review_rejected_rows(db, row_ids, action, reviewer=str(current_user.username or current_user.id))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data={"updated": n}, message=f"批量处理 {n} 行")
+
+
+# ─────────────────────────────────────────────────────────────
+# 质量处置(ignore/restore/suggestion) + 治理规则管理 —— A-20260909-001
+# 独立 sub-router(prefix=/data-quality/disposition), 避免与上方 /{table} 通配冲突
+# 语义: 已入库质量问题行的 L2 处置(源头打标 ignored/恢复) + L3 规则复用
+# ─────────────────────────────────────────────────────────────
+disposition_router = APIRouter(prefix="/data-quality/disposition", tags=["数据质量-治理处置"])
+
+
+@disposition_router.post("/{table}/{pk}/ignore", response_model=R, summary="彻底忽略质量问题行(quality_status→ignored)")
+def disposition_ignore_endpoint(table: str, pk: str, db: DBSession, current_user: CurrentUser,
+                                payload: dict = Body(default={})):
+    _get_table(table)
+    from app.services.quality_disposition_service import quality_ignore
+
+    op = str(current_user.username or current_user.id)
+    try:
+        data = quality_ignore(db, table, pk, operator=op, reason=payload.get("reason"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message=data.get("message", "已忽略"))
+
+
+@disposition_router.post("/{table}/{pk}/restore", response_model=R, summary="恢复质量问题行(清除 ignored/dup_residual)")
+def disposition_restore_endpoint(table: str, pk: str, db: DBSession, current_user: CurrentUser):
+    _get_table(table)
+    from app.services.quality_disposition_service import quality_restore
+
+    op = str(current_user.username or current_user.id)
+    try:
+        data = quality_restore(db, table, pk, operator=op)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message=data.get("message", "已恢复"))
+
+
+@disposition_router.get("/{table}/{pk}/suggestion", response_model=R, summary="单行治理建议(规则命中+E匹配提示)")
+def disposition_suggestion_endpoint(table: str, pk: str, db: DBSession, _: CurrentUser):
+    _get_table(table)
+    from app.services.quality_disposition_service import quality_suggestion
+
+    try:
+        data = quality_suggestion(db, table, pk)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data)
+
+
+# ── 治理规则 CRUD ────────────────────────────────────────────
+@disposition_router.get("/rules", response_model=R, summary="治理规则列表")
+def disposition_rules_endpoint(db: DBSession, _: CurrentUser,
+                               table_code: str | None = Query(None),
+                               enabled: bool | None = Query(None)):
+    from app.services.quality_disposition_service import list_rules
+
+    return R(data=list_rules(db, table_code=table_code, enabled=enabled))
+
+
+@disposition_router.post("/rules", response_model=R, summary="新建治理规则")
+def disposition_rule_create_endpoint(db: DBSession, current_user: CurrentUser, payload: dict = Body(...)):
+    from app.services.quality_disposition_service import create_rule
+
+    op = str(current_user.username or current_user.id)
+    try:
+        rule = create_rule(db, payload, operator=op)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=rule, message="规则已创建")
+
+
+@disposition_router.put("/rules/{rule_id}", response_model=R, summary="更新治理规则")
+def disposition_rule_update_endpoint(rule_id: int, db: DBSession, current_user: CurrentUser,
+                                     payload: dict = Body(...)):
+    from app.services.quality_disposition_service import update_rule
+
+    op = str(current_user.username or current_user.id)
+    try:
+        rule = update_rule(db, rule_id, payload, operator=op)
+    except ValueError as e:
+        raise HTTPException(status_code=404 if "不存在" in str(e) else 400, detail=str(e))
+    return R(data=rule, message="规则已更新")
+
+
+@disposition_router.delete("/rules/{rule_id}", response_model=R, summary="删除治理规则")
+def disposition_rule_delete_endpoint(rule_id: int, db: DBSession, _: CurrentUser):
+    from app.services.quality_disposition_service import delete_rule
+
+    if not delete_rule(db, rule_id):
+        raise HTTPException(status_code=404, detail="规则不存在")
+    return R(message="规则已删除")
+
+
+@disposition_router.post("/rules/{rule_id}/apply-test", response_model=R, summary="规则试匹配(预览命中行,不执行)")
+def disposition_rule_apply_test_endpoint(rule_id: int, db: DBSession, _: CurrentUser,
+                                         limit: int = Query(100, ge=1, le=1000)):
+    from app.services.quality_disposition_service import apply_rule_suggest
+
+    try:
+        data = apply_rule_suggest(db, rule_id, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data)
+
+
+# ── A/D 真重复识别扫描(种子规则 ad_overlap_dup) ──────────────
+@disposition_router.get("/scan/ad-overlap-dup", response_model=R, summary="扫描 A/D 真重复候选(同单+金额一致+30天窗)")
+def disposition_scan_ad_overlap_endpoint(db: DBSession, _: CurrentUser,
+                                         limit: int = Query(500, ge=1, le=10000)):
+    from app.services.quality_disposition_service import scan_ad_overlap_dup
+
+    return R(data=scan_ad_overlap_dup(db, limit=limit))
+
+
+# ── D 路缺 SN 坏副本自动排除 (2026-09-09) ────────────────────
+@disposition_router.post("/auto/d-no-sn-bad-dup", response_model=R, summary="D路缺SN坏副本自动标dup_residual(同单已由带SN行/E表计)")
+def disposition_auto_d_no_sn_bad_dup_endpoint(db: DBSession, _: CurrentUser,
+                                              limit: int = Query(2000, ge=1, le=10000),
+                                              include_auto_fixed: bool = Query(False)):
+    from app.services.quality_disposition_service import auto_dispose_d_no_sn_bad_dup
+
+    try:
+        data = auto_dispose_d_no_sn_bad_dup(db, limit=limit, include_auto_fixed=include_auto_fixed)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message=f"已自动排除 {data.get('disposed', 0)} 行缺SN坏副本")
+
+
+# ── E 空悬 → D 路台账对账回填 (2026-09-09) ──────────────────
+@disposition_router.post("/auto/backfill-e-orphan-to-d", response_model=R,
+                         summary="E空悬单回填D路台账(系统/自动原路退, INSERT manual_refunds 备注溯源)")
+def disposition_backfill_e_orphan_to_d_endpoint(db: DBSession, _: CurrentUser,
+                                                start: str | None = Query(None, description="北京日期 YYYY-MM-DD"),
+                                                end: str | None = Query(None, description="北京日期 YYYY-MM-DD"),
+                                                limit: int = Query(2000, ge=1, le=10000)):
+    from app.services.quality_disposition_service import backfill_e_orphan_to_d
+
+    try:
+        data = backfill_e_orphan_to_d(db, start=start, end=end, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message=f"已回填 {data.get('inserted', 0)} 笔 E 空悬到 D 路台账(备注溯源)")
+
+
+# ── D 路同单同金额重复自动排除 (2026-09-09) ──────────────────
+@disposition_router.post("/auto/d-dup-same-amount", response_model=R,
+                         summary="D路同单同金额重复自动标dup_residual(保留带SN/正常行, 副本剔除)")
+def disposition_auto_d_dup_same_amount_endpoint(db: DBSession, _: CurrentUser,
+                                                limit: int = Query(2000, ge=1, le=10000)):
+    from app.services.quality_disposition_service import auto_dispose_d_dup_same_amount
+
+    try:
+        data = auto_dispose_d_dup_same_amount(db, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message=f"已自动排除 {data.get('disposed', 0)} 行 D 同单同金额重复副本")
+
+
+# ── D 路"E 无对应金额笔"冗余剔除(逐笔对E + 时序护栏) (2026-09-09) ──
+@disposition_router.post("/auto/d-no-e-match", response_model=R,
+                         summary="D路冗余剔除(金额E无对应笔, 仅已对账日期; E滞后窗跳过)")
+def disposition_auto_d_no_e_match_endpoint(db: DBSession, _: CurrentUser,
+                                           limit: int = Query(2000, ge=1, le=10000)):
+    from app.services.quality_disposition_service import auto_dispose_d_no_e_match
+
+    try:
+        data = auto_dispose_d_no_e_match(db, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message=f"已剔除 {data.get('disposed', 0)} 行 D 冗余(E无对应, 已对账日期)")
+
+
+# ── D 路一键治理流水线 (2026-09-09) ──────────────────────────
+@disposition_router.post("/auto/d-governance", response_model=R,
+                         summary="D路一键治理(坏副本+同单重复+E无对应+空悬落D, 幂等)")
+def disposition_d_governance_endpoint(db: DBSession, _: CurrentUser,
+                                      start: str | None = Query(None, description="空悬落D窗口起(北京)"),
+                                      end: str | None = Query(None, description="空悬落D窗口止(北京)"),
+                                      limit: int = Query(10000, ge=1, le=50000)):
+    from app.services.quality_disposition_service import run_d_governance_pipeline
+
+    try:
+        data = run_d_governance_pipeline(db, start=start, end=end, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return R(data=data, message="D路一键治理完成(幂等可恢复)")

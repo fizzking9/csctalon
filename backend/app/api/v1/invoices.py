@@ -329,6 +329,7 @@ def export_reimbursement(rb_id: int, db: DBSession, _: CurrentUser):
         )
     )
     import io
+
     from openpyxl import Workbook
 
     wb = Workbook()

@@ -22,7 +22,7 @@
             <el-option :value="200" label="200 条" />
             <el-option :value="500" label="500 条" />
           </el-select>
-          <el-button type="primary" :icon="Refresh" size="small" @click="loadTimeline" :disabled="!hasSubject">刷新</el-button>
+          <el-button type="primary" :icon="Refresh" size="small" :disabled="!hasSubject" @click="loadTimeline">刷新</el-button>
         </div>
       </div>
       <div class="av-header-row av-header-row--search">
@@ -160,7 +160,52 @@
               <span v-if="!(subject.tags || []).length">-</span>
             </el-descriptions-item>
             <el-descriptions-item label="记录总数">{{ total }}</el-descriptions-item>
+            <!-- P4 档案扩展(BMS 设备管理采集, 有值才展示) -->
+            <template v-if="subject.main_merchant_name">
+              <el-descriptions-item label="主商户">{{ subject.main_merchant_name }}</el-descriptions-item>
+            </template>
+            <template v-if="subject.active_flag">
+              <el-descriptions-item label="激活状态">{{ subject.active_flag }}</el-descriptions-item>
+            </template>
+            <template v-if="subject.service_valid_until">
+              <el-descriptions-item label="服务有效期至">{{ fmtDateOnly(subject.service_valid_until) }}</el-descriptions-item>
+            </template>
+            <template v-if="subject.current_combo_name">
+              <el-descriptions-item label="当前套餐">{{ subject.current_combo_name }}</el-descriptions-item>
+            </template>
+            <template v-if="subject.app_version">
+              <el-descriptions-item label="应用版本">{{ subject.app_version }}</el-descriptions-item>
+            </template>
+            <template v-if="subject.start_iccid">
+              <el-descriptions-item label="启动卡ICCID">{{ subject.start_iccid }}</el-descriptions-item>
+            </template>
+            <template v-if="subject.virtual_iccid">
+              <el-descriptions-item label="虚拟卡ICCID">{{ subject.virtual_iccid }}</el-descriptions-item>
+            </template>
+            <template v-if="subject.batch_no">
+              <el-descriptions-item label="批次号">{{ subject.batch_no }}</el-descriptions-item>
+            </template>
+            <template v-if="subject.region">
+              <el-descriptions-item label="区域">{{ subject.region }}</el-descriptions-item>
+            </template>
           </el-descriptions>
+
+          <!-- 设备生命周期 KPI 概览(紧凑 chip 行, 数据来自各业务表) -->
+          <div v-if="subject.kpi" class="av-kpi-row">
+            <span v-if="subject.kpi.combo_count" class="av-kpi-chip">套餐 {{ subject.kpi.combo_count }}<em v-if="subject.kpi.combo_total_amount">· ¥{{ Number(subject.kpi.combo_total_amount).toFixed(0) }}</em></span>
+            <span v-if="subject.kpi.order_count" class="av-kpi-chip">订单 {{ subject.kpi.order_count }}</span>
+            <span v-if="subject.kpi.refund_count" class="av-kpi-chip">退费 {{ subject.kpi.refund_count }}</span>
+            <span v-if="subject.kpi.refund_record_report_count" class="av-kpi-chip">线上退款 {{ subject.kpi.refund_record_report_count }}</span>
+            <span v-if="subject.kpi.manual_refund_count" class="av-kpi-chip">手动退款 {{ subject.kpi.manual_refund_count }}</span>
+            <span v-if="subject.kpi.shanmao_refund_count" class="av-kpi-chip">闪猫 {{ subject.kpi.shanmao_refund_count }}</span>
+            <span v-if="subject.kpi.return_tracking_count" class="av-kpi-chip">退货 {{ subject.kpi.return_tracking_count }}</span>
+            <span v-if="subject.kpi.ticket_count" class="av-kpi-chip">工单 {{ subject.kpi.ticket_count }}</span>
+            <span v-if="subject.kpi.external_complaint_count" class="av-kpi-chip">315投诉 {{ subject.kpi.external_complaint_count }}</span>
+            <span v-if="subject.kpi.card_complaint_count" class="av-kpi-chip">卡商投诉 {{ subject.kpi.card_complaint_count }}</span>
+            <span v-if="subject.kpi.wallet_count" class="av-kpi-chip">钱包流水 {{ subject.kpi.wallet_count }}</span>
+            <span v-if="subject.kpi.cs_count" class="av-kpi-chip">接待 {{ subject.kpi.cs_count }}</span>
+            <span v-if="subject.kpi.flow_month_count" class="av-kpi-chip">流量月 {{ subject.kpi.flow_month_count }}<em v-if="subject.kpi.flow_total_gb">· {{ Number(subject.kpi.flow_total_gb) }}GB</em></span>
+          </div>
 
           <!-- 套餐&充值&流量汇总 -->
           <div class="av-sub-section">
@@ -206,19 +251,41 @@
             </el-collapse>
           </div>
 
-          <!-- 实时流量查询 -->
+          <!-- 流量(本地默认装载; 刷新按钮拉上游最新) -->
           <div class="av-sub-section av-traffic-section">
             <div class="av-sub-title">
-              实时流量
-              <el-button size="small" type="primary" plain :loading="trafficLoading" @click="queryTraffic" style="margin-left: 8px">查询实时流量</el-button>
+              流量
+              <el-button size="small" type="primary" plain :loading="trafficLoading" style="margin-left: 8px" @click="refreshTraffic">刷新最新数据</el-button>
+              <span v-if="trafficInfo" class="av-traffic-hint">
+                {{ trafficInfo.fetched ? '已从 BMS 拉取最新' : '本地数据' }}
+              </span>
             </div>
             <div v-if="trafficInfo" class="av-traffic-result">
-              <template v-if="trafficInfo.device_sn">
-                <span class="av-cs-item">可用 <b>{{ trafficInfo.available_human || trafficInfo.available_bytes || '-' }}</b></span>
-                <span class="av-cs-item">已用 <b>{{ trafficInfo.used_human || trafficInfo.used_bytes || '-' }}</b></span>
-                <span class="av-cs-item">剩余 <b>{{ trafficInfo.remaining_human || trafficInfo.remaining_bytes || '-' }}</b></span>
-              </template>
-              <el-alert v-else :title="trafficInfo._hint || '上游流量接口未接入'" type="info" :closable="false" show-icon style="margin-top: 4px" />
+              <!-- 套餐快照(最新生效) -->
+              <div v-if="trafficInfo.quota_latest" class="av-traffic-quota">
+                <span class="av-cs-item">套餐 <b>{{ trafficInfo.quota_latest.package_name || '-' }}</b></span>
+                <span class="av-cs-item">可用 <b>{{ trafficInfo.quota_latest.available_human || '-' }}</b></span>
+                <span class="av-cs-item">已用 <b>{{ trafficInfo.quota_latest.used_human || '-' }}</b></span>
+                <span class="av-cs-item">剩余 <b>{{ trafficInfo.quota_latest.remaining_human || '-' }}</b></span>
+                <el-tag v-if="trafficInfo.quota_latest.status" size="small" effect="plain" style="margin-left: 4px">{{ trafficInfo.quota_latest.status }}</el-tag>
+                <span v-if="trafficInfo.quota_latest.end_date" class="av-traffic-sub">有效期至 {{ fmtDateOnly(trafficInfo.quota_latest.end_date) }}</span>
+              </div>
+              <!-- 月流量使用 -->
+              <div v-if="trafficInfo.monthly_usage && trafficInfo.monthly_usage.length" class="av-traffic-monthly">
+                <div class="av-traffic-month-title">月流量使用(共 {{ trafficInfo.total_flow_gb }} GB)</div>
+                <div class="av-traffic-month-list">
+                  <span v-for="m in trafficInfo.monthly_usage" :key="m.stat_month" class="av-traffic-month-item">
+                    <b>{{ m.stat_month }}</b> {{ m.flow_gb != null ? Number(m.flow_gb) : '-' }} GB
+                    <el-tag v-if="m.month_complete" size="small" type="success" effect="plain">完整</el-tag>
+                    <el-tag v-else size="small" type="warning" effect="plain">进行中</el-tag>
+                  </span>
+                </div>
+              </div>
+              <!-- 提示: 刷新状态 / 无数据 -->
+              <div v-if="trafficInfo.fetch_msg" class="av-traffic-msg">{{ trafficInfo.fetch_msg }}</div>
+              <div v-if="!trafficInfo.quota_latest && !(trafficInfo.monthly_usage && trafficInfo.monthly_usage.length)" class="av-sub-empty">
+                本地无该设备流量数据, 点击「刷新最新数据」从 BMS 拉取
+              </div>
             </div>
           </div>
         </div>
@@ -403,8 +470,13 @@ async function loadExtraInfo() {
       personDetail.value = detailRes.data || null
       schedules.value = schedRes.data || []
     } else {
-      const res = await getLocalComboBySn(sn.value, { limit: 50 })
-      comboData.value = res.data || null
+      // 设备: 并行加载 套餐快照(本地) + 流量(默认只读本地, 不触发上游)
+      const [comboRes, trafficRes] = await Promise.all([
+        getLocalComboBySn(sn.value, { limit: 50 }),
+        queryUpstreamTraffic({ sn: sn.value }).catch(() => ({ data: { result: null } })),
+      ])
+      comboData.value = comboRes.data || null
+      trafficInfo.value = trafficRes.data?.result || null
     }
   } catch (e) {
     // 静默失败, 不影响审计主流程
@@ -414,15 +486,15 @@ async function loadExtraInfo() {
   }
 }
 
-// 查询上游实时流量(占位接口, 后端未接入真实数据源时返回 _hint)
-async function queryTraffic() {
+// 刷新实时流量: 显式触发上游拉取(BMS)最新月流量, 拉取后重读本地展示
+async function refreshTraffic() {
   if (!sn.value) return
   trafficLoading.value = true
   try {
-    const res = await queryUpstreamTraffic({ sn: sn.value })
-    trafficInfo.value = res.data || null
+    const res = await queryUpstreamTraffic({ sn: sn.value, refresh: true })
+    trafficInfo.value = res.data?.result || null
   } catch (e) {
-    trafficInfo.value = { _hint: '查询失败:无权限或上游接口未接入' }
+    trafficInfo.value = { fetch_msg: '刷新失败:无权限或上游接口未接入' }
   } finally {
     trafficLoading.value = false
   }
@@ -704,6 +776,30 @@ defineExpose({ loadTimeline, subject, items, total })
 .av-sched-time { color: #909399; font-size: 11px; }
 .av-sched-note { color: #c0c4cc; font-size: 10px; }
 
+/* 设备生命周期 KPI 概览 */
+.av-kpi-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.av-kpi-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: #606266;
+  background: #f5f7fa;
+  border: 1px solid #ebeef5;
+  border-radius: 3px;
+  padding: 1px 7px;
+  line-height: 1.7;
+}
+.av-kpi-chip em {
+  font-style: normal;
+  color: #909399;
+}
+
 /* 套餐汇总 */
 .av-combo-summary {
   display: flex;
@@ -721,15 +817,24 @@ defineExpose({ loadTimeline, subject, items, total })
   padding: 3px 0;
 }
 
-/* 流量三列 */
+/* 流量三列(套餐明细表内) */
 .av-traffic-row { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; font-size: 11px; }
 .av-traffic-sep { color: #c0c4cc; }
 .av-traffic-remain { color: #67c23a; font-weight: 600; }
-.av-traffic-result { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: #606266; margin-top: 4px; }
 .av-traffic-section :deep(.el-button) {
   padding: 4px 8px;
   font-size: 11px;
 }
+.av-traffic-hint { color: #909399; font-size: 11px; margin-left: 8px; }
+.av-traffic-result { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #606266; margin-top: 6px; }
+.av-traffic-quota { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; }
+.av-traffic-sub { color: #909399; font-size: 11px; }
+.av-traffic-monthly { border-top: 1px dashed #e4e7ed; padding-top: 6px; }
+.av-traffic-month-title { color: #606266; font-weight: 600; margin-bottom: 4px; }
+.av-traffic-month-list { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.av-traffic-month-item { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+.av-traffic-month-item .el-tag { margin-left: 2px; }
+.av-traffic-msg { color: #909399; font-size: 11px; }
 
 @media (max-width: 768px) {
   .av-header-row--top {

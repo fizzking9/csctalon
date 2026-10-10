@@ -17,7 +17,7 @@ from app.api.deps import AdminUser, CurrentUser, DBSession
 from app.core.config import settings
 from app.models.complaint_sync_log import ComplaintSyncLog
 from app.schemas.common import PageBase, R
-from app.services.complaint_sync import sync_complaints_from_payload
+from app.services.ingest_service import ingest_complaints
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +84,26 @@ def push_complaints(
     if not payload.get("external_complaints") and not payload.get("card_complaints"):
         raise HTTPException(status_code=400, detail="external_complaints / card_complaints 至少提供一项")
     try:
-        stats = sync_complaints_from_payload(db, payload, source_file=source_file, sync_source="workbuddy")
+        # 统一入库接口(#42): 内部转发现有 complaint_sync 管线, 口径不变
+        res = ingest_complaints(
+            db, payload=payload, source="workbuddy", source_file=source_file,
+            source_ref="workbuddy_push",
+        )
     except Exception as e:
         logger.exception(f"投诉推送失败: {e}")
         raise HTTPException(status_code=500, detail=f"同步失败: {e}") from e
-    return R(data=stats)
+    # 响应保持既有外部契约(external/card/status/log_id), 追加统一字段 run_id/rejected/validation
+    data = {
+        "log_id": res.extra.get("log_id"),
+        "status": res.status,
+        "external": res.extra.get("external", {}),
+        "card": res.extra.get("card", {}),
+        # #42: 统一入库结果字段(加法式扩展, 不破坏既有契约)
+        "run_id": res.run_id,
+        "rejected": res.rejected,          # 未采纳且已落拒收表的行数(待人工判定)
+        "validation": res.extra.get("validation", []),
+    }
+    return R(data=data)
 
 
 @router.get("/config", response_model=R, summary="投诉推送接入配置状态(内部)")
@@ -155,6 +170,11 @@ def list_sync_logs(
                         "failed": log.card_failed,
                         "matched": log.card_matched,
                     },
+                    # #42 abc-c: 拒收与入库前校验(存量行为 NULL → 兜底为 0/{})
+                    # 语义区分: rejected=未采纳待人工判定; validation=只读告警(非失败)
+                    "rejected": log.rejected or 0,
+                    "validation_count": log.validation_count or 0,
+                    "validation_severity": log.validation_severity or {},
                     "error": log.error,
                     "created_at": log.created_at.isoformat() if log.created_at else None,
                 }

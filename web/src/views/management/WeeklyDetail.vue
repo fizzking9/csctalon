@@ -180,7 +180,7 @@
               v-for="rid in section.related_report_ids || []"
               :key="rid"
               type="primary"
-              :underline="false"
+              underline="never"
               style="margin-right: 12px"
               @click="goReport(rid)"
             >

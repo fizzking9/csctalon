@@ -19,9 +19,9 @@
         <el-col :span="12">
           <el-form-item label="可见性">
             <el-radio-group v-model="form.visibility">
-              <el-radio-button label="public">全员</el-radio-button>
-              <el-radio-button label="manager">管理层</el-radio-button>
-              <el-radio-button label="admin">管理员</el-radio-button>
+              <el-radio-button value="public">全员</el-radio-button>
+              <el-radio-button value="manager">管理层</el-radio-button>
+              <el-radio-button value="admin">管理员</el-radio-button>
             </el-radio-group>
           </el-form-item>
         </el-col>

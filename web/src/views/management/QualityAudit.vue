@@ -13,7 +13,7 @@
 
     <!-- 状态统计卡(可点击筛选) -->
     <el-row :gutter="12" class="mb-16">
-      <el-col :xs="12" :sm="6" v-for="c in statCards" :key="c.key">
+      <el-col v-for="c in statCards" :key="c.key" :xs="12" :sm="4">
         <div class="stat-card" :class="{ 'stat-active': status === c.key }" @click="switchStatus(c.key)">
           <div class="stat-label">{{ c.label }}</div>
           <div class="stat-value" :style="{ color: c.color }">{{ summary[c.key] ?? 0 }}</div>
@@ -26,7 +26,7 @@
     </el-alert>
 
     <el-card>
-      <el-table :data="list" v-loading="loading" border stripe size="small" max-height="520">
+      <el-table v-loading="loading" :data="list" border stripe size="small" max-height="520">
         <el-table-column
           v-for="col in columns"
           :key="col.prop"
@@ -55,10 +55,18 @@
             <span class="text-muted">{{ row.quality_note || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" fixed="right">
+        <el-table-column label="建议" width="100" fixed="right">
+          <template #default="{ row }">
+            <el-button v-if="row.quality_status === 'pending'" size="small" type="success" link @click="onSuggestion(row)">治理建议</el-button>
+            <span v-else class="text-muted">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
             <el-button v-if="row.quality_status === 'pending'" size="small" type="primary" link @click="onConfirm(row)">确认通过</el-button>
             <el-button v-if="row.quality_status" size="small" link @click="openEdit(row)">编辑修正</el-button>
+            <el-button v-if="!isExcluded(row)" size="small" type="danger" link @click="onIgnore(row)">彻底忽略</el-button>
+            <el-button v-if="isExcluded(row)" size="small" type="warning" link @click="onRestore(row)">恢复</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -70,7 +78,7 @@
           :page-sizes="[20, 50, 100]"
           layout="total, sizes, prev, pager, next"
           background
-          small
+          size="small"
           @current-change="load"
           @size-change="page = 1; load()"
         />
@@ -93,7 +101,7 @@
           <el-input v-else v-model="editForm[field]" :rows="field === 'remark' ? 2 : 1" :type="field === 'remark' ? 'textarea' : 'text'" placeholder="可选" />
         </el-form-item>
       </el-form>
-      <div class="quality-note" v-if="editRow?.quality_note">原质量说明: {{ editRow.quality_note }}</div>
+      <div v-if="editRow?.quality_note" class="quality-note">原质量说明: {{ editRow.quality_note }}</div>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="onFix">保存修正</el-button>
@@ -106,11 +114,11 @@
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
-import { qualityList, qualityConfirm, qualityFix, qualityScan, listQualityTables } from '@/api/dataQuality'
+import { qualityList, qualityConfirm, qualityFix, qualityScan, listQualityTables, dispositionIgnore, dispositionRestore, dispositionSuggestion } from '@/api/dataQuality'
 import { formatMoney } from '@/utils/format'
 import { useAuthStore } from '@/stores/auth'
 
-const props = defineProps({ table: { type: String, required: true } })
+const props = defineProps({ table: { type: String, required: true }, refreshTick: { type: Number, default: 0 } })
 const authStore = useAuthStore()
 
 // ── 表配置(前端展示列) ──
@@ -191,7 +199,7 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = ref(50)
 const status = ref('pending')
-const summary = reactive({ pending: 0, auto_fixed: 0, ok: 0 })
+const summary = reactive({ pending: 0, auto_fixed: 0, ok: 0, ignored: 0, dup_residual: 0 })
 const editVisible = ref(false)
 const editRow = ref(null)
 const editForm = reactive({})
@@ -201,14 +209,56 @@ const statCards = [
   { key: 'pending', label: '待人工确认', color: '#f56c6c' },
   { key: 'auto_fixed', label: '自动纠错', color: '#e6a23c' },
   { key: 'ok', label: '已确认/正常', color: '#67c23a' },
+  { key: 'ignored', label: '已忽略', color: '#909399' },
+  { key: 'dup_residual', label: '已治理重复', color: '#909399' },
   { key: 'all', label: '全部记录', color: '#409eff' },
 ]
 
 function qualityLabel(s) {
-  return { pending: '待确认', auto_fixed: '已自动纠错', ok: '已确认', none: '正常' }[s || 'none'] || s
+  return { pending: '待确认', auto_fixed: '已自动纠错', auto_filled: 'E回填', ok: '已确认',
+           dup_residual: '已治理重复', ignored: '已忽略', none: '正常' }[s || 'none'] || s
 }
 function qualityType(s) {
-  return { pending: 'danger', auto_fixed: 'warning', ok: 'success', none: 'info' }[s || 'none'] || 'info'
+  return { pending: 'danger', auto_fixed: 'warning', auto_filled: 'primary', ok: 'success',
+           dup_residual: 'info', ignored: 'info', none: 'info' }[s || 'none'] || 'info'
+}
+function isExcluded(row) {
+  return ['ignored', 'dup_residual'].includes(row.quality_status)
+}
+function onIgnore(row) {
+  ElMessageBox.prompt(`彻底忽略该记录（${pkFieldOf(row)}）？忽略后将从经营统计中排除，可随时恢复。`, '彻底忽略', {
+    type: 'warning',
+    inputPlaceholder: '可选: 填写忽略原因',
+  })
+    .then(async ({ value }) => {
+      await dispositionIgnore(props.table, row[pkFieldOf(row)], value || '')
+      ElMessage.success('已彻底忽略(经营统计排除)')
+      load()
+    })
+    .catch(() => {})
+}
+function onRestore(row) {
+  ElMessageBox.confirm(`恢复该记录（${pkFieldOf(row)}）？恢复后重新参与人工判定/纳入统计。`, '恢复', { type: 'warning' })
+    .then(async () => {
+      await dispositionRestore(props.table, row[pkFieldOf(row)])
+      ElMessage.success('已恢复')
+      load()
+    })
+    .catch(() => {})
+}
+async function onSuggestion(row) {
+  try {
+    const res = await dispositionSuggestion(props.table, row[pkFieldOf(row)])
+    const d = res?.data || {}
+    const lines = []
+    if (d.e_hint) lines.push(`E表: ${d.e_hint.hint}`)
+    ;(d.suggestions || []).forEach(s => {
+      lines.push(`规则#${s.rule_id}「${s.name}」→ ${s.disposition} (${s.auto_level === 'auto' ? '自动' : '建议'}, 命中${s.hit_count}次)`)
+    })
+    ElMessageBox.alert(lines.length ? lines.join('\n') : '暂无可用治理建议', `治理建议 · ${tableLabel.value}`, { confirmButtonText: '知道了' })
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '获取建议失败')
+  }
 }
 function fieldType(f) {
   if (/time|_at$|date$/i.test(f)) return 'datetime'
@@ -307,6 +357,8 @@ async function onScan() {
 
 onMounted(load)
 watch(() => props.table, () => { status.value = 'pending'; page.value = 1; load() })
+// 外部(如缺SN坏副本自动排除后)请求刷新
+watch(() => props.refreshTick, () => { if (props.refreshTick > 0) load() })
 </script>
 
 <style scoped>
