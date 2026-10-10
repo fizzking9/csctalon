@@ -77,10 +77,6 @@ FULL_WINDOW_DAYS: int = 7
 LOW_FREQ_HOUR: int = max(0, int(getattr(settings, "LOW_FREQ_HOUR", 6) or 0))
 # 低频档忙碌顺延结束小时: 6:00 启动后若一直忙, 直到该小时前必须尝试启动(超过则当日放弃让位 8:00)
 LOW_FREQ_DEADLINE_HOUR: int = 7
-# #293 设备档案 SN 补全每日档(时): 4:00 跑在 5:00 缺口补跑之前(约 20-40 分钟, 不与其
-# 抢 BMS 浏览器登录态); 只补 devices 表缺档案字段(类型/套餐/商户/激活时间)的设备,
-# 幂等只填空值。与日批导出互补: 日批管新设备建档, 本档管存量漏采兜底。
-DEVICE_ENRICH_HOUR: int = 4
 
 # ── 检查间隔(秒) ──
 CHECK_INTERVAL = 60
@@ -673,31 +669,6 @@ class BmsScheduler:
                         await asyncio.sleep(CHECK_INTERVAL)
                         continue
                     first_tick = False
-
-                # ── 0.9) #293 设备档案 SN 补全每日档(4:00): 只补缺档案字段设备, 幂等 ──
-                # 窗口=整点起 60 分钟内(实测 2 万 SN 约 25 分钟); 忙则顺延下一分钟 tick。
-                # 失败也记 done(错误已入 bms_sync_logs), 防止每分钟重试; 次日自动再试。
-                if now_cn.hour == DEVICE_ENRICH_HOUR and DEVICE_ENRICH_HOUR not in today_done:
-                    try:
-                        from app.services.device_profile_enrich import (
-                            DAILY_LIMIT_DEFAULT,
-                            run_enrich,
-                        )
-
-                        enrich_db = SessionLocal()
-                        try:
-                            # 档案补全独立于同步源忙碌状态(不同接口通道, 不与 sync_all 抢导出);
-                            # 服务内部有 _run_lock 单飞保护, 不会与手动 CLI 并发。
-                            res = await run_enrich(
-                                enrich_db, limit=DAILY_LIMIT_DEFAULT, trigger_type="scheduled",
-                            )
-                        finally:
-                            enrich_db.close()
-                        today_done.add(DEVICE_ENRICH_HOUR)
-                        logger.info("[调度器] %s:00 设备档案补全完成: %s", DEVICE_ENRICH_HOUR, res)
-                    except Exception as ee:  # noqa: BLE001 补全失败不影响后续调度
-                        today_done.add(DEVICE_ENRICH_HOUR)
-                        logger.warning("[调度器] %s:00 设备档案补全异常: %s", DEVICE_ENRICH_HOUR, ee)
 
                 # ── 1) 5:00 补跑: 优先"缺口清点补跑", 无缺口退回前一天全天兜底 ──
                 #    (工单#2/A-20260904-002 3.3: 只补真缺口, 不重复无缺口源)
