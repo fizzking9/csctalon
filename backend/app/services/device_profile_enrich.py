@@ -172,22 +172,21 @@ def apply_renew_items(db: Session, sn: str, items: list[dict]) -> bool:
     """续费记录 items → devices 只填空值。返回是否填到了字段。
 
     - items 接口按 createDate DESC 返回（最新在前）, rows=20 取近 20 条;
-    - 套餐选择: 优先「非套餐已作废」的最新一条; 全部作废取最新一条
-      （分析需要知道最后套餐, 即便已作废/过期——空着反而制造「未填」假象）;
-    - 工厂质检套餐名不落库（与看板口径一致, 落了也会被过滤成「未填」）;
+    - 套餐选择(关键): 先在扫描中**跳过工厂质检套餐名**（最新记录常是质检流水,
+      不跳过会把后面的真实套餐挡住——2026-10-10 实测 11.9 万台因此落空）;
+      在非质检记录中优先「非套餐已作废」的最新一条, 否则取最新非质检一条。
+      「服务过期」的真实套餐照取（分析需要设备最后用的真实套餐, 空着反而造「未填」假象）;
     - merchant_name ← businessName(店铺名); active_time 兜底 ← 最早 startDate;
     - hit 也写 profile_probe_at=now(): 双语义(设备列表 30 天复探窗口顺延;
       续费记录查过即标记, 避免重复白查)。
     """
     if not items:
         return False
+    real = [it for it in items if it.get("comboName") and "工厂质检" not in it["comboName"]]
     combo = next(
-        (it.get("comboName") for it in items
-         if it.get("comboName") and it.get("currentStatus") != "套餐已作废"),
+        (it["comboName"] for it in real if it.get("currentStatus") != "套餐已作废"),
         None,
-    ) or (items[0].get("comboName") or None)
-    if combo and "工厂质检" in combo:
-        combo = None
+    ) or (real[0]["comboName"] if real else None)
     merchant = next((it.get("businessName") for it in items if it.get("businessName")), None)
     starts = sorted(it["startDate"] for it in items if it.get("startDate"))
     first_start = starts[0] if starts else None

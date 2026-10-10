@@ -23,6 +23,7 @@ from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.services.analytics._core import _device_dim_matched_sns
 from app.services.analytics.refund_chain import refund_withdrawal_detail
+from app.services.device_profile_enrich import apply_renew_items
 
 
 def _uniq(prefix: str) -> str:
@@ -145,6 +146,34 @@ def test_backlog_rows_device_dim_filter(db):
     # 按不存在的商户号 → 全被过滤
     rows = _query_backlog_rows(db, None, None, merchant=_uniq("无此商户"))
     assert rows == []
+
+
+def test_apply_renew_items_skips_qc_latest(db):
+    """#293: 最新续费记录为质检套餐时, 应跳过取后面的真实套餐(否则11.9万台落空)。"""
+    sn = _uniq("SN-QC")
+    _mk_device(db, sn)
+    # createDate DESC 顺序: 最新=质检, 其后=真实套餐(服务过期也照取)
+    items = [
+        {"comboName": "工厂质检专用套餐*30天", "currentStatus": "服务过期",
+         "businessName": "店铺甲", "startDate": "2026-09-01"},
+        {"comboName": "300G/月【双通道】", "currentStatus": "服务过期",
+         "businessName": "店铺甲", "startDate": "2026-07-01"},
+    ]
+    assert apply_renew_items(db, sn, items) is True
+    db.commit()
+    dev = db.get(Device, sn)
+    assert dev.current_combo_name == "300G/月【双通道】"
+    assert dev.merchant_name == "店铺甲"
+    # 只有质检记录 → combo 落空但商户/日期仍可填
+    sn2 = _uniq("SN-QC2")
+    _mk_device(db, sn2)
+    only_qc = [{"comboName": "工厂质检专用套餐*30天", "currentStatus": "服务过期",
+                "businessName": "店铺乙", "startDate": "2026-08-01"}]
+    assert apply_renew_items(db, sn2, only_qc) is True
+    db.commit()
+    assert db.get(Device, sn2).current_combo_name is None
+    # 空记录
+    assert apply_renew_items(db, _uniq("SN-E"), []) is False
 
 
 def test_rw_detail_device_dim_filter(db):
