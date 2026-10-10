@@ -803,17 +803,18 @@ async def sync_all(
                                         pass
 
                             # ── #293: device_combo 同步后自动反填 devices 档案缺字段 ──
-                            #    BMS 设备列表接口查不到的 SN(约45%)在 device_combos 里有
-                            #    完整的商户名/套餐名/激活时间, 反填到 devices 主表(幂等, 只填空值)
-                            _has_combo = any(
-                                r.get("success") and r.get("data_type") == "device_combo"
+                            #    BMS 设备列表接口查不到的 SN(约45%)在 bms_orders/tickets/combos 里有
+                            #    完整的设备型号/商户名/套餐名/激活时间, 反填到 devices 主表(幂等, 只填空值)
+                            _triggers = {"device_combo", "ticket"}
+                            _should_backfill = any(
+                                r.get("success") and r.get("data_type") in _triggers
                                 and ((r.get("inserted_rows") or 0) + (r.get("updated_rows") or 0)) > 0
                                 for r in results
                             )
-                            if _has_combo:
+                            if _should_backfill:
                                 try:
                                     from app.services.device_profile_enrich import backfill_from_business
-                                    _report("反填设备档案(从充值/流量数据)...")
+                                    _report("反填设备档案(从订单/工单/充值数据)...")
                                     _bk = backfill_from_business(hook_db)
                                     logger.info(f"[post-sync] 设备档案反填: {_bk}")
                                 except Exception as _bk_e:

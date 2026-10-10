@@ -144,62 +144,85 @@ def mark_probe_miss(db: Session, sn: str) -> None:
 
 
 def backfill_from_business(db: Session) -> dict:
-    """从 device_combos + device_flow_usage 反填 devices 缺字段（#293 采集后自动回写）。
+    """从业务表反填 devices 缺字段（#293 采集后自动回写）。
 
     BMS 设备列表接口(findPageList)查不到的 SN（约45%，多为14位SN不在BMS设备库），
-    但 device_combos（充值订单，每日采集同步）和 device_flow_usage（流量使用，按需采集）
-    里有完整的商户名(店铺名)、套餐名、设备类型、激活时间。本函数将这些业务数据
-    反填到 devices 主表，只填空值（COALESCE + NULLIF 幂等，可重复跑）。
+    但多个业务表已有完整档案信息：
+      - bms_orders（BMS订单）：设备型号(device_type_name)、激活时间(active_date)
+      - service_tickets（服务工单）：设备型号(device_type)、激活时间(active_time)
+      - device_combos（充值订单）：商户名(店铺名)、套餐名、激活时间(首充时间)
 
+    字段优先级（COALESCE 链，先 BMS 权威源 → 业务表）：
+      device_type:        bms_orders.device_type_name → tickets.device_type
+      merchant_name:      device_combos.merchant_name
+      current_combo_name: device_combos.package_name
+      active_time:        bms_orders.active_date → tickets.active_time → device_combos.首充时间
+
+    只填空值（COALESCE + NULLIF 幂等，可重复跑）。
+    分步执行（避免大 CTE 多表 JOIN 锁等待）：
+      1) bms_orders → device_type + active_time（最权威）
+      2) service_tickets → device_type + active_time（补充）
+      3) device_combos → merchant_name + current_combo_name + active_time（兜底）
     触发时机：bms_sync post-sync 钩子中，device_combo 同步成功后自动调用。
     """
-    result = db.execute(text("""
-        WITH latest_combo AS (
-          SELECT DISTINCT ON (device_sn)
-            device_sn, merchant_name, package_name, created_at_raw
-          FROM device_combos WHERE device_sn IS NOT NULL
-          ORDER BY device_sn, created_at_raw DESC
-        ),
-        earliest_combo AS (
-          SELECT DISTINCT ON (device_sn)
-            device_sn, created_at_raw AS first_recharge
-          FROM device_combos WHERE device_sn IS NOT NULL
-          ORDER BY device_sn, created_at_raw ASC
-        ),
-        flow_info AS (
-          SELECT DISTINCT ON (device_sn)
-            device_sn, device_type_name, device_combo_name, merchant_name AS flow_merchant
-          FROM device_flow_usage
-          WHERE device_sn IS NOT NULL AND device_type_name IS NOT NULL AND device_type_name != ''
-          ORDER BY device_sn, stat_month DESC
-        ),
-        combo_info AS (
-          SELECT
-            lc.device_sn,
-            lc.merchant_name, lc.package_name,
-            ec.first_recharge,
-            fi.device_type_name, fi.device_combo_name, fi.flow_merchant
-          FROM latest_combo lc
-          LEFT JOIN earliest_combo ec ON ec.device_sn = lc.device_sn
-          LEFT JOIN flow_info fi ON fi.device_sn = lc.device_sn
-        )
+    total = 0
+    # 步骤1: bms_orders → device_type + active_time（最权威）
+    r = db.execute(text("""
         UPDATE devices d
         SET
-          merchant_name      = COALESCE(NULLIF(d.merchant_name,''), ci.merchant_name, ci.flow_merchant),
-          current_combo_name = COALESCE(NULLIF(d.current_combo_name,''), ci.package_name, ci.device_combo_name),
-          device_type        = COALESCE(NULLIF(d.device_type,''), ci.device_type_name),
-          active_time        = COALESCE(d.active_time, ci.first_recharge)
-        FROM combo_info ci
-        WHERE d.sn = ci.device_sn
-        AND (d.device_type IS NULL OR d.device_type = ''
+          device_type = COALESCE(NULLIF(d.device_type,''), bo.device_type_name),
+          active_time = COALESCE(d.active_time, bo.active_date)
+        FROM (
+          SELECT DISTINCT ON (device_sn) device_sn, device_type_name, active_date
+          FROM bms_orders WHERE device_sn IS NOT NULL
+          ORDER BY device_sn, active_date DESC NULLS LAST
+        ) bo
+        WHERE d.sn = bo.device_sn
+        AND (d.device_type IS NULL OR d.device_type = '' OR d.active_time IS NULL)
+    """))
+    total += r.rowcount
+    # 步骤2: service_tickets → device_type + active_time（补充）
+    r = db.execute(text("""
+        UPDATE devices d
+        SET
+          device_type = COALESCE(NULLIF(d.device_type,''), ti.device_type),
+          active_time = COALESCE(d.active_time, ti.active_time)
+        FROM (
+          SELECT DISTINCT ON (device_sn) device_sn, device_type, active_time
+          FROM service_tickets WHERE device_sn IS NOT NULL
+          ORDER BY device_sn, created_at DESC
+        ) ti
+        WHERE d.sn = ti.device_sn
+        AND (d.device_type IS NULL OR d.device_type = '' OR d.active_time IS NULL)
+        AND (ti.device_type IS NOT NULL AND ti.device_type != '' OR ti.active_time IS NOT NULL)
+    """))
+    total += r.rowcount
+    # 步骤3: device_combos → merchant_name + current_combo_name + active_time（兜底）
+    r = db.execute(text("""
+        UPDATE devices d
+        SET
+          merchant_name = COALESCE(NULLIF(d.merchant_name,''), lc.merchant_name),
+          current_combo_name = COALESCE(NULLIF(d.current_combo_name,''), lc.package_name),
+          active_time = COALESCE(d.active_time, ec.first_recharge)
+        FROM (
+          SELECT DISTINCT ON (device_sn) device_sn, merchant_name, package_name, created_at_raw
+          FROM device_combos WHERE device_sn IS NOT NULL
+          ORDER BY device_sn, created_at_raw DESC
+        ) lc
+        LEFT JOIN (
+          SELECT DISTINCT ON (device_sn) device_sn, created_at_raw AS first_recharge
+          FROM device_combos WHERE device_sn IS NOT NULL
+          ORDER BY device_sn, created_at_raw ASC
+        ) ec ON ec.device_sn = lc.device_sn
+        WHERE d.sn = lc.device_sn
+        AND (d.merchant_name IS NULL OR d.merchant_name = ''
           OR d.current_combo_name IS NULL OR d.current_combo_name = ''
-          OR d.merchant_name IS NULL OR d.merchant_name = ''
           OR d.active_time IS NULL)
     """))
+    total += r.rowcount
     db.commit()
-    updated = result.rowcount
-    logger.info("[档案反填] 从 device_combos/flow_usage 反填 devices 缺字段: %s 行", updated)
-    return {"backfilled": updated}
+    logger.info("[档案反填] 从 bms_orders/tickets/combos 反填 devices 缺字段: %s 行", total)
+    return {"backfilled": total}
 
 
 def _make_session_hook(sns: list[str], concurrency: int, stats: dict):
