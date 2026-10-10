@@ -208,6 +208,9 @@ def _make_renew_session_hook(sns: list[str], concurrency: int, stats: dict):
     """构造续费记录探针 hook：登录后抓 token → 并发 renewRecord?sn= 查询 → 只填空值。"""
 
     async def hook(page) -> dict:
+        # hook 闭包内独立导入(避免模块级循环依赖; SessionLocal 每次调用时绑定当前配置)
+        from app.core.database import SessionLocal
+
         xtoken: dict = {}
 
         def on_request(req):
