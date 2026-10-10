@@ -12,6 +12,7 @@ from app.api.v1.complaints._detail import (
     complaint_pure_card,
     complaint_supplementary,
 )
+from app.api.v1.complaints._device_dims import complaint_device_dims
 from app.api.v1.complaints._extended_dims import complaint_extended_dims_endpoint
 from app.api.v1.complaints._health import complaint_health_metrics_endpoint
 from app.api.v1.complaints._helpers import (
@@ -123,6 +124,7 @@ __all__ = [
     'complaint_by_device_tag_endpoint',
     'complaint_dedup_review',
     'complaint_detail',
+    'complaint_device_dims',
     'complaint_extended_dims_endpoint',
     'complaint_health_metrics_endpoint',
     'complaint_overview',

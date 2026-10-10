@@ -113,7 +113,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
 import isoWeek from 'dayjs/plugin/isoWeek'
-import { complaintAnalysis, complaintOverview, complaintSummary, complaintDetail, complaintSupplementary, complaintBacklog, complaintBacklogExport, complaintBacklogDimOptions, complaintSubjectAnalysis, createAudit } from '@/api/complaint'
+import { complaintAnalysis, complaintOverview, complaintSummary, complaintDetail, complaintSupplementary, complaintBacklog, complaintBacklogExport, complaintBacklogDimOptions, complaintSubjectAnalysis, createAudit, complaintDeviceDims } from '@/api/complaint'
 import { useAudit } from '@/composables/useAudit'
 
 export function useComplaintAnalysis() {
@@ -143,6 +143,7 @@ export function useComplaintAnalysis() {
   const activeTab = computed(() => {
     if (topTab.value === 'execute') return 'backlog'
     if (analysisTab.value === 'subject') return 'subject'
+    if (analysisTab.value === 'device') return 'device'
     if (analysisTab.value === 'channel') {
       return channelTab.value === 'card' ? 'card' : channelTab.value
     }
@@ -467,6 +468,66 @@ export function useComplaintAnalysis() {
   function drillOvDeviceDim(kind, name) {
     if (!name) return
     topTab.value = 'execute' // 切到积压页(activeTab → 'backlog')
+    drillBacklogDim(kind, name)
+  }
+
+  // ── #67 设备维度 tab(独立于概览趋势, 按渠道可切) ──
+  //   数据面 = /complaints/device-dims(source_type 过滤), 与概览A6同源自洽。
+  //   渠道切换: all(三源合计剔卡商) / 内部投诉 / 商户号投诉 / 外部投诉 / (外)卡商
+  const deviceDimSource = ref('all')
+  const deviceDimData = ref(null)
+  const deviceDimLoading = ref(false)
+
+  const DEVICE_DIM_SOURCE_MAP = {
+    all: null,
+    internal: '内部投诉',
+    merchant: '商户号投诉',
+    external: '外部投诉',
+    card: '(外)卡商',
+  }
+
+  async function loadDeviceDims() {
+    deviceDimLoading.value = true
+    try {
+      const params = { start: range.value.start, end: range.value.end }
+      const src = DEVICE_DIM_SOURCE_MAP[deviceDimSource.value]
+      if (src) params.source_type = src
+      const res = await complaintDeviceDims(params)
+      deviceDimData.value = res.data || null
+    } catch (e) {
+      deviceDimData.value = null
+      ElMessage.error('设备维度数据加载失败')
+    } finally {
+      deviceDimLoading.value = false
+    }
+  }
+
+  watch(deviceDimSource, () => { if (analysisTab.value === 'device') loadDeviceDims() })
+
+  const devDims = computed(() => deviceDimData.value?.device_dims || {})
+  const devDeviceTypeOption = computed(() => _dimBarOption(devDims.value.by_device_type, '#6366f1'))
+  const devComboOption = computed(() => _dimBarOption(devDims.value.by_combo, '#0ea5e9'))
+  const devMerchantOption = computed(() => _dimBarOption(devDims.value.by_merchant, '#f59e0b'))
+  const devActiveAgeOption = computed(() => {
+    const d = devDims.value.by_active_age || []
+    if (!d.length || d.every(x => !x.count)) return null
+    return {
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      grid: { left: 8, right: 44, top: 8, bottom: 8, containLabel: true },
+      xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
+      yAxis: { type: 'category', data: d.map(x => x.name), inverse: true, axisLabel: { fontSize: 10 } },
+      series: [{
+        type: 'bar', data: d.map(x => x.count), barMaxWidth: 16,
+        itemStyle: { color: '#10b981', borderRadius: [0, 4, 4, 0] },
+        label: { show: true, position: 'right', fontSize: 10 },
+      }],
+    }
+  })
+
+  // 设备维度桶点击 → 切积压页 + 带筛选(同概览A6下钻逻辑)
+  function drillDeviceDim(kind, name) {
+    if (!name) return
+    topTab.value = 'execute'
     drillBacklogDim(kind, name)
   }
 
@@ -1105,6 +1166,8 @@ export function useComplaintAnalysis() {
       // 同时加载明细
       loadBacklog()
       loadSubjectAnalysis()
+      // 设备维度 tab 数据(按渠道可切)
+      loadDeviceDims()
     } finally {
       loading.value = false
     }
@@ -1304,6 +1367,7 @@ export function useComplaintAnalysis() {
 // 从概览下钻到渠道时，也要拉明细(此时 channelTab 可能未变化)
   watch(analysisTab, () => {
     if (analysisTab.value === 'channel') loadChannelDetail()
+    if (analysisTab.value === 'device' && !deviceDimData.value) loadDeviceDims()
   })
 
   return {
@@ -1374,6 +1438,16 @@ export function useComplaintAnalysis() {
     ovMerchantOption,
     ovActiveAgeOption,
     drillOvDeviceDim,
+    // #67 设备维度 tab(独立于概览趋势, 按渠道可切)
+    deviceDimSource,
+    deviceDimData,
+    deviceDimLoading,
+    devDeviceTypeOption,
+    devComboOption,
+    devMerchantOption,
+    devActiveAgeOption,
+    drillDeviceDim,
+    loadDeviceDims,
     subj,
     subjectRanking,
     extRatioColor,
