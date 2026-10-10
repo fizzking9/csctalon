@@ -153,7 +153,7 @@
       <section class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">六、设备维度汇总<el-tooltip effect="dark" placement="top" raw-content
-            content="<b>来源</b>：/analytics/refund/decision-overview → device_dims / sale_days_split<br/><b>口径</b>：经营四路 A+B+C+D 全量（#291 2026-10-10 拍板，与「一、资金流出全景」同口径同窗口，各路按实际出款归日，已排除重复/忽略与冻结类流水，各桶合计可与四路合计对账；tooltip 展示每桶分路构成）；设备型号/套餐/店铺 = devices 表属性（#271/#273 同源，#293 探针补全驱动覆盖）；激活时长 = 出款日 − bms_orders 最早激活日（#251 同源六桶：0-7/8-30/31-90/91-180/181-365/&gt;365/无激活记录）<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：图为空 = 窗口内四路均无成功退款；(未填)/(未填SN)/(未建档) 桶 = 台账/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击任一桶 → 「七、退款明细」自动带对应筛选（激活桶按 7/30/180 天界合并映射；明细按发起日锚定且不含 C 路，下钻为近似映射）；设备型号桶需反查到类型码才可下钻<br/><b>取舍</b>：前三饼图 Top5+其他聚合（占比构成 vs 长尾取舍）；激活时长保条形（有序分桶，饼图丢顺序）；不做型号×套餐交叉图（明细可组合）">
+            content="<b>来源</b>：/analytics/refund/decision-overview → device_dims / sale_days_split<br/><b>口径</b>：经营四路 A+B+C+D 全量（#291 2026-10-10 拍板，与「一、资金流出全景」同口径同窗口，各路按实际出款归日，已排除重复/忽略与冻结类流水，各桶合计可与四路合计对账；tooltip 展示每桶分路构成）；设备型号/套餐/店铺 = devices 表属性（#271/#273 同源，#293 探针补全驱动覆盖）；激活时长 = 出款日 − bms_orders 最早激活日（#251 同源六桶：0-7/8-30/31-90/91-180/181-365/&gt;365/无激活记录）<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：图为空 = 窗口内四路均无成功退款；(未填)/(未填SN)/(未建档) 桶 = 台账/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击任一桶 → 「七、退款明细」自动带对应筛选（只设筛选不自动滚动，消息提示引导；激活桶按 7/30/180 天界合并映射；明细按发起日锚定且不含 C 路，下钻为近似映射）；设备型号桶需反查到类型码才可下钻<br/><b>取舍</b>：前三饼图 Top5+其他聚合（占比构成 vs 长尾取舍）；激活时长保条形（有序分桶，饼图丢顺序）；不做型号×套餐交叉图（明细可组合）">
             <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
           </el-tooltip></span>
           <span class="block-hint">四路 A/B/C/D · 判断: 退款集中在哪类设备型号/套餐/店铺/激活时长 → 行动: 新机高退查质量与预期差, 老机高退查老化与续费话术 · 点击桶带筛选下钻明细</span>
@@ -421,19 +421,19 @@
           <el-select v-model="filter.reason" placeholder="退款原因" size="small" clearable filterable style="min-width: 180px">
             <el-option v-for="rs in facetReasons" :key="rs" :label="rs" :value="rs" />
           </el-select>
-          <!-- #273: 设备维度筛选(口径=devices 表, 与投诉积压同套参数) -->
-          <el-select v-model="filter.device_type" placeholder="设备类型" size="small" clearable filterable style="width: 150px">
+          <!-- #273: 设备维度筛选(口径=devices 表, 与投诉积压同套参数; 命名与区块六一致: 设备型号/套餐/店铺/激活时长) -->
+          <el-select v-model="filter.device_type" placeholder="设备型号" size="small" clearable filterable style="width: 150px">
             <el-option v-for="t in facetDeviceTypes" :key="t.value" :label="t.label" :value="t.value" />
           </el-select>
           <el-select v-model="filter.combo" placeholder="套餐" size="small" clearable filterable style="width: 160px">
             <el-option v-for="c in facetCombos" :key="c" :label="c" :value="c" />
           </el-select>
-          <el-select v-model="filter.merchant" placeholder="商户号" size="small" clearable filterable style="width: 160px">
+          <el-select v-model="filter.merchant" placeholder="店铺" size="small" clearable filterable style="width: 160px">
             <el-option v-for="m in facetMerchants" :key="m" :label="m" :value="m" />
           </el-select>
           <el-date-picker v-model="filter.activeRange" type="daterange" size="small" range-separator="~" start-placeholder="激活起" end-placeholder="激活止" value-format="YYYY-MM-DD" style="width: 210px" />
           <!-- #291: 激活后天数桶(六、设备维度汇总 激活桶下钻入口) -->
-          <el-select v-model="filter.activeAge" placeholder="激活时段" size="small" clearable style="width: 130px">
+          <el-select v-model="filter.activeAge" placeholder="激活时长" size="small" clearable style="width: 130px">
             <el-option label="≤7天" value="le7" />
             <el-option label="8-30天" value="8-30" />
             <el-option label="31-180天" value="31-180" />
@@ -494,6 +494,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ElMessage } from 'element-plus'
 import { RefreshLeft, QuestionFilled } from '@element-plus/icons-vue'
 import BaseChart from '@/components/BaseChart.vue'
 import { refundDeep, refundWithdrawal } from '@/api/analytics'
@@ -855,31 +856,34 @@ const activeAgeOption = computed(() => {
   }
 })
 
-// #291 桶点击 → 带筛选跳「七、退款明细」
+// #291 桶点击 → 设筛选到「七、退款明细」
 // 设备类型桶名是显示名(type_name), 需从 facets 反查类型码(code); 反查不到 → 不设筛选(避免假下钻)
+// 点击语义统一(2026-10-10 修正): 四类桶一律「只设筛选, 不自动滚动」 ——
+// 自动 scrollIntoView 会把图表(及 tooltip)推出视口, 体验中断(用户反馈"乱跳");
+// 筛选生效由 filter watch 自动触发 loadDetail, 明细见下方「七、退款明细」, 用消息提示引导。
 function drillDeviceDim(kind, name) {
   if (!name) return
   const patch = {}
+  let dimLabel = ''
   if (kind === 'type') {
     const hit = facetDeviceTypes.value.find(t => t.label === name || (name && t.label && t.label.startsWith(name + '(')))
     if (!hit) return
     patch.device_type = hit.value
+    dimLabel = '设备型号'
   } else if (kind === 'combo') {
     patch.combo = name
+    dimLabel = '套餐'
   } else if (kind === 'merchant') {
     patch.merchant = name
+    dimLabel = '店铺'
   } else if (kind === 'age') {
     const v = SALE_AGE_PARAM[name]
     if (!v) return
     patch.activeAge = v
+    dimLabel = '激活时长'
   }
   filter.value = { ...filter.value, ...patch }
-  // 激活时长桶点击: 只设筛选不自动滚动 —— 用户想看 tooltip 数值,
-  // 自动 scrollIntoView 会把图表(及 tooltip)推出视口, 体验中断。
-  // 饼图(型号/套餐/店铺)点击仍下钻到明细(点击语义=查构成)。
-  if (kind !== 'age') {
-    scrollToSection('sec-detail')
-  }
+  ElMessage.success(`已筛选 ${dimLabel}=${name}，明细见下方「七、退款明细」`)
 }
 
 async function loadDetail() {
