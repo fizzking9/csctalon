@@ -153,7 +153,7 @@
       <section class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">六、设备维度汇总<el-tooltip effect="dark" placement="top" raw-content
-            content="<b>来源</b>：/analytics/refund/decision-overview → device_dims / sale_days_split<br/><b>口径</b>：经营四路 A+B+C+D 全量（#291 2026-10-10 拍板，与「一、资金流出全景」同口径同窗口，各路按实际出款归日，已排除重复/忽略与冻结类流水，各桶合计可与四路合计对账；tooltip 展示每桶分路构成）；设备型号/套餐/店铺 = devices 表属性（#271/#273 同源，#293 探针补全驱动覆盖）；激活时长 = 出款日 − bms_orders 最早激活日（#251 同源六桶：0-7/8-30/31-90/91-180/181-365/&gt;365/无激活记录）<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：图为空 = 窗口内四路均无成功退款；(未填)/(未填SN)/(未建档) 桶 = 台账/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击任一桶 → 「七、退款明细」自动带对应筛选（只设筛选不自动滚动，消息提示引导；激活桶按 7/30/180 天界合并映射；明细按发起日锚定且不含 C 路，下钻为近似映射）；设备型号桶需反查到类型码才可下钻<br/><b>取舍</b>：前三饼图 Top5+其他聚合（占比构成 vs 长尾取舍）；激活时长保条形（有序分桶，饼图丢顺序）；不做型号×套餐交叉图（明细可组合）">
+            content="<b>来源</b>：/analytics/refund/decision-overview → device_dims / sale_days_split<br/><b>口径</b>：经营四路 A+B+C+D 全量（#291 2026-10-10 拍板，与「一、资金流出全景」同口径同窗口，各路按实际出款归日，已排除重复/忽略与冻结类流水，各桶合计可与四路合计对账；tooltip 展示每桶分路构成）；设备型号/套餐/店铺 = devices 表属性（#271/#273 同源，#293 探针补全驱动覆盖）；激活时长 = 出款日 − bms_orders 最早激活日（#251 同源六桶：0-7/8-30/31-90/91-180/181-365/&gt;365/无激活记录）<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：图为空 = 窗口内四路均无成功退款；(未填)/(未填SN)/(未建档) 桶 = 台账/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击任一桶 → 「七、退款明细」自动带对应筛选（只设筛选不自动滚动，消息提示引导；激活桶按 7/30/180 天界合并映射；明细按发起日锚定且不含 C 路，下钻为近似映射）；设备型号桶需反查到类型码才可下钻；「其他」为 Top5 长尾聚合桶，不可下钻<br/><b>取舍</b>：前三饼图 Top5+其他聚合（占比构成 vs 长尾取舍）；激活时长保条形（有序分桶，饼图丢顺序）；不做型号×套餐交叉图（明细可组合）">
             <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
           </el-tooltip></span>
           <span class="block-hint">四路 A/B/C/D · 判断: 退款集中在哪类设备型号/套餐/店铺/激活时长 → 行动: 新机高退查质量与预期差, 老机高退查老化与续费话术 · 点击桶带筛选下钻明细</span>
@@ -863,6 +863,12 @@ const activeAgeOption = computed(() => {
 // 筛选生效由 filter watch 自动触发 loadDetail, 明细见下方「七、退款明细」, 用消息提示引导。
 function drillDeviceDim(kind, name) {
   if (!name) return
+  // 「其他」是饼图 Top5+其他 聚合出的长尾合成桶, 无对应真实筛选值 ——
+  // 直接透传会变成 店铺=其他 / 套餐=其他 精确匹配 0 条(明细清单"空了"的假象), 禁止下钻。
+  if (name === '其他') {
+    ElMessage.info('「其他」为长尾聚合桶（Top5 之外的合计），不可下钻筛选')
+    return
+  }
   const patch = {}
   let dimLabel = ''
   if (kind === 'type') {
