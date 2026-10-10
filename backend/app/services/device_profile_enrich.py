@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 
 # BMS 设备列表接口（登录后页面同源调用, 带页面 x-token）
 _FIND_PAGE_LIST_PATH = "/bms-portal/device/findPageList"
+# BMS 续费记录接口（设备套餐页同源调用, #293 套餐兜底第二探针）
+# 设备列表的 deviceComboName 只反映「当前有效套餐」——已退款/过期/作废设备该字段
+# 本就为空(148,274 台已探针但套餐空); 续费记录按 SN 可查全历史套餐。
+_RENEW_FIND_PAGE_LIST_PATH = "/bms-portal/renewRecord/findPageList"
 
 # 调度档默认每小时最多补多少个(4:00 档, 预计 ~40 分钟)
 DAILY_LIMIT_DEFAULT = 20000
@@ -141,6 +145,164 @@ _EMPTY_PARAMS = {
 def mark_probe_miss(db: Session, sn: str) -> None:
     """miss(BMS 查无此 SN)也打探针(#293)——否则永久 miss 在每批堆积白查直至停滞。"""
     db.execute(text("UPDATE devices SET profile_probe_at = now() WHERE sn = :sn"), {"sn": sn})
+
+
+# ── #293 续费记录套餐兜底(renew 模式) ──
+
+def scan_renew_combo_sns(db: Session, limit: int) -> list[str]:
+    """扫描「已探针但套餐仍空」的 SN（设备列表源已穷尽, 续费记录兜底）。
+
+    倒排优先级: 近180天有退款的设备最先（退款分析是 #293 的直接受益方）,
+    其余按设备列表探针时间正序（最早被探的先补）。
+    """
+    q = text("""
+        SELECT d.sn FROM devices d
+        WHERE (d.current_combo_name IS NULL OR d.current_combo_name = '')
+          AND d.profile_probe_at IS NOT NULL
+        ORDER BY EXISTS (
+            SELECT 1 FROM refunds r
+            WHERE r.device_sn = d.sn AND r.updated_at >= now() - interval '180 days'
+        ) DESC, d.profile_probe_at ASC
+        LIMIT :lim
+    """)
+    return [r[0] for r in db.execute(q, {"lim": limit}).fetchall()]
+
+
+def apply_renew_items(db: Session, sn: str, items: list[dict]) -> bool:
+    """续费记录 items → devices 只填空值。返回是否填到了字段。
+
+    - items 接口按 createDate DESC 返回（最新在前）, rows=20 取近 20 条;
+    - 套餐选择: 优先「非套餐已作废」的最新一条; 全部作废取最新一条
+      （分析需要知道最后套餐, 即便已作废/过期——空着反而制造「未填」假象）;
+    - 工厂质检套餐名不落库（与看板口径一致, 落了也会被过滤成「未填」）;
+    - merchant_name ← businessName(店铺名); active_time 兜底 ← 最早 startDate;
+    - hit 也写 profile_probe_at=now(): 双语义(设备列表 30 天复探窗口顺延;
+      续费记录查过即标记, 避免重复白查)。
+    """
+    if not items:
+        return False
+    combo = next(
+        (it.get("comboName") for it in items
+         if it.get("comboName") and it.get("currentStatus") != "套餐已作废"),
+        None,
+    ) or (items[0].get("comboName") or None)
+    if combo and "工厂质检" in combo:
+        combo = None
+    merchant = next((it.get("businessName") for it in items if it.get("businessName")), None)
+    starts = sorted(it["startDate"] for it in items if it.get("startDate"))
+    first_start = starts[0] if starts else None
+    db.execute(text("""
+        UPDATE devices SET
+            current_combo_name = COALESCE(NULLIF(current_combo_name,''), :combo),
+            merchant_name      = COALESCE(NULLIF(merchant_name,''), :merchant),
+            active_time        = COALESCE(active_time, CAST(:first_start AS timestamp)),
+            profile_probe_at   = now()
+        WHERE sn = :sn
+    """), {
+        "sn": sn, "combo": combo, "merchant": merchant, "first_start": first_start,
+    })
+    return bool(combo or merchant or first_start)
+
+
+def _make_renew_session_hook(sns: list[str], concurrency: int, stats: dict):
+    """构造续费记录探针 hook：登录后抓 token → 并发 renewRecord?sn= 查询 → 只填空值。"""
+
+    async def hook(page) -> dict:
+        xtoken: dict = {}
+
+        def on_request(req):
+            if "x-token" in req.headers:
+                xtoken["value"] = req.headers["x-token"]
+
+        page.on("request", on_request)
+        # 进设备套餐页拿同源上下文(点一次搜索触发带 token 的请求)
+        await page.goto("https://wifi.cloud-cat.cn/bms/index.html#/device/device-combo",
+                        wait_until="domcontentloaded")
+        await asyncio.sleep(3)
+        try:
+            btn = (await page.query_selector('button:has-text("搜索")')
+                   or await page.query_selector('button:has-text("查询")'))
+            if btn:
+                await btn.click()
+                await asyncio.sleep(2)
+        except Exception:  # noqa: BLE001
+            pass
+
+        base_url = page.url.split("/bms/")[0]
+        list_url = f"{base_url}{_RENEW_FIND_PAGE_LIST_PATH}"
+        cookies = {c["name"]: c["value"] for c in await page.context.cookies()}
+        headers = {
+            "x-token": xtoken.get("value", ""),
+            "accept": "application/json, text/plain, */*",
+            "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/153.0 Safari/537.36",
+            "referer": page.url,
+        }
+
+        queue: asyncio.Queue = asyncio.Queue()
+        for s in sns:
+            queue.put_nowait(s)
+        pause = asyncio.Event()
+
+        async def worker(cli: httpx.AsyncClient, db: Session):
+            while not queue.empty():
+                sn = queue.get_nowait()
+                if pause.is_set():
+                    await pause.wait()
+                try:
+                    r = await cli.get(
+                        list_url,
+                        params={
+                            "page": 1, "rows": 20, "sn": sn,
+                            # 宽窗口: 这些设备的套餐记录多在历史(设备套餐页默认窗口仅7天会查空)
+                            "findStartDate": "2024-01-01T00:00:00.000Z",
+                            "findEndDate": "2026-12-31T23:59:59.000Z",
+                        },
+                        headers=headers,
+                    )
+                    stats["queried"] += 1
+                    if r.status_code != 200:
+                        stats["failed"] += 1
+                        pause.set()
+                        await asyncio.sleep(65)  # BMS 限流冷却
+                        pause.clear()
+                        queue.put_nowait(sn)  # 重新排队, 下轮再试
+                        continue
+                    items = ((r.json() or {}).get("data") or {}).get("items") or []
+                    if items:
+                        stats["hit"] += 1
+                        if apply_renew_items(db, sn, items):
+                            stats["updated"] += 1
+                    else:
+                        stats["miss"] += 1
+                        mark_probe_miss(db, sn)
+                    # 每 200 个提交一批(短事务, 避免长事务锁表)
+                    if stats["queried"] % 200 == 0:
+                        db.commit()
+                    if stats["queried"] % 500 == 0:
+                        logger.info(
+                            "[套餐兜底] 进度 %s/%s hit=%s miss=%s updated=%s failed=%s",
+                            stats["queried"], len(sns), stats["hit"],
+                            stats["miss"], stats["updated"], stats["failed"],
+                        )
+                except Exception:  # noqa: BLE001 单条失败不中断整体(不重排队, 防毒SN死循环)
+                    stats["failed"] += 1
+                    db.rollback()
+                    await asyncio.sleep(1)
+                finally:
+                    queue.task_done()
+
+        async with httpx.AsyncClient(cookies=cookies, timeout=30, follow_redirects=True) as cli:
+            dbs = [SessionLocal() for _ in range(concurrency)]
+            try:
+                await asyncio.gather(*[worker(cli, d) for d in dbs])
+                for d in dbs:
+                    d.commit()
+            finally:
+                for d in dbs:
+                    d.close()
+        return {k: stats.get(k, 0) for k in ("queried", "hit", "miss", "updated", "failed")}
+
+    return hook
 
 
 def backfill_from_business(db: Session) -> dict:
@@ -388,12 +550,19 @@ async def run_enrich(
     concurrency: int = CONCURRENCY_DEFAULT,
     trigger_type: str = "scheduled",
     timeout_sec: int = 7200,
+    mode: str = "device",
 ) -> dict:
     """主入口：扫描缺字段 SN → 登录 BMS → SN 查询补全 → 记日志。
 
+    mode="device"(默认): 设备列表探针——扫 devices 缺四字段任一的 SN,
+        findPageList?sn= 补设备类型/当前套餐/商户/激活时间(调度档用此模式)。
+    mode="renew": 续费记录套餐兜底——扫「已探针但套餐仍空」的 SN,
+        renewRecord?sn= 补历史套餐(已退款/过期/作废设备列表源查不到)。
+        手动驱动, 不挂调度(增量缺口由 device_combo 同步钩子 + 本模式按需重跑)。
+
     timeout_sec 是整个 SN 补全的外层预算(含登录): 调度档 2 万 SN 约 25-40 分钟;
     CLI 存量清零(数十万 SN)请传更大值(如 86400)。
-    返回 {skipped, target, queried, hit, miss, updated, failed, elapsed_sec}。
+    返回 {mode, skipped, target, queried, hit, miss, updated, failed, elapsed_sec}。
     并发运行保护：_run_lock 非阻塞获取, 已有实例在跑则返回 skipped。
     """
     if _run_lock.locked():
@@ -406,16 +575,19 @@ async def run_enrich(
 
         scan_db = SessionLocal()
         try:
-            sns = scan_missing_sns(scan_db, limit)
+            if mode == "renew":
+                sns = scan_renew_combo_sns(scan_db, limit)
+            else:
+                sns = scan_missing_sns(scan_db, limit)
         finally:
             scan_db.close()
 
         stats: dict[str, Any] = {
-            "skipped": False, "target": len(sns),
+            "mode": mode, "skipped": False, "target": len(sns),
             "queried": 0, "hit": 0, "miss": 0, "updated": 0, "failed": 0,
         }
         if not sns:
-            logger.info("[档案补全] 无缺字段设备, 无需回填")
+            logger.info("[档案补全] mode=%s 无目标设备, 无需回填", mode)
             _log_sync(db, trigger_type, stats, None)
             return stats
 
@@ -440,9 +612,12 @@ async def run_enrich(
 
         error: Optional[str] = None
         async with BmsFetcher() as fetcher:
+            hook = (_make_renew_session_hook(sns, concurrency, stats)
+                    if mode == "renew"
+                    else _make_session_hook(sns, concurrency, stats))
             result = await fetcher.fetch_one(
                 "device_profile", w_start, w_end, config,
-                timeout=timeout_sec, session_hook=_make_session_hook(sns, concurrency, stats),
+                timeout=timeout_sec, session_hook=hook,
             )
             if not result.success:
                 error = result.error or "session_hook 执行失败"
