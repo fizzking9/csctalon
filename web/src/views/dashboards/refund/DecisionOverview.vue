@@ -874,7 +874,12 @@ function drillDeviceDim(kind, name) {
     patch.activeAge = v
   }
   filter.value = { ...filter.value, ...patch }
-  scrollToSection('sec-detail')
+  // 激活时长桶点击: 只设筛选不自动滚动 —— 用户想看 tooltip 数值,
+  // 自动 scrollIntoView 会把图表(及 tooltip)推出视口, 体验中断。
+  // 饼图(型号/套餐/店铺)点击仍下钻到明细(点击语义=查构成)。
+  if (kind !== 'age') {
+    scrollToSection('sec-detail')
+  }
 }
 
 async function loadDetail() {
