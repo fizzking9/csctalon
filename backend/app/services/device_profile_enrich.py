@@ -155,7 +155,7 @@ def backfill_from_business(db: Session) -> dict:
     字段优先级（COALESCE 链，先 BMS 权威源 → 业务表）：
       device_type:        bms_orders.device_type_name → tickets.device_type
       merchant_name:      device_combos.merchant_name
-      current_combo_name: device_combos.package_name
+      current_combo_name: device_combos.package_name（排除工厂质检专用套餐）
       active_time:        bms_orders.active_date → tickets.active_time → device_combos.首充时间
 
     只填空值（COALESCE + NULLIF 幂等，可重复跑）。
@@ -198,17 +198,26 @@ def backfill_from_business(db: Session) -> dict:
     """))
     total += r.rowcount
     # 步骤3: device_combos → merchant_name + current_combo_name + active_time（兜底）
+    # #293 套餐排除工厂质检专用套餐: 最新行为质检流水时回退更早的非质检行
+    # (2026-10-10 实测未排质检导致 3.3 万设备 current_combo_name 被质检包名污染)
     r = db.execute(text("""
         UPDATE devices d
         SET
           merchant_name = COALESCE(NULLIF(d.merchant_name,''), lc.merchant_name),
-          current_combo_name = COALESCE(NULLIF(d.current_combo_name,''), lc.package_name),
+          current_combo_name = COALESCE(NULLIF(d.current_combo_name,''), lcp.package_name),
           active_time = COALESCE(d.active_time, ec.first_recharge)
         FROM (
-          SELECT DISTINCT ON (device_sn) device_sn, merchant_name, package_name, created_at_raw
+          SELECT DISTINCT ON (device_sn) device_sn, merchant_name, created_at_raw
           FROM device_combos WHERE device_sn IS NOT NULL
           ORDER BY device_sn, created_at_raw DESC
         ) lc
+        LEFT JOIN (
+          SELECT DISTINCT ON (device_sn) device_sn, package_name
+          FROM device_combos
+          WHERE device_sn IS NOT NULL AND package_name IS NOT NULL AND package_name != ''
+            AND position('工厂质检' in package_name) = 0
+          ORDER BY device_sn, created_at_raw DESC
+        ) lcp ON lcp.device_sn = lc.device_sn
         LEFT JOIN (
           SELECT DISTINCT ON (device_sn) device_sn, created_at_raw AS first_recharge
           FROM device_combos WHERE device_sn IS NOT NULL
