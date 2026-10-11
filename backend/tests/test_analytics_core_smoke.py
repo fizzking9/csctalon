@@ -49,7 +49,7 @@ class TestRefundChainSignatures:
                                       "slow_only", "path", "comp", "operator", "reason",
                                       "device_type", "combo", "merchant",  # #273 设备维度
                                       "active_start", "active_end",
-                                      "active_age"],  # #291 激活后天数桶下钻
+                                      "active_age"],  # #295 激活时长桶下钻
         "refund_withdrawal_daily_split": ["db", "start", "end"],
         "refund_withdrawal_sleeping": ["db", "start", "end", "page", "page_size"],
     }

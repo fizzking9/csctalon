@@ -195,8 +195,8 @@ def rw_detail(db: DBSession, _: CurrentUser, start: str | None = None, end: str 
               active_end: str = Query("", max_length=10, description="#273 激活时间止(YYYY-MM-DD)"),
               # ⚠️ pattern 尾部 ? 必须保留: 默认值是空串, pydantic v2 对空串也做 pattern 校验
               #    （实测 `^(...)$` 时「不传参数」也 422 —— #293 回归实录）
-              active_age: str = Query("", max_length=10, pattern=r"^(le7|8-30|31-180|gt180|none)?$",
-                                      description="#291 激活后天数桶下钻(事件日−bms_orders最早激活日)")):
+              active_age: str = Query("", max_length=10, pattern=r"^(le15|16-30|31-180|181-365|gt365|none)?$",
+                                      description="#295 激活时长桶下钻(事件日−bms_orders最早激活日)")):
     key = f"rw:detail:{start}:{end}:{sort}:{page}:{page_size}:{int(slow_only)}:{path}:{comp}:{operator}:{reason}:{device_type}:{combo}:{merchant}:{active_start}:{active_end}:{active_age}"
     return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_detail, db, start, end, sort, page, page_size, slow_only, path, comp, operator, reason, device_type, combo, merchant, active_start, active_end, active_age))
 

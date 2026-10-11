@@ -219,7 +219,7 @@ export function useComplaintAnalysis() {
   const backlogFilters = reactive({
     source_type: '', status: '', has_handler: null,
     // #273: 设备维度筛选(口径=devices 表, 与退款明细同一套后端参数)
-    // #291: activeAge=激活后天数桶(le7/8-30/31-180/gt180/none), 由四维汇总图桶点击带入
+    // #295: activeAge=激活时长桶(le15/16-30/31-180/181-365/gt365/none), 由四维汇总图桶点击带入
     device_type: '', combo: '', merchant: '', activeRange: null, activeAge: '',
   })
 
@@ -377,7 +377,7 @@ export function useComplaintAnalysis() {
     }
   })
 
-  // ── #291 设备维度汇总(积压口径): 设备类型/套餐/商户号 + 激活时间段四桶 ──
+  // ── #291 设备维度汇总(积压口径): 设备类型/套餐/商户号 + 激活时长五桶(#295) ──
   // 数据面 = /backlog 同一响应(by_device_type/by_combo/by_merchant/by_active_age),
   // 与明细表同源 → 点击桶设置筛选后明细行数 = 桶计数, 数字自洽可对账。
   function _dimBarOption(list, color) {
@@ -418,7 +418,11 @@ export function useComplaintAnalysis() {
   })
 
   // 四维桶点击 → 带筛选下钻积压明细(类型桶名=显示名, 需反查类型码; 反查不到不设筛选防假下钻)
-  const AGE_PARAM_BY_NAME = { '≤7天': 'le7', '8-30天': '8-30', '31-180天': '31-180', '>180天': 'gt180', '(无激活记录)': 'none' }
+  // #295 五桶 桶名→active_age 参数(与后端 _core._AGE_PARAM_TO_BUCKET 同值, 后端为单一来源)
+  const AGE_PARAM_BY_NAME = {
+    '0-15天': 'le15', '16-30天': '16-30', '31-180天': '31-180',
+    '181-365天': '181-365', '>365天': 'gt365', '(无激活记录)': 'none',
+  }
   function drillBacklogDim(kind, name) {
     if (!name) return
     if (kind === 'type') {

@@ -29,11 +29,13 @@ logger = logging.getLogger(__name__)
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
 from app.services.analytics._core import (
+    ACTIVE_AGE_BUCKETS,
     COMPLAINT_SPECIALTY,
     REFUND_RECOVERY_HR_CATS,
     SYS_OP_BLACKLIST_RR,
     TZ,
     D,
+    _active_age_bucket,
     _device_dim_attrs,
     _is_refund_staff,
     _normalize_refund_reason,
@@ -1667,25 +1669,14 @@ def refund_decision_overview(
 
     dd_attrs = _device_dim_attrs(db, {sn for (_rk, sn, _a, _e) in route_item_rows if sn})
 
-    # ── 7. 售出后 N 天分桶(#251 B3-5, 用户#6): 出款日 − 最早激活日 六桶 ──
+    # ── 7. 售出后 N 天分桶(#251 B3-5 建, #295 改桶): 出款日 − 最早激活日 五桶 ──
     #     口径随四路升级: 事件日 = 各路归日锚点(原为 A 路发起日 created_at_raw)。
     #     激活锚点并集兜底(#293): bms_orders MIN(active_date) 优先, devices.active_time 兜底
     #     (90天退款 SN 68% 在 bms_orders 无订单 → devices.active_time 反填覆盖 90%+)。
+    #     #295(2026-10-11): 桶定义收口到 _core.ACTIVE_AGE_BUCKETS, 与投诉侧同名同序
+    #     (0-15/16-30/31-180/181-365/>365/(无激活记录)), 消除退款六桶 vs 投诉四桶的口径分裂。
     #     ⚠️ 本块**单独核算, 不纳入售后客服指标**(用户拍板)——仅经营分析视角。
-    _SALE_BUCKETS = ("0-7天", "8-30天", "31-90天", "91-180天", "181-365天", ">365天", "无激活记录")
-
-    def _sale_bucket(days: int) -> str:
-        if days <= 7:
-            return "0-7天"
-        if days <= 30:
-            return "8-30天"
-        if days <= 90:
-            return "31-90天"
-        if days <= 180:
-            return "91-180天"
-        if days <= 365:
-            return "181-365天"
-        return ">365天"
+    _SALE_BUCKETS = ACTIVE_AGE_BUCKETS
 
     # 激活锚点: _device_dim_attrs.active_date(bms MIN→devices.active_time, 质检套餐已过滤)
     sale_active: dict[str, Any] = {sn: a["active_date"] for sn, a in dd_attrs.items() if a.get("active_date")}
@@ -1708,8 +1699,9 @@ def refund_decision_overview(
     for rk, sn, amt, ev in route_item_rows:
         act = sale_active.get(sn)
         ev_d = _ev_sh_date(ev)
-        # 无激活记录 = 无任何激活锚点; 事件日缺失(理论不发生)同归该桶防崩溃
-        bk = "无激活记录" if (act is None or ev_d is None) else _sale_bucket((ev_d - act).days)
+        # (无激活记录) = 无任何激活锚点; 事件日缺失(理论不发生)同归该桶防崩溃
+        # #295: 桶判定收口到 _core._active_age_bucket(与投诉侧/明细下钻同一函数)
+        bk = _active_age_bucket(None if (act is None or ev_d is None) else (ev_d - act).days)
         b = sale_map[bk]
         b[0] += 1
         b[1] += amt
@@ -1727,7 +1719,7 @@ def refund_decision_overview(
     ]
 
     # ── 8. 设备维度汇总(#291, 四路口径): 设备类型/套餐/商户号 分桶 ──
-    #     激活时间段维度**复用上方 sale_days_split**(#251 真身, 六桶), 此处不重复输出 ——
+    #     激活时间段维度**复用上方 sale_days_split**(#251 真身, #295 五桶), 此处不重复输出 ——
     #     同一事实禁止两处汇总(AGENTS 界面纪律#5 投影规则)。
     #     未填SN/未建档分别显式分桶, 暴露数据覆盖缺口; routes=各路笔数/金额分解(前端 tooltip)。
     def _dd_group(pick) -> list[dict[str, Any]]:

@@ -28,7 +28,7 @@ from app.services.analytics import (
 
 
 def _device_dim_groups(db, rows: list[dict]) -> dict[str, list[dict]]:
-    """#291 设备维度汇总(积压口径): 设备类型/套餐/商户号 + 激活时间段四桶。
+    """#291 设备维度汇总(积压口径): 设备类型/套餐/商户号 + 激活时长五桶(#295)。
 
     与明细筛选(#273/#291 active_age)同用 _device_dim_attrs(SN→设备属性,
     激活基准=bms_orders 最早激活日), 保证「汇总数字 ↔ 明细表」同源自洽:
@@ -49,7 +49,7 @@ def _device_dim_groups(db, rows: list[dict]) -> dict[str, list[dict]]:
             g[key] = g.get(key, 0) + 1
         return [{"name": k, "count": v} for k, v in sorted(g.items(), key=lambda x: -x[1])][:12]
 
-    # 激活时间段: 锚点=工单登记日(与 #291 active_age 筛选同锚), 固定桶顺序返回
+    # 激活时长: 锚点=工单登记日(与 active_age 筛选同锚), #295 五桶固定顺序返回
     age_g: dict[str, int] = {b: 0 for b in ACTIVE_AGE_BUCKETS}
     for r in rows:
         a = attrs.get(r["device_sn"]) if r["device_sn"] else None
@@ -90,8 +90,8 @@ def complaint_backlog(
     merchant: Annotated[str | None, Query(max_length=128, description="#273 商户号(devices.merchant_name)")] = None,
     active_start: Annotated[str | None, Query(max_length=10, description="#273 激活时间起(YYYY-MM-DD)")] = None,
     active_end: Annotated[str | None, Query(max_length=10, description="#273 激活时间止(YYYY-MM-DD)")] = None,
-    active_age: Annotated[str | None, Query(max_length=10, pattern=r"^(le7|8-30|31-180|gt180|none)$",
-                                            description="#291 激活后天数桶下钻(登记日−bms_orders最早激活日)")] = None,
+    active_age: Annotated[str | None, Query(max_length=10, pattern=r"^(le15|16-30|31-180|181-365|gt365|none)$",
+                                            description="#295 激活时长桶下钻(登记日−bms_orders最早激活日)")] = None,
 ):
     """积压未处理投诉的查询/统计/审核分析。
 
@@ -204,8 +204,8 @@ def complaint_backlog_export(
     merchant: Annotated[str | None, Query(max_length=128, description="#273 商户号")] = None,
     active_start: Annotated[str | None, Query(max_length=10, description="#273 激活时间起")] = None,
     active_end: Annotated[str | None, Query(max_length=10, description="#273 激活时间止")] = None,
-    active_age: Annotated[str | None, Query(max_length=10, pattern=r"^(le7|8-30|31-180|gt180|none)$",
-                                            description="#291 激活后天数桶下钻(登记日−bms_orders最早激活日)")] = None,
+    active_age: Annotated[str | None, Query(max_length=10, pattern=r"^(le15|16-30|31-180|181-365|gt365|none)$",
+                                            description="#295 激活时长桶下钻(登记日−bms_orders最早激活日)")] = None,
 ):
     """导出积压未处理投诉明细 Excel。
 

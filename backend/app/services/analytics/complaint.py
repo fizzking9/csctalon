@@ -776,7 +776,8 @@ def complaint_by_device_tag(
 # #252 B3-11 投诉分析扩展维度（店铺/商户号/设备型号/套餐/激活后时长）
 # ═══════════════════════════════════════════════════════════════════════
 
-# #252 建五桶 → #291 改**四桶**(用户拍板 2026-10-09): ≤7 / 8-30 / 31-180(6个月内) / >180(6个月以上)
+# #252 建五桶 → #291 改四桶 → #295 改**五桶**(用户拍板 2026-10-11):
+# 0-15 / 16-30 / 31-180 / 181-365 / >365 (+无激活记录), 退款/投诉同名同序
 # 桶名唯一来源 = _core.ACTIVE_AGE_BUCKETS(与退款侧明细下钻 active_age 参数同源)
 _ACTIVE_DAYS_BUCKETS = ACTIVE_AGE_BUCKETS
 
@@ -808,7 +809,7 @@ def complaint_extended_dims(
         device_type 文本，再空归 (未知类型)
       · 套餐: devices.current_combo_name → combo_name_alias(is_current) → combo_dict
         归一名，未命中回落原始名，空归 (无套餐)
-      · 激活后时长: register_time − bms_orders 最早激活日(#291 四桶口径, 与 #251 同源;
+      · 激活后时长: register_time − bms_orders 最早激活日(#295 五桶口径, 与 #251 同源;
         原 #252 用 devices.active_time, 已统一收敛到 bms_orders 单一基准)
       · 每维 TopN + 其余归 (其他)；未建链显式分桶暴露覆盖缺口
     """
@@ -890,8 +891,10 @@ def complaint_extended_dims(
         .order_by(cnt.desc())
     ).all()
 
-    # ── 5. 激活后时长(#291 四桶口径; 基准=bms_orders 最早激活日, 与 #251「销售天数」同源单口径,
+    # ── 5. 激活后时长(#295 五桶口径; 基准=bms_orders 最早激活日, 与 #251「销售天数」同源单口径,
     #        原 #252 用 devices.active_time → 统一收敛到 bms_orders) ──
+    #    切点=上界(用户拍板): 15/30/180/365 归其左侧桶; CASE 自上而下短路求值,
+    #    无激活记录优先判定, NULL 天数不会误落首桶(与 _active_age_bucket Python 侧同序)。
     fa_cte = (
         select(
             BmsOrder.device_sn.label("dsn"),
@@ -906,10 +909,11 @@ def complaint_extended_dims(
     )
     bucket_expr = case(
         (fa_cte.c.fa.is_(None), "(无激活记录)"),
-        (days_expr <= 7, "≤7天"),
-        (days_expr <= 30, "8-30天"),
+        (days_expr <= 15, "0-15天"),
+        (days_expr <= 30, "16-30天"),
         (days_expr <= 180, "31-180天"),
-        else_=">180天",
+        (days_expr <= 365, "181-365天"),
+        else_=">365天",
     )
     active_rows = db.execute(
         select(bucket_expr, cnt)
