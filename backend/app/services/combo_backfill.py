@@ -159,12 +159,12 @@ def query_missing_dates(db, start: date, end: date) -> list[date]:
     """
     sql = text(
         """
-        SELECT d.d
+        SELECT d.d::date AS d
         FROM generate_series(:start_date, :end_date, '1 day') AS d(d)
         WHERE NOT EXISTS (
             SELECT 1
             FROM device_combos dc
-            WHERE (dc.created_at_raw AT TIME ZONE 'Asia/Shanghai')::date = d.d
+            WHERE (dc.created_at_raw AT TIME ZONE 'Asia/Shanghai')::date = d.d::date
         )
         ORDER BY d.d
         """
