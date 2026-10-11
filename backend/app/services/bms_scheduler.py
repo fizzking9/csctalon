@@ -232,6 +232,10 @@ class BmsScheduler:
         # 低频档当日是否已执行/已尝试(A-20260907-001 / #31): date_str -> bool
         # 与 _last_run_slot 分开: 低频小时(6:00)不在高频槽位体系, 用独立日标记防重复
         self._low_freq_done: dict[str, bool] = {}
+        # #299: device_combo 历史回补当夜是否已启动: date_str -> bool
+        # (回补本体是后台 task, 服务内部 04:45 硬停止, 这里只防当夜重复触发)
+        self._combo_backfill_done: dict[str, bool] = {}
+        self._combo_task: asyncio.Task | None = None
         # 共享文档采集"槽位内已完成"(统一调度 #35/#51): date_str -> set(已完成槽位标识)
         # 语义: 共享文档与 BMS 高频同槽位节奏, 同槽位只采一次(防 60s 主循环重复触发)
         self._shared_doc_done: dict[str, set[str]] = {}
@@ -338,6 +342,19 @@ class BmsScheduler:
                 self._close_circuit_incident(biz_key, dt, note="手动恢复熔断自动平息")
             self._halted_types[biz_key] = set()
             logger.info(f"[调度器] 已清除 {biz_key} 的 {n} 个专项熔断标记({sorted(halted_set)}),自动同步恢复")
+
+    def _on_combo_backfill_done(self, task: asyncio.Task) -> None:
+        """#299 回补后台 task 收尾: 必须取回异常/结果, 避免 "Task exception never retrieved"。"""
+        try:
+            summary = task.result()
+            logger.info(f"[调度器] device_combo 历史回补当夜结束: {summary}")
+        except asyncio.CancelledError:
+            logger.info("[调度器] device_combo 历史回补 task 被取消")
+        except Exception as e:  # noqa: BLE001 后台任务异常不炸调度器, 台账保证次夜续跑
+            logger.error(
+                f"[调度器] device_combo 历史回补异常退出(未完成片留 combo_backfill_slices, 次夜续跑): {e}",
+                exc_info=True,
+            )
 
     def get_status(self) -> dict:
         """获取调度器状态(含 SyncTaskManager 的当前任务进度 + 专项级熔断状态)"""
@@ -467,6 +484,8 @@ class BmsScheduler:
             # 因为整档一次 sync_all 提交, 部分源失败也会整档成功结束), 置 _low_freq_done
             # 避免重启后重复跑低频档。
             self._low_freq_done = {}
+            # #299: 历史回补日标记同日切清空(回补 service 无状态重启, 缺口台账在 DB)
+            self._combo_backfill_done = {}
             if LOW_FREQ_HOUR > 0:
                 # #191: 回填改看"低频源自身的 scheduled 成功记录"(见 low_freq_done_from_logs),
                 #   不再用高频槽位推断 —— 低频小时若落在高频时段内(E 路 15:00)会误判已跑导致漏采。
@@ -723,6 +742,35 @@ class BmsScheduler:
                             yesterday_full_sync=True,
                             biz_key=biz_key,
                         )
+
+                # ── 1.4) device_combo 历史切片回补档(#299): 01:00~04:45 夜间窗口 ──
+                # BMS 套餐导出 10 万行硬上限 + 每日增量长期失效(搜索被日期面板拦截),
+                # 2024 年起约 700+ 北京业务日缺失。夜间空闲档启动后台回补 task:
+                #   - 服务内部 04:45 硬停止, 缺口未清完次夜按 combo_backfill_slices
+                #     台账续跑; 无缺口夜 no-op(兼作未来漏采自愈);
+                #   - 后台运行不阻塞主 tick; 与 sync_task_manager 互斥(同账号并发踢登录);
+                #   - 让开 05:00 缺口补跑、06:00 低频档、08:00 起高频档。
+                from app.services import combo_backfill
+
+                if combo_backfill.in_night_window(now_cn):
+                    _cb_key = f"{date_str}:combo-backfill"
+                    if not self._combo_backfill_done.get(_cb_key, False):
+                        if combo_backfill.is_running():
+                            # 重启恢复/手动 API 已启动 → 只补登记, 不重复起
+                            self._combo_backfill_done[_cb_key] = True
+                            logger.info("[调度器] device_combo 回补已在运行, 当夜不重复触发")
+                        elif sync_task_manager.is_busy():
+                            logger.info("[调度器] 夜间回补窗口但同步任务忙碌, 下一 tick 顺延")
+                        else:
+                            self._combo_backfill_done[_cb_key] = True
+                            logger.info(
+                                "[调度器] 进入夜间窗口, 启动 device_combo 历史切片回补(#299, "
+                                "04:45 硬停止, 缺口留档次夜续跑)"
+                            )
+                            self._combo_task = asyncio.create_task(
+                                combo_backfill.run_backfill(triggered_by="scheduled")
+                            )
+                            self._combo_task.add_done_callback(self._on_combo_backfill_done)
 
                 # ── 1.5) 低频源每日定时档(A-20260907-001 / #31) ──
                 # 每天对"DB default_sync=true − 高频4源"的低频源跑一次, 窗口=前一天整天。
