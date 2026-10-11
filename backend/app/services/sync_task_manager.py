@@ -18,7 +18,7 @@ import logging
 import random
 import string
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from app.services.bms_sync import _get_last_sync_time
@@ -54,6 +54,9 @@ class SyncTask:
     data_types: list[str]
     # 时间范围映射: data_type -> (start_str, end_str), UI 展示用
     time_ranges_display: dict[str, tuple[str, str]]
+    # #294: 实际补跑窗口 data_type -> (start_dt, end_dt), 同步成功后用于
+    # 按窗口覆盖的业务日平息同源采集 Incident
+    time_ranges: dict[str, tuple[datetime, datetime]] | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(TZ_CN))
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -132,6 +135,79 @@ class SyncTask:
             "results": self.results,
             "error": self.error,
         }
+
+
+def _biz_days_in_window(start: datetime, end: datetime) -> list[str]:
+    """枚举同步窗口覆盖的上海自然日(YYYY-MM-DD, 含首尾), 首尾各扩 1 天。
+
+    扩 1 天原因: 熔断链路 biz_key 按 04:00 切业务日(0~3 点算前一天),
+    alerts 链路按上海自然日; 多枚举一天只是多两次幂等查询(匹配 0 条即跳过),
+    不漏关、不误关(仍需同源同业务日精确匹配)。
+    """
+    def _cn_day(x: datetime) -> date:
+        # 补跑窗口时间由 bms_sync/fetch 按东八区构造; 裸时间按东八区解释
+        if x.tzinfo is None:
+            x = x.replace(tzinfo=TZ_CN)
+        return x.astimezone(TZ_CN).date()
+
+    d0 = _cn_day(start) - timedelta(days=1)
+    d1 = _cn_day(end) + timedelta(days=1)
+    days: list[str] = []
+    cur = d0
+    while cur <= d1:
+        days.append(cur.isoformat())
+        cur += timedelta(days=1)
+    return days
+
+
+def calm_ingest_incidents_after_sync(
+    success_types: list[str],
+    time_ranges: dict[str, tuple[datetime, datetime]] | None,
+) -> int:
+    """同步补跑成功后, 按各源补跑窗口覆盖的业务日平息采集类 Incident(#294)。
+
+    对每个成功源尝试两套登记键(都是系统自动登记、同一平息服务):
+      - <data_type>            : bms_scheduler 熔断链路登记(标题 '数据采集异常: refund 2026-10-08')
+      - data_arrival_<dt>      : alerts 采集健康指标链路登记(标题 '数据采集异常: data_arrival_refund ...')
+    精确 title 等值匹配(exact_title=True), 避免 refund 误关联 shanmao_refund 等子串源。
+    返回平息总条数; 仅 flush/commit 本函数自持的独立 session, 不影响调用方事务。
+    """
+    if not success_types or not time_ranges:
+        return 0
+    from app.core.database import SessionLocal
+    from app.services.ingest_incident_service import close_ingest_incidents
+
+    total = 0
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        for dt in success_types:
+            win = time_ranges.get(dt)
+            if not win:
+                continue
+            start, end = win[0], win[1]
+            if not start or not end:
+                continue
+            n_before = total
+            for day_key in _biz_days_in_window(start, end):
+                for metric_code in (dt, f"data_arrival_{dt}"):
+                    total += close_ingest_incidents(
+                        db,
+                        metric_code=metric_code,
+                        period_key=day_key,
+                        now=now,
+                        note="补跑同步成功自动平息(#294)",
+                        exact_title=True,
+                    )
+            if total > n_before:
+                logger.info(f"[SyncTask] {dt} 补跑成功, 自动平息采集事件 {total - n_before} 条")
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+    return total
 
 
 class SyncTaskManager:
@@ -295,6 +371,8 @@ class SyncTaskManager:
                 triggered_by=triggered_by,
                 data_types=list(data_types),
                 time_ranges_display=time_ranges_display,
+                # #294: 保存实际补跑窗口供成功后按业务日平息采集事件
+                time_ranges=dict(time_ranges) if time_ranges else None,
             )
             # 初始化每个源的 pending 进度
             for dt in data_types:
@@ -391,6 +469,22 @@ class SyncTaskManager:
             # 同步后预热今日看板: 数据已更新, 主动填充缓存让下次访问命中热缓存。
             # 仅在有源成功(success/partial)时预热, 全失败则跳过(无新数据)。
             if task.status in ("success", "partial"):
+                # #294: 补跑成功 → 按补跑窗口覆盖的业务日自动平息同源采集 Incident。
+                # 覆盖 reset_halt 只认当前 biz_key、且 _halted_types 容器重启丢失
+                # 导致事件成孤儿的场景(补了哪天的数据就关哪天的事件, 精确 title 防误关联)。
+                try:
+                    success_types = [
+                        r.get("data_type") for r in (task.results or [])
+                        if r.get("success") and r.get("data_type")
+                    ]
+                    if success_types:
+                        await asyncio.to_thread(
+                            calm_ingest_incidents_after_sync,
+                            success_types,
+                            task.time_ranges,
+                        )
+                except Exception as ie:  # noqa: BLE001 平息失败不影响同步收尾
+                    logger.warning(f"同步后平息采集事件失败(不影响同步): {ie}")
                 try:
                     from app.services.cache_warmer import warm_after_sync
                     wt = asyncio.create_task(asyncio.to_thread(warm_after_sync))

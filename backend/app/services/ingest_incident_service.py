@@ -116,16 +116,28 @@ def close_ingest_incidents(
     period_key: str | None,
     now: datetime,
     note: str,
+    exact_title: bool = False,
 ) -> int:
     """平息同源同业务日的未闭环 Incident(恢复自愈), 返回平息条数。
 
     只处理 is_closed=False 的行(已人工闭环的不动); 平息记 review_note 留痕。
+
+    exact_title=False(默认, 历史行为): title ilike %metric_code%。
+    exact_title=True(#294): 按登记时的完整 title 格式精确等值匹配
+        '数据采集异常: {metric_code} {period_key}'。补跑自愈路径必须用精确模式——
+        否则 refund 会误匹配 shanmao_refund / refund_record_report 等同子串源,
+        在某源补跑成功时连带平息其他仍缺数据的源。
     """
     from app.models.incident import Incident as IncidentModel
 
     if not period_key:
         return 0
     try:
+        title_where = (
+            IncidentModel.title == f"数据采集异常: {metric_code} {period_key}"
+            if exact_title
+            else IncidentModel.title.ilike(f"%{metric_code}%")
+        )
         rows = db.scalars(
             select(IncidentModel)
             .where(
@@ -133,7 +145,7 @@ def close_ingest_incidents(
                 IncidentModel.created_by == _INCIDENT_CREATOR,
                 IncidentModel.is_closed.is_(False),
                 IncidentModel.detail.ilike(f"%{period_key}%"),
-                IncidentModel.title.ilike(f"%{metric_code}%"),
+                title_where,
             )
         ).all()
         for i in rows:

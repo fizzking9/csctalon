@@ -172,11 +172,17 @@ def today_queue(db: Session, date: str | None = None, start: str | None = None, 
         and_(Incident.created_at.isnot(None), Incident.created_at >= today_start, Incident.created_at <= today_end),
     )
     # 非周期事件: 未闭环 或 当日发生
+    # #294: 业务看板只展示业务事件, 排除系统层采集告警(category='数据采集',
+    # 由数据质量监控/熔断自动登记)。该类事件属运维告警, 在「管理-异常事件」
+    # 台账仍完整可见; 口径与 incidents 路由 markers/timeline 保持一致。
+    # is_distinct_from 兼容历史 category=NULL 的事件(NULL 视为非采集类, 正常展示)。
     non_recur_rows = db.execute(
         select(Incident.id, Incident.title, Incident.status, Incident.subject,
                Incident.occurred_at, Incident.duration_minutes, Incident.is_closed,
                Incident.severity, Incident.is_recurring, Incident.recurrence_pattern)
-        .where(Incident.is_recurring == False, or_(Incident.is_closed == False, inc_between))  # noqa: E712
+        .where(Incident.is_recurring == False,  # noqa: E712
+               Incident.category.is_distinct_from("数据采集"),
+               or_(Incident.is_closed == False, inc_between))  # noqa: E712
         .order_by(Incident.is_closed.asc(), Incident.occurred_at.desc().nullslast(), Incident.created_at.desc())
         .limit(10)
     ).all()
@@ -198,6 +204,8 @@ def today_queue(db: Session, date: str | None = None, start: str | None = None, 
                Incident.valid_from, Incident.valid_to)
         .where(
             Incident.is_recurring == True,  # noqa: E712
+            # #294: 与非周期查询同口径, 业务看板排除系统层采集告警
+            Incident.category.is_distinct_from("数据采集"),
             Incident.valid_from.isnot(None),
             Incident.valid_from <= today_end,
             or_(Incident.valid_to.is_(None), Incident.valid_to >= today_start),
