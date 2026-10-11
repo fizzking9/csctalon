@@ -380,11 +380,28 @@ export function useComplaintAnalysis() {
   // ── #291 设备维度汇总(积压口径): 设备类型/套餐/商户号 + 激活时长五桶(#295) ──
   // 数据面 = /backlog 同一响应(by_device_type/by_combo/by_merchant/by_active_age),
   // 与明细表同源 → 点击桶设置筛选后明细行数 = 桶计数, 数字自洽可对账。
+  // #297: tooltip 统一显示「单数 + 单数占比(分子/分母)」, 对齐退款侧详细度。
+  //   投诉无金额维度(#252 取舍: 工单金额字段稀疏), 故只有单数占比, 必须显式标口径;
+  //   占比分母 totalAll = 服务端返回的全量项合计 —— Top8 截断时未显示项仍在分母,
+  //   保证占比是「占该维度全部投诉」而非「占图上 8 条」。
+  function _dimBarTooltip(rows, totalAll) {
+    return {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      formatter: (params) => {
+        const it = rows[params[0].dataIndex] || {}
+        const cnt = it.count || 0
+        const ratio = totalAll ? (cnt / totalAll * 100).toFixed(1) : '0.0'
+        return `<b>${it.name}</b><br/>单数：${cnt} 件<br/>单数占比：${ratio}%（${cnt}/${totalAll} 件）`
+      },
+    }
+  }
+
   function _dimBarOption(list, color) {
     if (!list?.length || list.every(x => !x.count)) return null
+    const totalAll = list.reduce((s, x) => s + (x.count || 0), 0)
     const sorted = [...list].sort((a, b2) => b2.count - a.count).slice(0, 8)
     return {
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      tooltip: _dimBarTooltip(sorted, totalAll),
       grid: { left: 8, right: 44, top: 8, bottom: 8, containLabel: true },
       xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
       yAxis: { type: 'category', data: sorted.map(x => x.name), inverse: true,
@@ -397,15 +414,14 @@ export function useComplaintAnalysis() {
     }
   }
 
-  const backlogDeviceTypeOption = computed(() => _dimBarOption(b.value.by_device_type, '#6366f1'))
-  const backlogComboOption = computed(() => _dimBarOption(b.value.by_combo, '#0ea5e9'))
-  const backlogMerchantOption = computed(() => _dimBarOption(b.value.by_merchant, '#f59e0b'))
-
-  const backlogActiveAgeOption = computed(() => {
-    const d = b.value.by_active_age || []
+  // 激活时长条形: 六桶固定顺序(后端 ACTIVE_AGE_BUCKETS, 不排序不截断), 仅颜色区分,
+  // tooltip 同口径(分母=六桶合计, 占比合计 100%); 积压/概览/设备tab 三处共用。
+  function _ageBarOption(list) {
+    const d = list || []
     if (!d.length || d.every(x => !x.count)) return null
+    const totalAll = d.reduce((s, x) => s + (x.count || 0), 0)
     return {
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      tooltip: _dimBarTooltip(d, totalAll),
       grid: { left: 8, right: 44, top: 8, bottom: 8, containLabel: true },
       xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
       yAxis: { type: 'category', data: d.map(x => x.name), inverse: true, axisLabel: { fontSize: 10 } },
@@ -415,7 +431,12 @@ export function useComplaintAnalysis() {
         label: { show: true, position: 'right', fontSize: 10 },
       }],
     }
-  })
+  }
+
+  const backlogDeviceTypeOption = computed(() => _dimBarOption(b.value.by_device_type, '#6366f1'))
+  const backlogComboOption = computed(() => _dimBarOption(b.value.by_combo, '#0ea5e9'))
+  const backlogMerchantOption = computed(() => _dimBarOption(b.value.by_merchant, '#f59e0b'))
+  const backlogActiveAgeOption = computed(() => _ageBarOption(b.value.by_active_age))
 
   // 四维桶点击 → 带筛选下钻积压明细(类型桶名=显示名, 需反查类型码; 反查不到不设筛选防假下钻)
   // #295 五桶 桶名→active_age 参数(与后端 _core._AGE_PARAM_TO_BUCKET 同值, 后端为单一来源)
@@ -452,21 +473,7 @@ export function useComplaintAnalysis() {
   const ovDeviceTypeOption = computed(() => _dimBarOption(ovDims.value.by_device_type, '#6366f1'))
   const ovComboOption = computed(() => _dimBarOption(ovDims.value.by_combo, '#0ea5e9'))
   const ovMerchantOption = computed(() => _dimBarOption(ovDims.value.by_merchant, '#f59e0b'))
-  const ovActiveAgeOption = computed(() => {
-    const d = ovDims.value.by_active_age || []
-    if (!d.length || d.every(x => !x.count)) return null
-    return {
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      grid: { left: 8, right: 44, top: 8, bottom: 8, containLabel: true },
-      xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
-      yAxis: { type: 'category', data: d.map(x => x.name), inverse: true, axisLabel: { fontSize: 10 } },
-      series: [{
-        type: 'bar', data: d.map(x => x.count), barMaxWidth: 16,
-        itemStyle: { color: '#10b981', borderRadius: [0, 4, 4, 0] },
-        label: { show: true, position: 'right', fontSize: 10 },
-      }],
-    }
-  })
+  const ovActiveAgeOption = computed(() => _ageBarOption(ovDims.value.by_active_age))
 
   // 概览四维桶点击 → 切积压页 + 带筛选(复用 drillBacklogDim 的反查逻辑)
   function drillOvDeviceDim(kind, name) {
@@ -512,21 +519,7 @@ export function useComplaintAnalysis() {
   const devDeviceTypeOption = computed(() => _dimBarOption(devDims.value.by_device_type, '#6366f1'))
   const devComboOption = computed(() => _dimBarOption(devDims.value.by_combo, '#0ea5e9'))
   const devMerchantOption = computed(() => _dimBarOption(devDims.value.by_merchant, '#f59e0b'))
-  const devActiveAgeOption = computed(() => {
-    const d = devDims.value.by_active_age || []
-    if (!d.length || d.every(x => !x.count)) return null
-    return {
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      grid: { left: 8, right: 44, top: 8, bottom: 8, containLabel: true },
-      xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
-      yAxis: { type: 'category', data: d.map(x => x.name), inverse: true, axisLabel: { fontSize: 10 } },
-      series: [{
-        type: 'bar', data: d.map(x => x.count), barMaxWidth: 16,
-        itemStyle: { color: '#10b981', borderRadius: [0, 4, 4, 0] },
-        label: { show: true, position: 'right', fontSize: 10 },
-      }],
-    }
-  })
+  const devActiveAgeOption = computed(() => _ageBarOption(devDims.value.by_active_age))
 
   // 设备维度桶点击 → 切积压页 + 带筛选(同概览A6下钻逻辑)
   function drillDeviceDim(kind, name) {
