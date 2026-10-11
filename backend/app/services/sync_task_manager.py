@@ -163,51 +163,49 @@ def _biz_days_in_window(start: datetime, end: datetime) -> list[str]:
 def calm_ingest_incidents_after_sync(
     success_types: list[str],
     time_ranges: dict[str, tuple[datetime, datetime]] | None,
-) -> int:
-    """同步补跑成功后, 按各源补跑窗口覆盖的业务日平息采集类 Incident(#294)。
+) -> dict:
+    """增量补跑成功后, 按各源补跑窗口覆盖的业务日收口采集告警/事件(#294)。
 
-    对每个成功源尝试两套登记键(都是系统自动登记、同一平息服务):
-      - <data_type>            : bms_scheduler 熔断链路登记(标题 '数据采集异常: refund 2026-10-08')
-      - data_arrival_<dt>      : alerts 采集健康指标链路登记(标题 '数据采集异常: data_arrival_refund ...')
-    精确 title 等值匹配(exact_title=True), 避免 refund 误关联 shanmao_refund 等子串源。
-    返回平息总条数; 仅 flush/commit 本函数自持的独立 session, 不影响调用方事务。
+    补了哪天就关哪天: 窗口按上海自然日枚举(前后各扩 1 天兼容 04:00 切业务日)。
+    委托 ingest_health_reconcile 统一处理 Alert 恢复 + Incident 平息(含告警链
+    data_arrival_<dt> 与熔断链 <dt> 两个登记键)。本函数自持独立 session 并提交,
+    不影响后台任务主流程事务。返回 {"recovered_alerts", "closed_incidents"}。
     """
     if not success_types or not time_ranges:
-        return 0
+        return {"recovered_alerts": 0, "closed_incidents": 0}
     from app.core.database import SessionLocal
-    from app.services.ingest_incident_service import close_ingest_incidents
+    from app.services.ingest_health_reconcile import recover_arrival_alerts
 
-    total = 0
+    # 各源窗口业务日并集(同一窗口通常覆盖相同日期, 并集即可, recover 内部按源过滤)
+    period_keys: set[str] = set()
+    valid_types: list[str] = []
+    for dt in success_types:
+        win = time_ranges.get(dt)
+        if not win or not win[0] or not win[1]:
+            continue
+        valid_types.append(dt)
+        period_keys.update(_biz_days_in_window(win[0], win[1]))
+    if not valid_types or not period_keys:
+        return {"recovered_alerts": 0, "closed_incidents": 0}
+
     db = SessionLocal()
     try:
-        now = datetime.now(timezone.utc)
-        for dt in success_types:
-            win = time_ranges.get(dt)
-            if not win:
-                continue
-            start, end = win[0], win[1]
-            if not start or not end:
-                continue
-            n_before = total
-            for day_key in _biz_days_in_window(start, end):
-                for metric_code in (dt, f"data_arrival_{dt}"):
-                    total += close_ingest_incidents(
-                        db,
-                        metric_code=metric_code,
-                        period_key=day_key,
-                        now=now,
-                        note="补跑同步成功自动平息(#294)",
-                        exact_title=True,
-                    )
-            if total > n_before:
-                logger.info(f"[SyncTask] {dt} 补跑成功, 自动平息采集事件 {total - n_before} 条")
+        result = recover_arrival_alerts(
+            db,
+            data_types=valid_types,
+            period_keys=period_keys,
+            now=datetime.now(timezone.utc),
+            note="补跑同步成功自动收口(#294)",
+        )
         db.commit()
+        if result["recovered_alerts"] or result["closed_incidents"]:
+            logger.info(f"[SyncTask] 补跑成功收口: {result}")
+        return result
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
-    return total
 
 
 class SyncTaskManager:

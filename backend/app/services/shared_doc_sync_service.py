@@ -855,8 +855,40 @@ def sync_one_source(db: Session, row: DocSyncSource, trigger: str = "manual") ->
             logger.error(f"[shared_doc] 失败状态写回失败(不影响错误抛出): {rec_err}")
         raise
     # 成功: 入库状态(complaint 可能 partial) + 行数统计写回配置行
+    # #294: 全量快照 success/partial(通道已到达, 与 _eval_data_arrival 的
+    # success/partial 口径一致) → 收口该源跨天滞留的采集健康告警/事件。
+    # 必须排在 _record_status 之前: 仅 flush, 借其末尾 commit 一并提交
+    # (定时入口 sync_doc_source_safe 在本函数后直接 close, 无独立 commit)。
+    if stats.get("status") in ("success", "partial"):
+        _reconcile_after_snapshot_sync(db, row)
     _record_status(db, row, stats["status"], _summary_from_stats(row, stats), None)
     return stats
+
+
+def _reconcile_after_snapshot_sync(db: Session, row: DocSyncSource) -> None:
+    """#294 全量快照同步到达后, 收口该源未恢复的 data_arrival 告警/采集 Incident。
+
+    全量快照通道语义: 一次成功导出+入库 = 文档内全部历史数据此刻已在库,
+    因此 period_keys=None 收口该源所有历史业务日的滞留告警(覆盖跨天补数、
+    容器重启导致的孤儿)。任何异常只告警不抛出(入库本身已成功)。
+    """
+    try:
+        from app.services.ingest_health_reconcile import recover_arrival_alerts
+
+        if row.target_type == TARGET_COMPLAINT:
+            data_types = ["external_complaint", "card_complaint"]
+        elif row.target_type == TARGET_MANUAL_REFUND:
+            data_types = ["manual_refund"]
+        else:
+            return
+        recover_arrival_alerts(
+            db,
+            data_types=data_types,
+            period_keys=None,
+            note="共享文档全量同步成功自动收口(#294)",
+        )
+    except Exception as e:  # noqa: BLE001 收口失败不影响已成功的同步入库
+        logger.warning(f"[shared_doc] 采集告警收口失败(不影响同步): {e}")
 
 
 def _sync_with_version_gate(db: Session, row: DocSyncSource, out_path: str,
