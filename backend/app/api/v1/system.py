@@ -122,3 +122,54 @@ def update_sync_source(data_type: str, payload: SyncSourceUpdate, db: DBSession,
     if warning:
         return R(data=updated, message=warning)
     return R(data=updated)
+
+
+# ── #299 device_combo 历史切片回补: admin 手动入口(调度器 01:00 自动档之外) ──
+
+class ComboBackfillRunRequest(BaseModel):
+    # 白天手动执行需显式 true(会与高频档争用同一 BMS 账号, 默认拒绝)
+    allow_daytime: bool = False
+    # 本次最多执行几片(None=跑到 04:45/3 小时预算或队列清空)
+    max_slices: int | None = None
+
+
+# 保留手动 task 强引用, 防事件循环弱引用 GC(与 bms_scheduler._combo_task 同理)
+_manual_combo_backfill_task = None
+
+
+@router.get("/combo-backfill/status", response_model=R[dict],
+            summary="设备套餐历史回补进度(#299)")
+def combo_backfill_status(db: DBSession, _: AdminUser):
+    """台账汇总: 各状态切片数 / 剩余片数 / 最近 10 片明细。"""
+    from app.services import combo_backfill
+
+    return R(data=combo_backfill.backfill_status(db))
+
+
+@router.post("/combo-backfill/run", response_model=R[dict],
+             summary="手动启动设备套餐历史回补(#299)")
+async def combo_backfill_run(payload: ComboBackfillRunRequest, _: AdminUser):
+    """后台启动切片回补; 与调度器/同步任务互斥。夜间窗口外默认拒绝。"""
+    import asyncio
+
+    from app.services import combo_backfill
+    from app.services.sync_task_manager import sync_task_manager
+
+    global _manual_combo_backfill_task
+
+    if combo_backfill.is_running():
+        raise HTTPException(status_code=409, detail="device_combo 回补已在运行中")
+    if not payload.allow_daytime and not combo_backfill.in_night_window():
+        raise HTTPException(
+            status_code=409,
+            detail="当前不在夜间回补窗口(01:00~04:45); 确认空闲后可用 allow_daytime=true 白天手动执行",
+        )
+    if sync_task_manager.is_busy():
+        raise HTTPException(status_code=409, detail="有同步任务正在执行, 请等待空闲后再启动")
+
+    _manual_combo_backfill_task = asyncio.create_task(combo_backfill.run_backfill(
+        triggered_by="manual",
+        allow_daytime=payload.allow_daytime,
+        max_slices=payload.max_slices,
+    ))
+    return R(data={"started": True}, message="device_combo 历史回补已后台启动, 进度见 GET /system/combo-backfill/status")

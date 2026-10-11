@@ -49,6 +49,7 @@ from app.models.device import (  # noqa: F401
     device_tag_rel,
 )
 from app.models.device_combo import DeviceCombo  # noqa: F401
+from app.models.combo_backfill_slice import ComboBackfillSlice  # noqa: F401
 from app.models.device_flow_usage import DeviceFlowUsage  # noqa: F401
 from app.models.doc_sync_config import DocSyncConfig  # noqa: F401
 from app.models.doc_sync_login_log import DocSyncLoginLog  # noqa: F401
@@ -171,6 +172,7 @@ __all__ = [
     "DeptInfoSync",
     "Device",
     "DeviceCombo",
+    "ComboBackfillSlice",
     "DeviceFlowUsage",
     "DeviceTag",
     "DeviceTagBatch",
