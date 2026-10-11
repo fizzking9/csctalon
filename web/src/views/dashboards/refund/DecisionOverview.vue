@@ -142,6 +142,8 @@
           active_age 参数(明细按 D1 发起日锚定且不含 C 路 → 下钻为近似映射)。
         · tooltip 统一: {分项名} · 占比% · 金额¥ · 单数笔 · 笔单价¥(金额/单数);
           笔单价识别"单笔损失大"维度(笔数少但金额大=高单价设备出问题)。
+          #296(2026-10-11): 激活时长条形按单数, tooltip 必须并列「单数占比+金额占比」,
+          禁止只写一个无口径的「占比」(实测两口径可差 4pct, 会误读)。
         · 排序: 前三饼图按金额倒序(钱集中度), 扇区 value=金额; 激活时长按桶固定
           顺序(0-15→16-30→...→(无激活记录), 即按时长由短到长)。
         · 取舍: ① 不做型号×套餐交叉图(组合爆炸, 明细筛选可自由组合);
@@ -155,7 +157,7 @@
       <section class="block-card mb-16">
         <div class="block-head">
           <span class="block-title">六、设备维度汇总<el-tooltip effect="dark" placement="top" raw-content
-            content="<b>来源</b>：/analytics/refund/decision-overview → device_dims / sale_days_split<br/><b>口径</b>：经营四路 A+B+C+D 全量（#291 2026-10-10 拍板，与「一、资金流出全景」同口径同窗口，各路按实际出款归日，已排除重复/忽略与冻结类流水，各桶合计可与四路合计对账；tooltip 展示每桶分路构成）；设备型号/套餐/店铺 = devices 表属性（#271/#273 同源，#293 探针补全驱动覆盖）；激活时长 = 出款日 − bms_orders 最早激活日（#295 五桶，与投诉侧同名同序：0-15/16-30/31-180/181-365/&gt;365/(无激活记录)；切点=上界：30/180/365 归其左侧桶，激活晚于出款的负值自然落首桶）<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：图为空 = 窗口内四路均无成功退款；(未填)/(未填SN)/(未建档) 桶 = 台账/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击任一桶 → 「七、退款明细」自动带对应筛选（只设筛选不自动滚动，消息提示引导；激活桶与明细 active_age 参数 1:1 映射；明细按 D1 发起日锚定且不含 C 路，下钻为近似映射）；设备型号桶需反查到类型码才可下钻；「其他」为 Top5 长尾聚合桶，不可下钻<br/><b>取舍</b>：前三饼图 Top5+其他聚合（占比构成 vs 长尾取舍）；激活时长保条形（有序分桶，饼图丢顺序）；不做型号×套餐交叉图（明细可组合）">
+            content="<b>来源</b>：/analytics/refund/decision-overview → device_dims / sale_days_split<br/><b>口径</b>：经营四路 A+B+C+D 全量（#291 2026-10-10 拍板，与「一、资金流出全景」同口径同窗口，各路按实际出款归日，已排除重复/忽略与冻结类流水，各桶合计可与四路合计对账；tooltip 展示每桶分路构成）；设备型号/套餐/店铺 = devices 表属性（#271/#273 同源，#293 探针补全驱动覆盖）；激活时长 = 出款日 − bms_orders 最早激活日（#295 五桶，与投诉侧同名同序：0-15/16-30/31-180/181-365/&gt;365/(无激活记录)；切点=上界：30/180/365 归其左侧桶，激活晚于出款的负值自然落首桶）；<b>激活时长条形按单数</b>，tooltip 同时给出单数占比与金额占比两个口径（#296，两口径不相等属正常：新机/老机笔单价不同）<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；缓存 60s<br/><b>「空」的含义</b>：图为空 = 窗口内四路均无成功退款；(未填)/(未填SN)/(未建档) 桶 = 台账/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击任一桶 → 「七、退款明细」自动带对应筛选（只设筛选不自动滚动，消息提示引导；激活桶与明细 active_age 参数 1:1 映射；明细按 D1 发起日锚定且不含 C 路，下钻为近似映射）；设备型号桶需反查到类型码才可下钻；「其他」为 Top5 长尾聚合桶，不可下钻<br/><b>取舍</b>：前三饼图 Top5+其他聚合（占比构成 vs 长尾取舍）；激活时长保条形（有序分桶，饼图丢顺序）；不做型号×套餐交叉图（明细可组合）">
             <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
           </el-tooltip></span>
           <span class="block-hint">四路 A/B/C/D · 判断: 退款集中在哪类设备型号/套餐/店铺/激活时长 → 行动: 新机高退查质量与预期差, 老机高退查老化与续费话术 · 点击桶带筛选下钻明细</span>
@@ -179,7 +181,7 @@
         </el-row>
         <el-row>
           <el-col :xs="24" :md="12">
-            <div class="sub-title">激活时长（#295 五桶口径, 按时长排序）</div>
+            <div class="sub-title">激活时长（#295 五桶口径 · 条形按单数, 按时长排序）</div>
             <BaseChart v-if="activeAgeOption.series" :option="activeAgeOption" height="240px" @chartClick="(p) => drillDeviceDim('age', p.name)" />
             <el-empty v-else description="暂无数据" :image-size="60" />
           </el-col>
@@ -841,16 +843,20 @@ const SALE_AGE_PARAM = {
 const activeAgeOption = computed(() => {
   const list = data.value?.sale_days_split || []
   if (!list.length) return {}
+  // #296: 条形按单数(#291 拍板), tooltip 必须同时标清单数占比与金额占比,
+  // 避免「占比」紧邻金额被误读为金额占比(6.1-9.30 实测两口径差 4.2pct)
   const totalCount = list.reduce((s, r) => s + (r.cnt || 0), 0)
+  const totalAmount = list.reduce((s, r) => s + (r.amount || 0), 0)
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
       formatter: (params) => {
         const it = list[params[0].dataIndex] || {}
         const cnt = it.cnt || 0
-        const ratio = totalCount ? (cnt / totalCount * 100).toFixed(1) : 0
+        const cntRatio = totalCount ? (cnt / totalCount * 100).toFixed(1) : '0.0'
         const amt = it.amount || 0
+        const amtRatio = totalAmount ? (amt / totalAmount * 100).toFixed(1) : '0.0'
         const unit = cnt ? (amt / cnt) : 0
-        return `<b>${it.bucket}</b><br/>占比: ${ratio}%<br/>金额: ¥${formatMoney(amt)}<br/>单数: ${cnt}笔<br/>笔单价: ¥${formatMoney(unit)}${_fmtRouteLines(it.routes)}`
+        return `<b>${it.bucket}</b><br/>单数占比: ${cntRatio}%（${cnt}笔/${totalCount}笔, 条形按单数）<br/>金额占比: ${amtRatio}%（¥${formatMoney(amt)}）<br/>笔单价: ¥${formatMoney(unit)}${_fmtRouteLines(it.routes)}`
       } },
     grid: { left: 8, right: 56, top: 8, bottom: 8, containLabel: true },
     xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
