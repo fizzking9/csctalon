@@ -349,7 +349,7 @@ async def run_backfill(
             reset_failed_for_new_night(db)
             missing = await asyncio.to_thread(query_missing_dates, db, horizon_start, end_date)
             ranges = plan_slices(missing)
-            summary["planned"] = await asyncio.to_thread(ensure_slice_rows(db, ranges))
+            summary["planned"] = await asyncio.to_thread(ensure_slice_rows, db, ranges)
             logger.info(
                 f"[combo-backfill] 启动({triggered_by}): 缺失 {len(missing)} 天, "
                 f"本轮新登记 {summary['planned']} 片, 截止 {stop_at:%Y-%m-%d %H:%M}"
