@@ -14,6 +14,11 @@
 `snapshot_period != 'daily'` 过滤, 跳过历史 daily 预生成报告, 强制 daily 问句
 走实时 LLM(L2 优先级)。weekly/monthly/rolling_* 预生成报告仍可命中, 不受影响。
 
+#308 (2026-10-12): 候选池两道硬过滤(见 _SQL_TMPL_ACTIVE / _SQL_SINGLE_DAY_FIT):
+- 停用模板(#306 rolling_7d/30d)的存量快照不得再服役;
+- 单日问句要求报告内容窗口恰为该日 —— 多日窗口快照不得服务单日问句
+  (生产实测「今日」问句被 L2 语义命中 rolling_30d → 用户拿到 30 天口径)。
+
 SQL 全部走参数化 text() + bind params(AGENTS.md 铁律)。
 """
 
@@ -210,6 +215,23 @@ def _window_jaccard(rs, re, qs, qe) -> float:
         return 0.0
 
 
+# #308 (2026-10-12): 候选池两道硬性过滤(SQL 片段, L1/L2 五个分支共用)
+# 1) _SQL_TMPL_ACTIVE —— 排除「模板已停用」的存量快照:
+#    rolling_7d/30d_compare 停用(#306)只影响生成, 今晨已生成的当日快照仍在候选池,
+#    生产实测「今日退款」被 L2 语义命中 rolling_30d 摘取 → 用户拿到 30 天口径。
+#    template_id 为 NULL 的历史行保留(无法判定停用, 不扩大打击面)。
+_SQL_TMPL_ACTIVE = (
+    "AND (r.template_id IS NULL OR EXISTS (SELECT 1 FROM ai_report_templates t "
+    "WHERE t.id = r.template_id AND t.is_active = TRUE))"
+)
+# 2) _SQL_SINGLE_DAY_FIT —— 单日问句的内容窗口对齐:
+#    原单日分支仅按 snapshot_date=当日 取候选, rolling/weekly/monthly 等多日窗口
+#    快照全部入池, 语义匹配层无窗口概念 → 单日问句拿到多日口径数字。
+#    现要求报告内容窗口恰为该日(start=end=sdate), 或 start/end 未落(NULL, 如日报)。
+#    效果: 单日问句不再命中多日快照, 回落实时 LLM —— 与 10-09 日报实时化设计一致。
+_SQL_SINGLE_DAY_FIT = "AND (r.start IS NULL OR (r.start = :sdate AND r.end = :sdate))"
+
+
 def match_template_report(
     db: Session,
     question: str,
@@ -243,7 +265,7 @@ def match_template_report(
         # #151 区间窗口: 报告内容窗口与问句窗口重叠才命中(weekly/monthly 有 start/end;
         #   daily 日报 start/end=None 被排除, 避免区间问句命中今日实时日报)
         rows = db.execute(
-            text("""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
+            text(f"""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
                       r.snapshot_date, r.snapshot_period, r.is_public,
                       r.answer_md, r.llm_model, r.llm_ms, r.total_ms,
                       r.prompt_tokens, r.completion_tokens, r.total_tokens,
@@ -254,13 +276,14 @@ def match_template_report(
                  AND r.snapshot_period != 'daily'
                  AND r.start IS NOT NULL AND r.end IS NOT NULL
                  AND r.start <= :q_end AND r.end >= :q_start
+                 {_SQL_TMPL_ACTIVE}
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
             {"q_start": win_start, "q_end": win_end, "period": win_period or ""},
         ).mappings().all()
     elif win_date:
         # 单日(含 start==end 回退): 按 snapshot_date 匹配(日报 start/end=None)
         rows = db.execute(
-            text("""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
+            text(f"""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
                       r.snapshot_date, r.snapshot_period, r.is_public,
                       r.answer_md, r.llm_model, r.llm_ms, r.total_ms,
                       r.prompt_tokens, r.completion_tokens, r.total_tokens,
@@ -269,13 +292,15 @@ def match_template_report(
                WHERE r.is_public = TRUE
                  AND r.snapshot_period != 'daily'
                  AND r.snapshot_date = :sdate
+                 {_SQL_TMPL_ACTIVE}
+                 {_SQL_SINGLE_DAY_FIT}
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
             {"sdate": win_date, "period": win_period or ""},
         ).mappings().all()
     else:
         # 无 win_date 时取当日
         rows = db.execute(
-            text("""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
+            text(f"""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
                       r.snapshot_date, r.snapshot_period, r.is_public,
                       r.answer_md, r.llm_model, r.llm_ms, r.total_ms,
                       r.prompt_tokens, r.completion_tokens, r.total_tokens,
@@ -283,9 +308,11 @@ def match_template_report(
                FROM ai_reports r
                WHERE r.is_public = TRUE
                  AND r.snapshot_period != 'daily'
-                 AND r.snapshot_date = :today
+                 AND r.snapshot_date = :sdate
+                 {_SQL_TMPL_ACTIVE}
+                 {_SQL_SINGLE_DAY_FIT}
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
-            {"today": today, "period": win_period or ""},
+            {"sdate": today, "period": win_period or ""},
         ).mappings().all()
 
     # #143: 候选按「keywords 命中数 DESC + period 匹配 DESC + created_at DESC」综合排序
@@ -400,7 +427,7 @@ def list_candidates(db: Session, win_period: str | None,
     if win_start and win_end and win_start != win_end:
         # #151 区间窗口: 报告内容窗口与问句窗口重叠(weekly/monthly 有 start/end)
         rows = db.execute(
-            text("""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
+            text(f"""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
                       r.snapshot_date, r.snapshot_period, r.is_public,
                       r.answer_md, r.llm_model, r.llm_ms, r.total_ms,
                       r.prompt_tokens, r.completion_tokens, r.total_tokens,
@@ -411,14 +438,17 @@ def list_candidates(db: Session, win_period: str | None,
                  AND r.snapshot_period != 'daily'
                  AND r.start IS NOT NULL AND r.end IS NOT NULL
                  AND r.start <= :q_end AND r.end >= :q_start
+                 {_SQL_TMPL_ACTIVE}
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
             {"q_start": win_start, "q_end": win_end, "period": win_period or ""},
         ).mappings().all()
     else:
         # 单日/无窗口: 按 snapshot_date(日报 start/end=None, 只能按快照日期对齐)
+        # #308: 同日快照还须内容窗口恰为该日, 多日窗口快照(rolling/weekly/monthly)
+        #   不得服务单日问句 —— 否则窗口回显「今日」而数字是多日口径。
         sdate = win_date or today
         rows = db.execute(
-            text("""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
+            text(f"""SELECT r.id, r.task_id, r.user_id, r.template_id, r.question, r.period,
                       r.snapshot_date, r.snapshot_period, r.is_public,
                       r.answer_md, r.llm_model, r.llm_ms, r.total_ms,
                       r.prompt_tokens, r.completion_tokens, r.total_tokens,
@@ -427,6 +457,8 @@ def list_candidates(db: Session, win_period: str | None,
                WHERE r.is_public = TRUE
                  AND r.snapshot_period != 'daily'
                  AND r.snapshot_date = :sdate
+                 {_SQL_TMPL_ACTIVE}
+                 {_SQL_SINGLE_DAY_FIT}
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
             {"sdate": sdate, "period": win_period or ""},
         ).mappings().all()

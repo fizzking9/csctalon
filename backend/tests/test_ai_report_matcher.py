@@ -466,3 +466,201 @@ def test_match_rolling_7d_beats_natural_weekly_on_keyword_tie():
     assert matched is not None
     assert matched.id == 72                    # 窗口贴合的 rolling_7d 胜出
     assert tmpl.code == "rolling_7d_compare"
+
+
+# ── #308 候选池硬过滤: 停用模板排除 + 单日内容窗口对齐 ──────────────────
+#
+# 生产事故(2026-10-12): 问「今日退款情况如何？」命中 rolling_30d 快照摘取,
+# 用户拿到 30 天口径数字但回显窗口是「今日」。根因两条:
+#   ① rolling_7d/30d_compare 已停用(#306), 但存量快照仍在 L1/L2 候选池;
+#   ② 单日分支仅按 snapshot_date=当日 取候选, 不做内容窗口对齐。
+# 修复: _SQL_TMPL_ACTIVE + _SQL_SINGLE_DAY_FIT 注入全部 5 个 SQL 分支。
+
+import datetime as _dt308  # noqa: E402  段内统一别名, 避免与上文局部 import 混淆
+
+import pytest  # noqa: E402
+
+from app.models.ai_report import AiReport  # noqa: E402
+from app.models.ai_report_template import AiReportTemplate  # noqa: E402
+from app.models.user import User  # noqa: E402
+from app.services.ai_report_matcher import list_candidates  # noqa: E402
+
+_308_SNAP = _dt308.date(2026, 8, 1)  # 固定历史快照日, 与测试库当日快照隔离
+_308_PREFIX = "t308_"
+
+
+def _308_purge(db):
+    """清理本段用例残留(t308_ 前缀模板 + 其快照)。
+
+    与 gate 文件同理: 命中后 matcher 内部 _bump_matched_count 会 commit,
+    命中类用例的 fixture 行会落库, 必须在每个用例前清一遍防相互污染。
+    """
+    ids = [row[0] for row in db.query(AiReportTemplate.id).filter(
+        AiReportTemplate.code.like(f"{_308_PREFIX}%")).all()]
+    if not ids:
+        return
+    db.query(AiReport).filter(AiReport.template_id.in_(ids)).delete(synchronize_session=False)
+    db.query(AiReportTemplate).filter(AiReportTemplate.id.in_(ids)).delete(synchronize_session=False)
+    db.commit()
+
+
+@pytest.fixture()
+def _308_clean(db):
+    """真实 DB 用例入口: 前后各清一次残留。
+
+    后清必要: 命中类用例(_bump_matched_count commit)会把 fixture 行落库,
+    仅前清会让最后一个命中用例的残留污染后续测试文件(实测 gate 空壳用例被命中)。
+    """
+    _308_purge(db)
+    yield db
+    _308_purge(db)
+
+
+def _308_user(db):
+    u = db.query(User).filter(User.username == "_t308_user").first()
+    if u is None:
+        u = User(username="_t308_user", display_name="t308",
+                 hashed_password="_dummy", role="admin")
+        db.add(u)
+        db.flush()
+    return u
+
+
+def _308_tmpl(db, code, *, is_active=True, keywords=("退款", "四路")):
+    t = AiReportTemplate(
+        code=code, name_cn=code, period="weekly", frequency="weekly",
+        scope="refund", format="brief", required_dimensions=[],   # 空维度: #192 门槛不拦
+        question_template=f"{code} 问句模板", question_keywords=list(keywords),
+        is_active=is_active,
+    )
+    db.add(t)
+    db.flush()
+    return t
+
+
+def _308_report(db, template_id, user_id, *, start=None, end=None,
+                snapshot_period="weekly", code_q="本周退款专项简报"):
+    r = AiReport()
+    r.user_id = user_id
+    r.template_id = template_id
+    r.answer_md = "**四路分布**：A 80 笔\n**涉诉情况**：70.7%\n**退款原因**：充值错误 33 笔\n"
+    r.question = code_q
+    r.period = snapshot_period
+    r.snapshot_date = _308_SNAP
+    r.snapshot_period = snapshot_period
+    r.is_public = True
+    r.matched_count = 0
+    r.llm_ms = 0
+    r.total_ms = 0
+    r.created_at = _dt308.datetime.now(_dt308.timezone.utc)
+    r.start = start
+    r.end = end
+    db.add(r)
+    db.flush()
+    return r
+
+
+def test_308_single_day_excludes_multi_day_snapshot(_308_clean):
+    db = _308_clean
+    """单日问句不得命中多日窗口快照(rolling/weekly/monthly) —— 事故场景本身。
+
+    active 模板 + 当日快照 + 内容窗口 07-26~08-01(7 天):
+    L1 match_template_report 与 L2 list_candidates 都必须返空 → 交实时 LLM。"""
+    u = _308_user(db)
+    t = _308_tmpl(db, "t308_weekly_active")
+    _308_report(db, t.id, u.id,
+                start=_dt308.date(2026, 7, 26), end=_dt308.date(2026, 8, 1))
+
+    hit, tmpl = match_template_report(db, "今日退款情况如何？四路分布怎么样？",
+                                      "daily", "2026-08-01")
+    assert hit is None and tmpl is None
+    assert list_candidates(db, "daily", "2026-08-01", question="今日退款") == []
+
+
+def test_308_disabled_template_excluded_l1_and_l2(_308_clean):
+    db = _308_clean
+    """模板 is_active=False 的存量快照不得再服役(L1/L2 均排除, 含区间分支)。"""
+    u = _308_user(db)
+    t = _308_tmpl(db, "t308_rolling_disabled", is_active=False,
+                  keywords=("近30天", "退款"))
+    _308_report(db, t.id, u.id,
+                start=_dt308.date(2026, 7, 26), end=_dt308.date(2026, 8, 1),
+                snapshot_period="rolling_30d")
+
+    # 单日分支
+    hit, tmpl = match_template_report(db, "近30天退款情况", "daily", "2026-08-01")
+    assert hit is None and tmpl is None
+    # 区间分支(窗口与报告完全重叠, 仅因模板停用被排除)
+    hit2, tmpl2 = match_template_report(
+        db, "近30天退款情况", "monthly", None,
+        win_start=_dt308.date(2026, 7, 26), win_end=_dt308.date(2026, 8, 1))
+    assert hit2 is None and tmpl2 is None
+    assert list_candidates(db, "monthly", None,
+                           win_start=_dt308.date(2026, 7, 26),
+                           win_end=_dt308.date(2026, 8, 1),
+                           question="近30天退款") == []
+
+
+def test_308_range_question_still_matches_active_overlap(_308_clean):
+    db = _308_clean
+    """回归: 区间问句命中 active 模板重叠快照不受影响(weekly 正常服役)。"""
+    u = _308_user(db)
+    t = _308_tmpl(db, "t308_weekly_range")
+    r = _308_report(db, t.id, u.id,
+                    start=_dt308.date(2026, 7, 26), end=_dt308.date(2026, 8, 1))
+
+    hit, tmpl = match_template_report(
+        db, "本周退款四路情况", "weekly", None,
+        win_start=_dt308.date(2026, 7, 26), win_end=_dt308.date(2026, 8, 1))
+    assert hit is not None and hit.id == r.id
+    assert tmpl.code == "t308_weekly_range"
+    cands = list_candidates(db, "weekly", None,
+                            win_start=_dt308.date(2026, 7, 26),
+                            win_end=_dt308.date(2026, 8, 1),
+                            question="本周退款四路情况")
+    assert any(c.id == r.id for c in cands)
+
+
+def test_308_null_window_report_still_matches_single_day(_308_clean):
+    db = _308_clean
+    """回归: start/end 未落(NULL)的历史快照仍可服务单日问句(与 gate 测试同构)。"""
+    u = _308_user(db)
+    t = _308_tmpl(db, "t308_weekly_nullwin")
+    r = _308_report(db, t.id, u.id)   # start/end 均 None
+
+    hit, _tmpl = match_template_report(db, "退款四路情况", "daily", "2026-08-01")
+    assert hit is not None and hit.id == r.id
+
+
+def test_308_sql_fragments_injected_all_branches():
+    """SQL 层断言: 单日分支含窗口对齐+模板过滤; 区间分支含模板过滤且不含单日对齐。"""
+    import datetime as _dt
+
+    rows = [_make_report_row(88, 1, "weekly",
+                             _dt.datetime(2026, 9, 17, 11, 0, tzinfo=_dt.timezone.utc))]
+    templates = {1: _make_template(1, "weekly_x", ["退款"])}
+
+    def _mk_db():
+        db = MagicMock()
+        mm = MagicMock()
+        mm.mappings.return_value = mm
+        mm.all.return_value = rows
+        db.execute.return_value = mm
+        qm = MagicMock()
+        qm.get.side_effect = lambda tid: templates.get(tid)
+        db.query.return_value = qm
+        return db
+
+    db1 = _mk_db()
+    match_template_report(db1, "今日退款", "daily", "2026-09-17")
+    sql_day = _select_sql_of(db1)
+    assert "r.start = :sdate AND r.end = :sdate" in sql_day      # 单日窗口对齐
+    assert "ai_report_templates t" in sql_day                    # 模板 active 过滤
+
+    db2 = _mk_db()
+    match_template_report(db2, "本周退款", "weekly", None,
+                          win_start=_dt.date(2026, 9, 7), win_end=_dt.date(2026, 9, 13))
+    sql_range = _select_sql_of(db2)
+    assert "r.start <= :q_end AND r.end >= :q_start" in sql_range  # 区间重叠保留
+    assert "ai_report_templates t" in sql_range
+    assert "r.start = :sdate" not in sql_range                     # 区间不套单日对齐
