@@ -85,8 +85,10 @@ _GEN_SYSTEM_V4 = (
     "环比 `yoy_value`/`yoy_pct`（refund.total_amount、refund.total_count、reception.total、"
     "refund.a_route.litigation_ratio）; 涉诉率百分点差 `delta_pct_points`; "
     "四路占比 `amount_pct`/`count_pct`（各路占退款总额/总笔数）; "
-    "积压环比 `backlog_prev_pct`（complaint.total 与 complaint.by_source 各项, 基期为 0 时为 null）。"
-    "带 verdict（利好/利空/持平）的指标直接引用 verdict。\n"
+    "投诉环比 `registered_prev_pct`/`handled_prev_pct`/`backlog_prev_pct`"
+    "（complaint.total 与 complaint.by_source 各项, 基期为 0 时为 null）。"
+    "带 verdict（利好/利空/持平）的指标直接引用 verdict（含 registered_verdict/"
+    "handled_verdict/backlog_verdict）。\n"
     "  - b. 本期与对比期绝对值都有、但没给对应派生字段时：只陈述两个绝对值"
     "（对比期前值见 complaint_breakdown 各项的 registered_prev/handled_prev/backlog_prev）, "
     "禁止自算百分号。\n"
@@ -185,10 +187,21 @@ def _focus_updates() -> list[dict]:
         },
         {
             "code": "ai-incremental-analysis",
-            # 该卡是追加一条(b3c4d5e6f7a8 seed 原文结尾), old 用结尾片段定位
-            "old": "下钻建议: 给出'看哪个看板卡片/下钻到哪一层'的可执行建议(不重复数据).",
+            # 完整 seed 原文(b3c4d5e6f7a8)做等值定位(UPDATE WHERE content=:old 是等值匹配,
+            # 不能用片段 —— 首版迁移用片段定位导致该卡漏更, 2026-10-12 修正)
+            "old": (
+                "当用户问'分析/总览/怎么看/风险/异常'类开放题时(纯取数问句跳过本段), 增量分析任务: "
+                "- 口径差异提醒: 当数据里出现 registered 与 handled 这类不同口径数字(见口径卡), 必须显式标注口径, 禁止直接相减或推断因果; "
+                "- 环比异常预警: yoy_pct 超 ±30% 的指标, 必须点名并给出可能原因方向(数据/运营/外部, 不下结论); "
+                "- 风险与机会: 按 business_benchmark 卡的方向判定(如'退款金额上升=风险'), 每类最多 1 条; "
+                "- 下钻建议: 给出'看哪个看板卡片/下钻到哪一层'的可执行建议(不重复数据)."
+            ),
             "new": (
-                "下钻建议: 给出'看哪个看板卡片/下钻到哪一层'的可执行建议(不重复数据); "
+                "当用户问'分析/总览/怎么看/风险/异常'类开放题时(纯取数问句跳过本段), 增量分析任务: "
+                "- 口径差异提醒: 当数据里出现 registered 与 handled 这类不同口径数字(见口径卡), 必须显式标注口径, 禁止直接相减或推断因果; "
+                "- 环比异常预警: yoy_pct 超 ±30% 的指标, 必须点名并给出可能原因方向(数据/运营/外部, 不下结论); "
+                "- 风险与机会: 按 business_benchmark 卡的方向判定(如'退款金额上升=风险'), 每类最多 1 条; "
+                "- 下钻建议: 给出'看哪个看板卡片/下钻到哪一层'的可执行建议(不重复数据); "
                 "无派生字段时: 某指标数据里没有环比(yoy_pct)/verdict 等派生字段, "
                 "直接陈述本期绝对值即可, 禁止输出'变化率未随数据下发/无法计算'类系统内部话术"
                 "(【数据省略说明】另有标注的除外)."

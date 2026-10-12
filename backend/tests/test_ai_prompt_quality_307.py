@@ -63,27 +63,39 @@ def test_add_verdicts_skips_missing_yoy():
 def test_enrich_complaint_breakdown_prev_and_verdict():
     feed = {
         "complaint": {
-            "total": {"registered": 10, "handled": 8, "backlog": 3, "backlog_prev_pct": 50.0},
+            "total": {"registered": 10, "handled": 8, "backlog": 3,
+                      "backlog_prev_pct": 50.0},
             "by_source": [
                 {"source": "内部投诉", "registered": 4, "handled": 3, "backlog": 1,
                  "backlog_prev_pct": -25.0},
                 {"source": "外部投诉", "registered": 3, "handled": 2, "backlog": 2},
             ],
-            "prev": {"by_source": [
-                {"source": "内部投诉", "registered": 5, "handled": 4, "backlog": 1},
-                {"source": "外部投诉", "registered": 2, "handled": 2, "backlog": 1},
-            ]},
+            "prev": {
+                "total": {"registered": 8, "handled": 6, "backlog": 2},
+                "by_source": [
+                    {"source": "内部投诉", "registered": 5, "handled": 4, "backlog": 1},
+                    {"source": "外部投诉", "registered": 2, "handled": 2, "backlog": 1},
+                ],
+            },
         },
     }
     ai_feed._enrich_complaint_breakdown(feed)
+    # total 节点: 前值 + 代码算环比 + verdict(登记少=好, 处理多=好, 积压少=好)
+    tot = feed["complaint"]["total"]
+    assert tot["registered_prev"] == 8 and tot["handled_prev"] == 6
+    assert tot["registered_prev_pct"] == 25.0      # (10-8)/8
+    assert tot["handled_prev_pct"] == 33.3         # (8-6)/6
+    assert tot["registered_verdict"] == "利空"      # 登记上升=利空
+    assert tot["handled_verdict"] == "利好"         # 处理上升=利好(实测判反处)
+    assert tot["backlog_verdict"] == "利空"         # 积压 +50%=利空
+    # by_source 投影: complaint_breakdown 可达(scope 切片后)
     bd = feed["complaint_breakdown"]
     assert len(bd) == 2
     inner = bd[0]
     assert inner["registered_prev"] == 5 and inner["handled_prev"] == 4 and inner["backlog_prev"] == 1
     assert inner["backlog_prev_pct"] == -25.0
-    # 积压越少越好: 下降=利好
     assert inner["backlog_verdict"] == "利好"
-    # 外部投诉: 无 backlog_prev_pct → 不加 verdict 键; prev 仍补齐
+    # 外部投诉: prev 有值 → 补前值; 基期 0/None 时 pct 不算
     ext = bd[1]
     assert ext["registered_prev"] == 2 and "backlog_verdict" not in ext
 

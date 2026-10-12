@@ -161,35 +161,61 @@ def _add_verdicts(feed: dict) -> None:
 
 
 def _enrich_complaint_breakdown(feed: dict) -> None:
-    """#307: complaint_breakdown 投影补前值与 verdict(就地下发 AI 专属段)。
+    """#307: complaint 侧投影补前值/环比/verdict(就地下发 AI 专属, 不改 external 契约)。
 
     原 #139 投影只取 registered/handled/backlog 裸数字:
       ① complaint.by_source 项已有的 backlog_prev_pct 被丢弃;
       ② 前值(在 complaint.prev 块)不可达 —— 问退款的问句 scope 切片会把 complaint
          段切走, 模型手里只剩裸数组 → 只能输出「变化率未随数据下发」噪音(实测取证)。
-    现补: 每源 prev_* 前值 + backlog_prev_pct + verdict(登记/积压越少越好, 处理越多越好)。
+    发布后实测补刀(2026-10-12): 模型对无 verdict 的 registered/handled 自判
+      「处理量环比上升 10.5%(利空)」—— 判反(处理越多越好)且比率系自算(幻觉风险)。
+      凡工具能算的: 代码补 registered_prev_pct/handled_prev_pct + verdict
+      (登记越少越好, 处理越多越好), 模型只引用。
     """
     rc = feed.get("complaint")
     if not isinstance(rc, dict):
         return
     prev = rc.get("prev") if isinstance(rc.get("prev"), dict) else {}
-    pmap = {x.get("source"): x for x in (prev.get("by_source") or []) if isinstance(x, dict)}
+
+    def _pct(cur, prv):
+        if cur is None or prv in (None, 0):
+            return None
+        return round((cur - prv) / prv * 100, 1)
+
+    def _enrich_node(node: dict, psrc: dict) -> None:
+        # 前值(登记/处理/积压)
+        for k in ("registered", "handled", "backlog"):
+            if k in node and k in psrc:
+                node[f"{k}_prev"] = psrc.get(k)
+        # 派生环比(代码算, 模型禁自算)
+        for k in ("registered", "handled"):
+            if node.get(f"{k}_prev_pct") is None and k in psrc:
+                node[f"{k}_prev_pct"] = _pct(node.get(k), psrc.get(k))
+        # verdict: 登记越少越好, 处理越多越好, 积压越少越好
+        if "registered_prev_pct" in node and node.get("registered_prev_pct") is not None:
+            node["registered_verdict"] = _verdict_from_yoy(node["registered_prev_pct"], more_is_better=False)
+        if "handled_prev_pct" in node and node.get("handled_prev_pct") is not None:
+            node["handled_verdict"] = _verdict_from_yoy(node["handled_prev_pct"], more_is_better=True)
+        if node.get("backlog_prev_pct") is not None:
+            node["backlog_verdict"] = _verdict_from_yoy(node["backlog_prev_pct"], more_is_better=False)
+
+    # ① total 节点(就地加键; complaint.total 已有 backlog_prev_pct, #prompt-v2.1)
+    if isinstance(rc.get("total"), dict):
+        ptotal = prev.get("total") if isinstance(prev.get("total"), dict) else {}
+        _enrich_node(rc["total"], ptotal)
+    # ② by_source 各项 + complaint_breakdown 投影(scope 切片后仍可达)
     out = []
+    pmap = {x.get("source"): x for x in (prev.get("by_source") or []) if isinstance(x, dict)}
     for s in rc.get("by_source") or []:
         if not isinstance(s, dict):
             continue
-        item = {"source": s.get("source"), "registered": s.get("registered"),
-                "handled": s.get("handled"), "backlog": s.get("backlog")}
-        psrc = pmap.get(s.get("source")) or {}
-        if psrc:
-            item["registered_prev"] = psrc.get("registered")
-            item["handled_prev"] = psrc.get("handled")
-            item["backlog_prev"] = psrc.get("backlog")
-        if s.get("backlog_prev_pct") is not None:
-            item["backlog_prev_pct"] = s.get("backlog_prev_pct")
-            # 积压方向: 越少越好(backlog_prev_pct 上升=利空)
-            item["backlog_verdict"] = _verdict_from_yoy(s.get("backlog_prev_pct"), more_is_better=False)
-        out.append(item)
+        _enrich_node(s, pmap.get(s.get("source")) or {})
+        out.append({k: s.get(k) for k in (
+            "source", "registered", "handled", "backlog",
+            "registered_prev", "handled_prev", "backlog_prev",
+            "registered_prev_pct", "handled_prev_pct", "backlog_prev_pct",
+            "registered_verdict", "handled_verdict", "backlog_verdict",
+        ) if s.get(k) is not None or k in ("source", "registered", "handled", "backlog")})
     if out:
         feed["complaint_breakdown"] = out
 
