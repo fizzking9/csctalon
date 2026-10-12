@@ -65,10 +65,15 @@ def _overview(db):
 
 
 def test_sale_days_split_bucket_boundaries(db):
-    """各桶边界: 5/20/60/120/200/400 天激活的设备, 退款各落对应桶。"""
+    """#295 五桶各桶落位: 14/17/60/120/200/400 天激活的设备, 退款各落对应桶。
+
+    精确切点(15/16/30/31/180/181/365/366)的归属在纯函数用例
+    test_active_age_dims.py::test_active_age_bucket_cut_points 断言;
+    本用例走 DB+时区归日链路, 故取切点内侧安全值防跨日小时差抖动。
+    """
     cases = [
-        (5, "0-7天"), (20, "8-30天"), (60, "31-90天"),
-        (120, "91-180天"), (200, "181-365天"), (400, ">365天"),
+        (14, "0-15天"), (17, "16-30天"), (60, "31-180天"),
+        (200, "181-365天"), (400, ">365天"),
     ]
     for days, bucket in cases:
         sn = _uniq(f"SN-{days}")
@@ -77,23 +82,23 @@ def test_sale_days_split_bucket_boundaries(db):
         _mk_refund(db, sn, "100")
 
     split = _overview(db)["sale_days_split"]
-    # 7 桶齐全
+    # #295: 五桶 + (无激活记录), 顺序按时长由短到长(后端常量单一来源)
     assert [b["bucket"] for b in split] == [
-        "0-7天", "8-30天", "31-90天", "91-180天", "181-365天", ">365天", "无激活记录",
+        "0-15天", "16-30天", "31-180天", "181-365天", ">365天", "(无激活记录)",
     ]
     for days, bucket in cases:
         assert _bucket(split, bucket)["cnt"] >= 1, f"{bucket} 应至少含本测试 1 笔"
 
 
 def test_sale_days_split_no_active_record(db):
-    """无激活记录设备(无 bms_orders 行)的退款落「无激活记录」桶。"""
+    """无激活记录设备(无 bms_orders 行)的退款落「(无激活记录)」桶。"""
     sn = _uniq("SN-NOACT")
     _mk_device(db, sn)
     _mk_refund(db, sn, "50")
 
     split = _overview(db)["sale_days_split"]
-    assert _bucket(split, "无激活记录")["cnt"] >= 1
-    assert _bucket(split, "无激活记录")["amount"] >= 50.0
+    assert _bucket(split, "(无激活记录)")["cnt"] >= 1
+    assert _bucket(split, "(无激活记录)")["amount"] >= 50.0
 
 
 def test_sale_days_split_first_active_min(db):
@@ -105,7 +110,7 @@ def test_sale_days_split_first_active_min(db):
     _mk_refund(db, sn, "80")
 
     split = _overview(db)["sale_days_split"]
-    # 200 天前首购 → 181-365天 桶(而非按续费 10 天的 8-30天)
+    # 200 天前首购 → 181-365天 桶(而非按续费 10 天的 0-15/16-30 桶)
     assert _bucket(split, "181-365天")["cnt"] >= 1
 
 
@@ -129,7 +134,7 @@ def test_sale_days_split_excludes_non_online(db):
     db.flush()
 
     split = _overview(db)["sale_days_split"]
-    amt = _bucket(split, "0-7天")["amount"]
+    amt = _bucket(split, "0-15天")["amount"]
     # 999(线下) 与 888(申请中) 均不应出现在桶内
     assert abs(amt - 999 - 888) > 0.01 or amt < 999
 
@@ -138,10 +143,10 @@ def test_sale_days_split_amount_decimal_to_float(db):
     """金额出参为 float(JSON number 元), 且分桶求和 = 各桶之和。"""
     sn = _uniq("SN-AMT")
     _mk_device(db, sn)
-    _mk_order(db, sn, 15)
+    _mk_order(db, sn, 14)
     _mk_refund(db, sn, "123.45")
 
     split = _overview(db)["sale_days_split"]
-    b = _bucket(split, "8-30天")
+    b = _bucket(split, "0-15天")
     assert isinstance(b["amount"], float)
     assert b["amount"] >= 123.45

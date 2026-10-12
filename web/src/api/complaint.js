@@ -7,6 +7,12 @@ export function complaintOverview(params) {
   return request.get('/complaints/overview', { params })
 }
 
+// #67 投诉设备维度汇总(按渠道可切: 内部/商户号/外部/卡商)
+//   与概览 device_dims 同源自洽(source_type=None ≡ 概览A6), 支持渠道过滤。
+export function complaintDeviceDims(params) {
+  return request.get('/complaints/device-dims', { params })
+}
+
 // 投诉决策分析(管理摘要/平台分布/时效/处理人效率)
 export function complaintAnalysis(params) {
   return request.get('/complaints/analysis', { params })

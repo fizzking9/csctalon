@@ -154,6 +154,11 @@ def list_timeline_markers(
         except ValueError:
             raise HTTPException(status_code=400, detail=f"无效的事件类型: {event_type}")
 
+    # 时序轴只标注业务异常/业务事件, 排除系统层故障(如数据采集/同步异常)。
+    # 数据采集异常由数据质量监控自动登记(category='数据采集'), 属系统告警而非业务事件,
+    # 标注在经营时序轴上会干扰业务趋势判断; 用 is_distinct_from 兼容 NULL category。
+    stmt = stmt.where(Incident.category.is_distinct_from('数据采集'))
+
     rows = list(db.scalars(stmt.order_by(Incident.occurred_at.asc().nulls_last(),
                                          Incident.start_at.asc().nulls_last(),
                                          Incident.id.asc())))

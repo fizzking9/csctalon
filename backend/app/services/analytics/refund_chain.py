@@ -460,8 +460,8 @@ def refund_withdrawal_detail(db: Session, start: str | None = None, end: str | N
 
     #273: 追加设备维度筛选(设备类型/套餐/商户号/激活时间段), 口径走 devices 表
     (与分品类运营看板 #271 同源), SN 未建档的行在任一设备维度条件生效时被排除。
-    #291: 追加 active_age 激活后天数桶筛选(le7/8-30/31-180/gt180/none) —— 汇总图
-    「激活时间段」桶的下钻落点(相对天数无法用 active_start/end 绝对日期表达);
+    #295: active_age 激活时长桶筛选(le15/16-30/31-180/181-365/gt365/none) —— 汇总图
+    「激活时长」桶的下钻落点(相对天数无法用 active_start/end 绝对日期表达);
     锚点 = D1 退款创建日 − bms_orders 最早激活日(#251 同源); 无激活记录的行仅在
     active_age='none' 时保留。
     """

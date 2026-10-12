@@ -737,8 +737,8 @@ def _query_backlog_rows(
     供 /backlog(分页+统计) 与 /backlog/export(导出Excel) 共用, 保证两处口径 100% 一致。
     返回列表已按 sort 排序, 每行含 audited 字段(已核查标识)。
     #273: 设备维度筛选(设备类型/套餐/商户号/激活时间段), 口径走 devices 表(同 #271)。
-    #291: active_age 激活后天数桶筛选(le7/8-30/31-180/gt180/none), 锚点=工单登记日 −
-    bms_orders 最早激活日(#251 同源); 供投诉维度汇总图「激活时间段」桶下钻。
+    #295: active_age 激活时长桶筛选(le15/16-30/31-180/181-365/gt365/none), 锚点=工单登记日 −
+    bms_orders 最早激活日(#251 同源); 供投诉维度汇总图「激活时长」桶下钻。
     """
     src_expr = _complaint_source_type_case()
 

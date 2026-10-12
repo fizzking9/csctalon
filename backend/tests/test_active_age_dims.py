@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""#291/#292 退款/投诉维度汇总分析: 设备类型/套餐/商户号/激活时间段(四桶) + active_age 桶下钻。
+"""#291/#292 退款/投诉维度汇总分析: 设备类型/套餐/商户号/激活时长(#295 五桶) + active_age 桶下钻。
 
-口径(用户拍板 2026-10-09 #291 + #292 修正):
-  · 激活时间段四桶 ≤7 / 8-30 / 31-180 / >180 + (无激活记录),
+口径(用户拍板 2026-10-09 #291 + #292 修正; 2026-10-11 #295 改桶):
+  · 激活时长五桶 0-15 / 16-30 / 31-180 / 181-365 / >365 + (无激活记录),
+    切点=上界(30 归 16-30、180 归 31-180、365 归 181-365),
     桶名唯一来源 = _core.ACTIVE_AGE_BUCKETS(退款/投诉两侧同源)
   · 激活基准 = bms_orders 最早激活日 MIN(active_date)（与 #251 sale_days_split 同源）
   · 退款锚点 = D1 退款创建日; 投诉锚点 = 工单登记日
@@ -24,9 +25,17 @@ from app.api.v1.complaints._backlog import _device_dim_groups
 from app.api.v1.complaints._helpers import _query_backlog_rows
 from app.models.bms_order import BmsOrder
 from app.models.device import Device, DimDeviceType
+from app.models.manual_refund import ManualRefund
 from app.models.refund import Refund
+from app.models.shanmao_refund import ShanmaoRefund
 from app.models.ticket import ServiceTicket
-from app.services.analytics import ACTIVE_AGE_BUCKETS, _device_dim_options, refund_decision_overview
+from app.models.wallet import WalletWithdrawal
+from app.services.analytics import (
+    ACTIVE_AGE_BUCKETS,
+    _active_age_bucket,
+    _device_dim_options,
+    refund_decision_overview,
+)
 from app.services.analytics.refund_chain import refund_withdrawal_detail
 
 
@@ -93,28 +102,59 @@ def _mk_backlog_ticket(db, sn: str | None) -> ServiceTicket:
     return t
 
 
+def test_active_age_bucket_cut_points():
+    """#295 纯函数切点(用户拍板: 切点=上界)。
+
+    15/30/180/365 各归其左侧桶; 16/31/181/366 进入右侧桶;
+    负数(激活晚于事件, 补录/时点差)自然落首桶; None → (无激活记录)。
+    """
+    cases = {
+        -5: "0-15天", 0: "0-15天", 15: "0-15天",
+        16: "16-30天", 30: "16-30天",
+        31: "31-180天", 180: "31-180天",
+        181: "181-365天", 365: "181-365天",
+        366: ">365天", 10000: ">365天",
+    }
+    for days, bucket in cases.items():
+        assert _active_age_bucket(days) == bucket, f"days={days}"
+    assert _active_age_bucket(None) == "(无激活记录)"
+    # 参数映射与桶一一对应(下钻枚举完整)
+    from app.services.analytics._core import _AGE_PARAM_TO_BUCKET
+    assert set(_AGE_PARAM_TO_BUCKET.values()) == set(ACTIVE_AGE_BUCKETS)
+
+
 def test_rw_detail_active_age_filter(db):
-    """退款明细 active_age 桶下钻: 激活3天→le7; 激活200天→gt180; 无激活→none。"""
-    sn_new, sn_old, sn_none = _uniq("SN-NA"), _uniq("SN-OLD"), _uniq("SN-NO")
-    _mk_device(db, sn_new)
-    _mk_device(db, sn_old)
-    _mk_device(db, sn_none)
+    """退款明细 active_age 桶下钻(#295): 激活3天→le15; 200天→181-365; 400天→gt365; 无激活→none。"""
+    sn_new, sn_mid, sn_old, sn_none = (_uniq("SN-NA"), _uniq("SN-MID"),
+                                       _uniq("SN-OLD"), _uniq("SN-NO"))
+    for sn in (sn_new, sn_mid, sn_old, sn_none):
+        _mk_device(db, sn)
     _mk_order(db, sn_new, 3)
-    _mk_order(db, sn_old, 200)
+    _mk_order(db, sn_mid, 200)
+    _mk_order(db, sn_old, 400)
     rf_new = _mk_b_refund(db, sn_new)
+    rf_mid = _mk_b_refund(db, sn_mid)
     rf_old = _mk_b_refund(db, sn_old)
     rf_none = _mk_b_refund(db, sn_none)
 
-    # ≤7天桶: 只含新机退款
-    nos = {r["refund_no"] for r in refund_withdrawal_detail(db, path="B", active_age="le7")["list"]}
+    # 0-15天桶: 只含新机退款
+    nos = {r["refund_no"] for r in refund_withdrawal_detail(db, path="B", active_age="le15")["list"]}
     assert rf_new.refund_no in nos
+    assert rf_mid.refund_no not in nos
     assert rf_old.refund_no not in nos
     assert rf_none.refund_no not in nos
 
-    # >180天桶: 只含老机退款
-    nos = {r["refund_no"] for r in refund_withdrawal_detail(db, path="B", active_age="gt180")["list"]}
+    # 181-365天桶
+    nos = {r["refund_no"] for r in refund_withdrawal_detail(db, path="B", active_age="181-365")["list"]}
+    assert rf_mid.refund_no in nos
+    assert rf_new.refund_no not in nos
+    assert rf_old.refund_no not in nos
+
+    # >365天桶: 只含超一年老机退款
+    nos = {r["refund_no"] for r in refund_withdrawal_detail(db, path="B", active_age="gt365")["list"]}
     assert rf_old.refund_no in nos
     assert rf_new.refund_no not in nos
+    assert rf_mid.refund_no not in nos
 
     # (无激活记录)桶: 只含无 bms_orders 激活记录的设备
     nos = {r["refund_no"] for r in refund_withdrawal_detail(db, path="B", active_age="none")["list"]}
@@ -166,6 +206,59 @@ def test_decision_overview_device_dims(db):
     assert isinstance(row["amount"], float)
 
 
+def test_decision_overview_device_dims_four_routes(db):
+    """#291 口径升级(2026-10-10 用户拍板): 设备维度汇总算全四路 A+B+C+D。
+
+    同一设备四路各造 1 笔不同金额 → 商户/型号桶 count=4 且 routes 分路明细齐全;
+    同时回归 #293 状态口径: 线下已退款 / 线上申请中不入桶(A 路只收线上+已退款);
+    sale_days_split 同为四路数据面(激活10天 → #295 0-15天 桶含全部 4 笔)。
+    """
+    sn = _uniq("SN-4R")
+    _mk_device(db, sn, merchant_name="商户4R")
+    _mk_order(db, sn, 10, device_type_name="CPE-4R", combo_name="套餐4R")
+    now = _now_naive()
+    # A 线上直退(线上+已退款)
+    db.add(Refund(refund_no=_uniq("RF"), device_sn=sn, refund_method="线上", status="已退款",
+                  refund_amount=Decimal("10.00"), created_at_raw=now))
+    # A 路排除回归: 线下已退款 / 线上申请中(#293 口径: 只管实际退款)
+    db.add(Refund(refund_no=_uniq("RF"), device_sn=sn, refund_method="线下", status="已退款",
+                  refund_amount=Decimal("999.00"), created_at_raw=now))
+    db.add(Refund(refund_no=_uniq("RF"), device_sn=sn, refund_method="线上", status="申请中",
+                  refund_amount=Decimal("888.00"), created_at_raw=now))
+    # B 钱包提现(用户提现, op_time 归日)
+    db.add(WalletWithdrawal(account_id=_uniq("ACC"), device_sn=sn, op_type="用户提现",
+                            op_amount=Decimal("20.00"), op_time=datetime.now(UTC),
+                            operator="SYS"))
+    # C 闪猫退款(已退款; 归日锚点回退 created_at 由 TimestampMixin 填充)
+    db.add(ShanmaoRefund(refund_no=_uniq("TF"), device_sn=sn, status="已退款",
+                         refund_amount=Decimal("30.00"), actual_amount=Decimal("30.00")))
+    # D 手动退款(is_refunded='是', register_time 归日)
+    db.add(ManualRefund(device_sn=sn, is_refunded="是", refund_amount=Decimal("40.00"),
+                        register_time=now))
+    db.flush()
+
+    ov = refund_decision_overview(
+        db, start=str(date.today() - timedelta(days=1)), end=str(date.today()), grain="day",
+    )
+    merch = {r["name"]: r for r in ov["device_dims"]["by_merchant"]}
+    row = merch["商户4R"]
+    assert row["count"] == 4                       # 四路齐全, 线下/申请中不计入
+    assert abs(row["amount"] - 100.0) < 0.01       # 10+20+30+40
+    assert set(row["routes"]) == {"A 线上直退", "B 钱包提现", "C 闪猫退款", "D 手动退款"}
+    for rk, amt in (("A 线上直退", 10.0), ("B 钱包提现", 20.0),
+                    ("C 闪猫退款", 30.0), ("D 手动退款", 40.0)):
+        assert row["routes"][rk]["count"] == 1
+        assert abs(row["routes"][rk]["amount"] - amt) < 0.01
+    # 型号桶同为四路口径
+    types = {r["name"]: r["count"] for r in ov["device_dims"]["by_device_type"]}
+    assert types.get("CPE-4R", 0) == 4
+    # sale_days_split 同为四路: 激活10天 → 0-15天 桶含全部 4 笔(#295 五桶)
+    sb = next(b for b in ov["sale_days_split"] if b["bucket"] == "0-15天")
+    assert sb["cnt"] == 4
+    assert abs(sb["amount"] - 100.0) < 0.01
+    assert set(sb["routes"]) == {"A 线上直退", "B 钱包提现", "C 闪猫退款", "D 手动退款"}
+
+
 def test_backlog_active_age_and_dims(db):
     """投诉积压四维统计与明细同源: 桶计数 == active_age 同条件筛选行数。
 
@@ -173,7 +266,7 @@ def test_backlog_active_age_and_dims(db):
     """
     sn_a = _uniq("SN-BA")
     _mk_device(db, sn_a, merchant_name="商户W")
-    _mk_order(db, sn_a, 300, device_type_name="CPE-BA", combo_name="套餐W")  # >180天桶
+    _mk_order(db, sn_a, 300, device_type_name="CPE-BA", combo_name="套餐W")  # 181-365天桶
     tk_a = _mk_backlog_ticket(db, sn_a)
     sn_none = _uniq("SN-BNONE")
     _mk_device(db, sn_none)                              # 有建档, 无激活记录
@@ -193,19 +286,19 @@ def test_backlog_active_age_and_dims(db):
     merch = {r["name"]: r["count"] for r in g["by_merchant"]}
     assert merch.get("商户W", 0) >= 1
 
-    # 激活时间段: 固定桶顺序(ACTIVE_AGE_BUCKETS 单一来源), >180 与 无激活记录 计数正确
+    # 激活时长: 固定桶顺序(ACTIVE_AGE_BUCKETS 单一来源), 181-365 与 无激活记录 计数正确
     assert [r["name"] for r in g["by_active_age"]] == list(ACTIVE_AGE_BUCKETS)
     ages = {r["name"]: r["count"] for r in g["by_active_age"]}
-    assert ages.get(">180天", 0) >= 1
+    assert ages.get("181-365天", 0) >= 1
     assert ages.get("(无激活记录)", 0) >= 2  # tk_none + tk_nosn
 
-    # 下钻自洽: active_age=gt180 筛选行 == >180天桶计数
-    rows_gt = _query_backlog_rows(db, None, None, active_age="gt180")
+    # 下钻自洽: active_age=181-365 筛选行 == 181-365天桶计数
+    rows_gt = _query_backlog_rows(db, None, None, active_age="181-365")
     nos = {r["ticket_no"] for r in rows_gt}
     assert tk_a.ticket_no in nos
     assert tk_none.ticket_no not in nos
     assert tk_nosn.ticket_no not in nos
-    assert len(rows_gt) == ages[">180天"]
+    assert len(rows_gt) == ages["181-365天"]
 
 
 def test_backlog_groups_unregistered(db):

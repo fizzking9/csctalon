@@ -10,7 +10,7 @@
   │       ④ 时间控件全页唯一（改造前 5 个图表各有粒度开关 → 同屏可能 3 种粒度）。            │
   │ 口径：三源 = complaint_scope 分桶（内部/商户号/外部）；**(外)卡商完全独立，不入总量**   │
   │       （用户 2026-09-11 #53 决策）。时间过滤「登记 OR 完成」与 /summary 对齐。          │
-  │       积压明细筛选含设备维度（设备类型/套餐/商户号/激活时间段，走 devices 表，#273）。   │
+  │       积压明细筛选含设备维度（设备型号/套餐/店铺/激活时长，走 devices 表，#273）。      │
   │       详见 docs/standards/投诉渠道口径与对账说明.md ·                                     │
   │       docs/standards/数据时间字段使用规范.md                                                │
   │ 取舍：❌ 不堆图 —— 概览的旧 12+ 图表已下移到渠道页；每个图表必须**指向一个动作**。        │
@@ -35,6 +35,43 @@
         v-model:custom-range="customRange"
         @update:range="onRangeChange"
       />
+    </div>
+
+    <!-- 两级导航(#67 P1) —— 位置: 顶部时间条下方(2026-10-10 从页底上移, 页底需滚屏才能切 tab, 不可用)
+         一级 = 任务域(分析 / 执行跟踪)
+         二级 = 分析内的视角(决策概览 / 设备维度 / 渠道明细 / 主体分析)
+         三级 = 渠道明细的子页(内部/商户号/外部/卡商 同构面板)
+         ★ 为什么分两级而不是 8 个平铺 tab：
+           "看趋势做判断"(分析) 与 "盯人干活"(执行跟踪) 是两种不同任务，
+           平铺会让决策者在 8 个 tab 里迷路。 -->
+    <div v-if="loaded" class="nav-wrap">
+      <el-radio-group v-model="topTab" size="default">
+        <el-radio-button value="analysis">分析</el-radio-button>
+        <el-radio-button value="execute">
+          执行跟踪
+          <el-badge v-if="(b.total ?? 0) > 0" :value="b.total" type="danger" style="margin-left:6px" />
+        </el-radio-button>
+      </el-radio-group>
+
+      <template v-if="topTab === 'analysis'">
+        <span class="nav-sep" />
+        <el-radio-group v-model="analysisTab" size="small">
+          <el-radio-button value="overview">决策概览</el-radio-button>
+          <el-radio-button value="device">设备维度</el-radio-button>
+          <el-radio-button value="channel">渠道明细</el-radio-button>
+          <el-radio-button value="subject">主体分析</el-radio-button>
+        </el-radio-group>
+      </template>
+
+      <template v-if="topTab === 'analysis' && analysisTab === 'channel'">
+        <span class="nav-sep" />
+        <el-radio-group v-model="channelTab" size="small">
+          <el-radio-button value="internal">内部投诉</el-radio-button>
+          <el-radio-button value="merchant">商户号投诉</el-radio-button>
+          <el-radio-button value="external">外部投诉</el-radio-button>
+          <el-radio-button value="card">(外)卡商</el-radio-button>
+        </el-radio-group>
+      </template>
     </div>
 
     <!-- 未加载时的提示 -->
@@ -318,58 +355,88 @@
           </el-col>
         </el-row>
 
-        <!-- ══════════════ A6: 设备维度汇总（#292 投诉决策概览四维） ══════════════
-             设计说明（Design Rationale）
-             目的：让班组长看清"窗口内投诉集中在哪类设备/套餐/商户/激活阶段"，
-                   据此定向跟进（如某型号集中报障 → 排查批次质量问题）。
-             逻辑：与积压页四维**同源同函数**(_device_dim_groups)，但口径=窗口内全量投诉工单(含已完成)，
-                   而积压页只看未完成 → 两图数字不同是口径差异，非 bug。
-             口径：设备类型/套餐取 bms_orders 最新订单(create_date DESC)的 device_type_name/combo_name；
-                   商户号取 devices.merchant_name；激活时间=bms_orders MIN(active_date) ∪ devices.active_time 兜底。
-                   测试套餐(含"工厂质检")已排除。详见 _core.py #292。
-             取舍：❌ 不在概览做分组统计图表(柱/饼) —— 概览只给分布事实，分组交叉在积压页；
-                   ❌ 不重复积压页已有图表，仅概览多一层数据面。
-             工单：#292 · 设计：本文件头部设计说明 -->
-        <div v-if="overviewData?.device_dims" class="chart-title" style="margin: 8px 0">
-          设备维度汇总（窗口内全量投诉 · 点击桶 → 跳积压页带筛选）
-          <el-tooltip effect="dark" placement="top" raw-content
-            content="<b>来源</b>：/complaints/overview 同一响应 device_dims<br/><b>口径</b>：窗口内全量投诉工单(含已完成, 剔卡商)；设备型号/套餐=bms_orders最新订单; 商户号=devices表; 激活=bms最早∪devices兜底<br/><b>时点</b>：跟随页面时间范围（默认近30天）<br/><b>「空」的含义</b>：(未填SN)=工单无设备号; (未建档)=SN不在设备库; (未填)=设备库无该字段值<br/><b>下钻</b>：点击桶 → 跳转积压页并带对应筛选<br/><b>取舍</b>：概览看全量(含已完成)，积压页只看未完成 → 两图数字不同是口径差异">
-            <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
-          </el-tooltip>
+        <!-- ★ #67: 设备维度汇总已迁移至独立「设备维度」tab —— 与趋势图分离, 且支持按渠道(内部/商户号/外部/卡商)拆分。
+             概览专注「时间维度判断失控」, 设备维度 tab 专注「SN 维度定位归因」。
+             真身位置: 下文 activeTab==='device' section。 -->
+
+        <!-- ★ 比率指标占位: 数据完整度不足, 本期不渲染(见 #68 专项研究)
+             此处保留注释而非代码 —— 数据成熟后由 #68 决定是否加回 -->
+      </section>
+
+      <!-- ══════════════ 设备维度 tab（#67 投诉分析四维独立页） ══════════════
+           设计说明（Design Rationale）
+           目的：让班组长/运营看清「本期投诉集中在哪类设备/套餐/商户/激活阶段」,
+                 并能按渠道(内部/商户号/外部/卡商)拆分, 定位质量问题 vs 服务问题的归因差异。
+           逻辑：从决策概览拆出, 与趋势图分离 —— 趋势回答「量随时间怎么变」, 本页回答「量落在什么设备上」。
+                 复用概览A6的四维函数(_device_dim_groups), 保证本页 ↔ 概览 ↔ 积压明细 同源自洽。
+           口径：投诉判据=工单 service_category 空白或='投诉'(complaint_scope 唯一出口);
+                 设备型号/套餐取 bms_orders 最新订单; 商户号=devices表; 激活=bms最早∪devices兜底。
+                 source_type=全部 → 三源合计剔卡商(与旧概览A6完全一致); 卡商独立来源=card_complaints。
+           取舍：❌ 不做趋势图(那是概览的职责);
+                 ❌ 不做跨渠道对比表(本期先做渠道切换, 对比表视使用情况再加);
+                 ❌ 不做金额维度(投诉工单金额字段稀疏)。
+           工单：#67 -->
+      <section v-if="activeTab === 'device'" v-loading="deviceDimLoading" class="block-card">
+        <div class="block-head">
+          <span class="block-title">投诉设备维度汇总</span>
+          <span class="block-hint">统一时间窗口内, 按 SN 维度看投诉集中在哪类设备型号/套餐/店铺/激活时长 · 支持按渠道拆分 · 与退款分析「设备维度汇总」同名同口径(devices 表)</span>
+          <div style="flex:1" />
+          <el-radio-group v-model="deviceDimSource" size="small">
+            <el-radio-button value="all">全部(三源)</el-radio-button>
+            <el-radio-button value="internal">内部投诉</el-radio-button>
+            <el-radio-button value="merchant">商户号投诉</el-radio-button>
+            <el-radio-button value="external">外部投诉</el-radio-button>
+            <el-radio-button value="card">(外)卡商</el-radio-button>
+          </el-radio-group>
+          <el-popover placement="bottom-end" :width="440" trigger="click">
+            <template #reference>
+              <el-icon style="color:#909399;cursor:help;font-size:15px"><QuestionFilled /></el-icon>
+            </template>
+            <div style="font-size:12px;line-height:1.6;color:#4b5563">
+              <div style="font-weight:700;font-size:13px;color:#1f2937;margin-bottom:8px">设备维度汇总 · 设计说明</div>
+              <div style="margin-bottom:8px"><b>给谁用</b><div>班组长/运营, 用于定位「投诉集中在哪类设备, 以及不同渠道的设备分布差异」。四维命名(设备型号/套餐/店铺/激活时长)与退款分析「六、设备维度汇总」一致, 同为 devices 表属性(#271/#273 同源)。</div></div>
+              <div style="margin-bottom:8px"><b>为什么独立成 tab</b><div>趋势图回答「量随时间怎么变」, 设备维度回答「量落在什么设备上」——两类问题混在一起会互相干扰。</div></div>
+              <div style="margin-bottom:8px"><b>口径</b><div>投诉判据=工单 service_category 空白或='投诉'; 设备型号/套餐=bms_orders 最新订单; 店铺=devices 表; 激活时长=登记日 − bms 最早激活日∪devices 兜底, #295 五桶(0-15/16-30/31-180/181-365/&gt;365/(无激活记录), 切点=上界), 与退款侧同名同桶; 退款侧锚点=出款日, 锚点不同故同一设备两侧落桶可能不同, 属正常。「全部」=三源合计剔卡商, 与原概览A6完全一致。<b>四维条形均按单数</b>, 悬停显示单数与<b>单数占比</b>(分子/分母; 型号/套餐/店铺显示 Top8, 分母仍为该维度全部投诉数); 投诉工单金额字段稀疏, 只有单数口径无金额占比(#252/#297)。</div></div>
+              <div style="margin-bottom:8px"><b>「空」的含义</b><div>(未填SN)=工单无设备号; (未建档)=SN 不在设备库; (未填)=设备库无该字段值。</div></div>
+              <div><b>取舍</b><div>不做趋势/金额维度(工单金额稀疏, #252); 型号/套餐/店铺只展示 Top8; 不做跨渠道对比表(视使用情况再加)。</div></div>
+            </div>
+          </el-popover>
         </div>
-        <el-row v-if="overviewData?.device_dims" :gutter="16" class="mb-16">
+
+        <el-row :gutter="16" class="mb-16">
           <el-col :xs="24" :sm="12" :md="6">
             <div class="chart-card">
-              <div class="chart-title">设备类型 Top</div>
-              <BaseChart v-if="ovDeviceTypeOption" :option="ovDeviceTypeOption" height="200px" @chartClick="(p) => drillOvDeviceDim('type', p.name)" />
+              <div class="chart-title">设备型号 Top</div>
+              <BaseChart v-if="devDeviceTypeOption" :option="devDeviceTypeOption" height="220px" @chartClick="(p) => drillDeviceDim('type', p.name)" />
               <el-empty v-else description="暂无数据" :image-size="40" />
             </div>
           </el-col>
           <el-col :xs="24" :sm="12" :md="6">
             <div class="chart-card">
               <div class="chart-title">套餐 Top</div>
-              <BaseChart v-if="ovComboOption" :option="ovComboOption" height="200px" @chartClick="(p) => drillOvDeviceDim('combo', p.name)" />
+              <BaseChart v-if="devComboOption" :option="devComboOption" height="220px" @chartClick="(p) => drillDeviceDim('combo', p.name)" />
               <el-empty v-else description="暂无数据" :image-size="40" />
             </div>
           </el-col>
           <el-col :xs="24" :sm="12" :md="6">
             <div class="chart-card">
-              <div class="chart-title">商户号 Top</div>
-              <BaseChart v-if="ovMerchantOption" :option="ovMerchantOption" height="200px" @chartClick="(p) => drillOvDeviceDim('merchant', p.name)" />
+              <div class="chart-title">店铺 Top</div>
+              <BaseChart v-if="devMerchantOption" :option="devMerchantOption" height="220px" @chartClick="(p) => drillDeviceDim('merchant', p.name)" />
               <el-empty v-else description="暂无数据" :image-size="40" />
             </div>
           </el-col>
           <el-col :xs="24" :sm="12" :md="6">
             <div class="chart-card">
-              <div class="chart-title">激活时间段</div>
-              <BaseChart v-if="ovActiveAgeOption" :option="ovActiveAgeOption" height="200px" @chartClick="(p) => drillOvDeviceDim('age', p.name)" />
+              <div class="chart-title">激活时长</div>
+              <BaseChart v-if="devActiveAgeOption" :option="devActiveAgeOption" height="220px" @chartClick="(p) => drillDeviceDim('age', p.name)" />
               <el-empty v-else description="暂无数据" :image-size="40" />
             </div>
           </el-col>
         </el-row>
 
-        <!-- ★ 比率指标占位: 数据完整度不足, 本期不渲染(见 #68 专项研究)
-             此处保留注释而非代码 —— 数据成熟后由 #68 决定是否加回 -->
+        <div class="block-hint" style="margin-top:8px">
+          💡 点击任一桶 → 跳转积压审核页并带对应筛选条件（设备类型/套餐/商户号/激活时长）
+        </div>
       </section>
 
       <!-- ============ 渠道明细(2026-09-11 #67 P2 同构化) ============
@@ -423,23 +490,24 @@
             <el-option label="待分派" :value="false" />
             <el-option label="已分派" :value="true" />
           </el-select>
-          <!-- #273: 设备维度筛选(口径=devices 表, 与退款明细同套参数) -->
-          <el-select v-model="backlogFilters.device_type" size="small" placeholder="设备类型" clearable filterable style="width:150px" @change="backlogPage = 1; loadBacklog()">
+          <!-- #273: 设备维度筛选(口径=devices 表, 与退款明细同套参数; 命名与退款区块六一致: 设备型号/套餐/店铺/激活时长) -->
+          <el-select v-model="backlogFilters.device_type" size="small" placeholder="设备型号" clearable filterable style="width:150px" @change="backlogPage = 1; loadBacklog()">
             <el-option v-for="t in backlogDimOptions.device_types || []" :key="t.value" :label="t.label" :value="t.value" />
           </el-select>
           <el-select v-model="backlogFilters.combo" size="small" placeholder="套餐" clearable filterable style="width:160px" @change="backlogPage = 1; loadBacklog()">
             <el-option v-for="c in backlogDimOptions.combos || []" :key="c" :label="c" :value="c" />
           </el-select>
-          <el-select v-model="backlogFilters.merchant" size="small" placeholder="商户号" clearable filterable style="width:160px" @change="backlogPage = 1; loadBacklog()">
+          <el-select v-model="backlogFilters.merchant" size="small" placeholder="店铺" clearable filterable style="width:160px" @change="backlogPage = 1; loadBacklog()">
             <el-option v-for="m in backlogDimOptions.merchants || []" :key="m" :label="m" :value="m" />
           </el-select>
           <el-date-picker v-model="backlogFilters.activeRange" type="daterange" size="small" range-separator="~" start-placeholder="激活起" end-placeholder="激活止" value-format="YYYY-MM-DD" style="width:210px" @change="backlogPage = 1; loadBacklog()" />
-          <!-- #291: 激活后天数桶(设备维度汇总 激活桶下钻入口; 锚点=登记日−bms_orders最早激活日) -->
-          <el-select v-model="backlogFilters.activeAge" size="small" placeholder="激活时段" clearable style="width:130px" @change="backlogPage = 1; loadBacklog()">
-            <el-option label="≤7天" value="le7" />
-            <el-option label="8-30天" value="8-30" />
+          <!-- #295: 激活时长桶(设备维度汇总 激活桶下钻入口; 锚点=登记日−bms_orders最早激活日) -->
+          <el-select v-model="backlogFilters.activeAge" size="small" placeholder="激活时长" clearable style="width:130px" @change="backlogPage = 1; loadBacklog()">
+            <el-option label="0-15天" value="le15" />
+            <el-option label="16-30天" value="16-30" />
             <el-option label="31-180天" value="31-180" />
-            <el-option label=">180天" value="gt180" />
+            <el-option label="181-365天" value="181-365" />
+            <el-option label=">365天" value="gt365" />
             <el-option label="无激活记录" value="none" />
           </el-select>
           <el-button size="small" :icon="Refresh" @click="loadBacklog">刷新</el-button>
@@ -518,19 +586,19 @@
 
         <!-- #291 设备维度汇总(积压口径): 与明细表同源, 点击桶带筛选下钻
              设计说明: 目的=回答「积压集中在哪类设备/套餐/商户/激活阶段」;
-             口径=积压未完成工单(与明细同源自洽), 激活四桶=登记日−bms_orders最早激活日;
-             取舍=不重复展示 #252 extended-dims(全量含已完成, 另一数据面)。工单 #291。 -->
+             口径=积压未完成工单(与明细同源自洽), 激活时长 #295 五桶=登记日−bms_orders最早激活日;
+             取舍=不重复展示 #252 extended-dims(全量含已完成, 另一数据面)。工单 #291/#295。 -->
         <div class="chart-title" style="margin-bottom: 8px">
           设备维度汇总（点击桶 → 明细表带筛选）
           <el-tooltip effect="dark" placement="top" raw-content
-            content="<b>来源</b>：/complaints/backlog 同一响应（by_device_type/by_combo/by_merchant/by_active_age）<br/><b>口径</b>：积压未完成工单（与下方明细表完全同源）；设备属性 = devices 表（#271/#273 同源）；激活时间段 = 登记日 − bms_orders 最早激活日 四桶（≤7 / 8-30 / 31-180 / &gt;180天 / 无激活记录，#291 口径）<br/><b>时点</b>：跟随页面时间范围（默认近30天），刷新即更新<br/><b>「空」的含义</b>：图为空 = 窗口内无积压工单；(未填SN)/(未建档) 桶 = 工单/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击桶 → 明细表自动带对应筛选，行数 = 桶计数<br/><b>取舍</b>：不重复展示 #252 extended-dims 全量口径（含已完成工单，属另一数据面）">
+            content="<b>来源</b>：/complaints/backlog 同一响应（by_device_type/by_combo/by_merchant/by_active_age）<br/><b>口径</b>：积压未完成工单（与下方明细表完全同源）；设备属性 = devices 表（#271/#273 同源，命名与退款「设备维度汇总」一致：设备型号/套餐/店铺/激活时长）；激活时长 = 登记日 − bms_orders 最早激活日，#295 五桶（0-15 / 16-30 / 31-180 / 181-365 / &gt;365天 / (无激活记录)，切点=上界：30/180/365 归其左侧桶；与退款侧同名同桶，退款锚点=出款日，锚点不同落桶可不同属正常；<b>四维条形均按单数</b>，悬停显示单数与<b>单数占比</b>（投诉工单金额字段稀疏，不做金额维度，故只有单数口径，#252/#297）；型号/套餐/店铺仅显示 Top8，占比分母仍为该维度全部积压工单数）<br/><b>时点</b>：跟随页面时间范围（默认近30天），刷新即更新<br/><b>「空」的含义</b>：图为空 = 窗口内无积压工单；(未填SN)/(未建档) 桶 = 工单/设备库覆盖缺口，显式保留不隐藏<br/><b>下钻</b>：点击桶 → 明细表自动带对应筛选，行数 = 桶计数<br/><b>取舍</b>：不重复展示 #252 extended-dims 全量口径（含已完成工单，属另一数据面）；不做金额占比（工单金额稀疏，#252）">
             <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
           </el-tooltip>
         </div>
         <el-row :gutter="16" class="mb-16">
           <el-col :xs="24" :sm="12" :md="6">
             <div class="chart-card">
-              <div class="chart-title">设备类型 Top</div>
+              <div class="chart-title">设备型号 Top</div>
               <BaseChart v-if="backlogDeviceTypeOption" :option="backlogDeviceTypeOption" height="200px" @chartClick="(p) => drillBacklogDim('type', p.name)" />
               <el-empty v-else description="暂无数据" :image-size="40" />
             </div>
@@ -544,14 +612,14 @@
           </el-col>
           <el-col :xs="24" :sm="12" :md="6">
             <div class="chart-card">
-              <div class="chart-title">商户号 Top</div>
+              <div class="chart-title">店铺 Top</div>
               <BaseChart v-if="backlogMerchantOption" :option="backlogMerchantOption" height="200px" @chartClick="(p) => drillBacklogDim('merchant', p.name)" />
               <el-empty v-else description="暂无数据" :image-size="40" />
             </div>
           </el-col>
           <el-col :xs="24" :sm="12" :md="6">
             <div class="chart-card">
-              <div class="chart-title">激活时间段</div>
+              <div class="chart-title">激活时长</div>
               <BaseChart v-if="backlogActiveAgeOption" :option="backlogActiveAgeOption" height="200px" @chartClick="(p) => drillBacklogDim('age', p.name)" />
               <el-empty v-else description="暂无数据" :image-size="40" />
             </div>
@@ -959,41 +1027,6 @@
         </el-drawer>
       </section>
     </template>
-    <!-- 两级导航(#67 P1)
-         一级 = 任务域(分析 / 执行跟踪)
-         二级 = 分析内的视角(决策概览 / 渠道明细 / 主体分析)
-         三级 = 渠道明细的子页(内部/商户号/外部/卡商 同构面板)
-         ★ 为什么分两级而不是 8 个平铺 tab：
-           "看趋势做判断"(分析) 与 "盯人干活"(执行跟踪) 是两种不同任务，
-           平铺会让决策者在 8 个 tab 里迷路。 -->
-    <div v-if="loaded" class="nav-wrap">
-      <el-radio-group v-model="topTab" size="default">
-        <el-radio-button value="analysis">分析</el-radio-button>
-        <el-radio-button value="execute">
-          执行跟踪
-          <el-badge v-if="(b.total ?? 0) > 0" :value="b.total" type="danger" style="margin-left:6px" />
-        </el-radio-button>
-      </el-radio-group>
-
-      <template v-if="topTab === 'analysis'">
-        <span class="nav-sep" />
-        <el-radio-group v-model="analysisTab" size="small">
-          <el-radio-button value="overview">决策概览</el-radio-button>
-          <el-radio-button value="channel">渠道明细</el-radio-button>
-          <el-radio-button value="subject">主体分析</el-radio-button>
-        </el-radio-group>
-      </template>
-
-      <template v-if="topTab === 'analysis' && analysisTab === 'channel'">
-        <span class="nav-sep" />
-        <el-radio-group v-model="channelTab" size="small">
-          <el-radio-button value="internal">内部投诉</el-radio-button>
-          <el-radio-button value="merchant">商户号投诉</el-radio-button>
-          <el-radio-button value="external">外部投诉</el-radio-button>
-          <el-radio-button value="card">(外)卡商</el-radio-button>
-        </el-radio-group>
-      </template>
-    </div>
   </div>
 </template>
 
@@ -1074,6 +1107,16 @@ const {
   backlogMerchantOption,
   backlogActiveAgeOption,
   drillBacklogDim,
+  // #67 设备维度 tab(独立于概览趋势, 按渠道可切)
+  deviceDimSource,
+  deviceDimData,
+  deviceDimLoading,
+  devDeviceTypeOption,
+  devComboOption,
+  devMerchantOption,
+  devActiveAgeOption,
+  drillDeviceDim,
+  loadDeviceDims,
   subj,
   subjectRanking,
   extRatioColor,
