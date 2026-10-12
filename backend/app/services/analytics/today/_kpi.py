@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.models.card_complaint import CardComplaint
 from app.models.cs_record import CsRecord
+from app.models.device_combo import DeviceCombo
 from app.models.external_complaint import ExternalComplaint
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
@@ -267,6 +268,20 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
                          .where(_between(CsRecord.operation_time, ys, ye),
                                 CsRecord.operator.isnot(None))).scalar() or 0
 
+    # 6b. ★ #309 窗口充值(真实现金流充入): device_combos 按 created_at_raw 落窗,
+    #     剔除工厂质检专用套餐流水(package_name ILIKE '%质检%') —— 与分品类运营看板
+    #     #293 同判据(出厂质检单笔 999/9999 元非真实营收, 2026-10 曾占当期流水 57.5%)。
+    #     环比 = 上一等长窗口(ys~ye), 与其他 KPI 卡同一对比语义。
+    _not_qc = DeviceCombo.package_name.notilike("%质检%")
+    _rc_t = db.execute(select(
+        func.count(), func.coalesce(func.sum(DeviceCombo.actual_amount), 0),
+    ).where(_between(DeviceCombo.created_at_raw, ts, te), _not_qc)).first()
+    _rc_y = db.execute(select(
+        func.count(), func.coalesce(func.sum(DeviceCombo.actual_amount), 0),
+    ).where(_between(DeviceCombo.created_at_raw, ys, ye), _not_qc)).first()
+    rc_cnt_t, rc_amt_t = int(_rc_t[0] or 0), round(float(_rc_t[1] or 0), 2)
+    rc_cnt_y, rc_amt_y = int(_rc_y[0] or 0), round(float(_rc_y[1] or 0), 2)
+
     # 7. 今日投诉单 —— ★★ #81 (2026-09-13) 口径统一到「唯一出口」★★
     #
     #   ⚠️ 变更背景（#81 实测）:
@@ -408,6 +423,10 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         },
         "refund_count":   _k(rf_cnt_t, rf_cnt_y),
         "refund_amount":  _k(round(rf_amt_t, 2), round(rf_amt_y, 2)),
+        # ★ #309 窗口充值(剔除质检流水): value=金额, count=笔数, 环比=上一等长窗口
+        "recharge":       {**_k(rc_amt_t, rc_amt_y),
+                           "count": rc_cnt_t, "count_yoy": rc_cnt_y,
+                           "count_yoy_pct": _pct_delta(rc_cnt_t, rc_cnt_y)},
         "cash_out":       _k(round(cash_t, 2), round(cash_y, 2)),      # 经营估算 A+B+C+D
         "actual_cashflow":_k(round(e_t["amount"], 2), round(e_y["amount"], 2)), # (新) 实际现金流E
         # ⚠️ 2026-09-01 新增: 当日完成退款(已退款,按更新时间) —— 补 BMS"实际退款时间"口径
@@ -449,6 +468,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         "_spec": {
             "refund_count":     "退款笔数 = 四路经营合计 A线上直退 + B用户取现 + C闪猫退款 + D手动退款 (按创建时间)",
             "refund_amount":    "退款金额 = 四路经营合计 A+B+C+D (经营侧登记的所有退款出款)",
+            "recharge":         "充值金额 = device_combos 窗口内 actual_amount 合计(按 created_at_raw 落窗), 已剔除工厂质检专用套餐流水(package_name 含「质检」) —— 与分品类运营看板 #293 同判据, 只计真实付费充入; count=充值笔数; 环比=上一等长窗口(#309)",
             "refund_done_today":"当日完成退款 = 路线A(线上直退) 中 status=已退款 且 更新时间(退款完成时刻)∈ 当日, 含几天前创建今天才完成的单 (BMS 实际退款时间口径)",
             "cash_out":         "真实现金流(对账基准) = refund_record_reports 退款成功合计, 不分ORIGINAL/BALANCE桶 (2026-09-05 v1.1 起替代 merchant_refunds)",
             "actual_cashflow":  "实际现金流(对账基准) = refund_record_reports 退款成功合计, 不分ORIGINAL/BALANCE桶",

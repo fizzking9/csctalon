@@ -45,6 +45,19 @@
             </div>
           </el-col>
           <el-col :xs="12" :sm="8" :md="4">
+            <!-- ★ #309 窗口充值对照卡: 给「现金流出」一个「流入」对照 ——
+                 退款 ¥X 是充值的多大比例, 回答「退款压力是否可控」。
+                 下钻 → 数据查看·充值流量(带窗口, 按充值时间落窗)。 -->
+            <div class="kpi-card kpi-drill" style="background:#ecfdf5" title="点击查看充值流量明细" @click="drillRecharge">
+              <div class="kpi-label" style="color:#059669">窗口充值<el-tooltip effect="dark" placement="top" raw-content
+                content="<b>来源</b>：/analytics/refund/decision-overview → summary.recharge_amount / recharge_count / refund_recharge_ratio<br/><b>口径</b>：窗口内 device_combos 实际充值金额合计(按充值时间 created_at_raw 落窗)，<b>已剔除工厂质检专用套餐流水</b>(套餐名含「质检」，与今日看板充值卡、分品类运营看板 #293 同判据)，只计真实付费充入<br/><b>退款占充值</b>：现金流出总额(四路经营合计) ÷ 窗口充值 × 100%；分母为 0 时显示「—」<br/><b>时点</b>：跟随顶部时间条，点「分析」刷新；后端缓存 60s<br/><b>「空」的含义</b>：0 = 窗口内无真实充值流水(或全部为质检流水)<br/><b>下钻</b>：点卡片 → 数据查看·充值流量(带当前窗口，按充值时间；该页为原始流水含质检行，剔质检合计以本卡为准)">
+                <el-icon style="color:#b0b4bb;cursor:help;vertical-align:-1px;font-size:13px"><QuestionFilled /></el-icon>
+              </el-tooltip></div>
+              <div class="kpi-value">¥{{ formatMoney(summary.recharge_amount) }}</div>
+              <div class="kpi-sub">{{ summary.recharge_count ?? 0 }} 笔 · 退款占充值 {{ summary.refund_recharge_ratio != null ? summary.refund_recharge_ratio + '%' : '—' }}</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="8" :md="4">
             <!-- #205 ⚠️ 不做下钻（规范 §3.4）: 纯环比派生值 =（本期四路合计−上一等长窗口）/上一窗口，
                  无独立明细构成；构成即「现金流出总额」卡（已可下钻）。故只给ⓘ说明、不做点击跳转。 -->
             <div class="kpi-card" style="background:#f0fdf4">
@@ -499,12 +512,15 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { RefreshLeft, QuestionFilled } from '@element-plus/icons-vue'
 import BaseChart from '@/components/BaseChart.vue'
 import { refundDeep, refundWithdrawal } from '@/api/analytics'
 import { useAudit } from '@/composables/useAudit'
 import { formatMoney } from '@/utils/format'
+
+const router = useRouter()
 
 const props = defineProps({
   start: { type: String, default: '' },
@@ -557,6 +573,10 @@ function scrollToSection(id) {
 }
 // 现金流出总额 / 商户号实际(E) / 对账偏差 → 区块一「资金流出全景」按日四路构成表
 function drillRoutes() { scrollToSection('sec-routes') }
+// ★ #309 窗口充值 → 数据查看·充值流量(带窗口, 按充值时间落窗; 跨页下钻须带窗口, 规范 §3.3)
+function drillRecharge() {
+  router.push({ path: '/data/recharge-traffic', query: { start: props.start, end: props.end } })
+}
 // 钱包净水位 → 区块二「钱包水位监控」按日转入/转出/扣费构成表
 function drillWallet() { scrollToSection('sec-wallet') }
 // 涉诉退款占比 → 区块七明细并自动选中「涉诉」筛选(filter 变更由 watch 触发 loadDetail)

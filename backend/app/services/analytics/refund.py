@@ -1584,9 +1584,29 @@ def refund_decision_overview(
         + m_note
     )
 
+    # ── #309 窗口充值(真实现金流充入): device_combos 按 created_at_raw 落窗,
+    #     剔除工厂质检专用套餐流水(package_name 含「质检」), 与今日看板充值卡/
+    #     分品类运营看板 #293 同一判据。用于「退款 vs 充值」资金对照。
+    _rc = db.execute(text("""
+        SELECT count(*) AS cnt, COALESCE(sum(dc.actual_amount), 0) AS amt
+        FROM device_combos dc
+        WHERE dc.created_at_raw >= :ts AND dc.created_at_raw <= :te
+          AND dc.package_name NOT ILIKE '%质检%'
+    """), {"ts": cur_s, "te": cur_e}).first()
+    recharge_cnt = int(_rc.cnt or 0)
+    recharge_amt = D(_rc.amt)
+    # 退款/充值占比: 四路经营合计 ÷ 窗口充值; 分母为 0 → None(前端显示「—」)
+    refund_recharge_ratio = (
+        round(float(cur_cash / recharge_amt * 100), 1) if recharge_amt > 0 else None
+    )
+
     summary = {
         "cash_out_total": round(cur_cash, 2),
         "cash_out_count": cur_tot["online_cnt"] + cur_tot["withdraw_cnt"] + cur_tot["sm_cnt"] + cur_tot["d_cnt"],
+        # ★ #309 窗口充值对照(剔除质检流水) + 退款/充值占比
+        "recharge_amount": round(recharge_amt, 2),
+        "recharge_count": recharge_cnt,
+        "refund_recharge_ratio": refund_recharge_ratio,
         "chain_pct": chain_pct,
         "online_count": cur_tot["online_cnt"],
         "online_amount": round(cur_tot["online_amt"], 2),

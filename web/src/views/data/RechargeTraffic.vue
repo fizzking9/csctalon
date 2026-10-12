@@ -180,6 +180,7 @@
 
 <script setup>
 import { reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
 import {
@@ -188,6 +189,7 @@ import {
   queryUpstreamTraffic,
 } from '@/api/recharge'
 
+const route = useRoute()
 const activeTab = ref('local')
 
 // ---------- 本地查询 ----------
@@ -235,6 +237,12 @@ function resetFilter() {
 }
 
 // initial load
+// ★ #309 下钻承接: 今日看板「充值金额」卡带 start/end 跳入(规范 §3.3 下钻带窗口),
+//   固定按充值时间(created_at_raw)落窗, 与卡片口径一致。
+if (route.query.start && route.query.end) {
+  filter.time_field = 'created_at_raw'
+  filter.range = [String(route.query.start), String(route.query.end)]
+}
 onSearch()
 
 // ---------- 上游(流量已接入真实 BMS; #185 清理: 删除未接入的充值订单占位按钮/函数) ----------

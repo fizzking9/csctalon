@@ -586,6 +586,8 @@ export function useToday() {
       session: () => router.push({ path: '/dashboards/reception', query: drillRange() }),
       refund_count: () => router.push({ path: '/dashboards/refund', query: drillRange() }),
       refund_amount: () => router.push({ path: '/dashboards/refund', query: drillRange() }),
+      // #309: 充值卡 → 数据查看·充值流量(承接窗口, 按充值时间 created_at_raw)
+      recharge: () => router.push({ path: '/data/recharge-traffic', query: drillRange() }),
       complaint: () => drillToComplaint({ view: 'overview' }),
       staff_on_duty: () => drillToOperation(),
       recovery_rate: () => drillToRefundRecovery(),
@@ -775,6 +777,19 @@ export function useToday() {
           ? `${refundAmt.yoy_pct > 0 ? '↑' : '↓'} ${Math.abs(refundAmt.yoy_pct).toFixed(1)}%`
           : '',
         yoyClass: (refundAmt.yoy_pct ?? 0) >= 0 ? 'yoy-up' : 'yoy-down',
+      },
+      // ★ #309 充值卡: 真实现金流充入(剔除工厂质检套餐流水), 与分品类运营看板 #293 同判据
+      {
+        key: 'recharge',
+        label: '充值金额',
+        displayValue: '¥' + formatMoney(d.recharge?.value),
+        icon: 'Coin',
+        colorClass: 'kpi-green',
+        sub: `${formatNum(d.recharge?.count)} 笔`,
+        yoy: (d.recharge?.yoy_pct != null && d.recharge?.yoy_pct !== 0)
+          ? `${d.recharge.yoy_pct > 0 ? '↑' : '↓'} ${Math.abs(d.recharge.yoy_pct).toFixed(1)}%`
+          : '',
+        yoyClass: (d.recharge?.yoy_pct ?? 0) >= 0 ? 'yoy-up' : 'yoy-down',
       },
       {
         key: 'complaint',
