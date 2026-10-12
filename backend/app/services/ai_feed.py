@@ -870,7 +870,10 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
     #   结构约定(源头上保证可校验): 每个维度必须以二级锚点行 **<维度>**：<数据> 输出,
     #   缺失的维度写成 **<维度>**：暂无 —— 校验器按此结构做纯结构检查, 不做语义猜测。
     if required_dimensions:
-        _dims = "、".join(str(d) for d in required_dimensions if d)
+        # 条目可为字符串或同义词数组(❷ D9); 数组渲染成"甲(或写作乙)", 不用 str()
+        # (实测 str(list) 的引号括号形态会困惑模型)。
+        _dims = "、".join(str(d) if not isinstance(d, list) else "、".join(str(x) for x in d)
+                          for d in required_dimensions if d)
         business_ctx += (
             "\n\n【本次必须覆盖维度】" +
             f"{_dims}(每个维度都要给出数据, 缺失的如实写\"暂无/未提供\", 不得省略该维度)\n" +
@@ -912,6 +915,24 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
         )
     else:
         body = f"{business_ctx}\n\n{data_ctx}\n\n请回答以下问题：{question}"
+    # D9(2026-10-12) 输出契约收尾追加(仅预生成模板链路): 锚点行纪律只写在 prompt
+    # 中段会被 detail 体裁+大 system 提示词淹没 —— 实测(diag-enum)中段注入后双模型
+    # 0/8, 输出退化成无粗体纯文本维度行; 而末尾追加(boost 对照)双模型锚点行遵从度
+    # 良好。放 user 消息最末(问题之后)吃近因效应。示例一律 <数据>/<N> 占位: 实测
+    # 示例里的具体数字会被模型原文照抄成报告数据(幻觉注入)。仅 required_dimensions
+    # 链路(预生成)受影响, 前台实时问答(required=None)不受影响。
+    if required_dimensions:
+        body += (
+            "\n\n【输出契约(最高优先, 与上文冲突时以本条为准)】\n"
+            "1. 上面【本次必须覆盖维度】里的每个维度, 必须各有一行以 `**<维度名>**：` "
+            "开头的锚点行, 维度关键词原文必须出现在 `**` 标签文字中(如维度含\"四路\"写 "
+            "`**四路分布**：<数据>`); 章节标题(##/###)不能替代锚点行。\n"
+            "2. 锚点行的展开内容(列表/表格)写在锚点行之后的行里; 解析类维度(趋势/环比/"
+            "同比/结论)同样必须各有锚点行(如 `**环比**：<数据>`), 不得只织入叙述。\n"
+            "3. 锚点行里的数字必须来自【给定数据】; 严禁把提示词/本契约里的示例措辞或"
+            "示例数字写进报告。\n"
+            "4. 全文禁止出现 null/None/NaN 字样; 给定数据中为 null 的字段, 写\"暂无\"或省略。"
+        )
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": body},
