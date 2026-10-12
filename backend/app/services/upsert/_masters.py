@@ -102,7 +102,25 @@ def upsert_device_combos(df: pd.DataFrame, mapping: dict[str, str], db: Session,
             result.add_error(idx, f"行解析失败: {e}")
     if not rows:
         return
-    _sync_devices(rows, "device_sn", db)
+    # #305: 建档时回填激活时间 —— device_combo 导入会为新 SN 建档(_sync_devices),
+    # 不带 active_time 会产生大量激活时间为 NULL 的设备档案(生产实测 68.6 万)。
+    # 取批内该 SN 最早 start_date(首次套餐开始)作激活时间; 每行注入同一 min 值,
+    # 使 _sync_devices 的「首个非空」取值必命中 min; 仅填 NULL, 已有值的设备不覆盖
+    # (BMS 设备档案导入的权威激活时间优先生效)。
+    _min_start: dict = {}
+    for r in rows:
+        sn = r.get("device_sn")
+        sd = r.get("start_date")
+        if sn and sd and (sn not in _min_start or sd < _min_start[sn]):
+            _min_start[sn] = sd
+    for r in rows:
+        if r.get("device_sn") in _min_start:
+            r["active_time"] = _min_start[r["device_sn"]]
+    _sync_devices(rows, "device_sn", db, fill_fields=["active_time"])
+    # active_time 是 Device 列而非 DeviceCombo 列, device_combo 映射也不含该目标字段;
+    # 注入仅为建档填充, 进套餐表前移除, 避免 _execute_upsert 对未知列响亮报错(KeyError 防御)
+    for r in rows:
+        r.pop("active_time", None)
     _execute_upsert(db, DeviceCombo, "recharge_order_no", rows, result)
 
 def upsert_device_tags(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:

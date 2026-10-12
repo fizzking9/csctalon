@@ -747,7 +747,11 @@ def _sync_devices(rows: list[dict], sn_field: str, db: Session, fill_fields: lis
         if sn not in per_sn_fill:
             per_sn_fill[sn] = {}
         for f in fill_fields:
-            v = _to_str(r.get(f))
+            v = r.get(f)
+            # #305: 日期值保留原类型(datetime 直入 timestamptz 列);
+            # 字符串仍走 _to_str 归一(去空白/尾部tab)。上游 run_upsert 已把 NaN/占位符归一为 None。
+            if isinstance(v, str):
+                v = _to_str(v)
             if v and f not in per_sn_fill[sn]:
                 per_sn_fill[sn][f] = v
     for sn in sns:
