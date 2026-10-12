@@ -13,14 +13,16 @@
 本文件把**实测能力矩阵**编码为可执行断言 —— 让约束在 CI 里失败，
 而不是在评审里被人工发现。
 
-## 依据（实测，见 docs/reports/模型能力矩阵与任务分流-*.md）
+## 依据（实测，见 docs/reports/模型能力矩阵与任务分流-*.md 及 talon /v1/public/overview）
 
 | 模型 | 架构 | 数值聚合 | 相对时间解析 | 非数值 |
 |---|---|---|---|---|
-| qwen3.8:27b | Dense | ✅ 4/4 | ⚠️ 4/5 | ✅ |
-| qwen3.5:122b | Dense | ✅ 4/4 | ? | ✅ |
-| qwen3-coder:30b | **MoE** | ❌ **3/4**（偏差 20000） | ❌ **1/5** | ✅ 快 3x |
-| qwen2.5:7b | Dense | ❌（语义匹配 5/5 全错） | ? | ⚠️ |
+| qwen3.8:27b | Dense | ✅ 4/4 | ⚠️ 4/5 | ✅（2026-10-12 起 talon 冷备） |
+| qwen2.5:14b | Dense | ✅ talon 实测 14/14（含 en_math/structured_output） | ✅ | ✅ 热驻 mac-mini |
+| ~~qwen3.5:122b~~ | Dense | ✅ 4/4 | ? | ✅ **2026-10-12 已从 talon 下线** |
+| qwen3-coder:30b | **MoE** | ❌ **3/4**（偏差 20000） | ❌ **1/5** | ✅ 快 3x（仅 assistant 可用） |
+| qwen2.5:7b | Dense | ❌（语义匹配 5/5 全错; talon 实测 reasoning_multistep=fail） | ? | ⚠️ |
+| qwen3.5:9b | ? | ?（structured_output=fail） | ? | ⚠️ 不可进结构化输出档 |
 
 ## 核心约束
 
@@ -62,13 +64,19 @@ def test_specialist_candidates_are_numeric_safe(tier):
             f"{tier}.{slot} = {code} —— 该模型实测数值聚合 3/4（偏差 20000）、"
             f"相对时间解析 1/5，而 {tier} 用途含结构化输出/治理研判。\n"
             f"降级会**静默算错**（格式合法但数字错），比失败更糟。\n"
-            f"应改为 Dense 模型（如 qwen3.5:122b，数值聚合 4/4）。"
+            f"应改为 Dense 模型（如 qwen2.5:14b，talon 实测 14/14；"
+            f"122b 已于 2026-10-12 从 talon 下线，不可再引用）。"
         )
 
 
-def test_specialist_secondary_is_122b():
-    """锁定当前选型：specialist 备选是 122b（Dense，数值聚合 4/4）"""
-    assert llm_tiers.TIERS["specialist"]["secondary"] == "talon-gmk-qwen3.5-122b"
+def test_specialist_secondary_is_dense_14b():
+    """锁定 2026-10-12 选型（#300）：specialist 备选是 qwen2.5:14b
+
+    历史: 该位原锁 122b（Dense 数值 4/4），但 122b 已从 talon 下线；
+    coder-30b 因 MoE 数值缺陷被禁（见 NUMERIC_UNSAFE）；14b 为 Dense、
+    talon 实测 14/14（含 en_math/structured_output）、热驻 mac-mini 零冷启动。
+    """
+    assert llm_tiers.TIERS["specialist"]["secondary"] == "talon-macmini-qwen2.5-14b"
 
 
 def test_assistant_may_use_coder():
