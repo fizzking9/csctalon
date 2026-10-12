@@ -697,6 +697,29 @@ def _execute_upsert(
     result.inserted += max(len(rows) - existing_count, 0)
     result.updated += min(existing_count, len(rows))
 
+def _clean_device_sn(raw: Any) -> str | None:
+    """#305: 设备 SN 清洗 + 垃圾判别。
+
+    来源实证(2026-10-12): 人工登记数据存在「一格多 SN(换行/斜杠/全角逗号拼接)」
+    「Excel 文本前缀引号('69...)」「字面 x」等脏值, _sync_devices 照单建档,
+    已产生 1.7 万+ 无激活时间/无型号/无商户的垃圾空壳档。
+    规则: 去首尾引号/反引号(Excel 文本标记, 内里是合法 SN) → 含拼接符/引号或
+    命中垃圾字面 → None(跳过建设备档; 业务行本身照常导入, 不受影响)。
+    """
+    s = _to_str(raw)
+    if not s:
+        return None
+    s = s.strip().strip("'\"`").strip()
+    if not s or s.lower() in _JUNK_SN_LITERALS or _JUNK_SN_RE.search(s):
+        return None
+    return s
+
+
+# 拼接符/引号 = 多 SN 一格或脏文本; 全角标点来自人工输入习惯
+_JUNK_SN_RE = re.compile(r"[\s/'\"\\\\,;，、；]")
+_JUNK_SN_LITERALS = {"x", "none", "null", "nan", "无", "待定", "测试"}
+
+
 def _sync_devices(rows: list[dict], sn_field: str, db: Session, fill_fields: list[str] | None = None) -> None:
     """从导入记录中同步设备主数据(SN 不存在则创建,存在则按需填充 merchant_name 等字段)
 
@@ -721,16 +744,23 @@ def _sync_devices(rows: list[dict], sn_field: str, db: Session, fill_fields: lis
     fill_fields = [f for f in fill_fields if f in _legal_cols]
     # 先把 device_sn 里的前后空白统一去掉(BMS CSV 常带尾部空格),同时按规范化后的 SN 建索引
     normalized_rows: list[dict] = []
+    junk_samples: list[str] = []
     for r in rows:
         nr = dict(r)
-        raw_sn = nr.get(sn_field)
-        if isinstance(raw_sn, str):
-            nr[sn_field] = raw_sn.strip()
+        sn = _clean_device_sn(nr.get(sn_field))
+        if nr.get(sn_field) is not None and sn is None and len(junk_samples) < 3:
+            junk_samples.append(str(nr.get(sn_field))[:40])
+        nr[sn_field] = sn
         normalized_rows.append(nr)
     rows = normalized_rows
+    if junk_samples:
+        logger.warning(
+            "[upsert._sync_devices] 拦截 %d 行垃圾 SN(多SN拼接/引号/字面占位), "
+            "不建设备档; 样例: %s（#305）",
+            len(rows) - sum(1 for r in rows if r.get(sn_field)), junk_samples,
+        )
 
-    sns = {_to_str(r.get(sn_field)) for r in rows}
-    sns.discard(None)
+    sns = {r.get(sn_field) for r in rows if r.get(sn_field)}
     if not sns:
         return
     existing_map: dict[str, Device] = {
@@ -741,7 +771,7 @@ def _sync_devices(rows: list[dict], sn_field: str, db: Session, fill_fields: lis
     # 用 SN 建原 rows 索引(取第一条非空字段作为填充值)
     per_sn_fill: dict[str, dict] = {}
     for r in rows:
-        sn = _to_str(r.get(sn_field))
+        sn = _clean_device_sn(r.get(sn_field))
         if not sn:
             continue
         if sn not in per_sn_fill:
