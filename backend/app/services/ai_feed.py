@@ -63,6 +63,41 @@ _SYSTEM_PROMPT = (
     "不得直接判定\"无人值班\"或\"系统故障\"。AI 接管率上升=利好(可控指标前置)。"
 )
 
+# ── #307 (2026-10-12) 实时问答专用 System Prompt(gen_system_live) ──────────
+# 为什么拆双版: 实时问答与后台预生成的目标相反 —— 实时追求「快、准、简」(用户在
+# 等待, 只问一个焦点), 预生成追求「全、深、结构」(H2 五锚点供摘取层定位)。
+# 历史问题(实测取证): 单一 gen_system v3(3892 字符) 同时服务两种调用, 导致:
+#   ① 问「今日退款」却输出全套 5 个 H2 锚点(含「接待分析 暂无」空段);
+#   ② 把口径纪律原文背给用户(提示词泄漏, 用户要结论不要纪律课);
+#   ③ 「≤500 字」约束对 120b 完全失效(实测 700~1600 字符);
+#   ④ verdict 无从引用 —— 模型按铁律 9 自判「处理量下降=利空」这类无据判定。
+# 实时版配套改造: feed 层预计算 verdict(#307 _add_verdicts), 模型只叙述不判定。
+_SYSTEM_PROMPT_LIVE = (
+    "你是客服经营数据助手，基于【给定数据】用中文简洁回答实时问句。\n"
+    "铁律:\n"
+    "1. 所有数字必须来自【给定数据】，严禁编造；环比(yoy_pct)、占比(amount_pct/"
+    "count_pct)等派生数字均已由系统算好，直接原样引用，禁止自行计算。\n"
+    "2. 数据中带 verdict(利好/利空/持平)的指标直接引用该判定；无 verdict 的指标"
+    "只报数字，禁止自行评判好坏。\n"
+    "3. 某指标没有对比字段时，直接陈述本期数值即可，禁止写\"变化率未随数据下发\""
+    "\"无法计算\"等系统内部话术。\n"
+    "4. 只回答问句所问的内容：问退款就只说退款。禁止输出 \"## 章节标题\"、表格和"
+    "未问到的段落；用简短分点叙述，全文不超过 300 字。\n"
+    "5. 禁止向用户复述统计口径、系统规则、数据缺失原因；指标确实无数据时写\"暂无\"。\n"
+    "6. 回答第一行写明统计窗口(引用【数据窗口说明】起止时间，格式 YYYY-MM-DD HH:mm)；"
+    "金额一律元；所有对比均为环比(前一个等长周期)，禁止使用\"同比\"一词。\n"
+    "7. 只回答经营数据相关的问题；无关问题礼貌说明无法回答。\n"
+    "8. 若上下文给出【本次必须覆盖维度】清单，则逐维度给出数据(用 **维度**：加粗行)，"
+    "此时长度可放宽至 800 字，但仍禁止未问段落的空泛展开。\n"
+    "示例(问\"今日退款情况如何？\"):\n"
+    "统计窗口：2026-10-12 00:00 至 20:20\n"
+    "- 退款总额 26,061.70 元，环比 +2.4%（利空）；221 笔，环比持平。\n"
+    "- 四路：A 线上直退 13,926.30 元（53.4%）、B 钱包提现 6,208.30 元（23.8%）、"
+    "D 手动退款 5,927.10 元（22.7%）。\n"
+    "- 涉诉率 37.4%，环比下降（利好）。\n"
+    "- 建议：关注 A 路大额单笔。\n"
+)
+
 # 预设快捷触发句(前端展示用; 与 GLOSSARY_ROUTE 关键词对应)
 # ⚠️ 快捷句必须落在「已有预生成快照」的窗口/域上, 否则展示出来却必走实时 LLM,
 #    又慢又消耗算力。周报 weekly_compare_last 每周一 02:00 才生成「上一周」快照
@@ -74,6 +109,100 @@ QUICK_QUESTIONS = [
     "上周接待量和各专项会话、设备情况怎么样？",
     "今日经营总览：接待、退款、投诉一起说说。",
 ]
+
+
+# ── #307 (2026-10-12) verdict 预计算: 凡工具能算的(利好/利空), 不写成对模型的要求 ──
+# 方向基准与 business-benchmark 卡/预生成版铁律 9 完全一致(单一来源, 双处引用):
+#   退款金额/笔数 越少越好; 接待量 越多越好; 投诉登记/积压 越少越好; 投诉处理 越多越好;
+#   涉诉率(A路) 下降=利好(涉诉少=退款争议少)。
+# 历史问题: verdict 全靠模型按铁律自判 → 实测输出「处理 89 下降（利空）」这类
+# 无据判定(铁律 9 并未定义处理量方向)。现在代码算好, 模型只叙述。
+def _verdict_from_yoy(yoy_pct, *, more_is_better: bool) -> str | None:
+    """按环比百分比与业务方向给 verdict; 无环比值返回 None(模型只报数不评判)。
+
+    |yoy| < 0.05 视为持平(与 feed 下发的一位小数精度一致: 0.0/-0.0 不算涨跌)。
+    """
+    if yoy_pct is None:
+        return None
+    try:
+        v = float(yoy_pct)
+    except (TypeError, ValueError):
+        return None
+    if abs(v) < 0.05:
+        return "持平"
+    up = v > 0
+    return ("利好" if up else "利空") if more_is_better else ("利空" if up else "利好")
+
+
+def _add_verdicts(feed: dict) -> None:
+    """给 feed 关键指标附加 verdict(利好/利空/持平) —— #307, 就地修改。
+
+    覆盖: refund.total_amount/total_count(退款越少越好)、
+          refund.a_route.litigation_ratio(按 delta_pct_points, 下降=利好)、
+          reception.total(接待越多越好)。
+    无 yoy 字段或 yoy=None 的指标不加(实时版铁律 2: 无 verdict 只报数字)。
+    仅加键不改既有键, external /brief 对外契约不受影响(verdict 在 AI 侧投影)。
+    """
+    rf = feed.get("refund")
+    if isinstance(rf, dict):
+        for key in ("total_amount", "total_count"):
+            node = rf.get(key)
+            if isinstance(node, dict) and "yoy_pct" in node:
+                node["verdict"] = _verdict_from_yoy(node.get("yoy_pct"), more_is_better=False)
+        ar = rf.get("a_route")
+        if isinstance(ar, dict) and isinstance(ar.get("litigation_ratio"), dict):
+            lr = ar["litigation_ratio"]
+            lr["verdict"] = _verdict_from_yoy(lr.get("delta_pct_points"), more_is_better=False)
+    rc = feed.get("reception")
+    if isinstance(rc, dict):
+        tot = rc.get("total")
+        if isinstance(tot, dict) and "yoy_pct" in tot:
+            tot["verdict"] = _verdict_from_yoy(tot.get("yoy_pct"), more_is_better=True)
+
+
+def _enrich_complaint_breakdown(feed: dict) -> None:
+    """#307: complaint_breakdown 投影补前值与 verdict(就地下发 AI 专属段)。
+
+    原 #139 投影只取 registered/handled/backlog 裸数字:
+      ① complaint.by_source 项已有的 backlog_prev_pct 被丢弃;
+      ② 前值(在 complaint.prev 块)不可达 —— 问退款的问句 scope 切片会把 complaint
+         段切走, 模型手里只剩裸数组 → 只能输出「变化率未随数据下发」噪音(实测取证)。
+    现补: 每源 prev_* 前值 + backlog_prev_pct + verdict(登记/积压越少越好, 处理越多越好)。
+    """
+    rc = feed.get("complaint")
+    if not isinstance(rc, dict):
+        return
+    prev = rc.get("prev") if isinstance(rc.get("prev"), dict) else {}
+    pmap = {x.get("source"): x for x in (prev.get("by_source") or []) if isinstance(x, dict)}
+    out = []
+    for s in rc.get("by_source") or []:
+        if not isinstance(s, dict):
+            continue
+        item = {"source": s.get("source"), "registered": s.get("registered"),
+                "handled": s.get("handled"), "backlog": s.get("backlog")}
+        psrc = pmap.get(s.get("source")) or {}
+        if psrc:
+            item["registered_prev"] = psrc.get("registered")
+            item["handled_prev"] = psrc.get("handled")
+            item["backlog_prev"] = psrc.get("backlog")
+        if s.get("backlog_prev_pct") is not None:
+            item["backlog_prev_pct"] = s.get("backlog_prev_pct")
+            # 积压方向: 越少越好(backlog_prev_pct 上升=利空)
+            item["backlog_verdict"] = _verdict_from_yoy(s.get("backlog_prev_pct"), more_is_better=False)
+        out.append(item)
+    if out:
+        feed["complaint_breakdown"] = out
+
+
+def _format_win_times(feed: dict) -> None:
+    """#307: 窗口时间格式化到分钟(去微秒) —— 实测模型会照抄
+    「2026-10-12T20:20:06.543534+08:00」秒级时间戳, 用户看到冗长不友好。
+    仅处理 date_start/date_end/generated_at 的 ISO 串: YYYY-MM-DDTHH:mm → YYYY-MM-DD HH:mm。
+    """
+    for k in ("date_start", "date_end", "generated_at"):
+        v = feed.get(k)
+        if isinstance(v, str) and "T" in v and len(v) >= 16:
+            feed[k] = f"{v[:10]} {v[11:16]}"
 
 
 def _build_feed(db: Session, period: str, date: str | None,
@@ -149,6 +278,11 @@ def _build_feed(db: Session, period: str, date: str | None,
     else:
         # 周/月/区间: 按日颗粒度补走势数组, 让 AI 能描述哪天涨跌
         _enrich_with_daily_trend(db, feed, win["start"], win["end"])
+    # #307: verdict 预计算 + complaint_breakdown 补前值/verdict + 窗口时间格式化
+    # (均在 AI 侧投影层, 不改 external /brief 对外契约)
+    _add_verdicts(feed)
+    _enrich_complaint_breakdown(feed)
+    _format_win_times(feed)
     return feed
 
 
@@ -232,23 +366,10 @@ def _enrich_with_today_kanban(db: Session, feed: dict, start_s: str, end_s: str)
         logger.warning("ai_feed enrich today:refund-recovery 失败(忽略): %s", e)
 
     # #139 (2026-09-17) C: 日报补投诉三源分布投影
-    #   _build_brief 顶层 complaint.by_source 已含三源(内部/商户号/外部)×
-    #   (registered/handled/backlog), 但 _select_feed_sections 按 scope 切 feed 段,
-    #   问句只命中 refund/reception scope 时 complaint 段会被切走 → AI 答不出三源。
-    #   此处投影 by_source 到顶层 complaint_breakdown, 并加入 _CONSTANT_FEED_KEYS
-    #   (见下方), 让所有 scope 切片都保留三源拆分(轻量投影, 不重复 total)。
-    try:
-        if isinstance(feed.get("complaint"), dict):
-            by_src = feed["complaint"].get("by_source") or []
-            feed["complaint_breakdown"] = [
-                {"source": s.get("source"),
-                 "registered": s.get("registered"),
-                 "handled": s.get("handled"),
-                 "backlog": s.get("backlog")}
-                for s in by_src if isinstance(s, dict)
-            ]
-    except Exception as e:  # noqa: BLE001
-        logger.warning("ai_feed 投影 complaint_breakdown 失败(忽略): %s", e)
+    #   #307 (2026-10-12): 投影构造移至 _enrich_complaint_breakdown(_build_feed 末尾统一
+    #   调用) —— 原投影只取 registered/handled/backlog 裸数字, 丢弃 by_source 项已有的
+    #   backlog_prev_pct 与 complaint.prev 前值, 模型只能写「变化率未随数据下发」噪音。
+    #   complaint 段本体仍保留(问投诉的问句 scope 命中时完整下发)。
 
 
 def _compact_reception_breakdown(rb: dict) -> dict:
@@ -785,8 +906,17 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
                    window_label: str | None = None, window_source: str | None = None,
                    required_dimensions: list | None = None,
                    scope: str | None = None, format: str | None = None,
-                   feed_limit: int | None = None) -> list[dict]:
+                   feed_limit: int | None = None,
+                   call_mode: str = "live") -> list[dict]:
     """构造发给模型的 messages(三层 Prompt)。
+
+    call_mode(#307): "live"(实时问答, 缺省) / "pregen"(后台预生成)。两模式目标相反:
+      - live: 用户在等, 只问一个焦点 → gen_system_live(精简铁律: 只答所问/禁章节标题/
+        verdict 直接引用/≤300 字), 并从 feed 裁掉 routes_prev(历史四路前值, 实测几乎
+        不被引用, 纯占预算);
+      - pregen: 后台无等待压力, 供摘取层定位 → gen_system(H2 五锚点全景结构)。
+      system 均 DB 优先(load_effective_prompt), 代码常量兜底。调用方显式传参,
+      不用 window_label 字符串匹配做主判据。
 
     window_label/window_source(工单 #66): 上层(ai.py)把"窗口怎么定出来的"传下来,
     既写进 Prompt 让模型明确当前窗口, 也便于排查 —— 自然语言推断错误时, 从这里就能看出
@@ -808,6 +938,10 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
       实时问答不传(保持 3500, 用户等 60s)。
     """
     feed = _build_feed(db, period, date, start=start, end=end)
+    # #307: live 模式裁 routes_prev(四路前值) —— 实时问句几乎不问四路前值对比,
+    #   该块实测只占预算稀释关键段; 预生成保留(周/月报「趋势对比」锚点可能用到)。
+    if call_mode != "pregen" and isinstance(feed.get("refund"), dict):
+        feed["refund"].pop("routes_prev", None)
     # #98 层2: 按问句 scope 切 feed 段(只留命中业务段+恒量段), 降输入 token。
     # scopes 空集(问句未命中 refund/complaint/reception 关键词)→ 回退全量, 兼容。
     # ⚠️ 2026-09-15 修复: 改用 keywords_to_scopes 取所有命中 scope, 避免多域
@@ -903,10 +1037,15 @@ def build_messages(db: Session, period: str, date: str | None, question: str,
         entity_ctx = ""
     if entity_ctx:
         data_ctx = f"{data_ctx}\n\n{entity_ctx}"
-    # #178 提示词版本化: DB 有生效版本(gen_system) → 用之；无/异常 → 代码常量兜底（铁律）
+    # #178 提示词版本化: DB 有生效版本 → 用之；无/异常 → 代码常量兜底（铁律）
+    # #307 双版拆分: pregen 用 gen_system(H2 五锚点全景), live 用 gen_system_live
+    #   (精简铁律)。两码各自版本化, 生产 DB 需各 seed 一条(见 alembic #307 迁移)。
     from app.services.prompt_config_service import load_effective_prompt
 
-    system = load_effective_prompt(db, "gen_system") or _SYSTEM_PROMPT
+    if call_mode == "pregen":
+        system = load_effective_prompt(db, "gen_system") or _SYSTEM_PROMPT
+    else:
+        system = load_effective_prompt(db, "gen_system_live") or _SYSTEM_PROMPT_LIVE
     if focus:
         body = (
             f"{business_ctx}\n\n"

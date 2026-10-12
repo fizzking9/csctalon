@@ -389,6 +389,8 @@ def generate_for_template(db: Session, template: AiReportTemplate,
             format=template.format,
             # #189 feed 预算按窗口粒度放宽(模板 period; 月/周报需容下 daily_trend 与业务段)
             feed_limit=_FEED_LIMIT_BY_PERIOD.get(template.period),
+            # #307 预生成链路显式声明: 用 gen_system(H2 五锚点全景)并保留 routes_prev
+            call_mode="pregen",
         )
     except Exception as e:  # noqa: BLE001  build_messages 失败不阻塞 worker
         logger.error("ai_report_worker build_messages failed (template=%s): %s", template.code, e)

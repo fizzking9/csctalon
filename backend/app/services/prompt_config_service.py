@@ -29,7 +29,9 @@ from app.models.prompt_config import PromptConfig
 
 logger = logging.getLogger(__name__)
 
-PROMPT_CODES = ("gen_system", "extract_system")
+# #307 (2026-10-12): 双版拆分 —— gen_system=预生成报告版, gen_system_live=实时问答精简版
+# (ai_feed.build_messages 按 call_mode 路由, 两码各自版本化, 见迁移 c5d6e7f8a9b0)
+PROMPT_CODES = ("gen_system", "gen_system_live", "extract_system")
 
 
 def _now_cn() -> datetime:

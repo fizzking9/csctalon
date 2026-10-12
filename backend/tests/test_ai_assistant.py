@@ -140,12 +140,14 @@ def test_build_feed_matches_brief(db):
 
 
 def test_build_feed_range_start_end(db):
-    """v1.1: _build_feed 支持 start/end 任意区间(透传 external._build_brief range)。"""
+    """v1.1: _build_feed 支持 start/end 任意区间(透传 external._build_brief range)。
+
+    #307: date_start/date_end 经 _format_win_times 格式化到分钟(去微秒/T), 便于模型照抄。"""
     from app.services import ai_feed
     feed = ai_feed._build_feed(db, period="daily", date=None, start="2026-07-01", end="2026-07-07")
     assert feed["period"] == "range"
     assert feed["range"]["span_days"] == 7
-    assert feed["date_start"].startswith("2026-07-01T00:00:00")
+    assert feed["date_start"].startswith("2026-07-01 00:00")
     for key in ("reception", "refund", "complaint", "_spec"):
         assert key in feed
 
@@ -181,12 +183,15 @@ def test_build_messages_window_label_absent_keeps_old_output(db):
 
 
 def test_system_prompt_requires_window_echo_and_yoy_semantics(db):
-    """D1: System 铁律须要求回显窗口, 并说明 yoy 不是独立明细。"""
+    """D1: System 铁律须要求回显窗口, 并说明 yoy 不是独立明细。
+
+    #307: 实时问答缺省走 gen_system_live(精简版), 其铁律 6 要求首行写窗口、
+    铁律 7 说明对比均为环比(前一等长周期)。"""
     from app.services import ai_feed
     msgs = ai_feed.build_messages(db, period="daily", date="2026-07-15", question="今日退款如何?")
     sys_content = msgs[0]["content"]
-    assert "写明本次统计窗口" in sys_content
-    assert "不是另一天的独立明细" in sys_content
+    assert "写明统计窗口" in sys_content
+    assert "前一个等长周期" in sys_content
 
 
 def test_glossary_timezone_has_compare_semantics():
