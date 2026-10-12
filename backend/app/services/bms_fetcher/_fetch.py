@@ -1127,13 +1127,15 @@ class BmsFetcher:
         if not ok:
             raise RuntimeError(f"_fill_el_input: fill + evaluate 都失败 value={value!r}")
 
-    async def _click_search_device_combo(self, page) -> None:
-        """#299 设备套餐页专用「关日期面板 → 点搜索」序列。
+    async def _click_search_after_panel_close(self, page, tag: str = "device_combo") -> None:
+        """#299/#305 BMS 设备类页面专用「关日期面板 → 点搜索」序列。
 
-        探针实证(2026-10-11, 生产只读): _set_time_range 填值虽把 v-model
-        填对了, 但 el-picker-panel 仍展开; 通用 _click_query_button 的
-        force-click 落在面板遮罩上 → renewRecord/findPageList 请求根本不发出,
-        于是每日导出一直是 BMS 默认「近 7 天」, 历史窗口从未生效。
+        探针实证(2026-10-11/12, 生产只读): 套餐页(#299)与设备档案页(#305)的
+        _set_time_range / _set_time_by_labels 填值虽把 v-model 填对了, 但
+        el-picker-panel 仍展开; 通用 _click_query_button 的 force-click 落在
+        面板遮罩上 → findPageList 请求根本不发出, 每日导出一直是 BMS 默认
+        「近 N 天/1 条」, 历史窗口从未生效(#305 实证: 设备档案切片导出 10 万行
+        全是 2026-08~10 默认窗口, 而切片窗口是 2021-09~2022-06)。
         修法(探针已逐档验证): 真实键盘 ESC 尝试关面板 → Playwright 原生点击
         「搜索」; 面板仍拦截指针事件时, 降级页面内 el.click()(探针实测该路径
         能正确发出带 findStartDate/findEndDate 的 XHR, 679 条全部落在窗口内)。
@@ -1151,10 +1153,10 @@ class BmsFetcher:
             btn = page.locator("button:visible", has_text="搜索").first
             await btn.wait_for(state="visible", timeout=4_000)
             await btn.click(timeout=4_000)
-            logger.info("[device_combo] 搜索按钮原生点击成功")
+            logger.info(f"[{tag}] 搜索按钮原生点击成功")
             return
         except Exception as e:  # noqa: BLE001 面板拦截 → 降级 DOM click
-            logger.info(f"[device_combo] 原生点击搜索被拦截, 降级 DOM click: {e}")
+            logger.info(f"[{tag}] 原生点击搜索被拦截, 降级 DOM click: {e}")
 
         # 策略 B: 页面内真实 el.click()——探针证明面板仍在 DOM 中时它也能命中
         clicked = await page.evaluate("""() => {
@@ -1170,11 +1172,11 @@ class BmsFetcher:
             return (b.innerText || '').trim();
         }""")
         if clicked:
-            logger.info(f"[device_combo] 搜索按钮 DOM click 成功: {clicked}")
+            logger.info(f"[{tag}] 搜索按钮 DOM click 成功: {clicked}")
             return
 
         # 策略 C: 最后回退通用查询按钮级联
-        logger.warning("[device_combo] 未定位到搜索按钮, 回退通用 _click_query_button")
+        logger.warning(f"[{tag}] 未定位到搜索按钮, 回退通用 _click_query_button")
         await self._click_query_button(page)
 
     async def _click_query_button(self, page) -> None:
@@ -1780,10 +1782,11 @@ class BmsFetcher:
 
             # 4. 搜索
             logger.info(f"[{data_type}] 点击查询/搜索...")
-            if data_type == "device_combo":
-                # #299: 该页日期面板会拦截通用 force-click, 必须先真实关面板再点
-                # 搜索(否则 findPageList 不发请求, 导出永远是默认近 7 天)
-                await self._click_search_device_combo(page)
+            if data_type in ("device_combo", "device_profile"):
+                # #299/#305: 设备类页面日期面板会拦截通用 force-click, 必须先真实
+                # 关面板再点搜索(否则 findPageList 不发请求, 导出永远是默认近窗口;
+                # #305 实证 device_profile 切片导出 10 万行全是 2026-08~10 默认窗口)
+                await self._click_search_after_panel_close(page, tag=data_type)
             else:
                 await self._click_query_button(page)
 
