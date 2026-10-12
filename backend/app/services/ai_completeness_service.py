@@ -62,6 +62,8 @@ _EMPTY_TAILS = {"", ":", "：", "—", "-", "无", "无。", "无。"}
 _DIGIT_RE = re.compile(r"\d")
 # 段落块边界: `#` 标题行 或 下一个锚点行(`**标签**：`) → 块结束, 不再向后归属
 _SECTION_STOP_RE = re.compile(r"^\s*(?:#{1,6}\s|\*\*[^*]{1,24}?\*\*[:：])")
+# 标题锚点的段落块边界: 仅 `#` 标题行(子锚点行属于章节展开, 见 _section_body_has_data)
+_SECTION_STOP_HEADING_RE = re.compile(r"^\s*#{1,6}\s")
 # 段落块最多向后看的非空行数(防跨段误归属)
 _SECTION_MAX_LINES = 8
 
@@ -112,21 +114,28 @@ def _anchor_verdict(line: str, kw: str) -> bool | None:
     return True
 
 
-def _section_body_has_data(lines: list[str], anchor_idx: int) -> bool:
+def _section_body_has_data(lines: list[str], anchor_idx: int,
+                           heading_anchor: bool = False) -> bool:
     """D9(2026-10-12): 锚点行之后的段落块是否含数据。
 
     解决"空锚点行(或首段缺失标记) + 完整数据列表/表格在后续行"被拒的模式
     (生产 rolling_7d/30d 断供 5 天归因的主失败形态)。向后看最多 8 个非空行,
-    跳过空行(markdown 表格/列表与锚点行之间常见空行), 遇 `#` 标题或下一个
-    锚点行即停 —— 数据必须紧邻锚点行, 防跨段误归属。块内任一行含数字即判
-    有数据(报告是经营数字文档, 纯缺失陈述行不含数字)。
+    跳过空行(markdown 表格/列表与锚点行之间常见空行), 遇 `#` 标题即停;
+    粗体锚点还遇下一个锚点行即停 —— 数据必须紧邻锚点行, 防跨段误归属。
+    块内任一行含数字即判有数据(报告是经营数字文档, 纯缺失陈述行不含数字)。
+
+    heading_anchor(D9 补充, 2026-10-12 复测取证): 锚点本身是标题时, 其章节的
+    展开常以子锚点行组织(如 `## 趋势对比` → `**接待量**：每日趋势如下：` →
+    表格) —— 子锚点行不截断块扫描(它们属于该章节), 只有下一个标题终止。
+    实证: 27b t3 输出 `### 趋势对比` 后紧跟子锚点行, 旧规则块=0 行误判缺失。
     """
+    stop_re = (_SECTION_STOP_HEADING_RE if heading_anchor else _SECTION_STOP_RE)
     scanned = 0
     for ln in lines[anchor_idx + 1:]:
         s = ln.strip()
         if not s:
             continue
-        if _SECTION_STOP_RE.match(ln):
+        if stop_re.match(ln):
             break
         scanned += 1
         if scanned > _SECTION_MAX_LINES:
@@ -148,7 +157,8 @@ def _entry_covered(md: str, entry: str | list) -> bool:
             v = _anchor_verdict(ln, kw_s)
             if v is True:
                 return True
-            if v is None and _section_body_has_data(lines, i):
+            if v is None and _section_body_has_data(
+                    lines, i, heading_anchor=bool(_HEADING_RE.match(ln))):
                 return True
     return False
 

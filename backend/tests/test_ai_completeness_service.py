@@ -210,6 +210,38 @@ def test_heading_missing_mark_missing():
     assert out["missing"] == ["涉诉"]
 
 
+def test_heading_block_continues_past_sub_anchors():
+    """D9 复测取证(27b t3): 标题章节的展开以子锚点行组织 —— 子锚点行不截断
+    块扫描, 其后表格数字归属该章节。形态: `### 趋势对比` → `**接待量**：每日
+    趋势如下：` → 表格行。"""
+    md = ("### 趋势对比\n"
+          "**接待量**：每日趋势如下：\n"
+          "| 日期 | 接待量 |\n| 10-01 | 3,626 |\n| 10-02 | 3,590 |\n"
+          "**退款金额**：每日趋势如下：\n"
+          "| 日期 | 金额 |\n| 10-01 | 23,212 元 |\n")
+    t = _mk_tmpl(["趋势"])
+    out = check_dimensions(db=None, report=_mk_report(md), template=t)
+    assert out["complete"] is True
+
+
+def test_heading_block_sub_anchors_without_data_missing():
+    """D9 边界: 标题锚点 + 子锚点行均无数字(纯定性叙述) → 仍缺失。"""
+    md = "### 趋势对比\n**接待量**：每日趋势如下：\n整体呈波动走势。\n"
+    t = _mk_tmpl(["趋势"])
+    out = check_dimensions(db=None, report=_mk_report(md), template=t)
+    assert out["complete"] is False
+    assert out["missing"] == ["趋势"]
+
+
+def test_heading_block_stops_at_next_heading():
+    """D9 边界: 标题锚点的段落块遇下一个标题即终止, 后节数据不归属本节。"""
+    md = "### 趋势对比\n整体走势平稳。\n\n## 投诉分析\n投诉 1,182 件。\n"
+    t = _mk_tmpl(["趋势"])
+    out = check_dimensions(db=None, report=_mk_report(md), template=t)
+    assert out["complete"] is False
+    assert out["missing"] == ["趋势"]
+
+
 def test_h1_not_anchor():
     """H1 是文档标题, 不作锚点(防标题党误判)。"""
     md = "# 四路分布\n今日天气晴朗。\n"
