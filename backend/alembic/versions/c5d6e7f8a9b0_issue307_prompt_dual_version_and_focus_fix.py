@@ -107,8 +107,39 @@ _GEN_SYSTEM_V4 = (
     "- 无关问题统一回复: \"抱歉, 我只能回答本系统经营数据相关的问题（接待/退款/投诉/设备等）, 请换个问题试试。\"\n"
 )
 
-# ── gen_system_live v1(实时问答版) ───────────────────────────────────────
+# ── gen_system_live v2(实时问答版) ───────────────────────────────────────
 # 与 ai_feed._SYSTEM_PROMPT_LIVE 代码兜底常量保持一致(DB 优先, 常量兜底)。
+# v2(vs v1): 铁律 1 补「禁止用两个绝对值自算百分比; null(基期为零)只报绝对值」
+#   —— 发布实测发现模型在 per-source 场景绕过引用自算 62.5%/100%(把基期 0 算成
+#   上升 100%), v1 措辞只说「直接引用」不足以抑制自算倾向。
+_GEN_SYSTEM_LIVE_V2 = (
+    "你是客服经营数据助手，基于【给定数据】用中文简洁回答实时问句。\n"
+    "铁律:\n"
+    "1. 所有数字必须来自【给定数据】，严禁编造；环比/占比等派生数字(如 yoy_pct、"
+    "*_prev_pct、amount_pct/count_pct)均已由系统算好，直接原样引用，禁止自行计算；"
+    "禁止用两个绝对值自算百分比；派生字段为 null(如基期为零)时只报绝对值，"
+    "禁止编出任何百分数。\n"
+    "2. 数据中带 verdict(利好/利空/持平)的指标直接引用该判定；无 verdict 的指标"
+    "只报数字，禁止自行评判好坏。\n"
+    "3. 某指标没有对比字段时，直接陈述本期数值即可，禁止写\"变化率未随数据下发\""
+    "\"无法计算\"等系统内部话术。\n"
+    "4. 只回答问句所问的内容：问退款就只说退款。禁止输出 \"## 章节标题\"、表格和"
+    "未问到的段落；用简短分点叙述，全文不超过 300 字。\n"
+    "5. 禁止向用户复述统计口径、系统规则、数据缺失原因；指标确实无数据时写\"暂无\"。\n"
+    "6. 回答第一行写明统计窗口(引用【数据窗口说明】起止时间，格式 YYYY-MM-DD HH:mm)；"
+    "金额一律元；所有对比均为环比(前一个等长周期)，禁止使用\"同比\"一词。\n"
+    "7. 只回答经营数据相关的问题；无关问题礼貌说明无法回答。\n"
+    "8. 若上下文给出【本次必须覆盖维度】清单，则逐维度给出数据(用 **维度**：加粗行)，"
+    "此时长度可放宽至 800 字，但仍禁止未问段落的空泛展开。\n"
+    "示例(问\"今日退款情况如何？\"):\n"
+    "统计窗口：2026-10-12 00:00 至 20:20\n"
+    "- 退款总额 26,061.70 元，环比 +2.4%（利空）；221 笔，环比持平。\n"
+    "- 四路：A 线上直退 13,926.30 元（53.4%）、B 钱包提现 6,208.30 元（23.8%）、"
+    "D 手动退款 5,927.10 元（22.7%）。\n"
+    "- 涉诉率 37.4%，环比下降（利好）。\n"
+    "- 建议：关注 A 路大额单笔。\n"
+)
+# v1 留痕(账本完整, 已被 v2 取代)
 _GEN_SYSTEM_LIVE_V1 = (
     "你是客服经营数据助手，基于【给定数据】用中文简洁回答实时问句。\n"
     "铁律:\n"
@@ -145,6 +176,12 @@ _V4_REASON = (
 _LIVE_V1_REASON = (
     "#307 实时问答专用精简版: 单一 v3 同时服务两种模式导致实时问答输出 H2 空段/"
     "口径纪律泄漏/超长。本版铁律: 只答所问/禁章节标题/verdict 直接引用/无对比字段禁系统话术/≤300字。"
+)
+
+_LIVE_V2_REASON = (
+    "#307 发布实测补刀: v1 下模型在 per-source 场景绕过引用, 用绝对值自算环比"
+    "(62.5%/把基期 0 自算成上升 100%)。v2 铁律 1 明确: 禁止两绝对值自算百分比, "
+    "派生字段 null(基期为零)只报绝对值。"
 )
 
 
@@ -221,16 +258,28 @@ def upgrade() -> None:
             "INSERT INTO prompt_configs (code, name_cn, content, version, is_active, change_reason) "
             "VALUES ('gen_system', '生成侧·System 铁律', :content, 4, false, :reason)"
         ), {"content": _GEN_SYSTEM_V4, "reason": _V4_REASON})
-    # 2) gen_system_live v1(直接激活: 新 code, 实时链路发布即生效; 代码常量兜底一致)
-    _live = conn.execute(
-        sa.text("SELECT 1 FROM prompt_configs WHERE code='gen_system_live'")
+    # 2) gen_system_live: v1 留痕 + v2 激活(v1 为空库 seed; 已装库 v1 已存在→去激活,
+    #    插入 v2 生效。同 code 至多一个生效(部分唯一索引), 幂等)
+    _live1 = conn.execute(
+        sa.text("SELECT 1 FROM prompt_configs WHERE code='gen_system_live' AND version=1")
     ).scalar()
-    if not _live:
+    if not _live1:
+        conn.execute(sa.text(
+            "INSERT INTO prompt_configs (code, name_cn, content, version, is_active, change_reason) "
+            "VALUES ('gen_system_live', '生成侧·实时问答 System', :content, 1, false, :reason)"
+        ), {"content": _GEN_SYSTEM_LIVE_V1, "reason": _LIVE_V1_REASON})
+    conn.execute(sa.text(
+        "UPDATE prompt_configs SET is_active=false WHERE code='gen_system_live' AND version<2"
+    ))
+    _live2 = conn.execute(
+        sa.text("SELECT 1 FROM prompt_configs WHERE code='gen_system_live' AND version=2")
+    ).scalar()
+    if not _live2:
         conn.execute(sa.text(
             "INSERT INTO prompt_configs (code, name_cn, content, version, is_active, "
             "activated_at, change_reason) "
-            "VALUES ('gen_system_live', '生成侧·实时问答 System', :content, 1, true, now(), :reason)"
-        ), {"content": _GEN_SYSTEM_LIVE_V1, "reason": _LIVE_V1_REASON})
+            "VALUES ('gen_system_live', '生成侧·实时问答 System', :content, 2, true, now(), :reason)"
+        ), {"content": _GEN_SYSTEM_LIVE_V2, "reason": _LIVE_V2_REASON})
     # 3) focus 卡修复(仅当仍是 seed 原文时更新, 运营手工改过的不动)
     for row in _focus_updates():
         res = conn.execute(
@@ -247,5 +296,10 @@ def upgrade() -> None:
 def downgrade() -> None:
     conn = op.get_bind()
     conn.execute(sa.text("DELETE FROM prompt_configs WHERE code='gen_system' AND version=4"))
-    conn.execute(sa.text("DELETE FROM prompt_configs WHERE code='gen_system_live'"))
+    # live: 删 v2, v1 重激活(回到首发布态)
+    conn.execute(sa.text("DELETE FROM prompt_configs WHERE code='gen_system_live' AND version=2"))
+    conn.execute(sa.text(
+        "UPDATE prompt_configs SET is_active=true, activated_at=now() "
+        "WHERE code='gen_system_live' AND version=1"
+    ))
     # focus 卡不回滚(文案修正无副作用, 且 WHERE 原文已不在)
