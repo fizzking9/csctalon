@@ -1,0 +1,12 @@
+# csctalon LLM 漂移巡检日志轮转(#300)
+# 安装(生产服务器, 一次性):
+#   sudo cp /opt/csctalon/current/deploy/logrotate.d/csctalon-llm-drift /etc/logrotate.d/csctalon-llm-drift
+/var/log/csctalon-llm-drift.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

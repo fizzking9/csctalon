@@ -321,6 +321,21 @@ sudo logrotate -d /etc/logrotate.d/csctalon-nginx   # 干跑验证
 > 且带 `PATH` 声明不依赖 root 的默认 PATH。旧文档给出的 `crontab -e` 方式仍可用，
 > 但**不要与 `/etc/cron.d/` 重复配置**（会一天跑两次）。
 
+**LLM 档位链漂移巡检（#300）**：`scripts/check_llm_talon_drift.py` 每日 10:20
+比对 talon 免密 `/v1/public/overview`（值班节点 + 14 项实测能力）与本仓
+`llm_providers / llm_role_members`，发现「链上模型已下线 / 必需能力实测 fail /
+MoE 进涉数值档 / 链成员被禁用」即退出码 1 并在日志打 FAIL。
+安装（一次性，root）：
+
+```bash
+sudo cp /opt/csctalon/current/deploy/cron.d/csctalon-llm-drift /etc/cron.d/csctalon-llm-drift
+sudo chmod 644 /etc/cron.d/csctalon-llm-drift
+sudo cp /opt/csctalon/current/deploy/logrotate.d/csctalon-llm-drift /etc/logrotate.d/csctalon-llm-drift
+# 立即手跑一次（容器内，只读；连真实库按脚本铁律显式授权）：
+docker exec csctalon-backend python /app/scripts/check_llm_talon_drift.py --allow-real-db
+tail -n 50 /var/log/csctalon-llm-drift.log
+```
+
 **恢复演练（尚未做，待排期）**：`restore.sh` 在隔离环境走一遍并核对业务表计数，
 确认「备份能真的恢复」而不只是「备份能生成」。
 
