@@ -4,12 +4,13 @@
 #   sudo cp /opt/csctalon/current/deploy/cron.d/csctalon-llm-drift /etc/cron.d/csctalon-llm-drift
 #   sudo chmod 644 /etc/cron.d/csctalon-llm-drift
 # 立即验证:
-#   docker exec csctalon-backend python /app/scripts/check_llm_talon_drift.py --allow-real-db
+#   docker exec csctalon-backend python -m app.ops.llm_drift_patrol
 #
 # 为什么 10:20: talon 能力考场在每日 08~09 点跑(见 overview tested_at),
 # 10:20 巡检能拿到当天最新的实测结果, 又不与 03:30 备份/白天高频采集冲突。
 # 退出码: 0=PASS · 1=漂移(看日志 FAIL 段) · 2=talon overview 拉取失败
 # 日志轮转见 deploy/logrotate.d/csctalon-llm-drift
+# 巡检模块在 app/ops/(scripts/ 会被发布流程当杂质清理, 不随镜像走)
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-20 10 * * * root /usr/bin/docker exec csctalon-backend python /app/scripts/check_llm_talon_drift.py --allow-real-db >> /var/log/csctalon-llm-drift.log 2>&1
+20 10 * * * root /usr/bin/docker exec csctalon-backend python -m app.ops.llm_drift_patrol >> /var/log/csctalon-llm-drift.log 2>&1

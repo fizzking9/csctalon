@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
 """LLM 档位链 × talon 值班/实测能力 漂移巡检（只读）—— #300。
 
+容器内运行（天然 prod 环境, 只读 SELECT + 免密 GET, 无需 --allow-real-db）:
+
+    docker exec csctalon-backend python -m app.ops.llm_drift_patrol
+    docker exec csctalon-backend python -m app.ops.llm_drift_patrol --json
+
 ## 为什么存在
 
 2026-10-12 talon 值班换防, csctalon 的档位链暴露出三类漂移, 全靠人工
@@ -10,9 +15,13 @@
   3. provider code 与底层 model 名不符（macmini-7b 实跑 qwen3.5:9b）。
 
 talon 现已提供免密聚合端点 GET /v1/public/overview（模型清单 + 值班节点 +
-14 项实测能力, 公开端点只读不含 IP/密钥）, 本脚本把它与 csctalon DB 的
+14 项实测能力, 公开端点只读不含 IP/密钥）, 本模块把它与 DB 的
 llm_providers / llm_role_members 逐日比对, 让漂移在 cron 日志里暴露,
 而不是在某次降级静默算错后复盘。
+
+为什么放在 app/ops 而不是 backend/scripts/: 发布流程 --git 模式会把
+scripts/ 当开发杂质清理（见 docker-compose.yml 头部纯净性注释）,
+只有 app/ 随镜像发布。
 
 ## 检查项
 
@@ -30,14 +39,6 @@ WARN（仅提示, 不影响退出码）:
   W3 talon 无该模型实测数据（如云端节点 tested={}）
   W4 provider code 隐含的模型族/尺寸与 model 字段不符（如 *-qwen2.5-7b 实跑 9b）
 
-## 用法
-
-    # 生产容器内（只读, 连真实库仍需显式授权, 遵循仓库脚本铁律）:
-    docker exec csctalon-backend python /app/scripts/check_llm_talon_drift.py \
-        --allow-real-db
-    # JSON（供后续告警接入）:
-    ... --allow-real-db --json
-
 退出码: 0=无 ERROR（可有 WARN） · 1=存在漂移 ERROR · 2=拉取 talon/DB 失败
 """
 
@@ -48,13 +49,6 @@ import json
 import re
 import sys
 import urllib.request
-from pathlib import Path
-
-_BACKEND_DIR = Path(__file__).resolve().parents[1]
-if str(_BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(_BACKEND_DIR))
-
-from scripts._bootstrap import bootstrap, real_db_requested  # noqa: E402
 
 # ── 判定常量（与 tests/test_model_selection_guard.py 同源知识）──────────────
 # talon 侧模型名（model id, 非 csctalon provider code）
@@ -68,10 +62,11 @@ TIER_REQUIRED_CAPS = {
     "governance": ("reasoning_multistep",),    # 矛盾检测/多步语义研判
 }
 _OVERVIEW_TIMEOUT_S = 10
+_FALLBACK_TALON_BASE = "http://10.147.17.22:4080"
 
 
 def _norm_model(model: str | None) -> str:
-    """归一模型名: 去 :latest 等 tag 噪声, 小写。glm-4.7-flash:latest → glm-4.7-flash"""
+    """归一模型名: 去 :latest tag 噪声并小写。glm-4.7-flash:latest → glm-4.7-flash"""
     if not model:
         return ""
     m = model.strip().lower()
@@ -98,7 +93,7 @@ def _code_model_mismatch(code: str, model: str) -> bool | None:
     """W4 启发式: provider code 隐含的模型族或参数尺寸与 model 字段不一致。
 
     例: code=...-macmini-qwen2.5-7b, model=qwen3.5:9b → 族不同(qwen2.5 vs qwen3.5)
-        且尺寸不同(7b vs 9b) → True。无法解析任一侧返回 None(不判)。
+        或尺寸不同(7b vs 9b) → True。任一侧无法解析返回 None(不判)。
     """
     cf, mf = _FAMILY_RE.search(code or ""), _FAMILY_RE.search(model or "")
     cs, ms = _SIZE_RE.search(code or ""), _SIZE_RE.search(model or "")
@@ -113,8 +108,7 @@ def evaluate(providers: list[dict], members: list[dict], overview: dict) -> dict
     """纯函数: 输入 DB 行 + talon overview, 输出 {errors, warnings, chains}。
 
     providers: [{code, model, enabled, is_cloud, base_url}]
-    members:   [{role_key, provider_code, sort_order}]（已按 enabled 过滤与否均可,
-               本函数只看 enabled=true 的成员）
+    members:   [{role_key, provider_code, sort_order, enabled}]
     """
     talon = _index_overview(overview)
     prov_by_code = {p["code"]: p for p in providers}
@@ -122,8 +116,9 @@ def evaluate(providers: list[dict], members: list[dict], overview: dict) -> dict
     warnings: list[str] = []
     chains: dict[str, list[str]] = {}
 
-    active = [m for m in members if m.get("enabled", True)]
-    for m in active:
+    for m in members:
+        if not m.get("enabled", True):
+            continue
         tier, code = m["role_key"], m["provider_code"]
         chains.setdefault(tier, []).append(code)
 
@@ -180,8 +175,7 @@ def evaluate(providers: list[dict], members: list[dict], overview: dict) -> dict
             )
 
         # W4: code/model 名实不符
-        mismatch = _code_model_mismatch(code, model)
-        if mismatch:
+        if _code_model_mismatch(code, model):
             warnings.append(f"[W4] {tier} ← provider code {code} 与底层 model {model} 族/尺寸不符")
 
     return {"errors": errors, "warnings": warnings, "chains": chains}
@@ -195,17 +189,14 @@ def fetch_overview(base_url: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="LLM 档位链 × talon 值班/实测 漂移巡检（只读）#300")
-    ap.add_argument("--allow-real-db", action="store_true", help="允许连真实库（生产必需, 显式授权）")
-    ap.add_argument("--json", action="store_true", help="输出 JSON 报告")
-    args = ap.parse_args()
+def _load_rows() -> tuple[list[dict], list[dict], str]:
+    """从容器环境 DB 读 provider/成员, 返回 (providers, members, talon_base)。"""
+    from sqlalchemy import text
 
-    db = bootstrap(mode="prod" if real_db_requested(sys.argv) else None,
-                   allow_real_db=args.allow_real_db)
+    from app.core.database import SessionLocal
+
+    db = SessionLocal()
     try:
-        from sqlalchemy import text
-
         providers = [
             {"code": r[0], "model": r[1], "enabled": r[2],
              "is_cloud": r[3], "base_url": r[4]}
@@ -219,12 +210,21 @@ def main() -> int:
                 "select role_key, provider_code, sort_order, enabled "
                 "from llm_role_members order by role_key, sort_order")).all()
         ]
-        # talon 基址取任意一个 provider 的 base_url（全部指向同一网关）, 去 /v1
-        base = next((p["base_url"] for p in providers if p.get("base_url")),
-                    "http://10.147.17.22:4080")
-        base = re.sub(r"/v1/?$", "", base)
     finally:
         db.close()
+
+    base = next((p["base_url"] for p in providers if p.get("base_url")), _FALLBACK_TALON_BASE)
+    base = re.sub(r"/v1/?$", "", base)
+    return providers, members, base
+
+
+def run_patrol(as_json: bool = False) -> int:
+    """供 __main__ 与未来管理 API 复用, 返回退出码。"""
+    try:
+        providers, members, base = _load_rows()
+    except Exception as e:  # noqa: BLE001
+        print(f"[FATAL] 读取 llm 配置失败: {e}", file=sys.stderr)
+        return 2
 
     try:
         overview = fetch_overview(base)
@@ -236,7 +236,7 @@ def main() -> int:
     report["talon_service"] = overview.get("service")
     report["talon_model_count"] = overview.get("count")
 
-    if args.json:
+    if as_json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         print(f"talon={report['talon_service']} 模型数={report['talon_model_count']}")
@@ -253,6 +253,13 @@ def main() -> int:
             print(f"结论: PASS（0 ERROR / {len(report['warnings'])} WARN）")
 
     return 1 if report["errors"] else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="LLM 档位链 × talon 值班/实测 漂移巡检（只读）#300")
+    ap.add_argument("--json", action="store_true", help="输出 JSON 报告")
+    args = ap.parse_args(argv)
+    return run_patrol(as_json=args.json)
 
 
 if __name__ == "__main__":

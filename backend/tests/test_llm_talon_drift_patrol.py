@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.check_llm_talon_drift import _code_model_mismatch, _norm_model, evaluate
+from app.ops.llm_drift_patrol import _code_model_mismatch, _norm_model, evaluate
 
 
 def _item(model: str, *, duty=True, preload=True, healthy=True, tested=None, display=None):
