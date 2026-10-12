@@ -352,9 +352,13 @@ class Settings(BaseSettings):
     # ── AI 预生成「无新事件跳过」三档开关 (#193/#204, 2026-10-07) ─────────
     # 设计: docs/design/20260924-#193-AI报告刷新策略-无新事件跳过-实现方案.md §4.3
     # off      = 不判定, 行为与改造前完全一致(回滚位)
-    # dry_run  = 判定但照常生成, "本可跳过"写 system_events 留痕(影子期验证, 默认)
+    # dry_run  = 判定但照常生成, "本可跳过"写 system_events 留痕(影子期验证)
     # enforce  = 判定为无新事件则跳过(不调 LLM), 写留痕
-    AI_PREGEN_SKIP_MODE: str = "dry_run"
+    # #306 (2026-10-12) 默认 dry_run → off: daily 已随 #236 改实时生成、
+    #   rolling_7d/30d 已停用, warm_on_sync_complete 中再无 period≠daily 的
+    #   refresh_on_sync 模板, 本判定已无作用对象; 三档代码保留, 如需复盘可经
+    #   .env 设 AI_PREGEN_SKIP_MODE=dry_run/enforce 重新打开。
+    AI_PREGEN_SKIP_MODE: str = "off"
     # 距上次快照超过该分钟数 → 必生成(保窗口时刻不大幅落后, 见方案 §4.2)
     AI_PREGEN_MAX_STALE_MINUTES: int = 120
     # 灰度: 仅对这些模板 scope 生效(逗号分隔), 其余 scope 不判定照常生成

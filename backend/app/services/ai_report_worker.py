@@ -100,11 +100,13 @@ def _now_cn() -> _dt.datetime:
 def schedule_due_templates(db: Session) -> list[AiReportTemplate]:
     """扫描 ai_report_templates, 返回当前时刻应当触发的模板列表。
 
-    判定逻辑(#126 P0-3 修正 trigger_at 格式):
+    判定逻辑(#126 P0-3 修正 trigger_at 格式; #306 放宽 weekly/monthly 容差):
     - frequency=sync-triggered: 不在此扫描(由 warm_on_sync_complete 主动触发)
     - frequency=daily + trigger_at=HH:MM: 当前北京时间 HH:MM 在 ±1 分钟内
-    - frequency=weekly + trigger_at=wday-HH:MM: 当前北京时间 wday-HH:MM 在 ±1 分钟内
-    - frequency=monthly + trigger_at=day-HH:MM: 当前北京时间 day-HH:MM 在 ±1 分钟内
+    - frequency=weekly + trigger_at=wday-HH:MM: 当天是周 wday 且时刻已达 HH:MM
+      (#306: 由 ±1 分钟点匹配放宽为触发日当天; 当日已有成功快照则去重, 实现漏跑当补)
+    - frequency=monthly + trigger_at=day-HH:MM: 当天是当月 day 号且时刻已达 HH:MM
+      (同 #306 放宽 + 快照去重)
 
     格式说明(#126 P0-3):
     - 新格式(推荐): 用 `-` 分隔前缀与 HH:MM, 如 "1-09:00" (周一9点 / 每月1号9点)
@@ -114,8 +116,9 @@ def schedule_due_templates(db: Session) -> list[AiReportTemplate]:
     返回按 priority 升序的模板列表(小先执行)。
 
     #236 (B2-1, 2026-10-09): 跳过 `period=daily` 模板 —— daily 报告改实时生成
-    (走 L2 优先级, 用户等几秒), 不再走 warm_idle 定时预生成。weekly/monthly/rolling_*
-    模板即使 frequency=daily(如每日生成 rolling_7d)仍正常触发, 不受影响。
+    (走 L2 优先级, 用户等几秒), 不再走 warm_idle 定时预生成。weekly/monthly 不受影响。
+    #306 (2026-10-12): rolling_7d/rolling_30d 模板停用(is_active=false), 自然不会
+    被查出来; weekly/monthly 增加「触发日当天漏跑当补 + 当日快照幂等去重」。
     """
     now = _now_cn()
     now_wday = now.isoweekday()  # 1=周一, 7=周日
@@ -140,21 +143,32 @@ def schedule_due_templates(db: Session) -> list[AiReportTemplate]:
                 if _hm_match(t.trigger_at, now_hm):
                     due.append(t)
             elif t.frequency == "weekly":
-                # 新格式: "wday-HH:MM" (如 "1-09:00" = 周一9点)
+                # 新格式: "wday-HH:MM" (如 "1-02:00" = 周一凌晨2点)
                 # 旧格式: "wday:HH:MM" (如 "1:09:00", #124 遗留, 兼容)
+                # #306: 触发日当天时刻已达即 due(不再限 ±1 分钟), 漏跑当补
                 wday, hm = _parse_wday_hhmm(t.trigger_at)
-                if wday is not None and wday == now_wday and _hm_match(hm, now_hm):
+                if wday is not None and wday == now_wday and _trigger_time_reached(now, hm):
                     due.append(t)
             elif t.frequency == "monthly":
-                # 新格式: "day-HH:MM" (如 "1-09:00" = 每月1号9点)
+                # 新格式: "day-HH:MM" (如 "1-02:00" = 每月1号凌晨2点)
                 # 旧格式: "day:HH:MM" (如 "1:09:00", #124 遗留, 兼容)
+                # #306: 同 weekly, 触发日(每月 day 号)当天时刻已达即 due
                 day, hm = _parse_wday_hhmm(t.trigger_at)
-                if day is not None and day == now_day and _hm_match(hm, now_hm):
+                if day is not None and day == now_day and _trigger_time_reached(now, hm):
                     due.append(t)
         except (ValueError, IndexError):
             logger.warning("ai_report_template(id=%s code=%s) trigger_at=%s 解析失败, 跳过",
                            t.id, t.code, t.trigger_at)
             continue
+
+    # #306 漏跑补跑幂等去重: weekly/monthly 触发日当天若已存在成功公共快照
+    # (02:00 正常跑过或早些时候已补过), 不再重复生成; 无快照才留在 due 里补跑。
+    today = now.strftime("%Y-%m-%d")
+    due = [
+        t for t in due
+        if not _has_public_snapshot_today(
+            db, t.id, snapshot_period=t.period, snapshot_date=today)
+    ]
 
     # 按 priority 升序(小先执行)
     due.sort(key=lambda x: x.priority)
@@ -189,7 +203,7 @@ def _parse_wday_hhmm(trigger_at: str) -> tuple[int | None, str]:
 
 
 def _hm_match(trigger_hm: str, now_hm: str) -> bool:
-    """HH:MM 匹配(±1 分钟容差)。
+    """HH:MM 精确点匹配(±1 分钟容差)。
 
     例: trigger="09:00", now="09:00" / "08:59" / "09:01" 都视为匹配
     """
@@ -201,6 +215,54 @@ def _hm_match(trigger_hm: str, now_hm: str) -> bool:
     trigger_min = th * 60 + tm
     now_min = nh * 60 + nm
     return abs(now_min - trigger_min) <= 1
+
+
+def _trigger_time_reached(now: _dt.datetime, trigger_hm: str) -> bool:
+    """触发日当天, 当前时刻是否已达 trigger 的 HH:MM(下界保留 1 分钟容差)。
+
+    #306 (2026-10-12): weekly/monthly 判定由 _hm_match 的「±1 分钟点匹配」放宽为
+    「触发日当天到点即匹配」。配合 `_has_public_snapshot_today` 当日快照去重, 实现
+    漏跑补生成: trigger_at 时刻因发布重启/服务停摆错过后, 当天 warm_idle 每分钟
+    扫描都会重新命中, 直到该期报告成功落库; 已落库则当天不再重复生成(幂等)。
+
+    为什么宽限只到「触发日当天」: compute_pregen_window 的退化逻辑保证, weekly 仅在
+    周一、monthly 仅在 1 号当天生成时窗口才是「完整上周/上月」; 跨日补跑窗口会漂移
+    成「本周一~昨天」, 与问句窗口(上周/上月)不再重叠, 命中层取不到。
+
+    例: trigger="02:00", 同日 01:59(下界容差)/02:00/10:30 → True; 01:58 → False。
+    """
+    try:
+        th, tm = map(int, trigger_hm.split(":"))
+    except (ValueError, AttributeError):
+        return False
+    trigger_min = th * 60 + tm
+    now_min = now.hour * 60 + now.minute
+    return now_min >= trigger_min - 1
+
+
+def _has_public_snapshot_today(db: Session, template_id: int, *,
+                               snapshot_period: str, snapshot_date: str) -> bool:
+    """#306: (模板, 周期, 快照日) 三元组下是否已存在成功的公共预生成报告。
+
+    预生成仅在 success 时落库且 is_public=TRUE(见 generate_for_template),
+    失败/被抢占/校验不过均不落库 —— 故「无快照」即「这期还没成功生成过」,
+    作为漏跑补跑的幂等判据: 补成功一次后当天 warm_idle/warm_on_startup 不再重复。
+
+    查询失败 fail-open 返回 False(宁可重复补一次, 也不因监控故障漏报)。
+    """
+    try:
+        exists = db.execute(
+            text("""SELECT EXISTS(
+                      SELECT 1 FROM ai_reports
+                      WHERE template_id = :tid AND is_public = TRUE
+                        AND snapshot_period = :sp AND snapshot_date = :sd)"""),
+            {"tid": template_id, "sp": snapshot_period, "sd": snapshot_date},
+        ).scalar()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("当日快照存在性查询失败(template_id=%s), 按未生成处理: %s",
+                       template_id, e)
+        return False
+    return bool(exists)
 
 
 async def _pregen_llm(messages: list[dict], db: Session, max_tokens: int, *,
@@ -500,7 +562,10 @@ def _template_due_now(t: AiReportTemplate, now: _dt.datetime) -> bool:
     供 `warm_on_startup` 复用同一套 trigger_at 语义（避免两处判定漂移）。
 
     - frequency=sync-triggered: 启动预热**不触发**（由 warm_on_sync_complete 负责）
-    - daily + "HH:MM" / weekly + "wday-HH:MM" / monthly + "day-HH:MM": ±1 分钟匹配
+    - daily + "HH:MM": ±1 分钟点匹配(daily 模板在 warm_on_startup 已被 B2-1 前置跳过)
+    - weekly + "wday-HH:MM" / monthly + "day-HH:MM":
+      #306 起为「触发日当天时刻已达」(与 schedule_due_templates 同口径),
+      配合 warm_on_startup 内当日快照去重实现漏跑当补。
     """
     if t.frequency == "sync-triggered" or not t.trigger_at:
         return False
@@ -510,10 +575,12 @@ def _template_due_now(t: AiReportTemplate, now: _dt.datetime) -> bool:
             return _hm_match(t.trigger_at, now_hm)
         if t.frequency == "weekly":
             wday, hm = _parse_wday_hhmm(t.trigger_at)
-            return wday is not None and wday == now.isoweekday() and _hm_match(hm, now_hm)
+            return (wday is not None and wday == now.isoweekday()
+                    and _trigger_time_reached(now, hm))
         if t.frequency == "monthly":
             day, hm = _parse_wday_hhmm(t.trigger_at)
-            return day is not None and day == now.day and _hm_match(hm, now_hm)
+            return (day is not None and day == now.day
+                    and _trigger_time_reached(now, hm))
     except (ValueError, IndexError):
         logger.warning("ai_report_template(id=%s code=%s) trigger_at=%s 解析失败",
                        t.id, t.code, t.trigger_at)
@@ -713,6 +780,9 @@ def warm_on_startup(force: bool = False) -> None:
       - 其余(周报/月报, refresh_on_sync=False): **只在 trigger_at 到点时生成**
         (复用 `_template_due_now`, 与 schedule_due_templates 同口径),
         未到点则跳过 —— 到点的那次由 warm_idle 正常触发, 不依赖重启。
+      - #306(2026-10-12): 周报/月报的「到点」判定放宽为触发日当天时刻已达; 且当日
+        已有成功公共快照则跳过 —— 发布重启错过 02:00 时, 触发日当天启动/warm_idle
+        自动补跑一次, 已成功则永不重算(与 schedule_due_templates 同口径幂等)。
 
     节流(#166 用户指定「按快照窗口判」): 统一走 `_window_generated_recently`,
     按 `(template_id, snapshot_period, snapshot_date=今日)` 判「同一份报告」,
@@ -752,6 +822,14 @@ def warm_on_startup(force: bool = False) -> None:
                 # ① 周报/月报(refresh_on_sync=False): 只有到点才生成
                 #    未到点 → 启动不生成(#166 核心修复), 等 warm_idle 按 trigger_at 触发
                 if not refresh_on_sync and not _template_due_now(tmpl, now):
+                    continue
+                # ①.5 #306 漏跑当补幂等去重: 触发日当天该期报告已成功落库(02:00 正常
+                #     跑过或 warm_idle 已补过) → 重启不再重算; 无快照则本次启动即补跑。
+                if _has_public_snapshot_today(
+                        db, tid, snapshot_period=tmpl.period, snapshot_date=today):
+                    logger.info(
+                        "warm_on_startup: 模板 %s 触发日当日快照已存在, 跳过(幂等去重)",
+                        tcode)
                     continue
                 # ② 节流: 同一份报告(模板 + 快照窗口)刚生成过则跳过(防重启风暴)
                 if _window_generated_recently(

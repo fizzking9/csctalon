@@ -10,6 +10,8 @@
   同一快照窗口刚生成过则节流跳过
 - #236 (B2-1, 2026-10-09): daily 报告改实时生成 —— warm_on_startup 不再预生成
   period=daily 模板(改走 L2 实时); 节流测试改用 weekly 模板覆盖
+- #306 (2026-10-12): weekly/monthly 触发日当天漏跑当补 —— ±1 分钟容差放宽为
+  「触发日当天时刻已达」+ 当日成功公共快照幂等去重; warm_on_startup 同口径
 
 固定 datetime 注入, 避免测试随时钟漂移。
 """
@@ -344,6 +346,111 @@ def test_warm_on_startup_throttles_same_snapshot_window(
     assert t.id not in startup_calls, (
         "同一快照窗口 20min 内已生成过, 启动预热应节流跳过(防重启风暴)"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 工单 #306: weekly/monthly 触发日当天漏跑当补 + 当日快照幂等去重
+#
+# 背景: 旧判定 trigger_at 仅 ±1 分钟容差, 发布重启错过周一/1号 02:00 即缺整周/
+# 整月报告且永不补(生产 10-09~10-11 连续三天夜间未跑成)。放宽为「触发日当天
+# 时刻已达即 due」, 再以当日成功公共快照去重: 无快照→补, 已成功→不重算。
+# 跨触发日不补(compute_pregen_window 仅触发日当天才是完整上周/上月窗口)。
+# ══════════════════════════════════════════════════════════════════════════
+
+def _add_public_snapshot(db, user, template, *, period, snapshot_date):
+    """造一份当日成功公共预生成报告(仅 success 才会 is_public=TRUE 落库)。"""
+    db.add(AiReport(
+        task_id=None, user_id=user.id, question="周期报告?", answer_md="md",
+        llm_model="test-model", llm_ms=1, total_ms=1,
+        template_id=template.id, snapshot_period=period,
+        snapshot_date=snapshot_date, is_public=True,
+    ))
+    db.flush()
+
+
+def test_weekly_catchup_due_monday_morning_without_snapshot(
+        db, monkeypatch, weekly_midnight_template):
+    """#306: 周一上午 10:30(已错过 02:00 ±1 分钟)且当日无快照 → 仍 due(漏跑当补)。"""
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 14, 10, 30))  # 周一
+    due = schedule_due_templates(db)
+    assert "_test_weekly_midnight" in [t.code for t in due], (
+        "触发日当天错过 trigger 时刻后应持续可补(无快照时), 旧 ±1 分钟判定会漏报"
+    )
+
+
+def test_weekly_not_due_before_trigger_time(
+        db, monkeypatch, weekly_midnight_template):
+    """#306: 周一 01:58(trigger 02:00 未到, 超出 -1min 下界容差) → 不 due。"""
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 14, 1, 58))
+    assert "_test_weekly_midnight" not in [t.code for t in schedule_due_templates(db)]
+
+
+def test_weekly_not_due_off_trigger_day(
+        db, monkeypatch, weekly_midnight_template):
+    """#306: 周三上午(非触发日)即使无快照也不 due —— 跨日补会导致周报窗口漂移。"""
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 16, 10, 30))
+    assert "_test_weekly_midnight" not in [t.code for t in schedule_due_templates(db)]
+
+
+def test_weekly_catchup_deduped_when_snapshot_exists(
+        db, monkeypatch, weekly_midnight_template, user1):
+    """#306: 周一上午且当日已有成功公共快照(02:00 跑过/早些时候已补) → 不重复 due。"""
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 14, 10, 30))
+    _add_public_snapshot(
+        db, user1, weekly_midnight_template,
+        period="weekly", snapshot_date="2026-09-14")
+    assert "_test_weekly_midnight" not in [t.code for t in schedule_due_templates(db)], (
+        "触发日当天快照已存在时必须幂等去重, 否则每次 warm_idle 都重算"
+    )
+
+
+def test_monthly_catchup_due_first_day_without_snapshot(
+        db, monkeypatch, monthly_midnight_template):
+    """#306: 每月1号上午(错过 02:00)无快照 → due。"""
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 1, 10, 30))  # 1号周二
+    assert "_test_monthly_midnight" in [t.code for t in schedule_due_templates(db)]
+
+
+def test_monthly_not_due_after_first_day(
+        db, monkeypatch, monthly_midnight_template):
+    """#306: 每月2号不再补月报(非触发日, 月报退化窗口仅1号当天成立)。"""
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 2, 10, 30))
+    assert "_test_monthly_midnight" not in [t.code for t in schedule_due_templates(db)]
+
+
+def test_monthly_catchup_deduped_when_snapshot_exists(
+        db, monkeypatch, monthly_midnight_template, user1):
+    """#306: 1号上午当月报快照已存在 → 不重复 due。"""
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 1, 10, 30))
+    _add_public_snapshot(
+        db, user1, monthly_midnight_template,
+        period="monthly", snapshot_date="2026-09-01")
+    assert "_test_monthly_midnight" not in [t.code for t in schedule_due_templates(db)]
+
+
+def test_warm_on_startup_catches_up_missed_weekly(
+        db, monkeypatch, startup_calls):
+    """#306: 触发日白天发布重启、当日无快照 → 启动预热直接补跑周报。"""
+    t = _add_template(db, code="_test_306_weekly_catchup", period="weekly",
+                      frequency="weekly", trigger_at="1-02:00")
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 14, 10, 30))  # 周一上午
+
+    warm_on_startup(force=True)
+
+    assert t.id in startup_calls, "错过 02:00 后触发日当天重启应补跑, 不能缺整周报告"
+
+
+def test_warm_on_startup_skips_caught_up_weekly(
+        db, monkeypatch, startup_calls, user1):
+    """#306: 触发日重启但当日快照已存在(warm_idle 已补/02:00 已跑) → 不重算。"""
+    t = _add_template(db, code="_test_306_weekly_done", period="weekly",
+                      frequency="weekly", trigger_at="1-02:00")
+    _patch_now(monkeypatch, _dt.datetime(2026, 9, 14, 10, 30))
+    _add_public_snapshot(db, user1, t, period="weekly", snapshot_date="2026-09-14")
+
+    warm_on_startup(force=True)
+
+    assert t.id not in startup_calls, "当日已成功生成的周报不应因重启重算"
 
 
 def test_warm_on_startup_throttle_is_period_scoped(
