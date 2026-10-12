@@ -499,10 +499,40 @@ class BmsFetcher:
                 pass
             await asyncio.sleep(0.9)
             s_val, e_val = await _read_back()
+
+        if not (start_str[:10] in s_val and end_str[:10] in e_val):
+            # #305 策略C(探针 2026-10-12 三策略对抗实证): 设备档案页的激活时间编辑器
+            # 对键盘输入完全不认账(Enter/失焦都回退默认值), 但 Vue 层 $emit('input')
+            # 直接改父组件 v-model 100% 粘住(DOM+vue 值均正确)。
+            logger.warning("  [填值] 键盘输入不提交, 降级 Vue $emit 直接改 v-model (#305 策略C)")
+            await page.evaluate(
+                """([sSel, sVal, eVal]) => {
+                    function upVue(el) {
+                        let n = el;
+                        for (let i = 0; i < 8 && n; i++) {
+                            if (n.__vue__) return n.__vue__;
+                            n = n.parentElement;
+                        }
+                        return null;
+                    }
+                    const el = document.querySelector(sSel);
+                    const vm = upVue(el);
+                    if (!vm) throw new Error('编辑器无 Vue 实例');
+                    vm.$emit('input', [new Date(sVal.replace(' ', 'T')), new Date(eVal.replace(' ', 'T'))]);
+                }""",
+                [
+                    f'input[placeholder="{s_ph}"]',
+                    start_str,
+                    end_str,
+                ],
+            )
+            await asyncio.sleep(0.9)
+            s_val, e_val = await _read_back()
             if not (start_str[:10] in s_val and end_str[:10] in e_val):
-                # #305: 宁可响亮失败让切片标 failed 重试, 也不带错窗口静默查错数据
+                # 宁可响亮失败让切片标 failed 重试, 也不带错窗口静默查错数据
                 raise RuntimeError(
-                    f"时间填值提交失败: DOM={s_val!r}~{e_val!r}, 期望 {start_str!r}~{end_str!r}"
+                    f"时间填值提交失败(键盘+Vue$emit 均无效): DOM={s_val!r}~{e_val!r}, "
+                    f"期望 {start_str!r}~{end_str!r}"
                 )
         logger.info(f"  [填值] DOM 回读校验通过: {s_val!r} ~ {e_val!r}")
         await asyncio.sleep(0.5)
