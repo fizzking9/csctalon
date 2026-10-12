@@ -433,61 +433,78 @@ class BmsFetcher:
         """填 Element UI datetimerange 的两个 input 并确保 Vue v-model 更新。
 
         背景(2026-09-01): 时间框需先展开高级筛选(.show-more)才可见。
-        - Element UI DatePicker 的 input 需**先 click 聚焦**才可 fill, 否则 fill 会
-          超时(8s)退化为 evaluate setter; 而 setter 有时不触发 Vue v-model 更新 →
-          查询用默认近一周 → 窗口不精确, 甚至导出按钮状态异常。
-        - 这里对每个 input: click 聚焦 → fill(缩短超时) → evaluate 兜底 setter+事件,
-          确保 Vue 更新。
-        - ⚠️ 不要用 page.mouse.click(5,5) 关闭面板: 会改变页面滚动/点击位置导致不稳定;
-          改用 ESC + blur 关闭 picker。
+        #305(2026-10-12 探针实证): 设备档案页 start 侧 fill 能提交, end 侧 fill
+        后失焦被 Element 重置回默认值(页面加载时刻) → bindEndTime 永远是 now,
+        查询窗口变成 [start, now](176 万台), 导出的 10 万行全是默认窗口。
+        根因: fill() 是单次 value+input 事件, Element 内部 user-input 状态没更新,
+        blur 重解析时 end 被丢弃。修法改用与 _set_time_range 策略0 同款、已在
+        套餐页(#299)实证可靠的「click→Ctrl+A→Backspace→键盘逐字输入→真实鼠标
+        点空白失焦」, 并加 DOM 回读强校验(越界即抛, 禁止带错窗口继续查)。
+        校验按日期部分(前 10 字符)匹配, 兼容 daterange(纯日期)编辑器。
         """
+        async def _type_one(i_el, val: str) -> None:
+            # 与策略0 同款键盘输入(真实键击, Element 内部状态才会更新)
+            await i_el.scroll_into_view_if_needed()
+            await asyncio.sleep(0.18)
+            await i_el.click(timeout=5000)
+            await asyncio.sleep(0.28)
+            await page.keyboard.press("Control+A")
+            await asyncio.sleep(0.10)
+            await page.keyboard.press("Backspace")
+            await asyncio.sleep(0.15)
+            await i_el.type(val, delay=35)
+            await asyncio.sleep(0.30)
+
         for i_el, val in [(start_inp, start_str), (end_inp, end_str)]:
             try:
-                # 先 click 聚焦, 让 Element UI 进入可编辑状态(避免 fill 超时)
-                await i_el.click(timeout=5000)
-                await asyncio.sleep(0.15)
-            except Exception as _ce:
-                logger.warning(f"  [填值] click 聚焦失败(继续): {_ce}")
-            try:
-                await i_el.fill(val, timeout=4000)
-            except Exception as _fe:
-                logger.warning(f"  [填值] fill 超时/失败,退化为 evaluate setter: {_fe}")
-                try:
-                    await i_el.evaluate(
-                        """(el, v) => {
-                            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                            if (setter) setter.call(el, v); else el.value = v;
-                            el.dispatchEvent(new Event('input', { bubbles: true }));
-                            el.dispatchEvent(new Event('change', { bubbles: true }));
-                        }""",
-                        val,
-                    )
-                except Exception as _e2:
-                    logger.warning(f"  [填值] evaluate setter 失败(忽略): {_e2}")
-            await asyncio.sleep(0.2)
-        # 触发 blur + ESC, 让 DatePicker 面板收起并同步 v-model
+                await _type_one(i_el, val)
+            except Exception as e:  # noqa: BLE001 单边键盘输入失败 → 退回 fill+setter
+                logger.warning(f"  [填值] 键盘输入失败退回 fill+setter: {e}")
+                await self._fill_el_input(page, i_el, val)
+
+        # 真实鼠标点页面右上角空白, 让 picker 失焦并同步内部值(勿用 ESC: 会丢弃未提交解析)
         try:
-            await page.keyboard.press("Escape")
+            viewport = page.viewport_size or {"width": 1920, "height": 1080}
+            await page.mouse.click(max(int(viewport.get("width", 1920)) - 40, 1850), 20)
         except Exception:
             pass
-        try:
-            s_ph = await start_inp.get_attribute("placeholder") or ""
-            e_ph = await end_inp.get_attribute("placeholder") or ""
-            await page.evaluate(
-                """([sSel, eSel]) => {
-                    const s = document.querySelector(sSel);
-                    const e = document.querySelector(eSel);
-                    for (const el of [s, e]) {
-                        if (el) {
-                            el.dispatchEvent(new Event('change', { bubbles: true }));
-                            el.blur && el.blur();
-                        }
-                    }
-                }""",
+        await asyncio.sleep(0.9)
+
+        # DOM 回读强校验(按日期部分匹配), 不匹配的单边重试一次
+        s_ph = await start_inp.get_attribute("placeholder") or ""
+        e_ph = await end_inp.get_attribute("placeholder") or ""
+
+        async def _read_back() -> tuple[str, str]:
+            return await page.evaluate(
+                """([sSel, eSel]) => [
+                    (document.querySelector(sSel) || {}).value || '',
+                    (document.querySelector(eSel) || {}).value || '',
+                ]""",
                 [f'input[placeholder="{s_ph}"]', f'input[placeholder="{e_ph}"]'],
             )
-        except Exception as _fe:
-            logger.warning(f"  [填值] 触发 blur 异常(忽略): {_fe}")
+
+        s_val, e_val = await _read_back()
+        if not (start_str[:10] in s_val and end_str[:10] in e_val):
+            logger.warning(
+                f"  [填值] 回读不符 s={s_val!r} e={e_val!r} (期望 {start_str!r}~{end_str!r}), 重试键盘输入"
+            )
+            if start_str[:10] not in s_val:
+                await _type_one(start_inp, start_str)
+            if end_str[:10] not in e_val:
+                await _type_one(end_inp, end_str)
+            try:
+                viewport = page.viewport_size or {"width": 1920, "height": 1080}
+                await page.mouse.click(max(int(viewport.get("width", 1920)) - 40, 1850), 20)
+            except Exception:
+                pass
+            await asyncio.sleep(0.9)
+            s_val, e_val = await _read_back()
+            if not (start_str[:10] in s_val and end_str[:10] in e_val):
+                # #305: 宁可响亮失败让切片标 failed 重试, 也不带错窗口静默查错数据
+                raise RuntimeError(
+                    f"时间填值提交失败: DOM={s_val!r}~{e_val!r}, 期望 {start_str!r}~{end_str!r}"
+                )
+        logger.info(f"  [填值] DOM 回读校验通过: {s_val!r} ~ {e_val!r}")
         await asyncio.sleep(0.5)
 
     async def _set_time_by_labels(self, page, start_label: str, end_label: str, start_str: str, end_str: str):
