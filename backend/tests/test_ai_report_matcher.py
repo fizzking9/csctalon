@@ -621,6 +621,44 @@ def test_308_range_question_still_matches_active_overlap(_308_clean):
     assert any(c.id == r.id for c in cands)
 
 
+def test_308_range_question_excludes_low_fit_snapshot(_308_clean):
+    db = _308_clean
+    """区间问句窗口贴合度门槛(生产实测 Q2 补刀): 问「近30天」不得命中 7 天周快照。
+
+    快照 07-26~08-01(7 天) vs 问句 07-03~08-01(30 天): 贴合度 7/30≈0.23 < 0.5,
+    L1/L2 均须返空 → 交实时 LLM(否则回显「近30天」而数字是上周口径)。
+    """
+    u = _308_user(db)
+    t = _308_tmpl(db, "t308_weekly_lowfit", keywords=("退款", "四路", "近30天"))
+    _308_report(db, t.id, u.id,
+                start=_dt308.date(2026, 7, 26), end=_dt308.date(2026, 8, 1))
+
+    hit, tmpl = match_template_report(
+        db, "近30天退款情况如何？", "weekly", None,
+        win_start=_dt308.date(2026, 7, 3), win_end=_dt308.date(2026, 8, 1))
+    assert hit is None and tmpl is None
+    assert list_candidates(db, "weekly", None,
+                           win_start=_dt308.date(2026, 7, 3),
+                           win_end=_dt308.date(2026, 8, 1),
+                           question="近30天退款") == []
+
+
+def test_308_range_question_high_fit_still_matches(_308_clean):
+    db = _308_clean
+    """贴合度边界回归: 「本月」12 天问句 vs 月快照 11 天 = 0.92 ≥ 0.5, 正常命中。"""
+    u = _308_user(db)
+    t = _308_tmpl(db, "t308_monthly_fit", keywords=("本月", "退款"))
+    r = _308_report(db, t.id, u.id,
+                    start=_dt308.date(2026, 8, 1), end=_dt308.date(2026, 8, 11),
+                    snapshot_period="monthly")
+
+    hit, tmpl = match_template_report(
+        db, "本月退款情况如何？", "monthly", None,
+        win_start=_dt308.date(2026, 8, 1), win_end=_dt308.date(2026, 8, 12))
+    assert hit is not None and hit.id == r.id
+    assert tmpl.code == "t308_monthly_fit"
+
+
 def test_308_null_window_report_still_matches_single_day(_308_clean):
     db = _308_clean
     """回归: start/end 未落(NULL)的历史快照仍可服务单日问句(与 gate 测试同构)。"""
@@ -664,3 +702,4 @@ def test_308_sql_fragments_injected_all_branches():
     assert "r.start <= :q_end AND r.end >= :q_start" in sql_range  # 区间重叠保留
     assert "ai_report_templates t" in sql_range
     assert "r.start = :sdate" not in sql_range                     # 区间不套单日对齐
+    assert "LEAST(r.end, :q_end)" in sql_range                     # 窗口贴合度门槛

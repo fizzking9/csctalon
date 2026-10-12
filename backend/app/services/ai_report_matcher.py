@@ -230,6 +230,17 @@ _SQL_TMPL_ACTIVE = (
 #    现要求报告内容窗口恰为该日(start=end=sdate), 或 start/end 未落(NULL, 如日报)。
 #    效果: 单日问句不再命中多日快照, 回落实时 LLM —— 与 10-09 日报实时化设计一致。
 _SQL_SINGLE_DAY_FIT = "AND (r.start IS NULL OR (r.start = :sdate AND r.end = :sdate))"
+# 3) _SQL_RANGE_FIT —— 区间问句的窗口贴合度门槛(2026-10-12 生产实测补刀):
+#    区间分支原本仅要求「重叠 1 天」即入池, 语义匹配层无窗口概念 → 问「近30天」
+#    被 L2 命中 7 天周快照(贴合度 7/30≈0.23), 回显「近30天」而数字是上周口径。
+#    现要求报告内容窗口与问句窗口的贴合度(交集天数/并集天数) >= 0.5:
+#    「本月」12天 vs 月快照 11天 = 0.92 保留; 「近30天」30天 vs 周快照 7天 = 0.23 排除;
+#    「本周」8天 vs 周快照 7天 = 0.875 保留(正常服役不受影响)。
+#    (重叠条件已保证交集 ≥ 1 天; 并集恒 > 0, 无除零。)
+_SQL_RANGE_FIT = (
+    "AND ((LEAST(r.end, :q_end) - GREATEST(r.start, :q_start) + 1)::float "
+    "/ (GREATEST(r.end, :q_end) - LEAST(r.start, :q_start) + 1)) >= 0.5"
+)
 
 
 def match_template_report(
@@ -277,6 +288,7 @@ def match_template_report(
                  AND r.start IS NOT NULL AND r.end IS NOT NULL
                  AND r.start <= :q_end AND r.end >= :q_start
                  {_SQL_TMPL_ACTIVE}
+                 {_SQL_RANGE_FIT}
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
             {"q_start": win_start, "q_end": win_end, "period": win_period or ""},
         ).mappings().all()
@@ -439,6 +451,7 @@ def list_candidates(db: Session, win_period: str | None,
                  AND r.start IS NOT NULL AND r.end IS NOT NULL
                  AND r.start <= :q_end AND r.end >= :q_start
                  {_SQL_TMPL_ACTIVE}
+                 {_SQL_RANGE_FIT}
                ORDER BY (r.snapshot_period = :period) DESC, r.created_at DESC"""),
             {"q_start": win_start, "q_end": win_end, "period": win_period or ""},
         ).mappings().all()
