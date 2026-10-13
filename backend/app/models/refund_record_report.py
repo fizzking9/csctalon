@@ -28,6 +28,8 @@ class RefundRecordReport(TimestampMixin, Base):
             "platform_order_no", "refund_time", "refund_amount",
             name="uq_refund_record_reports_dedup",
         ),
+        # #319 数据分层: 信源表(BMS 退款记录报表水单)归入 ods schema
+        {"schema": "ods"},
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True, comment="自增主键")

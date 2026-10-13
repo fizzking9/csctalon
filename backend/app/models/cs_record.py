@@ -32,6 +32,8 @@ class CsRecord(IDMixin, TimestampMixin, Base):
             "consult_time", "problem_create_time",
             name="uq_cs_record_business"
         ),
+        # #319 数据分层: 信源表(智能助手同步流水)归入 ods schema
+        {"schema": "ods"},
     )
 
     problem_category: Mapped[str | None] = mapped_column(

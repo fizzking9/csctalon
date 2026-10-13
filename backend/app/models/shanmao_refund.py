@@ -19,6 +19,7 @@ class ShanmaoRefund(QualityMixin, TimestampMixin, Base):
     """
 
     __tablename__ = "shanmao_refunds"
+    __table_args__ = {"schema": "ods"}
 
     # ── 主键 & 关联 ──────────────────────────────────────────────
     refund_no: Mapped[str] = mapped_column(

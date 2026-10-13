@@ -19,6 +19,7 @@ class MerchantRefund(IDMixin, TimestampMixin, Base):
     """商户号现金流 - 微信侧真实现金流(交易流水,含支付与退款)"""
 
     __tablename__ = "merchant_refunds"
+    __table_args__ = {"schema": "ods"}
 
     wx_refund_no: Mapped[str | None] = mapped_column(
         String(64), index=True, nullable=True, comment="微信退款单号(Excel存float已损,仅留存)"

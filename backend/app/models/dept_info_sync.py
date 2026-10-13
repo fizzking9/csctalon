@@ -46,6 +46,7 @@ class DeptInfoSync(IDMixin, TimestampMixin, Base):
     """部门间信息同步登记"""
 
     __tablename__ = "dept_info_syncs"
+    __table_args__ = {"schema": "ods"}
 
     title: Mapped[str] = mapped_column(String(255), nullable=False, comment="同步标题")
     category: Mapped[str] = mapped_column(

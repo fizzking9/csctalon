@@ -56,6 +56,9 @@ class Attendance(IDMixin, TimestampMixin, Base):
     """考勤打卡记录(企业微信同步)"""
 
     __tablename__ = "attendance"
+    # #319 数据分层: 信源表(企微同步打卡原始数据)归入 ods schema
+    # 注意: 本文件内 ShiftTemplate/Schedule 为系统内业务表, 留 public 不动
+    __table_args__ = {"schema": "ods"}
 
     person_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("persons.id", ondelete="CASCADE"), index=True, nullable=False, comment="人员"

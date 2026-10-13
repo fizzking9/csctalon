@@ -531,7 +531,7 @@ def _column_type(db: Session, table: str, col: str) -> str:
     """列类型（information_schema 权威）—— 决定 `new` 值怎么解析，弄错会二次偏移时区。"""
     dtype = db.execute(text(
         "SELECT data_type FROM information_schema.columns "
-        "WHERE table_schema='public' AND table_name=:t AND column_name=:c"
+        "WHERE table_schema IN ('public', 'ods') AND table_name=:t AND column_name=:c"
     ), {"t": table, "c": col}).scalar()
     if not dtype:
         raise ExecuteError(f"列不存在: {table}.{col}")
@@ -616,7 +616,7 @@ def _exec_fix_time(db: Session, f: GovernanceFinding, *, params: dict | None) ->
     _assert_ident(table, "表名")
     has_id = bool(db.execute(text(
         "SELECT count(*) FROM information_schema.columns "
-        "WHERE table_schema='public' AND table_name=:t AND column_name='id'"
+        "WHERE table_schema IN ('public', 'ods') AND table_name=:t AND column_name='id'"
     ), {"t": table}).scalar())
     if not has_id:
         raise ExecuteError(f"表 {table} 无 id 列，无法按 pk 定位行，fix_time 不可用")

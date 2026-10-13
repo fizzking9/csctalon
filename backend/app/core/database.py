@@ -2,7 +2,7 @@
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import settings
@@ -27,6 +27,24 @@ engine = create_engine(
     max_overflow=20,
     echo=settings.SQL_ECHO,
 )
+
+
+# #319 数据分层: 21 张信源表已从 public 移入 ods schema。
+# 仓库内存在 300+ 处历史裸 SQL(text() 直写表名, 如 refund.py 单文件 60+ 处),
+# 逐一改写风险高且噪音大;改为连接级 search_path=public,ods:
+#   - public 在前 → 系统业务表(86-21 张)解析行为完全不变;
+#   - ods 兜底 → 裸 SQL 命中 ods.<t> 等价于原 public.<t>, 42P01 风险从根上消除。
+# ORM/迁移仍走显式 schema 限定,不依赖 search_path。
+@event.listens_for(engine, "connect")
+def _set_search_path(dbapi_conn, _connection_record):
+    cursor = dbapi_conn.cursor()
+    try:
+        cursor.execute("SET search_path TO public, ods")
+        # ⚠️ 必须 commit: psycopg2 下 SET 处于隐式事务中, 而连接池 reset_on_return=rollback
+        # 会在连接归还时回滚掉未提交的 SET(表现为"首次取用正常, 复用后 42P01")。
+        dbapi_conn.commit()
+    finally:
+        cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

@@ -21,6 +21,7 @@ class ManualRefund(IDMixin, TimestampMixin, Base):
     """手动退款登记 - 客服在商户号后台手动操作的退款台账"""
 
     __tablename__ = "manual_refunds"
+    __table_args__ = {"schema": "ods"}
 
     # ── 登记信息 ────────────────────────────────────────────────
     register_time: Mapped[datetime | None] = mapped_column(

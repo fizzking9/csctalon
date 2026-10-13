@@ -18,9 +18,11 @@ class ScrmSessionTransfer(IDMixin, TimestampMixin, Base):
     """SCRM 会话转接事件"""
 
     __tablename__ = "scrm_session_transfers"
+    # #319 数据分层: 信源表(SCRM 同步事件流)归入 ods schema
+    __table_args__ = {"schema": "ods"}
 
     session_id: Mapped[str] = mapped_column(
-        String(128), ForeignKey("scrm_sessions.session_id", ondelete="CASCADE"),
+        String(128), ForeignKey("ods.scrm_sessions.session_id", ondelete="CASCADE"),
         index=True, nullable=False, comment="归属会话"
     )
     from_operator_id: Mapped[str | None] = mapped_column(

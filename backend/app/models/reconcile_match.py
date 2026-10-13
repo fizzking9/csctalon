@@ -35,7 +35,8 @@ class ReconcileMatch(IDMixin, TimestampMixin, Base):
         comment="关联复核批次(reconcile_checks.id, 可空=草稿未成批)",
     )
     report_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("refund_record_reports.id"), index=True, nullable=False,
+        # #319: refund_record_reports 已归入 ods schema, FK 须显式跨 schema 引用
+        Integer, ForeignKey("ods.refund_record_reports.id"), index=True, nullable=False,
         comment="E 退款记录报表 id(勾稽基准)",
     )
     # ── E 笔快照冗余(便于直接查/列表, 不依赖 join report 表) ──

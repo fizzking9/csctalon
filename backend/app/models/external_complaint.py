@@ -19,6 +19,7 @@ class ExternalComplaint(QualityMixin, IDMixin, TimestampMixin, Base):
     """外部投诉(监督局/315)"""
 
     __tablename__ = "external_complaints"
+    __table_args__ = {"schema": "ods"}
 
     complaint_no: Mapped[str | None] = mapped_column(
         String(64), index=True, nullable=True,

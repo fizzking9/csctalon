@@ -19,6 +19,7 @@ class CardComplaint(QualityMixin, IDMixin, TimestampMixin, Base):
     """卡商群投诉"""
 
     __tablename__ = "card_complaints"
+    __table_args__ = {"schema": "ods"}
 
     complaint_date: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True, nullable=True, comment="投诉日期(主时间字段)"

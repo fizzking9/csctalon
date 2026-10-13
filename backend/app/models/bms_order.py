@@ -22,6 +22,7 @@ class BmsOrder(TimestampMixin, Base):
     """订单管理 - BMS 订单台账"""
 
     __tablename__ = "bms_orders"
+    __table_args__ = {"schema": "ods"}
 
     order_no: Mapped[str] = mapped_column(String(64), primary_key=True, comment="订单号")
     order_type: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True, comment="订单类型(预存/储值卡充值等)")

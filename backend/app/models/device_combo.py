@@ -17,6 +17,7 @@ class DeviceCombo(TimestampMixin, Base):
     """设备套餐 - 设备已购套餐记录"""
 
     __tablename__ = "device_combos"
+    __table_args__ = {"schema": "ods"}
 
     recharge_order_no: Mapped[str] = mapped_column(String(64), primary_key=True, comment="充值订单号")
     device_sn: Mapped[str | None] = mapped_column(

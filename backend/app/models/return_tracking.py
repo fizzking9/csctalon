@@ -22,6 +22,7 @@ class ReturnTracking(TimestampMixin, Base):
     """退货跟踪 - 设备退货/换货全流程"""
 
     __tablename__ = "return_trackings"
+    __table_args__ = {"schema": "ods"}
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True, comment="自增主键")
     device_sn: Mapped[str | None] = mapped_column(

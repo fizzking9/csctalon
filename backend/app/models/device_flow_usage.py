@@ -21,6 +21,8 @@ class DeviceFlowUsage(TimestampMixin, Base):
     __tablename__ = "device_flow_usage"
     __table_args__ = (
         UniqueConstraint("device_sn", "stat_month", name="uq_device_flow_usage_sn_month"),
+        # #319 数据分层: 信源表(BMS 月流量抓取)归入 ods schema
+        {"schema": "ods"},
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True, comment="自增主键")

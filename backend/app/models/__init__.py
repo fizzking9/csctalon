@@ -68,6 +68,7 @@ from app.models.ingest_mode_config import IngestModeConfig  # noqa: F401
 from app.models.ingest_rejected_row import IngestRejectedRow  # noqa: F401
 from app.models.integration_profile import IntegrationProfile  # noqa: F401
 from app.models.kb_article import KbArticle  # noqa: F401
+from app.models.llm_cloud_policy import LlmCloudPolicy  # noqa: F401
 from app.models.llm_provider import LlmCallLog, LlmProvider  # noqa: F401
 from app.models.llm_role_config import LlmRoleConfig  # noqa: F401
 from app.models.llm_role_member import LlmRoleMember  # noqa: F401
@@ -107,6 +108,7 @@ from app.models.scrm_session import ScrmSession  # noqa: F401
 from app.models.scrm_session_transfer import ScrmSessionTransfer  # noqa: F401
 from app.models.scrm_staff_profile import ScrmStaffProfile  # noqa: F401
 from app.models.scrm_sync_log import ScrmSyncLog  # noqa: F401
+from app.models.shanmao_refund import ShanmaoRefund  # noqa: F401
 from app.models.shop import (  # noqa: F401
     DeviceShopLink,
     Enterprise,
@@ -193,6 +195,7 @@ __all__ = [
     "IngestRejectedRow",
     "KbArticle",
     "LlmCallLog",
+    "LlmCloudPolicy",
     "LlmProvider",
     "Measure",
     "ManualRefund",
@@ -235,6 +238,7 @@ __all__ = [
     "ScrmSessionTransfer",
     "ScrmStaffProfile",
     "ScrmSyncLog",
+    "ShanmaoRefund",
     "SourceGroup",
     "SystemEvent",
     "ServiceTicket",

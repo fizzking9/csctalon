@@ -132,4 +132,6 @@ class ScrmStaffProfile(IDMixin, TimestampMixin, Base):
                          name="uq_scrm_staff_src_nick_ent"),
         Index("ix_scrm_staff_real_name_alias", "real_name", "alias_name"),
         Index("ix_scrm_staff_company_status", "company_group", "online_status"),
+        # #319 数据分层: 信源表(SCRM 同步员工档案)归入 ods schema
+        {"schema": "ods"},
     )

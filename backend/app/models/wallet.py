@@ -45,6 +45,8 @@ class WalletWithdrawal(QualityMixin, IDMixin, TimestampMixin, Base):
             postgresql_where=text("device_sn IS NULL"),
             postgresql_nulls_not_distinct=True,
         ),
+        # #319 数据分层: 信源表(会员钱包流水同步)归入 ods schema
+        {"schema": "ods"},
     )
 
     account_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True, comment="账户ID")

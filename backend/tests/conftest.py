@@ -91,6 +91,20 @@ def _engine():
     _assert_test_database(settings.database_url)
     # settings 已在导入时按测试环境变量加载
     engine = create_engine(settings.database_url, pool_pre_ping=True)
+
+    # #319: 测试库独立 engine 与主 engine 同口径 —— 裸 SQL 经 search_path 命中 ods
+    from sqlalchemy import event as _sa_event
+
+    @_sa_event.listens_for(engine, "connect")
+    def _set_search_path(dbapi_conn, _rec):
+        cur = dbapi_conn.cursor()
+        try:
+            cur.execute("SET search_path TO public, ods")
+            # 必须 commit: 连接池归还时 rollback 会撤销未提交的 SET(同 database.py)
+            dbapi_conn.commit()
+        finally:
+            cur.close()
+
     try:
         from sqlalchemy import text
 
@@ -103,6 +117,30 @@ def _engine():
         with engine.connect() as conn:
             conn.execute(text("DROP TABLE IF EXISTS governance_prompts CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS onboarding_prompts CASCADE"))
+            conn.commit()
+
+        # #319: 21 个模型带 {"schema": "ods"}, create_all 前须保证 schema 存在
+        # (幂等; 测试库每轮重建, 无需迁移即可建出 ods.<t>)
+        with engine.connect() as conn:
+            conn.execute(text("CREATE SCHEMA IF NOT EXISTS ods"))
+            conn.commit()
+
+        # #319: 历史测试库在 public 下残留 21 张旧表(create_all 只建不迁)。
+        # search_path=public 在前 → 裸 SQL 会命中残留空表(ORM 写 ods, 裸 SQL 读 public 旧表),
+        # 且 reconcile_matches/complaint_same_source_members 上的旧 FK 仍指向 public 旧表。
+        # 故建表前清掉: 21 张旧表 + 2 张带跨 schema FK 的依赖表(重建后 FK 才指向 ods)。
+        with engine.connect() as conn:
+            for _t in (
+                "bms_orders", "device_combos", "refunds", "manual_refunds",
+                "merchant_refunds", "shanmao_refunds", "refund_record_reports",
+                "card_complaints", "external_complaints", "cs_records",
+                "scrm_sessions", "scrm_session_transfers", "scrm_operators",
+                "scrm_staff_profiles", "wallet_withdrawals", "device_flow_usage",
+                "return_trackings", "wechat_registrations", "wechat_accounts",
+                "dept_info_syncs", "attendance",
+                "reconcile_matches", "complaint_same_source_members",
+            ):
+                conn.execute(text(f'DROP TABLE IF EXISTS public."{_t}" CASCADE'))
             conn.commit()
 
         Base.metadata.create_all(bind=engine)

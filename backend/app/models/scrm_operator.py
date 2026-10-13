@@ -17,6 +17,7 @@ class ScrmOperator(IDMixin, TimestampMixin, Base):
     """SCRM 客服账号快照 - 以 operator_id(PK) 为业务主键,每次同步覆盖更新"""
 
     __tablename__ = "scrm_operators"
+    __table_args__ = {"schema": "ods"}
 
     operator_id: Mapped[str] = mapped_column(
         String(128), unique=True, index=True, nullable=False, comment="SCRM 平台客服 ID(业务唯一键)"

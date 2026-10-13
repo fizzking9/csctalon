@@ -18,6 +18,7 @@ class ScrmSession(IDMixin, TimestampMixin, Base):
     """SCRM 客服接待会话(三合一:private/group/virtual 用 session_type 区分)"""
 
     __tablename__ = "scrm_sessions"
+    __table_args__ = {"schema": "ods"}
 
     # ---- 业务唯一键: SCRM 侧 sessionId。分 session_type 仍可能撞,因此全局唯一 ----
     session_id: Mapped[str] = mapped_column(

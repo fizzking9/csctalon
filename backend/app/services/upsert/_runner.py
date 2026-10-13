@@ -163,7 +163,7 @@ def _column_max_lengths(db: Session, data_type: str) -> dict[str, int | None]:
             return {}
         rows = db.execute(_text(
             "SELECT column_name, character_maximum_length FROM information_schema.columns "
-            "WHERE table_schema = 'public' AND table_name = :t "
+            "WHERE table_schema IN ('public', 'ods') AND table_name = :t "
             "  AND data_type IN ('text', 'character varying')"
         ), {"t": table}).mappings().all()
         return {r["column_name"]: r["character_maximum_length"] for r in rows}
@@ -186,7 +186,7 @@ def _datetime_columns(db: Session, data_type: str) -> set[str]:
             return set()
         rows = db.execute(_text(
             "SELECT column_name FROM information_schema.columns "
-            "WHERE table_schema = 'public' AND table_name = :t "
+            "WHERE table_schema IN ('public', 'ods') AND table_name = :t "
             "  AND data_type IN ('timestamp with time zone','timestamp without time zone','date')"
         ), {"t": table}).scalars().all()
         return set(rows)

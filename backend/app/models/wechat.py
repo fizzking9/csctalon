@@ -45,6 +45,8 @@ class WechatRegistration(IDMixin, TimestampMixin, Base):
     """
 
     __tablename__ = "wechat_registrations"
+    # #319 数据分层: 信源表(微信侧同步身份数据)归入 ods schema
+    __table_args__ = {"schema": "ods"}
 
     # 微信侧身份标识
     openid: Mapped[str] = mapped_column(String(64), index=True, nullable=False, comment="微信 openid(小程序/公众号)")
@@ -80,6 +82,8 @@ class WechatAccount(IDMixin, Base):
     """
 
     __tablename__ = "wechat_accounts"
+    # #319 数据分层: 信源表(微信侧绑定关系)归入 ods schema
+    __table_args__ = {"schema": "ods"}
 
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), index=True, nullable=False)
     openid: Mapped[str] = mapped_column(String(64), index=True, nullable=False)

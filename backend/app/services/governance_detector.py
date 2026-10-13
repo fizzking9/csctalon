@@ -559,7 +559,7 @@ def scan_text_anomaly(db: Session, *, tables: list[str] | None = None) -> list[d
         cols = db.execute(text(
             "SELECT column_name, data_type, character_maximum_length "
             "FROM information_schema.columns "
-            "WHERE table_schema = 'public' AND table_name = :t "
+            "WHERE table_schema IN ('public', 'ods') AND table_name = :t "
             "  AND data_type IN ('text', 'character varying')"
         ), {"t": table}).mappings().all()
         for c in cols:
@@ -681,7 +681,7 @@ def _now_cn() -> _dt.datetime:
 
 def _table_exists(db: Session, table: str) -> bool:
     return bool(db.execute(text(
-        "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=:t"
+        "SELECT 1 FROM information_schema.tables WHERE table_schema IN ('public', 'ods') AND table_name=:t"
     ), {"t": table}).scalar())
 
 
@@ -698,13 +698,13 @@ def _table_time_column(db: Session, table: str) -> tuple[str, str] | None:
     if r:
         dtype = db.execute(text(
             "SELECT data_type FROM information_schema.columns "
-            "WHERE table_schema='public' AND table_name=:t AND column_name=:c"
+            "WHERE table_schema IN ('public', 'ods') AND table_name=:t AND column_name=:c"
         ), {"t": table, "c": r}).scalar()
         if dtype:
             return r, dtype
     row = db.execute(text(
         "SELECT column_name, data_type FROM information_schema.columns "
-        "WHERE table_schema='public' AND table_name=:t "
+        "WHERE table_schema IN ('public', 'ods') AND table_name=:t "
         "AND data_type IN ('timestamp with time zone','timestamp without time zone') "
         "ORDER BY ordinal_position LIMIT 1"
     ), {"t": table}).mappings().first()
@@ -1047,7 +1047,7 @@ def _date_columns(db: Session, table: str) -> list[dict]:
     """该表的日期列（information_schema 权威；系统审计列已排除）。"""
     rows = db.execute(text(
         "SELECT column_name, data_type FROM information_schema.columns "
-        "WHERE table_schema = 'public' AND table_name = :t "
+        "WHERE table_schema IN ('public', 'ods') AND table_name = :t "
         "  AND data_type IN ('timestamp with time zone','timestamp without time zone','date') "
         "ORDER BY ordinal_position"
     ), {"t": table}).mappings().all()
@@ -1057,7 +1057,7 @@ def _date_columns(db: Session, table: str) -> list[dict]:
 def _has_id_column(db: Session, table: str) -> bool:
     return bool(db.execute(text(
         "SELECT count(*) FROM information_schema.columns "
-        "WHERE table_schema='public' AND table_name=:t AND column_name='id'"
+        "WHERE table_schema IN ('public', 'ods') AND table_name=:t AND column_name='id'"
     ), {"t": table}).scalar())
 
 
@@ -1561,7 +1561,7 @@ _FILLABLE_RULES: tuple[dict, ...] = (
 
 def _column_exists(db: Session, table: str, column: str) -> bool:
     return bool(db.execute(text(
-        "SELECT 1 FROM information_schema.columns WHERE table_schema='public' "
+        "SELECT 1 FROM information_schema.columns WHERE table_schema IN ('public', 'ods') "
         "AND table_name=:t AND column_name=:c"
     ), {"t": table, "c": column}).scalar())
 

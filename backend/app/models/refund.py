@@ -19,6 +19,7 @@ class Refund(QualityMixin, TimestampMixin, Base):
     """
 
     __tablename__ = "refunds"
+    __table_args__ = {"schema": "ods"}
 
     refund_no: Mapped[str] = mapped_column(String(64), primary_key=True, comment="退费单号 RF...")
     platform_order_no: Mapped[str | None] = mapped_column(String(64), index=True, comment="平台订单号 SP/WS/WX...")

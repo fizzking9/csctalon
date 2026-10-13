@@ -94,6 +94,7 @@ class ComplaintSameSourceMember(IDMixin, TimestampMixin, Base):
     )
     complaint_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("external_complaints.id", ondelete="CASCADE"),
+        # #319: external_complaints 已归入 ods schema, FK 须显式跨 schema 引用
+        ForeignKey("ods.external_complaints.id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
