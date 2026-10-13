@@ -332,8 +332,9 @@ async def run_backfill(
         stop_at = deadline or (
             night_deadline(n) if in_night_window(n) else n + timedelta(hours=3)
         )
-        # 只补到「前天」: 昨天整天归 06:00 低频档(夜间 01:00 时它还没跑)
-        end_date = horizon_end or (n.date() - timedelta(days=2))
+        # #317 补到「昨天」: 与 06:00 低频档重叠但 upsert 主键 recharge_order_no 幂等不冲突,
+        # 确保 06:00 低频档失败/熔断时昨天缺口仍有兜底(原补到前天会留一天无人兜底)
+        end_date = horizon_end or (n.date() - timedelta(days=1))
 
         summary = {
             "triggered_by": triggered_by,
