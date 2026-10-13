@@ -138,28 +138,67 @@ def test_dims_device_type_normalized_and_fallback(db):
     assert db.get(Device, sn_raw).device_type in names
 
 
-def test_dims_package_canonical_and_fallback(db):
-    """套餐维: 当前别名命中用归一名, 未命中回落原始名。"""
+def test_dims_package_three_source_and_qc_filter(db):
+    """套餐维(#313 统一口径): 三源回落 + 工厂质检过滤, 无归一。
+
+    与退款侧 by_combo 的 a["combo"] 同源(_device_dim_attrs):
+      · bms_orders 最新非质检订单 combo_name 优先(三源第一)
+      · 回落 devices.current_combo_name(三源第二)
+      · 回落 device_combos 最新 package_name(三源第三)
+      · 工厂质检套餐三源统一过滤 → (无套餐)
+      · combo_name_alias 归一不再生效(与退款侧对齐)
+    """
+    from app.models.bms_order import BmsOrder
+
+    # 归一表存在但不再生效(#313 去归一, 与退款侧对齐)
     cd = ComboDict(combo_code=_uniq("CMB"), canonical_name=_uniq("归一套餐"))
     db.add(cd)
     db.flush()
-    raw_hit, raw_miss = _uniq("原始套餐A"), _uniq("原始套餐B")
+    raw_hit = _uniq("原始套餐A")
     db.add(ComboNameAlias(
         combo_code=cd.combo_code, raw_package_name=raw_hit,
         effective_from=date.today() - timedelta(days=1), is_current=True,
     ))
-    sn_hit = _uniq("SN-P1")
-    _mk_device(db, sn_hit, current_combo_name=raw_hit)
-    sn_miss = _uniq("SN-P2")
-    _mk_device(db, sn_miss, current_combo_name=raw_miss)
-    _mk_complaint(db, sn_hit)
-    _mk_complaint(db, sn_miss)
+
+    # 1) devices.current_combo_name 有值, 无 bms_orders/device_combos → 用 devices 值(不归一)
+    sn_dev = _uniq("SN-PD")
+    _mk_device(db, sn_dev, current_combo_name=raw_hit)
+    _mk_complaint(db, sn_dev)
+
+    # 2) bms_orders 最新非质检订单优先(覆盖 devices.current_combo_name)
+    raw_b = _uniq("套餐B-订单")
+    sn_order = _uniq("SN-PO")
+    _mk_device(db, sn_order, current_combo_name=raw_hit)
+    db.add(BmsOrder(
+        order_no=_uniq("OD"), device_sn=sn_order,
+        combo_name=raw_b, create_date=datetime.now(UTC),
+    ))
+    _mk_complaint(db, sn_order)
+
+    # 3) bms_orders 最新订单是质检套餐 → 跳过, 回落 devices.current_combo_name
+    raw_c = _uniq("套餐C-质检回落")
+    sn_qc = _uniq("SN-PQ")
+    _mk_device(db, sn_qc, current_combo_name=raw_c)
+    db.add(BmsOrder(
+        order_no=_uniq("OD"), device_sn=sn_qc,
+        combo_name="工厂质检测试套餐", create_date=datetime.now(UTC),
+    ))
+    _mk_complaint(db, sn_qc)
+
+    # 4) 无套餐 → (无套餐)
+    sn_none = _uniq("SN-PN")
+    _mk_device(db, sn_none)
+    _mk_complaint(db, sn_none)
+
     db.flush()
 
     names = _names(_dim(db)["by_package"])
-    assert cd.canonical_name in names   # 归一命中
-    assert raw_hit not in names          # 原始名被归一替代
-    assert raw_miss in names             # 未命中回落原始名
+    assert raw_hit in names                 # devices 直读, 归一不生效
+    assert cd.canonical_name not in names   # 归一已去掉
+    assert raw_b in names                   # bms_orders 最新非质检优先
+    assert raw_c in names                   # 质检订单跳过后回落 devices
+    assert "工厂质检测试套餐" not in names    # 工厂质检过滤
+    assert "(无套餐)" in names               # 无套餐落桶
 
 
 def test_dims_active_days_buckets(db):

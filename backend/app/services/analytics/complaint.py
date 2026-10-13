@@ -32,6 +32,7 @@ from app.services.analytics._core import (
     ACTIVE_AGE_BUCKETS,
     REAL_FINISH_EPOCH_SECS,
     _complaint_source_type_case,
+    _device_dim_attrs,
     _person_position_map,
     _resolve_windows,
     _route_a_online_refund_filter,
@@ -868,28 +869,21 @@ def complaint_extended_dims(
         .order_by(cnt.desc())
     ).all()
 
-    # ── 4. 套餐（当前别名归一, 未命中回落原始名）──
-    canonical = (
-        select(ComboDict.canonical_name)
-        .select_from(ComboNameAlias)
-        .join(ComboDict, ComboDict.combo_code == ComboNameAlias.combo_code)
-        .where(
-            ComboNameAlias.raw_package_name == Device.current_combo_name,
-            ComboNameAlias.is_current.is_(True),
-        )
-        .order_by(case((ComboNameAlias.merchant_pk.isnot(None), 0), else_=1))
-        .limit(1)
-        .scalar_subquery()
-    )
-    pkg_name = func.coalesce(canonical, Device.current_combo_name, "(无套餐)")
-    pkg_rows = db.execute(
-        select(pkg_name, cnt)
-        .select_from(ServiceTicket)
-        .outerjoin(Device, Device.sn == ServiceTicket.device_sn)
-        .where(_is_c, *_win)
-        .group_by(pkg_name)
-        .order_by(cnt.desc())
-    ).all()
+    # ── 4. 套餐（#313 统一口径: 调 _device_dim_attrs 三源回落 + 工厂质检过滤,
+    #         与退款侧 by_combo 的 a["combo"] 同源; 去掉 combo_name_alias 归一与退款侧对齐;
+    #         原 #252 用 devices.current_combo_name 单源 + 归一, 覆盖率低于三源回落,
+    #         且不过滤工厂质检 → 质检套餐会混入统计）──
+    sn_list = [r[0] for r in db.execute(
+        select(ServiceTicket.device_sn).where(_is_c, *_win)
+    ).all() if r[0]]
+    _dd_pkg = _device_dim_attrs(db, {str(s) for s in sn_list})
+    _pkg_cnt: dict[str, int] = {}
+    for sn in sn_list:
+        a = _dd_pkg.get(str(sn))
+        key = (a["combo"] if a else None) or "(无套餐)"
+        _pkg_cnt[key] = _pkg_cnt.get(key, 0) + 1
+    pkg_rows = [(n, c) for n, c in
+                sorted(_pkg_cnt.items(), key=lambda x: -x[1])]
 
     # ── 5. 激活后时长(#295 五桶口径; 基准=bms_orders 最早激活日, 与 #251「销售天数」同源单口径,
     #        原 #252 用 devices.active_time → 统一收敛到 bms_orders) ──
