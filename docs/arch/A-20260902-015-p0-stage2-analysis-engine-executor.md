@@ -28,7 +28,7 @@ v0.2 审计确认系统核心从「4 个固定硬编码看板」转向「自助�
 ## 数据模型（2 张新表）
 
 ### AnalysisView（分析视图）
-新建 [backend/app/models/analysis_view.py](file:///Users/tanzk/dev/csctalon/backend/app/models/analysis_view.py)
+新建 [backend/app/models/analysis_view.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/models/analysis_view.py)
 
 ```python
 class AnalysisView(IDMixin, TimestampMixin, Base):
@@ -114,7 +114,7 @@ class ClassificationRule(IDMixin, TimestampMixin, Base):
 
 ## 引擎执行器 engine.py
 
-新建 [backend/app/services/analysis_engine.py](file:///Users/tanzk/dev/csctalon/backend/app/services)
+新建 [backend/app/services/analysis_engine.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services)
 
 ### 核心函数
 
@@ -264,7 +264,7 @@ def _to_chart_data(merged, chart_type, segments) -> dict:
 
 ## API 端点
 
-新建 [backend/app/api/v1/analysis_views.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1)
+新建 [backend/app/api/v1/analysis_views.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1)
 
 ### 视图管理
 - `GET /analysis-views` — 列表（支持 preset/active 筛选）
@@ -345,18 +345,18 @@ def _to_chart_data(merged, chart_type, segments) -> dict:
 
 ### 后端（步骤 1-12）
 
-1. **新模型**：[analysis_view.py](file:///Users/tanzk/dev/csctalon/backend/app/models/analysis_view.py)（AnalysisView + ClassificationRule）
+1. **新模型**：[analysis_view.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/models/analysis_view.py)（AnalysisView + ClassificationRule）
 
-2. **注册模型**：[models/__init__.py](file:///Users/tanzk/dev/csctalon/backend/app/models/__init__.py) 加 import
+2. **注册模型**：[models/__init__.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/models/__init__.py) 加 import
 
 3. **alembic 迁移**：`python -m alembic revision --autogenerate -m "add analysis_views and classification_rules"`，review 产物确认含 2 新表
 
-4. **schemas**：新建 [schemas/analysis_view.py](file:///Users/tanzk/dev/csctalon/backend/app/schemas)
+4. **schemas**：新建 [schemas/analysis_view.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/schemas)
    - AnalysisViewOut / AnalysisViewCreate / AnalysisViewUpdate / AnalysisViewExecute
    - ClassificationRuleOut / ClassificationRuleCreate / ClassificationRuleUpdate
    - ExecuteResult（chart_type + 动态字段）
 
-5. **引擎核心**：新建 [services/analysis_engine.py](file:///Users/tanzk/dev/csctalon/backend/app/services)
+5. **引擎核心**：新建 [services/analysis_engine.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services)
    - `execute_view(db, view, params)` 主入口
    - `_execute_segment` / `_build_classification_case` / `_merge_segment_results` / `_to_chart_data`
    - `_apply_time_grain`（day→`to_char(col,'YYYY-MM-DD')`，week→`to_char(col,'IYYY-IW')`，month→`to_char(col,'YYYY-MM')`，none→原值）
@@ -365,24 +365,24 @@ def _to_chart_data(merged, chart_type, segments) -> dict:
    - `_build_filters` / `_build_time_filter` / `_resolve_time_range`
    - 模型注册表 `_MODEL_REGISTRY`（table_name → model class，用于反射获取 SQLAlchemy 列）
 
-6. **预设视图种子**：新建 [services/preset_views_seed.py](file:///Users/tanzk/dev/csctalon/backend/app/services)
+6. **预设视图种子**：新建 [services/preset_views_seed.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services)
    - `PRESET_VIEWS`：8 个预设视图配置（4 大看板拆分）
    - `ensure_preset_views_registered(db)`：幂等注册（按 code upsert）
 
-7. **视图管理 API**：新建 [api/v1/analysis_views.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1)
+7. **视图管理 API**：新建 [api/v1/analysis_views.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1)
    - CRUD + execute 端点
    - execute 端点支持 `view_id`（已存视图）或 `inline_config`（ViewBuilder 实时预览用，不入库）
 
 8. **分类规则 API**：同文件或新建 `api/v1/classification_rules.py`
    - CRUD + preview 端点
 
-9. **注册路由**：改 [api/v1/router.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/router.py) 挂载 analysis_views + classification_rules
+9. **注册路由**：改 [api/v1/router.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/router.py) 挂载 analysis_views + classification_rules
 
-10. **启动时注册预设**：改 [main.py](file:///Users/tanzk/dev/csctalon/backend/app/main.py) lifespan，在 `ensure_data_sources_registered` 后调 `ensure_preset_views_registered`
+10. **启动时注册预设**：改 [main.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/main.py) lifespan，在 `ensure_data_sources_registered` 后调 `ensure_preset_views_registered`
 
-11. **旧端点兼容**：[api/v1/analytics.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/analytics.py) 保留但内部改为调用 `execute_view(db, preset_view, params)`，删除 `services/analytics.py` 中的硬编码函数（或保留作为对照，标记 deprecated）
+11. **旧端点兼容**：[api/v1/analytics.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/analytics.py) 保留但内部改为调用 `execute_view(db, preset_view, params)`，删除 `services/analytics.py` 中的硬编码函数（或保留作为对照，标记 deprecated）
 
-12. **测试**：新建 [tests/test_analysis_engine.py](file:///Users/tanzk/dev/csctalon/backend/tests)
+12. **测试**：新建 [tests/test_analysis_engine.py](file:///Users/tanzk/dev-tmp/csctalon/backend/tests)
     - 单 segment 查询（退款趋势）
     - 双 segment 相加（真实现金流）
     - 分类规则注入（CASE WHEN 生成正确）
@@ -391,13 +391,13 @@ def _to_chart_data(merged, chart_type, segments) -> dict:
 
 ### 前端（步骤 13-20）
 
-13. **api 模块**：新建 [api/analysis-view.js](file:///Users/tanzk/dev/csctalon/web/src/api)
+13. **api 模块**：新建 [api/analysis-view.js](file:///Users/tanzk/dev-tmp/csctalon/web/src/api)
     - listAnalysisViews / getAnalysisView / createAnalysisView / updateAnalysisView / deleteAnalysisView
     - executeAnalysisView(payload) — POST /analysis-views/execute
     - listClassificationRules / createClassificationRule / updateClassificationRule / deleteClassificationRule
     - previewClassificationRule(payload)
 
-14. **ViewBuilder.vue**：新建 [views/analytics/ViewBuilder.vue](file:///Users/tanzk/dev/csctalon/web/src/views/analytics)
+14. **ViewBuilder.vue**：新建 [views/analytics/ViewBuilder.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/views/analytics)
     - **三栏布局**：
       - 左栏：数据源选择 + 字段面板（从 `/data-sources/{code}/fields` 加载，按 semantic_role 分组：维度/度量/时间/分类/人名/SN）
       - 中栏：配置区（segments 标签页，每个 segment 一个卡片：数据源、维度区、度量区、筛选区、时间粒度、分类规则）
@@ -407,26 +407,26 @@ def _to_chart_data(merged, chart_type, segments) -> dict:
     - **保存**：保存为 AnalysisView（输入名称、图表类型）
     - **分类规则编辑器**：内嵌规则编辑（if field op value then label）
 
-15. **ViewList.vue**：新建 [views/analytics/ViewList.vue](file:///Users/tanzk/dev/csctalon/web/src/views/analytics)
+15. **ViewList.vue**：新建 [views/analytics/ViewList.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/views/analytics)
     - 已保存视图列表（区分预设/自定义）
     - 点击视图 → 进入 ViewRender.vue 渲染
 
-16. **ViewRender.vue**：新建 [views/analytics/ViewRender.vue](file:///Users/tanzk/dev/csctalon/web/src/views/analytics)
+16. **ViewRender.vue**：新建 [views/analytics/ViewRender.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/views/analytics)
     - 根据 view_id 加载视图配置 → 调 execute → 渲染图表
     - 支持日期范围筛选、筛选器覆盖
     - 复用 BaseChart.vue
 
-17. **分类规则管理页**：新建 [views/system/ClassificationRules.vue](file:///Users/tanzk/dev/csctalon/web/src/views/system)
+17. **分类规则管理页**：新建 [views/system/ClassificationRules.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/views/system)
     - 规则列表 + 编辑器（条件组合 → 标签）
 
-18. **路由更新**：改 [router/index.js](file:///Users/tanzk/dev/csctalon/web/src/router/index.js)
+18. **路由更新**：改 [router/index.js](file:///Users/tanzk/dev-tmp/csctalon/web/src/router/index.js)
     - 新增 `/analytics/builder`（ViewBuilder）
     - 新增 `/analytics/views`（ViewList）
     - 新增 `/analytics/views/:id`（ViewRender）
     - 保留旧 `/analytics/operation` 等路由，内部改为重定向到对应预设视图渲染页
     - 新增 `/system/classification-rules`
 
-19. **菜单更新**：改 [layouts/MainLayout.vue](file:///Users/tanzk/dev/csctalon/web/src/layouts/MainLayout.vue)
+19. **菜单更新**：改 [layouts/MainLayout.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/layouts/MainLayout.vue)
     - 分析看板下新增：视图构建器、我的视图
     - 系统管理下新增：分类规则
 
@@ -434,13 +434,13 @@ def _to_chart_data(merged, chart_type, segments) -> dict:
 
 ## 关键复用点（不要重写）
 
-- [services/analytics.py:cash_out_trend](file:///Users/tanzk/dev/csctalon/backend/app/services/analytics.py#L110) — 「分表聚合后相加」的范例，engine.py 的 `_merge_segment_results` 照此泛化
-- [models/data_source.py](file:///Users/tanzk/dev/csctalon/backend/app/models/data_source.py) — DataSource/DataSourceField 已建好，ViewBuilder 直接用
-- [services/data_source_registry.py:FIELD_OVERRIDES](file:///Users/tanzk/dev/csctalon/backend/app/services/data_source_registry.py#L60) — 字段语义已注册，ViewBuilder 据此分组
-- [api/v1/data_sources.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/data_sources.py) — `GET /data-sources/{code}/fields` 已有，ViewBuilder 复用
-- [components/BaseChart.vue](file:///Users/tanzk/dev/csctalon/web/src/components/BaseChart.vue) — ECharts 封装，ViewRender 复用
-- [schemas/common.py](file:///Users/tanzk/dev/csctalon/backend/app/schemas/common.py) 的 `R` + `PageBase`
-- [api/deps.py](file:///Users/tanzk/dev/csctalon/backend/app/api/deps.py) 的 `CurrentUser`/`DBSession`
+- [services/analytics.py:cash_out_trend](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services/analytics.py#L110) — 「分表聚合后相加」的范例，engine.py 的 `_merge_segment_results` 照此泛化
+- [models/data_source.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/models/data_source.py) — DataSource/DataSourceField 已建好，ViewBuilder 直接用
+- [services/data_source_registry.py:FIELD_OVERRIDES](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services/data_source_registry.py#L60) — 字段语义已注册，ViewBuilder 据此分组
+- [api/v1/data_sources.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/data_sources.py) — `GET /data-sources/{code}/fields` 已有，ViewBuilder 复用
+- [components/BaseChart.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/components/BaseChart.vue) — ECharts 封装，ViewRender 复用
+- [schemas/common.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/schemas/common.py) 的 `R` + `PageBase`
+- [api/deps.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/deps.py) 的 `CurrentUser`/`DBSession`
 
 ## 验证方案（端到端）
 

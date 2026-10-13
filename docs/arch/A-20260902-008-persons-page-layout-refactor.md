@@ -7,7 +7,7 @@
 
 ## Context(为什么改)
 
-当前 [Persons.vue](file:///Users/tanzk/dev/csctalon/web/src/views/system/Persons.vue) 存在三类体验问题(用户反馈):
+当前 [Persons.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/views/system/Persons.vue) 存在三类体验问题(用户反馈):
 
 1. **布局浪费、操作不便**:主区是宽表格(10 列)+ 详情用 70% 抽屉。抽屉里 `el-descriptions column=2` 在 70% 宽度下大量横向空白;待归并别名面板始终展开占满纵向空间,即便不处理也挤占视野。
 2. **可编辑性差**:部门/角色/在职状态等只能通过单独的"编辑生命周期"dialog 改,且部门/角色还没在编辑表单里;岗位/专项要另开"任职记录"dialog。没有 inline 编辑,没有批量编辑。
@@ -41,7 +41,7 @@
 ## 后端改动
 
 ### 新增 `POST /persons/batch-update`(Admin)
-[persons.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/persons.py) 加端点:
+[persons.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/persons.py) 加端点:
 ```python
 class BatchUpdateRequest(BaseModel):
     ids: list[int]
@@ -56,9 +56,9 @@ class BatchUpdateRequest(BaseModel):
 ```
 逻辑:
 - Person 原生字段(department/role/employment_status/is_active/is_confirmed/hire_date):`UPDATE persons SET <非空字段> WHERE id IN (ids)`,跳过未提供的(None)。
-- 分组/专项(group_name/specialty 任一非空):对每个 id 调 `create_assignment(db, pid, StaffAssignmentCreate(effective_from=今天, group_name, specialty, source="manual"))`(复用 [staff_assignment_service.py](file:///Users/tanzk/dev/csctalon/backend/app/services/staff_assignment_service.py))。
+- 分组/专项(group_name/specialty 任一非空):对每个 id 调 `create_assignment(db, pid, StaffAssignmentCreate(effective_from=今天, group_name, specialty, source="manual"))`(复用 [staff_assignment_service.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services/staff_assignment_service.py))。
 - 返回 `{updated: N, assignments_created: M}`。
-- schema 加 `BatchUpdateRequest`(放 [person.py](file:///Users/tanzk/dev/csctalon/backend/app/schemas/person.py))。
+- schema 加 `BatchUpdateRequest`(放 [person.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/schemas/person.py))。
 
 ### 现有端点复用
 - inline 编辑:复用 `PUT /persons/{id}`(已支持 department/role/employment_status/hire_date 等字段经 setattr)。
@@ -111,10 +111,10 @@ class BatchUpdateRequest(BaseModel):
 
 | 文件 | 改动 |
 |---|---|
-| [backend/app/api/v1/persons.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/persons.py) | 加 `POST /persons/batch-update` 端点 |
-| [backend/app/schemas/person.py](file:///Users/tanzk/dev/csctalon/backend/app/schemas/person.py) | 加 `BatchUpdateRequest` |
-| [web/src/views/system/Persons.vue](file:///Users/tanzk/dev/csctalon/web/src/views/system/Persons.vue) | 布局重构(分栏/折叠/inline/批量)+ 删抽屉+编辑生命周期dialog |
-| [web/src/api/person.js](file:///Users/tanzk/dev/csctalon/web/src/api/person.js) | 加 `batchUpdatePersons` |
+| [backend/app/api/v1/persons.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/persons.py) | 加 `POST /persons/batch-update` 端点 |
+| [backend/app/schemas/person.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/schemas/person.py) | 加 `BatchUpdateRequest` |
+| [web/src/views/system/Persons.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/views/system/Persons.vue) | 布局重构(分栏/折叠/inline/批量)+ 删抽屉+编辑生命周期dialog |
+| [web/src/api/person.js](file:///Users/tanzk/dev-tmp/csctalon/web/src/api/person.js) | 加 `batchUpdatePersons` |
 
 ## 验证
 

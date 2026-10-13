@@ -74,7 +74,7 @@ operator_ticket(8) / operator_audit(8) / operator_refund(8)
 1. **`backend/app/models/dashboard.py`** 新建 Dashboard 模型（字段见上）。
 2. **`backend/app/models/__init__.py`** 加 `from app.models.dashboard import Dashboard` + `__all__`。
 3. **`backend/alembic/versions/n4d5e6f7b8c9_add_dashboards.py`** 新建迁移：建 dashboards 表（code unique idx / category idx / status idx），down_revision=m3c4d5e6f7a8。参照现有迁移文件写法。
-4. **`backend/app/services/preset_dashboards_seed.py`** 新建：`PRESET_DASHBOARDS`（4 个预设看板配置）+ `ensure_preset_dashboards_registered(db)`。幂等 upsert by code；预加载 `AnalysisView.code→id` 映射填充 items.view_id，找不到的 view_code 跳过并计数。参照 [preset_views_seed.py](file:///Users/tanzk/dev/csctalon/backend/app/services/preset_views_seed.py) 模式。
+4. **`backend/app/services/preset_dashboards_seed.py`** 新建：`PRESET_DASHBOARDS`（4 个预设看板配置）+ `ensure_preset_dashboards_registered(db)`。幂等 upsert by code；预加载 `AnalysisView.code→id` 映射填充 items.view_id，找不到的 view_code 跳过并计数。参照 [preset_views_seed.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services/preset_views_seed.py) 模式。
 5. **`backend/app/schemas/dashboard.py`** 新建：DashboardItem / DashboardOut / DashboardCreate / DashboardUpdate / DashboardListOut。
 6. **`backend/app/api/v1/dashboards.py`** 新建路由 `/dashboards`：
    - `GET ""` 列表：支持 category/status 筛选；按 `_allowed_visibility(user.role)` 过滤（admin=全部 / supervisor=public+manager / agent=public）；分页。
@@ -82,7 +82,7 @@ operator_ticket(8) / operator_audit(8) / operator_refund(8)
    - `POST ""` 创建：`AdminOrSupervisor`；is_preset 强制 False。
    - `PUT "/{id}"` 更新：`AdminOrSupervisor`；预设看板 code/category disabled（不可改）。
    - `DELETE "/{id}"` 删除：`AdminOrSupervisor`；预设不可删（400）。
-   - 复用 [deps.py](file:///Users/tanzk/dev/csctalon/backend/app/api/deps.py) 的 `CurrentUser`/`AdminOrSupervisor`/`DBSession`。
+   - 复用 [deps.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/deps.py) 的 `CurrentUser`/`AdminOrSupervisor`/`DBSession`。
    - **不建** `/execute` 批量端点（MVP 前端并发调 `/analysis-views/execute`）。
 7. **`backend/app/api/v1/router.py`** 加 `api_router.include_router(dashboards.router)`。
 8. **`backend/app/main.py`** `_init_data_sources_and_presets()`（L73-83）在 `ensure_preset_views_registered` 之后加 `ensure_preset_dashboards_registered(db)`，日志输出注册统计。
@@ -97,13 +97,13 @@ agent → [public]
 ## 前端实施
 
 1. **`web/src/api/dashboard.js`** 新建：listDashboards/getDashboard/createDashboard/updateDashboard/deleteDashboard。
-2. **`web/src/components/ViewItemCard.vue`** 新建：单视图卡片。props: viewId/title/start/end/reloadKey。内部 `getAnalysisView(viewId)` 取配置 + `executeAnalysisView({view_id,params})` 取数据；chart_option/table 渲染逻辑从 [ViewRender.vue](file:///Users/tanzk/dev/csctalon/web/src/views/analytics/ViewRender.vue) 抽出复用；含独立 loading/错误态/重试/单卡刷新；watch(start,end,reloadKey) 重载。
+2. **`web/src/components/ViewItemCard.vue`** 新建：单视图卡片。props: viewId/title/start/end/reloadKey。内部 `getAnalysisView(viewId)` 取配置 + `executeAnalysisView({view_id,params})` 取数据；chart_option/table 渲染逻辑从 [ViewRender.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/views/analytics/ViewRender.vue) 抽出复用；含独立 loading/错误态/重试/单卡刷新；watch(start,end,reloadKey) 重载。
 3. **`web/src/views/dashboards/DashboardView.vue`** 新建：看板渲染页。
    - 顶部：看板名 + category 标签 + 时间范围选择器（近7/30/90天/默认）+ 刷新按钮 + description alert。
    - 主体：`el-row` + `el-col :span="item.span"` 渲染 `ViewItemCard`（visible 项）。
    - 时间范围：用户选 > 看板 time_range_default > 各视图自己的；"默认"档不传 start/end。
    - 路由参数推断 dashboard：用 `route.name` 映射 code（DashboardRefund→preset_dashboard_refund 等）或 `route.params.code`。
-4. **`web/src/views/dashboards/Designer.vue`** 新建：看板配置页（数据中心）。参照 [ClassificationRules.vue](file:///Users/tanzk/dev/csctalon/web/src/views/system/ClassificationRules.vue) 的列表+dialog 模式。列表（code/name/category/items数/visibility/status/操作）+ 编辑 dialog（元信息表单 + items 编辑表：上移/下移/标题覆盖/span/可见/删除 + "添加视图"打开视图选择 dialog 多选）。编辑预设看板时 code/category disabled。
+4. **`web/src/views/dashboards/Designer.vue`** 新建：看板配置页（数据中心）。参照 [ClassificationRules.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/views/system/ClassificationRules.vue) 的列表+dialog 模式。列表（code/name/category/items数/visibility/status/操作）+ 编辑 dialog（元信息表单 + items 编辑表：上移/下移/标题覆盖/span/可见/删除 + "添加视图"打开视图选择 dialog 多选）。编辑预设看板时 code/category disabled。
 5. **`web/src/views/dashboards/Special.vue`** 新建：专项跟进页。顶部 el-select 切换 category=专项 的看板 + "配置专项看板"按钮跳 Designer；主体复用 `DashboardView` 组件（传 dashboardId）；无专项看板时 el-empty 提示。
 6. **`web/src/router/index.js`** 新增路由（决策看板区，meta.manager）：
    - `dashboards/refund` → DashboardView（DashboardRefund）
@@ -120,14 +120,14 @@ agent → [public]
 
 ## 复用的现有资产
 
-- [analysis_engine.execute_view](file:///Users/tanzk/dev/csctalon/backend/app/services/analysis_engine.py) — 视图执行，看板 item 直接调 `/analysis-views/execute` 复用
-- [preset_views_seed.PRESET_VIEWS](file:///Users/tanzk/dev/csctalon/backend/app/services/preset_views_seed.py) — 24 预设视图，看板 items 引用其 code
-- [deps.py](file:///Users/tanzk/dev/csctalon/backend/app/api/deps.py) — CurrentUser/AdminOrSupervisor/DBSession
-- [BaseChart.vue](file:///Users/tanzk/dev/csctalon/web/src/components/BaseChart.vue) — echarts 通用组件
-- [ViewRender.vue](file:///Users/tanzk/dev/csctalon/web/src/views/analytics/ViewRender.vue) — chart_option/table 渲染逻辑抽出
-- [ClassificationRules.vue](file:///Users/tanzk/dev/csctalon/web/src/views/system/ClassificationRules.vue) — CRUD 配置页模式
-- [stores/auth.js](file:///Users/tanzk/dev/csctalon/web/src/stores/auth.js) — isManager/isAdmin 权限
-- 路由守卫 [router/index.js L181-194](file:///Users/tanzk/dev/csctalon/web/src/router/index.js) — meta.admin/manager 已支持
+- [analysis_engine.execute_view](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services/analysis_engine.py) — 视图执行，看板 item 直接调 `/analysis-views/execute` 复用
+- [preset_views_seed.PRESET_VIEWS](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services/preset_views_seed.py) — 24 预设视图，看板 items 引用其 code
+- [deps.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/deps.py) — CurrentUser/AdminOrSupervisor/DBSession
+- [BaseChart.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/components/BaseChart.vue) — echarts 通用组件
+- [ViewRender.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/views/analytics/ViewRender.vue) — chart_option/table 渲染逻辑抽出
+- [ClassificationRules.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/views/system/ClassificationRules.vue) — CRUD 配置页模式
+- [stores/auth.js](file:///Users/tanzk/dev-tmp/csctalon/web/src/stores/auth.js) — isManager/isAdmin 权限
+- 路由守卫 [router/index.js L181-194](file:///Users/tanzk/dev-tmp/csctalon/web/src/router/index.js) — meta.admin/manager 已支持
 
 ## 分阶段
 

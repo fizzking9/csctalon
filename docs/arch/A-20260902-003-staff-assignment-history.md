@@ -78,7 +78,7 @@
 
 ### Phase 1 后端模型 + 迁移
 
-**1.1** 新建 [staff_assignment.py](file:///Users/tanzk/dev/csctalon/backend/app/models/staff_assignment.py)
+**1.1** 新建 [staff_assignment.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/models/staff_assignment.py)
 - `StaffAssignment(IDMixin, TimestampMixin, Base)`:
   - `person_id` FK→persons.id ondelete=CASCADE indexed
   - `effective_from: Date` not null indexed
@@ -93,16 +93,16 @@
   - `Index("ix_staff_assignments_person_effective", "person_id", "effective_from", "effective_to")`
   - `Index("uq_staff_assignments_current_per_person", "person_id", unique=True, postgresql_where=text("is_current = true"))`
 
-**1.2** 改 [person.py](file:///Users/tanzk/dev/csctalon/backend/app/models/person.py) — `Person` 加字段:
+**1.2** 改 [person.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/models/person.py) — `Person` 加字段:
 - `position` String(32) nullable(当前岗位镜像)
 - `specialty` String(64) nullable(当前专项镜像)
 - `hire_date/probation_end_date/regularization_date/resignation_date` Date nullable
 - `employment_status` String(16) default 'active' not null(active/probation/regular/resigned,派生但存储)
 - `group_name` 注释更新为"当前组(镜像自最新任职)"
 
-**1.3** 改 [__init__.py](file:///Users/tanzk/dev/csctalon/backend/app/models/__init__.py) — import + `__all__` 加 `StaffAssignment`
+**1.3** 改 [__init__.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/models/__init__.py) — import + `__all__` 加 `StaffAssignment`
 
-**1.4** 新建迁移 [u0d1e2f3a4b5_add_staff_assignments.py](file:///Users/tanzk/dev/csctalon/backend/alembic/versions/u0d1e2f3a4b5_add_staff_assignments.py)
+**1.4** 新建迁移 [u0d1e2f3a4b5_add_staff_assignments.py](file:///Users/tanzk/dev-tmp/csctalon/backend/alembic/versions/u0d1e2f3a4b5_add_staff_assignments.py)
 - `revision="u0d1e2f3a4b5"`,`down_revision="t9c0d1e2f3a4"`(当前 head)
 - `op.create_table("staff_assignments", ...)` + ForeignKeyConstraint(ondelete CASCADE) + PrimaryKeyConstraint
 - 索引:`ix_staff_assignments_person_id` / `ix_staff_assignments_effective_from` / `ix_staff_assignments_is_current` / `ix_staff_assignments_person_effective` / `uq_staff_assignments_current_per_person`(部分唯一)
@@ -111,20 +111,20 @@
 
 ### Phase 2 后端 Schema
 
-**2.1** 新建 [staff_assignment.py](file:///Users/tanzk/dev/csctalon/backend/app/schemas/staff_assignment.py)
+**2.1** 新建 [staff_assignment.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/schemas/staff_assignment.py)
 - `StaffAssignmentOut(from_attributes)`:全字段
 - `StaffAssignmentCreate`:effective_from(date 必填)/position/specialty/group_name/change_reason/source(默认 manual)/effective_to(可选)
 - `StaffAssignmentUpdate`:effective_to/change_reason/position/specialty/group_name
 - `StaffAssignmentAtOut`:同 Out 或 null
 
-**2.2** 改 [person.py](file:///Users/tanzk/dev/csctalon/backend/app/schemas/person.py)
+**2.2** 改 [person.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/schemas/person.py)
 - `PersonOut` 加 position/specialty/hire_date/probation_end_date/regularization_date/resignation_date/employment_status
 - `PersonUpdate`:**移除** `group_name`(决策 2);加 hire_date/probation_end_date/regularization_date/resignation_date/employment_status(均 Optional)
 - `MergeNewRequest` 保留 `group_name`(前端兼容)
 
 ### Phase 3 后端服务层
 
-**3.1** 新建 [staff_assignment_service.py](file:///Users/tanzk/dev/csctalon/backend/app/services/staff_assignment_service.py)
+**3.1** 新建 [staff_assignment_service.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services/staff_assignment_service.py)
 (db 始终第一参数,遵循 `_execute_upsert` 规则):
 - `list_assignments(db, person_id)`:按 effective_from desc
 - `create_assignment(db, person_id, payload, result=None)`:
@@ -138,11 +138,11 @@
 - `_apply_current_to_person(db, person, assignment)`:镜像 position/specialty/group_name
 - `recalculate_employment_status(person)`:按 resignation_date→regularization_date→probation_end_date 推导
 
-**3.2** 新建 [staff_import.py](file:///Users/tanzk/dev/csctalon/backend/app/services/staff_import.py)
+**3.2** 新建 [staff_import.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services/staff_import.py)
 - `upsert_staff_snapshot(df, mapping, db, result)`:apply_mapping 取列 → `_to_datetime(snapshot_date).date()` → 按决策 4 优先级匹配 Person(alias 精确→display_name)→ 调 `create_assignment` 复用幂等/re-chain(避免重复实现)→ 同步 Person.remark
 - 生命周期列(可选):若 mapping 含 hire_date/regularization_date 等且 df 有值,写回 Person
 
-**3.3** 改 [data_parser.py](file:///Users/tanzk/dev/csctalon/backend/app/services/data_parser.py) — `COLUMN_TEMPLATES["staff"]`:
+**3.3** 改 [data_parser.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services/data_parser.py) — `COLUMN_TEMPLATES["staff"]`:
 ```
 display_name←姓名, alias_kefu←客服名, alias_name1←名称1, alias_name2←名称2,
 remark←备注, specialty←专项, position←岗位, snapshot_date←更新时间,
@@ -150,11 +150,11 @@ remark←备注, specialty←专项, position←岗位, snapshot_date←更新�
 hire_date←入职日期, probation_end_date←试用期到期, regularization_date←转正日期, resignation_date←离职日期
 ```
 
-**3.4** 改 [uploads.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/uploads.py) — `DATA_TYPES` 加 `"staff"`(仅影响 /uploads/parse 的 gate 与 suggest_mapping,UPSERT_DISPATCH 不加)
+**3.4** 改 [uploads.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/uploads.py) — `DATA_TYPES` 加 `"staff"`(仅影响 /uploads/parse 的 gate 与 suggest_mapping,UPSERT_DISPATCH 不加)
 
 ### Phase 4 后端 API
 
-**4.1** 新建 [staff_assignments.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/staff_assignments.py)
+**4.1** 新建 [staff_assignments.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/staff_assignments.py)
 `router = APIRouter(prefix="/persons", tags=["系统-人员任职"])`:
 - `GET /persons/{person_id}/assignments` — AdminOrSupervisor,返回 list[StaffAssignmentOut]
 - `POST /persons/{person_id}/assignments` — AdminOrSupervisor,body=StaffAssignmentCreate
@@ -164,18 +164,18 @@ hire_date←入职日期, probation_end_date←试用期到期, regularization_d
 - `POST /persons/import-snapshot` — AdminUser,body={stored_path, sheet_name, encoding, column_mapping}:
   - `load_dataframe` → 建 UploadRecord(data_type="staff_snapshot", source="manual") → `upsert_staff_snapshot` → 更新统计 + status → 返回 R[ImportResponse]
 
-**4.2** 改 [persons.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/persons.py)
+**4.2** 改 [persons.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/persons.py)
 - `update_person`:写完后若生命周期日期变更,调 `recalculate_employment_status(p)` 重算写回
 - `merge_new`:建 Person 后若 group_name 非空,调 `create_assignment(db, p.id, StaffAssignmentCreate(effective_from=date.today(), group_name=..., source='manual'))`
 
-**4.3** 改 [router.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/router.py) — include staff_assignments.router
+**4.3** 改 [router.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/router.py) — include staff_assignments.router
 
 ### Phase 5 前端
 
-**5.1** 新建 [staffAssignment.js](file:///Users/tanzk/dev/csctalon/web/src/api/staffAssignment.js)
+**5.1** 新建 [staffAssignment.js](file:///Users/tanzk/dev-tmp/csctalon/web/src/api/staffAssignment.js)
 listAssignments/createAssignment/updateAssignment/deleteAssignment/getAssignmentAt/importSnapshot
 
-**5.2** 改 [Persons.vue](file:///Users/tanzk/dev/csctalon/web/src/views/system/Persons.vue) 详情抽屉:
+**5.2** 改 [Persons.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/views/system/Persons.vue) 详情抽屉:
 - `el-descriptions` 加:岗位/专项/入职日期/试用期到期/转正日期/离职日期/在职状态(el-tag)+ 生命周期编辑入口
 - 新增"任职历史"区段:`el-table`(effective_from/effective_to/position/specialty/group_name/source/is_current tag)+ 编辑/删除操作
 - "新增任职记录"`el-button`→`el-dialog`:el-date-picker(effective_from)、el-select(position:客服/组长/主管)、el-select(specialty:接待/投诉接待/主管)、el-input(group_name/change_reason)
@@ -212,23 +212,23 @@ listAssignments/createAssignment/updateAssignment/deleteAssignment/getAssignment
 ## 关键文件清单
 
 新建:
-- [backend/app/models/staff_assignment.py](file:///Users/tanzk/dev/csctalon/backend/app/models/staff_assignment.py)
-- [backend/app/schemas/staff_assignment.py](file:///Users/tanzk/dev/csctalon/backend/app/schemas/staff_assignment.py)
-- [backend/app/services/staff_assignment_service.py](file:///Users/tanzk/dev/csctalon/backend/app/services/staff_assignment_service.py)
-- [backend/app/services/staff_import.py](file:///Users/tanzk/dev/csctalon/backend/app/services/staff_import.py)
-- [backend/app/api/v1/staff_assignments.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/staff_assignments.py)
-- [backend/alembic/versions/u0d1e2f3a4b5_add_staff_assignments.py](file:///Users/tanzk/dev/csctalon/backend/alembic/versions/u0d1e2f3a4b5_add_staff_assignments.py)
-- [web/src/api/staffAssignment.js](file:///Users/tanzk/dev/csctalon/web/src/api/staffAssignment.js)
+- [backend/app/models/staff_assignment.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/models/staff_assignment.py)
+- [backend/app/schemas/staff_assignment.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/schemas/staff_assignment.py)
+- [backend/app/services/staff_assignment_service.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services/staff_assignment_service.py)
+- [backend/app/services/staff_import.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services/staff_import.py)
+- [backend/app/api/v1/staff_assignments.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/staff_assignments.py)
+- [backend/alembic/versions/u0d1e2f3a4b5_add_staff_assignments.py](file:///Users/tanzk/dev-tmp/csctalon/backend/alembic/versions/u0d1e2f3a4b5_add_staff_assignments.py)
+- [web/src/api/staffAssignment.js](file:///Users/tanzk/dev-tmp/csctalon/web/src/api/staffAssignment.js)
 
 修改:
-- [backend/app/models/person.py](file:///Users/tanzk/dev/csctalon/backend/app/models/person.py)
-- [backend/app/models/__init__.py](file:///Users/tanzk/dev/csctalon/backend/app/models/__init__.py)
-- [backend/app/schemas/person.py](file:///Users/tanzk/dev/csctalon/backend/app/schemas/person.py)
-- [backend/app/services/data_parser.py](file:///Users/tanzk/dev/csctalon/backend/app/services/data_parser.py)
-- [backend/app/api/v1/uploads.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/uploads.py)
-- [backend/app/api/v1/persons.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/persons.py)
-- [backend/app/api/v1/router.py](file:///Users/tanzk/dev/csctalon/backend/app/api/v1/router.py)
-- [web/src/views/system/Persons.vue](file:///Users/tanzk/dev/csctalon/web/src/views/system/Persons.vue)
+- [backend/app/models/person.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/models/person.py)
+- [backend/app/models/__init__.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/models/__init__.py)
+- [backend/app/schemas/person.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/schemas/person.py)
+- [backend/app/services/data_parser.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/services/data_parser.py)
+- [backend/app/api/v1/uploads.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/uploads.py)
+- [backend/app/api/v1/persons.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/persons.py)
+- [backend/app/api/v1/router.py](file:///Users/tanzk/dev-tmp/csctalon/backend/app/api/v1/router.py)
+- [web/src/views/system/Persons.vue](file:///Users/tanzk/dev-tmp/csctalon/web/src/views/system/Persons.vue)
 
 ## 风险与缓解
 

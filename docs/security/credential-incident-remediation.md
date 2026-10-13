@@ -67,7 +67,7 @@ git show ed3ddcc -- backend/scripts/fix_scrm_configs_baiyin_final.py | grep -E "
 #### 2.3 执行重写(在仓库根目录)
 
 ```bash
-cd /Users/tanzk/dev/csctalon
+cd /Users/tanzk/dev-tmp/csctalon
 
 # 先备份(保险)
 git bundle create /tmp/csctalon-backup-$(date +%Y%m%d).bundle --all
