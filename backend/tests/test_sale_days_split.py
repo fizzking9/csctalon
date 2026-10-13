@@ -82,9 +82,10 @@ def test_sale_days_split_bucket_boundaries(db):
         _mk_refund(db, sn, "100")
 
     split = _overview(db)["sale_days_split"]
-    # #295: 五桶 + (无激活记录), 顺序按时长由短到长(后端常量单一来源)
+    # #295: 五桶 + (无SN) + (无激活记录), 顺序按时长由短到长(后端常量单一来源)
+    # #311 方案D: (无SN) 单独桶在 (无激活记录) 前(SN 缺失不再混入无激活记录)
     assert [b["bucket"] for b in split] == [
-        "0-15天", "16-30天", "31-180天", "181-365天", ">365天", "(无激活记录)",
+        "0-15天", "16-30天", "31-180天", "181-365天", ">365天", "(无SN)", "(无激活记录)",
     ]
     for days, bucket in cases:
         assert _bucket(split, bucket)["cnt"] >= 1, f"{bucket} 应至少含本测试 1 笔"

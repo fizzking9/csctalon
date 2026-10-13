@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -829,3 +829,59 @@ def _manual_dedup_key(r: dict) -> tuple:
         (r.get("device_sn") or "").strip(),
         (r.get("registrant") or "").strip(),
     )
+
+
+def _resolve_device_sn_by_order(db: Session, order_no: str) -> str | None:
+    """按订单号反查 device_sn(#311 方案 B: D 路 manual_refunds SN 回填机制)。
+
+    手动退款 Excel 中常缺 device_sn 但有 order_no(90 天 2200/7618 = 28.9%);
+    此时按 order_no 跨表反查 SN 回填, 命中率 ~54.6%(实测 90 天窗口)。
+
+    按优先级查三张表(同 order_no 在不同表对应不同业务环节, 取并集):
+      1. refunds.platform_order_no / third_order_no  (已退款记录带 SN, 命中 24.6%)
+      2. device_combos.recharge_order_no              (设备充值订单, 命中 46.6%)
+      3. bms_orders.order_no                          (BMS 订单, 命中率极低, 兜底)
+
+    反查不到返回 None(调用方在历史回填脚本里打 'sn_unresolvable' 标记;
+    导入路径下保持 None, 不影响去重键 COALESCE(device_sn, '') 一致性)。
+
+    注意:
+    - 函数内部 import 模型, 避免顶层循环依赖(_core 被 _refunds import)。
+    - 反查源都 FK 到 devices.sn, 命中即真 SN, 不会创建伪设备行。
+    """
+    from app.models.bms_order import BmsOrder
+    from app.models.device_combo import DeviceCombo
+    from app.models.refund import Refund
+
+    # 1. refunds: platform_order_no / third_order_no 二选一
+    r = db.execute(
+        select(Refund.device_sn).where(
+            or_(Refund.platform_order_no == order_no,
+                Refund.third_order_no == order_no),
+            Refund.device_sn.isnot(None),
+        ).limit(1)
+    ).first()
+    if r and r[0]:
+        return str(r[0])
+
+    # 2. device_combos: recharge_order_no 主键命中
+    r = db.execute(
+        select(DeviceCombo.device_sn).where(
+            DeviceCombo.recharge_order_no == order_no,
+            DeviceCombo.device_sn.isnot(None),
+        ).limit(1)
+    ).first()
+    if r and r[0]:
+        return str(r[0])
+
+    # 3. bms_orders: order_no 主键命中(兜底)
+    r = db.execute(
+        select(BmsOrder.device_sn).where(
+            BmsOrder.order_no == order_no,
+            BmsOrder.device_sn.isnot(None),
+        ).limit(1)
+    ).first()
+    if r and r[0]:
+        return str(r[0])
+
+    return None

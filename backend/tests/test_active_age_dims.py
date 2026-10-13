@@ -212,6 +212,9 @@ def test_decision_overview_device_dims_four_routes(db):
     同一设备四路各造 1 笔不同金额 → 商户/型号桶 count=4 且 routes 分路明细齐全;
     同时回归 #293 状态口径: 线下已退款 / 线上申请中不入桶(A 路只收线上+已退款);
     sale_days_split 同为四路数据面(激活10天 → #295 0-15天 桶含全部 4 笔)。
+
+    #311 方案C(2026-10-13): C 路闪猫退款独立单列, 4 路汇总改 3 路(A+B+D);
+    device_dims/sale_days_split 排除 C 路, C 路独立到 c_route_summary。
     """
     sn = _uniq("SN-4R")
     _mk_device(db, sn, merchant_name="商户4R")
@@ -240,23 +243,30 @@ def test_decision_overview_device_dims_four_routes(db):
     ov = refund_decision_overview(
         db, start=str(date.today() - timedelta(days=1)), end=str(date.today()), grain="day",
     )
+    # #311 方案C: device_dims 是 3 路汇总(A+B+D), C 路独立到 c_route_summary
     merch = {r["name"]: r for r in ov["device_dims"]["by_merchant"]}
     row = merch["商户4R"]
-    assert row["count"] == 4                       # 四路齐全, 线下/申请中不计入
-    assert abs(row["amount"] - 100.0) < 0.01       # 10+20+30+40
-    assert set(row["routes"]) == {"A 线上直退", "B 钱包提现", "C 闪猫退款", "D 手动退款"}
-    for rk, amt in (("A 线上直退", 10.0), ("B 钱包提现", 20.0),
-                    ("C 闪猫退款", 30.0), ("D 手动退款", 40.0)):
+    assert row["count"] == 3                       # 三路 A+B+D(C 路独立, 不混入)
+    assert abs(row["amount"] - 70.0) < 0.01        # 10+20+40(排除 C 路 30)
+    assert set(row["routes"]) == {"A 线上直退", "B 钱包提现", "D 手动退款"}
+    for rk, amt in (("A 线上直退", 10.0), ("B 钱包提现", 20.0), ("D 手动退款", 40.0)):
         assert row["routes"][rk]["count"] == 1
         assert abs(row["routes"][rk]["amount"] - amt) < 0.01
-    # 型号桶同为四路口径
+    # 型号桶同为三路口径
     types = {r["name"]: r["count"] for r in ov["device_dims"]["by_device_type"]}
-    assert types.get("CPE-4R", 0) == 4
-    # sale_days_split 同为四路: 激活10天 → 0-15天 桶含全部 4 笔(#295 五桶)
+    assert types.get("CPE-4R", 0) == 3
+    # sale_days_split 同为三路: 激活10天 → 0-15天 桶含 A+B+D 3 笔(#295 五桶, #311 排除 C 路)
     sb = next(b for b in ov["sale_days_split"] if b["bucket"] == "0-15天")
-    assert sb["cnt"] == 4
-    assert abs(sb["amount"] - 100.0) < 0.01
-    assert set(sb["routes"]) == {"A 线上直退", "B 钱包提现", "C 闪猫退款", "D 手动退款"}
+    assert sb["cnt"] == 3
+    assert abs(sb["amount"] - 70.0) < 0.01
+    assert set(sb["routes"]) == {"A 线上直退", "B 钱包提现", "D 手动退款"}
+    # #311 方案C: c_route_summary 独立展示 C 路(1 笔 30 元)
+    assert ov["c_route_summary"]["count"] == 1
+    assert abs(ov["c_route_summary"]["amount"] - 30.0) < 0.01
+    c_sb = next(b for b in ov["c_route_summary"]["sale_days_split"] if b["bucket"] == "0-15天")
+    assert c_sb["cnt"] == 1
+    assert abs(c_sb["amount"] - 30.0) < 0.01
+    assert set(c_sb["routes"]) == {"C 闪猫退款"}
 
 
 def test_backlog_active_age_and_dims(db):

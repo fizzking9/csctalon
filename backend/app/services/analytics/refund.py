@@ -1640,22 +1640,26 @@ def refund_decision_overview(
             ev = ev.replace(tzinfo=TZ)
         return ev.astimezone(TZ).date()
 
-    route_item_rows: list[tuple[str, str | None, Decimal, Any]] = []  # (路名, SN, 金额元, 归日锚点)
+    route_item_rows: list[tuple[str, str | None, Decimal, Any, str | None]] = []  # (路名, SN, 金额元, 归日锚点, 退款时套餐名)
     # A 线上直退: 线上+已退款+排除已治理行; 归日=实际扣款→最新更新→创建(2026-09-09 对账口径)
+    # #311 方案A: pkg=refunds.package_name(退款发生时真实套餐, 实测 100% 有值; 工厂质检 0 笔)
     for r in db.execute(text(f"""
         SELECT r.device_sn AS sn, r.refund_amount AS amt,
-               COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) AS ev
+               COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) AS ev,
+               r.package_name AS pkg
         FROM refunds r
         WHERE r.refund_method = '线上' AND r.status = '已退款'
           AND {stats_quality_excluded_sql('r.quality_status')}
           AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
           AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) <= :te
     """), {"ts": cur_s, "te": cur_e}).fetchall():
-        route_item_rows.append(("A 线上直退", r.sn, D(r.amt), r.ev))
+        route_item_rows.append(("A 线上直退", r.sn, D(r.amt), r.ev, r.pkg))
     # B 钱包提现: 用户提现+排除失败/冻结备注+排除已治理行; 归日=实际扣款→操作
+    # B 路无 package_name 字段(钱包流水无套餐概念), pkg=NULL, by_combo 回落到 dd_attrs.combo
     for r in db.execute(text(f"""
         SELECT w.device_sn AS sn, w.op_amount AS amt,
-               COALESCE(w.actual_refund_time, w.op_time) AS ev
+               COALESCE(w.actual_refund_time, w.op_time) AS ev,
+               NULL::text AS pkg
         FROM wallet_withdrawals w
         WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts
           AND COALESCE(w.actual_refund_time, w.op_time) <= :te
@@ -1663,31 +1667,35 @@ def refund_decision_overview(
           AND {_withdraw_fail_remark_sql_cond()}
           AND {stats_quality_excluded_sql('w.quality_status')}
     """), {"ts": cur_s, "te": cur_e}).fetchall():
-        route_item_rows.append(("B 钱包提现", r.sn, D(r.amt), r.ev))
+        route_item_rows.append(("B 钱包提现", r.sn, D(r.amt), r.ev, r.pkg))
     # C 闪猫退款: 已退款+排除已治理行; 金额=实际→申请; 归日=退款→审核→创建
+    # #311 方案A: pkg=shanmao_refunds.package_name(闪猫侧套餐名)
     for r in db.execute(text(f"""
         SELECT s.device_sn AS sn, COALESCE(s.actual_amount, s.refund_amount, 0) AS amt,
-               COALESCE(s.refund_time, s.audit_time, s.created_at) AS ev
+               COALESCE(s.refund_time, s.audit_time, s.created_at) AS ev,
+               s.package_name AS pkg
         FROM shanmao_refunds s
         WHERE COALESCE(s.refund_time, s.audit_time, s.created_at) >= :ts
           AND COALESCE(s.refund_time, s.audit_time, s.created_at) <= :te
           AND s.status = '已退款'
           AND {stats_quality_excluded_sql('s.quality_status')}
     """), {"ts": cur_s, "te": cur_e}).fetchall():
-        route_item_rows.append(("C 闪猫退款", r.sn, D(r.amt), r.ev))
+        route_item_rows.append(("C 闪猫退款", r.sn, D(r.amt), r.ev, r.pkg))
     # D 手动退款: is_refunded='是'+排除已治理行(_d_excl_q 见区块1); 归日=实际扣款→操作→登记
+    # D 路 manual_refunds 无 package_name 字段(商户号后台退款台账无套餐), pkg=NULL, 走 dd_attrs.combo 回落
     for r in db.execute(text(f"""
         SELECT m.device_sn AS sn, m.refund_amount AS amt,
-               COALESCE(m.actual_refund_time, m.op_time, m.register_time) AS ev
+               COALESCE(m.actual_refund_time, m.op_time, m.register_time) AS ev,
+               NULL::text AS pkg
         FROM manual_refunds m
         WHERE COALESCE(m.actual_refund_time, m.op_time, m.register_time) >= :ts
           AND COALESCE(m.actual_refund_time, m.op_time, m.register_time) <= :te
           AND m.is_refunded = '是'
           {"AND " + _EXCL_QSTATUS_SQL if _d_excl_q else ''}
     """), {"ts": cur_s, "te": cur_e}).fetchall():
-        route_item_rows.append(("D 手动退款", r.sn, D(r.amt), r.ev))
+        route_item_rows.append(("D 手动退款", r.sn, D(r.amt), r.ev, r.pkg))
 
-    dd_attrs = _device_dim_attrs(db, {sn for (_rk, sn, _a, _e) in route_item_rows if sn})
+    dd_attrs = _device_dim_attrs(db, {sn for (_rk, sn, _a, _e, _p) in route_item_rows if sn})
 
     # ── 7. 售出后 N 天分桶(#251 B3-5 建, #295 改桶): 出款日 − 最早激活日 五桶 ──
     #     口径随四路升级: 事件日 = 各路归日锚点(原为 A 路发起日 created_at_raw)。
@@ -1698,10 +1706,16 @@ def refund_decision_overview(
     #     ⚠️ 本块**单独核算, 不纳入售后客服指标**(用户拍板)——仅经营分析视角。
     _SALE_BUCKETS = ACTIVE_AGE_BUCKETS
 
+    # #311 方案C: C 路闪猫退款业务相对独立, 从 4 路汇总拆出独立展示
+    # (C 路 90 天 157 笔 100% 归无激活记录桶, 混入会拉低激活分析质量)
+    _C_ROUTE = "C 闪猫退款"
+    abd_rows = [r for r in route_item_rows if r[0] != _C_ROUTE]   # A+B+D 三路汇总
+    c_rows = [r for r in route_item_rows if r[0] == _C_ROUTE]    # C 路独立汇总
+
     # 激活锚点: _device_dim_attrs.active_date(bms MIN→devices.active_time, 质检套餐已过滤)
     sale_active: dict[str, Any] = {sn: a["active_date"] for sn, a in dd_attrs.items() if a.get("active_date")}
     # devices 表外的少量 SN(dd_attrs 无行): 仍按 bms MIN(active_date) 并集兜底, 不误归「无激活记录」
-    _no_dev = {sn for (_rk, sn, _a, _e) in route_item_rows if sn and sn not in dd_attrs}
+    _no_dev = {sn for (_rk, sn, _a, _e, _p) in route_item_rows if sn and sn not in dd_attrs}
     if _no_dev:
         from app.models.bms_order import BmsOrder  # 局部导入(与 _core 同法, 防循环依赖)
 
@@ -1716,12 +1730,18 @@ def refund_decision_overview(
                 sale_active[str(sn)] = fa.astimezone(TZ).date()
 
     sale_map: dict[str, list] = {b: [0, Decimal("0"), {}] for b in _SALE_BUCKETS}
-    for rk, sn, amt, ev in route_item_rows:
-        act = sale_active.get(sn)
-        ev_d = _ev_sh_date(ev)
-        # (无激活记录) = 无任何激活锚点; 事件日缺失(理论不发生)同归该桶防崩溃
-        # #295: 桶判定收口到 _core._active_age_bucket(与投诉侧/明细下钻同一函数)
-        bk = _active_age_bucket(None if (act is None or ev_d is None) else (ev_d - act).days)
+    # #311 方案C: 4 路汇总排除 C 路(C 路独立到 c_route_summary), sale_map 只遍历 abd_rows
+    for rk, sn, amt, ev, _pkg in abd_rows:
+        # #311 方案D: SN 缺失单独归 "(无SN)" 桶, 不再混入 "(无激活记录)"
+        # (实测 90 天 475 笔无激活 = 310 SN空 + 165 active_date空; 拆桶后无激活记录 165=0.65%)
+        if sn is None:
+            bk = "(无SN)"
+        else:
+            act = sale_active.get(sn)
+            ev_d = _ev_sh_date(ev)
+            # (无激活记录) = 有 SN 但查不到 active_date; 事件日缺失(理论不发生)同归该桶防崩溃
+            # #295: 桶判定收口到 _core._active_age_bucket(与投诉侧/明细下钻同一函数)
+            bk = _active_age_bucket(None if (act is None or ev_d is None) else (ev_d - act).days)
         b = sale_map[bk]
         b[0] += 1
         b[1] += amt
@@ -1738,16 +1758,46 @@ def refund_decision_overview(
         for b in _SALE_BUCKETS
     ]
 
+    # #311 方案C: C 路闪猫退款独立汇总(不混入 4 路汇总, 业务相对独立)
+    # C 路 90 天 157 笔 100% 归无激活记录桶; 独立展示避免拉低 4 路激活分析质量
+    c_sale_map: dict[str, list] = {b: [0, Decimal("0"), {}] for b in _SALE_BUCKETS}
+    for rk, sn, amt, ev, _pkg in c_rows:
+        if sn is None:
+            bk = "(无SN)"
+        else:
+            act = sale_active.get(sn)
+            ev_d = _ev_sh_date(ev)
+            bk = _active_age_bucket(None if (act is None or ev_d is None) else (ev_d - act).days)
+        b = c_sale_map[bk]
+        b[0] += 1
+        b[1] += amt
+        # C 路独立, routes 只含 C 自己(便于前端 tooltip 展示)
+        rb = b[2].setdefault(rk, [0, Decimal("0")])
+        rb[0] += 1
+        rb[1] += amt
+    c_sale_days_split = [
+        {"bucket": b,
+         "cnt": c_sale_map[b][0],
+         "amount": float(round(c_sale_map[b][1], 2)),
+         "routes": {rk: {"count": c, "amount": float(round(a2, 2))}
+                    for rk, (c, a2) in sorted(c_sale_map[b][2].items())}}
+        for b in _SALE_BUCKETS
+    ]
+
     # ── 8. 设备维度汇总(#291, 四路口径): 设备类型/套餐/商户号 分桶 ──
     #     激活时间段维度**复用上方 sale_days_split**(#251 真身, #295 五桶), 此处不重复输出 ——
     #     同一事实禁止两处汇总(AGENTS 界面纪律#5 投影规则)。
     #     未填SN/未建档分别显式分桶, 暴露数据覆盖缺口; routes=各路笔数/金额分解(前端 tooltip)。
-    def _dd_group(pick) -> list[dict[str, Any]]:
+    #     #311 方案C: rows 参数默认 abd_rows(排除 C 路); C 路独立时传 c_rows
+    def _dd_group(pick, rows: list = None) -> list[dict[str, Any]]:
+        rows = rows if rows is not None else abd_rows
+        # #311 方案A: pick 接收 (a, pkg), 让 by_combo 优先用退款发生时的 package_name
+        # (A/C 路 100% 有值; B/D 路无 package_name 字段 → pkg=None → 回落 a["combo"])
         g: dict[str, list] = {}
-        for rk, sn, amt, _ev in route_item_rows:
+        for rk, sn, amt, _ev, pkg in rows:
             a = dd_attrs.get(sn) if sn else None
             if a is not None:
-                key = pick(a) or "(未填)"
+                key = pick(a, pkg) or "(未填)"
             else:
                 key = "(未建档)" if sn else "(未填SN)"
             b = g.setdefault(key, [0, Decimal("0"), {}])
@@ -1766,9 +1816,29 @@ def refund_decision_overview(
                 for k, v in sorted(g.items(), key=lambda x: -x[1][0])][:12]
 
     device_dims = {
-        "by_device_type": _dd_group(lambda a: a["type_name"]),
-        "by_combo": _dd_group(lambda a: a["combo"]),
-        "by_merchant": _dd_group(lambda a: a["merchant"]),
+        "by_device_type": _dd_group(lambda a, _pkg: a["type_name"]),
+        # #311 方案A: by_combo 优先用退款发生时 package_name(pkg), 回落 dd_attrs.combo(设备当前套餐)
+        # 原口径(bms_orders 最新订单 combo_name)在退款分析里会因设备最新订单是质检套餐
+        # 而归 "(未填)", 实测 90 天 27.22% 笔误归; 改用 refunds.package_name 后 0 笔工厂质检
+        "by_combo": _dd_group(lambda a, pkg: pkg or a["combo"]),
+        "by_merchant": _dd_group(lambda a, _pkg: a["merchant"]),
+    }
+
+    # #311 方案C: C 路独立的设备维度汇总(用 c_rows, 不混入 4 路汇总)
+    c_device_dims = {
+        "by_device_type": _dd_group(lambda a, _pkg: a["type_name"], c_rows),
+        "by_combo": _dd_group(lambda a, pkg: pkg or a["combo"], c_rows),
+        "by_merchant": _dd_group(lambda a, _pkg: a["merchant"], c_rows),
+    }
+
+    # C 路独立汇总: 笔数/金额/激活分桶/设备维度
+    c_count = sum(1 for _ in c_rows)
+    c_amount = sum((r[2] for r in c_rows), Decimal("0"))   # r[2] = amt
+    c_route_summary = {
+        "count": c_count,
+        "amount": float(round(c_amount, 2)),
+        "sale_days_split": c_sale_days_split,
+        "device_dims": c_device_dims,
     }
 
     return {
@@ -1780,6 +1850,9 @@ def refund_decision_overview(
         "reason_operator": reason_operator,
         "sale_days_split": sale_days_split,
         "device_dims": device_dims,
+        # #311 方案C: C 路闪猫退款独立汇总(业务相对独立, 不混入 4 路汇总)
+        # 前端可单独展示 C 路笔数/金额/激活分桶/设备维度
+        "c_route_summary": c_route_summary,
     }
 
 

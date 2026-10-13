@@ -125,6 +125,12 @@
             </div>
           </el-col>
         </el-row>
+        <!-- #311 方案C: C 路闪猫退款独立提示行(业务相对独立, 已从下方激活/维度分析拆出) -->
+        <div v-if="cRouteSummary.count" class="c-route-hint">
+          <el-icon style="color:#9333ea;vertical-align:-1px"><InfoFilled /></el-icon>
+          <span>其中 C 路闪猫退款 <b>{{ cRouteSummary.count }}</b> 笔 · ¥{{ formatMoney(cRouteSummary.amount) }}
+            （业务相对独立, 已从下方「激活时长」「设备维度」分析拆出单列, 不混入三路 A+B+D 汇总）</span>
+        </div>
         <el-alert
           v-if="summary.conclusions && summary.conclusions.length"
           type="info" :closable="false" show-icon
@@ -514,7 +520,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { RefreshLeft, QuestionFilled } from '@element-plus/icons-vue'
+import { InfoFilled, RefreshLeft, QuestionFilled } from '@element-plus/icons-vue'
 import BaseChart from '@/components/BaseChart.vue'
 import { refundDeep, refundWithdrawal } from '@/api/analytics'
 import { useAudit } from '@/composables/useAudit'
@@ -799,6 +805,8 @@ const reasonOption = computed(() => {
 // 2026-10-10 口径升级: 后端由 A 单路改为四路 A+B+C+D 全量, 每桶附 routes 分路明细 → tooltip 展示。
 // 2026-10-11 #295: 激活时长六桶改五桶(0-15/16-30/31-180/181-365/>365/(无激活记录)), 与投诉侧统一。
 const deviceDims = computed(() => data.value?.device_dims || {})
+// #311 方案C: C 路闪猫退款独立汇总(业务相对独立, 不混入 4 路激活/维度分析)
+const cRouteSummary = computed(() => data.value?.c_route_summary || {})
 
 // 四路分路明细行(A/B/C/D, 固定顺序), 供 tooltip 展示每桶的路构成
 const ROUTE_ORDER = ['A 线上直退', 'B 钱包提现', 'C 闪猫退款', 'D 手动退款']
@@ -858,7 +866,9 @@ const merchantOption = computed(() => _dimPieOption(deviceDims.value.by_merchant
 // 点击桶 1:1 映射到明细 active_age 参数(锚点/路径差异致下钻为近似映射, 见区块六设计说明)
 const SALE_AGE_PARAM = {
   '0-15天': 'le15', '16-30天': '16-30', '31-180天': '31-180',
-  '181-365天': '181-365', '>365天': 'gt365', '(无激活记录)': 'none',
+  '181-365天': '181-365', '>365天': 'gt365',
+  // #311 方案D: (无SN) 单独桶, SN 缺失的退款行不再混入 (无激活记录)
+  '(无SN)': 'nosn', '(无激活记录)': 'none',
 }
 const activeAgeOption = computed(() => {
   const list = data.value?.sale_days_split || []
@@ -1008,6 +1018,10 @@ onMounted(load)
 .mt-12 { margin-top: 12px; }
 .error-msg { color: #f56c6c; padding: 12px; background: #fef0f0; border-radius: 4px; margin-bottom: 16px; }
 .conclusion-line { line-height: 1.8; font-size: 13px; color: #334155; }
+/* #311 方案C: C 路闪猫退款独立提示行(KPI 区下方, conclusions 上方) */
+.c-route-hint { margin: 6px 0 4px; padding: 6px 10px; background: #fdf4ff; border-radius: 6px;
+  font-size: 12px; color: #6b21a8; line-height: 1.5; }
+.c-route-hint b { color: #9333ea; }
 .kpi-card { border-radius: 10px; padding: 12px 14px 10px; border: 1px solid rgba(148,163,184,0.15); display: flex; flex-direction: column; gap: 3px; min-height: 84px; }
 /* #205 可下钻卡片: cursor:pointer + hover 反馈(规范 §3.5 交互一致性) */
 .kpi-drill { cursor: pointer; transition: box-shadow 0.15s ease, transform 0.15s ease; }

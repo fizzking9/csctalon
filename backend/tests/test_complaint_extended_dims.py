@@ -182,8 +182,9 @@ def test_dims_active_days_buckets(db):
     db.flush()
 
     rows = _dim(db)["by_active_days"]
-    # #295 五桶 + 无激活记录, 桶名与 _core.ACTIVE_AGE_BUCKETS 单一来源一致
-    assert _names(rows) == ["0-15天", "16-30天", "31-180天", "181-365天", ">365天", "(无激活记录)"]
+    # #295 五桶 + (无SN) + 无激活记录, 桶名与 _core.ACTIVE_AGE_BUCKETS 单一来源一致
+    # #311 方案D: (无SN) 单独桶(投诉侧 SN 100% 有值, 该桶 count=0, 但桶列表统一)
+    assert _names(rows) == ["0-15天", "16-30天", "31-180天", "181-365天", ">365天", "(无SN)", "(无激活记录)"]
     amap = {r["name"]: r["count"] for r in rows}
     assert amap["0-15天"] >= 1
     assert amap["16-30天"] >= 1

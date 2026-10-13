@@ -9,9 +9,13 @@
   ok           人工确认通过(quality_confirm/quality_fix 置位)
   dup_residual 已治理重复(从经营统计排除, 不物理删除, 可恢复)
   ignored      人工裁定彻底忽略(从经营统计排除, 通用"该笔不纳入", A-20260909-001 §2.2)
+  sn_unresolvable D路手动退款 device_sn 缺失且 order_no 三表(refunds/device_combos/
+                bms_orders)反查均无匹配(#311 方案B, 由 backfill_manual_refund_sn.py 打标);
+                不进入 STATS_EXCLUDED_QUALITY_STATUSES, 不影响经营统计口径, 仅作数据质量页可见标记
 
 统计排除约定(analytics/_quality_exclude): COALESCE(quality_status,'') NOT IN
 ('dup_residual','ignored')  → 这两个状态的行不纳入经营四路 A/B/C/D 统计。
+(sn_unresolvable 不在排除集合, 仍计入统计——D 路退款金额仍发生, 仅 SN 缺失不影响金额口径)
 
 校验规则(按表配置, 全部 4 类):
   R-时间  时间字段异常: 缺失/未来日期/年份错位(远古)/时间倒挂/跨度异常

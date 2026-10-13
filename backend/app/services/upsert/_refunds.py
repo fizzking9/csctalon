@@ -32,6 +32,7 @@ from app.services.upsert._core import (
     _looks_like_bad_refund_no,
     _manual_dedup_key,
     _op_str,
+    _resolve_device_sn_by_order,
     _sanitize_date,
     _sanitize_name_field,
     _sync_devices,
@@ -500,12 +501,21 @@ def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session
             registrant = _sanitize_name_field(data.get("registrant"), idx, result, "手动退款-登记人")
             refund_operator = _sanitize_name_field(data.get("refund_operator"), idx, result, "手动退款-退款操作人")
             raw_refunded = (data.get("is_refunded") or "").strip() if data.get("is_refunded") is not None else ""
+            # #311 方案B: Excel 无 SN 但有订单号 → 按 order_no 跨表反查 SN 回填
+            # (refunds.platform_order_no / device_combos.recharge_order_no / bms_orders.order_no)
+            # 命中率约 54.6%, 命中即真 SN(反查源均 FK 到 devices.sn)。
+            # 反查不到仍留 None, 历史回填脚本批量打 'sn_unresolvable' 标记。
+            device_sn = (data.get("device_sn") or "").strip() if data.get("device_sn") else None
+            if not device_sn and order_no:
+                resolved = _resolve_device_sn_by_order(db, order_no)
+                if resolved:
+                    device_sn = resolved
             rows.append({
                 "register_time": register_time,
                 # ⚠️ 2026-09-05 (#20): 纠错(auto_fixed)发生时保留原始值到 register_time_raw,
                 #   供审计/回滚; 未纠错(值与 register_time 相同)则置 NULL
                 "register_time_raw": register_time_before if quality_status == "auto_fixed" else None,
-                "device_sn": (data.get("device_sn") or "").strip() if data.get("device_sn") else None,
+                "device_sn": device_sn,
                 "order_no": order_no,
                 "merchant_id": (data.get("merchant_id") or "").strip() if data.get("merchant_id") else None,
                 "order_amount": _to_decimal(data.get("order_amount")),
