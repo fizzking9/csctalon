@@ -6,8 +6,10 @@
 - 逻辑(为何这样组织): 复用 analytics.complaint.complaint_extended_dims(判据与 #87 同源),
   挂在 complaints 子路由下 —— 缓存 key 前缀 `complaint:` 自动纳入 cache_warmer 失效 pattern。
 - 口径: 投诉判据 = 工单 service_category 空白或='投诉'(complaint_scope 唯一出口);
-  店铺/商户号取 is_current 建链(回答「现在谁在投诉」, 非时点快照); 套餐经
-  combo_name_alias(is_current) 归一; 未建链显式分桶暴露覆盖缺口。
+  店铺/商户号取 is_current 建链(回答「现在谁在投诉」, 非时点快照); 套餐(#313 已改)
+  经 _device_dim_attrs 三源回落(bms_orders 最新非质检订单 → devices.current_combo_name
+  → device_combos 最新 package_name), 过滤工厂质检, 与退款侧 by_combo 同源;
+  未建链显式分桶暴露覆盖缺口。
 - 取舍: 不做金额维度(投诉工单金额字段稀疏); 不做时点 SCD 快照(如需另开工单);
   每维 TopN + 其余归 (其他)。
 - 工单: #252 · 排期: docs/reports/20261009-下一步开发计划-排期规划.md §六 B3-11

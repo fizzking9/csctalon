@@ -808,8 +808,9 @@ def complaint_extended_dims(
         （回答「现在哪些店铺/商户在投诉」，运营动作面向当前归属；非投诉发生时点 SCD 快照）
       · 设备型号: devices.device_type_code → dim_device_type.type_name，未命中回落原始
         device_type 文本，再空归 (未知类型)
-      · 套餐: devices.current_combo_name → combo_name_alias(is_current) → combo_dict
-        归一名，未命中回落原始名，空归 (无套餐)
+      · 套餐(#313 已改, 本文档同步): _device_dim_attrs 三源回落(bms_orders 最新非质检订单
+        → devices.current_combo_name → device_combos 最新 package_name), 过滤工厂质检
+        专用套餐, 与退款侧 by_combo 同源; 空归 (无套餐)。不再走 combo_name_alias 归一
       · 激活后时长: register_time − bms_orders 最早激活日(#295 五桶口径, 与 #251 同源;
         原 #252 用 devices.active_time, 已统一收敛到 bms_orders 单一基准)
       · 每维 TopN + 其余归 (其他)；未建链显式分桶暴露覆盖缺口
