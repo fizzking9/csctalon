@@ -84,7 +84,9 @@ export const refundDeep = {
   typeTrend: (params) => request.get('/analytics/refund/type-trend', { params }),
   problemTypeDetail: (params) => request.get('/analytics/refund/problem-type-detail', { params }),
   groupComparison: (params) => request.get('/analytics/refund/group-comparison', { params }),
-  decisionOverview: (params) => request.get('/analytics/refund/decision-overview', { params }),
+  // 决策概览: 90 天大窗口后端实测 65s, 默认 60s axios 会超时报"加载决策概览失败";
+  // 单独放宽至 180s(远低于 nginx 900s, 与 refundExport 120s 同模式)
+  decisionOverview: (params) => request.get('/analytics/refund/decision-overview', { params, timeout: 180000 }),
 }
 
 // 退款明细导出 Excel(blob)
