@@ -45,6 +45,34 @@ DATA_TYPES = {
     "manual_refund", "device_combo", "device_tag", "device_tag_binding",
 }
 
+# #314 手动上传入库后按 data_type 分前缀失效看板缓存(与 sync_task_manager finally 同口径,
+#   仅失效受影响 pattern, 避免过度清缓存引发冷加载)。device 类喂两侧 device_dims → 失效 refund+complaint。
+_CACHE_PATTERNS_BY_TYPE: dict[str, tuple[str, ...]] = {
+    # 退款类 → refund:* + today:*
+    "refund": ("refund:*", "today:*"),
+    "shanmao_refund": ("refund:*", "today:*"),
+    "merchant_refund": ("refund:*", "today:*"),
+    "refund_record_report": ("refund:*", "today:*"),
+    "manual_refund": ("refund:*", "today:*"),
+    "return_tracking": ("refund:*", "today:*"),
+    # 投诉类 → complaint:* + today:*
+    "external_complaint": ("complaint:*", "today:*"),
+    "card_complaint": ("complaint:*", "today:*"),
+    "cs_record": ("complaint:*", "today:*"),
+    "ticket": ("complaint:*", "today:*"),
+    # 设备类 → refund:* + complaint:* + today:*(device_dims 喂两侧看板)
+    "bms_order": ("refund:*", "complaint:*", "today:*"),
+    "device_combo": ("refund:*", "complaint:*", "today:*"),
+    "device_profile": ("refund:*", "complaint:*", "today:*"),
+    "device_flow_usage": ("refund:*", "complaint:*", "today:*"),
+    "device_tag": ("refund:*", "complaint:*", "today:*"),
+    "device_tag_binding": ("refund:*", "complaint:*", "today:*"),
+    # 其他 → today:* (wallet/merchant/staff 仅影响今日视图, 不触 refund/complaint 聚合)
+    "wallet": ("today:*",),
+    "merchant": ("today:*",),
+    "staff": ("today:*",),
+}
+
 
 @router.post("/parse", response_model=R, summary="上传并解析文件(返回预览)")
 async def parse_upload(
@@ -201,6 +229,21 @@ def confirm_import(
                 _close_gaps_from_import(db, data_type, df, mapping, record.id)
             except Exception as ge:  # noqa: BLE001 台账回写失败不影响导入结果
                 logger.warning(f"手动导入回写缺口台账失败(忽略): {ge}")
+
+            # #314 缓存规范 §九 G2: 手动上传入库后失效受影响看板缓存,
+            # 否则用户上传退款/投诉 xlsx 后看板仍读旧聚合直到 60s 自然过期。
+            # 与 sync_task_manager finally 同口径(cache_invalidate_recent_days,
+            # 仅清近 N 天窗口, 保留历史缓存); 失败静默不影响主流程(同 G1)。
+            # 按 data_type 分前缀避免过度失效引发冷加载:
+            #   退款类 → refund:* + today:*; 投诉类 → complaint:* + today:*;
+            #   设备类 → refund:* + complaint:* + today:*(device_dims 喂两侧);
+            #   其他 → today:*。
+            try:
+                from app.core.redis_client import cache_invalidate_recent_days
+                for pat in _CACHE_PATTERNS_BY_TYPE.get(data_type, ("today:*",)):
+                    cache_invalidate_recent_days(pat)
+            except Exception as ce:  # noqa: BLE001 缓存失效失败不影响导入结果
+                logger.warning(f"手动导入缓存失效失败(忽略): {ce}")
 
         # 后台异步执行关联匹配和人员别名提取（避免阻塞导入响应）
         background_tasks.add_task(_run_post_import_tasks, data_type)
