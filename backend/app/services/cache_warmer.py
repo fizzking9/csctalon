@@ -355,6 +355,110 @@ def _warm_reports(db, *, force: bool = False) -> int:
     )
 
 
+def _warm_reception(db, start: str, end: str, label: str, *,
+                    group_start: str | None = None, group_end: str | None = None,
+                    force: bool = False) -> int:
+    """预热客服接待看板 4 个接口 (analytics.reception_*)。
+
+    返回成功预热条数。key 与 analytics.py 路由层 ``f"reception:{name}:{start}:{end}"``
+    逐字符对齐(缓存规范 §5.2 铁律)。
+
+    - start/end: 接待看板大窗口(默认近 90 天, 与 ReceptionDashboard.vue 默认对齐)
+    - group_start/group_end: group-detail 接口用近 7 天窗口
+      (与 ReceptionDashboard.vue:710 「group-detail 用最近 7 天」约定对齐;
+       大窗口下行数过多, 前端不展示全部)
+
+    时间语义已确认无 8h 偏移(工单 #316 验收项):
+      service 内部统一走 ``_date_range``(_core.py:191), naive 入参按北京时间
+      解释转 UTC aware, 不存在 SCRM naive 当 UTC 的偏移风险。
+    """
+    from app.services import analytics as A
+
+    # group-detail 用单独窗口(默认回落到主窗口)
+    gs = group_start or start
+    ge = group_end or end
+    sd, ed = _dt(start), _dt(end)
+    gsd, ged = _dt(gs), _dt(ge)
+    specs = [
+        # (name, key, fn, args, kwargs)
+        ("reception:overview",
+         f"reception:overview:{start}:{end}",
+         A.reception_overview_trend, (db, sd, ed), {}),
+        ("reception:catsum",
+         f"reception:catsum:{start}:{end}",
+         A.reception_category_summary, (db, sd, ed), {}),
+        ("reception:percapita",
+         f"reception:percapita:{start}:{end}",
+         A.reception_per_capita, (db, sd, ed), {}),
+        ("reception:group",
+         f"reception:group:{gs}:{ge}",
+         A.reception_group_detail, (db, gsd, ged), {}),
+    ]
+    return sum(
+        _warm_one(key, fn, args, kw, f"{label}:{name}", force=force)
+        for name, key, fn, args, kw in specs
+    )
+
+
+def _warm_refund_deep(db, start: str, end: str, label: str, *,
+                      force: bool = False) -> int:
+    """预热退款深度分析看板 8 个核心接口 (analytics.refund_*)。
+
+    返回成功预热条数。key 与 analytics.py 路由层逐字符对齐(缓存规范 §5.2 铁律)。
+    覆盖 RefundDashboard 月报场景默认入口(近 30 天); 单日/区间模式由路由层
+    cached_call 按需回填, 不在预热范围。
+
+    ⚠️ key 中的 ``None`` 是 Python None 经 f-string 转字符串 "None", 必须与
+       路由层 ``f"refund:pa:{start}:{end}:{department}:..."`` 在 start/department 等
+       为 None 时的输出**逐字符对齐** —— 工单 #316 验收项「grep 核对」。
+    ⚠️ service 函数签名变更时, 本处 kwargs 必须同步(参见 test_cache_warmer_alignment.py)。
+    """
+    from app.services import analytics as A
+
+    specs = [
+        # (name, key, fn, args, kwargs)
+        # refund:do (decision-overview) - 默认 grain=day
+        ("refund:do",
+         f"refund:do:{start}:{end}:day",
+         A.refund_decision_overview, (db, start, end), {"grain": "day"}),
+        # refund:gc (group-comparison) - 无额外参数
+        ("refund:gc",
+         f"refund:gc:{start}:{end}",
+         A.refund_group_comparison, (db, start, end), {}),
+        # refund:pa (personnel-analysis) - 默认无筛选
+        ("refund:pa",
+         f"refund:pa:{start}:{end}:None:None:None:None",
+         A.refund_personnel_analysis, (db, start, end),
+         {"department": None, "group": None, "specialty": None, "staff_type": None}),
+        # refund:prm (person-reason-matrix) - top=15 默认
+        ("refund:prm",
+         f"refund:prm:{start}:{end}:15",
+         A.refund_person_reason_matrix, (db, start, end), {"top": 15}),
+        # refund:ptd (problem-type-detail) - top=10 默认
+        ("refund:ptd",
+         f"refund:ptd:{start}:{end}:10",
+         A.refund_problem_type_detail, (db, start, end), {"top": 10}),
+        # refund:tt (type-trend) - grain=day, dimension=reason 默认
+        ("refund:tt",
+         f"refund:tt:{start}:{end}:day:reason",
+         A.refund_type_trend, (db, start, end), {"grain": "day", "dimension": "reason"}),
+        # refund:da (device-analysis) - 默认参数(limit=20)
+        ("refund:da",
+         f"refund:da:{start}:{end}:None:None:None:None:20",
+         A.refund_device_analysis, (db, start, end),
+         {"reason": None, "amount_min": None, "amount_max": None,
+          "reception_count_min": None, "limit": 20}),
+        # refund:pt (personnel-trend) - grain=day, operators=None 默认
+        ("refund:pt",
+         f"refund:pt:{start}:{end}:None:day",
+         A.refund_personnel_trend, (db, start, end), {"operators": None, "grain": "day"}),
+    ]
+    return sum(
+        _warm_one(key, fn, args, kw, f"{label}:{name}", force=force)
+        for name, key, fn, args, kw in specs
+    )
+
+
 def _run(label: str, do_warm) -> None:
     """单飞执行一次预热(进程级锁防并发重复计算)
 
@@ -405,17 +509,30 @@ def warm_on_startup() -> None:
 
 
 def warm_idle() -> None:
-    """空闲期预热: 今日 + 本周视图 (白天, 非同步中, 节流刷新)
+    """空闲期预热: 今日 + 本周视图 + 接待/退款深度看板 (白天, 非同步中, 节流刷新)
 
     由 bms_scheduler 主循环每分钟调用; 白天/空闲/缓存将过期时才真正重算,
     其余情况快速跳过(ttl 检查 + 单飞锁)。
+
+    #316: 接待/退款深度看板(reception:*/refund:*)原先仅路由层 60s TTL 按需回填,
+    首次访问冷加载 2-4s。现纳入节流预热(白天每分钟自检, TTL≤60 才重算),
+    实测无 8h 偏移后可考虑进 warm_after_sync(本变更仅先纳 warm_idle 降风险)。
     """
     if datetime.now(TZ_CN).hour not in DAYTIME_HOURS:
         return  # 夜间无人访问, 省计算
 
+    # 接待看板默认近 90 天(与 ReceptionDashboard.vue rangeMode='90' 对齐);
+    # group-detail 单独用近 7 天(与前端 :710 约定对齐)
+    rec_s, rec_e = _days_ago_str(89), _today_str()
+    grp_s, grp_e = _days_ago_str(6), _today_str()
+    # 退款深度看板默认近 30 天(月报场景, 与 _warm_reports 同窗口)
+    rfd_s, rfd_e = _days_ago_str(29), _today_str()
+
     def _do(db):
         _warm_today_view(db)   # 节流: 仍新鲜则跳过
         _warm_week_view(db)
+        _warm_reception(db, rec_s, rec_e, "空闲", group_start=grp_s, group_end=grp_e)
+        _warm_refund_deep(db, rfd_s, rfd_e, "空闲")
 
     _run("空闲", _do)
 
