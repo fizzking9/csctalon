@@ -38,10 +38,23 @@ WITH events AS (
     WHERE device_sn IS NOT NULL AND package_name IS NOT NULL
       AND package_name NOT LIKE '%工厂质检%'
 ),
+events_dedup AS (
+    -- 同一设备同一时间点两路事件可能同时存在(bms_order + device_combo 同 timestamp),
+    -- 需去重到唯一 package, 否则 intervals 会产生相同 (device_sn, valid_from) 撞唯一键.
+    -- 优先级: bms_order(订单记录, 更权威) > device_combo.
+    SELECT device_sn, package_name, source, order_no, evt_time
+    FROM (
+        SELECT *,
+               ROW_NUMBER() OVER (PARTITION BY device_sn, evt_time
+                                  ORDER BY CASE source WHEN 'bms_order' THEN 0 ELSE 1 END) AS rn
+        FROM events
+    ) t
+    WHERE rn = 1
+),
 ordered AS (
     SELECT device_sn, package_name, source, order_no, evt_time,
            LAG(package_name) OVER (PARTITION BY device_sn ORDER BY evt_time, source) AS prev_pkg
-    FROM events
+    FROM events_dedup
 ),
 grouped AS (
     SELECT device_sn, package_name, source, order_no, evt_time,
