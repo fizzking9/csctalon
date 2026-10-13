@@ -1321,12 +1321,17 @@ def _active_age_bucket(days: int | None) -> str:
 def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
     """SN → 设备属性映射(#292 口径修正: 型号/套餐改取 bms_orders 最新订单, 激活并集兜底)。
 
-    口径(用户拍板 2026-10-09 #292; #293 回落扩展 2026-10-10):
+    口径(用户拍板 2026-10-09 #292; #293 回落扩展 2026-10-10; #312 口径扩展 2026-10-13):
       · type_name  = bms_orders 最新订单(create_date DESC) 的 device_type_name;
                      无订单时回落 devices.device_type(#293 反填后覆盖 93%+,
                      90天退款 SN 68% 在 bms_orders 无订单 → 原全落「(未填)」)
-      · combo      = bms_orders 最新订单的 combo_name; 回落 devices.current_combo_name;
-                     工厂质检测试套餐(3 变体) → None(两源统一过滤)
+      · combo      = bms_orders **最新非质检订单**(create_date DESC 首条 combo_name 非空
+                     且不含"工厂质检")的 combo_name(#312: 设备退款/提现后回厂质检,
+                     质检单顶到最新, 会把历史正常套餐掩埋 → 跳过质检单);
+                     回落 devices.current_combo_name;
+                     再回落 device_combos 最新 package_name(#312: bms_orders 无订单
+                     但充值流水有套餐的设备, 90天实测 256 SN 因此白归「(未填)」);
+                     三源统一过滤工厂质检 → None
       · merchant   = devices.merchant_name(设备归属商户, 退款/投诉分析更准)
       · active_date = bms_orders MIN(active_date) 最早激活日; 无则 devices.active_time 兜底
                      （并集, 覆盖率 78.8% → 83.3%; #293 反填后 90%+）
@@ -1336,6 +1341,7 @@ def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
         return {}
     from app.models.bms_order import BmsOrder
     from app.models.device import Device
+    from app.models.device_combo import DeviceCombo
 
     # 1) devices 表: merchant_name + active_time(激活兜底) + device_type/current_combo_name(#293 回落)
     dev_rows = db.execute(
@@ -1344,7 +1350,8 @@ def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
         .where(Device.sn.in_(sns))
     ).all()
 
-    # 2) bms_orders: 最新订单(create_date DESC 取首条)的 device_type_name/combo_name
+    # 2) bms_orders: 最新订单(create_date DESC 取首条)的 device_type_name;
+    #    combo 取最新**非质检**订单(#312: 跳过质检单, 防历史正常套餐被顶掉)
     order_rows = db.execute(
         select(BmsOrder.device_sn, BmsOrder.device_type_name,
                BmsOrder.combo_name, BmsOrder.create_date)
@@ -1352,10 +1359,25 @@ def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
         .order_by(BmsOrder.device_sn, BmsOrder.create_date.desc().nullslast())
     ).all()
     latest: dict[str, tuple[str | None, str | None]] = {}
+    latest_nonqc_combo: dict[str, str] = {}
     for sn, type_name, combo_name, _c in order_rows:
         sn_s = str(sn)
         if sn_s not in latest:
             latest[sn_s] = (type_name, combo_name)
+        # 首个(=最新)非质检且非空 combo 即为该 SN 的真实套餐(#312)
+        if sn_s not in latest_nonqc_combo and combo_name and "工厂质检" not in combo_name:
+            latest_nonqc_combo[sn_s] = combo_name
+
+    # 2b) device_combos 最新充值流水 package_name(#312 第三回落源, 非质检)
+    dc_combo: dict[str, str] = {}
+    for sn, pkg, _c in db.execute(
+        select(DeviceCombo.device_sn, DeviceCombo.package_name, DeviceCombo.created_at_raw)
+        .where(DeviceCombo.device_sn.in_(sns), DeviceCombo.package_name.isnot(None))
+        .order_by(DeviceCombo.device_sn, DeviceCombo.created_at_raw.desc().nullslast())
+    ).all():
+        sn_s = str(sn)
+        if sn_s not in dc_combo and pkg and "工厂质检" not in pkg:
+            dc_combo[sn_s] = pkg
 
     # 3) 最早激活日: bms_orders MIN(active_date)(#251 同源)
     first_active: dict[str, Any] = {
@@ -1369,14 +1391,17 @@ def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for sn, merchant, dev_active, dev_type, dev_combo in dev_rows:
         sn_s = str(sn)
-        # bms_orders 权威优先; 无订单/字段空的 SN 回落 devices(#293 反填数据)
-        type_name, combo_name = latest.get(sn_s, (None, None))
+        # type_name: bms_orders 最新订单权威优先, 空则回落 devices(#293 反填数据)
+        type_name, _latest_combo = latest.get(sn_s, (None, None))
         if not type_name and dev_type:
             type_name = dev_type
+        # combo 回落链(#312): 最新非质检订单 → devices.current_combo_name → device_combos 最新
+        combo_name = latest_nonqc_combo.get(sn_s)
         if not combo_name and dev_combo:
             combo_name = dev_combo
-        # 工厂质检测试套餐(3 变体: 工厂质检专用套餐/全球设备工厂质检套餐/(国内))不计入分析
-        # 两源统一过滤(bms_orders 与 devices 回落值都可能来自质检流水)
+        if not combo_name:
+            combo_name = dc_combo.get(sn_s)
+        # 工厂质检测试套餐(3 变体)不计入分析, 三源统一过滤
         if combo_name and "工厂质检" in combo_name:
             combo_name = None
         fa = first_active.get(sn_s)

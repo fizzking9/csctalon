@@ -25,6 +25,7 @@ from app.api.v1.complaints._backlog import _device_dim_groups
 from app.api.v1.complaints._helpers import _query_backlog_rows
 from app.models.bms_order import BmsOrder
 from app.models.device import Device, DimDeviceType
+from app.models.device_combo import DeviceCombo
 from app.models.manual_refund import ManualRefund
 from app.models.refund import Refund
 from app.models.shanmao_refund import ShanmaoRefund
@@ -355,3 +356,51 @@ def test_factory_combo_excluded(db):
     opts = _device_dim_options(db)
     assert "工厂质检专用套餐" not in opts["combos"]
     assert any(t["value"] == "CPE-FC" for t in opts["device_types"])
+
+
+def test_combo_latest_nonqc_order_not_buried(db):
+    """#312 修复1: 最新订单=工厂质检(回厂) → combo 跳过质检单, 取历史最新非质检订单。
+
+    生产实测 480 SN: 设备退款/提现后回厂质检, 质检单 create_date 最新,
+    旧口径取"最新订单"把历史正常套餐掩埋 → (未填); 新口径跳过质检单。
+    """
+    sn = _uniq("SN-QCB")
+    _mk_device(db, sn)
+    # 历史正常套餐订单(早) + 最新质检单(晚) —— 新口径应取"正常套餐QCB"
+    _mk_order(db, sn, 100, combo_name="正常套餐QCB", create_days_ago=60)
+    _mk_order(db, sn, 5, combo_name="工厂质检专用套餐*30天", create_days_ago=1)
+    _mk_b_refund(db, sn)
+    db.flush()
+
+    ov = refund_decision_overview(
+        db, start=str(date.today() - timedelta(days=1)), end=str(date.today()), grain="day",
+    )
+    combos = {r["name"]: r["count"] for r in ov["device_dims"]["by_combo"]}
+    assert combos.get("正常套餐QCB", 0) >= 1
+    assert all("工厂质检" not in n for n in combos)
+
+
+def test_combo_device_combos_fallback(db):
+    """#312 修复2: bms_orders 无订单 + 档案套餐空 → combo 回落 device_combos 最新 package_name。
+
+    生产实测 256 SN: BMS 订单表无记录但充值流水(device_combos)有套餐名,
+    旧口径回落链未接 device_combos → (未填); 新口径第三回落源补上。
+    """
+    sn = _uniq("SN-DCF")
+    _mk_device(db, sn)  # current_combo_name 空, 且无 bms_orders
+    # 较早一条 + 较新一条, 应取较新的 package_name
+    db.add(DeviceCombo(recharge_order_no=_uniq("RC"), device_sn=sn,
+                       package_name="旧流水套餐DCF",
+                       created_at_raw=datetime.now(UTC) - timedelta(days=30)))
+    db.add(DeviceCombo(recharge_order_no=_uniq("RC"), device_sn=sn,
+                       package_name="充值流水套餐DCF",
+                       created_at_raw=datetime.now(UTC)))
+    _mk_b_refund(db, sn)
+    db.flush()
+
+    ov = refund_decision_overview(
+        db, start=str(date.today() - timedelta(days=1)), end=str(date.today()), grain="day",
+    )
+    combos = {r["name"]: r["count"] for r in ov["device_dims"]["by_combo"]}
+    assert combos.get("充值流水套餐DCF", 0) >= 1   # 最新一条生效
+    assert "旧流水套餐DCF" not in combos
