@@ -16,7 +16,10 @@
 并集命中率 ~54.6% (90 天实测 1201/2200)。
 
 ## 处理逻辑
-- 命中: UPDATE device_sn = <反查值> (保留 quality_status 不变, 仅回填 SN)
+- 命中且安全: UPDATE device_sn = <反查值> (保留 quality_status 不变, 仅回填 SN)
+- 命中但撞去重键: 同订单已存在同 SN+同登记人 的登记行(重复登记, 一空 SN 一不空),
+  回填会违反 uq_manual_refunds_dedup → 打标 quality_status='dup_residual'
+  (重复残留, 在 STATS_EXCLUDED_QUALITY_STATUSES 内, 不进统计), 不回填 SN
 - 未命中: UPDATE quality_status='sn_unresolvable',
            quality_note='[SN无法反查] order_no=<xxx> 三表均无匹配'
   (该状态不进入 STATS_EXCLUDED_QUALITY_STATUSES, 不影响经营统计口径;
@@ -110,26 +113,52 @@ def main() -> int:
             return 0
 
         # ── 反查 ──
+        # 命中后再分流: 回填是否会撞 uq_manual_refunds_dedup
+        #   (register_date, order_no, COALESCE(device_sn,''), COALESCE(registrant,''))
+        # 撞键(已存在同订单+同SN+同登记人行) → dup 组打 dup_residual, 不回填
         plans_resolved: list[tuple[int, str, str]] = []   # (id, order_no, resolved_sn)
+        plans_dup: list[tuple[int, str, str]] = []        # (id, order_no, resolved_sn)
         plans_unresolvable: list[tuple[int, str]] = []    # (id, order_no)
         for r in rows:
             sn = _resolve_device_sn_by_order(db, r.order_no)
-            if sn:
-                plans_resolved.append((r.id, r.order_no, sn))
-            else:
+            if not sn:
                 plans_unresolvable.append((r.id, r.order_no))
+                continue
+            # 撞键预检: 同 register_date + order_no + 该 SN + 同 registrant 的行是否已存在
+            dup = db.scalar(text(
+                "SELECT 1 FROM manual_refunds x "
+                "WHERE (x.register_time AT TIME ZONE 'Asia/Shanghai')::date "
+                "      = (SELECT (m.register_time AT TIME ZONE 'Asia/Shanghai')::date "
+                "         FROM manual_refunds m WHERE m.id = :i) "
+                "  AND x.order_no = :ono "
+                "  AND COALESCE(x.device_sn, '') = :sn "
+                "  AND COALESCE(x.registrant, '') = "
+                "      COALESCE((SELECT m.registrant FROM manual_refunds m WHERE m.id = :i), '') "
+                "  AND x.id != :i LIMIT 1"
+            ), {"i": r.id, "ono": r.order_no, "sn": sn})
+            if dup:
+                plans_dup.append((r.id, r.order_no, sn))
+            else:
+                plans_resolved.append((r.id, r.order_no, sn))
 
-        logger.info("反查结果: 命中 %d / 未命中 %d (命中率 %.1f%%)",
+        logger.info("反查结果: 安全回填 %d / 撞去重键(dup_residual) %d / 未命中 %d (命中率 %.1f%%)",
                     len(plans_resolved),
+                    len(plans_dup),
                     len(plans_unresolvable),
-                    100.0 * len(plans_resolved) / max(1, len(rows)))
+                    100.0 * (len(plans_resolved) + len(plans_dup)) / max(1, len(rows)))
 
         # 预览
-        print("\n=== 命中预览(前 15 行) ===")
+        print("\n=== 安全回填预览(前 15 行) ===")
         print(f"{'id':>8}  {'order_no':<32} {'resolved_sn'}")
         for mid, ono, sn in plans_resolved[:15]:
             print(f"{mid:>8}  {ono:<32} {sn}")
         print(f"... 共 {len(plans_resolved)} 行")
+
+        print("\n=== 撞去重键预览(前 15 行, 将打 dup_residual, 不回填 SN) ===")
+        print(f"{'id':>8}  {'order_no':<32} {'resolved_sn(重复)'}")
+        for mid, ono, sn in plans_dup[:15]:
+            print(f"{mid:>8}  {ono:<32} {sn}")
+        print(f"... 共 {len(plans_dup)} 行")
 
         print("\n=== 未命中预览(前 15 行, 将打 sn_unresolvable) ===")
         print(f"{'id':>8}  {'order_no'}")
@@ -148,21 +177,50 @@ def main() -> int:
         )) or 0
         logger.info("更新前 空SN且order_no有值 行数: %d", before_null)
 
-        # 1) 回填命中的 device_sn
+        # 1) 回填命中的 device_sn(带 NOT EXISTS 双保险, 防批次内互撞:
+        #    预检后若同批另一行先回填成同 SN, 本行 rowcount=0 → 转 dup 打标)
         n_filled = 0
-        for mid, _ono, sn in plans_resolved:
-            db.execute(
-                text("UPDATE manual_refunds SET device_sn = :sn WHERE id = :i"),
+        fallback_dup: list[tuple[int, str, str]] = []
+        for mid, ono, sn in plans_resolved:
+            res = db.execute(
+                text("UPDATE manual_refunds mr SET device_sn = :sn WHERE mr.id = :i "
+                     "AND NOT EXISTS ("
+                     "  SELECT 1 FROM manual_refunds x "
+                     "  WHERE (x.register_time AT TIME ZONE 'Asia/Shanghai')::date "
+                     "        = (mr.register_time AT TIME ZONE 'Asia/Shanghai')::date "
+                     "    AND x.order_no = mr.order_no "
+                     "    AND COALESCE(x.device_sn, '') = :sn "
+                     "    AND COALESCE(x.registrant, '') = COALESCE(mr.registrant, '') "
+                     "    AND x.id != mr.id)"),
                 {"sn": sn, "i": mid},
             )
-            n_filled += 1
-            if n_filled % 500 == 0:
+            if res.rowcount:
+                n_filled += 1
+            else:
+                fallback_dup.append((mid, ono, sn))
+            if n_filled % 500 == 0 and n_filled:
                 db.flush()
                 logger.info("  已回填 SN %d/%d", n_filled, len(plans_resolved))
         db.flush()
-        logger.info("  回填 SN 完成: %d 行", n_filled)
+        plans_dup.extend(fallback_dup)
+        logger.info("  回填 SN 完成: %d 行 (批次内互撞转 dup: %d 行)", n_filled, len(fallback_dup))
 
-        # 2) 未命中打标 sn_unresolvable
+        # 2) 撞去重键打标 dup_residual(在 STATS_EXCLUDED_QUALITY_STATUSES 内, 不进统计)
+        n_dup = 0
+        for mid, ono, sn in plans_dup:
+            note = (f"[重复登记残留] order_no={ono} 已存在同SN({sn})登记行, "
+                    f"本行(空SN)不再回填, 以带SN行为准")
+            db.execute(
+                text("UPDATE manual_refunds SET quality_status = 'dup_residual', "
+                     "quality_note = COALESCE(quality_note || ' | ', '') || :note "
+                     "WHERE id = :i"),
+                {"note": note, "i": mid},
+            )
+            n_dup += 1
+        db.flush()
+        logger.info("  打标 dup_residual 完成: %d 行", n_dup)
+
+        # 3) 未命中打标 sn_unresolvable
         n_marked = 0
         for mid, ono in plans_unresolvable:
             note = f"[SN无法反查] order_no={ono} 三表(refunds/device_combos/bms_orders)均无匹配"
@@ -198,8 +256,8 @@ def main() -> int:
             logger.warning("自检: 仍有 %d 行未处理(可能反查期间新增数据, 需重跑)", unmarked_null)
 
         db.commit()
-        logger.info("✔ 回填完成: SN 回填 %d 行 / 打标 sn_unresolvable %d 行",
-                    n_filled, n_marked)
+        logger.info("✔ 回填完成: SN 回填 %d 行 / 打标 dup_residual %d 行 / 打标 sn_unresolvable %d 行",
+                    n_filled, n_dup, n_marked)
         return 0
     except Exception:
         db.rollback()
