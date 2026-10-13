@@ -2313,11 +2313,15 @@ def refund_group_comparison(
     op_host_sns = core["op_host_sns"]
 
     # 按组聚合
+    # #316 实测预热发现 bug: refund_op_amount 初始化 0.0(float) 与 sd["refund_op_amount"]
+    # (Decimal, 见 line 395 round(ro_amt, 2) → round 对 Decimal 返回 Decimal) 相加报错
+    # 「unsupported operand type(s) for +=: 'float' and 'decimal.Decimal'」,
+    # 违反铁律 4「金额字段一律使用定点数 Decimal」。统一改 Decimal 初始化。
     group_data: dict[str, dict] = {}
     for sd in staff_detail:
         g = sd.get("group") or "未分组"
         d = group_data.setdefault(g, {"person_cnt": 0, "total_sn": 0, "success_sn": 0,
-                                       "failed_sn": 0, "refund_op_amount": 0.0,
+                                       "failed_sn": 0, "refund_op_amount": Decimal("0"),
                                        "rates": [], "success_sns": set()})
         d["person_cnt"] += 1
         d["total_sn"] += sd["total_sn"]
@@ -2350,8 +2354,8 @@ def refund_group_comparison(
         total = d["total_sn"]
         succ = d["success_sn"]
         rate = round(succ / total * 100, 2) if total else 0.0
-        # 估算挽回金额
-        est_amt = 0.0
+        # 估算挽回金额 — 与 refund_op_amount 同口径用 Decimal(铁律 4)
+        est_amt = Decimal("0")
         for sn in d["success_sns"]:
             sn_reason = core["sn_host_reason"].get(sn, "其他(填写备注)")
             avg = reason_fail_avg.get(sn_reason, overall_fail_avg)
