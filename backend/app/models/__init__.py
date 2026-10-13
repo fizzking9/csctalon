@@ -51,6 +51,7 @@ from app.models.device import (  # noqa: F401
 )
 from app.models.device_combo import DeviceCombo  # noqa: F401
 from app.models.device_flow_usage import DeviceFlowUsage  # noqa: F401
+from app.models.dim_device_combo import DimDeviceCombo  # noqa: F401  # #320 设备-套餐 SCD2 干净维度
 from app.models.doc_sync_config import DocSyncConfig  # noqa: F401
 from app.models.doc_sync_login_log import DocSyncLoginLog  # noqa: F401
 from app.models.doc_sync_source import DocSyncSource  # noqa: F401
@@ -176,6 +177,7 @@ __all__ = [
     "DeviceCombo",
     "ComboBackfillSlice",
     "DeviceFlowUsage",
+    "DimDeviceCombo",
     "DeviceTag",
     "DeviceTagBatch",
     "DeviceTagBinding",

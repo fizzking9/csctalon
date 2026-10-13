@@ -13,7 +13,7 @@ import datetime as _dt
 import re as _re
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Iterable
 
 from sqlalchemy import and_, case, exists, func, literal, or_, select, text
 from sqlalchemy.orm import Session
@@ -1424,3 +1424,46 @@ def _age_days_between(event_date, active_date) -> int | None:
     if event_date is None or active_date is None:
         return None
     return (event_date - active_date).days
+
+
+def lookup_point_in_time_combo(
+    db: Session,
+    sn_ev_pairs: Iterable[tuple[str, datetime]],
+) -> dict[tuple[str, datetime], str | None]:
+    """#320: 按 (设备 SN, 事件时点) 从 dim_device_combo 取当时套餐名。
+
+    返回 dict[(sn, ev)] = package_name; 无匹配区间的返回 None(由调用方回落)。
+    实现: 按 SN 批量取区间(valid_from, valid_to, package_name),
+    对每个 ev 做包含判断 valid_from <= ev < valid_to(valid_to=NULL 视为无穷大)。
+    """
+    from app.models.dim_device_combo import DimDeviceCombo
+
+    pairs = list(sn_ev_pairs)
+    if not pairs:
+        return {}
+    sns = {sn for sn, _ in pairs}
+    rows = db.execute(
+        select(
+            DimDeviceCombo.device_sn,
+            DimDeviceCombo.valid_from,
+            DimDeviceCombo.valid_to,
+            DimDeviceCombo.package_name,
+        )
+        .where(DimDeviceCombo.device_sn.in_(sns))
+        .order_by(DimDeviceCombo.device_sn, DimDeviceCombo.valid_from)
+    ).all()
+    # sn → list[(valid_from, valid_to, package)]
+    intervals: dict[str, list[tuple[datetime, datetime | None, str]]] = {}
+    for sn, vf, vt, pkg in rows:
+        intervals.setdefault(str(sn), []).append((vf, vt, pkg))
+
+    out: dict[tuple[str, datetime], str | None] = {}
+    for sn, ev in pairs:
+        ivs = intervals.get(str(sn), [])
+        found: str | None = None
+        for vf, vt, pkg in ivs:
+            if ev >= vf and (vt is None or ev < vt):
+                found = pkg
+                break
+        out[(str(sn), ev)] = found
+    return out

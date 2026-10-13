@@ -42,6 +42,7 @@ from app.services.analytics._core import (
     _resolve_windows,
     _strip_qw_prefix,
     _withdraw_fail_remark_sql_cond,
+    lookup_point_in_time_combo,
 )
 from app.services.analytics.cash import _EXCL_QSTATUS_SQL, _quality_exclude_sql
 
@@ -1697,6 +1698,12 @@ def refund_decision_overview(
 
     dd_attrs = _device_dim_attrs(db, {sn for (_rk, sn, _a, _e, _p) in route_item_rows if sn})
 
+    # #320: 套餐维度改读 dim_device_combo 时点真身(退款事件时点 ∈ [valid_from, valid_to))。
+    # 回落链: dim 时点套餐 → 退款记录 package_name(A/C 路) → 设备当前套餐(a["combo"])。
+    _dim_combo = lookup_point_in_time_combo(
+        db, [(sn, ev) for (_rk, sn, _a, ev, _p) in route_item_rows if sn]
+    )
+
     # ── 7. 售出后 N 天分桶(#251 B3-5 建, #295 改桶): 出款日 − 最早激活日 五桶 ──
     #     口径随四路升级: 事件日 = 各路归日锚点(原为 A 路发起日 created_at_raw)。
     #     激活锚点并集兜底(#293): bms_orders MIN(active_date) 优先, devices.active_time 兜底
@@ -1791,13 +1798,14 @@ def refund_decision_overview(
     #     #311 方案C: rows 参数默认 abd_rows(排除 C 路); C 路独立时传 c_rows
     def _dd_group(pick, rows: list = None) -> list[dict[str, Any]]:
         rows = rows if rows is not None else abd_rows
-        # #311 方案A: pick 接收 (a, pkg), 让 by_combo 优先用退款发生时的 package_name
-        # (A/C 路 100% 有值; B/D 路无 package_name 字段 → pkg=None → 回落 a["combo"])
+        # #320: pick 接收 (a, pkg, dim_pkg), by_combo 优先用 dim 时点套餐,
+        # 回落退款记录 package_name(A/C 路), 再回落设备当前套餐(a["combo"])。
         g: dict[str, list] = {}
-        for rk, sn, amt, _ev, pkg in rows:
+        for rk, sn, amt, ev, pkg in rows:
             a = dd_attrs.get(sn) if sn else None
+            dim_pkg = _dim_combo.get((sn, ev)) if sn else None
             if a is not None:
-                key = pick(a, pkg) or "(未填)"
+                key = pick(a, pkg, dim_pkg) or "(未填)"
             else:
                 key = "(未建档)" if sn else "(未填SN)"
             b = g.setdefault(key, [0, Decimal("0"), {}])
@@ -1816,19 +1824,17 @@ def refund_decision_overview(
                 for k, v in sorted(g.items(), key=lambda x: -x[1][0])][:12]
 
     device_dims = {
-        "by_device_type": _dd_group(lambda a, _pkg: a["type_name"]),
-        # #311 方案A: by_combo 优先用退款发生时 package_name(pkg), 回落 dd_attrs.combo(设备当前套餐)
-        # 原口径(bms_orders 最新订单 combo_name)在退款分析里会因设备最新订单是质检套餐
-        # 而归 "(未填)", 实测 90 天 27.22% 笔误归; 改用 refunds.package_name 后 0 笔工厂质检
-        "by_combo": _dd_group(lambda a, pkg: pkg or a["combo"]),
-        "by_merchant": _dd_group(lambda a, _pkg: a["merchant"]),
+        "by_device_type": _dd_group(lambda a, _pkg, _d: a["type_name"]),
+        # #320: by_combo 优先用 dim_device_combo 时点套餐 → 退款记录 package_name → 当前套餐
+        "by_combo": _dd_group(lambda a, pkg, d: d or pkg or a["combo"]),
+        "by_merchant": _dd_group(lambda a, _pkg, _d: a["merchant"]),
     }
 
     # #311 方案C: C 路独立的设备维度汇总(用 c_rows, 不混入 4 路汇总)
     c_device_dims = {
-        "by_device_type": _dd_group(lambda a, _pkg: a["type_name"], c_rows),
-        "by_combo": _dd_group(lambda a, pkg: pkg or a["combo"], c_rows),
-        "by_merchant": _dd_group(lambda a, _pkg: a["merchant"], c_rows),
+        "by_device_type": _dd_group(lambda a, _pkg, _d: a["type_name"], c_rows),
+        "by_combo": _dd_group(lambda a, pkg, d: d or pkg or a["combo"], c_rows),
+        "by_merchant": _dd_group(lambda a, _pkg, _d: a["merchant"], c_rows),
     }
 
     # C 路独立汇总: 笔数/金额/激活分桶/设备维度

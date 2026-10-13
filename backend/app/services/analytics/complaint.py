@@ -37,6 +37,7 @@ from app.services.analytics._core import (
     _resolve_windows,
     _route_a_online_refund_filter,
     _ticket_category_case,
+    lookup_point_in_time_combo,
 )
 
 
@@ -808,9 +809,9 @@ def complaint_extended_dims(
         （回答「现在哪些店铺/商户在投诉」，运营动作面向当前归属；非投诉发生时点 SCD 快照）
       · 设备型号: devices.device_type_code → dim_device_type.type_name，未命中回落原始
         device_type 文本，再空归 (未知类型)
-      · 套餐(#313 已改, 本文档同步): _device_dim_attrs 三源回落(bms_orders 最新非质检订单
-        → devices.current_combo_name → device_combos 最新 package_name), 过滤工厂质检
-        专用套餐, 与退款侧 by_combo 同源; 空归 (无套餐)。不再走 combo_name_alias 归一
+      · 套餐(#320 改): 改读 dim_device_combo 干净维度(SCD2, 工单登记时点 ∈ [valid_from,
+        valid_to)), 与退款侧 by_combo 同读同一真身; 回落 _device_dim_attrs 当前套餐, 空归 (无套餐)。
+        维度构建期已过滤工厂质检套餐, 查询侧零判断。
       · 激活后时长: register_time − bms_orders 最早激活日(#295 五桶口径, 与 #251 同源;
         原 #252 用 devices.active_time, 已统一收敛到 bms_orders 单一基准)
       · 每维 TopN + 其余归 (其他)；未建链显式分桶暴露覆盖缺口
@@ -870,18 +871,19 @@ def complaint_extended_dims(
         .order_by(cnt.desc())
     ).all()
 
-    # ── 4. 套餐（#313 统一口径: 调 _device_dim_attrs 三源回落 + 工厂质检过滤,
-    #         与退款侧 by_combo 的 a["combo"] 同源; 去掉 combo_name_alias 归一与退款侧对齐;
-    #         原 #252 用 devices.current_combo_name 单源 + 归一, 覆盖率低于三源回落,
-    #         且不过滤工厂质检 → 质检套餐会混入统计）──
-    sn_list = [r[0] for r in db.execute(
-        select(ServiceTicket.device_sn).where(_is_c, *_win)
-    ).all() if r[0]]
-    _dd_pkg = _device_dim_attrs(db, {str(s) for s in sn_list})
+    # ── 4. 套餐（#320: 改读 dim_device_combo 时点真身, 工单登记时点 ∈ [valid_from, valid_to);
+    #         回落 _device_dim_attrs 当前套餐, 与退款侧 by_combo 同源同口径）──
+    sn_time_rows = db.execute(
+        select(ServiceTicket.device_sn, ServiceTicket.register_time)
+        .where(_is_c, *_win)
+    ).all()
+    _pairs = [(str(r.device_sn), r.register_time) for r in sn_time_rows if r.device_sn]
+    _dim_pkg = lookup_point_in_time_combo(db, _pairs)
+    _dd_pkg = _device_dim_attrs(db, {sn for sn, _ in _pairs})
     _pkg_cnt: dict[str, int] = {}
-    for sn in sn_list:
-        a = _dd_pkg.get(str(sn))
-        key = (a["combo"] if a else None) or "(无套餐)"
+    for sn, rt in _pairs:
+        a = _dd_pkg.get(sn)
+        key = _dim_pkg.get((sn, rt)) or (a["combo"] if a else None) or "(无套餐)"
         _pkg_cnt[key] = _pkg_cnt.get(key, 0) + 1
     pkg_rows = [(n, c) for n, c in
                 sorted(_pkg_cnt.items(), key=lambda x: -x[1])]

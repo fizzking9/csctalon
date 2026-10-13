@@ -350,11 +350,26 @@ class BmsScheduler:
             logger.info(f"[调度器] device_combo 历史回补当夜结束: {summary}")
         except asyncio.CancelledError:
             logger.info("[调度器] device_combo 历史回补 task 被取消")
+            return
         except Exception as e:  # noqa: BLE001 后台任务异常不炸调度器, 台账保证次夜续跑
             logger.error(
                 f"[调度器] device_combo 历史回补异常退出(未完成片留 combo_backfill_slices, 次夜续跑): {e}",
                 exc_info=True,
             )
+            return
+        # #320: 回补完成后刷新 dim_device_combo 干净维度(SCD2 重建),
+        # 保证退款/投诉两侧套餐维度读到最新套餐时点数据。
+        try:
+            from app.core.database import SessionLocal
+            from app.services.dim_device_combo_service import rebuild_dim_device_combo
+            _dim_db = SessionLocal()
+            try:
+                res = rebuild_dim_device_combo(_dim_db)
+                logger.info(f"[调度器] dim_device_combo 随回补刷新完成: {res}")
+            finally:
+                _dim_db.close()
+        except Exception as e:  # noqa: BLE001 维度刷新失败不影响主流程, 下次回补再试
+            logger.error(f"[调度器] dim_device_combo 刷新失败(下次回补重试): {e}", exc_info=True)
 
     def get_status(self) -> dict:
         """获取调度器状态(含 SyncTaskManager 的当前任务进度 + 专项级熔断状态)"""
