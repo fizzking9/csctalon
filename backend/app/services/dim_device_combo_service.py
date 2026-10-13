@@ -30,12 +30,14 @@ WITH events AS (
            'bms_order'::text AS source, order_no
     FROM ods.bms_orders
     WHERE device_sn IS NOT NULL AND combo_name IS NOT NULL
+      AND create_date IS NOT NULL
       AND combo_name NOT LIKE '%工厂质检%'
     UNION ALL
     SELECT device_sn, package_name, created_at_raw AS evt_time,
            'device_combo'::text AS source, recharge_order_no AS order_no
     FROM ods.device_combos
     WHERE device_sn IS NOT NULL AND package_name IS NOT NULL
+      AND created_at_raw IS NOT NULL
       AND package_name NOT LIKE '%工厂质检%'
 ),
 events_dedup AS (
