@@ -7,12 +7,10 @@ from typing import Any
 from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.orm import Session
 
-from app.models.bms_order import BmsOrder
 from app.models.combo_dict import ComboDict, ComboNameAlias
-from app.models.cs_record import CsRecord
 from app.models.device import Device, DimDeviceType
 from app.models.merchant import DeviceMerchantLink, Merchant
-from app.models.refund import RefundClean
+from app.models.ods_clean import BmsOrderClean, CsRecordClean, RefundClean
 from app.models.shop import DeviceShopLink, Shop
 from app.models.ticket import ServiceTicket
 from app.services.complaint_scope import (
@@ -368,10 +366,10 @@ def complaint_health_metrics(
     # 口径: 窗口内 `cs_records.operation_time` 命中的去重 `device_sn`
     active_sn = int(
         db.scalar(
-            select(func.count(func.distinct(CsRecord.device_sn))).where(
-                CsRecord.operation_time >= ts,
-                CsRecord.operation_time <= te,
-                CsRecord.device_sn.isnot(None),
+            select(func.count(func.distinct(CsRecordClean.device_sn))).where(
+                CsRecordClean.operation_time >= ts,
+                CsRecordClean.operation_time <= te,
+                CsRecordClean.device_sn.isnot(None),
             )
         )
         or 0
@@ -449,13 +447,13 @@ def complaint_health_metrics(
 
     # 客服接待数（按操作人，取接待会话数）
     reception_rows = db.execute(
-        select(CsRecord.operator, func.count())
+        select(CsRecordClean.operator, func.count())
         .where(
-            CsRecord.operation_time >= ts,
-            CsRecord.operation_time <= te,
-            CsRecord.operator.isnot(None),
+            CsRecordClean.operation_time >= ts,
+            CsRecordClean.operation_time <= te,
+            CsRecordClean.operator.isnot(None),
         )
-        .group_by(CsRecord.operator)
+        .group_by(CsRecordClean.operator)
     ).all()
 
     # 在岗人数（按 bucket）—— 只统计**有别名**的人，避免重复
@@ -894,11 +892,11 @@ def complaint_extended_dims(
     #    无激活记录优先判定, NULL 天数不会误落首桶(与 _active_age_bucket Python 侧同序)。
     fa_cte = (
         select(
-            BmsOrder.device_sn.label("dsn"),
-            func.min(BmsOrder.active_date).label("fa"),
+            BmsOrderClean.device_sn.label("dsn"),
+            func.min(BmsOrderClean.active_date).label("fa"),
         )
-        .where(BmsOrder.device_sn.isnot(None), BmsOrder.active_date.isnot(None))
-        .group_by(BmsOrder.device_sn)
+        .where(BmsOrderClean.device_sn.isnot(None), BmsOrderClean.active_date.isnot(None))
+        .group_by(BmsOrderClean.device_sn)
     ).cte("first_active")
     days_expr = (
         func.date(ServiceTicket.register_time.op("AT TIME ZONE")("Asia/Shanghai"))

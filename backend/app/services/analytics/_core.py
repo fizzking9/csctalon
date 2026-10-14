@@ -19,13 +19,11 @@ from sqlalchemy import and_, case, exists, func, literal, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.models.group import PersonGroupMembership
+from app.models.ods_clean import RefundClean, RefundRecordReportClean, WalletWithdrawalClean
 from app.models.person import Person, PersonAlias
-from app.models.refund import RefundClean
-from app.models.refund_record_report import RefundRecordReport
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.staff_assignment import StaffAssignment
 from app.models.ticket import ServiceTicket
-from app.models.wallet import WalletWithdrawal
 from app.services.complaint_scope import (
     BUCKET_OTHER,  # noqa: F401
     complaint_bucket_case,
@@ -38,7 +36,7 @@ from app.services.quality_check import stats_quality_include
 # ═══════════════════════════════════════════════════════════════════
 # 2026-08-14: 投诉登记节点下的外部投诉/卡商群投诉两个文件曾"暂不纳入"
 #   系统汇总分析。设置为 False 后, 部分 analytics 聚合将跳过
-#   ExternalComplaint / CardComplaint 两张表, 仅使用 service_tickets
+#   外部投诉 / 卡商群投诉两封信源表, 仅使用 service_tickets
 #   中的投诉分类作为统计口径。
 #
 # ⚠️⚠️ 2026-09-10 (#47) 改为 True —— 用户拍板 ⚠️⚠️
@@ -323,12 +321,12 @@ def _route_b_withdraw_filter():
     避免被冻结/拒绝的提现被误计入成功退款统计。
     备注为 NULL 视为非失败(COALESCE 保护), 正常计入。
     """
-    conds = [WalletWithdrawal.op_type == "用户提现"]
+    conds = [WalletWithdrawalClean.op_type == "用户提现"]
     for _k in _WITHDRAW_FAIL_REMARK_KEYWORDS:
-        conds.append(func.coalesce(WalletWithdrawal.remark, "").notlike(f"%{_k}%"))
+        conds.append(func.coalesce(WalletWithdrawalClean.remark, "").notlike(f"%{_k}%"))
     # #201 S-P0-1：排除 dup_residual/ignored（wallet 在 QUALITY_TABLES 内可被打标，
     # 与 cash_flow_wide B 路口径一致）
-    conds.append(stats_quality_include(WalletWithdrawal.quality_status))
+    conds.append(stats_quality_include(WalletWithdrawalClean.quality_status))
     return tuple(conds)
 
 
@@ -343,7 +341,7 @@ _E_ROUTE_SUCCESS_STATUSES = ("退款成功", "成功", "SUCCESS")
 
 def _route_e_cashflow_filter():
     """【实际现金流 E】refund_record_reports: refund_status 为退款成功 全部"""
-    return (RefundRecordReport.refund_status.in_(_E_ROUTE_SUCCESS_STATUSES),)
+    return (RefundRecordReportClean.refund_status.in_(_E_ROUTE_SUCCESS_STATUSES),)
 
 
 
@@ -1148,8 +1146,8 @@ def _device_dim_matched_sns(
     激活时间改查 bms_orders MIN(active_date) 或 devices.active_time 兜底(并集)。
     不同条件查不同源, 各自取 SN 集合后取交集(AND 语义)。
     """
-    from app.models.bms_order import BmsOrder
     from app.models.device import Device
+    from app.models.ods_clean import BmsOrderClean
 
     sn_sets: list[set[str]] = []
 
@@ -1164,10 +1162,10 @@ def _device_dim_matched_sns(
     #   否则图表桶(回落值)点击下钻查不到。
     if device_type or combo:
         latest_sub = (
-            select(BmsOrder.device_sn, BmsOrder.device_type_name, BmsOrder.combo_name)
-            .where(BmsOrder.device_sn.isnot(None))
-            .distinct(BmsOrder.device_sn)
-            .order_by(BmsOrder.device_sn, BmsOrder.create_date.desc().nullslast())
+            select(BmsOrderClean.device_sn, BmsOrderClean.device_type_name, BmsOrderClean.combo_name)
+            .where(BmsOrderClean.device_sn.isnot(None))
+            .distinct(BmsOrderClean.device_sn)
+            .order_by(BmsOrderClean.device_sn, BmsOrderClean.create_date.desc().nullslast())
         ).subquery()
         latest_sq = select(latest_sub.c.device_sn)
         if device_type:
@@ -1185,7 +1183,7 @@ def _device_dim_matched_sns(
         dev_sq = (
             select(Device.sn)
             .where(Device.sn.isnot(None), or_(*dev_conds))
-            .where(~exists(select(1).where(BmsOrder.device_sn == Device.sn)))
+            .where(~exists(select(1).where(BmsOrderClean.device_sn == Device.sn)))
         )
         for s in db.scalars(dev_sq).all():
             if s:
@@ -1217,14 +1215,14 @@ def _device_dim_matched_sns(
             hi = datetime.combine(d1, _dt.time.max, tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None) if d1 else None
             active_matched: set[str] = set()
             # 1) bms_orders 有 MIN(active_date) 落在区间
-            bms_sq = select(BmsOrder.device_sn).where(BmsOrder.active_date.isnot(None)).group_by(BmsOrder.device_sn)
+            bms_sq = select(BmsOrderClean.device_sn).where(BmsOrderClean.active_date.isnot(None)).group_by(BmsOrderClean.device_sn)
             if lo:
-                bms_sq = bms_sq.having(func.min(BmsOrder.active_date) >= lo)
+                bms_sq = bms_sq.having(func.min(BmsOrderClean.active_date) >= lo)
             if hi:
-                bms_sq = bms_sq.having(func.min(BmsOrder.active_date) <= hi)
+                bms_sq = bms_sq.having(func.min(BmsOrderClean.active_date) <= hi)
             active_matched.update(s for s in db.scalars(bms_sq).all() if s)
             # 2) devices.active_time 落在区间 且 该 SN 无 bms_orders 激活记录(兜底, 不重复)
-            has_bms_active = select(BmsOrder.device_sn).where(BmsOrder.active_date.isnot(None))
+            has_bms_active = select(BmsOrderClean.device_sn).where(BmsOrderClean.active_date.isnot(None))
             dev_conds = [Device.active_time.isnot(None), ~Device.sn.in_(has_bms_active)]
             if lo:
                 dev_conds.append(Device.active_time >= lo)
@@ -1248,14 +1246,14 @@ def _device_dim_options(db: Session) -> dict[str, list[str]]:
     · 套餐     = bms_orders.combo_name distinct(排除工厂质检 3 变体)
     · 商户号   = devices.merchant_name(设备归属)
     """
-    from app.models.bms_order import BmsOrder
     from app.models.device import Device
+    from app.models.ods_clean import BmsOrderClean
 
     # 设备类型: bms_orders.device_type_name(原文), distinct 取后排序
     type_names = sorted({
         t for t in db.scalars(
-            select(BmsOrder.device_type_name)
-            .where(BmsOrder.device_type_name.isnot(None))
+            select(BmsOrderClean.device_type_name)
+            .where(BmsOrderClean.device_type_name.isnot(None))
             .distinct()
         ).all() if t
     })
@@ -1263,8 +1261,8 @@ def _device_dim_options(db: Session) -> dict[str, list[str]]:
     # 套餐: bms_orders.combo_name, 排除工厂质检测试套餐(3 变体不计入分析)
     combos = sorted({
         c for c in db.scalars(
-            select(BmsOrder.combo_name)
-            .where(BmsOrder.combo_name.isnot(None))
+            select(BmsOrderClean.combo_name)
+            .where(BmsOrderClean.combo_name.isnot(None))
             .distinct()
         ).all() if c and "工厂质检" not in c
     })
@@ -1339,9 +1337,8 @@ def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
     """
     if not sns:
         return {}
-    from app.models.bms_order import BmsOrder
     from app.models.device import Device
-    from app.models.device_combo import DeviceCombo
+    from app.models.ods_clean import BmsOrderClean, DeviceComboClean
 
     # 1) devices 表: merchant_name + active_time(激活兜底) + device_type/current_combo_name(#293 回落)
     dev_rows = db.execute(
@@ -1353,10 +1350,10 @@ def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
     # 2) bms_orders: 最新订单(create_date DESC 取首条)的 device_type_name;
     #    combo 取最新**非质检**订单(#312: 跳过质检单, 防历史正常套餐被顶掉)
     order_rows = db.execute(
-        select(BmsOrder.device_sn, BmsOrder.device_type_name,
-               BmsOrder.combo_name, BmsOrder.create_date)
-        .where(BmsOrder.device_sn.in_(sns))
-        .order_by(BmsOrder.device_sn, BmsOrder.create_date.desc().nullslast())
+        select(BmsOrderClean.device_sn, BmsOrderClean.device_type_name,
+               BmsOrderClean.combo_name, BmsOrderClean.create_date)
+        .where(BmsOrderClean.device_sn.in_(sns))
+        .order_by(BmsOrderClean.device_sn, BmsOrderClean.create_date.desc().nullslast())
     ).all()
     latest: dict[str, tuple[str | None, str | None]] = {}
     latest_nonqc_combo: dict[str, str] = {}
@@ -1371,9 +1368,9 @@ def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
     # 2b) device_combos 最新充值流水 package_name(#312 第三回落源, 非质检)
     dc_combo: dict[str, str] = {}
     for sn, pkg, _c in db.execute(
-        select(DeviceCombo.device_sn, DeviceCombo.package_name, DeviceCombo.created_at_raw)
-        .where(DeviceCombo.device_sn.in_(sns), DeviceCombo.package_name.isnot(None))
-        .order_by(DeviceCombo.device_sn, DeviceCombo.created_at_raw.desc().nullslast())
+        select(DeviceComboClean.device_sn, DeviceComboClean.package_name, DeviceComboClean.created_at_raw)
+        .where(DeviceComboClean.device_sn.in_(sns), DeviceComboClean.package_name.isnot(None))
+        .order_by(DeviceComboClean.device_sn, DeviceComboClean.created_at_raw.desc().nullslast())
     ).all():
         sn_s = str(sn)
         if sn_s not in dc_combo and pkg and "工厂质检" not in pkg:
@@ -1382,9 +1379,9 @@ def _device_dim_attrs(db: Session, sns: set[str]) -> dict[str, dict[str, Any]]:
     # 3) 最早激活日: bms_orders MIN(active_date)(#251 同源)
     first_active: dict[str, Any] = {
         sn: fa for sn, fa in db.execute(
-            select(BmsOrder.device_sn, func.min(BmsOrder.active_date))
-            .where(BmsOrder.device_sn.in_(sns), BmsOrder.active_date.isnot(None))
-            .group_by(BmsOrder.device_sn)
+            select(BmsOrderClean.device_sn, func.min(BmsOrderClean.active_date))
+            .where(BmsOrderClean.device_sn.in_(sns), BmsOrderClean.active_date.isnot(None))
+            .group_by(BmsOrderClean.device_sn)
         ).all()
     }
 

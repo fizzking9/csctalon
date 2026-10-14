@@ -15,19 +15,19 @@ from typing import Any
 from sqlalchemy import and_, case, func, literal, or_, select, text, union
 from sqlalchemy.orm import Session
 
-from app.models.card_complaint import CardComplaint
-from app.models.cs_record import CsRecord
-from app.models.external_complaint import ExternalComplaint
+from app.models.ods_clean import CardComplaintClean
+from app.models.ods_clean import CsRecordClean
+from app.models.ods_clean import ExternalComplaintClean
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.person import Person, PersonAlias
-from app.models.refund import RefundClean
-from app.models.refund_record_report import RefundRecordReport
+from app.models.ods_clean import RefundClean
+from app.models.ods_clean import RefundRecordReportClean
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask
 from app.models.ticket import ServiceTicket
 from app.models.todo import TodoItem
-from app.models.wallet import WalletWithdrawal
+from app.models.ods_clean import WalletWithdrawalClean
 from app.services.complaint_scope import (
     ALL_BUCKETS,
     BUCKET_CARD,

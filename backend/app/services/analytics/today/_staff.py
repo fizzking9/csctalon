@@ -15,19 +15,19 @@ from typing import Any
 from sqlalchemy import and_, case, func, literal, or_, select, text, union
 from sqlalchemy.orm import Session
 
-from app.models.card_complaint import CardComplaint
-from app.models.cs_record import CsRecord
-from app.models.external_complaint import ExternalComplaint
+from app.models.ods_clean import CardComplaintClean
+from app.models.ods_clean import CsRecordClean
+from app.models.ods_clean import ExternalComplaintClean
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.person import Person, PersonAlias
-from app.models.refund import RefundClean
-from app.models.refund_record_report import RefundRecordReport
+from app.models.ods_clean import RefundClean
+from app.models.ods_clean import RefundRecordReportClean
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask
 from app.models.ticket import ServiceTicket
 from app.models.todo import TodoItem
-from app.models.wallet import WalletWithdrawal
+from app.models.ods_clean import WalletWithdrawalClean
 from app.services.complaint_scope import (
     ALL_BUCKETS,
     BUCKET_CARD,
@@ -144,36 +144,36 @@ def today_staff_efficiency(
     def _sys_auto_filter():
         """返回 SQL 条件 排除 cs_record 中系统自动产生的记录"""
         kw = ("系统自动", "自动发送", "自动回复", "自动推送", "自动补发", "自动触发", "自动生成")
-        kw_like = [CsRecord.description.ilike(f"%{k}%") for k in kw] \
-                + [CsRecord.execution_result.ilike(f"%{k}%") for k in kw] \
-                + [CsRecord.solution.ilike(f"%{k}%") for k in kw]
+        kw_like = [CsRecordClean.description.ilike(f"%{k}%") for k in kw] \
+                + [CsRecordClean.execution_result.ilike(f"%{k}%") for k in kw] \
+                + [CsRecordClean.solution.ilike(f"%{k}%") for k in kw]
         return and_(
-            CsRecord.operator.isnot(None),
-            CsRecord.operator.notin_(SYS_OP_BLACKLIST),
+            CsRecordClean.operator.isnot(None),
+            CsRecordClean.operator.notin_(SYS_OP_BLACKLIST),
             ~or_(*kw_like),  # 反向: 不包含任何自动关键词
         )
 
     # 1. 会话接待量 + 接待人数(去重SN) 总量 per operator
     #    v2: 排除系统自动记录
-    cs_q = (select(CsRecord.operator.label("op"),
+    cs_q = (select(CsRecordClean.operator.label("op"),
                    func.count().label("c"),
-                   func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("dc"))
-            .where(CsRecord.operation_time.isnot(None),
-                   CsRecord.operation_time >= ts, CsRecord.operation_time <= te,
+                   func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))).label("dc"))
+            .where(CsRecordClean.operation_time.isnot(None),
+                   CsRecordClean.operation_time >= ts, CsRecordClean.operation_time <= te,
                    _sys_auto_filter())
-            .group_by(CsRecord.operator)).cte("cs_q")
+            .group_by(CsRecordClean.operator)).cte("cs_q")
     # 2. 会话接待 按 6 个 category_bucket 分桶 per operator: 会话数 + 接待数(SN去重) 两套
     #    v2: 同样排除系统自动记录
     cs_cat_q = (select(
-        CsRecord.operator.label("op"),
+        CsRecordClean.operator.label("op"),
         _category_case().label("bucket"),
         func.count().label("scnt"),
-        func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("pcnt"),
+        func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))).label("pcnt"),
     ).where(
-        CsRecord.operation_time.isnot(None),
-        CsRecord.operation_time >= ts, CsRecord.operation_time <= te,
+        CsRecordClean.operation_time.isnot(None),
+        CsRecordClean.operation_time >= ts, CsRecordClean.operation_time <= te,
         _sys_auto_filter(),
-    ).group_by(CsRecord.operator, "bucket")).cte("cs_cat_q")
+    ).group_by(CsRecordClean.operator, "bucket")).cte("cs_cat_q")
     # 3. 退款挽回实际执行: 笔数 + 去重设备个数
     #    已有 sys/system 排除, 保留
     #    ⚠️ 2026-09-08: 工作量口径(无金额)保持全状态(any_status), 不随经营口径收紧到已退款,
@@ -361,7 +361,7 @@ def today_staff_efficiency(
                     ELSE '咨询接待'
                 END AS spec,
                 c.device_sn AS sn
-            FROM cs_records c
+            FROM cs_record_clean c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
               AND c.operator IS NOT NULL
@@ -446,7 +446,7 @@ def today_staff_efficiency(
                    END AS spec,
                    st.device_sn AS sn
             FROM service_tickets st
-            JOIN cs_records c2
+            JOIN cs_record_clean c2
               ON c2.device_sn = st.device_sn
              AND c2.operator IS NOT NULL
              AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助','WeChat','wechat','WECHAT','AI客服','智能客服','机器人客服','客户','班牛','系统','微信投诉')
@@ -537,7 +537,7 @@ def today_staff_efficiency(
                    st.service_item AS service_item,
                    st.service_category AS service_category
             FROM service_tickets st
-            JOIN cs_records c2
+            JOIN cs_record_clean c2
               ON c2.device_sn = st.device_sn
              AND c2.operator IS NOT NULL
              AND c2.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助','WeChat','wechat','WECHAT','AI客服','智能客服','机器人客服','客户','班牛','系统','微信投诉')
@@ -1080,14 +1080,14 @@ def today_staff_efficiency(
                    "sys", "system", "SYS", "System", "系统", "班牛", "用户自助", "客户自助"]
     _virtual_agg = db.execute(
         select(
-            CsRecord.operator.label("op"),
+            CsRecordClean.operator.label("op"),
             func.count().label("rc"),
-            func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("rdc"),
+            func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))).label("rdc"),
         )
-        .where(CsRecord.operation_time.isnot(None),
-               CsRecord.operation_time >= ts, CsRecord.operation_time <= te,
-               CsRecord.operator.in_(_AI_SYS_OPS))
-        .group_by(CsRecord.operator)
+        .where(CsRecordClean.operation_time.isnot(None),
+               CsRecordClean.operation_time >= ts, CsRecordClean.operation_time <= te,
+               CsRecordClean.operator.in_(_AI_SYS_OPS))
+        .group_by(CsRecordClean.operator)
     ).all()
     # ─────────────────────────────────────────────────────────────────────
     # ★ 2026-09-14 用户要求: 「AI 接待也纳入效率值核算，算法与专项人员一致」
@@ -1131,14 +1131,14 @@ def today_staff_efficiency(
                 _category_case().label("bucket"),
                 func.count().label("scnt"),
                 func.count(
-                    func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))
+                    func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))
                 ).label("pcnt"),
             )
             .where(
-                CsRecord.operation_time.isnot(None),
-                CsRecord.operation_time >= ts,
-                CsRecord.operation_time <= te,
-                CsRecord.operator == op_name,
+                CsRecordClean.operation_time.isnot(None),
+                CsRecordClean.operation_time >= ts,
+                CsRecordClean.operation_time <= te,
+                CsRecordClean.operator == op_name,
             )
             .group_by("bucket")
         ).all()

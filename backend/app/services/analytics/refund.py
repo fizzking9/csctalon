@@ -22,7 +22,6 @@ from typing import Any
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.orm import Session
 
-from app.models.manual_refund import ManualRefund
 from app.models.person import Person, PersonAlias
 
 logger = logging.getLogger(__name__)
@@ -157,13 +156,13 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
         if info["is_recovery_staff"]:
             recovery_ops[op] = info
 
-    # ---- 3. 分母SN (cs_records problem_category='退款') ----
+    # ---- 3. 分母SN (cs_record_clean problem_category='退款') ----
     cs_refund_sn_sql = text(
         """
         SELECT c.operator AS op, c.device_sn AS sn,
                c.operation_time AS op_time,
                c.problem_type AS problem_type
-        FROM cs_records c
+        FROM cs_record_clean c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND NOT (c.operator = ANY(:sys_bl))
@@ -265,7 +264,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
                    'cs_kw' AS src, LEFT(COALESCE(c.description,''),100) AS reason,
                    0 AS amount, '退款流程' AS status, 'cs_record关键词' AS method,
                    c.operation_time AS event_time
-            FROM cs_records c
+            FROM cs_record_clean c
             JOIN host_sns hs ON c.device_sn = hs.sn
             WHERE c.operation_time IS NOT NULL
               AND c.device_sn IS NOT NULL
@@ -455,7 +454,7 @@ def refund_personnel_analysis(
     for r in db.execute(text(
         """
         SELECT c.operator AS op, MIN(c.operation_time) AS first_t, MAX(c.operation_time) AS last_t
-        FROM cs_records c
+        FROM cs_record_clean c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND NOT (c.operator = ANY(:sys_bl))
@@ -536,7 +535,7 @@ def refund_person_devices(
         SELECT c.device_sn AS sn,
                MIN(c.operation_time) AS first_t, MAX(c.operation_time) AS last_t,
                COUNT(*) AS cnt
-        FROM cs_records c
+        FROM cs_record_clean c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND c.operator = :op
@@ -637,7 +636,7 @@ def refund_personnel_trend(
             """
             SELECT c.operator AS op, c.device_sn AS sn,
                    DATE_TRUNC('week', c.operation_time AT TIME ZONE 'Asia/Shanghai')::date AS wk
-            FROM cs_records c
+            FROM cs_record_clean c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
               AND NOT (c.operator = ANY(:sys_bl))
@@ -655,7 +654,7 @@ def refund_personnel_trend(
             """
             SELECT c.operator AS op, c.device_sn AS sn,
                    DATE(c.operation_time AT TIME ZONE 'Asia/Shanghai') AS d
-            FROM cs_records c
+            FROM cs_record_clean c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
               AND NOT (c.operator = ANY(:sys_bl))
@@ -785,7 +784,7 @@ def refund_device_analysis(
     for r in db.execute(text(
         """
         SELECT c.device_sn AS sn, COUNT(*) AS cnt
-        FROM cs_records c
+        FROM cs_record_clean c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND c.problem_category = '退款'
@@ -834,7 +833,7 @@ def refund_device_analysis(
     for r in db.execute(text(
         """
         SELECT c.device_sn AS sn, COUNT(DISTINCT c.operator) AS op_cnt
-        FROM cs_records c
+        FROM cs_record_clean c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND c.problem_category = '退款'
@@ -895,7 +894,7 @@ def refund_device_detail(
         """
         SELECT c.operation_time, c.operator, c.problem_type, c.description,
                c.execution_result, c.solution, c.consult_time
-        FROM cs_records c
+        FROM cs_record_clean c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND c.device_sn = :sn
@@ -959,7 +958,7 @@ def refund_device_detail(
     for r in db.execute(text(
         """
         SELECT w.id, w.op_time, w.op_amount, w.op_type
-        FROM wallet_withdrawals w
+        FROM wallet_withdrawal_clean w
         WHERE w.device_sn = :sn AND w.op_time IS NOT NULL
         ORDER BY w.op_time DESC LIMIT 10
         """
@@ -1033,7 +1032,7 @@ def refund_type_trend(
         f"""
         SELECT {date_col} AS d, c.device_sn AS sn,
                c.problem_type, c.operator
-        FROM cs_records c
+        FROM cs_record_clean c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND NOT (c.operator = ANY(:sys_bl))
@@ -1110,7 +1109,7 @@ def refund_decision_overview(
     wallet_rows = db.execute(text(f"""
         SELECT {_day("w.op_time")} AS d, w.op_type,
                count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
-        FROM wallet_withdrawals w
+        FROM wallet_withdrawal_clean w
         WHERE w.op_time >= :ts AND w.op_time <= :te
           AND w.op_type IN ('订单退费转入', '用户提现', '系统扣费')
           AND {_withdraw_fail_remark_sql_cond()}
@@ -1323,7 +1322,7 @@ def refund_decision_overview(
     wd_rows = db.execute(text(f"""
         SELECT {_day("COALESCE(w.actual_refund_time, w.op_time)")} AS d,
                count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
-        FROM wallet_withdrawals w
+        FROM wallet_withdrawal_clean w
         WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts AND COALESCE(w.actual_refund_time, w.op_time) <= :te AND w.op_type = '用户提现'
           AND {_withdraw_fail_remark_sql_cond()}
           AND {stats_quality_excluded_sql('w.quality_status')}
@@ -1334,31 +1333,31 @@ def refund_decision_overview(
     sm_rows = db.execute(text(f"""
         SELECT {_day("COALESCE(s.refund_time, s.audit_time, s.created_at)")} AS d,
                count(*) AS cnt, COALESCE(sum(COALESCE(s.actual_amount, s.refund_amount, 0)), 0) AS amt
-        FROM shanmao_refunds s
+        FROM shanmao_refund_clean s
         WHERE COALESCE(s.refund_time, s.audit_time, s.created_at) >= :ts
           AND COALESCE(s.refund_time, s.audit_time, s.created_at) <= :te
           AND s.status = '已退款'
           AND {stats_quality_excluded_sql('s.quality_status')}
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
-    # D 手动退款 (manual_refunds, is_refunded='是'; 对账归日用实际扣款时间 actual_refund_time(2026-09-09 E回填),
+    # D 手动退款 (manual_refund_clean, is_refunded='是'; 对账归日用实际扣款时间 actual_refund_time(2026-09-09 E回填),
     #    缺失回退 op_time/register_time; 排除 dup_residual/ignored → 经营口径不与重复/忽略行虚高; A-20260909-001)
     _d_excl_q = _quality_exclude_sql(db)
     d_rows = db.execute(text(f"""
         SELECT {_day("COALESCE(m.actual_refund_time, m.op_time, m.register_time)")} AS d,
                count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
-        FROM manual_refunds m
+        FROM manual_refund_clean m
         WHERE COALESCE(m.actual_refund_time, m.op_time, m.register_time) >= :ts
           AND COALESCE(m.actual_refund_time, m.op_time, m.register_time) <= :te
           AND m.is_refunded = '是'
           {"AND " + _EXCL_QSTATUS_SQL if _d_excl_q else ''}
         GROUP BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
-    # E 实际现金流 (refund_record_reports 退款成功, 对账基准, 独立展示不与四路累加)
+    # E 实际现金流 (refund_record_report_clean 退款成功, 对账基准, 独立展示不与四路累加)
     e_rows = db.execute(text(f"""
         SELECT {_day("e.refund_time")} AS d,
                count(*) AS cnt, COALESCE(sum(e.refund_amount), 0) AS amt
-        FROM refund_record_reports e
+        FROM refund_record_report_clean e
         WHERE e.refund_time >= :ts AND e.refund_time <= :te
           AND e.refund_status IN ('退款成功', '成功', 'SUCCESS')
         GROUP BY 1
@@ -1415,7 +1414,7 @@ def refund_decision_overview(
         # #201 S-P0-1：B 路窗口汇总补 dup_residual/ignored 排除
         for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(op_amount), 0) AS amt
-            FROM wallet_withdrawals w WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts
+            FROM wallet_withdrawal_clean w WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts
               AND COALESCE(w.actual_refund_time, w.op_time) <= :te AND w.op_type = '用户提现'
               AND {_withdraw_fail_remark_sql_cond()}
               AND {stats_quality_excluded_sql('w.quality_status')}
@@ -1424,7 +1423,7 @@ def refund_decision_overview(
         # #201 S-P0-1：C 路窗口汇总补 dup_residual/ignored 排除
         for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(COALESCE(actual_amount, refund_amount, 0)), 0) AS amt
-            FROM shanmao_refunds s
+            FROM shanmao_refund_clean s
             WHERE COALESCE(s.refund_time, s.audit_time, s.created_at) >= :ts
               AND COALESCE(s.refund_time, s.audit_time, s.created_at) <= :te
               AND s.status = '已退款'
@@ -1434,17 +1433,17 @@ def refund_decision_overview(
         # D 手动退款 (is_refunded='是'; 归日=actual_refund_time 优先(实际扣款); 排除 dup_residual/ignored 已治理行)
         for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
-            FROM manual_refunds m
+            FROM manual_refund_clean m
             WHERE COALESCE(m.actual_refund_time, m.op_time, m.register_time) >= :ts
               AND COALESCE(m.actual_refund_time, m.op_time, m.register_time) <= :te
               AND m.is_refunded = '是'
               {"AND " + _EXCL_QSTATUS_SQL if _d_excl_q else ''}
         """), {"ts": s, "te": e}).fetchall():
             tot["d_cnt"] += int(r.cnt or 0); tot["d_amt"] += D(r.amt)
-        # E 实际现金流 (refund_record_reports 退款成功, 对账基准)
+        # E 实际现金流 (refund_record_report_clean 退款成功, 对账基准)
         for r in db.execute(text("""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
-            FROM refund_record_reports e
+            FROM refund_record_report_clean e
             WHERE e.refund_time >= :ts AND e.refund_time <= :te
               AND e.refund_status IN ('退款成功', '成功', 'SUCCESS')
         """), {"ts": s, "te": e}).fetchall():
@@ -1475,14 +1474,14 @@ def refund_decision_overview(
     mreg_rows = db.execute(text(f"""
         SELECT {_day("m.register_time")} AS d,
                count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
-        FROM manual_refunds m
+        FROM manual_refund_clean m
         WHERE m.register_time >= :ts AND m.register_time <= :te
         GROUP BY 1 ORDER BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     mdone_rows = db.execute(text(f"""
         SELECT {_day("COALESCE(m.op_time, m.register_time)")} AS d,
                count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
-        FROM manual_refunds m
+        FROM manual_refund_clean m
         WHERE COALESCE(m.op_time, m.register_time) >= :ts AND COALESCE(m.op_time, m.register_time) <= :te
           AND m.is_refunded = '是'
         GROUP BY 1 ORDER BY 1
@@ -1504,10 +1503,10 @@ def refund_decision_overview(
         manual_water["net"].append(float(round(net, 2)))
         manual_water["cum_net"].append(float(round(m_cum, 2)))
 
-    # E 数据最新日(refund_record_reports 持续采集, 显示其最新退款日作参考)
+    # E 数据最新日(refund_record_report_clean 持续采集, 显示其最新退款日作参考)
     e_data_until = None
     e_max = db.execute(text(
-        "SELECT max(refund_time) FROM refund_record_reports "
+        "SELECT max(refund_time) FROM refund_record_report_clean "
         "WHERE refund_status IN ('退款成功', '成功', 'SUCCESS')"
     )).scalar()
     if e_max is not None:
@@ -1585,12 +1584,12 @@ def refund_decision_overview(
         + m_note
     )
 
-    # ── #309 窗口充值(真实现金流充入): device_combos 按 created_at_raw 落窗,
+    # ── #309 窗口充值(真实现金流充入): device_combo_clean 按 created_at_raw 落窗,
     #     剔除工厂质检专用套餐流水(package_name 含「质检」), 与今日看板充值卡/
     #     分品类运营看板 #293 同一判据。用于「退款 vs 充值」资金对照。
     _rc = db.execute(text("""
         SELECT count(*) AS cnt, COALESCE(sum(dc.actual_amount), 0) AS amt
-        FROM device_combos dc
+        FROM device_combo_clean dc
         WHERE dc.created_at_raw >= :ts AND dc.created_at_raw <= :te
           AND dc.package_name NOT ILIKE '%质检%'
     """), {"ts": cur_s, "te": cur_e}).first()
@@ -1661,7 +1660,7 @@ def refund_decision_overview(
         SELECT w.device_sn AS sn, w.op_amount AS amt,
                COALESCE(w.actual_refund_time, w.op_time) AS ev,
                NULL::text AS pkg
-        FROM wallet_withdrawals w
+        FROM wallet_withdrawal_clean w
         WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts
           AND COALESCE(w.actual_refund_time, w.op_time) <= :te
           AND w.op_type = '用户提现'
@@ -1670,12 +1669,12 @@ def refund_decision_overview(
     """), {"ts": cur_s, "te": cur_e}).fetchall():
         route_item_rows.append(("B 钱包提现", r.sn, D(r.amt), r.ev, r.pkg))
     # C 闪猫退款: 已退款+排除已治理行; 金额=实际→申请; 归日=退款→审核→创建
-    # #311 方案A: pkg=shanmao_refunds.package_name(闪猫侧套餐名)
+    # #311 方案A: pkg=shanmao_refund_clean.package_name(闪猫侧套餐名)
     for r in db.execute(text(f"""
         SELECT s.device_sn AS sn, COALESCE(s.actual_amount, s.refund_amount, 0) AS amt,
                COALESCE(s.refund_time, s.audit_time, s.created_at) AS ev,
                s.package_name AS pkg
-        FROM shanmao_refunds s
+        FROM shanmao_refund_clean s
         WHERE COALESCE(s.refund_time, s.audit_time, s.created_at) >= :ts
           AND COALESCE(s.refund_time, s.audit_time, s.created_at) <= :te
           AND s.status = '已退款'
@@ -1683,12 +1682,12 @@ def refund_decision_overview(
     """), {"ts": cur_s, "te": cur_e}).fetchall():
         route_item_rows.append(("C 闪猫退款", r.sn, D(r.amt), r.ev, r.pkg))
     # D 手动退款: is_refunded='是'+排除已治理行(_d_excl_q 见区块1); 归日=实际扣款→操作→登记
-    # D 路 manual_refunds 无 package_name 字段(商户号后台退款台账无套餐), pkg=NULL, 走 dd_attrs.combo 回落
+    # D 路 manual_refund_clean 无 package_name 字段(商户号后台退款台账无套餐), pkg=NULL, 走 dd_attrs.combo 回落
     for r in db.execute(text(f"""
         SELECT m.device_sn AS sn, m.refund_amount AS amt,
                COALESCE(m.actual_refund_time, m.op_time, m.register_time) AS ev,
                NULL::text AS pkg
-        FROM manual_refunds m
+        FROM manual_refund_clean m
         WHERE COALESCE(m.actual_refund_time, m.op_time, m.register_time) >= :ts
           AND COALESCE(m.actual_refund_time, m.op_time, m.register_time) <= :te
           AND m.is_refunded = '是'
@@ -1724,12 +1723,12 @@ def refund_decision_overview(
     # devices 表外的少量 SN(dd_attrs 无行): 仍按 bms MIN(active_date) 并集兜底, 不误归「无激活记录」
     _no_dev = {sn for (_rk, sn, _a, _e, _p) in route_item_rows if sn and sn not in dd_attrs}
     if _no_dev:
-        from app.models.bms_order import BmsOrder  # 局部导入(与 _core 同法, 防循环依赖)
+        from app.models.ods_clean import BmsOrderClean  # 局部导入(与 _core 同法, 防循环依赖)
 
         for sn, fa in db.execute(
-            select(BmsOrder.device_sn, func.min(BmsOrder.active_date))
-            .where(BmsOrder.device_sn.in_(_no_dev), BmsOrder.active_date.isnot(None))
-            .group_by(BmsOrder.device_sn)
+            select(BmsOrderClean.device_sn, func.min(BmsOrderClean.active_date))
+            .where(BmsOrderClean.device_sn.in_(_no_dev), BmsOrderClean.active_date.isnot(None))
+            .group_by(BmsOrderClean.device_sn)
         ).all():
             if fa is not None:
                 # active_date 为 timestamptz: naive 按 UTC 读入转上海; 与 _device_dim_attrs 同法
@@ -1862,90 +1861,6 @@ def refund_decision_overview(
     }
 
 
-
-# ---------- 手动退款登记 数据质量审核 (L3: 自动纠错记录 + 待人工确认) ----------
-def _mr_quality_out(r: ManualRefund) -> dict[str, Any]:
-    """手动退款登记行 → 质量审核输出"""
-    def _sh(dt):
-        return dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S") if dt else None
-    return {
-        "id": r.id,
-        "register_time": _sh(r.register_time),
-        "op_time": _sh(r.op_time),
-        "is_refunded": r.is_refunded,
-        "refund_amount": float(r.refund_amount or 0),
-        "order_amount": float(r.order_amount or 0),
-        "device_sn": r.device_sn,
-        "order_no": r.order_no,
-        "merchant_id": r.merchant_id,
-        "registrant": r.registrant,
-        "refund_operator": r.refund_operator,
-        "remark": r.remark,
-        "quality_status": r.quality_status,
-        "quality_note": r.quality_note,
-    }
-
-def manual_refund_quality_list(db: Session, status: str = "all", page: int = 1, page_size: int = 50) -> dict[str, Any]:
-    """手动退款登记质量审核列表: status = all/pending/auto_fixed/ok
-
-    统计摘要: 各状态计数(供前端徽标)。列表按登记日期倒序。
-    """
-    summary = {}
-    for st in ("pending", "auto_fixed", "ok"):
-        summary[st] = db.scalar(
-            select(func.count()).select_from(ManualRefund).where(ManualRefund.quality_status == st)
-        ) or 0
-    q = select(ManualRefund)
-    if status in ("pending", "auto_fixed", "ok"):
-        q = q.where(ManualRefund.quality_status == status)
-    total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
-    rows = db.execute(
-        q.order_by(ManualRefund.register_time.desc())
-        .offset((page - 1) * page_size).limit(page_size)
-    ).scalars().all()
-    return {"total": total, "summary": summary,
-            "list": [_mr_quality_out(r) for r in rows]}
-
-def manual_refund_quality_confirm(db: Session, rid: int) -> dict[str, Any]:
-    """人工确认通过: quality_status → ok (保留纠错说明, 追加确认标记)"""
-    r = db.get(ManualRefund, rid)
-    if not r:
-        raise ValueError(f"手动退款记录不存在: id={rid}")
-    r.quality_status = "ok"
-    r.quality_note = ((r.quality_note or "") + " | 人工确认通过") if r.quality_note else "人工确认通过"
-    db.commit()
-    return {"id": rid, "quality_status": "ok"}
-
-def manual_refund_quality_fix(db: Session, rid: int, payload: dict[str, Any]) -> dict[str, Any]:
-    """人工修正: 更新指定字段(register_time/op_time/is_refunded/refund_amount/order_no/device_sn等),
-    修正后置 ok。仅接受白名单字段, 时间字段支持 'YYYY-MM-DD' / 'YYYY-MM-DD HH:MM:SS' / ISO 格式。
-    """
-    r = db.get(ManualRefund, rid)
-    if not r:
-        raise ValueError(f"手动退款记录不存在: id={rid}")
-    allowed = {"register_time", "op_time", "is_refunded", "refund_amount", "order_amount",
-               "order_no", "device_sn", "merchant_id", "registrant", "refund_operator", "remark"}
-    changes = []
-    for k, v in (payload or {}).items():
-        if k not in allowed or v is None:
-            continue
-        if k in ("register_time", "op_time"):
-            setattr(r, k, _dt.datetime.fromisoformat(str(v)) if isinstance(v, str) and "T" in str(v)
-                    else _dt.datetime.strptime(str(v), "%Y-%m-%d %H:%M:%S")
-                    if isinstance(v, str) and len(str(v)) > 10
-                    else _dt.datetime.strptime(str(v), "%Y-%m-%d"))
-            changes.append(k)
-        elif k in ("refund_amount", "order_amount"):
-            setattr(r, k, D(v))
-            changes.append(k)
-        else:
-            setattr(r, k, str(v))
-            changes.append(k)
-    r.quality_status = "ok"
-    r.quality_note = ((r.quality_note or "") + f" | 人工修正字段: {','.join(changes)}") if changes else (r.quality_note or "")
-    db.commit()
-    return {"id": rid, "quality_status": "ok", "changed": changes}
-
 def refund_export_original(
     db: Session, start: str | None = None, end: str | None = None,
     online_refunded_only: bool = False,
@@ -2068,10 +1983,10 @@ def refund_export_all(
 
     明细 sheet(2026-09-09 放宽为台账原始, 人工分析用, 不砍状态/类型行, 附状态列自筛):
     - A退费单明细(全量): refunds 全部(线上直退/线下/转入提现账户/未填写 + 驳回/无需退款/空白), 时间=created_at_raw
-    - B钱包流水明细(全量): wallet_withdrawals 全部 op_type(用户提现/订单退费转入/系统扣费), 时间=op_time
-    - C闪猫退款明细(全量): shanmao_refunds 全部状态, 时间=COALESCE(audit_time, created_at)
-    - D手动退款明细(全量): manual_refunds 全部(is_refunded 是/否), 时间=COALESCE(op_time, register_time)
-    - E退款记录报表(全量): refund_record_reports 全部 refund_status, 时间=refund_time
+    - B钱包流水明细(全量): wallet_withdrawal_clean 全部 op_type(用户提现/订单退费转入/系统扣费), 时间=op_time
+    - C闪猫退款明细(全量): shanmao_refund_clean 全部状态, 时间=COALESCE(audit_time, created_at)
+    - D手动退款明细(全量): manual_refund_clean 全部(is_refunded 是/否), 时间=COALESCE(op_time, register_time)
+    - E退款记录报表(全量): refund_record_report_clean 全部 refund_status, 时间=refund_time
 
     汇总 sheet(五路汇总(A-E))保持成功口径, 与 refund_decision_overview.routes_daily 一致:
     - A 线上直退: refund_method='线上' AND status='已退款'
@@ -2098,7 +2013,7 @@ def refund_export_all(
     # 含失败/冻结备注; 附"操作类型/备注"列供人工筛出真实出款; 2026-09-09 放宽)
     b_rows = db.execute(text("""
         SELECT account_id, device_sn, op_type, op_amount, wallet_balance, operator, op_time, remark
-        FROM wallet_withdrawals w
+        FROM wallet_withdrawal_clean w
         WHERE w.op_time >= :ts AND w.op_time <= :te
         ORDER BY w.op_time
     """), {"ts": cur_s, "te": cur_e}).fetchall()
@@ -2118,7 +2033,7 @@ def refund_export_all(
         SELECT refund_no, order_no, device_sn, phone, paid_amount, refund_amount, actual_amount,
                package_name, merchant_name, refund_reason, refund_method, status,
                applicant, auditor, operator, apply_time, audit_time, refund_time, remark, audit_remark
-        FROM shanmao_refunds
+        FROM shanmao_refund_clean
         WHERE COALESCE(audit_time, created_at) >= :ts AND COALESCE(audit_time, created_at) <= :te
         ORDER BY COALESCE(audit_time, created_at)
     """), {"ts": cur_s, "te": cur_e}).fetchall()
@@ -2150,7 +2065,7 @@ def refund_export_all(
     d_rows = db.execute(text("""
         SELECT register_time, device_sn, order_no, merchant_id, order_amount, refund_amount,
                registrant, is_refunded, refund_operator, op_time, remark, quality_status
-        FROM manual_refunds
+        FROM manual_refund_clean
         WHERE COALESCE(op_time, register_time) >= :ts AND COALESCE(op_time, register_time) <= :te
         ORDER BY COALESCE(op_time, register_time)
     """), {"ts": cur_s, "te": cur_e}).fetchall()
@@ -2173,7 +2088,7 @@ def refund_export_all(
     e_rows = db.execute(text("""
         SELECT platform_order_no, wx_order_no, merchant_id, merchant_name, device_sn,
                product_name, refund_time, apply_refund_amount, refund_amount, refund_status
-        FROM refund_record_reports
+        FROM refund_record_report_clean
         WHERE refund_time >= :ts AND refund_time <= :te
         ORDER BY refund_time
     """), {"ts": cur_s, "te": cur_e}).fetchall()
@@ -2205,7 +2120,7 @@ def refund_export_all(
             GROUP BY 1"""),
         ("B 钱包提现", f"""
             SELECT {_day("COALESCE(w.actual_refund_time, w.op_time)")} AS d, count(*) AS cnt, COALESCE(sum(w.op_amount), 0) AS amt
-            FROM wallet_withdrawals w WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts
+            FROM wallet_withdrawal_clean w WHERE COALESCE(w.actual_refund_time, w.op_time) >= :ts
               AND COALESCE(w.actual_refund_time, w.op_time) <= :te AND w.op_type = '用户提现'
               AND {_withdraw_fail_remark_sql_cond()}
               AND {stats_quality_excluded_sql('w.quality_status')}
@@ -2213,7 +2128,7 @@ def refund_export_all(
         ("C 闪猫退款", f"""
             SELECT {_day("COALESCE(s.refund_time, s.audit_time, s.created_at)")} AS d, count(*) AS cnt,
                    COALESCE(sum(COALESCE(s.actual_amount, s.refund_amount, 0)), 0) AS amt
-            FROM shanmao_refunds s
+            FROM shanmao_refund_clean s
             WHERE COALESCE(s.refund_time, s.audit_time, s.created_at) >= :ts
               AND COALESCE(s.refund_time, s.audit_time, s.created_at) <= :te
               AND s.status = '已退款'
@@ -2222,7 +2137,7 @@ def refund_export_all(
         ("D 手动退款", f"""
             SELECT {_day("COALESCE(m.actual_refund_time, m.op_time, m.register_time)")} AS d, count(*) AS cnt,
                    COALESCE(sum(m.refund_amount), 0) AS amt
-            FROM manual_refunds m
+            FROM manual_refund_clean m
             WHERE COALESCE(m.actual_refund_time, m.op_time, m.register_time) >= :ts
               AND COALESCE(m.actual_refund_time, m.op_time, m.register_time) <= :te
               AND m.is_refunded = '是'
@@ -2231,7 +2146,7 @@ def refund_export_all(
         ("E退款记录报表", f"""
             SELECT {_day("r.refund_time")} AS d, count(*) AS cnt,
                    COALESCE(sum(r.refund_amount), 0) AS amt
-            FROM refund_record_reports r
+            FROM refund_record_report_clean r
             WHERE r.refund_status IN ('退款成功','成功','SUCCESS')
               AND r.refund_time >= :ts AND r.refund_time <= :te
             GROUP BY 1"""),
@@ -2280,7 +2195,7 @@ def refund_problem_type_detail(
     for r in db.execute(text(
         """
         SELECT c.device_sn AS sn, c.problem_type
-        FROM cs_records c
+        FROM cs_record_clean c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND NOT (c.operator = ANY(:sys_bl))
@@ -2501,7 +2416,7 @@ def refund_recovery_analysis(
             "_note": "当前时间窗口未识别到人员数据, 请检查 Person 维表配置.",
         }
 
-    # ---- 3. 分母: 所有人员 在周期内 cs_records 接待的【真退款类】 SN 集合 (按 op 分组) ----
+    # ---- 3. 分母: 所有人员 在周期内 cs_record_clean 接待的【真退款类】 SN 集合 (按 op 分组) ----
     #    口径修正(2026-08-11):
     #      - problem_category = '退款' (大类是退款诉求)
     #      - 不再限制operator必须是退款挽回专员: 任何人员(含组长/主管/退款处理员)接待的退款类SN都算入分母
@@ -2512,7 +2427,7 @@ def refund_recovery_analysis(
         SELECT c.operator AS op, c.device_sn AS sn,
                c.operation_time AS op_time,
                c.problem_type AS problem_type
-        FROM cs_records c
+        FROM cs_record_clean c
         WHERE c.operation_time IS NOT NULL
           AND c.operation_time >= :ts AND c.operation_time <= :te
           AND NOT (c.operator = ANY(:sys_bl))
@@ -2530,13 +2445,13 @@ def refund_recovery_analysis(
         {"ts": ts, "te": te, "sys_bl": list(SYS_OP_BLACKLIST_RR), **kw_params},
     ).fetchall()
 
-    # 收集所有在cs_records中出现的operator，然后补全他们的meta信息
+    # 收集所有在cs_record_clean中出现的operator，然后补全他们的meta信息
     all_cs_ops: set[str] = set()
     for r in cs_sn_rows:
         if r.op:
             all_cs_ops.add(r.op)
 
-    # 将cs_records中出现但不在person_rows中的operator也加入all_ops_meta
+    # 将cs_record_clean中出现但不在person_rows中的operator也加入all_ops_meta
     person_op_map = {p.operator: p for p in person_rows}
     for op in all_cs_ops:
         if op not in all_ops_meta:
@@ -2596,7 +2511,7 @@ def refund_recovery_analysis(
     #   修正说明: 之前只判断了全局时间窗口,没有校验"退款时间必须在接待时间之后",导致接待前已退款的SN被误判为失败
     #   说明: 允许专员接待后最长7天走到退款审批(到账/工单结案)才判定为失败, 避免"假成功"
     #   2026-08-11 修正: 增加第3个失败来源——cs_record描述关键词匹配
-    #     大量退款操作通过企微等渠道执行,记录在cs_records.description中(如"退款说明"/"退款后重新充值说明"等)
+    #     大量退款操作通过企微等渠道执行,记录在cs_record_clean.description中(如"退款说明"/"退款后重新充值说明"等)
     #     但没有同步到refunds表或service_tickets表,导致这些已进入退款流程的SN被误判为"挽回成功"
     #     新增cs_kw_sn分支: cs_record描述含退款流程关键词的SN直接判定为失败
     import datetime as _dt2
@@ -2653,7 +2568,7 @@ def refund_recovery_analysis(
                    '退款流程' AS status,
                    'cs_record关键词' AS method,
                    c.operation_time AS event_time
-            FROM cs_records c
+            FROM cs_record_clean c
             JOIN host_sns hs ON c.device_sn = hs.sn
             WHERE c.operation_time IS NOT NULL
               AND c.device_sn IS NOT NULL
@@ -3064,7 +2979,7 @@ def refund_recovery_analysis(
             """
             SELECT DISTINCT c.device_sn AS sn,
                    MIN(c.operation_time) AS first_op_time
-            FROM cs_records c
+            FROM cs_record_clean c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
               AND NOT (c.operator = ANY(:sys_bl))
@@ -3235,7 +3150,7 @@ def refund_recovery_analysis(
                 """
                 SELECT DATE(c.operation_time AT TIME ZONE 'Asia/Shanghai') AS d,
                        c.device_sn AS sn
-                FROM cs_records c
+                FROM cs_record_clean c
                 WHERE c.operation_time IS NOT NULL
                   AND c.operation_time >= :ts AND c.operation_time <= :te
                   AND NOT (c.operator = ANY(:sys_bl))
@@ -3274,7 +3189,7 @@ def refund_recovery_analysis(
                   AND st.device_sn IS NOT NULL
                 UNION
                 SELECT c.device_sn AS sn
-                FROM cs_records c
+                FROM cs_record_clean c
                 WHERE c.operation_time IS NOT NULL
                   AND c.operation_time >= :ts AND c.operation_time <= :te7
                   AND c.problem_category = '退款'
@@ -3318,7 +3233,7 @@ def refund_recovery_analysis(
             """
             SELECT EXTRACT(HOUR FROM c.operation_time AT TIME ZONE 'Asia/Shanghai') AS hh,
                    c.device_sn AS sn
-            FROM cs_records c
+            FROM cs_record_clean c
             WHERE c.operation_time IS NOT NULL
               AND c.operation_time >= :ts AND c.operation_time <= :te
               AND NOT (c.operator = ANY(:sys_bl))
@@ -3354,7 +3269,7 @@ def refund_recovery_analysis(
                  WHERE COALESCE(st.service_category,'') = '退款' AND COALESCE(st.status, '') != '终止'
                 UNION
                 SELECT DISTINCT c.device_sn AS sn
-                FROM cs_records c JOIN arr a ON c.device_sn = a.sn
+                FROM cs_record_clean c JOIN arr a ON c.device_sn = a.sn
                  WHERE c.problem_category = '退款'
                    AND NOT (c.operator = ANY(:sys_bl))
                    AND (COALESCE(c.description,'') ILIKE ANY(ARRAY[:ck1,:ck2,:ck3,:ck4])

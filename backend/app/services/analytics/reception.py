@@ -6,10 +6,9 @@ from typing import Any
 from sqlalchemy import and_, case, func, select, text
 from sqlalchemy.orm import Session
 
-from app.models.cs_record import CsRecord
 from app.models.group import Group, PersonGroupMembership
+from app.models.ods_clean import CsRecordClean, RefundClean
 from app.models.person import Person, PersonAlias
-from app.models.refund import RefundClean
 from app.models.ticket import ServiceTicket
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
@@ -228,7 +227,7 @@ def _category_case():
     for bucket, keywords in _CATEGORY_BUCKETS[:-1]:  # 除最后一项"其他问题"(兜底)
         if keywords:
             for kw in keywords:
-                whens.append((CsRecord.problem_category.ilike(f"%{kw}%"), bucket))
+                whens.append((CsRecordClean.problem_category.ilike(f"%{kw}%"), bucket))
     fallback = _CATEGORY_BUCKETS[-1][0]  # "其他问题"
     return case(*whens, else_=fallback).label("category_bucket")
 
@@ -289,16 +288,16 @@ def reception_overview_trend(
     - per_capita_daily: 人均接待量/天 = reception_total / staff_count / day_count
     """
     start, end = _date_range(start, end)
-    week_trunc = func.date_trunc("week", CsRecord.operation_time).label("week_start")
+    week_trunc = func.date_trunc("week", CsRecordClean.operation_time).label("week_start")
     rows = db.execute(
         select(
             week_trunc,
-            func.to_char(func.date_trunc("week", CsRecord.operation_time), "IW").label("week_no"),
+            func.to_char(func.date_trunc("week", CsRecordClean.operation_time), "IW").label("week_no"),
             func.count().label("total"),
-            func.count(func.distinct(func.to_char(CsRecord.operation_time, "YYYY-MM-DD"))).label("day_count"),
-            func.count(func.distinct(CsRecord.operator)).filter(CsRecord.operator.isnot(None)).label("staff_count"),
+            func.count(func.distinct(func.to_char(CsRecordClean.operation_time, "YYYY-MM-DD"))).label("day_count"),
+            func.count(func.distinct(CsRecordClean.operator)).filter(CsRecordClean.operator.isnot(None)).label("staff_count"),
         )
-        .where(CsRecord.operation_time.between(start, end))
+        .where(CsRecordClean.operation_time.between(start, end))
         .group_by("week_start")
         .order_by("week_start")
     ).all()
@@ -327,16 +326,16 @@ def reception_category_summary(
     输出: [{week_start, week_no, 投诉, 退款, 其他问题, 套餐问题, 咨询, 综合问题}]
     """
     start, end = _date_range(start, end)
-    week_trunc = func.date_trunc("week", CsRecord.operation_time).label("week_start")
+    week_trunc = func.date_trunc("week", CsRecordClean.operation_time).label("week_start")
     bucket = _category_case()
     rows = db.execute(
         select(
             week_trunc,
-            func.to_char(func.date_trunc("week", CsRecord.operation_time), "IW").label("week_no"),
+            func.to_char(func.date_trunc("week", CsRecordClean.operation_time), "IW").label("week_no"),
             bucket,
             func.count().label("cnt"),
         )
-        .where(CsRecord.operation_time.between(start, end))
+        .where(CsRecordClean.operation_time.between(start, end))
         .group_by("week_start", "category_bucket")
         .order_by("week_start", "category_bucket")
     ).all()
@@ -376,13 +375,13 @@ def reception_per_capita(
     # 步骤1: 按周 × operator × bucket 聚合每人每类接待数
     op_cat_rows = db.execute(
         select(
-            func.date_trunc("week", CsRecord.operation_time).label("week_start"),
-            func.to_char(func.date_trunc("week", CsRecord.operation_time), "IW").label("week_no"),
-            CsRecord.operator.label("operator"),
+            func.date_trunc("week", CsRecordClean.operation_time).label("week_start"),
+            func.to_char(func.date_trunc("week", CsRecordClean.operation_time), "IW").label("week_no"),
+            CsRecordClean.operator.label("operator"),
             bucket,
             func.count().label("cnt"),
         )
-        .where(CsRecord.operation_time.between(start, end), CsRecord.operator.isnot(None))
+        .where(CsRecordClean.operation_time.between(start, end), CsRecordClean.operator.isnot(None))
         .group_by("week_start", "week_no", "operator", "category_bucket")
     ).all()
 
@@ -510,18 +509,18 @@ def reception_group_detail(
     bucket = _category_case()
     rows = db.execute(
         select(
-            CsRecord.operator.label("operator"),
+            CsRecordClean.operator.label("operator"),
             op_person.c.display_name.label("display_name"),
             op_person.c.group_name.label("group_name"),
             op_person.c.specialty.label("specialty"),
-            func.to_char(CsRecord.operation_time, "YYYY-MM-DD").label("day"),
+            func.to_char(CsRecordClean.operation_time, "YYYY-MM-DD").label("day"),
             bucket,
             func.count().label("cnt"),
         )
-        .outerjoin(op_person, CsRecord.operator == op_person.c.operator)
-        .where(CsRecord.operation_time.between(start, end), CsRecord.operator.isnot(None))
+        .outerjoin(op_person, CsRecordClean.operator == op_person.c.operator)
+        .where(CsRecordClean.operation_time.between(start, end), CsRecordClean.operator.isnot(None))
         .group_by(
-            CsRecord.operator,
+            CsRecordClean.operator,
             op_person.c.display_name,
             op_person.c.group_name,
             op_person.c.specialty,

@@ -111,6 +111,10 @@ def _engine():
         import app.models  # noqa: F401  确保所有模型已注册到 Base.metadata
         from app.core.database import Base
 
+        # #322 方案A: 干净层视图清单(视图名 → (源表全限定名, 列清单))。迁移/conftest
+        #   共用同一来源, 保证「视图 DDL 与模型/迁移逐字一致」。
+        from app.models.ods_clean import CLEAN_VIEWS
+
         # 2026-09-23: create_all 不 ALTER 已有表; 旧测试库的 governance_prompts /
         # onboarding_prompts 缺新列(change_reason/references/activated_at/by)且 code
         # 仍带旧 unique 约束(多版本行 INSERT 会冲突)。先 DROP 让 create_all 按新模型重建。
@@ -143,47 +147,37 @@ def _engine():
                 conn.execute(text(f'DROP TABLE IF EXISTS public."{_t}" CASCADE'))
             conn.commit()
 
-        # #322 方案A: create_all 会按 RefundClean 模型把 refund_clean 建成**表**(见下方说明),
+        # #322 方案A: create_all 会按各 *Clean 模型把视图名建成**表**(见下方说明),
         #   故先移除同名残留对象(可能是上一轮遗留的视图或表), 让 create_all 能干净地按模型建表。
         #   PG 的 DROP VIEW/TABLE 在对象类型不符时会报 WrongObjectType(即使带 IF EXISTS),
-        #   故用 DO 块按 pg_class.relkind 判定后再删。
+        #   故先按 pg_class.relkind 判定对象类型, 再删对应类型。
         with engine.connect() as conn:
-            conn.execute(text(
-                """
-                DO $$
-                BEGIN
-                    IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                               WHERE n.nspname = 'public' AND c.relname = 'refund_clean'
-                                 AND c.relkind = 'v') THEN
-                        DROP VIEW public.refund_clean;
-                    END IF;
-                    IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                               WHERE n.nspname = 'public' AND c.relname = 'refund_clean'
-                                 AND c.relkind IN ('r', 'p')) THEN
-                        DROP TABLE public.refund_clean CASCADE;
-                    END IF;
-                END $$;
-                """
-            ))
+            for _view in CLEAN_VIEWS:
+                _relkind = conn.execute(
+                    text(
+                        "SELECT c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        "WHERE n.nspname = 'public' AND c.relname = :rn"
+                    ),
+                    {"rn": _view},
+                ).scalar()
+                if _relkind == "v":
+                    conn.execute(text(f'DROP VIEW public."{_view}"'))
+                elif _relkind in ("r", "p"):
+                    conn.execute(text(f'DROP TABLE public."{_view}" CASCADE'))
             conn.commit()
 
         Base.metadata.create_all(bind=engine)
 
-        # #322 方案A: create_all 会按 RefundClean 模型把 refund_clean 建成**表**,
-        #   与线上的**视图**(over ods.refunds)不符; 且 analytics 现已全部改读
-        #   refund_clean, 若留 create_all 的空表会口径错位/用例全红。
+        # #322 方案A: create_all 会把各 *Clean 模型建成**表**(视图无法由 create_all 建),
+        #   与线上的**视图**(over ods 源表)不符; 且 analytics 现已全部改读这些视图,
+        #   若留 create_all 的空表会口径错位/用例全红。
         #   测试库不跑 Alembic 迁移, 故在此拆表重建为视图。
-        #   CREATE VIEW 的列清单与迁移 a9b0c1d2e3f4 逐字一致(改一处须同步另一处)。
-        #   顺序: create_all 先建出视图依赖的 ods.refunds → 再建视图 → 最后 stamp。
+        #   CREATE VIEW 的列清单与迁移 c3d4e5f6a7b8 共用 CLEAN_VIEWS(改一处即同步)。
+        #   顺序: create_all 先建出视图依赖的 ods 源表 → 再建视图 → 最后 stamp。
         with engine.connect() as conn:
-            conn.execute(text("DROP TABLE IF EXISTS public.refund_clean CASCADE"))
-            conn.execute(text(
-                "CREATE VIEW refund_clean AS SELECT "
-                "refund_no, platform_order_no, third_order_no, device_sn, refund_reason, package_name, "
-                "merchant_name, refund_amount, actual_amount, remark, status, refund_method, "
-                "audit_remark, auditor, operator, created_at_raw, updated_at_raw, actual_refund_time, "
-                "quality_status, created_at, updated_at FROM ods.refunds"
-            ))
+            for _view, (_src, _cols) in CLEAN_VIEWS.items():
+                conn.execute(text(f'DROP TABLE IF EXISTS public."{_view}" CASCADE'))
+                conn.execute(text(f'CREATE VIEW public."{_view}" AS SELECT {_cols} FROM {_src}'))
             conn.commit()
 
         # ⚠️ 2026-09-07 修复: create_all 建表后 stamp alembic 到 head。

@@ -35,11 +35,9 @@ from sqlalchemy.orm import Session
 
 from app.models.combo_dict import ComboDict, ComboNameAlias
 from app.models.device import Device
-from app.models.device_combo import DeviceCombo
-from app.models.device_flow_usage import DeviceFlowUsage
+from app.models.ods_clean import DeviceComboClean, DeviceFlowUsageClean, RefundClean
 
 # from app.models.merchant import DeviceMerchantLink, Merchant  # #271: 暂用 devices.merchant_name，links/merchants 表全空
-from app.models.refund import RefundClean
 from app.models.ticket import ServiceTicket
 from app.services import complaint_scope
 from app.services.analytics._core import D
@@ -92,15 +90,15 @@ def _fetch_active_devices(db: Session, since: datetime, end: datetime) -> set[st
     环比全线假降 60-85%。
     """
     # 质检套餐排除(#293): 出厂质检流水非真实充值, 不应计入充值活跃
-    not_qc = DeviceCombo.package_name.notilike("%质检%")
+    not_qc = DeviceComboClean.package_name.notilike("%质检%")
     # 充值活跃
     rc = {
         r[0]
         for r in db.execute(
-            select(distinct(DeviceCombo.device_sn))
-            .where(DeviceCombo.device_sn.isnot(None))
-            .where(DeviceCombo.created_at_raw >= since)
-            .where(DeviceCombo.created_at_raw <= end)
+            select(distinct(DeviceComboClean.device_sn))
+            .where(DeviceComboClean.device_sn.isnot(None))
+            .where(DeviceComboClean.created_at_raw >= since)
+            .where(DeviceComboClean.created_at_raw <= end)
             .where(not_qc)
         )
     }
@@ -108,11 +106,11 @@ def _fetch_active_devices(db: Session, since: datetime, end: datetime) -> set[st
     fl = {
         r[0]
         for r in db.execute(
-            select(distinct(DeviceFlowUsage.device_sn))
-            .where(DeviceFlowUsage.device_sn.isnot(None))
-            .where(DeviceFlowUsage.month_complete.is_(True))
-            .where(DeviceFlowUsage.stat_month >= since.strftime("%Y-%m"))
-            .where(DeviceFlowUsage.stat_month <= end.strftime("%Y-%m"))
+            select(distinct(DeviceFlowUsageClean.device_sn))
+            .where(DeviceFlowUsageClean.device_sn.isnot(None))
+            .where(DeviceFlowUsageClean.month_complete.is_(True))
+            .where(DeviceFlowUsageClean.stat_month >= since.strftime("%Y-%m"))
+            .where(DeviceFlowUsageClean.stat_month <= end.strftime("%Y-%m"))
         )
     }
     return rc | fl
@@ -126,32 +124,32 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime, end: datetime
     修复前 CategoryBoard 充值金额虚高 ~2.4 倍。
     """
     # 质检套餐排除条件(出厂质检, 非用户付费)
-    not_qc = DeviceCombo.package_name.notilike("%质检%")
+    not_qc = DeviceComboClean.package_name.notilike("%质检%")
     if dim == "device_type":
         stmt = (
             select(
                 Device.device_type.label("key"),
                 func.count().label("cnt"),
-                func.coalesce(func.sum(DeviceCombo.actual_amount), 0).label("amount"),
+                func.coalesce(func.sum(DeviceComboClean.actual_amount), 0).label("amount"),
             )
-            .select_from(DeviceCombo)
-            .join(Device, Device.sn == DeviceCombo.device_sn)
-            .where(DeviceCombo.created_at_raw >= since)
-            .where(DeviceCombo.created_at_raw <= end)
+            .select_from(DeviceComboClean)
+            .join(Device, Device.sn == DeviceComboClean.device_sn)
+            .where(DeviceComboClean.created_at_raw >= since)
+            .where(DeviceComboClean.created_at_raw <= end)
             .where(not_qc)
             .group_by(Device.device_type)
         )
     elif dim == "combo":
         stmt = (
             select(
-                DeviceCombo.package_name.label("key"),
+                DeviceComboClean.package_name.label("key"),
                 func.count().label("cnt"),
-                func.coalesce(func.sum(DeviceCombo.actual_amount), 0).label("amount"),
+                func.coalesce(func.sum(DeviceComboClean.actual_amount), 0).label("amount"),
             )
-            .where(DeviceCombo.created_at_raw >= since)
-            .where(DeviceCombo.created_at_raw <= end)
+            .where(DeviceComboClean.created_at_raw >= since)
+            .where(DeviceComboClean.created_at_raw <= end)
             .where(not_qc)
-            .group_by(DeviceCombo.package_name)
+            .group_by(DeviceComboClean.package_name)
         )
     elif dim == "merchant":
         # #271: 走 devices.merchant_name（links/merchants 表全空）
@@ -159,12 +157,12 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime, end: datetime
             select(
                 Device.merchant_name.label("key"),
                 func.count().label("cnt"),
-                func.coalesce(func.sum(DeviceCombo.actual_amount), 0).label("amount"),
+                func.coalesce(func.sum(DeviceComboClean.actual_amount), 0).label("amount"),
             )
-            .select_from(DeviceCombo)
-            .join(Device, Device.sn == DeviceCombo.device_sn)
-            .where(DeviceCombo.created_at_raw >= since)
-            .where(DeviceCombo.created_at_raw <= end)
+            .select_from(DeviceComboClean)
+            .join(Device, Device.sn == DeviceComboClean.device_sn)
+            .where(DeviceComboClean.created_at_raw >= since)
+            .where(DeviceComboClean.created_at_raw <= end)
             .where(not_qc)
             .where(Device.merchant_name.isnot(None))
             .group_by(Device.merchant_name)
@@ -200,7 +198,7 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime, end: datetime) 
             .group_by(Device.device_type)
         )
     elif dim == "combo":
-        # #270: 去掉 JOIN device_combos（充值流水一对多导致退款重复计数 2.5x），
+        # #270: 去掉对充值流水表的 JOIN（充值流水一对多导致退款重复计数 2.5x），
         # 改按 Device.current_combo_name 分组（与设备数/活跃同口径）
         stmt = (
             select(Device.current_combo_name.label("key"), func.count().label("cnt"))
@@ -243,7 +241,7 @@ def _fetch_complaint_by_dim(db: Session, dim: str, since: datetime, end: datetim
             .group_by(Device.device_type)
         )
     elif dim == "combo":
-        # #270: 同退款修复，去掉 JOIN device_combos 放大，按 current_combo_name 分组
+        # #270: 同退款修复，去掉对充值流水表的 JOIN 放大，按 current_combo_name 分组
         stmt = (
             select(Device.current_combo_name.label("key"), func.count().label("cnt"))
             .select_from(ServiceTicket)

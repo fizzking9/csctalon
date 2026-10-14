@@ -7,9 +7,7 @@ from typing import Any
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from app.models.manual_refund import ManualRefund
-from app.models.refund import RefundClean
-from app.models.wallet import WalletWithdrawal
+from app.models.ods_clean import ManualRefundClean, RefundClean, WalletWithdrawalClean
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
 from app.services.analytics._core import (
@@ -48,9 +46,9 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
     all_rf = list(db.execute(select(RefundClean)).scalars().all())
     # 2026-08-28: 只取"成功提现"(排除 提现申请-冻结 等失败/冻结备注), 避免冻结记录被当作真实出款
     all_wd = list(db.execute(
-        select(WalletWithdrawal).where(*_route_b_withdraw_filter())
+        select(WalletWithdrawalClean).where(*_route_b_withdraw_filter())
     ).scalars().all())
-    all_wi = list(db.execute(select(WalletWithdrawal).where(WalletWithdrawal.op_type == "订单退费转入")).scalars().all())
+    all_wi = list(db.execute(select(WalletWithdrawalClean).where(WalletWithdrawalClean.op_type == "订单退费转入")).scalars().all())
 
     # 所有 datetime 先统一 naive, 避免 tz 比较报错
     for r in all_rf:
@@ -206,8 +204,8 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
     #    2026-09-09 (A-20260909-001): 扩展排除 ignored(人工彻底忽略)
     #    abc-a: 改用统一入口 _quality_include_cond(), 与 raw SQL 路径同口径
     all_mr = list(db.execute(
-        select(ManualRefund).where(
-            ManualRefund.is_refunded == "是",
+        select(ManualRefundClean).where(
+            ManualRefundClean.is_refunded == "是",
             *_quality_include_cond(),
         )
     ).scalars().all())
@@ -629,7 +627,7 @@ def refund_withdrawal_sleeping(
         ORDER BY created_at_raw
     """), {"ts": s, "te": e}).fetchall()
     wd_rows = db.execute(text(f"""
-        SELECT remark, device_sn, op_amount, op_time FROM wallet_withdrawals w
+        SELECT remark, device_sn, op_amount, op_time FROM wallet_withdrawal_clean w
         WHERE w.op_type = '用户提现' AND {_withdraw_fail_remark_sql_cond()}
     """)).fetchall()
 

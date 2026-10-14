@@ -15,19 +15,19 @@ from typing import Any
 from sqlalchemy import and_, case, func, literal, or_, select, text, union
 from sqlalchemy.orm import Session
 
-from app.models.card_complaint import CardComplaint
-from app.models.cs_record import CsRecord
-from app.models.external_complaint import ExternalComplaint
+from app.models.ods_clean import CardComplaintClean
+from app.models.ods_clean import CsRecordClean
+from app.models.ods_clean import ExternalComplaintClean
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.person import Person, PersonAlias
-from app.models.refund import RefundClean
-from app.models.refund_record_report import RefundRecordReport
+from app.models.ods_clean import RefundClean
+from app.models.ods_clean import RefundRecordReportClean
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask
 from app.models.ticket import ServiceTicket
 from app.models.todo import TodoItem
-from app.models.wallet import WalletWithdrawal
+from app.models.ods_clean import WalletWithdrawalClean
 from app.services.complaint_scope import (
     ALL_BUCKETS,
     BUCKET_CARD,
@@ -90,8 +90,8 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     else:
         d_iso = (_dt.datetime.now(TZ).date() if date is None else _parse_date(date)).isoformat()
         d_end_iso = None
-    between = and_(CsRecord.operation_time.isnot(None),
-                   CsRecord.operation_time >= ts, CsRecord.operation_time <= te)
+    between = and_(CsRecordClean.operation_time.isnot(None),
+                   CsRecordClean.operation_time >= ts, CsRecordClean.operation_time <= te)
     tk_between = and_(ServiceTicket.register_time.isnot(None),
                       ServiceTicket.register_time >= ts, ServiceTicket.register_time <= te)
 
@@ -104,7 +104,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         .group_by("category_bucket")
     ).all()
     cat_device_rows = db.execute(
-        select(bucket, func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("dcnt"))
+        select(bucket, func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))).label("dcnt"))
         .where(between)
         .group_by("category_bucket")
     ).all()
@@ -133,15 +133,15 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     op_person = _operator_to_person_cte()
     top_rows = db.execute(
         select(
-            CsRecord.operator.label("raw_op"),
+            CsRecordClean.operator.label("raw_op"),
             op_person.c.display_name.label("display_name"),
             op_person.c.department.label("department"),
             op_person.c.group_name.label("group_name"),
             func.count().label("cnt"),
-            func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("dcnt"),
+            func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))).label("dcnt"),
         )
-        .outerjoin(op_person, CsRecord.operator == op_person.c.operator)
-        .where(between, CsRecord.operator.isnot(None))
+        .outerjoin(op_person, CsRecordClean.operator == op_person.c.operator)
+        .where(between, CsRecordClean.operator.isnot(None))
         .group_by("raw_op", op_person.c.display_name, op_person.c.department, op_person.c.group_name)
         .order_by(func.count().desc())
         .limit(10)
@@ -179,13 +179,13 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     # 叠加 external_complaints 今日 (按 complaint_category 聚合,未分类则归入 "外部投诉(监督局/315等)")
     # 2026-08-14: _INCLUDE_COMPLAINT_FILES=False 时跳过, ec_between=literal(False) 使下游查询返回空
     if _INCLUDE_COMPLAINT_FILES:
-        ec_between = and_(ExternalComplaint.complaint_date.isnot(None),
-                          ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te)
+        ec_between = and_(ExternalComplaintClean.complaint_date.isnot(None),
+                          ExternalComplaintClean.complaint_date >= ts, ExternalComplaintClean.complaint_date <= te)
         ec_rows = db.execute(
-            select(func.coalesce(ExternalComplaint.complaint_category, "外部投诉(监督局/315等)"),
+            select(func.coalesce(ExternalComplaintClean.complaint_category, "外部投诉(监督局/315等)"),
                    func.count().label("cnt"))
             .where(ec_between)
-            .group_by(func.coalesce(ExternalComplaint.complaint_category, "外部投诉(监督局/315等)"))
+            .group_by(func.coalesce(ExternalComplaintClean.complaint_category, "外部投诉(监督局/315等)"))
             .order_by(text("cnt DESC"))
         ).all()
         for r in ec_rows:
@@ -195,13 +195,13 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                 "value": int(r[1] or 0),
             })
         # 叠加 card_complaints 今日 (按 problem_category 聚合, 未分类归入 "卡商群投诉")
-        cc_between = and_(CardComplaint.complaint_date.isnot(None),
-                          CardComplaint.complaint_date >= ts, CardComplaint.complaint_date <= te)
+        cc_between = and_(CardComplaintClean.complaint_date.isnot(None),
+                          CardComplaintClean.complaint_date >= ts, CardComplaintClean.complaint_date <= te)
         cc_rows = db.execute(
-            select(func.coalesce(CardComplaint.problem_category, BUCKET_CARD),
+            select(func.coalesce(CardComplaintClean.problem_category, BUCKET_CARD),
                    func.count().label("cnt"))
             .where(cc_between)
-            .group_by(func.coalesce(CardComplaint.problem_category, BUCKET_CARD))
+            .group_by(func.coalesce(CardComplaintClean.problem_category, BUCKET_CARD))
             .order_by(text("cnt DESC"))
         ).all()
         for r in cc_rows:
@@ -234,9 +234,9 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                                    _complaint_source_type_case() == BUCKET_CARD)
     ).scalar() or 0
     _ov_card_cc = db.execute(
-        select(func.count()).select_from(CardComplaint)
-        .where(cc_between, CardComplaint.matched_ticket_no.isnot(None),
-               CardComplaint.matched_ticket_no.in_(
+        select(func.count()).select_from(CardComplaintClean)
+        .where(cc_between, CardComplaintClean.matched_ticket_no.isnot(None),
+               CardComplaintClean.matched_ticket_no.in_(
                    select(ServiceTicket.ticket_no).where(
                        tk_between, _ticket_category_case() == "投诉",
                        _complaint_source_type_case() == BUCKET_CARD,
@@ -287,10 +287,10 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     card_by_category: list[dict] = []
     if _cnt_cc > 0:
         _cc_rows = db.execute(
-            select(func.coalesce(CardComplaint.problem_category, CARD_SCOPE),
+            select(func.coalesce(CardComplaintClean.problem_category, CARD_SCOPE),
                    func.count().label("cnt"))
             .where(cc_between)
-            .group_by(func.coalesce(CardComplaint.problem_category, CARD_SCOPE))
+            .group_by(func.coalesce(CardComplaintClean.problem_category, CARD_SCOPE))
             .order_by(text("cnt DESC"))
         ).all()
         card_by_category = [
@@ -345,7 +345,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                 -- 是否匹配到 cs_record: 1=匹配, 0=未匹配
                 CASE WHEN c.problem_category IS NOT NULL THEN 1 ELSE 0 END AS has_match
             FROM comp_tickets ct
-            LEFT JOIN cs_records c
+            LEFT JOIN cs_record_clean c
               ON ct.device_sn = c.device_sn
               AND c.operation_time IS NOT NULL
               AND c.operation_time BETWEEN (ct.register_time - INTERVAL '24 hours')
@@ -403,7 +403,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                 WHEN COALESCE(service_item, '') ~* '微信投诉'
                 THEN '微信商户号投诉类'
                 -- A3-4: 外部平台名(12315/工信部/消协/公共服务/市监/政务) → 外部平台投诉受理类
-                --       注意: 这里不重复 外部投诉(ExternalComplaint)表, 这些工单是 service_tickets
+                --       注意: 这里不重复 外部投诉(ExternalComplaintClean)表, 这些工单是 service_tickets
                 --       中通过 "投诉子类" 字段直接录入"全国12315平台"等名称的记录
                 WHEN COALESCE(service_item, '') ~* '(12315|工信部|消协|消费者协会|公共服务|监督局|市场监管|市监|12345|政务平台)'
                 THEN '外部平台投诉受理类'
@@ -445,9 +445,9 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         return "外部平台投诉受理类"
 
     ec_list_rows = db.execute(
-        select(ExternalComplaint.complaint_category,
-               ExternalComplaint.platform,
-               ExternalComplaint.keyword)
+        select(ExternalComplaintClean.complaint_category,
+               ExternalComplaintClean.platform,
+               ExternalComplaintClean.keyword)
         .where(ec_between)
     ).all()
     for r in ec_list_rows:
@@ -472,8 +472,8 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         return "卡商群待标注类"
 
     cc_list_rows = db.execute(
-        select(CardComplaint.problem_category,
-               CardComplaint.problem)
+        select(CardComplaintClean.problem_category,
+               CardComplaintClean.problem)
         .where(cc_between)
     ).all()
     for r in cc_list_rows:
@@ -505,7 +505,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
 
     # ═══════════════════════════════════════════════════════════
     # 2026-08-13 新增: 投诉处理人 × 处理状态 统计 (三张投诉表合并)
-    #   - 处理人来源: service_tickets.handler / ExternalComplaint.handler / CardComplaint.handler
+    #   - 处理人来源: service_tickets.handler / ExternalComplaintClean.handler / CardComplaintClean.handler
     #   - 统一归一化: "企微-洪佳" → "洪佳"，空值 → "未分配"
     #   - 状态口径: 3表统一映射为 [待处理/处理中/已完成/已终止/未标注] 5 桶
     # ═══════════════════════════════════════════════════════════
@@ -545,7 +545,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                 END AS raw_status,
                 '外部投诉'::text AS source_type,
                 COUNT(*)::int AS cnt
-            FROM external_complaints ec
+            FROM external_complaint_clean ec
             WHERE ec.complaint_date IS NOT NULL
               AND ec.complaint_date >= :ts AND ec.complaint_date <= :te
             GROUP BY 1, 2, 3
@@ -564,7 +564,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
                 END AS raw_status,
                 '卡商群投诉'::text AS source_type,
                 COUNT(*)::int AS cnt
-            FROM card_complaints cc
+            FROM card_complaint_clean cc
             WHERE cc.complaint_date IS NOT NULL
               AND cc.complaint_date >= :ts AND cc.complaint_date <= :te
             GROUP BY 1, 2, 3
@@ -837,27 +837,27 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
         # 注意: complaint_pending 的三表查询直接使用表模型，不受 _INCLUDE_COMPLAINT_FILES 标志影响
         # 该标志仅控制投诉子类饼图/根因等聚合查询，并不阻止未闭环列表查询
         ec_where = and_(
-            ExternalComplaint.complaint_date.isnot(None),
-            ExternalComplaint.complaint_date >= ts_pending,
-            ExternalComplaint.complaint_date <= te_pending,
+            ExternalComplaintClean.complaint_date.isnot(None),
+            ExternalComplaintClean.complaint_date >= ts_pending,
+            ExternalComplaintClean.complaint_date <= te_pending,
         )
         ec_pending_rows = db.execute(
             select(
-                ExternalComplaint.complaint_no,
-                ExternalComplaint.complaint_date,
-                ExternalComplaint.complainant,
-                ExternalComplaint.complainant_phone,
-                ExternalComplaint.device_sn,
-                ExternalComplaint.platform,
-                ExternalComplaint.problem,
-                ExternalComplaint.complaint_category,
-                ExternalComplaint.result,
-                ExternalComplaint.handle_time,
-                ExternalComplaint.handle_detail,
-                ExternalComplaint.follower,
+                ExternalComplaintClean.complaint_no,
+                ExternalComplaintClean.complaint_date,
+                ExternalComplaintClean.complainant,
+                ExternalComplaintClean.complainant_phone,
+                ExternalComplaintClean.device_sn,
+                ExternalComplaintClean.platform,
+                ExternalComplaintClean.problem,
+                ExternalComplaintClean.complaint_category,
+                ExternalComplaintClean.result,
+                ExternalComplaintClean.handle_time,
+                ExternalComplaintClean.handle_detail,
+                ExternalComplaintClean.follower,
             )
             .where(ec_where)
-            .order_by(ExternalComplaint.complaint_date.asc())
+            .order_by(ExternalComplaintClean.complaint_date.asc())
             # ⚠️ 移除 LIMIT (和 service_tickets 同理, 统一放到 Python 层 过滤完 bucket 后再 LIMIT)
         ).mappings().all()
         for r in ec_pending_rows:
@@ -905,27 +905,27 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
 
         # ── C. card_complaints 卡商群投诉 (未闭环) ──
         cc_where = and_(
-            CardComplaint.complaint_date.isnot(None),
-            CardComplaint.complaint_date >= ts_pending,
-            CardComplaint.complaint_date <= te_pending,
+            CardComplaintClean.complaint_date.isnot(None),
+            CardComplaintClean.complaint_date >= ts_pending,
+            CardComplaintClean.complaint_date <= te_pending,
         )
         cc_pending_rows = db.execute(
             select(
-                CardComplaint.id,
-                CardComplaint.complaint_date,
-                CardComplaint.complainant,
-                CardComplaint.complainant_phone,
-                CardComplaint.device_sn,
-                CardComplaint.complaint_group,
-                CardComplaint.problem,
-                CardComplaint.problem_category,
-                CardComplaint.result,
-                CardComplaint.handle_result,
-                CardComplaint.solution,
-                CardComplaint.handler,
+                CardComplaintClean.id,
+                CardComplaintClean.complaint_date,
+                CardComplaintClean.complainant,
+                CardComplaintClean.complainant_phone,
+                CardComplaintClean.device_sn,
+                CardComplaintClean.complaint_group,
+                CardComplaintClean.problem,
+                CardComplaintClean.problem_category,
+                CardComplaintClean.result,
+                CardComplaintClean.handle_result,
+                CardComplaintClean.solution,
+                CardComplaintClean.handler,
             )
             .where(cc_where)
-            .order_by(CardComplaint.complaint_date.asc())
+            .order_by(CardComplaintClean.complaint_date.asc())
             # ⚠️ 移除 LIMIT (和 service_tickets 同理, 统一放到 Python 层 过滤完 bucket 后再 LIMIT)
         ).mappings().all()
         for r in cc_pending_rows:

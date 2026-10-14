@@ -7,8 +7,7 @@ from typing import Callable as _Callable
 from sqlalchemy import and_, case, func, literal, select, text, union
 from sqlalchemy.orm import Session
 
-from app.models.card_complaint import CardComplaint
-from app.models.external_complaint import ExternalComplaint
+from app.models.ods_clean import CardComplaintClean, ExternalComplaintClean
 from app.models.ticket import ServiceTicket
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
@@ -506,29 +505,29 @@ def _view_complaint_root_heatmap(db: Session, params: _PARAMS_T) -> _RET_T:
             _ticket_category_case() == "投诉",
         ),
         select(
-            ExternalComplaint.device_sn.label("sn"),
-            ExternalComplaint.complainant_phone.label("phone"),
-            func.coalesce(ExternalComplaint.complaint_category, literal("外部投诉")).label("sub"),
-            ExternalComplaint.complaint_date.label("rt"),
+            ExternalComplaintClean.device_sn.label("sn"),
+            ExternalComplaintClean.complainant_phone.label("phone"),
+            func.coalesce(ExternalComplaintClean.complaint_category, literal("外部投诉")).label("sub"),
+            ExternalComplaintClean.complaint_date.label("rt"),
         ).where(
-            ExternalComplaint.complaint_date >= ts - timedelta(days=1),
-            ExternalComplaint.complaint_date <= te + timedelta(days=1),
+            ExternalComplaintClean.complaint_date >= ts - timedelta(days=1),
+            ExternalComplaintClean.complaint_date <= te + timedelta(days=1),
         ),
         select(
-            CardComplaint.device_sn.label("sn"),
-            CardComplaint.complainant_phone.label("phone"),
-            func.coalesce(CardComplaint.problem_category, literal("卡商投诉")).label("sub"),
-            CardComplaint.complaint_date.label("rt"),
+            CardComplaintClean.device_sn.label("sn"),
+            CardComplaintClean.complainant_phone.label("phone"),
+            func.coalesce(CardComplaintClean.problem_category, literal("卡商投诉")).label("sub"),
+            CardComplaintClean.complaint_date.label("rt"),
         ).where(
-            CardComplaint.complaint_date >= ts - timedelta(days=1),
-            CardComplaint.complaint_date <= te + timedelta(days=1),
+            CardComplaintClean.complaint_date >= ts - timedelta(days=1),
+            CardComplaintClean.complaint_date <= te + timedelta(days=1),
         ),
     )
     # 再建一级 CTE 便于 JOIN
     u = select(union_subq.c.sn, union_subq.c.phone, union_subq.c.sub, union_subq.c.rt).cte("u")
 
     # ±24h 窗口 JOIN cs_record, 拿根因分类
-    from app.models.cs_record import CsRecord as _CsR
+    from app.models.ods_clean import CsRecordClean as _CsR
     stmt = (
         select(
             u.c.sub.label("投诉子类"),
@@ -668,20 +667,20 @@ def _view_today_phone_dup(db: Session, params: _PARAMS_T) -> _RET_T:
         _ticket_category_case() == "投诉",
     )
     comp_ec = select(
-        _clean_col_expr(ExternalComplaint.complainant_phone).label("phone_c"),
-        func.coalesce(ExternalComplaint.complaint_category, literal("外部投诉")).label("sub"),
-        ExternalComplaint.device_sn.label("sn_c"),
+        _clean_col_expr(ExternalComplaintClean.complainant_phone).label("phone_c"),
+        func.coalesce(ExternalComplaintClean.complaint_category, literal("外部投诉")).label("sub"),
+        ExternalComplaintClean.device_sn.label("sn_c"),
         literal("EC").label("src"),
     ).where(
-        ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te,
+        ExternalComplaintClean.complaint_date >= ts, ExternalComplaintClean.complaint_date <= te,
     )
     comp_cc = select(
-        _clean_col_expr(CardComplaint.complainant_phone).label("phone_c"),
-        func.coalesce(CardComplaint.problem_category, literal("卡商投诉")).label("sub"),
-        CardComplaint.device_sn.label("sn_c"),
+        _clean_col_expr(CardComplaintClean.complainant_phone).label("phone_c"),
+        func.coalesce(CardComplaintClean.problem_category, literal("卡商投诉")).label("sub"),
+        CardComplaintClean.device_sn.label("sn_c"),
         literal("CC").label("src"),
     ).where(
-        CardComplaint.complaint_date >= ts, CardComplaint.complaint_date <= te,
+        CardComplaintClean.complaint_date >= ts, CardComplaintClean.complaint_date <= te,
     )
     comp_u = union(comp_st, comp_ec, comp_cc).cte("u")
     # 全部工单 (非投诉也统计) 用于总进线次数

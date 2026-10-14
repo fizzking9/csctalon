@@ -8,10 +8,12 @@ from typing import Any
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.orm import Session
 
-from app.models.manual_refund import ManualRefund
-from app.models.refund import RefundClean
-from app.models.refund_record_report import RefundRecordReport
-from app.models.wallet import WalletWithdrawal
+from app.models.ods_clean import (
+    ManualRefundClean,
+    RefundClean,
+    RefundRecordReportClean,
+    WalletWithdrawalClean,
+)
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
 from app.services.analytics._core import (
@@ -90,7 +92,8 @@ def operation_method_dist(db: Session) -> list[dict]:
 #   金额: actual_amount(实际退款金额)  而非 refund_amount(申请退款金额)
 #   时间: audit_time(审核通过时间 ≈ 退款完成时间)  Excel 无独立 refund_time 列
 #   状态列: status  成功值: '已退款'(中文), 其他状态(申请中/已驳回/退款失败等)不计入经营出款
-_C_SHANMAO_TABLE = "shanmao_refunds"
+# #322 方案A: 读路径切到 public 薄视图 shanmao_refund_clean(over 闪猫退款信源表), 口径逐字不变
+_C_SHANMAO_TABLE = "shanmao_refund_clean"
 
 _C_SHANMAO_AMOUNT_COL = "actual_amount"
 
@@ -168,7 +171,8 @@ def _route_c_shanmao_agg(db: Session, start, end) -> tuple[int, float]:
 # 数据源: 商户号手机退款处理登记.xlsx (客服在商户号后台手动操作退款台账)
 #   金额: refund_amount(退款金额); 状态: is_refunded='是' 计入经营出款, '否' = 登记蓄水(水位)
 #   时间: op_time(实际退款操作时间) 为主, 缺失回退 register_time(登记日期)
-_D_OTHER_TABLE = "manual_refunds"
+# #322 方案A: 读路径切到 public 薄视图 manual_refund_clean(over 手动退款信源表), 口径逐字不变
+_D_OTHER_TABLE = "manual_refund_clean"
 
 _D_OTHER_AMOUNT_COL = "refund_amount"
 
@@ -228,7 +232,7 @@ def _quality_include_cond() -> list:
     (同一份报表里两条路径混用时, 曾出现一条排除 dup_residual、另一条没排除)。
     #201 S-P0-1：真身收敛到 quality_check.stats_quality_include。
     """
-    return [stats_quality_include(ManualRefund.quality_status)]
+    return [stats_quality_include(ManualRefundClean.quality_status)]
 
 def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
     """【路线D】手动退款(manual_refunds)独立表聚合 (表不存在则返回 0,0,不报错).
@@ -353,8 +357,8 @@ def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tu
 
 def _cash_routes_total(db: Session,
                        col_a: Any = RefundClean.created_at_raw,
-                       col_b: Any = WalletWithdrawal.op_time,
-                       col_e: Any = RefundRecordReport.refund_time,
+                       col_b: Any = WalletWithdrawalClean.op_time,
+                       col_e: Any = RefundRecordReportClean.refund_time,
                        start: _dt.datetime | None = None,
                        end: _dt.datetime | None = None) -> dict[str, Any]:
     """【统一核算聚合器 v3】四路经营A/B/C/D + 实际现金流E + 对账偏差.
@@ -395,7 +399,7 @@ def _cash_routes_total(db: Session,
     # ── B 钱包用户取现 ──
     b_row = db.execute(select(
         func.count(),
-        func.coalesce(func.sum(WalletWithdrawal.op_amount), 0),
+        func.coalesce(func.sum(WalletWithdrawalClean.op_amount), 0),
     ).where(
         *_route_b_withdraw_filter(),
         _between(col_b, start, end),
@@ -410,7 +414,7 @@ def _cash_routes_total(db: Session,
     # ── E 实际现金流: refund_record_reports 退款成功合计 (对账基准) ──
     e_row = db.execute(select(
         func.count(),
-        func.coalesce(func.sum(RefundRecordReport.refund_amount), 0),
+        func.coalesce(func.sum(RefundRecordReportClean.refund_amount), 0),
     ).where(
         *_route_e_cashflow_filter(),
         _between(col_e, start, end),
@@ -475,11 +479,11 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
     # ── B 用户提现按日 (路线B wallet) ──
     withdraw_rows = db.execute(
         select(
-            func.to_char(func.timezone("Asia/Shanghai", WalletWithdrawal.op_time), "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(WalletWithdrawal.op_amount), 0).label("amount"),
+            func.to_char(func.timezone("Asia/Shanghai", WalletWithdrawalClean.op_time), "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(WalletWithdrawalClean.op_amount), 0).label("amount"),
             func.count().label("count"),
         )
-        .where(WalletWithdrawal.op_time.between(s, e), *_route_b_withdraw_filter())
+        .where(WalletWithdrawalClean.op_time.between(s, e), *_route_b_withdraw_filter())
         .group_by("date")
     ).all()
     withdraw_map = {r.date: {"amount": D(r.amount), "count": r.count} for r in withdraw_rows}
@@ -531,11 +535,11 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
     # 日分桶统一按北京日 (与决策概览 _day AT TIME ZONE 口径一致)
     actual_rows = db.execute(
         select(
-            func.to_char(func.timezone("Asia/Shanghai", RefundRecordReport.refund_time), "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(RefundRecordReport.refund_amount), 0).label("amount"),
+            func.to_char(func.timezone("Asia/Shanghai", RefundRecordReportClean.refund_time), "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(RefundRecordReportClean.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
-        .where(RefundRecordReport.refund_time.between(s, e), *_route_e_cashflow_filter())
+        .where(RefundRecordReportClean.refund_time.between(s, e), *_route_e_cashflow_filter())
         .group_by("date")
     ).all()
     actual_map = {r.date: {"amount": D(r.amount), "count": r.count} for r in actual_rows}
@@ -592,20 +596,20 @@ def wallet_vs_withdraw(db: Session, start: datetime | None = None, end: datetime
     # 退回钱包: wallet 中 op_type='订单退费转入'
     wallet_in = db.execute(
         select(
-            func.to_char(func.timezone("Asia/Shanghai", WalletWithdrawal.op_time), "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(WalletWithdrawal.op_amount), 0).label("amount"),
+            func.to_char(func.timezone("Asia/Shanghai", WalletWithdrawalClean.op_time), "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(WalletWithdrawalClean.op_amount), 0).label("amount"),
         )
-        .where(WalletWithdrawal.op_time.between(start, end), WalletWithdrawal.op_type == "订单退费转入")
+        .where(WalletWithdrawalClean.op_time.between(start, end), WalletWithdrawalClean.op_type == "订单退费转入")
         .group_by("date")
     ).all()
     wallet_in_map = {r.date: D(r.amount) for r in wallet_in}
     # 实际提现: op_type='用户提现' 且 备注非失败/冻结 (2026-08-28 排除冻结记录)
     withdraw = db.execute(
         select(
-            func.to_char(func.timezone("Asia/Shanghai", WalletWithdrawal.op_time), "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(WalletWithdrawal.op_amount), 0).label("amount"),
+            func.to_char(func.timezone("Asia/Shanghai", WalletWithdrawalClean.op_time), "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(WalletWithdrawalClean.op_amount), 0).label("amount"),
         )
-        .where(WalletWithdrawal.op_time.between(start, end), *_route_b_withdraw_filter())
+        .where(WalletWithdrawalClean.op_time.between(start, end), *_route_b_withdraw_filter())
         .group_by("date")
     ).all()
     withdraw_map = {r.date: D(r.amount) for r in withdraw}
@@ -666,13 +670,13 @@ def merchant_cash_summary(db: Session) -> list[dict]:
     """
     rows = db.execute(
         select(
-            RefundRecordReport.merchant_id,
-            func.coalesce(func.sum(RefundRecordReport.refund_amount), 0).label("amount"),
+            RefundRecordReportClean.merchant_id,
+            func.coalesce(func.sum(RefundRecordReportClean.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
         .where(*_route_e_cashflow_filter())
-        .group_by(RefundRecordReport.merchant_id)
-        .order_by(func.sum(RefundRecordReport.refund_amount).desc())
+        .group_by(RefundRecordReportClean.merchant_id)
+        .order_by(func.sum(RefundRecordReportClean.refund_amount).desc())
         .limit(50)
     ).all()
     return [
@@ -690,11 +694,11 @@ def wallet_balance_top(db: Session, limit: int = 20) -> list[dict]:
     # 用窗口函数取每个账户最新一条记录的余额
     rows = db.execute(
         select(
-            WalletWithdrawal.account_id,
-            WalletWithdrawal.wallet_balance,
-            WalletWithdrawal.op_time,
+            WalletWithdrawalClean.account_id,
+            WalletWithdrawalClean.wallet_balance,
+            WalletWithdrawalClean.op_time,
         )
-        .order_by(WalletWithdrawal.account_id, WalletWithdrawal.op_time.desc())
+        .order_by(WalletWithdrawalClean.account_id, WalletWithdrawalClean.op_time.desc())
         .limit(limit * 5)
     ).all()
     # 去重保留每个账户最新

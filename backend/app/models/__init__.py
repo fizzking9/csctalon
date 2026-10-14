@@ -86,6 +86,21 @@ from app.models.metric import (
 )  # noqa: F401
 from app.models.notification import Notification  # noqa: F401
 from app.models.notification_channel import NotificationChannel  # noqa: F401
+
+# #322 方案A: public 干净层视图的只读模型集中登记(analytics 改读视图, 不直读 ods)
+from app.models.ods_clean import (  # noqa: F401
+    BmsOrderClean,
+    CardComplaintClean,
+    CsRecordClean,
+    DeviceComboClean,
+    DeviceFlowUsageClean,
+    ExternalComplaintClean,
+    ManualRefundClean,
+    RefundClean,
+    RefundRecordReportClean,
+    ShanmaoRefundClean,
+    WalletWithdrawalClean,
+)
 from app.models.onboarding_prompt import OnboardingPrompt  # noqa: F401
 from app.models.operation_log import OperationLog  # noqa: F401
 from app.models.person import Person, PersonAlias, PersonSkillTag  # noqa: F401
@@ -94,7 +109,7 @@ from app.models.prompt_config import PromptConfig  # noqa: F401
 from app.models.quality_disposition_rule import QualityDispositionRule  # noqa: F401
 from app.models.reconcile_check import ReconcileCheck  # noqa: F401
 from app.models.reconcile_match import ReconcileMatch  # noqa: F401
-from app.models.refund import Refund, RefundClean  # noqa: F401
+from app.models.refund import Refund  # noqa: F401
 from app.models.refund_record_report import RefundRecordReport  # noqa: F401
 from app.models.refund_wide import RefundWide  # noqa: F401
 from app.models.report import Report, ReportStatus, ReportType  # noqa: F401
@@ -220,6 +235,16 @@ __all__ = [
     "ReconcileMatch",
     "Refund",
     "RefundClean",
+    "BmsOrderClean",
+    "DeviceComboClean",
+    "CardComplaintClean",
+    "ExternalComplaintClean",
+    "CsRecordClean",
+    "WalletWithdrawalClean",
+    "DeviceFlowUsageClean",
+    "ManualRefundClean",
+    "RefundRecordReportClean",
+    "ShanmaoRefundClean",
     "RefundWide",
     "Report",
     "ReportStatus",

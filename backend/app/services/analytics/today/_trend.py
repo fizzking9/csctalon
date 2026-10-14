@@ -15,19 +15,19 @@ from typing import Any
 from sqlalchemy import and_, case, func, literal, or_, select, text, union
 from sqlalchemy.orm import Session
 
-from app.models.card_complaint import CardComplaint
-from app.models.cs_record import CsRecord
-from app.models.external_complaint import ExternalComplaint
+from app.models.ods_clean import CardComplaintClean
+from app.models.ods_clean import CsRecordClean
+from app.models.ods_clean import ExternalComplaintClean
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.person import Person, PersonAlias
-from app.models.refund import RefundClean
-from app.models.refund_record_report import RefundRecordReport
+from app.models.ods_clean import RefundClean
+from app.models.ods_clean import RefundRecordReportClean
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask
 from app.models.ticket import ServiceTicket
 from app.models.todo import TodoItem
-from app.models.wallet import WalletWithdrawal
+from app.models.ods_clean import WalletWithdrawalClean
 from app.services.complaint_scope import (
     ALL_BUCKETS,
     BUCKET_CARD,
@@ -218,11 +218,11 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         x_label = "日期 (跨度 {} 天)".format(len(slots_days))
         n_slots = len(slots_days)
     cs_rows = db.execute(
-        select(_time_trunc(CsRecord.operation_time),
+        select(_time_trunc(CsRecordClean.operation_time),
                func.count().label("cnt"),
-               func.count(func.distinct(func.nullif(func.trim(CsRecord.device_sn), ""))).label("dev_cnt"))
-        .where(CsRecord.operation_time.isnot(None),
-               CsRecord.operation_time >= ts, CsRecord.operation_time <= te)
+               func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))).label("dev_cnt"))
+        .where(CsRecordClean.operation_time.isnot(None),
+               CsRecordClean.operation_time >= ts, CsRecordClean.operation_time <= te)
         .group_by("trunc_t")
     ).all()
     cs_map: dict[int, int] = {}
@@ -261,11 +261,11 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
 
     # --- 路线B: 钱包提现(按粒度 笔数+金额) ---
     wb_rows = db.execute(
-        select(_time_trunc(WalletWithdrawal.op_time),
+        select(_time_trunc(WalletWithdrawalClean.op_time),
                func.count().label("cnt"),
-               func.coalesce(func.sum(WalletWithdrawal.op_amount), 0).label("amt"))
-        .where(WalletWithdrawal.op_time.isnot(None),
-               WalletWithdrawal.op_time >= ts, WalletWithdrawal.op_time <= te,
+               func.coalesce(func.sum(WalletWithdrawalClean.op_amount), 0).label("amt"))
+        .where(WalletWithdrawalClean.op_time.isnot(None),
+               WalletWithdrawalClean.op_time >= ts, WalletWithdrawalClean.op_time <= te,
                *_route_b_withdraw_filter())
         .group_by("trunc_t")
     ).all()
@@ -289,11 +289,11 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
 
     # --- 路线E: 商户号实际现金流(按粒度 笔数+金额, 数据源=refund_record_reports) ---
     e_rows = db.execute(
-        select(_time_trunc(RefundRecordReport.refund_time),
+        select(_time_trunc(RefundRecordReportClean.refund_time),
                func.count().label("cnt"),
-               func.coalesce(func.sum(RefundRecordReport.refund_amount), 0).label("amt"))
-        .where(RefundRecordReport.refund_time.isnot(None),
-               RefundRecordReport.refund_time >= ts, RefundRecordReport.refund_time <= te,
+               func.coalesce(func.sum(RefundRecordReportClean.refund_amount), 0).label("amt"))
+        .where(RefundRecordReportClean.refund_time.isnot(None),
+               RefundRecordReportClean.refund_time >= ts, RefundRecordReportClean.refund_time <= te,
                *_route_e_cashflow_filter())
         .group_by("trunc_t")
     ).all()
@@ -313,7 +313,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
     #   **与 #81 核心指标同源**（分桶 + 扣 315 已 matched 重叠 + 剥卡商）
     #
     #   【修什么】原实现（2026-09-14 前）：
-    #     `工单投诉类 + ExternalComplaint 全表 + CardComplaint 全表`
+    #     `工单投诉类 + 外部投诉全表 + 卡商群投诉全表`
     #     → ① **含卡商**（与 #53「卡商独立、不纳入总量」直接冲突）
     #       ② **不扣重叠** → 315 里已 matched 到工单的记录被重复计入
     #       ③ 与同页「核心指标·投诉数」**对不上**（实测 1127 vs 1111，差 16）
@@ -387,12 +387,12 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
             func.extract("epoch", ServiceTicket.finish_time - ServiceTicket.register_time) >= 180,
             ServiceTicket.finish_time >= ts, ServiceTicket.finish_time <= te)
         ec_done_rows = db.execute(
-            select(_time_trunc(ExternalComplaint.complaint_date), func.count().label("cnt"),
-                   func.count(ExternalComplaint.matched_ticket_no)
-                   .filter(ExternalComplaint.matched_ticket_no.in_(_done_sub)).label("ov"))
-            .where(ExternalComplaint.complaint_date.isnot(None),
-                   ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te,
-                   ExternalComplaint.result.in_(_EXTERNAL_DONE_RESULTS_LOCAL))
+            select(_time_trunc(ExternalComplaintClean.complaint_date), func.count().label("cnt"),
+                   func.count(ExternalComplaintClean.matched_ticket_no)
+                   .filter(ExternalComplaintClean.matched_ticket_no.in_(_done_sub)).label("ov"))
+            .where(ExternalComplaintClean.complaint_date.isnot(None),
+                   ExternalComplaintClean.complaint_date >= ts, ExternalComplaintClean.complaint_date <= te,
+                   ExternalComplaintClean.result.in_(_EXTERNAL_DONE_RESULTS_LOCAL))
             .group_by("trunc_t")
         ).all()
         for r in ec_done_rows:
@@ -408,16 +408,16 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
     # 315 补充表**净新增**并入「外部投诉」（与 /summary 合并口径一致）
     #   净新增 = 当日总数 − 已 matched 到本范围内工单的条数（避免与工单双算）
     if _INCLUDE_COMPLAINT_FILES:
-        _ec_cond = [ExternalComplaint.complaint_date.isnot(None),
-                    ExternalComplaint.complaint_date >= ts, ExternalComplaint.complaint_date <= te]
+        _ec_cond = [ExternalComplaintClean.complaint_date.isnot(None),
+                    ExternalComplaintClean.complaint_date >= ts, ExternalComplaintClean.complaint_date <= te]
         _sub_tk = select(ServiceTicket.ticket_no).where(
             _ticket_category_case() == "投诉",
             ServiceTicket.register_time.isnot(None),
             ServiceTicket.register_time >= ts, ServiceTicket.register_time <= te)
         ec_rows = db.execute(
-            select(_time_trunc(ExternalComplaint.complaint_date), func.count().label("cnt"),
-                   func.count(ExternalComplaint.matched_ticket_no)
-                   .filter(ExternalComplaint.matched_ticket_no.in_(_sub_tk)).label("ov"))
+            select(_time_trunc(ExternalComplaintClean.complaint_date), func.count().label("cnt"),
+                   func.count(ExternalComplaintClean.matched_ticket_no)
+                   .filter(ExternalComplaintClean.matched_ticket_no.in_(_sub_tk)).label("ov"))
             .where(*_ec_cond)
             .group_by("trunc_t")
         ).all()
@@ -431,7 +431,7 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
             net = int(r.cnt or 0) - int(r.ov or 0)
             if net:
                 cp_map[idx] = cp_map.get(idx, 0) + net
-        # ⚠️ CardComplaint **不再并入**（#53 卡商独立，见上方说明）
+        # ⚠️ 卡商群投诉 **不再并入**（#53 卡商独立，见上方说明）
 
     # ── 填充到槽位: 单日填当前小时之前, 多日填全部(最后一天可能实时) ──
     slots = list(range(n_slots))
