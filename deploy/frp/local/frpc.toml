@@ -28,3 +28,15 @@ type = "http"
 localIP = "127.0.0.1"
 localPort = 80
 customDomains = ["REPLACE_FRP_DOMAIN"]
+
+# -----------------------------------------------------------------------------
+# talon 算力网关: 本机 talon-api (4080) 通过隧道暴露到 talon 子域
+# 2026-10-15 补登: 生产迁移 node-2080 (prod-csctalon-talon VM) 时该条目丢失,
+# 导致 talon.kimirock.top 通过 mTLS 后 frps 无此 customDomain → 404。
+# -----------------------------------------------------------------------------
+[[proxies]]
+name = "talon-http"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 4080
+customDomains = ["talon.REPLACE_FRP_DOMAIN"]
