@@ -111,7 +111,12 @@ def test_supply_device_behavior_profile(db):
         Device(sn="SNBEH0001", merchant_name="商户乙", status="正常"),
         DeviceCombo(recharge_order_no="RB1", device_sn="SNBEH0001",
                     actual_amount=Decimal("12.34"),
-                    remaining_traffic=5 * GB, created_at_raw=datetime(2026, 9, 1)),
+                    # #325: 必须带非质检 package_name —— #293 起累计金额排除质检套餐
+                    #   (NOT ILIKE '%质检%'), package_name 为 NULL 的行会被一并排除。
+                    package_name="测试套餐29元",
+                    # 原写死 2026-09-01(距今超 30 天窗口, 时间炸弹) → 锚定当前时间 -1 天
+                    remaining_traffic=5 * GB,
+                    created_at_raw=datetime.now() - timedelta(days=1)),
     ])
     db.flush()
     res = ADS.supply_device_behavior(db, "SNBEH0001", timeline_days=30, timeline_limit=10)

@@ -100,13 +100,16 @@ def _mk_complaint(db, sn: str, days_ago: int = 0) -> ServiceTicket:
 
 
 def test_ops_overview_device_type(db):
-    """设备类型维: 归一码聚合 + 活跃/充值/退款/投诉四级指标。"""
-    dt = DimDeviceType(type_code=_uniq("CPE"), type_name=_uniq("4G路由器"))
-    db.add(dt)
-    db.flush()
+    """设备类型维: 聚合 + 活跃/充值/退款/投诉四级指标。
+
+    ⚠️ #325 对齐: #293 已把 device_type 维的 key 源从 DimDeviceType.type_code
+    改为 devices.device_type(中文名, 因全表 type_code 历史为空不可用) ——
+    聚合不再读字典表, 故此处直接给设备挂 device_type 中文名作 key。
+    """
+    dt_name = _uniq("4G路由器")
     sn1, sn2 = _uniq("SN-T1"), _uniq("SN-T2")
-    _mk_device(db, sn1, device_type_code=dt.type_code)
-    _mk_device(db, sn2, device_type_code=dt.type_code)
+    _mk_device(db, sn1, device_type=dt_name)
+    _mk_device(db, sn2, device_type=dt_name)
     _mk_recharge(db, sn1, Decimal("100.00"))
     _mk_flow(db, sn2)
     _mk_refund(db, sn1)
@@ -116,8 +119,8 @@ def test_ops_overview_device_type(db):
     res = category_ops_overview(db, dim="device_type", limit=10)
     assert res["dim"] == "device_type"
     items = {r["key"]: r for r in res["items"]}
-    assert dt.type_code in items
-    it = items[dt.type_code]
+    assert dt_name in items
+    it = items[dt_name]
     assert it["device_cnt"] == 2
     assert it["active_cnt"] == 2
     assert it["recharge_amount"] == 100.0

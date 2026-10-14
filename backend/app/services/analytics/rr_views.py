@@ -523,8 +523,10 @@ def _view_complaint_root_heatmap(db: Session, params: _PARAMS_T) -> _RET_T:
             CardComplaintClean.complaint_date <= te + timedelta(days=1),
         ),
     )
-    # 再建一级 CTE 便于 JOIN
-    u = select(union_subq.c.sn, union_subq.c.phone, union_subq.c.sub, union_subq.c.rt).cte("u")
+    # 再包一层 CTE 便于 JOIN。⚠️ #325 修复: CompoundSelect(union) 不能直接取 .c
+    # (SA2.0 会 AttributeError, 该 preset 线上一调用即 500), 必须先 .cte() ——
+    # 与下方 comp_u = union(...).cte("u") 同一正确姿势。
+    u = union_subq.cte("u")
 
     # ±24h 窗口 JOIN cs_record, 拿根因分类
     from app.models.ods_clean import CsRecordClean as _CsR
@@ -558,8 +560,10 @@ def _view_complaint_root_heatmap(db: Session, params: _PARAMS_T) -> _RET_T:
         "其它(注销/发票/退换)", "未关联SN",
     ]
     for r in rows_q:
-        sub = (r["投诉子类"] or "未标注")[:14]
-        rc = r["根因"] or "未关联SN"
+        # ⚠️ #325: SA2.0 的 Row 不支持 r["中文列名"] 字符串下标(移除), 须走 _mapping
+        m = r._mapping
+        sub = (m["投诉子类"] or "未标注")[:14]
+        rc = m["根因"] or "未关联SN"
         # 没关联上的 → 未关联SN 桶
         if rc not in ROOT_BUCKETS:
             # _complaint_root_case 已经归一化, 没命中的 else 值按规范归入最后兜底桶

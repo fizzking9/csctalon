@@ -36,8 +36,11 @@ class TestTierDefinitions:
     def test_no_tier_primary_is_disabled_provider(self):
         """档位首选应是实测可用且当前启用的 provider（防止指向 disabled）。"""
         # 允许集合 = 生产实测可用者（27b 当前 disabled，故不作 assistant/expert 首选）
+        # ⚠️ #325/#300 对齐: 2026-10-12 值班切换, expert 首选由 122b 改为 gpt-oss:120b
+        #   （122b 已从 talon 模型清单下线, 见 llm_tiers.py expert.rationale）。
+        #   本断言与 TIERS 定义同仓同源, 模型再切换时需同步更新此处。
         assert llm_tiers.TIERS["assistant"]["primary"] == "talon-gmk-qwen3-coder-30b"
-        assert llm_tiers.TIERS["expert"]["primary"] == "talon-gmk-qwen3.5-122b"
+        assert llm_tiers.TIERS["expert"]["primary"] == "talon-gmk-gpt-oss-120b"
 
 
 class TestResolveTier:
@@ -53,8 +56,9 @@ class TestResolveTier:
         assert chain[1] == "talon-gmk-qwen2.5-7b"          # 备选
 
     def test_expert_chain_local_primary(self):
+        # ⚠️ #325/#300 对齐: expert 首选 2026-10-12 起为 gpt-oss:120b（122b 已下线）
         chain = llm_tiers.resolve_tier("expert")
-        assert chain[0] == "talon-gmk-qwen3.5-122b"
+        assert chain[0] == "talon-gmk-gpt-oss-120b"
 
     def test_cloud_not_in_chain_by_default(self):
         """默认策略(explicit_only)下，链中不应含云端。"""
