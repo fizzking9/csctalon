@@ -100,3 +100,55 @@ def rebuild_dim_device_combo(db: Session) -> dict:
     dev_cnt = db.execute(text("SELECT COUNT(DISTINCT device_sn) FROM dim_device_combo")).scalar() or 0
     logger.info(f"[dim_device_combo] 重建完成: {inserted} 行 / {dev_cnt} 台设备")
     return {"rows": inserted, "devices": dev_cnt}
+
+
+# ── #321: 把 dim 当前切片投影回 devices.current_combo_name ────────────────
+# 背景: devices.current_combo_name 现有三个写入方(CSV 导入覆盖 / 探针只填 / 业务反填只填),
+#       语义不一致导致与订单源 37% 对不上。目标: 让 dim 成为"当前套餐"的单一真身之一。
+# 生产实测(2026-10-14): dim 当前切片覆盖 1,512,301 台; 有 current 的设备约 174.8 万台,
+#   其中 dim 缺 445,415 台(25.5%)、可补空 209,897 台、不一致 198,924 台。
+#   —— dim 并不能完整权威"current", 故**默认只补空**(不覆盖), 避免丢失 BMS 独有套餐。
+
+_DIM_CURRENT_SUBQ = """
+    SELECT DISTINCT ON (device_sn) device_sn, package_name
+    FROM dim_device_combo
+    WHERE is_current
+    ORDER BY device_sn
+"""
+
+# 只补空: 仅当 current 为空/空串时填入 dim 值(不改动已有值, 无回归)
+_SQL_FILL_CURRENT = text("""
+UPDATE devices d
+SET current_combo_name = x.package_name, updated_at = now()
+FROM (""" + _DIM_CURRENT_SUBQ + """) x
+WHERE d.sn = x.device_sn
+  AND (d.current_combo_name IS NULL OR d.current_combo_name = '')
+""")
+
+# 覆盖: 以 dim 当前切片覆盖(仅更新确有差异的行, 幂等)
+_SQL_OVERWRITE_CURRENT = text("""
+UPDATE devices d
+SET current_combo_name = x.package_name, updated_at = now()
+FROM (""" + _DIM_CURRENT_SUBQ + """) x
+WHERE d.sn = x.device_sn
+  AND d.current_combo_name IS DISTINCT FROM x.package_name
+""")
+
+
+def refresh_current_combo_from_dim(db: Session, *, overwrite: bool = False) -> dict:
+    """把 dim_device_combo 当前切片投影回 devices.current_combo_name (#321)。
+
+    overwrite=False(默认, 推荐): **只补空** —— 保留 BMS 现值, 仅填 dim 有值且 current 为空
+        的设备(生产实测约 209,897 台), 无回归。
+    overwrite=True: 以 dim 覆盖 —— 生产实测约 198,924 台改值; dim 缺失者(44.5 万台)不触及,
+        保持原值。用于"分析口径与订单源对齐"目标。
+
+    幂等(覆盖模式仅更新确有差异的行); 属批量 UPDATE, 调用方须已过 db_guard 守卫。
+    返回: {"updated": 影响行数, "overwrite": bool}
+    """
+    sql = _SQL_OVERWRITE_CURRENT if overwrite else _SQL_FILL_CURRENT
+    result = db.execute(sql)
+    db.commit()
+    updated = result.rowcount
+    logger.info(f"[dim_device_combo] current_combo_name 投影回写(overwrite={overwrite}): {updated} 行")
+    return {"updated": updated, "overwrite": overwrite}

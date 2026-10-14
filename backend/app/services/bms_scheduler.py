@@ -361,11 +361,18 @@ class BmsScheduler:
         # 保证退款/投诉两侧套餐维度读到最新套餐时点数据。
         try:
             from app.core.database import SessionLocal
-            from app.services.dim_device_combo_service import rebuild_dim_device_combo
+            from app.services.dim_device_combo_service import (
+                rebuild_dim_device_combo,
+                refresh_current_combo_from_dim,
+            )
             _dim_db = SessionLocal()
             try:
                 res = rebuild_dim_device_combo(_dim_db)
                 logger.info(f"[调度器] dim_device_combo 随回补刷新完成: {res}")
+                # #321: 重建后把 dim 当前切片"只补空"投影回 current_combo_name
+                # (不覆盖 BMS 现值; dim 仅覆盖 86% 有 current 的设备, 故不做覆盖)
+                proj = refresh_current_combo_from_dim(_dim_db, overwrite=False)
+                logger.info(f"[调度器] current_combo_name 投影(只补空)完成: {proj}")
             finally:
                 _dim_db.close()
         except Exception as e:  # noqa: BLE001 维度刷新失败不影响主流程, 下次回补再试
