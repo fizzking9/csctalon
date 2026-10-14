@@ -35,6 +35,7 @@ from app.services.analytics._core import (
     TZ,
     D,
     _active_age_bucket,
+    _cs_time_sql,
     _device_dim_attrs,
     _is_refund_staff,
     _normalize_refund_reason,
@@ -157,14 +158,14 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
             recovery_ops[op] = info
 
     # ---- 3. 分母SN (cs_record_clean problem_category='退款') ----
+    # #326: 时间窗谓词归一到 _cs_time_sql()(与原三行逐字等价, 仍全走绑定参数)
     cs_refund_sn_sql = text(
-        """
+        f"""
         SELECT c.operator AS op, c.device_sn AS sn,
                c.operation_time AS op_time,
                c.problem_type AS problem_type
         FROM cs_record_clean c
-        WHERE c.operation_time IS NOT NULL
-          AND c.operation_time >= :ts AND c.operation_time <= :te
+        WHERE {_cs_time_sql()}
           AND NOT (c.operator = ANY(:sys_bl))
           AND c.problem_category = '退款'
           AND NOT (
@@ -452,11 +453,10 @@ def refund_personnel_analysis(
     op_first_reception: dict[str, datetime] = {}
     op_last_reception: dict[str, datetime] = {}
     for r in db.execute(text(
-        """
+        f"""
         SELECT c.operator AS op, MIN(c.operation_time) AS first_t, MAX(c.operation_time) AS last_t
         FROM cs_record_clean c
-        WHERE c.operation_time IS NOT NULL
-          AND c.operation_time >= :ts AND c.operation_time <= :te
+        WHERE {_cs_time_sql()}
           AND NOT (c.operator = ANY(:sys_bl))
           AND c.problem_category = '退款'
         GROUP BY c.operator
@@ -531,13 +531,12 @@ def refund_person_devices(
     # 查该人员接待每个SN的次数和首末时间
     sn_reception_stats: dict[str, dict] = {}
     for r in db.execute(text(
-        """
+        f"""
         SELECT c.device_sn AS sn,
                MIN(c.operation_time) AS first_t, MAX(c.operation_time) AS last_t,
                COUNT(*) AS cnt
         FROM cs_record_clean c
-        WHERE c.operation_time IS NOT NULL
-          AND c.operation_time >= :ts AND c.operation_time <= :te
+        WHERE {_cs_time_sql()}
           AND c.operator = :op
           AND c.problem_category = '退款'
           AND c.device_sn IS NOT NULL
@@ -633,12 +632,11 @@ def refund_personnel_trend(
         # 周粒度: 按ISO周聚合
         week_op_host: dict[str, dict[str, set[str]]] = {}
         for r in db.execute(text(
-            """
+            f"""
             SELECT c.operator AS op, c.device_sn AS sn,
                    DATE_TRUNC('week', c.operation_time AT TIME ZONE 'Asia/Shanghai')::date AS wk
             FROM cs_record_clean c
-            WHERE c.operation_time IS NOT NULL
-              AND c.operation_time >= :ts AND c.operation_time <= :te
+            WHERE {_cs_time_sql()}
               AND NOT (c.operator = ANY(:sys_bl))
               AND c.problem_category = '退款'
               AND c.device_sn IS NOT NULL
@@ -651,12 +649,11 @@ def refund_personnel_trend(
         dates_list = sorted(set(day_op_host.keys()))
     else:
         for r in db.execute(text(
-            """
+            f"""
             SELECT c.operator AS op, c.device_sn AS sn,
                    DATE(c.operation_time AT TIME ZONE 'Asia/Shanghai') AS d
             FROM cs_record_clean c
-            WHERE c.operation_time IS NOT NULL
-              AND c.operation_time >= :ts AND c.operation_time <= :te
+            WHERE {_cs_time_sql()}
               AND NOT (c.operator = ANY(:sys_bl))
               AND c.problem_category = '退款'
               AND c.device_sn IS NOT NULL
@@ -782,11 +779,10 @@ def refund_device_analysis(
     repeat_refund = set()
     # 查复退款设备(SN在周期内出现>=2次退款诉求,即cs_record接待>=2次)
     for r in db.execute(text(
-        """
+        f"""
         SELECT c.device_sn AS sn, COUNT(*) AS cnt
         FROM cs_record_clean c
-        WHERE c.operation_time IS NOT NULL
-          AND c.operation_time >= :ts AND c.operation_time <= :te
+        WHERE {_cs_time_sql()}
           AND c.problem_category = '退款'
           AND c.device_sn IS NOT NULL
         GROUP BY c.device_sn
@@ -831,11 +827,10 @@ def refund_device_analysis(
     all_host_sns = core["global_host_sns"]
     sn_rc_cnt: dict[str, int] = {}
     for r in db.execute(text(
-        """
+        f"""
         SELECT c.device_sn AS sn, COUNT(DISTINCT c.operator) AS op_cnt
         FROM cs_record_clean c
-        WHERE c.operation_time IS NOT NULL
-          AND c.operation_time >= :ts AND c.operation_time <= :te
+        WHERE {_cs_time_sql()}
           AND c.problem_category = '退款'
           AND c.device_sn IS NOT NULL
         GROUP BY c.device_sn
@@ -891,12 +886,11 @@ def refund_device_detail(
     # 接待时间线
     timeline = []
     for r in db.execute(text(
-        """
+        f"""
         SELECT c.operation_time, c.operator, c.problem_type, c.description,
                c.execution_result, c.solution, c.consult_time
         FROM cs_record_clean c
-        WHERE c.operation_time IS NOT NULL
-          AND c.operation_time >= :ts AND c.operation_time <= :te
+        WHERE {_cs_time_sql()}
           AND c.device_sn = :sn
           AND c.problem_category = '退款'
         ORDER BY c.operation_time ASC
@@ -1033,8 +1027,7 @@ def refund_type_trend(
         SELECT {date_col} AS d, c.device_sn AS sn,
                c.problem_type, c.operator
         FROM cs_record_clean c
-        WHERE c.operation_time IS NOT NULL
-          AND c.operation_time >= :ts AND c.operation_time <= :te
+        WHERE {_cs_time_sql()}
           AND NOT (c.operator = ANY(:sys_bl))
           AND c.problem_category = '退款'
           AND c.device_sn IS NOT NULL
@@ -2193,11 +2186,10 @@ def refund_problem_type_detail(
     # 查每个 problem_type 的 SN 集合
     pt_sn: dict[str, set[str]] = {}
     for r in db.execute(text(
-        """
+        f"""
         SELECT c.device_sn AS sn, c.problem_type
         FROM cs_record_clean c
-        WHERE c.operation_time IS NOT NULL
-          AND c.operation_time >= :ts AND c.operation_time <= :te
+        WHERE {_cs_time_sql()}
           AND NOT (c.operator = ANY(:sys_bl))
           AND c.problem_category = '退款'
           AND c.device_sn IS NOT NULL
@@ -2422,14 +2414,14 @@ def refund_recovery_analysis(
     #      - 不再限制operator必须是退款挽回专员: 任何人员(含组长/主管/退款处理员)接待的退款类SN都算入分母
     #      - 如果非专职挽回人员接待的退款SN最终没有产生退款行为 → 也算挽回成功
     #      - 移除 problem_type 过度过滤: 网络问题/其他问题等所有退款理由均计入
+    #    #326: 时间窗谓词归一到 _cs_time_sql()(与原三行逐字等价)
     cs_refund_sn_sql = text(
-        """
+        f"""
         SELECT c.operator AS op, c.device_sn AS sn,
                c.operation_time AS op_time,
                c.problem_type AS problem_type
         FROM cs_record_clean c
-        WHERE c.operation_time IS NOT NULL
-          AND c.operation_time >= :ts AND c.operation_time <= :te
+        WHERE {_cs_time_sql()}
           AND NOT (c.operator = ANY(:sys_bl))
           AND c.problem_category = '退款'
           AND NOT (
@@ -2975,13 +2967,13 @@ def refund_recovery_analysis(
         week_label = f"{(now_sh.isocalendar()[0])}-W{(now_sh - _dt.timedelta(weeks=wi)).isocalendar()[1]}"
 
         # 当周 所有人员 cs_record 接待【真退款类】 SN (2026-08-11: 包含所有人员,不只专职挽回)
+        # #326: 时间窗谓词归一到 _cs_time_sql()(与原三行逐字等价)
         wk_cs = db.execute(text(
-            """
+            f"""
             SELECT DISTINCT c.device_sn AS sn,
                    MIN(c.operation_time) AS first_op_time
             FROM cs_record_clean c
-            WHERE c.operation_time IS NOT NULL
-              AND c.operation_time >= :ts AND c.operation_time <= :te
+            WHERE {_cs_time_sql()}
               AND NOT (c.operator = ANY(:sys_bl))
               AND c.problem_category = '退款'
               AND NOT (
@@ -3146,13 +3138,13 @@ def refund_recovery_analysis(
             te0 = _dt.datetime.combine(end_day, _dt.time.max).replace(tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
             te0_7 = te0 + _dt.timedelta(days=7)
             # 日粒度 分母SN (按天, 2026-08-11: 包含所有人员,不只专职挽回)
+            # #326: 时间窗谓词归一到 _cs_time_sql()(与原三行逐字等价)
             day_host_rows = db.execute(text(
-                """
+                f"""
                 SELECT DATE(c.operation_time AT TIME ZONE 'Asia/Shanghai') AS d,
                        c.device_sn AS sn
                 FROM cs_record_clean c
-                WHERE c.operation_time IS NOT NULL
-                  AND c.operation_time >= :ts AND c.operation_time <= :te
+                WHERE {_cs_time_sql()}
                   AND NOT (c.operator = ANY(:sys_bl))
                   AND c.problem_category = '退款'
                   AND c.device_sn IS NOT NULL
@@ -3172,7 +3164,7 @@ def refund_recovery_analysis(
             # 与 KPI global_fail_sns 一致: refunds + 退款工单 + cs_record关键词 三来源
             ck = _RR_CS_FAIL_KW
             day_fail_rows = db.execute(text(
-                """
+                f"""
                 SELECT r.device_sn AS sn
                 FROM refund_clean r
                 WHERE r.created_at_raw IS NOT NULL
@@ -3190,8 +3182,7 @@ def refund_recovery_analysis(
                 UNION
                 SELECT c.device_sn AS sn
                 FROM cs_record_clean c
-                WHERE c.operation_time IS NOT NULL
-                  AND c.operation_time >= :ts AND c.operation_time <= :te7
+                WHERE {_cs_time_sql(':te7')}
                   AND c.problem_category = '退款'
                   AND NOT (c.operator = ANY(:sys_bl))
                   AND c.device_sn IS NOT NULL
@@ -3229,13 +3220,13 @@ def refund_recovery_analysis(
         ts_today = _dt.datetime.combine(today_sh, _dt.time.min).replace(tzinfo=TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
         te_today = _dt.datetime.now(TZ).astimezone(_dt.timezone.utc).replace(tzinfo=None)
         # 今日 分母SN (按小时, 2026-08-11: 包含所有人员,不只专职挽回)
+        # #326: 时间窗谓词归一到 _cs_time_sql()(与原三行逐字等价)
         hr_rows = db.execute(text(
-            """
+            f"""
             SELECT EXTRACT(HOUR FROM c.operation_time AT TIME ZONE 'Asia/Shanghai') AS hh,
                    c.device_sn AS sn
             FROM cs_record_clean c
-            WHERE c.operation_time IS NOT NULL
-              AND c.operation_time >= :ts AND c.operation_time <= :te
+            WHERE {_cs_time_sql()}
               AND NOT (c.operator = ANY(:sys_bl))
               AND c.problem_category = '退款'
               AND c.device_sn IS NOT NULL

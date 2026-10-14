@@ -56,6 +56,8 @@ from app.services.analytics._core import (
     _complaint_source_type_case,
     _complaint_subitem_case,
     _derive_service_item_for_refund,
+    _cs_operator_cond,
+    _cs_time_cond,
     _parse_date,
     _pct_delta,
     _resolve_windows,
@@ -103,15 +105,16 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
         return and_(col.isnot(None), col >= s, col <= e)
 
     # 1. 今日接待量 (cs_records.operation_time)
-    cs_today = db.execute(select(func.count()).where(_between(CsRecordClean.operation_time, ts, te))).scalar() or 0
-    cs_yoy = db.execute(select(func.count()).where(_between(CsRecordClean.operation_time, ys, ye))).scalar() or 0
+    #    #326: 时间窗谓词归一到 _cs_time_cond(与原 _between 展开逐字等价)
+    cs_today = db.execute(select(func.count()).where(_cs_time_cond(ts, te))).scalar() or 0
+    cs_yoy = db.execute(select(func.count()).where(_cs_time_cond(ys, ye))).scalar() or 0
     # 1b. 今日服务设备数 (cs_records.device_sn 去重, 排除 NULL/空串) — 补充口径：1台设备多次进线算1次，体现覆盖面
     cs_device_today = db.execute(select(
         func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), "")))
-    ).where(_between(CsRecordClean.operation_time, ts, te))).scalar() or 0
+    ).where(_cs_time_cond(ts, te))).scalar() or 0
     cs_device_yoy = db.execute(select(
         func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), "")))
-    ).where(_between(CsRecordClean.operation_time, ys, ye))).scalar() or 0
+    ).where(_cs_time_cond(ys, ye))).scalar() or 0
 
     # 1c. ★ #78 接待来源分层（真人 / AI全自动 / 系统 / 客户自助）
     #     设计说明（Design Rationale）:
@@ -161,7 +164,7 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
                             func.to_char(CsRecordClean.operation_time, "YYYY-MM-DD HH24:MI:SS"))
             )).label("events"),
         )
-        .where(_between(CsRecordClean.operation_time, ts, te))
+        .where(_cs_time_cond(ts, te))
         .group_by(_cs_kind_case)
     ).all()
     cs_breakdown: dict[str, dict[str, int]] = {
@@ -178,19 +181,19 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
     _ai_sessions = cs_breakdown[SourceKind.AI_AUTO.value]["sessions"]
     _human_sn_rows = db.execute(
         select(func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))))
-        .where(_between(CsRecordClean.operation_time, ts, te),
+        .where(_cs_time_cond(ts, te),
                func.lower(func.trim(func.coalesce(CsRecordClean.operator, ""))) != "wechat",
                func.coalesce(func.trim(CsRecordClean.operator), "") != "")
     ).scalar() or 0
     _ai_sn_rows = db.execute(
         select(func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))))
-        .where(_between(CsRecordClean.operation_time, ts, te),
+        .where(_cs_time_cond(ts, te),
                func.lower(func.trim(func.coalesce(CsRecordClean.operator, ""))) == "wechat")
     ).scalar() or 0
     _overlap = db.execute(
         select(func.count()).select_from(
             select(func.nullif(func.trim(CsRecordClean.device_sn), "").label("sn"))
-            .where(_between(CsRecordClean.operation_time, ts, te))
+            .where(_cs_time_cond(ts, te))
             .group_by(func.nullif(func.trim(CsRecordClean.device_sn), ""))
             .having(and_(
                 func.count().filter(func.lower(func.trim(func.coalesce(CsRecordClean.operator, ""))) == "wechat") > 0,
@@ -262,11 +265,11 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
 
     # 6. 今日在岗人数 (cs_records distinct operator)
     staff_t = db.execute(select(func.count(func.distinct(CsRecordClean.operator)))
-                         .where(_between(CsRecordClean.operation_time, ts, te),
-                                CsRecordClean.operator.isnot(None))).scalar() or 0
+                         .where(_cs_time_cond(ts, te),
+                                _cs_operator_cond())).scalar() or 0
     staff_y = db.execute(select(func.count(func.distinct(CsRecordClean.operator)))
-                         .where(_between(CsRecordClean.operation_time, ys, ye),
-                                CsRecordClean.operator.isnot(None))).scalar() or 0
+                         .where(_cs_time_cond(ys, ye),
+                                _cs_operator_cond())).scalar() or 0
 
     # 6b. ★ #309 窗口充值(真实现金流充入): device_combos 按 created_at_raw 落窗,
     #     剔除工厂质检专用套餐流水(package_name ILIKE '%质检%') —— 与分品类运营看板

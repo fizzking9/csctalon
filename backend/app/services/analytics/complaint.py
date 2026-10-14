@@ -30,6 +30,8 @@ from app.services.analytics._core import (
     ACTIVE_AGE_BUCKETS,
     REAL_FINISH_EPOCH_SECS,
     _complaint_source_type_case,
+    _cs_operator_cond,
+    _cs_time_cond,
     _device_dim_attrs,
     _person_position_map,
     _resolve_windows,
@@ -364,11 +366,12 @@ def complaint_health_metrics(
 
     # ── 1. 活跃 SN 基数（分母基底）──────────────────────────────
     # 口径: 窗口内 `cs_records.operation_time` 命中的去重 `device_sn`
+    # #326: 时间窗谓词归一到 _cs_time_cond —— 原写法无 IS NOT NULL,
+    #       但 NULL 行两种写法在 WHERE 中同为不通过, 语义完全一致。
     active_sn = int(
         db.scalar(
             select(func.count(func.distinct(CsRecordClean.device_sn))).where(
-                CsRecordClean.operation_time >= ts,
-                CsRecordClean.operation_time <= te,
+                _cs_time_cond(ts, te),
                 CsRecordClean.device_sn.isnot(None),
             )
         )
@@ -446,12 +449,12 @@ def complaint_health_metrics(
     ).all()
 
     # 客服接待数（按操作人，取接待会话数）
+    # #326: 时间窗/操作人谓词归一(原裸 >=/<= 与谓词语义一致, NULL 行同为不通过)
     reception_rows = db.execute(
         select(CsRecordClean.operator, func.count())
         .where(
-            CsRecordClean.operation_time >= ts,
-            CsRecordClean.operation_time <= te,
-            CsRecordClean.operator.isnot(None),
+            _cs_time_cond(ts, te),
+            _cs_operator_cond(),
         )
         .group_by(CsRecordClean.operator)
     ).all()

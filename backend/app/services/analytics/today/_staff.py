@@ -62,6 +62,8 @@ from app.services.analytics._core import (
     _route_a_online_refund_filter,
     _route_b_withdraw_filter,
     _route_e_cashflow_filter,
+    _cs_time_cond,
+    _cs_time_sql,
     _strip_qw_prefix,
     _ticket_category_case,
 )
@@ -158,8 +160,8 @@ def today_staff_efficiency(
     cs_q = (select(CsRecordClean.operator.label("op"),
                    func.count().label("c"),
                    func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))).label("dc"))
-            .where(CsRecordClean.operation_time.isnot(None),
-                   CsRecordClean.operation_time >= ts, CsRecordClean.operation_time <= te,
+            # #326: 时间窗谓词归一到 _cs_time_cond(与原 isnot(None)+>=+<= 逐字等价)
+            .where(_cs_time_cond(ts, te),
                    _sys_auto_filter())
             .group_by(CsRecordClean.operator)).cte("cs_q")
     # 2. 会话接待 按 6 个 category_bucket 分桶 per operator: 会话数 + 接待数(SN去重) 两套
@@ -170,8 +172,7 @@ def today_staff_efficiency(
         func.count().label("scnt"),
         func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))).label("pcnt"),
     ).where(
-        CsRecordClean.operation_time.isnot(None),
-        CsRecordClean.operation_time >= ts, CsRecordClean.operation_time <= te,
+        _cs_time_cond(ts, te),
         _sys_auto_filter(),
     ).group_by(CsRecordClean.operator, "bucket")).cte("cs_cat_q")
     # 3. 退款挽回实际执行: 笔数 + 去重设备个数
@@ -343,7 +344,7 @@ def today_staff_efficiency(
     #   外部投诉(external): service_tickets + external_complaints + card_complaints 外部投诉类
     # ─────────────────────────────────────────────────────────────────────
     merged_sn_sql = text(
-        """
+        f"""
         -- 子查询1: cs_record 按 6 类专项 × SN 输出 (过滤系统自动)
         WITH cs_sns AS (
             SELECT
@@ -362,8 +363,7 @@ def today_staff_efficiency(
                 END AS spec,
                 c.device_sn AS sn
             FROM cs_record_clean c
-            WHERE c.operation_time IS NOT NULL
-              AND c.operation_time >= :ts AND c.operation_time <= :te
+            WHERE {_cs_time_sql()}
               AND c.operator IS NOT NULL
               AND c.operator NOT IN ('sys','system','SYS','System','用户自助','客户自助','企微用户自助','WeChat','wechat','WECHAT','AI客服','智能客服','机器人客服','客户','班牛','系统','微信投诉')
               AND NOT (
@@ -1084,8 +1084,7 @@ def today_staff_efficiency(
             func.count().label("rc"),
             func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))).label("rdc"),
         )
-        .where(CsRecordClean.operation_time.isnot(None),
-               CsRecordClean.operation_time >= ts, CsRecordClean.operation_time <= te,
+        .where(_cs_time_cond(ts, te),
                CsRecordClean.operator.in_(_AI_SYS_OPS))
         .group_by(CsRecordClean.operator)
     ).all()
@@ -1135,9 +1134,7 @@ def today_staff_efficiency(
                 ).label("pcnt"),
             )
             .where(
-                CsRecordClean.operation_time.isnot(None),
-                CsRecordClean.operation_time >= ts,
-                CsRecordClean.operation_time <= te,
+                _cs_time_cond(ts, te),
                 CsRecordClean.operator == op_name,
             )
             .group_by("bucket")

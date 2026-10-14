@@ -55,6 +55,7 @@ from app.services.analytics._core import (
     _complaint_source_type_case,
     _complaint_subitem_case,
     _derive_service_item_for_refund,
+    _cs_time_cond,
     _parse_date,
     _pct_delta,
     _resolve_windows,
@@ -221,8 +222,8 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
         select(_time_trunc(CsRecordClean.operation_time),
                func.count().label("cnt"),
                func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))).label("dev_cnt"))
-        .where(CsRecordClean.operation_time.isnot(None),
-               CsRecordClean.operation_time >= ts, CsRecordClean.operation_time <= te)
+        # #326: 时间窗谓词归一到 _cs_time_cond(与原 isnot(None)+>=+<= 逐字等价)
+        .where(_cs_time_cond(ts, te))
         .group_by("trunc_t")
     ).all()
     cs_map: dict[int, int] = {}

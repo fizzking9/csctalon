@@ -55,6 +55,8 @@ from app.services.analytics._core import (
     _complaint_source_type_case,
     _complaint_subitem_case,
     _derive_service_item_for_refund,
+    _cs_operator_cond,
+    _cs_time_cond,
     _parse_date,
     _pct_delta,
     _resolve_windows,
@@ -90,8 +92,8 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
     else:
         d_iso = (_dt.datetime.now(TZ).date() if date is None else _parse_date(date)).isoformat()
         d_end_iso = None
-    between = and_(CsRecordClean.operation_time.isnot(None),
-                   CsRecordClean.operation_time >= ts, CsRecordClean.operation_time <= te)
+    # #326: 时间窗谓词归一到 _cs_time_cond(与原 and_ 拼装逐字等价)
+    between = _cs_time_cond(ts, te)
     tk_between = and_(ServiceTicket.register_time.isnot(None),
                       ServiceTicket.register_time >= ts, ServiceTicket.register_time <= te)
 
@@ -141,7 +143,7 @@ def today_reception_breakdown(db: Session, date: str | None = None, start: str |
             func.count(func.distinct(func.nullif(func.trim(CsRecordClean.device_sn), ""))).label("dcnt"),
         )
         .outerjoin(op_person, CsRecordClean.operator == op_person.c.operator)
-        .where(between, CsRecordClean.operator.isnot(None))
+        .where(between, _cs_operator_cond())
         .group_by("raw_op", op_person.c.display_name, op_person.c.department, op_person.c.group_name)
         .order_by(func.count().desc())
         .limit(10)

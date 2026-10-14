@@ -19,7 +19,12 @@ from sqlalchemy import and_, case, exists, func, literal, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.models.group import PersonGroupMembership
-from app.models.ods_clean import RefundClean, RefundRecordReportClean, WalletWithdrawalClean
+from app.models.ods_clean import (
+    CsRecordClean,
+    RefundClean,
+    RefundRecordReportClean,
+    WalletWithdrawalClean,
+)
 from app.models.person import Person, PersonAlias
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.staff_assignment import StaffAssignment
@@ -125,6 +130,56 @@ def _apply_person_filters(stmt, person_alias,
         stmt = stmt.where(exists_s.exists())
     return stmt
 
+
+
+# ============================================================
+# 「有效接待记录(cs_record)」单一谓词 (#326 口径归一)
+# ============================================================
+# 背景: analytics 各文件此前各自拼装 cs_record 过滤条件, 存在三种
+# 写法 —— ① IS NOT NULL + >= + <=  ② 裸 >= + <=  ③ BETWEEN(闭区间)。
+# 三者对 NULL 行在 PostgreSQL 中同为 false(NULL 比较结果为 NULL、
+# NULL BETWEEN 结果为 NULL, WHERE 中均不通过), 行选择结果完全一致
+# → 属等价重复, 统一收敛到本谓词, 消除口径分裂隐患。
+# ⚠️ 本谓词只含「时间窗」与「操作人非空」两个最小公共判据;
+#    各处更强的专用判据(系统账户黑名单/自动关键词/退款大类等)
+#    不在内、不得混用, 保留在各调用点原样。
+def _cs_time_cond(start, end):
+    """有效接待时间窗谓词(ORM): operation_time 非空且 ∈ [start, end] 闭区间。
+
+    #326: 归一 analytics 内约 29 处手拼写法(①/②/③三种写法语义等价);
+    仅收敛时间窗本身, 不含 operator/problem_category 等领域条件。
+    """
+    return and_(
+        CsRecordClean.operation_time.isnot(None),
+        CsRecordClean.operation_time >= start,
+        CsRecordClean.operation_time <= end,
+    )
+
+
+def _cs_operator_cond():
+    """有效操作人谓词(ORM, 弱判据): operator 非空。
+
+    ⚠️ 仅表示「有操作人」; 排除系统/AI 账户的强判据在
+    today/_staff 的 _sys_auto_filter 与 refund 模块的 SYS_OP_BLACKLIST_RR
+    (裸 SQL 侧), 两者语义更强, 禁止用本弱判据替代。
+    """
+    return CsRecordClean.operator.isnot(None)
+
+
+def _cs_time_sql(te_param: str = ":te") -> str:
+    """有效接待时间窗谓词(裸 SQL 片段, 供 text() 内嵌入)。
+
+    生成: c.operation_time IS NOT NULL
+              AND c.operation_time >= :ts AND c.operation_time <= {te_param}
+    te_param 仅兼容各查询截止参数名差异(:te / :te7); 起始参数名统一 :ts
+    (现存全部裸 SQL 均如此)。表别名固定 c(现存裸 SQL 均 FROM cs_record_clean c)。
+    ⚠️ 拼接的只是代码内常量参数名/别名, 值一律走绑定参数, 不违反参数化铁律。
+    """
+    return (
+        "c.operation_time IS NOT NULL "
+        "AND c.operation_time >= :ts "
+        f"AND c.operation_time <= {te_param}"
+    )
 
 
 # ============================================================

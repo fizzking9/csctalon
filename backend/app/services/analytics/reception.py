@@ -15,6 +15,8 @@ from app.models.ticket import ServiceTicket
 from app.services.analytics._core import (
     COMPLAINT_SPECIALTY,
     SYS_OP_BLACKLIST_RR,
+    _cs_operator_cond,
+    _cs_time_cond,
     _date_range,
     _route_a_online_refund_filter,
     _strip_qw_prefix,
@@ -295,9 +297,11 @@ def reception_overview_trend(
             func.to_char(func.date_trunc("week", CsRecordClean.operation_time), "IW").label("week_no"),
             func.count().label("total"),
             func.count(func.distinct(func.to_char(CsRecordClean.operation_time, "YYYY-MM-DD"))).label("day_count"),
-            func.count(func.distinct(CsRecordClean.operator)).filter(CsRecordClean.operator.isnot(None)).label("staff_count"),
+            # #326: 操作人谓词归一到 _cs_operator_cond(逐字等价)
+            func.count(func.distinct(CsRecordClean.operator)).filter(_cs_operator_cond()).label("staff_count"),
         )
-        .where(CsRecordClean.operation_time.between(start, end))
+        # #326: 时间窗谓词归一到 _cs_time_cond(原 between 与 >=/<= 语义等价, NULL 行同为 false)
+        .where(_cs_time_cond(start, end))
         .group_by("week_start")
         .order_by("week_start")
     ).all()
@@ -335,7 +339,8 @@ def reception_category_summary(
             bucket,
             func.count().label("cnt"),
         )
-        .where(CsRecordClean.operation_time.between(start, end))
+        # #326: 时间窗谓词归一到 _cs_time_cond(原 between 语义等价)
+        .where(_cs_time_cond(start, end))
         .group_by("week_start", "category_bucket")
         .order_by("week_start", "category_bucket")
     ).all()
@@ -381,7 +386,8 @@ def reception_per_capita(
             bucket,
             func.count().label("cnt"),
         )
-        .where(CsRecordClean.operation_time.between(start, end), CsRecordClean.operator.isnot(None))
+        # #326: 时间窗/操作人谓词归一(原 between + isnot(None) 语义等价)
+        .where(_cs_time_cond(start, end), _cs_operator_cond())
         .group_by("week_start", "week_no", "operator", "category_bucket")
     ).all()
 
@@ -518,7 +524,8 @@ def reception_group_detail(
             func.count().label("cnt"),
         )
         .outerjoin(op_person, CsRecordClean.operator == op_person.c.operator)
-        .where(CsRecordClean.operation_time.between(start, end), CsRecordClean.operator.isnot(None))
+        # #326: 时间窗/操作人谓词归一(原 between + isnot(None) 语义等价)
+        .where(_cs_time_cond(start, end), _cs_operator_cond())
         .group_by(
             CsRecordClean.operator,
             op_person.c.display_name,
