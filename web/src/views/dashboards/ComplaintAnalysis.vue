@@ -370,8 +370,10 @@
            逻辑：从决策概览拆出, 与趋势图分离 —— 趋势回答「量随时间怎么变」, 本页回答「量落在什么设备上」。
                  复用概览A6的四维函数(_device_dim_groups), 保证本页 ↔ 概览 ↔ 积压明细 同源自洽。
            口径：投诉判据=工单 service_category 空白或='投诉'(complaint_scope 唯一出口);
-                 套餐=#320 改读 dim_device_combo 干净维度(SCD2, 工单登记时点); 设备型号=bms_orders 最新订单;
-                 商户号=devices表; 激活=bms最早∪devices兜底。
+                 套餐=#320 改读 dim_device_combo 干净维度(SCD2, 工单登记时点), 空时回落
+                 devices.current_combo_name(current 基准, 用户 2026-10-14 拍板);
+                 current 与订单源 37% 设备不一致问题保留, 排查见 #321;
+                 设备型号=bms_orders 最新订单; 商户号=devices表; 激活=bms最早∪devices兜底。
                  source_type=全部 → 三源合计剔卡商(与旧概览A6完全一致); 卡商独立来源=card_complaints。
            取舍：❌ 不做趋势图(那是概览的职责);
                  ❌ 不做跨渠道对比表(本期先做渠道切换, 对比表视使用情况再加);
