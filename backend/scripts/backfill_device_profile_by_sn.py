@@ -35,7 +35,7 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, default=10, help="BMS 查询并发(默认 10)")
     parser.add_argument("--timeout", type=int, default=86400,
                         help="整体超时秒数(默认 86400=24h, 供存量清零长跑)")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     # 档案补全是 UPDATE devices 的生产运维操作 → 显式授权真实库
     db = bootstrap(mode="prod", allow_real_db=real_db_requested())
