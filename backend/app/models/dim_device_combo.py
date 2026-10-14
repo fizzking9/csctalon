@@ -13,6 +13,7 @@
   ② 不存归一码(套餐归一属 combo_dict 维表层, 保持本层只做"原始套餐名时点快照");
   ③ 质检套餐在构建期过滤而非查询期过滤(维度即"干净", 查询侧零判断成本)。
 - 工单: #320 · 前置: #319 (ods 分层落地)
+- C4 登记: docs/standards/数据库表结构说明.md §四(SCD Type 2 历史追溯)
 """
 
 from __future__ import annotations
