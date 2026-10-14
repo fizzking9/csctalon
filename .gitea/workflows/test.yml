@@ -61,6 +61,23 @@ jobs:
             bash scripts/check-commit-issue.sh --head-only
           fi
 
+  # #319 契约 C2: analytics 层禁止直读 ods 源表(P2 逐域切换的棘轮门禁)。
+  # 纯 python3 静态扫描, 不依赖 docker; 只阻断「新增」违规, 存量违规入基线逐步收敛。
+  analytics-ods-isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码 (显式 clone)
+        run: |
+          rm -rf /workspace/ci-repo
+          git clone --quiet http://127.0.0.1:3000/tanzk/csctalon.git /workspace/ci-repo
+          cd /workspace/ci-repo && git log --oneline -1
+
+      - name: 校验 analytics↔ods 隔离 (C2 棘轮)
+        run: |
+          set -euo pipefail
+          cd /workspace/ci-repo
+          python3 scripts/check_analytics_ods_isolation.py
+
   backend-lint-test:
     runs-on: ubuntu-latest
     steps:
