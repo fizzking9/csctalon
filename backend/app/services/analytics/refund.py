@@ -239,7 +239,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
                    COALESCE(r.actual_amount, r.refund_amount, 0) AS amount,
                    r.status AS status, r.refund_method AS method,
                    r.created_at_raw AS event_time
-            FROM refunds r
+            FROM refund_clean r
             JOIN host_sns hs ON r.device_sn = hs.sn
             WHERE r.created_at_raw IS NOT NULL
               AND r.device_sn IS NOT NULL
@@ -319,7 +319,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
         """
         SELECT r.device_sn AS sn, r.operator AS op,
                COALESCE(r.actual_amount, r.refund_amount, 0) AS amt
-        FROM refunds r
+        FROM refund_clean r
         WHERE r.created_at_raw IS NOT NULL
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
           AND r.device_sn IS NOT NULL
@@ -575,7 +575,7 @@ def refund_person_devices(
             """
             SELECT r.device_sn AS sn, r.refund_no, r.created_at_raw, r.status,
                    COALESCE(r.actual_amount, r.refund_amount, 0) AS amt
-            FROM refunds r
+            FROM refund_clean r
             WHERE r.created_at_raw IS NOT NULL
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
               AND r.device_sn = ANY(:sn_arr)
@@ -752,7 +752,7 @@ def refund_device_analysis(
         r_row = db.execute(text(
             """
             SELECT r.refund_no, r.created_at_raw, r.status
-            FROM refunds r
+            FROM refund_clean r
             WHERE r.device_sn = :sn AND r.created_at_raw IS NOT NULL
               AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
             ORDER BY r.created_at_raw DESC LIMIT 1
@@ -920,7 +920,7 @@ def refund_device_detail(
         """
         SELECT r.refund_no, r.refund_amount, r.actual_amount, r.refund_method,
                r.status, r.operator, r.auditor, r.created_at_raw, r.refund_reason
-        FROM refunds r
+        FROM refund_clean r
         WHERE r.device_sn = :sn AND r.created_at_raw IS NOT NULL
         ORDER BY r.created_at_raw DESC
         LIMIT 10
@@ -1156,11 +1156,11 @@ def refund_decision_overview(
                    OR st.service_item ILIKE '%政务平台%') AS has_ext,
                bool_or(st.service_item ILIKE '%微信%') AS has_merchant,
                bool_or(st.service_item ILIKE '%商品投诉%' OR st.service_item ILIKE '%服务投诉%') AS has_int
-        FROM refunds r
+        FROM refund_clean r
         LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
         WHERE r.refund_method = '线上' AND r.status = '已退款'
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
-        GROUP BY 1, r.refund_no
+        GROUP BY 1, r.refund_no, r.refund_amount
     """), {"ts": cur_s, "te": cur_e}).fetchall()
     cs_map: dict[str, dict[str, list]] = {}
     for r in comp_rows:
@@ -1222,7 +1222,7 @@ def refund_decision_overview(
                    bool_or(st.service_item ILIKE '%微信%') AS has_merchant,
                    bool_or(st.service_item ILIKE '%商品投诉%' OR st.service_item ILIKE '%服务投诉%') AS has_int,
                    MAX(r.audit_remark) AS ar, MAX(r.remark) AS rm
-            FROM refunds r
+            FROM refund_clean r
             LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
             WHERE r.refund_method = '线上' AND r.status = '已退款'
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
@@ -1251,7 +1251,7 @@ def refund_decision_overview(
             SELECT DISTINCT ON (r.refund_no)
                 r.refund_no, r.refund_amount, r.operator,
                 COALESCE(NULLIF(st.service_item, ''), '<未关联工单>') AS reason
-            FROM refunds r
+            FROM refund_clean r
             LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
             WHERE r.refund_method = '线上' AND r.status = '已退款'
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
@@ -1311,7 +1311,7 @@ def refund_decision_overview(
     route_rows = db.execute(text(f"""
         SELECT {_day("COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw)")} AS d,
                count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
-        FROM refunds r
+        FROM refund_clean r
         WHERE r.refund_method = '线上' AND r.status = '已退款'
           AND {stats_quality_excluded_sql('r.quality_status')}
           AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
@@ -1406,7 +1406,7 @@ def refund_decision_overview(
         # #201 S-P0-1：A 路窗口汇总补 dup_residual/ignored 排除（与 routes_daily/cash_flow_wide 对齐）
         for r in db.execute(text(f"""
             SELECT count(*) AS cnt, COALESCE(sum(refund_amount), 0) AS amt
-            FROM refunds r WHERE r.refund_method = '线上' AND r.status = '已退款'
+            FROM refund_clean r WHERE r.refund_method = '线上' AND r.status = '已退款'
               AND {stats_quality_excluded_sql('r.quality_status')}
               AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
               AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) <= :te
@@ -1648,7 +1648,7 @@ def refund_decision_overview(
         SELECT r.device_sn AS sn, r.refund_amount AS amt,
                COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) AS ev,
                r.package_name AS pkg
-        FROM refunds r
+        FROM refund_clean r
         WHERE r.refund_method = '线上' AND r.status = '已退款'
           AND {stats_quality_excluded_sql('r.quality_status')}
           AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
@@ -1975,7 +1975,7 @@ def refund_export_original(
                    OR st.service_item ILIKE '%政务平台%') AS has_ext,
                bool_or(st.service_item ILIKE '%微信%') AS has_merchant,
                bool_or(st.service_item ILIKE '%商品投诉%' OR st.service_item ILIKE '%服务投诉%') AS has_int
-        FROM refunds r
+        FROM refund_clean r
         LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
         WHERE r.created_at_raw >= :ts AND r.created_at_raw <= :te {_a_scope}
         GROUP BY r.refund_no
@@ -2024,7 +2024,7 @@ def refund_export_original(
                 r.refund_amount, r.actual_amount, r.status, r.merchant_name, r.package_name, r.remark,
                 r.created_at_raw, r.updated_at_raw,
                 COALESCE(NULLIF(st.service_item, ''), '') AS service_item
-            FROM refunds r
+            FROM refund_clean r
             LEFT JOIN service_tickets st ON st.device_sn = r.device_sn
             WHERE r.created_at_raw >= :ts AND r.created_at_raw <= :te {_a_scope}
             ORDER BY r.refund_no, st.finish_time DESC NULLS LAST
@@ -2198,7 +2198,7 @@ def refund_export_all(
         # #201 S-P0-1：导出汇总 A/B/C 与决策概览同口径补 dup_residual/ignored 排除
         ("A 线上直退", f"""
             SELECT {_day("COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw)")} AS d, count(*) AS cnt, COALESCE(sum(r.refund_amount), 0) AS amt
-            FROM refunds r WHERE r.refund_method = '线上' AND r.status = '已退款'
+            FROM refund_clean r WHERE r.refund_method = '线上' AND r.status = '已退款'
               AND {stats_quality_excluded_sql('r.quality_status')}
               AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) >= :ts
               AND COALESCE(r.actual_refund_time, r.updated_at_raw, r.created_at_raw) <= :te
@@ -2619,7 +2619,7 @@ def refund_recovery_analysis(
                    r.status AS status,
                    r.refund_method AS method,
                    r.created_at_raw AS event_time
-            FROM refunds r
+            FROM refund_clean r
             JOIN host_sns hs ON r.device_sn = hs.sn
             WHERE r.created_at_raw IS NOT NULL
               AND r.device_sn IS NOT NULL
@@ -2723,7 +2723,7 @@ def refund_recovery_analysis(
         SELECT r.device_sn AS sn,
                r.operator AS op,
                COALESCE(r.actual_amount, r.refund_amount, 0) AS amt
-        FROM refunds r
+        FROM refund_clean r
         WHERE r.created_at_raw IS NOT NULL
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
           AND r.device_sn IS NOT NULL
@@ -3088,7 +3088,7 @@ def refund_recovery_analysis(
                    COALESCE(r.actual_amount, r.refund_amount, 0) AS amount,
                    r.status AS status, r.refund_method AS method,
                    r.created_at_raw AS event_time
-            FROM refunds r
+            FROM refund_clean r
             WHERE r.created_at_raw IS NOT NULL
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
               AND r.device_sn IS NOT NULL
@@ -3158,7 +3158,7 @@ def refund_recovery_analysis(
             FROM (
                 SELECT r.device_sn AS sn,
                        DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai') AS day
-                FROM refunds r
+                FROM refund_clean r
                 WHERE r.created_at_raw IS NOT NULL
                   AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
                   AND r.device_sn = ANY(:sn_arr)
@@ -3259,7 +3259,7 @@ def refund_recovery_analysis(
             day_fail_rows = db.execute(text(
                 """
                 SELECT r.device_sn AS sn
-                FROM refunds r
+                FROM refund_clean r
                 WHERE r.created_at_raw IS NOT NULL
                   AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
                   AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
@@ -3347,7 +3347,7 @@ def refund_recovery_analysis(
             tfr = db.execute(text(
                 """
                 WITH arr AS (SELECT unnest(CAST(:sn_arr AS text[])) AS sn)
-                SELECT DISTINCT r.device_sn AS sn FROM refunds r JOIN arr a ON r.device_sn = a.sn
+                SELECT DISTINCT r.device_sn AS sn FROM refund_clean r JOIN arr a ON r.device_sn = a.sn
                  WHERE COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
                 UNION
                 SELECT DISTINCT st.device_sn AS sn FROM service_tickets st JOIN arr a ON st.device_sn = a.sn

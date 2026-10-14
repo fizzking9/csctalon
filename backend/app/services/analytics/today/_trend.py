@@ -21,7 +21,7 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.person import Person, PersonAlias
-from app.models.refund import Refund
+from app.models.refund import RefundClean
 from app.models.refund_record_report import RefundRecordReport
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask
@@ -239,11 +239,11 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
 
     # --- 路线A: 退费单线上直退(按粒度 笔数+金额) ---
     rf_rows = db.execute(
-        select(_time_trunc(Refund.created_at_raw),
+        select(_time_trunc(RefundClean.created_at_raw),
                func.count().label("cnt"),
-               func.coalesce(func.sum(Refund.refund_amount), 0).label("amt"))
-        .where(Refund.created_at_raw.isnot(None),
-               Refund.created_at_raw >= ts, Refund.created_at_raw <= te,
+               func.coalesce(func.sum(RefundClean.refund_amount), 0).label("amt"))
+        .where(RefundClean.created_at_raw.isnot(None),
+               RefundClean.created_at_raw >= ts, RefundClean.created_at_raw <= te,
                *_route_a_online_refund_filter())
         .group_by("trunc_t")
     ).all()

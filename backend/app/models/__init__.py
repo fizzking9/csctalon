@@ -94,7 +94,7 @@ from app.models.prompt_config import PromptConfig  # noqa: F401
 from app.models.quality_disposition_rule import QualityDispositionRule  # noqa: F401
 from app.models.reconcile_check import ReconcileCheck  # noqa: F401
 from app.models.reconcile_match import ReconcileMatch  # noqa: F401
-from app.models.refund import Refund  # noqa: F401
+from app.models.refund import Refund, RefundClean  # noqa: F401
 from app.models.refund_record_report import RefundRecordReport  # noqa: F401
 from app.models.refund_wide import RefundWide  # noqa: F401
 from app.models.report import Report, ReportStatus, ReportType  # noqa: F401
@@ -219,6 +219,7 @@ __all__ = [
     "ReconcileCheck",
     "ReconcileMatch",
     "Refund",
+    "RefundClean",
     "RefundWide",
     "Report",
     "ReportStatus",

@@ -143,7 +143,49 @@ def _engine():
                 conn.execute(text(f'DROP TABLE IF EXISTS public."{_t}" CASCADE'))
             conn.commit()
 
+        # #322 方案A: create_all 会按 RefundClean 模型把 refund_clean 建成**表**(见下方说明),
+        #   故先移除同名残留对象(可能是上一轮遗留的视图或表), 让 create_all 能干净地按模型建表。
+        #   PG 的 DROP VIEW/TABLE 在对象类型不符时会报 WrongObjectType(即使带 IF EXISTS),
+        #   故用 DO 块按 pg_class.relkind 判定后再删。
+        with engine.connect() as conn:
+            conn.execute(text(
+                """
+                DO $$
+                BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                               WHERE n.nspname = 'public' AND c.relname = 'refund_clean'
+                                 AND c.relkind = 'v') THEN
+                        DROP VIEW public.refund_clean;
+                    END IF;
+                    IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                               WHERE n.nspname = 'public' AND c.relname = 'refund_clean'
+                                 AND c.relkind IN ('r', 'p')) THEN
+                        DROP TABLE public.refund_clean CASCADE;
+                    END IF;
+                END $$;
+                """
+            ))
+            conn.commit()
+
         Base.metadata.create_all(bind=engine)
+
+        # #322 方案A: create_all 会按 RefundClean 模型把 refund_clean 建成**表**,
+        #   与线上的**视图**(over ods.refunds)不符; 且 analytics 现已全部改读
+        #   refund_clean, 若留 create_all 的空表会口径错位/用例全红。
+        #   测试库不跑 Alembic 迁移, 故在此拆表重建为视图。
+        #   CREATE VIEW 的列清单与迁移 a9b0c1d2e3f4 逐字一致(改一处须同步另一处)。
+        #   顺序: create_all 先建出视图依赖的 ods.refunds → 再建视图 → 最后 stamp。
+        with engine.connect() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS public.refund_clean CASCADE"))
+            conn.execute(text(
+                "CREATE VIEW refund_clean AS SELECT "
+                "refund_no, platform_order_no, third_order_no, device_sn, refund_reason, package_name, "
+                "merchant_name, refund_amount, actual_amount, remark, status, refund_method, "
+                "audit_remark, auditor, operator, created_at_raw, updated_at_raw, actual_refund_time, "
+                "quality_status, created_at, updated_at FROM ods.refunds"
+            ))
+            conn.commit()
+
         # ⚠️ 2026-09-07 修复: create_all 建表后 stamp alembic 到 head。
         #   否则 app lifespan(_run_migrations_on_startup) 在 TestClient 启动时会再次
         #   alembic upgrade head, 对全新测试库(无 alembic_version)从 d9b7f1 重跑全部

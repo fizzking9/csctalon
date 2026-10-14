@@ -12,7 +12,7 @@ from app.models.combo_dict import ComboDict, ComboNameAlias
 from app.models.cs_record import CsRecord
 from app.models.device import Device, DimDeviceType
 from app.models.merchant import DeviceMerchantLink, Merchant
-from app.models.refund import Refund
+from app.models.refund import RefundClean
 from app.models.shop import DeviceShopLink, Shop
 from app.models.ticket import ServiceTicket
 from app.services.complaint_scope import (
@@ -229,10 +229,10 @@ def category_by_service_item(db: Session) -> list[dict]:
 def category_by_merchant(db: Session, limit: int = 20) -> list[dict]:
     """按商户汇总退款 【统一口径: 路线A 退费单-线上直退】"""
     rows = db.execute(
-        select(Refund.merchant_name, func.coalesce(func.sum(Refund.refund_amount), 0), func.count())
-        .where(Refund.merchant_name.isnot(None), *_route_a_online_refund_filter())
-        .group_by(Refund.merchant_name)
-        .order_by(func.sum(Refund.refund_amount).desc())
+        select(RefundClean.merchant_name, func.coalesce(func.sum(RefundClean.refund_amount), 0), func.count())
+        .where(RefundClean.merchant_name.isnot(None), *_route_a_online_refund_filter())
+        .group_by(RefundClean.merchant_name)
+        .order_by(func.sum(RefundClean.refund_amount).desc())
         .limit(limit)
     ).all()
     return [{"name": r[0], "value": float(r[1] or 0), "count": r[2]} for r in rows]
@@ -245,10 +245,10 @@ def _package_canonical_sq():
     匹配优先级: 商户级别名(merchant_pk 命中) > 全局别名(merchant_pk IS NULL)。
     未命中返回 NULL, 由调用方回落原始名。
     """
-    event_date = func.date(func.coalesce(Refund.created_at_raw, Refund.created_at))
+    event_date = func.date(func.coalesce(RefundClean.created_at_raw, RefundClean.created_at))
     merchant_sq = (
         select(Merchant.id)
-        .where(Merchant.sub_name == Refund.merchant_name)
+        .where(Merchant.sub_name == RefundClean.merchant_name)
         .limit(1)
         .scalar_subquery()
     )
@@ -257,7 +257,7 @@ def _package_canonical_sq():
         .select_from(ComboNameAlias)
         .join(ComboDict, ComboDict.combo_code == ComboNameAlias.combo_code)
         .where(
-            ComboNameAlias.raw_package_name == Refund.package_name,
+            ComboNameAlias.raw_package_name == RefundClean.package_name,
             ComboNameAlias.effective_from <= event_date,
             or_(ComboNameAlias.effective_to.is_(None), ComboNameAlias.effective_to > event_date),
             or_(
@@ -279,12 +279,12 @@ def category_by_package(db: Session, limit: int = 20) -> list[dict]:
     历史报表用事件发生时生效的别名快照, 不回改历史数字。
     """
     canonical = _package_canonical_sq()
-    name_expr = func.coalesce(canonical, Refund.package_name)
+    name_expr = func.coalesce(canonical, RefundClean.package_name)
     rows = db.execute(
-        select(name_expr, func.coalesce(func.sum(Refund.refund_amount), 0), func.count())
-        .where(Refund.package_name.isnot(None), *_route_a_online_refund_filter())
+        select(name_expr, func.coalesce(func.sum(RefundClean.refund_amount), 0), func.count())
+        .where(RefundClean.package_name.isnot(None), *_route_a_online_refund_filter())
         .group_by(name_expr)
-        .order_by(func.sum(Refund.refund_amount).desc())
+        .order_by(func.sum(RefundClean.refund_amount).desc())
         .limit(limit)
     ).all()
     return [{"name": r[0], "value": float(r[1] or 0), "count": r[2]} for r in rows]
@@ -297,7 +297,7 @@ def package_alias_coverage(db: Session) -> dict:
         select(
             func.count(),
             func.count().filter(canonical.isnot(None)),
-        ).where(Refund.package_name.isnot(None), *_route_a_online_refund_filter())
+        ).where(RefundClean.package_name.isnot(None), *_route_a_online_refund_filter())
     ).one()
     unmatched = (total or 0) - (matched or 0)
     return {

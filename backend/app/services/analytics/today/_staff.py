@@ -21,7 +21,7 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.person import Person, PersonAlias
-from app.models.refund import Refund
+from app.models.refund import RefundClean
 from app.models.refund_record_report import RefundRecordReport
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask
@@ -178,15 +178,15 @@ def today_staff_efficiency(
     #    已有 sys/system 排除, 保留
     #    ⚠️ 2026-09-08: 工作量口径(无金额)保持全状态(any_status), 不随经营口径收紧到已退款,
     #    否则会低估"申请中/驳回"等已投入处理动作的工作量。
-    rf_q = (select(Refund.operator.label("op"),
+    rf_q = (select(RefundClean.operator.label("op"),
                    func.count().label("sc"),
-                   func.count(func.distinct(func.nullif(func.trim(Refund.device_sn), ""))).label("pc"))
-            .where(Refund.created_at_raw.isnot(None),
-                   Refund.created_at_raw >= ts, Refund.created_at_raw <= te,
-                   Refund.operator.isnot(None),
-                   Refund.operator.notin_(["sys", "system", "SYS", "System"]),
+                   func.count(func.distinct(func.nullif(func.trim(RefundClean.device_sn), ""))).label("pc"))
+            .where(RefundClean.created_at_raw.isnot(None),
+                   RefundClean.created_at_raw >= ts, RefundClean.created_at_raw <= te,
+                   RefundClean.operator.isnot(None),
+                   RefundClean.operator.notin_(["sys", "system", "SYS", "System"]),
                    *_route_a_online_any_status_filter())
-            .group_by(Refund.operator)).cte("rf_q")
+            .group_by(RefundClean.operator)).cte("rf_q")
     # 4. 投诉类工单 处理人完工: 笔数 + 去重设备个数
     cm_q = (select(ServiceTicket.handler.label("op"),
                    func.count().label("sc"),
@@ -376,7 +376,7 @@ def today_staff_efficiency(
         rf_sns AS (
             SELECT r.operator AS op, '退款处理' AS spec,
                    r.device_sn AS sn
-            FROM refunds r
+            FROM refund_clean r
             WHERE r.created_at_raw IS NOT NULL
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
               AND r.operator IS NOT NULL

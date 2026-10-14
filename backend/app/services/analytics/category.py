@@ -39,7 +39,7 @@ from app.models.device_combo import DeviceCombo
 from app.models.device_flow_usage import DeviceFlowUsage
 
 # from app.models.merchant import DeviceMerchantLink, Merchant  # #271: 暂用 devices.merchant_name，links/merchants 表全空
-from app.models.refund import Refund
+from app.models.refund import RefundClean
 from app.models.ticket import ServiceTicket
 from app.services import complaint_scope
 from app.services.analytics._core import D
@@ -187,15 +187,15 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime, end: datetime) 
     """
     # 口径A: 排除非实际退款状态(与 refund.py 10 处 NOT IN 同模式)
     actual_refund_cond = (
-        func.coalesce(Refund.status, "").notin_(("无需退款", "驳回", "申请中"))
+        func.coalesce(RefundClean.status, "").notin_(("无需退款", "驳回", "申请中"))
     )
     if dim == "device_type":
         stmt = (
             select(Device.device_type.label("key"), func.count().label("cnt"))
-            .select_from(Refund)
-            .join(Device, Device.sn == Refund.device_sn)
-            .where(Refund.created_at_raw >= since)
-            .where(Refund.created_at_raw <= end)
+            .select_from(RefundClean)
+            .join(Device, Device.sn == RefundClean.device_sn)
+            .where(RefundClean.created_at_raw >= since)
+            .where(RefundClean.created_at_raw <= end)
             .where(actual_refund_cond)
             .group_by(Device.device_type)
         )
@@ -204,10 +204,10 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime, end: datetime) 
         # 改按 Device.current_combo_name 分组（与设备数/活跃同口径）
         stmt = (
             select(Device.current_combo_name.label("key"), func.count().label("cnt"))
-            .select_from(Refund)
-            .join(Device, Device.sn == Refund.device_sn)
-            .where(Refund.created_at_raw >= since)
-            .where(Refund.created_at_raw <= end)
+            .select_from(RefundClean)
+            .join(Device, Device.sn == RefundClean.device_sn)
+            .where(RefundClean.created_at_raw >= since)
+            .where(RefundClean.created_at_raw <= end)
             .where(actual_refund_cond)
             .group_by(Device.current_combo_name)
         )
@@ -215,10 +215,10 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime, end: datetime) 
         # #271: 走 devices.merchant_name（links/merchants 表全空）
         stmt = (
             select(Device.merchant_name.label("key"), func.count().label("cnt"))
-            .select_from(Refund)
-            .join(Device, Device.sn == Refund.device_sn)
-            .where(Refund.created_at_raw >= since)
-            .where(Refund.created_at_raw <= end)
+            .select_from(RefundClean)
+            .join(Device, Device.sn == RefundClean.device_sn)
+            .where(RefundClean.created_at_raw >= since)
+            .where(RefundClean.created_at_raw <= end)
             .where(actual_refund_cond)
             .where(Device.merchant_name.isnot(None))
             .group_by(Device.merchant_name)

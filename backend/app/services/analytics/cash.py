@@ -9,7 +9,7 @@ from sqlalchemy import and_, func, select, text
 from sqlalchemy.orm import Session
 
 from app.models.manual_refund import ManualRefund
-from app.models.refund import Refund
+from app.models.refund import RefundClean
 from app.models.refund_record_report import RefundRecordReport
 from app.models.wallet import WalletWithdrawal
 
@@ -37,11 +37,11 @@ def operation_trend(db: Session, start: datetime | None = None, end: datetime | 
     start, end = _date_range(start, end)
     rows = db.execute(
         select(
-            func.to_char(func.timezone("Asia/Shanghai", Refund.created_at_raw), "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(Refund.refund_amount), 0).label("amount"),
+            func.to_char(func.timezone("Asia/Shanghai", RefundClean.created_at_raw), "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(RefundClean.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
-        .where(Refund.created_at_raw.between(start, end), *_route_a_online_refund_filter())
+        .where(RefundClean.created_at_raw.between(start, end), *_route_a_online_refund_filter())
         .group_by("date")
         .order_by("date")
     ).all()
@@ -54,9 +54,9 @@ def operation_status_dist(db: Session) -> list[dict]:
     需展示线上退费单的全状态, 故用 _route_a_online_any_status_filter(仅 method)。
     """
     rows = db.execute(
-        select(Refund.status, func.coalesce(func.sum(Refund.refund_amount), 0), func.count())
+        select(RefundClean.status, func.coalesce(func.sum(RefundClean.refund_amount), 0), func.count())
         .where(*_route_a_online_any_status_filter())
-        .group_by(Refund.status)
+        .group_by(RefundClean.status)
     ).all()
     total = sum(r[2] for r in rows) or 1
     return [
@@ -67,10 +67,10 @@ def operation_status_dist(db: Session) -> list[dict]:
 def operation_reason_top(db: Session, limit: int = 10) -> list[dict]:
     """退费原因 TOP 【统一口径: 路线A 退费单-线上直退】"""
     rows = db.execute(
-        select(Refund.refund_reason, func.coalesce(func.sum(Refund.refund_amount), 0), func.count())
-        .where(Refund.refund_reason.isnot(None), *_route_a_online_refund_filter())
-        .group_by(Refund.refund_reason)
-        .order_by(func.sum(Refund.refund_amount).desc())
+        select(RefundClean.refund_reason, func.coalesce(func.sum(RefundClean.refund_amount), 0), func.count())
+        .where(RefundClean.refund_reason.isnot(None), *_route_a_online_refund_filter())
+        .group_by(RefundClean.refund_reason)
+        .order_by(func.sum(RefundClean.refund_amount).desc())
         .limit(limit)
     ).all()
     return [{"name": r[0], "value": float(r[1] or 0), "count": r[2]} for r in rows]
@@ -78,8 +78,8 @@ def operation_reason_top(db: Session, limit: int = 10) -> list[dict]:
 def operation_method_dist(db: Session) -> list[dict]:
     """退款方式占比"""
     rows = db.execute(
-        select(Refund.refund_method, func.coalesce(func.sum(Refund.refund_amount), 0), func.count())
-        .group_by(Refund.refund_method)
+        select(RefundClean.refund_method, func.coalesce(func.sum(RefundClean.refund_amount), 0), func.count())
+        .group_by(RefundClean.refund_method)
     ).all()
     return [{"name": r[0] or "(空)", "value": float(r[1] or 0), "count": r[2]} for r in rows]
 
@@ -352,7 +352,7 @@ def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tu
     return cnt_map, amt_map
 
 def _cash_routes_total(db: Session,
-                       col_a: Any = Refund.created_at_raw,
+                       col_a: Any = RefundClean.created_at_raw,
                        col_b: Any = WalletWithdrawal.op_time,
                        col_e: Any = RefundRecordReport.refund_time,
                        start: _dt.datetime | None = None,
@@ -385,7 +385,7 @@ def _cash_routes_total(db: Session,
     # ── A 退费单线上直退 ──
     a_row = db.execute(select(
         func.count(),
-        func.coalesce(func.sum(Refund.refund_amount), 0),
+        func.coalesce(func.sum(RefundClean.refund_amount), 0),
     ).where(
         *_route_a_online_refund_filter(),
         _between(col_a, start, end),
@@ -464,11 +464,11 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
     # 日分桶统一按北京日 (AT TIME ZONE 'Asia/Shanghai'), 与 C/D/E 路及决策概览口径一致 (2026-09-05 修正 UTC 截日 bug)
     direct_rows = db.execute(
         select(
-            func.to_char(func.timezone("Asia/Shanghai", Refund.created_at_raw), "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(Refund.refund_amount), 0).label("amount"),
+            func.to_char(func.timezone("Asia/Shanghai", RefundClean.created_at_raw), "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(RefundClean.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
-        .where(*_route_a_online_refund_filter(), Refund.created_at_raw.between(s, e))
+        .where(*_route_a_online_refund_filter(), RefundClean.created_at_raw.between(s, e))
         .group_by("date")
     ).all()
     direct_map = {r.date: {"amount": D(r.amount), "count": r.count} for r in direct_rows}

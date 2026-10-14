@@ -8,7 +8,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.models.manual_refund import ManualRefund
-from app.models.refund import Refund
+from app.models.refund import RefundClean
 from app.models.wallet import WalletWithdrawal
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
@@ -45,7 +45,7 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
       - B 路径 D4 = 退费单 updated_at_raw (接口回调成功 ≈ 实际到账)
     """
     # 1. 取全量数据 (66k rows, 内存可容纳)
-    all_rf = list(db.execute(select(Refund)).scalars().all())
+    all_rf = list(db.execute(select(RefundClean)).scalars().all())
     # 2026-08-28: 只取"成功提现"(排除 提现申请-冻结 等失败/冻结备注), 避免冻结记录被当作真实出款
     all_wd = list(db.execute(
         select(WalletWithdrawal).where(*_route_b_withdraw_filter())
@@ -295,8 +295,8 @@ def refund_withdrawal_overview(db: Session, start: str | None = None, end: str |
         }
 
     # A路径未提现率 (全局口径, 不随D4窗口变化: 统计全量转入提现账户工单 vs 已匹配提现)
-    rf_all = list(db.execute(select(Refund.refund_method, func.count(), func.sum(Refund.refund_amount))
-                             .group_by(Refund.refund_method)).all())
+    rf_all = list(db.execute(select(RefundClean.refund_method, func.count(), func.sum(RefundClean.refund_amount))
+                             .group_by(RefundClean.refund_method)).all())
     a_total_cnt = 0; a_total_amt = 0.0
     for m, c, am in rf_all:
         if m and "转入" in m:
@@ -623,7 +623,7 @@ def refund_withdrawal_sleeping(
     e = datetime.fromisoformat(end) if end else None
     rf_rows = db.execute(text("""
         SELECT refund_no, device_sn, refund_amount, created_at_raw, operator
-        FROM refunds
+        FROM refund_clean
         WHERE refund_method LIKE '%转入提现%'
           AND created_at_raw >= :ts AND created_at_raw <= :te
         ORDER BY created_at_raw

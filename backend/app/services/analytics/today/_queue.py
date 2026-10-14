@@ -21,7 +21,7 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.person import Person, PersonAlias
-from app.models.refund import Refund
+from app.models.refund import RefundClean
 from app.models.refund_record_report import RefundRecordReport
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask

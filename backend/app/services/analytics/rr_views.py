@@ -265,7 +265,7 @@ def _view_refund_operator_hbar(db: Session, params: _PARAMS_T) -> _RET_T:
         SELECT COALESCE(NULLIF(TRIM(r.auditor),''), '未知') AS auditor,
                SUM(COALESCE(r.actual_amount, r.refund_amount, 0)) AS amount,
                COUNT(*) AS cnt
-        FROM refunds r
+        FROM refund_clean r
         WHERE r.created_at_raw IS NOT NULL
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
           AND r.refund_method = '线上'

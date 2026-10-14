@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.models.group import PersonGroupMembership
 from app.models.person import Person, PersonAlias
-from app.models.refund import Refund
+from app.models.refund import RefundClean
 from app.models.refund_record_report import RefundRecordReport
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.staff_assignment import StaffAssignment
@@ -267,9 +267,9 @@ def _route_a_online_refund_filter():
     不排除则治理后的线上退单行仍虚增经营数字；与 cash_flow_wide A 路口径一致）。
     """
     return (
-        Refund.refund_method == "线上",
-        Refund.status == "已退款",
-        stats_quality_include(Refund.quality_status),
+        RefundClean.refund_method == "线上",
+        RefundClean.status == "已退款",
+        stats_quality_include(RefundClean.quality_status),
     )
 
 def _route_a_online_any_status_filter():
@@ -278,7 +278,7 @@ def _route_a_online_any_status_filter():
     用于需要看全状态的分析(如 operation_status_dist 状态分布),
     不用于经营出款统计。
     """
-    return (Refund.refund_method == "线上",)
+    return (RefundClean.refund_method == "线上",)
 
 
 # ---------- 路线B 钱包用户取现 ----------
@@ -779,7 +779,7 @@ def _annotate_chain_litigation(db: Session, rows):
     for i in range(0, len(ab_nos), 500):
         chunk = ab_nos[i:i + 500]
         for no, ar, rm in db.execute(
-            select(Refund.refund_no, Refund.audit_remark, Refund.remark).where(Refund.refund_no.in_(chunk))
+            select(RefundClean.refund_no, RefundClean.audit_remark, RefundClean.remark).where(RefundClean.refund_no.in_(chunk))
         ):
             remark_map[str(no)] = ((ar or "") + (rm or ""))
     for r in rows:

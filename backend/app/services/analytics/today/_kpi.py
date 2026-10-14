@@ -22,7 +22,7 @@ from app.models.external_complaint import ExternalComplaint
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.person import Person, PersonAlias
-from app.models.refund import Refund
+from app.models.refund import RefundClean
 from app.models.refund_record_report import RefundRecordReport
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask
@@ -243,11 +243,11 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
     def _route_a_done_in_window(s: _dt.datetime, e: _dt.datetime) -> dict:
         row = db.execute(select(
             func.count(),
-            func.coalesce(func.sum(Refund.refund_amount), 0),
+            func.coalesce(func.sum(RefundClean.refund_amount), 0),
         ).where(
             *_route_a_online_refund_filter(),
-            Refund.status == "已退款",
-            _between(Refund.updated_at_raw, s, e),
+            RefundClean.status == "已退款",
+            _between(RefundClean.updated_at_raw, s, e),
         )).first() or (0, 0)
         return {"count": int(row[0] or 0), "amount": round(float(row[1] or 0), 2)}
     a_done_t = _route_a_done_in_window(ts, te)
