@@ -48,6 +48,9 @@ set -euo pipefail
 
 FRP_VERSION="0.61.1"
 VHOST_PORT=8080
+# 2026-10-21: 边缘 TLS 入口的后端目标。生产已改 ZeroTier 直连并停用 frpc/frps;
+# 若仍要用 frp 隧道, 传 --upstream 127.0.0.1:8080 并把 frps 的 vhostHTTPPort 显式绑 127.0.0.1。
+UPSTREAM="10.147.17.3:80"
 MODE="openresty"     # openresty(默认,1Panel) | nginx(宿主 apt)
 DOMAIN=""
 TOKEN=""
@@ -70,6 +73,7 @@ while [[ $# -gt 0 ]]; do
     --repo) REPO_BASE="${2:?--repo 需要 raw base url}"; shift 2 ;;
     --frp-version) FRP_VERSION="${2:?}"; shift 2 ;;
     --vhost-port) VHOST_PORT="${2:?}"; shift 2 ;;
+    --upstream)   UPSTREAM="${2:?--upstream 需要 host:port}"; shift 2 ;;
     --mode) MODE="${2:?--mode 需要 nginx|openresty}"; shift 2 ;;
     --skip-install-docker) SKIP_DOCKER=1; shift ;;
     --no-install-docker) SKIP_DOCKER=1; shift ;;
@@ -94,6 +98,8 @@ git raw 一条命令:
   --repo <raw_base>        模板来源 git raw base(默认 gitea main 分支)
   --frp-version <v>        默认 0.61.1
   --vhost-port <端口>      默认 8080(frps vhostHTTPPort)
+  --upstream <host:port>   可选, TLS 入口的反代后端; 默认 10.147.17.3:80(ZeroTier 直连)。
+                           走 frp 隧道时传 127.0.0.1:8080。
   --skip-install-docker    已装 docker 时跳过安装
   --skip-frps              不启动 frps 容器(仅生成 TLS 入口配置, 供 1Panel OpenResty 先行接管)
 HELP
@@ -190,7 +196,7 @@ if [[ "$MODE" == "nginx" ]]; then
   rm -f /etc/nginx/sites-enabled/default
   sed -e "s/REPLACE_FRP_DOMAIN/${DOMAIN}/g" \
       -e "s/REPLACE_FRP_CERT_NAME/${CERT_BASENAME}/g" \
-      -e "s|127.0.0.1:8080|127.0.0.1:${VHOST_PORT}|g" \
+      -e "s|REPLACE_UPSTREAM|${UPSTREAM}|g" \
       "$TEMPLATE_DIR/nginx.conf" > /etc/nginx/conf.d/csctalon-frp.conf
   nginx -t || { err "nginx 配置校验失败, 请检查"; exit 1; }
   ok "nginx 配置已生成并通过校验"
@@ -198,7 +204,7 @@ else
   # ---------- 4b. openresty 模式: 生成 1Panel OpenResty 反代配置 ----------
   c "生成 1Panel OpenResty 反代配置(打印, 由用户在 1Panel 手动落盘)..."
   sed -e "s/REPLACE_FRP_DOMAIN/${DOMAIN}/g" \
-      -e "s|127.0.0.1:8080|127.0.0.1:${VHOST_PORT}|g" \
+      -e "s|REPLACE_UPSTREAM|${UPSTREAM}|g" \
       "$TEMPLATE_DIR/openresty.conf" > /tmp/csctalon-openresty.conf
   echo ""
   echo "──────────────────────────────────────────────────────────────"
@@ -245,7 +251,7 @@ ok "云端转发机部署完成! (TLS 入口模式: $MODE)"
 echo "  域名       : https://${DOMAIN}"
 echo "  云端公网IP : ${PUBLIC_IP}"
 echo "  隧道端口   : 7000 (安全组需放行, 建议仅对办公/内网出口IP开放)"
-echo "  业务端口   : 443 (HTTPS, 需放行); 其余 8080/7500 均绑 127.0.0.1 无需开放"
+echo "  业务端口   : 443 (HTTPS, 需放行); 8080 仅在本机需要(frps vhost), 不对公网开放"
 echo ""
 echo "  下一步(本地服务器)执行:"
 echo "    bash deploy/frp/local/install-frpc.sh \\"
@@ -257,7 +263,7 @@ echo "    443  → 0.0.0.0/0 (HTTPS)"
 echo "    7000 → 仅办公/内网出口IP (frp 隧道)"
 echo "    22   → 仅办公IP"
 if [[ "$MODE" == "openresty" ]]; then
-  echo "  1Panel OpenResty: 证书由 1Panel 自动签发/续期(Let's Encrypt); 反代目标 127.0.0.1:${VHOST_PORT} (frps)"
+  echo "  1Panel OpenResty: 证书由 1Panel 自动签发/续期(Let's Encrypt); 反代目标 ${UPSTREAM} (直连, 非 frps)"
 else
   echo "  备注: 若 --cert 未传, 请把证书放 /etc/nginx/certs/<域名>.crt/.key 后 systemctl reload nginx"
 fi
