@@ -15,11 +15,15 @@ Revision ID: r8s9t0u1v2w3
 Revises: q7r8s9t0u1v2
 Create Date: 2026-09-20
 """
+import logging
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 
 from alembic import op
+
+# R-P2-16: 迁移内提示走 logger(AGENTS.md 铁律 1 禁裸 print)
+logger = logging.getLogger("alembic.runtime.migration")
 
 revision: str = 'r8s9t0u1v2w3'
 down_revision: Union[str, None] = 'q7r8s9t0u1v2'
@@ -75,8 +79,10 @@ def upgrade() -> None:
     ), {"new": _V3, "old": _V2})
     if res.rowcount == 0:
         # 行不存在（环境未 seed）或已被管理员手改 → 不覆盖，只提示
-        print("[#169] judge_system 未按 v2 匹配到（不存在或已被手改），跳过自动升级；"
-              "请人工确认提示词是否已含「mark_pending 不改口径」与「fix_time 禁止编造修正值」")
+        logger.warning(
+            "[#169] judge_system 未按 v2 匹配到（不存在或已被手改），跳过自动升级；"
+            "请人工确认提示词是否已含「mark_pending 不改口径」与「fix_time 禁止编造修正值」"
+        )
 
 
 def downgrade() -> None:

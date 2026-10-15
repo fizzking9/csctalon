@@ -23,11 +23,15 @@ Revision ID: c5d6e7f8a9b0
 Revises: a4b5c6d7e8f0
 Create Date: 2026-10-12 22:00:00.000000
 """
+import logging
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 
 from alembic import op
+
+# R-P2-16: 迁移内提示走 logger(AGENTS.md 铁律 1 禁裸 print)
+logger = logging.getLogger("alembic.runtime.migration")
 
 revision: str = 'c5d6e7f8a9b0'
 down_revision: Union[str, None] = 'a4b5c6d7e8f0'
@@ -289,9 +293,11 @@ def upgrade() -> None:
             {"code": row["code"], "old": row["old"], "new": row["new"]},
         )
         if res.rowcount:
-            print(f"  focus card updated: {row['code']}")
+            logger.info("  focus card updated: %s", row["code"])
         else:
-            print(f"  focus card skipped (content 不匹配旧 seed, 疑运营已手工修改): {row['code']}")
+            logger.warning(
+                "  focus card skipped (content 不匹配旧 seed, 疑运营已手工修改): %s", row["code"]
+            )
 
 
 def downgrade() -> None:
