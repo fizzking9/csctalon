@@ -152,4 +152,6 @@ work-data/
 certs/
 # C7 工具私有状态: AI 工具记忆/会话状态, 写给工具自己用的不入库
 .workbuddy/
+.trae/
+.dsh/
 
