@@ -5,8 +5,9 @@ workbuddy 每 20 分钟检查文件(商户号手机退款处理登记.xlsx),文�
 
 1. 数据清洗: 列名映射(兼容中文/英文字段)、姓名/金额字段防御性校验、
    时间质量校验(登记日期年份纠错/时间倒挂标记)
-2. 业务去重: 按 (register_time, order_no, refund_amount) 复合键 upsert,
+2. 业务去重: 按 (北京登记日期, order_no, COALESCE(device_sn,''), COALESCE(registrant,'')) 复合键 upsert,
    防止 20 分钟重复推送产生脏数据(同一订单可分期多次退款,复合键能区分)
+   # R-P2-18: 去重键描述须与 _key_cols(line 347) 一致 —— 非 register_time+refund_amount
 3. 设备主数据维护: 推送中出现的新 SN 自动在 devices 表建空壳
 4. 同步日志: 每次推送写入 manual_refund_sync_logs,记录清洗/去重/报错统计
 """
