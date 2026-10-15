@@ -14,8 +14,6 @@ import uuid as _uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
-
 from app.api.v1.complaints._helpers import _query_backlog_rows
 from app.models.bms_order import BmsOrder
 from app.models.device import Device
