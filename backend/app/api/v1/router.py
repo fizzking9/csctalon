@@ -40,6 +40,7 @@ from app.api.v1 import (
     kb_articles,
     llm_providers,
     match,
+    mcp,
     measures,
     metrics,
     miniapp,
@@ -147,5 +148,6 @@ api_router.include_router(sync_manual_refunds.router)
 api_router.include_router(doc_sync.router)
 api_router.include_router(shared_doc_sync.router)
 api_router.include_router(external.router)
+api_router.include_router(mcp.router)  # #327 MCP 只读数据出口(SSE)
 api_router.include_router(integrations.router)
 api_router.include_router(site_info.router)
