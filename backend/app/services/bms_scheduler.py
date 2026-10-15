@@ -837,6 +837,12 @@ class BmsScheduler:
                             # 复用既有"忙顺延"判据(锁定语义): 该源小时窗口内且空闲才跑
                             now_cn.hour,
                             low_freq_hour=now_cn.hour,
+                            # #191 修复(2026-10-15): 必须显式给 deadline_hour, 否则取默认
+                            #   LOW_FREQ_DEADLINE_HOUR=7, 使 now_hour>=7 恒 False →
+                            #   所有 per-source hour>=7 的低频档(E 路 15:00)**永不触发**
+                            #   (实测近 20 天零 scheduled 记录, 数据仅靠人工手动触发维持)。
+                            #   窗口语义 = [该源配置小时, 该源配置小时+1), 与上方注释一致。
+                            deadline_hour=now_cn.hour + 1,
                             done=False,
                             busy=sync_task_manager.is_busy(),
                         ):

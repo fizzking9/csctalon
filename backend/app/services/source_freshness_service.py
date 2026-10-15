@@ -4,10 +4,12 @@
 但 `scheduled` 档**每次都取回 0 行**(上游 T+1 且次日白天才发布), 而采集链路把"成功但 0 行"
 按成功记录 —— 既无告警也无通知, 数据断了 2 天没有任何人知道(事故见 #190)。
 
-本模块补三件事(都是"事实查询", 不做业务推断):
+本模块补四件事(都是"事实查询", 不做业务推断):
 1. `notify_empty_result`: scheduled 档取 0 行 → 写 `system_events` 告警(按源 + 当日节流);
 2. `check_freshness`: 关键业务时间列"最新值距今天数"巡检, 超阈值 → 告警;
 3. `run_freshness_check`: 巡检入口(调度器每小时调用一次)。
+4. `check_device_combo_coverage`(#299 顺带项 5): "成功 ≠ 完整" —— 低频档/回补跑完仍可能
+   覆盖不全, 用 devices 无有效套餐占比做守卫, 超阈值 → 告警。
 
 新增巡检目标时必须用 **ORM 列**引用表/字段(AGENTS.md 铁律: 禁止拼接 SQL 标识符)。
 """
@@ -16,10 +18,11 @@ import datetime as _dt
 import json
 import logging
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
+from app.models.device import Device
 from app.models.refund_record_report import RefundRecordReport
 from app.services.system_event_service import record_system_event
 
@@ -147,6 +150,43 @@ def check_freshness(db: Session | None = None, *, now: _dt.datetime | None = Non
     return out
 
 
+# 设备套餐覆盖率阈值(#299 顺带项 5): 无套餐设备占比上限(%)
+# 依据: #298 基线 40.2%(历史回补前) → #299 回补后 2.62%(52,659/2,011,583)。
+#   超 5% 说明 device_combo 链路"成功但覆盖不完整"(0 行当成功 / 断采), 需人工介入。
+COMBO_MISSING_MAX_PCT: float = 5.0
+
+
+def check_device_combo_coverage(db: Session | None = None) -> dict:
+    """只读巡检: devices 无有效套餐(current_combo_name 为空)占比(#299 顺带项 5)。
+
+    口径(与 #298/#320/#321 一致):
+      - 分母 = devices 全量行数;
+      - 分子 = `current_combo_name IS NULL OR ''`(无套餐设备);
+      - 套餐单一真实源为 `dim_device_combo`(#320), `current_combo_name` 是其投影(#321),
+        故本巡检等价于"套餐覆盖是否完整"的守卫 —— 成功 ≠ 完整。
+    事实查询, 不做业务推断; 取数失败 → alert=False(不误报)。
+    """
+    own = db is None
+    db = db or SessionLocal()
+    try:
+        total = db.execute(select(func.count()).select_from(Device)).scalar() or 0
+        missing = db.execute(
+            select(func.count()).select_from(Device).where(
+                or_(Device.current_combo_name.is_(None), Device.current_combo_name == "")
+            )
+        ).scalar() or 0
+    except Exception as e:  # noqa: BLE001  取数失败不误报
+        logger.warning("套餐覆盖率巡检取数失败: %s", e)
+        return {"total": None, "missing": None, "pct": None,
+                "threshold_pct": COMBO_MISSING_MAX_PCT, "alert": False}
+    finally:
+        if own:
+            db.close()
+    pct = round(missing / total * 100, 2) if total else 0.0
+    return {"total": total, "missing": missing, "pct": pct,
+            "threshold_pct": COMBO_MISSING_MAX_PCT, "alert": pct > COMBO_MISSING_MAX_PCT}
+
+
 def run_freshness_check(db: Session | None = None) -> dict:
     """巡检 + 对超期目标写告警(按源 + 当日节流)。返回巡检明细与告警数。"""
     rows = check_freshness(db)
@@ -166,4 +206,21 @@ def run_freshness_check(db: Session | None = None) -> dict:
                     "lag_days": r["lag_days"], "max_lag_days": r["max_lag_days"]},
         ):
             alerts += 1
-    return {"checked": len(rows), "alerts": alerts, "rows": rows}
+
+    # #299 顺带项 5: 覆盖率守卫 —— "成功 ≠ 完整"(0 行当成功 / 回补跑完仍覆盖不全)
+    coverage = check_device_combo_coverage(db)
+    if coverage["alert"]:
+        if _emit_once(
+            "coverage:device_combo", today,
+            action="device_combo_coverage",
+            title="设备套餐覆盖率异常波动",
+            summary=(f"无套餐设备 {coverage['missing']}/{coverage['total']} "
+                     f"= {coverage['pct']}%(阈值 {coverage['threshold_pct']}%); "
+                     f"采集/回补虽报成功但覆盖不完整, 需核查 device_combo 链路"),
+            detail={"total": coverage["total"], "missing": coverage["missing"],
+                    "pct": coverage["pct"], "threshold_pct": coverage["threshold_pct"]},
+        ):
+            alerts += 1
+
+    return {"checked": len(rows), "alerts": alerts, "rows": rows, "coverage": coverage}
+

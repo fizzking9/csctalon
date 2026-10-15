@@ -215,6 +215,83 @@ def test_low_freq_done_backfill_ignores_failed_and_missing_time():
     assert got == {}
 
 
+def test_should_run_low_freq_per_source_hour_window():
+    """#191 修复(2026-10-15): per-source 小时档的窗口 = [该源小时, 该源小时+1)。
+
+    锁根因: 调度器原调用 `should_run_low_freq(now_cn.hour, low_freq_hour=now_cn.hour)`
+    **未传 deadline_hour** → 取默认 7; 而 `now_hour>=deadline_hour → False`, 使
+    per-source hour>=7 的档(E 路 15:00)**永不触发**(实测近 20 天零 scheduled 记录)。
+    """
+    from app.services.bms_scheduler import should_run_low_freq
+
+    # 正确: 显式 deadline_hour=hour+1 → 窗口内且空闲 → 触发
+    assert should_run_low_freq(15, low_freq_hour=15, deadline_hour=16,
+                               done=False, busy=False) is True
+    # 根因复现: 缺省 deadline_hour(7) → 恒 False
+    assert should_run_low_freq(15, low_freq_hour=15, deadline_hour=7,
+                               done=False, busy=False) is False
+    # 默认 06:00 档行为不变(6 < 7)
+    assert should_run_low_freq(6, low_freq_hour=6, deadline_hour=7,
+                               done=False, busy=False) is True
+    # 窗口内忙 → 不记 done, 下分钟重试
+    assert should_run_low_freq(15, low_freq_hour=15, deadline_hour=16,
+                               done=False, busy=True) is False
+    # 已跑到下一整点 → 放弃
+    assert should_run_low_freq(16, low_freq_hour=15, deadline_hour=16,
+                               done=False, busy=False) is False
+
+
+def test_low_freq_call_site_passes_deadline_hour():
+    """漂移守卫: 调度器低频分支调用点必须显式传 deadline_hour=now_cn.hour+1。
+
+    缺省即回归根因(见上用例): 源码文本断言, 防止后续改动再次漏传。
+    """
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "app/services/bms_scheduler.py"
+    text = src.read_text(encoding="utf-8")
+    assert "low_freq_hour=now_cn.hour," in text
+    assert "deadline_hour=now_cn.hour + 1," in text, (
+        "调度器低频分支漏传 deadline_hour → per-source hour>=7 的档(E 路 15:00)永不触发"
+    )
+
+
+# ── 设备套餐覆盖率守卫(#299 顺带项 5: 成功 ≠ 完整) ─────────────────────
+
+
+class _SeqDB:
+    """按调用顺序吐 scalar 值的桩(两次 execute: 先 total 后 missing)。"""
+
+    def __init__(self, values):
+        self._vals = list(values)
+
+    def execute(self, *_a, **_k):
+        return self
+
+    def scalar(self):
+        return self._vals.pop(0)
+
+    def close(self):
+        pass
+
+
+def test_device_combo_coverage_alerts_when_missing_ratio_exceeds_threshold():
+    """无套餐占比超阈值(5%) → alert=True(抓"成功但覆盖不完整")。"""
+    from app.services.source_freshness_service import check_device_combo_coverage
+
+    r = check_device_combo_coverage(_SeqDB([1000, 80]))
+    assert r["total"] == 1000 and r["missing"] == 80
+    assert r["pct"] == 8.0 and r["threshold_pct"] == 5.0 and r["alert"] is True
+
+
+def test_device_combo_coverage_silent_below_threshold():
+    """回补后现状(2.62%)远低于阈值 → 不告警(避免噪音)。"""
+    from app.services.source_freshness_service import check_device_combo_coverage
+
+    r = check_device_combo_coverage(_SeqDB([2_011_583, 52_659]))
+    assert r["pct"] == 2.62 and r["alert"] is False
+
+
 # ── AI 侧 E 时效口径(直击"E 对账基准：暂无"误报) ────────────────────────
 
 
