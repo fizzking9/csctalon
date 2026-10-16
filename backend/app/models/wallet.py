@@ -19,11 +19,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+from app.models.adoption_mixin import AdoptionColumnsMixin
 from app.models.base import IDMixin, TimestampMixin
 from app.models.quality_mixin import QualityMixin
 
 
-class WalletWithdrawal(QualityMixin, IDMixin, TimestampMixin, Base):
+class WalletWithdrawal(AdoptionColumnsMixin, QualityMixin, IDMixin, TimestampMixin, Base):
     """钱包提现操作 - 会员钱包流水"""
 
     __tablename__ = "wallet_withdrawals"

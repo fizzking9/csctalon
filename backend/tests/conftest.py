@@ -166,7 +166,35 @@ def _engine():
                     conn.execute(text(f'DROP TABLE public."{_view}" CASCADE'))
             conn.commit()
 
+        # #332: 退款五路 ods 表新增 adopt_* 治理四列, create_all 只建不 ALTER,
+        #   旧测试库里的 ods.refunds 等不会自动加列(ORM 整对象 INSERT 会因缺列报错)。
+        #   测试库每轮重建、数据靠事务回滚隔离, 直接 DROP CASCADE;
+        #   依赖它们的 public.*_clean 视图随之被级联删除, 下方视图重建步骤会统一重建。
+        with engine.connect() as conn:
+            for _t in (
+                "refund_record_reports", "shanmao_refunds", "manual_refunds",
+                "wallet_withdrawals", "refunds",
+            ):
+                conn.execute(text(f'DROP TABLE IF EXISTS ods."{_t}" CASCADE'))
+            conn.commit()
+
         Base.metadata.create_all(bind=engine)
+
+        # #332 测试补 DDL: ods.manual_refunds 的去重唯一索引仅存在于 Alembic 迁移
+        # (m7n8o9p0q1r2, 表达式部分索引, 未进 ORM __table_args__), create_all 建不出来;
+        # upsert_manual_refunds 的 ON CONFLICT 要推断它, 否则同步路径测试直接报错。
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_manual_refunds_dedup
+                ON ods.manual_refunds (
+                    ((register_time AT TIME ZONE 'Asia/Shanghai')::date),
+                    order_no,
+                    COALESCE(device_sn, ''),
+                    COALESCE(registrant, '')
+                )
+                WHERE order_no IS NOT NULL
+            """))
+            conn.commit()
 
         # #322 方案A: create_all 会把各 *Clean 模型建成**表**(视图无法由 create_all 建),
         #   与线上的**视图**(over ods 源表)不符; 且 analytics 现已全部改读这些视图,

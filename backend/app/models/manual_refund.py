@@ -14,10 +14,11 @@ from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+from app.models.adoption_mixin import AdoptionColumnsMixin
 from app.models.base import IDMixin, TimestampMixin
 
 
-class ManualRefund(IDMixin, TimestampMixin, Base):
+class ManualRefund(AdoptionColumnsMixin, IDMixin, TimestampMixin, Base):
     """手动退款登记 - 客服在商户号后台手动操作的退款台账"""
 
     __tablename__ = "manual_refunds"

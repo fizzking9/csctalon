@@ -16,10 +16,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+from app.models.adoption_mixin import AdoptionColumnsMixin
 from app.models.base import TimestampMixin
 
 
-class RefundRecordReport(TimestampMixin, Base):
+class RefundRecordReport(TimestampMixin, AdoptionColumnsMixin, Base):
     """退款记录报表 - BMS 线上退款水单"""
 
     __tablename__ = "refund_record_reports"

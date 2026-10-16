@@ -8,11 +8,12 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+from app.models.adoption_mixin import AdoptionColumnsMixin
 from app.models.base import TimestampMixin
 from app.models.quality_mixin import QualityMixin
 
 
-class ShanmaoRefund(QualityMixin, TimestampMixin, Base):
+class ShanmaoRefund(AdoptionColumnsMixin, QualityMixin, TimestampMixin, Base):
     """闪猫退款 - 闪猫加速系统已退款申请记录
 
     与 refunds(云猫BMS退费单) 数据隔离,便于独立分析两个平台的退款差异

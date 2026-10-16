@@ -1,5 +1,6 @@
 """模型汇总 - 导入所有模型,供 Alembic 与应用初始化使用"""
 
+from app.models.adoption_mixin import AdoptionColumnsMixin  # noqa: F401  # #332 五路采纳治理列
 from app.models.ai_focus_config import AiFocusConfig  # noqa: F401
 from app.models.ai_report import AiReport  # noqa: F401
 from app.models.ai_report_feedback import AiReportFeedback  # noqa: F401
@@ -52,6 +53,10 @@ from app.models.device import (  # noqa: F401
 from app.models.device_combo import DeviceCombo  # noqa: F401
 from app.models.device_flow_usage import DeviceFlowUsage  # noqa: F401
 from app.models.dim_device_combo import DimDeviceCombo  # noqa: F401  # #320 设备-套餐 SCD2 干净维度
+from app.models.dim_merchant import (  # noqa: F401  # #332 E路企业商户维表
+    DimDeviceMerchant,
+    DimMerchantGroup,
+)
 from app.models.doc_sync_config import DocSyncConfig  # noqa: F401
 from app.models.doc_sync_login_log import DocSyncLoginLog  # noqa: F401
 from app.models.doc_sync_source import DocSyncSource  # noqa: F401
@@ -111,6 +116,16 @@ from app.models.reconcile_check import ReconcileCheck  # noqa: F401
 from app.models.reconcile_match import ReconcileMatch  # noqa: F401
 from app.models.refund import Refund  # noqa: F401
 from app.models.refund_record_report import RefundRecordReport  # noqa: F401
+
+# #332 退款五路标准层: 5 张 std 标准表 + 人工覆盖留痕表
+from app.models.refund_standard import (  # noqa: F401
+    AdoptionOverride,
+    StdRefundManual,
+    StdRefundOnline,
+    StdRefundRecord,
+    StdRefundShanmao,
+    StdWalletFlow,
+)
 from app.models.refund_wide import RefundWide  # noqa: F401
 from app.models.report import Report, ReportStatus, ReportType  # noqa: F401
 from app.models.report_comment import CommentTarget, ReportComment  # noqa: F401
@@ -193,6 +208,8 @@ __all__ = [
     "ComboBackfillSlice",
     "DeviceFlowUsage",
     "DimDeviceCombo",
+    "DimDeviceMerchant",
+    "DimMerchantGroup",
     "DeviceTag",
     "DeviceTagBatch",
     "DeviceTagBinding",
@@ -246,6 +263,12 @@ __all__ = [
     "RefundRecordReportClean",
     "ShanmaoRefundClean",
     "RefundWide",
+    "StdRefundOnline",
+    "StdWalletFlow",
+    "StdRefundShanmao",
+    "StdRefundManual",
+    "StdRefundRecord",
+    "AdoptionOverride",
     "Report",
     "ReportStatus",
     "ReportType",
@@ -299,4 +322,5 @@ __all__ = [
     "WeeklySectionBinding",
     "IDMixin",
     "TimestampMixin",
+    "AdoptionColumnsMixin",
 ]
