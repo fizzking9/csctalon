@@ -11,6 +11,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.models.adoption_mixin import ADOPT_COLUMNS
 from app.models.device import Device
 from app.models.manual_refund import ManualRefund
 
@@ -646,6 +647,14 @@ def _execute_upsert(
     if not rows:
         return
 
+    # #332 FR-5 护栏: 采纳治理四列只能由采纳作业(app.services.governance.
+    # refund_adoption)写。同步 rows 即使误带(映射错误/上游脏键)也一律剔除 ——
+    # 保证新增行四列落 NULL、冲突更新不覆盖既有判定。
+    if any(ADOPT_COLUMNS.intersection(r) for r in rows):
+        for r in rows:
+            for _col in ADOPT_COLUMNS:
+                r.pop(_col, None)
+
     # ── 嗅探模型是否存在 synced_at / updated_by_raw 列 (P1-T4 新字段) ──
     _m_cols = {c.key for c in model.__table__.columns}
     _has_synced_at = "synced_at" in _m_cols
@@ -687,7 +696,12 @@ def _execute_upsert(
             select(func.count()).select_from(model).where(getattr(model, pk_field).in_(keys))
         ) or 0
     stmt = pg_insert(model).values(rows)
-    update_cols = {c: stmt.excluded[c] for c in rows[0] if c != pk_field}
+    # #332: 治理列双保险 —— 动态列清单再排除一次(上方已从 rows 剔除, 此处防御未来改动)
+    update_cols = {
+        c: stmt.excluded[c]
+        for c in rows[0]
+        if c != pk_field and c not in ADOPT_COLUMNS
+    }
     # P1-T4: 冲突更新时 synced_at 强制 = DB now() (覆盖 excluded 值,避免 Python 机时钟差 / 扫表时间漂移)
     if _has_synced_at:
         update_cols["synced_at"] = func.now()

@@ -138,14 +138,14 @@ def test_route_e_time_window(_test_session):
 # 根因: #21 治理把确凿重复标 dup_residual(不物理删), 但 _route_d_other_agg / trend
 #       未排除 → 已治理重复仍计入 D 路经营(生产 9月窗口差 ¥4.8万)。
 # ============================================================
-def _seed_manual(session, sn, amount, op_time, is_refunded="是", quality_status=None):
+def _seed_manual(session, sn, amount, op_time, is_refunded="是", quality_status=None, order_suffix=""):
     from app.models import ManualRefund
 
     if sn:
         _ensure_device(session, sn)
     m = ManualRefund(
         device_sn=sn,
-        order_no=f"WS-D-{sn}-{amount}",
+        order_no=f"WS-D-{sn}-{amount}{order_suffix}",
         merchant_id="1611876437",
         refund_amount=amount,
         register_time=_dt("2026-09-03 09:00:00"),
@@ -166,9 +166,11 @@ def test_route_d_excludes_dup_residual(_test_session):
 
     s = _dt("2026-09-01 00:00:00")
     e = _dt("2026-09-10 23:59:59")
-    # 1 笔正常行 + 1 笔 dup_residual 重复行(同金额同单)
+    # 1 笔正常行 + 1 笔 dup_residual 重复行(同金额; order_no 加后缀以兼容
+    # #332 起测试库也具备的 uq_manual_refunds_dedup 唯一索引 —— 排除语义由
+    # quality_status 标记驱动, 不依赖键真重复)
     _seed_manual(_test_session, "SN-D-1", "19.00", "2026-09-05 10:00:00", quality_status=None)
-    _seed_manual(_test_session, "SN-D-1", "19.00", "2026-09-05 10:00:00", quality_status="dup_residual")
+    _seed_manual(_test_session, "SN-D-1", "19.00", "2026-09-05 10:00:00", quality_status="dup_residual", order_suffix="-dup")
 
     res = _cash_routes_total(_test_session, start=s, end=e)
     rd = res["route_d"]

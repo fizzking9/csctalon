@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.models.adoption_mixin import ADOPT_COLUMNS
 from app.models.bms_order import BmsOrder
 from app.models.device import Device, DeviceTag, DeviceTagBinding
 from app.models.device_combo import DeviceCombo
@@ -441,8 +442,10 @@ def upsert_refund_record_reports(df: pd.DataFrame, mapping: dict[str, str], db: 
     for i in range(0, len(rows), BATCH):
         batch = rows[i:i + BATCH]
         stmt = pg_insert(RefundRecordReport).values(batch)
+        # #332 FR-5: 采纳治理四列不参与冲突更新(显式护栏, batch 理论上不会带)
         update_cols = {c: stmt.excluded[c] for c in batch[0]
-                       if c not in ("platform_order_no", "refund_time", "refund_amount")}
+                       if c not in ("platform_order_no", "refund_time", "refund_amount")
+                       and c not in ADOPT_COLUMNS}
         # ⚠️ 唯一索引是表达式(经 _to_datetime 后 refund_time 已是 timestamptz, PG 存毫秒级),
         #    直接用列 on_conflict_do_update 可能不命中表达式唯一索引; 但 uq 是普通列唯一约束
         #    (platform_order_no, refund_time, refund_amount), 故 index_elements 用三列即可。

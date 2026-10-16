@@ -9,6 +9,7 @@ from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.models.adoption_mixin import ADOPT_COLUMNS
 from app.models.manual_refund import ManualRefund
 from app.models.merchant_refund import MerchantRefund
 from app.models.refund import Refund
@@ -555,11 +556,18 @@ def upsert_manual_refunds(df: pd.DataFrame, mapping: dict[str, str], db: Session
         batch = rows[i:i + BATCH]
         stmt = pg_insert(ManualRefund).values(batch)
         _key_cols = ("register_time", "order_no", "device_sn", "registrant")
-        update_cols = {c: stmt.excluded[c] for c in batch[0].keys() if c not in _key_cols}
-        # 内容比较字段: 去重键与系统派生/溯源字段不参与"是否变化"判定
+        # #332 FR-5: 采纳治理四列不参与冲突更新(理论上 batch 不会带, 此处为显式护栏)
+        update_cols = {
+            c: stmt.excluded[c]
+            for c in batch[0].keys()
+            if c not in _key_cols and c not in ADOPT_COLUMNS
+        }
+        # 内容比较字段: 去重键、系统派生/溯源字段、采纳治理列不参与"是否变化"判定
         _compare_cols = [
             c for c in batch[0].keys()
-            if c not in _key_cols and c not in ("quality_note", "register_time_raw")
+            if c not in _key_cols
+            and c not in ("quality_note", "register_time_raw")
+            and c not in ADOPT_COLUMNS
         ]
         _where = None
         if _compare_cols:
