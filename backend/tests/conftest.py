@@ -178,6 +178,12 @@ def _engine():
                 conn.execute(text(f'DROP TABLE IF EXISTS ods."{_t}" CASCADE'))
             conn.commit()
 
+        # #332 T5: dim_device_merchant 新增 arbiter_pick 列, 同上 create_all 不 ALTER,
+        #   旧测试库需 DROP 重建(数据由作业全量重建, 无损失)。
+        with engine.connect() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS public.dim_device_merchant CASCADE"))
+            conn.commit()
+
         Base.metadata.create_all(bind=engine)
 
         # #332 测试补 DDL: ods.manual_refunds 的去重唯一索引仅存在于 Alembic 迁移

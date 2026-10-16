@@ -11,6 +11,7 @@ from app.api.v1 import (
     admin_complaint_same_source,
     admin_governance_prompt,
     admin_onboarding_prompt,
+    admin_refund_adoption,
     agenda,
     ai,
     ai_onboarding,
@@ -133,6 +134,7 @@ api_router.include_router(admin_ai_prompt_eval.router)  # #173 AI 提示词评�
 api_router.include_router(admin_ai_prompt_config.router)  # #178 提示词版本管理(admin)
 api_router.include_router(admin_governance_prompt.router)  # 研判提示词版本管理(admin)
 api_router.include_router(admin_onboarding_prompt.router)  # 起草提示词版本管理(admin)
+api_router.include_router(admin_refund_adoption.router)  # #332 退款采纳人工覆盖(admin)
 api_router.include_router(alerts.router)
 api_router.include_router(metrics.router)
 api_router.include_router(batch_jobs.router)  # #258 夜批任务管理

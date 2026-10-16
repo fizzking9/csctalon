@@ -1640,6 +1640,56 @@ class BmsScheduler:
             except Exception as gap_err:  # noqa: BLE001
                 logger.warning(f"[调度器] 缺口记账失败(忽略): {gap_err}")
 
+        # ── #332: 退款五路采纳作业 → E路企业商户维表重建(同步成功后顺序触发) ──
+        # 任一退款路源(refund/wallet/shanmao_refund/manual_refund/refund_record_report)
+        # 本轮同步成功即触发; 作业幂等, 失败不回滚同步、由 jobs 层写错误事件等下一周期。
+        try:
+            _refund_route_types = {
+                "refund", "wallet", "shanmao_refund", "manual_refund", "refund_record_report",
+            }
+            _ok_types = {
+                r.get("data_type") for r in task_results
+                if isinstance(r, dict) and r.get("success") and r.get("data_type")
+            }
+            if _ok_types & _refund_route_types:
+                self._run_refund_governance(trigger=f"scheduled:{why or '定时同步'}")
+        except Exception as gov_err:  # noqa: BLE001 治理作业失败不影响调度主流程
+            logger.error(
+                f"[调度器] 退款治理作业触发失败(下周期重试): {gov_err}", exc_info=True,
+            )
+
+    def _run_refund_governance(self, *, trigger: str) -> None:
+        """#332: 顺序触发 采纳作业 → dim_device_merchant 重建。
+
+        两作业各自持事务级 advisory lock 互斥(app.services.governance.jobs),
+        与 admin 手动触发共用同一锁源; 主要为「手动+自动」并发兜底。
+        单作业失败上抛由调用点捕获(不阻断另一作业以外的调度主流程)。
+        """
+        from app.services.governance.jobs import (
+            run_adoption_job,
+            run_dim_device_merchant_job,
+        )
+        gov_db = SessionLocal()
+        try:
+            r1 = run_adoption_job(gov_db, trigger=trigger)
+            if r1.get("skipped"):
+                logger.info("[调度器] 采纳作业在运行中, 本轮跳过")
+            else:
+                logger.info(
+                    "[调度器] 采纳作业完成: "
+                    + "; ".join(f"{r}={s['total']}行" for r, s in r1["routes"].items())
+                )
+            r2 = run_dim_device_merchant_job(gov_db, trigger=trigger)
+            if r2.get("skipped"):
+                logger.info("[调度器] dim_device_merchant 重建在运行中, 本轮跳过")
+            else:
+                logger.info(
+                    f"[调度器] dim_device_merchant 重建完成: "
+                    f"{r2['segments']}分段/{r2['devices']}设备"
+                )
+        finally:
+            gov_db.close()
+
     def _register_circuit_alert(self, biz_key: str, data_type: str) -> None:
         """熔断触发 → 站内信通知 + Incident 自动登记(A-20260904-002 §五#5 / #203)。
 

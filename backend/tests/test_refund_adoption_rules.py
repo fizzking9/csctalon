@@ -39,9 +39,28 @@ from app.services.governance.refund_adoption import (
 _TS = "2026-10-16T08:00:00+08:00"
 _LONG_GARBAGE = "该订单状态异常请联系管理员处理超长错位文本哦哦哦哦哦"  # >16 字
 
+_ODS_TABLES = ("ods.refunds", "ods.wallet_withdrawals", "ods.shanmao_refunds",
+               "ods.manual_refunds", "ods.refund_record_reports")
+_STD_TABLES = ("std_refund_online", "std_wallet_flow", "std_refund_shanmao",
+               "std_refund_manual", "std_refund_record")
+
+
+def _purge(db) -> None:
+    """清空五路 ods/std 表与覆盖表, 使本用例输入集完全由夹具决定。
+
+    为什么必须清: T4 人工覆盖 API / T6 治理作业用例经**作业内部 commit** 会把行
+    (RC-OV1 / RC-JOB1) 与覆盖记录落在持久测试库 csctalon_test, 而本文件多处以
+    **绝对计数**断言(total / std 表行数)。残留会使计数偏大、断言假红。
+    清理在本用例事务内执行, 随 db fixture 回滚, 不改动其它用例数据。
+    """
+    for _t in _STD_TABLES + _ODS_TABLES:
+        db.execute(text(f"DELETE FROM {_t}"))
+    db.execute(text("DELETE FROM adoption_overrides"))
+
 
 def _seed(db) -> None:
     """构造五路全分类夹具(每路各规则码至少命中 1 行 + 未知枚举 pending 行)。"""
+    _purge(db)  # 先清残留, 保证输入集确定(见 _purge 说明)
     # ── A 路 ods.refunds ──
     db.execute(text("""
         INSERT INTO ods.refunds

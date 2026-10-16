@@ -79,3 +79,7 @@ class DimDeviceMerchant(IDMixin, Base):
         String(8), nullable=False, server_default=text("'none'"),
         comment="冲突标记: none=正常 / overlap=同时段多商户待仲裁(fake 不入表)",
     )
+    arbiter_pick: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("false"),
+        comment="仲裁选中: TRUE=同 SN overlap 分段中被设备档案 merchant_name 选中的商户分段",
+    )
