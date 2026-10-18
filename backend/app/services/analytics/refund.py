@@ -63,6 +63,10 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
 
     与 refund_recovery_analysis 第1-5步逻辑完全一致, 提取为公共函数供深度分析接口复用.
 
+    #332 例外声明(铁律15): 本函数全部退款读取走 ods 原始层 refunds, 不切 std ——
+    挽回漏斗是全状态语义, 需追「申请中/无需退款/驳回」等未完结工单
+    (std 只含已退款采纳行, 读 std 会漏掉正在挽回的活单, 成功率/待挽回清单全错).
+
     Returns:
         dict with keys:
         - all_ops_meta: dict[op, {name, group, specialty, position, dept, hr_cat, is_recovery_staff}]
@@ -513,7 +517,11 @@ def refund_person_devices(
     db: Session, operator: str, start: str | None = None, end: str | None = None,
     result: str = "all",
 ) -> dict[str, Any]:
-    """接口2: 人员接待设备清单 - 某人员周期内接待的所有SN + 成功/失败明细."""
+    """接口2: 人员接待设备清单 - 某人员周期内接待的所有SN + 成功/失败明细.
+
+    #332 例外声明(铁律15): 退款读取走 ods 原始层 refunds —— 全状态语义,
+    理由见 _refund_recovery_core docstring。
+    """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
     core = _refund_recovery_core(db, cur_s, cur_e)
     host_sns = core["op_host_sns"].get(operator, set())
@@ -716,7 +724,11 @@ def refund_device_analysis(
     amount_max: float | None = None, reception_count_min: int | None = None,
     limit: int = 20,
 ) -> dict[str, Any]:
-    """接口5: 设备分析 - Top风险设备 + 时差分布 + 接待次数分布."""
+    """接口5: 设备分析 - Top风险设备 + 时差分布 + 接待次数分布.
+
+    #332 例外声明(铁律15): 退款读取走 ods 原始层 refunds —— 全状态语义,
+    理由见 _refund_recovery_core docstring。
+    """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
     core = _refund_recovery_core(db, cur_s, cur_e)
     global_fail_sns = core["global_fail_sns"]
@@ -865,7 +877,11 @@ def refund_device_analysis(
 def refund_device_detail(
     db: Session, device_sn: str, start: str | None = None, end: str | None = None,
 ) -> dict[str, Any]:
-    """接口6: 设备详情 - 接待时间线 + 退款记录 + 工单 + 钱包."""
+    """接口6: 设备详情 - 接待时间线 + 退款记录 + 工单 + 钱包.
+
+    #332 例外声明(铁律15): 退款/钱包读取走 ods 原始层 refunds/wallet_withdrawals ——
+    设备详情需展示该 SN 全状态退款记录与全量钱包流水(含失败/冻结), 非经营统计口径。
+    """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
     core = _refund_recovery_core(db, cur_s, cur_e)
     global_fail_sns = core["global_fail_sns"]
@@ -2280,6 +2296,9 @@ def refund_recovery_analysis(
     end: str | None = None,
 ) -> dict[str, Any]:
     """退款挽回专项分析: 总体KPI + 原因分布 + 按人员明细 + 周趋势.
+
+    #332 例外声明(铁律15): 本函数全部退款读取(含各 CTE)走 ods 原始层 refunds ——
+    全状态语义, 理由见 _refund_recovery_core docstring。
 
     返回结构:
       {
