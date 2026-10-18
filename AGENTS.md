@@ -76,6 +76,15 @@
       不入 git；任务收尾把**结论提炼进 `docs/reports/`**，耐用脚本证明可复用后才进 `scripts/`。
     - **点号 ≠ 不入库**：`.gitea/` 等协作配置必须入库；`__pycache__` / `.venv` / `node_modules`
       等缓存运行时忽略。唯一判据：别人 clone 后是否需要它才能跑起来 / 理解系统。
+15. **禁止绕过《退款五路数据标准与采纳规则》的采纳口径**（见 `docs/standards/退款五路数据标准与采纳规则.md`，META）：
+    - 退款五路（A 线上直退 / B 钱包流水 / C 闪猫 / D 手动 / E 企微记录）统计**一律读 `std_*` 标准表**
+      （`std_refund_online` / `std_wallet_flow` / `std_refund_shanmao` / `std_refund_manual` / `std_refund_record`），
+      **禁止**在查询侧散落复刻采纳条件（失败/冻结关键词、质量状态过滤等已由采纳作业在表层固化）。
+    - ods 原始表**只同步不治理**：采集 upsert 不得覆盖采纳标识四列（`adopt_state` / `adopt_reason` /
+      `adopt_rule_ver` / `adopted_at`）；质量治理入口 = 人工覆盖 API（`adoption_overrides`），禁止直接改原始数据。
+    - 采纳规则变更必须**升版 `ADOPT_RULE_VER`** 并同步修订口径文档；全状态/全方式语义例外
+      （工作量统计、导出原始明细自筛）允许读 ods 原始层，但必须在注释中声明例外理由。
+    - 企业商户维度统一经 `dim_device_merchant`（as-of 分段维表）回填，禁止各处自行实现商户回落逻辑。
 
 ## 输出风格
 
