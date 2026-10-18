@@ -7,8 +7,11 @@ from sqlalchemy import and_, case, func, select, text
 from sqlalchemy.orm import Session
 
 from app.models.group import Group, PersonGroupMembership
-from app.models.ods_clean import CsRecordClean, RefundClean
+from app.models.ods_clean import CsRecordClean
 from app.models.person import Person, PersonAlias
+
+# #332: 退款统计切标准表 std_refund_online(采纳口径表层固化)
+from app.models.refund_standard import StdRefundOnline
 from app.models.ticket import ServiceTicket
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
@@ -157,17 +160,17 @@ def operator_audit_stats(db: Session, start: datetime | None = None, end: dateti
     op_prs = _operator_to_person_cte()
     rows = db.execute(
         select(
-            func.coalesce(op_prs.c.display_name, RefundClean.auditor).label("operator"),
+            func.coalesce(op_prs.c.display_name, StdRefundOnline.auditor).label("operator"),
             func.count().label("audit_count"),
-            func.coalesce(func.sum(RefundClean.refund_amount), 0).label("audit_amount"),
+            func.coalesce(func.sum(StdRefundOnline.refund_amount), 0).label("audit_amount"),
         )
-        .select_from(RefundClean)
-        .outerjoin(op_prs, op_prs.c.operator == RefundClean.auditor)
-        .where(RefundClean.auditor.isnot(None),
-               RefundClean.created_at_raw.between(start, end),
+        .select_from(StdRefundOnline)
+        .outerjoin(op_prs, op_prs.c.operator == StdRefundOnline.auditor)
+        .where(StdRefundOnline.auditor.isnot(None),
+               StdRefundOnline.created_at_raw.between(start, end),
                *_route_a_online_refund_filter())
         .group_by(text("1"))
-        .order_by(func.sum(RefundClean.refund_amount).desc())
+        .order_by(func.sum(StdRefundOnline.refund_amount).desc())
     ).all()
     return [
         {"operator": _strip_qw_prefix(r[0]), "audit_count": r[1], "audit_amount": float(r[2] or 0)}
@@ -185,21 +188,21 @@ def operator_refund_stats(db: Session, start: datetime | None = None, end: datet
     op_prs = _operator_to_person_cte()
     rows = db.execute(
         select(
-            func.coalesce(op_prs.c.display_name, RefundClean.operator).label("operator"),
+            func.coalesce(op_prs.c.display_name, StdRefundOnline.operator).label("operator"),
             func.count().label("op_count"),
-            func.coalesce(func.sum(RefundClean.refund_amount), 0).label("refund_amount"),
+            func.coalesce(func.sum(StdRefundOnline.refund_amount), 0).label("refund_amount"),
         )
-        .select_from(RefundClean)
-        .outerjoin(op_prs, op_prs.c.operator == RefundClean.operator)
+        .select_from(StdRefundOnline)
+        .outerjoin(op_prs, op_prs.c.operator == StdRefundOnline.operator)
         .where(
-            RefundClean.operator.isnot(None),
-            RefundClean.operator.notin_(SYS_OP_BLACKLIST_RR),
-            RefundClean.created_at_raw.between(start, end),
+            StdRefundOnline.operator.isnot(None),
+            StdRefundOnline.operator.notin_(SYS_OP_BLACKLIST_RR),
+            StdRefundOnline.created_at_raw.between(start, end),
             *_route_a_online_refund_filter(),
         )
         .group_by(text("1"))
-        .having(func.coalesce(op_prs.c.display_name, RefundClean.operator) != "系统自动")
-        .order_by(func.sum(RefundClean.refund_amount).desc())
+        .having(func.coalesce(op_prs.c.display_name, StdRefundOnline.operator) != "系统自动")
+        .order_by(func.sum(StdRefundOnline.refund_amount).desc())
     ).all()
     return [
         {"operator": _strip_qw_prefix(r[0]), "op_count": r[1], "refund_amount": float(r[2] or 0)}

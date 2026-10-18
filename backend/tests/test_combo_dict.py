@@ -67,6 +67,10 @@ class TestCategoryByPackage:
             quality_status="normal",
         ))
         db.flush()
+        # #332 T8: 套餐归一取数 std_refund_online —— 先跑采纳作业
+        from app.services.governance.refund_adoption import run_refund_adoption
+
+        run_refund_adoption(db, routes="A", commit=False)
         result = category_by_package(db, limit=5)
         assert any(r["name"] == "原始套餐A" and r["value"] == 100.0 for r in result)
 
@@ -88,6 +92,10 @@ class TestCategoryByPackage:
             quality_status="normal",
         ))
         db.flush()
+        # #332 T8: 套餐归一取数 std_refund_online —— 先跑采纳作业
+        from app.services.governance.refund_adoption import run_refund_adoption
+
+        run_refund_adoption(db, routes="A", commit=False)
         result = category_by_package(db, limit=5)
         assert any(r["name"] == "黄金套餐" and r["value"] == 200.0 for r in result)
 

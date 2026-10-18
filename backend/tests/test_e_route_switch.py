@@ -18,6 +18,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+# #332 T8: D/E 路取数 std 表 —— 测试内 seed 原始行后需跑采纳作业固化进 std
+from app.services.governance.refund_adoption import run_refund_adoption
 from tests._db_guard import safe_wipe
 
 _TZ = timezone(timedelta(hours=8))
@@ -34,9 +36,13 @@ def _test_session(_engine):
 
     session = Session(_engine, autocommit=False, autoflush=False)
     from app.models import Refund, RefundRecordReport
+    from app.models.refund_standard import StdRefundManual, StdRefundRecord
 
     for cls in (RefundRecordReport, Refund):
         safe_wipe(session, cls)
+    # #332 T8: std 同步清空(采纳作业为全量重建, ods 已清, 防 std 残留污染绝对计数)
+    safe_wipe(session, StdRefundManual)
+    safe_wipe(session, StdRefundRecord)
     # 本文件 D 路回归测试建的 manual(SN-D-*) 也清理, 防污染
     safe_wipe(session, ManualRefund, where=ManualRefund.device_sn.like("SN-D-%"))
     safe_wipe(session, Device, where=Device.sn.like("SN-E-%"))
@@ -48,6 +54,8 @@ def _test_session(_engine):
         try:
             for cls in (RefundRecordReport, Refund):
                 safe_wipe(session, cls)
+            safe_wipe(session, StdRefundManual)
+            safe_wipe(session, StdRefundRecord)
             safe_wipe(session, ManualRefund, where=ManualRefund.device_sn.like("SN-D-%"))
             safe_wipe(session, Device, where=Device.sn.like("SN-E-%"))
             safe_wipe(session, Device, where=Device.sn.like("SN-D-%"))
@@ -95,6 +103,7 @@ def test_route_e_reads_refund_record_reports(_test_session):
     # 2 笔退款成功
     _seed_report(_test_session, "SN-E-1", "19.00", "2026-09-05 10:00:00")
     _seed_report(_test_session, "SN-E-2", "31.50", "2026-09-06 14:00:00")
+    run_refund_adoption(_test_session, routes="E", commit=False)
 
     res = _cash_routes_total(_test_session, start=s, end=e)
     ac = res["actual_cashflow"]
@@ -111,6 +120,7 @@ def test_route_e_filters_non_success_status(_test_session):
     _seed_report(_test_session, "SN-E-3", "19.00", "2026-09-05 10:00:00", status="退款成功")
     _seed_report(_test_session, "SN-E-4", "50.00", "2026-09-05 11:00:00", status="退款中")  # 不计
     _seed_report(_test_session, "SN-E-5", "80.00", "2026-09-05 12:00:00", status="失败")     # 不计
+    run_refund_adoption(_test_session, routes="E", commit=False)
 
     res = _cash_routes_total(_test_session, start=s, end=e)
     ac = res["actual_cashflow"]
@@ -126,6 +136,7 @@ def test_route_e_time_window(_test_session):
     e = _dt("2026-09-05 23:59:59")
     _seed_report(_test_session, "SN-E-6", "19.00", "2026-09-04 10:00:00")  # 窗口内
     _seed_report(_test_session, "SN-E-7", "99.00", "2026-09-06 10:00:00")  # 窗口外
+    run_refund_adoption(_test_session, routes="E", commit=False)
 
     res = _cash_routes_total(_test_session, start=s, end=e)
     ac = res["actual_cashflow"]
@@ -171,6 +182,8 @@ def test_route_d_excludes_dup_residual(_test_session):
     # quality_status 标记驱动, 不依赖键真重复)
     _seed_manual(_test_session, "SN-D-1", "19.00", "2026-09-05 10:00:00", quality_status=None)
     _seed_manual(_test_session, "SN-D-1", "19.00", "2026-09-05 10:00:00", quality_status="dup_residual", order_suffix="-dup")
+    # #332: dup_residual 排除语义由采纳作业在表层执行(std_refund_manual 不含该行)
+    run_refund_adoption(_test_session, routes="D", commit=False)
 
     res = _cash_routes_total(_test_session, start=s, end=e)
     rd = res["route_d"]
@@ -186,6 +199,7 @@ def test_route_d_keeps_normal_and_pending(_test_session):
     e = _dt("2026-09-10 23:59:59")
     _seed_manual(_test_session, "SN-D-2", "19.00", "2026-09-05 10:00:00", quality_status=None)
     _seed_manual(_test_session, "SN-D-3", "5.00", "2026-09-05 11:00:00", quality_status="pending")
+    run_refund_adoption(_test_session, routes="D", commit=False)
 
     res = _cash_routes_total(_test_session, start=s, end=e)
     rd = res["route_d"]

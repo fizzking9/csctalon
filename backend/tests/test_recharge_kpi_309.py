@@ -99,6 +99,10 @@ def test_decision_overview_recharge_and_ratio(db):
     _mk_combo(db, amount="400.00", package="全球通用30天", when=now)
     _mk_combo(db, amount="9999.00", package="闪猫质检30日套餐", when=now)
     _mk_refund(db, amount="100.00", when=now)   # 四路 A 路现金流出 100
+    # #332 T8: 四路取数 std 表 —— 先跑采纳作业
+    from app.services.governance.refund_adoption import run_refund_adoption
+
+    run_refund_adoption(db, routes="A", commit=False)
 
     ov = refund_decision_overview(db, start=start, end=end, grain="day")
     s = ov["summary"]
@@ -115,6 +119,10 @@ def test_decision_overview_ratio_none_when_no_recharge(db):
     now = datetime.now(UTC)
     _mk_combo(db, amount="9999.00", package="工厂质检专用套餐*30天", when=now)
     _mk_refund(db, amount="50.00", when=now)
+    # #332 T8: 四路取数 std 表 —— 先跑采纳作业
+    from app.services.governance.refund_adoption import run_refund_adoption
+
+    run_refund_adoption(db, routes="A", commit=False)
 
     ov = refund_decision_overview(db, start=start, end=end, grain="day")
     s = ov["summary"]

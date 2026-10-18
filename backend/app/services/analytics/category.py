@@ -35,7 +35,10 @@ from sqlalchemy.orm import Session
 
 from app.models.combo_dict import ComboDict, ComboNameAlias
 from app.models.device import Device
-from app.models.ods_clean import DeviceComboClean, DeviceFlowUsageClean, RefundClean
+from app.models.ods_clean import DeviceComboClean, DeviceFlowUsageClean
+
+# #332: 退款统计切标准表 std_refund_online(采纳口径表层固化)
+from app.models.refund_standard import StdRefundOnline
 
 # from app.models.merchant import DeviceMerchantLink, Merchant  # #271: 暂用 devices.merchant_name，links/merchants 表全空
 from app.models.ticket import ServiceTicket
@@ -179,22 +182,17 @@ def _fetch_recharge_by_dim(db: Session, dim: str, since: datetime, end: datetime
 def _fetch_refund_by_dim(db: Session, dim: str, since: datetime, end: datetime) -> dict[str, int]:
     """窗口内实际退款笔数(口径A), 按维度聚合。
 
-    #293: 加 status 口径A过滤(NOT IN 无需退款/驳回/申请中), 与退款分析 4442e89 对齐;
-    修复前把申请中/登记类全算进「退款笔数」, 近30天夸 ~40%。
     #293: 补 end 上界(与充值/活跃同窗)。
+    #332: 取数切 std_refund_online(采纳作业固化已退款), 原 NOT IN
+    (无需退款/驳回/申请中) 散落过滤删除 —— std 表只含已退款采纳行。
     """
-    # 口径A: 排除非实际退款状态(与 refund.py 10 处 NOT IN 同模式)
-    actual_refund_cond = (
-        func.coalesce(RefundClean.status, "").notin_(("无需退款", "驳回", "申请中"))
-    )
     if dim == "device_type":
         stmt = (
             select(Device.device_type.label("key"), func.count().label("cnt"))
-            .select_from(RefundClean)
-            .join(Device, Device.sn == RefundClean.device_sn)
-            .where(RefundClean.created_at_raw >= since)
-            .where(RefundClean.created_at_raw <= end)
-            .where(actual_refund_cond)
+            .select_from(StdRefundOnline)
+            .join(Device, Device.sn == StdRefundOnline.device_sn)
+            .where(StdRefundOnline.created_at_raw >= since)
+            .where(StdRefundOnline.created_at_raw <= end)
             .group_by(Device.device_type)
         )
     elif dim == "combo":
@@ -202,22 +200,20 @@ def _fetch_refund_by_dim(db: Session, dim: str, since: datetime, end: datetime) 
         # 改按 Device.current_combo_name 分组（与设备数/活跃同口径）
         stmt = (
             select(Device.current_combo_name.label("key"), func.count().label("cnt"))
-            .select_from(RefundClean)
-            .join(Device, Device.sn == RefundClean.device_sn)
-            .where(RefundClean.created_at_raw >= since)
-            .where(RefundClean.created_at_raw <= end)
-            .where(actual_refund_cond)
+            .select_from(StdRefundOnline)
+            .join(Device, Device.sn == StdRefundOnline.device_sn)
+            .where(StdRefundOnline.created_at_raw >= since)
+            .where(StdRefundOnline.created_at_raw <= end)
             .group_by(Device.current_combo_name)
         )
     elif dim == "merchant":
         # #271: 走 devices.merchant_name（links/merchants 表全空）
         stmt = (
             select(Device.merchant_name.label("key"), func.count().label("cnt"))
-            .select_from(RefundClean)
-            .join(Device, Device.sn == RefundClean.device_sn)
-            .where(RefundClean.created_at_raw >= since)
-            .where(RefundClean.created_at_raw <= end)
-            .where(actual_refund_cond)
+            .select_from(StdRefundOnline)
+            .join(Device, Device.sn == StdRefundOnline.device_sn)
+            .where(StdRefundOnline.created_at_raw >= since)
+            .where(StdRefundOnline.created_at_raw <= end)
             .where(Device.merchant_name.isnot(None))
             .group_by(Device.merchant_name)
         )

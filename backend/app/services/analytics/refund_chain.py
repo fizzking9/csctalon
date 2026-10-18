@@ -7,7 +7,11 @@ from typing import Any
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from app.models.ods_clean import ManualRefundClean, RefundClean, WalletWithdrawalClean
+# #332: 链路分析是全状态/全方式语义 —— A 路径=「转入提现账户」退款(被 std A 路
+#   采纳规则排除), 蓄水分析需要全方式行 → 退款单与提现进水读 ods 原始层;
+#   B 成功提现与 D 手动退款取 std 表(采纳口径表层固化)。
+from app.models.refund import Refund
+from app.models.refund_standard import StdRefundManual, StdWalletFlow
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
 from app.services.analytics._core import (
@@ -28,10 +32,7 @@ from app.services.analytics._core import (
     _naive,
     _norm_chain_operator,
     _pct,
-    _route_b_withdraw_filter,
-    _withdraw_fail_remark_sql_cond,
 )
-from app.services.analytics.cash import _quality_include_cond
 
 _RFN_RE = _re.compile(r'退费单\s*([A-Za-z0-9]+)')
 
@@ -43,12 +44,16 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
       - B 路径 D4 = 退费单 updated_at_raw (接口回调成功 ≈ 实际到账)
     """
     # 1. 取全量数据 (66k rows, 内存可容纳)
-    all_rf = list(db.execute(select(RefundClean)).scalars().all())
-    # 2026-08-28: 只取"成功提现"(排除 提现申请-冻结 等失败/冻结备注), 避免冻结记录被当作真实出款
+    # #332: 读 ods 原始层 —— 链路 A 路径是「转入提现账户」退款, std_refund_online
+    #   不含该方式(采纳规则排除), 也不能只含已退款行(链路要全状态)
+    all_rf = list(db.execute(select(Refund)).scalars().all())
+    # 2026-08-28 → #332: 只取"成功提现"—— std_wallet_flow 已在表层固化
+    #   (失败/冻结/空 op_type 不进表, 原 _WITHDRAW_FAIL_REMARK 关键词机制删除)
     all_wd = list(db.execute(
-        select(WalletWithdrawalClean).where(*_route_b_withdraw_filter())
+        select(StdWalletFlow).where(StdWalletFlow.op_type == "用户提现")
     ).scalars().all())
-    all_wi = list(db.execute(select(WalletWithdrawalClean).where(WalletWithdrawalClean.op_type == "订单退费转入")).scalars().all())
+    # 进水: flow_dir='inflow' 即 op_type='订单退费转入' (#332 std 派生列)
+    all_wi = list(db.execute(select(StdWalletFlow).where(StdWalletFlow.flow_dir == "inflow")).scalars().all())
 
     # 所有 datetime 先统一 naive, 避免 tz 比较报错
     for r in all_rf:
@@ -198,16 +203,12 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
             "withdraw_remark": withdraw_remark,
         })
 
-    # 4. D 路: 手动退款 (manual_refunds, is_refunded='是')
+    # 4. D 路: 手动退款 (std_refund_manual 采纳行)
     #    客服在商户号后台手动操作的退款登记台账, 时效 = 登记时间(register_time) → 实际退款操作时间(op_time)
-    #    2026-09-06: 排除 quality_status='dup_residual' 已治理重复(不视为独立一笔实际退款出款)
-    #    2026-09-09 (A-20260909-001): 扩展排除 ignored(人工彻底忽略)
-    #    abc-a: 改用统一入口 _quality_include_cond(), 与 raw SQL 路径同口径
+    #    2026-09-06/09: 排除 dup_residual/ignored → #332 采纳作业已在表层固化
+    #    (仅 is_refunded='是' 且非重复/不可回查行进表), 查询不再散落 WHERE
     all_mr = list(db.execute(
-        select(ManualRefundClean).where(
-            ManualRefundClean.is_refunded == "是",
-            *_quality_include_cond(),
-        )
+        select(StdRefundManual)
     ).scalars().all())
     for mr in all_mr:
         d1 = _naive(mr.register_time)
@@ -293,8 +294,9 @@ def refund_withdrawal_overview(db: Session, start: str | None = None, end: str |
         }
 
     # A路径未提现率 (全局口径, 不随D4窗口变化: 统计全量转入提现账户工单 vs 已匹配提现)
-    rf_all = list(db.execute(select(RefundClean.refund_method, func.count(), func.sum(RefundClean.refund_amount))
-                             .group_by(RefundClean.refund_method)).all())
+    # #332: 读 ods 原始层 —— 转入提现账户行被 std A 路采纳规则排除, std 里查不到
+    rf_all = list(db.execute(select(Refund.refund_method, func.count(), func.sum(Refund.refund_amount))
+                             .group_by(Refund.refund_method)).all())
     a_total_cnt = 0; a_total_amt = 0.0
     for m, c, am in rf_all:
         if m and "转入" in m:
@@ -621,14 +623,15 @@ def refund_withdrawal_sleeping(
     e = datetime.fromisoformat(end) if end else None
     rf_rows = db.execute(text("""
         SELECT refund_no, device_sn, refund_amount, created_at_raw, operator
-        FROM refund_clean
+        FROM refunds
         WHERE refund_method LIKE '%转入提现%'
           AND created_at_raw >= :ts AND created_at_raw <= :te
         ORDER BY created_at_raw
     """), {"ts": s, "te": e}).fetchall()
-    wd_rows = db.execute(text(f"""
-        SELECT remark, device_sn, op_amount, op_time FROM wallet_withdrawal_clean w
-        WHERE w.op_type = '用户提现' AND {_withdraw_fail_remark_sql_cond()}
+    # #332: std_wallet_flow 已固化成功提现(失败/冻结/空 op_type 不进表), 备注排除删除
+    wd_rows = db.execute(text("""
+        SELECT remark, device_sn, op_amount, op_time FROM std_wallet_flow w
+        WHERE w.op_type = '用户提现'
     """)).fetchall()
 
     wd_by_rfn: dict[str, list] = {}

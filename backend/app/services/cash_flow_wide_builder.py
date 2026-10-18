@@ -38,7 +38,10 @@ from app.services.quality_check import STATS_EXCLUDED_QUALITY_STATUSES as _EXCLU
 
 logger = logging.getLogger(__name__)
 
-# B 路失败/冻结备注关键词(与 analytics._WITHDRAW_FAIL_REMARK_KEYWORDS 一致)
+# B 路失败/冻结备注关键词(与 quality_check._WITHDRAW_FAIL_REMARK_KEYWORDS 一致)
+# ⚠️ #332: analytics 查询侧的关键词机制已删除 —— B 路统计改读 std_wallet_flow,
+#    失败/冻结/空 op_type 排除已在采纳作业表层固化; 本副本仅服务宽表物化
+#    (宽表作业不在 T8 范围, 保留为独立对照口径)。
 _WITHDRAW_FAIL_KEYWORDS = ("冻结", "退款失败", "提现失败", "超期订单不允许退款", "驳回", "拒绝", "未到账")
 
 # ⚠️ A-20260909-001 §2.7: 经营宽表排除的源头质量状态集合

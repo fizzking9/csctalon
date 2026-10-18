@@ -47,10 +47,14 @@ def _test_session(_engine):
         Refund,
         RefundRecordReport,
     )
+    from app.models.refund_standard import StdRefundManual, StdRefundOnline
 
     # 先删子表(reconcile_matches FK→reconcile_checks), 再删主表
     for cls in (ReconcileMatch, ReconcileCheck, RefundRecordReport, ManualRefund, Refund):
         safe_wipe(session, cls)
+    # #332 T8: 对账 A/D 路快照取 std 表 —— 同步清空(采纳作业全量重建, 防残留污染)
+    safe_wipe(session, StdRefundOnline)
+    safe_wipe(session, StdRefundManual)
     safe_wipe(session, Device, where=Device.sn.like("SN-C-%"))
     session.commit()
     try:
@@ -59,12 +63,28 @@ def _test_session(_engine):
         try:
             for cls in (ReconcileMatch, ReconcileCheck, RefundRecordReport, ManualRefund, Refund):
                 safe_wipe(session, cls)
+            safe_wipe(session, StdRefundOnline)
+            safe_wipe(session, StdRefundManual)
             safe_wipe(session, Device, where=Device.sn.like("SN-C-%"))
             session.commit()
         except Exception:
             session.rollback()
         session.rollback()
         session.close()
+
+
+def _adopt(session):
+    """#332 T8: 对账快照五路均取数 std 表 —— seed 原始行后跑采纳作业固化。
+
+    全五路(非单 A/D): actual_cashflow=E 路(std_refund_record) 也要看到 seed 水单;
+    本夹具已清空 ods 各表, 全量重建无残留污染。
+    ⚠️ 必须 commit=True: 采纳作业含 TRUNCATE std(ACCESS EXCLUSIVE 锁, 事务结束才释放),
+    本文件 API 用例走 TestClient 独立连接 —— 不提交会把独立连接的读锁死。
+    作业输出随夹具 teardown 全量清理(ods+std 都在 wipe 清单), 无跨用例残留。
+    """
+    from app.services.governance.refund_adoption import run_refund_adoption
+
+    run_refund_adoption(session, commit=True)
 
 
 def _seed_report(session, platform_order_no="WS2026090500000001", device_sn="SN-C-1",
@@ -145,6 +165,7 @@ def test_preview_check_snapshot_shape(_test_session):
     # E 水单 1 笔 且命中 A 路退费单 → E 勾稽 A 桶
     _seed_report(_test_session, platform_order_no="WS-MATCH-A", amount="19.00")
     _seed_refund_a(_test_session, platform_order_no="WS-MATCH-A")
+    _adopt(_test_session)
 
     res = preview_check(
         _test_session,
@@ -171,6 +192,7 @@ def test_preview_operational_matches_direct_sum(_test_session):
                  op_time=_dt("2026-09-05 11:00:00"))
     _seed_report(_test_session, platform_order_no="WS-ORD-1", amount="19.00")
     _seed_report(_test_session, platform_order_no="WS-UNMATCHED", amount="8.00", device_sn="SN-C-1")
+    _adopt(_test_session)
 
     res = preview_check(
         _test_session,
@@ -200,6 +222,7 @@ def test_confirm_check_persist(_test_session):
 
     _seed_report(_test_session, platform_order_no="WS-ORD-1", amount="19.00")
     _seed_refund_a(_test_session, platform_order_no="WS-ORD-1")
+    _adopt(_test_session)
 
     user = _fake_user()
     check = confirm_check(
@@ -227,6 +250,7 @@ def test_confirm_check_not_affect_statistics(_test_session):
 
     _seed_report(_test_session, platform_order_no="WS-ORD-1", amount="19.00")
     _seed_refund_a(_test_session, platform_order_no="WS-ORD-1")
+    _adopt(_test_session)
 
     user = _fake_user()
     before = preview_check(
@@ -252,6 +276,7 @@ def test_set_conclusion(_test_session):
 
     _seed_report(_test_session, platform_order_no="WS-ORD-1", amount="19.00")
     _seed_refund_a(_test_session, platform_order_no="WS-ORD-1")
+    _adopt(_test_session)
     user = _fake_user()
     check = confirm_check(
         _test_session, user,
@@ -375,6 +400,7 @@ def test_api_check_run_requires_login(_api_env, _test_session):
     # get_current_user 抛错场景由 app 处理; 直接以 admin 登录跑正常路径
     state["user"] = _make("admin")
     _seed_report(_test_session, platform_order_no="WS-API-1", amount="19.00")
+    _adopt(_test_session)
     r = client.get("/api/v1/reconcile/check/run",
                    params={"start": "2026-09-01T00:00:00", "end": "2026-09-05T23:59:59"})
     assert r.status_code == 200, r.text
@@ -386,6 +412,7 @@ def test_api_check_confirm_requires_admin(_api_env, _test_session):
     """check/confirm 仅 Admin/Supervisor(agent 403)"""
     client, state, _make = _api_env
     _seed_report(_test_session, platform_order_no="WS-API-2", amount="19.00")
+    _adopt(_test_session)
     state["user"] = _make("agent")
     r = client.post("/api/v1/reconcile/check/confirm",
                     params={"start": "2026-09-01T00:00:00", "end": "2026-09-05T23:59:59"})

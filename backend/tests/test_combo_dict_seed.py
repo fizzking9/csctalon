@@ -124,6 +124,10 @@ class TestUnificationE2E:
                 refund_method="线上", status="已退款", quality_status="normal",
             ))
         db.commit()
+        # #332 T8: 套餐归一取数 std_refund_online —— 先跑采纳作业
+        from app.services.governance.refund_adoption import run_refund_adoption
+
+        run_refund_adoption(db, routes="A", commit=False)
         result = category_by_package(db, limit=500)
         # 两个变体应合并为同一标准名一行, 金额合计 200
         hits = [r for r in result if r["name"]

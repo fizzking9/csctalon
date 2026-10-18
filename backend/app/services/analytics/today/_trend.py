@@ -21,13 +21,13 @@ from app.models.ods_clean import ExternalComplaintClean
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.person import Person, PersonAlias
-from app.models.ods_clean import RefundClean
-from app.models.ods_clean import RefundRecordReportClean
+from app.models.refund_standard import StdRefundOnline  # #332: 退款统计切标准表
+from app.models.refund_standard import StdRefundRecord  # #332: E 路切标准表
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask
 from app.models.ticket import ServiceTicket
 from app.models.todo import TodoItem
-from app.models.ods_clean import WalletWithdrawalClean
+from app.models.refund_standard import StdWalletFlow  # #332: B 路切标准表
 from app.services.complaint_scope import (
     ALL_BUCKETS,
     BUCKET_CARD,
@@ -240,11 +240,11 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
 
     # --- 路线A: 退费单线上直退(按粒度 笔数+金额) ---
     rf_rows = db.execute(
-        select(_time_trunc(RefundClean.created_at_raw),
+        select(_time_trunc(StdRefundOnline.created_at_raw),
                func.count().label("cnt"),
-               func.coalesce(func.sum(RefundClean.refund_amount), 0).label("amt"))
-        .where(RefundClean.created_at_raw.isnot(None),
-               RefundClean.created_at_raw >= ts, RefundClean.created_at_raw <= te,
+               func.coalesce(func.sum(StdRefundOnline.refund_amount), 0).label("amt"))
+        .where(StdRefundOnline.created_at_raw.isnot(None),
+               StdRefundOnline.created_at_raw >= ts, StdRefundOnline.created_at_raw <= te,
                *_route_a_online_refund_filter())
         .group_by("trunc_t")
     ).all()
@@ -262,11 +262,11 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
 
     # --- 路线B: 钱包提现(按粒度 笔数+金额) ---
     wb_rows = db.execute(
-        select(_time_trunc(WalletWithdrawalClean.op_time),
+        select(_time_trunc(StdWalletFlow.op_time),
                func.count().label("cnt"),
-               func.coalesce(func.sum(WalletWithdrawalClean.op_amount), 0).label("amt"))
-        .where(WalletWithdrawalClean.op_time.isnot(None),
-               WalletWithdrawalClean.op_time >= ts, WalletWithdrawalClean.op_time <= te,
+               func.coalesce(func.sum(StdWalletFlow.op_amount), 0).label("amt"))
+        .where(StdWalletFlow.op_time.isnot(None),
+               StdWalletFlow.op_time >= ts, StdWalletFlow.op_time <= te,
                *_route_b_withdraw_filter())
         .group_by("trunc_t")
     ).all()
@@ -290,11 +290,11 @@ def today_hourly_trend(db: Session, date: str | None = None, start: str | None =
 
     # --- 路线E: 商户号实际现金流(按粒度 笔数+金额, 数据源=refund_record_reports) ---
     e_rows = db.execute(
-        select(_time_trunc(RefundRecordReportClean.refund_time),
+        select(_time_trunc(StdRefundRecord.refund_time),
                func.count().label("cnt"),
-               func.coalesce(func.sum(RefundRecordReportClean.refund_amount), 0).label("amt"))
-        .where(RefundRecordReportClean.refund_time.isnot(None),
-               RefundRecordReportClean.refund_time >= ts, RefundRecordReportClean.refund_time <= te,
+               func.coalesce(func.sum(StdRefundRecord.refund_amount), 0).label("amt"))
+        .where(StdRefundRecord.refund_time.isnot(None),
+               StdRefundRecord.refund_time >= ts, StdRefundRecord.refund_time <= te,
                *_route_e_cashflow_filter())
         .group_by("trunc_t")
     ).all()

@@ -85,8 +85,10 @@ _BMS_COMPLAINT_CATEGORY = "投诉"
 # 采集质量标记 → 统计排除（#60）
 # ═══════════════════════════════════════════════════════════════════
 # 沿用**项目既有范式**(退款侧 A-20260909-001 §2.7):
-#   `analytics._EXCL_QSTATUS_SQL` = "COALESCE(quality_status,'') NOT IN
-#                                    ('dup_residual','ignored')"
+#   ⚠️ #332 (2026-10-18) 起退款侧原 `analytics._EXCL_QSTATUS_SQL`
+#   ("COALESCE(quality_status,'') NOT IN ('dup_residual','ignored')") 已删除 ——
+#   退款五路改读 std 标准表, 质量排除在采纳作业表层固化; 投诉侧仍走本文件的
+#   COMPLAINT_EXCLUDE_QSTATUS 查询侧排除(作用于 external/card 两表, 与退款表无关)。
 #   设计要点: ① 统一入口, 防口径漂移; ② 列不存在时返回 None, 不让报表报错。
 #
 # #59 新增 `dup_sn_backfill`: 源文档「先建行、后补 SN」造成的**残影行**

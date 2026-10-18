@@ -1,20 +1,23 @@
 # -*- coding: utf-8 -*-
-"""quality_status 排除口径单点化 + 多路径等价性测试（工单 #201 / S-P0-1）。
+"""质量标记治理口径测试（工单 #201 / S-P0-1 → #332 T8 语义升版）。
 
-背景: 审查发现「经营统计排除 dup_residual/ignored」存在多份并行实现:
-  - ORM 真身: analytics/_core.py 的 A/B 路过滤 + analytics/cash.py 的 C/D 路聚合
-  - 裸 SQL:  analytics/refund.py 决策概览 routes_daily / _window_totals / 导出汇总
-  - 宽表:    cash_flow_wide_builder.py（A/B/C/D Python 侧跳过）
-             wide_table_builder.py（refund_wide 行范围，修复前完全不排除）
-  - 复核:    reconcile_check.py D 路
-修复后全部引用 quality_check.STATS_EXCLUDED_QUALITY_STATUSES 及其 SQL/ORM 助手。
+#201 原始背景: 「经营统计排除 dup_residual/ignored」曾有 8 处并行实现,
+统一收敛为 quality_check 助手 + 查询侧散落 WHERE。
+
+#332 T8 升版说明: 查询侧散落 WHERE 已整体删除, 采纳口径在 std 表层固化
+(ADOPT_RULE_VER=r202601016_v1, 行为锁 test_refund_adoption_rules.py):
+  - A/B/C 路采纳规则**不含质量维度** → dup_residual/ignored 行仍进 std
+    (质量行治理入口 = 质量页处置 + 人工覆盖采纳 state + 重跑采纳作业);
+  - D 路保留部分质量排除 (dup_residual/sn_unresolvable → excluded;
+    'ignored' 不在 D 路排除清单, 由人工覆盖采纳 state 处理);
+  - 宽表行范围排除与处置钩子维持原状(本文件 §3/§4 继续锁定)。
 
 本测试锁定:
-1. 排除集合只有一个字面量来源（各模块别名必须 is 同一对象）
-2. ORM 聚合器(_cash_routes_total) 与裸 SQL 决策概览(routes_daily/summary) 四路
-   count/amount 完全一致，且都不含 dup_residual/ignored 行
+1. 排除集合只有一个字面量来源(宽表/处置服务仍引用 quality_check 真身)
+2. ORM 聚合器(_cash_routes_total) 与裸 SQL 决策概览(routes_daily/summary)
+   同源 std 表 → 四路 count/amount 完全一致; D 路采纳排除质量行
 3. refund_wide 行范围/批次组装/残留子查询都不含被打标退费单
-4. 质量页 ignore/restore 后触发宽表重建钩子（物理表名映射正确）
+4. 质量页 ignore/restore 后触发宽表重建钩子(物理表名映射正确)
 """
 
 from __future__ import annotations
@@ -137,19 +140,31 @@ def _seed_four_routes(db):
                      registrant="测试员", quality_status="ignored"),
     ])
     db.flush()
+    # #332 T8: 四路取数 std 表 —— dup_residual/ignored 排除语义由采纳作业在表层固化
+    #   (原查询侧散落 WHERE 已删除), 等价性断言改为「std 表内不含治理行」
+    from app.services.governance.refund_adoption import run_refund_adoption
+
+    run_refund_adoption(db, commit=False)
 
 
 def test_orm_aggregator_excludes_marked_rows(db):
-    """ORM 真身路径: 四路只含正常行。"""
+    """#332 T8: ORM 真身路径取数 std 表 —— 断言按 r20261016_v1 采纳口径。
+
+    A/B/C 路采纳规则不含质量维度 → 质量标记行进 std(9999 特征值被计入,
+    这是已确认的口径而非缺陷; 治理入口=人工覆盖采纳 state);
+    D 路采纳排除仅 dup_residual/sn_unresolvable('ignored' 行进 std,
+    由人工覆盖 state 排除) → 2 正常 + 1 ignored = 3 笔。
+    """
     _seed_four_routes(db)
     cur_s, cur_e = _resolve_windows(None, _DAY, _DAY)[:2]
     tot = _cash_routes_total(db, start=cur_s, end=cur_e)
-    assert (tot["route_a"]["count"], tot["route_a"]["amount"]) == (2, 300.0)
-    assert (tot["route_b"]["count"], tot["route_b"]["amount"]) == (2, 110.0)
-    assert (tot["route_c"]["count"], tot["route_c"]["amount"]) == (2, 150.0)
-    assert (tot["route_d"]["count"], tot["route_d"]["amount"]) == (2, 200.0)
-    # 经营四路总量 = 8 笔 / ¥760（任一治理行漏排都会冲到 9000+）
-    assert (tot["operational"]["count"], tot["operational"]["amount"]) == (8, 760.0)
+    assert (tot["route_a"]["count"], tot["route_a"]["amount"]) == (4, 20298.0)
+    assert (tot["route_b"]["count"], tot["route_b"]["amount"]) == (4, 20108.0)
+    assert (tot["route_c"]["count"], tot["route_c"]["amount"]) == (4, 20148.0)
+    # D 路: dup_residual 在采纳层排除, ignored 不在排除清单(r20261016_v1) → 3 笔
+    assert (tot["route_d"]["count"], tot["route_d"]["amount"]) == (3, 10199.0)
+    # 经营四路总量 = 15 笔 / ¥70753
+    assert (tot["operational"]["count"], tot["operational"]["amount"]) == (15, 70753.0)
 
 
 def test_raw_sql_overview_matches_orm_aggregator(db):
@@ -173,13 +188,13 @@ def test_raw_sql_overview_matches_orm_aggregator(db):
         assert raw_counts[k] == v["count"], f"{k} 笔数: 裸SQL={raw_counts[k]} ORM={v['count']}"
         assert raw_amts[k] == v["amount"], f"{k} 金额: 裸SQL={raw_amts[k]} ORM={v['amount']}"
 
-    # summary(_window_totals 第三套裸 SQL) 同样对齐
+    # summary(_window_totals 第三套裸 SQL) 同样对齐(#332 T8 后与 ORM 同源 std)
     s = ov["summary"]
-    assert s["online_count"] == 2
-    assert s["online_amount"] == 300.0
-    assert s["withdraw_amount"] == 110.0
-    assert s["cash_out_count"] == 8
-    assert s["cash_out_total"] == 760.0
+    assert s["online_count"] == 4
+    assert s["online_amount"] == 20298.0
+    assert s["withdraw_amount"] == 20108.0
+    assert s["cash_out_count"] == 15
+    assert s["cash_out_total"] == 70753.0
 
 
 # ─────────────────── 3. refund_wide 行范围排除 ───────────────────

@@ -57,7 +57,13 @@ def _bucket(split: list[dict], name: str) -> dict:
 
 
 def _overview(db):
-    """宽窗口调用: 覆盖全部测试数据(激活 400 天前 ~ 今天)。"""
+    """宽窗口调用: 覆盖全部测试数据(激活 400 天前 ~ 今天)。
+
+    #332 T8: decision_overview 取数 std 表 —— 先跑采纳作业把 ods 夹具固化进 std。
+    """
+    from app.services.governance.refund_adoption import run_refund_adoption
+
+    run_refund_adoption(db, commit=False)
     today = datetime.now(UTC).date()
     return refund_decision_overview(
         db, start=str(today - timedelta(days=1)), end=str(today), grain="day",

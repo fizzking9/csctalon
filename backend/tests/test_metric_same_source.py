@@ -148,6 +148,11 @@ def metrics_seeded(db):
         remark="提现申请-冻结，提现单号WD-METRIC-FROZEN",
     ))
     db.flush()
+    # #332 T8: refund_count 与看板同源取 std 表 —— A/B 采纳语义在采纳作业层固化
+    #   (冻结提现 9999 由采纳规则排除, 不进 std_wallet_flow)
+    from app.services.governance.refund_adoption import run_refund_adoption
+
+    run_refund_adoption(db, routes=("A", "B"), commit=False)
 
     # ── ticket_backlog 需真有投诉积压（否则值为 0 → 量级断言必然失败）──
     #   告警线 450/预警线 420 → 造 435 条未完成投诉, 落在 warning 档。

@@ -19,13 +19,12 @@ from sqlalchemy import and_, case, exists, func, literal, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.models.group import PersonGroupMembership
-from app.models.ods_clean import (
-    CsRecordClean,
-    RefundClean,
-    RefundRecordReportClean,
-    WalletWithdrawalClean,
-)
+from app.models.ods_clean import CsRecordClean
 from app.models.person import Person, PersonAlias
+
+# #332: 退款五路统计切换标准表(std_*) + ods 原始 Refund(全状态诊断专用, std 只含已退款采纳行)
+from app.models.refund import Refund
+from app.models.refund_standard import StdRefundRecord, StdWalletFlow
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.staff_assignment import StaffAssignment
 from app.models.ticket import ServiceTicket
@@ -34,9 +33,6 @@ from app.services.complaint_scope import (
     complaint_bucket_case,
     is_complaint_ticket_cond,
 )
-
-# #201 S-P0-1：经营统计质量排除口径唯一来源（dup_residual/ignored 全仓只准这一份定义）
-from app.services.quality_check import stats_quality_include
 
 # ═══════════════════════════════════════════════════════════════════
 # 2026-08-14: 投诉登记节点下的外部投诉/卡商群投诉两个文件曾"暂不纳入"
@@ -308,81 +304,46 @@ def _date_range(start: datetime | None, end: datetime | None) -> tuple[datetime,
 
 # ---------- 路线A 退费单线上直退 ----------
 # ⚠️ 2026-09-08 (#41/A-20260908-004): A 路经营口径收紧为「线上 + 已退款」。
-#   原口径仅 refund_method='线上', 会把"无需退款(266)/驳回(15)/空状态(785)"等
-#   非成功退款算进经营出款(虚高 ¥11.8万)。用户确认: A 路只算真正退出去的钱,
-#   与 B/C/D"成功才计"语义对齐, 保证对账(A+B+C+D vs E)可信。
-#   全状态分析(如状态分布)用 _route_a_online_any_status_filter()(仅 method)。
+# ⚠️ #332 (2026-10-18): A 路取数切换为标准表 std_refund_online —— 采纳作业
+#   (refund_adoption, r20261016_v1) 已在表层固化「线上(+空方式捞回) + 已退款 +
+#   质量排除」，统计入口不再散落 WHERE。全状态分析(状态分布 / 今日退款挽回
+#   工作量)用 _route_a_online_any_status_filter() 读 ods 原始层 Refund
+#   (std 表只含已退款采纳行，不含申请中/驳回/转入提现账户)。
+#   口径权威: docs/standards/退款五路数据标准与采纳规则.md
 def _route_a_online_refund_filter():
-    """【路线A经营口径】线上直退且已退款: refund_method='线上' AND status='已退款'。
+    """【路线A经营口径】std_refund_online 已在表层固化采纳口径，恒返回空元组。
 
-    用于经营出款/对账/趋势/排名等(钱真正退出去的场景)。
-    #201 S-P0-1：同时排除 dup_residual/ignored（refunds 在 QUALITY_TABLES 内可被打标，
-    不排除则治理后的线上退单行仍虚增经营数字；与 cash_flow_wide A 路口径一致）。
+    #332 切换后行集由采纳作业固化(status='已退款' AND (refund_method='线上' OR
+    refund_method IS NULL)，含空方式捞回 530 行)。调用方保留调用点以维持
+    「走统一口径入口」的形态；原 method/status/quality 三段 WHERE 删除。
     """
-    return (
-        RefundClean.refund_method == "线上",
-        RefundClean.status == "已退款",
-        stats_quality_include(RefundClean.quality_status),
-    )
+    return ()
 
 def _route_a_online_any_status_filter():
-    """【路线A全状态口径】仅 refund_method='线上'(不看 status)。
+    """【路线A全状态口径】仅 refund_method='线上'(不看 status)，读 ods 原始层。
 
-    用于需要看全状态的分析(如 operation_status_dist 状态分布),
-    不用于经营出款统计。
+    用于需要看全状态的分析(如 operation_status_dist 状态分布 / 今日退款挽回
+    工作量)，不用于经营出款统计。std_refund_online 只含已退款采纳行，
+    全状态诊断必须读 ods.refunds 原始表(clean 薄视图同投影，#332 起直读原表)。
     """
-    return (RefundClean.refund_method == "线上",)
+    return (Refund.refund_method == "线上",)
 
 
 # ---------- 路线B 钱包用户取现 ----------
-# ⚠️ 2026-08-28 口径修复: BMS 提现操作记录中, 备注含"提现申请-冻结,提现单号WD..."
-#    的记录代表"提现申请被冻结/拒绝", 并非成功退款(钱并未实际出账给用户)。
-#    但它们 op_type 仍是 '用户提现', 若全量计入会导致"成功退款"虚高。
-#    同时同一笔提现会出现"冻结记录+成功记录"成对(同一 WD 提现单号):
-#       - 冻结记录: 备注='提现申请-冻结，提现单号WD...', op_time=申请时刻, SN 多为空
-#       - 成功记录: 备注='用户提现-退费单RF...-提现单号WD...', op_time=实际出款时刻
-#    历史也出现过失败备注: '用户提现-退费单RF... 微信退款失败：超期订单不允许退款'
-#    统一口径(用户确认): 所有失败/冻结备注的提现记录均不计入成功退款统计。
-#
-# 失败/冻结备注关键词(统一识别所有失败形态, 含历史数据):
-_WITHDRAW_FAIL_REMARK_KEYWORDS = ("冻结", "退款失败", "提现失败", "超期订单不允许退款", "驳回", "拒绝", "未到账")
-
-def _is_withdraw_fail_remark(remark: str | None) -> bool:
-    """备注是否为"失败/冻结"类(冻结/退款失败/超期订单不允许退款等)。
-
-    命中任一关键词即视为失败提现, 不计入成功退款统计。
-    """
-    if not remark:
-        return False
-    return any(k in remark for k in _WITHDRAW_FAIL_REMARK_KEYWORDS)
-
-def _withdraw_fail_remark_sql_cond() -> str:
-    """原生 SQL 的失败备注排除条件片段 (用于内联 SQL, 表别名必须为 w)。
-
-    形如: AND COALESCE(w.remark,'') NOT LIKE '%冻结%' AND ... (全部关键词)
-    """
-    conds = " AND ".join(
-        f"COALESCE(w.remark, '') NOT LIKE '%{k}%'" for k in _WITHDRAW_FAIL_REMARK_KEYWORDS
-    )
-    return conds
-
-
-
-# ---------- 路线B 钱包用户取现 ----------
+# 历史口径(2026-08-28): BMS 提现记录中备注含"提现申请-冻结/退款失败"等的行
+#   并非成功退款, 同一笔提现会出现"冻结记录+成功记录"成对; 统一口径(用户确认):
+#   所有失败/冻结备注的提现记录均不计入成功退款统计。
+# ⚠️ #332 (2026-10-18): B 路取数切换为 std_wallet_flow —— 采纳作业已固化
+#   op_type='用户提现' 且备注非失败/冻结(失败/冻结/空 op_type 不进表)。
+#   原 _WITHDRAW_FAIL_REMARK_KEYWORDS 关键词机制随之删除(quality_check 与
+#   cash_flow_wide_builder 各有独立副本, 不受影响)。
 def _route_b_withdraw_filter():
-    """【路线B】钱包-用户取现: op_type='用户提现' 且 备注非失败/冻结 (成功提现口径)。
+    """【路线B】钱包-用户取现: op_type='用户提现' (成功提现已在表层固化)。
 
-    2026-08-28 修复: 排除"提现申请-冻结"等失败/冻结备注的提现记录,
-    避免被冻结/拒绝的提现被误计入成功退款统计。
-    备注为 NULL 视为非失败(COALESCE 保护), 正常计入。
+    std_wallet_flow 仅收成功提现(outflow): 提现申请-冻结/退款失败等备注行
+    与空 op_type 行不进表(采纳规则 r20261016_v1), 备注排除不再散落于查询。
     """
-    conds = [WalletWithdrawalClean.op_type == "用户提现"]
-    for _k in _WITHDRAW_FAIL_REMARK_KEYWORDS:
-        conds.append(func.coalesce(WalletWithdrawalClean.remark, "").notlike(f"%{_k}%"))
-    # #201 S-P0-1：排除 dup_residual/ignored（wallet 在 QUALITY_TABLES 内可被打标，
-    # 与 cash_flow_wide B 路口径一致）
-    conds.append(stats_quality_include(WalletWithdrawalClean.quality_status))
-    return tuple(conds)
+    return (StdWalletFlow.op_type == "用户提现",)
 
 
 
@@ -395,8 +356,12 @@ def _route_b_withdraw_filter():
 _E_ROUTE_SUCCESS_STATUSES = ("退款成功", "成功", "SUCCESS")
 
 def _route_e_cashflow_filter():
-    """【实际现金流 E】refund_record_reports: refund_status 为退款成功 全部"""
-    return (RefundRecordReportClean.refund_status.in_(_E_ROUTE_SUCCESS_STATUSES),)
+    """【实际现金流 E】std_refund_record: refund_status 为退款成功 全部(防御性保留)。
+
+    #332: E 路为标准数据源, 采纳作业按原始数据全量进表(不做状态过滤),
+    此处保留 refund_status 过滤作为防御, 防未来采纳规则放宽导致口径漂移。
+    """
+    return (StdRefundRecord.refund_status.in_(_E_ROUTE_SUCCESS_STATUSES),)
 
 
 
@@ -832,7 +797,8 @@ def _annotate_chain_litigation(db: Session, rows):
     for i in range(0, len(ab_nos), 500):
         chunk = ab_nos[i:i + 500]
         for no, ar, rm in db.execute(
-            select(RefundClean.refund_no, RefundClean.audit_remark, RefundClean.remark).where(RefundClean.refund_no.in_(chunk))
+            # 读 ods 原始层: 链路行含转入提现账户(被 std A 路排除), 反查备注不能读 std
+            select(Refund.refund_no, Refund.audit_remark, Refund.remark).where(Refund.refund_no.in_(chunk))
         ):
             remark_map[str(no)] = ((ar or "") + (rm or ""))
     for r in rows:

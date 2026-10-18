@@ -79,8 +79,11 @@ def _mk_flow(db, sn: str, month: str = "2026-10") -> DeviceFlowUsage:
 
 
 def _mk_refund(db, sn: str, days_ago: int = 0) -> Refund:
+    # #332 T8: 退款指标取数 std_refund_online, seed 须满足 A 路采纳规则
+    # (已退款 且 方式=线上/NULL), 否则采纳作业盖 A_EX_STATUS_NULL 不进 std。
     r = Refund(
         refund_no=_uniq("RF"), device_sn=sn,
+        refund_method="线上", status="已退款",
         created_at_raw=datetime.now(UTC) - timedelta(days=days_ago),
     )
     db.add(r)
@@ -115,6 +118,10 @@ def test_ops_overview_device_type(db):
     _mk_refund(db, sn1)
     _mk_complaint(db, sn1)
     db.flush()
+    # #332 T8: 退款指标取数 std_refund_online —— 先跑采纳作业
+    from app.services.governance.refund_adoption import run_refund_adoption
+
+    run_refund_adoption(db, routes="A", commit=False)
 
     res = category_ops_overview(db, dim="device_type", limit=10)
     assert res["dim"] == "device_type"
@@ -201,6 +208,10 @@ def test_ops_overview_combo_no_amplification(db):
     _mk_refund(db, sn)
     _mk_complaint(db, sn)
     db.flush()
+    # #332 T8: 退款指标取数 std_refund_online —— 先跑采纳作业
+    from app.services.governance.refund_adoption import run_refund_adoption
+
+    run_refund_adoption(db, routes="A", commit=False)
 
     res = category_ops_overview(db, dim="combo", limit=50)
     items = {r["key"]: r for r in res["items"]}

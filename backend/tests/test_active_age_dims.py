@@ -38,6 +38,7 @@ from app.services.analytics import (
     refund_decision_overview,
 )
 from app.services.analytics.refund_chain import refund_withdrawal_detail
+from app.services.governance.refund_adoption import run_refund_adoption
 
 
 def _uniq(prefix: str) -> str:
@@ -188,6 +189,8 @@ def test_decision_overview_device_dims(db):
         created_at_raw=_now_naive() - timedelta(hours=1),
     ))
     db.flush()
+    # #332 T8: decision_overview 取数 std 五表 —— 先跑采纳作业把 ods 夹具固化进 std
+    run_refund_adoption(db, commit=False)
 
     ov = refund_decision_overview(
         db, start=str(date.today() - timedelta(days=1)), end=str(date.today()), grain="day",
@@ -240,6 +243,8 @@ def test_decision_overview_device_dims_four_routes(db):
     db.add(ManualRefund(device_sn=sn, is_refunded="是", refund_amount=Decimal("40.00"),
                         register_time=now))
     db.flush()
+    # #332 T8: 四路取数 std 表 —— 排除回归(线下已退款/线上申请中)现由采纳作业层承担
+    run_refund_adoption(db, commit=False)
 
     ov = refund_decision_overview(
         db, start=str(date.today() - timedelta(days=1)), end=str(date.today()), grain="day",
@@ -371,6 +376,8 @@ def test_combo_latest_nonqc_order_not_buried(db):
     _mk_order(db, sn, 5, combo_name="工厂质检专用套餐*30天", create_days_ago=1)
     _mk_b_refund(db, sn)
     db.flush()
+    # #332 T8: 取数 std 表, 先跑采纳作业
+    run_refund_adoption(db, commit=False)
 
     ov = refund_decision_overview(
         db, start=str(date.today() - timedelta(days=1)), end=str(date.today()), grain="day",
@@ -397,6 +404,8 @@ def test_combo_device_combos_fallback(db):
                        created_at_raw=datetime.now(UTC)))
     _mk_b_refund(db, sn)
     db.flush()
+    # #332 T8: 取数 std 表, 先跑采纳作业
+    run_refund_adoption(db, commit=False)
 
     ov = refund_decision_overview(
         db, start=str(date.today() - timedelta(days=1)), end=str(date.today()), grain="day",

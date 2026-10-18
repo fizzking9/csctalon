@@ -8,11 +8,13 @@ from typing import Any
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.orm import Session
 
-from app.models.ods_clean import (
-    ManualRefundClean,
-    RefundClean,
-    RefundRecordReportClean,
-    WalletWithdrawalClean,
+# #332: 退款五路统计切换标准表(std_*)——表层已固化采纳口径, 散落 WHERE 删除。
+# 全状态例外: operation_status_dist 读 ods 原始 Refund(std 只含已退款采纳行)。
+from app.models.refund import Refund as RefundRaw
+from app.models.refund_standard import (
+    StdRefundOnline,
+    StdRefundRecord,
+    StdWalletFlow,
 )
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
@@ -25,40 +27,33 @@ from app.services.analytics._core import (
     _route_e_cashflow_filter,
 )
 
-# #201 S-P0-1：质量排除口径唯一来源在 quality_check，本模块只做引用/薄封装
-from app.services.quality_check import (
-    STATS_EXCLUDED_QUALITY_STATUSES,
-    stats_quality_excluded_sql,
-    stats_quality_include,
-)
-
 
 # ---------- 看板1:运营分析 ----------
 def operation_trend(db: Session, start: datetime | None = None, end: datetime | None = None) -> list[dict]:
-    """退款趋势(按日):退款金额、笔数 【统一口径: 路线A 退费单-线上直退 refund_method='线上'】"""
+    """退款趋势(按日):退款金额、笔数 【统一口径: A 路线上直退, 取数 std_refund_online 采纳行(#332)】"""
     start, end = _date_range(start, end)
     rows = db.execute(
         select(
-            func.to_char(func.timezone("Asia/Shanghai", RefundClean.created_at_raw), "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(RefundClean.refund_amount), 0).label("amount"),
+            func.to_char(func.timezone("Asia/Shanghai", StdRefundOnline.created_at_raw), "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(StdRefundOnline.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
-        .where(RefundClean.created_at_raw.between(start, end), *_route_a_online_refund_filter())
+        .where(StdRefundOnline.created_at_raw.between(start, end), *_route_a_online_refund_filter())
         .group_by("date")
         .order_by("date")
     ).all()
     return [{"date": r.date, "value": float(r.amount or 0), "count": r.count} for r in rows]
 
 def operation_status_dist(db: Session) -> list[dict]:
-    """退费状态分布 【路线A: 线上退费单各状态占比(含申请中/无需退款/驳回, 全状态口径)】
+    """退费状态分布 【A 路: 线上退费单各状态占比(含申请中/无需退款/驳回, 全状态口径)】
 
-    注: 2026-09-08 起经营口径 A 路收紧为线上+已退款, 但本函数是"状态分布",
-    需展示线上退费单的全状态, 故用 _route_a_online_any_status_filter(仅 method)。
+    ⚠️ #332: 全状态诊断读 ods 原始层 Refund —— std_refund_online 只含已退款
+    采纳行, 看不到申请中/驳回等状态; 本函数不是经营出款统计。
     """
     rows = db.execute(
-        select(RefundClean.status, func.coalesce(func.sum(RefundClean.refund_amount), 0), func.count())
+        select(RefundRaw.status, func.coalesce(func.sum(RefundRaw.refund_amount), 0), func.count())
         .where(*_route_a_online_any_status_filter())
-        .group_by(RefundClean.status)
+        .group_by(RefundRaw.status)
     ).all()
     total = sum(r[2] for r in rows) or 1
     return [
@@ -67,21 +62,21 @@ def operation_status_dist(db: Session) -> list[dict]:
     ]
 
 def operation_reason_top(db: Session, limit: int = 10) -> list[dict]:
-    """退费原因 TOP 【统一口径: 路线A 退费单-线上直退】"""
+    """退费原因 TOP 【统一口径: A 路线上直退, 取数 std_refund_online 采纳行(#332)】"""
     rows = db.execute(
-        select(RefundClean.refund_reason, func.coalesce(func.sum(RefundClean.refund_amount), 0), func.count())
-        .where(RefundClean.refund_reason.isnot(None), *_route_a_online_refund_filter())
-        .group_by(RefundClean.refund_reason)
-        .order_by(func.sum(RefundClean.refund_amount).desc())
+        select(StdRefundOnline.refund_reason, func.coalesce(func.sum(StdRefundOnline.refund_amount), 0), func.count())
+        .where(StdRefundOnline.refund_reason.isnot(None), *_route_a_online_refund_filter())
+        .group_by(StdRefundOnline.refund_reason)
+        .order_by(func.sum(StdRefundOnline.refund_amount).desc())
         .limit(limit)
     ).all()
     return [{"name": r[0], "value": float(r[1] or 0), "count": r[2]} for r in rows]
 
 def operation_method_dist(db: Session) -> list[dict]:
-    """退款方式占比"""
+    """退款方式占比 【#332: 取数 std_refund_online, 已采纳退款的方式分布(线上/空方式捞回)】"""
     rows = db.execute(
-        select(RefundClean.refund_method, func.coalesce(func.sum(RefundClean.refund_amount), 0), func.count())
-        .group_by(RefundClean.refund_method)
+        select(StdRefundOnline.refund_method, func.coalesce(func.sum(StdRefundOnline.refund_amount), 0), func.count())
+        .group_by(StdRefundOnline.refund_method)
     ).all()
     return [{"name": r[0] or "(空)", "value": float(r[1] or 0), "count": r[2]} for r in rows]
 
@@ -92,14 +87,16 @@ def operation_method_dist(db: Session) -> list[dict]:
 #   金额: actual_amount(实际退款金额)  而非 refund_amount(申请退款金额)
 #   时间: audit_time(审核通过时间 ≈ 退款完成时间)  Excel 无独立 refund_time 列
 #   状态列: status  成功值: '已退款'(中文), 其他状态(申请中/已驳回/退款失败等)不计入经营出款
-# #322 方案A: 读路径切到 public 薄视图 shanmao_refund_clean(over 闪猫退款信源表), 口径逐字不变
-_C_SHANMAO_TABLE = "shanmao_refund_clean"
+# #322 方案A → #332: 读路径切到标准表 std_refund_shanmao(采纳作业固化 status='已退款'),
+# 原 status='已退款' WHERE 与质量排除片段删除。
+_C_SHANMAO_TABLE = "std_refund_shanmao"
 
 _C_SHANMAO_AMOUNT_COL = "actual_amount"
 
 _C_SHANMAO_TIME_COL = "audit_time"
 
-_C_SHANMAO_STATUS_COL = "status"
+# std 表层已固化已退款口径 → 状态条件置 None, SQL 模板条件式自动去子句
+_C_SHANMAO_STATUS_COL = None
 
 _C_SHANMAO_STATUS_OK = "已退款"
 
@@ -139,15 +136,12 @@ def _route_c_shanmao_agg(db: Session, start, end) -> tuple[int, float]:
     """
     if not _table_exists(db, _C_SHANMAO_TABLE):
         return 0, Decimal("0")
-    # #201 S-P0-1：C 路排除 dup_residual/ignored（shanmao_refunds 在 QUALITY_TABLES 内可打标，
-    # 原仅 D 路排除，造成治理标记后 C 路与 cash_flow_wide 口径不一致）
     sql_tpl = f"""
     SELECT COUNT(*) AS cnt,
            COALESCE(SUM({_C_SHANMAO_AMOUNT_COL})::numeric,0) AS amt
     FROM {_C_SHANMAO_TABLE}
     WHERE {_C_SHANMAO_TIME_COL} IS NOT NULL
       {"AND " + _C_SHANMAO_STATUS_COL + " = :st" if _C_SHANMAO_STATUS_COL else ""}
-      AND {_EXCL_QSTATUS_SQL}
       {"AND " + _C_SHANMAO_TIME_COL + " >= :s" if start else ""}
       {"AND " + _C_SHANMAO_TIME_COL + " <= :e" if end else ""}
     """
@@ -171,85 +165,33 @@ def _route_c_shanmao_agg(db: Session, start, end) -> tuple[int, float]:
 # 数据源: 商户号手机退款处理登记.xlsx (客服在商户号后台手动操作退款台账)
 #   金额: refund_amount(退款金额); 状态: is_refunded='是' 计入经营出款, '否' = 登记蓄水(水位)
 #   时间: op_time(实际退款操作时间) 为主, 缺失回退 register_time(登记日期)
-# #322 方案A: 读路径切到 public 薄视图 manual_refund_clean(over 手动退款信源表), 口径逐字不变
-_D_OTHER_TABLE = "manual_refund_clean"
+# #322 方案A → #332: 读路径切到标准表 std_refund_manual(采纳作业固化 is_refunded='是'
+#   且排除 dup_residual/sn_unresolvable), 原 is_refunded WHERE 与质量排除机制删除。
+_D_OTHER_TABLE = "std_refund_manual"
 
 _D_OTHER_AMOUNT_COL = "refund_amount"
 
 _D_OTHER_TIME_COL = "COALESCE(op_time, register_time)"
 
-_D_OTHER_STATUS_COL = "is_refunded"
+# std 表层已固化 is_refunded='是' → 状态条件置 None, SQL 模板条件式自动去子句
+_D_OTHER_STATUS_COL = None
 
 _D_OTHER_STATUS_OK = "是"
 
-# ⚠️ 2026-09-06 (#21 治理 P4): D 路统计必须排除已治理的重复行。
-#    清理脚本(cleanup_manual_duplicate_residual / mark_grey_placeholder_residual)
-#    把确凿重复标记为 quality_status='dup_residual' (不物理删除), 若不排除,
-#    这些重复仍被算进 D 路 → D 路重复统计依旧虚高(生产 9月窗口曾差 ¥4.8万)。
-# ⚠️ 2026-09-09 (A-20260909-001 §2.7): 扩展为排除集合, 新增 ignored(人工彻底忽略)
-#    由质量页 ignore 动作置位; dup_residual(重复治理)与 ignored(人工忽略)在统计上等价,
-#    统一从经营四路排除。
-# ⚠️ 2026-10-07 (#201 S-P0-1): 排除集合/SQL 片段的字面量定义全部收敛到
-#    quality_check.STATS_EXCLUDED_QUALITY_STATUSES，此处仅保留兼容性别名字段，
-#    禁止再出现第二份 ('dup_residual','ignored') 字面量。
-_D_OTHER_EXCLUDE_QSTATUS = STATS_EXCLUDED_QUALITY_STATUSES[0]  # 旧名单值兼容别名
-
-_D_OTHER_EXCLUDE_QSTATUS_SET = STATS_EXCLUDED_QUALITY_STATUSES
-
-# SQL 排除片段(表需含 quality_status 列): 常量集合内联安全；真身见 quality_check
-_EXCL_QSTATUS_SQL = stats_quality_excluded_sql("quality_status")
-
-def _manual_refunds_has_quality_col(db: Session) -> bool:
-    """manual_refunds 是否有 quality_status 列(旧环境/旧表无该列时跳过排除, 不报错)。"""
-    if not _table_exists(db, _D_OTHER_TABLE):
-        return False
-    try:
-        with db.begin_nested():
-            row = db.execute(text(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name=:t AND column_name='quality_status'"
-            ), {"t": _D_OTHER_TABLE}).first()
-        return bool(row)
-    except Exception:
-        return False
-
-def _quality_exclude_sql(db: Session) -> str | None:
-    """★统一入口(A-20260909-001 §2.3 / abc-a): 取"排除已治理行"的 SQL 条件片段。
-
-    返回 None 表示当前环境该表无 quality_status 列(旧库/旧表) → 调用方应跳过该条件,
-    不能因为"列不存在"就让整段报表查询报错。
-
-    为什么要收敛: 原先 8 处各自写 `_D_OTHER_EXCLUDE_QSTATUS if _manual_refunds_has_quality_col(db) else None`,
-    其中一处误用字符串常量本身当布尔标记(可读性差, 且新增排除状态时容易漏改某处)。
-    现在口径只有一个来源, 新增"排除状态"只需改 `quality_check.STATS_EXCLUDED_QUALITY_STATUSES`。
-    """
-    return _EXCL_QSTATUS_SQL if _manual_refunds_has_quality_col(db) else None
-
-def _quality_include_cond() -> list:
-    """★统一入口(ORM 侧): 与 `_quality_exclude_sql` 同口径的 SQLAlchemy 条件列表。
-
-    供 ORM 查询(而非 raw SQL)使用 —— 避免 ORM 路径与 raw SQL 路径的排除口径漂移
-    (同一份报表里两条路径混用时, 曾出现一条排除 dup_residual、另一条没排除)。
-    #201 S-P0-1：真身收敛到 quality_check.stats_quality_include。
-    """
-    return [stats_quality_include(ManualRefundClean.quality_status)]
-
 def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
-    """【路线D】手动退款(manual_refunds)独立表聚合 (表不存在则返回 0,0,不报错).
+    """【路线D】手动退款聚合 (取数 std_refund_manual 采纳行; 表不存在则返回 0,0,不报错).
 
     同 _route_c_shanmao_agg: 必须用 savepoint 隔离 PG 事务失败状态。
-    排除 quality_status='dup_residual'(已治理重复, 见常量注释)。
+    #332: 采纳作业已固化 is_refunded='是' + 质量排除, 查询不再散落 WHERE。
     """
     if not _table_exists(db, _D_OTHER_TABLE):
         return 0, Decimal("0")
-    exclude_q = _quality_exclude_sql(db)
     sql_tpl = f"""
     SELECT COUNT(*) AS cnt,
            COALESCE(SUM({_D_OTHER_AMOUNT_COL})::numeric,0) AS amt
     FROM {_D_OTHER_TABLE}
     WHERE {_D_OTHER_TIME_COL} IS NOT NULL
       {"AND " + _D_OTHER_STATUS_COL + " = :st" if _D_OTHER_STATUS_COL else ""}
-      {"AND " + _EXCL_QSTATUS_SQL if exclude_q else ""}
       {"AND " + _D_OTHER_TIME_COL + " >= :s" if start else ""}
       {"AND " + _D_OTHER_TIME_COL + " <= :e" if end else ""}
     """
@@ -270,11 +212,10 @@ def _route_d_other_agg(db: Session, start, end) -> tuple[int, float]:
 
 # ---------- 路线C/D 按时间粒度分组聚合 (小时/日) ----------
 def _route_c_shanmao_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tuple[dict[int, int], dict[int, float]]:
-    """【路线C】闪猫退款按时间分组聚合 (表不存在则返回空map)."""
+    """【路线C】闪猫退款按时间分组聚合 (取数 std_refund_shanmao; 表不存在则返回空map)."""
     if not _table_exists(db, _C_SHANMAO_TABLE):
         return {}, {}
     trunc_expr = "date_trunc(:grain, timezone('Asia/Shanghai', " + _C_SHANMAO_TIME_COL + "))" if grain == "hour" else "date_trunc(:grain, timezone('Asia/Shanghai', " + _C_SHANMAO_TIME_COL + "))"
-    # #201 S-P0-1：C 路趋势同步排除 dup_residual/ignored（与 _route_c_shanmao_agg 同口径）
     sql_tpl = f"""
     SELECT {trunc_expr} AS trunc_t,
            COUNT(*) AS cnt,
@@ -282,7 +223,6 @@ def _route_c_shanmao_trend(db: Session, start, end, grain: str, slot_idx_fn) -> 
     FROM {_C_SHANMAO_TABLE}
     WHERE {_C_SHANMAO_TIME_COL} IS NOT NULL
       {"AND " + _C_SHANMAO_STATUS_COL + " = :st" if _C_SHANMAO_STATUS_COL else ""}
-      AND {_EXCL_QSTATUS_SQL}
       {"AND " + _C_SHANMAO_TIME_COL + " >= :s" if start else ""}
       {"AND " + _C_SHANMAO_TIME_COL + " <= :e" if end else ""}
     GROUP BY trunc_t
@@ -313,10 +253,9 @@ def _route_c_shanmao_trend(db: Session, start, end, grain: str, slot_idx_fn) -> 
     return cnt_map, amt_map
 
 def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tuple[dict[int, int], dict[int, float]]:
-    """【路线D】手动退款按时间分组聚合 (表不存在则返回空map; 排除 dup_residual/ignored 行)."""
+    """【路线D】手动退款按时间分组聚合 (取数 std_refund_manual 采纳行; 表不存在则返回空map)."""
     if not _table_exists(db, _D_OTHER_TABLE):
         return {}, {}
-    exclude_q = _quality_exclude_sql(db)
     trunc_expr = "date_trunc(:grain, timezone('Asia/Shanghai', " + _D_OTHER_TIME_COL + "))"
     sql_tpl = f"""
     SELECT {trunc_expr} AS trunc_t,
@@ -325,7 +264,6 @@ def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tu
     FROM {_D_OTHER_TABLE}
     WHERE {_D_OTHER_TIME_COL} IS NOT NULL
       {"AND " + _D_OTHER_STATUS_COL + " = :st" if _D_OTHER_STATUS_COL else ""}
-      {"AND " + _EXCL_QSTATUS_SQL if exclude_q else ""}
       {"AND " + _D_OTHER_TIME_COL + " >= :s" if start else ""}
       {"AND " + _D_OTHER_TIME_COL + " <= :e" if end else ""}
     GROUP BY trunc_t
@@ -356,17 +294,17 @@ def _route_d_other_trend(db: Session, start, end, grain: str, slot_idx_fn) -> tu
     return cnt_map, amt_map
 
 def _cash_routes_total(db: Session,
-                       col_a: Any = RefundClean.created_at_raw,
-                       col_b: Any = WalletWithdrawalClean.op_time,
-                       col_e: Any = RefundRecordReportClean.refund_time,
+                       col_a: Any = StdRefundOnline.created_at_raw,
+                       col_b: Any = StdWalletFlow.op_time,
+                       col_e: Any = StdRefundRecord.refund_time,
                        start: _dt.datetime | None = None,
                        end: _dt.datetime | None = None) -> dict[str, Any]:
-    """【统一核算聚合器 v3】四路经营A/B/C/D + 实际现金流E + 对账偏差.
+    """【统一核算聚合器 v3】四路经营A/B/C/D + 实际现金流E + 对账偏差 (#332 取数 std 五表).
 
     Args:
-        col_a: 路线A 时间列 (默认 refunds.created_at_raw)
-        col_b: 路线B 时间列 (默认 wallet_withdrawals.op_time)
-        col_e: 实际现金流 E 时间列 (默认 refund_record_reports.refund_time)
+        col_a: 路线A 时间列 (默认 std_refund_online.created_at_raw)
+        col_b: 路线B 时间列 (默认 std_wallet_flow.op_time)
+        col_e: 实际现金流 E 时间列 (默认 std_refund_record.refund_time)
         start/end: 时间窗边界 (None = 全表)
     Returns:
         {route_a/b/c/d: {count, amount},
@@ -386,35 +324,35 @@ def _cash_routes_total(db: Session,
             conds.append(col <= e)
         return and_(*conds)
 
-    # ── A 退费单线上直退 ──
+    # ── A 退费单线上直退 (std_refund_online 采纳行) ──
     a_row = db.execute(select(
         func.count(),
-        func.coalesce(func.sum(RefundClean.refund_amount), 0),
+        func.coalesce(func.sum(StdRefundOnline.refund_amount), 0),
     ).where(
         *_route_a_online_refund_filter(),
         _between(col_a, start, end),
     )).first() or (0, 0)
     a_cnt, a_amt = int(a_row[0] or 0), D(a_row[1])
 
-    # ── B 钱包用户取现 ──
+    # ── B 钱包用户取现 (std_wallet_flow 成功提现) ──
     b_row = db.execute(select(
         func.count(),
-        func.coalesce(func.sum(WalletWithdrawalClean.op_amount), 0),
+        func.coalesce(func.sum(StdWalletFlow.op_amount), 0),
     ).where(
         *_route_b_withdraw_filter(),
         _between(col_b, start, end),
     )).first() or (0, 0)
     b_cnt, b_amt = int(b_row[0] or 0), D(b_row[1])
 
-    # ── C 闪猫退款独立表 (shanmao_refunds, status=已退款) ──
+    # ── C 闪猫退款独立表 (std_refund_shanmao, 采纳行) ──
     c_cnt, c_amt = _route_c_shanmao_agg(db, start, end)
-    # ── D 手动退款独立表 (manual_refunds, is_refunded='是') ──
+    # ── D 手动退款独立表 (std_refund_manual, 采纳行) ──
     d_cnt, d_amt = _route_d_other_agg(db, start, end)
 
-    # ── E 实际现金流: refund_record_reports 退款成功合计 (对账基准) ──
+    # ── E 实际现金流: std_refund_record 退款成功合计 (对账基准) ──
     e_row = db.execute(select(
         func.count(),
-        func.coalesce(func.sum(RefundRecordReportClean.refund_amount), 0),
+        func.coalesce(func.sum(StdRefundRecord.refund_amount), 0),
     ).where(
         *_route_e_cashflow_filter(),
         _between(col_e, start, end),
@@ -468,22 +406,22 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
     # 日分桶统一按北京日 (AT TIME ZONE 'Asia/Shanghai'), 与 C/D/E 路及决策概览口径一致 (2026-09-05 修正 UTC 截日 bug)
     direct_rows = db.execute(
         select(
-            func.to_char(func.timezone("Asia/Shanghai", RefundClean.created_at_raw), "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(RefundClean.refund_amount), 0).label("amount"),
+            func.to_char(func.timezone("Asia/Shanghai", StdRefundOnline.created_at_raw), "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(StdRefundOnline.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
-        .where(*_route_a_online_refund_filter(), RefundClean.created_at_raw.between(s, e))
+        .where(*_route_a_online_refund_filter(), StdRefundOnline.created_at_raw.between(s, e))
         .group_by("date")
     ).all()
     direct_map = {r.date: {"amount": D(r.amount), "count": r.count} for r in direct_rows}
-    # ── B 用户提现按日 (路线B wallet) ──
+    # ── B 用户提现按日 (路线B std_wallet_flow 成功提现) ──
     withdraw_rows = db.execute(
         select(
-            func.to_char(func.timezone("Asia/Shanghai", WalletWithdrawalClean.op_time), "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(WalletWithdrawalClean.op_amount), 0).label("amount"),
+            func.to_char(func.timezone("Asia/Shanghai", StdWalletFlow.op_time), "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(StdWalletFlow.op_amount), 0).label("amount"),
             func.count().label("count"),
         )
-        .where(WalletWithdrawalClean.op_time.between(s, e), *_route_b_withdraw_filter())
+        .where(StdWalletFlow.op_time.between(s, e), *_route_b_withdraw_filter())
         .group_by("date")
     ).all()
     withdraw_map = {r.date: {"amount": D(r.amount), "count": r.count} for r in withdraw_rows}
@@ -508,10 +446,9 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
             shanmao_map = {r[0]: {"amount": D(r[2]), "count": int(r[1] or 0)} for r in sm_rows}
         except Exception:
             pass   # 表未建 → 空 (savepoint 已隔离 PG 事务失败状态)
-    # ── D 手动退款按日 (manual_refunds, is_refunded='是'; 排除 dup_residual/ignored) ──
+    # ── D 手动退款按日 (std_refund_manual 采纳行) ──
     other_map: dict[str, dict] = {}
     if _table_exists(db, _D_OTHER_TABLE):
-        _excl_q = _quality_exclude_sql(db)
         try:
             with db.begin_nested():
                 ot_rows = db.execute(text(f"""
@@ -521,7 +458,6 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
                 FROM {_D_OTHER_TABLE}
                 WHERE {_D_OTHER_TIME_COL} IS NOT NULL
                   {'AND ' + _D_OTHER_STATUS_COL + ' = :st' if _D_OTHER_STATUS_COL else ''}
-                  {"AND " + _EXCL_QSTATUS_SQL if _excl_q else ''}
                   AND {_D_OTHER_TIME_COL} >= :s AND {_D_OTHER_TIME_COL} <= :e
                 GROUP BY 1
                 """), {
@@ -531,15 +467,15 @@ def cash_out_trend(db: Session, start: datetime | None = None, end: datetime | N
             other_map = {r[0]: {"amount": D(r[2]), "count": int(r[1] or 0)} for r in ot_rows}
         except Exception:
             pass
-    # ── E 实际现金流按日 (refund_record_reports 退款成功合计, 对账基准) ──
+    # ── E 实际现金流按日 (std_refund_record 退款成功合计, 对账基准) ──
     # 日分桶统一按北京日 (与决策概览 _day AT TIME ZONE 口径一致)
     actual_rows = db.execute(
         select(
-            func.to_char(func.timezone("Asia/Shanghai", RefundRecordReportClean.refund_time), "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(RefundRecordReportClean.refund_amount), 0).label("amount"),
+            func.to_char(func.timezone("Asia/Shanghai", StdRefundRecord.refund_time), "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(StdRefundRecord.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
-        .where(RefundRecordReportClean.refund_time.between(s, e), *_route_e_cashflow_filter())
+        .where(StdRefundRecord.refund_time.between(s, e), *_route_e_cashflow_filter())
         .group_by("date")
     ).all()
     actual_map = {r.date: {"amount": D(r.amount), "count": r.count} for r in actual_rows}
@@ -593,23 +529,23 @@ def wallet_vs_withdraw(db: Session, start: datetime | None = None, end: datetime
     两者的差额即为"退到钱包但尚未提现"的沉淀资金
     """
     start, end = _date_range(start, end)
-    # 退回钱包: wallet 中 op_type='订单退费转入'
+    # 退回钱包: std_wallet_flow 进水 (flow_dir='inflow' 即 op_type='订单退费转入', #332)
     wallet_in = db.execute(
         select(
-            func.to_char(func.timezone("Asia/Shanghai", WalletWithdrawalClean.op_time), "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(WalletWithdrawalClean.op_amount), 0).label("amount"),
+            func.to_char(func.timezone("Asia/Shanghai", StdWalletFlow.op_time), "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(StdWalletFlow.op_amount), 0).label("amount"),
         )
-        .where(WalletWithdrawalClean.op_time.between(start, end), WalletWithdrawalClean.op_type == "订单退费转入")
+        .where(StdWalletFlow.op_time.between(start, end), StdWalletFlow.flow_dir == "inflow")
         .group_by("date")
     ).all()
     wallet_in_map = {r.date: D(r.amount) for r in wallet_in}
-    # 实际提现: op_type='用户提现' 且 备注非失败/冻结 (2026-08-28 排除冻结记录)
+    # 实际提现: std_wallet_flow 成功提现 (失败/冻结已在表层排除, #332)
     withdraw = db.execute(
         select(
-            func.to_char(func.timezone("Asia/Shanghai", WalletWithdrawalClean.op_time), "YYYY-MM-DD").label("date"),
-            func.coalesce(func.sum(WalletWithdrawalClean.op_amount), 0).label("amount"),
+            func.to_char(func.timezone("Asia/Shanghai", StdWalletFlow.op_time), "YYYY-MM-DD").label("date"),
+            func.coalesce(func.sum(StdWalletFlow.op_amount), 0).label("amount"),
         )
-        .where(WalletWithdrawalClean.op_time.between(start, end), *_route_b_withdraw_filter())
+        .where(StdWalletFlow.op_time.between(start, end), *_route_b_withdraw_filter())
         .group_by("date")
     ).all()
     withdraw_map = {r.date: D(r.amount) for r in withdraw}
@@ -670,13 +606,13 @@ def merchant_cash_summary(db: Session) -> list[dict]:
     """
     rows = db.execute(
         select(
-            RefundRecordReportClean.merchant_id,
-            func.coalesce(func.sum(RefundRecordReportClean.refund_amount), 0).label("amount"),
+            StdRefundRecord.merchant_id,
+            func.coalesce(func.sum(StdRefundRecord.refund_amount), 0).label("amount"),
             func.count().label("count"),
         )
         .where(*_route_e_cashflow_filter())
-        .group_by(RefundRecordReportClean.merchant_id)
-        .order_by(func.sum(RefundRecordReportClean.refund_amount).desc())
+        .group_by(StdRefundRecord.merchant_id)
+        .order_by(func.sum(StdRefundRecord.refund_amount).desc())
         .limit(50)
     ).all()
     return [
@@ -690,15 +626,15 @@ def merchant_cash_summary(db: Session) -> list[dict]:
     ]
 
 def wallet_balance_top(db: Session, limit: int = 20) -> list[dict]:
-    """钱包余额分布(按账户,取最新余额)"""
+    """钱包余额分布(按账户,取最新余额) 【#332: 取数 std_wallet_flow(仅采纳行)】"""
     # 用窗口函数取每个账户最新一条记录的余额
     rows = db.execute(
         select(
-            WalletWithdrawalClean.account_id,
-            WalletWithdrawalClean.wallet_balance,
-            WalletWithdrawalClean.op_time,
+            StdWalletFlow.account_id,
+            StdWalletFlow.wallet_balance,
+            StdWalletFlow.op_time,
         )
-        .order_by(WalletWithdrawalClean.account_id, WalletWithdrawalClean.op_time.desc())
+        .order_by(StdWalletFlow.account_id, StdWalletFlow.op_time.desc())
         .limit(limit * 5)
     ).all()
     # 去重保留每个账户最新

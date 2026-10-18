@@ -22,6 +22,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+# #332 T8: A/E 路取数 std 表 —— 测试内 seed 原始行后需跑采纳作业固化进 std
+from app.services.governance.refund_adoption import run_refund_adoption
 from tests._db_guard import safe_wipe
 
 _TZ = timezone(timedelta(hours=8))
@@ -36,9 +38,13 @@ def _bj(s: str) -> datetime:
 def _test_session(_engine):
     session = Session(_engine, autocommit=False, autoflush=False)
     from app.models import Device, Refund, RefundRecordReport
+    from app.models.refund_standard import StdRefundOnline, StdRefundRecord
 
     for cls in (RefundRecordReport, Refund):
         safe_wipe(session, cls)
+    # #332 T8: std 同步清空(采纳作业全量重建, 防 std 残留污染绝对计数)
+    safe_wipe(session, StdRefundOnline)
+    safe_wipe(session, StdRefundRecord)
     safe_wipe(session, Device, where=Device.sn.like("SN-TZ-%"))
     session.commit()
     try:
@@ -47,6 +53,8 @@ def _test_session(_engine):
         try:
             for cls in (RefundRecordReport, Refund):
                 safe_wipe(session, cls)
+            safe_wipe(session, StdRefundOnline)
+            safe_wipe(session, StdRefundRecord)
             safe_wipe(session, Device, where=Device.sn.like("SN-TZ-%"))
             session.commit()
         except Exception:
@@ -112,6 +120,7 @@ def test_e_route_bj_midnight_buckets_to_bj_day(_test_session):
     # 北京 09-05 00:30 → aware(+8) 入库即 UTC 09-04 16:30
     bj_midnight = _bj("2026-09-05 00:30:00")
     _seed_report(_test_session, "SN-TZ-E1", "19.00", bj_midnight)
+    run_refund_adoption(_test_session, routes="E", commit=False)
 
     start, end = _bj("2026-09-01 00:00:00"), _bj("2026-09-10 00:00:00")
     rows = cash_out_trend(_test_session, start, end)
@@ -127,6 +136,7 @@ def test_e_route_bj_evening_stays_bj_day(_test_session):
 
     bj_evening = _bj("2026-09-05 23:30:00")
     _seed_report(_test_session, "SN-TZ-E2", "31.50", bj_evening)
+    run_refund_adoption(_test_session, routes="E", commit=False)
 
     start, end = _bj("2026-09-01 00:00:00"), _bj("2026-09-10 00:00:00")
     rows = cash_out_trend(_test_session, start, end)
@@ -140,6 +150,7 @@ def test_a_route_bj_midnight_buckets_to_bj_day(_test_session):
 
     bj_midnight = _bj("2026-09-05 00:30:00")
     _seed_refund_a(_test_session, "SN-TZ-A1", "50.00", bj_midnight)
+    run_refund_adoption(_test_session, routes="A", commit=False)
 
     start, end = _bj("2026-09-01 00:00:00"), _bj("2026-09-10 00:00:00")
     rows = cash_out_trend(_test_session, start, end)
@@ -159,6 +170,7 @@ def test_naive_param_treated_as_bj_window(_test_session):
     # 北京 2026-09-01 00:30 = UTC 2026-08-31 16:30
     bj_midnight = _bj("2026-09-01 00:30:00")
     _seed_report(_test_session, "SN-TZ-N1", "66.00", bj_midnight)
+    run_refund_adoption(_test_session, routes="E", commit=False)
 
     # naive 入参(模拟前端 dateRange 传 YYYY-MM-DD)
     start = _py_dt.fromisoformat("2026-09-01")   # naive 北京

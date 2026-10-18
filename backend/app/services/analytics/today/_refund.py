@@ -21,13 +21,13 @@ from app.models.ods_clean import ExternalComplaintClean
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.person import Person, PersonAlias
-from app.models.ods_clean import RefundClean
-from app.models.ods_clean import RefundRecordReportClean
+from app.models.refund_standard import StdRefundOnline  # #332: 退款统计切标准表
+from app.models.refund_standard import StdRefundRecord  # #332: E 路切标准表(预留 import)
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask
 from app.models.ticket import ServiceTicket
 from app.models.todo import TodoItem
-from app.models.ods_clean import WalletWithdrawalClean
+from app.models.refund_standard import StdWalletFlow  # #332: B 路切标准表(预留 import)
 from app.services.complaint_scope import (
     ALL_BUCKETS,
     BUCKET_CARD,
@@ -96,16 +96,16 @@ def _ensure_service_tickets_for_unmatched_refunds(
     """
     # 1. 扫所有日期内路线A退款
     in_range = and_(
-        RefundClean.created_at_raw.isnot(None),
-        RefundClean.created_at_raw >= range_start,
-        RefundClean.created_at_raw <= range_end,
+        StdRefundOnline.created_at_raw.isnot(None),
+        StdRefundOnline.created_at_raw >= range_start,
+        StdRefundOnline.created_at_raw <= range_end,
         *_route_a_online_refund_filter(),
     )
     refunds_rows = db.execute(select(
-        RefundClean.refund_no, RefundClean.device_sn, RefundClean.operator, RefundClean.auditor,
-        RefundClean.remark, RefundClean.audit_remark, RefundClean.package_name, RefundClean.refund_reason,
-        RefundClean.refund_amount, RefundClean.actual_amount, RefundClean.created_at_raw, RefundClean.updated_at_raw,
-        RefundClean.platform_order_no, RefundClean.status,
+        StdRefundOnline.refund_no, StdRefundOnline.device_sn, StdRefundOnline.operator, StdRefundOnline.auditor,
+        StdRefundOnline.remark, StdRefundOnline.audit_remark, StdRefundOnline.package_name, StdRefundOnline.refund_reason,
+        StdRefundOnline.refund_amount, StdRefundOnline.actual_amount, StdRefundOnline.created_at_raw, StdRefundOnline.updated_at_raw,
+        StdRefundOnline.platform_order_no, StdRefundOnline.status,
     ).where(in_range)).all()
     if not refunds_rows:
         return {"inserted": 0, "skipped": 0}
@@ -136,14 +136,14 @@ def _ensure_service_tickets_for_unmatched_refunds(
     sns = sorted({r.device_sn for r in refunds_rows if r.device_sn})
     if sns:
         sec = match_win_sec
-        pairs = db.execute(select(RefundClean.refund_no, ServiceTicket.ticket_no
-        ).select_from(RefundClean).join(ServiceTicket, and_(
-            ServiceTicket.device_sn == RefundClean.device_sn,
+        pairs = db.execute(select(StdRefundOnline.refund_no, ServiceTicket.ticket_no
+        ).select_from(StdRefundOnline).join(ServiceTicket, and_(
+            ServiceTicket.device_sn == StdRefundOnline.device_sn,
             ServiceTicket.device_sn.in_(sns),
-            RefundClean.device_sn.in_(sns),
+            StdRefundOnline.device_sn.in_(sns),
             ServiceTicket.register_time.isnot(None),
-            RefundClean.created_at_raw.isnot(None),
-            func.abs(func.extract("epoch", ServiceTicket.register_time - RefundClean.created_at_raw)) < sec,
+            StdRefundOnline.created_at_raw.isnot(None),
+            func.abs(func.extract("epoch", ServiceTicket.register_time - StdRefundOnline.created_at_raw)) < sec,
             # v3.2 P0新增: 必须handler非空, 才算"已被服务工单覆盖"
             ServiceTicket.handler.isnot(None),
             ServiceTicket.handler != "",
@@ -259,8 +259,8 @@ def today_refund_breakdown(db: Session, date: str | None = None, start: str | No
     else:
         d_iso = (_dt.datetime.now(TZ).date() if date is None else _parse_date(date)).isoformat()
         d_end_iso = None
-    between = and_(RefundClean.created_at_raw.isnot(None),
-                   RefundClean.created_at_raw >= ts, RefundClean.created_at_raw <= te,
+    between = and_(StdRefundOnline.created_at_raw.isnot(None),
+                   StdRefundOnline.created_at_raw >= ts, StdRefundOnline.created_at_raw <= te,
                    *_route_a_online_refund_filter())
     _WIN_45D = 86400 * 45  # v3.1: ±30d → ±45d,修复 8/1 样本里 31.28d 这种工单登记稍早被错漏的情况
 
@@ -272,7 +272,7 @@ def today_refund_breakdown(db: Session, date: str | None = None, start: str | No
     #   1) handler 非空优先 (避免"时差最小但handler=NULL的用户自助工单"覆盖掉"时差稍大但有真实处理人"的工单)
     #   2) scat/sitm 非空优先 (同理, 原因榜不要选上空分类的工单)
     #   3) 时间差最小 (原有逻辑, 作为次级排序)
-    # 同时带出 RefundClean.auditor/operator 作为最终兜底: 工单hdl仍空时直接回退到退款单审核人/操作人
+    # 同时带出 StdRefundOnline.auditor/operator 作为最终兜底: 工单hdl仍空时直接回退到退款单审核人/操作人
     _hdl_ok = case(
         (and_(ServiceTicket.handler.isnot(None), ServiceTicket.handler != ""), 1),
         else_=0,
@@ -288,25 +288,25 @@ def today_refund_breakdown(db: Session, date: str | None = None, start: str | No
         else_=0,
     )
     best_stmt = select(
-        RefundClean.refund_no.label("rid"),
-        RefundClean.refund_amount.label("amt"),
-        RefundClean.package_name.label("pkg"),
-        RefundClean.refund_reason.label("rrsn"),
-        RefundClean.auditor.label("raud"),   # 新增: 退款单审核人 (P2回退)
-        RefundClean.operator.label("rop"),   # 新增: 退款单操作人 (P2回退)
+        StdRefundOnline.refund_no.label("rid"),
+        StdRefundOnline.refund_amount.label("amt"),
+        StdRefundOnline.package_name.label("pkg"),
+        StdRefundOnline.refund_reason.label("rrsn"),
+        StdRefundOnline.auditor.label("raud"),   # 新增: 退款单审核人 (P2回退)
+        StdRefundOnline.operator.label("rop"),   # 新增: 退款单操作人 (P2回退)
         # 工单字段 (左连接, 可能 NULL)
         ServiceTicket.service_category.label("scat"),
         ServiceTicket.service_item.label("sitm"),
         ServiceTicket.handler.label("hdl"),
         func.abs(func.extract("epoch",
-            ServiceTicket.register_time - RefundClean.created_at_raw
+            ServiceTicket.register_time - StdRefundOnline.created_at_raw
         )).label("diff_sec"),
-    ).select_from(RefundClean).outerjoin(ServiceTicket, and_(
-        ServiceTicket.device_sn == RefundClean.device_sn,
-        RefundClean.device_sn.isnot(None), RefundClean.device_sn != "",
+    ).select_from(StdRefundOnline).outerjoin(ServiceTicket, and_(
+        ServiceTicket.device_sn == StdRefundOnline.device_sn,
+        StdRefundOnline.device_sn.isnot(None), StdRefundOnline.device_sn != "",
         ServiceTicket.register_time.isnot(None),
         func.abs(func.extract("epoch",
-            ServiceTicket.register_time - RefundClean.created_at_raw
+            ServiceTicket.register_time - StdRefundOnline.created_at_raw
         )) < _WIN_45D,
     )).where(between)
     best_cte = best_stmt.distinct(text("rid")).order_by(
@@ -413,11 +413,11 @@ def today_refund_breakdown(db: Session, date: str | None = None, start: str | No
 
     # ── ③ 补充字段: 退款商品分布 Top10 (独立于原因维度, 用于业务分析但不混原因榜) ──
     pkg_agg = db.execute(select(
-        RefundClean.package_name.label("pkg"),
+        StdRefundOnline.package_name.label("pkg"),
         func.count().label("cnt"),
-        func.coalesce(func.sum(RefundClean.refund_amount), 0).label("amt"),
-    ).where(between).group_by(RefundClean.package_name
-    ).order_by(func.sum(RefundClean.refund_amount).desc()).limit(10)).all()
+        func.coalesce(func.sum(StdRefundOnline.refund_amount), 0).label("amt"),
+    ).where(between).group_by(StdRefundOnline.package_name
+    ).order_by(func.sum(StdRefundOnline.refund_amount).desc()).limit(10)).all()
     packages = [
         {"name": r[0] or "商品名空", "count": int(r.cnt or 0), "amount": round(float(r.amt or 0), 2)}
         for r in pkg_agg

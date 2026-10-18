@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from app.services.analytics import (
     _clean_phone,
     _date_range,
-    _is_withdraw_fail_remark,
     _merge_person_rows,
 )
 
@@ -84,22 +83,6 @@ def test_date_range_default_both():
     assert end is not None
     assert end.tzinfo is not None
     assert start == end - timedelta(days=30)
-
-
-# ---- _is_withdraw_fail_remark: 失败/冻结备注判断 ----
-
-def test_withdraw_fail_remark_hits_keywords():
-    """正向: 命中失败关键词(冻结/退款失败/驳回等) → True。"""
-    assert _is_withdraw_fail_remark("账户冻结") is True
-    assert _is_withdraw_fail_remark("退款失败, 余额不足") is True
-    assert _is_withdraw_fail_remark("驳回: 超期订单不允许退款") is True
-
-
-def test_withdraw_fail_remark_plain():
-    """边界: 正常提现备注 → False。"""
-    assert _is_withdraw_fail_remark("提现成功到账") is False
-    assert _is_withdraw_fail_remark("") is False
-    assert _is_withdraw_fail_remark(None) is False
 
 
 # ---- _merge_person_rows: 首页效率同一人多行按 person_id 归并 (F-P1-1, 2026-09-04) ----
@@ -238,86 +221,38 @@ def test_three_source_case_keyword_priority():
     assert "12315" in A._EXTERNAL_PLATFORM_KEYWORDS
 
 
-# ---- 质量排除口径统一 (A-20260909-001 §2.3 / abc-a) ----
-
-def test_quality_exclude_set_is_single_source():
-    """★口径单一来源: 排除集合只在此处定义(dup_residual=已治理重复, ignored=人工忽略)"""
-    import app.services.analytics as A
-    assert set(A._D_OTHER_EXCLUDE_QSTATUS_SET) == {"dup_residual", "ignored"}
-
-
-def test_excl_sql_matches_exclude_set():
-    """★SQL 片段必须与排除集合一一对应(加状态时不得只改一处)"""
-    import app.services.analytics as A
-    sql = A._EXCL_QSTATUS_SQL
-    for st in A._D_OTHER_EXCLUDE_QSTATUS_SET:
-        assert f"'{st}'" in sql, f"SQL 排除片段漏了 {st}"
-    # 也必须放过 NULL(历史行 quality_status 为空 = 未标记, 属正常业务行)
-    assert "COALESCE" in sql, "NULL 行必须被放行, 否则历史数据全被排除"
-
-
-def test_quality_include_cond_is_list():
-    """ORM 侧统一入口返回条件列表(供 where(*cond) 展开)"""
-    import app.services.analytics as A
-    cond = A._quality_include_cond()
-    assert isinstance(cond, list) and len(cond) == 1
-
-
-def test_quality_exclude_sql_delegates_to_gate():
-    """统一入口在"无 quality 列"的旧环境必须返回 None(让调用方跳过条件, 不报错)"""
-    import app.services.analytics as A
-    from app.services.analytics import cash as _cash  # 拆分后(issue #184)门控函数在 cash 子模块
-
-    class _Dummy:
-        pass
-
-    # 打桩: 模拟旧表无 quality_status 列(须打在函数所在子模块全局, facade 只读不够)
-    orig = _cash._manual_refunds_has_quality_col
-    try:
-        _cash._manual_refunds_has_quality_col = lambda db: False
-        assert A._quality_exclude_sql(_Dummy()) is None
-        _cash._manual_refunds_has_quality_col = lambda db: True
-        assert A._quality_exclude_sql(_Dummy()) == A._EXCL_QSTATUS_SQL
-    finally:
-        _cash._manual_refunds_has_quality_col = orig
-
+# ---- 质量排除门控机制已删除 (#332, ADOPT_RULE_VER=r20261016_v1) ----
 
 def test_no_scattered_gate_expressions():
-    """★回归锁: 不得再出现散落的 `X if _manual_refunds_has_quality_col(db) else None` 门控。
+    """★回归锁(#332): 质量排除门控机制整体删除 —— D 路采纳口径已在 std_refund_manual
+    表层固化(采纳规则见 app/services/governance/refund_adoption.py, 行为锁见
+    test_refund_adoption_rules.py), analytics 包内禁止再出现散落门控。
 
-    历史问题: 8 处各自内联该表达式, 其中一处误把**字符串常量本身**当布尔标记使用,
-    且新增排除状态时需要逐处修改(易漏)。现收敛为 _quality_exclude_sql() 单一入口。
-
-    判定: 用 AST 找出所有「以 _manual_refunds_has_quality_col(...) 为条件的三元表达式」,
-    仅允许出现在 _quality_exclude_sql 函数体内。语言级判定, 不受注释/文档字符串干扰。
+    判定: 用 AST 找出被删符号的任何定义/引用, 全部视为回潮违规。
     """
     import ast
     import pathlib
 
     import app.services.analytics as A
 
-    # 拆分后(issue #184): 源码断言须扫 analytics 包全部子模块, 而非只读 facade __init__
     pkg = pathlib.Path(A.__file__).parent
     src = "\n".join(p.read_text(encoding="utf-8") for p in sorted(pkg.glob("*.py")))
     tree = ast.parse(src)
 
-    # 记录唯一入口的函数体行号区间
-    allowed: set[int] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_quality_exclude_sql":
-            allowed.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
-
-    offenders: list[int] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.IfExp):
-            continue
-        cond = node.test
-        # 匹配 _manual_refunds_has_quality_col(...) 调用
-        calls = [n for n in ast.walk(cond) if isinstance(n, ast.Call)]
-        if any(getattr(c.func, "id", None) == "_manual_refunds_has_quality_col" for c in calls):
-            if node.lineno not in allowed:
-                offenders.append(node.lineno)
-
+    banned = {
+        "_manual_refunds_has_quality_col",
+        "_quality_exclude_sql",
+        "_quality_include_cond",
+        "_EXCL_QSTATUS_SQL",
+        "_D_OTHER_EXCLUDE_QSTATUS",
+        "_D_OTHER_EXCLUDE_QSTATUS_SET",
+    }
+    offenders = sorted({
+        getattr(n, "name", "") for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Name, ast.Attribute))
+        and getattr(n, "name", None) in banned
+        and getattr(n, "attr", None) in (None, *banned)
+    })
     assert not offenders, (
-        f"仍有散落门控表达式(行 {offenders}), 请改用 _quality_exclude_sql(db)"
+        f"质量门控机制已删除(#332, 采纳口径在 std 表层固化), 禁止回潮: {offenders}"
     )

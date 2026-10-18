@@ -22,13 +22,13 @@ from app.models.ods_clean import ExternalComplaintClean
 from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.person import Person, PersonAlias
-from app.models.ods_clean import RefundClean
-from app.models.ods_clean import RefundRecordReportClean
+from app.models.refund_standard import StdRefundOnline  # #332: 退款统计切标准表
+from app.models.refund_standard import StdRefundRecord  # #332: E 路切标准表(预留 import)
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask
 from app.models.ticket import ServiceTicket
 from app.models.todo import TodoItem
-from app.models.ods_clean import WalletWithdrawalClean
+from app.models.refund_standard import StdWalletFlow  # #332: B 路切标准表(预留 import)
 from app.services.complaint_scope import (
     ALL_BUCKETS,
     BUCKET_CARD,
@@ -244,13 +244,13 @@ def today_kpi(db: Session, date: str | None = None, start: str | None = None, en
     #   会把"几天前创建、今天才完成退款"的单归到创建那天, 导致今日看板"已退款"看不到。
     #   这里仅作**新增指标**返回, 不改变原 routes/refund_count 口径(保持历史一致)。
     def _route_a_done_in_window(s: _dt.datetime, e: _dt.datetime) -> dict:
+        # #332: std_refund_online 已固化已退款, 原 status=='已退款' 冗余条件删除
         row = db.execute(select(
             func.count(),
-            func.coalesce(func.sum(RefundClean.refund_amount), 0),
+            func.coalesce(func.sum(StdRefundOnline.refund_amount), 0),
         ).where(
             *_route_a_online_refund_filter(),
-            RefundClean.status == "已退款",
-            _between(RefundClean.updated_at_raw, s, e),
+            _between(StdRefundOnline.updated_at_raw, s, e),
         )).first() or (0, 0)
         return {"count": int(row[0] or 0), "amount": round(float(row[1] or 0), 2)}
     a_done_t = _route_a_done_in_window(ts, te)
