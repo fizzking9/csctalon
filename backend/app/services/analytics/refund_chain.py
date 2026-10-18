@@ -7,9 +7,11 @@ from typing import Any
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-# #332: 链路分析是全状态/全方式语义 —— A 路径=「转入提现账户」退款(被 std A 路
-#   采纳规则排除), 蓄水分析需要全方式行 → 退款单与提现进水读 ods 原始层;
+# #332: 链路分析是按单业务台账语义（非蓄水池核算）—— A 路径=「转入提现账户」退款
+#   工单(被 std A 路采纳规则排除), 按单时效(D1发起→D2入钱包→D4提现)需要工单锚点
+#   (B 路进水 remark 无 RF 单号, 生产实测无法纯 B 还按单还原) → 退款单读 ods 原始层;
 #   B 成功提现与 D 手动退款取 std 表(采纳口径表层固化)。
+#   蓄水池/水位核算与链路分析无关 —— 那是纯 B 一本账(口径文档 §四)。
 from app.models.refund import Refund
 from app.models.refund_standard import StdRefundManual, StdWalletFlow
 
@@ -294,7 +296,8 @@ def refund_withdrawal_overview(db: Session, start: str | None = None, end: str |
         }
 
     # A路径未提现率 (全局口径, 不随D4窗口变化: 统计全量转入提现账户工单 vs 已匹配提现)
-    # #332: 读 ods 原始层 —— 转入提现账户行被 std A 路采纳规则排除, std 里查不到
+    # #332: 读 ods 原始层 —— 按单台账口径(转入提现账户行被 std A 路采纳规则排除,
+    #   std 里查不到); 蓄水池/水位的纯 B 核算见决策概览 wallet_water, 与本指标无关
     rf_all = list(db.execute(select(Refund.refund_method, func.count(), func.sum(Refund.refund_amount))
                              .group_by(Refund.refund_method)).all())
     a_total_cnt = 0; a_total_amt = 0.0
