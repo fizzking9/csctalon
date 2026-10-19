@@ -1,8 +1,10 @@
 """浏览器交互工具: 弹窗关闭 / 按钮定位点击 / 无数据判定 / 下载重试(不含登录)。"""
 
 import asyncio
+import json
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 
 def _parse_filename_utc_ts(filename: str) -> datetime | None:
@@ -64,6 +66,91 @@ _DOWNLOAD_MAX_RETRIES: dict[str, int] = {
 }
 
 _DOWNLOAD_DEFAULT_RETRIES = 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #335: 导出请求 ISO 日期改写(route 拦截)
+#   背景: BMS 后端 2026-10-11 起收紧导出接口日期反序列化, 只收
+#   "yyyy-MM-dd HH:mm:ss"; 而 return_tracking 页面导出把日期选择器
+#   v-model(JS Date 对象)直接随 JSON 序列化 → ISO-8601 UTC 串
+#   (实证: bms_sync_logs 报错 payload 含 "2026-10-19T01:41:07.000Z"
+#   = 北京 09:41:07 窗口终点) → BMS 400 JSON parse error。
+#   填值侧无法根治(组件 v-model 恒为 Date, 页面自有序列化逻辑不可控),
+#   故对白名单源在导出前注册 page.route 拦截, 把请求体里的 ISO 日期
+#   字符串改写为北京时 "yyyy-MM-dd HH:mm:ss" 后放行。
+# ──────────────────────────────────────────────────────────────────────
+_EXPORT_REWRITE_ISO_DATE_TYPES: frozenset = frozenset({"return_tracking"})
+
+_TZ_CN = ZoneInfo("Asia/Shanghai")
+
+# 完整匹配 ISO-8601 日期时间(允许小数秒 / Z / ±hh:mm 偏移), 日期部分单独不匹配
+_ISO_DT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$"
+)
+
+
+def _rewrite_iso_dates_in_json(node):
+    """递归把 JSON 结构里的 ISO-8601 日期时间字符串改写为北京时 "yyyy-MM-dd HH:mm:ss"。
+
+    返回 (新节点, 改写处数)。只改写**完整匹配** ISO 形态的字符串值,
+    其它类型/普通字符串一律原样保留(不改写嵌在长文本里的日期子串, 防误伤)。
+    """
+    if isinstance(node, dict):
+        cnt = 0
+        out = {}
+        for k, v in node.items():
+            nv, c = _rewrite_iso_dates_in_json(v)
+            out[k] = nv
+            cnt += c
+        return out, cnt
+    if isinstance(node, list):
+        cnt = 0
+        out = []
+        for v in node:
+            nv, c = _rewrite_iso_dates_in_json(v)
+            out.append(nv)
+            cnt += c
+        return out, cnt
+    if isinstance(node, str) and _ISO_DT_RE.match(node):
+        try:
+            dt = datetime.fromisoformat(node.replace("Z", "+00:00"))
+            if dt.tzinfo is None:  # 无偏移按 UTC 处理(与 JS toISOString 语义一致)
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(_TZ_CN).strftime("%Y-%m-%d %H:%M:%S"), 1
+        except Exception:
+            return node, 0
+    return node, 0
+
+
+async def _rewrite_export_request_iso_dates(route, request, logger_obj, data_type: str):
+    """page.route 处理器: 改写导出 POST 请求体里的 ISO 日期, 其余请求原样放行。
+
+    任何解析/改写异常都不阻断导出——按原样 continue, 由 BMS 响应决定成败
+    (改写是「修复已知坏形态」, 不是「新增前置校验」)。
+    """
+    try:
+        if (request.method or "").upper() != "POST":
+            await route.continue_()
+            return
+        post_data = request.post_data
+        if not post_data or "T" not in post_data:  # 快路径: 无 T 必无 ISO 日期
+            await route.continue_()
+            return
+        body = json.loads(post_data)
+        new_body, n = _rewrite_iso_dates_in_json(body)
+        if not n:
+            await route.continue_()
+            return
+        logger_obj.info(
+            "[%s] 导出请求 ISO 日期改写 %d 处(#335: BMS 后端只收 yyyy-MM-dd HH:mm:ss)",
+            data_type, n,
+        )
+        await route.continue_(post_data=json.dumps(new_body, ensure_ascii=False))
+    except Exception:
+        try:
+            await route.continue_()
+        except Exception:
+            pass
 
 
 
@@ -448,6 +535,46 @@ async def _download_with_retry(
     """
     timeout_ms = _DOWNLOAD_TIMEOUT_MS.get(data_type, _DOWNLOAD_DEFAULT_TIMEOUT_MS)
     max_retries = _DOWNLOAD_MAX_RETRIES.get(data_type, _DOWNLOAD_DEFAULT_RETRIES)
+
+    # #335: 白名单源注册导出请求 ISO 日期改写(route 拦截, 详见上方常量注释)。
+    #   拦截面=URL 含 export 的请求; 非 POST/非 JSON/无 ISO 日期一律原样放行。
+    _iso_route_pattern = re.compile(r"export", re.IGNORECASE)
+    _iso_route_registered = False
+
+    async def _iso_route_handler(route, request):
+        await _rewrite_export_request_iso_dates(route, request, logger_obj, data_type)
+
+    if data_type in _EXPORT_REWRITE_ISO_DATE_TYPES:
+        try:
+            await page.route(_iso_route_pattern, _iso_route_handler)
+            _iso_route_registered = True
+        except Exception as _route_err:
+            logger_obj.warning(
+                "[%s] 注册 ISO 日期改写 route 失败(忽略,按原样导出): %s",
+                data_type, _route_err,
+            )
+
+    try:
+        return await _download_retry_loop(
+            page, data_type, logger_obj, timeout_ms, max_retries, expect_end_dt,
+        )
+    finally:
+        if _iso_route_registered:
+            try:
+                await page.unroute(_iso_route_pattern, _iso_route_handler)
+            except Exception:
+                pass
+
+
+async def _download_retry_loop(
+    page,
+    data_type: str,
+    logger_obj,
+    timeout_ms: int,
+    max_retries: int,
+    expect_end_dt: datetime | None = None,
+):
+    """_download_with_retry 的重试循环体(#335 拆出以便在外层套 route 拦截的 try/finally)。"""
     last_exc: Exception | None = None
 
     for attempt in range(0, max_retries + 1):

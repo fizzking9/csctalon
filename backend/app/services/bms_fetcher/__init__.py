@@ -12,6 +12,7 @@ from app.services.bms_fetcher._browser import (
     _DOWNLOAD_TIMEOUT_MS,
     _EMPTY_STATE_SELECTORS,
     _EXPORT_ANY_CLICKABLE,
+    _EXPORT_REWRITE_ISO_DATE_TYPES,
     BmsSessionExpired,
     EmptyQueryResult,
     _click_export_button,
@@ -21,6 +22,7 @@ from app.services.bms_fetcher._browser import (
     _locate_export_button,
     _page_shows_no_data,
     _parse_filename_utc_ts,
+    _rewrite_iso_dates_in_json,
 )
 from app.services.bms_fetcher._fetch import (
     _BMS_FILL_TZ_UTC_DEFAULT,
@@ -79,6 +81,7 @@ __all__ = [
     '_DOWNLOAD_TIMEOUT_MS',
     '_EMPTY_STATE_SELECTORS',
     '_EXPORT_ANY_CLICKABLE',
+    '_EXPORT_REWRITE_ISO_DATE_TYPES',
     '_FETCH_LEAD_SECONDS',
     '_LOGIN_CLASS_KEYS',
     '_OCR_AVG_PROB',
@@ -98,6 +101,7 @@ __all__ = [
     '_locate_export_button',
     '_page_shows_no_data',
     '_parse_filename_utc_ts',
+    '_rewrite_iso_dates_in_json',
     '_poll_login_errors_for',
     '_read_login_error',
     '_refresh_captcha_image',
