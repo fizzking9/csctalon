@@ -510,7 +510,14 @@ def upsert_bms_orders(df: pd.DataFrame, mapping: dict[str, str], db: Session, re
     if not rows:
         return
     _sync_devices(rows, "device_sn", db, fill_fields=["merchant_name"])
-    _execute_upsert(db, BmsOrder, "order_no", rows, result)
+    # #335: 10 万行单事务单语句 upsert 会让 postgres backend 进程内存膨胀到 ~1.9GiB,
+    #   撞破 db 容器 2GiB memcg 限额被 OOM kill → 全库 recovery → 导入失败(2026-10-19 三次实证)。
+    #   分批 2000 行/commit(与上方 docstring 原始设计一致): 单批 ~3.8 万绑定参数(<65535 上限)、
+    #   WAL/事务内存随 commit 释放。upsert 幂等,中途失败重跑安全。
+    _BATCH = 2000
+    for i in range(0, len(rows), _BATCH):
+        _execute_upsert(db, BmsOrder, "order_no", rows[i:i + _BATCH], result)
+        db.commit()
 
 def upsert_return_trackings(df: pd.DataFrame, mapping: dict[str, str], db: Session, result: ImportResult) -> None:
     """退货跟踪 - 幂等 upsert
