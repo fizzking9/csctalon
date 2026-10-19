@@ -147,11 +147,14 @@ services:
       start_period: 30s   # 预留迁移/种子/调度器启动时间
     # 上限(#279): 4G 给 Playwright chromium + ddddocr onnx 留余量(采集期单容器峰值
     # 观测约 1.5-2.5G); 2 CPU 防止采集/导出任务饿死健康检查响应。
+    # #335: bms_order 全量导出(10万行硬截断)采集期峰值破 4G → memcg OOM 杀 gunicorn
+    # (2026-10-13 起每小时循环, 详见 #335); _fetch 读取已换 calamine 降一个量级,
+    # 内存再放宽到 8G 双保险(主机 23G, 余量充足)。
     deploy:
       resources:
         limits:
           cpus: '2.0'
-          memory: 4G
+          memory: 8G
     depends_on:
       db:
         condition: service_healthy

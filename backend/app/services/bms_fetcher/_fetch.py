@@ -1976,7 +1976,11 @@ class BmsFetcher:
             import pandas as pd
             suffix_l = str(dest_path).lower()
             if suffix_l.endswith(".xlsx"):
-                df = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
+                # #335: 大文件读取换 calamine(Rust 流式) —— openpyxl 全量 DOM 加载,
+                # bms_order 导出被 BMS 硬截断 10 万行时峰值 RSS > 4GiB 触发 memcg OOM
+                # (gunicorn 被杀 → 服务重启 → 僵尸清理标 failed, 2026-10-13 起每小时循环)。
+                # calamine 内存降一个量级; data_parser 同款引擎(其 514 行先例)。
+                df = pd.read_excel(dest_path, engine="calamine", dtype=str)
             elif suffix_l.endswith(".xls"):
                 try:
                     df = pd.read_excel(dest_path, dtype=str)
@@ -2096,7 +2100,8 @@ class BmsFetcher:
             import pandas as pd
             suffix_l = str(dest_path).lower()
             if suffix_l.endswith(".xlsx"):
-                df = pd.read_excel(dest_path, engine="openpyxl", dtype=str)
+                # #335: 同上 —— 全量导出(10万行硬截断)读取换 calamine, 防 memcg OOM
+                df = pd.read_excel(dest_path, engine="calamine", dtype=str)
             elif suffix_l.endswith(".xls"):
                 try:
                     df = pd.read_excel(dest_path, dtype=str)

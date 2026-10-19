@@ -522,6 +522,20 @@ async def _download_with_retry(
                                 try:
                                     body = await resp.text()
                                     export_rate_limited["msg"] = body[:200]
+                                    # #335: 导出异常时记录请求端点与 payload ——
+                                    # 定位 BMS 前端实际发送的参数形态(如 return_tracking
+                                    # 日期被页面序列化为 ISO-UTC 触发 400), 为 route
+                                    # 改写提供事实依据; 正常下载不经过此路径。
+                                    try:
+                                        req = resp.request
+                                        logger_obj.warning(
+                                            "[%s] 导出异常请求诊断: url=%s method=%s post_data=%r",
+                                            data_type, resp.url,
+                                            req.method if req else "?",
+                                            (req.post_data or "")[:500] if req else "",
+                                        )
+                                    except Exception:
+                                        pass
                                 except Exception:
                                     export_rate_limited["msg"] = "(body 读取失败)"
                             # 用 create_task 挂后台,避免同步回调里直接 await 协程;
