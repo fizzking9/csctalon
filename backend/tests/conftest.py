@@ -214,6 +214,17 @@ def _engine():
                 conn.execute(text(f'CREATE VIEW public."{_view}" AS SELECT {_cols} FROM {_src}'))
             conn.commit()
 
+        # #334: std_*_all 全量镜像视图(over ods 五路, 含采纳四列)。
+        #   全状态语义读点已迁这些视图; 测试库不跑迁移, 在此显式建视图,
+        #   与迁移 b443c1a2d3e4 共用单一来源 STD_ALL_VIEWS(SELECT * 透传)。
+        from app.models.refund_standard import STD_ALL_VIEWS
+
+        with engine.connect() as conn:
+            for _view, _src in STD_ALL_VIEWS.items():
+                conn.execute(text(f'DROP VIEW IF EXISTS public."{_view}" CASCADE'))
+                conn.execute(text(f'CREATE VIEW public."{_view}" AS SELECT * FROM {_src}'))
+            conn.commit()
+
         # ⚠️ 2026-09-07 修复: create_all 建表后 stamp alembic 到 head。
         #   否则 app lifespan(_run_migrations_on_startup) 在 TestClient 启动时会再次
         #   alembic upgrade head, 对全新测试库(无 alembic_version)从 d9b7f1 重跑全部

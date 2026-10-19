@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.models.bms_order import BmsOrder
@@ -22,13 +22,8 @@ from app.models.device import Device
 from app.models.device_combo import DeviceCombo
 from app.models.device_flow_usage import DeviceFlowUsage
 from app.models.external_complaint import ExternalComplaint
-from app.models.manual_refund import ManualRefund
-from app.models.refund import Refund
-from app.models.refund_record_report import RefundRecordReport
 from app.models.return_tracking import ReturnTracking
-from app.models.shanmao_refund import ShanmaoRefund
 from app.models.ticket import ServiceTicket
-from app.models.wallet import WalletWithdrawal
 
 
 def build_device_profile(db: Session, device: Device) -> dict:
@@ -79,10 +74,17 @@ def build_device_profile(db: Session, device: Device) -> dict:
     remaining = _sum(DeviceCombo, DeviceCombo.remaining_traffic, DeviceCombo.device_sn,
                      DeviceCombo.remaining_traffic != -1)
     total_flow = _sum(DeviceFlowUsage, DeviceFlowUsage.flow_gb, DeviceFlowUsage.device_sn)
+
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    def _cnt_std(view_name: str) -> int:
+        return int(db.scalar(
+            text(f"SELECT count(*) FROM {view_name} WHERE device_sn = :sn"), {"sn": sn}
+        ) or 0)
+
     profile["kpi"] = {
-        "refund_count": _cnt(Refund, Refund.device_sn),
+        "refund_count": _cnt_std("std_refund_online_all"),
         "ticket_count": _cnt(ServiceTicket, ServiceTicket.device_sn),
-        "wallet_count": _cnt(WalletWithdrawal, WalletWithdrawal.device_sn),
+        "wallet_count": _cnt_std("std_wallet_flow_all"),
         "cs_count": _cnt(CsRecord, CsRecord.device_sn),
         "external_complaint_count": _cnt(ExternalComplaint, ExternalComplaint.device_sn),
         "card_complaint_count": _cnt(CardComplaint, CardComplaint.device_sn),
@@ -92,11 +94,11 @@ def build_device_profile(db: Session, device: Device) -> dict:
             _sum(DeviceCombo, DeviceCombo.actual_amount, DeviceCombo.device_sn,
                  DeviceCombo.package_name.notilike("%质检%")), 2),
         "combo_remaining_bytes": int(remaining),
-        "manual_refund_count": _cnt(ManualRefund, ManualRefund.device_sn),
-        "shanmao_refund_count": _cnt(ShanmaoRefund, ShanmaoRefund.device_sn),
+        "manual_refund_count": _cnt_std("std_refund_manual_all"),
+        "shanmao_refund_count": _cnt_std("std_refund_shanmao_all"),
         "order_count": _cnt(BmsOrder, BmsOrder.device_sn),
         "return_tracking_count": _cnt(ReturnTracking, ReturnTracking.device_sn),
-        "refund_record_report_count": _cnt(RefundRecordReport, RefundRecordReport.device_sn),
+        "refund_record_report_count": _cnt_std("std_refund_record_all"),
         "flow_month_count": _cnt(DeviceFlowUsage, DeviceFlowUsage.device_sn),
         "flow_total_gb": round(total_flow, 4),
     }

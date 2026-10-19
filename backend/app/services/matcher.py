@@ -20,15 +20,13 @@ import logging
 import re
 import time
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.models.merchant import Merchant
 from app.models.merchant_refund import MerchantRefund
-from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
 from app.models.upload import DataMatchRelation
-from app.models.wallet import WalletWithdrawal
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +99,10 @@ def _preload_existing_relations(db: Session, src_table: str, dst_table: str, mat
 
 def _match_refund_merchant_refund(db: Session, only_unmatched: bool) -> tuple[int, set[str]]:
     """退费单.platform_order_no == 商户退款.merchant_order_no"""
-    refunds = db.scalars(select(Refund).where(Refund.platform_order_no.isnot(None))).all()
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    refunds = db.execute(text(
+        "SELECT refund_no, platform_order_no FROM std_refund_online_all WHERE platform_order_no IS NOT NULL"
+    )).all()
     mr_map = {}
     for mr in db.scalars(select(MerchantRefund).where(MerchantRefund.merchant_order_no.isnot(None))).all():
         key = (mr.merchant_order_no or "").strip()
@@ -133,7 +134,10 @@ def _match_refund_merchant_refund(db: Session, only_unmatched: bool) -> tuple[in
 
 def _match_refund_ticket_by_order(db: Session, only_unmatched: bool) -> tuple[int, set[str]]:
     """退费单.platform_order_no == 工单.order_no"""
-    refunds = db.scalars(select(Refund).where(Refund.platform_order_no.isnot(None))).all()
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    refunds = db.execute(text(
+        "SELECT refund_no, platform_order_no FROM std_refund_online_all WHERE platform_order_no IS NOT NULL"
+    )).all()
     ticket_map = {}
     for t in db.scalars(select(ServiceTicket).where(ServiceTicket.order_no.isnot(None))).all():
         key = (t.order_no or "").strip()
@@ -165,7 +169,10 @@ def _match_refund_ticket_by_order(db: Session, only_unmatched: bool) -> tuple[in
 
 def _match_refund_ticket_by_sn(db: Session, only_unmatched: bool) -> tuple[int, set[str]]:
     """退费单.device_sn == 工单.device_sn"""
-    refunds = db.scalars(select(Refund).where(Refund.device_sn.isnot(None))).all()
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    refunds = db.execute(text(
+        "SELECT refund_no, device_sn FROM std_refund_online_all WHERE device_sn IS NOT NULL"
+    )).all()
     ticket_sn_map = {}
     for t in db.scalars(select(ServiceTicket).where(ServiceTicket.device_sn.isnot(None))).all():
         ticket_sn_map.setdefault(t.device_sn, []).append(t.ticket_no)
@@ -202,7 +209,10 @@ def _match_refund_ticket_by_sn(db: Session, only_unmatched: bool) -> tuple[int, 
 
 def _match_refund_wallet_by_remark(db: Session, only_unmatched: bool) -> tuple[int, set[str]]:
     """钱包提现.remark 含退费单号 RF..."""
-    wallets = db.scalars(select(WalletWithdrawal).where(WalletWithdrawal.remark.isnot(None))).all()
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    wallets = db.execute(text(
+        "SELECT id, remark FROM std_wallet_flow_all WHERE remark IS NOT NULL"
+    )).all()
 
     existing = _preload_existing_relations(db, "refund", "wallet", "refund_no_in_remark") if only_unmatched else set()
 
@@ -232,9 +242,14 @@ def _match_refund_wallet_by_remark(db: Session, only_unmatched: bool) -> tuple[i
 
 def _match_refund_wallet_by_sn(db: Session, only_unmatched: bool) -> tuple[int, set[str]]:
     """退费单.device_sn == 钱包提现.device_sn"""
-    refunds = db.scalars(select(Refund).where(Refund.device_sn.isnot(None))).all()
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    refunds = db.execute(text(
+        "SELECT refund_no, device_sn FROM std_refund_online_all WHERE device_sn IS NOT NULL"
+    )).all()
     wallet_sn_map = {}
-    for w in db.scalars(select(WalletWithdrawal).where(WalletWithdrawal.device_sn.isnot(None))).all():
+    for w in db.execute(text(
+        "SELECT id, device_sn FROM std_wallet_flow_all WHERE device_sn IS NOT NULL"
+    )).all():
         wallet_sn_map.setdefault(w.device_sn, []).append(w.id)
 
     existing = _preload_existing_relations(db, "refund", "wallet", "device_sn") if only_unmatched else set()
@@ -267,7 +282,10 @@ def _match_refund_wallet_by_sn(db: Session, only_unmatched: bool) -> tuple[int, 
 
 def _match_refund_merchant(db: Session, only_unmatched: bool) -> tuple[int, set[str]]:
     """退费单.merchant_name == 商户.sub_name"""
-    refunds = db.scalars(select(Refund).where(Refund.merchant_name.isnot(None))).all()
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    refunds = db.execute(text(
+        "SELECT refund_no, merchant_name FROM std_refund_online_all WHERE merchant_name IS NOT NULL"
+    )).all()
     merchant_map = {m.sub_name: m.id for m in db.scalars(select(Merchant)).all()}
 
     existing = _preload_existing_relations(db, "refund", "merchant", "merchant_name") if only_unmatched else set()
@@ -296,7 +314,8 @@ def _match_refund_merchant(db: Session, only_unmatched: bool) -> tuple[int, set[
 
 def get_unmatched_summary(db: Session) -> dict[str, int]:
     """获取各表待关联数据统计"""
-    refund_count = db.scalar(select(func.count()).select_from(Refund)) or 0
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    refund_count = db.scalar(text("SELECT count(*) FROM std_refund_online_all")) or 0
     refund_with_mr = db.scalar(
         select(func.count(func.distinct(DataMatchRelation.src_id)))
         .where(

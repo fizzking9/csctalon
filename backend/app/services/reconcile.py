@@ -20,13 +20,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, text
 
 from app.models.manual_refund import ManualRefund
-from app.models.refund import Refund
 from app.models.refund_record_report import RefundRecordReport
-from app.models.shanmao_refund import ShanmaoRefund
-from app.models.wallet import WalletWithdrawal
 from app.services.analytics._core import D
 
 logger = logging.getLogger(__name__)
@@ -304,18 +301,18 @@ def _build_route_maps(db, start, end):
     C 路(闪猫 shanmao_refunds): refund_no/device_sn
     D 路(手动 manual_refunds): order_no/device_sn+金额
     """
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
     # A: 平台订单号 → refund_no(退费单)
     a_by_order: dict[str, set[str]] = {}
-    rows = db.execute(
-        select(Refund.platform_order_no, Refund.refund_no)
-        .where(Refund.platform_order_no.is_not(None))
-    ).all()
+    rows = db.execute(text(
+        "SELECT platform_order_no, refund_no FROM std_refund_online_all WHERE platform_order_no IS NOT NULL"
+    )).all()
     for order_no, refund_no in rows:
         if order_no:
             a_by_order.setdefault(str(order_no).strip(), set()).add(str(refund_no))
     # A2: refund_no 本身(可能 report.platform_order_no 直接是 RF 退费单号)
     a_by_no: set[str] = set()
-    for (rno,) in db.execute(select(Refund.refund_no)).all():
+    for (rno,) in db.execute(text("SELECT refund_no FROM std_refund_online_all")).all():
         if rno:
             a_by_no.add(str(rno).strip())
 
@@ -323,44 +320,34 @@ def _build_route_maps(db, start, end):
     # ⚠️ 2026-09-09 (M-4, A-20260909-001 §2.8.3): C 路 device_sn 覆盖 0%,
     #    原 c_sns 匹配实际全漏配 → 改用 order_no(WXALR)为主锚点。
     c_order_nos: set[str] = set()
-    for (ono,) in db.execute(
-        select(ShanmaoRefund.order_no).where(
-            ShanmaoRefund.order_no.is_not(None),
-            ShanmaoRefund.status == "已退款",
-        )
-    ).all():
+    for (ono,) in db.execute(text(
+        "SELECT order_no FROM std_refund_shanmao_all WHERE order_no IS NOT NULL AND status = '已退款'"
+    )).all():
         if ono:
             c_order_nos.add(str(ono).strip())
     c_sns: set[str] = set()
-    for (sn,) in db.execute(
-        select(ShanmaoRefund.device_sn).where(ShanmaoRefund.device_sn.is_not(None))
-    ).all():
+    for (sn,) in db.execute(text(
+        "SELECT device_sn FROM std_refund_shanmao_all WHERE device_sn IS NOT NULL"
+    )).all():
         if sn:
             c_sns.add(str(sn).strip())
 
     # B: wallet 用户提现 设备+金额集合
     b_keys: set[tuple[str, Decimal]] = set()
-    for sn, amt in db.execute(
-        select(WalletWithdrawal.device_sn, WalletWithdrawal.op_amount)
-        .where(
-            WalletWithdrawal.op_type == "用户提现",
-            WalletWithdrawal.device_sn.is_not(None),
-            WalletWithdrawal.op_amount.is_not(None),
-        )
-    ).all():
+    for sn, amt in db.execute(text(
+        "SELECT device_sn, op_amount FROM std_wallet_flow_all "
+        "WHERE op_type = '用户提现' AND device_sn IS NOT NULL AND op_amount IS NOT NULL"
+    )).all():
         if sn and amt is not None:
             b_keys.add((str(sn).strip(), D(amt)))
 
     # D: manual 已退款 设备+金额 + order_no 集合
     d_keys: set[tuple[str, Decimal]] = set()
     d_order_nos: set[str] = set()
-    for sn, amt, ono in db.execute(
-        select(ManualRefund.device_sn, ManualRefund.refund_amount, ManualRefund.order_no)
-        .where(
-            ManualRefund.is_refunded == "是",
-            ManualRefund.refund_amount.is_not(None),
-        )
-    ).all():
+    for sn, amt, ono in db.execute(text(
+        "SELECT device_sn, refund_amount, order_no FROM std_refund_manual_all "
+        "WHERE is_refunded = '是' AND refund_amount IS NOT NULL"
+    )).all():
         if sn and amt is not None:
             d_keys.add((str(sn).strip(), D(amt)))
         if ono:
@@ -426,25 +413,25 @@ def water_statement(
     # 时间窗归一化: 参数按北京时间传入 → 统一 UTC aware 过滤 (2026-09-05 修复偏 8h)
     start = _to_utc_aware(start)
     end = _to_utc_aware(end)
-    base = select(RefundRecordReport).where(
-        RefundRecordReport.refund_status.in_(_SUCCESS_STATUSES),
-        RefundRecordReport.refund_time >= start,
-        RefundRecordReport.refund_time <= end,
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    _win_sql = (
+        "FROM std_refund_record_all "
+        "WHERE refund_status IN ('退款成功','成功','SUCCESS') "
+        "AND refund_time >= :s AND refund_time <= :e"
     )
-    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    _win_params = {"s": start, "e": end}
+    total = db.scalar(text(f"SELECT count(*) {_win_sql}"), _win_params) or 0
     total_amt = (
-        db.scalar(select(func.coalesce(func.sum(RefundRecordReport.refund_amount), 0)).where(
-            RefundRecordReport.refund_status.in_(_SUCCESS_STATUSES),
-            RefundRecordReport.refund_time >= start,
-            RefundRecordReport.refund_time <= end,
-        ))
+        db.scalar(text(f"SELECT COALESCE(SUM(refund_amount), 0) {_win_sql}"), _win_params)
         or 0.0
     )
 
     maps = _build_route_maps(db, start, end)
 
     # 逐行分类(水单量通常可控; 如需更大可改 SQL 关联, 一期 Python 逐行)
-    rows = list(db.scalars(base.order_by(RefundRecordReport.refund_time.desc())))
+    rows = list(db.execute(
+        text(f"SELECT * {_win_sql} ORDER BY refund_time DESC"), _win_params
+    ).all())
     by_route = {"A": 0, "B": 0, "C": 0, "D": 0, "unmatched": 0}
     classified = []
     for r in rows:

@@ -4,15 +4,15 @@ import re as _re
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import column, func, select, table, text
 from sqlalchemy.orm import Session
 
-# #332: 链路分析是按单业务台账语义（非蓄水池核算）—— A 路径=「转入提现账户」退款
+# #334: 链路分析是按单业务台账语义（非蓄水池核算）—— A 路径=「转入提现账户」退款
 #   工单(被 std A 路采纳规则排除), 按单时效(D1发起→D2入钱包→D4提现)需要工单锚点
-#   (B 路进水 remark 无 RF 单号, 生产实测无法纯 B 还按单还原) → 退款单读 ods 原始层;
+#   (B 路进水 remark 无 RF 单号, 生产实测无法纯 B 还按单还原) → 退款单读
+#   std_refund_online_all 全量镜像(ods.refunds 同构透传, 含被排除行);
 #   B 成功提现与 D 手动退款取 std 表(采纳口径表层固化)。
 #   蓄水池/水位核算与链路分析无关 —— 那是纯 B 一本账(口径文档 §四)。
-from app.models.refund import Refund
 from app.models.refund_standard import StdRefundManual, StdWalletFlow
 
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
@@ -38,6 +38,18 @@ from app.services.analytics._core import (
 
 _RFN_RE = _re.compile(r'退费单\s*([A-Za-z0-9]+)')
 
+# #334: 全状态语义读 std_refund_online_all 全量镜像(ods.refunds 同构透传, 含被采纳规则排除行)。
+#   用轻量 table()/column() 而非 ORM 实体: 视图只读, 且下方会对行内时间字段原地 naive 归一,
+#   ORM 实体挂载 Session 后赋值会在 autoflush 时对只读视图发 UPDATE 报错。
+_REFUND_ALL = table(
+    "std_refund_online_all",
+    column("refund_no"), column("platform_order_no"), column("device_sn"),
+    column("refund_method"), column("refund_reason"), column("refund_amount"), column("actual_amount"),
+    column("status"), column("package_name"), column("merchant_name"),
+    column("auditor"), column("operator"),
+    column("created_at_raw"), column("created_at"), column("updated_at_raw"), column("updated_at"),
+)
+
 def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime | None = None):
     """构建"一笔实际出款"的全链路记录 (只有 A=转入钱包+B=线上直退两条有效路径, 其他无效剔除)。
 
@@ -46,9 +58,10 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
       - B 路径 D4 = 退费单 updated_at_raw (接口回调成功 ≈ 实际到账)
     """
     # 1. 取全量数据 (66k rows, 内存可容纳)
-    # #332: 读 ods 原始层 —— 链路 A 路径是「转入提现账户」退款, std_refund_online
-    #   不含该方式(采纳规则排除), 也不能只含已退款行(链路要全状态)
-    all_rf = list(db.execute(select(Refund)).scalars().all())
+    # #334: 读 std_refund_online_all 全量镜像(ods 同构透传, 含被排除行) —— 链路 A 路径是
+    #   「转入提现账户」退款, std_refund_online 不含该方式(采纳规则排除), 也不能只含已退款行(链路要全状态)
+    from types import SimpleNamespace as _SN
+    all_rf = [_SN(**dict(r._mapping)) for r in db.execute(select(_REFUND_ALL)).all()]
     # 2026-08-28 → #332: 只取"成功提现"—— std_wallet_flow 已在表层固化
     #   (失败/冻结/空 op_type 不进表, 原 _WITHDRAW_FAIL_REMARK 关键词机制删除)
     all_wd = list(db.execute(
@@ -296,10 +309,13 @@ def refund_withdrawal_overview(db: Session, start: str | None = None, end: str |
         }
 
     # A路径未提现率 (全局口径, 不随D4窗口变化: 统计全量转入提现账户工单 vs 已匹配提现)
-    # #332: 读 ods 原始层 —— 按单台账口径(转入提现账户行被 std A 路采纳规则排除,
-    #   std 里查不到); 蓄水池/水位的纯 B 核算见决策概览 wallet_water, 与本指标无关
-    rf_all = list(db.execute(select(Refund.refund_method, func.count(), func.sum(Refund.refund_amount))
-                             .group_by(Refund.refund_method)).all())
+    # #334: 读 std_refund_online_all 全量镜像(ods 同构透传, 含被排除行) —— 按单台账口径
+    #   (转入提现账户行被 std A 路采纳规则排除, std 采纳集里查不到);
+    #   蓄水池/水位的纯 B 核算见决策概览 wallet_water, 与本指标无关
+    rf_all = list(db.execute(
+        select(_REFUND_ALL.c.refund_method, func.count(), func.sum(_REFUND_ALL.c.refund_amount))
+        .group_by(_REFUND_ALL.c.refund_method)
+    ).all())
     a_total_cnt = 0; a_total_amt = 0.0
     for m, c, am in rf_all:
         if m and "转入" in m:
@@ -624,9 +640,11 @@ def refund_withdrawal_sleeping(
     """
     s = datetime.fromisoformat(start) if start else None
     e = datetime.fromisoformat(end) if end else None
+    # #334: 全状态全方式语义(转入提现账户行被 std A 路采纳规则排除) →
+    #   读 std_refund_online_all 全量镜像(ods 同构透传, 含被排除行)
     rf_rows = db.execute(text("""
         SELECT refund_no, device_sn, refund_amount, created_at_raw, operator
-        FROM refunds
+        FROM std_refund_online_all
         WHERE refund_method LIKE '%转入提现%'
           AND created_at_raw >= :ts AND created_at_raw <= :te
         ORDER BY created_at_raw

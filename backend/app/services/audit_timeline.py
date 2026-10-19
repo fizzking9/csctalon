@@ -33,7 +33,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
 
 from app.models.bms_order import BmsOrder
@@ -651,10 +651,14 @@ def build_device_timeline(
     since = _resolve_time_window(days)
     per_table_limit = max(limit, 200)
 
-    refund_stmt = select(Refund).where(Refund.device_sn == sn)
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    refund_sql = "SELECT * FROM std_refund_online_all WHERE device_sn = :sn"
+    refund_params: dict = {"sn": sn, "lim": per_table_limit}
     if since:
-        refund_stmt = refund_stmt.where(Refund.created_at_raw >= since)
-    refunds = list(db.scalars(refund_stmt.order_by(Refund.created_at_raw.desc()).limit(per_table_limit)))
+        refund_sql += " AND created_at_raw >= :since"
+        refund_params["since"] = since
+    refund_sql += " ORDER BY created_at_raw DESC LIMIT :lim"
+    refunds = list(db.execute(text(refund_sql), refund_params).all())
 
     ticket_stmt = select(ServiceTicket).where(ServiceTicket.device_sn == sn)
     if since:
@@ -663,10 +667,14 @@ def build_device_timeline(
         )
     tickets = list(db.scalars(ticket_stmt.order_by(ServiceTicket.finish_time.desc().nullslast()).limit(per_table_limit)))
 
-    wallet_stmt = select(WalletWithdrawal).where(WalletWithdrawal.device_sn == sn)
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    wallet_sql = "SELECT * FROM std_wallet_flow_all WHERE device_sn = :sn"
+    wallet_params: dict = {"sn": sn, "lim": per_table_limit}
     if since:
-        wallet_stmt = wallet_stmt.where(WalletWithdrawal.op_time >= since)
-    wallets = list(db.scalars(wallet_stmt.order_by(WalletWithdrawal.op_time.desc()).limit(per_table_limit)))
+        wallet_sql += " AND op_time >= :since"
+        wallet_params["since"] = since
+    wallet_sql += " ORDER BY op_time DESC LIMIT :lim"
+    wallets = list(db.execute(text(wallet_sql), wallet_params).all())
 
     mr_stmt = select(MerchantRefund).where(MerchantRefund.device_no == sn)
     if since:
@@ -697,16 +705,24 @@ def build_device_timeline(
     device_combos = list(db.scalars(combo_stmt.order_by(DeviceCombo.created_at_raw.desc().nullslast()).limit(per_table_limit)))
 
     # 手动退款登记(manual_refunds): 主时间=register_time
-    manual_stmt = select(ManualRefund).where(ManualRefund.device_sn == sn)
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    manual_sql = "SELECT * FROM std_refund_manual_all WHERE device_sn = :sn"
+    manual_params: dict = {"sn": sn, "lim": per_table_limit}
     if since:
-        manual_stmt = manual_stmt.where(ManualRefund.register_time >= since)
-    manual_refunds = list(db.scalars(manual_stmt.order_by(ManualRefund.register_time.desc().nullslast()).limit(per_table_limit)))
+        manual_sql += " AND register_time >= :since"
+        manual_params["since"] = since
+    manual_sql += " ORDER BY register_time DESC NULLS LAST LIMIT :lim"
+    manual_refunds = list(db.execute(text(manual_sql), manual_params).all())
 
     # 闪猫退款(shanmao_refunds): 主时间=apply_time
-    shanmao_stmt = select(ShanmaoRefund).where(ShanmaoRefund.device_sn == sn)
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    shanmao_sql = "SELECT * FROM std_refund_shanmao_all WHERE device_sn = :sn"
+    shanmao_params: dict = {"sn": sn, "lim": per_table_limit}
     if since:
-        shanmao_stmt = shanmao_stmt.where(ShanmaoRefund.apply_time >= since)
-    shanmao_refunds = list(db.scalars(shanmao_stmt.order_by(ShanmaoRefund.apply_time.desc().nullslast()).limit(per_table_limit)))
+        shanmao_sql += " AND apply_time >= :since"
+        shanmao_params["since"] = since
+    shanmao_sql += " ORDER BY apply_time DESC NULLS LAST LIMIT :lim"
+    shanmao_refunds = list(db.execute(text(shanmao_sql), shanmao_params).all())
 
     # 订单管理(bms_orders): 主时间=create_date(订单创建/同步锚点), 退 create_date
     order_stmt = select(BmsOrder).where(BmsOrder.device_sn == sn)
@@ -729,10 +745,14 @@ def build_device_timeline(
     return_trackings = list(db.scalars(rt_stmt.order_by(ReturnTracking.return_time.desc().nullslast()).limit(per_table_limit)))
 
     # 线上退款水单(refund_record_reports, E路): 主时间=refund_time
-    rrr_stmt = select(RefundRecordReport).where(RefundRecordReport.device_sn == sn)
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    rrr_sql = "SELECT * FROM std_refund_record_all WHERE device_sn = :sn"
+    rrr_params: dict = {"sn": sn, "lim": per_table_limit}
     if since:
-        rrr_stmt = rrr_stmt.where(RefundRecordReport.refund_time >= since)
-    refund_record_reports = list(db.scalars(rrr_stmt.order_by(RefundRecordReport.refund_time.desc().nullslast()).limit(per_table_limit)))
+        rrr_sql += " AND refund_time >= :since"
+        rrr_params["since"] = since
+    rrr_sql += " ORDER BY refund_time DESC NULLS LAST LIMIT :lim"
+    refund_record_reports = list(db.execute(text(rrr_sql), rrr_params).all())
 
     items = _merge_and_sort(
         [
@@ -801,10 +821,14 @@ def build_person_timeline(
     since = _resolve_time_window(days)
     per_table_limit = max(limit, 200)
 
-    refund_stmt = select(Refund).where(or_(Refund.operator.in_(alias_vals), Refund.auditor.in_(alias_vals)))
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    refund_sql = "SELECT * FROM std_refund_online_all WHERE (operator = ANY(:aliases) OR auditor = ANY(:aliases))"
+    refund_params = {"aliases": alias_vals, "lim": per_table_limit}
     if since:
-        refund_stmt = refund_stmt.where(Refund.created_at_raw >= since)
-    refunds = list(db.scalars(refund_stmt.order_by(Refund.created_at_raw.desc()).limit(per_table_limit)))
+        refund_sql += " AND created_at_raw >= :since"
+        refund_params["since"] = since
+    refund_sql += " ORDER BY created_at_raw DESC LIMIT :lim"
+    refunds = list(db.execute(text(refund_sql), refund_params).all())
 
     ticket_stmt = select(ServiceTicket).where(
         or_(ServiceTicket.handler.in_(alias_vals), ServiceTicket.registrant.in_(alias_vals))
@@ -815,10 +839,14 @@ def build_person_timeline(
         )
     tickets = list(db.scalars(ticket_stmt.order_by(ServiceTicket.finish_time.desc().nullslast()).limit(per_table_limit)))
 
-    wallet_stmt = select(WalletWithdrawal).where(WalletWithdrawal.operator.in_(alias_vals))
+    # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    wallet_sql = "SELECT * FROM std_wallet_flow_all WHERE operator = ANY(:aliases)"
+    wallet_params = {"aliases": alias_vals, "lim": per_table_limit}
     if since:
-        wallet_stmt = wallet_stmt.where(WalletWithdrawal.op_time >= since)
-    wallets = list(db.scalars(wallet_stmt.order_by(WalletWithdrawal.op_time.desc()).limit(per_table_limit)))
+        wallet_sql += " AND op_time >= :since"
+        wallet_params["since"] = since
+    wallet_sql += " ORDER BY op_time DESC LIMIT :lim"
+    wallets = list(db.execute(text(wallet_sql), wallet_params).all())
 
     cs_stmt = select(CsRecord).where(CsRecord.operator.in_(alias_vals))
     if since:

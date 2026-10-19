@@ -63,7 +63,8 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
 
     与 refund_recovery_analysis 第1-5步逻辑完全一致, 提取为公共函数供深度分析接口复用.
 
-    #332 例外声明(铁律15): 本函数全部退款读取走 ods 原始层 refunds, 不切 std ——
+    #334 例外声明(铁律15): 本函数全部退款读取走 std_refund_online_all 全量镜像视图
+    (ods 同构透传, 含被采纳排除行), 不切 std 采纳集 ——
     挽回漏斗是全状态语义, 需追「申请中/无需退款/驳回」等未完结工单
     (std 只含已退款采纳行, 读 std 会漏掉正在挽回的活单, 成功率/待挽回清单全错).
 
@@ -240,7 +241,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
                    COALESCE(r.actual_amount, r.refund_amount, 0) AS amount,
                    r.status AS status, r.refund_method AS method,
                    r.created_at_raw AS event_time
-            FROM refunds r
+            FROM std_refund_online_all r
             JOIN host_sns hs ON r.device_sn = hs.sn
             WHERE r.created_at_raw IS NOT NULL
               AND r.device_sn IS NOT NULL
@@ -320,7 +321,7 @@ def _refund_recovery_core(db: Session, ts, te) -> dict:
         """
         SELECT r.device_sn AS sn, r.operator AS op,
                COALESCE(r.actual_amount, r.refund_amount, 0) AS amt
-        FROM refunds r
+        FROM std_refund_online_all r
         WHERE r.created_at_raw IS NOT NULL
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
           AND r.device_sn IS NOT NULL
@@ -519,7 +520,8 @@ def refund_person_devices(
 ) -> dict[str, Any]:
     """接口2: 人员接待设备清单 - 某人员周期内接待的所有SN + 成功/失败明细.
 
-    #332 例外声明(铁律15): 退款读取走 ods 原始层 refunds —— 全状态语义,
+    #334 例外声明(铁律15): 退款读取走 std_refund_online_all 全量镜像视图
+    (ods 同构透传, 含被排除行) —— 全状态语义,
     理由见 _refund_recovery_core docstring。
     """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
@@ -578,7 +580,7 @@ def refund_person_devices(
             """
             SELECT r.device_sn AS sn, r.refund_no, r.created_at_raw, r.status,
                    COALESCE(r.actual_amount, r.refund_amount, 0) AS amt
-            FROM refunds r
+            FROM std_refund_online_all r
             WHERE r.created_at_raw IS NOT NULL
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
               AND r.device_sn = ANY(:sn_arr)
@@ -726,7 +728,8 @@ def refund_device_analysis(
 ) -> dict[str, Any]:
     """接口5: 设备分析 - Top风险设备 + 时差分布 + 接待次数分布.
 
-    #332 例外声明(铁律15): 退款读取走 ods 原始层 refunds —— 全状态语义,
+    #334 例外声明(铁律15): 退款读取走 std_refund_online_all 全量镜像视图
+    (ods 同构透传, 含被排除行) —— 全状态语义,
     理由见 _refund_recovery_core docstring。
     """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
@@ -757,7 +760,7 @@ def refund_device_analysis(
         r_row = db.execute(text(
             """
             SELECT r.refund_no, r.created_at_raw, r.status
-            FROM refunds r
+            FROM std_refund_online_all r
             WHERE r.device_sn = :sn AND r.created_at_raw IS NOT NULL
               AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
             ORDER BY r.created_at_raw DESC LIMIT 1
@@ -879,7 +882,8 @@ def refund_device_detail(
 ) -> dict[str, Any]:
     """接口6: 设备详情 - 接待时间线 + 退款记录 + 工单 + 钱包.
 
-    #332 例外声明(铁律15): 退款/钱包读取走 ods 原始层 refunds/wallet_withdrawals ——
+    #334 例外声明(铁律15): 退款/钱包读取走 std_refund_online_all / std_wallet_flow_all
+    全量镜像视图(ods 同构透传, 含被排除行) ——
     设备详情需展示该 SN 全状态退款记录与全量钱包流水(含失败/冻结), 非经营统计口径。
     """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
@@ -926,7 +930,7 @@ def refund_device_detail(
         """
         SELECT r.refund_no, r.refund_amount, r.actual_amount, r.refund_method,
                r.status, r.operator, r.auditor, r.created_at_raw, r.refund_reason
-        FROM refunds r
+        FROM std_refund_online_all r
         WHERE r.device_sn = :sn AND r.created_at_raw IS NOT NULL
         ORDER BY r.created_at_raw DESC
         LIMIT 10
@@ -965,7 +969,7 @@ def refund_device_detail(
     for r in db.execute(text(
         """
         SELECT w.id, w.op_time, w.op_amount, w.op_type
-        FROM wallet_withdrawals w
+        FROM std_wallet_flow_all w
         WHERE w.device_sn = :sn AND w.op_time IS NOT NULL
         ORDER BY w.op_time DESC LIMIT 10
         """
@@ -1320,7 +1324,8 @@ def refund_decision_overview(
     #           作为防御性保留, 防采纳规则未来放宽导致口径漂移)
     #     采纳规则版本: ADOPT_RULE_VER=r20261016_v1; 采纳行数/金额基线见 #332 T7 对账报告。
     #     明细/失败归因/全方式语义查询(设备详情/退款失败分析/操作人全方式统计)不属
-    #     口径统计, 读 ods 原始层 refunds/wallet_withdrawals(见各处 #332 注释)。
+    #     口径统计, 读 std_*_all 全量镜像视图(std_refund_online_all / std_wallet_flow_all
+    #     等, ods 同构透传含被排除行; 见各处 #334 注释)。
     #     口径权威: docs/standards/退款五路数据标准与采纳规则.md
     #     ═══════════════════════════════════════════════════════════════════════
     #     线下退款、转入提现账户(钱包内部流转)不属于四路, 不计入现金流全景
@@ -1477,11 +1482,12 @@ def refund_decision_overview(
     reconcile_diff = round(cur_cash - actual_cash, 2)     # 对账偏差 = 经营四路 − E
 
     # ── 4. 手动退款登记水位 (与钱包水位同构: 登记 vs 已退款完成 = 蓄水) ──
-    # 登记进水=全部登记(含未退/蓄水) → #332 读 ods 原始表 manual_refunds(std 只含已退款采纳行)
+    # 登记进水=全部登记(含未退/蓄水) → #334 读 std_refund_manual_all 全量镜像
+    # (ods 同构透传, 含被排除行; std 采纳集只含已退款行)
     mreg_rows = db.execute(text(f"""
         SELECT {_day("m.register_time")} AS d,
                count(*) AS cnt, COALESCE(sum(m.refund_amount), 0) AS amt
-        FROM manual_refunds m
+        FROM std_refund_manual_all m
         WHERE m.register_time >= :ts AND m.register_time <= :te
         GROUP BY 1 ORDER BY 1
     """), {"ts": cur_s, "te": cur_e}).fetchall()
@@ -1875,8 +1881,8 @@ def refund_export_original(
     """
     cur_s, cur_e, _, _, _, _ = _resolve_windows(None, start, end)
     # #332: 经营口径 → std_refund_online(采纳口径表层固化, 无需再拼 method/status 条件);
-    #        原始全量(默认) → ods 原始表 refunds(全状态全方式供人工自筛)
-    _table = "std_refund_online" if online_refunded_only else "refunds"
+    #        #334: 原始全量(默认) → std_refund_online_all 全量镜像(ods 同构透传, 全状态全方式供人工自筛)
+    _table = "std_refund_online" if online_refunded_only else "std_refund_online_all"
 
     # 涉诉分类 (与决策概览口径一致; 三源关键词与 _complaint_source_type_case 约定一致)
     comp_map: dict[str, str] = {}
@@ -1979,16 +1985,16 @@ def refund_export_original(
 def refund_export_all(
     db: Session, start: str | None = None, end: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """导出退款分析 Excel(多 sheet): 明细(ods 原始全量, 供人工分析) + 汇总(std 采纳口径对账).
+    """导出退款分析 Excel(多 sheet): 明细(std_*_all 全量镜像, 供人工分析) + 汇总(std 采纳口径对账).
 
     明细 sheet(2026-09-09 放宽为台账原始, 人工分析用, 不砍状态/类型行, 附状态列自筛;
-    #332: 明细维持「原始全量自筛」语义不切 std —— std 表只含采纳行, 会丢人工自筛所需
-    的驳回/失败/登记未退等行; 明细直读 ods 原始表):
-    - A退费单明细(全量): refunds 全部(线上直退/线下/转入提现账户/未填写 + 驳回/无需退款/空白), 时间=created_at_raw
-    - B钱包流水明细(全量): wallet_withdrawals 全部 op_type(用户提现/订单退费转入/系统扣费), 时间=op_time
-    - C闪猫退款明细(全量): shanmao_refunds 全部状态, 时间=COALESCE(audit_time, created_at)
-    - D手动退款明细(全量): manual_refunds 全部(is_refunded 是/否), 时间=COALESCE(op_time, register_time)
-    - E退款记录报表(全量): refund_record_reports 全部 refund_status, 时间=refund_time
+    #334: 明细维持「全量自筛」语义不切 std 采纳集 —— std 表只含采纳行, 会丢人工自筛所需
+    的驳回/失败/登记未退等行; 明细读 std_*_all 全量镜像视图(ods 同构透传, 含被排除行)):
+    - A退费单明细(全量): std_refund_online_all 全部(线上直退/线下/转入提现账户/未填写 + 驳回/无需退款/空白), 时间=created_at_raw
+    - B钱包流水明细(全量): std_wallet_flow_all 全部 op_type(用户提现/订单退费转入/系统扣费), 时间=op_time
+    - C闪猫退款明细(全量): std_refund_shanmao_all 全部状态, 时间=COALESCE(audit_time, created_at)
+    - D手动退款明细(全量): std_refund_manual_all 全部(is_refunded 是/否), 时间=COALESCE(op_time, register_time)
+    - E退款记录报表(全量): std_refund_record_all 全部 refund_status, 时间=refund_time
 
     汇总 sheet(五路汇总(A-E))保持成功口径, #332 起取数 std 标准表(采纳作业固化, r20261016_v1),
     与 refund_decision_overview.routes_daily 一致:
@@ -2003,7 +2009,7 @@ def refund_export_all(
 
     # A 退费单明细 (原始全量: 所有退费单行含线下/转入提现/未填写 + 驳回/无需退款/空白状态,
     # 供人工分析自筛; 2026-09-09 由'仅线上已退款'放宽回全量;
-    # #332: 明细维持原始全量读 ods 原始表 refunds, 不切 std)
+    # #334: 明细维持全量语义读 std_refund_online_all 全量镜像(ods 同构透传, 含被排除行), 不切 std 采纳集)
     sheets["A退费单明细(全量)"] = refund_export_original(db, start, end)
 
     def _sh(dt) -> str:
@@ -2013,10 +2019,10 @@ def refund_export_all(
 
     # B 钱包流水明细 (台账原始全量: 用户提现/订单退费转入/系统扣费等全部 op_type,
     # 含失败/冻结备注; 附"操作类型/备注"列供人工筛出真实出款; 2026-09-09 放宽;
-    # #332: 读 ods 原始表 wallet_withdrawals, 不切 std)
+    # #334: 读 std_wallet_flow_all 全量镜像(ods 同构透传, 含被排除行), 不切 std 采纳集)
     b_rows = db.execute(text("""
         SELECT account_id, device_sn, op_type, op_amount, wallet_balance, operator, op_time, remark
-        FROM wallet_withdrawals w
+        FROM std_wallet_flow_all w
         WHERE w.op_time >= :ts AND w.op_time <= :te
         ORDER BY w.op_time
     """), {"ts": cur_s, "te": cur_e}).fetchall()
@@ -2032,12 +2038,12 @@ def refund_export_all(
     } for r in b_rows]
 
     # C 闪猫退款明细 (台账原始全量: 全部状态含申请中/已驳回/已退款; 附"状态"列自筛; 2026-09-09 放宽;
-    # #332: 读 ods 原始表 shanmao_refunds, 不切 std)
+    # #334: 读 std_refund_shanmao_all 全量镜像(ods 同构透传, 含被排除行), 不切 std 采纳集)
     c_rows = db.execute(text("""
         SELECT refund_no, order_no, device_sn, phone, paid_amount, refund_amount, actual_amount,
                package_name, merchant_name, refund_reason, refund_method, status,
                applicant, auditor, operator, apply_time, audit_time, refund_time, remark, audit_remark
-        FROM shanmao_refunds
+        FROM std_refund_shanmao_all
         WHERE COALESCE(audit_time, created_at) >= :ts AND COALESCE(audit_time, created_at) <= :te
         ORDER BY COALESCE(audit_time, created_at)
     """), {"ts": cur_s, "te": cur_e}).fetchall()
@@ -2065,11 +2071,11 @@ def refund_export_all(
     } for r in c_rows]
 
     # D 手动退款明细 (台账原始全量: 含 is_refunded=否 的登记(蓄水/未退)与已治理重复行;
-    # 附"是否已退款/质量状态"列自筛; 2026-09-09 放宽; #332: 读 ods 原始表 manual_refunds, 不切 std)
+    # 附"是否已退款/质量状态"列自筛; 2026-09-09 放宽; #334: 读 std_refund_manual_all 全量镜像(ods 同构透传, 含被排除行), 不切 std 采纳集)
     d_rows = db.execute(text("""
         SELECT register_time, device_sn, order_no, merchant_id, order_amount, refund_amount,
                registrant, is_refunded, refund_operator, op_time, remark, quality_status
-        FROM manual_refunds
+        FROM std_refund_manual_all
         WHERE COALESCE(op_time, register_time) >= :ts AND COALESCE(op_time, register_time) <= :te
         ORDER BY COALESCE(op_time, register_time)
     """), {"ts": cur_s, "te": cur_e}).fetchall()
@@ -2089,11 +2095,11 @@ def refund_export_all(
     } for r in d_rows]
 
     # E 退款记录报表明细 (台账原始全量: 全部 refund_status; 附"退款状态"列自筛; 2026-09-09 放宽;
-    # #332: 读 ods 原始表 refund_record_reports, 不切 std)
+    # #334: 读 std_refund_record_all 全量镜像(ods 同构透传, 含被排除行), 不切 std 采纳集)
     e_rows = db.execute(text("""
         SELECT platform_order_no, wx_order_no, merchant_id, merchant_name, device_sn,
                product_name, refund_time, apply_refund_amount, refund_amount, refund_status
-        FROM refund_record_reports
+        FROM std_refund_record_all
         WHERE refund_time >= :ts AND refund_time <= :te
         ORDER BY refund_time
     """), {"ts": cur_s, "te": cur_e}).fetchall()
@@ -2297,7 +2303,8 @@ def refund_recovery_analysis(
 ) -> dict[str, Any]:
     """退款挽回专项分析: 总体KPI + 原因分布 + 按人员明细 + 周趋势.
 
-    #332 例外声明(铁律15): 本函数全部退款读取(含各 CTE)走 ods 原始层 refunds ——
+    #334 例外声明(铁律15): 本函数全部退款读取(含各 CTE)走 std_refund_online_all
+    全量镜像视图(ods 同构透传, 含被排除行) ——
     全状态语义, 理由见 _refund_recovery_core docstring。
 
     返回结构:
@@ -2534,7 +2541,7 @@ def refund_recovery_analysis(
                    r.status AS status,
                    r.refund_method AS method,
                    r.created_at_raw AS event_time
-            FROM refunds r
+            FROM std_refund_online_all r
             JOIN host_sns hs ON r.device_sn = hs.sn
             WHERE r.created_at_raw IS NOT NULL
               AND r.device_sn IS NOT NULL
@@ -2632,13 +2639,13 @@ def refund_recovery_analysis(
     #   注意: 这只是 "退款操作工作量" 独立字段, 不影响成功率计算的分子分母
     refund_op_sns: dict[str, set[str]] = {}   # operator alias -> set of 退款操作 SN
     refund_op_amt: dict[str, Decimal] = {}     # operator alias -> 操作金额合计
-    # 从 refunds 拉 operator (统计真人操作的所有退款方式:线上/线下/转入提现账户)
+    # 从 std_refund_online_all 拉 operator (统计真人操作的所有退款方式:线上/线下/转入提现账户)
     for r in db.execute(text(
         """
         SELECT r.device_sn AS sn,
                r.operator AS op,
                COALESCE(r.actual_amount, r.refund_amount, 0) AS amt
-        FROM refunds r
+        FROM std_refund_online_all r
         WHERE r.created_at_raw IS NOT NULL
           AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
           AND r.device_sn IS NOT NULL
@@ -3003,7 +3010,7 @@ def refund_recovery_analysis(
                    COALESCE(r.actual_amount, r.refund_amount, 0) AS amount,
                    r.status AS status, r.refund_method AS method,
                    r.created_at_raw AS event_time
-            FROM refunds r
+            FROM std_refund_online_all r
             WHERE r.created_at_raw IS NOT NULL
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
               AND r.device_sn IS NOT NULL
@@ -3073,7 +3080,7 @@ def refund_recovery_analysis(
             FROM (
                 SELECT r.device_sn AS sn,
                        DATE(r.created_at_raw AT TIME ZONE 'Asia/Shanghai') AS day
-                FROM refunds r
+                FROM std_refund_online_all r
                 WHERE r.created_at_raw IS NOT NULL
                   AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
                   AND r.device_sn = ANY(:sn_arr)
@@ -3169,12 +3176,12 @@ def refund_recovery_analysis(
                 key = str(r.d)
                 day_to_host.setdefault(key, set()).add(r.sn)
             # 日粒度 失败SN (T+7, 修正口径: 不限制operator/refund_method, 工单用register_time)
-            # 与 KPI global_fail_sns 一致: refunds + 退款工单 + cs_record关键词 三来源
+            # 与 KPI global_fail_sns 一致: std_refund_online_all + 退款工单 + cs_record关键词 三来源
             ck = _RR_CS_FAIL_KW
             day_fail_rows = db.execute(text(
                 f"""
                 SELECT r.device_sn AS sn
-                FROM refunds r
+                FROM std_refund_online_all r
                 WHERE r.created_at_raw IS NOT NULL
                   AND r.created_at_raw >= :ts AND r.created_at_raw <= :te7
                   AND COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
@@ -3256,12 +3263,12 @@ def refund_recovery_analysis(
             today_all_sns.update(s)
         today_fail_sns: set[str] = set()
         if today_all_sns:
-            # 与 KPI global_fail_sns 口径一致: refunds + 退款工单 + cs_record关键词 三来源
+            # 与 KPI global_fail_sns 口径一致: std_refund_online_all + 退款工单 + cs_record关键词 三来源
             ck = _RR_CS_FAIL_KW
             tfr = db.execute(text(
                 """
                 WITH arr AS (SELECT unnest(CAST(:sn_arr AS text[])) AS sn)
-                SELECT DISTINCT r.device_sn AS sn FROM refunds r JOIN arr a ON r.device_sn = a.sn
+                SELECT DISTINCT r.device_sn AS sn FROM std_refund_online_all r JOIN arr a ON r.device_sn = a.sn
                  WHERE COALESCE(r.status, '') NOT IN ('无需退款', '驳回', '申请中')
                 UNION
                 SELECT DISTINCT st.device_sn AS sn FROM service_tickets st JOIN arr a ON st.device_sn = a.sn

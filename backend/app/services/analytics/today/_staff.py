@@ -12,7 +12,7 @@ from decimal import Decimal
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, func, literal, or_, select, text, union
+from sqlalchemy import and_, case, column, func, literal, or_, select, table, text, union
 from sqlalchemy.orm import Session
 
 from app.models.ods_clean import CardComplaintClean
@@ -22,7 +22,9 @@ from app.models.group import Group, PersonGroupMembership
 from app.models.incident import Incident
 from app.models.person import Person, PersonAlias
 from app.models.ods_clean import RefundRecordReportClean  # noqa: F401  (#332: 预留 import, 当前无取数)
-from app.models.refund import Refund  # #332: 退款挽回工作量=全状态口径, 读 ods 原始层(std 只含已退款采纳行)
+# #334: 退款挽回工作量=全状态口径, 读 std_refund_online_all 全量镜像
+#   (ods.refunds 同构透传, 含被采纳规则排除行; std 采纳集只含已退款行)。
+#   轻量 table()/column() 即可 —— 本文件只做聚合/明细查询, 不需要 ORM 实体。
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.task import SpecialTask
 from app.models.ticket import ServiceTicket
@@ -58,7 +60,6 @@ from app.services.analytics._core import (
     _parse_date,
     _pct_delta,
     _resolve_windows,
-    _route_a_online_any_status_filter,
     _route_a_online_refund_filter,
     _route_b_withdraw_filter,
     _route_e_cashflow_filter,
@@ -77,6 +78,12 @@ from app.services.analytics.reception import (
     _category_case,
     _merge_person_rows,
     _operator_to_person_cte,
+)
+
+# #334: std_refund_online_all 全量镜像的轻量表句柄(见上方 import 处注释)
+_REFUND_ONLINE_ALL = table(
+    "std_refund_online_all",
+    column("operator"), column("device_sn"), column("created_at_raw"), column("refund_method"),
 )
 
 
@@ -179,15 +186,17 @@ def today_staff_efficiency(
     #    已有 sys/system 排除, 保留
     #    ⚠️ 2026-09-08: 工作量口径(无金额)保持全状态(any_status), 不随经营口径收紧到已退款,
     #    否则会低估"申请中/驳回"等已投入处理动作的工作量。
-    rf_q = (select(Refund.operator.label("op"),
+    #    #334: 读 std_refund_online_all 全量镜像(ods 同构透传, 含被排除行);
+    #    原 _route_a_online_any_status_filter()(仅 refund_method='线上')改绑到镜像视图
+    rf_q = (select(_REFUND_ONLINE_ALL.c.operator.label("op"),
                    func.count().label("sc"),
-                   func.count(func.distinct(func.nullif(func.trim(Refund.device_sn), ""))).label("pc"))
-            .where(Refund.created_at_raw.isnot(None),
-                   Refund.created_at_raw >= ts, Refund.created_at_raw <= te,
-                   Refund.operator.isnot(None),
-                   Refund.operator.notin_(["sys", "system", "SYS", "System"]),
-                   *_route_a_online_any_status_filter())
-            .group_by(Refund.operator)).cte("rf_q")
+                   func.count(func.distinct(func.nullif(func.trim(_REFUND_ONLINE_ALL.c.device_sn), ""))).label("pc"))
+            .where(_REFUND_ONLINE_ALL.c.created_at_raw.isnot(None),
+                   _REFUND_ONLINE_ALL.c.created_at_raw >= ts, _REFUND_ONLINE_ALL.c.created_at_raw <= te,
+                   _REFUND_ONLINE_ALL.c.operator.isnot(None),
+                   _REFUND_ONLINE_ALL.c.operator.notin_(["sys", "system", "SYS", "System"]),
+                   _REFUND_ONLINE_ALL.c.refund_method == "线上")
+            .group_by(_REFUND_ONLINE_ALL.c.operator)).cte("rf_q")
     # 4. 投诉类工单 处理人完工: 笔数 + 去重设备个数
     cm_q = (select(ServiceTicket.handler.label("op"),
                    func.count().label("sc"),
@@ -373,12 +382,13 @@ def today_staff_efficiency(
               )
         ),
         -- 子查询2: refund SN → "退款处理" 专项 (实际退款操作)
-        -- #332: 全状态工作量语义(只看经手, 不管经营出款) → 读 ods 原始层,
+        -- #334: 全状态工作量语义(只看经手, 不管经营出款) → 读 std_refund_online_all
+        --   全量镜像(ods 同构透传, 含被排除行);
         --   std_refund_online 只含已退款采纳行会漏掉申请中/驳回的处理工作量
         rf_sns AS (
             SELECT r.operator AS op, '退款处理' AS spec,
                    r.device_sn AS sn
-            FROM refunds r
+            FROM std_refund_online_all r
             WHERE r.created_at_raw IS NOT NULL
               AND r.created_at_raw >= :ts AND r.created_at_raw <= :te
               AND r.operator IS NOT NULL

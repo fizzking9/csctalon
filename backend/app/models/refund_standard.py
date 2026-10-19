@@ -279,3 +279,17 @@ class AdoptionOverride(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False, comment="提交时间"
     )
+
+
+# ── #334: std_*_all 全量镜像视图（单一来源，Alembic 迁移与 tests/conftest 共用）────────
+# 键=视图名(public schema), 值=ods 源表全限定名。SELECT * 透传, 含 T1 采纳四列。
+# 定位: 全状态语义场景(挽回漏斗/状态分布/工作量/导出明细/链路台账/设备档案/对账勾稽)
+#   统一读本视图; 经营统计仍读 std_* 采纳集物理表; 业务代码禁止直读 ods。
+# ⚠️ 只读: 视图不可写; 任何写入(采集 upsert / 质量标记 / 人工覆盖)必须落 ods 源表。
+STD_ALL_VIEWS: dict[str, str] = {
+    "std_refund_online_all": "ods.refunds",
+    "std_wallet_flow_all": "ods.wallet_withdrawals",
+    "std_refund_shanmao_all": "ods.shanmao_refunds",
+    "std_refund_manual_all": "ods.manual_refunds",
+    "std_refund_record_all": "ods.refund_record_reports",
+}
