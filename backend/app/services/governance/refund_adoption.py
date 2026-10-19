@@ -68,6 +68,36 @@ E_ADOPT_ALL = "E_ADOPT_ALL"                # 全量采纳(refund_status 原样�
 # 未知枚举(不在任何白名单内)→ pending; 非业务规则码, 仅标记「机器无法归类」
 PENDING_UNKNOWN = "PENDING_UNKNOWN"
 
+# ── 规则码中文释义(#333) ─────────────────────────────────────────────────────
+# 单一来源: 与上方规则码定义同处维护(改规则码必须同步改这里)。
+# 消费方: data_source_registry 经 ADOPT_REASON_ENUM 下发前端, 数据查看树
+# adopt_reason 列 tooltip 展示; 供业务看懂「这行为什么进/没进统计」。
+ADOPT_REASON_CN: dict[str, str] = {
+    A_ADOPT_ONLINE: "采纳: 已退款且方式为线上(含空方式)",
+    A_EX_METHOD: "排除: 方式为转入提现账户/线下, 非线上直退",
+    A_EX_GARBAGE: "排除: 方式或状态错位值/长文本垃圾",
+    A_EX_STATUS: "排除: 状态为无需退款/驳回/申请中(未完结)",
+    A_EX_STATUS_NULL: "排除: 状态为空(且非已退款)",
+    B_ADOPT_INFLOW: "采纳: 订单退费转入(蓄水池进水)",
+    B_ADOPT_OUTFLOW: "采纳: 系统扣费/成功用户提现(出水)",
+    B_EX_FAIL_FROZEN: "排除: 用户提现备注含失败/冻结关键词",
+    B_EX_NULL_TYPE: "排除: 操作类型为空",
+    C_ADOPT: "采纳: 闪猫退款状态为已退款",
+    C_EX_NOT_REFUNDED: "排除: 审核中/退款中/失败/驳回/无需退款",
+    D_ADOPT: "采纳: 手动登记已退款(非重复/SN可解析)",
+    D_EX_DUP: "排除: 重复残留(dup_residual)",
+    D_EX_NO_SN: "排除: SN不可解析(sn_unresolvable)",
+    D_EX_NOT_REFUNDED: "排除: 登记为未退款(蓄水, 非出款)",
+    E_ADOPT_ALL: "采纳: E路全量(水单对账基准, 状态原样保留)",
+    PENDING_UNKNOWN: "待定: 规则白名单外的未知枚举, 待业务确认",
+}
+
+# 前端下发格式: "code=中文" 列表(经 DataSourceField.enum_values 走既有通道)
+ADOPT_REASON_ENUM: list[str] = [f"{k}={v}" for k, v in ADOPT_REASON_CN.items()]
+
+# adopt_state 三态枚举(含 NULL 语义说明见 AdoptionColumnsMixin 注释)
+ADOPT_STATE_ENUM: list[str] = ["adopted", "excluded", "pending"]
+
 ROUTE_A = "A"
 ROUTE_B = "B"
 ROUTE_C = "C"

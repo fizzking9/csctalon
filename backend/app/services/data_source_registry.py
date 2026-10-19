@@ -36,6 +36,9 @@ from app.models.shanmao_refund import ShanmaoRefund
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 
+# #333: 采纳三态/规则码枚举单一来源在采纳作业模块
+from app.services.governance.refund_adoption import ADOPT_REASON_ENUM, ADOPT_STATE_ENUM
+
 # ─────────────────────────────────────────────────────────────────────
 # 数据查看树：分组口径与命名约束（工单 #100）
 #
@@ -680,6 +683,38 @@ FIELD_OVERRIDES: dict[tuple[str, str], dict] = {
     ("device_flow_usage", "month_complete"): {"role": "category", "name_cn": "是否完整月"},
     ("device_flow_usage", "fetched_at"): {"role": "time", "name_cn": "抓取时间"},
 }
+
+# ── #333: 采纳治理四列展示配置（经营五路 A~E 共用, 程序化展开） ────────────────
+# 目的: 数据查看树五路原始表行级展示「这行为什么进/没进统计」——
+#   adopt_state 三态徽标 + 规则码中文 tooltip + 待定行可筛选(工单 #333)。
+# 口径单一来源: ADOPT_REASON_ENUM / ADOPT_STATE_ENUM 定义在采纳作业模块
+#   (app.services.governance.refund_adoption), 规则码变更必须同处升版。
+# 只读约束: 本页仅展示, 人工覆盖一律走后端 admin API adoption_overrides(铁律 15)。
+_ADOPT_SOURCE_CODES = ("refund", "wallet", "shanmao_refund", "manual_refund", "refund_record_report")
+for _ac in _ADOPT_SOURCE_CODES:
+    FIELD_OVERRIDES[(_ac, "adopt_state")] = {
+        "role": "category",
+        "enum": list(ADOPT_STATE_ENUM),
+        "is_filterable": True,
+        "name_cn": "采纳状态(是否进统计)",
+    }
+    FIELD_OVERRIDES[(_ac, "adopt_reason")] = {
+        "role": "dimension",
+        # enum 下发 "规则码=中文释义" 列表, 供前端 tooltip; 不参与筛选
+        "enum": list(ADOPT_REASON_ENUM),
+        "is_filterable": False,
+        "name_cn": "采纳规则码",
+    }
+    FIELD_OVERRIDES[(_ac, "adopt_rule_ver")] = {
+        "role": "dimension",
+        "is_filterable": False,
+        "name_cn": "采纳规则版本",
+    }
+    FIELD_OVERRIDES[(_ac, "adopted_at")] = {
+        "role": "time",
+        "is_filterable": False,
+        "name_cn": "采纳判定时间",
+    }
 
 # 反射时排除的系统字段（TimestampMixin 的系统时间 + raw_extra 冗余）
 _EXCLUDED_FIELDS = {"id", "created_at", "updated_at", "raw_extra"}

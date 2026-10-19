@@ -29,6 +29,14 @@
           因为投诉口径是 `service_category` 空白或='投诉'（BMS 导出未选类别即空白），
           预置筛很容易与「投诉分析」页的口径打架。要看投诉口径请去投诉分析页。
         · **不做树内搜索/拖拽排序**。当前 21 项，五分组可一屏扫完；加搜索是过度设计。
+        · **#333 采纳状态只读展示**。经营五路原始表行级展示采纳三态徽标 + 规则码
+          中文 tooltip，回答"这行原始数据到底进没进统计"（口径权威：
+          docs/standards/退款五路数据标准与采纳规则.md）。规则码释义由后端
+          /fields 的 enum_values 下发（单一来源在采纳作业模块 refund_adoption），
+          前端零硬编码，规则升级只改后端。
+          取舍：**不提供改采纳状态的任何入口** —— 人工治理一律走后端 admin API
+          （adoption_overrides）留痕 + 幂等重算（铁律 15），界面直改会绕过覆盖
+          审计与规则版本化，故本页四列全部只读。
     -->
     <div class="flex-row">
       <!-- 左侧数据源列表 -->
@@ -181,6 +189,20 @@
               >只读投影 · 真身「{{ currentSource.true_body_name }}」</el-tag>
             </div>
             <div class="header-actions">
+              <!-- #333: 采纳状态筛选(仅经营五路原始表显示) —— 待定行治理跟进入口 -->
+              <el-select
+                v-if="hasAdoptState"
+                v-model="filters.adopt_state"
+                size="small"
+                style="width: 160px"
+                placeholder="采纳状态: 全部"
+                clearable
+                @change="handleFilterChange"
+              >
+                <el-option label="采纳(进统计)" value="adopted" />
+                <el-option label="排除(不进统计)" value="excluded" />
+                <el-option label="待定(需治理跟进)" value="pending" />
+              </el-select>
               <el-button
                 type="primary"
                 size="small"
@@ -216,7 +238,50 @@
                 :sortable="col.sortable"
                 show-overflow-tooltip
               >
-                <template #default="{ row }">{{ fmtCell(row[col.prop], col.dataType) }}</template>
+                <!-- #333: 采纳状态列表头带口径说明(ⓘ) —— 页面层可见说明 -->
+                <template v-if="col.prop === 'adopt_state'" #header>
+                  <span>{{ col.label }}</span>
+                  <el-tooltip placement="top" effect="light" :width="340">
+                    <template #content>
+                      <div style="line-height: 1.7">
+                        <b>这行原始数据进没进统计？</b>（口径：退款五路数据标准与采纳规则.md）<br>
+                        <el-tag size="small" type="success">采纳</el-tag> 进入 std_* 标准表，计入经营统计<br>
+                        <el-tag size="small" type="info">排除</el-tag> 规则排除，不计入统计（原因见「采纳规则码」列）<br>
+                        <el-tag size="small" type="warning">待定</el-tag> 未知枚举，待业务确认，暂不计入<br>
+                        <span style="opacity:.7">未判定 = 尚未跑过采纳作业（新同步行）。<br>
+                        本页只读：改判走后台人工覆盖 API 留痕，规则版本化可重算。</span>
+                      </div>
+                    </template>
+                    <el-icon class="adopt-info-icon"><InfoFilled /></el-icon>
+                  </el-tooltip>
+                </template>
+                <template #default="{ row }">
+                  <!-- #333: 采纳三态徽标 -->
+                  <template v-if="col.prop === 'adopt_state'">
+                    <el-tag
+                      v-if="row.adopt_state"
+                      size="small"
+                      :type="adoptStateMeta[row.adopt_state]?.type || 'info'"
+                    >{{ adoptStateMeta[row.adopt_state]?.label || row.adopt_state }}</el-tag>
+                    <span v-else class="cell-dim">未判定</span>
+                  </template>
+                  <!-- #333: 规则码 + 中文释义 tooltip(释义来自后端 enum 下发) -->
+                  <template v-else-if="col.prop === 'adopt_reason'">
+                    <el-tooltip v-if="row.adopt_reason" placement="top" effect="light" :width="320">
+                      <template #content>
+                        <div style="max-width: 300px; line-height: 1.6">
+                          {{ adoptReasonCn(row.adopt_reason) }}
+                          <div v-if="row.adopt_rule_ver" style="margin-top: 4px; opacity: .7">
+                            规则版本: {{ row.adopt_rule_ver }}
+                          </div>
+                        </div>
+                      </template>
+                      <span class="adopt-reason-cell">{{ row.adopt_reason }}</span>
+                    </el-tooltip>
+                    <span v-else>-</span>
+                  </template>
+                  <template v-else>{{ fmtCell(row[col.prop], col.dataType) }}</template>
+                </template>
               </el-table-column>
             </el-table>
           </div>
@@ -434,6 +499,10 @@ const tableColumns = computed(() => {
     if (f.data_type === 'timestamp') width = 170
     if (f.data_type === 'numeric') width = 120
     if (f.semantic_role === 'sn') width = 180
+    // #333: 采纳治理四列固定列宽(徽标/规则码/版本/时间)
+    if (f.field_name === 'adopt_state') width = 150
+    if (f.field_name === 'adopt_reason') width = 150
+    if (f.field_name === 'adopt_rule_ver') width = 130
     return {
       prop: f.field_name,
       label: f.field_name_cn || f.field_name,
@@ -443,6 +512,40 @@ const tableColumns = computed(() => {
     }
   })
 })
+
+// ── #333: 采纳治理四列展示辅助 ────────────────────────────────────────────
+// 三态徽标文案与颜色(纯展示映射; 枚举值本身由后端权威定义)
+const adoptStateMeta = {
+  adopted: { label: '采纳', type: 'success' },
+  excluded: { label: '排除', type: 'info' },
+  pending: { label: '待定', type: 'warning' },
+}
+
+// 当前数据源是否含采纳状态列(经营五路原始表; 其它表不显示筛选与徽标逻辑)
+const hasAdoptState = computed(() =>
+  currentFields.value.some((f) => f.field_name === 'adopt_state')
+)
+
+// 规则码 → 中文释义: 从后端 /fields 的 adopt_reason enum_values("code=中文")解析,
+// 前端零硬编码 —— 规则码升级只改采纳作业模块, 界面自动跟随。
+const adoptReasonMap = computed(() => {
+  const f = currentFields.value.find((x) => x.field_name === 'adopt_reason')
+  const map = {}
+  for (const e of f?.enum_values || []) {
+    const i = e.indexOf('=')
+    if (i > 0) map[e.slice(0, i)] = e.slice(i + 1)
+  }
+  return map
+})
+
+function adoptReasonCn(code) {
+  // 人工覆盖行带 manual: 前缀(机器规则码仍保留, 见采纳作业模块人工覆盖约定)
+  if (code?.startsWith('manual:')) {
+    const raw = code.slice(7)
+    return `人工覆盖(原规则: ${adoptReasonMap.value[raw] || raw})`
+  }
+  return adoptReasonMap.value[code] || code
+}
 
 function fmtCell(value, dataType) {
   if (value == null) return '-'
@@ -714,4 +817,18 @@ onMounted(() => {
   color: #909399;
 }
 .placeholder-tag { margin-left: 6px; }
+
+/* #333: 采纳治理列展示样式 */
+.adopt-info-icon {
+  margin-left: 2px;
+  vertical-align: -2px;
+  color: #909399;
+  cursor: help;
+}
+.adopt-reason-cell {
+  font-family: monospace;
+  font-size: 12px;
+  cursor: help;
+}
+.cell-dim { color: #c0c4cc; }
 </style>
