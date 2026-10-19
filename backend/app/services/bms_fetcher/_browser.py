@@ -537,8 +537,11 @@ async def _download_with_retry(
     max_retries = _DOWNLOAD_MAX_RETRIES.get(data_type, _DOWNLOAD_DEFAULT_RETRIES)
 
     # #335: 白名单源注册导出请求 ISO 日期改写(route 拦截, 详见上方常量注释)。
-    #   拦截面=URL 含 export 的请求; 非 POST/非 JSON/无 ISO 日期一律原样放行。
-    _iso_route_pattern = re.compile(r"export", re.IGNORECASE)
+    #   拦截面=URL 含 export / download 的请求(与导出响应监听器判据对齐:
+    #   return_tracking 导出接口为 .../customer-return-tracking/downLoadExcel,
+    #   不含 "export", 仅含 "download", 故两者都要匹配)。
+    #   非 POST / 非 JSON / 无 ISO 日期一律原样放行。
+    _iso_route_pattern = re.compile(r"export|download", re.IGNORECASE)
     _iso_route_registered = False
 
     async def _iso_route_handler(route, request):
