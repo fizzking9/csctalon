@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from datetime import datetime, timezone
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 
@@ -69,17 +70,22 @@ _DOWNLOAD_DEFAULT_RETRIES = 1
 
 
 # ──────────────────────────────────────────────────────────────────────
-# #335: 导出请求 ISO 日期改写(route 拦截)
+# #335/#336: 导出请求 ISO 日期改写(route 拦截)
 #   背景: BMS 后端 2026-10-11 起收紧导出接口日期反序列化, 只收
-#   "yyyy-MM-dd HH:mm:ss"; 而 return_tracking 页面导出把日期选择器
-#   v-model(JS Date 对象)直接随 JSON 序列化 → ISO-8601 UTC 串
-#   (实证: bms_sync_logs 报错 payload 含 "2026-10-19T01:41:07.000Z"
-#   = 北京 09:41:07 窗口终点) → BMS 400 JSON parse error。
+#   "yyyy-MM-dd HH:mm:ss"; 而页面导出把日期选择器 v-model(JS Date 对象)
+#   直接 toISOString 序列化 → ISO-8601 UTC 串。BMS 前端 10-15 深夜~10-16
+#   发版把该缺陷扩散到更多报表页(同组件库), 各端点表现不同:
+#   - return_tracking(#335): POST+JSON, BMS 400 JSON parse error
+#     (实证 payload 含 "2026-10-19T01:41:07.000Z" = 北京 09:41:07 窗口终点)
+#   - refund_record_report(#336): GET+query string, BMS **静默返空 CSV**
+#     (实证: wxRefundBill/downLoadExcel/v1.01?refundStartTime=2026-10-11T16:00:00.000Z...
+#     已知有数据窗口 10-12~10-14 仍返 137 字节纯表头; 而页面默认查询用正常格式
+#     refundStartTime=2026-10-13+15:20:05 → total=1948, 数据一直在)
 #   填值侧无法根治(组件 v-model 恒为 Date, 页面自有序列化逻辑不可控),
-#   故对白名单源在导出前注册 page.route 拦截, 把请求体里的 ISO 日期
-#   字符串改写为北京时 "yyyy-MM-dd HH:mm:ss" 后放行。
+#   故对白名单源在导出前注册 page.route 拦截, 把 ISO 日期(POST body 或
+#   GET query string)改写为北京时 "yyyy-MM-dd HH:mm:ss" 后放行。
 # ──────────────────────────────────────────────────────────────────────
-_EXPORT_REWRITE_ISO_DATE_TYPES: frozenset = frozenset({"return_tracking"})
+_EXPORT_REWRITE_ISO_DATE_TYPES: frozenset = frozenset({"return_tracking", "refund_record_report"})
 
 _TZ_CN = ZoneInfo("Asia/Shanghai")
 
@@ -123,13 +129,46 @@ def _rewrite_iso_dates_in_json(node):
 
 
 async def _rewrite_export_request_iso_dates(route, request, logger_obj, data_type: str):
-    """page.route 处理器: 改写导出 POST 请求体里的 ISO 日期, 其余请求原样放行。
+    """page.route 处理器: 改写导出请求里的 ISO 日期, 其余请求原样放行。
 
+    覆盖两种携带形态(#335/#336):
+      - POST + JSON body(return_tracking): 解析 body 递归改写
+      - GET + query string(refund_record_report): 解析 query 逐值改写,
+        route.continue_(url=...) 覆盖放行
     任何解析/改写异常都不阻断导出——按原样 continue, 由 BMS 响应决定成败
     (改写是「修复已知坏形态」, 不是「新增前置校验」)。
     """
     try:
-        if (request.method or "").upper() != "POST":
+        method = (request.method or "").upper()
+        if method == "GET":
+            url = request.url or ""
+            if "T" not in url:  # 快路径: 无 T 必无 ISO 日期
+                await route.continue_()
+                return
+            parts = urlsplit(url)
+            pairs = parse_qsl(parts.query, keep_blank_values=True)
+            if not pairs:
+                await route.continue_()
+                return
+            new_pairs = []
+            n_total = 0
+            for k, v in pairs:
+                nv, c = _rewrite_iso_dates_in_json(v)
+                new_pairs.append((k, nv))
+                n_total += c
+            if not n_total:
+                await route.continue_()
+                return
+            logger_obj.info(
+                "[%s] 导出请求 ISO 日期改写 %d 处(GET query, #336: BMS 只收 yyyy-MM-dd HH:mm:ss)",
+                data_type, n_total,
+            )
+            # urlencode 默认 quote_plus: 空格→"+", 与 BMS 页面自身拼参形态一致
+            new_query = urlencode(new_pairs)
+            new_url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+            await route.continue_(url=new_url)
+            return
+        if method != "POST":
             await route.continue_()
             return
         post_data = request.post_data

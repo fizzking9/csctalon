@@ -77,5 +77,79 @@ def test_non_iso_untouched():
 
 
 def test_return_tracking_in_whitelist():
-    """return_tracking 必须在改写白名单(防配置漂移回归)"""
+    """return_tracking / refund_record_report 必须在改写白名单(防配置漂移回归)"""
     assert "return_tracking" in _EXPORT_REWRITE_ISO_DATE_TYPES
+    assert "refund_record_report" in _EXPORT_REWRITE_ISO_DATE_TYPES  # #336
+
+
+# ── #336: GET query string 改写(refund_record_report 导出走 GET+query) ──
+from urllib.parse import parse_qsl, urlsplit
+
+import pytest
+
+from app.services.bms_fetcher._browser import _rewrite_export_request_iso_dates
+
+
+class _FakeRequest:
+    def __init__(self, method: str, url: str = "", post_data: str | None = None):
+        self.method = method
+        self.url = url
+        self.post_data = post_data
+
+
+class _FakeRoute:
+    def __init__(self):
+        self.kwargs = None
+
+    async def continue_(self, **kwargs):
+        self.kwargs = kwargs  # 无 kwargs = 原样放行
+
+
+class _FakeLogger:
+    def info(self, *a, **k):
+        pass
+
+    def warning(self, *a, **k):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_get_query_iso_rewritten():
+    """生产实证形态: downLoadExcel GET query 带 ISO → 改写为北京时格式"""
+    url = (
+        "https://wifi.cloud-cat.cn/bms-portal/wxRefundBill/downLoadExcel/v1.01"
+        "?page=1&rows=20&sn=&refundStartTime=2026-10-11T16:00:00.000Z"
+        "&refundEndTime=2026-10-14T15:59:59.000Z"
+    )
+    route = _FakeRoute()
+    await _rewrite_export_request_iso_dates(route, _FakeRequest("GET", url), _FakeLogger(), "refund_record_report")
+    assert route.kwargs is not None and "url" in route.kwargs
+    params = dict(parse_qsl(urlsplit(route.kwargs["url"]).query, keep_blank_values=True))
+    assert params["refundStartTime"] == "2026-10-12 00:00:00"
+    assert params["refundEndTime"] == "2026-10-14 23:59:59"
+    assert params["page"] == "1" and params["sn"] == ""  # 其它参数原样(含空值保留)
+
+
+@pytest.mark.asyncio
+async def test_get_query_normal_format_passthrough():
+    """GET query 已是 yyyy-MM-dd HH:mm:ss(页面默认形态) → 原样放行"""
+    url = (
+        "https://wifi.cloud-cat.cn/bms-portal/wxRefundBill/findPageList"
+        "?page=1&refundStartTime=2026-10-13+15:20:05&refundEndTime=2026-10-20+15:20:05"
+    )
+    route = _FakeRoute()
+    await _rewrite_export_request_iso_dates(route, _FakeRequest("GET", url), _FakeLogger(), "refund_record_report")
+    assert route.kwargs == {}  # continue_() 无参 = 原样
+
+
+@pytest.mark.asyncio
+async def test_post_body_iso_still_rewritten():
+    """POST+JSON 路径回归(#335 形态): body 改写, url 不动"""
+    import json as _json
+    body = _json.dumps({"startTime": "2026-10-11T16:00:00.000Z", "pageNo": 1})
+    route = _FakeRoute()
+    req = _FakeRequest("POST", "https://wifi.cloud-cat.cn/x/downLoadExcel", post_data=body)
+    await _rewrite_export_request_iso_dates(route, req, _FakeLogger(), "return_tracking")
+    assert route.kwargs is not None and "post_data" in route.kwargs
+    out = _json.loads(route.kwargs["post_data"])
+    assert out["startTime"] == "2026-10-12 00:00:00" and out["pageNo"] == 1
