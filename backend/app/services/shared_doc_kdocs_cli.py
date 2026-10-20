@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""金山文档(kdocs.cn / WPS)扫码登录 → 生成 storage_state
+"""金山文档(kdocs.cn / WPS)扫码登录 CLI → 生成 storage_state
 
 背景:
   金山共享表格(如 https://www.kdocs.cn/l/...) 未登录只能看 canvas, 无法导出;
   登录后可"导出为 Excel", 走标准 xlsx 解析。
-  登录态存到 BROWSER_STATE_DIR/kdocs.json, 后续脚本复用。
+  登录态存到 BROWSER_STATE_DIR/kdocs.json, 后续共享文档同步复用。
 
 两种模式:
   ① GUI 模式(默认, 本机用): 弹出真实浏览器, 用户扫码后按回车保存。
@@ -13,11 +13,11 @@
 
 用法:
   # 本机 GUI 扫码
-  cd backend && ./.venv/bin/python ./scripts/kdocs_login.py
+  cd backend && ./.venv/bin/python -m app.services.shared_doc_kdocs_cli
 
-  # 生产 Headless 扫码
-  docker exec -e PYTHONPATH=/app csctalon-backend \
-      python /app/scripts/kdocs_login.py --headless \
+  # 生产 Headless 扫码(已预装于镜像, 可直接 docker exec)
+  docker exec csctalon-backend \
+      python -m app.services.shared_doc_kdocs_cli --headless \
       --qr-out /tmp/kdocs_qr.png --timeout 300
 
 #148 防退化:
@@ -26,13 +26,8 @@
 """
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
-
-_ROOT = Path(__file__).resolve().parents[1]
-# 脚本位于 backend/scripts/ 下, _ROOT 即 backend/ 目录, 直接加入 sys.path 即可 import app
-sys.path.insert(0, str(_ROOT))
 
 from app.core.config import settings
 
@@ -71,6 +66,7 @@ def _open_doc_and_show_login(page) -> None:
 
 def main() -> int:
     import argparse
+
     from playwright.sync_api import sync_playwright
 
     ap = argparse.ArgumentParser(description="金山文档扫码登录, 生成 kdocs.json")
@@ -110,7 +106,7 @@ def main() -> int:
             qr_path = Path(args.qr_out)
             page.screenshot(path=str(qr_path), full_page=False)
             print(f"📸 二维码截图: {qr_path} ({qr_path.stat().st_size} 字节)")
-            print(f"   👉 请把该文件传到本地, 用 WPS/微信扫码登录")
+            print("   👉 请把该文件传到本地, 用 WPS/微信扫码登录")
             print(f"   👉 扫码后脚本自动检测 __WPSENV__.user.id (超时 {args.timeout}s)…")
 
             deadline = time.time() + args.timeout

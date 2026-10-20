@@ -118,9 +118,9 @@ if [[ $GIT_MODE -eq 1 ]]; then
     "$RELEASE_DIR/backend/tests" \
     "$RELEASE_DIR/backend/uploads" \
     "$RELEASE_DIR/VERSION.tmp"
-  # backend/scripts/ 仅保留共享文档扫码登录脚本(运维工具, #148), 其余调试脚本删除
-  find "$RELEASE_DIR/backend/scripts" -type f \
-    ! -name "tencent_doc_login.py" ! -name "kdocs_login.py" -delete 2>/dev/null || true
+  # backend/scripts/ 清空所有调试/归档脚本(生产镜像不再从 scripts/ 取内容)
+  # 登录脚本已于 2026-10-20 迁入 app/services/shared_doc_*_cli.py, 不再从 scripts/ 走
+  rm -rf "$RELEASE_DIR/backend/scripts" 2>/dev/null || true
 else
   c "解压发布包 → $RELEASE_DIR"
   tar xzf "$PKG" -C "$RELEASE_DIR"

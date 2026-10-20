@@ -47,7 +47,8 @@ echo "${VERSION}" > "$ROOT_DIR/VERSION.tmp"
 # 注意: 根 data/logs/dist/backups 不在显式清单里, 无需 exclude;
 #       tar --exclude 不能写 data/logs(会匹配任意层级, 误伤 web/src/views/data/
 #       源码目录——曾导致前端 Ingest.vue 缺失构建失败)
-# backend/scripts: 先整体排除调试脚本, 再用 tar r 追加仅两个登录脚本(#148)
+# backend/scripts: 整体排除调试脚本(登录脚本已于 2026-10-20 迁入 app/services/,
+# 不再需要从 scripts/ 白名单放行, 也不再从这里追加到 tar)
 TMP_TAR="${OUT_FILE%.gz}"
 tar cf "$TMP_TAR" \
   --exclude='.git' \
@@ -81,26 +82,7 @@ tar cf "$TMP_TAR" \
   web \
   deploy \
   VERSION.tmp 2>/dev/null
-# 追加仅两个登录脚本(运维工具, 生产需 headless 扫码更新登录态)
-# 2026-10-14 修复: 两脚本已移入 backend/scripts/archive/, 原 `tar rf <路径> 2>/dev/null`
-#   在 set -e 下静默中止 → 不产出 .tar.gz / latest.tar.gz, 方式B发布不可用且无报错。
-#   现改为: canonical 路径缺失时回退 archive/, 经暂存目录以标准路径追加;
-#   均缺失则告警跳过(不阻断打包), 绝不静默。
-_LOGIN_STAGE="$(mktemp -d)"
-mkdir -p "$_LOGIN_STAGE/backend/scripts"
-for _name in tencent_doc_login.py kdocs_login.py; do
-  if [[ -f "backend/scripts/$_name" ]]; then
-    cp "backend/scripts/$_name" "$_LOGIN_STAGE/backend/scripts/$_name"
-  elif [[ -f "backend/scripts/archive/$_name" ]]; then
-    cp "backend/scripts/archive/$_name" "$_LOGIN_STAGE/backend/scripts/$_name"
-  else
-    echo "⚠ 登录脚本缺失(已跳过): backend/scripts/$_name" >&2
-  fi
-done
-if [[ -n "$(ls -A "$_LOGIN_STAGE/backend/scripts" 2>/dev/null)" ]]; then
-  tar rf "$TMP_TAR" -C "$_LOGIN_STAGE" backend/scripts
-fi
-rm -rf "$_LOGIN_STAGE"
+# login 脚本已在 app/services/ 下, 随 backend/ 整体打包自然进入发布包
 gzip -f "$TMP_TAR"
 rm -f "$ROOT_DIR/VERSION.tmp"
 

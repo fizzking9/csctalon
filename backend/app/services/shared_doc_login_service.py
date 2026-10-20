@@ -327,7 +327,7 @@ def check_single_worker() -> bool:
         logger.warning(
             "[shared-doc-login] 检测到多 worker 部署(WEB_CONCURRENCY>1 或 gunicorn -w N): "
             "页面内扫码登录已禁用(SharedDocLoginManager 是进程内单例, 跨 worker 会话不可达)。"
-            "请改用 CLI 脚本(scripts/tencent_doc_login.py / kdocs_login.py), 或改回单 worker 部署。"
+            "请改用 CLI 脚本(python -m app.services.shared_doc_tencent_cli / shared_doc_kdocs_cli), 或改回单 worker 部署。"
             "其他业务不受影响。"
         )
         return False
@@ -933,11 +933,15 @@ class SharedDocLoginManager:
         而本机(macOS)有 GUI, 脚本 `headless=False` 可直接扫码。故改为**两段式**:
           ① 本机生成 storage_state → ② scp 上传到宿主机挂载目录(容器内 /app/data/browser_states)
         """
-        script = "tencent_doc_login.py" if platform == "tencent" else "kdocs_login.py"
+        cli_mod = (
+            "app.services.shared_doc_tencent_cli"
+            if platform == "tencent"
+            else "app.services.shared_doc_kdocs_cli"
+        )
         state_file = DEFAULT_STATE_FILE.get(platform, f"{platform}.json")
         return (
             f"# ① 本地(macOS 有 GUI)生成登录态; 脚本会弹浏览器, 扫码后回车保存\n"
-            f'cd backend && ./.venv/bin/python ../scripts/{script} --url "{doc_url}"\n'
+            f'cd backend && ./.venv/bin/python -m {cli_mod} --url "{doc_url}"\n'
             f"# ② 上传到生产宿主机(挂载点 → 容器内 /app/data/browser_states)\n"
             f"scp backend/data/browser_states/{state_file} tanzk@<服务器IP>:/tmp/ && \\\n"
             f"  ssh tanzk@<服务器IP> \"sudo mv /tmp/{state_file} /opt/csctalon/browser_states/\""

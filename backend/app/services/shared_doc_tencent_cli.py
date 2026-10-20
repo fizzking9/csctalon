@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""腾讯文档扫码登录 → 生成 storage_state(供共享文档读取/导出复用)
+"""腾讯文档扫码登录 CLI → 生成 storage_state(供共享文档读取/导出复用)
 
 背景:
   共享表格(如 https://docs.qq.com/sheet/...) 未登录只能读腾讯私有压缩格式;
-  用账号登录后可"导出为 Excel", 走标准 xlsx 解析(复用 _poc_shared_doc_reader)。
-  登录态存到 BROWSER_STATE_DIR/tencent_doc.json, 后续脚本复用(免二次扫码)。
+  用账号登录后可"导出为 Excel", 走标准 xlsx 解析。
+  登录态存到 BROWSER_STATE_DIR/tencent_doc.json, 后续共享文档同步复用。
 
 两种模式:
   ① GUI 模式(默认, 本机用): 弹出真实浏览器, 用户扫码后按回车保存。
@@ -13,14 +13,12 @@
 
 用法:
   # 本机 GUI 扫码
-  cd backend && ./.venv/bin/python ./scripts/tencent_doc_login.py
+  cd backend && ./.venv/bin/python -m app.services.shared_doc_tencent_cli
 
-  # 生产 Headless 扫码(二维码截图到 /tmp/tencent_qr.png, 运维 scp 到本地扫码)
-  docker exec -e PYTHONPATH=/app csctalon-backend \
-      python /app/scripts/tencent_doc_login.py --headless \
+  # 生产 Headless 扫码(已预装于镜像, 可直接 docker exec)
+  docker exec csctalon-backend \
+      python -m app.services.shared_doc_tencent_cli --headless \
       --qr-out /tmp/tencent_qr.png --timeout 300
-
-登录态文件安全: 存于 data/browser_states/(独立于 uploads, 不对外暴露)。
 
 #148 防退化:
   保存前必须双重校验:
@@ -30,13 +28,8 @@
 """
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
-
-_ROOT = Path(__file__).resolve().parents[1]
-# 脚本位于 backend/scripts/ 下, _ROOT 即 backend/ 目录, 直接加入 sys.path 即可 import app
-sys.path.insert(0, str(_ROOT))
 
 from app.core.config import settings
 
@@ -104,6 +97,7 @@ def _open_login_and_show_qr(page) -> None:
 
 def main() -> int:
     import argparse
+
     from playwright.sync_api import sync_playwright
 
     ap = argparse.ArgumentParser(description="腾讯文档扫码登录, 生成 tencent_doc.json")
@@ -140,12 +134,12 @@ def main() -> int:
 
         if headless:
             # ── Headless 模式: 截图二维码 + 轮询登录态 ──
-            print(f"🌐 [headless] 打开腾讯首页并触发登录弹窗…")
+            print("🌐 [headless] 打开腾讯首页并触发登录弹窗…")
             _open_login_and_show_qr(page)
             qr_path = Path(args.qr_out)
             page.screenshot(path=str(qr_path), full_page=False)
             print(f"📸 二维码截图: {qr_path} ({qr_path.stat().st_size} 字节)")
-            print(f"   👉 请把该文件传到本地, 用微信扫码登录")
+            print("   👉 请把该文件传到本地, 用微信扫码登录")
             print(f"   👉 扫码后脚本自动检测真登录 cookie (超时 {args.timeout}s)…")
 
             deadline = time.time() + args.timeout

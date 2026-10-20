@@ -285,7 +285,7 @@ def test_cli_fallback_command_is_two_stage_and_container_safe(mgr):
     (容器无 scripts/ 无 .venv), 属假降级路径。现要求两段式: 本机扫码 → scp 上传。
     """
     cmd = mgr.cli_fallback_command("tencent", "https://docs.qq.com/sheet/AAA")
-    assert "tencent_doc_login.py" in cmd
+    assert "shared_doc_tencent_cli" in cmd
     assert "https://docs.qq.com/sheet/AAA" in cmd
     # 必须含上传段(证明是两段式而非旧的一行假命令)
     assert "scp" in cmd
@@ -296,9 +296,9 @@ def test_cli_fallback_command_is_two_stage_and_container_safe(mgr):
 
 
 def test_cli_fallback_command_kdocs(mgr):
-    """正向: 金山平台降级命令指向 kdocs 脚本与 kdocs.json。"""
+    """正向: 金山平台降级命令指向 kdocs CLI 模块与 kdocs.json。"""
     cmd = mgr.cli_fallback_command("kdocs", "https://www.kdocs.cn/l/BBB")
-    assert "kdocs_login.py" in cmd
+    assert "shared_doc_kdocs_cli" in cmd
     assert "kdocs.json" in cmd
 
 

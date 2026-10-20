@@ -349,7 +349,7 @@ def _export_kdocs_xlsx(doc_url: str, out_path: str, state_filename: str | None =
     state_path = Path(settings.BROWSER_STATE_DIR) / (state_filename or _DEFAULT_STATE_FILE[PLATFORM_KDOCS])
     if not state_path.exists():
         raise FileNotFoundError(
-            f"未找到金山登录态 {state_path}。请先运行 scripts/kdocs_login.py 扫码登录"
+            f"未找到金山登录态 {state_path}。请先运行 docker exec csctalon-backend python -m app.services.shared_doc_kdocs_cli --headless 扫码登录"
         )
     out = str(Path(out_path).resolve())
     with sync_playwright() as p:
