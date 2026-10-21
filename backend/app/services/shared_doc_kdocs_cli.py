@@ -64,6 +64,32 @@ def _open_doc_and_show_login(page) -> None:
             continue
 
 
+def _maybe_confirm_middle_page(page) -> bool:
+    """扫码成功后金山会跳到 account.wps.cn 的"选择账号/确认登录"中间页。
+
+    该页只有一个 `a#loginConfirm.form_button`("Sign In"), 不点它页面永远停在访客态
+    (生产实测 2026-10-21: 未点 → uid=fake_xxx)。返回 True 表示点到了。
+    """
+    try:
+        cur = (page.url or "").lower()
+    except Exception:
+        return False
+    if "account.wps.cn" not in cur:
+        return False
+    for sel in ("#loginConfirm", "a.form_button", ".form_button",
+                "a:has-text('Sign In')", "button:has-text('Sign In')"):
+        try:
+            btn = page.query_selector(sel)
+            if btn and btn.is_visible():
+                btn.click()
+                page.wait_for_timeout(3000)
+                print(f"   ✔ 已点击中间页确认按钮: {sel}")
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def main() -> int:
     import argparse
 
@@ -111,11 +137,23 @@ def main() -> int:
 
             deadline = time.time() + args.timeout
             uid = ""
+            confirmed = False
             while time.time() < deadline:
+                # 扫码成功后可能停在 account.wps.cn 中间页, 必须先点确认按钮
+                if _maybe_confirm_middle_page(page):
+                    confirmed = True
                 uid = _get_kdocs_user_id(page)
                 if uid and not uid.startswith("fake_"):
                     print(f"✅ 检测到真用户: user.id={uid}")
                     break
+                if confirmed and not uid:
+                    # 点完确认但页面没自动跳回文档页 → 主动跳一次再检测
+                    try:
+                        page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
+                        page.wait_for_timeout(3000)
+                    except Exception:
+                        pass
+                    confirmed = False
                 time.sleep(3)
             else:
                 print(f"❌ {args.timeout}s 内未检测到登录态(最后 uid={uid or '<空>'}), 超时。")

@@ -618,7 +618,12 @@ def _browser_verify(w: _SessionWorker, platform: str, doc_url: str) -> tuple[boo
             except Exception as e:  # noqa: BLE001
                 logger.warning("[shared-doc-login] 金山中间页dump失败: %s", e)
             # ② 选择器按优先级尝试: ID > 登录按钮 class > 账号选择项 > 文本
-            for sel in ("#confirmCode", "a.js_toProtocolDialog",
+            #    2026-10-21 实测补充: 扫码成功后金山跳到 account.wps.cn/v1/chooseaccount 中间页,
+            #    页面只有一个 `a#loginConfirm.form_button`("Sign In"), 不点它就永远停在访客态
+            #    (日志: 金山中间页未找到可点元素 → is_guest=True uid=fake_xxx)。
+            for sel in ("#loginConfirm", "a.form_button", ".form_button",
+                        "a:has-text('Sign In')", "button:has-text('Sign In')",
+                        "#confirmCode", "a.js_toProtocolDialog",
                         "[class*='account']", ".account-item", "li.my-account",
                         "a:has-text('Login')", "a:has-text('登录')",
                         "button:has-text('Login')", "button:has-text('登录')"):

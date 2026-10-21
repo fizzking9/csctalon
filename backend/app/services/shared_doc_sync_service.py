@@ -972,7 +972,8 @@ def _do_sync(db: Session, row: DocSyncSource, out_path: str, trigger: str) -> di
     except FileNotFoundError as e:
         # 登录态缺失: 属于配置/环境问题, 明确提示去扫码
         raise RuntimeError(
-            f"共享文档导出失败: {e}。请先完成 {row.platform} 登录态(scripts/{row.platform}_doc_login.py)"
+            f"共享文档导出失败: {e}。请先完成 {row.platform} 登录态"
+            f"(python -m app.services.shared_doc_{'kdocs' if row.platform == 'kdocs' else 'tencent'}_cli --headless)"
         ) from e
     logger.info(f"[shared_doc] {source_file} 导出成功, 开始解析入库")
 
