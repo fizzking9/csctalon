@@ -76,9 +76,11 @@ def upgrade() -> None:
     """)
     op.create_index("ix_std_cs_record_op_time", "std_cs_record", ["operation_time"])
     op.create_index("ix_std_cs_record_sn", "std_cs_record", ["device_sn"])
-    op.create_index(
-        "ix_std_cs_record_cat_op", "std_cs_record",
-        ["problem_category", "operation_time DESC"],
+    # compound index with DESC — op.create_index treats "col DESC" as literal
+    # column name, 必须用原生 DDL
+    op.execute(
+        "CREATE INDEX ix_std_cs_record_cat_op ON std_cs_record "
+        "(problem_category, operation_time DESC)"
     )
     op.execute("ALTER TABLE std_cs_record ADD PRIMARY KEY (id)")
 
