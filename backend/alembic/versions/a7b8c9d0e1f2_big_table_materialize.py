@@ -1,6 +1,6 @@
 """#339 大表物理精简: cs_records + bms_orders (Phase ①)
 
-Revision ID: f1a2b3c4d5e6
+Revision ID: a7b8c9d0e1f2
 Revises: e9d4f5c6b1a2
 Create Date: 2026-10-21
 
@@ -41,7 +41,7 @@ from typing import Sequence, Union
 
 from alembic import op
 
-revision: str = "f1a2b3c4d5e6"
+revision: str = "a7b8c9d0e1f2"
 down_revision: Union[str, None] = "e9d4f5c6b1a2"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
