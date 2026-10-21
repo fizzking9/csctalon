@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 
 from fastapi import Query
-from sqlalchemy import func, select
+from sqlalchemy import column, func, select, table
 
 from app.api.deps import CurrentUser, DBSession
 
@@ -37,9 +37,12 @@ from app.api.v1.complaints._helpers import (
 )
 from app.api.v1.complaints._router import router
 from app.core.redis_client import cache_ttl_for, cached_json
-from app.models.card_complaint import CardComplaint
-from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
+
+# #338: 投诉概览读 std_all 镜像
+_CC = table("std_card_complaint_all", column("complaint_date"), column("result"), column("matched_ticket_no"))
+_EC = table("std_external_complaint_all",
+            column("complaint_date"), column("result"), column("matched_ticket_no"))
 from app.schemas.common import R
 from app.services.analytics import (
     TZ,
@@ -151,14 +154,14 @@ def complaint_overview(
         )
         # 315 已办结: 扣除「matched 到窗口内工单」的部分 —— 与 registered 的扣减对称，
         #   否则分子含、分母不含 → 完成率可能 >100%(长跨度实测 100.2%)。
-        ed_conds = [ExternalComplaint.complaint_date.isnot(None),
-                    ExternalComplaint.result.in_(_EXTERNAL_DONE_RESULTS)]
+        ed_conds = [_EC.c.complaint_date.isnot(None),
+                    _EC.c.result.in_(_EXTERNAL_DONE_RESULTS)]
         if w_ts:
-            ed_conds.append(ExternalComplaint.complaint_date >= w_ts)
+            ed_conds.append(_EC.c.complaint_date >= w_ts)
         if w_te:
-            ed_conds.append(ExternalComplaint.complaint_date <= w_te)
+            ed_conds.append(_EC.c.complaint_date <= w_te)
         ext_done_all = int(
-            db.scalar(select(func.count()).select_from(ExternalComplaint).where(*ed_conds)) or 0
+            db.scalar(select(func.count()).select_from(_EC).where(*ed_conds)) or 0
         )
         matched_sub = select(ServiceTicket.ticket_no).where(
             _ticket_category_case() == "投诉",
@@ -168,10 +171,10 @@ def complaint_overview(
         )
         ext_done_overlap = int(
             db.scalar(
-                select(func.count()).select_from(ExternalComplaint).where(
+                select(func.count()).select_from(_EC).where(
                     *ed_conds,
-                    ExternalComplaint.matched_ticket_no.isnot(None),
-                    ExternalComplaint.matched_ticket_no.in_(matched_sub),
+                    _EC.c.matched_ticket_no.isnot(None),
+                    _EC.c.matched_ticket_no.in_(matched_sub),
                 )
             ) or 0
         )
@@ -256,7 +259,7 @@ def complaint_overview(
     # 并入 315 补充表净新增(与 /summary 同口径); ⚠️ 卡商**不并入**(#53)
     #   ⚠️ 必须用 `+=` 逐日累加(不清零 net 负值) —— 与 `_source_reg_handled` 的
     #      `max(ext_reg, 0)` 是在**总和**层面截断，若这里对逐日净额逐个 max(0) 会改变总量。
-    for r in _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te):
+    for r in _suppl_trend_rows(db, _EC, "外部投诉", ts, te):
         b = day_map.setdefault(r["day"], {"内部投诉": 0, "商户号投诉": 0, "外部投诉": 0})
         b["外部投诉"] = b.get("外部投诉", 0) + int(r["total"] or 0) - int(r["overlap"] or 0)
     trend_stacked = []
@@ -277,7 +280,7 @@ def complaint_overview(
 
     # ── 4.1 (外)卡商独立趋势(不并入总量堆叠, #53) ──
     card_day: dict[str, dict] = {}
-    for r in _suppl_trend_rows(db, CardComplaint, "外部投诉", ts, te):
+    for r in _suppl_trend_rows(db, _CC, "外部投诉", ts, te):
         net = int(r["total"] or 0) - int(r["overlap"] or 0)
         if net:
             b = card_day.setdefault(r["day"], {"registered": 0})
@@ -298,7 +301,7 @@ def complaint_overview(
         in_stmt = in_stmt.where(ServiceTicket.register_time <= te)
     in_map = {str(d)[:10]: int(c or 0) for d, c in db.execute(in_stmt.group_by(day_trunc)).all() if d}
     # 进水并入 315 补充表净新增(与总量口径一致)，否则净水位末端与积压对不上
-    for r in _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te):
+    for r in _suppl_trend_rows(db, _EC, "外部投诉", ts, te):
         in_map[r["day"]] = in_map.get(r["day"], 0) + int(r["total"] or 0) - int(r["overlap"] or 0)
 
     # 按登记日汇总"仍未完成"(与积压页同一条判定链: _query_backlog_rows 的结果)

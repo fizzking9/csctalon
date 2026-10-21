@@ -124,25 +124,36 @@ def has_quality_col(db, table_name: str) -> bool:
         return False
 
 
+def _model_col(model, name):
+    """兼容 ORM 模型与 sqlalchemy table 对象的列访问(#338 std_all 切换)。"""
+    return getattr(model.c, name) if hasattr(model, "c") else getattr(model, name)
+
+
+def _model_table_name(model) -> str:
+    """兼容 ORM 模型(__tablename__)与 table 对象(.name)的表名获取。"""
+    return getattr(model, "__tablename__", None) or getattr(model, "name", "")
+
+
 def complaint_quality_include_cond(model, db=None) -> list:
-    """投诉表「排除已治理残影」的 ORM 条件列表（统一入口, #60）
+    """投诉表「排除已治理残影」的条件列表（统一入口, #60）
 
     用法:
         select(...).where(*complaint_quality_include_cond(ExternalComplaint))
 
     参数:
-      · `model` —— `ExternalComplaint` / `CardComplaint`（须有 `quality_status`）
+      · `model` —— ORM 模型 或 std_all table 对象（须有 `quality_status` 列）
       · `db`    —— 可选。给出时先做**列存在性守卫**（旧库无列 → 返回空列表跳过）。
 
     ⚠️ 不传 `db` 时不做守卫（调用方已知表结构）—— 避免每次查询都打
        information_schema 造成额外开销。
     """
-    if db is not None and not has_quality_col(db, model.__tablename__):
+    if db is not None and not has_quality_col(db, _model_table_name(model)):
         return []
+    qs = _model_col(model, "quality_status")
     return [
         or_(
-            model.quality_status.is_(None),
-            model.quality_status.notin_(COMPLAINT_EXCLUDE_QSTATUS),
+            qs.is_(None),
+            qs.notin_(COMPLAINT_EXCLUDE_QSTATUS),
         )
     ]
 

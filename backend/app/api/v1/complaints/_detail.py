@@ -1,7 +1,7 @@
 """投诉明细/纯工信部/补充明细: complaint_detail / complaint_pure_card / complaint_supplementary。"""
 
 from fastapi import Query
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, column, func, or_, select, table
 
 from app.api.deps import CurrentUser, DBSession
 
@@ -21,9 +21,22 @@ from app.api.v1.complaints._helpers import (
 )
 from app.api.v1.complaints._router import router
 from app.core.redis_client import cache_ttl_for, cached_json
-from app.models.card_complaint import CardComplaint
-from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
+
+# #338: 投诉明细读 std_all 镜像(展示用全列)
+_CC = table("std_card_complaint_all",
+            column("id"), column("complaint_date"), column("complaint_group"),
+            column("complainant"), column("complainant_phone"), column("device_sn"),
+            column("problem"), column("problem_category"), column("result"),
+            column("solution"), column("handler"), column("handle_result"),
+            column("matched_ticket_no"), column("created_at"))
+_EC = table("std_external_complaint_all",
+            column("id"), column("complaint_no"), column("complaint_date"),
+            column("platform"), column("complainant"), column("complainant_phone"),
+            column("device_sn"), column("problem"), column("complaint_category"),
+            column("solution"), column("result"), column("follower"),
+            column("handle_time"), column("handle_detail"), column("matched_ticket_no"),
+            column("company_entity"), column("complaint_shop"), column("created_at"))
 from app.schemas.common import R
 from app.services.analytics import (
     _complaint_source_type_case,
@@ -180,10 +193,10 @@ def complaint_detail(
             _keep_extra = (not source_type) or (_bucket == source_type)
             stmt = select(model)
             if ts:
-                stmt = stmt.where(model.complaint_date >= ts)
+                stmt = stmt.where(model.c.complaint_date >= ts)
             if te:
-                stmt = stmt.where(model.complaint_date <= te)
-            rows = db.scalars(stmt.order_by(model.complaint_date.desc().nullslast())).all()
+                stmt = stmt.where(model.c.complaint_date <= te)
+            rows = db.execute(stmt.order_by(model.c.complaint_date.desc().nullslast())).mappings().all()
             for c in rows:
                 sn = getattr(c, sn_field_name)
                 suppl_item = {
@@ -252,9 +265,9 @@ def complaint_detail(
                     "suppl_count": 1,
                 })
 
-        _collect(ExternalComplaint, "device_sn", "315外部投诉")
+        _collect(_EC, "device_sn", "315外部投诉")
         # #47: 统计桶名用「(外)卡商」(与数据源字面名"卡商群投诉"区分)
-        _collect(CardComplaint, "device_sn", "(外)卡商")
+        _collect(_CC, "device_sn", "(外)卡商")
 
         # 工单行便捷合并字段: 补充表里更详细的 完成时间/投诉内容(供明细表直接展示)
         for r in records:
@@ -411,14 +424,14 @@ def complaint_supplementary(
     def _items(model, sn_field, source_name):
         stmt = select(model).where(True)
         if ts:
-            stmt = stmt.where(model.complaint_date >= ts)
+            stmt = stmt.where(model.c.complaint_date >= ts)
         if te:
-            stmt = stmt.where(model.complaint_date <= te)
+            stmt = stmt.where(model.c.complaint_date <= te)
         if matched is True:
-            stmt = stmt.where(model.matched_ticket_no.isnot(None))
+            stmt = stmt.where(model.c.matched_ticket_no.isnot(None))
         elif matched is False:
-            stmt = stmt.where(model.matched_ticket_no.is_(None))
-        rows = db.scalars(stmt.order_by(model.complaint_date.desc().nullslast())).all()
+            stmt = stmt.where(model.c.matched_ticket_no.is_(None))
+        rows = db.execute(stmt.order_by(model.c.complaint_date.desc().nullslast())).mappings().all()
         return [
             {
                 "source": source_name,
@@ -445,9 +458,9 @@ def complaint_supplementary(
 
     items: list[dict] = []
     if source_type in (None, "external", "315"):
-        items.extend(_items(ExternalComplaint, "device_sn", "315外部投诉"))
+        items.extend(_items(_EC, "device_sn", "315外部投诉"))
     if source_type in (None, "card", "卡商"):
-        items.extend(_items(CardComplaint, "device_sn", "(外)卡商"))
+        items.extend(_items(_CC, "device_sn", "(外)卡商"))
     # 按投诉日期降序(主排序), 无日期的排末尾
     items.sort(key=lambda x: (x.get("complaint_date") is None, x.get("complaint_date") or ""), reverse=True)
     # F-P1-2: 补充记录 登记/处理 计数(明细标题展示)

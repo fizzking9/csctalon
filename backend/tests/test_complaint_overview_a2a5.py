@@ -431,14 +431,13 @@ class TestScopeDeclaration:
         证明差异来自「315 补充表」这一**已知口径**，而非漏统/重复计。
         若此断言失败 → 说明还有未解释的口径缺口（必须查明）。
         """
-        from sqlalchemy import func, select
+        from sqlalchemy import column, func, select, table
 
         from app.api.v1.complaints import (
             _parse_dt,
             _parse_dt_end,
             _suppl_trend_rows,
         )
-        from app.models.external_complaint import ExternalComplaint
         from app.models.ticket import ServiceTicket
         from app.services.analytics import _complaint_source_type_case, _ticket_category_case
         from app.services.complaint_scope import CARD_SCOPE
@@ -462,10 +461,12 @@ class TestScopeDeclaration:
             f"A5 total({d['hour_heatmap']['total']}) 应等于工单侧登记数({tk})"
         )
 
-        # 315 补充表净新增
+        # 315 补充表净新增(#338: 读 std_all 镜像)
+        _EC = table("std_external_complaint_all",
+                    column("complaint_date"), column("matched_ticket_no"))
         suppl_net = sum(
             int(r["total"] or 0) - int(r["overlap"] or 0)
-            for r in _suppl_trend_rows(db_with_complaints, ExternalComplaint, "外部投诉", ts, te)
+            for r in _suppl_trend_rows(db_with_complaints, _EC, "外部投诉", ts, te)
         )
 
         kpi_total = next(k for k in d["kpi"] if k["key"] == "total")["value"]

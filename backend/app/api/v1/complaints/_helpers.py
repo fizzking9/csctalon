@@ -6,10 +6,15 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import Integer, and_, column, func, or_, select, table
 
 from app.api.deps import DBSession
-from app.models.card_complaint import CardComplaint
 from app.models.complaint_audit import ComplaintAudit
-from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
+
+# #338: 投诉域读 std_all 镜像(全量口径), 禁止直读 ods
+_CC = table("std_card_complaint_all",
+            column("complaint_date"), column("matched_ticket_no"), column("result"))
+_EC = table("std_external_complaint_all",
+            column("device_sn"), column("result"), column("complaint_category"),
+            column("complaint_date"), column("platform"), column("matched_ticket_no"))
 
 # #338: 投诉关联退款分析(全状态口径) → 读 std_refund_online_all 镜像
 _REFUND_ALL = table(
@@ -132,9 +137,9 @@ def _suppl_trend_rows(
     """
     conds = []
     if ts:
-        conds.append(model.complaint_date >= ts)
+        conds.append(model.c.complaint_date >= ts)
     if te:
-        conds.append(model.complaint_date <= te)
+        conds.append(model.c.complaint_date <= te)
 
     # 本范围内 投诉类 且 归属指定三源 的工单号子查询(与 _overlap_suppl 同口径:
     # 补充记录关联工单的 register_time 或真实 finish_time 在本范围内 → 视为工单已计入)
@@ -154,7 +159,7 @@ def _suppl_trend_rows(
             fin_conds.append(and_(ServiceTicket.finish_time.isnot(None), ServiceTicket.finish_time <= te))
         t_sub = t_sub.where(or_(and_(*reg_conds), and_(*fin_conds)))
 
-    day_expr = _day_trunc(model.complaint_date)
+    day_expr = _day_trunc(model.c.complaint_date)
     total_rows = db.execute(
         select(day_expr, func.count())
         .select_from(model)
@@ -165,8 +170,8 @@ def _suppl_trend_rows(
         select(day_expr, func.count())
         .select_from(model)
         .where(*conds)
-        .where(model.matched_ticket_no.isnot(None))
-        .where(model.matched_ticket_no.in_(t_sub))
+        .where(model.c.matched_ticket_no.isnot(None))
+        .where(model.c.matched_ticket_no.in_(t_sub))
         .group_by(day_expr)
     ).all()
     total_map = {str(r[0])[:10]: int(r[1]) for r in total_rows if r[0]}
@@ -282,11 +287,11 @@ def _source_reg_handled(db, src_val: str, ts, te,
     #   ⚠️ 本分支必须**独立于** `src_val == "外部投诉"` 那个 if 块 ——
     #      否则(我曾犯错)卡商永远进不去, 表现为「total 有值但 registered/handled 全 0」。
     if src_val == "(外)卡商":
-        _cc_conds = [CardComplaint.complaint_date.isnot(None)]
+        _cc_conds = [_CC.c.complaint_date.isnot(None)]
         if ts:
-            _cc_conds.append(CardComplaint.complaint_date >= ts)
+            _cc_conds.append(_CC.c.complaint_date >= ts)
         if te:
-            _cc_conds.append(CardComplaint.complaint_date <= te)
+            _cc_conds.append(_CC.c.complaint_date <= te)
         # ★★ #65: 卡商 registered = **工单侧真卡商 + 补充表 − 重叠** ★★
         #   ⚠️ #53 曾用「表自身行数」(不扣重), 依据是「工单侧无卡商分类」。
         #      #57 证明该检测方式有误 —— 卡商在工单侧以 `item='工信部投诉'` 形式存在。
@@ -302,7 +307,7 @@ def _source_reg_handled(db, src_val: str, ts, te,
             )
         ) or 0
         _tot_cc = db.scalar(
-            select(func.count()).select_from(CardComplaint).where(*_cc_conds)
+            select(func.count()).select_from(_CC).where(*_cc_conds)
         ) or 0
         # 重叠 = 补充表已 matched 到「本范围内卡商工单」的条数
         _ov_sub = select(ServiceTicket.ticket_no).where(
@@ -313,15 +318,15 @@ def _source_reg_handled(db, src_val: str, ts, te,
             *([ServiceTicket.register_time <= te] if te else []),
         )
         _ov_cc = db.scalar(
-            select(func.count()).select_from(CardComplaint)
-            .where(*_cc_conds, CardComplaint.matched_ticket_no.isnot(None),
-                   CardComplaint.matched_ticket_no.in_(_ov_sub))
+            select(func.count()).select_from(_CC)
+            .where(*_cc_conds, _CC.c.matched_ticket_no.isnot(None),
+                   _CC.c.matched_ticket_no.in_(_ov_sub))
         ) or 0
         _reg_cc = int(_reg_tk) + int(_tot_cc) - int(_ov_cc)
         # handled: 补充表前缀锚定 + **工单侧真实完成**(#65 新增)
         #   ⚠️ 卡商 result 是混合语义字段(实测 117 种取值) → 用前缀锚定, 非枚举
         _done_rows = db.execute(
-            select(CardComplaint.result).where(*_cc_conds)
+            select(_CC.c.result).where(*_cc_conds)
         ).scalars().all()
         _hdl_cc = sum(1 for v in _done_rows if card_result_state(v) == STATUS_DONE)
         # ★ 卡商工单侧已办结(与 315 分支同口径: finish 落窗口 且 真实完成)
@@ -364,28 +369,28 @@ def _source_reg_handled(db, src_val: str, ts, te,
                 sub_conds.append(ServiceTicket.register_time <= te if not handled_side else ServiceTicket.finish_time <= te)
             sub = select(ServiceTicket.ticket_no).where(*sub_conds)
             conds = [
-                model.complaint_date.isnot(None),
-                model.matched_ticket_no.isnot(None),
-                model.matched_ticket_no.in_(sub),
+                model.c.complaint_date.isnot(None),
+                model.c.matched_ticket_no.isnot(None),
+                model.c.matched_ticket_no.in_(sub),
             ]
             if done_only:
-                conds.append(model.result.in_(_EXTERNAL_DONE_RESULTS))
+                conds.append(model.c.result.in_(_EXTERNAL_DONE_RESULTS))
             if ts:
-                conds.append(model.complaint_date >= ts)
+                conds.append(model.c.complaint_date >= ts)
             if te:
-                conds.append(model.complaint_date <= te)
+                conds.append(model.c.complaint_date <= te)
             return db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
 
         # registered 并入: 净新增(总数 − 已 matched 窗口内登记工单) —— 仅 315
         #   ⚠️ #47: 卡商已拆出为**独立桶**(见函数上方 `src_val == "(外)卡商"` 分支),
         #      此处只并入 ExternalComplaint(原先两表都并入, 会与卡商桶双算)。
         ext_reg = 0
-        for model in (ExternalComplaint,):
-            conds = [model.complaint_date.isnot(None)]
+        for model in (_EC,):
+            conds = [model.c.complaint_date.isnot(None)]
             if ts:
-                conds.append(model.complaint_date >= ts)
+                conds.append(model.c.complaint_date >= ts)
             if te:
-                conds.append(model.complaint_date <= te)
+                conds.append(model.c.complaint_date <= te)
             total = db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
             ext_reg += int(total) - int(_overlap(model, done_only=False, handled_side=False))
         registered += max(ext_reg, 0)
@@ -393,13 +398,13 @@ def _source_reg_handled(db, src_val: str, ts, te,
         # handled 并入: 315(external_complaints) 补充表已办结(result∈办结类)。
         #   ⚠️ #47: 卡商**有独立分支**(见函数上方 `src_val == "(外)卡商"`), 用前缀锚定判定,
         #      不并入此处 —— 用 315 的办结枚举套卡商会恒为 0(实测卡商 result 是另一套语义)。
-        model = ExternalComplaint
-        conds = [model.complaint_date.isnot(None)]
+        model = _EC
+        conds = [model.c.complaint_date.isnot(None)]
         if ts:
-            conds.append(model.complaint_date >= ts)
+            conds.append(model.c.complaint_date >= ts)
         if te:
-            conds.append(model.complaint_date <= te)
-        conds_done = list(conds) + [model.result.in_(_EXTERNAL_DONE_RESULTS)]
+            conds.append(model.c.complaint_date <= te)
+        conds_done = list(conds) + [model.c.result.in_(_EXTERNAL_DONE_RESULTS)]
         ext_done = db.scalar(select(func.count()).select_from(model).where(*conds_done)) or 0
         # matched 到"窗口内真实完成工单"的已办结 → 工单侧 handled 已计, 不重复加
         ext_done_overlap_handled = int(_overlap(model, done_only=True, handled_side=True))
@@ -506,8 +511,8 @@ def _suppl_event_metrics(
     from app.services.complaint_scope import complaint_quality_include_cond
 
     rows = db.execute(
-        select(model.id, model.device_sn, date_col, model.complainant_phone,
-               channel_col, model.quality_status, model.problem)
+        select(model.c.id, model.c.device_sn, date_col, model.c.complainant_phone,
+               channel_col, model.c.quality_status, model.c.problem)
         .where(*conds, *complaint_quality_include_cond(model, db))
     ).all()
     payload = [
@@ -664,9 +669,9 @@ def _external_done_sns(db) -> set[str]:
     result = cached_call(
         "complaint:ext_done_sns", 60,
         lambda: list(db.scalars(
-            select(ExternalComplaint.device_sn)
-            .where(ExternalComplaint.result.in_(_EXTERNAL_DONE_RESULTS))
-            .where(ExternalComplaint.device_sn.isnot(None))
+            select(_EC.c.device_sn)
+            .where(_EC.c.result.in_(_EXTERNAL_DONE_RESULTS))
+            .where(_EC.c.device_sn.isnot(None))
         ).all()),
     )
     return set(result or [])
@@ -796,9 +801,9 @@ def _query_backlog_rows(
     ext_done_sns = _external_done_sns(db)
     # SN → 315登记细分分类(用于外部投诉 remark 为空时的投诉原因补充)
     sn_315_cat: dict[str, str] = dict(db.execute(
-        select(ExternalComplaint.device_sn, ExternalComplaint.complaint_category)
-        .where(ExternalComplaint.device_sn.isnot(None))
-        .where(ExternalComplaint.complaint_category.isnot(None), ExternalComplaint.complaint_category != "")
+        select(_EC.c.device_sn, _EC.c.complaint_category)
+        .where(_EC.c.device_sn.isnot(None))
+        .where(_EC.c.complaint_category.isnot(None), _EC.c.complaint_category != "")
     ).all())
 
     # Python 归一化兜底, 保证与明细口径 100% 一致
@@ -996,12 +1001,12 @@ def _complaint_sn_subquery(w_ts, w_te, src_expr):
         tk_conds.append(ServiceTicket.register_time <= w_te)
     tk_sn = select(ServiceTicket.device_sn.label("sn")).where(*tk_conds)
 
-    ext_conds = [ExternalComplaint.device_sn.isnot(None)]
+    ext_conds = [_EC.c.device_sn.isnot(None)]
     if w_ts:
-        ext_conds.append(ExternalComplaint.complaint_date >= w_ts)
+        ext_conds.append(_EC.c.complaint_date >= w_ts)
     if w_te:
-        ext_conds.append(ExternalComplaint.complaint_date <= w_te)
-    ext_sn = select(ExternalComplaint.device_sn.label("sn")).where(*ext_conds)
+        ext_conds.append(_EC.c.complaint_date <= w_te)
+    ext_sn = select(_EC.c.device_sn.label("sn")).where(*ext_conds)
     return tk_sn.union(ext_sn)
 
 def _complaint_refund_rows(db, w_ts, w_te, src_expr):

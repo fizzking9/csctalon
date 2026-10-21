@@ -287,9 +287,19 @@ class AdoptionOverride(Base):
 #   统一读本视图; 经营统计仍读 std_* 采纳集物理表; 业务代码禁止直读 ods。
 # ⚠️ 只读: 视图不可写; 任何写入(采集 upsert / 质量标记 / 人工覆盖)必须落 ods 源表。
 STD_ALL_VIEWS: dict[str, str] = {
+    # ── 退款五路（含 T1 采纳四列，std_* 采纳集 + std_*_all 全量镜像）──
     "std_refund_online_all": "ods.refunds",
     "std_wallet_flow_all": "ods.wallet_withdrawals",
     "std_refund_shanmao_all": "ods.shanmao_refunds",
     "std_refund_manual_all": "ods.manual_refunds",
     "std_refund_record_all": "ods.refund_record_reports",
+    # ── #338: 投诉/设备/SCRM 域 std_all 镜像（业务层零读 ods）──
+    # 无采纳规则的表：std_all 即清洗后全量口径；大表后续按需物化为精简 std_* 表。
+    "std_card_complaint_all": "ods.card_complaints",
+    "std_external_complaint_all": "ods.external_complaints",
+    "std_cs_record_all": "ods.cs_records",
+    "std_bms_order_all": "ods.bms_orders",
+    "std_device_combo_all": "ods.device_combos",
+    "std_device_flow_usage_all": "ods.device_flow_usage",
+    "std_scrm_session_all": "ods.scrm_sessions",
 }

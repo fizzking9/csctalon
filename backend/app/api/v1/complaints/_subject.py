@@ -11,8 +11,12 @@ from app.api.deps import CurrentUser, DBSession
 from app.api.v1.complaints._helpers import _norm_subject_entity, _parse_dt, _parse_dt_end
 from app.api.v1.complaints._router import router
 from app.core.redis_client import cache_ttl_for, cached_json
-from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
+
+# #338: 投诉主体分析读 std_all 镜像
+_EC = table("std_external_complaint_all",
+            column("company_entity"), column("complaint_shop"),
+            column("device_sn"), column("complaint_date"))
 
 # #338: 投诉主体退款关联(全状态口径) → 读 std_refund_online_all 镜像
 _REFUND_ALL = table(
@@ -118,11 +122,11 @@ def complaint_subject_analysis(
     _IGNORE_SHOP = {"/", "-", ""}
     ext_rows = db.execute(
         select(
-            ExternalComplaint.company_entity,
-            ExternalComplaint.complaint_shop,
-            ExternalComplaint.device_sn,
-            ExternalComplaint.complaint_date,
-        ).where(*_reg_conds(ExternalComplaint.complaint_date))
+            _EC.c.company_entity,
+            _EC.c.complaint_shop,
+            _EC.c.device_sn,
+            _EC.c.complaint_date,
+        ).where(*_reg_conds(_EC.c.complaint_date))
     ).all()
     external_total = len(ext_rows)
     external_unattributed = 0
@@ -271,10 +275,10 @@ def complaint_subject_analysis(
                     _prev_map[_n] = _prev_map.get(_n, 0) + 1
             # 外部侧: 对比期投诉日期
             for company_entity, complaint_shop, _sn, _cd in db.execute(
-                select(ExternalComplaint.company_entity, ExternalComplaint.complaint_shop,
-                       ExternalComplaint.device_sn, ExternalComplaint.complaint_date)
-                .where(ExternalComplaint.complaint_date >= _pts,
-                       ExternalComplaint.complaint_date <= _pte)
+                select(_EC.c.company_entity, _EC.c.complaint_shop,
+                       _EC.c.device_sn, _EC.c.complaint_date)
+                .where(_EC.c.complaint_date >= _pts,
+                       _EC.c.complaint_date <= _pte)
             ).all():
                 _subj = None
                 if company_entity and str(company_entity).strip():

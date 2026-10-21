@@ -18,7 +18,7 @@
 from typing import Annotated
 
 from fastapi import Query
-from sqlalchemy import select
+from sqlalchemy import column, select, table
 
 from app.api.deps import CurrentUser, DBSession
 
@@ -27,8 +27,10 @@ from app.api.v1.complaints._backlog import _device_dim_groups
 from app.api.v1.complaints._helpers import _parse_dt, _parse_dt_end
 from app.api.v1.complaints._router import router
 from app.core.redis_client import cache_ttl_for, cached_json
-from app.models.card_complaint import CardComplaint
 from app.models.ticket import ServiceTicket
+
+# #338: 卡商投诉读 std_all 镜像
+_CC = table("std_card_complaint_all", column("complaint_date"), column("device_sn"))
 from app.schemas.common import R
 from app.services.analytics import _complaint_source_type_case, _ticket_category_case
 from app.services.complaint_scope import CARD_SCOPE
@@ -84,13 +86,13 @@ def complaint_device_dims(
 
     # ── 卡商侧: card_complaints 表(独立体系, 仅 source_type=(外)卡商 时取) ──
     if source_type == CARD_SCOPE:
-        card_conds = [CardComplaint.complaint_date.isnot(None)]
+        card_conds = [_CC.c.complaint_date.isnot(None)]
         if ts:
-            card_conds.append(CardComplaint.complaint_date >= ts)
+            card_conds.append(_CC.c.complaint_date >= ts)
         if te:
-            card_conds.append(CardComplaint.complaint_date <= te)
+            card_conds.append(_CC.c.complaint_date <= te)
         card_rows = db.execute(
-            select(CardComplaint.device_sn, CardComplaint.complaint_date).where(*card_conds)
+            select(_CC.c.device_sn, _CC.c.complaint_date).where(*card_conds)
         ).all()
         rows.extend({"device_sn": r[0], "register_time": r[1]} for r in card_rows)
 

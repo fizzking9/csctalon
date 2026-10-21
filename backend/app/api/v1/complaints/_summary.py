@@ -1,6 +1,6 @@
 """三源投诉统计汇总: complaint_summary。"""
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, column, func, or_, select, table
 
 from app.api.deps import CurrentUser, DBSession
 
@@ -20,9 +20,19 @@ from app.api.v1.complaints._helpers import (
 )
 from app.api.v1.complaints._router import router
 from app.core.redis_client import cache_ttl_for, cached_json
-from app.models.card_complaint import CardComplaint
-from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
+
+# #338: 投诉汇总读 std_all 镜像(_suppl_event_metrics 需 id/device_sn/complainant_phone/quality_status/problem)
+_CC = table("std_card_complaint_all",
+            column("id"), column("device_sn"), column("complainant_phone"),
+            column("quality_status"), column("problem"),
+            column("complaint_date"), column("complaint_group"),
+            column("problem_category"), column("matched_ticket_no"))
+_EC = table("std_external_complaint_all",
+            column("id"), column("device_sn"), column("complainant_phone"),
+            column("quality_status"), column("problem"),
+            column("complaint_date"), column("platform"),
+            column("matched_ticket_no"))
 from app.schemas.common import R
 from app.services.analytics import (
     _complaint_source_type_case,
@@ -179,10 +189,10 @@ def complaint_summary(
     #   故放到 50 覆盖全集；图表可读性由前端做 Top-N + 「其他」聚合解决
     #   （前端聚合优于后端截断：后端截断会**丢数据**且无法察觉）。
     card_by_cat = db.execute(
-        select(CardComplaint.problem_category, func.count())
-        .where(*([CardComplaint.complaint_date >= ts] if ts else []))
-        .where(*([CardComplaint.complaint_date <= te] if te else []))
-        .group_by(CardComplaint.problem_category)
+        select(_CC.c.problem_category, func.count())
+        .where(*([_CC.c.complaint_date >= ts] if ts else []))
+        .where(*([_CC.c.complaint_date <= te] if te else []))
+        .group_by(_CC.c.problem_category)
         .order_by(func.count().desc())
         .limit(50)
     ).all()
@@ -207,16 +217,16 @@ def complaint_summary(
         matched = db.scalar(select(func.count()).select_from(model).where(matched_col.isnot(None), *conds)) or 0
 
         # ★ 渠道列: 315 用 platform; 卡商无 platform, 群名即渠道
-        ch_col = (CardComplaint.complaint_group
-                  if model is CardComplaint else ExternalComplaint.platform)
+        ch_col = (_CC.c.complaint_group
+                  if model is _CC else _EC.c.platform)
         ev = _suppl_event_metrics(
             db, model, date_col, ch_col, ts, te, with_review_rows=True
         )
         return {"total": int(total), "matched": int(matched), **ev}
 
     supplementary = {
-        "external": _suppl_stats(ExternalComplaint, ExternalComplaint.complaint_date, ExternalComplaint.matched_ticket_no),
-        "card": _suppl_stats(CardComplaint, CardComplaint.complaint_date, CardComplaint.matched_ticket_no),
+        "external": _suppl_stats(_EC, _EC.c.complaint_date, _EC.c.matched_ticket_no),
+        "card": _suppl_stats(_CC, _CC.c.complaint_date, _CC.c.matched_ticket_no),
     }
 
     # ---- 三源总数合并补充表(去重) ----
@@ -232,9 +242,9 @@ def complaint_summary(
         """
         conds = []
         if ts:
-            conds.append(model.complaint_date >= ts)
+            conds.append(model.c.complaint_date >= ts)
         if te:
-            conds.append(model.complaint_date <= te)
+            conds.append(model.c.complaint_date <= te)
         t_sub = (
             select(ServiceTicket.ticket_no)
             .where(_ticket_category_case() == "投诉")
@@ -247,8 +257,8 @@ def complaint_summary(
                 select(func.count())
                 .select_from(model)
                 .where(*conds)
-                .where(model.matched_ticket_no.isnot(None))
-                .where(model.matched_ticket_no.in_(t_sub))
+                .where(model.c.matched_ticket_no.isnot(None))
+                .where(model.c.matched_ticket_no.in_(t_sub))
             )
             or 0
         )
@@ -256,7 +266,7 @@ def complaint_summary(
     # ⚠️ 2026-09-10 (#47): 卡商**从外部桶拆出** → external_total 不再并入 card 补充表。
     #   原式(2026-09-01 口径): external = 工单 + 315净 + 卡商净  ← 卡商被并进来
     #   现式: external = 工单 + 315净
-    external_total = int(external_ticket_total) + supplementary["external"]["total"] - _overlap_suppl(ExternalComplaint, "外部投诉")
+    external_total = int(external_ticket_total) + supplementary["external"]["total"] - _overlap_suppl(_EC, "外部投诉")
     # ★★ 2026-09-11 (#53) 卡商**独立**统计 ★★
     #   用户: "卡商的投诉 不纳入总量的管理, 整体独立统计分析…全部单算"。
     #   ⚠️ 卡商**不进** `complaint_total`（不进三源合计）—— 这句仍成立。
@@ -272,7 +282,7 @@ def complaint_summary(
     card_total = (
         int(card_ticket_total)
         + int(supplementary["card"]["total"])
-        - _overlap_suppl(CardComplaint, CARD_SCOPE)
+        - _overlap_suppl(_CC, CARD_SCOPE)
     )
     merchant_total = int(merchant_ticket_total)
 
@@ -284,8 +294,8 @@ def complaint_summary(
     #    (2026-09-01 口径), 现拆开: 外部趋势 = 工单 + 315净; 卡商趋势 = 卡商净。
     # ⚠️ 不可嵌套调用 _merge_trend(其第一参数要求 (day,count) 元组列表, 嵌套会把
     #    {day,count} 字典解包 → int('count') 崩溃)。两个补充表 dict 列表直接相加后一次合并。
-    external_suppl_trend = _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te)
-    card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "(外)卡商", ts, te)
+    external_suppl_trend = _suppl_trend_rows(db, _EC, "外部投诉", ts, te)
+    card_suppl_trend = _suppl_trend_rows(db, _CC, "(外)卡商", ts, te)
     external_trend_merged = _merge_trend(external_trend, external_suppl_trend)
     # ★★ #65: 卡商趋势 = 工单侧真卡商 + 补充表净（与 card_total 同口径）★★
     #   修复前: `_merge_trend([], card_suppl_trend)` —— 工单侧完全没进来,

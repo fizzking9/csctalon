@@ -3,19 +3,27 @@
 import re
 
 from fastapi import Query
-from sqlalchemy import select
+from sqlalchemy import column, select, table
 
 from app.api.deps import CurrentUser, DBSession
 
 # 跨子模块引用(拆分自 complaints_src.py, 原同文件内直接调用)
 from app.api.v1.complaints._helpers import _parse_dt, _parse_dt_end
 from app.api.v1.complaints._router import router
-from app.models.card_complaint import CardComplaint
-from app.models.external_complaint import ExternalComplaint
 from app.schemas.common import R
 from app.services.complaint_scope import (
     dedup_events,
 )
+
+# #338: 投诉质量清单读 std_all 镜像
+_CC = table("std_card_complaint_all",
+            column("id"), column("device_sn"), column("complainant_phone"),
+            column("complaint_date"), column("complaint_group"),
+            column("created_at"), column("quality_status"), column("quality_note"))
+_EC = table("std_external_complaint_all",
+            column("id"), column("device_sn"), column("complainant_phone"),
+            column("complaint_date"), column("platform"),
+            column("created_at"), column("quality_status"), column("quality_note"))
 
 
 @router.get("/sn-backfill", response_model=R,
@@ -57,7 +65,6 @@ def complaint_sn_backfill(
       ★ **不删除任何行** —— 残影保留, 仅打标 + 统计排除。
         可通过把 `quality_status` 置空**完整回滚**。
     """
-    from app.models.card_complaint import CardComplaint
     from app.services.complaint_scope import QSTATUS_DUP_SN_BACKFILL
 
     ts = _parse_dt(start)
@@ -67,17 +74,18 @@ def complaint_sn_backfill(
     by_month: dict[str, int] = {}
 
     def _collect(model, label_col, src: str):
-        conds: list = [model.quality_status == QSTATUS_DUP_SN_BACKFILL]
+        # model 为 sqlalchemy table 对象(std_all 镜像), 列通过 model.c 访问
+        conds: list = [model.c.quality_status == QSTATUS_DUP_SN_BACKFILL]
         if ts:
-            conds.append(model.complaint_date >= ts)
+            conds.append(model.c.complaint_date >= ts)
         if te:
-            conds.append(model.complaint_date <= te)
+            conds.append(model.c.complaint_date <= te)
         ghosts = db.execute(
-            select(model.id, model.device_sn, model.complaint_date,
-                   model.complainant_phone, label_col, model.created_at,
-                   model.quality_note)
+            select(model.c.id, model.c.device_sn, model.c.complaint_date,
+                   model.c.complainant_phone, label_col, model.c.created_at,
+                   model.c.quality_note)
             .where(*conds)
-            .order_by(model.complaint_date.desc().nullslast())
+            .order_by(model.c.complaint_date.desc().nullslast())
             .limit(limit)
         ).all()
         for gid, sn, cdate, ph, lbl, cat, note in ghosts:
@@ -91,8 +99,8 @@ def complaint_sn_backfill(
             full_sn = full_created = None
             if full_id:
                 frow = db.execute(
-                    select(model.device_sn, model.created_at)
-                    .where(model.__table__.c.id == full_id)
+                    select(model.c.device_sn, model.c.created_at)
+                    .where(model.c.id == full_id)
                 ).first()
                 if frow:
                     full_sn, full_created = frow[0], frow[1]
@@ -108,16 +116,16 @@ def complaint_sn_backfill(
                 "full_created_at": full_created.isoformat() if full_created else None,
                 "full_id": full_id,
                 "quality_note": note,
-                "table": model.__tablename__,
+                "table": model.name,
             })
             if cdate:
                 k = cdate.strftime("%Y-%m")
                 by_month[k] = by_month.get(k, 0) + 1
 
     if source_type in (None, "", "external"):
-        _collect(ExternalComplaint, ExternalComplaint.platform, "external")
+        _collect(_EC, _EC.c.platform, "external")
     if source_type in (None, "", "card"):
-        _collect(CardComplaint, CardComplaint.complaint_group, "card")
+        _collect(_CC, _CC.c.complaint_group, "card")
 
     out.sort(key=lambda x: str(x.get("complaint_date") or ""), reverse=True)
     return R(data={
@@ -164,14 +172,14 @@ def complaint_dedup_review(
     te = _parse_dt_end(end)
 
     def _collect(model, ch_col) -> list[dict]:
-        conds: list = [model.complaint_date.isnot(None)]
+        conds: list = [model.c.complaint_date.isnot(None)]
         if ts:
-            conds.append(model.complaint_date >= ts)
+            conds.append(model.c.complaint_date >= ts)
         if te:
-            conds.append(model.complaint_date <= te)
+            conds.append(model.c.complaint_date <= te)
         rows = db.execute(
-            select(model.id, model.device_sn, model.complaint_date,
-                   model.complainant_phone, ch_col)
+            select(model.c.id, model.c.device_sn, model.c.complaint_date,
+                   model.c.complainant_phone, ch_col)
             .where(*conds)
         ).all()
         payload = [
@@ -182,15 +190,15 @@ def complaint_dedup_review(
         _, _, review = dedup_events(payload)
         # 补 `source_type`(前端区分卡商/315) 与 `record_count`(组内条数, 排序用)
         for g in review:
-            g["source_type"] = "card" if model is CardComplaint else "external"
+            g["source_type"] = "card" if model is _CC else "external"
             g["record_count"] = len(g.get("record_ids") or [])
         return review
 
     out: list[dict] = []
     if source_type in (None, "", "external"):
-        out += _collect(ExternalComplaint, ExternalComplaint.platform)
+        out += _collect(_EC, _EC.c.platform)
     if source_type in (None, "", "card"):
-        out += _collect(CardComplaint, CardComplaint.complaint_group)
+        out += _collect(_CC, _CC.c.complaint_group)
 
     # 影响面大的优先(组内条数降序), 再按投诉日倒序(近期更值得处理)
     out.sort(key=lambda g: (-int(g.get("record_count") or 0),

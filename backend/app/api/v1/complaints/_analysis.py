@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, column, func, or_, select, table
 
 from app.api.deps import CurrentUser, DBSession
 
@@ -21,9 +21,18 @@ from app.api.v1.complaints._helpers import (
 )
 from app.api.v1.complaints._router import router
 from app.core.redis_client import cache_ttl_for, cached_json
-from app.models.card_complaint import CardComplaint
-from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
+
+# #338: 投诉分析读 std_all 镜像
+_CC = table("std_card_complaint_all",
+            column("id"), column("device_sn"), column("complainant_phone"),
+            column("quality_status"), column("problem"), column("complaint_date"),
+            column("complaint_group"), column("matched_ticket_no"))
+_EC = table("std_external_complaint_all",
+            column("id"), column("device_sn"), column("complainant_phone"),
+            column("quality_status"), column("problem"), column("complaint_date"),
+            column("platform"), column("complaint_category"),
+            column("matched_ticket_no"), column("created_at"))
 from app.schemas.common import R
 from app.services.analytics import (
     TZ,
@@ -85,8 +94,8 @@ def complaint_analysis(
     #      卡商投诉在工单侧登记为**外部投诉类**(工信部/12315/消协等平台投诉),
     #      故此处仍传 "外部投诉" —— 传 "(外)卡商" 会使 t_sub 恒空 → overlap 恒 0
     #      → 卡商总数虚高(实测 796 vs 真实 39)。
-    _ext_suppl_trend = _suppl_trend_rows(db, ExternalComplaint, "外部投诉", ts, te)
-    _card_suppl_trend = _suppl_trend_rows(db, CardComplaint, "外部投诉", ts, te)
+    _ext_suppl_trend = _suppl_trend_rows(db, _EC, "外部投诉", ts, te)
+    _card_suppl_trend = _suppl_trend_rows(db, _CC, "外部投诉", ts, te)
     # 补充表净计入总数 = total - overlap (overlap 已关联本范围内工单 → 工单已计入, 去重)
     #   ⚠️ 仅 315 适用此去重(315 投诉可能落成工单)。
     _ext_suppl_net = sum(int(r["total"] or 0) - int(r["overlap"] or 0) for r in _ext_suppl_trend)
@@ -279,15 +288,15 @@ def complaint_analysis(
     # 工单口径 remark 全空且数量少; 315 补充表(external_complaints)有完整 problem/平台/分类。
     ext_conds = []
     if ts:
-        ext_conds.append(ExternalComplaint.complaint_date >= ts)
+        ext_conds.append(_EC.c.complaint_date >= ts)
     if te:
-        ext_conds.append(ExternalComplaint.complaint_date <= te)
+        ext_conds.append(_EC.c.complaint_date <= te)
 
     # 平台分布 (315 表 platform 字段)
     ext_plat_rows = db.execute(
-        select(ExternalComplaint.platform, func.count())
+        select(_EC.c.platform, func.count())
         .where(*ext_conds)
-        .group_by(ExternalComplaint.platform)
+        .group_by(_EC.c.platform)
         .order_by(func.count().desc())
         .limit(15)
     ).all()
@@ -298,9 +307,9 @@ def complaint_analysis(
 
     # 问题分类分布 (315 表 complaint_category 字段)
     ext_cat_rows = db.execute(
-        select(ExternalComplaint.complaint_category, func.count())
+        select(_EC.c.complaint_category, func.count())
         .where(*ext_conds)
-        .group_by(ExternalComplaint.complaint_category)
+        .group_by(_EC.c.complaint_category)
         .order_by(func.count().desc())
         .limit(15)
     ).all()
@@ -310,7 +319,7 @@ def complaint_analysis(
     ]
 
     # 外部投诉趋势 (315 表按日)
-    ext_day_trunc = func.date_trunc("day", func.timezone("Asia/Shanghai", ExternalComplaint.complaint_date))
+    ext_day_trunc = func.date_trunc("day", func.timezone("Asia/Shanghai", _EC.c.complaint_date))
     ext_trend_rows = db.execute(
         select(ext_day_trunc, func.count())
         .where(*ext_conds)
@@ -323,11 +332,11 @@ def complaint_analysis(
     ]
 
     # 外部投诉总数/关联状态 (315 表)
-    ext_total = db.scalar(select(func.count()).select_from(ExternalComplaint).where(*ext_conds)) or 0
+    ext_total = db.scalar(select(func.count()).select_from(_EC).where(*ext_conds)) or 0
     ext_matched = db.scalar(
-        select(func.count()).select_from(ExternalComplaint)
+        select(func.count()).select_from(_EC)
         .where(*ext_conds)
-        .where(ExternalComplaint.matched_ticket_no.isnot(None))
+        .where(_EC.c.matched_ticket_no.isnot(None))
     ) or 0
 
     # 今日登记的外部投诉数(按 created_at 北京时间当天): 独立于筛选范围
@@ -335,8 +344,8 @@ def complaint_analysis(
     now_sh = datetime.now(TZ)
     today_start_utc = now_sh.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     ext_today_registered = db.scalar(
-        select(func.count()).select_from(ExternalComplaint)
-        .where(ExternalComplaint.created_at >= today_start_utc)
+        select(func.count()).select_from(_EC)
+        .where(_EC.c.created_at >= today_start_utc)
     ) or 0
 
     # 商户号投诉分类 (工单 service_item)
@@ -506,9 +515,9 @@ def complaint_analysis(
 
     # ── 8. 外部投诉平台趋势 (315 表按平台) ──
     ext_plat_trend_rows = db.execute(
-        select(ext_day_trunc, ExternalComplaint.platform, func.count())
+        select(ext_day_trunc, _EC.c.platform, func.count())
         .where(*ext_conds)
-        .group_by(ext_day_trunc, ExternalComplaint.platform)
+        .group_by(ext_day_trunc, _EC.c.platform)
         .order_by(ext_day_trunc)
     ).all()
     ext_plat_trend_map: dict[str, dict[str, int]] = {}
@@ -532,8 +541,8 @@ def complaint_analysis(
     #   渠道列用 `complaint_group`(卡商表无 platform, 群名即渠道)。
     #   前端据此展示「多渠道(非重复) / 真重复」两个指标, 见 ComplaintAnalysis.vue。
     _card_events = _suppl_event_metrics(
-        db, CardComplaint, CardComplaint.complaint_date,
-        CardComplaint.complaint_group, ts, te,
+        db, _CC, _CC.c.complaint_date,
+        _CC.c.complaint_group, ts, te,
     )
 
     return R(
