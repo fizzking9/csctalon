@@ -31,6 +31,14 @@ from pathlib import Path
 
 from app.core.config import settings
 
+# 登录按钮选择器与二维码判定复用页内扫码的真身定义, 避免两份漂移。
+# (2026-10-21 生产实测: CLI 旧选择器 text=登录 会误点到"协作邀请"浮层,
+#  截图里根本没有二维码 → 用户没有可扫的东西。.wlcp-btn:not(.is-highlight) 才有效。)
+from app.services.shared_doc_login_service import (
+    _KDOCS_SIGNIN_BUTTONS,
+    _QRCODE_PRESENT_JS,
+)
+
 TARGET_URL = "https://www.kdocs.cn/l/cbZIHtt6obyf"
 STATE_PATH = Path(settings.BROWSER_STATE_DIR) / "kdocs.json"
 
@@ -50,18 +58,32 @@ def _get_kdocs_user_id(page) -> str:
 
 
 def _open_doc_and_show_login(page) -> None:
-    """打开共享文档 → 若登录弹窗未自动弹出则点登录按钮"""
+    """打开共享文档 → 点登录按钮展开二维码 → 等二维码图片真正加载完成
+
+    选择器顺序与页内扫码保持一致(见 shared_doc_login_service._KDOCS_SIGNIN_BUTTONS)。
+    必须先等二维码图片 naturalWidth>0, 否则截图是一块白板。
+    """
     page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
     page.wait_for_timeout(3000)
-    for sel in ["text=登录", "text=立即登录", "button:has-text('登录')"]:
+    # 清掉可能遮挡登录按钮的浮层(实测: "XX 邀请你协作编辑文档" 模态框会盖住登录入口)
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
+    for sel in _KDOCS_SIGNIN_BUTTONS:
         try:
-            btn = page.query_selector(sel)
-            if btn and btn.is_visible():
-                btn.click()
+            page.click(sel, timeout=2500)
+            try:
+                page.wait_for_function(_QRCODE_PRESENT_JS, timeout=8000)
+                print(f"   ✔ 二维码已展开(选择器={sel})")
+            except Exception:
                 page.wait_for_timeout(2000)
-                break
+                print(f"   ⚠ 已点击({sel}), 二维码判定未命中但继续")
+            return
         except Exception:
             continue
+    print("   ⚠ 未找到登录按钮, 按当前页面截图")
 
 
 def _maybe_confirm_middle_page(page) -> bool:
