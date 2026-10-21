@@ -493,7 +493,18 @@ def _read_sheet_records(
     n_empty = 0
     n_biz_empty = 0
     for _, row in df.iterrows():
-        rec = {str(col): (None if pd.isna(v) else v) for col, v in row.items()}
+        # 2026-10-21: 剥离 Excel「文本格式」前缀单引号。
+        #   金山在线表格把单元格设为文本时, 导出 xlsx 会把 `'` 一起写进值里,
+        #   pandas 按 dtype=str 原样读出 → device_sn 变成 `'69212536007750`,
+        #   既匹配不到 devices 表(外键 manual_refunds_device_sn_fkey 报错),
+        #   也会让去重复合键错位。实测生产已有 13 条此类脏 SN。
+        rec = {}
+        for col, v in row.items():
+            if pd.isna(v):
+                rec[str(col)] = None
+                continue
+            s = str(v)
+            rec[str(col)] = s[1:] if s.startswith("'") else s
         # 过滤全空行(所有字段均为 None/空): 与 complaint_sync._is_empty_*_rec 同语义,
         # 避免空白模板行进入入库管线被判 dropped/failed
         if all(v is None or (isinstance(v, str) and v.strip() == "") for v in rec.values()):
