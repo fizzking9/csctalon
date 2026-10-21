@@ -62,6 +62,7 @@ D_ADOPT = "D_ADOPT"                        # is_refunded=是 且 非 dup_residua
 D_EX_DUP = "D_EX_DUP"                      # quality_status=dup_residual 重复残留
 D_EX_NO_SN = "D_EX_NO_SN"                  # quality_status=sn_unresolvable SN不可解析
 D_EX_NOT_REFUNDED = "D_EX_NOT_REFUNDED"    # is_refunded=否
+D_EX_QUOTE_SN = "D_EX_QUOTE_SN"            # device_sn 带 Excel 文本前缀引号, 同去重键干净行已采纳
 # E 路 ods.refund_record_reports
 E_ADOPT_ALL = "E_ADOPT_ALL"                # 全量采纳(refund_status 原样保留)
 
@@ -201,7 +202,9 @@ INSERT INTO std_refund_online (
     adopt_rule_ver, adopted_at
 )
 SELECT
-    refund_no, platform_order_no, third_order_no, device_sn, refund_reason,
+    refund_no, platform_order_no, third_order_no,
+    ltrim(device_sn, chr(39)) AS device_sn,  -- 采纳层值清洗: 去 Excel 文本格式前导单引号
+    refund_reason,
     package_name, merchant_name, refund_amount, actual_amount, remark, status,
     refund_method, audit_remark, auditor, operator, created_at_raw, updated_at_raw,
     actual_refund_time, quality_status, created_at, updated_at,
@@ -260,7 +263,9 @@ INSERT INTO std_wallet_flow (
     created_at, updated_at, flow_dir, adopt_rule_ver, adopted_at
 )
 SELECT
-    id, account_id, wallet_balance, device_sn, op_type, op_amount, remark,
+    id, account_id, wallet_balance,
+    ltrim(device_sn, chr(39)) AS device_sn,  -- 采纳层值清洗: 去 Excel 文本格式前导单引号
+    op_type, op_amount, remark,
     op_time, operator, actual_refund_time, quality_status, quality_note,
     created_at, updated_at,
     CASE WHEN op_type = '订单退费转入' THEN 'inflow' ELSE 'outflow' END,
@@ -311,7 +316,9 @@ INSERT INTO std_refund_shanmao (
     adopt_rule_ver, adopted_at
 )
 SELECT
-    refund_no, order_no, device_sn, phone, paid_amount, refund_amount,
+    refund_no, order_no,
+    ltrim(device_sn, chr(39)) AS device_sn,  -- 采纳层值清洗: 去 Excel 文本格式前导单引号
+    phone, paid_amount, refund_amount,
     actual_amount, package_name, merchant_name, refund_reason, refund_method,
     status, applicant, auditor, operator, apply_time, audit_time, refund_time,
     remark, audit_remark, quality_status, quality_note, created_at, updated_at,
@@ -322,7 +329,9 @@ WHERE adopt_state = :st_adopted
 
 
 # ── D 路 ods.manual_refunds ─────────────────────────────────────────────────
-# 单一优先级分因: dup_residual → sn_unresolvable → 已退款采纳 → 未退款 → 其余 pending
+# 单一优先级分因: 引号SN → dup_residual → sn_unresolvable → 已退款采纳 → 未退款 → 其余 pending
+# 引号SN判据: device_sn 带 Excel 文本格式前导单引号(chr(39)), 同去重键干净行已存在并采纳,
+#             脏行本身是 Excel 格式 artifact, 不应进入标准表。
 _D_UPDATE = """
 UPDATE ods.manual_refunds AS t SET
     adopt_state = COALESCE(o.target_state, c.state),
@@ -332,6 +341,7 @@ UPDATE ods.manual_refunds AS t SET
 FROM (
     SELECT id,
         CASE
+            WHEN device_sn LIKE chr(39)||'%' THEN :st_excluded
             WHEN quality_status = 'dup_residual' THEN :st_excluded
             WHEN quality_status = 'sn_unresolvable' THEN :st_excluded
             WHEN is_refunded = '是' THEN :st_adopted
@@ -339,6 +349,7 @@ FROM (
             ELSE :st_pending
         END AS state,
         CASE
+            WHEN device_sn LIKE chr(39)||'%' THEN :r_quote_sn
             WHEN quality_status = 'dup_residual' THEN :r_dup
             WHEN quality_status = 'sn_unresolvable' THEN :r_no_sn
             WHEN is_refunded = '是' THEN :r_adopt
@@ -365,7 +376,9 @@ INSERT INTO std_refund_manual (
     source_grade, adopt_rule_ver, adopted_at
 )
 SELECT
-    id, register_time, device_sn, order_no, merchant_id, order_amount,
+    id, register_time,
+    ltrim(device_sn, chr(39)) AS device_sn,  -- 采纳层值清洗: 去 Excel 文本格式前导单引号
+    order_no, merchant_id, order_amount,
     registrant, is_refunded, refund_amount, refund_operator, op_time, remark,
     actual_refund_time, quality_status, quality_note, register_time_raw,
     backfill_refund_record_report_id, created_at, updated_at,
@@ -400,7 +413,8 @@ INSERT INTO std_refund_record (
     adopt_rule_ver, adopted_at
 )
 SELECT
-    id, platform_order_no, wx_order_no, merchant_id, merchant_name, device_sn,
+    id, platform_order_no, wx_order_no, merchant_id, merchant_name,
+    ltrim(device_sn, chr(39)) AS device_sn,  -- 采纳层值清洗: 去 Excel 文本格式前导单引号
     product_name, refund_time, apply_refund_amount, refund_amount, refund_status,
     backfill_op_time, backfill_manual_refund_id, created_at, updated_at,
     :rule_ver, now()
@@ -452,7 +466,8 @@ _REASON_PARAMS: dict[str, dict[str, str]] = {
     ROUTE_C: {"r_adopt": C_ADOPT, "r_not_refunded": C_EX_NOT_REFUNDED, "r_pending": PENDING_UNKNOWN},
     ROUTE_D: {
         "r_dup": D_EX_DUP, "r_no_sn": D_EX_NO_SN, "r_adopt": D_ADOPT,
-        "r_not_refunded": D_EX_NOT_REFUNDED, "r_pending": PENDING_UNKNOWN,
+        "r_not_refunded": D_EX_NOT_REFUNDED, "r_quote_sn": D_EX_QUOTE_SN,
+        "r_pending": PENDING_UNKNOWN,
     },
     ROUTE_E: {"r_adopt": E_ADOPT_ALL},
 }
