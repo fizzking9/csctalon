@@ -234,10 +234,14 @@ def _engine():
                 conn.execute(text(_sql))
             conn.commit()
 
-        # #339 Phase ②: 精简物理表 std_cs_record / std_bms_order (复刻迁移 d9e1f0c2b4a6)
-        #   业务侧 table("std_cs_record", ...) / table("std_bms_order", ...) 已切到精简表;
-        #   测试库不跑 Alembic, 故在此显式建表 + 索引 + 主键。
-        #   表结构 / 列清单与线上迁移逐字一致, 单一来源 = alembic/versions/d9e1f0c2b4a6_big_table_materialize.py
+        # #339 Phase ②: 精简物理表 std_cs_record / std_bms_order
+        #   线上 = 物理表 (CREATE TABLE AS SELECT 精简列 + rebuild 定时刷新), 生产
+        #     消费侧 table("std_cs_record", ...) 走物理表 → 提速显著 (EXPLAIN 实测
+        #     90d TOPN 83ms→44ms, 1.87x)
+        #   测试库 = 视图 (CREATE VIEW std_cs_record AS SELECT 精简列 FROM ods.*)
+        #     — 与 STD_ALL_VIEWS 同范式, fixture 往 ods 插数据后视图自动可见;
+        #     若建物理表会在 create_all 时 CREATE TABLE AS SELECT FROM ods.* (此时
+        #     ods 为空 → 物理表永远空), fixture 插 ods 后物理表无感知, 导致测试全零
         _CS_COLS = """
             id, problem_category, problem_type, device_sn, solution,
             operation_time, operator, description, execution_result, user_accepted,
@@ -252,21 +256,18 @@ def _engine():
             created_at, updated_at
         """
         with engine.connect() as conn:
-            conn.execute(text("DROP TABLE IF EXISTS public.std_cs_record CASCADE"))
-            conn.execute(text("DROP TABLE IF EXISTS public.std_bms_order CASCADE"))
-            conn.execute(text(f"CREATE TABLE public.std_cs_record AS SELECT {_CS_COLS} FROM ods.cs_records WITH DATA"))
-            conn.execute(text(f"CREATE TABLE public.std_bms_order AS SELECT {_BO_COLS} FROM ods.bms_orders WITH DATA"))
-            conn.execute(text("CREATE INDEX ix_std_cs_record_op_time ON public.std_cs_record (operation_time)"))
-            conn.execute(text("CREATE INDEX ix_std_cs_record_sn ON public.std_cs_record (device_sn)"))
-            conn.execute(text(
-                "CREATE INDEX ix_std_cs_record_cat_op ON public.std_cs_record "
-                "(problem_category, operation_time DESC)"
-            ))
-            conn.execute(text("CREATE INDEX ix_std_bms_order_sn ON public.std_bms_order (device_sn)"))
-            conn.execute(text("CREATE INDEX ix_std_bms_order_create_date ON public.std_bms_order (create_date)"))
-            conn.execute(text("CREATE INDEX ix_std_bms_order_active_date ON public.std_bms_order (active_date)"))
-            conn.execute(text("ALTER TABLE public.std_cs_record ADD PRIMARY KEY (id)"))
-            conn.execute(text("ALTER TABLE public.std_bms_order ADD PRIMARY KEY (order_no)"))
+            # #322 同款: 先按 pg_class.relkind 判定对象类型再删,
+            # 避免 DROP TABLE 作用于 VIEW / DROP VIEW 作用于 TABLE 报 WrongObjectType
+            for _t in ("std_cs_record", "std_bms_order"):
+                _relkind = conn.execute(text(
+                    "SELECT relkind FROM pg_class WHERE relname = :n AND relnamespace = 'public'::regnamespace"
+                ), {"n": _t}).scalar()
+                if _relkind == "v":
+                    conn.execute(text(f'DROP VIEW public."{_t}" CASCADE'))
+                elif _relkind in ("r", "p"):
+                    conn.execute(text(f'DROP TABLE public."{_t}" CASCADE'))
+            conn.execute(text(f"CREATE VIEW public.std_cs_record AS SELECT {_CS_COLS} FROM ods.cs_records"))
+            conn.execute(text(f"CREATE VIEW public.std_bms_order AS SELECT {_BO_COLS} FROM ods.bms_orders"))
             conn.commit()
 
         # ⚠️ 2026-09-07 修复: create_all 建表后 stamp alembic 到 head。
