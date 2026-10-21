@@ -57,6 +57,16 @@ def _rebuild_refund_wide(db: Session) -> dict:
     return build_refund_wide(db)
 
 
+def _rebuild_std_big(db: Session) -> dict:
+    """#339: 全量重建大表精简物理表 std_cs_record / std_bms_order。
+
+    自管事务(Session(engine))+advisory lock, 不复用 runner 的 db (fn 执行期间
+    runner session 空闲, 两不相扰); TRUNCATE+INSERT 同事务原子换装。
+    """
+    from app.services.governance.std_big_rebuild import rebuild_both
+    return rebuild_both()
+
+
 def _purge_expired_logs(db: Session) -> dict:
     """按保留期批删超期日志/审计(#261 B4-5)。
 
@@ -123,6 +133,15 @@ BATCH_JOBS: dict[str, dict] = {
         "fn": _rebuild_refund_wide,
         "schedule_daily_at": "03:10",
         "timeout_minutes": 120,
+    },
+    # #339: 大表精简物理表全量重建(cs_records 54万/bms_orders 67万, 消费侧
+    # table() 路径 + cs_record_clean/bms_order_clean 视图都挂在精简表上)。
+    # 03:40 = 现有夜批错峰末端(purge 02:00 → cash_flow 02:30 → refund_wide 03:10),
+    # 早于 05:00 BMS 补跑 / 06:00 套餐同步窗口。实测单表 3.4s/6.0s。
+    "rebuild_std_big": {
+        "fn": _rebuild_std_big,
+        "schedule_daily_at": "03:40",
+        "timeout_minutes": 60,
     },
 }
 

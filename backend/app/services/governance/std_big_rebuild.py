@@ -1,10 +1,14 @@
 """#339 大表物理精简重建作业: cs_records / bms_orders
 
-幂等, advisory lock 防并发, 全量 TRUNCATE + INSERT…SELECT。
+幂等, advisory lock 防并发, 全量 TRUNCATE + INSERT…SELECT (同事务原子换装,
+读侧 MVCC 无感知中间态)。
 设计范式同 dim_device_combo_service / refund_adoption。
 
-定时: 凌晨 02:30 (避开 BMS 维护 / 05:00 补跑 / 06:00 套餐同步)
-手动: admin API / 直接调用 rebuild_cs_records() 或 rebuild_bms_orders()
+定时: batch job rebuild_std_big, 北京时间每日 03:40 (batch_runner.BATCH_JOBS)。
+  原设计 02:30 已被 rebuild_cash_flow_wide 占用, 按 02:00 purge → 02:30
+  cash_flow_wide → 03:10 refund_wide → 03:40 std_big 错峰; 早于 05:00 BMS
+  补跑 / 06:00 套餐同步窗口。
+手动: 直接调用 rebuild_cs_records() / rebuild_bms_orders() / rebuild_both()
 """
 from __future__ import annotations
 
@@ -15,10 +19,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.database import engine
+from app.core.db_guard import assert_safe_to_destroy
 
 logger = logging.getLogger(__name__)
 
-# 精简列集 (与 migration f1a2b3c4d5e6 共用单一来源)
+# 精简列集 (与 migration d9e1f0c2b4a6 共用单一来源)
 _CS_COLS = "id, problem_category, problem_type, device_sn, solution, operation_time, operator, description, execution_result, user_accepted, consult_time, created_at"
 _BO_COLS = "order_no, order_type, device_sn, combo_name, combo_price, actual_pay_price, balance_pay_price, pay_date, pay_type, order_status, refund_status, create_user, create_date, business_name, merchant_name, active_date, device_type_name, created_at, updated_at"
 
@@ -46,6 +51,13 @@ def _rebuild(std_table: str, ods_table: str, cols: str, lock_key: int, label: st
 
     with Session(engine, autocommit=False, autoflush=False) as db:
         try:
+            # 破坏性操作纪律: TRUNCATE 前过 db_guard; 定时重建是设计内常态运维,
+            # 显式 allow_real_db=True (与 batch_runner._purge_expired_logs 同范式)
+            assert_safe_to_destroy(
+                db,
+                reason=f"std_big_rebuild[{label}]: TRUNCATE {std_table} 后全量回灌(设计内定时重建, #339)",
+                allow_real_db=True,
+            )
             db.execute(text(f"SELECT pg_advisory_lock({lock_key})"))
             # 1) TRUNCATE
             db.execute(text(f"TRUNCATE TABLE {std_table}"))

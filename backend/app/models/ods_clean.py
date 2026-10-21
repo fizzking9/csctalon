@@ -73,9 +73,13 @@ class RefundClean(Base):
 
 
 class BmsOrderClean(Base):
-    """`public.bms_order_clean` 视图 (#322 方案A, over ods.bms_orders)。
+    """`public.bms_order_clean` 视图 (#322 方案A → #339 Phase③ 改挂 std_bms_order)。
 
-    排除内部溯源列 synced_at / raw_extra(其余业务列全保留)。
+    #339 Phase③: 源由 ods.bms_orders(31列) 改为 std_bms_order(精简物理表 19 列,
+    每日 03:40 batch job rebuild_std_big 重建)。列审计(2026-10-21): 被删的
+    payable_price / wx_order_no / order_result / order_status_raw / last_stored_time /
+    mch_id / business_id / before_serve_valid_date / after_serve_valid_date / days
+    在 analytics 侧零消费, 采集/元数据/质量探针仍走 ods 源表不受影响。
     """
 
     __tablename__ = "bms_order_clean"
@@ -85,28 +89,18 @@ class BmsOrderClean(Base):
     device_sn: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="设备SN")
     combo_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="套餐名称")
     combo_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="套餐价格(元)")
-    payable_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="应付价格(元)")
     actual_pay_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="实际支付价格(元)")
     balance_pay_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True, comment="余额支付(元)")
-    wx_order_no: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="微信订单号")
     pay_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="支付时间")
     pay_type: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="支付类型(1微信支付等)")
     order_status: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="订单状态(0未支付/1已支付)")
-    order_result: Mapped[str | None] = mapped_column(Text, nullable=True, comment="订单结果/下单返回")
-    order_status_raw: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="订单状态原始码")
     create_user: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="创建人(WeChat/Wallet/SYS)")
     create_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="创建时间(同步锚点)")
     business_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="商户名称")
-    business_id: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="内部商户ID")
     device_type_name: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="设备类型")
     refund_status: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="退款状态")
     active_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="激活时间")
-    last_stored_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="最后储值时间")
-    mch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="微信商户Id")
     merchant_name: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="微信商户名称")
-    before_serve_valid_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="续费前服务有效期")
-    after_serve_valid_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="续费后服务有效期")
-    days: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="有效期天数")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, comment="系统导入时间")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, comment="系统导入时间")
 
@@ -198,7 +192,13 @@ class ExternalComplaintClean(Base):
 
 
 class CsRecordClean(Base):
-    """`public.cs_record_clean` 视图 (#322 方案A, over ods.cs_records)。"""
+    """`public.cs_record_clean` 视图 (#322 方案A → #339 Phase③ 改挂 std_cs_record)。
+
+    #339 Phase③: 源由 ods.cs_records(16列) 改为 std_cs_record(精简物理表 12 列,
+    每日 03:40 batch job rebuild_std_big 重建)。列审计(2026-10-21): 被删的
+    send_content / problem_create_time / last_consult_time / updated_at 在
+    analytics 侧零消费, 采集/元数据/质量探针仍走 ods 源表不受影响。
+    """
 
     __tablename__ = "cs_record_clean"
 
@@ -209,15 +209,11 @@ class CsRecordClean(Base):
     solution: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="方案")
     operation_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="操作时间(主时间字段)")
     operator: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="操作人:企微-XXX")
-    send_content: Mapped[str | None] = mapped_column(Text, nullable=True, comment="发送内容")
     description: Mapped[str | None] = mapped_column(Text, nullable=True, comment="说明")
     execution_result: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="执行结果说明")
     user_accepted: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="用户是否接受")
     consult_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="咨询时间")
-    problem_create_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="问题类型创建时间")
-    last_consult_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="最后咨询时间")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, comment="系统导入时间")
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, comment="系统导入时间")
 
 
 class WalletWithdrawalClean(Base):
@@ -366,11 +362,11 @@ def _cols(model: type[Base]) -> str:
 # (其迁移/模型本次不改, 列清单由 RefundClean 模型自动得出, 与旧迁移逐字一致)。
 CLEAN_VIEWS: dict[str, tuple[str, str]] = {
     "refund_clean": ("ods.refunds", _cols(RefundClean)),
-    "bms_order_clean": ("ods.bms_orders", _cols(BmsOrderClean)),
+    "bms_order_clean": ("std_bms_order", _cols(BmsOrderClean)),  # #339 Phase③: 挂精简物理表
     "device_combo_clean": ("ods.device_combos", _cols(DeviceComboClean)),
     "card_complaint_clean": ("ods.card_complaints", _cols(CardComplaintClean)),
     "external_complaint_clean": ("ods.external_complaints", _cols(ExternalComplaintClean)),
-    "cs_record_clean": ("ods.cs_records", _cols(CsRecordClean)),
+    "cs_record_clean": ("std_cs_record", _cols(CsRecordClean)),  # #339 Phase③: 挂精简物理表
     "wallet_withdrawal_clean": ("ods.wallet_withdrawals", _cols(WalletWithdrawalClean)),
     "device_flow_usage_clean": ("ods.device_flow_usage", _cols(DeviceFlowUsageClean)),
     "manual_refund_clean": ("ods.manual_refunds", _cols(ManualRefundClean)),

@@ -202,42 +202,11 @@ def _engine():
             """))
             conn.commit()
 
-        # #322 方案A: create_all 会把各 *Clean 模型建成**表**(视图无法由 create_all 建),
-        #   与线上的**视图**(over ods 源表)不符; 且 analytics 现已全部改读这些视图,
-        #   若留 create_all 的空表会口径错位/用例全红。
-        #   测试库不跑 Alembic 迁移, 故在此拆表重建为视图。
-        #   CREATE VIEW 的列清单与迁移 c3d4e5f6a7b8 共用 CLEAN_VIEWS(改一处即同步)。
-        #   顺序: create_all 先建出视图依赖的 ods 源表 → 再建视图 → 最后 stamp。
-        with engine.connect() as conn:
-            for _view, (_src, _cols) in CLEAN_VIEWS.items():
-                conn.execute(text(f'DROP TABLE IF EXISTS public."{_view}" CASCADE'))
-                conn.execute(text(f'CREATE VIEW public."{_view}" AS SELECT {_cols} FROM {_src}'))
-            conn.commit()
-
-        # #334: std_*_all 全量镜像视图(over ods 五路, 含采纳四列)。
-        #   全状态语义读点已迁这些视图; 测试库不跑迁移, 在此显式建视图,
-        #   与迁移 b443c1a2d3e4 共用单一来源 STD_ALL_VIEWS(SELECT * 透传)。
-        from app.models.refund_standard import STD_ALL_VIEWS, STD_CUSTOM_VIEWS_DDL
-
-        with engine.connect() as conn:
-            for _view, _src in STD_ALL_VIEWS.items():
-                conn.execute(text(f'DROP VIEW IF EXISTS public."{_view}" CASCADE'))
-                conn.execute(text(f'CREATE VIEW public."{_view}" AS SELECT * FROM {_src}'))
-            for _sql in STD_CUSTOM_VIEWS_DDL:
-                # 视图名取 CREATE VIEW <name> 段的 <name> (正则抗 "AS alias" 干扰)
-                import re
-                _m = re.match(r"\s*CREATE\s+VIEW\s+(\S+)", _sql, re.IGNORECASE)
-                _name = _m.group(1) if _m else "UNKNOWN"
-                # 物理表可能被 create_all 提前建了 (ORM 映射), 先 DROP TABLE + DROP VIEW 双保险
-                conn.execute(text(f'DROP TABLE IF EXISTS public."{_name}" CASCADE'))
-                conn.execute(text(f'DROP VIEW IF EXISTS public."{_name}" CASCADE'))
-                conn.execute(text(_sql))
-            conn.commit()
-
-        # #339 Phase ②: 精简物理表 std_cs_record / std_bms_order
-        #   线上 = 物理表 (CREATE TABLE AS SELECT 精简列 + rebuild 定时刷新), 生产
-        #     消费侧 table("std_cs_record", ...) 走物理表 → 提速显著 (EXPLAIN 实测
-        #     90d TOPN 83ms→44ms, 1.87x)
+        # #339 Phase ②/③: 精简表 std_cs_record / std_bms_order —— 必须先于
+        #   CLEAN_VIEWS 建 (cs_record_clean / bms_order_clean Phase③ 起改挂这两者)。
+        #   线上 = 物理表 (CREATE TABLE AS SELECT 精简列 + 03:40 rebuild_std_big 定时刷新),
+        #     消费侧 table()/clean 视图走物理表 → 提速显著 (EXPLAIN 实测 90d TOPN
+        #     cs_records 83ms→44ms, 1.87x)
         #   测试库 = 视图 (CREATE VIEW std_cs_record AS SELECT 精简列 FROM ods.*)
         #     — 与 STD_ALL_VIEWS 同范式, fixture 往 ods 插数据后视图自动可见;
         #     若建物理表会在 create_all 时 CREATE TABLE AS SELECT FROM ods.* (此时
@@ -268,6 +237,39 @@ def _engine():
                     conn.execute(text(f'DROP TABLE public."{_t}" CASCADE'))
             conn.execute(text(f"CREATE VIEW public.std_cs_record AS SELECT {_CS_COLS} FROM ods.cs_records"))
             conn.execute(text(f"CREATE VIEW public.std_bms_order AS SELECT {_BO_COLS} FROM ods.bms_orders"))
+            conn.commit()
+
+        # #322 方案A: create_all 会把各 *Clean 模型建成**表**(视图无法由 create_all 建),
+        #   与线上的**视图**(over ods 源表/std 精简表)不符; 且 analytics 现已全部改读
+        #   这些视图, 若留 create_all 的空表会口径错位/用例全红。
+        #   测试库不跑 Alembic 迁移, 故在此拆表重建为视图。
+        #   CREATE VIEW 的列清单与迁移 c3d4e5f6a7b8 共用 CLEAN_VIEWS(改一处即同步);
+        #   #339 Phase③ 起 cs_record_clean / bms_order_clean 源为 std 精简表(上方已建)。
+        #   顺序: create_all 先建出视图依赖的 ods 源表 → 建 std 精简视图 → 再建 clean 视图 → 最后 stamp。
+        with engine.connect() as conn:
+            for _view, (_src, _cols) in CLEAN_VIEWS.items():
+                conn.execute(text(f'DROP TABLE IF EXISTS public."{_view}" CASCADE'))
+                conn.execute(text(f'CREATE VIEW public."{_view}" AS SELECT {_cols} FROM {_src}'))
+            conn.commit()
+
+        # #334: std_*_all 全量镜像视图(over ods 五路, 含采纳四列)。
+        #   全状态语义读点已迁这些视图; 测试库不跑迁移, 在此显式建视图,
+        #   与迁移 b443c1a2d3e4 共用单一来源 STD_ALL_VIEWS(SELECT * 透传)。
+        from app.models.refund_standard import STD_ALL_VIEWS, STD_CUSTOM_VIEWS_DDL
+
+        with engine.connect() as conn:
+            for _view, _src in STD_ALL_VIEWS.items():
+                conn.execute(text(f'DROP VIEW IF EXISTS public."{_view}" CASCADE'))
+                conn.execute(text(f'CREATE VIEW public."{_view}" AS SELECT * FROM {_src}'))
+            for _sql in STD_CUSTOM_VIEWS_DDL:
+                # 视图名取 CREATE VIEW <name> 段的 <name> (正则抗 "AS alias" 干扰)
+                import re
+                _m = re.match(r"\s*CREATE\s+VIEW\s+(\S+)", _sql, re.IGNORECASE)
+                _name = _m.group(1) if _m else "UNKNOWN"
+                # 物理表可能被 create_all 提前建了 (ORM 映射), 先 DROP TABLE + DROP VIEW 双保险
+                conn.execute(text(f'DROP TABLE IF EXISTS public."{_name}" CASCADE'))
+                conn.execute(text(f'DROP VIEW IF EXISTS public."{_name}" CASCADE'))
+                conn.execute(text(_sql))
             conn.commit()
 
         # ⚠️ 2026-09-07 修复: create_all 建表后 stamp alembic 到 head。
