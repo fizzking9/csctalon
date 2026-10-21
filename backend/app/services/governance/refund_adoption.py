@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 
 from sqlalchemy import text
@@ -128,10 +128,9 @@ class _Route:
     std_insert_sql: str
     amount_expr: str
     pk_col: str
-    std_count: int = 0
-    std_amount: Decimal = Decimal("0")
-    elapsed_ms: int = 0
-    counts: dict = field(default_factory=dict)
+    # #341: E 路 std_refund_record 2026-10-21 改为视图(全量采纳 + SN 清洗已内嵌视图),
+    # 不再 TRUNCATE + INSERT 重建; adopt_state 盖章仍在 ods 侧正常执行。
+    std_is_view: bool = False
 
 
 # 公共绑定参数(状态三态), 各 UPDATE 复用
@@ -449,6 +448,7 @@ _ROUTES: dict[str, _Route] = {
         route=ROUTE_E, ods_table="ods.refund_record_reports", std_table="std_refund_record",
         update_sql=_E_UPDATE, std_insert_sql=_E_STD_INSERT,
         amount_expr="COALESCE(sum(refund_amount), 0)", pk_col="id",
+        std_is_view=True,
     ),
 }
 
@@ -496,9 +496,11 @@ def _run_one_route(db: Session, cfg: _Route) -> dict:
     db.flush()
 
     # 2) 重建 std: 先清空再按 adopted 集合全量插入(事务内, 回滚可恢复)
-    db.execute(text(f"TRUNCATE TABLE {cfg.std_table}"))
-    db.execute(text(cfg.std_insert_sql), params)
-    db.flush()
+    #    #341: std_is_view=True 的路(E 路) 跳过 —— 视图定义内嵌清洗, 实时透传 ods
+    if not cfg.std_is_view:
+        db.execute(text(f"TRUNCATE TABLE {cfg.std_table}"))
+        db.execute(text(cfg.std_insert_sql), params)
+        db.flush()
 
     # 3) 汇总: ods 侧三态计数(含被人工覆盖改写后的最终 state)
     state_rows = db.execute(text(

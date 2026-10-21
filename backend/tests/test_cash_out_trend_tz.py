@@ -38,13 +38,14 @@ def _bj(s: str) -> datetime:
 def _test_session(_engine):
     session = Session(_engine, autocommit=False, autoflush=False)
     from app.models import Device, Refund, RefundRecordReport
-    from app.models.refund_standard import StdRefundOnline, StdRefundRecord
+    from app.models.refund_standard import StdRefundOnline
 
     for cls in (RefundRecordReport, Refund):
         safe_wipe(session, cls)
     # #332 T8: std 同步清空(采纳作业全量重建, 防 std 残留污染绝对计数)
     safe_wipe(session, StdRefundOnline)
-    safe_wipe(session, StdRefundRecord)
+    # #341: E 路 std_refund_record 已改为视图(透传 ods.refund_record_reports),
+    # 上一行 safe_wipe(RefundRecordReport) 已清空视图数据, 无需额外 wipe StdRefundRecord
     safe_wipe(session, Device, where=Device.sn.like("SN-TZ-%"))
     session.commit()
     try:
@@ -54,7 +55,6 @@ def _test_session(_engine):
             for cls in (RefundRecordReport, Refund):
                 safe_wipe(session, cls)
             safe_wipe(session, StdRefundOnline)
-            safe_wipe(session, StdRefundRecord)
             safe_wipe(session, Device, where=Device.sn.like("SN-TZ-%"))
             session.commit()
         except Exception:

@@ -217,12 +217,21 @@ def _engine():
         # #334: std_*_all 全量镜像视图(over ods 五路, 含采纳四列)。
         #   全状态语义读点已迁这些视图; 测试库不跑迁移, 在此显式建视图,
         #   与迁移 b443c1a2d3e4 共用单一来源 STD_ALL_VIEWS(SELECT * 透传)。
-        from app.models.refund_standard import STD_ALL_VIEWS
+        from app.models.refund_standard import STD_ALL_VIEWS, STD_CUSTOM_VIEWS_DDL
 
         with engine.connect() as conn:
             for _view, _src in STD_ALL_VIEWS.items():
                 conn.execute(text(f'DROP VIEW IF EXISTS public."{_view}" CASCADE'))
                 conn.execute(text(f'CREATE VIEW public."{_view}" AS SELECT * FROM {_src}'))
+            for _sql in STD_CUSTOM_VIEWS_DDL:
+                # 视图名取 CREATE VIEW <name> 段的 <name> (正则抗 "AS alias" 干扰)
+                import re
+                _m = re.match(r"\s*CREATE\s+VIEW\s+(\S+)", _sql, re.IGNORECASE)
+                _name = _m.group(1) if _m else "UNKNOWN"
+                # 物理表可能被 create_all 提前建了 (ORM 映射), 先 DROP TABLE + DROP VIEW 双保险
+                conn.execute(text(f'DROP TABLE IF EXISTS public."{_name}" CASCADE'))
+                conn.execute(text(f'DROP VIEW IF EXISTS public."{_name}" CASCADE'))
+                conn.execute(text(_sql))
             conn.commit()
 
         # ⚠️ 2026-09-07 修复: create_all 建表后 stamp alembic 到 head。

@@ -213,19 +213,16 @@ class StdRefundManual(_StdAdoptColumns, Base):
 
 
 class StdRefundRecord(_StdAdoptColumns, Base):
-    """`public.std_refund_record` — E 路企微商户号退款水单采纳行。
+    """`public.std_refund_record` — E 路企微商户号退款水单 (视图, #341 2026-10-21)。
 
-    采纳口径: 全量(当前数据全部退款成功); refund_status 原样保留,
-    未来若出现非成功状态由统计侧按 refund_status 防御性过滤。
-    over ods.refund_record_reports, 列与 refund_record_report_clean 15 业务列对齐。
+    采纳口径: 全量(数据端已验证 100% refund_status=退款成功);
+    视图嵌入 ltrim(device_sn, chr(39)) 清洗 Excel 文本格式前导单引号,
+    列与原物理表严格对齐, 消费方 ORM 零改动。
     """
 
     __tablename__ = "std_refund_record"
-    __table_args__ = (
-        Index("ix_std_refund_record_rtime", "refund_time"),
-        Index("ix_std_refund_record_sn", "device_sn"),
-        Index("ix_std_refund_record_mid", "merchant_id"),
-    )
+    # #341: 视图不支持 INDEX, 原物理表三级索引 (rtime/sn/mid) 由 migration 一并删除;
+    # oids.refund_record_reports 是上游物理表, 若宽扫描需索引可加在 oids 侧。
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, comment="源行 id")
     platform_order_no: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="平台订单号")
@@ -306,3 +303,19 @@ STD_ALL_VIEWS: dict[str, str] = {
     "std_scrm_session_transfer_all": "ods.scrm_session_transfers",
     "std_return_tracking_all": "ods.return_trackings",
 }
+
+# #341: 自定义 std 视图 DDL (含列派生/清洗, 不能用 SELECT * 透传)。
+# 单一来源: 与 migration e9d4f5c6b1a2 共用; conftest.py 测试库显式建视图时读此。
+STD_CUSTOM_VIEWS_DDL: list[str] = [
+    """\
+CREATE VIEW std_refund_record AS
+SELECT
+    id, platform_order_no, wx_order_no, merchant_id, merchant_name,
+    ltrim(device_sn, chr(39)) AS device_sn,  -- 去 Excel 文本格式前导单引号(同 E_STD_INSERT 清洗)
+    product_name, refund_time, apply_refund_amount, refund_amount, refund_status,
+    backfill_op_time, backfill_manual_refund_id,
+    created_at, updated_at, adopt_rule_ver, adopted_at
+FROM ods.refund_record_reports
+WHERE adopt_state = 'adopted'
+""",
+]
