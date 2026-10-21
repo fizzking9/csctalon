@@ -258,10 +258,15 @@ def check_line_candidates(
     _: CurrentUser,
     report_id: int = Query(..., ge=1, description="E 退款记录报表 id"),
 ):
-    from app.models.refund_record_report import RefundRecordReport
+    from sqlalchemy import column, select, table
+
     from app.services.reconcile_check import _route_candidates
 
-    report = db.get(RefundRecordReport, report_id)
+    # #338: 对账勾稽读 std_refund_record_all 镜像(全量 E 路水单)
+    _RR_ALL = table("std_refund_record_all",
+                    column("id"), column("refund_status"), column("platform_order_no"),
+                    column("device_sn"), column("refund_amount"))
+    report = db.execute(select(_RR_ALL).where(_RR_ALL.c.id == report_id)).mappings().first()
     if not report:
         raise HTTPException(status_code=404, detail="E 退款记录报表不存在")
     cand = _route_candidates(db, report)

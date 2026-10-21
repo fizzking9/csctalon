@@ -323,10 +323,14 @@ def scan_alerts(db: DBSession, _: ManagerUser):
     """
     from datetime import datetime, timedelta, timezone
 
+    from sqlalchemy import column, table
+
     from app.models.external_complaint import ExternalComplaint
     from app.models.incident import Incident
-    from app.models.refund import Refund
     from app.models.ticket import ServiceTicket
+
+    # #338: 退款量激增告警(全状态口径) → 读 std_refund_online_all 镜像
+    _REFUND_ONLINE_ALL = table("std_refund_online_all", column("created_at"))
 
     now = datetime.now(timezone.utc)
     today_start = datetime.combine(now.date(), datetime.min.time(), tzinfo=timezone.utc)
@@ -362,7 +366,7 @@ def scan_alerts(db: DBSession, _: ManagerUser):
 
         try:
             if rtype == "refund_surge":
-                cnt = db.scalar(select(func.count()).select_from(Refund).where(Refund.created_at >= day_start)) or 0
+                cnt = db.scalar(select(func.count()).select_from(_REFUND_ONLINE_ALL).where(_REFUND_ONLINE_ALL.c.created_at >= day_start)) or 0
                 if threshold and cnt >= threshold:
                     db.add(Alert(
                         rule_id=rule.id,

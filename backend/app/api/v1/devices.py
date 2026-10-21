@@ -1,17 +1,27 @@
 """设备管理路由"""
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, or_, select
+from sqlalchemy import column, func, or_, select, table
 
 from app.api.deps import AdminUser, CurrentUser, DBSession, ManagerUser
 from app.models.device import Device, DeviceTag, DeviceTagBatch, DeviceTagBinding, device_tag_rel
 from app.models.merchant_refund import MerchantRefund
-from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
-from app.models.wallet import WalletWithdrawal
 from app.schemas.common import PageBase, R
 from app.services.audit_timeline import build_device_timeline
 from app.services.device_profile import build_device_profile
+
+# #338: 设备详情全状态口径 → 读 std_*_all 镜像视图, 禁止直读 ods
+_REFUND_ONLINE_ALL = table(
+    "std_refund_online_all",
+    column("refund_no"), column("device_sn"), column("refund_amount"),
+    column("status"), column("created_at_raw"),
+)
+_WALLET_FLOW_ALL = table(
+    "std_wallet_flow_all",
+    column("id"), column("device_sn"), column("op_type"), column("op_amount"),
+    column("op_time"), column("remark"),
+)
 
 router = APIRouter(prefix="/devices", tags=["设备管理"])
 
@@ -64,16 +74,19 @@ def get_device(sn: str, db: DBSession, _: CurrentUser):
     device = db.get(Device, sn)
     if not device:
         raise HTTPException(status_code=404, detail="设备不存在")
-    # 聚合退费单
-    refunds = list(db.scalars(select(Refund).where(Refund.device_sn == sn).order_by(Refund.created_at_raw.desc()).limit(50)))
+    # 聚合退费单(#338: 全状态口径读 std_refund_online_all 镜像)
+    refunds = list(db.execute(
+        select(_REFUND_ONLINE_ALL).where(_REFUND_ONLINE_ALL.c.device_sn == sn)
+        .order_by(_REFUND_ONLINE_ALL.c.created_at_raw.desc()).limit(50)
+    ).mappings())
     tickets = list(db.scalars(select(ServiceTicket).where(ServiceTicket.device_sn == sn).order_by(ServiceTicket.register_time.desc()).limit(20)))
-    list(db.scalars(select(WalletWithdrawal).where(WalletWithdrawal.device_sn == sn).order_by(WalletWithdrawal.op_time.desc()).limit(20)))
+    list(db.execute(select(_WALLET_FLOW_ALL).where(_WALLET_FLOW_ALL.c.device_sn == sn).order_by(_WALLET_FLOW_ALL.c.op_time.desc()).limit(20)))
     list(db.scalars(select(MerchantRefund).where(MerchantRefund.device_no == sn).order_by(MerchantRefund.trade_time.desc()).limit(20)))
     return R(
         data={
             "device": build_device_profile(db, device),
-            "refund_count": db.scalar(select(func.count()).select_from(Refund).where(Refund.device_sn == sn)) or 0,
-            "refund_total": float(db.scalar(select(func.coalesce(func.sum(Refund.refund_amount), 0)).where(Refund.device_sn == sn)) or 0),
+            "refund_count": db.scalar(select(func.count()).select_from(_REFUND_ONLINE_ALL).where(_REFUND_ONLINE_ALL.c.device_sn == sn)) or 0,
+            "refund_total": float(db.scalar(select(func.coalesce(func.sum(_REFUND_ONLINE_ALL.c.refund_amount), 0)).where(_REFUND_ONLINE_ALL.c.device_sn == sn)) or 0),
             "cash_out_total": float(
                 db.scalar(select(func.coalesce(func.sum(MerchantRefund.refund_amount), 0)).where(MerchantRefund.device_no == sn, MerchantRefund.refund_amount > 0)) or 0
             ),

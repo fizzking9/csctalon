@@ -15,15 +15,14 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Iterable
 
-from sqlalchemy import and_, case, exists, func, literal, or_, select, text
+from sqlalchemy import and_, case, column, exists, func, literal, or_, select, table, text
 from sqlalchemy.orm import Session
 
 from app.models.group import PersonGroupMembership
 from app.models.ods_clean import CsRecordClean
 from app.models.person import Person, PersonAlias
 
-# #332: 退款五路统计切换标准表(std_*) + ods 原始 Refund(全状态诊断专用, std 只含已退款采纳行)
-from app.models.refund import Refund
+# #338: 退款五路统计统一读 std_* / std_*_all, 禁止直读 ods。
 from app.models.refund_standard import StdRefundRecord, StdWalletFlow
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.staff_assignment import StaffAssignment
@@ -319,15 +318,10 @@ def _route_a_online_refund_filter():
     """
     return ()
 
-def _route_a_online_any_status_filter():
-    """【路线A全状态口径】仅 refund_method='线上'(不看 status)，读 ods 原始层。
-
-    用于需要看全状态的分析(如 operation_status_dist 状态分布 / 今日退款挽回
-    工作量)，不用于经营出款统计。std_refund_online 只含已退款采纳行，
-    全状态诊断必须读 ods.refunds 原始表(clean 薄视图同投影，#332 起直读原表)。
-    """
-    return (Refund.refund_method == "线上",)
-
+# ---------- 路线A全状态口径 ----------
+# #338: 全状态分析(状态分布/挽回工作量/链路台账)统一读 std_refund_online_all
+#   镜像视图(ods.refunds 同构透传, 含被采纳规则排除的行); 不再直读 ods。
+#   各调用方用 table("std_refund_online_all", column("refund_method"), ...) 自建轻量表句柄。
 
 # ---------- 路线B 钱包用户取现 ----------
 # 历史口径(2026-08-28): BMS 提现记录中备注含"提现申请-冻结/退款失败"等的行
@@ -796,9 +790,11 @@ def _annotate_chain_litigation(db: Session, rows):
     remark_map: dict[str, str] = {}
     for i in range(0, len(ab_nos), 500):
         chunk = ab_nos[i:i + 500]
+        # #338: 链路台账需看被 std A 路排除的「转入提现账户」行 → 读 std_refund_online_all 镜像
+        _all = table("std_refund_online_all",
+                     column("refund_no"), column("audit_remark"), column("remark"))
         for no, ar, rm in db.execute(
-            # 读 ods 原始层: 链路行含转入提现账户(被 std A 路排除), 反查备注不能读 std
-            select(Refund.refund_no, Refund.audit_remark, Refund.remark).where(Refund.refund_no.in_(chunk))
+            select(_all.c.refund_no, _all.c.audit_remark, _all.c.remark).where(_all.c.refund_no.in_(chunk))
         ):
             remark_map[str(no)] = ((ar or "") + (rm or ""))
     for r in rows:

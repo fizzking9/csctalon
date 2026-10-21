@@ -3,14 +3,19 @@
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Integer, and_, func, or_, select
+from sqlalchemy import Integer, and_, column, func, or_, select, table
 
 from app.api.deps import DBSession
 from app.models.card_complaint import CardComplaint
 from app.models.complaint_audit import ComplaintAudit
 from app.models.external_complaint import ExternalComplaint
-from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
+
+# #338: 投诉关联退款分析(全状态口径) → 读 std_refund_online_all 镜像
+_REFUND_ALL = table(
+    "std_refund_online_all",
+    column("refund_method"), column("device_sn"), column("refund_amount"), column("created_at_raw"),
+)
 from app.services.analytics import (
     REAL_FINISH_EPOCH_SECS,
     TZ,
@@ -1006,17 +1011,17 @@ def _complaint_refund_rows(db, w_ts, w_te, src_expr):
     """
     sn_sub = _complaint_sn_subquery(w_ts, w_te, src_expr)
     conds = [
-        Refund.refund_method == "线上",
-        Refund.device_sn.isnot(None),
-        Refund.device_sn.in_(sn_sub),
+        _REFUND_ALL.c.refund_method == "线上",
+        _REFUND_ALL.c.device_sn.isnot(None),
+        _REFUND_ALL.c.device_sn.in_(sn_sub),
     ]
     if w_ts:
-        conds.append(Refund.created_at_raw >= w_ts)
+        conds.append(_REFUND_ALL.c.created_at_raw >= w_ts)
     if w_te:
-        conds.append(Refund.created_at_raw <= w_te)
-    day = _day_trunc(Refund.created_at_raw)
+        conds.append(_REFUND_ALL.c.created_at_raw <= w_te)
+    day = _day_trunc(_REFUND_ALL.c.created_at_raw)
     return db.execute(
-        select(day, func.count(), func.coalesce(func.sum(Refund.refund_amount), 0))
+        select(day, func.count(), func.coalesce(func.sum(_REFUND_ALL.c.refund_amount), 0))
         .where(*conds).group_by(day).order_by(day)
     ).all()
 
@@ -1026,16 +1031,16 @@ def _complaint_refund_amount(db, w_ts, w_te, src_expr) -> tuple[int, float]:
     金额单位: 元(Numeric(12,2) 原值), 与 `/subject-analysis` 的 `refund_amount` 一致。
     """
     conds = [
-        Refund.refund_method == "线上",
-        Refund.device_sn.isnot(None),
-        Refund.device_sn.in_(_complaint_sn_subquery(w_ts, w_te, src_expr)),
+        _REFUND_ALL.c.refund_method == "线上",
+        _REFUND_ALL.c.device_sn.isnot(None),
+        _REFUND_ALL.c.device_sn.in_(_complaint_sn_subquery(w_ts, w_te, src_expr)),
     ]
     if w_ts:
-        conds.append(Refund.created_at_raw >= w_ts)
+        conds.append(_REFUND_ALL.c.created_at_raw >= w_ts)
     if w_te:
-        conds.append(Refund.created_at_raw <= w_te)
+        conds.append(_REFUND_ALL.c.created_at_raw <= w_te)
     cnt, amt = db.execute(
-        select(func.count(), func.coalesce(func.sum(Refund.refund_amount), 0)).where(*conds)
+        select(func.count(), func.coalesce(func.sum(_REFUND_ALL.c.refund_amount), 0)).where(*conds)
     ).one()
     return int(cnt or 0), float(amt or 0)
 

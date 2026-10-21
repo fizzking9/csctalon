@@ -234,7 +234,7 @@ def get_incident_impact_comparison(
     from sqlalchemy import func as _func
 
     from app.models.cs_record import CsRecord
-    from app.models.refund import Refund
+    from app.models.refund_standard import StdRefundOnline
     from app.models.ticket import ServiceTicket
 
     i = db.get(Incident, incident_id)
@@ -284,9 +284,10 @@ def get_incident_impact_comparison(
         # 退款笔数/金额(refunds.actual_refund_time, COALESCE 退化 created_at_raw)
         # 业务口径: actual_refund_time 是"实际扣款时间"(对账基准), E 滞后未回填时
         # 退化用 created_at_raw; 在 SQL 用 COALESCE 实现, 单次扫描即可。
-        refund_time_col = _func.coalesce(Refund.actual_refund_time, Refund.created_at_raw)
+        # #338: 已退款统计 → 读 std_refund_online 采纳行
+        refund_time_col = _func.coalesce(StdRefundOnline.actual_refund_time, StdRefundOnline.created_at_raw)
         refund_row = db.execute(
-            select(_func.count(), _func.coalesce(_func.sum(Refund.refund_amount), 0))
+            select(_func.count(), _func.coalesce(_func.sum(StdRefundOnline.refund_amount), 0))
             .where(and_(refund_time_col.isnot(None),
                         refund_time_col >= s, refund_time_col <= e))
         ).first()

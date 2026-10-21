@@ -5,23 +5,26 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import and_, column, func, select, table, text
 from sqlalchemy.orm import Session
 
-# #332: 退款五路统计切换标准表(std_*)——表层已固化采纳口径, 散落 WHERE 删除。
-# 全状态例外: operation_status_dist 读 ods 原始 Refund(std 只含已退款采纳行)。
-from app.models.refund import Refund as RefundRaw
+# #338: 退款五路统计统一读 std_* / std_*_all, 禁止直读 ods。
 from app.models.refund_standard import (
     StdRefundOnline,
     StdRefundRecord,
     StdWalletFlow,
 )
 
+# std_refund_online_all 全量镜像(全状态口径: 含申请中/驳回等被采纳规则排除的行)
+_REFUND_ONLINE_ALL = table(
+    "std_refund_online_all",
+    column("status"), column("refund_amount"), column("refund_method"),
+)
+
 # 跨子模块引用(拆分自 app.services.analytics, 原同文件内直接调用)
 from app.services.analytics._core import (
     D,
     _date_range,
-    _route_a_online_any_status_filter,
     _route_a_online_refund_filter,
     _route_b_withdraw_filter,
     _route_e_cashflow_filter,
@@ -47,13 +50,15 @@ def operation_trend(db: Session, start: datetime | None = None, end: datetime | 
 def operation_status_dist(db: Session) -> list[dict]:
     """退费状态分布 【A 路: 线上退费单各状态占比(含申请中/无需退款/驳回, 全状态口径)】
 
-    ⚠️ #332: 全状态诊断读 ods 原始层 Refund —— std_refund_online 只含已退款
-    采纳行, 看不到申请中/驳回等状态; 本函数不是经营出款统计。
+    #338: 全状态诊断读 std_refund_online_all 镜像视图(含被采纳规则排除的行);
+    std_refund_online 只含已退款采纳行, 看不到申请中/驳回等状态。
     """
     rows = db.execute(
-        select(RefundRaw.status, func.coalesce(func.sum(RefundRaw.refund_amount), 0), func.count())
-        .where(*_route_a_online_any_status_filter())
-        .group_by(RefundRaw.status)
+        select(_REFUND_ONLINE_ALL.c.status,
+               func.coalesce(func.sum(_REFUND_ONLINE_ALL.c.refund_amount), 0),
+               func.count())
+        .where(_REFUND_ONLINE_ALL.c.refund_method == "线上")
+        .group_by(_REFUND_ONLINE_ALL.c.status)
     ).all()
     total = sum(r[2] for r in rows) or 1
     return [

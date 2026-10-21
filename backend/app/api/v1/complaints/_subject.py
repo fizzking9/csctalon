@@ -3,7 +3,7 @@
 from datetime import timezone
 
 from fastapi import Query
-from sqlalchemy import func, select
+from sqlalchemy import column, func, select, table
 
 from app.api.deps import CurrentUser, DBSession
 
@@ -12,8 +12,13 @@ from app.api.v1.complaints._helpers import _norm_subject_entity, _parse_dt, _par
 from app.api.v1.complaints._router import router
 from app.core.redis_client import cache_ttl_for, cached_json
 from app.models.external_complaint import ExternalComplaint
-from app.models.refund import Refund
 from app.models.ticket import ServiceTicket
+
+# #338: 投诉主体退款关联(全状态口径) → 读 std_refund_online_all 镜像
+_REFUND_ALL = table(
+    "std_refund_online_all",
+    column("device_sn"), column("refund_method"), column("refund_amount"), column("created_at_raw"),
+)
 from app.schemas.common import R
 from app.services.analytics import (
     TZ,
@@ -209,11 +214,11 @@ def complaint_subject_analysis(
     refund_by_sn: dict[str, tuple[int, float]] = {}
     if all_subject_sns:
         for sn, cnt, amt in db.execute(
-            select(Refund.device_sn, func.count(), func.coalesce(func.sum(Refund.refund_amount), 0))
-            .where(Refund.refund_method == "线上")
-            .where(Refund.device_sn.in_(all_subject_sns))
-            .where(*_reg_conds(Refund.created_at_raw))
-            .group_by(Refund.device_sn)
+            select(_REFUND_ALL.c.device_sn, func.count(), func.coalesce(func.sum(_REFUND_ALL.c.refund_amount), 0))
+            .where(_REFUND_ALL.c.refund_method == "线上")
+            .where(_REFUND_ALL.c.device_sn.in_(all_subject_sns))
+            .where(*_reg_conds(_REFUND_ALL.c.created_at_raw))
+            .group_by(_REFUND_ALL.c.device_sn)
         ).all():
             refund_by_sn[sn] = (int(cnt), float(amt))
 

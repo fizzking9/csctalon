@@ -1,13 +1,20 @@
 """匹配与待关联数据路由"""
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import column, func, select, table
 
 from app.api.deps import AdminUser, CurrentUser, DBSession
-from app.models.refund import Refund
 from app.models.upload import DataMatchRelation
 from app.schemas.common import PageBase, R
 from app.services.matcher import get_unmatched_summary, match_all
+
+# #338: 对账匹配需看全量退款单(含未采纳) → 读 std_refund_online_all 镜像
+_REFUND_ONLINE_ALL = table(
+    "std_refund_online_all",
+    column("refund_no"), column("platform_order_no"), column("device_sn"),
+    column("merchant_name"), column("refund_amount"), column("status"),
+    column("created_at_raw"),
+)
 
 router = APIRouter(prefix="/match", tags=["数据中心-关联匹配"])
 
@@ -130,8 +137,8 @@ def list_unmatched_refunds(
             )
         )
     )
-    stmt = select(Refund).order_by(Refund.refund_no.desc())
-    all_refunds = list(db.scalars(stmt).unique())
+    stmt = select(_REFUND_ONLINE_ALL).order_by(_REFUND_ONLINE_ALL.c.refund_no.desc())
+    all_refunds = list(db.execute(stmt).mappings())
     unmatched = [r for r in all_refunds if r.refund_no not in matched_ids]
     total = len(unmatched)
     start = (page - 1) * page_size

@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.models.device import Device
-from app.models.refund_record_report import RefundRecordReport
+from app.models.refund_standard import StdRefundRecord
 from app.services.system_event_service import record_system_event
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ FRESHNESS_TARGETS: tuple[dict, ...] = (
     {
         "source": "refund_record_report",
         "name": "退款记录报表(E 路对账基准)",
-        "time_attr": RefundRecordReport.refund_time,
+        "time_attr": StdRefundRecord.refund_time,
         "max_lag_days": 1,
         "expected_by_hour": 15,   # 与 bms_fetcher.BMS_DATA_SOURCES[...]["options"]["low_freq_hour"] 一致
         "note": "上游 T+1(次日白天发布); 当天 15:00 档后仍落后>1天=采集链路失效",
