@@ -33,7 +33,7 @@ from app.services.analytics import TZ
 from app.services.bms_sync import sync_all
 
 # #338: 回填基线统计读 std_bms_order_all 镜像(仅取两列, 避免全列展开)
-_BO = table("std_bms_order_all", column("device_sn"), column("create_date"))
+_BO = table("std_bms_order", column("device_sn"), column("create_date"))
 
 logger = logging.getLogger(__name__)
 

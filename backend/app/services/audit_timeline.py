@@ -37,7 +37,7 @@ from sqlalchemy import column, or_, select, table, text
 from sqlalchemy.orm import Session
 
 # #338: 审计时序读 std_all 镜像(全量展示口径), 禁止直读 ods
-_CS = table("std_cs_record_all",
+_CS = table("std_cs_record",
             column("id"), column("problem_category"), column("problem_type"),
             column("solution"), column("operator"), column("execution_result"),
             column("user_accepted"), column("operation_time"), column("description"),
@@ -59,7 +59,7 @@ _DC = table("std_device_combo_all",
             column("traffic_type"), column("merchant_name"), column("actual_amount"),
             column("start_date"), column("end_date"), column("created_at_raw"),
             column("status"), column("device_sn"), column("creator"))
-_BO = table("std_bms_order_all",
+_BO = table("std_bms_order",
             column("order_no"), column("order_type"), column("combo_name"),
             column("combo_price"), column("actual_pay_price"), column("balance_pay_price"),
             column("pay_type"), column("order_status"), column("refund_status"),

@@ -24,7 +24,7 @@ def _mcol(model, name: str):
 
 _T_REFUND = table("std_refund_online_all", column("operator"), column("auditor"), column("created_at"))
 _T_WALLET = table("std_wallet_flow_all", column("operator"), column("created_at"))
-_T_CS = table("std_cs_record_all", column("operator"), column("created_at"))
+_T_CS = table("std_cs_record", column("operator"), column("created_at"))
 _T_EC = table("std_external_complaint_all", column("follower"), column("created_at"))
 _T_CC = table("std_card_complaint_all", column("handler"), column("created_at"))
 _T_SCRM = table("std_scrm_session_all", column("operator_name"), column("created_at"))

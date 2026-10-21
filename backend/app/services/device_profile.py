@@ -19,13 +19,13 @@ from app.models.device import Device
 from app.models.ticket import ServiceTicket
 
 # #338: 设备档案读 std_all 镜像
-_CS = table("std_cs_record_all", column("device_sn"))
+_CS = table("std_cs_record", column("device_sn"))
 _EC = table("std_external_complaint_all", column("device_sn"))
 _CC = table("std_card_complaint_all", column("device_sn"))
 _DC = table("std_device_combo_all",
             column("device_sn"), column("actual_amount"), column("package_name"),
             column("remaining_traffic"))
-_BO = table("std_bms_order_all", column("device_sn"))
+_BO = table("std_bms_order", column("device_sn"))
 _DFU = table("std_device_flow_usage_all", column("device_sn"), column("flow_gb"))
 
 

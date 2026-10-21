@@ -33,7 +33,7 @@ from app.models.device import Device
 _DC = table("std_device_combo_all", column("device_sn"), column("actual_amount"), column("created_at_raw"))
 _DFU = table("std_device_flow_usage_all",
              column("device_sn"), column("stat_month"), column("month_complete"), column("flow_gb"))
-_CS = table("std_cs_record_all", column("device_sn"), column("operation_time"))
+_CS = table("std_cs_record", column("device_sn"), column("operation_time"))
 _EC = table("std_external_complaint_all", column("device_sn"), column("complaint_date"))
 
 # ── 默认权重/窗口/阈值/等级线: 单一事实来源在 app.models.risk_alert_settings ──

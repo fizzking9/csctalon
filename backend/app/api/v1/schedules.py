@@ -13,7 +13,7 @@ from app.api.deps import CurrentUser, DBSession, ManagerUser
 from app.models.person import Person, PersonAlias
 
 # #338: 排班读 std_all 镜像
-_CS = table("std_cs_record_all", column("operator"), column("operation_time"))
+_CS = table("std_cs_record", column("operator"), column("operation_time"))
 from app.models.schedule import Attendance, Schedule, ShiftTemplate
 from app.models.ticket import ServiceTicket
 from app.schemas.common import R

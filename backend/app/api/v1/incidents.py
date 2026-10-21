@@ -239,7 +239,7 @@ def get_incident_impact_comparison(
     from app.models.ticket import ServiceTicket
 
     # #338: 接待量统计 → 读 std_cs_record_all 镜像
-    _CS_ALL = _table("std_cs_record_all", _column("operation_time"))
+    _CS_ALL = _table("std_cs_record", _column("operation_time"))
 
     i = db.get(Incident, incident_id)
     if not i:

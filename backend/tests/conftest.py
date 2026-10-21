@@ -234,6 +234,41 @@ def _engine():
                 conn.execute(text(_sql))
             conn.commit()
 
+        # #339 Phase ②: 精简物理表 std_cs_record / std_bms_order (复刻迁移 d9e1f0c2b4a6)
+        #   业务侧 table("std_cs_record", ...) / table("std_bms_order", ...) 已切到精简表;
+        #   测试库不跑 Alembic, 故在此显式建表 + 索引 + 主键。
+        #   表结构 / 列清单与线上迁移逐字一致, 单一来源 = alembic/versions/d9e1f0c2b4a6_big_table_materialize.py
+        _CS_COLS = """
+            id, problem_category, problem_type, device_sn, solution,
+            operation_time, operator, description, execution_result, user_accepted,
+            consult_time, created_at
+        """
+        _BO_COLS = """
+            order_no, order_type, device_sn, combo_name, combo_price,
+            actual_pay_price, balance_pay_price, pay_date, pay_type,
+            order_status, refund_status,
+            create_user, create_date, business_name, merchant_name,
+            active_date, device_type_name,
+            created_at, updated_at
+        """
+        with engine.connect() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS public.std_cs_record CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS public.std_bms_order CASCADE"))
+            conn.execute(text(f"CREATE TABLE public.std_cs_record AS SELECT {_CS_COLS} FROM ods.cs_records WITH DATA"))
+            conn.execute(text(f"CREATE TABLE public.std_bms_order AS SELECT {_BO_COLS} FROM ods.bms_orders WITH DATA"))
+            conn.execute(text("CREATE INDEX ix_std_cs_record_op_time ON public.std_cs_record (operation_time)"))
+            conn.execute(text("CREATE INDEX ix_std_cs_record_sn ON public.std_cs_record (device_sn)"))
+            conn.execute(text(
+                "CREATE INDEX ix_std_cs_record_cat_op ON public.std_cs_record "
+                "(problem_category, operation_time DESC)"
+            ))
+            conn.execute(text("CREATE INDEX ix_std_bms_order_sn ON public.std_bms_order (device_sn)"))
+            conn.execute(text("CREATE INDEX ix_std_bms_order_create_date ON public.std_bms_order (create_date)"))
+            conn.execute(text("CREATE INDEX ix_std_bms_order_active_date ON public.std_bms_order (active_date)"))
+            conn.execute(text("ALTER TABLE public.std_cs_record ADD PRIMARY KEY (id)"))
+            conn.execute(text("ALTER TABLE public.std_bms_order ADD PRIMARY KEY (order_no)"))
+            conn.commit()
+
         # ⚠️ 2026-09-07 修复: create_all 建表后 stamp alembic 到 head。
         #   否则 app lifespan(_run_migrations_on_startup) 在 TestClient 启动时会再次
         #   alembic upgrade head, 对全新测试库(无 alembic_version)从 d9b7f1 重跑全部
