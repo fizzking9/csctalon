@@ -21,12 +21,16 @@ import logging
 import re
 from datetime import date, datetime, time
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, column, func, or_, select, table
 from sqlalchemy.orm import Session
 
 from app.models.device import Device, DeviceTag, device_tag_rel
-from app.models.device_combo import DeviceCombo
 from app.models.person import Person
+
+# #338: AI 数据供给读 std_all 镜像
+_DC = table("std_device_combo_all",
+            column("device_sn"), column("created_at_raw"), column("actual_amount"),
+            column("available_traffic"), column("used_traffic"), column("remaining_traffic"))
 from app.models.schedule import Attendance, Schedule, ShiftTemplate
 from app.services.audit_timeline import build_device_timeline
 from app.services.device_profile import build_device_profile
@@ -117,13 +121,13 @@ def supply_recharge(db: Session, *, sn: str | None = None,
     额外补 unlimited_count(剩余流量=-1 的无限套餐数), 因为 -1 不应混入字节合计。
     """
     rng = _validate_range(start, end)
-    stmt = select(DeviceCombo)
+    stmt = select(_DC)
     if sn:
-        stmt = stmt.where(DeviceCombo.device_sn == sn)
+        stmt = stmt.where(_DC.c.device_sn == sn)
     if rng is not None:
         s, e = rng
-        stmt = stmt.where(DeviceCombo.created_at_raw >= datetime.combine(s, time.min))
-        stmt = stmt.where(DeviceCombo.created_at_raw <= datetime.combine(e, time.max))
+        stmt = stmt.where(_DC.c.created_at_raw >= datetime.combine(s, time.min))
+        stmt = stmt.where(_DC.c.created_at_raw <= datetime.combine(e, time.max))
 
     # 单条聚合查询拿全部 6 指标; 无限包用 CASE 求和计数(-1 语义)。
     # ⚠️ 聚合表达式必须引用 sub.c.*(子查询列); 若引用 DeviceCombo 原表列, SQLAlchemy 会把

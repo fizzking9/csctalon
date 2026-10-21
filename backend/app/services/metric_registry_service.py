@@ -13,12 +13,14 @@ from datetime import date as date_type
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import column, func, or_, select, table
 from sqlalchemy.orm import Session
 
 from app.models.bms_sync_log import BmsSyncLog
 from app.models.complaint_sync_log import ComplaintSyncLog
-from app.models.external_complaint import ExternalComplaint
+
+# #338: 指标快照读 std_all 镜像
+_EC = table("std_external_complaint_all", column("complaint_date"))
 from app.models.manual_refund_sync_log import ManualRefundSyncLog
 from app.models.metric import MetricDailySnapshot, MetricRegistry, MetricThreshold
 from app.models.ticket import ServiceTicket
@@ -191,8 +193,8 @@ def _eval_ticket_backlog_net(db: Session, ts: datetime, te: datetime) -> dict:
 def _eval_external_complaint_7d(db: Session, ts: datetime, te: datetime) -> dict:
     """近7天外部投诉量: external_complaints.complaint_date 近7天"""
     start7 = te - timedelta(days=7)
-    cnt = db.scalar(select(func.count()).select_from(ExternalComplaint).where(
-        ExternalComplaint.complaint_date >= start7, ExternalComplaint.complaint_date < te
+    cnt = db.scalar(select(func.count()).select_from(_EC).where(
+        _EC.c.complaint_date >= start7, _EC.c.complaint_date < te
     )) or 0
     return {"value": float(cnt), "data_ok": True, "detail": f"近7天 {start7.date()}~{te.date()}"}
 

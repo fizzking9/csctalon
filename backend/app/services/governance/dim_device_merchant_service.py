@@ -4,7 +4,8 @@
 权威口径: docs/standards/退款五路数据标准与采纳规则.md
 
 构建逻辑(纯 SQL 一次 INSERT…SELECT, 范式同 dim_device_combo_service):
-  1. base: E 路 ods.refund_record_reports 取 (device_sn, merchant_id,
+  1. base: E 路 std_refund_record_all 镜像(#338, 与 ods.refund_record_reports
+     同构透传)取 (device_sn, merchant_id,
      merchant_name, refund_time) 去重; 过滤空 SN / 空 refund_time / 假 SN
      (全重复位正则 ^(\\d)\\1+$, 如 00000000000000 —— 普查 2026-10-16 确认);
   2. enriched: LEFT JOIN dim_merchant_group 取集团名, 无人工映射 = merchant_name;
@@ -54,7 +55,7 @@ _FAKE_SN_REGEX = r"^(\d)\1+$"
 _REBUILD_SQL = text(r"""
 WITH base AS (
     SELECT DISTINCT r.device_sn, r.merchant_id, r.merchant_name, r.refund_time
-    FROM ods.refund_record_reports r
+    FROM std_refund_record_all r
     WHERE r.device_sn IS NOT NULL AND btrim(r.device_sn) <> ''
       AND r.refund_time IS NOT NULL
       AND r.device_sn !~ '^(\d)\1+$'
@@ -169,7 +170,7 @@ def rebuild_dim_device_merchant(db: Session, *, commit: bool = True) -> dict:
         FROM dim_device_merchant
     """)).one()
     fake = db.execute(text(
-        "SELECT count(DISTINCT device_sn) FROM ods.refund_record_reports "
+        "SELECT count(DISTINCT device_sn) FROM std_refund_record_all "
         "WHERE device_sn ~ :re"
     ), {"re": _FAKE_SN_REGEX}).scalar() or 0
     if commit:

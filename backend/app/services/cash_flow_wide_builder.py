@@ -21,7 +21,7 @@ E(refund_record_reports) 不进本表; e_matched 仅作经营侧对账标记:
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import column, select, table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -32,6 +32,18 @@ from app.models.refund import Refund
 from app.models.refund_record_report import RefundRecordReport
 from app.models.shanmao_refund import ShanmaoRefund
 from app.models.wallet import WalletWithdrawal
+
+
+# #338: 宽表构建读 std_all 全列镜像
+def _t(view, model):
+    return table(view, *[column(c.name) for c in model.__table__.columns])
+
+_R = _t("std_refund_online_all", Refund)
+_W = _t("std_wallet_flow_all", WalletWithdrawal)
+_S = _t("std_refund_shanmao_all", ShanmaoRefund)
+_M = _t("std_refund_manual_all", ManualRefund)
+_EC = _t("std_external_complaint_all", ExternalComplaint)
+_RRR = _t("std_refund_record_all", RefundRecordReport)
 
 # #201 S-P0-1：排除集合唯一字面量来源（原本文件 _EXCLUDED_QUALITY 双实现已删）
 from app.services.quality_check import STATS_EXCLUDED_QUALITY_STATUSES as _EXCLUDED_QUALITY
@@ -62,13 +74,13 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
 
     # 2. 预载 E 对账键集
     e_order_keys: set[str] = set(db.scalars(
-        select(RefundRecordReport.platform_order_no)
-        .where(RefundRecordReport.refund_status.in_(("退款成功", "成功", "SUCCESS")))
+        select(_RRR.c.platform_order_no)
+        .where(_RRR.c.refund_status.in_(("退款成功", "成功", "SUCCESS")))
     ))
 
     # 3. 外部投诉 SN 集
     ec_sns: set[str] = set(db.scalars(
-        select(ExternalComplaint.device_sn).where(ExternalComplaint.device_sn.isnot(None))
+        select(_EC.c.device_sn).where(_EC.c.device_sn.isnot(None))
     ))
 
     now = datetime.now(timezone.utc)
@@ -87,14 +99,14 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
     # ── A: refunds 线上+已退款(created_at_raw 非空, 与 analytics _between 全表口径一致) ──
     a_rows = db.execute(
         select(
-            Refund.refund_no, Refund.platform_order_no, Refund.device_sn,
-            Refund.refund_amount, Refund.created_at_raw, Refund.operator,
-            Refund.refund_reason, Refund.merchant_name, Refund.package_name,
-            Refund.auditor, Refund.quality_status,
+            _R.c.refund_no, _R.c.platform_order_no, _R.c.device_sn,
+            _R.c.refund_amount, _R.c.created_at_raw, _R.c.operator,
+            _R.c.refund_reason, _R.c.merchant_name, _R.c.package_name,
+            _R.c.auditor, _R.c.quality_status,
         ).where(
-            Refund.refund_method == "线上",
-            Refund.status == "已退款",
-            Refund.created_at_raw.isnot(None),
+            _R.c.refund_method == "线上",
+            _R.c.status == "已退款",
+            _R.c.created_at_raw.isnot(None),
         )
     ).all()
     for r in a_rows:
@@ -127,12 +139,12 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
     #     (经手人分析主要看 A/C/D; B 路是系统/用户钱包提现, 无客服经手人语义, 见 L-4)
     b_rows = db.execute(
         select(
-            WalletWithdrawal.id, WalletWithdrawal.device_sn,
-            WalletWithdrawal.op_amount, WalletWithdrawal.op_time,
-            WalletWithdrawal.remark,
-            WalletWithdrawal.account_id, WalletWithdrawal.quality_status,
+            _W.c.id, _W.c.device_sn,
+            _W.c.op_amount, _W.c.op_time,
+            _W.c.remark,
+            _W.c.account_id, _W.c.quality_status,
         ).where(
-            WalletWithdrawal.op_type == "用户提现",
+            _W.c.op_type == "用户提现",
         )
     ).all()
     b_rows = [w for w in b_rows if not any(k in (w.remark or "") for k in _WITHDRAW_FAIL_KEYWORDS)]
@@ -167,11 +179,11 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
     # ── C: shanmao 已退款 ──
     c_rows = db.execute(
         select(
-            ShanmaoRefund.refund_no, ShanmaoRefund.order_no, ShanmaoRefund.device_sn,
-            ShanmaoRefund.actual_amount, ShanmaoRefund.audit_time, ShanmaoRefund.created_at,
-            ShanmaoRefund.operator, ShanmaoRefund.auditor, ShanmaoRefund.refund_reason,
-            ShanmaoRefund.merchant_name, ShanmaoRefund.package_name, ShanmaoRefund.quality_status,
-        ).where(ShanmaoRefund.status == "已退款")
+            _S.c.refund_no, _S.c.order_no, _S.c.device_sn,
+            _S.c.actual_amount, _S.c.audit_time, _S.c.created_at,
+            _S.c.operator, _S.c.auditor, _S.c.refund_reason,
+            _S.c.merchant_name, _S.c.package_name, _S.c.quality_status,
+        ).where(_S.c.status == "已退款")
     ).all()
     for r in c_rows:
         if (r.quality_status or "") in _EXCLUDED_QUALITY:
@@ -202,12 +214,12 @@ def build_cash_flow_wide(db: Session, progress_callback=None) -> dict:
     # ── D: manual 已退款(排除 dup_residual/ignored) ──
     d_rows = db.execute(
         select(
-            ManualRefund.id, ManualRefund.order_no, ManualRefund.device_sn,
-            ManualRefund.refund_amount, ManualRefund.op_time, ManualRefund.register_time,
-            ManualRefund.refund_operator, ManualRefund.registrant,
-            ManualRefund.remark, ManualRefund.quality_status,
-            ManualRefund.merchant_id,
-        ).where(ManualRefund.is_refunded == "是")
+            _M.c.id, _M.c.order_no, _M.c.device_sn,
+            _M.c.refund_amount, _M.c.op_time, _M.c.register_time,
+            _M.c.refund_operator, _M.c.registrant,
+            _M.c.remark, _M.c.quality_status,
+            _M.c.merchant_id,
+        ).where(_M.c.is_refunded == "是")
     ).all()
     for r in d_rows:
         if (r.quality_status or "") in _EXCLUDED_QUALITY:

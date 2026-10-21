@@ -325,12 +325,13 @@ def scan_alerts(db: DBSession, _: ManagerUser):
 
     from sqlalchemy import column, table
 
-    from app.models.external_complaint import ExternalComplaint
     from app.models.incident import Incident
     from app.models.ticket import ServiceTicket
 
     # #338: 退款量激增告警(全状态口径) → 读 std_refund_online_all 镜像
     _REFUND_ONLINE_ALL = table("std_refund_online_all", column("created_at"))
+    # #338: 投诉激增告警 → 读 std_external_complaint_all 镜像
+    _EXTERNAL_COMPLAINT_ALL = table("std_external_complaint_all", column("complaint_date"))
 
     now = datetime.now(timezone.utc)
     today_start = datetime.combine(now.date(), datetime.min.time(), tzinfo=timezone.utc)
@@ -411,7 +412,7 @@ def scan_alerts(db: DBSession, _: ManagerUser):
 
             elif rtype == "complaint_surge":
                 # 近 7 天外部投诉总量
-                cnt = db.scalar(select(func.count()).select_from(ExternalComplaint).where(ExternalComplaint.complaint_date >= week_start.date())) or 0
+                cnt = db.scalar(select(func.count()).select_from(_EXTERNAL_COMPLAINT_ALL).where(_EXTERNAL_COMPLAINT_ALL.c.complaint_date >= week_start.date())) or 0
                 if threshold and cnt >= threshold:
                     db.add(Alert(
                         rule_id=rule.id,

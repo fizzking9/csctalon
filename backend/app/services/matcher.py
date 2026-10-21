@@ -20,13 +20,15 @@ import logging
 import re
 import time
 
-from sqlalchemy import func, select, text
+from sqlalchemy import column, func, select, table, text
 from sqlalchemy.orm import Session
 
 from app.models.merchant import Merchant
-from app.models.merchant_refund import MerchantRefund
 from app.models.ticket import ServiceTicket
 from app.models.upload import DataMatchRelation
+
+# #338: 匹配服务读 std_all 镜像
+_MR = table("std_merchant_refund_all", column("id"), column("merchant_order_no"))
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +106,7 @@ def _match_refund_merchant_refund(db: Session, only_unmatched: bool) -> tuple[in
         "SELECT refund_no, platform_order_no FROM std_refund_online_all WHERE platform_order_no IS NOT NULL"
     )).all()
     mr_map = {}
-    for mr in db.scalars(select(MerchantRefund).where(MerchantRefund.merchant_order_no.isnot(None))).all():
+    for mr in db.execute(select(_MR).where(_MR.c.merchant_order_no.isnot(None))).mappings():
         key = (mr.merchant_order_no or "").strip()
         if key:
             mr_map[key] = str(mr.id)

@@ -5,7 +5,6 @@ from sqlalchemy import column, func, or_, select, table
 
 from app.api.deps import AdminUser, CurrentUser, DBSession, ManagerUser
 from app.models.device import Device, DeviceTag, DeviceTagBatch, DeviceTagBinding, device_tag_rel
-from app.models.merchant_refund import MerchantRefund
 from app.models.ticket import ServiceTicket
 from app.schemas.common import PageBase, R
 from app.services.audit_timeline import build_device_timeline
@@ -21,6 +20,10 @@ _WALLET_FLOW_ALL = table(
     "std_wallet_flow_all",
     column("id"), column("device_sn"), column("op_type"), column("op_amount"),
     column("op_time"), column("remark"),
+)
+_MERCHANT_REFUND_ALL = table(
+    "std_merchant_refund_all",
+    column("device_no"), column("trade_time"), column("refund_amount"),
 )
 
 router = APIRouter(prefix="/devices", tags=["设备管理"])
@@ -81,14 +84,14 @@ def get_device(sn: str, db: DBSession, _: CurrentUser):
     ).mappings())
     tickets = list(db.scalars(select(ServiceTicket).where(ServiceTicket.device_sn == sn).order_by(ServiceTicket.register_time.desc()).limit(20)))
     list(db.execute(select(_WALLET_FLOW_ALL).where(_WALLET_FLOW_ALL.c.device_sn == sn).order_by(_WALLET_FLOW_ALL.c.op_time.desc()).limit(20)))
-    list(db.scalars(select(MerchantRefund).where(MerchantRefund.device_no == sn).order_by(MerchantRefund.trade_time.desc()).limit(20)))
+    list(db.execute(select(_MERCHANT_REFUND_ALL).where(_MERCHANT_REFUND_ALL.c.device_no == sn).order_by(_MERCHANT_REFUND_ALL.c.trade_time.desc()).limit(20)))
     return R(
         data={
             "device": build_device_profile(db, device),
             "refund_count": db.scalar(select(func.count()).select_from(_REFUND_ONLINE_ALL).where(_REFUND_ONLINE_ALL.c.device_sn == sn)) or 0,
             "refund_total": float(db.scalar(select(func.coalesce(func.sum(_REFUND_ONLINE_ALL.c.refund_amount), 0)).where(_REFUND_ONLINE_ALL.c.device_sn == sn)) or 0),
             "cash_out_total": float(
-                db.scalar(select(func.coalesce(func.sum(MerchantRefund.refund_amount), 0)).where(MerchantRefund.device_no == sn, MerchantRefund.refund_amount > 0)) or 0
+                db.scalar(select(func.coalesce(func.sum(_MERCHANT_REFUND_ALL.c.refund_amount), 0)).where(_MERCHANT_REFUND_ALL.c.device_no == sn, _MERCHANT_REFUND_ALL.c.refund_amount > 0)) or 0
             ),
             "recent_refunds": [
                 {

@@ -22,8 +22,8 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
+from sqlalchemy import column, exists, func, select, table
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import exists, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -33,6 +33,15 @@ from app.models.refund_wide import RefundWide
 from app.models.ticket import ServiceTicket
 from app.models.upload import DataMatchRelation
 from app.models.wallet import WalletWithdrawal
+
+
+# #338: 宽表构建读 std_all 全列镜像(列取自 ORM 模型, 保证不漏列)
+def _t(view, model):
+    return table(view, *[column(c.name) for c in model.__table__.columns])
+
+_R = _t("std_refund_online_all", Refund)
+_W = _t("std_wallet_flow_all", WalletWithdrawal)
+_EC = _t("std_external_complaint_all", ExternalComplaint)
 
 # #201 S-P0-1：refund_wide 行范围与经营四路同口径，排除 dup_residual/ignored
 from app.services.quality_check import (
@@ -73,10 +82,10 @@ def _in_scope_refund_nos(db: Session) -> set[str]:
     # 1. 线上+已退款(主体)
     # #201 S-P0-1：三路退费单来源统一排除 dup_residual/ignored（与 cash_flow_wide/analytics 对齐）
     main = set(db.scalars(
-        select(Refund.refund_no).where(
-            Refund.refund_method == "线上",
-            Refund.status == "已退款",
-            stats_quality_include(Refund.quality_status),
+        select(_R.c.refund_no).where(
+            _R.c.refund_method == "线上",
+            _R.c.status == "已退款",
+            stats_quality_include(_R.c.quality_status),
         )
     ))
     # 2. 带 wallet 关联（DMR 的 src_id 需仍指向未被治理排除的退费单）
@@ -86,20 +95,20 @@ def _in_scope_refund_nos(db: Session) -> set[str]:
             DataMatchRelation.dst_table == "wallet",
             DataMatchRelation.status == "matched",
             DataMatchRelation.src_id.in_(
-                select(Refund.refund_no).where(stats_quality_include(Refund.quality_status))
+                select(_R.c.refund_no).where(stats_quality_include(_R.c.quality_status))
             ),
         )
     ))
     # 3. 设备SN有外部投诉
     ec_sns = set(db.scalars(
-        select(ExternalComplaint.device_sn).where(ExternalComplaint.device_sn.isnot(None))
+        select(_EC.c.device_sn).where(_EC.c.device_sn.isnot(None))
     ))
     ec_nos: set[str] = set()
     if ec_sns:
         ec_nos = set(db.scalars(
-            select(Refund.refund_no).where(
-                Refund.device_sn.in_(list(ec_sns)),
-                stats_quality_include(Refund.quality_status),
+            select(_R.c.refund_no).where(
+                _R.c.device_sn.in_(list(ec_sns)),
+                stats_quality_include(_R.c.quality_status),
             )
         ))
     return main | wallet_nos | ec_nos
@@ -112,24 +121,24 @@ def _scope_refund_no_subquery():
     NOT IN 参数列表, 触发 PG 65,535 绑定参数上限 — 见 A-20260908-001 §4.2)。
     """
     # #201 S-P0-1：与 _in_scope_refund_nos 同口径，三路均排除 dup_residual/ignored
-    main = select(Refund.refund_no).where(
-        Refund.refund_method == "线上",
-        Refund.status == "已退款",
-        stats_quality_include(Refund.quality_status),
+    main = select(_R.c.refund_no).where(
+        _R.c.refund_method == "线上",
+        _R.c.status == "已退款",
+        stats_quality_include(_R.c.quality_status),
     )
     wallet = select(DataMatchRelation.src_id).where(
         DataMatchRelation.src_table == "refund",
         DataMatchRelation.dst_table == "wallet",
         DataMatchRelation.status == "matched",
         DataMatchRelation.src_id.in_(
-            select(Refund.refund_no).where(stats_quality_include(Refund.quality_status))
+            select(_R.c.refund_no).where(stats_quality_include(_R.c.quality_status))
         ),
     )
-    ec_refund = select(Refund.refund_no).where(
-        Refund.device_sn.in_(
-            select(ExternalComplaint.device_sn).where(ExternalComplaint.device_sn.isnot(None))
+    ec_refund = select(_R.c.refund_no).where(
+        _R.c.device_sn.in_(
+            select(_EC.c.device_sn).where(_EC.c.device_sn.isnot(None))
         ),
-        stats_quality_include(Refund.quality_status),
+        stats_quality_include(_R.c.quality_status),
     )
     return main.union(wallet, ec_refund).subquery()
 
@@ -227,11 +236,11 @@ def _build_wide_batch(db: Session, target_refund_nos: list[str],
     ⚠️ 默认 `True` 保持生产行为不变（生产只有一个调用方, 见下方 `build_wide_table`）。
     """
     # 1. 拉取本批退费单主表记录
-    refunds: dict[str, Refund] = {
+    refunds: dict[str, object] = {
         r.refund_no: r
-        for r in db.scalars(
-            select(Refund).where(Refund.refund_no.in_(target_refund_nos))
-        )
+        for r in db.execute(
+            select(_R).where(_R.c.refund_no.in_(target_refund_nos))
+        ).mappings()
     }
 
     # 2. 拉取本批关联关系(src_table='refund' AND status='matched')
@@ -261,11 +270,11 @@ def _build_wide_batch(db: Session, target_refund_nos: list[str],
     if ticket_ids:
         tickets = {t.ticket_no: t for t in db.scalars(select(ServiceTicket).where(ServiceTicket.ticket_no.in_(ticket_ids)))}
 
-    wallets: dict[str, WalletWithdrawal] = {}
+    wallets: dict[str, object] = {}
     if wallet_ids:
         wallet_int_ids = [int(wid) for wid in wallet_ids if wid.isdigit()]
         if wallet_int_ids:
-            wallets = {str(w.id): w for w in db.scalars(select(WalletWithdrawal).where(WalletWithdrawal.id.in_(wallet_int_ids)))}
+            wallets = {str(w.id): w for w in db.execute(select(_W).where(_W.c.id.in_(wallet_int_ids))).mappings()}
 
     # 4. 外部投诉按 device_sn 聚合(与 matcher 关系无关,直接查表)
     device_sns: set[str] = {r.device_sn for r in refunds.values() if r.device_sn}
@@ -273,12 +282,12 @@ def _build_wide_batch(db: Session, target_refund_nos: list[str],
     if device_sns:
         ec_rows = db.execute(
             select(
-                ExternalComplaint.device_sn,
-                func.count(ExternalComplaint.id),
-                func.max(ExternalComplaint.complaint_date),
+                _EC.c.device_sn,
+                func.count(_EC.c.id),
+                func.max(_EC.c.complaint_date),
             )
-            .where(ExternalComplaint.device_sn.in_(device_sns))
-            .group_by(ExternalComplaint.device_sn)
+            .where(_EC.c.device_sn.in_(device_sns))
+            .group_by(_EC.c.device_sn)
         ).all()
         ec_stats = {row[0]: (row[1], row[2]) for row in ec_rows}
 
@@ -369,8 +378,8 @@ def _select_ticket(
 
 
 def _select_wallet(
-    wallet_rels: list[tuple[str, str]], wallets: dict[str, WalletWithdrawal]
-) -> WalletWithdrawal | None:
+    wallet_rels: list[tuple[str, str]], wallets: dict[str, object]
+) -> object | None:
     """从同 SN 的多笔钱包记录中选择最新 op_time 的一笔"""
     if not wallet_rels:
         return None

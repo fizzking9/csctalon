@@ -23,15 +23,18 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import column, func, select, table
 from sqlalchemy.orm import Session
 
 from app.models.complaint_same_source import ComplaintSameSourceGroup
-from app.models.cs_record import CsRecord
 from app.models.device import Device
-from app.models.device_combo import DeviceCombo
-from app.models.device_flow_usage import DeviceFlowUsage
-from app.models.external_complaint import ExternalComplaint
+
+# #338: 投诉风险评分读 std_all 镜像
+_DC = table("std_device_combo_all", column("device_sn"), column("actual_amount"), column("created_at_raw"))
+_DFU = table("std_device_flow_usage_all",
+             column("device_sn"), column("stat_month"), column("month_complete"), column("flow_gb"))
+_CS = table("std_cs_record_all", column("device_sn"), column("operation_time"))
+_EC = table("std_external_complaint_all", column("device_sn"), column("complaint_date"))
 
 # ── 默认权重/窗口/阈值/等级线: 单一事实来源在 app.models.risk_alert_settings ──
 # (#276 配置表化; compute_* 参数为 None 时读 risk_alert_settings 配置表, 60s 缓存)
@@ -101,13 +104,13 @@ def _fetch_recharge_facts(db: Session, since: datetime) -> dict[str, dict[str, A
     """近 N 天每台设备充值笔数/金额(device_combos, 金额元 Decimal)。"""
     stmt = (
         select(
-            DeviceCombo.device_sn,
+            _DC.c.device_sn,
             func.count().label("cnt"),
-            func.coalesce(func.sum(DeviceCombo.actual_amount), 0).label("amount"),
+            func.coalesce(func.sum(_DC.c.actual_amount), 0).label("amount"),
         )
-        .where(DeviceCombo.device_sn.isnot(None))
-        .where(DeviceCombo.created_at_raw >= since)
-        .group_by(DeviceCombo.device_sn)
+        .where(_DC.c.device_sn.isnot(None))
+        .where(_DC.c.created_at_raw >= since)
+        .group_by(_DC.c.device_sn)
     )
     return {
         r.device_sn: {"cnt": int(r.cnt), "amount": Decimal(str(r.amount))}
@@ -120,22 +123,22 @@ def _fetch_flow_facts(db: Session) -> dict[str, float | None]:
     # 子查询取每设备最近完整月, 再回表取该月 flow_gb
     latest = (
         select(
-            DeviceFlowUsage.device_sn,
-            func.max(DeviceFlowUsage.stat_month).label("m"),
+            _DFU.c.device_sn,
+            func.max(_DFU.c.stat_month).label("m"),
         )
-        .where(DeviceFlowUsage.device_sn.isnot(None))
-        .where(DeviceFlowUsage.month_complete.is_(True))
-        .group_by(DeviceFlowUsage.device_sn)
+        .where(_DFU.c.device_sn.isnot(None))
+        .where(_DFU.c.month_complete.is_(True))
+        .group_by(_DFU.c.device_sn)
         .subquery()
     )
     stmt = (
-        select(DeviceFlowUsage.device_sn, DeviceFlowUsage.flow_gb)
+        select(_DFU.c.device_sn, _DFU.c.flow_gb)
         .join(
             latest,
-            (DeviceFlowUsage.device_sn == latest.c.device_sn)
-            & (DeviceFlowUsage.stat_month == latest.c.m),
+            (_DFU.c.device_sn == latest.c.device_sn)
+            & (_DFU.c.stat_month == latest.c.m),
         )
-        .where(DeviceFlowUsage.month_complete.is_(True))
+        .where(_DFU.c.month_complete.is_(True))
     )
     return {
         r.device_sn: (float(r.flow_gb) if r.flow_gb is not None else None)
@@ -146,10 +149,10 @@ def _fetch_flow_facts(db: Session) -> dict[str, float | None]:
 def _fetch_contact_facts(db: Session, since: datetime) -> dict[str, int]:
     """近 N 天每台设备接待次数(cs_records)。"""
     stmt = (
-        select(CsRecord.device_sn, func.count().label("cnt"))
-        .where(CsRecord.device_sn.isnot(None))
-        .where(CsRecord.operation_time >= since)
-        .group_by(CsRecord.device_sn)
+        select(_CS.c.device_sn, func.count().label("cnt"))
+        .where(_CS.c.device_sn.isnot(None))
+        .where(_CS.c.operation_time >= since)
+        .group_by(_CS.c.device_sn)
     )
     return {r.device_sn: int(r.cnt) for r in db.execute(stmt)}
 
@@ -175,10 +178,10 @@ def _fetch_repeat_facts(
     same_source = {r.device_sn for r in db.execute(group_stmt)}
 
     ext_stmt = (
-        select(ExternalComplaint.device_sn, func.count().label("cnt"))
-        .where(ExternalComplaint.device_sn.isnot(None))
-        .where(ExternalComplaint.complaint_date >= external_since)
-        .group_by(ExternalComplaint.device_sn)
+        select(_EC.c.device_sn, func.count().label("cnt"))
+        .where(_EC.c.device_sn.isnot(None))
+        .where(_EC.c.complaint_date >= external_since)
+        .group_by(_EC.c.device_sn)
     )
     externals = {r.device_sn: int(r.cnt) for r in db.execute(ext_stmt)}
 

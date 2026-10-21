@@ -281,11 +281,13 @@ def supervision_sn_subquery():
     用于纠正「实际是监所投诉、却录进工信部」的工单。
     独立成函数便于复用与单测。
     """
-    from app.models.external_complaint import ExternalComplaint
+    # #338: 读 std_all 镜像
+    from sqlalchemy import column, table
+    _EC = table("std_external_complaint_all", column("device_sn"), column("platform"))
 
-    return select(ExternalComplaint.device_sn).where(
-        ExternalComplaint.device_sn.isnot(None),
-        supervision_platform_cond(ExternalComplaint.platform),
+    return select(_EC.c.device_sn).where(
+        _EC.c.device_sn.isnot(None),
+        supervision_platform_cond(_EC.c.platform),
     )
 
 

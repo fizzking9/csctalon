@@ -7,11 +7,13 @@ from datetime import date, datetime, time, timedelta, timezone
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import column, func, select, table
 
 from app.api.deps import CurrentUser, DBSession, ManagerUser
-from app.models.cs_record import CsRecord
 from app.models.person import Person, PersonAlias
+
+# #338: 排班读 std_all 镜像
+_CS = table("std_cs_record_all", column("operator"), column("operation_time"))
 from app.models.schedule import Attendance, Schedule, ShiftTemplate
 from app.models.ticket import ServiceTicket
 from app.schemas.common import R
@@ -335,9 +337,9 @@ def comparison(db: DBSession, _: CurrentUser, day: str = Query(..., description=
 
     # 当日接待 operator 与 工单 handler
     rec_ops = db.scalars(
-        select(CsRecord.operator, func.count())
-        .where(CsRecord.operation_time >= dt_start, CsRecord.operation_time < dt_end, CsRecord.operator.isnot(None))
-        .group_by(CsRecord.operator)
+        select(_CS.c.operator, func.count())
+        .where(_CS.c.operation_time >= dt_start, _CS.c.operation_time < dt_end, _CS.c.operator.isnot(None))
+        .group_by(_CS.c.operator)
     )
     op_count = {op: int(c) for op, c in rec_ops}
     tkt_handlers = db.scalars(

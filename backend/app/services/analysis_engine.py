@@ -11,7 +11,7 @@
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, column, func, or_, select, table
 from sqlalchemy.orm import Session
 
 from app.models.analysis_view import AnalysisView, ClassificationRule
@@ -31,21 +31,28 @@ from app.models.scrm_session_transfer import ScrmSessionTransfer
 from app.models.ticket import ServiceTicket
 from app.models.wallet import WalletWithdrawal
 
-# 模型注册表:table_name → model class(用于根据 DataSource.table_name 反射获取列)
-_MODEL_REGISTRY: dict[str, type] = {
-    Refund.__tablename__: Refund,
+
+def _std_table(view_name: str, orm_model):
+    """#338: 从 ORM 模型列定义生成 std_all 全列 table 对象(供分析引擎动态查询)。"""
+    return table(view_name, *[column(c.name) for c in orm_model.__table__.columns])
+
+
+# 模型注册表:table_name → 查询对象(ORM 模型 或 std_all table 对象)
+# #338: ods 信源表统一映射到 std_all 镜像视图; public 表(工单/宽表)保留 ORM。
+_MODEL_REGISTRY: dict[str, object] = {
+    "refunds": _std_table("std_refund_online_all", Refund),
     CashFlowWide.__tablename__: CashFlowWide,
     RefundWide.__tablename__: RefundWide,
-    WalletWithdrawal.__tablename__: WalletWithdrawal,
+    "wallet_withdrawals": _std_table("std_wallet_flow_all", WalletWithdrawal),
     ServiceTicket.__tablename__: ServiceTicket,
-    DeviceCombo.__tablename__: DeviceCombo,
-    MerchantRefund.__tablename__: MerchantRefund,
-    RefundRecordReport.__tablename__: RefundRecordReport,
-    ScrmSession.__tablename__: ScrmSession,
-    ScrmSessionTransfer.__tablename__: ScrmSessionTransfer,
-    CsRecord.__tablename__: CsRecord,
-    ExternalComplaint.__tablename__: ExternalComplaint,
-    CardComplaint.__tablename__: CardComplaint,
+    "device_combos": _std_table("std_device_combo_all", DeviceCombo),
+    "merchant_refunds": _std_table("std_merchant_refund_all", MerchantRefund),
+    "refund_record_reports": _std_table("std_refund_record_all", RefundRecordReport),
+    "scrm_sessions": _std_table("std_scrm_session_all", ScrmSession),
+    "scrm_session_transfers": _std_table("std_scrm_session_transfer_all", ScrmSessionTransfer),
+    "cs_records": _std_table("std_cs_record_all", CsRecord),
+    "external_complaints": _std_table("std_external_complaint_all", ExternalComplaint),
+    "card_complaints": _std_table("std_card_complaint_all", CardComplaint),
 }
 
 
@@ -440,10 +447,15 @@ def _to_chart_data(merged: list[dict], chart_type: str, segments: list[dict], ra
 
 
 def _get_column(model, field_name: str):
-    """安全获取模型列(防注入:字段名必须存在于模型)"""
-    col = getattr(model, field_name, None)
+    """安全获取模型列(防注入:字段名必须存在于模型)
+
+    #338: 兼容 ORM 模型与 std_all table 对象。
+    """
+    col_container = getattr(model, "c", model)
+    col = getattr(col_container, field_name, None)
     if col is None:
-        raise ValueError(f"字段不存在: {model.__tablename__}.{field_name}")
+        tname = getattr(model, "__tablename__", None) or getattr(model, "name", "")
+        raise ValueError(f"字段不存在: {tname}.{field_name}")
     return col
 
 

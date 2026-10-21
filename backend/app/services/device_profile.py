@@ -12,18 +12,21 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, select, text
+from sqlalchemy import column, func, select, table, text
 from sqlalchemy.orm import Session
 
-from app.models.bms_order import BmsOrder
-from app.models.card_complaint import CardComplaint
-from app.models.cs_record import CsRecord
 from app.models.device import Device
-from app.models.device_combo import DeviceCombo
-from app.models.device_flow_usage import DeviceFlowUsage
-from app.models.external_complaint import ExternalComplaint
-from app.models.return_tracking import ReturnTracking
 from app.models.ticket import ServiceTicket
+
+# #338: 设备档案读 std_all 镜像
+_CS = table("std_cs_record_all", column("device_sn"))
+_EC = table("std_external_complaint_all", column("device_sn"))
+_CC = table("std_card_complaint_all", column("device_sn"))
+_DC = table("std_device_combo_all",
+            column("device_sn"), column("actual_amount"), column("package_name"),
+            column("remaining_traffic"))
+_BO = table("std_bms_order_all", column("device_sn"))
+_DFU = table("std_device_flow_usage_all", column("device_sn"), column("flow_gb"))
 
 
 def build_device_profile(db: Session, device: Device) -> dict:
@@ -71,9 +74,9 @@ def build_device_profile(db: Session, device: Device) -> dict:
     }
 
     # ---- 生命周期 KPI 概览(各业务表 count + 关键 sum, 口径与 timeline/本地查询一致) ----
-    remaining = _sum(DeviceCombo, DeviceCombo.remaining_traffic, DeviceCombo.device_sn,
-                     DeviceCombo.remaining_traffic != -1)
-    total_flow = _sum(DeviceFlowUsage, DeviceFlowUsage.flow_gb, DeviceFlowUsage.device_sn)
+    remaining = _sum(_DC, _DC.c.remaining_traffic, _DC.c.device_sn,
+                     _DC.c.remaining_traffic != -1)
+    total_flow = _sum(_DFU, _DFU.c.flow_gb, _DFU.c.device_sn)
 
     # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
     def _cnt_std(view_name: str) -> int:
@@ -85,21 +88,21 @@ def build_device_profile(db: Session, device: Device) -> dict:
         "refund_count": _cnt_std("std_refund_online_all"),
         "ticket_count": _cnt(ServiceTicket, ServiceTicket.device_sn),
         "wallet_count": _cnt_std("std_wallet_flow_all"),
-        "cs_count": _cnt(CsRecord, CsRecord.device_sn),
-        "external_complaint_count": _cnt(ExternalComplaint, ExternalComplaint.device_sn),
-        "card_complaint_count": _cnt(CardComplaint, CardComplaint.device_sn),
-        "combo_count": _cnt(DeviceCombo, DeviceCombo.device_sn),
+        "cs_count": _cnt(_CS, _CS.c.device_sn),
+        "external_complaint_count": _cnt(_EC, _EC.c.device_sn),
+        "card_complaint_count": _cnt(_CC, _CC.c.device_sn),
+        "combo_count": _cnt(_DC, _DC.c.device_sn),
         # 累计充值金额排除质检套餐(#293): 出厂质检流水(999/9999元)非真实付费
         "combo_total_amount": round(
-            _sum(DeviceCombo, DeviceCombo.actual_amount, DeviceCombo.device_sn,
-                 DeviceCombo.package_name.notilike("%质检%")), 2),
+            _sum(_DC, _DC.c.actual_amount, _DC.c.device_sn,
+                 _DC.c.package_name.notilike("%质检%")), 2),
         "combo_remaining_bytes": int(remaining),
         "manual_refund_count": _cnt_std("std_refund_manual_all"),
         "shanmao_refund_count": _cnt_std("std_refund_shanmao_all"),
-        "order_count": _cnt(BmsOrder, BmsOrder.device_sn),
-        "return_tracking_count": _cnt(ReturnTracking, ReturnTracking.device_sn),
+        "order_count": _cnt(_BO, _BO.c.device_sn),
+        "return_tracking_count": _cnt_std("std_return_tracking_all"),
         "refund_record_report_count": _cnt_std("std_refund_record_all"),
-        "flow_month_count": _cnt(DeviceFlowUsage, DeviceFlowUsage.device_sn),
+        "flow_month_count": _cnt(_DFU, _DFU.c.device_sn),
         "flow_total_gb": round(total_flow, 4),
     }
     return profile

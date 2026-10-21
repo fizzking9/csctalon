@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, column, func, or_, select, table
 from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, DBSession
@@ -30,13 +30,15 @@ from app.api.v1.complaints import (
 )
 from app.core.config import settings
 from app.core.redis_client import cache_ttl_for, cached_call
-from app.models.card_complaint import CardComplaint
-from app.models.external_complaint import ExternalComplaint
 from app.models.external_token import ExternalAccessToken
 from app.models.person import Person
 from app.models.specialty import PersonSpecialtyAssignment, Specialty
 from app.models.ticket import ServiceTicket
 from app.models.user import User
+
+# #338: 外部接口读 std_all 镜像
+_EC = table("std_external_complaint_all", column("complaint_date"), column("matched_ticket_no"), column("result"))
+_CC = table("std_card_complaint_all", column("complaint_date"), column("matched_ticket_no"))
 from app.schemas.common import R
 from app.schemas.external_token import (
     ExternalTokenCreate,
@@ -737,23 +739,23 @@ def _complaint_enhanced_window(db: Session, start_s: str, end_s: str) -> dict:
         if te:
             sub_conds.append(ServiceTicket.finish_time <= te if handled_side else ServiceTicket.register_time <= te)
         sub = select(ServiceTicket.ticket_no).where(*sub_conds)
-        conds = [model.complaint_date.isnot(None), model.matched_ticket_no.isnot(None),
-                 model.matched_ticket_no.in_(sub)]
+        conds = [model.c.complaint_date.isnot(None), model.c.matched_ticket_no.isnot(None),
+                 model.c.matched_ticket_no.in_(sub)]
         if done_only:
-            conds.append(model.result.in_(_EXTERNAL_DONE_RESULTS))
+            conds.append(model.c.result.in_(_EXTERNAL_DONE_RESULTS))
         if ts:
-            conds.append(model.complaint_date >= ts)
+            conds.append(model.c.complaint_date >= ts)
         if te:
-            conds.append(model.complaint_date <= te)
+            conds.append(model.c.complaint_date <= te)
         return db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
 
     ext_reg = 0
-    for model in (ExternalComplaint, CardComplaint):
-        conds = [model.complaint_date.isnot(None)]
+    for model in (_EC, _CC):
+        conds = [model.c.complaint_date.isnot(None)]
         if ts:
-            conds.append(model.complaint_date >= ts)
+            conds.append(model.c.complaint_date >= ts)
         if te:
-            conds.append(model.complaint_date <= te)
+            conds.append(model.c.complaint_date <= te)
         suppl_total = db.scalar(select(func.count()).select_from(model).where(*conds)) or 0
         ext_reg += int(suppl_total) - _suppl_overlap(model)
     # 外部投诉桶并入补充表净新增(不为负)
@@ -770,15 +772,15 @@ def _complaint_enhanced_window(db: Session, start_s: str, end_s: str) -> dict:
     #   ⚠️ 卡商(card_complaints)不并入: 其 result 是另一套语义(已解决/已退款完成/
     #      投诉错误/流量虚...), 无统一办结集合, 套用 315 集合会恒为 0 → 保持不进 handled。
     #  (与 complaints._source_reg_handled include_suppl_external 分支逐行对齐)
-    _suppl_done_conds = [ExternalComplaint.complaint_date.isnot(None),
-                         ExternalComplaint.result.in_(_EXTERNAL_DONE_RESULTS)]
+    _suppl_done_conds = [_EC.c.complaint_date.isnot(None),
+                         _EC.c.result.in_(_EXTERNAL_DONE_RESULTS)]
     if ts:
-        _suppl_done_conds.append(ExternalComplaint.complaint_date >= ts)
+        _suppl_done_conds.append(_EC.c.complaint_date >= ts)
     if te:
-        _suppl_done_conds.append(ExternalComplaint.complaint_date <= te)
-    _ext_done = db.scalar(select(func.count()).select_from(ExternalComplaint).where(*_suppl_done_conds)) or 0
+        _suppl_done_conds.append(_EC.c.complaint_date <= te)
+    _ext_done = db.scalar(select(func.count()).select_from(_EC).where(*_suppl_done_conds)) or 0
     # matched 到"窗口内真实完成工单"的已办结 → 工单侧 handled 已计, 不重复加
-    _ext_done_overlap_handled = _suppl_overlap(ExternalComplaint, done_only=True, handled_side=True)
+    _ext_done_overlap_handled = _suppl_overlap(_EC, done_only=True, handled_side=True)
     _ext_handled_extra = max(int(_ext_done) - int(_ext_done_overlap_handled), 0)
     if _ext_handled_extra:
         for item in by_source:

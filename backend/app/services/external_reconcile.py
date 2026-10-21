@@ -53,12 +53,22 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, column, func, or_, select, table
 from sqlalchemy.orm import Session
 
 from app.models.card_complaint import CardComplaint
 from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
+
+# #338: 对账统计只读侧走 std_all 镜像; 回写侧(_remark_one)仍需 ORM 模型 update 原表
+_CC_TBL = table("std_card_complaint_all",
+                column("id"), column("device_sn"), column("complaint_date"),
+                column("complaint_group"), column("matched_ticket_no"),
+                column("complainant_phone"), column("quality_status"))
+_EC_TBL = table("std_external_complaint_all",
+                column("id"), column("device_sn"), column("complaint_date"),
+                column("platform"), column("matched_ticket_no"),
+                column("complainant_phone"), column("quality_status"))
 from app.services.complaint_scope import (
     complaint_quality_include_cond,
     effective_card_ticket_cond,
@@ -194,8 +204,8 @@ def _reconcile_core(
     # 已匹配记录 —— 用候选集**实时校验**是否仍合规
     #   ⚠️ 不能只看 matched 列非空: 历史匹配可能指向非本类工单(见模块头)
     doc_rows = db.execute(
-        select(doc_model.id, doc_model.device_sn, doc_date_col,
-               doc_matched_col, doc_label_col, doc_model.complainant_phone)
+        select(doc_model.c.id, doc_model.c.device_sn, doc_date_col,
+               doc_matched_col, doc_label_col, doc_model.c.complainant_phone)
         .where(*d_conds)
     ).all()
 
@@ -323,10 +333,10 @@ def external_reconcile(
     """
     return _reconcile_core(
         db,
-        doc_model=ExternalComplaint,
-        doc_date_col=ExternalComplaint.complaint_date,
-        doc_label_col=ExternalComplaint.platform,
-        doc_matched_col=ExternalComplaint.matched_ticket_no,
+        doc_model=_EC_TBL,
+        doc_date_col=_EC_TBL.c.complaint_date,
+        doc_label_col=_EC_TBL.c.platform,
+        doc_matched_col=_EC_TBL.c.matched_ticket_no,
         ticket_where=_external_ticket_where(),
         ts=ts, te=te,
         detail_limit=detail_limit, include_detail=include_detail,
@@ -356,10 +366,10 @@ def card_reconcile(
     """
     return _reconcile_core(
         db,
-        doc_model=CardComplaint,
-        doc_date_col=CardComplaint.complaint_date,
-        doc_label_col=CardComplaint.complaint_group,
-        doc_matched_col=CardComplaint.matched_ticket_no,
+        doc_model=_CC_TBL,
+        doc_date_col=_CC_TBL.c.complaint_date,
+        doc_label_col=_CC_TBL.c.complaint_group,
+        doc_matched_col=_CC_TBL.c.matched_ticket_no,
         ticket_where=_card_ticket_where(),
         ts=ts, te=te,
         detail_limit=detail_limit, include_detail=include_detail,

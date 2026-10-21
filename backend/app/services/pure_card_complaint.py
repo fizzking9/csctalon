@@ -70,12 +70,14 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, column, select, table
 from sqlalchemy.orm import Session
 
-from app.models.card_complaint import CardComplaint
-from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
+
+# #338: 纯工信部投诉判定读 std_all 镜像
+_CC = table("std_card_complaint_all", column("device_sn"), column("complainant_phone"))
+_EC = table("std_external_complaint_all", column("device_sn"), column("complainant_phone"))
 from app.services.complaint_scope import (
     complaint_bucket_case,
     is_complaint_ticket_cond,
@@ -106,8 +108,8 @@ def _hit_sets(db: Session) -> dict[str, set[str]]:
     """
     out: dict[str, set[str]] = {}
     for name, model, sn_col, ph_col in (
-        ("card", CardComplaint, CardComplaint.device_sn, CardComplaint.complainant_phone),
-        ("ext", ExternalComplaint, ExternalComplaint.device_sn, ExternalComplaint.complainant_phone),
+        ("card", _CC, _CC.c.device_sn, _CC.c.complainant_phone),
+        ("ext", _EC, _EC.c.device_sn, _EC.c.complainant_phone),
     ):
         out[f"{name}_sn"] = {
             v for v in db.scalars(select(sn_col).where(sn_col.isnot(None)).distinct()).all() if v

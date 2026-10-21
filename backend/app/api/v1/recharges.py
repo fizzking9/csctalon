@@ -16,11 +16,16 @@ import logging
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import column, func, select, table
 
 from app.api.deps import AdminOrSupervisor, CurrentUser, DBSession
 from app.models.device_combo import DeviceCombo
+from app.models.device_flow_usage import DeviceFlowUsage
 from app.schemas.common import PageBase, R
+
+# #338: 充值/流量查询读 std_all 全列镜像
+_DC = table("std_device_combo_all", *[column(c.name) for c in DeviceCombo.__table__.columns])
+_DFU = table("std_device_flow_usage_all", *[column(c.name) for c in DeviceFlowUsage.__table__.columns])
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +56,7 @@ def _bytes_to_human(b: int | None) -> str | None:
     return f"{b:.2f} PB"
 
 
-def _serialize_combo(c: DeviceCombo) -> dict:
+def _serialize_combo(c) -> dict:
     return {
         "recharge_order_no": c.recharge_order_no,
         "device_sn": c.device_sn,
@@ -79,16 +84,16 @@ def _serialize_combo(c: DeviceCombo) -> dict:
 def _apply_combo_filters(stmt, *, sn, merchant, package_type, status, start, end, time_field="created_at_raw"):
     if sn:
         if isinstance(sn, str):
-            stmt = stmt.where(DeviceCombo.device_sn == sn)
+            stmt = stmt.where(_DC.c.device_sn == sn)
         else:  # list
-            stmt = stmt.where(DeviceCombo.device_sn.in_(list(sn)))
+            stmt = stmt.where(_DC.c.device_sn.in_(list(sn)))
     if merchant:
-        stmt = stmt.where(DeviceCombo.merchant_name.ilike(f"%{merchant}%"))
+        stmt = stmt.where(_DC.c.merchant_name.ilike(f"%{merchant}%"))
     if package_type:
-        stmt = stmt.where(DeviceCombo.package_type == package_type)
+        stmt = stmt.where(_DC.c.package_type == package_type)
     if status:
-        stmt = stmt.where(DeviceCombo.status == status)
-    dt_col = getattr(DeviceCombo, time_field, DeviceCombo.created_at_raw)
+        stmt = stmt.where(_DC.c.status == status)
+    dt_col = getattr(_DC.c, time_field, _DC.c.created_at_raw)
     if start:
         stmt = stmt.where(dt_col >= start)
     if end:
@@ -114,7 +119,7 @@ def list_local_combos(
 ):
     if time_field not in {"created_at_raw", "start_date", "end_date"}:
         raise HTTPException(status_code=400, detail="time_field 非法")
-    stmt = select(DeviceCombo)
+    stmt = select(_DC)
     stmt = _apply_combo_filters(
         stmt,
         sn=sn, merchant=merchant, package_type=package_type, status=status,
@@ -122,11 +127,11 @@ def list_local_combos(
     )
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = list(
-        db.scalars(
-            stmt.order_by(DeviceCombo.created_at_raw.desc().nullslast())
+        db.execute(
+            stmt.order_by(_DC.c.created_at_raw.desc().nullslast())
             .offset((page - 1) * page_size)
             .limit(page_size)
-        )
+        ).mappings()
     )
     return R(data=PageBase(items=[_serialize_combo(r) for r in rows], total=total or 0, page=page, page_size=page_size))
 
@@ -142,7 +147,7 @@ def local_combos_summary(
     start: str | None = Query(None),
     end: str | None = Query(None),
 ):
-    stmt = select(DeviceCombo)
+    stmt = select(_DC)
     stmt = _apply_combo_filters(
         stmt,
         sn=sn, merchant=merchant, package_type=package_type, status=status,
@@ -151,10 +156,10 @@ def local_combos_summary(
     count_stmt = (
         select(
             func.count(),
-            func.coalesce(func.sum(DeviceCombo.actual_amount), 0.0),
-            func.coalesce(func.sum(DeviceCombo.available_traffic), 0),
-            func.coalesce(func.sum(DeviceCombo.used_traffic), 0),
-            func.coalesce(func.sum(DeviceCombo.remaining_traffic), 0),
+            func.coalesce(func.sum(_DC.c.actual_amount), 0.0),
+            func.coalesce(func.sum(_DC.c.available_traffic), 0),
+            func.coalesce(func.sum(_DC.c.used_traffic), 0),
+            func.coalesce(func.sum(_DC.c.remaining_traffic), 0),
         )
         .select_from(stmt.subquery())
     )
@@ -179,12 +184,12 @@ def local_combos_summary(
 def local_combo_by_sn(sn: str, db: DBSession, _: CurrentUser, limit: int = Query(100, ge=1, le=500)):
     """返回某设备所有充值套餐记录(按充值时间倒序),并附当前汇总状态。"""
     rows = list(
-        db.scalars(
-            select(DeviceCombo)
-            .where(DeviceCombo.device_sn == sn)
-            .order_by(DeviceCombo.created_at_raw.desc().nullslast())
+        db.execute(
+            select(_DC)
+            .where(_DC.c.device_sn == sn)
+            .order_by(_DC.c.created_at_raw.desc().nullslast())
             .limit(limit)
-        )
+        ).mappings()
     )
     total_amount = sum(float(r.actual_amount) for r in rows if r.actual_amount is not None)
     remain = sum((r.remaining_traffic or 0) for r in rows if (r.remaining_traffic or 0) != -1)
@@ -222,12 +227,12 @@ def _upstream_query_traffic(db, params: dict) -> dict | None:
 
     # ── 1. 套餐快照(本地 device_combos, 字节口径 -1=无限) ──
     combos = list(
-        db.scalars(
-            select(DeviceCombo)
-            .where(DeviceCombo.device_sn == sn)
-            .order_by(DeviceCombo.created_at_raw.desc().nullslast())
+        db.execute(
+            select(_DC)
+            .where(_DC.c.device_sn == sn)
+            .order_by(_DC.c.created_at_raw.desc().nullslast())
             .limit(50)
-        )
+        ).mappings()
     )
     # 最新一条"流量正常"套餐(当前生效); 无则取最新一条
     normal = next((c for c in combos if c.status and "正常" in str(c.status)), None)
@@ -262,15 +267,13 @@ def _upstream_query_traffic(db, params: dict) -> dict | None:
     }
 
     # ── 2. 月流量使用(本地 device_flow_usage) ──
-    from app.models.device_flow_usage import DeviceFlowUsage
-
     def _read_monthly() -> list[dict]:
         rows = list(
-            db.scalars(
-                select(DeviceFlowUsage)
-                .where(DeviceFlowUsage.device_sn == sn)
-                .order_by(DeviceFlowUsage.stat_month.desc().nullslast())
-            )
+            db.execute(
+                select(_DFU)
+                .where(_DFU.c.device_sn == sn)
+                .order_by(_DFU.c.stat_month.desc().nullslast())
+            ).mappings()
         )
         return [
             {

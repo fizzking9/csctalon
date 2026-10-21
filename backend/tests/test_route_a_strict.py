@@ -94,11 +94,15 @@ def test_route_a_refund_filter_now_empty():
 
 
 def test_route_a_any_status_filter_only_method():
-    """全状态口径 _route_a_online_any_status_filter 仅 method(读 ods 原始层 Refund)。"""
-    from app.services.analytics import _route_a_online_any_status_filter
+    """#338: 全状态口径已迁移到 std_refund_online_all 镜像视图(SELECT * FROM ods.refunds),
+    不再需要 _route_a_online_any_status_filter 函数。此处锁 operation_status_dist 读 std_all。"""
+    import inspect
 
-    conds = _route_a_online_any_status_filter()
-    assert len(conds) == 1  # 仅 method
+    from app.models.refund_standard import STD_ALL_VIEWS
+    from app.services.analytics.cash import operation_status_dist
+    src = inspect.getsource(operation_status_dist)
+    assert "std_refund_online_all" in src
+    assert "std_refund_online_all" in STD_ALL_VIEWS
 
 
 # ---- _cash_routes_total route_a 取数 std 采纳行 ----

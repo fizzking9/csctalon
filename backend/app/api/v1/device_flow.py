@@ -9,16 +9,19 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import column, func, select, table
 
 from app.api.deps import AdminOrSupervisor, CurrentUser, DBSession
 from app.models.device_flow_usage import DeviceFlowUsage
 from app.schemas.common import PageBase, R
 
+# #338: 设备流量查询读 std_all 全列镜像
+_DFU = table("std_device_flow_usage_all", *[column(c.name) for c in DeviceFlowUsage.__table__.columns])
+
 router = APIRouter(prefix="/device-flow", tags=["设备流量"])
 
 
-def _serialize(r: DeviceFlowUsage) -> dict:
+def _serialize(r) -> dict:
     return {
         "id": r.id,
         "device_sn": r.device_sn,
@@ -88,22 +91,22 @@ def list_usage(
     month: str | None = Query(None, description="月份 YYYY-MM(精确)"),
     device_type: str | None = Query(None, description="设备类型"),
 ):
-    stmt = select(DeviceFlowUsage)
+    stmt = select(_DFU)
     if sn:
-        stmt = stmt.where(DeviceFlowUsage.device_sn.ilike(f"%{sn.strip()}%"))
+        stmt = stmt.where(_DFU.c.device_sn.ilike(f"%{sn.strip()}%"))
     if merchant:
-        stmt = stmt.where(DeviceFlowUsage.merchant_name.ilike(f"%{merchant.strip()}%"))
+        stmt = stmt.where(_DFU.c.merchant_name.ilike(f"%{merchant.strip()}%"))
     if month:
-        stmt = stmt.where(DeviceFlowUsage.stat_month == month.strip())
+        stmt = stmt.where(_DFU.c.stat_month == month.strip())
     if device_type:
-        stmt = stmt.where(DeviceFlowUsage.device_type_name.ilike(f"%{device_type.strip()}%"))
+        stmt = stmt.where(_DFU.c.device_type_name.ilike(f"%{device_type.strip()}%"))
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = list(
-        db.scalars(
-            stmt.order_by(DeviceFlowUsage.stat_month.desc().nullslast(), DeviceFlowUsage.device_sn)
+        db.execute(
+            stmt.order_by(_DFU.c.stat_month.desc().nullslast(), _DFU.c.device_sn)
             .offset((page - 1) * page_size)
             .limit(page_size)
-        )
+        ).mappings()
     )
     return R(data=PageBase(items=[_serialize(r) for r in rows], total=total, page=page, page_size=page_size))
 
@@ -111,11 +114,11 @@ def list_usage(
 @router.get("/usage/{sn}", response_model=R, summary="单设备SN月流量明细+汇总")
 def usage_by_sn(sn: str, db: DBSession, _: CurrentUser):
     rows = list(
-        db.scalars(
-            select(DeviceFlowUsage)
-            .where(DeviceFlowUsage.device_sn == sn)
-            .order_by(DeviceFlowUsage.stat_month.desc().nullslast())
-        )
+        db.execute(
+            select(_DFU)
+            .where(_DFU.c.device_sn == sn)
+            .order_by(_DFU.c.stat_month.desc().nullslast())
+        ).mappings()
     )
     total_flow = sum(float(r.flow_gb) for r in rows if r.flow_gb is not None)
     merchant = next((r.merchant_name for r in rows if r.merchant_name), None)

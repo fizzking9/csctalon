@@ -22,15 +22,22 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import column, select, table
 from sqlalchemy.orm import Session
 
 from app.models.complaint_same_source import (
     ComplaintSameSourceGroup,
     ComplaintSameSourceMember,
 )
-from app.models.external_complaint import ExternalComplaint
 from app.services.quality_check import stats_quality_include
+
+# #338: 同源判重读 std_all 镜像
+_EC = table("std_external_complaint_all",
+            column("id"), column("device_sn"), column("complaint_date"),
+            column("problem"), column("handle_detail"), column("quality_status"),
+            column("platform"), column("complainant"), column("complainant_phone"),
+            column("complaint_category"), column("result"), column("follower"),
+            column("matched_ticket_no"))
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +113,7 @@ def content_similarity(a: str | None, b: str | None) -> float:
     return max(_ngram_dice(na, nb), SequenceMatcher(None, na, nb).ratio())
 
 
-def _content_text(r: ExternalComplaint) -> str:
+def _content_text(r: Any) -> str:
     return r.problem or r.handle_detail or ""
 
 
@@ -115,7 +122,7 @@ def mark_present(name: str | None) -> bool:
     return bool(name) and bool(_PAREN_MARK.search(str(name)))
 
 
-def embed_suspect(r: ExternalComplaint) -> bool:
+def embed_suspect(r: Any) -> bool:
     """「公共服务平台再次来电内嵌前文」嫌疑：历史原文把相似度虚高 → 需人工。
 
     判据沿用 v5 原型：文本 ≥150 字，且含再次来电极词，且（含 <br/> 或 长度 >250）。
@@ -136,7 +143,7 @@ def _daydiff(a: datetime, b: datetime) -> int:
 
 
 def _discover_pairs(
-    rows_by_sn: dict[str, list[ExternalComplaint]],
+    rows_by_sn: dict[str, list[Any]],
 ) -> dict[str, list[dict[str, Any]]]:
     """同 SN 组内两两判定，产出 {sn: [pair,...]}（仅命中对）。
 
@@ -176,7 +183,7 @@ def _discover_pairs(
 
 
 def _components(
-    rows_by_sn: dict[str, list[ExternalComplaint]],
+    rows_by_sn: dict[str, list[Any]],
     pairs_by_sn: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     """按命中对做连通分量（同 SN 内并查集），组装组定义。
@@ -245,13 +252,13 @@ def rebuild_groups(db: Session, *, persist: bool = True) -> dict[str, Any]:
     """
     # 1) 候选行：有 SN、有投诉日期、质量未排除（dup_residual/ignored 脏数据不参与，
     #    草案 §5.2 重复导入与同源判重分开）。
-    rows = db.scalars(
-        select(ExternalComplaint)
-        .where(ExternalComplaint.device_sn.isnot(None))
-        .where(ExternalComplaint.complaint_date.isnot(None))
-        .where(stats_quality_include(ExternalComplaint.quality_status))
-        .order_by(ExternalComplaint.complaint_date, ExternalComplaint.id)
-    ).all()
+    rows = db.execute(
+        select(_EC)
+        .where(_EC.c.device_sn.isnot(None))
+        .where(_EC.c.complaint_date.isnot(None))
+        .where(stats_quality_include(_EC.c.quality_status))
+        .order_by(_EC.c.complaint_date, _EC.c.id)
+    ).mappings().all()
 
     # 2) 人工已终审组的成员锁定，不参与重排。
     locked_ids: set[int] = set()
@@ -267,7 +274,7 @@ def rebuild_groups(db: Session, *, persist: bool = True) -> dict[str, Any]:
         if m.group_id in kept_group_ids:
             locked_ids.add(m.complaint_id)
 
-    rows_by_sn: dict[str, list[ExternalComplaint]] = {}
+    rows_by_sn: dict[str, list[Any]] = {}
     for r in rows:
         if r.id in locked_ids:
             continue
@@ -352,15 +359,15 @@ def group_view(db: Session, group: ComplaintSameSourceGroup) -> dict[str, Any]:
     案件状态语义（草案 §4）：组内任一办结即已处理（在视图里给 done_any 标志，
     最新行 result 仅作展示，二者不互相覆盖）。
     """
-    members = db.scalars(
-        select(ExternalComplaint)
+    members = db.execute(
+        select(_EC)
         .join(
             ComplaintSameSourceMember,
-            ComplaintSameSourceMember.complaint_id == ExternalComplaint.id,
+            ComplaintSameSourceMember.complaint_id == _EC.c.id,
         )
         .where(ComplaintSameSourceMember.group_id == group.id)
-        .order_by(ExternalComplaint.complaint_date, ExternalComplaint.id)
-    ).all()
+        .order_by(_EC.c.complaint_date, _EC.c.id)
+    ).mappings().all()
 
     latest = members[-1] if members else None
     return {
@@ -386,7 +393,7 @@ def group_view(db: Session, group: ComplaintSameSourceGroup) -> dict[str, Any]:
     }
 
 
-def _member_dict(r: ExternalComplaint) -> dict[str, Any]:
+def _member_dict(r: Any) -> dict[str, Any]:
     return {
         "id": r.id,
         "complaint_date": r.complaint_date.isoformat() if r.complaint_date else None,

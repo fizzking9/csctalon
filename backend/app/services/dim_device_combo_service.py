@@ -3,6 +3,9 @@
 单一真身: 把 bms_orders + device_combos 两路套餐事件合并为 SCD Type 2 区间,
 供退款/投诉两侧按事件时点 JOIN 取当时套餐。
 
+#338: 源数据改读 std_bms_order_all / std_device_combo_all 镜像视图
+(与 ods 同构透传, 业务/派生作业零直读 ods)。
+
 构建逻辑(纯 SQL, 一次 INSERT ... SELECT):
   1. 合并两路事件, 过滤「工厂质检」套餐;
   2. 按设备+时间排序, LAG 检测套餐变化, 打 group 标记;
@@ -28,14 +31,14 @@ _REBUILD_SQL = text("""
 WITH events AS (
     SELECT device_sn, combo_name AS package_name, create_date AS evt_time,
            'bms_order'::text AS source, order_no
-    FROM ods.bms_orders
+    FROM std_bms_order_all
     WHERE device_sn IS NOT NULL AND combo_name IS NOT NULL
       AND create_date IS NOT NULL
       AND combo_name NOT LIKE '%工厂质检%'
     UNION ALL
     SELECT device_sn, package_name, created_at_raw AS evt_time,
            'device_combo'::text AS source, recharge_order_no AS order_no
-    FROM ods.device_combos
+    FROM std_device_combo_all
     WHERE device_sn IS NOT NULL AND package_name IS NOT NULL
       AND created_at_raw IS NOT NULL
       AND package_name NOT LIKE '%工厂质检%'

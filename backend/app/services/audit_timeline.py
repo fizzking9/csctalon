@@ -33,22 +33,47 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import column, or_, select, table, text
 from sqlalchemy.orm import Session
 
-from app.models.bms_order import BmsOrder
-from app.models.card_complaint import CardComplaint
-from app.models.cs_record import CsRecord
-from app.models.device_combo import DeviceCombo
-from app.models.external_complaint import ExternalComplaint
-from app.models.manual_refund import ManualRefund
-from app.models.merchant_refund import MerchantRefund
-from app.models.refund import Refund
-from app.models.refund_record_report import RefundRecordReport
-from app.models.return_tracking import ReturnTracking
-from app.models.shanmao_refund import ShanmaoRefund
+# #338: 审计时序读 std_all 镜像(全量展示口径), 禁止直读 ods
+_CS = table("std_cs_record_all",
+            column("id"), column("problem_category"), column("problem_type"),
+            column("solution"), column("operator"), column("execution_result"),
+            column("user_accepted"), column("operation_time"), column("description"),
+            column("device_sn"))
+_EC = table("std_external_complaint_all",
+            column("id"), column("complaint_no"), column("platform"), column("complainant"),
+            column("complainant_phone"), column("complaint_category"), column("result"),
+            column("solution"), column("follower"), column("complaint_date"),
+            column("handle_time"), column("problem"), column("handle_detail"),
+            column("matched_ticket_no"), column("device_sn"))
+_CC = table("std_card_complaint_all",
+            column("id"), column("complaint_group"), column("complainant"),
+            column("complainant_phone"), column("problem_category"), column("result"),
+            column("solution"), column("handler"), column("complaint_date"),
+            column("problem"), column("handle_result"), column("matched_ticket_no"),
+            column("device_sn"))
+_DC = table("std_device_combo_all",
+            column("recharge_order_no"), column("package_name"), column("package_type"),
+            column("traffic_type"), column("merchant_name"), column("actual_amount"),
+            column("start_date"), column("end_date"), column("created_at_raw"),
+            column("status"), column("device_sn"), column("creator"))
+_BO = table("std_bms_order_all",
+            column("order_no"), column("order_type"), column("combo_name"),
+            column("combo_price"), column("actual_pay_price"), column("balance_pay_price"),
+            column("pay_type"), column("order_status"), column("refund_status"),
+            column("business_name"), column("merchant_name"), column("create_user"),
+            column("pay_date"), column("create_date"), column("device_sn"))
+
+from app.models.manual_refund import ManualRefund  # noqa: F401  # 类型注解(构建函数签名)
+from app.models.merchant_refund import MerchantRefund  # noqa: F401  # 类型注解
+from app.models.refund import Refund  # noqa: F401  # 类型注解
+from app.models.refund_record_report import RefundRecordReport  # noqa: F401  # 类型注解
+from app.models.return_tracking import ReturnTracking  # noqa: F401  # 类型注解
+from app.models.shanmao_refund import ShanmaoRefund  # noqa: F401  # 类型注解
 from app.models.ticket import ServiceTicket
-from app.models.wallet import WalletWithdrawal
+from app.models.wallet import WalletWithdrawal  # noqa: F401  # 类型注解
 
 # 事件类型 → 中文标签 + Element Plus timeline type(决定颜色)
 EVENT_TYPE_META: dict[str, dict[str, str]] = {
@@ -241,7 +266,7 @@ def _build_merchant_refund_items(rows: list[MerchantRefund], include_device_sn: 
     return items
 
 
-def _build_cs_record_items(rows: list[CsRecord], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
+def _build_cs_record_items(rows: list, include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
     items: list[dict] = []
     for c in rows:
         parts = []
@@ -280,7 +305,7 @@ def _build_cs_record_items(rows: list[CsRecord], include_device_sn: bool = False
     return items
 
 
-def _build_external_complaint_items(rows: list[ExternalComplaint], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
+def _build_external_complaint_items(rows: list, include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
     """315外部投诉(监督局/315)时序项"""
     items: list[dict] = []
     for c in rows:
@@ -324,7 +349,7 @@ def _build_external_complaint_items(rows: list[ExternalComplaint], include_devic
     return items
 
 
-def _build_card_complaint_items(rows: list[CardComplaint], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
+def _build_card_complaint_items(rows: list, include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
     """卡商群投诉时序项"""
     items: list[dict] = []
     for c in rows:
@@ -366,7 +391,7 @@ def _build_card_complaint_items(rows: list[CardComplaint], include_device_sn: bo
     return items
 
 
-def _build_device_combo_items(rows: list[DeviceCombo], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
+def _build_device_combo_items(rows: list, include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
     """设备套餐购买/流量时序项"""
     items: list[dict] = []
     for c in rows:
@@ -493,7 +518,7 @@ def _build_shanmao_refund_items(rows: list[ShanmaoRefund], include_device_sn: bo
     return items
 
 
-def _build_bms_order_items(rows: list[BmsOrder], include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
+def _build_bms_order_items(rows: list, include_device_sn: bool = False, include_person_name: bool = True) -> list[dict]:
     """订单管理(bms_orders)时序项 - BMS 支付订单台账(微信续费/储值卡/后台充值/预存等)"""
     items: list[dict] = []
     for o in rows:
@@ -676,33 +701,36 @@ def build_device_timeline(
     wallet_sql += " ORDER BY op_time DESC LIMIT :lim"
     wallets = list(db.execute(text(wallet_sql), wallet_params).all())
 
-    mr_stmt = select(MerchantRefund).where(MerchantRefund.device_no == sn)
+    mr_sql = "SELECT * FROM std_merchant_refund_all WHERE device_no = :sn"
+    mr_params: dict = {"sn": sn, "lim": per_table_limit}
     if since:
-        mr_stmt = mr_stmt.where(MerchantRefund.trade_time >= since)
-    merchant_refunds = list(db.scalars(mr_stmt.order_by(MerchantRefund.trade_time.desc()).limit(per_table_limit)))
+        mr_sql += " AND trade_time >= :since"
+        mr_params["since"] = since
+    mr_sql += " ORDER BY trade_time DESC LIMIT :lim"
+    merchant_refunds = list(db.execute(text(mr_sql), mr_params).all())
 
-    cs_stmt = select(CsRecord).where(CsRecord.device_sn == sn)
+    cs_stmt = select(_CS).where(_CS.c.device_sn == sn)
     if since:
-        cs_stmt = cs_stmt.where(CsRecord.operation_time >= since)
-    cs_records = list(db.scalars(cs_stmt.order_by(CsRecord.operation_time.desc()).limit(per_table_limit)))
+        cs_stmt = cs_stmt.where(_CS.c.operation_time >= since)
+    cs_records = list(db.execute(cs_stmt.order_by(_CS.c.operation_time.desc()).limit(per_table_limit)).mappings())
 
-    ec_stmt = select(ExternalComplaint).where(ExternalComplaint.device_sn == sn)
+    ec_stmt = select(_EC).where(_EC.c.device_sn == sn)
     if since:
-        ec_stmt = ec_stmt.where(ExternalComplaint.complaint_date >= since)
-    external_complaints = list(db.scalars(ec_stmt.order_by(ExternalComplaint.complaint_date.desc().nullslast()).limit(per_table_limit)))
+        ec_stmt = ec_stmt.where(_EC.c.complaint_date >= since)
+    external_complaints = list(db.execute(ec_stmt.order_by(_EC.c.complaint_date.desc().nullslast()).limit(per_table_limit)).mappings())
 
-    cc_stmt = select(CardComplaint).where(CardComplaint.device_sn == sn)
+    cc_stmt = select(_CC).where(_CC.c.device_sn == sn)
     if since:
-        cc_stmt = cc_stmt.where(CardComplaint.complaint_date >= since)
-    card_complaints = list(db.scalars(cc_stmt.order_by(CardComplaint.complaint_date.desc().nullslast()).limit(per_table_limit)))
+        cc_stmt = cc_stmt.where(_CC.c.complaint_date >= since)
+    card_complaints = list(db.execute(cc_stmt.order_by(_CC.c.complaint_date.desc().nullslast()).limit(per_table_limit)).mappings())
 
     # 设备套餐(device_combos): 主时间=created_at_raw(购买时间), 无则退 start_date
-    combo_stmt = select(DeviceCombo).where(DeviceCombo.device_sn == sn)
+    combo_stmt = select(_DC).where(_DC.c.device_sn == sn)
     if since:
         combo_stmt = combo_stmt.where(
-            or_(DeviceCombo.created_at_raw >= since, DeviceCombo.start_date >= since)
+            or_(_DC.c.created_at_raw >= since, _DC.c.start_date >= since)
         )
-    device_combos = list(db.scalars(combo_stmt.order_by(DeviceCombo.created_at_raw.desc().nullslast()).limit(per_table_limit)))
+    device_combos = list(db.execute(combo_stmt.order_by(_DC.c.created_at_raw.desc().nullslast()).limit(per_table_limit)).mappings())
 
     # 手动退款登记(manual_refunds): 主时间=register_time
     # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
@@ -725,24 +753,22 @@ def build_device_timeline(
     shanmao_refunds = list(db.execute(text(shanmao_sql), shanmao_params).all())
 
     # 订单管理(bms_orders): 主时间=create_date(订单创建/同步锚点), 退 create_date
-    order_stmt = select(BmsOrder).where(BmsOrder.device_sn == sn)
+    order_stmt = select(_BO).where(_BO.c.device_sn == sn)
     if since:
         order_stmt = order_stmt.where(
-            or_(BmsOrder.create_date >= since, BmsOrder.pay_date >= since)
+            or_(_BO.c.create_date >= since, _BO.c.pay_date >= since)
         )
-    bms_orders = list(db.scalars(order_stmt.order_by(BmsOrder.create_date.desc().nullslast()).limit(per_table_limit)))
+    bms_orders = list(db.execute(order_stmt.order_by(_BO.c.create_date.desc().nullslast()).limit(per_table_limit)).mappings())
 
     # 退货跟踪(return_trackings): 主时间=return_time(退货发生), 退 created_at_raw/order_time
-    rt_stmt = select(ReturnTracking).where(ReturnTracking.device_sn == sn)
+    # #338: 读 std_return_tracking_all 全量镜像(ods 同构透传), 业务代码零读 ods
+    rt_sql = "SELECT * FROM std_return_tracking_all WHERE device_sn = :sn"
+    rt_params: dict = {"sn": sn, "lim": per_table_limit}
     if since:
-        rt_stmt = rt_stmt.where(
-            or_(
-                ReturnTracking.return_time >= since,
-                ReturnTracking.sign_time >= since,
-                ReturnTracking.created_at_raw >= since,
-            )
-        )
-    return_trackings = list(db.scalars(rt_stmt.order_by(ReturnTracking.return_time.desc().nullslast()).limit(per_table_limit)))
+        rt_sql += " AND (return_time >= :since OR sign_time >= :since OR created_at_raw >= :since)"
+        rt_params["since"] = since
+    rt_sql += " ORDER BY return_time DESC NULLS LAST LIMIT :lim"
+    return_trackings = list(db.execute(text(rt_sql), rt_params).all())
 
     # 线上退款水单(refund_record_reports, E路): 主时间=refund_time
     # #334: 读 std_*_all 全量镜像(ods 同构透传), 业务代码零读 ods
@@ -848,22 +874,22 @@ def build_person_timeline(
     wallet_sql += " ORDER BY op_time DESC LIMIT :lim"
     wallets = list(db.execute(text(wallet_sql), wallet_params).all())
 
-    cs_stmt = select(CsRecord).where(CsRecord.operator.in_(alias_vals))
+    cs_stmt = select(_CS).where(_CS.c.operator.in_(alias_vals))
     if since:
-        cs_stmt = cs_stmt.where(CsRecord.operation_time >= since)
-    cs_records = list(db.scalars(cs_stmt.order_by(CsRecord.operation_time.desc()).limit(per_table_limit)))
+        cs_stmt = cs_stmt.where(_CS.c.operation_time >= since)
+    cs_records = list(db.execute(cs_stmt.order_by(_CS.c.operation_time.desc()).limit(per_table_limit)).mappings())
 
-    ec_stmt = select(ExternalComplaint).where(
-        ExternalComplaint.follower.in_(alias_vals)
+    ec_stmt = select(_EC).where(
+        _EC.c.follower.in_(alias_vals)
     )
     if since:
-        ec_stmt = ec_stmt.where(ExternalComplaint.complaint_date >= since)
-    external_complaints = list(db.scalars(ec_stmt.order_by(ExternalComplaint.complaint_date.desc().nullslast()).limit(per_table_limit)))
+        ec_stmt = ec_stmt.where(_EC.c.complaint_date >= since)
+    external_complaints = list(db.execute(ec_stmt.order_by(_EC.c.complaint_date.desc().nullslast()).limit(per_table_limit)).mappings())
 
-    cc_stmt = select(CardComplaint).where(CardComplaint.handler.in_(alias_vals))
+    cc_stmt = select(_CC).where(_CC.c.handler.in_(alias_vals))
     if since:
-        cc_stmt = cc_stmt.where(CardComplaint.complaint_date >= since)
-    card_complaints = list(db.scalars(cc_stmt.order_by(CardComplaint.complaint_date.desc().nullslast()).limit(per_table_limit)))
+        cc_stmt = cc_stmt.where(_CC.c.complaint_date >= since)
+    card_complaints = list(db.execute(cc_stmt.order_by(_CC.c.complaint_date.desc().nullslast()).limit(per_table_limit)).mappings())
 
     items = _merge_and_sort(
         [

@@ -1566,6 +1566,21 @@ def _column_exists(db: Session, table: str, column: str) -> bool:
     ), {"t": table, "c": column}).scalar())
 
 
+def _pk_columns(db: Session, table: str) -> list[str]:
+    rows = db.execute(text("""
+        SELECT kcu.column_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+        WHERE tc.constraint_type = 'PRIMARY KEY'
+          AND tc.table_schema IN ('public', 'ods')
+          AND tc.table_name = :t
+        ORDER BY kcu.ordinal_position
+    """), {"t": table}).fetchall()
+    return [r[0] for r in rows]
+
+
 def _blank_cond(alias: str, col: str, is_text: bool) -> str:
     """「该列为空」条件：NULL 或（文本列的）空串 —— 空串与 NULL 在业务上同义，须一并算空缺。"""
     c = f'{alias}."{col}"'
@@ -1632,7 +1647,10 @@ def _alias_rule_specs(db: Session) -> list[dict]:
             continue
         if not _column_exists(db, table, "person_id"):
             continue
-        pk_cols = [c.name for c in model.__table__.primary_key.columns]
+        # #338: 兼容 ORM 模型与 std_all table 对象——主键从 information_schema 取
+        pk_cols = _pk_columns(db, table)
+        if not pk_cols and hasattr(model, "__table__"):
+            pk_cols = [c.name for c in model.__table__.primary_key.columns]
         if len(pk_cols) != 1:
             continue  # 复合主键无法定位单行（样本 _id 与 mark_pending 都要单列主键）
         out.append({

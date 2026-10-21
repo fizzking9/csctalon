@@ -10,19 +10,26 @@ sys/system 标记为系统自动操作（is_system=true），不建 person。
 
 import re
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import column, delete, func, select, table
 from sqlalchemy.orm import Session
 
-from app.models.card_complaint import CardComplaint
-from app.models.cs_record import CsRecord
-from app.models.external_complaint import ExternalComplaint
 from app.models.person import PersonAlias
-from app.models.refund import Refund
 from app.models.scrm_operator import ScrmOperator
-from app.models.scrm_session import ScrmSession
-from app.models.scrm_session_transfer import ScrmSessionTransfer
 from app.models.ticket import ServiceTicket
-from app.models.wallet import WalletWithdrawal
+
+
+# #338: 人员别名提取统一读 std_all 镜像
+def _mcol(model, name: str):
+    return getattr(model.c, name) if hasattr(model, "c") else getattr(model, name)
+
+_T_REFUND = table("std_refund_online_all", column("operator"), column("auditor"), column("created_at"))
+_T_WALLET = table("std_wallet_flow_all", column("operator"), column("created_at"))
+_T_CS = table("std_cs_record_all", column("operator"), column("created_at"))
+_T_EC = table("std_external_complaint_all", column("follower"), column("created_at"))
+_T_CC = table("std_card_complaint_all", column("handler"), column("created_at"))
+_T_SCRM = table("std_scrm_session_all", column("operator_name"), column("created_at"))
+_T_SCRMT = table("std_scrm_session_transfer_all",
+                 column("from_operator_name"), column("to_operator_name"), column("created_at"))
 
 # 系统自动操作标识（不归并到真人，入库标 is_system 供审计）
 SYSTEM_ALIASES = {"sys", "system", "SYS", "System"}
@@ -89,19 +96,19 @@ _INITIALS_RE = re.compile(r"^[A-Z]{2,6}$")  # 全大写缩写 ZHY/HYK
 
 # (model, field_attr, source_table, source_field)
 PERSON_FIELD_SOURCES = [
-    (Refund, Refund.operator, "refunds", "operator"),
-    (Refund, Refund.auditor, "refunds", "auditor"),
+    (_T_REFUND, _T_REFUND.c.operator, "refunds", "operator"),
+    (_T_REFUND, _T_REFUND.c.auditor, "refunds", "auditor"),
     (ServiceTicket, ServiceTicket.handler, "service_tickets", "handler"),
     (ServiceTicket, ServiceTicket.registrant, "service_tickets", "registrant"),
-    (WalletWithdrawal, WalletWithdrawal.operator, "wallet_withdrawals", "operator"),
-    (CsRecord, CsRecord.operator, "cs_records", "operator"),
-    (ExternalComplaint, ExternalComplaint.follower, "external_complaints", "follower"),
-    (CardComplaint, CardComplaint.handler, "card_complaints", "handler"),
+    (_T_WALLET, _T_WALLET.c.operator, "wallet_withdrawals", "operator"),
+    (_T_CS, _T_CS.c.operator, "cs_records", "operator"),
+    (_T_EC, _T_EC.c.follower, "external_complaints", "follower"),
+    (_T_CC, _T_CC.c.handler, "card_complaints", "handler"),
     # ---- SCRM 聚合平台新增数据源(operator_name 用于别名归一 → Person) ----
     (ScrmOperator, ScrmOperator.operator_name, "scrm_operators", "operator_name"),
-    (ScrmSession, ScrmSession.operator_name, "scrm_sessions", "operator_name"),
-    (ScrmSessionTransfer, ScrmSessionTransfer.from_operator_name, "scrm_session_transfers", "from_operator_name"),
-    (ScrmSessionTransfer, ScrmSessionTransfer.to_operator_name, "scrm_session_transfers", "to_operator_name"),
+    (_T_SCRM, _T_SCRM.c.operator_name, "scrm_sessions", "operator_name"),
+    (_T_SCRMT, _T_SCRMT.c.from_operator_name, "scrm_session_transfers", "from_operator_name"),
+    (_T_SCRMT, _T_SCRMT.c.to_operator_name, "scrm_session_transfers", "to_operator_name"),
 ]
 
 # 自由文本字段: 源数据混了名字+投诉叙述,需先取首段人名
@@ -285,7 +292,7 @@ def extract_person_aliases(db: Session) -> dict:
     for model, field_attr, src_table, src_field in PERSON_FIELD_SOURCES:
         is_freetext = (src_table, src_field) in FREETEXT_FIELDS
         rows = db.execute(
-            select(field_attr, func.max(model.created_at)).where(field_attr.isnot(None)).group_by(field_attr)
+            select(field_attr, func.max(_mcol(model, "created_at"))).where(field_attr.isnot(None)).group_by(field_attr)
         ).all()
         for raw_value, last_seen in rows:
             if not raw_value or str(raw_value).strip() in INVALID_ALIASES:

@@ -302,4 +302,7 @@ STD_ALL_VIEWS: dict[str, str] = {
     "std_device_combo_all": "ods.device_combos",
     "std_device_flow_usage_all": "ods.device_flow_usage",
     "std_scrm_session_all": "ods.scrm_sessions",
+    "std_merchant_refund_all": "ods.merchant_refunds",
+    "std_scrm_session_transfer_all": "ods.scrm_session_transfers",
+    "std_return_tracking_all": "ods.return_trackings",
 }

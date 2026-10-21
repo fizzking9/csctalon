@@ -24,14 +24,16 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import desc, func, select
+from sqlalchemy import column, desc, func, select, table
 
 from app.api.deps import AdminUser, DBSession
-from app.models.bms_order import BmsOrder
 from app.models.bms_sync_log import BmsSyncLog
 from app.schemas.common import R
 from app.services.analytics import TZ
 from app.services.bms_sync import sync_all
+
+# #338: 回填基线统计读 std_bms_order_all 镜像(仅取两列, 避免全列展开)
+_BO = table("std_bms_order_all", column("device_sn"), column("create_date"))
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +56,10 @@ def _month_window(month: str) -> tuple[datetime, datetime]:
 
 
 def _baseline(db) -> dict:
-    """回填基线: bms_orders 行数/SN数/最早订单时间。"""
-    rows = db.scalar(select(func.count()).select_from(BmsOrder)) or 0
-    sns = db.scalar(select(func.count(func.distinct(BmsOrder.device_sn)))) or 0
-    min_create = db.scalar(select(func.min(BmsOrder.create_date)))
+    """回填基线: bms_orders 行数/SN数/最早订单时间(读 std_bms_order_all 镜像)。"""
+    rows = db.scalar(select(func.count()).select_from(_BO)) or 0
+    sns = db.scalar(select(func.count(func.distinct(_BO.c.device_sn)))) or 0
+    min_create = db.scalar(select(func.min(_BO.c.create_date)))
     return {"rows": rows, "sns": sns, "min_create": min_create.isoformat() if min_create else None}
 
 

@@ -231,11 +231,15 @@ def get_incident_impact_comparison(
     from datetime import timedelta, timezone
 
     from sqlalchemy import and_
+    from sqlalchemy import column as _column
     from sqlalchemy import func as _func
+    from sqlalchemy import table as _table
 
-    from app.models.cs_record import CsRecord
     from app.models.refund_standard import StdRefundOnline
     from app.models.ticket import ServiceTicket
+
+    # #338: 接待量统计 → 读 std_cs_record_all 镜像
+    _CS_ALL = _table("std_cs_record_all", _column("operation_time"))
 
     i = db.get(Incident, incident_id)
     if not i:
@@ -271,9 +275,9 @@ def get_incident_impact_comparison(
     def _stats(s, e):
         # 接待量(cs_records.operation_time)
         reception = db.scalar(
-            select(_func.count()).select_from(CsRecord)
-            .where(and_(CsRecord.operation_time.isnot(None),
-                        CsRecord.operation_time >= s, CsRecord.operation_time <= e))
+            select(_func.count()).select_from(_CS_ALL)
+            .where(and_(_CS_ALL.c.operation_time.isnot(None),
+                        _CS_ALL.c.operation_time >= s, _CS_ALL.c.operation_time <= e))
         ) or 0
         # 投诉量(service_tickets.created_at, 来自 TimestampMixin)
         complaint = db.scalar(

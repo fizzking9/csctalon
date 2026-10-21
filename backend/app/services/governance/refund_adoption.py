@@ -89,6 +89,7 @@ ADOPT_REASON_CN: dict[str, str] = {
     D_EX_DUP: "排除: 重复残留(dup_residual)",
     D_EX_NO_SN: "排除: SN不可解析(sn_unresolvable)",
     D_EX_NOT_REFUNDED: "排除: 登记为未退款(蓄水, 非出款)",
+    D_EX_QUOTE_SN: "排除: SN带Excel文本前缀引号(同去重键干净行已采纳)",
     E_ADOPT_ALL: "采纳: E路全量(水单对账基准, 状态原样保留)",
     PENDING_UNKNOWN: "待定: 规则白名单外的未知枚举, 待业务确认",
 }

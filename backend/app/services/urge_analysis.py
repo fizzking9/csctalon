@@ -23,16 +23,20 @@ from sqlalchemy import (
     and_,
     case,
     cast,
+    column,
     desc,
     func,
     select,
+    table,
     text,
 )
 from sqlalchemy.orm import Session
 
-from app.models.card_complaint import CardComplaint
-from app.models.external_complaint import ExternalComplaint
 from app.models.ticket import ServiceTicket
+
+# #338: 催单分析读 std_all 镜像
+_CC = table("std_card_complaint_all", column("complaint_date"))
+_EC = table("std_external_complaint_all", column("complaint_date"))
 
 TZ = ZoneInfo("Asia/Shanghai")
 logger = logging.getLogger(__name__)
@@ -429,12 +433,12 @@ def complaint_urge_trend(db: Session, params: dict | None) -> dict:
     # 2) 每日外部投诉量
     ec_q = db.execute(
         select(
-            cast(func.date_trunc("day", ExternalComplaint.complaint_date.op("AT TIME ZONE")('Asia/Shanghai')), Date).label("d"),
+            cast(func.date_trunc("day", _EC.c.complaint_date.op("AT TIME ZONE")('Asia/Shanghai')), Date).label("d"),
             func.count().label("cnt"),
         )
         .where(
-            ExternalComplaint.complaint_date >= ts_utc,
-            ExternalComplaint.complaint_date < te_utc,
+            _EC.c.complaint_date >= ts_utc,
+            _EC.c.complaint_date < te_utc,
         )
         .group_by("d")
     ).all()
@@ -443,12 +447,12 @@ def complaint_urge_trend(db: Session, params: dict | None) -> dict:
     # 3) 每日卡投诉量
     cc_q = db.execute(
         select(
-            cast(func.date_trunc("day", CardComplaint.complaint_date.op("AT TIME ZONE")('Asia/Shanghai')), Date).label("d"),
+            cast(func.date_trunc("day", _CC.c.complaint_date.op("AT TIME ZONE")('Asia/Shanghai')), Date).label("d"),
             func.count().label("cnt"),
         )
         .where(
-            CardComplaint.complaint_date >= ts_utc,
-            CardComplaint.complaint_date < te_utc,
+            _CC.c.complaint_date >= ts_utc,
+            _CC.c.complaint_date < te_utc,
         )
         .group_by("d")
     ).all()
