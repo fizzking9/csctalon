@@ -50,13 +50,49 @@ _REFUND_ALL = table(
     column("created_at_raw"), column("created_at"), column("updated_at_raw"), column("updated_at"),
 )
 
+# ── #344 Process-level memoization: _build_chain_rows 全量结果 ─────────────
+#   生产实测: _build_chain_rows(db, None, None) = 2794ms, rw_overview 连调两次
+#   (窗口 + 全量)合计 5.05ms → 全量那次在热路径里白白吃掉一半耗时。
+#   本变量缓存 **仅全量**(start=None, end=None) 的 71944 行匹配结果,
+#   带窗口的调用(start/end 非 None)不在此缓存(窗口组合多, 命中率低, 窗口筛选
+#   在匹配完成之后做 —— 全量已经算过 D1/D2/D4, 过滤 O(N) 极快)。
+#   失效: sync 完成事件 → _invalidate_chain_rows_cache() 主动清
+#         时间窗口 30min → 兜底过期(避免 sync 事件漏触导致脏结果停留太久)
+#         进程重启 → 自动丢(热重载/部署后自然刷新)
+#   进程级单 worker(见 AGENTS.md) —— 无并发问题, 不需要锁。
+import time as _time
+
+_CHAIN_ROWS_CACHE_FULL: list[dict[str, Any]] | None = None
+_CHAIN_ROWS_CACHE_TS: float = 0.0
+_CHAIN_ROWS_CACHE_TTL: float = 1800.0   # 30min 兜底
+
+
+def _invalidate_chain_rows_cache() -> None:
+    """sync 完成后主动失效。由 sync_task_manager 的 on_success 回调触发。"""
+    global _CHAIN_ROWS_CACHE_FULL, _CHAIN_ROWS_CACHE_TS
+    _CHAIN_ROWS_CACHE_FULL = None
+    _CHAIN_ROWS_CACHE_TS = 0.0
+
+
 def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime | None = None):
     """构建"一笔实际出款"的全链路记录 (只有 A=转入钱包+B=线上直退两条有效路径, 其他无效剔除)。
 
     筛选时间窗口作用在 **D4 (实际现金出款时刻)**, 而非 D1 发起退款时刻:
       - A 路径 D4 = 用户提现 op_time (钱包真实出款给用户的时刻)
       - B 路径 D4 = 退费单 updated_at_raw (接口回调成功 ≈ 实际到账)
+
+    #344: start=None & end=None(全量) 走进程级 memoization, 避免 rw_overview 等
+         多次调用方把同一份 71944 行结果反复算(单次 2.8s)。带窗口的调用(start/end 非 None)
+         不走缓存, 每次全量 scan + 内存匹配(已在 O(N) 可接受范围), 然后 D4 窗口过滤。
     """
+    global _CHAIN_ROWS_CACHE_FULL, _CHAIN_ROWS_CACHE_TS
+    # 命中 memo: 仅全量调用(start=None, end=None)
+    if start is None and end is None and _CHAIN_ROWS_CACHE_FULL is not None:
+        age = _time.time() - _CHAIN_ROWS_CACHE_TS
+        if age < _CHAIN_ROWS_CACHE_TTL:
+            return _CHAIN_ROWS_CACHE_FULL
+        # 兜底过期: 清掉重算(避免 sync 事件漏触)
+        _CHAIN_ROWS_CACHE_FULL = None
     # 1. 取全量数据 (66k rows, 内存可容纳)
     # #334: 读 std_refund_online_all 全量镜像(ods 同构透传, 含被排除行) —— 链路 A 路径是
     #   「转入提现账户」退款, std_refund_online 不含该方式(采纳规则排除), 也不能只含已退款行(链路要全状态)
@@ -261,6 +297,10 @@ def _build_chain_rows(db: Session, start: datetime | None = None, end: datetime 
             "withdraw_id": None,
             "withdraw_remark": "",
         })
+    # 回写 memo: 仅全量结果(start=None, end=None)
+    if start is None and end is None:
+        _CHAIN_ROWS_CACHE_FULL = rows
+        _CHAIN_ROWS_CACHE_TS = _time.time()
     return rows
 
 def refund_withdrawal_overview(db: Session, start: str | None = None, end: str | None = None) -> dict[str, Any]:

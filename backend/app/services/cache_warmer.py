@@ -556,7 +556,15 @@ def warm_after_sync() -> None:
     月报看板: 运营/现金流/退款分类/人员操作(近30天+静态), 同步后保持月报新鲜。
     #341: 提现全链路(rw:*)读 BMS 多表, 同步后数据变动必须强制刷新
           (rw 域冷加载 5-13s, 不刷新的话下次访问必然白屏)。
+    #344: 同步后先 invalidation memoization(_build_chain_rows 全量结果),
+          因为 std_refund_online_all / std_wallet_flow 已被 upsert 刷新,
+          memoized 结果变脏。
     """
+    try:
+        from app.services.analytics.refund_chain import _invalidate_chain_rows_cache
+        _invalidate_chain_rows_cache()
+    except Exception:
+        pass  # memo 失效失败不阻塞预热
     t = _today_str()
     s29 = _days_ago_str(29)   # 提现全链路默认窗口 = 前端 last30(today-29 ~ today), 30 个自然日
 
