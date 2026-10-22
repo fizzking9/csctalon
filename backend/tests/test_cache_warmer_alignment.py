@@ -126,11 +126,11 @@ def test_rw_warmer_keys_follow_frontend_request_shape(monkeypatch):
     )
 
 
-def test_rebuild_all_scope_also_warms_rw(monkeypatch):
-    """#342: `rebuild_cache(scope="all")` 的失效列表含 `rw:*`，必须同时重新预热 rw。
+def test_rebuild_all_scope_also_warms_rw_and_refund(monkeypatch):
+    """#342/#343: `rebuild_cache(scope="all")` 的失效列表含 `rw:*`/`refund:*`，必须同时重新预热。
 
     回归: 此前只失效不预热 → 管理员点「重建全部缓存」后，提现全链路看板必然
-    冷加载 5~9s（预热白名单里根本没有 rw）。
+    冷加载 5~9s（预热白名单里根本没有 rw）；refund 域同因(#343)。
     """
     calls: list[str] = []
 
@@ -145,12 +145,53 @@ def test_rebuild_all_scope_also_warms_rw(monkeypatch):
     monkeypatch.setattr(W, "_warm_week_view", lambda db, force=False: calls.append("week") or 1)
     monkeypatch.setattr(W, "_warm_reports", lambda db, force=False: calls.append("reports") or 1)
     monkeypatch.setattr(W, "_warm_rw_deep", lambda *a, **k: calls.append("rw") or 1)
+    monkeypatch.setattr(W, "_warm_refund_deep", lambda *a, **k: calls.append("refund") or 1)
 
     res = W.rebuild_cache("all")
 
     assert res["ok"] is True
-    assert res["warmed"] == 4, calls
-    assert "rw" in calls, f"scope=all 必须重新预热 rw: {calls}"
+    assert res["warmed"] == 5, calls
+    assert "rw" in calls and "refund" in calls, (
+        f"scope=all 必须重新预热 rw 与 refund: {calls}"
+    )
+
+
+def test_refund_deep_warmer_keys_follow_frontend_request_shape(monkeypatch):
+    """#343: refund 预热 key 必须与前端**实际请求**的形态一致，否则预热永不命中。
+
+    生产复核（2026-10-22, Redis × nginx 实测）: 8 个 refund:* 预热 key 全空转——
+      · refund:do 预热 30 天窗口, 而 RefundDashboard 默认 rangeMode='day'(单日),
+        92 次/周请求几乎全是 start=end 单日形态;
+      · 其余接口预热 today-29, 而 RefundRecovery 默认 rangeMode='30' =
+        subtract(30,'day')(today-30), 差 1 天;
+      · refund:pt 的 operators 由前端动态生成(永远非 None), 预热必不命中。
+    """
+    captured: list[str] = []
+    monkeypatch.setattr(
+        W, "_warm_one",
+        lambda key, fn, args, kw, name, **k: captured.append(key) or 0,
+    )
+
+    W._warm_refund_deep(None, "2026-09-22", "2026-10-22", "单测")
+    keys = set(captured)
+
+    # 6 个低频接口: 用调用方传入的 30 天窗口(与 RefundRecovery subtract(30) 对齐)
+    assert "refund:gc:2026-09-22:2026-10-22" in keys
+    assert "refund:pa:2026-09-22:2026-10-22:None:None:None:None" in keys
+    assert "refund:prm:2026-09-22:2026-10-22:15" in keys
+    assert "refund:ptd:2026-09-22:2026-10-22:10" in keys
+    assert "refund:tt:2026-09-22:2026-10-22:day:reason" in keys
+    assert "refund:da:2026-09-22:2026-10-22:None:None:None:None:20" in keys
+    # refund:do: 昨日单日(RefundDashboard 默认单日形态), 而非传入的 30 天窗口
+    y = W._days_ago_str(1)
+    assert f"refund:do:{y}:{y}:day" in keys
+    assert not any(k.startswith("refund:do:2026-09-22") for k in keys), (
+        f"refund:do 不应预热 30 天窗口(前端默认是单日): {keys}"
+    )
+    # refund:pt: operators 动态不可预测 → 不预热
+    assert not any(k.startswith("refund:pt:") for k in keys), (
+        f"refund:pt 预热必不命中(operators 动态), 应删除: {keys}"
+    )
 
 
 def test_staff_buckets_are_internally_consistent():

@@ -404,11 +404,22 @@ def _warm_reception(db, start: str, end: str, label: str, *,
 
 def _warm_refund_deep(db, start: str, end: str, label: str, *,
                       force: bool = False) -> int:
-    """预热退款深度分析看板 8 个核心接口 (analytics.refund_*)。
+    """预热退款深度分析看板 7 个接口 (analytics.refund_*)。返回成功预热条数。
 
-    返回成功预热条数。key 与 analytics.py 路由层逐字符对齐(缓存规范 §5.2 铁律)。
-    覆盖 RefundDashboard 月报场景默认入口(近 30 天); 单日/区间模式由路由层
-    cached_call 按需回填, 不在预热范围。
+    ── #343 窗口口径（按前端真实请求形态, nginx 实测 2026-10-22）─────────────
+    ⚠️ 两类窗口**不可混用**, 与 #342 同因（差 1 天/形态不符 → key 永不命中）:
+
+    · `refund:do` → **昨日单日** ``{_days_ago_str(1)}`` 相同起止:
+      RefundDashboard overview 默认 ``rangeMode='day'``(上午=昨日/下午=今日),
+      nginx 实测 92 次/周绝大多数为单日。昨日属历史窗口, 路由层走
+      ``HISTORY_TTL=24h``, 预热一次管一天; 今日单日(进行中日)不预热,
+      靠路由层 180s 按需回填。
+    · 其余 6 接口 → 调用方传入的 **today-30 ~ today** 窗口:
+      RefundRecovery(人员/设备/类型 tab) 默认 ``rangeMode='30'`` =
+      ``dayjs().subtract(30,'day')`` —— 注意与 rw 域(today-29, RefundWithdrawal
+      的 last30)差 1 天, 调用方(warm_idle/rebuild)必须分开传。
+    · `refund:pt` 不预热: 前端 loadTrend 总是从表格动态算 operators 传入
+      (永远非 None 且不可预测), 预热必不命中, 纯 DB 浪费(#343 拍板删除)。
 
     ⚠️ key 中的 ``None`` 是 Python None 经 f-string 转字符串 "None", 必须与
        路由层 ``f"refund:pa:{start}:{end}:{department}:..."`` 在 start/department 等
@@ -417,12 +428,13 @@ def _warm_refund_deep(db, start: str, end: str, label: str, *,
     """
     from app.services import analytics as A
 
+    y = _days_ago_str(1)   # 昨日单日(#343: refund:do 默认视图形态)
     specs = [
         # (name, key, fn, args, kwargs)
-        # refund:do (decision-overview) - 默认 grain=day
+        # refund:do (decision-overview) - 昨日单日, grain=day
         ("refund:do",
-         f"refund:do:{start}:{end}:day",
-         A.refund_decision_overview, (db, start, end), {"grain": "day"}),
+         f"refund:do:{y}:{y}:day",
+         A.refund_decision_overview, (db, y, y), {"grain": "day"}),
         # refund:gc (group-comparison) - 无额外参数
         ("refund:gc",
          f"refund:gc:{start}:{end}",
@@ -450,10 +462,6 @@ def _warm_refund_deep(db, start: str, end: str, label: str, *,
          A.refund_device_analysis, (db, start, end),
          {"reason": None, "amount_min": None, "amount_max": None,
           "reception_count_min": None, "limit": 20}),
-        # refund:pt (personnel-trend) - grain=day, operators=None 默认
-        ("refund:pt",
-         f"refund:pt:{start}:{end}:None:day",
-         A.refund_personnel_trend, (db, start, end), {"operators": None, "grain": "day"}),
     ]
     return sum(
         _warm_one(key, fn, args, kw, f"{label}:{name}", force=force)
@@ -582,8 +590,11 @@ def warm_idle() -> None:
     # #342: 前端是 `dayjs().subtract(90,'day') ~ today`, 此前用 89 天 → key 差 1 天永不命中
     rec_s, rec_e = _days_ago_str(90), _today_str()
     grp_s, grp_e = _days_ago_str(6), _today_str()   # group-detail 近 7 天(前端 subtract(6))
-    # 退款深度看板默认近 30 天(月报场景, 与 _warm_reports 同窗口)
-    rfd_s, rfd_e = _days_ago_str(29), _today_str()
+    # ⚠️ #343: refund 与 rw 两个看板的「近 30 天」窗口惯例不同, 必须分开:
+    #   refund(RefundRecovery rangeMode='30') = subtract(30) → today-30 ~ today
+    #   rw(RefundWithdrawal last30)           = today-29 ~ today (#342 已对齐)
+    rfd_s, rfd_e = _days_ago_str(30), _today_str()
+    rw_s, rw_e = _days_ago_str(29), _today_str()
 
     def _do(db):
         _warm_today_view(db)   # 节流: 仍新鲜则跳过
@@ -591,7 +602,7 @@ def warm_idle() -> None:
         _warm_reception(db, rec_s, rec_e, "空闲", group_start=grp_s, group_end=grp_e)
         _warm_refund_deep(db, rfd_s, rfd_e, "空闲")
         # #341: 提现全链路看板(慢查询 5-13s) 纳入空闲预热
-        _warm_rw_deep(db, rfd_s, rfd_e, "空闲")
+        _warm_rw_deep(db, rw_s, rw_e, "空闲")
 
     _run("空闲", _do)
 
@@ -716,12 +727,14 @@ def rebuild_cache(scope: str, *, invalidate_only: bool = False) -> dict:
     try:
         if not invalidate_only:
             if scope == "all":
-                # #342: 失效列表含 rw:*, 但此前 never 重算 → 重建后 rw 必然冷加载 5~9s
+                # #342: 失效列表含 rw:*/refund:*, 但此前 never 重算 → 重建后必然冷加载
+                # #343: refund 窗口 today-30(RefundRecovery) 与 rw 的 today-29 不同, 分开传
                 warmed = (
                     _warm_today_view(db, force=True)
                     + _warm_week_view(db, force=True)
                     + _warm_reports(db, force=True)
                     + _warm_rw_deep(db, _days_ago_str(29), _today_str(), "重建", force=True)
+                    + _warm_refund_deep(db, _days_ago_str(30), _today_str(), "重建", force=True)
                 )
             elif warm_fn is not None:
                 warmed = warm_fn(db, force=True)
