@@ -126,6 +126,33 @@ def test_rw_warmer_keys_follow_frontend_request_shape(monkeypatch):
     )
 
 
+def test_rebuild_all_scope_also_warms_rw(monkeypatch):
+    """#342: `rebuild_cache(scope="all")` 的失效列表含 `rw:*`，必须同时重新预热 rw。
+
+    回归: 此前只失效不预热 → 管理员点「重建全部缓存」后，提现全链路看板必然
+    冷加载 5~9s（预热白名单里根本没有 rw）。
+    """
+    calls: list[str] = []
+
+    class _DummyDB:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(W, "get_redis", lambda: object())
+    monkeypatch.setattr(W, "SessionLocal", _DummyDB)
+    monkeypatch.setattr(W, "cache_invalidate_pattern", lambda p: 0)
+    monkeypatch.setattr(W, "_warm_today_view", lambda db, force=False: calls.append("today") or 1)
+    monkeypatch.setattr(W, "_warm_week_view", lambda db, force=False: calls.append("week") or 1)
+    monkeypatch.setattr(W, "_warm_reports", lambda db, force=False: calls.append("reports") or 1)
+    monkeypatch.setattr(W, "_warm_rw_deep", lambda *a, **k: calls.append("rw") or 1)
+
+    res = W.rebuild_cache("all")
+
+    assert res["ok"] is True
+    assert res["warmed"] == 4, calls
+    assert "rw" in calls, f"scope=all 必须重新预热 rw: {calls}"
+
+
 def test_staff_buckets_are_internally_consistent():
     """`CAT_BUCKETS` 与 `cat_data` 的桶 key 必须一一对应。
 
