@@ -9,8 +9,8 @@
 必须用 execution_options={"autocommit": True} 让 ALTER TABLE/CREATE INDEX 在
 AUTOCOMMIT 模式执行。downgrade 同理。
 """
+
 from alembic import op
-import sqlalchemy as sa
 
 revision = "b5c7d9e3f1a2"
 down_revision = "0dce885e5a06"
