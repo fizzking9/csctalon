@@ -459,6 +459,44 @@ def _warm_refund_deep(db, start: str, end: str, label: str, *,
     )
 
 
+def _warm_rw_deep(db, start: str, end: str, label: str, *,
+                 force: bool = False) -> int:
+    """#341 预热提现全链路看板 7 个核心接口 (analytics.refund_withdrawal_*)。
+
+    返回成功预热条数。key 与 analytics.py 路由层逐字符对齐(缓存规范 §5.2 铁律)。
+    覆盖 RefundWithdrawalDashboard 默认近 30 天窗口; detail/sleeping 只预热第一页,
+    其他分页/排序/筛选组合由路由层按需回填, 不在预热范围(避免空间浪费)。
+    """
+    from app.services import analytics as A
+
+    specs = [
+        ("rw:overview", f"rw:overview:{start}:{end}",
+         A.refund_withdrawal_overview, (db, start, end), {}),
+        ("rw:timedist", f"rw:timedist:{start}:{end}",
+         A.refund_withdrawal_time_distribution, (db, start, end), {}),
+        ("rw:dims", f"rw:dims:{start}:{end}:20",
+         A.refund_withdrawal_dimensions, (db, start, end, 20), {}),
+        ("rw:detail",
+         f"rw:detail:{start}:{end}:days_desc:1:50:0:ALL:all:::None:None:None:None:None:le15",
+         A.refund_withdrawal_detail, (db, start, end),
+         {"sort": "days_desc", "page": 1, "page_size": 50, "slow_only": False,
+          "path": "ALL", "comp": "all", "operator": "", "reason": "",
+          "device_type": None, "combo": None, "merchant": None,
+          "active_start": None, "active_end": None, "active_age": "le15"}),
+        ("rw:facets", f"rw:facets:{start}:{end}",
+         A.refund_withdrawal_facets, (db, start, end), {}),
+        ("rw:dailysplit", f"rw:dailysplit:{start}:{end}",
+         A.refund_withdrawal_daily_split, (db, start, end), {}),
+        ("rw:sleeping", f"rw:sleeping:{start}:{end}:1:50",
+         A.refund_withdrawal_sleeping, (db, start, end),
+         {"page": 1, "page_size": 50}),
+    ]
+    return sum(
+        _warm_one(key, fn, args, kw, f"{label}:{name}", force=force)
+        for name, key, fn, args, kw in specs
+    )
+
+
 def _run(label: str, do_warm) -> None:
     """单飞执行一次预热(进程级锁防并发重复计算)
 
@@ -492,14 +530,21 @@ def _run(label: str, do_warm) -> None:
 
 
 def warm_after_sync() -> None:
-    """同步完成后预热: 今日视图 + 月报看板 (数据同步后强制刷新)
+    """同步完成后预热: 今日视图 + 月报看板 + 提现全链路 (数据同步后强制刷新)
 
     今日视图: 同步主要影响当日数据, 强制刷新。
     月报看板: 运营/现金流/退款分类/人员操作(近30天+静态), 同步后保持月报新鲜。
+    #341: 提现全链路(rw:*)读 BMS 多表, 同步后数据变动必须强制刷新
+          (rw 域冷加载 5-13s, 不刷新的话下次访问必然白屏)。
     """
+    t = _today_str()
+    s30 = _days_ago_str(29)
+
     def _do(db):
         _warm_today_view(db, force=True)
         _warm_reports(db, force=True)
+        # #341: rw 域同步后强制刷新(近30天窗口, 与月报同口径)
+        _warm_rw_deep(db, s30, t, "同步后", force=True)
     _run("同步后", _do)
 
 
@@ -533,6 +578,8 @@ def warm_idle() -> None:
         _warm_week_view(db)
         _warm_reception(db, rec_s, rec_e, "空闲", group_start=grp_s, group_end=grp_e)
         _warm_refund_deep(db, rfd_s, rfd_e, "空闲")
+        # #341: 提现全链路看板(慢查询 5-13s) 纳入空闲预热
+        _warm_rw_deep(db, rfd_s, rfd_e, "空闲")
 
     _run("空闲", _do)
 
@@ -608,9 +655,11 @@ def is_warming() -> bool:
 SCOPE_PATTERNS: dict[str, tuple[list[str], Callable | None]] = {
     "today":   (["today:*", "complaint:*"], _warm_today_view),
     "week":    (["today:*", "complaint:*"], _warm_week_view),
-    "reports": (["op:*", "cash:*", "cat:*", "operator:*", "summary"], _warm_reports),
+    "reports": (["op:*", "cash:*", "cat:*", "operator:*", "summary*"], _warm_reports),
+    # #341: 提现全链路(rw:*)纳入全部缓存重建
     "all":     (
-        ["today:*", "refund:*", "complaint:*", "op:*", "cash:*", "cat:*", "operator:*", "summary"],
+        ["today:*", "refund:*", "rw:*", "complaint:*",
+         "op:*", "cash:*", "cat:*", "operator:*", "summary*"],
         None,  # all 在 rebuild_cache 内组合预热 today+week+reports
     ),
 }

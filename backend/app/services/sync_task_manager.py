@@ -458,9 +458,15 @@ class SyncTaskManager:
             # 缓存失效兜底: 同步完成后统一失效看板缓存 (含 BMS/SCRM 并发合并任务),
             # 避免同步后仍读到旧聚合结果。complaint:* 一并失效(BMS 投诉工单同步后会变)。
             # reception:* (#228): SCRM 同步后接待看板缓存失效, 否则接待分析页读到旧聚合。
+            # #341: 补齐 op/cash/cat/operator/summary/rw 6 个此前遗漏的前缀 ——
+            #       这些域的数据来源(BMS/SCRM)在同步中也会变, 但之前只有今日/退款/投诉/接待
+            #       四个前缀被统一失效, 导致静态聚合(op:status 等)最长可读到 60s 旧数据。
             try:
                 from app.core.redis_client import cache_invalidate_recent_days
-                for pat in ("today:*", "refund:*", "complaint:*", "reception:*"):
+                for pat in (
+                    "today:*", "refund:*", "complaint:*", "reception:*",
+                    "op:*", "cash:*", "cat:*", "operator:*", "rw:*", "summary*",
+                ):
                     cache_invalidate_recent_days(pat)
             except Exception as ce:  # noqa: BLE001
                 logger.debug(f"缓存失效兜底失败(不影响同步): {ce}")

@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, DBSession, get_current_user
 from app.core.database import get_db
-from app.core.redis_client import cache_ttl_for, cached_call
+from app.core.redis_client import cache_ttl_by_key, cached_call
 from app.models.user import User
 from app.schemas.common import R
 from app.services import analytics as A
@@ -47,7 +47,7 @@ def _parse_dt(s: str | None) -> datetime | None:
 
 @router.get("/operation/trend", response_model=R, summary="退款趋势(按日)")
 def op_trend(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=cached_call(f"op:trend:{start}:{end}", cache_ttl_for(start, end, 60), A.operation_trend, db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"op:trend:{start}:{end}", cache_ttl_by_key(f"op:trend:{start}:{end}", start, end), A.operation_trend, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/operation/status", response_model=R, summary="退费状态分布")
@@ -70,7 +70,7 @@ def op_method(db: DBSession, _: CurrentUser):
 
 @router.get("/cash/trend", response_model=R, summary="真实现金流出趋势")
 def cash_trend(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=cached_call(f"cash:trend:{start}:{end}", cache_ttl_for(start, end, 60), A.cash_out_trend, db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"cash:trend:{start}:{end}", cache_ttl_by_key(f"cash:trend:{start}:{end}", start, end), A.cash_out_trend, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/cash/breakdown", response_model=R, summary="真实现金流构成(直接退款+用户提现)")
@@ -80,7 +80,7 @@ def cash_breakdown(db: DBSession, _: CurrentUser):
 
 @router.get("/cash/wallet-vs-withdraw", response_model=R, summary="退回钱包vs实际提现")
 def cash_compare(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=cached_call(f"cash:wallet:{start}:{end}", cache_ttl_for(start, end, 60), A.wallet_vs_withdraw, db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"cash:wallet:{start}:{end}", cache_ttl_by_key(f"cash:wallet:{start}:{end}", start, end), A.wallet_vs_withdraw, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/cash/merchant", response_model=R, summary="商户号对账")
@@ -122,17 +122,17 @@ def cat_package_coverage(db: DBSession, _: CurrentUser):
 
 @router.get("/operator/ticket", response_model=R, summary="人员工单处理统计")
 def op_ticket(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=cached_call(f"operator:ticket:{start}:{end}", cache_ttl_for(start, end, 60), A.operator_ticket_stats, db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"operator:ticket:{start}:{end}", cache_ttl_by_key(f"operator:ticket:{start}:{end}", start, end), A.operator_ticket_stats, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/operator/audit", response_model=R, summary="人员审核统计")
 def op_audit(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=cached_call(f"operator:audit:{start}:{end}", cache_ttl_for(start, end, 60), A.operator_audit_stats, db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"operator:audit:{start}:{end}", cache_ttl_by_key(f"operator:audit:{start}:{end}", start, end), A.operator_audit_stats, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/operator/refund", response_model=R, summary="人员退费操作统计")
 def op_refund(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=cached_call(f"operator:refund:{start}:{end}", cache_ttl_for(start, end, 60), A.operator_refund_stats, db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"operator:refund:{start}:{end}", cache_ttl_by_key(f"operator:refund:{start}:{end}", start, end), A.operator_refund_stats, db, _parse_dt(start), _parse_dt(end)))
 
 
 # ---------- 看板5: 客服接待看板 (对齐周报4模块) ----------
@@ -140,22 +140,22 @@ def op_refund(db: DBSession, _: CurrentUser, start: str | None = None, end: str 
 
 @router.get("/reception/overview", response_model=R, summary="接待看板-总体接待量(按周)")
 def reception_overview(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=cached_call(f"reception:overview:{start}:{end}", cache_ttl_for(start, end, 60), A.reception_overview_trend, db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"reception:overview:{start}:{end}", cache_ttl_by_key(f"reception:overview:{start}:{end}", start, end), A.reception_overview_trend, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/reception/category-summary", response_model=R, summary="接待看板-接待分项汇总(按周×分类)")
 def reception_category(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=cached_call(f"reception:catsum:{start}:{end}", cache_ttl_for(start, end, 60), A.reception_category_summary, db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"reception:catsum:{start}:{end}", cache_ttl_by_key(f"reception:catsum:{start}:{end}", start, end), A.reception_category_summary, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/reception/per-capita", response_model=R, summary="接待看板-接待分项人均工作(按周×专项组)")
 def reception_pc(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=cached_call(f"reception:percapita:{start}:{end}", cache_ttl_for(start, end, 60), A.reception_per_capita, db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"reception:percapita:{start}:{end}", cache_ttl_by_key(f"reception:percapita:{start}:{end}", start, end), A.reception_per_capita, db, _parse_dt(start), _parse_dt(end)))
 
 
 @router.get("/reception/group-detail", response_model=R, summary="接待看板-各组接待明细(按组×人员×日)")
 def reception_group(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
-    return R(data=cached_call(f"reception:group:{start}:{end}", cache_ttl_for(start, end, 60), A.reception_group_detail, db, _parse_dt(start), _parse_dt(end)))
+    return R(data=cached_call(f"reception:group:{start}:{end}", cache_ttl_by_key(f"reception:group:{start}:{end}", start, end), A.reception_group_detail, db, _parse_dt(start), _parse_dt(end)))
 
 
 # ---------- 看板6: 退款-提现全链路看板 (合并 SN对账 + 发起退款→实际到账时效分析) ----------
@@ -164,20 +164,20 @@ def reception_group(db: DBSession, _: CurrentUser, start: str | None = None, end
 @router.get("/refund-withdrawal/overview", response_model=R, summary="提现全链路看板-顶部KPI总览(三路对比:直退/钱包提现/手动退款+到账率)")
 def rw_overview(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
     key = f"rw:overview:{start}:{end}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_overview, db, start, end))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_withdrawal_overview, db, start, end))
 
 
 @router.get("/refund-withdrawal/time-distribution", response_model=R, summary="提现全链路看板-三路耗时分桶(用于柱状图)")
 def rw_time_dist(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
     key = f"rw:timedist:{start}:{end}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_time_distribution, db, start, end))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_withdrawal_time_distribution, db, start, end))
 
 
 @router.get("/refund-withdrawal/dimensions", response_model=R, summary="提现全链路看板-按处理人/原因/方式TopN聚合")
 def rw_dims(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None,
             topn: int = Query(20, ge=1, le=100)):
     key = f"rw:dims:{start}:{end}:{topn}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_dimensions, db, start, end, topn))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_withdrawal_dimensions, db, start, end, topn))
 
 
 @router.get("/refund-withdrawal/detail", response_model=R, summary="提现全链路看板-明细列表(支持排序/慢单筛选/涉诉/操作人/退款原因/设备维度筛选/分页)")
@@ -198,19 +198,19 @@ def rw_detail(db: DBSession, _: CurrentUser, start: str | None = None, end: str 
               active_age: str = Query("", max_length=10, pattern=r"^(le15|16-30|31-180|181-365|gt365|none)?$",
                                       description="#295 激活时长桶下钻(事件日−bms_orders最早激活日)")):
     key = f"rw:detail:{start}:{end}:{sort}:{page}:{page_size}:{int(slow_only)}:{path}:{comp}:{operator}:{reason}:{device_type}:{combo}:{merchant}:{active_start}:{active_end}:{active_age}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_detail, db, start, end, sort, page, page_size, slow_only, path, comp, operator, reason, device_type, combo, merchant, active_start, active_end, active_age))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_withdrawal_detail, db, start, end, sort, page, page_size, slow_only, path, comp, operator, reason, device_type, combo, merchant, active_start, active_end, active_age))
 
 
 @router.get("/refund-withdrawal/facets", response_model=R, summary="提现全链路看板-明细筛选候选项(操作人/退款原因)")
 def rw_facets(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
     key = f"rw:facets:{start}:{end}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 120), A.refund_withdrawal_facets, db, start, end))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_withdrawal_facets, db, start, end))
 
 
 @router.get("/refund-withdrawal/daily-split", response_model=R, summary="提现全链路看板-按实际出款日拆分三路(直退/钱包提现/手动退款)堆叠图")
 def rw_daily_split(db: DBSession, _: CurrentUser, start: str | None = None, end: str | None = None):
     key = f"rw:dailysplit:{start}:{end}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_daily_split, db, start, end))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_withdrawal_daily_split, db, start, end))
 
 
 @router.get("/refund-withdrawal/sleeping", response_model=R, summary="提现时效-钱包沉淀清单(转入未提现,分页)")
@@ -218,7 +218,7 @@ def rw_sleeping(db: DBSession, _: CurrentUser,
                 start: str | None = None, end: str | None = None,
                 page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500)):
     key = f"rw:sleeping:{start}:{end}:{page}:{page_size}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_withdrawal_sleeping, db, start, end, page=page, page_size=page_size))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_withdrawal_sleeping, db, start, end, page=page, page_size=page_size))
 
 
 # ---------- 看板7: 今日看板 (单日切面 + 实时节奏) ----------
@@ -236,7 +236,7 @@ def today_kpi_endpoint(db: DBSession, _: CurrentUser, date: str | None = None, s
                       specialty_id: int | None = Query(None, description="按专项ID筛选")):
     # 60s 缓存: 切换聚合粒度时同参数重复请求命中缓存, 避免重复 DB 聚合
     key = f"today:kpi:{date}:{start}:{end}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.today_kpi, db, date, start, end))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.today_kpi, db, date, start, end))
 
 
 @router.get("/today/hourly-trend", response_model=R, summary="今日看板-时间节奏(接待量柱+退款金额线,双Y轴,支持hour/day/week/month粒度)")
@@ -244,28 +244,28 @@ def today_hourly(db: DBSession, _: CurrentUser, date: str | None = None, start: 
                  trend_grain: str | None = Query(None, pattern="^(hour|day|week|month)$", description="聚合粒度: hour=按小时, day=按日, week=按周, month=按月; 不传则根据时间跨度自动选择"),
                  department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
     key = f"today:hourly:{date}:{start}:{end}:{trend_grain}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.today_hourly_trend, db, date, start, end, trend_grain=trend_grain))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.today_hourly_trend, db, date, start, end, trend_grain=trend_grain))
 
 
 @router.get("/today/reception", response_model=R, summary="今日看板-接待分项(分类饼+Top客服柱)")
 def today_reception(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
                     department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
     key = f"today:reception:{date}:{start}:{end}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.today_reception_breakdown, db, date, start, end))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.today_reception_breakdown, db, date, start, end))
 
 
 @router.get("/today/refund", response_model=R, summary="今日看板-退款分项(原因Top10+方式分布)")
 def today_refund(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
                  department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
     key = f"today:refund:{date}:{start}:{end}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.today_refund_breakdown, db, date, start, end))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.today_refund_breakdown, db, date, start, end))
 
 
 @router.get("/today/queue", response_model=R, summary="今日看板-处理队列(今日到期待办+进行中专项+今日异常)")
 def today_queue_endpoint(db: DBSession, _: CurrentUser, date: str | None = None, start: str | None = None, end: str | None = None,
                          department: str | None = Query(None), group_id: int | None = Query(None), specialty_id: int | None = Query(None)):
     key = f"today:queue:{date}:{start}:{end}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.today_queue, db, date, start, end))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.today_queue, db, date, start, end))
 
 
 @router.get("/today/staff", response_model=R, summary="今日看板-人均效率表(接待/退款/完工单合成权重)")
@@ -280,7 +280,7 @@ def today_staff(db: DBSession, _: CurrentUser, date: str | None = None,
                 specialty_id: int | None = Query(None, description="按专项ID筛选")):
     # staff 接口是最重的(含 DISTINCT ON 关联), 缓存 90s 进一步降低切换开销
     key = f"today:staff:{date}:{start}:{end}:{topn}:{int(qw_only)}:{aggregate_by}:{department}:{group_id}:{specialty_id}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 90), A.today_staff_efficiency, db, date, start, end, topn, qw_only, aggregate_by,
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.today_staff_efficiency, db, date, start, end, topn, qw_only, aggregate_by,
                                            department=department, group_id=group_id, specialty_id=specialty_id))
 
 
@@ -301,7 +301,7 @@ def today_refund_recovery_endpoint(
       · 成功率 = 挽留成功 / 分母
     """
     key = f"today:rr:{date}:{start}:{end}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_recovery_analysis, db, date, start, end))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_recovery_analysis, db, date, start, end))
 
 
 # ==============================================================
@@ -315,7 +315,7 @@ def refund_personnel_analysis_endpoint(
     specialty: str | None = Query(None), staff_type: str | None = Query(None),
 ):
     key = f"refund:pa:{start}:{end}:{department}:{group}:{specialty}:{staff_type}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_personnel_analysis, db, start, end,
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_personnel_analysis, db, start, end,
                                department=department, group=group, specialty=specialty, staff_type=staff_type))
 
 
@@ -327,7 +327,7 @@ def refund_person_devices_endpoint(
     result: str = Query("all", pattern="^(all|success|failed)$"),
 ):
     key = f"refund:pd:{operator}:{start}:{end}:{result}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_person_devices, db, operator, start, end, result=result))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_person_devices, db, operator, start, end, result=result))
 
 
 @router.get("/refund/personnel-trend", response_model=R, summary="退款看板-人员趋势")
@@ -338,7 +338,7 @@ def refund_personnel_trend_endpoint(
     grain: str = Query("day", pattern="^(day|week)$"),
 ):
     key = f"refund:pt:{start}:{end}:{operators}:{grain}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 120), A.refund_personnel_trend, db, start, end, operators=operators, grain=grain))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_personnel_trend, db, start, end, operators=operators, grain=grain))
 
 
 @router.get("/refund/person-reason-matrix", response_model=R, summary="退款看板-人员×原因矩阵")
@@ -348,7 +348,7 @@ def refund_person_reason_matrix_endpoint(
     top: int = Query(15, ge=1, le=50),
 ):
     key = f"refund:prm:{start}:{end}:{top}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 120), A.refund_person_reason_matrix, db, start, end, top=top))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_person_reason_matrix, db, start, end, top=top))
 
 
 @router.get("/refund/device-analysis", response_model=R, summary="退款看板-设备分析")
@@ -360,7 +360,7 @@ def refund_device_analysis_endpoint(
     limit: int = Query(20, ge=1, le=100),
 ):
     key = f"refund:da:{start}:{end}:{reason}:{amount_min}:{amount_max}:{reception_count_min}:{limit}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 120), A.refund_device_analysis, db, start, end,
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_device_analysis, db, start, end,
                                reason=reason, amount_min=amount_min, amount_max=amount_max,
                                reception_count_min=reception_count_min, limit=limit))
 
@@ -372,7 +372,7 @@ def refund_device_detail_endpoint(
     start: str | None = Query(None), end: str | None = Query(None),
 ):
     key = f"refund:dd:{device_sn}:{start}:{end}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_device_detail, db, device_sn, start, end))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_device_detail, db, device_sn, start, end))
 
 
 @router.get("/refund/type-trend", response_model=R, summary="退款看板-类型趋势")
@@ -383,7 +383,7 @@ def refund_type_trend_endpoint(
     dimension: str = Query("reason", pattern="^(reason|staff_type)$"),
 ):
     key = f"refund:tt:{start}:{end}:{grain}:{dimension}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 120), A.refund_type_trend, db, start, end, grain=grain, dimension=dimension))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_type_trend, db, start, end, grain=grain, dimension=dimension))
 
 
 @router.get("/refund/problem-type-detail", response_model=R, summary="退款看板-problem_type细分Top10")
@@ -393,7 +393,7 @@ def refund_problem_type_detail_endpoint(
     top: int = Query(10, ge=1, le=30),
 ):
     key = f"refund:ptd:{start}:{end}:{top}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 120), A.refund_problem_type_detail, db, start, end, top=top))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_problem_type_detail, db, start, end, top=top))
 
 
 @router.get("/refund/group-comparison", response_model=R, summary="退款看板-组间对比")
@@ -402,7 +402,7 @@ def refund_group_comparison_endpoint(
     start: str | None = Query(None), end: str | None = Query(None),
 ):
     key = f"refund:gc:{start}:{end}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 120), A.refund_group_comparison, db, start, end))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_group_comparison, db, start, end))
 
 
 @router.get("/refund/decision-overview", response_model=R, summary="退款看板-决策概览(资金全景/钱包水位/涉诉归因/原因人员)")
@@ -412,7 +412,7 @@ def refund_decision_overview_endpoint(
     grain: str = Query("day", pattern="^(day|week)$"),
 ):
     key = f"refund:do:{start}:{end}:{grain}"
-    return R(data=cached_call(key, cache_ttl_for(start, end, 60), A.refund_decision_overview, db, start, end, grain=grain))
+    return R(data=cached_call(key, cache_ttl_by_key(key, start, end), A.refund_decision_overview, db, start, end, grain=grain))
 
 
 @router.get("/refund/export", summary="退款明细导出Excel(明细台账全量 + 五路成功口径汇总)")

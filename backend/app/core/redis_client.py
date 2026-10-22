@@ -35,6 +35,11 @@ TZ_CN = timezone(timedelta(hours=8))
 
 # 日期感知 TTL(秒): 含今天窗口保持短 TTL; 纯历史窗口拉长到 24h(数据已定型)
 HISTORY_TTL_SECONDS = 24 * 3600
+# 查询成本分层 TTL (2026-10-22 #341): analytics 接口 TTL 不再统一 60s,
+# 而是按 key 前缀对应的查询成本分层, 让慢查询获得更长 TTL 降低未命中概率。
+TTL_FAST = 60       # < 500ms: 实时运营域 (today/op/cat/operator/summary)
+TTL_MEDIUM = 180    # 1-3s: 运营汇总域 (refund 深度 / reception percapita / cash:wallet)
+TTL_SLOW = 600      # > 3s: 对账域 (rw 提现全链路全部 7 个接口)
 # 同步后失效保留窗口(天): 仅失效「含今天 + 近 N 天」的缓存, 更早的历史缓存长期驻留
 # (历史 TTL 已拉到 24h, 同步不涉及历史窗口, 无需清掉)
 SYNC_INVALIDATE_RECENT_DAYS = 7
@@ -240,6 +245,44 @@ def cache_ttl_for(start: str | None, end: str | None, base_ttl: int) -> int:
     if is_historical_window(start, end):
         return HISTORY_TTL_SECONDS
     return base_ttl
+
+
+# ── #341 查询成本分层 TTL 映射表 ─────────────────────────────────────
+# key 形态匹配 → base_ttl
+# 按 10-22 生产实测 (955 条 nginx rt):
+#   rw:* 全部 7 接口 > 3s → TTL_SLOW(600)
+#   refund:* 深度分析 8 接口 / reception:percapita / reception:catsum /
+#   cash:wallet 1-3s → TTL_MEDIUM(180)
+#   today:* / op:* / cat:* / operator:* / summary* 等 < 500ms → TTL_FAST(60)
+_TTL_KEY_PATTERNS: list[tuple[str, int]] = [
+    # 匹配优先级从上到下, 第一个命中即返回
+    ("rw:", TTL_SLOW),
+    ("refund:", TTL_MEDIUM),
+    ("reception:percapita", TTL_MEDIUM),
+    ("reception:catsum", TTL_MEDIUM),
+    ("cash:wallet", TTL_MEDIUM),
+    # 其余全部走 TTL_FAST
+]
+
+
+def cache_ttl_by_key(key: str, start: str | None, end: str | None) -> int:
+    """#341 按 key 前缀 + 查询历史窗口决定 TTL。
+
+    取代 analytics.py 里散点硬编码的 cache_ttl_for(start, end, 60/120)，
+    统一由 key 前缀映射查询成本分层，避免漏改或不一致。
+
+    用法: analytics.py 里
+      - 原来: cache_ttl_for(start, end, 60)   # 或 120
+      - 现在: cache_ttl_by_key(key, start, end)
+        （key 先构造出来再传入——先 TTL 后 key 的旧调用顺序已无法表达 key 相关逻辑）
+    """
+    # 历史窗口: 数据已定型, 无论什么域都拉到 24h
+    if is_historical_window(start, end):
+        return HISTORY_TTL_SECONDS
+    for prefix, base_ttl in _TTL_KEY_PATTERNS:
+        if key.startswith(prefix):
+            return base_ttl
+    return TTL_FAST
 
 
 def cache_invalidate_recent_days(
