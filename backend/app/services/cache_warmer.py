@@ -579,9 +579,9 @@ def warm_idle() -> None:
         return  # 夜间无人访问, 省计算
 
     # 接待看板默认近 90 天(与 ReceptionDashboard.vue rangeMode='90' 对齐);
-    # group-detail 单独用近 7 天(与前端 :710 约定对齐)
-    rec_s, rec_e = _days_ago_str(89), _today_str()
-    grp_s, grp_e = _days_ago_str(6), _today_str()
+    # #342: 前端是 `dayjs().subtract(90,'day') ~ today`, 此前用 89 天 → key 差 1 天永不命中
+    rec_s, rec_e = _days_ago_str(90), _today_str()
+    grp_s, grp_e = _days_ago_str(6), _today_str()   # group-detail 近 7 天(前端 subtract(6))
     # 退款深度看板默认近 30 天(月报场景, 与 _warm_reports 同窗口)
     rfd_s, rfd_e = _days_ago_str(29), _today_str()
 
