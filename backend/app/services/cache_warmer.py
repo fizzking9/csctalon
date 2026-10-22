@@ -317,9 +317,10 @@ def _warm_reports(db, *, force: bool = False) -> int:
     from app.api.v1.complaints import complaint_analysis, complaint_subject_analysis
     from app.services import analytics as A
 
-    s = _days_ago_str(29)   # 近30天 = 月报窗口
+    # #342: 三个页面(Operation/Cash/Operator)默认 `dayjs().subtract(30,'day')` ~ 今天,
+    # 此前用 _days_ago_str(29)(差 1 天) → 预热 key 永不命中, 现对齐到 subtract(30)。
+    s = _days_ago_str(30)   # 近30天窗口 = 前端默认(含端点共 31 天)
     e = _today_str()
-    s30 = _days_ago_str(30)  # 投诉决策看板默认窗口: 前端 dayjs().subtract(30,'day') ~ 今天
     sd, ed = _dt(s), _dt(e)
     specs = [
         # 静态(无窗口, 任意查看都命中同一 key)
@@ -337,16 +338,17 @@ def _warm_reports(db, *, force: bool = False) -> int:
         # 近30天窗口(月报常用)
         ("op:trend",        f"op:trend:{s}:{e}",          A.operation_trend,        (db, sd, ed), {}),
         ("cash:trend",      f"cash:trend:{s}:{e}",         A.cash_out_trend,         (db, sd, ed), {}),
-        ("cash:wallet",     f"cash:wallet:{s}:{e}",        A.wallet_vs_withdraw,     (db, sd, ed), {}),
+        # #342: cash:wallet 两个调用方(RefundWithdrawal/Cash)都用 T 格式日期, 且
+        # 前者由 _warm_rw_deep 用同窗口预热 → 这里不再预热 plain 日期形态(永不命中)。
         ("operator:ticket", f"operator:ticket:{s}:{e}",    A.operator_ticket_stats,  (db, sd, ed), {}),
         ("operator:audit",  f"operator:audit:{s}:{e}",    A.operator_audit_stats,   (db, sd, ed), {}),
         ("operator:refund", f"operator:refund:{s}:{e}",   A.operator_refund_stats,  (db, sd, ed), {}),
         # 投诉决策/被投诉主体看板(ComplaintAnalysis.vue 默认近30天: subtract(30)~today)
-        ("complaint:analysis", f"complaint:analysis:{s30}:{e}",
-         complaint_analysis.__wrapped__, (db, None), {"start": s30, "end": e}),
-        ("complaint:subject",  f"complaint:subject:{s30}:{e}:all:total:0:none",
+        ("complaint:analysis", f"complaint:analysis:{s}:{e}",
+         complaint_analysis.__wrapped__, (db, None), {"start": s, "end": e}),
+        ("complaint:subject",  f"complaint:subject:{s}:{e}:all:total:0:none",
          complaint_subject_analysis.__wrapped__, (db, None),
-         {"start": s30, "end": e,
+         {"start": s, "end": e,
           "source_type": "all", "sort_by": "total", "top_n": 0, "compare": "none"}),
     ]
     return sum(
@@ -461,35 +463,44 @@ def _warm_refund_deep(db, start: str, end: str, label: str, *,
 
 def _warm_rw_deep(db, start: str, end: str, label: str, *,
                  force: bool = False) -> int:
-    """#341 预热提现全链路看板 7 个核心接口 (analytics.refund_withdrawal_*)。
+    """#341 预热提现全链路看板核心接口 (analytics.refund_withdrawal_*)。
 
     返回成功预热条数。key 与 analytics.py 路由层逐字符对齐(缓存规范 §5.2 铁律)。
-    覆盖 RefundWithdrawalDashboard 默认近 30 天窗口; detail/sleeping 只预热第一页,
-    其他分页/排序/筛选组合由路由层按需回填, 不在预热范围(避免空间浪费)。
+
+    ⚠️ #342 教训：**必须按前端实际请求形态生成 key**，否则预热写入的条目永不被命中
+    （生产曾连续空转：预热写 plain 日期，而 RefundWithdrawal.vue 的 `rangeParams()`
+    固定拼 `T00:00:00` / `T23:59:59`，两者 key 不同 → 每 2 分钟白算 4~35s）：
+      · overview / daily-split / sleeping / cash:wallet → 带时间后缀的窗口
+      · detail → `sort=d1_desc` + 第一页 + 8 个空筛选位（DecisionOverview.vue 默认值）
+      · facets → DecisionOverview 用 plain 日期请求（无时间后缀）
+      · time-distribution / dimensions → 前端零调用（仅 api 定义无使用），不预热
+    其他分页/排序/筛选组合由路由层按需回填，不在预热范围（避免空间浪费）。
     """
     from app.services import analytics as A
 
+    st = f"{start}T00:00:00"
+    et = f"{end}T23:59:59"
     specs = [
-        ("rw:overview", f"rw:overview:{start}:{end}",
-         A.refund_withdrawal_overview, (db, start, end), {}),
-        ("rw:timedist", f"rw:timedist:{start}:{end}",
-         A.refund_withdrawal_time_distribution, (db, start, end), {}),
-        ("rw:dims", f"rw:dims:{start}:{end}:20",
-         A.refund_withdrawal_dimensions, (db, start, end, 20), {}),
+        ("rw:overview", f"rw:overview:{st}:{et}",
+         A.refund_withdrawal_overview, (db, st, et), {}),
+        ("rw:dailysplit", f"rw:dailysplit:{st}:{et}",
+         A.refund_withdrawal_daily_split, (db, st, et), {}),
+        ("rw:sleeping", f"rw:sleeping:{st}:{et}:1:50",
+         A.refund_withdrawal_sleeping, (db, st, et),
+         {"page": 1, "page_size": 50}),
+        # 同一页面 loadAll 并发请求, 窗口与 rw 域一致(T 格式), 一并预热
+        ("cash:wallet", f"cash:wallet:{st}:{et}",
+         A.wallet_vs_withdraw, (db, st, et), {}),
         ("rw:detail",
-         f"rw:detail:{start}:{end}:days_desc:1:50:0:ALL:all:::None:None:None:None:None:le15",
-         A.refund_withdrawal_detail, (db, start, end),
-         {"sort": "days_desc", "page": 1, "page_size": 50, "slow_only": False,
+         f"rw:detail:{st}:{et}:d1_desc:1:50:0:ALL:all::::::::",
+         A.refund_withdrawal_detail, (db, st, et),
+         {"sort": "d1_desc", "page": 1, "page_size": 50, "slow_only": False,
           "path": "ALL", "comp": "all", "operator": "", "reason": "",
-          "device_type": None, "combo": None, "merchant": None,
-          "active_start": None, "active_end": None, "active_age": "le15"}),
+          "device_type": "", "combo": "", "merchant": "",
+          "active_start": "", "active_end": "", "active_age": ""}),
+        # facets 由 DecisionOverview.vue 以 plain 日期(YYYY-MM-DD)请求
         ("rw:facets", f"rw:facets:{start}:{end}",
          A.refund_withdrawal_facets, (db, start, end), {}),
-        ("rw:dailysplit", f"rw:dailysplit:{start}:{end}",
-         A.refund_withdrawal_daily_split, (db, start, end), {}),
-        ("rw:sleeping", f"rw:sleeping:{start}:{end}:1:50",
-         A.refund_withdrawal_sleeping, (db, start, end),
-         {"page": 1, "page_size": 50}),
     ]
     return sum(
         _warm_one(key, fn, args, kw, f"{label}:{name}", force=force)
@@ -538,13 +549,13 @@ def warm_after_sync() -> None:
           (rw 域冷加载 5-13s, 不刷新的话下次访问必然白屏)。
     """
     t = _today_str()
-    s30 = _days_ago_str(29)
+    s29 = _days_ago_str(29)   # 提现全链路默认窗口 = 前端 last30(today-29 ~ today), 30 个自然日
 
     def _do(db):
         _warm_today_view(db, force=True)
         _warm_reports(db, force=True)
         # #341: rw 域同步后强制刷新(近30天窗口, 与月报同口径)
-        _warm_rw_deep(db, s30, t, "同步后", force=True)
+        _warm_rw_deep(db, s29, t, "同步后", force=True)
     _run("同步后", _do)
 
 
@@ -704,10 +715,12 @@ def rebuild_cache(scope: str, *, invalidate_only: bool = False) -> dict:
     try:
         if not invalidate_only:
             if scope == "all":
+                # #342: 失效列表含 rw:*, 但此前 never 重算 → 重建后 rw 必然冷加载 5~9s
                 warmed = (
                     _warm_today_view(db, force=True)
                     + _warm_week_view(db, force=True)
                     + _warm_reports(db, force=True)
+                    + _warm_rw_deep(db, _days_ago_str(29), _today_str(), "重建", force=True)
                 )
             elif warm_fn is not None:
                 warmed = warm_fn(db, force=True)

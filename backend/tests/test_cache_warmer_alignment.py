@@ -84,7 +84,35 @@ def test_subject_warmer_key_shape_matches_route_cache_key():
     """
     src = inspect.getsource(W)
     assert "complaint:subject:{start}:{end}:all:total:0:none" in src
-    assert "complaint:subject:{s30}:{e}:all:total:0:none" in src
+    # #342: 月报窗口变量由 s30 统一为 s（两者等价, 但仍须含 6 段）
+    assert "complaint:subject:{s}:{e}:all:total:0:none" in src
+
+
+def test_rw_warmer_keys_follow_frontend_request_shape(monkeypatch):
+    """#342: rw 预热 key 必须与前端**实际请求**的形态一致，否则预热永不命中。
+
+    生产事故（#341 上线后复核发现）: 预热写 plain 日期 `rw:overview:2026-09-23:2026-10-22`，
+    而 RefundWithdrawal.vue 的 `rangeParams()` 固定拼 `T00:00:00`/`T23:59:59` →
+    key 不同 → 每 2 分钟白算一轮（单轮实测 4~35s），Redis 里 0 命中。
+    """
+    captured: list[str] = []
+    monkeypatch.setattr(W, "_warm_one", lambda key, *a, **kw: captured.append(key) or 0)
+
+    W._warm_rw_deep(None, "2026-09-23", "2026-10-22", "单测")
+
+    st, et = "2026-09-23T00:00:00", "2026-10-22T23:59:59"
+    assert f"rw:overview:{st}:{et}" in captured
+    assert f"rw:dailysplit:{st}:{et}" in captured
+    assert f"rw:sleeping:{st}:{et}:1:50" in captured
+    assert f"cash:wallet:{st}:{et}" in captured
+    # detail 用 DecisionOverview.vue 的真实默认参数(d1_desc + 8 个空筛选位)
+    assert f"rw:detail:{st}:{et}:d1_desc:1:50:0:ALL:all::::::::" in captured
+    # facets 由 DecisionOverview 以 plain 日期请求
+    assert "rw:facets:2026-09-23:2026-10-22" in captured
+    # 前端零调用的接口不预热（time-distribution / dimensions）
+    assert not any(k.startswith(("rw:timedist", "rw:dims")) for k in captured), (
+        f"前端零调用接口不应预热: {captured}"
+    )
 
 
 def test_staff_buckets_are_internally_consistent():
