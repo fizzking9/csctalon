@@ -95,23 +95,34 @@ def test_rw_warmer_keys_follow_frontend_request_shape(monkeypatch):
     而 RefundWithdrawal.vue 的 `rangeParams()` 固定拼 `T00:00:00`/`T23:59:59` →
     key 不同 → 每 2 分钟白算一轮（单轮实测 4~35s），Redis 里 0 命中。
     """
-    captured: list[str] = []
-    monkeypatch.setattr(W, "_warm_one", lambda key, *a, **kw: captured.append(key) or 0)
+    captured: list[tuple[str, tuple]] = []
+    monkeypatch.setattr(
+        W, "_warm_one",
+        lambda key, fn, args, kw, name, **k: captured.append((key, args)) or 0,
+    )
 
     W._warm_rw_deep(None, "2026-09-23", "2026-10-22", "单测")
+    keys = [k for k, _ in captured]
 
     st, et = "2026-09-23T00:00:00", "2026-10-22T23:59:59"
-    assert f"rw:overview:{st}:{et}" in captured
-    assert f"rw:dailysplit:{st}:{et}" in captured
-    assert f"rw:sleeping:{st}:{et}:1:50" in captured
-    assert f"cash:wallet:{st}:{et}" in captured
+    assert f"rw:overview:{st}:{et}" in keys
+    assert f"rw:dailysplit:{st}:{et}" in keys
+    assert f"rw:sleeping:{st}:{et}:1:50" in keys
+    assert f"cash:wallet:{st}:{et}" in keys
     # detail 用 DecisionOverview.vue 的真实默认参数(d1_desc + 8 个空筛选位)
-    assert f"rw:detail:{st}:{et}:d1_desc:1:50:0:ALL:all::::::::" in captured
+    assert f"rw:detail:{st}:{et}:d1_desc:1:50:0:ALL:all::::::::" in keys
     # facets 由 DecisionOverview 以 plain 日期请求
-    assert "rw:facets:2026-09-23:2026-10-22" in captured
+    assert "rw:facets:2026-09-23:2026-10-22" in keys
     # 前端零调用的接口不预热（time-distribution / dimensions）
-    assert not any(k.startswith(("rw:timedist", "rw:dims")) for k in captured), (
-        f"前端零调用接口不应预热: {captured}"
+    assert not any(k.startswith(("rw:timedist", "rw:dims")) for k in keys), (
+        f"前端零调用接口不应预热: {keys}"
+    )
+    # cash:wallet 的 service 收 datetime（路由层用 _parse_dt），传 str 会 AttributeError
+    from datetime import datetime
+
+    wallet_args = dict(captured)[f"cash:wallet:{st}:{et}"]
+    assert isinstance(wallet_args[1], datetime) and isinstance(wallet_args[2], datetime), (
+        f"cash:wallet 预热必须传 datetime, 实际 {wallet_args!r}"
     )
 
 

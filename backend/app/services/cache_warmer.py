@@ -489,8 +489,9 @@ def _warm_rw_deep(db, start: str, end: str, label: str, *,
          A.refund_withdrawal_sleeping, (db, st, et),
          {"page": 1, "page_size": 50}),
         # 同一页面 loadAll 并发请求, 窗口与 rw 域一致(T 格式), 一并预热
+        # ⚠️ wallet_vs_withdraw 的签名收 datetime(路由层用 _parse_dt 转换), 传字符串会 AttributeError
         ("cash:wallet", f"cash:wallet:{st}:{et}",
-         A.wallet_vs_withdraw, (db, st, et), {}),
+         A.wallet_vs_withdraw, (db, _dt(st), _dt(et)), {}),
         ("rw:detail",
          f"rw:detail:{st}:{et}:d1_desc:1:50:0:ALL:all::::::::",
          A.refund_withdrawal_detail, (db, st, et),
