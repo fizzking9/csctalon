@@ -75,10 +75,20 @@ pnpm-debug.log*
 .env.local
 .env.*.local
 backend/.env
+# 模式专属配置: backend/.env.dev.example 的用法说明写的是 `cp 成 .env.dev`,
+# 但 .env.dev / .env.prod 原先**没被忽略** → 照文档操作会产生一个「可提交」的
+# 口令文件, 与 AGENTS.md 铁律 14(C5 密钥凭证严禁入库)直接冲突。
+# 注: 此处不匹配 .env.dev.example(模板必须入库), 因为 gitignore 的 .env.dev
+# 只匹配文件名恰为 .env.dev 的路径。
+.env.dev
+.env.prod
+backend/.env.dev
+backend/.env.prod
 # 保留模板文件
 !.env.example
 !backend/.env.example
 !web/.env.example
+!backend/.env.dev.example
 
 # ---------- 运行时数据 ----------
 # 上传的业务文件(运行时挂载,仅保留目录占位)

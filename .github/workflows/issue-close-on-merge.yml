@@ -1,0 +1,111 @@
+# GitHub Actions: 合并后工单状态自动流转 (G3)
+#
+# 迁移自 .gitea/workflows/issue-close-on-merge.yml; 对应锁定设计
+# docs/arch/A-20260903-001-issue-automation-gates.md §2.3。规则未变:
+#   - PR 合并(merged)后, 从标题/描述解析 #<issue号>
+#   - incident 事故单不自动关闭(必须人工结案)
+#   - 其他类型: 若无剩余未关闭子工单则置 closed, 否则仅评论
+# 实现差异: Gitea REST → GitHub REST(gh CLI + 内置 GITHUB_TOKEN)。
+#
+# ⚠️ GitHub 特有防护: issue 与 PR **共用同一编号序列**。若 PR 里引用的 #5 其实是一个
+#    PR 而不是工单, 直接关闭会把那个 PR 关掉。故先判定 payload 里是否含 pull_request,
+#    命中即跳过(原 Gitea 写法没有这个风险面, 这里补上)。
+
+name: issue-close-on-merge
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  close-issue:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      # 需要仓库内的 scripts/ci_open_referenced_issues.py(子工单判定)
+      - uses: actions/checkout@v4
+
+      - name: 解析工单号并流转状态
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HTML_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          title="${PR_TITLE:-}"
+          body="${PR_BODY:-}"
+          num="${PR_NUMBER:-}"
+          html="${PR_HTML_URL:-}"
+          api="${REPO}"
+
+          # 从标题+描述提取所有 #数字, 取第一个作为主工单
+          issue_no=$(printf '%s\n%s\n' "$title" "$body" | grep -Eo '#[0-9]+' | head -1 | tr -d '#') || true
+          if [ -z "${issue_no:-}" ]; then
+            echo "⚠️ 未解析到工单号, 跳过状态流转"
+            exit 0
+          fi
+          echo "== 关联工单 #${issue_no} =="
+
+          payload=$(mktemp)
+          # 引用号不存在/无权限时不要把 job 弄红(与迁移前 `curl ... || true` 的宽容行为一致)
+          if ! gh api "repos/${api}/issues/${issue_no}" > "$payload" 2>/dev/null; then
+            echo "⚠️ 工单 #${issue_no} 读取失败(可能不存在), 跳过状态流转"
+            exit 0
+          fi
+
+          # 防护: 命中的可能是一个 PR(编号共用), 不关闭
+          is_pr=$(python3 -c "import json,sys; print('yes' if 'pull_request' in json.load(open(sys.argv[1])) else 'no')" "$payload")
+          if [ "$is_pr" = "yes" ]; then
+            echo "⚠️ #${issue_no} 是 PR 而非工单, 跳过状态流转"
+            exit 0
+          fi
+
+          labels=$(python3 -c "import json,sys; print(','.join(x.get('name','') for x in json.load(open(sys.argv[1])).get('labels',[])))" "$payload")
+          state=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('state',''))" "$payload")
+          echo "labels = $labels"
+          echo "current state = $state"
+
+          comment="✅ 已由 PR #${num} 合并交付：${html}"
+
+          if echo "$labels" | grep -q 'incident'; then
+            echo "⏸ incident 事故单, 不自动关闭(需人工结案), 仅追加评论"
+            gh issue comment "${issue_no}" --repo "${api}" --body "$comment"
+            exit 0
+          fi
+
+          # 若已关闭, 只追加评论
+          if [ "$state" = "closed" ]; then
+            echo "工单已关闭, 仅追加评论"
+            gh issue comment "${issue_no}" --repo "${api}" --body "$comment"
+            exit 0
+          fi
+
+          # ── O-11 (R-P2-15): A-20260903-001 §2.3 子工单判定 ──
+          # 父子工单在本仓库以「父单正文引用 #N」关联(见 docs/design/20260905-BMS工单草稿.md)。
+          # 父单正文引用的工单中仍有 open 者 → 仅评论不关闭; 全部 closed → 正常关闭。
+          open_children=$(python3 scripts/ci_open_referenced_issues.py \
+            --api "https://api.github.com/repos/${api}" \
+            --exclude "${issue_no}" < "$payload" || true)
+          if [ -n "${open_children:-}" ]; then
+            echo "⏸ 存在未关闭子工单/关联工单(#${open_children}), 仅评论不关闭"
+            formatted=$(echo "$open_children" | sed 's/,/, #/g; s/^/#/')
+            gh issue comment "${issue_no}" --repo "${api}" \
+              --body "${comment}（仍有未关闭关联工单：${formatted}，暂不自动关闭）"
+            exit 0
+          fi
+
+          # 关闭工单 + 评论
+          echo "✅ 关闭工单 #${issue_no}"
+          gh issue comment "${issue_no}" --repo "${api}" --body "$comment"
+          gh issue close "${issue_no}" --repo "${api}"
+          echo "done"

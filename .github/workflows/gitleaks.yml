@@ -1,0 +1,36 @@
+# GitHub Actions: gitleaks 凭证扫描
+#
+# 迁移自 .gitea/workflows/gitleaks.yml。原写法「纯 docker + 手工 clone 内网地址」只是
+# 为了绕过内网 runner 拉不到 action 的限制, 现在改用 actions/checkout + 官方 docker 镜像。
+#
+# 本地已有 pre-commit 钩子(仅扫暂存区, 见 scripts/install-gitleaks-hook.sh),
+# 本 CI 是最后一道防线: 扫**全量历史**。
+#
+# ⚠️ fetch-depth: 0 不能省 —— gitleaks detect 依赖完整 git 历史; 浅克隆会漏扫老提交。
+# ⚠️ 规则与白名单在 .gitleaks.toml(单一来源), 此处不重复定义。
+
+name: gitleaks
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks scan (docker)
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" -w /repo \
+            zricethezav/gitleaks:latest \
+            detect --source . --config .gitleaks.toml --redact --no-banner

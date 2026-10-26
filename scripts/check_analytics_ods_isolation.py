@@ -26,6 +26,13 @@ import re
 import sys
 from pathlib import Path
 
+# 控制台编码兜底(2026-10-26): 本脚本输出含 '↔' 等非 ASCII 字符, 而中文 Windows 的
+# 默认 stdout 编码是 cp936(GBK) → print 直接抛 UnicodeEncodeError。结果是同一个门禁
+# 「本地崩、CI 过」(Linux 是 UTF-8) —— 这种本地与 CI 不同最容易误导人。
+# 仅在支持 reconfigure 且当前不是 UTF-8 时切换, Linux/CI 行为逐字不变。
+if hasattr(sys.stdout, "reconfigure") and (sys.stdout.encoding or "").lower() not in ("utf-8", "utf_8"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = ROOT / "backend" / "app" / "models"
 ANALYTICS_DIR = ROOT / "backend" / "app" / "services" / "analytics"

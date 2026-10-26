@@ -71,11 +71,31 @@ curl localhost:8000/health # 后端健康检查
 
 ### 本地开发
 
+**Windows（推荐）：一条命令起全栈**
+
+```powershell
+.\scripts\dev.ps1            # db/redis(docker) + 后端(8000) + 前端(5173)
+.\scripts\dev.ps1 -Restart   # 先停再起
+.\scripts\dev.ps1 -Logs      # 跟踪 logs/dev/*.log
+.\scripts\dev.ps1 -Stop      # 停后端/前端；加 -StopInfra 连 db/redis 一起停
+```
+
+首次运行会自动：从 `.env.dev.example` 生成 `backend/.env`、再由它派生根 `.env`
+（供 compose 插值用，避免库名/口令两处漂移）、建 `backend/.venv` 装依赖、
+`alembic upgrade head`、装前端依赖。日志落 `logs/dev/`（已 gitignore）。
+
+**手动（Linux/macOS 或需分窗口看日志）**
+
 ```bash
-# 后端
+# 基础设施：只起 db/redis，后端前端跑本机进程才有热重载
+docker compose up -d db redis
+
+# 后端（依赖单一来源 = pyproject.toml，无 requirements.txt，见 #183）
 cd backend
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[dev]"
+cp .env.dev.example .env       # 已 gitignore；dev 模式回退加载 .env
+python -m alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 
 # 前端
@@ -144,7 +164,7 @@ csctalon/
 ├── .env.example                   # 环境变量模板
 ├── AGENTS.md                      # AI 全局行为约束(Copilot 自动加载)
 ├── .github/agents/                # 三阶段自定义 Agent(架构师/开发者/审查员)
-├── .gitea/workflows/              # CI(gitleaks + backend-test)
+├── .github/workflows/             # CI(GitHub Actions: gitleaks + backend-test)
 ├── docker-compose.yml             # 4 个服务编排
 └── README.md                      # 本文件
 ```
@@ -161,7 +181,7 @@ csctalon/
 | 规范 | `docs/standards/` | 错误码 / 审查清单 / 任务派工单模板 / 工单驱动工作流 |
 | 文档组织 | `docs/README.md` | docs 目录职责 / 文件命名规范 / 运维手册分发 |
 | 测试 | `backend/tests/` | pytest 基建, 独立 `csctalon_test` 库, 隔离开发/生产 |
-| CI | `.gitea/workflows/` | gitleaks 凭证扫描 + backend-test(**提交信息工单号校验** · ruff `app/`+`tests/` · **空库 alembic upgrade head** · pytest，强制) |
+| CI | `.github/workflows/` | gitleaks 凭证扫描 + backend-test(**提交信息工单号校验** · ruff `app/`+`tests/` · **空库 alembic upgrade head** · pytest，强制) |
 
 > **提交钩子（建议安装）**：`bash scripts/install-gitleaks-hook.sh`（pre-commit 扫凭证）+
 > `bash scripts/install-commit-msg-hook.sh`（commit-msg 强制提交信息带 `#工单号`，#216）。

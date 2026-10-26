@@ -20,11 +20,13 @@ paths = [
     '''^\.gitleaks\.toml$''',
     '''package-lock\.json$''',
     '''yarn\.lock$''',
-    # CI 工作流: 仅 test.yml 含 postgres service 测试口令(非业务凭证, 与 config.py
-    # 默认一致), 只用于 CI 隔离库, 生产走 .env 注入; 属测试基础设施豁免, 不违反 OPS-11。
+    # CI 工作流: 仅 test.yml 含 postgres service 测试口令(非业务凭证, 与 config 默认一致),
+    # 只用于 CI 隔离库, 生产走 .env 注入; 属测试基础设施豁免, 不违反 OPS-11。
     # #211 收窄: 不再用 .*\.yml 整体放行整个 workflows 目录 —— 其余 workflow 及未来
     # 新增工作流一律纳入扫描, 防凭证借 CI 文件绕过。
-    '''^\.gitea/workflows/test\.yml$''',
+    # 2026-10-26: CI 由 .gitea/workflows 迁至 .github/workflows(GitHub Actions),
+    # 故白名单路径随文件走, 否则这条豁免就失效、门禁会误报测试库口令。
+    '''^\.github/workflows/test\.yml$''',
     # #211 收窄: 不再整体放行 backend/tests(原放行会让真实密钥借测试文件绕过**所有**规则)。
     # 测试夹具天然高发的「假手机号 / 假强密码串」改在对应**规则级** allowlist 精确豁免
     # (见文末 hardcoded-phone-number / hardcoded-strong-password 两条规则);

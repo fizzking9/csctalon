@@ -1,0 +1,241 @@
+# GitHub Actions: 后端 lint + 测试 + 空库迁移门禁
+#
+# 迁移自 .gitea/workflows/test.yml。原文件是「纯 docker」写法, 原因是当时的 Gitea
+# runner 在内网、连不上 github.com, `uses:` 类 action 无法下载(会卡死在 Set up job)。
+# 现在仓库托管在 GitHub, 那几个限制不复存在, 故改回**官方 action + service 容器**写法:
+#   - 检出:   actions/checkout (不再手工 clone 内网地址)
+#   - Python: actions/setup-python 3.11 (对齐 backend/Dockerfile 的 python:3.11-slim)
+#   - 依赖缓存: setup-python 的 pip cache (原 docker 方案每次都全量 pip install)
+#   - 数据库: services.postgres:15 (原为 docker run 两个独立容器)
+#
+# 门禁清单(与迁移前逐项等价, 少一项就是放水):
+#   1) commit-message-lint     提交信息必须携带 #工单号 (#216)
+#   2) analytics-ods-isolation analytics 层禁止直读 ods 源表 (#319 契约 C2, 棘轮门禁)
+#   3) backend-lint-test       ruff → 空库 alembic upgrade head (#211) → 单 head → pytest
+#   4) frontend-lint-test      npm ci → eslint → vitest
+#
+# ⚠️ 空库迁移门禁(#211)不能省: pytest 走的是 create_all + stamp head, 会掩盖
+#    「某迁移 DROP 了链上从未 CREATE 的对象 / 链断裂 / 多 head」。只有从基线重放整条链
+#    才能发现。该门禁在 2026-10-26 的真实价值见下: 它当时确实是红的。
+
+name: backend-test
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master]
+
+# 默认最小权限; 需要写 issue 的 job 单独提权(见本文件末尾的回写步骤与 issue-*.yml)
+permissions:
+  contents: read
+
+jobs:
+  # #216/R-P2-9: 提交信息必须携带 #工单号(与本地 commit-msg 钩子共用
+  # scripts/check-commit-issue.sh, 单一事实来源)。纯 git 门禁, 不装任何语言运行时。
+  # 只校验「本次新增」提交, 不追溯历史 —— 重建仓库时历史提交可以没有工单号。
+  commit-message-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 必须全历史: 后面要 rev-list before..after
+          fetch-depth: 0
+
+      - name: 校验新增提交信息携带工单号 (#216)
+        shell: bash
+        run: |
+          set -euo pipefail
+          zero=0000000000000000000000000000000000000000
+          event="${{ github.event_name }}"
+          before="${{ github.event.before }}"
+          after="${{ github.event.after }}"
+          if [ -z "$after" ]; then after="${{ github.sha }}"; fi
+
+          if [ "$event" = "pull_request" ]; then
+            before="${{ github.event.pull_request.base.sha }}"
+            after="${{ github.event.pull_request.head.sha }}"
+            # PR 的 base/head 不一定在克隆里, 显式补齐后再判定区间是否可靠
+            git fetch --no-tags --quiet origin "$before" "$after" || true
+          fi
+          echo "event=$event before=${before:-<empty>} after=$after"
+
+          # 两端提交都本地可达且 before 非全零(非新分支首推) → 精确校验新增区间;
+          # 新分支首推 / force-push 旧基不可达 / fork PR 等无法确定可靠区间时,
+          # 回退为仅校验 HEAD(保守: 不追溯、不误阻断)。
+          if [ -n "${before:-}" ] && [ "$before" != "$zero" ] \
+             && git cat-file -e "${before}^{commit}" 2>/dev/null \
+             && git cat-file -e "${after}^{commit}" 2>/dev/null; then
+            range="$before..$after"
+            echo "== 校验新增提交区间 $range =="
+            git log --oneline "$range" || true
+            bash scripts/check-commit-issue.sh --range "$range"
+          else
+            echo "== 无法确定可靠区间(新分支/force-push/fork), 回退仅校验 HEAD =="
+            git log --oneline -1
+            bash scripts/check-commit-issue.sh --head-only
+          fi
+
+  # #319 契约 C2: analytics 层禁止直读 ods 源表(P2 逐域切换的棘轮门禁)。
+  # 纯 python3 静态扫描, 只阻断「新增」违规, 存量违规入基线逐步收敛。
+  analytics-ods-isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验 analytics↔ods 隔离 (C2 棘轮)
+        run: python3 scripts/check_analytics_ods_isolation.py
+
+  backend-lint-test:
+    runs-on: ubuntu-latest
+    # contents:read 读代码; issues:write 仅给末尾「回写 CI 结果到工单」那一步用。
+    # (GitHub 的 permissions 只能设在 job/workflow 级, 不能设在 step 级。)
+    permissions:
+      contents: read
+      issues: write
+    # 一个 postgres 容器承载两个库: csctalon_test(pytest) + csctalon_dev(空库迁移门禁)。
+    # ⚠️ 库名后缀是启动期硬要求: dev 模式的守卫只接受 *_dev(见 app/core/config/guard.py)。
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: csctalon
+          POSTGRES_PASSWORD: csctalon123
+          POSTGRES_DB: csctalon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U csctalon"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      # 系统库: libzbar0 供 pyzbar 解发票二维码(Dockerfile 同样安装);
+      # libpq-dev/gcc 供个别包在无 wheel 时回退源码编译。
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libzbar0 libpq-dev gcc postgresql-client
+
+      # #211: 空库迁移门禁专用库 —— 与 pytest 的 create_all + stamp head 路径相互独立
+      - name: 建空库 csctalon_dev (迁移门禁用)
+        env:
+          PGPASSWORD: csctalon123
+        run: |
+          for i in $(seq 1 30); do
+            pg_isready -h 127.0.0.1 -p 5432 -U csctalon && break
+            sleep 1
+          done
+          psql -h 127.0.0.1 -U csctalon -d postgres -c 'CREATE DATABASE csctalon_dev'
+          psql -h 127.0.0.1 -U csctalon -d postgres -c '\l' | grep csctalon
+
+      - name: 安装后端依赖 (pyproject 单一来源, #183)
+        working-directory: backend
+        run: pip install -e ".[dev]"
+
+      - name: ruff (app/ + tests/)
+        working-directory: backend
+        run: ruff check app/ tests/
+
+      # 命令级 env 仅作用于本条 alembic 进程(切勿 export 到全局):
+      # tests/conftest.py 用 setdefault 从 TEST_POSTGRES_* 回填 POSTGRES_*,
+      # 若全局已存在 POSTGRES_HOST 会遮蔽回填, 反令 pytest 连到空库上不存在的 csctalon_test。
+      # 多 head / 链断裂时 upgrade head 直接非零退出(即门禁失败)。
+      - name: alembic upgrade head (空库迁移链门禁, #211)
+        working-directory: backend
+        env:
+          APP_MODE: dev
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: '5432'
+          POSTGRES_USER: csctalon
+          POSTGRES_PASSWORD: csctalon123
+          POSTGRES_DB: csctalon_dev
+        run: python -m alembic upgrade head
+
+      - name: alembic heads (必须单一 head)
+        working-directory: backend
+        env:
+          APP_MODE: dev
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: '5432'
+          POSTGRES_USER: csctalon
+          POSTGRES_PASSWORD: csctalon123
+          POSTGRES_DB: csctalon_dev
+        run: |
+          out=$(python -m alembic heads)
+          echo "$out"
+          echo "$out" | grep -q '(head)' || { echo "❌ 未找到 head"; exit 1; }
+          [ "$(echo "$out" | grep -c '(head)')" -eq 1 ] \
+            || { echo "❌ 存在多个 head, 请先 merge"; exit 1; }
+
+      - name: pytest
+        id: backend-test
+        working-directory: backend
+        env:
+          TEST_POSTGRES_HOST: 127.0.0.1
+          TEST_POSTGRES_PORT: '5432'
+          TEST_POSTGRES_USER: csctalon
+          TEST_POSTGRES_PASSWORD: csctalon123
+          TEST_POSTGRES_DB: csctalon_test
+        run: pytest
+
+      # 对应锁定设计 A-20260903-001 §2.2: pytest/ruff 结果回写工单评论, 幂等去重。
+      # 迁移到 GitHub 后改用 gh + 内置 GITHUB_TOKEN(无需自建 secret)。
+      - name: 回写 CI 结果到工单 (G2)
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          SHA: ${{ github.sha }}
+          TEST_OUTCOME: ${{ steps.backend-test.outcome }}
+        run: |
+          set -euo pipefail
+          issue_no=$(printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | grep -Eo '#[0-9]+' | head -1 | tr -d '#') || true
+          if [ -z "${issue_no:-}" ]; then
+            echo "未解析到工单号, 跳过回写"
+            exit 0
+          fi
+          # 幂等: 该工单已有同 commit 的 CI 评论则跳过
+          if gh api "repos/${{ github.repository }}/issues/${issue_no}/comments" \
+               --jq '.[].body' 2>/dev/null | grep -q "${SHA}"; then
+            echo "已存在同 commit CI 评论, 跳过(幂等)"
+            exit 0
+          fi
+          gh issue comment "${issue_no}" \
+            --repo "${{ github.repository }}" \
+            --body "🤖 CI 自动回写: commit \`${SHA}\` 后端流水线(ruff + 空库迁移 + pytest) = **${TEST_OUTCOME}**"
+          echo "已回写 CI 结果到工单 #${issue_no}"
+
+  frontend-lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # node 24: jsdom 30 / undici 8 需要 Node 22+ 的 webidl API
+      # (node 20 会报 webidl.util.markAsUncloneable is not a function)。
+      # 与迁移前的 docker node:24 保持一致。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: npm ci
+        working-directory: web
+        run: npm ci
+
+      - name: eslint
+        working-directory: web
+        run: npm run lint
+
+      - name: vitest
+        working-directory: web
+        run: npm test

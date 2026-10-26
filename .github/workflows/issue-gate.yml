@@ -1,10 +1,10 @@
-# Gitea Actions: PR 工单号门禁 (G1)
+# GitHub Actions: PR 工单号门禁 (G1)
 #
-# 对应锁定设计 docs/arch/A-20260903-001-issue-automation-gates.md §2.1
-# 规则:
+# 迁移自 .gitea/workflows/issue-gate.yml; 对应锁定设计
+# docs/arch/A-20260903-001-issue-automation-gates.md §2.1。规则未变:
 #   - PR 标题或描述必须包含 #<数字>(如 #2), 否则 CI fail
 #   - 豁免: 变更文件全部为 docs/*.md 或根 *.md 的纯文档 PR
-# 注: 本 runner 内网, 禁用 GitHub action, 纯 shell + curl 实现。
+# 实现差异: Gitea REST → GitHub REST(gh CLI + 内置 GITHUB_TOKEN, 无需自建 secret)。
 
 name: issue-gate
 
@@ -12,18 +12,24 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
       - name: 校验 PR 关联工单号
+        shell: bash
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          GITEA_TOKEN: ${{ secrets.GITEATOKEN }}
         run: |
-          set -e
+          set -euo pipefail
           title="${PR_TITLE:-}"
           body="${PR_BODY:-}"
           num="${PR_NUMBER:-}"
@@ -39,20 +45,19 @@ jobs:
           fi
 
           # 2) 未关联工单号 → 检查是否纯文档 PR(豁免)
-          files=$(curl -s -H "Authorization: token ${GITEA_TOKEN}" \
-            "http://127.0.0.1:3000/api/v1/repos/tanzk/csctalon/pulls/${num}/files" \
-            | python3 -c "import sys,json; print(' '.join(f.get('filename','') for f in json.load(sys.stdin)))" 2>/dev/null || true)
+          files=$(gh api "repos/${REPO}/pulls/${num}/files" --paginate --jq '.[].filename' || true)
 
           echo "== 变更文件 =="
           echo "$files"
 
           non_doc=0
-          for f in $files; do
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
             case "$f" in
               docs/*.md|*.md) ;;
               *) non_doc=1 ;;
             esac
-          done
+          done <<< "$files"
 
           if [ "$non_doc" = "0" ]; then
             echo "✅ 纯文档 PR, 豁免工单号门禁"

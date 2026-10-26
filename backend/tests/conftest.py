@@ -23,7 +23,7 @@ import pytest
 # 1. 本地开发(backend/.env 存在): 仅强制 ENV=test + 独立测试库名, host/user/
 #    password 由 settings 从 backend/.env 自动加载(与开发库同连接, 库名隔离)。
 # 2. CI / 无 .env 场景: 通过 TEST_POSTGRES_* 环境变量注入完整连接参数
-#    (CI 工作流自行提供 postgres 服务, 见 .gitea/workflows/test.yml)。
+#    (CI 工作流自行提供 postgres 服务, 见 .github/workflows/test.yml)。
 # 3. 绝不硬编码密码在仓库(对应 AGENTS.md 绝对禁止第 3 条)。
 #
 # ⚠️⚠️ 2026-09-10 数据事故修复 (工单 #42) ⚠️⚠️

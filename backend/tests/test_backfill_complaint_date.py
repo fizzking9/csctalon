@@ -24,12 +24,13 @@ _SCRIPT = _BACKEND.parent / "scripts" / "backfill_complaint_date.py"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-# ⚠️ CI 只挂载 backend/ 目录(见 .gitea/workflows/test.yml 的 `-v .../backend:/app`),
-#    仓库根的 scripts/ 在容器内不存在 → 不能在收集期直接 exec_module(会 FileNotFoundError
-#    导致整个测试会话中断)。故改为"可选加载": 脚本不在时跳过本文件的用例。
+# ⚠️ 2026-10-26 CI 迁至 GitHub Actions 后：检出**整个仓库**, 仓库根 scripts/ 存在
+#    → 本文件在 CI 中会**真正执行**(迁移前只挂载 backend/ 时会 skip)。
+#    存在性判断仍保留作防御: 在只拿到 backend/ 的环境下避免收集期 FileNotFoundError
+#    中断整个测试会话。
 if not _SCRIPT.exists():
     pytest.skip(
-        f"回填脚本不在当前环境(CI 仅挂载 backend/): {_SCRIPT}",
+        f"回填脚本不在当前环境(仅拿到 backend/ 时): {_SCRIPT}",
         allow_module_level=True,
     )
 

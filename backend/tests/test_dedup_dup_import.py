@@ -30,11 +30,14 @@ _SCRIPT = _BACKEND.parent / "scripts" / "dedup_complaint_dup_import.py"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-# ⚠️ CI 只挂载 backend/(见 .gitea/workflows/test.yml 的 `-v .../backend:/app`),
-#    仓库根 scripts/ 在容器内不存在 → 不能在收集期 exec_module(会中断整个会话)。
+# ⚠️ 2026-10-26 CI 迁至 GitHub Actions 后：检出**整个仓库**并设 working-directory: backend,
+#    仓库根 scripts/ 随检出存在 → 本文件在 CI 中会**真正执行**(迁移前只挂载 backend/
+#    时会被 skip, 覆盖率实际是缺的)。
+#    下面的存在性判断仍然保留: 在只拿到 backend/ 的环境下防御性跳过,
+#    避免收集期 exec_module 报 FileNotFoundError 中断整个会话。
 if not _SCRIPT.exists():
     pytest.skip(
-        f"去重脚本不在当前环境(CI 仅挂载 backend/): {_SCRIPT}",
+        f"去重脚本不在当前环境(仅拿到 backend/ 时): {_SCRIPT}",
         allow_module_level=True,
     )
 

@@ -34,13 +34,35 @@ depends_on: str | Sequence[str] | None = None
 # refund_clean 已由 a9b0c1d2e3f4 建好, 本迁移只建其余 10 张
 _NEW_VIEWS = [v for v in CLEAN_VIEWS if v != "refund_clean"]
 
+# ⚠️ 源表钉回 #322 当时的 ods 源表 (2026-10-26 空库重放修复)
+#
+# 背景: 本迁移 `from app.models.ods_clean import CLEAN_VIEWS` —— 而 CLEAN_VIEWS 是
+#   **可变的应用常量**。#339 Phase③(58850d3) 把它其中两个键改挂到 std 精简物理表:
+#       bms_order_clean -> std_bms_order / cs_record_clean -> std_cs_record
+#   于是本历史迁移在**空库重放**时被一起改写了语义: 它会在 std_* 尚未创建之前
+#   (std_* 由后续 d9e1f0c2b4a6 建) 就去 `FROM std_bms_order`, 报
+#       relation "std_bms_order" does not exist  -> 整条迁移链回滚, 空库无法起飞。
+#   生产不受影响(早已越过本版本, 不会重放), 但 CI #211 空库门禁与本地新环境必然失败。
+#
+# 修法(最小且忠实): 只把被改写过的两个源表钉回 ods —— 与 58850d3 之前的历史行为逐字一致。
+#   列集差异无需处理: 这两张视图随后由 0dce885e5a06 DROP+CREATE 用精简列集整表重建,
+#   中间态的列数不影响最终结构。
+#
+# 通用教训: **历史迁移不得依赖可变的应用常量** —— 常量一改, 历史迁移的语义就跟着漂移,
+#   且只在"重放"时才暴露。新增迁移请把源表/列清单就地冻结。
+_PINNED_ODS_SRC = {
+    "bms_order_clean": "ods.bms_orders",
+    "cs_record_clean": "ods.cs_records",
+}
+
 
 def upgrade() -> None:
     for view, (src_table, cols) in CLEAN_VIEWS.items():
         if view == "refund_clean":
             continue  # 已存在, 不重建
+        src = _PINNED_ODS_SRC.get(view, src_table)
         op.execute(
-            f"CREATE VIEW public.{view} AS SELECT {cols} FROM {src_table}"
+            f"CREATE VIEW public.{view} AS SELECT {cols} FROM {src}"
         )
 
 
